@@ -1161,6 +1161,19 @@ impl<T: Float> TransformerEncoderLayer<T> {
             training: true,
         })
     }
+
+    /// Override the post-attention / post-FFN dropout probability after
+    /// construction. Forwards to [`Dropout::set_p`]; same validation.
+    /// Used by MC-dropout inference (see ferrotorch-paged's
+    /// `predict_all_layers_logits_mc`).
+    pub fn set_dropout_p(&mut self, p: f64) -> FerrotorchResult<()> {
+        self.dropout.set_p(p)
+    }
+
+    /// Current dropout probability for this encoder layer.
+    pub fn dropout_p(&self) -> f64 {
+        self.dropout.p()
+    }
 }
 
 impl<T: Float> Module<T> for TransformerEncoderLayer<T> {

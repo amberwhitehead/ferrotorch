@@ -395,6 +395,28 @@ impl<T: Float> Dropout<T> {
     pub fn inplace(&self) -> bool {
         self.inplace
     }
+
+    /// Override the dropout probability after construction. Same
+    /// validation as [`Self::new`]: `p` must be in `[0, 1)`.
+    ///
+    /// Use case: MC-dropout-style inference where a model loaded with
+    /// `p=0` (eval-time default) is temporarily reactivated with a
+    /// non-zero rate to draw stochastic samples without rebuilding
+    /// the module hierarchy.
+    pub fn set_p(&mut self, p: f64) -> FerrotorchResult<()> {
+        if !(0.0..1.0).contains(&p) {
+            return Err(FerrotorchError::InvalidArgument {
+                message: format!("dropout probability must be in [0, 1), got {p}"),
+            });
+        }
+        self.p = p;
+        Ok(())
+    }
+
+    /// Read the current dropout probability.
+    pub fn p(&self) -> f64 {
+        self.p
+    }
 }
 
 impl<T: Float> Module<T> for Dropout<T> {
