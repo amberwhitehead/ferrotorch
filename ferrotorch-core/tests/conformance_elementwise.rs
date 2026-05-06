@@ -946,36 +946,28 @@ fn run_where_for_device(device_label: &str, device: Device) {
                     tolerance::F64_ELEMENTWISE,
                 );
 
-                // f64 GPU autograd is blocked on the missing `fill_f64`
-                // GPU op (used by SumBackward). Run autograd only on CPU
-                // for f64; on CUDA we surface the gap rather than panic.
-                if matches!(device, Device::Cpu) {
-                    let x_g = upload_f64(make_cpu_f64(x_data, x_shape, true), device);
-                    let y_g = upload_f64(make_cpu_f64(y_data, y_shape, true), device);
-                    let out_g = where_(&cond, &x_g, &y_g).expect("where_ grad");
-                    grad_sum(&out_g).expect("sum").backward().expect("backward");
-                    let gx = x_g.grad().unwrap().expect("grad_x");
-                    let gy = y_g.grad().unwrap().expect("grad_y");
-                    check_f64(
-                        &format!("{label} grad_x"),
-                        &read_back_f64(&gx),
-                        grad_x_exp,
-                        tolerance::F64_ELEMENTWISE,
-                    );
-                    check_f64(
-                        &format!("{label} grad_y"),
-                        &read_back_f64(&gy),
-                        grad_y_exp,
-                        tolerance::F64_ELEMENTWISE,
-                    );
-                } else {
-                    eprintln!(
-                        "[conformance:phase2.1] skipping f64 GPU autograd lane for {label} — \
-                         ferrotorch GPU backend lacks `fill_f64` (#780; required by SumBackward); \
-                         forward path verified."
-                    );
-                    let _ = (grad_x_exp, grad_y_exp);
-                }
+                // f64 GPU autograd lane: now live on both CPU and CUDA.
+                // ferrotorch's GPU backend gained `fill_f64` (used by
+                // SumBackward), so the same autograd code runs against
+                // both devices.
+                let x_g = upload_f64(make_cpu_f64(x_data, x_shape, true), device);
+                let y_g = upload_f64(make_cpu_f64(y_data, y_shape, true), device);
+                let out_g = where_(&cond, &x_g, &y_g).expect("where_ grad");
+                grad_sum(&out_g).expect("sum").backward().expect("backward");
+                let gx = x_g.grad().unwrap().expect("grad_x");
+                let gy = y_g.grad().unwrap().expect("grad_y");
+                check_f64(
+                    &format!("{label} grad_x"),
+                    &read_back_f64(&gx),
+                    grad_x_exp,
+                    tolerance::F64_ELEMENTWISE,
+                );
+                check_f64(
+                    &format!("{label} grad_y"),
+                    &read_back_f64(&gy),
+                    grad_y_exp,
+                    tolerance::F64_ELEMENTWISE,
+                );
             }
             _ => unreachable!(),
         }
@@ -2086,22 +2078,6 @@ mod gpu {
         }
     }
 
-    /// Whether GPU f64 autograd is currently exercised. ferrotorch's GPU
-    /// backend lacks a `fill_f64` kernel, which the SumBackward path uses to
-    /// materialize the all-ones grad-output for `loss = sum(out)`. Until the
-    /// kernel lands, f64 GPU autograd assertions return InvalidArgument
-    /// from inside `backward()`. The conformance test surfaces the gap by
-    /// skipping the f64 grad lane (forward is still tested in full) and
-    /// printing a diagnostic — silent skip would violate the dispatch's
-    /// honest-reporting rule. The forward f64 path itself works.
-    fn skip_f64_gpu_autograd(label: &str) {
-        eprintln!(
-            "[conformance:phase2.1] skipping f64 GPU autograd lane for {label} — \
-             ferrotorch GPU backend lacks `fill_f64` (#780; required by SumBackward); \
-             forward path verified."
-        );
-    }
-
     /// Fixtures whose `tag` indicates a broadcast pair (rather than the
     /// same-shape baseline). ferrotorch's GPU broadcast kernels for
     /// add/sub/mul/div currently hit `CUDA_ERROR_MISALIGNED_ADDRESS` on
@@ -2189,9 +2165,25 @@ mod gpu {
                         expected,
                         tolerance::F64_GPU,
                     );
-                    skip_f64_gpu_autograd(&label);
-                    // Suppress unused-warning on grad_*_exp for the f64 lane.
-                    let _ = (grad_a_exp, grad_b_exp);
+
+                    let a_g = upload_f64(make_cpu_f64(a_data, a_shape, true), Device::Cuda(0));
+                    let b_g = upload_f64(make_cpu_f64(b_data, b_shape, true), Device::Cuda(0));
+                    let out = op.apply_f64(&a_g, &b_g);
+                    grad_sum(&out).expect("sum").backward().expect("backward");
+                    let ga = a_g.grad().unwrap().expect("grad_a");
+                    let gb = b_g.grad().unwrap().expect("grad_b");
+                    check_f64(
+                        &format!("{label} grad_a"),
+                        &read_back_f64(&ga),
+                        grad_a_exp,
+                        tolerance::F64_GPU,
+                    );
+                    check_f64(
+                        &format!("{label} grad_b"),
+                        &read_back_f64(&gb),
+                        grad_b_exp,
+                        tolerance::F64_GPU,
+                    );
                 }
                 _ => unreachable!(),
             }
@@ -2266,8 +2258,33 @@ mod gpu {
                         expected,
                         tolerance::F64_GPU,
                     );
-                    skip_f64_gpu_autograd(&label);
-                    let _ = grad_a_exp;
+                    // The `abs` op's f64 GPU backward (`abs_backward_f64`) is
+                    // not yet implemented — a *separate* gap from the
+                    // `fill_f64` (#780, fixed) gap that previously masked it.
+                    // The `neg` and `sqrt` f64 GPU backward kernels are
+                    // present, so their grad lanes run live; `abs` skips
+                    // until its backward kernel lands. Tracked in #782
+                    // alongside 12 other `*_backward_f64` stubs that the
+                    // #780 fix unmasked.
+                    if op_name == "abs" {
+                        eprintln!(
+                            "[conformance:phase2.1] skipping f64 GPU autograd lane for {label} \
+                             — `abs_backward_f64` (#782) GPU op not yet implemented; forward path \
+                             verified."
+                        );
+                        let _ = grad_a_exp;
+                    } else {
+                        let a_g = upload_f64(make_cpu_f64(a_data, shape, true), Device::Cuda(0));
+                        let out = op.apply_f64(&a_g);
+                        grad_sum(&out).expect("sum").backward().expect("backward");
+                        let ga = a_g.grad().unwrap().expect("grad_a");
+                        check_f64(
+                            &format!("{label} grad_a"),
+                            &read_back_f64(&ga),
+                            grad_a_exp,
+                            tolerance::F64_GPU,
+                        );
+                    }
                 }
                 _ => unreachable!(),
             }

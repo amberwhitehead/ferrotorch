@@ -2176,6 +2176,12 @@ impl GpuBackend for CudaBackendImpl {
         Ok(Self::wrap_buffer(result, ordinal))
     }
 
+    fn fill_f64(&self, n: usize, scalar: f64, ordinal: usize) -> FerrotorchResult<GpuBufferHandle> {
+        let dev = self.device(ordinal)?;
+        let result = crate::kernels::gpu_fill_f64(n, scalar, dev).map_err(Self::map_gpu_err)?;
+        Ok(Self::wrap_buffer_f64(result, ordinal))
+    }
+
     fn gelu_backward_f32(
         &self,
         grad: &GpuBufferHandle,

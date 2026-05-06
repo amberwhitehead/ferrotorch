@@ -19530,6 +19530,75 @@ pub fn gpu_fill_f32(n: usize, scalar: f32, device: &GpuDevice) -> GpuResult<Cuda
     Ok(out)
 }
 
+/// Allocate an `n`-element f64 buffer on `device` filled with `scalar`.
+///
+/// f64 sibling of [`gpu_fill_f32`]. Used by [`SumBackward`] / [`MeanBackward`]
+/// for f64 tensors so the upstream gradient is built entirely on-device,
+/// without a CPU → GPU round-trip. The PTX is derived from `FILL_F32_PTX`
+/// via [`get_f64_ptx`], which handles the f32→f64 byte-stride change
+/// (`shl.b64 ..., 2` → `shl.b64 ..., 3`) and all `.f32`→`.f64` op-code /
+/// register substitutions (#780). The runtime scalar is passed as a
+/// `.param .f64` kernel argument — never baked into the PTX template.
+///
+/// [`SumBackward`]: ferrotorch_core::grad_fns::reduction
+/// [`MeanBackward`]: ferrotorch_core::grad_fns::reduction
+#[cfg(feature = "cuda")]
+pub fn gpu_fill_f64(n: usize, scalar: f64, device: &GpuDevice) -> GpuResult<CudaBuffer<f64>> {
+    use cudarc::driver::PushKernelArg;
+    static CACHE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+
+    let ctx = device.context();
+    let stream = device.stream();
+    let ptx = get_f64_ptx(&CACHE, FILL_F32_PTX, "fill_f32_kernel", "fill_f64_kernel");
+    let f =
+        crate::module_cache::get_or_compile(ctx, ptx, "fill_f64_kernel", device.ordinal() as u32)
+            .map_err(|e| GpuError::PtxCompileFailed {
+            kernel: "fill_f64_kernel",
+            source: e,
+        })?;
+
+    let mut out = alloc_zeros_f64(n, device)?;
+    if n == 0 {
+        return Ok(out);
+    }
+    let cfg = launch_cfg(n)?;
+    let n_u32 = n as u32;
+    // SAFETY:
+    // - `f` is a valid PTX `CudaFunction` for `fill_f64_kernel`
+    //   returned by `module_cache::get_or_compile` immediately
+    //   above; the f64 PTX is produced by `get_f64_ptx` from
+    //   `FILL_F32_PTX`, which performs the exact `.f32`→`.f64`
+    //   substitutions plus the load-bearing 4-byte→8-byte stride
+    //   change at line 90 (`shl.b64 %off, %off, 2` →
+    //   `shl.b64 %off, %off, 3`). The kernel ABI is
+    //   `(out_ptr: u64, scalar: f64, n: u32)` — same parameter
+    //   *order* as `FILL_F32_PTX` (line 3301), with the scalar
+    //   widened to f64.
+    // - `out: &mut CudaBuffer<f64>` was alloc'd above via
+    //   `alloc_zeros_f64(n, device)?` — buffer is `n * 8` bytes,
+    //   matching the f64 stride. The `&mut` borrow ensures
+    //   exclusive ownership for the duration of the launch; the
+    //   `n == 0` early-exit avoids launching with zero work.
+    // - The kernel writes `out[i] = scalar` for `i in [0, n)`
+    //   per the PTX bound check (`setp.ge.u32 %p, %r_tid, %n_reg`
+    //   skips OOB threads); reads only `scalar` (passed
+    //   by-reference, cudarc copies into the launch param buffer).
+    // - `n_u32 = n as u32` cannot truncate: `launch_cfg(n)?`
+    //   returns `Err` if `n > u32::MAX`.
+    // - cudarc enqueues the launch on `stream`; the three arg
+    //   refs live until the trailing `?`. Stream sync is the
+    //   caller's responsibility before reading `out`.
+    unsafe {
+        stream
+            .launch_builder(&f)
+            .arg(out.inner_mut())
+            .arg(&scalar)
+            .arg(&n_u32)
+            .launch(cfg)?;
+    }
+    Ok(out)
+}
+
 /// Check whether a GPU buffer contains any inf or NaN values (#687).
 ///
 /// Launches the `HAS_INF_NAN_F32_PTX` reduction kernel: every thread
@@ -20898,6 +20967,12 @@ pub fn gpu_abs_backward(
 /// Stub -- always returns [`GpuError::NoCudaFeature`].
 #[cfg(not(feature = "cuda"))]
 pub fn gpu_fill_f32(_n: usize, _scalar: f32, _device: &GpuDevice) -> GpuResult<CudaBuffer<f32>> {
+    Err(GpuError::NoCudaFeature)
+}
+
+/// Stub -- always returns [`GpuError::NoCudaFeature`].
+#[cfg(not(feature = "cuda"))]
+pub fn gpu_fill_f64(_n: usize, _scalar: f64, _device: &GpuDevice) -> GpuResult<CudaBuffer<f64>> {
     Err(GpuError::NoCudaFeature)
 }
 
