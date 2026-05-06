@@ -1141,12 +1141,40 @@ pub fn linear_fused<T: Float>(
 /// Differentiable matrix-vector multiply. Attaches `MvBackward` when needed.
 pub fn mv_differentiable<T: Float>(a: &Tensor<T>, x: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
     let needs_grad = is_grad_enabled() && (a.requires_grad() || x.requires_grad());
-
-    // Compute mv directly from slices to avoid double-copy.
-    let a_data = a.data()?;
-    let x_data = x.data()?;
     let m = a.shape()[0];
     let k = a.shape()[1];
+
+    // GPU path (#817): route CUDA inputs through cuBLAS Sgemv/Dgemv. Pre-fix
+    // the function unconditionally called `.data()?` and surfaced as
+    // `GpuTensorNotAccessible`. PyTorch's `torch.mv` works on CUDA for
+    // f32 and f64 and so must ferrotorch's.
+    if a.is_cuda() && a.device() == x.device() {
+        if let Some(backend) = gpu_backend() {
+            // Materialise non-contiguous views (e.g. permute/transpose) so the
+            // row-major-trick in cuBLAS sees contiguous strides.
+            let a = if a.is_contiguous() { a.clone() } else { a.contiguous()? };
+            let x = if x.is_contiguous() { x.clone() } else { x.contiguous()? };
+            let handle = if is_f32::<T>() {
+                backend.mv_f32(a.gpu_handle()?, x.gpu_handle()?, m, k)?
+            } else if is_f64::<T>() {
+                backend.mv_f64(a.gpu_handle()?, x.gpu_handle()?, m, k)?
+            } else {
+                return Err(FerrotorchError::NotImplementedOnCuda { op: "mv" });
+            };
+            let storage = TensorStorage::gpu(handle);
+            let shape = vec![m];
+            return if needs_grad {
+                let grad_fn = Arc::new(MvBackward::new(a, x));
+                Tensor::from_operation(storage, shape, grad_fn)
+            } else {
+                Tensor::from_storage(storage, shape, false)
+            };
+        }
+    }
+
+    // CPU path: compute mv directly from slices to avoid double-copy.
+    let a_data = a.data()?;
+    let x_data = x.data()?;
     let zero = <T as num_traits::Zero>::zero();
 
     let mut result_vec = vec![zero; m];
@@ -1173,6 +1201,33 @@ pub fn mv_differentiable<T: Float>(a: &Tensor<T>, x: &Tensor<T>) -> FerrotorchRe
 /// Differentiable dot product. Attaches `DotBackward` when needed.
 pub fn dot_differentiable<T: Float>(a: &Tensor<T>, b: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
     let needs_grad = is_grad_enabled() && (a.requires_grad() || b.requires_grad());
+
+    // GPU path (#816): route CUDA inputs through cuBLAS Sdot/Ddot. Pre-fix
+    // the function unconditionally called `.data()?` and surfaced as
+    // `GpuTensorNotAccessible`. PyTorch's `torch.dot` works on CUDA for
+    // f32 and f64 and so must ferrotorch's.
+    if a.is_cuda() && a.device() == b.device() {
+        if let Some(backend) = gpu_backend() {
+            let a = if a.is_contiguous() { a.clone() } else { a.contiguous()? };
+            let b = if b.is_contiguous() { b.clone() } else { b.contiguous()? };
+            let n = a.shape().first().copied().unwrap_or(0);
+            let handle = if is_f32::<T>() {
+                backend.dot_f32(a.gpu_handle()?, b.gpu_handle()?, n)?
+            } else if is_f64::<T>() {
+                backend.dot_f64(a.gpu_handle()?, b.gpu_handle()?, n)?
+            } else {
+                return Err(FerrotorchError::NotImplementedOnCuda { op: "dot" });
+            };
+            let storage = TensorStorage::gpu(handle);
+            let shape: Vec<usize> = vec![];
+            return if needs_grad {
+                let grad_fn = Arc::new(DotBackward::new(a, b));
+                Tensor::from_operation(storage, shape, grad_fn)
+            } else {
+                Tensor::from_storage(storage, shape, false)
+            };
+        }
+    }
 
     let a_data = a.data()?;
     let b_data = b.data()?;
@@ -1238,6 +1293,41 @@ pub fn matmul_differentiable<T: Float>(
         b.contiguous()?
     };
 
+    // GPU dispatch for 1D x 2D vector-matrix product (#818). Pre-fix this
+    // shape fell through to `linalg::matmul`, which calls `.data()?` and
+    // surfaces as `GpuTensorNotAccessible` for CUDA tensors. PyTorch's
+    // `torch.matmul(x_1d, B_2d)` works on CUDA, so this branch routes to
+    // `vm_f{32,64}` (cuBLAS gemv with the OP_N transpose flag — no
+    // materialised transpose).
+    if a.is_cuda() && a.ndim() == 1 && b.ndim() == 2 {
+        let backend = gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
+        let k = a.shape()[0];
+        let n = b.shape()[1];
+        if k != b.shape()[0] {
+            return Err(FerrotorchError::ShapeMismatch {
+                message: format!(
+                    "matmul 1D x 2D: a is [{k}], b is {:?}",
+                    b.shape()
+                ),
+            });
+        }
+        let handle = if is_f32::<T>() {
+            backend.vm_f32(a.gpu_handle()?, b.gpu_handle()?, k, n)?
+        } else if is_f64::<T>() {
+            backend.vm_f64(a.gpu_handle()?, b.gpu_handle()?, k, n)?
+        } else {
+            return Err(FerrotorchError::NotImplementedOnCuda { op: "matmul" });
+        };
+        let storage = TensorStorage::gpu(handle);
+        let shape = vec![n];
+        return if is_grad_enabled() && (a.requires_grad() || b.requires_grad()) {
+            let grad_fn = Arc::new(MatmulBackward::new(a.clone(), b.clone()));
+            Tensor::from_operation(storage, shape, grad_fn)
+        } else {
+            Tensor::from_storage(storage, shape, false)
+        };
+    }
+
     if a.is_cuda() && a.ndim() == 2 && b.ndim() == 2 {
         let backend =
             crate::gpu_dispatch::gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
@@ -1275,18 +1365,100 @@ pub fn matmul_differentiable<T: Float>(
         //
         // GPU shape coverage (#801): 2D x 2D is handled above; 3D x 3D with
         // matching batch dim routes to `bmm_differentiable` which has GPU
-        // f32/f64 dispatch (#800). Other rank combinations (1D x 1D dot,
-        // 2D x 1D mv, 1D x 2D vm, broadcast >3D) require GPU dot/mv/vm/
-        // batched-broadcast kernels that do not yet exist on the backend
-        // trait — those routes fall through to CPU specialised paths and
-        // surface as `GpuTensorNotAccessible` for CUDA inputs. Tracked via
-        // cascade follow-ups (see conformance test `cascade_skip`).
+        // f32/f64 dispatch (#800). 1D x 1D / 2D x 1D / 1D x 2D vector cases
+        // are handled by `dot_differentiable` / `mv_differentiable` and the
+        // `vm_*` GPU branch above (#816 / #817 / #818).
+        //
+        // For all other rank combinations on CUDA — 4D bmm, 3D x 2D, 2D x 3D,
+        // and arbitrary leading-dim broadcasts — route to `broadcast_bmm_*`
+        // (cuBLAS gemmStridedBatched, stride=0 on broadcasted axes; #819).
         match (a.ndim(), b.ndim()) {
             (1, 1) => return dot_differentiable(&a, &b),
             (2, 1) => return mv_differentiable(&a, &b),
             (2, 2) => return mm_differentiable(&a, &b),
             (3, 3) if a.shape()[0] == b.shape()[0] => return bmm_differentiable(&a, &b),
             _ => {}
+        }
+
+        // GPU broadcast-bmm path (#819). Routes 4D bmm, 3D x 2D, 2D x 3D,
+        // and leading-dim broadcasts to cuBLAS gemmStridedBatched. PyTorch
+        // supports all of these on CUDA; pre-fix they fell through to the
+        // CPU `linalg::matmul` and surfaced as `GpuTensorNotAccessible`.
+        if a.is_cuda() && a.ndim() >= 2 && b.ndim() >= 2 && (is_f32::<T>() || is_f64::<T>()) {
+            let backend = gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
+            let a_nd = a.ndim();
+            let b_nd = b.ndim();
+            let m = a.shape()[a_nd - 2];
+            let k_a = a.shape()[a_nd - 1];
+            let k_b = b.shape()[b_nd - 2];
+            let n = b.shape()[b_nd - 1];
+            if k_a != k_b {
+                return Err(FerrotorchError::ShapeMismatch {
+                    message: format!(
+                        "matmul: inner dimensions mismatch: {:?} @ {:?}",
+                        a.shape(),
+                        b.shape()
+                    ),
+                });
+            }
+            let a_lead: Vec<usize> = a.shape()[..a_nd - 2].to_vec();
+            let b_lead: Vec<usize> = b.shape()[..b_nd - 2].to_vec();
+            // Broadcast leading shapes (numpy / PyTorch rules), including
+            // 0-sized axes. PyTorch's rule: (a, b) compatible iff a == b
+            // OR a == 1 OR b == 1; result = a if b == 1 else b.
+            let max_len = a_lead.len().max(b_lead.len());
+            let mut out_lead: Vec<usize> = Vec::with_capacity(max_len);
+            for i in 0..max_len {
+                let pa = max_len - a_lead.len();
+                let pb = max_len - b_lead.len();
+                let da = if i < pa { 1 } else { a_lead[i - pa] };
+                let db = if i < pb { 1 } else { b_lead[i - pb] };
+                if da == db || da == 1 || db == 1 {
+                    let pick = if db == 1 { da } else { db };
+                    out_lead.push(pick);
+                } else {
+                    return Err(FerrotorchError::ShapeMismatch {
+                        message: format!(
+                            "matmul: batch dims cannot be broadcast: {:?} vs {:?}",
+                            a.shape(),
+                            b.shape()
+                        ),
+                    });
+                }
+            }
+            let handle = if is_f32::<T>() {
+                backend.broadcast_bmm_f32(
+                    a.gpu_handle()?,
+                    b.gpu_handle()?,
+                    &a_lead,
+                    &b_lead,
+                    &out_lead,
+                    m,
+                    k_a,
+                    n,
+                )?
+            } else {
+                backend.broadcast_bmm_f64(
+                    a.gpu_handle()?,
+                    b.gpu_handle()?,
+                    &a_lead,
+                    &b_lead,
+                    &out_lead,
+                    m,
+                    k_a,
+                    n,
+                )?
+            };
+            let mut shape = out_lead;
+            shape.push(m);
+            shape.push(n);
+            let storage = TensorStorage::gpu(handle);
+            return if is_grad_enabled() && (a.requires_grad() || b.requires_grad()) {
+                let grad_fn = Arc::new(MatmulBackward::new(a.clone(), b.clone()));
+                Tensor::from_operation(storage, shape, grad_fn)
+            } else {
+                Tensor::from_storage(storage, shape, false)
+            };
         }
 
         // Fallback for other shapes — still goes through linalg::matmul.

@@ -352,6 +352,156 @@ pub trait GpuBackend: Send + Sync {
         })
     }
 
+    // -- Vector matmul kernels (#816 / #817 / #818) ---------------------------
+    //
+    // These cover the rank combinations that PyTorch's `torch.matmul` (and
+    // `torch.dot` / `torch.mv`) accepts on CUDA but ferrotorch previously
+    // routed through CPU-only specialised paths, surfacing as
+    // `GpuTensorNotAccessible` for CUDA inputs.
+    //
+    // - `dot_*` : 1D x 1D inner product (cuBLAS `{S,D}dot`)
+    // - `mv_*`  : 2D x 1D matrix-vector product (cuBLAS `{S,D}gemv`, OP_T)
+    // - `vm_*`  : 1D x 2D vector-matrix product (cuBLAS `{S,D}gemv`, OP_N)
+    //
+    // CUDA is the primary GPU backend; backends that don't implement these
+    // (or aren't CUDA at all) inherit the default `Err` impl. CUDA itself
+    // overrides them with real cuBLAS kernels.
+
+    /// 1D x 1D dot product on GPU. Returns a 1-element buffer.
+    /// `n` is the shared length of both inputs (each buffer holds `n` elements).
+    fn dot_f32(
+        &self,
+        _a: &GpuBufferHandle,
+        _b: &GpuBufferHandle,
+        _n: usize,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::InvalidArgument {
+            message: "dot_f32 GPU op not implemented for this backend".into(),
+        })
+    }
+
+    /// 1D x 1D dot product on GPU (f64 dtype).
+    fn dot_f64(
+        &self,
+        _a: &GpuBufferHandle,
+        _b: &GpuBufferHandle,
+        _n: usize,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::InvalidArgument {
+            message: "dot_f64 GPU op not implemented for this backend".into(),
+        })
+    }
+
+    /// 2D x 1D matrix-vector product `y[m] = A[m,k] @ x[k]`. Returns a
+    /// buffer of length `m`.
+    fn mv_f32(
+        &self,
+        _a: &GpuBufferHandle,
+        _x: &GpuBufferHandle,
+        _m: usize,
+        _k: usize,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::InvalidArgument {
+            message: "mv_f32 GPU op not implemented for this backend".into(),
+        })
+    }
+
+    /// 2D x 1D matrix-vector product on GPU (f64 dtype).
+    fn mv_f64(
+        &self,
+        _a: &GpuBufferHandle,
+        _x: &GpuBufferHandle,
+        _m: usize,
+        _k: usize,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::InvalidArgument {
+            message: "mv_f64 GPU op not implemented for this backend".into(),
+        })
+    }
+
+    /// 1D x 2D vector-matrix product `y[n] = x[k] @ B[k,n]`. Returns a
+    /// buffer of length `n`. Implemented via `gemv` with the transpose flag
+    /// — does NOT materialise a transposed copy of `B`.
+    fn vm_f32(
+        &self,
+        _x: &GpuBufferHandle,
+        _b: &GpuBufferHandle,
+        _k: usize,
+        _n: usize,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::InvalidArgument {
+            message: "vm_f32 GPU op not implemented for this backend".into(),
+        })
+    }
+
+    /// 1D x 2D vector-matrix product on GPU (f64 dtype).
+    fn vm_f64(
+        &self,
+        _x: &GpuBufferHandle,
+        _b: &GpuBufferHandle,
+        _k: usize,
+        _n: usize,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::InvalidArgument {
+            message: "vm_f64 GPU op not implemented for this backend".into(),
+        })
+    }
+
+    // -- Broadcast / 4D matmul kernel (#819) ----------------------------------
+    //
+    // PyTorch's `torch.matmul` supports arbitrary leading-dim broadcast on
+    // CUDA — `(B, M, K) @ (K, N)`, `(M, K) @ (B, K, N)`, full 4D bmm,
+    // `(2, 1, M, K) @ (2, 4, K, N)`, etc. Pre-fix these shapes fell through
+    // to `linalg::matmul` (CPU path) and surfaced as `GpuTensorNotAccessible`
+    // for CUDA inputs. Post-fix, `matmul_differentiable` routes them to
+    // `broadcast_bmm_f{32,64}` which lower to `cublas{S,D}gemmStridedBatched`
+    // — stride=0 on broadcasted axes, no `expand` materialisation.
+    //
+    // Inputs:
+    // - `a`/`b`: GPU buffers, contiguous, in row-major batch layout. The
+    //   caller has already ensured non-broadcasted dims match and that
+    //   `a.len() == a_batch_count * m * k`, `b.len() == b_batch_count * k * n`.
+    // - `out_lead`: the broadcasted leading-dim shape (excluding `m, n`).
+    //   `batch = product(out_lead)`. Output shape is `out_lead + [m, n]`.
+    // - `a_lead`/`b_lead`: per-leading-axis sizes for A and B. Where the
+    //   axis size is 1 vs `out_lead[i]`, that axis is treated as broadcast.
+    //   Lengths may be shorter than `out_lead` (implicit batch=1 prefix).
+    // - `m`, `k`, `n`: per-batch matmul dims.
+
+    /// Broadcast / batched matmul on GPU (f32 dtype).
+    fn broadcast_bmm_f32(
+        &self,
+        _a: &GpuBufferHandle,
+        _b: &GpuBufferHandle,
+        _a_lead: &[usize],
+        _b_lead: &[usize],
+        _out_lead: &[usize],
+        _m: usize,
+        _k: usize,
+        _n: usize,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::InvalidArgument {
+            message: "broadcast_bmm_f32 GPU op not implemented for this backend".into(),
+        })
+    }
+
+    /// Broadcast / batched matmul on GPU (f64 dtype).
+    fn broadcast_bmm_f64(
+        &self,
+        _a: &GpuBufferHandle,
+        _b: &GpuBufferHandle,
+        _a_lead: &[usize],
+        _b_lead: &[usize],
+        _out_lead: &[usize],
+        _m: usize,
+        _k: usize,
+        _n: usize,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::InvalidArgument {
+            message: "broadcast_bmm_f64 GPU op not implemented for this backend".into(),
+        })
+    }
+
     // Reduction f64
     fn sum_f64(&self, _a: &GpuBufferHandle, _numel: usize) -> FerrotorchResult<GpuBufferHandle> {
         Err(FerrotorchError::InvalidArgument {

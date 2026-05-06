@@ -31,7 +31,9 @@
 //! accompanied by an `eprintln!` warning.
 
 #[cfg(feature = "cuda")]
-use cudarc::cublas::{Gemm, GemmConfig, StridedBatchedConfig, sys};
+use cudarc::cublas::{Gemm, GemmConfig, Gemv, GemvConfig, StridedBatchedConfig, sys};
+#[cfg(feature = "cuda")]
+use cudarc::driver::DevicePtr;
 
 use crate::buffer::CudaBuffer;
 use crate::device::GpuDevice;
@@ -492,6 +494,1066 @@ pub fn gpu_bmm_f64(
     Ok(c)
 }
 
+// ---------------------------------------------------------------------------
+// Broadcast / 4D batched matmul (#819) — cuBLAS {S,D}gemmStridedBatched
+// ---------------------------------------------------------------------------
+//
+// PyTorch supports arbitrary leading-dim broadcast on CUDA — `(B, M, K) @
+// (K, N)`, `(M, K) @ (B, K, N)`, full 4D bmm, mixed broadcast like
+// `(2, 1, M, K) @ (2, 4, K, N)`, etc. We implement this on GPU via
+// `cublas{S,D}gemmStridedBatched` with stride=0 on broadcasted axes (no
+// `expand` materialisation — that would be a perf regression).
+//
+// Implementation strategy:
+//   1. Compute per-flat-batch offsets `(a_off, b_off)` for each output batch.
+//   2. Group consecutive batches into maximal runs where the per-step
+//      `(da, db)` deltas are constant. Each run lowers to ONE
+//      `gemmStridedBatched` call with the run's (stride_a, stride_b).
+//   3. For "clean" cases (no broadcast / broadcast on a contiguous prefix),
+//      this collapses to exactly one call. For mixed-axis broadcasts like
+//      `(2,1,M,K) @ (2,4,K,N)`, it issues one call per outer-axis index
+//      (still all on GPU, no host detour).
+//
+// Stride semantics: cuBLAS with the row-major trick (swap operands and
+// dims inside the per-batch GEMM) treats:
+//   - stride_a (logical A): step (in elements) into A buffer per batch
+//   - stride_b (logical B): step (in elements) into B buffer per batch
+//   - stride_c: step (in elements) into C per batch (always m*n)
+
+#[cfg(feature = "cuda")]
+fn flat_offset(flat: usize, src_lead: &[usize], out_lead: &[usize]) -> usize {
+    // Map a flat row-major index `flat` over `out_lead` to a flat row-major
+    // index over `src_lead`, with size-1 axes broadcast to 0 and missing
+    // prefix axes treated as size-1.
+    if src_lead.is_empty() {
+        return 0;
+    }
+    let nd = out_lead.len();
+    let prefix = nd - src_lead.len();
+
+    // Decompose flat -> per-axis index over out_lead.
+    let mut idx = vec![0usize; nd];
+    let mut rem = flat;
+    for i in 0..nd {
+        let stride: usize = out_lead[i + 1..].iter().product();
+        let s = stride.max(1);
+        idx[i] = rem / s;
+        rem %= s;
+    }
+
+    // Compute row-major strides over src_lead.
+    let mut src_strides = vec![1usize; src_lead.len()];
+    if src_lead.len() >= 2 {
+        for i in (0..src_lead.len() - 1).rev() {
+            src_strides[i] = src_strides[i + 1] * src_lead[i + 1];
+        }
+    }
+
+    let mut off = 0usize;
+    for (i, &stride) in src_strides.iter().enumerate() {
+        let out_axis = i + prefix;
+        let dim = src_lead[i];
+        let coord = if dim == 1 { 0 } else { idx[out_axis] };
+        off += coord * stride;
+    }
+    off
+}
+
+/// One contiguous run of batches with constant per-step deltas.
+#[cfg(feature = "cuda")]
+struct StrideRun {
+    batch: usize,
+    a_start: usize, // element offset into A
+    b_start: usize, // element offset into B
+    c_start: usize, // element offset into C
+    stride_a: i64,  // element stride between consecutive batches in A
+    stride_b: i64,
+    stride_c: i64,
+}
+
+#[cfg(feature = "cuda")]
+fn compute_stride_runs(
+    a_lead: &[usize],
+    b_lead: &[usize],
+    out_lead: &[usize],
+    m: usize,
+    k: usize,
+    n: usize,
+) -> Vec<StrideRun> {
+    let total: usize = out_lead.iter().product();
+    if total == 0 {
+        return Vec::new();
+    }
+
+    let a_mat = m * k;
+    let b_mat = k * n;
+    let c_mat = m * n;
+
+    // Build per-flat (a_off, b_off, c_off) sequence.
+    let offs: Vec<(usize, usize, usize)> = (0..total)
+        .map(|f| {
+            (
+                flat_offset(f, a_lead, out_lead) * a_mat,
+                flat_offset(f, b_lead, out_lead) * b_mat,
+                f * c_mat,
+            )
+        })
+        .collect();
+
+    // Greedy grouping: start a run, extend while (da, db, dc) deltas hold.
+    let mut runs = Vec::new();
+    let mut i = 0;
+    while i < total {
+        let (a0, b0, c0) = offs[i];
+        if i + 1 == total {
+            runs.push(StrideRun {
+                batch: 1,
+                a_start: a0,
+                b_start: b0,
+                c_start: c0,
+                stride_a: 0,
+                stride_b: 0,
+                stride_c: 0,
+            });
+            i += 1;
+            continue;
+        }
+        let (a1, b1, c1) = offs[i + 1];
+        let da = a1 as i64 - a0 as i64;
+        let db = b1 as i64 - b0 as i64;
+        let dc = c1 as i64 - c0 as i64;
+
+        let mut j = i + 1;
+        while j + 1 < total {
+            let (an, bn, cn) = offs[j];
+            let (an1, bn1, cn1) = offs[j + 1];
+            if an1 as i64 - an as i64 == da
+                && bn1 as i64 - bn as i64 == db
+                && cn1 as i64 - cn as i64 == dc
+            {
+                j += 1;
+            } else {
+                break;
+            }
+        }
+        runs.push(StrideRun {
+            batch: j - i + 1,
+            a_start: a0,
+            b_start: b0,
+            c_start: c0,
+            stride_a: da,
+            stride_b: db,
+            stride_c: dc,
+        });
+        i = j + 1;
+    }
+    runs
+}
+
+#[cfg(feature = "cuda")]
+fn validate_broadcast_shapes(
+    op: &'static str,
+    a_lead: &[usize],
+    b_lead: &[usize],
+    out_lead: &[usize],
+    a_len: usize,
+    b_len: usize,
+    m: usize,
+    k: usize,
+    n: usize,
+) -> GpuResult<()> {
+    let a_batch_count: usize = if a_lead.is_empty() {
+        1
+    } else {
+        a_lead.iter().product()
+    };
+    let b_batch_count: usize = if b_lead.is_empty() {
+        1
+    } else {
+        b_lead.iter().product()
+    };
+    let expected_a = a_batch_count * m * k;
+    let expected_b = b_batch_count * k * n;
+    if a_len != expected_a {
+        return Err(GpuError::ShapeMismatch {
+            op,
+            expected: vec![expected_a],
+            got: vec![a_len],
+        });
+    }
+    if b_len != expected_b {
+        return Err(GpuError::ShapeMismatch {
+            op,
+            expected: vec![expected_b],
+            got: vec![b_len],
+        });
+    }
+    // Verify out_lead is the broadcast of a_lead and b_lead.
+    let max_len = a_lead.len().max(b_lead.len());
+    if out_lead.len() < max_len {
+        return Err(GpuError::ShapeMismatch {
+            op,
+            expected: vec![max_len],
+            got: vec![out_lead.len()],
+        });
+    }
+    for i in 0..out_lead.len() {
+        let pa = out_lead.len() - a_lead.len();
+        let pb = out_lead.len() - b_lead.len();
+        let da = if i < pa { 1 } else { a_lead[i - pa] };
+        let db = if i < pb { 1 } else { b_lead[i - pb] };
+        let target = out_lead[i];
+        // PyTorch broadcast rule, including 0-sized axes:
+        //   ok iff (da == target or da == 1) and (db == target or db == 1).
+        // (Numpy / torch treat dim-0 as a normal length: 0 broadcasts with 0
+        // or 1; the resulting axis is 0.)
+        let ok = (da == target || da == 1) && (db == target || db == 1);
+        if !ok {
+            return Err(GpuError::ShapeMismatch {
+                op,
+                expected: vec![target],
+                got: vec![da, db],
+            });
+        }
+    }
+    Ok(())
+}
+
+/// Broadcast / 4D batched matmul on GPU (f32). See module-level docs.
+#[cfg(feature = "cuda")]
+pub fn gpu_broadcast_bmm_f32(
+    a: &CudaBuffer<f32>,
+    b: &CudaBuffer<f32>,
+    a_lead: &[usize],
+    b_lead: &[usize],
+    out_lead: &[usize],
+    m: usize,
+    k: usize,
+    n: usize,
+    device: &GpuDevice,
+) -> GpuResult<CudaBuffer<f32>> {
+    validate_broadcast_shapes(
+        "broadcast_bmm_f32",
+        a_lead,
+        b_lead,
+        out_lead,
+        a.len(),
+        b.len(),
+        m,
+        k,
+        n,
+    )?;
+    let total: usize = out_lead.iter().product();
+    let out_numel = total * m * n;
+    if total == 0 || m == 0 || k == 0 || n == 0 {
+        return alloc_zeros_f32(out_numel, device);
+    }
+
+    let m_i32 = i32::try_from(m).map_err(|_| GpuError::ShapeMismatch {
+        op: "broadcast_bmm_f32",
+        expected: vec![i32::MAX as usize],
+        got: vec![m],
+    })?;
+    let k_i32 = i32::try_from(k).map_err(|_| GpuError::ShapeMismatch {
+        op: "broadcast_bmm_f32",
+        expected: vec![i32::MAX as usize],
+        got: vec![k],
+    })?;
+    let n_i32 = i32::try_from(n).map_err(|_| GpuError::ShapeMismatch {
+        op: "broadcast_bmm_f32",
+        expected: vec![i32::MAX as usize],
+        got: vec![n],
+    })?;
+
+    let runs = compute_stride_runs(a_lead, b_lead, out_lead, m, k, n);
+    let blas = device.blas();
+    let mut c = alloc_zeros_f32(out_numel, device)?;
+
+    for run in &runs {
+        let batch_i32 = i32::try_from(run.batch).map_err(|_| GpuError::ShapeMismatch {
+            op: "broadcast_bmm_f32",
+            expected: vec![i32::MAX as usize],
+            got: vec![run.batch],
+        })?;
+        let cfg = StridedBatchedConfig {
+            gemm: GemmConfig {
+                transa: sys::cublasOperation_t::CUBLAS_OP_N,
+                transb: sys::cublasOperation_t::CUBLAS_OP_N,
+                m: n_i32,
+                n: m_i32,
+                k: k_i32,
+                alpha: 1.0f32,
+                lda: n_i32,
+                ldb: k_i32,
+                beta: 0.0f32,
+                ldc: n_i32,
+            },
+            batch_size: batch_i32,
+            // Row-major trick: cuBLAS sees swapped operands. The "logical A"
+            // we pass to gemm_strided_batched is our `b` (with stride_b in
+            // f32 elements), and "logical B" is our `a` (with stride_a).
+            stride_a: run.stride_b,
+            stride_b: run.stride_a,
+            stride_c: run.stride_c,
+        };
+
+        // Slice out this run's range from each operand. End offsets:
+        //   start + (batch - 1) * stride + per_batch_extent
+        let b_extent = b_mat_extent_f32(run.batch, run.stride_b, k * n);
+        let a_extent = b_mat_extent_f32(run.batch, run.stride_a, m * k);
+        let c_extent = b_mat_extent_f32(run.batch, run.stride_c, m * n);
+
+        let a_view = a.inner().slice(run.a_start..(run.a_start + a_extent));
+        let b_view = b.inner().slice(run.b_start..(run.b_start + b_extent));
+        let mut c_view = c
+            .inner_mut()
+            .slice_mut(run.c_start..(run.c_start + c_extent));
+
+        // SAFETY:
+        // - `Gemm::gemm_strided_batched` (cudarc 0.19.4 cublas/safe/gemm.rs:255)
+        //   is unsafe due to "improper arguments may lead to invalid memory
+        //   accesses". Discharged below.
+        // - `blas` is the device's shared `Arc<CudaBlas>`.
+        // - The per-run extent `b_extent / a_extent / c_extent` covers
+        //   `(batch - 1) * stride + per_batch_size` in elements (the exact
+        //   range cuBLAS will read/write under stride-batched semantics with
+        //   stride>=0); for stride=0 the extent reduces to one matrix's
+        //   elements, also safe. The caller's `a_lead`/`b_lead`/`out_lead`
+        //   shape contract is validated above by `validate_broadcast_shapes`.
+        // - `a_view`/`b_view` are shared `CudaView`s; `c_view` is a
+        //   `CudaViewMut` over a freshly allocated `c`. No aliasing.
+        // - Dimensions `m_i32, k_i32, n_i32` are guarded above; `batch_i32`
+        //   is guarded per-run.
+        // - Row-major trick is identical to `gpu_bmm_f32` above.
+        unsafe {
+            blas.gemm_strided_batched(cfg, &b_view, &a_view, &mut c_view)?;
+        }
+    }
+
+    Ok(c)
+}
+
+/// Same as `gpu_broadcast_bmm_f32` but for f64 (cuBLAS DGEMM).
+#[cfg(feature = "cuda")]
+pub fn gpu_broadcast_bmm_f64(
+    a: &CudaBuffer<f64>,
+    b: &CudaBuffer<f64>,
+    a_lead: &[usize],
+    b_lead: &[usize],
+    out_lead: &[usize],
+    m: usize,
+    k: usize,
+    n: usize,
+    device: &GpuDevice,
+) -> GpuResult<CudaBuffer<f64>> {
+    validate_broadcast_shapes(
+        "broadcast_bmm_f64",
+        a_lead,
+        b_lead,
+        out_lead,
+        a.len(),
+        b.len(),
+        m,
+        k,
+        n,
+    )?;
+    let total: usize = out_lead.iter().product();
+    let out_numel = total * m * n;
+    if total == 0 || m == 0 || k == 0 || n == 0 {
+        return alloc_zeros_f64(out_numel, device);
+    }
+
+    let m_i32 = i32::try_from(m).map_err(|_| GpuError::ShapeMismatch {
+        op: "broadcast_bmm_f64",
+        expected: vec![i32::MAX as usize],
+        got: vec![m],
+    })?;
+    let k_i32 = i32::try_from(k).map_err(|_| GpuError::ShapeMismatch {
+        op: "broadcast_bmm_f64",
+        expected: vec![i32::MAX as usize],
+        got: vec![k],
+    })?;
+    let n_i32 = i32::try_from(n).map_err(|_| GpuError::ShapeMismatch {
+        op: "broadcast_bmm_f64",
+        expected: vec![i32::MAX as usize],
+        got: vec![n],
+    })?;
+
+    let runs = compute_stride_runs(a_lead, b_lead, out_lead, m, k, n);
+    let blas = device.blas();
+    let mut c = alloc_zeros_f64(out_numel, device)?;
+
+    for run in &runs {
+        let batch_i32 = i32::try_from(run.batch).map_err(|_| GpuError::ShapeMismatch {
+            op: "broadcast_bmm_f64",
+            expected: vec![i32::MAX as usize],
+            got: vec![run.batch],
+        })?;
+        let cfg = StridedBatchedConfig {
+            gemm: GemmConfig {
+                transa: sys::cublasOperation_t::CUBLAS_OP_N,
+                transb: sys::cublasOperation_t::CUBLAS_OP_N,
+                m: n_i32,
+                n: m_i32,
+                k: k_i32,
+                alpha: 1.0f64,
+                lda: n_i32,
+                ldb: k_i32,
+                beta: 0.0f64,
+                ldc: n_i32,
+            },
+            batch_size: batch_i32,
+            stride_a: run.stride_b,
+            stride_b: run.stride_a,
+            stride_c: run.stride_c,
+        };
+
+        let b_extent = b_mat_extent_f32(run.batch, run.stride_b, k * n);
+        let a_extent = b_mat_extent_f32(run.batch, run.stride_a, m * k);
+        let c_extent = b_mat_extent_f32(run.batch, run.stride_c, m * n);
+
+        let a_view = a.inner().slice(run.a_start..(run.a_start + a_extent));
+        let b_view = b.inner().slice(run.b_start..(run.b_start + b_extent));
+        let mut c_view = c
+            .inner_mut()
+            .slice_mut(run.c_start..(run.c_start + c_extent));
+
+        // SAFETY: same contract as `gpu_broadcast_bmm_f32`; the f64 `Gemm`
+        // impl (cudarc 0.19.4 cublas/safe/gemm.rs:317) shares the
+        // gemm_strided_batched contract.
+        unsafe {
+            blas.gemm_strided_batched(cfg, &b_view, &a_view, &mut c_view)?;
+        }
+    }
+
+    Ok(c)
+}
+
+/// Compute the element-extent of the buffer range covered by a strided-batched
+/// run with `batch` matrices, given `stride` (signed, in elements) and
+/// `per_mat` (elements in one matrix). For stride=0 this is `per_mat`.
+/// For stride>0 it is `(batch-1)*stride + per_mat`. For stride<0 (not used
+/// in current codepaths but defended against) we widen to start..end safely.
+#[cfg(feature = "cuda")]
+fn b_mat_extent_f32(batch: usize, stride: i64, per_mat: usize) -> usize {
+    if batch == 0 {
+        return 0;
+    }
+    if stride == 0 {
+        return per_mat;
+    }
+    let abs = stride.unsigned_abs() as usize;
+    (batch - 1) * abs + per_mat
+}
+
+// ---------------------------------------------------------------------------
+// GPU dot product -- f32 / f64 (cuBLAS Sdot / Ddot)
+// ---------------------------------------------------------------------------
+//
+// cuBLAS exposes Sdot/Ddot only via the raw `sys::cublas{S,D}dot_v2` FFI
+// (no safe wrapper in cudarc 0.19.4). With the default HOST pointer mode,
+// the result is written to a host pointer; we then upload that scalar to
+// a length-1 device buffer so the caller still sees a `CudaBuffer`. The
+// uploaded scalar bypasses any host-side compute on the input buffers —
+// the inputs themselves are never copied to the host. Synchronising the
+// stream before the host upload is necessary because Sdot/Ddot is async
+// and must complete before we can read the host pointer.
+//
+// We do NOT switch the handle to DEVICE pointer mode because (a) the
+// shared cuBLAS handle is reused by other concurrent ops on the device's
+// thread, and (b) the scalar upload via `htod_copy` is well under a
+// microsecond — negligible vs. the dot itself.
+
+/// 1D inner product on the GPU using cuBLAS SDOT.
+///
+/// Returns a `CudaBuffer<f32>` of length 1 holding `Σ a[i]*b[i]`.
+#[cfg(feature = "cuda")]
+pub fn gpu_dot_f32(
+    a: &CudaBuffer<f32>,
+    b: &CudaBuffer<f32>,
+    n: usize,
+    device: &GpuDevice,
+) -> GpuResult<CudaBuffer<f32>> {
+    if a.len() != n {
+        return Err(GpuError::ShapeMismatch {
+            op: "dot",
+            expected: vec![n],
+            got: vec![a.len()],
+        });
+    }
+    if b.len() != n {
+        return Err(GpuError::ShapeMismatch {
+            op: "dot",
+            expected: vec![n],
+            got: vec![b.len()],
+        });
+    }
+    if a.device_ordinal() != device.ordinal() {
+        return Err(GpuError::DeviceMismatch {
+            expected: device.ordinal(),
+            got: a.device_ordinal(),
+        });
+    }
+    if b.device_ordinal() != device.ordinal() {
+        return Err(GpuError::DeviceMismatch {
+            expected: device.ordinal(),
+            got: b.device_ordinal(),
+        });
+    }
+
+    // Empty dot = 0 (PyTorch parity: torch.dot([], []) == 0).
+    if n == 0 {
+        return alloc_zeros_f32(1, device);
+    }
+
+    let n_i32 = i32::try_from(n).map_err(|_| GpuError::ShapeMismatch {
+        op: "dot",
+        expected: vec![i32::MAX as usize],
+        got: vec![n],
+    })?;
+
+    let blas = device.blas();
+    let stream = device.stream();
+    let mut host_result: f32 = 0.0;
+
+    let (a_ptr, _record_a) = a.inner().device_ptr(&stream);
+    let (b_ptr, _record_b) = b.inner().device_ptr(&stream);
+
+    // SAFETY:
+    // - `cublasSdot_v2` (cuBLAS docs / cudarc 0.19.4 src/cublas/sys/mod.rs:5884)
+    //   reads `n` elements from `x` (incx=1) and `n` elements from `y` (incy=1)
+    //   and writes a single f32 to `result`. Each obligation discharged below.
+    // - Buffer lengths: `a.len() == n` (line guard), `b.len() == n` (line guard).
+    //   cuBLAS reads exactly `n` elements at stride 1 from each, which matches.
+    // - `a_ptr`/`b_ptr` are valid device pointers obtained via `DevicePtr::device_ptr`
+    //   on the cuBLAS handle's stream; lifetimes outlive this call via the
+    //   `_record_a/_record_b` guards.
+    // - `result` points to a stack-allocated `host_result: f32` — valid host
+    //   memory because the handle is in the default `CUBLAS_POINTER_MODE_HOST`.
+    //   cuBLAS will synchronously copy the scalar back when Sdot completes.
+    // - `n_i32` is from `i32::try_from(n)`; sign/overflow guarded above.
+    // - Handle: `*blas.handle()` is a valid `cublasHandle_t` bound to the
+    //   device's stream by `CudaBlas::new`.
+    unsafe {
+        sys::cublasSdot_v2(
+            *blas.handle(),
+            n_i32,
+            a_ptr as *const f32,
+            1,
+            b_ptr as *const f32,
+            1,
+            &mut host_result as *mut f32,
+        )
+        .result()?;
+    }
+
+    // The `_record_*` lifetime guards drop at end of scope (after the
+    // synchronize call), keeping the cuBLAS view of `a`/`b` alive for the
+    // async Sdot call.
+
+    // Synchronise so cuBLAS has actually written `host_result` (Sdot in
+    // HOST pointer mode is not strictly synchronous on all libcuda
+    // versions; an explicit sync makes the contract precise).
+    stream.synchronize()?;
+
+    // Upload the scalar to a length-1 device buffer so the caller still
+    // sees a `CudaBuffer<f32>` (consistent with all other GPU ops).
+    let mut out = alloc_zeros_f32(1, device)?;
+    stream.memcpy_htod(std::slice::from_ref(&host_result), out.inner_mut())?;
+    Ok(out)
+}
+
+/// 1D inner product on the GPU using cuBLAS DDOT (f64).
+#[cfg(feature = "cuda")]
+pub fn gpu_dot_f64(
+    a: &CudaBuffer<f64>,
+    b: &CudaBuffer<f64>,
+    n: usize,
+    device: &GpuDevice,
+) -> GpuResult<CudaBuffer<f64>> {
+    if a.len() != n {
+        return Err(GpuError::ShapeMismatch {
+            op: "dot_f64",
+            expected: vec![n],
+            got: vec![a.len()],
+        });
+    }
+    if b.len() != n {
+        return Err(GpuError::ShapeMismatch {
+            op: "dot_f64",
+            expected: vec![n],
+            got: vec![b.len()],
+        });
+    }
+    if a.device_ordinal() != device.ordinal() {
+        return Err(GpuError::DeviceMismatch {
+            expected: device.ordinal(),
+            got: a.device_ordinal(),
+        });
+    }
+    if b.device_ordinal() != device.ordinal() {
+        return Err(GpuError::DeviceMismatch {
+            expected: device.ordinal(),
+            got: b.device_ordinal(),
+        });
+    }
+
+    if n == 0 {
+        return alloc_zeros_f64(1, device);
+    }
+
+    let n_i32 = i32::try_from(n).map_err(|_| GpuError::ShapeMismatch {
+        op: "dot_f64",
+        expected: vec![i32::MAX as usize],
+        got: vec![n],
+    })?;
+
+    let blas = device.blas();
+    let stream = device.stream();
+    let mut host_result: f64 = 0.0;
+
+    let (a_ptr, _record_a) = a.inner().device_ptr(&stream);
+    let (b_ptr, _record_b) = b.inner().device_ptr(&stream);
+
+    // SAFETY: identical to `gpu_dot_f32` above (cublasDdot_v2 docs at
+    // cudarc 0.19.4 src/cublas/sys/mod.rs:3128). Buffer-length, device,
+    // and pointer-mode obligations are discharged on the lines above
+    // this block; HOST pointer mode is the cuBLAS default and matches
+    // `&mut host_result`.
+    unsafe {
+        sys::cublasDdot_v2(
+            *blas.handle(),
+            n_i32,
+            a_ptr as *const f64,
+            1,
+            b_ptr as *const f64,
+            1,
+            &mut host_result as *mut f64,
+        )
+        .result()?;
+    }
+
+    // The `_record_*` lifetime guards drop at end of scope.
+
+    stream.synchronize()?;
+
+    let mut out = alloc_zeros_f64(1, device)?;
+    stream.memcpy_htod(std::slice::from_ref(&host_result), out.inner_mut())?;
+    Ok(out)
+}
+
+// ---------------------------------------------------------------------------
+// GPU mv (matrix-vector) -- f32 / f64 (cuBLAS Sgemv / Dgemv, OP_T)
+// ---------------------------------------------------------------------------
+//
+// We store matrices in row-major order. cuBLAS sees memory as column-major,
+// so a row-major (m,k) matrix appears to cuBLAS as a column-major (k,m)
+// matrix. To compute `y[m] = A_row[m,k] @ x[k]`, we ask cuBLAS to compute
+// `(A_col)^T @ x`, where `A_col` is the (k,m) view. With `op = CUBLAS_OP_T`
+// and `m=k_i32, n=m_i32, lda=k_i32`, gemv's signature `y = α·op(A)·x`
+// produces `(A_col)^T·x`, which is exactly the row-major mat-vec product.
+
+/// 2D x 1D matrix-vector product on the GPU: `y = A @ x` for row-major
+/// `A: [m, k]` and `x: [k]`. Returns `[m]`.
+#[cfg(feature = "cuda")]
+pub fn gpu_mv_f32(
+    a: &CudaBuffer<f32>,
+    x: &CudaBuffer<f32>,
+    m: usize,
+    k: usize,
+    device: &GpuDevice,
+) -> GpuResult<CudaBuffer<f32>> {
+    if a.len() != m * k {
+        return Err(GpuError::ShapeMismatch {
+            op: "mv",
+            expected: vec![m, k],
+            got: vec![a.len()],
+        });
+    }
+    if x.len() != k {
+        return Err(GpuError::ShapeMismatch {
+            op: "mv",
+            expected: vec![k],
+            got: vec![x.len()],
+        });
+    }
+    if a.device_ordinal() != device.ordinal() {
+        return Err(GpuError::DeviceMismatch {
+            expected: device.ordinal(),
+            got: a.device_ordinal(),
+        });
+    }
+    if x.device_ordinal() != device.ordinal() {
+        return Err(GpuError::DeviceMismatch {
+            expected: device.ordinal(),
+            got: x.device_ordinal(),
+        });
+    }
+
+    // Empty result handling. PyTorch parity: A[m,0] @ x[0] = zeros[m].
+    if m == 0 || k == 0 {
+        return alloc_zeros_f32(m, device);
+    }
+
+    let m_i32 = i32::try_from(m).map_err(|_| GpuError::ShapeMismatch {
+        op: "mv",
+        expected: vec![i32::MAX as usize],
+        got: vec![m],
+    })?;
+    let k_i32 = i32::try_from(k).map_err(|_| GpuError::ShapeMismatch {
+        op: "mv",
+        expected: vec![i32::MAX as usize],
+        got: vec![k],
+    })?;
+
+    let blas = device.blas();
+    let mut y = alloc_zeros_f32(m, device)?;
+
+    let cfg = GemvConfig {
+        trans: sys::cublasOperation_t::CUBLAS_OP_T,
+        m: k_i32,
+        n: m_i32,
+        alpha: 1.0f32,
+        lda: k_i32,
+        incx: 1,
+        beta: 0.0f32,
+        incy: 1,
+    };
+
+    // SAFETY:
+    // - `Gemv::gemv` (cudarc 0.19.4 src/cublas/safe/gemv.rs:26-32) is unsafe
+    //   because "improper arguments may lead to invalid memory accesses".
+    //   Each obligation discharged below.
+    // - `blas` is a valid `Arc<CudaBlas>` from `device.blas()` bound to the
+    //   device's stream.
+    // - Row-major trick: `a.inner()` is read by cuBLAS as a column-major
+    //   matrix of shape (k_i32, m_i32) with `lda=k_i32`. With OP_T and
+    //   `m=k_i32, n=m_i32`, gemv computes `y = (A_col)^T·x` — exactly
+    //   the row-major mat-vec product `A_row·x`.
+    // - Buffer lengths: `a.len() == m*k` (guard above), `x.len() == k`
+    //   (guard above); `y` was just allocated with `m` zeros. The gemv
+    //   read footprint is `m*k` for A and `k` for x; the write footprint
+    //   is `m` for y. All match.
+    // - Strides: `incx=1`, `incy=1`, `lda=k_i32` — exact for contiguous
+    //   row-major data (cuBLAS reads each column of the (k,m) col-major
+    //   view at stride 1, and there are m such columns, totalling m*k
+    //   element accesses).
+    // - Dimension typing: `m_i32`, `k_i32` from `i32::try_from`, sign/overflow
+    //   guarded above.
+    // - Aliasing: `a, x` shared inputs, `y` freshly allocated.
+    // - Device residency: all device-checked above.
+    unsafe {
+        blas.gemv(cfg, a.inner(), x.inner(), y.inner_mut())?;
+    }
+
+    Ok(y)
+}
+
+/// 2D x 1D matrix-vector product on the GPU (f64).
+#[cfg(feature = "cuda")]
+pub fn gpu_mv_f64(
+    a: &CudaBuffer<f64>,
+    x: &CudaBuffer<f64>,
+    m: usize,
+    k: usize,
+    device: &GpuDevice,
+) -> GpuResult<CudaBuffer<f64>> {
+    if a.len() != m * k {
+        return Err(GpuError::ShapeMismatch {
+            op: "mv_f64",
+            expected: vec![m, k],
+            got: vec![a.len()],
+        });
+    }
+    if x.len() != k {
+        return Err(GpuError::ShapeMismatch {
+            op: "mv_f64",
+            expected: vec![k],
+            got: vec![x.len()],
+        });
+    }
+    if a.device_ordinal() != device.ordinal() {
+        return Err(GpuError::DeviceMismatch {
+            expected: device.ordinal(),
+            got: a.device_ordinal(),
+        });
+    }
+    if x.device_ordinal() != device.ordinal() {
+        return Err(GpuError::DeviceMismatch {
+            expected: device.ordinal(),
+            got: x.device_ordinal(),
+        });
+    }
+
+    if m == 0 || k == 0 {
+        return alloc_zeros_f64(m, device);
+    }
+
+    let m_i32 = i32::try_from(m).map_err(|_| GpuError::ShapeMismatch {
+        op: "mv_f64",
+        expected: vec![i32::MAX as usize],
+        got: vec![m],
+    })?;
+    let k_i32 = i32::try_from(k).map_err(|_| GpuError::ShapeMismatch {
+        op: "mv_f64",
+        expected: vec![i32::MAX as usize],
+        got: vec![k],
+    })?;
+
+    let blas = device.blas();
+    let mut y = alloc_zeros_f64(m, device)?;
+
+    let cfg = GemvConfig {
+        trans: sys::cublasOperation_t::CUBLAS_OP_T,
+        m: k_i32,
+        n: m_i32,
+        alpha: 1.0f64,
+        lda: k_i32,
+        incx: 1,
+        beta: 0.0f64,
+        incy: 1,
+    };
+
+    // SAFETY: identical to `gpu_mv_f32` above; the f64 `Gemv` impl in
+    // cudarc 0.19.4 src/cublas/safe/gemv.rs:63-89 uses the same call
+    // contract (`cublasDgemv_v2`).
+    unsafe {
+        blas.gemv(cfg, a.inner(), x.inner(), y.inner_mut())?;
+    }
+
+    Ok(y)
+}
+
+// ---------------------------------------------------------------------------
+// GPU vm (vector-matrix) -- f32 / f64 (cuBLAS Sgemv / Dgemv, OP_N)
+// ---------------------------------------------------------------------------
+//
+// We compute `y[n] = x[k] @ B_row[k, n]` without materialising a transpose.
+// In row-major terms, `(x @ B_row)[j] = Σ_i x[i] * B_row[i, j]`. Treating
+// B_row's underlying storage as a column-major matrix of shape (n, k)
+// (since `B_row[i,j] = B_col[j,i]`), and using gemv with OP_N (no
+// transpose), `y = B_col · x` gives `y[j] = Σ_i B_col[j,i] * x[i]
+// = Σ_i B_row[i,j] * x[i]` — exactly the row-major vec-mat product.
+// Configuration: `op=OP_N, m=n_i32, n=k_i32, lda=n_i32`.
+
+/// 1D x 2D vector-matrix product on the GPU: `y = x @ B` for `x: [k]`
+/// and row-major `B: [k, n]`. Returns `[n]`.
+#[cfg(feature = "cuda")]
+pub fn gpu_vm_f32(
+    x: &CudaBuffer<f32>,
+    b: &CudaBuffer<f32>,
+    k: usize,
+    n: usize,
+    device: &GpuDevice,
+) -> GpuResult<CudaBuffer<f32>> {
+    if x.len() != k {
+        return Err(GpuError::ShapeMismatch {
+            op: "vm",
+            expected: vec![k],
+            got: vec![x.len()],
+        });
+    }
+    if b.len() != k * n {
+        return Err(GpuError::ShapeMismatch {
+            op: "vm",
+            expected: vec![k, n],
+            got: vec![b.len()],
+        });
+    }
+    if x.device_ordinal() != device.ordinal() {
+        return Err(GpuError::DeviceMismatch {
+            expected: device.ordinal(),
+            got: x.device_ordinal(),
+        });
+    }
+    if b.device_ordinal() != device.ordinal() {
+        return Err(GpuError::DeviceMismatch {
+            expected: device.ordinal(),
+            got: b.device_ordinal(),
+        });
+    }
+
+    if k == 0 || n == 0 {
+        return alloc_zeros_f32(n, device);
+    }
+
+    let k_i32 = i32::try_from(k).map_err(|_| GpuError::ShapeMismatch {
+        op: "vm",
+        expected: vec![i32::MAX as usize],
+        got: vec![k],
+    })?;
+    let n_i32 = i32::try_from(n).map_err(|_| GpuError::ShapeMismatch {
+        op: "vm",
+        expected: vec![i32::MAX as usize],
+        got: vec![n],
+    })?;
+
+    let blas = device.blas();
+    let mut y = alloc_zeros_f32(n, device)?;
+
+    let cfg = GemvConfig {
+        trans: sys::cublasOperation_t::CUBLAS_OP_N,
+        m: n_i32,
+        n: k_i32,
+        alpha: 1.0f32,
+        lda: n_i32,
+        incx: 1,
+        beta: 0.0f32,
+        incy: 1,
+    };
+
+    // SAFETY: same Gemv contract as `gpu_mv_f32`. The OP_N + (m=n,n=k,
+    // lda=n) configuration gives `y_col = B_col · x_col` where B_col is
+    // the (n,k) column-major view of row-major B[k,n] data; this equals
+    // the row-major `x @ B_row` product without transposing data.
+    // Read footprint: `k*n` for B (m_i32 cols × n_i32 elements per col
+    // at stride 1), `k` for x (n_i32 elements at stride 1); write
+    // footprint: `n` for y (m_i32 elements at stride 1). All match
+    // the buffer lengths checked at the function head.
+    unsafe {
+        blas.gemv(cfg, b.inner(), x.inner(), y.inner_mut())?;
+    }
+
+    Ok(y)
+}
+
+/// 1D x 2D vector-matrix product on the GPU (f64).
+#[cfg(feature = "cuda")]
+pub fn gpu_vm_f64(
+    x: &CudaBuffer<f64>,
+    b: &CudaBuffer<f64>,
+    k: usize,
+    n: usize,
+    device: &GpuDevice,
+) -> GpuResult<CudaBuffer<f64>> {
+    if x.len() != k {
+        return Err(GpuError::ShapeMismatch {
+            op: "vm_f64",
+            expected: vec![k],
+            got: vec![x.len()],
+        });
+    }
+    if b.len() != k * n {
+        return Err(GpuError::ShapeMismatch {
+            op: "vm_f64",
+            expected: vec![k, n],
+            got: vec![b.len()],
+        });
+    }
+    if x.device_ordinal() != device.ordinal() {
+        return Err(GpuError::DeviceMismatch {
+            expected: device.ordinal(),
+            got: x.device_ordinal(),
+        });
+    }
+    if b.device_ordinal() != device.ordinal() {
+        return Err(GpuError::DeviceMismatch {
+            expected: device.ordinal(),
+            got: b.device_ordinal(),
+        });
+    }
+
+    if k == 0 || n == 0 {
+        return alloc_zeros_f64(n, device);
+    }
+
+    let k_i32 = i32::try_from(k).map_err(|_| GpuError::ShapeMismatch {
+        op: "vm_f64",
+        expected: vec![i32::MAX as usize],
+        got: vec![k],
+    })?;
+    let n_i32 = i32::try_from(n).map_err(|_| GpuError::ShapeMismatch {
+        op: "vm_f64",
+        expected: vec![i32::MAX as usize],
+        got: vec![n],
+    })?;
+
+    let blas = device.blas();
+    let mut y = alloc_zeros_f64(n, device)?;
+
+    let cfg = GemvConfig {
+        trans: sys::cublasOperation_t::CUBLAS_OP_N,
+        m: n_i32,
+        n: k_i32,
+        alpha: 1.0f64,
+        lda: n_i32,
+        incx: 1,
+        beta: 0.0f64,
+        incy: 1,
+    };
+
+    // SAFETY: identical to `gpu_vm_f32`; f64 Gemv impl is symmetric.
+    unsafe {
+        blas.gemv(cfg, b.inner(), x.inner(), y.inner_mut())?;
+    }
+
+    Ok(y)
+}
+
+#[cfg(not(feature = "cuda"))]
+pub fn gpu_dot_f32(
+    _a: &CudaBuffer<f32>,
+    _b: &CudaBuffer<f32>,
+    _n: usize,
+    _device: &GpuDevice,
+) -> GpuResult<CudaBuffer<f32>> {
+    Err(GpuError::NoCudaFeature)
+}
+
+#[cfg(not(feature = "cuda"))]
+pub fn gpu_dot_f64(
+    _a: &CudaBuffer<f64>,
+    _b: &CudaBuffer<f64>,
+    _n: usize,
+    _device: &GpuDevice,
+) -> GpuResult<CudaBuffer<f64>> {
+    Err(GpuError::NoCudaFeature)
+}
+
+#[cfg(not(feature = "cuda"))]
+pub fn gpu_mv_f32(
+    _a: &CudaBuffer<f32>,
+    _x: &CudaBuffer<f32>,
+    _m: usize,
+    _k: usize,
+    _device: &GpuDevice,
+) -> GpuResult<CudaBuffer<f32>> {
+    Err(GpuError::NoCudaFeature)
+}
+
+#[cfg(not(feature = "cuda"))]
+pub fn gpu_mv_f64(
+    _a: &CudaBuffer<f64>,
+    _x: &CudaBuffer<f64>,
+    _m: usize,
+    _k: usize,
+    _device: &GpuDevice,
+) -> GpuResult<CudaBuffer<f64>> {
+    Err(GpuError::NoCudaFeature)
+}
+
+#[cfg(not(feature = "cuda"))]
+pub fn gpu_vm_f32(
+    _x: &CudaBuffer<f32>,
+    _b: &CudaBuffer<f32>,
+    _k: usize,
+    _n: usize,
+    _device: &GpuDevice,
+) -> GpuResult<CudaBuffer<f32>> {
+    Err(GpuError::NoCudaFeature)
+}
+
+#[cfg(not(feature = "cuda"))]
+pub fn gpu_vm_f64(
+    _x: &CudaBuffer<f64>,
+    _b: &CudaBuffer<f64>,
+    _k: usize,
+    _n: usize,
+    _device: &GpuDevice,
+) -> GpuResult<CudaBuffer<f64>> {
+    Err(GpuError::NoCudaFeature)
+}
+
 #[cfg(not(feature = "cuda"))]
 pub fn gpu_bmm_f64(
     _a: &CudaBuffer<f64>,
@@ -516,6 +1578,38 @@ pub fn gpu_bmm_f32(
     _n: usize,
     _device: &GpuDevice,
 ) -> GpuResult<CudaBuffer<f32>> {
+    Err(GpuError::NoCudaFeature)
+}
+
+#[cfg(not(feature = "cuda"))]
+#[allow(clippy::too_many_arguments)]
+pub fn gpu_broadcast_bmm_f32(
+    _a: &CudaBuffer<f32>,
+    _b: &CudaBuffer<f32>,
+    _a_lead: &[usize],
+    _b_lead: &[usize],
+    _out_lead: &[usize],
+    _m: usize,
+    _k: usize,
+    _n: usize,
+    _device: &GpuDevice,
+) -> GpuResult<CudaBuffer<f32>> {
+    Err(GpuError::NoCudaFeature)
+}
+
+#[cfg(not(feature = "cuda"))]
+#[allow(clippy::too_many_arguments)]
+pub fn gpu_broadcast_bmm_f64(
+    _a: &CudaBuffer<f64>,
+    _b: &CudaBuffer<f64>,
+    _a_lead: &[usize],
+    _b_lead: &[usize],
+    _out_lead: &[usize],
+    _m: usize,
+    _k: usize,
+    _n: usize,
+    _device: &GpuDevice,
+) -> GpuResult<CudaBuffer<f64>> {
     Err(GpuError::NoCudaFeature)
 }
 

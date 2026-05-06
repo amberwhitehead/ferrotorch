@@ -502,43 +502,21 @@ fn check_f64(label: &str, actual: &[f64], expected: &[f64], tol: f64) {
 ///   `linear_fused` / `matmul_differentiable` (2D x 2D) /
 ///   `bmm_differentiable` forward paths now dispatch on `is_f64::<T>()`
 ///   and route f64 tensors to `matmul_f64` / `bmm_f64` (cuBLAS dgemm).
-/// * `#801` — `matmul_differentiable` 2D x 2D and 3D x 3D now run on GPU;
-///   1D x 1D (dot), 2D x 1D (mv), 1D x 2D (vm), and broadcast (>3D, or
-///   3D with mismatched batch) still fall through to CPU-only specialised
-///   paths and surface as `GpuTensorNotAccessible` for CUDA inputs. Those
-///   routes need GPU dot/mv/vm/batched-broadcast kernels on the backend
-///   trait — tracked as separate sub-cascades.
+/// * `#801` — RESOLVED. `matmul_differentiable` now routes every supported
+///   PyTorch matmul rank combination through cuBLAS:
+///   - 1D x 1D (dot), 2D x 1D (mv), 1D x 2D (vm) via `dot_*` / `mv_*` /
+///     `vm_*` (#816 / #817 / #818).
+///   - 2D x 2D and 3D x 3D-matching-batch via `matmul_*` / `bmm_*`.
+///   - 4D bmm, 3D x 2D, 2D x 3D, and arbitrary leading-dim broadcasts via
+///     `broadcast_bmm_*` (cuBLAS gemmStridedBatched, stride=0 on broadcast
+///     axes — #819).
 fn cascade_skip(
     op: &str,
     device_label: &str,
     _dtype: &str,
     tag: &Option<String>,
 ) -> Option<&'static str> {
-    if device_label == "cuda:0" && op == "matmul" {
-        // Sub-cascades for #801: only 2D x 2D and matching 3D x 3D dispatch
-        // to GPU; the rest depend on missing backend kernels.
-        if let Some(t) = tag.as_deref() {
-            match t {
-                "matmul_2d_2d" | "matmul_3d_3d" => return None,
-                "matmul_1d_1d" => {
-                    return Some("#801 — 1D x 1D (dot) needs GPU dot kernel; sub-cascade filed");
-                }
-                "matmul_2d_1d" => {
-                    return Some("#801 — 2D x 1D (mv) needs GPU mv kernel; sub-cascade filed");
-                }
-                "matmul_1d_2d" => {
-                    return Some("#801 — 1D x 2D (vm) needs GPU vm kernel; sub-cascade filed");
-                }
-                "matmul_broadcast" => {
-                    return Some(
-                        "#801 — broadcast matmul needs GPU broadcast-bmm kernel; \
-                         sub-cascade filed",
-                    );
-                }
-                _ => {}
-            }
-        }
-    }
+    let _ = (op, device_label, tag);
     None
 }
 
