@@ -37,14 +37,20 @@ How fixtures are generated per-op:
   ``is_leaf=True``. The fixture records both flags so the Rust test can
   assert the same.
 
-This script is meant to run from the user's Windows torch install via:
+Usage from WSL (preferred — Linux-native after #777):
+
+    python3 scripts/regenerate_core_creation_fixtures.py
+
+Required Python deps (installed in WSL via ``pip install --user`` per #777):
+
+    torch>=2.5  (with CUDA support to populate the cuda paths)
+    numpy
+
+Fallback via the Windows host Python (only if WSL install is unavailable;
+this was the original Path-2 workflow before #777):
 
     /mnt/c/Users/texas/AppData/Local/Programs/Python/Python312/python.exe \\
         scripts/regenerate_core_creation_fixtures.py
-
-The repo's WSL distro does NOT have torch installed; running it via the
-Windows-side python.exe is by design (ditto the existing
-``scripts/pytorch_validate.py`` workflow).
 """
 
 from __future__ import annotations

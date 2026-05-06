@@ -11,16 +11,17 @@ ferrotorch-tokenize wraps the same `tokenizers` library that
 `transformers.AutoTokenizer` uses, so bit-identical output between the
 Rust wrapper and the Python reference is the conformance proof.
 
-# Usage from WSL:
+# Usage from WSL (preferred — Linux-native after #777):
+#   python3 /home/doll/ferrotorch/scripts/regenerate_tokenize_fixtures.py
+#
+# Required Python deps (installed in WSL via `pip install --user` per #777):
+#   tokenizers>=0.22  (must match the Rust workspace's `tokenizers` crate)
+#   huggingface_hub>=1.0
+#
+# Fallback usage via the Windows host Python (only if WSL install is
+# unavailable; this was the original Path-2 workflow before #777):
 #   /mnt/c/Users/texas/AppData/Local/Programs/Python/Python312/python.exe \
 #     /home/doll/ferrotorch/scripts/regenerate_tokenize_fixtures.py
-#
-# Usage from Windows cmd (or PowerShell):
-#   python C:\\path\\to\\ferrotorch\\scripts\\regenerate_tokenize_fixtures.py
-#
-# Required Python deps (already installed on the user's Windows host):
-#   tokenizers>=0.22  (must match the Rust workspace's `tokenizers` crate)
-#   huggingface_hub>=0.20
 #
 # The script writes:
 #   ferrotorch-tokenize/tests/conformance/assets/llama3_tokenizer.json
