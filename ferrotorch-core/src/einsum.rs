@@ -19,14 +19,33 @@
 //! * Two-input batched matmul (`"bij,bjk->bik"`): `grad_fns::linalg::bmm`.
 //!
 //! Equations whose structure does not map onto the existing GPU primitives
-//! (notably equations with repeated input indices like `"ii->"` (trace) or
-//! `"ii->i"` (diagonal), and contractions whose layout differs from the
-//! direct matmul/bmm pattern) return
-//! [`FerrotorchError::NotImplementedOnCuda`] rather than silently
+//! return [`FerrotorchError::NotImplementedOnCuda`] rather than silently
 //! materialising the operands on CPU. Per `rust-gpu-discipline` §3, no
-//! silent CPU detour is permitted in a non-autograd path; the caller must
-//! either move the inputs with `.cpu()` themselves or wait for the
-//! follow-up that adds the missing on-device primitives.
+//! silent CPU detour is permitted in a non-autograd path.
+//!
+//! ## Repeated-index extension (#821)
+//!
+//! Single-input equations with repeated indices (`"ii->"` trace, `"ii->i"`
+//! diagonal, `"ii"` implicit trace) are decomposed on-device by building
+//! a strided view of the diagonal — shape `[N]` with stride `[N+1]` over
+//! the original `[N, N]` tensor — and materialising it through the
+//! existing `strided_copy_f{32,64}` GPU kernels (via `as_strided_copy`).
+//! For trace, the diagonal is then reduced with `sum_dim`. No new GPU
+//! primitive is introduced; the existing CL-496 strided_copy surface is
+//! the on-device decomposition target.
+//!
+//! ## Multi-axis 2-input extension (#822)
+//!
+//! Two-input contractions with multiple contracting axes or permuted
+//! operand layouts (e.g. `"ijk,jkl->il"`, `"bijk,bjkl->bil"`) are handled
+//! by a general permute+reshape+matmul/bmm decomposition: each operand
+//! is permuted into `[batch_dims, free_dims, contract_dims]` (A) /
+//! `[batch_dims, contract_dims, free_dims]` (B), reshaped to a 3-D
+//! `[batch, M, K]` / `[batch, K, N]` form, contracted via `bmm`, then
+//! reshaped + permuted back to the requested output layout. Equations
+//! whose decomposition cannot be expressed through this route (e.g.
+//! diagonal+contract combos with repeated input indices on a 2-input
+//! equation) still return `Err(NotImplementedOnCuda)`.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -183,7 +202,7 @@ fn build_dim_map<T: Float>(
 // Single-input einsum (trace, transpose, axis-sum, diagonal)
 // ---------------------------------------------------------------------------
 
-/// GPU dispatch for single-input einsum (#803).
+/// GPU dispatch for single-input einsum (#803, extended in #821).
 ///
 /// Decomposes the equation into GPU-aware primitives:
 ///
@@ -194,11 +213,10 @@ fn build_dim_map<T: Float>(
 ///   indices): repeated `sum_dim` along the dropped axes; if there is
 ///   also a permutation among the kept axes, a final `permute_t`.
 /// * Full reduction (out empty, no repeats): `grad_fns::reduction::sum`.
-/// * Repeated input indices ("ii->", "ii->i", etc.): no GPU primitive
-///   captures the diagonal-extract / trace contraction, so we return
-///   `Err(NotImplementedOnCuda { op: "einsum_repeated_index" })`.
-///   These cases are tracked for a follow-up that adds an on-device
-///   diagonal kernel; meanwhile callers must `.cpu()` the operand.
+/// * Repeated input indices ("ii->", "ii->i", "ii"): on-device diagonal
+///   extraction via `as_strided_copy` (shape `[N]`, stride `[N+1]`),
+///   then `sum_dim` for the trace case. Implemented via the existing
+///   `strided_copy_f{32,64}` kernel — no new primitive surface.
 fn einsum_single_gpu<T: Float>(
     parsed: &ParsedEquation,
     input: &Tensor<T>,
@@ -207,13 +225,11 @@ fn einsum_single_gpu<T: Float>(
     let in_subs = &parsed.input_subscripts[0];
     let out_subs = &parsed.output_subscripts;
 
-    // Repeated input indices are not GPU-decomposable with the existing
-    // primitive surface. Surface as Err rather than silently going to
-    // CPU (§3 forbids the silent fallback).
+    // Repeated input indices: extract the diagonal on-device via the
+    // existing strided_copy kernel, then optionally reduce. Implemented
+    // as a composite over existing primitives — no new GPU surface.
     if has_duplicate_chars(in_subs) {
-        return Err(FerrotorchError::NotImplementedOnCuda {
-            op: "einsum_repeated_index",
-        });
+        return einsum_single_repeated_gpu(in_subs, out_subs, input);
     }
 
     // Output indices must all appear in the input (caller has already
@@ -291,6 +307,115 @@ fn einsum_single_gpu<T: Float>(
         let materialised = crate::methods::contiguous_t(&permuted)?;
         Ok(materialised)
     })
+}
+
+/// GPU implementation of repeated-index single-input einsum (#821).
+///
+/// Handles the patterns where one or more input indices repeat — i.e.
+/// `"ii->"` (trace), `"ii->i"` (diagonal extraction), `"ii"` (implicit
+/// trace). The decomposition is purely composite over existing GPU
+/// primitives:
+///
+/// 1. Construct a strided view that selects only the positions where the
+///    repeated indices coincide. For `"ii"` over an `[N, N]` tensor this
+///    is shape `[N]` with stride `[N+1]` over the underlying contiguous
+///    storage. Generalises to `iii…` of rank `r` over an `[N, N, ..., N]`
+///    tensor as shape `[N]` with stride `[1 + N + N^2 + … + N^{r-1}]`.
+/// 2. Materialise the view via `as_strided_copy`, which dispatches to the
+///    existing `strided_copy_f{32,64}` GPU kernel (CL-496) on CUDA — no
+///    host bounce, no new kernel.
+/// 3. If the output is empty (`"ii->"` or implicit `"ii"`), reduce the
+///    `[N]` diagonal vector with `sum_dim`. Otherwise return the diagonal
+///    directly (e.g. `"ii->i"` produces an `[N]` vector).
+///
+/// Restrictions: the output may contain at most one of the repeated
+/// chars (i.e. `"ii->i"` is allowed, but `"ii->ii"` is not — that asks
+/// for the original matrix back, which is not a valid einsum). Mixed
+/// repeats with other free indices (e.g. `"iij->j"`) are not yet handled
+/// here and fall through to `Err(NotImplementedOnCuda)` so they surface
+/// as a sub-cascade rather than silently producing wrong results.
+fn einsum_single_repeated_gpu<T: Float>(
+    in_subs: &[char],
+    out_subs: &[char],
+    input: &Tensor<T>,
+) -> FerrotorchResult<Tensor<T>> {
+    let ndim = in_subs.len();
+    if ndim < 2 {
+        // A single index can't repeat with itself within rank 1 — shouldn't reach here.
+        return Err(FerrotorchError::NotImplementedOnCuda {
+            op: "einsum_repeated_index",
+        });
+    }
+
+    // Currently support the homogeneous case where every input axis is
+    // the *same* repeated index, e.g. "ii", "iii", "iiii". This covers
+    // the trace / diagonal patterns (#821 scope). Mixed repeated /
+    // non-repeated indices (e.g. "iij->j") are not on-device-decomposable
+    // through plain strided_copy and are surfaced as a sub-cascade.
+    let first = in_subs[0];
+    let all_same = in_subs.iter().all(|&c| c == first);
+    if !all_same {
+        return Err(FerrotorchError::NotImplementedOnCuda {
+            op: "einsum_repeated_index_mixed",
+        });
+    }
+
+    // All N axes share the same size — build_dim_map already validated this.
+    let n = input.shape()[0];
+    for (axis, &size) in input.shape().iter().enumerate() {
+        if size != n {
+            return Err(FerrotorchError::ShapeMismatch {
+                message: format!(
+                    "einsum: repeated-index axis {axis} has size {size}, expected {n} (all-same diagonal)"
+                ),
+            });
+        }
+    }
+
+    // Output is either empty (trace) or the same single repeated char (diagonal).
+    let want_diagonal = match out_subs.len() {
+        0 => false,
+        1 if out_subs[0] == first => true,
+        _ => {
+            return Err(FerrotorchError::NotImplementedOnCuda {
+                op: "einsum_repeated_index_unsupported_output",
+            });
+        }
+    };
+
+    // Stride to step from one diagonal element to the next: 1 + N + N^2 + ... + N^{r-1}.
+    // For rank 2 this is N+1 (the canonical "stride past one row plus one column").
+    // The underlying storage must be contiguous — materialise if it isn't.
+    let materialised = if input.is_contiguous() {
+        input.clone()
+    } else {
+        crate::methods::contiguous_t(input)?
+    };
+
+    let mut step: isize = 0;
+    let mut pow: isize = 1;
+    for _ in 0..ndim {
+        step += pow;
+        pow = pow
+            .checked_mul(n as isize)
+            .ok_or_else(|| FerrotorchError::InvalidArgument {
+                message: "einsum repeated-index: tensor too large for stride math".into(),
+            })?;
+    }
+
+    // Build the diagonal as an as_strided view of shape [N], stride [step]
+    // over the materialised storage, starting at the existing storage offset.
+    // `as_strided` is metadata-only on every device; the materialisation
+    // happens inside `as_strided_copy` via the GPU strided_copy kernel.
+    let diag_view = materialised.as_strided(&[n], &[step], None)?;
+    let diag = diag_view.as_strided_copy(&[n], &[step], None)?;
+
+    if want_diagonal {
+        // "ii->i" — return the diagonal vector directly.
+        return Ok(diag);
+    }
+    // "ii->" or implicit "ii" — reduce to a scalar with sum_dim.
+    crate::grad_fns::reduction::sum_dim(&diag, 0, false)
 }
 
 /// Returns `true` if `chars` contains any character more than once.
@@ -440,26 +565,32 @@ fn einsum_single<T: Float>(
 // Two-input einsum via TTGT
 // ---------------------------------------------------------------------------
 
-/// GPU dispatch for two-input einsum (#803).
+/// GPU dispatch for two-input einsum (#803, extended in #822).
 ///
-/// Maps a small set of high-frequency contraction patterns onto the
-/// existing GPU primitives:
+/// Maps contraction patterns onto existing GPU primitives:
 ///
 /// * 2D matmul `"ij,jk->ik"` (and any equivalent re-letter):
 ///   `grad_fns::linalg::matmul_differentiable` (forward-only via `no_grad`).
 /// * Batched matmul `"bij,bjk->bik"` (and any equivalent re-letter):
 ///   `grad_fns::linalg::bmm`.
+/// * Vector / Hadamard / outer / matrix-vector special cases (1-D operands).
+/// * **General multi-axis decomposition (#822):** any equation whose
+///   indices partition cleanly into `batch / free_a / free_b / contract`
+///   sets — including multi-axis contractions like `"ijk,jkl->il"` and
+///   permuted operand or output layouts. Each operand is permuted into
+///   `[batch, free, contract]` (A) / `[batch, contract, free]` (B),
+///   reshaped to 3-D, contracted with `bmm`, then reshaped + permuted
+///   back to the requested output layout.
 ///
-/// Anything else (outer products, dot via einsum, contractions with a
-/// permuted output, ≥4D batched matmul, multi-axis contractions) returns
-/// `Err(NotImplementedOnCuda { op: "einsum_general" })`. Callers that
-/// need those equations on CUDA must `.cpu()` first; the follow-up
-/// adds the missing primitives.
+/// Equations that fall outside this surface (notably those with input
+/// repeats on a 2-input equation, e.g. `"ii,j->j"`) return
+/// `Err(NotImplementedOnCuda { op: "einsum_general" })` so they surface
+/// as sub-cascades.
 fn einsum_two_gpu<T: Float>(
     parsed: &ParsedEquation,
     a: &Tensor<T>,
     b: &Tensor<T>,
-    _dim_map: &BTreeMap<char, usize>,
+    dim_map: &BTreeMap<char, usize>,
 ) -> FerrotorchResult<Tensor<T>> {
     let a_subs = &parsed.input_subscripts[0];
     let b_subs = &parsed.input_subscripts[1];
@@ -676,10 +807,294 @@ fn einsum_two_gpu<T: Float>(
             return crate::grad_fns::shape::squeeze(&mm_result, 0);
         }
 
-        Err(FerrotorchError::NotImplementedOnCuda {
-            op: "einsum_general",
-        })
+        // General permute+reshape+bmm decomposition (#822).
+        // Falls back to NotImplementedOnCuda if the equation can't be
+        // expressed through this route (e.g. mixed input repeats or chars
+        // missing from the dim_map).
+        einsum_two_gpu_general(a_subs, b_subs, out_subs, a, b, dim_map)
     })
+}
+
+/// General GPU decomposition for 2-input einsum (#822).
+///
+/// Strategy: classify each unique char into one of four buckets —
+/// `batch` (in A, B, and out), `free_a` (in A and out, not in B),
+/// `free_b` (in B and out, not in A), `contract` (in A and B, not in out).
+/// Then:
+///
+/// 1. Permute A so its axes are `[batch..., free_a..., contract...]`.
+/// 2. Permute B so its axes are `[batch..., contract..., free_b...]`.
+/// 3. Reshape both to 3-D `[batch_total, M, K]` and `[batch_total, K, N]`.
+/// 4. Call `bmm` → `[batch_total, M, N]`.
+/// 5. Reshape back to `[batch..., free_a..., free_b...]`.
+/// 6. Permute to match `out_subs` order.
+///
+/// Equations with chars that appear only in one input but not in the
+/// output (lone-summed indices, e.g. `"ijk,kl->jl"` where `i` is only in
+/// A) are handled by an `axis_sum` pre-pass on the offending operand
+/// before the four-way classification.
+///
+/// If any operand has repeated input chars (e.g. `"iij,j->j"`) this path
+/// declines with `Err(NotImplementedOnCuda { op: "einsum_general" })` —
+/// these cases need diagonal extraction on the operand first, which is
+/// out of scope here and tracked as a sub-cascade.
+fn einsum_two_gpu_general<T: Float>(
+    a_subs: &[char],
+    b_subs: &[char],
+    out_subs: &[char],
+    a: &Tensor<T>,
+    b: &Tensor<T>,
+    dim_map: &BTreeMap<char, usize>,
+) -> FerrotorchResult<Tensor<T>> {
+    // We already filter out repeated-index operands at the entry to
+    // einsum_two_gpu, but keep the guard here as a safety net so this
+    // function is independently safe.
+    if has_duplicate_chars(a_subs) || has_duplicate_chars(b_subs) {
+        return Err(FerrotorchError::NotImplementedOnCuda {
+            op: "einsum_general",
+        });
+    }
+
+    // Sum out lone-A indices (chars only in A and not in B or out) and
+    // lone-B indices (only in B and not in A or out) up front. After this
+    // every char in each operand is either batch / free / contract.
+    let a_only_lone: Vec<char> = a_subs
+        .iter()
+        .copied()
+        .filter(|c| !b_subs.contains(c) && !out_subs.contains(c))
+        .collect();
+    let b_only_lone: Vec<char> = b_subs
+        .iter()
+        .copied()
+        .filter(|c| !a_subs.contains(c) && !out_subs.contains(c))
+        .collect();
+
+    let (a_reduced_subs, a_reduced) = reduce_lone_axes(a_subs, &a_only_lone, a)?;
+    let (b_reduced_subs, b_reduced) = reduce_lone_axes(b_subs, &b_only_lone, b)?;
+
+    // Classify chars after lone-axis reduction.
+    let mut batch_chars: Vec<char> = Vec::new();
+    let mut free_a_chars: Vec<char> = Vec::new();
+    let mut free_b_chars: Vec<char> = Vec::new();
+    let mut contract_chars: Vec<char> = Vec::new();
+
+    for &c in &a_reduced_subs {
+        let in_b = b_reduced_subs.contains(&c);
+        let in_out = out_subs.contains(&c);
+        match (in_b, in_out) {
+            (true, true) => {
+                if !batch_chars.contains(&c) {
+                    batch_chars.push(c);
+                }
+            }
+            (true, false) => {
+                if !contract_chars.contains(&c) {
+                    contract_chars.push(c);
+                }
+            }
+            (false, true) => {
+                if !free_a_chars.contains(&c) {
+                    free_a_chars.push(c);
+                }
+            }
+            (false, false) => {
+                // Should already be summed out above; defensive Err.
+                return Err(FerrotorchError::Internal {
+                    message: format!(
+                        "einsum_two_gpu_general: lone-A char '{c}' survived reduction"
+                    ),
+                });
+            }
+        }
+    }
+    for &c in &b_reduced_subs {
+        if !a_reduced_subs.contains(&c) && out_subs.contains(&c) && !free_b_chars.contains(&c) {
+            free_b_chars.push(c);
+        }
+    }
+
+    // Build the source-axis lookup for each operand. Since we filtered
+    // out repeats, each char appears at exactly one axis in each operand.
+    let a_axis_of = |c: char| -> Option<usize> { a_reduced_subs.iter().position(|&x| x == c) };
+    let b_axis_of = |c: char| -> Option<usize> { b_reduced_subs.iter().position(|&x| x == c) };
+
+    // Build A permutation: [batch..., free_a..., contract...]
+    let mut a_perm: Vec<usize> = Vec::with_capacity(a_reduced_subs.len());
+    for &c in &batch_chars {
+        a_perm.push(a_axis_of(c).ok_or_else(|| FerrotorchError::Internal {
+            message: format!("einsum_two_gpu_general: batch char '{c}' missing from A"),
+        })?);
+    }
+    for &c in &free_a_chars {
+        a_perm.push(a_axis_of(c).ok_or_else(|| FerrotorchError::Internal {
+            message: format!("einsum_two_gpu_general: free-A char '{c}' missing from A"),
+        })?);
+    }
+    for &c in &contract_chars {
+        a_perm.push(a_axis_of(c).ok_or_else(|| FerrotorchError::Internal {
+            message: format!("einsum_two_gpu_general: contract char '{c}' missing from A"),
+        })?);
+    }
+    if a_perm.len() != a_reduced_subs.len() {
+        return Err(FerrotorchError::Internal {
+            message: format!(
+                "einsum_two_gpu_general: A permutation has {} axes, expected {}",
+                a_perm.len(),
+                a_reduced_subs.len()
+            ),
+        });
+    }
+
+    // Build B permutation: [batch..., contract..., free_b...]
+    let mut b_perm: Vec<usize> = Vec::with_capacity(b_reduced_subs.len());
+    for &c in &batch_chars {
+        b_perm.push(b_axis_of(c).ok_or_else(|| FerrotorchError::Internal {
+            message: format!("einsum_two_gpu_general: batch char '{c}' missing from B"),
+        })?);
+    }
+    for &c in &contract_chars {
+        b_perm.push(b_axis_of(c).ok_or_else(|| FerrotorchError::Internal {
+            message: format!("einsum_two_gpu_general: contract char '{c}' missing from B"),
+        })?);
+    }
+    for &c in &free_b_chars {
+        b_perm.push(b_axis_of(c).ok_or_else(|| FerrotorchError::Internal {
+            message: format!("einsum_two_gpu_general: free-B char '{c}' missing from B"),
+        })?);
+    }
+    if b_perm.len() != b_reduced_subs.len() {
+        return Err(FerrotorchError::Internal {
+            message: format!(
+                "einsum_two_gpu_general: B permutation has {} axes, expected {}",
+                b_perm.len(),
+                b_reduced_subs.len()
+            ),
+        });
+    }
+
+    // Apply permutations on-device (zero-copy stride view + strided_copy).
+    let a_perm_view = crate::methods::permute_t(&a_reduced, &a_perm)?;
+    let a_permuted = crate::methods::contiguous_t(&a_perm_view)?;
+    let b_perm_view = crate::methods::permute_t(&b_reduced, &b_perm)?;
+    let b_permuted = crate::methods::contiguous_t(&b_perm_view)?;
+
+    // Compute group sizes.
+    let batch_sizes: Vec<usize> = batch_chars.iter().map(|c| dim_map[c]).collect();
+    let free_a_sizes: Vec<usize> = free_a_chars.iter().map(|c| dim_map[c]).collect();
+    let free_b_sizes: Vec<usize> = free_b_chars.iter().map(|c| dim_map[c]).collect();
+    let contract_sizes: Vec<usize> = contract_chars.iter().map(|c| dim_map[c]).collect();
+
+    let batch_total: usize = batch_sizes.iter().product::<usize>().max(1);
+    let free_a_total: usize = free_a_sizes.iter().product::<usize>().max(1);
+    let free_b_total: usize = free_b_sizes.iter().product::<usize>().max(1);
+    let contract_total: usize = contract_sizes.iter().product::<usize>().max(1);
+
+    // Reshape A to [batch_total, free_a_total, contract_total]. Use raw
+    // usize shapes so reshape's no-op fast path works on every device.
+    let a_3d = crate::grad_fns::shape::reshape(
+        &a_permuted,
+        &[
+            batch_total as isize,
+            free_a_total as isize,
+            contract_total as isize,
+        ],
+    )?;
+    // Reshape B to [batch_total, contract_total, free_b_total].
+    let b_3d = crate::grad_fns::shape::reshape(
+        &b_permuted,
+        &[
+            batch_total as isize,
+            contract_total as isize,
+            free_b_total as isize,
+        ],
+    )?;
+
+    // bmm requires 3-D; we always feed it 3-D here.
+    let bmm_result = crate::grad_fns::linalg::bmm(&a_3d, &b_3d)?;
+    // bmm_result shape: [batch_total, free_a_total, free_b_total].
+
+    // Reshape back to [batch..., free_a..., free_b...].
+    let mut intermediate_shape: Vec<isize> = Vec::with_capacity(
+        batch_sizes.len() + free_a_sizes.len() + free_b_sizes.len(),
+    );
+    intermediate_shape.extend(batch_sizes.iter().map(|&n| n as isize));
+    intermediate_shape.extend(free_a_sizes.iter().map(|&n| n as isize));
+    intermediate_shape.extend(free_b_sizes.iter().map(|&n| n as isize));
+
+    // Handle the corner case where every group is empty (rare — would
+    // only arise from a fully-reduced equation): keep at least a scalar.
+    let intermediate = if intermediate_shape.is_empty() {
+        // 0-D scalar: bmm_result is [1, 1, 1]; reshape to [].
+        crate::grad_fns::shape::reshape(&bmm_result, &[])?
+    } else {
+        crate::grad_fns::shape::reshape(&bmm_result, &intermediate_shape)?
+    };
+
+    // Build the intermediate's char order.
+    let intermediate_chars: Vec<char> = batch_chars
+        .iter()
+        .chain(free_a_chars.iter())
+        .chain(free_b_chars.iter())
+        .copied()
+        .collect();
+
+    // If the intermediate already matches out_subs, we're done.
+    if intermediate_chars == *out_subs {
+        return Ok(intermediate);
+    }
+
+    // Otherwise build a permutation to reorder.
+    if intermediate_chars.len() != out_subs.len() {
+        return Err(FerrotorchError::Internal {
+            message: format!(
+                "einsum_two_gpu_general: intermediate has {} axes, output has {}",
+                intermediate_chars.len(),
+                out_subs.len()
+            ),
+        });
+    }
+    let out_perm: Vec<usize> = out_subs
+        .iter()
+        .map(|c| {
+            intermediate_chars
+                .iter()
+                .position(|ic| ic == c)
+                .ok_or_else(|| FerrotorchError::Internal {
+                    message: format!(
+                        "einsum_two_gpu_general: out char '{c}' missing from intermediate"
+                    ),
+                })
+        })
+        .collect::<FerrotorchResult<Vec<_>>>()?;
+
+    let permuted_view = crate::methods::permute_t(&intermediate, &out_perm)?;
+    crate::methods::contiguous_t(&permuted_view)
+}
+
+/// Sum out the listed `lone_chars` axes from `tensor`, returning the new
+/// subscript list (with those chars removed) and the reduced tensor.
+///
+/// Used as a pre-pass for [`einsum_two_gpu_general`] so the four-way
+/// classification (`batch`/`free_a`/`free_b`/`contract`) is exhaustive.
+fn reduce_lone_axes<T: Float>(
+    subs: &[char],
+    lone_chars: &[char],
+    tensor: &Tensor<T>,
+) -> FerrotorchResult<(Vec<char>, Tensor<T>)> {
+    if lone_chars.is_empty() {
+        return Ok((subs.to_vec(), tensor.clone()));
+    }
+    let mut current_subs = subs.to_vec();
+    let mut current = tensor.clone();
+    // Sum from the highest dim downward so removals don't shift indices
+    // we still need to remove.
+    for axis in (0..subs.len()).rev() {
+        if lone_chars.contains(&subs[axis]) {
+            current = crate::grad_fns::reduction::sum_dim(&current, axis as i64, false)?;
+            current_subs.remove(axis);
+        }
+    }
+    Ok((current_subs, current))
 }
 
 fn einsum_two<T: Float>(

@@ -259,30 +259,25 @@ mod gpu {
     }
 
     #[test]
-    fn gpu_einsum_trace_returns_err_not_silent_cpu_detour() {
-        // #803 scope-narrowing decision: equations with repeated input
-        // indices ("ii->" trace, "ii->i" diagonal) have no clean
-        // decomposition into the existing GPU primitives. Per §3, we
-        // return Err(NotImplementedOnCuda) instead of silently moving
-        // the operand to CPU. The follow-up that adds an on-device
-        // diagonal-extract kernel can flip this to a passing forward.
+    fn gpu_einsum_trace_stays_on_device() {
+        // #803 / #821: trace `"ii->"` previously returned
+        // `Err(NotImplementedOnCuda { op: "einsum_repeated_index" })` as
+        // a §3-correct scope-narrowing. Bugfix Batch 6 / Dispatch A2
+        // (#821) implemented the on-device diagonal extraction via
+        // `as_strided_copy` + `sum_dim`, so trace now succeeds on GPU.
+        // The test pins the new behaviour: result is correct AND stays
+        // on device — the same §3 contract every other GPU einsum
+        // forward path enforces.
         ensure_cuda_backend();
         let a = upload(t_f32(&[1.0, 2.0, 3.0, 4.0], &[2, 2]));
-        let r = einsum("ii->", &[&a]);
-        match r {
-            Err(ferrotorch_core::FerrotorchError::NotImplementedOnCuda { op }) => {
-                assert_eq!(
-                    op, "einsum_repeated_index",
-                    "expected einsum_repeated_index marker, got {op:?}"
-                );
-            }
-            Ok(t) => panic!(
-                "#803: trace einsum on GPU must return Err(NotImplementedOnCuda), \
-                 not silently produce a {:?} tensor",
-                t.device()
-            ),
-            Err(other) => panic!("unexpected error variant: {other:?}"),
-        }
+        let r = einsum("ii->", &[&a]).expect("#821: trace must succeed on GPU");
+        assert!(
+            r.is_cuda(),
+            "#821: trace einsum on GPU must stay on device, got {:?}",
+            r.device()
+        );
+        let host = r.cpu().unwrap();
+        assert!((host.item().unwrap() - 5.0).abs() < 1e-6);
     }
 
     // ---------------------------------------------------------------------

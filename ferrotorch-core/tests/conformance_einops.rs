@@ -378,54 +378,53 @@ fn check_f64(label: &str, actual: &[f64], expected: &[f64], tol: f64) {
 /// each failure with a tracking issue rather than silently weakening
 /// tolerance.
 ///
-/// `tag` is consulted *in addition* to (op, device, dtype) — needed for
-/// per-equation cascade rows (the GPU einsum subset narrowing in #803).
+/// `tag` is reserved for per-equation cascade rows (e.g. when a future
+/// row needs to skip a specific einsum tag). With #821 / #822 closing
+/// the only previously-tag-keyed cascade rows, all skips currently
+/// dispatch off (op, device, dtype) only — `tag` is left in the
+/// signature for symmetry with the future surface.
 fn cascade_skip(
-    op: &str,
-    device_label: &str,
+    _op: &str,
+    _device_label: &str,
     _dtype: &str,
-    tag: Option<&str>,
+    _tag: Option<&str>,
 ) -> Option<&'static str> {
     // Issue #791 (CLOSED in Bugfix Batch 4 / Dispatch A3):
     // EinsumBackwardSingle now handles projection / axis-sum cases
     // structurally (broadcast-to-lhs-shape) instead of constructing
     // a malformed reverse-equation. The skip is therefore removed.
     //
-    // Issue #803 (CLOSED — partial — in the same dispatch): einsum
-    // forward on CUDA now decomposes into GPU primitives for the
-    // patterns the existing primitive surface covers (matmul, bmm,
-    // permutation, axis sum, full reduce). Equations with repeated
-    // input indices on GPU (`"ii->"` trace, `"ii->i"` diagonal) now
-    // return `Err(NotImplementedOnCuda)` instead of silently
-    // detouring to CPU. The conformance fixtures for those tags on
-    // GPU therefore need to be skipped here until the on-device
-    // diagonal kernel lands.
-    if op == "einsum"
-        && device_label == "cuda:0"
-        && (tag == Some("trace_2d") || tag == Some("diagonal_2d"))
-    {
-        return Some(
-            "#803 partial: einsum 'trace_2d'/'diagonal_2d' on GPU returns NotImplementedOnCuda \
-             pending on-device diagonal kernel",
-        );
-    }
-    if op == "einsum_differentiable"
-        && device_label == "cuda:0"
-        && (tag == Some("trace_2d") || tag == Some("diagonal_2d"))
-    {
-        return Some(
-            "#803 partial: einsum_differentiable 'trace_2d'/'diagonal_2d' on GPU returns \
-             NotImplementedOnCuda pending on-device diagonal kernel",
-        );
-    }
+    // Issue #803 (CLOSED — partial — in Batch 4 / A4): einsum forward
+    // on CUDA now decomposes into GPU primitives for the patterns the
+    // existing primitive surface covers (matmul, bmm, permutation,
+    // axis sum, full reduce).
+    //
+    // Issue #821 (CLOSED in Bugfix Batch 6 / Dispatch A2): repeated-
+    // index equations (`"ii->"` trace, `"ii->i"` diagonal, `"ii"`
+    // implicit trace) now decompose on-device via `as_strided_copy`
+    // (shape [N], stride [N+1]) + `sum_dim`. The cascade_skip rows
+    // for `trace_2d` / `diagonal_2d` are therefore removed — the
+    // conformance fixtures for those tags now exercise the GPU path
+    // end-to-end.
+    //
+    // Issue #822 (CLOSED in Bugfix Batch 6 / Dispatch A2): the
+    // 2-input GPU dispatch now handles general multi-axis and
+    // permuted contractions via permute+reshape+bmm. No conformance
+    // fixtures targeted those equations specifically (they would
+    // route through `einsum_general`), but the path is now live for
+    // any future fixture additions.
 
-    // Issue #790: GPU reduce with EinopsReduction::Max / Min returns the
-    // first row of the input instead of the running-extremum endpoint when
-    // the kept axis comes after the reduced axis. Affects only the GPU
-    // axis-aligned fast path; CPU is correct.
-    if op == "reduce_max_min_gpu" && device_label == "cuda:0" {
-        return Some("#790 GPU reduce Max/Min selects wrong slice from cummax");
-    }
+    // Issue #790 (CLOSED in Bugfix Batch 6 / Dispatch A1): the symptom
+    // (GPU `reduce(Max/Min)` returning the first row instead of the
+    // column-wise extremum) was a downstream consequence of the strided-
+    // view-readback bug fixed under #802 (Bugfix Batch 1) — the
+    // `cummax → narrow(last) → squeeze → view_reshape` chain on CUDA
+    // produced a tensor with non-zero `storage_offset`, and pre-#802
+    // `gpu_to_cpu` discarded the offset so `.cpu()` read the first slice
+    // of the buffer rather than the narrowed view. With #802's on-device
+    // strided-copy materialization in place the cummax / narrow / squeeze
+    // primitives all return correct values; see
+    // `tests/_probe_b6_a1_reduce_max_min_gpu.rs` for the verifying probes.
 
     None
 }
