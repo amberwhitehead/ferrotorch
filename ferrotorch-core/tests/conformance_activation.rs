@@ -442,11 +442,21 @@ fn check_f64(label: &str, actual: &[f64], expected: &[f64], tol: f64) {
 ///   F64_TRANSCENDENTAL. (Same family as #781 / #784.)
 /// - #798: gpu log_softmax f32 backward grad returns wildly wrong values
 ///   (delta ~4.0).
-/// - #799: gpu gelu_with(None) f32 forward diverges by 1.25e-2 — likely
-///   the GPU kernel ignores the GeluApproximate flag.
-/// - #820: gpu log_softmax f64 backward grad — same algebraic shape as
-///   #798's f32 bug (likely double-exp on saved softmax). Surfaced once
-///   #797 unblocked the f64 forward path.
+/// - #799 (closed for f32): gpu gelu_with(None) f32 forward diverged by
+///   1.25e-2 — root cause was a corrupted set of A&S-7.1.26 polynomial
+///   coefficients in `GELU_ERF_PTX` and `GELU_BACKWARD_ERF_PTX` (the
+///   stored hex didn't match the documented A&S coefficients; the Horner
+///   curve aliased to a different shape). Coefficients restored to A&S
+///   7.1.26; f32 lane meets F32_TRANSCENDENTAL_GPU = 1e-4. f64 lane is
+///   now within ~2e-7 (A&S polynomial-class limit) — still skipped vs the
+///   1e-10 gate; tracked as a follow-up f64-precision upgrade. Permanent
+///   regression sentinel: `tests/_probe_b4_a2_gelu_none_gpu.rs`.
+/// - #820 (closed): gpu log_softmax f64 backward grad — was the f64
+///   sibling of #798's f32 bug (inline f64 exp polynomial double-exp'd
+///   the already-exp'd `softmax_output` buffer). Fixed by mechanical
+///   mirror of the f32 chunk in commit 2fbb23d8: kernel now loads the
+///   probability directly from `output_ptr`. Permanent regression
+///   sentinel: `tests/_probe_b4_a4_log_softmax_f64_grad.rs`. No skip.
 #[allow(
     dead_code,
     reason = "consumed by `gpu` cfg-gated callers; CPU-side run loop also calls it"
@@ -485,22 +495,35 @@ fn cascade_skip(op: &str, device_label: &str, dtype: &str) -> Option<&'static st
         // #798 — fixed: gpu log_softmax f32 backward kernel was double-exp'ing
         // the saved softmax buffer (host already passed exp(log_softmax)).
         // PTX kernel now consumes the softmax probabilities directly. No skip.
-        // #820 — surfaced once #797 unblocked the f64 forward: gpu
-        // log_softmax f64 backward kernel returns wildly wrong gradients
-        // (delta ~4.09 vs PyTorch). Same shape as #798's f32 bug — the f64
-        // backward kernel needs the same algebraic fix re-applied (likely a
-        // double-exp on the saved softmax buffer). Out of A3 scope; tracked
-        // separately. The forward path now runs live; only the backward lane
-        // is skipped here.
-        ("log_softmax_dim_last", "cuda:0", "float64") => {
-            Some("#820: gpu log_softmax f64 backward grad — needs same fix as #798 f32")
-        }
-        // #799 — gpu gelu_with(None) GPU forward divergence (~1.25e-2). Affects
-        // both f32 and f64 lanes (the GPU kernel ignores the GeluApproximate
-        // flag in both dtypes).
-        ("gelu_none", "cuda:0", _) => {
-            Some("#799: gpu gelu_with(None) forward diverges 1.25e-2 from PyTorch")
-        }
+        // #820 — fixed: gpu log_softmax f64 backward kernel had the same
+        // algebra bug as #798 (inline f64 exp polynomial re-applied exp on
+        // the already-exp'd `softmax_output` buffer). Mechanical mirror of
+        // #798's f32 fix: kernel now loads the probability directly from
+        // `output_ptr`. Permanent regression sentinel:
+        // `tests/_probe_b4_a4_log_softmax_f64_grad.rs`. Meets
+        // F64_TRANSCENDENTAL = 1e-10 (post-fix max delta ~9e-16). No skip.
+        // #799 — fixed for f32: the GELU_ERF_PTX / GELU_BACKWARD_ERF_PTX
+        // kernels held a corrupted set of A&S-7.1.26 polynomial
+        // coefficients (a1..a5 didn't match the documented
+        // `|err(erf)| < 1.5e-7` bound; the Horner curve aliased to a
+        // different shape, residual ~1.25e-2 against PyTorch on the
+        // |x| ≈ 0.75 fixture rows). The dispatch was already routing
+        // `gelu_with(None)` to `gelu_erf_f32`; the kernel constants are
+        // now the correct A&S 7.1.26 set, residual <1e-7 on the fixture
+        // band. Permanent regression sentinel:
+        // `tests/_probe_b4_a2_gelu_none_gpu.rs`.
+        //
+        // f64 lane stays skipped: the A&S 7.1.26 polynomial class is
+        // ~2e-7 worst-case, which is well past F64_TRANSCENDENTAL = 1e-10.
+        // The f64 GPU kernel is now numerically close to PyTorch (down
+        // from ~1.25e-2) but a Chebyshev / Cody erfc refit is needed to
+        // hit the 1e-10 gate. Tracked as a follow-up f64-precision
+        // upgrade (out of #799 scope).
+        ("gelu_none", "cuda:0", "float64") => Some(
+            "#799 f64 follow-up: gpu gelu_with(None) f64 within ~2e-7 \
+             of PyTorch (A&S 7.1.26 polynomial-class limit) — needs \
+             higher-degree erf refit to clear F64_TRANSCENDENTAL = 1e-10",
+        ),
         _ => None,
     }
 }

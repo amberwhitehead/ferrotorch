@@ -38,7 +38,12 @@ pub struct ComplexTensor<T: Float> {
 impl<T: Float> ComplexTensor<T> {
     /// Build from separate real and imaginary buffers + shape.
     pub fn from_re_im(re: Vec<T>, im: Vec<T>, shape: Vec<usize>) -> FerrotorchResult<Self> {
-        let expected: usize = shape.iter().product::<usize>().max(1);
+        // shape=[] -> 0-d scalar (numel 1); shape=[0] -> empty (numel 0). (#805)
+        let expected: usize = if shape.is_empty() {
+            1
+        } else {
+            shape.iter().product()
+        };
         if re.len() != expected || im.len() != expected {
             return Err(FerrotorchError::ShapeMismatch {
                 message: format!(
@@ -71,7 +76,12 @@ impl<T: Float> ComplexTensor<T> {
 
     /// Zero-filled complex tensor of the given shape.
     pub fn zeros(shape: &[usize]) -> Self {
-        let total: usize = shape.iter().product::<usize>().max(1);
+        // shape=[] -> 0-d scalar (numel 1); shape=[0] -> empty (numel 0). (#805)
+        let total: usize = if shape.is_empty() {
+            1
+        } else {
+            shape.iter().product()
+        };
         let zero = <T as num_traits::Zero>::zero();
         Self {
             re: Arc::new(vec![zero; total]),
@@ -101,7 +111,14 @@ impl<T: Float> ComplexTensor<T> {
                 ),
             });
         }
-        let n = shape[..shape.len() - 1].iter().product::<usize>().max(1);
+        // Leading dims form the complex shape; empty leading -> 0-d scalar
+        // (numel 1), but any zero leading dim -> empty (numel 0). (#805)
+        let leading = &shape[..shape.len() - 1];
+        let n = if leading.is_empty() {
+            1
+        } else {
+            leading.iter().product()
+        };
         let data = t.data_vec()?;
         let mut re = Vec::with_capacity(n);
         let mut im = Vec::with_capacity(n);
@@ -336,7 +353,12 @@ impl<T: Float> ComplexTensor<T> {
 
     /// Reshape (must preserve numel; no data copy).
     pub fn reshape(&self, shape: &[usize]) -> FerrotorchResult<Self> {
-        let new_total: usize = shape.iter().product::<usize>().max(1);
+        // shape=[] -> 0-d scalar (numel 1); shape=[0,...] -> empty (numel 0). (#805)
+        let new_total: usize = if shape.is_empty() {
+            1
+        } else {
+            shape.iter().product()
+        };
         if new_total != self.re.len() {
             return Err(FerrotorchError::ShapeMismatch {
                 message: format!(

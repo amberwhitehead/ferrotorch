@@ -378,21 +378,45 @@ fn check_f64(label: &str, actual: &[f64], expected: &[f64], tol: f64) {
 /// each failure with a tracking issue rather than silently weakening
 /// tolerance.
 ///
-/// `tag` is consulted *in addition* to (op, device, dtype) — needed because
-/// single-input `einsum_differentiable` projections (e.g. `"ij->i"`) hit a
-/// distinct backward-equation bug (#791) that does not affect permutations.
+/// `tag` is consulted *in addition* to (op, device, dtype) — needed for
+/// per-equation cascade rows (the GPU einsum subset narrowing in #803).
 fn cascade_skip(
     op: &str,
     device_label: &str,
     _dtype: &str,
     tag: Option<&str>,
 ) -> Option<&'static str> {
-    // Issue #791: EinsumBackwardSingle constructs an invalid reverse
-    // equation for projection cases (LHS strict superset of RHS). The
-    // failing fixture is the `axis_sum` tag (eq "ij->i"). This affects both
-    // CPU and GPU.
-    if op == "einsum_differentiable" && tag == Some("axis_sum") {
-        return Some("#791 EinsumBackwardSingle bug for projection equations");
+    // Issue #791 (CLOSED in Bugfix Batch 4 / Dispatch A3):
+    // EinsumBackwardSingle now handles projection / axis-sum cases
+    // structurally (broadcast-to-lhs-shape) instead of constructing
+    // a malformed reverse-equation. The skip is therefore removed.
+    //
+    // Issue #803 (CLOSED — partial — in the same dispatch): einsum
+    // forward on CUDA now decomposes into GPU primitives for the
+    // patterns the existing primitive surface covers (matmul, bmm,
+    // permutation, axis sum, full reduce). Equations with repeated
+    // input indices on GPU (`"ii->"` trace, `"ii->i"` diagonal) now
+    // return `Err(NotImplementedOnCuda)` instead of silently
+    // detouring to CPU. The conformance fixtures for those tags on
+    // GPU therefore need to be skipped here until the on-device
+    // diagonal kernel lands.
+    if op == "einsum"
+        && device_label == "cuda:0"
+        && (tag == Some("trace_2d") || tag == Some("diagonal_2d"))
+    {
+        return Some(
+            "#803 partial: einsum 'trace_2d'/'diagonal_2d' on GPU returns NotImplementedOnCuda \
+             pending on-device diagonal kernel",
+        );
+    }
+    if op == "einsum_differentiable"
+        && device_label == "cuda:0"
+        && (tag == Some("trace_2d") || tag == Some("diagonal_2d"))
+    {
+        return Some(
+            "#803 partial: einsum_differentiable 'trace_2d'/'diagonal_2d' on GPU returns \
+             NotImplementedOnCuda pending on-device diagonal kernel",
+        );
     }
 
     // Issue #790: GPU reduce with EinopsReduction::Max / Min returns the

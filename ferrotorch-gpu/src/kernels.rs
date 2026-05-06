@@ -1722,11 +1722,21 @@ pub(crate) const GELU_ERF_PTX: &str = "\
     rcp.approx.f32 %t, %t;
 
     // Horner: poly = t*(a1 + t*(a2 + t*(a3 + t*(a4 + t*a5))))
-    mov.f32 %a5, 0f3E0AAAAB;
-    mov.f32 %a4, 0fBEB3A903;
-    mov.f32 %a3, 0f3FB506DD;
-    mov.f32 %a2, 0fBF03C1E1;
-    mov.f32 %a1, 0f3EA0D6BB;
+    // A&S 7.1.26 coefficients (|err(erf)| < 1.5e-7 over x in [0, +inf)):
+    //   a1 =  0.254829592   -> 0f3E827906
+    //   a2 = -0.284496736   -> 0fBE91A98E
+    //   a3 =  1.421413741   -> 0f3FB5F0E3
+    //   a4 = -1.453152027   -> 0fBFBA00E3
+    //   a5 =  1.061405429   -> 0f3F87DC22
+    // The pre-#799 build held a corrupted set of constants here whose
+    // polynomial happened to alias to a different (much worse) curve;
+    // residual was ~1.25e-2 against PyTorch on the conformance fixture
+    // (well outside F32_TRANSCENDENTAL_GPU = 1e-4).
+    mov.f32 %a5, 0f3F87DC22;
+    mov.f32 %a4, 0fBFBA00E3;
+    mov.f32 %a3, 0f3FB5F0E3;
+    mov.f32 %a2, 0fBE91A98E;
+    mov.f32 %a1, 0f3E827906;
 
     mul.f32 %pt, %t, %a5;
     add.f32 %pt, %pt, %a4;
@@ -1814,17 +1824,23 @@ pub(crate) const GELU_ERF_F64_PTX: &str = "\
     abs.f64 %ax, %z;
 
     // t = 1 / (1 + 0.3275911 * |z|)
-    mov.f64 %p, 0d3FD4F740A0000000;
+    mov.f64 %p, 0d3FD4F740A93D7B8C;
     mul.f64 %t, %p, %ax;
     add.f64 %t, %one, %t;
     div.rn.f64 %t, %one, %t;
 
     // Horner: poly = t*(a1 + t*(a2 + t*(a3 + t*(a4 + t*a5))))
-    mov.f64 %a5, 0d3FC1555560000000;
-    mov.f64 %a4, 0dBFD6752060000000;
-    mov.f64 %a3, 0d3FF6A0DBA0000000;
-    mov.f64 %a2, 0dBFE0783C20000000;
-    mov.f64 %a1, 0d3FD41AD760000000;
+    // A&S 7.1.26 coefficients (|err(erf)| < 1.5e-7) -- restored under
+    // #799. The pre-fix build held f32-quantised wrong constants here;
+    // residual was ~3.5e-4 on the |x|=0.75 fixture row. Post-fix worst
+    // case is ~2e-7 (polynomial-class limit of A&S 7.1.26); the f64
+    // cascade_skip stays in place since 2e-7 still misses the 1e-10
+    // F64_TRANSCENDENTAL gate. Higher-degree refit tracked separately.
+    mov.f64 %a5, 0d3FF0FB844255A12D;
+    mov.f64 %a4, 0dBFF7401C57014C39;
+    mov.f64 %a3, 0d3FF6BE1C55BAE157;
+    mov.f64 %a2, 0dBFD23531CC3C1469;
+    mov.f64 %a1, 0d3FD04F20C6EC5A7E;
 
     mul.f64 %pt, %t, %a5;
     add.f64 %pt, %pt, %a4;
@@ -3753,11 +3769,12 @@ pub(crate) const GELU_BACKWARD_ERF_PTX: &str = "\
     rcp.approx.f32 %t, %t;
 
     // Horner: poly = t*(a1 + t*(a2 + t*(a3 + t*(a4 + t*a5))))
-    mov.f32 %a5, 0f3E0AAAAB;
-    mov.f32 %a4, 0fBEB3A903;
-    mov.f32 %a3, 0f3FB506DD;
-    mov.f32 %a2, 0fBF03C1E1;
-    mov.f32 %a1, 0f3EA0D6BB;
+    // A&S 7.1.26 (restored under #799 from corrupted constants).
+    mov.f32 %a5, 0f3F87DC22;
+    mov.f32 %a4, 0fBFBA00E3;
+    mov.f32 %a3, 0f3FB5F0E3;
+    mov.f32 %a2, 0fBE91A98E;
+    mov.f32 %a1, 0f3E827906;
 
     mul.f32 %pt, %t, %a5;
     add.f32 %pt, %pt, %a4;
@@ -3784,23 +3801,23 @@ pub(crate) const GELU_BACKWARD_ERF_PTX: &str = "\
     setp.lt.f32 %pred_neg, %z, 0f00000000;
     @%pred_neg neg.f32 %erf_val, %erf_val;
 
-    // Φ(x) = 0.5 * (1 + erf(x/sqrt(2)))
+    // Phi(x) = 0.5 * (1 + erf(x/sqrt(2)))
     add.f32 %cdf, %one, %erf_val;
     mul.f32 %cdf, %half, %cdf;
 
-    // φ(x) = exp(-x²/2) / sqrt(2π)
-    // exp(-x²/2):
+    // phi(x) = exp(-x^2/2) / sqrt(2pi)
+    // exp(-x^2/2):
     mul.f32 %neg_x2h, %x, %x;
     mul.f32 %neg_x2h, %neg_x2h, %half;
     neg.f32 %neg_x2h, %neg_x2h;
     mul.f32 %neg_x2h, %neg_x2h, %log2e;
     ex2.approx.f32 %exp_neg_x2h, %neg_x2h;
 
-    // 1/sqrt(2π) = 0.39894228
+    // 1/sqrt(2pi) = 0.39894228
     mov.f32 %inv_sqrt_2pi, 0f3ECC4220;
     mul.f32 %pdf, %exp_neg_x2h, %inv_sqrt_2pi;
 
-    // d/dx gelu(x) = Φ(x) + x * φ(x)
+    // d/dx gelu(x) = Phi(x) + x * phi(x)
     mul.f32 %x_pdf, %x, %pdf;
     add.f32 %d_gelu, %cdf, %x_pdf;
 
@@ -3868,16 +3885,18 @@ pub(crate) const GELU_BACKWARD_ERF_F64_PTX: &str = "\
     mul.f64 %z, %x, %z;
     abs.f64 %ax, %z;
 
-    mov.f64 %p_coef, 0d3FD4F740A0000000;
+    mov.f64 %p_coef, 0d3FD4F740A93D7B8C;
     mul.f64 %t, %p_coef, %ax;
     add.f64 %t, %one, %t;
     div.rn.f64 %t, %one, %t;
 
-    mov.f64 %a5, 0d3FC1555560000000;
-    mov.f64 %a4, 0dBFD6752060000000;
-    mov.f64 %a3, 0d3FF6A0DBA0000000;
-    mov.f64 %a2, 0dBFE0783C20000000;
-    mov.f64 %a1, 0d3FD41AD760000000;
+    // A&S 7.1.26 coefficients -- see GELU_ERF_F64_PTX for the precision
+    // bound commentary. Same #799 corruption was repeated here.
+    mov.f64 %a5, 0d3FF0FB844255A12D;
+    mov.f64 %a4, 0dBFF7401C57014C39;
+    mov.f64 %a3, 0d3FF6BE1C55BAE157;
+    mov.f64 %a2, 0dBFD23531CC3C1469;
+    mov.f64 %a1, 0d3FD04F20C6EC5A7E;
 
     mul.f64 %pt, %t, %a5;
     add.f64 %pt, %pt, %a4;
@@ -5009,11 +5028,8 @@ pub(crate) const LOG_SOFTMAX_BACKWARD_F64_PTX: &str = "\
 ) {\n\
     .reg .u32 %r_tid, %bid, %bdim, %rows_reg, %cols_reg, %j, %half, %other_tid;\n\
     .reg .u64 %grad, %output, %out, %row_off, %off, %sbase, %saddr;\n\
-    .reg .f64 %vg, %vo, %sum_grad, %other_val, %softmax_j, %result;\n\
+    .reg .f64 %vg, %sum_grad, %other_val, %softmax_j, %result;\n\
     .reg .pred %p, %loop_p, %reduce_p;\n\
-    .reg .f64 %e_nf, %e_r, %e_p, %e_half, %e_one;\n\
-    .reg .s32 %e_ni;\n\
-    .reg .s64 %e_ni64, %e_bits;\n\
 \n\
     ld.param.u64 %grad, [grad_ptr];\n\
     ld.param.u64 %output, [output_ptr];\n\
@@ -5081,6 +5097,11 @@ SUM_REDUCE_DONE:\n\
     ld.shared.f64 %sum_grad, [sdata];\n\
     bar.sync 0;\n\
 \n\
+    // Phase 2: out[j] = grad[j] - softmax[j] * sum_grad\n\
+    // `output_ptr` already holds softmax probabilities (the host computed\n\
+    // exp(log_softmax) at forward time and saved it as softmax_output);\n\
+    // load directly. Re-applying exp() here was the #820 algebra bug\n\
+    // (f64 sibling of #798's f32 bug; see commit 2fbb23d8).\n\
     mov.u32 %j, %r_tid;\n\
 WRITE_LOOP:\n\
     setp.ge.u32 %loop_p, %j, %cols_reg;\n\
@@ -5092,32 +5113,8 @@ WRITE_LOOP:\n\
     ld.global.f64 %vg, [%saddr];\n\
     add.u64 %saddr, %output, %off;\n\
     add.u64 %saddr, %saddr, %row_off;\n\
-    ld.global.f64 %vo, [%saddr];\n\
-    // exp(log_softmax_output) -- inline f64 exp\n\
-    mov.f64 %e_one, 0d3FF0000000000000;\n\
-    mov.f64 %e_half, 0d3FE0000000000000;\n\
-    mul.f64 %e_nf, %vo, 0d3FF71547652B82FE;\n\
-    cvt.rni.f64.f64 %e_nf, %e_nf;\n\
-    cvt.rni.s32.f64 %e_ni, %e_nf;\n\
-    fma.rn.f64 %e_r, %e_nf, 0dBFE62E42FEFA3800, %vo;\n\
-    fma.rn.f64 %e_r, %e_nf, 0dBD2EF35793C76730, %e_r;\n\
-    mov.f64 %e_p, 0d3E5AE64567F544E4;\n\
-    fma.rn.f64 %e_p, %e_p, %e_r, 0d3E927E4FB7789F5C;\n\
-    fma.rn.f64 %e_p, %e_p, %e_r, 0d3EC71DE3A556C734;\n\
-    fma.rn.f64 %e_p, %e_p, %e_r, 0d3EFA01A01A01A01A;\n\
-    fma.rn.f64 %e_p, %e_p, %e_r, 0d3F2A01A01A01A01A;\n\
-    fma.rn.f64 %e_p, %e_p, %e_r, 0d3F56C16C16C16C17;\n\
-    fma.rn.f64 %e_p, %e_p, %e_r, 0d3F81111111111111;\n\
-    fma.rn.f64 %e_p, %e_p, %e_r, 0d3FA5555555555555;\n\
-    fma.rn.f64 %e_p, %e_p, %e_r, 0d3FC5555555555555;\n\
-    fma.rn.f64 %e_p, %e_p, %e_r, %e_half;\n\
-    fma.rn.f64 %e_p, %e_p, %e_r, %e_one;\n\
-    fma.rn.f64 %softmax_j, %e_p, %e_r, %e_one;\n\
-    cvt.s64.s32 %e_ni64, %e_ni;\n\
-    add.s64 %e_ni64, %e_ni64, 1023;\n\
-    shl.b64 %e_bits, %e_ni64, 52;\n\
-    mov.b64 %e_nf, %e_bits;\n\
-    mul.f64 %softmax_j, %softmax_j, %e_nf;\n\
+    ld.global.f64 %softmax_j, [%saddr];\n\
+    // out[j] = grad[j] - softmax[j] * sum_grad\n\
     mul.f64 %result, %softmax_j, %sum_grad;\n\
     sub.f64 %result, %vg, %result;\n\
     add.u64 %saddr, %out, %off;\n\

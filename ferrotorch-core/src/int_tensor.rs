@@ -73,8 +73,15 @@ impl<I: IntElement> IntTensor<I> {
     /// Build from a Vec + shape. Returns an error if `data.len()` does
     /// not match the shape's total numel.
     pub fn from_vec(data: Vec<I>, shape: Vec<usize>) -> FerrotorchResult<Self> {
-        let expected: usize = shape.iter().product::<usize>().max(1);
-        if data.len() != expected && !(shape.is_empty() && data.len() == 1) {
+        // PyTorch parity: shape=[] is a 0-d scalar (numel=1); shape=[0]
+        // (or any shape with a zero axis) is empty (numel=0). The previous
+        // `.max(1)` conflated these. (#805)
+        let expected: usize = if shape.is_empty() {
+            1
+        } else {
+            shape.iter().product()
+        };
+        if data.len() != expected {
             return Err(FerrotorchError::ShapeMismatch {
                 message: format!(
                     "IntTensor::from_vec: data.len()={} != prod(shape)={} for shape {:?}",
@@ -97,7 +104,12 @@ impl<I: IntElement> IntTensor<I> {
 
     /// Zeros of the given shape.
     pub fn zeros(shape: &[usize]) -> Self {
-        let total: usize = shape.iter().product::<usize>().max(1);
+        // shape=[] -> 0-d scalar (numel 1); shape=[0] -> empty (numel 0). (#805)
+        let total: usize = if shape.is_empty() {
+            1
+        } else {
+            shape.iter().product()
+        };
         let zero = I::try_from_i64(0).expect("0 fits in any IntElement");
         Self {
             data: Arc::new(vec![zero; total]),
@@ -174,7 +186,12 @@ impl<I: IntElement> IntTensor<I> {
 
     /// Reshape (must preserve numel; no data copy).
     pub fn reshape(&self, shape: &[usize]) -> FerrotorchResult<Self> {
-        let new_total: usize = shape.iter().product::<usize>().max(1);
+        // shape=[] -> 0-d scalar (numel 1); shape=[0,...] -> empty (numel 0). (#805)
+        let new_total: usize = if shape.is_empty() {
+            1
+        } else {
+            shape.iter().product()
+        };
         if new_total != self.data.len() {
             return Err(FerrotorchError::ShapeMismatch {
                 message: format!(

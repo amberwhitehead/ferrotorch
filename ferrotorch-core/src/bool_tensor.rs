@@ -29,8 +29,15 @@ pub struct BoolTensor {
 impl BoolTensor {
     /// Build from a Vec + shape. Errors on numel mismatch.
     pub fn from_vec(data: Vec<bool>, shape: Vec<usize>) -> FerrotorchResult<Self> {
-        let expected: usize = shape.iter().product::<usize>().max(1);
-        if data.len() != expected && !(shape.is_empty() && data.len() == 1) {
+        // PyTorch parity: shape=[] is a 0-d scalar (numel=1); shape=[0]
+        // (or any shape with a zero axis) is empty (numel=0). The previous
+        // `.max(1)` conflated these. (#805)
+        let expected: usize = if shape.is_empty() {
+            1
+        } else {
+            shape.iter().product()
+        };
+        if data.len() != expected {
             return Err(FerrotorchError::ShapeMismatch {
                 message: format!(
                     "BoolTensor::from_vec: data.len()={} != prod(shape)={} for shape {:?}",
@@ -53,7 +60,12 @@ impl BoolTensor {
 
     /// All-false tensor of the given shape.
     pub fn zeros(shape: &[usize]) -> Self {
-        let total: usize = shape.iter().product::<usize>().max(1);
+        // shape=[] -> 0-d scalar (numel 1); shape=[0] -> empty (numel 0). (#805)
+        let total: usize = if shape.is_empty() {
+            1
+        } else {
+            shape.iter().product()
+        };
         Self {
             data: Arc::new(vec![false; total]),
             shape: shape.to_vec(),
@@ -62,7 +74,12 @@ impl BoolTensor {
 
     /// All-true tensor of the given shape.
     pub fn ones(shape: &[usize]) -> Self {
-        let total: usize = shape.iter().product::<usize>().max(1);
+        // shape=[] -> 0-d scalar (numel 1); shape=[0] -> empty (numel 0). (#805)
+        let total: usize = if shape.is_empty() {
+            1
+        } else {
+            shape.iter().product()
+        };
         Self {
             data: Arc::new(vec![true; total]),
             shape: shape.to_vec(),
@@ -152,7 +169,12 @@ impl BoolTensor {
 
     /// Reshape (must preserve numel; no data copy).
     pub fn reshape(&self, shape: &[usize]) -> FerrotorchResult<Self> {
-        let new_total: usize = shape.iter().product::<usize>().max(1);
+        // shape=[] -> 0-d scalar (numel 1); shape=[0,...] -> empty (numel 0). (#805)
+        let new_total: usize = if shape.is_empty() {
+            1
+        } else {
+            shape.iter().product()
+        };
         if new_total != self.data.len() {
             return Err(FerrotorchError::ShapeMismatch {
                 message: format!(

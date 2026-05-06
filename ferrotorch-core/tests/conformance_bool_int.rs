@@ -512,27 +512,9 @@ fn cases_for<'a>(file: &'a FixtureFile, op: &str) -> Vec<&'a Fixture> {
 // that has been filed as a follow-up tracking issue. The skip is the
 // audit trail — a parity gap that exists must be visible.
 //
-// Active cascades:
-//   * #805 — `BoolTensor::zeros(&[0])` and `IntTensor::zeros(&[0])` have
-//     `numel = 1` instead of `0` (the `.max(1)` in zeros/ones/from_vec
-//     conflates the 0-d scalar case with the 1-D empty case). PyTorch's
-//     `torch.zeros([0])` has `numel = 0`. Skipping the `empty1d` /
-//     `empty` / `n0` fixtures keeps the rest of the suite running while
-//     #805 is open.
+// Active cascades: (none — #805 fixed in Bugfix Batch 4 / dispatch A1.)
 fn cascade_skip(op: &str, tag: Option<&str>) -> Option<&'static str> {
-    let tag = tag.unwrap_or("");
-    // The empty-shape divergence affects every op that runs through a
-    // `zeros` / `from_vec` / `arange(0)` constructor with `shape = [0]`.
-    // We skip by tag so the per-op `_empty` / `n0` cases are filtered
-    // out without touching the non-empty cases for the same op.
-    let empty_tag = matches!(tag, "empty" | "empty1d" | "n0");
-    if empty_tag {
-        return Some(
-            "issue #805 — empty-shape numel divergence (torch=0, ferrotorch=1) \
-             in BoolTensor/IntTensor zeros/from_vec/arange",
-        );
-    }
-    let _ = op;
+    let _ = (op, tag);
     None
 }
 
@@ -869,27 +851,36 @@ fn bool_count_true_reduction() {
 /// `True` (for AND). This is a contract test on top of the fixture-
 /// driven test, so a future change cannot silently break the parity.
 ///
-/// NOTE: We cannot construct an empty `BoolTensor` via `zeros(&[0])` /
-/// `from_vec(vec![], vec![0])` today — both paths trigger the
-/// `.max(1)` shape-numel divergence tracked under issue #805. We
-/// therefore skip this test until #805 is fixed; the contract is still
-/// asserted indirectly via the stdlib invariant on raw slices below.
+/// Now that #805 is fixed, we exercise the BoolTensor path directly via
+/// `zeros(&[0])` / `from_vec(vec![], vec![0])` in addition to the
+/// stdlib slice invariant.
 #[test]
 fn bool_empty_reduction_identities() {
     // Stdlib invariant — drives the BoolTensor implementation. As long
     // as `count_true` / `any` / `all` delegate to `Iterator`, parity
-    // with PyTorch is structural for the empty case. The full
-    // BoolTensor-level test is blocked on #805 (see cascade_skip docs).
-    let empty: &[bool] = &[];
+    // with PyTorch is structural for the empty case.
+    let empty_slice: &[bool] = &[];
     assert!(
-        !empty.iter().any(|&b| b),
+        !empty_slice.iter().any(|&b| b),
         "any([]) must be false (OR identity)"
     );
     assert!(
-        empty.iter().all(|&b| b),
+        empty_slice.iter().all(|&b| b),
         "all([]) must be true (AND identity)"
     );
-    assert_eq!(empty.iter().filter(|&&b| b).count(), 0);
+    assert_eq!(empty_slice.iter().filter(|&&b| b).count(), 0);
+
+    // BoolTensor-level (was blocked on #805, now live).
+    let z = BoolTensor::zeros(&[0]);
+    assert_eq!(z.numel(), 0);
+    assert!(!z.any(), "BoolTensor::zeros(&[0]).any() must be false");
+    assert!(z.all(), "BoolTensor::zeros(&[0]).all() must be true (AND identity)");
+    assert_eq!(z.count_true(), 0);
+
+    let from_vec = BoolTensor::from_vec(vec![], vec![0]).expect("empty from_vec");
+    assert_eq!(from_vec.numel(), 0);
+    assert!(!from_vec.any());
+    assert!(from_vec.all());
 }
 
 // ---------------------------------------------------------------------------

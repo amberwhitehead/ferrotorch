@@ -3,12 +3,36 @@
 //! Supports both explicit (`"ij,jk->ik"`) and implicit (`"ij,jk"`) notation.
 //! Handles single-input operations (trace, transpose, axis-sum) and two-input
 //! contractions via the TTGT (transpose-transpose-GEMM-transpose) algorithm.
+//!
+//! ## Device dispatch (#803)
+//!
+//! For CUDA inputs, the forward pass is decomposed into GPU-aware
+//! sub-primitives instead of falling silently to CPU:
+//!
+//! * Pure permutation (e.g. `"ij->ji"`, `"abc->bca"`): zero-copy
+//!   `permute_t` + on-device `contiguous_t` (uses the backend
+//!   `strided_copy_*` kernel).
+//! * Axis sum / projection (e.g. `"ij->i"`, `"ijk->ij"`): repeated
+//!   `sum_dim` along the dropped axes.
+//! * Full reduction (e.g. `"ij->"`): `grad_fns::reduction::sum`.
+//! * Two-input matmul (`"ij,jk->ik"`): `grad_fns::linalg::matmul_differentiable`.
+//! * Two-input batched matmul (`"bij,bjk->bik"`): `grad_fns::linalg::bmm`.
+//!
+//! Equations whose structure does not map onto the existing GPU primitives
+//! (notably equations with repeated input indices like `"ii->"` (trace) or
+//! `"ii->i"` (diagonal), and contractions whose layout differs from the
+//! direct matmul/bmm pattern) return
+//! [`FerrotorchError::NotImplementedOnCuda`] rather than silently
+//! materialising the operands on CPU. Per `rust-gpu-discipline` §3, no
+//! silent CPU detour is permitted in a non-autograd path; the caller must
+//! either move the inputs with `.cpu()` themselves or wait for the
+//! follow-up that adds the missing on-device primitives.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use crate::autograd::autocast_ops::autocast_guard;
-use crate::autograd::no_grad::is_grad_enabled;
+use crate::autograd::no_grad::{is_grad_enabled, no_grad};
 use crate::dtype::Float;
 use crate::error::{FerrotorchError, FerrotorchResult};
 use crate::storage::TensorStorage;
@@ -159,11 +183,138 @@ fn build_dim_map<T: Float>(
 // Single-input einsum (trace, transpose, axis-sum, diagonal)
 // ---------------------------------------------------------------------------
 
+/// GPU dispatch for single-input einsum (#803).
+///
+/// Decomposes the equation into GPU-aware primitives:
+///
+/// * Pure permutation (set(in)==set(out), no repeated input indices):
+///   `permute_t` (zero-copy stride view) + `contiguous_t` (on-device
+///   strided_copy kernel).
+/// * Axis sum / projection (set(out) ⊊ set(in), no repeated input
+///   indices): repeated `sum_dim` along the dropped axes; if there is
+///   also a permutation among the kept axes, a final `permute_t`.
+/// * Full reduction (out empty, no repeats): `grad_fns::reduction::sum`.
+/// * Repeated input indices ("ii->", "ii->i", etc.): no GPU primitive
+///   captures the diagonal-extract / trace contraction, so we return
+///   `Err(NotImplementedOnCuda { op: "einsum_repeated_index" })`.
+///   These cases are tracked for a follow-up that adds an on-device
+///   diagonal kernel; meanwhile callers must `.cpu()` the operand.
+fn einsum_single_gpu<T: Float>(
+    parsed: &ParsedEquation,
+    input: &Tensor<T>,
+    dim_map: &BTreeMap<char, usize>,
+) -> FerrotorchResult<Tensor<T>> {
+    let in_subs = &parsed.input_subscripts[0];
+    let out_subs = &parsed.output_subscripts;
+
+    // Repeated input indices are not GPU-decomposable with the existing
+    // primitive surface. Surface as Err rather than silently going to
+    // CPU (§3 forbids the silent fallback).
+    if has_duplicate_chars(in_subs) {
+        return Err(FerrotorchError::NotImplementedOnCuda {
+            op: "einsum_repeated_index",
+        });
+    }
+
+    // Output indices must all appear in the input (caller has already
+    // validated this in `build_dim_map`, so this is just a safety check).
+    for &c in out_subs {
+        if !in_subs.contains(&c) {
+            return Err(FerrotorchError::InvalidArgument {
+                message: format!(
+                    "einsum: output index '{c}' does not appear in any input subscripts"
+                ),
+            });
+        }
+    }
+
+    // Disable autograd inside the composite — `einsum_differentiable`
+    // attaches the autograd node *outside* the forward call. The
+    // sub-ops we call here (sum_dim, matmul_differentiable, etc.) would
+    // otherwise build their own grad_fn chain that double-counts the
+    // gradient.
+    no_grad(|| {
+        // Step 1: sum out any axes whose chars do not appear in the
+        // output. We sum from the highest dim downward so each removal
+        // shifts only the dims after it (already removed) — it does not
+        // shift the index of any dim still queued for removal.
+        let mut keep_chars: Vec<char> = in_subs.clone();
+        let mut current = input.clone();
+        let mut axis = in_subs.len();
+        for &c in in_subs.iter().rev() {
+            axis -= 1;
+            if !out_subs.contains(&c) {
+                current = crate::grad_fns::reduction::sum_dim(&current, axis as i64, false)?;
+                keep_chars.remove(axis);
+            }
+        }
+
+        // Step 2: if the remaining chars are not in the same order as
+        // out_subs, permute. After step 1, `keep_chars` and `out_subs`
+        // are the same set of distinct chars (since in_subs has no
+        // duplicates and we kept exactly those that appear in out_subs).
+        if keep_chars == *out_subs {
+            // Already in the right order — make sure the result is
+            // contiguous (sum_dim returns contiguous; pure no-op
+            // single-axis cases need no permute).
+            let out_shape: Vec<usize> = out_subs.iter().map(|c| dim_map[c]).collect();
+            // Verify the shape is what we expect; if not, that's an
+            // internal-bug condition.
+            if current.shape() != out_shape.as_slice() {
+                return Err(FerrotorchError::Internal {
+                    message: format!(
+                        "einsum_single_gpu: shape mismatch after reduction: got {:?} expected {:?}",
+                        current.shape(),
+                        out_shape
+                    ),
+                });
+            }
+            return Ok(current);
+        }
+
+        // Compute the permutation: for each output position, find the
+        // current axis position of that char in keep_chars.
+        let perm: Vec<usize> = out_subs
+            .iter()
+            .map(|c| {
+                keep_chars
+                    .iter()
+                    .position(|kc| kc == c)
+                    .expect("out_subs char must exist in keep_chars (validated above)")
+            })
+            .collect();
+        // permute_t produces a stride-view; materialise it via
+        // contiguous_t so the caller gets a fresh on-device buffer
+        // (same semantics as the CPU path which always returns a
+        // freshly allocated row-major result).
+        let permuted = crate::methods::permute_t(&current, &perm)?;
+        let materialised = crate::methods::contiguous_t(&permuted)?;
+        Ok(materialised)
+    })
+}
+
+/// Returns `true` if `chars` contains any character more than once.
+fn has_duplicate_chars(chars: &[char]) -> bool {
+    let mut seen = std::collections::HashSet::new();
+    for &c in chars {
+        if !seen.insert(c) {
+            return true;
+        }
+    }
+    false
+}
+
 fn einsum_single<T: Float>(
     parsed: &ParsedEquation,
     input: &Tensor<T>,
     dim_map: &BTreeMap<char, usize>,
 ) -> FerrotorchResult<Tensor<T>> {
+    // GPU-aware dispatch (#803): decompose into GPU primitives where
+    // possible instead of falling to CPU.
+    if input.is_cuda() {
+        return einsum_single_gpu(parsed, input, dim_map);
+    }
+
     let in_subs = &parsed.input_subscripts[0];
     let out_subs = &parsed.output_subscripts;
 
@@ -289,12 +440,266 @@ fn einsum_single<T: Float>(
 // Two-input einsum via TTGT
 // ---------------------------------------------------------------------------
 
+/// GPU dispatch for two-input einsum (#803).
+///
+/// Maps a small set of high-frequency contraction patterns onto the
+/// existing GPU primitives:
+///
+/// * 2D matmul `"ij,jk->ik"` (and any equivalent re-letter):
+///   `grad_fns::linalg::matmul_differentiable` (forward-only via `no_grad`).
+/// * Batched matmul `"bij,bjk->bik"` (and any equivalent re-letter):
+///   `grad_fns::linalg::bmm`.
+///
+/// Anything else (outer products, dot via einsum, contractions with a
+/// permuted output, ≥4D batched matmul, multi-axis contractions) returns
+/// `Err(NotImplementedOnCuda { op: "einsum_general" })`. Callers that
+/// need those equations on CUDA must `.cpu()` first; the follow-up
+/// adds the missing primitives.
+fn einsum_two_gpu<T: Float>(
+    parsed: &ParsedEquation,
+    a: &Tensor<T>,
+    b: &Tensor<T>,
+    _dim_map: &BTreeMap<char, usize>,
+) -> FerrotorchResult<Tensor<T>> {
+    let a_subs = &parsed.input_subscripts[0];
+    let b_subs = &parsed.input_subscripts[1];
+    let out_subs = &parsed.output_subscripts;
+
+    // Reject equations with repeated input indices (e.g. "i,i->i" with
+    // a second input that also has repeats) — none of these have a
+    // direct GPU primitive.
+    if has_duplicate_chars(a_subs) || has_duplicate_chars(b_subs) {
+        return Err(FerrotorchError::NotImplementedOnCuda {
+            op: "einsum_repeated_index",
+        });
+    }
+
+    no_grad(|| {
+        // Generalised 2D x 2D contraction with a single contracted
+        // index. Covers `"ij,jk->ik"` (the canonical matmul) AND its
+        // backward-derived siblings `"ik,jk->ij"` (= A @ B^T) and
+        // `"ij,ik->jk"` (= A^T @ B), which `EinsumBackwardTwo`
+        // generates from a forward `"ij,jk->ik"` matmul. The dispatch
+        // identifies the contracted char, transposes operands as
+        // needed (zero-copy via `permute_t`+`contiguous_t`), calls
+        // `matmul_differentiable` (GPU 2D x 2D), then permutes the
+        // result to match `out_subs` order.
+        if a_subs.len() == 2
+            && b_subs.len() == 2
+            && out_subs.len() == 2
+            && a_subs[0] != a_subs[1]
+            && b_subs[0] != b_subs[1]
+            && out_subs[0] != out_subs[1]
+        {
+            // Find the contracted char: in both a_subs and b_subs but
+            // not in out_subs.
+            let contracted: Option<char> = a_subs.iter().copied().find(|c| {
+                b_subs.contains(c) && !out_subs.contains(c)
+            });
+            if let Some(c) = contracted {
+                // The other chars: one from A (= a_other), one from B
+                // (= b_other). Both must appear in out_subs.
+                let a_other = if a_subs[0] == c { a_subs[1] } else { a_subs[0] };
+                let b_other = if b_subs[0] == c { b_subs[1] } else { b_subs[0] };
+                if a_other != b_other
+                    && out_subs.contains(&a_other)
+                    && out_subs.contains(&b_other)
+                {
+                    // Position the contracted dim: A wants c at axis 1, B at axis 0.
+                    let a_oriented = if a_subs[1] == c {
+                        a.clone()
+                    } else {
+                        let permuted = crate::methods::permute_t(a, &[1, 0])?;
+                        crate::methods::contiguous_t(&permuted)?
+                    };
+                    let b_oriented = if b_subs[0] == c {
+                        b.clone()
+                    } else {
+                        let permuted = crate::methods::permute_t(b, &[1, 0])?;
+                        crate::methods::contiguous_t(&permuted)?
+                    };
+                    let mm = crate::grad_fns::linalg::matmul_differentiable(
+                        &a_oriented,
+                        &b_oriented,
+                    )?;
+                    // mm has shape [a_other_size, b_other_size]; permute
+                    // if out_subs order doesn't match.
+                    if out_subs[0] == a_other && out_subs[1] == b_other {
+                        return Ok(mm);
+                    }
+                    let permuted = crate::methods::permute_t(&mm, &[1, 0])?;
+                    return crate::methods::contiguous_t(&permuted);
+                }
+            }
+        }
+
+        // Generalised 3D batched-matmul pattern: a has 3 distinct
+        // chars [bat, p, q], b has 3 distinct chars [bat, p2, q2], one
+        // of which equals bat (the batch char shared with a), and one
+        // of the other two is the contracted index. out has [bat, X, Y]
+        // where X and Y are the non-batch, non-contracted chars from
+        // a and b respectively (in some order). Covers the canonical
+        // `"bij,bjk->bik"` AND its backward siblings
+        // `"bik,bjk->bij"` (bmm of A and B^T) and
+        // `"bij,bik->bjk"` (bmm of A^T and B), which
+        // `EinsumBackwardTwo` generates from a forward bmm.
+        if a_subs.len() == 3
+            && b_subs.len() == 3
+            && out_subs.len() == 3
+            && a_subs[0] == b_subs[0]
+            && a_subs[0] == out_subs[0]
+        {
+            let bat = a_subs[0];
+            // Distinct chars within each operand, batch char only at leading position.
+            let a_uniq = a_subs[0] != a_subs[1]
+                && a_subs[1] != a_subs[2]
+                && a_subs[0] != a_subs[2];
+            let b_uniq = b_subs[0] != b_subs[1]
+                && b_subs[1] != b_subs[2]
+                && b_subs[0] != b_subs[2];
+            if a_uniq && b_uniq && bat != out_subs[1] && bat != out_subs[2] && out_subs[1] != out_subs[2] {
+                // Find the contracted char: in a (excluding bat) and b
+                // (excluding bat) but not in out.
+                let a_non_batch = [a_subs[1], a_subs[2]];
+                let b_non_batch = [b_subs[1], b_subs[2]];
+                let contracted: Option<char> = a_non_batch.iter().copied().find(|c| {
+                    b_non_batch.contains(c) && !out_subs.contains(c)
+                });
+                if let Some(c) = contracted {
+                    let a_other = if a_subs[1] == c { a_subs[2] } else { a_subs[1] };
+                    let b_other = if b_subs[1] == c { b_subs[2] } else { b_subs[1] };
+                    if a_other != b_other
+                        && out_subs.contains(&a_other)
+                        && out_subs.contains(&b_other)
+                    {
+                        // Want A oriented as [bat, a_other, c] (contracted
+                        // dim at axis 2). If A is [bat, c, a_other], swap
+                        // axes 1 and 2.
+                        let a_oriented = if a_subs[2] == c {
+                            a.clone()
+                        } else {
+                            let permuted = crate::methods::permute_t(a, &[0, 2, 1])?;
+                            crate::methods::contiguous_t(&permuted)?
+                        };
+                        // Want B oriented as [bat, c, b_other] (contracted
+                        // dim at axis 1).
+                        let b_oriented = if b_subs[1] == c {
+                            b.clone()
+                        } else {
+                            let permuted = crate::methods::permute_t(b, &[0, 2, 1])?;
+                            crate::methods::contiguous_t(&permuted)?
+                        };
+                        let result = crate::grad_fns::linalg::bmm(&a_oriented, &b_oriented)?;
+                        // result shape: [bat, a_other, b_other]. Permute
+                        // if out_subs has them in the opposite order.
+                        if out_subs[1] == a_other && out_subs[2] == b_other {
+                            return Ok(result);
+                        }
+                        let permuted = crate::methods::permute_t(&result, &[0, 2, 1])?;
+                        return crate::methods::contiguous_t(&permuted);
+                    }
+                }
+            }
+        }
+
+        // Hadamard / elementwise pattern: a_subs == b_subs == out_subs
+        // (e.g. "ij,ij->ij"). On the algebra level this is just a *
+        // b. `mul` is GPU-aware (broadcast_mul kernel).
+        if a_subs == b_subs && b_subs.as_slice() == out_subs.as_slice() {
+            return crate::grad_fns::arithmetic::mul(a, b);
+        }
+
+        // Dot product pattern: a_subs == b_subs (both 1D, same single
+        // char) and out_subs is empty. e.g. "i,i->" or implicit "i,i".
+        if a_subs.len() == 1 && b_subs.as_slice() == a_subs.as_slice() && out_subs.is_empty() {
+            let prod = crate::grad_fns::arithmetic::mul(a, b)?;
+            return crate::grad_fns::reduction::sum(&prod);
+        }
+
+        // Outer product pattern: a_subs and b_subs are both 1D with
+        // distinct chars, out_subs is `a_subs ++ b_subs`. e.g. "i,j->ij".
+        if a_subs.len() == 1
+            && b_subs.len() == 1
+            && a_subs[0] != b_subs[0]
+            && out_subs.len() == 2
+            && out_subs[0] == a_subs[0]
+            && out_subs[1] == b_subs[0]
+        {
+            // a: [m] -> [m, 1]; b: [n] -> [1, n]; broadcast_mul -> [m, n].
+            let a_unsq = crate::grad_fns::shape::unsqueeze(a, 1)?;
+            let b_unsq = crate::grad_fns::shape::unsqueeze(b, 0)?;
+            return crate::grad_fns::arithmetic::mul(&a_unsq, &b_unsq);
+        }
+
+        // Scalar-broadcast vector pattern: a is empty subs (scalar)
+        // and b is 1D, out matches b. e.g. ",i->i". Generated by
+        // EinsumBackwardTwo for grad_a of dot ("i,i->" backward).
+        if a_subs.is_empty() && b_subs.len() == 1 && out_subs.as_slice() == b_subs.as_slice() {
+            // mul broadcasts scalar a against vector b.
+            return crate::grad_fns::arithmetic::mul(a, b);
+        }
+        // Symmetric: vector × scalar. e.g. "i,->i".
+        if b_subs.is_empty() && a_subs.len() == 1 && out_subs.as_slice() == a_subs.as_slice() {
+            return crate::grad_fns::arithmetic::mul(a, b);
+        }
+
+        // Matrix-vector pattern: a is 2D [I,J], b is 1D [J], out is
+        // 1D [I]. e.g. "ij,j->i". Generated by EinsumBackwardTwo for
+        // grad_a of outer ("i,j->ij" backward). Implemented via
+        // matmul_differentiable on (a, b.unsqueeze(1)) followed by
+        // squeeze — matmul is GPU-aware for 2D x 2D, and the unsqueeze/
+        // squeeze are zero-copy stride views.
+        if a_subs.len() == 2
+            && b_subs.len() == 1
+            && out_subs.len() == 1
+            && a_subs[1] == b_subs[0]
+            && a_subs[0] == out_subs[0]
+            && a_subs[0] != a_subs[1]
+        {
+            let b_unsq = crate::grad_fns::shape::unsqueeze(b, 1)?; // [J] -> [J,1]
+            let mm_result = crate::grad_fns::linalg::matmul_differentiable(a, &b_unsq)?; // [I,1]
+            return crate::grad_fns::shape::squeeze(&mm_result, 1);
+        }
+
+        // Vector-matrix pattern: a is 1D [I], b is 2D [I,J], out is
+        // 1D [J]. e.g. "i,ij->j". Generated by EinsumBackwardTwo for
+        // grad_b of outer.
+        if a_subs.len() == 1
+            && b_subs.len() == 2
+            && out_subs.len() == 1
+            && a_subs[0] == b_subs[0]
+            && b_subs[1] == out_subs[0]
+            && b_subs[0] != b_subs[1]
+        {
+            let a_unsq = crate::grad_fns::shape::unsqueeze(a, 0)?; // [I] -> [1,I]
+            let mm_result = crate::grad_fns::linalg::matmul_differentiable(&a_unsq, b)?; // [1,J]
+            return crate::grad_fns::shape::squeeze(&mm_result, 0);
+        }
+
+        Err(FerrotorchError::NotImplementedOnCuda {
+            op: "einsum_general",
+        })
+    })
+}
+
 fn einsum_two<T: Float>(
     parsed: &ParsedEquation,
     a: &Tensor<T>,
     b: &Tensor<T>,
     dim_map: &BTreeMap<char, usize>,
 ) -> FerrotorchResult<Tensor<T>> {
+    // GPU-aware dispatch (#803): map the common contraction patterns
+    // onto the existing GPU primitives instead of falling to CPU.
+    if a.is_cuda() || b.is_cuda() {
+        if a.device() != b.device() {
+            return Err(FerrotorchError::DeviceMismatch {
+                expected: a.device(),
+                got: b.device(),
+            });
+        }
+        return einsum_two_gpu(parsed, a, b, dim_map);
+    }
+
     let a_subs = &parsed.input_subscripts[0];
     let b_subs = &parsed.input_subscripts[1];
     let out_subs = &parsed.output_subscripts;
@@ -654,15 +1059,20 @@ pub fn einsum_differentiable<T: Float>(
     let any_requires_grad = inputs.iter().any(|t| t.requires_grad());
 
     if is_grad_enabled() && any_requires_grad {
-        let device = result.device();
         let wrapped = match inputs.len() {
             1 => {
                 let grad_fn = Arc::new(EinsumBackwardSingle {
                     equation: equation.to_string(),
                     input: inputs[0].clone(),
                 });
-                let storage = TensorStorage::on_device(result.data_vec()?, device)?;
-                Tensor::from_operation(storage, result.shape().to_vec(), grad_fn)
+                // Reuse the result's storage as-is. For CUDA inputs the
+                // forward path now produces a device tensor (#803), and
+                // calling `data_vec()` here would yank it back to CPU
+                // — re-introducing the silent-detour the dispatch
+                // closes. `into_storage_and_shape` keeps the storage
+                // bound to whichever device the forward produced.
+                let (storage, shape) = result.into_storage_and_shape()?;
+                Tensor::from_operation(storage, shape, grad_fn)
             }
             2 => {
                 let grad_fn = Arc::new(EinsumBackwardTwo {
@@ -670,8 +1080,8 @@ pub fn einsum_differentiable<T: Float>(
                     a: inputs[0].clone(),
                     b: inputs[1].clone(),
                 });
-                let storage = TensorStorage::on_device(result.data_vec()?, device)?;
-                Tensor::from_operation(storage, result.shape().to_vec(), grad_fn)
+                let (storage, shape) = result.into_storage_and_shape()?;
+                Tensor::from_operation(storage, shape, grad_fn)
             }
             _ => Ok(result),
         }?;
@@ -702,12 +1112,6 @@ impl<T: Float> GradFn<T> for EinsumBackwardSingle<T> {
             return Ok(vec![None]);
         }
 
-        // Reverse the equation: swap input and output subscripts.
-        // "ij->ji" becomes "ji->ij"
-        // "ii->" becomes "->ii" which is not valid single-input einsum.
-        //
-        // For the trace case ("ii->"), grad is a scalar. We need to produce
-        // a diagonal matrix. Handle this specially.
         let (lhs, rhs) = self
             .equation
             .split_once("->")
@@ -716,92 +1120,133 @@ impl<T: Float> GradFn<T> for EinsumBackwardSingle<T> {
         let in_subs: Vec<char> = lhs.chars().filter(|c| c.is_ascii_lowercase()).collect();
         let out_subs: Vec<char> = rhs.chars().collect();
 
-        // Check if this is a "reduction" case where in_subs has repeated chars
-        // or chars not in out_subs.
-        let has_repeated = {
-            let mut seen = std::collections::HashSet::new();
-            in_subs.iter().any(|c| !seen.insert(c))
+        // Repeated input indices (e.g. "ii->" trace, "ii->i" diagonal):
+        // the gradient is nonzero only on the diagonal slice the
+        // forward op picked. Keep the existing element-wise CPU
+        // construction for these — there is no GPU primitive for
+        // diagonal-extract today, and the projection rewrite below
+        // does NOT cover them (the structural assumption "lhs and rhs
+        // are sets of distinct chars" fails). This branch is unchanged
+        // from the pre-#791 behaviour.
+        if has_duplicate_chars(&in_subs) {
+            return self.backward_repeated_index(grad_output, &in_subs, &out_subs);
+        }
+
+        // Projection / axis-sum / full-reduce / pure permutation
+        // (#791): when set(out_subs) ⊆ set(in_subs) and in_subs has no
+        // repeats, the forward is exactly:
+        //   1. Permute the input axes from in_subs order to (out_subs ++ dropped)
+        //   2. Sum over the dropped axes.
+        // The vector-Jacobian product is its transpose:
+        //   1. View grad_output (shape = out_shape) with size-1 axes
+        //      inserted for every dropped axis, in the (out_subs ++
+        //      dropped) order.
+        //   2. expand to the full permuted shape (broadcasting the
+        //      gradient along the dropped axes).
+        //   3. permute back to in_subs order.
+        //
+        // This is the structural fix: it replaces the fragile
+        // `format!("{rhs}->{lhs}")` reverse-equation pattern (which
+        // produced equations like "i->ij" that have indices on the
+        // RHS that don't appear on the LHS — rejected by the
+        // einsum equation parser, hence the #791 crash).
+        //
+        // Validate that out_subs ⊆ in_subs (caller ought to have
+        // already, but be defensive — invalid equations should be
+        // rejected here, not when we're partway through expanding).
+        for &c in &out_subs {
+            if !in_subs.contains(&c) {
+                return Err(FerrotorchError::InvalidArgument {
+                    message: format!(
+                        "einsum backward: output index '{c}' does not appear in input subscripts"
+                    ),
+                });
+            }
+        }
+
+        // Build the "intermediate" axis order: [out_subs..., dropped...]
+        // where `dropped` are the axes summed away.
+        let in_shape = self.input.shape();
+        let dropped_chars: Vec<char> = in_subs
+            .iter()
+            .filter(|c| !out_subs.contains(c))
+            .copied()
+            .collect();
+        let intermediate_chars: Vec<char> = out_subs
+            .iter()
+            .chain(dropped_chars.iter())
+            .copied()
+            .collect();
+
+        // Step 1: reshape grad_output so it has size-1 placeholders
+        // for the dropped axes — match the intermediate axis order
+        // exactly. `intermediate_shape` matches `intermediate_chars`.
+        let dim_size = |c: char| -> usize {
+            // in_subs is the same length as in_shape because
+            // `build_dim_map` validated this on the forward call.
+            for (axis, &ic) in in_subs.iter().enumerate() {
+                if ic == c {
+                    return in_shape[axis];
+                }
+            }
+            unreachable!("dim_size called for char not in in_subs")
+        };
+        let intermediate_shape: Vec<usize> =
+            intermediate_chars.iter().map(|&c| dim_size(c)).collect();
+
+        // grad_output has shape matching out_subs (its axis count
+        // is `out_subs.len()`). Insert size-1 axes for the dropped
+        // chars at the trailing positions to get an unsqueezed
+        // shape matching `intermediate_shape` modulo size-1 axes.
+        let unsqueezed_shape: Vec<usize> = (0..intermediate_chars.len())
+            .map(|i| if i < out_subs.len() { intermediate_shape[i] } else { 1 })
+            .collect();
+
+        // Use reshape (view_reshape) — grad_output is contiguous
+        // (it came from a forward op or .backward() entry-point).
+        let grad_unsq = if grad_output.shape() == unsqueezed_shape.as_slice() {
+            grad_output.clone()
+        } else if grad_output.is_contiguous() {
+            grad_output.view_reshape(unsqueezed_shape.clone())?
+        } else {
+            grad_output
+                .contiguous()?
+                .view_reshape(unsqueezed_shape.clone())?
         };
 
-        if has_repeated {
-            // Cases like "ii->" (trace). Build the gradient manually:
-            // grad_A[i,j] = grad_output * delta(i,j) for trace case.
-            let in_shape: Vec<usize> = self.input.shape().to_vec();
-            let in_numel = self.input.numel();
-            let mut grad_data = vec![<T as num_traits::Zero>::zero(); in_numel];
-            let grad_out_data = grad_output.data_vec()?;
+        // Step 2: expand to the full intermediate shape. `expand`
+        // is GPU-aware (broadcast_add path on CUDA, CPU loop
+        // otherwise) — no silent CPU detour.
+        let grad_expanded = if intermediate_shape.is_empty()
+            || grad_unsq.shape() == intermediate_shape.as_slice()
+        {
+            // out_subs covers all of in_subs (pure permutation) — no
+            // expansion needed.
+            grad_unsq
+        } else {
+            crate::grad_fns::shape::expand(&grad_unsq, &intermediate_shape)?
+        };
 
-            // General approach: for each element of grad_A, we need to determine
-            // the gradient. The gradient of sum over repeated indices is nonzero
-            // only where repeated indices are equal.
-            let out_strides = row_major_strides(grad_output.shape());
-
-            for (flat, grad_elem) in grad_data.iter_mut().enumerate().take(in_numel) {
-                // Decode flat to multi-index for input.
-                let mut multi = vec![0usize; in_subs.len()];
-                {
-                    let mut rem = flat;
-                    for i in (0..in_subs.len()).rev() {
-                        multi[i] = rem % in_shape[i];
-                        rem /= in_shape[i];
-                    }
-                }
-
-                // Check: all occurrences of the same char must have the same value.
-                let mut char_val: BTreeMap<char, usize> = BTreeMap::new();
-                let mut valid = true;
-                for (axis, &c) in in_subs.iter().enumerate() {
-                    match char_val.get(&c) {
-                        Some(&prev) if prev != multi[axis] => {
-                            valid = false;
-                            break;
-                        }
-                        _ => {
-                            char_val.insert(c, multi[axis]);
-                        }
-                    }
-                }
-
-                if !valid {
-                    continue; // grad is zero
-                }
-
-                // Compute the flat index into grad_output for the corresponding output element.
-                let mut out_flat = 0usize;
-                for (oi, &oc) in out_subs.iter().enumerate() {
-                    out_flat += char_val[&oc] * out_strides[oi];
-                }
-
-                *grad_elem = if out_subs.is_empty() {
-                    // Scalar output — the gradient is just the scalar value.
-                    grad_out_data[0]
-                } else {
-                    grad_out_data[out_flat]
-                };
-            }
-
-            let grad_tensor = Tensor::from_storage(TensorStorage::cpu(grad_data), in_shape, false)?;
-            return Ok(vec![Some(grad_tensor)]);
+        // Step 3: permute from `intermediate_chars` order back to
+        // `in_subs` order.
+        if intermediate_chars == in_subs {
+            // Already in input order — make sure the result is
+            // contiguous so downstream grad accumulation isn't
+            // surprised by stride views.
+            return Ok(vec![Some(crate::methods::contiguous_t(&grad_expanded)?)]);
         }
-
-        // Simple permutation/projection case: reverse the equation.
-        // "ij->ji" -> "ji->ij", "ij->" -> reverse is grad_output broadcast.
-        if out_subs.is_empty() {
-            // All indices summed: grad_A = grad_scalar * ones_like(A)
-            let scalar_val = grad_output.item()?;
-            let grad_data = vec![scalar_val; self.input.numel()];
-            let grad_tensor = Tensor::from_storage(
-                TensorStorage::cpu(grad_data),
-                self.input.shape().to_vec(),
-                false,
-            )?;
-            return Ok(vec![Some(grad_tensor)]);
-        }
-
-        // Pure permutation: "ij->ji" reverses to "ji->ij"
-        let reverse_eq = format!("{rhs}->{lhs}");
-        let grad_a = einsum(&reverse_eq, &[grad_output])?;
-        Ok(vec![Some(grad_a)])
+        let perm: Vec<usize> = in_subs
+            .iter()
+            .map(|c| {
+                intermediate_chars
+                    .iter()
+                    .position(|ic| ic == c)
+                    .expect("in_subs char must exist in intermediate_chars")
+            })
+            .collect();
+        let permuted = crate::methods::permute_t(&grad_expanded, &perm)?;
+        let grad_input = crate::methods::contiguous_t(&permuted)?;
+        Ok(vec![Some(grad_input)])
     }
 
     fn inputs(&self) -> Vec<&Tensor<T>> {
@@ -810,6 +1255,73 @@ impl<T: Float> GradFn<T> for EinsumBackwardSingle<T> {
 
     fn name(&self) -> &'static str {
         "EinsumBackward"
+    }
+}
+
+impl<T: Float> EinsumBackwardSingle<T> {
+    /// Backward path for the rare repeated-input-index cases (`"ii->"`
+    /// trace, `"ii->i"` diagonal). Element-wise CPU construction; the
+    /// projection-rewrite path above does not cover this because its
+    /// structural assumption (in_subs is a set of distinct chars)
+    /// fails. CUDA inputs are routed through `.cpu()` because the
+    /// forward path itself returns `NotImplementedOnCuda` for these
+    /// cases (#803 — no on-device diagonal kernel today).
+    fn backward_repeated_index(
+        &self,
+        grad_output: &Tensor<T>,
+        in_subs: &[char],
+        out_subs: &[char],
+    ) -> FerrotorchResult<Vec<Option<Tensor<T>>>> {
+        let in_shape: Vec<usize> = self.input.shape().to_vec();
+        let in_numel = self.input.numel();
+        let mut grad_data = vec![<T as num_traits::Zero>::zero(); in_numel];
+        let grad_out_data = grad_output.data_vec()?;
+
+        let out_strides = row_major_strides(grad_output.shape());
+
+        for (flat, grad_elem) in grad_data.iter_mut().enumerate().take(in_numel) {
+            // Decode flat to multi-index for input.
+            let mut multi = vec![0usize; in_subs.len()];
+            {
+                let mut rem = flat;
+                for i in (0..in_subs.len()).rev() {
+                    multi[i] = rem % in_shape[i];
+                    rem /= in_shape[i];
+                }
+            }
+
+            // All occurrences of the same char must have the same value.
+            let mut char_val: BTreeMap<char, usize> = BTreeMap::new();
+            let mut valid = true;
+            for (axis, &c) in in_subs.iter().enumerate() {
+                match char_val.get(&c) {
+                    Some(&prev) if prev != multi[axis] => {
+                        valid = false;
+                        break;
+                    }
+                    _ => {
+                        char_val.insert(c, multi[axis]);
+                    }
+                }
+            }
+            if !valid {
+                continue;
+            }
+
+            let mut out_flat = 0usize;
+            for (oi, &oc) in out_subs.iter().enumerate() {
+                out_flat += char_val[&oc] * out_strides[oi];
+            }
+
+            *grad_elem = if out_subs.is_empty() {
+                grad_out_data[0]
+            } else {
+                grad_out_data[out_flat]
+            };
+        }
+
+        let grad_tensor = Tensor::from_storage(TensorStorage::cpu(grad_data), in_shape, false)?;
+        Ok(vec![Some(grad_tensor)])
     }
 }
 
