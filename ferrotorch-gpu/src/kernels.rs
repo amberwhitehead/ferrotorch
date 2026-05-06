@@ -83,10 +83,14 @@ pub(crate) fn ptx_f32_to_f64(
         // Bit reinterpretation (for NaN/inf checks)
         .replace("mov.b32", "mov.b64")
         // Byte offset: 4 bytes per f32 → 8 bytes per f64.
-        // Cover both the canonical `%off` register and the `%off_in`/`%off_out`
-        // pair used by gather/scatter/transpose-style kernels. Missing one of
-        // these caused `gpu_transpose_2d_f64` to issue f32-stride loads against
-        // an f64 buffer, hitting CUDA_ERROR_MISALIGNED_ADDRESS. (#575)
+        // Cover the canonical `%off` register, the `%off_in`/`%off_out`
+        // pair used by gather/scatter/transpose-style kernels, and the
+        // `%off_a`/`%off_b` pair used by the binary broadcast kernels.
+        // Missing one of these caused `gpu_transpose_2d_f64` to issue
+        // f32-stride loads against an f64 buffer, hitting
+        // `CUDA_ERROR_MISALIGNED_ADDRESS` (#575); the same class of bug
+        // recurred for `gpu_broadcast_{add,sub,mul,div}_f64` because the
+        // broadcast PTX uses `%off_a`/`%off_b` for the input loads (#779).
         .replace("shl.b64 %off, %off, 2", "shl.b64 %off, %off, 3")
         .replace("shl.b64 %off_in, %off_in, 2", "shl.b64 %off_in, %off_in, 3")
         .replace(
@@ -101,6 +105,8 @@ pub(crate) fn ptx_f32_to_f64(
             "shl.b64 %off_dst, %off_dst, 2",
             "shl.b64 %off_dst, %off_dst, 3",
         )
+        .replace("shl.b64 %off_a, %off_a, 2", "shl.b64 %off_a, %off_a, 3")
+        .replace("shl.b64 %off_b, %off_b, 2", "shl.b64 %off_b, %off_b, 3")
         // Atomics
         .replace("atom.global.add.f32", "atom.global.add.f64")
         // Common float hex literals

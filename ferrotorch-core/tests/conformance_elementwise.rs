@@ -2078,22 +2078,6 @@ mod gpu {
         }
     }
 
-    /// Fixtures whose `tag` indicates a broadcast pair (rather than the
-    /// same-shape baseline). ferrotorch's GPU broadcast kernels for
-    /// add/sub/mul/div currently hit `CUDA_ERROR_MISALIGNED_ADDRESS` on
-    /// some broadcast configurations — a real GPU-side bug surfaced by
-    /// this conformance test. Until the broadcast misalignment is fixed,
-    /// the GPU lanes for these ops cover the same-shape baselines (which
-    /// dispatch to the non-broadcast `add_f32`/`add_f64`/etc. kernels)
-    /// and surface the broadcast gap via diagnostic. The CPU lanes still
-    /// exercise the broadcast cases in full.
-    fn is_broadcast_tag(tag: Option<&str>) -> bool {
-        matches!(
-            tag,
-            Some("broadcast_1to2") | Some("scalar_to_vec") | Some("outer")
-        )
-    }
-
     fn run_binary_gpu(op_name: &str, op: BinaryOp) {
         ensure_cuda_backend();
         let file = load_fixtures();
@@ -2101,15 +2085,6 @@ mod gpu {
         let cases = cases_for(&file, op_name, "cuda:0");
         assert!(!cases.is_empty(), "no CUDA fixtures for op {op_name:?}");
         for f in cases {
-            if is_broadcast_tag(f.tag.as_deref()) {
-                eprintln!(
-                    "[conformance:phase2.1] skipping GPU broadcast case for {op_name} \
-                     tag={:?} dtype={} — ferrotorch GPU (#779) broadcast_{op_name}_* kernels \
-                     hit CUDA_ERROR_MISALIGNED_ADDRESS; same-shape GPU lane is verified.",
-                    f.tag, f.dtype
-                );
-                continue;
-            }
             let label = format!("{op_name} cuda:0 tag={:?} dtype={}", f.tag, f.dtype);
             let a_shape = f.a_shape.as_ref().unwrap();
             let b_shape = f.b_shape.as_ref().unwrap();
