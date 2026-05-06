@@ -1221,13 +1221,23 @@ impl<T: Float> SoftplusBackward<T> {
 
 impl<T: Float> GradFn<T> for SoftplusBackward<T> {
     fn backward(&self, grad_output: &Tensor<T>) -> FerrotorchResult<Vec<Option<Tensor<T>>>> {
-        // GPU-native path for f32: grad * sigmoid(beta * x)
-        if grad_output.is_cuda() && is_f32::<T>() {
+        // GPU-native path for f32 + f64: grad * sigmoid(beta * x).
+        // Pre-fix the f64 lane returned `NotImplementedOnCuda` and forced the
+        // saved CPU `.data()?` fallback that triggered #796. The kernels we
+        // dispatch to (`scale_f64`, `sigmoid_f64`, `mul_f64`) all exist in
+        // the live `CudaBackendImpl`. (#796)
+        if grad_output.is_cuda() && (is_f32::<T>() || is_f64::<T>()) {
             let backend = gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
             let x_h = self.input.gpu_handle()?;
-            let beta_x = backend.scale_f32(x_h, self.beta as f32)?;
-            let sig = backend.sigmoid_f32(&beta_x)?;
-            let result_h = backend.mul_f32(grad_output.gpu_handle()?, &sig)?;
+            let result_h = if is_f32::<T>() {
+                let beta_x = backend.scale_f32(x_h, self.beta as f32)?;
+                let sig = backend.sigmoid_f32(&beta_x)?;
+                backend.mul_f32(grad_output.gpu_handle()?, &sig)?
+            } else {
+                let beta_x = backend.scale_f64(x_h, self.beta)?;
+                let sig = backend.sigmoid_f64(&beta_x)?;
+                backend.mul_f64(grad_output.gpu_handle()?, &sig)?
+            };
             let grad_input = Tensor::from_storage(
                 TensorStorage::gpu(result_h),
                 self.input.shape().to_vec(),
@@ -1236,7 +1246,7 @@ impl<T: Float> GradFn<T> for SoftplusBackward<T> {
             return Ok(vec![Some(grad_input)]);
         }
 
-        // Non-f32 CUDA tensors are not supported.
+        // Non-f32/f64 CUDA tensors are not supported.
         if grad_output.is_cuda() || self.input.is_cuda() {
             return Err(FerrotorchError::NotImplementedOnCuda {
                 op: "softplus backward",
@@ -1306,16 +1316,18 @@ pub fn softplus<T: Float>(
         }
     })?;
 
-    let device = input.device();
+    // `unary_map` already keeps the result on `input.device()` for both CPU
+    // and CUDA (CUDA path goes via CPU detour and re-uploads). Pre-fix this
+    // branch boxed `TensorStorage::on_device(output.data()?.to_vec(), device)`,
+    // which (a) failed with `GpuTensorNotAccessible` for CUDA inputs and (b)
+    // forced an unnecessary D2H+H2D round-trip when it succeeded. (#796)
     if is_grad_enabled() && input.requires_grad() {
-        let storage = TensorStorage::on_device(output.data()?.to_vec(), device)?;
+        let (storage, shape) = output.into_storage_and_shape()?;
         Tensor::from_operation(
             storage,
-            output.shape().to_vec(),
+            shape,
             Arc::new(SoftplusBackward::new(input.clone(), beta, threshold)),
         )
-    } else if device.is_cuda() {
-        output.to(device)
     } else {
         Ok(output)
     }
@@ -1610,11 +1622,26 @@ impl<T: Float> LeakyReluBackward<T> {
 
 impl<T: Float> GradFn<T> for LeakyReluBackward<T> {
     fn backward(&self, grad_output: &Tensor<T>) -> FerrotorchResult<Vec<Option<Tensor<T>>>> {
-        let input_data = self.input.data()?;
-        let grad_data = grad_output.data()?;
         let zero = <T as num_traits::Zero>::zero();
         let one = <T as num_traits::One>::one();
         let slope = T::from(self.negative_slope).unwrap();
+
+        // CUDA path: build the per-element mask via `unary_map` (which keeps
+        // the result on the input's device by routing through a CPU detour
+        // and re-uploading), then multiply by `grad_output` using the
+        // CUDA-aware `arithmetic::mul`. Pre-fix this branch unconditionally
+        // called `self.input.data()?` / `grad_output.data()?`, which fails
+        // with `GpuTensorNotAccessible` for CUDA-resident saved state. (#796)
+        if self.input.is_cuda() || grad_output.is_cuda() {
+            let grad_input = crate::autograd::no_grad::no_grad(|| {
+                let mask = unary_map(&self.input, |x| if x > zero { one } else { slope })?;
+                crate::grad_fns::arithmetic::mul(grad_output, &mask)
+            })?;
+            return Ok(vec![Some(grad_input)]);
+        }
+
+        let input_data = self.input.data()?;
+        let grad_data = grad_output.data()?;
         let result: Vec<T> = input_data
             .iter()
             .zip(grad_data.iter())
@@ -1643,9 +1670,16 @@ pub fn leaky_relu<T: Float>(input: &Tensor<T>, negative_slope: f64) -> Ferrotorc
     let slope = T::from(negative_slope).unwrap();
     let output = unary_map(input, |x| if x > zero { x } else { slope * x })?;
     if is_grad_enabled() && input.requires_grad() {
+        // Pre-fix this branch boxed `TensorStorage::cpu(output.data()?.to_vec())`,
+        // which (a) failed with `GpuTensorNotAccessible` for CUDA inputs (since
+        // `unary_map` keeps the tensor on the input's device) and (b) silently
+        // moved the autograd-tracked output off the device when it succeeded
+        // for CPU. Use the storage that `unary_map` produced — it is already
+        // on the correct device. (#796)
+        let (storage, shape) = output.into_storage_and_shape()?;
         Tensor::from_operation(
-            TensorStorage::cpu(output.data()?.to_vec()),
-            output.shape().to_vec(),
+            storage,
+            shape,
             Arc::new(LeakyReluBackward::new(input.clone(), negative_slope)),
         )
     } else {

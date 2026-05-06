@@ -538,12 +538,10 @@ impl<T: Float> Tensor<T> {
     /// Accumulate a gradient additively (used by the backward engine).
     ///
     /// Keeps gradients on their original device to avoid GPU↔CPU round-trips.
-    /// When both the existing gradient and the incoming gradient are on GPU
-    /// (and the element type is f32), accumulation uses `backend.add_f32()`
-    /// entirely on-device.
+    /// When both the existing gradient and the incoming gradient are on GPU,
+    /// accumulation uses `backend.add_f32()` / `backend.add_f64()` entirely
+    /// on-device (dispatched on element size).
     pub(crate) fn accumulate_grad(&self, incoming: &Tensor<T>) -> FerrotorchResult<()> {
-        use std::any::TypeId;
-
         let mut guard = self
             .inner
             .grad
@@ -560,10 +558,10 @@ impl<T: Float> Tensor<T> {
             }
             Some(existing) => {
                 // Accumulate: existing_grad += incoming_grad.
-                let is_f32 = TypeId::of::<T>() == TypeId::of::<f32>();
-
-                // GPU-native path: both on GPU and f32.
-                if is_f32 && existing.is_cuda() && incoming.is_cuda() {
+                // GPU-native path: both on GPU. Dispatch by element size to
+                // pick add_f32 or add_f64 — mirrors the canonical pattern in
+                // `autograd::graph::accumulate_non_leaf_grad` (#789, #788, #800).
+                if existing.is_cuda() && incoming.is_cuda() {
                     let backend = crate::gpu_dispatch::gpu_backend()
                         .ok_or(FerrotorchError::DeviceUnavailable)?;
                     if existing.numel() != incoming.numel() {
@@ -575,8 +573,13 @@ impl<T: Float> Tensor<T> {
                             ),
                         });
                     }
-                    let sum_handle =
-                        backend.add_f32(existing.gpu_handle()?, incoming.gpu_handle()?)?;
+                    let a_handle = existing.gpu_handle()?;
+                    let b_handle = incoming.gpu_handle()?;
+                    let sum_handle = if std::mem::size_of::<T>() == 4 {
+                        backend.add_f32(a_handle, b_handle)?
+                    } else {
+                        backend.add_f64(a_handle, b_handle)?
+                    };
                     let storage = TensorStorage::gpu(sum_handle);
                     let combined = Tensor::from_storage(storage, existing.shape().to_vec(), false)?;
                     *guard = Some(Box::new(combined));

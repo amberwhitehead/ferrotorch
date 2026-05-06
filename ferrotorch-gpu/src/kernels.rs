@@ -4861,8 +4861,13 @@ DONE:\n\
 // ---------------------------------------------------------------------------
 // For each row of length `cols`:
 //   sum_grad = sum(grad[j])
-//   out[j] = grad[j] - exp(output[j]) * sum_grad
-// where output[j] is the log-softmax output, so exp(output[j]) = softmax[j].
+//   out[j] = grad[j] - softmax[j] * sum_grad
+// where `output_ptr` is the **softmax-probability** buffer that the Rust
+// host (`grad_fns/activation.rs::log_softmax_inner`) saved by computing
+// `exp(log_softmax)` once at forward time. The kernel consumes those
+// probabilities directly — historically it re-applied `exp()` here, which
+// double-exp'd the buffer and produced grad deltas of ~4.0 on (1,4) f32
+// inputs (#798).
 // One block per row, 256 threads per block.
 
 #[cfg(feature = "cuda")]
@@ -4955,7 +4960,10 @@ SUM_REDUCE_DONE:\n\
     ld.shared.f32 %sum_grad, [sdata];\n\
     bar.sync 0;\n\
 \n\
-    // Phase 2: out[j] = grad[j] - exp(output[j]) * sum_grad\n\
+    // Phase 2: out[j] = grad[j] - softmax[j] * sum_grad\n\
+    // `output_ptr` already holds softmax probabilities (the host computed\n\
+    // exp(log_softmax) at forward time and saved it as softmax_output);\n\
+    // load directly. Re-applying exp() here was the #798 algebra bug.\n\
     mov.u32 %j, %r_tid;\n\
 WRITE_LOOP:\n\
     setp.ge.u32 %loop_p, %j, %cols_reg;\n\
@@ -4967,10 +4975,7 @@ WRITE_LOOP:\n\
     ld.global.f32 %vg, [%saddr];\n\
     add.u64 %saddr, %output, %off;\n\
     add.u64 %saddr, %saddr, %row_off;\n\
-    ld.global.f32 %vo, [%saddr];\n\
-    // exp(log_softmax_output) = softmax probability\n\
-    mul.f32 %vo, %vo, 0f3FB8AA3B;\n\
-    ex2.approx.f32 %softmax_j, %vo;\n\
+    ld.global.f32 %softmax_j, [%saddr];\n\
     // out[j] = grad[j] - softmax[j] * sum_grad\n\
     mul.f32 %result, %softmax_j, %sum_grad;\n\
     sub.f32 %result, %vg, %result;\n\

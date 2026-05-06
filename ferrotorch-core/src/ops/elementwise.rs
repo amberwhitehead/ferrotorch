@@ -761,6 +761,14 @@ pub fn fast_tanh<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
 /// LLVM may auto-vectorize the inner loop via SLEEF-style lowering when
 /// compiled with `target-cpu=native`.
 pub fn fast_sin<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
+    // CUDA tensors take the unary_map tier-2 dispatch (CPU detour then
+    // re-upload). Pre-fix this fn unconditionally called `input.data()?`,
+    // which returns `Err(GpuTensorNotAccessible)` on CUDA and broke
+    // both forward (`sin(cuda_tensor)`) and the SinBackward composite
+    // path (which recurses into `cos(cuda_tensor)`). #796.
+    if input.is_cuda() {
+        return unary_map(input, |x| x.sin());
+    }
     let data = input.data()?;
     let n = data.len();
     if std::mem::size_of::<T>() == 4 {
@@ -801,6 +809,14 @@ pub fn fast_sin<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
 /// range reduction for moderate inputs and Payne-Hanek for |x| > ~10^5.
 /// See [`fast_sin`] for details on the reduction algorithm and accuracy.
 pub fn fast_cos<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
+    // CUDA tensors take the unary_map tier-2 dispatch (CPU detour then
+    // re-upload). Pre-fix this fn unconditionally called `input.data()?`,
+    // which returns `Err(GpuTensorNotAccessible)` on CUDA and broke
+    // both forward (`cos(cuda_tensor)`) and the CosBackward composite
+    // path (which recurses into `sin(cuda_tensor)`). #796.
+    if input.is_cuda() {
+        return unary_map(input, |x| x.cos());
+    }
     let data = input.data()?;
     let n = data.len();
     if std::mem::size_of::<T>() == 4 {

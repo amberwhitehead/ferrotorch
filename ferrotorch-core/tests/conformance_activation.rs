@@ -452,13 +452,6 @@ fn cascade_skip(op: &str, device_label: &str, dtype: &str) -> Option<&'static st
         ("hardsigmoid", "cpu", "float64") => {
             Some("#795: hardsigmoid f64 grad — ferrotorch is more precise than PyTorch")
         }
-        // #796 — sin/cos/leaky_relu/softplus autograd-on-CUDA broken.
-        ("sin", "cuda:0", _)
-        | ("cos", "cuda:0", _)
-        | ("leaky_relu", "cuda:0", _)
-        | ("softplus_default", "cuda:0", _) => {
-            Some("#796: autograd-on-CUDA fails with GpuTensorNotAccessible")
-        }
         // #797 — exp_f64 PTX JIT failure on GPU. Also propagates transitively
         // into log_softmax_f64 (which uses exp_f64 internally during the
         // softmax half), so the f64 GPU log_softmax lane skips here too with
@@ -467,10 +460,9 @@ fn cascade_skip(op: &str, device_label: &str, dtype: &str) -> Option<&'static st
         ("log_softmax_dim_last", "cuda:0", "float64") => {
             Some("#797: log_softmax_f64 GPU forward depends on exp_f64 (PTX JIT failure)")
         }
-        // #798 — gpu log_softmax f32 backward broken.
-        ("log_softmax_dim_last", "cuda:0", "float32") => {
-            Some("#798: gpu log_softmax f32 backward grad wildly wrong (delta ~4.0)")
-        }
+        // #798 — fixed: gpu log_softmax f32 backward kernel was double-exp'ing
+        // the saved softmax buffer (host already passed exp(log_softmax)).
+        // PTX kernel now consumes the softmax probabilities directly. No skip.
         // #799 — gpu gelu_with(None) GPU forward divergence (~1.25e-2). Affects
         // both f32 and f64 lanes (the GPU kernel ignores the GeluApproximate
         // flag in both dtypes).
