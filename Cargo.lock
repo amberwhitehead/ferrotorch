@@ -2463,12 +2463,18 @@ dependencies = [
  "ferray-stride-tricks",
  "ferray-ufunc",
  "ferray-window",
+ "ferrotorch-gpu",
  "half",
  "num-traits",
+ "quote",
  "rayon",
  "rustc-hash 2.1.2",
  "rustfft",
+ "serde",
+ "serde_json",
+ "syn 2.0.117",
  "thiserror 2.0.18",
+ "toml",
  "tracing",
 ]
 

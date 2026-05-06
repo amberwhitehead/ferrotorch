@@ -12,6 +12,17 @@ keywords.workspace = true
 categories.workspace = true
 readme = "README.md"
 
+[features]
+# Marker feature that gates the GPU branches of the conformance suite. The
+# tests themselves use `#[cfg(feature = "gpu")]` (NOT `#[ignore]`) so that on
+# a non-CUDA build the test functions are entirely absent rather than silently
+# skipped. The actual GPU backend (cudarc kernels, cuBLAS calls, etc.) is
+# wired in via the `[dev-dependencies]` entry on `ferrotorch-gpu` below — that
+# is a one-way edge (test-only → ferrotorch-gpu), so it does not create a
+# package cycle even though ferrotorch-gpu depends on ferrotorch-core in its
+# non-test builds. Cargo deliberately permits dev-dep cycles for this reason.
+gpu = []
+
 [dependencies]
 ferray-core = { workspace = true }
 ferray-ufunc = { workspace = true }
@@ -30,4 +41,27 @@ faer = "0.24"
 rustc-hash = "2"
 tracing = { workspace = true }
 
+# Conformance suite scaffolding (Phase 2.0 — issue #759):
+#   * `syn`/`quote` parse the public surface of `src/lib.rs` (and every module
+#     it declares) so `tests/conformance_surface_inventory.rs` can write a
+#     deterministic `_surface.json`.
+#   * `toml` parses `_surface_exclusions.toml`, the strict-gate allow-list.
+#   * `serde`/`serde_json` parse the inventory JSON and the Python-generated
+#     fixtures in `tests/conformance/fixtures/`.
+# All four are already transitive deps elsewhere in the workspace; adding them
+# as dev-deps does not pull a new top-level crate.
 [dev-dependencies]
+syn = { version = "2", features = ["full", "extra-traits"] }
+quote = "1"
+toml = "1"
+serde = { workspace = true }
+serde_json = { workspace = true }
+# `ferrotorch-gpu` registers the cudarc backend that `tests/conformance_creation.rs`
+# uses under `--features gpu` to exercise `.to(Device::Cuda(0))` and read back
+# values for parity assertions. Listed as a dev-dep (not optional, not feature-
+# gated at the manifest level) because Cargo permits dev-dep cycles: the
+# ferrotorch-gpu→ferrotorch-core edge in normal builds is preserved while this
+# test-only ferrotorch-core→ferrotorch-gpu edge does not propagate to the
+# package graph. The test code is gated on `cfg(feature = "gpu")` so the
+# binary contains no GPU references on non-CUDA builds.
+ferrotorch-gpu = { workspace = true }
