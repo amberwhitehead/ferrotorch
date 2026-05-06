@@ -122,11 +122,32 @@ QDTYPES = {
 }
 
 
+def f32(x: float) -> float:
+    """Round a Python float through numpy float32 to match ferrotorch's
+    f32 arithmetic exactly. Python's native float is f64; without this
+    the reference diverges from ferrotorch by f32-rounding errors."""
+    import numpy as np  # local import to keep module-level deps minimal
+
+    return float(np.float32(x))
+
+
+def round_half_away_from_zero(x: float) -> int:
+    """Match Rust's `f32::round` semantics: round-half-away-from-zero,
+    NOT Python's banker's-rounding (round-half-to-even). Critical for
+    bit-exact integer-code parity at boundary inputs like 0.5 or -0.5."""
+    if x >= 0.0:
+        return int(math.floor(x + 0.5))
+    return -int(math.floor(-x + 0.5))
+
+
 def affine_quantize(
     x: torch.Tensor, scale: float, zp: int, qmin: int, qmax: int
 ) -> list[int]:
     """Reference affine quantize matching ferrotorch's `quantize_val`:
         q = clamp(round(x / scale + zp), qmin, qmax)
+
+    Done in f32 arithmetic with round-half-away-from-zero to match the
+    exact behaviour of `f32::round` in Rust.
 
     Returns a list of i32-domain integer codes (NOT the i8 storage form).
     The Rust test reads the QuantizedTensor's stored bytes and reconstructs
@@ -134,35 +155,46 @@ def affine_quantize(
     """
     raw = x.detach().to("cpu").to(torch.float32).reshape(-1).tolist()
     codes: list[int] = []
+    scale_f = f32(scale)
+    zp_f = f32(float(zp))
     for v in raw:
-        q = round(v / scale + zp)
+        # Match ferrotorch's `(x / scale + zp).round() as i32` exactly:
+        # all operands are f32, accumulator is f32, then cast.
+        v_f = f32(v)
+        scaled = f32(v_f / scale_f)
+        biased = f32(scaled + zp_f)
+        q = round_half_away_from_zero(biased)
         q = max(qmin, min(qmax, q))
         codes.append(int(q))
     return codes
 
 
 def affine_dequantize(codes: list[int], scale: float, zp: int) -> list[float]:
-    """Inverse: x = (q - zp) * scale."""
-    return [(q - zp) * scale for q in codes]
+    """Inverse: x = (q - zp) * scale, computed in f32 to match ferrotorch."""
+    scale_f = f32(scale)
+    out: list[float] = []
+    for q in codes:
+        diff = f32(float(q - zp))
+        out.append(f32(diff * scale_f))
+    return out
 
 
 def compute_scale_zp(min_val: float, max_val: float, qmin: int, qmax: int) -> tuple[float, int]:
     """Match ferrotorch's `compute_scale_zp` exactly:
       - expand range to include zero
-      - scale = (max - min) / (qmax - qmin), with EPS floor on range
-      - zp = round(qmin - min/scale), NOT clamped
+      - scale = (max - min) / (qmax - qmin), with f32::EPSILON floor on range
+      - zp = round(qmin - min/scale), round-half-away-from-zero, NOT clamped
+    All arithmetic is performed in f32.
     """
-    min_v = min(min_val, 0.0)
-    max_v = max(max_val, 0.0)
-    rng = max(max_v - min_v, sys.float_info.min)  # f32::EPSILON would be 1.19e-7;
-    # we use float_info.min as a very small floor — for any non-degenerate input
-    # the EPSILON-floor in Rust is unreached. The constant-tensor edge case
-    # exercises the floor and we test the exact ferrotorch behaviour there.
-    # For a tighter parity with f32::EPSILON, compute as f32 explicitly:
-    eps_f32 = 1.1920929e-7
-    rng = max(max_v - min_v, eps_f32)
-    scale = rng / (qmax - qmin)
-    zp = round(qmin - min_v / scale)
+    min_v = f32(min(f32(min_val), 0.0))
+    max_v = f32(max(f32(max_val), 0.0))
+    eps_f32 = f32(1.1920929e-7)  # f32::EPSILON
+    rng = f32(max(f32(max_v - min_v), eps_f32))
+    scale = f32(rng / float(qmax - qmin))
+    # Mirror Rust's `(qmin as f32 - min_val / scale).round() as i32`.
+    div = f32(min_v / scale)
+    biased = f32(float(qmin) - div)
+    zp = round_half_away_from_zero(biased)
     return scale, int(zp)
 
 
@@ -263,15 +295,22 @@ def fixture_quantize_per_channel() -> list[dict[str, Any]]:
             stride *= d
         for i, v in enumerate(flat):
             ch = (i // stride) % shape[axis]
-            q = round(v / scales[ch] + zps[ch])
+            v_f = f32(v)
+            scale_f = f32(scales[ch])
+            zp_f = f32(float(zps[ch]))
+            scaled = f32(v_f / scale_f)
+            biased = f32(scaled + zp_f)
+            q = round_half_away_from_zero(biased)
             q = max(qmin, min(qmax, q))
             codes.append(int(q))
 
-        # Dequant in the same order.
+        # Dequant in the same order. Use f32 arithmetic to match ferrotorch.
         dequant: list[float] = []
         for i, q in enumerate(codes):
             ch = (i // stride) % shape[axis]
-            dequant.append((q - zps[ch]) * scales[ch])
+            scale_f = f32(scales[ch])
+            diff = f32(float(q - zps[ch]))
+            dequant.append(f32(diff * scale_f))
 
         out.append({
             "op": "quantize_per_channel",
@@ -301,14 +340,16 @@ def fixture_qparams() -> list[dict[str, Any]]:
     """
     out: list[dict[str, Any]] = []
 
-    # Symmetric across the three dtypes.
+    # Symmetric across the three dtypes. Compute the expected scale in
+    # f32 to mirror ferrotorch's `QParams::symmetric` arithmetic exactly.
     for max_abs in (5.0, 1.0, 100.0):
-        for qdtype, expected in [
-            ("int8", (max_abs / 127.0, 0)),
-            ("uint8", (max_abs / 128.0, 128)),
-            ("int4", (max_abs / 7.0, 0)),
+        # Floor to f32::EPSILON like ferrotorch.
+        ma = f32(max(f32(max_abs), 1.1920929e-7))
+        for qdtype, scale, zp in [
+            ("int8", f32(ma / 127.0), 0),
+            ("uint8", f32(ma / 128.0), 128),
+            ("int4", f32(ma / 7.0), 0),
         ]:
-            scale, zp = expected
             out.append({
                 "op": "qparams_symmetric",
                 "tag": f"{qdtype}_maxabs{max_abs}",

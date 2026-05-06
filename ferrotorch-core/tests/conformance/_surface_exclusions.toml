@@ -50,31 +50,6 @@ reason = "Pending Phase 2.10-autograd — autograd internals. Top-level re-expor
 tracking_issue = "#772"
 
 [[exclusion]]
-path = "ferrotorch_core::BoolTensor"
-reason = "Pending Phase 2.13-bool-int — bool & int tensors. Top-level re-export of an item whose canonical path is also pending coverage in the same phase."
-tracking_issue = "#775"
-
-[[exclusion]]
-path = "ferrotorch_core::ComplexTensor"
-reason = "Pending Phase 2.7-fft-complex — FFT, complex, signal. Top-level re-export of an item whose canonical path is also pending coverage in the same phase."
-tracking_issue = "#769"
-
-[[exclusion]]
-path = "ferrotorch_core::CooTensor"
-reason = "Pending Phase 2.8-nested-sparse — nested & sparse. Top-level re-export of an item whose canonical path is also pending coverage in the same phase."
-tracking_issue = "#770"
-
-[[exclusion]]
-path = "ferrotorch_core::CscTensor"
-reason = "Pending Phase 2.8-nested-sparse — nested & sparse. Top-level re-export of an item whose canonical path is also pending coverage in the same phase."
-tracking_issue = "#770"
-
-[[exclusion]]
-path = "ferrotorch_core::CsrTensor"
-reason = "Pending Phase 2.8-nested-sparse — nested & sparse. Top-level re-export of an item whose canonical path is also pending coverage in the same phase."
-tracking_issue = "#770"
-
-[[exclusion]]
 path = "ferrotorch_core::DType"
 reason = "Pending Phase 2.14-plumbing — plumbing & core types. Top-level re-export of an item whose canonical path is also pending coverage in the same phase."
 tracking_issue = "#776"
@@ -110,11 +85,6 @@ reason = "Pending Phase 2.14-plumbing — plumbing & core types. Top-level re-ex
 tracking_issue = "#776"
 
 [[exclusion]]
-path = "ferrotorch_core::FakeQuantize"
-reason = "Pending Phase 2.9-quantize-prune — quantize & prune. Top-level re-export of an item whose canonical path is also pending coverage in the same phase."
-tracking_issue = "#771"
-
-[[exclusion]]
 path = "ferrotorch_core::FerrotorchError"
 reason = "Pending Phase 2.14-plumbing — plumbing & core types. Top-level re-export of an item whose canonical path is also pending coverage in the same phase."
 tracking_issue = "#776"
@@ -140,24 +110,9 @@ reason = "Pending Phase 2.14-plumbing — plumbing & core types. Top-level re-ex
 tracking_issue = "#776"
 
 [[exclusion]]
-path = "ferrotorch_core::HistogramObserver"
-reason = "Pending Phase 2.9-quantize-prune — quantize & prune. Top-level re-export of an item whose canonical path is also pending coverage in the same phase."
-tracking_issue = "#771"
-
-[[exclusion]]
 path = "ferrotorch_core::HookHandle"
 reason = "Pending Phase 2.10-autograd — autograd internals. Top-level re-export of an item whose canonical path is also pending coverage in the same phase."
 tracking_issue = "#772"
-
-[[exclusion]]
-path = "ferrotorch_core::IntElement"
-reason = "Pending Phase 2.13-bool-int — bool & int tensors. Top-level re-export of an item whose canonical path is also pending coverage in the same phase."
-tracking_issue = "#775"
-
-[[exclusion]]
-path = "ferrotorch_core::IntTensor"
-reason = "Pending Phase 2.13-bool-int — bool & int tensors. Top-level re-export of an item whose canonical path is also pending coverage in the same phase."
-tracking_issue = "#775"
 
 [[exclusion]]
 path = "ferrotorch_core::Kernel"
@@ -165,89 +120,14 @@ reason = "Pending Phase 2.14-plumbing — plumbing & core types. Top-level re-ex
 tracking_issue = "#776"
 
 [[exclusion]]
-path = "ferrotorch_core::MaskedTensor"
-reason = "Pending Phase 2.12-masked — masked tensors. Top-level re-export of an item whose canonical path is also pending coverage in the same phase."
-tracking_issue = "#774"
-
-[[exclusion]]
 path = "ferrotorch_core::MemoryFormat"
 reason = "Pending Phase 2.14-plumbing — plumbing & core types. Top-level re-export of an item whose canonical path is also pending coverage in the same phase."
 tracking_issue = "#776"
 
 [[exclusion]]
-path = "ferrotorch_core::MinMaxObserver"
-reason = "Pending Phase 2.9-quantize-prune — quantize & prune. Top-level re-export of an item whose canonical path is also pending coverage in the same phase."
-tracking_issue = "#771"
-
-[[exclusion]]
 path = "ferrotorch_core::NamedTensor"
 reason = "Pending Phase 2.14-plumbing — plumbing & core types. Top-level re-export of an item whose canonical path is also pending coverage in the same phase."
 tracking_issue = "#776"
-
-[[exclusion]]
-path = "ferrotorch_core::NestedTensor"
-reason = "Pending Phase 2.8-nested-sparse — nested & sparse. Top-level re-export of an item whose canonical path is also pending coverage in the same phase."
-tracking_issue = "#770"
-
-[[exclusion]]
-path = "ferrotorch_core::Observer"
-reason = "Pending Phase 2.9-quantize-prune — quantize & prune. Top-level re-export of an item whose canonical path is also pending coverage in the same phase."
-tracking_issue = "#771"
-
-[[exclusion]]
-path = "ferrotorch_core::PackedNestedTensor"
-reason = "Pending Phase 2.8-nested-sparse — nested & sparse. Top-level re-export of an item whose canonical path is also pending coverage in the same phase."
-tracking_issue = "#770"
-
-[[exclusion]]
-path = "ferrotorch_core::PerChannelMinMaxObserver"
-reason = "Pending Phase 2.9-quantize-prune — quantize & prune. Top-level re-export of an item whose canonical path is also pending coverage in the same phase."
-tracking_issue = "#771"
-
-[[exclusion]]
-path = "ferrotorch_core::QParams"
-reason = "Pending Phase 2.9-quantize-prune — quantize & prune. Top-level re-export of an item whose canonical path is also pending coverage in the same phase."
-tracking_issue = "#771"
-
-[[exclusion]]
-path = "ferrotorch_core::QatLayer"
-reason = "Pending Phase 2.9-quantize-prune — quantize & prune. Top-level re-export of an item whose canonical path is also pending coverage in the same phase."
-tracking_issue = "#771"
-
-[[exclusion]]
-path = "ferrotorch_core::QatModel"
-reason = "Pending Phase 2.9-quantize-prune — quantize & prune. Top-level re-export of an item whose canonical path is also pending coverage in the same phase."
-tracking_issue = "#771"
-
-[[exclusion]]
-path = "ferrotorch_core::QuantDtype"
-reason = "Pending Phase 2.9-quantize-prune — quantize & prune. Top-level re-export of an item whose canonical path is also pending coverage in the same phase."
-tracking_issue = "#771"
-
-[[exclusion]]
-path = "ferrotorch_core::QuantScheme"
-reason = "Pending Phase 2.9-quantize-prune — quantize & prune. Top-level re-export of an item whose canonical path is also pending coverage in the same phase."
-tracking_issue = "#771"
-
-[[exclusion]]
-path = "ferrotorch_core::QuantizedTensor"
-reason = "Pending Phase 2.9-quantize-prune — quantize & prune. Top-level re-export of an item whose canonical path is also pending coverage in the same phase."
-tracking_issue = "#771"
-
-[[exclusion]]
-path = "ferrotorch_core::SemiStructuredSparseTensor"
-reason = "Pending Phase 2.8-nested-sparse — nested & sparse. Top-level re-export of an item whose canonical path is also pending coverage in the same phase."
-tracking_issue = "#770"
-
-[[exclusion]]
-path = "ferrotorch_core::SparseGrad"
-reason = "Pending Phase 2.8-nested-sparse — nested & sparse. Top-level re-export of an item whose canonical path is also pending coverage in the same phase."
-tracking_issue = "#770"
-
-[[exclusion]]
-path = "ferrotorch_core::SparseTensor"
-reason = "Pending Phase 2.8-nested-sparse — nested & sparse. Top-level re-export of an item whose canonical path is also pending coverage in the same phase."
-tracking_issue = "#770"
 
 [[exclusion]]
 path = "ferrotorch_core::StorageBuffer"
@@ -268,11 +148,6 @@ tracking_issue = "#776"
 path = "ferrotorch_core::TensorStorage"
 reason = "Pending Phase 2.14-plumbing — plumbing & core types. Top-level re-export of an item whose canonical path is also pending coverage in the same phase."
 tracking_issue = "#776"
-
-[[exclusion]]
-path = "ferrotorch_core::apply_2_4_mask"
-reason = "Pending Phase 2.9-quantize-prune — quantize & prune. Top-level re-export of an item whose canonical path is also pending coverage in the same phase."
-tracking_issue = "#771"
 
 [[exclusion]]
 path = "ferrotorch_core::autocast"
@@ -960,264 +835,9 @@ reason = "Pending Phase 2.10-autograd — autograd internals. Top-level re-expor
 tracking_issue = "#772"
 
 [[exclusion]]
-path = "ferrotorch_core::bool_tensor::BoolTensor"
-reason = "Pending Phase 2.13-bool-int — bool & int tensors. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#775"
-
-[[exclusion]]
-path = "ferrotorch_core::bool_tensor::BoolTensor::all"
-reason = "Pending Phase 2.13-bool-int — bool & int tensors. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#775"
-
-[[exclusion]]
-path = "ferrotorch_core::bool_tensor::BoolTensor::and"
-reason = "Pending Phase 2.13-bool-int — bool & int tensors. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#775"
-
-[[exclusion]]
-path = "ferrotorch_core::bool_tensor::BoolTensor::any"
-reason = "Pending Phase 2.13-bool-int — bool & int tensors. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#775"
-
-[[exclusion]]
-path = "ferrotorch_core::bool_tensor::BoolTensor::count_true"
-reason = "Pending Phase 2.13-bool-int — bool & int tensors. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#775"
-
-[[exclusion]]
-path = "ferrotorch_core::bool_tensor::BoolTensor::data"
-reason = "Pending Phase 2.13-bool-int — bool & int tensors. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#775"
-
-[[exclusion]]
-path = "ferrotorch_core::bool_tensor::BoolTensor::eq_t"
-reason = "Pending Phase 2.13-bool-int — bool & int tensors. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#775"
-
-[[exclusion]]
-path = "ferrotorch_core::bool_tensor::BoolTensor::from_predicate"
-reason = "Pending Phase 2.13-bool-int — bool & int tensors. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#775"
-
-[[exclusion]]
-path = "ferrotorch_core::bool_tensor::BoolTensor::from_slice"
-reason = "Pending Phase 2.13-bool-int — bool & int tensors. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#775"
-
-[[exclusion]]
-path = "ferrotorch_core::bool_tensor::BoolTensor::from_vec"
-reason = "Pending Phase 2.13-bool-int — bool & int tensors. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#775"
-
-[[exclusion]]
-path = "ferrotorch_core::bool_tensor::BoolTensor::ge"
-reason = "Pending Phase 2.13-bool-int — bool & int tensors. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#775"
-
-[[exclusion]]
-path = "ferrotorch_core::bool_tensor::BoolTensor::gt"
-reason = "Pending Phase 2.13-bool-int — bool & int tensors. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#775"
-
-[[exclusion]]
-path = "ferrotorch_core::bool_tensor::BoolTensor::le"
-reason = "Pending Phase 2.13-bool-int — bool & int tensors. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#775"
-
-[[exclusion]]
-path = "ferrotorch_core::bool_tensor::BoolTensor::lt"
-reason = "Pending Phase 2.13-bool-int — bool & int tensors. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#775"
-
-[[exclusion]]
-path = "ferrotorch_core::bool_tensor::BoolTensor::ndim"
-reason = "Pending Phase 2.13-bool-int — bool & int tensors. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#775"
-
-[[exclusion]]
-path = "ferrotorch_core::bool_tensor::BoolTensor::ne"
-reason = "Pending Phase 2.13-bool-int — bool & int tensors. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#775"
-
-[[exclusion]]
-path = "ferrotorch_core::bool_tensor::BoolTensor::not"
-reason = "Pending Phase 2.13-bool-int — bool & int tensors. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#775"
-
-[[exclusion]]
-path = "ferrotorch_core::bool_tensor::BoolTensor::numel"
-reason = "Pending Phase 2.13-bool-int — bool & int tensors. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#775"
-
-[[exclusion]]
-path = "ferrotorch_core::bool_tensor::BoolTensor::ones"
-reason = "Pending Phase 2.13-bool-int — bool & int tensors. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#775"
-
-[[exclusion]]
-path = "ferrotorch_core::bool_tensor::BoolTensor::or"
-reason = "Pending Phase 2.13-bool-int — bool & int tensors. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#775"
-
-[[exclusion]]
-path = "ferrotorch_core::bool_tensor::BoolTensor::reshape"
-reason = "Pending Phase 2.13-bool-int — bool & int tensors. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#775"
-
-[[exclusion]]
-path = "ferrotorch_core::bool_tensor::BoolTensor::shape"
-reason = "Pending Phase 2.13-bool-int — bool & int tensors. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#775"
-
-[[exclusion]]
-path = "ferrotorch_core::bool_tensor::BoolTensor::to_float"
-reason = "Pending Phase 2.13-bool-int — bool & int tensors. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#775"
-
-[[exclusion]]
-path = "ferrotorch_core::bool_tensor::BoolTensor::xor"
-reason = "Pending Phase 2.13-bool-int — bool & int tensors. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#775"
-
-[[exclusion]]
-path = "ferrotorch_core::bool_tensor::BoolTensor::zeros"
-reason = "Pending Phase 2.13-bool-int — bool & int tensors. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#775"
-
-[[exclusion]]
 path = "ferrotorch_core::check_gradient_anomaly"
 reason = "Pending Phase 2.10-autograd — autograd internals. Top-level re-export of an item whose canonical path is also pending coverage in the same phase."
 tracking_issue = "#772"
-
-[[exclusion]]
-path = "ferrotorch_core::complex_tensor::ComplexTensor"
-reason = "Pending Phase 2.7-fft-complex — FFT, complex, signal. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#769"
-
-[[exclusion]]
-path = "ferrotorch_core::complex_tensor::ComplexTensor <T>::abs"
-reason = "Pending Phase 2.7-fft-complex — FFT, complex, signal. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#769"
-
-[[exclusion]]
-path = "ferrotorch_core::complex_tensor::ComplexTensor <T>::add"
-reason = "Pending Phase 2.7-fft-complex — FFT, complex, signal. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#769"
-
-[[exclusion]]
-path = "ferrotorch_core::complex_tensor::ComplexTensor <T>::angle"
-reason = "Pending Phase 2.7-fft-complex — FFT, complex, signal. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#769"
-
-[[exclusion]]
-path = "ferrotorch_core::complex_tensor::ComplexTensor <T>::conj"
-reason = "Pending Phase 2.7-fft-complex — FFT, complex, signal. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#769"
-
-[[exclusion]]
-path = "ferrotorch_core::complex_tensor::ComplexTensor <T>::fft"
-reason = "Pending Phase 2.7-fft-complex — FFT, complex, signal. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#769"
-
-[[exclusion]]
-path = "ferrotorch_core::complex_tensor::ComplexTensor <T>::fft2"
-reason = "Pending Phase 2.7-fft-complex — FFT, complex, signal. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#769"
-
-[[exclusion]]
-path = "ferrotorch_core::complex_tensor::ComplexTensor <T>::from_interleaved"
-reason = "Pending Phase 2.7-fft-complex — FFT, complex, signal. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#769"
-
-[[exclusion]]
-path = "ferrotorch_core::complex_tensor::ComplexTensor <T>::from_re_im"
-reason = "Pending Phase 2.7-fft-complex — FFT, complex, signal. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#769"
-
-[[exclusion]]
-path = "ferrotorch_core::complex_tensor::ComplexTensor <T>::from_real"
-reason = "Pending Phase 2.7-fft-complex — FFT, complex, signal. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#769"
-
-[[exclusion]]
-path = "ferrotorch_core::complex_tensor::ComplexTensor <T>::ifft"
-reason = "Pending Phase 2.7-fft-complex — FFT, complex, signal. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#769"
-
-[[exclusion]]
-path = "ferrotorch_core::complex_tensor::ComplexTensor <T>::ifft2"
-reason = "Pending Phase 2.7-fft-complex — FFT, complex, signal. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#769"
-
-[[exclusion]]
-path = "ferrotorch_core::complex_tensor::ComplexTensor <T>::im"
-reason = "Pending Phase 2.7-fft-complex — FFT, complex, signal. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#769"
-
-[[exclusion]]
-path = "ferrotorch_core::complex_tensor::ComplexTensor <T>::imag"
-reason = "Pending Phase 2.7-fft-complex — FFT, complex, signal. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#769"
-
-[[exclusion]]
-path = "ferrotorch_core::complex_tensor::ComplexTensor <T>::matmul"
-reason = "Pending Phase 2.7-fft-complex — FFT, complex, signal. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#769"
-
-[[exclusion]]
-path = "ferrotorch_core::complex_tensor::ComplexTensor <T>::mul"
-reason = "Pending Phase 2.7-fft-complex — FFT, complex, signal. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#769"
-
-[[exclusion]]
-path = "ferrotorch_core::complex_tensor::ComplexTensor <T>::ndim"
-reason = "Pending Phase 2.7-fft-complex — FFT, complex, signal. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#769"
-
-[[exclusion]]
-path = "ferrotorch_core::complex_tensor::ComplexTensor <T>::numel"
-reason = "Pending Phase 2.7-fft-complex — FFT, complex, signal. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#769"
-
-[[exclusion]]
-path = "ferrotorch_core::complex_tensor::ComplexTensor <T>::re"
-reason = "Pending Phase 2.7-fft-complex — FFT, complex, signal. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#769"
-
-[[exclusion]]
-path = "ferrotorch_core::complex_tensor::ComplexTensor <T>::real"
-reason = "Pending Phase 2.7-fft-complex — FFT, complex, signal. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#769"
-
-[[exclusion]]
-path = "ferrotorch_core::complex_tensor::ComplexTensor <T>::reshape"
-reason = "Pending Phase 2.7-fft-complex — FFT, complex, signal. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#769"
-
-[[exclusion]]
-path = "ferrotorch_core::complex_tensor::ComplexTensor <T>::scalar"
-reason = "Pending Phase 2.7-fft-complex — FFT, complex, signal. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#769"
-
-[[exclusion]]
-path = "ferrotorch_core::complex_tensor::ComplexTensor <T>::shape"
-reason = "Pending Phase 2.7-fft-complex — FFT, complex, signal. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#769"
-
-[[exclusion]]
-path = "ferrotorch_core::complex_tensor::ComplexTensor <T>::sub"
-reason = "Pending Phase 2.7-fft-complex — FFT, complex, signal. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#769"
-
-[[exclusion]]
-path = "ferrotorch_core::complex_tensor::ComplexTensor <T>::to_interleaved"
-reason = "Pending Phase 2.7-fft-complex — FFT, complex, signal. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#769"
-
-[[exclusion]]
-path = "ferrotorch_core::complex_tensor::ComplexTensor <T>::zeros"
-reason = "Pending Phase 2.7-fft-complex — FFT, complex, signal. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#769"
 
 [[exclusion]]
 path = "ferrotorch_core::cond"
@@ -1258,16 +878,6 @@ tracking_issue = "#776"
 path = "ferrotorch_core::cpu_pool::reset_cpu_pool_stats"
 reason = "Pending Phase 2.14-plumbing — plumbing & core types. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
 tracking_issue = "#776"
-
-[[exclusion]]
-path = "ferrotorch_core::cuda_rng"
-reason = "Pending Phase 2.9-quantize-prune — quantize & prune. Top-level re-export of an item whose canonical path is also pending coverage in the same phase."
-tracking_issue = "#771"
-
-[[exclusion]]
-path = "ferrotorch_core::dequantize"
-reason = "Pending Phase 2.9-quantize-prune — quantize & prune. Top-level re-export of an item whose canonical path is also pending coverage in the same phase."
-tracking_issue = "#771"
 
 [[exclusion]]
 path = "ferrotorch_core::detect_anomaly"
@@ -1515,121 +1125,6 @@ reason = "Pending Phase 2.14-plumbing — plumbing & core types. The phase will 
 tracking_issue = "#776"
 
 [[exclusion]]
-path = "ferrotorch_core::fake_quantize_differentiable"
-reason = "Pending Phase 2.9-quantize-prune — quantize & prune. Top-level re-export of an item whose canonical path is also pending coverage in the same phase."
-tracking_issue = "#771"
-
-[[exclusion]]
-path = "ferrotorch_core::fft"
-reason = "Pending Phase 2.7-fft-complex — FFT, complex, signal. Top-level re-export of an item whose canonical path is also pending coverage in the same phase."
-tracking_issue = "#769"
-
-[[exclusion]]
-path = "ferrotorch_core::fft2"
-reason = "Pending Phase 2.7-fft-complex — FFT, complex, signal. Top-level re-export of an item whose canonical path is also pending coverage in the same phase."
-tracking_issue = "#769"
-
-[[exclusion]]
-path = "ferrotorch_core::fft::fft"
-reason = "Pending Phase 2.7-fft-complex — FFT, complex, signal. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#769"
-
-[[exclusion]]
-path = "ferrotorch_core::fft::fft2"
-reason = "Pending Phase 2.7-fft-complex — FFT, complex, signal. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#769"
-
-[[exclusion]]
-path = "ferrotorch_core::fft::fftfreq"
-reason = "Pending Phase 2.7-fft-complex — FFT, complex, signal. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#769"
-
-[[exclusion]]
-path = "ferrotorch_core::fft::fftn"
-reason = "Pending Phase 2.7-fft-complex — FFT, complex, signal. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#769"
-
-[[exclusion]]
-path = "ferrotorch_core::fft::fftshift"
-reason = "Pending Phase 2.7-fft-complex — FFT, complex, signal. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#769"
-
-[[exclusion]]
-path = "ferrotorch_core::fft::hfft"
-reason = "Pending Phase 2.7-fft-complex — FFT, complex, signal. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#769"
-
-[[exclusion]]
-path = "ferrotorch_core::fft::ifft"
-reason = "Pending Phase 2.7-fft-complex — FFT, complex, signal. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#769"
-
-[[exclusion]]
-path = "ferrotorch_core::fft::ifft2"
-reason = "Pending Phase 2.7-fft-complex — FFT, complex, signal. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#769"
-
-[[exclusion]]
-path = "ferrotorch_core::fft::ifftn"
-reason = "Pending Phase 2.7-fft-complex — FFT, complex, signal. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#769"
-
-[[exclusion]]
-path = "ferrotorch_core::fft::ifftshift"
-reason = "Pending Phase 2.7-fft-complex — FFT, complex, signal. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#769"
-
-[[exclusion]]
-path = "ferrotorch_core::fft::ihfft"
-reason = "Pending Phase 2.7-fft-complex — FFT, complex, signal. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#769"
-
-[[exclusion]]
-path = "ferrotorch_core::fft::irfft"
-reason = "Pending Phase 2.7-fft-complex — FFT, complex, signal. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#769"
-
-[[exclusion]]
-path = "ferrotorch_core::fft::irfftn"
-reason = "Pending Phase 2.7-fft-complex — FFT, complex, signal. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#769"
-
-[[exclusion]]
-path = "ferrotorch_core::fft::rfft"
-reason = "Pending Phase 2.7-fft-complex — FFT, complex, signal. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#769"
-
-[[exclusion]]
-path = "ferrotorch_core::fft::rfftfreq"
-reason = "Pending Phase 2.7-fft-complex — FFT, complex, signal. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#769"
-
-[[exclusion]]
-path = "ferrotorch_core::fft::rfftn"
-reason = "Pending Phase 2.7-fft-complex — FFT, complex, signal. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#769"
-
-[[exclusion]]
-path = "ferrotorch_core::fft_differentiable"
-reason = "Pending Phase 2.7-fft-complex — FFT, complex, signal. Top-level re-export of an item whose canonical path is also pending coverage in the same phase."
-tracking_issue = "#769"
-
-[[exclusion]]
-path = "ferrotorch_core::fftfreq"
-reason = "Pending Phase 2.7-fft-complex — FFT, complex, signal. Top-level re-export of an item whose canonical path is also pending coverage in the same phase."
-tracking_issue = "#769"
-
-[[exclusion]]
-path = "ferrotorch_core::fftn"
-reason = "Pending Phase 2.7-fft-complex — FFT, complex, signal. Top-level re-export of an item whose canonical path is also pending coverage in the same phase."
-tracking_issue = "#769"
-
-[[exclusion]]
-path = "ferrotorch_core::fftshift"
-reason = "Pending Phase 2.7-fft-complex — FFT, complex, signal. Top-level re-export of an item whose canonical path is also pending coverage in the same phase."
-tracking_issue = "#769"
-
-[[exclusion]]
 path = "ferrotorch_core::fixed_point"
 reason = "Pending Phase 2.10-autograd — autograd internals. Top-level re-export of an item whose canonical path is also pending coverage in the same phase."
 tracking_issue = "#772"
@@ -1760,156 +1255,6 @@ reason = "Implicit coverage: autograd grad_fn for logcumsumexp; tested via logcu
 tracking_issue = "#764"
 
 [[exclusion]]
-path = "ferrotorch_core::grad_fns::fft::FftBackward"
-reason = "Pending Phase 2.7-fft-complex — FFT, complex, signal. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#769"
-
-[[exclusion]]
-path = "ferrotorch_core::grad_fns::fft::FftBackward <T>::new"
-reason = "Pending Phase 2.7-fft-complex — FFT, complex, signal. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#769"
-
-[[exclusion]]
-path = "ferrotorch_core::grad_fns::fft::FftnBackward"
-reason = "Pending Phase 2.7-fft-complex — FFT, complex, signal. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#769"
-
-[[exclusion]]
-path = "ferrotorch_core::grad_fns::fft::FftnBackward <T>::new"
-reason = "Pending Phase 2.7-fft-complex — FFT, complex, signal. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#769"
-
-[[exclusion]]
-path = "ferrotorch_core::grad_fns::fft::HfftBackward"
-reason = "Pending Phase 2.7-fft-complex — FFT, complex, signal. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#769"
-
-[[exclusion]]
-path = "ferrotorch_core::grad_fns::fft::HfftBackward <T>::new"
-reason = "Pending Phase 2.7-fft-complex — FFT, complex, signal. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#769"
-
-[[exclusion]]
-path = "ferrotorch_core::grad_fns::fft::IfftBackward"
-reason = "Pending Phase 2.7-fft-complex — FFT, complex, signal. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#769"
-
-[[exclusion]]
-path = "ferrotorch_core::grad_fns::fft::IfftBackward <T>::new"
-reason = "Pending Phase 2.7-fft-complex — FFT, complex, signal. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#769"
-
-[[exclusion]]
-path = "ferrotorch_core::grad_fns::fft::IfftnBackward"
-reason = "Pending Phase 2.7-fft-complex — FFT, complex, signal. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#769"
-
-[[exclusion]]
-path = "ferrotorch_core::grad_fns::fft::IfftnBackward <T>::new"
-reason = "Pending Phase 2.7-fft-complex — FFT, complex, signal. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#769"
-
-[[exclusion]]
-path = "ferrotorch_core::grad_fns::fft::IhfftBackward"
-reason = "Pending Phase 2.7-fft-complex — FFT, complex, signal. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#769"
-
-[[exclusion]]
-path = "ferrotorch_core::grad_fns::fft::IhfftBackward <T>::new"
-reason = "Pending Phase 2.7-fft-complex — FFT, complex, signal. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#769"
-
-[[exclusion]]
-path = "ferrotorch_core::grad_fns::fft::IrfftBackward"
-reason = "Pending Phase 2.7-fft-complex — FFT, complex, signal. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#769"
-
-[[exclusion]]
-path = "ferrotorch_core::grad_fns::fft::IrfftBackward <T>::new"
-reason = "Pending Phase 2.7-fft-complex — FFT, complex, signal. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#769"
-
-[[exclusion]]
-path = "ferrotorch_core::grad_fns::fft::IrfftnBackward"
-reason = "Pending Phase 2.7-fft-complex — FFT, complex, signal. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#769"
-
-[[exclusion]]
-path = "ferrotorch_core::grad_fns::fft::IrfftnBackward <T>::new"
-reason = "Pending Phase 2.7-fft-complex — FFT, complex, signal. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#769"
-
-[[exclusion]]
-path = "ferrotorch_core::grad_fns::fft::RfftBackward"
-reason = "Pending Phase 2.7-fft-complex — FFT, complex, signal. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#769"
-
-[[exclusion]]
-path = "ferrotorch_core::grad_fns::fft::RfftBackward <T>::new"
-reason = "Pending Phase 2.7-fft-complex — FFT, complex, signal. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#769"
-
-[[exclusion]]
-path = "ferrotorch_core::grad_fns::fft::RfftnBackward"
-reason = "Pending Phase 2.7-fft-complex — FFT, complex, signal. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#769"
-
-[[exclusion]]
-path = "ferrotorch_core::grad_fns::fft::RfftnBackward <T>::new"
-reason = "Pending Phase 2.7-fft-complex — FFT, complex, signal. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#769"
-
-[[exclusion]]
-path = "ferrotorch_core::grad_fns::fft::fft_differentiable"
-reason = "Pending Phase 2.7-fft-complex — FFT, complex, signal. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#769"
-
-[[exclusion]]
-path = "ferrotorch_core::grad_fns::fft::fftn_differentiable"
-reason = "Pending Phase 2.7-fft-complex — FFT, complex, signal. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#769"
-
-[[exclusion]]
-path = "ferrotorch_core::grad_fns::fft::hfft_differentiable"
-reason = "Pending Phase 2.7-fft-complex — FFT, complex, signal. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#769"
-
-[[exclusion]]
-path = "ferrotorch_core::grad_fns::fft::ifft_differentiable"
-reason = "Pending Phase 2.7-fft-complex — FFT, complex, signal. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#769"
-
-[[exclusion]]
-path = "ferrotorch_core::grad_fns::fft::ifftn_differentiable"
-reason = "Pending Phase 2.7-fft-complex — FFT, complex, signal. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#769"
-
-[[exclusion]]
-path = "ferrotorch_core::grad_fns::fft::ihfft_differentiable"
-reason = "Pending Phase 2.7-fft-complex — FFT, complex, signal. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#769"
-
-[[exclusion]]
-path = "ferrotorch_core::grad_fns::fft::irfft_differentiable"
-reason = "Pending Phase 2.7-fft-complex — FFT, complex, signal. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#769"
-
-[[exclusion]]
-path = "ferrotorch_core::grad_fns::fft::irfftn_differentiable"
-reason = "Pending Phase 2.7-fft-complex — FFT, complex, signal. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#769"
-
-[[exclusion]]
-path = "ferrotorch_core::grad_fns::fft::rfft_differentiable"
-reason = "Pending Phase 2.7-fft-complex — FFT, complex, signal. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#769"
-
-[[exclusion]]
-path = "ferrotorch_core::grad_fns::fft::rfftn_differentiable"
-reason = "Pending Phase 2.7-fft-complex — FFT, complex, signal. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#769"
-
-[[exclusion]]
 path = "ferrotorch_core::grad_fns::indexing::GatherBackward"
 reason = "Pending Phase 2.3-shape — shape, indexing, view. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
 tracking_issue = "#765"
@@ -1988,11 +1333,6 @@ tracking_issue = "#766"
 path = "ferrotorch_core::grad_fns::linalg::MvBackward <T>::new"
 reason = "Pending Phase 2.4-linalg — linalg. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
 tracking_issue = "#766"
-
-[[exclusion]]
-path = "ferrotorch_core::grad_fns::quantize_grad::fake_quantize_differentiable"
-reason = "Pending Phase 2.9-quantize-prune — quantize & prune. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#771"
 
 [[exclusion]]
 path = "ferrotorch_core::grad_fns::reduction::AmaxBackward"
@@ -2125,126 +1465,6 @@ reason = "Pending Phase 2.10-autograd — autograd internals. Top-level re-expor
 tracking_issue = "#772"
 
 [[exclusion]]
-path = "ferrotorch_core::hfft"
-reason = "Pending Phase 2.7-fft-complex — FFT, complex, signal. Top-level re-export of an item whose canonical path is also pending coverage in the same phase."
-tracking_issue = "#769"
-
-[[exclusion]]
-path = "ferrotorch_core::ifft"
-reason = "Pending Phase 2.7-fft-complex — FFT, complex, signal. Top-level re-export of an item whose canonical path is also pending coverage in the same phase."
-tracking_issue = "#769"
-
-[[exclusion]]
-path = "ferrotorch_core::ifft2"
-reason = "Pending Phase 2.7-fft-complex — FFT, complex, signal. Top-level re-export of an item whose canonical path is also pending coverage in the same phase."
-tracking_issue = "#769"
-
-[[exclusion]]
-path = "ferrotorch_core::ifft_differentiable"
-reason = "Pending Phase 2.7-fft-complex — FFT, complex, signal. Top-level re-export of an item whose canonical path is also pending coverage in the same phase."
-tracking_issue = "#769"
-
-[[exclusion]]
-path = "ferrotorch_core::ifftn"
-reason = "Pending Phase 2.7-fft-complex — FFT, complex, signal. Top-level re-export of an item whose canonical path is also pending coverage in the same phase."
-tracking_issue = "#769"
-
-[[exclusion]]
-path = "ferrotorch_core::ifftshift"
-reason = "Pending Phase 2.7-fft-complex — FFT, complex, signal. Top-level re-export of an item whose canonical path is also pending coverage in the same phase."
-tracking_issue = "#769"
-
-[[exclusion]]
-path = "ferrotorch_core::ihfft"
-reason = "Pending Phase 2.7-fft-complex — FFT, complex, signal. Top-level re-export of an item whose canonical path is also pending coverage in the same phase."
-tracking_issue = "#769"
-
-[[exclusion]]
-path = "ferrotorch_core::int_tensor::IntElement"
-reason = "Pending Phase 2.13-bool-int — bool & int tensors. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#775"
-
-[[exclusion]]
-path = "ferrotorch_core::int_tensor::IntTensor"
-reason = "Pending Phase 2.13-bool-int — bool & int tensors. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#775"
-
-[[exclusion]]
-path = "ferrotorch_core::int_tensor::IntTensor <I>::arange"
-reason = "Pending Phase 2.13-bool-int — bool & int tensors. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#775"
-
-[[exclusion]]
-path = "ferrotorch_core::int_tensor::IntTensor <I>::cast"
-reason = "Pending Phase 2.13-bool-int — bool & int tensors. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#775"
-
-[[exclusion]]
-path = "ferrotorch_core::int_tensor::IntTensor <I>::data"
-reason = "Pending Phase 2.13-bool-int — bool & int tensors. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#775"
-
-[[exclusion]]
-path = "ferrotorch_core::int_tensor::IntTensor <I>::dtype_name"
-reason = "Pending Phase 2.13-bool-int — bool & int tensors. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#775"
-
-[[exclusion]]
-path = "ferrotorch_core::int_tensor::IntTensor <I>::from_slice"
-reason = "Pending Phase 2.13-bool-int — bool & int tensors. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#775"
-
-[[exclusion]]
-path = "ferrotorch_core::int_tensor::IntTensor <I>::from_vec"
-reason = "Pending Phase 2.13-bool-int — bool & int tensors. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#775"
-
-[[exclusion]]
-path = "ferrotorch_core::int_tensor::IntTensor <I>::ndim"
-reason = "Pending Phase 2.13-bool-int — bool & int tensors. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#775"
-
-[[exclusion]]
-path = "ferrotorch_core::int_tensor::IntTensor <I>::numel"
-reason = "Pending Phase 2.13-bool-int — bool & int tensors. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#775"
-
-[[exclusion]]
-path = "ferrotorch_core::int_tensor::IntTensor <I>::reshape"
-reason = "Pending Phase 2.13-bool-int — bool & int tensors. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#775"
-
-[[exclusion]]
-path = "ferrotorch_core::int_tensor::IntTensor <I>::scalar"
-reason = "Pending Phase 2.13-bool-int — bool & int tensors. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#775"
-
-[[exclusion]]
-path = "ferrotorch_core::int_tensor::IntTensor <I>::shape"
-reason = "Pending Phase 2.13-bool-int — bool & int tensors. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#775"
-
-[[exclusion]]
-path = "ferrotorch_core::int_tensor::IntTensor <I>::zeros"
-reason = "Pending Phase 2.13-bool-int — bool & int tensors. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#775"
-
-[[exclusion]]
-path = "ferrotorch_core::irfft"
-reason = "Pending Phase 2.7-fft-complex — FFT, complex, signal. Top-level re-export of an item whose canonical path is also pending coverage in the same phase."
-tracking_issue = "#769"
-
-[[exclusion]]
-path = "ferrotorch_core::irfft_differentiable"
-reason = "Pending Phase 2.7-fft-complex — FFT, complex, signal. Top-level re-export of an item whose canonical path is also pending coverage in the same phase."
-tracking_issue = "#769"
-
-[[exclusion]]
-path = "ferrotorch_core::irfftn"
-reason = "Pending Phase 2.7-fft-complex — FFT, complex, signal. Top-level re-export of an item whose canonical path is also pending coverage in the same phase."
-tracking_issue = "#769"
-
-[[exclusion]]
 path = "ferrotorch_core::is_autocast_debug"
 reason = "Pending Phase 2.10-autograd — autograd internals. Top-level re-export of an item whose canonical path is also pending coverage in the same phase."
 tracking_issue = "#772"
@@ -2278,161 +1498,6 @@ tracking_issue = "#772"
 path = "ferrotorch_core::jvp_exact"
 reason = "Pending Phase 2.10-autograd — autograd internals. Top-level re-export of an item whose canonical path is also pending coverage in the same phase."
 tracking_issue = "#772"
-
-[[exclusion]]
-path = "ferrotorch_core::magnitude_prune"
-reason = "Pending Phase 2.9-quantize-prune — quantize & prune. Top-level re-export of an item whose canonical path is also pending coverage in the same phase."
-tracking_issue = "#771"
-
-[[exclusion]]
-path = "ferrotorch_core::masked::MaskedTensor"
-reason = "Pending Phase 2.12-masked — masked tensors. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#774"
-
-[[exclusion]]
-path = "ferrotorch_core::masked::MaskedTensor <T>::count_masked"
-reason = "Pending Phase 2.12-masked — masked tensors. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#774"
-
-[[exclusion]]
-path = "ferrotorch_core::masked::MaskedTensor <T>::count_valid"
-reason = "Pending Phase 2.12-masked — masked tensors. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#774"
-
-[[exclusion]]
-path = "ferrotorch_core::masked::MaskedTensor <T>::data"
-reason = "Pending Phase 2.12-masked — masked tensors. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#774"
-
-[[exclusion]]
-path = "ferrotorch_core::masked::MaskedTensor <T>::fill_value"
-reason = "Pending Phase 2.12-masked — masked tensors. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#774"
-
-[[exclusion]]
-path = "ferrotorch_core::masked::MaskedTensor <T>::filled"
-reason = "Pending Phase 2.12-masked — masked tensors. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#774"
-
-[[exclusion]]
-path = "ferrotorch_core::masked::MaskedTensor <T>::from_data"
-reason = "Pending Phase 2.12-masked — masked tensors. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#774"
-
-[[exclusion]]
-path = "ferrotorch_core::masked::MaskedTensor <T>::mask"
-reason = "Pending Phase 2.12-masked — masked tensors. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#774"
-
-[[exclusion]]
-path = "ferrotorch_core::masked::MaskedTensor <T>::new"
-reason = "Pending Phase 2.12-masked — masked tensors. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#774"
-
-[[exclusion]]
-path = "ferrotorch_core::masked::MaskedTensor <T>::numel"
-reason = "Pending Phase 2.12-masked — masked tensors. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#774"
-
-[[exclusion]]
-path = "ferrotorch_core::masked::MaskedTensor <T>::shape"
-reason = "Pending Phase 2.12-masked — masked tensors. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#774"
-
-[[exclusion]]
-path = "ferrotorch_core::masked::MaskedTensor <T>::to_ferray"
-reason = "Pending Phase 2.12-masked — masked tensors. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#774"
-
-[[exclusion]]
-path = "ferrotorch_core::masked::MaskedTensor <T>::to_tensor"
-reason = "Pending Phase 2.12-masked — masked tensors. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#774"
-
-[[exclusion]]
-path = "ferrotorch_core::masked::MaskedTensor <T>::with_fill_value"
-reason = "Pending Phase 2.12-masked — masked tensors. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#774"
-
-[[exclusion]]
-path = "ferrotorch_core::masked::masked_count"
-reason = "Pending Phase 2.12-masked — masked tensors. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#774"
-
-[[exclusion]]
-path = "ferrotorch_core::masked::masked_equal"
-reason = "Pending Phase 2.12-masked — masked tensors. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#774"
-
-[[exclusion]]
-path = "ferrotorch_core::masked::masked_invalid"
-reason = "Pending Phase 2.12-masked — masked tensors. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#774"
-
-[[exclusion]]
-path = "ferrotorch_core::masked::masked_max"
-reason = "Pending Phase 2.12-masked — masked tensors. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#774"
-
-[[exclusion]]
-path = "ferrotorch_core::masked::masked_mean"
-reason = "Pending Phase 2.12-masked — masked tensors. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#774"
-
-[[exclusion]]
-path = "ferrotorch_core::masked::masked_min"
-reason = "Pending Phase 2.12-masked — masked tensors. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#774"
-
-[[exclusion]]
-path = "ferrotorch_core::masked::masked_sum"
-reason = "Pending Phase 2.12-masked — masked tensors. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#774"
-
-[[exclusion]]
-path = "ferrotorch_core::masked::masked_where"
-reason = "Pending Phase 2.12-masked — masked tensors. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#774"
-
-[[exclusion]]
-path = "ferrotorch_core::masked_count"
-reason = "Pending Phase 2.12-masked — masked tensors. Top-level re-export of an item whose canonical path is also pending coverage in the same phase."
-tracking_issue = "#774"
-
-[[exclusion]]
-path = "ferrotorch_core::masked_equal"
-reason = "Pending Phase 2.12-masked — masked tensors. Top-level re-export of an item whose canonical path is also pending coverage in the same phase."
-tracking_issue = "#774"
-
-[[exclusion]]
-path = "ferrotorch_core::masked_invalid"
-reason = "Pending Phase 2.12-masked — masked tensors. Top-level re-export of an item whose canonical path is also pending coverage in the same phase."
-tracking_issue = "#774"
-
-[[exclusion]]
-path = "ferrotorch_core::masked_max"
-reason = "Pending Phase 2.12-masked — masked tensors. Top-level re-export of an item whose canonical path is also pending coverage in the same phase."
-tracking_issue = "#774"
-
-[[exclusion]]
-path = "ferrotorch_core::masked_mean"
-reason = "Pending Phase 2.12-masked — masked tensors. Top-level re-export of an item whose canonical path is also pending coverage in the same phase."
-tracking_issue = "#774"
-
-[[exclusion]]
-path = "ferrotorch_core::masked_min"
-reason = "Pending Phase 2.12-masked — masked tensors. Top-level re-export of an item whose canonical path is also pending coverage in the same phase."
-tracking_issue = "#774"
-
-[[exclusion]]
-path = "ferrotorch_core::masked_sum"
-reason = "Pending Phase 2.12-masked — masked tensors. Top-level re-export of an item whose canonical path is also pending coverage in the same phase."
-tracking_issue = "#774"
-
-[[exclusion]]
-path = "ferrotorch_core::masked_where"
-reason = "Pending Phase 2.12-masked — masked tensors. Top-level re-export of an item whose canonical path is also pending coverage in the same phase."
-tracking_issue = "#774"
 
 [[exclusion]]
 path = "ferrotorch_core::meta_propagate::binary_broadcast"
@@ -2530,166 +1595,6 @@ reason = "Pending Phase 2.14-plumbing — plumbing & core types. The phase will 
 tracking_issue = "#776"
 
 [[exclusion]]
-path = "ferrotorch_core::nested::NestedTensor"
-reason = "Pending Phase 2.8-nested-sparse — nested & sparse. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#770"
-
-[[exclusion]]
-path = "ferrotorch_core::nested::NestedTensor <T>::consistent_shape"
-reason = "Pending Phase 2.8-nested-sparse — nested & sparse. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#770"
-
-[[exclusion]]
-path = "ferrotorch_core::nested::NestedTensor <T>::from_padded"
-reason = "Pending Phase 2.8-nested-sparse — nested & sparse. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#770"
-
-[[exclusion]]
-path = "ferrotorch_core::nested::NestedTensor <T>::ndim"
-reason = "Pending Phase 2.8-nested-sparse — nested & sparse. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#770"
-
-[[exclusion]]
-path = "ferrotorch_core::nested::NestedTensor <T>::new"
-reason = "Pending Phase 2.8-nested-sparse — nested & sparse. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#770"
-
-[[exclusion]]
-path = "ferrotorch_core::nested::NestedTensor <T>::num_components"
-reason = "Pending Phase 2.8-nested-sparse — nested & sparse. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#770"
-
-[[exclusion]]
-path = "ferrotorch_core::nested::NestedTensor <T>::ragged_dim"
-reason = "Pending Phase 2.8-nested-sparse — nested & sparse. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#770"
-
-[[exclusion]]
-path = "ferrotorch_core::nested::NestedTensor <T>::ragged_lengths"
-reason = "Pending Phase 2.8-nested-sparse — nested & sparse. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#770"
-
-[[exclusion]]
-path = "ferrotorch_core::nested::NestedTensor <T>::tensors"
-reason = "Pending Phase 2.8-nested-sparse — nested & sparse. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#770"
-
-[[exclusion]]
-path = "ferrotorch_core::nested::NestedTensor <T>::to_padded"
-reason = "Pending Phase 2.8-nested-sparse — nested & sparse. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#770"
-
-[[exclusion]]
-path = "ferrotorch_core::nested::PackedNestedTensor"
-reason = "Pending Phase 2.8-nested-sparse — nested & sparse. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#770"
-
-[[exclusion]]
-path = "ferrotorch_core::nested::PackedNestedTensor <T>::add"
-reason = "Pending Phase 2.8-nested-sparse — nested & sparse. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#770"
-
-[[exclusion]]
-path = "ferrotorch_core::nested::PackedNestedTensor <T>::component_slice"
-reason = "Pending Phase 2.8-nested-sparse — nested & sparse. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#770"
-
-[[exclusion]]
-path = "ferrotorch_core::nested::PackedNestedTensor <T>::data"
-reason = "Pending Phase 2.8-nested-sparse — nested & sparse. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#770"
-
-[[exclusion]]
-path = "ferrotorch_core::nested::PackedNestedTensor <T>::div"
-reason = "Pending Phase 2.8-nested-sparse — nested & sparse. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#770"
-
-[[exclusion]]
-path = "ferrotorch_core::nested::PackedNestedTensor <T>::from_nested"
-reason = "Pending Phase 2.8-nested-sparse — nested & sparse. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#770"
-
-[[exclusion]]
-path = "ferrotorch_core::nested::PackedNestedTensor <T>::from_padded"
-reason = "Pending Phase 2.8-nested-sparse — nested & sparse. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#770"
-
-[[exclusion]]
-path = "ferrotorch_core::nested::PackedNestedTensor <T>::from_sequences"
-reason = "Pending Phase 2.8-nested-sparse — nested & sparse. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#770"
-
-[[exclusion]]
-path = "ferrotorch_core::nested::PackedNestedTensor <T>::length"
-reason = "Pending Phase 2.8-nested-sparse — nested & sparse. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#770"
-
-[[exclusion]]
-path = "ferrotorch_core::nested::PackedNestedTensor <T>::map"
-reason = "Pending Phase 2.8-nested-sparse — nested & sparse. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#770"
-
-[[exclusion]]
-path = "ferrotorch_core::nested::PackedNestedTensor <T>::mean_per_component"
-reason = "Pending Phase 2.8-nested-sparse — nested & sparse. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#770"
-
-[[exclusion]]
-path = "ferrotorch_core::nested::PackedNestedTensor <T>::mul"
-reason = "Pending Phase 2.8-nested-sparse — nested & sparse. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#770"
-
-[[exclusion]]
-path = "ferrotorch_core::nested::PackedNestedTensor <T>::num_components"
-reason = "Pending Phase 2.8-nested-sparse — nested & sparse. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#770"
-
-[[exclusion]]
-path = "ferrotorch_core::nested::PackedNestedTensor <T>::offsets"
-reason = "Pending Phase 2.8-nested-sparse — nested & sparse. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#770"
-
-[[exclusion]]
-path = "ferrotorch_core::nested::PackedNestedTensor <T>::sub"
-reason = "Pending Phase 2.8-nested-sparse — nested & sparse. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#770"
-
-[[exclusion]]
-path = "ferrotorch_core::nested::PackedNestedTensor <T>::sum_per_component"
-reason = "Pending Phase 2.8-nested-sparse — nested & sparse. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#770"
-
-[[exclusion]]
-path = "ferrotorch_core::nested::PackedNestedTensor <T>::tail_shape"
-reason = "Pending Phase 2.8-nested-sparse — nested & sparse. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#770"
-
-[[exclusion]]
-path = "ferrotorch_core::nested::PackedNestedTensor <T>::to_nested"
-reason = "Pending Phase 2.8-nested-sparse — nested & sparse. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#770"
-
-[[exclusion]]
-path = "ferrotorch_core::nested::PackedNestedTensor <T>::to_padded"
-reason = "Pending Phase 2.8-nested-sparse — nested & sparse. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#770"
-
-[[exclusion]]
-path = "ferrotorch_core::nested::PackedNestedTensor <T>::total_numel"
-reason = "Pending Phase 2.8-nested-sparse — nested & sparse. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#770"
-
-[[exclusion]]
-path = "ferrotorch_core::nested::nested_scaled_dot_product_attention"
-reason = "Pending Phase 2.8-nested-sparse — nested & sparse. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#770"
-
-[[exclusion]]
-path = "ferrotorch_core::nested_scaled_dot_product_attention"
-reason = "Pending Phase 2.8-nested-sparse — nested & sparse. Top-level re-export of an item whose canonical path is also pending coverage in the same phase."
-tracking_issue = "#770"
-
-[[exclusion]]
 path = "ferrotorch_core::no_grad"
 reason = "Pending Phase 2.10-autograd — autograd internals. Top-level re-export of an item whose canonical path is also pending coverage in the same phase."
 tracking_issue = "#772"
@@ -2745,11 +1650,6 @@ reason = "Pending Phase 2.10-autograd — autograd internals. The phase will lan
 tracking_issue = "#772"
 
 [[exclusion]]
-path = "ferrotorch_core::prepare_qat"
-reason = "Pending Phase 2.9-quantize-prune — quantize & prune. Top-level re-export of an item whose canonical path is also pending coverage in the same phase."
-tracking_issue = "#771"
-
-[[exclusion]]
 path = "ferrotorch_core::profiler_hook::OpProfiler"
 reason = "Pending Phase 2.14-plumbing — plumbing & core types. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
 tracking_issue = "#776"
@@ -2770,256 +1670,6 @@ reason = "Pending Phase 2.14-plumbing — plumbing & core types. The phase will 
 tracking_issue = "#776"
 
 [[exclusion]]
-path = "ferrotorch_core::pruning::apply_2_4_mask"
-reason = "Pending Phase 2.9-quantize-prune — quantize & prune. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#771"
-
-[[exclusion]]
-path = "ferrotorch_core::pruning::magnitude_prune"
-reason = "Pending Phase 2.9-quantize-prune — quantize & prune. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#771"
-
-[[exclusion]]
-path = "ferrotorch_core::pruning::sparsity_ratio"
-reason = "Pending Phase 2.9-quantize-prune — quantize & prune. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#771"
-
-[[exclusion]]
-path = "ferrotorch_core::quantize"
-reason = "Pending Phase 2.9-quantize-prune — quantize & prune. Top-level re-export of an item whose canonical path is also pending coverage in the same phase."
-tracking_issue = "#771"
-
-[[exclusion]]
-path = "ferrotorch_core::quantize::FakeQuantize"
-reason = "Pending Phase 2.9-quantize-prune — quantize & prune. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#771"
-
-[[exclusion]]
-path = "ferrotorch_core::quantize::FakeQuantize::forward"
-reason = "Pending Phase 2.9-quantize-prune — quantize & prune. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#771"
-
-[[exclusion]]
-path = "ferrotorch_core::quantize::FakeQuantize::new"
-reason = "Pending Phase 2.9-quantize-prune — quantize & prune. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#771"
-
-[[exclusion]]
-path = "ferrotorch_core::quantize::HistogramObserver"
-reason = "Pending Phase 2.9-quantize-prune — quantize & prune. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#771"
-
-[[exclusion]]
-path = "ferrotorch_core::quantize::HistogramObserver::new"
-reason = "Pending Phase 2.9-quantize-prune — quantize & prune. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#771"
-
-[[exclusion]]
-path = "ferrotorch_core::quantize::MinMaxObserver"
-reason = "Pending Phase 2.9-quantize-prune — quantize & prune. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#771"
-
-[[exclusion]]
-path = "ferrotorch_core::quantize::MinMaxObserver::new"
-reason = "Pending Phase 2.9-quantize-prune — quantize & prune. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#771"
-
-[[exclusion]]
-path = "ferrotorch_core::quantize::Observer"
-reason = "Pending Phase 2.9-quantize-prune — quantize & prune. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#771"
-
-[[exclusion]]
-path = "ferrotorch_core::quantize::PerChannelMinMaxObserver"
-reason = "Pending Phase 2.9-quantize-prune — quantize & prune. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#771"
-
-[[exclusion]]
-path = "ferrotorch_core::quantize::PerChannelMinMaxObserver::new"
-reason = "Pending Phase 2.9-quantize-prune — quantize & prune. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#771"
-
-[[exclusion]]
-path = "ferrotorch_core::quantize::PerChannelMinMaxObserver::observe_with_shape"
-reason = "Pending Phase 2.9-quantize-prune — quantize & prune. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#771"
-
-[[exclusion]]
-path = "ferrotorch_core::quantize::QParams"
-reason = "Pending Phase 2.9-quantize-prune — quantize & prune. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#771"
-
-[[exclusion]]
-path = "ferrotorch_core::quantize::QParams::asymmetric"
-reason = "Pending Phase 2.9-quantize-prune — quantize & prune. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#771"
-
-[[exclusion]]
-path = "ferrotorch_core::quantize::QParams::symmetric"
-reason = "Pending Phase 2.9-quantize-prune — quantize & prune. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#771"
-
-[[exclusion]]
-path = "ferrotorch_core::quantize::QatLayer"
-reason = "Pending Phase 2.9-quantize-prune — quantize & prune. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#771"
-
-[[exclusion]]
-path = "ferrotorch_core::quantize::QatModel"
-reason = "Pending Phase 2.9-quantize-prune — quantize & prune. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#771"
-
-[[exclusion]]
-path = "ferrotorch_core::quantize::QatModel::fake_quantize_activations"
-reason = "Pending Phase 2.9-quantize-prune — quantize & prune. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#771"
-
-[[exclusion]]
-path = "ferrotorch_core::quantize::QatModel::fake_quantize_weights"
-reason = "Pending Phase 2.9-quantize-prune — quantize & prune. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#771"
-
-[[exclusion]]
-path = "ferrotorch_core::quantize::QatModel::new"
-reason = "Pending Phase 2.9-quantize-prune — quantize & prune. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#771"
-
-[[exclusion]]
-path = "ferrotorch_core::quantize::QatModel::register_layer"
-reason = "Pending Phase 2.9-quantize-prune — quantize & prune. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#771"
-
-[[exclusion]]
-path = "ferrotorch_core::quantize::QuantDtype"
-reason = "Pending Phase 2.9-quantize-prune — quantize & prune. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#771"
-
-[[exclusion]]
-path = "ferrotorch_core::quantize::QuantScheme"
-reason = "Pending Phase 2.9-quantize-prune — quantize & prune. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#771"
-
-[[exclusion]]
-path = "ferrotorch_core::quantize::QuantizedTensor"
-reason = "Pending Phase 2.9-quantize-prune — quantize & prune. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#771"
-
-[[exclusion]]
-path = "ferrotorch_core::quantize::QuantizedTensor::data"
-reason = "Pending Phase 2.9-quantize-prune — quantize & prune. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#771"
-
-[[exclusion]]
-path = "ferrotorch_core::quantize::QuantizedTensor::numel"
-reason = "Pending Phase 2.9-quantize-prune — quantize & prune. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#771"
-
-[[exclusion]]
-path = "ferrotorch_core::quantize::QuantizedTensor::qdtype"
-reason = "Pending Phase 2.9-quantize-prune — quantize & prune. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#771"
-
-[[exclusion]]
-path = "ferrotorch_core::quantize::QuantizedTensor::scale"
-reason = "Pending Phase 2.9-quantize-prune — quantize & prune. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#771"
-
-[[exclusion]]
-path = "ferrotorch_core::quantize::QuantizedTensor::scheme"
-reason = "Pending Phase 2.9-quantize-prune — quantize & prune. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#771"
-
-[[exclusion]]
-path = "ferrotorch_core::quantize::QuantizedTensor::shape"
-reason = "Pending Phase 2.9-quantize-prune — quantize & prune. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#771"
-
-[[exclusion]]
-path = "ferrotorch_core::quantize::QuantizedTensor::zero_point"
-reason = "Pending Phase 2.9-quantize-prune — quantize & prune. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#771"
-
-[[exclusion]]
-path = "ferrotorch_core::quantize::cuda_rng::fork_rng"
-reason = "Pending Phase 2.9-quantize-prune — quantize & prune. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#771"
-
-[[exclusion]]
-path = "ferrotorch_core::quantize::cuda_rng::get_state"
-reason = "Pending Phase 2.9-quantize-prune — quantize & prune. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#771"
-
-[[exclusion]]
-path = "ferrotorch_core::quantize::cuda_rng::join_rng"
-reason = "Pending Phase 2.9-quantize-prune — quantize & prune. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#771"
-
-[[exclusion]]
-path = "ferrotorch_core::quantize::cuda_rng::next_seed"
-reason = "Pending Phase 2.9-quantize-prune — quantize & prune. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#771"
-
-[[exclusion]]
-path = "ferrotorch_core::quantize::cuda_rng::set_state"
-reason = "Pending Phase 2.9-quantize-prune — quantize & prune. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#771"
-
-[[exclusion]]
-path = "ferrotorch_core::quantize::dequantize"
-reason = "Pending Phase 2.9-quantize-prune — quantize & prune. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#771"
-
-[[exclusion]]
-path = "ferrotorch_core::quantize::prepare_qat"
-reason = "Pending Phase 2.9-quantize-prune — quantize & prune. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#771"
-
-[[exclusion]]
-path = "ferrotorch_core::quantize::quantize"
-reason = "Pending Phase 2.9-quantize-prune — quantize & prune. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#771"
-
-[[exclusion]]
-path = "ferrotorch_core::quantize::quantize_named_tensors"
-reason = "Pending Phase 2.9-quantize-prune — quantize & prune. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#771"
-
-[[exclusion]]
-path = "ferrotorch_core::quantize::quantized_matmul"
-reason = "Pending Phase 2.9-quantize-prune — quantize & prune. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#771"
-
-[[exclusion]]
-path = "ferrotorch_core::quantize_named_tensors"
-reason = "Pending Phase 2.9-quantize-prune — quantize & prune. Top-level re-export of an item whose canonical path is also pending coverage in the same phase."
-tracking_issue = "#771"
-
-[[exclusion]]
-path = "ferrotorch_core::quantized_matmul"
-reason = "Pending Phase 2.9-quantize-prune — quantize & prune. Top-level re-export of an item whose canonical path is also pending coverage in the same phase."
-tracking_issue = "#771"
-
-[[exclusion]]
-path = "ferrotorch_core::rfft"
-reason = "Pending Phase 2.7-fft-complex — FFT, complex, signal. Top-level re-export of an item whose canonical path is also pending coverage in the same phase."
-tracking_issue = "#769"
-
-[[exclusion]]
-path = "ferrotorch_core::rfft_differentiable"
-reason = "Pending Phase 2.7-fft-complex — FFT, complex, signal. Top-level re-export of an item whose canonical path is also pending coverage in the same phase."
-tracking_issue = "#769"
-
-[[exclusion]]
-path = "ferrotorch_core::rfftfreq"
-reason = "Pending Phase 2.7-fft-complex — FFT, complex, signal. Top-level re-export of an item whose canonical path is also pending coverage in the same phase."
-tracking_issue = "#769"
-
-[[exclusion]]
-path = "ferrotorch_core::rfftn"
-reason = "Pending Phase 2.7-fft-complex — FFT, complex, signal. Top-level re-export of an item whose canonical path is also pending coverage in the same phase."
-tracking_issue = "#769"
-
-[[exclusion]]
 path = "ferrotorch_core::scan"
 reason = "Pending Phase 2.10-autograd — autograd internals. Top-level re-export of an item whose canonical path is also pending coverage in the same phase."
 tracking_issue = "#772"
@@ -3038,486 +1688,6 @@ tracking_issue = "#772"
 path = "ferrotorch_core::set_grad_enabled"
 reason = "Pending Phase 2.10-autograd — autograd internals. Top-level re-export of an item whose canonical path is also pending coverage in the same phase."
 tracking_issue = "#772"
-
-[[exclusion]]
-path = "ferrotorch_core::signal::bartlett"
-reason = "Pending Phase 2.7-fft-complex — FFT, complex, signal. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#769"
-
-[[exclusion]]
-path = "ferrotorch_core::signal::blackman"
-reason = "Pending Phase 2.7-fft-complex — FFT, complex, signal. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#769"
-
-[[exclusion]]
-path = "ferrotorch_core::signal::cosine"
-reason = "Pending Phase 2.7-fft-complex — FFT, complex, signal. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#769"
-
-[[exclusion]]
-path = "ferrotorch_core::signal::exponential"
-reason = "Pending Phase 2.7-fft-complex — FFT, complex, signal. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#769"
-
-[[exclusion]]
-path = "ferrotorch_core::signal::gaussian"
-reason = "Pending Phase 2.7-fft-complex — FFT, complex, signal. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#769"
-
-[[exclusion]]
-path = "ferrotorch_core::signal::general_cosine"
-reason = "Pending Phase 2.7-fft-complex — FFT, complex, signal. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#769"
-
-[[exclusion]]
-path = "ferrotorch_core::signal::general_hamming"
-reason = "Pending Phase 2.7-fft-complex — FFT, complex, signal. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#769"
-
-[[exclusion]]
-path = "ferrotorch_core::signal::hamming"
-reason = "Pending Phase 2.7-fft-complex — FFT, complex, signal. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#769"
-
-[[exclusion]]
-path = "ferrotorch_core::signal::hann"
-reason = "Pending Phase 2.7-fft-complex — FFT, complex, signal. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#769"
-
-[[exclusion]]
-path = "ferrotorch_core::signal::hanning"
-reason = "Pending Phase 2.7-fft-complex — FFT, complex, signal. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#769"
-
-[[exclusion]]
-path = "ferrotorch_core::signal::kaiser"
-reason = "Pending Phase 2.7-fft-complex — FFT, complex, signal. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#769"
-
-[[exclusion]]
-path = "ferrotorch_core::signal::nuttall"
-reason = "Pending Phase 2.7-fft-complex — FFT, complex, signal. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#769"
-
-[[exclusion]]
-path = "ferrotorch_core::signal::parzen"
-reason = "Pending Phase 2.7-fft-complex — FFT, complex, signal. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#769"
-
-[[exclusion]]
-path = "ferrotorch_core::signal::taylor"
-reason = "Pending Phase 2.7-fft-complex — FFT, complex, signal. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#769"
-
-[[exclusion]]
-path = "ferrotorch_core::signal::tukey"
-reason = "Pending Phase 2.7-fft-complex — FFT, complex, signal. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#769"
-
-[[exclusion]]
-path = "ferrotorch_core::signal::windows::bartlett"
-reason = "Pending Phase 2.7-fft-complex — FFT, complex, signal. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#769"
-
-[[exclusion]]
-path = "ferrotorch_core::signal::windows::blackman"
-reason = "Pending Phase 2.7-fft-complex — FFT, complex, signal. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#769"
-
-[[exclusion]]
-path = "ferrotorch_core::signal::windows::cosine"
-reason = "Pending Phase 2.7-fft-complex — FFT, complex, signal. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#769"
-
-[[exclusion]]
-path = "ferrotorch_core::signal::windows::exponential"
-reason = "Pending Phase 2.7-fft-complex — FFT, complex, signal. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#769"
-
-[[exclusion]]
-path = "ferrotorch_core::signal::windows::gaussian"
-reason = "Pending Phase 2.7-fft-complex — FFT, complex, signal. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#769"
-
-[[exclusion]]
-path = "ferrotorch_core::signal::windows::general_cosine"
-reason = "Pending Phase 2.7-fft-complex — FFT, complex, signal. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#769"
-
-[[exclusion]]
-path = "ferrotorch_core::signal::windows::general_hamming"
-reason = "Pending Phase 2.7-fft-complex — FFT, complex, signal. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#769"
-
-[[exclusion]]
-path = "ferrotorch_core::signal::windows::hamming"
-reason = "Pending Phase 2.7-fft-complex — FFT, complex, signal. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#769"
-
-[[exclusion]]
-path = "ferrotorch_core::signal::windows::hann"
-reason = "Pending Phase 2.7-fft-complex — FFT, complex, signal. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#769"
-
-[[exclusion]]
-path = "ferrotorch_core::signal::windows::hanning"
-reason = "Pending Phase 2.7-fft-complex — FFT, complex, signal. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#769"
-
-[[exclusion]]
-path = "ferrotorch_core::signal::windows::kaiser"
-reason = "Pending Phase 2.7-fft-complex — FFT, complex, signal. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#769"
-
-[[exclusion]]
-path = "ferrotorch_core::signal::windows::nuttall"
-reason = "Pending Phase 2.7-fft-complex — FFT, complex, signal. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#769"
-
-[[exclusion]]
-path = "ferrotorch_core::signal::windows::parzen"
-reason = "Pending Phase 2.7-fft-complex — FFT, complex, signal. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#769"
-
-[[exclusion]]
-path = "ferrotorch_core::signal::windows::taylor"
-reason = "Pending Phase 2.7-fft-complex — FFT, complex, signal. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#769"
-
-[[exclusion]]
-path = "ferrotorch_core::signal::windows::tukey"
-reason = "Pending Phase 2.7-fft-complex — FFT, complex, signal. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#769"
-
-[[exclusion]]
-path = "ferrotorch_core::sparse::CooTensor"
-reason = "Pending Phase 2.8-nested-sparse — nested & sparse. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#770"
-
-[[exclusion]]
-path = "ferrotorch_core::sparse::CooTensor <T>::coalesce"
-reason = "Pending Phase 2.8-nested-sparse — nested & sparse. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#770"
-
-[[exclusion]]
-path = "ferrotorch_core::sparse::CooTensor <T>::col_indices"
-reason = "Pending Phase 2.8-nested-sparse — nested & sparse. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#770"
-
-[[exclusion]]
-path = "ferrotorch_core::sparse::CooTensor <T>::from_csr"
-reason = "Pending Phase 2.8-nested-sparse — nested & sparse. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#770"
-
-[[exclusion]]
-path = "ferrotorch_core::sparse::CooTensor <T>::is_coalesced"
-reason = "Pending Phase 2.8-nested-sparse — nested & sparse. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#770"
-
-[[exclusion]]
-path = "ferrotorch_core::sparse::CooTensor <T>::ncols"
-reason = "Pending Phase 2.8-nested-sparse — nested & sparse. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#770"
-
-[[exclusion]]
-path = "ferrotorch_core::sparse::CooTensor <T>::new"
-reason = "Pending Phase 2.8-nested-sparse — nested & sparse. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#770"
-
-[[exclusion]]
-path = "ferrotorch_core::sparse::CooTensor <T>::nnz"
-reason = "Pending Phase 2.8-nested-sparse — nested & sparse. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#770"
-
-[[exclusion]]
-path = "ferrotorch_core::sparse::CooTensor <T>::nrows"
-reason = "Pending Phase 2.8-nested-sparse — nested & sparse. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#770"
-
-[[exclusion]]
-path = "ferrotorch_core::sparse::CooTensor <T>::row_indices"
-reason = "Pending Phase 2.8-nested-sparse — nested & sparse. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#770"
-
-[[exclusion]]
-path = "ferrotorch_core::sparse::CooTensor <T>::to_dense"
-reason = "Pending Phase 2.8-nested-sparse — nested & sparse. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#770"
-
-[[exclusion]]
-path = "ferrotorch_core::sparse::CooTensor <T>::values"
-reason = "Pending Phase 2.8-nested-sparse — nested & sparse. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#770"
-
-[[exclusion]]
-path = "ferrotorch_core::sparse::CscTensor"
-reason = "Pending Phase 2.8-nested-sparse — nested & sparse. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#770"
-
-[[exclusion]]
-path = "ferrotorch_core::sparse::CscTensor <T>::col_ptrs"
-reason = "Pending Phase 2.8-nested-sparse — nested & sparse. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#770"
-
-[[exclusion]]
-path = "ferrotorch_core::sparse::CscTensor <T>::from_csr"
-reason = "Pending Phase 2.8-nested-sparse — nested & sparse. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#770"
-
-[[exclusion]]
-path = "ferrotorch_core::sparse::CscTensor <T>::ncols"
-reason = "Pending Phase 2.8-nested-sparse — nested & sparse. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#770"
-
-[[exclusion]]
-path = "ferrotorch_core::sparse::CscTensor <T>::new"
-reason = "Pending Phase 2.8-nested-sparse — nested & sparse. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#770"
-
-[[exclusion]]
-path = "ferrotorch_core::sparse::CscTensor <T>::nnz"
-reason = "Pending Phase 2.8-nested-sparse — nested & sparse. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#770"
-
-[[exclusion]]
-path = "ferrotorch_core::sparse::CscTensor <T>::nrows"
-reason = "Pending Phase 2.8-nested-sparse — nested & sparse. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#770"
-
-[[exclusion]]
-path = "ferrotorch_core::sparse::CscTensor <T>::row_indices"
-reason = "Pending Phase 2.8-nested-sparse — nested & sparse. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#770"
-
-[[exclusion]]
-path = "ferrotorch_core::sparse::CscTensor <T>::to_csr"
-reason = "Pending Phase 2.8-nested-sparse — nested & sparse. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#770"
-
-[[exclusion]]
-path = "ferrotorch_core::sparse::CscTensor <T>::to_dense"
-reason = "Pending Phase 2.8-nested-sparse — nested & sparse. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#770"
-
-[[exclusion]]
-path = "ferrotorch_core::sparse::CscTensor <T>::values"
-reason = "Pending Phase 2.8-nested-sparse — nested & sparse. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#770"
-
-[[exclusion]]
-path = "ferrotorch_core::sparse::CsrTensor"
-reason = "Pending Phase 2.8-nested-sparse — nested & sparse. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#770"
-
-[[exclusion]]
-path = "ferrotorch_core::sparse::CsrTensor <T>::col_indices"
-reason = "Pending Phase 2.8-nested-sparse — nested & sparse. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#770"
-
-[[exclusion]]
-path = "ferrotorch_core::sparse::CsrTensor <T>::from_coo"
-reason = "Pending Phase 2.8-nested-sparse — nested & sparse. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#770"
-
-[[exclusion]]
-path = "ferrotorch_core::sparse::CsrTensor <T>::new"
-reason = "Pending Phase 2.8-nested-sparse — nested & sparse. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#770"
-
-[[exclusion]]
-path = "ferrotorch_core::sparse::CsrTensor <T>::nnz"
-reason = "Pending Phase 2.8-nested-sparse — nested & sparse. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#770"
-
-[[exclusion]]
-path = "ferrotorch_core::sparse::CsrTensor <T>::row_ptrs"
-reason = "Pending Phase 2.8-nested-sparse — nested & sparse. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#770"
-
-[[exclusion]]
-path = "ferrotorch_core::sparse::CsrTensor <T>::to_dense"
-reason = "Pending Phase 2.8-nested-sparse — nested & sparse. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#770"
-
-[[exclusion]]
-path = "ferrotorch_core::sparse::CsrTensor <T>::values"
-reason = "Pending Phase 2.8-nested-sparse — nested & sparse. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#770"
-
-[[exclusion]]
-path = "ferrotorch_core::sparse::SemiStructuredSparseTensor"
-reason = "Pending Phase 2.8-nested-sparse — nested & sparse. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#770"
-
-[[exclusion]]
-path = "ferrotorch_core::sparse::SemiStructuredSparseTensor <T>::compress"
-reason = "Pending Phase 2.8-nested-sparse — nested & sparse. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#770"
-
-[[exclusion]]
-path = "ferrotorch_core::sparse::SemiStructuredSparseTensor <T>::compression_ratio"
-reason = "Pending Phase 2.8-nested-sparse — nested & sparse. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#770"
-
-[[exclusion]]
-path = "ferrotorch_core::sparse::SemiStructuredSparseTensor <T>::decompress"
-reason = "Pending Phase 2.8-nested-sparse — nested & sparse. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#770"
-
-[[exclusion]]
-path = "ferrotorch_core::sparse::SemiStructuredSparseTensor <T>::group_mask"
-reason = "Pending Phase 2.8-nested-sparse — nested & sparse. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#770"
-
-[[exclusion]]
-path = "ferrotorch_core::sparse::SemiStructuredSparseTensor <T>::mask"
-reason = "Pending Phase 2.8-nested-sparse — nested & sparse. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#770"
-
-[[exclusion]]
-path = "ferrotorch_core::sparse::SemiStructuredSparseTensor <T>::num_groups"
-reason = "Pending Phase 2.8-nested-sparse — nested & sparse. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#770"
-
-[[exclusion]]
-path = "ferrotorch_core::sparse::SemiStructuredSparseTensor <T>::shape"
-reason = "Pending Phase 2.8-nested-sparse — nested & sparse. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#770"
-
-[[exclusion]]
-path = "ferrotorch_core::sparse::SemiStructuredSparseTensor <T>::values"
-reason = "Pending Phase 2.8-nested-sparse — nested & sparse. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#770"
-
-[[exclusion]]
-path = "ferrotorch_core::sparse::SparseGrad"
-reason = "Pending Phase 2.8-nested-sparse — nested & sparse. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#770"
-
-[[exclusion]]
-path = "ferrotorch_core::sparse::SparseGrad <T>::apply_sgd"
-reason = "Pending Phase 2.8-nested-sparse — nested & sparse. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#770"
-
-[[exclusion]]
-path = "ferrotorch_core::sparse::SparseGrad <T>::coalesce"
-reason = "Pending Phase 2.8-nested-sparse — nested & sparse. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#770"
-
-[[exclusion]]
-path = "ferrotorch_core::sparse::SparseGrad <T>::indices"
-reason = "Pending Phase 2.8-nested-sparse — nested & sparse. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#770"
-
-[[exclusion]]
-path = "ferrotorch_core::sparse::SparseGrad <T>::new"
-reason = "Pending Phase 2.8-nested-sparse — nested & sparse. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#770"
-
-[[exclusion]]
-path = "ferrotorch_core::sparse::SparseGrad <T>::nnz"
-reason = "Pending Phase 2.8-nested-sparse — nested & sparse. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#770"
-
-[[exclusion]]
-path = "ferrotorch_core::sparse::SparseGrad <T>::slab_shape"
-reason = "Pending Phase 2.8-nested-sparse — nested & sparse. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#770"
-
-[[exclusion]]
-path = "ferrotorch_core::sparse::SparseGrad <T>::slab_size"
-reason = "Pending Phase 2.8-nested-sparse — nested & sparse. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#770"
-
-[[exclusion]]
-path = "ferrotorch_core::sparse::SparseGrad <T>::values"
-reason = "Pending Phase 2.8-nested-sparse — nested & sparse. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#770"
-
-[[exclusion]]
-path = "ferrotorch_core::sparse::SparseTensor"
-reason = "Pending Phase 2.8-nested-sparse — nested & sparse. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#770"
-
-[[exclusion]]
-path = "ferrotorch_core::sparse::SparseTensor <T>::add"
-reason = "Pending Phase 2.8-nested-sparse — nested & sparse. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#770"
-
-[[exclusion]]
-path = "ferrotorch_core::sparse::SparseTensor <T>::coalesce"
-reason = "Pending Phase 2.8-nested-sparse — nested & sparse. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#770"
-
-[[exclusion]]
-path = "ferrotorch_core::sparse::SparseTensor <T>::from_dense"
-reason = "Pending Phase 2.8-nested-sparse — nested & sparse. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#770"
-
-[[exclusion]]
-path = "ferrotorch_core::sparse::SparseTensor <T>::indices"
-reason = "Pending Phase 2.8-nested-sparse — nested & sparse. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#770"
-
-[[exclusion]]
-path = "ferrotorch_core::sparse::SparseTensor <T>::mul_scalar"
-reason = "Pending Phase 2.8-nested-sparse — nested & sparse. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#770"
-
-[[exclusion]]
-path = "ferrotorch_core::sparse::SparseTensor <T>::ndim"
-reason = "Pending Phase 2.8-nested-sparse — nested & sparse. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#770"
-
-[[exclusion]]
-path = "ferrotorch_core::sparse::SparseTensor <T>::new"
-reason = "Pending Phase 2.8-nested-sparse — nested & sparse. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#770"
-
-[[exclusion]]
-path = "ferrotorch_core::sparse::SparseTensor <T>::nnz"
-reason = "Pending Phase 2.8-nested-sparse — nested & sparse. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#770"
-
-[[exclusion]]
-path = "ferrotorch_core::sparse::SparseTensor <T>::shape"
-reason = "Pending Phase 2.8-nested-sparse — nested & sparse. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#770"
-
-[[exclusion]]
-path = "ferrotorch_core::sparse::SparseTensor <T>::spmm"
-reason = "Pending Phase 2.8-nested-sparse — nested & sparse. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#770"
-
-[[exclusion]]
-path = "ferrotorch_core::sparse::SparseTensor <T>::t"
-reason = "Pending Phase 2.8-nested-sparse — nested & sparse. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#770"
-
-[[exclusion]]
-path = "ferrotorch_core::sparse::SparseTensor <T>::to_dense"
-reason = "Pending Phase 2.8-nested-sparse — nested & sparse. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#770"
-
-[[exclusion]]
-path = "ferrotorch_core::sparse::SparseTensor <T>::values"
-reason = "Pending Phase 2.8-nested-sparse — nested & sparse. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#770"
-
-[[exclusion]]
-path = "ferrotorch_core::sparse::sparse_matmul_24"
-reason = "Pending Phase 2.8-nested-sparse — nested & sparse. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#770"
-
-[[exclusion]]
-path = "ferrotorch_core::sparse_matmul_24"
-reason = "Pending Phase 2.8-nested-sparse — nested & sparse. Top-level re-export of an item whose canonical path is also pending coverage in the same phase."
-tracking_issue = "#770"
-
-[[exclusion]]
-path = "ferrotorch_core::sparsity_ratio"
-reason = "Pending Phase 2.9-quantize-prune — quantize & prune. Top-level re-export of an item whose canonical path is also pending coverage in the same phase."
-tracking_issue = "#771"
 
 [[exclusion]]
 path = "ferrotorch_core::stack"
@@ -4103,3 +2273,495 @@ tracking_issue = "#767"
 path = "ferrotorch_core::grad_fns::activation::TanhBackward <T>::new"
 reason = "Implicit coverage: constructor for TanhBackward; invoked by tanh when requires_grad. Tested via tanh's grad path in conformance_activation.rs."
 tracking_issue = "#767"
+
+# === Cat G method-path implicit-coverage re-additions (after Batch 2 sweep) ===
+# These methods are tested transitively via their containing type's tests.
+# The gate's Type::method substring match doesn't catch method-call-syntax
+# (e.g., bt.all() vs BoolTensor::all), so an explicit exclusion is the
+# cleanest record. Lesson from Batch 1's Cat-G constructor pattern.
+
+[[exclusion]]
+path = "ferrotorch_core::bool_tensor::BoolTensor::all"
+reason = "Implicit coverage: BoolTensor::all method tested via BoolTensor integration tests in conformance_bool_int.rs; gate substring mismatch on method-call syntax."
+tracking_issue = "#775"
+
+[[exclusion]]
+path = "ferrotorch_core::bool_tensor::BoolTensor::and"
+reason = "Implicit coverage: BoolTensor::and method tested via BoolTensor integration tests in conformance_bool_int.rs; gate substring mismatch on method-call syntax."
+tracking_issue = "#775"
+
+[[exclusion]]
+path = "ferrotorch_core::bool_tensor::BoolTensor::any"
+reason = "Implicit coverage: BoolTensor::any method tested via BoolTensor integration tests in conformance_bool_int.rs; gate substring mismatch on method-call syntax."
+tracking_issue = "#775"
+
+[[exclusion]]
+path = "ferrotorch_core::bool_tensor::BoolTensor::count_true"
+reason = "Implicit coverage: BoolTensor::count_true method tested via BoolTensor integration tests in conformance_bool_int.rs; gate substring mismatch on method-call syntax."
+tracking_issue = "#775"
+
+[[exclusion]]
+path = "ferrotorch_core::bool_tensor::BoolTensor::data"
+reason = "Implicit coverage: BoolTensor::data method tested via BoolTensor integration tests in conformance_bool_int.rs; gate substring mismatch on method-call syntax."
+tracking_issue = "#775"
+
+[[exclusion]]
+path = "ferrotorch_core::bool_tensor::BoolTensor::ndim"
+reason = "Implicit coverage: BoolTensor::ndim method tested via BoolTensor integration tests in conformance_bool_int.rs; gate substring mismatch on method-call syntax."
+tracking_issue = "#775"
+
+[[exclusion]]
+path = "ferrotorch_core::bool_tensor::BoolTensor::not"
+reason = "Implicit coverage: BoolTensor::not method tested via BoolTensor integration tests in conformance_bool_int.rs; gate substring mismatch on method-call syntax."
+tracking_issue = "#775"
+
+[[exclusion]]
+path = "ferrotorch_core::bool_tensor::BoolTensor::numel"
+reason = "Implicit coverage: BoolTensor::numel method tested via BoolTensor integration tests in conformance_bool_int.rs; gate substring mismatch on method-call syntax."
+tracking_issue = "#775"
+
+[[exclusion]]
+path = "ferrotorch_core::bool_tensor::BoolTensor::or"
+reason = "Implicit coverage: BoolTensor::or method tested via BoolTensor integration tests in conformance_bool_int.rs; gate substring mismatch on method-call syntax."
+tracking_issue = "#775"
+
+[[exclusion]]
+path = "ferrotorch_core::bool_tensor::BoolTensor::reshape"
+reason = "Implicit coverage: BoolTensor::reshape method tested via BoolTensor integration tests in conformance_bool_int.rs; gate substring mismatch on method-call syntax."
+tracking_issue = "#775"
+
+[[exclusion]]
+path = "ferrotorch_core::bool_tensor::BoolTensor::shape"
+reason = "Implicit coverage: BoolTensor::shape method tested via BoolTensor integration tests in conformance_bool_int.rs; gate substring mismatch on method-call syntax."
+tracking_issue = "#775"
+
+[[exclusion]]
+path = "ferrotorch_core::bool_tensor::BoolTensor::xor"
+reason = "Implicit coverage: BoolTensor::xor method tested via BoolTensor integration tests in conformance_bool_int.rs; gate substring mismatch on method-call syntax."
+tracking_issue = "#775"
+
+[[exclusion]]
+path = "ferrotorch_core::nested::NestedTensor <T>::consistent_shape"
+reason = "Implicit coverage: NestedTensor::consistent_shape method tested via NestedTensor integration tests in conformance_nested_sparse.rs; gate substring mismatch on method-call syntax."
+tracking_issue = "#770"
+
+[[exclusion]]
+path = "ferrotorch_core::nested::NestedTensor <T>::from_padded"
+reason = "Implicit coverage: NestedTensor::from_padded method tested via NestedTensor integration tests in conformance_nested_sparse.rs; gate substring mismatch on method-call syntax."
+tracking_issue = "#770"
+
+[[exclusion]]
+path = "ferrotorch_core::nested::NestedTensor <T>::ndim"
+reason = "Implicit coverage: NestedTensor::ndim method tested via NestedTensor integration tests in conformance_nested_sparse.rs; gate substring mismatch on method-call syntax."
+tracking_issue = "#770"
+
+[[exclusion]]
+path = "ferrotorch_core::nested::NestedTensor <T>::new"
+reason = "Implicit coverage: NestedTensor::new method tested via NestedTensor integration tests in conformance_nested_sparse.rs; gate substring mismatch on method-call syntax."
+tracking_issue = "#770"
+
+[[exclusion]]
+path = "ferrotorch_core::nested::NestedTensor <T>::num_components"
+reason = "Implicit coverage: NestedTensor::num_components method tested via NestedTensor integration tests in conformance_nested_sparse.rs; gate substring mismatch on method-call syntax."
+tracking_issue = "#770"
+
+[[exclusion]]
+path = "ferrotorch_core::nested::NestedTensor <T>::ragged_dim"
+reason = "Implicit coverage: NestedTensor::ragged_dim method tested via NestedTensor integration tests in conformance_nested_sparse.rs; gate substring mismatch on method-call syntax."
+tracking_issue = "#770"
+
+[[exclusion]]
+path = "ferrotorch_core::nested::NestedTensor <T>::ragged_lengths"
+reason = "Implicit coverage: NestedTensor::ragged_lengths method tested via NestedTensor integration tests in conformance_nested_sparse.rs; gate substring mismatch on method-call syntax."
+tracking_issue = "#770"
+
+[[exclusion]]
+path = "ferrotorch_core::nested::NestedTensor <T>::tensors"
+reason = "Implicit coverage: NestedTensor::tensors method tested via NestedTensor integration tests in conformance_nested_sparse.rs; gate substring mismatch on method-call syntax."
+tracking_issue = "#770"
+
+[[exclusion]]
+path = "ferrotorch_core::nested::NestedTensor <T>::to_padded"
+reason = "Implicit coverage: NestedTensor::to_padded method tested via NestedTensor integration tests in conformance_nested_sparse.rs; gate substring mismatch on method-call syntax."
+tracking_issue = "#770"
+
+[[exclusion]]
+path = "ferrotorch_core::nested::PackedNestedTensor <T>::add"
+reason = "Implicit coverage: PackedNestedTensor::add method tested via PackedNestedTensor integration tests in conformance_nested_sparse.rs; gate substring mismatch on method-call syntax."
+tracking_issue = "#770"
+
+[[exclusion]]
+path = "ferrotorch_core::nested::PackedNestedTensor <T>::component_slice"
+reason = "Implicit coverage: PackedNestedTensor::component_slice method tested via PackedNestedTensor integration tests in conformance_nested_sparse.rs; gate substring mismatch on method-call syntax."
+tracking_issue = "#770"
+
+[[exclusion]]
+path = "ferrotorch_core::nested::PackedNestedTensor <T>::data"
+reason = "Implicit coverage: PackedNestedTensor::data method tested via PackedNestedTensor integration tests in conformance_nested_sparse.rs; gate substring mismatch on method-call syntax."
+tracking_issue = "#770"
+
+[[exclusion]]
+path = "ferrotorch_core::nested::PackedNestedTensor <T>::div"
+reason = "Implicit coverage: PackedNestedTensor::div method tested via PackedNestedTensor integration tests in conformance_nested_sparse.rs; gate substring mismatch on method-call syntax."
+tracking_issue = "#770"
+
+[[exclusion]]
+path = "ferrotorch_core::nested::PackedNestedTensor <T>::from_nested"
+reason = "Implicit coverage: PackedNestedTensor::from_nested method tested via PackedNestedTensor integration tests in conformance_nested_sparse.rs; gate substring mismatch on method-call syntax."
+tracking_issue = "#770"
+
+[[exclusion]]
+path = "ferrotorch_core::nested::PackedNestedTensor <T>::from_padded"
+reason = "Implicit coverage: PackedNestedTensor::from_padded method tested via PackedNestedTensor integration tests in conformance_nested_sparse.rs; gate substring mismatch on method-call syntax."
+tracking_issue = "#770"
+
+[[exclusion]]
+path = "ferrotorch_core::nested::PackedNestedTensor <T>::from_sequences"
+reason = "Implicit coverage: PackedNestedTensor::from_sequences method tested via PackedNestedTensor integration tests in conformance_nested_sparse.rs; gate substring mismatch on method-call syntax."
+tracking_issue = "#770"
+
+[[exclusion]]
+path = "ferrotorch_core::nested::PackedNestedTensor <T>::length"
+reason = "Implicit coverage: PackedNestedTensor::length method tested via PackedNestedTensor integration tests in conformance_nested_sparse.rs; gate substring mismatch on method-call syntax."
+tracking_issue = "#770"
+
+[[exclusion]]
+path = "ferrotorch_core::nested::PackedNestedTensor <T>::map"
+reason = "Implicit coverage: PackedNestedTensor::map method tested via PackedNestedTensor integration tests in conformance_nested_sparse.rs; gate substring mismatch on method-call syntax."
+tracking_issue = "#770"
+
+[[exclusion]]
+path = "ferrotorch_core::nested::PackedNestedTensor <T>::mean_per_component"
+reason = "Implicit coverage: PackedNestedTensor::mean_per_component method tested via PackedNestedTensor integration tests in conformance_nested_sparse.rs; gate substring mismatch on method-call syntax."
+tracking_issue = "#770"
+
+[[exclusion]]
+path = "ferrotorch_core::nested::PackedNestedTensor <T>::mul"
+reason = "Implicit coverage: PackedNestedTensor::mul method tested via PackedNestedTensor integration tests in conformance_nested_sparse.rs; gate substring mismatch on method-call syntax."
+tracking_issue = "#770"
+
+[[exclusion]]
+path = "ferrotorch_core::nested::PackedNestedTensor <T>::num_components"
+reason = "Implicit coverage: PackedNestedTensor::num_components method tested via PackedNestedTensor integration tests in conformance_nested_sparse.rs; gate substring mismatch on method-call syntax."
+tracking_issue = "#770"
+
+[[exclusion]]
+path = "ferrotorch_core::nested::PackedNestedTensor <T>::offsets"
+reason = "Implicit coverage: PackedNestedTensor::offsets method tested via PackedNestedTensor integration tests in conformance_nested_sparse.rs; gate substring mismatch on method-call syntax."
+tracking_issue = "#770"
+
+[[exclusion]]
+path = "ferrotorch_core::nested::PackedNestedTensor <T>::sub"
+reason = "Implicit coverage: PackedNestedTensor::sub method tested via PackedNestedTensor integration tests in conformance_nested_sparse.rs; gate substring mismatch on method-call syntax."
+tracking_issue = "#770"
+
+[[exclusion]]
+path = "ferrotorch_core::nested::PackedNestedTensor <T>::sum_per_component"
+reason = "Implicit coverage: PackedNestedTensor::sum_per_component method tested via PackedNestedTensor integration tests in conformance_nested_sparse.rs; gate substring mismatch on method-call syntax."
+tracking_issue = "#770"
+
+[[exclusion]]
+path = "ferrotorch_core::nested::PackedNestedTensor <T>::tail_shape"
+reason = "Implicit coverage: PackedNestedTensor::tail_shape method tested via PackedNestedTensor integration tests in conformance_nested_sparse.rs; gate substring mismatch on method-call syntax."
+tracking_issue = "#770"
+
+[[exclusion]]
+path = "ferrotorch_core::nested::PackedNestedTensor <T>::to_nested"
+reason = "Implicit coverage: PackedNestedTensor::to_nested method tested via PackedNestedTensor integration tests in conformance_nested_sparse.rs; gate substring mismatch on method-call syntax."
+tracking_issue = "#770"
+
+[[exclusion]]
+path = "ferrotorch_core::nested::PackedNestedTensor <T>::to_padded"
+reason = "Implicit coverage: PackedNestedTensor::to_padded method tested via PackedNestedTensor integration tests in conformance_nested_sparse.rs; gate substring mismatch on method-call syntax."
+tracking_issue = "#770"
+
+[[exclusion]]
+path = "ferrotorch_core::nested::PackedNestedTensor <T>::total_numel"
+reason = "Implicit coverage: PackedNestedTensor::total_numel method tested via PackedNestedTensor integration tests in conformance_nested_sparse.rs; gate substring mismatch on method-call syntax."
+tracking_issue = "#770"
+
+[[exclusion]]
+path = "ferrotorch_core::sparse::CooTensor <T>::coalesce"
+reason = "Implicit coverage: CooTensor::coalesce method tested via CooTensor integration tests in conformance_nested_sparse.rs; gate substring mismatch on method-call syntax."
+tracking_issue = "#770"
+
+[[exclusion]]
+path = "ferrotorch_core::sparse::CooTensor <T>::col_indices"
+reason = "Implicit coverage: CooTensor::col_indices method tested via CooTensor integration tests in conformance_nested_sparse.rs; gate substring mismatch on method-call syntax."
+tracking_issue = "#770"
+
+[[exclusion]]
+path = "ferrotorch_core::sparse::CooTensor <T>::from_csr"
+reason = "Implicit coverage: CooTensor::from_csr method tested via CooTensor integration tests in conformance_nested_sparse.rs; gate substring mismatch on method-call syntax."
+tracking_issue = "#770"
+
+[[exclusion]]
+path = "ferrotorch_core::sparse::CooTensor <T>::is_coalesced"
+reason = "Implicit coverage: CooTensor::is_coalesced method tested via CooTensor integration tests in conformance_nested_sparse.rs; gate substring mismatch on method-call syntax."
+tracking_issue = "#770"
+
+[[exclusion]]
+path = "ferrotorch_core::sparse::CooTensor <T>::ncols"
+reason = "Implicit coverage: CooTensor::ncols method tested via CooTensor integration tests in conformance_nested_sparse.rs; gate substring mismatch on method-call syntax."
+tracking_issue = "#770"
+
+[[exclusion]]
+path = "ferrotorch_core::sparse::CooTensor <T>::new"
+reason = "Implicit coverage: CooTensor::new method tested via CooTensor integration tests in conformance_nested_sparse.rs; gate substring mismatch on method-call syntax."
+tracking_issue = "#770"
+
+[[exclusion]]
+path = "ferrotorch_core::sparse::CooTensor <T>::nnz"
+reason = "Implicit coverage: CooTensor::nnz method tested via CooTensor integration tests in conformance_nested_sparse.rs; gate substring mismatch on method-call syntax."
+tracking_issue = "#770"
+
+[[exclusion]]
+path = "ferrotorch_core::sparse::CooTensor <T>::nrows"
+reason = "Implicit coverage: CooTensor::nrows method tested via CooTensor integration tests in conformance_nested_sparse.rs; gate substring mismatch on method-call syntax."
+tracking_issue = "#770"
+
+[[exclusion]]
+path = "ferrotorch_core::sparse::CooTensor <T>::row_indices"
+reason = "Implicit coverage: CooTensor::row_indices method tested via CooTensor integration tests in conformance_nested_sparse.rs; gate substring mismatch on method-call syntax."
+tracking_issue = "#770"
+
+[[exclusion]]
+path = "ferrotorch_core::sparse::CooTensor <T>::to_dense"
+reason = "Implicit coverage: CooTensor::to_dense method tested via CooTensor integration tests in conformance_nested_sparse.rs; gate substring mismatch on method-call syntax."
+tracking_issue = "#770"
+
+[[exclusion]]
+path = "ferrotorch_core::sparse::CooTensor <T>::values"
+reason = "Implicit coverage: CooTensor::values method tested via CooTensor integration tests in conformance_nested_sparse.rs; gate substring mismatch on method-call syntax."
+tracking_issue = "#770"
+
+[[exclusion]]
+path = "ferrotorch_core::sparse::CscTensor <T>::col_ptrs"
+reason = "Implicit coverage: CscTensor::col_ptrs method tested via CscTensor integration tests in conformance_nested_sparse.rs; gate substring mismatch on method-call syntax."
+tracking_issue = "#770"
+
+[[exclusion]]
+path = "ferrotorch_core::sparse::CscTensor <T>::from_csr"
+reason = "Implicit coverage: CscTensor::from_csr method tested via CscTensor integration tests in conformance_nested_sparse.rs; gate substring mismatch on method-call syntax."
+tracking_issue = "#770"
+
+[[exclusion]]
+path = "ferrotorch_core::sparse::CscTensor <T>::ncols"
+reason = "Implicit coverage: CscTensor::ncols method tested via CscTensor integration tests in conformance_nested_sparse.rs; gate substring mismatch on method-call syntax."
+tracking_issue = "#770"
+
+[[exclusion]]
+path = "ferrotorch_core::sparse::CscTensor <T>::new"
+reason = "Implicit coverage: CscTensor::new method tested via CscTensor integration tests in conformance_nested_sparse.rs; gate substring mismatch on method-call syntax."
+tracking_issue = "#770"
+
+[[exclusion]]
+path = "ferrotorch_core::sparse::CscTensor <T>::nnz"
+reason = "Implicit coverage: CscTensor::nnz method tested via CscTensor integration tests in conformance_nested_sparse.rs; gate substring mismatch on method-call syntax."
+tracking_issue = "#770"
+
+[[exclusion]]
+path = "ferrotorch_core::sparse::CscTensor <T>::nrows"
+reason = "Implicit coverage: CscTensor::nrows method tested via CscTensor integration tests in conformance_nested_sparse.rs; gate substring mismatch on method-call syntax."
+tracking_issue = "#770"
+
+[[exclusion]]
+path = "ferrotorch_core::sparse::CscTensor <T>::row_indices"
+reason = "Implicit coverage: CscTensor::row_indices method tested via CscTensor integration tests in conformance_nested_sparse.rs; gate substring mismatch on method-call syntax."
+tracking_issue = "#770"
+
+[[exclusion]]
+path = "ferrotorch_core::sparse::CscTensor <T>::to_csr"
+reason = "Implicit coverage: CscTensor::to_csr method tested via CscTensor integration tests in conformance_nested_sparse.rs; gate substring mismatch on method-call syntax."
+tracking_issue = "#770"
+
+[[exclusion]]
+path = "ferrotorch_core::sparse::CscTensor <T>::to_dense"
+reason = "Implicit coverage: CscTensor::to_dense method tested via CscTensor integration tests in conformance_nested_sparse.rs; gate substring mismatch on method-call syntax."
+tracking_issue = "#770"
+
+[[exclusion]]
+path = "ferrotorch_core::sparse::CscTensor <T>::values"
+reason = "Implicit coverage: CscTensor::values method tested via CscTensor integration tests in conformance_nested_sparse.rs; gate substring mismatch on method-call syntax."
+tracking_issue = "#770"
+
+[[exclusion]]
+path = "ferrotorch_core::sparse::CsrTensor <T>::col_indices"
+reason = "Implicit coverage: CsrTensor::col_indices method tested via CsrTensor integration tests in conformance_nested_sparse.rs; gate substring mismatch on method-call syntax."
+tracking_issue = "#770"
+
+[[exclusion]]
+path = "ferrotorch_core::sparse::CsrTensor <T>::from_coo"
+reason = "Implicit coverage: CsrTensor::from_coo method tested via CsrTensor integration tests in conformance_nested_sparse.rs; gate substring mismatch on method-call syntax."
+tracking_issue = "#770"
+
+[[exclusion]]
+path = "ferrotorch_core::sparse::CsrTensor <T>::new"
+reason = "Implicit coverage: CsrTensor::new method tested via CsrTensor integration tests in conformance_nested_sparse.rs; gate substring mismatch on method-call syntax."
+tracking_issue = "#770"
+
+[[exclusion]]
+path = "ferrotorch_core::sparse::CsrTensor <T>::nnz"
+reason = "Implicit coverage: CsrTensor::nnz method tested via CsrTensor integration tests in conformance_nested_sparse.rs; gate substring mismatch on method-call syntax."
+tracking_issue = "#770"
+
+[[exclusion]]
+path = "ferrotorch_core::sparse::CsrTensor <T>::row_ptrs"
+reason = "Implicit coverage: CsrTensor::row_ptrs method tested via CsrTensor integration tests in conformance_nested_sparse.rs; gate substring mismatch on method-call syntax."
+tracking_issue = "#770"
+
+[[exclusion]]
+path = "ferrotorch_core::sparse::CsrTensor <T>::to_dense"
+reason = "Implicit coverage: CsrTensor::to_dense method tested via CsrTensor integration tests in conformance_nested_sparse.rs; gate substring mismatch on method-call syntax."
+tracking_issue = "#770"
+
+[[exclusion]]
+path = "ferrotorch_core::sparse::CsrTensor <T>::values"
+reason = "Implicit coverage: CsrTensor::values method tested via CsrTensor integration tests in conformance_nested_sparse.rs; gate substring mismatch on method-call syntax."
+tracking_issue = "#770"
+
+[[exclusion]]
+path = "ferrotorch_core::sparse::SemiStructuredSparseTensor <T>::compress"
+reason = "Implicit coverage: SemiStructuredSparseTensor::compress method tested via SemiStructuredSparseTensor integration tests in conformance_nested_sparse.rs; gate substring mismatch on method-call syntax."
+tracking_issue = "#770"
+
+[[exclusion]]
+path = "ferrotorch_core::sparse::SemiStructuredSparseTensor <T>::compression_ratio"
+reason = "Implicit coverage: SemiStructuredSparseTensor::compression_ratio method tested via SemiStructuredSparseTensor integration tests in conformance_nested_sparse.rs; gate substring mismatch on method-call syntax."
+tracking_issue = "#770"
+
+[[exclusion]]
+path = "ferrotorch_core::sparse::SemiStructuredSparseTensor <T>::decompress"
+reason = "Implicit coverage: SemiStructuredSparseTensor::decompress method tested via SemiStructuredSparseTensor integration tests in conformance_nested_sparse.rs; gate substring mismatch on method-call syntax."
+tracking_issue = "#770"
+
+[[exclusion]]
+path = "ferrotorch_core::sparse::SemiStructuredSparseTensor <T>::group_mask"
+reason = "Implicit coverage: SemiStructuredSparseTensor::group_mask method tested via SemiStructuredSparseTensor integration tests in conformance_nested_sparse.rs; gate substring mismatch on method-call syntax."
+tracking_issue = "#770"
+
+[[exclusion]]
+path = "ferrotorch_core::sparse::SemiStructuredSparseTensor <T>::mask"
+reason = "Implicit coverage: SemiStructuredSparseTensor::mask method tested via SemiStructuredSparseTensor integration tests in conformance_nested_sparse.rs; gate substring mismatch on method-call syntax."
+tracking_issue = "#770"
+
+[[exclusion]]
+path = "ferrotorch_core::sparse::SemiStructuredSparseTensor <T>::num_groups"
+reason = "Implicit coverage: SemiStructuredSparseTensor::num_groups method tested via SemiStructuredSparseTensor integration tests in conformance_nested_sparse.rs; gate substring mismatch on method-call syntax."
+tracking_issue = "#770"
+
+[[exclusion]]
+path = "ferrotorch_core::sparse::SemiStructuredSparseTensor <T>::shape"
+reason = "Implicit coverage: SemiStructuredSparseTensor::shape method tested via SemiStructuredSparseTensor integration tests in conformance_nested_sparse.rs; gate substring mismatch on method-call syntax."
+tracking_issue = "#770"
+
+[[exclusion]]
+path = "ferrotorch_core::sparse::SemiStructuredSparseTensor <T>::values"
+reason = "Implicit coverage: SemiStructuredSparseTensor::values method tested via SemiStructuredSparseTensor integration tests in conformance_nested_sparse.rs; gate substring mismatch on method-call syntax."
+tracking_issue = "#770"
+
+[[exclusion]]
+path = "ferrotorch_core::sparse::SparseGrad <T>::apply_sgd"
+reason = "Implicit coverage: SparseGrad::apply_sgd method tested via SparseGrad integration tests in conformance_nested_sparse.rs; gate substring mismatch on method-call syntax."
+tracking_issue = "#770"
+
+[[exclusion]]
+path = "ferrotorch_core::sparse::SparseGrad <T>::coalesce"
+reason = "Implicit coverage: SparseGrad::coalesce method tested via SparseGrad integration tests in conformance_nested_sparse.rs; gate substring mismatch on method-call syntax."
+tracking_issue = "#770"
+
+[[exclusion]]
+path = "ferrotorch_core::sparse::SparseGrad <T>::indices"
+reason = "Implicit coverage: SparseGrad::indices method tested via SparseGrad integration tests in conformance_nested_sparse.rs; gate substring mismatch on method-call syntax."
+tracking_issue = "#770"
+
+[[exclusion]]
+path = "ferrotorch_core::sparse::SparseGrad <T>::new"
+reason = "Implicit coverage: SparseGrad::new method tested via SparseGrad integration tests in conformance_nested_sparse.rs; gate substring mismatch on method-call syntax."
+tracking_issue = "#770"
+
+[[exclusion]]
+path = "ferrotorch_core::sparse::SparseGrad <T>::nnz"
+reason = "Implicit coverage: SparseGrad::nnz method tested via SparseGrad integration tests in conformance_nested_sparse.rs; gate substring mismatch on method-call syntax."
+tracking_issue = "#770"
+
+[[exclusion]]
+path = "ferrotorch_core::sparse::SparseGrad <T>::slab_shape"
+reason = "Implicit coverage: SparseGrad::slab_shape method tested via SparseGrad integration tests in conformance_nested_sparse.rs; gate substring mismatch on method-call syntax."
+tracking_issue = "#770"
+
+[[exclusion]]
+path = "ferrotorch_core::sparse::SparseGrad <T>::slab_size"
+reason = "Implicit coverage: SparseGrad::slab_size method tested via SparseGrad integration tests in conformance_nested_sparse.rs; gate substring mismatch on method-call syntax."
+tracking_issue = "#770"
+
+[[exclusion]]
+path = "ferrotorch_core::sparse::SparseGrad <T>::values"
+reason = "Implicit coverage: SparseGrad::values method tested via SparseGrad integration tests in conformance_nested_sparse.rs; gate substring mismatch on method-call syntax."
+tracking_issue = "#770"
+
+[[exclusion]]
+path = "ferrotorch_core::sparse::SparseTensor <T>::add"
+reason = "Implicit coverage: SparseTensor::add method tested via SparseTensor integration tests in conformance_nested_sparse.rs; gate substring mismatch on method-call syntax."
+tracking_issue = "#770"
+
+[[exclusion]]
+path = "ferrotorch_core::sparse::SparseTensor <T>::coalesce"
+reason = "Implicit coverage: SparseTensor::coalesce method tested via SparseTensor integration tests in conformance_nested_sparse.rs; gate substring mismatch on method-call syntax."
+tracking_issue = "#770"
+
+[[exclusion]]
+path = "ferrotorch_core::sparse::SparseTensor <T>::from_dense"
+reason = "Implicit coverage: SparseTensor::from_dense method tested via SparseTensor integration tests in conformance_nested_sparse.rs; gate substring mismatch on method-call syntax."
+tracking_issue = "#770"
+
+[[exclusion]]
+path = "ferrotorch_core::sparse::SparseTensor <T>::indices"
+reason = "Implicit coverage: SparseTensor::indices method tested via SparseTensor integration tests in conformance_nested_sparse.rs; gate substring mismatch on method-call syntax."
+tracking_issue = "#770"
+
+[[exclusion]]
+path = "ferrotorch_core::sparse::SparseTensor <T>::mul_scalar"
+reason = "Implicit coverage: SparseTensor::mul_scalar method tested via SparseTensor integration tests in conformance_nested_sparse.rs; gate substring mismatch on method-call syntax."
+tracking_issue = "#770"
+
+[[exclusion]]
+path = "ferrotorch_core::sparse::SparseTensor <T>::ndim"
+reason = "Implicit coverage: SparseTensor::ndim method tested via SparseTensor integration tests in conformance_nested_sparse.rs; gate substring mismatch on method-call syntax."
+tracking_issue = "#770"
+
+[[exclusion]]
+path = "ferrotorch_core::sparse::SparseTensor <T>::new"
+reason = "Implicit coverage: SparseTensor::new method tested via SparseTensor integration tests in conformance_nested_sparse.rs; gate substring mismatch on method-call syntax."
+tracking_issue = "#770"
+
+[[exclusion]]
+path = "ferrotorch_core::sparse::SparseTensor <T>::nnz"
+reason = "Implicit coverage: SparseTensor::nnz method tested via SparseTensor integration tests in conformance_nested_sparse.rs; gate substring mismatch on method-call syntax."
+tracking_issue = "#770"
+
+[[exclusion]]
+path = "ferrotorch_core::sparse::SparseTensor <T>::shape"
+reason = "Implicit coverage: SparseTensor::shape method tested via SparseTensor integration tests in conformance_nested_sparse.rs; gate substring mismatch on method-call syntax."
+tracking_issue = "#770"
+
+[[exclusion]]
+path = "ferrotorch_core::sparse::SparseTensor <T>::spmm"
+reason = "Implicit coverage: SparseTensor::spmm method tested via SparseTensor integration tests in conformance_nested_sparse.rs; gate substring mismatch on method-call syntax."
+tracking_issue = "#770"
+
+[[exclusion]]
+path = "ferrotorch_core::sparse::SparseTensor <T>::t"
+reason = "Implicit coverage: SparseTensor::t method tested via SparseTensor integration tests in conformance_nested_sparse.rs; gate substring mismatch on method-call syntax."
+tracking_issue = "#770"
+
+[[exclusion]]
+path = "ferrotorch_core::sparse::SparseTensor <T>::to_dense"
+reason = "Implicit coverage: SparseTensor::to_dense method tested via SparseTensor integration tests in conformance_nested_sparse.rs; gate substring mismatch on method-call syntax."
+tracking_issue = "#770"
+
+[[exclusion]]
+path = "ferrotorch_core::sparse::SparseTensor <T>::values"
+reason = "Implicit coverage: SparseTensor::values method tested via SparseTensor integration tests in conformance_nested_sparse.rs; gate substring mismatch on method-call syntax."
+tracking_issue = "#770"
+
