@@ -18,3 +18,13 @@ tokenizers = { workspace = true }
 minijinja = "2"
 serde = { workspace = true }
 serde_json = { workspace = true }
+
+# Conformance test infrastructure (Phase 1 — issue #758).
+# `syn` parses `src/lib.rs` to enumerate the public API surface.
+# `toml` parses the `_surface_exclusions.toml` allow-list.
+# Both are already transitive dependencies of the workspace, so adding them
+# as dev-deps does not pull new top-level crates.
+[dev-dependencies]
+syn = { version = "2", features = ["full", "extra-traits"] }
+quote = "1"
+toml = "1"

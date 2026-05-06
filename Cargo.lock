@@ -2689,9 +2689,12 @@ version = "0.4.7"
 dependencies = [
  "ferrotorch-core",
  "minijinja",
+ "quote",
  "serde",
  "serde_json",
+ "syn 2.0.117",
  "tokenizers",
+ "toml",
 ]
 
 [[package]]

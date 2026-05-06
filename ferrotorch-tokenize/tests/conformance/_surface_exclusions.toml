@@ -1,0 +1,19 @@
+# Strict coverage gate exclusions for the ferrotorch-tokenize conformance suite.
+#
+# Tracking issue: #758. Phase-1 mandate: every `pub` item in
+# ferrotorch-tokenize MUST be referenced by name from at least one
+# conformance test, OR appear here with a written reason. New `pub`
+# items added without conformance tests fail CI.
+#
+# Format: `[[exclusion]]` table-array entries with:
+#   path   — the fully qualified item path as written in `_surface.json`
+#   reason — one or more sentences explaining why no conformance test
+#            references this item. Acceptable reasons include:
+#              * Re-export of an upstream type whose contract is the
+#                upstream library's responsibility (e.g. `Tokenizer`
+#                belongs to the `tokenizers` crate's test suite).
+#              * Method on a struct whose conformance is implicit in
+#                the struct's other usages.
+#
+# Initial state: empty. The user must approve any addition; subagents
+# must not auto-populate this file.
