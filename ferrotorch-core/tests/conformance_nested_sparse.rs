@@ -65,15 +65,15 @@
 
 use std::path::PathBuf;
 
-use serde::de::{self, Deserializer, SeqAccess, Visitor};
 use serde::Deserialize;
+use serde::de::{self, Deserializer, SeqAccess, Visitor};
 
 use ferrotorch_core::nested::{
-    nested_scaled_dot_product_attention, NestedTensor, PackedNestedTensor,
+    NestedTensor, PackedNestedTensor, nested_scaled_dot_product_attention,
 };
 use ferrotorch_core::sparse::{
-    sparse_matmul_24, CooTensor, CscTensor, CsrTensor, SemiStructuredSparseTensor, SparseGrad,
-    SparseTensor,
+    CooTensor, CscTensor, CsrTensor, SemiStructuredSparseTensor, SparseGrad, SparseTensor,
+    sparse_matmul_24,
 };
 use ferrotorch_core::{Tensor, TensorStorage};
 

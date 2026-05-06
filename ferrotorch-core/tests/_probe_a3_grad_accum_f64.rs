@@ -37,10 +37,10 @@
 
 use std::sync::Once;
 
+use ferrotorch_core::Device;
 use ferrotorch_core::creation::from_vec;
 use ferrotorch_core::grad_fns::arithmetic::add;
 use ferrotorch_core::grad_fns::reduction::sum as op_sum;
-use ferrotorch_core::Device;
 
 static GPU_INIT: Once = Once::new();
 
@@ -56,7 +56,10 @@ fn ensure_cuda_backend() {
 fn grad_accumulate_twice_on_gpu_f32() {
     ensure_cuda_backend();
     let cpu = from_vec::<f32>(vec![1.0, 2.0, 3.0, 4.0], &[4]).expect("cpu tensor");
-    let x = cpu.to(Device::Cuda(0)).expect("cpu->gpu").requires_grad_(true);
+    let x = cpu
+        .to(Device::Cuda(0))
+        .expect("cpu->gpu")
+        .requires_grad_(true);
 
     // y = x + x — backward accumulates x.grad twice (1.0 from each branch).
     let y = add(&x, &x).expect("add");
@@ -83,7 +86,10 @@ fn grad_accumulate_twice_on_gpu_f32() {
 fn grad_accumulate_twice_on_gpu_f64() {
     ensure_cuda_backend();
     let cpu = from_vec::<f64>(vec![1.0, 2.0, 3.0, 4.0], &[4]).expect("cpu tensor");
-    let x = cpu.to(Device::Cuda(0)).expect("cpu->gpu").requires_grad_(true);
+    let x = cpu
+        .to(Device::Cuda(0))
+        .expect("cpu->gpu")
+        .requires_grad_(true);
 
     // y = x + x — backward accumulates x.grad twice.
     let y = add(&x, &x).expect("add");
@@ -111,7 +117,10 @@ fn grad_accumulate_twice_on_gpu_f64() {
 fn grad_accumulate_three_branches_on_gpu_f64() {
     ensure_cuda_backend();
     let cpu = from_vec::<f64>(vec![10.0, 20.0], &[2]).expect("cpu tensor");
-    let x = cpu.to(Device::Cuda(0)).expect("cpu->gpu").requires_grad_(true);
+    let x = cpu
+        .to(Device::Cuda(0))
+        .expect("cpu->gpu")
+        .requires_grad_(true);
 
     // y = ((x + x) + x) — three branches into x; backward accumulates
     // grad three times on the leaf.

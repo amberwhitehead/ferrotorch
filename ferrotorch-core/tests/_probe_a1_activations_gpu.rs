@@ -20,11 +20,11 @@
 
 use std::sync::Once;
 
+use ferrotorch_core::Device;
 use ferrotorch_core::autograd::graph::backward;
 use ferrotorch_core::creation::from_vec;
 use ferrotorch_core::grad_fns::activation::{leaky_relu, softplus};
 use ferrotorch_core::grad_fns::transcendental::{cos, sin};
-use ferrotorch_core::Device;
 
 static GPU_INIT: Once = Once::new();
 
@@ -92,8 +92,12 @@ fn cos_autograd_cuda_f32() {
     let g = gpu.grad().expect("grad lookup").expect("grad attached");
     let g_cpu = g.cpu().expect("grad gpu->cpu");
     let g_data = g_cpu.data().expect("grad data");
-    let expected: Vec<f32> =
-        vec![-(0.1f32.sin()), -(0.5f32.sin()), -(1.0f32.sin()), -((-0.7f32).sin())];
+    let expected: Vec<f32> = vec![
+        -(0.1f32.sin()),
+        -(0.5f32.sin()),
+        -(1.0f32.sin()),
+        -((-0.7f32).sin()),
+    ];
     for (i, (actual, want)) in g_data.iter().zip(expected.iter()).enumerate() {
         assert!(
             (actual - want).abs() < 1e-4,
@@ -222,8 +226,12 @@ fn cos_autograd_cuda_f64() {
     let g = gpu.grad().expect("grad lookup").expect("grad attached");
     let g_cpu = g.cpu().expect("grad gpu->cpu");
     let g_data = g_cpu.data().expect("grad data");
-    let expected: Vec<f64> =
-        vec![-(0.1f64.sin()), -(0.5f64.sin()), -(1.0f64.sin()), -((-0.7f64).sin())];
+    let expected: Vec<f64> = vec![
+        -(0.1f64.sin()),
+        -(0.5f64.sin()),
+        -(1.0f64.sin()),
+        -((-0.7f64).sin()),
+    ];
     for (i, (actual, want)) in g_data.iter().zip(expected.iter()).enumerate() {
         assert!(
             (actual - want).abs() < 1e-9,

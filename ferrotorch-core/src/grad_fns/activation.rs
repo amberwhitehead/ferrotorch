@@ -386,27 +386,20 @@ impl<T: Float> GradFn<T> for GeluBackward<T> {
     }
 }
 
-/// Approximate erf(x) using Abramowitz & Stegun formula 7.1.26 (max error ~1.5e-7).
+/// Approximate erf(x) for the GELU(none) forward / backward path.
+///
+/// Delegates to `crate::special::erf_scalar`, which dispatches per-T:
+///   - f64 → SunPro fdlibm piecewise rational approximation (~1 ulp;
+///     meets F64_TRANSCENDENTAL = 1e-10);
+///   - f32 / bf16 → Abramowitz & Stegun 7.1.26 polynomial (~1.5e-7;
+///     inside F32_TRANSCENDENTAL_CPU = 1e-5).
+///
+/// Pre-#792 this function held a private A&S 7.1.26 copy that left
+/// gelu_none f64 at ~5e-8 residual, ~500x past the conformance gate.
+/// Routing through `special::erf_scalar` keeps the f64 / f32 dispatch
+/// in one place and lets gelu_none inherit the precision upgrade.
 fn erf_approx<T: Float>(x: T) -> T {
-    let one = <T as num_traits::One>::one();
-    let zero = <T as num_traits::Zero>::zero();
-    let sign = if x < zero { -one } else { one };
-    let x = if x < zero { -x } else { x };
-
-    let p = T::from(0.3275911).unwrap();
-    let a1 = T::from(0.254829592).unwrap();
-    let a2 = T::from(-0.284496736).unwrap();
-    let a3 = T::from(1.421413741).unwrap();
-    let a4 = T::from(-1.453152027).unwrap();
-    let a5 = T::from(1.061405429).unwrap();
-
-    let t = one / (one + p * x);
-    let t2 = t * t;
-    let t3 = t2 * t;
-    let t4 = t3 * t;
-    let t5 = t4 * t;
-    let poly = a1 * t + a2 * t2 + a3 * t3 + a4 * t4 + a5 * t5;
-    sign * (one - poly * (-x * x).exp())
+    crate::special::erf_scalar(x)
 }
 
 // ---------------------------------------------------------------------------

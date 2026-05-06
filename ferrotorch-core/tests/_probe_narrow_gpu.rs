@@ -24,8 +24,8 @@
 
 use std::sync::Once;
 
-use ferrotorch_core::creation::from_vec;
 use ferrotorch_core::Device;
+use ferrotorch_core::creation::from_vec;
 
 static GPU_INIT: Once = Once::new();
 

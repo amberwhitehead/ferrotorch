@@ -32,10 +32,10 @@
 
 use std::sync::Once;
 
+use ferrotorch_core::Device;
 use ferrotorch_core::autograd::graph::backward;
 use ferrotorch_core::creation::from_vec;
 use ferrotorch_core::grad_fns::activation::log_softmax;
-use ferrotorch_core::Device;
 
 static GPU_INIT: Once = Once::new();
 

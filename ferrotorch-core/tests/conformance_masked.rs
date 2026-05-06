@@ -961,11 +961,7 @@ fn cpu_with_fill_value_substitutes_override() {
                 let mt = MaskedTensor::new(a, mask)
                     .expect("MaskedTensor::new")
                     .with_fill_value(fill);
-                assert_eq!(
-                    mt.fill_value(),
-                    fill,
-                    "{label}: fill_value getter mismatch"
-                );
+                assert_eq!(mt.fill_value(), fill, "{label}: fill_value getter mismatch");
                 let filled = mt.filled().expect("filled");
                 check_f64(
                     &format!("{label} filled"),

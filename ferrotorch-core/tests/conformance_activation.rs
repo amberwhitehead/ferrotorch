@@ -407,68 +407,132 @@ fn check_f64(label: &str, actual: &[f64], expected: &[f64], tol: f64) {
 /// issue rather than silently weakening tolerance.
 ///
 /// Phase 2.5 surfaced 8 cascade follow-ups (#792 .. #799) covering:
-/// - #792: erf / erfc / digamma / gelu(none) f64 polynomial approximation
-///   residual (~6e-8 vs F64_TRANSCENDENTAL = 1e-10).
-/// - #793: erfinv f32 Winitzki rational approximation residual
-///   (~1.3e-4 vs F32_TRANSCENDENTAL_CPU = 1e-5).
-/// - #794: gelu() default fast-sigmoid approximation diverges from
-///   PyTorch's torch.nn.GELU default (approximate='none') by ~6e-3.
-/// - #795: hardsigmoid f64 backward — ferrotorch is *more* precise than
-///   PyTorch (PyTorch rounds 1/6 to f32 internally even for f64 input).
+/// - #792 (closed): erf / erfc / digamma / gelu(none) f64 polynomial residual
+///   — replaced Abramowitz-Stegun 7.1.26 in special::{erf,erfc,digamma} with
+///   SunPro fdlibm piecewise rational approximation; meets F64_TRANSCENDENTAL
+///   = 1e-10 gate (max abs err 1.1e-16 / 2.2e-16 / 2.7e-15 vs libm). Permanent
+///   regression sentinel: `tests/_probe_b3_a1_special_f64.rs`.
+/// - #793 (closed): erfinv f32 Winitzki rational approximation residual
+///   (~1.3e-4 vs F32_TRANSCENDENTAL_CPU = 1e-5) — replaced Winitzki final
+///   answer with Winitzki seed + Newton refinement against A1's SunPro
+///   `erf_f64_hi`; quadratic convergence drops the error to <1e-6 (f32) /
+///   <1e-15 (f64). Permanent regression sentinel:
+///   `tests/_probe_b3_a2_erfinv_f32.rs`.
+/// - #794 (closed): gelu() default already matches PyTorch's torch.nn.GELU
+///   default (approximate='none', exact erf-based) — `GeluApproximate::None`
+///   is `#[default]` on the enum since c329573db. The conformance test's
+///   `GeluSigmoid` fixture row now drives the sigmoid path explicitly via
+///   `gelu_with(_, GeluApproximate::Sigmoid)` instead of bare `gelu(_)` so
+///   the row exercises what its fixture was generated for. Breaking-change
+///   note: callers relying on the historical fast-sigmoid default must
+///   spell `gelu_with(GeluApproximate::Sigmoid)` explicitly.
+/// - #795 (closed): hardsigmoid f64 backward — ferrotorch is *more* precise
+///   than PyTorch (PyTorch rounds 1/6 to f32 internally even for f64
+///   input). The fixture's expected grad is `f32(1/6)` cast back to f64
+///   (≈ 0.16666667163372…), while ferrotorch returns the exact f64 `1/6`
+///   (≈ 0.16666666666666…). The two differ by `|1/6 − f32(1/6)| ≈ 5e-9` —
+///   below 1 ULP at f32 magnitudes but above the workspace
+///   `F64_TRANSCENDENTAL = 1e-10`. Closed by per-op tolerance relaxation
+///   in `tol_overrides()` (5e-8, ~10× the analytical worst case) instead
+///   of degrading ferrotorch's precision to match PyTorch's bug.
 /// - #796: sin/cos/leaky_relu/softplus autograd-on-CUDA fail with
 ///   `GpuTensorNotAccessible` — backward saves a CPU vec via .data()?.
-/// - #797: gpu_exp_f64_kernel PTX JIT compilation failed (same family as
-///   #781 / #784).
+/// - #797: fixed — `EXP_F64_PTX` referenced undeclared `%ln2_hi` / `%ln2_lo`
+///   registers; dead `mov` writes dropped. JIT compiles, runs live within
+///   F64_TRANSCENDENTAL. (Same family as #781 / #784.)
 /// - #798: gpu log_softmax f32 backward grad returns wildly wrong values
 ///   (delta ~4.0).
 /// - #799: gpu gelu_with(None) f32 forward diverges by 1.25e-2 — likely
 ///   the GPU kernel ignores the GeluApproximate flag.
+/// - #820: gpu log_softmax f64 backward grad — same algebraic shape as
+///   #798's f32 bug (likely double-exp on saved softmax). Surfaced once
+///   #797 unblocked the f64 forward path.
 #[allow(
     dead_code,
     reason = "consumed by `gpu` cfg-gated callers; CPU-side run loop also calls it"
 )]
 fn cascade_skip(op: &str, device_label: &str, dtype: &str) -> Option<&'static str> {
     match (op, device_label, dtype) {
-        // #792 — special-function f64 polynomial residual on CPU.
-        ("erf", "cpu", "float64")
-        | ("erfc", "cpu", "float64")
-        | ("digamma", "cpu", "float64")
-        | ("gelu_none", "cpu", "float64") => {
-            Some("#792: special-function f64 polynomial residual ~6e-8 (CPU)")
-        }
-        // #792 (erf-via-gelu also affects f32 erf cluster on GPU) — gelu(None)
-        // on CPU f32 is within tolerance, leave that running.
-        // #793 — erfinv Winitzki residual (~1.3e-4 absolute, dtype-independent).
-        ("erfinv", "cpu", _) => Some("#793: erfinv Winitzki residual ~1.3e-4 (CPU)"),
-        // #794 — gelu() default fast-sigmoid divergence from PyTorch's nn.GELU.
-        // Magnitude ~6e-3 absolute; surfaces in both f32 and f64.
-        ("gelu_sigmoid", _, _) => {
-            Some("#794: gelu() default sigmoid approximation diverges from PyTorch nn.GELU default")
-        }
-        // #795 — hardsigmoid f64 backward: ferrotorch is more precise.
-        // The fixture's expected grad is PyTorch's f32-rounded 1/6; we accept
-        // ferrotorch's true f64 1/6 by skipping until the fixture-tolerance
-        // policy lands.
-        ("hardsigmoid", "cpu", "float64") => {
-            Some("#795: hardsigmoid f64 grad — ferrotorch is more precise than PyTorch")
-        }
-        // #797 — exp_f64 PTX JIT failure on GPU. Also propagates transitively
-        // into log_softmax_f64 (which uses exp_f64 internally during the
-        // softmax half), so the f64 GPU log_softmax lane skips here too with
-        // the same root cause.
-        ("exp", "cuda:0", "float64") => Some("#797: exp_f64_kernel PTX JIT compilation failed"),
-        ("log_softmax_dim_last", "cuda:0", "float64") => {
-            Some("#797: log_softmax_f64 GPU forward depends on exp_f64 (PTX JIT failure)")
-        }
+        // #792 (closed): erf / erfc / digamma / gelu_none f64 are now within
+        // F64_TRANSCENDENTAL = 1e-10 — special::{erf, erfc, digamma} use the
+        // SunPro fdlibm piecewise rational approximation. The probe at
+        // `tests/_probe_b3_a1_special_f64.rs` is the permanent regression
+        // sentinel; gelu_none inherits the precision since GELU(none) is
+        // 0.5 * x * (1 + erf(x / sqrt(2))).
+        // #793 (closed): erfinv f32 / f64 are now within F32_TRANSCENDENTAL_CPU
+        // = 1e-5 / F64_TRANSCENDENTAL = 1e-10 — `erfinv_scalar` now seeds with
+        // the Winitzki rational and Newton-refines against `erf_f64_hi`. The
+        // probe at `tests/_probe_b3_a2_erfinv_f32.rs` (libm round-trip) is
+        // the permanent regression sentinel.
+        // #794 (closed): gelu() default = GeluApproximate::None already
+        // matches PyTorch's torch.nn.GELU default. The conformance row for
+        // `gelu_sigmoid` is now driven by an explicit `gelu_with(Sigmoid)`
+        // rather than bare `gelu()` (see `apply_f32` / `apply_f64`), so the
+        // fixture-row matches the kernel under test. No skip.
+        // #795 (closed): hardsigmoid f64 backward — handled by per-op
+        // tolerance override in `tol_overrides()` (5e-8 vs the workspace
+        // F64_TRANSCENDENTAL = 1e-10) absorbing PyTorch's f32-round-trip on
+        // the `1/6` constant. ferrotorch is correct (returns exact f64
+        // `1/6`); PyTorch is the divergence. No skip.
+        // #797 — fixed: EXP_F64_PTX referenced undeclared `%ln2_hi` /
+        // `%ln2_lo` registers (dead `mov` writes that ptxas rejected at
+        // module load). The ln(2) hi/lo split was already inlined as
+        // hex-literal FMA operands two lines below; the dead movs were
+        // dropped, the kernel JITs, and `gpu_exp_f64` runs live within
+        // F64_TRANSCENDENTAL = 1e-10 across the probed domain. The
+        // transitive `log_softmax_f64` GPU forward (depends on
+        // `gpu_exp_f64`) also runs live as a result. No skip.
         // #798 — fixed: gpu log_softmax f32 backward kernel was double-exp'ing
         // the saved softmax buffer (host already passed exp(log_softmax)).
         // PTX kernel now consumes the softmax probabilities directly. No skip.
+        // #820 — surfaced once #797 unblocked the f64 forward: gpu
+        // log_softmax f64 backward kernel returns wildly wrong gradients
+        // (delta ~4.09 vs PyTorch). Same shape as #798's f32 bug — the f64
+        // backward kernel needs the same algebraic fix re-applied (likely a
+        // double-exp on the saved softmax buffer). Out of A3 scope; tracked
+        // separately. The forward path now runs live; only the backward lane
+        // is skipped here.
+        ("log_softmax_dim_last", "cuda:0", "float64") => {
+            Some("#820: gpu log_softmax f64 backward grad — needs same fix as #798 f32")
+        }
         // #799 — gpu gelu_with(None) GPU forward divergence (~1.25e-2). Affects
         // both f32 and f64 lanes (the GPU kernel ignores the GeluApproximate
         // flag in both dtypes).
         ("gelu_none", "cuda:0", _) => {
             Some("#799: gpu gelu_with(None) forward diverges 1.25e-2 from PyTorch")
         }
+        _ => None,
+    }
+}
+
+/// Per-op tolerance overrides for documented "ferrotorch is more precise
+/// than PyTorch" divergences.
+///
+/// Returns `(tol_f32_override, tol_f64_override)` — `None` per slot leaves
+/// the workspace default in place. Each branch must cite the analytical
+/// worst-case bound and the issue documenting the divergence.
+///
+/// **Policy**: never relax to make a flaky test green. The override must
+/// describe a bounded numerical artefact in the reference (PyTorch),
+/// not a real precision gap in ferrotorch's kernel.
+#[allow(
+    dead_code,
+    reason = "consumed alongside cascade_skip from both CPU and gpu cfg-gated paths"
+)]
+fn tol_overrides(op: &str) -> Option<(Option<f32>, Option<f64>)> {
+    match op {
+        // #795 — hardsigmoid f64 backward. PyTorch returns the f32-rounded
+        // `1/6` constant cast back to f64 (`f64::from(1.0_f32 / 6.0)` ≈
+        // 0.16666667163372…) even when both input and output are f64;
+        // ferrotorch returns the exact f64 `1/6` (≈ 0.16666666666666…).
+        // Worst-case analytical delta is `|1/6 − f32(1/6)| ≈ 5.0e-9` on
+        // every element of the active region. We override f64 backward
+        // tolerance to 5e-8 (≈ 10× the analytical worst case) so the
+        // forward (which agrees exactly with PyTorch) and the backward
+        // both pass without weakening the workspace `F64_TRANSCENDENTAL`
+        // for any other op. The f32 lane is unaffected — both sides use
+        // the same f32 constant.
+        "hardsigmoid" => Some((None, Some(5.0e-8))),
         _ => None,
     }
 }
@@ -554,10 +618,14 @@ impl SimpleActivation {
             SimpleActivation::GeluTanh => {
                 gelu_with(a, GeluApproximate::Tanh).expect("gelu_with(tanh)")
             }
-            // `gelu(x)` defaults to the fast sigmoid approximation — that's
-            // the ferrotorch convention. Fixture row for `gelu_sigmoid` is
-            // generated as `x * sigmoid(1.702 * x)` to match.
-            SimpleActivation::GeluSigmoid => gelu(a).expect("gelu (sigmoid default)"),
+            // Fixture row for `gelu_sigmoid` is generated as
+            // `x * sigmoid(1.702 * x)`. We drive the sigmoid path
+            // explicitly via `gelu_with(Sigmoid)`. Bare `gelu(_)` defaults
+            // to `GeluApproximate::None` (PyTorch parity, #794) and would
+            // not match this fixture row.
+            SimpleActivation::GeluSigmoid => {
+                gelu_with(a, GeluApproximate::Sigmoid).expect("gelu_with(sigmoid)")
+            }
             SimpleActivation::SoftmaxDimLast => softmax(a).expect("softmax"),
             SimpleActivation::LogSoftmaxDimLast => log_softmax(a).expect("log_softmax"),
         }
@@ -585,7 +653,12 @@ impl SimpleActivation {
             SimpleActivation::GeluTanh => {
                 gelu_with(a, GeluApproximate::Tanh).expect("gelu_with(tanh)")
             }
-            SimpleActivation::GeluSigmoid => gelu(a).expect("gelu (sigmoid default)"),
+            // See `apply_f32` for the rationale — bare `gelu(_)` is now
+            // `GeluApproximate::None` (PyTorch parity, #794), so the
+            // sigmoid fixture row routes through `gelu_with(Sigmoid)`.
+            SimpleActivation::GeluSigmoid => {
+                gelu_with(a, GeluApproximate::Sigmoid).expect("gelu_with(sigmoid)")
+            }
             SimpleActivation::SoftmaxDimLast => softmax(a).expect("softmax"),
             SimpleActivation::LogSoftmaxDimLast => log_softmax(a).expect("log_softmax"),
         }
@@ -661,7 +734,7 @@ fn run_simple_activation_for_device(
             .map(F64ListSentinel::as_slice)
             .expect("grad_a");
 
-        let (tol_f32, tol_f64) = if op.is_transcendental() {
+        let (mut tol_f32, mut tol_f64) = if op.is_transcendental() {
             if on_gpu {
                 (
                     tolerance::F32_TRANSCENDENTAL_GPU,
@@ -676,6 +749,16 @@ fn run_simple_activation_for_device(
         } else {
             (tolerance::F32_ELEMENTWISE, tolerance::F64_TRANSCENDENTAL)
         };
+
+        // Per-op tolerance overrides for documented PyTorch divergences
+        // where ferrotorch is mathematically more precise than the
+        // reference. Each branch must justify the relaxation magnitude
+        // against an analytical worst-case bound — never to make a flaky
+        // test green.
+        if let Some((f32_over, f64_over)) = tol_overrides(op.fixture_name()) {
+            tol_f32 = f32_over.unwrap_or(tol_f32);
+            tol_f64 = f64_over.unwrap_or(tol_f64);
+        }
 
         match f.dtype.as_str() {
             "float32" => {
@@ -808,8 +891,10 @@ fn cpu_gelu_tanh() {
 }
 
 #[test]
-fn cpu_gelu_sigmoid_default() {
-    // `gelu(x)` defaults to the sigmoid approximation in ferrotorch.
+fn cpu_gelu_sigmoid() {
+    // The sigmoid GELU is now opt-in via `gelu_with(Sigmoid)`. Bare
+    // `gelu(x)` matches PyTorch's `torch.nn.GELU()` default
+    // (`GeluApproximate::None`, exact erf-based) — see #794.
     run_simple_activation_for_device(SimpleActivation::GeluSigmoid, "cpu", Device::Cpu, true);
 }
 
@@ -2153,7 +2238,11 @@ fn implicit_backward_coverage_smoke() {
     let _ = elu(&a, 1.0).expect("elu+EluBackward");
     let _ = gelu_with(&a, GeluApproximate::None).expect("gelu+GeluBackward(none)");
     let _ = gelu_with(&a, GeluApproximate::Tanh).expect("gelu+GeluBackward(tanh)");
-    let _ = gelu(&a).expect("gelu+GeluBackward(sigmoid default)");
+    let _ = gelu_with(&a, GeluApproximate::Sigmoid).expect("gelu+GeluBackward(sigmoid)");
+    // Bare `gelu(_)` defaults to `GeluApproximate::None` per #794 — also
+    // covered by the line above, but exercised once more here so the
+    // public-API entry point appears in the surface walk.
+    let _ = gelu(&a).expect("gelu+GeluBackward(default = none, #794)");
     let _ = softmax(&a).expect("softmax+SoftmaxBackward");
     let _ = log_softmax(&a).expect("log_softmax+LogSoftmaxBackward");
 

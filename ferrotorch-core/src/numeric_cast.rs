@@ -73,16 +73,15 @@ where
     T: num_traits::ToPrimitive + std::fmt::Debug + Copy,
     U: num_traits::NumCast,
 {
-    let result: U = <U as num_traits::NumCast>::from(v).ok_or_else(|| {
-        FerrotorchError::InvalidArgument {
+    let result: U =
+        <U as num_traits::NumCast>::from(v).ok_or_else(|| FerrotorchError::InvalidArgument {
             message: format!(
                 "cast from {} to {} failed: value {:?} not representable",
                 std::any::type_name::<T>(),
                 std::any::type_name::<U>(),
                 v,
             ),
-        }
-    })?;
+        })?;
 
     // Saturation guard for issue #815. `NumCast` may silently saturate a
     // finite source to `±Infinity` when the target is a narrow float

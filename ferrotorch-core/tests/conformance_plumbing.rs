@@ -195,9 +195,7 @@ use ferrotorch_core::device::Device;
 use ferrotorch_core::dispatch::{DispatchKey, DispatchKeySet, Dispatcher, Kernel};
 use ferrotorch_core::dtype::Float;
 use ferrotorch_core::error::{FerrotorchError, FerrotorchResult};
-use ferrotorch_core::gpu_dispatch::{
-    GpuBufferHandle, GpuRngState, gpu_backend, has_gpu_backend,
-};
+use ferrotorch_core::gpu_dispatch::{GpuBufferHandle, GpuRngState, gpu_backend, has_gpu_backend};
 use ferrotorch_core::meta_propagate;
 use ferrotorch_core::named_tensor::NamedTensor;
 use ferrotorch_core::numeric_cast::cast;
@@ -663,7 +661,9 @@ fn cast_fixture_driven() {
             ("usize", "f32") => {
                 let v = match src_val {
                     CastSrcValue::I64(x) if x >= 0 => x as usize,
-                    other => panic!("{label}: usize source must be a non-negative int, got {other:?}"),
+                    other => {
+                        panic!("{label}: usize source must be a non-negative int, got {other:?}")
+                    }
                 };
                 let r: FerrotorchResult<f32> = cast(v);
                 check_cast_result(r.map(f64::from), expect_err, &f.expected_value, &label)
@@ -750,8 +750,7 @@ fn build_error_for_fixture(variant: &str, args: &serde_json::Value) -> Ferrotorc
     let usize_field = |k: &str| -> usize {
         args.get(k)
             .and_then(Value::as_u64)
-            .unwrap_or_else(|| panic!("error fixture missing usize field {k}"))
-            as usize
+            .unwrap_or_else(|| panic!("error fixture missing usize field {k}")) as usize
     };
     let parse_device = |s: &str| -> Device {
         match s {
@@ -773,7 +772,9 @@ fn build_error_for_fixture(variant: &str, args: &serde_json::Value) -> Ferrotorc
         }
     };
     match variant {
-        "ShapeMismatch" => FerrotorchError::ShapeMismatch { message: s("message") },
+        "ShapeMismatch" => FerrotorchError::ShapeMismatch {
+            message: s("message"),
+        },
         "DeviceMismatch" => FerrotorchError::DeviceMismatch {
             expected: parse_device(&s("expected")),
             got: parse_device(&s("got")),
@@ -797,9 +798,15 @@ fn build_error_for_fixture(variant: &str, args: &serde_json::Value) -> Ferrotorc
             axis: usize_field("axis"),
             size: usize_field("size"),
         },
-        "InvalidArgument" => FerrotorchError::InvalidArgument { message: s("message") },
-        "LockPoisoned" => FerrotorchError::LockPoisoned { message: s("message") },
-        "Internal" => FerrotorchError::Internal { message: s("message") },
+        "InvalidArgument" => FerrotorchError::InvalidArgument {
+            message: s("message"),
+        },
+        "LockPoisoned" => FerrotorchError::LockPoisoned {
+            message: s("message"),
+        },
+        "Internal" => FerrotorchError::Internal {
+            message: s("message"),
+        },
         "DeviceUnavailable" => FerrotorchError::DeviceUnavailable,
         "GpuTensorNotAccessible" => FerrotorchError::GpuTensorNotAccessible,
         "NotImplementedOnCuda" => {
@@ -816,7 +823,9 @@ fn build_error_for_fixture(variant: &str, args: &serde_json::Value) -> Ferrotorc
             };
             FerrotorchError::NotImplementedOnCuda { op: op_static }
         }
-        "WorkerPanic" => FerrotorchError::WorkerPanic { message: s("message") },
+        "WorkerPanic" => FerrotorchError::WorkerPanic {
+            message: s("message"),
+        },
         other => panic!("unknown FerrotorchError variant {other:?}"),
     }
 }
@@ -919,7 +928,10 @@ fn tensor_metadata_basic_shapes() {
 fn tensor_metadata_transposed_breaks_contiguity() {
     let file = load_fixtures();
     let cases = cases_for(&file, "tensor_metadata_transposed");
-    assert!(!cases.is_empty(), "no fixtures for tensor_metadata_transposed");
+    assert!(
+        !cases.is_empty(),
+        "no fixtures for tensor_metadata_transposed"
+    );
     for f in cases {
         let label = format!("tensor_metadata_transposed tag={:?}", f.tag);
         let shape = f.shape.as_ref().expect("shape");
@@ -1198,8 +1210,8 @@ fn tensor_storage_on_device_cpu() {
 fn tensor_storage_on_device_meta_discards_data() {
     // Meta target keeps only the element count, not the data — by
     // documented contract.
-    let s: TensorStorage<f32> = TensorStorage::on_device(vec![1.0, 2.0, 3.0], Device::Meta)
-        .expect("on_device(Meta)");
+    let s: TensorStorage<f32> =
+        TensorStorage::on_device(vec![1.0, 2.0, 3.0], Device::Meta).expect("on_device(Meta)");
     assert!(s.is_meta());
     assert_eq!(s.len(), 3);
 }
@@ -1383,8 +1395,7 @@ fn gpu_dispatch_module_query_apis() {
     // shape — both functions must be callable and return the documented
     // types.
     let _has = has_gpu_backend();
-    let backend_opt: Option<&'static dyn ferrotorch_core::gpu_dispatch::GpuBackend> =
-        gpu_backend();
+    let backend_opt: Option<&'static dyn ferrotorch_core::gpu_dispatch::GpuBackend> = gpu_backend();
     // Whether `Some` or `None` is implementation-defined for the test
     // process; both are valid. The substring grep covers
     // `gpu_backend` / `has_gpu_backend`.
@@ -1492,7 +1503,10 @@ fn cast_huge_f64_to_bf16_returns_err_post_815() {
     // ever flips back to Ok(Infinity) the regression will be caught
     // here.
     let r: FerrotorchResult<half::bf16> = cast(1e300_f64);
-    assert!(r.is_err(), "post-#815: expected Err for finite-source saturation");
+    assert!(
+        r.is_err(),
+        "post-#815: expected Err for finite-source saturation"
+    );
     let msg = format!("{}", r.unwrap_err());
     assert!(
         msg.contains("saturates to non-finite") || msg.contains("not representable"),
@@ -1531,7 +1545,11 @@ fn meta_unary_same_shape_passthrough() {
     }
     // CPU input → None.
     let cpu = cpu_t(&[3, 4]);
-    assert!(meta_propagate::unary_same_shape(&cpu).expect("ok").is_none());
+    assert!(
+        meta_propagate::unary_same_shape(&cpu)
+            .expect("ok")
+            .is_none()
+    );
 }
 
 #[test]
@@ -1552,7 +1570,11 @@ fn meta_binary_broadcast_shapes() {
     // CPU inputs → None.
     let a = cpu_t(&[2, 3]);
     let b = cpu_t(&[2, 3]);
-    assert!(meta_propagate::binary_broadcast(&a, &b).expect("ok").is_none());
+    assert!(
+        meta_propagate::binary_broadcast(&a, &b)
+            .expect("ok")
+            .is_none()
+    );
     // Mixed → Err.
     let r = meta_propagate::binary_broadcast(&meta_t(&[2, 3]), &cpu_t(&[2, 3]));
     assert!(r.is_err(), "mixed meta+cpu must error");

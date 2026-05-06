@@ -9754,8 +9754,6 @@ pub(crate) const EXP_F64_PTX: &str = "\
 
     // Constants
     mov.f64 %log2e, 0d3FF71547652B82FE;   // log2(e) = 1.4426950408889634
-    mov.f64 %ln2_hi, 0d3FE62E42FEFA3800;  // ln(2) high bits
-    mov.f64 %ln2_lo, 0d3D2EF35793C76730;  // ln(2) low bits
     mov.f64 %one, 0d3FF0000000000000;      // 1.0
     mov.f64 %half, 0d3FE0000000000000;     // 0.5
 
@@ -9764,7 +9762,10 @@ pub(crate) const EXP_F64_PTX: &str = "\
     cvt.rni.f64.f64 %nf, %nf;             // round to nearest integer
     cvt.rni.s32.f64 %ni, %nf;             // integer n
 
-    // r = x - n * ln2  (Cody-Waite two-step for precision)
+    // r = x - n * ln2  (Cody-Waite two-step for precision); the
+    // hi/lo split of ln(2) is `0d3FE62E42FEFA3800` (hi) and
+    // `0d3D2EF35793C76730` (lo), inlined directly into the FMA
+    // instructions below to avoid the cost of an unused register.
     fma.rn.f64 %r, %nf, 0dBFE62E42FEFA3800, %x;  // r = x - n*ln2_hi
     fma.rn.f64 %r, %nf, 0dBD2EF35793C76730, %r;   // r -= n*ln2_lo
 

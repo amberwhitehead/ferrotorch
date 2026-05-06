@@ -956,7 +956,11 @@ fn cpu_rfftfreq() {
 // in `conformance_surface_coverage` treats both as covered when their short
 // identifiers appear in this file.
 
-fn run_window_simple(op_tag: &str, by_signal: fn(usize) -> ferrotorch_core::FerrotorchResult<Tensor<f64>>, by_windows: fn(usize) -> ferrotorch_core::FerrotorchResult<Tensor<f64>>) {
+fn run_window_simple(
+    op_tag: &str,
+    by_signal: fn(usize) -> ferrotorch_core::FerrotorchResult<Tensor<f64>>,
+    by_windows: fn(usize) -> ferrotorch_core::FerrotorchResult<Tensor<f64>>,
+) {
     let file = load_fixtures();
     let cases = cases_for(&file, op_tag, "cpu");
     assert!(!cases.is_empty(), "no fixtures for {op_tag} on cpu");
@@ -991,20 +995,12 @@ fn run_window_simple(op_tag: &str, by_signal: fn(usize) -> ferrotorch_core::Ferr
 
 #[test]
 fn cpu_window_bartlett() {
-    run_window_simple(
-        "window_bartlett",
-        signal::bartlett,
-        windows_mod::bartlett,
-    );
+    run_window_simple("window_bartlett", signal::bartlett, windows_mod::bartlett);
 }
 
 #[test]
 fn cpu_window_blackman() {
-    run_window_simple(
-        "window_blackman",
-        signal::blackman,
-        windows_mod::blackman,
-    );
+    run_window_simple("window_blackman", signal::blackman, windows_mod::blackman);
 }
 
 #[test]
@@ -1015,47 +1011,27 @@ fn cpu_window_hann() {
 #[test]
 fn cpu_window_hanning() {
     // hanning is an alias of hann; the fixture matches.
-    run_window_simple(
-        "window_hanning",
-        signal::hanning,
-        windows_mod::hanning,
-    );
+    run_window_simple("window_hanning", signal::hanning, windows_mod::hanning);
 }
 
 #[test]
 fn cpu_window_hamming() {
-    run_window_simple(
-        "window_hamming",
-        signal::hamming,
-        windows_mod::hamming,
-    );
+    run_window_simple("window_hamming", signal::hamming, windows_mod::hamming);
 }
 
 #[test]
 fn cpu_window_nuttall() {
-    run_window_simple(
-        "window_nuttall",
-        signal::nuttall,
-        windows_mod::nuttall,
-    );
+    run_window_simple("window_nuttall", signal::nuttall, windows_mod::nuttall);
 }
 
 #[test]
 fn cpu_window_cosine() {
-    run_window_simple(
-        "window_cosine",
-        signal::cosine,
-        windows_mod::cosine,
-    );
+    run_window_simple("window_cosine", signal::cosine, windows_mod::cosine);
 }
 
 #[test]
 fn cpu_window_parzen() {
-    run_window_simple(
-        "window_parzen",
-        signal::parzen,
-        windows_mod::parzen,
-    );
+    run_window_simple("window_parzen", signal::parzen, windows_mod::parzen);
 }
 
 #[test]
@@ -1106,8 +1082,7 @@ fn cpu_window_exponential() {
             .expect("out_values");
 
         let r_signal = signal::exponential(m, None, tau).expect("signal::exponential");
-        let r_windows =
-            windows_mod::exponential(m, None, tau).expect("windows::exponential");
+        let r_windows = windows_mod::exponential(m, None, tau).expect("windows::exponential");
         check_f64(
             &format!("{label} signal::*"),
             r_signal.data().expect("data"),
@@ -1171,8 +1146,7 @@ fn cpu_window_general_cosine() {
             .expect("out_values");
 
         let r_signal = signal::general_cosine(m, coeffs).expect("signal::general_cosine");
-        let r_windows =
-            windows_mod::general_cosine(m, coeffs).expect("windows::general_cosine");
+        let r_windows = windows_mod::general_cosine(m, coeffs).expect("windows::general_cosine");
         check_f64(
             &format!("{label} signal::*"),
             r_signal.data().expect("data"),
@@ -1204,8 +1178,7 @@ fn cpu_window_general_hamming() {
             .expect("out_values");
 
         let r_signal = signal::general_hamming(m, alpha).expect("signal::general_hamming");
-        let r_windows =
-            windows_mod::general_hamming(m, alpha).expect("windows::general_hamming");
+        let r_windows = windows_mod::general_hamming(m, alpha).expect("windows::general_hamming");
         check_f64(
             &format!("{label} signal::*"),
             r_signal.data().expect("data"),
@@ -1308,12 +1281,7 @@ fn cpu_window_tukey() {
 //   real, imag, re, im, shape, ndim, numel, add, sub, mul, conj, abs,
 //   angle, matmul, fft, ifft, fft2, ifft2, reshape.
 
-fn complex_tensor_check(
-    op_name: &str,
-    fixture: &Fixture,
-    actual_re: &[f64],
-    actual_im: &[f64],
-) {
+fn complex_tensor_check(op_name: &str, fixture: &Fixture, actual_re: &[f64], actual_im: &[f64]) {
     let label = format!("{op_name} cpu dtype={}", fixture.dtype);
     let expected = fixture
         .out_values
@@ -1426,18 +1394,10 @@ fn cpu_complex_tensor_pointwise_ops() {
             let b_re = f.b_re.as_ref().expect("b_re");
             let b_im = f.b_im.as_ref().expect("b_im");
             let shape = f.shape.as_ref().expect("shape");
-            let a = ComplexTensor::<f64>::from_re_im(
-                a_re.clone(),
-                a_im.clone(),
-                shape.clone(),
-            )
-            .expect("a");
-            let b = ComplexTensor::<f64>::from_re_im(
-                b_re.clone(),
-                b_im.clone(),
-                shape.clone(),
-            )
-            .expect("b");
+            let a = ComplexTensor::<f64>::from_re_im(a_re.clone(), a_im.clone(), shape.clone())
+                .expect("a");
+            let b = ComplexTensor::<f64>::from_re_im(b_re.clone(), b_im.clone(), shape.clone())
+                .expect("b");
             let c = match op {
                 "complex_add" => a.add(&b).expect("add"),
                 "complex_sub" => a.sub(&b).expect("sub"),
@@ -1457,8 +1417,8 @@ fn cpu_complex_tensor_conj_abs_angle() {
         let a_re = f.a_re.as_ref().expect("a_re");
         let a_im = f.a_im.as_ref().expect("a_im");
         let shape = f.shape.as_ref().expect("shape");
-        let a = ComplexTensor::<f64>::from_re_im(a_re.clone(), a_im.clone(), shape.clone())
-            .expect("a");
+        let a =
+            ComplexTensor::<f64>::from_re_im(a_re.clone(), a_im.clone(), shape.clone()).expect("a");
         let c = a.conj();
         complex_tensor_check("complex_conj", f, c.re(), c.im());
     }
@@ -1478,8 +1438,7 @@ fn cpu_complex_tensor_conj_abs_angle() {
         if f.dtype == "float32" {
             let a_re_f32: Vec<f32> = a_re.iter().map(|&x| x as f32).collect();
             let a_im_f32: Vec<f32> = a_im.iter().map(|&x| x as f32).collect();
-            let a = ComplexTensor::<f32>::from_re_im(a_re_f32, a_im_f32, shape.clone())
-                .expect("a");
+            let a = ComplexTensor::<f32>::from_re_im(a_re_f32, a_im_f32, shape.clone()).expect("a");
             let abs_t = a.abs().expect("abs");
             check_f32(
                 &format!("complex_abs cpu tag={:?} dtype=f32", f.tag),
@@ -1512,8 +1471,7 @@ fn cpu_complex_tensor_conj_abs_angle() {
         if f.dtype == "float32" {
             let a_re_f32: Vec<f32> = a_re.iter().map(|&x| x as f32).collect();
             let a_im_f32: Vec<f32> = a_im.iter().map(|&x| x as f32).collect();
-            let a = ComplexTensor::<f32>::from_re_im(a_re_f32, a_im_f32, shape.clone())
-                .expect("a");
+            let a = ComplexTensor::<f32>::from_re_im(a_re_f32, a_im_f32, shape.clone()).expect("a");
             let ang = a.angle().expect("angle");
             check_f32(
                 &format!("complex_angle cpu tag={:?} dtype=f32", f.tag),
@@ -1564,12 +1522,8 @@ fn cpu_complex_tensor_fft_bridges() {
             let a_re = f.a_re.as_ref().expect("a_re");
             let a_im = f.a_im.as_ref().expect("a_im");
             let shape = f.shape.as_ref().expect("shape");
-            let a = ComplexTensor::<f64>::from_re_im(
-                a_re.clone(),
-                a_im.clone(),
-                shape.clone(),
-            )
-            .expect("a");
+            let a = ComplexTensor::<f64>::from_re_im(a_re.clone(), a_im.clone(), shape.clone())
+                .expect("a");
             let c = match op {
                 "complex_fft_default" => a.fft(f.n_arg).expect("fft"),
                 "complex_ifft_default" => a.ifft(f.n_arg).expect("ifft"),
@@ -1585,12 +1539,8 @@ fn cpu_complex_tensor_fft_bridges() {
             let a_re = f.a_re.as_ref().expect("a_re");
             let a_im = f.a_im.as_ref().expect("a_im");
             let shape = f.shape.as_ref().expect("shape");
-            let a = ComplexTensor::<f64>::from_re_im(
-                a_re.clone(),
-                a_im.clone(),
-                shape.clone(),
-            )
-            .expect("a");
+            let a = ComplexTensor::<f64>::from_re_im(a_re.clone(), a_im.clone(), shape.clone())
+                .expect("a");
             let c = match op {
                 "complex_fft2_default" => a.fft2().expect("fft2"),
                 "complex_ifft2_default" => a.ifft2().expect("ifft2"),
@@ -1634,10 +1584,7 @@ fn run_fft_diff_for_device(op_name: &str, device_label: &str, device: Device) {
             );
             continue;
         }
-        let label = format!(
-            "{op_name} {device_label} tag={:?} dtype={}",
-            f.tag, f.dtype,
-        );
+        let label = format!("{op_name} {device_label} tag={:?} dtype={}", f.tag, f.dtype,);
         let shape = f.a_shape.as_ref().expect("a_shape");
         let a_data = f
             .a_data

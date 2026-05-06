@@ -552,10 +552,7 @@ fn run_forward_for_device(device_label: &str, device: Device) {
                 let v = upload_f32(make_cpu_f32(f.v_data.as_slice(), &v_shape, false), device);
 
                 let bias_t: Option<Tensor<f32>> = f.bias.as_ref().map(|b| {
-                    upload_f32(
-                        make_cpu_f32(b.as_slice(), &[f.n_q, f.n_k], false),
-                        device,
-                    )
+                    upload_f32(make_cpu_f32(b.as_slice(), &[f.n_q, f.n_k], false), device)
                 });
                 let mask_t: Option<Tensor<f32>> = f
                     .mask_2d
@@ -596,10 +593,7 @@ fn run_forward_for_device(device_label: &str, device: Device) {
                 let v = upload_f64(make_cpu_f64(f.v_data.as_slice(), &v_shape, false), device);
 
                 let bias_t: Option<Tensor<f64>> = f.bias.as_ref().map(|b| {
-                    upload_f64(
-                        make_cpu_f64(b.as_slice(), &[f.n_q, f.n_k], false),
-                        device,
-                    )
+                    upload_f64(make_cpu_f64(b.as_slice(), &[f.n_q, f.n_k], false), device)
                 });
                 let mask_t: Option<Tensor<f64>> = f
                     .mask_2d
@@ -699,10 +693,7 @@ fn run_backward_for_device(device_label: &str, device: Device) {
                 let v = upload_f32(make_cpu_f32(f.v_data.as_slice(), &v_shape, true), device);
 
                 let bias_t: Option<Tensor<f32>> = f.bias.as_ref().map(|b| {
-                    upload_f32(
-                        make_cpu_f32(b.as_slice(), &[f.n_q, f.n_k], false),
-                        device,
-                    )
+                    upload_f32(make_cpu_f32(b.as_slice(), &[f.n_q, f.n_k], false), device)
                 });
                 let mask_t: Option<Tensor<f32>> = f
                     .mask_2d
@@ -757,10 +748,7 @@ fn run_backward_for_device(device_label: &str, device: Device) {
                 let v = upload_f64(make_cpu_f64(f.v_data.as_slice(), &v_shape, true), device);
 
                 let bias_t: Option<Tensor<f64>> = f.bias.as_ref().map(|b| {
-                    upload_f64(
-                        make_cpu_f64(b.as_slice(), &[f.n_q, f.n_k], false),
-                        device,
-                    )
+                    upload_f64(make_cpu_f64(b.as_slice(), &[f.n_q, f.n_k], false), device)
                 });
                 let mask_t: Option<Tensor<f64>> = f
                     .mask_2d

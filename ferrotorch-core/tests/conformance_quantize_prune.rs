@@ -355,10 +355,7 @@ fn quantize_per_tensor_bit_exact_codes() {
     assert!(!cases.is_empty(), "no quantize_per_tensor fixtures");
 
     for f in cases {
-        let label = format!(
-            "quantize_per_tensor tag={:?} qdtype={:?}",
-            f.tag, f.qdtype
-        );
+        let label = format!("quantize_per_tensor tag={:?} qdtype={:?}", f.tag, f.qdtype);
         let shape = f.shape.as_ref().expect("shape");
         let x_data = f.x_data.as_ref().expect("x_data").as_slice();
         let qdtype = parse_qdtype(f.qdtype.as_deref().expect("qdtype"));
@@ -367,8 +364,7 @@ fn quantize_per_tensor_bit_exact_codes() {
         let expected_zp = f.zero_point.expect("zero_point");
 
         let t = make_cpu_f32(x_data, shape, false);
-        let qt: QuantizedTensor =
-            quantize(&t, QuantScheme::PerTensor, qdtype).expect("quantize");
+        let qt: QuantizedTensor = quantize(&t, QuantScheme::PerTensor, qdtype).expect("quantize");
 
         // Shape preservation.
         assert_eq!(qt.shape(), shape.as_slice(), "{label}: shape mismatch");
@@ -447,10 +443,7 @@ fn quantize_per_channel_bit_exact_codes() {
     assert!(!cases.is_empty(), "no quantize_per_channel fixtures");
 
     for f in cases {
-        let label = format!(
-            "quantize_per_channel tag={:?} qdtype={:?}",
-            f.tag, f.qdtype
-        );
+        let label = format!("quantize_per_channel tag={:?} qdtype={:?}", f.tag, f.qdtype);
         let shape = f.shape.as_ref().expect("shape");
         let axis = f.axis.expect("axis");
         let x_data = f.x_data.as_ref().expect("x_data").as_slice();
@@ -742,7 +735,10 @@ fn quantize_dequantize_round_trip_within_step() {
 fn fake_quantize_differentiable_forward_and_ste_backward() {
     let file = load_fixtures();
     let cases = cases_for(&file, "fake_quantize_differentiable");
-    assert!(!cases.is_empty(), "no fake_quantize_differentiable fixtures");
+    assert!(
+        !cases.is_empty(),
+        "no fake_quantize_differentiable fixtures"
+    );
 
     for f in cases {
         let label = format!("fake_quantize_differentiable tag={:?}", f.tag);
@@ -758,8 +754,7 @@ fn fake_quantize_differentiable_forward_and_ste_backward() {
         // y = fake_quantize_differentiable(x, ...). Then y.sum().backward().
         let shape = vec![x_data.len()];
         let x = make_cpu_f32(x_data, &shape, true);
-        let y =
-            fake_quantize_differentiable(&x, scale, zp, qmin, qmax).expect("fq_differentiable");
+        let y = fake_quantize_differentiable(&x, scale, zp, qmin, qmax).expect("fq_differentiable");
 
         let actual_y = y.data().expect("y data").to_vec();
         let expected_y_f32: Vec<f32> = expected_y.iter().map(|&v| v as f32).collect();
@@ -773,10 +768,7 @@ fn fake_quantize_differentiable_forward_and_ste_backward() {
         // Backward: use sum() on y as a scalar loss, like PyTorch's reference.
         let loss = ferrotorch_core::grad_fns::reduction::sum(&y).expect("sum");
         loss.backward().expect("backward");
-        let grad = x
-            .grad()
-            .expect("grad opt")
-            .expect("grad value");
+        let grad = x.grad().expect("grad opt").expect("grad value");
         let actual_grad = grad.data().expect("grad data").to_vec();
         let expected_grad_f32: Vec<f32> = expected_grad.iter().map(|&v| v as f32).collect();
         // The STE mask is the binary indicator of in-range; multiplying by
@@ -1055,9 +1047,8 @@ fn qat_model_register_layer_and_fake_quantize_weights() {
     assert_eq!(fq_w.len(), weights.len());
 
     // Same for QatModel::fake_quantize_activations.
-    let (fq_a, _grad_mask) =
-        QatModel::fake_quantize_activations(&mut model, "fc1", &[1.0, 2.0])
-            .expect("fake_quantize_activations");
+    let (fq_a, _grad_mask) = QatModel::fake_quantize_activations(&mut model, "fc1", &[1.0, 2.0])
+        .expect("fake_quantize_activations");
     assert_eq!(fq_a.len(), 2);
 }
 

@@ -521,19 +521,13 @@ fn cascade_skip(
             match t {
                 "matmul_2d_2d" | "matmul_3d_3d" => return None,
                 "matmul_1d_1d" => {
-                    return Some(
-                        "#801 — 1D x 1D (dot) needs GPU dot kernel; sub-cascade filed",
-                    );
+                    return Some("#801 — 1D x 1D (dot) needs GPU dot kernel; sub-cascade filed");
                 }
                 "matmul_2d_1d" => {
-                    return Some(
-                        "#801 — 2D x 1D (mv) needs GPU mv kernel; sub-cascade filed",
-                    );
+                    return Some("#801 — 2D x 1D (mv) needs GPU mv kernel; sub-cascade filed");
                 }
                 "matmul_1d_2d" => {
-                    return Some(
-                        "#801 — 1D x 2D (vm) needs GPU vm kernel; sub-cascade filed",
-                    );
+                    return Some("#801 — 1D x 2D (vm) needs GPU vm kernel; sub-cascade filed");
                 }
                 "matmul_broadcast" => {
                     return Some(

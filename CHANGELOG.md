@@ -6,7 +6,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+### Breaking
+- ferrotorch-core: `gelu()` (no-arg) default is now `GeluApproximate::None` (exact erf-based: `x * 0.5 * (1 + erf(x / √2))`), matching `torch.nn.GELU()`'s `approximate='none'` default. Previously the no-arg path defaulted to `GeluApproximate::Sigmoid` (`x * sigmoid(1.702 * x)`), producing ~6e-3 absolute deviation from PyTorch. **Migration**: callers relying on the historical fast-sigmoid default must opt in explicitly via `gelu_with(input, GeluApproximate::Sigmoid)` (LLM/transformer paths in `ferrotorch-llama` etc. will silently get the slower-but-more-precise erf path after upgrade — adjust if performance matters more than parity in your call site). `gelu_with(_, GeluApproximate::Tanh)` (PyTorch's `approximate='tanh'`) and `gelu_with(_, GeluApproximate::None)` are unchanged. The enum discriminant order is unchanged; only the `#[default]` attribute moved (closes #794).
+
 ### Fixed
+- ferrotorch-core: hardsigmoid f64 backward conformance tolerance — ferrotorch returns the exact f64 `1/6` (≈ 0.16666666666666…) for the active-region gradient; PyTorch returns `f32(1/6)` cast back to f64 (≈ 0.16666667163372…) because its `hardsigmoid_backward` uses an f32 constant internally even for f64 inputs. ferrotorch is correct; PyTorch is the divergence. Closed by adding a per-op tolerance override (`tol_overrides()` in `conformance_activation.rs`) of 5e-8 for `hardsigmoid` f64 — bounded by 10× the analytical worst case `|1/6 − f32(1/6)| ≈ 5.0e-9`. The workspace-wide `F64_TRANSCENDENTAL = 1e-10` gate is preserved for every other op; only this one PyTorch artefact is absorbed (closes #795).
 - ferrotorch-core: sin/cos/leaky_relu/softplus autograd-on-CUDA broken — removed broken `.data()?` save-state in `LeakyReluBackward` and `SoftplusBackward`; routes via existing tensor-op composites that are CUDA-aware (`unary_map` mask + `arithmetic::mul` for leaky_relu, `scale_f64`/`sigmoid_f64`/`mul_f64` extension to the existing f32 GPU lane for softplus). Forward `softplus`/`fast_sin`/`fast_cos`/`leaky_relu` no longer force-detour CUDA-resident output through CPU storage; instead each takes the `unary_map` path for CUDA inputs and reuses `into_storage_and_shape()` to keep the autograd-tracked tensor on the input device. Sin/Cos backward already had a CUDA composite path (#796)
 - ferrotorch-core: narrow on GPU returns wrong values via D2H readback — surfaced by phase 2.3 (#765) (#802)
 - ferrotorch-core: matmul_f64 GPU forward unsupported — surfaced by phase 2.4 (#766) (#800)
@@ -329,6 +333,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - M≤4 cuBLAS bypass: route vector-matrix multiplies through PTX `small_matmul` kernel instead of cuBLAS SGEMM
 
 ### Changed
+- ferrotorch-gpu: exp_f64_kernel PTX JIT compilation failed — surfaced by phase 2.5 (#767) (#797)
+- ferrotorch-core: erfinv f32 Winitzki rational approx residual — surfaced by phase 2.5 (#767) (#793)
+- ferrotorch-core: special::erf / erfc / digamma / gelu_none f64 polynomial approximation residual — surfaced by phase 2.5 (#767) (#792)
+- GPU f64 grad accumulation silently round-trips to CPU (sibling of #788) (#789)
+- ferrotorch-gpu: log_softmax_f32 backward grad on GPU returns wildly wrong values — surfaced by phase 2.5 (#767) (#798)
+- ferrotorch-gpu: sin/cos/leaky_relu/softplus autograd-on-CUDA fails with GpuTensorNotAccessible — surfaced by phase 2.5 (#767) (#796)
 - ferrotorch-core: numeric_cast::cast<f64,bf16>(1e300) returns Ok(Infinity) instead of Err — surfaced by phase 2.14 (#776) (#815)
 - Add Phase 2.11 conformance suite for flex_attention (#811)
 - release: bump 0.4.5 → 0.4.6 + architect skill improvements (after-action review) (#745)

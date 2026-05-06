@@ -4,6 +4,8 @@
 //! same shape. Implementations use either `num_traits::Float` methods or
 //! well-known numerical approximations (Abramowitz & Stegun, Lanczos, etc.).
 
+use std::any::TypeId;
+
 use crate::dtype::Float;
 use crate::error::FerrotorchResult;
 use crate::ops::elementwise::{binary_map, unary_map};
@@ -28,6 +30,11 @@ fn nt_one<T: num_traits::One>() -> T {
 // ---------------------------------------------------------------------------
 
 // Abramowitz & Stegun 7.1.26 coefficients for erf approximation.
+//
+// Used only for f32 today: the documented worst-case |epsilon| <= 1.5e-7 sits
+// well inside the f32 transcendental tolerance gate (1e-5) but is three
+// orders of magnitude looser than F64_TRANSCENDENTAL = 1e-10. The f64 path
+// dispatches to `erf_f64_hi` below (#792).
 const ERF_A1: f64 = 0.254829592;
 const ERF_A2: f64 = -0.284496736;
 const ERF_A3: f64 = 1.421413741;
@@ -53,9 +60,352 @@ const LANCZOS_COEFFICIENTS: [f64; 9] = [
 // Scalar helper functions
 // ---------------------------------------------------------------------------
 
-/// Compute erf(x) for a single float using the Abramowitz & Stegun 7.1.26
-/// approximation. Maximum error: |epsilon(x)| <= 1.5e-7.
-fn erf_scalar<T: Float>(x: T) -> T {
+// === High-precision f64 erf / erfc =========================================
+//
+// Cody (1969) / SunPro fdlibm-style piecewise rational approximations. The
+// constants below are the canonical SunPro coefficients (Sun Microsystems
+// 1993, public domain) used by the system C math library on Linux/macOS/BSD;
+// the same constants appear unchanged in Go's math.Erf, Julia's libm, the
+// `libm` Rust crate, and OpenBSD's libm. They give ~1 ulp accuracy across
+// f64, well inside F64_TRANSCENDENTAL = 1e-10 (#792 conformance gate).
+//
+// Domain split (matching fdlibm exactly):
+//   |x| < 2^-28      : erf(x) = x * (1 + efx + PP/QQ * x^2) (linear+quad)
+//   |x| < 0.84375    : rational PP / QQ   in t = x^2
+//   |x| < 1.25       : rational PA / QA   in s = |x| - 1
+//   |x| < 1/0.35     : exp(-x^2 - 0.5625) * RA / SA + 0.5*sign(x) (etc.)
+//   |x| < 28         : exp(-x^2 - 0.5625) * RB / SB + 0.5*sign(x) (etc.)
+//   |x| >= 28        : saturate to ±1 (erf) / ±0 (erfc)
+//
+// The `efx` constant encodes the linear correction near the origin where
+// the rational approximation degenerates.
+//
+// Clippy fires `excessive_precision` on most coefficients because they are
+// written to 21 decimal digits — the trailing digits round to the same f64
+// bit pattern as a 17-digit truncation, but they are reproduced verbatim
+// from the SunPro source so the diff against the upstream reference is
+// audit-friendly. Suppressed at the constant-block level only.
+
+#[allow(clippy::excessive_precision)]
+const ERF_EFX: f64 = 1.2837916709551257e-01;
+
+// PP, QQ — rational approximation valid for |x| < 0.84375 (in t = x*x).
+#[allow(clippy::excessive_precision)]
+const ERF_PP0: f64 = 1.28379167095512558561e-01;
+#[allow(clippy::excessive_precision)]
+const ERF_PP1: f64 = -3.25042107247001499370e-01;
+#[allow(clippy::excessive_precision)]
+const ERF_PP2: f64 = -2.84817495755985104766e-02;
+#[allow(clippy::excessive_precision)]
+const ERF_PP3: f64 = -5.77027029648944159157e-03;
+#[allow(clippy::excessive_precision)]
+const ERF_PP4: f64 = -2.37630166566501626084e-05;
+#[allow(clippy::excessive_precision)]
+const ERF_QQ1: f64 = 3.97917223959155352819e-01;
+#[allow(clippy::excessive_precision)]
+const ERF_QQ2: f64 = 6.50222499887672944485e-02;
+#[allow(clippy::excessive_precision)]
+const ERF_QQ3: f64 = 5.08130628187576562776e-03;
+#[allow(clippy::excessive_precision)]
+const ERF_QQ4: f64 = 1.32494738004321644526e-04;
+#[allow(clippy::excessive_precision)]
+const ERF_QQ5: f64 = -3.96022827877536812320e-06;
+
+// PA, QA — rational approximation valid for 0.84375 <= |x| < 1.25
+// (in s = |x| - 1). erf(x) = sign(x) * (ERX + PA(s)/QA(s)).
+#[allow(clippy::excessive_precision)]
+const ERF_ERX: f64 = 8.45062911510467529297e-01;
+#[allow(clippy::excessive_precision)]
+const ERF_PA0: f64 = -2.36211856075265944077e-03;
+#[allow(clippy::excessive_precision)]
+const ERF_PA1: f64 = 4.14856118683748331666e-01;
+#[allow(clippy::excessive_precision)]
+const ERF_PA2: f64 = -3.72207876035701323847e-01;
+#[allow(clippy::excessive_precision)]
+const ERF_PA3: f64 = 3.18346619901161753674e-01;
+#[allow(clippy::excessive_precision)]
+const ERF_PA4: f64 = -1.10894694282396677476e-01;
+#[allow(clippy::excessive_precision)]
+const ERF_PA5: f64 = 3.54783043256182359371e-02;
+#[allow(clippy::excessive_precision)]
+const ERF_PA6: f64 = -2.16637559486879084300e-03;
+#[allow(clippy::excessive_precision)]
+const ERF_QA1: f64 = 1.06420880400844228286e-01;
+#[allow(clippy::excessive_precision)]
+const ERF_QA2: f64 = 5.40397917702171048937e-01;
+#[allow(clippy::excessive_precision)]
+const ERF_QA3: f64 = 7.18286544141962662868e-02;
+#[allow(clippy::excessive_precision)]
+const ERF_QA4: f64 = 1.26171219808761642112e-01;
+#[allow(clippy::excessive_precision)]
+const ERF_QA5: f64 = 1.36370839120290507362e-02;
+#[allow(clippy::excessive_precision)]
+const ERF_QA6: f64 = 1.19844998467991074170e-02;
+
+// RA, SA — rational approximation for 1.25 <= |x| < 1/0.35 (~2.857).
+// erfc(x) = exp(-x^2 - 0.5625) * (RA(1/x^2) / SA(1/x^2)) / x.
+#[allow(clippy::excessive_precision)]
+const ERF_RA0: f64 = -9.86494403484714822705e-03;
+#[allow(clippy::excessive_precision)]
+const ERF_RA1: f64 = -6.93858572707181764372e-01;
+#[allow(clippy::excessive_precision)]
+const ERF_RA2: f64 = -1.05586262253232909814e+01;
+#[allow(clippy::excessive_precision)]
+const ERF_RA3: f64 = -6.23753324503260060396e+01;
+#[allow(clippy::excessive_precision)]
+const ERF_RA4: f64 = -1.62396669462573470355e+02;
+#[allow(clippy::excessive_precision)]
+const ERF_RA5: f64 = -1.84605092906711035994e+02;
+#[allow(clippy::excessive_precision)]
+const ERF_RA6: f64 = -8.12874355063065934246e+01;
+#[allow(clippy::excessive_precision)]
+const ERF_RA7: f64 = -9.81432934416914548592e+00;
+#[allow(clippy::excessive_precision)]
+const ERF_SA1: f64 = 1.96512716674392571292e+01;
+#[allow(clippy::excessive_precision)]
+const ERF_SA2: f64 = 1.37657754143519042600e+02;
+#[allow(clippy::excessive_precision)]
+const ERF_SA3: f64 = 4.34565877475229228821e+02;
+#[allow(clippy::excessive_precision)]
+const ERF_SA4: f64 = 6.45387271733267880336e+02;
+#[allow(clippy::excessive_precision)]
+const ERF_SA5: f64 = 4.29008140027567833386e+02;
+#[allow(clippy::excessive_precision)]
+const ERF_SA6: f64 = 1.08635005541779435134e+02;
+#[allow(clippy::excessive_precision)]
+const ERF_SA7: f64 = 6.57024977031928170135e+00;
+#[allow(clippy::excessive_precision)]
+const ERF_SA8: f64 = -6.04244152148580987438e-02;
+
+// RB, SB — rational approximation for 1/0.35 <= |x| < 28.
+#[allow(clippy::excessive_precision)]
+const ERF_RB0: f64 = -9.86494292470009928597e-03;
+#[allow(clippy::excessive_precision)]
+const ERF_RB1: f64 = -7.99283237680523006574e-01;
+#[allow(clippy::excessive_precision)]
+const ERF_RB2: f64 = -1.77579549177547519889e+01;
+#[allow(clippy::excessive_precision)]
+const ERF_RB3: f64 = -1.60636384855821916062e+02;
+#[allow(clippy::excessive_precision)]
+const ERF_RB4: f64 = -6.37566443368389627722e+02;
+#[allow(clippy::excessive_precision)]
+const ERF_RB5: f64 = -1.02509513161107724954e+03;
+#[allow(clippy::excessive_precision)]
+const ERF_RB6: f64 = -4.83519191608651397019e+02;
+#[allow(clippy::excessive_precision)]
+const ERF_SB1: f64 = 3.03380607434824582924e+01;
+#[allow(clippy::excessive_precision)]
+const ERF_SB2: f64 = 3.25792512996573918826e+02;
+#[allow(clippy::excessive_precision)]
+const ERF_SB3: f64 = 1.53672958608443695994e+03;
+#[allow(clippy::excessive_precision)]
+const ERF_SB4: f64 = 3.19985821950859553908e+03;
+#[allow(clippy::excessive_precision)]
+const ERF_SB5: f64 = 2.55305040643316442583e+03;
+#[allow(clippy::excessive_precision)]
+const ERF_SB6: f64 = 4.74528541206955367215e+02;
+#[allow(clippy::excessive_precision)]
+const ERF_SB7: f64 = -2.24409524465858183362e+01;
+
+/// High-precision f64 erf using the SunPro fdlibm piecewise rational
+/// approximation. Accuracy: ~1 ulp across all of f64 (well inside the
+/// F64_TRANSCENDENTAL = 1e-10 conformance gate). Closes #792.
+fn erf_f64_hi(x: f64) -> f64 {
+    if x.is_nan() {
+        return x;
+    }
+    if x == f64::INFINITY {
+        return 1.0;
+    }
+    if x == f64::NEG_INFINITY {
+        return -1.0;
+    }
+
+    let ax = x.abs();
+
+    if ax < 0.84375 {
+        // Near origin: exploit the small-x cancellation by computing
+        // erf(x) = x + x * R(x^2) where R is a rational in x^2.
+        if ax < f64::from_bits(0x3E300000_00000000) {
+            // |x| < 2^-28 — sub-ULP regime; linear extrapolation.
+            return x + ERF_EFX * x;
+        }
+        let z = x * x;
+        let r = ERF_PP0 + z * (ERF_PP1 + z * (ERF_PP2 + z * (ERF_PP3 + z * ERF_PP4)));
+        let s = 1.0 + z * (ERF_QQ1 + z * (ERF_QQ2 + z * (ERF_QQ3 + z * (ERF_QQ4 + z * ERF_QQ5))));
+        let y = r / s;
+        return x + x * y;
+    }
+
+    if ax < 1.25 {
+        // 0.84375 <= |x| < 1.25
+        let s = ax - 1.0;
+        let p = ERF_PA0
+            + s * (ERF_PA1
+                + s * (ERF_PA2 + s * (ERF_PA3 + s * (ERF_PA4 + s * (ERF_PA5 + s * ERF_PA6)))));
+        let q = 1.0
+            + s * (ERF_QA1
+                + s * (ERF_QA2 + s * (ERF_QA3 + s * (ERF_QA4 + s * (ERF_QA5 + s * ERF_QA6)))));
+        let y = ERF_ERX + p / q;
+        return if x >= 0.0 { y } else { -y };
+    }
+
+    if ax >= 6.0 {
+        // erf(x) saturates to ±1 to within f64 precision once |x| > ~6.
+        return if x >= 0.0 { 1.0 } else { -1.0 };
+    }
+
+    // 1.25 <= |x| < 6: erf(x) = sign(x) * (1 - erfc_tail(|x|)).
+    let s = 1.0 / (ax * ax);
+    let (r, big_s) = if ax < 1.0 / 0.35 {
+        // 1.25 <= |x| < 1/0.35
+        let r = ERF_RA0
+            + s * (ERF_RA1
+                + s * (ERF_RA2
+                    + s * (ERF_RA3 + s * (ERF_RA4 + s * (ERF_RA5 + s * (ERF_RA6 + s * ERF_RA7))))));
+        let big_s = 1.0
+            + s * (ERF_SA1
+                + s * (ERF_SA2
+                    + s * (ERF_SA3
+                        + s * (ERF_SA4
+                            + s * (ERF_SA5 + s * (ERF_SA6 + s * (ERF_SA7 + s * ERF_SA8)))))));
+        (r, big_s)
+    } else {
+        let r = ERF_RB0
+            + s * (ERF_RB1
+                + s * (ERF_RB2 + s * (ERF_RB3 + s * (ERF_RB4 + s * (ERF_RB5 + s * ERF_RB6)))));
+        let big_s = 1.0
+            + s * (ERF_SB1
+                + s * (ERF_SB2
+                    + s * (ERF_SB3 + s * (ERF_SB4 + s * (ERF_SB5 + s * (ERF_SB6 + s * ERF_SB7))))));
+        (r, big_s)
+    };
+
+    // Form `exp(-x^2 - 0.5625) * R/S / |x|` carefully: split |x| via
+    // `f64::from_bits(bits & 0xFFFFFFFF_00000000)` to truncate to the upper
+    // 32 bits — this gives an exact `z` plus a small correction `x - z` so
+    // `exp(-z*z - 0.5625) * exp(-(x-z)*(x+z)) * (R/S)/|x|` minimizes
+    // catastrophic cancellation in the exponent argument.
+    let bits = ax.to_bits() & 0xFFFFFFFF_00000000;
+    let z = f64::from_bits(bits);
+    let r_factor = (-z * z - 0.5625).exp() * (-(ax - z) * (ax + z) + r / big_s).exp() / ax;
+    if x >= 0.0 {
+        1.0 - r_factor
+    } else {
+        r_factor - 1.0
+    }
+}
+
+/// High-precision f64 erfc using the same SunPro fdlibm piecewise rational
+/// approximation but expressed directly so the right-tail (large positive
+/// `x`) is computed without the catastrophic `1 - erf(x)` cancellation.
+/// Accuracy: ~1 ulp across all of f64. Closes #792.
+fn erfc_f64_hi(x: f64) -> f64 {
+    if x.is_nan() {
+        return x;
+    }
+    if x == f64::INFINITY {
+        return 0.0;
+    }
+    if x == f64::NEG_INFINITY {
+        return 2.0;
+    }
+
+    let ax = x.abs();
+
+    if ax < 0.84375 {
+        if ax < f64::from_bits(0x3C700000_00000000) {
+            // |x| < 2^-56 — erf(x) is subnormally small; erfc(x) = 1 - erf(x).
+            return 1.0 - x;
+        }
+        let z = x * x;
+        let r = ERF_PP0 + z * (ERF_PP1 + z * (ERF_PP2 + z * (ERF_PP3 + z * ERF_PP4)));
+        let s = 1.0 + z * (ERF_QQ1 + z * (ERF_QQ2 + z * (ERF_QQ3 + z * (ERF_QQ4 + z * ERF_QQ5))));
+        let y = r / s;
+        if ax < 0.25 {
+            // 1 - (x + x*y) preserves precision when y*x is small.
+            return 1.0 - (x + x * y);
+        }
+        // Re-associate as 0.5 - (x + x*y - 0.5) to keep significand bits.
+        let r2 = x * y;
+        let r3 = r2 + x;
+        return 0.5 - (r3 - 0.5);
+    }
+
+    if ax < 1.25 {
+        let s = ax - 1.0;
+        let p = ERF_PA0
+            + s * (ERF_PA1
+                + s * (ERF_PA2 + s * (ERF_PA3 + s * (ERF_PA4 + s * (ERF_PA5 + s * ERF_PA6)))));
+        let q = 1.0
+            + s * (ERF_QA1
+                + s * (ERF_QA2 + s * (ERF_QA3 + s * (ERF_QA4 + s * (ERF_QA5 + s * ERF_QA6)))));
+        if x >= 0.0 {
+            let z = 1.0 - ERF_ERX;
+            return z - p / q;
+        }
+        let z = ERF_ERX + p / q;
+        return 1.0 + z;
+    }
+
+    if ax < 28.0 {
+        let s = 1.0 / (ax * ax);
+        let (r, big_s) = if ax < 1.0 / 0.35 {
+            let r = ERF_RA0
+                + s * (ERF_RA1
+                    + s * (ERF_RA2
+                        + s * (ERF_RA3
+                            + s * (ERF_RA4 + s * (ERF_RA5 + s * (ERF_RA6 + s * ERF_RA7))))));
+            let big_s = 1.0
+                + s * (ERF_SA1
+                    + s * (ERF_SA2
+                        + s * (ERF_SA3
+                            + s * (ERF_SA4
+                                + s * (ERF_SA5 + s * (ERF_SA6 + s * (ERF_SA7 + s * ERF_SA8)))))));
+            (r, big_s)
+        } else {
+            let r = ERF_RB0
+                + s * (ERF_RB1
+                    + s * (ERF_RB2 + s * (ERF_RB3 + s * (ERF_RB4 + s * (ERF_RB5 + s * ERF_RB6)))));
+            let big_s = 1.0
+                + s * (ERF_SB1
+                    + s * (ERF_SB2
+                        + s * (ERF_SB3
+                            + s * (ERF_SB4 + s * (ERF_SB5 + s * (ERF_SB6 + s * ERF_SB7))))));
+            (r, big_s)
+        };
+
+        let bits = ax.to_bits() & 0xFFFFFFFF_00000000;
+        let z = f64::from_bits(bits);
+        let r_factor = (-z * z - 0.5625).exp() * (-(ax - z) * (ax + z) + r / big_s).exp() / ax;
+        if x >= 0.0 { r_factor } else { 2.0 - r_factor }
+    } else if x >= 0.0 {
+        0.0
+    } else {
+        2.0
+    }
+}
+
+/// Compute erf(x) for a single float.
+///
+/// f64 path (T = f64): SunPro fdlibm piecewise rational approximation
+/// (`erf_f64_hi`), accuracy ~1 ulp — meets F64_TRANSCENDENTAL = 1e-10.
+/// Other types (f32, bf16): Abramowitz & Stegun 7.1.26 polynomial,
+/// accuracy ~1.5e-7 — well inside F32_TRANSCENDENTAL_CPU = 1e-5.
+///
+/// `pub(crate)` so internal callers (e.g. `grad_fns::activation::gelu_with`
+/// in the GELU(none) branch, which is `0.5 * x * (1 + erf(x / sqrt(2)))`)
+/// share the same precision path — without it, gelu_none retained the
+/// 1.5e-7 A&S residual even after special::erf was upgraded (#792).
+pub(crate) fn erf_scalar<T: Float>(x: T) -> T {
+    // f64 specialization via TypeId: zero runtime cost (the branch is
+    // monomorphized away by the compiler) and avoids relaxing the gate.
+    if TypeId::of::<T>() == TypeId::of::<f64>() {
+        let xf = x.to_f64().unwrap();
+        let yf = erf_f64_hi(xf);
+        return T::from(yf).unwrap();
+    }
+
     let zero = nt_zero::<T>();
     let one = nt_one::<T>();
 
@@ -81,10 +431,49 @@ fn erf_scalar<T: Float>(x: T) -> T {
     sign * (one - poly * t * (-ax * ax).exp())
 }
 
-/// Compute erfinv(x) using the Winitzki (2008) rational approximation.
+/// Compute erfc(x) for a single float.
 ///
-/// erfinv(x) = sign(x) * sqrt( -b + sqrt(b^2 - c) )
-/// where b = 2/(pi*a) + ln(1-x^2)/2, c = ln(1-x^2)/a, a = 0.147.
+/// f64 path: SunPro fdlibm `erfc_f64_hi`, ~1 ulp — closes #792 (gelu_none
+/// inherits this precision since GELU(none) calls `erf` internally).
+/// f32/bf16: `1 - erf_scalar(x)` (the f32 cancellation is bounded by the
+/// f32 transcendental tolerance and the only way for erfc to leave that
+/// tolerance is for erf to leave its own tolerance first).
+fn erfc_scalar<T: Float>(x: T) -> T {
+    if TypeId::of::<T>() == TypeId::of::<f64>() {
+        let xf = x.to_f64().unwrap();
+        let yf = erfc_f64_hi(xf);
+        return T::from(yf).unwrap();
+    }
+
+    nt_one::<T>() - erf_scalar(x)
+}
+
+/// Compute erfinv(x) for a single float — Winitzki (2008) initial guess
+/// followed by Newton refinement against the SunPro fdlibm `erf_f64_hi`.
+///
+/// Why this shape:
+///
+/// - The Winitzki (2008) closed-form rational approximation is convenient
+///   (no tables, no branching) but its documented worst-case |epsilon| is
+///   ~1.3e-3 over (-1, 1) and empirically peaks at ~4.4e-3 near |x| -> 1
+///   in f32 — three orders of magnitude past F32_TRANSCENDENTAL_CPU = 1e-5
+///   and many orders past F64_TRANSCENDENTAL = 1e-10. Using it as the
+///   final answer was the root cause of #793.
+/// - A1 just upgraded `erf_f64_hi` to ~1 ulp via the SunPro fdlibm
+///   piecewise rational (see #792). With a sub-ulp `erf` available, the
+///   Newton iteration for f(x) = erf(x) - y converges quadratically:
+///   `x_{n+1} = x_n - (erf(x_n) - y) * (sqrt(pi) / 2) * exp(x_n^2)`.
+///   From the Winitzki seed (~1e-3 error), one step lands inside ~1e-6
+///   and three steps inside ~1e-15, comfortably under both
+///   F32_TRANSCENDENTAL_CPU and F64_TRANSCENDENTAL.
+/// - We do the entire refinement in f64 (the Winitzki seed too) so that
+///   f32 inputs benefit from the high-precision intermediate computation
+///   before being narrowed back via `T::from`. The f32 path otherwise
+///   loses precision on the `(1 - x*x).ln()` term as |x| -> 1 because the
+///   subtraction loses bits before the log even runs.
+///
+/// Two iterations are sufficient for both gates; the loop exits early once
+/// the residual drops below 4 * f64::EPSILON. Closes #793.
 fn erfinv_scalar<T: Float>(x: T) -> T {
     let zero = nt_zero::<T>();
     let one = nt_one::<T>();
@@ -99,20 +488,36 @@ fn erfinv_scalar<T: Float>(x: T) -> T {
         return T::neg_infinity();
     }
 
-    let sign = if x < zero { -one } else { one };
-    let ax = x.abs();
+    // All work in f64: Winitzki seed in the wider type, then Newton with the
+    // fdlibm `erf_f64_hi`. Narrow back to T at the very end.
+    let y = x.to_f64().unwrap();
+    let sign = if y < 0.0 { -1.0 } else { 1.0 };
+    let ay = y.abs();
 
-    // Winitzki approximation: a cleaner formulation.
-    let a = T::from(0.147).unwrap();
-    let two = T::from(2.0).unwrap();
-    let pi = T::from(std::f64::consts::PI).unwrap();
-
-    let ln_term = (one - ax * ax).ln();
-    let b = two / (pi * a) + ln_term / two;
+    // Winitzki (2008) initial guess. `a = 0.147` is the constant the original
+    // paper tunes for; we keep it verbatim since this is just the seed.
+    let a = 0.147_f64;
+    let pi = std::f64::consts::PI;
+    let ln_term = (1.0 - ay * ay).ln();
+    let b = 2.0 / (pi * a) + ln_term / 2.0;
     let c = ln_term / a;
+    let mut z = sign * (-b + (b * b - c).sqrt()).sqrt();
 
-    // erfinv(x) = sign(x) * sqrt( -b + sqrt(b^2 - c) )
-    sign * (-b + (b * b - c).sqrt()).sqrt()
+    // Newton refine: f(z) = erf(z) - y, f'(z) = 2/sqrt(pi) * exp(-z^2).
+    // dz = (erf(z) - y) / f'(z) = (erf(z) - y) * sqrt(pi)/2 * exp(z^2).
+    // Three iterations max — quadratic convergence drops a ~1e-3 seed to
+    // sub-ulp in 3 steps, and the early-exit guard catches f32 inputs after
+    // ~1 step.
+    let half_sqrt_pi = 0.5 * pi.sqrt();
+    for _ in 0..3 {
+        let resid = erf_f64_hi(z) - y;
+        if resid.abs() < 4.0 * f64::EPSILON {
+            break;
+        }
+        z -= resid * half_sqrt_pi * (z * z).exp();
+    }
+
+    T::from(z).unwrap()
 }
 
 /// Compute lgamma(x) using the Lanczos approximation.
@@ -142,11 +547,58 @@ fn lgamma_scalar<T: Float>(x: T) -> T {
     half_ln_2pi + (t).ln() * (z + half) - t + sum.ln()
 }
 
+/// High-precision f64 digamma using Bernoulli-extended Stirling asymptotics
+/// shifted to z >= 14. The asymptotic series is
+///   psi(z) ~ ln(z) - 1/(2z) - sum_{k>=1} B_{2k} / (2k z^{2k})
+/// with B_{2k}/(2k) coefficients 1/12, 1/120, 1/252, 1/240, 1/132,
+/// 691/32760, 1/12. Truncating after the z^-12 term at z >= 14 gives
+/// |residual| <= 691/(32760 * 14^12) ≈ 4e-16, well inside the
+/// F64_TRANSCENDENTAL = 1e-10 conformance gate. Closes #792.
+fn digamma_f64_hi(x: f64) -> f64 {
+    if x < 0.5 {
+        // Reflection: psi(1 - x) = psi(x) + pi * cot(pi * x).
+        let pi = std::f64::consts::PI;
+        let cot = (pi * x).cos() / (pi * x).sin();
+        return digamma_f64_hi(1.0 - x) - pi * cot;
+    }
+
+    // Recurrence: psi(x) = psi(x + 1) - 1/x. Shift up to z >= 14 (the
+    // pre-fix shift target was 6, which left the leading omitted term
+    // 1/(240 z^8) ≈ 2.5e-9 — already past the 1e-10 gate).
+    let mut acc = 0.0_f64;
+    let mut z = x;
+    while z < 14.0 {
+        acc -= 1.0 / z;
+        z += 1.0;
+    }
+
+    let z2 = z * z;
+    let z4 = z2 * z2;
+    let z6 = z4 * z2;
+    let z8 = z4 * z4;
+    let z10 = z8 * z2;
+    let z12 = z8 * z4;
+
+    acc + z.ln() - 1.0 / (2.0 * z) - 1.0 / (12.0 * z2) + 1.0 / (120.0 * z4) - 1.0 / (252.0 * z6)
+        + 1.0 / (240.0 * z8)
+        - 1.0 / (132.0 * z10)
+        + 691.0 / (32_760.0 * z12)
+}
+
 /// Compute digamma(x) = psi(x) = d/dx ln(Gamma(x)).
 ///
-/// Uses the recurrence relation psi(x+1) = psi(x) + 1/x to shift x into the
-/// range [6, inf), then applies the asymptotic expansion.
+/// f64 path: extended Stirling series shifted to z >= 14, ~1e-15 residual —
+/// closes #792 (pre-fix asymptotic-series truncation at z^-6 left a ~2.5e-9
+/// residual at the shift threshold).
+/// Other types (f32, bf16): legacy 4-term asymptotic expansion shifted
+/// to z >= 6 (well inside f32 transcendental tolerance).
 fn digamma_scalar<T: Float>(x: T) -> T {
+    if TypeId::of::<T>() == TypeId::of::<f64>() {
+        let xf = x.to_f64().unwrap();
+        let yf = digamma_f64_hi(xf);
+        return T::from(yf).unwrap();
+    }
+
     let zero = nt_zero::<T>();
     let one = nt_one::<T>();
     let half = T::from(0.5).unwrap();
@@ -217,17 +669,20 @@ fn xlogy_scalar<T: Float>(x: T, y: T) -> T {
 
 /// Error function: erf(x) = (2/sqrt(pi)) * integral(0, x, exp(-t^2) dt).
 ///
-/// Uses the Abramowitz & Stegun 7.1.26 polynomial approximation with
-/// maximum error |epsilon| <= 1.5e-7.
+/// f64 path: SunPro fdlibm piecewise rational approximation, ~1 ulp accuracy
+/// (meets F64_TRANSCENDENTAL = 1e-10). f32/bf16 path: Abramowitz & Stegun
+/// 7.1.26 polynomial, |epsilon| <= 1.5e-7 (meets F32_TRANSCENDENTAL = 1e-5).
 pub fn erf<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
     unary_map(input, erf_scalar)
 }
 
 /// Complementary error function: erfc(x) = 1 - erf(x).
 ///
-/// Computed directly as `1 - erf(x)` using the same polynomial approximation.
+/// f64 path: SunPro fdlibm `erfc_f64_hi` — computed directly so the
+/// right-tail (large positive x) avoids the catastrophic 1 - erf(x)
+/// cancellation. f32/bf16 path: literal `1 - erf_scalar(x)`.
 pub fn erfc<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
-    unary_map(input, |x| nt_one::<T>() - erf_scalar(x))
+    unary_map(input, erfc_scalar)
 }
 
 /// Inverse error function: erfinv(erf(x)) = x.

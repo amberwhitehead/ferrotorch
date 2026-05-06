@@ -137,7 +137,7 @@ use ferrotorch_core::autograd::saved_tensors::{
 };
 use ferrotorch_core::ops::higher_order::{cond, scan, validate_cond_branches};
 use ferrotorch_core::vmap::{
-    per_sample_grad, select, stack, vmap, vmap2, vmap3, vmap_many, vmap_multi_output,
+    per_sample_grad, select, stack, vmap, vmap_many, vmap_multi_output, vmap2, vmap3,
 };
 use ferrotorch_core::{Tensor, TensorStorage};
 
@@ -407,8 +407,12 @@ fn make_cpu_f32(data: &[f64], shape: &[usize], requires_grad: bool) -> Tensor<f3
 }
 
 fn make_cpu_f64(data: &[f64], shape: &[usize], requires_grad: bool) -> Tensor<f64> {
-    Tensor::from_storage(TensorStorage::cpu(data.to_vec()), shape.to_vec(), requires_grad)
-        .expect("make_cpu_f64")
+    Tensor::from_storage(
+        TensorStorage::cpu(data.to_vec()),
+        shape.to_vec(),
+        requires_grad,
+    )
+    .expect("make_cpu_f64")
 }
 
 fn check_f32(label: &str, actual: &[f32], expected: &[f64], tol: f32) {
@@ -1029,12 +1033,22 @@ fn cpu_jacfwd_sin() {
             "float32" => {
                 let input = make_cpu_f32(a_data, shape, false);
                 let jac = jacfwd(|x: DualTensor<f32>| dual_sin(&x), &input).expect("jacfwd");
-                check_f32(&label, jac.data().expect("jac"), exp, tolerance::F32_GRAD_CPU);
+                check_f32(
+                    &label,
+                    jac.data().expect("jac"),
+                    exp,
+                    tolerance::F32_GRAD_CPU,
+                );
             }
             "float64" => {
                 let input = make_cpu_f64(a_data, shape, false);
                 let jac = jacfwd(|x: DualTensor<f64>| dual_sin(&x), &input).expect("jacfwd");
-                check_f64(&label, jac.data().expect("jac"), exp, tolerance::F64_GRAD_CPU);
+                check_f64(
+                    &label,
+                    jac.data().expect("jac"),
+                    exp,
+                    tolerance::F64_GRAD_CPU,
+                );
             }
             other => panic!("{label}: unexpected dtype {other:?}"),
         }
@@ -1354,8 +1368,16 @@ fn cpu_gradient_penalty_linear_discriminator() {
             continue;
         }
         let shape = f.a_shape.as_ref().expect("a_shape");
-        let real = f.real.as_ref().map(F64ListSentinel::as_slice).expect("real");
-        let fake = f.fake.as_ref().map(F64ListSentinel::as_slice).expect("fake");
+        let real = f
+            .real
+            .as_ref()
+            .map(F64ListSentinel::as_slice)
+            .expect("real");
+        let fake = f
+            .fake
+            .as_ref()
+            .map(F64ListSentinel::as_slice)
+            .expect("fake");
         let lam = f.lambda_.expect("lambda");
         let exp = f
             .out_values
@@ -1387,7 +1409,10 @@ fn cpu_gradient_penalty_rejects_shape_mismatch() {
     let real = make_cpu_f32(&[1.0, 2.0], &[2], false);
     let fake = make_cpu_f32(&[1.0, 2.0, 3.0], &[3], false);
     let result = gradient_penalty(|x: &Tensor<f32>| sum(x), &real, &fake, 10.0);
-    assert!(result.is_err(), "gradient_penalty must reject mismatched shapes");
+    assert!(
+        result.is_err(),
+        "gradient_penalty must reject mismatched shapes"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -1455,10 +1480,7 @@ fn cpu_checkpoint_multi_two_inputs_both_grad() {
 
 #[test]
 fn cpu_checkpoint_multi_empty_inputs_errors() {
-    let result = checkpoint_multi::<f32, _>(
-        |_: &[Tensor<f32>]| panic!("should not run"),
-        &[],
-    );
+    let result = checkpoint_multi::<f32, _>(|_: &[Tensor<f32>]| panic!("should not run"), &[]);
     assert!(result.is_err(), "checkpoint_multi must reject empty inputs");
 }
 
@@ -1535,8 +1557,7 @@ fn cpu_vmap_per_row_sum_matches_torch() {
 
         let x = make_cpu_f32(a_data, shape, false);
         // vmap of x.sum_all over batch dim 0 → per-row sum
-        let result =
-            vmap(|t: &Tensor<f32>| t.sum_all(), 0, 0)(&x).expect("vmap sum");
+        let result = vmap(|t: &Tensor<f32>| t.sum_all(), 0, 0)(&x).expect("vmap sum");
         assert_eq!(result.shape(), out_shape.as_slice(), "{label}: shape");
         check_f32(
             &label,
@@ -1554,18 +1575,9 @@ fn cpu_vmap_over_closure_with_outer_scoped_variable() {
     // aliasing or grad-tracking bugs.
     use ferrotorch_core::grad_fns::arithmetic::add;
     let bias = make_cpu_f32(&[10.0, 20.0, 30.0, 40.0], &[4], false);
-    let x = make_cpu_f32(
-        &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0],
-        &[2, 4],
-        false,
-    );
+    let x = make_cpu_f32(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0], &[2, 4], false);
     // For each [4]-row of x, add the outer-scoped `bias`.
-    let result = vmap(
-        |row: &Tensor<f32>| add(row, &bias),
-        0,
-        0,
-    )(&x)
-    .expect("vmap closure");
+    let result = vmap(|row: &Tensor<f32>| add(row, &bias), 0, 0)(&x).expect("vmap closure");
     assert_eq!(result.shape(), &[2, 4]);
     let expected = [11.0_f32, 22.0, 33.0, 44.0, 15.0, 26.0, 37.0, 48.0];
     tolerance::assert_close_f32(
@@ -1911,12 +1923,9 @@ fn check_gradient_anomaly_detects_nan_grad_on_panic_lane() {
     // not a panic, but PyTorch's anomaly mode prints the error and the
     // backtrace — same outcome from the user's perspective.
     AnomalyMode::enable();
-    let nan_grad = Tensor::<f32>::from_storage(
-        TensorStorage::cpu(vec![1.0, f32::NAN, 3.0]),
-        vec![3],
-        false,
-    )
-    .expect("make nan grad");
+    let nan_grad =
+        Tensor::<f32>::from_storage(TensorStorage::cpu(vec![1.0, f32::NAN, 3.0]), vec![3], false)
+            .expect("make nan grad");
     let result = check_gradient_anomaly(&nan_grad, "TestOp", None);
     AnomalyMode::disable();
     assert!(result.is_err(), "NaN grad must produce anomaly Err");
@@ -1927,12 +1936,8 @@ fn check_gradient_anomaly_detects_nan_grad_on_panic_lane() {
 #[test]
 fn check_gradient_anomaly_skipped_when_disabled() {
     AnomalyMode::disable();
-    let nan_grad = Tensor::<f32>::from_storage(
-        TensorStorage::cpu(vec![f32::NAN]),
-        vec![1],
-        false,
-    )
-    .expect("make nan grad");
+    let nan_grad = Tensor::<f32>::from_storage(TensorStorage::cpu(vec![f32::NAN]), vec![1], false)
+        .expect("make nan grad");
     // Disabled: NaN should pass.
     assert!(
         check_gradient_anomaly(&nan_grad, "TestOp", None).is_ok(),
@@ -2029,7 +2034,10 @@ fn with_autocast_state_overrides_caller_state() {
         with_autocast_state(disabled, || {
             assert!(!is_autocast_enabled());
         });
-        assert!(is_autocast_enabled(), "with_autocast_state must restore caller state");
+        assert!(
+            is_autocast_enabled(),
+            "with_autocast_state must restore caller state"
+        );
     });
 }
 
@@ -2135,12 +2143,11 @@ fn has_saved_tensor_hooks_default_false() {
 fn saved_tensors_hooks_install_and_uninstall_correctly() {
     // Inside the closure, hooks are present; after, they're cleared.
     let outside_before = has_saved_tensor_hooks();
-    let inside = saved_tensors_hooks::<f32, _, _>(
-        Ok,
-        Ok,
-        || -> ferrotorch_core::FerrotorchResult<bool> { Ok(has_saved_tensor_hooks()) },
-    )
-    .expect("saved_tensors_hooks");
+    let inside =
+        saved_tensors_hooks::<f32, _, _>(Ok, Ok, || -> ferrotorch_core::FerrotorchResult<bool> {
+            Ok(has_saved_tensor_hooks())
+        })
+        .expect("saved_tensors_hooks");
     let outside_after = has_saved_tensor_hooks();
     assert!(!outside_before, "no hooks before");
     assert!(inside, "hooks must be active inside the closure");
@@ -2181,7 +2188,11 @@ fn cpu_fixed_point_linear_contraction_finds_zero() {
             continue;
         }
         let x0_data = f.x0.as_ref().map(F64ListSentinel::as_slice).expect("x0");
-        let p_data = f.param.as_ref().map(F64ListSentinel::as_slice).expect("param");
+        let p_data = f
+            .param
+            .as_ref()
+            .map(F64ListSentinel::as_slice)
+            .expect("param");
         let exp = f
             .out_values
             .as_ref()
@@ -2195,9 +2206,9 @@ fn cpu_fixed_point_linear_contraction_finds_zero() {
         let p = make_cpu_f32(p_data, &[1], true);
 
         let x_star = fixed_point(
-            |x: &Tensor<f32>, params: &[&Tensor<f32>]| -> ferrotorch_core::FerrotorchResult<Tensor<f32>> {
-                mul(x, params[0])
-            },
+            |x: &Tensor<f32>,
+             params: &[&Tensor<f32>]|
+             -> ferrotorch_core::FerrotorchResult<Tensor<f32>> { mul(x, params[0]) },
             &x0,
             &[&p],
             max_iter,

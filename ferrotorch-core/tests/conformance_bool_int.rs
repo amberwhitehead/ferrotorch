@@ -58,8 +58,8 @@
 
 use std::path::PathBuf;
 
-use serde::de::{self, Deserializer, SeqAccess, Visitor};
 use serde::Deserialize;
+use serde::de::{self, Deserializer, SeqAccess, Visitor};
 
 use ferrotorch_core::bool_tensor::BoolTensor;
 use ferrotorch_core::int_tensor::{IntElement, IntTensor};
