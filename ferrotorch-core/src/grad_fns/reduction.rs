@@ -336,8 +336,7 @@ impl<T: Float> GradFn<T> for ProdBackward<T> {
                         .prod_backward_f64(self.input.gpu_handle()?, go_on_device.gpu_handle()?)?
                 };
                 let storage = TensorStorage::gpu(grad_handle);
-                let grad_input =
-                    Tensor::from_storage(storage, self.input.shape().to_vec(), false)?;
+                let grad_input = Tensor::from_storage(storage, self.input.shape().to_vec(), false)?;
                 return Ok(vec![Some(grad_input)]);
             }
         }

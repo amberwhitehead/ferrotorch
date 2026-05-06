@@ -40,11 +40,6 @@ reason = "Pending Phase 2.10-autograd — autograd internals. Top-level re-expor
 tracking_issue = "#772"
 
 [[exclusion]]
-path = "ferrotorch_core::AsStridedBackward"
-reason = "Pending Phase 2.3-shape — shape, indexing, view. Top-level re-export of an item whose canonical path is also pending coverage in the same phase."
-tracking_issue = "#765"
-
-[[exclusion]]
 path = "ferrotorch_core::AutocastCategory"
 reason = "Pending Phase 2.10-autograd — autograd internals. Top-level re-export of an item whose canonical path is also pending coverage in the same phase."
 tracking_issue = "#772"
@@ -110,11 +105,6 @@ reason = "Pending Phase 2.10-autograd — autograd internals. Top-level re-expor
 tracking_issue = "#772"
 
 [[exclusion]]
-path = "ferrotorch_core::EinopsReduction"
-reason = "Pending Phase 2.6-einops-einsum — einops & einsum. Top-level re-export of an item whose canonical path is also pending coverage in the same phase."
-tracking_issue = "#768"
-
-[[exclusion]]
 path = "ferrotorch_core::Element"
 reason = "Pending Phase 2.14-plumbing — plumbing & core types. Top-level re-export of an item whose canonical path is also pending coverage in the same phase."
 tracking_issue = "#776"
@@ -143,11 +133,6 @@ tracking_issue = "#776"
 path = "ferrotorch_core::ForwardBacktrace"
 reason = "Pending Phase 2.10-autograd — autograd internals. Top-level re-export of an item whose canonical path is also pending coverage in the same phase."
 tracking_issue = "#772"
-
-[[exclusion]]
-path = "ferrotorch_core::GeluApproximate"
-reason = "Pending Phase 2.5-special-transcendental — activations, transcendental, special. Top-level re-export of an item whose canonical path is also pending coverage in the same phase."
-tracking_issue = "#767"
 
 [[exclusion]]
 path = "ferrotorch_core::GradFn"
@@ -288,21 +273,6 @@ tracking_issue = "#776"
 path = "ferrotorch_core::apply_2_4_mask"
 reason = "Pending Phase 2.9-quantize-prune — quantize & prune. Top-level re-export of an item whose canonical path is also pending coverage in the same phase."
 tracking_issue = "#771"
-
-[[exclusion]]
-path = "ferrotorch_core::as_strided"
-reason = "Pending Phase 2.3-shape — shape, indexing, view. Top-level re-export of an item whose canonical path is also pending coverage in the same phase."
-tracking_issue = "#765"
-
-[[exclusion]]
-path = "ferrotorch_core::as_strided_copy"
-reason = "Pending Phase 2.3-shape — shape, indexing, view. Top-level re-export of an item whose canonical path is also pending coverage in the same phase."
-tracking_issue = "#765"
-
-[[exclusion]]
-path = "ferrotorch_core::as_strided_scatter"
-reason = "Pending Phase 2.3-shape — shape, indexing, view. Top-level re-export of an item whose canonical path is also pending coverage in the same phase."
-tracking_issue = "#765"
 
 [[exclusion]]
 path = "ferrotorch_core::autocast"
@@ -1115,39 +1085,9 @@ reason = "Pending Phase 2.13-bool-int — bool & int tensors. The phase will lan
 tracking_issue = "#775"
 
 [[exclusion]]
-path = "ferrotorch_core::broadcast_shapes"
-reason = "Pending Phase 2.3-shape — shape, indexing, view. Top-level re-export of an item whose canonical path is also pending coverage in the same phase."
-tracking_issue = "#765"
-
-[[exclusion]]
-path = "ferrotorch_core::bucketize"
-reason = "Pending Phase 2.3-shape — shape, indexing, view. Top-level re-export of an item whose canonical path is also pending coverage in the same phase."
-tracking_issue = "#765"
-
-[[exclusion]]
-path = "ferrotorch_core::cat"
-reason = "Pending Phase 2.3-shape — shape, indexing, view. Top-level re-export of an item whose canonical path is also pending coverage in the same phase."
-tracking_issue = "#765"
-
-[[exclusion]]
-path = "ferrotorch_core::cdist"
-reason = "Pending Phase 2.3-shape — shape, indexing, view. Top-level re-export of an item whose canonical path is also pending coverage in the same phase."
-tracking_issue = "#765"
-
-[[exclusion]]
 path = "ferrotorch_core::check_gradient_anomaly"
 reason = "Pending Phase 2.10-autograd — autograd internals. Top-level re-export of an item whose canonical path is also pending coverage in the same phase."
 tracking_issue = "#772"
-
-[[exclusion]]
-path = "ferrotorch_core::chunk_t"
-reason = "Pending Phase 2.3-shape — shape, indexing, view. Top-level re-export of an item whose canonical path is also pending coverage in the same phase."
-tracking_issue = "#765"
-
-[[exclusion]]
-path = "ferrotorch_core::clamp"
-reason = "Pending Phase 2.5-special-transcendental — activations, transcendental, special. Top-level re-export of an item whose canonical path is also pending coverage in the same phase."
-tracking_issue = "#767"
 
 [[exclusion]]
 path = "ferrotorch_core::complex_tensor::ComplexTensor"
@@ -1285,16 +1225,6 @@ reason = "Pending Phase 2.10-autograd — autograd internals. Top-level re-expor
 tracking_issue = "#772"
 
 [[exclusion]]
-path = "ferrotorch_core::contiguous_t"
-reason = "Pending Phase 2.3-shape — shape, indexing, view. Top-level re-export of an item whose canonical path is also pending coverage in the same phase."
-tracking_issue = "#765"
-
-[[exclusion]]
-path = "ferrotorch_core::cos"
-reason = "Pending Phase 2.5-special-transcendental — activations, transcendental, special. Top-level re-export of an item whose canonical path is also pending coverage in the same phase."
-tracking_issue = "#767"
-
-[[exclusion]]
 path = "ferrotorch_core::cpu_pool::cpu_pool_stats"
 reason = "Pending Phase 2.14-plumbing — plumbing & core types. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
 tracking_issue = "#776"
@@ -1373,21 +1303,6 @@ tracking_issue = "#776"
 path = "ferrotorch_core::device::Device::is_xpu"
 reason = "Pending Phase 2.14-plumbing — plumbing & core types. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
 tracking_issue = "#776"
-
-[[exclusion]]
-path = "ferrotorch_core::diag"
-reason = "Pending Phase 2.3-shape — shape, indexing, view. Top-level re-export of an item whose canonical path is also pending coverage in the same phase."
-tracking_issue = "#765"
-
-[[exclusion]]
-path = "ferrotorch_core::diagflat"
-reason = "Pending Phase 2.3-shape — shape, indexing, view. Top-level re-export of an item whose canonical path is also pending coverage in the same phase."
-tracking_issue = "#765"
-
-[[exclusion]]
-path = "ferrotorch_core::digamma"
-reason = "Pending Phase 2.5-special-transcendental — activations, transcendental, special. Top-level re-export of an item whose canonical path is also pending coverage in the same phase."
-tracking_issue = "#767"
 
 [[exclusion]]
 path = "ferrotorch_core::dispatch::DispatchKey"
@@ -1585,69 +1500,9 @@ reason = "Pending Phase 2.10-autograd — autograd internals. Top-level re-expor
 tracking_issue = "#772"
 
 [[exclusion]]
-path = "ferrotorch_core::einops::EinopsReduction"
-reason = "Pending Phase 2.6-einops-einsum — einops & einsum. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#768"
-
-[[exclusion]]
-path = "ferrotorch_core::einops::rearrange"
-reason = "Pending Phase 2.6-einops-einsum — einops & einsum. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#768"
-
-[[exclusion]]
-path = "ferrotorch_core::einops::rearrange_with"
-reason = "Pending Phase 2.6-einops-einsum — einops & einsum. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#768"
-
-[[exclusion]]
-path = "ferrotorch_core::einops::reduce"
-reason = "Pending Phase 2.6-einops-einsum — einops & einsum. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#768"
-
-[[exclusion]]
-path = "ferrotorch_core::einops::repeat"
-reason = "Pending Phase 2.6-einops-einsum — einops & einsum. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#768"
-
-[[exclusion]]
-path = "ferrotorch_core::einsum"
-reason = "Pending Phase 2.6-einops-einsum — einops & einsum. Top-level re-export of an item whose canonical path is also pending coverage in the same phase."
-tracking_issue = "#768"
-
-[[exclusion]]
-path = "ferrotorch_core::einsum::einsum"
-reason = "Pending Phase 2.6-einops-einsum — einops & einsum. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#768"
-
-[[exclusion]]
-path = "ferrotorch_core::einsum::einsum_differentiable"
-reason = "Pending Phase 2.6-einops-einsum — einops & einsum. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#768"
-
-[[exclusion]]
-path = "ferrotorch_core::einsum_differentiable"
-reason = "Pending Phase 2.6-einops-einsum — einops & einsum. Top-level re-export of an item whose canonical path is also pending coverage in the same phase."
-tracking_issue = "#768"
-
-[[exclusion]]
 path = "ferrotorch_core::enable_grad"
 reason = "Pending Phase 2.10-autograd — autograd internals. Top-level re-export of an item whose canonical path is also pending coverage in the same phase."
 tracking_issue = "#772"
-
-[[exclusion]]
-path = "ferrotorch_core::erf"
-reason = "Pending Phase 2.5-special-transcendental — activations, transcendental, special. Top-level re-export of an item whose canonical path is also pending coverage in the same phase."
-tracking_issue = "#767"
-
-[[exclusion]]
-path = "ferrotorch_core::erfc"
-reason = "Pending Phase 2.5-special-transcendental — activations, transcendental, special. Top-level re-export of an item whose canonical path is also pending coverage in the same phase."
-tracking_issue = "#767"
-
-[[exclusion]]
-path = "ferrotorch_core::erfinv"
-reason = "Pending Phase 2.5-special-transcendental — activations, transcendental, special. Top-level re-export of an item whose canonical path is also pending coverage in the same phase."
-tracking_issue = "#767"
 
 [[exclusion]]
 path = "ferrotorch_core::error::FerrotorchError"
@@ -1658,21 +1513,6 @@ tracking_issue = "#776"
 path = "ferrotorch_core::error::FerrotorchResult"
 reason = "Pending Phase 2.14-plumbing — plumbing & core types. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
 tracking_issue = "#776"
-
-[[exclusion]]
-path = "ferrotorch_core::exp"
-reason = "Pending Phase 2.5-special-transcendental — activations, transcendental, special. Top-level re-export of an item whose canonical path is also pending coverage in the same phase."
-tracking_issue = "#767"
-
-[[exclusion]]
-path = "ferrotorch_core::expand"
-reason = "Pending Phase 2.3-shape — shape, indexing, view. Top-level re-export of an item whose canonical path is also pending coverage in the same phase."
-tracking_issue = "#765"
-
-[[exclusion]]
-path = "ferrotorch_core::expm1"
-reason = "Pending Phase 2.5-special-transcendental — activations, transcendental, special. Top-level re-export of an item whose canonical path is also pending coverage in the same phase."
-tracking_issue = "#767"
 
 [[exclusion]]
 path = "ferrotorch_core::fake_quantize_differentiable"
@@ -1805,21 +1645,6 @@ reason = "Pending Phase 2.11-flex-attention — flex_attention. The phase will l
 tracking_issue = "#773"
 
 [[exclusion]]
-path = "ferrotorch_core::gather"
-reason = "Pending Phase 2.3-shape — shape, indexing, view. Top-level re-export of an item whose canonical path is also pending coverage in the same phase."
-tracking_issue = "#765"
-
-[[exclusion]]
-path = "ferrotorch_core::gelu"
-reason = "Pending Phase 2.5-special-transcendental — activations, transcendental, special. Top-level re-export of an item whose canonical path is also pending coverage in the same phase."
-tracking_issue = "#767"
-
-[[exclusion]]
-path = "ferrotorch_core::gelu_with"
-reason = "Pending Phase 2.5-special-transcendental — activations, transcendental, special. Top-level re-export of an item whose canonical path is also pending coverage in the same phase."
-tracking_issue = "#767"
-
-[[exclusion]]
 path = "ferrotorch_core::gpu_dispatch::GpuBackend"
 reason = "Pending Phase 2.14-plumbing — plumbing & core types. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
 tracking_issue = "#776"
@@ -1913,296 +1738,6 @@ tracking_issue = "#776"
 path = "ferrotorch_core::grad"
 reason = "Pending Phase 2.10-autograd — autograd internals. Top-level re-export of an item whose canonical path is also pending coverage in the same phase."
 tracking_issue = "#772"
-
-[[exclusion]]
-path = "ferrotorch_core::grad_fns::activation::EluBackward"
-reason = "Pending Phase 2.5-special-transcendental — activations, transcendental, special. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#767"
-
-[[exclusion]]
-path = "ferrotorch_core::grad_fns::activation::EluBackward <T>::new"
-reason = "Pending Phase 2.5-special-transcendental — activations, transcendental, special. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#767"
-
-[[exclusion]]
-path = "ferrotorch_core::grad_fns::activation::GeluApproximate"
-reason = "Pending Phase 2.5-special-transcendental — activations, transcendental, special. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#767"
-
-[[exclusion]]
-path = "ferrotorch_core::grad_fns::activation::GeluBackward"
-reason = "Pending Phase 2.5-special-transcendental — activations, transcendental, special. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#767"
-
-[[exclusion]]
-path = "ferrotorch_core::grad_fns::activation::GeluBackward <T>::new"
-reason = "Pending Phase 2.5-special-transcendental — activations, transcendental, special. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#767"
-
-[[exclusion]]
-path = "ferrotorch_core::grad_fns::activation::GluBackward"
-reason = "Pending Phase 2.5-special-transcendental — activations, transcendental, special. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#767"
-
-[[exclusion]]
-path = "ferrotorch_core::grad_fns::activation::GluBackward <T>::new"
-reason = "Pending Phase 2.5-special-transcendental — activations, transcendental, special. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#767"
-
-[[exclusion]]
-path = "ferrotorch_core::grad_fns::activation::HardsigmoidBackward"
-reason = "Pending Phase 2.5-special-transcendental — activations, transcendental, special. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#767"
-
-[[exclusion]]
-path = "ferrotorch_core::grad_fns::activation::HardsigmoidBackward <T>::new"
-reason = "Pending Phase 2.5-special-transcendental — activations, transcendental, special. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#767"
-
-[[exclusion]]
-path = "ferrotorch_core::grad_fns::activation::HardswishBackward"
-reason = "Pending Phase 2.5-special-transcendental — activations, transcendental, special. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#767"
-
-[[exclusion]]
-path = "ferrotorch_core::grad_fns::activation::HardswishBackward <T>::new"
-reason = "Pending Phase 2.5-special-transcendental — activations, transcendental, special. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#767"
-
-[[exclusion]]
-path = "ferrotorch_core::grad_fns::activation::HardtanhBackward"
-reason = "Pending Phase 2.5-special-transcendental — activations, transcendental, special. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#767"
-
-[[exclusion]]
-path = "ferrotorch_core::grad_fns::activation::HardtanhBackward <T>::new"
-reason = "Pending Phase 2.5-special-transcendental — activations, transcendental, special. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#767"
-
-[[exclusion]]
-path = "ferrotorch_core::grad_fns::activation::LeakyReluBackward"
-reason = "Pending Phase 2.5-special-transcendental — activations, transcendental, special. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#767"
-
-[[exclusion]]
-path = "ferrotorch_core::grad_fns::activation::LeakyReluBackward <T>::new"
-reason = "Pending Phase 2.5-special-transcendental — activations, transcendental, special. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#767"
-
-[[exclusion]]
-path = "ferrotorch_core::grad_fns::activation::LogSoftmaxBackward"
-reason = "Pending Phase 2.5-special-transcendental — activations, transcendental, special. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#767"
-
-[[exclusion]]
-path = "ferrotorch_core::grad_fns::activation::LogSoftmaxBackward <T>::new"
-reason = "Pending Phase 2.5-special-transcendental — activations, transcendental, special. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#767"
-
-[[exclusion]]
-path = "ferrotorch_core::grad_fns::activation::MishBackward"
-reason = "Pending Phase 2.5-special-transcendental — activations, transcendental, special. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#767"
-
-[[exclusion]]
-path = "ferrotorch_core::grad_fns::activation::MishBackward <T>::new"
-reason = "Pending Phase 2.5-special-transcendental — activations, transcendental, special. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#767"
-
-[[exclusion]]
-path = "ferrotorch_core::grad_fns::activation::PReluBackward"
-reason = "Pending Phase 2.5-special-transcendental — activations, transcendental, special. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#767"
-
-[[exclusion]]
-path = "ferrotorch_core::grad_fns::activation::PReluBackward <T>::new"
-reason = "Pending Phase 2.5-special-transcendental — activations, transcendental, special. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#767"
-
-[[exclusion]]
-path = "ferrotorch_core::grad_fns::activation::ReluBackward"
-reason = "Pending Phase 2.5-special-transcendental — activations, transcendental, special. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#767"
-
-[[exclusion]]
-path = "ferrotorch_core::grad_fns::activation::ReluBackward <T>::new"
-reason = "Pending Phase 2.5-special-transcendental — activations, transcendental, special. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#767"
-
-[[exclusion]]
-path = "ferrotorch_core::grad_fns::activation::SeluBackward"
-reason = "Pending Phase 2.5-special-transcendental — activations, transcendental, special. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#767"
-
-[[exclusion]]
-path = "ferrotorch_core::grad_fns::activation::SeluBackward <T>::new"
-reason = "Pending Phase 2.5-special-transcendental — activations, transcendental, special. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#767"
-
-[[exclusion]]
-path = "ferrotorch_core::grad_fns::activation::SigmoidBackward"
-reason = "Pending Phase 2.5-special-transcendental — activations, transcendental, special. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#767"
-
-[[exclusion]]
-path = "ferrotorch_core::grad_fns::activation::SigmoidBackward <T>::new"
-reason = "Pending Phase 2.5-special-transcendental — activations, transcendental, special. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#767"
-
-[[exclusion]]
-path = "ferrotorch_core::grad_fns::activation::SiluBackward"
-reason = "Pending Phase 2.5-special-transcendental — activations, transcendental, special. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#767"
-
-[[exclusion]]
-path = "ferrotorch_core::grad_fns::activation::SiluBackward <T>::new"
-reason = "Pending Phase 2.5-special-transcendental — activations, transcendental, special. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#767"
-
-[[exclusion]]
-path = "ferrotorch_core::grad_fns::activation::SoftmaxBackward"
-reason = "Pending Phase 2.5-special-transcendental — activations, transcendental, special. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#767"
-
-[[exclusion]]
-path = "ferrotorch_core::grad_fns::activation::SoftmaxBackward <T>::new"
-reason = "Pending Phase 2.5-special-transcendental — activations, transcendental, special. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#767"
-
-[[exclusion]]
-path = "ferrotorch_core::grad_fns::activation::SoftplusBackward"
-reason = "Pending Phase 2.5-special-transcendental — activations, transcendental, special. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#767"
-
-[[exclusion]]
-path = "ferrotorch_core::grad_fns::activation::SoftplusBackward <T>::new"
-reason = "Pending Phase 2.5-special-transcendental — activations, transcendental, special. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#767"
-
-[[exclusion]]
-path = "ferrotorch_core::grad_fns::activation::SoftsignBackward"
-reason = "Pending Phase 2.5-special-transcendental — activations, transcendental, special. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#767"
-
-[[exclusion]]
-path = "ferrotorch_core::grad_fns::activation::SoftsignBackward <T>::new"
-reason = "Pending Phase 2.5-special-transcendental — activations, transcendental, special. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#767"
-
-[[exclusion]]
-path = "ferrotorch_core::grad_fns::activation::TanhBackward"
-reason = "Pending Phase 2.5-special-transcendental — activations, transcendental, special. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#767"
-
-[[exclusion]]
-path = "ferrotorch_core::grad_fns::activation::TanhBackward <T>::new"
-reason = "Pending Phase 2.5-special-transcendental — activations, transcendental, special. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#767"
-
-[[exclusion]]
-path = "ferrotorch_core::grad_fns::activation::elu"
-reason = "Pending Phase 2.5-special-transcendental — activations, transcendental, special. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#767"
-
-[[exclusion]]
-path = "ferrotorch_core::grad_fns::activation::gelu"
-reason = "Pending Phase 2.5-special-transcendental — activations, transcendental, special. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#767"
-
-[[exclusion]]
-path = "ferrotorch_core::grad_fns::activation::gelu_with"
-reason = "Pending Phase 2.5-special-transcendental — activations, transcendental, special. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#767"
-
-[[exclusion]]
-path = "ferrotorch_core::grad_fns::activation::glu"
-reason = "Pending Phase 2.5-special-transcendental — activations, transcendental, special. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#767"
-
-[[exclusion]]
-path = "ferrotorch_core::grad_fns::activation::hardsigmoid"
-reason = "Pending Phase 2.5-special-transcendental — activations, transcendental, special. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#767"
-
-[[exclusion]]
-path = "ferrotorch_core::grad_fns::activation::hardswish"
-reason = "Pending Phase 2.5-special-transcendental — activations, transcendental, special. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#767"
-
-[[exclusion]]
-path = "ferrotorch_core::grad_fns::activation::hardtanh"
-reason = "Pending Phase 2.5-special-transcendental — activations, transcendental, special. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#767"
-
-[[exclusion]]
-path = "ferrotorch_core::grad_fns::activation::hardtanh_with"
-reason = "Pending Phase 2.5-special-transcendental — activations, transcendental, special. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#767"
-
-[[exclusion]]
-path = "ferrotorch_core::grad_fns::activation::leaky_relu"
-reason = "Pending Phase 2.5-special-transcendental — activations, transcendental, special. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#767"
-
-[[exclusion]]
-path = "ferrotorch_core::grad_fns::activation::log_softmax"
-reason = "Pending Phase 2.5-special-transcendental — activations, transcendental, special. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#767"
-
-[[exclusion]]
-path = "ferrotorch_core::grad_fns::activation::mish"
-reason = "Pending Phase 2.5-special-transcendental — activations, transcendental, special. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#767"
-
-[[exclusion]]
-path = "ferrotorch_core::grad_fns::activation::prelu"
-reason = "Pending Phase 2.5-special-transcendental — activations, transcendental, special. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#767"
-
-[[exclusion]]
-path = "ferrotorch_core::grad_fns::activation::relu"
-reason = "Pending Phase 2.5-special-transcendental — activations, transcendental, special. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#767"
-
-[[exclusion]]
-path = "ferrotorch_core::grad_fns::activation::relu6"
-reason = "Pending Phase 2.5-special-transcendental — activations, transcendental, special. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#767"
-
-[[exclusion]]
-path = "ferrotorch_core::grad_fns::activation::selu"
-reason = "Pending Phase 2.5-special-transcendental — activations, transcendental, special. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#767"
-
-[[exclusion]]
-path = "ferrotorch_core::grad_fns::activation::sigmoid"
-reason = "Pending Phase 2.5-special-transcendental — activations, transcendental, special. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#767"
-
-[[exclusion]]
-path = "ferrotorch_core::grad_fns::activation::silu"
-reason = "Pending Phase 2.5-special-transcendental — activations, transcendental, special. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#767"
-
-[[exclusion]]
-path = "ferrotorch_core::grad_fns::activation::softmax"
-reason = "Pending Phase 2.5-special-transcendental — activations, transcendental, special. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#767"
-
-[[exclusion]]
-path = "ferrotorch_core::grad_fns::activation::softplus"
-reason = "Pending Phase 2.5-special-transcendental — activations, transcendental, special. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#767"
-
-[[exclusion]]
-path = "ferrotorch_core::grad_fns::activation::softsign"
-reason = "Pending Phase 2.5-special-transcendental — activations, transcendental, special. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#767"
-
-[[exclusion]]
-path = "ferrotorch_core::grad_fns::activation::tanh"
-reason = "Pending Phase 2.5-special-transcendental — activations, transcendental, special. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#767"
 
 [[exclusion]]
 path = "ferrotorch_core::grad_fns::comparison::WhereBackward"
@@ -2405,26 +1940,6 @@ reason = "Pending Phase 2.3-shape — shape, indexing, view. The phase will land
 tracking_issue = "#765"
 
 [[exclusion]]
-path = "ferrotorch_core::grad_fns::indexing::index_select_1d"
-reason = "Pending Phase 2.3-shape — shape, indexing, view. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#765"
-
-[[exclusion]]
-path = "ferrotorch_core::grad_fns::indexing::index_select_1d_it"
-reason = "Pending Phase 2.3-shape — shape, indexing, view. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#765"
-
-[[exclusion]]
-path = "ferrotorch_core::grad_fns::indexing::masked_fill"
-reason = "Pending Phase 2.3-shape — shape, indexing, view. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#765"
-
-[[exclusion]]
-path = "ferrotorch_core::grad_fns::indexing::masked_fill_bt"
-reason = "Pending Phase 2.3-shape — shape, indexing, view. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#765"
-
-[[exclusion]]
 path = "ferrotorch_core::grad_fns::linalg::BmmBackward"
 reason = "Pending Phase 2.4-linalg — linalg. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
 tracking_issue = "#766"
@@ -2471,51 +1986,6 @@ tracking_issue = "#766"
 
 [[exclusion]]
 path = "ferrotorch_core::grad_fns::linalg::MvBackward <T>::new"
-reason = "Pending Phase 2.4-linalg — linalg. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#766"
-
-[[exclusion]]
-path = "ferrotorch_core::grad_fns::linalg::bmm"
-reason = "Pending Phase 2.4-linalg — linalg. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#766"
-
-[[exclusion]]
-path = "ferrotorch_core::grad_fns::linalg::bmm_differentiable"
-reason = "Pending Phase 2.4-linalg — linalg. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#766"
-
-[[exclusion]]
-path = "ferrotorch_core::grad_fns::linalg::dot_differentiable"
-reason = "Pending Phase 2.4-linalg — linalg. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#766"
-
-[[exclusion]]
-path = "ferrotorch_core::grad_fns::linalg::linear_fused"
-reason = "Pending Phase 2.4-linalg — linalg. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#766"
-
-[[exclusion]]
-path = "ferrotorch_core::grad_fns::linalg::matmul_differentiable"
-reason = "Pending Phase 2.4-linalg — linalg. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#766"
-
-[[exclusion]]
-path = "ferrotorch_core::grad_fns::linalg::mm_bt_differentiable"
-reason = "Pending Phase 2.4-linalg — linalg. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#766"
-
-[[exclusion]]
-path = "ferrotorch_core::grad_fns::linalg::mm_differentiable"
-reason = "Pending Phase 2.4-linalg — linalg. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#766"
-
-[[exclusion]]
-path = "ferrotorch_core::grad_fns::linalg::mv_differentiable"
-reason = "Pending Phase 2.4-linalg — linalg. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#766"
-
-[[exclusion]]
-path = "ferrotorch_core::grad_fns::linalg::permute_0213"
 reason = "Pending Phase 2.4-linalg — linalg. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
 tracking_issue = "#766"
 
@@ -2640,66 +2110,6 @@ reason = "Pending Phase 2.3-shape — shape, indexing, view. The phase will land
 tracking_issue = "#765"
 
 [[exclusion]]
-path = "ferrotorch_core::grad_fns::shape::cat"
-reason = "Pending Phase 2.3-shape — shape, indexing, view. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#765"
-
-[[exclusion]]
-path = "ferrotorch_core::grad_fns::shape::expand"
-reason = "Pending Phase 2.3-shape — shape, indexing, view. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#765"
-
-[[exclusion]]
-path = "ferrotorch_core::grad_fns::shape::flatten"
-reason = "Pending Phase 2.3-shape — shape, indexing, view. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#765"
-
-[[exclusion]]
-path = "ferrotorch_core::grad_fns::shape::reshape"
-reason = "Pending Phase 2.3-shape — shape, indexing, view. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#765"
-
-[[exclusion]]
-path = "ferrotorch_core::grad_fns::shape::squeeze"
-reason = "Pending Phase 2.3-shape — shape, indexing, view. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#765"
-
-[[exclusion]]
-path = "ferrotorch_core::grad_fns::shape::transpose_2d"
-reason = "Pending Phase 2.3-shape — shape, indexing, view. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#765"
-
-[[exclusion]]
-path = "ferrotorch_core::grad_fns::shape::unsqueeze"
-reason = "Pending Phase 2.3-shape — shape, indexing, view. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#765"
-
-[[exclusion]]
-path = "ferrotorch_core::grad_fns::transcendental::clamp"
-reason = "Pending Phase 2.5-special-transcendental — activations, transcendental, special. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#767"
-
-[[exclusion]]
-path = "ferrotorch_core::grad_fns::transcendental::cos"
-reason = "Pending Phase 2.5-special-transcendental — activations, transcendental, special. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#767"
-
-[[exclusion]]
-path = "ferrotorch_core::grad_fns::transcendental::exp"
-reason = "Pending Phase 2.5-special-transcendental — activations, transcendental, special. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#767"
-
-[[exclusion]]
-path = "ferrotorch_core::grad_fns::transcendental::log"
-reason = "Pending Phase 2.5-special-transcendental — activations, transcendental, special. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#767"
-
-[[exclusion]]
-path = "ferrotorch_core::grad_fns::transcendental::sin"
-reason = "Pending Phase 2.5-special-transcendental — activations, transcendental, special. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#767"
-
-[[exclusion]]
 path = "ferrotorch_core::grad_norm"
 reason = "Pending Phase 2.10-autograd — autograd internals. Top-level re-export of an item whose canonical path is also pending coverage in the same phase."
 tracking_issue = "#772"
@@ -2718,11 +2128,6 @@ tracking_issue = "#772"
 path = "ferrotorch_core::hfft"
 reason = "Pending Phase 2.7-fft-complex — FFT, complex, signal. Top-level re-export of an item whose canonical path is also pending coverage in the same phase."
 tracking_issue = "#769"
-
-[[exclusion]]
-path = "ferrotorch_core::histc"
-reason = "Pending Phase 2.3-shape — shape, indexing, view. Top-level re-export of an item whose canonical path is also pending coverage in the same phase."
-tracking_issue = "#765"
 
 [[exclusion]]
 path = "ferrotorch_core::ifft"
@@ -2873,196 +2278,6 @@ tracking_issue = "#772"
 path = "ferrotorch_core::jvp_exact"
 reason = "Pending Phase 2.10-autograd — autograd internals. Top-level re-export of an item whose canonical path is also pending coverage in the same phase."
 tracking_issue = "#772"
-
-[[exclusion]]
-path = "ferrotorch_core::lgamma"
-reason = "Pending Phase 2.5-special-transcendental — activations, transcendental, special. Top-level re-export of an item whose canonical path is also pending coverage in the same phase."
-tracking_issue = "#767"
-
-[[exclusion]]
-path = "ferrotorch_core::linalg::cholesky"
-reason = "Pending Phase 2.4-linalg — linalg. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#766"
-
-[[exclusion]]
-path = "ferrotorch_core::linalg::cholesky_ex"
-reason = "Pending Phase 2.4-linalg — linalg. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#766"
-
-[[exclusion]]
-path = "ferrotorch_core::linalg::cond"
-reason = "Pending Phase 2.4-linalg — linalg. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#766"
-
-[[exclusion]]
-path = "ferrotorch_core::linalg::cross"
-reason = "Pending Phase 2.4-linalg — linalg. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#766"
-
-[[exclusion]]
-path = "ferrotorch_core::linalg::det"
-reason = "Pending Phase 2.4-linalg — linalg. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#766"
-
-[[exclusion]]
-path = "ferrotorch_core::linalg::diagonal"
-reason = "Pending Phase 2.4-linalg — linalg. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#766"
-
-[[exclusion]]
-path = "ferrotorch_core::linalg::eig"
-reason = "Pending Phase 2.4-linalg — linalg. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#766"
-
-[[exclusion]]
-path = "ferrotorch_core::linalg::eigh"
-reason = "Pending Phase 2.4-linalg — linalg. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#766"
-
-[[exclusion]]
-path = "ferrotorch_core::linalg::eigvals"
-reason = "Pending Phase 2.4-linalg — linalg. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#766"
-
-[[exclusion]]
-path = "ferrotorch_core::linalg::eigvalsh"
-reason = "Pending Phase 2.4-linalg — linalg. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#766"
-
-[[exclusion]]
-path = "ferrotorch_core::linalg::householder_product"
-reason = "Pending Phase 2.4-linalg — linalg. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#766"
-
-[[exclusion]]
-path = "ferrotorch_core::linalg::inv"
-reason = "Pending Phase 2.4-linalg — linalg. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#766"
-
-[[exclusion]]
-path = "ferrotorch_core::linalg::inv_ex"
-reason = "Pending Phase 2.4-linalg — linalg. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#766"
-
-[[exclusion]]
-path = "ferrotorch_core::linalg::ldl_factor"
-reason = "Pending Phase 2.4-linalg — linalg. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#766"
-
-[[exclusion]]
-path = "ferrotorch_core::linalg::ldl_solve"
-reason = "Pending Phase 2.4-linalg — linalg. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#766"
-
-[[exclusion]]
-path = "ferrotorch_core::linalg::lstsq"
-reason = "Pending Phase 2.4-linalg — linalg. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#766"
-
-[[exclusion]]
-path = "ferrotorch_core::linalg::lstsq_solve"
-reason = "Pending Phase 2.4-linalg — linalg. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#766"
-
-[[exclusion]]
-path = "ferrotorch_core::linalg::lu"
-reason = "Pending Phase 2.4-linalg — linalg. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#766"
-
-[[exclusion]]
-path = "ferrotorch_core::linalg::lu_factor"
-reason = "Pending Phase 2.4-linalg — linalg. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#766"
-
-[[exclusion]]
-path = "ferrotorch_core::linalg::matrix_exp"
-reason = "Pending Phase 2.4-linalg — linalg. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#766"
-
-[[exclusion]]
-path = "ferrotorch_core::linalg::matrix_norm"
-reason = "Pending Phase 2.4-linalg — linalg. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#766"
-
-[[exclusion]]
-path = "ferrotorch_core::linalg::matrix_power"
-reason = "Pending Phase 2.4-linalg — linalg. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#766"
-
-[[exclusion]]
-path = "ferrotorch_core::linalg::matrix_rank"
-reason = "Pending Phase 2.4-linalg — linalg. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#766"
-
-[[exclusion]]
-path = "ferrotorch_core::linalg::multi_dot"
-reason = "Pending Phase 2.4-linalg — linalg. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#766"
-
-[[exclusion]]
-path = "ferrotorch_core::linalg::pinv"
-reason = "Pending Phase 2.4-linalg — linalg. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#766"
-
-[[exclusion]]
-path = "ferrotorch_core::linalg::qr"
-reason = "Pending Phase 2.4-linalg — linalg. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#766"
-
-[[exclusion]]
-path = "ferrotorch_core::linalg::slogdet"
-reason = "Pending Phase 2.4-linalg — linalg. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#766"
-
-[[exclusion]]
-path = "ferrotorch_core::linalg::solve"
-reason = "Pending Phase 2.4-linalg — linalg. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#766"
-
-[[exclusion]]
-path = "ferrotorch_core::linalg::solve_ex"
-reason = "Pending Phase 2.4-linalg — linalg. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#766"
-
-[[exclusion]]
-path = "ferrotorch_core::linalg::solve_triangular"
-reason = "Pending Phase 2.4-linalg — linalg. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#766"
-
-[[exclusion]]
-path = "ferrotorch_core::linalg::svd"
-reason = "Pending Phase 2.4-linalg — linalg. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#766"
-
-[[exclusion]]
-path = "ferrotorch_core::linalg::svdvals"
-reason = "Pending Phase 2.4-linalg — linalg. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#766"
-
-[[exclusion]]
-path = "ferrotorch_core::linalg::tensorinv"
-reason = "Pending Phase 2.4-linalg — linalg. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#766"
-
-[[exclusion]]
-path = "ferrotorch_core::linalg::tensorsolve"
-reason = "Pending Phase 2.4-linalg — linalg. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#766"
-
-[[exclusion]]
-path = "ferrotorch_core::linalg::vector_norm"
-reason = "Pending Phase 2.4-linalg — linalg. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#766"
-
-[[exclusion]]
-path = "ferrotorch_core::log"
-reason = "Pending Phase 2.5-special-transcendental — activations, transcendental, special. Top-level re-export of an item whose canonical path is also pending coverage in the same phase."
-tracking_issue = "#767"
-
-[[exclusion]]
-path = "ferrotorch_core::log1p"
-reason = "Pending Phase 2.5-special-transcendental — activations, transcendental, special. Top-level re-export of an item whose canonical path is also pending coverage in the same phase."
-tracking_issue = "#767"
 
 [[exclusion]]
 path = "ferrotorch_core::magnitude_prune"
@@ -3218,11 +2433,6 @@ tracking_issue = "#774"
 path = "ferrotorch_core::masked_where"
 reason = "Pending Phase 2.12-masked — masked tensors. Top-level re-export of an item whose canonical path is also pending coverage in the same phase."
 tracking_issue = "#774"
-
-[[exclusion]]
-path = "ferrotorch_core::meshgrid"
-reason = "Pending Phase 2.3-shape — shape, indexing, view. Top-level re-export of an item whose canonical path is also pending coverage in the same phase."
-tracking_issue = "#765"
 
 [[exclusion]]
 path = "ferrotorch_core::meta_propagate::binary_broadcast"
@@ -3485,11 +2695,6 @@ reason = "Pending Phase 2.10-autograd — autograd internals. Top-level re-expor
 tracking_issue = "#772"
 
 [[exclusion]]
-path = "ferrotorch_core::normalize_axis"
-reason = "Pending Phase 2.3-shape — shape, indexing, view. Top-level re-export of an item whose canonical path is also pending coverage in the same phase."
-tracking_issue = "#765"
-
-[[exclusion]]
 path = "ferrotorch_core::numeric_cast::cast"
 reason = "Pending Phase 2.14-plumbing — plumbing & core types. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
 tracking_issue = "#776"
@@ -3538,141 +2743,6 @@ tracking_issue = "#772"
 path = "ferrotorch_core::ops::higher_order::validate_cond_branches"
 reason = "Pending Phase 2.10-autograd — autograd internals. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
 tracking_issue = "#772"
-
-[[exclusion]]
-path = "ferrotorch_core::ops::indexing::gather"
-reason = "Pending Phase 2.3-shape — shape, indexing, view. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#765"
-
-[[exclusion]]
-path = "ferrotorch_core::ops::indexing::scatter"
-reason = "Pending Phase 2.3-shape — shape, indexing, view. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#765"
-
-[[exclusion]]
-path = "ferrotorch_core::ops::indexing::scatter_add"
-reason = "Pending Phase 2.3-shape — shape, indexing, view. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#765"
-
-[[exclusion]]
-path = "ferrotorch_core::ops::indexing::where_cond"
-reason = "Pending Phase 2.3-shape — shape, indexing, view. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#765"
-
-[[exclusion]]
-path = "ferrotorch_core::ops::linalg::bmm"
-reason = "Pending Phase 2.4-linalg — linalg. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#766"
-
-[[exclusion]]
-path = "ferrotorch_core::ops::linalg::dot"
-reason = "Pending Phase 2.4-linalg — linalg. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#766"
-
-[[exclusion]]
-path = "ferrotorch_core::ops::linalg::matmul"
-reason = "Pending Phase 2.4-linalg — linalg. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#766"
-
-[[exclusion]]
-path = "ferrotorch_core::ops::linalg::mm"
-reason = "Pending Phase 2.4-linalg — linalg. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#766"
-
-[[exclusion]]
-path = "ferrotorch_core::ops::linalg::mm_raw"
-reason = "Pending Phase 2.4-linalg — linalg. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#766"
-
-[[exclusion]]
-path = "ferrotorch_core::ops::linalg::mm_raw_at"
-reason = "Pending Phase 2.4-linalg — linalg. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#766"
-
-[[exclusion]]
-path = "ferrotorch_core::ops::linalg::mm_raw_bt"
-reason = "Pending Phase 2.4-linalg — linalg. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#766"
-
-[[exclusion]]
-path = "ferrotorch_core::ops::linalg::mv"
-reason = "Pending Phase 2.4-linalg — linalg. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#766"
-
-[[exclusion]]
-path = "ferrotorch_core::ops::linalg::transpose"
-reason = "Pending Phase 2.4-linalg — linalg. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#766"
-
-[[exclusion]]
-path = "ferrotorch_core::ops::search::bucketize"
-reason = "Pending Phase 2.3-shape — shape, indexing, view. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#765"
-
-[[exclusion]]
-path = "ferrotorch_core::ops::search::histc"
-reason = "Pending Phase 2.3-shape — shape, indexing, view. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#765"
-
-[[exclusion]]
-path = "ferrotorch_core::ops::search::meshgrid"
-reason = "Pending Phase 2.3-shape — shape, indexing, view. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#765"
-
-[[exclusion]]
-path = "ferrotorch_core::ops::search::searchsorted"
-reason = "Pending Phase 2.3-shape — shape, indexing, view. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#765"
-
-[[exclusion]]
-path = "ferrotorch_core::ops::search::topk"
-reason = "Pending Phase 2.3-shape — shape, indexing, view. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#765"
-
-[[exclusion]]
-path = "ferrotorch_core::ops::search::unique"
-reason = "Pending Phase 2.3-shape — shape, indexing, view. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#765"
-
-[[exclusion]]
-path = "ferrotorch_core::ops::search::unique_consecutive"
-reason = "Pending Phase 2.3-shape — shape, indexing, view. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#765"
-
-[[exclusion]]
-path = "ferrotorch_core::ops::tensor_ops::cdist"
-reason = "Pending Phase 2.3-shape — shape, indexing, view. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#765"
-
-[[exclusion]]
-path = "ferrotorch_core::ops::tensor_ops::diag"
-reason = "Pending Phase 2.3-shape — shape, indexing, view. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#765"
-
-[[exclusion]]
-path = "ferrotorch_core::ops::tensor_ops::diagflat"
-reason = "Pending Phase 2.3-shape — shape, indexing, view. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#765"
-
-[[exclusion]]
-path = "ferrotorch_core::ops::tensor_ops::roll"
-reason = "Pending Phase 2.3-shape — shape, indexing, view. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#765"
-
-[[exclusion]]
-path = "ferrotorch_core::ops::tensor_ops::tril"
-reason = "Pending Phase 2.3-shape — shape, indexing, view. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#765"
-
-[[exclusion]]
-path = "ferrotorch_core::ops::tensor_ops::triu"
-reason = "Pending Phase 2.3-shape — shape, indexing, view. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#765"
-
-[[exclusion]]
-path = "ferrotorch_core::permute_t"
-reason = "Pending Phase 2.3-shape — shape, indexing, view. Top-level re-export of an item whose canonical path is also pending coverage in the same phase."
-tracking_issue = "#765"
 
 [[exclusion]]
 path = "ferrotorch_core::prepare_qat"
@@ -3930,26 +3000,6 @@ reason = "Pending Phase 2.9-quantize-prune — quantize & prune. Top-level re-ex
 tracking_issue = "#771"
 
 [[exclusion]]
-path = "ferrotorch_core::rearrange"
-reason = "Pending Phase 2.6-einops-einsum — einops & einsum. Top-level re-export of an item whose canonical path is also pending coverage in the same phase."
-tracking_issue = "#768"
-
-[[exclusion]]
-path = "ferrotorch_core::rearrange_with"
-reason = "Pending Phase 2.6-einops-einsum — einops & einsum. Top-level re-export of an item whose canonical path is also pending coverage in the same phase."
-tracking_issue = "#768"
-
-[[exclusion]]
-path = "ferrotorch_core::reduce"
-reason = "Pending Phase 2.6-einops-einsum — einops & einsum. Top-level re-export of an item whose canonical path is also pending coverage in the same phase."
-tracking_issue = "#768"
-
-[[exclusion]]
-path = "ferrotorch_core::repeat"
-reason = "Pending Phase 2.6-einops-einsum — einops & einsum. Top-level re-export of an item whose canonical path is also pending coverage in the same phase."
-tracking_issue = "#768"
-
-[[exclusion]]
 path = "ferrotorch_core::rfft"
 reason = "Pending Phase 2.7-fft-complex — FFT, complex, signal. Top-level re-export of an item whose canonical path is also pending coverage in the same phase."
 tracking_issue = "#769"
@@ -3970,29 +3020,9 @@ reason = "Pending Phase 2.7-fft-complex — FFT, complex, signal. Top-level re-e
 tracking_issue = "#769"
 
 [[exclusion]]
-path = "ferrotorch_core::roll"
-reason = "Pending Phase 2.3-shape — shape, indexing, view. Top-level re-export of an item whose canonical path is also pending coverage in the same phase."
-tracking_issue = "#765"
-
-[[exclusion]]
 path = "ferrotorch_core::scan"
 reason = "Pending Phase 2.10-autograd — autograd internals. Top-level re-export of an item whose canonical path is also pending coverage in the same phase."
 tracking_issue = "#772"
-
-[[exclusion]]
-path = "ferrotorch_core::scatter"
-reason = "Pending Phase 2.3-shape — shape, indexing, view. Top-level re-export of an item whose canonical path is also pending coverage in the same phase."
-tracking_issue = "#765"
-
-[[exclusion]]
-path = "ferrotorch_core::scatter_add"
-reason = "Pending Phase 2.3-shape — shape, indexing, view. Top-level re-export of an item whose canonical path is also pending coverage in the same phase."
-tracking_issue = "#765"
-
-[[exclusion]]
-path = "ferrotorch_core::searchsorted"
-reason = "Pending Phase 2.3-shape — shape, indexing, view. Top-level re-export of an item whose canonical path is also pending coverage in the same phase."
-tracking_issue = "#765"
 
 [[exclusion]]
 path = "ferrotorch_core::select"
@@ -4008,46 +3038,6 @@ tracking_issue = "#772"
 path = "ferrotorch_core::set_grad_enabled"
 reason = "Pending Phase 2.10-autograd — autograd internals. Top-level re-export of an item whose canonical path is also pending coverage in the same phase."
 tracking_issue = "#772"
-
-[[exclusion]]
-path = "ferrotorch_core::shape::broadcast_shapes"
-reason = "Pending Phase 2.3-shape — shape, indexing, view. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#765"
-
-[[exclusion]]
-path = "ferrotorch_core::shape::c_contiguous_strides"
-reason = "Pending Phase 2.3-shape — shape, indexing, view. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#765"
-
-[[exclusion]]
-path = "ferrotorch_core::shape::channels_last_3d_strides"
-reason = "Pending Phase 2.3-shape — shape, indexing, view. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#765"
-
-[[exclusion]]
-path = "ferrotorch_core::shape::channels_last_strides"
-reason = "Pending Phase 2.3-shape — shape, indexing, view. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#765"
-
-[[exclusion]]
-path = "ferrotorch_core::shape::check_shapes_match"
-reason = "Pending Phase 2.3-shape — shape, indexing, view. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#765"
-
-[[exclusion]]
-path = "ferrotorch_core::shape::normalize_axis"
-reason = "Pending Phase 2.3-shape — shape, indexing, view. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#765"
-
-[[exclusion]]
-path = "ferrotorch_core::shape::numel"
-reason = "Pending Phase 2.3-shape — shape, indexing, view. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#765"
-
-[[exclusion]]
-path = "ferrotorch_core::sigmoid"
-reason = "Pending Phase 2.5-special-transcendental — activations, transcendental, special. Top-level re-export of an item whose canonical path is also pending coverage in the same phase."
-tracking_issue = "#767"
 
 [[exclusion]]
 path = "ferrotorch_core::signal::bartlett"
@@ -4198,16 +3188,6 @@ tracking_issue = "#769"
 path = "ferrotorch_core::signal::windows::tukey"
 reason = "Pending Phase 2.7-fft-complex — FFT, complex, signal. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
 tracking_issue = "#769"
-
-[[exclusion]]
-path = "ferrotorch_core::sin"
-reason = "Pending Phase 2.5-special-transcendental — activations, transcendental, special. Top-level re-export of an item whose canonical path is also pending coverage in the same phase."
-tracking_issue = "#767"
-
-[[exclusion]]
-path = "ferrotorch_core::sinc"
-reason = "Pending Phase 2.5-special-transcendental — activations, transcendental, special. Top-level re-export of an item whose canonical path is also pending coverage in the same phase."
-tracking_issue = "#767"
 
 [[exclusion]]
 path = "ferrotorch_core::sparse::CooTensor"
@@ -4540,116 +3520,6 @@ reason = "Pending Phase 2.9-quantize-prune — quantize & prune. Top-level re-ex
 tracking_issue = "#771"
 
 [[exclusion]]
-path = "ferrotorch_core::special::chebyshev_polynomial_t"
-reason = "Pending Phase 2.5-special-transcendental — activations, transcendental, special. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#767"
-
-[[exclusion]]
-path = "ferrotorch_core::special::chebyshev_polynomial_u"
-reason = "Pending Phase 2.5-special-transcendental — activations, transcendental, special. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#767"
-
-[[exclusion]]
-path = "ferrotorch_core::special::chebyshev_polynomial_v"
-reason = "Pending Phase 2.5-special-transcendental — activations, transcendental, special. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#767"
-
-[[exclusion]]
-path = "ferrotorch_core::special::chebyshev_polynomial_w"
-reason = "Pending Phase 2.5-special-transcendental — activations, transcendental, special. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#767"
-
-[[exclusion]]
-path = "ferrotorch_core::special::digamma"
-reason = "Pending Phase 2.5-special-transcendental — activations, transcendental, special. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#767"
-
-[[exclusion]]
-path = "ferrotorch_core::special::erf"
-reason = "Pending Phase 2.5-special-transcendental — activations, transcendental, special. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#767"
-
-[[exclusion]]
-path = "ferrotorch_core::special::erfc"
-reason = "Pending Phase 2.5-special-transcendental — activations, transcendental, special. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#767"
-
-[[exclusion]]
-path = "ferrotorch_core::special::erfinv"
-reason = "Pending Phase 2.5-special-transcendental — activations, transcendental, special. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#767"
-
-[[exclusion]]
-path = "ferrotorch_core::special::expm1"
-reason = "Pending Phase 2.5-special-transcendental — activations, transcendental, special. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#767"
-
-[[exclusion]]
-path = "ferrotorch_core::special::hermite_polynomial_h"
-reason = "Pending Phase 2.5-special-transcendental — activations, transcendental, special. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#767"
-
-[[exclusion]]
-path = "ferrotorch_core::special::hermite_polynomial_he"
-reason = "Pending Phase 2.5-special-transcendental — activations, transcendental, special. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#767"
-
-[[exclusion]]
-path = "ferrotorch_core::special::laguerre_polynomial_l"
-reason = "Pending Phase 2.5-special-transcendental — activations, transcendental, special. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#767"
-
-[[exclusion]]
-path = "ferrotorch_core::special::legendre_polynomial_p"
-reason = "Pending Phase 2.5-special-transcendental — activations, transcendental, special. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#767"
-
-[[exclusion]]
-path = "ferrotorch_core::special::lgamma"
-reason = "Pending Phase 2.5-special-transcendental — activations, transcendental, special. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#767"
-
-[[exclusion]]
-path = "ferrotorch_core::special::log1p"
-reason = "Pending Phase 2.5-special-transcendental — activations, transcendental, special. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#767"
-
-[[exclusion]]
-path = "ferrotorch_core::special::shifted_chebyshev_polynomial_t"
-reason = "Pending Phase 2.5-special-transcendental — activations, transcendental, special. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#767"
-
-[[exclusion]]
-path = "ferrotorch_core::special::shifted_chebyshev_polynomial_u"
-reason = "Pending Phase 2.5-special-transcendental — activations, transcendental, special. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#767"
-
-[[exclusion]]
-path = "ferrotorch_core::special::shifted_chebyshev_polynomial_v"
-reason = "Pending Phase 2.5-special-transcendental — activations, transcendental, special. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#767"
-
-[[exclusion]]
-path = "ferrotorch_core::special::shifted_chebyshev_polynomial_w"
-reason = "Pending Phase 2.5-special-transcendental — activations, transcendental, special. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#767"
-
-[[exclusion]]
-path = "ferrotorch_core::special::sinc"
-reason = "Pending Phase 2.5-special-transcendental — activations, transcendental, special. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#767"
-
-[[exclusion]]
-path = "ferrotorch_core::special::xlogy"
-reason = "Pending Phase 2.5-special-transcendental — activations, transcendental, special. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#767"
-
-[[exclusion]]
-path = "ferrotorch_core::split_t"
-reason = "Pending Phase 2.3-shape — shape, indexing, view. Top-level re-export of an item whose canonical path is also pending coverage in the same phase."
-tracking_issue = "#765"
-
-[[exclusion]]
 path = "ferrotorch_core::stack"
 reason = "Pending Phase 2.10-autograd — autograd internals. Top-level re-export of an item whose canonical path is also pending coverage in the same phase."
 tracking_issue = "#772"
@@ -4803,26 +3673,6 @@ tracking_issue = "#765"
 path = "ferrotorch_core::stride_tricks::Tensor <T>::as_strided_scatter"
 reason = "Pending Phase 2.3-shape — shape, indexing, view. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
 tracking_issue = "#765"
-
-[[exclusion]]
-path = "ferrotorch_core::stride_tricks::as_strided"
-reason = "Pending Phase 2.3-shape — shape, indexing, view. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#765"
-
-[[exclusion]]
-path = "ferrotorch_core::stride_tricks::as_strided_copy"
-reason = "Pending Phase 2.3-shape — shape, indexing, view. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#765"
-
-[[exclusion]]
-path = "ferrotorch_core::stride_tricks::as_strided_scatter"
-reason = "Pending Phase 2.3-shape — shape, indexing, view. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
-tracking_issue = "#765"
-
-[[exclusion]]
-path = "ferrotorch_core::tanh"
-reason = "Pending Phase 2.5-special-transcendental — activations, transcendental, special. Top-level re-export of an item whose canonical path is also pending coverage in the same phase."
-tracking_issue = "#767"
 
 [[exclusion]]
 path = "ferrotorch_core::tensor::GradFn"
@@ -5100,39 +3950,9 @@ reason = "Pending Phase 2.14-plumbing — plumbing & core types. The phase will 
 tracking_issue = "#776"
 
 [[exclusion]]
-path = "ferrotorch_core::topk"
-reason = "Pending Phase 2.3-shape — shape, indexing, view. Top-level re-export of an item whose canonical path is also pending coverage in the same phase."
-tracking_issue = "#765"
-
-[[exclusion]]
-path = "ferrotorch_core::tril"
-reason = "Pending Phase 2.3-shape — shape, indexing, view. Top-level re-export of an item whose canonical path is also pending coverage in the same phase."
-tracking_issue = "#765"
-
-[[exclusion]]
-path = "ferrotorch_core::triu"
-reason = "Pending Phase 2.3-shape — shape, indexing, view. Top-level re-export of an item whose canonical path is also pending coverage in the same phase."
-tracking_issue = "#765"
-
-[[exclusion]]
-path = "ferrotorch_core::unique"
-reason = "Pending Phase 2.3-shape — shape, indexing, view. Top-level re-export of an item whose canonical path is also pending coverage in the same phase."
-tracking_issue = "#765"
-
-[[exclusion]]
-path = "ferrotorch_core::unique_consecutive"
-reason = "Pending Phase 2.3-shape — shape, indexing, view. Top-level re-export of an item whose canonical path is also pending coverage in the same phase."
-tracking_issue = "#765"
-
-[[exclusion]]
 path = "ferrotorch_core::validate_cond_branches"
 reason = "Pending Phase 2.10-autograd — autograd internals. Top-level re-export of an item whose canonical path is also pending coverage in the same phase."
 tracking_issue = "#772"
-
-[[exclusion]]
-path = "ferrotorch_core::view_t"
-reason = "Pending Phase 2.3-shape — shape, indexing, view. Top-level re-export of an item whose canonical path is also pending coverage in the same phase."
-tracking_issue = "#765"
 
 [[exclusion]]
 path = "ferrotorch_core::vjp"
@@ -5189,12 +4009,97 @@ path = "ferrotorch_core::vmap::vmap_multi_output"
 reason = "Pending Phase 2.10-autograd — autograd internals. The phase will land a conformance test that exercises this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
 tracking_issue = "#772"
 
-[[exclusion]]
-path = "ferrotorch_core::where_cond"
-reason = "Pending Phase 2.3-shape — shape, indexing, view. Top-level re-export of an item whose canonical path is also pending coverage in the same phase."
-tracking_issue = "#765"
+# === Cat G implicit-coverage re-additions (after phase 2.5 batch sweep) ===
+# These constructors are invoked by their corresponding forward op when
+# requires_grad; tested transitively via the forward op's grad assertion
+# in conformance_activation.rs. Cat-G framing per phase-2.0 protocol.
 
 [[exclusion]]
-path = "ferrotorch_core::xlogy"
-reason = "Pending Phase 2.5-special-transcendental — activations, transcendental, special. Top-level re-export of an item whose canonical path is also pending coverage in the same phase."
+path = "ferrotorch_core::grad_fns::activation::EluBackward <T>::new"
+reason = "Implicit coverage: constructor for EluBackward; invoked by elu when requires_grad. Tested via elu's grad path in conformance_activation.rs."
+tracking_issue = "#767"
+
+[[exclusion]]
+path = "ferrotorch_core::grad_fns::activation::GeluBackward <T>::new"
+reason = "Implicit coverage: constructor for GeluBackward; invoked by gelu when requires_grad. Tested via gelu's grad path in conformance_activation.rs."
+tracking_issue = "#767"
+
+[[exclusion]]
+path = "ferrotorch_core::grad_fns::activation::GluBackward <T>::new"
+reason = "Implicit coverage: constructor for GluBackward; invoked by glu when requires_grad. Tested via glu's grad path in conformance_activation.rs."
+tracking_issue = "#767"
+
+[[exclusion]]
+path = "ferrotorch_core::grad_fns::activation::HardsigmoidBackward <T>::new"
+reason = "Implicit coverage: constructor for HardsigmoidBackward; invoked by hardsigmoid when requires_grad. Tested via hardsigmoid's grad path in conformance_activation.rs."
+tracking_issue = "#767"
+
+[[exclusion]]
+path = "ferrotorch_core::grad_fns::activation::HardswishBackward <T>::new"
+reason = "Implicit coverage: constructor for HardswishBackward; invoked by hardswish when requires_grad. Tested via hardswish's grad path in conformance_activation.rs."
+tracking_issue = "#767"
+
+[[exclusion]]
+path = "ferrotorch_core::grad_fns::activation::HardtanhBackward <T>::new"
+reason = "Implicit coverage: constructor for HardtanhBackward; invoked by hardtanh when requires_grad. Tested via hardtanh's grad path in conformance_activation.rs."
+tracking_issue = "#767"
+
+[[exclusion]]
+path = "ferrotorch_core::grad_fns::activation::LeakyReluBackward <T>::new"
+reason = "Implicit coverage: constructor for LeakyReluBackward; invoked by leaky_relu when requires_grad. Tested via leaky_relu's grad path in conformance_activation.rs."
+tracking_issue = "#767"
+
+[[exclusion]]
+path = "ferrotorch_core::grad_fns::activation::LogSoftmaxBackward <T>::new"
+reason = "Implicit coverage: constructor for LogSoftmaxBackward; invoked by log_softmax when requires_grad. Tested via log_softmax's grad path in conformance_activation.rs."
+tracking_issue = "#767"
+
+[[exclusion]]
+path = "ferrotorch_core::grad_fns::activation::MishBackward <T>::new"
+reason = "Implicit coverage: constructor for MishBackward; invoked by mish when requires_grad. Tested via mish's grad path in conformance_activation.rs."
+tracking_issue = "#767"
+
+[[exclusion]]
+path = "ferrotorch_core::grad_fns::activation::PReluBackward <T>::new"
+reason = "Implicit coverage: constructor for PReluBackward; invoked by prelu when requires_grad. Tested via prelu's grad path in conformance_activation.rs."
+tracking_issue = "#767"
+
+[[exclusion]]
+path = "ferrotorch_core::grad_fns::activation::ReluBackward <T>::new"
+reason = "Implicit coverage: constructor for ReluBackward; invoked by relu when requires_grad. Tested via relu's grad path in conformance_activation.rs."
+tracking_issue = "#767"
+
+[[exclusion]]
+path = "ferrotorch_core::grad_fns::activation::SeluBackward <T>::new"
+reason = "Implicit coverage: constructor for SeluBackward; invoked by selu when requires_grad. Tested via selu's grad path in conformance_activation.rs."
+tracking_issue = "#767"
+
+[[exclusion]]
+path = "ferrotorch_core::grad_fns::activation::SigmoidBackward <T>::new"
+reason = "Implicit coverage: constructor for SigmoidBackward; invoked by sigmoid when requires_grad. Tested via sigmoid's grad path in conformance_activation.rs."
+tracking_issue = "#767"
+
+[[exclusion]]
+path = "ferrotorch_core::grad_fns::activation::SiluBackward <T>::new"
+reason = "Implicit coverage: constructor for SiluBackward; invoked by silu when requires_grad. Tested via silu's grad path in conformance_activation.rs."
+tracking_issue = "#767"
+
+[[exclusion]]
+path = "ferrotorch_core::grad_fns::activation::SoftmaxBackward <T>::new"
+reason = "Implicit coverage: constructor for SoftmaxBackward; invoked by softmax when requires_grad. Tested via softmax's grad path in conformance_activation.rs."
+tracking_issue = "#767"
+
+[[exclusion]]
+path = "ferrotorch_core::grad_fns::activation::SoftplusBackward <T>::new"
+reason = "Implicit coverage: constructor for SoftplusBackward; invoked by softplus when requires_grad. Tested via softplus's grad path in conformance_activation.rs."
+tracking_issue = "#767"
+
+[[exclusion]]
+path = "ferrotorch_core::grad_fns::activation::SoftsignBackward <T>::new"
+reason = "Implicit coverage: constructor for SoftsignBackward; invoked by softsign when requires_grad. Tested via softsign's grad path in conformance_activation.rs."
+tracking_issue = "#767"
+
+[[exclusion]]
+path = "ferrotorch_core::grad_fns::activation::TanhBackward <T>::new"
+reason = "Implicit coverage: constructor for TanhBackward; invoked by tanh when requires_grad. Tested via tanh's grad path in conformance_activation.rs."
 tracking_issue = "#767"
