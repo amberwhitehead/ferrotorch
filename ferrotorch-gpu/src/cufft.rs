@@ -604,6 +604,418 @@ pub fn gpu_irfft_c2r_f32(
     Ok(normed)
 }
 
+// ---------------------------------------------------------------------------
+// Hermitian FFT (hfft, ihfft) (#636)
+// ---------------------------------------------------------------------------
+//
+// PyTorch parity:
+//   hfft(x)  = irfft(conj(x))   -- complex spectrum in, real signal out.
+//   ihfft(x) = conj(rfft(x))    -- real signal in, complex spectrum out.
+//
+// Both ops run fully on-device: the conjugate step uses `gpu_conj_f32/f64`
+// (PTX kernel that negates imaginary parts in the existing buffer), then
+// the rfft/irfft cuFFT plan is applied. No host round-trip.
+
+// ---------------------------------------------------------------------------
+// Internal C2R helper (no 1/n normalization) — used by hfft only
+// ---------------------------------------------------------------------------
+//
+// cuFFT C2R (cufftExecC2R / cufftExecZ2D) writes the unnormalized inverse
+// DFT: out[k] = sum_{j=0}^{N-1} in[j] * exp(+2*pi*i*j*k/N).
+//
+// gpu_irfft_c2r_f32/f64 divide by n_out to match torch.fft.irfft convention.
+// hfft instead keeps the raw C2R output (no division), which matches
+// torch.fft.hfft (= Re[IDFT_unnorm(conj(x))], numpy/PyTorch "backward" norm).
+
+fn gpu_c2r_raw_f32(
+    input: &CudaBuffer<f32>,
+    batch: usize,
+    n_out: usize,
+    device: &GpuDevice,
+) -> GpuResult<CudaBuffer<f32>> {
+    check_n_batch(n_out, batch, "gpu_c2r_raw_f32")?;
+    let half = n_out / 2 + 1;
+    let in_total = batch
+        .checked_mul(half)
+        .and_then(|v| v.checked_mul(2))
+        .ok_or(GpuError::ShapeMismatch {
+            op: "gpu_c2r_raw_f32",
+            expected: vec![batch, half, 2],
+            got: vec![input.len()],
+        })?;
+    if input.len() != in_total {
+        return Err(GpuError::ShapeMismatch {
+            op: "gpu_c2r_raw_f32",
+            expected: vec![batch, half, 2],
+            got: vec![input.len()],
+        });
+    }
+    let out_total = batch * n_out;
+    let stream = device.stream();
+    let plan = CudaFft::plan_1d(
+        n_out as i32,
+        cufft_sys::cufftType::CUFFT_C2R,
+        batch as i32,
+        stream.clone(),
+    )?;
+    let mut tmp = crate::transfer::alloc_zeros_f32(in_total, device)?;
+    stream.memcpy_dtod(input.inner(), tmp.inner_mut())?;
+    let mut out = crate::transfer::alloc_zeros_f32(out_total, device)?;
+    // SAFETY:
+    // - `cufft_result::exec_c2r` wraps `cufftExecC2R` (NVIDIA cuFFT C2R,
+    //   single precision). The plan was created on this device's stream with
+    //   `CUFFT_C2R`, length `n_out`, batch `batch`.
+    // - `tmp` is `[batch*(n_out/2+1)*2]` f32 (validated against `in_total`
+    //   above). `out` is `[batch*n_out]` f32 (allocated as `out_total`).
+    //   cuFFT reads `batch*(n_out/2+1)` complex samples and writes
+    //   `batch*n_out` reals -- sizes match.
+    // - `tmp` (cloned input) and `out` are distinct allocations; C2R may
+    //   overwrite `idata` on some architectures, hence the clone.
+    // - `_isync`/`_osync` `SyncOnDrop` guards stay alive across the FFI call
+    //   so the cuFFT work is recorded on `stream`.
+    unsafe {
+        let (idata, _isync) = tmp.inner_mut().device_ptr_mut(&stream);
+        let (odata, _osync) = out.inner_mut().device_ptr_mut(&stream);
+        cufft_result::exec_c2r(
+            plan.handle(),
+            idata as *mut cufft_sys::cufftComplex,
+            odata as *mut cufft_sys::cufftReal,
+        )?;
+    }
+    // No 1/n_out division -- hfft convention (torch.fft.hfft = Re[IDFT_unnorm(conj(x))]).
+    Ok(out)
+}
+
+fn gpu_c2r_raw_f64(
+    input: &CudaBuffer<f64>,
+    batch: usize,
+    n_out: usize,
+    device: &GpuDevice,
+) -> GpuResult<CudaBuffer<f64>> {
+    check_n_batch(n_out, batch, "gpu_c2r_raw_f64")?;
+    let half = n_out / 2 + 1;
+    let in_total = batch
+        .checked_mul(half)
+        .and_then(|v| v.checked_mul(2))
+        .ok_or(GpuError::ShapeMismatch {
+            op: "gpu_c2r_raw_f64",
+            expected: vec![batch, half, 2],
+            got: vec![input.len()],
+        })?;
+    if input.len() != in_total {
+        return Err(GpuError::ShapeMismatch {
+            op: "gpu_c2r_raw_f64",
+            expected: vec![batch, half, 2],
+            got: vec![input.len()],
+        });
+    }
+    let out_total = batch * n_out;
+    let stream = device.stream();
+    let plan = CudaFft::plan_1d(
+        n_out as i32,
+        cufft_sys::cufftType::CUFFT_Z2D,
+        batch as i32,
+        stream.clone(),
+    )?;
+    let mut tmp = crate::transfer::alloc_zeros_f64(in_total, device)?;
+    stream.memcpy_dtod(input.inner(), tmp.inner_mut())?;
+    let mut out = crate::transfer::alloc_zeros_f64(out_total, device)?;
+    // SAFETY:
+    // - `cufft_result::exec_z2d` wraps `cufftExecZ2D` (NVIDIA cuFFT Z2D,
+    //   double precision). Plan created on this device's stream with
+    //   `CUFFT_Z2D`, length `n_out`, batch `batch`.
+    // - `tmp` is `[batch*(n_out/2+1)*2]` f64 (validated against `in_total`).
+    //   `out` is `[batch*n_out]` f64 (allocated as `out_total`). cuFFT reads
+    //   `batch*(n_out/2+1)` Z2D complex samples and writes `batch*n_out`
+    //   reals -- sizes match.
+    // - `tmp` (cloned input) and `out` are distinct allocations.
+    // - `_isync`/`_osync` guards stay alive across the FFI call.
+    unsafe {
+        let (idata, _isync) = tmp.inner_mut().device_ptr_mut(&stream);
+        let (odata, _osync) = out.inner_mut().device_ptr_mut(&stream);
+        cufft_result::exec_z2d(
+            plan.handle(),
+            idata as *mut cufft_sys::cufftDoubleComplex,
+            odata as *mut cufft_sys::cufftDoubleReal,
+        )?;
+    }
+    // No 1/n_out division -- hfft convention.
+    Ok(out)
+}
+
+/// Forward Hermitian FFT: takes `[batch, n/2+1, 2]` interleaved complex f32
+/// and returns `[batch * n_out]` real f32, where `n_out = 2*(n/2+1 - 1) = 2*half - 2`
+/// unless the caller specifies a different `n_out` (matching `irfft_c2r`).
+///
+/// PyTorch parity: `hfft(x, n) = Re[IDFT_unnorm(conj(x))]`.
+/// The C2R cuFFT output is kept unnormalized (no `1/n_out` division), matching
+/// `torch.fft.hfft` / `numpy.fft.hfft` with "backward" normalization convention.
+pub fn gpu_hfft_f32(
+    input: &CudaBuffer<f32>,
+    batch: usize,
+    half_in: usize,
+    n_out: usize,
+    device: &GpuDevice,
+) -> GpuResult<CudaBuffer<f32>> {
+    check_n_batch(half_in, batch, "gpu_hfft_f32")?;
+    let expected_half = n_out / 2 + 1;
+    if half_in != expected_half {
+        return Err(GpuError::ShapeMismatch {
+            op: "gpu_hfft_f32",
+            expected: vec![batch, expected_half, 2],
+            got: vec![input.len()],
+        });
+    }
+    let in_total = batch * half_in * 2;
+    if input.len() != in_total {
+        return Err(GpuError::ShapeMismatch {
+            op: "gpu_hfft_f32",
+            expected: vec![batch, half_in, 2],
+            got: vec![input.len()],
+        });
+    }
+    // Copy input so we can conjugate in-place without mutating the caller's buffer.
+    let stream = device.stream();
+    let mut tmp = crate::transfer::alloc_zeros_f32(in_total, device)?;
+    stream.memcpy_dtod(input.inner(), tmp.inner_mut())?;
+    // Conjugate: negate imaginary parts on-device.
+    let conj_buf = crate::kernels::gpu_conj_f32(tmp, device)?;
+    // hfft = Re[IDFT_unnorm(conj(x))]: apply C2R without the 1/n_out scale.
+    gpu_c2r_raw_f32(&conj_buf, batch, n_out, device)
+}
+
+/// f64 variant of [`gpu_hfft_f32`].
+pub fn gpu_hfft_f64(
+    input: &CudaBuffer<f64>,
+    batch: usize,
+    half_in: usize,
+    n_out: usize,
+    device: &GpuDevice,
+) -> GpuResult<CudaBuffer<f64>> {
+    check_n_batch(half_in, batch, "gpu_hfft_f64")?;
+    let expected_half = n_out / 2 + 1;
+    if half_in != expected_half {
+        return Err(GpuError::ShapeMismatch {
+            op: "gpu_hfft_f64",
+            expected: vec![batch, expected_half, 2],
+            got: vec![input.len()],
+        });
+    }
+    let in_total = batch * half_in * 2;
+    if input.len() != in_total {
+        return Err(GpuError::ShapeMismatch {
+            op: "gpu_hfft_f64",
+            expected: vec![batch, half_in, 2],
+            got: vec![input.len()],
+        });
+    }
+    let stream = device.stream();
+    let mut tmp = crate::transfer::alloc_zeros_f64(in_total, device)?;
+    stream.memcpy_dtod(input.inner(), tmp.inner_mut())?;
+    let conj_buf = crate::kernels::gpu_conj_f64(tmp, device)?;
+    // hfft = Re[IDFT_unnorm(conj(x))]: apply C2R without the 1/n_out scale.
+    gpu_c2r_raw_f64(&conj_buf, batch, n_out, device)
+}
+
+/// Inverse Hermitian FFT: takes `[batch * n]` real f32 and returns
+/// `[batch, n/2+1, 2]` interleaved complex f32 (conjugated rfft output).
+///
+/// PyTorch parity: `ihfft(x) = conj(rfft(x)) / n`.
+pub fn gpu_ihfft_f32(
+    input: &CudaBuffer<f32>,
+    batch: usize,
+    n: usize,
+    device: &GpuDevice,
+) -> GpuResult<CudaBuffer<f32>> {
+    // rfft -> conj.
+    // gpu_rfft_r2c_f32 already normalizes nothing (irfft normalizes; rfft does
+    // not). For ihfft, PyTorch normalizes by 1/n. The rfft output is the
+    // one-sided DFT without normalization; we divide by n via gpu_scale on
+    // the output, then conjugate.
+    //
+    // Actually: torch.fft.ihfft(x) = conj(rfft(x)) / n.
+    // Our gpu_rfft_r2c_f32 returns unnormalized rfft. We need to scale by 1/n,
+    // then conjugate. Order: rfft -> scale(1/n) -> conj.
+    check_n_batch(n, batch, "gpu_ihfft_f32")?;
+    let rfft_out = gpu_rfft_r2c_f32(input, batch, n, device)?;
+    let scale = 1.0_f32 / n as f32;
+    let scaled = crate::kernels::gpu_scale(&rfft_out, scale, device)?;
+    crate::kernels::gpu_conj_f32(scaled, device)
+}
+
+/// f64 variant of [`gpu_ihfft_f32`].
+pub fn gpu_ihfft_f64(
+    input: &CudaBuffer<f64>,
+    batch: usize,
+    n: usize,
+    device: &GpuDevice,
+) -> GpuResult<CudaBuffer<f64>> {
+    check_n_batch(n, batch, "gpu_ihfft_f64")?;
+    let rfft_out = gpu_rfft_r2c_f64(input, batch, n, device)?;
+    let scale = 1.0_f64 / n as f64;
+    let scaled = crate::kernels::gpu_scale_f64(&rfft_out, scale, device)?;
+    crate::kernels::gpu_conj_f64(scaled, device)
+}
+
+// ---------------------------------------------------------------------------
+// N-D complex-to-complex FFT -- 3-D (fftn, ifftn) (#636)
+// ---------------------------------------------------------------------------
+//
+// Uses `cufftPlan3d` for the canonical [d, h, w, 2] unbatched case.
+// Input/output layout: `[d * h * w * 2]` interleaved complex.
+// `inverse=true` divides by `d*h*w` to match torch.fft.ifftn.
+
+/// 3-D forward (`inverse=false`) or inverse C2C FFT for f32.
+/// Input layout: `[d, h, w, 2]` interleaved complex; output same shape.
+pub fn gpu_fftn3d_c2c_f32(
+    input: &CudaBuffer<f32>,
+    d: usize,
+    h: usize,
+    w: usize,
+    inverse: bool,
+    device: &GpuDevice,
+) -> GpuResult<CudaBuffer<f32>> {
+    if d == 0 || h == 0 || w == 0 {
+        return Err(GpuError::ShapeMismatch {
+            op: "gpu_fftn3d_c2c_f32",
+            expected: vec![1, 1, 1],
+            got: vec![d, h, w],
+        });
+    }
+    let total = d * h * w * 2;
+    if input.len() != total {
+        return Err(GpuError::ShapeMismatch {
+            op: "gpu_fftn3d_c2c_f32",
+            expected: vec![d, h, w, 2],
+            got: vec![input.len()],
+        });
+    }
+
+    let stream = device.stream();
+    let plan = CudaFft::plan_3d(
+        d as i32,
+        h as i32,
+        w as i32,
+        cufft_sys::cufftType::CUFFT_C2C,
+        stream.clone(),
+    )?;
+
+    let mut tmp = crate::transfer::alloc_zeros_f32(total, device)?;
+    stream.memcpy_dtod(input.inner(), tmp.inner_mut())?;
+    let mut out = crate::transfer::alloc_zeros_f32(total, device)?;
+
+    let direction = if inverse {
+        FftDirection::Inverse
+    } else {
+        FftDirection::Forward
+    };
+    // SAFETY:
+    // - `cufft_result::exec_c2c` is the unsafe FFI shim around
+    //   `cufftExecC2C` (NVIDIA cuFFT, single-precision C2C).
+    // - Plan: created on the line above with `CUFFT_C2C`, dimensions
+    //   `[d, h, w]`, on this device's stream. Plan handle valid for the
+    //   call duration.
+    // - Buffer dtype: `cufftComplex` is byte-equivalent to interleaved
+    //   `(re, im)` f32 pairs. `tmp` and `out` are each `[d*h*w*2]` f32
+    //   (validated against `total = d*h*w*2` above). cuFFT reads/writes
+    //   `d*h*w` complex samples, matching the allocations exactly.
+    // - Device pointers: `device_ptr_mut` retrieves raw `CUdeviceptr` +
+    //   `_isync`/`_osync` `SyncOnDrop` guards. The guards stay alive
+    //   across the FFI call so the cuFFT work is ordered against `stream`.
+    // - Aliasing: `tmp` and `out` are distinct allocations.
+    // - Direction: enum cast to `c_int`; only legal values produced.
+    unsafe {
+        let (idata, _isync) = tmp.inner_mut().device_ptr_mut(&stream);
+        let (odata, _osync) = out.inner_mut().device_ptr_mut(&stream);
+        cufft_result::exec_c2c(
+            plan.handle(),
+            idata as *mut cufft_sys::cufftComplex,
+            odata as *mut cufft_sys::cufftComplex,
+            direction as c_int,
+        )?;
+    }
+
+    if inverse {
+        let scale = 1.0_f32 / (d as f32 * h as f32 * w as f32);
+        out = crate::kernels::gpu_scale(&out, scale, device)?;
+    }
+    Ok(out)
+}
+
+/// f64 variant of [`gpu_fftn3d_c2c_f32`].
+pub fn gpu_fftn3d_c2c_f64(
+    input: &CudaBuffer<f64>,
+    d: usize,
+    h: usize,
+    w: usize,
+    inverse: bool,
+    device: &GpuDevice,
+) -> GpuResult<CudaBuffer<f64>> {
+    if d == 0 || h == 0 || w == 0 {
+        return Err(GpuError::ShapeMismatch {
+            op: "gpu_fftn3d_c2c_f64",
+            expected: vec![1, 1, 1],
+            got: vec![d, h, w],
+        });
+    }
+    let total = d * h * w * 2;
+    if input.len() != total {
+        return Err(GpuError::ShapeMismatch {
+            op: "gpu_fftn3d_c2c_f64",
+            expected: vec![d, h, w, 2],
+            got: vec![input.len()],
+        });
+    }
+
+    let stream = device.stream();
+    let plan = CudaFft::plan_3d(
+        d as i32,
+        h as i32,
+        w as i32,
+        cufft_sys::cufftType::CUFFT_Z2Z,
+        stream.clone(),
+    )?;
+
+    let mut tmp = crate::transfer::alloc_zeros_f64(total, device)?;
+    stream.memcpy_dtod(input.inner(), tmp.inner_mut())?;
+    let mut out = crate::transfer::alloc_zeros_f64(total, device)?;
+
+    let direction = if inverse {
+        FftDirection::Inverse
+    } else {
+        FftDirection::Forward
+    };
+    // SAFETY:
+    // - `cufft_result::exec_z2z` is the unsafe FFI shim around
+    //   `cufftExecZ2Z` (NVIDIA cuFFT, double-precision C2C 3-D).
+    // - Plan: created above with `CUFFT_Z2Z`, dims `[d, h, w]`, on
+    //   this device's stream. Plan handle valid for the call.
+    // - Buffer dtype: `cufftDoubleComplex` is byte-equivalent to
+    //   interleaved `(re, im)` f64 pairs. `tmp` and `out` are each
+    //   `[d*h*w*2]` f64 (validated against `total`). cuFFT reads/writes
+    //   `d*h*w` Z2Z samples, matching exactly.
+    // - Device pointers: `device_ptr_mut` retrieves raw `CUdeviceptr` +
+    //   `_isync`/`_osync` guards alive across the FFI call.
+    // - Aliasing: `tmp` and `out` are distinct allocations.
+    // - Direction: enum cast to `c_int`; only legal values.
+    unsafe {
+        let (idata, _isync) = tmp.inner_mut().device_ptr_mut(&stream);
+        let (odata, _osync) = out.inner_mut().device_ptr_mut(&stream);
+        cufft_result::exec_z2z(
+            plan.handle(),
+            idata as *mut cufft_sys::cufftDoubleComplex,
+            odata as *mut cufft_sys::cufftDoubleComplex,
+            direction as c_int,
+        )?;
+    }
+
+    if inverse {
+        let scale = 1.0_f64 / (d as f64 * h as f64 * w as f64);
+        out = crate::kernels::gpu_scale_f64(&out, scale, device)?;
+    }
+    Ok(out)
+}
+
 /// f64 variant of [`gpu_irfft_c2r_f32`].
 pub fn gpu_irfft_c2r_f64(
     input: &CudaBuffer<f64>,
@@ -675,4 +1087,172 @@ pub fn gpu_irfft_c2r_f64(
     let scale = 1.0_f64 / n_out as f64;
     let normed = crate::kernels::gpu_scale_f64(&out, scale, device)?;
     Ok(normed)
+}
+
+// ---------------------------------------------------------------------------
+// 2-D complex-to-complex FFT via cufftPlanMany (#636)
+// ---------------------------------------------------------------------------
+//
+// cufftPlanMany(rank=2, n=[h,w], ..., CUFFT_C2C, batch=1) covers the
+// unbatched [h, w, 2] case that cufftPlan2d misses for rank != 2.
+// Input/output layout: `[h * w * 2]` interleaved complex, same convention
+// as all other ops in this file.
+// `inverse=true` divides by `h*w` to match torch.fft.ifftn.
+
+/// 2-D forward (`inverse=false`) or inverse C2C FFT via `cufftPlanMany` for f32.
+///
+/// Input layout: `[h, w, 2]` interleaved complex; output same shape.
+/// Normalization: `inverse=true` divides by `h*w` (torch.fft.ifftn parity).
+pub fn gpu_fftn2d_c2c_f32(
+    input: &CudaBuffer<f32>,
+    h: usize,
+    w: usize,
+    inverse: bool,
+    device: &GpuDevice,
+) -> GpuResult<CudaBuffer<f32>> {
+    if h == 0 || w == 0 {
+        return Err(GpuError::ShapeMismatch {
+            op: "gpu_fftn2d_c2c_f32",
+            expected: vec![1, 1],
+            got: vec![h, w],
+        });
+    }
+    let total = h * w * 2;
+    if input.len() != total {
+        return Err(GpuError::ShapeMismatch {
+            op: "gpu_fftn2d_c2c_f32",
+            expected: vec![h, w, 2],
+            got: vec![input.len()],
+        });
+    }
+
+    let stream = device.stream();
+    // cufftPlanMany with rank=2, n=[h,w], contiguous layout, batch=1.
+    // istride=ostride=1 (contiguous), idist=odist=h*w (one transform).
+    let n_dims = [h as c_int, w as c_int];
+    let plan = CudaFft::plan_many(
+        &n_dims,
+        None,
+        1,
+        (h * w) as i32,
+        None,
+        1,
+        (h * w) as i32,
+        cufft_sys::cufftType::CUFFT_C2C,
+        1,
+        stream.clone(),
+    )?;
+
+    let mut tmp = crate::transfer::alloc_zeros_f32(total, device)?;
+    stream.memcpy_dtod(input.inner(), tmp.inner_mut())?;
+    let mut out = crate::transfer::alloc_zeros_f32(total, device)?;
+
+    let direction = if inverse {
+        FftDirection::Inverse
+    } else {
+        FftDirection::Forward
+    };
+    // SAFETY:
+    // - `cufft_result::exec_c2c` wraps `cufftExecC2C` (NVIDIA cuFFT,
+    //   single-precision C2C). Plan created via `plan_many` with rank=2,
+    //   n=[h,w], CUFFT_C2C, batch=1, on this device's stream.
+    // - Buffer dtype: `cufftComplex` is byte-equivalent to interleaved
+    //   `(re, im)` f32 pairs. `tmp` and `out` are each `[h*w*2]` f32
+    //   (validated against `total = h*w*2`). cuFFT reads/writes `h*w`
+    //   complex samples -- sizes match.
+    // - `_isync`/`_osync` `SyncOnDrop` guards stay alive across the call.
+    // - Aliasing: `tmp` and `out` are distinct allocations.
+    // - Direction: enum cast to `c_int`; only legal values produced.
+    unsafe {
+        let (idata, _isync) = tmp.inner_mut().device_ptr_mut(&stream);
+        let (odata, _osync) = out.inner_mut().device_ptr_mut(&stream);
+        cufft_result::exec_c2c(
+            plan.handle(),
+            idata as *mut cufft_sys::cufftComplex,
+            odata as *mut cufft_sys::cufftComplex,
+            direction as c_int,
+        )?;
+    }
+
+    if inverse {
+        let scale = 1.0_f32 / (h as f32 * w as f32);
+        out = crate::kernels::gpu_scale(&out, scale, device)?;
+    }
+    Ok(out)
+}
+
+/// f64 variant of [`gpu_fftn2d_c2c_f32`].
+pub fn gpu_fftn2d_c2c_f64(
+    input: &CudaBuffer<f64>,
+    h: usize,
+    w: usize,
+    inverse: bool,
+    device: &GpuDevice,
+) -> GpuResult<CudaBuffer<f64>> {
+    if h == 0 || w == 0 {
+        return Err(GpuError::ShapeMismatch {
+            op: "gpu_fftn2d_c2c_f64",
+            expected: vec![1, 1],
+            got: vec![h, w],
+        });
+    }
+    let total = h * w * 2;
+    if input.len() != total {
+        return Err(GpuError::ShapeMismatch {
+            op: "gpu_fftn2d_c2c_f64",
+            expected: vec![h, w, 2],
+            got: vec![input.len()],
+        });
+    }
+
+    let stream = device.stream();
+    let n_dims = [h as c_int, w as c_int];
+    let plan = CudaFft::plan_many(
+        &n_dims,
+        None,
+        1,
+        (h * w) as i32,
+        None,
+        1,
+        (h * w) as i32,
+        cufft_sys::cufftType::CUFFT_Z2Z,
+        1,
+        stream.clone(),
+    )?;
+
+    let mut tmp = crate::transfer::alloc_zeros_f64(total, device)?;
+    stream.memcpy_dtod(input.inner(), tmp.inner_mut())?;
+    let mut out = crate::transfer::alloc_zeros_f64(total, device)?;
+
+    let direction = if inverse {
+        FftDirection::Inverse
+    } else {
+        FftDirection::Forward
+    };
+    // SAFETY:
+    // - `cufft_result::exec_z2z` wraps `cufftExecZ2Z` (NVIDIA cuFFT,
+    //   double-precision C2C). Plan created via `plan_many` with rank=2,
+    //   n=[h,w], CUFFT_Z2Z, batch=1, on this device's stream.
+    // - Buffer dtype: `cufftDoubleComplex` is byte-equivalent to interleaved
+    //   `(re, im)` f64 pairs. `tmp` and `out` are each `[h*w*2]` f64
+    //   (validated against `total = h*w*2`). Sizes match.
+    // - `_isync`/`_osync` guards stay alive across the FFI call.
+    // - Aliasing: distinct allocations.
+    // - Direction: only legal values produced.
+    unsafe {
+        let (idata, _isync) = tmp.inner_mut().device_ptr_mut(&stream);
+        let (odata, _osync) = out.inner_mut().device_ptr_mut(&stream);
+        cufft_result::exec_z2z(
+            plan.handle(),
+            idata as *mut cufft_sys::cufftDoubleComplex,
+            odata as *mut cufft_sys::cufftDoubleComplex,
+            direction as c_int,
+        )?;
+    }
+
+    if inverse {
+        let scale = 1.0_f64 / (h as f64 * w as f64);
+        out = crate::kernels::gpu_scale_f64(&out, scale, device)?;
+    }
+    Ok(out)
 }

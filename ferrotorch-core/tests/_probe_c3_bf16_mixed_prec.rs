@@ -360,6 +360,7 @@ fn c3_softmax_bf16_f32_large_spread() {
 
 /// Single row, single column — trivial case: softmax([v]) = [1.0].
 #[test]
+#[allow(clippy::approx_constant)]
 fn c3_softmax_bf16_f32_single_element() {
     ensure_cuda_backend();
     let backend = gpu_dispatch::gpu_backend().expect("backend");

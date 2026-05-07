@@ -727,11 +727,52 @@ fn real_array_to_tensor<T: Float>(
 ///
 /// `s` optionally specifies the output length along each transform axis
 /// (truncate or zero-pad).
+///
+/// # GPU note
+///
+/// The 3-D case (shape `[d, h, w, 2]`, `axes=None`, `s=None`) dispatches to
+/// `cufftPlan3d` on CUDA f32/f64 tensors (#636). Other ranks remain CPU-only.
 pub fn fftn<T: Float>(
     input: &Tensor<T>,
     s: Option<&[usize]>,
     axes: Option<&[isize]>,
 ) -> FerrotorchResult<Tensor<T>> {
+    // GPU fast paths (#636): dispatch by rank when s=None, axes=None.
+    // - shape [h, w, 2]    (rank-2 complex) -> cufftPlanMany rank=2
+    // - shape [d, h, w, 2] (rank-3 complex) -> cufftPlan3d
+    // Other shapes / non-None s or axes fall through to CPU (NotImplementedOnCuda).
+    if input.is_cuda()
+        && (is_f32::<T>() || is_f64::<T>())
+        && s.is_none()
+        && axes.is_none()
+    {
+        let shape = input.shape();
+        let backend =
+            crate::gpu_dispatch::gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
+        if shape.len() == 3 && shape[2] == 2 {
+            // 2-D complex: [h, w, 2]
+            let h = shape[0];
+            let w = shape[1];
+            let h_out = if is_f32::<T>() {
+                backend.fftn2d_c2c_f32(input.gpu_handle()?, h, w, false)?
+            } else {
+                backend.fftn2d_c2c_f64(input.gpu_handle()?, h, w, false)?
+            };
+            return Tensor::from_storage(TensorStorage::gpu(h_out), shape.to_vec(), false);
+        }
+        if shape.len() == 4 && shape[3] == 2 {
+            // 3-D complex: [d, h, w, 2]
+            let d = shape[0];
+            let h = shape[1];
+            let w = shape[2];
+            let h_out = if is_f32::<T>() {
+                backend.fftn3d_c2c_f32(input.gpu_handle()?, d, h, w, false)?
+            } else {
+                backend.fftn3d_c2c_f64(input.gpu_handle()?, d, h, w, false)?
+            };
+            return Tensor::from_storage(TensorStorage::gpu(h_out), shape.to_vec(), false);
+        }
+    }
     let arr = tensor_to_complex_array(input, "fftn")?;
     let result = ferray_fft::fftn(&arr, s, axes, FftNorm::Backward).map_err(|e| {
         FerrotorchError::InvalidArgument {
@@ -745,11 +786,52 @@ pub fn fftn<T: Float>(
 ///
 /// See [`fftn`] for parameter semantics. Normalization divides by the
 /// product of the transform-axis lengths (matches `torch.fft.ifftn`).
+///
+/// # GPU note
+///
+/// The 3-D case (shape `[d, h, w, 2]`, `axes=None`, `s=None`) dispatches to
+/// `cufftPlan3d` on CUDA f32/f64 tensors (#636). Other ranks remain CPU-only.
 pub fn ifftn<T: Float>(
     input: &Tensor<T>,
     s: Option<&[usize]>,
     axes: Option<&[isize]>,
 ) -> FerrotorchResult<Tensor<T>> {
+    // GPU fast paths (#636): dispatch by rank when s=None, axes=None.
+    // - shape [h, w, 2]    (rank-2 complex) -> cufftPlanMany rank=2
+    // - shape [d, h, w, 2] (rank-3 complex) -> cufftPlan3d
+    // Other shapes / non-None s or axes fall through to CPU (NotImplementedOnCuda).
+    if input.is_cuda()
+        && (is_f32::<T>() || is_f64::<T>())
+        && s.is_none()
+        && axes.is_none()
+    {
+        let shape = input.shape();
+        let backend =
+            crate::gpu_dispatch::gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
+        if shape.len() == 3 && shape[2] == 2 {
+            // 2-D complex: [h, w, 2]
+            let h = shape[0];
+            let w = shape[1];
+            let h_out = if is_f32::<T>() {
+                backend.fftn2d_c2c_f32(input.gpu_handle()?, h, w, true)?
+            } else {
+                backend.fftn2d_c2c_f64(input.gpu_handle()?, h, w, true)?
+            };
+            return Tensor::from_storage(TensorStorage::gpu(h_out), shape.to_vec(), false);
+        }
+        if shape.len() == 4 && shape[3] == 2 {
+            // 3-D complex: [d, h, w, 2]
+            let d = shape[0];
+            let h = shape[1];
+            let w = shape[2];
+            let h_out = if is_f32::<T>() {
+                backend.fftn3d_c2c_f32(input.gpu_handle()?, d, h, w, true)?
+            } else {
+                backend.fftn3d_c2c_f64(input.gpu_handle()?, d, h, w, true)?
+            };
+            return Tensor::from_storage(TensorStorage::gpu(h_out), shape.to_vec(), false);
+        }
+    }
     let arr = tensor_to_complex_array(input, "ifftn")?;
     let result = ferray_fft::ifftn(&arr, s, axes, FftNorm::Backward).map_err(|e| {
         FerrotorchError::InvalidArgument {
@@ -817,7 +899,37 @@ pub fn irfftn<T: Float>(
 /// If `n` is `None`, uses `2 * (input_len - 1)`.
 ///
 /// The Hermitian condition `X[k] = conj(X[-k])` is implicit in the input.
+///
+/// # GPU note
+///
+/// CUDA f32/f64 tensors dispatch to `gpu_hfft_*` via cuFFT C2R + conj PTX
+/// kernel (#636). Parity: `hfft(x, n) == irfft(conj(x), n)`.
 pub fn hfft<T: Float>(input: &Tensor<T>, n: Option<usize>) -> FerrotorchResult<Tensor<T>> {
+    // GPU fast path (#636): hfft = conj + irfft, fully on-device.
+    if input.is_cuda() && (is_f32::<T>() || is_f64::<T>()) {
+        let shape = input.shape();
+        // Input must be [..., half_n, 2].
+        if shape.len() >= 2 && *shape.last().unwrap() == 2 {
+            let ndim = shape.len();
+            let half_in = shape[ndim - 2];
+            let n_out = n.unwrap_or(2 * (half_in - 1));
+            // GPU path only when half_in == n_out/2+1 (no pad/truncate needed).
+            if half_in == n_out / 2 + 1 {
+                let batch_shape = &shape[..ndim - 2];
+                let batch_size: usize = batch_shape.iter().product::<usize>().max(1);
+                let backend = crate::gpu_dispatch::gpu_backend()
+                    .ok_or(FerrotorchError::DeviceUnavailable)?;
+                let h_out = if is_f32::<T>() {
+                    backend.hfft_f32(input.gpu_handle()?, batch_size, half_in, n_out)?
+                } else {
+                    backend.hfft_f64(input.gpu_handle()?, batch_size, half_in, n_out)?
+                };
+                let mut out_shape = batch_shape.to_vec();
+                out_shape.push(n_out);
+                return Tensor::from_storage(TensorStorage::gpu(h_out), out_shape, false);
+            }
+        }
+    }
     let arr = tensor_to_complex_array(input, "hfft")?;
     // #808: ferray-fft 0.3.8 performs the Hermitian projection internally
     // (its `hfft` delegates to `irfft`, which now projects the c2r axis
@@ -835,7 +947,38 @@ pub fn hfft<T: Float>(input: &Tensor<T>, n: Option<usize>) -> FerrotorchResult<T
 ///
 /// Input has shape `[..., n]` (real); output has shape `[..., n/2 + 1, 2]`
 /// (complex pairs).
+///
+/// # GPU note
+///
+/// CUDA f32/f64 tensors dispatch to `gpu_ihfft_*` via cuFFT R2C + conj PTX
+/// kernel (#636). Parity: `ihfft(x) == conj(rfft(x)) / n`.
 pub fn ihfft<T: Float>(input: &Tensor<T>, n: Option<usize>) -> FerrotorchResult<Tensor<T>> {
+    // GPU fast path (#636): ihfft = rfft + scale(1/n) + conj, fully on-device.
+    if input.is_cuda() && (is_f32::<T>() || is_f64::<T>()) {
+        let shape = input.shape();
+        if !shape.is_empty() {
+            let ndim = shape.len();
+            let input_n = shape[ndim - 1];
+            let fft_n = n.unwrap_or(input_n);
+            // GPU path only when fft_n == input_n (no pad/truncate).
+            if fft_n == input_n {
+                let batch_shape = &shape[..ndim - 1];
+                let batch_size: usize = batch_shape.iter().product::<usize>().max(1);
+                let backend = crate::gpu_dispatch::gpu_backend()
+                    .ok_or(FerrotorchError::DeviceUnavailable)?;
+                let h_out = if is_f32::<T>() {
+                    backend.ihfft_f32(input.gpu_handle()?, batch_size, fft_n)?
+                } else {
+                    backend.ihfft_f64(input.gpu_handle()?, batch_size, fft_n)?
+                };
+                let half_n = fft_n / 2 + 1;
+                let mut out_shape = batch_shape.to_vec();
+                out_shape.push(half_n);
+                out_shape.push(2);
+                return Tensor::from_storage(TensorStorage::gpu(h_out), out_shape, false);
+            }
+        }
+    }
     let arr = tensor_to_real_array(input, "ihfft")?;
     let result = ferray_fft::ihfft(&arr, n, None, FftNorm::Backward).map_err(|e| {
         FerrotorchError::InvalidArgument {

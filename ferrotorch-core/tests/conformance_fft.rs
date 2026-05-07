@@ -445,6 +445,26 @@ fn cascade_skip(
     // the centre-value normalization fix so the output matches scipy within
     // F64_WINDOW = 1e-6. The matching cascade_skip block has been retired.
 
+    // C.6 cleanup (#636): fftn/ifftn CUDA GPU paths support only rank-2
+    // (shape [h,w,2]) and rank-3 (shape [d,h,w,2]) with no s/axes override.
+    // Cases with explicit axes or non-None s require axes-aware cufftPlanMany
+    // dispatch (arbitrary-rank with stride/embed parameters) which is beyond
+    // the C.6 scope. Filed as cascade bug for the next N-D FFT sprint.
+    if (_op == "fftn" || _op == "ifftn") && _device_label == "cuda:0" {
+        if let Some(
+            "ndim_3_axes_neg1"
+            | "ndim_3_axes_0"
+            | "ndim_3_axes_n2_n1"
+            | "ndim_2_with_s",
+        ) = _tag
+        {
+            return Some(
+                "C.6: axes/s-override fftn on CUDA not yet implemented \
+                 (cufftPlanMany axes-aware dispatch deferred)",
+            );
+        }
+    }
+
     None
 }
 
@@ -667,8 +687,8 @@ fn cpu_ifft2() {
 // Cat A — fftn / ifftn / rfftn / irfftn
 // ---------------------------------------------------------------------------
 //
-// `fftn` family is currently CPU-only in ferrotorch (delegates to ferray-fft;
-// rejects CUDA tensors with `NotImplementedOnCuda`). We only run on CPU.
+// fftn / ifftn have a GPU fast path for the 3-D case (shape [d,h,w,2]) via
+// cufftPlan3d (#636). rfftn / irfftn remain CPU-only (ferray-fft path).
 
 fn run_fftn_for_device(op_name: &str, device_label: &str, device: Device) {
     let file = load_fixtures();
@@ -764,7 +784,12 @@ fn run_hfft_for_device(op_name: &str, device_label: &str, device: Device) {
         !cases.is_empty(),
         "no fixtures for {op_name} on {device_label}"
     );
-    let tol_f32 = tolerance::F32_FFT_CPU;
+    let on_gpu = matches!(device, Device::Cuda(_));
+    let tol_f32 = if on_gpu {
+        tolerance::F32_FFT_GPU
+    } else {
+        tolerance::F32_FFT_CPU
+    };
     let tol_f64 = tolerance::F64_FFT;
 
     for f in cases {
@@ -2125,5 +2150,41 @@ mod gpu {
         let file = load_fixtures();
         require_cuda_fixtures(&file);
         run_fft_diff_for_device("irfft_differentiable", "cuda:0", Device::Cuda(0));
+    }
+
+    // hfft / ihfft GPU paths (#636) -----------------------------------------
+
+    #[test]
+    fn gpu_hfft() {
+        ensure_cuda_backend();
+        let file = load_fixtures();
+        require_cuda_fixtures(&file);
+        run_hfft_for_device("hfft", "cuda:0", Device::Cuda(0));
+    }
+
+    #[test]
+    fn gpu_ihfft() {
+        ensure_cuda_backend();
+        let file = load_fixtures();
+        require_cuda_fixtures(&file);
+        run_hfft_for_device("ihfft", "cuda:0", Device::Cuda(0));
+    }
+
+    // fftn / ifftn 3-D GPU paths (#636) -------------------------------------
+
+    #[test]
+    fn gpu_fftn() {
+        ensure_cuda_backend();
+        let file = load_fixtures();
+        require_cuda_fixtures(&file);
+        run_fftn_for_device("fftn", "cuda:0", Device::Cuda(0));
+    }
+
+    #[test]
+    fn gpu_ifftn() {
+        ensure_cuda_backend();
+        let file = load_fixtures();
+        require_cuda_fixtures(&file);
+        run_fftn_for_device("ifftn", "cuda:0", Device::Cuda(0));
     }
 }

@@ -3598,6 +3598,36 @@ impl GpuBackend for CudaBackendImpl {
         Ok(Self::wrap_buffer_f64(out, a.device_ordinal()))
     }
 
+    // -- N-D FFT 2-D (fftn / ifftn via cufftPlanMany) (#636) -----------------
+
+    fn fftn2d_c2c_f32(
+        &self,
+        a: &GpuBufferHandle,
+        h: usize,
+        w: usize,
+        inverse: bool,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        let a_buf = Self::unwrap_buffer(a)?;
+        let dev = self.device(a.device_ordinal())?;
+        let out = crate::cufft::gpu_fftn2d_c2c_f32(a_buf, h, w, inverse, dev)
+            .map_err(Self::map_gpu_err)?;
+        Ok(Self::wrap_buffer(out, a.device_ordinal()))
+    }
+
+    fn fftn2d_c2c_f64(
+        &self,
+        a: &GpuBufferHandle,
+        h: usize,
+        w: usize,
+        inverse: bool,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        let a_buf = Self::unwrap_buffer_f64(a)?;
+        let dev = self.device(a.device_ordinal())?;
+        let out = crate::cufft::gpu_fftn2d_c2c_f64(a_buf, h, w, inverse, dev)
+            .map_err(Self::map_gpu_err)?;
+        Ok(Self::wrap_buffer_f64(out, a.device_ordinal()))
+    }
+
     // -- Sparse SpMM (cuSPARSE) ----------------------------------------------
     //
     // PyTorch parity (rust-gpu-discipline §3): `torch.sparse.mm` runs on

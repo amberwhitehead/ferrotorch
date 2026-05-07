@@ -2365,6 +2365,35 @@ pub trait GpuBackend: Send + Sync {
         })
     }
 
+    /// 2-D complex-to-complex FFT via `cufftPlanMany` for f32. (#636)
+    ///
+    /// Input/output layout `[h, w, 2]` interleaved complex.
+    /// `inverse=true` divides by `h*w`.
+    fn fftn2d_c2c_f32(
+        &self,
+        _a: &GpuBufferHandle,
+        _h: usize,
+        _w: usize,
+        _inverse: bool,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::InvalidArgument {
+            message: "fftn2d_c2c_f32 GPU op not yet implemented".into(),
+        })
+    }
+
+    /// f64 2-D FFT counterpart. (#636)
+    fn fftn2d_c2c_f64(
+        &self,
+        _a: &GpuBufferHandle,
+        _h: usize,
+        _w: usize,
+        _inverse: bool,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::InvalidArgument {
+            message: "fftn2d_c2c_f64 GPU op not yet implemented".into(),
+        })
+    }
+
     /// Fused Adam optimizer step: updates param, exp_avg, and exp_avg_sq
     /// in a single kernel launch.
     ///
