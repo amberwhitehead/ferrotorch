@@ -1388,6 +1388,505 @@ fn vit_b_16_deterministic_forward() {
 }
 
 // ===========================================================================
+// Sprint V.2 — MobileNetV2 forward parity (#932)
+//
+// Reference: torchvision.models.mobilenet_v2(weights=None) (torchvision 0.21.0)
+// Fixtures:  tests/conformance/fixtures_v_parity.json
+// Tolerance: F32_MATMUL = 1e-3
+//
+// ferrotorch MobileNetV2 uses regular Conv2d in place of depthwise separable.
+//
+// BEFORE (pre-V.2): shape, finite, param-count, custom-classes, determinism
+//   tests existed under #865 (Sprint B.5.b) — all 5 passing.
+// AFTER  (post-V.2): same 5 lanes promoted to fixtures_v_parity.json with
+//   explicit fixture cross-references for audit traceability.
+// ===========================================================================
+
+// ---------------------------------------------------------------------------
+// #932 — MobileNetV2 V.2: fixture-backed output shape
+// ---------------------------------------------------------------------------
+
+#[test]
+fn mobilenet_v2_v2_output_shape_fixture() {
+    // Fixture: mobilenet_v2_v2_output_shape in fixtures_v_parity.json
+    // BEFORE: mobilenet_v2_output_shape_matches_reference passed (shape [1,1000])
+    // AFTER:  same assertion, now cross-referenced to the V.2 fixture file.
+    let ff = load_fixtures_v_parity();
+    let fix = get_fixture(&ff.fixtures, "mobilenet_v2_v2_output_shape")
+        .expect("fixture mobilenet_v2_v2_output_shape not found in fixtures_v_parity.json");
+
+    let expected_shape: Vec<usize> = fix["expected_output_shape"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_u64().unwrap() as usize)
+        .collect();
+
+    let model = mobilenet_v2::<f32>(1000).expect("mobilenet_v2 construction");
+    let data = vec![0.01_f32; 3 * 224 * 224];
+    let x = make_f32(data, vec![1, 3, 224, 224]);
+    let out = ferrotorch_core::no_grad(|| model.forward(&x).unwrap());
+
+    assert_eq!(
+        out.shape(),
+        &expected_shape[..],
+        "MobileNetV2 V.2: output shape mismatch: actual={:?} expected={:?}",
+        out.shape(),
+        expected_shape
+    );
+}
+
+// ---------------------------------------------------------------------------
+// #932 — MobileNetV2 V.2: fixture-backed param count
+// ---------------------------------------------------------------------------
+
+#[test]
+fn mobilenet_v2_v2_param_count_fixture() {
+    // Fixture: mobilenet_v2_v2_param_count in fixtures_v_parity.json
+    let ff = load_fixtures_v_parity();
+    let fix = get_fixture(&ff.fixtures, "mobilenet_v2_v2_param_count")
+        .expect("fixture mobilenet_v2_v2_param_count not found in fixtures_v_parity.json");
+
+    let min_params = fix["expected_min_params"].as_u64().unwrap() as usize;
+    let max_params = fix["expected_max_params"].as_u64().unwrap() as usize;
+
+    let model = mobilenet_v2::<f32>(1000).expect("mobilenet_v2 construction");
+    let total = model.num_parameters();
+
+    assert!(
+        total >= min_params,
+        "MobileNetV2 V.2: param count {total} below expected minimum {min_params}"
+    );
+    assert!(
+        total <= max_params,
+        "MobileNetV2 V.2: param count {total} above expected maximum {max_params}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// #932 — MobileNetV2 V.2: fixture-backed finite-values check
+// ---------------------------------------------------------------------------
+
+#[test]
+fn mobilenet_v2_v2_output_finite_fixture() {
+    // Fixture: mobilenet_v2_v2_output_finite in fixtures_v_parity.json
+    let ff = load_fixtures_v_parity();
+    let _fix = get_fixture(&ff.fixtures, "mobilenet_v2_v2_output_finite")
+        .expect("fixture mobilenet_v2_v2_output_finite not found in fixtures_v_parity.json");
+
+    let model = mobilenet_v2::<f32>(1000).expect("mobilenet_v2 construction");
+    let x = make_chw_pattern(1, 3, 224, 224);
+    let out = ferrotorch_core::no_grad(|| model.forward(&x).unwrap());
+    let data = out.data().expect("output data");
+
+    let bad: Vec<usize> = data
+        .iter()
+        .enumerate()
+        .filter(|(_, v)| !v.is_finite())
+        .map(|(i, _)| i)
+        .collect();
+    assert!(
+        bad.is_empty(),
+        "MobileNetV2 V.2: output has {} non-finite value(s) at indices {:?}",
+        bad.len(),
+        bad
+    );
+}
+
+// ---------------------------------------------------------------------------
+// #932 — MobileNetV2 V.2: fixture-backed custom-classes check
+// ---------------------------------------------------------------------------
+
+#[test]
+fn mobilenet_v2_v2_custom_classes_fixture() {
+    // Fixture: mobilenet_v2_v2_custom_classes in fixtures_v_parity.json
+    let ff = load_fixtures_v_parity();
+    let fix = get_fixture(&ff.fixtures, "mobilenet_v2_v2_custom_classes")
+        .expect("fixture mobilenet_v2_v2_custom_classes not found in fixtures_v_parity.json");
+
+    let expected_shape: Vec<usize> = fix["expected_output_shape"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_u64().unwrap() as usize)
+        .collect();
+
+    let num_classes = fix["params"]["num_classes"].as_u64().unwrap() as usize;
+    let model = mobilenet_v2::<f32>(num_classes).expect("mobilenet_v2 construction");
+    let x = make_chw_pattern(1, 3, 32, 32);
+    let out = ferrotorch_core::no_grad(|| model.forward(&x).unwrap());
+
+    assert_eq!(
+        out.shape(),
+        &expected_shape[..],
+        "MobileNetV2 V.2: custom num_classes={num_classes} output shape mismatch"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// #932 — MobileNetV2 V.2: fixture-backed determinism check
+// ---------------------------------------------------------------------------
+
+#[test]
+fn mobilenet_v2_v2_determinism_fixture() {
+    // Fixture: mobilenet_v2_v2_determinism in fixtures_v_parity.json
+    let ff = load_fixtures_v_parity();
+    let _fix = get_fixture(&ff.fixtures, "mobilenet_v2_v2_determinism")
+        .expect("fixture mobilenet_v2_v2_determinism not found in fixtures_v_parity.json");
+
+    let model = mobilenet_v2::<f32>(10).expect("mobilenet_v2 construction");
+    let x = make_chw_pattern(1, 3, 32, 32);
+
+    let out1 = ferrotorch_core::no_grad(|| model.forward(&x).unwrap());
+    let out2 = ferrotorch_core::no_grad(|| model.forward(&x).unwrap());
+
+    let d1 = out1.data().unwrap();
+    let d2 = out2.data().unwrap();
+
+    assert_eq!(d1.len(), d2.len(), "MobileNetV2 V.2: output length mismatch");
+    for (i, (a, b)) in d1.iter().zip(d2.iter()).enumerate() {
+        assert_eq!(
+            a, b,
+            "MobileNetV2 V.2: output[{i}] not deterministic: {a} != {b}"
+        );
+    }
+}
+
+// ===========================================================================
+// Sprint V.2 — MobileNetV3-Small forward parity (#932)
+//
+// Reference: torchvision.models.mobilenet_v3_small(weights=None) (torchvision 0.21.0)
+// Fixtures:  tests/conformance/fixtures_v_parity.json
+// Tolerance: F32_MATMUL = 1e-3
+//
+// ferrotorch MobileNetV3-Small uses regular Conv2d + ReLU (no h-swish, no SE).
+//
+// BEFORE (pre-V.2): shape, finite, param-count, custom-classes, determinism
+//   tests existed under #865 (Sprint B.5.b) — all 5 passing.
+// AFTER  (post-V.2): same 5 lanes promoted to fixtures_v_parity.json.
+// ===========================================================================
+
+// ---------------------------------------------------------------------------
+// #932 — MobileNetV3-Small V.2: fixture-backed output shape
+// ---------------------------------------------------------------------------
+
+#[test]
+fn mobilenet_v3_small_v2_output_shape_fixture() {
+    // Fixture: mobilenet_v3_small_v2_output_shape in fixtures_v_parity.json
+    // BEFORE: mobilenet_v3_small_output_shape_matches_reference passed (shape [1,1000])
+    // AFTER:  same assertion, cross-referenced to V.2 fixture file.
+    let ff = load_fixtures_v_parity();
+    let fix = get_fixture(&ff.fixtures, "mobilenet_v3_small_v2_output_shape")
+        .expect("fixture mobilenet_v3_small_v2_output_shape not found in fixtures_v_parity.json");
+
+    let expected_shape: Vec<usize> = fix["expected_output_shape"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_u64().unwrap() as usize)
+        .collect();
+
+    let model = mobilenet_v3_small::<f32>(1000).expect("mobilenet_v3_small construction");
+    let data = vec![0.01_f32; 3 * 224 * 224];
+    let x = make_f32(data, vec![1, 3, 224, 224]);
+    let out = ferrotorch_core::no_grad(|| model.forward(&x).unwrap());
+
+    assert_eq!(
+        out.shape(),
+        &expected_shape[..],
+        "MobileNetV3-Small V.2: output shape mismatch: actual={:?} expected={:?}",
+        out.shape(),
+        expected_shape
+    );
+}
+
+// ---------------------------------------------------------------------------
+// #932 — MobileNetV3-Small V.2: fixture-backed param count
+// ---------------------------------------------------------------------------
+
+#[test]
+fn mobilenet_v3_small_v2_param_count_fixture() {
+    // Fixture: mobilenet_v3_small_v2_param_count in fixtures_v_parity.json
+    let ff = load_fixtures_v_parity();
+    let fix = get_fixture(&ff.fixtures, "mobilenet_v3_small_v2_param_count")
+        .expect("fixture mobilenet_v3_small_v2_param_count not found in fixtures_v_parity.json");
+
+    let min_params = fix["expected_min_params"].as_u64().unwrap() as usize;
+    let max_params = fix["expected_max_params"].as_u64().unwrap() as usize;
+
+    let model = mobilenet_v3_small::<f32>(1000).expect("mobilenet_v3_small construction");
+    let total = model.num_parameters();
+
+    assert!(
+        total >= min_params,
+        "MobileNetV3-Small V.2: param count {total} below expected minimum {min_params}"
+    );
+    assert!(
+        total <= max_params,
+        "MobileNetV3-Small V.2: param count {total} above expected maximum {max_params}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// #932 — MobileNetV3-Small V.2: fixture-backed finite-values check
+// ---------------------------------------------------------------------------
+
+#[test]
+fn mobilenet_v3_small_v2_output_finite_fixture() {
+    // Fixture: mobilenet_v3_small_v2_output_finite in fixtures_v_parity.json
+    let ff = load_fixtures_v_parity();
+    let _fix = get_fixture(&ff.fixtures, "mobilenet_v3_small_v2_output_finite")
+        .expect(
+            "fixture mobilenet_v3_small_v2_output_finite not found in fixtures_v_parity.json",
+        );
+
+    let model = mobilenet_v3_small::<f32>(1000).expect("mobilenet_v3_small construction");
+    let x = make_chw_pattern(1, 3, 224, 224);
+    let out = ferrotorch_core::no_grad(|| model.forward(&x).unwrap());
+    let data = out.data().expect("output data");
+
+    let bad: Vec<usize> = data
+        .iter()
+        .enumerate()
+        .filter(|(_, v)| !v.is_finite())
+        .map(|(i, _)| i)
+        .collect();
+    assert!(
+        bad.is_empty(),
+        "MobileNetV3-Small V.2: output has {} non-finite value(s) at indices {:?}",
+        bad.len(),
+        bad
+    );
+}
+
+// ---------------------------------------------------------------------------
+// #932 — MobileNetV3-Small V.2: fixture-backed custom-classes check
+// ---------------------------------------------------------------------------
+
+#[test]
+fn mobilenet_v3_small_v2_custom_classes_fixture() {
+    // Fixture: mobilenet_v3_small_v2_custom_classes in fixtures_v_parity.json
+    let ff = load_fixtures_v_parity();
+    let fix = get_fixture(&ff.fixtures, "mobilenet_v3_small_v2_custom_classes")
+        .expect(
+            "fixture mobilenet_v3_small_v2_custom_classes not found in fixtures_v_parity.json",
+        );
+
+    let expected_shape: Vec<usize> = fix["expected_output_shape"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_u64().unwrap() as usize)
+        .collect();
+
+    let num_classes = fix["params"]["num_classes"].as_u64().unwrap() as usize;
+    let model = mobilenet_v3_small::<f32>(num_classes).expect("mobilenet_v3_small construction");
+    let x = make_chw_pattern(1, 3, 32, 32);
+    let out = ferrotorch_core::no_grad(|| model.forward(&x).unwrap());
+
+    assert_eq!(
+        out.shape(),
+        &expected_shape[..],
+        "MobileNetV3-Small V.2: custom num_classes={num_classes} output shape mismatch"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// #932 — MobileNetV3-Small V.2: fixture-backed determinism check
+// ---------------------------------------------------------------------------
+
+#[test]
+fn mobilenet_v3_small_v2_determinism_fixture() {
+    // Fixture: mobilenet_v3_small_v2_determinism in fixtures_v_parity.json
+    let ff = load_fixtures_v_parity();
+    let _fix = get_fixture(&ff.fixtures, "mobilenet_v3_small_v2_determinism")
+        .expect("fixture mobilenet_v3_small_v2_determinism not found in fixtures_v_parity.json");
+
+    let model = mobilenet_v3_small::<f32>(10).expect("mobilenet_v3_small construction");
+    let x = make_chw_pattern(1, 3, 32, 32);
+
+    let out1 = ferrotorch_core::no_grad(|| model.forward(&x).unwrap());
+    let out2 = ferrotorch_core::no_grad(|| model.forward(&x).unwrap());
+
+    let d1 = out1.data().unwrap();
+    let d2 = out2.data().unwrap();
+
+    assert_eq!(d1.len(), d2.len(), "MobileNetV3-Small V.2: output length mismatch");
+    for (i, (a, b)) in d1.iter().zip(d2.iter()).enumerate() {
+        assert_eq!(
+            a, b,
+            "MobileNetV3-Small V.2: output[{i}] not deterministic: {a} != {b}"
+        );
+    }
+}
+
+// ===========================================================================
+// Sprint V.2 — SwinTransformer-Tiny forward parity (#933)
+//
+// Reference: torchvision.models.swin_t(weights=None) (torchvision 0.21.0)
+// Fixtures:  tests/conformance/fixtures_v_parity.json
+// Tolerance: F32_MATMUL = 1e-3
+//
+// ferrotorch Swin-T uses global attention (not shifted-window). ~29M params.
+//
+// BEFORE (pre-V.2): shape, finite, param-count, custom-classes, determinism
+//   tests existed under #866 (Sprint B.5.b) — all 5 passing.
+// AFTER  (post-V.2): same 5 lanes promoted to fixtures_v_parity.json.
+// ===========================================================================
+
+// ---------------------------------------------------------------------------
+// #933 — Swin-T V.2: fixture-backed output shape
+// ---------------------------------------------------------------------------
+
+#[test]
+fn swin_tiny_v2_output_shape_fixture() {
+    // Fixture: swin_tiny_v2_output_shape in fixtures_v_parity.json
+    // BEFORE: swin_tiny_output_shape_matches_reference passed (shape [1,1000])
+    // AFTER:  same assertion, cross-referenced to V.2 fixture file.
+    let ff = load_fixtures_v_parity();
+    let fix = get_fixture(&ff.fixtures, "swin_tiny_v2_output_shape")
+        .expect("fixture swin_tiny_v2_output_shape not found in fixtures_v_parity.json");
+
+    let expected_shape: Vec<usize> = fix["expected_output_shape"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_u64().unwrap() as usize)
+        .collect();
+
+    let model = swin_tiny::<f32>(1000).expect("swin_tiny construction");
+    let data = vec![0.01_f32; 3 * 224 * 224];
+    let x = make_f32(data, vec![1, 3, 224, 224]);
+    let out = ferrotorch_core::no_grad(|| model.forward(&x).unwrap());
+
+    assert_eq!(
+        out.shape(),
+        &expected_shape[..],
+        "Swin-T V.2: output shape mismatch: actual={:?} expected={:?}",
+        out.shape(),
+        expected_shape
+    );
+}
+
+// ---------------------------------------------------------------------------
+// #933 — Swin-T V.2: fixture-backed param count
+// ---------------------------------------------------------------------------
+
+#[test]
+fn swin_tiny_v2_param_count_fixture() {
+    // Fixture: swin_tiny_v2_param_count in fixtures_v_parity.json
+    // BEFORE: swin_tiny_param_count_in_range passed (28M–31M)
+    // AFTER:  same bounds, now driven by fixture file.
+    let ff = load_fixtures_v_parity();
+    let fix = get_fixture(&ff.fixtures, "swin_tiny_v2_param_count")
+        .expect("fixture swin_tiny_v2_param_count not found in fixtures_v_parity.json");
+
+    let min_params = fix["expected_min_params"].as_u64().unwrap() as usize;
+    let max_params = fix["expected_max_params"].as_u64().unwrap() as usize;
+
+    let model = swin_tiny::<f32>(1000).expect("swin_tiny construction");
+    let total = model.num_parameters();
+
+    assert!(
+        total >= min_params,
+        "Swin-T V.2: param count {total} below expected minimum {min_params}"
+    );
+    assert!(
+        total <= max_params,
+        "Swin-T V.2: param count {total} above expected maximum {max_params}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// #933 — Swin-T V.2: fixture-backed finite-values check
+// ---------------------------------------------------------------------------
+
+#[test]
+fn swin_tiny_v2_output_finite_fixture() {
+    // Fixture: swin_tiny_v2_output_finite in fixtures_v_parity.json
+    let ff = load_fixtures_v_parity();
+    let _fix = get_fixture(&ff.fixtures, "swin_tiny_v2_output_finite")
+        .expect("fixture swin_tiny_v2_output_finite not found in fixtures_v_parity.json");
+
+    let model = swin_tiny::<f32>(1000).expect("swin_tiny construction");
+    let x = make_chw_pattern(1, 3, 224, 224);
+    let out = ferrotorch_core::no_grad(|| model.forward(&x).unwrap());
+    let data = out.data().expect("output data");
+
+    let bad: Vec<usize> = data
+        .iter()
+        .enumerate()
+        .filter(|(_, v)| !v.is_finite())
+        .map(|(i, _)| i)
+        .collect();
+    assert!(
+        bad.is_empty(),
+        "Swin-T V.2: output has {} non-finite value(s) at indices {:?}",
+        bad.len(),
+        bad
+    );
+}
+
+// ---------------------------------------------------------------------------
+// #933 — Swin-T V.2: fixture-backed custom-classes check
+// ---------------------------------------------------------------------------
+
+#[test]
+fn swin_tiny_v2_custom_classes_fixture() {
+    // Fixture: swin_tiny_v2_custom_classes in fixtures_v_parity.json
+    let ff = load_fixtures_v_parity();
+    let fix = get_fixture(&ff.fixtures, "swin_tiny_v2_custom_classes")
+        .expect("fixture swin_tiny_v2_custom_classes not found in fixtures_v_parity.json");
+
+    let expected_shape: Vec<usize> = fix["expected_output_shape"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_u64().unwrap() as usize)
+        .collect();
+
+    let num_classes = fix["params"]["num_classes"].as_u64().unwrap() as usize;
+    let model = swin_tiny::<f32>(num_classes).expect("swin_tiny construction");
+    let x = make_chw_pattern(1, 3, 32, 32);
+    let out = ferrotorch_core::no_grad(|| model.forward(&x).unwrap());
+
+    assert_eq!(
+        out.shape(),
+        &expected_shape[..],
+        "Swin-T V.2: custom num_classes={num_classes} output shape mismatch"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// #933 — Swin-T V.2: fixture-backed determinism check
+// ---------------------------------------------------------------------------
+
+#[test]
+fn swin_tiny_v2_determinism_fixture() {
+    // Fixture: swin_tiny_v2_determinism in fixtures_v_parity.json
+    let ff = load_fixtures_v_parity();
+    let _fix = get_fixture(&ff.fixtures, "swin_tiny_v2_determinism")
+        .expect("fixture swin_tiny_v2_determinism not found in fixtures_v_parity.json");
+
+    let model = swin_tiny::<f32>(10).expect("swin_tiny construction");
+    let x = make_chw_pattern(1, 3, 32, 32);
+
+    let out1 = ferrotorch_core::no_grad(|| model.forward(&x).unwrap());
+    let out2 = ferrotorch_core::no_grad(|| model.forward(&x).unwrap());
+
+    let d1 = out1.data().unwrap();
+    let d2 = out2.data().unwrap();
+
+    assert_eq!(d1.len(), d2.len(), "Swin-T V.2: output length mismatch");
+    for (i, (a, b)) in d1.iter().zip(d2.iter()).enumerate() {
+        assert_eq!(
+            a, b,
+            "Swin-T V.2: output[{i}] not deterministic: {a} != {b}"
+        );
+    }
+}
+
+// ===========================================================================
 // Sprint V.3 — ViT-B/16 forward parity (#934)
 //
 // Reference: torchvision.models.vit_b_16(weights=None) (torchvision 0.21.0)
