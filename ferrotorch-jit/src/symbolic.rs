@@ -326,7 +326,7 @@ impl<T: Float> SymbolicTracedModule<T> {
 /// reshape target has **exactly one** symbolic match; with zero or
 /// multiple matches the op is left alone and the runtime guard will
 /// handle the conflict.
-pub(crate) fn patch_reshape_for_symbolic_dims(
+pub fn patch_reshape_for_symbolic_dims(
     graph: &mut IrGraph,
     trace_shapes: &[Vec<usize>],
     signature: &ShapeSignature,

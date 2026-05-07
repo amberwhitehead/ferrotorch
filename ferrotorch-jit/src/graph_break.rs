@@ -65,6 +65,10 @@ const KNOWN_OPS: &[&str] = &[
     "ReshapeBackward",
     "FlattenBackward",
     "TransposeBackward",
+    // Fix #889: Squeeze/Unsqueeze/Cat were missing from the known-op table.
+    "SqueezeBackward",
+    "UnsqueezeBackward",
+    "CatBackward",
 ];
 
 /// Returns `true` if the given `GradFn::name()` is in the known op mapping.
@@ -175,6 +179,8 @@ struct AnnotatedOp {
     input_is_leaf: Vec<bool>,
     /// Whether this operation is supported by the IR.
     is_supported: bool,
+    /// Scalar hyperparameters from `GradFn::scalar_args()` (e.g. pow exponent).
+    scalar_args: Vec<f64>,
 }
 
 // ---------------------------------------------------------------------------
@@ -321,6 +327,7 @@ where
             input_shapes: child_shapes,
             input_is_leaf: child_is_leaf,
             is_supported: supported,
+            scalar_args: grad_fn.scalar_args(),
         });
     }
 
@@ -415,7 +422,7 @@ fn build_ir_graph<T: Float>(
             })
             .collect::<FerrotorchResult<Vec<_>>>()?;
 
-        let ir_op = map_name_to_op(op.name, &op.output_shape)?;
+        let ir_op = map_name_to_op(op.name, &op.output_shape, &op.input_shapes, &op.scalar_args)?;
         let (_, out_ids) = graph.add_node(ir_op, ir_inputs, vec![op.output_shape.clone()]);
         tensor_to_ir.insert(op.output_id, out_ids[0]);
     }
@@ -574,7 +581,7 @@ fn build_ir_graph_from_run<T: Float>(
             })
             .collect::<FerrotorchResult<Vec<_>>>()?;
 
-        let ir_op = map_name_to_op(op.name, &op.output_shape)?;
+        let ir_op = map_name_to_op(op.name, &op.output_shape, &op.input_shapes, &op.scalar_args)?;
         let (_, out_ids) = graph.add_node(ir_op, ir_inputs, vec![op.output_shape.clone()]);
         tensor_to_ir.insert(op.output_id, out_ids[0]);
     }
@@ -592,15 +599,23 @@ fn build_ir_graph_from_run<T: Float>(
 /// Map a `GradFn::name()` string to the corresponding IR operation.
 ///
 /// Duplicated from `trace.rs` to avoid circular dependency. Must be kept
-/// in sync.
-fn map_name_to_op(name: &str, output_shape: &[usize]) -> FerrotorchResult<IrOpKind> {
+/// in sync with `trace::map_name_to_op`.
+fn map_name_to_op(
+    name: &str,
+    output_shape: &[usize],
+    input_shapes: &[Vec<usize>],
+    scalar_args: &[f64],
+) -> FerrotorchResult<IrOpKind> {
     match name {
         "AddBackward" => Ok(IrOpKind::Add),
         "SubBackward" => Ok(IrOpKind::Sub),
         "MulBackward" => Ok(IrOpKind::Mul),
         "DivBackward" => Ok(IrOpKind::Div),
         "NegBackward" => Ok(IrOpKind::Neg),
-        "PowBackward" => Ok(IrOpKind::Pow { exponent: 0.0 }),
+        // Fix #887: use the exponent captured via GradFn::scalar_args().
+        "PowBackward" => Ok(IrOpKind::Pow {
+            exponent: scalar_args.first().copied().unwrap_or(0.0),
+        }),
         "SqrtBackward" => Ok(IrOpKind::Sqrt),
         "AbsBackward" => Ok(IrOpKind::Abs),
         "SumBackward" => Ok(IrOpKind::Sum),
@@ -623,10 +638,73 @@ fn map_name_to_op(name: &str, output_shape: &[usize]) -> FerrotorchResult<IrOpKi
         }),
         "FlattenBackward" => Ok(IrOpKind::Flatten),
         "TransposeBackward" => Ok(IrOpKind::Transpose),
+        // Fix #889: Squeeze/Unsqueeze/Cat were missing; infer axis from shapes.
+        "SqueezeBackward" => {
+            let in_shape = input_shapes.first().map_or(&[][..], Vec::as_slice);
+            let axis = infer_squeeze_axis(in_shape, output_shape).unwrap_or(0);
+            Ok(IrOpKind::Squeeze { axis })
+        }
+        "UnsqueezeBackward" => {
+            let in_shape = input_shapes.first().map_or(&[][..], Vec::as_slice);
+            let axis = infer_unsqueeze_axis(in_shape, output_shape).unwrap_or(0);
+            Ok(IrOpKind::Unsqueeze { axis })
+        }
+        "CatBackward" => {
+            let axis = infer_cat_axis(input_shapes, output_shape).unwrap_or(0);
+            Ok(IrOpKind::Cat { axis })
+        }
         other => Err(FerrotorchError::InvalidArgument {
             message: format!("unsupported operation in tracer: {other}"),
         }),
     }
+}
+
+// ---------------------------------------------------------------------------
+// Shape-inference helpers (mirrored from trace.rs, #889)
+// ---------------------------------------------------------------------------
+
+fn infer_squeeze_axis(in_shape: &[usize], out_shape: &[usize]) -> Option<usize> {
+    let mut j = 0usize;
+    for (i, &d) in in_shape.iter().enumerate() {
+        if j < out_shape.len() && out_shape[j] == d {
+            j += 1;
+        } else {
+            return Some(i);
+        }
+    }
+    None
+}
+
+fn infer_unsqueeze_axis(in_shape: &[usize], out_shape: &[usize]) -> Option<usize> {
+    let mut j = 0usize;
+    for (i, &d) in out_shape.iter().enumerate() {
+        if j < in_shape.len() && in_shape[j] == d {
+            j += 1;
+        } else {
+            return Some(i);
+        }
+    }
+    None
+}
+
+fn infer_cat_axis(input_shapes: &[Vec<usize>], output_shape: &[usize]) -> Option<usize> {
+    if input_shapes.is_empty() || output_shape.is_empty() {
+        return None;
+    }
+    let ndim = output_shape.len();
+    for ax in 0..ndim {
+        let sum: usize = input_shapes.iter().map(|s| s.get(ax).copied().unwrap_or(0)).sum();
+        if sum == output_shape[ax] {
+            let first = &input_shapes[0];
+            let others_match = (0..ndim)
+                .filter(|&d| d != ax)
+                .all(|d| first.get(d).copied().unwrap_or(0) == output_shape[d]);
+            if others_match {
+                return Some(ax);
+            }
+        }
+    }
+    None
 }
 
 // ===========================================================================

@@ -202,12 +202,18 @@ fn eval_elementwise(
 // Constant Folding
 // ---------------------------------------------------------------------------
 
-/// Fold nodes whose inputs are all constants into a single `Constant` node.
+/// Fold nodes whose inputs are all constants into a single `Constant` node,
+/// then immediately sweep dead nodes.
 ///
 /// Only simple elementwise operations are folded: `Add`, `Sub`, `Mul`, `Div`,
 /// `Neg`, `Relu`, `Sigmoid`, `Tanh`.  Iterates to a fixed point so that
 /// chained constant expressions (e.g. `Const + Const -> Const * Const`) are
 /// fully collapsed.
+///
+/// After folding completes, a single DCE pass removes the orphan input-constant
+/// nodes that are no longer referenced by any consumer.  This mirrors the
+/// behaviour of torch.fx / Inductor's `constant_folding` pass which auto-chains
+/// DCE (fix for issue `#885`).
 pub fn constant_fold(graph: &mut IrGraph) {
     loop {
         let mut folded_any = false;
@@ -317,6 +323,11 @@ pub fn constant_fold(graph: &mut IrGraph) {
             break;
         }
     }
+
+    // Sweep orphan nodes (original input-constant nodes whose only consumer
+    // was the now-replaced op).  This matches torch.fx constant_folding
+    // behaviour and prevents stale nodes from accumulating (#885).
+    dead_code_eliminate(graph);
 }
 
 // ---------------------------------------------------------------------------

@@ -55,6 +55,16 @@ pub trait GradFn<T: Float>: Send + Sync + fmt::Debug {
 
     /// Name of this operation (e.g., "AddBackward", "MatmulBackward").
     fn name(&self) -> &'static str;
+
+    /// Scalar parameters saved by this backward node (e.g. the exponent for
+    /// `PowBackward`).  The JIT tracer uses these values to faithfully
+    /// reconstruct parameterised IR ops.
+    ///
+    /// The default implementation returns an empty slice; only backward nodes
+    /// that carry scalar hyperparameters need to override this method.
+    fn scalar_args(&self) -> Vec<f64> {
+        vec![]
+    }
 }
 
 /// Inner storage for a tensor, shared via `Arc`.

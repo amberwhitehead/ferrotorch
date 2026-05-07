@@ -1006,6 +1006,13 @@ impl<T: Float> GradFn<T> for PowBackward<T> {
     fn name(&self) -> &'static str {
         "PowBackward"
     }
+
+    fn scalar_args(&self) -> Vec<f64> {
+        // The exponent is the single scalar saved by PowBackward; the JIT
+        // tracer reads this to reconstruct `IrOpKind::Pow { exponent }` with
+        // the correct value instead of the 0.0 placeholder (#887).
+        vec![self.exp]
+    }
 }
 
 /// Elementwise power: `c = a ^ exp` where `exp` is a scalar `f64`.

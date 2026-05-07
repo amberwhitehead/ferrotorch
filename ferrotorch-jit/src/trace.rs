@@ -20,9 +20,19 @@ use crate::graph::{Dtype, IrGraph, IrOpKind, IrValueId};
 
 /// Map the `GradFn::name()` string to the corresponding IR operation.
 ///
-/// Shape-dependent ops (Reshape) use the tensor's output shape as a fallback
-/// since the backward node does not expose the target shape directly.
-fn map_name_to_op(name: &str, output_shape: &[usize]) -> FerrotorchResult<IrOpKind> {
+/// Shape-dependent ops (Reshape, Squeeze, Unsqueeze, Cat) use the tensor's
+/// output and input shapes to reconstruct axis parameters at trace time since
+/// the backward node does not expose them through the `GradFn` interface
+/// directly.
+///
+/// Parameterised ops (Pow) read their scalar from `scalar_args` which is
+/// populated by `GradFn::scalar_args()` (#887).
+fn map_name_to_op(
+    name: &str,
+    output_shape: &[usize],
+    input_shapes: &[Vec<usize>],
+    scalar_args: &[f64],
+) -> FerrotorchResult<IrOpKind> {
     match name {
         // Arithmetic
         "AddBackward" => Ok(IrOpKind::Add),
@@ -30,7 +40,10 @@ fn map_name_to_op(name: &str, output_shape: &[usize]) -> FerrotorchResult<IrOpKi
         "MulBackward" => Ok(IrOpKind::Mul),
         "DivBackward" => Ok(IrOpKind::Div),
         "NegBackward" => Ok(IrOpKind::Neg),
-        "PowBackward" => Ok(IrOpKind::Pow { exponent: 0.0 }),
+        // Fix #887: use the exponent captured via GradFn::scalar_args().
+        "PowBackward" => Ok(IrOpKind::Pow {
+            exponent: scalar_args.first().copied().unwrap_or(0.0),
+        }),
         "SqrtBackward" => Ok(IrOpKind::Sqrt),
         "AbsBackward" => Ok(IrOpKind::Abs),
 
@@ -62,10 +75,97 @@ fn map_name_to_op(name: &str, output_shape: &[usize]) -> FerrotorchResult<IrOpKi
         "FlattenBackward" => Ok(IrOpKind::Flatten),
         "TransposeBackward" => Ok(IrOpKind::Transpose),
 
+        // Fix #889: Squeeze/Unsqueeze/Cat were missing; infer axis from shapes.
+        "SqueezeBackward" => {
+            // Squeeze removes a length-1 dim: input_shape has one more dim
+            // than output_shape.  Find the axis that was removed.
+            let in_shape = input_shapes.first().map_or(&[][..], Vec::as_slice);
+            let axis = infer_squeeze_axis(in_shape, output_shape).unwrap_or(0);
+            Ok(IrOpKind::Squeeze { axis })
+        }
+        "UnsqueezeBackward" => {
+            // Unsqueeze inserts a length-1 dim: output_shape has one more dim
+            // than input_shape.  Find the axis that was inserted.
+            let in_shape = input_shapes.first().map_or(&[][..], Vec::as_slice);
+            let axis = infer_unsqueeze_axis(in_shape, output_shape).unwrap_or(0);
+            Ok(IrOpKind::Unsqueeze { axis })
+        }
+        "CatBackward" => {
+            // Cat grows exactly one axis relative to each input.  Find which
+            // axis grew beyond any single input's size.
+            let axis = infer_cat_axis(input_shapes, output_shape).unwrap_or(0);
+            Ok(IrOpKind::Cat { axis })
+        }
+
         other => Err(FerrotorchError::InvalidArgument {
             message: format!("unsupported operation in tracer: {other}"),
         }),
     }
+}
+
+// ---------------------------------------------------------------------------
+// Shape-inference helpers for #889
+// ---------------------------------------------------------------------------
+
+/// Infer which axis was removed by a `squeeze` operation.
+///
+/// Returns the first position where `in_shape` has a value that is absent from
+/// `out_shape` (i.e. the removed length-1 dimension).
+fn infer_squeeze_axis(in_shape: &[usize], out_shape: &[usize]) -> Option<usize> {
+    // Walk `in_shape` and skip forward in `out_shape`; the first mismatch
+    // is the squeezed axis.
+    let mut j = 0usize;
+    for (i, &d) in in_shape.iter().enumerate() {
+        if j < out_shape.len() && out_shape[j] == d {
+            j += 1;
+        } else {
+            // `in_shape[i]` has no counterpart at this point — it was squeezed.
+            return Some(i);
+        }
+    }
+    None
+}
+
+/// Infer which axis was inserted by an `unsqueeze` operation.
+///
+/// Returns the first position where `out_shape` has a `1` that is absent from
+/// `in_shape`.
+fn infer_unsqueeze_axis(in_shape: &[usize], out_shape: &[usize]) -> Option<usize> {
+    let mut j = 0usize;
+    for (i, &d) in out_shape.iter().enumerate() {
+        if j < in_shape.len() && in_shape[j] == d {
+            j += 1;
+        } else {
+            // `out_shape[i]` has no counterpart — it was inserted.
+            return Some(i);
+        }
+    }
+    None
+}
+
+/// Infer the concatenation axis from the output shape and the input shapes.
+///
+/// The cat axis is the one dimension where `output_shape[ax]` equals the sum
+/// of `input_shapes[k][ax]` across all inputs while every other axis matches.
+fn infer_cat_axis(input_shapes: &[Vec<usize>], output_shape: &[usize]) -> Option<usize> {
+    if input_shapes.is_empty() || output_shape.is_empty() {
+        return None;
+    }
+    let ndim = output_shape.len();
+    for ax in 0..ndim {
+        let sum: usize = input_shapes.iter().map(|s| s.get(ax).copied().unwrap_or(0)).sum();
+        if sum == output_shape[ax] {
+            // Verify all other axes match the first input.
+            let first = &input_shapes[0];
+            let others_match = (0..ndim)
+                .filter(|&d| d != ax)
+                .all(|d| first.get(d).copied().unwrap_or(0) == output_shape[d]);
+            if others_match {
+                return Some(ax);
+            }
+        }
+    }
+    None
 }
 
 // ---------------------------------------------------------------------------
@@ -86,6 +186,9 @@ struct OpRecord {
     input_shapes: Vec<Vec<usize>>,
     /// Whether each input is a leaf (no `grad_fn`).
     input_is_leaf: Vec<bool>,
+    /// Scalar hyperparameters saved by the backward node (`GradFn::scalar_args()`).
+    /// Used by `map_name_to_op` to reconstruct parameterised ops like `Pow` (#887).
+    scalar_args: Vec<f64>,
 }
 
 // ---------------------------------------------------------------------------
@@ -222,6 +325,7 @@ where
             input_ids: child_ids,
             input_shapes: child_shapes,
             input_is_leaf: child_is_leaf,
+            scalar_args: grad_fn.scalar_args(),
         });
     }
 
@@ -281,7 +385,7 @@ where
             })
             .collect::<FerrotorchResult<Vec<_>>>()?;
 
-        let ir_op = map_name_to_op(op.name, &op.output_shape)?;
+        let ir_op = map_name_to_op(op.name, &op.output_shape, &op.input_shapes, &op.scalar_args)?;
 
         // Tracing is monomorphic in `T`, so every produced edge carries the
         // same dtype that we resolved at entry.

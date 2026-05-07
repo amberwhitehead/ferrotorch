@@ -101,5 +101,8 @@ pub use interpreter::{interpret, interpret_multi};
 pub use memory_plan::{MemoryPlan, plan_memory};
 pub use module::{AotCompiledModule, CompileConfig, TracedModule, compile, compile_with_config};
 pub use optimize::{OptimizationConfig, optimize};
-pub use symbolic::{Guard, ShapeSignature, SymbolicDim, SymbolicTracedModule, compile_symbolic};
+pub use symbolic::{
+    Guard, ShapeSignature, SymbolicDim, SymbolicTracedModule, compile_symbolic,
+    patch_reshape_for_symbolic_dims,
+};
 pub use trace::trace;

@@ -10,6 +10,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - ferrotorch-core: `gelu()` (no-arg) default is now `GeluApproximate::None` (exact erf-based: `x * 0.5 * (1 + erf(x / √2))`), matching `torch.nn.GELU()`'s `approximate='none'` default. Previously the no-arg path defaulted to `GeluApproximate::Sigmoid` (`x * sigmoid(1.702 * x)`), producing ~6e-3 absolute deviation from PyTorch. **Migration**: callers relying on the historical fast-sigmoid default must opt in explicitly via `gelu_with(input, GeluApproximate::Sigmoid)` (LLM/transformer paths in `ferrotorch-llama` etc. will silently get the slower-but-more-precise erf path after upgrade — adjust if performance matters more than parity in your call site). `gelu_with(_, GeluApproximate::Tanh)` (PyTorch's `approximate='tanh'`) and `gelu_with(_, GeluApproximate::None)` are unchanged. The enum discriminant order is unchanged; only the `#[default]` attribute moved (closes #794).
 
 ### Fixed
+- Fix 5 ferrotorch-distributed conformance bugs (fixture key mismatches + SubBackend rank test) (#914)
 - Fix XpuDevice::is_available() to probe wgpu adapter list instead of assuming feature-compile equals availability (#911)
 - C7.4 cascade: JitError::GpuBackendUnavailable not exercised in default CI — requires InductorBackend with gpu target on non-GPU build (#884)
 - C7.4 cascade: DataDependentControlFlow and RecompilationError JitError variants not triggered in C7.4 — deferred to C7.5 full-graph tracing (#886)
@@ -350,6 +351,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - M≤4 cuBLAS bypass: route vector-matrix multiplies through PTX `small_matmul` kernel instead of cuBLAS SGEMM
 
 ### Changed
+- C7.1 cascade: trace::map_name_to_op missing Squeeze/Unsqueeze/Cat backward names — tracing these ops returns Err(unsupported) (#889)
+- C7.1 cascade: symbolic::patch_reshape_for_symbolic_dims is pub(crate) — integration tests cannot call it directly (#888)
+- C7.1 cascade: trace::PowBackward always emits exponent=0.0 — backward node loses pow exponent (#887)
+- constant_fold leaves orphan input-constant nodes (DCE not auto-chained after fold) (#885)
+- ferrotorch-distributed: SubBackend rank mapping diverges from torch.distributed ProcessGroup reference — SubBackend::new rejects members [1,2,3] as invalid ranks (world_size mismatch), blocking to_global/to_local verification — surfaced by C4 conformance (#857)
+- ferrotorch-distributed: SubBackend::members diverges from torch.distributed new_group reference — SubBackend::new rejects members [1,2,3] as invalid ranks against world_size=3 parent (world_size mismatch from SimulatedBackend::create_group) — surfaced by C4 conformance (#856)
+- ferrotorch-distributed: DeviceMesh::new valid construction diverges from torch.distributed reference — fixture uses shape/world_size keys but test reads mesh_shape/mesh_world_size — surfaced by C4 conformance (#855)
+- ferrotorch-distributed: reduce_scatter world_size=2 sum diverges from torch.distributed reference — fixture uses input_shape key but test reads shape — surfaced by C4 conformance (#854)
+- ferrotorch-distributed: all_gather world_size=2 diverges from torch.distributed reference — fixture uses input_shape/expected_shape keys but test reads shape — surfaced by C4 conformance (#853)
 - Conformance Buildout C9 — Tier-3 ferrotorch-nn (4 sub-phases, final) (#898)
 - Conformance Buildout C8 — Tier-3 ferrotorch-gpu (4 sub-phases) (#890)
 - Conformance Buildout C7 — Tier-3 ferrotorch-jit (4 sub-phases) (#883)

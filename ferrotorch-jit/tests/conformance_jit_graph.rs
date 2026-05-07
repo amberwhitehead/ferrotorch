@@ -794,7 +794,7 @@ fn symbolic_guard_range_above_max() {
 /// symbolic_reshape_patch_single: compile_symbolic with symbolic batch patches reshape
 /// [4,10] -> [-1,10] so the module can run with different batch sizes.
 ///
-/// patch_reshape_for_symbolic_dims is pub(crate); we exercise it end-to-end through
+/// patch_reshape_for_symbolic_dims is now `pub` (#888); we exercise it end-to-end through
 /// compile_symbolic which calls it internally — same as the unit tests in symbolic.rs.
 #[test]
 fn symbolic_reshape_patch_single() {
