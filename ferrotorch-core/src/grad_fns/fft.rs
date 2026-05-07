@@ -132,14 +132,29 @@ impl<T: Float> GradFn<T> for IfftBackward<T> {
 // RfftBackward
 // ---------------------------------------------------------------------------
 
-/// Backward for `y = rfft(x, n)`.
+/// Backward for `y = rfft(x, n)` (real → Hermitian-truncated complex).
 ///
-/// `rfft` takes real input of shape `[..., n]` and produces complex output
-/// `[..., n/2+1, 2]`. The backward needs to produce a real gradient.
+/// VJP derivation (matches PyTorch `FftR2CBackward` for `norm="backward"`):
 ///
-/// The VJP is: `grad_x = real(irfft_full(grad_y, n))` where `irfft_full`
-/// extends the Hermitian spectrum and does an inverse FFT.
-/// More precisely: `grad_x = irfft(grad_y, n)`.
+/// The forward `Y = rfft(x)` with output length `K = N/2 + 1` is the linear
+/// map `Y[k] = sum_{n} x[n] exp(-2π i k n / N)` for `k = 0..K-1`. For a
+/// real-valued upstream cotangent `grad_Y`, the cotangent on `x` is
+///
+/// ```text
+///   grad_x[n] = real( sum_{k=0..K-1} grad_Y[k] * exp(+2π i k n / N) )
+/// ```
+///
+/// (i.e., the **partial** unnormalized inverse over the half-spectrum, NOT
+/// the Hermitian-extended full inverse). Implementing this as `irfft(grad_Y,
+/// N)` would Hermitian-extend the spectrum and **double** the interior
+/// freqs, then divide by `N` — both wrong by a factor of `N` and by the
+/// boundary correction.
+///
+/// PyTorch's reference path is equivalent to: zero-pad `grad_Y` along the
+/// freq axis from `K` to `N`, run an unnormalized inverse complex FFT, take
+/// the real part. We compute this by calling our normalized
+/// `fft::ifft(zero_padded, N)` (which divides by `N`) and multiplying by `N`
+/// to undo the normalization.
 #[derive(Debug)]
 pub struct RfftBackward<T: Float> {
     input: Tensor<T>,
@@ -161,9 +176,53 @@ impl<T: Float> RfftBackward<T> {
 impl<T: Float> GradFn<T> for RfftBackward<T> {
     fn backward(&self, grad_output: &Tensor<T>) -> FerrotorchResult<Vec<Option<Tensor<T>>>> {
         let grad_input = if self.input.requires_grad() {
-            // Use irfft to convert the complex gradient back to real.
-            // irfft(grad_y, n=fft_n) gives us a real tensor of the right size.
-            Some(fft::irfft(grad_output, Some(self.fft_n))?)
+            let device = grad_output.device();
+            // Zero-pad grad_Y from [..., K, 2] to [..., N, 2] along the freq axis.
+            let go_shape = grad_output.shape();
+            if go_shape.len() < 2 || go_shape[go_shape.len() - 1] != 2 {
+                return Err(crate::error::FerrotorchError::InvalidArgument {
+                    message: format!(
+                        "RfftBackward: grad_output must have trailing complex pair, got {go_shape:?}"
+                    ),
+                });
+            }
+            let k = go_shape[go_shape.len() - 2];
+            let n = self.fft_n;
+            let batch_shape = &go_shape[..go_shape.len() - 2];
+            let batch_size: usize = batch_shape.iter().product::<usize>().max(1);
+            let go_data = grad_output.data_vec()?;
+
+            let mut padded = vec![T::from(0.0).unwrap(); batch_size * n * 2];
+            for b in 0..batch_size {
+                let src_off = b * k * 2;
+                let dst_off = b * n * 2;
+                let copy_pairs = k.min(n);
+                for kk in 0..copy_pairs {
+                    padded[dst_off + kk * 2] = go_data[src_off + kk * 2];
+                    padded[dst_off + kk * 2 + 1] = go_data[src_off + kk * 2 + 1];
+                }
+            }
+            let mut padded_shape = batch_shape.to_vec();
+            padded_shape.push(n);
+            padded_shape.push(2);
+            let padded_t =
+                Tensor::from_storage(TensorStorage::cpu(padded), padded_shape, false)?;
+
+            // ifft is normalized (divides by N); multiply by N to unnormalize.
+            let inv = fft::ifft(&padded_t, Some(n))?;
+            let inv_data = inv.data_vec()?;
+            let scale = T::from(n).unwrap();
+            // Take real part: drop the trailing 2 axis.
+            let mut grad_x_data = Vec::with_capacity(batch_size * n);
+            for b in 0..batch_size {
+                for nn in 0..n {
+                    grad_x_data.push(inv_data[b * n * 2 + nn * 2] * scale);
+                }
+            }
+            let mut out_shape = batch_shape.to_vec();
+            out_shape.push(n);
+            let t = Tensor::from_storage(TensorStorage::cpu(grad_x_data), out_shape, false)?;
+            Some(if device.is_cuda() { t.to(device)? } else { t })
         } else {
             None
         };
@@ -183,13 +242,38 @@ impl<T: Float> GradFn<T> for RfftBackward<T> {
 // IrfftBackward
 // ---------------------------------------------------------------------------
 
-/// Backward for `y = irfft(x, n)`.
+/// Backward for `y = irfft(x, n)` (Hermitian-truncated complex → real).
 ///
-/// `irfft` takes complex input `[..., n/2+1, 2]` and produces real output
-/// `[..., n]`. The backward produces a complex gradient.
+/// VJP derivation (matches PyTorch `FftC2RBackward` for `norm="backward"`):
 ///
-/// The VJP is: `grad_x = rfft(grad_y, n=n/2+1-related)`.
-/// More precisely, `grad_x = rfft(grad_y)` truncated/padded appropriately.
+/// Forward `y = irfft(x, N)` reconstructs the real signal by Hermitian-
+/// extending `x` (shape `[..., K, 2]`, `K = N/2 + 1`) to length `N`, running
+/// the unnormalized inverse FFT, and dividing by `N`. As a real-linear map
+/// over `x`,
+///
+/// ```text
+///   y[n] = (1/N) * (
+///       x_re[0]
+///     + (-1)^n * x_re[N/2]                                  (only when N even)
+///     + 2 * sum_{k=1..N/2-1} (x_re[k] cos(2π k n/N) - x_im[k] sin(2π k n/N))
+///   )
+/// ```
+///
+/// Differentiating w.r.t. real `grad_y[n]` and assembling the cotangent on
+/// `x` (complex of shape `[..., K, 2]`) gives, with `F = rfft(grad_y, N)`:
+///
+/// - boundary: `grad_x[0]    = F[0]    / N`
+/// - boundary: `grad_x[N/2]  = F[N/2]  / N`     (when `N` even)
+/// - interior: `grad_x[k]    = 2 * F[k] / N`    (for `k = 1..K-2`)
+///
+/// The factor of 2 is the Hermitian-doubling correction: each interior `k`
+/// in the half-spectrum corresponds to **two** entries in the full DFT
+/// (`k` and `N-k`), so the chain rule contributes twice. PyTorch's
+/// `_fft_c2r_backward` handles this exactly the same way.
+///
+/// Net change vs. the previous (buggy) `rfft(grad_y, N)` call:
+///   - divide all entries by `N` (the missing normalization),
+///   - multiply interior entries by 2 (the Hermitian-doubling correction).
 #[derive(Debug)]
 pub struct IrfftBackward<T: Float> {
     input: Tensor<T>,
@@ -211,9 +295,30 @@ impl<T: Float> IrfftBackward<T> {
 impl<T: Float> GradFn<T> for IrfftBackward<T> {
     fn backward(&self, grad_output: &Tensor<T>) -> FerrotorchResult<Vec<Option<Tensor<T>>>> {
         let grad_input = if self.input.requires_grad() {
-            // rfft(grad_y, n=output_n) gives us [.., output_n/2+1, 2] which
-            // should match the input shape.
-            Some(fft::rfft(grad_output, Some(self.output_n))?)
+            let device = grad_output.device();
+            let n = self.output_n;
+            let k = n / 2 + 1;
+            // rfft(grad_y, N) returns shape [..., K, 2] — same shape as x.
+            let f = fft::rfft(grad_output, Some(n))?;
+            let f_shape = f.shape().to_vec();
+            let f_data = f.data_vec()?;
+            let total_pairs = f_data.len() / 2;
+            let batch_size = total_pairs / k;
+
+            let inv_n = T::from(1.0).unwrap() / T::from(n).unwrap();
+            let two = T::from(2.0).unwrap();
+            let mut out = Vec::with_capacity(f_data.len());
+            for b in 0..batch_size {
+                for kk in 0..k {
+                    let interior = kk > 0 && (kk < k - 1 || n % 2 == 1);
+                    // For odd N there's no Nyquist sample; every k>0 is interior.
+                    let factor = if interior { two * inv_n } else { inv_n };
+                    out.push(f_data[(b * k + kk) * 2] * factor);
+                    out.push(f_data[(b * k + kk) * 2 + 1] * factor);
+                }
+            }
+            let t = Tensor::from_storage(TensorStorage::cpu(out), f_shape, false)?;
+            Some(if device.is_cuda() { t.to(device)? } else { t })
         } else {
             None
         };
@@ -428,28 +533,138 @@ impl<T: Float> GradFn<T> for IfftnBackward<T> {
 //   y = irfftn(x, s, axes) (Hermitian complex → real)
 //     → grad_x = rfftn(grad_y, s=original_real_shape, axes)
 
+/// Backward for `y = rfftn(x, s, axes)` (real → Hermitian-truncated complex,
+/// N-D). Generalizes `RfftBackward` to multiple transform axes.
+///
+/// Only the **last** transform axis is Hermitian-truncated; the others go
+/// full length. As in the 1-D case, the correct VJP is the
+/// **partial** unnormalized inverse over the half-spectrum:
+///
+/// ```text
+///   grad_x = real( ifftn_unnormalized(zero_pad_last_freq_axis(grad_Y), s, axes) )
+/// ```
+///
+/// We use `fft::ifftn` (which divides by `prod(s)`) and multiply by
+/// `prod(s)` to undo the normalization. The previous implementation called
+/// `fft::irfftn(grad_Y, s, axes)` which Hermitian-extends and divides — both
+/// errors of #809.
 #[derive(Debug)]
 pub struct RfftnBackward<T: Float> {
     input: Tensor<T>,
     /// Output sizes along the transform axes (passed to irfftn for backward).
     s: Option<Vec<usize>>,
     axes: Option<Vec<isize>>,
+    /// `rfftn` output shape (used to invert the half-spectrum truncation).
+    out_shape: Vec<usize>,
+    /// Length of the last transform axis in the original real signal
+    /// (so we know how far to zero-pad the freq axis).
+    last_axis_n: usize,
+    /// Logical index of the last transform axis in the rfftn output (the
+    /// truncated freq axis). Trailing complex pair is excluded.
+    last_axis_logical: usize,
+    /// Product of transform-axis lengths; used to scale by `prod(s)` after
+    /// the normalized inverse FFT.
+    norm_n: usize,
 }
 
 impl<T: Float> RfftnBackward<T> {
-    pub fn new(input: Tensor<T>, s: Option<Vec<usize>>, axes: Option<Vec<isize>>) -> Self {
-        Self { input, s, axes }
+    pub fn new(
+        input: Tensor<T>,
+        s: Option<Vec<usize>>,
+        axes: Option<Vec<isize>>,
+        out_shape: Vec<usize>,
+        last_axis_n: usize,
+        last_axis_logical: usize,
+        norm_n: usize,
+    ) -> Self {
+        Self {
+            input,
+            s,
+            axes,
+            out_shape,
+            last_axis_n,
+            last_axis_logical,
+            norm_n,
+        }
     }
 }
 
 impl<T: Float> GradFn<T> for RfftnBackward<T> {
     fn backward(&self, grad_output: &Tensor<T>) -> FerrotorchResult<Vec<Option<Tensor<T>>>> {
         let grad_input = if self.input.requires_grad() {
-            Some(fft::irfftn(
-                grad_output,
-                self.s.as_deref(),
-                self.axes.as_deref(),
-            )?)
+            let device = grad_output.device();
+            // 1. Zero-pad along the last transform axis from K = n_last/2 + 1
+            //    to n_last. The trailing axis (size 2) is the complex pair —
+            //    untouched.
+            let go_shape = grad_output.shape();
+            if go_shape != self.out_shape.as_slice() {
+                return Err(crate::error::FerrotorchError::InvalidArgument {
+                    message: format!(
+                        "RfftnBackward: grad_output shape {go_shape:?} does not match \
+                         forward output {:?}",
+                        self.out_shape
+                    ),
+                });
+            }
+            let go_data = grad_output.data_vec()?;
+            let mut padded_shape = self.out_shape.clone();
+            // Replace the half-spectrum dim with the full last_axis_n.
+            // out_shape layout: [..., last_axis_K, 2]. last_axis_logical is the
+            // index of the K dim within this layout (relative to the trailing 2).
+            padded_shape[self.last_axis_logical] = self.last_axis_n;
+            let padded_total: usize = padded_shape.iter().product();
+            let mut padded = vec![T::from(0.0).unwrap(); padded_total];
+            // Compute strides for both shapes (row-major).
+            let go_strides = row_major_strides(go_shape);
+            let pad_strides = row_major_strides(&padded_shape);
+            // K = original last_axis dim in go_shape (half-spectrum).
+            let k = go_shape[self.last_axis_logical];
+            // Iterate every element of grad_output and copy into padded.
+            for flat in 0..go_data.len() / 2 {
+                // Compute multi-index for the [..., K, 2]-stripped layout
+                // (i.e., excluding the trailing 2). flat indexes complex pairs
+                // here; the trailing 2 is handled in the inner loop.
+                let mut idx = vec![0usize; go_shape.len() - 1];
+                let mut rem = flat;
+                let logical_strides = row_major_strides(&go_shape[..go_shape.len() - 1]);
+                for d in 0..idx.len() {
+                    idx[d] = rem / logical_strides[d];
+                    rem %= logical_strides[d];
+                }
+                // Source offset (real start of pair).
+                let mut src = 0usize;
+                for d in 0..idx.len() {
+                    src += idx[d] * go_strides[d];
+                }
+                // Destination offset (uses padded_shape strides).
+                let mut dst = 0usize;
+                for d in 0..idx.len() {
+                    dst += idx[d] * pad_strides[d];
+                }
+                padded[dst] = go_data[src];
+                padded[dst + 1] = go_data[src + 1];
+                let _ = k; // silence unused-variable warnings on some paths
+            }
+            let padded_t =
+                Tensor::from_storage(TensorStorage::cpu(padded), padded_shape, false)?;
+
+            // 2. Normalized inverse FFT (divides by prod(s)).
+            let inv = fft::ifftn(&padded_t, self.s.as_deref(), self.axes.as_deref())?;
+            // 3. Multiply by prod(s) to undo the normalization → unnormalized
+            //    inverse, then take real part (drop trailing 2).
+            let inv_data = inv.data_vec()?;
+            let inv_shape = inv.shape().to_vec();
+            let scale = T::from(self.norm_n).unwrap();
+            let real_n_pairs = inv_data.len() / 2;
+            let mut grad_x_data = Vec::with_capacity(real_n_pairs);
+            for i in 0..real_n_pairs {
+                grad_x_data.push(inv_data[i * 2] * scale);
+            }
+            // Drop trailing 2 from shape.
+            let mut out_shape = inv_shape;
+            let _ = out_shape.pop();
+            let t = Tensor::from_storage(TensorStorage::cpu(grad_x_data), out_shape, false)?;
+            Some(if device.is_cuda() { t.to(device)? } else { t })
         } else {
             None
         };
@@ -465,27 +680,113 @@ impl<T: Float> GradFn<T> for RfftnBackward<T> {
     }
 }
 
+/// Row-major strides for a shape (in elements, not bytes).
+fn row_major_strides(shape: &[usize]) -> Vec<usize> {
+    let mut strides = vec![1usize; shape.len()];
+    for d in (0..shape.len().saturating_sub(1)).rev() {
+        strides[d] = strides[d + 1] * shape[d + 1];
+    }
+    strides
+}
+
+/// Backward for `y = irfftn(x, s, axes)` (Hermitian-truncated complex → real,
+/// N-D). Generalizes `IrfftBackward` to multiple transform axes.
+///
+/// The forward Hermitian-extends along the LAST transform axis only (the
+/// other transform axes go full length). So the VJP is:
+///
+/// ```text
+///   grad_x = rfftn(grad_y, s, axes) / prod(s),
+///   then multiply interior frequencies along the last freq axis by 2.
+/// ```
+///
+/// `grad_x_re/im[k]` for `k` along the last freq axis:
+/// - boundary (`k = 0` and, when `n_last` is even, `k = n_last/2`):
+///   divide by `prod(s)` only;
+/// - interior (`k = 1..K-2` for even `n_last`, or `k = 1..K-1` for odd):
+///   multiply by `2 / prod(s)`.
+///
+/// Same Hermitian-doubling correction as 1-D `IrfftBackward`, applied along
+/// the truncated axis.
 #[derive(Debug)]
 pub struct IrfftnBackward<T: Float> {
     input: Tensor<T>,
     s: Option<Vec<usize>>,
     axes: Option<Vec<isize>>,
+    /// Length of the last transform axis in the real output (so we can
+    /// detect Nyquist parity).
+    last_axis_n: usize,
+    /// Logical index of the last transform axis in the original Hermitian
+    /// input (i.e., in the rfftn output layout, half-spectrum dim).
+    last_axis_logical: usize,
+    /// `prod(s)` for normalizing.
+    norm_n: usize,
 }
 
 impl<T: Float> IrfftnBackward<T> {
-    pub fn new(input: Tensor<T>, s: Option<Vec<usize>>, axes: Option<Vec<isize>>) -> Self {
-        Self { input, s, axes }
+    pub fn new(
+        input: Tensor<T>,
+        s: Option<Vec<usize>>,
+        axes: Option<Vec<isize>>,
+        last_axis_n: usize,
+        last_axis_logical: usize,
+        norm_n: usize,
+    ) -> Self {
+        Self {
+            input,
+            s,
+            axes,
+            last_axis_n,
+            last_axis_logical,
+            norm_n,
+        }
     }
 }
 
 impl<T: Float> GradFn<T> for IrfftnBackward<T> {
     fn backward(&self, grad_output: &Tensor<T>) -> FerrotorchResult<Vec<Option<Tensor<T>>>> {
         let grad_input = if self.input.requires_grad() {
-            Some(fft::rfftn(
-                grad_output,
-                self.s.as_deref(),
-                self.axes.as_deref(),
-            )?)
+            let device = grad_output.device();
+            // 1. Unnormalized rfftn (we use ferrotorch's normalized rfftn,
+            //    which is FftNorm::Backward — i.e., *forward* is unnormalized;
+            //    its output is `sum_n y[n] exp(-2π i k n / N)` with no /N).
+            //    So no rescaling needed beyond the /prod(s) below.
+            let f = fft::rfftn(grad_output, self.s.as_deref(), self.axes.as_deref())?;
+            let f_shape = f.shape().to_vec();
+            let f_data = f.data_vec()?;
+
+            // 2. Compute strides for the output of rfftn (which is the same
+            //    shape as the input to irfftn, i.e., what the forward took).
+            //    The trailing axis is the complex pair. The half-spectrum is
+            //    at index `last_axis_logical` in the layout that excludes the
+            //    trailing 2.
+            let scale = T::from(1.0).unwrap() / T::from(self.norm_n).unwrap();
+            let two = T::from(2.0).unwrap();
+            // K (half-spectrum length on the truncated axis).
+            let k = f_shape[self.last_axis_logical];
+            let n_last = self.last_axis_n;
+
+            // Iterate every complex pair and apply the right factor.
+            let strides_logical = row_major_strides(&f_shape[..f_shape.len() - 1]);
+            let logical_total: usize = f_shape[..f_shape.len() - 1].iter().product();
+            let mut out = vec![T::from(0.0).unwrap(); f_data.len()];
+            for flat in 0..logical_total {
+                let mut rem = flat;
+                let mut idx = vec![0usize; strides_logical.len()];
+                for d in 0..idx.len() {
+                    idx[d] = rem / strides_logical[d];
+                    rem %= strides_logical[d];
+                }
+                let kk = idx[self.last_axis_logical];
+                // Boundary: kk == 0 always; kk == K-1 only when n_last is even.
+                let is_boundary = kk == 0 || (n_last % 2 == 0 && kk == k - 1);
+                let factor = if is_boundary { scale } else { two * scale };
+                let pair_offset = flat * 2;
+                out[pair_offset] = f_data[pair_offset] * factor;
+                out[pair_offset + 1] = f_data[pair_offset + 1] * factor;
+            }
+            let t = Tensor::from_storage(TensorStorage::cpu(out), f_shape, false)?;
+            Some(if device.is_cuda() { t.to(device)? } else { t })
         } else {
             None
         };
@@ -512,27 +813,85 @@ impl<T: Float> GradFn<T> for IrfftnBackward<T> {
 //   y = hfft(x, n)  → grad_x = ihfft(grad_y, n=input_n)
 //   y = ihfft(x, n) → grad_x = hfft(grad_y, n=input_n)
 
+/// Backward for `y = hfft(x, n)` (Hermitian complex `[..., K, 2]` → real
+/// `[..., n]`).
+///
+/// Forward (FftNorm::Backward): `hfft(x, N) = irfft_unnormalized(conj(x), N)`,
+/// i.e., `y[n] = real(sum_{k=0..N-1} conj(x_full[k]) exp(+2π i k n / N))` with
+/// no `1/N` scaling. Expanding using the Hermitian symmetry of `x`,
+///
+/// ```text
+///   y[n] = x_re[0]
+///        + (-1)^n * x_re[N/2]                                   (only for even N)
+///        + 2 * sum_{k=1..N/2-1} (x_re[k] cos(2π k n/N) + x_im[k] sin(2π k n/N))
+/// ```
+///
+/// VJP from real `grad_y` to Hermitian complex `grad_x` (shape `[..., K, 2]`),
+/// with `F = rfft(grad_y, N)` (unnormalized, so `re(F[k]) = sum_n grad_y[n]
+/// cos(2π k n/N)`, `im(F[k]) = -sum_n grad_y[n] sin(2π k n/N)`):
+///
+/// - boundary: `grad_x_re[0]   = re(F[0])`,    `grad_x_im[0]   = 0`
+/// - boundary: `grad_x_re[N/2] = re(F[N/2])`,  `grad_x_im[N/2] = 0`   (even N)
+/// - interior: `grad_x_re[k]   = 2 * re(F[k])`
+/// - interior: `grad_x_im[k]   = -2 * im(F[k])`  (sign: `+sin → -im(F)`)
+///
+/// Concretely: `grad_x = conj(rfft(grad_y, N))` for boundary entries,
+/// `grad_x = 2 * conj(rfft(grad_y, N))` for interior.
+///
+/// The previous implementation called `fft::ihfft(grad_y, n_forward)`, which
+/// is `conj(rfft(grad_y))/N`, missing both the `* N` (FftNorm::Backward
+/// hfft is unnormalized forward) and the interior `* 2` correction.
 #[derive(Debug)]
 pub struct HfftBackward<T: Float> {
     input: Tensor<T>,
     /// Length of the original Hermitian spectrum (input's second-to-last dim).
     input_n: usize,
+    /// Length of the real signal produced by hfft (so we know Nyquist parity).
+    output_n: usize,
 }
 
 impl<T: Float> HfftBackward<T> {
-    pub fn new(input: Tensor<T>, input_n: usize) -> Self {
-        Self { input, input_n }
+    pub fn new(input: Tensor<T>, input_n: usize, output_n: usize) -> Self {
+        Self {
+            input,
+            input_n,
+            output_n,
+        }
     }
 }
 
 impl<T: Float> GradFn<T> for HfftBackward<T> {
     fn backward(&self, grad_output: &Tensor<T>) -> FerrotorchResult<Vec<Option<Tensor<T>>>> {
         let grad_input = if self.input.requires_grad() {
-            // ihfft expects a real-valued input, returns Hermitian complex of
-            // length `n/2+1`. Using `n=2*(input_n-1)` recovers the original
-            // spectrum length `input_n`.
-            let n_forward = 2 * (self.input_n - 1);
-            Some(fft::ihfft(grad_output, Some(n_forward))?)
+            let device = grad_output.device();
+            let n = self.output_n;
+            let k = self.input_n; // K = N/2 + 1 for even N (or (N+1)/2 for odd).
+            // F = unnormalized rfft of grad_y.
+            let f = fft::rfft(grad_output, Some(n))?;
+            let f_data = f.data_vec()?;
+            let f_shape = f.shape().to_vec();
+            let total_pairs = f_data.len() / 2;
+            let batch_size = total_pairs / k;
+            let two = T::from(2.0).unwrap();
+            let mut out = Vec::with_capacity(f_data.len());
+            for b in 0..batch_size {
+                for kk in 0..k {
+                    // Boundary: kk == 0; kk == K-1 only when n is even.
+                    let is_boundary = kk == 0 || (n % 2 == 0 && kk == k - 1);
+                    let factor = if is_boundary {
+                        T::from(1.0).unwrap()
+                    } else {
+                        two
+                    };
+                    let re = f_data[(b * k + kk) * 2];
+                    let im = f_data[(b * k + kk) * 2 + 1];
+                    // grad_x = factor * conj(F[k]). conj negates the imag part.
+                    out.push(re * factor);
+                    out.push(-im * factor);
+                }
+            }
+            let t = Tensor::from_storage(TensorStorage::cpu(out), f_shape, false)?;
+            Some(if device.is_cuda() { t.to(device)? } else { t })
         } else {
             None
         };
@@ -548,6 +907,38 @@ impl<T: Float> GradFn<T> for HfftBackward<T> {
     }
 }
 
+/// Backward for `y = ihfft(x, n)` (real `[..., N]` → Hermitian complex
+/// `[..., K, 2]`).
+///
+/// Forward (FftNorm::Backward): `ihfft(x, N) = conj(rfft(x, N)) / N`. As a
+/// real-linear map,
+///
+/// ```text
+///   y_re[k] = (1/N) * sum_n x[n] cos(2π k n/N)
+///   y_im[k] = (1/N) * sum_n x[n] sin(2π k n/N)
+/// ```
+///
+/// The Hermitian half-spectrum has K = N/2 + 1 entries. The cotangent on
+/// real `x` is the partial unnormalized inverse over that half:
+///
+/// ```text
+///   grad_x[n] = (1/N) * sum_{k=0..K-1} (
+///                  grad_y_re[k] cos(2π k n/N) + grad_y_im[k] sin(2π k n/N)
+///              )
+///            = (1/N) * real( sum_{k=0..K-1} conj(grad_y[k]) exp(+2π i k n/N) )
+/// ```
+///
+/// (Because `conj(grad_y[k]) = grad_y_re[k] - i grad_y_im[k]` and
+/// `exp(+i θ) = cos θ + i sin θ`, the real part picks up the desired
+/// sign-correct combination.)
+///
+/// Implementation: zero-pad `conj(grad_y)` along the freq axis from `K` to
+/// `N`, run our normalized `fft::ifft` (which already supplies the `1/N`),
+/// take the real part. No further scaling needed.
+///
+/// The previous implementation called `fft::hfft(grad_y, input_n)`, which
+/// is the unnormalized inverse with conj — wrong by an `N` factor and by
+/// the absent boundary/interior treatment.
 #[derive(Debug)]
 pub struct IhfftBackward<T: Float> {
     input: Tensor<T>,
@@ -564,10 +955,54 @@ impl<T: Float> IhfftBackward<T> {
 impl<T: Float> GradFn<T> for IhfftBackward<T> {
     fn backward(&self, grad_output: &Tensor<T>) -> FerrotorchResult<Vec<Option<Tensor<T>>>> {
         let grad_input = if self.input.requires_grad() {
-            // hfft maps Hermitian complex `[..., n/2+1, 2]` → real `[..., n]`.
-            // grad_y has shape `[..., n/2+1, 2]`; we want grad_x of shape
-            // `[..., input_n]`. Pass `n=input_n` so hfft outputs that length.
-            Some(fft::hfft(grad_output, Some(self.input_n))?)
+            let device = grad_output.device();
+            let n = self.input_n;
+            let go_shape = grad_output.shape();
+            if go_shape.len() < 2 || go_shape[go_shape.len() - 1] != 2 {
+                return Err(crate::error::FerrotorchError::InvalidArgument {
+                    message: format!(
+                        "IhfftBackward: grad_output must have trailing complex pair, got {go_shape:?}"
+                    ),
+                });
+            }
+            let k = go_shape[go_shape.len() - 2];
+            let batch_shape = &go_shape[..go_shape.len() - 2];
+            let batch_size: usize = batch_shape.iter().product::<usize>().max(1);
+            let go_data = grad_output.data_vec()?;
+
+            // Zero-pad conj(grad_y) from [..., K, 2] to [..., N, 2].
+            let mut padded = vec![T::from(0.0).unwrap(); batch_size * n * 2];
+            for b in 0..batch_size {
+                let src_off = b * k * 2;
+                let dst_off = b * n * 2;
+                let copy_pairs = k.min(n);
+                for kk in 0..copy_pairs {
+                    let re = go_data[src_off + kk * 2];
+                    let im = go_data[src_off + kk * 2 + 1];
+                    padded[dst_off + kk * 2] = re;
+                    padded[dst_off + kk * 2 + 1] = -im; // conj
+                }
+            }
+            let mut padded_shape = batch_shape.to_vec();
+            padded_shape.push(n);
+            padded_shape.push(2);
+            let padded_t =
+                Tensor::from_storage(TensorStorage::cpu(padded), padded_shape, false)?;
+
+            // Normalized ifft: divides by N — exactly the 1/N we want.
+            let inv = fft::ifft(&padded_t, Some(n))?;
+            let inv_data = inv.data_vec()?;
+            // Take real part: drop trailing 2.
+            let mut grad_x_data = Vec::with_capacity(batch_size * n);
+            for b in 0..batch_size {
+                for nn in 0..n {
+                    grad_x_data.push(inv_data[b * n * 2 + nn * 2]);
+                }
+            }
+            let mut out_shape = batch_shape.to_vec();
+            out_shape.push(n);
+            let t = Tensor::from_storage(TensorStorage::cpu(grad_x_data), out_shape, false)?;
+            Some(if device.is_cuda() { t.to(device)? } else { t })
         } else {
             None
         };
@@ -723,10 +1158,30 @@ pub fn rfftn_differentiable<T: Float>(
             }
             (None, None) => input.shape().to_vec(),
         };
+        // Resolve the last transform axis (logical, in real-input space).
+        let in_shape = input.shape();
+        let last_axis_logical = match axes {
+            Some(axes_slice) => {
+                let a = *axes_slice.last().unwrap();
+                if a < 0 {
+                    (in_shape.len() as isize + a) as usize
+                } else {
+                    a as usize
+                }
+            }
+            None => in_shape.len() - 1,
+        };
+        let last_axis_n = s_back.last().copied().unwrap_or(in_shape[last_axis_logical]);
+        let norm_n: usize = s_back.iter().product::<usize>().max(1);
+        let out_shape = result.shape().to_vec();
         let grad_fn = Arc::new(RfftnBackward::new(
             input.clone(),
             Some(s_back),
             axes.map(|v| v.to_vec()),
+            out_shape,
+            last_axis_n,
+            last_axis_logical,
+            norm_n,
         ));
         let storage = TensorStorage::on_device(result.data_vec()?, device)?;
         Tensor::from_operation(storage, result.shape().to_vec(), grad_fn)
@@ -751,10 +1206,35 @@ pub fn irfftn_differentiable<T: Float>(
             Some(s_slice) => s_slice.to_vec(),
             None => result.shape().to_vec(),
         };
+        // Resolve the last transform axis. Layout: input is the
+        // Hermitian-truncated complex tensor with trailing 2; for the real
+        // output (`result`), the last freq axis is the last entry of `axes`
+        // (or the last axis if `axes` is `None`).
+        let res_shape = result.shape();
+        let last_axis_logical_real = match axes {
+            Some(axes_slice) => {
+                let a = *axes_slice.last().unwrap();
+                if a < 0 {
+                    (res_shape.len() as isize + a) as usize
+                } else {
+                    a as usize
+                }
+            }
+            None => res_shape.len() - 1,
+        };
+        // For the input (`x` to irfftn), the half-spectrum axis is at the
+        // same logical index since irfftn's input layout is `[..., 2]` and
+        // the freq axis maps 1:1 with the real output's last transform axis.
+        let last_axis_logical = last_axis_logical_real;
+        let last_axis_n = *s_back.last().unwrap_or(&res_shape[last_axis_logical_real]);
+        let norm_n: usize = s_back.iter().product::<usize>().max(1);
         let grad_fn = Arc::new(IrfftnBackward::new(
             input.clone(),
             Some(s_back),
             axes.map(|v| v.to_vec()),
+            last_axis_n,
+            last_axis_logical,
+            norm_n,
         ));
         let storage = TensorStorage::on_device(result.data_vec()?, device)?;
         Tensor::from_operation(storage, result.shape().to_vec(), grad_fn)
@@ -772,11 +1252,13 @@ pub fn hfft_differentiable<T: Float>(
     let device = input.device();
     let shape = input.shape();
     let input_n = shape[shape.len() - 2];
-    let _ = n; // (used at fwd call); backward derives spectrum length from input_n
     let result = fft::hfft(input, n)?;
+    // hfft output's last dim is the real-signal length N. Persist it so the
+    // backward can detect Nyquist parity (boundary vs. interior k).
+    let output_n = *result.shape().last().unwrap();
 
     if is_grad_enabled() && input.requires_grad() {
-        let grad_fn = Arc::new(HfftBackward::new(input.clone(), input_n));
+        let grad_fn = Arc::new(HfftBackward::new(input.clone(), input_n, output_n));
         let storage = TensorStorage::on_device(result.data_vec()?, device)?;
         Tensor::from_operation(storage, result.shape().to_vec(), grad_fn)
     } else {
@@ -792,8 +1274,10 @@ pub fn ihfft_differentiable<T: Float>(
 ) -> FerrotorchResult<Tensor<T>> {
     let device = input.device();
     let shape = input.shape();
-    let input_n = *shape.last().unwrap();
-    let _ = n;
+    // FFT length N: defaults to the input's last dim (real signal length).
+    // When `n` is supplied, ihfft truncates/pads the input before the
+    // transform — the backward reconstructs grad over that same `N`.
+    let input_n = n.unwrap_or(*shape.last().unwrap());
     let result = fft::ihfft(input, n)?;
 
     if is_grad_enabled() && input.requires_grad() {

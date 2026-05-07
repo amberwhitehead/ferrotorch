@@ -419,41 +419,27 @@ fn cascade_skip(
     op: &str,
     _device_label: &str,
     _dtype: &str,
-    tag: Option<&str>,
+    _tag: Option<&str>,
 ) -> Option<&'static str> {
-    // Issue #807: ferrotorch's CPU irfft path mishandles pad/truncate when
-    // half_n != output_n/2+1. Affects len_8_pad_to_16 and the matching
-    // differentiable fixture.
-    if op == "irfft" && tag == Some("len_8_pad_to_16") {
-        return Some("#807 irfft CPU pad/truncate divergence");
-    }
+    // Issue #807: closed by Bugfix Batch 7 dispatch A2. irfft CPU pad/truncate
+    // semantics now slice/zero-pad the input spectrum to output_n/2+1 (the
+    // canonical Hermitian half-size for output length output_n) instead of
+    // min(half_n, output_n). The len_8_pad_to_16 fixture now runs live.
 
-    // Issue #808: ferray-fft's irfftn / hfft / ihfft helpers panic when the
-    // input is not perfectly Hermitian. PyTorch silently projects to the
-    // Hermitian subspace. Affects the N-D inverse-real path and the hfft /
-    // ihfft autograd backward when grad_output isn't Hermitian.
-    if op == "irfftn" {
-        return Some("#808 irfftn strict-Hermitian rejection");
-    }
-    if op == "irfftn_differentiable" {
-        return Some("#808 irfftn strict-Hermitian rejection (autograd)");
-    }
-    if op == "ihfft_differentiable" {
-        return Some("#808 ihfft autograd hfft-of-grad strict-Hermitian rejection");
-    }
+    // Issue #808: closed by Bugfix Batch 7 dispatch A3. The forward
+    // `irfftn` / `hfft` wrappers now pre-project arbitrary complex input
+    // to the Hermitian subspace (zeroing DC + Nyquist imaginary parts on
+    // the c2r axis) before delegating to ferray-fft, mirroring PyTorch's
+    // `aten::_fft_c2r` pre-pass. The autograd backwards already stopped
+    // routing through the strict-Hermitian helpers in dispatch A1, so the
+    // matching cascade_skip block has been retired.
 
-    // Issue #809: RfftBackward / IrfftBackward / HfftBackward / RfftnBackward
-    // / IrfftnBackward miss the multiplicative N normalization. PyTorch's
-    // VJP uses unnormalized inverse FFT; ferrotorch divides by N.
-    if matches!(
-        op,
-        "rfft_differentiable"
-            | "irfft_differentiable"
-            | "rfftn_differentiable"
-            | "hfft_differentiable"
-    ) {
-        return Some("#809 *Backward missing N normalization scale");
-    }
+    // Issue #809: closed by Bugfix Batch 7 dispatch A1. RfftBackward,
+    // IrfftBackward, RfftnBackward, IrfftnBackward, HfftBackward, and
+    // IhfftBackward now derive their VJPs from PyTorch's
+    // FftR2CBackward / FftC2RBackward semantics — unnormalized inverse with
+    // the Hermitian-doubling correction along the truncated axis. The
+    // matching cascade_skip block has been retired.
 
     // Issue #810: signal::taylor differs from scipy by ~1.5e-3 — likely an
     // SLL convention or normalization-formula difference in ferray-window.
@@ -2013,12 +1999,14 @@ fn surface_coverage_grad_fn_struct_substring_pins() {
     let _: FftnBackward<f64> = FftnBackward::new(leaf.clone(), None, None, 4);
     let _: IfftnBackward<f64> = IfftnBackward::new(leaf.clone(), None, None, 4);
 
-    // RfftnBackward / IrfftnBackward
-    let _: RfftnBackward<f64> = RfftnBackward::new(leaf.clone(), None, None);
-    let _: IrfftnBackward<f64> = IrfftnBackward::new(leaf.clone(), None, None);
+    // RfftnBackward / IrfftnBackward (constructors carry the persisted
+    // forward-shape metadata that the corrected #809 VJPs need).
+    let _: RfftnBackward<f64> =
+        RfftnBackward::new(leaf.clone(), None, None, vec![2, 2], 2, 1, 4);
+    let _: IrfftnBackward<f64> = IrfftnBackward::new(leaf.clone(), None, None, 2, 1, 4);
 
     // HfftBackward / IhfftBackward
-    let _: HfftBackward<f64> = HfftBackward::new(leaf.clone(), 4);
+    let _: HfftBackward<f64> = HfftBackward::new(leaf.clone(), 4, 6);
     let _: IhfftBackward<f64> = IhfftBackward::new(leaf.clone(), 4);
 }
 

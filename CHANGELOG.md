@@ -334,6 +334,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - M≤4 cuBLAS bypass: route vector-matrix multiplies through PTX `small_matmul` kernel instead of cuBLAS SGEMM
 
 ### Changed
+- ferrotorch-gpu: einsum 2-input multi-axis/permuted contractions need broader primitive coverage — partial of #803 (#822)
+- ferrotorch-gpu: einsum repeated-index ('ii->', 'ii->i') needs on-device diagonal kernel — partial of #803 (#821)
+- ferrotorch-core: GPU reduce(Max/Min) returns first-row instead of last — surfaced by phase 2.6 (#768) (#790)
 - ferrotorch-gpu: broadcast_bmm missing for matmul broadcast/4D — surfaced by #801 fix (#819)
 - ferrotorch-gpu: vm_f32/vm_f64 missing for matmul 1D×2D — surfaced by #801 fix (#818)
 - ferrotorch-gpu: mv_f32/mv_f64 missing for matmul 2D×1D — surfaced by #801 fix (#817)
