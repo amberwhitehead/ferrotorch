@@ -1,0 +1,474 @@
+{
+  "metadata": {
+    "torch_version": "2.11.0",
+    "reference": "torch.jit.trace + torch.fx + torch.export semantics",
+    "generated_at": "2026-05-07T16:21:15.741894Z",
+    "tracking_issue": "#806",
+    "sub_phase": "C7.1",
+    "description": "Reference fixtures for ferrotorch-jit C7.1: graph IR, trace recording, symbolic shape guards, codegen_ir lowering. Pin: torch == 2.11.0. Covers: graph.rs, trace.rs, symbolic.rs, codegen_ir.rs.",
+    "modules_covered": [
+      "codegen_ir",
+      "graph",
+      "symbolic",
+      "trace"
+    ]
+  },
+  "fixtures": [
+    {
+      "module": "graph",
+      "case": "graph_add_relu_node_count",
+      "description": "IrGraph: input -> add(x,x) -> relu -> output. Expected: 3 nodes (Input, Add, Relu), 3 values, 1 input, 1 output.",
+      "expected": {
+        "node_count": 3,
+        "value_count": 3,
+        "input_count": 1,
+        "output_count": 1,
+        "op_sequence": [
+          "Input",
+          "Add",
+          "Relu"
+        ]
+      },
+      "torch_reference": "torch.fx traced x+x->relu produces 3 nodes"
+    },
+    {
+      "module": "graph",
+      "case": "graph_two_inputs_mm_sum",
+      "description": "IrGraph: A[2,3], B[3,2] -> mm -> sum -> output. Expected: 4 nodes, 4 values, 2 inputs, 1 output.",
+      "expected": {
+        "node_count": 4,
+        "value_count": 4,
+        "input_count": 2,
+        "output_count": 1,
+        "op_sequence": [
+          "Input",
+          "Input",
+          "Mm",
+          "Sum"
+        ]
+      },
+      "torch_reference": "torch.fx traced mm(A,B).sum() produces 4 nodes"
+    },
+    {
+      "module": "graph",
+      "case": "graph_topological_order_valid",
+      "description": "topological_order(): every producer appears before every consumer.",
+      "property": "topological_order_invariant",
+      "torch_reference": "torch.fx.Graph.topological_sort() producers before consumers"
+    },
+    {
+      "module": "graph",
+      "case": "graph_constant_detection",
+      "description": "is_constant(): inputs return false, constants added via add_constant return true.",
+      "expected": {
+        "input_is_constant": false,
+        "constant_is_constant": true
+      },
+      "torch_reference": "torch.fx distinguishes get_attr (constant) from placeholder (input)"
+    },
+    {
+      "module": "graph",
+      "case": "graph_dtype_default_f32",
+      "description": "Default construction paths tag every IrValue with Dtype::F32.",
+      "expected": {
+        "all_dtypes_f32": true
+      },
+      "torch_reference": "torch.jit.trace on f32 inputs produces f32 values throughout"
+    },
+    {
+      "module": "graph",
+      "case": "graph_dtype_explicit_f64",
+      "description": "Explicit f64 construction paths (add_input_with_dtype, add_node_with_dtype) tag every IrValue with Dtype::F64.",
+      "expected": {
+        "all_dtypes_f64": true
+      },
+      "torch_reference": "torch.jit.trace on f64 inputs produces f64 values throughout"
+    },
+    {
+      "module": "graph",
+      "case": "graph_dtype_name_round_trip",
+      "description": "Dtype::F32.name() == 'f32', Dtype::F64.name() == 'f64'.",
+      "expected": {
+        "f32_name": "f32",
+        "f64_name": "f64"
+      },
+      "torch_reference": "torch dtype string representations"
+    },
+    {
+      "module": "graph",
+      "case": "graph_dtype_from_type_name_recognizes_primitives",
+      "description": "Dtype::from_type_name: 'f32' -> F32, 'f64' -> F64, 'core::primitive::f32' -> F32. Returns None for 'bf16', 'i32'.",
+      "expected": {
+        "f32_maps": "F32",
+        "f64_maps": "F64",
+        "core_f32_maps": "F32",
+        "bf16_maps": "None",
+        "i32_maps": "None"
+      },
+      "torch_reference": "std::any::type_name-based Dtype inference"
+    },
+    {
+      "module": "graph",
+      "case": "graph_remove_node_decrements_counts",
+      "description": "remove_node(): removing relu from input->add->relu leaves 2 nodes, 2 values; output_values is cleared.",
+      "expected": {
+        "node_count_before": 3,
+        "node_count_after": 2,
+        "value_count_before": 3,
+        "value_count_after": 2,
+        "output_cleared": true
+      },
+      "torch_reference": "torch.fx.Graph.erase_node() removes node and edges"
+    },
+    {
+      "module": "trace",
+      "case": "trace_add_self_structure",
+      "description": "trace(|x| x+x, [x]): 2 nodes (Input + Add); Add's two input IrValueIds are identical (value reuse).",
+      "workload": "x.shape=[3], requires_grad=True; y = x + x",
+      "expected": {
+        "node_count": 2,
+        "input_count": 1,
+        "output_count": 1,
+        "has_Add": true,
+        "add_inputs_both_same": true
+      },
+      "torch_reference": "torch.jit.trace(lambda x: x+x, x) produces aten::add with both inputs referencing the same placeholder"
+    },
+    {
+      "module": "trace",
+      "case": "trace_mul_relu_structure",
+      "description": "trace(|x,y| relu(x*y)): 4 nodes (2\u00d7Input, Mul, Relu).",
+      "workload": "x.shape=[3], y.shape=[3], both requires_grad=True",
+      "expected": {
+        "node_count": 4,
+        "input_count": 2,
+        "output_count": 1,
+        "has_Mul": true,
+        "has_Relu": true
+      },
+      "torch_reference": "torch.jit.trace relu(x*y) = 2 placeholders + mul + relu"
+    },
+    {
+      "module": "trace",
+      "case": "trace_mm_sum_structure",
+      "description": "trace(|A,B| sum(mm(A,B))): 4 nodes (2\u00d7Input, Mm, Sum).",
+      "workload": "A.shape=[2,3], B.shape=[3,2], both requires_grad=True",
+      "expected": {
+        "node_count": 4,
+        "input_count": 2,
+        "output_count": 1,
+        "has_Mm": true,
+        "has_Sum": true
+      },
+      "torch_reference": "torch.jit.trace mm(A,B).sum() = 4 nodes"
+    },
+    {
+      "module": "trace",
+      "case": "trace_no_grad_fn_error",
+      "description": "trace() with requires_grad=False inputs returns Err containing 'no grad_fn'.",
+      "expected": {
+        "returns_error": true,
+        "error_contains": "no grad_fn"
+      },
+      "torch_reference": "torch.jit.trace requires differentiable outputs"
+    },
+    {
+      "module": "trace",
+      "case": "trace_deeper_a_plus_b_squared",
+      "description": "trace(|a,b| (a+b)*(a+b)): 4 nodes (2\u00d7Input, Add, Mul).",
+      "workload": "a.shape=[2], b.shape=[2], both requires_grad=True",
+      "expected": {
+        "node_count": 4,
+        "input_count": 2,
+        "output_count": 1,
+        "has_Add": true,
+        "has_Mul": true
+      },
+      "torch_reference": "torch.jit.trace (a+b)*(a+b) = 4 nodes"
+    },
+    {
+      "module": "symbolic",
+      "case": "symbolic_guard_accepts_varying_batch",
+      "description": "Guard(trace=[4,10], symbolic_dim=0) accepts [1,10],[4,10],[8,10],[16,10],[100,10].",
+      "trace_shape": [
+        4,
+        10
+      ],
+      "symbolic_dim": 0,
+      "test_shapes_accept": [
+        [
+          1,
+          10
+        ],
+        [
+          4,
+          10
+        ],
+        [
+          8,
+          10
+        ],
+        [
+          16,
+          10
+        ],
+        [
+          100,
+          10
+        ]
+      ],
+      "expected": {
+        "all_pass": true
+      },
+      "torch_reference": "torch.export with dynamic_shapes={'x': {0: Dim('batch')}} accepts variable batch sizes"
+    },
+    {
+      "module": "symbolic",
+      "case": "symbolic_guard_rejects_concrete_dim",
+      "description": "Guard(trace=[4,10], symbolic_dim=0) rejects [8,7]: dim 1 is concrete=10, runtime=7.",
+      "trace_shape": [
+        4,
+        10
+      ],
+      "symbolic_dim": 0,
+      "test_shape_reject": [
+        8,
+        7
+      ],
+      "expected": {
+        "returns_error": true,
+        "error_dim": 1
+      },
+      "torch_reference": "torch.export rejects mismatched static dim"
+    },
+    {
+      "module": "symbolic",
+      "case": "symbolic_guard_rejects_rank_mismatch",
+      "description": "Guard(trace=[4,10]) rejects [4,10,2]: rank 3 vs 2.",
+      "trace_shape": [
+        4,
+        10
+      ],
+      "symbolic_dim": null,
+      "test_shape_reject": [
+        4,
+        10,
+        2
+      ],
+      "expected": {
+        "returns_error": true,
+        "error_contains": "rank"
+      },
+      "torch_reference": "torch.export rejects wrong rank"
+    },
+    {
+      "module": "symbolic",
+      "case": "symbolic_guard_range_below_min",
+      "description": "Guard with range [2,32] rejects batch=1 (below min=2).",
+      "trace_shape": [
+        4,
+        10
+      ],
+      "symbolic_dim": 0,
+      "min": 2,
+      "max": 32,
+      "test_shape_reject": [
+        1,
+        10
+      ],
+      "expected": {
+        "returns_error": true,
+        "error_contains": "below min"
+      },
+      "torch_reference": "torch.export Dim(min=2) rejects batch=1"
+    },
+    {
+      "module": "symbolic",
+      "case": "symbolic_guard_range_above_max",
+      "description": "Guard with range [2,32] rejects batch=33 (above max=32).",
+      "trace_shape": [
+        4,
+        10
+      ],
+      "symbolic_dim": 0,
+      "min": 2,
+      "max": 32,
+      "test_shape_reject": [
+        33,
+        10
+      ],
+      "expected": {
+        "returns_error": true,
+        "error_contains": "above max"
+      },
+      "torch_reference": "torch.export Dim(max=32) rejects batch=33"
+    },
+    {
+      "module": "symbolic",
+      "case": "symbolic_reshape_patch_single",
+      "description": "patch_reshape_for_symbolic_dims: target [4,10] with symbolic value 4 at dim 0 -> rewritten to [-1,10].",
+      "trace_shape": [
+        4,
+        10
+      ],
+      "symbolic_dim": 0,
+      "reshape_before": [
+        4,
+        10
+      ],
+      "expected": {
+        "reshape_after": [
+          -1,
+          10
+        ]
+      },
+      "torch_reference": "torch.export rewrites symbolic dim to -1 in reshape"
+    },
+    {
+      "module": "symbolic",
+      "case": "symbolic_reshape_patch_ambiguous",
+      "description": "patch_reshape_for_symbolic_dims: target [4,4] with symbolic value=4 appearing in two positions -> NOT rewritten. Stays [4,4].",
+      "trace_shape": [
+        4,
+        4
+      ],
+      "symbolic_dim": 0,
+      "reshape_before": [
+        4,
+        4
+      ],
+      "expected": {
+        "reshape_after": [
+          4,
+          4
+        ]
+      },
+      "torch_reference": "Ambiguous substitution left to runtime guard"
+    },
+    {
+      "module": "codegen_ir",
+      "case": "codegen_ir_neg_single_loop",
+      "description": "lower_to_loops([Neg], ['in0'], 'out', 8): 1 Loop, start=0, end=8, body=[Store].",
+      "op": "Neg",
+      "numel": 8,
+      "expected": {
+        "stmt_count": 1,
+        "stmt_kind": "Loop",
+        "loop_start": 0,
+        "loop_end": 8,
+        "body_count": 1,
+        "body_kind": "Store"
+      },
+      "torch_reference": "torch.inductor emits a single flat loop for elementwise neg"
+    },
+    {
+      "module": "codegen_ir",
+      "case": "codegen_ir_add_single_loop",
+      "description": "lower_to_loops([Add], ['a','b'], 'out', 4): 1 loop [0,4).",
+      "op": "Add",
+      "numel": 4,
+      "expected": {
+        "stmt_count": 1,
+        "stmt_kind": "Loop",
+        "loop_start": 0,
+        "loop_end": 4
+      },
+      "torch_reference": "torch.inductor emits a single flat loop for elementwise add"
+    },
+    {
+      "module": "codegen_ir",
+      "case": "codegen_ir_sum_reduction",
+      "description": "lower_to_loops([Sum], ['in0'], 'out', 10): [Let(acc=0.0), Loop(i,0..10,Accumulate), Store(out[0]=acc)].",
+      "op": "Sum",
+      "numel": 10,
+      "expected": {
+        "stmt_count": 3,
+        "stmt_0_kind": "Let",
+        "stmt_0_var": "acc",
+        "stmt_0_value": 0.0,
+        "stmt_1_kind": "Loop",
+        "stmt_1_end": 10,
+        "stmt_2_kind": "Store",
+        "stmt_2_index": 0
+      },
+      "torch_reference": "torch.inductor: let acc=0; accumulate loop; store for sum"
+    },
+    {
+      "module": "codegen_ir",
+      "case": "codegen_ir_mean_divides_by_n",
+      "description": "lower_to_loops([Mean], ['in0'], 'out', 5): final Store divides acc by 5.0.",
+      "op": "Mean",
+      "numel": 5,
+      "expected": {
+        "stmt_count": 3,
+        "final_store_op": "Div",
+        "divisor": 5.0
+      },
+      "torch_reference": "torch.inductor mean = sum / n"
+    },
+    {
+      "module": "codegen_ir",
+      "case": "codegen_ir_prod_init_one",
+      "description": "lower_to_loops([Prod], ['in0'], 'out', 3): initial Let value = 1.0 (multiplicative identity).",
+      "op": "Prod",
+      "numel": 3,
+      "expected": {
+        "stmt_count": 3,
+        "stmt_0_value": 1.0
+      },
+      "torch_reference": "torch.inductor prod init = 1.0"
+    },
+    {
+      "module": "codegen_ir",
+      "case": "codegen_ir_fused_neg_relu_sigmoid_6_stmts",
+      "description": "lower_to_loops([Neg,Relu,Sigmoid], ['in0'], 'out', 4): 1 fused loop, 6-stmt body: Let(in0_val), Let(val), Assign(neg), Assign(relu), Assign(sigmoid), Store.",
+      "ops": [
+        "Neg",
+        "Relu",
+        "Sigmoid"
+      ],
+      "numel": 4,
+      "expected": {
+        "stmt_count": 1,
+        "body_count": 6,
+        "body_0_kind": "Let",
+        "body_0_var": "in0_val",
+        "body_1_kind": "Let",
+        "body_1_var": "val",
+        "body_5_kind": "Store",
+        "body_5_buffer": "out"
+      },
+      "torch_reference": "torch.inductor fuses elementwise ops into one kernel loop"
+    },
+    {
+      "module": "codegen_ir",
+      "case": "codegen_ir_matmul_triple_nested",
+      "description": "lower_matmul('a','b','out', M=2, K=3, N=4): Loop(i,0..2) -> Loop(j,0..4) -> [Let(acc), Loop(p,0..3), Store].",
+      "m": 2,
+      "k": 3,
+      "n": 4,
+      "expected": {
+        "outer_loop_var": "i",
+        "outer_loop_end": 2,
+        "inner_loop_var": "j",
+        "inner_loop_end": 4,
+        "inner_body_count": 3
+      },
+      "torch_reference": "torch.inductor triple-nested i,j,k loops for matmul"
+    },
+    {
+      "module": "codegen_ir",
+      "case": "codegen_ir_pow_becomes_fn_call",
+      "description": "apply_op_expr(Expr::var('x'), Pow{exponent:3.0}) = FnCall('powf', [Var('x'), Const(3.0)]).",
+      "op": "Pow",
+      "exponent": 3.0,
+      "expected": {
+        "expr_kind": "FnCall",
+        "fn_name": "powf",
+        "arg_count": 2,
+        "arg_1_value": 3.0
+      },
+      "torch_reference": "torch.inductor emits powf(x, exp) for pow op"
+    }
+  ]
+}

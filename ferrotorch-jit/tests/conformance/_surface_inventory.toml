@@ -1,0 +1,1171 @@
+# Surface inventory for ferrotorch-jit
+# Authored for C7.1 (Graph IR + tracing + symbolic).
+# Subsequent sub-phases C7.2, C7.3, C7.4 REUSE this file without replacing it.
+# DO NOT replace this file in later sub-phases — only extend [[item]] entries.
+#
+# Inventory date: 2026-05-07
+# Total items: 246
+#
+# Modules covered:
+#   graph        — IrValueId, IrNodeId, IrOpKind, Dtype, IrValue, IrNode, IrGraph (+methods)
+#   trace        — trace
+#   symbolic     — ShapeSignature, SymbolicDim, Guard, SymbolicTracedModule, compile_symbolic (+methods)
+#   codegen_ir   — Expr, BinOpKind, UnaryOpKind, LoopIR, helper fns
+#   module       — TracedModule, CompileConfig, AotCompiledModule, compile, compile_with_config (+methods)
+#   optimize     — OptimizationConfig, optimize, constant_fold, dead_code_eliminate, fuse_elementwise, pattern_fuse
+#   interpreter  — interpret, interpret_multi
+#   codegen      — CompiledGraph, Codegen, InterpreterBackend, NativeBackend, InductorTarget, InductorBackend (+methods)
+#   codegen_cpu  — CpuCodegen
+#   codegen_gpu  — GpuCodegen
+#   codegen_jit  — JitCompiledKernel, compile_loop_ir_kernel, jit_supports (+methods)
+#   fusion       — FusedOp, ReductionKind, FusedChain, is_fusion_enabled, with_fusion, ... (+methods)
+#   dag_fusion   — FusionGroup, FusionGroupKind, find_fusion_groups, fuse_dag
+#   graph_break  — GraphSegment, SegmentedModule, TraceResult, trace_with_breaks (+methods)
+#   memory_plan  — MemoryPlan, plan_memory (+methods)
+#   aot_autograd — AotGraphPair, decompose_forward_backward, compile_aot
+#   export       — DimSpec, InputSpec, ExportedProgram, ExportedProgramMetadata, export, export_with_dynamic_shapes (+methods)
+#   autotune     — AutotuneKey, AutotuneCandidate, AutotuneResult, Autotuner (+methods)
+#   error        — JitError (enum + variants)
+#   serialize    — IrGraph::serialize / IrGraph::deserialize (methods on IrGraph)
+
+# ============================================================
+# graph — IR data structures
+# ============================================================
+
+[[item]]
+path = "ferrotorch_jit::graph::IrValueId"
+kind = "struct"
+c7_phase = "C7.1"
+
+[[item]]
+path = "ferrotorch_jit::graph::IrNodeId"
+kind = "struct"
+c7_phase = "C7.1"
+
+[[item]]
+path = "ferrotorch_jit::graph::IrOpKind"
+kind = "enum"
+c7_phase = "C7.1"
+
+[[item]]
+path = "ferrotorch_jit::graph::Dtype"
+kind = "enum"
+c7_phase = "C7.1"
+
+[[item]]
+path = "ferrotorch_jit::graph::Dtype::name"
+kind = "method"
+c7_phase = "C7.1"
+
+[[item]]
+path = "ferrotorch_jit::graph::Dtype::from_type_name"
+kind = "method"
+c7_phase = "C7.1"
+
+[[item]]
+path = "ferrotorch_jit::graph::IrValue"
+kind = "struct"
+c7_phase = "C7.1"
+
+[[item]]
+path = "ferrotorch_jit::graph::IrNode"
+kind = "struct"
+c7_phase = "C7.1"
+
+[[item]]
+path = "ferrotorch_jit::graph::IrGraph"
+kind = "struct"
+c7_phase = "C7.1"
+
+[[item]]
+path = "ferrotorch_jit::graph::IrGraph::new"
+kind = "method"
+c7_phase = "C7.1"
+
+[[item]]
+path = "ferrotorch_jit::graph::IrGraph::add_input"
+kind = "method"
+c7_phase = "C7.1"
+
+[[item]]
+path = "ferrotorch_jit::graph::IrGraph::add_input_with_dtype"
+kind = "method"
+c7_phase = "C7.1"
+
+[[item]]
+path = "ferrotorch_jit::graph::IrGraph::add_constant"
+kind = "method"
+c7_phase = "C7.1"
+
+[[item]]
+path = "ferrotorch_jit::graph::IrGraph::add_constant_with_dtype"
+kind = "method"
+c7_phase = "C7.1"
+
+[[item]]
+path = "ferrotorch_jit::graph::IrGraph::add_node"
+kind = "method"
+c7_phase = "C7.1"
+
+[[item]]
+path = "ferrotorch_jit::graph::IrGraph::add_node_with_dtype"
+kind = "method"
+c7_phase = "C7.1"
+
+[[item]]
+path = "ferrotorch_jit::graph::IrGraph::set_outputs"
+kind = "method"
+c7_phase = "C7.1"
+
+[[item]]
+path = "ferrotorch_jit::graph::IrGraph::node_count"
+kind = "method"
+c7_phase = "C7.1"
+
+[[item]]
+path = "ferrotorch_jit::graph::IrGraph::value_count"
+kind = "method"
+c7_phase = "C7.1"
+
+[[item]]
+path = "ferrotorch_jit::graph::IrGraph::topological_order"
+kind = "method"
+c7_phase = "C7.1"
+
+[[item]]
+path = "ferrotorch_jit::graph::IrGraph::alloc_node_id"
+kind = "method"
+c7_phase = "C7.1"
+
+[[item]]
+path = "ferrotorch_jit::graph::IrGraph::alloc_value_id"
+kind = "method"
+c7_phase = "C7.1"
+
+[[item]]
+path = "ferrotorch_jit::graph::IrGraph::is_constant"
+kind = "method"
+c7_phase = "C7.1"
+
+[[item]]
+path = "ferrotorch_jit::graph::IrGraph::remove_node"
+kind = "method"
+c7_phase = "C7.1"
+
+# serialize methods live in serialize.rs but are impl'd on IrGraph
+[[item]]
+path = "ferrotorch_jit::graph::IrGraph::serialize"
+kind = "method"
+c7_phase = "C7.1"
+
+[[item]]
+path = "ferrotorch_jit::graph::IrGraph::deserialize"
+kind = "method"
+c7_phase = "C7.1"
+
+# ============================================================
+# trace — post-hoc autograd tracer
+# ============================================================
+
+[[item]]
+path = "ferrotorch_jit::trace::trace"
+kind = "fn"
+c7_phase = "C7.1"
+
+# ============================================================
+# symbolic — shape guards and symbolic modules
+# ============================================================
+
+[[item]]
+path = "ferrotorch_jit::symbolic::ShapeSignature"
+kind = "struct"
+c7_phase = "C7.1"
+
+[[item]]
+path = "ferrotorch_jit::symbolic::ShapeSignature::new"
+kind = "method"
+c7_phase = "C7.1"
+
+[[item]]
+path = "ferrotorch_jit::symbolic::ShapeSignature::symbolic_dim"
+kind = "method"
+c7_phase = "C7.1"
+
+[[item]]
+path = "ferrotorch_jit::symbolic::ShapeSignature::symbolic_dim_with_range"
+kind = "method"
+c7_phase = "C7.1"
+
+[[item]]
+path = "ferrotorch_jit::symbolic::ShapeSignature::symbolic_dims_for"
+kind = "method"
+c7_phase = "C7.1"
+
+[[item]]
+path = "ferrotorch_jit::symbolic::ShapeSignature::is_symbolic"
+kind = "method"
+c7_phase = "C7.1"
+
+[[item]]
+path = "ferrotorch_jit::symbolic::SymbolicDim"
+kind = "struct"
+c7_phase = "C7.1"
+
+[[item]]
+path = "ferrotorch_jit::symbolic::Guard"
+kind = "struct"
+c7_phase = "C7.1"
+
+[[item]]
+path = "ferrotorch_jit::symbolic::Guard::new"
+kind = "method"
+c7_phase = "C7.1"
+
+[[item]]
+path = "ferrotorch_jit::symbolic::Guard::check"
+kind = "method"
+c7_phase = "C7.1"
+
+[[item]]
+path = "ferrotorch_jit::symbolic::SymbolicTracedModule"
+kind = "struct"
+c7_phase = "C7.1"
+
+[[item]]
+path = "ferrotorch_jit::symbolic::SymbolicTracedModule::new"
+kind = "method"
+c7_phase = "C7.1"
+
+[[item]]
+path = "ferrotorch_jit::symbolic::SymbolicTracedModule::inner"
+kind = "method"
+c7_phase = "C7.1"
+
+[[item]]
+path = "ferrotorch_jit::symbolic::SymbolicTracedModule::guard"
+kind = "method"
+c7_phase = "C7.1"
+
+[[item]]
+path = "ferrotorch_jit::symbolic::SymbolicTracedModule::forward_symbolic"
+kind = "method"
+c7_phase = "C7.1"
+
+[[item]]
+path = "ferrotorch_jit::symbolic::compile_symbolic"
+kind = "fn"
+c7_phase = "C7.1"
+
+# ============================================================
+# codegen_ir — loop IR and helpers
+# ============================================================
+
+[[item]]
+path = "ferrotorch_jit::codegen_ir::Expr"
+kind = "enum"
+c7_phase = "C7.1"
+
+[[item]]
+path = "ferrotorch_jit::codegen_ir::Expr::var"
+kind = "method"
+c7_phase = "C7.1"
+
+[[item]]
+path = "ferrotorch_jit::codegen_ir::Expr::constant"
+kind = "method"
+c7_phase = "C7.1"
+
+[[item]]
+path = "ferrotorch_jit::codegen_ir::Expr::int"
+kind = "method"
+c7_phase = "C7.1"
+
+[[item]]
+path = "ferrotorch_jit::codegen_ir::Expr::bin"
+kind = "method"
+c7_phase = "C7.1"
+
+[[item]]
+path = "ferrotorch_jit::codegen_ir::Expr::unary"
+kind = "method"
+c7_phase = "C7.1"
+
+[[item]]
+path = "ferrotorch_jit::codegen_ir::Expr::index"
+kind = "method"
+c7_phase = "C7.1"
+
+[[item]]
+path = "ferrotorch_jit::codegen_ir::Expr::call"
+kind = "method"
+c7_phase = "C7.1"
+
+[[item]]
+path = "ferrotorch_jit::codegen_ir::Expr::sum"
+kind = "method"
+c7_phase = "C7.1"
+
+[[item]]
+path = "ferrotorch_jit::codegen_ir::Expr::prod"
+kind = "method"
+c7_phase = "C7.1"
+
+[[item]]
+path = "ferrotorch_jit::codegen_ir::BinOpKind"
+kind = "enum"
+c7_phase = "C7.1"
+
+[[item]]
+path = "ferrotorch_jit::codegen_ir::UnaryOpKind"
+kind = "enum"
+c7_phase = "C7.1"
+
+[[item]]
+path = "ferrotorch_jit::codegen_ir::LoopIR"
+kind = "enum"
+c7_phase = "C7.1"
+
+[[item]]
+path = "ferrotorch_jit::codegen_ir::ir_op_to_unary"
+kind = "fn"
+c7_phase = "C7.1"
+
+[[item]]
+path = "ferrotorch_jit::codegen_ir::ir_op_to_binary"
+kind = "fn"
+c7_phase = "C7.1"
+
+[[item]]
+path = "ferrotorch_jit::codegen_ir::is_unary_elementwise"
+kind = "fn"
+c7_phase = "C7.1"
+
+[[item]]
+path = "ferrotorch_jit::codegen_ir::is_binary_elementwise"
+kind = "fn"
+c7_phase = "C7.1"
+
+[[item]]
+path = "ferrotorch_jit::codegen_ir::is_elementwise"
+kind = "fn"
+c7_phase = "C7.1"
+
+[[item]]
+path = "ferrotorch_jit::codegen_ir::is_reduction"
+kind = "fn"
+c7_phase = "C7.1"
+
+[[item]]
+path = "ferrotorch_jit::codegen_ir::apply_op_expr"
+kind = "fn"
+c7_phase = "C7.1"
+
+[[item]]
+path = "ferrotorch_jit::codegen_ir::apply_binary_op_expr"
+kind = "fn"
+c7_phase = "C7.1"
+
+[[item]]
+path = "ferrotorch_jit::codegen_ir::lower_to_loops"
+kind = "fn"
+c7_phase = "C7.1"
+
+[[item]]
+path = "ferrotorch_jit::codegen_ir::lower_matmul"
+kind = "fn"
+c7_phase = "C7.1"
+
+# ============================================================
+# error — JitError enum
+# ============================================================
+
+[[item]]
+path = "ferrotorch_jit::error::JitError"
+kind = "enum"
+c7_phase = "C7.1"
+
+[[item]]
+path = "ferrotorch_jit::error::JitError::TracingError"
+kind = "variant"
+c7_phase = "C7.1"
+
+[[item]]
+path = "ferrotorch_jit::error::JitError::DataDependentControlFlow"
+kind = "variant"
+c7_phase = "C7.1"
+
+[[item]]
+path = "ferrotorch_jit::error::JitError::UnsupportedOp"
+kind = "variant"
+c7_phase = "C7.1"
+
+[[item]]
+path = "ferrotorch_jit::error::JitError::ShapeMismatch"
+kind = "variant"
+c7_phase = "C7.1"
+
+[[item]]
+path = "ferrotorch_jit::error::JitError::CodegenError"
+kind = "variant"
+c7_phase = "C7.1"
+
+[[item]]
+path = "ferrotorch_jit::error::JitError::SerializationError"
+kind = "variant"
+c7_phase = "C7.1"
+
+[[item]]
+path = "ferrotorch_jit::error::JitError::GraphBreak"
+kind = "variant"
+c7_phase = "C7.1"
+
+[[item]]
+path = "ferrotorch_jit::error::JitError::ExportError"
+kind = "variant"
+c7_phase = "C7.1"
+
+[[item]]
+path = "ferrotorch_jit::error::JitError::ParameterError"
+kind = "variant"
+c7_phase = "C7.1"
+
+[[item]]
+path = "ferrotorch_jit::error::JitError::RecompilationError"
+kind = "variant"
+c7_phase = "C7.1"
+
+[[item]]
+path = "ferrotorch_jit::error::JitError::GpuBackendUnavailable"
+kind = "variant"
+c7_phase = "C7.1"
+
+[[item]]
+path = "ferrotorch_jit::error::JitError::Unsupported"
+kind = "variant"
+c7_phase = "C7.1"
+
+# ============================================================
+# module — TracedModule and compile helpers
+# ============================================================
+
+[[item]]
+path = "ferrotorch_jit::module::CompileConfig"
+kind = "struct"
+c7_phase = "C7.2"
+
+[[item]]
+path = "ferrotorch_jit::module::CompileConfig::from_optimization"
+kind = "method"
+c7_phase = "C7.2"
+
+[[item]]
+path = "ferrotorch_jit::module::TracedModule"
+kind = "struct"
+c7_phase = "C7.2"
+
+[[item]]
+path = "ferrotorch_jit::module::TracedModule::new"
+kind = "method"
+c7_phase = "C7.2"
+
+[[item]]
+path = "ferrotorch_jit::module::TracedModule::forward_multi"
+kind = "method"
+c7_phase = "C7.2"
+
+[[item]]
+path = "ferrotorch_jit::module::TracedModule::graph"
+kind = "method"
+c7_phase = "C7.2"
+
+[[item]]
+path = "ferrotorch_jit::module::TracedModule::input_count"
+kind = "method"
+c7_phase = "C7.2"
+
+[[item]]
+path = "ferrotorch_jit::module::TracedModule::output_shape"
+kind = "method"
+c7_phase = "C7.2"
+
+[[item]]
+path = "ferrotorch_jit::module::TracedModule::to_bytes"
+kind = "method"
+c7_phase = "C7.2"
+
+[[item]]
+path = "ferrotorch_jit::module::TracedModule::from_bytes"
+kind = "method"
+c7_phase = "C7.2"
+
+[[item]]
+path = "ferrotorch_jit::module::TracedModule::save"
+kind = "method"
+c7_phase = "C7.2"
+
+[[item]]
+path = "ferrotorch_jit::module::TracedModule::load"
+kind = "method"
+c7_phase = "C7.2"
+
+[[item]]
+path = "ferrotorch_jit::module::AotCompiledModule"
+kind = "struct"
+c7_phase = "C7.2"
+
+[[item]]
+path = "ferrotorch_jit::module::AotCompiledModule::new"
+kind = "method"
+c7_phase = "C7.2"
+
+[[item]]
+path = "ferrotorch_jit::module::AotCompiledModule::forward_with_ctx"
+kind = "method"
+c7_phase = "C7.2"
+
+[[item]]
+path = "ferrotorch_jit::module::AotCompiledModule::backward"
+kind = "method"
+c7_phase = "C7.2"
+
+[[item]]
+path = "ferrotorch_jit::module::AotCompiledModule::forward_graph"
+kind = "method"
+c7_phase = "C7.2"
+
+[[item]]
+path = "ferrotorch_jit::module::AotCompiledModule::backward_graph"
+kind = "method"
+c7_phase = "C7.2"
+
+[[item]]
+path = "ferrotorch_jit::module::AotCompiledModule::saved_tensor_indices"
+kind = "method"
+c7_phase = "C7.2"
+
+[[item]]
+path = "ferrotorch_jit::module::compile"
+kind = "fn"
+c7_phase = "C7.2"
+
+[[item]]
+path = "ferrotorch_jit::module::compile_with_config"
+kind = "fn"
+c7_phase = "C7.2"
+
+# ============================================================
+# optimize — IR optimization passes
+# ============================================================
+
+[[item]]
+path = "ferrotorch_jit::optimize::OptimizationConfig"
+kind = "struct"
+c7_phase = "C7.2"
+
+[[item]]
+path = "ferrotorch_jit::optimize::optimize"
+kind = "fn"
+c7_phase = "C7.2"
+
+[[item]]
+path = "ferrotorch_jit::optimize::constant_fold"
+kind = "fn"
+c7_phase = "C7.2"
+
+[[item]]
+path = "ferrotorch_jit::optimize::dead_code_eliminate"
+kind = "fn"
+c7_phase = "C7.2"
+
+[[item]]
+path = "ferrotorch_jit::optimize::fuse_elementwise"
+kind = "fn"
+c7_phase = "C7.2"
+
+[[item]]
+path = "ferrotorch_jit::optimize::pattern_fuse"
+kind = "fn"
+c7_phase = "C7.2"
+
+# ============================================================
+# interpreter
+# ============================================================
+
+[[item]]
+path = "ferrotorch_jit::interpreter::interpret"
+kind = "fn"
+c7_phase = "C7.2"
+
+[[item]]
+path = "ferrotorch_jit::interpreter::interpret_multi"
+kind = "fn"
+c7_phase = "C7.2"
+
+# ============================================================
+# codegen — backends
+# ============================================================
+
+[[item]]
+path = "ferrotorch_jit::codegen::CompiledGraph"
+kind = "struct"
+c7_phase = "C7.2"
+
+[[item]]
+path = "ferrotorch_jit::codegen::CompiledGraph::execute"
+kind = "method"
+c7_phase = "C7.2"
+
+[[item]]
+path = "ferrotorch_jit::codegen::CompiledGraph::num_inputs"
+kind = "method"
+c7_phase = "C7.2"
+
+[[item]]
+path = "ferrotorch_jit::codegen::CompiledGraph::output_shape"
+kind = "method"
+c7_phase = "C7.2"
+
+[[item]]
+path = "ferrotorch_jit::codegen::Codegen"
+kind = "trait"
+c7_phase = "C7.2"
+
+[[item]]
+path = "ferrotorch_jit::codegen::InterpreterBackend"
+kind = "struct"
+c7_phase = "C7.2"
+
+[[item]]
+path = "ferrotorch_jit::codegen::NativeBackend"
+kind = "struct"
+c7_phase = "C7.2"
+
+[[item]]
+path = "ferrotorch_jit::codegen::InductorTarget"
+kind = "enum"
+c7_phase = "C7.2"
+
+[[item]]
+path = "ferrotorch_jit::codegen::InductorBackend"
+kind = "struct"
+c7_phase = "C7.2"
+
+[[item]]
+path = "ferrotorch_jit::codegen::InductorBackend::new"
+kind = "method"
+c7_phase = "C7.2"
+
+[[item]]
+path = "ferrotorch_jit::codegen::InductorBackend::with_block_size"
+kind = "method"
+c7_phase = "C7.2"
+
+[[item]]
+path = "ferrotorch_jit::codegen::InductorBackend::generate"
+kind = "method"
+c7_phase = "C7.2"
+
+# ============================================================
+# codegen_cpu
+# ============================================================
+
+[[item]]
+path = "ferrotorch_jit::codegen_cpu::CpuCodegen"
+kind = "struct"
+c7_phase = "C7.2"
+
+[[item]]
+path = "ferrotorch_jit::codegen_cpu::CpuCodegen::generate_rust_source"
+kind = "method"
+c7_phase = "C7.2"
+
+# ============================================================
+# codegen_gpu
+# ============================================================
+
+[[item]]
+path = "ferrotorch_jit::codegen_gpu::GpuCodegen"
+kind = "struct"
+c7_phase = "C7.3"
+
+[[item]]
+path = "ferrotorch_jit::codegen_gpu::GpuCodegen::generate_cuda_source"
+kind = "method"
+c7_phase = "C7.3"
+
+[[item]]
+path = "ferrotorch_jit::codegen_gpu::GpuCodegen::generate_ptx_source"
+kind = "method"
+c7_phase = "C7.3"
+
+# ============================================================
+# codegen_jit
+# ============================================================
+
+[[item]]
+path = "ferrotorch_jit::codegen_jit::JitCompiledKernel"
+kind = "struct"
+c7_phase = "C7.2"
+
+[[item]]
+path = "ferrotorch_jit::codegen_jit::JitCompiledKernel::num_inputs"
+kind = "method"
+c7_phase = "C7.2"
+
+[[item]]
+path = "ferrotorch_jit::codegen_jit::JitCompiledKernel::output_len"
+kind = "method"
+c7_phase = "C7.2"
+
+[[item]]
+path = "ferrotorch_jit::codegen_jit::JitCompiledKernel::execute"
+kind = "method"
+c7_phase = "C7.2"
+
+[[item]]
+path = "ferrotorch_jit::codegen_jit::compile_loop_ir_kernel"
+kind = "fn"
+c7_phase = "C7.2"
+
+[[item]]
+path = "ferrotorch_jit::codegen_jit::jit_supports"
+kind = "fn"
+c7_phase = "C7.2"
+
+# ============================================================
+# fusion — FusedChain and helpers
+# ============================================================
+
+[[item]]
+path = "ferrotorch_jit::fusion::FusedOp"
+kind = "enum"
+c7_phase = "C7.3"
+
+[[item]]
+path = "ferrotorch_jit::fusion::ReductionKind"
+kind = "enum"
+c7_phase = "C7.3"
+
+[[item]]
+path = "ferrotorch_jit::fusion::FusedChain"
+kind = "struct"
+c7_phase = "C7.3"
+
+[[item]]
+path = "ferrotorch_jit::fusion::FusedChain::new"
+kind = "method"
+c7_phase = "C7.3"
+
+[[item]]
+path = "ferrotorch_jit::fusion::FusedChain::push"
+kind = "method"
+c7_phase = "C7.3"
+
+[[item]]
+path = "ferrotorch_jit::fusion::FusedChain::len"
+kind = "method"
+c7_phase = "C7.3"
+
+[[item]]
+path = "ferrotorch_jit::fusion::FusedChain::is_empty"
+kind = "method"
+c7_phase = "C7.3"
+
+[[item]]
+path = "ferrotorch_jit::fusion::FusedChain::ops"
+kind = "method"
+c7_phase = "C7.3"
+
+[[item]]
+path = "ferrotorch_jit::fusion::FusedChain::execute_cpu"
+kind = "method"
+c7_phase = "C7.3"
+
+[[item]]
+path = "ferrotorch_jit::fusion::FusedChain::generate_ptx"
+kind = "method"
+c7_phase = "C7.3"
+
+[[item]]
+path = "ferrotorch_jit::fusion::FusedChain::generate_ptx_named"
+kind = "method"
+c7_phase = "C7.3"
+
+[[item]]
+path = "ferrotorch_jit::fusion::FusedChain::generate_c"
+kind = "method"
+c7_phase = "C7.3"
+
+[[item]]
+path = "ferrotorch_jit::fusion::is_fusion_enabled"
+kind = "fn"
+c7_phase = "C7.3"
+
+[[item]]
+path = "ferrotorch_jit::fusion::with_fusion"
+kind = "fn"
+c7_phase = "C7.3"
+
+[[item]]
+path = "ferrotorch_jit::fusion::generate_reduction_c"
+kind = "fn"
+c7_phase = "C7.3"
+
+[[item]]
+path = "ferrotorch_jit::fusion::generate_reduction_ptx"
+kind = "fn"
+c7_phase = "C7.3"
+
+[[item]]
+path = "ferrotorch_jit::fusion::estimate_numel_for_inputs"
+kind = "fn"
+c7_phase = "C7.3"
+
+[[item]]
+path = "ferrotorch_jit::fusion::estimate_matmul_dims"
+kind = "fn"
+c7_phase = "C7.3"
+
+[[item]]
+path = "ferrotorch_jit::fusion::apply_fused"
+kind = "fn"
+c7_phase = "C7.3"
+
+# ============================================================
+# dag_fusion
+# ============================================================
+
+[[item]]
+path = "ferrotorch_jit::dag_fusion::FusionGroup"
+kind = "struct"
+c7_phase = "C7.3"
+
+[[item]]
+path = "ferrotorch_jit::dag_fusion::FusionGroupKind"
+kind = "enum"
+c7_phase = "C7.3"
+
+[[item]]
+path = "ferrotorch_jit::dag_fusion::find_fusion_groups"
+kind = "fn"
+c7_phase = "C7.3"
+
+[[item]]
+path = "ferrotorch_jit::dag_fusion::fuse_dag"
+kind = "fn"
+c7_phase = "C7.3"
+
+# ============================================================
+# graph_break
+# ============================================================
+
+[[item]]
+path = "ferrotorch_jit::graph_break::GraphSegment"
+kind = "enum"
+c7_phase = "C7.3"
+
+[[item]]
+path = "ferrotorch_jit::graph_break::SegmentedModule"
+kind = "struct"
+c7_phase = "C7.3"
+
+[[item]]
+path = "ferrotorch_jit::graph_break::SegmentedModule::new"
+kind = "method"
+c7_phase = "C7.3"
+
+[[item]]
+path = "ferrotorch_jit::graph_break::SegmentedModule::forward"
+kind = "method"
+c7_phase = "C7.3"
+
+[[item]]
+path = "ferrotorch_jit::graph_break::SegmentedModule::segment_count"
+kind = "method"
+c7_phase = "C7.3"
+
+[[item]]
+path = "ferrotorch_jit::graph_break::SegmentedModule::segments"
+kind = "method"
+c7_phase = "C7.3"
+
+[[item]]
+path = "ferrotorch_jit::graph_break::SegmentedModule::is_fully_compiled"
+kind = "method"
+c7_phase = "C7.3"
+
+[[item]]
+path = "ferrotorch_jit::graph_break::TraceResult"
+kind = "enum"
+c7_phase = "C7.3"
+
+[[item]]
+path = "ferrotorch_jit::graph_break::trace_with_breaks"
+kind = "fn"
+c7_phase = "C7.3"
+
+# ============================================================
+# memory_plan
+# ============================================================
+
+[[item]]
+path = "ferrotorch_jit::memory_plan::MemoryPlan"
+kind = "struct"
+c7_phase = "C7.3"
+
+[[item]]
+path = "ferrotorch_jit::memory_plan::MemoryPlan::savings_percent"
+kind = "method"
+c7_phase = "C7.3"
+
+[[item]]
+path = "ferrotorch_jit::memory_plan::plan_memory"
+kind = "fn"
+c7_phase = "C7.3"
+
+# ============================================================
+# aot_autograd
+# ============================================================
+
+[[item]]
+path = "ferrotorch_jit::aot_autograd::AotGraphPair"
+kind = "struct"
+c7_phase = "C7.3"
+
+[[item]]
+path = "ferrotorch_jit::aot_autograd::decompose_forward_backward"
+kind = "fn"
+c7_phase = "C7.3"
+
+[[item]]
+path = "ferrotorch_jit::aot_autograd::compile_aot"
+kind = "fn"
+c7_phase = "C7.3"
+
+# ============================================================
+# export
+# ============================================================
+
+[[item]]
+path = "ferrotorch_jit::export::DimSpec"
+kind = "enum"
+c7_phase = "C7.4"
+
+[[item]]
+path = "ferrotorch_jit::export::DimSpec::dynamic"
+kind = "method"
+c7_phase = "C7.4"
+
+[[item]]
+path = "ferrotorch_jit::export::DimSpec::dynamic_range"
+kind = "method"
+c7_phase = "C7.4"
+
+[[item]]
+path = "ferrotorch_jit::export::DimSpec::is_dynamic"
+kind = "method"
+c7_phase = "C7.4"
+
+[[item]]
+path = "ferrotorch_jit::export::InputSpec"
+kind = "struct"
+c7_phase = "C7.4"
+
+[[item]]
+path = "ferrotorch_jit::export::InputSpec::new"
+kind = "method"
+c7_phase = "C7.4"
+
+[[item]]
+path = "ferrotorch_jit::export::InputSpec::all_static"
+kind = "method"
+c7_phase = "C7.4"
+
+[[item]]
+path = "ferrotorch_jit::export::InputSpec::has_dynamic_dims"
+kind = "method"
+c7_phase = "C7.4"
+
+[[item]]
+path = "ferrotorch_jit::export::InputSpec::rank"
+kind = "method"
+c7_phase = "C7.4"
+
+[[item]]
+path = "ferrotorch_jit::export::ExportedProgram"
+kind = "struct"
+c7_phase = "C7.4"
+
+[[item]]
+path = "ferrotorch_jit::export::ExportedProgram::run"
+kind = "method"
+c7_phase = "C7.4"
+
+[[item]]
+path = "ferrotorch_jit::export::ExportedProgram::run_with_guards"
+kind = "method"
+c7_phase = "C7.4"
+
+[[item]]
+path = "ferrotorch_jit::export::ExportedProgram::check_inputs"
+kind = "method"
+c7_phase = "C7.4"
+
+[[item]]
+path = "ferrotorch_jit::export::ExportedProgram::serialize"
+kind = "method"
+c7_phase = "C7.4"
+
+[[item]]
+path = "ferrotorch_jit::export::ExportedProgram::deserialize"
+kind = "method"
+c7_phase = "C7.4"
+
+[[item]]
+path = "ferrotorch_jit::export::ExportedProgram::save"
+kind = "method"
+c7_phase = "C7.4"
+
+[[item]]
+path = "ferrotorch_jit::export::ExportedProgram::load"
+kind = "method"
+c7_phase = "C7.4"
+
+[[item]]
+path = "ferrotorch_jit::export::ExportedProgram::to_json"
+kind = "method"
+c7_phase = "C7.4"
+
+[[item]]
+path = "ferrotorch_jit::export::ExportedProgram::parse_json_metadata"
+kind = "method"
+c7_phase = "C7.4"
+
+[[item]]
+path = "ferrotorch_jit::export::ExportedProgramMetadata"
+kind = "struct"
+c7_phase = "C7.4"
+
+[[item]]
+path = "ferrotorch_jit::export::export"
+kind = "fn"
+c7_phase = "C7.4"
+
+[[item]]
+path = "ferrotorch_jit::export::export_with_dynamic_shapes"
+kind = "fn"
+c7_phase = "C7.4"
+
+# ============================================================
+# autotune
+# ============================================================
+
+[[item]]
+path = "ferrotorch_jit::autotune::AutotuneKey"
+kind = "struct"
+c7_phase = "C7.4"
+
+[[item]]
+path = "ferrotorch_jit::autotune::AutotuneKey::from_graph"
+kind = "method"
+c7_phase = "C7.4"
+
+[[item]]
+path = "ferrotorch_jit::autotune::AutotuneCandidate"
+kind = "struct"
+c7_phase = "C7.4"
+
+[[item]]
+path = "ferrotorch_jit::autotune::AutotuneCandidate::new"
+kind = "method"
+c7_phase = "C7.4"
+
+[[item]]
+path = "ferrotorch_jit::autotune::AutotuneCandidate::name"
+kind = "method"
+c7_phase = "C7.4"
+
+[[item]]
+path = "ferrotorch_jit::autotune::AutotuneResult"
+kind = "struct"
+c7_phase = "C7.4"
+
+[[item]]
+path = "ferrotorch_jit::autotune::AutotuneResult::winner_name"
+kind = "method"
+c7_phase = "C7.4"
+
+[[item]]
+path = "ferrotorch_jit::autotune::AutotuneResult::winner_time"
+kind = "method"
+c7_phase = "C7.4"
+
+[[item]]
+path = "ferrotorch_jit::autotune::AutotuneResult::winner_compiled"
+kind = "method"
+c7_phase = "C7.4"
+
+[[item]]
+path = "ferrotorch_jit::autotune::AutotuneResult::all_timings"
+kind = "method"
+c7_phase = "C7.4"
+
+[[item]]
+path = "ferrotorch_jit::autotune::Autotuner"
+kind = "struct"
+c7_phase = "C7.4"
+
+[[item]]
+path = "ferrotorch_jit::autotune::Autotuner::new"
+kind = "method"
+c7_phase = "C7.4"
+
+[[item]]
+path = "ferrotorch_jit::autotune::Autotuner::with_candidate"
+kind = "method"
+c7_phase = "C7.4"
+
+[[item]]
+path = "ferrotorch_jit::autotune::Autotuner::with_iterations"
+kind = "method"
+c7_phase = "C7.4"
+
+[[item]]
+path = "ferrotorch_jit::autotune::Autotuner::with_warmup"
+kind = "method"
+c7_phase = "C7.4"
+
+[[item]]
+path = "ferrotorch_jit::autotune::Autotuner::iterations"
+kind = "method"
+c7_phase = "C7.4"
+
+[[item]]
+path = "ferrotorch_jit::autotune::Autotuner::warmup"
+kind = "method"
+c7_phase = "C7.4"
+
+[[item]]
+path = "ferrotorch_jit::autotune::Autotuner::candidate_count"
+kind = "method"
+c7_phase = "C7.4"
+
+[[item]]
+path = "ferrotorch_jit::autotune::Autotuner::cached"
+kind = "method"
+c7_phase = "C7.4"
+
+[[item]]
+path = "ferrotorch_jit::autotune::Autotuner::tune"
+kind = "method"
+c7_phase = "C7.4"
+
+[[item]]
+path = "ferrotorch_jit::autotune::Autotuner::clear_cache"
+kind = "method"
+c7_phase = "C7.4"
+
+[[item]]
+path = "ferrotorch_jit::autotune::Autotuner::cache_size"
+kind = "method"
+c7_phase = "C7.4"

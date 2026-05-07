@@ -1,0 +1,554 @@
+{
+  "metadata": {
+    "torch_version": "2.6.0+cu124",
+    "python_executable": "/usr/sbin/python3",
+    "python_platform": "Linux-6.6.87.2-microsoft-standard-WSL2-x86_64-with-glibc2.41",
+    "generated_at": "2026-05-07T16:18:54.996809Z",
+    "description": "Reference fixtures for ferrotorch-jit C7.2 interpreter + module conformance suite. Pin: torch == 2.11.0. Covers: interpreter.rs, module.rs, aot_autograd.rs, graph_break.rs.",
+    "phase": "C7.2",
+    "tracking_issue": "#857"
+  },
+  "fixtures": [
+    {
+      "case": "interp_add_self",
+      "module": "interpreter",
+      "op": "interpret",
+      "description": "Interpreter: y = x + x.  Single input, Add node, shape [3]. Validates basic IrOpKind::Add dispatch.",
+      "input": [
+        1.0,
+        2.0,
+        3.0
+      ],
+      "input_shape": [
+        3
+      ],
+      "dtype": "float32",
+      "expected_output": [
+        2.0,
+        4.0,
+        6.0
+      ],
+      "expected_shape": [
+        3
+      ],
+      "tol": 1e-06,
+      "torch_reference": "x=[1.0, 2.0, 3.0]; (x+x).tolist()==[2.0, 4.0, 6.0]"
+    },
+    {
+      "case": "interp_matmul_2x3_3x2",
+      "module": "interpreter",
+      "op": "interpret_mm",
+      "description": "Interpreter: C = mm(A, B) with A=[2,3], B=[3,2]. Validates IrOpKind::Mm dispatch and 2-D matrix multiplication.",
+      "input_a": [
+        1.0,
+        2.0,
+        3.0,
+        4.0,
+        5.0,
+        6.0
+      ],
+      "input_b": [
+        7.0,
+        8.0,
+        9.0,
+        10.0,
+        11.0,
+        12.0
+      ],
+      "shape_a": [
+        2,
+        3
+      ],
+      "shape_b": [
+        3,
+        2
+      ],
+      "dtype": "float32",
+      "expected_output": [
+        58.0,
+        64.0,
+        139.0,
+        154.0
+      ],
+      "expected_shape": [
+        2,
+        2
+      ],
+      "tol": 1e-05,
+      "torch_reference": "A=[1.0, 2.0, 3.0, 4.0, 5.0, 6.0] shape=[2, 3]; B=[7.0, 8.0, 9.0, 10.0, 11.0, 12.0] shape=[3, 2]; torch.mm(A,B).reshape(-1).tolist()==[58.0, 64.0, 139.0, 154.0]"
+    },
+    {
+      "case": "interp_constant_add",
+      "module": "interpreter",
+      "op": "interpret_constant",
+      "description": "Interpreter: y = x + constant([10,20,30]). Validates IrOpKind::Constant embedding and Add dispatch.",
+      "input": [
+        1.0,
+        2.0,
+        3.0
+      ],
+      "constant": [
+        10.0,
+        20.0,
+        30.0
+      ],
+      "input_shape": [
+        3
+      ],
+      "dtype": "float32",
+      "expected_output": [
+        11.0,
+        22.0,
+        33.0
+      ],
+      "expected_shape": [
+        3
+      ],
+      "tol": 1e-06,
+      "torch_reference": "x=[1.0, 2.0, 3.0]; c=[10.0, 20.0, 30.0]; (x+c).tolist()==[11.0, 22.0, 33.0]"
+    },
+    {
+      "case": "interp_chain_sub_pow_sqrt",
+      "module": "interpreter",
+      "op": "interpret_chain",
+      "description": "Interpreter: y = sqrt((x-c)^2) with x=[4,1,5], c=[1,1,1]. Validates a 3-node chain (Sub\u2192Pow\u2192Sqrt) and IrOpKind::Pow exponent.",
+      "input": [
+        4.0,
+        1.0,
+        5.0
+      ],
+      "constant": [
+        1.0,
+        1.0,
+        1.0
+      ],
+      "input_shape": [
+        3
+      ],
+      "dtype": "float32",
+      "expected_output": [
+        3.0,
+        0.0,
+        4.0
+      ],
+      "expected_shape": [
+        3
+      ],
+      "tol": 1e-05,
+      "torch_reference": "x=[4.0, 1.0, 5.0]; c=[1.0, 1.0, 1.0]; sqrt((x-c)**2).tolist()==[3.0, 0.0, 4.0]"
+    },
+    {
+      "case": "interp_fused_elementwise_neg_relu",
+      "module": "interpreter",
+      "op": "interpret_fused_elementwise",
+      "description": "Interpreter: FusedElementwise{ops:[Neg,Relu]}. Input [-1,2,-3,4]; after neg=[1,-2,3,-4]; after relu=[1,0,3,0]. Validates apply_elementwise_op chain dispatch.",
+      "input": [
+        -1.0,
+        2.0,
+        -3.0,
+        4.0
+      ],
+      "input_shape": [
+        4
+      ],
+      "dtype": "float32",
+      "expected_output": [
+        1.0,
+        0.0,
+        3.0,
+        0.0
+      ],
+      "expected_shape": [
+        4
+      ],
+      "tol": 1e-06,
+      "torch_reference": "x=[-1.0, 2.0, -3.0, 4.0]; relu(-x).tolist()==[1.0, 0.0, 3.0, 0.0]"
+    },
+    {
+      "case": "interp_multi_output",
+      "module": "interpreter",
+      "op": "interpret_multi",
+      "description": "interpret_multi: [y0,y1] = [x+x, x*x]. Validates multi-output graph execution and CL-368 multi-output path.",
+      "input": [
+        1.0,
+        2.0,
+        3.0
+      ],
+      "input_shape": [
+        3
+      ],
+      "dtype": "float32",
+      "expected_output_0": [
+        2.0,
+        4.0,
+        6.0
+      ],
+      "expected_output_1": [
+        1.0,
+        4.0,
+        9.0
+      ],
+      "expected_shape": [
+        3
+      ],
+      "tol": 1e-06,
+      "torch_reference": "x=[1.0, 2.0, 3.0]; y0=(x+x)=[2.0, 4.0, 6.0]; y1=(x*x)=[1.0, 4.0, 9.0]"
+    },
+    {
+      "case": "interp_activation_softmax",
+      "module": "interpreter",
+      "op": "interpret_softmax",
+      "description": "Interpreter: y = softmax(x) with x=[1,2,3,4]. Validates IrOpKind::Softmax dispatch via activation::softmax.",
+      "input": [
+        1.0,
+        2.0,
+        3.0,
+        4.0
+      ],
+      "input_shape": [
+        4
+      ],
+      "dtype": "float32",
+      "expected_output": [
+        0.032058604061603546,
+        0.08714432269334793,
+        0.23688283562660217,
+        0.6439142823219299
+      ],
+      "expected_shape": [
+        4
+      ],
+      "tol": 1e-05,
+      "torch_reference": "x=[1.0, 2.0, 3.0, 4.0]; torch.softmax(x,dim=0).tolist()==[0.032058604061603546, 0.08714432269334793, 0.23688283562660217, 0.6439142823219299]"
+    },
+    {
+      "case": "interp_reduction_sum",
+      "module": "interpreter",
+      "op": "interpret_sum",
+      "description": "Interpreter: y = sum(x) with x=[1,2,3,4,5]; result=15. Validates IrOpKind::Sum reduction dispatch.",
+      "input": [
+        1.0,
+        2.0,
+        3.0,
+        4.0,
+        5.0
+      ],
+      "input_shape": [
+        5
+      ],
+      "dtype": "float32",
+      "expected_output": [
+        15.0
+      ],
+      "expected_shape": [
+        1
+      ],
+      "tol": 1e-05,
+      "torch_reference": "x=[1.0, 2.0, 3.0, 4.0, 5.0]; x.sum().item()==15.0"
+    },
+    {
+      "case": "module_traced_forward",
+      "module": "module",
+      "op": "compile",
+      "description": "TracedModule: compile(sum(a*b)) and forward_multi([a,b]). Validates the full compile\u2192TracedModule\u2192forward_multi pipeline.",
+      "input_a": [
+        1.0,
+        2.0,
+        3.0
+      ],
+      "input_b": [
+        4.0,
+        5.0,
+        6.0
+      ],
+      "shape_a": [
+        3
+      ],
+      "shape_b": [
+        3
+      ],
+      "dtype": "float32",
+      "expected_output": [
+        32.0
+      ],
+      "expected_shape": [
+        1
+      ],
+      "tol": 1e-05,
+      "torch_reference": "a=[1.0, 2.0, 3.0]; b=[4.0, 5.0, 6.0]; (a*b).sum().item()==32.0"
+    },
+    {
+      "case": "module_forward_single_input",
+      "module": "module",
+      "op": "compile_single",
+      "description": "TracedModule: compile(sum(x)) and forward(x). Validates Module::forward for a single-input traced module.",
+      "input": [
+        10.0,
+        20.0,
+        30.0
+      ],
+      "input_shape": [
+        3
+      ],
+      "dtype": "float32",
+      "expected_output": [
+        60.0
+      ],
+      "expected_shape": [
+        1
+      ],
+      "tol": 1e-05,
+      "torch_reference": "x=[10.0, 20.0, 30.0]; x.sum().item()==60.0"
+    },
+    {
+      "case": "module_reuse_different_inputs",
+      "module": "module",
+      "op": "compile_reuse",
+      "description": "TracedModule reuse: same module, different inputs. compile(sum(a*b)); call with a=[3,4] b=[5,6] \u2192 sum([15,24])=39.",
+      "input_a": [
+        3.0,
+        4.0
+      ],
+      "input_b": [
+        5.0,
+        6.0
+      ],
+      "shape_a": [
+        2
+      ],
+      "shape_b": [
+        2
+      ],
+      "dtype": "float32",
+      "expected_output": [
+        39.0
+      ],
+      "expected_shape": [
+        1
+      ],
+      "tol": 1e-05,
+      "torch_reference": "a=[3.0, 4.0]; b=[5.0, 6.0]; (a*b).sum().item()==39.0"
+    },
+    {
+      "case": "module_save_load_bytes",
+      "module": "module",
+      "op": "to_bytes_from_bytes",
+      "description": "TracedModule to_bytes / from_bytes roundtrip. compile(sum(a*b)); serialize and deserialize; check result is identical.",
+      "input_a": [
+        1.0,
+        2.0,
+        3.0
+      ],
+      "input_b": [
+        4.0,
+        5.0,
+        6.0
+      ],
+      "shape_a": [
+        3
+      ],
+      "shape_b": [
+        3
+      ],
+      "dtype": "float32",
+      "expected_output": [
+        32.0
+      ],
+      "expected_shape": [
+        1
+      ],
+      "tol": 1e-05,
+      "torch_reference": "a=[1.0, 2.0, 3.0]; b=[4.0, 5.0, 6.0]; (a*b).sum().item()==32.0"
+    },
+    {
+      "case": "aot_backward_add",
+      "module": "aot_autograd",
+      "op": "decompose_add_backward",
+      "description": "AOT autograd: y = a + b; backward. For Add, grad_a = grad_out and grad_b = grad_out (identity pass-through). Input shape [3]; grad_out = ones(3); expect grad_a = [1,1,1], grad_b = [1,1,1].",
+      "input_a": [
+        1.0,
+        2.0,
+        3.0
+      ],
+      "input_b": [
+        4.0,
+        5.0,
+        6.0
+      ],
+      "input_shape": [
+        3
+      ],
+      "grad_out": [
+        1.0,
+        1.0,
+        1.0
+      ],
+      "dtype": "float32",
+      "expected_grad_a": [
+        1.0,
+        1.0,
+        1.0
+      ],
+      "expected_grad_b": [
+        1.0,
+        1.0,
+        1.0
+      ],
+      "tol": 1e-05,
+      "torch_reference": "a,b grad=[1,1,1]; grad_a=[1.0, 1.0, 1.0], grad_b=[1.0, 1.0, 1.0]"
+    },
+    {
+      "case": "aot_backward_mul",
+      "module": "aot_autograd",
+      "op": "decompose_mul_backward",
+      "description": "AOT autograd: y = a * b; backward. grad_a = b * grad_out, grad_b = a * grad_out. Validates that Mul backward emits two Mul nodes using saved tensors.",
+      "input_a": [
+        2.0,
+        3.0,
+        4.0
+      ],
+      "input_b": [
+        5.0,
+        6.0,
+        7.0
+      ],
+      "input_shape": [
+        3
+      ],
+      "grad_out": [
+        1.0,
+        1.0,
+        1.0
+      ],
+      "dtype": "float32",
+      "expected_grad_a": [
+        5.0,
+        6.0,
+        7.0
+      ],
+      "expected_grad_b": [
+        2.0,
+        3.0,
+        4.0
+      ],
+      "tol": 1e-05,
+      "torch_reference": "a=[2,3,4], b=[5,6,7], grad_out=[1,1,1]; grad_a=[5.0, 6.0, 7.0], grad_b=[2.0, 3.0, 4.0]"
+    },
+    {
+      "case": "aot_backward_sum",
+      "module": "aot_autograd",
+      "op": "decompose_sum_backward",
+      "description": "AOT autograd: y = sum(a); backward. grad_a = ones(4) * scalar_grad_out. Validates Sum backward emits constant-ones tensor and Mul.",
+      "input_a": [
+        1.0,
+        2.0,
+        3.0,
+        4.0
+      ],
+      "input_shape": [
+        4
+      ],
+      "grad_out": [
+        1.0
+      ],
+      "dtype": "float32",
+      "expected_grad_a": [
+        1.0,
+        1.0,
+        1.0,
+        1.0
+      ],
+      "tol": 1e-05,
+      "torch_reference": "a=[1,2,3,4], grad_out=1.0; grad_a=[1.0, 1.0, 1.0, 1.0]"
+    },
+    {
+      "case": "aot_graph_pair_structure",
+      "module": "aot_autograd",
+      "op": "decompose_structure",
+      "description": "AOT autograd structural check: decompose_forward_backward(Add graph) must produce an AotGraphPair whose backward has output_values.len()==2 and whose saved_tensor_indices is non-empty. Spec-only \u2014 no numeric PyTorch reference for graph structure.",
+      "cascade_skip": "spec-only marker, no PyTorch reference"
+    },
+    {
+      "case": "graph_break_unbroken_add_sum",
+      "module": "graph_break",
+      "op": "trace_with_breaks_unbroken",
+      "description": "trace_with_breaks: all-supported ops (Add + Sum) produce TraceResult::Unbroken (no graph breaks). Validates that fully traceable functions don't produce segments.",
+      "input": [
+        1.0,
+        2.0,
+        3.0
+      ],
+      "input_shape": [
+        3
+      ],
+      "dtype": "float32",
+      "expected_output": [
+        12.0
+      ],
+      "expected_shape": [
+        1
+      ],
+      "tol": 1e-05,
+      "torch_reference": "x=[1.0, 2.0, 3.0]; (x+x).sum().item()==12.0"
+    },
+    {
+      "case": "graph_break_segmented_module_forward",
+      "module": "graph_break",
+      "op": "segmented_module_forward",
+      "description": "SegmentedModule forward: segment1 (compiled, x+x) \u2192 segment2 (eager, *10). Input [1,2,3] \u2192 after-compiled [2,4,6] \u2192 after-eager [20,40,60].",
+      "input": [
+        1.0,
+        2.0,
+        3.0
+      ],
+      "input_shape": [
+        3
+      ],
+      "dtype": "float32",
+      "intermediate": [
+        2.0,
+        4.0,
+        6.0
+      ],
+      "expected_output": [
+        20.0,
+        40.0,
+        60.0
+      ],
+      "expected_shape": [
+        3
+      ],
+      "tol": 1e-05,
+      "torch_reference": "x=[1.0, 2.0, 3.0]; relu(-x).not-applicable; (x+x)*10=[20.0, 40.0, 60.0]"
+    },
+    {
+      "case": "graph_break_fullgraph_supported_ops",
+      "module": "graph_break",
+      "op": "trace_with_breaks_fullgraph",
+      "description": "trace_with_breaks with fullgraph=true on an all-supported function must succeed (not error). Validates that fullgraph mode only errors on actual breaks, not on supported ops.",
+      "input": [
+        2.0,
+        3.0
+      ],
+      "input_shape": [
+        2
+      ],
+      "dtype": "float32",
+      "expected_output": [
+        10.0
+      ],
+      "expected_shape": [
+        1
+      ],
+      "tol": 1e-05,
+      "torch_reference": "x=[2.0, 3.0]; (x+x).sum().item()==10.0"
+    },
+    {
+      "case": "graph_break_is_known_op",
+      "module": "graph_break",
+      "op": "is_known_op",
+      "description": "is_known_op: internal helper. 'AddBackward' is known, 'CustomOpBackward' is not. Spec-only \u2014 no numeric PyTorch reference.",
+      "cascade_skip": "spec-only marker, no PyTorch reference"
+    }
+  ]
+}

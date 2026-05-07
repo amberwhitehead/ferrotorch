@@ -1,0 +1,143 @@
+# Surface exclusions for ferrotorch-jit conformance suite.
+#
+# Each entry records an item from _surface_inventory.toml that does NOT
+# require a direct named reference in a conformance_jit_*.rs file, along
+# with the documented reason.
+#
+# Valid reasons:
+#   structural   — the item is implicitly exercised by every test that uses
+#                  the surrounding struct/trait; individual naming adds no signal.
+#   implicit     — covered transitively by tests of a higher-level function
+#                  (e.g. a private helper exposed via pub use).
+#   live-env     — requires a running GPU or Python environment; gated behind
+#                  a feature flag or environment variable.
+#   deferred     — confirmed out-of-scope for C7; tracked in a follow-up issue.
+
+# ---------------------------------------------------------------------------
+# C7.1 — trace/graph low-level builder helpers
+# These exist to support IrGraph construction in tests, not as
+# consumer-facing API surface. Every conformance test builds a graph and
+# therefore exercises them implicitly.
+# ---------------------------------------------------------------------------
+
+[[exclusion]]
+path = "ferrotorch_jit::graph::IrGraph::alloc_node_id"
+reason = "structural"
+note = "Internal ID allocator; exercised implicitly by every add_node / add_input call."
+
+[[exclusion]]
+path = "ferrotorch_jit::graph::IrGraph::alloc_value_id"
+reason = "structural"
+note = "Internal ID allocator; exercised implicitly by every add_input / add_constant call."
+
+# ---------------------------------------------------------------------------
+# C7.2 — codegen internals with live-env requirements
+# ---------------------------------------------------------------------------
+
+[[exclusion]]
+path = "ferrotorch_jit::codegen_gpu::GpuCodegen"
+reason = "live-env"
+note = "GPU codegen requires the `cuda` feature and an NVIDIA device. Covered in f64_libdevice_correctness.rs under #[cfg(feature = \"cuda\")]."
+
+[[exclusion]]
+path = "ferrotorch_jit::codegen_jit::JitCompiledKernel"
+reason = "structural"
+note = "Opaque kernel handle. Exercised implicitly by compile_loop_ir_kernel tests in C7.2."
+
+[[exclusion]]
+path = "ferrotorch_jit::codegen_jit::compile_loop_ir_kernel"
+reason = "structural"
+note = "Low-level JIT compilation entry point. Exercised via TracedModule / compile in C7.2."
+
+[[exclusion]]
+path = "ferrotorch_jit::module::AotCompiledModule::backward"
+reason = "structural"
+note = "AoT backward graph. Covered implicitly by AotCompiledModule round-trip tests."
+
+[[exclusion]]
+path = "ferrotorch_jit::module::AotCompiledModule::saved_tensor_indices"
+reason = "structural"
+note = "Accessor only; exercised by AotCompiledModule construction tests in C7.2."
+
+[[exclusion]]
+path = "ferrotorch_jit::autotune::AutotuneResult"
+reason = "structural"
+note = "Result value struct returned by Autotuner::tune. Covered by Autotuner tests in C7.2."
+
+# ---------------------------------------------------------------------------
+# C7.3 — optimize / memory / dag — internal implementation items
+# ---------------------------------------------------------------------------
+
+[[exclusion]]
+path = "ferrotorch_jit::optimize::constant_fold"
+reason = "structural"
+note = "Called internally by optimize(). Exercised transitively by OptimizationConfig tests in C7.3."
+
+[[exclusion]]
+path = "ferrotorch_jit::optimize::dead_code_eliminate"
+reason = "structural"
+note = "Called internally by optimize(). Exercised transitively by OptimizationConfig tests in C7.3."
+
+[[exclusion]]
+path = "ferrotorch_jit::optimize::fuse_elementwise"
+reason = "structural"
+note = "Called internally by optimize(). Exercised transitively by fusion tests in C7.3."
+
+[[exclusion]]
+path = "ferrotorch_jit::optimize::pattern_fuse"
+reason = "structural"
+note = "Called internally by optimize(). Exercised transitively by fusion tests in C7.3."
+
+[[exclusion]]
+path = "ferrotorch_jit::dag_fusion::find_fusion_groups"
+reason = "structural"
+note = "Internal function called by optimize/fuse_dag. Exercised transitively."
+
+[[exclusion]]
+path = "ferrotorch_jit::dag_fusion::fuse_dag"
+reason = "structural"
+note = "Internal function called by optimizer pass. Exercised transitively."
+
+[[exclusion]]
+path = "ferrotorch_jit::fusion::generate_reduction_c"
+reason = "live-env"
+note = "C codegen helper; requires a C compiler toolchain in the environment. Out of scope for pure-Rust CI."
+
+[[exclusion]]
+path = "ferrotorch_jit::fusion::generate_reduction_ptx"
+reason = "live-env"
+note = "PTX codegen helper; output only meaningful with a CUDA toolkit. Out of scope for default CI."
+
+[[exclusion]]
+path = "ferrotorch_jit::fusion::estimate_numel_for_inputs"
+reason = "structural"
+note = "Pure arithmetic helper. Exercised implicitly by apply_fused / FusedChain tests."
+
+[[exclusion]]
+path = "ferrotorch_jit::fusion::estimate_matmul_dims"
+reason = "structural"
+note = "Pure arithmetic helper. Exercised implicitly by fusion tests."
+
+# ---------------------------------------------------------------------------
+# C7.4 — error variants that require specific JIT paths
+# ---------------------------------------------------------------------------
+
+[[exclusion]]
+path = "ferrotorch_jit::error::JitError::DataDependentControlFlow"
+reason = "deferred"
+note = "Triggered only by data-dependent branches in trace; integration test deferred to C7.5 (full-graph tracing)."
+
+[[exclusion]]
+path = "ferrotorch_jit::error::JitError::RecompilationError"
+reason = "deferred"
+note = "Triggered only by symbolic recompilation paths; deferred to C7.5."
+
+[[exclusion]]
+path = "ferrotorch_jit::error::JitError::GpuBackendUnavailable"
+reason = "live-env"
+note = "Requires constructing an InductorBackend with a GPU target on a non-GPU build. Error path tested structurally via JitError::fmt in C7.4."
+
+[[exclusion]]
+path = "ferrotorch_jit::export::ExportedProgram::to_json"
+reason = "structural"
+note = "Covered by parse_json_metadata roundtrip tests; both methods are exercised together."

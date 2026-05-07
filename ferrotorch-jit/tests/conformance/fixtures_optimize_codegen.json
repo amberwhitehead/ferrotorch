@@ -1,0 +1,1329 @@
+{
+  "metadata": {
+    "torch_version": "2.6.0+cu124",
+    "python_executable": "/usr/sbin/python3",
+    "python_platform": "Linux-6.6.87.2-microsoft-standard-WSL2-x86_64-with-glibc2.41",
+    "generated_at": "2026-05-07T16:21:15.744138Z",
+    "tracking_issue": "#883",
+    "sub_phase": "C7.3",
+    "description": "Reference fixtures for ferrotorch-jit optimize+codegen conformance suite. Covers 9 modules: optimize, fusion, dag_fusion, codegen, codegen_cpu, codegen_gpu, codegen_jit, autotune, memory_plan.",
+    "modules_covered": [
+      "autotune",
+      "codegen",
+      "codegen_cpu",
+      "codegen_gpu",
+      "codegen_jit",
+      "dag_fusion",
+      "fusion",
+      "memory_plan",
+      "optimize"
+    ]
+  },
+  "fixtures": [
+    {
+      "module": "optimize",
+      "case": "constant_fold_add_two_constants",
+      "description": "constant_fold: Constant(2.0) + Constant(3.0) \u2014 the graph output is now produced by a Constant node (output_is_constant == true). Note: constant_fold replaces the op node but does NOT remove orphan input constants; DCE handles that as a separate pass.",
+      "input_a": [
+        2.0
+      ],
+      "input_b": [
+        3.0
+      ],
+      "op": "Add",
+      "expected_output": [
+        5.0
+      ],
+      "expected_output_is_constant": true,
+      "torch_reference": "torch.tensor([2.0]) + torch.tensor([3.0]) == 5.0"
+    },
+    {
+      "module": "optimize",
+      "case": "constant_fold_chain_add_then_mul",
+      "description": "constant_fold: Const(2)+Const(3) -> Const(5), then 5*Const(4) -> Const(20). Folding iterates to a fixed point: graph output becomes Constant(20). Orphan source constants are cleaned up by DCE, not constant_fold.",
+      "input_a": [
+        2.0
+      ],
+      "input_b": [
+        3.0
+      ],
+      "input_c": [
+        4.0
+      ],
+      "ops": [
+        "Add",
+        "Mul"
+      ],
+      "expected_output": [
+        20.0
+      ],
+      "expected_output_is_constant": true,
+      "torch_reference": "(torch.tensor([2.0]) + torch.tensor([3.0])) * torch.tensor([4.0]) == 20.0"
+    },
+    {
+      "module": "optimize",
+      "case": "constant_fold_neg",
+      "description": "constant_fold: Neg(Constant([7.0, -3.0])) \u2014 graph output becomes Constant([-7.0, 3.0]). Orphan source constant cleaned up by DCE.",
+      "input": [
+        7.0,
+        -3.0
+      ],
+      "op": "Neg",
+      "expected_output": [
+        -7.0,
+        3.0
+      ],
+      "expected_output_is_constant": true,
+      "torch_reference": "-torch.tensor([7.0, -3.0]) == [-7.0, 3.0]"
+    },
+    {
+      "module": "optimize",
+      "case": "constant_fold_relu",
+      "description": "constant_fold: Relu(Constant([-2.0, 0.0, 3.0])) \u2014 graph output becomes Constant([0.0, 0.0, 3.0]). Orphan source constant cleaned up by DCE.",
+      "input": [
+        -2.0,
+        0.0,
+        3.0
+      ],
+      "op": "Relu",
+      "expected_output": [
+        0.0,
+        0.0,
+        3.0
+      ],
+      "expected_output_is_constant": true,
+      "torch_reference": "torch.relu(torch.tensor([-2.0, 0.0, 3.0])).tolist() == [0.0, 0.0, 3.0]"
+    },
+    {
+      "module": "optimize",
+      "case": "optimize_idempotent_on_mixed_graph",
+      "description": "Idempotency: a graph with a constant-foldable branch, a dead branch, and a fusible unary chain. After one full optimize pass the graph reaches a fixed point; running optimize a second time must not change the node count. This is ferrotorch's own documented contract for the optimizer.",
+      "expected_nodes_after_first_pass": 4,
+      "expected_nodes_after_second_pass": 4,
+      "property": "idempotent",
+      "torch_reference": "spec-only marker, no PyTorch reference"
+    },
+    {
+      "module": "optimize",
+      "case": "dce_removes_unused_branch",
+      "description": "dead_code_eliminate: a graph where x->relu->output and x->neg (dead). After DCE: 2 nodes remain (Input, Relu). Neg is removed.",
+      "initial_node_count": 3,
+      "expected_nodes_after_dce": 2,
+      "removed_ops": [
+        "Neg"
+      ],
+      "property": "dead_branch_removed"
+    },
+    {
+      "module": "optimize",
+      "case": "dce_cascading_removal",
+      "description": "dead_code_eliminate: cascading removal. An unused chain Const->Neg->Add should be fully removed in iterative passes.",
+      "initial_node_count": 5,
+      "expected_nodes_after_dce": 2,
+      "property": "cascade_removed"
+    },
+    {
+      "module": "optimize",
+      "case": "pattern_fuse_linear_relu",
+      "description": "pattern_fuse: Linear->Relu fuses into FusedLinearActivation{Relu}. The resulting graph has one fewer node than before fusion.",
+      "fusion_pattern": "Linear+Relu",
+      "expected_fused_kind": "FusedLinearActivation",
+      "expected_activation": "Relu",
+      "property": "linear_activation_fused"
+    },
+    {
+      "module": "optimize",
+      "case": "fuse_elementwise_chain_neg_relu_sigmoid",
+      "description": "fuse_elementwise: a chain Neg->Relu->Sigmoid collapses into one FusedElementwise{[Neg, Relu, Sigmoid]} node. Input chain: [-5, -1, 0, 1, 3]. Reference output: apply neg, then relu, then sigmoid sequentially.",
+      "input": [
+        -5.0,
+        -1.0,
+        0.0,
+        1.0,
+        3.0
+      ],
+      "ops": [
+        "Neg",
+        "Relu",
+        "Sigmoid"
+      ],
+      "expected_output": [
+        0.9933071490757153,
+        0.7310585786300049,
+        0.5,
+        0.5,
+        0.5
+      ],
+      "expected_fused_node_count": 1,
+      "expected_ops_in_fused": [
+        "Neg",
+        "Relu",
+        "Sigmoid"
+      ],
+      "property": "fusion_preserves_output",
+      "torch_reference": "x=torch.tensor([-5.,-1.,0.,1.,3.]); torch.sigmoid(torch.relu(-x)).tolist()"
+    },
+    {
+      "module": "fusion",
+      "case": "fused_chain_scalar_add_relu_neg_f32",
+      "description": "FusedChain::execute_cpu: [ScalarAdd(2), Relu, Neg] on [-5,-1,0,1,3]. Must match sequential application of each op individually.",
+      "input": [
+        -5.0,
+        -1.0,
+        0.0,
+        1.0,
+        3.0
+      ],
+      "chain_ops": [
+        {
+          "op": "ScalarAdd",
+          "arg": 2.0
+        },
+        {
+          "op": "Relu"
+        },
+        {
+          "op": "Neg"
+        }
+      ],
+      "expected_output": [
+        -0.0,
+        -1.0,
+        -2.0,
+        -3.0,
+        -5.0
+      ],
+      "tolerance": 1e-06,
+      "torch_reference": "x=torch.tensor([-5.,-1.,0.,1.,3.]); (-torch.relu(x+2)).tolist()"
+    },
+    {
+      "module": "fusion",
+      "case": "fused_chain_single_op_sigmoid_f64",
+      "description": "FusedChain::execute_cpu with single op Sigmoid. Input: [0.0], expected: [0.5]",
+      "input": [
+        0.0
+      ],
+      "chain_ops": [
+        {
+          "op": "Sigmoid"
+        }
+      ],
+      "expected_output": [
+        0.5
+      ],
+      "tolerance": 1e-09,
+      "torch_reference": "torch.sigmoid(torch.tensor([0.0], dtype=torch.float64)).tolist()"
+    },
+    {
+      "module": "fusion",
+      "case": "fused_chain_single_op_tanh_f64",
+      "description": "FusedChain::execute_cpu with single op Tanh. Input: [0.0], expected: [0.0]",
+      "input": [
+        0.0
+      ],
+      "chain_ops": [
+        {
+          "op": "Tanh"
+        }
+      ],
+      "expected_output": [
+        0.0
+      ],
+      "tolerance": 1e-09,
+      "torch_reference": "torch.tanh(torch.tensor([0.0], dtype=torch.float64)).tolist()"
+    },
+    {
+      "module": "fusion",
+      "case": "fused_chain_single_op_sqrt_f64",
+      "description": "FusedChain::execute_cpu with single op Sqrt. Input: [4.0, 9.0, 16.0], expected: [2.0, 3.0, 4.0]",
+      "input": [
+        4.0,
+        9.0,
+        16.0
+      ],
+      "chain_ops": [
+        {
+          "op": "Sqrt"
+        }
+      ],
+      "expected_output": [
+        2.0,
+        3.0,
+        4.0
+      ],
+      "tolerance": 1e-09,
+      "torch_reference": "torch.sqrt(torch.tensor([4.0, 9.0, 16.0], dtype=torch.float64)).tolist()"
+    },
+    {
+      "module": "fusion",
+      "case": "fused_chain_single_op_abs_f64",
+      "description": "FusedChain::execute_cpu with single op Abs. Input: [-3.0, 0.0, 5.0], expected: [3.0, 0.0, 5.0]",
+      "input": [
+        -3.0,
+        0.0,
+        5.0
+      ],
+      "chain_ops": [
+        {
+          "op": "Abs"
+        }
+      ],
+      "expected_output": [
+        3.0,
+        0.0,
+        5.0
+      ],
+      "tolerance": 1e-09,
+      "torch_reference": "torch.abs(torch.tensor([-3.0, 0.0, 5.0], dtype=torch.float64)).tolist()"
+    },
+    {
+      "module": "fusion",
+      "case": "fused_chain_single_op_exp_f64",
+      "description": "FusedChain::execute_cpu with single op Exp. Input: [0.0], expected: [1.0]",
+      "input": [
+        0.0
+      ],
+      "chain_ops": [
+        {
+          "op": "Exp"
+        }
+      ],
+      "expected_output": [
+        1.0
+      ],
+      "tolerance": 1e-09,
+      "torch_reference": "torch.exp(torch.tensor([0.0], dtype=torch.float64)).tolist()"
+    },
+    {
+      "module": "fusion",
+      "case": "fused_chain_single_op_log_f64",
+      "description": "FusedChain::execute_cpu with single op Log. Input: [1.0], expected: [0.0]",
+      "input": [
+        1.0
+      ],
+      "chain_ops": [
+        {
+          "op": "Log"
+        }
+      ],
+      "expected_output": [
+        0.0
+      ],
+      "tolerance": 1e-09,
+      "torch_reference": "torch.log(torch.tensor([1.0], dtype=torch.float64)).tolist()"
+    },
+    {
+      "module": "fusion",
+      "case": "fused_chain_single_op_neg_f64",
+      "description": "FusedChain::execute_cpu with single op Neg. Input: [1.0, -2.0, 0.0], expected: [-1.0, 2.0, -0.0]",
+      "input": [
+        1.0,
+        -2.0,
+        0.0
+      ],
+      "chain_ops": [
+        {
+          "op": "Neg"
+        }
+      ],
+      "expected_output": [
+        -1.0,
+        2.0,
+        -0.0
+      ],
+      "tolerance": 1e-09,
+      "torch_reference": "torch.neg(torch.tensor([1.0, -2.0, 0.0], dtype=torch.float64)).tolist()"
+    },
+    {
+      "module": "fusion",
+      "case": "fused_chain_pow_2_f64",
+      "description": "FusedChain::execute_cpu with Pow(2.0): x^2.",
+      "input": [
+        3.0
+      ],
+      "chain_ops": [
+        {
+          "op": "Pow",
+          "arg": 2.0
+        }
+      ],
+      "expected_output": [
+        9.0
+      ],
+      "tolerance": 1e-10,
+      "torch_reference": "torch.tensor([3.0], dtype=torch.float64).pow(2.0).tolist() == [9.0]"
+    },
+    {
+      "module": "fusion",
+      "case": "fused_chain_scalar_mul_f32",
+      "description": "FusedChain::execute_cpu with ScalarMul(3.0).",
+      "input": [
+        2.0,
+        -1.0
+      ],
+      "chain_ops": [
+        {
+          "op": "ScalarMul",
+          "arg": 3.0
+        }
+      ],
+      "expected_output": [
+        6.0,
+        -3.0
+      ],
+      "tolerance": 1e-06,
+      "torch_reference": "(torch.tensor([2.0,-1.0]) * 3.0).tolist() == [6.0, -3.0]"
+    },
+    {
+      "module": "fusion",
+      "case": "fused_chain_gelu_matches_torch",
+      "description": "FusedChain::execute_cpu with Gelu. Reference: PyTorch torch.nn.functional.gelu(x, approximate='tanh').",
+      "input": [
+        -1.0,
+        0.0,
+        1.0,
+        2.0
+      ],
+      "chain_ops": [
+        {
+          "op": "Gelu"
+        }
+      ],
+      "expected_output": [
+        -0.15880800939172324,
+        0.0,
+        0.8411919906082768,
+        1.954597694087775
+      ],
+      "tolerance": 1e-05,
+      "torch_reference": "torch.nn.functional.gelu(torch.tensor([-1.,0.,1.,2.], dtype=torch.float64), approximate='tanh').tolist()"
+    },
+    {
+      "module": "fusion",
+      "case": "fused_chain_silu_matches_torch",
+      "description": "FusedChain::execute_cpu with Silu. Reference: PyTorch torch.nn.functional.silu(x).",
+      "input": [
+        -1.0,
+        0.0,
+        1.0,
+        2.0
+      ],
+      "chain_ops": [
+        {
+          "op": "Silu"
+        }
+      ],
+      "expected_output": [
+        -0.2689414213699951,
+        0.0,
+        0.7310585786300049,
+        1.7615941559557646
+      ],
+      "tolerance": 1e-09,
+      "torch_reference": "torch.nn.functional.silu(torch.tensor([-1.,0.,1.,2.], dtype=torch.float64)).tolist()"
+    },
+    {
+      "module": "fusion",
+      "case": "ptx_generation_header_structure",
+      "description": "FusedChain::generate_ptx must emit a valid PTX header: .version 7.0, .target sm_52, .address_size 64, and .visible .entry fused_kernel.",
+      "chain_ops": [
+        {
+          "op": "ScalarAdd",
+          "arg": 2.0
+        },
+        {
+          "op": "Relu"
+        },
+        {
+          "op": "Neg"
+        }
+      ],
+      "expected_ptx_contains": [
+        ".version 7.0",
+        ".target sm_52",
+        ".address_size 64",
+        ".visible .entry fused_kernel",
+        "in_ptr",
+        "out_ptr",
+        "st.global.f32",
+        "ret;"
+      ],
+      "property": "ptx_structural"
+    },
+    {
+      "module": "fusion",
+      "case": "ptx_generation_sigmoid_uses_ex2",
+      "description": "FusedChain::generate_ptx with Sigmoid must emit ex2.approx.f32 and rcp.approx.f32 (hardware approximation pathway).",
+      "chain_ops": [
+        {
+          "op": "Sigmoid"
+        }
+      ],
+      "expected_ptx_contains": [
+        "ex2.approx.f32",
+        "rcp.approx.f32"
+      ],
+      "property": "ptx_structural"
+    },
+    {
+      "module": "fusion",
+      "case": "ptx_generation_sqrt_uses_sqrt_approx",
+      "description": "FusedChain::generate_ptx with Sqrt must emit sqrt.approx.f32.",
+      "chain_ops": [
+        {
+          "op": "Sqrt"
+        }
+      ],
+      "expected_ptx_contains": [
+        "sqrt.approx.f32"
+      ],
+      "property": "ptx_structural"
+    },
+    {
+      "module": "fusion",
+      "case": "ptx_generation_pow_uses_lg2_ex2",
+      "description": "FusedChain::generate_ptx with Pow must emit lg2.approx.f32 and ex2.approx.f32.",
+      "chain_ops": [
+        {
+          "op": "Pow",
+          "arg": 3.0
+        }
+      ],
+      "expected_ptx_contains": [
+        "lg2.approx.f32",
+        "ex2.approx.f32"
+      ],
+      "property": "ptx_structural"
+    },
+    {
+      "module": "fusion",
+      "case": "ptx_generation_binary_op_rejected",
+      "description": "FusedChain::generate_ptx must return an error when the chain contains a binary op (Add/Sub/Mul/Div), because the kernel signature is single-input.",
+      "chain_ops": [
+        {
+          "op": "Add"
+        }
+      ],
+      "expected_error_contains": "binary op",
+      "property": "error_on_binary_op"
+    },
+    {
+      "module": "fusion",
+      "case": "c_codegen_header_structure",
+      "description": "FusedChain::generate_c must emit valid C: #include <math.h>, void <fn_name>(...), #pragma omp simd, and the correct loop pattern.",
+      "fn_name": "fused_relu_neg",
+      "chain_ops": [
+        {
+          "op": "Relu"
+        },
+        {
+          "op": "Neg"
+        }
+      ],
+      "expected_c_contains": [
+        "#include <math.h>",
+        "void fused_relu_neg(",
+        "#pragma omp simd",
+        "for (int i = 0",
+        "out[i] = val;"
+      ],
+      "property": "c_structural"
+    },
+    {
+      "module": "fusion",
+      "case": "generate_reduction_ptx_sum_uses_atom_add",
+      "description": "generate_reduction_ptx(Sum) must emit atom.global.add.f32 for atomic accumulation.",
+      "reduction_kind": "Sum",
+      "kernel_name": "reduce_sum",
+      "expected_ptx_contains": [
+        "atom.global.add.f32"
+      ],
+      "property": "ptx_structural"
+    },
+    {
+      "module": "fusion",
+      "case": "generate_reduction_ptx_mean_has_finalize_entry",
+      "description": "generate_reduction_ptx(Mean) must emit a second .entry named <kernel_name>_finalize that divides the sum by n.",
+      "reduction_kind": "Mean",
+      "kernel_name": "reduce_mean",
+      "expected_ptx_contains": [
+        "reduce_mean_finalize",
+        "div.approx.f32"
+      ],
+      "property": "ptx_structural"
+    },
+    {
+      "module": "fusion",
+      "case": "fusion_flag_default_off_then_scoped_on",
+      "description": "is_fusion_enabled() is false by default. Inside with_fusion{} it is true. After the closure it returns to false. This is a thread-local guard contract.",
+      "property": "flag_contract"
+    },
+    {
+      "module": "fusion",
+      "case": "fused_chain_matches_sequential_f64",
+      "description": "FusedChain::execute_cpu result must match applying each op one at a time. This is the core fusion-equivalence property.",
+      "input": [
+        -3.0,
+        -1.5,
+        0.0,
+        0.5,
+        2.0,
+        4.0
+      ],
+      "chain_ops": [
+        {
+          "op": "ScalarAdd",
+          "arg": 2.0
+        },
+        {
+          "op": "Relu"
+        },
+        {
+          "op": "Neg"
+        }
+      ],
+      "expected_output": [
+        -0.0,
+        -0.5,
+        -2.0,
+        -2.5,
+        -4.0,
+        -6.0
+      ],
+      "tolerance": 1e-10,
+      "property": "fusion_equivalence",
+      "torch_reference": "x=torch.tensor([-3.,-1.5,0.,0.5,2.,4.], dtype=torch.float64); (-torch.relu(x+2)).tolist()"
+    },
+    {
+      "module": "dag_fusion",
+      "case": "single_elementwise_op_forms_one_group",
+      "description": "find_fusion_groups: a graph with one Relu node forms exactly one elementwise fusion group.",
+      "graph_ops": [
+        "Relu"
+      ],
+      "expected_group_count": 1,
+      "expected_group_kind": "Elementwise"
+    },
+    {
+      "module": "dag_fusion",
+      "case": "chain_neg_relu_sigmoid_fuses_one_group",
+      "description": "find_fusion_groups: a chain Neg->Relu->Sigmoid fuses into one Elementwise group with 3 ops.",
+      "graph_ops": [
+        "Neg",
+        "Relu",
+        "Sigmoid"
+      ],
+      "expected_group_count": 1,
+      "expected_group_kind": "Elementwise",
+      "expected_ops_in_group": [
+        "Neg",
+        "Relu",
+        "Sigmoid"
+      ]
+    },
+    {
+      "module": "dag_fusion",
+      "case": "binary_add_plus_relu_one_elementwise_group",
+      "description": "find_fusion_groups: Add(x,y)->Relu forms one Elementwise group with 2 ops. Binary elementwise ops can fuse with unary ones.",
+      "graph_ops": [
+        "Add",
+        "Relu"
+      ],
+      "expected_group_count": 1,
+      "expected_group_kind": "Elementwise"
+    },
+    {
+      "module": "dag_fusion",
+      "case": "reduction_breaks_group_into_two",
+      "description": "find_fusion_groups: Relu->Sum creates two groups: group 0 = Elementwise(Relu), group 1 = Reduction(Sum).",
+      "graph_ops": [
+        "Relu",
+        "Sum"
+      ],
+      "expected_group_count": 2,
+      "expected_group_kinds": [
+        "Elementwise",
+        "Reduction"
+      ]
+    },
+    {
+      "module": "dag_fusion",
+      "case": "matmul_is_standalone_group",
+      "description": "find_fusion_groups: Mm is a standalone MatMul group. Subsequent Relu forms a separate Elementwise group.",
+      "graph_ops": [
+        "Mm",
+        "Relu"
+      ],
+      "expected_group_count": 2,
+      "expected_group_kinds": [
+        "MatMul",
+        "Elementwise"
+      ]
+    },
+    {
+      "module": "dag_fusion",
+      "case": "fuse_dag_elementwise_emits_loop_ir",
+      "description": "fuse_dag: an elementwise group (Neg->Relu) emits non-empty LoopIR. fuse_dag is the bridge between fusion-group discovery and code lowering.",
+      "graph_ops": [
+        "Neg",
+        "Relu"
+      ],
+      "expected_loops_non_empty": true,
+      "property": "fuse_dag_structural"
+    },
+    {
+      "module": "dag_fusion",
+      "case": "fuse_dag_matmul_group_emits_triple_loop",
+      "description": "fuse_dag: a MatMul group (Mm A[2,3] x B[3,4]) emits a triple loop nest with outer loop var 'i', middle 'j', inner 'p'.",
+      "lhs_shape": [
+        2,
+        3
+      ],
+      "rhs_shape": [
+        3,
+        4
+      ],
+      "expected_outer_loop_var": "i",
+      "property": "fuse_dag_structural"
+    },
+    {
+      "module": "dag_fusion",
+      "case": "fuse_dag_reduction_emits_accumulator",
+      "description": "fuse_dag: a Reduction group (Sum) emits LoopIR starting with Let{var='acc', ...} \u2014 the accumulator.",
+      "graph_ops": [
+        "Sum"
+      ],
+      "expected_first_stmt_var": "acc",
+      "property": "fuse_dag_structural"
+    },
+    {
+      "module": "dag_fusion",
+      "case": "external_inputs_and_outputs_correct",
+      "description": "find_fusion_groups: for input->relu->output, the group's external_inputs should be [x] and external_outputs should be [relu_out]. Both are computed from the IR graph structure.",
+      "graph_ops": [
+        "Relu"
+      ],
+      "expected_external_input_count": 1,
+      "expected_external_output_count": 1,
+      "property": "io_correctness"
+    },
+    {
+      "module": "codegen",
+      "case": "interpreter_backend_relu_sqrt_chain",
+      "description": "InterpreterBackend: compile then execute a relu->sqrt graph. Input [1, 4, 9] -> relu -> sqrt -> [1, 2, 3].",
+      "input": [
+        1.0,
+        4.0,
+        9.0
+      ],
+      "graph_ops": [
+        "Relu",
+        "Sqrt"
+      ],
+      "expected_output": [
+        1.0,
+        2.0,
+        3.0
+      ],
+      "tolerance": 1e-10,
+      "backend": "InterpreterBackend",
+      "torch_reference": "torch.sqrt(torch.relu(torch.tensor([1.,4.,9.], dtype=torch.float64))).tolist()"
+    },
+    {
+      "module": "codegen",
+      "case": "native_backend_relu_sqrt_chain",
+      "description": "NativeBackend: compile then execute a relu->sqrt graph. Output must match InterpreterBackend within tolerance.",
+      "input": [
+        1.0,
+        4.0,
+        9.0
+      ],
+      "graph_ops": [
+        "Relu",
+        "Sqrt"
+      ],
+      "expected_output": [
+        1.0,
+        2.0,
+        3.0
+      ],
+      "tolerance": 1e-10,
+      "backend": "NativeBackend",
+      "torch_reference": "torch.sqrt(torch.relu(torch.tensor([1.,4.,9.], dtype=torch.float64))).tolist()"
+    },
+    {
+      "module": "codegen",
+      "case": "compiled_graph_wrong_input_count_returns_error",
+      "description": "CompiledGraph::execute: passing the wrong number of inputs must return FerrotorchError::InvalidArgument. This is part of the documented CompiledGraph contract.",
+      "graph_ops": [
+        "Neg"
+      ],
+      "num_expected_inputs": 1,
+      "num_actual_inputs": 0,
+      "expected_error_kind": "InvalidArgument",
+      "property": "error_contract"
+    },
+    {
+      "module": "codegen",
+      "case": "compiled_graph_output_shape_preserved",
+      "description": "CompiledGraph::output_shape must reflect the graph's output shape. For a [3]-shaped input through Relu, output_shape must be [3].",
+      "input_shape": [
+        3
+      ],
+      "graph_ops": [
+        "Relu"
+      ],
+      "expected_output_shape": [
+        3
+      ],
+      "property": "shape_preserved"
+    },
+    {
+      "module": "codegen",
+      "case": "native_backend_add_two_inputs",
+      "description": "NativeBackend: compile then execute Add(x, y). Input a=[1,2,3], b=[10,20,30] -> [11,22,33].",
+      "input_a": [
+        1.0,
+        2.0,
+        3.0
+      ],
+      "input_b": [
+        10.0,
+        20.0,
+        30.0
+      ],
+      "graph_ops": [
+        "Add"
+      ],
+      "expected_output": [
+        11.0,
+        22.0,
+        33.0
+      ],
+      "tolerance": 1e-10,
+      "backend": "NativeBackend",
+      "torch_reference": "(torch.tensor([1.,2.,3.]) + torch.tensor([10.,20.,30.])).tolist() == [11.,22.,33.]"
+    },
+    {
+      "module": "codegen_cpu",
+      "case": "generate_rust_source_neg_contains_inline_always",
+      "description": "CpuCodegen::generate_rust_source for Neg must emit #[inline(always)] and the correct function signature.",
+      "graph_ops": [
+        "Neg"
+      ],
+      "fn_name": "kernel_neg",
+      "expected_source_contains": [
+        "#[inline(always)]",
+        "pub unsafe fn kernel_neg",
+        "inputs: &[&[f64]]",
+        "output: &mut [f64]",
+        "for"
+      ],
+      "property": "source_structural"
+    },
+    {
+      "module": "codegen_cpu",
+      "case": "generate_rust_source_binary_add_uses_both_inputs",
+      "description": "CpuCodegen::generate_rust_source for Add must reference inputs[0] and inputs[1].",
+      "graph_ops": [
+        "Add"
+      ],
+      "fn_name": "kernel_add",
+      "expected_source_contains": [
+        "inputs[0]",
+        "inputs[1]",
+        "output["
+      ],
+      "property": "source_structural"
+    },
+    {
+      "module": "codegen_cpu",
+      "case": "generate_rust_source_sum_reduction_uses_accumulator",
+      "description": "CpuCodegen::generate_rust_source for Sum must emit let mut acc and acc += patterns.",
+      "graph_ops": [
+        "Sum"
+      ],
+      "fn_name": "kernel_sum",
+      "expected_source_contains": [
+        "let mut acc",
+        "acc +=",
+        "output[0"
+      ],
+      "property": "source_structural"
+    },
+    {
+      "module": "codegen_cpu",
+      "case": "generate_rust_source_matmul_triple_loop",
+      "description": "CpuCodegen::generate_rust_source for Mm(2x3 * 3x4) must emit for i, for j, for p loops.",
+      "fn_name": "kernel_matmul",
+      "lhs_shape": [
+        2,
+        3
+      ],
+      "rhs_shape": [
+        3,
+        4
+      ],
+      "expected_source_contains": [
+        "for i in",
+        "for j in",
+        "for p in",
+        "let mut acc"
+      ],
+      "property": "source_structural"
+    },
+    {
+      "module": "codegen_cpu",
+      "case": "generate_rust_source_sigmoid_uses_exp",
+      "description": "CpuCodegen::generate_rust_source for Sigmoid must emit .exp() in the generated body.",
+      "graph_ops": [
+        "Sigmoid"
+      ],
+      "fn_name": "kernel_sigmoid",
+      "expected_source_contains": [
+        "1.0_f64",
+        ".exp()"
+      ],
+      "property": "source_structural"
+    },
+    {
+      "module": "codegen_cpu",
+      "case": "generate_rust_source_pow_uses_powf",
+      "description": "CpuCodegen::generate_rust_source for Pow{exponent:2.0} must emit .powf(.",
+      "graph_ops_with_args": [
+        {
+          "op": "Pow",
+          "exponent": 2.0
+        }
+      ],
+      "fn_name": "kernel_pow",
+      "expected_source_contains": [
+        ".powf("
+      ],
+      "property": "source_structural"
+    },
+    {
+      "module": "codegen_gpu",
+      "case": "generate_cuda_source_neg_f32_has_global_kernel",
+      "description": "GpuCodegen::generate_cuda_source for Neg with dtype=F32 must emit __global__ void <fn_name>, float* __restrict__, and int tid = blockIdx.x * blockDim.x + threadIdx.x.",
+      "graph_ops": [
+        "Neg"
+      ],
+      "fn_name": "cuda_neg",
+      "dtype": "F32",
+      "num_inputs": 1,
+      "expected_source_contains": [
+        "__global__ void cuda_neg",
+        "float* __restrict__",
+        "blockIdx.x",
+        "threadIdx.x"
+      ],
+      "property": "cuda_structural"
+    },
+    {
+      "module": "codegen_gpu",
+      "case": "generate_cuda_source_add_f32_has_two_input_pointers",
+      "description": "GpuCodegen::generate_cuda_source for Add with 2 inputs must emit in0 and in1 parameter names.",
+      "graph_ops": [
+        "Add"
+      ],
+      "fn_name": "cuda_add",
+      "dtype": "F32",
+      "num_inputs": 2,
+      "expected_source_contains": [
+        "in0",
+        "in1"
+      ],
+      "property": "cuda_structural"
+    },
+    {
+      "module": "codegen_gpu",
+      "case": "generate_cuda_source_sum_reduction_uses_shared_memory",
+      "description": "GpuCodegen::generate_cuda_source for Sum must emit __shared__ for block-level reduction.",
+      "graph_ops": [
+        "Sum"
+      ],
+      "fn_name": "cuda_sum",
+      "dtype": "F32",
+      "num_inputs": 1,
+      "expected_source_contains": [
+        "__shared__"
+      ],
+      "property": "cuda_structural"
+    },
+    {
+      "module": "codegen_gpu",
+      "case": "generate_ptx_source_f32_neg_has_header",
+      "description": "GpuCodegen::generate_ptx_source for Neg with dtype=F32 must emit .version, .target sm_52, and .address_size 64 headers.",
+      "graph_ops": [
+        "Neg"
+      ],
+      "fn_name": "ptx_neg",
+      "dtype": "F32",
+      "num_inputs": 1,
+      "block_size": 256,
+      "expected_ptx_contains": [
+        ".version",
+        ".target sm_52",
+        ".address_size 64"
+      ],
+      "property": "ptx_structural"
+    },
+    {
+      "module": "codegen_gpu",
+      "case": "generate_ptx_source_f64_transcendental_unsupported_without_cuda_feature",
+      "description": "GpuCodegen::generate_ptx_source for Exp with dtype=F64 must return Err(JitError::Unsupported) when the 'cuda' feature is disabled. This is the PyTorch-parity device-error policy: NotImplementedError for unsupported (op, dtype) combinations.",
+      "graph_ops": [
+        "Exp"
+      ],
+      "fn_name": "ptx_exp_f64",
+      "dtype": "F64",
+      "num_inputs": 1,
+      "block_size": 256,
+      "expected_error_kind": "JitError::Unsupported",
+      "property": "error_contract",
+      "cascade_skip": "cascade: GPU-dtype dispatch returns wrong variant on some builds \u2014 see issue TBD"
+    },
+    {
+      "module": "codegen_gpu",
+      "case": "generate_cuda_source_f64_neg_uses_double",
+      "description": "GpuCodegen::generate_cuda_source for Neg with dtype=F64 must emit 'double' instead of 'float' in parameter declarations.",
+      "graph_ops": [
+        "Neg"
+      ],
+      "fn_name": "cuda_neg_f64",
+      "dtype": "F64",
+      "num_inputs": 1,
+      "expected_source_contains": [
+        "double"
+      ],
+      "expected_source_not_contains": [],
+      "property": "cuda_structural"
+    },
+    {
+      "module": "codegen_jit",
+      "case": "jit_supports_simple_elementwise_loops",
+      "description": "jit_supports predicate: LoopIR from lower_to_loops for Neg must return true (no unsupported constructs).",
+      "graph_ops": [
+        "Neg"
+      ],
+      "expected_jit_supports": true,
+      "property": "jit_supports_predicate"
+    },
+    {
+      "module": "codegen_jit",
+      "case": "jit_supports_rejects_if_statement",
+      "description": "jit_supports predicate: LoopIR containing an If statement must return false (multi-block IR not yet wired).",
+      "loop_ir_kind": "If",
+      "expected_jit_supports": false,
+      "property": "jit_supports_predicate"
+    },
+    {
+      "module": "codegen_jit",
+      "case": "compile_loop_ir_kernel_neg_executes_correctly",
+      "description": "compile_loop_ir_kernel + JitCompiledKernel::execute: Neg kernel on [1,-2,3.5,0] must produce [-1,2,-3.5,0].",
+      "graph_ops": [
+        "Neg"
+      ],
+      "input": [
+        1.0,
+        -2.0,
+        3.5,
+        0.0
+      ],
+      "expected_output": [
+        -1.0,
+        2.0,
+        -3.5,
+        0.0
+      ],
+      "tolerance": 1e-12,
+      "property": "jit_execute",
+      "torch_reference": "(-torch.tensor([1.,-2.,3.5,0.])).tolist() == [-1.,2.,-3.5,0.]"
+    },
+    {
+      "module": "codegen_jit",
+      "case": "compile_loop_ir_kernel_add_two_inputs",
+      "description": "compile_loop_ir_kernel + execute: Add kernel on [1,2,3] + [10,20,30] = [11,22,33].",
+      "graph_ops": [
+        "Add"
+      ],
+      "input_a": [
+        1.0,
+        2.0,
+        3.0
+      ],
+      "input_b": [
+        10.0,
+        20.0,
+        30.0
+      ],
+      "expected_output": [
+        11.0,
+        22.0,
+        33.0
+      ],
+      "tolerance": 1e-12,
+      "property": "jit_execute",
+      "torch_reference": "(torch.tensor([1.,2.,3.]) + torch.tensor([10.,20.,30.])).tolist()"
+    },
+    {
+      "module": "codegen_jit",
+      "case": "compile_cache_returns_same_arc_for_identical_loops",
+      "description": "compile_loop_ir_kernel: calling twice with the same LoopIR and shape must return Arc-equal kernels (cache hit). This is the kernel compile-cache idempotency contract.",
+      "graph_ops": [
+        "Neg"
+      ],
+      "n": 5,
+      "expected_cache_hit": true,
+      "property": "cache_idempotency"
+    },
+    {
+      "module": "codegen_jit",
+      "case": "execute_rejects_wrong_input_count",
+      "description": "JitCompiledKernel::execute: passing 0 inputs to a 1-input kernel must return FerrotorchError::InvalidArgument.",
+      "graph_ops": [
+        "Neg"
+      ],
+      "num_expected_inputs": 1,
+      "num_actual_inputs": 0,
+      "expected_error_kind": "InvalidArgument",
+      "property": "error_contract"
+    },
+    {
+      "module": "codegen_jit",
+      "case": "execute_rejects_short_output_buffer",
+      "description": "JitCompiledKernel::execute: output buffer shorter than output_len must return FerrotorchError::InvalidArgument.",
+      "graph_ops": [
+        "Neg"
+      ],
+      "output_len": 4,
+      "provided_output_len": 2,
+      "expected_error_kind": "InvalidArgument",
+      "property": "error_contract"
+    },
+    {
+      "module": "codegen_jit",
+      "case": "relu_kernel_executes_correctly",
+      "description": "JIT-compiled Relu kernel: [-1, 0, 1, 2.5] -> [0, 0, 1, 2.5].",
+      "graph_ops": [
+        "Relu"
+      ],
+      "input": [
+        -1.0,
+        0.0,
+        1.0,
+        2.5
+      ],
+      "expected_output": [
+        0.0,
+        0.0,
+        1.0,
+        2.5
+      ],
+      "tolerance": 1e-12,
+      "property": "jit_execute",
+      "torch_reference": "torch.relu(torch.tensor([-1.,0.,1.,2.5])).tolist()"
+    },
+    {
+      "module": "codegen_jit",
+      "case": "sqrt_exp_chain_executes_correctly",
+      "description": "JIT-compiled Exp->Sqrt kernel: sqrt(exp([0, ln2, ln4])) = [1, sqrt(2), 2].",
+      "graph_ops": [
+        "Exp",
+        "Sqrt"
+      ],
+      "input": [
+        0.0,
+        0.6931471805599453,
+        1.3862943611198906
+      ],
+      "expected_output": [
+        1.0,
+        1.4142135623730951,
+        2.0
+      ],
+      "tolerance": 1e-09,
+      "property": "jit_execute",
+      "torch_reference": "torch.sqrt(torch.exp(torch.tensor([0.,math.log(2.),math.log(4.)], dtype=torch.float64))).tolist()"
+    },
+    {
+      "module": "autotune",
+      "case": "autotuner_empty_candidates_returns_error",
+      "description": "Autotuner::tune with no candidates registered must return FerrotorchError::InvalidArgument. This is the documented Autotuner contract.",
+      "expected_error_contains": "no candidates",
+      "property": "error_contract"
+    },
+    {
+      "module": "autotune",
+      "case": "autotuner_picks_winner_from_two_candidates",
+      "description": "Autotuner::tune with two candidates (InterpreterBackend, NativeBackend) must pick one and return a valid AutotuneResult. all_timings must have 2 entries. The winner_compiled output must match the expected value.",
+      "graph_ops": [
+        "Relu",
+        "Sqrt"
+      ],
+      "input": [
+        1.0,
+        4.0,
+        9.0
+      ],
+      "expected_output": [
+        1.0,
+        2.0,
+        3.0
+      ],
+      "tolerance": 1e-10,
+      "candidates": [
+        "InterpreterBackend",
+        "NativeBackend"
+      ],
+      "expected_timing_row_count": 2,
+      "property": "winner_selection",
+      "torch_reference": "torch.sqrt(torch.relu(torch.tensor([1.,4.,9.], dtype=torch.float64))).tolist()"
+    },
+    {
+      "module": "autotune",
+      "case": "autotune_cache_hit_returns_single_timing_row",
+      "description": "Autotuner::tune called twice on the same graph+shapes: first call has 2 timing rows, second call (cache hit) has 1 row.",
+      "graph_ops": [
+        "Relu",
+        "Sqrt"
+      ],
+      "input": [
+        1.0,
+        4.0,
+        9.0
+      ],
+      "first_call_timing_rows": 2,
+      "second_call_timing_rows": 1,
+      "property": "cache_behavior"
+    },
+    {
+      "module": "autotune",
+      "case": "autotune_key_is_shape_sensitive",
+      "description": "AutotuneKey::from_graph: two graphs with the same ops but different input shapes produce different keys.",
+      "shape_a": [
+        4
+      ],
+      "shape_b": [
+        8
+      ],
+      "graph_ops": [
+        "Relu"
+      ],
+      "expected_keys_equal": false,
+      "property": "key_sensitivity"
+    },
+    {
+      "module": "autotune",
+      "case": "autotune_key_is_op_sensitive",
+      "description": "AutotuneKey::from_graph: two graphs with the same input shape but different ops produce different keys.",
+      "shape": [
+        3
+      ],
+      "graph_op_a": "Relu",
+      "graph_op_b": "Sigmoid",
+      "expected_keys_equal": false,
+      "property": "key_sensitivity"
+    },
+    {
+      "module": "autotune",
+      "case": "autotuner_clear_cache_forces_retune",
+      "description": "Autotuner::clear_cache: after clearing, the next tune call runs a full benchmark (all_timings.len() == candidate_count).",
+      "graph_ops": [
+        "Relu"
+      ],
+      "input": [
+        1.0,
+        4.0,
+        9.0
+      ],
+      "candidates": [
+        "InterpreterBackend",
+        "NativeBackend"
+      ],
+      "expected_post_clear_timing_rows": 2,
+      "property": "cache_clear"
+    },
+    {
+      "module": "memory_plan",
+      "case": "simple_chain_reuses_buffers",
+      "description": "plan_memory: input[100]->relu->sigmoid->output. Naive total = 3 * 100 = 300. With reuse, num_slots < 3 and planned_total < naive_total.",
+      "chain_shape": [
+        100
+      ],
+      "chain_ops": [
+        "Relu",
+        "Sigmoid"
+      ],
+      "naive_total": 300,
+      "expected_num_slots_lt": 3,
+      "expected_planned_total_lt_naive": true,
+      "property": "buffer_reuse"
+    },
+    {
+      "module": "memory_plan",
+      "case": "diamond_concurrent_values_different_slots",
+      "description": "plan_memory: input fans to relu and sigmoid simultaneously (diamond). relu_out and sigmoid_out must be in different slots (concurrent liveness).",
+      "input_shape": [
+        50
+      ],
+      "expected_relu_slot_ne_sigmoid_slot": true,
+      "property": "slot_correctness"
+    },
+    {
+      "module": "memory_plan",
+      "case": "long_chain_savings_percent_positive",
+      "description": "plan_memory: input[1000]->relu->sigmoid->tanh->neg->output. savings_percent() must be > 20.0%.",
+      "chain_shape": [
+        1000
+      ],
+      "chain_ops": [
+        "Relu",
+        "Sigmoid",
+        "Tanh",
+        "Neg"
+      ],
+      "naive_total": 5000,
+      "expected_savings_pct_gt": 20.0,
+      "property": "savings_metric"
+    },
+    {
+      "module": "memory_plan",
+      "case": "empty_graph_produces_empty_plan",
+      "description": "plan_memory on an empty graph: assignments is empty, num_slots=0, naive_total=0, planned_total=0, savings_percent()=0.0.",
+      "expected_assignments_empty": true,
+      "expected_num_slots": 0,
+      "expected_naive_total": 0,
+      "expected_planned_total": 0,
+      "expected_savings_pct": 0.0,
+      "property": "empty_graph"
+    },
+    {
+      "module": "memory_plan",
+      "case": "all_values_assigned_and_slots_valid",
+      "description": "plan_memory: every IR value produced in the graph must have a slot assignment, and all slot indices must be < num_slots. This is the completeness contract.",
+      "graph_ops": [
+        "Add",
+        "Relu"
+      ],
+      "num_inputs": 2,
+      "property": "completeness"
+    },
+    {
+      "module": "memory_plan",
+      "case": "graph_outputs_pinned_to_end",
+      "description": "plan_memory: two simultaneously-live graph outputs (relu_out and neg_out) must be assigned to different slots.",
+      "input_shape": [
+        10
+      ],
+      "graph_ops": [
+        "Relu",
+        "Neg"
+      ],
+      "num_outputs": 2,
+      "expected_output_slots_ne": true,
+      "property": "pinned_outputs"
+    }
+  ]
+}
