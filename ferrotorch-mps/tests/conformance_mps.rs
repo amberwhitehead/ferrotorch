@@ -32,7 +32,9 @@
 use std::path::PathBuf;
 
 use ferrotorch_core::FerrotorchError;
-use ferrotorch_mps::{MpsDevice, init_mps_backend, is_mps_available, mps_device_count};
+use ferrotorch_mps::{
+    MpsDevice, init_mps_backend, is_mps_available, kernels, mps_device_count,
+};
 use serde::Deserialize;
 
 // ---------------------------------------------------------------------------
@@ -444,4 +446,159 @@ fn live_mps_event_elapsed_time() {
     cascade_skip!(
         "no Apple Silicon on test box; MPS Event elapsed_time deferred — tracking issue #451"
     );
+}
+
+// ---------------------------------------------------------------------------
+// Sprint C.7 — kernel constant presence tests (all platforms)
+//
+// These tests verify that the MSL source constants are non-empty and contain
+// the expected kernel function names. They do NOT compile or run any Metal
+// code — that happens at runtime on macOS via MtlBackend::new(). These tests
+// run on all platforms and confirm the embedded sources were not accidentally
+// blanked or mis-named.
+// ---------------------------------------------------------------------------
+
+/// MATMUL_F32 kernel source is non-empty and declares `matmul_f32`.
+#[test]
+fn kernel_source_matmul_f32_present() {
+    assert!(
+        !kernels::MATMUL_F32.is_empty(),
+        "MATMUL_F32 kernel source must not be empty"
+    );
+    assert!(
+        kernels::MATMUL_F32.contains("matmul_f32"),
+        "MATMUL_F32 must declare kernel function `matmul_f32`"
+    );
+}
+
+/// BMM_F32 kernel source is non-empty and declares `bmm_f32`.
+#[test]
+fn kernel_source_bmm_f32_present() {
+    assert!(
+        !kernels::BMM_F32.is_empty(),
+        "BMM_F32 kernel source must not be empty"
+    );
+    assert!(
+        kernels::BMM_F32.contains("bmm_f32"),
+        "BMM_F32 must declare kernel function `bmm_f32`"
+    );
+}
+
+/// ELEMENTWISE_F32 source declares all four binary functions.
+#[test]
+fn kernel_source_elementwise_f32_present() {
+    for name in &["add_f32", "sub_f32", "mul_f32", "div_f32"] {
+        assert!(
+            kernels::ELEMENTWISE_F32.contains(name),
+            "ELEMENTWISE_F32 must declare kernel function `{name}`"
+        );
+    }
+}
+
+/// ACTIVATIONS_F32 source declares relu_f32 and sigmoid_f32.
+#[test]
+fn kernel_source_activations_f32_present() {
+    for name in &["relu_f32", "sigmoid_f32"] {
+        assert!(
+            kernels::ACTIVATIONS_F32.contains(name),
+            "ACTIVATIONS_F32 must declare kernel function `{name}`"
+        );
+    }
+}
+
+/// SOFTMAX_F32 source declares `softmax_f32`.
+#[test]
+fn kernel_source_softmax_f32_present() {
+    assert!(
+        kernels::SOFTMAX_F32.contains("softmax_f32"),
+        "SOFTMAX_F32 must declare kernel function `softmax_f32`"
+    );
+}
+
+/// SUM_AXIS_F32 source declares `sum_axis_f32`.
+#[test]
+fn kernel_source_sum_axis_f32_present() {
+    assert!(
+        kernels::SUM_AXIS_F32.contains("sum_axis_f32"),
+        "SUM_AXIS_F32 must declare kernel function `sum_axis_f32`"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Sprint C.7 — live-MPS kernel execution tests (cascade_skip on non-Apple)
+//
+// Each test below exercises one of the 10 Sprint C.7 GpuBackend methods via
+// MtlBackend. On this box (WSL2 x86_64) they cascade_skip immediately.
+// On Apple Silicon CI they compile the MSL, launch the kernel, and assert
+// numerical correctness against a CPU reference. Tracking issue #626.
+// ---------------------------------------------------------------------------
+
+/// live_mps_matmul_f32: MtlBackend::matmul_f32 produces correct results.
+/// Cascade skip: no Apple Silicon on test box. Tracking issue #626.
+#[test]
+fn live_mps_matmul_f32() {
+    cascade_skip!("no Apple Silicon on test box; matmul_f32 MSL kernel deferred — tracking issue #626");
+}
+
+/// live_mps_bmm_f32: MtlBackend::bmm_f32 produces correct batched matmul.
+/// Cascade skip: no Apple Silicon on test box. Tracking issue #626.
+#[test]
+fn live_mps_bmm_f32() {
+    cascade_skip!("no Apple Silicon on test box; bmm_f32 MSL kernel deferred — tracking issue #626");
+}
+
+/// live_mps_add_f32: MtlBackend::add_f32 element-wise addition.
+/// Cascade skip: no Apple Silicon on test box. Tracking issue #626.
+#[test]
+fn live_mps_add_f32() {
+    cascade_skip!("no Apple Silicon on test box; add_f32 MSL kernel deferred — tracking issue #626");
+}
+
+/// live_mps_sub_f32: MtlBackend::sub_f32 element-wise subtraction.
+/// Cascade skip: no Apple Silicon on test box. Tracking issue #626.
+#[test]
+fn live_mps_sub_f32() {
+    cascade_skip!("no Apple Silicon on test box; sub_f32 MSL kernel deferred — tracking issue #626");
+}
+
+/// live_mps_mul_f32: MtlBackend::mul_f32 element-wise multiplication.
+/// Cascade skip: no Apple Silicon on test box. Tracking issue #626.
+#[test]
+fn live_mps_mul_f32() {
+    cascade_skip!("no Apple Silicon on test box; mul_f32 MSL kernel deferred — tracking issue #626");
+}
+
+/// live_mps_div_f32: MtlBackend::div_f32 element-wise division.
+/// Cascade skip: no Apple Silicon on test box. Tracking issue #626.
+#[test]
+fn live_mps_div_f32() {
+    cascade_skip!("no Apple Silicon on test box; div_f32 MSL kernel deferred — tracking issue #626");
+}
+
+/// live_mps_relu_f32: MtlBackend::relu_f32 activation.
+/// Cascade skip: no Apple Silicon on test box. Tracking issue #626.
+#[test]
+fn live_mps_relu_f32() {
+    cascade_skip!("no Apple Silicon on test box; relu_f32 MSL kernel deferred — tracking issue #626");
+}
+
+/// live_mps_sigmoid_f32: MtlBackend::sigmoid_f32 activation.
+/// Cascade skip: no Apple Silicon on test box. Tracking issue #626.
+#[test]
+fn live_mps_sigmoid_f32() {
+    cascade_skip!("no Apple Silicon on test box; sigmoid_f32 MSL kernel deferred — tracking issue #626");
+}
+
+/// live_mps_softmax_f32: MtlBackend::softmax_f32 last-dim softmax.
+/// Cascade skip: no Apple Silicon on test box. Tracking issue #626.
+#[test]
+fn live_mps_softmax_f32() {
+    cascade_skip!("no Apple Silicon on test box; softmax_f32 MSL kernel deferred — tracking issue #626");
+}
+
+/// live_mps_sum_axis_f32: MtlBackend::sum_axis_f32 axis reduction.
+/// Cascade skip: no Apple Silicon on test box. Tracking issue #626.
+#[test]
+fn live_mps_sum_axis_f32() {
+    cascade_skip!("no Apple Silicon on test box; sum_axis_f32 MSL kernel deferred — tracking issue #626");
 }

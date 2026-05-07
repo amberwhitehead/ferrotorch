@@ -5,5 +5,18 @@
 # Format mirrors ferrotorch-core's _surface_exclusions.toml.
 # tracking_issue must be #NNN or a full https:// URL — "TBD"/"pending"/etc. fail the gate.
 #
-# Current exclusions: 0
-# Every inventoried item is covered by conformance_mps.rs directly.
+# Sprint C.7 exclusions: MtlBackend and MtlBackend::new are cfg(target_os="macos").
+# The conformance test suite runs on Linux/WSL (no Apple hardware); these items
+# cannot be exercised here. The live-MPS conformance tests in conformance_mps.rs
+# cascade_skip on non-Apple platforms per Sprint A.1 pattern.
+# Follow-up: macOS CI runner will un-skip them (#626).
+
+[[exclusion]]
+path = "ferrotorch_mps::MtlBackend"
+reason = "cfg(target_os='macos') — absent on Linux/WSL test box. Covered by cascade_skip tests in conformance_mps.rs; live execution requires Apple Silicon CI (#626)."
+tracking_issue = "#626"
+
+[[exclusion]]
+path = "ferrotorch_mps::MtlBackend::new"
+reason = "cfg(target_os='macos') — absent on Linux/WSL test box. Covered by cascade_skip tests in conformance_mps.rs; live execution requires Apple Silicon CI (#626)."
+tracking_issue = "#626"

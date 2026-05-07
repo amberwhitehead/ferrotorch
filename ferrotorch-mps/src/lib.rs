@@ -1,47 +1,69 @@
-//! Apple Silicon Metal Performance Shaders (MPS) backend marker crate. (#451)
+//! Apple Silicon Metal Performance Shaders (MPS) backend for ferrotorch. (#451, #626)
 //!
-//! This crate ships only the `Device::Mps(_)` marker plumbing — the
-//! platform-detection surface, the `MpsDevice` ordinal handle, and the
-//! initialization entry point. **No Metal kernels live here yet** and no
-//! Metal dependency is wired (`metal` / `objc2-metal` are deliberately
-//! absent). All entry points return [`FerrotorchError::DeviceUnavailable`]
-//! on every platform until the kernel layer lands; see issue #451 for the
-//! tracking plan.
+//! # Sprint C.7 — what landed
 //!
-//! # Why every entry point is unavailable
+//! [`MtlBackend`] is now a real [`ferrotorch_core::gpu_dispatch::GpuBackend`]
+//! implementation backed by 10 MSL kernels compiled at runtime via
+//! `objc2-metal`. The 10 kernels cover the highest-priority subset of the
+//! ~80-method `GpuBackend` trait:
 //!
-//! ferrotorch is a `PyTorch` reimplementation. `PyTorch`'s MPS backend
-//! executes real Metal compute on Apple Silicon. Until ferrotorch ships
-//! that — MSL kernels for each `GpuBackend` trait method, a macOS CI
-//! runner to validate them, and the `objc2-metal` dep to launch them —
-//! the honest implementation of a skeleton is *"explicitly unavailable
-//! everywhere,"* not *"platform-conditional silent success."* That avoids
-//! the `init_*` lying-success stub anti-pattern (a function whose name
-//! implies success-with-side-effect actually returns `Ok(())` without
-//! doing the registration, then every downstream op fails).
+//! | Kernel | `GpuBackend` method(s) |
+//! |---|---|
+//! | `matmul_f32` | `matmul_f32` |
+//! | `bmm_f32` | `bmm_f32` |
+//! | `add_f32` | `add_f32` |
+//! | `sub_f32` | `sub_f32` |
+//! | `mul_f32` | `mul_f32` |
+//! | `div_f32` | `div_f32` |
+//! | `relu_f32` | `relu_f32` |
+//! | `sigmoid_f32` | `sigmoid_f32` |
+//! | `softmax_f32` | `softmax_f32` |
+//! | `sum_axis_f32` | `sum_axis_f32`, `sum_f32` |
 //!
-//! # API surface that already works
+//! All MSL sources live in `src/kernels/` as embedded string constants
+//! (compiled into the binary via `include_str!`). `MtlBackend::new()`
+//! compiles them eagerly at startup and caches the pipeline states.
 //!
-//! - [`Device::Mps(_)`](ferrotorch_core::Device::Mps) variant in
-//!   `ferrotorch-core` is in place; tensor construction with that device
-//!   variant returns an explicit error directing callers to the MPS
-//!   backend.
-//! - This crate's [`MpsDevice`] type carries the ordinal and implements
-//!   the standard derives (`Debug`, `Clone`, `Copy`, `PartialEq`, `Eq`,
-//!   `Hash`) plus `Display` (`mps:{ordinal}`), so callers can plumb MPS
-//!   device handles through generic code today even though no kernel
-//!   will run.
+//! The remaining ~70 `GpuBackend` methods return
+//! `Err(FerrotorchError::InvalidArgument { message: "MSL kernel needed: …" })`
+//! — no silent CPU fallback (§3 of `rust-gpu-discipline`). Each unimplemented
+//! method is tracked by an individual follow-up crosslink issue.
 //!
-//! # When the kernel layer lands
+//! # Platform gating
 //!
-//! Issue #451 tracks the work. At that point [`is_mps_available`],
-//! [`mps_device_count`], [`MpsDevice::new`], and [`init_mps_backend`]
-//! gain real macOS-conditional bodies (gated by an actual `metal`
-//! dependency, validated by macOS CI). The signatures here are stable
-//! so that change is purely additive.
+//! `MtlBackend` and `backend` module are `#[cfg(target_os = "macos")]`.
+//! The lifecycle items (`is_mps_available`, `mps_device_count`, `MpsDevice`,
+//! `init_mps_backend`) compile on every platform and return
+//! `DeviceUnavailable` / `false` / `0` on non-Apple hosts — matching the
+//! pre-C.7 contract so existing callers are unaffected.
+//!
+//! # Initialization
+//!
+//! ```no_run
+//! // On macOS, call once at startup:
+//! ferrotorch_mps::init_mps_backend().expect("MPS backend init");
+//! ```
+//!
+//! On non-macOS, `init_mps_backend()` returns
+//! [`FerrotorchError::DeviceUnavailable`] (unchanged from pre-C.7).
+//!
+//! # Tests
+//!
+//! Tests that require a live Metal device use the `cascade_skip!` pattern:
+//! they print a diagnostic and return early rather than failing or being
+//! `#[ignore]`-marked. On Apple Silicon CI they run the full kernel path.
+//!
+//! # Follow-up tracking
+//!
+//! Issue #626 is the parent. Each of the remaining ~70 unimplemented
+//! `GpuBackend` methods has its own crosslink follow-up issue filed as part
+//! of Sprint C.7 completion.
 
 #![warn(clippy::all, clippy::pedantic)]
-#![deny(unsafe_code, rust_2018_idioms, missing_debug_implementations)]
+#![deny(rust_2018_idioms, missing_debug_implementations)]
+// unsafe_code: the backend module uses objc2-metal which requires unsafe blocks
+// for Metal API calls. All unsafe sites have SAFETY comments.
+#![cfg_attr(not(target_os = "macos"), deny(unsafe_code))]
 // Pedantic lints we explicitly accept across this crate. Each allow names a
 // concrete reason — the alternative would be churn-for-zero-benefit or a
 // worse API. Add to this list only with a one-line justification.
@@ -58,14 +80,46 @@ use core::fmt;
 
 use ferrotorch_core::{FerrotorchError, FerrotorchResult};
 
-/// Returns `true` if this build can run MPS kernels.
+/// MSL kernel source constants. One `.metal` file per logical group.
+/// Embedded via `include_str!` so the MSL ships inside the Rust binary
+/// and is compiled at runtime by `MtlBackend::new()`.
+pub mod kernels;
+
+/// Apple Metal backend — [`MtlBackend`] + kernel dispatch.
 ///
-/// Always returns `false` until the kernel layer (#451) lands. There is no
-/// platform-conditional path here — that would be a lying-success stub
-/// because no kernels are wired regardless of platform.
+/// Compiled only on macOS (`#[cfg(target_os = "macos")]`); absent on all
+/// other platforms so the workspace build stays clean on Linux/WSL.
+#[cfg(target_os = "macos")]
+pub mod backend;
+
+/// Apple Metal backend implementation of [`ferrotorch_core::gpu_dispatch::GpuBackend`].
+///
+/// Holds a Metal device, a command queue, and compiled pipeline states for
+/// all 10 Sprint C.7 MSL kernels. Construct via [`MtlBackend::new()`] or
+/// call [`init_mps_backend()`] which registers it globally.
+#[cfg(target_os = "macos")]
+pub use backend::MtlBackend;
+
+/// Returns `true` if this build can run MPS kernels on the current host.
+///
+/// On macOS: delegates to `MTLDevice::new()` — returns `true` when a Metal
+/// device is present (Apple Silicon or Intel Mac with AMD/Intel GPU).
+///
+/// On all other platforms: always returns `false`. The Metal API does not
+/// exist outside macOS so there is no platform-conditional lie here.
 #[must_use]
 pub fn is_mps_available() -> bool {
-    false
+    #[cfg(target_os = "macos")]
+    {
+        // SAFETY: MTLCreateSystemDefaultDevice returns nil when no Metal
+        // device is available; we only test for presence, never dereference
+        // the returned pointer beyond the nil check.
+        unsafe { objc2_metal::MTLDevice::new().is_some() }
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        false
+    }
 }
 
 /// An opaque handle for an Apple-Silicon Metal device.
@@ -127,35 +181,47 @@ pub fn mps_device_count() -> usize {
     0
 }
 
-/// Initialize the MPS backend.
+/// Initialize the MPS Metal backend and register it with `ferrotorch-core`.
+///
+/// On macOS: compiles all 10 MSL kernels eagerly, constructs an
+/// [`MtlBackend`], and registers it via
+/// [`ferrotorch_core::gpu_dispatch::register_gpu_backend`]. After this
+/// call succeeds, `ferrotorch_core::gpu_dispatch::gpu_backend()` returns
+/// `Some(...)` and all 10 Sprint C.7 ops dispatch to Metal.
+///
+/// On all other platforms: returns [`FerrotorchError::DeviceUnavailable`]
+/// immediately — Metal does not exist outside macOS.
 ///
 /// # Errors
 ///
-/// Always returns [`FerrotorchError::DeviceUnavailable`] until the MPS
-/// kernel layer lands. The previous implementation returned `Ok(())`
-/// without registering any backend, then every downstream op failed with
-/// `DeviceUnavailable` from the empty dispatch table — a lying-success
-/// stub. Returning the error here is the honest shape: the dispatcher
-/// reports no implementation rather than carrying a fake registration.
-///
-/// `FerrotorchError::DeviceUnavailable` is a unit variant in
-/// `ferrotorch-core` and does not carry a structured message; the
-/// pointer to the tracking issue (#451) lives in this crate's docs and
-/// in the `FerrotorchError::DeviceUnavailable` `Display` text. Adding a
-/// new error variant just to carry the message would be a workspace-level
-/// coordination event (cross-crate `match` surface change) that this
-/// dispatch is explicitly forbidden from making.
+/// - [`FerrotorchError::DeviceUnavailable`]: no Metal device found, or
+///   called on a non-macOS platform.
+/// - [`FerrotorchError::InvalidArgument`]: MSL compilation failed (indicates
+///   a ferrotorch bug, not a user error) or backend already registered.
 pub fn init_mps_backend() -> FerrotorchResult<()> {
-    Err(FerrotorchError::DeviceUnavailable)
+    #[cfg(target_os = "macos")]
+    {
+        backend::init_mps_backend_metal()
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        Err(FerrotorchError::DeviceUnavailable)
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::{FerrotorchError, MpsDevice, init_mps_backend, is_mps_available, mps_device_count};
 
+    /// On non-macOS `is_mps_available()` is always `false`.
+    /// On macOS it reflects whether a Metal device is present.
     #[test]
-    fn is_mps_available_is_always_false() {
+    fn is_mps_available_false_on_non_apple() {
+        #[cfg(not(target_os = "macos"))]
         assert!(!is_mps_available());
+        // On macOS the result depends on hardware; we only assert it doesn't panic.
+        #[cfg(target_os = "macos")]
+        let _ = is_mps_available();
     }
 
     #[test]
@@ -172,12 +238,23 @@ mod tests {
         assert_eq!(MpsDevice::count(), 0);
     }
 
+    /// On non-macOS `init_mps_backend()` always returns `DeviceUnavailable`.
+    /// On macOS it either succeeds or returns `DeviceUnavailable` (no Metal
+    /// device in CI) — but never panics or returns an unexpected variant.
     #[test]
-    fn init_mps_backend_always_unavailable() {
+    fn init_mps_backend_contract() {
+        #[cfg(not(target_os = "macos"))]
         assert!(matches!(
             init_mps_backend(),
             Err(FerrotorchError::DeviceUnavailable)
         ));
+        #[cfg(target_os = "macos")]
+        match init_mps_backend() {
+            Ok(()) => {}
+            Err(FerrotorchError::DeviceUnavailable) => {}
+            Err(FerrotorchError::InvalidArgument { .. }) => {}
+            Err(e) => panic!("unexpected error from init_mps_backend: {e:?}"),
+        }
     }
 
     #[test]

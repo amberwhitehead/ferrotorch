@@ -13,6 +13,16 @@ categories.workspace = true
 
 [dependencies]
 ferrotorch-core = { workspace = true }
+tracing = { workspace = true }
+
+# objc2-metal is gated to macOS: it exposes the Metal API which only exists
+# on Apple platforms. On Linux/WSL the dep is absent so the workspace build
+# stays clean. The version matches what is already resolved in Cargo.lock
+# (pulled in transitively by other workspace members).
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2-metal = "0.3.2"
+objc2-foundation = "0.3.2"
+objc2 = "0.6.4"
 
 [dev-dependencies]
 serde = { workspace = true }
