@@ -133,6 +133,8 @@ struct Fixture {
     #[serde(default)]
     shape: Option<Vec<usize>>,
     #[serde(default)]
+    input_shape: Option<Vec<usize>>,
+    #[serde(default)]
     input_rank0: Option<Vec<f32>>,
     #[serde(default)]
     input_rank1: Option<Vec<f32>>,
@@ -153,8 +155,10 @@ struct Fixture {
     #[serde(default)]
     expected_members: Option<Vec<usize>>,
     #[serde(default)]
+    #[allow(dead_code, reason = "metadata kept for diagnostics")]
     mesh_shape: Option<Vec<usize>>,
     #[serde(default)]
+    #[allow(dead_code, reason = "metadata kept for diagnostics")]
     mesh_world_size: Option<usize>,
     #[serde(default)]
     expected_ndim: Option<usize>,
@@ -678,12 +682,7 @@ fn all_gather_world_size_1_is_identity() {
 /// `all_gather` with `world_size=2` must concatenate tensors from all ranks.
 /// Reference: torch.distributed.all_gather concatenates along dim 0.
 #[test]
-#[allow(unreachable_code)]
 fn all_gather_world_size_2_matches_reference() {
-    cascade_skip!(
-        "fixture key mismatch: fixture emits input_shape/expected_shape but test reads shape — \
-         PyTorch-parity divergence; tracking issue #853"
-    );
     let file = load_fixtures();
     let cases = fixtures_for(&file, "all_gather_world_size_2");
     assert!(!cases.is_empty(), "fixture all_gather_world_size_2 not found");
@@ -691,7 +690,7 @@ fn all_gather_world_size_2_matches_reference() {
     let f = cases[0];
     let input0 = f.input_rank0.clone().expect("fixture must have input_rank0");
     let input1 = f.input_rank1.clone().expect("fixture must have input_rank1");
-    let input_shape = f.shape.clone().expect("fixture must have shape");
+    let input_shape = f.input_shape.clone().expect("fixture must have input_shape");
     let expected = f.expected_all_ranks.clone().expect("fixture must have expected_all_ranks");
 
     let group = SimulatedBackend::create_group(2).unwrap();
@@ -745,12 +744,7 @@ fn reduce_scatter_world_size_1_sum_is_identity() {
 /// `reduce_scatter` with `world_size=2` and `op=Sum` must sum values then
 /// scatter chunks. Reference: torch.distributed.reduce_scatter.
 #[test]
-#[allow(unreachable_code)]
 fn reduce_scatter_world_size_2_sum_matches_reference() {
-    cascade_skip!(
-        "fixture key mismatch: fixture emits input_shape but test reads shape — \
-         PyTorch-parity divergence; tracking issue #854"
-    );
     let file = load_fixtures();
     let cases = fixtures_for(&file, "reduce_scatter_world_size_2_sum");
     assert!(!cases.is_empty(), "fixture reduce_scatter_world_size_2_sum not found");
@@ -758,7 +752,7 @@ fn reduce_scatter_world_size_2_sum_matches_reference() {
     let f = cases[0];
     let input0 = f.input_rank0.clone().expect("fixture must have input_rank0");
     let input1 = f.input_rank1.clone().expect("fixture must have input_rank1");
-    let input_shape = f.shape.clone().expect("fixture must have shape");
+    let input_shape = f.input_shape.clone().expect("fixture must have input_shape");
     let expected0 = f.expected_rank0.clone().expect("fixture must have expected_rank0");
     let expected1 = f.expected_rank1.clone().expect("fixture must have expected_rank1");
 
@@ -914,15 +908,7 @@ fn sendrecv_round_trip_matches_reference() {
 /// `SubBackend::members()` must return the member ranks it was created with.
 /// Reference: `torch.distributed.new_group(ranks=[...]).ranks()`.
 #[test]
-#[allow(unreachable_code)]
 fn sub_backend_members_matches_fixture() {
-    cascade_skip!(
-        "SubBackend::new rejects members [1,2,3] as invalid ranks — SimulatedBackend::create_group \
-         yields a world_size=4 group but the first backend has rank=0 (world_size=4), and \
-         SubBackend validates members against parent.world_size(); root cause is a world_size \
-         mismatch in the test harness vs. torch.distributed.new_group semantics — \
-         tracking issue #856"
-    );
     let file = load_fixtures();
     let cases = fixtures_for(&file, "SubBackend_members");
     assert!(!cases.is_empty(), "fixture SubBackend_members not found");
@@ -933,10 +919,12 @@ fn sub_backend_members_matches_fixture() {
     let expected_members = f.expected_members.clone().expect("fixture must have expected_members");
 
     let group = SimulatedBackend::create_group(world_size).unwrap();
-    let parent: Arc<dyn Backend> = Arc::new(group.into_iter().next().unwrap());
-    // SubBackend requires the parent to have the right world_size; create a
-    // fresh parent with world_size=4 via an Arc wrapping the first backend.
-    // We only need to verify members() and rank mapping, not actual collectives.
+    // Use the backend whose global rank matches the first member (rank 1) so
+    // that SubBackend::new can locate the caller's rank inside `members`.
+    let first_member = members[0];
+    let parent: Arc<dyn Backend> = Arc::new(
+        group.into_iter().nth(first_member).expect("group must have enough ranks"),
+    );
     let sub = SubBackend::new(parent, members).unwrap();
     assert_eq!(
         sub.members(),
@@ -948,14 +936,7 @@ fn sub_backend_members_matches_fixture() {
 /// `SubBackend::to_global` and `to_local` must map correctly.
 /// Reference: ProcessGroup rank-mapping semantics.
 #[test]
-#[allow(unreachable_code)]
 fn sub_backend_rank_mapping_matches_fixture() {
-    cascade_skip!(
-        "SubBackend::new rejects members [1,2,3] as invalid ranks — same world_size mismatch \
-         as sub_backend_members_matches_fixture; to_global/to_local parity with \
-         torch.distributed.ProcessGroup cannot be verified until construction succeeds — \
-         tracking issue #857"
-    );
     let file = load_fixtures();
     let cases = fixtures_for(&file, "SubBackend_rank_mapping");
     assert!(!cases.is_empty(), "fixture SubBackend_rank_mapping not found");
@@ -965,7 +946,12 @@ fn sub_backend_rank_mapping_matches_fixture() {
     let members = f.members.clone().expect("fixture must have members");
 
     let group = SimulatedBackend::create_group(world_size).unwrap();
-    let parent: Arc<dyn Backend> = Arc::new(group.into_iter().next().unwrap());
+    // Use the backend whose global rank matches the first member (rank 1) so
+    // that SubBackend::new can locate the caller's rank inside `members`.
+    let first_member = members[0];
+    let parent: Arc<dyn Backend> = Arc::new(
+        group.into_iter().nth(first_member).expect("group must have enough ranks"),
+    );
     let sub = SubBackend::new(parent, members.clone()).unwrap();
 
     // to_global(local) → global rank
@@ -1000,19 +986,14 @@ fn sub_backend_rank_mapping_matches_fixture() {
 /// `DeviceMesh::new` with valid shape×world_size must succeed.
 /// Reference: torch.distributed.DeviceMesh(device_type, [[0,1],[2,3]]).
 #[test]
-#[allow(unreachable_code)]
 fn device_mesh_new_valid_matches_fixture() {
-    cascade_skip!(
-        "fixture key mismatch: fixture emits shape/world_size but test reads mesh_shape/mesh_world_size — \
-         PyTorch-parity divergence; tracking issue #855"
-    );
     let file = load_fixtures();
     let cases = fixtures_for(&file, "DeviceMesh_new_valid");
     assert!(!cases.is_empty(), "fixture DeviceMesh_new_valid not found");
 
     let f = cases[0];
-    let shape = f.mesh_shape.clone().expect("fixture must have mesh_shape");
-    let world_size = f.mesh_world_size.expect("fixture must have mesh_world_size");
+    let shape = f.shape.clone().expect("fixture must have shape");
+    let world_size = f.world_size.expect("fixture must have world_size");
     let expected_ndim = f.expected_ndim.expect("fixture must have expected_ndim");
     let expected_size = f.expected_size.expect("fixture must have expected_size");
 
