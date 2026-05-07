@@ -6,13 +6,11 @@
 # tracking_issue must be #NNN or a full https:// URL — "TBD"/"pending"/etc. fail the gate.
 
 # ── AsyncCheckpointer ────────────────────────────────────────────────────────
-# AsyncCheckpointer requires a live async runtime (Tokio) and background thread
-# management; it cannot be exercised at the fixture level without a full async
-# executor wired up. Covered by integration tests in the workspace root.
-[[exclusion]]
-path = "ferrotorch_serialize::AsyncCheckpointer"
-reason = "Requires a live Tokio async runtime; not exercisable via fixture-level test. Covered transitively by integration tests in workspace root."
-tracking_issue = "#852"
+# Closed by #852: conformance_serialize_async.rs provides full conformance
+# tests for AsyncCheckpointer (save/wait/load round-trip, sequential saves,
+# is_saving() flag, Default, Debug, and invalid-path error propagation).
+# AsyncCheckpointer uses std::thread internally — no Tokio runtime needed.
+# (No exclusion entries remain for #852.)
 
 # ── GGUF file-format items ───────────────────────────────────────────────────
 # GgufFile, GgufMetadata, GgufTensorInfo, GgufValue, load_gguf, load_gguf_mmap,
@@ -105,55 +103,15 @@ reason = "Requires a live IrGraph from ferrotorch-jit; deferred to JIT conforman
 tracking_issue = "#849"
 
 # ── mmap load variants ───────────────────────────────────────────────────────
-# The mmap variants (load_pytorch_state_dict_mmap, load_safetensors_mmap,
-# load_safetensors_sharded_mmap) share the same deserialization path as their
-# non-mmap counterparts. The divergence is in the I/O layer (memmap2::Mmap vs
-# read_to_end), not the tensor reconstruction logic. Mmap requires a real
-# file-descriptor-backed mapping that works differently under WSL2 (no huge
-# pages, no DAX). These variants are covered by the non-mmap roundtrip tests
-# for correctness; a dedicated mmap integration test is tracked separately.
-[[exclusion]]
-path = "ferrotorch_serialize::load_pytorch_state_dict_mmap"
-reason = "Mmap I/O layer shares deserialization logic with load_pytorch_state_dict (covered); mmap-specific integration test tracked in #850."
-tracking_issue = "#850"
-
-[[exclusion]]
-path = "ferrotorch_serialize::load_safetensors_mmap"
-reason = "Mmap I/O layer shares deserialization logic with load_safetensors (covered); mmap-specific integration test tracked in #850."
-tracking_issue = "#850"
-
-[[exclusion]]
-path = "ferrotorch_serialize::load_safetensors_sharded_mmap"
-reason = "Mmap I/O layer shares deserialization logic with load_safetensors_sharded (covered); mmap-specific integration test tracked in #850."
-tracking_issue = "#850"
+# Closed by #850: conformance_serialize_mmap.rs provides full integration
+# tests for load_safetensors_mmap, load_safetensors_sharded_mmap, and
+# load_pytorch_state_dict_mmap (single-file round-trip, value parity with heap
+# loader, owned-data guarantee, missing-file error).
+# (No exclusion entries remain for #850.)
 
 # ── sharded / filtered / progress safetensors ────────────────────────────────
-# These require a multi-file sharded checkpoint directory with a valid
-# model.safetensors.index.json. Generating a minimal sharded fixture set
-# requires at minimum two shard files + an index; this is tracked as a
-# follow-up to the base safetensors conformance.
-[[exclusion]]
-path = "ferrotorch_serialize::ShardProgress"
-reason = "ShardProgress is only observable via the progress callback in load_safetensors_sharded_with_progress; sharded fixture generation tracked in #851."
-tracking_issue = "#851"
-
-[[exclusion]]
-path = "ferrotorch_serialize::load_safetensors_sharded"
-reason = "Requires a multi-file sharded safetensors directory; sharded fixture generation tracked in #851."
-tracking_issue = "#851"
-
-[[exclusion]]
-path = "ferrotorch_serialize::load_safetensors_sharded_filtered"
-reason = "Requires a multi-file sharded safetensors directory; sharded fixture generation tracked in #851."
-tracking_issue = "#851"
-
-[[exclusion]]
-path = "ferrotorch_serialize::load_safetensors_sharded_with_progress"
-reason = "Requires a multi-file sharded safetensors directory and progress callback; sharded fixture generation tracked in #851."
-tracking_issue = "#851"
-
-[[exclusion]]
-path = "ferrotorch_serialize::load_safetensors_auto"
-kind = "fn"
-reason = "load_safetensors_auto dispatches to load_safetensors (covered) for single-file inputs; sharded dispatch requires multi-file fixture tracked in #851."
-tracking_issue = "#851"
+# Closed by #851: conformance_serialize_sharded.rs provides full integration
+# tests for load_safetensors_sharded, load_safetensors_sharded_filtered,
+# load_safetensors_sharded_with_progress, load_safetensors_auto, and
+# ShardProgress field inspection via in-memory fixture directories.
+# (No exclusion entries remain for #851.)

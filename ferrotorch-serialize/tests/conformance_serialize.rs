@@ -1306,48 +1306,11 @@ fn onnx_export_items_cascade_skip() {
     );
 }
 
-// ---------------------------------------------------------------------------
-// cascade_skip: mmap load variants
-// ---------------------------------------------------------------------------
-
-/// Mmap load variants share the same deserialization logic but differ in
-/// the I/O layer. Integration test tracked in #850.
-#[test]
-fn mmap_load_variants_cascade_skip() {
-    cascade_skip!(
-        "Mmap I/O layer (load_pytorch_state_dict_mmap, load_safetensors_mmap, \
-         load_safetensors_sharded_mmap) shares deserialization logic with non-mmap \
-         counterparts (covered); mmap-specific integration test tracked in #850"
-    );
-}
-
-// ---------------------------------------------------------------------------
-// cascade_skip: sharded / filtered / progress safetensors
-// ---------------------------------------------------------------------------
-
-/// Sharded safetensors items require a multi-file directory. Tracked in #861.
-#[test]
-fn sharded_safetensors_cascade_skip() {
-    cascade_skip!(
-        "load_safetensors_sharded, load_safetensors_sharded_filtered, \
-         load_safetensors_sharded_with_progress, load_safetensors_auto, and \
-         ShardProgress require a multi-file sharded safetensors directory; \
-         sharded fixture generation tracked in #851"
-    );
-}
-
-// ---------------------------------------------------------------------------
-// cascade_skip: AsyncCheckpointer
-// ---------------------------------------------------------------------------
-
-/// AsyncCheckpointer requires a live Tokio async runtime. Tracked in #857.
-#[test]
-fn async_checkpointer_cascade_skip() {
-    cascade_skip!(
-        "AsyncCheckpointer requires a live Tokio async runtime; \
-         not exercisable via fixture-level test — tracked in #852"
-    );
-}
+// cascade_skip entries for #850 (mmap), #851 (sharded), and #852 (async)
+// have been removed. Full integration tests now live in:
+//   - conformance_serialize_mmap.rs    (#850)
+//   - conformance_serialize_sharded.rs (#851)
+//   - conformance_serialize_async.rs   (#852)
 
 // ---------------------------------------------------------------------------
 // Surface-anchor block
@@ -1376,9 +1339,7 @@ fn surface_anchors() {
         "load_checkpoint",
         "TrainingCheckpoint::new",
         "PickleValue",
-        // Excluded items — named here so the gate doesn't confuse
-        // "exclusion entry present" with "no reference at all".
-        // "AsyncCheckpointer"          — excluded, #857
+        // Excluded items still pending (GGUF and ONNX only):
         // "GgufFile"                   — excluded, #848
         // "GgufMetadata"               — excluded, #848
         // "GgufTensorInfo"             — excluded, #848
@@ -1395,13 +1356,16 @@ fn surface_anchors() {
         // "export_from_program"        — excluded, #849
         // "export_ir_graph_to_onnx"    — excluded, #849
         // "ir_graph_to_onnx"           — excluded, #849
-        // "load_pytorch_state_dict_mmap" — excluded, #850
-        // "load_safetensors_mmap"      — excluded, #850
-        // "load_safetensors_sharded_mmap" — excluded, #850
-        // "ShardProgress"              — excluded, #851
-        // "load_safetensors_sharded"   — excluded, #851
-        // "load_safetensors_sharded_filtered" — excluded, #851
-        // "load_safetensors_sharded_with_progress" — excluded, #851
-        // "load_safetensors_auto"      — excluded, #851
+        //
+        // Items now covered by dedicated conformance files (no longer excluded):
+        // "load_pytorch_state_dict_mmap" — conformance_serialize_mmap.rs (#850)
+        // "load_safetensors_mmap"        — conformance_serialize_mmap.rs (#850)
+        // "load_safetensors_sharded_mmap" — conformance_serialize_mmap.rs (#850)
+        // "AsyncCheckpointer"            — conformance_serialize_async.rs (#852)
+        // "ShardProgress"                — conformance_serialize_sharded.rs (#851)
+        // "load_safetensors_sharded"     — conformance_serialize_sharded.rs (#851)
+        // "load_safetensors_sharded_filtered" — conformance_serialize_sharded.rs (#851)
+        // "load_safetensors_sharded_with_progress" — conformance_serialize_sharded.rs (#851)
+        // "load_safetensors_auto"        — conformance_serialize_sharded.rs (#851)
     ];
 }
