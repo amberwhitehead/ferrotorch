@@ -131,11 +131,39 @@ impl XpuDevice {
         Device::Xpu(self.ordinal)
     }
 
-    /// True when the wgpu feature is compiled in. Without it, every
-    /// op in this crate returns `DeviceUnavailable`.
-    #[inline]
+    /// True when the wgpu feature is compiled in **and** at least one wgpu
+    /// adapter can be successfully initialised at runtime.
+    ///
+    /// Mirrors `torch.xpu.is_available()` semantics: the feature flag being
+    /// compiled in is necessary but not sufficient — a usable adapter must
+    /// also be present. On machines with no Intel GPU (e.g. WSL2 without
+    /// Vulkan ICDs) this returns `false` even when the `wgpu` feature is
+    /// enabled, matching PyTorch behaviour. (#828)
+    ///
+    /// # Performance
+    ///
+    /// This function initialises the wgpu runtime internally, which involves
+    /// adapter enumeration and (on some backends) a Vulkan/Metal call. Call
+    /// it once and cache the result if performance matters.
     pub fn is_available() -> bool {
-        cfg!(feature = "wgpu")
+        #[cfg(feature = "wgpu")]
+        {
+            // CubeRuntime::new probes the adapter list. It either:
+            //   • returns Ok  — a usable wgpu adapter was found → available
+            //   • returns Err — no adapter / driver error        → unavailable
+            //   • panics      — wgpu worker thread panics on WSL2 when no
+            //                   Vulkan ICD is present             → unavailable
+            // catch_unwind handles the panic path cleanly without
+            // surfacing an unwind boundary to callers.
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                CubeRuntime::new(CubeDevice::Wgpu(0)).is_ok()
+            }))
+            .unwrap_or(false)
+        }
+        #[cfg(not(feature = "wgpu"))]
+        {
+            false
+        }
     }
 
     /// Borrow the underlying [`CubeRuntime`] (only with the `wgpu`

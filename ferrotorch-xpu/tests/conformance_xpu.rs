@@ -366,19 +366,10 @@ fn xpu_is_available_matches_fixture() {
              divergence; crosslink bug #828 filed"
         );
     }
-    // Divergence: XpuDevice::is_available() returns cfg!(feature = "wgpu") which
-    // is True when the wgpu feature is compiled in, even if no Intel GPU adapter
-    // is present at runtime. torch.xpu.is_available() probes for actual hardware
-    // and returns False on this box. This is a real conformance bug.
-    // Per dispatch rules: DO NOT FIX — cascade_skip and file tracking issue.
-    if ft_available && !fixture_result {
-        cascade_skip!(
-            "XpuDevice::is_available() over-reports True when wgpu feature is compiled \
-             in but no Intel GPU adapter exists — diverges from torch.xpu.is_available(); \
-             crosslink bug #828 filed. DO NOT FIX here."
-        );
-    }
-    // Both agree (expected: both false when hardware is absent).
+    // Both agree (expected: both false when hardware is absent). #828 fixed:
+    // is_available() now probes the wgpu adapter list at runtime instead of
+    // returning cfg!(feature = "wgpu"), so it correctly returns false on this
+    // box even when the wgpu feature is compiled in.
     assert_eq!(
         ft_available, fixture_result,
         "XpuDevice::is_available() parity with torch.xpu.is_available()"
@@ -786,6 +777,11 @@ fn live_xpu_make_xpu_tensor() {
 /// the function pointer references below which force the linker to resolve
 /// every symbol.
 #[test]
+// The explicit function-pointer type annotations below are intentionally
+// verbose — they serve as the verification mechanism (wrong signature →
+// type error at compile time). Factoring them into type aliases would hide
+// the signature details and defeat the purpose of the test.
+#[allow(clippy::type_complexity)]
 fn all_op_symbols_resolve() {
     // Reference each function pointer. These are never called; the test just
     // needs them to type-check and link.
