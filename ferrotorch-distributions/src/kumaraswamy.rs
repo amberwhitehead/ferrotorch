@@ -120,9 +120,16 @@ impl<T: Float> Distribution<T> for Kumaraswamy<T> {
 
     fn entropy(&self) -> FerrotorchResult<Tensor<T>> {
         crate::fallback::check_gpu_fallback_opt_in(&[&self.a, &self.b], "Kumaraswamy::entropy")?;
-        // H = (1 - 1/b) + (1 - 1/a) * H_b - log(a) - log(b)
-        // where H_b = digamma(b+1) + euler_gamma (harmonic number approximation)
-        // Simplified: H ≈ (1-1/a)*(digamma(b+1)+euler) + (1-1/b) - ln(a*b)
+        // Derived from E[log f(X)] for Kumaraswamy(a, b):
+        //   E[log X]       = (-euler_gamma - digamma(b+1)) / a
+        //   E[log(1-X^a)]  = -1/b   (since X^a ~ Power(b), exact)
+        //
+        // H = -log(a) - log(b) - (a-1)*E[log X] - (b-1)*E[log(1-X^a)]
+        //   = -log(a) - log(b) + (1 - 1/a)*(euler_gamma + digamma(b+1)) + (1 - 1/b)
+        //
+        // digamma(b+1) via shift-then-asymptotic expansion — valid for all b > 0
+        // (integer or fractional). The previous integer-step loop diverged for
+        // non-integer b in (0,1) because it stepped past the target argument.
         let a = self.a.data()?;
         let b = self.b.data()?;
         let one = <T as num_traits::One>::one();
@@ -130,24 +137,11 @@ impl<T: Float> Distribution<T> for Kumaraswamy<T> {
 
         let mut out = Vec::with_capacity(a.len());
         for i in 0..a.len() {
-            // Approximate digamma(b+1) ≈ ln(b) + 1/(2*b) for large b
             let bf = num_traits::ToPrimitive::to_f64(&b[i]).unwrap();
-            let digamma_b1 = T::from(if bf > 5.0 {
-                bf.ln() + 0.5 / bf
-            } else {
-                // For small b, use the recurrence: digamma(x+1) = digamma(x) + 1/x
-                // digamma(1) = -euler_gamma
-                let mut val = -0.5772156649015329;
-                let mut x = 1.0;
-                while x < bf + 1.0 {
-                    val += 1.0 / x;
-                    x += 1.0;
-                }
-                val
-            })
-            .unwrap();
-
-            let h = (one - one / a[i]) * (digamma_b1 + euler) + (one - one / b[i])
+            // digamma(b+1) via shift-then-asymptotic expansion.
+            let digamma_b1 = T::from(digamma_f64(bf + 1.0)).unwrap();
+            let h = (one - one / a[i]) * (euler + digamma_b1)
+                + (one - one / b[i])
                 - a[i].ln()
                 - b[i].ln();
             out.push(h);
@@ -260,6 +254,22 @@ impl<T: Float> Distribution<T> for Kumaraswamy<T> {
         }
         Tensor::from_storage(TensorStorage::cpu(out), self.a.shape().to_vec(), false)
     }
+}
+
+/// Digamma (psi) function for f64 via asymptotic expansion with argument shift.
+/// Valid for all x > 0 (integer or fractional).
+fn digamma_f64(mut x: f64) -> f64 {
+    let mut result = 0.0;
+    // Shift argument up until x >= 6 for asymptotic accuracy.
+    while x < 6.0 {
+        result -= 1.0 / x;
+        x += 1.0;
+    }
+    // Asymptotic: psi(x) ~ ln(x) - 1/(2x) - 1/(12x^2) + 1/(120x^4) - 1/(252x^6)
+    let x2 = x * x;
+    result += x.ln() - 0.5 / x - 1.0 / (12.0 * x2) + 1.0 / (120.0 * x2 * x2)
+        - 1.0 / (252.0 * x2 * x2 * x2);
+    result
 }
 
 /// Scalar lgamma via the existing tensor-shaped `special::lgamma` op.

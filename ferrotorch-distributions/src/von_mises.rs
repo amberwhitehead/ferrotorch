@@ -149,6 +149,12 @@ impl<T: Float> Distribution<T> for VonMises<T> {
         Tensor::from_storage(TensorStorage::cpu(out), shape.to_vec(), false)
     }
 
+    fn mean(&self) -> FerrotorchResult<Tensor<T>> {
+        // Reference: torch.distributions.VonMises.mean — returns self.loc (the mean direction).
+        // The mean of a VonMises distribution is loc (modulo 2π, but torch returns loc directly).
+        Ok(self.loc.clone())
+    }
+
     fn rsample(&self, _shape: &[usize]) -> FerrotorchResult<Tensor<T>> {
         Err(FerrotorchError::InvalidArgument {
             message: "VonMises: rsample not supported (discrete rejection sampling)".into(),

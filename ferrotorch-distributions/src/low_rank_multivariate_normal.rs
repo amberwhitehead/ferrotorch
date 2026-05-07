@@ -175,6 +175,12 @@ impl<T: Float> Distribution<T> for LowRankMultivariateNormal<T> {
         self.inner.log_prob(value)
     }
 
+    fn mean(&self) -> FerrotorchResult<Tensor<T>> {
+        // Reference: torch.distributions.LowRankMultivariateNormal.mean — property returns self.loc.
+        // mean = loc (the distribution mean vector, shape [d]).
+        Ok(self.loc.clone())
+    }
+
     fn entropy(&self) -> FerrotorchResult<Tensor<T>> {
         self.inner.entropy()
     }

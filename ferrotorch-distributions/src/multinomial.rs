@@ -230,6 +230,46 @@ impl<T: Float> Distribution<T> for Multinomial<T> {
         }
     }
 
+    fn mean(&self) -> FerrotorchResult<Tensor<T>> {
+        // Reference: torch.distributions.Multinomial.mean
+        // mean[k] = total_count * p[k]
+        crate::fallback::check_gpu_fallback_opt_in(&[&self.probs], "Multinomial::mean")?;
+        let device = self.probs.device();
+        let n_t = T::from(self.total_count).unwrap();
+        let probs_data = self.probs.data_vec()?;
+        let zero = <T as num_traits::Zero>::zero();
+        let total: T = probs_data.iter().copied().fold(zero, |a, b| a + b);
+        let out: Vec<T> = probs_data.iter().map(|&p| n_t * p / total).collect();
+        let t = Tensor::from_storage(
+            TensorStorage::cpu(out),
+            self.probs.shape().to_vec(),
+            false,
+        )?;
+        if device.is_cuda() { t.to(device) } else { Ok(t) }
+    }
+
+    fn variance(&self) -> FerrotorchResult<Tensor<T>> {
+        // Reference: torch.distributions.Multinomial.variance
+        // variance[k] = total_count * p[k] * (1 - p[k])
+        crate::fallback::check_gpu_fallback_opt_in(&[&self.probs], "Multinomial::variance")?;
+        let device = self.probs.device();
+        let n_t = T::from(self.total_count).unwrap();
+        let probs_data = self.probs.data_vec()?;
+        let zero = <T as num_traits::Zero>::zero();
+        let one = <T as num_traits::One>::one();
+        let total: T = probs_data.iter().copied().fold(zero, |a, b| a + b);
+        let out: Vec<T> = probs_data.iter().map(|&p| {
+            let pk = p / total;
+            n_t * pk * (one - pk)
+        }).collect();
+        let t = Tensor::from_storage(
+            TensorStorage::cpu(out),
+            self.probs.shape().to_vec(),
+            false,
+        )?;
+        if device.is_cuda() { t.to(device) } else { Ok(t) }
+    }
+
     fn entropy(&self) -> FerrotorchResult<Tensor<T>> {
         crate::fallback::check_gpu_fallback_opt_in(&[&self.probs], "Multinomial::entropy")?;
         // Use the exact formula:

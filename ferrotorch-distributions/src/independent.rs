@@ -69,14 +69,45 @@ impl<T: Float, D: Distribution<T>> Independent<T, D> {
 }
 
 impl<T: Float, D: Distribution<T>> Distribution<T> for Independent<T, D> {
+    fn batch_shape(&self) -> Vec<usize> {
+        // Independent reinterprets the rightmost `reinterpreted_batch_ndims` batch
+        // dims as event dims, so the exposed batch shape has those dims removed.
+        let base_batch = self.base.batch_shape();
+        let n = self.reinterpreted_batch_ndims.min(base_batch.len());
+        base_batch[..base_batch.len() - n].to_vec()
+    }
+
     fn sample(&self, shape: &[usize]) -> FerrotorchResult<Tensor<T>> {
-        // Independent does not change the shape of samples — only how the
-        // tail dimensions are interpreted for log_prob/entropy.
-        self.base.sample(shape)
+        // Reference: torch.distributions.Independent.sample(sample_shape)
+        // PyTorch calls base.sample(sample_shape) which already includes the base's
+        // batch shape in the output.  The base's sample(shape) appends its own
+        // batch_shape to `shape` when constructing output.  Here, Normal::sample(shape)
+        // uses the provided `shape` as the full output shape and cycles over the
+        // batch parameters — so we must forward `shape ++ reinterpreted_batch_dims`
+        // so that the last reinterpreted_batch_ndims dims are the event dims.
+        let base_batch = self.base.batch_shape();
+        if base_batch.is_empty() || self.reinterpreted_batch_ndims == 0 {
+            return self.base.sample(shape);
+        }
+        // Take the rightmost `reinterpreted_batch_ndims` dims from base_batch as
+        // the event dims that must appear at the end of every sample.
+        let n = self.reinterpreted_batch_ndims.min(base_batch.len());
+        let event_dims = &base_batch[base_batch.len() - n..];
+        let mut full_shape: Vec<usize> = shape.to_vec();
+        full_shape.extend_from_slice(event_dims);
+        self.base.sample(&full_shape)
     }
 
     fn rsample(&self, shape: &[usize]) -> FerrotorchResult<Tensor<T>> {
-        self.base.rsample(shape)
+        let base_batch = self.base.batch_shape();
+        if base_batch.is_empty() || self.reinterpreted_batch_ndims == 0 {
+            return self.base.rsample(shape);
+        }
+        let n = self.reinterpreted_batch_ndims.min(base_batch.len());
+        let event_dims = &base_batch[base_batch.len() - n..];
+        let mut full_shape: Vec<usize> = shape.to_vec();
+        full_shape.extend_from_slice(event_dims);
+        self.base.rsample(&full_shape)
     }
 
     fn log_prob(&self, value: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
@@ -182,12 +213,16 @@ mod tests {
     }
 
     #[test]
-    fn test_independent_sample_shape_unchanged() {
+    fn test_independent_sample_shape() {
+        // Independent(Normal(loc=[2], scale=[2]), reinterpreted_batch_ndims=1):
+        //   batch_shape = []  (the [2] dim is reinterpreted as event)
+        //   event_shape = [2]
+        // sample([5]) → shape [5, 2]  (PyTorch semantics: sample_shape ++ event_shape)
         let loc = cpu_tensor(&[0.0, 0.0], &[2]);
         let scale = cpu_tensor(&[1.0, 1.0], &[2]);
         let normal = Normal::new(loc, scale).unwrap();
         let ind = Independent::new(normal, 1).unwrap();
-        let s = ind.sample(&[5, 2]).unwrap();
+        let s = ind.sample(&[5]).unwrap();
         assert_eq!(s.shape(), &[5, 2]);
     }
 }

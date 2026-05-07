@@ -302,6 +302,12 @@ impl<T: Float> Distribution<T> for MultivariateNormal<T> {
         }
     }
 
+    fn mean(&self) -> FerrotorchResult<Tensor<T>> {
+        // Reference: torch.distributions.MultivariateNormal.mean — property returns self.loc.
+        // mean = loc (the distribution mean vector, shape [d]).
+        Ok(self.loc.clone())
+    }
+
     fn entropy(&self) -> FerrotorchResult<Tensor<T>> {
         crate::fallback::check_gpu_fallback_opt_in(
             &[&self.scale_tril],

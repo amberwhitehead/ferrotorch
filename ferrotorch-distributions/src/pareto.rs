@@ -111,6 +111,44 @@ impl<T: Float> Distribution<T> for Pareto<T> {
         Tensor::from_storage(TensorStorage::cpu(out), value.shape().to_vec(), false)
     }
 
+    fn mean(&self) -> FerrotorchResult<Tensor<T>> {
+        // Reference: torch.distributions.Pareto.mean
+        // mean = alpha * scale / (alpha - 1)  when alpha > 1, else inf
+        crate::fallback::check_gpu_fallback_opt_in(&[&self.scale, &self.alpha], "Pareto::mean")?;
+        let s = self.scale.data()?;
+        let a = self.alpha.data()?;
+        let one = <T as num_traits::One>::one();
+        let mut out = Vec::with_capacity(s.len());
+        for i in 0..s.len() {
+            if a[i] > one {
+                out.push(a[i] * s[i] / (a[i] - one));
+            } else {
+                out.push(T::infinity());
+            }
+        }
+        Tensor::from_storage(TensorStorage::cpu(out), self.scale.shape().to_vec(), false)
+    }
+
+    fn variance(&self) -> FerrotorchResult<Tensor<T>> {
+        // Reference: torch.distributions.Pareto.variance
+        // variance = scale^2 * alpha / ((alpha-1)^2 * (alpha-2))  when alpha > 2, else inf
+        crate::fallback::check_gpu_fallback_opt_in(&[&self.scale, &self.alpha], "Pareto::variance")?;
+        let s = self.scale.data()?;
+        let a = self.alpha.data()?;
+        let one = <T as num_traits::One>::one();
+        let two = T::from(2.0).unwrap();
+        let mut out = Vec::with_capacity(s.len());
+        for i in 0..s.len() {
+            if a[i] > two {
+                let am1 = a[i] - one;
+                out.push(s[i] * s[i] * a[i] / (am1 * am1 * (a[i] - two)));
+            } else {
+                out.push(T::infinity());
+            }
+        }
+        Tensor::from_storage(TensorStorage::cpu(out), self.scale.shape().to_vec(), false)
+    }
+
     fn entropy(&self) -> FerrotorchResult<Tensor<T>> {
         crate::fallback::check_gpu_fallback_opt_in(&[&self.scale, &self.alpha], "Pareto::entropy")?;
         // H = log(scale/alpha) + 1 + 1/alpha

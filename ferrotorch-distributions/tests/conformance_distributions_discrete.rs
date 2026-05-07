@@ -179,10 +179,6 @@ fn multinomial_new() {
 
 #[test]
 fn multinomial_fixtures_log_prob_mean_variance() {
-    // cascade_skip for mean/variance: #879 — Multinomial::mean and ::variance are
-    // not implemented (fall through to Distribution trait default which returns Err).
-    // mean[k] = total_count * p[k]; variance[k] = total_count * p[k] * (1 - p[k]).
-    // log_prob is correct and is verified here; mean/variance skipped pending #879.
     let fix = fixtures();
     for case in fix["multinomial"].as_array().unwrap() {
         let label = case["label"].as_str().unwrap();
@@ -198,8 +194,11 @@ fn multinomial_fixtures_log_prob_mean_variance() {
         let lp = d.log_prob(&counts_t).unwrap().item().unwrap();
         assert_close(lp, f(&case["log_prob"]), TOL, &format!("Multinomial[{label}] log_prob"));
 
-        // mean and variance not yet implemented in source — crosslink #879
-        cascade_skip(&format!("Multinomial[{label}] mean/variance not implemented (crosslink #879)"));
+        let mean = d.mean().unwrap().data_vec().unwrap();
+        assert_close_vec(&mean, &fvec(&case["mean"]), TOL, &format!("Multinomial[{label}] mean"));
+
+        let var = d.variance().unwrap().data_vec().unwrap();
+        assert_close_vec(&var, &fvec(&case["variance"]), TOL, &format!("Multinomial[{label}] variance"));
     }
 }
 
@@ -317,12 +316,19 @@ fn relaxed_bernoulli_new_sample_shape() {
 
 #[test]
 fn relaxed_bernoulli_fixtures_log_prob() {
-    // cascade_skip: #878 — RelaxedBernoulli::log_prob uses wrong formula;
-    // implementation produces 1.6186 vs expected -0.7893 for temp=0.5,probs=0.7,x=0.2.
-    // Root cause: incorrect direct Maddison-eq21 expansion; correct formula is
-    // log_prob = log(temp) + diff - 2*softplus(diff) - log(x) - log(1-x)
-    // where diff = logits - logit(x)*temp.  Filed as crosslink #878.
-    cascade_skip("RelaxedBernoulli::log_prob formula diverges from PyTorch (crosslink #878)");
+    let fix = fixtures();
+    for case in fix["relaxed_bernoulli"].as_array().unwrap() {
+        let label = case["label"].as_str().unwrap();
+        let temp = f(&case["temperature"]);
+        let probs_v = f(&case["probs"]);
+        let d = RelaxedBernoulli::new(temp, scalar(probs_v).unwrap()).unwrap();
+
+        let x_pts = fvec(&case["x_points"]);
+        let x_t = from_slice::<f64>(&x_pts, &[x_pts.len()]).unwrap();
+        let lp = d.log_prob(&x_t).unwrap().data_vec().unwrap();
+        let exp_lp = fvec(&case["log_prob"]);
+        assert_close_vec(&lp, &exp_lp, TOL, &format!("RelaxedBernoulli[{label}] log_prob"));
+    }
 }
 
 #[test]

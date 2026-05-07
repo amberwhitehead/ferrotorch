@@ -59,6 +59,11 @@ impl<T: Float> Normal<T> {
 }
 
 impl<T: Float> Distribution<T> for Normal<T> {
+    fn batch_shape(&self) -> Vec<usize> {
+        // Normal's batch shape is the shape of the loc/scale parameter tensors.
+        self.loc.shape().to_vec()
+    }
+
     fn sample(&self, shape: &[usize]) -> FerrotorchResult<Tensor<T>> {
         crate::fallback::check_gpu_fallback_opt_in(&[&self.loc, &self.scale], "Normal::sample")?;
         let device = self.loc.device();

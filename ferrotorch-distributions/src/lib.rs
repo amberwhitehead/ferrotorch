@@ -162,6 +162,16 @@ pub trait Distribution<T: Float>: Send + Sync {
     // what they can express in closed form.
     // -----------------------------------------------------------------------
 
+    /// The batch shape of the distribution — the shape of parameter tensors
+    /// (excluding event dims). Default returns an empty vec (scalar batch).
+    ///
+    /// Distributions with batched parameters (e.g. `Normal` with `loc` of
+    /// shape `[B]`) override this to return `vec![B]`. Used by `Independent`
+    /// to forward the correct sample shape to the base distribution.
+    fn batch_shape(&self) -> Vec<usize> {
+        vec![]
+    }
+
     /// Cumulative distribution function: `P(X <= value)`. Default returns an
     /// `InvalidArgument` error for distributions without a closed-form CDF.
     fn cdf(&self, _value: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {

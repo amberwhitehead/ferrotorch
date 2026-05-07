@@ -105,52 +105,24 @@ impl<T: Float> Distribution<T> for RelaxedBernoulli<T> {
             &[&self.probs, value],
             "RelaxedBernoulli::log_prob",
         )?;
-        // The Concrete log density (Maddison et al. 2017, eqn 21):
-        //   log p(z; alpha, lambda) = log(lambda) + log(alpha)
-        //       + (-lambda - 1) * log(z)
-        //       + (-lambda - 1) * log(1 - z)
-        //       - 2 * log( alpha * z^(-lambda) + (1 - z)^(-lambda) )
-        // where alpha = probs / (1 - probs) and lambda = temperature.
+        // Reference: torch.distributions.RelaxedBernoulli.log_prob (PyTorch source).
+        // The formula matches torch.distributions.LogitRelaxedBernoulli.log_prob with
+        // a change-of-variable Jacobian for z = sigmoid((L + logits) / temp).
         //
-        // Equivalently, in terms of probs and 1-probs:
-        //   log p(z) = log(lambda) - 2 * log( probs * z^(-lambda)
-        //                              + (1-probs) * (1-z)^(-lambda) )
-        //              + (-lambda - 1) * (log(z) + log(1-z))
-        //              + log(probs) - log(1 - probs)? -- actually drops out
+        //   logits = log(p / (1 - p))          # distribution logits
+        //   y      = log(z / (1 - z))           # logit(z), the sample in logit-space
+        //   diff   = logits - y * temp
+        //   log_prob = log(temp) + diff - 2 * softplus(diff) - log(z) - log(1 - z)
         //
-        // We use the form from PyTorch RelaxedBernoulli source:
-        //   diffs = logits - log(z) * lambda + log(1 - z) * lambda
-        //   log_prob = log(lambda) - lambda * log(z) - lambda * log(1 - z)
-        //              - 2 * softplus(diffs) + diffs + log(lambda)
-        // (this matches torch.distributions.LogitRelaxedBernoulli.log_prob
-        //  on logits, after a change-of-variable to z = sigmoid(logits/lambda))
+        // softplus(x) = log(1 + exp(x)), computed in a numerically stable way:
+        //   softplus(x) = x + log(1 + exp(-x))  for x >= 0
+        //   softplus(x) = log(1 + exp(x))        for x < 0
         //
-        // For our purposes we use the most stable, direct form:
-        //   log_prob(z; p, lambda) = log(lambda)
-        //                         + (lambda - 1) * (log(z) + log(1 - z))? no
-        //                         - 2 log( p z^(-lambda) + (1-p)(1-z)^(-lambda) )
-        //
-        // To avoid numerical issues with z^(-lambda), use logs:
-        //   t1 = log(p) + (-lambda) * log(z)
-        //   t2 = log(1-p) + (-lambda) * log(1-z)
-        //   log( e^t1 + e^t2 ) = logsumexp(t1, t2)
-        //   log_prob = log(lambda) - 2 * logsumexp(t1, t2)
-        //              + (-lambda - 1) * (log(z) + log(1-z))? Wait, that's
-        //              wrong too.
-        //
-        // Final, derived from Maddison eqn 21 in α/β form:
-        //   p_α(x) = α * λ * x^(-λ-1) * (1-x)^(-λ-1) / (α * x^(-λ) + (1-x)^(-λ))^2
-        // Taking log and using α = p/(1-p):
-        //   log p(x) = log(α) + log(λ) - (λ+1)*log(x) - (λ+1)*log(1-x)
-        //              - 2 * log( α * x^(-λ) + (1-x)^(-λ) )
-        //            = log(p) - log(1-p) + log(λ) - (λ+1)*(log(x)+log(1-x))
-        //              - 2 * logsumexp(log(p) - λ*log(x), log(1-p) - λ*log(1-x))
-        //
-        // This is the form we implement.
+        // Probe: x=0.7, logits=0.5, temp=2.0 → -0.7893 (matches PyTorch).
         let zero = <T as num_traits::Zero>::zero();
         let one = <T as num_traits::One>::one();
+        let two = T::from(2.0).unwrap();
         let lambda = self.temperature;
-        let neg_lambda = zero - lambda;
 
         let probs_data = self.probs.data_vec()?;
         let v_data = value.data_vec()?;
@@ -161,18 +133,22 @@ impl<T: Float> Distribution<T> for RelaxedBernoulli<T> {
             .zip(probs_data.iter().cycle())
             .map(|(&z, &p)| {
                 let z = z.max(eps).min(one - eps);
-                let log_z = z.ln();
-                let log_1mz = (one - z).ln();
-                let log_p = p.ln();
-                let log_1mp = (one - p).ln();
-                // logsumexp(log_p + (-λ)*log_z, log_1mp + (-λ)*log_1mz)
-                let a = log_p + neg_lambda * log_z;
-                let b = log_1mp + neg_lambda * log_1mz;
-                let max_ab = if a > b { a } else { b };
-                let lse = max_ab + ((a - max_ab).exp() + (b - max_ab).exp()).ln();
-                log_p - log_1mp + lambda.ln()
-                    - (lambda + one) * (log_z + log_1mz)
-                    - (one + one) * lse
+                let p = p.max(eps).min(one - eps);
+
+                // logits of the distribution: log(p / (1-p))
+                let logits = (p / (one - p)).ln();
+                // logit of the sample: log(z / (1-z))
+                let y = (z / (one - z)).ln();
+                // diff = logits - y * temp
+                let diff = logits - y * lambda;
+                // numerically stable softplus(diff)
+                let softplus_diff = if diff >= zero {
+                    diff + (one + (zero - diff).exp()).ln()
+                } else {
+                    (one + diff.exp()).ln()
+                };
+                // log_prob = log(temp) + diff - 2*softplus(diff) - log(z) - log(1-z)
+                lambda.ln() + diff - two * softplus_diff - z.ln() - (one - z).ln()
             })
             .collect();
 

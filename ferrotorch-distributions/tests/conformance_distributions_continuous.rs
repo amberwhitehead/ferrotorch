@@ -615,10 +615,6 @@ fn multivariate_normal_new() {
 
 #[test]
 fn multivariate_normal_fixtures_log_prob_entropy_mean() {
-    // cascade_skip for mean: MultivariateNormal does not yet implement
-    // Distribution::mean().  Tracked: crosslink #875
-    cascade_skip("#875 MultivariateNormal missing Distribution::mean()");
-
     let fix = fixtures();
     for case in fix["multivariate_normal"].as_array().unwrap() {
         let label = case["label"].as_str().unwrap();
@@ -646,7 +642,8 @@ fn multivariate_normal_fixtures_log_prob_entropy_mean() {
 
         assert_close(d.entropy().unwrap().item().unwrap(), f(&case["entropy"]), TOL, &format!("MultivariateNormal[{label}] entropy"));
 
-        // mean omitted pending #875
+        let mean = d.mean().unwrap().data_vec().unwrap();
+        assert_close_vec(&mean, &loc_v, TOL, &format!("MultivariateNormal[{label}] mean"));
     }
 }
 
@@ -665,10 +662,6 @@ fn low_rank_multivariate_normal_new() {
 
 #[test]
 fn low_rank_multivariate_normal_fixtures_log_prob_entropy_mean() {
-    // cascade_skip for mean: LowRankMultivariateNormal does not yet implement
-    // Distribution::mean().  Tracked: crosslink #875
-    cascade_skip("#875 LowRankMultivariateNormal missing Distribution::mean()");
-
     let fix = fixtures();
     for case in fix["low_rank_multivariate_normal"].as_array().unwrap() {
         let label = case["label"].as_str().unwrap();
@@ -701,7 +694,8 @@ fn low_rank_multivariate_normal_fixtures_log_prob_entropy_mean() {
 
         assert_close(d.entropy().unwrap().item().unwrap(), f(&case["entropy"]), TOL, &format!("LRMVN[{label}] entropy"));
 
-        // mean omitted pending #875
+        let mean = d.mean().unwrap().data_vec().unwrap();
+        assert_close_vec(&mean, &loc_v, TOL, &format!("LRMVN[{label}] mean"));
     }
 }
 
@@ -718,11 +712,6 @@ fn dirichlet_new() {
 
 #[test]
 fn dirichlet_fixtures_log_prob_mean_variance_entropy() {
-    // cascade_skip for mean/variance: Dirichlet does not yet implement
-    // Distribution::mean() or Distribution::variance().
-    // Tracked: crosslink #875
-    cascade_skip("#875 Dirichlet missing Distribution::mean() / variance()");
-
     let fix = fixtures();
     for case in fix["dirichlet"].as_array().unwrap() {
         let label = case["label"].as_str().unwrap();
@@ -742,7 +731,12 @@ fn dirichlet_fixtures_log_prob_mean_variance_entropy() {
         let lp = d.log_prob(&x_t).unwrap().data_vec().unwrap();
         assert_close_vec(&lp, &fvec(&case["log_prob"]), TOL, &format!("Dirichlet[{label}] log_prob"));
 
-        // mean/variance omitted pending #875
+        let mean = d.mean().unwrap().data_vec().unwrap();
+        assert_close_vec(&mean, &fvec(&case["mean"]), TOL, &format!("Dirichlet[{label}] mean"));
+
+        let var = d.variance().unwrap().data_vec().unwrap();
+        assert_close_vec(&var, &fvec(&case["variance"]), TOL, &format!("Dirichlet[{label}] variance"));
+
         assert_close(d.entropy().unwrap().item().unwrap(), f(&case["entropy"]), TOL, &format!("Dirichlet[{label}] entropy"));
     }
 }
@@ -759,11 +753,6 @@ fn kumaraswamy_new() {
 
 #[test]
 fn kumaraswamy_fixtures_log_prob_mean_variance_entropy() {
-    // cascade_skip for entropy: Kumaraswamy::entropy() uses an incorrect digamma
-    // approximation for non-integer b in (0,1), causing divergence from PyTorch
-    // on the sub_unity fixture.  Tracked: crosslink #877
-    cascade_skip("#877 Kumaraswamy::entropy() wrong digamma for non-integer b < 1");
-
     let fix = fixtures();
     for case in fix["kumaraswamy"].as_array().unwrap() {
         let label = case["label"].as_str().unwrap();
@@ -778,7 +767,7 @@ fn kumaraswamy_fixtures_log_prob_mean_variance_entropy() {
 
         assert_close(d.mean().unwrap().item().unwrap(), f(&case["mean"]), TOL, &format!("Kumaraswamy[{label}] mean"));
         assert_close(d.variance().unwrap().item().unwrap(), f(&case["variance"]), TOL, &format!("Kumaraswamy[{label}] variance"));
-        // entropy omitted pending #877
+        assert_close(d.entropy().unwrap().item().unwrap(), f(&case["entropy"]), TOL, &format!("Kumaraswamy[{label}] entropy"));
     }
 }
 
@@ -803,11 +792,6 @@ fn pareto_new() {
 
 #[test]
 fn pareto_fixtures_log_prob_mean_variance_entropy() {
-    // cascade_skip for mean/variance: Pareto does not yet implement
-    // Distribution::mean() or Distribution::variance().
-    // Tracked: crosslink #875
-    cascade_skip("#875 Pareto missing Distribution::mean() / variance()");
-
     let fix = fixtures();
     for case in fix["pareto"].as_array().unwrap() {
         let label = case["label"].as_str().unwrap();
@@ -820,7 +804,8 @@ fn pareto_fixtures_log_prob_mean_variance_entropy() {
         let lp = d.log_prob(&x_t).unwrap().data_vec().unwrap();
         assert_close_vec(&lp, &fvec(&case["log_prob"]), TOL, &format!("Pareto[{label}] log_prob"));
 
-        // mean/variance omitted pending #875
+        assert_close(d.mean().unwrap().item().unwrap(), f(&case["mean"]), TOL, &format!("Pareto[{label}] mean"));
+        assert_close(d.variance().unwrap().item().unwrap(), f(&case["variance"]), TOL, &format!("Pareto[{label}] variance"));
 
         assert_close(d.entropy().unwrap().item().unwrap(), f(&case["entropy"]), TOL, &format!("Pareto[{label}] entropy"));
     }
@@ -838,10 +823,6 @@ fn von_mises_new() {
 
 #[test]
 fn von_mises_fixtures_log_prob_mean() {
-    // cascade_skip for mean: VonMises does not yet implement Distribution::mean().
-    // Tracked: crosslink #875
-    cascade_skip("#875 VonMises missing Distribution::mean()");
-
     let fix = fixtures();
     for case in fix["von_mises"].as_array().unwrap() {
         let label = case["label"].as_str().unwrap();
@@ -854,7 +835,7 @@ fn von_mises_fixtures_log_prob_mean() {
         let lp = d.log_prob(&x_t).unwrap().data_vec().unwrap();
         assert_close_vec(&lp, &fvec(&case["log_prob"]), TOL, &format!("VonMises[{label}] log_prob"));
 
-        // mean omitted pending #875
+        assert_close(d.mean().unwrap().item().unwrap(), f(&case["mean"]), TOL, &format!("VonMises[{label}] mean"));
     }
 }
 
@@ -894,22 +875,14 @@ fn weibull_fixtures_log_prob_mean_variance_entropy() {
 
 #[test]
 fn independent_new_sample_shape() {
-    // cascade_skip: Independent::sample() does not yet broadcast the base
-    // distribution's batch dims into the sample shape (PyTorch parity gap).
-    // Tracked: crosslink #876
-    cascade_skip("#876 Independent::sample() does not broadcast batch dims");
-    return;
-
-    #[allow(unreachable_code)]
-    {
-        let loc = from_slice::<f64>(&[0.0, 1.0, 2.0], &[3]).unwrap();
-        let scale = from_slice::<f64>(&[1.0, 1.0, 1.0], &[3]).unwrap();
-        let base = Normal::new(loc, scale).unwrap();
-        let d = Independent::new(base, 1).unwrap();
-        let s = d.sample(&[4]).unwrap();
-        // sample([4]) over batch-size-3 Normal → shape [4, 3] per PyTorch semantics
-        assert_eq!(s.shape()[s.shape().len() - 1], 3);
-    }
+    let loc = from_slice::<f64>(&[0.0, 1.0, 2.0], &[3]).unwrap();
+    let scale = from_slice::<f64>(&[1.0, 1.0, 1.0], &[3]).unwrap();
+    let base = Normal::new(loc, scale).unwrap();
+    let d = Independent::new(base, 1).unwrap();
+    let s = d.sample(&[4]).unwrap();
+    // sample([4]) over batch-size-3 Normal → shape [4, 3] per PyTorch semantics
+    assert_eq!(s.shape(), &[4, 3]);
+    assert_eq!(s.shape()[s.shape().len() - 1], 3);
 }
 
 #[test]

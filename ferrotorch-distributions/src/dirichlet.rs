@@ -259,6 +259,46 @@ impl<T: Float> Distribution<T> for Dirichlet<T> {
         }
     }
 
+    fn mean(&self) -> FerrotorchResult<Tensor<T>> {
+        // Reference: torch.distributions.Dirichlet.mean — returns concentration / concentration.sum(-1, keepdim=True)
+        // mean[i] = alpha[i] / sum(alpha)
+        crate::fallback::check_gpu_fallback_opt_in(&[&self.concentration], "Dirichlet::mean")?;
+        let device = self.concentration.device();
+        let alpha = self.concentration.data_vec()?;
+        let zero = <T as num_traits::Zero>::zero();
+        let alpha_sum: T = alpha.iter().copied().fold(zero, |a, b| a + b);
+        let out: Vec<T> = alpha.iter().map(|&a| a / alpha_sum).collect();
+        let t = Tensor::from_storage(
+            TensorStorage::cpu(out),
+            self.concentration.shape().to_vec(),
+            false,
+        )?;
+        if device.is_cuda() { t.to(device) } else { Ok(t) }
+    }
+
+    fn variance(&self) -> FerrotorchResult<Tensor<T>> {
+        // Reference: torch.distributions.Dirichlet.variance
+        // variance[i] = alpha[i] * (alpha0 - alpha[i]) / (alpha0^2 * (alpha0 + 1))
+        crate::fallback::check_gpu_fallback_opt_in(&[&self.concentration], "Dirichlet::variance")?;
+        let device = self.concentration.device();
+        let alpha = self.concentration.data_vec()?;
+        let zero = <T as num_traits::Zero>::zero();
+        let one = <T as num_traits::One>::one();
+        let alpha_sum: T = alpha.iter().copied().fold(zero, |a, b| a + b);
+        let alpha_sum_sq = alpha_sum * alpha_sum;
+        let alpha_sum_p1 = alpha_sum + one;
+        let out: Vec<T> = alpha
+            .iter()
+            .map(|&a| a * (alpha_sum - a) / (alpha_sum_sq * alpha_sum_p1))
+            .collect();
+        let t = Tensor::from_storage(
+            TensorStorage::cpu(out),
+            self.concentration.shape().to_vec(),
+            false,
+        )?;
+        if device.is_cuda() { t.to(device) } else { Ok(t) }
+    }
+
     fn entropy(&self) -> FerrotorchResult<Tensor<T>> {
         crate::fallback::check_gpu_fallback_opt_in(&[&self.concentration], "Dirichlet::entropy")?;
         // H = sum(lgamma(alpha_k)) - lgamma(sum(alpha))
