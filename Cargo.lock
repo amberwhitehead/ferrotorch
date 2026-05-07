@@ -2212,9 +2212,9 @@ dependencies = [
 
 [[package]]
 name = "ferray-core"
-version = "0.3.1"
+version = "0.3.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1ba5a91309611cb428b9102f61b30ad0f51e31de2ac3d40314da359d8e6e4d04"
+checksum = "9f9f4769cefca70615c8cf63b07c86a0f66a642a4f604d1bac49ec09286619a8"
 dependencies = [
  "ferray-core-macros",
  "half",
@@ -2226,9 +2226,9 @@ dependencies = [
 
 [[package]]
 name = "ferray-core-macros"
-version = "0.3.1"
+version = "0.3.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5b706762a6286720d831586f9e1ab6ad363c463eb7e55d6c69579f2b12c52b60"
+checksum = "46bdca093714c99dedfbcbbf98d1cf104f0732670a833b5864719a7685835bef"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -2307,9 +2307,9 @@ dependencies = [
 
 [[package]]
 name = "ferray-ufunc"
-version = "0.3.1"
+version = "0.3.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e576c37c0de9551e54ea16d99a50aea7355c572e5816e750c76c1d16f173e96c"
+checksum = "86c85b16016143b106f794ff23ba8c6d505f1963bc7c33dac245601f1bf61539"
 dependencies = [
  "core-math",
  "ferray-core",
@@ -2321,9 +2321,9 @@ dependencies = [
 
 [[package]]
 name = "ferray-window"
-version = "0.3.1"
+version = "0.3.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8c545f2fbbe91f1cffb2eab144be2d410ff871b4411f1fa693a5449fa8b66f08"
+checksum = "c13491d0a9bb09c0016379c2b0316ed22a65044947bc7ad7bc5e41d9da994f08"
 dependencies = [
  "ferray-core",
  "ferray-ufunc",

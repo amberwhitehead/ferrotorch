@@ -416,7 +416,7 @@ fn check_f64(label: &str, actual: &[f64], expected: &[f64], tol: f64) {
 /// `tag` is consulted in addition to (op, device, dtype) to target specific
 /// fixture cases without affecting others.
 fn cascade_skip(
-    op: &str,
+    _op: &str,
     _device_label: &str,
     _dtype: &str,
     _tag: Option<&str>,
@@ -441,11 +441,9 @@ fn cascade_skip(
     // the Hermitian-doubling correction along the truncated axis. The
     // matching cascade_skip block has been retired.
 
-    // Issue #810: signal::taylor differs from scipy by ~1.5e-3 — likely an
-    // SLL convention or normalization-formula difference in ferray-window.
-    if op == "window_taylor" {
-        return Some("#810 taylor diverges from scipy by 1.5e-3");
-    }
+    // Issue #810: closed by ferray-window 0.3.7. The Taylor window now applies
+    // the centre-value normalization fix so the output matches scipy within
+    // F64_WINDOW = 1e-6. The matching cascade_skip block has been retired.
 
     None
 }
