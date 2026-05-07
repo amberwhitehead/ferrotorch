@@ -1,11 +1,12 @@
 //! ResNet architectures: ResNet-18, ResNet-34, and ResNet-50.
 //!
 //! Follows the original paper: "Deep Residual Learning for Image Recognition"
-//! (He et al., 2015). This implementation omits BatchNorm2d (not yet available
-//! in `ferrotorch_nn`) -- batch normalization can be slotted in later without
-//! changing the overall architecture.
+//! (He et al., 2015). Batch normalization is included after every convolution,
+//! matching the `torchvision.models.resnet` reference implementation.
 //!
-//! All convolutions use Kaiming-initialized weights. The residual `add` uses
+//! All convolutions use Kaiming-initialized weights (bias=false). BN layers
+//! use the default affine=true so weight+bias parameters are learnable, giving
+//! the same parameter count as torchvision. The residual `add` uses
 //! `ferrotorch_core::grad_fns::arithmetic::add` so gradients flow through
 //! skip connections automatically.
 
@@ -14,6 +15,7 @@ use ferrotorch_core::grad_fns::arithmetic::add;
 use ferrotorch_core::grad_fns::shape::reshape;
 use ferrotorch_core::{FerrotorchResult, Float, Tensor};
 
+use ferrotorch_nn::norm::BatchNorm2d;
 use ferrotorch_nn::Conv2d;
 use ferrotorch_nn::Linear;
 use ferrotorch_nn::module::Module;
@@ -60,20 +62,24 @@ fn conv1x1<T: Float>(
 // BasicBlock (for ResNet-18 / ResNet-34)
 // ===========================================================================
 
-/// A basic residual block with two 3x3 convolutions.
+/// A basic residual block with two 3x3 convolutions, each followed by
+/// BatchNorm2d — matching the torchvision `BasicBlock` reference.
 ///
 /// ```text
-/// x -----> conv1 -> relu -> conv2 -----> (+) -> relu -> out
-/// |                                       ^
-/// +---------- [downsample] ---------------+
+/// x --> conv1 -> bn1 -> relu -> conv2 -> bn2 --> (+) -> relu -> out
+/// |                                               ^
+/// +------------- [downsample conv -> bn] ----------+
 /// ```
 ///
-/// The optional `downsample` 1x1 convolution is used when the spatial size
-/// or channel count changes between the input and the output.
+/// The optional `downsample` path uses a 1x1 conv + BN and is added whenever
+/// the spatial size or channel count changes between input and output.
 pub struct BasicBlock<T: Float> {
     conv1: Conv2d<T>,
+    bn1: BatchNorm2d<T>,
     conv2: Conv2d<T>,
-    downsample: Option<Conv2d<T>>,
+    bn2: BatchNorm2d<T>,
+    /// When present: (conv1x1, bn) that projects the skip connection.
+    downsample: Option<(Conv2d<T>, BatchNorm2d<T>)>,
     training: bool,
 }
 
@@ -90,17 +96,23 @@ impl<T: Float> BasicBlock<T> {
     ///   downsampling layers.
     pub fn new(in_planes: usize, planes: usize, stride: usize) -> FerrotorchResult<Self> {
         let conv1 = conv3x3(in_planes, planes, stride)?;
+        let bn1 = BatchNorm2d::new(planes, 1e-5, 0.1, true)?;
         let conv2 = conv3x3(planes, planes, 1)?;
+        let bn2 = BatchNorm2d::new(planes, 1e-5, 0.1, true)?;
 
         let downsample = if stride != 1 || in_planes != planes * Self::EXPANSION {
-            Some(conv1x1(in_planes, planes * Self::EXPANSION, stride)?)
+            let ds_conv = conv1x1(in_planes, planes * Self::EXPANSION, stride)?;
+            let ds_bn = BatchNorm2d::new(planes * Self::EXPANSION, 1e-5, 0.1, true)?;
+            Some((ds_conv, ds_bn))
         } else {
             None
         };
 
         Ok(Self {
             conv1,
+            bn1,
             conv2,
+            bn2,
             downsample,
             training: true,
         })
@@ -109,14 +121,19 @@ impl<T: Float> BasicBlock<T> {
 
 impl<T: Float> Module<T> for BasicBlock<T> {
     fn forward(&self, input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
-        // Main path.
+        // Main path: conv -> BN -> relu -> conv -> BN.
         let out = self.conv1.forward(input)?;
+        let out = Module::<T>::forward(&self.bn1, &out)?;
         let out = relu(&out)?;
         let out = self.conv2.forward(&out)?;
+        let out = Module::<T>::forward(&self.bn2, &out)?;
 
-        // Skip connection.
+        // Skip connection (optionally projected).
         let identity = match &self.downsample {
-            Some(ds) => ds.forward(input)?,
+            Some((ds_conv, ds_bn)) => {
+                let x = ds_conv.forward(input)?;
+                Module::<T>::forward(ds_bn, &x)?
+            }
             None => input.clone(),
         };
 
@@ -128,9 +145,12 @@ impl<T: Float> Module<T> for BasicBlock<T> {
     fn parameters(&self) -> Vec<&Parameter<T>> {
         let mut params = Vec::new();
         params.extend(self.conv1.parameters());
+        params.extend(self.bn1.parameters());
         params.extend(self.conv2.parameters());
-        if let Some(ref ds) = self.downsample {
-            params.extend(ds.parameters());
+        params.extend(self.bn2.parameters());
+        if let Some((ref ds_conv, ref ds_bn)) = self.downsample {
+            params.extend(ds_conv.parameters());
+            params.extend(ds_bn.parameters());
         }
         params
     }
@@ -138,9 +158,12 @@ impl<T: Float> Module<T> for BasicBlock<T> {
     fn parameters_mut(&mut self) -> Vec<&mut Parameter<T>> {
         let mut params = Vec::new();
         params.extend(self.conv1.parameters_mut());
+        params.extend(self.bn1.parameters_mut());
         params.extend(self.conv2.parameters_mut());
-        if let Some(ref mut ds) = self.downsample {
-            params.extend(ds.parameters_mut());
+        params.extend(self.bn2.parameters_mut());
+        if let Some((ref mut ds_conv, ref mut ds_bn)) = self.downsample {
+            params.extend(ds_conv.parameters_mut());
+            params.extend(ds_bn.parameters_mut());
         }
         params
     }
@@ -150,12 +173,21 @@ impl<T: Float> Module<T> for BasicBlock<T> {
         for (name, p) in self.conv1.named_parameters() {
             params.push((format!("conv1.{name}"), p));
         }
+        for (name, p) in self.bn1.named_parameters() {
+            params.push((format!("bn1.{name}"), p));
+        }
         for (name, p) in self.conv2.named_parameters() {
             params.push((format!("conv2.{name}"), p));
         }
-        if let Some(ref ds) = self.downsample {
-            for (name, p) in ds.named_parameters() {
-                params.push((format!("downsample.{name}"), p));
+        for (name, p) in self.bn2.named_parameters() {
+            params.push((format!("bn2.{name}"), p));
+        }
+        if let Some((ref ds_conv, ref ds_bn)) = self.downsample {
+            for (name, p) in ds_conv.named_parameters() {
+                params.push((format!("downsample.0.{name}"), p));
+            }
+            for (name, p) in ds_bn.named_parameters() {
+                params.push((format!("downsample.1.{name}"), p));
             }
         }
         params
@@ -163,10 +195,20 @@ impl<T: Float> Module<T> for BasicBlock<T> {
 
     fn train(&mut self) {
         self.training = true;
+        self.bn1.train();
+        self.bn2.train();
+        if let Some((_, ref mut ds_bn)) = self.downsample {
+            ds_bn.train();
+        }
     }
 
     fn eval(&mut self) {
         self.training = false;
+        self.bn1.eval();
+        self.bn2.eval();
+        if let Some((_, ref mut ds_bn)) = self.downsample {
+            ds_bn.eval();
+        }
     }
 
     fn is_training(&self) -> bool {
@@ -178,20 +220,25 @@ impl<T: Float> Module<T> for BasicBlock<T> {
 // Bottleneck (for ResNet-50)
 // ===========================================================================
 
-/// A bottleneck residual block with 1x1 -> 3x3 -> 1x1 convolutions.
+/// A bottleneck residual block with 1x1 -> 3x3 -> 1x1 convolutions, each
+/// followed by BatchNorm2d — matching the torchvision `Bottleneck` reference.
 ///
 /// ```text
-/// x --> conv1 (1x1) -> relu -> conv2 (3x3) -> relu -> conv3 (1x1) --> (+) -> relu -> out
-/// |                                                                     ^
-/// +----------------------- [downsample] --------------------------------+
+/// x -> conv1(1x1)->bn1->relu -> conv2(3x3)->bn2->relu -> conv3(1x1)->bn3 -> (+) -> relu -> out
+/// |                                                                           ^
+/// +---------------------------- [downsample conv -> bn] ----------------------+
 /// ```
 ///
 /// The expansion factor is 4: `conv3` outputs `planes * 4` channels.
 pub struct Bottleneck<T: Float> {
     conv1: Conv2d<T>,
+    bn1: BatchNorm2d<T>,
     conv2: Conv2d<T>,
+    bn2: BatchNorm2d<T>,
     conv3: Conv2d<T>,
-    downsample: Option<Conv2d<T>>,
+    bn3: BatchNorm2d<T>,
+    /// When present: (conv1x1, bn) projecting the skip connection.
+    downsample: Option<(Conv2d<T>, BatchNorm2d<T>)>,
     training: bool,
 }
 
@@ -208,19 +255,27 @@ impl<T: Float> Bottleneck<T> {
         let width = planes; // No group convolution, so width = planes.
 
         let conv1 = conv1x1(in_planes, width, 1)?;
+        let bn1 = BatchNorm2d::new(width, 1e-5, 0.1, true)?;
         let conv2 = conv3x3(width, width, stride)?;
+        let bn2 = BatchNorm2d::new(width, 1e-5, 0.1, true)?;
         let conv3 = conv1x1(width, planes * Self::EXPANSION, 1)?;
+        let bn3 = BatchNorm2d::new(planes * Self::EXPANSION, 1e-5, 0.1, true)?;
 
         let downsample = if stride != 1 || in_planes != planes * Self::EXPANSION {
-            Some(conv1x1(in_planes, planes * Self::EXPANSION, stride)?)
+            let ds_conv = conv1x1(in_planes, planes * Self::EXPANSION, stride)?;
+            let ds_bn = BatchNorm2d::new(planes * Self::EXPANSION, 1e-5, 0.1, true)?;
+            Some((ds_conv, ds_bn))
         } else {
             None
         };
 
         Ok(Self {
             conv1,
+            bn1,
             conv2,
+            bn2,
             conv3,
+            bn3,
             downsample,
             training: true,
         })
@@ -231,18 +286,24 @@ impl<T: Float> Module<T> for Bottleneck<T> {
     fn forward(&self, input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
         // 1x1 reduce.
         let out = self.conv1.forward(input)?;
+        let out = Module::<T>::forward(&self.bn1, &out)?;
         let out = relu(&out)?;
 
         // 3x3 process.
         let out = self.conv2.forward(&out)?;
+        let out = Module::<T>::forward(&self.bn2, &out)?;
         let out = relu(&out)?;
 
         // 1x1 expand.
         let out = self.conv3.forward(&out)?;
+        let out = Module::<T>::forward(&self.bn3, &out)?;
 
-        // Skip connection.
+        // Skip connection (optionally projected).
         let identity = match &self.downsample {
-            Some(ds) => ds.forward(input)?,
+            Some((ds_conv, ds_bn)) => {
+                let x = ds_conv.forward(input)?;
+                Module::<T>::forward(ds_bn, &x)?
+            }
             None => input.clone(),
         };
 
@@ -253,10 +314,14 @@ impl<T: Float> Module<T> for Bottleneck<T> {
     fn parameters(&self) -> Vec<&Parameter<T>> {
         let mut params = Vec::new();
         params.extend(self.conv1.parameters());
+        params.extend(self.bn1.parameters());
         params.extend(self.conv2.parameters());
+        params.extend(self.bn2.parameters());
         params.extend(self.conv3.parameters());
-        if let Some(ref ds) = self.downsample {
-            params.extend(ds.parameters());
+        params.extend(self.bn3.parameters());
+        if let Some((ref ds_conv, ref ds_bn)) = self.downsample {
+            params.extend(ds_conv.parameters());
+            params.extend(ds_bn.parameters());
         }
         params
     }
@@ -264,10 +329,14 @@ impl<T: Float> Module<T> for Bottleneck<T> {
     fn parameters_mut(&mut self) -> Vec<&mut Parameter<T>> {
         let mut params = Vec::new();
         params.extend(self.conv1.parameters_mut());
+        params.extend(self.bn1.parameters_mut());
         params.extend(self.conv2.parameters_mut());
+        params.extend(self.bn2.parameters_mut());
         params.extend(self.conv3.parameters_mut());
-        if let Some(ref mut ds) = self.downsample {
-            params.extend(ds.parameters_mut());
+        params.extend(self.bn3.parameters_mut());
+        if let Some((ref mut ds_conv, ref mut ds_bn)) = self.downsample {
+            params.extend(ds_conv.parameters_mut());
+            params.extend(ds_bn.parameters_mut());
         }
         params
     }
@@ -277,15 +346,27 @@ impl<T: Float> Module<T> for Bottleneck<T> {
         for (name, p) in self.conv1.named_parameters() {
             params.push((format!("conv1.{name}"), p));
         }
+        for (name, p) in self.bn1.named_parameters() {
+            params.push((format!("bn1.{name}"), p));
+        }
         for (name, p) in self.conv2.named_parameters() {
             params.push((format!("conv2.{name}"), p));
+        }
+        for (name, p) in self.bn2.named_parameters() {
+            params.push((format!("bn2.{name}"), p));
         }
         for (name, p) in self.conv3.named_parameters() {
             params.push((format!("conv3.{name}"), p));
         }
-        if let Some(ref ds) = self.downsample {
-            for (name, p) in ds.named_parameters() {
-                params.push((format!("downsample.{name}"), p));
+        for (name, p) in self.bn3.named_parameters() {
+            params.push((format!("bn3.{name}"), p));
+        }
+        if let Some((ref ds_conv, ref ds_bn)) = self.downsample {
+            for (name, p) in ds_conv.named_parameters() {
+                params.push((format!("downsample.0.{name}"), p));
+            }
+            for (name, p) in ds_bn.named_parameters() {
+                params.push((format!("downsample.1.{name}"), p));
             }
         }
         params
@@ -293,10 +374,22 @@ impl<T: Float> Module<T> for Bottleneck<T> {
 
     fn train(&mut self) {
         self.training = true;
+        self.bn1.train();
+        self.bn2.train();
+        self.bn3.train();
+        if let Some((_, ref mut ds_bn)) = self.downsample {
+            ds_bn.train();
+        }
     }
 
     fn eval(&mut self) {
         self.training = false;
+        self.bn1.eval();
+        self.bn2.eval();
+        self.bn3.eval();
+        if let Some((_, ref mut ds_bn)) = self.downsample {
+            ds_bn.eval();
+        }
     }
 
     fn is_training(&self) -> bool {
@@ -312,16 +405,15 @@ impl<T: Float> Module<T> for Bottleneck<T> {
 ///
 /// The architecture follows the standard ResNet design:
 ///
-/// 1. 7x7 conv, stride 2 (initial feature extraction)
+/// 1. 7x7 conv, stride 2, BN, ReLU (stem)
 /// 2. 3x3 max pool, stride 2
 /// 3. Four residual layers (layer1..layer4)
 /// 4. Adaptive average pool to (1, 1)
 /// 5. Fully connected classifier
-///
-/// Batch normalization is omitted (not yet in `ferrotorch_nn`).
 pub struct ResNet<T: Float> {
     // Stem.
     conv1: Conv2d<T>,
+    bn1: BatchNorm2d<T>,
     maxpool: MaxPool2d,
 
     // Residual layers (stored as trait objects for uniformity).
@@ -344,6 +436,7 @@ impl<T: Float> ResNet<T> {
     /// of the four stages.
     fn from_basic(layers: [usize; 4], num_classes: usize) -> FerrotorchResult<Self> {
         let conv1 = Conv2d::new(3, 64, (7, 7), (2, 2), (3, 3), false)?;
+        let bn1 = BatchNorm2d::new(64, 1e-5, 0.1, true)?;
         let maxpool = MaxPool2d::new([3, 3], [2, 2], [1, 1]);
 
         let layer1 = Self::make_basic_layer(64, 64, layers[0], 1)?;
@@ -356,6 +449,7 @@ impl<T: Float> ResNet<T> {
 
         Ok(Self {
             conv1,
+            bn1,
             maxpool,
             layer1,
             layer2,
@@ -370,6 +464,7 @@ impl<T: Float> ResNet<T> {
     /// Build a ResNet from Bottleneck blocks.
     fn from_bottleneck(layers: [usize; 4], num_classes: usize) -> FerrotorchResult<Self> {
         let conv1 = Conv2d::new(3, 64, (7, 7), (2, 2), (3, 3), false)?;
+        let bn1 = BatchNorm2d::new(64, 1e-5, 0.1, true)?;
         let maxpool = MaxPool2d::new([3, 3], [2, 2], [1, 1]);
 
         let layer1 = Self::make_bottleneck_layer(64, 64, layers[0], 1)?;
@@ -385,6 +480,7 @@ impl<T: Float> ResNet<T> {
 
         Ok(Self {
             conv1,
+            bn1,
             maxpool,
             layer1,
             layer2,
@@ -451,8 +547,9 @@ impl<T: Float> ResNet<T> {
 
 impl<T: Float> Module<T> for ResNet<T> {
     fn forward(&self, input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
-        // Stem: conv -> relu -> maxpool.
+        // Stem: conv -> BN -> relu -> maxpool.
         let x = self.conv1.forward(input)?;
+        let x = Module::<T>::forward(&self.bn1, &x)?;
         let x = relu(&x)?;
         let x = Module::<T>::forward(&self.maxpool, &x)?;
 
@@ -477,6 +574,7 @@ impl<T: Float> Module<T> for ResNet<T> {
     fn parameters(&self) -> Vec<&Parameter<T>> {
         let mut params = Vec::new();
         params.extend(self.conv1.parameters());
+        params.extend(self.bn1.parameters());
         params.extend(collect_layer_params(&self.layer1));
         params.extend(collect_layer_params(&self.layer2));
         params.extend(collect_layer_params(&self.layer3));
@@ -488,6 +586,7 @@ impl<T: Float> Module<T> for ResNet<T> {
     fn parameters_mut(&mut self) -> Vec<&mut Parameter<T>> {
         let mut params = Vec::new();
         params.extend(self.conv1.parameters_mut());
+        params.extend(self.bn1.parameters_mut());
         params.extend(collect_layer_params_mut(&mut self.layer1));
         params.extend(collect_layer_params_mut(&mut self.layer2));
         params.extend(collect_layer_params_mut(&mut self.layer3));
@@ -501,6 +600,9 @@ impl<T: Float> Module<T> for ResNet<T> {
         for (name, p) in self.conv1.named_parameters() {
             params.push((format!("conv1.{name}"), p));
         }
+        for (name, p) in self.bn1.named_parameters() {
+            params.push((format!("bn1.{name}"), p));
+        }
         named_layer_params(&self.layer1, "layer1", &mut params);
         named_layer_params(&self.layer2, "layer2", &mut params);
         named_layer_params(&self.layer3, "layer3", &mut params);
@@ -513,6 +615,7 @@ impl<T: Float> Module<T> for ResNet<T> {
 
     fn train(&mut self) {
         self.training = true;
+        self.bn1.train();
         for block in &mut self.layer1 {
             block.train();
         }
@@ -529,6 +632,7 @@ impl<T: Float> Module<T> for ResNet<T> {
 
     fn eval(&mut self) {
         self.training = false;
+        self.bn1.eval();
         for block in &mut self.layer1 {
             block.eval();
         }
@@ -601,6 +705,7 @@ impl<T: Float> crate::models::feature_extractor::IntermediateFeatures<T> for Res
 
         // Stem.
         let x = self.conv1.forward(input)?;
+        let x = Module::<T>::forward(&self.bn1, &x)?;
         let x = relu(&x)?;
         let x = Module::<T>::forward(&self.maxpool, &x)?;
         out.insert("stem".to_string(), x.clone());
@@ -718,17 +823,23 @@ mod tests {
 
     #[test]
     fn test_basic_block_parameter_count() {
-        // No downsample: 2 * (64 * 64 * 3 * 3) = 73728
+        // No downsample: 2 convs + 2 BNs (weight+bias each).
+        // conv1: 64*64*3*3=36864, bn1: 64*2=128, conv2: 64*64*3*3=36864, bn2: 64*2=128
         let block = BasicBlock::<f32>::new(64, 64, 1).unwrap();
         let count: usize = block.parameters().iter().map(|p| p.numel()).sum();
-        assert_eq!(count, 2 * 64 * 64 * 3 * 3);
+        let expected_no_ds = 2 * 64 * 64 * 3 * 3   // conv1 + conv2
+                           + 2 * (2 * 64);           // bn1 + bn2 (weight+bias)
+        assert_eq!(count, expected_no_ds);
 
-        // With downsample: 2 convs + 1x1 ds
+        // With downsample: 2 convs + 2 BNs + ds_conv + ds_bn.
         let block = BasicBlock::<f32>::new(64, 128, 2).unwrap();
         let count: usize = block.parameters().iter().map(|p| p.numel()).sum();
         let expected = 64 * 128 * 3 * 3     // conv1: 64->128
-                     + 128 * 128 * 3 * 3    // conv2: 128->128
-                     + (64 * 128); // downsample: 64->128
+                     + 2 * 128              // bn1
+                     + 128 * 128 * 3 * 3   // conv2: 128->128
+                     + 2 * 128             // bn2
+                     + 64 * 128            // downsample conv: 64->128
+                     + 2 * 128;            // downsample bn
         assert_eq!(count, expected);
     }
 
@@ -766,14 +877,17 @@ mod tests {
 
     #[test]
     fn test_bottleneck_parameter_count() {
-        // No downsample: in=256, planes=64
+        // No downsample: in=256, planes=64 (256 == 64*4 so no projection needed).
         // conv1: 256*64*1*1 = 16384
+        // bn1:   2*64       =   128   (weight + bias)
         // conv2: 64*64*3*3  = 36864
+        // bn2:   2*64       =   128
         // conv3: 64*256*1*1 = 16384
-        // total = 69632
+        // bn3:   2*256      =   512
+        // total = 70400
         let block = Bottleneck::<f32>::new(256, 64, 1).unwrap();
         let count: usize = block.parameters().iter().map(|p| p.numel()).sum();
-        assert_eq!(count, 16384 + 36864 + 16384);
+        assert_eq!(count, 16384 + 128 + 36864 + 128 + 16384 + 512);
     }
 
     // -----------------------------------------------------------------------

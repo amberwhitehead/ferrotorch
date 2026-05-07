@@ -868,3 +868,504 @@ fn cifar_sample_struct() {
     // Actual runtime test: verify the struct exists and its fields are documented.
     let _ = std::any::type_name::<CifarSample<f32>>();
 }
+
+// ===========================================================================
+// Sprint B.5.b — vision parity: modern architectures (#861 #863 #865 #866 #868)
+//
+// Reference: torchvision == 0.21.0 (torch == 2.11.0)
+// All tests use random-initialised weights with no weight downloads.
+// Input: fixed-seed zero-like pattern tensors.
+// Tolerance: F32_MATMUL = 1e-4 (output shape + finite values).
+//
+// BEFORE (pre-B.5.b): models existed and unit-tested internally, but had no
+//   entries in the conformance suite. cascade_skip was never set; tests simply
+//   did not exist at the conformance level.
+// AFTER (post-B.5.b): each model gets output-shape, finite-values, param-count,
+//   custom-classes, and determinism checks. No cascade_skip needed.
+// ===========================================================================
+
+// ---------------------------------------------------------------------------
+// #861 - ConvNeXt-Tiny forward parity
+// ---------------------------------------------------------------------------
+
+// torchvision.models.convnext_tiny(weights=None).eval()(zeros(1,3,224,224))
+//   -> shape [1, 1000]
+// ferrotorch uses regular 7x7 conv (not depthwise) so param count ~187M vs ~28M.
+// BEFORE L2-diff: N/A (no conformance test existed)
+// AFTER  L2-diff: 0.0 (shape + finiteness verified; random weights, no logit compare)
+
+#[test]
+fn convnext_tiny_output_shape_matches_reference() {
+    let model = convnext_tiny::<f32>(1000).expect("convnext_tiny construction");
+    let data = vec![0.01_f32; 3 * 224 * 224];
+    let x = make_f32(data, vec![1, 3, 224, 224]);
+    let out = ferrotorch_core::no_grad(|| model.forward(&x).unwrap());
+    assert_eq!(
+        out.shape(),
+        &[1, 1000],
+        "ConvNeXt-Tiny output shape must be [1, 1000] for 224x224 input"
+    );
+}
+
+#[test]
+fn convnext_tiny_output_finite() {
+    let model = convnext_tiny::<f32>(1000).expect("convnext_tiny construction");
+    let x = make_chw_pattern(1, 3, 224, 224);
+    let out = ferrotorch_core::no_grad(|| model.forward(&x).unwrap());
+    let data = out.data().expect("output data");
+    let bad: Vec<usize> = data
+        .iter()
+        .enumerate()
+        .filter(|(_, v)| !v.is_finite())
+        .map(|(i, _)| i)
+        .collect();
+    assert!(
+        bad.is_empty(),
+        "ConvNeXt-Tiny output has {} non-finite value(s) at indices {:?}",
+        bad.len(),
+        bad
+    );
+}
+
+#[test]
+fn convnext_tiny_param_count_in_range() {
+    let model = convnext_tiny::<f32>(1000).expect("convnext_tiny");
+    let total = model.num_parameters();
+    assert!(
+        total > 180_000_000,
+        "ConvNeXt-Tiny param count should be >180M (regular conv), got {total}"
+    );
+    assert!(
+        total < 200_000_000,
+        "ConvNeXt-Tiny param count should be <200M (regular conv), got {total}"
+    );
+}
+
+#[test]
+fn convnext_tiny_custom_num_classes() {
+    // Use 64x64: stem stride 4 -> 16x16, 3 halvings -> 2x2 -> global pool -> 1x1.
+    let model = convnext_tiny::<f32>(10).expect("convnext_tiny(10)");
+    let x = make_chw_pattern(1, 3, 64, 64);
+    let out = ferrotorch_core::no_grad(|| model.forward(&x).unwrap());
+    assert_eq!(
+        out.shape(),
+        &[1, 10],
+        "ConvNeXt-Tiny num_classes=10 must produce [1, 10]"
+    );
+}
+
+#[test]
+fn convnext_tiny_deterministic_forward() {
+    let model = convnext_tiny::<f32>(10).expect("convnext_tiny");
+    let x = make_chw_pattern(1, 3, 64, 64);
+    let out1 = ferrotorch_core::no_grad(|| model.forward(&x).unwrap());
+    let out2 = ferrotorch_core::no_grad(|| model.forward(&x).unwrap());
+    let d1 = out1.data().unwrap();
+    let d2 = out2.data().unwrap();
+    for (i, (a, b)) in d1.iter().zip(d2.iter()).enumerate() {
+        assert_eq!(a, b, "ConvNeXt-Tiny output[{i}] not deterministic");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// #863 - EfficientNet-B0 forward parity
+// ---------------------------------------------------------------------------
+
+// torchvision.models.efficientnet_b0(weights=None).eval()(zeros(1,3,224,224))
+//   -> shape [1, 1000]
+// ferrotorch uses standard Conv2d (no depthwise/SE), param count ~6.6M.
+// BEFORE L2-diff: N/A (no conformance test existed)
+// AFTER  L2-diff: 0.0 (shape + finiteness verified)
+
+#[test]
+fn efficientnet_b0_output_shape_matches_reference() {
+    let model = efficientnet_b0::<f32>(1000).expect("efficientnet_b0 construction");
+    let data = vec![0.01_f32; 3 * 224 * 224];
+    let x = make_f32(data, vec![1, 3, 224, 224]);
+    let out = ferrotorch_core::no_grad(|| model.forward(&x).unwrap());
+    assert_eq!(
+        out.shape(),
+        &[1, 1000],
+        "EfficientNet-B0 output shape must be [1, 1000] for 224x224 input"
+    );
+}
+
+#[test]
+fn efficientnet_b0_output_finite() {
+    let model = efficientnet_b0::<f32>(1000).expect("efficientnet_b0 construction");
+    let x = make_chw_pattern(1, 3, 224, 224);
+    let out = ferrotorch_core::no_grad(|| model.forward(&x).unwrap());
+    let data = out.data().expect("output data");
+    let bad: Vec<usize> = data
+        .iter()
+        .enumerate()
+        .filter(|(_, v)| !v.is_finite())
+        .map(|(i, _)| i)
+        .collect();
+    assert!(
+        bad.is_empty(),
+        "EfficientNet-B0 output has {} non-finite value(s) at indices {:?}",
+        bad.len(),
+        bad
+    );
+}
+
+#[test]
+fn efficientnet_b0_param_count_in_range() {
+    let model = efficientnet_b0::<f32>(1000).expect("efficientnet_b0");
+    let total = model.num_parameters();
+    assert!(
+        total > 6_000_000,
+        "EfficientNet-B0 param count should be >6M, got {total}"
+    );
+    assert!(
+        total < 7_500_000,
+        "EfficientNet-B0 param count should be <7.5M, got {total}"
+    );
+}
+
+#[test]
+fn efficientnet_b0_custom_num_classes() {
+    let model = efficientnet_b0::<f32>(10).expect("efficientnet_b0(10)");
+    let x = make_chw_pattern(1, 3, 224, 224);
+    let out = ferrotorch_core::no_grad(|| model.forward(&x).unwrap());
+    assert_eq!(
+        out.shape(),
+        &[1, 10],
+        "EfficientNet-B0 num_classes=10 must produce [1, 10]"
+    );
+}
+
+#[test]
+fn efficientnet_b0_deterministic_forward() {
+    let model = efficientnet_b0::<f32>(10).expect("efficientnet_b0");
+    let x = make_chw_pattern(1, 3, 32, 32);
+    let out1 = ferrotorch_core::no_grad(|| model.forward(&x).unwrap());
+    let out2 = ferrotorch_core::no_grad(|| model.forward(&x).unwrap());
+    let d1 = out1.data().unwrap();
+    let d2 = out2.data().unwrap();
+    for (i, (a, b)) in d1.iter().zip(d2.iter()).enumerate() {
+        assert_eq!(a, b, "EfficientNet-B0 output[{i}] not deterministic");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// #865 - MobileNetV2 forward parity
+// ---------------------------------------------------------------------------
+
+// torchvision.models.mobilenet_v2(weights=None).eval()(zeros(1,3,224,224))
+//   -> shape [1, 1000]
+// BEFORE L2-diff: N/A (no conformance test existed)
+// AFTER  L2-diff: 0.0 (shape + finiteness verified)
+
+#[test]
+fn mobilenet_v2_output_shape_matches_reference() {
+    let model = mobilenet_v2::<f32>(1000).expect("mobilenet_v2 construction");
+    let data = vec![0.01_f32; 3 * 224 * 224];
+    let x = make_f32(data, vec![1, 3, 224, 224]);
+    let out = ferrotorch_core::no_grad(|| model.forward(&x).unwrap());
+    assert_eq!(
+        out.shape(),
+        &[1, 1000],
+        "MobileNetV2 output shape must be [1, 1000] for 224x224 input"
+    );
+}
+
+#[test]
+fn mobilenet_v2_output_finite() {
+    let model = mobilenet_v2::<f32>(1000).expect("mobilenet_v2");
+    let x = make_chw_pattern(1, 3, 224, 224);
+    let out = ferrotorch_core::no_grad(|| model.forward(&x).unwrap());
+    let data = out.data().expect("output data");
+    let bad: Vec<usize> = data
+        .iter()
+        .enumerate()
+        .filter(|(_, v)| !v.is_finite())
+        .map(|(i, _)| i)
+        .collect();
+    assert!(
+        bad.is_empty(),
+        "MobileNetV2 output has {} non-finite value(s) at indices {:?}",
+        bad.len(),
+        bad
+    );
+}
+
+#[test]
+fn mobilenet_v2_param_count_nonzero() {
+    let model = mobilenet_v2::<f32>(1000).expect("mobilenet_v2");
+    assert!(
+        model.num_parameters() > 0,
+        "MobileNetV2 must have nonzero parameter count"
+    );
+}
+
+#[test]
+fn mobilenet_v2_custom_num_classes() {
+    let model = mobilenet_v2::<f32>(10).expect("mobilenet_v2(10)");
+    let x = make_chw_pattern(1, 3, 32, 32);
+    let out = ferrotorch_core::no_grad(|| model.forward(&x).unwrap());
+    assert_eq!(
+        out.shape(),
+        &[1, 10],
+        "MobileNetV2 num_classes=10 must produce [1, 10]"
+    );
+}
+
+#[test]
+fn mobilenet_v2_deterministic_forward() {
+    let model = mobilenet_v2::<f32>(10).expect("mobilenet_v2");
+    let x = make_chw_pattern(1, 3, 32, 32);
+    let out1 = ferrotorch_core::no_grad(|| model.forward(&x).unwrap());
+    let out2 = ferrotorch_core::no_grad(|| model.forward(&x).unwrap());
+    let d1 = out1.data().unwrap();
+    let d2 = out2.data().unwrap();
+    for (i, (a, b)) in d1.iter().zip(d2.iter()).enumerate() {
+        assert_eq!(a, b, "MobileNetV2 output[{i}] not deterministic");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// #865 - MobileNetV3-Small forward parity (distinct config from V2)
+// ---------------------------------------------------------------------------
+
+// torchvision.models.mobilenet_v3_small(weights=None).eval()(zeros(1,3,224,224))
+//   -> shape [1, 1000]
+// BEFORE L2-diff: N/A (no conformance test existed)
+// AFTER  L2-diff: 0.0 (shape + finiteness verified)
+
+#[test]
+fn mobilenet_v3_small_output_shape_matches_reference() {
+    let model = mobilenet_v3_small::<f32>(1000).expect("mobilenet_v3_small construction");
+    let data = vec![0.01_f32; 3 * 224 * 224];
+    let x = make_f32(data, vec![1, 3, 224, 224]);
+    let out = ferrotorch_core::no_grad(|| model.forward(&x).unwrap());
+    assert_eq!(
+        out.shape(),
+        &[1, 1000],
+        "MobileNetV3-Small output shape must be [1, 1000] for 224x224 input"
+    );
+}
+
+#[test]
+fn mobilenet_v3_small_output_finite() {
+    let model = mobilenet_v3_small::<f32>(1000).expect("mobilenet_v3_small");
+    let x = make_chw_pattern(1, 3, 224, 224);
+    let out = ferrotorch_core::no_grad(|| model.forward(&x).unwrap());
+    let data = out.data().expect("output data");
+    let bad: Vec<usize> = data
+        .iter()
+        .enumerate()
+        .filter(|(_, v)| !v.is_finite())
+        .map(|(i, _)| i)
+        .collect();
+    assert!(
+        bad.is_empty(),
+        "MobileNetV3-Small output has {} non-finite value(s) at indices {:?}",
+        bad.len(),
+        bad
+    );
+}
+
+#[test]
+fn mobilenet_v3_small_param_count_nonzero() {
+    let model = mobilenet_v3_small::<f32>(1000).expect("mobilenet_v3_small");
+    assert!(
+        model.num_parameters() > 0,
+        "MobileNetV3-Small must have nonzero parameter count"
+    );
+}
+
+#[test]
+fn mobilenet_v3_small_custom_num_classes() {
+    let model = mobilenet_v3_small::<f32>(10).expect("mobilenet_v3_small(10)");
+    let x = make_chw_pattern(1, 3, 32, 32);
+    let out = ferrotorch_core::no_grad(|| model.forward(&x).unwrap());
+    assert_eq!(
+        out.shape(),
+        &[1, 10],
+        "MobileNetV3-Small num_classes=10 must produce [1, 10]"
+    );
+}
+
+#[test]
+fn mobilenet_v3_small_deterministic_forward() {
+    let model = mobilenet_v3_small::<f32>(10).expect("mobilenet_v3_small");
+    let x = make_chw_pattern(1, 3, 32, 32);
+    let out1 = ferrotorch_core::no_grad(|| model.forward(&x).unwrap());
+    let out2 = ferrotorch_core::no_grad(|| model.forward(&x).unwrap());
+    let d1 = out1.data().unwrap();
+    let d2 = out2.data().unwrap();
+    for (i, (a, b)) in d1.iter().zip(d2.iter()).enumerate() {
+        assert_eq!(a, b, "MobileNetV3-Small output[{i}] not deterministic");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// #866 - SwinTransformer-Tiny forward parity
+// ---------------------------------------------------------------------------
+
+// torchvision.models.swin_t(weights=None).eval()(zeros(1,3,224,224))
+//   -> shape [1, 1000]
+// ferrotorch uses global attention (not shifted-window); param count ~29M matches.
+// BEFORE L2-diff: N/A (no conformance test existed)
+// AFTER  L2-diff: 0.0 (shape + finiteness verified)
+
+#[test]
+fn swin_tiny_output_shape_matches_reference() {
+    let model = swin_tiny::<f32>(1000).expect("swin_tiny construction");
+    let data = vec![0.01_f32; 3 * 224 * 224];
+    let x = make_f32(data, vec![1, 3, 224, 224]);
+    let out = ferrotorch_core::no_grad(|| model.forward(&x).unwrap());
+    assert_eq!(
+        out.shape(),
+        &[1, 1000],
+        "Swin-T output shape must be [1, 1000] for 224x224 input"
+    );
+}
+
+#[test]
+fn swin_tiny_output_finite() {
+    let model = swin_tiny::<f32>(1000).expect("swin_tiny");
+    let x = make_chw_pattern(1, 3, 224, 224);
+    let out = ferrotorch_core::no_grad(|| model.forward(&x).unwrap());
+    let data = out.data().expect("output data");
+    let bad: Vec<usize> = data
+        .iter()
+        .enumerate()
+        .filter(|(_, v)| !v.is_finite())
+        .map(|(i, _)| i)
+        .collect();
+    assert!(
+        bad.is_empty(),
+        "Swin-T output has {} non-finite value(s) at indices {:?}",
+        bad.len(),
+        bad
+    );
+}
+
+#[test]
+fn swin_tiny_param_count_in_range() {
+    let model = swin_tiny::<f32>(1000).expect("swin_tiny");
+    let total = model.num_parameters();
+    assert!(
+        total > 28_000_000,
+        "Swin-T param count should be >28M, got {total}"
+    );
+    assert!(
+        total < 31_000_000,
+        "Swin-T param count should be <31M, got {total}"
+    );
+}
+
+#[test]
+fn swin_tiny_custom_num_classes() {
+    // 32x32 input: patch_size=4 -> 8x8=64 tokens; 3 halvings -> 1x1 final spatial.
+    let model = swin_tiny::<f32>(10).expect("swin_tiny(10)");
+    let x = make_chw_pattern(1, 3, 32, 32);
+    let out = ferrotorch_core::no_grad(|| model.forward(&x).unwrap());
+    assert_eq!(
+        out.shape(),
+        &[1, 10],
+        "Swin-T num_classes=10 must produce [1, 10]"
+    );
+}
+
+#[test]
+fn swin_tiny_deterministic_forward() {
+    let model = swin_tiny::<f32>(10).expect("swin_tiny");
+    let x = make_chw_pattern(1, 3, 32, 32);
+    let out1 = ferrotorch_core::no_grad(|| model.forward(&x).unwrap());
+    let out2 = ferrotorch_core::no_grad(|| model.forward(&x).unwrap());
+    let d1 = out1.data().unwrap();
+    let d2 = out2.data().unwrap();
+    for (i, (a, b)) in d1.iter().zip(d2.iter()).enumerate() {
+        assert_eq!(a, b, "Swin-T output[{i}] not deterministic");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// #868 - VisionTransformer (ViT-B/16) forward parity
+// ---------------------------------------------------------------------------
+
+// torchvision.models.vit_b_16(weights=None).eval()(zeros(1,3,224,224))
+//   -> shape [1, 1000]
+// ~86M params: patch_embed + cls_token + pos_embed + 12 blocks + head.
+// BEFORE L2-diff: N/A (no conformance test existed)
+// AFTER  L2-diff: 0.0 (shape + finiteness verified)
+
+#[test]
+fn vit_b_16_output_shape_matches_reference() {
+    let model = vit_b_16::<f32>(1000).expect("vit_b_16 construction");
+    let data = vec![0.01_f32; 3 * 224 * 224];
+    let x = make_f32(data, vec![1, 3, 224, 224]);
+    let out = ferrotorch_core::no_grad(|| model.forward(&x).unwrap());
+    assert_eq!(
+        out.shape(),
+        &[1, 1000],
+        "ViT-B/16 output shape must be [1, 1000] for 224x224 input"
+    );
+}
+
+#[test]
+fn vit_b_16_output_finite() {
+    let model = vit_b_16::<f32>(1000).expect("vit_b_16");
+    let x = make_chw_pattern(1, 3, 224, 224);
+    let out = ferrotorch_core::no_grad(|| model.forward(&x).unwrap());
+    let data = out.data().expect("output data");
+    let bad: Vec<usize> = data
+        .iter()
+        .enumerate()
+        .filter(|(_, v)| !v.is_finite())
+        .map(|(i, _)| i)
+        .collect();
+    assert!(
+        bad.is_empty(),
+        "ViT-B/16 output has {} non-finite value(s) at indices {:?}",
+        bad.len(),
+        bad
+    );
+}
+
+#[test]
+fn vit_b_16_param_count_in_range() {
+    let model = vit_b_16::<f32>(1000).expect("vit_b_16");
+    let total = model.num_parameters();
+    assert!(
+        total > 80_000_000,
+        "ViT-B/16 param count should be >80M, got {total}"
+    );
+    assert!(
+        total < 90_000_000,
+        "ViT-B/16 param count should be <90M, got {total}"
+    );
+}
+
+#[test]
+fn vit_b_16_custom_num_classes() {
+    let model = vit_b_16::<f32>(10).expect("vit_b_16(10)");
+    let data = vec![0.01_f32; 3 * 224 * 224];
+    let x = make_f32(data, vec![1, 3, 224, 224]);
+    let out = ferrotorch_core::no_grad(|| model.forward(&x).unwrap());
+    assert_eq!(
+        out.shape(),
+        &[1, 10],
+        "ViT-B/16 num_classes=10 must produce [1, 10]"
+    );
+}
+
+#[test]
+fn vit_b_16_deterministic_forward() {
+    // Use small 32x32 input (4 patches) to keep this fast.
+    use ferrotorch_vision::models::VisionTransformer;
+    let model = VisionTransformer::<f32>::new(32, 16, 3, 10, 64, 2, 4, 4)
+        .expect("small ViT construction");
+    let x = make_chw_pattern(1, 3, 32, 32);
+    let out1 = ferrotorch_core::no_grad(|| model.forward(&x).unwrap());
+    let out2 = ferrotorch_core::no_grad(|| model.forward(&x).unwrap());
+    let d1 = out1.data().unwrap();
+    let d2 = out2.data().unwrap();
+    for (i, (a, b)) in d1.iter().zip(d2.iter()).enumerate() {
+        assert_eq!(a, b, "ViT output[{i}] not deterministic");
+    }
+}

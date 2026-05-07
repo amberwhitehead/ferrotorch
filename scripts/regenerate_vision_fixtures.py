@@ -992,6 +992,146 @@ fixtures.append({
 })
 
 # ---------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# B.5.b: modern architecture forward-parity fixtures
+# Reference: torchvision 0.21.0, torch 2.11.0
+# No pretrained weights -- random init, shape-only contract.
+# ---------------------------------------------------------------------------
+
+def add_convnext_fixtures():
+    """ConvNeXt-Tiny (#861): output shape and param-count range."""
+    fixtures.append({
+        "id": "convnext_tiny_output_shape_contract",
+        "op": "convnext_tiny_forward",
+        "params": {"num_classes": 1000, "input_shape": [1, 3, 224, 224]},
+        "expected_output_shape": [1, 1000],
+        "note": (
+            "torchvision.models.convnext_tiny(weights=None)(zeros(1,3,224,224)) -> [1,1000]. "
+            "ferrotorch uses regular 7x7 conv (no depthwise) so param count ~187M vs ~28M. "
+            "Shape contract only; logit values depend on random init."
+        ),
+        "torchvision_version": tv_ver,
+    })
+    fixtures.append({
+        "id": "convnext_tiny_param_count_range",
+        "op": "convnext_tiny_param_count",
+        "params": {"num_classes": 1000},
+        "expected_min_params": 180_000_000,
+        "expected_max_params": 200_000_000,
+        "note": "ferrotorch regular-conv variant: 7x7 replaces depthwise, ~187M vs original ~28M.",
+    })
+
+
+add_convnext_fixtures()
+
+
+def add_efficientnet_fixtures():
+    """EfficientNet-B0 (#863): output shape contract."""
+    fixtures.append({
+        "id": "efficientnet_b0_output_shape_contract",
+        "op": "efficientnet_b0_forward",
+        "params": {"num_classes": 1000, "input_shape": [1, 3, 224, 224]},
+        "expected_output_shape": [1, 1000],
+        "note": (
+            "torchvision.models.efficientnet_b0(weights=None)(zeros(1,3,224,224)) -> [1,1000]. "
+            "ferrotorch uses standard Conv2d (no depthwise/SE). Shape contract only."
+        ),
+        "torchvision_version": tv_ver,
+    })
+    fixtures.append({
+        "id": "efficientnet_b0_param_count_range",
+        "op": "efficientnet_b0_param_count",
+        "params": {"num_classes": 1000},
+        "expected_min_params": 6_000_000,
+        "expected_max_params": 7_500_000,
+        "note": "Standard Conv2d approximation of EfficientNet-B0: ~6.6M params.",
+    })
+
+
+add_efficientnet_fixtures()
+
+
+def add_mobilenet_b5b_fixtures():
+    """MobileNetV2 and MobileNetV3-Small (#865): two distinct configs."""
+    fixtures.append({
+        "id": "mobilenet_v2_output_shape_contract",
+        "op": "mobilenet_v2_forward",
+        "params": {"num_classes": 1000, "input_shape": [1, 3, 224, 224]},
+        "expected_output_shape": [1, 1000],
+        "note": (
+            "torchvision.models.mobilenet_v2(weights=None)(zeros(1,3,224,224)) -> [1,1000]. "
+            "ferrotorch uses standard Conv2d in place of depthwise separable. Shape contract only."
+        ),
+        "torchvision_version": tv_ver,
+    })
+    fixtures.append({
+        "id": "mobilenet_v3_small_output_shape_contract",
+        "op": "mobilenet_v3_small_forward",
+        "params": {"num_classes": 1000, "input_shape": [1, 3, 224, 224]},
+        "expected_output_shape": [1, 1000],
+        "note": (
+            "torchvision.models.mobilenet_v3_small(weights=None)(zeros(1,3,224,224)) -> [1,1000]. "
+            "ferrotorch uses standard Conv2d + ReLU (no h-swish or SE). Shape contract only."
+        ),
+        "torchvision_version": tv_ver,
+    })
+
+
+add_mobilenet_b5b_fixtures()
+
+
+def add_swin_fixtures():
+    """Swin Transformer Tiny (#866): output shape and param-count range."""
+    fixtures.append({
+        "id": "swin_tiny_output_shape_contract",
+        "op": "swin_t_forward",
+        "params": {"num_classes": 1000, "input_shape": [1, 3, 224, 224]},
+        "expected_output_shape": [1, 1000],
+        "note": (
+            "torchvision.models.swin_t(weights=None)(zeros(1,3,224,224)) -> [1,1000]. "
+            "ferrotorch uses global (non-shifted-window) attention. ~29M param count matches."
+        ),
+        "torchvision_version": tv_ver,
+    })
+    fixtures.append({
+        "id": "swin_tiny_param_count_range",
+        "op": "swin_t_param_count",
+        "params": {"num_classes": 1000},
+        "expected_min_params": 28_000_000,
+        "expected_max_params": 31_000_000,
+        "note": "Swin-T with global attention: ~29M parameters.",
+    })
+
+
+add_swin_fixtures()
+
+
+def add_vit_b5b_fixtures():
+    """ViT-B/16 (#868): output shape and param-count range."""
+    fixtures.append({
+        "id": "vit_b_16_output_shape_contract",
+        "op": "vit_b_16_forward",
+        "params": {"num_classes": 1000, "input_shape": [1, 3, 224, 224]},
+        "expected_output_shape": [1, 1000],
+        "note": (
+            "torchvision.models.vit_b_16(weights=None)(zeros(1,3,224,224)) -> [1,1000]. "
+            "196 patches + CLS token, 12 transformer blocks, embed_dim=768."
+        ),
+        "torchvision_version": tv_ver,
+    })
+    fixtures.append({
+        "id": "vit_b_16_param_count_range",
+        "op": "vit_b_16_param_count",
+        "params": {"num_classes": 1000},
+        "expected_min_params": 80_000_000,
+        "expected_max_params": 90_000_000,
+        "note": "ViT-B/16: ~86M parameters (patch_embed + cls + pos + 12 blocks + head).",
+    })
+
+
+add_vit_b5b_fixtures()
+
+# ---------------------------------------------------------------------------
 # Assemble and write
 # ---------------------------------------------------------------------------
 

@@ -29,6 +29,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - `ptx_f32_to_f64` converter coverage gaps surfaced by the `_probe_backward_f64.rs` cascade verification: extended the converter (`ferrotorch-gpu/src/kernels.rs`) to handle (a) the `%row_off` register's byte-stride rewrite (`shl.b64 %row_off, %row_off, 2 → 3`) so the f32 → f64 lift of `LAYERNORM_BACKWARD_PTX` and `RMSNORM_BACKWARD_PTX` produces correct stride math, (b) the `*.approx.f32` floats — `rcp.approx.f32`, `div.approx.f32`, `sqrt.approx.f32` — which have no `*.approx.f64` PTX form so the converter promotes them to `*.rn.f64` (correct rounding, no precision loss), and (c) `.target sm_52 → sm_60` because `atom.add.f64.global` (used by the per-column gradient accumulation in layernorm_backward / rmsnorm_backward) requires sm_60+. Also fixed an em-dash character (U+2014) inside a comment in `LOG_SOFTMAX_BACKWARD_F64_PTX` that ptxas rejected as an invalid byte. New `_probe_backward_f64.rs` regression sentinel covering all 13 backward kernels. (#784 cascade)
 
 ### Added
+- Sprint B.5.d: vision transforms+datasets+IO parity (#870 #871 #872 #874) (#920)
 - Add FeatureExtractor cross-model integration tests (#927)
 - Add mathematical-property and snapshot tests for YOLO detection model (#923)
 - Add mathematical-property and snapshot tests for UNet vision model (#919)
