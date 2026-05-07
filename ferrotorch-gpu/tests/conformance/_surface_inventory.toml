@@ -1101,122 +1101,122 @@ c8_phase = "C8.3"
 [[item]]
 path = "ferrotorch_gpu::rng::CudaRngManager"
 kind = "struct"
-c8_phase = "C8.3"
+c8_phase = "C8.4"
 
 [[item]]
 path = "ferrotorch_gpu::rng::PhiloxGenerator"
 kind = "struct"
-c8_phase = "C8.3"
+c8_phase = "C8.4"
 
 [[item]]
 path = "ferrotorch_gpu::rng::PhiloxState"
 kind = "struct"
-c8_phase = "C8.3"
+c8_phase = "C8.4"
 
 [[item]]
 path = "ferrotorch_gpu::rng::cuda_rng_manager"
 kind = "fn"
-c8_phase = "C8.3"
+c8_phase = "C8.4"
 
 [[item]]
 path = "ferrotorch_gpu::rng::fork_rng"
 kind = "fn"
-c8_phase = "C8.3"
+c8_phase = "C8.4"
 
 [[item]]
 path = "ferrotorch_gpu::rng::join_rng"
 kind = "fn"
-c8_phase = "C8.3"
+c8_phase = "C8.4"
 
 [[item]]
 path = "ferrotorch_gpu::graph::CaptureMode"
 kind = "enum"
-c8_phase = "C8.3"
+c8_phase = "C8.4"
 
 [[item]]
 path = "ferrotorch_gpu::graph::CapturedGraph"
 kind = "struct"
-c8_phase = "C8.3"
+c8_phase = "C8.4"
 
 [[item]]
 path = "ferrotorch_gpu::graph::GraphPoolHandle"
 kind = "struct"
-c8_phase = "C8.3"
+c8_phase = "C8.4"
 
 [[item]]
 path = "ferrotorch_gpu::graph::CapturePool"
 kind = "struct"
-c8_phase = "C8.3"
+c8_phase = "C8.4"
 
 [[item]]
 path = "ferrotorch_gpu::graph::CaptureStatus"
 kind = "enum"
-c8_phase = "C8.3"
+c8_phase = "C8.4"
 
 [[item]]
 path = "ferrotorch_gpu::graph::begin_capture"
 kind = "fn"
-c8_phase = "C8.3"
+c8_phase = "C8.4"
 
 [[item]]
 path = "ferrotorch_gpu::graph::end_capture"
 kind = "fn"
-c8_phase = "C8.3"
+c8_phase = "C8.4"
 
 [[item]]
 path = "ferrotorch_gpu::graph::end_capture_with_pool"
 kind = "fn"
-c8_phase = "C8.3"
+c8_phase = "C8.4"
 
 [[item]]
 path = "ferrotorch_gpu::graph::graph_pool_handle"
 kind = "fn"
-c8_phase = "C8.3"
+c8_phase = "C8.4"
 
 [[item]]
 path = "ferrotorch_gpu::graph::capture_pool_for_handle"
 kind = "fn"
-c8_phase = "C8.3"
+c8_phase = "C8.4"
 
 [[item]]
 path = "ferrotorch_gpu::graph::release_graph_pool_handle"
 kind = "fn"
-c8_phase = "C8.3"
+c8_phase = "C8.4"
 
 [[item]]
 path = "ferrotorch_gpu::graph::make_graphed_callable"
 kind = "fn"
-c8_phase = "C8.3"
+c8_phase = "C8.4"
 
 [[item]]
 path = "ferrotorch_gpu::tensor_bridge::GpuTensor"
 kind = "struct"
-c8_phase = "C8.3"
+c8_phase = "C8.4"
 
 [[item]]
 path = "ferrotorch_gpu::tensor_bridge::GpuFloat"
 kind = "trait"
-c8_phase = "C8.3"
+c8_phase = "C8.4"
 
 [[item]]
 path = "ferrotorch_gpu::tensor_bridge::cuda"
 kind = "fn"
-c8_phase = "C8.3"
+c8_phase = "C8.4"
 
 [[item]]
 path = "ferrotorch_gpu::tensor_bridge::cuda_default"
 kind = "fn"
-c8_phase = "C8.3"
+c8_phase = "C8.4"
 
 [[item]]
 path = "ferrotorch_gpu::tensor_bridge::tensor_to_gpu"
 kind = "fn"
-c8_phase = "C8.3"
+c8_phase = "C8.4"
 
 [[item]]
 path = "ferrotorch_gpu::tensor_bridge::tensor_to_cpu"
 kind = "fn"
-c8_phase = "C8.3"
+c8_phase = "C8.4"
 
 [[item]]
 path = "ferrotorch_gpu::backend_impl::CudaBackendImpl"
