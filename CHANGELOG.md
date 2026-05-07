@@ -353,6 +353,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - M≤4 cuBLAS bypass: route vector-matrix multiplies through PTX `small_matmul` kernel instead of cuBLAS SGEMM
 
 ### Changed
+- GPU svd / qr drop host bounces (#635)
+- cusolver.rs gpu_svd_*, gpu_cholesky_*, gpu_solve_* download every output buffer to host Vec — synchronous full readback; GPU-resident outputs never returned (#896)
+- blas.rs module doc promises silent CPU fallback on cuBLAS handle failure with eprintln — §3 violation; non-opt-in CPU fallback (#895)
 - EpochResult / EvalResult missing external-construction helpers blocks conformance testing (#846)
 - ferrotorch-profiler: DeviceType and GpuTimingPair not re-exported from crate root (#837)
 - safe_alloc_with_hooks: hook freed-bytes not unblocking alloc when used_bytes starts at zero (#891)

@@ -19,12 +19,12 @@
 //! All tests are feature-gated on `#[cfg(feature = "cuda")]`.
 //! cuSPARSELt tests are additionally gated on `#[cfg(feature = "cusparselt")]`.
 //!
-//! ## Cascade bugs
+//! ## Cascade bugs — RESOLVED (Sprint B.2)
 //!
-//! | ID | Module | Finding |
-//! |---|---|---|
-//! | CASCADE-C8.3-001 | blas.rs | Doc comment says "falls back to CPU on cuBLAS handle failure" — §3 violation; fallback is silent and not opt-in |
-//! | CASCADE-C8.3-002 | cusolver.rs | `gpu_svd_f32` / `gpu_svd_f64` download results to CPU Vec — sync host-readback on every call; GPU buffers never returned |
+//! | ID | Module | Finding | Resolution |
+//! |---|---|---|---|
+//! | CASCADE-C8.3-001 | blas.rs | Doc comment falsely claimed silent CPU fallback — §3 violation (#895) | FIXED: docstring rewritten; no CPU fallback exists in production path |
+//! | CASCADE-C8.3-002 | cusolver.rs | `gpu_svd_f32/f64`, `gpu_qr_f32/f64` bounced through host `Vec<T>` — sync readback on every call (#896, #635) | FIXED: `gpu_svd_f32/f64_dev` + `gpu_qr_f32/f64_dev` device-resident variants; `backend_impl.rs` callers migrated |
 
 #![cfg(feature = "cuda")]
 
@@ -680,6 +680,263 @@ fn cusolver_cholesky_4x4_f64() {
         assert!(
             rel < 1e-9,
             "cholesky f64 ({tag}): ||L@L^T - A||_F / ||A||_F = {rel:.12e} > 1e-9"
+        );
+    }
+}
+
+// ===========================================================================
+// Device-resident SVD (#896 / #635) — rust-gpu-discipline §3 parity tests
+//
+// These tests call `cusolver::gpu_svd_f32_dev` / `gpu_svd_f64_dev` and assert:
+//   1. All three output buffers live on device 0 (`device_ordinal() == 0`).
+//   2. S values match the PyTorch reference within tolerance.
+//   3. Reconstruction ||U @ diag(S) @ Vh - A||_F / ||A||_F < tolerance.
+//
+// This is the §3 conformance check: outputs must stay on-device, not bounce
+// through a host `Vec<T>`.
+// ===========================================================================
+
+/// Device-resident SVD f32: asserts all outputs have device_ordinal == 0.
+/// Uses the same fixtures as `cusolver_svd_4x4_f32` but calls the _dev variant.
+#[test]
+fn cusolver_svd_dev_f32_device_resident() {
+    ensure_cuda();
+    let fixtures = load_fixtures();
+    let device = GpuDevice::new(0).expect("GpuDevice::new");
+
+    for f in pick_fixtures(&fixtures, "cusolver", "gpu_svd_f32") {
+        let tag = f["tag"].as_str().unwrap_or("?");
+        let m = f["m"].as_u64().unwrap() as usize;
+        let n = f["n"].as_u64().unwrap() as usize;
+        let k = m.min(n);
+
+        let data = as_f32_vec(&f["input"]);
+        let expected_s = as_f32_vec(&f["expected_s"]);
+
+        // Upload input — stays on device throughout.
+        let a_buf = ferrotorch_gpu::transfer::cpu_to_gpu(&data, &device)
+            .unwrap_or_else(|e| panic!("svd_dev_f32 upload ({tag}): {e}"));
+
+        let (u_buf, s_buf, vh_buf) = cusolver::gpu_svd_f32_dev(&a_buf, m, n, &device)
+            .unwrap_or_else(|e| panic!("gpu_svd_f32_dev ({tag}): {e}"));
+
+        // §3 assertion: outputs must be on device, not on host.
+        assert_eq!(u_buf.device_ordinal(), 0, "svd_dev f32 ({tag}): U on wrong device");
+        assert_eq!(s_buf.device_ordinal(), 0, "svd_dev f32 ({tag}): S on wrong device");
+        assert_eq!(vh_buf.device_ordinal(), 0, "svd_dev f32 ({tag}): Vh on wrong device");
+
+        assert_eq!(u_buf.len(), m * k, "svd_dev f32 ({tag}): U length");
+        assert_eq!(s_buf.len(), k, "svd_dev f32 ({tag}): S length");
+        assert_eq!(vh_buf.len(), k * n, "svd_dev f32 ({tag}): Vh length");
+
+        // Download only for value verification.
+        let u = ferrotorch_gpu::transfer::gpu_to_cpu(&u_buf, &device)
+            .unwrap_or_else(|e| panic!("svd_dev_f32 dl U ({tag}): {e}"));
+        let s = ferrotorch_gpu::transfer::gpu_to_cpu(&s_buf, &device)
+            .unwrap_or_else(|e| panic!("svd_dev_f32 dl S ({tag}): {e}"));
+        let vh = ferrotorch_gpu::transfer::gpu_to_cpu(&vh_buf, &device)
+            .unwrap_or_else(|e| panic!("svd_dev_f32 dl Vh ({tag}): {e}"));
+
+        assert_close_f32(&s, &expected_s, 1e-4, &format!("svd_dev_f32 S {tag}"));
+
+        let mut svh = vec![0.0f32; k * n];
+        for i in 0..k {
+            for j in 0..n {
+                svh[i * n + j] = s[i] * vh[i * n + j];
+            }
+        }
+        let recon = matmul_f32(&u, &svh, m, k, n);
+        let a_data = as_f32_vec(&f["a_data"]);
+        let rel = frob_diff_f32(&recon, &a_data) / frob_f32(&a_data).max(1e-8);
+        assert!(
+            rel < 1e-4,
+            "svd_dev_f32 ({tag}): recon error {rel:.6e} > 1e-4"
+        );
+    }
+}
+
+/// Device-resident SVD f64: asserts all outputs have device_ordinal == 0.
+#[test]
+fn cusolver_svd_dev_f64_device_resident() {
+    ensure_cuda();
+    let fixtures = load_fixtures();
+    let device = GpuDevice::new(0).expect("GpuDevice::new");
+
+    for f in pick_fixtures(&fixtures, "cusolver", "gpu_svd_f64") {
+        let tag = f["tag"].as_str().unwrap_or("?");
+        let m = f["m"].as_u64().unwrap() as usize;
+        let n = f["n"].as_u64().unwrap() as usize;
+        let k = m.min(n);
+
+        let data = as_f64_vec(&f["input"]);
+        let expected_s = as_f64_vec(&f["expected_s"]);
+
+        let a_buf = ferrotorch_gpu::transfer::cpu_to_gpu(&data, &device)
+            .unwrap_or_else(|e| panic!("svd_dev_f64 upload ({tag}): {e}"));
+
+        let (u_buf, s_buf, vh_buf) = cusolver::gpu_svd_f64_dev(&a_buf, m, n, &device)
+            .unwrap_or_else(|e| panic!("gpu_svd_f64_dev ({tag}): {e}"));
+
+        assert_eq!(u_buf.device_ordinal(), 0, "svd_dev f64 ({tag}): U on wrong device");
+        assert_eq!(s_buf.device_ordinal(), 0, "svd_dev f64 ({tag}): S on wrong device");
+        assert_eq!(vh_buf.device_ordinal(), 0, "svd_dev f64 ({tag}): Vh on wrong device");
+
+        assert_eq!(u_buf.len(), m * k, "svd_dev f64 ({tag}): U length");
+        assert_eq!(s_buf.len(), k, "svd_dev f64 ({tag}): S length");
+        assert_eq!(vh_buf.len(), k * n, "svd_dev f64 ({tag}): Vh length");
+
+        let u = ferrotorch_gpu::transfer::gpu_to_cpu(&u_buf, &device)
+            .unwrap_or_else(|e| panic!("svd_dev_f64 dl U ({tag}): {e}"));
+        let s = ferrotorch_gpu::transfer::gpu_to_cpu(&s_buf, &device)
+            .unwrap_or_else(|e| panic!("svd_dev_f64 dl S ({tag}): {e}"));
+        let vh = ferrotorch_gpu::transfer::gpu_to_cpu(&vh_buf, &device)
+            .unwrap_or_else(|e| panic!("svd_dev_f64 dl Vh ({tag}): {e}"));
+
+        assert_close_f64(&s, &expected_s, 1e-9, &format!("svd_dev_f64 S {tag}"));
+
+        let mut svh = vec![0.0f64; k * n];
+        for i in 0..k {
+            for j in 0..n {
+                svh[i * n + j] = s[i] * vh[i * n + j];
+            }
+        }
+        let recon = matmul_f64(&u, &svh, m, k, n);
+        let a_data = as_f64_vec(&f["a_data"]);
+        let rel = frob_diff_f64(&recon, &a_data) / frob_f64(&a_data).max(1e-15);
+        assert!(
+            rel < 1e-9,
+            "svd_dev_f64 ({tag}): recon error {rel:.12e} > 1e-9"
+        );
+    }
+}
+
+// ===========================================================================
+// Device-resident QR (#896 / #635) — rust-gpu-discipline §3 parity tests
+//
+// Asserts Q and R outputs live on device, then verifies:
+//   1. ||Q^T @ Q - I||_F < tolerance  (Q columns are orthonormal)
+//   2. ||Q @ R - A||_F / ||A||_F < tolerance  (reconstruction)
+// ===========================================================================
+
+/// Device-resident QR f32: asserts Q and R have device_ordinal == 0.
+#[test]
+fn cusolver_qr_dev_f32_device_resident() {
+    ensure_cuda();
+    let fixtures = load_fixtures();
+    let device = GpuDevice::new(0).expect("GpuDevice::new");
+
+    for f in pick_fixtures(&fixtures, "cusolver", "gpu_svd_f32") {
+        // Reuse svd fixtures (same m×n matrices) — QR works on any m×n matrix.
+        let tag = f["tag"].as_str().unwrap_or("?");
+        let m = f["m"].as_u64().unwrap() as usize;
+        let n = f["n"].as_u64().unwrap() as usize;
+        let k = m.min(n);
+
+        let a_data_flat = as_f32_vec(&f["a_data"]);
+
+        let a_buf = ferrotorch_gpu::transfer::cpu_to_gpu(&a_data_flat, &device)
+            .unwrap_or_else(|e| panic!("qr_dev_f32 upload ({tag}): {e}"));
+
+        let (q_buf, r_buf) = cusolver::gpu_qr_f32_dev(&a_buf, m, n, &device)
+            .unwrap_or_else(|e| panic!("gpu_qr_f32_dev ({tag}): {e}"));
+
+        // §3 assertion: Q and R must live on device.
+        assert_eq!(q_buf.device_ordinal(), 0, "qr_dev f32 ({tag}): Q on wrong device");
+        assert_eq!(r_buf.device_ordinal(), 0, "qr_dev f32 ({tag}): R on wrong device");
+
+        assert_eq!(q_buf.len(), m * k, "qr_dev f32 ({tag}): Q length");
+        assert_eq!(r_buf.len(), k * n, "qr_dev f32 ({tag}): R length");
+
+        let q = ferrotorch_gpu::transfer::gpu_to_cpu(&q_buf, &device)
+            .unwrap_or_else(|e| panic!("qr_dev_f32 dl Q ({tag}): {e}"));
+        let r = ferrotorch_gpu::transfer::gpu_to_cpu(&r_buf, &device)
+            .unwrap_or_else(|e| panic!("qr_dev_f32 dl R ({tag}): {e}"));
+
+        // Check Q columns are orthonormal: Q^T @ Q ~ I_k.
+        // q is [m,k] row-major; qt is [k,m]; qt@q is [k,k].
+        let qt: Vec<f32> = {
+            let mut t = vec![0.0f32; k * m];
+            for i in 0..m { for j in 0..k { t[j * m + i] = q[i * k + j]; } }
+            t
+        };
+        let qtq = matmul_f32(&qt, &q, k, m, k);
+        for i in 0..k {
+            for j in 0..k {
+                let expected = if i == j { 1.0f32 } else { 0.0f32 };
+                let got = qtq[i * k + j];
+                assert!(
+                    (got - expected).abs() < 1e-4,
+                    "qr_dev_f32 ({tag}): Q^T@Q[{i},{j}] = {got:.6e}, expected {expected:.1}"
+                );
+            }
+        }
+
+        // Reconstruction: Q @ R ~ A.
+        let recon = matmul_f32(&q, &r, m, k, n);
+        let rel = frob_diff_f32(&recon, &a_data_flat) / frob_f32(&a_data_flat).max(1e-8);
+        assert!(
+            rel < 1e-4,
+            "qr_dev_f32 ({tag}): recon error {rel:.6e} > 1e-4"
+        );
+    }
+}
+
+/// Device-resident QR f64: asserts Q and R have device_ordinal == 0.
+#[test]
+fn cusolver_qr_dev_f64_device_resident() {
+    ensure_cuda();
+    let fixtures = load_fixtures();
+    let device = GpuDevice::new(0).expect("GpuDevice::new");
+
+    for f in pick_fixtures(&fixtures, "cusolver", "gpu_svd_f64") {
+        let tag = f["tag"].as_str().unwrap_or("?");
+        let m = f["m"].as_u64().unwrap() as usize;
+        let n = f["n"].as_u64().unwrap() as usize;
+        let k = m.min(n);
+
+        let a_data_flat = as_f64_vec(&f["a_data"]);
+
+        let a_buf = ferrotorch_gpu::transfer::cpu_to_gpu(&a_data_flat, &device)
+            .unwrap_or_else(|e| panic!("qr_dev_f64 upload ({tag}): {e}"));
+
+        let (q_buf, r_buf) = cusolver::gpu_qr_f64_dev(&a_buf, m, n, &device)
+            .unwrap_or_else(|e| panic!("gpu_qr_f64_dev ({tag}): {e}"));
+
+        assert_eq!(q_buf.device_ordinal(), 0, "qr_dev f64 ({tag}): Q on wrong device");
+        assert_eq!(r_buf.device_ordinal(), 0, "qr_dev f64 ({tag}): R on wrong device");
+
+        assert_eq!(q_buf.len(), m * k, "qr_dev f64 ({tag}): Q length");
+        assert_eq!(r_buf.len(), k * n, "qr_dev f64 ({tag}): R length");
+
+        let q = ferrotorch_gpu::transfer::gpu_to_cpu(&q_buf, &device)
+            .unwrap_or_else(|e| panic!("qr_dev_f64 dl Q ({tag}): {e}"));
+        let r = ferrotorch_gpu::transfer::gpu_to_cpu(&r_buf, &device)
+            .unwrap_or_else(|e| panic!("qr_dev_f64 dl R ({tag}): {e}"));
+
+        // Q^T @ Q ~ I_k.
+        let qt: Vec<f64> = {
+            let mut t = vec![0.0f64; k * m];
+            for i in 0..m { for j in 0..k { t[j * m + i] = q[i * k + j]; } }
+            t
+        };
+        let qtq = matmul_f64(&qt, &q, k, m, k);
+        for i in 0..k {
+            for j in 0..k {
+                let expected = if i == j { 1.0f64 } else { 0.0f64 };
+                let got = qtq[i * k + j];
+                assert!(
+                    (got - expected).abs() < 1e-9,
+                    "qr_dev_f64 ({tag}): Q^T@Q[{i},{j}] = {got:.12e}, expected {expected:.1}"
+                );
+            }
+        }
+
+        // Reconstruction: Q @ R ~ A.
+        let recon = matmul_f64(&q, &r, m, k, n);
+        let rel = frob_diff_f64(&recon, &a_data_flat) / frob_f64(&a_data_flat).max(1e-15);
+        assert!(
+            rel < 1e-9,
+            "qr_dev_f64 ({tag}): recon error {rel:.12e} > 1e-9"
         );
     }
 }

@@ -3004,14 +3004,14 @@ impl GpuBackend for CudaBackendImpl {
         m: usize,
         n: usize,
     ) -> FerrotorchResult<(GpuBufferHandle, GpuBufferHandle, GpuBufferHandle)> {
+        // (#896 / #635) Device-resident SVD: no host bounce of matrix data.
+        // gpu_svd_f32_dev accepts &CudaBuffer<f32> and returns (U, S, Vh) as
+        // CudaBuffer<f32> — all on device. Matches torch.linalg.svd behaviour
+        // on CUDA (outputs stay on the input device).
         let a_buf = Self::unwrap_buffer(a)?;
         let dev = self.device(a.device_ordinal())?;
-        let a_host = crate::transfer::gpu_to_cpu(a_buf, dev).map_err(Self::map_gpu_err)?;
-        let (u, s, vt) =
-            crate::cusolver::gpu_svd_f32(&a_host, m, n, dev).map_err(Self::map_gpu_err)?;
-        let u_buf = crate::transfer::cpu_to_gpu(&u, dev).map_err(Self::map_gpu_err)?;
-        let s_buf = crate::transfer::cpu_to_gpu(&s, dev).map_err(Self::map_gpu_err)?;
-        let vt_buf = crate::transfer::cpu_to_gpu(&vt, dev).map_err(Self::map_gpu_err)?;
+        let (u_buf, s_buf, vt_buf) =
+            crate::cusolver::gpu_svd_f32_dev(a_buf, m, n, dev).map_err(Self::map_gpu_err)?;
         let ord = a.device_ordinal();
         Ok((
             Self::wrap_buffer(u_buf, ord),
@@ -3026,14 +3026,11 @@ impl GpuBackend for CudaBackendImpl {
         m: usize,
         n: usize,
     ) -> FerrotorchResult<(GpuBufferHandle, GpuBufferHandle, GpuBufferHandle)> {
+        // (#896 / #635) Device-resident SVD — f64. See svd_f32 for rationale.
         let a_buf = Self::unwrap_buffer_f64(a)?;
         let dev = self.device(a.device_ordinal())?;
-        let a_host = crate::transfer::gpu_to_cpu(a_buf, dev).map_err(Self::map_gpu_err)?;
-        let (u, s, vt) =
-            crate::cusolver::gpu_svd_f64(&a_host, m, n, dev).map_err(Self::map_gpu_err)?;
-        let u_buf = crate::transfer::cpu_to_gpu(&u, dev).map_err(Self::map_gpu_err)?;
-        let s_buf = crate::transfer::cpu_to_gpu(&s, dev).map_err(Self::map_gpu_err)?;
-        let vt_buf = crate::transfer::cpu_to_gpu(&vt, dev).map_err(Self::map_gpu_err)?;
+        let (u_buf, s_buf, vt_buf) =
+            crate::cusolver::gpu_svd_f64_dev(a_buf, m, n, dev).map_err(Self::map_gpu_err)?;
         let ord = a.device_ordinal();
         Ok((
             Self::wrap_buffer_f64(u_buf, ord),
@@ -3101,12 +3098,13 @@ impl GpuBackend for CudaBackendImpl {
         m: usize,
         n: usize,
     ) -> FerrotorchResult<(GpuBufferHandle, GpuBufferHandle)> {
+        // (#896 / #635) Device-resident QR: no host bounce of matrix data.
+        // gpu_qr_f32_dev uses on-device transposes (gpu_transpose_2d) and
+        // on-device R/Q extraction kernels. Matches torch.linalg.qr on CUDA.
         let a_buf = Self::unwrap_buffer(a)?;
         let dev = self.device(a.device_ordinal())?;
-        let a_host = crate::transfer::gpu_to_cpu(a_buf, dev).map_err(Self::map_gpu_err)?;
-        let (q, r) = crate::cusolver::gpu_qr_f32(&a_host, m, n, dev).map_err(Self::map_gpu_err)?;
-        let q_buf = crate::transfer::cpu_to_gpu(&q, dev).map_err(Self::map_gpu_err)?;
-        let r_buf = crate::transfer::cpu_to_gpu(&r, dev).map_err(Self::map_gpu_err)?;
+        let (q_buf, r_buf) =
+            crate::cusolver::gpu_qr_f32_dev(a_buf, m, n, dev).map_err(Self::map_gpu_err)?;
         let ord = a.device_ordinal();
         Ok((Self::wrap_buffer(q_buf, ord), Self::wrap_buffer(r_buf, ord)))
     }
@@ -3117,12 +3115,11 @@ impl GpuBackend for CudaBackendImpl {
         m: usize,
         n: usize,
     ) -> FerrotorchResult<(GpuBufferHandle, GpuBufferHandle)> {
+        // (#896 / #635) Device-resident QR — f64. See qr_f32 for rationale.
         let a_buf = Self::unwrap_buffer_f64(a)?;
         let dev = self.device(a.device_ordinal())?;
-        let a_host = crate::transfer::gpu_to_cpu(a_buf, dev).map_err(Self::map_gpu_err)?;
-        let (q, r) = crate::cusolver::gpu_qr_f64(&a_host, m, n, dev).map_err(Self::map_gpu_err)?;
-        let q_buf = crate::transfer::cpu_to_gpu(&q, dev).map_err(Self::map_gpu_err)?;
-        let r_buf = crate::transfer::cpu_to_gpu(&r, dev).map_err(Self::map_gpu_err)?;
+        let (q_buf, r_buf) =
+            crate::cusolver::gpu_qr_f64_dev(a_buf, m, n, dev).map_err(Self::map_gpu_err)?;
         let ord = a.device_ordinal();
         Ok((
             Self::wrap_buffer_f64(q_buf, ord),

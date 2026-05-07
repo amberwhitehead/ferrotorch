@@ -13,7 +13,7 @@
 #[cfg(feature = "cuda")]
 use cudarc::cusolver as cusolver_safe;
 #[cfg(feature = "cuda")]
-use cudarc::driver::{DevicePtr, DevicePtrMut};
+use cudarc::driver::{DevicePtr, DevicePtrMut, PushKernelArg};
 
 #[cfg(feature = "cuda")]
 use crate::buffer::CudaBuffer;
@@ -26,6 +26,472 @@ use crate::error::{GpuError, GpuResult};
 use crate::device::GpuDevice;
 #[cfg(not(feature = "cuda"))]
 use crate::error::{GpuError, GpuResult};
+
+// ---------------------------------------------------------------------------
+// PTX kernels for device-resident QR helpers (#896 / #635)
+// ---------------------------------------------------------------------------
+
+/// PTX: extract the upper triangle of a col-major m×n QR result into a
+/// row-major k×n output buffer R (k = min(m,n)).
+///
+/// Thread `tid` iterates over all k*n output elements.
+/// R_row[i, j]  = colmaj[j*m + i]  when j >= i
+///              = 0                 when j < i
+/// (col-major m×n: element (i,j) is at offset j*m + i)
+///
+/// Params: (in_ptr, out_ptr, m, n, total=k*n)
+///
+/// ASCII layout note:
+///   col-major m×n has column j starting at offset j*m.
+///   R upper triangle: row i only uses columns j >= i, i in [0, k).
+#[cfg(feature = "cuda")]
+const EXTRACT_UPPER_TRI_F32_PTX: &str = "\
+.version 7.0\n\
+.target sm_52\n\
+.address_size 64\n\
+\n\
+.visible .entry extract_upper_tri_colmaj_f32(\n\
+    .param .u64 in_ptr,\n\
+    .param .u64 out_ptr,\n\
+    .param .u32 M,\n\
+    .param .u32 N,\n\
+    .param .u32 total\n\
+) {\n\
+    .reg .u32 %r_tid, %bid, %bdim, %tot;\n\
+    .reg .u32 %row_i, %col_j, %src_idx;\n\
+    .reg .u32 %M_reg, %N_reg;\n\
+    .reg .u64 %in, %out, %off_in, %off_out;\n\
+    .reg .f32 %val;\n\
+    .reg .pred %p_oob, %p_zero;\n\
+\n\
+    ld.param.u64  %in,    [in_ptr];\n\
+    ld.param.u64  %out,   [out_ptr];\n\
+    ld.param.u32  %M_reg, [M];\n\
+    ld.param.u32  %N_reg, [N];\n\
+    ld.param.u32  %tot,   [total];\n\
+\n\
+    mov.u32 %bid,   %ctaid.x;\n\
+    mov.u32 %bdim,  %ntid.x;\n\
+    mov.u32 %r_tid, %tid.x;\n\
+    mad.lo.u32 %r_tid, %bid, %bdim, %r_tid;\n\
+\n\
+    setp.ge.u32 %p_oob, %r_tid, %tot;\n\
+    @%p_oob bra DONE;\n\
+\n\
+    // Output is row-major k x n: r_tid = row_i * N + col_j\n\
+    div.u32 %row_i, %r_tid, %N_reg;\n\
+    rem.u32 %col_j, %r_tid, %N_reg;\n\
+\n\
+    // If j < i, write 0.0 (upper-triangle only)\n\
+    setp.lt.u32 %p_zero, %col_j, %row_i;\n\
+    @%p_zero bra WRITE_ZERO;\n\
+\n\
+    // src_idx = col_j * M + row_i  (col-major index)\n\
+    mad.lo.u32 %src_idx, %col_j, %M_reg, %row_i;\n\
+    cvt.u64.u32 %off_in, %src_idx;\n\
+    shl.b64     %off_in, %off_in, 2;\n\
+    add.u64     %off_in, %in, %off_in;\n\
+    ld.global.f32 %val, [%off_in];\n\
+    bra.uni WRITE;\n\
+\n\
+WRITE_ZERO:\n\
+    mov.f32 %val, 0f00000000;\n\
+\n\
+WRITE:\n\
+    cvt.u64.u32 %off_out, %r_tid;\n\
+    shl.b64     %off_out, %off_out, 2;\n\
+    add.u64     %off_out, %out, %off_out;\n\
+    st.global.f32 [%off_out], %val;\n\
+\n\
+DONE:\n\
+    ret;\n\
+}\n\
+";
+
+/// PTX: extract the upper triangle of a col-major m×n QR result into a
+/// row-major k×n output buffer R — f64 variant.
+///
+/// Identical logic to the f32 version; uses .f64 and 3-bit (8-byte) shifts.
+#[cfg(feature = "cuda")]
+const EXTRACT_UPPER_TRI_F64_PTX: &str = "\
+.version 7.0\n\
+.target sm_52\n\
+.address_size 64\n\
+\n\
+.visible .entry extract_upper_tri_colmaj_f64(\n\
+    .param .u64 in_ptr,\n\
+    .param .u64 out_ptr,\n\
+    .param .u32 M,\n\
+    .param .u32 N,\n\
+    .param .u32 total\n\
+) {\n\
+    .reg .u32 %r_tid, %bid, %bdim, %tot;\n\
+    .reg .u32 %row_i, %col_j, %src_idx;\n\
+    .reg .u32 %M_reg, %N_reg;\n\
+    .reg .u64 %in, %out, %off_in, %off_out;\n\
+    .reg .f64 %val;\n\
+    .reg .pred %p_oob, %p_zero;\n\
+\n\
+    ld.param.u64  %in,    [in_ptr];\n\
+    ld.param.u64  %out,   [out_ptr];\n\
+    ld.param.u32  %M_reg, [M];\n\
+    ld.param.u32  %N_reg, [N];\n\
+    ld.param.u32  %tot,   [total];\n\
+\n\
+    mov.u32 %bid,   %ctaid.x;\n\
+    mov.u32 %bdim,  %ntid.x;\n\
+    mov.u32 %r_tid, %tid.x;\n\
+    mad.lo.u32 %r_tid, %bid, %bdim, %r_tid;\n\
+\n\
+    setp.ge.u32 %p_oob, %r_tid, %tot;\n\
+    @%p_oob bra DONE;\n\
+\n\
+    div.u32 %row_i, %r_tid, %N_reg;\n\
+    rem.u32 %col_j, %r_tid, %N_reg;\n\
+\n\
+    setp.lt.u32 %p_zero, %col_j, %row_i;\n\
+    @%p_zero bra WRITE_ZERO;\n\
+\n\
+    mad.lo.u32 %src_idx, %col_j, %M_reg, %row_i;\n\
+    cvt.u64.u32 %off_in, %src_idx;\n\
+    shl.b64     %off_in, %off_in, 3;\n\
+    add.u64     %off_in, %in, %off_in;\n\
+    ld.global.f64 %val, [%off_in];\n\
+    bra.uni WRITE;\n\
+\n\
+WRITE_ZERO:\n\
+    mov.f64 %val, 0d0000000000000000;\n\
+\n\
+WRITE:\n\
+    cvt.u64.u32 %off_out, %r_tid;\n\
+    shl.b64     %off_out, %off_out, 3;\n\
+    add.u64     %off_out, %out, %off_out;\n\
+    st.global.f64 [%off_out], %val;\n\
+\n\
+DONE:\n\
+    ret;\n\
+}\n\
+";
+
+/// PTX: copy the first `k` columns from a col-major m×n buffer into a
+/// col-major m×k output buffer.
+///
+/// Thread `tid` in [0, m*k): out[tid] = in[tid]
+/// (first k columns of col-major m×n are exactly the first m*k elements)
+#[cfg(feature = "cuda")]
+const EXTRACT_COLS_F32_PTX: &str = "\
+.version 7.0\n\
+.target sm_52\n\
+.address_size 64\n\
+\n\
+.visible .entry extract_cols_colmaj_f32(\n\
+    .param .u64 in_ptr,\n\
+    .param .u64 out_ptr,\n\
+    .param .u32 total\n\
+) {\n\
+    .reg .u32 %r_tid, %bid, %bdim, %tot;\n\
+    .reg .u64 %in, %out, %off;\n\
+    .reg .f32 %val;\n\
+    .reg .pred %p;\n\
+\n\
+    ld.param.u64 %in,  [in_ptr];\n\
+    ld.param.u64 %out, [out_ptr];\n\
+    ld.param.u32 %tot, [total];\n\
+\n\
+    mov.u32 %bid,   %ctaid.x;\n\
+    mov.u32 %bdim,  %ntid.x;\n\
+    mov.u32 %r_tid, %tid.x;\n\
+    mad.lo.u32 %r_tid, %bid, %bdim, %r_tid;\n\
+\n\
+    setp.ge.u32 %p, %r_tid, %tot;\n\
+    @%p bra DONE;\n\
+\n\
+    cvt.u64.u32 %off, %r_tid;\n\
+    shl.b64     %off, %off, 2;\n\
+    add.u64     %off, %in, %off;\n\
+    ld.global.f32 %val, [%off];\n\
+\n\
+    cvt.u64.u32 %off, %r_tid;\n\
+    shl.b64     %off, %off, 2;\n\
+    add.u64     %off, %out, %off;\n\
+    st.global.f32 [%off], %val;\n\
+\n\
+DONE:\n\
+    ret;\n\
+}\n\
+";
+
+/// PTX: copy first k columns of col-major m×n → col-major m×k — f64 variant.
+#[cfg(feature = "cuda")]
+const EXTRACT_COLS_F64_PTX: &str = "\
+.version 7.0\n\
+.target sm_52\n\
+.address_size 64\n\
+\n\
+.visible .entry extract_cols_colmaj_f64(\n\
+    .param .u64 in_ptr,\n\
+    .param .u64 out_ptr,\n\
+    .param .u32 total\n\
+) {\n\
+    .reg .u32 %r_tid, %bid, %bdim, %tot;\n\
+    .reg .u64 %in, %out, %off;\n\
+    .reg .f64 %val;\n\
+    .reg .pred %p;\n\
+\n\
+    ld.param.u64 %in,  [in_ptr];\n\
+    ld.param.u64 %out, [out_ptr];\n\
+    ld.param.u32 %tot, [total];\n\
+\n\
+    mov.u32 %bid,   %ctaid.x;\n\
+    mov.u32 %bdim,  %ntid.x;\n\
+    mov.u32 %r_tid, %tid.x;\n\
+    mad.lo.u32 %r_tid, %bid, %bdim, %r_tid;\n\
+\n\
+    setp.ge.u32 %p, %r_tid, %tot;\n\
+    @%p bra DONE;\n\
+\n\
+    cvt.u64.u32 %off, %r_tid;\n\
+    shl.b64     %off, %off, 3;\n\
+    add.u64     %off, %in, %off;\n\
+    ld.global.f64 %val, [%off];\n\
+\n\
+    cvt.u64.u32 %off, %r_tid;\n\
+    shl.b64     %off, %off, 3;\n\
+    add.u64     %off, %out, %off;\n\
+    st.global.f64 [%off], %val;\n\
+\n\
+DONE:\n\
+    ret;\n\
+}\n\
+";
+
+// ---------------------------------------------------------------------------
+// Helpers that launch the above kernels
+// ---------------------------------------------------------------------------
+
+/// Launch grid size: 1 block of 256 threads is enough for n ≤ 256; otherwise
+/// ceil(n / 256) blocks of 256 threads each.
+#[cfg(feature = "cuda")]
+fn qr_launch_cfg(n: usize) -> GpuResult<cudarc::driver::LaunchConfig> {
+    if n == 0 {
+        return Err(GpuError::InvalidState {
+            message: "qr_launch_cfg: n == 0".into(),
+        });
+    }
+    let threads = 256u32;
+    let blocks = (n as u32).div_ceil(threads);
+    Ok(cudarc::driver::LaunchConfig {
+        block_dim: (threads, 1, 1),
+        grid_dim: (blocks, 1, 1),
+        shared_mem_bytes: 0,
+    })
+}
+
+/// Extract the upper-triangle R from a col-major m×n post-geqrf buffer.
+/// Returns a row-major k×n `CudaBuffer<f32>` (k = min(m, n)).
+#[cfg(feature = "cuda")]
+fn gpu_extract_upper_tri_f32(
+    d_a: &CudaBuffer<f32>,
+    m: usize,
+    n: usize,
+    k: usize,
+    device: &GpuDevice,
+) -> GpuResult<CudaBuffer<f32>> {
+    let total = k * n;
+    let ctx = device.context();
+    let stream = device.stream();
+
+    let f = match crate::module_cache::get_or_compile(
+        ctx,
+        EXTRACT_UPPER_TRI_F32_PTX,
+        "extract_upper_tri_colmaj_f32",
+        device.ordinal() as u32,
+    ) {
+        Ok(f) => f,
+        Err(e) => {
+            return Err(GpuError::PtxCompileFailed {
+                kernel: "extract_upper_tri_colmaj_f32",
+                source: e,
+            });
+        }
+    };
+
+    let mut out = crate::transfer::alloc_zeros_f32(total, device)?;
+    let cfg = qr_launch_cfg(total)?;
+    let m_u32 = m as u32;
+    let n_u32 = n as u32;
+    let total_u32 = total as u32;
+
+    // SAFETY:
+    // - `f` is a valid PTX function compiled from EXTRACT_UPPER_TRI_F32_PTX.
+    //   ABI: (in_ptr: u64, out_ptr: u64, M: u32, N: u32, total: u32).
+    // - `d_a` is the col-major m×n buffer produced by geqrf; its upper triangle
+    //   holds R. Thread tid reads d_a[col_j * m + row_i] for col_j >= row_i,
+    //   where 0 <= row_i < k and 0 <= col_j < n — all in-bounds because
+    //   col_j < n => col_j * m + row_i < m * n == d_a.len().
+    // - `out` is freshly allocated as k*n zeros; tid in [0, k*n) writes
+    //   out[tid] — no out-of-bounds or aliasing.
+    unsafe {
+        stream
+            .launch_builder(&f)
+            .arg(d_a.inner())
+            .arg(out.inner_mut())
+            .arg(&m_u32)
+            .arg(&n_u32)
+            .arg(&total_u32)
+            .launch(cfg)?;
+    }
+
+    Ok(out)
+}
+
+/// Extract the upper-triangle R from a col-major m×n post-geqrf buffer — f64.
+#[cfg(feature = "cuda")]
+fn gpu_extract_upper_tri_f64(
+    d_a: &CudaBuffer<f64>,
+    m: usize,
+    n: usize,
+    k: usize,
+    device: &GpuDevice,
+) -> GpuResult<CudaBuffer<f64>> {
+    let total = k * n;
+    let ctx = device.context();
+    let stream = device.stream();
+
+    let f = match crate::module_cache::get_or_compile(
+        ctx,
+        EXTRACT_UPPER_TRI_F64_PTX,
+        "extract_upper_tri_colmaj_f64",
+        device.ordinal() as u32,
+    ) {
+        Ok(f) => f,
+        Err(e) => {
+            return Err(GpuError::PtxCompileFailed {
+                kernel: "extract_upper_tri_colmaj_f64",
+                source: e,
+            });
+        }
+    };
+
+    let mut out = crate::transfer::alloc_zeros_f64(total, device)?;
+    let cfg = qr_launch_cfg(total)?;
+    let m_u32 = m as u32;
+    let n_u32 = n as u32;
+    let total_u32 = total as u32;
+
+    // SAFETY: same obligations as gpu_extract_upper_tri_f32; f64 element size.
+    // ABI: (in_ptr: u64, out_ptr: u64, M: u32, N: u32, total: u32).
+    unsafe {
+        stream
+            .launch_builder(&f)
+            .arg(d_a.inner())
+            .arg(out.inner_mut())
+            .arg(&m_u32)
+            .arg(&n_u32)
+            .arg(&total_u32)
+            .launch(cfg)?;
+    }
+
+    Ok(out)
+}
+
+/// Extract first k columns from a col-major m×n buffer → col-major m×k.
+///
+/// Since col-major m×n stores column j at offset j*m, the first k columns
+/// are exactly the first m*k contiguous elements.
+#[cfg(feature = "cuda")]
+fn gpu_extract_cols_f32(
+    d_a: &CudaBuffer<f32>,
+    m: usize,
+    _n: usize,
+    k: usize,
+    device: &GpuDevice,
+) -> GpuResult<CudaBuffer<f32>> {
+    let total = m * k;
+    let ctx = device.context();
+    let stream = device.stream();
+
+    let f = match crate::module_cache::get_or_compile(
+        ctx,
+        EXTRACT_COLS_F32_PTX,
+        "extract_cols_colmaj_f32",
+        device.ordinal() as u32,
+    ) {
+        Ok(f) => f,
+        Err(e) => {
+            return Err(GpuError::PtxCompileFailed {
+                kernel: "extract_cols_colmaj_f32",
+                source: e,
+            });
+        }
+    };
+
+    let mut out = crate::transfer::alloc_zeros_f32(total, device)?;
+    let cfg = qr_launch_cfg(total)?;
+    let total_u32 = total as u32;
+
+    // SAFETY:
+    // - `f` is a valid PTX function compiled from EXTRACT_COLS_F32_PTX.
+    //   ABI: (in_ptr: u64, out_ptr: u64, total: u32).
+    // - Thread tid copies d_a[tid] to out[tid] for tid in [0, m*k).
+    //   d_a.len() >= m*n >= m*k (since k <= n), so source index is in-bounds.
+    // - `out` is freshly allocated as m*k zeros; no aliasing with d_a.
+    unsafe {
+        stream
+            .launch_builder(&f)
+            .arg(d_a.inner())
+            .arg(out.inner_mut())
+            .arg(&total_u32)
+            .launch(cfg)?;
+    }
+
+    Ok(out)
+}
+
+/// Extract first k columns from a col-major m×n buffer → col-major m×k — f64.
+#[cfg(feature = "cuda")]
+fn gpu_extract_cols_f64(
+    d_a: &CudaBuffer<f64>,
+    m: usize,
+    _n: usize,
+    k: usize,
+    device: &GpuDevice,
+) -> GpuResult<CudaBuffer<f64>> {
+    let total = m * k;
+    let ctx = device.context();
+    let stream = device.stream();
+
+    let f = match crate::module_cache::get_or_compile(
+        ctx,
+        EXTRACT_COLS_F64_PTX,
+        "extract_cols_colmaj_f64",
+        device.ordinal() as u32,
+    ) {
+        Ok(f) => f,
+        Err(e) => {
+            return Err(GpuError::PtxCompileFailed {
+                kernel: "extract_cols_colmaj_f64",
+                source: e,
+            });
+        }
+    };
+
+    let mut out = crate::transfer::alloc_zeros_f64(total, device)?;
+    let cfg = qr_launch_cfg(total)?;
+    let total_u32 = total as u32;
+
+    // SAFETY: same as gpu_extract_cols_f32; f64 element size (8 bytes).
+    unsafe {
+        stream
+            .launch_builder(&f)
+            .arg(d_a.inner())
+            .arg(out.inner_mut())
+            .arg(&total_u32)
+            .launch(cfg)?;
+    }
+
+    Ok(out)
+}
 
 // ---------------------------------------------------------------------------
 // Helper: transpose row-major <-> column-major in-place on CPU
@@ -3895,6 +4361,629 @@ pub fn gpu_eigvalsh_f64(
     }
 
     Ok(d_w)
+}
+
+// ---------------------------------------------------------------------------
+// Device-resident SVD: A = U * diag(S) * Vh  (#896 / #635)
+//
+// `gpu_svd_f32_dev` / `gpu_svd_f64_dev` mirror `gpu_svd_f32` / `gpu_svd_f64`
+// but accept a `&CudaBuffer<T>` (row-major m×n) and return three
+// `CudaBuffer<T>` outputs — U [m,k], S [k], Vh [k,n] — all on device.
+//
+// The row→column-major transpose is performed on-device via `gpu_transpose_2d`;
+// the col→row-major re-orientation of U and Vh outputs is likewise on-device.
+// No host bounce of the matrix data.
+//
+// /rust-gpu-discipline §3: PyTorch's `torch.linalg.svd` on CUDA returns CUDA
+// tensors. The old `gpu_svd_f32` / `gpu_svd_f64` API bounced through host
+// `Vec<T>` — a §3 violation. These functions are the compliant replacements;
+// callers in `backend_impl.rs` must migrate to them.
+// ---------------------------------------------------------------------------
+
+/// Device-resident thin SVD (f32). Returns `(U, S, Vh)` as `CudaBuffer<f32>`:
+/// - U:  `m * k` elements, row-major `[m, k]`   where `k = min(m, n)`
+/// - S:  `k` elements
+/// - Vh: `k * n` elements, row-major `[k, n]`
+///
+/// (#896 / #635) No host bounce of the matrix data — all layout conversions
+/// are on-device via `gpu_transpose_2d`.
+#[cfg(feature = "cuda")]
+pub fn gpu_svd_f32_dev(
+    a_dev: &CudaBuffer<f32>,
+    m: usize,
+    n: usize,
+    device: &GpuDevice,
+) -> GpuResult<(CudaBuffer<f32>, CudaBuffer<f32>, CudaBuffer<f32>)> {
+    use cudarc::cusolver::sys as csys;
+
+    if a_dev.len() != m * n {
+        return Err(GpuError::ShapeMismatch {
+            op: "gpu_svd_f32_dev: A length mismatch",
+            expected: vec![m * n],
+            got: vec![a_dev.len()],
+        });
+    }
+    if m == 0 || n == 0 {
+        return Ok((
+            crate::transfer::alloc_zeros_f32(0, device)?,
+            crate::transfer::alloc_zeros_f32(0, device)?,
+            crate::transfer::alloc_zeros_f32(0, device)?,
+        ));
+    }
+
+    let k = m.min(n);
+    let stream = device.stream();
+    let dn = cusolver_safe::DnHandle::new(stream.clone())?;
+
+    // Row-major → column-major on device (no host bounce).
+    // gpu_transpose_2d(buf, m, n) treats `buf` as row-major m×n and produces
+    // column-major m×n (which is the same as row-major n×m).
+    let mut d_a = crate::kernels::gpu_transpose_2d(a_dev, m, n, device)?;
+
+    // Allocate output buffers.
+    let mut d_s = crate::transfer::alloc_zeros_f32(k, device)?;
+    let mut d_u = crate::transfer::alloc_zeros_f32(m * k, device)?;
+    let mut d_vt = crate::transfer::alloc_zeros_f32(k * n, device)?;
+    let mut d_info = alloc_zeros_i32(1, device)?;
+
+    // Query workspace size.
+    let mut lwork: i32 = 0;
+    // SAFETY:
+    // - `dn.cu()` is a valid `cusolverDnHandle_t` bound to `stream`, created
+    //   by `DnHandle::new` above; the handle outlives this call.
+    // - `m`, `n` are non-zero (checked above); the LAPACK ABI requires
+    //   `m, n >= 0` for `Sgesvd_bufferSize`.
+    // - This is a pure query: no matrix pointer is needed; only `m` and `n`
+    //   are inspected. `&mut lwork` is stack-resident.
+    unsafe {
+        csys::cusolverDnSgesvd_bufferSize(dn.cu(), m as i32, n as i32, &mut lwork).result()?;
+    }
+
+    let mut d_work = crate::transfer::alloc_zeros_f32(lwork.max(1) as usize, device)?;
+
+    // Run cuSOLVER Sgesvd (thin: jobu='S', jobvt='S').
+    // SAFETY:
+    // - `dn.cu()` is the valid handle proved above; it outlives this call.
+    // - `d_a` is a column-major m×n f32 buffer produced by `gpu_transpose_2d`
+    //   above; cuSOLVER may overwrite its contents per the Sgesvd contract.
+    // - `d_u` is m*k f32 (thin U); `d_s` is k f32 (singular values);
+    //   `d_vt` is k*n f32 (thin VT). Buffer sizes match the jobu='S'
+    //   / jobvt='S' thin SVD layout.
+    // - `lda = m as i32`, `ldu = m as i32`, `ldvt = k as i32` satisfy
+    //   the LAPACK leading-dimension requirements for column-major thin SVD.
+    // - `d_work` is `lwork.max(1)` f32 elements from the buffer-size query.
+    // - `rwork = null_mut()` — only needed for complex types; must be NULL
+    //   for real f32 per upstream docs.
+    // - `d_info` single i32 for the status code; checked after `synchronize`.
+    // - The six `_sync` guards keep `CudaSlice` borrows alive across the FFI
+    //   call so no concurrent reuse of these device pointers occurs.
+    unsafe {
+        let (a_ptr, _a_sync) = d_a.inner_mut().device_ptr_mut(&stream);
+        let (s_ptr, _s_sync) = d_s.inner_mut().device_ptr_mut(&stream);
+        let (u_ptr, _u_sync) = d_u.inner_mut().device_ptr_mut(&stream);
+        let (vt_ptr, _vt_sync) = d_vt.inner_mut().device_ptr_mut(&stream);
+        let (work_ptr, _work_sync) = d_work.inner_mut().device_ptr_mut(&stream);
+        let (info_ptr, _info_sync) = d_info.inner_mut().device_ptr_mut(&stream);
+
+        csys::cusolverDnSgesvd(
+            dn.cu(),
+            b'S' as i8, // jobu: thin U
+            b'S' as i8, // jobvt: thin VT
+            m as i32,
+            n as i32,
+            a_ptr as *mut f32,
+            m as i32, // lda = m (column-major)
+            s_ptr as *mut f32,
+            u_ptr as *mut f32,
+            m as i32, // ldu = m
+            vt_ptr as *mut f32,
+            k as i32, // ldvt = k (thin SVD)
+            work_ptr as *mut f32,
+            lwork,
+            std::ptr::null_mut(), // rwork (unused for real)
+            info_ptr as *mut i32,
+        )
+        .result()?;
+    }
+
+    stream.synchronize()?;
+
+    let info_val = read_dev_info(&d_info, device)?;
+    if info_val != 0 {
+        return Err(GpuError::InvalidState {
+            message: format!("gpu_svd_f32_dev: cuSOLVER Sgesvd info={info_val}"),
+        });
+    }
+
+    // Convert cuSOLVER column-major outputs to row-major on device.
+    //
+    // U is column-major m×k. Treating it as row-major k×m and transposing
+    // via gpu_transpose_2d gives row-major m×k.
+    let u_row = crate::kernels::gpu_transpose_2d(&d_u, k, m, device)?;
+
+    // Vh is column-major k×n. Treating it as row-major n×k and transposing
+    // gives row-major k×n.
+    let vt_row = crate::kernels::gpu_transpose_2d(&d_vt, n, k, device)?;
+
+    // S (d_s) is a plain 1-D vector — no layout conversion needed.
+    Ok((u_row, d_s, vt_row))
+}
+
+/// Device-resident thin SVD (f64). Returns `(U, S, Vh)` as `CudaBuffer<f64>`:
+/// - U:  `m * k` elements, row-major `[m, k]`   where `k = min(m, n)`
+/// - S:  `k` elements
+/// - Vh: `k * n` elements, row-major `[k, n]`
+///
+/// (#896 / #635) No host bounce of the matrix data.
+#[cfg(feature = "cuda")]
+pub fn gpu_svd_f64_dev(
+    a_dev: &CudaBuffer<f64>,
+    m: usize,
+    n: usize,
+    device: &GpuDevice,
+) -> GpuResult<(CudaBuffer<f64>, CudaBuffer<f64>, CudaBuffer<f64>)> {
+    use cudarc::cusolver::sys as csys;
+
+    if a_dev.len() != m * n {
+        return Err(GpuError::ShapeMismatch {
+            op: "gpu_svd_f64_dev: A length mismatch",
+            expected: vec![m * n],
+            got: vec![a_dev.len()],
+        });
+    }
+    if m == 0 || n == 0 {
+        return Ok((
+            crate::transfer::alloc_zeros_f64(0, device)?,
+            crate::transfer::alloc_zeros_f64(0, device)?,
+            crate::transfer::alloc_zeros_f64(0, device)?,
+        ));
+    }
+
+    let k = m.min(n);
+    let stream = device.stream();
+    let dn = cusolver_safe::DnHandle::new(stream.clone())?;
+
+    // Row-major → column-major on device.
+    let mut d_a = crate::kernels::gpu_transpose_2d_f64(a_dev, m, n, device)?;
+
+    let mut d_s = crate::transfer::alloc_zeros_f64(k, device)?;
+    let mut d_u = crate::transfer::alloc_zeros_f64(m * k, device)?;
+    let mut d_vt = crate::transfer::alloc_zeros_f64(k * n, device)?;
+    let mut d_info = alloc_zeros_i32(1, device)?;
+
+    let mut lwork: i32 = 0;
+    // SAFETY: same obligations as gpu_svd_f32_dev; `Dgesvd_bufferSize` is a
+    // pure query on `m` and `n`; the handle is valid and stack-resident lwork.
+    unsafe {
+        csys::cusolverDnDgesvd_bufferSize(dn.cu(), m as i32, n as i32, &mut lwork).result()?;
+    }
+
+    let mut d_work = crate::transfer::alloc_zeros_f64(lwork.max(1) as usize, device)?;
+
+    // SAFETY: same obligations as gpu_svd_f32_dev, transposed to f64 types.
+    // `d_a` is column-major m×n f64; `d_u` m*k f64; `d_s` k f64;
+    // `d_vt` k*n f64. `rwork = null_mut()` for real f64.
+    unsafe {
+        let (a_ptr, _a_sync) = d_a.inner_mut().device_ptr_mut(&stream);
+        let (s_ptr, _s_sync) = d_s.inner_mut().device_ptr_mut(&stream);
+        let (u_ptr, _u_sync) = d_u.inner_mut().device_ptr_mut(&stream);
+        let (vt_ptr, _vt_sync) = d_vt.inner_mut().device_ptr_mut(&stream);
+        let (work_ptr, _work_sync) = d_work.inner_mut().device_ptr_mut(&stream);
+        let (info_ptr, _info_sync) = d_info.inner_mut().device_ptr_mut(&stream);
+
+        csys::cusolverDnDgesvd(
+            dn.cu(),
+            b'S' as i8,
+            b'S' as i8,
+            m as i32,
+            n as i32,
+            a_ptr as *mut f64,
+            m as i32,
+            s_ptr as *mut f64,
+            u_ptr as *mut f64,
+            m as i32,
+            vt_ptr as *mut f64,
+            k as i32,
+            work_ptr as *mut f64,
+            lwork,
+            std::ptr::null_mut(),
+            info_ptr as *mut i32,
+        )
+        .result()?;
+    }
+
+    stream.synchronize()?;
+
+    let info_val = read_dev_info(&d_info, device)?;
+    if info_val != 0 {
+        return Err(GpuError::InvalidState {
+            message: format!("gpu_svd_f64_dev: cuSOLVER Dgesvd info={info_val}"),
+        });
+    }
+
+    // Column-major → row-major on device (same logic as f32 variant).
+    let u_row = crate::kernels::gpu_transpose_2d_f64(&d_u, k, m, device)?;
+    let vt_row = crate::kernels::gpu_transpose_2d_f64(&d_vt, n, k, device)?;
+
+    Ok((u_row, d_s, vt_row))
+}
+
+// ---------------------------------------------------------------------------
+// Device-resident QR: A = Q * R   (#896 / #635)
+//
+// `gpu_qr_f32_dev` / `gpu_qr_f64_dev` mirror `gpu_qr_f32` / `gpu_qr_f64`
+// but accept/return `CudaBuffer<T>` — no host bounce for the matrix data.
+//
+// The row→col-major and col→row-major transposes are done on-device via
+// `gpu_transpose_2d`.
+//
+// /rust-gpu-discipline §3: PyTorch's `torch.linalg.qr` on CUDA returns CUDA
+// tensors. The old API bounced through host `Vec<T>` — a §3 violation.
+// ---------------------------------------------------------------------------
+
+/// Device-resident reduced QR (f32). Returns `(Q, R)` as `CudaBuffer<f32>`:
+/// - Q: `m * k` elements, row-major `[m, k]`  where `k = min(m, n)`
+/// - R: `k * n` elements, row-major `[k, n]`
+///
+/// (#896 / #635) No host bounce of the matrix data.
+#[cfg(feature = "cuda")]
+pub fn gpu_qr_f32_dev(
+    a_dev: &CudaBuffer<f32>,
+    m: usize,
+    n: usize,
+    device: &GpuDevice,
+) -> GpuResult<(CudaBuffer<f32>, CudaBuffer<f32>)> {
+    use cudarc::cusolver::sys as csys;
+
+    if a_dev.len() != m * n {
+        return Err(GpuError::ShapeMismatch {
+            op: "gpu_qr_f32_dev: A length mismatch",
+            expected: vec![m * n],
+            got: vec![a_dev.len()],
+        });
+    }
+    if m == 0 || n == 0 {
+        return Ok((
+            crate::transfer::alloc_zeros_f32(0, device)?,
+            crate::transfer::alloc_zeros_f32(0, device)?,
+        ));
+    }
+
+    let k = m.min(n);
+    let stream = device.stream();
+    let dn = cusolver_safe::DnHandle::new(stream.clone())?;
+
+    // Row-major → column-major on device.
+    let mut d_a = crate::kernels::gpu_transpose_2d(a_dev, m, n, device)?;
+    let mut d_tau = crate::transfer::alloc_zeros_f32(k, device)?;
+    let mut d_info = alloc_zeros_i32(1, device)?;
+
+    // Query workspace for Sgeqrf.
+    let mut lwork: i32 = 0;
+    // SAFETY:
+    // - `dn.cu()` is a valid `cusolverDnHandle_t` bound to `stream`.
+    // - `m`, `n` are non-zero; `lda = m as i32` satisfies lda >= max(1, m).
+    // - `a_ptr` is the `m*n` column-major f32 buffer from `gpu_transpose_2d`.
+    //   This is a query-only call; cuSOLVER inspects dims only.
+    unsafe {
+        let (a_ptr, _a_sync) = d_a.inner_mut().device_ptr_mut(&stream);
+        csys::cusolverDnSgeqrf_bufferSize(
+            dn.cu(),
+            m as i32,
+            n as i32,
+            a_ptr as *mut f32,
+            m as i32,
+            &mut lwork,
+        )
+        .result()?;
+    }
+
+    let mut d_work = crate::transfer::alloc_zeros_f32(lwork.max(1) as usize, device)?;
+
+    // Compute Householder QR.
+    // SAFETY:
+    // - `dn.cu()` is the valid handle; it outlives this call.
+    // - `d_a` is the column-major m×n f32 input; cuSOLVER overwrites in place:
+    //   lower triangle = Householder reflectors, upper triangle = R.
+    // - `d_tau` is a k-element f32 buffer for reflector scalars.
+    // - `d_work` / `d_info` as documented in the buffer-size query above.
+    unsafe {
+        let (a_ptr, _a_sync) = d_a.inner_mut().device_ptr_mut(&stream);
+        let (tau_ptr, _tau_sync) = d_tau.inner_mut().device_ptr_mut(&stream);
+        let (work_ptr, _work_sync) = d_work.inner_mut().device_ptr_mut(&stream);
+        let (info_ptr, _info_sync) = d_info.inner_mut().device_ptr_mut(&stream);
+
+        csys::cusolverDnSgeqrf(
+            dn.cu(),
+            m as i32,
+            n as i32,
+            a_ptr as *mut f32,
+            m as i32,
+            tau_ptr as *mut f32,
+            work_ptr as *mut f32,
+            lwork,
+            info_ptr as *mut i32,
+        )
+        .result()?;
+    }
+
+    stream.synchronize()?;
+
+    let info_val = read_dev_info(&d_info, device)?;
+    if info_val != 0 {
+        return Err(GpuError::InvalidState {
+            message: format!("gpu_qr_f32_dev: Sgeqrf info={info_val}"),
+        });
+    }
+
+    // Extract R from the upper triangle of d_a (column-major m×n) on device.
+    // d_a is column-major: element (i, j) is at index j*m + i.
+    // R is k×n row-major: element (i, j) = d_a[j*m + i] for j >= i.
+    // We use a PTX kernel for the upper-triangle extraction on device.
+    let r_dev = gpu_extract_upper_tri_f32(&d_a, m, n, k, device)?;
+
+    // Generate explicit Q on device via Sorgqr.
+    let mut lwork_orgqr: i32 = 0;
+    // SAFETY:
+    // - `dn.cu()` is the valid handle, alive until function exit.
+    // - `d_a` currently holds the Householder reflectors (post-Sgeqrf);
+    //   `d_tau` holds the reflector scalars. Both are read-only in this query.
+    // - `m`, `k`, `lda = m as i32` satisfy the LAPACK orgqr_bufferSize ABI.
+    unsafe {
+        let (a_ptr, _a_sync) = d_a.inner().device_ptr(&stream);
+        let (tau_ptr, _tau_sync) = d_tau.inner().device_ptr(&stream);
+        csys::cusolverDnSorgqr_bufferSize(
+            dn.cu(),
+            m as i32,
+            k as i32,
+            k as i32,
+            a_ptr as *const f32,
+            m as i32,
+            tau_ptr as *const f32,
+            &mut lwork_orgqr,
+        )
+        .result()?;
+    }
+
+    let mut d_work2 = crate::transfer::alloc_zeros_f32(lwork_orgqr.max(1) as usize, device)?;
+    let mut d_info2 = alloc_zeros_i32(1, device)?;
+
+    // SAFETY:
+    // - `dn.cu()` is the valid handle.
+    // - `d_a` lower triangle holds the k Householder reflectors written by
+    //   Sgeqrf; cuSOLVER overwrites the first k columns with explicit Q.
+    // - `d_tau` holds the k reflector scalars (read-only).
+    // - `d_work2` is `lwork_orgqr.max(1)` f32 elements from the query above.
+    // - `d_info2` single i32 for the status; checked after synchronize.
+    unsafe {
+        let (a_ptr, _a_sync) = d_a.inner_mut().device_ptr_mut(&stream);
+        let (tau_ptr, _tau_sync) = d_tau.inner().device_ptr(&stream);
+        let (work_ptr, _work_sync) = d_work2.inner_mut().device_ptr_mut(&stream);
+        let (info_ptr, _info_sync) = d_info2.inner_mut().device_ptr_mut(&stream);
+
+        csys::cusolverDnSorgqr(
+            dn.cu(),
+            m as i32,
+            k as i32,
+            k as i32,
+            a_ptr as *mut f32,
+            m as i32,
+            tau_ptr as *const f32,
+            work_ptr as *mut f32,
+            lwork_orgqr,
+            info_ptr as *mut i32,
+        )
+        .result()?;
+    }
+
+    stream.synchronize()?;
+
+    let info_val2 = read_dev_info(&d_info2, device)?;
+    if info_val2 != 0 {
+        return Err(GpuError::InvalidState {
+            message: format!("gpu_qr_f32_dev: Sorgqr info={info_val2}"),
+        });
+    }
+
+    // Q is in the first k columns of d_a (column-major m×n post-Sorgqr).
+    // Extract first k columns (m*k elements) and convert col-major → row-major.
+    // Column-major m×k is the same as row-major k×m in memory, so
+    // gpu_transpose_2d(&first_k_cols, k, m) → row-major m×k.
+    let q_col = gpu_extract_cols_f32(&d_a, m, n, k, device)?;
+    let q_row = crate::kernels::gpu_transpose_2d(&q_col, k, m, device)?;
+
+    Ok((q_row, r_dev))
+}
+
+/// Device-resident reduced QR (f64). Returns `(Q, R)` as `CudaBuffer<f64>`:
+/// - Q: `m * k` elements, row-major `[m, k]`  where `k = min(m, n)`
+/// - R: `k * n` elements, row-major `[k, n]`
+///
+/// (#896 / #635) No host bounce of the matrix data.
+#[cfg(feature = "cuda")]
+pub fn gpu_qr_f64_dev(
+    a_dev: &CudaBuffer<f64>,
+    m: usize,
+    n: usize,
+    device: &GpuDevice,
+) -> GpuResult<(CudaBuffer<f64>, CudaBuffer<f64>)> {
+    use cudarc::cusolver::sys as csys;
+
+    if a_dev.len() != m * n {
+        return Err(GpuError::ShapeMismatch {
+            op: "gpu_qr_f64_dev: A length mismatch",
+            expected: vec![m * n],
+            got: vec![a_dev.len()],
+        });
+    }
+    if m == 0 || n == 0 {
+        return Ok((
+            crate::transfer::alloc_zeros_f64(0, device)?,
+            crate::transfer::alloc_zeros_f64(0, device)?,
+        ));
+    }
+
+    let k = m.min(n);
+    let stream = device.stream();
+    let dn = cusolver_safe::DnHandle::new(stream.clone())?;
+
+    // Row-major → column-major on device.
+    let mut d_a = crate::kernels::gpu_transpose_2d_f64(a_dev, m, n, device)?;
+    let mut d_tau = crate::transfer::alloc_zeros_f64(k, device)?;
+    let mut d_info = alloc_zeros_i32(1, device)?;
+
+    // Query workspace for Dgeqrf.
+    let mut lwork: i32 = 0;
+    // SAFETY: same as gpu_qr_f32_dev; f64 variant of the same query.
+    unsafe {
+        let (a_ptr, _a_sync) = d_a.inner_mut().device_ptr_mut(&stream);
+        csys::cusolverDnDgeqrf_bufferSize(
+            dn.cu(),
+            m as i32,
+            n as i32,
+            a_ptr as *mut f64,
+            m as i32,
+            &mut lwork,
+        )
+        .result()?;
+    }
+
+    let mut d_work = crate::transfer::alloc_zeros_f64(lwork.max(1) as usize, device)?;
+
+    // SAFETY: same as gpu_qr_f32_dev; f64 types throughout.
+    unsafe {
+        let (a_ptr, _a_sync) = d_a.inner_mut().device_ptr_mut(&stream);
+        let (tau_ptr, _tau_sync) = d_tau.inner_mut().device_ptr_mut(&stream);
+        let (work_ptr, _work_sync) = d_work.inner_mut().device_ptr_mut(&stream);
+        let (info_ptr, _info_sync) = d_info.inner_mut().device_ptr_mut(&stream);
+
+        csys::cusolverDnDgeqrf(
+            dn.cu(),
+            m as i32,
+            n as i32,
+            a_ptr as *mut f64,
+            m as i32,
+            tau_ptr as *mut f64,
+            work_ptr as *mut f64,
+            lwork,
+            info_ptr as *mut i32,
+        )
+        .result()?;
+    }
+
+    stream.synchronize()?;
+
+    let info_val = read_dev_info(&d_info, device)?;
+    if info_val != 0 {
+        return Err(GpuError::InvalidState {
+            message: format!("gpu_qr_f64_dev: Dgeqrf info={info_val}"),
+        });
+    }
+
+    // Extract R from the upper triangle on device.
+    let r_dev = gpu_extract_upper_tri_f64(&d_a, m, n, k, device)?;
+
+    // Generate explicit Q via Dorgqr.
+    let mut lwork_orgqr: i32 = 0;
+    // SAFETY: same as gpu_qr_f32_dev; f64 types.
+    unsafe {
+        let (a_ptr, _a_sync) = d_a.inner().device_ptr(&stream);
+        let (tau_ptr, _tau_sync) = d_tau.inner().device_ptr(&stream);
+        csys::cusolverDnDorgqr_bufferSize(
+            dn.cu(),
+            m as i32,
+            k as i32,
+            k as i32,
+            a_ptr as *const f64,
+            m as i32,
+            tau_ptr as *const f64,
+            &mut lwork_orgqr,
+        )
+        .result()?;
+    }
+
+    let mut d_work2 = crate::transfer::alloc_zeros_f64(lwork_orgqr.max(1) as usize, device)?;
+    let mut d_info2 = alloc_zeros_i32(1, device)?;
+
+    // SAFETY: same as gpu_qr_f32_dev; f64 types.
+    unsafe {
+        let (a_ptr, _a_sync) = d_a.inner_mut().device_ptr_mut(&stream);
+        let (tau_ptr, _tau_sync) = d_tau.inner().device_ptr(&stream);
+        let (work_ptr, _work_sync) = d_work2.inner_mut().device_ptr_mut(&stream);
+        let (info_ptr, _info_sync) = d_info2.inner_mut().device_ptr_mut(&stream);
+
+        csys::cusolverDnDorgqr(
+            dn.cu(),
+            m as i32,
+            k as i32,
+            k as i32,
+            a_ptr as *mut f64,
+            m as i32,
+            tau_ptr as *const f64,
+            work_ptr as *mut f64,
+            lwork_orgqr,
+            info_ptr as *mut i32,
+        )
+        .result()?;
+    }
+
+    stream.synchronize()?;
+
+    let info_val2 = read_dev_info(&d_info2, device)?;
+    if info_val2 != 0 {
+        return Err(GpuError::InvalidState {
+            message: format!("gpu_qr_f64_dev: Dorgqr info={info_val2}"),
+        });
+    }
+
+    // Extract first k columns of d_a (col-major m×n) → col-major m×k;
+    // then col-major m×k (= row-major k×m) → row-major m×k.
+    let q_col = gpu_extract_cols_f64(&d_a, m, n, k, device)?;
+    let q_row = crate::kernels::gpu_transpose_2d_f64(&q_col, k, m, device)?;
+
+    Ok((q_row, r_dev))
+}
+
+// Device-resident stubs when `cuda` feature is disabled.
+
+#[cfg(not(feature = "cuda"))]
+pub fn gpu_svd_f32_dev(
+    _a: &CudaBuffer<f32>,
+    _m: usize,
+    _n: usize,
+    _device: &GpuDevice,
+) -> GpuResult<(CudaBuffer<f32>, CudaBuffer<f32>, CudaBuffer<f32>)> {
+    Err(GpuError::NoCudaFeature)
+}
+
+#[cfg(not(feature = "cuda"))]
+pub fn gpu_svd_f64_dev(
+    _a: &CudaBuffer<f64>,
+    _m: usize,
+    _n: usize,
+    _device: &GpuDevice,
+) -> GpuResult<(CudaBuffer<f64>, CudaBuffer<f64>, CudaBuffer<f64>)> {
+    Err(GpuError::NoCudaFeature)
+}
+
+#[cfg(not(feature = "cuda"))]
+pub fn gpu_qr_f32_dev(
+    _a: &CudaBuffer<f32>,
+    _m: usize,
+    _n: usize,
+    _device: &GpuDevice,
+) -> GpuResult<(CudaBuffer<f32>, CudaBuffer<f32>)> {
+    Err(GpuError::NoCudaFeature)
+}
+
+#[cfg(not(feature = "cuda"))]
+pub fn gpu_qr_f64_dev(
+    _a: &CudaBuffer<f64>,
+    _m: usize,
+    _n: usize,
+    _device: &GpuDevice,
+) -> GpuResult<(CudaBuffer<f64>, CudaBuffer<f64>)> {
+    Err(GpuError::NoCudaFeature)
 }
 
 // ---------------------------------------------------------------------------

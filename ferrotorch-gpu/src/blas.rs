@@ -23,12 +23,18 @@
 //!
 //! This produces the correct row-major result in C without any transpositions.
 //!
-//! # CPU fallback
+//! # Error policy (rust-gpu-discipline §3 — PyTorch parity)
 //!
-//! If cuBLAS handle creation fails (e.g. library not found), the module falls
-//! back to a CPU round-trip: copy both matrices to host, multiply with naive
-//! triple-loop, copy result back. This is correct but slow, and is
-//! accompanied by an `eprintln!` warning.
+//! There is **no silent CPU fallback** in this module. A cuBLAS failure
+//! (handle creation or GEMM call) propagates as `Err(GpuError::Blas(...))` or
+//! `Err(GpuError::Driver(...))` — matching PyTorch's behaviour of raising
+//! `RuntimeError` rather than silently downgrading to CPU compute.
+//!
+//! The `FERROTORCH_ENABLE_GPU_FALLBACK` opt-in is not wired for matmul;
+//! cuBLAS is always available on any supported CUDA build so the handle is
+//! created once in [`GpuDevice::new`] and reused for the lifetime of the
+//! device. If it were ever to fail, the structured `Err` is the correct
+//! response — the caller can decide whether to fall back.
 
 #[cfg(feature = "cuda")]
 use cudarc::cublas::{Gemm, GemmConfig, Gemv, GemvConfig, StridedBatchedConfig, sys};
