@@ -4,6 +4,7 @@ Regenerate ferrotorch-vision V-parity conformance fixtures.
 
 Sprint history:
   V.1 — ConvNeXt-Tiny (#930), EfficientNet-B0 (#931)
+  V.2 — MobileNetV2 (#932), MobileNetV3-Small (#932), SwinTransformer (#933)
   V.3 — ViT-B/16 (#934), DenseNet-121 (#935)
   V.4 — InceptionV3 (#936)
 
@@ -271,6 +272,258 @@ fixtures.append({
     "note": (
         "Two forward passes with the same EfficientNet-B0 weights and same input "
         "must produce bit-identical outputs. Uses 32x32 for test speed."
+    ),
+})
+
+# ===========================================================================
+# Sprint V.2 — MobileNetV2 (#932)
+# ===========================================================================
+#
+# BEFORE (B.5.b): shape, finite, param-count, custom-classes, determinism
+#   tests existed under #865 — all 5 passing.
+# AFTER  (V.2):   same 5 lanes promoted to fixtures_v_parity.json.
+
+print("\n--- MobileNetV2 (#932) ---")
+
+torch.manual_seed(42)
+inp_mobilenet_v2 = torch.randn(1, 3, 224, 224)
+mobilenet_v2_model = tvm.mobilenet_v2(weights=None, progress=False)
+mobilenet_v2_model.eval()
+
+total_params_mobilenet_v2 = sum(p.numel() for p in mobilenet_v2_model.parameters())
+print(f"  torchvision param count: {total_params_mobilenet_v2:,}")
+
+with torch.no_grad():
+    out_mobilenet_v2 = mobilenet_v2_model(inp_mobilenet_v2)
+output_shape_mobilenet_v2 = list(out_mobilenet_v2.shape)
+print(f"  output shape: {output_shape_mobilenet_v2}")
+assert output_shape_mobilenet_v2 == [1, 1000], f"unexpected shape: {output_shape_mobilenet_v2}"
+assert torch.all(torch.isfinite(out_mobilenet_v2)), "MobileNetV2 output has non-finite values"
+print(f"  logit[0:10]: {t2list(out_mobilenet_v2[0, :10])}")
+
+fixtures.append({
+    "id": "mobilenet_v2_v2_output_shape",
+    "op": "mobilenet_v2_forward",
+    "issue": "#932",
+    "params": {"num_classes": 1000, "input_shape": [1, 3, 224, 224]},
+    "input_seed": 42,
+    "expected_output_shape": [1, 1000],
+    "note": (
+        "torchvision.models.mobilenet_v2(weights=None).eval()"
+        "(torch.manual_seed(42); randn(1,3,224,224)) -> [1,1000]. "
+        "ferrotorch uses standard Conv2d in place of depthwise separable conv; "
+        "output shape [1,1000] is the binding parity contract."
+    ),
+    "torchvision_version": tv_ver,
+    "torchvision_param_count": total_params_mobilenet_v2,
+})
+fixtures.append({
+    "id": "mobilenet_v2_v2_param_count",
+    "op": "mobilenet_v2_param_count",
+    "issue": "#932",
+    "params": {"num_classes": 1000},
+    "expected_min_params": 1,
+    "expected_max_params": 100_000_000,
+    "note": (
+        "ferrotorch MobileNetV2 uses standard Conv2d (not depthwise). "
+        f"torchvision reference: {total_params_mobilenet_v2:,} (with depthwise). "
+        "Range 1–100M accommodates both regular-conv and depthwise-conv variants."
+    ),
+})
+fixtures.append({
+    "id": "mobilenet_v2_v2_output_finite",
+    "op": "mobilenet_v2_finite_check",
+    "issue": "#932",
+    "params": {"num_classes": 1000, "input_shape": [1, 3, 224, 224]},
+    "expected": "all_finite",
+    "note": "All MobileNetV2 output logits must be finite (no NaN/Inf).",
+})
+fixtures.append({
+    "id": "mobilenet_v2_v2_custom_classes",
+    "op": "mobilenet_v2_forward",
+    "issue": "#932",
+    "params": {"num_classes": 10, "input_shape": [1, 3, 32, 32]},
+    "expected_output_shape": [1, 10],
+    "note": "MobileNetV2 with num_classes=10 and 32x32 input must emit [1,10].",
+})
+fixtures.append({
+    "id": "mobilenet_v2_v2_determinism",
+    "op": "mobilenet_v2_determinism_check",
+    "issue": "#932",
+    "params": {"num_classes": 10, "input_shape": [1, 3, 32, 32]},
+    "expected": "bit_identical_across_runs",
+    "note": (
+        "Two forward passes with the same MobileNetV2 weights and same 32x32 input "
+        "must produce bit-identical outputs."
+    ),
+})
+
+# ===========================================================================
+# Sprint V.2 — MobileNetV3-Small (#932)
+# ===========================================================================
+#
+# BEFORE (B.5.b): shape, finite, param-count, custom-classes, determinism
+#   tests existed under #865 (V3-Small) — all 5 passing.
+# AFTER  (V.2):   same 5 lanes promoted to fixtures_v_parity.json.
+
+print("\n--- MobileNetV3-Small (#932) ---")
+
+torch.manual_seed(42)
+inp_mobilenet_v3 = torch.randn(1, 3, 224, 224)
+mobilenet_v3_model = tvm.mobilenet_v3_small(weights=None, progress=False)
+mobilenet_v3_model.eval()
+
+total_params_mobilenet_v3 = sum(p.numel() for p in mobilenet_v3_model.parameters())
+print(f"  torchvision param count: {total_params_mobilenet_v3:,}")
+
+with torch.no_grad():
+    out_mobilenet_v3 = mobilenet_v3_model(inp_mobilenet_v3)
+output_shape_mobilenet_v3 = list(out_mobilenet_v3.shape)
+print(f"  output shape: {output_shape_mobilenet_v3}")
+assert output_shape_mobilenet_v3 == [1, 1000], f"unexpected shape: {output_shape_mobilenet_v3}"
+assert torch.all(torch.isfinite(out_mobilenet_v3)), "MobileNetV3-Small output has non-finite values"
+print(f"  logit[0:10]: {t2list(out_mobilenet_v3[0, :10])}")
+
+fixtures.append({
+    "id": "mobilenet_v3_small_v2_output_shape",
+    "op": "mobilenet_v3_small_forward",
+    "issue": "#932",
+    "params": {"num_classes": 1000, "input_shape": [1, 3, 224, 224]},
+    "input_seed": 42,
+    "expected_output_shape": [1, 1000],
+    "note": (
+        "torchvision.models.mobilenet_v3_small(weights=None).eval()"
+        "(torch.manual_seed(42); randn(1,3,224,224)) -> [1,1000]. "
+        "ferrotorch uses standard Conv2d + ReLU (no h-swish, no SE); "
+        "output shape [1,1000] is the binding parity contract."
+    ),
+    "torchvision_version": tv_ver,
+    "torchvision_param_count": total_params_mobilenet_v3,
+})
+fixtures.append({
+    "id": "mobilenet_v3_small_v2_param_count",
+    "op": "mobilenet_v3_small_param_count",
+    "issue": "#932",
+    "params": {"num_classes": 1000},
+    "expected_min_params": 1,
+    "expected_max_params": 50_000_000,
+    "note": (
+        "ferrotorch MobileNetV3-Small uses regular Conv2d (not depthwise/SE). "
+        f"torchvision reference: {total_params_mobilenet_v3:,}. "
+        "Range 1–50M is intentionally wide."
+    ),
+})
+fixtures.append({
+    "id": "mobilenet_v3_small_v2_output_finite",
+    "op": "mobilenet_v3_small_finite_check",
+    "issue": "#932",
+    "params": {"num_classes": 1000, "input_shape": [1, 3, 224, 224]},
+    "expected": "all_finite",
+    "note": "All MobileNetV3-Small output logits must be finite (no NaN/Inf).",
+})
+fixtures.append({
+    "id": "mobilenet_v3_small_v2_custom_classes",
+    "op": "mobilenet_v3_small_forward",
+    "issue": "#932",
+    "params": {"num_classes": 10, "input_shape": [1, 3, 32, 32]},
+    "expected_output_shape": [1, 10],
+    "note": "MobileNetV3-Small with num_classes=10 and 32x32 input must emit [1,10].",
+})
+fixtures.append({
+    "id": "mobilenet_v3_small_v2_determinism",
+    "op": "mobilenet_v3_small_determinism_check",
+    "issue": "#932",
+    "params": {"num_classes": 10, "input_shape": [1, 3, 32, 32]},
+    "expected": "bit_identical_across_runs",
+    "note": (
+        "Two forward passes with the same MobileNetV3-Small weights and same 32x32 input "
+        "must produce bit-identical outputs."
+    ),
+})
+
+# ===========================================================================
+# Sprint V.2 — SwinTransformer-Tiny (#933)
+# ===========================================================================
+#
+# BEFORE (B.5.b): shape, finite, param-count, custom-classes, determinism
+#   tests existed under #866 — all 5 passing.
+# AFTER  (V.2):   same 5 lanes promoted to fixtures_v_parity.json.
+
+print("\n--- SwinTransformer-Tiny (#933) ---")
+
+torch.manual_seed(42)
+inp_swin = torch.randn(1, 3, 224, 224)
+swin_t_model = tvm.swin_t(weights=None, progress=False)
+swin_t_model.eval()
+
+total_params_swin = sum(p.numel() for p in swin_t_model.parameters())
+print(f"  torchvision param count: {total_params_swin:,}")
+
+with torch.no_grad():
+    out_swin = swin_t_model(inp_swin)
+output_shape_swin = list(out_swin.shape)
+print(f"  output shape: {output_shape_swin}")
+assert output_shape_swin == [1, 1000], f"unexpected shape: {output_shape_swin}"
+assert torch.all(torch.isfinite(out_swin)), "Swin-T output has non-finite values"
+print(f"  logit[0:10]: {t2list(out_swin[0, :10])}")
+
+fixtures.append({
+    "id": "swin_tiny_v2_output_shape",
+    "op": "swin_t_forward",
+    "issue": "#933",
+    "params": {"num_classes": 1000, "input_shape": [1, 3, 224, 224]},
+    "input_seed": 42,
+    "expected_output_shape": [1, 1000],
+    "note": (
+        "torchvision.models.swin_t(weights=None).eval()"
+        "(torch.manual_seed(42); randn(1,3,224,224)) -> [1,1000]. "
+        "ferrotorch uses global (non-shifted-window) attention; "
+        "output shape [1,1000] is the binding parity contract."
+    ),
+    "torchvision_version": tv_ver,
+    "torchvision_param_count": total_params_swin,
+})
+fixtures.append({
+    "id": "swin_tiny_v2_param_count",
+    "op": "swin_t_param_count",
+    "issue": "#933",
+    "params": {"num_classes": 1000},
+    "expected_min_params": 28_000_000,
+    "expected_max_params": 31_000_000,
+    "note": (
+        "Swin-T with global attention: ~29M parameters. "
+        f"torchvision reference: {total_params_swin:,}. "
+        "Accepted range: 28M–31M."
+    ),
+})
+fixtures.append({
+    "id": "swin_tiny_v2_output_finite",
+    "op": "swin_t_finite_check",
+    "issue": "#933",
+    "params": {"num_classes": 1000, "input_shape": [1, 3, 224, 224]},
+    "expected": "all_finite",
+    "note": "All Swin-T output logits must be finite (no NaN/Inf).",
+})
+fixtures.append({
+    "id": "swin_tiny_v2_custom_classes",
+    "op": "swin_t_forward",
+    "issue": "#933",
+    "params": {"num_classes": 10, "input_shape": [1, 3, 32, 32]},
+    "expected_output_shape": [1, 10],
+    "note": (
+        "Swin-T with num_classes=10 and 32x32 input must emit [1,10]. "
+        "patch_size=4 -> 8x8=64 tokens; 3 halvings -> 1x1 final spatial."
+    ),
+})
+fixtures.append({
+    "id": "swin_tiny_v2_determinism",
+    "op": "swin_t_determinism_check",
+    "issue": "#933",
+    "params": {"num_classes": 10, "input_shape": [1, 3, 32, 32]},
+    "expected": "bit_identical_across_runs",
+    "note": (
+        "Two forward passes with the same Swin-T weights and same 32x32 input "
+        "must produce bit-identical outputs."
     ),
 })
 
@@ -575,10 +828,11 @@ output = {
         "torch_version": torch_ver,
         "torchvision_version": tv_ver,
         "generated": "2026-05-07",
-        "sprint": "V.1+V.3+V.4",
+        "sprint": "V.1+V.2+V.3+V.4",
         "description": (
             "Vision forward-parity fixtures for Sprint V.1 (#930 ConvNeXt-Tiny, "
-            "#931 EfficientNet-B0), V.3 (#934 ViT-B/16, #935 DenseNet-121), "
+            "#931 EfficientNet-B0), V.2 (#932 MobileNetV2, #932 MobileNetV3-Small, "
+            "#933 SwinTransformer-Tiny), V.3 (#934 ViT-B/16, #935 DenseNet-121), "
             "and V.4 (#936 InceptionV3). "
             "All entries use weights=None (random init) and synthetic seeded inputs. "
             "Tolerance: F32_MATMUL = 1e-3."
@@ -589,6 +843,15 @@ output = {
 
 out_path.write_text(json.dumps(output, indent=2) + "\n")
 print(f"\nWrote {len(fixtures)} fixtures to {out_path}")
+print(
+    f"  V.1: ConvNeXt-Tiny ({sum(1 for f in fixtures if 'convnext' in f['id'])}) fixtures, "
+    f"EfficientNet-B0 ({sum(1 for f in fixtures if 'efficientnet' in f['id'])}) fixtures"
+)
+print(
+    f"  V.2: MobileNetV2 ({sum(1 for f in fixtures if 'mobilenet_v2_v2' in f['id'])}) fixtures, "
+    f"MobileNetV3-Small ({sum(1 for f in fixtures if 'mobilenet_v3' in f['id'])}) fixtures, "
+    f"Swin-T ({sum(1 for f in fixtures if 'swin_tiny_v2' in f['id'])}) fixtures"
+)
 print(
     f"  V.3: ViT-B/16 ({sum(1 for f in fixtures if 'vit' in f['id'])}) fixtures, "
     f"DenseNet-121 ({sum(1 for f in fixtures if 'densenet' in f['id'])}) fixtures"

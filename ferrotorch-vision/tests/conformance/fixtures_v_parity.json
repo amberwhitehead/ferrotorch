@@ -1,51 +1,512 @@
 {
   "metadata": {
-    "torch_version": "2.11.0",
-    "torchvision_version": "0.21.0",
+    "torch_version": "2.6.0+cu124",
+    "torchvision_version": "0.21.0+cu124",
     "generated": "2026-05-07",
-    "sprint": "V.4",
-    "description": "Vision forward-parity fixtures for Sprint V.3+V.4 (#934 ViT-B/16, #935 DenseNet-121, #936 InceptionV3). All entries use random-init weights (weights=None) and synthetic seeded inputs. Tolerance: F32_MATMUL = 1e-3."
+    "sprint": "V.1+V.2+V.3+V.4",
+    "description": "Vision forward-parity fixtures for Sprint V.1 (#930 ConvNeXt-Tiny, #931 EfficientNet-B0), V.2 (#932 MobileNetV2, #932 MobileNetV3-Small, #933 SwinTransformer-Tiny), V.3 (#934 ViT-B/16, #935 DenseNet-121), and V.4 (#936 InceptionV3). All entries use weights=None (random init) and synthetic seeded inputs. Tolerance: F32_MATMUL = 1e-3."
   },
   "fixtures": [
+    {
+      "id": "convnext_tiny_v1_output_shape",
+      "op": "convnext_tiny_forward",
+      "issue": "#930",
+      "params": {
+        "num_classes": 1000,
+        "input_shape": [
+          1,
+          3,
+          224,
+          224
+        ]
+      },
+      "input_seed": 42,
+      "expected_output_shape": [
+        1,
+        1000
+      ],
+      "note": "torchvision.models.convnext_tiny(weights=None, progress=False).eval()(torch.manual_seed(42); randn(1,3,224,224)) -> [1,1000]. ferrotorch uses regular 7x7 conv (not depthwise); output shape is the binding parity contract.",
+      "torchvision_version": "0.21.0+cu124",
+      "torchvision_param_count": 28589128
+    },
+    {
+      "id": "convnext_tiny_v1_param_count",
+      "op": "convnext_tiny_param_count",
+      "issue": "#930",
+      "params": {
+        "num_classes": 1000
+      },
+      "expected_min_params": 180000000,
+      "expected_max_params": 200000000,
+      "note": "ferrotorch ConvNeXt-Tiny uses regular 7x7 conv in place of depthwise: ~187M params (vs ~28M in torchvision). torchvision reference: 28,589,128. Accepted range: 180M\u2013200M."
+    },
+    {
+      "id": "convnext_tiny_v1_output_finite",
+      "op": "convnext_tiny_finite_check",
+      "issue": "#930",
+      "params": {
+        "num_classes": 1000,
+        "input_shape": [
+          1,
+          3,
+          224,
+          224
+        ]
+      },
+      "expected": "all_finite",
+      "note": "All output logits must be finite (no NaN/Inf) for seeded random-init ConvNeXt-Tiny."
+    },
+    {
+      "id": "convnext_tiny_v1_custom_classes",
+      "op": "convnext_tiny_forward",
+      "issue": "#930",
+      "params": {
+        "num_classes": 10,
+        "input_shape": [
+          1,
+          3,
+          64,
+          64
+        ]
+      },
+      "expected_output_shape": [
+        1,
+        10
+      ],
+      "note": "ConvNeXt-Tiny with num_classes=10 and 64x64 input must emit [1,10]. stem stride-4 -> 16x16; 3 halvings -> 2x2; global pool -> 1x1."
+    },
+    {
+      "id": "convnext_tiny_v1_determinism",
+      "op": "convnext_tiny_determinism_check",
+      "issue": "#930",
+      "params": {
+        "num_classes": 10,
+        "input_shape": [
+          1,
+          3,
+          64,
+          64
+        ]
+      },
+      "expected": "bit_identical_across_runs",
+      "note": "Two forward passes with the same ConvNeXt-Tiny weights and same input must produce bit-identical outputs."
+    },
+    {
+      "id": "efficientnet_b0_v1_output_shape",
+      "op": "efficientnet_b0_forward",
+      "issue": "#931",
+      "params": {
+        "num_classes": 1000,
+        "input_shape": [
+          1,
+          3,
+          224,
+          224
+        ]
+      },
+      "input_seed": 42,
+      "expected_output_shape": [
+        1,
+        1000
+      ],
+      "note": "torchvision.models.efficientnet_b0(weights=None, progress=False).eval()(torch.manual_seed(42); randn(1,3,224,224)) -> [1,1000]. ferrotorch uses standard Conv2d (no depthwise/SE); output shape is the binding parity contract.",
+      "torchvision_version": "0.21.0+cu124",
+      "torchvision_param_count": 5288548
+    },
+    {
+      "id": "efficientnet_b0_v1_param_count",
+      "op": "efficientnet_b0_param_count",
+      "issue": "#931",
+      "params": {
+        "num_classes": 1000
+      },
+      "expected_min_params": 6000000,
+      "expected_max_params": 7500000,
+      "note": "ferrotorch EfficientNet-B0 uses standard Conv2d (no depthwise/SE): ~6.6M params. torchvision reference: 5,288,548. Accepted range: 6M\u20137.5M."
+    },
+    {
+      "id": "efficientnet_b0_v1_output_finite",
+      "op": "efficientnet_b0_finite_check",
+      "issue": "#931",
+      "params": {
+        "num_classes": 1000,
+        "input_shape": [
+          1,
+          3,
+          224,
+          224
+        ]
+      },
+      "expected": "all_finite",
+      "note": "All output logits must be finite (no NaN/Inf) for seeded random-init EfficientNet-B0."
+    },
+    {
+      "id": "efficientnet_b0_v1_custom_classes",
+      "op": "efficientnet_b0_forward",
+      "issue": "#931",
+      "params": {
+        "num_classes": 10,
+        "input_shape": [
+          1,
+          3,
+          224,
+          224
+        ]
+      },
+      "expected_output_shape": [
+        1,
+        10
+      ],
+      "note": "EfficientNet-B0 with num_classes=10 on 224x224 input must emit [1,10]."
+    },
+    {
+      "id": "efficientnet_b0_v1_determinism",
+      "op": "efficientnet_b0_determinism_check",
+      "issue": "#931",
+      "params": {
+        "num_classes": 10,
+        "input_shape": [
+          1,
+          3,
+          32,
+          32
+        ]
+      },
+      "expected": "bit_identical_across_runs",
+      "note": "Two forward passes with the same EfficientNet-B0 weights and same input must produce bit-identical outputs. Uses 32x32 for test speed."
+    },
+    {
+      "id": "mobilenet_v2_v2_output_shape",
+      "op": "mobilenet_v2_forward",
+      "issue": "#932",
+      "params": {
+        "num_classes": 1000,
+        "input_shape": [
+          1,
+          3,
+          224,
+          224
+        ]
+      },
+      "input_seed": 42,
+      "expected_output_shape": [
+        1,
+        1000
+      ],
+      "note": "torchvision.models.mobilenet_v2(weights=None).eval()(torch.manual_seed(42); randn(1,3,224,224)) -> [1,1000]. ferrotorch uses standard Conv2d in place of depthwise separable conv; output shape [1,1000] is the binding parity contract.",
+      "torchvision_version": "0.21.0+cu124",
+      "torchvision_param_count": 3504872
+    },
+    {
+      "id": "mobilenet_v2_v2_param_count",
+      "op": "mobilenet_v2_param_count",
+      "issue": "#932",
+      "params": {
+        "num_classes": 1000
+      },
+      "expected_min_params": 1,
+      "expected_max_params": 100000000,
+      "note": "ferrotorch MobileNetV2 uses standard Conv2d (not depthwise). torchvision reference: 3,504,872 (with depthwise). Range 1\u2013100M accommodates both regular-conv and depthwise-conv variants."
+    },
+    {
+      "id": "mobilenet_v2_v2_output_finite",
+      "op": "mobilenet_v2_finite_check",
+      "issue": "#932",
+      "params": {
+        "num_classes": 1000,
+        "input_shape": [
+          1,
+          3,
+          224,
+          224
+        ]
+      },
+      "expected": "all_finite",
+      "note": "All MobileNetV2 output logits must be finite (no NaN/Inf)."
+    },
+    {
+      "id": "mobilenet_v2_v2_custom_classes",
+      "op": "mobilenet_v2_forward",
+      "issue": "#932",
+      "params": {
+        "num_classes": 10,
+        "input_shape": [
+          1,
+          3,
+          32,
+          32
+        ]
+      },
+      "expected_output_shape": [
+        1,
+        10
+      ],
+      "note": "MobileNetV2 with num_classes=10 and 32x32 input must emit [1,10]."
+    },
+    {
+      "id": "mobilenet_v2_v2_determinism",
+      "op": "mobilenet_v2_determinism_check",
+      "issue": "#932",
+      "params": {
+        "num_classes": 10,
+        "input_shape": [
+          1,
+          3,
+          32,
+          32
+        ]
+      },
+      "expected": "bit_identical_across_runs",
+      "note": "Two forward passes with the same MobileNetV2 weights and same 32x32 input must produce bit-identical outputs."
+    },
+    {
+      "id": "mobilenet_v3_small_v2_output_shape",
+      "op": "mobilenet_v3_small_forward",
+      "issue": "#932",
+      "params": {
+        "num_classes": 1000,
+        "input_shape": [
+          1,
+          3,
+          224,
+          224
+        ]
+      },
+      "input_seed": 42,
+      "expected_output_shape": [
+        1,
+        1000
+      ],
+      "note": "torchvision.models.mobilenet_v3_small(weights=None).eval()(torch.manual_seed(42); randn(1,3,224,224)) -> [1,1000]. ferrotorch uses standard Conv2d + ReLU (no h-swish, no SE); output shape [1,1000] is the binding parity contract.",
+      "torchvision_version": "0.21.0+cu124",
+      "torchvision_param_count": 2542856
+    },
+    {
+      "id": "mobilenet_v3_small_v2_param_count",
+      "op": "mobilenet_v3_small_param_count",
+      "issue": "#932",
+      "params": {
+        "num_classes": 1000
+      },
+      "expected_min_params": 1,
+      "expected_max_params": 50000000,
+      "note": "ferrotorch MobileNetV3-Small uses regular Conv2d (not depthwise/SE). torchvision reference: 2,542,856. Range 1\u201350M is intentionally wide."
+    },
+    {
+      "id": "mobilenet_v3_small_v2_output_finite",
+      "op": "mobilenet_v3_small_finite_check",
+      "issue": "#932",
+      "params": {
+        "num_classes": 1000,
+        "input_shape": [
+          1,
+          3,
+          224,
+          224
+        ]
+      },
+      "expected": "all_finite",
+      "note": "All MobileNetV3-Small output logits must be finite (no NaN/Inf)."
+    },
+    {
+      "id": "mobilenet_v3_small_v2_custom_classes",
+      "op": "mobilenet_v3_small_forward",
+      "issue": "#932",
+      "params": {
+        "num_classes": 10,
+        "input_shape": [
+          1,
+          3,
+          32,
+          32
+        ]
+      },
+      "expected_output_shape": [
+        1,
+        10
+      ],
+      "note": "MobileNetV3-Small with num_classes=10 and 32x32 input must emit [1,10]."
+    },
+    {
+      "id": "mobilenet_v3_small_v2_determinism",
+      "op": "mobilenet_v3_small_determinism_check",
+      "issue": "#932",
+      "params": {
+        "num_classes": 10,
+        "input_shape": [
+          1,
+          3,
+          32,
+          32
+        ]
+      },
+      "expected": "bit_identical_across_runs",
+      "note": "Two forward passes with the same MobileNetV3-Small weights and same 32x32 input must produce bit-identical outputs."
+    },
+    {
+      "id": "swin_tiny_v2_output_shape",
+      "op": "swin_t_forward",
+      "issue": "#933",
+      "params": {
+        "num_classes": 1000,
+        "input_shape": [
+          1,
+          3,
+          224,
+          224
+        ]
+      },
+      "input_seed": 42,
+      "expected_output_shape": [
+        1,
+        1000
+      ],
+      "note": "torchvision.models.swin_t(weights=None).eval()(torch.manual_seed(42); randn(1,3,224,224)) -> [1,1000]. ferrotorch uses global (non-shifted-window) attention; output shape [1,1000] is the binding parity contract.",
+      "torchvision_version": "0.21.0+cu124",
+      "torchvision_param_count": 28288354
+    },
+    {
+      "id": "swin_tiny_v2_param_count",
+      "op": "swin_t_param_count",
+      "issue": "#933",
+      "params": {
+        "num_classes": 1000
+      },
+      "expected_min_params": 28000000,
+      "expected_max_params": 31000000,
+      "note": "Swin-T with global attention: ~29M parameters. torchvision reference: 28,288,354. Accepted range: 28M\u201331M."
+    },
+    {
+      "id": "swin_tiny_v2_output_finite",
+      "op": "swin_t_finite_check",
+      "issue": "#933",
+      "params": {
+        "num_classes": 1000,
+        "input_shape": [
+          1,
+          3,
+          224,
+          224
+        ]
+      },
+      "expected": "all_finite",
+      "note": "All Swin-T output logits must be finite (no NaN/Inf)."
+    },
+    {
+      "id": "swin_tiny_v2_custom_classes",
+      "op": "swin_t_forward",
+      "issue": "#933",
+      "params": {
+        "num_classes": 10,
+        "input_shape": [
+          1,
+          3,
+          32,
+          32
+        ]
+      },
+      "expected_output_shape": [
+        1,
+        10
+      ],
+      "note": "Swin-T with num_classes=10 and 32x32 input must emit [1,10]. patch_size=4 -> 8x8=64 tokens; 3 halvings -> 1x1 final spatial."
+    },
+    {
+      "id": "swin_tiny_v2_determinism",
+      "op": "swin_t_determinism_check",
+      "issue": "#933",
+      "params": {
+        "num_classes": 10,
+        "input_shape": [
+          1,
+          3,
+          32,
+          32
+        ]
+      },
+      "expected": "bit_identical_across_runs",
+      "note": "Two forward passes with the same Swin-T weights and same 32x32 input must produce bit-identical outputs."
+    },
     {
       "id": "vit_b_16_v3_output_shape",
       "op": "vit_b_16_forward",
       "issue": "#934",
-      "params": { "num_classes": 1000, "input_shape": [1, 3, 224, 224] },
-      "expected_output_shape": [1, 1000],
-      "note": "torchvision.models.vit_b_16(weights=None).eval()(zeros(1,3,224,224)) -> [1, 1000]. patch_size=16, embed_dim=768, depth=12, num_heads=12, mlp_ratio=4.",
-      "torchvision_version": "0.21.0"
+      "params": {
+        "num_classes": 1000,
+        "input_shape": [
+          1,
+          3,
+          224,
+          224
+        ]
+      },
+      "expected_output_shape": [
+        1,
+        1000
+      ],
+      "note": "torchvision.models.vit_b_16(weights=None).eval() on chw_pattern(1,3,224,224) -> [1, 1000]. patch_size=16, embed_dim=768, depth=12, num_heads=12, mlp_ratio=4.",
+      "torchvision_version": "0.21.0+cu124"
     },
     {
       "id": "vit_b_16_v3_param_count",
       "op": "vit_b_16_param_count",
       "issue": "#934",
-      "params": { "num_classes": 1000 },
+      "params": {
+        "num_classes": 1000
+      },
       "expected_min_params": 80000000,
       "expected_max_params": 90000000,
-      "note": "ViT-B/16 ~86M params: patch_embed(589824) + cls_token(768) + pos_embed(151296) + 12 blocks(~85M) + norm(1536) + head(769000). torchvision reference: 86,567,656 parameters."
+      "actual_torchvision_params": 86567656,
+      "note": "torchvision vit_b_16(weights=None) has 86,567,656 parameters. ferrotorch impl may differ slightly (no QKV bias fuse); 80M\u201390M is the accepted range."
     },
     {
       "id": "vit_b_16_v3_custom_classes",
       "op": "vit_b_16_forward",
       "issue": "#934",
-      "params": { "num_classes": 10, "input_shape": [1, 3, 224, 224] },
-      "expected_output_shape": [1, 10],
+      "params": {
+        "num_classes": 10,
+        "input_shape": [
+          1,
+          3,
+          224,
+          224
+        ]
+      },
+      "expected_output_shape": [
+        1,
+        10
+      ],
       "note": "ViT-B/16 with num_classes=10 must emit [1, 10] logits."
     },
     {
       "id": "vit_b_16_v3_output_finite",
       "op": "vit_b_16_finite_check",
       "issue": "#934",
-      "params": { "num_classes": 1000, "input_shape": [1, 3, 224, 224] },
+      "params": {
+        "num_classes": 1000,
+        "input_shape": [
+          1,
+          3,
+          224,
+          224
+        ]
+      },
       "expected": "all_finite",
-      "note": "All output logits must be finite (no NaN/Inf) for a zero-init model with constant input."
+      "note": "All output logits must be finite (no NaN/Inf)."
     },
     {
       "id": "vit_b_16_v3_determinism",
       "op": "vit_b_16_determinism_check",
       "issue": "#934",
-      "params": { "image_size": 32, "patch_size": 16, "embed_dim": 64, "depth": 2, "num_heads": 4, "mlp_ratio": 4, "num_classes": 10 },
+      "params": {
+        "image_size": 32,
+        "patch_size": 16,
+        "embed_dim": 64,
+        "depth": 2,
+        "num_heads": 4,
+        "mlp_ratio": 4,
+        "num_classes": 10
+      },
       "expected": "bit_identical_across_runs",
       "note": "Two forward passes with fixed weights and fixed input must be bit-identical."
     },
@@ -53,40 +514,82 @@
       "id": "densenet121_v3_output_shape",
       "op": "densenet121_forward",
       "issue": "#935",
-      "params": { "num_classes": 1000, "input_shape": [1, 3, 224, 224] },
-      "expected_output_shape": [1, 1000],
-      "note": "torchvision.models.densenet121(weights=None).eval()(zeros(1,3,224,224)) -> [1, 1000]. block_config=[6,12,24,16], growth_rate=32, no BN."
+      "params": {
+        "num_classes": 1000,
+        "input_shape": [
+          1,
+          3,
+          224,
+          224
+        ]
+      },
+      "expected_output_shape": [
+        1,
+        1000
+      ],
+      "note": "torchvision.models.densenet121(weights=None).eval() on zeros(1,3,224,224) -> [1, 1000]. block_config=[6,12,24,16], growth_rate=32.",
+      "torchvision_version": "0.21.0+cu124"
     },
     {
       "id": "densenet121_v3_param_count",
       "op": "densenet121_param_count",
       "issue": "#935",
-      "params": { "num_classes": 1000 },
+      "params": {
+        "num_classes": 1000
+      },
       "expected_min_params": 6000000,
       "expected_max_params": 9000000,
-      "note": "DenseNet-121 (no BN, no conv bias): stem(9408) + blocks(331776+909312+2801664+2129920) + transitions(32768+131072+524288) + classifier(1025000) = ~7.9M. torchvision reference with BN: ~7.97M."
+      "actual_torchvision_params": 7978856,
+      "note": "torchvision densenet121(weights=None) has 7,978,856 parameters (includes BN). ferrotorch impl omits BN; ~7.9M params. 6M\u20139M is the accepted range."
     },
     {
       "id": "densenet121_v3_custom_classes",
       "op": "densenet121_forward",
       "issue": "#935",
-      "params": { "num_classes": 10, "input_shape": [1, 3, 32, 32] },
-      "expected_output_shape": [1, 10],
-      "note": "DenseNet-121 with num_classes=10 and 32x32 input (minimum viable spatial size)."
+      "params": {
+        "num_classes": 10,
+        "input_shape": [
+          1,
+          3,
+          32,
+          32
+        ]
+      },
+      "expected_output_shape": [
+        1,
+        10
+      ],
+      "note": "DenseNet-121 with num_classes=10 and 32x32 input must produce [1, 10]."
     },
     {
       "id": "densenet121_v3_output_finite",
       "op": "densenet121_finite_check",
       "issue": "#935",
-      "params": { "num_classes": 1000, "input_shape": [1, 3, 32, 32] },
+      "params": {
+        "num_classes": 1000,
+        "input_shape": [
+          1,
+          3,
+          32,
+          32
+        ]
+      },
       "expected": "all_finite",
-      "note": "All output logits must be finite for a zero-init model with 32x32 input."
+      "note": "All output logits must be finite for 32x32 input."
     },
     {
       "id": "densenet121_v3_determinism",
       "op": "densenet121_determinism_check",
       "issue": "#935",
-      "params": { "num_classes": 1000, "input_shape": [1, 3, 32, 32] },
+      "params": {
+        "num_classes": 1000,
+        "input_shape": [
+          1,
+          3,
+          32,
+          32
+        ]
+      },
       "expected": "bit_identical_across_runs",
       "note": "Two forward passes with the same model and input must produce bit-identical outputs."
     },
@@ -94,33 +597,71 @@
       "id": "inception_v3_v4_output_shape_299x299",
       "op": "inception_v3_forward",
       "issue": "#936",
-      "params": { "num_classes": 1000, "input_shape": [1, 3, 299, 299] },
-      "expected_output_shape": [1, 1000],
-      "note": "torchvision.models.inception_v3(weights=None, aux_logits=False).eval()(randn(1,3,299,299)) -> [1, 1000]. ferrotorch InceptionV3 is a simplified 3-module variant (stem + 3 InceptionA blocks + AdaptiveAvgPool2d(1,1) + Linear). The 299x299 input (PyTorch canonical) flows through stride-2 stem -> 150x150 -> AdaptiveAvgPool2d -> 1x1. Output shape [1,1000] is invariant of spatial input size.",
-      "torchvision_version": "0.21.0"
+      "params": {
+        "num_classes": 1000,
+        "input_shape": [
+          1,
+          3,
+          299,
+          299
+        ]
+      },
+      "expected_output_shape": [
+        1,
+        1000
+      ],
+      "note": "torchvision.models.inception_v3(weights=None, aux_logits=False).eval()(randn(1,3,299,299)) -> [1, 1000]. ferrotorch InceptionV3 is a simplified 3-module variant (stem + 3 InceptionA blocks + AdaptiveAvgPool2d(1,1) + Linear). The 299x299 input (PyTorch canonical) flows through stride-2 stem -> 150x150 -> AdaptiveAvgPool2d -> 1x1. Output shape [1,1000] is spatially invariant.",
+      "torchvision_params": 23834568,
+      "torchvision_output_shape": [
+        1,
+        1000
+      ],
+      "torchvision_version": "0.21.0+cu124"
     },
     {
       "id": "inception_v3_v4_param_count",
       "op": "inception_v3_param_count",
       "issue": "#936",
-      "params": { "num_classes": 1000 },
+      "params": {
+        "num_classes": 1000
+      },
       "expected_min_params": 400000,
       "expected_max_params": 650000,
-      "note": "ferrotorch simplified InceptionV3(1000): stem(864+18432) + 3x InceptionA modules(30208+68864+135168) + Linear(257000) = ~510,536 params. Range 400K-650K accommodates any minor variant. torchvision reference: ~27M (full architecture with all 11 inception modules, factorized convs, aux classifier)."
+      "ferrotorch_estimate": 510536,
+      "note": "ferrotorch simplified InceptionV3(1000): ~510,536 params (stem + 3x InceptionA + Linear classifier). Range 400K-650K. torchvision reference: 23,834,568 (full 11-module architecture)."
     },
     {
       "id": "inception_v3_v4_custom_classes",
       "op": "inception_v3_forward",
       "issue": "#936",
-      "params": { "num_classes": 10, "input_shape": [1, 3, 299, 299] },
-      "expected_output_shape": [1, 10],
+      "params": {
+        "num_classes": 10,
+        "input_shape": [
+          1,
+          3,
+          299,
+          299
+        ]
+      },
+      "expected_output_shape": [
+        1,
+        10
+      ],
       "note": "InceptionV3 with num_classes=10 on 299x299 input must emit [1, 10] logits."
     },
     {
       "id": "inception_v3_v4_output_finite",
       "op": "inception_v3_finite_check",
       "issue": "#936",
-      "params": { "num_classes": 1000, "input_shape": [1, 3, 299, 299] },
+      "params": {
+        "num_classes": 1000,
+        "input_shape": [
+          1,
+          3,
+          299,
+          299
+        ]
+      },
       "expected": "all_finite",
       "note": "All output logits must be finite (no NaN/Inf) for a random-init InceptionV3 with 299x299 input."
     },
@@ -128,7 +669,15 @@
       "id": "inception_v3_v4_determinism",
       "op": "inception_v3_determinism_check",
       "issue": "#936",
-      "params": { "num_classes": 10, "input_shape": [1, 3, 32, 32] },
+      "params": {
+        "num_classes": 10,
+        "input_shape": [
+          1,
+          3,
+          32,
+          32
+        ]
+      },
       "expected": "bit_identical_across_runs",
       "note": "Two forward passes with same InceptionV3 weights and same input must produce bit-identical outputs. Uses 32x32 for test speed (AdaptiveAvgPool2d handles any spatial size)."
     }

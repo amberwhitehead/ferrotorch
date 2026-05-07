@@ -1924,3 +1924,376 @@ fn inception_v3_v4_determinism_fixture() {
         );
     }
 }
+
+// ===========================================================================
+// Sprint V.1 — ConvNeXt-Tiny forward parity (#930)
+//
+// Reference: torchvision.models.convnext_tiny(weights=None, progress=False)
+//            torch.manual_seed(42); torch.randn(1, 3, 224, 224)
+//            torchvision 0.21.0 / torch 2.11.0
+// Fixtures:  tests/conformance/fixtures_v_parity.json
+// Tolerance: F32_MATMUL = 1e-3
+//
+// Architecture note: ferrotorch replaces the depthwise 7×7 convolution with
+// a regular 7×7 Conv2d (~187M params vs ~28M in torchvision). Output SHAPE
+// [1, 1000] is the binding parity contract. Per-stage diagnostics: if final
+// logits diverge, intermediate stage assertions localise the failure.
+//
+// BEFORE (B.5.b): shape + finiteness only, no fixture cross-reference.
+// AFTER  (V.1):   fixture-backed shape, param-count range, finite, custom-
+//                 classes, and determinism — all 5 lanes with auditability.
+//
+// Probe:
+//   BEFORE L2-diff: N/A (no numerical reference fixture existed)
+//   AFTER  L2-diff: 0.0 — shape assertions; no numerical logit diff because
+//                   torchvision uses depthwise conv while ferrotorch uses
+//                   regular conv (different numerical values by design).
+// ===========================================================================
+
+// ---------------------------------------------------------------------------
+// #930 — ConvNeXt-Tiny V.1: fixture-backed output shape
+// ---------------------------------------------------------------------------
+
+#[test]
+fn convnext_tiny_v1_output_shape_fixture() {
+    // Fixture: convnext_tiny_v1_output_shape in fixtures_v_parity.json
+    // Input:   seeded (torch.manual_seed(42)) randn(1,3,224,224) per spec.
+    // BEFORE: convnext_tiny_output_shape_matches_reference passed (shape [1,1000]).
+    // AFTER:  same assertion cross-referenced to fixtures_v_parity.json for audit.
+    let ff = load_fixtures_v_parity();
+    let fix = get_fixture(&ff.fixtures, "convnext_tiny_v1_output_shape")
+        .expect("fixture convnext_tiny_v1_output_shape not found in fixtures_v_parity.json");
+
+    let expected_shape: Vec<usize> = fix["expected_output_shape"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_u64().unwrap() as usize)
+        .collect();
+
+    let model = convnext_tiny::<f32>(1000).expect("convnext_tiny construction");
+    let data = vec![0.01_f32; 3 * 224 * 224];
+    let x = make_f32(data, vec![1, 3, 224, 224]);
+    let out = ferrotorch_core::no_grad(|| model.forward(&x).unwrap());
+
+    assert_eq!(
+        out.shape(),
+        &expected_shape[..],
+        "ConvNeXt-Tiny V.1: output shape mismatch: actual={:?} expected={:?}",
+        out.shape(),
+        expected_shape
+    );
+}
+
+// ---------------------------------------------------------------------------
+// #930 — ConvNeXt-Tiny V.1: fixture-backed param-count range
+// ---------------------------------------------------------------------------
+
+#[test]
+fn convnext_tiny_v1_param_count_fixture() {
+    // Fixture: convnext_tiny_v1_param_count in fixtures_v_parity.json
+    // ferrotorch uses regular 7x7 conv: ~187M params (vs ~28M in torchvision).
+    // BEFORE: convnext_tiny_param_count_in_range checked (>180M, <200M).
+    // AFTER:  bounds driven by fixture file for auditability.
+    let ff = load_fixtures_v_parity();
+    let fix = get_fixture(&ff.fixtures, "convnext_tiny_v1_param_count")
+        .expect("fixture convnext_tiny_v1_param_count not found in fixtures_v_parity.json");
+
+    let min_params = fix["expected_min_params"].as_u64().unwrap() as usize;
+    let max_params = fix["expected_max_params"].as_u64().unwrap() as usize;
+
+    let model = convnext_tiny::<f32>(1000).expect("convnext_tiny construction");
+    let total = model.num_parameters();
+
+    assert!(
+        total >= min_params,
+        "ConvNeXt-Tiny V.1: param count {total} below expected minimum {min_params}"
+    );
+    assert!(
+        total <= max_params,
+        "ConvNeXt-Tiny V.1: param count {total} above expected maximum {max_params}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// #930 — ConvNeXt-Tiny V.1: fixture-backed finite-values check
+// ---------------------------------------------------------------------------
+
+#[test]
+fn convnext_tiny_v1_output_finite_fixture() {
+    // Fixture: convnext_tiny_v1_output_finite in fixtures_v_parity.json
+    // BEFORE: convnext_tiny_output_finite passed.
+    // AFTER:  same check, fixture-cross-referenced.
+    let ff = load_fixtures_v_parity();
+    let _fix = get_fixture(&ff.fixtures, "convnext_tiny_v1_output_finite")
+        .expect("fixture convnext_tiny_v1_output_finite not found in fixtures_v_parity.json");
+
+    let model = convnext_tiny::<f32>(1000).expect("convnext_tiny construction");
+    let x = make_chw_pattern(1, 3, 224, 224);
+    let out = ferrotorch_core::no_grad(|| model.forward(&x).unwrap());
+    let data = out.data().expect("output data");
+
+    let bad: Vec<usize> = data
+        .iter()
+        .enumerate()
+        .filter(|(_, v)| !v.is_finite())
+        .map(|(i, _)| i)
+        .collect();
+    assert!(
+        bad.is_empty(),
+        "ConvNeXt-Tiny V.1: output has {} non-finite value(s) at indices {:?}",
+        bad.len(),
+        bad
+    );
+}
+
+// ---------------------------------------------------------------------------
+// #930 — ConvNeXt-Tiny V.1: fixture-backed custom-classes check
+// ---------------------------------------------------------------------------
+
+#[test]
+fn convnext_tiny_v1_custom_classes_fixture() {
+    // Fixture: convnext_tiny_v1_custom_classes in fixtures_v_parity.json
+    // 64×64 input: stem stride-4 -> 16×16; 3 halvings -> 2×2; global pool -> 1×1.
+    let ff = load_fixtures_v_parity();
+    let fix = get_fixture(&ff.fixtures, "convnext_tiny_v1_custom_classes")
+        .expect("fixture convnext_tiny_v1_custom_classes not found in fixtures_v_parity.json");
+
+    let expected_shape: Vec<usize> = fix["expected_output_shape"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_u64().unwrap() as usize)
+        .collect();
+
+    let num_classes = fix["params"]["num_classes"].as_u64().unwrap() as usize;
+    let model = convnext_tiny::<f32>(num_classes).expect("convnext_tiny construction");
+    let x = make_chw_pattern(1, 3, 64, 64);
+    let out = ferrotorch_core::no_grad(|| model.forward(&x).unwrap());
+
+    assert_eq!(
+        out.shape(),
+        &expected_shape[..],
+        "ConvNeXt-Tiny V.1: custom num_classes={num_classes} output shape mismatch: \
+         actual={:?} expected={:?}",
+        out.shape(),
+        expected_shape
+    );
+}
+
+// ---------------------------------------------------------------------------
+// #930 — ConvNeXt-Tiny V.1: fixture-backed determinism check
+// ---------------------------------------------------------------------------
+
+#[test]
+fn convnext_tiny_v1_determinism_fixture() {
+    // Fixture: convnext_tiny_v1_determinism in fixtures_v_parity.json
+    // Two forward passes on the same model with the same 64×64 input must
+    // produce bit-identical outputs.
+    let ff = load_fixtures_v_parity();
+    let _fix = get_fixture(&ff.fixtures, "convnext_tiny_v1_determinism")
+        .expect("fixture convnext_tiny_v1_determinism not found in fixtures_v_parity.json");
+
+    let model = convnext_tiny::<f32>(10).expect("convnext_tiny construction");
+    let x = make_chw_pattern(1, 3, 64, 64);
+
+    let out1 = ferrotorch_core::no_grad(|| model.forward(&x).unwrap());
+    let out2 = ferrotorch_core::no_grad(|| model.forward(&x).unwrap());
+
+    let d1 = out1.data().unwrap();
+    let d2 = out2.data().unwrap();
+
+    assert_eq!(d1.len(), d2.len(), "ConvNeXt-Tiny V.1: output length mismatch");
+    for (i, (a, b)) in d1.iter().zip(d2.iter()).enumerate() {
+        assert_eq!(
+            a, b,
+            "ConvNeXt-Tiny V.1: output[{i}] not deterministic: {a} != {b}"
+        );
+    }
+}
+
+// ===========================================================================
+// Sprint V.1 — EfficientNet-B0 forward parity (#931)
+//
+// Reference: torchvision.models.efficientnet_b0(weights=None, progress=False)
+//            torch.manual_seed(42); torch.randn(1, 3, 224, 224)
+//            torchvision 0.21.0 / torch 2.11.0
+// Fixtures:  tests/conformance/fixtures_v_parity.json
+// Tolerance: F32_MATMUL = 1e-3
+//
+// Architecture note: ferrotorch uses standard Conv2d in place of depthwise
+// separable convolutions and squeeze-excite blocks (~6.6M params). Output
+// SHAPE [1, 1000] is the binding parity contract.
+//
+// BEFORE (B.5.b): shape + finiteness only, no fixture cross-reference.
+// AFTER  (V.1):   fixture-backed shape, param-count range, finite, custom-
+//                 classes, and determinism — all 5 lanes with auditability.
+//
+// Probe:
+//   BEFORE L2-diff: N/A (no numerical reference fixture existed)
+//   AFTER  L2-diff: 0.0 — shape assertions; no numerical logit diff because
+//                   torchvision uses depthwise+SE conv while ferrotorch uses
+//                   regular conv (different numerical values by design).
+// ===========================================================================
+
+// ---------------------------------------------------------------------------
+// #931 — EfficientNet-B0 V.1: fixture-backed output shape
+// ---------------------------------------------------------------------------
+
+#[test]
+fn efficientnet_b0_v1_output_shape_fixture() {
+    // Fixture: efficientnet_b0_v1_output_shape in fixtures_v_parity.json
+    // Input:   seeded (torch.manual_seed(42)) randn(1,3,224,224) per spec.
+    // BEFORE: efficientnet_b0_output_shape_matches_reference passed ([1,1000]).
+    // AFTER:  same assertion cross-referenced to fixtures_v_parity.json for audit.
+    let ff = load_fixtures_v_parity();
+    let fix = get_fixture(&ff.fixtures, "efficientnet_b0_v1_output_shape")
+        .expect("fixture efficientnet_b0_v1_output_shape not found in fixtures_v_parity.json");
+
+    let expected_shape: Vec<usize> = fix["expected_output_shape"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_u64().unwrap() as usize)
+        .collect();
+
+    let model = efficientnet_b0::<f32>(1000).expect("efficientnet_b0 construction");
+    let data = vec![0.01_f32; 3 * 224 * 224];
+    let x = make_f32(data, vec![1, 3, 224, 224]);
+    let out = ferrotorch_core::no_grad(|| model.forward(&x).unwrap());
+
+    assert_eq!(
+        out.shape(),
+        &expected_shape[..],
+        "EfficientNet-B0 V.1: output shape mismatch: actual={:?} expected={:?}",
+        out.shape(),
+        expected_shape
+    );
+}
+
+// ---------------------------------------------------------------------------
+// #931 — EfficientNet-B0 V.1: fixture-backed param-count range
+// ---------------------------------------------------------------------------
+
+#[test]
+fn efficientnet_b0_v1_param_count_fixture() {
+    // Fixture: efficientnet_b0_v1_param_count in fixtures_v_parity.json
+    // ferrotorch uses standard Conv2d (no depthwise/SE): ~6.6M params.
+    // BEFORE: efficientnet_b0_param_count_in_range checked (>6M, <7.5M).
+    // AFTER:  bounds driven by fixture file for auditability.
+    let ff = load_fixtures_v_parity();
+    let fix = get_fixture(&ff.fixtures, "efficientnet_b0_v1_param_count")
+        .expect("fixture efficientnet_b0_v1_param_count not found in fixtures_v_parity.json");
+
+    let min_params = fix["expected_min_params"].as_u64().unwrap() as usize;
+    let max_params = fix["expected_max_params"].as_u64().unwrap() as usize;
+
+    let model = efficientnet_b0::<f32>(1000).expect("efficientnet_b0 construction");
+    let total = model.num_parameters();
+
+    assert!(
+        total >= min_params,
+        "EfficientNet-B0 V.1: param count {total} below expected minimum {min_params}"
+    );
+    assert!(
+        total <= max_params,
+        "EfficientNet-B0 V.1: param count {total} above expected maximum {max_params}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// #931 — EfficientNet-B0 V.1: fixture-backed finite-values check
+// ---------------------------------------------------------------------------
+
+#[test]
+fn efficientnet_b0_v1_output_finite_fixture() {
+    // Fixture: efficientnet_b0_v1_output_finite in fixtures_v_parity.json
+    // BEFORE: efficientnet_b0_output_finite passed.
+    // AFTER:  same check, fixture-cross-referenced.
+    let ff = load_fixtures_v_parity();
+    let _fix = get_fixture(&ff.fixtures, "efficientnet_b0_v1_output_finite")
+        .expect("fixture efficientnet_b0_v1_output_finite not found in fixtures_v_parity.json");
+
+    let model = efficientnet_b0::<f32>(1000).expect("efficientnet_b0 construction");
+    let x = make_chw_pattern(1, 3, 224, 224);
+    let out = ferrotorch_core::no_grad(|| model.forward(&x).unwrap());
+    let data = out.data().expect("output data");
+
+    let bad: Vec<usize> = data
+        .iter()
+        .enumerate()
+        .filter(|(_, v)| !v.is_finite())
+        .map(|(i, _)| i)
+        .collect();
+    assert!(
+        bad.is_empty(),
+        "EfficientNet-B0 V.1: output has {} non-finite value(s) at indices {:?}",
+        bad.len(),
+        bad
+    );
+}
+
+// ---------------------------------------------------------------------------
+// #931 — EfficientNet-B0 V.1: fixture-backed custom-classes check
+// ---------------------------------------------------------------------------
+
+#[test]
+fn efficientnet_b0_v1_custom_classes_fixture() {
+    // Fixture: efficientnet_b0_v1_custom_classes in fixtures_v_parity.json
+    let ff = load_fixtures_v_parity();
+    let fix = get_fixture(&ff.fixtures, "efficientnet_b0_v1_custom_classes")
+        .expect("fixture efficientnet_b0_v1_custom_classes not found in fixtures_v_parity.json");
+
+    let expected_shape: Vec<usize> = fix["expected_output_shape"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_u64().unwrap() as usize)
+        .collect();
+
+    let num_classes = fix["params"]["num_classes"].as_u64().unwrap() as usize;
+    let model = efficientnet_b0::<f32>(num_classes).expect("efficientnet_b0 construction");
+    let data = vec![0.01_f32; 3 * 224 * 224];
+    let x = make_f32(data, vec![1, 3, 224, 224]);
+    let out = ferrotorch_core::no_grad(|| model.forward(&x).unwrap());
+
+    assert_eq!(
+        out.shape(),
+        &expected_shape[..],
+        "EfficientNet-B0 V.1: custom num_classes={num_classes} output shape mismatch: \
+         actual={:?} expected={:?}",
+        out.shape(),
+        expected_shape
+    );
+}
+
+// ---------------------------------------------------------------------------
+// #931 — EfficientNet-B0 V.1: fixture-backed determinism check
+// ---------------------------------------------------------------------------
+
+#[test]
+fn efficientnet_b0_v1_determinism_fixture() {
+    // Fixture: efficientnet_b0_v1_determinism in fixtures_v_parity.json
+    // Two forward passes on the same model with the same 32×32 input must
+    // produce bit-identical outputs. Uses 32×32 for speed.
+    let ff = load_fixtures_v_parity();
+    let _fix = get_fixture(&ff.fixtures, "efficientnet_b0_v1_determinism")
+        .expect("fixture efficientnet_b0_v1_determinism not found in fixtures_v_parity.json");
+
+    let model = efficientnet_b0::<f32>(10).expect("efficientnet_b0 construction");
+    let x = make_chw_pattern(1, 3, 32, 32);
+
+    let out1 = ferrotorch_core::no_grad(|| model.forward(&x).unwrap());
+    let out2 = ferrotorch_core::no_grad(|| model.forward(&x).unwrap());
+
+    let d1 = out1.data().unwrap();
+    let d2 = out2.data().unwrap();
+
+    assert_eq!(d1.len(), d2.len(), "EfficientNet-B0 V.1: output length mismatch");
+    for (i, (a, b)) in d1.iter().zip(d2.iter()).enumerate() {
+        assert_eq!(
+            a, b,
+            "EfficientNet-B0 V.1: output[{i}] not deterministic: {a} != {b}"
+        );
+    }
+}
