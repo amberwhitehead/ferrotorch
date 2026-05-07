@@ -83,7 +83,7 @@ rayon = "1.11"
 half = { version = "2.4", features = ["num-traits", "bytemuck"] }
 num-traits = "0.2"
 bytemuck = "1"
-cudarc = { version = "0.19", features = ["cublas", "cusolver", "cufft"] }
+cudarc = { version = "0.19", features = ["cublas", "cusolver", "cufft", "cusparse"] }
 # CUDA toolkit version for cudarc is selected via the CUDARC_CUDA_VERSION env
 # var in .cargo/config.toml (default 12080 for WSL compatibility). Adding a
 # `cuda-NNNNN` feature here would conflict with the env-driven cfg and produce

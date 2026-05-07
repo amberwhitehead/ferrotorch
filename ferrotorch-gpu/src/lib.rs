@@ -215,3 +215,29 @@ pub use pool::{cached_bytes, empty_cache, empty_cache_all, round_len};
 pub use rng::{CudaRngManager, PhiloxGenerator, PhiloxState, cuda_rng_manager, fork_rng, join_rng};
 pub use tensor_bridge::{GpuFloat, GpuTensor, cuda, cuda_default, tensor_to_cpu, tensor_to_gpu};
 pub use transfer::{alloc_zeros, alloc_zeros_f32, alloc_zeros_f64, cpu_to_gpu, gpu_to_cpu};
+
+// ---------------------------------------------------------------------------
+// cuSPARSE feature-flag smoke test
+// ---------------------------------------------------------------------------
+//
+// P1 wires the `cusparse` feature on the workspace `cudarc` dep so P2's
+// `SparseTensor::spmm` can call into cuSPARSE. This is a type-reference-only
+// test — it confirms the symbol resolves at compile time without making any
+// CUDA call. P2 will exercise the actual SpMM path.
+
+#[cfg(test)]
+#[cfg(feature = "cuda")]
+mod cusparse_smoke {
+    /// Compile-time check that `cudarc::cusparse::sys::cusparseHandle_t` is
+    /// reachable through the workspace dep's feature set. The function never
+    /// runs against a real GPU; the assertion is purely that the type resolves
+    /// (i.e., `cusparse` is enabled on `cudarc`).
+    #[test]
+    fn cusparse_handle_type_resolves() {
+        // A null handle is a valid bit pattern for the raw pointer typedef and
+        // proves the `sys::cusparseHandle_t` symbol is in scope without
+        // touching the device.
+        let handle: cudarc::cusparse::sys::cusparseHandle_t = std::ptr::null_mut();
+        assert!(handle.is_null());
+    }
+}
