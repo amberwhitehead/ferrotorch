@@ -1,0 +1,405 @@
+# Surface exclusions for ferrotorch-optim conformance suite.
+# Each entry explains WHY an item is not covered by a conformance test.
+#
+# Exclusion reasons:
+#   implicit   — coverage is provided transitively by a tested item
+#   structural — struct fields, type aliases, re-exports; no independent behaviour
+#   live-env   — requires GPU, live training loop, or external binary
+#   deferred   — covered by a future sub-phase (noted in c6_phase field)
+#
+# Items here are EXCLUDED from the Layer-4 coverage gate (to be authored in C6.4 wrap-up).
+
+# ---------------------------------------------------------------------------
+# Optimizer trait: method coverage provided by optimizer-specific tests
+# ---------------------------------------------------------------------------
+
+[[exclusion]]
+path = "ferrotorch_optim::optimizer::Optimizer::step"
+reason = "implicit"
+note = "Covered by every step-by-step conformance test in conformance_optim_sgd_family.rs and future sub-phase tests."
+
+[[exclusion]]
+path = "ferrotorch_optim::optimizer::Optimizer::zero_grad"
+reason = "implicit"
+note = "zero_grad is called in every multi-step fixture test. No separate fixture needed."
+
+[[exclusion]]
+path = "ferrotorch_optim::optimizer::Optimizer::lr"
+reason = "implicit"
+note = "lr() returned as part of every fixture assertion setup."
+
+[[exclusion]]
+path = "ferrotorch_optim::optimizer::Optimizer::set_lr"
+reason = "implicit"
+note = "set_lr tested in unit tests; scheduler integration is a C6.4 concern."
+
+[[exclusion]]
+path = "ferrotorch_optim::optimizer::Optimizer::param_groups"
+reason = "implicit"
+note = "param_groups() accessed in every test helper; implicit coverage."
+
+[[exclusion]]
+path = "ferrotorch_optim::optimizer::Optimizer::param_groups_mut"
+reason = "implicit"
+note = "Accessed by fixture driver; implicit coverage."
+
+[[exclusion]]
+path = "ferrotorch_optim::optimizer::Optimizer::add_param_group"
+reason = "implicit"
+note = "Tested in unit tests; no separate fixture needed."
+
+[[exclusion]]
+path = "ferrotorch_optim::optimizer::OptimizerState"
+reason = "structural"
+note = "Type alias for HashMap; tested transitively by state_dict/load_state_dict tests."
+
+# ---------------------------------------------------------------------------
+# Config builder methods: structural / implicit
+# ---------------------------------------------------------------------------
+
+[[exclusion]]
+path = "ferrotorch_optim::sgd::SgdConfig::foreach"
+reason = "implicit"
+note = "foreach parity is tested in unit tests; conformance tests use default (foreach=false)."
+
+[[exclusion]]
+path = "ferrotorch_optim::sgd::SgdConfig::momentum"
+reason = "implicit"
+note = "Tested via SgdConfig::with_momentum in conformance_optim_sgd_family.rs."
+
+[[exclusion]]
+path = "ferrotorch_optim::sgd::SgdConfig::dampening"
+reason = "implicit"
+note = "Tested via SgdConfig::with_dampening in conformance_optim_sgd_family.rs."
+
+[[exclusion]]
+path = "ferrotorch_optim::sgd::SgdConfig::weight_decay"
+reason = "implicit"
+note = "Tested via SgdConfig::with_weight_decay in conformance_optim_sgd_family.rs."
+
+[[exclusion]]
+path = "ferrotorch_optim::sgd::SgdConfig::nesterov"
+reason = "implicit"
+note = "Tested via SgdConfig::with_nesterov in conformance_optim_sgd_family.rs."
+
+# ---------------------------------------------------------------------------
+# foreach_utils: GPU-only helpers; not exercised on CPU conformance
+# ---------------------------------------------------------------------------
+
+[[exclusion]]
+path = "ferrotorch_optim::foreach_utils::elemwise_max"
+reason = "live-env"
+note = "Used by GPU foreach path; not reachable in CPU-only conformance tests. C6.3 tracking."
+
+[[exclusion]]
+path = "ferrotorch_optim::foreach_utils::scalar_on"
+reason = "live-env"
+note = "Used by GPU foreach path; not reachable in CPU-only conformance tests. C6.3 tracking."
+
+[[exclusion]]
+path = "ferrotorch_optim::foreach_utils::f64_scalar_on"
+reason = "live-env"
+note = "Used by GPU foreach path; not reachable in CPU-only conformance tests. C6.3 tracking."
+
+# ---------------------------------------------------------------------------
+# Adam-family: deferred to C6.2
+# ---------------------------------------------------------------------------
+
+[[exclusion]]
+path = "ferrotorch_optim::adam::AdamConfig"
+reason = "deferred"
+note = "C6.2 will add Adam/AdamW/Adamax/NAdam/RAdam/SparseAdam/Adafactor/Adadelta conformance tests."
+c6_phase = "C6.2"
+
+[[exclusion]]
+path = "ferrotorch_optim::adamw::AdamWConfig"
+reason = "deferred"
+note = "C6.2 deferred."
+c6_phase = "C6.2"
+
+[[exclusion]]
+path = "ferrotorch_optim::adamax::AdamaxConfig"
+reason = "deferred"
+note = "C6.2 deferred."
+c6_phase = "C6.2"
+
+[[exclusion]]
+path = "ferrotorch_optim::nadam::NAdamConfig"
+reason = "deferred"
+note = "C6.2 deferred."
+c6_phase = "C6.2"
+
+[[exclusion]]
+path = "ferrotorch_optim::radam::RAdamConfig"
+reason = "deferred"
+note = "C6.2 deferred."
+c6_phase = "C6.2"
+
+[[exclusion]]
+path = "ferrotorch_optim::sparse_adam::SparseAdamConfig"
+reason = "deferred"
+note = "C6.2 deferred."
+c6_phase = "C6.2"
+
+[[exclusion]]
+path = "ferrotorch_optim::adadelta::AdadeltaConfig"
+reason = "deferred"
+note = "C6.2 deferred."
+c6_phase = "C6.2"
+
+[[exclusion]]
+path = "ferrotorch_optim::adafactor::AdafactorConfig"
+reason = "deferred"
+note = "C6.2 deferred."
+c6_phase = "C6.2"
+
+# ---------------------------------------------------------------------------
+# Muon, LBFGS, natural gradient, EMA, SWA, GradScaler, differentiable: C6.3
+# ---------------------------------------------------------------------------
+
+[[exclusion]]
+path = "ferrotorch_optim::muon::MuonConfig"
+reason = "deferred"
+note = "C6.3 deferred."
+c6_phase = "C6.3"
+
+[[exclusion]]
+path = "ferrotorch_optim::lbfgs::LbfgsConfig"
+reason = "deferred"
+note = "C6.3 deferred."
+c6_phase = "C6.3"
+
+[[exclusion]]
+path = "ferrotorch_optim::natural_gradient::KfacConfig"
+reason = "deferred"
+note = "C6.3 deferred."
+c6_phase = "C6.3"
+
+[[exclusion]]
+path = "ferrotorch_optim::ema::ExponentialMovingAverage"
+reason = "deferred"
+note = "C6.3 deferred."
+c6_phase = "C6.3"
+
+[[exclusion]]
+path = "ferrotorch_optim::swa::AveragedModel"
+reason = "deferred"
+note = "C6.3 deferred."
+c6_phase = "C6.3"
+
+[[exclusion]]
+path = "ferrotorch_optim::swa::Swalr"
+reason = "deferred"
+note = "C6.3 deferred."
+c6_phase = "C6.3"
+
+[[exclusion]]
+path = "ferrotorch_optim::grad_accumulator::GradientAccumulator"
+reason = "deferred"
+note = "C6.3 deferred."
+c6_phase = "C6.3"
+
+[[exclusion]]
+path = "ferrotorch_optim::grad_scaler::GradScaler"
+reason = "deferred"
+note = "C6.3 deferred."
+c6_phase = "C6.3"
+
+[[exclusion]]
+path = "ferrotorch_optim::differentiable::diff_sgd_step"
+reason = "deferred"
+note = "C6.3 deferred."
+c6_phase = "C6.3"
+
+[[exclusion]]
+path = "ferrotorch_optim::differentiable::diff_sgd_momentum_step"
+reason = "deferred"
+note = "C6.3 deferred."
+c6_phase = "C6.3"
+
+# ---------------------------------------------------------------------------
+# Schedulers: C6.4 — exclusions for items covered implicitly or structurally
+# ---------------------------------------------------------------------------
+# Note: conformance_optim_schedulers.rs (C6.4) directly tests all 12 scheduler
+# types with fixture-driven reference sequences. The items below are excluded
+# because they are either:
+#   - Enum/trait/function types with no independent behaviour beyond what the
+#     struct tests exercise (structural/implicit), OR
+#   - Closure-based schedulers (LambdaLR, MultiplicativeLR, ChainedScheduler)
+#     that cannot be pinned to a static reference fixture because their output
+#     depends on a user-supplied closure.
+
+# Traits — covered by every scheduler conformance test via LrScheduler::step
+[[exclusion]]
+path = "ferrotorch_optim::scheduler::LrScheduler"
+reason = "implicit"
+note = "Exercised by every scheduler conformance test in conformance_optim_schedulers.rs via the trait bound on MockOptimizer."
+
+[[exclusion]]
+path = "ferrotorch_optim::scheduler::LrScheduler::step"
+reason = "implicit"
+note = "Called in every scheduler fixture loop in conformance_optim_schedulers.rs."
+
+[[exclusion]]
+path = "ferrotorch_optim::scheduler::LrScheduler::get_lr"
+reason = "implicit"
+note = "Verified via sched.get_lr() assertion in step_lr_matches_reference."
+
+[[exclusion]]
+path = "ferrotorch_optim::scheduler::MetricScheduler"
+reason = "implicit"
+note = "Exercised by reduce_lr_on_plateau_matches_reference via MetricScheduler<f32>::step."
+
+# SequentialLr and cosine_warmup_scheduler — tested by unit tests in scheduler/mod.rs;
+# no separate reference fixture needed (behaviour is compositional, not a PyTorch primitive).
+[[exclusion]]
+path = "ferrotorch_optim::scheduler::SequentialLr"
+reason = "implicit"
+note = "Covered by unit tests in src/scheduler/mod.rs; no torch.optim.lr_scheduler counterpart to fixture against."
+
+[[exclusion]]
+path = "ferrotorch_optim::scheduler::SequentialLr::new"
+reason = "implicit"
+note = "Implicit via SequentialLr unit tests."
+
+[[exclusion]]
+path = "ferrotorch_optim::scheduler::cosine_warmup_scheduler"
+reason = "implicit"
+note = "Covered by unit tests in src/scheduler/mod.rs; convenience wrapper over LinearWarmup + CosineAnnealingLR, both of which have fixture tests."
+
+# Per-struct get_lr methods — all verified implicitly: StepLR::get_lr is called
+# directly in step_lr_matches_reference; all others are covered by LrScheduler::get_lr.
+[[exclusion]]
+path = "ferrotorch_optim::scheduler::StepLR::get_lr"
+reason = "implicit"
+note = "Explicitly called in step_lr_matches_reference (sched.get_lr() assertion)."
+
+[[exclusion]]
+path = "ferrotorch_optim::scheduler::MultiStepLR::get_lr"
+reason = "implicit"
+note = "Covered by LrScheduler::get_lr via trait dispatch in multi_step_lr_matches_reference."
+
+[[exclusion]]
+path = "ferrotorch_optim::scheduler::ExponentialLR::get_lr"
+reason = "implicit"
+note = "Covered by LrScheduler::get_lr via trait dispatch."
+
+[[exclusion]]
+path = "ferrotorch_optim::scheduler::CosineAnnealingLR::get_lr"
+reason = "implicit"
+note = "Covered by LrScheduler::get_lr via trait dispatch."
+
+[[exclusion]]
+path = "ferrotorch_optim::scheduler::CosineAnnealingWarmRestarts::get_lr"
+reason = "implicit"
+note = "Covered by LrScheduler::get_lr via trait dispatch."
+
+[[exclusion]]
+path = "ferrotorch_optim::scheduler::CyclicLR::get_lr"
+reason = "implicit"
+note = "Covered by LrScheduler::get_lr via trait dispatch."
+
+[[exclusion]]
+path = "ferrotorch_optim::scheduler::OneCycleLR::get_lr"
+reason = "implicit"
+note = "Covered by LrScheduler::get_lr via trait dispatch."
+
+[[exclusion]]
+path = "ferrotorch_optim::scheduler::PolynomialLR::get_lr"
+reason = "implicit"
+note = "Covered by LrScheduler::get_lr via trait dispatch."
+
+[[exclusion]]
+path = "ferrotorch_optim::scheduler::ConstantLR::get_lr"
+reason = "implicit"
+note = "Covered by LrScheduler::get_lr via trait dispatch."
+
+[[exclusion]]
+path = "ferrotorch_optim::scheduler::LinearLR::get_lr"
+reason = "implicit"
+note = "Covered by LrScheduler::get_lr via trait dispatch."
+
+[[exclusion]]
+path = "ferrotorch_optim::scheduler::LinearWarmup::get_lr"
+reason = "implicit"
+note = "Covered by LrScheduler::get_lr via trait dispatch."
+
+[[exclusion]]
+path = "ferrotorch_optim::scheduler::ReduceLROnPlateau::get_lr"
+reason = "implicit"
+note = "Covered by MetricScheduler<f32>::step assertions in reduce_lr_on_plateau_matches_reference."
+
+# Enum variants — structural; type identity verified by the match arms in conformance tests
+[[exclusion]]
+path = "ferrotorch_optim::scheduler::CyclicMode"
+reason = "structural"
+note = "Enum used in cyclic_lr_matches_reference fixture loop (Triangular and Triangular2 variants exercised)."
+
+[[exclusion]]
+path = "ferrotorch_optim::scheduler::AnnealStrategy"
+reason = "structural"
+note = "Enum used in one_cycle_lr_matches_reference (Cos and Linear variants exercised)."
+
+[[exclusion]]
+path = "ferrotorch_optim::scheduler::PlateauMode"
+reason = "structural"
+note = "Enum used in reduce_lr_on_plateau_matches_reference (Min mode)."
+
+# ReduceLROnPlateau builder methods — min_lr is not called in fixture tests because
+# the fixture scenarios don't require a floor; covered by unit tests in scheduler/plateau.rs
+[[exclusion]]
+path = "ferrotorch_optim::scheduler::ReduceLROnPlateau::min_lr"
+reason = "implicit"
+note = "Builder setter tested in unit tests (test_plateau_respects_min_lr). Not needed in fixture tests whose metrics don't approach zero."
+
+# Closure-based schedulers — cannot be pinned to a static reference fixture because
+# behaviour depends on a user-supplied closure at construction time.
+[[exclusion]]
+path = "ferrotorch_optim::scheduler::LambdaLR"
+reason = "implicit"
+note = "User-closure scheduler; no torch.optim.lr_scheduler.LambdaLR reference sequence is reproducible without fixing the closure. Unit tests in src/scheduler/lambda_lr.rs cover correctness."
+
+[[exclusion]]
+path = "ferrotorch_optim::scheduler::LambdaLR::new"
+reason = "implicit"
+note = "Implicit via LambdaLR unit tests."
+
+[[exclusion]]
+path = "ferrotorch_optim::scheduler::LambdaLR::get_lr"
+reason = "implicit"
+note = "Implicit via LambdaLR unit tests."
+
+[[exclusion]]
+path = "ferrotorch_optim::scheduler::MultiplicativeLR"
+reason = "implicit"
+note = "User-closure scheduler; same rationale as LambdaLR. Unit tests in src/scheduler/multiplicative_lr.rs."
+
+[[exclusion]]
+path = "ferrotorch_optim::scheduler::MultiplicativeLR::new"
+reason = "implicit"
+note = "Implicit via MultiplicativeLR unit tests."
+
+[[exclusion]]
+path = "ferrotorch_optim::scheduler::MultiplicativeLR::get_lr"
+reason = "implicit"
+note = "Implicit via MultiplicativeLR unit tests."
+
+[[exclusion]]
+path = "ferrotorch_optim::scheduler::ChainedScheduler"
+reason = "implicit"
+note = "Compositional wrapper; no distinct reference sequence beyond the component schedulers already tested. Unit tests in src/scheduler/chained_scheduler.rs."
+
+[[exclusion]]
+path = "ferrotorch_optim::scheduler::ChainedScheduler::new"
+reason = "implicit"
+note = "Implicit via ChainedScheduler unit tests."
+
+[[exclusion]]
+path = "ferrotorch_optim::scheduler::ChainedScheduler::len"
+reason = "implicit"
+note = "Trivial length accessor; implicit via ChainedScheduler unit tests."
+
+[[exclusion]]
+path = "ferrotorch_optim::scheduler::ChainedScheduler::is_empty"
+reason = "implicit"
+note = "Trivial predicate derived from len(); implicit via ChainedScheduler unit tests."

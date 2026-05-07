@@ -1,0 +1,1494 @@
+# Surface inventory for ferrotorch-optim
+# Generated for C6.1 (SGD-family conformance).
+# C6.2 (Adam-family), C6.3 (misc/utilities), C6.4 (schedulers) will READ this file.
+# DO NOT replace this file in later sub-phases — only extend the
+# [exclusions] sections and add new [item.*] entries as the surface grows.
+#
+# Inventory date: 2026-05-07
+# Total items: 254
+
+# ============================================================
+# Optimizer trait + base types
+# ============================================================
+
+[[item]]
+path = "ferrotorch_optim::optimizer::Optimizer"
+kind = "trait"
+c6_phase = "C6.1"
+
+[[item]]
+path = "ferrotorch_optim::optimizer::Optimizer::step"
+kind = "method"
+c6_phase = "C6.1"
+
+[[item]]
+path = "ferrotorch_optim::optimizer::Optimizer::zero_grad"
+kind = "method"
+c6_phase = "C6.1"
+
+[[item]]
+path = "ferrotorch_optim::optimizer::Optimizer::lr"
+kind = "method"
+c6_phase = "C6.1"
+
+[[item]]
+path = "ferrotorch_optim::optimizer::Optimizer::set_lr"
+kind = "method"
+c6_phase = "C6.1"
+
+[[item]]
+path = "ferrotorch_optim::optimizer::Optimizer::param_groups"
+kind = "method"
+c6_phase = "C6.1"
+
+[[item]]
+path = "ferrotorch_optim::optimizer::Optimizer::param_groups_mut"
+kind = "method"
+c6_phase = "C6.1"
+
+[[item]]
+path = "ferrotorch_optim::optimizer::Optimizer::add_param_group"
+kind = "method"
+c6_phase = "C6.1"
+
+[[item]]
+path = "ferrotorch_optim::optimizer::Optimizer::state_dict"
+kind = "method"
+c6_phase = "C6.1"
+
+[[item]]
+path = "ferrotorch_optim::optimizer::Optimizer::load_state_dict"
+kind = "method"
+c6_phase = "C6.1"
+
+[[item]]
+path = "ferrotorch_optim::optimizer::OptimizerState"
+kind = "type"
+c6_phase = "C6.1"
+
+[[item]]
+path = "ferrotorch_optim::optimizer::ParamGroup"
+kind = "struct"
+c6_phase = "C6.1"
+
+[[item]]
+path = "ferrotorch_optim::optimizer::ParamGroup::new"
+kind = "fn"
+c6_phase = "C6.1"
+
+[[item]]
+path = "ferrotorch_optim::optimizer::ParamGroup::with_weight_decay"
+kind = "fn"
+c6_phase = "C6.1"
+
+[[item]]
+path = "ferrotorch_optim::optimizer::ParamGroup::params"
+kind = "fn"
+c6_phase = "C6.1"
+
+[[item]]
+path = "ferrotorch_optim::optimizer::ParamGroup::add_param"
+kind = "fn"
+c6_phase = "C6.1"
+
+# ============================================================
+# SGD
+# ============================================================
+
+[[item]]
+path = "ferrotorch_optim::sgd::SgdConfig"
+kind = "struct"
+c6_phase = "C6.1"
+
+[[item]]
+path = "ferrotorch_optim::sgd::SgdConfig::new"
+kind = "fn"
+c6_phase = "C6.1"
+
+[[item]]
+path = "ferrotorch_optim::sgd::SgdConfig::foreach"
+kind = "fn"
+c6_phase = "C6.1"
+
+[[item]]
+path = "ferrotorch_optim::sgd::SgdConfig::momentum"
+kind = "fn"
+c6_phase = "C6.1"
+
+[[item]]
+path = "ferrotorch_optim::sgd::SgdConfig::dampening"
+kind = "fn"
+c6_phase = "C6.1"
+
+[[item]]
+path = "ferrotorch_optim::sgd::SgdConfig::weight_decay"
+kind = "fn"
+c6_phase = "C6.1"
+
+[[item]]
+path = "ferrotorch_optim::sgd::SgdConfig::nesterov"
+kind = "fn"
+c6_phase = "C6.1"
+
+[[item]]
+path = "ferrotorch_optim::sgd::SgdConfig::with_lr"
+kind = "fn"
+c6_phase = "C6.1"
+
+[[item]]
+path = "ferrotorch_optim::sgd::SgdConfig::with_momentum"
+kind = "fn"
+c6_phase = "C6.1"
+
+[[item]]
+path = "ferrotorch_optim::sgd::SgdConfig::with_dampening"
+kind = "fn"
+c6_phase = "C6.1"
+
+[[item]]
+path = "ferrotorch_optim::sgd::SgdConfig::with_weight_decay"
+kind = "fn"
+c6_phase = "C6.1"
+
+[[item]]
+path = "ferrotorch_optim::sgd::SgdConfig::with_nesterov"
+kind = "fn"
+c6_phase = "C6.1"
+
+[[item]]
+path = "ferrotorch_optim::sgd::SgdConfig::with_maximize"
+kind = "fn"
+c6_phase = "C6.1"
+
+[[item]]
+path = "ferrotorch_optim::sgd::SgdConfig::with_foreach"
+kind = "fn"
+c6_phase = "C6.1"
+
+[[item]]
+path = "ferrotorch_optim::sgd::Sgd"
+kind = "struct"
+c6_phase = "C6.1"
+
+[[item]]
+path = "ferrotorch_optim::sgd::Sgd::new"
+kind = "fn"
+c6_phase = "C6.1"
+
+# ============================================================
+# Adagrad
+# ============================================================
+
+[[item]]
+path = "ferrotorch_optim::adagrad::AdagradConfig"
+kind = "struct"
+c6_phase = "C6.1"
+
+[[item]]
+path = "ferrotorch_optim::adagrad::AdagradConfig::with_lr"
+kind = "fn"
+c6_phase = "C6.1"
+
+[[item]]
+path = "ferrotorch_optim::adagrad::AdagradConfig::with_lr_decay"
+kind = "fn"
+c6_phase = "C6.1"
+
+[[item]]
+path = "ferrotorch_optim::adagrad::AdagradConfig::with_weight_decay"
+kind = "fn"
+c6_phase = "C6.1"
+
+[[item]]
+path = "ferrotorch_optim::adagrad::AdagradConfig::with_initial_accumulator_value"
+kind = "fn"
+c6_phase = "C6.1"
+
+[[item]]
+path = "ferrotorch_optim::adagrad::AdagradConfig::with_eps"
+kind = "fn"
+c6_phase = "C6.1"
+
+[[item]]
+path = "ferrotorch_optim::adagrad::AdagradConfig::with_maximize"
+kind = "fn"
+c6_phase = "C6.1"
+
+[[item]]
+path = "ferrotorch_optim::adagrad::AdagradConfig::with_foreach"
+kind = "fn"
+c6_phase = "C6.1"
+
+[[item]]
+path = "ferrotorch_optim::adagrad::Adagrad"
+kind = "struct"
+c6_phase = "C6.1"
+
+[[item]]
+path = "ferrotorch_optim::adagrad::Adagrad::new"
+kind = "fn"
+c6_phase = "C6.1"
+
+[[item]]
+path = "ferrotorch_optim::adagrad::Adagrad::from_params"
+kind = "fn"
+c6_phase = "C6.1"
+
+# ============================================================
+# ASGD
+# ============================================================
+
+[[item]]
+path = "ferrotorch_optim::asgd::AsgdConfig"
+kind = "struct"
+c6_phase = "C6.1"
+
+[[item]]
+path = "ferrotorch_optim::asgd::AsgdConfig::with_lr"
+kind = "fn"
+c6_phase = "C6.1"
+
+[[item]]
+path = "ferrotorch_optim::asgd::AsgdConfig::with_lambd"
+kind = "fn"
+c6_phase = "C6.1"
+
+[[item]]
+path = "ferrotorch_optim::asgd::AsgdConfig::with_alpha"
+kind = "fn"
+c6_phase = "C6.1"
+
+[[item]]
+path = "ferrotorch_optim::asgd::AsgdConfig::with_t0"
+kind = "fn"
+c6_phase = "C6.1"
+
+[[item]]
+path = "ferrotorch_optim::asgd::AsgdConfig::with_weight_decay"
+kind = "fn"
+c6_phase = "C6.1"
+
+[[item]]
+path = "ferrotorch_optim::asgd::AsgdConfig::with_foreach"
+kind = "fn"
+c6_phase = "C6.1"
+
+[[item]]
+path = "ferrotorch_optim::asgd::Asgd"
+kind = "struct"
+c6_phase = "C6.1"
+
+[[item]]
+path = "ferrotorch_optim::asgd::Asgd::new"
+kind = "fn"
+c6_phase = "C6.1"
+
+[[item]]
+path = "ferrotorch_optim::asgd::Asgd::averaged_param"
+kind = "fn"
+c6_phase = "C6.1"
+
+# ============================================================
+# Rprop
+# ============================================================
+
+[[item]]
+path = "ferrotorch_optim::rprop::RpropConfig"
+kind = "struct"
+c6_phase = "C6.1"
+
+[[item]]
+path = "ferrotorch_optim::rprop::RpropConfig::with_lr"
+kind = "fn"
+c6_phase = "C6.1"
+
+[[item]]
+path = "ferrotorch_optim::rprop::RpropConfig::with_etas"
+kind = "fn"
+c6_phase = "C6.1"
+
+[[item]]
+path = "ferrotorch_optim::rprop::RpropConfig::with_step_sizes"
+kind = "fn"
+c6_phase = "C6.1"
+
+[[item]]
+path = "ferrotorch_optim::rprop::Rprop"
+kind = "struct"
+c6_phase = "C6.1"
+
+[[item]]
+path = "ferrotorch_optim::rprop::Rprop::new"
+kind = "fn"
+c6_phase = "C6.1"
+
+# ============================================================
+# RMSprop
+# ============================================================
+
+[[item]]
+path = "ferrotorch_optim::rmsprop::RmspropConfig"
+kind = "struct"
+c6_phase = "C6.1"
+
+[[item]]
+path = "ferrotorch_optim::rmsprop::RmspropConfig::with_lr"
+kind = "fn"
+c6_phase = "C6.1"
+
+[[item]]
+path = "ferrotorch_optim::rmsprop::RmspropConfig::with_alpha"
+kind = "fn"
+c6_phase = "C6.1"
+
+[[item]]
+path = "ferrotorch_optim::rmsprop::RmspropConfig::with_eps"
+kind = "fn"
+c6_phase = "C6.1"
+
+[[item]]
+path = "ferrotorch_optim::rmsprop::RmspropConfig::with_weight_decay"
+kind = "fn"
+c6_phase = "C6.1"
+
+[[item]]
+path = "ferrotorch_optim::rmsprop::RmspropConfig::with_momentum"
+kind = "fn"
+c6_phase = "C6.1"
+
+[[item]]
+path = "ferrotorch_optim::rmsprop::RmspropConfig::with_centered"
+kind = "fn"
+c6_phase = "C6.1"
+
+[[item]]
+path = "ferrotorch_optim::rmsprop::RmspropConfig::with_maximize"
+kind = "fn"
+c6_phase = "C6.1"
+
+[[item]]
+path = "ferrotorch_optim::rmsprop::RmspropConfig::with_foreach"
+kind = "fn"
+c6_phase = "C6.1"
+
+[[item]]
+path = "ferrotorch_optim::rmsprop::Rmsprop"
+kind = "struct"
+c6_phase = "C6.1"
+
+[[item]]
+path = "ferrotorch_optim::rmsprop::Rmsprop::new"
+kind = "fn"
+c6_phase = "C6.1"
+
+[[item]]
+path = "ferrotorch_optim::rmsprop::Rmsprop::new_with_groups"
+kind = "fn"
+c6_phase = "C6.1"
+
+# ============================================================
+# Adam-family (stubs — C6.2 will fill in conformance tests)
+# ============================================================
+
+[[item]]
+path = "ferrotorch_optim::adam::AdamConfig"
+kind = "struct"
+c6_phase = "C6.2"
+
+[[item]]
+path = "ferrotorch_optim::adam::AdamConfig::with_lr"
+kind = "fn"
+c6_phase = "C6.2"
+
+[[item]]
+path = "ferrotorch_optim::adam::AdamConfig::with_betas"
+kind = "fn"
+c6_phase = "C6.2"
+
+[[item]]
+path = "ferrotorch_optim::adam::AdamConfig::with_eps"
+kind = "fn"
+c6_phase = "C6.2"
+
+[[item]]
+path = "ferrotorch_optim::adam::AdamConfig::with_weight_decay"
+kind = "fn"
+c6_phase = "C6.2"
+
+[[item]]
+path = "ferrotorch_optim::adam::AdamConfig::with_amsgrad"
+kind = "fn"
+c6_phase = "C6.2"
+
+[[item]]
+path = "ferrotorch_optim::adam::AdamConfig::with_maximize"
+kind = "fn"
+c6_phase = "C6.2"
+
+[[item]]
+path = "ferrotorch_optim::adam::AdamConfig::with_foreach"
+kind = "fn"
+c6_phase = "C6.2"
+
+[[item]]
+path = "ferrotorch_optim::adam::Adam"
+kind = "struct"
+c6_phase = "C6.2"
+
+[[item]]
+path = "ferrotorch_optim::adam::Adam::new"
+kind = "fn"
+c6_phase = "C6.2"
+
+[[item]]
+path = "ferrotorch_optim::adamw::AdamWConfig"
+kind = "struct"
+c6_phase = "C6.2"
+
+[[item]]
+path = "ferrotorch_optim::adamw::AdamWConfig::with_lr"
+kind = "fn"
+c6_phase = "C6.2"
+
+[[item]]
+path = "ferrotorch_optim::adamw::AdamWConfig::with_betas"
+kind = "fn"
+c6_phase = "C6.2"
+
+[[item]]
+path = "ferrotorch_optim::adamw::AdamWConfig::with_eps"
+kind = "fn"
+c6_phase = "C6.2"
+
+[[item]]
+path = "ferrotorch_optim::adamw::AdamWConfig::with_weight_decay"
+kind = "fn"
+c6_phase = "C6.2"
+
+[[item]]
+path = "ferrotorch_optim::adamw::AdamWConfig::with_maximize"
+kind = "fn"
+c6_phase = "C6.2"
+
+[[item]]
+path = "ferrotorch_optim::adamw::AdamWConfig::with_foreach"
+kind = "fn"
+c6_phase = "C6.2"
+
+[[item]]
+path = "ferrotorch_optim::adamw::AdamW"
+kind = "struct"
+c6_phase = "C6.2"
+
+[[item]]
+path = "ferrotorch_optim::adamw::AdamW::new"
+kind = "fn"
+c6_phase = "C6.2"
+
+[[item]]
+path = "ferrotorch_optim::adamw::AdamW::new_with_groups"
+kind = "fn"
+c6_phase = "C6.2"
+
+[[item]]
+path = "ferrotorch_optim::adamax::AdamaxConfig"
+kind = "struct"
+c6_phase = "C6.2"
+
+[[item]]
+path = "ferrotorch_optim::adamax::AdamaxConfig::with_lr"
+kind = "fn"
+c6_phase = "C6.2"
+
+[[item]]
+path = "ferrotorch_optim::adamax::AdamaxConfig::with_betas"
+kind = "fn"
+c6_phase = "C6.2"
+
+[[item]]
+path = "ferrotorch_optim::adamax::AdamaxConfig::with_eps"
+kind = "fn"
+c6_phase = "C6.2"
+
+[[item]]
+path = "ferrotorch_optim::adamax::AdamaxConfig::with_weight_decay"
+kind = "fn"
+c6_phase = "C6.2"
+
+[[item]]
+path = "ferrotorch_optim::adamax::AdamaxConfig::with_foreach"
+kind = "fn"
+c6_phase = "C6.2"
+
+[[item]]
+path = "ferrotorch_optim::adamax::Adamax"
+kind = "struct"
+c6_phase = "C6.2"
+
+[[item]]
+path = "ferrotorch_optim::adamax::Adamax::new"
+kind = "fn"
+c6_phase = "C6.2"
+
+[[item]]
+path = "ferrotorch_optim::nadam::NAdamConfig"
+kind = "struct"
+c6_phase = "C6.2"
+
+[[item]]
+path = "ferrotorch_optim::nadam::NAdamConfig::with_lr"
+kind = "fn"
+c6_phase = "C6.2"
+
+[[item]]
+path = "ferrotorch_optim::nadam::NAdamConfig::with_betas"
+kind = "fn"
+c6_phase = "C6.2"
+
+[[item]]
+path = "ferrotorch_optim::nadam::NAdamConfig::with_eps"
+kind = "fn"
+c6_phase = "C6.2"
+
+[[item]]
+path = "ferrotorch_optim::nadam::NAdamConfig::with_weight_decay"
+kind = "fn"
+c6_phase = "C6.2"
+
+[[item]]
+path = "ferrotorch_optim::nadam::NAdamConfig::with_momentum_decay"
+kind = "fn"
+c6_phase = "C6.2"
+
+[[item]]
+path = "ferrotorch_optim::nadam::NAdamConfig::with_decoupled_weight_decay"
+kind = "fn"
+c6_phase = "C6.2"
+
+[[item]]
+path = "ferrotorch_optim::nadam::NAdamConfig::with_foreach"
+kind = "fn"
+c6_phase = "C6.2"
+
+[[item]]
+path = "ferrotorch_optim::nadam::NAdam"
+kind = "struct"
+c6_phase = "C6.2"
+
+[[item]]
+path = "ferrotorch_optim::nadam::NAdam::new"
+kind = "fn"
+c6_phase = "C6.2"
+
+[[item]]
+path = "ferrotorch_optim::radam::RAdamConfig"
+kind = "struct"
+c6_phase = "C6.2"
+
+[[item]]
+path = "ferrotorch_optim::radam::RAdamConfig::with_lr"
+kind = "fn"
+c6_phase = "C6.2"
+
+[[item]]
+path = "ferrotorch_optim::radam::RAdamConfig::with_betas"
+kind = "fn"
+c6_phase = "C6.2"
+
+[[item]]
+path = "ferrotorch_optim::radam::RAdamConfig::with_eps"
+kind = "fn"
+c6_phase = "C6.2"
+
+[[item]]
+path = "ferrotorch_optim::radam::RAdamConfig::with_weight_decay"
+kind = "fn"
+c6_phase = "C6.2"
+
+[[item]]
+path = "ferrotorch_optim::radam::RAdamConfig::with_decoupled_weight_decay"
+kind = "fn"
+c6_phase = "C6.2"
+
+[[item]]
+path = "ferrotorch_optim::radam::RAdamConfig::with_foreach"
+kind = "fn"
+c6_phase = "C6.2"
+
+[[item]]
+path = "ferrotorch_optim::radam::RAdam"
+kind = "struct"
+c6_phase = "C6.2"
+
+[[item]]
+path = "ferrotorch_optim::radam::RAdam::new"
+kind = "fn"
+c6_phase = "C6.2"
+
+[[item]]
+path = "ferrotorch_optim::sparse_adam::SparseAdamConfig"
+kind = "struct"
+c6_phase = "C6.2"
+
+[[item]]
+path = "ferrotorch_optim::sparse_adam::SparseAdam"
+kind = "struct"
+c6_phase = "C6.2"
+
+[[item]]
+path = "ferrotorch_optim::adadelta::AdadeltaConfig"
+kind = "struct"
+c6_phase = "C6.2"
+
+[[item]]
+path = "ferrotorch_optim::adadelta::AdadeltaConfig::with_lr"
+kind = "fn"
+c6_phase = "C6.2"
+
+[[item]]
+path = "ferrotorch_optim::adadelta::AdadeltaConfig::with_rho"
+kind = "fn"
+c6_phase = "C6.2"
+
+[[item]]
+path = "ferrotorch_optim::adadelta::AdadeltaConfig::with_eps"
+kind = "fn"
+c6_phase = "C6.2"
+
+[[item]]
+path = "ferrotorch_optim::adadelta::AdadeltaConfig::with_weight_decay"
+kind = "fn"
+c6_phase = "C6.2"
+
+[[item]]
+path = "ferrotorch_optim::adadelta::AdadeltaConfig::with_foreach"
+kind = "fn"
+c6_phase = "C6.2"
+
+[[item]]
+path = "ferrotorch_optim::adadelta::Adadelta"
+kind = "struct"
+c6_phase = "C6.2"
+
+[[item]]
+path = "ferrotorch_optim::adadelta::Adadelta::new"
+kind = "fn"
+c6_phase = "C6.2"
+
+[[item]]
+path = "ferrotorch_optim::adafactor::AdafactorConfig"
+kind = "struct"
+c6_phase = "C6.2"
+
+[[item]]
+path = "ferrotorch_optim::adafactor::AdafactorConfig::with_lr"
+kind = "fn"
+c6_phase = "C6.2"
+
+[[item]]
+path = "ferrotorch_optim::adafactor::AdafactorConfig::with_beta1"
+kind = "fn"
+c6_phase = "C6.2"
+
+[[item]]
+path = "ferrotorch_optim::adafactor::AdafactorConfig::with_decay_rate"
+kind = "fn"
+c6_phase = "C6.2"
+
+[[item]]
+path = "ferrotorch_optim::adafactor::AdafactorConfig::with_eps_sq"
+kind = "fn"
+c6_phase = "C6.2"
+
+[[item]]
+path = "ferrotorch_optim::adafactor::AdafactorConfig::with_eps_rms"
+kind = "fn"
+c6_phase = "C6.2"
+
+[[item]]
+path = "ferrotorch_optim::adafactor::AdafactorConfig::with_weight_decay"
+kind = "fn"
+c6_phase = "C6.2"
+
+[[item]]
+path = "ferrotorch_optim::adafactor::AdafactorConfig::with_relative_step"
+kind = "fn"
+c6_phase = "C6.2"
+
+[[item]]
+path = "ferrotorch_optim::adafactor::AdafactorConfig::with_warmup_init"
+kind = "fn"
+c6_phase = "C6.2"
+
+[[item]]
+path = "ferrotorch_optim::adafactor::Adafactor"
+kind = "struct"
+c6_phase = "C6.2"
+
+[[item]]
+path = "ferrotorch_optim::adafactor::Adafactor::new"
+kind = "fn"
+c6_phase = "C6.2"
+
+# ============================================================
+# Muon, LBFGS, natural gradient (C6.3)
+# ============================================================
+
+[[item]]
+path = "ferrotorch_optim::muon::MuonConfig"
+kind = "struct"
+c6_phase = "C6.3"
+
+[[item]]
+path = "ferrotorch_optim::muon::MuonConfig::new"
+kind = "fn"
+c6_phase = "C6.3"
+
+[[item]]
+path = "ferrotorch_optim::muon::MuonConfig::momentum"
+kind = "fn"
+c6_phase = "C6.3"
+
+[[item]]
+path = "ferrotorch_optim::muon::MuonConfig::nesterov"
+kind = "fn"
+c6_phase = "C6.3"
+
+[[item]]
+path = "ferrotorch_optim::muon::MuonConfig::ns_steps"
+kind = "fn"
+c6_phase = "C6.3"
+
+[[item]]
+path = "ferrotorch_optim::muon::MuonConfig::weight_decay"
+kind = "fn"
+c6_phase = "C6.3"
+
+[[item]]
+path = "ferrotorch_optim::muon::MuonConfig::with_lr"
+kind = "fn"
+c6_phase = "C6.3"
+
+[[item]]
+path = "ferrotorch_optim::muon::MuonConfig::with_momentum"
+kind = "fn"
+c6_phase = "C6.3"
+
+[[item]]
+path = "ferrotorch_optim::muon::MuonConfig::with_nesterov"
+kind = "fn"
+c6_phase = "C6.3"
+
+[[item]]
+path = "ferrotorch_optim::muon::MuonConfig::with_ns_steps"
+kind = "fn"
+c6_phase = "C6.3"
+
+[[item]]
+path = "ferrotorch_optim::muon::MuonConfig::with_weight_decay"
+kind = "fn"
+c6_phase = "C6.3"
+
+[[item]]
+path = "ferrotorch_optim::muon::MuonConfig::with_maximize"
+kind = "fn"
+c6_phase = "C6.3"
+
+[[item]]
+path = "ferrotorch_optim::muon::Muon"
+kind = "struct"
+c6_phase = "C6.3"
+
+[[item]]
+path = "ferrotorch_optim::muon::Muon::new"
+kind = "fn"
+c6_phase = "C6.3"
+
+[[item]]
+path = "ferrotorch_optim::lbfgs::LineSearchFn"
+kind = "enum"
+c6_phase = "C6.3"
+
+[[item]]
+path = "ferrotorch_optim::lbfgs::LbfgsConfig"
+kind = "struct"
+c6_phase = "C6.3"
+
+[[item]]
+path = "ferrotorch_optim::lbfgs::LbfgsConfig::with_lr"
+kind = "fn"
+c6_phase = "C6.3"
+
+[[item]]
+path = "ferrotorch_optim::lbfgs::LbfgsConfig::with_max_iter"
+kind = "fn"
+c6_phase = "C6.3"
+
+[[item]]
+path = "ferrotorch_optim::lbfgs::LbfgsConfig::with_max_eval"
+kind = "fn"
+c6_phase = "C6.3"
+
+[[item]]
+path = "ferrotorch_optim::lbfgs::LbfgsConfig::with_tolerance_grad"
+kind = "fn"
+c6_phase = "C6.3"
+
+[[item]]
+path = "ferrotorch_optim::lbfgs::LbfgsConfig::with_tolerance_change"
+kind = "fn"
+c6_phase = "C6.3"
+
+[[item]]
+path = "ferrotorch_optim::lbfgs::LbfgsConfig::with_history_size"
+kind = "fn"
+c6_phase = "C6.3"
+
+[[item]]
+path = "ferrotorch_optim::lbfgs::LbfgsConfig::with_line_search_fn"
+kind = "fn"
+c6_phase = "C6.3"
+
+[[item]]
+path = "ferrotorch_optim::lbfgs::LbfgsConfig::with_maximize"
+kind = "fn"
+c6_phase = "C6.3"
+
+[[item]]
+path = "ferrotorch_optim::lbfgs::Lbfgs"
+kind = "struct"
+c6_phase = "C6.3"
+
+[[item]]
+path = "ferrotorch_optim::natural_gradient::KfacConfig"
+kind = "struct"
+c6_phase = "C6.3"
+
+[[item]]
+path = "ferrotorch_optim::natural_gradient::KfacConfig::with_lr"
+kind = "fn"
+c6_phase = "C6.3"
+
+[[item]]
+path = "ferrotorch_optim::natural_gradient::KfacConfig::with_damping"
+kind = "fn"
+c6_phase = "C6.3"
+
+[[item]]
+path = "ferrotorch_optim::natural_gradient::KfacConfig::with_momentum"
+kind = "fn"
+c6_phase = "C6.3"
+
+[[item]]
+path = "ferrotorch_optim::natural_gradient::KfacConfig::with_update_freq"
+kind = "fn"
+c6_phase = "C6.3"
+
+[[item]]
+path = "ferrotorch_optim::natural_gradient::KfacConfig::with_weight_decay"
+kind = "fn"
+c6_phase = "C6.3"
+
+[[item]]
+path = "ferrotorch_optim::natural_gradient::KfacConfig::with_maximize"
+kind = "fn"
+c6_phase = "C6.3"
+
+[[item]]
+path = "ferrotorch_optim::natural_gradient::Kfac"
+kind = "struct"
+c6_phase = "C6.3"
+
+[[item]]
+path = "ferrotorch_optim::natural_gradient::Kfac::new"
+kind = "fn"
+c6_phase = "C6.3"
+
+[[item]]
+path = "ferrotorch_optim::natural_gradient::Kfac::update_factors"
+kind = "fn"
+c6_phase = "C6.3"
+
+[[item]]
+path = "ferrotorch_optim::ema::ExponentialMovingAverage"
+kind = "struct"
+c6_phase = "C6.3"
+
+[[item]]
+path = "ferrotorch_optim::ema::ExponentialMovingAverage::new"
+kind = "fn"
+c6_phase = "C6.3"
+
+[[item]]
+path = "ferrotorch_optim::ema::ExponentialMovingAverage::with_foreach"
+kind = "fn"
+c6_phase = "C6.3"
+
+[[item]]
+path = "ferrotorch_optim::ema::ExponentialMovingAverage::with_decay_warmup"
+kind = "fn"
+c6_phase = "C6.3"
+
+[[item]]
+path = "ferrotorch_optim::ema::ExponentialMovingAverage::decay"
+kind = "fn"
+c6_phase = "C6.3"
+
+[[item]]
+path = "ferrotorch_optim::ema::ExponentialMovingAverage::num_updates"
+kind = "fn"
+c6_phase = "C6.3"
+
+[[item]]
+path = "ferrotorch_optim::ema::ExponentialMovingAverage::update"
+kind = "fn"
+c6_phase = "C6.3"
+
+[[item]]
+path = "ferrotorch_optim::ema::ExponentialMovingAverage::apply_shadow"
+kind = "fn"
+c6_phase = "C6.3"
+
+[[item]]
+path = "ferrotorch_optim::ema::ExponentialMovingAverage::restore"
+kind = "fn"
+c6_phase = "C6.3"
+
+[[item]]
+path = "ferrotorch_optim::ema::ExponentialMovingAverage::shadow_params"
+kind = "fn"
+c6_phase = "C6.3"
+
+[[item]]
+path = "ferrotorch_optim::ema::ExponentialMovingAverage::shadow_values"
+kind = "fn"
+c6_phase = "C6.3"
+
+[[item]]
+path = "ferrotorch_optim::swa::AveragingStrategy"
+kind = "enum"
+c6_phase = "C6.3"
+
+[[item]]
+path = "ferrotorch_optim::swa::AveragedModel"
+kind = "struct"
+c6_phase = "C6.3"
+
+[[item]]
+path = "ferrotorch_optim::swa::AveragedModel::new"
+kind = "fn"
+c6_phase = "C6.3"
+
+[[item]]
+path = "ferrotorch_optim::swa::AveragedModel::with_foreach"
+kind = "fn"
+c6_phase = "C6.3"
+
+[[item]]
+path = "ferrotorch_optim::swa::AveragedModel::n_averaged"
+kind = "fn"
+c6_phase = "C6.3"
+
+[[item]]
+path = "ferrotorch_optim::swa::AveragedModel::strategy"
+kind = "fn"
+c6_phase = "C6.3"
+
+[[item]]
+path = "ferrotorch_optim::swa::AveragedModel::averaged_params"
+kind = "fn"
+c6_phase = "C6.3"
+
+[[item]]
+path = "ferrotorch_optim::swa::AveragedModel::averaged_values"
+kind = "fn"
+c6_phase = "C6.3"
+
+[[item]]
+path = "ferrotorch_optim::swa::AveragedModel::update_parameters"
+kind = "fn"
+c6_phase = "C6.3"
+
+[[item]]
+path = "ferrotorch_optim::swa::AveragedModel::apply_to"
+kind = "fn"
+c6_phase = "C6.3"
+
+[[item]]
+path = "ferrotorch_optim::swa::AnnealStrategy"
+kind = "enum"
+c6_phase = "C6.3"
+
+[[item]]
+path = "ferrotorch_optim::swa::Swalr"
+kind = "struct"
+c6_phase = "C6.3"
+
+[[item]]
+path = "ferrotorch_optim::swa::Swalr::new"
+kind = "fn"
+c6_phase = "C6.3"
+
+[[item]]
+path = "ferrotorch_optim::swa::Swalr::swa_lr"
+kind = "fn"
+c6_phase = "C6.3"
+
+[[item]]
+path = "ferrotorch_optim::swa::Swalr::anneal_epochs"
+kind = "fn"
+c6_phase = "C6.3"
+
+[[item]]
+path = "ferrotorch_optim::grad_accumulator::GradientAccumulator"
+kind = "struct"
+c6_phase = "C6.3"
+
+[[item]]
+path = "ferrotorch_optim::grad_accumulator::GradientAccumulator::new"
+kind = "fn"
+c6_phase = "C6.3"
+
+[[item]]
+path = "ferrotorch_optim::grad_accumulator::GradientAccumulator::should_step"
+kind = "fn"
+c6_phase = "C6.3"
+
+[[item]]
+path = "ferrotorch_optim::grad_accumulator::GradientAccumulator::scale_loss"
+kind = "fn"
+c6_phase = "C6.3"
+
+[[item]]
+path = "ferrotorch_optim::grad_accumulator::GradientAccumulator::accumulation_steps"
+kind = "fn"
+c6_phase = "C6.3"
+
+[[item]]
+path = "ferrotorch_optim::grad_accumulator::GradientAccumulator::current_step"
+kind = "fn"
+c6_phase = "C6.3"
+
+[[item]]
+path = "ferrotorch_optim::grad_accumulator::GradientAccumulator::reset"
+kind = "fn"
+c6_phase = "C6.3"
+
+[[item]]
+path = "ferrotorch_optim::grad_scaler::GradScalerConfig"
+kind = "struct"
+c6_phase = "C6.3"
+
+[[item]]
+path = "ferrotorch_optim::grad_scaler::GradScalerConfig::with_init_scale"
+kind = "fn"
+c6_phase = "C6.3"
+
+[[item]]
+path = "ferrotorch_optim::grad_scaler::GradScalerConfig::with_growth_factor"
+kind = "fn"
+c6_phase = "C6.3"
+
+[[item]]
+path = "ferrotorch_optim::grad_scaler::GradScalerConfig::with_backoff_factor"
+kind = "fn"
+c6_phase = "C6.3"
+
+[[item]]
+path = "ferrotorch_optim::grad_scaler::GradScalerConfig::with_growth_interval"
+kind = "fn"
+c6_phase = "C6.3"
+
+[[item]]
+path = "ferrotorch_optim::grad_scaler::GradScalerConfig::with_enabled"
+kind = "fn"
+c6_phase = "C6.3"
+
+[[item]]
+path = "ferrotorch_optim::grad_scaler::GradScalerState"
+kind = "struct"
+c6_phase = "C6.3"
+
+[[item]]
+path = "ferrotorch_optim::grad_scaler::GradScaler"
+kind = "struct"
+c6_phase = "C6.3"
+
+[[item]]
+path = "ferrotorch_optim::grad_scaler::GradScaler::new"
+kind = "fn"
+c6_phase = "C6.3"
+
+[[item]]
+path = "ferrotorch_optim::grad_scaler::GradScaler::scale"
+kind = "fn"
+c6_phase = "C6.3"
+
+[[item]]
+path = "ferrotorch_optim::grad_scaler::GradScaler::unscale_"
+kind = "fn"
+c6_phase = "C6.3"
+
+[[item]]
+path = "ferrotorch_optim::grad_scaler::GradScaler::step"
+kind = "fn"
+c6_phase = "C6.3"
+
+[[item]]
+path = "ferrotorch_optim::grad_scaler::GradScaler::update"
+kind = "fn"
+c6_phase = "C6.3"
+
+[[item]]
+path = "ferrotorch_optim::grad_scaler::GradScaler::get_scale"
+kind = "fn"
+c6_phase = "C6.3"
+
+[[item]]
+path = "ferrotorch_optim::grad_scaler::GradScaler::is_enabled"
+kind = "fn"
+c6_phase = "C6.3"
+
+[[item]]
+path = "ferrotorch_optim::grad_scaler::GradScaler::state_dict"
+kind = "fn"
+c6_phase = "C6.3"
+
+[[item]]
+path = "ferrotorch_optim::grad_scaler::GradScaler::load_state_dict"
+kind = "fn"
+c6_phase = "C6.3"
+
+[[item]]
+path = "ferrotorch_optim::differentiable::DiffSgdMomentumOutput"
+kind = "type"
+c6_phase = "C6.3"
+
+[[item]]
+path = "ferrotorch_optim::differentiable::diff_sgd_step"
+kind = "fn"
+c6_phase = "C6.3"
+
+[[item]]
+path = "ferrotorch_optim::differentiable::diff_sgd_momentum_step"
+kind = "fn"
+c6_phase = "C6.3"
+
+[[item]]
+path = "ferrotorch_optim::foreach_utils::elemwise_max"
+kind = "fn"
+c6_phase = "C6.3"
+
+[[item]]
+path = "ferrotorch_optim::foreach_utils::scalar_on"
+kind = "fn"
+c6_phase = "C6.3"
+
+[[item]]
+path = "ferrotorch_optim::foreach_utils::f64_scalar_on"
+kind = "fn"
+c6_phase = "C6.3"
+
+# ============================================================
+# Schedulers (C6.4)
+# ============================================================
+
+[[item]]
+path = "ferrotorch_optim::scheduler::LrScheduler"
+kind = "trait"
+c6_phase = "C6.4"
+
+[[item]]
+path = "ferrotorch_optim::scheduler::LrScheduler::step"
+kind = "method"
+c6_phase = "C6.4"
+
+[[item]]
+path = "ferrotorch_optim::scheduler::LrScheduler::get_lr"
+kind = "method"
+c6_phase = "C6.4"
+
+[[item]]
+path = "ferrotorch_optim::scheduler::MetricScheduler"
+kind = "trait"
+c6_phase = "C6.4"
+
+[[item]]
+path = "ferrotorch_optim::scheduler::SequentialLr"
+kind = "struct"
+c6_phase = "C6.4"
+
+[[item]]
+path = "ferrotorch_optim::scheduler::SequentialLr::new"
+kind = "fn"
+c6_phase = "C6.4"
+
+[[item]]
+path = "ferrotorch_optim::scheduler::cosine_warmup_scheduler"
+kind = "fn"
+c6_phase = "C6.4"
+
+[[item]]
+path = "ferrotorch_optim::scheduler::StepLR"
+kind = "struct"
+c6_phase = "C6.4"
+
+[[item]]
+path = "ferrotorch_optim::scheduler::StepLR::new"
+kind = "fn"
+c6_phase = "C6.4"
+
+[[item]]
+path = "ferrotorch_optim::scheduler::StepLR::get_lr"
+kind = "fn"
+c6_phase = "C6.4"
+
+[[item]]
+path = "ferrotorch_optim::scheduler::MultiStepLR"
+kind = "struct"
+c6_phase = "C6.4"
+
+[[item]]
+path = "ferrotorch_optim::scheduler::MultiStepLR::new"
+kind = "fn"
+c6_phase = "C6.4"
+
+[[item]]
+path = "ferrotorch_optim::scheduler::MultiStepLR::get_lr"
+kind = "fn"
+c6_phase = "C6.4"
+
+[[item]]
+path = "ferrotorch_optim::scheduler::ExponentialLR"
+kind = "struct"
+c6_phase = "C6.4"
+
+[[item]]
+path = "ferrotorch_optim::scheduler::ExponentialLR::new"
+kind = "fn"
+c6_phase = "C6.4"
+
+[[item]]
+path = "ferrotorch_optim::scheduler::ExponentialLR::get_lr"
+kind = "fn"
+c6_phase = "C6.4"
+
+[[item]]
+path = "ferrotorch_optim::scheduler::CosineAnnealingLR"
+kind = "struct"
+c6_phase = "C6.4"
+
+[[item]]
+path = "ferrotorch_optim::scheduler::CosineAnnealingLR::new"
+kind = "fn"
+c6_phase = "C6.4"
+
+[[item]]
+path = "ferrotorch_optim::scheduler::CosineAnnealingLR::get_lr"
+kind = "fn"
+c6_phase = "C6.4"
+
+[[item]]
+path = "ferrotorch_optim::scheduler::CosineAnnealingWarmRestarts"
+kind = "struct"
+c6_phase = "C6.4"
+
+[[item]]
+path = "ferrotorch_optim::scheduler::CosineAnnealingWarmRestarts::new"
+kind = "fn"
+c6_phase = "C6.4"
+
+[[item]]
+path = "ferrotorch_optim::scheduler::CosineAnnealingWarmRestarts::get_lr"
+kind = "fn"
+c6_phase = "C6.4"
+
+[[item]]
+path = "ferrotorch_optim::scheduler::CyclicMode"
+kind = "enum"
+c6_phase = "C6.4"
+
+[[item]]
+path = "ferrotorch_optim::scheduler::CyclicLR"
+kind = "struct"
+c6_phase = "C6.4"
+
+[[item]]
+path = "ferrotorch_optim::scheduler::CyclicLR::new"
+kind = "fn"
+c6_phase = "C6.4"
+
+[[item]]
+path = "ferrotorch_optim::scheduler::CyclicLR::get_lr"
+kind = "fn"
+c6_phase = "C6.4"
+
+[[item]]
+path = "ferrotorch_optim::scheduler::AnnealStrategy"
+kind = "enum"
+c6_phase = "C6.4"
+
+[[item]]
+path = "ferrotorch_optim::scheduler::OneCycleLR"
+kind = "struct"
+c6_phase = "C6.4"
+
+[[item]]
+path = "ferrotorch_optim::scheduler::OneCycleLR::new"
+kind = "fn"
+c6_phase = "C6.4"
+
+[[item]]
+path = "ferrotorch_optim::scheduler::OneCycleLR::get_lr"
+kind = "fn"
+c6_phase = "C6.4"
+
+[[item]]
+path = "ferrotorch_optim::scheduler::PolynomialLR"
+kind = "struct"
+c6_phase = "C6.4"
+
+[[item]]
+path = "ferrotorch_optim::scheduler::PolynomialLR::new"
+kind = "fn"
+c6_phase = "C6.4"
+
+[[item]]
+path = "ferrotorch_optim::scheduler::PolynomialLR::get_lr"
+kind = "fn"
+c6_phase = "C6.4"
+
+[[item]]
+path = "ferrotorch_optim::scheduler::ConstantLR"
+kind = "struct"
+c6_phase = "C6.4"
+
+[[item]]
+path = "ferrotorch_optim::scheduler::ConstantLR::new"
+kind = "fn"
+c6_phase = "C6.4"
+
+[[item]]
+path = "ferrotorch_optim::scheduler::ConstantLR::get_lr"
+kind = "fn"
+c6_phase = "C6.4"
+
+[[item]]
+path = "ferrotorch_optim::scheduler::LinearLR"
+kind = "struct"
+c6_phase = "C6.4"
+
+[[item]]
+path = "ferrotorch_optim::scheduler::LinearLR::new"
+kind = "fn"
+c6_phase = "C6.4"
+
+[[item]]
+path = "ferrotorch_optim::scheduler::LinearLR::get_lr"
+kind = "fn"
+c6_phase = "C6.4"
+
+[[item]]
+path = "ferrotorch_optim::scheduler::LambdaLR"
+kind = "struct"
+c6_phase = "C6.4"
+
+[[item]]
+path = "ferrotorch_optim::scheduler::LambdaLR::new"
+kind = "fn"
+c6_phase = "C6.4"
+
+[[item]]
+path = "ferrotorch_optim::scheduler::LambdaLR::get_lr"
+kind = "fn"
+c6_phase = "C6.4"
+
+[[item]]
+path = "ferrotorch_optim::scheduler::LinearWarmup"
+kind = "struct"
+c6_phase = "C6.4"
+
+[[item]]
+path = "ferrotorch_optim::scheduler::LinearWarmup::new"
+kind = "fn"
+c6_phase = "C6.4"
+
+[[item]]
+path = "ferrotorch_optim::scheduler::LinearWarmup::get_lr"
+kind = "fn"
+c6_phase = "C6.4"
+
+[[item]]
+path = "ferrotorch_optim::scheduler::PlateauMode"
+kind = "enum"
+c6_phase = "C6.4"
+
+[[item]]
+path = "ferrotorch_optim::scheduler::ReduceLROnPlateau"
+kind = "struct"
+c6_phase = "C6.4"
+
+[[item]]
+path = "ferrotorch_optim::scheduler::ReduceLROnPlateau::new"
+kind = "fn"
+c6_phase = "C6.4"
+
+[[item]]
+path = "ferrotorch_optim::scheduler::ReduceLROnPlateau::factor"
+kind = "fn"
+c6_phase = "C6.4"
+
+[[item]]
+path = "ferrotorch_optim::scheduler::ReduceLROnPlateau::patience"
+kind = "fn"
+c6_phase = "C6.4"
+
+[[item]]
+path = "ferrotorch_optim::scheduler::ReduceLROnPlateau::min_lr"
+kind = "fn"
+c6_phase = "C6.4"
+
+[[item]]
+path = "ferrotorch_optim::scheduler::ReduceLROnPlateau::threshold"
+kind = "fn"
+c6_phase = "C6.4"
+
+[[item]]
+path = "ferrotorch_optim::scheduler::ReduceLROnPlateau::get_lr"
+kind = "fn"
+c6_phase = "C6.4"
+
+[[item]]
+path = "ferrotorch_optim::scheduler::MultiplicativeLR"
+kind = "struct"
+c6_phase = "C6.4"
+
+[[item]]
+path = "ferrotorch_optim::scheduler::MultiplicativeLR::new"
+kind = "fn"
+c6_phase = "C6.4"
+
+[[item]]
+path = "ferrotorch_optim::scheduler::MultiplicativeLR::get_lr"
+kind = "fn"
+c6_phase = "C6.4"
+
+[[item]]
+path = "ferrotorch_optim::scheduler::ChainedScheduler"
+kind = "struct"
+c6_phase = "C6.4"
+
+[[item]]
+path = "ferrotorch_optim::scheduler::ChainedScheduler::new"
+kind = "fn"
+c6_phase = "C6.4"
+
+[[item]]
+path = "ferrotorch_optim::scheduler::ChainedScheduler::len"
+kind = "fn"
+c6_phase = "C6.4"
+
+[[item]]
+path = "ferrotorch_optim::scheduler::ChainedScheduler::is_empty"
+kind = "fn"
+c6_phase = "C6.4"

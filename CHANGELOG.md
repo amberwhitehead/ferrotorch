@@ -24,6 +24,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - `ptx_f32_to_f64` converter coverage gaps surfaced by the `_probe_backward_f64.rs` cascade verification: extended the converter (`ferrotorch-gpu/src/kernels.rs`) to handle (a) the `%row_off` register's byte-stride rewrite (`shl.b64 %row_off, %row_off, 2 → 3`) so the f32 → f64 lift of `LAYERNORM_BACKWARD_PTX` and `RMSNORM_BACKWARD_PTX` produces correct stride math, (b) the `*.approx.f32` floats — `rcp.approx.f32`, `div.approx.f32`, `sqrt.approx.f32` — which have no `*.approx.f64` PTX form so the converter promotes them to `*.rn.f64` (correct rounding, no precision loss), and (c) `.target sm_52 → sm_60` because `atom.add.f64.global` (used by the per-column gradient accumulation in layernorm_backward / rmsnorm_backward) requires sm_60+. Also fixed an em-dash character (U+2014) inside a comment in `LOG_SOFTMAX_BACKWARD_F64_PTX` that ptxas rejected as an invalid byte. New `_probe_backward_f64.rs` regression sentinel covering all 13 backward kernels. (#784 cascade)
 
 ### Added
+- Add SGD-family conformance suite for ferrotorch-optim (C6.1) (#881)
 - Added cusparse feature to cudarc workspace dep; cuSPARSE bindings now accessible for P2 SparseTensor::spmm GPU implementation. Workspace `cudarc` features extended from `["cublas", "cusolver", "cufft"]` to `["cublas", "cusolver", "cufft", "cusparse"]`. Compile-time smoke test in `ferrotorch-gpu/src/lib.rs` (`cusparse_smoke::cusparse_handle_type_resolves`) confirms `cudarc::cusparse::sys::cusparseHandle_t` resolves through the workspace dep. No behavioral change yet — P2 will wire SparseTensor::spmm onto cuSPARSE.
 - `_probe_backward_f64.rs` permanent regression sentinel (`ferrotorch-gpu/tests/`): 13 sub-tests exercising every `*_backward_f64` GPU kernel (relu, abs, sigmoid, tanh, gelu, clamp, silu, elu, mish, softmax, log_softmax, layernorm, rmsnorm) against closed-form CPU references. Each test uploads f64 input + grad_output, calls the GPU kernel, and asserts `F64_ELEMENTWISE = 1e-9` (elementwise) or `F64_REDUCTION = 1e-7` (per-row) tolerance vs the CPU formula. Locks in #782's coverage and the converter extensions for #784 cascade.
 - `_probe_pow_f64.rs` strict-tolerance and edge-base sub-tests (`ferrotorch-gpu/tests/`): 7 new tests on top of the 5 existing JIT/value sentinels — `pow_f64_strict_tolerance_{squared,sqrt,reciprocal,cubed_ten}` (asserting against `F64_TRANSCENDENTAL = 1e-10`, replacing the historical 1e-7) and `pow_f64_edge_bases_near_one_{09,15,099_100}` (the worst-case bases that pre-#783 erred ~1.4e-8 to ~9e-6 relative).
@@ -339,6 +340,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - M≤4 cuBLAS bypass: route vector-matrix multiplies through PTX `small_matmul` kernel instead of cuBLAS SGEMM
 
 ### Changed
+- Conformance Buildout C5 — Tier-2 (distributions + vision) (#858)
+- Conformance Buildout C4 — Tier-2 (serialize + distributed) (#847)
+- Conformance Buildout C3 — Tier-2 (train + cubecl + data + llama) (#842)
+- Conformance Buildout C2 — Tier-1 cont (ml + hub) (#838)
+- Conformance Buildout C1 — Tier-1 crates (mps + jit-script + xpu + profiler) (#826)
 - ferrotorch-gpu: gelu_with(None) f64 GPU still ~2e-7 off (A&S 7.1.26 polynomial class limit) — needs higher-degree erf refit per F64_TRANSCENDENTAL = 1e-10 (#823)
 - ferrotorch-core: nested+sparse have no GPU implementation — surfaced by phase 2.8 (#770) (#806)
 - ferrotorch-core: bumped ferray-fft pin to 0.3.8 and retired Hermitian-projection mitigation; ferray-fft 0.3.8 now does the Hermitian projection internally so `project_hermitian_in_place`, `compute_linear_index`, and the two-staged `irfftn` body are removed; conformance unchanged (W4-W6, #808)
