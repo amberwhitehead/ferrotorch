@@ -34,14 +34,14 @@ use ferrotorch_core::grad_fns::activation::{GeluApproximate, gelu_with};
 /// would push beyond this band.
 const F32_TRANSCENDENTAL_GPU: f32 = 1e-4;
 
-/// Post-fix the f64 GPU None lane is bounded by the A&S 7.1.26 polynomial
-/// class limit (~2e-7 worst case across our probe range), not by the
-/// `F64_TRANSCENDENTAL = 1e-10` workspace gate. A degree-11 Chebyshev (or
-/// Cody erfc) refit would push the f64 lane to <1e-12 — tracked as a
-/// follow-up, not in #799 scope. This probe holds the kernel to the
-/// "polynomial-class lower bound" so a regression that re-corrupts the
-/// constants surfaces immediately.
-const F64_GELU_AS_BOUND: f64 = 5e-7;
+/// Post-#823 the f64 GPU None lane meets the workspace `F64_TRANSCENDENTAL
+/// = 1e-10` gate: `GELU_ERF_F64_PTX` and `GELU_BACKWARD_ERF_F64_PTX` were
+/// re-implemented around the SunPro fdlibm piecewise rational (matching
+/// the CPU lane from #792). Empirical residual on the probe range is
+/// ~1e-16 (machine ulp). This probe holds the kernel to the workspace
+/// gate so a regression that re-introduces the A&S 7.1.26 polynomial (or
+/// re-corrupts the fdlibm constants) surfaces immediately.
+const F64_GELU_AS_BOUND: f64 = 1e-10;
 
 static GPU_INIT: Once = Once::new();
 
@@ -154,14 +154,13 @@ fn gpu_gelu_none_f64_matches_cpu() {
         assert!(
             d <= F64_GELU_AS_BOUND,
             "gpu_gelu_none_f64 mismatch at i={i} x={}: gpu={g} cpu={c} diff={d} \
-             A&S-7.1.26 bound={F64_GELU_AS_BOUND} (#799 regression)",
+             F64_TRANSCENDENTAL={F64_GELU_AS_BOUND} (#823 regression)",
             xs[i]
         );
     }
     println!(
         "gpu_gelu_none_f64_matches_cpu: max |diff| = {max_abs_diff} \
-         (A&S 7.1.26 polynomial-class bound; tighter via Chebyshev refit \
-         would close the f64 gate — out of #799 scope)"
+         (within F64_TRANSCENDENTAL = 1e-10 via SunPro fdlibm port — #823)"
     );
 }
 

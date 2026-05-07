@@ -1774,7 +1774,29 @@ DONE:
 ";
 
 /// PTX source for `gelu_erf_f64_kernel`: exact erf GELU (f64).
-/// Full f64 precision via Cody-Waite + degree-11 Horner for exp(-z^2).
+///
+/// Closes #823. Implements `erf(x/sqrt(2))` via the SunPro fdlibm
+/// piecewise rational (1993, public domain) — the same routine used by
+/// the CPU lane in `ferrotorch-core/src/special.rs::erf_f64_hi` after
+/// Bugfix Batch 3 #792. Accuracy: ~1 ulp across all of f64, well inside
+/// `F64_TRANSCENDENTAL = 1e-10`.
+///
+/// Domain split (matches fdlibm exactly, with `ax = |x/sqrt(2)|`):
+///   ax < 0.84375  : erf(z) = z + z * (PP(z*z) / QQ(z*z))
+///   ax < 1.25     : erf(z) = sign(z) * (ERX + PA(s) / QA(s)),  s = ax - 1
+///   ax < 1/0.35   : erfc tail with R = RA / S = SA  (1.25..2.857)
+///   ax < 6.0      : erfc tail with R = RB / S = SB  (2.857..6)
+///   ax >= 6.0     : saturate to sign(z) * 1.0
+/// The tail forms `erf(z) = sign(z) * (1 - exp(-ax*ax - 0.5625) *
+/// exp(-(ax - z32)*(ax + z32) + R/S) / ax)` with `z32` = upper 32 bits of
+/// ax bit-truncated to keep `-z32^2 - 0.5625` representable exactly
+/// (avoids catastrophic cancellation in the exponent argument). Two
+/// Cody-Waite + degree-11 Horner exp blocks evaluate the two factors.
+///
+/// Pre-#823 this kernel held the A&S 7.1.26 5-term polynomial whose
+/// `|err(erf)| < 1.5e-7` ceiling capped the f64 lane at ~2e-7 worst-case
+/// (well past the 1e-10 conformance gate). Replaced with the full
+/// fdlibm piecewise rational.
 #[cfg(feature = "cuda")]
 pub(crate) const GELU_ERF_F64_PTX: &str = "\
 .version 7.0
@@ -1788,13 +1810,13 @@ pub(crate) const GELU_ERF_F64_PTX: &str = "\
 ) {
     .reg .u32 %r_tid, %bid, %bdim, %n_reg;
     .reg .u64 %in, %out, %off;
-    .reg .f64 %x, %z, %ax, %one, %half;
-    .reg .f64 %t, %pt, %z2, %neg_z2, %exp_neg_z2, %erf_val;
-    .reg .f64 %p, %a1, %a2, %a3, %a4, %a5, %result;
+    .reg .f64 %x, %z, %ax, %one, %half, %erf_val, %result;
+    .reg .f64 %s, %num, %den;
+    .reg .f64 %z32, %dx, %arg1, %arg2, %exp1, %exp2, %r_factor;
     .reg .f64 %e_nf, %e_r, %e_p, %e_half;
     .reg .s32 %e_ni;
-    .reg .s64 %e_ni64, %e_bits;
-    .reg .pred %pred_ge, %pred_neg;
+    .reg .s64 %e_ni64, %e_bits, %ax_bits, %mask_hi;
+    .reg .pred %pred_ge, %pred_neg, %pred_small, %pred_mid, %pred_far, %pred_ra;
 
     ld.param.u64 %in, [in_ptr];
     ld.param.u64 %out, [out_ptr];
@@ -1816,52 +1838,182 @@ pub(crate) const GELU_ERF_F64_PTX: &str = "\
     ld.global.f64 %x, [%in];
     mov.f64 %one, 0d3FF0000000000000;
     mov.f64 %half, 0d3FE0000000000000;
+    mov.f64 %e_half, 0d3FE0000000000000;
 
-    // z = x / sqrt(2) = x * 0.70710678
-    mov.f64 %z, 0d3FE6A09E60000000;
+    // z = x / sqrt(2) using the full-precision 1/sqrt(2) constant
+    // (0d3FE6A09E667F3BCD ~ 0.7071067811865475). The previous
+    // truncated constant 0d3FE6A09E60000000 introduced ~3e-9 error
+    // in z which alone exceeded the 1e-10 transcendental gate.
+    mov.f64 %z, 0d3FE6A09E667F3BCD;
     mul.f64 %z, %x, %z;
-
     abs.f64 %ax, %z;
 
-    // t = 1 / (1 + 0.3275911 * |z|)
-    mov.f64 %p, 0d3FD4F740A93D7B8C;
-    mul.f64 %t, %p, %ax;
-    add.f64 %t, %one, %t;
-    div.rn.f64 %t, %one, %t;
+    // -- Region select on ax --
+    // pred_small : ax < 0.84375
+    // pred_mid   : 0.84375 <= ax < 1.25
+    // pred_far   : ax >= 6.0
+    // otherwise  : 1.25 <= ax < 6
+    setp.lt.f64 %pred_small, %ax, 0d3FEB000000000000;
+    setp.lt.f64 %pred_mid, %ax, 0d3FF4000000000000;
+    setp.ge.f64 %pred_far, %ax, 0d4018000000000000;
 
-    // Horner: poly = t*(a1 + t*(a2 + t*(a3 + t*(a4 + t*a5))))
-    // A&S 7.1.26 coefficients (|err(erf)| < 1.5e-7) -- restored under
-    // #799. The pre-fix build held f32-quantised wrong constants here;
-    // residual was ~3.5e-4 on the |x|=0.75 fixture row. Post-fix worst
-    // case is ~2e-7 (polynomial-class limit of A&S 7.1.26); the f64
-    // cascade_skip stays in place since 2e-7 still misses the 1e-10
-    // F64_TRANSCENDENTAL gate. Higher-degree refit tracked separately.
-    mov.f64 %a5, 0d3FF0FB844255A12D;
-    mov.f64 %a4, 0dBFF7401C57014C39;
-    mov.f64 %a3, 0d3FF6BE1C55BAE157;
-    mov.f64 %a2, 0dBFD23531CC3C1469;
-    mov.f64 %a1, 0d3FD04F20C6EC5A7E;
+    @%pred_small bra ERF_SMALL;
+    @%pred_mid bra ERF_MID;
+    @%pred_far bra ERF_FAR;
+    bra ERF_TAIL;
 
-    mul.f64 %pt, %t, %a5;
-    add.f64 %pt, %pt, %a4;
-    mul.f64 %pt, %pt, %t;
-    add.f64 %pt, %pt, %a3;
-    mul.f64 %pt, %pt, %t;
-    add.f64 %pt, %pt, %a2;
-    mul.f64 %pt, %pt, %t;
-    add.f64 %pt, %pt, %a1;
-    mul.f64 %pt, %pt, %t;
+// ---------------------------------------------------------------------
+// Small-x branch: ax < 0.84375
+//   r  = PP0 + t*(PP1 + t*(PP2 + t*(PP3 + t*PP4))),         t = z*z
+//   s  = 1 + t*(QQ1 + t*(QQ2 + t*(QQ3 + t*(QQ4 + t*QQ5))))
+//   erf(z) = z + z * (r/s)
+// fdlibm degenerate-near-zero branch (ax < 2^-28) is omitted because
+// for our gelu_with(None) path z is bounded away from zero whenever
+// it matters; the small rational is exact to ~1 ulp at z = 0 anyway.
+// ---------------------------------------------------------------------
+ERF_SMALL:
+    mul.f64 %s, %z, %z;
+    // PP Horner (descending): PP4, PP3, PP2, PP1, PP0
+    mov.f64 %num, 0dBEF8EAD6120016AC; // PP4 = -2.37630166566501626084e-05
+    fma.rn.f64 %num, %num, %s, 0dBF77A291236668E4; // PP3
+    fma.rn.f64 %num, %num, %s, 0dBF9D2A51DBD7194F; // PP2
+    fma.rn.f64 %num, %num, %s, 0dBFD4CD7D691CB913; // PP1
+    fma.rn.f64 %num, %num, %s, 0d3FC06EBA8214DB68; // PP0
+    // QQ Horner: QQ5, QQ4, QQ3, QQ2, QQ1, then *s + 1
+    mov.f64 %den, 0dBED09C4342A26120; // QQ5 = -3.96022827877536812320e-06
+    fma.rn.f64 %den, %den, %s, 0d3F215DC9221C1A10; // QQ4 = 1.32494738004321644526e-04
+    fma.rn.f64 %den, %den, %s, 0d3F74D022C4D36B0F; // QQ3 = 5.08130628187576562776e-03
+    fma.rn.f64 %den, %den, %s, 0d3FB0A54C5536CEBA; // QQ2 = 6.50222499887672944485e-02
+    fma.rn.f64 %den, %den, %s, 0d3FD97779CDDADC09; // QQ1 = 3.97917223959155352819e-01
+    fma.rn.f64 %den, %den, %s, %one;
+    div.rn.f64 %erf_val, %num, %den;
+    fma.rn.f64 %erf_val, %z, %erf_val, %z;
+    bra ERF_DONE;
 
-    // exp(-z^2) in full f64
-    mul.f64 %z2, %ax, %ax;
-    neg.f64 %neg_z2, %z2;
+// ---------------------------------------------------------------------
+// Mid-x branch: 0.84375 <= ax < 1.25
+//   s = ax - 1
+//   p = PA0 + s*(PA1 + s*(PA2 + s*(PA3 + s*(PA4 + s*(PA5 + s*PA6)))))
+//   q = 1 + s*(QA1 + s*(QA2 + s*(QA3 + s*(QA4 + s*(QA5 + s*QA6)))))
+//   erf(z) = sign(z) * (ERX + p/q),  ERX = 8.45062911510467529297e-01
+// ---------------------------------------------------------------------
+ERF_MID:
+    sub.f64 %s, %ax, %one;
+    mov.f64 %num, 0dBF61BF380A96073F; // PA6 = -2.16637559486879084300e-03
+    fma.rn.f64 %num, %num, %s, 0d3FA22A36599795EB; // PA5
+    fma.rn.f64 %num, %num, %s, 0dBFBC63983D3E28EC; // PA4
+    fma.rn.f64 %num, %num, %s, 0d3FD45FCA805120E4; // PA3
+    fma.rn.f64 %num, %num, %s, 0dBFD7D240FBB8C3F1; // PA2
+    fma.rn.f64 %num, %num, %s, 0d3FDA8D00AD92B34D; // PA1
+    fma.rn.f64 %num, %num, %s, 0dBF6359B8BEF77538; // PA0
+    mov.f64 %den, 0d3F888B545735151D; // QA6 = 1.19844998467991074170e-02
+    fma.rn.f64 %den, %den, %s, 0d3F8BEDC26B51DD1C; // QA5
+    fma.rn.f64 %den, %den, %s, 0d3FC02660E763351F; // QA4
+    fma.rn.f64 %den, %den, %s, 0d3FB2635CD99FE9A7; // QA3
+    fma.rn.f64 %den, %den, %s, 0d3FE14AF092EB6F33; // QA2
+    fma.rn.f64 %den, %den, %s, 0d3FBB3E6618EEE323; // QA1
+    fma.rn.f64 %den, %den, %s, %one;
+    div.rn.f64 %erf_val, %num, %den;
+    add.f64 %erf_val, %erf_val, 0d3FEB0AC160000000; // ERX (truncated form)
+    // Note: SunPro fdlibm spells ERX as 8.45062911510467529297e-01,
+    // implemented bit-exactly as 0d3FEB0AC160000000 (the trailing
+    // 32 mantissa bits are zero by design, mirroring the z32
+    // truncation used in the tail). The low-bit residual is folded
+    // into the rational p/q.
+    setp.lt.f64 %pred_neg, %z, 0d0000000000000000;
+    @%pred_neg neg.f64 %erf_val, %erf_val;
+    bra ERF_DONE;
 
-    // --- exp(%neg_z2) via Cody-Waite + degree-11 Horner ---
-    mov.f64 %e_half, 0d3FE0000000000000;
-    fma.rn.f64 %e_nf, %neg_z2, 0d3FF71547652B82FE, %e_half;
+// ---------------------------------------------------------------------
+// Far tail: ax >= 6.0  -- erf saturates to +-1 within 1 ulp.
+// ---------------------------------------------------------------------
+ERF_FAR:
+    mov.f64 %erf_val, %one;
+    setp.lt.f64 %pred_neg, %z, 0d0000000000000000;
+    @%pred_neg neg.f64 %erf_val, %erf_val;
+    bra ERF_DONE;
+
+// ---------------------------------------------------------------------
+// Tail: 1.25 <= ax < 6
+//   t  = 1 / (ax * ax)
+//   pred_ra = (ax < 1/0.35  ~= 2.857142857)
+//   if pred_ra: use RA/SA  else: use RB/SB
+//   z32 = ax with low 32 mantissa bits zeroed (bit-truncate)
+//   factor = exp(-z32*z32 - 0.5625)
+//          * exp(-(ax - z32) * (ax + z32) + R/S) / ax
+//   erf(z) = sign(z) * (1 - factor)
+// ---------------------------------------------------------------------
+ERF_TAIL:
+    mul.f64 %s, %ax, %ax;
+    div.rn.f64 %s, %one, %s;
+    setp.lt.f64 %pred_ra, %ax, 0d4006DB6DB6DB6DB7; // 1 / 0.35 ~= 2.857142857
+    @%pred_ra bra ERF_TAIL_RA;
+
+    // RB / SB  (1/0.35 <= ax < 28; we cap earlier at 6)
+    mov.f64 %num, 0dC07E384E9BDC383F; // RB6 = -4.83519191608651397019e+02
+    fma.rn.f64 %num, %num, %s, 0dC09004616A2E5992; // RB5
+    fma.rn.f64 %num, %num, %s, 0dC083EC881375F228; // RB4
+    fma.rn.f64 %num, %num, %s, 0dC064145D43C5ED98; // RB3
+    fma.rn.f64 %num, %num, %s, 0dC031C209555F995A; // RB2
+    fma.rn.f64 %num, %num, %s, 0dBFE993BA70C285DE; // RB1
+    fma.rn.f64 %num, %num, %s, 0dBF84341239E86F4A; // RB0
+    mov.f64 %den, 0dC03670E242712D62; // SB7 = -2.24409524465858183362e+01
+    fma.rn.f64 %den, %den, %s, 0d407DA874E79FE763; // SB6
+    fma.rn.f64 %den, %den, %s, 0d40A3F219CEDF3BE6; // SB5
+    fma.rn.f64 %den, %den, %s, 0d40A8FFB7688C246A; // SB4
+    fma.rn.f64 %den, %den, %s, 0d409802EB189D5118; // SB3
+    fma.rn.f64 %den, %den, %s, 0d40745CAE221B9F0A; // SB2
+    fma.rn.f64 %den, %den, %s, 0d403E568B261D5190; // SB1
+    fma.rn.f64 %den, %den, %s, %one;
+    bra ERF_TAIL_RS_DONE;
+
+ERF_TAIL_RA:
+    // RA / SA  (1.25 <= ax < 1/0.35)
+    mov.f64 %num, 0dC023A0EFC69AC25C; // RA7 = -9.81432934416914548592
+    fma.rn.f64 %num, %num, %s, 0dC054526557E4D2F2; // RA6 = -8.12874355063065934246e+01
+    fma.rn.f64 %num, %num, %s, 0dC067135CEBCCABB2; // RA5
+    fma.rn.f64 %num, %num, %s, 0dC0644CB184282266; // RA4
+    fma.rn.f64 %num, %num, %s, 0dC04F300AE4CBA38D; // RA3
+    fma.rn.f64 %num, %num, %s, 0dC0251E0441B0E726; // RA2 = -1.05586262253232909814e+01
+    fma.rn.f64 %num, %num, %s, 0dBFE63416E4BA7360; // RA1
+    fma.rn.f64 %num, %num, %s, 0dBF843412600D6435; // RA0
+    mov.f64 %den, 0dBFAEEFF2EE749A62; // SA8 = -6.04244152148580987438e-02
+    fma.rn.f64 %den, %den, %s, 0d401A47EF8E484A93; // SA7
+    fma.rn.f64 %den, %den, %s, 0d405B28A3EE48AE2C; // SA6 = 1.08635005541779435134e+02
+    fma.rn.f64 %den, %den, %s, 0d407AD02157700314; // SA5
+    fma.rn.f64 %den, %den, %s, 0d40842B1921EC2868; // SA4
+    fma.rn.f64 %den, %den, %s, 0d407B290DD58A1A71; // SA3
+    fma.rn.f64 %den, %den, %s, 0d4061350C526AE721; // SA2
+    fma.rn.f64 %den, %den, %s, 0d4033A6B9BD707687; // SA1 = 1.96512716674392571292e+01
+    fma.rn.f64 %den, %den, %s, %one;
+    // fall through
+
+ERF_TAIL_RS_DONE:
+    div.rn.f64 %s, %num, %den; // R/S
+
+    // z32 = bits(ax) & 0xFFFFFFFF00000000  (truncate low 32 mantissa bits)
+    mov.b64 %ax_bits, %ax;
+    mov.s64 %mask_hi, -4294967296; // 0xFFFFFFFF00000000 reinterpreted as i64
+    and.b64 %ax_bits, %ax_bits, %mask_hi;
+    mov.b64 %z32, %ax_bits;
+
+    // arg1 = -z32*z32 - 0.5625
+    mul.f64 %arg1, %z32, %z32;
+    neg.f64 %arg1, %arg1;
+    sub.f64 %arg1, %arg1, 0d3FE2000000000000; // 0.5625
+
+    // arg2 = -(ax - z32) * (ax + z32) + R/S
+    sub.f64 %dx, %ax, %z32;
+    add.f64 %arg2, %ax, %z32;
+    mul.f64 %dx, %dx, %arg2;
+    neg.f64 %dx, %dx;
+    add.f64 %arg2, %dx, %s;
+
+    // -- exp(arg1) via Cody-Waite + degree-11 Horner --
+    fma.rn.f64 %e_nf, %arg1, 0d3FF71547652B82FE, %e_half;
     cvt.rmi.f64.f64 %e_nf, %e_nf;
     cvt.rni.s32.f64 %e_ni, %e_nf;
-    fma.rn.f64 %e_r, %e_nf, 0dBFE62E42FEFA3800, %neg_z2;
+    fma.rn.f64 %e_r, %e_nf, 0dBFE62E42FEFA3800, %arg1;
     fma.rn.f64 %e_r, %e_nf, 0dBD2EF35793C76730, %e_r;
     mov.f64 %e_p, 0d3E5AE64567F544E4;
     fma.rn.f64 %e_p, %e_p, %e_r, 0d3E927E4FB7789F5C;
@@ -1874,20 +2026,45 @@ pub(crate) const GELU_ERF_F64_PTX: &str = "\
     fma.rn.f64 %e_p, %e_p, %e_r, 0d3FC5555555555555;
     fma.rn.f64 %e_p, %e_p, %e_r, %e_half;
     fma.rn.f64 %e_p, %e_p, %e_r, %one;
-    fma.rn.f64 %exp_neg_z2, %e_p, %e_r, %one;
+    fma.rn.f64 %exp1, %e_p, %e_r, %one;
     cvt.s64.s32 %e_ni64, %e_ni;
     add.s64 %e_ni64, %e_ni64, 1023;
     shl.b64 %e_bits, %e_ni64, 52;
     mov.b64 %e_nf, %e_bits;
-    mul.f64 %exp_neg_z2, %exp_neg_z2, %e_nf;
-    // --- end exp ---
+    mul.f64 %exp1, %exp1, %e_nf;
 
-    mul.f64 %erf_val, %pt, %exp_neg_z2;
-    sub.f64 %erf_val, %one, %erf_val;
+    // -- exp(arg2) via Cody-Waite + degree-11 Horner --
+    fma.rn.f64 %e_nf, %arg2, 0d3FF71547652B82FE, %e_half;
+    cvt.rmi.f64.f64 %e_nf, %e_nf;
+    cvt.rni.s32.f64 %e_ni, %e_nf;
+    fma.rn.f64 %e_r, %e_nf, 0dBFE62E42FEFA3800, %arg2;
+    fma.rn.f64 %e_r, %e_nf, 0dBD2EF35793C76730, %e_r;
+    mov.f64 %e_p, 0d3E5AE64567F544E4;
+    fma.rn.f64 %e_p, %e_p, %e_r, 0d3E927E4FB7789F5C;
+    fma.rn.f64 %e_p, %e_p, %e_r, 0d3EC71DE3A556C734;
+    fma.rn.f64 %e_p, %e_p, %e_r, 0d3EFA01A01A01A01A;
+    fma.rn.f64 %e_p, %e_p, %e_r, 0d3F2A01A01A01A01A;
+    fma.rn.f64 %e_p, %e_p, %e_r, 0d3F56C16C16C16C17;
+    fma.rn.f64 %e_p, %e_p, %e_r, 0d3F81111111111111;
+    fma.rn.f64 %e_p, %e_p, %e_r, 0d3FA5555555555555;
+    fma.rn.f64 %e_p, %e_p, %e_r, 0d3FC5555555555555;
+    fma.rn.f64 %e_p, %e_p, %e_r, %e_half;
+    fma.rn.f64 %e_p, %e_p, %e_r, %one;
+    fma.rn.f64 %exp2, %e_p, %e_r, %one;
+    cvt.s64.s32 %e_ni64, %e_ni;
+    add.s64 %e_ni64, %e_ni64, 1023;
+    shl.b64 %e_bits, %e_ni64, 52;
+    mov.b64 %e_nf, %e_bits;
+    mul.f64 %exp2, %exp2, %e_nf;
 
+    mul.f64 %r_factor, %exp1, %exp2;
+    div.rn.f64 %r_factor, %r_factor, %ax;
+    sub.f64 %erf_val, %one, %r_factor;
     setp.lt.f64 %pred_neg, %z, 0d0000000000000000;
     @%pred_neg neg.f64 %erf_val, %erf_val;
+    // fall through
 
+ERF_DONE:
     add.f64 %erf_val, %one, %erf_val;
     mul.f64 %result, %half, %x;
     mul.f64 %result, %result, %erf_val;
@@ -3831,7 +4008,13 @@ DONE:
 ";
 
 /// PTX source for `gelu_backward_erf_f64_kernel`: exact erf backward (f64).
-/// Full f64 precision via Cody-Waite + degree-11 Horner for exp(-z^2) and exp(-x^2/2).
+///
+/// Closes #823. Mirrors `GELU_ERF_F64_PTX` (SunPro fdlibm piecewise
+/// rational, ~1 ulp) for the erf-of-(x/sqrt(2)) factor of the gradient,
+/// then composes
+///   d/dx GELU_None(x) = 0.5 * (1 + erf(x/sqrt(2))) + x * phi(x)
+/// with phi(x) = exp(-x*x/2) / sqrt(2*pi). The exp(-x*x/2) factor uses
+/// the same Cody-Waite + degree-11 Horner block.
 #[cfg(feature = "cuda")]
 pub(crate) const GELU_BACKWARD_ERF_F64_PTX: &str = "\
 .version 7.0
@@ -3846,15 +4029,15 @@ pub(crate) const GELU_BACKWARD_ERF_F64_PTX: &str = "\
 ) {
     .reg .u32 %r_tid, %bid, %bdim, %n_reg;
     .reg .u64 %grad, %input, %out, %off;
-    .reg .f64 %vg, %x, %ax, %z, %z2, %neg_z2, %exp_neg_z2;
-    .reg .f64 %t, %pt, %one, %half, %erf_val, %cdf, %pdf;
-    .reg .f64 %neg_x2h, %exp_neg_x2h, %inv_sqrt_2pi, %x_pdf;
-    .reg .f64 %d_gelu, %result;
-    .reg .f64 %p_coef, %a1, %a2, %a3, %a4, %a5;
+    .reg .f64 %vg, %x, %z, %ax, %one, %half, %erf_val;
+    .reg .f64 %s, %num, %den;
+    .reg .f64 %z32, %dx, %arg1, %arg2, %exp1, %exp2, %r_factor;
+    .reg .f64 %cdf, %pdf, %neg_x2h, %exp_neg_x2h;
+    .reg .f64 %inv_sqrt_2pi, %x_pdf, %d_gelu, %result;
     .reg .f64 %e_nf, %e_r, %e_p, %e_half;
     .reg .s32 %e_ni;
-    .reg .s64 %e_ni64, %e_bits;
-    .reg .pred %pred_ge, %pred_neg;
+    .reg .s64 %e_ni64, %e_bits, %ax_bits, %mask_hi;
+    .reg .pred %pred_ge, %pred_neg, %pred_small, %pred_mid, %pred_far, %pred_ra;
 
     ld.param.u64 %grad, [grad_ptr];
     ld.param.u64 %input, [input_ptr];
@@ -3880,44 +4063,135 @@ pub(crate) const GELU_BACKWARD_ERF_F64_PTX: &str = "\
 
     mov.f64 %one, 0d3FF0000000000000;
     mov.f64 %half, 0d3FE0000000000000;
+    mov.f64 %e_half, 0d3FE0000000000000;
 
-    mov.f64 %z, 0d3FE6A09E60000000;
+    // z = x / sqrt(2) -- full-precision constant 0d3FE6A09E667F3BCD.
+    mov.f64 %z, 0d3FE6A09E667F3BCD;
     mul.f64 %z, %x, %z;
     abs.f64 %ax, %z;
 
-    mov.f64 %p_coef, 0d3FD4F740A93D7B8C;
-    mul.f64 %t, %p_coef, %ax;
-    add.f64 %t, %one, %t;
-    div.rn.f64 %t, %one, %t;
+    setp.lt.f64 %pred_small, %ax, 0d3FEB000000000000; // 0.84375
+    setp.lt.f64 %pred_mid, %ax, 0d3FF4000000000000;   // 1.25
+    setp.ge.f64 %pred_far, %ax, 0d4018000000000000;   // 6.0
+    @%pred_small bra B_ERF_SMALL;
+    @%pred_mid bra B_ERF_MID;
+    @%pred_far bra B_ERF_FAR;
+    bra B_ERF_TAIL;
 
-    // A&S 7.1.26 coefficients -- see GELU_ERF_F64_PTX for the precision
-    // bound commentary. Same #799 corruption was repeated here.
-    mov.f64 %a5, 0d3FF0FB844255A12D;
-    mov.f64 %a4, 0dBFF7401C57014C39;
-    mov.f64 %a3, 0d3FF6BE1C55BAE157;
-    mov.f64 %a2, 0dBFD23531CC3C1469;
-    mov.f64 %a1, 0d3FD04F20C6EC5A7E;
+B_ERF_SMALL:
+    mul.f64 %s, %z, %z;
+    mov.f64 %num, 0dBEF8EAD6120016AC; // PP4
+    fma.rn.f64 %num, %num, %s, 0dBF77A291236668E4; // PP3
+    fma.rn.f64 %num, %num, %s, 0dBF9D2A51DBD7194F; // PP2
+    fma.rn.f64 %num, %num, %s, 0dBFD4CD7D691CB913; // PP1
+    fma.rn.f64 %num, %num, %s, 0d3FC06EBA8214DB68; // PP0
+    mov.f64 %den, 0dBED09C4342A26120; // QQ5
+    fma.rn.f64 %den, %den, %s, 0d3F215DC9221C1A10; // QQ4
+    fma.rn.f64 %den, %den, %s, 0d3F74D022C4D36B0F; // QQ3
+    fma.rn.f64 %den, %den, %s, 0d3FB0A54C5536CEBA; // QQ2
+    fma.rn.f64 %den, %den, %s, 0d3FD97779CDDADC09; // QQ1
+    fma.rn.f64 %den, %den, %s, %one;
+    div.rn.f64 %erf_val, %num, %den;
+    fma.rn.f64 %erf_val, %z, %erf_val, %z;
+    bra B_ERF_DONE;
 
-    mul.f64 %pt, %t, %a5;
-    add.f64 %pt, %pt, %a4;
-    mul.f64 %pt, %pt, %t;
-    add.f64 %pt, %pt, %a3;
-    mul.f64 %pt, %pt, %t;
-    add.f64 %pt, %pt, %a2;
-    mul.f64 %pt, %pt, %t;
-    add.f64 %pt, %pt, %a1;
-    mul.f64 %pt, %pt, %t;
+B_ERF_MID:
+    sub.f64 %s, %ax, %one;
+    mov.f64 %num, 0dBF61BF380A96073F; // PA6
+    fma.rn.f64 %num, %num, %s, 0d3FA22A36599795EB; // PA5
+    fma.rn.f64 %num, %num, %s, 0dBFBC63983D3E28EC; // PA4
+    fma.rn.f64 %num, %num, %s, 0d3FD45FCA805120E4; // PA3
+    fma.rn.f64 %num, %num, %s, 0dBFD7D240FBB8C3F1; // PA2
+    fma.rn.f64 %num, %num, %s, 0d3FDA8D00AD92B34D; // PA1
+    fma.rn.f64 %num, %num, %s, 0dBF6359B8BEF77538; // PA0
+    mov.f64 %den, 0d3F888B545735151D; // QA6
+    fma.rn.f64 %den, %den, %s, 0d3F8BEDC26B51DD1C; // QA5
+    fma.rn.f64 %den, %den, %s, 0d3FC02660E763351F; // QA4
+    fma.rn.f64 %den, %den, %s, 0d3FB2635CD99FE9A7; // QA3
+    fma.rn.f64 %den, %den, %s, 0d3FE14AF092EB6F33; // QA2
+    fma.rn.f64 %den, %den, %s, 0d3FBB3E6618EEE323; // QA1
+    fma.rn.f64 %den, %den, %s, %one;
+    div.rn.f64 %erf_val, %num, %den;
+    add.f64 %erf_val, %erf_val, 0d3FEB0AC160000000; // ERX
+    setp.lt.f64 %pred_neg, %z, 0d0000000000000000;
+    @%pred_neg neg.f64 %erf_val, %erf_val;
+    bra B_ERF_DONE;
 
-    // exp(-z^2) in full f64
-    mul.f64 %z2, %ax, %ax;
-    neg.f64 %neg_z2, %z2;
+B_ERF_FAR:
+    mov.f64 %erf_val, %one;
+    setp.lt.f64 %pred_neg, %z, 0d0000000000000000;
+    @%pred_neg neg.f64 %erf_val, %erf_val;
+    bra B_ERF_DONE;
 
-    // --- exp(%neg_z2) ---
-    mov.f64 %e_half, 0d3FE0000000000000;
-    fma.rn.f64 %e_nf, %neg_z2, 0d3FF71547652B82FE, %e_half;
+B_ERF_TAIL:
+    mul.f64 %s, %ax, %ax;
+    div.rn.f64 %s, %one, %s;
+    setp.lt.f64 %pred_ra, %ax, 0d4006DB6DB6DB6DB7; // 1/0.35
+    @%pred_ra bra B_ERF_TAIL_RA;
+
+    // RB / SB
+    mov.f64 %num, 0dC07E384E9BDC383F; // RB6
+    fma.rn.f64 %num, %num, %s, 0dC09004616A2E5992; // RB5
+    fma.rn.f64 %num, %num, %s, 0dC083EC881375F228; // RB4
+    fma.rn.f64 %num, %num, %s, 0dC064145D43C5ED98; // RB3
+    fma.rn.f64 %num, %num, %s, 0dC031C209555F995A; // RB2
+    fma.rn.f64 %num, %num, %s, 0dBFE993BA70C285DE; // RB1
+    fma.rn.f64 %num, %num, %s, 0dBF84341239E86F4A; // RB0
+    mov.f64 %den, 0dC03670E242712D62; // SB7
+    fma.rn.f64 %den, %den, %s, 0d407DA874E79FE763; // SB6
+    fma.rn.f64 %den, %den, %s, 0d40A3F219CEDF3BE6; // SB5
+    fma.rn.f64 %den, %den, %s, 0d40A8FFB7688C246A; // SB4
+    fma.rn.f64 %den, %den, %s, 0d409802EB189D5118; // SB3
+    fma.rn.f64 %den, %den, %s, 0d40745CAE221B9F0A; // SB2
+    fma.rn.f64 %den, %den, %s, 0d403E568B261D5190; // SB1
+    fma.rn.f64 %den, %den, %s, %one;
+    bra B_ERF_TAIL_RS_DONE;
+
+B_ERF_TAIL_RA:
+    // RA / SA
+    mov.f64 %num, 0dC023A0EFC69AC25C; // RA7
+    fma.rn.f64 %num, %num, %s, 0dC054526557E4D2F2; // RA6
+    fma.rn.f64 %num, %num, %s, 0dC067135CEBCCABB2; // RA5
+    fma.rn.f64 %num, %num, %s, 0dC0644CB184282266; // RA4
+    fma.rn.f64 %num, %num, %s, 0dC04F300AE4CBA38D; // RA3
+    fma.rn.f64 %num, %num, %s, 0dC0251E0441B0E726; // RA2
+    fma.rn.f64 %num, %num, %s, 0dBFE63416E4BA7360; // RA1
+    fma.rn.f64 %num, %num, %s, 0dBF843412600D6435; // RA0
+    mov.f64 %den, 0dBFAEEFF2EE749A62; // SA8
+    fma.rn.f64 %den, %den, %s, 0d401A47EF8E484A93; // SA7
+    fma.rn.f64 %den, %den, %s, 0d405B28A3EE48AE2C; // SA6
+    fma.rn.f64 %den, %den, %s, 0d407AD02157700314; // SA5
+    fma.rn.f64 %den, %den, %s, 0d40842B1921EC2868; // SA4
+    fma.rn.f64 %den, %den, %s, 0d407B290DD58A1A71; // SA3
+    fma.rn.f64 %den, %den, %s, 0d4061350C526AE721; // SA2
+    fma.rn.f64 %den, %den, %s, 0d4033A6B9BD707687; // SA1
+    fma.rn.f64 %den, %den, %s, %one;
+    // fall through
+
+B_ERF_TAIL_RS_DONE:
+    div.rn.f64 %s, %num, %den;
+
+    // z32 = bit-truncated ax (low 32 bits zeroed)
+    mov.b64 %ax_bits, %ax;
+    mov.s64 %mask_hi, -4294967296;
+    and.b64 %ax_bits, %ax_bits, %mask_hi;
+    mov.b64 %z32, %ax_bits;
+
+    mul.f64 %arg1, %z32, %z32;
+    neg.f64 %arg1, %arg1;
+    sub.f64 %arg1, %arg1, 0d3FE2000000000000; // 0.5625
+
+    sub.f64 %dx, %ax, %z32;
+    add.f64 %arg2, %ax, %z32;
+    mul.f64 %dx, %dx, %arg2;
+    neg.f64 %dx, %dx;
+    add.f64 %arg2, %dx, %s;
+
+    // exp(arg1)
+    fma.rn.f64 %e_nf, %arg1, 0d3FF71547652B82FE, %e_half;
     cvt.rmi.f64.f64 %e_nf, %e_nf;
     cvt.rni.s32.f64 %e_ni, %e_nf;
-    fma.rn.f64 %e_r, %e_nf, 0dBFE62E42FEFA3800, %neg_z2;
+    fma.rn.f64 %e_r, %e_nf, 0dBFE62E42FEFA3800, %arg1;
     fma.rn.f64 %e_r, %e_nf, 0dBD2EF35793C76730, %e_r;
     mov.f64 %e_p, 0d3E5AE64567F544E4;
     fma.rn.f64 %e_p, %e_p, %e_r, 0d3E927E4FB7789F5C;
@@ -3930,20 +4204,45 @@ pub(crate) const GELU_BACKWARD_ERF_F64_PTX: &str = "\
     fma.rn.f64 %e_p, %e_p, %e_r, 0d3FC5555555555555;
     fma.rn.f64 %e_p, %e_p, %e_r, %e_half;
     fma.rn.f64 %e_p, %e_p, %e_r, %one;
-    fma.rn.f64 %exp_neg_z2, %e_p, %e_r, %one;
+    fma.rn.f64 %exp1, %e_p, %e_r, %one;
     cvt.s64.s32 %e_ni64, %e_ni;
     add.s64 %e_ni64, %e_ni64, 1023;
     shl.b64 %e_bits, %e_ni64, 52;
     mov.b64 %e_nf, %e_bits;
-    mul.f64 %exp_neg_z2, %exp_neg_z2, %e_nf;
-    // --- end exp ---
+    mul.f64 %exp1, %exp1, %e_nf;
 
-    mul.f64 %erf_val, %pt, %exp_neg_z2;
-    sub.f64 %erf_val, %one, %erf_val;
+    // exp(arg2)
+    fma.rn.f64 %e_nf, %arg2, 0d3FF71547652B82FE, %e_half;
+    cvt.rmi.f64.f64 %e_nf, %e_nf;
+    cvt.rni.s32.f64 %e_ni, %e_nf;
+    fma.rn.f64 %e_r, %e_nf, 0dBFE62E42FEFA3800, %arg2;
+    fma.rn.f64 %e_r, %e_nf, 0dBD2EF35793C76730, %e_r;
+    mov.f64 %e_p, 0d3E5AE64567F544E4;
+    fma.rn.f64 %e_p, %e_p, %e_r, 0d3E927E4FB7789F5C;
+    fma.rn.f64 %e_p, %e_p, %e_r, 0d3EC71DE3A556C734;
+    fma.rn.f64 %e_p, %e_p, %e_r, 0d3EFA01A01A01A01A;
+    fma.rn.f64 %e_p, %e_p, %e_r, 0d3F2A01A01A01A01A;
+    fma.rn.f64 %e_p, %e_p, %e_r, 0d3F56C16C16C16C17;
+    fma.rn.f64 %e_p, %e_p, %e_r, 0d3F81111111111111;
+    fma.rn.f64 %e_p, %e_p, %e_r, 0d3FA5555555555555;
+    fma.rn.f64 %e_p, %e_p, %e_r, 0d3FC5555555555555;
+    fma.rn.f64 %e_p, %e_p, %e_r, %e_half;
+    fma.rn.f64 %e_p, %e_p, %e_r, %one;
+    fma.rn.f64 %exp2, %e_p, %e_r, %one;
+    cvt.s64.s32 %e_ni64, %e_ni;
+    add.s64 %e_ni64, %e_ni64, 1023;
+    shl.b64 %e_bits, %e_ni64, 52;
+    mov.b64 %e_nf, %e_bits;
+    mul.f64 %exp2, %exp2, %e_nf;
 
+    mul.f64 %r_factor, %exp1, %exp2;
+    div.rn.f64 %r_factor, %r_factor, %ax;
+    sub.f64 %erf_val, %one, %r_factor;
     setp.lt.f64 %pred_neg, %z, 0d0000000000000000;
     @%pred_neg neg.f64 %erf_val, %erf_val;
+    // fall through
 
+B_ERF_DONE:
     add.f64 %cdf, %one, %erf_val;
     mul.f64 %cdf, %half, %cdf;
 
@@ -3952,7 +4251,6 @@ pub(crate) const GELU_BACKWARD_ERF_F64_PTX: &str = "\
     mul.f64 %neg_x2h, %neg_x2h, %half;
     neg.f64 %neg_x2h, %neg_x2h;
 
-    // --- exp(%neg_x2h) ---
     fma.rn.f64 %e_nf, %neg_x2h, 0d3FF71547652B82FE, %e_half;
     cvt.rmi.f64.f64 %e_nf, %e_nf;
     cvt.rni.s32.f64 %e_ni, %e_nf;
@@ -3975,10 +4273,9 @@ pub(crate) const GELU_BACKWARD_ERF_F64_PTX: &str = "\
     shl.b64 %e_bits, %e_ni64, 52;
     mov.b64 %e_nf, %e_bits;
     mul.f64 %exp_neg_x2h, %exp_neg_x2h, %e_nf;
-    // --- end exp ---
 
-    // 1/sqrt(2*pi) = 0.39894228
-    mov.f64 %inv_sqrt_2pi, 0d3FD9884440000000;
+    // 1/sqrt(2*pi) = 0.3989422804014327 = 0d3FD9884533D43651
+    mov.f64 %inv_sqrt_2pi, 0d3FD9884533D43651;
     mul.f64 %pdf, %exp_neg_x2h, %inv_sqrt_2pi;
 
     mul.f64 %x_pdf, %x, %pdf;

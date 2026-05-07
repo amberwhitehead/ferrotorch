@@ -461,6 +461,11 @@ fn check_f64(label: &str, actual: &[f64], expected: &[f64], tol: f64) {
     dead_code,
     reason = "consumed by `gpu` cfg-gated callers; CPU-side run loop also calls it"
 )]
+#[allow(
+    clippy::match_single_binding,
+    reason = "registry kept as a match to make future skip entries one-line additions; \
+              the historical-fix commentary is the load-bearing artefact"
+)]
 fn cascade_skip(op: &str, device_label: &str, dtype: &str) -> Option<&'static str> {
     match (op, device_label, dtype) {
         // #792 (closed): erf / erfc / digamma / gelu_none f64 are now within
@@ -513,17 +518,11 @@ fn cascade_skip(op: &str, device_label: &str, dtype: &str) -> Option<&'static st
         // band. Permanent regression sentinel:
         // `tests/_probe_b4_a2_gelu_none_gpu.rs`.
         //
-        // f64 lane stays skipped: the A&S 7.1.26 polynomial class is
-        // ~2e-7 worst-case, which is well past F64_TRANSCENDENTAL = 1e-10.
-        // The f64 GPU kernel is now numerically close to PyTorch (down
-        // from ~1.25e-2) but a Chebyshev / Cody erfc refit is needed to
-        // hit the 1e-10 gate. Tracked as a follow-up f64-precision
-        // upgrade (out of #799 scope).
-        ("gelu_none", "cuda:0", "float64") => Some(
-            "#799 f64 follow-up: gpu gelu_with(None) f64 within ~2e-7 \
-             of PyTorch (A&S 7.1.26 polynomial-class limit) — needs \
-             higher-degree erf refit to clear F64_TRANSCENDENTAL = 1e-10",
-        ),
+        // #823 — closed for f64: GELU_ERF_F64_PTX and
+        // GELU_BACKWARD_ERF_F64_PTX now port the SunPro fdlibm piecewise
+        // rational (the same routine the CPU lane uses post-#792). The
+        // f64 GPU lane is at ~1e-16 (machine ulp) on the probe range,
+        // well inside F64_TRANSCENDENTAL = 1e-10. No skip needed.
         _ => None,
     }
 }

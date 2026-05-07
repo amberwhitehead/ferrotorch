@@ -229,7 +229,7 @@ fn einsum_single_gpu<T: Float>(
     // existing strided_copy kernel, then optionally reduce. Implemented
     // as a composite over existing primitives — no new GPU surface.
     if has_duplicate_chars(in_subs) {
-        return einsum_single_repeated_gpu(in_subs, out_subs, input);
+        return einsum_single_repeated_gpu(in_subs, out_subs, input, dim_map);
     }
 
     // Output indices must all appear in the input (caller has already
@@ -309,7 +309,7 @@ fn einsum_single_gpu<T: Float>(
     })
 }
 
-/// GPU implementation of repeated-index single-input einsum (#821).
+/// GPU implementation of repeated-index single-input einsum (#821, #824).
 ///
 /// Handles the patterns where one or more input indices repeat — i.e.
 /// `"ii->"` (trace), `"ii->i"` (diagonal extraction), `"ii"` (implicit
@@ -338,84 +338,146 @@ fn einsum_single_repeated_gpu<T: Float>(
     in_subs: &[char],
     out_subs: &[char],
     input: &Tensor<T>,
+    dim_map: &BTreeMap<char, usize>,
 ) -> FerrotorchResult<Tensor<T>> {
-    let ndim = in_subs.len();
-    if ndim < 2 {
+    if in_subs.len() < 2 {
         // A single index can't repeat with itself within rank 1 — shouldn't reach here.
         return Err(FerrotorchError::NotImplementedOnCuda {
             op: "einsum_repeated_index",
         });
     }
 
-    // Currently support the homogeneous case where every input axis is
-    // the *same* repeated index, e.g. "ii", "iii", "iiii". This covers
-    // the trace / diagonal patterns (#821 scope). Mixed repeated /
-    // non-repeated indices (e.g. "iij->j") are not on-device-decomposable
-    // through plain strided_copy and are surfaced as a sub-cascade.
-    let first = in_subs[0];
-    let all_same = in_subs.iter().all(|&c| c == first);
-    if !all_same {
-        return Err(FerrotorchError::NotImplementedOnCuda {
-            op: "einsum_repeated_index_mixed",
-        });
-    }
+    // Build the diagonalised tensor + new (deduped) subscript list. After
+    // this every char in `new_subs` appears exactly once and `diag` is a
+    // freshly materialised on-device tensor whose layout corresponds to
+    // those subs in row-major order. Implements both the homogeneous
+    // diagonal/trace patterns from #821 (`"ii"`, `"iii"`, `"iii->i"`) and
+    // the mixed repeated/free patterns added in #824 (`"iij->j"`,
+    // `"iji->j"`, `"iijk->jk"`, `"iij->ij"`, etc.) through the same
+    // `as_strided_copy` (GPU `strided_copy_f{32,64}`) primitive.
+    let (new_subs, diag) = diagonalize_repeats_gpu(in_subs, input)?;
 
-    // All N axes share the same size — build_dim_map already validated this.
-    let n = input.shape()[0];
-    for (axis, &size) in input.shape().iter().enumerate() {
-        if size != n {
-            return Err(FerrotorchError::ShapeMismatch {
+    // Output may not introduce chars absent from the deduped input subs.
+    // `build_dim_map` already validates this upstream, but we recheck
+    // so this branch is independently safe against direct callers.
+    for &c in out_subs {
+        if !new_subs.contains(&c) {
+            return Err(FerrotorchError::InvalidArgument {
                 message: format!(
-                    "einsum: repeated-index axis {axis} has size {size}, expected {n} (all-same diagonal)"
+                    "einsum: output index '{c}' does not appear in any input subscripts"
                 ),
             });
         }
     }
 
-    // Output is either empty (trace) or the same single repeated char (diagonal).
-    let want_diagonal = match out_subs.len() {
-        0 => false,
-        1 if out_subs[0] == first => true,
-        _ => {
-            return Err(FerrotorchError::NotImplementedOnCuda {
-                op: "einsum_repeated_index_unsupported_output",
-            });
-        }
+    // Recurse into the standard single-input GPU dispatch with the
+    // diagonalised tensor + deduped subs. `einsum_single_gpu` will see
+    // no repeats and route through the sum-axes-then-permute path —
+    // every step on-device.
+    let new_parsed = ParsedEquation {
+        input_subscripts: vec![new_subs],
+        output_subscripts: out_subs.to_vec(),
     };
+    einsum_single_gpu(&new_parsed, &diag, dim_map)
+}
 
-    // Stride to step from one diagonal element to the next: 1 + N + N^2 + ... + N^{r-1}.
-    // For rank 2 this is N+1 (the canonical "stride past one row plus one column").
-    // The underlying storage must be contiguous — materialise if it isn't.
-    let materialised = if input.is_contiguous() {
-        input.clone()
-    } else {
-        crate::methods::contiguous_t(input)?
-    };
+/// Diagonalise repeated input chars on a GPU (or CPU) tensor via a single
+/// `as_strided_copy` (#821 / #824 / #825 shared machinery).
+///
+/// Given an input tensor and its subscript list (which may contain
+/// repeated chars, e.g. `"iij"` or `"iji"`), this builds a strided view
+/// that walks the diagonal across each repeat-class while preserving free
+/// axes, then materialises that view through the existing
+/// `strided_copy_f{32,64}` kernel on CUDA (or the CPU walker on host) —
+/// no host bounce, no new primitive surface.
+///
+/// The returned subscript list contains each character exactly once, in
+/// the order of its first appearance in `in_subs`. For each output axis
+/// the corresponding stride is the *sum* of the original strides of all
+/// input axes carrying that char — stepping along the new axis advances
+/// every original axis with that char in lock-step, which is the
+/// definition of a generalised diagonal.
+///
+/// Examples (assume row-major input strides):
+///
+/// * `"ii"` over `[N, N]` (strides `[N, 1]`) → subs `"i"`, view shape
+///   `[N]`, stride `[N + 1]`. Standard 2-D diagonal.
+/// * `"iij"` over `[N, N, M]` (strides `[N*M, M, 1]`) → subs `"ij"`,
+///   view shape `[N, M]`, strides `[N*M + M, 1]`.
+/// * `"iji"` over `[N, M, N]` (strides `[M*N, N, 1]`) → subs `"ij"`,
+///   view shape `[N, M]`, strides `[M*N + 1, N]`. Free index between
+///   the two repeats — its stride is preserved.
+/// * `"iii"` over `[N, N, N]` (strides `[N*N, N, 1]`) → subs `"i"`,
+///   view shape `[N]`, stride `[N*N + N + 1]`. Homogeneous case from
+///   #821 — covered by the same code path.
+///
+/// If `in_subs` contains no repeated chars the input is returned
+/// unchanged (with a clone of the subs vector) so callers can use this
+/// as an unconditional pre-pass.
+fn diagonalize_repeats_gpu<T: Float>(
+    in_subs: &[char],
+    input: &Tensor<T>,
+) -> FerrotorchResult<(Vec<char>, Tensor<T>)> {
+    if !has_duplicate_chars(in_subs) {
+        return Ok((in_subs.to_vec(), input.clone()));
+    }
 
-    let mut step: isize = 0;
-    let mut pow: isize = 1;
-    for _ in 0..ndim {
-        step += pow;
-        pow = pow
-            .checked_mul(n as isize)
-            .ok_or_else(|| FerrotorchError::InvalidArgument {
-                message: "einsum repeated-index: tensor too large for stride math".into(),
+    // Use the input's existing strides directly — `as_strided` views the
+    // underlying storage at `storage_offset` with whatever strides we
+    // hand it, so we don't need to materialise a contiguous copy first.
+    let in_strides = input.strides();
+    let in_shape = input.shape();
+    if in_strides.len() != in_subs.len() || in_shape.len() != in_subs.len() {
+        return Err(FerrotorchError::Internal {
+            message: format!(
+                "diagonalize_repeats_gpu: subs/shape/strides length mismatch: \
+                 {} vs {} vs {}",
+                in_subs.len(),
+                in_shape.len(),
+                in_strides.len()
+            ),
+        });
+    }
+
+    // Walk `in_subs` in order, collecting unique chars (preserving first-
+    // occurrence order) and accumulating the collapsed stride per char.
+    let mut new_subs: Vec<char> = Vec::with_capacity(in_subs.len());
+    let mut new_sizes: Vec<usize> = Vec::with_capacity(in_subs.len());
+    let mut new_strides: Vec<isize> = Vec::with_capacity(in_subs.len());
+    for (axis, &c) in in_subs.iter().enumerate() {
+        if let Some(pos) = new_subs.iter().position(|&nc| nc == c) {
+            // Repeat: validate consistent size, accumulate stride.
+            if new_sizes[pos] != in_shape[axis] {
+                return Err(FerrotorchError::ShapeMismatch {
+                    message: format!(
+                        "einsum: repeated index '{c}' addresses incompatible sizes \
+                         {} vs {}",
+                        new_sizes[pos], in_shape[axis]
+                    ),
+                });
+            }
+            let add = in_strides[axis];
+            new_strides[pos] = new_strides[pos].checked_add(add).ok_or_else(|| {
+                FerrotorchError::InvalidArgument {
+                    message: "einsum diagonalisation: stride sum overflowed".into(),
+                }
             })?;
+        } else {
+            // First sighting: introduce as new axis.
+            new_subs.push(c);
+            new_sizes.push(in_shape[axis]);
+            new_strides.push(in_strides[axis]);
+        }
     }
 
-    // Build the diagonal as an as_strided view of shape [N], stride [step]
-    // over the materialised storage, starting at the existing storage offset.
-    // `as_strided` is metadata-only on every device; the materialisation
-    // happens inside `as_strided_copy` via the GPU strided_copy kernel.
-    let diag_view = materialised.as_strided(&[n], &[step], None)?;
-    let diag = diag_view.as_strided_copy(&[n], &[step], None)?;
-
-    if want_diagonal {
-        // "ii->i" — return the diagonal vector directly.
-        return Ok(diag);
-    }
-    // "ii->" or implicit "ii" — reduce to a scalar with sum_dim.
-    crate::grad_fns::reduction::sum_dim(&diag, 0, false)
+    // `as_strided` is metadata-only on every device. `as_strided_copy`
+    // materialises through the existing GPU `strided_copy_f{32,64}`
+    // kernel for CUDA tensors and the CPU walker for host tensors —
+    // both already on-device-correct. We pass `None` for the storage
+    // offset so the new view inherits `input`'s offset.
+    let view = input.as_strided(&new_sizes, &new_strides, None)?;
+    let materialised = view.as_strided_copy(&new_sizes, &new_strides, None)?;
+    Ok((new_subs, materialised))
 }
 
 /// Returns `true` if `chars` contains any character more than once.
@@ -582,23 +644,40 @@ fn einsum_single<T: Float>(
 ///   reshaped to 3-D, contracted with `bmm`, then reshaped + permuted
 ///   back to the requested output layout.
 ///
-/// Equations that fall outside this surface (notably those with input
-/// repeats on a 2-input equation, e.g. `"ii,j->j"`) return
-/// `Err(NotImplementedOnCuda { op: "einsum_general" })` so they surface
-/// as sub-cascades.
+/// Operands with repeated input chars (e.g. `"ii,j->j"`, `"ij,jj->i"`,
+/// `"ii,jk->jk"`) are handled by a pre-pass that diagonalises each
+/// offending operand on-device via [`diagonalize_repeats_gpu`] —
+/// replacing `"ii"` with `"i"`, `"jj"` with `"j"`, etc. — before falling
+/// into the general permute+matmul+reshape decomposition (#825).
 fn einsum_two_gpu<T: Float>(
     parsed: &ParsedEquation,
     a: &Tensor<T>,
     b: &Tensor<T>,
     dim_map: &BTreeMap<char, usize>,
 ) -> FerrotorchResult<Tensor<T>> {
-    let a_subs = &parsed.input_subscripts[0];
-    let b_subs = &parsed.input_subscripts[1];
+    let a_subs_orig = &parsed.input_subscripts[0];
+    let b_subs_orig = &parsed.input_subscripts[1];
     let out_subs = &parsed.output_subscripts;
 
-    // Reject equations with repeated input indices (e.g. "i,i->i" with
-    // a second input that also has repeats) — none of these have a
-    // direct GPU primitive.
+    // Pre-pass for #825: if either operand carries repeated input chars
+    // (e.g. `"ii,j->j"` or `"ij,jj->i"`), diagonalise that operand on-
+    // device first so every remaining char is distinct within each
+    // operand. The diagonalisation reuses the same `as_strided_copy`
+    // (GPU `strided_copy_f{32,64}`) machinery introduced for #821/#824 —
+    // no new primitive surface, no host bounce. After the pre-pass,
+    // every downstream branch (matmul, bmm, vector/Hadamard/outer
+    // shortcuts, the general permute+bmm decomposition) sees operands
+    // with no repeated chars and behaves exactly as it did pre-#825.
+    let (a_subs_owned, a_diagonalised) = diagonalize_repeats_gpu(a_subs_orig, a)?;
+    let (b_subs_owned, b_diagonalised) = diagonalize_repeats_gpu(b_subs_orig, b)?;
+    let a_subs = &a_subs_owned;
+    let b_subs = &b_subs_owned;
+    let a = &a_diagonalised;
+    let b = &b_diagonalised;
+
+    // Safety net: after the pre-pass neither operand should still carry
+    // repeats. If that ever changes we want a structured error rather
+    // than wrong values.
     if has_duplicate_chars(a_subs) || has_duplicate_chars(b_subs) {
         return Err(FerrotorchError::NotImplementedOnCuda {
             op: "einsum_repeated_index",

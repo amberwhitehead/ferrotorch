@@ -413,6 +413,24 @@ fn cascade_skip(
     // fixtures targeted those equations specifically (they would
     // route through `einsum_general`), but the path is now live for
     // any future fixture additions.
+    //
+    // Issue #824 (CLOSED in Final mop-up A2): single-input mixed
+    // repeated/free indices (`"iij->j"`, `"iji->j"`, `"iijk->jk"`,
+    // `"iij->ij"`) decompose on-device via the shared
+    // `diagonalize_repeats_gpu` helper — each repeat-class becomes a
+    // single axis whose stride is the sum of the original strides of
+    // every axis carrying that char, then the standard sum-axes/permute
+    // path handles the rest. No conformance fixtures targeted those
+    // equations directly (they previously errored via
+    // `einsum_repeated_index_mixed`), but the path is now live.
+    //
+    // Issue #825 (CLOSED in Final mop-up A2): two-input einsum with
+    // operand repeats (`"ii,j->j"`, `"ij,jj->i"`, `"ii,jk->jk"`) is
+    // handled by a pre-pass that diagonalises each offending operand
+    // via the same `diagonalize_repeats_gpu` machinery before routing
+    // into the existing 2-input decomposition (#822). No conformance
+    // fixtures targeted those equations directly, but the path is now
+    // live for any future fixture additions.
 
     // Issue #790 (CLOSED in Bugfix Batch 6 / Dispatch A1): the symptom
     // (GPU `reduce(Max/Min)` returning the first row instead of the
