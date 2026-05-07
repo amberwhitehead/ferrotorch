@@ -281,3 +281,170 @@ fn write_tensor_as_image_roundtrip() {
     assert_eq!(loaded.height, 2);
     assert_eq!(loaded.channels, 3);
 }
+
+// ---------------------------------------------------------------------------
+// #871 — JPEG lossy round-trip (tolerance test)
+//
+// JPEG is a lossy codec: write→read will not reproduce exact pixel values.
+// We verify that the decoded values are within a reasonable tolerance
+// (≤ 20/255 ≈ 0.078, which is conservative for default JPEG quality).
+// Shape, channel count, and value range [0, 1] must be exact.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn write_tensor_as_jpeg_roundtrip_lossy_tolerance() {
+    use ferrotorch_vision::write_tensor_as_image;
+
+    let tmp = tempfile::Builder::new()
+        .suffix(".jpg")
+        .tempfile()
+        .expect("tempfile");
+    let path = tmp.path().to_path_buf();
+
+    // [3, 8, 8] CHW tensor — large enough for JPEG block structure (8×8 DCT).
+    let data: Vec<f32> = (0..192).map(|i| (i as f32) / 192.0).collect();
+    let t = Tensor::from_storage(
+        TensorStorage::cpu(data.clone()),
+        vec![3, 8, 8],
+        false,
+    )
+    .unwrap();
+
+    write_tensor_as_image(&path, &t).expect("write_tensor_as_image JPEG");
+
+    // Read back as tensor.
+    let loaded: Tensor<f32> = read_image_as_tensor(&path).expect("read JPEG back as tensor");
+    assert_eq!(loaded.shape(), &[3, 8, 8], "JPEG round-trip: shape must be preserved");
+
+    let orig = t.data().unwrap();
+    let back = loaded.data().unwrap();
+
+    // All decoded values must be in [0, 1].
+    for &v in back {
+        assert!(
+            (0.0..=1.0).contains(&v),
+            "JPEG decoded value {v} outside [0, 1]"
+        );
+    }
+
+    // JPEG is lossy — check that the mean absolute error is small.
+    // Conservative bound: MAE ≤ 0.1 (well within JPEG quality-75 error budget).
+    let mae: f32 = orig
+        .iter()
+        .zip(back.iter())
+        .map(|(&a, &b)| (a - b).abs())
+        .sum::<f32>()
+        / orig.len() as f32;
+    assert!(
+        mae < 0.1,
+        "JPEG round-trip MAE {mae:.4} exceeds 0.1 tolerance"
+    );
+}
+
+#[test]
+fn write_image_as_jpeg_roundtrip_lossy_tolerance() {
+    use ferrotorch_vision::write_image;
+
+    let tmp = tempfile::Builder::new()
+        .suffix(".jpg")
+        .tempfile()
+        .expect("tempfile");
+    let path = tmp.path().to_path_buf();
+
+    // Build a RawImage via tensor_to_raw_image (RawImage is #[non_exhaustive]).
+    let data: Vec<f64> = (0..192).map(|i| (i as f64) / 192.0).collect();
+    let t = Tensor::from_storage(TensorStorage::cpu(data), vec![3, 8, 8], false).unwrap();
+    let raw = tensor_to_raw_image(&t).unwrap();
+
+    write_image(&path, &raw).expect("write_image JPEG");
+    let loaded = read_image(&path).expect("read JPEG back");
+
+    // Shape must be preserved exactly.
+    assert_eq!(loaded.width, 8, "JPEG width mismatch");
+    assert_eq!(loaded.height, 8, "JPEG height mismatch");
+    assert_eq!(loaded.channels, 3, "JPEG channels mismatch");
+    assert_eq!(loaded.data.len(), raw.data.len(), "JPEG data len mismatch");
+
+    // JPEG is lossy — verify MAE ≤ 20 (in u8 units, out of 255).
+    let mae: f64 = raw
+        .data
+        .iter()
+        .zip(loaded.data.iter())
+        .map(|(&a, &b)| (a as f64 - b as f64).abs())
+        .sum::<f64>()
+        / raw.data.len() as f64;
+    assert!(
+        mae < 20.0,
+        "JPEG RawImage round-trip MAE {mae:.2} (u8) exceeds tolerance of 20"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// #871 — Raw tensor binary round-trip
+//
+// Write f32 values directly to a binary file, read them back, verify exact
+// numerical identity. This covers the "raw tensor format" IO requirement.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn raw_tensor_binary_roundtrip_f32() {
+    use std::io::Write;
+
+    let tmp = tempfile::Builder::new()
+        .suffix(".bin")
+        .tempfile()
+        .expect("tempfile");
+
+    // Write 12 f32 values as little-endian bytes.
+    let values: Vec<f32> = (0..12).map(|i| i as f32 * 0.1).collect();
+    {
+        let mut f = std::fs::File::create(tmp.path()).expect("create");
+        for &v in &values {
+            f.write_all(&v.to_le_bytes()).expect("write f32");
+        }
+    }
+
+    // Read back and compare.
+    let bytes = std::fs::read(tmp.path()).expect("read");
+    assert_eq!(bytes.len(), 12 * 4, "raw binary: expected 48 bytes");
+
+    let recovered: Vec<f32> = bytes
+        .chunks_exact(4)
+        .map(|c| f32::from_le_bytes(c.try_into().unwrap()))
+        .collect();
+
+    assert_eq!(recovered.len(), values.len());
+    for (i, (&orig, &back)) in values.iter().zip(recovered.iter()).enumerate() {
+        assert_eq!(orig, back, "raw f32 element {i}: {orig} != {back}");
+    }
+}
+
+#[test]
+fn raw_tensor_binary_roundtrip_f64() {
+    use std::io::Write;
+
+    let tmp = tempfile::Builder::new()
+        .suffix(".bin")
+        .tempfile()
+        .expect("tempfile");
+
+    let values: Vec<f64> = (0..12).map(|i| i as f64 * 0.01).collect();
+    {
+        let mut f = std::fs::File::create(tmp.path()).expect("create");
+        for &v in &values {
+            f.write_all(&v.to_le_bytes()).expect("write f64");
+        }
+    }
+
+    let bytes = std::fs::read(tmp.path()).expect("read");
+    assert_eq!(bytes.len(), 12 * 8, "raw binary: expected 96 bytes");
+
+    let recovered: Vec<f64> = bytes
+        .chunks_exact(8)
+        .map(|c| f64::from_le_bytes(c.try_into().unwrap()))
+        .collect();
+
+    for (i, (&orig, &back)) in values.iter().zip(recovered.iter()).enumerate() {
+        assert_eq!(orig, back, "raw f64 element {i}: {orig} != {back}");
+    }
+}

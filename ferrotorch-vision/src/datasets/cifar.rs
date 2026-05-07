@@ -1,8 +1,22 @@
 //! CIFAR-10 and CIFAR-100 image classification datasets.
 //!
 //! Provides the CIFAR-10 (10 classes) and CIFAR-100 (100 classes) datasets of
-//! 32x32 colour images. Currently supports synthetic data generation for
-//! pipeline testing.
+//! 32x32 colour images. Supports loading from the official binary batch files
+//! on disk and generating synthetic data for pipeline testing.
+//!
+//! # CIFAR-10 binary batch format
+//!
+//! Each batch file contains a sequence of samples. Each sample is:
+//! - 1 byte: class label (0..9)
+//! - 3072 bytes: pixel data in channel-major order — the full R plane
+//!   (32×32 = 1024 bytes), then G, then B.
+//!
+//! # CIFAR-100 binary batch format
+//!
+//! Same as CIFAR-10 but each sample header is 2 bytes:
+//! - 1 byte: coarse label (0..19)  — stored but unused (we expose fine label)
+//! - 1 byte: fine label (0..99)
+//! - 3072 bytes: pixel data
 //!
 //! # Example
 //!
@@ -20,6 +34,8 @@
 //! let s = c100.get(0).unwrap();
 //! assert!(s.label < 100);
 //! ```
+
+use std::path::Path;
 
 use ferrotorch_core::numeric_cast::cast;
 use ferrotorch_core::{FerrotorchError, FerrotorchResult, Float, Tensor, TensorStorage};
@@ -97,6 +113,46 @@ impl<T: Float> Cifar10<T> {
             0xc1fa_0010_0001,
             0xc1fa_0010_0002,
         )?;
+        Ok(Self {
+            images,
+            labels,
+            split,
+        })
+    }
+
+    /// Load CIFAR-10 from binary batch files in `root`.
+    ///
+    /// Reads the standard CIFAR-10 binary layout:
+    /// - Train: `data_batch_1.bin` … `data_batch_5.bin`
+    /// - Test:  `test_batch.bin`
+    ///
+    /// Each sample in a batch file is 1 label byte + 3072 pixel bytes
+    /// (channel-major R→G→B, each plane 32×32). Pixel values are normalized
+    /// to `[0, 1]` by dividing by 255.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if any batch file is missing or contains invalid data.
+    pub fn from_dir<P: AsRef<Path>>(root: P, split: Split) -> FerrotorchResult<Self> {
+        let root = root.as_ref();
+        let batch_files: Vec<&str> = match split {
+            Split::Train => vec![
+                "data_batch_1.bin",
+                "data_batch_2.bin",
+                "data_batch_3.bin",
+                "data_batch_4.bin",
+                "data_batch_5.bin",
+            ],
+            Split::Test => vec!["test_batch.bin"],
+        };
+
+        let (images, labels) = load_cifar_batches::<T>(
+            root,
+            &batch_files,
+            CifarFormat::Cifar10,
+            Self::NUM_CLASSES,
+        )?;
+
         Ok(Self {
             images,
             labels,
@@ -184,6 +240,41 @@ impl<T: Float> Cifar100<T> {
         })
     }
 
+    /// Load CIFAR-100 from binary batch files in `root`.
+    ///
+    /// Reads the standard CIFAR-100 binary layout:
+    /// - Train: `train.bin`
+    /// - Test:  `test.bin`
+    ///
+    /// Each sample in a batch file is 2 label bytes (coarse, fine) + 3072
+    /// pixel bytes (channel-major R→G→B, each plane 32×32). Only the fine
+    /// label (0..99) is exposed; the coarse label is discarded. Pixel values
+    /// are normalized to `[0, 1]` by dividing by 255.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the batch file is missing or contains invalid data.
+    pub fn from_dir<P: AsRef<Path>>(root: P, split: Split) -> FerrotorchResult<Self> {
+        let root = root.as_ref();
+        let batch_files: Vec<&str> = match split {
+            Split::Train => vec!["train.bin"],
+            Split::Test => vec!["test.bin"],
+        };
+
+        let (images, labels) = load_cifar_batches::<T>(
+            root,
+            &batch_files,
+            CifarFormat::Cifar100,
+            Self::NUM_CLASSES,
+        )?;
+
+        Ok(Self {
+            images,
+            labels,
+            split,
+        })
+    }
+
     /// Which split this dataset represents.
     pub fn split(&self) -> Split {
         self.split
@@ -210,6 +301,109 @@ impl<T: Float + 'static> Dataset for Cifar100<T> {
             label: self.labels[index],
         })
     }
+}
+
+// ---------------------------------------------------------------------------
+// Binary batch reader
+// ---------------------------------------------------------------------------
+
+/// Selects the on-disk sample layout for CIFAR-10 vs CIFAR-100.
+#[derive(Clone, Copy)]
+enum CifarFormat {
+    /// CIFAR-10: 1 label byte + 3072 pixel bytes per sample.
+    Cifar10,
+    /// CIFAR-100: 2 label bytes (coarse, fine) + 3072 pixel bytes per sample.
+    Cifar100,
+}
+
+/// Number of bytes in the image portion of every CIFAR sample (3 × 32 × 32).
+const BYTES_PER_IMAGE: usize = CHANNELS * HEIGHT * WIDTH;
+
+/// Load images and labels from one or more CIFAR binary batch files.
+///
+/// `batch_files` lists relative file names inside `root`. Files are
+/// concatenated in the order given.
+fn load_cifar_batches<T: Float>(
+    root: &Path,
+    batch_files: &[&str],
+    format: CifarFormat,
+    num_classes: usize,
+) -> FerrotorchResult<(Vec<Tensor<T>>, Vec<u8>)> {
+    let header_bytes = match format {
+        CifarFormat::Cifar10 => 1usize,
+        CifarFormat::Cifar100 => 2usize,
+    };
+    let bytes_per_sample = header_bytes + BYTES_PER_IMAGE;
+
+    let mut images: Vec<Tensor<T>> = Vec::new();
+    let mut labels: Vec<u8> = Vec::new();
+
+    for &file_name in batch_files {
+        let path = root.join(file_name);
+        if !path.exists() {
+            return Err(FerrotorchError::InvalidArgument {
+                message: format!(
+                    "CIFAR batch file not found: '{}'. \
+                     Automatic download is not yet supported.",
+                    path.display(),
+                ),
+            });
+        }
+
+        let bytes = std::fs::read(&path).map_err(|e| FerrotorchError::InvalidArgument {
+            message: format!("failed to read '{}': {e}", path.display()),
+        })?;
+
+        if bytes.len() % bytes_per_sample != 0 {
+            return Err(FerrotorchError::InvalidArgument {
+                message: format!(
+                    "batch file '{}': length {} is not a multiple of sample size {}",
+                    path.display(),
+                    bytes.len(),
+                    bytes_per_sample,
+                ),
+            });
+        }
+
+        let n_samples = bytes.len() / bytes_per_sample;
+        let inv_255 = 1.0_f64 / 255.0;
+
+        for i in 0..n_samples {
+            let sample_start = i * bytes_per_sample;
+
+            // Extract label — for CIFAR-100 the fine label is the second byte.
+            let label = match format {
+                CifarFormat::Cifar10 => bytes[sample_start],
+                CifarFormat::Cifar100 => bytes[sample_start + 1],
+            };
+            if label as usize >= num_classes {
+                return Err(FerrotorchError::InvalidArgument {
+                    message: format!(
+                        "batch file '{}': sample {i} has label {label} >= num_classes {num_classes}",
+                        path.display(),
+                    ),
+                });
+            }
+
+            // Pixel data follows the header bytes.
+            let pixel_start = sample_start + header_bytes;
+            let raw_pixels = &bytes[pixel_start..pixel_start + BYTES_PER_IMAGE];
+
+            // Pixels are already in channel-major order (R plane, then G, then B).
+            let data: Vec<T> = raw_pixels
+                .iter()
+                .map(|&b| cast::<f64, T>(b as f64 * inv_255))
+                .collect::<FerrotorchResult<Vec<T>>>()?;
+
+            let storage = TensorStorage::cpu(data);
+            let tensor =
+                Tensor::from_storage(storage, vec![CHANNELS, HEIGHT, WIDTH], false)?;
+            images.push(tensor);
+            labels.push(label);
+        }
+    }
+
+    Ok((images, labels))
 }
 
 // ---------------------------------------------------------------------------
