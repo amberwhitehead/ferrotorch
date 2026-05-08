@@ -7,6 +7,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ## [Unreleased]
 
 ### Changed
+- Phase 5: Conv2d::new_full with groups + dilation params (CPU-only, GPU stays groups=1 dilation=1) (#1002)
 - Phase 4: ViT remap (#999) + named_children sweep (#995) + ResNet50 pretrained-weights upgrade (#1001)
 - Align ferrotorch ViT-B/16 named_parameters schema with torchvision vit_b_16 (#999)
 - ferrotorch-vision: model Module impls don't override named_children/children, so generic state-dict loaders see empty descendants_dyn() trees (#995)
