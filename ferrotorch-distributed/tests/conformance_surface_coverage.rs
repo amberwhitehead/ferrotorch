@@ -33,7 +33,10 @@ struct SurfaceInventory {
 struct SurfaceItem {
     path: String,
     kind: String,
-    #[allow(dead_code, reason = "deserialized for forward-compat with future reporting")]
+    #[allow(
+        dead_code,
+        reason = "deserialized for forward-compat with future reporting"
+    )]
     signature: String,
 }
 
@@ -86,8 +89,7 @@ fn read_exclusions() -> Vec<Exclusion> {
     if !p.exists() {
         return Vec::new();
     }
-    let body =
-        fs::read_to_string(&p).unwrap_or_else(|e| panic!("read {}: {e}", p.display()));
+    let body = fs::read_to_string(&p).unwrap_or_else(|e| panic!("read {}: {e}", p.display()));
     let parsed: ExclusionsFile =
         toml::from_str(&body).unwrap_or_else(|e| panic!("parse {}: {e}", p.display()));
     parsed.exclusions

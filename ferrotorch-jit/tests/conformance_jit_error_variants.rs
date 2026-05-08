@@ -62,7 +62,9 @@ fn neg_graph() -> IrGraph {
 /// The variant constructs correctly and its Display contains the op name.
 #[test]
 fn data_dependent_control_flow_display_contains_op() {
-    let e = JitError::DataDependentControlFlow { op: "torch.where".to_string() };
+    let e = JitError::DataDependentControlFlow {
+        op: "torch.where".to_string(),
+    };
     let msg = e.to_string();
     assert!(
         msg.contains("data-dependent control flow"),
@@ -77,7 +79,9 @@ fn data_dependent_control_flow_display_contains_op() {
 /// `From<JitError> for FerrotorchError` preserves the message.
 #[test]
 fn data_dependent_control_flow_converts_to_ferrotorch_error() {
-    let jit_err = JitError::DataDependentControlFlow { op: "dynamic_select".to_string() };
+    let jit_err = JitError::DataDependentControlFlow {
+        op: "dynamic_select".to_string(),
+    };
     let ft_err: FerrotorchError = jit_err.into();
     let msg = ft_err.to_string();
     assert!(
@@ -89,7 +93,9 @@ fn data_dependent_control_flow_converts_to_ferrotorch_error() {
 /// The `op` field is accessible by pattern matching.
 #[test]
 fn data_dependent_control_flow_field_access() {
-    let e = JitError::DataDependentControlFlow { op: "masked_fill".to_string() };
+    let e = JitError::DataDependentControlFlow {
+        op: "masked_fill".to_string(),
+    };
     match e {
         JitError::DataDependentControlFlow { op } => {
             assert_eq!(op, "masked_fill");
@@ -101,7 +107,9 @@ fn data_dependent_control_flow_field_access() {
 /// Display message explicitly requires static control flow.
 #[test]
 fn data_dependent_control_flow_display_mentions_static_control_flow() {
-    let e = JitError::DataDependentControlFlow { op: "if_else".to_string() };
+    let e = JitError::DataDependentControlFlow {
+        op: "if_else".to_string(),
+    };
     let msg = e.to_string();
     assert!(
         msg.contains("static control flow"),
@@ -165,9 +173,15 @@ fn recompilation_error_field_access() {
 /// Empty shape vector is valid — scalar recompilation.
 #[test]
 fn recompilation_error_empty_shape() {
-    let e = JitError::RecompilationError { shape: vec![], message: "scalar recompile".to_string() };
+    let e = JitError::RecompilationError {
+        shape: vec![],
+        message: "scalar recompile".to_string(),
+    };
     let msg = e.to_string();
-    assert!(msg.contains("recompilation failed"), "unexpected Display: {msg}");
+    assert!(
+        msg.contains("recompilation failed"),
+        "unexpected Display: {msg}"
+    );
 }
 
 // ===========================================================================
@@ -271,21 +285,26 @@ fn gpu_backend_unavailable_opt_in_cpu_fallback_pattern() {
     // "GPU not wired" variant; all other errors propagate.
     let compiled = match result {
         Ok(c) => c,
-        Err(ref e) if e.to_string().contains("GPU backend unavailable")
-            || e.to_string().contains("GpuCuda")
-            || e.to_string().contains("GpuPtx")
-            || e.to_string().contains("not yet wire") =>
+        Err(ref e)
+            if e.to_string().contains("GPU backend unavailable")
+                || e.to_string().contains("GpuCuda")
+                || e.to_string().contains("GpuPtx")
+                || e.to_string().contains("not yet wire") =>
         {
             // Opt-in CPU fallback: compile on CPU instead.
             let cpu_backend = InductorBackend::new(InductorTarget::CpuRust);
-            cpu_backend.compile(&g).expect("CPU fallback compile must succeed")
+            cpu_backend
+                .compile(&g)
+                .expect("CPU fallback compile must succeed")
         }
         Err(e) => panic!("unexpected non-GPU-unavailable error: {e}"),
     };
 
     // Verify the CPU-compiled graph executes.
     let inputs: Vec<Vec<f64>> = vec![vec![-1.0, 2.0, -3.0, 4.0]];
-    let output = compiled.execute(&inputs).expect("compiled graph execute must succeed");
+    let output = compiled
+        .execute(&inputs)
+        .expect("compiled graph execute must succeed");
     // relu(-1, 2, -3, 4) = (0, 2, 0, 4)
     assert_eq!(output.len(), 4);
 }

@@ -129,7 +129,9 @@ fn every_public_item_has_a_conformance_reference_or_exclusion() {
     let tests_dir: PathBuf = [env!("CARGO_MANIFEST_DIR"), "tests"].iter().collect();
 
     // 1. Load surface inventory.
-    let inventory_path = tests_dir.join("conformance").join("_surface_inventory.toml");
+    let inventory_path = tests_dir
+        .join("conformance")
+        .join("_surface_inventory.toml");
     let inventory_raw = std::fs::read_to_string(&inventory_path).unwrap_or_else(|e| {
         panic!(
             "Cannot read surface inventory at {}: {e}",
@@ -140,7 +142,9 @@ fn every_public_item_has_a_conformance_reference_or_exclusion() {
     let all_items: HashSet<String> = inventory_phases.keys().cloned().collect();
 
     // 2. Load exclusions.
-    let exclusions_path = tests_dir.join("conformance").join("_surface_exclusions.toml");
+    let exclusions_path = tests_dir
+        .join("conformance")
+        .join("_surface_exclusions.toml");
     let exclusions_raw = std::fs::read_to_string(&exclusions_path).unwrap_or_else(|e| {
         panic!(
             "Cannot read exclusions file at {}: {e}",
@@ -183,11 +187,7 @@ fn every_public_item_has_a_conformance_reference_or_exclusion() {
     }
 
     // Combined text across all present files — used for soft-warn matching.
-    let combined_text: String = phase_text
-        .values()
-        .cloned()
-        .collect::<Vec<_>>()
-        .join("\n");
+    let combined_text: String = phase_text.values().cloned().collect::<Vec<_>>().join("\n");
 
     // C9.4 file must be present since we own it.
     let c94_text = phase_text
@@ -211,14 +211,12 @@ fn every_public_item_has_a_conformance_reference_or_exclusion() {
 
         // Leaf name is the last `::` segment.  Match on leaf OR full path.
         let leaf = item.rsplit("::").next().unwrap_or(item.as_str());
-        let in_combined =
-            combined_text.contains(leaf) || combined_text.contains(item.as_str());
+        let in_combined = combined_text.contains(leaf) || combined_text.contains(item.as_str());
 
         match phase {
             "C9.4" => {
                 // Hard: C9.4 file is present, must reference the item.
-                let referenced =
-                    c94_text.contains(leaf) || c94_text.contains(item.as_str());
+                let referenced = c94_text.contains(leaf) || c94_text.contains(item.as_str());
                 if !referenced {
                     uncovered_hard.push(format!("{item} (leaf={leaf})"));
                 }
@@ -249,9 +247,7 @@ fn every_public_item_has_a_conformance_reference_or_exclusion() {
         for (path, phase) in &uncovered_soft {
             eprintln!("  [{phase}] {path}");
         }
-        eprintln!(
-            "  Items in absent-file phases become hard failures once those files land."
-        );
+        eprintln!("  Items in absent-file phases become hard failures once those files land.");
     }
 
     // Hard failures.
@@ -374,7 +370,9 @@ fn c9_4_key_names_all_referenced() {
 fn surface_inventory_and_exclusions_are_readable() {
     let tests_dir: PathBuf = [env!("CARGO_MANIFEST_DIR"), "tests"].iter().collect();
 
-    let inventory_path = tests_dir.join("conformance").join("_surface_inventory.toml");
+    let inventory_path = tests_dir
+        .join("conformance")
+        .join("_surface_inventory.toml");
     let inventory_raw =
         std::fs::read_to_string(&inventory_path).expect("_surface_inventory.toml must be readable");
     let phases = extract_inventory_phases(&inventory_raw);
@@ -391,7 +389,9 @@ fn surface_inventory_and_exclusions_are_readable() {
         "inventory has only {c94_count} C9.4 items (expected ≥10)"
     );
 
-    let exclusions_path = tests_dir.join("conformance").join("_surface_exclusions.toml");
+    let exclusions_path = tests_dir
+        .join("conformance")
+        .join("_surface_exclusions.toml");
     let exclusions_raw = std::fs::read_to_string(&exclusions_path)
         .expect("_surface_exclusions.toml must be readable");
     let excluded = extract_toml_paths(&exclusions_raw);
@@ -460,7 +460,10 @@ fn peer_conformance_files_presence_report() {
         eprintln!("  Gate will enforce hard-fail once these files land.");
     }
     if !present.is_empty() {
-        eprintln!("peer_presence: present peer files for phases: {:?}", present);
+        eprintln!(
+            "peer_presence: present peer files for phases: {:?}",
+            present
+        );
     }
 
     // This test always passes — its purpose is the eprintln diagnostic.
@@ -486,9 +489,7 @@ fn c9_4_fixture_file_present_and_non_empty() {
     .collect();
 
     let raw = std::fs::read_to_string(&fixture_path).unwrap_or_else(|e| {
-        panic!(
-            "nn_attention.json missing — run scripts/regenerate_nn_attention_fixtures.py: {e}"
-        )
+        panic!("nn_attention.json missing — run scripts/regenerate_nn_attention_fixtures.py: {e}")
     });
 
     // Must contain at least some fixture entries.

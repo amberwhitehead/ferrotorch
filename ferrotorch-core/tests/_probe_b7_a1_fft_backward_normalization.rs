@@ -20,13 +20,13 @@
 //! Pre-fix: this probe should fail for Rfft / Irfft / Rfftn / Irfftn / Hfft.
 //! Post-fix: every assertion within `F64_FFT_GRAD = 1e-9`.
 
+use ferrotorch_core::TensorStorage;
 use ferrotorch_core::grad_fns::fft::{
     hfft_differentiable, ihfft_differentiable, irfft_differentiable, irfftn_differentiable,
     rfft_differentiable, rfftn_differentiable,
 };
 use ferrotorch_core::grad_fns::reduction::sum as sum_loss;
 use ferrotorch_core::tensor::Tensor;
-use ferrotorch_core::TensorStorage;
 
 const F64_FFT_GRAD: f64 = 1e-9;
 
@@ -131,9 +131,7 @@ fn probe_rfftn_backward_3x4() {
     // From PyTorch: torch.fft.rfftn of [3,4] real has output [3, 3, 2].
     // Loss = sum(re) + sum(im). grad pattern (per fixture `ndim_2_3x4`):
     //   [9, -3, 3, 3, 0, 0, 0, 0, 0, 0, 0, 0]
-    let expected = [
-        9.0, -3.0, 3.0, 3.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
-    ];
+    let expected = [9.0, -3.0, 3.0, 3.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0];
     assert_close("rfftn 3x4", &g_data, &expected, F64_FFT_GRAD);
 }
 

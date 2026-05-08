@@ -763,11 +763,7 @@ pub fn fftn<T: Float>(
                     } else {
                         backend.fftn2d_c2c_f64(input.gpu_handle()?, h, w, false)?
                     };
-                    return Tensor::from_storage(
-                        TensorStorage::gpu(h_out),
-                        shape.to_vec(),
-                        false,
-                    );
+                    return Tensor::from_storage(TensorStorage::gpu(h_out), shape.to_vec(), false);
                 }
                 if spatial_ndim == 3 {
                     let d = shape[0];
@@ -778,11 +774,7 @@ pub fn fftn<T: Float>(
                     } else {
                         backend.fftn3d_c2c_f64(input.gpu_handle()?, d, h, w, false)?
                     };
-                    return Tensor::from_storage(
-                        TensorStorage::gpu(h_out),
-                        shape.to_vec(),
-                        false,
-                    );
+                    return Tensor::from_storage(TensorStorage::gpu(h_out), shape.to_vec(), false);
                 }
             } else if let Some(ax) = axes {
                 // Axes-override path (#966): normalize isize axes to usize.
@@ -810,9 +802,7 @@ pub fn fftn<T: Float>(
                     (spatial_ndim - r..spatial_ndim).collect();
                 let axes_set: std::collections::HashSet<usize> =
                     norm_axes.iter().copied().collect();
-                if norm_axes.iter().all(|&a| a < spatial_ndim)
-                    && axes_set == innermost_set
-                {
+                if norm_axes.iter().all(|&a| a < spatial_ndim) && axes_set == innermost_set {
                     // Sort axes ascending so cufftPlanMany rank matches shape order.
                     let mut sorted_axes = norm_axes.clone();
                     sorted_axes.sort_unstable();
@@ -832,11 +822,7 @@ pub fn fftn<T: Float>(
                             false,
                         )?
                     };
-                    return Tensor::from_storage(
-                        TensorStorage::gpu(h_out),
-                        shape.to_vec(),
-                        false,
-                    );
+                    return Tensor::from_storage(TensorStorage::gpu(h_out), shape.to_vec(), false);
                 }
             }
         }
@@ -883,11 +869,7 @@ pub fn ifftn<T: Float>(
                     } else {
                         backend.fftn2d_c2c_f64(input.gpu_handle()?, h, w, true)?
                     };
-                    return Tensor::from_storage(
-                        TensorStorage::gpu(h_out),
-                        shape.to_vec(),
-                        false,
-                    );
+                    return Tensor::from_storage(TensorStorage::gpu(h_out), shape.to_vec(), false);
                 }
                 if spatial_ndim == 3 {
                     let d = shape[0];
@@ -898,11 +880,7 @@ pub fn ifftn<T: Float>(
                     } else {
                         backend.fftn3d_c2c_f64(input.gpu_handle()?, d, h, w, true)?
                     };
-                    return Tensor::from_storage(
-                        TensorStorage::gpu(h_out),
-                        shape.to_vec(),
-                        false,
-                    );
+                    return Tensor::from_storage(TensorStorage::gpu(h_out), shape.to_vec(), false);
                 }
             } else if let Some(ax) = axes {
                 let norm_axes: Vec<usize> = ax
@@ -923,9 +901,7 @@ pub fn ifftn<T: Float>(
                     (spatial_ndim - r..spatial_ndim).collect();
                 let axes_set: std::collections::HashSet<usize> =
                     norm_axes.iter().copied().collect();
-                if norm_axes.iter().all(|&a| a < spatial_ndim)
-                    && axes_set == innermost_set
-                {
+                if norm_axes.iter().all(|&a| a < spatial_ndim) && axes_set == innermost_set {
                     let mut sorted_axes = norm_axes.clone();
                     sorted_axes.sort_unstable();
                     let spatial_shape = &shape[..spatial_ndim];
@@ -944,11 +920,7 @@ pub fn ifftn<T: Float>(
                             true,
                         )?
                     };
-                    return Tensor::from_storage(
-                        TensorStorage::gpu(h_out),
-                        shape.to_vec(),
-                        false,
-                    );
+                    return Tensor::from_storage(TensorStorage::gpu(h_out), shape.to_vec(), false);
                 }
             }
         }
@@ -1038,8 +1010,8 @@ pub fn hfft<T: Float>(input: &Tensor<T>, n: Option<usize>) -> FerrotorchResult<T
             if half_in == n_out / 2 + 1 {
                 let batch_shape = &shape[..ndim - 2];
                 let batch_size: usize = batch_shape.iter().product::<usize>().max(1);
-                let backend = crate::gpu_dispatch::gpu_backend()
-                    .ok_or(FerrotorchError::DeviceUnavailable)?;
+                let backend =
+                    crate::gpu_dispatch::gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
                 let h_out = if is_f32::<T>() {
                     backend.hfft_f32(input.gpu_handle()?, batch_size, half_in, n_out)?
                 } else {
@@ -1085,8 +1057,8 @@ pub fn ihfft<T: Float>(input: &Tensor<T>, n: Option<usize>) -> FerrotorchResult<
             if fft_n == input_n {
                 let batch_shape = &shape[..ndim - 1];
                 let batch_size: usize = batch_shape.iter().product::<usize>().max(1);
-                let backend = crate::gpu_dispatch::gpu_backend()
-                    .ok_or(FerrotorchError::DeviceUnavailable)?;
+                let backend =
+                    crate::gpu_dispatch::gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
                 let h_out = if is_f32::<T>() {
                     backend.ihfft_f32(input.gpu_handle()?, batch_size, fft_n)?
                 } else {

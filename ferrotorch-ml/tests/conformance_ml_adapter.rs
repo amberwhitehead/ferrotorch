@@ -112,12 +112,8 @@ fn tensor_to_array1_matches_reference() {
     let shape = f.shape.as_ref().expect("shape");
     let expected_flat = f.expected_flat.as_ref().expect("expected_flat");
 
-    let t = Tensor::from_storage(
-        TensorStorage::cpu(input_flat.clone()),
-        shape.clone(),
-        false,
-    )
-    .expect("build tensor");
+    let t = Tensor::from_storage(TensorStorage::cpu(input_flat.clone()), shape.clone(), false)
+        .expect("build tensor");
     let arr = tensor_to_array1(&t).expect("tensor_to_array1");
 
     assert_eq!(arr.len(), expected_flat.len(), "tensor_to_array1: length");
@@ -156,12 +152,8 @@ fn tensor_to_array2_matches_reference() {
     let shape = f.shape.as_ref().expect("shape");
     let expected_flat = f.expected_flat.as_ref().expect("expected_flat");
 
-    let t = Tensor::from_storage(
-        TensorStorage::cpu(input_flat.clone()),
-        shape.clone(),
-        false,
-    )
-    .expect("build tensor");
+    let t = Tensor::from_storage(TensorStorage::cpu(input_flat.clone()), shape.clone(), false)
+        .expect("build tensor");
     let arr = tensor_to_array2(&t).expect("tensor_to_array2");
 
     assert_eq!(arr.shape(), shape.as_slice(), "array shape");
@@ -255,12 +247,8 @@ fn tensor_to_array2_rejects_1d_input() {
 
 #[test]
 fn tensor_to_array1_usize_rejects_negative() {
-    let t = Tensor::from_storage(
-        TensorStorage::cpu(vec![0.0_f64, 1.0, -1.0]),
-        vec![3],
-        false,
-    )
-    .expect("build tensor");
+    let t = Tensor::from_storage(TensorStorage::cpu(vec![0.0_f64, 1.0, -1.0]), vec![3], false)
+        .expect("build tensor");
     assert!(
         tensor_to_array1_usize(&t).is_err(),
         "tensor_to_array1_usize must reject negative values"
@@ -269,12 +257,8 @@ fn tensor_to_array1_usize_rejects_negative() {
 
 #[test]
 fn tensor_to_array1_usize_rejects_nan() {
-    let t = Tensor::from_storage(
-        TensorStorage::cpu(vec![0.0_f64, f64::NAN]),
-        vec![2],
-        false,
-    )
-    .expect("build tensor");
+    let t = Tensor::from_storage(TensorStorage::cpu(vec![0.0_f64, f64::NAN]), vec![2], false)
+        .expect("build tensor");
     assert!(
         tensor_to_array1_usize(&t).is_err(),
         "tensor_to_array1_usize must reject NaN"
@@ -292,12 +276,8 @@ fn adapter_1d_round_trip_identity() {
     let input_flat = f.input_flat.as_ref().expect("input_flat");
     let shape = f.shape.as_ref().expect("shape");
 
-    let t_in = Tensor::from_storage(
-        TensorStorage::cpu(input_flat.clone()),
-        shape.clone(),
-        false,
-    )
-    .expect("build tensor");
+    let t_in = Tensor::from_storage(TensorStorage::cpu(input_flat.clone()), shape.clone(), false)
+        .expect("build tensor");
     let arr = tensor_to_array1(&t_in).expect("to array");
     let t_out = array1_to_tensor(arr).expect("back to tensor");
 
@@ -312,12 +292,8 @@ fn adapter_2d_round_trip_identity() {
     let input_flat = f.input_flat.as_ref().expect("input_flat");
     let shape = f.shape.as_ref().expect("shape");
 
-    let t_in = Tensor::from_storage(
-        TensorStorage::cpu(input_flat.clone()),
-        shape.clone(),
-        false,
-    )
-    .expect("build tensor");
+    let t_in = Tensor::from_storage(TensorStorage::cpu(input_flat.clone()), shape.clone(), false)
+        .expect("build tensor");
     let arr = tensor_to_array2(&t_in).expect("to array2");
     let t_out = array2_to_tensor(arr).expect("back to tensor");
 

@@ -85,21 +85,33 @@ fn cpu_f64(data: Vec<f64>, shape: &[usize]) -> Tensor<f64> {
 
 /// Build a CPU f32 tensor with requires_grad (for reference CPU backward).
 fn cpu_f32_grad(data: Vec<f32>, shape: &[usize]) -> Tensor<f32> {
-    from_vec(data, shape).expect("from_vec").requires_grad_(true)
+    from_vec(data, shape)
+        .expect("from_vec")
+        .requires_grad_(true)
 }
 
 /// Build a CPU f64 tensor with requires_grad.
 fn cpu_f64_grad(data: Vec<f64>, shape: &[usize]) -> Tensor<f64> {
-    from_vec(data, shape).expect("from_vec").requires_grad_(true)
+    from_vec(data, shape)
+        .expect("from_vec")
+        .requires_grad_(true)
 }
 
 fn read_f32(t: &Tensor<f32>) -> Vec<f32> {
-    let cpu = if t.is_cuda() { t.cpu().expect("d2h") } else { t.clone() };
+    let cpu = if t.is_cuda() {
+        t.cpu().expect("d2h")
+    } else {
+        t.clone()
+    };
     cpu.data().expect("read").to_vec()
 }
 
 fn read_f64(t: &Tensor<f64>) -> Vec<f64> {
-    let cpu = if t.is_cuda() { t.cpu().expect("d2h") } else { t.clone() };
+    let cpu = if t.is_cuda() {
+        t.cpu().expect("d2h")
+    } else {
+        t.clone()
+    };
     cpu.data().expect("read").to_vec()
 }
 
@@ -134,12 +146,22 @@ fn mv_backward_f32_gpu_stays_on_device() {
     let x_cpu = cpu_f32_grad(x_data.clone(), &[4]);
     let y_cpu = mv_differentiable(&a_cpu, &x_cpu).expect("mv cpu");
     let seed_cpu = cpu_f32(vec![1.0; 3], &[3]);
-    let grads_cpu = y_cpu.grad_fn().unwrap().backward(&seed_cpu).expect("mv cpu backward");
+    let grads_cpu = y_cpu
+        .grad_fn()
+        .unwrap()
+        .backward(&seed_cpu)
+        .expect("mv cpu backward");
 
-    for (g, c) in read_f32(grad_a).iter().zip(read_f32(grads_cpu[0].as_ref().unwrap()).iter()) {
+    for (g, c) in read_f32(grad_a)
+        .iter()
+        .zip(read_f32(grads_cpu[0].as_ref().unwrap()).iter())
+    {
         assert!((g - c).abs() < F32_GRAD, "grad_A mismatch: {g} vs {c}");
     }
-    for (g, c) in read_f32(grad_x).iter().zip(read_f32(grads_cpu[1].as_ref().unwrap()).iter()) {
+    for (g, c) in read_f32(grad_x)
+        .iter()
+        .zip(read_f32(grads_cpu[1].as_ref().unwrap()).iter())
+    {
         assert!((g - c).abs() < F32_GRAD, "grad_x mismatch: {g} vs {c}");
     }
 }
@@ -154,16 +176,30 @@ fn mv_backward_f64_gpu_stays_on_device() {
 
     let y_gpu = mv_differentiable(&a_gpu, &x_gpu).expect("mv f64 forward gpu");
     let seed_gpu = gpu_f64(vec![1.0; 2], &[2]);
-    let grads = y_gpu.grad_fn().unwrap().backward(&seed_gpu).expect("mv f64 backward gpu");
+    let grads = y_gpu
+        .grad_fn()
+        .unwrap()
+        .backward(&seed_gpu)
+        .expect("mv f64 backward gpu");
 
-    assert!(grads[0].as_ref().unwrap().is_cuda(), "grad_A f64 must be on CUDA — §3");
-    assert!(grads[1].as_ref().unwrap().is_cuda(), "grad_x f64 must be on CUDA — §3");
+    assert!(
+        grads[0].as_ref().unwrap().is_cuda(),
+        "grad_A f64 must be on CUDA — §3"
+    );
+    assert!(
+        grads[1].as_ref().unwrap().is_cuda(),
+        "grad_x f64 must be on CUDA — §3"
+    );
 
     let a_cpu = cpu_f64_grad(a_data.clone(), &[2, 3]);
     let x_cpu = cpu_f64_grad(x_data.clone(), &[3]);
     let y_cpu = mv_differentiable(&a_cpu, &x_cpu).expect("mv f64 cpu");
     let seed_cpu = cpu_f64(vec![1.0; 2], &[2]);
-    let grads_cpu = y_cpu.grad_fn().unwrap().backward(&seed_cpu).expect("mv f64 cpu backward");
+    let grads_cpu = y_cpu
+        .grad_fn()
+        .unwrap()
+        .backward(&seed_cpu)
+        .expect("mv f64 cpu backward");
 
     for (g, c) in read_f64(grads[0].as_ref().unwrap())
         .iter()
@@ -188,7 +224,11 @@ fn dot_backward_f32_gpu_stays_on_device() {
     let s_gpu = dot_differentiable(&a_gpu, &b_gpu).expect("dot forward gpu");
     // scalar seed on GPU
     let seed_gpu = gpu_f32(vec![1.0], &[]);
-    let grads = s_gpu.grad_fn().unwrap().backward(&seed_gpu).expect("dot backward gpu");
+    let grads = s_gpu
+        .grad_fn()
+        .unwrap()
+        .backward(&seed_gpu)
+        .expect("dot backward gpu");
 
     let grad_a = grads[0].as_ref().unwrap();
     let grad_b = grads[1].as_ref().unwrap();
@@ -199,12 +239,22 @@ fn dot_backward_f32_gpu_stays_on_device() {
     let b_cpu = cpu_f32_grad(b_data.clone(), &[4]);
     let s_cpu = dot_differentiable(&a_cpu, &b_cpu).expect("cpu dot");
     let seed_cpu = cpu_f32(vec![1.0], &[]);
-    let grads_cpu = s_cpu.grad_fn().unwrap().backward(&seed_cpu).expect("cpu dot backward");
+    let grads_cpu = s_cpu
+        .grad_fn()
+        .unwrap()
+        .backward(&seed_cpu)
+        .expect("cpu dot backward");
 
-    for (g, c) in read_f32(grad_a).iter().zip(read_f32(grads_cpu[0].as_ref().unwrap()).iter()) {
+    for (g, c) in read_f32(grad_a)
+        .iter()
+        .zip(read_f32(grads_cpu[0].as_ref().unwrap()).iter())
+    {
         assert!((g - c).abs() < F32_GRAD, "dot grad_a mismatch: {g} vs {c}");
     }
-    for (g, c) in read_f32(grad_b).iter().zip(read_f32(grads_cpu[1].as_ref().unwrap()).iter()) {
+    for (g, c) in read_f32(grad_b)
+        .iter()
+        .zip(read_f32(grads_cpu[1].as_ref().unwrap()).iter())
+    {
         assert!((g - c).abs() < F32_GRAD, "dot grad_b mismatch: {g} vs {c}");
     }
 }
@@ -219,10 +269,20 @@ fn dot_backward_f64_gpu_stays_on_device() {
 
     let s_gpu = dot_differentiable(&a_gpu, &b_gpu).expect("dot f64 gpu");
     let seed_gpu = gpu_f64(vec![1.0], &[]);
-    let grads = s_gpu.grad_fn().unwrap().backward(&seed_gpu).expect("dot f64 backward gpu");
+    let grads = s_gpu
+        .grad_fn()
+        .unwrap()
+        .backward(&seed_gpu)
+        .expect("dot f64 backward gpu");
 
-    assert!(grads[0].as_ref().unwrap().is_cuda(), "dot f64 grad_a must be on CUDA — §3");
-    assert!(grads[1].as_ref().unwrap().is_cuda(), "dot f64 grad_b must be on CUDA — §3");
+    assert!(
+        grads[0].as_ref().unwrap().is_cuda(),
+        "dot f64 grad_a must be on CUDA — §3"
+    );
+    assert!(
+        grads[1].as_ref().unwrap().is_cuda(),
+        "dot f64 grad_b must be on CUDA — §3"
+    );
 
     let a_cpu = cpu_f64_grad(a_data.clone(), &[3]);
     let b_cpu = cpu_f64_grad(b_data.clone(), &[3]);
@@ -234,7 +294,10 @@ fn dot_backward_f64_gpu_stays_on_device() {
         .iter()
         .zip(read_f64(grads_cpu[0].as_ref().unwrap()).iter())
     {
-        assert!((g - c).abs() < F64_GRAD, "dot f64 grad_a mismatch: {g} vs {c}");
+        assert!(
+            (g - c).abs() < F64_GRAD,
+            "dot f64 grad_a mismatch: {g} vs {c}"
+        );
     }
 }
 
@@ -255,7 +318,11 @@ fn matmul_vm_backward_f32_gpu_stays_on_device() {
     assert!(y_gpu.is_cuda());
 
     let seed_gpu = gpu_f32(vec![1.0; 4], &[4]);
-    let grads = y_gpu.grad_fn().unwrap().backward(&seed_gpu).expect("vm backward gpu");
+    let grads = y_gpu
+        .grad_fn()
+        .unwrap()
+        .backward(&seed_gpu)
+        .expect("vm backward gpu");
 
     let grad_a = grads[0].as_ref().unwrap();
     let grad_b = grads[1].as_ref().unwrap();
@@ -268,12 +335,22 @@ fn matmul_vm_backward_f32_gpu_stays_on_device() {
     let b_cpu = cpu_f32_grad(b_data.clone(), &[3, 4]);
     let y_cpu = matmul_differentiable(&a_cpu, &b_cpu).expect("cpu vm");
     let seed_cpu = cpu_f32(vec![1.0; 4], &[4]);
-    let grads_cpu = y_cpu.grad_fn().unwrap().backward(&seed_cpu).expect("cpu vm backward");
+    let grads_cpu = y_cpu
+        .grad_fn()
+        .unwrap()
+        .backward(&seed_cpu)
+        .expect("cpu vm backward");
 
-    for (g, c) in read_f32(grad_a).iter().zip(read_f32(grads_cpu[0].as_ref().unwrap()).iter()) {
+    for (g, c) in read_f32(grad_a)
+        .iter()
+        .zip(read_f32(grads_cpu[0].as_ref().unwrap()).iter())
+    {
         assert!((g - c).abs() < F32_GRAD, "vm grad_a mismatch: {g} vs {c}");
     }
-    for (g, c) in read_f32(grad_b).iter().zip(read_f32(grads_cpu[1].as_ref().unwrap()).iter()) {
+    for (g, c) in read_f32(grad_b)
+        .iter()
+        .zip(read_f32(grads_cpu[1].as_ref().unwrap()).iter())
+    {
         assert!((g - c).abs() < F32_GRAD, "vm grad_b mismatch: {g} vs {c}");
     }
 }
@@ -295,7 +372,11 @@ fn matmul_broadcast_backward_f32_gpu_stays_on_device() {
     assert!(c_gpu.is_cuda());
 
     let seed_gpu = gpu_f32(vec![1.0; 30], &[2, 3, 5]);
-    let grads = c_gpu.grad_fn().unwrap().backward(&seed_gpu).expect("broadcast backward gpu");
+    let grads = c_gpu
+        .grad_fn()
+        .unwrap()
+        .backward(&seed_gpu)
+        .expect("broadcast backward gpu");
 
     let grad_a = grads[0].as_ref().unwrap();
     let grad_b = grads[1].as_ref().unwrap();
@@ -308,13 +389,29 @@ fn matmul_broadcast_backward_f32_gpu_stays_on_device() {
     let b_cpu = cpu_f32_grad(b_data.clone(), &[4, 5]);
     let c_cpu = matmul_differentiable(&a_cpu, &b_cpu).expect("cpu broadcast");
     let seed_cpu = cpu_f32(vec![1.0; 30], &[2, 3, 5]);
-    let grads_cpu = c_cpu.grad_fn().unwrap().backward(&seed_cpu).expect("cpu broadcast backward");
+    let grads_cpu = c_cpu
+        .grad_fn()
+        .unwrap()
+        .backward(&seed_cpu)
+        .expect("cpu broadcast backward");
 
-    for (g, c) in read_f32(grad_a).iter().zip(read_f32(grads_cpu[0].as_ref().unwrap()).iter()) {
-        assert!((g - c).abs() < F32_GRAD, "broadcast grad_A mismatch: {g} vs {c}");
+    for (g, c) in read_f32(grad_a)
+        .iter()
+        .zip(read_f32(grads_cpu[0].as_ref().unwrap()).iter())
+    {
+        assert!(
+            (g - c).abs() < F32_GRAD,
+            "broadcast grad_A mismatch: {g} vs {c}"
+        );
     }
-    for (g, c) in read_f32(grad_b).iter().zip(read_f32(grads_cpu[1].as_ref().unwrap()).iter()) {
-        assert!((g - c).abs() < F32_GRAD, "broadcast grad_B mismatch: {g} vs {c}");
+    for (g, c) in read_f32(grad_b)
+        .iter()
+        .zip(read_f32(grads_cpu[1].as_ref().unwrap()).iter())
+    {
+        assert!(
+            (g - c).abs() < F32_GRAD,
+            "broadcast grad_B mismatch: {g} vs {c}"
+        );
     }
 }
 
@@ -358,7 +455,10 @@ fn gather_backward_f32_gpu_stays_on_device() {
     };
     let grads_cpu = grad_fn_cpu.backward(&go_cpu).expect("gather backward cpu");
 
-    for (g, c) in read_f32(grad_inp).iter().zip(read_f32(grads_cpu[0].as_ref().unwrap()).iter()) {
+    for (g, c) in read_f32(grad_inp)
+        .iter()
+        .zip(read_f32(grads_cpu[0].as_ref().unwrap()).iter())
+    {
         assert!((g - c).abs() < F32_GRAD, "gather grad mismatch: {g} vs {c}");
     }
 }
@@ -390,7 +490,10 @@ fn scatter_backward_f32_gpu_stays_on_device() {
     let grads = grad_fn.backward(&go_gpu).expect("scatter backward gpu");
     let grad_inp = grads[0].as_ref().unwrap();
     let grad_src = grads[1].as_ref().unwrap();
-    assert!(grad_inp.is_cuda(), "scatter grad_input must be on CUDA — §3");
+    assert!(
+        grad_inp.is_cuda(),
+        "scatter grad_input must be on CUDA — §3"
+    );
     assert!(grad_src.is_cuda(), "scatter grad_src must be on CUDA — §3");
 
     // CPU reference
@@ -410,13 +513,19 @@ fn scatter_backward_f32_gpu_stays_on_device() {
         .iter()
         .zip(read_f32(grads_cpu[0].as_ref().unwrap()).iter())
     {
-        assert!((g - c).abs() < F32_GRAD, "scatter grad_input mismatch: {g} vs {c}");
+        assert!(
+            (g - c).abs() < F32_GRAD,
+            "scatter grad_input mismatch: {g} vs {c}"
+        );
     }
     for (g, c) in read_f32(grad_src)
         .iter()
         .zip(read_f32(grads_cpu[1].as_ref().unwrap()).iter())
     {
-        assert!((g - c).abs() < F32_GRAD, "scatter grad_src mismatch: {g} vs {c}");
+        assert!(
+            (g - c).abs() < F32_GRAD,
+            "scatter grad_src mismatch: {g} vs {c}"
+        );
     }
 }
 
@@ -446,8 +555,14 @@ fn scatter_add_backward_f32_gpu_stays_on_device() {
     let grads = grad_fn.backward(&go_gpu).expect("scatter_add backward gpu");
     let grad_inp = grads[0].as_ref().unwrap();
     let grad_src = grads[1].as_ref().unwrap();
-    assert!(grad_inp.is_cuda(), "scatter_add grad_input must be on CUDA — §3");
-    assert!(grad_src.is_cuda(), "scatter_add grad_src must be on CUDA — §3");
+    assert!(
+        grad_inp.is_cuda(),
+        "scatter_add grad_input must be on CUDA — §3"
+    );
+    assert!(
+        grad_src.is_cuda(),
+        "scatter_add grad_src must be on CUDA — §3"
+    );
 
     // CPU reference
     let inp_cpu = cpu_f32_grad(inp_data.clone(), &input_shape);
@@ -460,19 +575,27 @@ fn scatter_add_backward_f32_gpu_stays_on_device() {
         index: idx_data.clone(),
         index_shape: idx_shape.clone(),
     };
-    let grads_cpu = grad_fn_cpu.backward(&go_cpu).expect("scatter_add backward cpu");
+    let grads_cpu = grad_fn_cpu
+        .backward(&go_cpu)
+        .expect("scatter_add backward cpu");
 
     for (g, c) in read_f32(grad_inp)
         .iter()
         .zip(read_f32(grads_cpu[0].as_ref().unwrap()).iter())
     {
-        assert!((g - c).abs() < F32_GRAD, "scatter_add grad_input mismatch: {g} vs {c}");
+        assert!(
+            (g - c).abs() < F32_GRAD,
+            "scatter_add grad_input mismatch: {g} vs {c}"
+        );
     }
     for (g, c) in read_f32(grad_src)
         .iter()
         .zip(read_f32(grads_cpu[1].as_ref().unwrap()).iter())
     {
-        assert!((g - c).abs() < F32_GRAD, "scatter_add grad_src mismatch: {g} vs {c}");
+        assert!(
+            (g - c).abs() < F32_GRAD,
+            "scatter_add grad_src mismatch: {g} vs {c}"
+        );
     }
 }
 
@@ -511,18 +634,26 @@ fn where_cond_backward_f32_gpu_stays_on_device() {
         y: y_cpu.clone(),
         condition: condition.clone(),
     };
-    let grads_cpu = grad_fn_cpu.backward(&go_cpu).expect("where_cond backward cpu");
+    let grads_cpu = grad_fn_cpu
+        .backward(&go_cpu)
+        .expect("where_cond backward cpu");
 
     for (g, c) in read_f32(grad_x)
         .iter()
         .zip(read_f32(grads_cpu[0].as_ref().unwrap()).iter())
     {
-        assert!((g - c).abs() < F32_GRAD, "where_cond grad_x mismatch: {g} vs {c}");
+        assert!(
+            (g - c).abs() < F32_GRAD,
+            "where_cond grad_x mismatch: {g} vs {c}"
+        );
     }
     for (g, c) in read_f32(grad_y)
         .iter()
         .zip(read_f32(grads_cpu[1].as_ref().unwrap()).iter())
     {
-        assert!((g - c).abs() < F32_GRAD, "where_cond grad_y mismatch: {g} vs {c}");
+        assert!(
+            (g - c).abs() < F32_GRAD,
+            "where_cond grad_y mismatch: {g} vs {c}"
+        );
     }
 }

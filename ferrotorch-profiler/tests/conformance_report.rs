@@ -43,8 +43,7 @@ fn fixtures_json() -> serde_json::Value {
             p.display()
         )
     });
-    serde_json::from_slice(&bytes)
-        .unwrap_or_else(|e| panic!("parse {}: {e}", p.display()))
+    serde_json::from_slice(&bytes).unwrap_or_else(|e| panic!("parse {}: {e}", p.display()))
 }
 
 // ---------------------------------------------------------------------------
@@ -96,10 +95,7 @@ fn build_report_from_fixture(fixture_id: &str) -> ferrotorch_profiler::ProfileRe
                     .get("category")
                     .and_then(|v| v.as_str())
                     .unwrap_or("tensor_op");
-                let duration_us = ev
-                    .get("duration_us")
-                    .and_then(|v| v.as_u64())
-                    .unwrap_or(0);
+                let duration_us = ev.get("duration_us").and_then(|v| v.as_u64()).unwrap_or(0);
                 p.record_with_duration(name, category, duration_us);
             }
         }
@@ -147,11 +143,7 @@ fn report_top_ops_sorted_by_cumulative_duration() {
     let report = build_report_from_fixture("report_top_ops_sorted");
     let top3 = report.top_ops(3);
 
-    assert_eq!(
-        top3.len(),
-        3,
-        "top_ops(3) must return exactly 3 summaries"
-    );
+    assert_eq!(top3.len(), 3, "top_ops(3) must return exactly 3 summaries");
     for (i, summary) in top3.iter().enumerate() {
         assert_eq!(
             summary.name, expected_names[i],
@@ -516,7 +508,10 @@ fn report_table_nonempty_contains_separator_and_header() {
         "table must contain 'Op' column header; got:\n{t}"
     );
     // Both recorded op names must appear.
-    assert!(t.contains("matmul"), "table must contain 'matmul'; got:\n{t}");
+    assert!(
+        t.contains("matmul"),
+        "table must contain 'matmul'; got:\n{t}"
+    );
     assert!(t.contains("relu"), "table must contain 'relu'; got:\n{t}");
 }
 

@@ -16,6 +16,12 @@ pub mod yolo;
 
 pub use convnext::{ConvNeXt, ConvNeXtBlock, convnext_tiny};
 pub use densenet::{DenseBlock, DenseLayer, DenseNet, TransitionLayer, densenet121};
+pub use detection::{
+    AnchorGenerator, Detections, FPN_OUT_CHANNELS, FasterRcnn, FeaturePyramidNetwork,
+    MaskDetections, MaskHead, MaskPredictor, MaskRcnn, Rpn, RpnConfig, RpnHead,
+    SSD_ANCHORS_PER_SCALE, SSD_FM_SIZES, SSD_TOTAL_ANCHORS, Ssd300, SsdDetections, TwoMlpHead,
+    fasterrcnn_resnet50_fpn, maskrcnn_resnet50_fpn, ssd300_vgg16,
+};
 pub use efficientnet::{ConvBlock, EfficientNet, efficientnet_b0};
 pub use feature_extractor::{FeatureExtractor, IntermediateFeatures, create_feature_extractor};
 pub use inception::{InceptionModule, InceptionV3, inception_v3};
@@ -25,17 +31,10 @@ pub use mobilenet::{
 pub use registry::{
     ModelConstructor, ModelRegistry, REGISTRY, get_model, list_models, register_model,
 };
-pub use detection::{
-    AnchorGenerator, Detections, FPN_OUT_CHANNELS, FasterRcnn, FeaturePyramidNetwork,
-    MaskDetections, MaskHead, MaskPredictor, MaskRcnn, Rpn, RpnConfig, RpnHead,
-    SSD_ANCHORS_PER_SCALE, SSD_FM_SIZES, SSD_TOTAL_ANCHORS, Ssd300, SsdDetections, TwoMlpHead,
-    fasterrcnn_resnet50_fpn, maskrcnn_resnet50_fpn, ssd300_vgg16,
-};
-pub use segmentation::{
-    Aspp, DeepLabV3, DeepLabV3Head, Fcn, FcnHead, ResNet50Dilated,
-    deeplabv3_resnet50, fcn_resnet50,
-};
 pub use resnet::{BasicBlock, Bottleneck, ResNet, resnet18, resnet34, resnet50};
+pub use segmentation::{
+    Aspp, DeepLabV3, DeepLabV3Head, Fcn, FcnHead, ResNet50Dilated, deeplabv3_resnet50, fcn_resnet50,
+};
 pub use swin::{SwinBlock, SwinTransformer, swin_tiny};
 pub use unet::{UNet, unet};
 pub use vgg::{VGG, vgg11, vgg16};

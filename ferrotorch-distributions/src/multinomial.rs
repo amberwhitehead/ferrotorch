@@ -240,12 +240,12 @@ impl<T: Float> Distribution<T> for Multinomial<T> {
         let zero = <T as num_traits::Zero>::zero();
         let total: T = probs_data.iter().copied().fold(zero, |a, b| a + b);
         let out: Vec<T> = probs_data.iter().map(|&p| n_t * p / total).collect();
-        let t = Tensor::from_storage(
-            TensorStorage::cpu(out),
-            self.probs.shape().to_vec(),
-            false,
-        )?;
-        if device.is_cuda() { t.to(device) } else { Ok(t) }
+        let t = Tensor::from_storage(TensorStorage::cpu(out), self.probs.shape().to_vec(), false)?;
+        if device.is_cuda() {
+            t.to(device)
+        } else {
+            Ok(t)
+        }
     }
 
     fn variance(&self) -> FerrotorchResult<Tensor<T>> {
@@ -258,16 +258,19 @@ impl<T: Float> Distribution<T> for Multinomial<T> {
         let zero = <T as num_traits::Zero>::zero();
         let one = <T as num_traits::One>::one();
         let total: T = probs_data.iter().copied().fold(zero, |a, b| a + b);
-        let out: Vec<T> = probs_data.iter().map(|&p| {
-            let pk = p / total;
-            n_t * pk * (one - pk)
-        }).collect();
-        let t = Tensor::from_storage(
-            TensorStorage::cpu(out),
-            self.probs.shape().to_vec(),
-            false,
-        )?;
-        if device.is_cuda() { t.to(device) } else { Ok(t) }
+        let out: Vec<T> = probs_data
+            .iter()
+            .map(|&p| {
+                let pk = p / total;
+                n_t * pk * (one - pk)
+            })
+            .collect();
+        let t = Tensor::from_storage(TensorStorage::cpu(out), self.probs.shape().to_vec(), false)?;
+        if device.is_cuda() {
+            t.to(device)
+        } else {
+            Ok(t)
+        }
     }
 
     fn entropy(&self) -> FerrotorchResult<Tensor<T>> {

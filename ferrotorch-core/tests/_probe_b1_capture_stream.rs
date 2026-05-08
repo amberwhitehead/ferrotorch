@@ -56,19 +56,20 @@ fn probe_b1_gpu_add_into_on_stream_dispatches() {
 
     stream.synchronize().expect("sync after dispatch");
     let actual = gpu_to_cpu(&out, &dev).unwrap();
-    assert_eq!(actual, vec![11.0f32, 22.0, 33.0, 44.0],
-        "probe B1 #897: output mismatch");
+    assert_eq!(
+        actual,
+        vec![11.0f32, 22.0, 33.0, 44.0],
+        "probe B1 #897: output mismatch"
+    );
 }
 
 /// Probe: AFTER fix CapturedGraph API surface works under parallel execution.
 #[test]
 fn probe_b1_captured_graph_api_surface() {
     ensure_cuda();
-    use std::sync::Arc;
     use ferrotorch_gpu::device::GpuDevice;
-    use ferrotorch_gpu::graph::{
-        CapturePool, begin_capture_with_pool, end_capture_with_pool,
-    };
+    use ferrotorch_gpu::graph::{CapturePool, begin_capture_with_pool, end_capture_with_pool};
+    use std::sync::Arc;
 
     // Serialize graph captures within this test binary.
     use std::sync::{Mutex, MutexGuard};
@@ -88,8 +89,8 @@ fn probe_b1_captured_graph_api_surface() {
     // under parallel test execution because gpu_add_into ran on device.stream().
     // AFTER fix: dedicated stream with ThreadLocal mode is safe under parallelism.
     begin_capture_with_pool(&pool, &capture_stream).expect("begin_capture_with_pool");
-    let graph = end_capture_with_pool(&capture_stream, Arc::clone(&pool))
-        .expect("end_capture_with_pool");
+    let graph =
+        end_capture_with_pool(&capture_stream, Arc::clone(&pool)).expect("end_capture_with_pool");
 
     // Verify CapturedGraph API surface.
     assert!(!graph.is_uploaded(), "fresh graph must not be uploaded");

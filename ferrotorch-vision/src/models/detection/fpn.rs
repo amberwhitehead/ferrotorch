@@ -23,12 +23,12 @@
 
 use std::collections::HashMap;
 
-use ferrotorch_core::{FerrotorchResult, Float, Tensor};
 use ferrotorch_core::grad_fns::arithmetic::add;
-use ferrotorch_nn::{Conv2d, InterpolateMode, interpolate};
+use ferrotorch_core::{FerrotorchResult, Float, Tensor};
 use ferrotorch_nn::module::Module;
 use ferrotorch_nn::parameter::Parameter;
 use ferrotorch_nn::pooling::MaxPool2d;
+use ferrotorch_nn::{Conv2d, InterpolateMode, interpolate};
 
 /// Number of output channels for every FPN level.
 pub const FPN_OUT_CHANNELS: usize = 256;
@@ -106,26 +106,26 @@ impl<T: Float> FeaturePyramidNetwork<T> {
         &self,
         backbone_features: &HashMap<String, Tensor<T>>,
     ) -> FerrotorchResult<HashMap<String, Tensor<T>>> {
-        let c2 = backbone_features
-            .get("layer1")
-            .ok_or_else(|| ferrotorch_core::FerrotorchError::InvalidArgument {
+        let c2 = backbone_features.get("layer1").ok_or_else(|| {
+            ferrotorch_core::FerrotorchError::InvalidArgument {
                 message: "FPN: backbone_features missing 'layer1' (C2)".into(),
-            })?;
-        let c3 = backbone_features
-            .get("layer2")
-            .ok_or_else(|| ferrotorch_core::FerrotorchError::InvalidArgument {
+            }
+        })?;
+        let c3 = backbone_features.get("layer2").ok_or_else(|| {
+            ferrotorch_core::FerrotorchError::InvalidArgument {
                 message: "FPN: backbone_features missing 'layer2' (C3)".into(),
-            })?;
-        let c4 = backbone_features
-            .get("layer3")
-            .ok_or_else(|| ferrotorch_core::FerrotorchError::InvalidArgument {
+            }
+        })?;
+        let c4 = backbone_features.get("layer3").ok_or_else(|| {
+            ferrotorch_core::FerrotorchError::InvalidArgument {
                 message: "FPN: backbone_features missing 'layer3' (C4)".into(),
-            })?;
-        let c5 = backbone_features
-            .get("layer4")
-            .ok_or_else(|| ferrotorch_core::FerrotorchError::InvalidArgument {
+            }
+        })?;
+        let c5 = backbone_features.get("layer4").ok_or_else(|| {
+            ferrotorch_core::FerrotorchError::InvalidArgument {
                 message: "FPN: backbone_features missing 'layer4' (C5)".into(),
-            })?;
+            }
+        })?;
 
         // --- Lateral convolutions ---
         let lat5 = self.lateral5.forward(c5)?;

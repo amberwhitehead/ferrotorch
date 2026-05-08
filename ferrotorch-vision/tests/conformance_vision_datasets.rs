@@ -21,7 +21,7 @@
 #![allow(
     clippy::cast_possible_truncation,
     clippy::cast_precision_loss,
-    clippy::uninlined_format_args,
+    clippy::uninlined_format_args
 )]
 
 use std::path::PathBuf;
@@ -106,10 +106,7 @@ fn mnist_from_dir_train_pixel_normalization() {
 
     // All values must be in [0, 1].
     for &v in data {
-        assert!(
-            (0.0..=1.0).contains(&v),
-            "MNIST pixel {v} outside [0, 1]"
-        );
+        assert!((0.0..=1.0).contains(&v), "MNIST pixel {v} outside [0, 1]");
     }
 
     // Spot-check: fixture seed=0, formula = (0 + i*17) % 256 / 255.
@@ -171,7 +168,10 @@ fn mnist_from_dir_split_accessor() {
 #[test]
 fn mnist_from_dir_missing_returns_err() {
     let result = Mnist::<f32>::from_dir("/nonexistent/path", Split::Train);
-    assert!(result.is_err(), "from_dir must return Err for missing files");
+    assert!(
+        result.is_err(),
+        "from_dir must return Err for missing files"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -268,11 +268,7 @@ fn cifar10_from_dir_train_labels() {
     // data_batch_1.bin labels: [0, 5, 2, 8]
     let expected = [0u8, 5, 2, 8];
     for (i, &exp) in expected.iter().enumerate() {
-        assert_eq!(
-            ds.get(i).unwrap().label,
-            exp,
-            "CIFAR-10 train sample {i}"
-        );
+        assert_eq!(ds.get(i).unwrap().label, exp, "CIFAR-10 train sample {i}");
     }
 }
 

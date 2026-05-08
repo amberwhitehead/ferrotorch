@@ -39,8 +39,7 @@ fn fixtures() -> Value {
         .join("tests")
         .join("conformance")
         .join("fixtures.json");
-    let body = std::fs::read_to_string(&p)
-        .unwrap_or_else(|e| panic!("read fixtures.json: {e}"));
+    let body = std::fs::read_to_string(&p).unwrap_or_else(|e| panic!("read fixtures.json: {e}"));
     serde_json::from_str(&body).expect("parse fixtures.json")
 }
 
@@ -73,8 +72,10 @@ fn assert_close(actual: f64, expected: f64, tol: f64, ctx: &str) {
         return;
     }
     if expected.is_infinite() {
-        assert!(actual.is_infinite() && actual.signum() == expected.signum(),
-            "{ctx}: expected {expected}, got {actual}");
+        assert!(
+            actual.is_infinite() && actual.signum() == expected.signum(),
+            "{ctx}: expected {expected}, got {actual}"
+        );
         return;
     }
     assert!(
@@ -127,7 +128,10 @@ fn distribution_trait_cdf_default_returns_error() {
     // Pareto does not implement icdf — the default trait impl returns InvalidArgument.
     // (Kumaraswamy has an actual icdf; use Pareto as the representative no-icdf dist.)
     let d = Pareto::new(scalar(1.0f64).unwrap(), scalar(2.0f64).unwrap()).unwrap();
-    assert!(d.icdf(&scalar(0.5f64).unwrap()).is_err(), "icdf should error");
+    assert!(
+        d.icdf(&scalar(0.5f64).unwrap()).is_err(),
+        "icdf should error"
+    );
 }
 
 #[test]
@@ -203,9 +207,24 @@ fn normal_fixtures_log_prob_mean_variance_entropy_cdf_icdf() {
             let exp_lp = fvec(&case["log_prob"]);
             assert_close_vec(&lp_data, &exp_lp, TOL, &format!("Normal[{label}] log_prob"));
 
-            assert_close(d.mean().unwrap().item().unwrap(), f(&case["mean"]), TOL, &format!("Normal[{label}] mean"));
-            assert_close(d.variance().unwrap().item().unwrap(), f(&case["variance"]), TOL, &format!("Normal[{label}] variance"));
-            assert_close(d.entropy().unwrap().item().unwrap(), f(&case["entropy"]), TOL, &format!("Normal[{label}] entropy"));
+            assert_close(
+                d.mean().unwrap().item().unwrap(),
+                f(&case["mean"]),
+                TOL,
+                &format!("Normal[{label}] mean"),
+            );
+            assert_close(
+                d.variance().unwrap().item().unwrap(),
+                f(&case["variance"]),
+                TOL,
+                &format!("Normal[{label}] variance"),
+            );
+            assert_close(
+                d.entropy().unwrap().item().unwrap(),
+                f(&case["entropy"]),
+                TOL,
+                &format!("Normal[{label}] entropy"),
+            );
 
             // CDF
             let cdf_x = fvec(&case["cdf_x"]);
@@ -241,8 +260,18 @@ fn beta_new_accessors() {
     let c1 = scalar(2.0f64).unwrap();
     let c0 = scalar(3.0f64).unwrap();
     let d = Beta::new(c1, c0).unwrap();
-    assert_close(d.concentration1().item().unwrap(), 2.0, TOL, "Beta::concentration1");
-    assert_close(d.concentration0().item().unwrap(), 3.0, TOL, "Beta::concentration0");
+    assert_close(
+        d.concentration1().item().unwrap(),
+        2.0,
+        TOL,
+        "Beta::concentration1",
+    );
+    assert_close(
+        d.concentration0().item().unwrap(),
+        3.0,
+        TOL,
+        "Beta::concentration0",
+    );
 }
 
 #[test]
@@ -260,9 +289,24 @@ fn beta_fixtures_log_prob_mean_variance_entropy() {
         let exp_lp = fvec(&case["log_prob"]);
         assert_close_vec(&lp, &exp_lp, TOL, &format!("Beta[{label}] log_prob"));
 
-        assert_close(d.mean().unwrap().item().unwrap(), f(&case["mean"]), TOL, &format!("Beta[{label}] mean"));
-        assert_close(d.variance().unwrap().item().unwrap(), f(&case["variance"]), TOL, &format!("Beta[{label}] variance"));
-        assert_close(d.entropy().unwrap().item().unwrap(), f(&case["entropy"]), TOL, &format!("Beta[{label}] entropy"));
+        assert_close(
+            d.mean().unwrap().item().unwrap(),
+            f(&case["mean"]),
+            TOL,
+            &format!("Beta[{label}] mean"),
+        );
+        assert_close(
+            d.variance().unwrap().item().unwrap(),
+            f(&case["variance"]),
+            TOL,
+            &format!("Beta[{label}] variance"),
+        );
+        assert_close(
+            d.entropy().unwrap().item().unwrap(),
+            f(&case["entropy"]),
+            TOL,
+            &format!("Beta[{label}] entropy"),
+        );
     }
 }
 
@@ -283,7 +327,12 @@ fn gamma_new_accessors() {
     let conc = scalar(2.0f64).unwrap();
     let rate = scalar(1.0f64).unwrap();
     let d = Gamma::new(conc, rate).unwrap();
-    assert_close(d.concentration().item().unwrap(), 2.0, TOL, "Gamma::concentration");
+    assert_close(
+        d.concentration().item().unwrap(),
+        2.0,
+        TOL,
+        "Gamma::concentration",
+    );
     assert_close(d.rate().item().unwrap(), 1.0, TOL, "Gamma::rate");
 }
 
@@ -302,9 +351,24 @@ fn gamma_fixtures_log_prob_mean_variance_entropy() {
         let exp_lp = fvec(&case["log_prob"]);
         assert_close_vec(&lp, &exp_lp, TOL, &format!("Gamma[{label}] log_prob"));
 
-        assert_close(d.mean().unwrap().item().unwrap(), f(&case["mean"]), TOL, &format!("Gamma[{label}] mean"));
-        assert_close(d.variance().unwrap().item().unwrap(), f(&case["variance"]), TOL, &format!("Gamma[{label}] variance"));
-        assert_close(d.entropy().unwrap().item().unwrap(), f(&case["entropy"]), TOL, &format!("Gamma[{label}] entropy"));
+        assert_close(
+            d.mean().unwrap().item().unwrap(),
+            f(&case["mean"]),
+            TOL,
+            &format!("Gamma[{label}] mean"),
+        );
+        assert_close(
+            d.variance().unwrap().item().unwrap(),
+            f(&case["variance"]),
+            TOL,
+            &format!("Gamma[{label}] variance"),
+        );
+        assert_close(
+            d.entropy().unwrap().item().unwrap(),
+            f(&case["entropy"]),
+            TOL,
+            &format!("Gamma[{label}] entropy"),
+        );
     }
 }
 
@@ -340,19 +404,44 @@ fn exponential_fixtures_log_prob_mean_variance_entropy_cdf_icdf() {
         let exp_lp = fvec(&case["log_prob"]);
         assert_close_vec(&lp, &exp_lp, TOL, &format!("Exponential[{label}] log_prob"));
 
-        assert_close(d.mean().unwrap().item().unwrap(), f(&case["mean"]), TOL, &format!("Exponential[{label}] mean"));
-        assert_close(d.variance().unwrap().item().unwrap(), f(&case["variance"]), TOL, &format!("Exponential[{label}] variance"));
-        assert_close(d.entropy().unwrap().item().unwrap(), f(&case["entropy"]), TOL, &format!("Exponential[{label}] entropy"));
+        assert_close(
+            d.mean().unwrap().item().unwrap(),
+            f(&case["mean"]),
+            TOL,
+            &format!("Exponential[{label}] mean"),
+        );
+        assert_close(
+            d.variance().unwrap().item().unwrap(),
+            f(&case["variance"]),
+            TOL,
+            &format!("Exponential[{label}] variance"),
+        );
+        assert_close(
+            d.entropy().unwrap().item().unwrap(),
+            f(&case["entropy"]),
+            TOL,
+            &format!("Exponential[{label}] entropy"),
+        );
 
         let cdf_out = d.cdf(&x_t).unwrap().data_vec().unwrap();
         let exp_cdf = fvec(&case["cdf"]);
-        assert_close_vec(&cdf_out, &exp_cdf, TOL, &format!("Exponential[{label}] cdf"));
+        assert_close_vec(
+            &cdf_out,
+            &exp_cdf,
+            TOL,
+            &format!("Exponential[{label}] cdf"),
+        );
 
         let icdf_q = fvec(&case["icdf_q"]);
         let icdf_q_t = from_slice::<f64>(&icdf_q, &[icdf_q.len()]).unwrap();
         let icdf_out = d.icdf(&icdf_q_t).unwrap().data_vec().unwrap();
         let exp_icdf = fvec(&case["icdf"]);
-        assert_close_vec(&icdf_out, &exp_icdf, TOL, &format!("Exponential[{label}] icdf"));
+        assert_close_vec(
+            &icdf_out,
+            &exp_icdf,
+            TOL,
+            &format!("Exponential[{label}] icdf"),
+        );
     }
 }
 
@@ -385,19 +474,49 @@ fn laplace_fixtures_log_prob_mean_variance_entropy_cdf_icdf() {
         let x_pts = fvec(&case["x_points"]);
         let x_t = from_slice::<f64>(&x_pts, &[x_pts.len()]).unwrap();
         let lp = d.log_prob(&x_t).unwrap().data_vec().unwrap();
-        assert_close_vec(&lp, &fvec(&case["log_prob"]), TOL, &format!("Laplace[{label}] log_prob"));
+        assert_close_vec(
+            &lp,
+            &fvec(&case["log_prob"]),
+            TOL,
+            &format!("Laplace[{label}] log_prob"),
+        );
 
-        assert_close(d.mean().unwrap().item().unwrap(), f(&case["mean"]), TOL, &format!("Laplace[{label}] mean"));
-        assert_close(d.variance().unwrap().item().unwrap(), f(&case["variance"]), TOL, &format!("Laplace[{label}] variance"));
-        assert_close(d.entropy().unwrap().item().unwrap(), f(&case["entropy"]), TOL, &format!("Laplace[{label}] entropy"));
+        assert_close(
+            d.mean().unwrap().item().unwrap(),
+            f(&case["mean"]),
+            TOL,
+            &format!("Laplace[{label}] mean"),
+        );
+        assert_close(
+            d.variance().unwrap().item().unwrap(),
+            f(&case["variance"]),
+            TOL,
+            &format!("Laplace[{label}] variance"),
+        );
+        assert_close(
+            d.entropy().unwrap().item().unwrap(),
+            f(&case["entropy"]),
+            TOL,
+            &format!("Laplace[{label}] entropy"),
+        );
 
         let cdf_out = d.cdf(&x_t).unwrap().data_vec().unwrap();
-        assert_close_vec(&cdf_out, &fvec(&case["cdf"]), TOL, &format!("Laplace[{label}] cdf"));
+        assert_close_vec(
+            &cdf_out,
+            &fvec(&case["cdf"]),
+            TOL,
+            &format!("Laplace[{label}] cdf"),
+        );
 
         let icdf_q = fvec(&case["icdf_q"]);
         let icdf_q_t = from_slice::<f64>(&icdf_q, &[icdf_q.len()]).unwrap();
         let icdf_out = d.icdf(&icdf_q_t).unwrap().data_vec().unwrap();
-        assert_close_vec(&icdf_out, &fvec(&case["icdf"]), TOL, &format!("Laplace[{label}] icdf"));
+        assert_close_vec(
+            &icdf_out,
+            &fvec(&case["icdf"]),
+            TOL,
+            &format!("Laplace[{label}] icdf"),
+        );
     }
 }
 
@@ -423,17 +542,37 @@ fn cauchy_fixtures_log_prob_entropy_cdf_icdf() {
         let x_pts = fvec(&case["x_points"]);
         let x_t = from_slice::<f64>(&x_pts, &[x_pts.len()]).unwrap();
         let lp = d.log_prob(&x_t).unwrap().data_vec().unwrap();
-        assert_close_vec(&lp, &fvec(&case["log_prob"]), TOL, &format!("Cauchy[{label}] log_prob"));
+        assert_close_vec(
+            &lp,
+            &fvec(&case["log_prob"]),
+            TOL,
+            &format!("Cauchy[{label}] log_prob"),
+        );
 
-        assert_close(d.entropy().unwrap().item().unwrap(), f(&case["entropy"]), TOL, &format!("Cauchy[{label}] entropy"));
+        assert_close(
+            d.entropy().unwrap().item().unwrap(),
+            f(&case["entropy"]),
+            TOL,
+            &format!("Cauchy[{label}] entropy"),
+        );
 
         let cdf_out = d.cdf(&x_t).unwrap().data_vec().unwrap();
-        assert_close_vec(&cdf_out, &fvec(&case["cdf"]), TOL, &format!("Cauchy[{label}] cdf"));
+        assert_close_vec(
+            &cdf_out,
+            &fvec(&case["cdf"]),
+            TOL,
+            &format!("Cauchy[{label}] cdf"),
+        );
 
         let icdf_q = fvec(&case["icdf_q"]);
         let icdf_q_t = from_slice::<f64>(&icdf_q, &[icdf_q.len()]).unwrap();
         let icdf_out = d.icdf(&icdf_q_t).unwrap().data_vec().unwrap();
-        assert_close_vec(&icdf_out, &fvec(&case["icdf"]), TOL, &format!("Cauchy[{label}] icdf"));
+        assert_close_vec(
+            &icdf_out,
+            &fvec(&case["icdf"]),
+            TOL,
+            &format!("Cauchy[{label}] icdf"),
+        );
     }
 }
 
@@ -459,11 +598,31 @@ fn gumbel_fixtures_log_prob_mean_variance_entropy() {
         let x_pts = fvec(&case["x_points"]);
         let x_t = from_slice::<f64>(&x_pts, &[x_pts.len()]).unwrap();
         let lp = d.log_prob(&x_t).unwrap().data_vec().unwrap();
-        assert_close_vec(&lp, &fvec(&case["log_prob"]), TOL, &format!("Gumbel[{label}] log_prob"));
+        assert_close_vec(
+            &lp,
+            &fvec(&case["log_prob"]),
+            TOL,
+            &format!("Gumbel[{label}] log_prob"),
+        );
 
-        assert_close(d.mean().unwrap().item().unwrap(), f(&case["mean"]), TOL, &format!("Gumbel[{label}] mean"));
-        assert_close(d.variance().unwrap().item().unwrap(), f(&case["variance"]), TOL, &format!("Gumbel[{label}] variance"));
-        assert_close(d.entropy().unwrap().item().unwrap(), f(&case["entropy"]), TOL, &format!("Gumbel[{label}] entropy"));
+        assert_close(
+            d.mean().unwrap().item().unwrap(),
+            f(&case["mean"]),
+            TOL,
+            &format!("Gumbel[{label}] mean"),
+        );
+        assert_close(
+            d.variance().unwrap().item().unwrap(),
+            f(&case["variance"]),
+            TOL,
+            &format!("Gumbel[{label}] variance"),
+        );
+        assert_close(
+            d.entropy().unwrap().item().unwrap(),
+            f(&case["entropy"]),
+            TOL,
+            &format!("Gumbel[{label}] entropy"),
+        );
     }
 }
 
@@ -488,11 +647,31 @@ fn half_normal_fixtures_log_prob_mean_variance_entropy() {
         let x_pts = fvec(&case["x_points"]);
         let x_t = from_slice::<f64>(&x_pts, &[x_pts.len()]).unwrap();
         let lp = d.log_prob(&x_t).unwrap().data_vec().unwrap();
-        assert_close_vec(&lp, &fvec(&case["log_prob"]), TOL, &format!("HalfNormal[{label}] log_prob"));
+        assert_close_vec(
+            &lp,
+            &fvec(&case["log_prob"]),
+            TOL,
+            &format!("HalfNormal[{label}] log_prob"),
+        );
 
-        assert_close(d.mean().unwrap().item().unwrap(), f(&case["mean"]), TOL, &format!("HalfNormal[{label}] mean"));
-        assert_close(d.variance().unwrap().item().unwrap(), f(&case["variance"]), TOL, &format!("HalfNormal[{label}] variance"));
-        assert_close(d.entropy().unwrap().item().unwrap(), f(&case["entropy"]), TOL, &format!("HalfNormal[{label}] entropy"));
+        assert_close(
+            d.mean().unwrap().item().unwrap(),
+            f(&case["mean"]),
+            TOL,
+            &format!("HalfNormal[{label}] mean"),
+        );
+        assert_close(
+            d.variance().unwrap().item().unwrap(),
+            f(&case["variance"]),
+            TOL,
+            &format!("HalfNormal[{label}] variance"),
+        );
+        assert_close(
+            d.entropy().unwrap().item().unwrap(),
+            f(&case["entropy"]),
+            TOL,
+            &format!("HalfNormal[{label}] entropy"),
+        );
     }
 }
 
@@ -518,11 +697,31 @@ fn log_normal_fixtures_log_prob_mean_variance_entropy() {
         let x_pts = fvec(&case["x_points"]);
         let x_t = from_slice::<f64>(&x_pts, &[x_pts.len()]).unwrap();
         let lp = d.log_prob(&x_t).unwrap().data_vec().unwrap();
-        assert_close_vec(&lp, &fvec(&case["log_prob"]), TOL, &format!("LogNormal[{label}] log_prob"));
+        assert_close_vec(
+            &lp,
+            &fvec(&case["log_prob"]),
+            TOL,
+            &format!("LogNormal[{label}] log_prob"),
+        );
 
-        assert_close(d.mean().unwrap().item().unwrap(), f(&case["mean"]), TOL, &format!("LogNormal[{label}] mean"));
-        assert_close(d.variance().unwrap().item().unwrap(), f(&case["variance"]), TOL, &format!("LogNormal[{label}] variance"));
-        assert_close(d.entropy().unwrap().item().unwrap(), f(&case["entropy"]), TOL, &format!("LogNormal[{label}] entropy"));
+        assert_close(
+            d.mean().unwrap().item().unwrap(),
+            f(&case["mean"]),
+            TOL,
+            &format!("LogNormal[{label}] mean"),
+        );
+        assert_close(
+            d.variance().unwrap().item().unwrap(),
+            f(&case["variance"]),
+            TOL,
+            &format!("LogNormal[{label}] variance"),
+        );
+        assert_close(
+            d.entropy().unwrap().item().unwrap(),
+            f(&case["entropy"]),
+            TOL,
+            &format!("LogNormal[{label}] entropy"),
+        );
     }
 }
 
@@ -532,7 +731,12 @@ fn log_normal_fixtures_log_prob_mean_variance_entropy() {
 
 #[test]
 fn student_t_new() {
-    let d = StudentT::new(scalar(3.0f64).unwrap(), scalar(0.0f64).unwrap(), scalar(1.0f64).unwrap()).unwrap();
+    let d = StudentT::new(
+        scalar(3.0f64).unwrap(),
+        scalar(0.0f64).unwrap(),
+        scalar(1.0f64).unwrap(),
+    )
+    .unwrap();
     assert_eq!(d.sample(&[5]).unwrap().shape(), &[5]);
 }
 
@@ -544,21 +748,46 @@ fn student_t_fixtures_log_prob_entropy_mean_variance() {
         let df = f(&case["df"]);
         let loc = f(&case["loc"]);
         let scale = f(&case["scale"]);
-        let d = StudentT::new(scalar(df).unwrap(), scalar(loc).unwrap(), scalar(scale).unwrap()).unwrap();
+        let d = StudentT::new(
+            scalar(df).unwrap(),
+            scalar(loc).unwrap(),
+            scalar(scale).unwrap(),
+        )
+        .unwrap();
 
         let x_pts = fvec(&case["x_points"]);
         let x_t = from_slice::<f64>(&x_pts, &[x_pts.len()]).unwrap();
         let lp = d.log_prob(&x_t).unwrap().data_vec().unwrap();
-        assert_close_vec(&lp, &fvec(&case["log_prob"]), TOL, &format!("StudentT[{label}] log_prob"));
+        assert_close_vec(
+            &lp,
+            &fvec(&case["log_prob"]),
+            TOL,
+            &format!("StudentT[{label}] log_prob"),
+        );
 
-        assert_close(d.entropy().unwrap().item().unwrap(), f(&case["entropy"]), TOL, &format!("StudentT[{label}] entropy"));
+        assert_close(
+            d.entropy().unwrap().item().unwrap(),
+            f(&case["entropy"]),
+            TOL,
+            &format!("StudentT[{label}] entropy"),
+        );
 
         // mean and variance are null for df==1 (Cauchy case); use inherent methods
         if !case["mean"].is_null() {
             let mv = d.mean_value().unwrap();
-            assert_close(mv[0], f(&case["mean"]), TOL, &format!("StudentT[{label}] mean"));
+            assert_close(
+                mv[0],
+                f(&case["mean"]),
+                TOL,
+                &format!("StudentT[{label}] mean"),
+            );
             let vv = d.variance_value().unwrap();
-            assert_close(vv[0], f(&case["variance"]), TOL, &format!("StudentT[{label}] variance"));
+            assert_close(
+                vv[0],
+                f(&case["variance"]),
+                TOL,
+                &format!("StudentT[{label}] variance"),
+            );
         }
     }
 }
@@ -585,19 +814,49 @@ fn uniform_fixtures_log_prob_mean_variance_entropy_cdf_icdf() {
         let x_pts = fvec(&case["x_points"]);
         let x_t = from_slice::<f64>(&x_pts, &[x_pts.len()]).unwrap();
         let lp = d.log_prob(&x_t).unwrap().data_vec().unwrap();
-        assert_close_vec(&lp, &fvec(&case["log_prob"]), TOL, &format!("Uniform[{label}] log_prob"));
+        assert_close_vec(
+            &lp,
+            &fvec(&case["log_prob"]),
+            TOL,
+            &format!("Uniform[{label}] log_prob"),
+        );
 
-        assert_close(d.mean().unwrap().item().unwrap(), f(&case["mean"]), TOL, &format!("Uniform[{label}] mean"));
-        assert_close(d.variance().unwrap().item().unwrap(), f(&case["variance"]), TOL, &format!("Uniform[{label}] variance"));
-        assert_close(d.entropy().unwrap().item().unwrap(), f(&case["entropy"]), TOL, &format!("Uniform[{label}] entropy"));
+        assert_close(
+            d.mean().unwrap().item().unwrap(),
+            f(&case["mean"]),
+            TOL,
+            &format!("Uniform[{label}] mean"),
+        );
+        assert_close(
+            d.variance().unwrap().item().unwrap(),
+            f(&case["variance"]),
+            TOL,
+            &format!("Uniform[{label}] variance"),
+        );
+        assert_close(
+            d.entropy().unwrap().item().unwrap(),
+            f(&case["entropy"]),
+            TOL,
+            &format!("Uniform[{label}] entropy"),
+        );
 
         let cdf_out = d.cdf(&x_t).unwrap().data_vec().unwrap();
-        assert_close_vec(&cdf_out, &fvec(&case["cdf"]), TOL, &format!("Uniform[{label}] cdf"));
+        assert_close_vec(
+            &cdf_out,
+            &fvec(&case["cdf"]),
+            TOL,
+            &format!("Uniform[{label}] cdf"),
+        );
 
         let icdf_q = fvec(&case["icdf_q"]);
         let icdf_q_t = from_slice::<f64>(&icdf_q, &[icdf_q.len()]).unwrap();
         let icdf_out = d.icdf(&icdf_q_t).unwrap().data_vec().unwrap();
-        assert_close_vec(&icdf_out, &fvec(&case["icdf"]), TOL, &format!("Uniform[{label}] icdf"));
+        assert_close_vec(
+            &icdf_out,
+            &fvec(&case["icdf"]),
+            TOL,
+            &format!("Uniform[{label}] icdf"),
+        );
     }
 }
 
@@ -622,14 +881,18 @@ fn multivariate_normal_fixtures_log_prob_entropy_mean() {
         let n = loc_v.len();
         let loc_t = from_slice::<f64>(&loc_v, &[n]).unwrap();
 
-        let tril_rows: Vec<f64> = case["scale_tril"].as_array().unwrap()
+        let tril_rows: Vec<f64> = case["scale_tril"]
+            .as_array()
+            .unwrap()
             .iter()
             .flat_map(fvec)
             .collect();
         let tril_t = from_slice::<f64>(&tril_rows, &[n, n]).unwrap();
         let d = MultivariateNormal::from_scale_tril(loc_t, tril_t).unwrap();
 
-        let x_pts: Vec<Vec<f64>> = case["x_points"].as_array().unwrap()
+        let x_pts: Vec<Vec<f64>> = case["x_points"]
+            .as_array()
+            .unwrap()
             .iter()
             .map(fvec)
             .collect();
@@ -638,12 +901,27 @@ fn multivariate_normal_fixtures_log_prob_entropy_mean() {
         let x_t = from_slice::<f64>(&x_flat, &[m, n]).unwrap();
 
         let lp = d.log_prob(&x_t).unwrap().data_vec().unwrap();
-        assert_close_vec(&lp, &fvec(&case["log_prob"]), TOL, &format!("MultivariateNormal[{label}] log_prob"));
+        assert_close_vec(
+            &lp,
+            &fvec(&case["log_prob"]),
+            TOL,
+            &format!("MultivariateNormal[{label}] log_prob"),
+        );
 
-        assert_close(d.entropy().unwrap().item().unwrap(), f(&case["entropy"]), TOL, &format!("MultivariateNormal[{label}] entropy"));
+        assert_close(
+            d.entropy().unwrap().item().unwrap(),
+            f(&case["entropy"]),
+            TOL,
+            &format!("MultivariateNormal[{label}] entropy"),
+        );
 
         let mean = d.mean().unwrap().data_vec().unwrap();
-        assert_close_vec(&mean, &loc_v, TOL, &format!("MultivariateNormal[{label}] mean"));
+        assert_close_vec(
+            &mean,
+            &loc_v,
+            TOL,
+            &format!("MultivariateNormal[{label}] mean"),
+        );
     }
 }
 
@@ -669,11 +947,16 @@ fn low_rank_multivariate_normal_fixtures_log_prob_entropy_mean() {
         let n = loc_v.len();
         let loc_t = from_slice::<f64>(&loc_v, &[n]).unwrap();
 
-        let fac_rows: Vec<f64> = case["cov_factor"].as_array().unwrap()
+        let fac_rows: Vec<f64> = case["cov_factor"]
+            .as_array()
+            .unwrap()
             .iter()
             .flat_map(fvec)
             .collect();
-        let rank = case["cov_factor"].as_array().unwrap()[0].as_array().unwrap().len();
+        let rank = case["cov_factor"].as_array().unwrap()[0]
+            .as_array()
+            .unwrap()
+            .len();
         let fac_t = from_slice::<f64>(&fac_rows, &[n, rank]).unwrap();
 
         let diag_v = fvec(&case["cov_diag"]);
@@ -681,7 +964,9 @@ fn low_rank_multivariate_normal_fixtures_log_prob_entropy_mean() {
 
         let d = LowRankMultivariateNormal::new(loc_t, fac_t, diag_t).unwrap();
 
-        let x_pts: Vec<Vec<f64>> = case["x_points"].as_array().unwrap()
+        let x_pts: Vec<Vec<f64>> = case["x_points"]
+            .as_array()
+            .unwrap()
             .iter()
             .map(fvec)
             .collect();
@@ -690,9 +975,19 @@ fn low_rank_multivariate_normal_fixtures_log_prob_entropy_mean() {
         let x_t = from_slice::<f64>(&x_flat, &[m, n]).unwrap();
 
         let lp = d.log_prob(&x_t).unwrap().data_vec().unwrap();
-        assert_close_vec(&lp, &fvec(&case["log_prob"]), TOL, &format!("LRMVN[{label}] log_prob"));
+        assert_close_vec(
+            &lp,
+            &fvec(&case["log_prob"]),
+            TOL,
+            &format!("LRMVN[{label}] log_prob"),
+        );
 
-        assert_close(d.entropy().unwrap().item().unwrap(), f(&case["entropy"]), TOL, &format!("LRMVN[{label}] entropy"));
+        assert_close(
+            d.entropy().unwrap().item().unwrap(),
+            f(&case["entropy"]),
+            TOL,
+            &format!("LRMVN[{label}] entropy"),
+        );
 
         let mean = d.mean().unwrap().data_vec().unwrap();
         assert_close_vec(&mean, &loc_v, TOL, &format!("LRMVN[{label}] mean"));
@@ -720,7 +1015,9 @@ fn dirichlet_fixtures_log_prob_mean_variance_entropy() {
         let conc_t = from_slice::<f64>(&conc_v, &[k]).unwrap();
         let d = Dirichlet::new(conc_t).unwrap();
 
-        let x_pts: Vec<Vec<f64>> = case["x_points"].as_array().unwrap()
+        let x_pts: Vec<Vec<f64>> = case["x_points"]
+            .as_array()
+            .unwrap()
             .iter()
             .map(fvec)
             .collect();
@@ -729,15 +1026,35 @@ fn dirichlet_fixtures_log_prob_mean_variance_entropy() {
         let x_t = from_slice::<f64>(&x_flat, &[m, k]).unwrap();
 
         let lp = d.log_prob(&x_t).unwrap().data_vec().unwrap();
-        assert_close_vec(&lp, &fvec(&case["log_prob"]), TOL, &format!("Dirichlet[{label}] log_prob"));
+        assert_close_vec(
+            &lp,
+            &fvec(&case["log_prob"]),
+            TOL,
+            &format!("Dirichlet[{label}] log_prob"),
+        );
 
         let mean = d.mean().unwrap().data_vec().unwrap();
-        assert_close_vec(&mean, &fvec(&case["mean"]), TOL, &format!("Dirichlet[{label}] mean"));
+        assert_close_vec(
+            &mean,
+            &fvec(&case["mean"]),
+            TOL,
+            &format!("Dirichlet[{label}] mean"),
+        );
 
         let var = d.variance().unwrap().data_vec().unwrap();
-        assert_close_vec(&var, &fvec(&case["variance"]), TOL, &format!("Dirichlet[{label}] variance"));
+        assert_close_vec(
+            &var,
+            &fvec(&case["variance"]),
+            TOL,
+            &format!("Dirichlet[{label}] variance"),
+        );
 
-        assert_close(d.entropy().unwrap().item().unwrap(), f(&case["entropy"]), TOL, &format!("Dirichlet[{label}] entropy"));
+        assert_close(
+            d.entropy().unwrap().item().unwrap(),
+            f(&case["entropy"]),
+            TOL,
+            &format!("Dirichlet[{label}] entropy"),
+        );
     }
 }
 
@@ -763,11 +1080,31 @@ fn kumaraswamy_fixtures_log_prob_mean_variance_entropy() {
         let x_pts = fvec(&case["x_points"]);
         let x_t = from_slice::<f64>(&x_pts, &[x_pts.len()]).unwrap();
         let lp = d.log_prob(&x_t).unwrap().data_vec().unwrap();
-        assert_close_vec(&lp, &fvec(&case["log_prob"]), TOL, &format!("Kumaraswamy[{label}] log_prob"));
+        assert_close_vec(
+            &lp,
+            &fvec(&case["log_prob"]),
+            TOL,
+            &format!("Kumaraswamy[{label}] log_prob"),
+        );
 
-        assert_close(d.mean().unwrap().item().unwrap(), f(&case["mean"]), TOL, &format!("Kumaraswamy[{label}] mean"));
-        assert_close(d.variance().unwrap().item().unwrap(), f(&case["variance"]), TOL, &format!("Kumaraswamy[{label}] variance"));
-        assert_close(d.entropy().unwrap().item().unwrap(), f(&case["entropy"]), TOL, &format!("Kumaraswamy[{label}] entropy"));
+        assert_close(
+            d.mean().unwrap().item().unwrap(),
+            f(&case["mean"]),
+            TOL,
+            &format!("Kumaraswamy[{label}] mean"),
+        );
+        assert_close(
+            d.variance().unwrap().item().unwrap(),
+            f(&case["variance"]),
+            TOL,
+            &format!("Kumaraswamy[{label}] variance"),
+        );
+        assert_close(
+            d.entropy().unwrap().item().unwrap(),
+            f(&case["entropy"]),
+            TOL,
+            &format!("Kumaraswamy[{label}] entropy"),
+        );
     }
 }
 
@@ -777,7 +1114,10 @@ fn kumaraswamy_icdf_not_implemented() {
     // via distribution_trait_cdf_default_returns_error (Pareto).  Here we just
     // verify Kumaraswamy::icdf succeeds on a valid quantile as a smoke-test.
     let d = Kumaraswamy::new(scalar(2.0f64).unwrap(), scalar(3.0f64).unwrap()).unwrap();
-    assert!(d.icdf(&scalar(0.5f64).unwrap()).is_ok(), "Kumaraswamy::icdf should succeed");
+    assert!(
+        d.icdf(&scalar(0.5f64).unwrap()).is_ok(),
+        "Kumaraswamy::icdf should succeed"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -802,12 +1142,32 @@ fn pareto_fixtures_log_prob_mean_variance_entropy() {
         let x_pts = fvec(&case["x_points"]);
         let x_t = from_slice::<f64>(&x_pts, &[x_pts.len()]).unwrap();
         let lp = d.log_prob(&x_t).unwrap().data_vec().unwrap();
-        assert_close_vec(&lp, &fvec(&case["log_prob"]), TOL, &format!("Pareto[{label}] log_prob"));
+        assert_close_vec(
+            &lp,
+            &fvec(&case["log_prob"]),
+            TOL,
+            &format!("Pareto[{label}] log_prob"),
+        );
 
-        assert_close(d.mean().unwrap().item().unwrap(), f(&case["mean"]), TOL, &format!("Pareto[{label}] mean"));
-        assert_close(d.variance().unwrap().item().unwrap(), f(&case["variance"]), TOL, &format!("Pareto[{label}] variance"));
+        assert_close(
+            d.mean().unwrap().item().unwrap(),
+            f(&case["mean"]),
+            TOL,
+            &format!("Pareto[{label}] mean"),
+        );
+        assert_close(
+            d.variance().unwrap().item().unwrap(),
+            f(&case["variance"]),
+            TOL,
+            &format!("Pareto[{label}] variance"),
+        );
 
-        assert_close(d.entropy().unwrap().item().unwrap(), f(&case["entropy"]), TOL, &format!("Pareto[{label}] entropy"));
+        assert_close(
+            d.entropy().unwrap().item().unwrap(),
+            f(&case["entropy"]),
+            TOL,
+            &format!("Pareto[{label}] entropy"),
+        );
     }
 }
 
@@ -833,9 +1193,19 @@ fn von_mises_fixtures_log_prob_mean() {
         let x_pts = fvec(&case["x_points"]);
         let x_t = from_slice::<f64>(&x_pts, &[x_pts.len()]).unwrap();
         let lp = d.log_prob(&x_t).unwrap().data_vec().unwrap();
-        assert_close_vec(&lp, &fvec(&case["log_prob"]), TOL, &format!("VonMises[{label}] log_prob"));
+        assert_close_vec(
+            &lp,
+            &fvec(&case["log_prob"]),
+            TOL,
+            &format!("VonMises[{label}] log_prob"),
+        );
 
-        assert_close(d.mean().unwrap().item().unwrap(), f(&case["mean"]), TOL, &format!("VonMises[{label}] mean"));
+        assert_close(
+            d.mean().unwrap().item().unwrap(),
+            f(&case["mean"]),
+            TOL,
+            &format!("VonMises[{label}] mean"),
+        );
     }
 }
 
@@ -861,11 +1231,31 @@ fn weibull_fixtures_log_prob_mean_variance_entropy() {
         let x_pts = fvec(&case["x_points"]);
         let x_t = from_slice::<f64>(&x_pts, &[x_pts.len()]).unwrap();
         let lp = d.log_prob(&x_t).unwrap().data_vec().unwrap();
-        assert_close_vec(&lp, &fvec(&case["log_prob"]), TOL, &format!("Weibull[{label}] log_prob"));
+        assert_close_vec(
+            &lp,
+            &fvec(&case["log_prob"]),
+            TOL,
+            &format!("Weibull[{label}] log_prob"),
+        );
 
-        assert_close(d.mean().unwrap().item().unwrap(), f(&case["mean"]), TOL, &format!("Weibull[{label}] mean"));
-        assert_close(d.variance().unwrap().item().unwrap(), f(&case["variance"]), TOL, &format!("Weibull[{label}] variance"));
-        assert_close(d.entropy().unwrap().item().unwrap(), f(&case["entropy"]), TOL, &format!("Weibull[{label}] entropy"));
+        assert_close(
+            d.mean().unwrap().item().unwrap(),
+            f(&case["mean"]),
+            TOL,
+            &format!("Weibull[{label}] mean"),
+        );
+        assert_close(
+            d.variance().unwrap().item().unwrap(),
+            f(&case["variance"]),
+            TOL,
+            &format!("Weibull[{label}] variance"),
+        );
+        assert_close(
+            d.entropy().unwrap().item().unwrap(),
+            f(&case["entropy"]),
+            TOL,
+            &format!("Weibull[{label}] entropy"),
+        );
     }
 }
 
@@ -902,9 +1292,19 @@ fn independent_fixtures_log_prob_entropy() {
         let xp_v = fvec(&case["x_point"]);
         let x_t = from_slice::<f64>(&xp_v, &[n]).unwrap();
         let lp = d.log_prob(&x_t).unwrap().item().unwrap();
-        assert_close(lp, f(&case["log_prob"]), TOL, &format!("Independent[{label}] log_prob"));
+        assert_close(
+            lp,
+            f(&case["log_prob"]),
+            TOL,
+            &format!("Independent[{label}] log_prob"),
+        );
 
-        assert_close(d.entropy().unwrap().item().unwrap(), f(&case["entropy"]), TOL, &format!("Independent[{label}] entropy"));
+        assert_close(
+            d.entropy().unwrap().item().unwrap(),
+            f(&case["entropy"]),
+            TOL,
+            &format!("Independent[{label}] entropy"),
+        );
     }
 }
 
@@ -949,7 +1349,12 @@ fn mixture_same_family_fixtures_log_prob() {
         for (x_val, exp_val) in x_pts.iter().zip(exp_lp.iter()) {
             let x_t = scalar(*x_val).unwrap();
             let lp = d.log_prob(&x_t).unwrap().item().unwrap();
-            assert_close(lp, *exp_val, TOL, &format!("MixtureSameFamily[{label}] log_prob at x={x_val}"));
+            assert_close(
+                lp,
+                *exp_val,
+                TOL,
+                &format!("MixtureSameFamily[{label}] log_prob at x={x_val}"),
+            );
         }
     }
 }
@@ -982,7 +1387,12 @@ fn transformed_distribution_fixtures_log_prob_equals_lognormal() {
         let x_t = from_slice::<f64>(&x_pts, &[x_pts.len()]).unwrap();
         let lp = d.log_prob(&x_t).unwrap().data_vec().unwrap();
         let exp_lp = fvec(&case["log_prob_transformed"]);
-        assert_close_vec(&lp, &exp_lp, TOL, &format!("TransformedDistribution[{label}] log_prob"));
+        assert_close_vec(
+            &lp,
+            &exp_lp,
+            TOL,
+            &format!("TransformedDistribution[{label}] log_prob"),
+        );
     }
 }
 
@@ -993,8 +1403,12 @@ fn transformed_distribution_fixtures_log_prob_equals_lognormal() {
 #[test]
 fn exp_transform_forward_inverse_log_det_jacobian() {
     let fix = fixtures();
-    let case = fix["transforms"].as_array().unwrap()
-        .iter().find(|c| c["label"] == "exp_transform").unwrap();
+    let case = fix["transforms"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["label"] == "exp_transform")
+        .unwrap();
 
     let x_pts = fvec(&case["x_points"]);
     let x_t = from_slice::<f64>(&x_pts, &[x_pts.len()]).unwrap();
@@ -1008,15 +1422,28 @@ fn exp_transform_forward_inverse_log_det_jacobian() {
     // inverse(forward(x)) ≈ x
     assert_close_vec(&inv, &x_pts, TOL, "ExpTransform::inverse");
 
-    let ladj = t.log_abs_det_jacobian(&x_t, &y_t).unwrap().data_vec().unwrap();
-    assert_close_vec(&ladj, &fvec(&case["log_abs_det_jacobian"]), TOL, "ExpTransform::log_abs_det_jacobian");
+    let ladj = t
+        .log_abs_det_jacobian(&x_t, &y_t)
+        .unwrap()
+        .data_vec()
+        .unwrap();
+    assert_close_vec(
+        &ladj,
+        &fvec(&case["log_abs_det_jacobian"]),
+        TOL,
+        "ExpTransform::log_abs_det_jacobian",
+    );
 }
 
 #[test]
 fn affine_transform_new_forward_inverse_log_det_jacobian() {
     let fix = fixtures();
-    let case = fix["transforms"].as_array().unwrap()
-        .iter().find(|c| c["label"] == "affine_transform_loc2_scale3").unwrap();
+    let case = fix["transforms"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["label"] == "affine_transform_loc2_scale3")
+        .unwrap();
 
     let loc = f(&case["loc"]);
     let scale = f(&case["scale"]);
@@ -1026,43 +1453,89 @@ fn affine_transform_new_forward_inverse_log_det_jacobian() {
     let x_t = from_slice::<f64>(&x_pts, &[x_pts.len()]).unwrap();
 
     let fwd = t.forward(&x_t).unwrap().data_vec().unwrap();
-    assert_close_vec(&fwd, &fvec(&case["forward"]), TOL, "AffineTransform::forward");
+    assert_close_vec(
+        &fwd,
+        &fvec(&case["forward"]),
+        TOL,
+        "AffineTransform::forward",
+    );
 
     let y_t = from_slice::<f64>(&fwd, &[fwd.len()]).unwrap();
     let inv = t.inverse(&y_t).unwrap().data_vec().unwrap();
     // inverse(forward(x)) should ≈ x (forward maps x→loc+scale*x so inverse gives back x)
-    assert_close_vec(&inv, &fvec(&case["inverse"]), TOL, "AffineTransform::inverse");
+    assert_close_vec(
+        &inv,
+        &fvec(&case["inverse"]),
+        TOL,
+        "AffineTransform::inverse",
+    );
 
-    let ladj = t.log_abs_det_jacobian(&x_t, &y_t).unwrap().data_vec().unwrap();
-    assert_close_vec(&ladj, &fvec(&case["log_abs_det_jacobian"]), TOL, "AffineTransform::log_abs_det_jacobian");
+    let ladj = t
+        .log_abs_det_jacobian(&x_t, &y_t)
+        .unwrap()
+        .data_vec()
+        .unwrap();
+    assert_close_vec(
+        &ladj,
+        &fvec(&case["log_abs_det_jacobian"]),
+        TOL,
+        "AffineTransform::log_abs_det_jacobian",
+    );
 }
 
 #[test]
 fn sigmoid_transform_forward_inverse_log_det_jacobian() {
     let fix = fixtures();
-    let case = fix["transforms"].as_array().unwrap()
-        .iter().find(|c| c["label"] == "sigmoid_transform").unwrap();
+    let case = fix["transforms"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["label"] == "sigmoid_transform")
+        .unwrap();
 
     let x_pts = fvec(&case["x_points"]);
     let x_t = from_slice::<f64>(&x_pts, &[x_pts.len()]).unwrap();
     let t = SigmoidTransform;
 
     let fwd = t.forward(&x_t).unwrap().data_vec().unwrap();
-    assert_close_vec(&fwd, &fvec(&case["forward"]), TOL, "SigmoidTransform::forward");
+    assert_close_vec(
+        &fwd,
+        &fvec(&case["forward"]),
+        TOL,
+        "SigmoidTransform::forward",
+    );
 
     let y_t = from_slice::<f64>(&fwd, &[fwd.len()]).unwrap();
     let inv = t.inverse(&y_t).unwrap().data_vec().unwrap();
-    assert_close_vec(&inv, &fvec(&case["inverse"]), TOL, "SigmoidTransform::inverse");
+    assert_close_vec(
+        &inv,
+        &fvec(&case["inverse"]),
+        TOL,
+        "SigmoidTransform::inverse",
+    );
 
-    let ladj = t.log_abs_det_jacobian(&x_t, &y_t).unwrap().data_vec().unwrap();
-    assert_close_vec(&ladj, &fvec(&case["log_abs_det_jacobian"]), TOL, "SigmoidTransform::log_abs_det_jacobian");
+    let ladj = t
+        .log_abs_det_jacobian(&x_t, &y_t)
+        .unwrap()
+        .data_vec()
+        .unwrap();
+    assert_close_vec(
+        &ladj,
+        &fvec(&case["log_abs_det_jacobian"]),
+        TOL,
+        "SigmoidTransform::log_abs_det_jacobian",
+    );
 }
 
 #[test]
 fn tanh_transform_forward_inverse_log_det_jacobian() {
     let fix = fixtures();
-    let case = fix["transforms"].as_array().unwrap()
-        .iter().find(|c| c["label"] == "tanh_transform").unwrap();
+    let case = fix["transforms"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["label"] == "tanh_transform")
+        .unwrap();
 
     let x_pts = fvec(&case["x_points"]);
     let x_t = from_slice::<f64>(&x_pts, &[x_pts.len()]).unwrap();
@@ -1073,31 +1546,68 @@ fn tanh_transform_forward_inverse_log_det_jacobian() {
 
     let y_t = from_slice::<f64>(&fwd, &[fwd.len()]).unwrap();
     let inv = t.inverse(&y_t).unwrap().data_vec().unwrap();
-    assert_close_vec(&inv, &fvec(&case["inverse"]), TOL_LOOSE, "TanhTransform::inverse");
+    assert_close_vec(
+        &inv,
+        &fvec(&case["inverse"]),
+        TOL_LOOSE,
+        "TanhTransform::inverse",
+    );
 
-    let ladj = t.log_abs_det_jacobian(&x_t, &y_t).unwrap().data_vec().unwrap();
-    assert_close_vec(&ladj, &fvec(&case["log_abs_det_jacobian"]), TOL, "TanhTransform::log_abs_det_jacobian");
+    let ladj = t
+        .log_abs_det_jacobian(&x_t, &y_t)
+        .unwrap()
+        .data_vec()
+        .unwrap();
+    assert_close_vec(
+        &ladj,
+        &fvec(&case["log_abs_det_jacobian"]),
+        TOL,
+        "TanhTransform::log_abs_det_jacobian",
+    );
 }
 
 #[test]
 fn softplus_transform_forward_inverse_log_det_jacobian() {
     let fix = fixtures();
-    let case = fix["transforms"].as_array().unwrap()
-        .iter().find(|c| c["label"] == "softplus_transform").unwrap();
+    let case = fix["transforms"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["label"] == "softplus_transform")
+        .unwrap();
 
     let x_pts = fvec(&case["x_points"]);
     let x_t = from_slice::<f64>(&x_pts, &[x_pts.len()]).unwrap();
     let t = SoftplusTransform;
 
     let fwd = t.forward(&x_t).unwrap().data_vec().unwrap();
-    assert_close_vec(&fwd, &fvec(&case["forward"]), TOL, "SoftplusTransform::forward");
+    assert_close_vec(
+        &fwd,
+        &fvec(&case["forward"]),
+        TOL,
+        "SoftplusTransform::forward",
+    );
 
     let y_t = from_slice::<f64>(&fwd, &[fwd.len()]).unwrap();
     let inv = t.inverse(&y_t).unwrap().data_vec().unwrap();
-    assert_close_vec(&inv, &fvec(&case["inverse"]), TOL, "SoftplusTransform::inverse");
+    assert_close_vec(
+        &inv,
+        &fvec(&case["inverse"]),
+        TOL,
+        "SoftplusTransform::inverse",
+    );
 
-    let ladj = t.log_abs_det_jacobian(&x_t, &y_t).unwrap().data_vec().unwrap();
-    assert_close_vec(&ladj, &fvec(&case["log_abs_det_jacobian"]), TOL, "SoftplusTransform::log_abs_det_jacobian");
+    let ladj = t
+        .log_abs_det_jacobian(&x_t, &y_t)
+        .unwrap()
+        .data_vec()
+        .unwrap();
+    assert_close_vec(
+        &ladj,
+        &fvec(&case["log_abs_det_jacobian"]),
+        TOL,
+        "SoftplusTransform::log_abs_det_jacobian",
+    );
 }
 
 #[test]
@@ -1106,8 +1616,12 @@ fn compose_transform_new_len_is_empty_forward_inverse_log_det_jacobian() {
     // forward(x) = exp(2*x)
     // fixture uses compose_affine_then_exp which is actually AffineTransform(2,2) then ExpTransform
     let fix = fixtures();
-    let case = fix["transforms"].as_array().unwrap()
-        .iter().find(|c| c["label"] == "compose_affine_then_exp").unwrap();
+    let case = fix["transforms"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["label"] == "compose_affine_then_exp")
+        .unwrap();
 
     // Recreate: affine(loc=2, scale=3) then exp — matches the fixture generator
     let aff: Box<dyn Transform<f64>> = Box::new(AffineTransform::new(2.0f64, 3.0f64));
@@ -1120,14 +1634,33 @@ fn compose_transform_new_len_is_empty_forward_inverse_log_det_jacobian() {
     let x_t = from_slice::<f64>(&x_pts, &[x_pts.len()]).unwrap();
 
     let fwd = compose.forward(&x_t).unwrap().data_vec().unwrap();
-    assert_close_vec(&fwd, &fvec(&case["forward"]), TOL, "ComposeTransform::forward");
+    assert_close_vec(
+        &fwd,
+        &fvec(&case["forward"]),
+        TOL,
+        "ComposeTransform::forward",
+    );
 
     let y_t = from_slice::<f64>(&fwd, &[fwd.len()]).unwrap();
     let inv = compose.inverse(&y_t).unwrap().data_vec().unwrap();
-    assert_close_vec(&inv, &fvec(&case["inverse"]), TOL, "ComposeTransform::inverse");
+    assert_close_vec(
+        &inv,
+        &fvec(&case["inverse"]),
+        TOL,
+        "ComposeTransform::inverse",
+    );
 
-    let ladj = compose.log_abs_det_jacobian(&x_t, &y_t).unwrap().data_vec().unwrap();
-    assert_close_vec(&ladj, &fvec(&case["log_abs_det_jacobian"]), TOL, "ComposeTransform::log_abs_det_jacobian");
+    let ladj = compose
+        .log_abs_det_jacobian(&x_t, &y_t)
+        .unwrap()
+        .data_vec()
+        .unwrap();
+    assert_close_vec(
+        &ladj,
+        &fvec(&case["log_abs_det_jacobian"]),
+        TOL,
+        "ComposeTransform::log_abs_det_jacobian",
+    );
 }
 
 #[test]

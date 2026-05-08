@@ -53,14 +53,13 @@ use std::sync::Arc;
 
 use ferrotorch_core::storage::TensorStorage;
 use ferrotorch_core::{FerrotorchError, Tensor};
+use ferrotorch_distributed::backend::{Backend, SimulatedBackend};
 use ferrotorch_distributed::{
-    DEFAULT_COLLECTIVE_TIMEOUT, DeviceMesh, DTensor, DistributedError, Placement, ReduceOp,
-    SubBackend,
-    all_gather, allreduce, async_all_gather, async_reduce_scatter, barrier, broadcast,
+    DEFAULT_COLLECTIVE_TIMEOUT, DTensor, DeviceMesh, DistributedError, Placement, ReduceOp,
+    SubBackend, all_gather, allreduce, async_all_gather, async_reduce_scatter, barrier, broadcast,
     flat_shard_metadata, is_gloo_available, is_mpi_available, is_ucc_available, recv,
     reduce_scatter, send, sendrecv,
 };
-use ferrotorch_distributed::backend::{Backend, SimulatedBackend};
 use serde::Deserialize;
 
 // ---------------------------------------------------------------------------
@@ -145,7 +144,10 @@ struct Fixture {
     #[serde(default)]
     expected_rank1: Option<Vec<f32>>,
     #[serde(default)]
-    #[allow(dead_code, reason = "metadata kept for diagnostics — op_type used in fixture lookup")]
+    #[allow(
+        dead_code,
+        reason = "metadata kept for diagnostics — op_type used in fixture lookup"
+    )]
     op_type: Option<String>,
     #[serde(default)]
     #[allow(dead_code, reason = "metadata kept for diagnostics")]
@@ -422,14 +424,21 @@ fn default_collective_timeout_matches_fixture() {
 fn simulated_backend_create_group_world_size_1() {
     let file = load_fixtures();
     let cases = fixtures_for(&file, "SimulatedBackend_create_group_world_size_1");
-    assert!(!cases.is_empty(), "fixture create_group_world_size_1 not found");
+    assert!(
+        !cases.is_empty(),
+        "fixture create_group_world_size_1 not found"
+    );
 
     let f = cases[0];
     let world_size = f.world_size.expect("fixture must have world_size");
     let expected_len = f.expected_len.expect("fixture must have expected_len");
 
     let group = SimulatedBackend::create_group(world_size).unwrap();
-    assert_eq!(group.len(), expected_len, "create_group({world_size}) must return {expected_len} backends");
+    assert_eq!(
+        group.len(),
+        expected_len,
+        "create_group({world_size}) must return {expected_len} backends"
+    );
     assert_eq!(group[0].rank(), 0, "rank 0 backend must have rank=0");
     assert_eq!(group[0].world_size(), 1, "world_size must be 1");
 }
@@ -439,16 +448,27 @@ fn simulated_backend_create_group_world_size_1() {
 fn simulated_backend_create_group_world_size_2() {
     let file = load_fixtures();
     let cases = fixtures_for(&file, "SimulatedBackend_create_group_world_size_2");
-    assert!(!cases.is_empty(), "fixture create_group_world_size_2 not found");
+    assert!(
+        !cases.is_empty(),
+        "fixture create_group_world_size_2 not found"
+    );
 
     let f = cases[0];
     let world_size = f.world_size.expect("fixture must have world_size");
 
     let group = SimulatedBackend::create_group(world_size).unwrap();
-    assert_eq!(group.len(), world_size, "create_group({world_size}) must return {world_size} backends");
+    assert_eq!(
+        group.len(),
+        world_size,
+        "create_group({world_size}) must return {world_size} backends"
+    );
     for (i, b) in group.iter().enumerate() {
         assert_eq!(b.rank(), i, "backend[{i}] must have rank={i}");
-        assert_eq!(b.world_size(), world_size, "backend[{i}] must have world_size={world_size}");
+        assert_eq!(
+            b.world_size(),
+            world_size,
+            "backend[{i}] must have world_size={world_size}"
+        );
     }
 }
 
@@ -456,10 +476,7 @@ fn simulated_backend_create_group_world_size_2() {
 #[test]
 fn simulated_backend_create_group_world_size_0_error() {
     let result = SimulatedBackend::create_group(0);
-    assert!(
-        result.is_err(),
-        "create_group(0) must return Err, got Ok"
-    );
+    assert!(result.is_err(), "create_group(0) must return Err, got Ok");
 }
 
 // ---------------------------------------------------------------------------
@@ -472,7 +489,10 @@ fn simulated_backend_create_group_world_size_0_error() {
 fn allreduce_world_size_1_sum_is_identity() {
     let file = load_fixtures();
     let cases = fixtures_for(&file, "allreduce_world_size_1_sum");
-    assert!(!cases.is_empty(), "fixture allreduce_world_size_1_sum not found");
+    assert!(
+        !cases.is_empty(),
+        "fixture allreduce_world_size_1_sum not found"
+    );
 
     let f = cases[0];
     let input = f.input.clone().expect("fixture must have input");
@@ -481,7 +501,11 @@ fn allreduce_world_size_1_sum_is_identity() {
         .expected
         .as_ref()
         .and_then(|v| v.as_array())
-        .map(|arr| arr.iter().map(|x| x.as_f64().unwrap() as f32).collect::<Vec<_>>())
+        .map(|arr| {
+            arr.iter()
+                .map(|x| x.as_f64().unwrap() as f32)
+                .collect::<Vec<_>>()
+        })
         .expect("fixture must have expected");
 
     let group = SimulatedBackend::create_group(1).unwrap();
@@ -497,7 +521,10 @@ fn allreduce_world_size_1_sum_is_identity() {
 fn allreduce_world_size_1_mean_is_identity() {
     let file = load_fixtures();
     let cases = fixtures_for(&file, "allreduce_world_size_1_mean");
-    assert!(!cases.is_empty(), "fixture allreduce_world_size_1_mean not found");
+    assert!(
+        !cases.is_empty(),
+        "fixture allreduce_world_size_1_mean not found"
+    );
 
     let f = cases[0];
     let input = f.input.clone().expect("fixture must have input");
@@ -506,7 +533,11 @@ fn allreduce_world_size_1_mean_is_identity() {
         .expected
         .as_ref()
         .and_then(|v| v.as_array())
-        .map(|arr| arr.iter().map(|x| x.as_f64().unwrap() as f32).collect::<Vec<_>>())
+        .map(|arr| {
+            arr.iter()
+                .map(|x| x.as_f64().unwrap() as f32)
+                .collect::<Vec<_>>()
+        })
         .expect("fixture must have expected");
 
     let group = SimulatedBackend::create_group(1).unwrap();
@@ -527,13 +558,25 @@ fn allreduce_world_size_1_mean_is_identity() {
 fn allreduce_world_size_2_sum_matches_reference() {
     let file = load_fixtures();
     let cases = fixtures_for(&file, "allreduce_world_size_2_sum");
-    assert!(!cases.is_empty(), "fixture allreduce_world_size_2_sum not found");
+    assert!(
+        !cases.is_empty(),
+        "fixture allreduce_world_size_2_sum not found"
+    );
 
     let f = cases[0];
-    let input0 = f.input_rank0.clone().expect("fixture must have input_rank0");
-    let input1 = f.input_rank1.clone().expect("fixture must have input_rank1");
+    let input0 = f
+        .input_rank0
+        .clone()
+        .expect("fixture must have input_rank0");
+    let input1 = f
+        .input_rank1
+        .clone()
+        .expect("fixture must have input_rank1");
     let shape = f.shape.clone().expect("fixture must have shape");
-    let expected = f.expected_all_ranks.clone().expect("fixture must have expected_all_ranks");
+    let expected = f
+        .expected_all_ranks
+        .clone()
+        .expect("fixture must have expected_all_ranks");
 
     let group = SimulatedBackend::create_group(2).unwrap();
     let t0 = make_tensor(input0, shape.clone());
@@ -542,13 +585,33 @@ fn allreduce_world_size_2_sum_matches_reference() {
     let (result0, result1) = std::thread::scope(|s| {
         let b0 = &group[0];
         let b1 = &group[1];
-        let h0 = s.spawn(|| allreduce(&t0, b0, ReduceOp::Sum).unwrap().data_vec().unwrap());
-        let h1 = s.spawn(|| allreduce(&t1, b1, ReduceOp::Sum).unwrap().data_vec().unwrap());
+        let h0 = s.spawn(|| {
+            allreduce(&t0, b0, ReduceOp::Sum)
+                .unwrap()
+                .data_vec()
+                .unwrap()
+        });
+        let h1 = s.spawn(|| {
+            allreduce(&t1, b1, ReduceOp::Sum)
+                .unwrap()
+                .data_vec()
+                .unwrap()
+        });
         (h0.join().unwrap(), h1.join().unwrap())
     });
 
-    assert_close(&result0, &expected, 1e-6, "allreduce(world_size=2, Sum) rank0");
-    assert_close(&result1, &expected, 1e-6, "allreduce(world_size=2, Sum) rank1");
+    assert_close(
+        &result0,
+        &expected,
+        1e-6,
+        "allreduce(world_size=2, Sum) rank0",
+    );
+    assert_close(
+        &result1,
+        &expected,
+        1e-6,
+        "allreduce(world_size=2, Sum) rank1",
+    );
 }
 
 /// `allreduce` with `world_size=2` and `op=Mean` must produce
@@ -558,13 +621,25 @@ fn allreduce_world_size_2_sum_matches_reference() {
 fn allreduce_world_size_2_mean_matches_reference() {
     let file = load_fixtures();
     let cases = fixtures_for(&file, "allreduce_world_size_2_mean");
-    assert!(!cases.is_empty(), "fixture allreduce_world_size_2_mean not found");
+    assert!(
+        !cases.is_empty(),
+        "fixture allreduce_world_size_2_mean not found"
+    );
 
     let f = cases[0];
-    let input0 = f.input_rank0.clone().expect("fixture must have input_rank0");
-    let input1 = f.input_rank1.clone().expect("fixture must have input_rank1");
+    let input0 = f
+        .input_rank0
+        .clone()
+        .expect("fixture must have input_rank0");
+    let input1 = f
+        .input_rank1
+        .clone()
+        .expect("fixture must have input_rank1");
     let shape = f.shape.clone().expect("fixture must have shape");
-    let expected = f.expected_all_ranks.clone().expect("fixture must have expected_all_ranks");
+    let expected = f
+        .expected_all_ranks
+        .clone()
+        .expect("fixture must have expected_all_ranks");
 
     let group = SimulatedBackend::create_group(2).unwrap();
     let t0 = make_tensor(input0, shape.clone());
@@ -573,13 +648,33 @@ fn allreduce_world_size_2_mean_matches_reference() {
     let (result0, result1) = std::thread::scope(|s| {
         let b0 = &group[0];
         let b1 = &group[1];
-        let h0 = s.spawn(|| allreduce(&t0, b0, ReduceOp::Mean).unwrap().data_vec().unwrap());
-        let h1 = s.spawn(|| allreduce(&t1, b1, ReduceOp::Mean).unwrap().data_vec().unwrap());
+        let h0 = s.spawn(|| {
+            allreduce(&t0, b0, ReduceOp::Mean)
+                .unwrap()
+                .data_vec()
+                .unwrap()
+        });
+        let h1 = s.spawn(|| {
+            allreduce(&t1, b1, ReduceOp::Mean)
+                .unwrap()
+                .data_vec()
+                .unwrap()
+        });
         (h0.join().unwrap(), h1.join().unwrap())
     });
 
-    assert_close(&result0, &expected, 1e-6, "allreduce(world_size=2, Mean) rank0");
-    assert_close(&result1, &expected, 1e-6, "allreduce(world_size=2, Mean) rank1");
+    assert_close(
+        &result0,
+        &expected,
+        1e-6,
+        "allreduce(world_size=2, Mean) rank0",
+    );
+    assert_close(
+        &result1,
+        &expected,
+        1e-6,
+        "allreduce(world_size=2, Mean) rank1",
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -592,7 +687,10 @@ fn allreduce_world_size_2_mean_matches_reference() {
 fn broadcast_world_size_1_is_identity() {
     let file = load_fixtures();
     let cases = fixtures_for(&file, "broadcast_world_size_1");
-    assert!(!cases.is_empty(), "fixture broadcast_world_size_1 not found");
+    assert!(
+        !cases.is_empty(),
+        "fixture broadcast_world_size_1 not found"
+    );
 
     let f = cases[0];
     let input = f.input.clone().expect("fixture must have input");
@@ -601,7 +699,11 @@ fn broadcast_world_size_1_is_identity() {
         .expected
         .as_ref()
         .and_then(|v| v.as_array())
-        .map(|arr| arr.iter().map(|x| x.as_f64().unwrap() as f32).collect::<Vec<_>>())
+        .map(|arr| {
+            arr.iter()
+                .map(|x| x.as_f64().unwrap() as f32)
+                .collect::<Vec<_>>()
+        })
         .expect("fixture must have expected");
 
     let group = SimulatedBackend::create_group(1).unwrap();
@@ -621,14 +723,29 @@ fn broadcast_world_size_1_is_identity() {
 fn broadcast_world_size_2_from_root_0_matches_reference() {
     let file = load_fixtures();
     let cases = fixtures_for(&file, "broadcast_world_size_2_from_root_0");
-    assert!(!cases.is_empty(), "fixture broadcast_world_size_2_from_root_0 not found");
+    assert!(
+        !cases.is_empty(),
+        "fixture broadcast_world_size_2_from_root_0 not found"
+    );
 
     let f = cases[0];
-    let input0 = f.input_rank0.clone().expect("fixture must have input_rank0");
-    let input1 = f.input_rank1.clone().expect("fixture must have input_rank1");
+    let input0 = f
+        .input_rank0
+        .clone()
+        .expect("fixture must have input_rank0");
+    let input1 = f
+        .input_rank1
+        .clone()
+        .expect("fixture must have input_rank1");
     let shape = f.shape.clone().expect("fixture must have shape");
-    let expected0 = f.expected_rank0.clone().expect("fixture must have expected_rank0");
-    let expected1 = f.expected_rank1.clone().expect("fixture must have expected_rank1");
+    let expected0 = f
+        .expected_rank0
+        .clone()
+        .expect("fixture must have expected_rank0");
+    let expected1 = f
+        .expected_rank1
+        .clone()
+        .expect("fixture must have expected_rank1");
 
     let group = SimulatedBackend::create_group(2).unwrap();
     let t0 = make_tensor(input0, shape.clone());
@@ -643,7 +760,12 @@ fn broadcast_world_size_2_from_root_0_matches_reference() {
     });
 
     assert_close(&result0, &expected0, 1e-6, "broadcast rank0");
-    assert_close(&result1, &expected1, 1e-6, "broadcast rank1 receives root's tensor");
+    assert_close(
+        &result1,
+        &expected1,
+        1e-6,
+        "broadcast rank1 receives root's tensor",
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -656,7 +778,10 @@ fn broadcast_world_size_2_from_root_0_matches_reference() {
 fn all_gather_world_size_1_is_identity() {
     let file = load_fixtures();
     let cases = fixtures_for(&file, "all_gather_world_size_1");
-    assert!(!cases.is_empty(), "fixture all_gather_world_size_1 not found");
+    assert!(
+        !cases.is_empty(),
+        "fixture all_gather_world_size_1 not found"
+    );
 
     let f = cases[0];
     let input = f.input.clone().expect("fixture must have input");
@@ -665,7 +790,11 @@ fn all_gather_world_size_1_is_identity() {
         .expected
         .as_ref()
         .and_then(|v| v.as_array())
-        .map(|arr| arr.iter().map(|x| x.as_f64().unwrap() as f32).collect::<Vec<_>>())
+        .map(|arr| {
+            arr.iter()
+                .map(|x| x.as_f64().unwrap() as f32)
+                .collect::<Vec<_>>()
+        })
         .expect("fixture must have expected");
 
     let group = SimulatedBackend::create_group(1).unwrap();
@@ -685,13 +814,28 @@ fn all_gather_world_size_1_is_identity() {
 fn all_gather_world_size_2_matches_reference() {
     let file = load_fixtures();
     let cases = fixtures_for(&file, "all_gather_world_size_2");
-    assert!(!cases.is_empty(), "fixture all_gather_world_size_2 not found");
+    assert!(
+        !cases.is_empty(),
+        "fixture all_gather_world_size_2 not found"
+    );
 
     let f = cases[0];
-    let input0 = f.input_rank0.clone().expect("fixture must have input_rank0");
-    let input1 = f.input_rank1.clone().expect("fixture must have input_rank1");
-    let input_shape = f.input_shape.clone().expect("fixture must have input_shape");
-    let expected = f.expected_all_ranks.clone().expect("fixture must have expected_all_ranks");
+    let input0 = f
+        .input_rank0
+        .clone()
+        .expect("fixture must have input_rank0");
+    let input1 = f
+        .input_rank1
+        .clone()
+        .expect("fixture must have input_rank1");
+    let input_shape = f
+        .input_shape
+        .clone()
+        .expect("fixture must have input_shape");
+    let expected = f
+        .expected_all_ranks
+        .clone()
+        .expect("fixture must have expected_all_ranks");
 
     let group = SimulatedBackend::create_group(2).unwrap();
     let t0 = make_tensor(input0, input_shape.clone());
@@ -718,7 +862,10 @@ fn all_gather_world_size_2_matches_reference() {
 fn reduce_scatter_world_size_1_sum_is_identity() {
     let file = load_fixtures();
     let cases = fixtures_for(&file, "reduce_scatter_world_size_1_sum");
-    assert!(!cases.is_empty(), "fixture reduce_scatter_world_size_1_sum not found");
+    assert!(
+        !cases.is_empty(),
+        "fixture reduce_scatter_world_size_1_sum not found"
+    );
 
     let f = cases[0];
     let input = f.input.clone().expect("fixture must have input");
@@ -727,7 +874,11 @@ fn reduce_scatter_world_size_1_sum_is_identity() {
         .expected
         .as_ref()
         .and_then(|v| v.as_array())
-        .map(|arr| arr.iter().map(|x| x.as_f64().unwrap() as f32).collect::<Vec<_>>())
+        .map(|arr| {
+            arr.iter()
+                .map(|x| x.as_f64().unwrap() as f32)
+                .collect::<Vec<_>>()
+        })
         .expect("fixture must have expected");
 
     let group = SimulatedBackend::create_group(1).unwrap();
@@ -747,14 +898,32 @@ fn reduce_scatter_world_size_1_sum_is_identity() {
 fn reduce_scatter_world_size_2_sum_matches_reference() {
     let file = load_fixtures();
     let cases = fixtures_for(&file, "reduce_scatter_world_size_2_sum");
-    assert!(!cases.is_empty(), "fixture reduce_scatter_world_size_2_sum not found");
+    assert!(
+        !cases.is_empty(),
+        "fixture reduce_scatter_world_size_2_sum not found"
+    );
 
     let f = cases[0];
-    let input0 = f.input_rank0.clone().expect("fixture must have input_rank0");
-    let input1 = f.input_rank1.clone().expect("fixture must have input_rank1");
-    let input_shape = f.input_shape.clone().expect("fixture must have input_shape");
-    let expected0 = f.expected_rank0.clone().expect("fixture must have expected_rank0");
-    let expected1 = f.expected_rank1.clone().expect("fixture must have expected_rank1");
+    let input0 = f
+        .input_rank0
+        .clone()
+        .expect("fixture must have input_rank0");
+    let input1 = f
+        .input_rank1
+        .clone()
+        .expect("fixture must have input_rank1");
+    let input_shape = f
+        .input_shape
+        .clone()
+        .expect("fixture must have input_shape");
+    let expected0 = f
+        .expected_rank0
+        .clone()
+        .expect("fixture must have expected_rank0");
+    let expected1 = f
+        .expected_rank1
+        .clone()
+        .expect("fixture must have expected_rank1");
 
     let group = SimulatedBackend::create_group(2).unwrap();
     let t0 = make_tensor(input0, input_shape.clone());
@@ -763,13 +932,33 @@ fn reduce_scatter_world_size_2_sum_matches_reference() {
     let (result0, result1) = std::thread::scope(|s| {
         let b0 = &group[0];
         let b1 = &group[1];
-        let h0 = s.spawn(|| reduce_scatter(&t0, b0, ReduceOp::Sum).unwrap().data_vec().unwrap());
-        let h1 = s.spawn(|| reduce_scatter(&t1, b1, ReduceOp::Sum).unwrap().data_vec().unwrap());
+        let h0 = s.spawn(|| {
+            reduce_scatter(&t0, b0, ReduceOp::Sum)
+                .unwrap()
+                .data_vec()
+                .unwrap()
+        });
+        let h1 = s.spawn(|| {
+            reduce_scatter(&t1, b1, ReduceOp::Sum)
+                .unwrap()
+                .data_vec()
+                .unwrap()
+        });
         (h0.join().unwrap(), h1.join().unwrap())
     });
 
-    assert_close(&result0, &expected0, 1e-6, "reduce_scatter rank0 gets first chunk");
-    assert_close(&result1, &expected1, 1e-6, "reduce_scatter rank1 gets second chunk");
+    assert_close(
+        &result0,
+        &expected0,
+        1e-6,
+        "reduce_scatter rank0 gets first chunk",
+    );
+    assert_close(
+        &result1,
+        &expected1,
+        1e-6,
+        "reduce_scatter rank1 gets second chunk",
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -782,7 +971,10 @@ fn reduce_scatter_world_size_2_sum_matches_reference() {
 fn barrier_world_size_1_is_ok() {
     let group = SimulatedBackend::create_group(1).unwrap();
     let result = barrier(&group[0]);
-    assert!(result.is_ok(), "barrier(world_size=1) must return Ok, got: {result:?}");
+    assert!(
+        result.is_ok(),
+        "barrier(world_size=1) must return Ok, got: {result:?}"
+    );
 }
 
 /// `barrier` with `world_size=2` must synchronise both ranks and return `Ok`.
@@ -799,8 +991,14 @@ fn barrier_world_size_2_synchronises() {
         (h0.join().unwrap(), h1.join().unwrap())
     });
 
-    assert!(r0.is_ok(), "barrier(world_size=2) rank0 must return Ok, got: {r0:?}");
-    assert!(r1.is_ok(), "barrier(world_size=2) rank1 must return Ok, got: {r1:?}");
+    assert!(
+        r0.is_ok(),
+        "barrier(world_size=2) rank0 must return Ok, got: {r0:?}"
+    );
+    assert!(
+        r1.is_ok(),
+        "barrier(world_size=2) rank1 must return Ok, got: {r1:?}"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -843,10 +1041,7 @@ fn send_to_self_returns_error() {
     let group = SimulatedBackend::create_group(2).unwrap();
     let t = make_tensor(vec![1.0_f32, 2.0], vec![2]);
     let result = send(&t, 0, &group[0]);
-    assert!(
-        result.is_err(),
-        "send to self rank must return Err, got Ok"
-    );
+    assert!(result.is_err(), "send to self rank must return Err, got Ok");
     let err_str = format!("{:?}", result.unwrap_err());
     assert!(
         err_str.contains("InvalidArgument") || err_str.contains("self rank"),
@@ -879,11 +1074,23 @@ fn sendrecv_round_trip_matches_reference() {
     assert!(!cases.is_empty(), "fixture sendrecv_round_trip not found");
 
     let f = cases[0];
-    let data0 = f.rank0_sends.clone().expect("fixture must have rank0_sends");
-    let data1 = f.rank1_sends.clone().expect("fixture must have rank1_sends");
+    let data0 = f
+        .rank0_sends
+        .clone()
+        .expect("fixture must have rank0_sends");
+    let data1 = f
+        .rank1_sends
+        .clone()
+        .expect("fixture must have rank1_sends");
     let shape = f.shape.clone().expect("fixture must have shape");
-    let expected_r0 = f.expected_rank0_receives.clone().expect("fixture must have expected_rank0_receives");
-    let expected_r1 = f.expected_rank1_receives.clone().expect("fixture must have expected_rank1_receives");
+    let expected_r0 = f
+        .expected_rank0_receives
+        .clone()
+        .expect("fixture must have expected_rank0_receives");
+    let expected_r1 = f
+        .expected_rank1_receives
+        .clone()
+        .expect("fixture must have expected_rank1_receives");
 
     let group = SimulatedBackend::create_group(2).unwrap();
     let t0 = make_tensor(data0, shape.clone());
@@ -897,8 +1104,18 @@ fn sendrecv_round_trip_matches_reference() {
         (h0.join().unwrap(), h1.join().unwrap())
     });
 
-    assert_close(&received0, &expected_r0, 1e-6, "sendrecv: rank0 receives rank1's data");
-    assert_close(&received1, &expected_r1, 1e-6, "sendrecv: rank1 receives rank0's data");
+    assert_close(
+        &received0,
+        &expected_r0,
+        1e-6,
+        "sendrecv: rank0 receives rank1's data",
+    );
+    assert_close(
+        &received1,
+        &expected_r1,
+        1e-6,
+        "sendrecv: rank1 receives rank0's data",
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -916,14 +1133,20 @@ fn sub_backend_members_matches_fixture() {
     let f = cases[0];
     let world_size = f.world_size.expect("fixture must have world_size");
     let members = f.members.clone().expect("fixture must have members");
-    let expected_members = f.expected_members.clone().expect("fixture must have expected_members");
+    let expected_members = f
+        .expected_members
+        .clone()
+        .expect("fixture must have expected_members");
 
     let group = SimulatedBackend::create_group(world_size).unwrap();
     // Use the backend whose global rank matches the first member (rank 1) so
     // that SubBackend::new can locate the caller's rank inside `members`.
     let first_member = members[0];
     let parent: Arc<dyn Backend> = Arc::new(
-        group.into_iter().nth(first_member).expect("group must have enough ranks"),
+        group
+            .into_iter()
+            .nth(first_member)
+            .expect("group must have enough ranks"),
     );
     let sub = SubBackend::new(parent, members).unwrap();
     assert_eq!(
@@ -939,7 +1162,10 @@ fn sub_backend_members_matches_fixture() {
 fn sub_backend_rank_mapping_matches_fixture() {
     let file = load_fixtures();
     let cases = fixtures_for(&file, "SubBackend_rank_mapping");
-    assert!(!cases.is_empty(), "fixture SubBackend_rank_mapping not found");
+    assert!(
+        !cases.is_empty(),
+        "fixture SubBackend_rank_mapping not found"
+    );
 
     let f = cases[0];
     let world_size = f.world_size.expect("fixture must have world_size");
@@ -950,7 +1176,10 @@ fn sub_backend_rank_mapping_matches_fixture() {
     // that SubBackend::new can locate the caller's rank inside `members`.
     let first_member = members[0];
     let parent: Arc<dyn Backend> = Arc::new(
-        group.into_iter().nth(first_member).expect("group must have enough ranks"),
+        group
+            .into_iter()
+            .nth(first_member)
+            .expect("group must have enough ranks"),
     );
     let sub = SubBackend::new(parent, members.clone()).unwrap();
 
@@ -1035,20 +1264,39 @@ fn placement_variants_match_fixture() {
     let shard = Placement::Shard(0);
     let partial = Placement::Partial(ReduceOp::Sum);
 
-    assert!(replicate.is_replicate(), "Replicate::is_replicate must be true");
+    assert!(
+        replicate.is_replicate(),
+        "Replicate::is_replicate must be true"
+    );
     assert!(!replicate.is_shard(), "Replicate::is_shard must be false");
-    assert!(!replicate.is_partial(), "Replicate::is_partial must be false");
-    assert!(replicate.shard_dim().is_none(), "Replicate::shard_dim must be None");
+    assert!(
+        !replicate.is_partial(),
+        "Replicate::is_partial must be false"
+    );
+    assert!(
+        replicate.shard_dim().is_none(),
+        "Replicate::shard_dim must be None"
+    );
 
     assert!(!shard.is_replicate(), "Shard::is_replicate must be false");
     assert!(shard.is_shard(), "Shard::is_shard must be true");
     assert!(!shard.is_partial(), "Shard::is_partial must be false");
-    assert_eq!(shard.shard_dim(), Some(0), "Shard(0)::shard_dim must be Some(0)");
+    assert_eq!(
+        shard.shard_dim(),
+        Some(0),
+        "Shard(0)::shard_dim must be Some(0)"
+    );
 
-    assert!(!partial.is_replicate(), "Partial::is_replicate must be false");
+    assert!(
+        !partial.is_replicate(),
+        "Partial::is_replicate must be false"
+    );
     assert!(!partial.is_shard(), "Partial::is_shard must be false");
     assert!(partial.is_partial(), "Partial::is_partial must be true");
-    assert!(partial.shard_dim().is_none(), "Partial::shard_dim must be None");
+    assert!(
+        partial.shard_dim().is_none(),
+        "Partial::shard_dim must be None"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -1098,7 +1346,10 @@ fn distributed_error_display_matches_fixture() {
     );
 
     // InvalidRank
-    let e = DistributedError::InvalidRank { rank: 5, world_size: 3 };
+    let e = DistributedError::InvalidRank {
+        rank: 5,
+        world_size: 3,
+    };
     let s = e.to_string();
     assert!(
         s.contains("rank") || s.contains("5"),
@@ -1152,8 +1403,20 @@ fn async_all_gather_matches_sync_reference() {
     let arc1 = Arc::clone(&arcs[1]);
 
     let (result0, result1) = std::thread::scope(|s| {
-        let h0 = s.spawn(|| async_all_gather(t0, arc0).wait().unwrap().data_vec().unwrap());
-        let h1 = s.spawn(|| async_all_gather(t1, arc1).wait().unwrap().data_vec().unwrap());
+        let h0 = s.spawn(|| {
+            async_all_gather(t0, arc0)
+                .wait()
+                .unwrap()
+                .data_vec()
+                .unwrap()
+        });
+        let h1 = s.spawn(|| {
+            async_all_gather(t1, arc1)
+                .wait()
+                .unwrap()
+                .data_vec()
+                .unwrap()
+        });
         (h0.join().unwrap(), h1.join().unwrap())
     });
 
@@ -1208,7 +1471,7 @@ fn async_reduce_scatter_matches_sync_reference() {
 
     let t0 = make_tensor(vec![1.0_f32, 2.0, 3.0, 4.0], vec![4]);
     let t1 = make_tensor(vec![5.0_f32, 6.0, 7.0, 8.0], vec![4]);
-    let expected_r0 = vec![6.0_f32, 8.0];  // rank0 gets first half of sum
+    let expected_r0 = vec![6.0_f32, 8.0]; // rank0 gets first half of sum
     let expected_r1 = vec![10.0_f32, 12.0]; // rank1 gets second half of sum
 
     let arc0 = Arc::clone(&arcs[0]);
@@ -1232,8 +1495,18 @@ fn async_reduce_scatter_matches_sync_reference() {
         (h0.join().unwrap(), h1.join().unwrap())
     });
 
-    assert_close(&result0, &expected_r0, 1e-6, "async_reduce_scatter rank0 gets first chunk");
-    assert_close(&result1, &expected_r1, 1e-6, "async_reduce_scatter rank1 gets second chunk");
+    assert_close(
+        &result0,
+        &expected_r0,
+        1e-6,
+        "async_reduce_scatter rank0 gets first chunk",
+    );
+    assert_close(
+        &result1,
+        &expected_r1,
+        1e-6,
+        "async_reduce_scatter rank1 gets second chunk",
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -1252,8 +1525,15 @@ fn tensor_shard_spec_fields_accessible() {
     let spec = metadata.tensor_specs.get("w").expect("spec must exist");
     assert_eq!(spec.full_shape, vec![400], "TensorShardSpec::full_shape");
     assert_eq!(spec.shard_dim, 0, "TensorShardSpec::shard_dim");
-    assert_eq!(spec.shard_sizes.len(), 4, "TensorShardSpec::shard_sizes len");
-    assert!(spec.shard_sizes.iter().all(|&s| s == 100), "all shard_sizes must be 100");
+    assert_eq!(
+        spec.shard_sizes.len(),
+        4,
+        "TensorShardSpec::shard_sizes len"
+    );
+    assert!(
+        spec.shard_sizes.iter().all(|&s| s == 100),
+        "all shard_sizes must be 100"
+    );
 }
 
 /// `ShardMetadata` fields must be readable and match expected values.
@@ -1265,7 +1545,10 @@ fn shard_metadata_fields_accessible() {
     let empty_state_dict: HashMap<String, Tensor<f32>> = HashMap::new();
     let metadata = flat_shard_metadata(&empty_state_dict, 4);
     assert_eq!(metadata.num_ranks, 4, "ShardMetadata::num_ranks");
-    assert!(metadata.tensor_specs.is_empty(), "ShardMetadata::tensor_specs empty");
+    assert!(
+        metadata.tensor_specs.is_empty(),
+        "ShardMetadata::tensor_specs empty"
+    );
 }
 
 /// `flat_shard_metadata` with single shard must produce offset=0, length=total.
@@ -1278,10 +1561,17 @@ fn flat_shard_metadata_single_shard_matches_fixture() {
 
     let metadata = flat_shard_metadata(&state_dict, 1);
     assert_eq!(metadata.num_ranks, 1, "num_ranks must be 1");
-    let spec = metadata.tensor_specs.get("weight").expect("weight spec must exist");
+    let spec = metadata
+        .tensor_specs
+        .get("weight")
+        .expect("weight spec must exist");
     assert_eq!(spec.full_shape, vec![100], "full_shape must be [100]");
     assert_eq!(spec.shard_dim, 0, "shard_dim must be 0");
-    assert_eq!(spec.shard_sizes, vec![100], "single shard: shard_sizes=[100]");
+    assert_eq!(
+        spec.shard_sizes,
+        vec![100],
+        "single shard: shard_sizes=[100]"
+    );
 }
 
 /// `flat_shard_metadata` with four shards must divide elements equally.
@@ -1293,8 +1583,15 @@ fn flat_shard_metadata_four_shards_matches_fixture() {
 
     let metadata = flat_shard_metadata(&state_dict, 4);
     assert_eq!(metadata.num_ranks, 4, "num_ranks must be 4");
-    let spec = metadata.tensor_specs.get("weight").expect("weight spec must exist");
-    assert_eq!(spec.full_shape, vec![100], "full_shape must be [25 * 4 = 100]");
+    let spec = metadata
+        .tensor_specs
+        .get("weight")
+        .expect("weight spec must exist");
+    assert_eq!(
+        spec.full_shape,
+        vec![100],
+        "full_shape must be [25 * 4 = 100]"
+    );
     assert_eq!(spec.shard_sizes.len(), 4, "must have 4 shard_sizes entries");
     assert!(
         spec.shard_sizes.iter().all(|&s| s == 25),
@@ -1313,7 +1610,9 @@ fn flat_shard_metadata_four_shards_matches_fixture() {
 fn rpc_error_display_structural() {
     use ferrotorch_distributed::RpcError;
 
-    let e = RpcError::FunctionNotFound { name: "my_fn".to_string() };
+    let e = RpcError::FunctionNotFound {
+        name: "my_fn".to_string(),
+    };
     let s = e.to_string();
     assert!(
         s.contains("my_fn") || s.contains("not found"),
@@ -1329,7 +1628,10 @@ fn rpc_error_display_structural() {
 
     // RpcError must convert to FerrotorchError
     let ft: FerrotorchError = RpcError::Timeout.into();
-    assert!(!format!("{ft:?}").is_empty(), "RpcError must convert to FerrotorchError");
+    assert!(
+        !format!("{ft:?}").is_empty(),
+        "RpcError must convert to FerrotorchError"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -1367,9 +1669,7 @@ fn live_ddp_gradient_sync() {
 /// Tracking issue #884.
 #[test]
 fn live_fsdp_parameter_sharding() {
-    cascade_skip!(
-        "FSDP parameter sharding requires >= 2 ranks; deferred — tracking issue #884"
-    );
+    cascade_skip!("FSDP parameter sharding requires >= 2 ranks; deferred — tracking issue #884");
 }
 
 /// Pipeline parallelism microbatch scheduling: requires multi-stage multi-rank.

@@ -7,8 +7,8 @@
 //! The returned boxes are in `[x1, y1, x2, y2]` pixel coords relative to
 //! the **original image** — scaled by the level's stride.
 
-use ferrotorch_core::{FerrotorchResult, Float, TensorStorage, Tensor};
 use ferrotorch_core::numeric_cast::cast;
+use ferrotorch_core::{FerrotorchResult, Float, Tensor, TensorStorage};
 
 // ---------------------------------------------------------------------------
 // AnchorGenerator
@@ -79,8 +79,8 @@ impl AnchorGenerator {
                 let _ = (zero, half);
                 out.push(-half_w); // x1
                 out.push(-half_h); // y1
-                out.push(half_w);  // x2
-                out.push(half_h);  // y2
+                out.push(half_w); // x2
+                out.push(half_h); // y2
             }
         }
         Ok(out)
@@ -123,7 +123,7 @@ impl AnchorGenerator {
                     let cy: T = (cast::<usize, T>(fy)? + cast::<f64, T>(0.5)?) * stride_t;
                     let _ = zero;
                     for a in 0..num_base {
-                        all_anchors.push(cx + base[a * 4]);     // x1
+                        all_anchors.push(cx + base[a * 4]); // x1
                         all_anchors.push(cy + base[a * 4 + 1]); // y1
                         all_anchors.push(cx + base[a * 4 + 2]); // x2
                         all_anchors.push(cy + base[a * 4 + 3]); // y2
@@ -205,7 +205,13 @@ pub fn decode_boxes<T: Float>(
 
 #[inline]
 fn clamp_t<T: Float>(v: T, lo: T, hi: T) -> T {
-    if v < lo { lo } else if v > hi { hi } else { v }
+    if v < lo {
+        lo
+    } else if v > hi {
+        hi
+    } else {
+        v
+    }
 }
 
 #[inline]

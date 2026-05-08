@@ -85,9 +85,11 @@ use ferrotorch_core::stride_tricks::{
     AsStridedBackward, as_strided, as_strided_copy, as_strided_scatter,
 };
 use ferrotorch_core::{
-    BoolTensor, Device, FerrotorchError, IntTensor, Tensor, TensorStorage, chunk_t, contiguous_t,
-    permute_t, split_t, view_t,
+    BoolTensor, Device, IntTensor, Tensor, TensorStorage, chunk_t, contiguous_t, permute_t,
+    split_t, view_t,
 };
+#[cfg(feature = "gpu")]
+use ferrotorch_core::FerrotorchError;
 
 /// Free-function `narrow_t` is not re-exported at the crate root; the
 /// inherent `Tensor::narrow` method calls into it. Wrap so the tests can

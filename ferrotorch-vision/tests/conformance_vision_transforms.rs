@@ -31,7 +31,7 @@
     clippy::explicit_iter_loop,
     clippy::redundant_else,
     clippy::float_cmp,
-    clippy::needless_range_loop,
+    clippy::needless_range_loop
 )]
 
 use std::path::PathBuf;
@@ -40,12 +40,12 @@ use ferrotorch_core::{Tensor, TensorStorage};
 use ferrotorch_data::Transform;
 use ferrotorch_vision::transforms::{
     Compose, ElasticTransform, GaussianNoise, RandomApply, RandomChoice, RandomCrop,
-    RandomGaussianBlur, RandomHorizontalFlip, RandomResizedCrop, RandomRotation, RandomVerticalFlip,
-    TrivialAugmentWide,
+    RandomGaussianBlur, RandomHorizontalFlip, RandomResizedCrop, RandomRotation,
+    RandomVerticalFlip, TrivialAugmentWide,
 };
 use ferrotorch_vision::{
-    CenterCrop, ColorJitter, IMAGENET_MEAN, IMAGENET_STD,
-    Resize, VisionNormalize, VisionToTensor, vision_manual_seed,
+    CenterCrop, ColorJitter, IMAGENET_MEAN, IMAGENET_STD, Resize, VisionNormalize, VisionToTensor,
+    vision_manual_seed,
 };
 use serde::Deserialize;
 
@@ -130,16 +130,12 @@ fn load_fixtures() -> FixtureFile {
             path.display()
         );
     }
-    let body = std::fs::read_to_string(&path)
-        .unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
-    serde_json::from_str(&body)
-        .unwrap_or_else(|e| panic!("parse fixtures.json: {e}"))
+    let body =
+        std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
+    serde_json::from_str(&body).unwrap_or_else(|e| panic!("parse fixtures.json: {e}"))
 }
 
-fn get_fixture<'a>(
-    fixtures: &'a [serde_json::Value],
-    id: &str,
-) -> Option<&'a serde_json::Value> {
+fn get_fixture<'a>(fixtures: &'a [serde_json::Value], id: &str) -> Option<&'a serde_json::Value> {
     fixtures.iter().find(|f| f["id"] == id)
 }
 
@@ -194,7 +190,12 @@ fn resize_8x8_to_4x4_matches_reference() {
     let out = resize.apply(input).unwrap();
 
     assert_eq!(out.shape(), &expected_shape[..], "Resize output shape");
-    assert_close_f64(out.data().unwrap(), &expected_data, 1e-6, "resize_8x8_to_4x4");
+    assert_close_f64(
+        out.data().unwrap(),
+        &expected_data,
+        1e-6,
+        "resize_8x8_to_4x4",
+    );
 }
 
 #[test]
@@ -223,14 +224,19 @@ fn resize_2x2_to_6x6_matches_reference() {
     let out = resize.apply(input).unwrap();
 
     assert_eq!(out.shape(), &expected_shape[..]);
-    assert_close_f64(out.data().unwrap(), &expected_data, 1e-6, "resize_2x2_to_6x6");
+    assert_close_f64(
+        out.data().unwrap(),
+        &expected_data,
+        1e-6,
+        "resize_2x2_to_6x6",
+    );
 }
 
 #[test]
 fn resize_identity_matches_reference() {
     let ff = load_fixtures();
-    let fix = get_fixture(&ff.fixtures, "resize_identity")
-        .expect("fixture resize_identity not found");
+    let fix =
+        get_fixture(&ff.fixtures, "resize_identity").expect("fixture resize_identity not found");
 
     let input_data = flatten_nested_f64(&fix["input"]);
     let expected_data = flatten_nested_f64(&fix["expected"]);
@@ -303,7 +309,12 @@ fn center_crop_8x8_to_4x4_matches_reference() {
     let out = crop.apply(input).unwrap();
 
     assert_eq!(out.shape(), &expected_shape[..]);
-    assert_close_f64(out.data().unwrap(), &expected_data, 1e-6, "center_crop_8x8_to_4x4");
+    assert_close_f64(
+        out.data().unwrap(),
+        &expected_data,
+        1e-6,
+        "center_crop_8x8_to_4x4",
+    );
 }
 
 #[test]
@@ -332,7 +343,12 @@ fn center_crop_6x6_to_2x2_matches_reference() {
     let out = crop.apply(input).unwrap();
 
     assert_eq!(out.shape(), &expected_shape[..]);
-    assert_close_f64(out.data().unwrap(), &expected_data, 1e-6, "center_crop_6x6_to_2x2");
+    assert_close_f64(
+        out.data().unwrap(),
+        &expected_data,
+        1e-6,
+        "center_crop_6x6_to_2x2",
+    );
 }
 
 #[test]
@@ -361,7 +377,12 @@ fn center_crop_multichannel_4x4_to_2x2_matches_reference() {
     let out = crop.apply(input).unwrap();
 
     assert_eq!(out.shape(), &expected_shape[..]);
-    assert_close_f64(out.data().unwrap(), &expected_data, 1e-6, "center_crop_multichannel");
+    assert_close_f64(
+        out.data().unwrap(),
+        &expected_data,
+        1e-6,
+        "center_crop_multichannel",
+    );
 }
 
 #[test]
@@ -405,15 +426,17 @@ fn vision_normalize_imagenet_4x4_matches_reference() {
         .map(|v| v.as_f64().unwrap())
         .collect();
 
-    let norm = VisionNormalize::<f64>::new(
-        [mean[0], mean[1], mean[2]],
-        [std[0], std[1], std[2]],
-    )
-    .unwrap();
+    let norm =
+        VisionNormalize::<f64>::new([mean[0], mean[1], mean[2]], [std[0], std[1], std[2]]).unwrap();
     let input = make_f64(input_data, input_shape);
     let out = norm.apply(input).unwrap();
 
-    assert_close_f64(out.data().unwrap(), &expected_data, 1e-5, "normalize_imagenet_4x4");
+    assert_close_f64(
+        out.data().unwrap(),
+        &expected_data,
+        1e-5,
+        "normalize_imagenet_4x4",
+    );
 }
 
 #[test]
@@ -435,7 +458,12 @@ fn vision_normalize_custom_0p5_4x4_matches_reference() {
     let input = make_f64(input_data, input_shape);
     let out = norm.apply(input).unwrap();
 
-    assert_close_f64(out.data().unwrap(), &expected_data, 1e-5, "normalize_custom_0p5");
+    assert_close_f64(
+        out.data().unwrap(),
+        &expected_data,
+        1e-5,
+        "normalize_custom_0p5",
+    );
 }
 
 #[test]
@@ -451,7 +479,12 @@ fn vision_normalize_imagenet_1x1_matches_reference() {
     let input = make_f64(input_data, vec![3, 1, 1]);
     let out = norm.apply(input).unwrap();
 
-    assert_close_f64(out.data().unwrap(), &expected_data, 1e-5, "normalize_imagenet_1x1");
+    assert_close_f64(
+        out.data().unwrap(),
+        &expected_data,
+        1e-5,
+        "normalize_imagenet_1x1",
+    );
 }
 
 #[test]
@@ -503,7 +536,12 @@ fn vision_to_tensor_2x3_rgb_matches_reference() {
     let out = transform.apply(input).unwrap();
 
     assert_eq!(out.shape(), &expected_shape[..]);
-    assert_close_f64(out.data().unwrap(), &expected_data, 1e-6, "to_tensor_2x3_rgb");
+    assert_close_f64(
+        out.data().unwrap(),
+        &expected_data,
+        1e-6,
+        "to_tensor_2x3_rgb",
+    );
 }
 
 #[test]
@@ -520,7 +558,12 @@ fn vision_to_tensor_1x1_rgb_matches_reference() {
     let out = transform.apply(input).unwrap();
 
     assert_eq!(out.shape(), &[3, 1, 1]);
-    assert_close_f64(out.data().unwrap(), &expected_data, 1e-5, "to_tensor_1x1_rgb");
+    assert_close_f64(
+        out.data().unwrap(),
+        &expected_data,
+        1e-5,
+        "to_tensor_1x1_rgb",
+    );
 }
 
 #[test]
@@ -792,15 +835,20 @@ fn compose_resize_normalize_matches_reference() {
 
     assert_eq!(out.shape(), &expected_shape[..]);
     // Tolerance 1e-5: two consecutive ops compound rounding.
-    assert_close_f64(out.data().unwrap(), &expected_data, 1e-5, "compose_resize_normalize");
+    assert_close_f64(
+        out.data().unwrap(),
+        &expected_data,
+        1e-5,
+        "compose_resize_normalize",
+    );
 }
 
 #[test]
 fn compose_new_len_is_empty() {
     // Exercises: Compose::new, Compose::len, Compose::is_empty
     let empty: Compose<f64> = Compose::new(vec![]);
-    assert_eq!(Compose::len(&empty), 0);       // Compose::len
-    assert!(Compose::is_empty(&empty));         // Compose::is_empty
+    assert_eq!(Compose::len(&empty), 0); // Compose::len
+    assert!(Compose::is_empty(&empty)); // Compose::is_empty
 
     let one: Compose<f64> = Compose::new(vec![Box::new(Resize::<f64>::new(4, 4))]);
     assert_eq!(one.len(), 1);
@@ -830,7 +878,12 @@ fn color_jitter_zero_params_output_equals_input() {
     let jitter = ColorJitter::<f64>::new(0.0, 0.0, 0.0, 0.0).unwrap();
     let out = jitter.apply(input).unwrap();
 
-    assert_close_f64(out.data().unwrap(), &expected_data, 1e-9, "color_jitter_zero_params");
+    assert_close_f64(
+        out.data().unwrap(),
+        &expected_data,
+        1e-9,
+        "color_jitter_zero_params",
+    );
 }
 
 #[test]
@@ -970,19 +1023,16 @@ fn random_gaussian_blur_shape_contract() {
 
 #[test]
 fn random_apply_new_constructor() {
-    let transforms: Vec<Box<dyn Transform<f64>>> =
-        vec![Box::new(Resize::<f64>::new(8, 8))];
+    let transforms: Vec<Box<dyn Transform<f64>>> = vec![Box::new(Resize::<f64>::new(8, 8))];
     let _ra = RandomApply::<f64>::new(transforms, 0.5).unwrap();
-    let bad_transforms: Vec<Box<dyn Transform<f64>>> =
-        vec![Box::new(Resize::<f64>::new(8, 8))];
+    let bad_transforms: Vec<Box<dyn Transform<f64>>> = vec![Box::new(Resize::<f64>::new(8, 8))];
     assert!(RandomApply::<f64>::new(bad_transforms, 1.5).is_err());
 }
 
 #[test]
 fn random_apply_p1_shape_contract() {
     // p=1.0 means always apply — inner is an identity resize.
-    let transforms: Vec<Box<dyn Transform<f64>>> =
-        vec![Box::new(Resize::<f64>::new(8, 8))];
+    let transforms: Vec<Box<dyn Transform<f64>>> = vec![Box::new(Resize::<f64>::new(8, 8))];
     let ra = RandomApply::<f64>::new(transforms, 1.0).unwrap();
     let data: Vec<f64> = (0..192).map(|i| i as f64 / 192.0).collect();
     let t = make_f64(data, vec![3, 8, 8]);
@@ -1135,8 +1185,8 @@ where
     };
     let mut flip_count = 0usize;
     for _ in 0..n {
-        let t = Tensor::from_storage(TensorStorage::cpu(data.clone()), vec![3, 4, 4], false)
-            .unwrap();
+        let t =
+            Tensor::from_storage(TensorStorage::cpu(data.clone()), vec![3, 4, 4], false).unwrap();
         let out = transform().apply(t).unwrap();
         if out.data().unwrap() != data.as_slice() {
             flip_count += 1;
@@ -1185,10 +1235,8 @@ fn random_vflip_distribution_moment_p0p5_n10000() {
     // PROBE AFTER: 10_000 trials of RandomVerticalFlip(p=0.5) must yield
     //              flip rate in [0.46, 0.54].
     const N: usize = 10_000;
-    let flips = count_flips_n::<f64, _>(
-        || Box::new(RandomVerticalFlip::<f64>::new(0.5).unwrap()),
-        N,
-    );
+    let flips =
+        count_flips_n::<f64, _>(|| Box::new(RandomVerticalFlip::<f64>::new(0.5).unwrap()), N);
     assert_flip_rate(flips, N, 0.5, 0.04, "RandomVerticalFlip p=0.5");
 }
 
@@ -1207,10 +1255,8 @@ fn random_hflip_distribution_moment_p0p3_n10000() {
 fn random_vflip_distribution_moment_p0p7_n10000() {
     // Verify p=0.7 yields ~70% flip rate.
     const N: usize = 10_000;
-    let flips = count_flips_n::<f64, _>(
-        || Box::new(RandomVerticalFlip::<f64>::new(0.7).unwrap()),
-        N,
-    );
+    let flips =
+        count_flips_n::<f64, _>(|| Box::new(RandomVerticalFlip::<f64>::new(0.7).unwrap()), N);
     assert_flip_rate(flips, N, 0.7, 0.07, "RandomVerticalFlip p=0.7");
 }
 
@@ -1226,9 +1272,7 @@ fn random_crop_offset_distribution_moment_n5000() {
     const N: usize = 5_000;
 
     // Input: 1 channel, 16×16 where pixel[r,c] = r*16 + c (as f64/255 scale).
-    let raw: Vec<f64> = (0..256usize)
-        .map(|i| i as f64 / 255.0)
-        .collect();
+    let raw: Vec<f64> = (0..256usize).map(|i| i as f64 / 255.0).collect();
     let crop = RandomCrop::<f64>::new(8, 8);
 
     // Accumulate the top-left corner value of each crop output.
@@ -1237,12 +1281,8 @@ fn random_crop_offset_distribution_moment_n5000() {
     // E[top] = 3.5, E[left] = 3.5 → E[t*16+l] = 3.5*16 + 3.5 = 59.5 → /255 ≈ 0.2333
     let mut top_left_sum = 0.0_f64;
     for _ in 0..N {
-        let t = Tensor::from_storage(
-            TensorStorage::cpu(raw.clone()),
-            vec![1, 16, 16],
-            false,
-        )
-        .unwrap();
+        let t =
+            Tensor::from_storage(TensorStorage::cpu(raw.clone()), vec![1, 16, 16], false).unwrap();
         let out = crop.apply(t).unwrap();
         top_left_sum += out.data().unwrap()[0];
     }
@@ -1263,10 +1303,7 @@ fn random_crop_output_values_within_input_range() {
     // Structural invariant: every cropped pixel must have been present in the
     // input (no interpolation, no padding). Does NOT call vision_manual_seed.
     let data: Vec<f64> = (0..192usize).map(|i| i as f64 / 192.0).collect();
-    let input_set: std::collections::HashSet<u64> = data
-        .iter()
-        .map(|&v| v.to_bits())
-        .collect();
+    let input_set: std::collections::HashSet<u64> = data.iter().map(|&v| v.to_bits()).collect();
 
     let crop = RandomCrop::<f64>::new(4, 4);
     for _ in 0..200 {

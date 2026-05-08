@@ -32,9 +32,7 @@
 use std::path::PathBuf;
 
 use ferrotorch_core::FerrotorchError;
-use ferrotorch_mps::{
-    MpsDevice, init_mps_backend, is_mps_available, kernels, mps_device_count,
-};
+use ferrotorch_mps::{MpsDevice, init_mps_backend, is_mps_available, kernels, mps_device_count};
 use serde::Deserialize;
 
 // ---------------------------------------------------------------------------
@@ -224,7 +222,8 @@ fn mps_device_count_matches_fixture() {
         .expected
         .as_ref()
         .and_then(|v| v.as_u64())
-        .expect("mps_device_count fixture must have u64 `expected`") as usize;
+        .expect("mps_device_count fixture must have u64 `expected`")
+        as usize;
 
     assert_eq!(
         mps_device_count(),
@@ -286,7 +285,8 @@ fn mps_device_count_method_matches_fixture() {
         .expected
         .as_ref()
         .and_then(|v| v.as_u64())
-        .expect("MpsDevice_count fixture must have u64 `expected`") as usize;
+        .expect("MpsDevice_count fixture must have u64 `expected`")
+        as usize;
 
     assert_eq!(
         MpsDevice::count(),
@@ -318,9 +318,9 @@ fn mps_device_ordinal_structural() {
     assert!(!cases.is_empty(), "fixture MpsDevice_ordinal not found");
 
     let f = cases[0];
-    let expected_ordinal = f
-        .expected_ordinal
-        .expect("MpsDevice_ordinal fixture must have expected_ordinal") as usize;
+    let expected_ordinal =
+        f.expected_ordinal
+            .expect("MpsDevice_ordinal fixture must have expected_ordinal") as usize;
 
     // MpsDevice::new always errors, so we cannot call ordinal() directly.
     // The fixture documents ordinal_input == 0 → expected_ordinal == 0.
@@ -392,10 +392,9 @@ fn mps_device_display_matches_fixture() {
             .ordinal
             .unwrap_or_else(|| panic!("MpsDevice_display[{i}] must have `ordinal` field"))
             as usize;
-        let expected_display = f
-            .expected_ferrotorch_display
-            .as_deref()
-            .unwrap_or_else(|| panic!("MpsDevice_display[{i}] must have expected_ferrotorch_display"));
+        let expected_display = f.expected_ferrotorch_display.as_deref().unwrap_or_else(|| {
+            panic!("MpsDevice_display[{i}] must have expected_ferrotorch_display")
+        });
 
         // MpsDevice::new errors, but Device::Mps(ordinal) carries the same
         // ordinal and its Display impl uses the "mps:N" format that mirrors
@@ -434,9 +433,7 @@ fn live_mps_tensor_residency() {
 /// Silicon. Cascade skip: no Apple Silicon on this box. Tracking issue #451.
 #[test]
 fn live_mps_synchronize() {
-    cascade_skip!(
-        "no Apple Silicon on test box; MPS synchronize deferred — tracking issue #451"
-    );
+    cascade_skip!("no Apple Silicon on test box; MPS synchronize deferred — tracking issue #451");
 }
 
 /// live_mps_event_elapsed_time: torch.mps.Event elapsed-time semantics.
@@ -537,68 +534,88 @@ fn kernel_source_sum_axis_f32_present() {
 /// Cascade skip: no Apple Silicon on test box. Tracking issue #626.
 #[test]
 fn live_mps_matmul_f32() {
-    cascade_skip!("no Apple Silicon on test box; matmul_f32 MSL kernel deferred — tracking issue #626");
+    cascade_skip!(
+        "no Apple Silicon on test box; matmul_f32 MSL kernel deferred — tracking issue #626"
+    );
 }
 
 /// live_mps_bmm_f32: MtlBackend::bmm_f32 produces correct batched matmul.
 /// Cascade skip: no Apple Silicon on test box. Tracking issue #626.
 #[test]
 fn live_mps_bmm_f32() {
-    cascade_skip!("no Apple Silicon on test box; bmm_f32 MSL kernel deferred — tracking issue #626");
+    cascade_skip!(
+        "no Apple Silicon on test box; bmm_f32 MSL kernel deferred — tracking issue #626"
+    );
 }
 
 /// live_mps_add_f32: MtlBackend::add_f32 element-wise addition.
 /// Cascade skip: no Apple Silicon on test box. Tracking issue #626.
 #[test]
 fn live_mps_add_f32() {
-    cascade_skip!("no Apple Silicon on test box; add_f32 MSL kernel deferred — tracking issue #626");
+    cascade_skip!(
+        "no Apple Silicon on test box; add_f32 MSL kernel deferred — tracking issue #626"
+    );
 }
 
 /// live_mps_sub_f32: MtlBackend::sub_f32 element-wise subtraction.
 /// Cascade skip: no Apple Silicon on test box. Tracking issue #626.
 #[test]
 fn live_mps_sub_f32() {
-    cascade_skip!("no Apple Silicon on test box; sub_f32 MSL kernel deferred — tracking issue #626");
+    cascade_skip!(
+        "no Apple Silicon on test box; sub_f32 MSL kernel deferred — tracking issue #626"
+    );
 }
 
 /// live_mps_mul_f32: MtlBackend::mul_f32 element-wise multiplication.
 /// Cascade skip: no Apple Silicon on test box. Tracking issue #626.
 #[test]
 fn live_mps_mul_f32() {
-    cascade_skip!("no Apple Silicon on test box; mul_f32 MSL kernel deferred — tracking issue #626");
+    cascade_skip!(
+        "no Apple Silicon on test box; mul_f32 MSL kernel deferred — tracking issue #626"
+    );
 }
 
 /// live_mps_div_f32: MtlBackend::div_f32 element-wise division.
 /// Cascade skip: no Apple Silicon on test box. Tracking issue #626.
 #[test]
 fn live_mps_div_f32() {
-    cascade_skip!("no Apple Silicon on test box; div_f32 MSL kernel deferred — tracking issue #626");
+    cascade_skip!(
+        "no Apple Silicon on test box; div_f32 MSL kernel deferred — tracking issue #626"
+    );
 }
 
 /// live_mps_relu_f32: MtlBackend::relu_f32 activation.
 /// Cascade skip: no Apple Silicon on test box. Tracking issue #626.
 #[test]
 fn live_mps_relu_f32() {
-    cascade_skip!("no Apple Silicon on test box; relu_f32 MSL kernel deferred — tracking issue #626");
+    cascade_skip!(
+        "no Apple Silicon on test box; relu_f32 MSL kernel deferred — tracking issue #626"
+    );
 }
 
 /// live_mps_sigmoid_f32: MtlBackend::sigmoid_f32 activation.
 /// Cascade skip: no Apple Silicon on test box. Tracking issue #626.
 #[test]
 fn live_mps_sigmoid_f32() {
-    cascade_skip!("no Apple Silicon on test box; sigmoid_f32 MSL kernel deferred — tracking issue #626");
+    cascade_skip!(
+        "no Apple Silicon on test box; sigmoid_f32 MSL kernel deferred — tracking issue #626"
+    );
 }
 
 /// live_mps_softmax_f32: MtlBackend::softmax_f32 last-dim softmax.
 /// Cascade skip: no Apple Silicon on test box. Tracking issue #626.
 #[test]
 fn live_mps_softmax_f32() {
-    cascade_skip!("no Apple Silicon on test box; softmax_f32 MSL kernel deferred — tracking issue #626");
+    cascade_skip!(
+        "no Apple Silicon on test box; softmax_f32 MSL kernel deferred — tracking issue #626"
+    );
 }
 
 /// live_mps_sum_axis_f32: MtlBackend::sum_axis_f32 axis reduction.
 /// Cascade skip: no Apple Silicon on test box. Tracking issue #626.
 #[test]
 fn live_mps_sum_axis_f32() {
-    cascade_skip!("no Apple Silicon on test box; sum_axis_f32 MSL kernel deferred — tracking issue #626");
+    cascade_skip!(
+        "no Apple Silicon on test box; sum_axis_f32 MSL kernel deferred — tracking issue #626"
+    );
 }

@@ -36,20 +36,19 @@
     clippy::redundant_else
 )]
 
-
 use std::path::PathBuf;
 
 use ferrotorch_core::{Tensor, TensorStorage};
 use ferrotorch_nn::Parameter;
-use ferrotorch_train::{
-    AccuracyMetric, EarlyStopping, EmaCallback, LossMetric, Metric, RunningAverage, TopKAccuracy,
-    TrainingHistory,
-};
+use ferrotorch_train::amp::{AmpContext, AutocastDtype, GradScalerConfig};
 use ferrotorch_train::callback::Callback;
 use ferrotorch_train::checkpoint::checkpoint_sequential;
 use ferrotorch_train::grad_utils::{clip_grad_norm_, clip_grad_value_};
 use ferrotorch_train::history::EpochResult;
-use ferrotorch_train::amp::{AmpContext, AutocastDtype, GradScalerConfig};
+use ferrotorch_train::{
+    AccuracyMetric, EarlyStopping, EmaCallback, LossMetric, Metric, RunningAverage, TopKAccuracy,
+    TrainingHistory,
+};
 use serde::Deserialize;
 
 // ---------------------------------------------------------------------------
@@ -78,8 +77,12 @@ fn load_fixture_bytes() -> Vec<u8> {
         .join("tests")
         .join("conformance")
         .join("fixtures.json");
-    let raw = std::fs::read(&p)
-        .unwrap_or_else(|e| panic!("read {} failed: {e}. Regenerate via scripts/regenerate_train_fixtures.py", p.display()));
+    let raw = std::fs::read(&p).unwrap_or_else(|e| {
+        panic!(
+            "read {} failed: {e}. Regenerate via scripts/regenerate_train_fixtures.py",
+            p.display()
+        )
+    });
     // Replace the bare `Infinity` JSON token (written by Python) with a JSON
     // string so that serde_json strict parser accepts the file.
     let patched = String::from_utf8_lossy(&raw)
@@ -115,9 +118,7 @@ struct FixtureMetadata {
 
 fn load_fixtures() -> FixtureFile {
     let bytes = load_fixture_bytes();
-    serde_json::from_slice(&bytes).unwrap_or_else(|e| {
-        panic!("parse fixtures.json failed: {e}")
-    })
+    serde_json::from_slice(&bytes).unwrap_or_else(|e| panic!("parse fixtures.json failed: {e}"))
 }
 
 // ---------------------------------------------------------------------------
@@ -133,7 +134,10 @@ enum MetricFixture {
         label: String,
     },
     LossMetricEmpty {
-        #[allow(dead_code, reason = "field present in fixture but not exercised — empty by definition")]
+        #[allow(
+            dead_code,
+            reason = "field present in fixture but not exercised — empty by definition"
+        )]
         batches: Vec<f64>,
         expected_mean: f64,
         label: String,
@@ -344,8 +348,10 @@ impl ferrotorch_nn::Module<f32> for ScaleModule {
     fn named_parameters(&self) -> Vec<(String, &Parameter<f32>)> {
         vec![]
     }
-    fn train(&mut self) { /* stateless test module — no training/eval mode to toggle */ }
-    fn eval(&mut self) { /* stateless test module — no training/eval mode to toggle */ }
+    fn train(&mut self) { /* stateless test module — no training/eval mode to toggle */
+    }
+    fn eval(&mut self) { /* stateless test module — no training/eval mode to toggle */
+    }
     fn is_training(&self) -> bool {
         true
     }
@@ -375,9 +381,15 @@ fn fixture_file_has_all_sections() {
     assert!(!file.grad_utils.is_empty(), "grad_utils section is empty");
     assert!(!file.ema.is_empty(), "ema section is empty");
     assert!(!file.history.is_empty(), "history section is empty");
-    assert!(!file.early_stopping.is_empty(), "early_stopping section is empty");
+    assert!(
+        !file.early_stopping.is_empty(),
+        "early_stopping section is empty"
+    );
     assert!(!file.grad_accum.is_empty(), "grad_accum section is empty");
-    assert!(!file.checkpoint_sequential.is_empty(), "checkpoint_sequential section is empty");
+    assert!(
+        !file.checkpoint_sequential.is_empty(),
+        "checkpoint_sequential section is empty"
+    );
     assert!(!file.amp.is_empty(), "amp section is empty");
 }
 
@@ -389,9 +401,19 @@ fn fixture_file_has_all_sections() {
 #[test]
 fn loss_metric_basic_mean() {
     let file = load_fixtures();
-    let f = file.metric.iter().find(|m| matches!(m, MetricFixture::LossMetric { .. }))
+    let f = file
+        .metric
+        .iter()
+        .find(|m| matches!(m, MetricFixture::LossMetric { .. }))
         .expect("LossMetric basic fixture not found");
-    let MetricFixture::LossMetric { batches, expected_mean, label } = f else { unreachable!() };
+    let MetricFixture::LossMetric {
+        batches,
+        expected_mean,
+        label,
+    } = f
+    else {
+        unreachable!()
+    };
 
     let mut m = LossMetric::new();
     for v in batches {
@@ -408,9 +430,19 @@ fn loss_metric_basic_mean() {
 #[test]
 fn loss_metric_empty_returns_zero() {
     let file = load_fixtures();
-    let f = file.metric.iter().find(|m| matches!(m, MetricFixture::LossMetricEmpty { .. }))
+    let f = file
+        .metric
+        .iter()
+        .find(|m| matches!(m, MetricFixture::LossMetricEmpty { .. }))
         .expect("LossMetricEmpty fixture not found");
-    let MetricFixture::LossMetricEmpty { expected_mean, label, .. } = f else { unreachable!() };
+    let MetricFixture::LossMetricEmpty {
+        expected_mean,
+        label,
+        ..
+    } = f
+    else {
+        unreachable!()
+    };
 
     let m = LossMetric::new();
     let got = m.compute();
@@ -424,9 +456,19 @@ fn loss_metric_empty_returns_zero() {
 #[test]
 fn loss_metric_single_value() {
     let file = load_fixtures();
-    let f = file.metric.iter().find(|m| matches!(m, MetricFixture::LossMetricSingle { .. }))
+    let f = file
+        .metric
+        .iter()
+        .find(|m| matches!(m, MetricFixture::LossMetricSingle { .. }))
         .expect("LossMetricSingle fixture not found");
-    let MetricFixture::LossMetricSingle { batches, expected_mean, label } = f else { unreachable!() };
+    let MetricFixture::LossMetricSingle {
+        batches,
+        expected_mean,
+        label,
+    } = f
+    else {
+        unreachable!()
+    };
 
     let mut m = LossMetric::new();
     for v in batches {
@@ -443,7 +485,10 @@ fn loss_metric_single_value() {
 #[test]
 fn loss_metric_reset_then_accumulate() {
     let file = load_fixtures();
-    let f = file.metric.iter().find(|m| matches!(m, MetricFixture::LossMetricAfterReset { .. }))
+    let f = file
+        .metric
+        .iter()
+        .find(|m| matches!(m, MetricFixture::LossMetricAfterReset { .. }))
         .expect("LossMetricAfterReset fixture not found");
     let MetricFixture::LossMetricAfterReset {
         batches_before_reset,
@@ -451,7 +496,10 @@ fn loss_metric_reset_then_accumulate() {
         expected_mean_before,
         expected_mean_after,
         label,
-    } = f else { unreachable!() };
+    } = f
+    else {
+        unreachable!()
+    };
 
     let mut m = LossMetric::new();
     for v in batches_before_reset {
@@ -481,9 +529,19 @@ fn loss_metric_reset_then_accumulate() {
 #[test]
 fn accuracy_metric_two_batches() {
     let file = load_fixtures();
-    let f = file.metric.iter().find(|m| matches!(m, MetricFixture::AccuracyMetric { .. }))
+    let f = file
+        .metric
+        .iter()
+        .find(|m| matches!(m, MetricFixture::AccuracyMetric { .. }))
         .expect("AccuracyMetric fixture not found");
-    let MetricFixture::AccuracyMetric { batches, expected, label } = f else { unreachable!() };
+    let MetricFixture::AccuracyMetric {
+        batches,
+        expected,
+        label,
+    } = f
+    else {
+        unreachable!()
+    };
 
     let mut m = AccuracyMetric::new();
     for batch in batches {
@@ -500,9 +558,19 @@ fn accuracy_metric_two_batches() {
 #[test]
 fn accuracy_metric_perfect() {
     let file = load_fixtures();
-    let f = file.metric.iter().find(|m| matches!(m, MetricFixture::AccuracyMetricPerfect { .. }))
+    let f = file
+        .metric
+        .iter()
+        .find(|m| matches!(m, MetricFixture::AccuracyMetricPerfect { .. }))
         .expect("AccuracyMetricPerfect fixture not found");
-    let MetricFixture::AccuracyMetricPerfect { batches, expected, label } = f else { unreachable!() };
+    let MetricFixture::AccuracyMetricPerfect {
+        batches,
+        expected,
+        label,
+    } = f
+    else {
+        unreachable!()
+    };
 
     let mut m = AccuracyMetric::new();
     for batch in batches {
@@ -523,9 +591,20 @@ fn accuracy_metric_perfect() {
 #[test]
 fn topk_accuracy_basic() {
     let file = load_fixtures();
-    let f = file.metric.iter().find(|m| matches!(m, MetricFixture::TopkAccuracy { .. }))
+    let f = file
+        .metric
+        .iter()
+        .find(|m| matches!(m, MetricFixture::TopkAccuracy { .. }))
         .expect("TopkAccuracy fixture not found");
-    let MetricFixture::TopkAccuracy { k, batches, expected, label } = f else { unreachable!() };
+    let MetricFixture::TopkAccuracy {
+        k,
+        batches,
+        expected,
+        label,
+    } = f
+    else {
+        unreachable!()
+    };
 
     let mut m = TopKAccuracy::new(*k);
     assert_eq!(m.k(), *k, "[{label}] k accessor");
@@ -547,7 +626,10 @@ fn topk_accuracy_basic() {
 #[test]
 fn running_average_window_eviction() {
     let file = load_fixtures();
-    let f = file.metric.iter().find(|m| matches!(m, MetricFixture::RunningAverage { .. }))
+    let f = file
+        .metric
+        .iter()
+        .find(|m| matches!(m, MetricFixture::RunningAverage { .. }))
         .expect("RunningAverage fixture not found");
     let MetricFixture::RunningAverage {
         window_size,
@@ -555,7 +637,10 @@ fn running_average_window_eviction() {
         expected_after_all,
         expected_after_3,
         label,
-    } = f else { unreachable!() };
+    } = f
+    else {
+        unreachable!()
+    };
 
     let mut m = RunningAverage::new(*window_size);
     assert_eq!(m.window_size(), *window_size);
@@ -596,14 +681,21 @@ fn clip_grad_norm_all_fixtures() {
             continue;
         }
         let label = &f.label;
-        let max_norm = f.max_norm.expect("clip_grad_norm_ fixture must have max_norm");
-        let raw_norm_type = f.norm_type.as_ref().expect("clip_grad_norm_ fixture must have norm_type");
+        let max_norm = f
+            .max_norm
+            .expect("clip_grad_norm_ fixture must have max_norm");
+        let raw_norm_type = f
+            .norm_type
+            .as_ref()
+            .expect("clip_grad_norm_ fixture must have norm_type");
         let norm_type = parse_norm_type(raw_norm_type);
 
         // Build parameters from fixture grads.
-        let params_owned: Vec<Parameter<f32>> = f.grads.iter().map(|g| {
-            make_param_with_grad(g, &[g.len()])
-        }).collect();
+        let params_owned: Vec<Parameter<f32>> = f
+            .grads
+            .iter()
+            .map(|g| make_param_with_grad(g, &[g.len()]))
+            .collect();
         let params_ref: Vec<&Parameter<f32>> = params_owned.iter().collect();
 
         let total_norm = clip_grad_norm_(&params_ref, max_norm, norm_type)
@@ -617,8 +709,15 @@ fn clip_grad_norm_all_fixtures() {
         }
 
         // Validate clipped values.
-        for (i, (param, expected_g)) in params_owned.iter().zip(f.expected_clipped.iter()).enumerate() {
-            let grad = param.grad().unwrap().expect("param should have grad after clipping");
+        for (i, (param, expected_g)) in params_owned
+            .iter()
+            .zip(f.expected_clipped.iter())
+            .enumerate()
+        {
+            let grad = param
+                .grad()
+                .unwrap()
+                .expect("param should have grad after clipping");
             let data = grad.data().unwrap();
             assert_eq!(
                 data.len(),
@@ -649,18 +748,29 @@ fn clip_grad_value_all_fixtures() {
             continue;
         }
         let label = &f.label;
-        let clip_value = f.clip_value.expect("clip_grad_value_ fixture must have clip_value");
+        let clip_value = f
+            .clip_value
+            .expect("clip_grad_value_ fixture must have clip_value");
 
-        let params_owned: Vec<Parameter<f32>> = f.grads.iter().map(|g| {
-            make_param_with_grad(g, &[g.len()])
-        }).collect();
+        let params_owned: Vec<Parameter<f32>> = f
+            .grads
+            .iter()
+            .map(|g| make_param_with_grad(g, &[g.len()]))
+            .collect();
         let params_ref: Vec<&Parameter<f32>> = params_owned.iter().collect();
 
         clip_grad_value_(&params_ref, clip_value)
             .unwrap_or_else(|e| panic!("[{label}] clip_grad_value_ error: {e}"));
 
-        for (i, (param, expected_g)) in params_owned.iter().zip(f.expected_clipped.iter()).enumerate() {
-            let grad = param.grad().unwrap().expect("param should have grad after clipping");
+        for (i, (param, expected_g)) in params_owned
+            .iter()
+            .zip(f.expected_clipped.iter())
+            .enumerate()
+        {
+            let grad = param
+                .grad()
+                .unwrap()
+                .expect("param should have grad after clipping");
             let data = grad.data().unwrap();
             for (j, (&got, &exp)) in data.iter().zip(expected_g.iter()).enumerate() {
                 assert!(
@@ -680,7 +790,10 @@ fn clip_grad_value_all_fixtures() {
 #[test]
 fn ema_single_step() {
     let file = load_fixtures();
-    let f = file.ema.iter().find(|e| e.kind == "ema_single_step")
+    let f = file
+        .ema
+        .iter()
+        .find(|e| e.kind == "ema_single_step")
         .expect("ema_single_step fixture not found");
 
     let mut ema = EmaCallback::new(f.decay);
@@ -694,7 +807,8 @@ fn ema_single_step() {
     for (i, (&got, &exp)) in shadow[0].iter().zip(f.expected_after_1.iter()).enumerate() {
         assert!(
             (got - exp).abs() < 1e-5,
-            "[{}] shadow[0][{i}]: expected {exp}, got {got}", f.label
+            "[{}] shadow[0][{i}]: expected {exp}, got {got}",
+            f.label
         );
     }
 }
@@ -703,20 +817,29 @@ fn ema_single_step() {
 #[test]
 fn ema_multi_step() {
     let file = load_fixtures();
-    let f = file.ema.iter().find(|e| e.kind == "ema_multi_step")
+    let f = file
+        .ema
+        .iter()
+        .find(|e| e.kind == "ema_multi_step")
         .expect("ema_multi_step fixture not found");
 
     let mut ema = EmaCallback::new(f.decay);
     let initial: Vec<Vec<f32>> = vec![f.initial.iter().map(|&v| v as f32).collect()];
     ema.init_from_params(&initial).unwrap();
 
-    for (step_idx, (update, expected)) in f.updates.iter().zip(f.expected_after_each.iter()).enumerate() {
+    for (step_idx, (update, expected)) in f
+        .updates
+        .iter()
+        .zip(f.expected_after_each.iter())
+        .enumerate()
+    {
         let u: Vec<Vec<f32>> = vec![update.iter().map(|&v| v as f32).collect()];
         ema.update_from_params(&u).unwrap();
         let got = ema.shadow_params()[0][0];
         assert!(
             (got - expected).abs() < 1e-5,
-            "[{}] step {step_idx}: expected {expected}, got {got}", f.label
+            "[{}] step {step_idx}: expected {expected}, got {got}",
+            f.label
         );
     }
 }
@@ -725,7 +848,10 @@ fn ema_multi_step() {
 #[test]
 fn ema_decay_zero() {
     let file = load_fixtures();
-    let f = file.ema.iter().find(|e| e.kind == "ema_decay_zero")
+    let f = file
+        .ema
+        .iter()
+        .find(|e| e.kind == "ema_decay_zero")
         .expect("ema_decay_zero fixture not found");
 
     let mut ema = EmaCallback::new(f.decay);
@@ -737,14 +863,21 @@ fn ema_decay_zero() {
 
     let got = ema.shadow_params()[0][0];
     let exp = f.expected_after_1[0];
-    assert!((got - exp).abs() < 1e-6, "[{}] expected {exp}, got {got}", f.label);
+    assert!(
+        (got - exp).abs() < 1e-6,
+        "[{}] expected {exp}, got {got}",
+        f.label
+    );
 }
 
 /// EmaCallback with decay=1 keeps shadow unchanged.
 #[test]
 fn ema_decay_one() {
     let file = load_fixtures();
-    let f = file.ema.iter().find(|e| e.kind == "ema_decay_one")
+    let f = file
+        .ema
+        .iter()
+        .find(|e| e.kind == "ema_decay_one")
         .expect("ema_decay_one fixture not found");
 
     let mut ema = EmaCallback::new(f.decay);
@@ -756,7 +889,11 @@ fn ema_decay_one() {
 
     let got = ema.shadow_params()[0][0];
     let exp = f.expected_after_1[0];
-    assert!((got - exp).abs() < 1e-6, "[{}] expected {exp}, got {got}", f.label);
+    assert!(
+        (got - exp).abs() < 1e-6,
+        "[{}] expected {exp}, got {got}",
+        f.label
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -825,19 +962,27 @@ fn build_history(epochs: &[HistoryEpoch]) -> TrainingHistory {
 #[test]
 fn history_best_train_loss() {
     let file = load_fixtures();
-    let f = file.history.iter().find(|h| h.kind == "history_best_train_loss")
+    let f = file
+        .history
+        .iter()
+        .find(|h| h.kind == "history_best_train_loss")
         .expect("history_best_train_loss fixture not found");
 
     let h = build_history(&f.epochs);
     let (epoch, loss) = h.best_train_loss().expect("history should not be empty");
 
-    let exp_epoch = f.expected_best_epoch.expect("fixture needs expected_best_epoch");
-    let exp_loss = f.expected_best_loss.expect("fixture needs expected_best_loss");
+    let exp_epoch = f
+        .expected_best_epoch
+        .expect("fixture needs expected_best_epoch");
+    let exp_loss = f
+        .expected_best_loss
+        .expect("fixture needs expected_best_loss");
 
     assert_eq!(epoch, exp_epoch, "[{}] best epoch mismatch", f.label);
     assert!(
         (loss - exp_loss).abs() < 1e-9,
-        "[{}] best loss: expected {exp_loss}, got {loss}", f.label
+        "[{}] best loss: expected {exp_loss}, got {loss}",
+        f.label
     );
 }
 
@@ -845,19 +990,27 @@ fn history_best_train_loss() {
 #[test]
 fn history_best_val_loss() {
     let file = load_fixtures();
-    let f = file.history.iter().find(|h| h.kind == "history_best_val_loss")
+    let f = file
+        .history
+        .iter()
+        .find(|h| h.kind == "history_best_val_loss")
         .expect("history_best_val_loss fixture not found");
 
     let h = build_history(&f.epochs);
     let (epoch, loss) = h.best_val_loss().expect("history should have val_loss");
 
-    let exp_epoch = f.expected_best_epoch.expect("fixture needs expected_best_epoch");
-    let exp_loss = f.expected_best_loss.expect("fixture needs expected_best_loss");
+    let exp_epoch = f
+        .expected_best_epoch
+        .expect("fixture needs expected_best_epoch");
+    let exp_loss = f
+        .expected_best_loss
+        .expect("fixture needs expected_best_loss");
 
     assert_eq!(epoch, exp_epoch, "[{}] best val epoch mismatch", f.label);
     assert!(
         (loss - exp_loss).abs() < 1e-9,
-        "[{}] best val loss: expected {exp_loss}, got {loss}", f.label
+        "[{}] best val loss: expected {exp_loss}, got {loss}",
+        f.label
     );
 }
 
@@ -865,15 +1018,26 @@ fn history_best_val_loss() {
 #[test]
 fn history_loss_vectors() {
     let file = load_fixtures();
-    let f = file.history.iter().find(|h| h.kind == "history_loss_vectors")
+    let f = file
+        .history
+        .iter()
+        .find(|h| h.kind == "history_loss_vectors")
         .expect("history_loss_vectors fixture not found");
 
     let h = build_history(&f.epochs);
     let train = h.train_losses();
     let val: Vec<f64> = h.val_losses().into_iter().flatten().collect();
 
-    assert_eq!(train, f.expected_train_losses, "[{}] train_losses mismatch", f.label);
-    assert_eq!(val, f.expected_val_losses, "[{}] val_losses mismatch", f.label);
+    assert_eq!(
+        train, f.expected_train_losses,
+        "[{}] train_losses mismatch",
+        f.label
+    );
+    assert_eq!(
+        val, f.expected_val_losses,
+        "[{}] val_losses mismatch",
+        f.label
+    );
 }
 
 /// TrainingHistory::len and is_empty.
@@ -903,7 +1067,10 @@ fn stopped_f32(es: &EarlyStopping) -> bool {
 #[test]
 fn early_stopping_triggers_after_patience() {
     let file = load_fixtures();
-    let f = file.early_stopping.iter().find(|e| e.kind == "early_stopping_triggers")
+    let f = file
+        .early_stopping
+        .iter()
+        .find(|e| e.kind == "early_stopping_triggers")
         .expect("early_stopping_triggers fixture not found");
 
     let mut es = EarlyStopping::new(f.patience, f.min_delta);
@@ -914,13 +1081,18 @@ fn early_stopping_triggers_after_patience() {
         wait_seq.push(es.wait());
     }
 
-    assert_eq!(wait_seq, f.expected_wait_sequence, "[{}] wait sequence mismatch", f.label);
+    assert_eq!(
+        wait_seq, f.expected_wait_sequence,
+        "[{}] wait sequence mismatch",
+        f.label
+    );
 
     if let Some(n) = f.expected_stopped_after_n {
         assert_eq!(
             f.val_losses.len(),
             n,
-            "[{}] expected stopped after {n} epochs", f.label
+            "[{}] expected stopped after {n} epochs",
+            f.label
         );
         assert!(stopped_f32(&es), "[{}] expected stopped=true", f.label);
     }
@@ -930,7 +1102,10 @@ fn early_stopping_triggers_after_patience() {
 #[test]
 fn early_stopping_min_delta_filtering() {
     let file = load_fixtures();
-    let f = file.early_stopping.iter().find(|e| e.kind == "early_stopping_min_delta")
+    let f = file
+        .early_stopping
+        .iter()
+        .find(|e| e.kind == "early_stopping_min_delta")
         .expect("early_stopping_min_delta fixture not found");
 
     let mut es = EarlyStopping::new(f.patience, f.min_delta);
@@ -941,14 +1116,21 @@ fn early_stopping_min_delta_filtering() {
         wait_seq.push(es.wait());
     }
 
-    assert_eq!(wait_seq, f.expected_wait_sequence, "[{}] wait sequence mismatch", f.label);
+    assert_eq!(
+        wait_seq, f.expected_wait_sequence,
+        "[{}] wait sequence mismatch",
+        f.label
+    );
 }
 
 /// EarlyStopping resets wait counter on genuine improvement.
 #[test]
 fn early_stopping_resets_on_improvement() {
     let file = load_fixtures();
-    let f = file.early_stopping.iter().find(|e| e.kind == "early_stopping_resets")
+    let f = file
+        .early_stopping
+        .iter()
+        .find(|e| e.kind == "early_stopping_resets")
         .expect("early_stopping_resets fixture not found");
 
     let mut es = EarlyStopping::new(f.patience, f.min_delta);
@@ -959,7 +1141,11 @@ fn early_stopping_resets_on_improvement() {
         wait_seq.push(es.wait());
     }
 
-    assert_eq!(wait_seq, f.expected_wait_sequence, "[{}] wait sequence mismatch", f.label);
+    assert_eq!(
+        wait_seq, f.expected_wait_sequence,
+        "[{}] wait sequence mismatch",
+        f.label
+    );
 }
 
 /// EarlyStopping::patience and best_loss accessors.
@@ -978,7 +1164,10 @@ fn early_stopping_accessors() {
 #[test]
 fn grad_accum_mean_loss() {
     let file = load_fixtures();
-    let f = file.grad_accum.iter().find(|g| g.kind == "grad_accum_mean")
+    let f = file
+        .grad_accum
+        .iter()
+        .find(|g| g.kind == "grad_accum_mean")
         .expect("grad_accum_mean fixture not found");
 
     // Gradient accumulation in this crate is a LossMetric usage pattern: feed
@@ -990,9 +1179,15 @@ fn grad_accum_mean_loss() {
     let got = m.compute();
     assert!(
         (got - f.expected_mean_loss).abs() < 1e-9,
-        "[{}] grad_accum mean: expected {}, got {got}", f.label, f.expected_mean_loss
+        "[{}] grad_accum mean: expected {}, got {got}",
+        f.label,
+        f.expected_mean_loss
     );
-    assert_eq!(f.batch_losses.len(), f.n_accumulate, "fixture n_accumulate matches batch count");
+    assert_eq!(
+        f.batch_losses.len(),
+        f.n_accumulate,
+        "fixture n_accumulate matches batch count"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -1003,11 +1198,15 @@ fn grad_accum_mean_loss() {
 #[test]
 fn checkpoint_sequential_product() {
     let file = load_fixtures();
-    let f = file.checkpoint_sequential.iter()
+    let f = file
+        .checkpoint_sequential
+        .iter()
         .find(|c| c.kind == "checkpoint_sequential_product")
         .expect("checkpoint_sequential_product fixture not found");
 
-    let modules: Vec<ScaleModule> = f.scale_factors.iter()
+    let modules: Vec<ScaleModule> = f
+        .scale_factors
+        .iter()
         .map(|&sf| ScaleModule { factor: sf as f32 })
         .collect();
     let input = ferrotorch_core::scalar(f.input_val as f32).unwrap();
@@ -1016,7 +1215,9 @@ fn checkpoint_sequential_product() {
     let got = output.item().unwrap() as f64;
     assert!(
         (got - f.expected_output).abs() < 1e-4,
-        "[{}] expected {}, got {got}", f.label, f.expected_output
+        "[{}] expected {}, got {got}",
+        f.label,
+        f.expected_output
     );
 }
 
@@ -1024,11 +1225,15 @@ fn checkpoint_sequential_product() {
 #[test]
 fn checkpoint_sequential_single_module() {
     let file = load_fixtures();
-    let f = file.checkpoint_sequential.iter()
+    let f = file
+        .checkpoint_sequential
+        .iter()
         .find(|c| c.kind == "checkpoint_sequential_single")
         .expect("checkpoint_sequential_single fixture not found");
 
-    let modules: Vec<ScaleModule> = f.scale_factors.iter()
+    let modules: Vec<ScaleModule> = f
+        .scale_factors
+        .iter()
         .map(|&sf| ScaleModule { factor: sf as f32 })
         .collect();
     let input = ferrotorch_core::scalar(f.input_val as f32).unwrap();
@@ -1037,7 +1242,9 @@ fn checkpoint_sequential_single_module() {
     let got = output.item().unwrap() as f64;
     assert!(
         (got - f.expected_output).abs() < 1e-4,
-        "[{}] expected {}, got {got}", f.label, f.expected_output
+        "[{}] expected {}, got {got}",
+        f.label,
+        f.expected_output
     );
 }
 
@@ -1064,15 +1271,21 @@ fn checkpoint_reexport_accessible() {
 #[test]
 fn amp_grad_scaler_default_scale() {
     let file = load_fixtures();
-    let f = file.amp.iter().find(|a| a.kind == "grad_scaler_default_scale")
+    let f = file
+        .amp
+        .iter()
+        .find(|a| a.kind == "grad_scaler_default_scale")
         .expect("grad_scaler_default_scale fixture not found");
 
-    let expected = f.expected_init_scale.expect("fixture must have expected_init_scale");
+    let expected = f
+        .expected_init_scale
+        .expect("fixture must have expected_init_scale");
     let ctx = AmpContext::<f32>::new(AutocastDtype::F16, GradScalerConfig::default());
     let got = ctx.get_scale();
     assert!(
         (got - expected).abs() < 1e-3,
-        "[{}] default scale: expected {expected}, got {got}", f.label
+        "[{}] default scale: expected {expected}, got {got}",
+        f.label
     );
 }
 
@@ -1080,11 +1293,16 @@ fn amp_grad_scaler_default_scale() {
 #[test]
 fn amp_grad_scaler_state_dict_roundtrip() {
     let file = load_fixtures();
-    let f = file.amp.iter().find(|a| a.kind == "grad_scaler_state_dict_roundtrip")
+    let f = file
+        .amp
+        .iter()
+        .find(|a| a.kind == "grad_scaler_state_dict_roundtrip")
         .expect("grad_scaler_state_dict_roundtrip fixture not found");
 
     let init_scale = f.init_scale.expect("fixture must have init_scale");
-    let expected_after = f.expected_scale_after_load.expect("fixture must have expected_scale_after_load");
+    let expected_after = f
+        .expected_scale_after_load
+        .expect("fixture must have expected_scale_after_load");
 
     let mut cfg = GradScalerConfig::default();
     cfg.init_scale = init_scale;
@@ -1093,7 +1311,9 @@ fn amp_grad_scaler_state_dict_roundtrip() {
     let state = ctx.scaler_state_dict();
     assert!(
         (state.scale_factor - expected_after).abs() < 1e-3,
-        "[{}] state_dict scale: expected {expected_after}, got {}", f.label, state.scale_factor
+        "[{}] state_dict scale: expected {expected_after}, got {}",
+        f.label,
+        state.scale_factor
     );
 
     // Load into fresh context and verify.
@@ -1102,7 +1322,8 @@ fn amp_grad_scaler_state_dict_roundtrip() {
     let got = ctx2.get_scale();
     assert!(
         (got - expected_after).abs() < 1e-3,
-        "[{}] after load: expected {expected_after}, got {got}", f.label
+        "[{}] after load: expected {expected_after}, got {got}",
+        f.label
     );
 }
 
@@ -1148,10 +1369,16 @@ fn amp_autocast_forward_enables_autocast() {
 
     let ctx = AmpContext::<f32>::new(AutocastDtype::F16, GradScalerConfig::default());
 
-    assert!(!is_autocast_enabled(), "autocast should be off before autocast_forward");
+    assert!(
+        !is_autocast_enabled(),
+        "autocast should be off before autocast_forward"
+    );
     let was_enabled = ctx.autocast_forward(is_autocast_enabled);
     assert!(was_enabled, "autocast should be on inside autocast_forward");
-    assert!(!is_autocast_enabled(), "autocast should be off after autocast_forward");
+    assert!(
+        !is_autocast_enabled(),
+        "autocast should be off after autocast_forward"
+    );
 
     // Verify dtype is set correctly inside the closure.
     let dtype = ctx.autocast_forward(autocast_dtype);
@@ -1170,8 +1397,12 @@ fn tensorboard_writer_new_and_add_scalar() {
         .expect("TensorBoardWriter::new failed");
 
     // add_scalar must succeed for a freshly created writer.
-    writer.add_scalar("loss/train", 0.5, 0).expect("add_scalar failed");
-    writer.add_scalar("loss/train", 0.3, 1).expect("add_scalar step 1 failed");
+    writer
+        .add_scalar("loss/train", 0.5, 0)
+        .expect("add_scalar failed");
+    writer
+        .add_scalar("loss/train", 0.3, 1)
+        .expect("add_scalar step 1 failed");
     writer.flush().expect("flush failed");
 
     // log_dir must match what was passed.
@@ -1188,7 +1419,9 @@ fn tensorboard_writer_add_scalars() {
     let mut vals = std::collections::HashMap::new();
     vals.insert("train".to_string(), 0.5_f64);
     vals.insert("val".to_string(), 0.6_f64);
-    writer.add_scalars("loss", &vals, 0).expect("add_scalars failed");
+    writer
+        .add_scalars("loss", &vals, 0)
+        .expect("add_scalars failed");
     writer.flush().expect("flush failed");
 }
 
@@ -1318,12 +1551,14 @@ fn amp_backward_step_cascade_skip() {
 #[test]
 fn surface_anchors() {
     use ferrotorch_train::amp::{
-        AutocastCategory, AmpContext, GradScalerConfig, AutocastDtype,
-        autocast_category, autocast_guard, should_cast_to_reduced, should_keep_full_precision,
+        AmpContext, AutocastCategory, AutocastDtype, GradScalerConfig, autocast_category,
+        autocast_guard, should_cast_to_reduced, should_keep_full_precision,
     };
-    use ferrotorch_train::{EvalResult, LossFn, TrainingHistory, EarlyStopping, EmaCallback,
-                           TopKAccuracy, RunningAverage};
     use ferrotorch_train::history::EpochResult;
+    use ferrotorch_train::{
+        EarlyStopping, EmaCallback, EvalResult, LossFn, RunningAverage, TopKAccuracy,
+        TrainingHistory,
+    };
 
     // --- AmpContext::new ---
     let ctx = AmpContext::<f32>::new(AutocastDtype::F16, GradScalerConfig::default());
@@ -1378,7 +1613,11 @@ fn surface_anchors() {
     // --- EarlyStopping::wait ---
     let _w = es.wait(); // EarlyStopping::wait
     // Drive one epoch so wait() can be non-trivial.
-    Callback::<f32>::on_epoch_end(&mut es, 0, &EpochResult::new_with_defaults(0, 1.0, Some(1.0), 0.001));
+    Callback::<f32>::on_epoch_end(
+        &mut es,
+        0,
+        &EpochResult::new_with_defaults(0, 1.0, Some(1.0), 0.001),
+    );
 
     // --- EmaCallback::init_from_params ---
     let mut ema = EmaCallback::new(0.9);
@@ -1397,11 +1636,11 @@ fn surface_anchors() {
 
     // --- TensorBoardWriter::flush and log_dir ---
     let dir = tempfile::tempdir().expect("tempdir");
-    let mut writer = ferrotorch_train::TensorBoardWriter::new(dir.path())
-        .expect("TensorBoardWriter::new");
+    let mut writer =
+        ferrotorch_train::TensorBoardWriter::new(dir.path()).expect("TensorBoardWriter::new");
     writer.add_scalar("x", 1.0, 0).unwrap();
-    writer.flush().unwrap();                          // TensorBoardWriter::flush
-    let _log_dir = writer.log_dir();                  // TensorBoardWriter::log_dir
+    writer.flush().unwrap(); // TensorBoardWriter::flush
+    let _log_dir = writer.log_dir(); // TensorBoardWriter::log_dir
 
     // --- Learner::skipped_steps / model_mut / epoch / step / evaluate /
     //     with_val_metric / LossFn — covered by cascade_skip tests above

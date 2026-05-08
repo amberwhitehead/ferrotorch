@@ -36,8 +36,7 @@ fn cummax_f64_simple_increasing() {
     let device = GpuDevice::new(0).expect("CUDA device 0");
     let gpu_in = cpu_to_gpu(&input, &device).expect("upload");
     // shape [outer=1, dim=4, inner=1]
-    let (vals, _idxs) =
-        kernels::gpu_cummax_f64(&gpu_in, 1, 4, 1, &device).expect("gpu_cummax_f64");
+    let (vals, _idxs) = kernels::gpu_cummax_f64(&gpu_in, 1, 4, 1, &device).expect("gpu_cummax_f64");
     let out = gpu_to_cpu(&vals, &device).expect("readback");
     let expected = [1.0_f64, 2.0, 3.0, 4.0];
     for (i, (a, e)) in out.iter().zip(expected.iter()).enumerate() {
@@ -54,8 +53,7 @@ fn cummax_f64_with_negatives() {
     let input = [-3.0_f64, 1.0, -5.0, 2.0, 0.5];
     let device = GpuDevice::new(0).expect("CUDA device 0");
     let gpu_in = cpu_to_gpu(&input, &device).expect("upload");
-    let (vals, _idxs) =
-        kernels::gpu_cummax_f64(&gpu_in, 1, 5, 1, &device).expect("gpu_cummax_f64");
+    let (vals, _idxs) = kernels::gpu_cummax_f64(&gpu_in, 1, 5, 1, &device).expect("gpu_cummax_f64");
     let out = gpu_to_cpu(&vals, &device).expect("readback");
     let expected = [-3.0_f64, 1.0, 1.0, 2.0, 2.0];
     for (i, (a, e)) in out.iter().zip(expected.iter()).enumerate() {
@@ -72,8 +70,7 @@ fn cummin_f64_simple_decreasing() {
     let input = [4.0_f64, 3.0, 2.0, 1.0];
     let device = GpuDevice::new(0).expect("CUDA device 0");
     let gpu_in = cpu_to_gpu(&input, &device).expect("upload");
-    let (vals, _idxs) =
-        kernels::gpu_cummin_f64(&gpu_in, 1, 4, 1, &device).expect("gpu_cummin_f64");
+    let (vals, _idxs) = kernels::gpu_cummin_f64(&gpu_in, 1, 4, 1, &device).expect("gpu_cummin_f64");
     let out = gpu_to_cpu(&vals, &device).expect("readback");
     let expected = [4.0_f64, 3.0, 2.0, 1.0];
     for (i, (a, e)) in out.iter().zip(expected.iter()).enumerate() {
@@ -90,8 +87,7 @@ fn cummin_f64_with_positives() {
     let input = [3.0_f64, -1.0, 5.0, -2.0, 0.5];
     let device = GpuDevice::new(0).expect("CUDA device 0");
     let gpu_in = cpu_to_gpu(&input, &device).expect("upload");
-    let (vals, _idxs) =
-        kernels::gpu_cummin_f64(&gpu_in, 1, 5, 1, &device).expect("gpu_cummin_f64");
+    let (vals, _idxs) = kernels::gpu_cummin_f64(&gpu_in, 1, 5, 1, &device).expect("gpu_cummin_f64");
     let out = gpu_to_cpu(&vals, &device).expect("readback");
     let expected = [3.0_f64, -1.0, -1.0, -2.0, -2.0];
     for (i, (a, e)) in out.iter().zip(expected.iter()).enumerate() {

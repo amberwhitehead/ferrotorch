@@ -45,12 +45,12 @@ use ferrotorch_core::{FerrotorchError, Tensor, TensorStorage};
 use ferrotorch_jit::graph::{IrGraph, IrOpKind};
 use ferrotorch_nn::StateDict;
 use ferrotorch_serialize::{
-    GgmlType, GgufFile, GgufMetadata, GgufTensorInfo, GgufValue, OnnxExportConfig,
-    PickleValue, dequantize_gguf_tensor, export_from_program, export_ir_graph_to_onnx,
+    GgmlType, GgufFile, GgufMetadata, GgufTensorInfo, GgufValue, OnnxExportConfig, PickleValue,
+    TrainingCheckpoint, dequantize_gguf_tensor, export_from_program, export_ir_graph_to_onnx,
     export_onnx, ir_graph_to_onnx, load_checkpoint, load_gguf, load_gguf_mmap,
     load_gguf_state_dict, load_gguf_state_dict_mmap, load_pytorch_state_dict, load_safetensors,
     load_state_dict, parse_gguf_bytes, parse_pickle, save_checkpoint, save_pytorch,
-    save_safetensors, save_state_dict, validate_checkpoint, TrainingCheckpoint,
+    save_safetensors, save_state_dict, validate_checkpoint,
 };
 use serde::Deserialize;
 
@@ -138,15 +138,12 @@ fn load_fixtures() -> FixtureFile {
             p.display()
         )
     });
-    serde_json::from_slice(&bytes)
-        .unwrap_or_else(|e| panic!("parse {}: {e}", p.display()))
+    serde_json::from_slice(&bytes).unwrap_or_else(|e| panic!("parse {}: {e}", p.display()))
 }
 
-fn fixture_by_kind<'a>(
-    arr: &'a [serde_json::Value],
-    kind: &str,
-) -> Option<&'a serde_json::Value> {
-    arr.iter().find(|v| v.get("kind").and_then(|k| k.as_str()) == Some(kind))
+fn fixture_by_kind<'a>(arr: &'a [serde_json::Value], kind: &str) -> Option<&'a serde_json::Value> {
+    arr.iter()
+        .find(|v| v.get("kind").and_then(|k| k.as_str()) == Some(kind))
 }
 
 // ---------------------------------------------------------------------------
@@ -173,15 +170,42 @@ fn fixture_file_has_all_sections() {
         file.save_checkpoint.len(),
         file.training_checkpoint.len(),
     );
-    assert!(!file.save_safetensors.is_empty(), "save_safetensors fixtures missing");
-    assert!(!file.load_safetensors.is_empty(), "load_safetensors fixtures missing");
-    assert!(!file.save_pytorch.is_empty(), "save_pytorch fixtures missing");
-    assert!(!file.load_pytorch.is_empty(), "load_pytorch fixtures missing");
-    assert!(!file.parse_pickle.is_empty(), "parse_pickle fixtures missing");
-    assert!(!file.validate_checkpoint.is_empty(), "validate_checkpoint fixtures missing");
-    assert!(!file.save_state_dict.is_empty(), "save_state_dict fixtures missing");
-    assert!(!file.save_checkpoint.is_empty(), "save_checkpoint fixtures missing");
-    assert!(!file.training_checkpoint.is_empty(), "training_checkpoint fixtures missing");
+    assert!(
+        !file.save_safetensors.is_empty(),
+        "save_safetensors fixtures missing"
+    );
+    assert!(
+        !file.load_safetensors.is_empty(),
+        "load_safetensors fixtures missing"
+    );
+    assert!(
+        !file.save_pytorch.is_empty(),
+        "save_pytorch fixtures missing"
+    );
+    assert!(
+        !file.load_pytorch.is_empty(),
+        "load_pytorch fixtures missing"
+    );
+    assert!(
+        !file.parse_pickle.is_empty(),
+        "parse_pickle fixtures missing"
+    );
+    assert!(
+        !file.validate_checkpoint.is_empty(),
+        "validate_checkpoint fixtures missing"
+    );
+    assert!(
+        !file.save_state_dict.is_empty(),
+        "save_state_dict fixtures missing"
+    );
+    assert!(
+        !file.save_checkpoint.is_empty(),
+        "save_checkpoint fixtures missing"
+    );
+    assert!(
+        !file.training_checkpoint.is_empty(),
+        "training_checkpoint fixtures missing"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -237,7 +261,10 @@ fn save_load_safetensors_f32_2d() {
             "[{name}][{i}]: expected {exp}, got {g}"
         );
     }
-    eprintln!("  save_load_safetensors_f32_2d: {} tensor, {} elements, {} bytes", name, expected_numel, expected_bytes);
+    eprintln!(
+        "  save_load_safetensors_f32_2d: {} tensor, {} elements, {} bytes",
+        name, expected_numel, expected_bytes
+    );
 }
 
 /// save_safetensors + load_safetensors round-trips an f32 1D bias tensor.
@@ -391,10 +418,7 @@ fn save_safetensors_deterministic_key_ordering() {
     let loaded: StateDict<f32> = load_safetensors(&path).expect("load multi failed");
     let mut keys: Vec<&str> = loaded.keys().map(String::as_str).collect();
     keys.sort();
-    assert_eq!(
-        keys, expected_order,
-        "key order mismatch after round-trip"
-    );
+    assert_eq!(keys, expected_order, "key order mismatch after round-trip");
 }
 
 /// load_safetensors returns DtypeMismatch when the file dtype does not match T.
@@ -498,10 +522,17 @@ fn save_pytorch_zip_structure_and_pickle() {
     };
 
     // Pickle protocol 2 header.
-    assert_eq!(pkl_bytes[0], 0x80, "pickle must start with PROTO opcode (0x80)");
+    assert_eq!(
+        pkl_bytes[0], 0x80,
+        "pickle must start with PROTO opcode (0x80)"
+    );
     assert_eq!(pkl_bytes[1], 0x02, "pickle must be protocol 2 (0x02)");
     // STOP opcode.
-    assert_eq!(*pkl_bytes.last().unwrap(), 0x2e, "pickle must end with STOP (0x2e)");
+    assert_eq!(
+        *pkl_bytes.last().unwrap(),
+        0x2e,
+        "pickle must end with STOP (0x2e)"
+    );
 
     let pkl_str = String::from_utf8_lossy(&pkl_bytes);
     for token in &expected_contains {
@@ -586,7 +617,10 @@ fn save_pytorch_f64_double_storage() {
     let pkl_str = String::from_utf8_lossy(&pkl_bytes);
 
     for token in &expected_contains {
-        assert!(pkl_str.contains(token), "f64 pickle missing token: {token:?}");
+        assert!(
+            pkl_str.contains(token),
+            "f64 pickle missing token: {token:?}"
+        );
     }
 }
 
@@ -608,10 +642,18 @@ fn save_pytorch_multi_tensor_zip_entries() {
     let mut state: StateDict<f32> = HashMap::new();
     for t in tensors {
         let name = t["name"].as_str().unwrap().to_string();
-        let data: Vec<f32> = t["data_f32"].as_array().unwrap()
-            .iter().map(|v| v.as_f64().unwrap() as f32).collect();
-        let shape: Vec<usize> = t["shape"].as_array().unwrap()
-            .iter().map(|v| v.as_u64().unwrap() as usize).collect();
+        let data: Vec<f32> = t["data_f32"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_f64().unwrap() as f32)
+            .collect();
+        let shape: Vec<usize> = t["shape"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_u64().unwrap() as usize)
+            .collect();
         state.insert(name, make_f32(data, shape));
     }
 
@@ -626,7 +668,10 @@ fn save_pytorch_multi_tensor_zip_entries() {
         .collect();
 
     for entry in &expected_entries {
-        assert!(names.contains(&entry.to_string()), "ZIP missing entry: {entry}");
+        assert!(
+            names.contains(&entry.to_string()),
+            "ZIP missing entry: {entry}"
+        );
     }
 }
 
@@ -679,7 +724,10 @@ fn save_pytorch_pickle_protocol_header() {
     pkl_entry.read_to_end(&mut pkl_bytes).unwrap();
 
     assert_eq!(pkl_bytes[0], header_bytes[0], "PROTO opcode byte mismatch");
-    assert_eq!(pkl_bytes[1], header_bytes[1], "protocol version byte mismatch");
+    assert_eq!(
+        pkl_bytes[1], header_bytes[1],
+        "protocol version byte mismatch"
+    );
     assert_eq!(
         *pkl_bytes.last().unwrap(),
         stop_byte,
@@ -705,10 +753,18 @@ fn save_pytorch_deterministic_key_ordering() {
     let mut state: StateDict<f32> = HashMap::new();
     for t in tensors {
         let name = t["name"].as_str().unwrap().to_string();
-        let data: Vec<f32> = t["data_f32"].as_array().unwrap()
-            .iter().map(|v| v.as_f64().unwrap() as f32).collect();
-        let shape: Vec<usize> = t["shape"].as_array().unwrap()
-            .iter().map(|v| v.as_u64().unwrap() as usize).collect();
+        let data: Vec<f32> = t["data_f32"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_f64().unwrap() as f32)
+            .collect();
+        let shape: Vec<usize> = t["shape"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_u64().unwrap() as usize)
+            .collect();
         state.insert(name, make_f32(data, shape));
     }
 
@@ -726,7 +782,9 @@ fn save_pytorch_deterministic_key_ordering() {
     let positions: Vec<usize> = expected_order
         .iter()
         .map(|key| {
-            pkl_str.find(key).unwrap_or_else(|| panic!("key {key:?} not found in pickle"))
+            pkl_str
+                .find(key)
+                .unwrap_or_else(|| panic!("key {key:?} not found in pickle"))
         })
         .collect();
 
@@ -746,17 +804,25 @@ fn save_pytorch_deterministic_key_ordering() {
 #[test]
 fn load_pytorch_state_dict_round_trip() {
     let file = load_fixtures();
-    let f = fixture_by_kind(&file.load_pytorch, "round_trip")
-        .expect("round_trip fixture not found");
+    let f =
+        fixture_by_kind(&file.load_pytorch, "round_trip").expect("round_trip fixture not found");
 
     let tensors = f["tensors"].as_array().unwrap();
     let mut state: StateDict<f32> = HashMap::new();
     for t in tensors {
         let name = t["name"].as_str().unwrap().to_string();
-        let data: Vec<f32> = t["data_f32"].as_array().unwrap()
-            .iter().map(|v| v.as_f64().unwrap() as f32).collect();
-        let shape: Vec<usize> = t["shape"].as_array().unwrap()
-            .iter().map(|v| v.as_u64().unwrap() as usize).collect();
+        let data: Vec<f32> = t["data_f32"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_f64().unwrap() as f32)
+            .collect();
+        let shape: Vec<usize> = t["shape"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_u64().unwrap() as usize)
+            .collect();
         state.insert(name, make_f32(data, shape));
     }
 
@@ -769,10 +835,18 @@ fn load_pytorch_state_dict_round_trip() {
 
     for t in tensors {
         let name = t["name"].as_str().unwrap();
-        let orig_data: Vec<f32> = t["data_f32"].as_array().unwrap()
-            .iter().map(|v| v.as_f64().unwrap() as f32).collect();
-        let orig_shape: Vec<usize> = t["shape"].as_array().unwrap()
-            .iter().map(|v| v.as_u64().unwrap() as usize).collect();
+        let orig_data: Vec<f32> = t["data_f32"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_f64().unwrap() as f32)
+            .collect();
+        let orig_shape: Vec<usize> = t["shape"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_u64().unwrap() as usize)
+            .collect();
 
         let lt = &loaded[name];
         assert_eq!(lt.shape(), orig_shape.as_slice(), "[{name}] shape mismatch");
@@ -790,8 +864,7 @@ fn load_pytorch_state_dict_round_trip() {
 #[test]
 fn load_pytorch_state_dict_missing_file_error() {
     let _file = load_fixtures();
-    let result: Result<StateDict<f32>, _> =
-        load_pytorch_state_dict("/nonexistent/model.pt");
+    let result: Result<StateDict<f32>, _> = load_pytorch_state_dict("/nonexistent/model.pt");
     assert!(result.is_err(), "expected error for missing .pt file");
 }
 
@@ -831,7 +904,10 @@ fn parse_pickle_accepts_protocol_2() {
 
     // The parsed value must be a PickleValue.
     let _pv: PickleValue = result.unwrap();
-    eprintln!("  parse_pickle_accepts_protocol_2: {} pickle bytes parsed", pkl_bytes.len());
+    eprintln!(
+        "  parse_pickle_accepts_protocol_2: {} pickle bytes parsed",
+        pkl_bytes.len()
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -859,7 +935,10 @@ fn validate_checkpoint_missing_file_error() {
 
     let path = f["path"].as_str().unwrap();
     let result = validate_checkpoint(path);
-    assert!(result.is_err(), "expected error for missing checkpoint file");
+    assert!(
+        result.is_err(),
+        "expected error for missing checkpoint file"
+    );
 }
 
 /// validate_checkpoint returns an error for a corrupt (non-ZIP) file.
@@ -871,7 +950,10 @@ fn validate_checkpoint_corrupt_file_error() {
     std::fs::write(&path, b"this is not a ZIP file").unwrap();
 
     let result = validate_checkpoint(&path);
-    assert!(result.is_err(), "expected error for corrupt checkpoint file");
+    assert!(
+        result.is_err(),
+        "expected error for corrupt checkpoint file"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -891,10 +973,18 @@ fn save_load_state_dict_f32_round_trip() {
     let mut expected: Vec<(String, Vec<f32>, Vec<usize>)> = Vec::new();
     for t in tensors {
         let name = t["name"].as_str().unwrap().to_string();
-        let data: Vec<f32> = t["data_f32"].as_array().unwrap()
-            .iter().map(|v| v.as_f64().unwrap() as f32).collect();
-        let shape: Vec<usize> = t["shape"].as_array().unwrap()
-            .iter().map(|v| v.as_u64().unwrap() as usize).collect();
+        let data: Vec<f32> = t["data_f32"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_f64().unwrap() as f32)
+            .collect();
+        let shape: Vec<usize> = t["shape"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_u64().unwrap() as usize)
+            .collect();
         state.insert(name.clone(), make_f32(data.clone(), shape.clone()));
         expected.push((name, data, shape));
     }
@@ -908,7 +998,11 @@ fn save_load_state_dict_f32_round_trip() {
     assert_eq!(loaded.len(), state.len(), "[{label}] tensor count mismatch");
     for (name, exp_data, exp_shape) in &expected {
         let t = &loaded[name];
-        assert_eq!(t.shape(), exp_shape.as_slice(), "[{label}][{name}] shape mismatch");
+        assert_eq!(
+            t.shape(),
+            exp_shape.as_slice(),
+            "[{label}][{name}] shape mismatch"
+        );
         let got = t.data().unwrap();
         for (i, (&g, &exp)) in got.iter().zip(exp_data.iter()).enumerate() {
             assert!(
@@ -932,10 +1026,18 @@ fn save_load_state_dict_f64_round_trip() {
     let mut expected: Vec<(String, Vec<f64>, Vec<usize>)> = Vec::new();
     for t in tensors {
         let name = t["name"].as_str().unwrap().to_string();
-        let data: Vec<f64> = t["data_f64"].as_array().unwrap()
-            .iter().map(|v| v.as_f64().unwrap()).collect();
-        let shape: Vec<usize> = t["shape"].as_array().unwrap()
-            .iter().map(|v| v.as_u64().unwrap() as usize).collect();
+        let data: Vec<f64> = t["data_f64"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_f64().unwrap())
+            .collect();
+        let shape: Vec<usize> = t["shape"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_u64().unwrap() as usize)
+            .collect();
         state.insert(name.clone(), make_f64(data.clone(), shape.clone()));
         expected.push((name, data, shape));
     }
@@ -975,7 +1077,10 @@ fn save_state_dict_dtype_tag_f32() {
     // inspect only the header portion (before the separator).
     let raw = std::fs::read(&path).unwrap();
     let sep = b"\n---\n";
-    let sep_pos = raw.windows(sep.len()).position(|w| w == sep).unwrap_or(raw.len());
+    let sep_pos = raw
+        .windows(sep.len())
+        .position(|w| w == sep)
+        .unwrap_or(raw.len());
     let header = std::str::from_utf8(&raw[..sep_pos]).expect("header is valid UTF-8");
     assert!(
         header.contains("\"dtype\":\"f32\""),
@@ -1017,10 +1122,18 @@ fn save_state_dict_scalar_shape() {
         .expect("scalar_shape fixture not found");
 
     let name = f["tensor_name"].as_str().unwrap();
-    let data: Vec<f64> = f["data_f64"].as_array().unwrap()
-        .iter().map(|v| v.as_f64().unwrap()).collect();
-    let shape: Vec<usize> = f["shape"].as_array().unwrap()
-        .iter().map(|v| v.as_u64().unwrap() as usize).collect();
+    let data: Vec<f64> = f["data_f64"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_f64().unwrap())
+        .collect();
+    let shape: Vec<usize> = f["shape"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_u64().unwrap() as usize)
+        .collect();
 
     let state = state64(&[(name, data.clone(), shape.clone())]);
     let dir = tempfile::tempdir().expect("tempdir");
@@ -1029,7 +1142,11 @@ fn save_state_dict_scalar_shape() {
     save_state_dict(&state, &path).expect("save scalar failed");
     let loaded: StateDict<f64> = load_state_dict(&path).expect("load scalar failed");
 
-    assert_eq!(loaded[name].shape(), shape.as_slice(), "scalar shape must be []");
+    assert_eq!(
+        loaded[name].shape(),
+        shape.as_slice(),
+        "scalar shape must be []"
+    );
     assert!(
         (loaded[name].data().unwrap()[0] - data[0]).abs() < 1e-12,
         "scalar value mismatch"
@@ -1044,8 +1161,12 @@ fn save_state_dict_high_rank_shape() {
         .expect("high_rank_shape fixture not found");
 
     let name = f["tensor_name"].as_str().unwrap();
-    let shape: Vec<usize> = f["shape"].as_array().unwrap()
-        .iter().map(|v| v.as_u64().unwrap() as usize).collect();
+    let shape: Vec<usize> = f["shape"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_u64().unwrap() as usize)
+        .collect();
     let expected_numel = f["numel"].as_u64().unwrap() as usize;
 
     // Data is generated from numel (0..N as f64); the fixture records only
@@ -1081,10 +1202,18 @@ fn save_state_dict_deterministic_key_ordering() {
     let mut state: StateDict<f64> = HashMap::new();
     for t in tensors {
         let name = t["name"].as_str().unwrap().to_string();
-        let data: Vec<f64> = t["data_f64"].as_array().unwrap()
-            .iter().map(|v| v.as_f64().unwrap()).collect();
-        let shape: Vec<usize> = t["shape"].as_array().unwrap()
-            .iter().map(|v| v.as_u64().unwrap() as usize).collect();
+        let data: Vec<f64> = t["data_f64"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_f64().unwrap())
+            .collect();
+        let shape: Vec<usize> = t["shape"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_u64().unwrap() as usize)
+            .collect();
         state.insert(name, make_f64(data, shape));
     }
 
@@ -1101,7 +1230,11 @@ fn save_state_dict_deterministic_key_ordering() {
 
     let positions: Vec<usize> = expected_order
         .iter()
-        .map(|key| header.find(key).unwrap_or_else(|| panic!("key {key:?} not in header")))
+        .map(|key| {
+            header
+                .find(key)
+                .unwrap_or_else(|| panic!("key {key:?} not in header"))
+        })
         .collect();
 
     for i in 1..positions.len() {
@@ -1142,7 +1275,10 @@ fn load_state_dict_dtype_mismatch_error() {
 fn load_state_dict_missing_file_error() {
     let _file = load_fixtures();
     let result: Result<StateDict<f32>, _> = load_state_dict("/nonexistent/state.fts");
-    assert!(result.is_err(), "expected error for missing state dict file");
+    assert!(
+        result.is_err(),
+        "expected error for missing state dict file"
+    );
     let msg = format!("{}", result.unwrap_err());
     assert!(
         msg.contains("failed to open file"),
@@ -1183,10 +1319,18 @@ fn save_load_checkpoint_f32_round_trip() {
     let mut expected: Vec<(String, Vec<f32>, Vec<usize>)> = Vec::new();
     for t in model_tensors {
         let name = t["name"].as_str().unwrap().to_string();
-        let data: Vec<f32> = t["data_f32"].as_array().unwrap()
-            .iter().map(|v| v.as_f64().unwrap() as f32).collect();
-        let shape: Vec<usize> = t["shape"].as_array().unwrap()
-            .iter().map(|v| v.as_u64().unwrap() as usize).collect();
+        let data: Vec<f32> = t["data_f32"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_f64().unwrap() as f32)
+            .collect();
+        let shape: Vec<usize> = t["shape"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_u64().unwrap() as usize)
+            .collect();
         model_state.insert(name.clone(), make_f32(data.clone(), shape.clone()));
         expected.push((name, data, shape));
     }
@@ -1209,7 +1353,11 @@ fn save_load_checkpoint_f32_round_trip() {
 
     for (name, exp_data, exp_shape) in &expected {
         let t = &loaded.model_state[name];
-        assert_eq!(t.shape(), exp_shape.as_slice(), "[{label}][{name}] shape mismatch");
+        assert_eq!(
+            t.shape(),
+            exp_shape.as_slice(),
+            "[{label}][{name}] shape mismatch"
+        );
         let got = t.data().unwrap();
         for (i, (&g, &exp)) in got.iter().zip(exp_data.iter()).enumerate() {
             assert!(
@@ -1255,9 +1403,11 @@ fn load_checkpoint_epoch_step_preserved() {
 #[test]
 fn load_checkpoint_missing_file_error() {
     let _file = load_fixtures();
-    let result: Result<TrainingCheckpoint<f32>, _> =
-        load_checkpoint("/nonexistent/checkpoint.ft");
-    assert!(result.is_err(), "expected error for missing checkpoint file");
+    let result: Result<TrainingCheckpoint<f32>, _> = load_checkpoint("/nonexistent/checkpoint.ft");
+    assert!(
+        result.is_err(),
+        "expected error for missing checkpoint file"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -1282,7 +1432,10 @@ fn training_checkpoint_new_stores_fields() {
         step,
     );
 
-    assert_eq!(ckpt.epoch, epoch, "TrainingCheckpoint::new must store epoch");
+    assert_eq!(
+        ckpt.epoch, epoch,
+        "TrainingCheckpoint::new must store epoch"
+    );
     assert_eq!(ckpt.step, step, "TrainingCheckpoint::new must store step");
     assert_eq!(ckpt.model_state.len(), 1, "model_state must have 1 tensor");
 }
@@ -1315,7 +1468,11 @@ fn gguf_parse_gguf_bytes() {
     let bytes = gguf_fixture_bytes();
     let file = parse_gguf_bytes(&bytes).expect("parse_gguf_bytes must succeed on valid fixture");
     assert_eq!(file.version, 3, "GGUF version must be 3");
-    assert_eq!(file.metadata.entries.len(), 2, "fixture has 2 metadata entries");
+    assert_eq!(
+        file.metadata.entries.len(),
+        2,
+        "fixture has 2 metadata entries"
+    );
     assert_eq!(file.tensors.len(), 3, "fixture has 3 tensors");
 }
 
@@ -1344,9 +1501,18 @@ fn gguf_load_gguf_mmap() {
 fn gguf_load_gguf_state_dict() {
     let path = gguf_fixture_path();
     let sd = load_gguf_state_dict(&path).expect("load_gguf_state_dict must succeed");
-    assert!(sd.contains_key("weights.0"), "state dict must have weights.0");
-    assert!(sd.contains_key("weights.1"), "state dict must have weights.1");
-    assert!(sd.contains_key("weights.q8"), "state dict must have weights.q8");
+    assert!(
+        sd.contains_key("weights.0"),
+        "state dict must have weights.0"
+    );
+    assert!(
+        sd.contains_key("weights.1"),
+        "state dict must have weights.1"
+    );
+    assert!(
+        sd.contains_key("weights.q8"),
+        "state dict must have weights.q8"
+    );
     assert_eq!(sd.len(), 3);
 }
 
@@ -1437,7 +1603,11 @@ fn gguf_ggml_type_variant() {
     let file = parse_gguf_bytes(&bytes).unwrap();
     let w0 = file.tensors.iter().find(|t| t.name == "weights.0").unwrap();
     assert_eq!(w0.ggml_type, GgmlType::F32);
-    let wq = file.tensors.iter().find(|t| t.name == "weights.q8").unwrap();
+    let wq = file
+        .tensors
+        .iter()
+        .find(|t| t.name == "weights.q8")
+        .unwrap();
     assert_eq!(wq.ggml_type, GgmlType::Q8_0);
 }
 
@@ -1539,9 +1709,7 @@ fn onnx_export_onnx() {
     let x_storage = TensorStorage::cpu(vec![1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0]);
     let x = Tensor::from_storage(x_storage, vec![2, 3], true).unwrap();
     export_onnx(
-        |inputs: &[Tensor<f32>]| {
-            inputs[0].clone().add(&inputs[0])
-        },
+        |inputs: &[Tensor<f32>]| inputs[0].clone().add(&inputs[0]),
         &[x],
         &path,
         OnnxExportConfig::default(),

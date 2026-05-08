@@ -45,9 +45,7 @@ use ferrotorch_nn::init::{
     xavier_uniform, zeros,
 };
 use ferrotorch_nn::lazy_norm::LazyBatchNorm1d;
-use ferrotorch_nn::loss::{
-    BCELoss, BCEWithLogitsLoss, CrossEntropyLoss, L1Loss, MSELoss, NLLLoss,
-};
+use ferrotorch_nn::loss::{BCELoss, BCEWithLogitsLoss, CrossEntropyLoss, L1Loss, MSELoss, NLLLoss};
 use ferrotorch_nn::module::{Module, Reduction};
 use ferrotorch_nn::norm::{
     BatchNorm1d, BatchNorm2d, BatchNorm3d, GroupNorm, InstanceNorm1d, InstanceNorm2d, LayerNorm,
@@ -244,12 +242,7 @@ fn norm_layer_norm_matches_pytorch() {
         let out = ln.forward(&input).unwrap();
         let actual = out.data_vec().unwrap();
 
-        assert_close_f32(
-            &actual,
-            &expected,
-            F32_NORM,
-            &format!("layer_norm/{tag}"),
-        );
+        assert_close_f32(&actual, &expected, F32_NORM, &format!("layer_norm/{tag}"));
         tested += 1;
     }
     assert!(tested > 0, "no layer_norm fixtures loaded");
@@ -296,10 +289,18 @@ fn norm_batch_norm_1d_matches_pytorch() {
         let num_features = fx["num_features"].as_u64().unwrap() as usize;
         let weight_data = json_to_f32_vec(&fx["weight"]);
         let bias_data = json_to_f32_vec(&fx["bias"]);
-        let running_mean: Vec<f64> = fx["running_mean"].as_array().unwrap()
-            .iter().map(|v| v.as_f64().unwrap()).collect();
-        let running_var: Vec<f64> = fx["running_var"].as_array().unwrap()
-            .iter().map(|v| v.as_f64().unwrap()).collect();
+        let running_mean: Vec<f64> = fx["running_mean"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_f64().unwrap())
+            .collect();
+        let running_var: Vec<f64> = fx["running_var"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_f64().unwrap())
+            .collect();
 
         // Fixture uses running_mean=0, running_var=1 (BatchNorm default).
         // Default constructor already sets those values; no mutation needed.
@@ -309,13 +310,18 @@ fn norm_batch_norm_1d_matches_pytorch() {
         bn.bias = Some(Parameter::from_slice(&bias_data, &[num_features]).unwrap());
         // Confirm running stats match fixture expectations (read-only accessors).
         let _ = running_mean; // consumed — default 0s match fixture
-        let _ = running_var;  // consumed — default 1s match fixture
+        let _ = running_var; // consumed — default 1s match fixture
         bn.eval();
 
         let out = bn.forward(&input).unwrap();
         let actual = out.data_vec().unwrap();
 
-        assert_close_f32(&actual, &expected, F32_NORM, &format!("batch_norm_1d/{tag}"));
+        assert_close_f32(
+            &actual,
+            &expected,
+            F32_NORM,
+            &format!("batch_norm_1d/{tag}"),
+        );
         tested += 1;
     }
     assert!(tested > 0, "no batch_norm_1d fixtures loaded");
@@ -334,10 +340,18 @@ fn norm_batch_norm_2d_matches_pytorch() {
         let num_features = fx["num_features"].as_u64().unwrap() as usize;
         let weight_data = json_to_f32_vec(&fx["weight"]);
         let bias_data = json_to_f32_vec(&fx["bias"]);
-        let running_mean: Vec<f64> = fx["running_mean"].as_array().unwrap()
-            .iter().map(|v| v.as_f64().unwrap()).collect();
-        let running_var: Vec<f64> = fx["running_var"].as_array().unwrap()
-            .iter().map(|v| v.as_f64().unwrap()).collect();
+        let running_mean: Vec<f64> = fx["running_mean"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_f64().unwrap())
+            .collect();
+        let running_var: Vec<f64> = fx["running_var"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_f64().unwrap())
+            .collect();
 
         // Fixture uses running_mean=0, running_var=1 (BatchNorm default).
         let mut bn = BatchNorm2d::<f32>::new(num_features, eps, 0.1, true).unwrap();
@@ -350,7 +364,12 @@ fn norm_batch_norm_2d_matches_pytorch() {
         let out = bn.forward(&input).unwrap();
         let actual = out.data_vec().unwrap();
 
-        assert_close_f32(&actual, &expected, F32_NORM, &format!("batch_norm_2d/{tag}"));
+        assert_close_f32(
+            &actual,
+            &expected,
+            F32_NORM,
+            &format!("batch_norm_2d/{tag}"),
+        );
         tested += 1;
     }
     assert!(tested > 0, "no batch_norm_2d fixtures loaded");
@@ -369,10 +388,18 @@ fn norm_batch_norm_3d_matches_pytorch() {
         let num_features = fx["num_features"].as_u64().unwrap() as usize;
         let weight_data = json_to_f32_vec(&fx["weight"]);
         let bias_data = json_to_f32_vec(&fx["bias"]);
-        let running_mean: Vec<f64> = fx["running_mean"].as_array().unwrap()
-            .iter().map(|v| v.as_f64().unwrap()).collect();
-        let running_var: Vec<f64> = fx["running_var"].as_array().unwrap()
-            .iter().map(|v| v.as_f64().unwrap()).collect();
+        let running_mean: Vec<f64> = fx["running_mean"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_f64().unwrap())
+            .collect();
+        let running_var: Vec<f64> = fx["running_var"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_f64().unwrap())
+            .collect();
 
         // Fixture uses running_mean=0, running_var=1 (BatchNorm default).
         let mut bn = BatchNorm3d::<f32>::new(num_features, eps, 0.1, true).unwrap();
@@ -385,7 +412,12 @@ fn norm_batch_norm_3d_matches_pytorch() {
         let out = bn.forward(&input).unwrap();
         let actual = out.data_vec().unwrap();
 
-        assert_close_f32(&actual, &expected, F32_NORM, &format!("batch_norm_3d/{tag}"));
+        assert_close_f32(
+            &actual,
+            &expected,
+            F32_NORM,
+            &format!("batch_norm_3d/{tag}"),
+        );
         tested += 1;
     }
     assert!(tested > 0, "no batch_norm_3d fixtures loaded");
@@ -409,7 +441,12 @@ fn norm_instance_norm_1d_matches_pytorch() {
         let out = inst.forward(&input).unwrap();
         let actual = out.data_vec().unwrap();
 
-        assert_close_f32(&actual, &expected, F32_NORM, &format!("instance_norm_1d/{tag}"));
+        assert_close_f32(
+            &actual,
+            &expected,
+            F32_NORM,
+            &format!("instance_norm_1d/{tag}"),
+        );
         tested += 1;
     }
     assert!(tested > 0, "no instance_norm_1d fixtures loaded");
@@ -433,7 +470,12 @@ fn norm_instance_norm_2d_matches_pytorch() {
         let out = inst.forward(&input).unwrap();
         let actual = out.data_vec().unwrap();
 
-        assert_close_f32(&actual, &expected, F32_NORM, &format!("instance_norm_2d/{tag}"));
+        assert_close_f32(
+            &actual,
+            &expected,
+            F32_NORM,
+            &format!("instance_norm_2d/{tag}"),
+        );
         tested += 1;
     }
     assert!(tested > 0, "no instance_norm_2d fixtures loaded");
@@ -522,7 +564,12 @@ fn activation_sigmoid_matches_pytorch() {
         let out = m.forward(&input).unwrap();
         let actual = out.data_vec().unwrap();
 
-        assert_close_f32(&actual, &expected, F32_TRANSCENDENTAL, &format!("sigmoid/{tag}"));
+        assert_close_f32(
+            &actual,
+            &expected,
+            F32_TRANSCENDENTAL,
+            &format!("sigmoid/{tag}"),
+        );
         tested += 1;
     }
     assert!(tested > 0, "no sigmoid fixtures loaded");
@@ -542,7 +589,12 @@ fn activation_tanh_matches_pytorch() {
         let out = m.forward(&input).unwrap();
         let actual = out.data_vec().unwrap();
 
-        assert_close_f32(&actual, &expected, F32_TRANSCENDENTAL, &format!("tanh/{tag}"));
+        assert_close_f32(
+            &actual,
+            &expected,
+            F32_TRANSCENDENTAL,
+            &format!("tanh/{tag}"),
+        );
         tested += 1;
     }
     assert!(tested > 0, "no tanh fixtures loaded");
@@ -562,7 +614,12 @@ fn activation_gelu_exact_matches_pytorch() {
         let out = m.forward(&input).unwrap();
         let actual = out.data_vec().unwrap();
 
-        assert_close_f32(&actual, &expected, F32_TRANSCENDENTAL, &format!("gelu_exact/{tag}"));
+        assert_close_f32(
+            &actual,
+            &expected,
+            F32_TRANSCENDENTAL,
+            &format!("gelu_exact/{tag}"),
+        );
         tested += 1;
     }
     assert!(tested > 0, "no gelu_exact fixtures loaded");
@@ -582,7 +639,12 @@ fn activation_gelu_tanh_matches_pytorch() {
         let out = m.forward(&input).unwrap();
         let actual = out.data_vec().unwrap();
 
-        assert_close_f32(&actual, &expected, F32_TRANSCENDENTAL, &format!("gelu_tanh/{tag}"));
+        assert_close_f32(
+            &actual,
+            &expected,
+            F32_TRANSCENDENTAL,
+            &format!("gelu_tanh/{tag}"),
+        );
         tested += 1;
     }
     assert!(tested > 0, "no gelu_tanh fixtures loaded");
@@ -602,7 +664,12 @@ fn activation_silu_matches_pytorch() {
         let out = m.forward(&input).unwrap();
         let actual = out.data_vec().unwrap();
 
-        assert_close_f32(&actual, &expected, F32_TRANSCENDENTAL, &format!("silu/{tag}"));
+        assert_close_f32(
+            &actual,
+            &expected,
+            F32_TRANSCENDENTAL,
+            &format!("silu/{tag}"),
+        );
         tested += 1;
     }
     assert!(tested > 0, "no silu fixtures loaded");
@@ -622,7 +689,12 @@ fn activation_softmax_matches_pytorch() {
         let out = m.forward(&input).unwrap();
         let actual = out.data_vec().unwrap();
 
-        assert_close_f32(&actual, &expected, F32_TRANSCENDENTAL, &format!("softmax/{tag}"));
+        assert_close_f32(
+            &actual,
+            &expected,
+            F32_TRANSCENDENTAL,
+            &format!("softmax/{tag}"),
+        );
         tested += 1;
     }
     assert!(tested > 0, "no softmax fixtures loaded");
@@ -642,7 +714,12 @@ fn activation_log_softmax_matches_pytorch() {
         let out = m.forward(&input).unwrap();
         let actual = out.data_vec().unwrap();
 
-        assert_close_f32(&actual, &expected, F32_TRANSCENDENTAL, &format!("log_softmax/{tag}"));
+        assert_close_f32(
+            &actual,
+            &expected,
+            F32_TRANSCENDENTAL,
+            &format!("log_softmax/{tag}"),
+        );
         tested += 1;
     }
     assert!(tested > 0, "no log_softmax fixtures loaded");
@@ -663,7 +740,12 @@ fn activation_elu_matches_pytorch() {
         let out = m.forward(&input).unwrap();
         let actual = out.data_vec().unwrap();
 
-        assert_close_f32(&actual, &expected, F32_TRANSCENDENTAL, &format!("elu/{tag}"));
+        assert_close_f32(
+            &actual,
+            &expected,
+            F32_TRANSCENDENTAL,
+            &format!("elu/{tag}"),
+        );
         tested += 1;
     }
     assert!(tested > 0, "no elu fixtures loaded");
@@ -683,7 +765,12 @@ fn activation_selu_matches_pytorch() {
         let out = m.forward(&input).unwrap();
         let actual = out.data_vec().unwrap();
 
-        assert_close_f32(&actual, &expected, F32_TRANSCENDENTAL, &format!("selu/{tag}"));
+        assert_close_f32(
+            &actual,
+            &expected,
+            F32_TRANSCENDENTAL,
+            &format!("selu/{tag}"),
+        );
         tested += 1;
     }
     assert!(tested > 0, "no selu fixtures loaded");
@@ -703,7 +790,12 @@ fn activation_mish_matches_pytorch() {
         let out = m.forward(&input).unwrap();
         let actual = out.data_vec().unwrap();
 
-        assert_close_f32(&actual, &expected, F32_TRANSCENDENTAL, &format!("mish/{tag}"));
+        assert_close_f32(
+            &actual,
+            &expected,
+            F32_TRANSCENDENTAL,
+            &format!("mish/{tag}"),
+        );
         tested += 1;
     }
     assert!(tested > 0, "no mish fixtures loaded");
@@ -724,7 +816,12 @@ fn activation_leaky_relu_matches_pytorch() {
         let out = m.forward(&input).unwrap();
         let actual = out.data_vec().unwrap();
 
-        assert_close_f32(&actual, &expected, F32_ELEMENTWISE, &format!("leaky_relu/{tag}"));
+        assert_close_f32(
+            &actual,
+            &expected,
+            F32_ELEMENTWISE,
+            &format!("leaky_relu/{tag}"),
+        );
         tested += 1;
     }
     assert!(tested > 0, "no leaky_relu fixtures loaded");
@@ -744,7 +841,12 @@ fn activation_hardsigmoid_matches_pytorch() {
         let out = m.forward(&input).unwrap();
         let actual = out.data_vec().unwrap();
 
-        assert_close_f32(&actual, &expected, F32_ELEMENTWISE, &format!("hardsigmoid/{tag}"));
+        assert_close_f32(
+            &actual,
+            &expected,
+            F32_ELEMENTWISE,
+            &format!("hardsigmoid/{tag}"),
+        );
         tested += 1;
     }
     assert!(tested > 0, "no hardsigmoid fixtures loaded");
@@ -764,7 +866,12 @@ fn activation_hardswish_matches_pytorch() {
         let out = m.forward(&input).unwrap();
         let actual = out.data_vec().unwrap();
 
-        assert_close_f32(&actual, &expected, F32_ELEMENTWISE, &format!("hardswish/{tag}"));
+        assert_close_f32(
+            &actual,
+            &expected,
+            F32_ELEMENTWISE,
+            &format!("hardswish/{tag}"),
+        );
         tested += 1;
     }
     assert!(tested > 0, "no hardswish fixtures loaded");
@@ -785,7 +892,12 @@ fn activation_softplus_matches_pytorch() {
         let out = m.forward(&input).unwrap();
         let actual = out.data_vec().unwrap();
 
-        assert_close_f32(&actual, &expected, F32_TRANSCENDENTAL, &format!("softplus/{tag}"));
+        assert_close_f32(
+            &actual,
+            &expected,
+            F32_TRANSCENDENTAL,
+            &format!("softplus/{tag}"),
+        );
         tested += 1;
     }
     assert!(tested > 0, "no softplus fixtures loaded");
@@ -805,7 +917,12 @@ fn activation_log_sigmoid_matches_pytorch() {
         let out = m.forward(&input).unwrap();
         let actual = out.data_vec().unwrap();
 
-        assert_close_f32(&actual, &expected, F32_TRANSCENDENTAL, &format!("log_sigmoid/{tag}"));
+        assert_close_f32(
+            &actual,
+            &expected,
+            F32_TRANSCENDENTAL,
+            &format!("log_sigmoid/{tag}"),
+        );
         tested += 1;
     }
     assert!(tested > 0, "no log_sigmoid fixtures loaded");
@@ -827,7 +944,12 @@ fn activation_hardtanh_matches_pytorch() {
         let out = m.forward(&input).unwrap();
         let actual = out.data_vec().unwrap();
 
-        assert_close_f32(&actual, &expected, F32_ELEMENTWISE, &format!("hardtanh/{tag}"));
+        assert_close_f32(
+            &actual,
+            &expected,
+            F32_ELEMENTWISE,
+            &format!("hardtanh/{tag}"),
+        );
         tested += 1;
     }
     assert!(tested > 0, "no hardtanh fixtures loaded");
@@ -935,7 +1057,10 @@ fn loss_bce_with_logits_matches_pytorch() {
     let fixtures = load_fixtures();
     let mut tested = 0usize;
 
-    for fx in fixtures.iter().filter(|f| f["op"] == "bce_with_logits_loss") {
+    for fx in fixtures
+        .iter()
+        .filter(|f| f["op"] == "bce_with_logits_loss")
+    {
         let tag = fx["tag"].as_str().unwrap_or("?");
         let pred = tensor_from_fixture(&fx["pred_data"], &fx["pred_shape"]);
         let target = tensor_from_fixture(&fx["target_data"], &fx["target_shape"]);
@@ -947,11 +1072,21 @@ fn loss_bce_with_logits_matches_pytorch() {
         if reduction_s == "none" {
             let actual = out.data_vec().unwrap();
             let expected = json_to_f32_vec(&fx["out_data"]);
-            assert_close_f32(&actual, &expected, F32_LOSS, &format!("bce_with_logits_loss/{tag}"));
+            assert_close_f32(
+                &actual,
+                &expected,
+                F32_LOSS,
+                &format!("bce_with_logits_loss/{tag}"),
+            );
         } else {
             let actual = out.data_vec().unwrap()[0];
             let expected = json_scalar_f32(&fx["out_scalar"]);
-            assert_close_scalar_f32(actual, expected, F32_LOSS, &format!("bce_with_logits_loss/{tag}"));
+            assert_close_scalar_f32(
+                actual,
+                expected,
+                F32_LOSS,
+                &format!("bce_with_logits_loss/{tag}"),
+            );
         }
         tested += 1;
     }
@@ -968,8 +1103,12 @@ fn loss_cross_entropy_matches_pytorch() {
         let pred = tensor_from_fixture(&fx["pred_data"], &fx["pred_shape"]);
 
         // Targets are integer class indices
-        let target_data: Vec<f32> = fx["target_data"].as_array().unwrap()
-            .iter().map(|v| v.as_u64().unwrap() as f32).collect();
+        let target_data: Vec<f32> = fx["target_data"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_u64().unwrap() as f32)
+            .collect();
         let target_shape = json_to_usize_vec(&fx["target_shape"]);
         let target = from_vec(target_data, &target_shape).unwrap();
 
@@ -980,7 +1119,12 @@ fn loss_cross_entropy_matches_pytorch() {
         let actual = out.data_vec().unwrap()[0];
         let expected = json_scalar_f32(&fx["out_scalar"]);
 
-        assert_close_scalar_f32(actual, expected, F32_LOSS, &format!("cross_entropy_loss/{tag}"));
+        assert_close_scalar_f32(
+            actual,
+            expected,
+            F32_LOSS,
+            &format!("cross_entropy_loss/{tag}"),
+        );
         tested += 1;
     }
     assert!(tested > 0, "no cross_entropy_loss fixtures loaded");
@@ -996,8 +1140,12 @@ fn loss_nll_matches_pytorch() {
         let pred = tensor_from_fixture(&fx["pred_data"], &fx["pred_shape"]);
 
         // Targets are integer class indices
-        let target_data: Vec<f32> = fx["target_data"].as_array().unwrap()
-            .iter().map(|v| v.as_u64().unwrap() as f32).collect();
+        let target_data: Vec<f32> = fx["target_data"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_u64().unwrap() as f32)
+            .collect();
         let target_shape = json_to_usize_vec(&fx["target_shape"]);
         let target = from_vec(target_data, &target_shape).unwrap();
 
@@ -1025,8 +1173,12 @@ fn init_zeros_matches_pytorch() {
 
     for fx in fixtures.iter().filter(|f| f["op"] == "init_zeros") {
         let shape = json_to_usize_vec(&fx["shape"]);
-        let expected: Vec<f32> = fx["expected_values"].as_array().unwrap()
-            .iter().map(|v| v.as_f64().unwrap() as f32).collect();
+        let expected: Vec<f32> = fx["expected_values"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_f64().unwrap() as f32)
+            .collect();
 
         let mut param = Parameter::ones(&shape).unwrap(); // start non-zero
         zeros(&mut param).unwrap();
@@ -1045,8 +1197,12 @@ fn init_ones_matches_pytorch() {
 
     for fx in fixtures.iter().filter(|f| f["op"] == "init_ones") {
         let shape = json_to_usize_vec(&fx["shape"]);
-        let expected: Vec<f32> = fx["expected_values"].as_array().unwrap()
-            .iter().map(|v| v.as_f64().unwrap() as f32).collect();
+        let expected: Vec<f32> = fx["expected_values"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_f64().unwrap() as f32)
+            .collect();
 
         let mut param = Parameter::<f32>::zeros(&shape).unwrap();
         ones(&mut param).unwrap();
@@ -1066,8 +1222,12 @@ fn init_constant_matches_pytorch() {
     for fx in fixtures.iter().filter(|f| f["op"] == "init_constant") {
         let shape = json_to_usize_vec(&fx["shape"]);
         let fill_value = fx["fill_value"].as_f64().unwrap() as f32;
-        let expected: Vec<f32> = fx["expected_values"].as_array().unwrap()
-            .iter().map(|v| v.as_f64().unwrap() as f32).collect();
+        let expected: Vec<f32> = fx["expected_values"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_f64().unwrap() as f32)
+            .collect();
 
         let mut param = Parameter::<f32>::zeros(&shape).unwrap();
         constant(&mut param, fill_value).unwrap();
@@ -1145,7 +1305,10 @@ fn init_kaiming_uniform_bounds() {
     let fixtures = load_fixtures();
     let mut tested = 0usize;
 
-    for fx in fixtures.iter().filter(|f| f["op"] == "init_kaiming_uniform") {
+    for fx in fixtures
+        .iter()
+        .filter(|f| f["op"] == "init_kaiming_uniform")
+    {
         let shape = json_to_usize_vec(&fx["shape"]);
         let expected_limit = fx["expected_limit"].as_f64().unwrap();
 
@@ -1284,7 +1447,12 @@ fn functional_linear_matches_pytorch() {
         let out = functional::linear(&input, &weight, Some(&bias)).unwrap();
         let actual = out.data_vec().unwrap();
 
-        assert_close_f32(&actual, &expected, F32_ELEMENTWISE, &format!("fn_linear/{tag}"));
+        assert_close_f32(
+            &actual,
+            &expected,
+            F32_ELEMENTWISE,
+            &format!("fn_linear/{tag}"),
+        );
         tested += 1;
     }
     assert!(tested > 0, "no fn_linear fixtures loaded");
@@ -1303,7 +1471,12 @@ fn functional_relu_matches_pytorch() {
         let out = functional::relu(&input).unwrap();
         let actual = out.data_vec().unwrap();
 
-        assert_close_f32(&actual, &expected, F32_ELEMENTWISE, &format!("fn_relu/{tag}"));
+        assert_close_f32(
+            &actual,
+            &expected,
+            F32_ELEMENTWISE,
+            &format!("fn_relu/{tag}"),
+        );
         tested += 1;
     }
     assert!(tested > 0, "no fn_relu fixtures loaded");
@@ -1322,7 +1495,12 @@ fn functional_sigmoid_matches_pytorch() {
         let out = functional::sigmoid(&input).unwrap();
         let actual = out.data_vec().unwrap();
 
-        assert_close_f32(&actual, &expected, F32_TRANSCENDENTAL, &format!("fn_sigmoid/{tag}"));
+        assert_close_f32(
+            &actual,
+            &expected,
+            F32_TRANSCENDENTAL,
+            &format!("fn_sigmoid/{tag}"),
+        );
         tested += 1;
     }
     assert!(tested > 0, "no fn_sigmoid fixtures loaded");
@@ -1341,7 +1519,12 @@ fn functional_tanh_matches_pytorch() {
         let out = functional::tanh(&input).unwrap();
         let actual = out.data_vec().unwrap();
 
-        assert_close_f32(&actual, &expected, F32_TRANSCENDENTAL, &format!("fn_tanh/{tag}"));
+        assert_close_f32(
+            &actual,
+            &expected,
+            F32_TRANSCENDENTAL,
+            &format!("fn_tanh/{tag}"),
+        );
         tested += 1;
     }
     assert!(tested > 0, "no fn_tanh fixtures loaded");
@@ -1360,7 +1543,12 @@ fn functional_gelu_matches_pytorch() {
         let out = functional::gelu(&input).unwrap();
         let actual = out.data_vec().unwrap();
 
-        assert_close_f32(&actual, &expected, F32_TRANSCENDENTAL, &format!("fn_gelu/{tag}"));
+        assert_close_f32(
+            &actual,
+            &expected,
+            F32_TRANSCENDENTAL,
+            &format!("fn_gelu/{tag}"),
+        );
         tested += 1;
     }
     assert!(tested > 0, "no fn_gelu fixtures loaded");
@@ -1379,7 +1567,12 @@ fn functional_silu_matches_pytorch() {
         let out = functional::silu(&input).unwrap();
         let actual = out.data_vec().unwrap();
 
-        assert_close_f32(&actual, &expected, F32_TRANSCENDENTAL, &format!("fn_silu/{tag}"));
+        assert_close_f32(
+            &actual,
+            &expected,
+            F32_TRANSCENDENTAL,
+            &format!("fn_silu/{tag}"),
+        );
         tested += 1;
     }
     assert!(tested > 0, "no fn_silu fixtures loaded");
@@ -1398,7 +1591,12 @@ fn functional_softmax_matches_pytorch() {
         let out = functional::softmax(&input).unwrap();
         let actual = out.data_vec().unwrap();
 
-        assert_close_f32(&actual, &expected, F32_TRANSCENDENTAL, &format!("fn_softmax/{tag}"));
+        assert_close_f32(
+            &actual,
+            &expected,
+            F32_TRANSCENDENTAL,
+            &format!("fn_softmax/{tag}"),
+        );
         tested += 1;
     }
     assert!(tested > 0, "no fn_softmax fixtures loaded");
@@ -1417,7 +1615,12 @@ fn functional_log_softmax_matches_pytorch() {
         let out = functional::log_softmax(&input).unwrap();
         let actual = out.data_vec().unwrap();
 
-        assert_close_f32(&actual, &expected, F32_TRANSCENDENTAL, &format!("fn_log_softmax/{tag}"));
+        assert_close_f32(
+            &actual,
+            &expected,
+            F32_TRANSCENDENTAL,
+            &format!("fn_log_softmax/{tag}"),
+        );
         tested += 1;
     }
     assert!(tested > 0, "no fn_log_softmax fixtures loaded");
@@ -1437,7 +1640,12 @@ fn functional_leaky_relu_matches_pytorch() {
         let out = functional::leaky_relu(&input, neg_slope).unwrap();
         let actual = out.data_vec().unwrap();
 
-        assert_close_f32(&actual, &expected, F32_ELEMENTWISE, &format!("fn_leaky_relu/{tag}"));
+        assert_close_f32(
+            &actual,
+            &expected,
+            F32_ELEMENTWISE,
+            &format!("fn_leaky_relu/{tag}"),
+        );
         tested += 1;
     }
     assert!(tested > 0, "no fn_leaky_relu fixtures loaded");
@@ -1477,10 +1685,18 @@ fn lazy_norm_lazy_batch_norm_1d_matches_pytorch() {
         let input = tensor_from_fixture(&fx["input_data"], &fx["input_shape"]);
         let expected = json_to_f32_vec(&fx["out_data"]);
         let num_features = fx["num_features"].as_u64().unwrap() as usize;
-        let running_mean: Vec<f64> = fx["running_mean"].as_array().unwrap()
-            .iter().map(|v| v.as_f64().unwrap()).collect();
-        let running_var: Vec<f64> = fx["running_var"].as_array().unwrap()
-            .iter().map(|v| v.as_f64().unwrap()).collect();
+        let running_mean: Vec<f64> = fx["running_mean"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_f64().unwrap())
+            .collect();
+        let running_var: Vec<f64> = fx["running_var"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_f64().unwrap())
+            .collect();
 
         // LazyBatchNorm1d: materialize via first training forward (accumulates
         // running stats), then switch to eval. The fixture was generated by the
@@ -1496,7 +1712,12 @@ fn lazy_norm_lazy_batch_norm_1d_matches_pytorch() {
         let out = lazy_m.forward(&input).unwrap();
         let actual = out.data_vec().unwrap();
 
-        assert_close_f32(&actual, &expected, F32_NORM, &format!("lazy_batch_norm_1d/{tag}"));
+        assert_close_f32(
+            &actual,
+            &expected,
+            F32_NORM,
+            &format!("lazy_batch_norm_1d/{tag}"),
+        );
         tested += 1;
     }
     assert!(tested > 0, "no lazy_batch_norm_1d fixtures loaded");
@@ -1522,12 +1743,20 @@ fn utils_clip_grad_norm_matches_pytorch() {
         let expected_g2 = json_to_f32_vec(&fx["clipped_grad2"]);
 
         // Build parameters with gradients injected via Tensor::set_grad.
-        let t1 = from_vec(g1_data.clone(), &g1_shape).unwrap().requires_grad_(true);
-        let t2 = from_vec(g2_data.clone(), &g2_shape).unwrap().requires_grad_(true);
+        let t1 = from_vec(g1_data.clone(), &g1_shape)
+            .unwrap()
+            .requires_grad_(true);
+        let t2 = from_vec(g2_data.clone(), &g2_shape)
+            .unwrap()
+            .requires_grad_(true);
         let p1 = Parameter::new(t1);
         let p2 = Parameter::new(t2);
-        p1.tensor().set_grad(Some(from_vec(g1_data, &g1_shape).unwrap())).unwrap();
-        p2.tensor().set_grad(Some(from_vec(g2_data, &g2_shape).unwrap())).unwrap();
+        p1.tensor()
+            .set_grad(Some(from_vec(g1_data, &g1_shape).unwrap()))
+            .unwrap();
+        p2.tensor()
+            .set_grad(Some(from_vec(g2_data, &g2_shape).unwrap()))
+            .unwrap();
 
         let params: Vec<&Parameter<f32>> = vec![&p1, &p2];
         clip_grad_norm_(&params, max_norm as f64, 2.0).unwrap();
@@ -1535,8 +1764,18 @@ fn utils_clip_grad_norm_matches_pytorch() {
         let clipped_g1 = p1.tensor().grad().unwrap().unwrap().data_vec().unwrap();
         let clipped_g2 = p2.tensor().grad().unwrap().unwrap().data_vec().unwrap();
 
-        assert_close_f32(&clipped_g1, &expected_g1, 1e-5, &format!("clip_grad_norm_/{tag}/g1"));
-        assert_close_f32(&clipped_g2, &expected_g2, 1e-5, &format!("clip_grad_norm_/{tag}/g2"));
+        assert_close_f32(
+            &clipped_g1,
+            &expected_g1,
+            1e-5,
+            &format!("clip_grad_norm_/{tag}/g1"),
+        );
+        assert_close_f32(
+            &clipped_g2,
+            &expected_g2,
+            1e-5,
+            &format!("clip_grad_norm_/{tag}/g2"),
+        );
         tested += 1;
     }
     assert!(tested > 0, "no clip_grad_norm_ fixtures loaded");
@@ -1554,15 +1793,24 @@ fn utils_clip_grad_value_matches_pytorch() {
         let clip_value = fx["clip_value"].as_f64().unwrap() as f32;
         let expected_g1 = json_to_f32_vec(&fx["clipped_grad1"]);
 
-        let t1 = from_vec(g1_data.clone(), &g1_shape).unwrap().requires_grad_(true);
+        let t1 = from_vec(g1_data.clone(), &g1_shape)
+            .unwrap()
+            .requires_grad_(true);
         let p1 = Parameter::new(t1);
-        p1.tensor().set_grad(Some(from_vec(g1_data, &g1_shape).unwrap())).unwrap();
+        p1.tensor()
+            .set_grad(Some(from_vec(g1_data, &g1_shape).unwrap()))
+            .unwrap();
 
         let params: Vec<&Parameter<f32>> = vec![&p1];
         clip_grad_value_(&params, clip_value as f64).unwrap();
 
         let clipped = p1.tensor().grad().unwrap().unwrap().data_vec().unwrap();
-        assert_close_f32(&clipped, &expected_g1, 1e-6, &format!("clip_grad_value_/{tag}"));
+        assert_close_f32(
+            &clipped,
+            &expected_g1,
+            1e-6,
+            &format!("clip_grad_value_/{tag}"),
+        );
         tested += 1;
     }
     assert!(tested > 0, "no clip_grad_value_ fixtures loaded");

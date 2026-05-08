@@ -205,8 +205,7 @@ impl<T: Float> GradFn<T> for RfftBackward<T> {
             let mut padded_shape = batch_shape.to_vec();
             padded_shape.push(n);
             padded_shape.push(2);
-            let padded_t =
-                Tensor::from_storage(TensorStorage::cpu(padded), padded_shape, false)?;
+            let padded_t = Tensor::from_storage(TensorStorage::cpu(padded), padded_shape, false)?;
 
             // ifft is normalized (divides by N); multiply by N to unnormalize.
             let inv = fft::ifft(&padded_t, Some(n))?;
@@ -645,8 +644,7 @@ impl<T: Float> GradFn<T> for RfftnBackward<T> {
                 padded[dst + 1] = go_data[src + 1];
                 let _ = k; // silence unused-variable warnings on some paths
             }
-            let padded_t =
-                Tensor::from_storage(TensorStorage::cpu(padded), padded_shape, false)?;
+            let padded_t = Tensor::from_storage(TensorStorage::cpu(padded), padded_shape, false)?;
 
             // 2. Normalized inverse FFT (divides by prod(s)).
             let inv = fft::ifftn(&padded_t, self.s.as_deref(), self.axes.as_deref())?;
@@ -986,8 +984,7 @@ impl<T: Float> GradFn<T> for IhfftBackward<T> {
             let mut padded_shape = batch_shape.to_vec();
             padded_shape.push(n);
             padded_shape.push(2);
-            let padded_t =
-                Tensor::from_storage(TensorStorage::cpu(padded), padded_shape, false)?;
+            let padded_t = Tensor::from_storage(TensorStorage::cpu(padded), padded_shape, false)?;
 
             // Normalized ifft: divides by N — exactly the 1/N we want.
             let inv = fft::ifft(&padded_t, Some(n))?;
@@ -1171,7 +1168,10 @@ pub fn rfftn_differentiable<T: Float>(
             }
             None => in_shape.len() - 1,
         };
-        let last_axis_n = s_back.last().copied().unwrap_or(in_shape[last_axis_logical]);
+        let last_axis_n = s_back
+            .last()
+            .copied()
+            .unwrap_or(in_shape[last_axis_logical]);
         let norm_n: usize = s_back.iter().product::<usize>().max(1);
         let out_shape = result.shape().to_vec();
         let grad_fn = Arc::new(RfftnBackward::new(

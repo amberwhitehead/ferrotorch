@@ -273,7 +273,11 @@ impl<T: Float> Distribution<T> for Dirichlet<T> {
             self.concentration.shape().to_vec(),
             false,
         )?;
-        if device.is_cuda() { t.to(device) } else { Ok(t) }
+        if device.is_cuda() {
+            t.to(device)
+        } else {
+            Ok(t)
+        }
     }
 
     fn variance(&self) -> FerrotorchResult<Tensor<T>> {
@@ -296,7 +300,11 @@ impl<T: Float> Distribution<T> for Dirichlet<T> {
             self.concentration.shape().to_vec(),
             false,
         )?;
-        if device.is_cuda() { t.to(device) } else { Ok(t) }
+        if device.is_cuda() {
+            t.to(device)
+        } else {
+            Ok(t)
+        }
     }
 
     fn entropy(&self) -> FerrotorchResult<Tensor<T>> {

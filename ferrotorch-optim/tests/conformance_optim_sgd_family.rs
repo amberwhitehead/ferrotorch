@@ -31,7 +31,7 @@
     clippy::cast_sign_loss,
     clippy::uninlined_format_args,
     clippy::explicit_iter_loop,
-    clippy::redundant_else,
+    clippy::redundant_else
 )]
 
 use std::path::PathBuf;
@@ -39,8 +39,8 @@ use std::path::PathBuf;
 use ferrotorch_core::{Tensor, TensorStorage};
 use ferrotorch_nn::Parameter;
 use ferrotorch_optim::{
-    Adagrad, AdagradConfig, Asgd, AsgdConfig, Optimizer, ParamGroup, Rmsprop, RmspropConfig,
-    Rprop, RpropConfig, Sgd, SgdConfig,
+    Adagrad, AdagradConfig, Asgd, AsgdConfig, Optimizer, ParamGroup, Rmsprop, RmspropConfig, Rprop,
+    RpropConfig, Sgd, SgdConfig,
 };
 
 // ---------------------------------------------------------------------------
@@ -75,8 +75,9 @@ fn fixture_path() -> PathBuf {
 
 fn load_fixtures() -> serde_json::Value {
     let path = fixture_path();
-    let body = std::fs::read_to_string(&path)
-        .unwrap_or_else(|e| panic!("read fixtures.json: {e}. Run scripts/regenerate_optim_fixtures.py"));
+    let body = std::fs::read_to_string(&path).unwrap_or_else(|e| {
+        panic!("read fixtures.json: {e}. Run scripts/regenerate_optim_fixtures.py")
+    });
     serde_json::from_str(&body).expect("parse fixtures.json")
 }
 
@@ -146,15 +147,24 @@ fn sgd_plain_step_parity() {
     // The fixture stores params AFTER each step; init is not in the file.
     // We hard-code the canonical seed (torch.manual_seed(42); torch.randn(10)).
     let init_params: Vec<f32> = vec![
-        0.3367, 0.1288, 0.2345, 0.2303, -1.1229,
-        -0.1863, 2.2082, -0.6380, 0.4617, 0.2674,
+        0.3367, 0.1288, 0.2345, 0.2303, -1.1229, -0.1863, 2.2082, -0.6380, 0.4617, 0.2674,
     ];
     let grad_steps: Vec<Vec<f32>> = vec![
-        vec![-0.4917, 0.3557, -0.3465, 0.6218, 1.5722, 1.1409, -0.0960, -0.7693, 0.9757, -0.0737],
-        vec![ 0.2162,-0.3476, -0.4131,-0.2786, 0.4397,-0.5476, 1.3618, 0.3791, 0.0870,-1.1205],
-        vec![-0.1613, 1.0161, -0.7040,-0.2243,-0.0559, 0.3891,-0.5073, 0.4729, 0.1440,-0.3407],
-        vec![ 0.0516, 0.1965,  0.6048, 0.7213,-0.5534, 0.3248,-0.1098,-1.2456, 0.4319, 0.1012],
-        vec![-0.8547,-0.2256,  0.2893, 0.2490,-0.4065,-0.0572,-0.9133, 0.4128,-0.2097, 0.5714],
+        vec![
+            -0.4917, 0.3557, -0.3465, 0.6218, 1.5722, 1.1409, -0.0960, -0.7693, 0.9757, -0.0737,
+        ],
+        vec![
+            0.2162, -0.3476, -0.4131, -0.2786, 0.4397, -0.5476, 1.3618, 0.3791, 0.0870, -1.1205,
+        ],
+        vec![
+            -0.1613, 1.0161, -0.7040, -0.2243, -0.0559, 0.3891, -0.5073, 0.4729, 0.1440, -0.3407,
+        ],
+        vec![
+            0.0516, 0.1965, 0.6048, 0.7213, -0.5534, 0.3248, -0.1098, -1.2456, 0.4319, 0.1012,
+        ],
+        vec![
+            -0.8547, -0.2256, 0.2893, 0.2490, -0.4065, -0.0572, -0.9133, 0.4128, -0.2097, 0.5714,
+        ],
     ];
 
     let param = make_param(&init_params);
@@ -167,7 +177,12 @@ fn sgd_plain_step_parity() {
         opt.step().unwrap();
         let actual = read_param(&param);
         let expected: Vec<f32> = fvec(&step_fix["params"]);
-        assert_close_vec(&actual, &expected, TOL, &format!("sgd_plain step {}", i + 1));
+        assert_close_vec(
+            &actual,
+            &expected,
+            TOL,
+            &format!("sgd_plain step {}", i + 1),
+        );
     }
 }
 
@@ -189,15 +204,24 @@ fn sgd_momentum_step_parity() {
     let momentum = variant["momentum"].as_f64().unwrap();
 
     let init_params: Vec<f32> = vec![
-        0.3367, 0.1288, 0.2345, 0.2303, -1.1229,
-        -0.1863, 2.2082, -0.6380, 0.4617, 0.2674,
+        0.3367, 0.1288, 0.2345, 0.2303, -1.1229, -0.1863, 2.2082, -0.6380, 0.4617, 0.2674,
     ];
     let grad_steps: Vec<Vec<f32>> = vec![
-        vec![-0.4917, 0.3557, -0.3465, 0.6218, 1.5722, 1.1409, -0.0960, -0.7693, 0.9757, -0.0737],
-        vec![ 0.2162,-0.3476, -0.4131,-0.2786, 0.4397,-0.5476, 1.3618, 0.3791, 0.0870,-1.1205],
-        vec![-0.1613, 1.0161, -0.7040,-0.2243,-0.0559, 0.3891,-0.5073, 0.4729, 0.1440,-0.3407],
-        vec![ 0.0516, 0.1965,  0.6048, 0.7213,-0.5534, 0.3248,-0.1098,-1.2456, 0.4319, 0.1012],
-        vec![-0.8547,-0.2256,  0.2893, 0.2490,-0.4065,-0.0572,-0.9133, 0.4128,-0.2097, 0.5714],
+        vec![
+            -0.4917, 0.3557, -0.3465, 0.6218, 1.5722, 1.1409, -0.0960, -0.7693, 0.9757, -0.0737,
+        ],
+        vec![
+            0.2162, -0.3476, -0.4131, -0.2786, 0.4397, -0.5476, 1.3618, 0.3791, 0.0870, -1.1205,
+        ],
+        vec![
+            -0.1613, 1.0161, -0.7040, -0.2243, -0.0559, 0.3891, -0.5073, 0.4729, 0.1440, -0.3407,
+        ],
+        vec![
+            0.0516, 0.1965, 0.6048, 0.7213, -0.5534, 0.3248, -0.1098, -1.2456, 0.4319, 0.1012,
+        ],
+        vec![
+            -0.8547, -0.2256, 0.2893, 0.2490, -0.4065, -0.0572, -0.9133, 0.4128, -0.2097, 0.5714,
+        ],
     ];
 
     let param = make_param(&init_params);
@@ -210,7 +234,12 @@ fn sgd_momentum_step_parity() {
         opt.step().unwrap();
         let actual = read_param(&param);
         let expected: Vec<f32> = fvec(&step_fix["params"]);
-        assert_close_vec(&actual, &expected, TOL, &format!("sgd_momentum step {}", i + 1));
+        assert_close_vec(
+            &actual,
+            &expected,
+            TOL,
+            &format!("sgd_momentum step {}", i + 1),
+        );
     }
 }
 
@@ -232,15 +261,24 @@ fn sgd_nesterov_step_parity() {
     let momentum = variant["momentum"].as_f64().unwrap();
 
     let init_params: Vec<f32> = vec![
-        0.3367, 0.1288, 0.2345, 0.2303, -1.1229,
-        -0.1863, 2.2082, -0.6380, 0.4617, 0.2674,
+        0.3367, 0.1288, 0.2345, 0.2303, -1.1229, -0.1863, 2.2082, -0.6380, 0.4617, 0.2674,
     ];
     let grad_steps: Vec<Vec<f32>> = vec![
-        vec![-0.4917, 0.3557, -0.3465, 0.6218, 1.5722, 1.1409, -0.0960, -0.7693, 0.9757, -0.0737],
-        vec![ 0.2162,-0.3476, -0.4131,-0.2786, 0.4397,-0.5476, 1.3618, 0.3791, 0.0870,-1.1205],
-        vec![-0.1613, 1.0161, -0.7040,-0.2243,-0.0559, 0.3891,-0.5073, 0.4729, 0.1440,-0.3407],
-        vec![ 0.0516, 0.1965,  0.6048, 0.7213,-0.5534, 0.3248,-0.1098,-1.2456, 0.4319, 0.1012],
-        vec![-0.8547,-0.2256,  0.2893, 0.2490,-0.4065,-0.0572,-0.9133, 0.4128,-0.2097, 0.5714],
+        vec![
+            -0.4917, 0.3557, -0.3465, 0.6218, 1.5722, 1.1409, -0.0960, -0.7693, 0.9757, -0.0737,
+        ],
+        vec![
+            0.2162, -0.3476, -0.4131, -0.2786, 0.4397, -0.5476, 1.3618, 0.3791, 0.0870, -1.1205,
+        ],
+        vec![
+            -0.1613, 1.0161, -0.7040, -0.2243, -0.0559, 0.3891, -0.5073, 0.4729, 0.1440, -0.3407,
+        ],
+        vec![
+            0.0516, 0.1965, 0.6048, 0.7213, -0.5534, 0.3248, -0.1098, -1.2456, 0.4319, 0.1012,
+        ],
+        vec![
+            -0.8547, -0.2256, 0.2893, 0.2490, -0.4065, -0.0572, -0.9133, 0.4128, -0.2097, 0.5714,
+        ],
     ];
 
     let param = make_param(&init_params);
@@ -253,7 +291,12 @@ fn sgd_nesterov_step_parity() {
         opt.step().unwrap();
         let actual = read_param(&param);
         let expected: Vec<f32> = fvec(&step_fix["params"]);
-        assert_close_vec(&actual, &expected, TOL, &format!("sgd_nesterov step {}", i + 1));
+        assert_close_vec(
+            &actual,
+            &expected,
+            TOL,
+            &format!("sgd_nesterov step {}", i + 1),
+        );
     }
 }
 
@@ -275,15 +318,24 @@ fn sgd_weight_decay_step_parity() {
     let wd = variant["weight_decay"].as_f64().unwrap();
 
     let init_params: Vec<f32> = vec![
-        0.3367, 0.1288, 0.2345, 0.2303, -1.1229,
-        -0.1863, 2.2082, -0.6380, 0.4617, 0.2674,
+        0.3367, 0.1288, 0.2345, 0.2303, -1.1229, -0.1863, 2.2082, -0.6380, 0.4617, 0.2674,
     ];
     let grad_steps: Vec<Vec<f32>> = vec![
-        vec![-0.4917, 0.3557, -0.3465, 0.6218, 1.5722, 1.1409, -0.0960, -0.7693, 0.9757, -0.0737],
-        vec![ 0.2162,-0.3476, -0.4131,-0.2786, 0.4397,-0.5476, 1.3618, 0.3791, 0.0870,-1.1205],
-        vec![-0.1613, 1.0161, -0.7040,-0.2243,-0.0559, 0.3891,-0.5073, 0.4729, 0.1440,-0.3407],
-        vec![ 0.0516, 0.1965,  0.6048, 0.7213,-0.5534, 0.3248,-0.1098,-1.2456, 0.4319, 0.1012],
-        vec![-0.8547,-0.2256,  0.2893, 0.2490,-0.4065,-0.0572,-0.9133, 0.4128,-0.2097, 0.5714],
+        vec![
+            -0.4917, 0.3557, -0.3465, 0.6218, 1.5722, 1.1409, -0.0960, -0.7693, 0.9757, -0.0737,
+        ],
+        vec![
+            0.2162, -0.3476, -0.4131, -0.2786, 0.4397, -0.5476, 1.3618, 0.3791, 0.0870, -1.1205,
+        ],
+        vec![
+            -0.1613, 1.0161, -0.7040, -0.2243, -0.0559, 0.3891, -0.5073, 0.4729, 0.1440, -0.3407,
+        ],
+        vec![
+            0.0516, 0.1965, 0.6048, 0.7213, -0.5534, 0.3248, -0.1098, -1.2456, 0.4319, 0.1012,
+        ],
+        vec![
+            -0.8547, -0.2256, 0.2893, 0.2490, -0.4065, -0.0572, -0.9133, 0.4128, -0.2097, 0.5714,
+        ],
     ];
 
     let param = make_param(&init_params);
@@ -296,7 +348,12 @@ fn sgd_weight_decay_step_parity() {
         opt.step().unwrap();
         let actual = read_param(&param);
         let expected: Vec<f32> = fvec(&step_fix["params"]);
-        assert_close_vec(&actual, &expected, TOL, &format!("sgd_weight_decay step {}", i + 1));
+        assert_close_vec(
+            &actual,
+            &expected,
+            TOL,
+            &format!("sgd_weight_decay step {}", i + 1),
+        );
     }
 }
 
@@ -319,15 +376,24 @@ fn sgd_dampening_step_parity() {
     let dampening = variant["dampening"].as_f64().unwrap();
 
     let init_params: Vec<f32> = vec![
-        0.3367, 0.1288, 0.2345, 0.2303, -1.1229,
-        -0.1863, 2.2082, -0.6380, 0.4617, 0.2674,
+        0.3367, 0.1288, 0.2345, 0.2303, -1.1229, -0.1863, 2.2082, -0.6380, 0.4617, 0.2674,
     ];
     let grad_steps: Vec<Vec<f32>> = vec![
-        vec![-0.4917, 0.3557, -0.3465, 0.6218, 1.5722, 1.1409, -0.0960, -0.7693, 0.9757, -0.0737],
-        vec![ 0.2162,-0.3476, -0.4131,-0.2786, 0.4397,-0.5476, 1.3618, 0.3791, 0.0870,-1.1205],
-        vec![-0.1613, 1.0161, -0.7040,-0.2243,-0.0559, 0.3891,-0.5073, 0.4729, 0.1440,-0.3407],
-        vec![ 0.0516, 0.1965,  0.6048, 0.7213,-0.5534, 0.3248,-0.1098,-1.2456, 0.4319, 0.1012],
-        vec![-0.8547,-0.2256,  0.2893, 0.2490,-0.4065,-0.0572,-0.9133, 0.4128,-0.2097, 0.5714],
+        vec![
+            -0.4917, 0.3557, -0.3465, 0.6218, 1.5722, 1.1409, -0.0960, -0.7693, 0.9757, -0.0737,
+        ],
+        vec![
+            0.2162, -0.3476, -0.4131, -0.2786, 0.4397, -0.5476, 1.3618, 0.3791, 0.0870, -1.1205,
+        ],
+        vec![
+            -0.1613, 1.0161, -0.7040, -0.2243, -0.0559, 0.3891, -0.5073, 0.4729, 0.1440, -0.3407,
+        ],
+        vec![
+            0.0516, 0.1965, 0.6048, 0.7213, -0.5534, 0.3248, -0.1098, -1.2456, 0.4319, 0.1012,
+        ],
+        vec![
+            -0.8547, -0.2256, 0.2893, 0.2490, -0.4065, -0.0572, -0.9133, 0.4128, -0.2097, 0.5714,
+        ],
     ];
 
     let param = make_param(&init_params);
@@ -340,7 +406,12 @@ fn sgd_dampening_step_parity() {
         opt.step().unwrap();
         let actual = read_param(&param);
         let expected: Vec<f32> = fvec(&step_fix["params"]);
-        assert_close_vec(&actual, &expected, TOL, &format!("sgd_dampening step {}", i + 1));
+        assert_close_vec(
+            &actual,
+            &expected,
+            TOL,
+            &format!("sgd_dampening step {}", i + 1),
+        );
     }
 }
 
@@ -350,18 +421,27 @@ fn sgd_dampening_step_parity() {
 
 fn init_params_f32() -> Vec<f32> {
     vec![
-        0.3367, 0.1288, 0.2345, 0.2303, -1.1229,
-        -0.1863, 2.2082, -0.6380, 0.4617, 0.2674,
+        0.3367, 0.1288, 0.2345, 0.2303, -1.1229, -0.1863, 2.2082, -0.6380, 0.4617, 0.2674,
     ]
 }
 
 fn grad_steps_f32() -> Vec<Vec<f32>> {
     vec![
-        vec![-0.4917, 0.3557, -0.3465, 0.6218, 1.5722, 1.1409, -0.0960, -0.7693, 0.9757, -0.0737],
-        vec![ 0.2162,-0.3476, -0.4131,-0.2786, 0.4397,-0.5476, 1.3618, 0.3791, 0.0870,-1.1205],
-        vec![-0.1613, 1.0161, -0.7040,-0.2243,-0.0559, 0.3891,-0.5073, 0.4729, 0.1440,-0.3407],
-        vec![ 0.0516, 0.1965,  0.6048, 0.7213,-0.5534, 0.3248,-0.1098,-1.2456, 0.4319, 0.1012],
-        vec![-0.8547,-0.2256,  0.2893, 0.2490,-0.4065,-0.0572,-0.9133, 0.4128,-0.2097, 0.5714],
+        vec![
+            -0.4917, 0.3557, -0.3465, 0.6218, 1.5722, 1.1409, -0.0960, -0.7693, 0.9757, -0.0737,
+        ],
+        vec![
+            0.2162, -0.3476, -0.4131, -0.2786, 0.4397, -0.5476, 1.3618, 0.3791, 0.0870, -1.1205,
+        ],
+        vec![
+            -0.1613, 1.0161, -0.7040, -0.2243, -0.0559, 0.3891, -0.5073, 0.4729, 0.1440, -0.3407,
+        ],
+        vec![
+            0.0516, 0.1965, 0.6048, 0.7213, -0.5534, 0.3248, -0.1098, -1.2456, 0.4319, 0.1012,
+        ],
+        vec![
+            -0.8547, -0.2256, 0.2893, 0.2490, -0.4065, -0.0572, -0.9133, 0.4128, -0.2097, 0.5714,
+        ],
     ]
 }
 
@@ -394,7 +474,12 @@ fn adagrad_plain_step_parity() {
         opt.step().unwrap();
         let actual = read_param(&param);
         let expected: Vec<f32> = fvec(&step_fix["params"]);
-        assert_close_vec(&actual, &expected, TOL, &format!("adagrad_plain step {}", i + 1));
+        assert_close_vec(
+            &actual,
+            &expected,
+            TOL,
+            &format!("adagrad_plain step {}", i + 1),
+        );
     }
 }
 
@@ -419,7 +504,10 @@ fn adagrad_lr_decay_step_parity() {
     let grads = grad_steps_f32();
 
     let param = make_param(&init);
-    let config = AdagradConfig::default().with_lr(lr).with_lr_decay(lr_decay).with_eps(eps);
+    let config = AdagradConfig::default()
+        .with_lr(lr)
+        .with_lr_decay(lr_decay)
+        .with_eps(eps);
     let mut opt = Adagrad::new(vec![ParamGroup::new(vec![param.clone()], lr)], config);
 
     let steps = variant["steps"].as_array().unwrap();
@@ -428,7 +516,12 @@ fn adagrad_lr_decay_step_parity() {
         opt.step().unwrap();
         let actual = read_param(&param);
         let expected: Vec<f32> = fvec(&step_fix["params"]);
-        assert_close_vec(&actual, &expected, TOL, &format!("adagrad_lr_decay step {}", i + 1));
+        assert_close_vec(
+            &actual,
+            &expected,
+            TOL,
+            &format!("adagrad_lr_decay step {}", i + 1),
+        );
     }
 }
 
@@ -453,7 +546,10 @@ fn adagrad_weight_decay_step_parity() {
     let grads = grad_steps_f32();
 
     let param = make_param(&init);
-    let config = AdagradConfig::default().with_lr(lr).with_weight_decay(wd).with_eps(eps);
+    let config = AdagradConfig::default()
+        .with_lr(lr)
+        .with_weight_decay(wd)
+        .with_eps(eps);
     let mut opt = Adagrad::new(vec![ParamGroup::new(vec![param.clone()], lr)], config);
 
     let steps = variant["steps"].as_array().unwrap();
@@ -462,7 +558,12 @@ fn adagrad_weight_decay_step_parity() {
         opt.step().unwrap();
         let actual = read_param(&param);
         let expected: Vec<f32> = fvec(&step_fix["params"]);
-        assert_close_vec(&actual, &expected, TOL, &format!("adagrad_wd step {}", i + 1));
+        assert_close_vec(
+            &actual,
+            &expected,
+            TOL,
+            &format!("adagrad_wd step {}", i + 1),
+        );
     }
 }
 
@@ -501,7 +602,12 @@ fn asgd_plain_step_parity() {
         opt.step().unwrap();
         let actual = read_param(&param);
         let expected: Vec<f32> = fvec(&step_fix["params"]);
-        assert_close_vec(&actual, &expected, TOL, &format!("asgd_plain step {}", i + 1));
+        assert_close_vec(
+            &actual,
+            &expected,
+            TOL,
+            &format!("asgd_plain step {}", i + 1),
+        );
     }
 }
 
@@ -584,7 +690,12 @@ fn rprop_plain_step_parity() {
         opt.step().unwrap();
         let actual = read_param(&param);
         let expected: Vec<f32> = fvec(&step_fix["params"]);
-        assert_close_vec(&actual, &expected, TOL, &format!("rprop_plain step {}", i + 1));
+        assert_close_vec(
+            &actual,
+            &expected,
+            TOL,
+            &format!("rprop_plain step {}", i + 1),
+        );
     }
 }
 
@@ -609,7 +720,10 @@ fn rmsprop_plain_step_parity() {
     let grads = grad_steps_f32();
 
     let param = make_param(&init);
-    let config = RmspropConfig::default().with_lr(lr).with_alpha(alpha).with_eps(eps);
+    let config = RmspropConfig::default()
+        .with_lr(lr)
+        .with_alpha(alpha)
+        .with_eps(eps);
     let mut opt = Rmsprop::new(vec![param.clone()], config);
 
     let steps = variant["steps"].as_array().unwrap();
@@ -618,7 +732,12 @@ fn rmsprop_plain_step_parity() {
         opt.step().unwrap();
         let actual = read_param(&param);
         let expected: Vec<f32> = fvec(&step_fix["params"]);
-        assert_close_vec(&actual, &expected, TOL, &format!("rmsprop_plain step {}", i + 1));
+        assert_close_vec(
+            &actual,
+            &expected,
+            TOL,
+            &format!("rmsprop_plain step {}", i + 1),
+        );
     }
 }
 
@@ -656,7 +775,12 @@ fn rmsprop_centered_step_parity() {
         opt.step().unwrap();
         let actual = read_param(&param);
         let expected: Vec<f32> = fvec(&step_fix["params"]);
-        assert_close_vec(&actual, &expected, TOL, &format!("rmsprop_centered step {}", i + 1));
+        assert_close_vec(
+            &actual,
+            &expected,
+            TOL,
+            &format!("rmsprop_centered step {}", i + 1),
+        );
     }
 }
 
@@ -695,7 +819,12 @@ fn rmsprop_momentum_step_parity() {
         opt.step().unwrap();
         let actual = read_param(&param);
         let expected: Vec<f32> = fvec(&step_fix["params"]);
-        assert_close_vec(&actual, &expected, TOL, &format!("rmsprop_momentum step {}", i + 1));
+        assert_close_vec(
+            &actual,
+            &expected,
+            TOL,
+            &format!("rmsprop_momentum step {}", i + 1),
+        );
     }
 }
 
@@ -734,6 +863,11 @@ fn rmsprop_weight_decay_step_parity() {
         opt.step().unwrap();
         let actual = read_param(&param);
         let expected: Vec<f32> = fvec(&step_fix["params"]);
-        assert_close_vec(&actual, &expected, TOL, &format!("rmsprop_wd step {}", i + 1));
+        assert_close_vec(
+            &actual,
+            &expected,
+            TOL,
+            &format!("rmsprop_wd step {}", i + 1),
+        );
     }
 }

@@ -131,8 +131,8 @@
 #![allow(clippy::float_cmp)]
 #![allow(clippy::unreadable_literal)]
 
-use ferrotorch_core::storage::TensorStorage;
 use ferrotorch_core::Tensor;
+use ferrotorch_core::storage::TensorStorage;
 use ferrotorch_nn::conv::{
     Conv1d, Conv2d, Conv3d, ConvTranspose1d, ConvTranspose2d, ConvTranspose3d,
 };
@@ -291,7 +291,12 @@ fn linear_forward_numerical_no_bias() {
     let x = cpu_tensor_f32(&[1.0, 0.0, 0.0, 0.0, 0.0, 1.0], &[2, 3]);
     let out = layer.forward(&x).unwrap();
     assert_eq!(out.shape(), &[2, 2]);
-    assert_close_f32(out.data().unwrap(), &[1.0, 0.0, 0.0, 0.0], 1e-6, "linear_no_bias");
+    assert_close_f32(
+        out.data().unwrap(),
+        &[1.0, 0.0, 0.0, 0.0],
+        1e-6,
+        "linear_no_bias",
+    );
 }
 
 #[test]
@@ -873,7 +878,12 @@ fn embedding_bag_forward_sum() {
 #[test]
 fn embedding_bag_forward_shape() {
     let eb = EmbeddingBag::<f32>::new(8, 4, EmbeddingBagMode::Sum).unwrap();
-    let out = eb.forward_bag(&cpu_tensor_f32(&[0.0, 1.0, 2.0, 3.0, 4.0], &[5]), &[0, 2, 4]).unwrap();
+    let out = eb
+        .forward_bag(
+            &cpu_tensor_f32(&[0.0, 1.0, 2.0, 3.0, 4.0], &[5]),
+            &[0, 2, 4],
+        )
+        .unwrap();
     // 3 bags (offsets [0,2,4] on 5 items -> bags=[0..2), [2..4), [4..5))
     assert_eq!(out.shape(), &[3, 4]);
 }
@@ -911,10 +921,7 @@ fn identity_train_eval() {
 #[test]
 fn flatten_default_batch_preserved() {
     let f = Flatten::default();
-    let x = cpu_tensor_f32(
-        &(0..24).map(|i| i as f32).collect::<Vec<_>>(),
-        &[2, 3, 4],
-    );
+    let x = cpu_tensor_f32(&(0..24).map(|i| i as f32).collect::<Vec<_>>(), &[2, 3, 4]);
     let out: Tensor<f32> = f.forward(&x).unwrap();
     assert_eq!(out.shape(), &[2, 12]);
 }
@@ -949,10 +956,7 @@ fn flatten_start_dim_out_of_range_errors() {
 #[test]
 fn unflatten_basic() {
     let uf = Unflatten::new(1, vec![2, 3]);
-    let x = cpu_tensor_f32(
-        &(0..12).map(|i| i as f32).collect::<Vec<_>>(),
-        &[2, 6],
-    );
+    let x = cpu_tensor_f32(&(0..12).map(|i| i as f32).collect::<Vec<_>>(), &[2, 6]);
     let out: Tensor<f32> = Module::<f32>::forward(&uf, &x).unwrap();
     assert_eq!(out.shape(), &[2, 2, 3]);
 }
@@ -972,7 +976,12 @@ fn channel_shuffle_groups2() {
     let out: Tensor<f32> = Module::<f32>::forward(&cs, &x).unwrap();
     // groups=2: channel order 0,1,2,3 -> 0,2,1,3
     assert_eq!(out.shape(), &[1, 4, 1, 1]);
-    assert_close_f32(out.data().unwrap(), &[1.0, 3.0, 2.0, 4.0], 1e-7, "channel_shuffle");
+    assert_close_f32(
+        out.data().unwrap(),
+        &[1.0, 3.0, 2.0, 4.0],
+        1e-7,
+        "channel_shuffle",
+    );
 }
 
 #[test]
@@ -1070,7 +1079,12 @@ fn constant_pad3d_forward() {
     // last dim 2 + (1+0) = 3
     let out: Tensor<f32> = Module::<f32>::forward(&pad, &x).unwrap();
     assert_eq!(out.shape()[3], 3);
-    assert_close_f32(&out.data().unwrap()[0..1], &[9.0], 1e-7, "constant_pad3d_first");
+    assert_close_f32(
+        &out.data().unwrap()[0..1],
+        &[9.0],
+        1e-7,
+        "constant_pad3d_first",
+    );
 }
 
 #[test]
@@ -1304,7 +1318,12 @@ fn pixel_unshuffle_is_inverse_of_pixel_shuffle() {
     let shuffled: Tensor<f32> = Module::<f32>::forward(&ps, &x).unwrap();
     let recovered: Tensor<f32> = Module::<f32>::forward(&pu, &shuffled).unwrap();
     assert_eq!(recovered.shape(), &[1, 4, 2, 2]);
-    assert_close_f32(recovered.data().unwrap(), &data, 1e-6, "pixel_shuffle_inverse");
+    assert_close_f32(
+        recovered.data().unwrap(),
+        &data,
+        1e-6,
+        "pixel_shuffle_inverse",
+    );
 }
 
 #[test]
@@ -1340,14 +1359,18 @@ fn max_pool2d_basic() {
     let pool = MaxPool2d::new([2, 2], [2, 2], [0, 0]);
     let x = cpu_tensor_f32(
         &[
-            1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0, 13.0, 14.0, 15.0,
-            16.0,
+            1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0, 13.0, 14.0, 15.0, 16.0,
         ],
         &[1, 1, 4, 4],
     );
     let out: Tensor<f32> = Module::<f32>::forward(&pool, &x).unwrap();
     assert_eq!(out.shape(), &[1, 1, 2, 2]);
-    assert_close_f32(out.data().unwrap(), &[6.0, 8.0, 14.0, 16.0], 1e-6, "max_pool2d");
+    assert_close_f32(
+        out.data().unwrap(),
+        &[6.0, 8.0, 14.0, 16.0],
+        1e-6,
+        "max_pool2d",
+    );
 }
 
 #[test]
@@ -1355,8 +1378,7 @@ fn avg_pool2d_basic() {
     let pool = AvgPool2d::new([2, 2], [2, 2], [0, 0]);
     let x = cpu_tensor_f32(
         &[
-            1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0, 13.0, 14.0, 15.0,
-            16.0,
+            1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0, 13.0, 14.0, 15.0, 16.0,
         ],
         &[1, 1, 4, 4],
     );
@@ -1375,8 +1397,7 @@ fn adaptive_avg_pool2d_2x2() {
     let pool = AdaptiveAvgPool2d::new((2, 2));
     let x = cpu_tensor_f32(
         &[
-            1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0, 13.0, 14.0, 15.0,
-            16.0,
+            1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0, 13.0, 14.0, 15.0, 16.0,
         ],
         &[1, 1, 4, 4],
     );
@@ -1429,14 +1450,18 @@ fn adaptive_max_pool2d_basic() {
     let pool = AdaptiveMaxPool2d::new((2, 2));
     let x = cpu_tensor_f32(
         &[
-            1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0, 13.0, 14.0, 15.0,
-            16.0,
+            1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0, 13.0, 14.0, 15.0, 16.0,
         ],
         &[1, 1, 4, 4],
     );
     let out: Tensor<f32> = Module::<f32>::forward(&pool, &x).unwrap();
     assert_eq!(out.shape(), &[1, 1, 2, 2]);
-    assert_close_f32(out.data().unwrap(), &[6.0, 8.0, 14.0, 16.0], 1e-6, "adaptive_max_pool2d");
+    assert_close_f32(
+        out.data().unwrap(),
+        &[6.0, 8.0, 14.0, 16.0],
+        1e-6,
+        "adaptive_max_pool2d",
+    );
 }
 
 #[test]
@@ -1478,7 +1503,9 @@ fn max_unpool2d_forward_with_indices() {
     // MaxPool2d 2x2 on row-major [1..16]: positions 5,7,13,15 (0-indexed)
     let pooled = cpu_tensor_f32(&[6.0, 8.0, 14.0, 16.0], &[1, 1, 2, 2]);
     let indices: &[usize] = &[5, 7, 13, 15];
-    let out = unpool.forward_with_indices(&pooled, indices, (4, 4)).unwrap();
+    let out = unpool
+        .forward_with_indices(&pooled, indices, (4, 4))
+        .unwrap();
     assert_eq!(out.shape(), &[1, 1, 4, 4]);
     let data = out.data().unwrap();
     assert!((data[5] - 6.0).abs() < 1e-6, "unpool at idx 5");
@@ -1516,12 +1543,19 @@ fn lp_pool2d_l2_norm_shape() {
 #[test]
 fn max_pool2d_free_fn() {
     let x = cpu_tensor_f32(
-        &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0, 13.0, 14.0, 15.0, 16.0],
+        &[
+            1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0, 13.0, 14.0, 15.0, 16.0,
+        ],
         &[1, 1, 4, 4],
     );
     let out = max_pool2d::<f32>(&x, [2, 2], [2, 2], [0, 0]).unwrap();
     assert_eq!(out.shape(), &[1, 1, 2, 2]);
-    assert_close_f32(out.data().unwrap(), &[6.0, 8.0, 14.0, 16.0], 1e-6, "max_pool2d_free");
+    assert_close_f32(
+        out.data().unwrap(),
+        &[6.0, 8.0, 14.0, 16.0],
+        1e-6,
+        "max_pool2d_free",
+    );
 }
 
 #[test]
@@ -1549,7 +1583,9 @@ fn avg_pool1d_free_fn() {
 #[test]
 fn avg_pool2d_free_fn() {
     let x = cpu_tensor_f32(
-        &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0, 13.0, 14.0, 15.0, 16.0],
+        &[
+            1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0, 13.0, 14.0, 15.0, 16.0,
+        ],
         &[1, 1, 4, 4],
     );
     let out = avg_pool2d::<f32>(&x, [2, 2], [2, 2], [0, 0]).unwrap();

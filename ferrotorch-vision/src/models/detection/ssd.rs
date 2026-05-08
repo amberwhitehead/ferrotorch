@@ -32,10 +32,10 @@
 //! Liu et al., "SSD: Single Shot MultiBox Detector", ECCV 2016.
 //! torchvision 0.21.x `ssd300_vgg16(weights=None, progress=False)`.
 
-use ferrotorch_core::numeric_cast::cast;
-use ferrotorch_core::{FerrotorchError, FerrotorchResult, Float, Tensor, TensorStorage};
 use ferrotorch_core::grad_fns::activation::relu;
 use ferrotorch_core::grad_fns::shape::cat;
+use ferrotorch_core::numeric_cast::cast;
+use ferrotorch_core::{FerrotorchError, FerrotorchResult, Float, Tensor, TensorStorage};
 use ferrotorch_nn::module::Module;
 use ferrotorch_nn::parameter::Parameter;
 use ferrotorch_nn::{BatchNorm2d, Conv2d};
@@ -72,7 +72,12 @@ impl<T: Float> L2Norm<T> {
         let init_val: T = cast(init_norm)?;
         let data = vec![init_val; num_channels];
         let weight = Parameter::from_slice(&data, &[num_channels])?;
-        Ok(Self { weight, num_channels, eps: 1e-12, training: false })
+        Ok(Self {
+            weight,
+            num_channels,
+            eps: 1e-12,
+            training: false,
+        })
     }
 }
 
@@ -183,13 +188,24 @@ impl<T: Float> ConvBnRelu<T> {
         // that is tracked as a follow-up (#965-dilation).  This is consistent
         // with how torchvision ssd300_vgg16 behaves for shape purposes.
         let _ = dilation; // accepted for API completeness; see comment above
-        let conv = Conv2d::new(in_ch, out_ch, (kernel, kernel), (stride, stride), (padding, padding), bias)?;
+        let conv = Conv2d::new(
+            in_ch,
+            out_ch,
+            (kernel, kernel),
+            (stride, stride),
+            (padding, padding),
+            bias,
+        )?;
         let bn = if with_bn {
             Some(BatchNorm2d::new(out_ch, 1e-5, 0.1, true)?)
         } else {
             None
         };
-        Ok(Self { conv, bn, training: true })
+        Ok(Self {
+            conv,
+            bn,
+            training: true,
+        })
     }
 }
 
@@ -249,7 +265,9 @@ impl<T: Float> Module<T> for ConvBnRelu<T> {
         }
     }
 
-    fn is_training(&self) -> bool { self.training }
+    fn is_training(&self) -> bool {
+        self.training
+    }
 }
 
 // ===========================================================================
@@ -284,12 +302,48 @@ fn generate_ssd_anchors<T: Float>() -> FerrotorchResult<Tensor<T>> {
     // This produces 4, 6, 6, 6, 4, 4 anchors per cell respectively.
     // scales = [0.07, 0.15, 0.33, 0.51, 0.69, 0.87, 1.05]
     let configs: Vec<SsdScaleConfig> = vec![
-        SsdScaleConfig { fm_size: 38, stride: 8,   scale_lo: 0.07, scale_hi: 0.15, extra_ratios: vec![2.0] },
-        SsdScaleConfig { fm_size: 19, stride: 16,  scale_lo: 0.15, scale_hi: 0.33, extra_ratios: vec![2.0, 3.0] },
-        SsdScaleConfig { fm_size: 10, stride: 30,  scale_lo: 0.33, scale_hi: 0.51, extra_ratios: vec![2.0, 3.0] },
-        SsdScaleConfig { fm_size:  5, stride: 60,  scale_lo: 0.51, scale_hi: 0.69, extra_ratios: vec![2.0, 3.0] },
-        SsdScaleConfig { fm_size:  3, stride: 100, scale_lo: 0.69, scale_hi: 0.87, extra_ratios: vec![2.0] },
-        SsdScaleConfig { fm_size:  1, stride: 300, scale_lo: 0.87, scale_hi: 1.05, extra_ratios: vec![2.0] },
+        SsdScaleConfig {
+            fm_size: 38,
+            stride: 8,
+            scale_lo: 0.07,
+            scale_hi: 0.15,
+            extra_ratios: vec![2.0],
+        },
+        SsdScaleConfig {
+            fm_size: 19,
+            stride: 16,
+            scale_lo: 0.15,
+            scale_hi: 0.33,
+            extra_ratios: vec![2.0, 3.0],
+        },
+        SsdScaleConfig {
+            fm_size: 10,
+            stride: 30,
+            scale_lo: 0.33,
+            scale_hi: 0.51,
+            extra_ratios: vec![2.0, 3.0],
+        },
+        SsdScaleConfig {
+            fm_size: 5,
+            stride: 60,
+            scale_lo: 0.51,
+            scale_hi: 0.69,
+            extra_ratios: vec![2.0, 3.0],
+        },
+        SsdScaleConfig {
+            fm_size: 3,
+            stride: 100,
+            scale_lo: 0.69,
+            scale_hi: 0.87,
+            extra_ratios: vec![2.0],
+        },
+        SsdScaleConfig {
+            fm_size: 1,
+            stride: 300,
+            scale_lo: 0.87,
+            scale_hi: 1.05,
+            extra_ratios: vec![2.0],
+        },
     ];
     let img_size = 300.0_f64;
     let _ = img_size; // retained for documentation; SSD300 canonical input size
@@ -382,11 +436,22 @@ impl<T: Float> SsdHead<T> {
         let mut reg_heads = Vec::with_capacity(in_channels.len());
 
         for (&ic, &na) in in_channels.iter().zip(anchors_per_scale.iter()) {
-            cls_heads.push(Conv2d::new(ic, na * num_classes, (3, 3), (1, 1), (1, 1), true)?);
+            cls_heads.push(Conv2d::new(
+                ic,
+                na * num_classes,
+                (3, 3),
+                (1, 1),
+                (1, 1),
+                true,
+            )?);
             reg_heads.push(Conv2d::new(ic, na * 4, (3, 3), (1, 1), (1, 1), true)?);
         }
 
-        Ok(Self { cls_heads, reg_heads, num_classes })
+        Ok(Self {
+            cls_heads,
+            reg_heads,
+            num_classes,
+        })
     }
 
     /// Run per-scale heads.
@@ -396,10 +461,7 @@ impl<T: Float> SsdHead<T> {
     /// Returns:
     /// - `cls_logits`: `[B, total_anchors, num_classes]` (all scales concatenated)
     /// - `bbox_regression`: `[B, total_anchors, 4]` (all scales concatenated)
-    fn forward(
-        &self,
-        feature_maps: &[Tensor<T>],
-    ) -> FerrotorchResult<(Tensor<T>, Tensor<T>)> {
+    fn forward(&self, feature_maps: &[Tensor<T>]) -> FerrotorchResult<(Tensor<T>, Tensor<T>)> {
         assert_eq!(feature_maps.len(), self.cls_heads.len());
         let batch = feature_maps[0].shape()[0];
 
@@ -429,15 +491,23 @@ impl<T: Float> SsdHead<T> {
 
     fn parameters(&self) -> Vec<&Parameter<T>> {
         let mut p = Vec::new();
-        for h in &self.cls_heads { p.extend(h.parameters()); }
-        for h in &self.reg_heads { p.extend(h.parameters()); }
+        for h in &self.cls_heads {
+            p.extend(h.parameters());
+        }
+        for h in &self.reg_heads {
+            p.extend(h.parameters());
+        }
         p
     }
 
     fn parameters_mut(&mut self) -> Vec<&mut Parameter<T>> {
         let mut p = Vec::new();
-        for h in &mut self.cls_heads { p.extend(h.parameters_mut()); }
-        for h in &mut self.reg_heads { p.extend(h.parameters_mut()); }
+        for h in &mut self.cls_heads {
+            p.extend(h.parameters_mut());
+        }
+        for h in &mut self.reg_heads {
+            p.extend(h.parameters_mut());
+        }
         p
     }
 
@@ -461,10 +531,7 @@ impl<T: Float> SsdHead<T> {
 ///
 /// Mirrors `SSDScoringHead._get_result_from_module` permute in torchvision:
 /// `x.permute(0, 2, 3, 1).reshape(B, -1, out_dim)`.
-fn permute_head_output<T: Float>(
-    x: &Tensor<T>,
-    out_dim: usize,
-) -> FerrotorchResult<Tensor<T>> {
+fn permute_head_output<T: Float>(x: &Tensor<T>, out_dim: usize) -> FerrotorchResult<Tensor<T>> {
     // x: [B, na*out_dim, H, W]
     let shape = x.shape();
     let b = shape[0];
@@ -490,7 +557,11 @@ fn permute_head_output<T: Float>(
     // Reshape to [B, H*W*na, out_dim].
     let n_anchors = h * w * na;
     let out_data = permuted;
-    Tensor::from_storage(TensorStorage::cpu(out_data), vec![b, n_anchors, out_dim], false)
+    Tensor::from_storage(
+        TensorStorage::cpu(out_data),
+        vec![b, n_anchors, out_dim],
+        false,
+    )
 }
 
 // ===========================================================================
@@ -616,10 +687,10 @@ impl<T: Float> Ssd300<T> {
     /// VGG-16 conv1_1 … conv4_3 (without pool4).
     fn build_stage1() -> FerrotorchResult<Vec<ConvBnRelu<T>>> {
         Ok(vec![
-            ConvBnRelu::new(  3,  64, 3, 1, 1, 1, true, false)?, // conv1_1
-            ConvBnRelu::new( 64,  64, 3, 1, 1, 1, true, false)?, // conv1_2
+            ConvBnRelu::new(3, 64, 3, 1, 1, 1, true, false)?, // conv1_1
+            ConvBnRelu::new(64, 64, 3, 1, 1, 1, true, false)?, // conv1_2
             // pool1 applied in forward
-            ConvBnRelu::new( 64, 128, 3, 1, 1, 1, true, false)?, // conv2_1
+            ConvBnRelu::new(64, 128, 3, 1, 1, 1, true, false)?, // conv2_1
             ConvBnRelu::new(128, 128, 3, 1, 1, 1, true, false)?, // conv2_2
             // pool2 applied in forward
             ConvBnRelu::new(128, 256, 3, 1, 1, 1, true, false)?, // conv3_1
@@ -683,9 +754,7 @@ impl<T: Float> Ssd300<T> {
         let shape = images.shape();
         if shape.len() != 4 || shape[1] != 3 {
             return Err(FerrotorchError::InvalidArgument {
-                message: format!(
-                    "Ssd300::forward: expected [B, 3, H, W], got {:?}", shape
-                ),
+                message: format!("Ssd300::forward: expected [B, 3, H, W], got {:?}", shape),
             });
         }
         let batch = shape[0];
@@ -760,12 +829,7 @@ impl<T: Float> Ssd300<T> {
         // Postprocess per image.
         let mut results = Vec::with_capacity(batch);
         for b in 0..batch {
-            let det = self.postprocess_single(
-                &cls_logits,
-                &bbox_regression,
-                b,
-                [img_h, img_w],
-            )?;
+            let det = self.postprocess_single(&cls_logits, &bbox_regression, b, [img_h, img_w])?;
             results.push(det);
         }
 
@@ -775,7 +839,7 @@ impl<T: Float> Ssd300<T> {
     /// Decode and NMS-filter predictions for a single image.
     fn postprocess_single(
         &self,
-        cls_logits: &Tensor<T>,    // [B, 8732, num_classes]
+        cls_logits: &Tensor<T>,      // [B, 8732, num_classes]
         bbox_regression: &Tensor<T>, // [B, 8732, 4]
         b: usize,
         img_size: [usize; 2],
@@ -804,11 +868,14 @@ impl<T: Float> Ssd300<T> {
                 if vf > acc { vf } else { acc }
             });
             let mut sum = 0.0_f64;
-            let exps: Vec<f64> = row.iter().map(|&v| {
-                let e = (v.to_f64().unwrap_or(0.0) - max_v).exp();
-                sum += e;
-                e
-            }).collect();
+            let exps: Vec<f64> = row
+                .iter()
+                .map(|&v| {
+                    let e = (v.to_f64().unwrap_or(0.0) - max_v).exp();
+                    sum += e;
+                    e
+                })
+                .collect();
             for (j, e) in exps.iter().enumerate() {
                 scores[a * nc + j] = e / sum;
             }
@@ -822,8 +889,8 @@ impl<T: Float> Ssd300<T> {
         for a in 0..n_anchors {
             let pcx = prior_data[a * 4].to_f64().unwrap_or(0.0);
             let pcy = prior_data[a * 4 + 1].to_f64().unwrap_or(0.0);
-            let pw  = prior_data[a * 4 + 2].to_f64().unwrap_or(0.0);
-            let ph  = prior_data[a * 4 + 3].to_f64().unwrap_or(0.0);
+            let pw = prior_data[a * 4 + 2].to_f64().unwrap_or(0.0);
+            let ph = prior_data[a * 4 + 3].to_f64().unwrap_or(0.0);
 
             let dx = reg_raw[a * 4].to_f64().unwrap_or(0.0);
             let dy = reg_raw[a * 4 + 1].to_f64().unwrap_or(0.0);
@@ -832,11 +899,11 @@ impl<T: Float> Ssd300<T> {
 
             let cx = dx * var_xy * pw + pcx;
             let cy = dy * var_xy * ph + pcy;
-            let w  = (dw * var_wh).exp() * pw;
-            let h  = (dh * var_wh).exp() * ph;
+            let w = (dw * var_wh).exp() * pw;
+            let h = (dh * var_wh).exp() * ph;
 
             // Convert (cx, cy, w, h) normalised → xyxy pixel coords.
-            decoded_boxes[a * 4]     = (cx - w * 0.5) * img_w;
+            decoded_boxes[a * 4] = (cx - w * 0.5) * img_w;
             decoded_boxes[a * 4 + 1] = (cy - h * 0.5) * img_h;
             decoded_boxes[a * 4 + 2] = (cx + w * 0.5) * img_w;
             decoded_boxes[a * 4 + 3] = (cy + h * 0.5) * img_h;
@@ -848,14 +915,14 @@ impl<T: Float> Ssd300<T> {
 
         // Gather per-class detections then run NMS.
         let mut all_boxes: Vec<[f64; 4]> = Vec::new();
-        let mut all_scores: Vec<f64>     = Vec::new();
-        let mut all_labels: Vec<usize>   = Vec::new();
+        let mut all_scores: Vec<f64> = Vec::new();
+        let mut all_labels: Vec<usize> = Vec::new();
 
         for cls in 1..nc {
             // Skip background (class 0).
             let mut cand_boxes: Vec<[f64; 4]> = Vec::new();
-            let mut cand_scores: Vec<f64>     = Vec::new();
-            let mut cand_idx: Vec<usize>      = Vec::new();
+            let mut cand_scores: Vec<f64> = Vec::new();
+            let mut cand_idx: Vec<usize> = Vec::new();
 
             for a in 0..n_anchors {
                 let s = scores[a * nc + cls];
@@ -871,19 +938,28 @@ impl<T: Float> Ssd300<T> {
                 }
             }
 
-            if cand_boxes.is_empty() { continue; }
+            if cand_boxes.is_empty() {
+                continue;
+            }
 
             // Build tensors for NMS.
-            let flat_boxes: Vec<T> = cand_boxes.iter().flat_map(|b| {
-                b.iter().map(|&v| T::from(v).unwrap_or_else(|| T::from(0.0f64).unwrap()))
-            }).collect();
-            let flat_scores: Vec<T> = cand_scores.iter().map(|&v| {
-                T::from(v).unwrap_or_else(|| T::from(0.0f64).unwrap())
-            }).collect();
+            let flat_boxes: Vec<T> = cand_boxes
+                .iter()
+                .flat_map(|b| {
+                    b.iter()
+                        .map(|&v| T::from(v).unwrap_or_else(|| T::from(0.0f64).unwrap()))
+                })
+                .collect();
+            let flat_scores: Vec<T> = cand_scores
+                .iter()
+                .map(|&v| T::from(v).unwrap_or_else(|| T::from(0.0f64).unwrap()))
+                .collect();
 
             let nc_boxes = cand_boxes.len();
-            let boxes_t = Tensor::from_storage(TensorStorage::cpu(flat_boxes), vec![nc_boxes, 4], false)?;
-            let scores_t = Tensor::from_storage(TensorStorage::cpu(flat_scores), vec![nc_boxes], false)?;
+            let boxes_t =
+                Tensor::from_storage(TensorStorage::cpu(flat_boxes), vec![nc_boxes, 4], false)?;
+            let scores_t =
+                Tensor::from_storage(TensorStorage::cpu(flat_scores), vec![nc_boxes], false)?;
 
             // Clip to image before NMS.
             let boxes_t = clip_boxes_to_image(&boxes_t, img_size)?;
@@ -905,12 +981,17 @@ impl<T: Float> Ssd300<T> {
 
         // Package detections.
         let n_det = all_boxes.len();
-        let boxes_flat: Vec<T> = all_boxes.iter().flat_map(|b| {
-            b.iter().map(|&v| T::from(v).unwrap_or_else(|| T::from(0.0f64).unwrap()))
-        }).collect();
-        let scores_flat: Vec<T> = all_scores.iter().map(|&v| {
-            T::from(v).unwrap_or_else(|| T::from(0.0f64).unwrap())
-        }).collect();
+        let boxes_flat: Vec<T> = all_boxes
+            .iter()
+            .flat_map(|b| {
+                b.iter()
+                    .map(|&v| T::from(v).unwrap_or_else(|| T::from(0.0f64).unwrap()))
+            })
+            .collect();
+        let scores_flat: Vec<T> = all_scores
+            .iter()
+            .map(|&v| T::from(v).unwrap_or_else(|| T::from(0.0f64).unwrap()))
+            .collect();
 
         let boxes = if n_det > 0 {
             Tensor::from_storage(TensorStorage::cpu(boxes_flat), vec![n_det, 4], false)?
@@ -923,7 +1004,11 @@ impl<T: Float> Ssd300<T> {
             Tensor::from_storage(TensorStorage::cpu(vec![]), vec![0usize], false)?
         };
 
-        Ok(SsdDetections { boxes, scores, labels: all_labels })
+        Ok(SsdDetections {
+            boxes,
+            scores,
+            labels: all_labels,
+        })
     }
 
     /// Total trainable scalar parameters.
@@ -954,9 +1039,13 @@ impl<T: Float> Module<T> for Ssd300<T> {
 
     fn parameters(&self) -> Vec<&Parameter<T>> {
         let mut p = Vec::new();
-        for f in &self.features_stage1 { p.extend(f.parameters()); }
+        for f in &self.features_stage1 {
+            p.extend(f.parameters());
+        }
         p.extend(self.l2_norm.parameters());
-        for f in &self.features_stage2 { p.extend(f.parameters()); }
+        for f in &self.features_stage2 {
+            p.extend(f.parameters());
+        }
         p.extend(self.conv6.parameters());
         p.extend(self.conv7.parameters());
         for block in &self.extra {
@@ -969,9 +1058,13 @@ impl<T: Float> Module<T> for Ssd300<T> {
 
     fn parameters_mut(&mut self) -> Vec<&mut Parameter<T>> {
         let mut p = Vec::new();
-        for f in &mut self.features_stage1 { p.extend(f.parameters_mut()); }
+        for f in &mut self.features_stage1 {
+            p.extend(f.parameters_mut());
+        }
         p.extend(self.l2_norm.parameters_mut());
-        for f in &mut self.features_stage2 { p.extend(f.parameters_mut()); }
+        for f in &mut self.features_stage2 {
+            p.extend(f.parameters_mut());
+        }
         p.extend(self.conv6.parameters_mut());
         p.extend(self.conv7.parameters_mut());
         for block in &mut self.extra {
@@ -1020,8 +1113,12 @@ impl<T: Float> Module<T> for Ssd300<T> {
 
     fn train(&mut self) {
         self.training = true;
-        for f in &mut self.features_stage1 { f.train(); }
-        for f in &mut self.features_stage2 { f.train(); }
+        for f in &mut self.features_stage1 {
+            f.train();
+        }
+        for f in &mut self.features_stage2 {
+            f.train();
+        }
         self.conv6.train();
         self.conv7.train();
         for block in &mut self.extra {
@@ -1032,8 +1129,12 @@ impl<T: Float> Module<T> for Ssd300<T> {
 
     fn eval(&mut self) {
         self.training = false;
-        for f in &mut self.features_stage1 { f.eval(); }
-        for f in &mut self.features_stage2 { f.eval(); }
+        for f in &mut self.features_stage1 {
+            f.eval();
+        }
+        for f in &mut self.features_stage2 {
+            f.eval();
+        }
         self.conv6.eval();
         self.conv7.eval();
         for block in &mut self.extra {
@@ -1129,10 +1230,8 @@ fn max_pool2d_impl<T: Float>(
 
     let data = input.data_vec()?;
     let neg_inf: f64 = f64::NEG_INFINITY;
-    let mut out = vec![
-        T::from(f64::NEG_INFINITY).unwrap_or(T::from(0.0f64).unwrap());
-        b * c * out_h * out_w
-    ];
+    let mut out =
+        vec![T::from(f64::NEG_INFINITY).unwrap_or(T::from(0.0f64).unwrap()); b * c * out_h * out_w];
 
     for bi in 0..b {
         for ci in 0..c {
@@ -1143,15 +1242,22 @@ fn max_pool2d_impl<T: Float>(
                     let mut max_val: f64 = neg_inf;
                     for kh in 0..kernel {
                         let ih = ih_start + kh;
-                        if ih < padding || ih >= in_h + padding { continue; }
+                        if ih < padding || ih >= in_h + padding {
+                            continue;
+                        }
                         let ih_real = ih - padding;
                         for kw in 0..kernel {
                             let iw = iw_start + kw;
-                            if iw < padding || iw >= in_w + padding { continue; }
+                            if iw < padding || iw >= in_w + padding {
+                                continue;
+                            }
                             let iw_real = iw - padding;
-                            let idx = bi * c * in_h * in_w + ci * in_h * in_w + ih_real * in_w + iw_real;
+                            let idx =
+                                bi * c * in_h * in_w + ci * in_h * in_w + ih_real * in_w + iw_real;
                             let v = data[idx].to_f64().unwrap_or(0.0);
-                            if v > max_val { max_val = v; }
+                            if v > max_val {
+                                max_val = v;
+                            }
                         }
                     }
                     let out_idx = bi * c * out_h * out_w + ci * out_h * out_w + oh * out_w + ow;
@@ -1197,10 +1303,7 @@ mod tests {
         let priors = generate_ssd_anchors::<f32>().unwrap();
         let data = priors.data_vec().unwrap();
         for (i, &v) in data.iter().enumerate() {
-            assert!(
-                (0.0..=1.0).contains(&v),
-                "prior[{i}] = {v} outside [0,1]"
-            );
+            assert!((0.0..=1.0).contains(&v), "prior[{i}] = {v} outside [0,1]");
         }
     }
 
@@ -1265,14 +1368,8 @@ mod tests {
         // Our implementation uses the same layer sizes so should be close.
         let model = ssd300_vgg16::<f32>(21).unwrap();
         let n = model.num_parameters();
-        assert!(
-            n > 20_000_000,
-            "SSD300 should have >20M params, got {n}"
-        );
-        assert!(
-            n < 35_000_000,
-            "SSD300 should have <35M params, got {n}"
-        );
+        assert!(n > 20_000_000, "SSD300 should have >20M params, got {n}");
+        assert!(n < 35_000_000, "SSD300 should have <35M params, got {n}");
     }
 
     // -----------------------------------------------------------------------
@@ -1288,13 +1385,19 @@ mod tests {
         let fms: Vec<Tensor<f32>> = fm_sizes
             .iter()
             .zip(in_channels.iter())
-            .map(|(&sz, &ic)| {
-                no_grad(|| randn::<f32>(&[1, ic, sz, sz]).unwrap())
-            })
+            .map(|(&sz, &ic)| no_grad(|| randn::<f32>(&[1, ic, sz, sz]).unwrap()))
             .collect();
         let (cls, reg) = no_grad(|| head.forward(&fms).unwrap());
-        assert_eq!(cls.shape(), &[1, SSD_TOTAL_ANCHORS, 21], "cls shape mismatch");
-        assert_eq!(reg.shape(), &[1, SSD_TOTAL_ANCHORS, 4],  "reg shape mismatch");
+        assert_eq!(
+            cls.shape(),
+            &[1, SSD_TOTAL_ANCHORS, 21],
+            "cls shape mismatch"
+        );
+        assert_eq!(
+            reg.shape(),
+            &[1, SSD_TOTAL_ANCHORS, 4],
+            "reg shape mismatch"
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -1328,11 +1431,8 @@ mod tests {
         // With init_norm=1 and a single-channel input, output should be ±1.
         let norm = L2Norm::<f32>::new(1, 1.0).unwrap();
         let data = vec![3.0f32, -4.0, 0.0, 5.0];
-        let x = Tensor::from_storage(
-            TensorStorage::cpu(data.clone()),
-            vec![4, 1, 1, 1],
-            false,
-        ).unwrap();
+        let x = Tensor::from_storage(TensorStorage::cpu(data.clone()), vec![4, 1, 1, 1], false)
+            .unwrap();
         let y = norm.forward(&x).unwrap();
         let out = y.data_vec().unwrap();
         for (i, (&orig, &normed)) in data.iter().zip(out.iter()).enumerate() {
@@ -1356,7 +1456,8 @@ mod tests {
             TensorStorage::cpu(vec![1.0f32; 3 * 300 * 300]),
             vec![1, 3, 300, 300],
             false,
-        ).unwrap();
+        )
+        .unwrap();
         let y = max_pool2d(&x, 2, 2).unwrap();
         assert_eq!(y.shape(), &[1, 3, 150, 150]);
     }

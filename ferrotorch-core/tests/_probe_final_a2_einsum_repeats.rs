@@ -28,10 +28,10 @@
 
 use std::sync::Once;
 
+use ferrotorch_core::Device;
 use ferrotorch_core::einsum::einsum;
 use ferrotorch_core::storage::TensorStorage;
 use ferrotorch_core::tensor::Tensor;
-use ferrotorch_core::Device;
 
 const F32_MATMUL_GPU: f32 = 1e-3;
 const F64_MATMUL_GPU: f64 = 1e-9;
@@ -60,11 +60,19 @@ fn upload_f64(t: Tensor<f64>) -> Tensor<f64> {
 }
 
 fn read_f32(t: &Tensor<f32>) -> Vec<f32> {
-    let cpu = if t.is_cuda() { t.cpu().unwrap() } else { t.clone() };
+    let cpu = if t.is_cuda() {
+        t.cpu().unwrap()
+    } else {
+        t.clone()
+    };
     cpu.data().unwrap().to_vec()
 }
 fn read_f64(t: &Tensor<f64>) -> Vec<f64> {
-    let cpu = if t.is_cuda() { t.cpu().unwrap() } else { t.clone() };
+    let cpu = if t.is_cuda() {
+        t.cpu().unwrap()
+    } else {
+        t.clone()
+    };
     cpu.data().unwrap().to_vec()
 }
 

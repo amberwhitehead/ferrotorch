@@ -249,8 +249,8 @@ fn fixture_file_covers_every_case() {
 #[test]
 fn script_two_arg_weighted_sum_f32() {
     let file = load_fixtures();
-    let fx = fixtures_for(&file, "two_arg_weighted_sum_f32")
-        .expect("fixture two_arg_weighted_sum_f32");
+    let fx =
+        fixtures_for(&file, "two_arg_weighted_sum_f32").expect("fixture two_arg_weighted_sum_f32");
     assert_eq!(fx.op, "script");
     assert!(fx.cascade_skip.is_none(), "unexpected cascade_skip");
 
@@ -280,12 +280,8 @@ fn script_three_arg_add_f32() {
     let input_c = fx.input_c.as_deref().expect("input_c");
     let expected = fx.expected_output.as_deref().expect("expected_output");
 
-    let module: TracedModule<f32> = cs_three_arg_add(
-        t1d_f32(input_a),
-        t1d_f32(input_b),
-        t1d_f32(input_c),
-    )
-    .unwrap();
+    let module: TracedModule<f32> =
+        cs_three_arg_add(t1d_f32(input_a), t1d_f32(input_b), t1d_f32(input_c)).unwrap();
     let result = module
         .forward_multi(&[t1d_f32(input_a), t1d_f32(input_b), t1d_f32(input_c)])
         .unwrap();
@@ -373,14 +369,17 @@ fn script_module_reuse_f32() {
         .expect("expected_output_second");
 
     // Build once using the first inputs.
-    let module: TracedModule<f32> =
-        cs_weighted_sum(t1d_f32(a_first), t1d_f32(w_first)).unwrap();
+    let module: TracedModule<f32> = cs_weighted_sum(t1d_f32(a_first), t1d_f32(w_first)).unwrap();
 
     // First call.
     let r1 = module
         .forward_multi(&[t1d_f32(a_first), t1d_f32(w_first)])
         .unwrap();
-    assert_close_f32(r1.data().expect("r1 data"), exp_first, "module_reuse first call");
+    assert_close_f32(
+        r1.data().expect("r1 data"),
+        exp_first,
+        "module_reuse first call",
+    );
 
     // Second call with different inputs — same module.
     let r2 = module
@@ -401,12 +400,17 @@ fn script_module_reuse_f32() {
 #[test]
 fn script_error_cases_are_cascade_skipped_in_fixtures() {
     let file = load_fixtures();
-    let spec_only_cases = ["unrecognized_return_type_emits_compile_error",
-        "missing_return_type_emits_compile_error"];
+    let spec_only_cases = [
+        "unrecognized_return_type_emits_compile_error",
+        "missing_return_type_emits_compile_error",
+    ];
     for case_name in spec_only_cases {
         let fx = fixtures_for(&file, case_name)
             .unwrap_or_else(|| panic!("missing fixture for spec-only case {case_name:?}"));
-        assert_eq!(fx.op, "script_error", "{case_name}: expected op=script_error");
+        assert_eq!(
+            fx.op, "script_error",
+            "{case_name}: expected op=script_error"
+        );
         let skip = fx.cascade_skip.as_deref().unwrap_or_else(|| {
             panic!(
                 "{case_name}: spec-only fixture must have cascade_skip set; \

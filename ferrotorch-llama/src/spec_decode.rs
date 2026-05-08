@@ -71,9 +71,7 @@ impl<T: Float> ModelHandle<T> for LlamaHandle<'_, T> {
         let shape = logits_tensor.shape();
         if shape.len() != 3 {
             return Err(FerrotorchError::InvalidArgument {
-                message: format!(
-                    "spec_decode: expected logits shape [1, S, V], got {shape:?}"
-                ),
+                message: format!("spec_decode: expected logits shape [1, S, V], got {shape:?}"),
             });
         }
         let seq_len = shape[1];
@@ -286,11 +284,7 @@ pub fn speculative_decode<T: Float>(
             target_probs.push(probs);
         }
         // Bonus target distribution at position K: after seeing all K draft tokens.
-        let prefix_k: Vec<u32> = context
-            .iter()
-            .chain(draft_tokens.iter())
-            .copied()
-            .collect();
+        let prefix_k: Vec<u32> = context.iter().chain(draft_tokens.iter()).copied().collect();
         let logits_k = target.forward_ids(&prefix_k)?;
         let probs_k = softmax_f64(&logits_k);
         target_probs.push(probs_k);
@@ -646,8 +640,7 @@ mod tests {
         let draft = FakeModel { v: 32 };
         let target = FakeModel { v: 64 };
         let cfg = SpecDecodeConfig::default();
-        let err =
-            speculative_decode::<f32>(&draft, &target, &[1u32, 2], &cfg).unwrap_err();
+        let err = speculative_decode::<f32>(&draft, &target, &[1u32, 2], &cfg).unwrap_err();
         assert!(
             matches!(err, FerrotorchError::InvalidArgument { .. }),
             "expected InvalidArgument, got {err:?}"

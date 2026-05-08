@@ -982,11 +982,7 @@ pub trait GpuBackend: Send + Sync {
 
     /// ReLU activation: bf16 input (u16) -> f32 output.
     /// `out[i] = max(0.0, bf16_to_f32(a[i]))`.
-    fn relu_bf16_f32(
-        &self,
-        _a: &GpuBufferHandle,
-        _n: usize,
-    ) -> FerrotorchResult<GpuBufferHandle> {
+    fn relu_bf16_f32(&self, _a: &GpuBufferHandle, _n: usize) -> FerrotorchResult<GpuBufferHandle> {
         Err(FerrotorchError::InvalidArgument {
             message: "relu_bf16_f32 GPU op not implemented for this backend".into(),
         })

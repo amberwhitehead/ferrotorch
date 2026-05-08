@@ -78,10 +78,17 @@ fn read_inventory() -> SurfaceInventory {
         fs::read_to_string(&p).unwrap_or_else(|e| panic!("read {} failed: {e}", p.display()));
     let raw: toml::Value =
         toml::from_str(&body).unwrap_or_else(|e| panic!("parse {}: {e}", p.display()));
-    let items_val = raw.get("item").expect("_surface_inventory.toml: missing [[item]] array");
-    let items: Vec<SurfaceItem> =
-        items_val.clone().try_into().unwrap_or_else(|e| panic!("deserialize items: {e}"));
-    SurfaceInventory { crate_name: None, items }
+    let items_val = raw
+        .get("item")
+        .expect("_surface_inventory.toml: missing [[item]] array");
+    let items: Vec<SurfaceItem> = items_val
+        .clone()
+        .try_into()
+        .unwrap_or_else(|e| panic!("deserialize items: {e}"));
+    SurfaceInventory {
+        crate_name: None,
+        items,
+    }
 }
 
 fn read_exclusions() -> Vec<Exclusion> {
@@ -89,8 +96,7 @@ fn read_exclusions() -> Vec<Exclusion> {
     if !p.exists() {
         return Vec::new();
     }
-    let body =
-        fs::read_to_string(&p).unwrap_or_else(|e| panic!("read {}: {e}", p.display()));
+    let body = fs::read_to_string(&p).unwrap_or_else(|e| panic!("read {}: {e}", p.display()));
     let parsed: ExclusionsFile =
         toml::from_str(&body).unwrap_or_else(|e| panic!("parse {}: {e}", p.display()));
     parsed.exclusions
@@ -118,8 +124,8 @@ fn read_conformance_test_sources() -> String {
         if path.extension().and_then(|s| s.to_str()) != Some("rs") {
             continue;
         }
-        let body = fs::read_to_string(&path)
-            .unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
+        let body =
+            fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
         combined.push_str(&body);
         combined.push('\n');
     }
@@ -200,8 +206,7 @@ fn tracking_issue_valid(s: &str) -> bool {
     {
         return false;
     }
-    let hash_form =
-        s.starts_with('#') && s[1..].chars().all(|c| c.is_ascii_digit()) && s.len() > 1;
+    let hash_form = s.starts_with('#') && s[1..].chars().all(|c| c.is_ascii_digit()) && s.len() > 1;
     let url_form = s.starts_with("http://") || s.starts_with("https://");
     hash_form || url_form
 }

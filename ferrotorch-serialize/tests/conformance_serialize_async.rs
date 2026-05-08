@@ -131,7 +131,11 @@ fn async_save_wait_load_round_trip() {
     );
 
     let b = &loaded.model_state["fc.bias"];
-    assert_eq!(b.data().unwrap(), &[0.5_f32, -0.5], "fc.bias values mismatch");
+    assert_eq!(
+        b.data().unwrap(),
+        &[0.5_f32, -0.5],
+        "fc.bias values mismatch"
+    );
 }
 
 /// AsyncCheckpointer preserves optimizer state across a save/load cycle.
@@ -153,7 +157,11 @@ fn async_save_preserves_optimizer_state() {
 
     let opt = &loaded.optimizer_state["layer.weight"];
     assert_eq!(opt["m"], vec![0.1, 0.2, 0.3, 0.4], "optimizer m mismatch");
-    assert_eq!(opt["v"], vec![0.01, 0.02, 0.03, 0.04], "optimizer v mismatch");
+    assert_eq!(
+        opt["v"],
+        vec![0.01, 0.02, 0.03, 0.04],
+        "optimizer v mismatch"
+    );
 }
 
 /// Multiple sequential saves each produce a correct checkpoint file.
@@ -185,9 +193,13 @@ fn async_reuse_saver_for_two_saves() {
 
     let mut saver = AsyncCheckpointer::new();
 
-    saver.save(minimal_checkpoint(7, 700), path_a.clone()).unwrap();
+    saver
+        .save(minimal_checkpoint(7, 700), path_a.clone())
+        .unwrap();
     // The second call to save() blocks until the first completes.
-    saver.save(minimal_checkpoint(8, 800), path_b.clone()).unwrap();
+    saver
+        .save(minimal_checkpoint(8, 800), path_b.clone())
+        .unwrap();
     saver.wait().unwrap();
 
     let a: TrainingCheckpoint<f32> = load_checkpoint(&path_a).unwrap();
@@ -208,7 +220,9 @@ fn async_reuse_saver_for_two_saves() {
 fn async_wait_when_no_save_in_progress_returns_ok() {
     let mut saver = AsyncCheckpointer::new();
     // No save started — wait should succeed immediately.
-    saver.wait().expect("wait() with no in-flight save must return Ok(())");
+    saver
+        .wait()
+        .expect("wait() with no in-flight save must return Ok(())");
     assert!(!saver.is_saving(), "is_saving must be false after wait()");
 }
 

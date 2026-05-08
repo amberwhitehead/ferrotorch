@@ -304,12 +304,7 @@ fn gpu_broadcast_bmm_f32_matches_cpu() {
         );
 
         let got = read_back_f32(&y);
-        assert_eq!(
-            got.len(),
-            want.len(),
-            "case {}: numel mismatch",
-            case.name
-        );
+        assert_eq!(got.len(), want.len(), "case {}: numel mismatch", case.name);
         for (i, (&g, &w)) in got.iter().zip(want.iter()).enumerate() {
             let d = (g - w).abs();
             assert!(
@@ -378,7 +373,12 @@ fn gpu_broadcast_bmm_f64_matches_cpu() {
             case.name
         );
         let got = read_back_f64(&y);
-        assert_eq!(got.len(), want.len(), "case {} f64: numel mismatch", case.name);
+        assert_eq!(
+            got.len(),
+            want.len(),
+            "case {} f64: numel mismatch",
+            case.name
+        );
         let gate = F64_MATMUL_GPU.max(1e-12 * (case.k as f64).max(1.0));
         for (i, (&g, &w)) in got.iter().zip(want.iter()).enumerate() {
             let d = (g - w).abs();

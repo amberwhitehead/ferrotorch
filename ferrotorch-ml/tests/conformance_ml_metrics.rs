@@ -21,15 +21,15 @@ use std::path::PathBuf;
 
 use ferrotorch_core::{Tensor, TensorStorage};
 use ferrotorch_ml::metrics::{
-    accuracy_score, adjusted_mutual_info_score, adjusted_rand_score, average_precision_score,
-    balanced_accuracy_score, brier_score_loss, calinski_harabasz_score, cohen_kappa_score,
-    completeness_score, confusion_matrix, coverage_error, d2_brier_score, davies_bouldin_score,
-    dcg_score, explained_variance_score, f1_score, fowlkes_mallows_score, hamming_loss,
-    homogeneity_score, label_ranking_average_precision_score, label_ranking_loss, log_loss,
-    matthews_corrcoef, max_error, mean_absolute_error, mean_absolute_percentage_error,
+    Average, accuracy_score, adjusted_mutual_info_score, adjusted_rand_score,
+    average_precision_score, balanced_accuracy_score, brier_score_loss, calinski_harabasz_score,
+    cohen_kappa_score, completeness_score, confusion_matrix, coverage_error, d2_brier_score,
+    davies_bouldin_score, dcg_score, explained_variance_score, f1_score, fowlkes_mallows_score,
+    hamming_loss, homogeneity_score, label_ranking_average_precision_score, label_ranking_loss,
+    log_loss, matthews_corrcoef, max_error, mean_absolute_error, mean_absolute_percentage_error,
     mean_squared_error, median_absolute_error, ndcg_score, normalized_mutual_info_score,
     precision_score, r2_score, recall_score, roc_auc_score, root_mean_squared_error,
-    silhouette_score, top_k_accuracy_score, v_measure_score, zero_one_loss, Average,
+    silhouette_score, top_k_accuracy_score, v_measure_score, zero_one_loss,
 };
 use serde::Deserialize;
 
@@ -89,10 +89,8 @@ fn expected_f64(f: &Fixture) -> f64 {
 
 /// Extract `expected` as `Vec<Vec<usize>>` (for confusion_matrix).
 fn expected_cm(f: &Fixture) -> Vec<Vec<usize>> {
-    serde_json::from_value(
-        f.expected.as_ref().expect("expected field missing").clone(),
-    )
-    .expect("expected field is not a Vec<Vec<usize>>")
+    serde_json::from_value(f.expected.as_ref().expect("expected field missing").clone())
+        .expect("expected field is not a Vec<Vec<usize>>")
 }
 
 /// Extract a flat `Vec<f64>` from a 1-D JSON array field.
@@ -100,7 +98,10 @@ fn as_f64_vec(v: &serde_json::Value, label: &str) -> Vec<f64> {
     v.as_array()
         .unwrap_or_else(|| panic!("{label}: expected JSON array"))
         .iter()
-        .map(|x| x.as_f64().unwrap_or_else(|| panic!("{label}: expected f64 element, got {x}")))
+        .map(|x| {
+            x.as_f64()
+                .unwrap_or_else(|| panic!("{label}: expected f64 element, got {x}"))
+        })
         .collect()
 }
 
@@ -197,7 +198,10 @@ fn r2_score_matches_sklearn() {
 fn r2_score_perfect_is_one() {
     let file = load_fixtures();
     let f = find(&file, "r2_score_perfect");
-    let y = tensor1d(&as_f64_vec(f.y_true.as_ref().expect("y_true"), "r2_perfect/y_true"));
+    let y = tensor1d(&as_f64_vec(
+        f.y_true.as_ref().expect("y_true"),
+        "r2_perfect/y_true",
+    ));
     let actual = r2_score(&y, &y).expect("r2_score_perfect");
     check_f64(actual, 1.0, 1e-12, "r2_score_perfect");
 }
@@ -206,8 +210,14 @@ fn r2_score_perfect_is_one() {
 fn r2_score_constant_baseline_is_zero() {
     let file = load_fixtures();
     let f = find(&file, "r2_score_constant_baseline");
-    let yt = tensor1d(&as_f64_vec(f.y_true.as_ref().expect("y_true"), "r2_const/y_true"));
-    let yp = tensor1d(&as_f64_vec(f.y_pred.as_ref().expect("y_pred"), "r2_const/y_pred"));
+    let yt = tensor1d(&as_f64_vec(
+        f.y_true.as_ref().expect("y_true"),
+        "r2_const/y_true",
+    ));
+    let yp = tensor1d(&as_f64_vec(
+        f.y_pred.as_ref().expect("y_pred"),
+        "r2_const/y_pred",
+    ));
     let actual = r2_score(&yt, &yp).expect("r2_constant");
     check_f64(actual, 0.0, 1e-12, "r2_score_constant_baseline");
 }
@@ -216,8 +226,14 @@ fn r2_score_constant_baseline_is_zero() {
 fn mean_squared_error_matches_sklearn() {
     let file = load_fixtures();
     let f = find(&file, "mean_squared_error");
-    let yt = tensor1d(&as_f64_vec(f.y_true.as_ref().expect("y_true"), "mse/y_true"));
-    let yp = tensor1d(&as_f64_vec(f.y_pred.as_ref().expect("y_pred"), "mse/y_pred"));
+    let yt = tensor1d(&as_f64_vec(
+        f.y_true.as_ref().expect("y_true"),
+        "mse/y_true",
+    ));
+    let yp = tensor1d(&as_f64_vec(
+        f.y_pred.as_ref().expect("y_pred"),
+        "mse/y_pred",
+    ));
     let actual = mean_squared_error(&yt, &yp).expect("mse");
     check_f64(actual, expected_f64(&f), f.tol.unwrap_or(1e-9), "mse");
 }
@@ -226,7 +242,10 @@ fn mean_squared_error_matches_sklearn() {
 fn mean_squared_error_perfect_is_zero() {
     let file = load_fixtures();
     let f = find(&file, "mean_squared_error_perfect");
-    let y = tensor1d(&as_f64_vec(f.y_true.as_ref().expect("y_true"), "mse_perfect/y_true"));
+    let y = tensor1d(&as_f64_vec(
+        f.y_true.as_ref().expect("y_true"),
+        "mse_perfect/y_true",
+    ));
     let actual = mean_squared_error(&y, &y).expect("mse_perfect");
     check_f64(actual, 0.0, 1e-12, "mse_perfect");
 }
@@ -235,8 +254,14 @@ fn mean_squared_error_perfect_is_zero() {
 fn root_mean_squared_error_matches_sklearn() {
     let file = load_fixtures();
     let f = find(&file, "root_mean_squared_error");
-    let yt = tensor1d(&as_f64_vec(f.y_true.as_ref().expect("y_true"), "rmse/y_true"));
-    let yp = tensor1d(&as_f64_vec(f.y_pred.as_ref().expect("y_pred"), "rmse/y_pred"));
+    let yt = tensor1d(&as_f64_vec(
+        f.y_true.as_ref().expect("y_true"),
+        "rmse/y_true",
+    ));
+    let yp = tensor1d(&as_f64_vec(
+        f.y_pred.as_ref().expect("y_pred"),
+        "rmse/y_pred",
+    ));
     let actual = root_mean_squared_error(&yt, &yp).expect("rmse");
     check_f64(actual, expected_f64(&f), f.tol.unwrap_or(1e-9), "rmse");
 }
@@ -245,7 +270,10 @@ fn root_mean_squared_error_matches_sklearn() {
 fn root_mean_squared_error_perfect_is_zero() {
     let file = load_fixtures();
     let f = find(&file, "root_mean_squared_error_perfect");
-    let y = tensor1d(&as_f64_vec(f.y_true.as_ref().expect("y_true"), "rmse_perfect/y_true"));
+    let y = tensor1d(&as_f64_vec(
+        f.y_true.as_ref().expect("y_true"),
+        "rmse_perfect/y_true",
+    ));
     let actual = root_mean_squared_error(&y, &y).expect("rmse_perfect");
     check_f64(actual, 0.0, 1e-12, "rmse_perfect");
 }
@@ -254,8 +282,14 @@ fn root_mean_squared_error_perfect_is_zero() {
 fn mean_absolute_error_matches_sklearn() {
     let file = load_fixtures();
     let f = find(&file, "mean_absolute_error");
-    let yt = tensor1d(&as_f64_vec(f.y_true.as_ref().expect("y_true"), "mae/y_true"));
-    let yp = tensor1d(&as_f64_vec(f.y_pred.as_ref().expect("y_pred"), "mae/y_pred"));
+    let yt = tensor1d(&as_f64_vec(
+        f.y_true.as_ref().expect("y_true"),
+        "mae/y_true",
+    ));
+    let yp = tensor1d(&as_f64_vec(
+        f.y_pred.as_ref().expect("y_pred"),
+        "mae/y_pred",
+    ));
     let actual = mean_absolute_error(&yt, &yp).expect("mae");
     check_f64(actual, expected_f64(&f), f.tol.unwrap_or(1e-9), "mae");
 }
@@ -264,7 +298,10 @@ fn mean_absolute_error_matches_sklearn() {
 fn mean_absolute_error_perfect_is_zero() {
     let file = load_fixtures();
     let f = find(&file, "mean_absolute_error_perfect");
-    let y = tensor1d(&as_f64_vec(f.y_true.as_ref().expect("y_true"), "mae_perfect/y_true"));
+    let y = tensor1d(&as_f64_vec(
+        f.y_true.as_ref().expect("y_true"),
+        "mae_perfect/y_true",
+    ));
     let actual = mean_absolute_error(&y, &y).expect("mae_perfect");
     check_f64(actual, 0.0, 1e-12, "mae_perfect");
 }
@@ -275,8 +312,14 @@ fn mean_absolute_error_perfect_is_zero() {
 fn mean_absolute_percentage_error_matches_sklearn() {
     let file = load_fixtures();
     let f = find(&file, "mean_absolute_percentage_error");
-    let yt = tensor1d(&as_f64_vec(f.y_true.as_ref().expect("y_true"), "mape/y_true"));
-    let yp = tensor1d(&as_f64_vec(f.y_pred.as_ref().expect("y_pred"), "mape/y_pred"));
+    let yt = tensor1d(&as_f64_vec(
+        f.y_true.as_ref().expect("y_true"),
+        "mape/y_true",
+    ));
+    let yp = tensor1d(&as_f64_vec(
+        f.y_pred.as_ref().expect("y_pred"),
+        "mape/y_pred",
+    ));
     let actual = mean_absolute_percentage_error(&yt, &yp).expect("mape");
     check_f64(actual, expected_f64(&f), f.tol.unwrap_or(1e-9), "mape");
 }
@@ -285,8 +328,14 @@ fn mean_absolute_percentage_error_matches_sklearn() {
 fn median_absolute_error_matches_sklearn() {
     let file = load_fixtures();
     let f = find(&file, "median_absolute_error");
-    let yt = tensor1d(&as_f64_vec(f.y_true.as_ref().expect("y_true"), "medae/y_true"));
-    let yp = tensor1d(&as_f64_vec(f.y_pred.as_ref().expect("y_pred"), "medae/y_pred"));
+    let yt = tensor1d(&as_f64_vec(
+        f.y_true.as_ref().expect("y_true"),
+        "medae/y_true",
+    ));
+    let yp = tensor1d(&as_f64_vec(
+        f.y_pred.as_ref().expect("y_pred"),
+        "medae/y_pred",
+    ));
     let actual = median_absolute_error(&yt, &yp).expect("medae");
     check_f64(actual, expected_f64(&f), f.tol.unwrap_or(1e-9), "medae");
 }
@@ -295,8 +344,14 @@ fn median_absolute_error_matches_sklearn() {
 fn max_error_matches_sklearn() {
     let file = load_fixtures();
     let f = find(&file, "max_error");
-    let yt = tensor1d(&as_f64_vec(f.y_true.as_ref().expect("y_true"), "max_error/y_true"));
-    let yp = tensor1d(&as_f64_vec(f.y_pred.as_ref().expect("y_pred"), "max_error/y_pred"));
+    let yt = tensor1d(&as_f64_vec(
+        f.y_true.as_ref().expect("y_true"),
+        "max_error/y_true",
+    ));
+    let yp = tensor1d(&as_f64_vec(
+        f.y_pred.as_ref().expect("y_pred"),
+        "max_error/y_pred",
+    ));
     let actual = max_error(&yt, &yp).expect("max_error");
     check_f64(actual, expected_f64(&f), f.tol.unwrap_or(1e-9), "max_error");
 }
@@ -305,8 +360,14 @@ fn max_error_matches_sklearn() {
 fn explained_variance_score_matches_sklearn() {
     let file = load_fixtures();
     let f = find(&file, "explained_variance_score");
-    let yt = tensor1d(&as_f64_vec(f.y_true.as_ref().expect("y_true"), "evs/y_true"));
-    let yp = tensor1d(&as_f64_vec(f.y_pred.as_ref().expect("y_pred"), "evs/y_pred"));
+    let yt = tensor1d(&as_f64_vec(
+        f.y_true.as_ref().expect("y_true"),
+        "evs/y_true",
+    ));
+    let yp = tensor1d(&as_f64_vec(
+        f.y_pred.as_ref().expect("y_pred"),
+        "evs/y_pred",
+    ));
     let actual = explained_variance_score(&yt, &yp).expect("evs");
     check_f64(actual, expected_f64(&f), f.tol.unwrap_or(1e-9), "evs");
 }
@@ -319,8 +380,14 @@ fn explained_variance_score_matches_sklearn() {
 fn accuracy_score_matches_sklearn() {
     let file = load_fixtures();
     let f = find(&file, "accuracy_score");
-    let yt = tensor1d(&as_f64_vec(f.y_true.as_ref().expect("y_true"), "acc/y_true"));
-    let yp = tensor1d(&as_f64_vec(f.y_pred.as_ref().expect("y_pred"), "acc/y_pred"));
+    let yt = tensor1d(&as_f64_vec(
+        f.y_true.as_ref().expect("y_true"),
+        "acc/y_true",
+    ));
+    let yp = tensor1d(&as_f64_vec(
+        f.y_pred.as_ref().expect("y_pred"),
+        "acc/y_pred",
+    ));
     let actual = accuracy_score(&yt, &yp).expect("accuracy");
     check_f64(actual, expected_f64(&f), f.tol.unwrap_or(1e-12), "accuracy");
 }
@@ -329,58 +396,119 @@ fn accuracy_score_matches_sklearn() {
 fn precision_score_binary_matches_sklearn() {
     let file = load_fixtures();
     let f = find(&file, "precision_score_binary");
-    let yt = tensor1d(&as_f64_vec(f.y_true.as_ref().expect("y_true"), "prec_bin/y_true"));
-    let yp = tensor1d(&as_f64_vec(f.y_pred.as_ref().expect("y_pred"), "prec_bin/y_pred"));
+    let yt = tensor1d(&as_f64_vec(
+        f.y_true.as_ref().expect("y_true"),
+        "prec_bin/y_true",
+    ));
+    let yp = tensor1d(&as_f64_vec(
+        f.y_pred.as_ref().expect("y_pred"),
+        "prec_bin/y_pred",
+    ));
     let actual = precision_score(&yt, &yp, Average::Binary).expect("precision_binary");
-    check_f64(actual, expected_f64(&f), f.tol.unwrap_or(1e-12), "precision_binary");
+    check_f64(
+        actual,
+        expected_f64(&f),
+        f.tol.unwrap_or(1e-12),
+        "precision_binary",
+    );
 }
 
 #[test]
 fn recall_score_binary_matches_sklearn() {
     let file = load_fixtures();
     let f = find(&file, "recall_score_binary");
-    let yt = tensor1d(&as_f64_vec(f.y_true.as_ref().expect("y_true"), "rec_bin/y_true"));
-    let yp = tensor1d(&as_f64_vec(f.y_pred.as_ref().expect("y_pred"), "rec_bin/y_pred"));
+    let yt = tensor1d(&as_f64_vec(
+        f.y_true.as_ref().expect("y_true"),
+        "rec_bin/y_true",
+    ));
+    let yp = tensor1d(&as_f64_vec(
+        f.y_pred.as_ref().expect("y_pred"),
+        "rec_bin/y_pred",
+    ));
     let actual = recall_score(&yt, &yp, Average::Binary).expect("recall_binary");
-    check_f64(actual, expected_f64(&f), f.tol.unwrap_or(1e-12), "recall_binary");
+    check_f64(
+        actual,
+        expected_f64(&f),
+        f.tol.unwrap_or(1e-12),
+        "recall_binary",
+    );
 }
 
 #[test]
 fn f1_score_binary_matches_sklearn() {
     let file = load_fixtures();
     let f = find(&file, "f1_score_binary");
-    let yt = tensor1d(&as_f64_vec(f.y_true.as_ref().expect("y_true"), "f1_bin/y_true"));
-    let yp = tensor1d(&as_f64_vec(f.y_pred.as_ref().expect("y_pred"), "f1_bin/y_pred"));
+    let yt = tensor1d(&as_f64_vec(
+        f.y_true.as_ref().expect("y_true"),
+        "f1_bin/y_true",
+    ));
+    let yp = tensor1d(&as_f64_vec(
+        f.y_pred.as_ref().expect("y_pred"),
+        "f1_bin/y_pred",
+    ));
     let actual = f1_score(&yt, &yp, Average::Binary).expect("f1_binary");
-    check_f64(actual, expected_f64(&f), f.tol.unwrap_or(1e-12), "f1_binary");
+    check_f64(
+        actual,
+        expected_f64(&f),
+        f.tol.unwrap_or(1e-12),
+        "f1_binary",
+    );
 }
 
 #[test]
 fn precision_score_macro_matches_sklearn() {
     let file = load_fixtures();
     let f = find(&file, "precision_score_macro");
-    let yt = tensor1d(&as_f64_vec(f.y_true.as_ref().expect("y_true"), "prec_mac/y_true"));
-    let yp = tensor1d(&as_f64_vec(f.y_pred.as_ref().expect("y_pred"), "prec_mac/y_pred"));
+    let yt = tensor1d(&as_f64_vec(
+        f.y_true.as_ref().expect("y_true"),
+        "prec_mac/y_true",
+    ));
+    let yp = tensor1d(&as_f64_vec(
+        f.y_pred.as_ref().expect("y_pred"),
+        "prec_mac/y_pred",
+    ));
     let actual = precision_score(&yt, &yp, Average::Macro).expect("precision_macro");
-    check_f64(actual, expected_f64(&f), f.tol.unwrap_or(1e-12), "precision_macro");
+    check_f64(
+        actual,
+        expected_f64(&f),
+        f.tol.unwrap_or(1e-12),
+        "precision_macro",
+    );
 }
 
 #[test]
 fn recall_score_macro_matches_sklearn() {
     let file = load_fixtures();
     let f = find(&file, "recall_score_macro");
-    let yt = tensor1d(&as_f64_vec(f.y_true.as_ref().expect("y_true"), "rec_mac/y_true"));
-    let yp = tensor1d(&as_f64_vec(f.y_pred.as_ref().expect("y_pred"), "rec_mac/y_pred"));
+    let yt = tensor1d(&as_f64_vec(
+        f.y_true.as_ref().expect("y_true"),
+        "rec_mac/y_true",
+    ));
+    let yp = tensor1d(&as_f64_vec(
+        f.y_pred.as_ref().expect("y_pred"),
+        "rec_mac/y_pred",
+    ));
     let actual = recall_score(&yt, &yp, Average::Macro).expect("recall_macro");
-    check_f64(actual, expected_f64(&f), f.tol.unwrap_or(1e-12), "recall_macro");
+    check_f64(
+        actual,
+        expected_f64(&f),
+        f.tol.unwrap_or(1e-12),
+        "recall_macro",
+    );
 }
 
 #[test]
 fn f1_score_macro_matches_sklearn() {
     let file = load_fixtures();
     let f = find(&file, "f1_score_macro");
-    let yt = tensor1d(&as_f64_vec(f.y_true.as_ref().expect("y_true"), "f1_mac/y_true"));
-    let yp = tensor1d(&as_f64_vec(f.y_pred.as_ref().expect("y_pred"), "f1_mac/y_pred"));
+    let yt = tensor1d(&as_f64_vec(
+        f.y_true.as_ref().expect("y_true"),
+        "f1_mac/y_true",
+    ));
+    let yp = tensor1d(&as_f64_vec(
+        f.y_pred.as_ref().expect("y_pred"),
+        "f1_mac/y_pred",
+    ));
     let actual = f1_score(&yt, &yp, Average::Macro).expect("f1_macro");
     check_f64(actual, expected_f64(&f), f.tol.unwrap_or(1e-12), "f1_macro");
 }
@@ -389,7 +517,10 @@ fn f1_score_macro_matches_sklearn() {
 fn roc_auc_score_matches_sklearn() {
     let file = load_fixtures();
     let f = find(&file, "roc_auc_score");
-    let yt = tensor1d(&as_f64_vec(f.y_true.as_ref().expect("y_true"), "roc_auc/y_true"));
+    let yt = tensor1d(&as_f64_vec(
+        f.y_true.as_ref().expect("y_true"),
+        "roc_auc/y_true",
+    ));
     let ys_vec = parse_score_1d(f.y_score.as_ref().expect("y_score"));
     let ys = tensor1d(&ys_vec);
     let actual = roc_auc_score(&yt, &ys).expect("roc_auc");
@@ -400,7 +531,10 @@ fn roc_auc_score_matches_sklearn() {
 fn log_loss_matches_sklearn() {
     let file = load_fixtures();
     let f = find(&file, "log_loss");
-    let yt = tensor1d(&as_f64_vec(f.y_true.as_ref().expect("y_true"), "log_loss/y_true"));
+    let yt = tensor1d(&as_f64_vec(
+        f.y_true.as_ref().expect("y_true"),
+        "log_loss/y_true",
+    ));
     let (flat, rows, cols) = parse_score_2d(f.y_prob.as_ref().expect("y_prob"));
     let yp = tensor2d(flat, rows, cols);
     let actual = log_loss(&yt, &yp).expect("log_loss");
@@ -422,28 +556,56 @@ fn confusion_matrix_matches_sklearn() {
 fn hamming_loss_matches_sklearn() {
     let file = load_fixtures();
     let f = find(&file, "hamming_loss");
-    let yt = tensor1d(&as_f64_vec(f.y_true.as_ref().expect("y_true"), "hamming/y_true"));
-    let yp = tensor1d(&as_f64_vec(f.y_pred.as_ref().expect("y_pred"), "hamming/y_pred"));
+    let yt = tensor1d(&as_f64_vec(
+        f.y_true.as_ref().expect("y_true"),
+        "hamming/y_true",
+    ));
+    let yp = tensor1d(&as_f64_vec(
+        f.y_pred.as_ref().expect("y_pred"),
+        "hamming/y_pred",
+    ));
     let actual = hamming_loss(&yt, &yp).expect("hamming_loss");
-    check_f64(actual, expected_f64(&f), f.tol.unwrap_or(1e-12), "hamming_loss");
+    check_f64(
+        actual,
+        expected_f64(&f),
+        f.tol.unwrap_or(1e-12),
+        "hamming_loss",
+    );
 }
 
 #[test]
 fn balanced_accuracy_score_matches_sklearn() {
     let file = load_fixtures();
     let f = find(&file, "balanced_accuracy_score");
-    let yt = tensor1d(&as_f64_vec(f.y_true.as_ref().expect("y_true"), "bal_acc/y_true"));
-    let yp = tensor1d(&as_f64_vec(f.y_pred.as_ref().expect("y_pred"), "bal_acc/y_pred"));
+    let yt = tensor1d(&as_f64_vec(
+        f.y_true.as_ref().expect("y_true"),
+        "bal_acc/y_true",
+    ));
+    let yp = tensor1d(&as_f64_vec(
+        f.y_pred.as_ref().expect("y_pred"),
+        "bal_acc/y_pred",
+    ));
     let actual = balanced_accuracy_score(&yt, &yp, false).expect("balanced_accuracy");
-    check_f64(actual, expected_f64(&f), f.tol.unwrap_or(1e-12), "balanced_accuracy");
+    check_f64(
+        actual,
+        expected_f64(&f),
+        f.tol.unwrap_or(1e-12),
+        "balanced_accuracy",
+    );
 }
 
 #[test]
 fn matthews_corrcoef_matches_sklearn() {
     let file = load_fixtures();
     let f = find(&file, "matthews_corrcoef");
-    let yt = tensor1d(&as_f64_vec(f.y_true.as_ref().expect("y_true"), "mcc/y_true"));
-    let yp = tensor1d(&as_f64_vec(f.y_pred.as_ref().expect("y_pred"), "mcc/y_pred"));
+    let yt = tensor1d(&as_f64_vec(
+        f.y_true.as_ref().expect("y_true"),
+        "mcc/y_true",
+    ));
+    let yp = tensor1d(&as_f64_vec(
+        f.y_pred.as_ref().expect("y_pred"),
+        "mcc/y_pred",
+    ));
     let actual = matthews_corrcoef(&yt, &yp).expect("mcc");
     check_f64(actual, expected_f64(&f), f.tol.unwrap_or(1e-12), "mcc");
 }
@@ -452,8 +614,14 @@ fn matthews_corrcoef_matches_sklearn() {
 fn cohen_kappa_score_matches_sklearn() {
     let file = load_fixtures();
     let f = find(&file, "cohen_kappa_score");
-    let yt = tensor1d(&as_f64_vec(f.y_true.as_ref().expect("y_true"), "kappa/y_true"));
-    let yp = tensor1d(&as_f64_vec(f.y_pred.as_ref().expect("y_pred"), "kappa/y_pred"));
+    let yt = tensor1d(&as_f64_vec(
+        f.y_true.as_ref().expect("y_true"),
+        "kappa/y_true",
+    ));
+    let yp = tensor1d(&as_f64_vec(
+        f.y_pred.as_ref().expect("y_pred"),
+        "kappa/y_pred",
+    ));
     let actual = cohen_kappa_score(&yt, &yp).expect("kappa");
     check_f64(actual, expected_f64(&f), f.tol.unwrap_or(1e-12), "kappa");
 }
@@ -462,7 +630,10 @@ fn cohen_kappa_score_matches_sklearn() {
 fn brier_score_loss_matches_sklearn() {
     let file = load_fixtures();
     let f = find(&file, "brier_score_loss");
-    let yt = tensor1d(&as_f64_vec(f.y_true.as_ref().expect("y_true"), "brier/y_true"));
+    let yt = tensor1d(&as_f64_vec(
+        f.y_true.as_ref().expect("y_true"),
+        "brier/y_true",
+    ));
     let yp_vec = parse_score_1d(f.y_prob.as_ref().expect("y_prob"));
     let yp = tensor1d(&yp_vec);
     let actual = brier_score_loss(&yt, &yp).expect("brier");
@@ -482,7 +653,10 @@ fn d2_brier_score_perfect_is_one() {
 fn top_k_accuracy_score_k1_matches_sklearn() {
     let file = load_fixtures();
     let f = find(&file, "top_k_accuracy_score_k1");
-    let yt = tensor1d(&as_f64_vec(f.y_true.as_ref().expect("y_true"), "topk1/y_true"));
+    let yt = tensor1d(&as_f64_vec(
+        f.y_true.as_ref().expect("y_true"),
+        "topk1/y_true",
+    ));
     let (flat, rows, cols) = parse_score_2d(f.y_score.as_ref().expect("y_score"));
     let ys = tensor2d(flat, rows, cols);
     let actual = top_k_accuracy_score(&yt, &ys, 1).expect("top_k_k1");
@@ -493,7 +667,10 @@ fn top_k_accuracy_score_k1_matches_sklearn() {
 fn top_k_accuracy_score_k2_matches_sklearn() {
     let file = load_fixtures();
     let f = find(&file, "top_k_accuracy_score_k2");
-    let yt = tensor1d(&as_f64_vec(f.y_true.as_ref().expect("y_true"), "topk2/y_true"));
+    let yt = tensor1d(&as_f64_vec(
+        f.y_true.as_ref().expect("y_true"),
+        "topk2/y_true",
+    ));
     let (flat, rows, cols) = parse_score_2d(f.y_score.as_ref().expect("y_score"));
     let ys = tensor2d(flat, rows, cols);
     let actual = top_k_accuracy_score(&yt, &ys, 2).expect("top_k_k2");
@@ -504,20 +681,42 @@ fn top_k_accuracy_score_k2_matches_sklearn() {
 fn zero_one_loss_normalized_matches_sklearn() {
     let file = load_fixtures();
     let f = find(&file, "zero_one_loss_normalized");
-    let yt = tensor1d(&as_f64_vec(f.y_true.as_ref().expect("y_true"), "zo_norm/y_true"));
-    let yp = tensor1d(&as_f64_vec(f.y_pred.as_ref().expect("y_pred"), "zo_norm/y_pred"));
+    let yt = tensor1d(&as_f64_vec(
+        f.y_true.as_ref().expect("y_true"),
+        "zo_norm/y_true",
+    ));
+    let yp = tensor1d(&as_f64_vec(
+        f.y_pred.as_ref().expect("y_pred"),
+        "zo_norm/y_pred",
+    ));
     let actual = zero_one_loss(&yt, &yp, true).expect("zero_one_normalized");
-    check_f64(actual, expected_f64(&f), f.tol.unwrap_or(1e-12), "zero_one_normalized");
+    check_f64(
+        actual,
+        expected_f64(&f),
+        f.tol.unwrap_or(1e-12),
+        "zero_one_normalized",
+    );
 }
 
 #[test]
 fn zero_one_loss_count_matches_sklearn() {
     let file = load_fixtures();
     let f = find(&file, "zero_one_loss_count");
-    let yt = tensor1d(&as_f64_vec(f.y_true.as_ref().expect("y_true"), "zo_cnt/y_true"));
-    let yp = tensor1d(&as_f64_vec(f.y_pred.as_ref().expect("y_pred"), "zo_cnt/y_pred"));
+    let yt = tensor1d(&as_f64_vec(
+        f.y_true.as_ref().expect("y_true"),
+        "zo_cnt/y_true",
+    ));
+    let yp = tensor1d(&as_f64_vec(
+        f.y_pred.as_ref().expect("y_pred"),
+        "zo_cnt/y_pred",
+    ));
     let actual = zero_one_loss(&yt, &yp, false).expect("zero_one_count");
-    check_f64(actual, expected_f64(&f), f.tol.unwrap_or(1e-12), "zero_one_count");
+    check_f64(
+        actual,
+        expected_f64(&f),
+        f.tol.unwrap_or(1e-12),
+        "zero_one_count",
+    );
 }
 
 #[test]
@@ -528,7 +727,12 @@ fn average_precision_score_matches_sklearn() {
     let ys_vec = parse_score_1d(f.y_score.as_ref().expect("y_score"));
     let ys = tensor1d(&ys_vec);
     let actual = average_precision_score(&yt, &ys).expect("avg_precision");
-    check_f64(actual, expected_f64(&f), f.tol.unwrap_or(1e-12), "avg_precision");
+    check_f64(
+        actual,
+        expected_f64(&f),
+        f.tol.unwrap_or(1e-12),
+        "avg_precision",
+    );
 }
 
 // ============================================================================
@@ -539,27 +743,46 @@ fn average_precision_score_matches_sklearn() {
 fn ndcg_score_perfect_matches_sklearn() {
     let file = load_fixtures();
     let f = find(&file, "ndcg_score_perfect");
-    let yt = tensor1d(&as_f64_vec(f.y_true.as_ref().expect("y_true"), "ndcg_perf/y_true"));
+    let yt = tensor1d(&as_f64_vec(
+        f.y_true.as_ref().expect("y_true"),
+        "ndcg_perf/y_true",
+    ));
     let ys = tensor1d(&parse_score_1d(f.y_score.as_ref().expect("y_score")));
     let actual = ndcg_score(&yt, &ys, None).expect("ndcg_perfect");
-    check_f64(actual, expected_f64(&f), f.tol.unwrap_or(1e-9), "ndcg_perfect");
+    check_f64(
+        actual,
+        expected_f64(&f),
+        f.tol.unwrap_or(1e-9),
+        "ndcg_perfect",
+    );
 }
 
 #[test]
 fn ndcg_score_imperfect_matches_sklearn() {
     let file = load_fixtures();
     let f = find(&file, "ndcg_score_imperfect");
-    let yt = tensor1d(&as_f64_vec(f.y_true.as_ref().expect("y_true"), "ndcg_imp/y_true"));
+    let yt = tensor1d(&as_f64_vec(
+        f.y_true.as_ref().expect("y_true"),
+        "ndcg_imp/y_true",
+    ));
     let ys = tensor1d(&parse_score_1d(f.y_score.as_ref().expect("y_score")));
     let actual = ndcg_score(&yt, &ys, None).expect("ndcg_imperfect");
-    check_f64(actual, expected_f64(&f), f.tol.unwrap_or(1e-9), "ndcg_imperfect");
+    check_f64(
+        actual,
+        expected_f64(&f),
+        f.tol.unwrap_or(1e-9),
+        "ndcg_imperfect",
+    );
 }
 
 #[test]
 fn dcg_score_matches_sklearn() {
     let file = load_fixtures();
     let f = find(&file, "dcg_score");
-    let yt = tensor1d(&as_f64_vec(f.y_true.as_ref().expect("y_true"), "dcg/y_true"));
+    let yt = tensor1d(&as_f64_vec(
+        f.y_true.as_ref().expect("y_true"),
+        "dcg/y_true",
+    ));
     let ys = tensor1d(&parse_score_1d(f.y_score.as_ref().expect("y_score")));
     let actual = dcg_score(&yt, &ys, None).expect("dcg");
     check_f64(actual, expected_f64(&f), f.tol.unwrap_or(1e-9), "dcg");
@@ -570,11 +793,9 @@ fn label_ranking_average_precision_score_matches_sklearn() {
     let file = load_fixtures();
     let f = find(&file, "label_ranking_average_precision_score");
     // y_true and y_score are 2-D nested arrays.
-    let (yt_flat, yt_rows, yt_cols) =
-        parse_score_2d(f.y_true.as_ref().expect("y_true"));
+    let (yt_flat, yt_rows, yt_cols) = parse_score_2d(f.y_true.as_ref().expect("y_true"));
     let yt = tensor2d(yt_flat, yt_rows, yt_cols);
-    let (ys_flat, ys_rows, ys_cols) =
-        parse_score_2d(f.y_score.as_ref().expect("y_score"));
+    let (ys_flat, ys_rows, ys_cols) = parse_score_2d(f.y_score.as_ref().expect("y_score"));
     let ys = tensor2d(ys_flat, ys_rows, ys_cols);
     let actual = label_ranking_average_precision_score(&yt, &ys).expect("lrap");
     check_f64(actual, expected_f64(&f), f.tol.unwrap_or(1e-9), "lrap");
@@ -584,28 +805,34 @@ fn label_ranking_average_precision_score_matches_sklearn() {
 fn label_ranking_loss_matches_sklearn() {
     let file = load_fixtures();
     let f = find(&file, "label_ranking_loss");
-    let (yt_flat, yt_rows, yt_cols) =
-        parse_score_2d(f.y_true.as_ref().expect("y_true"));
+    let (yt_flat, yt_rows, yt_cols) = parse_score_2d(f.y_true.as_ref().expect("y_true"));
     let yt = tensor2d(yt_flat, yt_rows, yt_cols);
-    let (ys_flat, ys_rows, ys_cols) =
-        parse_score_2d(f.y_score.as_ref().expect("y_score"));
+    let (ys_flat, ys_rows, ys_cols) = parse_score_2d(f.y_score.as_ref().expect("y_score"));
     let ys = tensor2d(ys_flat, ys_rows, ys_cols);
     let actual = label_ranking_loss(&yt, &ys).expect("label_ranking_loss");
-    check_f64(actual, expected_f64(&f), f.tol.unwrap_or(1e-9), "label_ranking_loss");
+    check_f64(
+        actual,
+        expected_f64(&f),
+        f.tol.unwrap_or(1e-9),
+        "label_ranking_loss",
+    );
 }
 
 #[test]
 fn coverage_error_matches_sklearn() {
     let file = load_fixtures();
     let f = find(&file, "coverage_error");
-    let (yt_flat, yt_rows, yt_cols) =
-        parse_score_2d(f.y_true.as_ref().expect("y_true"));
+    let (yt_flat, yt_rows, yt_cols) = parse_score_2d(f.y_true.as_ref().expect("y_true"));
     let yt = tensor2d(yt_flat, yt_rows, yt_cols);
-    let (ys_flat, ys_rows, ys_cols) =
-        parse_score_2d(f.y_score.as_ref().expect("y_score"));
+    let (ys_flat, ys_rows, ys_cols) = parse_score_2d(f.y_score.as_ref().expect("y_score"));
     let ys = tensor2d(ys_flat, ys_rows, ys_cols);
     let actual = coverage_error(&yt, &ys).expect("coverage_error");
-    check_f64(actual, expected_f64(&f), f.tol.unwrap_or(1e-9), "coverage_error");
+    check_f64(
+        actual,
+        expected_f64(&f),
+        f.tol.unwrap_or(1e-9),
+        "coverage_error",
+    );
 }
 
 // ============================================================================
@@ -616,8 +843,14 @@ fn coverage_error_matches_sklearn() {
 fn adjusted_rand_score_perfect_matches_sklearn() {
     let file = load_fixtures();
     let f = find(&file, "adjusted_rand_score_perfect");
-    let lt = tensor1d(&as_f64_vec(f.labels_true.as_ref().expect("labels_true"), "ari_perf/lt"));
-    let lp = tensor1d(&as_f64_vec(f.labels_pred.as_ref().expect("labels_pred"), "ari_perf/lp"));
+    let lt = tensor1d(&as_f64_vec(
+        f.labels_true.as_ref().expect("labels_true"),
+        "ari_perf/lt",
+    ));
+    let lp = tensor1d(&as_f64_vec(
+        f.labels_pred.as_ref().expect("labels_pred"),
+        "ari_perf/lp",
+    ));
     let actual = adjusted_rand_score(&lt, &lp).expect("ari_perfect");
     check_f64(actual, 1.0, 1e-12, "ari_perfect");
 }
@@ -626,18 +859,35 @@ fn adjusted_rand_score_perfect_matches_sklearn() {
 fn adjusted_rand_score_mixed_matches_sklearn() {
     let file = load_fixtures();
     let f = find(&file, "adjusted_rand_score_mixed");
-    let lt = tensor1d(&as_f64_vec(f.labels_true.as_ref().expect("labels_true"), "ari_mix/lt"));
-    let lp = tensor1d(&as_f64_vec(f.labels_pred.as_ref().expect("labels_pred"), "ari_mix/lp"));
+    let lt = tensor1d(&as_f64_vec(
+        f.labels_true.as_ref().expect("labels_true"),
+        "ari_mix/lt",
+    ));
+    let lp = tensor1d(&as_f64_vec(
+        f.labels_pred.as_ref().expect("labels_pred"),
+        "ari_mix/lp",
+    ));
     let actual = adjusted_rand_score(&lt, &lp).expect("ari_mixed");
-    check_f64(actual, expected_f64(&f), f.tol.unwrap_or(1e-12), "ari_mixed");
+    check_f64(
+        actual,
+        expected_f64(&f),
+        f.tol.unwrap_or(1e-12),
+        "ari_mixed",
+    );
 }
 
 #[test]
 fn adjusted_mutual_info_score_matches_sklearn() {
     let file = load_fixtures();
     let f = find(&file, "adjusted_mutual_info_score");
-    let lt = tensor1d(&as_f64_vec(f.labels_true.as_ref().expect("labels_true"), "ami/lt"));
-    let lp = tensor1d(&as_f64_vec(f.labels_pred.as_ref().expect("labels_pred"), "ami/lp"));
+    let lt = tensor1d(&as_f64_vec(
+        f.labels_true.as_ref().expect("labels_true"),
+        "ami/lt",
+    ));
+    let lp = tensor1d(&as_f64_vec(
+        f.labels_pred.as_ref().expect("labels_pred"),
+        "ami/lp",
+    ));
     let actual = adjusted_mutual_info_score(&lt, &lp).expect("ami");
     check_f64(actual, expected_f64(&f), f.tol.unwrap_or(1e-9), "ami");
 }
@@ -646,8 +896,14 @@ fn adjusted_mutual_info_score_matches_sklearn() {
 fn normalized_mutual_info_score_perfect_is_one() {
     let file = load_fixtures();
     let f = find(&file, "normalized_mutual_info_score");
-    let lt = tensor1d(&as_f64_vec(f.labels_true.as_ref().expect("labels_true"), "nmi/lt"));
-    let lp = tensor1d(&as_f64_vec(f.labels_pred.as_ref().expect("labels_pred"), "nmi/lp"));
+    let lt = tensor1d(&as_f64_vec(
+        f.labels_true.as_ref().expect("labels_true"),
+        "nmi/lt",
+    ));
+    let lp = tensor1d(&as_f64_vec(
+        f.labels_pred.as_ref().expect("labels_pred"),
+        "nmi/lp",
+    ));
     let actual = normalized_mutual_info_score(&lt, &lp).expect("nmi");
     check_f64(actual, 1.0, 1e-9, "nmi_perfect");
 }
@@ -656,8 +912,14 @@ fn normalized_mutual_info_score_perfect_is_one() {
 fn homogeneity_score_perfect_is_one() {
     let file = load_fixtures();
     let f = find(&file, "homogeneity_score_perfect");
-    let lt = tensor1d(&as_f64_vec(f.labels_true.as_ref().expect("labels_true"), "hom/lt"));
-    let lp = tensor1d(&as_f64_vec(f.labels_pred.as_ref().expect("labels_pred"), "hom/lp"));
+    let lt = tensor1d(&as_f64_vec(
+        f.labels_true.as_ref().expect("labels_true"),
+        "hom/lt",
+    ));
+    let lp = tensor1d(&as_f64_vec(
+        f.labels_pred.as_ref().expect("labels_pred"),
+        "hom/lp",
+    ));
     let actual = homogeneity_score(&lt, &lp).expect("homogeneity");
     check_f64(actual, 1.0, 1e-9, "homogeneity_perfect");
 }
@@ -666,8 +928,14 @@ fn homogeneity_score_perfect_is_one() {
 fn completeness_score_perfect_is_one() {
     let file = load_fixtures();
     let f = find(&file, "completeness_score_perfect");
-    let lt = tensor1d(&as_f64_vec(f.labels_true.as_ref().expect("labels_true"), "comp/lt"));
-    let lp = tensor1d(&as_f64_vec(f.labels_pred.as_ref().expect("labels_pred"), "comp/lp"));
+    let lt = tensor1d(&as_f64_vec(
+        f.labels_true.as_ref().expect("labels_true"),
+        "comp/lt",
+    ));
+    let lp = tensor1d(&as_f64_vec(
+        f.labels_pred.as_ref().expect("labels_pred"),
+        "comp/lp",
+    ));
     let actual = completeness_score(&lt, &lp).expect("completeness");
     check_f64(actual, 1.0, 1e-9, "completeness_perfect");
 }
@@ -676,8 +944,14 @@ fn completeness_score_perfect_is_one() {
 fn v_measure_score_perfect_is_one() {
     let file = load_fixtures();
     let f = find(&file, "v_measure_score_perfect");
-    let lt = tensor1d(&as_f64_vec(f.labels_true.as_ref().expect("labels_true"), "vmeas/lt"));
-    let lp = tensor1d(&as_f64_vec(f.labels_pred.as_ref().expect("labels_pred"), "vmeas/lp"));
+    let lt = tensor1d(&as_f64_vec(
+        f.labels_true.as_ref().expect("labels_true"),
+        "vmeas/lt",
+    ));
+    let lp = tensor1d(&as_f64_vec(
+        f.labels_pred.as_ref().expect("labels_pred"),
+        "vmeas/lp",
+    ));
     let actual = v_measure_score(&lt, &lp).expect("v_measure");
     check_f64(actual, 1.0, 1e-9, "v_measure_perfect");
 }
@@ -686,8 +960,14 @@ fn v_measure_score_perfect_is_one() {
 fn fowlkes_mallows_score_perfect_is_one() {
     let file = load_fixtures();
     let f = find(&file, "fowlkes_mallows_score_perfect");
-    let lt = tensor1d(&as_f64_vec(f.labels_true.as_ref().expect("labels_true"), "fm/lt"));
-    let lp = tensor1d(&as_f64_vec(f.labels_pred.as_ref().expect("labels_pred"), "fm/lp"));
+    let lt = tensor1d(&as_f64_vec(
+        f.labels_true.as_ref().expect("labels_true"),
+        "fm/lt",
+    ));
+    let lp = tensor1d(&as_f64_vec(
+        f.labels_pred.as_ref().expect("labels_pred"),
+        "fm/lp",
+    ));
     let actual = fowlkes_mallows_score(&lt, &lp).expect("fm");
     check_f64(actual, 1.0, 1e-12, "fm_perfect");
 }
@@ -696,36 +976,51 @@ fn fowlkes_mallows_score_perfect_is_one() {
 fn silhouette_score_matches_sklearn() {
     let file = load_fixtures();
     let f = find(&file, "silhouette_score");
-    let (x_flat, x_rows, x_cols) =
-        parse_score_2d(f.x.as_ref().expect("x"));
+    let (x_flat, x_rows, x_cols) = parse_score_2d(f.x.as_ref().expect("x"));
     let x = tensor2d(x_flat, x_rows, x_cols);
-    let labels = tensor1d(&as_f64_vec(f.labels.as_ref().expect("labels"), "sil/labels"));
+    let labels = tensor1d(&as_f64_vec(
+        f.labels.as_ref().expect("labels"),
+        "sil/labels",
+    ));
     let actual = silhouette_score(&x, &labels).expect("silhouette");
-    check_f64(actual, expected_f64(&f), f.tol.unwrap_or(1e-9), "silhouette");
+    check_f64(
+        actual,
+        expected_f64(&f),
+        f.tol.unwrap_or(1e-9),
+        "silhouette",
+    );
 }
 
 #[test]
 fn davies_bouldin_score_matches_sklearn() {
     let file = load_fixtures();
     let f = find(&file, "davies_bouldin_score");
-    let (x_flat, x_rows, x_cols) =
-        parse_score_2d(f.x.as_ref().expect("x"));
+    let (x_flat, x_rows, x_cols) = parse_score_2d(f.x.as_ref().expect("x"));
     let x = tensor2d(x_flat, x_rows, x_cols);
     let labels = tensor1d(&as_f64_vec(f.labels.as_ref().expect("labels"), "db/labels"));
     let actual = davies_bouldin_score(&x, &labels).expect("davies_bouldin");
-    check_f64(actual, expected_f64(&f), f.tol.unwrap_or(1e-9), "davies_bouldin");
+    check_f64(
+        actual,
+        expected_f64(&f),
+        f.tol.unwrap_or(1e-9),
+        "davies_bouldin",
+    );
 }
 
 #[test]
 fn calinski_harabasz_score_matches_sklearn() {
     let file = load_fixtures();
     let f = find(&file, "calinski_harabasz_score");
-    let (x_flat, x_rows, x_cols) =
-        parse_score_2d(f.x.as_ref().expect("x"));
+    let (x_flat, x_rows, x_cols) = parse_score_2d(f.x.as_ref().expect("x"));
     let x = tensor2d(x_flat, x_rows, x_cols);
     let labels = tensor1d(&as_f64_vec(f.labels.as_ref().expect("labels"), "ch/labels"));
     let actual = calinski_harabasz_score(&x, &labels).expect("calinski_harabasz");
-    check_f64(actual, expected_f64(&f), f.tol.unwrap_or(1e-9), "calinski_harabasz");
+    check_f64(
+        actual,
+        expected_f64(&f),
+        f.tol.unwrap_or(1e-9),
+        "calinski_harabasz",
+    );
 }
 
 // ============================================================================
@@ -783,9 +1078,6 @@ fn fixture_file_covers_every_metrics_op() {
     ];
 
     for r in &required {
-        assert!(
-            ops.contains(r),
-            "fixture file missing required op {r:?}"
-        );
+        assert!(ops.contains(r), "fixture file missing required op {r:?}");
     }
 }

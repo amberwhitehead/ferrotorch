@@ -9,10 +9,10 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use ferrotorch_core::{Tensor, TensorStorage};
 use ferrotorch_data::{
     ChainDataset, ConcatDataset, Dataset, IterableDataset, TensorDataset, VecDataset, WorkerInfo,
 };
-use ferrotorch_core::{Tensor, TensorStorage};
 use serde::Deserialize;
 
 // ---------------------------------------------------------------------------
@@ -130,7 +130,10 @@ fn tensor_dataset_is_empty() {
     // Non-empty dataset.
     let x = t32(&[1.0, 2.0], &[2, 1]);
     let ds = TensorDataset::new(vec![x]).unwrap();
-    assert!(!ds.is_empty(), "TensorDataset::is_empty should be false when len > 0");
+    assert!(
+        !ds.is_empty(),
+        "TensorDataset::is_empty should be false when len > 0"
+    );
     assert_eq!(ds.len(), 2);
 }
 
@@ -295,7 +298,13 @@ fn concat_dataset_len() {
             sizes
                 .iter()
                 .map(|&sz| {
-                    let data: Vec<i32> = (0..sz as i32).map(|_| { let v = counter * 10; counter += 1; v }).collect();
+                    let data: Vec<i32> = (0..sz as i32)
+                        .map(|_| {
+                            let v = counter * 10;
+                            counter += 1;
+                            v
+                        })
+                        .collect();
                     VecDataset::new(data)
                 })
                 .collect()
@@ -334,7 +343,11 @@ fn concat_dataset_get() {
                 .iter()
                 .map(|&sz| {
                     let data: Vec<i32> = (0..sz as i32)
-                        .map(|_| { let v = counter * 10; counter += 1; v })
+                        .map(|_| {
+                            let v = counter * 10;
+                            counter += 1;
+                            v
+                        })
                         .collect();
                     VecDataset::new(data)
                 })
@@ -387,11 +400,8 @@ fn chain_dataset_iter_order() {
             .map(|v| v.as_i64().unwrap() as i32)
             .collect();
 
-        let ds = ChainDataset::new(vec![
-            VecDataset::new(a_values),
-            VecDataset::new(b_values),
-        ])
-        .unwrap();
+        let ds =
+            ChainDataset::new(vec![VecDataset::new(a_values), VecDataset::new(b_values)]).unwrap();
 
         let got: Vec<i32> = IterableDataset::iter(&ds, None)
             .map(|r| r.unwrap())

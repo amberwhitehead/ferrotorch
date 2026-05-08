@@ -42,8 +42,7 @@ use objc2::rc::Retained;
 use objc2_foundation::NSString;
 use objc2_metal::{
     MTLBuffer, MTLCommandBuffer, MTLCommandQueue, MTLComputeCommandEncoder,
-    MTLComputePipelineState, MTLDevice, MTLFunction, MTLLibrary, MTLSize,
-    MTLStorageMode,
+    MTLComputePipelineState, MTLDevice, MTLFunction, MTLLibrary, MTLSize, MTLStorageMode,
 };
 
 use crate::kernels;
@@ -109,11 +108,7 @@ struct Pipelines {
 // Helper: compile one MTLLibrary + extract one function + build pipeline
 // ---------------------------------------------------------------------------
 
-fn compile_pipeline(
-    device: &MTLDevice,
-    source: &str,
-    fn_name: &str,
-) -> FerrotorchResult<Pipeline> {
+fn compile_pipeline(device: &MTLDevice, source: &str, fn_name: &str) -> FerrotorchResult<Pipeline> {
     // SAFETY: All objc2-metal calls go through the safe Rust bindings from
     // objc2-metal 0.3.2. The pointer casts inside `NSString::from_str` and
     // `newLibraryWithSource_options_error` are managed by the crate.
@@ -127,18 +122,16 @@ fn compile_pipeline(
             })?;
 
         let name = NSString::from_str(fn_name);
-        let func: Retained<MTLFunction> = lib
-            .newFunctionWithName(&name)
-            .ok_or_else(|| FerrotorchError::InvalidArgument {
-                message: format!("MSL function `{fn_name}` not found in library"),
-            })?;
+        let func: Retained<MTLFunction> =
+            lib.newFunctionWithName(&name)
+                .ok_or_else(|| FerrotorchError::InvalidArgument {
+                    message: format!("MSL function `{fn_name}` not found in library"),
+                })?;
 
         let pipeline: Retained<MTLComputePipelineState> = device
             .newComputePipelineStateWithFunction_error(&func)
             .map_err(|e| FerrotorchError::InvalidArgument {
-                message: format!(
-                    "MTLComputePipelineState creation failed for `{fn_name}`: {e:?}"
-                ),
+                message: format!("MTLComputePipelineState creation failed for `{fn_name}`: {e:?}"),
             })?;
 
         Ok(Pipeline { state: pipeline })
@@ -232,14 +225,9 @@ impl MtlBackend {
         // SAFETY: Metal manages the buffer memory; Rust holds a retained ref.
         let buf: Retained<MTLBuffer> = unsafe {
             self.device
-                .newBufferWithLength_options(
-                    byte_len,
-                    MTLStorageMode::Shared as u64,
-                )
+                .newBufferWithLength_options(byte_len, MTLStorageMode::Shared as u64)
                 .ok_or_else(|| FerrotorchError::InvalidArgument {
-                    message: format!(
-                        "MTLDevice::newBufferWithLength({byte_len}) returned nil"
-                    ),
+                    message: format!("MTLDevice::newBufferWithLength({byte_len}) returned nil"),
                 })?
         };
         Ok(Arc::new(MtlBuffer {
@@ -290,18 +278,14 @@ impl MtlBackend {
 
         let out_buf = self.alloc_buffer(n * 4, n)?;
 
-        let cmd_buf: Retained<MTLCommandBuffer> =
-            unsafe { self.queue.commandBuffer() }.ok_or_else(|| {
-                FerrotorchError::InvalidArgument {
-                    message: "MTLCommandQueue::commandBuffer returned nil".into(),
-                }
+        let cmd_buf: Retained<MTLCommandBuffer> = unsafe { self.queue.commandBuffer() }
+            .ok_or_else(|| FerrotorchError::InvalidArgument {
+                message: "MTLCommandQueue::commandBuffer returned nil".into(),
             })?;
 
-        let enc: Retained<MTLComputeCommandEncoder> =
-            unsafe { cmd_buf.computeCommandEncoder() }.ok_or_else(|| {
-                FerrotorchError::InvalidArgument {
-                    message: "MTLCommandBuffer::computeCommandEncoder returned nil".into(),
-                }
+        let enc: Retained<MTLComputeCommandEncoder> = unsafe { cmd_buf.computeCommandEncoder() }
+            .ok_or_else(|| FerrotorchError::InvalidArgument {
+                message: "MTLCommandBuffer::computeCommandEncoder returned nil".into(),
             })?;
 
         let n_u32 = n as u32;
@@ -345,18 +329,14 @@ impl MtlBackend {
         let n = a.len();
         let out_buf = self.alloc_buffer(n * 4, n)?;
 
-        let cmd_buf: Retained<MTLCommandBuffer> =
-            unsafe { self.queue.commandBuffer() }.ok_or_else(|| {
-                FerrotorchError::InvalidArgument {
-                    message: "MTLCommandQueue::commandBuffer returned nil".into(),
-                }
+        let cmd_buf: Retained<MTLCommandBuffer> = unsafe { self.queue.commandBuffer() }
+            .ok_or_else(|| FerrotorchError::InvalidArgument {
+                message: "MTLCommandQueue::commandBuffer returned nil".into(),
             })?;
 
-        let enc: Retained<MTLComputeCommandEncoder> =
-            unsafe { cmd_buf.computeCommandEncoder() }.ok_or_else(|| {
-                FerrotorchError::InvalidArgument {
-                    message: "MTLCommandBuffer::computeCommandEncoder returned nil".into(),
-                }
+        let enc: Retained<MTLComputeCommandEncoder> = unsafe { cmd_buf.computeCommandEncoder() }
+            .ok_or_else(|| FerrotorchError::InvalidArgument {
+                message: "MTLCommandBuffer::computeCommandEncoder returned nil".into(),
             })?;
 
         let n_u32 = n as u32;
@@ -407,7 +387,11 @@ impl GpuBackend for MtlBackend {
         elem_size: usize,
         device: usize,
     ) -> FerrotorchResult<GpuBufferHandle> {
-        let elem_count = if elem_size == 0 { 0 } else { data.len() / elem_size };
+        let elem_count = if elem_size == 0 {
+            0
+        } else {
+            data.len() / elem_size
+        };
         let buf = self.alloc_buffer(data.len(), elem_count)?;
 
         // Shared-mode buffers expose a CPU-accessible pointer directly.
@@ -538,18 +522,14 @@ impl GpuBackend for MtlBackend {
         let out_len = m * n;
         let out_buf = self.alloc_buffer(out_len * 4, out_len)?;
 
-        let cmd_buf: Retained<MTLCommandBuffer> =
-            unsafe { self.queue.commandBuffer() }.ok_or_else(|| {
-                FerrotorchError::InvalidArgument {
-                    message: "MTLCommandQueue::commandBuffer returned nil".into(),
-                }
+        let cmd_buf: Retained<MTLCommandBuffer> = unsafe { self.queue.commandBuffer() }
+            .ok_or_else(|| FerrotorchError::InvalidArgument {
+                message: "MTLCommandQueue::commandBuffer returned nil".into(),
             })?;
 
-        let enc: Retained<MTLComputeCommandEncoder> =
-            unsafe { cmd_buf.computeCommandEncoder() }.ok_or_else(|| {
-                FerrotorchError::InvalidArgument {
-                    message: "MTLCommandBuffer::computeCommandEncoder returned nil".into(),
-                }
+        let enc: Retained<MTLComputeCommandEncoder> = unsafe { cmd_buf.computeCommandEncoder() }
+            .ok_or_else(|| FerrotorchError::InvalidArgument {
+                message: "MTLCommandBuffer::computeCommandEncoder returned nil".into(),
             })?;
 
         let m_u32 = m as u32;
@@ -609,18 +589,14 @@ impl GpuBackend for MtlBackend {
         let out_len = batch * m * n;
         let out_buf = self.alloc_buffer(out_len * 4, out_len)?;
 
-        let cmd_buf: Retained<MTLCommandBuffer> =
-            unsafe { self.queue.commandBuffer() }.ok_or_else(|| {
-                FerrotorchError::InvalidArgument {
-                    message: "MTLCommandQueue::commandBuffer returned nil".into(),
-                }
+        let cmd_buf: Retained<MTLCommandBuffer> = unsafe { self.queue.commandBuffer() }
+            .ok_or_else(|| FerrotorchError::InvalidArgument {
+                message: "MTLCommandQueue::commandBuffer returned nil".into(),
             })?;
 
-        let enc: Retained<MTLComputeCommandEncoder> =
-            unsafe { cmd_buf.computeCommandEncoder() }.ok_or_else(|| {
-                FerrotorchError::InvalidArgument {
-                    message: "MTLCommandBuffer::computeCommandEncoder returned nil".into(),
-                }
+        let enc: Retained<MTLComputeCommandEncoder> = unsafe { cmd_buf.computeCommandEncoder() }
+            .ok_or_else(|| FerrotorchError::InvalidArgument {
+                message: "MTLCommandBuffer::computeCommandEncoder returned nil".into(),
             })?;
 
         let batch_u32 = batch as u32;
@@ -684,18 +660,14 @@ impl GpuBackend for MtlBackend {
         let out_len = rows * cols;
         let out_buf = self.alloc_buffer(out_len * 4, out_len)?;
 
-        let cmd_buf: Retained<MTLCommandBuffer> =
-            unsafe { self.queue.commandBuffer() }.ok_or_else(|| {
-                FerrotorchError::InvalidArgument {
-                    message: "MTLCommandQueue::commandBuffer returned nil".into(),
-                }
+        let cmd_buf: Retained<MTLCommandBuffer> = unsafe { self.queue.commandBuffer() }
+            .ok_or_else(|| FerrotorchError::InvalidArgument {
+                message: "MTLCommandQueue::commandBuffer returned nil".into(),
             })?;
 
-        let enc: Retained<MTLComputeCommandEncoder> =
-            unsafe { cmd_buf.computeCommandEncoder() }.ok_or_else(|| {
-                FerrotorchError::InvalidArgument {
-                    message: "MTLCommandBuffer::computeCommandEncoder returned nil".into(),
-                }
+        let enc: Retained<MTLComputeCommandEncoder> = unsafe { cmd_buf.computeCommandEncoder() }
+            .ok_or_else(|| FerrotorchError::InvalidArgument {
+                message: "MTLCommandBuffer::computeCommandEncoder returned nil".into(),
             })?;
 
         let rows_u32 = rows as u32;
@@ -758,18 +730,14 @@ impl GpuBackend for MtlBackend {
         let out_len = outer * inner;
         let out_buf = self.alloc_buffer(out_len * 4, out_len)?;
 
-        let cmd_buf: Retained<MTLCommandBuffer> =
-            unsafe { self.queue.commandBuffer() }.ok_or_else(|| {
-                FerrotorchError::InvalidArgument {
-                    message: "MTLCommandQueue::commandBuffer returned nil".into(),
-                }
+        let cmd_buf: Retained<MTLCommandBuffer> = unsafe { self.queue.commandBuffer() }
+            .ok_or_else(|| FerrotorchError::InvalidArgument {
+                message: "MTLCommandQueue::commandBuffer returned nil".into(),
             })?;
 
-        let enc: Retained<MTLComputeCommandEncoder> =
-            unsafe { cmd_buf.computeCommandEncoder() }.ok_or_else(|| {
-                FerrotorchError::InvalidArgument {
-                    message: "MTLCommandBuffer::computeCommandEncoder returned nil".into(),
-                }
+        let enc: Retained<MTLComputeCommandEncoder> = unsafe { cmd_buf.computeCommandEncoder() }
+            .ok_or_else(|| FerrotorchError::InvalidArgument {
+                message: "MTLCommandBuffer::computeCommandEncoder returned nil".into(),
             })?;
 
         let outer_u32 = outer as u32;
@@ -854,10 +822,11 @@ impl GpuBackend for MtlBackend {
 /// - [`FerrotorchError::InvalidArgument`]: MSL compilation failed (ferrotorch bug).
 pub fn init_mps_backend_metal() -> FerrotorchResult<()> {
     let backend = MtlBackend::new()?;
-    ferrotorch_core::gpu_dispatch::register_gpu_backend(Box::new(backend))
-        .map_err(|e| FerrotorchError::InvalidArgument {
+    ferrotorch_core::gpu_dispatch::register_gpu_backend(Box::new(backend)).map_err(|e| {
+        FerrotorchError::InvalidArgument {
             message: format!("MPS backend registration failed: {e}"),
-        })
+        }
+    })
 }
 
 #[cfg(test)]

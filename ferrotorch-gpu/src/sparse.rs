@@ -65,10 +65,9 @@ unsafe impl Sync for CusparseHandle {}
 impl CusparseHandle {
     /// Create a fresh cuSPARSE handle on the current CUDA context.
     pub fn new() -> GpuResult<Self> {
-        let inner = cudarc::cusparse::result::create()
-            .map_err(|e| GpuError::InvalidState {
-                message: format!("cusparseCreate failed: {e:?}"),
-            })?;
+        let inner = cudarc::cusparse::result::create().map_err(|e| GpuError::InvalidState {
+            message: format!("cusparseCreate failed: {e:?}"),
+        })?;
         Ok(Self { inner })
     }
 
@@ -118,9 +117,8 @@ fn set_stream(handle: &CusparseHandle, device: &GpuDevice) -> GpuResult<()> {
     //   of the same pointer.
     let stream = device.stream();
     let cu_stream_ptr = stream.cu_stream() as *mut csys::CUstream_st;
-    let status = unsafe {
-        csys::cusparseSetStream(handle.raw(), cu_stream_ptr as csys::cudaStream_t)
-    };
+    let status =
+        unsafe { csys::cusparseSetStream(handle.raw(), cu_stream_ptr as csys::cudaStream_t) };
     check(status, "cusparseSetStream")
 }
 

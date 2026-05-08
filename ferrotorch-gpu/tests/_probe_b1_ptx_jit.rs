@@ -53,10 +53,12 @@ fn probe_batchnorm_is_stub() {
     let mut rmean = cpu_to_gpu(&rmean_h, &dev).unwrap();
     let mut rvar = cpu_to_gpu(&rvar_h, &dev).unwrap();
     let result = ferrotorch_gpu::kernels::gpu_batchnorm_forward(
-        &inp, &weight, &bias, &mut rmean, &mut rvar,
-        3, 64, 1e-5, 0.1, true, &dev,
+        &inp, &weight, &bias, &mut rmean, &mut rvar, 3, 64, 1e-5, 0.1, true, &dev,
     );
-    println!("batchnorm_forward result: {:?}", result.as_ref().map(|_| "Ok(...)"));
+    println!(
+        "batchnorm_forward result: {:?}",
+        result.as_ref().map(|_| "Ok(...)")
+    );
     match &result {
         Ok(_) => println!("PROBE: batchnorm_forward returned Ok (stub removed)"),
         Err(e) => println!("PROBE BEFORE: batchnorm_forward is a stub, returned Err: {e}"),

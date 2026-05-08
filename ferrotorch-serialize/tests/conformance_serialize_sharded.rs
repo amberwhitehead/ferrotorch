@@ -37,7 +37,11 @@ fn make_f32(data: Vec<f32>, shape: Vec<usize>) -> Tensor<f32> {
 }
 
 /// Write a safetensors shard to `dir/filename`.
-fn write_shard(dir: &std::path::Path, filename: &str, state: &StateDict<f32>) -> std::path::PathBuf {
+fn write_shard(
+    dir: &std::path::Path,
+    filename: &str,
+    state: &StateDict<f32>,
+) -> std::path::PathBuf {
     let path = dir.join(filename);
     save_safetensors(state, &path).unwrap();
     path
@@ -213,7 +217,10 @@ fn sharded_load_ignores_extra_tensors_in_shard() {
     let merged: StateDict<f32> = load_safetensors_sharded(&index_path).unwrap();
     assert_eq!(merged.len(), 1, "only indexed tensors should be loaded");
     assert!(merged.contains_key("listed"));
-    assert!(!merged.contains_key("unlisted"), "'unlisted' must be ignored");
+    assert!(
+        !merged.contains_key("unlisted"),
+        "'unlisted' must be ignored"
+    );
 }
 
 /// load_safetensors_sharded returns an error when the index names a tensor
@@ -234,7 +241,10 @@ fn sharded_load_error_on_missing_index_tensor() {
     std::fs::write(&index_path, index_json).unwrap();
 
     let result: Result<StateDict<f32>, _> = load_safetensors_sharded(&index_path);
-    assert!(result.is_err(), "expected error for tensor absent from shard");
+    assert!(
+        result.is_err(),
+        "expected error for tensor absent from shard"
+    );
     let msg = format!("{}", result.unwrap_err());
     assert!(
         msg.contains("absent") || msg.contains("missing"),
@@ -287,11 +297,21 @@ fn sharded_filtered_keeps_only_matching_keys() {
     let filtered: StateDict<f32> =
         load_safetensors_sharded_filtered(&index_path, |k| k.contains(".q_proj.")).unwrap();
 
-    assert_eq!(filtered.len(), 2, "only the two q_proj tensors should be loaded");
+    assert_eq!(
+        filtered.len(),
+        2,
+        "only the two q_proj tensors should be loaded"
+    );
     assert!(filtered.contains_key("model.layers.0.q_proj.weight"));
     assert!(filtered.contains_key("model.layers.1.q_proj.weight"));
-    assert!(!filtered.contains_key("model.embed_tokens.weight"), "embed must be excluded");
-    assert!(!filtered.contains_key("lm_head.weight"), "lm_head must be excluded");
+    assert!(
+        !filtered.contains_key("model.embed_tokens.weight"),
+        "embed must be excluded"
+    );
+    assert!(
+        !filtered.contains_key("lm_head.weight"),
+        "lm_head must be excluded"
+    );
 }
 
 /// load_safetensors_sharded_filtered with a predicate matching nothing returns
@@ -355,11 +375,10 @@ fn sharded_progress_fires_once_per_shard() {
     let (index_path, _, _, _) = make_three_shard_fixture(tmp.path());
 
     let mut call_count = 0usize;
-    let _: StateDict<f32> =
-        load_safetensors_sharded_with_progress(&index_path, |_p| {
-            call_count += 1;
-        })
-        .unwrap();
+    let _: StateDict<f32> = load_safetensors_sharded_with_progress(&index_path, |_p| {
+        call_count += 1;
+    })
+    .unwrap();
 
     assert_eq!(call_count, 3, "callback must fire exactly once per shard");
 }
@@ -371,11 +390,10 @@ fn sharded_progress_shard_index_is_0_based() {
     let (index_path, _, _, _) = make_three_shard_fixture(tmp.path());
 
     let mut indices: Vec<usize> = Vec::new();
-    let _: StateDict<f32> =
-        load_safetensors_sharded_with_progress(&index_path, |p| {
-            indices.push(p.shard_index);
-        })
-        .unwrap();
+    let _: StateDict<f32> = load_safetensors_sharded_with_progress(&index_path, |p| {
+        indices.push(p.shard_index);
+    })
+    .unwrap();
 
     assert_eq!(indices, vec![0, 1, 2], "shard_index must be 0, 1, 2");
 }
@@ -387,11 +405,10 @@ fn sharded_progress_shard_count_is_correct() {
     let (index_path, _, _, _) = make_three_shard_fixture(tmp.path());
 
     let mut counts: Vec<usize> = Vec::new();
-    let _: StateDict<f32> =
-        load_safetensors_sharded_with_progress(&index_path, |p| {
-            counts.push(p.shard_count);
-        })
-        .unwrap();
+    let _: StateDict<f32> = load_safetensors_sharded_with_progress(&index_path, |p| {
+        counts.push(p.shard_count);
+    })
+    .unwrap();
 
     // Every callback must report shard_count = 3.
     assert!(
@@ -408,11 +425,10 @@ fn sharded_progress_total_tensors_is_correct() {
     let expected_total = shard_a.len() + shard_b.len() + shard_c.len();
 
     let mut reported_totals: Vec<usize> = Vec::new();
-    let _: StateDict<f32> =
-        load_safetensors_sharded_with_progress(&index_path, |p| {
-            reported_totals.push(p.total_tensors);
-        })
-        .unwrap();
+    let _: StateDict<f32> = load_safetensors_sharded_with_progress(&index_path, |p| {
+        reported_totals.push(p.total_tensors);
+    })
+    .unwrap();
 
     assert!(
         reported_totals.iter().all(|&t| t == expected_total),
@@ -428,11 +444,10 @@ fn sharded_progress_tensors_loaded_so_far_is_monotonic() {
     let (index_path, _, _, _) = make_three_shard_fixture(tmp.path());
 
     let mut loaded_so_far: Vec<usize> = Vec::new();
-    let _: StateDict<f32> =
-        load_safetensors_sharded_with_progress(&index_path, |p| {
-            loaded_so_far.push(p.tensors_loaded_so_far);
-        })
-        .unwrap();
+    let _: StateDict<f32> = load_safetensors_sharded_with_progress(&index_path, |p| {
+        loaded_so_far.push(p.tensors_loaded_so_far);
+    })
+    .unwrap();
 
     // First callback fires before any shard is loaded.
     assert_eq!(loaded_so_far[0], 0, "no tensors loaded before first shard");
@@ -454,11 +469,10 @@ fn sharded_progress_shard_file_is_nonempty() {
     let (index_path, _, _, _) = make_three_shard_fixture(tmp.path());
 
     let mut files: Vec<String> = Vec::new();
-    let _: StateDict<f32> =
-        load_safetensors_sharded_with_progress(&index_path, |p| {
-            files.push(p.shard_file.to_string());
-        })
-        .unwrap();
+    let _: StateDict<f32> = load_safetensors_sharded_with_progress(&index_path, |p| {
+        files.push(p.shard_file.to_string());
+    })
+    .unwrap();
 
     for f in &files {
         assert!(!f.is_empty(), "shard_file must not be empty");
@@ -532,7 +546,11 @@ fn auto_single_file_dispatches_correctly() {
     let from_auto: StateDict<f32> = load_safetensors_auto(&path).unwrap();
     let from_direct: StateDict<f32> = load_safetensors(&path).unwrap();
 
-    assert_eq!(from_auto.len(), from_direct.len(), "auto single-file tensor count mismatch");
+    assert_eq!(
+        from_auto.len(),
+        from_direct.len(),
+        "auto single-file tensor count mismatch"
+    );
     assert_eq!(
         from_auto["w"].data().unwrap(),
         from_direct["w"].data().unwrap(),
@@ -582,8 +600,7 @@ fn auto_sharded_matches_explicit_sharded_load() {
 /// load_safetensors_auto returns an error for a missing path.
 #[test]
 fn auto_missing_file_error() {
-    let result: Result<StateDict<f32>, _> =
-        load_safetensors_auto("/nonexistent/model.safetensors");
+    let result: Result<StateDict<f32>, _> = load_safetensors_auto("/nonexistent/model.safetensors");
     assert!(result.is_err(), "expected error for nonexistent file");
 }
 

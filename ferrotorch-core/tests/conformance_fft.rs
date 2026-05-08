@@ -2024,8 +2024,7 @@ fn surface_coverage_grad_fn_struct_substring_pins() {
 
     // RfftnBackward / IrfftnBackward (constructors carry the persisted
     // forward-shape metadata that the corrected #809 VJPs need).
-    let _: RfftnBackward<f64> =
-        RfftnBackward::new(leaf.clone(), None, None, vec![2, 2], 2, 1, 4);
+    let _: RfftnBackward<f64> = RfftnBackward::new(leaf.clone(), None, None, vec![2, 2], 2, 1, 4);
     let _: IrfftnBackward<f64> = IrfftnBackward::new(leaf.clone(), None, None, 2, 1, 4);
 
     // HfftBackward / IhfftBackward

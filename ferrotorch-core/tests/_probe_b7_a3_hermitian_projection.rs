@@ -82,12 +82,7 @@ fn assert_close(actual: &[f64], expected: &[f64], tol: f64, label: &str) {
 /// flat interleaved buffer. The projection zeroes `im[0]` and (when
 /// `output_n` is even and `output_n / 2 < half_n`) `im[output_n / 2]`,
 /// for every position along the leading axes.
-fn project_hermitian_last_axis(
-    data: &mut [f64],
-    leading: usize,
-    half_n: usize,
-    output_n: usize,
-) {
+fn project_hermitian_last_axis(data: &mut [f64], leading: usize, half_n: usize, output_n: usize) {
     for b in 0..leading {
         let dc_im = b * half_n * 2 + 1;
         data[dc_im] = 0.0;
@@ -107,12 +102,7 @@ fn project_hermitian_last_axis(
 /// Hermitian-extends to length `output_n`, and runs the unnormalized inverse
 /// DFT divided by `output_n` — matches PyTorch's `aten::_fft_c2r`.
 #[allow(clippy::needless_range_loop)]
-fn reference_irfft_1d(
-    data: &[f64],
-    batch: usize,
-    half_n: usize,
-    output_n: usize,
-) -> Vec<f64> {
+fn reference_irfft_1d(data: &[f64], batch: usize, half_n: usize, output_n: usize) -> Vec<f64> {
     let half_for_out = output_n / 2 + 1;
     let mut out = vec![0.0f64; batch * output_n];
     for b in 0..batch {
@@ -150,8 +140,7 @@ fn reference_irfft_1d(
         for t in 0..output_n {
             let mut acc = 0.0f64;
             for k in 0..output_n {
-                let theta =
-                    2.0 * std::f64::consts::PI * (k as f64) * (t as f64) / n_f;
+                let theta = 2.0 * std::f64::consts::PI * (k as f64) * (t as f64) / n_f;
                 let (re, im) = full[k];
                 acc += re * theta.cos() - im * theta.sin();
             }
@@ -165,12 +154,7 @@ fn reference_irfft_1d(
 /// `[batch, half_n, 2]` input.
 ///
 /// `hfft(a, n) == irfft(conj(a), n) * n` (PyTorch / NumPy convention).
-fn reference_hfft_1d(
-    data: &[f64],
-    batch: usize,
-    half_n: usize,
-    output_n: usize,
-) -> Vec<f64> {
+fn reference_hfft_1d(data: &[f64], batch: usize, half_n: usize, output_n: usize) -> Vec<f64> {
     // Build conj(a) and call the irfft reference, then multiply by n.
     let mut conj = data.to_vec();
     for b in 0..batch {
@@ -199,17 +183,14 @@ fn probe_808_irfftn_1d_even_nyquist() {
     // Deliberately non-Hermitian: im at DC and Nyquist are non-zero.
     let mut a_data: Vec<f64> = vec![
         // batch 0
-        2.0, 1.5,    // bin 0 (DC, im=1.5  ← non-zero!)
-        0.5, -0.25,  // bin 1
+        2.0, 1.5, // bin 0 (DC, im=1.5  ← non-zero!)
+        0.5, -0.25, // bin 1
         -0.75, 0.125, // bin 2
-        1.5, -0.5,   // bin 3
+        1.5, -0.5, // bin 3
         -1.0, 0.875, // bin 4 (Nyquist, im=0.875 ← non-zero!)
         // batch 1
-        0.7, -0.4,   // bin 0 (DC im non-zero)
-        1.1, 0.6,
-        -0.2, -0.3,
-        0.45, 1.2,
-        0.9, 0.55,   // bin 4 (Nyquist im non-zero)
+        0.7, -0.4, // bin 0 (DC im non-zero)
+        1.1, 0.6, -0.2, -0.3, 0.45, 1.2, 0.9, 0.55, // bin 4 (Nyquist im non-zero)
     ];
     let spec = make_complex(&a_data, &[batch, half_n, 2]);
     // s = [output_n], axes = [-1] is implicit when axes=None means transform
@@ -236,10 +217,8 @@ fn probe_808_irfftn_1d_odd_no_nyquist() {
     let batch = 1usize;
     // Non-zero im at DC. Last-bin (k=3) is the highest non-Nyquist bin.
     let mut a_data: Vec<f64> = vec![
-        1.0, 0.6,    // bin 0 (DC im=0.6 non-zero)
-        -0.3, 0.7,
-        0.4, -0.2,
-        -0.9, 0.1,
+        1.0, 0.6, // bin 0 (DC im=0.6 non-zero)
+        -0.3, 0.7, 0.4, -0.2, -0.9, 0.1,
     ];
     let spec = make_complex(&a_data, &[batch, half_n, 2]);
     let r = irfftn(&spec, Some(&[output_n]), Some(&[-1])).expect("irfftn 1d odd");
@@ -290,8 +269,7 @@ fn probe_808_irfftn_multiaxis_last_even() {
         }
     }
     let spec = make_complex(&data, &s_shape);
-    let r = irfftn(&spec, Some(&[rows, output_cols]), None)
-        .expect("irfftn multi-axis even");
+    let r = irfftn(&spec, Some(&[rows, output_cols]), None).expect("irfftn multi-axis even");
     assert_eq!(r.shape(), &[rows, output_cols]);
     let actual = read_back(&r);
 
@@ -312,10 +290,7 @@ fn probe_808_irfftn_multiaxis_last_even() {
             for r_in in 0..rows {
                 let re = data[r_in * half_cols * 2 + c * 2];
                 let im = data[r_in * half_cols * 2 + c * 2 + 1];
-                let theta = 2.0 * std::f64::consts::PI
-                    * (r_in as f64)
-                    * (r_out as f64)
-                    / n0;
+                let theta = 2.0 * std::f64::consts::PI * (r_in as f64) * (r_out as f64) / n0;
                 let (cos_t, sin_t) = (theta.cos(), theta.sin());
                 sum_re += re * cos_t - im * sin_t;
                 sum_im += re * sin_t + im * cos_t;
@@ -337,12 +312,7 @@ fn probe_808_irfftn_multiaxis_last_even() {
 
     // Step 3: 1-D irfft per row.
     let expected = reference_irfft_1d(&flat, rows, half_cols, output_cols);
-    assert_close(
-        &actual,
-        &expected,
-        F64_FFT,
-        "irfftn multi-axis last even",
-    );
+    assert_close(&actual, &expected, F64_FFT, "irfftn multi-axis last even");
 }
 
 // ---------------------------------------------------------------------------
@@ -368,8 +338,7 @@ fn probe_808_irfftn_multiaxis_last_odd() {
         }
     }
     let spec = make_complex(&data, &s_shape);
-    let r = irfftn(&spec, Some(&[rows, output_cols]), None)
-        .expect("irfftn multi-axis odd");
+    let r = irfftn(&spec, Some(&[rows, output_cols]), None).expect("irfftn multi-axis odd");
     assert_eq!(r.shape(), &[rows, output_cols]);
     let actual = read_back(&r);
 
@@ -385,10 +354,7 @@ fn probe_808_irfftn_multiaxis_last_odd() {
             for r_in in 0..rows {
                 let re = data[r_in * half_cols * 2 + c * 2];
                 let im = data[r_in * half_cols * 2 + c * 2 + 1];
-                let theta = 2.0 * std::f64::consts::PI
-                    * (r_in as f64)
-                    * (r_out as f64)
-                    / n0;
+                let theta = 2.0 * std::f64::consts::PI * (r_in as f64) * (r_out as f64) / n0;
                 let (cos_t, sin_t) = (theta.cos(), theta.sin());
                 sum_re += re * cos_t - im * sin_t;
                 sum_im += re * sin_t + im * cos_t;
@@ -420,11 +386,8 @@ fn probe_808_hfft_even() {
     let output_n = 8usize;
     let batch = 1usize;
     let mut a_data: Vec<f64> = vec![
-        2.0, 1.5,    // DC im non-zero
-        0.5, -0.25,
-        -0.75, 0.125,
-        1.5, -0.5,
-        -1.0, 0.875, // Nyquist im non-zero
+        2.0, 1.5, // DC im non-zero
+        0.5, -0.25, -0.75, 0.125, 1.5, -0.5, -1.0, 0.875, // Nyquist im non-zero
     ];
     let spec = make_complex(&a_data, &[batch, half_n, 2]);
     let r = hfft(&spec, Some(output_n)).expect("hfft even");
@@ -446,10 +409,8 @@ fn probe_808_hfft_odd() {
     let output_n = 7usize;
     let batch = 1usize;
     let mut a_data: Vec<f64> = vec![
-        1.0, 0.6,    // DC im non-zero
-        -0.3, 0.7,
-        0.4, -0.2,
-        -0.9, 0.1,
+        1.0, 0.6, // DC im non-zero
+        -0.3, 0.7, 0.4, -0.2, -0.9, 0.1,
     ];
     let spec = make_complex(&a_data, &[batch, half_n, 2]);
     let r = hfft(&spec, Some(output_n)).expect("hfft odd");
@@ -476,7 +437,11 @@ fn probe_808_ihfft_real_input() {
     assert_eq!(r.shape(), &[n / 2 + 1, 2]);
     // Spot-check: ihfft of any real input has DC bin im == 0 (Hermitian).
     let d = read_back(&r);
-    assert!(d[1].abs() < F64_FFT, "ihfft DC im should be ~0, got {}", d[1]);
+    assert!(
+        d[1].abs() < F64_FFT,
+        "ihfft DC im should be ~0, got {}",
+        d[1]
+    );
     // Nyquist bin (index n/2 in half-spectrum) im should also be ~0 for even n.
     let nyq_idx = n / 2;
     let nyq_im = d[nyq_idx * 2 + 1];

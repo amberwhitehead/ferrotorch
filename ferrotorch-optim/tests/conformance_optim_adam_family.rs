@@ -63,8 +63,9 @@ fn fixtures() -> Value {
         .join("tests")
         .join("conformance")
         .join("fixtures_adam_family.json");
-    let body = std::fs::read_to_string(&p)
-        .unwrap_or_else(|e| panic!("read fixtures_adam_family.json: {e}. Run scripts/regenerate_optim_adam_fixtures.py"));
+    let body = std::fs::read_to_string(&p).unwrap_or_else(|e| {
+        panic!("read fixtures_adam_family.json: {e}. Run scripts/regenerate_optim_adam_fixtures.py")
+    });
     serde_json::from_str(&body).expect("parse fixtures_adam_family.json")
 }
 
@@ -95,23 +96,15 @@ fn assert_close_vec(actual: &[f64], expected: &[f64], ctx: &str) {
 
 /// Create a 1-D f64 Parameter from a slice of values.
 fn make_param(data: &[f64]) -> Parameter<f64> {
-    let t = Tensor::from_storage(
-        TensorStorage::cpu(data.to_vec()),
-        vec![data.len()],
-        true,
-    )
-    .unwrap();
+    let t =
+        Tensor::from_storage(TensorStorage::cpu(data.to_vec()), vec![data.len()], true).unwrap();
     Parameter::new(t)
 }
 
 /// Set a dense gradient on a parameter.
 fn set_grad(param: &Parameter<f64>, grad: &[f64]) {
-    let g = Tensor::from_storage(
-        TensorStorage::cpu(grad.to_vec()),
-        vec![grad.len()],
-        false,
-    )
-    .unwrap();
+    let g =
+        Tensor::from_storage(TensorStorage::cpu(grad.to_vec()), vec![grad.len()], false).unwrap();
     param.tensor().set_grad(Some(g)).unwrap();
 }
 
@@ -130,9 +123,21 @@ fn fixture_file_has_all_sections() {
     let meta = &fix["metadata"];
     let torch_ver = meta["torch_version"].as_str().unwrap();
     eprintln!("  fixture torch_version: {torch_ver}");
-    assert_eq!(torch_ver, "2.11.0", "fixture must be pinned to torch 2.11.0");
+    assert_eq!(
+        torch_ver, "2.11.0",
+        "fixture must be pinned to torch 2.11.0"
+    );
 
-    for section in &["adam", "adamw", "adamax", "nadam", "radam", "sparse_adam", "adafactor", "adadelta"] {
+    for section in &[
+        "adam",
+        "adamw",
+        "adamax",
+        "nadam",
+        "radam",
+        "sparse_adam",
+        "adafactor",
+        "adadelta",
+    ] {
         assert!(
             fix[section].is_array() && !fix[section].as_array().unwrap().is_empty(),
             "fixture section '{section}' is missing or empty"
@@ -417,7 +422,11 @@ fn sparse_adam_trajectory() {
         });
 
         for (step, (got, expected)) in results.iter().zip(trajectory.iter()).enumerate() {
-            assert_close_vec(got, expected, &format!("SparseAdam[{label}] step {}", step + 1));
+            assert_close_vec(
+                got,
+                expected,
+                &format!("SparseAdam[{label}] step {}", step + 1),
+            );
         }
     }
 }
@@ -468,7 +477,12 @@ fn adafactor_trajectory() {
         // max/min operations).
         let tol = 1e-9;
         for (step, (got, expected)) in results.iter().zip(trajectory.iter()).enumerate() {
-            assert_eq!(got.len(), expected.len(), "Adafactor[{label}] step {} length", step + 1);
+            assert_eq!(
+                got.len(),
+                expected.len(),
+                "Adafactor[{label}] step {} length",
+                step + 1
+            );
             for (i, (&a, &e)) in got.iter().zip(expected.iter()).enumerate() {
                 assert!(
                     (a - e).abs() <= tol,
@@ -517,7 +531,11 @@ fn adadelta_trajectory() {
         });
 
         for (step, (got, expected)) in results.iter().zip(trajectory.iter()).enumerate() {
-            assert_close_vec(got, expected, &format!("Adadelta[{label}] step {}", step + 1));
+            assert_close_vec(
+                got,
+                expected,
+                &format!("Adadelta[{label}] step {}", step + 1),
+            );
         }
     }
 }
@@ -553,7 +571,10 @@ fn config_defaults_match_torch() {
     // NAdam
     let c = NAdamConfig::default();
     assert!((c.lr - 2e-3).abs() < 1e-15, "NAdam lr default");
-    assert!((c.momentum_decay - 4e-3).abs() < 1e-15, "NAdam momentum_decay default");
+    assert!(
+        (c.momentum_decay - 4e-3).abs() < 1e-15,
+        "NAdam momentum_decay default"
+    );
 
     // RAdam
     let c = RAdamConfig::default();
@@ -566,7 +587,10 @@ fn config_defaults_match_torch() {
 
     // Adafactor
     let c = AdafactorConfig::default();
-    assert!(c.lr.is_none(), "Adafactor lr default is None (relative step)");
+    assert!(
+        c.lr.is_none(),
+        "Adafactor lr default is None (relative step)"
+    );
     assert!(c.relative_step, "Adafactor relative_step default");
 
     // Adadelta
@@ -621,7 +645,10 @@ fn adam_state_dict_roundtrip() {
     let entry = &saved[key];
     assert_eq!(entry["step_count"][0] as u64, 3, "step_count after 3 steps");
     assert!(!entry["exp_avg"].is_empty(), "exp_avg should be non-empty");
-    assert!(!entry["exp_avg_sq"].is_empty(), "exp_avg_sq should be non-empty");
+    assert!(
+        !entry["exp_avg_sq"].is_empty(),
+        "exp_avg_sq should be non-empty"
+    );
 
     let param2 = make_param(&[1.0, -0.5, 0.3]);
     let mut opt2 = Adam::new(vec![param2], AdamConfig::default());
@@ -629,13 +656,11 @@ fn adam_state_dict_roundtrip() {
 
     let loaded = opt2.state_dict().unwrap();
     assert_eq!(
-        loaded[key]["step_count"],
-        saved[key]["step_count"],
+        loaded[key]["step_count"], saved[key]["step_count"],
         "step_count round-trip"
     );
     assert_eq!(
-        loaded[key]["exp_avg"],
-        saved[key]["exp_avg"],
+        loaded[key]["exp_avg"], saved[key]["exp_avg"],
         "exp_avg round-trip"
     );
 }
@@ -656,23 +681,49 @@ fn lr_accessors_all_optimizers() {
                 $init_lr
             );
             opt.set_lr(0.12345);
-            assert!(
-                (opt.lr() - 0.12345).abs() < 1e-15,
-                "set_lr not reflected"
-            );
+            assert!((opt.lr() - 0.12345).abs() < 1e-15, "set_lr not reflected");
         }};
     }
 
     let p = || make_param(&[1.0]);
 
-    check_lr!(Adam::new(vec![p()], AdamConfig::default().with_lr(1e-3)), 1e-3);
-    check_lr!(AdamW::new(vec![p()], AdamWConfig::default().with_lr(1e-3)), 1e-3);
-    check_lr!(Adamax::new(vec![p()], AdamaxConfig::default().with_lr(2e-3)), 2e-3);
-    check_lr!(NAdam::new(vec![p()], NAdamConfig::default().with_lr(2e-3)), 2e-3);
-    check_lr!(RAdam::new(vec![p()], RAdamConfig::default().with_lr(1e-3)), 1e-3);
-    check_lr!(SparseAdam::new(vec![p()], SparseAdamConfig::default().with_lr(1e-3)), 1e-3);
-    check_lr!(Adafactor::new(vec![p()], AdafactorConfig::default().with_lr(Some(1e-3)).with_relative_step(false)), 1e-3);
-    check_lr!(Adadelta::new(vec![p()], AdadeltaConfig::default().with_lr(1.0)), 1.0);
+    check_lr!(
+        Adam::new(vec![p()], AdamConfig::default().with_lr(1e-3)),
+        1e-3
+    );
+    check_lr!(
+        AdamW::new(vec![p()], AdamWConfig::default().with_lr(1e-3)),
+        1e-3
+    );
+    check_lr!(
+        Adamax::new(vec![p()], AdamaxConfig::default().with_lr(2e-3)),
+        2e-3
+    );
+    check_lr!(
+        NAdam::new(vec![p()], NAdamConfig::default().with_lr(2e-3)),
+        2e-3
+    );
+    check_lr!(
+        RAdam::new(vec![p()], RAdamConfig::default().with_lr(1e-3)),
+        1e-3
+    );
+    check_lr!(
+        SparseAdam::new(vec![p()], SparseAdamConfig::default().with_lr(1e-3)),
+        1e-3
+    );
+    check_lr!(
+        Adafactor::new(
+            vec![p()],
+            AdafactorConfig::default()
+                .with_lr(Some(1e-3))
+                .with_relative_step(false)
+        ),
+        1e-3
+    );
+    check_lr!(
+        Adadelta::new(vec![p()], AdadeltaConfig::default().with_lr(1.0)),
+        1.0
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -792,7 +843,10 @@ fn adafactor_relative_step_runs() {
     );
     opt.step().unwrap();
     let v = read_param(&param);
-    let changed = v.iter().zip([0.5f64, -0.5, 1.0, -1.0, 0.25].iter()).any(|(a, b)| (a - b).abs() > 1e-15);
+    let changed = v
+        .iter()
+        .zip([0.5f64, -0.5, 1.0, -1.0, 0.25].iter())
+        .any(|(a, b)| (a - b).abs() > 1e-15);
     assert!(changed, "Adafactor relative step should update params");
 }
 
@@ -867,22 +921,58 @@ fn surface_anchors() {
     // All items above are exercised through method calls in the tests
     // above; this function exists so the string `Type::method` appears
     // in a single searchable place for the Layer 4 gate.
-    let _ = AdamConfig::default().with_lr(1e-3).with_betas((0.9, 0.999)).with_eps(1e-8)
-        .with_weight_decay(0.0).with_amsgrad(false).with_maximize(false).with_foreach(false);
-    let _ = AdamWConfig::default().with_lr(1e-3).with_betas((0.9, 0.999)).with_weight_decay(0.01)
-        .with_foreach(false).with_maximize(false);
-    let _ = AdamaxConfig::default().with_lr(2e-3).with_betas((0.9, 0.999))
-        .with_eps(1e-8).with_weight_decay(0.0).with_foreach(false);
-    let _ = NAdamConfig::default().with_lr(2e-3).with_betas((0.9, 0.999))
-        .with_eps(1e-8).with_weight_decay(0.0).with_momentum_decay(4e-3)
-        .with_decoupled_weight_decay(false).with_foreach(false);
-    let _ = RAdamConfig::default().with_lr(1e-3).with_betas((0.9, 0.999))
-        .with_eps(1e-8).with_weight_decay(0.0).with_decoupled_weight_decay(false)
+    let _ = AdamConfig::default()
+        .with_lr(1e-3)
+        .with_betas((0.9, 0.999))
+        .with_eps(1e-8)
+        .with_weight_decay(0.0)
+        .with_amsgrad(false)
+        .with_maximize(false)
         .with_foreach(false);
-    let _ = SparseAdamConfig::default().with_lr(1e-3).with_betas((0.9, 0.999)).with_eps(1e-8);
-    let _ = AdafactorConfig::default().with_lr(Some(1e-3)).with_beta1(None)
-        .with_decay_rate(-0.8).with_eps_sq(1e-30).with_eps_rms(1e-3)
-        .with_weight_decay(0.0).with_relative_step(false).with_warmup_init(false);
-    let _ = AdadeltaConfig::default().with_lr(1.0).with_rho(0.9).with_eps(1e-6)
-        .with_weight_decay(0.0).with_foreach(false);
+    let _ = AdamWConfig::default()
+        .with_lr(1e-3)
+        .with_betas((0.9, 0.999))
+        .with_weight_decay(0.01)
+        .with_foreach(false)
+        .with_maximize(false);
+    let _ = AdamaxConfig::default()
+        .with_lr(2e-3)
+        .with_betas((0.9, 0.999))
+        .with_eps(1e-8)
+        .with_weight_decay(0.0)
+        .with_foreach(false);
+    let _ = NAdamConfig::default()
+        .with_lr(2e-3)
+        .with_betas((0.9, 0.999))
+        .with_eps(1e-8)
+        .with_weight_decay(0.0)
+        .with_momentum_decay(4e-3)
+        .with_decoupled_weight_decay(false)
+        .with_foreach(false);
+    let _ = RAdamConfig::default()
+        .with_lr(1e-3)
+        .with_betas((0.9, 0.999))
+        .with_eps(1e-8)
+        .with_weight_decay(0.0)
+        .with_decoupled_weight_decay(false)
+        .with_foreach(false);
+    let _ = SparseAdamConfig::default()
+        .with_lr(1e-3)
+        .with_betas((0.9, 0.999))
+        .with_eps(1e-8);
+    let _ = AdafactorConfig::default()
+        .with_lr(Some(1e-3))
+        .with_beta1(None)
+        .with_decay_rate(-0.8)
+        .with_eps_sq(1e-30)
+        .with_eps_rms(1e-3)
+        .with_weight_decay(0.0)
+        .with_relative_step(false)
+        .with_warmup_init(false);
+    let _ = AdadeltaConfig::default()
+        .with_lr(1.0)
+        .with_rho(0.9)
+        .with_eps(1e-6)
+        .with_weight_decay(0.0)
+        .with_foreach(false);
 }

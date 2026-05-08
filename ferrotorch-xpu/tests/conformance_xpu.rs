@@ -40,8 +40,8 @@ use std::path::PathBuf;
 use ferrotorch_core::{Device, FerrotorchError};
 use ferrotorch_xpu::{
     XpuDevice, make_xpu_tensor, xpu_abs, xpu_add, xpu_chebyshev_polynomial_t,
-    xpu_chebyshev_polynomial_u, xpu_chebyshev_polynomial_v, xpu_chebyshev_polynomial_w,
-    xpu_cos, xpu_div, xpu_exp, xpu_hermite_polynomial_h, xpu_hermite_polynomial_he,
+    xpu_chebyshev_polynomial_u, xpu_chebyshev_polynomial_v, xpu_chebyshev_polynomial_w, xpu_cos,
+    xpu_div, xpu_exp, xpu_hermite_polynomial_h, xpu_hermite_polynomial_he,
     xpu_laguerre_polynomial_l, xpu_legendre_polynomial_p, xpu_ln, xpu_matmul, xpu_mul, xpu_neg,
     xpu_relu, xpu_sigmoid, xpu_sin, xpu_sqrt, xpu_sub, xpu_tanh,
 };
@@ -55,11 +55,7 @@ use serde::Deserialize;
 /// Usage: `cascade_skip!("reason string")`.
 macro_rules! cascade_skip {
     ($reason:literal) => {{
-        eprintln!(
-            "  [cascade_skip] {} — {}",
-            module_path!(),
-            $reason
-        );
+        eprintln!("  [cascade_skip] {} — {}", module_path!(), $reason);
         return;
     }};
 }
@@ -77,12 +73,18 @@ mod tolerance {
     //! live-path dispatch when Intel XPU hardware is present.
 
     /// Elementwise f32 CPU (add/sub/mul/div/neg/abs/relu): IEEE 754 exact or 1 ULP.
-    #[allow(dead_code, reason = "reserved for live-XPU binary-op conformance tests")]
+    #[allow(
+        dead_code,
+        reason = "reserved for live-XPU binary-op conformance tests"
+    )]
     pub const F32_ELEMENTWISE: f32 = 1e-6;
 
     /// Transcendental f32 (exp/ln/sqrt/sin/cos/tanh/sigmoid): GPU approx may be
     /// looser; CPU reference should be within 1e-5.
-    #[allow(dead_code, reason = "reserved for live-XPU transcendental conformance tests")]
+    #[allow(
+        dead_code,
+        reason = "reserved for live-XPU transcendental conformance tests"
+    )]
     pub const F32_TRANSCENDENTAL: f32 = 1e-5;
 
     /// Matmul f32: O(n) error accumulation for small matrices.
@@ -91,10 +93,16 @@ mod tolerance {
 
     /// Polynomial approximation f32: three-term recurrences accumulate error
     /// proportional to degree × machine eps.
-    #[allow(dead_code, reason = "reserved for live-XPU polynomial conformance tests")]
+    #[allow(
+        dead_code,
+        reason = "reserved for live-XPU polynomial conformance tests"
+    )]
     pub const F32_POLYNOMIAL: f32 = 1e-4;
 
-    #[allow(dead_code, reason = "reserved for live-XPU value-comparison assertions")]
+    #[allow(
+        dead_code,
+        reason = "reserved for live-XPU value-comparison assertions"
+    )]
     pub fn assert_close_f32(actual: &[f32], expected: &[f32], tol: f32, label: &str) {
         assert_eq!(
             actual.len(),
@@ -308,8 +316,7 @@ fn xpu_device_new_errors_without_backend() {
 
     // XpuDevice::new may panic internally (wgpu adapter missing) or return
     // Err(DeviceUnavailable). Use catch_unwind to handle both.
-    let result =
-        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| XpuDevice::new(0)));
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| XpuDevice::new(0)));
     match result {
         // Clean Err — expected when wgpu feature is disabled.
         Ok(Err(FerrotorchError::DeviceUnavailable)) => {}
@@ -555,8 +562,16 @@ fn cpu_reference_binary_ops_well_formed() {
 fn cpu_reference_unary_ops_well_formed() {
     let file = load_fixtures();
     for op in &[
-        "xpu_neg", "xpu_abs", "xpu_relu", "xpu_exp", "xpu_ln", "xpu_sqrt",
-        "xpu_sin", "xpu_cos", "xpu_tanh", "xpu_sigmoid",
+        "xpu_neg",
+        "xpu_abs",
+        "xpu_relu",
+        "xpu_exp",
+        "xpu_ln",
+        "xpu_sqrt",
+        "xpu_sin",
+        "xpu_cos",
+        "xpu_tanh",
+        "xpu_sigmoid",
     ] {
         check_cpu_reference_fixtures(op, false, &file);
     }
@@ -577,15 +592,21 @@ fn cpu_reference_polynomial_ops_well_formed() {
         "xpu_legendre_polynomial_p",
     ] {
         let cases = fixtures_for(&file, op);
-        assert!(
-            !cases.is_empty(),
-            "no fixtures for polynomial op {op:?}"
-        );
+        assert!(!cases.is_empty(), "no fixtures for polynomial op {op:?}");
         for (i, f) in cases.iter().enumerate() {
             let label = format!("{op}[{i}]");
-            assert!(f.cascade_skip_live_xpu, "{label}: cascade_skip_live_xpu must be true");
-            assert!(f.n.is_some(), "{label}: polynomial fixture must have `n` field");
-            assert!(f.x.is_some(), "{label}: polynomial fixture must have `x` field");
+            assert!(
+                f.cascade_skip_live_xpu,
+                "{label}: cascade_skip_live_xpu must be true"
+            );
+            assert!(
+                f.n.is_some(),
+                "{label}: polynomial fixture must have `n` field"
+            );
+            assert!(
+                f.x.is_some(),
+                "{label}: polynomial fixture must have `x` field"
+            );
             assert!(
                 f.expected.is_some(),
                 "{label}: polynomial fixture must have `expected` field"
@@ -601,10 +622,16 @@ fn cpu_reference_matmul_well_formed() {
     assert!(!cases.is_empty(), "no xpu_matmul fixtures found");
     for (i, f) in cases.iter().enumerate() {
         let label = format!("xpu_matmul[{i}]");
-        assert!(f.cascade_skip_live_xpu, "{label}: must be cascade_skip_live_xpu");
+        assert!(
+            f.cascade_skip_live_xpu,
+            "{label}: must be cascade_skip_live_xpu"
+        );
         assert!(f.a_shape.is_some(), "{label}: missing a_shape");
         assert!(f.b_shape.is_some(), "{label}: missing b_shape");
-        assert!(f.expected_shape.is_some(), "{label}: missing expected_shape");
+        assert!(
+            f.expected_shape.is_some(),
+            "{label}: missing expected_shape"
+        );
         assert!(f.expected.is_some(), "{label}: missing expected");
         let a_shape = f.a_shape.as_ref().unwrap();
         let b_shape = f.b_shape.as_ref().unwrap();
@@ -629,13 +656,13 @@ fn cpu_reference_matmul_well_formed() {
 fn xpu_add_rejects_non_xpu_input_contract() {
     let file = load_fixtures();
     let cases = fixtures_for(&file, "xpu_add_rejects_cpu_input");
-    assert!(!cases.is_empty(), "fixture xpu_add_rejects_cpu_input not found");
+    assert!(
+        !cases.is_empty(),
+        "fixture xpu_add_rejects_cpu_input not found"
+    );
 
     let f = cases[0];
-    let accepted_variants = f
-        .expected_error_variants
-        .as_deref()
-        .unwrap_or(&[]);
+    let accepted_variants = f.expected_error_variants.as_deref().unwrap_or(&[]);
     // DeviceUnavailable and DeviceMismatch are both in the fixture's accepted list.
     assert!(
         accepted_variants
@@ -674,7 +701,10 @@ fn xpu_add_rejects_non_xpu_input_contract() {
 fn xpu_matmul_rejects_1d_input_contract() {
     let file = load_fixtures();
     let cases = fixtures_for(&file, "xpu_matmul_rejects_1d_input");
-    assert!(!cases.is_empty(), "fixture xpu_matmul_rejects_1d_input not found");
+    assert!(
+        !cases.is_empty(),
+        "fixture xpu_matmul_rejects_1d_input not found"
+    );
 
     let f = cases[0];
     assert_eq!(
@@ -785,60 +815,121 @@ fn live_xpu_make_xpu_tensor() {
 fn all_op_symbols_resolve() {
     // Reference each function pointer. These are never called; the test just
     // needs them to type-check and link.
-    let _: fn(&ferrotorch_core::Tensor<f32>, &ferrotorch_core::Tensor<f32>, &XpuDevice)
-        -> ferrotorch_core::FerrotorchResult<ferrotorch_core::Tensor<f32>> = xpu_add;
-    let _: fn(&ferrotorch_core::Tensor<f32>, &ferrotorch_core::Tensor<f32>, &XpuDevice)
-        -> ferrotorch_core::FerrotorchResult<ferrotorch_core::Tensor<f32>> = xpu_sub;
-    let _: fn(&ferrotorch_core::Tensor<f32>, &ferrotorch_core::Tensor<f32>, &XpuDevice)
-        -> ferrotorch_core::FerrotorchResult<ferrotorch_core::Tensor<f32>> = xpu_mul;
-    let _: fn(&ferrotorch_core::Tensor<f32>, &ferrotorch_core::Tensor<f32>, &XpuDevice)
-        -> ferrotorch_core::FerrotorchResult<ferrotorch_core::Tensor<f32>> = xpu_div;
-    let _: fn(&ferrotorch_core::Tensor<f32>, &ferrotorch_core::Tensor<f32>, &XpuDevice)
-        -> ferrotorch_core::FerrotorchResult<ferrotorch_core::Tensor<f32>> = xpu_matmul;
-    let _: fn(&ferrotorch_core::Tensor<f32>, &XpuDevice)
-        -> ferrotorch_core::FerrotorchResult<ferrotorch_core::Tensor<f32>> = xpu_neg;
-    let _: fn(&ferrotorch_core::Tensor<f32>, &XpuDevice)
-        -> ferrotorch_core::FerrotorchResult<ferrotorch_core::Tensor<f32>> = xpu_abs;
-    let _: fn(&ferrotorch_core::Tensor<f32>, &XpuDevice)
-        -> ferrotorch_core::FerrotorchResult<ferrotorch_core::Tensor<f32>> = xpu_relu;
-    let _: fn(&ferrotorch_core::Tensor<f32>, &XpuDevice)
-        -> ferrotorch_core::FerrotorchResult<ferrotorch_core::Tensor<f32>> = xpu_exp;
-    let _: fn(&ferrotorch_core::Tensor<f32>, &XpuDevice)
-        -> ferrotorch_core::FerrotorchResult<ferrotorch_core::Tensor<f32>> = xpu_ln;
-    let _: fn(&ferrotorch_core::Tensor<f32>, &XpuDevice)
-        -> ferrotorch_core::FerrotorchResult<ferrotorch_core::Tensor<f32>> = xpu_sqrt;
-    let _: fn(&ferrotorch_core::Tensor<f32>, &XpuDevice)
-        -> ferrotorch_core::FerrotorchResult<ferrotorch_core::Tensor<f32>> = xpu_sin;
-    let _: fn(&ferrotorch_core::Tensor<f32>, &XpuDevice)
-        -> ferrotorch_core::FerrotorchResult<ferrotorch_core::Tensor<f32>> = xpu_cos;
-    let _: fn(&ferrotorch_core::Tensor<f32>, &XpuDevice)
-        -> ferrotorch_core::FerrotorchResult<ferrotorch_core::Tensor<f32>> = xpu_tanh;
-    let _: fn(&ferrotorch_core::Tensor<f32>, &XpuDevice)
-        -> ferrotorch_core::FerrotorchResult<ferrotorch_core::Tensor<f32>> = xpu_sigmoid;
-    let _: fn(&ferrotorch_core::Tensor<f32>, usize, &XpuDevice)
-        -> ferrotorch_core::FerrotorchResult<ferrotorch_core::Tensor<f32>> =
+    let _: fn(
+        &ferrotorch_core::Tensor<f32>,
+        &ferrotorch_core::Tensor<f32>,
+        &XpuDevice,
+    ) -> ferrotorch_core::FerrotorchResult<ferrotorch_core::Tensor<f32>> = xpu_add;
+    let _: fn(
+        &ferrotorch_core::Tensor<f32>,
+        &ferrotorch_core::Tensor<f32>,
+        &XpuDevice,
+    ) -> ferrotorch_core::FerrotorchResult<ferrotorch_core::Tensor<f32>> = xpu_sub;
+    let _: fn(
+        &ferrotorch_core::Tensor<f32>,
+        &ferrotorch_core::Tensor<f32>,
+        &XpuDevice,
+    ) -> ferrotorch_core::FerrotorchResult<ferrotorch_core::Tensor<f32>> = xpu_mul;
+    let _: fn(
+        &ferrotorch_core::Tensor<f32>,
+        &ferrotorch_core::Tensor<f32>,
+        &XpuDevice,
+    ) -> ferrotorch_core::FerrotorchResult<ferrotorch_core::Tensor<f32>> = xpu_div;
+    let _: fn(
+        &ferrotorch_core::Tensor<f32>,
+        &ferrotorch_core::Tensor<f32>,
+        &XpuDevice,
+    ) -> ferrotorch_core::FerrotorchResult<ferrotorch_core::Tensor<f32>> = xpu_matmul;
+    let _: fn(
+        &ferrotorch_core::Tensor<f32>,
+        &XpuDevice,
+    ) -> ferrotorch_core::FerrotorchResult<ferrotorch_core::Tensor<f32>> = xpu_neg;
+    let _: fn(
+        &ferrotorch_core::Tensor<f32>,
+        &XpuDevice,
+    ) -> ferrotorch_core::FerrotorchResult<ferrotorch_core::Tensor<f32>> = xpu_abs;
+    let _: fn(
+        &ferrotorch_core::Tensor<f32>,
+        &XpuDevice,
+    ) -> ferrotorch_core::FerrotorchResult<ferrotorch_core::Tensor<f32>> = xpu_relu;
+    let _: fn(
+        &ferrotorch_core::Tensor<f32>,
+        &XpuDevice,
+    ) -> ferrotorch_core::FerrotorchResult<ferrotorch_core::Tensor<f32>> = xpu_exp;
+    let _: fn(
+        &ferrotorch_core::Tensor<f32>,
+        &XpuDevice,
+    ) -> ferrotorch_core::FerrotorchResult<ferrotorch_core::Tensor<f32>> = xpu_ln;
+    let _: fn(
+        &ferrotorch_core::Tensor<f32>,
+        &XpuDevice,
+    ) -> ferrotorch_core::FerrotorchResult<ferrotorch_core::Tensor<f32>> = xpu_sqrt;
+    let _: fn(
+        &ferrotorch_core::Tensor<f32>,
+        &XpuDevice,
+    ) -> ferrotorch_core::FerrotorchResult<ferrotorch_core::Tensor<f32>> = xpu_sin;
+    let _: fn(
+        &ferrotorch_core::Tensor<f32>,
+        &XpuDevice,
+    ) -> ferrotorch_core::FerrotorchResult<ferrotorch_core::Tensor<f32>> = xpu_cos;
+    let _: fn(
+        &ferrotorch_core::Tensor<f32>,
+        &XpuDevice,
+    ) -> ferrotorch_core::FerrotorchResult<ferrotorch_core::Tensor<f32>> = xpu_tanh;
+    let _: fn(
+        &ferrotorch_core::Tensor<f32>,
+        &XpuDevice,
+    ) -> ferrotorch_core::FerrotorchResult<ferrotorch_core::Tensor<f32>> = xpu_sigmoid;
+    let _: fn(
+        &ferrotorch_core::Tensor<f32>,
+        usize,
+        &XpuDevice,
+    ) -> ferrotorch_core::FerrotorchResult<ferrotorch_core::Tensor<f32>> =
         xpu_chebyshev_polynomial_t;
-    let _: fn(&ferrotorch_core::Tensor<f32>, usize, &XpuDevice)
-        -> ferrotorch_core::FerrotorchResult<ferrotorch_core::Tensor<f32>> =
+    let _: fn(
+        &ferrotorch_core::Tensor<f32>,
+        usize,
+        &XpuDevice,
+    ) -> ferrotorch_core::FerrotorchResult<ferrotorch_core::Tensor<f32>> =
         xpu_chebyshev_polynomial_u;
-    let _: fn(&ferrotorch_core::Tensor<f32>, usize, &XpuDevice)
-        -> ferrotorch_core::FerrotorchResult<ferrotorch_core::Tensor<f32>> =
+    let _: fn(
+        &ferrotorch_core::Tensor<f32>,
+        usize,
+        &XpuDevice,
+    ) -> ferrotorch_core::FerrotorchResult<ferrotorch_core::Tensor<f32>> =
         xpu_chebyshev_polynomial_v;
-    let _: fn(&ferrotorch_core::Tensor<f32>, usize, &XpuDevice)
-        -> ferrotorch_core::FerrotorchResult<ferrotorch_core::Tensor<f32>> =
+    let _: fn(
+        &ferrotorch_core::Tensor<f32>,
+        usize,
+        &XpuDevice,
+    ) -> ferrotorch_core::FerrotorchResult<ferrotorch_core::Tensor<f32>> =
         xpu_chebyshev_polynomial_w;
-    let _: fn(&ferrotorch_core::Tensor<f32>, usize, &XpuDevice)
-        -> ferrotorch_core::FerrotorchResult<ferrotorch_core::Tensor<f32>> =
-        xpu_hermite_polynomial_h;
-    let _: fn(&ferrotorch_core::Tensor<f32>, usize, &XpuDevice)
-        -> ferrotorch_core::FerrotorchResult<ferrotorch_core::Tensor<f32>> =
+    let _: fn(
+        &ferrotorch_core::Tensor<f32>,
+        usize,
+        &XpuDevice,
+    ) -> ferrotorch_core::FerrotorchResult<ferrotorch_core::Tensor<f32>> = xpu_hermite_polynomial_h;
+    let _: fn(
+        &ferrotorch_core::Tensor<f32>,
+        usize,
+        &XpuDevice,
+    ) -> ferrotorch_core::FerrotorchResult<ferrotorch_core::Tensor<f32>> =
         xpu_hermite_polynomial_he;
-    let _: fn(&ferrotorch_core::Tensor<f32>, usize, &XpuDevice)
-        -> ferrotorch_core::FerrotorchResult<ferrotorch_core::Tensor<f32>> =
+    let _: fn(
+        &ferrotorch_core::Tensor<f32>,
+        usize,
+        &XpuDevice,
+    ) -> ferrotorch_core::FerrotorchResult<ferrotorch_core::Tensor<f32>> =
         xpu_laguerre_polynomial_l;
-    let _: fn(&ferrotorch_core::Tensor<f32>, usize, &XpuDevice)
-        -> ferrotorch_core::FerrotorchResult<ferrotorch_core::Tensor<f32>> =
+    let _: fn(
+        &ferrotorch_core::Tensor<f32>,
+        usize,
+        &XpuDevice,
+    ) -> ferrotorch_core::FerrotorchResult<ferrotorch_core::Tensor<f32>> =
         xpu_legendre_polynomial_p;
-    let _: fn(Vec<f32>, &[usize], &XpuDevice)
-        -> ferrotorch_core::FerrotorchResult<ferrotorch_core::Tensor<f32>> = make_xpu_tensor;
+    let _: fn(
+        Vec<f32>,
+        &[usize],
+        &XpuDevice,
+    ) -> ferrotorch_core::FerrotorchResult<ferrotorch_core::Tensor<f32>> = make_xpu_tensor;
 }

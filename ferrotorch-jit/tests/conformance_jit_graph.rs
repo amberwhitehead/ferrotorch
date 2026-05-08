@@ -48,7 +48,7 @@
     clippy::cast_precision_loss,
     clippy::cast_sign_loss,
     clippy::uninlined_format_args,
-    clippy::explicit_iter_loop,
+    clippy::explicit_iter_loop
 )]
 
 use std::path::PathBuf;
@@ -102,9 +102,7 @@ fn fixture_path() -> PathBuf {
 fn load_fixtures() -> serde_json::Value {
     let path = fixture_path();
     let body = std::fs::read_to_string(&path).unwrap_or_else(|e| {
-        panic!(
-            "read fixtures_graph.json: {e}. Run scripts/regenerate_jit_fixtures.py"
-        )
+        panic!("read fixtures_graph.json: {e}. Run scripts/regenerate_jit_fixtures.py")
     });
     serde_json::from_str(&body).expect("parse fixtures_graph.json")
 }
@@ -147,7 +145,10 @@ fn fixtures_file_exists_and_is_c7_1() {
         .as_str()
         .expect("sub_phase in metadata");
     assert_eq!(phase, "C7.1", "fixture sub_phase must be C7.1");
-    let n = fixtures["fixtures"].as_array().expect("fixtures array").len();
+    let n = fixtures["fixtures"]
+        .as_array()
+        .expect("fixtures array")
+        .len();
     assert!(n >= 20, "expected at least 20 C7.1 fixtures, got {n}");
 }
 
@@ -284,8 +285,16 @@ fn graph_constant_detection() {
     let input_is_const = expected["input_is_constant"].as_bool().unwrap();
     let const_is_const = expected["constant_is_constant"].as_bool().unwrap();
 
-    assert_eq!(g.is_constant(x), input_is_const, "input should not be constant");
-    assert_eq!(g.is_constant(c), const_is_const, "constant should be constant");
+    assert_eq!(
+        g.is_constant(x),
+        input_is_const,
+        "input should not be constant"
+    );
+    assert_eq!(
+        g.is_constant(c),
+        const_is_const,
+        "constant should be constant"
+    );
 }
 
 /// graph_dtype_default_f32: default construction tags every IrValue with F32.
@@ -313,8 +322,7 @@ fn graph_dtype_explicit_f64() {
     let mut g = IrGraph::new();
     let x = g.add_input_with_dtype(vec![2], Dtype::F64);
     let c = g.add_constant_with_dtype(vec![0.0, 1.0], vec![2], Dtype::F64);
-    let (_, outs) =
-        g.add_node_with_dtype(IrOpKind::Add, vec![x, c], vec![vec![2]], &[Dtype::F64]);
+    let (_, outs) = g.add_node_with_dtype(IrOpKind::Add, vec![x, c], vec![vec![2]], &[Dtype::F64]);
     g.set_outputs(vec![outs[0]]);
 
     for v in &g.values {
@@ -332,8 +340,7 @@ fn graph_dtype_explicit_f64() {
 #[test]
 fn graph_dtype_name_round_trip() {
     let fixtures = load_fixtures();
-    let fx =
-        fixture_by_case(&fixtures, "graph_dtype_name_round_trip").expect("fixture missing");
+    let fx = fixture_by_case(&fixtures, "graph_dtype_name_round_trip").expect("fixture missing");
     let expected = &fx["expected"];
 
     assert_eq!(
@@ -352,8 +359,11 @@ fn graph_dtype_name_round_trip() {
 #[test]
 fn graph_dtype_from_type_name_recognizes_primitives() {
     let fixtures = load_fixtures();
-    let fx = fixture_by_case(&fixtures, "graph_dtype_from_type_name_recognizes_primitives")
-        .expect("fixture missing");
+    let fx = fixture_by_case(
+        &fixtures,
+        "graph_dtype_from_type_name_recognizes_primitives",
+    )
+    .expect("fixture missing");
     let expected = &fx["expected"];
 
     assert_eq!(
@@ -376,11 +386,7 @@ fn graph_dtype_from_type_name_recognizes_primitives() {
         None,
         "bf16 should return None"
     );
-    assert_eq!(
-        Dtype::from_type_name("i32"),
-        None,
-        "i32 should return None"
-    );
+    assert_eq!(Dtype::from_type_name("i32"), None, "i32 should return None");
 
     // Confirm fixture expectations agree.
     assert_eq!(expected["f32_maps"].as_str().unwrap(), "F32");
@@ -449,9 +455,7 @@ fn trace_add_self_structure() {
 
     let x = grad_vec_f32(vec![1.0, 2.0, 3.0]);
     let graph = trace(
-        |inputs: &[Tensor<f32>]| -> FerrotorchResult<Tensor<f32>> {
-            add(&inputs[0], &inputs[0])
-        },
+        |inputs: &[Tensor<f32>]| -> FerrotorchResult<Tensor<f32>> { add(&inputs[0], &inputs[0]) },
         &[x],
     )
     .unwrap();
@@ -481,8 +485,7 @@ fn trace_add_self_structure() {
     assert_eq!(add_node.inputs.len(), 2, "Add takes 2 inputs");
     if expected["add_inputs_both_same"].as_bool().unwrap() {
         assert_eq!(
-            add_node.inputs[0],
-            add_node.inputs[1],
+            add_node.inputs[0], add_node.inputs[1],
             "Add's two input IrValueIds must be the same (value reuse)"
         );
     }
@@ -577,13 +580,11 @@ fn trace_no_grad_fn_error() {
     let fx = fixture_by_case(&fixtures, "trace_no_grad_fn_error").expect("fixture missing");
     let expected = &fx["expected"];
 
-    let x = Tensor::from_storage(TensorStorage::cpu(vec![1.0f32, 2.0, 3.0]), vec![3], false)
-        .unwrap(); // requires_grad = false
+    let x =
+        Tensor::from_storage(TensorStorage::cpu(vec![1.0f32, 2.0, 3.0]), vec![3], false).unwrap(); // requires_grad = false
 
     let result = trace(
-        |inputs: &[Tensor<f32>]| -> FerrotorchResult<Tensor<f32>> {
-            add(&inputs[0], &inputs[0])
-        },
+        |inputs: &[Tensor<f32>]| -> FerrotorchResult<Tensor<f32>> { add(&inputs[0], &inputs[0]) },
         &[x],
     );
 
@@ -648,8 +649,8 @@ fn trace_deeper_a_plus_b_squared() {
 #[test]
 fn symbolic_guard_accepts_varying_batch() {
     let fixtures = load_fixtures();
-    let fx =
-        fixture_by_case(&fixtures, "symbolic_guard_accepts_varying_batch").expect("fixture missing");
+    let fx = fixture_by_case(&fixtures, "symbolic_guard_accepts_varying_batch")
+        .expect("fixture missing");
     let expected = &fx["expected"];
 
     let trace_shape = vec![4usize, 10];
@@ -679,8 +680,8 @@ fn symbolic_guard_accepts_varying_batch() {
 #[test]
 fn symbolic_guard_rejects_concrete_dim() {
     let fixtures = load_fixtures();
-    let fx = fixture_by_case(&fixtures, "symbolic_guard_rejects_concrete_dim")
-        .expect("fixture missing");
+    let fx =
+        fixture_by_case(&fixtures, "symbolic_guard_rejects_concrete_dim").expect("fixture missing");
     let expected = &fx["expected"];
 
     let trace_shape = vec![4usize, 10];
@@ -729,18 +730,14 @@ fn symbolic_guard_rejects_rank_mismatch() {
     assert!(result.is_err(), "guard must reject rank mismatch");
     let msg = format!("{}", result.unwrap_err());
     let needle = expected["error_contains"].as_str().unwrap();
-    assert!(
-        msg.contains(needle),
-        "error must contain {needle:?}: {msg}",
-    );
+    assert!(msg.contains(needle), "error must contain {needle:?}: {msg}",);
 }
 
 /// symbolic_guard_range_below_min: rejects when symbolic dim is below min.
 #[test]
 fn symbolic_guard_range_below_min() {
     let fixtures = load_fixtures();
-    let fx =
-        fixture_by_case(&fixtures, "symbolic_guard_range_below_min").expect("fixture missing");
+    let fx = fixture_by_case(&fixtures, "symbolic_guard_range_below_min").expect("fixture missing");
     let expected = &fx["expected"];
 
     let min = fx["min"].as_u64().unwrap() as usize;
@@ -767,8 +764,7 @@ fn symbolic_guard_range_below_min() {
 #[test]
 fn symbolic_guard_range_above_max() {
     let fixtures = load_fixtures();
-    let fx =
-        fixture_by_case(&fixtures, "symbolic_guard_range_above_max").expect("fixture missing");
+    let fx = fixture_by_case(&fixtures, "symbolic_guard_range_above_max").expect("fixture missing");
     let expected = &fx["expected"];
 
     let min = fx["min"].as_u64().unwrap() as usize;
@@ -803,8 +799,7 @@ fn symbolic_reshape_patch_single() {
     use ferrotorch_jit::symbolic::compile_symbolic;
 
     let fixtures = load_fixtures();
-    let _fx =
-        fixture_by_case(&fixtures, "symbolic_reshape_patch_single").expect("fixture missing");
+    let _fx = fixture_by_case(&fixtures, "symbolic_reshape_patch_single").expect("fixture missing");
 
     // Trace a graph that reshapes its input to its own concrete shape [4, 10].
     // With symbolic dim 0, compile_symbolic should patch this to [-1, 10].
@@ -818,8 +813,7 @@ fn symbolic_reshape_patch_single() {
     let sig = ShapeSignature::new().symbolic_dim(0, 0);
     let compiled = compile_symbolic::<f32, _>(
         |inputs| {
-            let shape_isize: Vec<isize> =
-                inputs[0].shape().iter().map(|&d| d as isize).collect();
+            let shape_isize: Vec<isize> = inputs[0].shape().iter().map(|&d| d as isize).collect();
             let r = reshape(&inputs[0], &shape_isize)?;
             relu(&r)
         },
@@ -858,28 +852,31 @@ fn symbolic_reshape_patch_ambiguous() {
     use ferrotorch_jit::symbolic::compile_symbolic;
 
     let _fixtures = load_fixtures();
-    let _fx = fixture_by_case(&_fixtures, "symbolic_reshape_patch_ambiguous")
-        .expect("fixture missing");
+    let _fx =
+        fixture_by_case(&_fixtures, "symbolic_reshape_patch_ambiguous").expect("fixture missing");
 
     let example = from_vec(vec![0.0f32; 16], &[4, 4])
         .unwrap()
         .requires_grad_(true);
 
     let sig = ShapeSignature::new().symbolic_dim(0, 0);
-    let compiled =
-        compile_symbolic::<f32, _>(|inputs| relu(&inputs[0]), &[example], sig).unwrap();
+    let compiled = compile_symbolic::<f32, _>(|inputs| relu(&inputs[0]), &[example], sig).unwrap();
 
     // [4, 4] must be accepted (same as trace shape).
     let same = from_vec(vec![0.0f32; 16], &[4, 4]).unwrap();
     assert!(
-        compiled.forward_symbolic(std::slice::from_ref(&same)).is_ok(),
+        compiled
+            .forward_symbolic(std::slice::from_ref(&same))
+            .is_ok(),
         "guard must accept trace-time shape [4,4]"
     );
 
     // [8, 4] must be accepted (batch varies, feature dim matches).
     let bigger_batch = from_vec(vec![0.0f32; 32], &[8, 4]).unwrap();
     assert!(
-        compiled.forward_symbolic(std::slice::from_ref(&bigger_batch)).is_ok(),
+        compiled
+            .forward_symbolic(std::slice::from_ref(&bigger_batch))
+            .is_ok(),
         "guard must accept [8,4] since dim 0 is symbolic"
     );
 
@@ -911,11 +908,19 @@ fn codegen_ir_neg_single_loop() {
         "stmt_count"
     );
     match &loops[0] {
-        LoopIR::Loop { var, start, end, body } => {
+        LoopIR::Loop {
+            var,
+            start,
+            end,
+            body,
+        } => {
             assert_eq!(var, "i");
             assert_eq!(*start, Expr::int(expected["loop_start"].as_i64().unwrap()));
             assert_eq!(*end, Expr::int(expected["loop_end"].as_i64().unwrap()));
-            assert_eq!(body.len(), expected["body_count"].as_u64().unwrap() as usize);
+            assert_eq!(
+                body.len(),
+                expected["body_count"].as_u64().unwrap() as usize
+            );
             assert!(
                 matches!(body[0], LoopIR::Store { .. }),
                 "body[0] must be Store"
@@ -1127,7 +1132,11 @@ fn codegen_ir_matmul_triple_nested() {
     let n = fx["n"].as_u64().unwrap() as usize;
     let loops = lower_matmul("a", "b", "out", m, k, n);
 
-    assert_eq!(loops.len(), 1, "lower_matmul must produce exactly 1 top-level loop");
+    assert_eq!(
+        loops.len(),
+        1,
+        "lower_matmul must produce exactly 1 top-level loop"
+    );
     match &loops[0] {
         LoopIR::Loop { var, end, body, .. } => {
             assert_eq!(
@@ -1142,7 +1151,12 @@ fn codegen_ir_matmul_triple_nested() {
             );
             assert_eq!(body.len(), 1, "outer body has 1 inner loop");
             match &body[0] {
-                LoopIR::Loop { var: var_j, end: end_j, body: inner_body, .. } => {
+                LoopIR::Loop {
+                    var: var_j,
+                    end: end_j,
+                    body: inner_body,
+                    ..
+                } => {
                     assert_eq!(
                         var_j.as_str(),
                         expected["inner_loop_var"].as_str().unwrap(),
@@ -1170,8 +1184,7 @@ fn codegen_ir_matmul_triple_nested() {
 #[test]
 fn codegen_ir_pow_becomes_fn_call() {
     let fixtures = load_fixtures();
-    let fx =
-        fixture_by_case(&fixtures, "codegen_ir_pow_becomes_fn_call").expect("fixture missing");
+    let fx = fixture_by_case(&fixtures, "codegen_ir_pow_becomes_fn_call").expect("fixture missing");
     let expected = &fx["expected"];
 
     let exponent = fx["exponent"].as_f64().unwrap();

@@ -1,5 +1,8 @@
 //! Conformance tests — ferrotorch-jit C7.2: Interpreter + Module + AOT Autograd + Graph Break.
-#![allow(dead_code, reason = "Fixture struct fields kept for diagnostics; type aliases scoped to test fns")]
+#![allow(
+    dead_code,
+    reason = "Fixture struct fields kept for diagnostics; type aliases scoped to test fns"
+)]
 //!
 //! Tracking issue: <https://github.com/dollspace-gay/ferrotorch/issues/857>.
 //! Parent: #806.
@@ -68,9 +71,7 @@ use ferrotorch_core::storage::TensorStorage;
 use ferrotorch_core::tensor::Tensor;
 use ferrotorch_jit::aot_autograd::{compile_aot, decompose_forward_backward};
 use ferrotorch_jit::graph::{IrGraph, IrOpKind};
-use ferrotorch_jit::graph_break::{
-    GraphSegment, SegmentedModule, TraceResult, trace_with_breaks,
-};
+use ferrotorch_jit::graph_break::{GraphSegment, SegmentedModule, TraceResult, trace_with_breaks};
 use ferrotorch_jit::interpreter::{interpret, interpret_multi};
 use ferrotorch_jit::module::{
     AotCompiledModule, CompileConfig, TracedModule, compile, compile_with_config,
@@ -157,8 +158,7 @@ fn load_fixtures() -> FixtureFile {
             p.display()
         )
     });
-    serde_json::from_slice(&bytes)
-        .unwrap_or_else(|e| panic!("parse {}: {e}", p.display()))
+    serde_json::from_slice(&bytes).unwrap_or_else(|e| panic!("parse {}: {e}", p.display()))
 }
 
 fn find_fixture<'a>(fixtures: &'a [Fixture], case: &str) -> &'a Fixture {
@@ -309,7 +309,12 @@ fn interpreter_matmul_matches_reference() {
     let b_tensor = shaped_f32(b_data, shape_b);
     let result = interpret::<f32>(&g, &[a_tensor, b_tensor]).unwrap();
 
-    assert_close(result.data().unwrap(), expected, tol, "interp_matmul_2x3_3x2");
+    assert_close(
+        result.data().unwrap(),
+        expected,
+        tol,
+        "interp_matmul_2x3_3x2",
+    );
 }
 
 /// Fixture-driven: interpret x + constant([10,20,30]).
@@ -389,7 +394,12 @@ fn interpreter_chain_sub_pow_sqrt_matches_reference() {
     let tensor = shaped_f32(input_data, input_shape);
     let result = interpret::<f32>(&g, &[tensor]).unwrap();
 
-    assert_close(result.data().unwrap(), expected, tol, "interp_chain_sub_pow_sqrt");
+    assert_close(
+        result.data().unwrap(),
+        expected,
+        tol,
+        "interp_chain_sub_pow_sqrt",
+    );
 }
 
 /// Fixture-driven: FusedElementwise{[Neg, Relu]} — apply_elementwise_op chain.
@@ -428,7 +438,12 @@ fn interpreter_fused_elementwise_neg_relu_matches_reference() {
     let tensor = shaped_f32(input_data, input_shape);
     let result = interpret::<f32>(&g, &[tensor]).unwrap();
 
-    assert_close(result.data().unwrap(), expected, tol, "interp_fused_elementwise_neg_relu");
+    assert_close(
+        result.data().unwrap(),
+        expected,
+        tol,
+        "interp_fused_elementwise_neg_relu",
+    );
 }
 
 /// Fixture-driven: interpret_multi with two outputs [x+x, x*x].
@@ -464,8 +479,18 @@ fn interpreter_multi_output_matches_reference() {
     let results = interpret_multi::<f32>(&g, &[tensor]).unwrap();
 
     assert_eq!(results.len(), 2, "interp_multi_output: expected 2 outputs");
-    assert_close(results[0].data().unwrap(), expected_0, tol, "interp_multi_output[0]");
-    assert_close(results[1].data().unwrap(), expected_1, tol, "interp_multi_output[1]");
+    assert_close(
+        results[0].data().unwrap(),
+        expected_0,
+        tol,
+        "interp_multi_output[0]",
+    );
+    assert_close(
+        results[1].data().unwrap(),
+        expected_1,
+        tol,
+        "interp_multi_output[1]",
+    );
 }
 
 /// Fixture-driven: softmax activation dispatch.
@@ -498,7 +523,12 @@ fn interpreter_softmax_matches_reference() {
     let tensor = shaped_f32(input_data, input_shape);
     let result = interpret::<f32>(&g, &[tensor]).unwrap();
 
-    assert_close(result.data().unwrap(), expected, tol, "interp_activation_softmax");
+    assert_close(
+        result.data().unwrap(),
+        expected,
+        tol,
+        "interp_activation_softmax",
+    );
 }
 
 /// Fixture-driven: Sum reduction — scalar output.
@@ -534,7 +564,11 @@ fn interpreter_reduction_sum_matches_reference() {
     let result = interpret::<f32>(&g, &[tensor]).unwrap();
 
     // Sum result is a 1-element tensor (scalar).
-    assert_eq!(result.numel(), 1, "interp_reduction_sum: expected scalar output");
+    assert_eq!(
+        result.numel(),
+        1,
+        "interp_reduction_sum: expected scalar output"
+    );
     let actual_val = result.data().unwrap()[0];
     let expected_val = expected[0] as f32;
     assert!(
@@ -649,7 +683,11 @@ fn module_traced_forward_matches_reference() {
     let b_in = shaped_f32(b_data, f.shape_b.as_ref().unwrap_or(&vec![b_data.len()]));
     let result = module.forward_multi(&[a_in, b_in]).unwrap();
 
-    assert_eq!(result.numel(), 1, "module_traced_forward: expected scalar output");
+    assert_eq!(
+        result.numel(),
+        1,
+        "module_traced_forward: expected scalar output"
+    );
     let actual_val = result.data().unwrap()[0];
     let expected_val = expected[0] as f32;
     assert!(
@@ -699,7 +737,11 @@ fn module_forward_single_input_matches_reference() {
     let x_in = shaped_f32(input_data, &input_shape);
     let result = module.forward(&x_in).unwrap();
 
-    assert_eq!(result.numel(), 1, "module_forward_single: expected scalar output");
+    assert_eq!(
+        result.numel(),
+        1,
+        "module_forward_single: expected scalar output"
+    );
     let actual_val = result.data().unwrap()[0];
     let expected_val = expected[0] as f32;
     assert!(
@@ -811,7 +853,11 @@ fn module_save_load_bytes_roundtrip() {
     let b_in = shaped_f32(b_data, f.shape_b.as_ref().unwrap_or(&vec![b_data.len()]));
     let result = restored.forward_multi(&[a_in, b_in]).unwrap();
 
-    assert_eq!(result.numel(), 1, "module_save_load_bytes: expected scalar output");
+    assert_eq!(
+        result.numel(),
+        1,
+        "module_save_load_bytes: expected scalar output"
+    );
     let actual_val = result.data().unwrap()[0];
     let expected_val = expected[0] as f32;
     assert!(
@@ -863,7 +909,10 @@ fn module_compile_with_config_default() {
 
     let result = module.forward(&vec_f32(&[2.0, 3.0])).unwrap();
     let val = result.data().unwrap()[0];
-    assert!((val - 5.0_f32).abs() < 1e-5_f32, "compile_with_config: got {val}, expected 5.0");
+    assert!(
+        (val - 5.0_f32).abs() < 1e-5_f32,
+        "compile_with_config: got {val}, expected 5.0"
+    );
 }
 
 /// Unit: CompileConfig::from_optimization.
@@ -965,15 +1014,32 @@ fn aot_add_backward_matches_reference() {
     let mut bwd_inputs: Vec<Tensor<f32>> = saved_tensors.into_iter().take(n_saved).collect();
     // Pad with zeros if we have fewer saved tensors than expected (conservative).
     while bwd_inputs.len() < n_saved {
-        bwd_inputs.push(shaped_f32(&vec![0.0_f64; input_shape.iter().product()], input_shape));
+        bwd_inputs.push(shaped_f32(
+            &vec![0.0_f64; input_shape.iter().product()],
+            input_shape,
+        ));
     }
     bwd_inputs.push(grad_out_t);
 
     let bwd_results = interpret_multi::<f32>(&pair.backward, &bwd_inputs).unwrap();
-    assert_eq!(bwd_results.len(), 2, "aot_backward_add: expected 2 grad outputs");
+    assert_eq!(
+        bwd_results.len(),
+        2,
+        "aot_backward_add: expected 2 grad outputs"
+    );
 
-    assert_close(bwd_results[0].data().unwrap(), expected_ga, tol, "aot_backward_add: grad_a");
-    assert_close(bwd_results[1].data().unwrap(), expected_gb, tol, "aot_backward_add: grad_b");
+    assert_close(
+        bwd_results[0].data().unwrap(),
+        expected_ga,
+        tol,
+        "aot_backward_add: grad_a",
+    );
+    assert_close(
+        bwd_results[1].data().unwrap(),
+        expected_gb,
+        tol,
+        "aot_backward_add: grad_b",
+    );
 }
 
 /// Fixture-driven: Mul backward — grad_a = b * grad_out, grad_b = a * grad_out.
@@ -1017,7 +1083,10 @@ fn aot_mul_backward_matches_reference() {
         .iter()
         .filter(|n| matches!(n.op, IrOpKind::Mul))
         .count();
-    assert_eq!(mul_count, 2, "aot_backward_mul: expected 2 Mul nodes in backward graph");
+    assert_eq!(
+        mul_count, 2,
+        "aot_backward_mul: expected 2 Mul nodes in backward graph"
+    );
 
     // Execute backward: inputs are [saved_a, saved_b, grad_out].
     let n_bwd_inputs = pair.backward.input_values.len();
@@ -1027,18 +1096,34 @@ fn aot_mul_backward_matches_reference() {
     let grad_out_t = shaped_f32(grad_out_data, input_shape);
 
     let saved_candidates = vec![a_t, b_t];
-    let mut bwd_inputs: Vec<Tensor<f32>> =
-        saved_candidates.into_iter().take(n_saved).collect();
+    let mut bwd_inputs: Vec<Tensor<f32>> = saved_candidates.into_iter().take(n_saved).collect();
     while bwd_inputs.len() < n_saved {
-        bwd_inputs.push(shaped_f32(&vec![0.0_f64; input_shape.iter().product()], input_shape));
+        bwd_inputs.push(shaped_f32(
+            &vec![0.0_f64; input_shape.iter().product()],
+            input_shape,
+        ));
     }
     bwd_inputs.push(grad_out_t);
 
     let bwd_results = interpret_multi::<f32>(&pair.backward, &bwd_inputs).unwrap();
-    assert_eq!(bwd_results.len(), 2, "aot_backward_mul: expected 2 grad outputs");
+    assert_eq!(
+        bwd_results.len(),
+        2,
+        "aot_backward_mul: expected 2 grad outputs"
+    );
 
-    assert_close(bwd_results[0].data().unwrap(), expected_ga, tol, "aot_backward_mul: grad_a");
-    assert_close(bwd_results[1].data().unwrap(), expected_gb, tol, "aot_backward_mul: grad_b");
+    assert_close(
+        bwd_results[0].data().unwrap(),
+        expected_ga,
+        tol,
+        "aot_backward_mul: grad_a",
+    );
+    assert_close(
+        bwd_results[1].data().unwrap(),
+        expected_gb,
+        tol,
+        "aot_backward_mul: grad_b",
+    );
 }
 
 /// Fixture-driven: Sum backward — grad_a = ones(n) * grad_out.
@@ -1089,8 +1174,7 @@ fn aot_sum_backward_matches_reference() {
     let grad_out_t = shaped_f32(grad_out_data, &[1]);
 
     let saved_candidates = vec![a_t];
-    let mut bwd_inputs: Vec<Tensor<f32>> =
-        saved_candidates.into_iter().take(n_saved).collect();
+    let mut bwd_inputs: Vec<Tensor<f32>> = saved_candidates.into_iter().take(n_saved).collect();
     while bwd_inputs.len() < n_saved {
         let numel: usize = input_shape.iter().product();
         bwd_inputs.push(shaped_f32(&vec![0.0_f64; numel], input_shape));
@@ -1098,9 +1182,18 @@ fn aot_sum_backward_matches_reference() {
     bwd_inputs.push(grad_out_t);
 
     let bwd_results = interpret_multi::<f32>(&pair.backward, &bwd_inputs).unwrap();
-    assert_eq!(bwd_results.len(), 1, "aot_backward_sum: expected 1 grad output");
+    assert_eq!(
+        bwd_results.len(),
+        1,
+        "aot_backward_sum: expected 1 grad output"
+    );
 
-    assert_close(bwd_results[0].data().unwrap(), expected_ga, tol, "aot_backward_sum: grad_a");
+    assert_close(
+        bwd_results[0].data().unwrap(),
+        expected_ga,
+        tol,
+        "aot_backward_sum: grad_a",
+    );
 }
 
 /// Unit: AotGraphPair structural properties — forward/backward non-empty,
@@ -1116,8 +1209,14 @@ fn aot_graph_pair_structure() {
 
     let pair = decompose_forward_backward(&g).unwrap();
 
-    assert!(!pair.forward.nodes.is_empty(), "AotGraphPair::forward must be non-empty");
-    assert!(!pair.backward.nodes.is_empty(), "AotGraphPair::backward must be non-empty");
+    assert!(
+        !pair.forward.nodes.is_empty(),
+        "AotGraphPair::forward must be non-empty"
+    );
+    assert!(
+        !pair.backward.nodes.is_empty(),
+        "AotGraphPair::backward must be non-empty"
+    );
 
     for &idx in &pair.saved_tensor_indices {
         assert!(
@@ -1147,8 +1246,14 @@ fn aot_compile_aot_produces_valid_pair() {
     )
     .unwrap();
 
-    assert!(!pair.forward.nodes.is_empty(), "compile_aot: forward graph is empty");
-    assert!(!pair.backward.nodes.is_empty(), "compile_aot: backward graph is empty");
+    assert!(
+        !pair.forward.nodes.is_empty(),
+        "compile_aot: forward graph is empty"
+    );
+    assert!(
+        !pair.backward.nodes.is_empty(),
+        "compile_aot: backward graph is empty"
+    );
     // The forward graph should have exactly 1 output.
     assert_eq!(
         pair.forward.output_values.len(),
@@ -1187,7 +1292,12 @@ fn aot_compiled_module_new_and_forward_with_ctx() {
     let output = aot_module.forward_with_ctx(&[a, b]).unwrap();
 
     // a + b = [5, 7, 9]
-    assert_close(output.data().unwrap(), &[5.0, 7.0, 9.0], 1e-5, "AotCompiledModule::forward_with_ctx");
+    assert_close(
+        output.data().unwrap(),
+        &[5.0, 7.0, 9.0],
+        1e-5,
+        "AotCompiledModule::forward_with_ctx",
+    );
 }
 
 /// Unit: decompose_forward_backward errors on an unsupported op rather than
@@ -1319,12 +1429,20 @@ fn graph_break_segmented_module_forward_matches_reference() {
     ]);
 
     assert_eq!(module.segment_count(), 2, "expected 2 segments");
-    assert!(!module.is_fully_compiled(), "eager segment present → not fully compiled");
+    assert!(
+        !module.is_fully_compiled(),
+        "eager segment present → not fully compiled"
+    );
 
     let input = shaped_f32(input_data, &[3]);
     let result = module.forward(&input).unwrap();
 
-    assert_close(result.data().unwrap(), expected, tol, "gb_segmented_module_forward");
+    assert_close(
+        result.data().unwrap(),
+        expected,
+        tol,
+        "gb_segmented_module_forward",
+    );
 }
 
 /// Fixture-driven: trace_with_breaks with fullgraph=true on a fully-supported
@@ -1367,7 +1485,11 @@ fn graph_break_fullgraph_supported_ops_succeeds() {
         &config,
     );
 
-    assert!(result.is_ok(), "fullgraph=true + all-supported → must succeed: {:?}", result.err());
+    assert!(
+        result.is_ok(),
+        "fullgraph=true + all-supported → must succeed: {:?}",
+        result.err()
+    );
 
     let graph = match result.unwrap() {
         TraceResult::Unbroken(g) => g,
@@ -1419,7 +1541,12 @@ fn graph_break_fully_compiled_module() {
     // After Relu: [0, 4, 0]
     let input = vec_f32(&[-1.0, 2.0, -3.0]);
     let result = module.forward(&input).unwrap();
-    assert_close(result.data().unwrap(), &[0.0, 4.0, 0.0], 1e-5, "fully_compiled_module");
+    assert_close(
+        result.data().unwrap(),
+        &[0.0, 4.0, 0.0],
+        1e-5,
+        "fully_compiled_module",
+    );
 }
 
 /// Unit: trace_with_breaks on a function with no grad_fn errors gracefully.
@@ -1432,9 +1559,7 @@ fn graph_break_no_grad_fn_errors() {
     use ferrotorch_core::grad_fns::arithmetic::add;
 
     let result = trace_with_breaks(
-        |inputs: &[Tensor<f32>]| -> FerrotorchResult<Tensor<f32>> {
-            add(&inputs[0], &inputs[0])
-        },
+        |inputs: &[Tensor<f32>]| -> FerrotorchResult<Tensor<f32>> { add(&inputs[0], &inputs[0]) },
         &[x],
         &config,
     );
@@ -1457,11 +1582,17 @@ fn graph_break_graph_segment_debug() {
 
     let compiled: GraphSegment<f32> = GraphSegment::Compiled(TracedModule::new(g));
     let debug_str = format!("{compiled:?}");
-    assert!(debug_str.contains("Compiled"), "expected 'Compiled' in debug: {debug_str}");
+    assert!(
+        debug_str.contains("Compiled"),
+        "expected 'Compiled' in debug: {debug_str}"
+    );
 
     type EagerFn = Arc<dyn Fn(&Tensor<f32>) -> FerrotorchResult<Tensor<f32>> + Send + Sync>;
     let eager: GraphSegment<f32> =
         GraphSegment::Eager(Arc::new(|input: &Tensor<f32>| Ok(input.clone())));
     let debug_str = format!("{eager:?}");
-    assert!(debug_str.contains("Eager"), "expected 'Eager' in debug: {debug_str}");
+    assert!(
+        debug_str.contains("Eager"),
+        "expected 'Eager' in debug: {debug_str}"
+    );
 }

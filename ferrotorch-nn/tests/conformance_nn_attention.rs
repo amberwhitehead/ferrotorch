@@ -51,7 +51,7 @@
     clippy::too_many_lines,
     clippy::unreadable_literal,
     clippy::needless_pass_by_value,
-    clippy::uninlined_format_args,
+    clippy::uninlined_format_args
 )]
 
 use std::path::PathBuf;
@@ -72,17 +72,17 @@ use ferrotorch_nn::flex_attention::{
 use ferrotorch_nn::paged_attention::{PagePool, PagedAttentionManager, PagedKVCache};
 // 5. transformer
 use ferrotorch_nn::transformer::{
-    KVCache, RoPEConvention, RoPEScaling, RotaryPositionEmbedding, SwiGLU,
-    TransformerDecoderLayer, TransformerEncoderLayer,
+    KVCache, RoPEConvention, RoPEScaling, RotaryPositionEmbedding, SwiGLU, TransformerDecoderLayer,
+    TransformerEncoderLayer,
 };
 // 6. grad_fns (via ferrotorch-core)
-use ferrotorch_core::grad_fns::activation::{softmax, SoftmaxBackward};
+use ferrotorch_core::grad_fns::activation::{SoftmaxBackward, softmax};
 use ferrotorch_core::grad_fns::reduction::sum as reduce_sum;
 use ferrotorch_core::{Tensor, TensorStorage};
-use ferrotorch_nn::module::Module;
-use ferrotorch_nn::parameter::Parameter;
-use ferrotorch_nn::norm::LayerNorm;
 use ferrotorch_nn::loss::CrossEntropyLoss;
+use ferrotorch_nn::module::Module;
+use ferrotorch_nn::norm::LayerNorm;
+use ferrotorch_nn::parameter::Parameter;
 
 // ── Cascade-skip configuration ─────────────────────────────────────────────
 
@@ -95,8 +95,6 @@ mod cascade_skip {
     /// ffn.w2.weight, ffn.w3.weight). Fixed: fixture regenerated with
     /// weight_q/k/v/out_proj keys and SwiGLU ffn_w3 (#976).
     pub const ENCODER_DECODER_FIXTURE_KEY_MISMATCH: bool = false;
-
-
 }
 
 // ── Tolerances ─────────────────────────────────────────────────────────────
@@ -143,7 +141,6 @@ mod tol {
 
 // ── JSON deserialization helpers ─────────────────────────────────────────────
 
-
 // ── Fixture file ─────────────────────────────────────────────────────────────
 
 #[derive(Debug, Deserialize)]
@@ -165,8 +162,8 @@ fn load_fixtures() -> Vec<serde_json::Value> {
     .collect();
     let raw = std::fs::read_to_string(&path)
         .unwrap_or_else(|e| panic!("Cannot read fixture file at {}: {e}", path.display()));
-    let file: FixtureFile = serde_json::from_str(&raw)
-        .unwrap_or_else(|e| panic!("Cannot parse fixture file: {e}"));
+    let file: FixtureFile =
+        serde_json::from_str(&raw).unwrap_or_else(|e| panic!("Cannot parse fixture file: {e}"));
     file.fixtures
 }
 
@@ -283,10 +280,7 @@ fn param_f32(v: &serde_json::Value, field: &str, shape: Vec<usize>) -> Parameter
 /// Overwrite the projections of a MultiheadAttention with fixture weights.
 /// Layout expected: weight_q_proj, weight_k_proj, weight_v_proj, weight_out_proj
 /// Optional: weight_q_bias, weight_k_bias, weight_v_bias, weight_out_bias
-fn inject_mha_weights(
-    mha: &mut MultiheadAttention<f32>,
-    v: &serde_json::Value,
-) {
+fn inject_mha_weights(mha: &mut MultiheadAttention<f32>, v: &serde_json::Value) {
     let ed = mha.embed_dim;
     let kv_d = mha.num_kv_heads * mha.head_dim;
 
@@ -421,10 +415,7 @@ fn reshape_to_heads_and_repeat_kv_shapes() {
     }
 
     // repeat_kv
-    let rkv_fixtures: Vec<_> = fixtures
-        .iter()
-        .filter(|f| f["op"] == "repeat_kv")
-        .collect();
+    let rkv_fixtures: Vec<_> = fixtures.iter().filter(|f| f["op"] == "repeat_kv").collect();
     for fix in &rkv_fixtures {
         let tag = extract_str(fix, "tag");
         let batch = extract_usize(fix, "batch");
@@ -529,7 +520,10 @@ fn standard_attention_matches_reference() {
         .filter(|f| f["op"] == "standard_attention")
         .collect();
 
-    assert!(!sa_fixtures.is_empty(), "No standard_attention fixtures found");
+    assert!(
+        !sa_fixtures.is_empty(),
+        "No standard_attention fixtures found"
+    );
 
     for fix in sa_fixtures {
         let tag = extract_str(fix, "tag");
@@ -559,12 +553,8 @@ fn standard_attention_matches_reference() {
 fn flash_and_standard_attention_agree() {
     // Build a small input: batch=1, n=8, d=16, causal=false
     let data: Vec<f32> = (0..128).map(|i| (i as f32) * 0.01 - 0.64).collect();
-    let q = Tensor::<f32>::from_storage(
-        TensorStorage::cpu(data.clone()),
-        vec![1, 8, 16],
-        false,
-    )
-    .unwrap();
+    let q = Tensor::<f32>::from_storage(TensorStorage::cpu(data.clone()), vec![1, 8, 16], false)
+        .unwrap();
     let k = Tensor::<f32>::from_storage(
         TensorStorage::cpu(data.iter().rev().cloned().collect()),
         vec![1, 8, 16],
@@ -581,7 +571,12 @@ fn flash_and_standard_attention_agree() {
     let fa_out = flash_attention::<f32>(&q, &k, &v, false, 4).expect("flash_attention");
     let sa_out = standard_attention::<f32>(&q, &k, &v, false).expect("standard_attention");
 
-    tol::assert_close(&data_f32(&fa_out), &data_f32(&sa_out), tol::F32_MATMUL, "flash_vs_standard");
+    tol::assert_close(
+        &data_f32(&fa_out),
+        &data_f32(&sa_out),
+        tol::F32_MATMUL,
+        "flash_vs_standard",
+    );
 }
 
 // ── 3. flex_attention ─────────────────────────────────────────────────────
@@ -594,10 +589,19 @@ fn flex_attention_composite_forward() {
     let fixtures = load_fixtures();
     let flex_fixtures: Vec<_> = fixtures
         .iter()
-        .filter(|f| f["op"] == "flex_attention" && f["tag"].as_str().map(|t| t.starts_with("nn_")).unwrap_or(false))
+        .filter(|f| {
+            f["op"] == "flex_attention"
+                && f["tag"]
+                    .as_str()
+                    .map(|t| t.starts_with("nn_"))
+                    .unwrap_or(false)
+        })
         .collect();
 
-    assert!(!flex_fixtures.is_empty(), "No nn_* flex_attention fixtures found");
+    assert!(
+        !flex_fixtures.is_empty(),
+        "No nn_* flex_attention fixtures found"
+    );
 
     for fix in flex_fixtures {
         let tag = extract_str(fix, "tag");
@@ -674,12 +678,8 @@ fn score_mod_constructors_smoke() {
     let _causal = causal_score_mod::<f32>();
     let _alibi = alibi_score_mod::<f32>(0.5_f32);
     // relative_position_bias_score_mod(bias_table, max_dist)
-    let bias_table = Tensor::<f32>::from_storage(
-        TensorStorage::cpu(vec![0.0f32; 9]),
-        vec![9],
-        false,
-    )
-    .unwrap();
+    let bias_table =
+        Tensor::<f32>::from_storage(TensorStorage::cpu(vec![0.0f32; 9]), vec![9], false).unwrap();
     let _rel_pos = relative_position_bias_score_mod::<f32>(bias_table, 4);
 }
 
@@ -720,14 +720,33 @@ fn paged_attention_append_retrieve() {
         mgr.append_kv(seq_id, &k_flat, &v_flat)
             .unwrap_or_else(|e| panic!("[{tag}] append_kv failed: {e}"));
 
-        let (k_out, v_out) = mgr.get_kv(seq_id)
+        let (k_out, v_out) = mgr
+            .get_kv(seq_id)
             .unwrap_or_else(|e| panic!("[{tag}] get_kv failed: {e}"));
 
-        assert_eq!(k_out.shape(), &[num_tokens, num_heads, head_dim], "[{tag}] k shape");
-        assert_eq!(v_out.shape(), &[num_tokens, num_heads, head_dim], "[{tag}] v shape");
+        assert_eq!(
+            k_out.shape(),
+            &[num_tokens, num_heads, head_dim],
+            "[{tag}] k shape"
+        );
+        assert_eq!(
+            v_out.shape(),
+            &[num_tokens, num_heads, head_dim],
+            "[{tag}] v shape"
+        );
 
-        tol::assert_close(&data_f32(&k_out), &expected_k, tol::F32_POINTWISE, &format!("{tag}/k"));
-        tol::assert_close(&data_f32(&v_out), &expected_v, tol::F32_POINTWISE, &format!("{tag}/v"));
+        tol::assert_close(
+            &data_f32(&k_out),
+            &expected_k,
+            tol::F32_POINTWISE,
+            &format!("{tag}/k"),
+        );
+        tol::assert_close(
+            &data_f32(&v_out),
+            &expected_v,
+            tol::F32_POINTWISE,
+            &format!("{tag}/v"),
+        );
     }
 
     // paged_manager_multi_seq fixture
@@ -771,13 +790,41 @@ fn paged_attention_append_retrieve() {
         let (ka_out, va_out) = mgr.get_kv(seq_a).unwrap();
         let (kb_out, vb_out) = mgr.get_kv(seq_b).unwrap();
 
-        assert_eq!(ka_out.shape(), &[tokens_a, num_heads, head_dim], "[{tag}] ka shape");
-        assert_eq!(kb_out.shape(), &[tokens_b, num_heads, head_dim], "[{tag}] kb shape");
+        assert_eq!(
+            ka_out.shape(),
+            &[tokens_a, num_heads, head_dim],
+            "[{tag}] ka shape"
+        );
+        assert_eq!(
+            kb_out.shape(),
+            &[tokens_b, num_heads, head_dim],
+            "[{tag}] kb shape"
+        );
 
-        tol::assert_close(&data_f32(&ka_out), &expected_ka, tol::F32_POINTWISE, &format!("{tag}/ka"));
-        tol::assert_close(&data_f32(&va_out), &expected_va, tol::F32_POINTWISE, &format!("{tag}/va"));
-        tol::assert_close(&data_f32(&kb_out), &expected_kb, tol::F32_POINTWISE, &format!("{tag}/kb"));
-        tol::assert_close(&data_f32(&vb_out), &expected_vb, tol::F32_POINTWISE, &format!("{tag}/vb"));
+        tol::assert_close(
+            &data_f32(&ka_out),
+            &expected_ka,
+            tol::F32_POINTWISE,
+            &format!("{tag}/ka"),
+        );
+        tol::assert_close(
+            &data_f32(&va_out),
+            &expected_va,
+            tol::F32_POINTWISE,
+            &format!("{tag}/va"),
+        );
+        tol::assert_close(
+            &data_f32(&kb_out),
+            &expected_kb,
+            tol::F32_POINTWISE,
+            &format!("{tag}/kb"),
+        );
+        tol::assert_close(
+            &data_f32(&vb_out),
+            &expected_vb,
+            tol::F32_POINTWISE,
+            &format!("{tag}/vb"),
+        );
     }
 }
 
@@ -868,8 +915,13 @@ fn rope_accessors_and_builder() {
     assert_eq!(rope.scaling(), RoPEScaling::None);
 
     // with_convention is a static constructor, not a chained builder.
-    let rope2 = RotaryPositionEmbedding::<f32>::with_convention(16, 64, 10000.0, RoPEConvention::HalfRotation)
-        .unwrap();
+    let rope2 = RotaryPositionEmbedding::<f32>::with_convention(
+        16,
+        64,
+        10000.0,
+        RoPEConvention::HalfRotation,
+    )
+    .unwrap();
     assert_eq!(rope2.convention(), RoPEConvention::HalfRotation);
 }
 
@@ -882,7 +934,10 @@ fn swiglu_forward_matches_reference() {
         .filter(|f| f["op"] == "swiglu_forward")
         .collect();
 
-    assert!(!swiglu_fixtures.is_empty(), "No swiglu_forward fixtures found");
+    assert!(
+        !swiglu_fixtures.is_empty(),
+        "No swiglu_forward fixtures found"
+    );
 
     for fix in swiglu_fixtures {
         let tag = extract_str(fix, "tag");
@@ -911,14 +966,14 @@ fn swiglu_forward_matches_reference() {
             ("w3.bias", "b3", vec![in_features]),
         ];
 
-        let mut state: ferrotorch_nn::module::StateDict<f32> =
-            std::collections::HashMap::new();
+        let mut state: ferrotorch_nn::module::StateDict<f32> = std::collections::HashMap::new();
         for (param_name, fixture_key, shape) in fixture_weights {
             let data = extract_f64_list(fix, fixture_key);
             let t = tensor_f32(&data, shape.clone());
             state.insert((*param_name).to_string(), t);
         }
-        swiglu.load_state_dict(&state, true)
+        swiglu
+            .load_state_dict(&state, true)
             .unwrap_or_else(|e| panic!("[{tag}] SwiGLU load_state_dict failed: {e}"));
 
         let x = tensor_f32(&input, vec![batch, seq, in_features]);
@@ -940,7 +995,10 @@ fn kvcache_update_and_retrieve() {
         .filter(|f| f["op"] == "kvcache_update_retrieve")
         .collect();
 
-    assert!(!kvc_fixtures.is_empty(), "No kvcache_update_retrieve fixtures found");
+    assert!(
+        !kvc_fixtures.is_empty(),
+        "No kvcache_update_retrieve fixtures found"
+    );
 
     for fix in kvc_fixtures {
         let tag = extract_str(fix, "tag");
@@ -969,29 +1027,57 @@ fn kvcache_update_and_retrieve() {
         // Reorder axes to [batch, num_heads, tokens, head_dim] via flatten (small test tensors).
         let k1 = permute_bshd_to_bhsd(&k1_raw, batch, tokens_1, num_heads, head_dim);
         let v1 = permute_bshd_to_bhsd(&v1_raw, batch, tokens_1, num_heads, head_dim);
-        let (_k_a, _v_a) = cache.update(k1, v1)
+        let (_k_a, _v_a) = cache
+            .update(k1, v1)
             .unwrap_or_else(|e| panic!("[{tag}] KVCache update 1 failed: {e}"));
-        assert_eq!(cache.seq_len(), tokens_1, "[{tag}] seq_len after first update");
+        assert_eq!(
+            cache.seq_len(),
+            tokens_1,
+            "[{tag}] seq_len after first update"
+        );
 
         let k2_raw = tensor_f32(&k2_data, vec![batch, tokens_2, num_heads, head_dim]);
         let v2_raw = tensor_f32(&v2_data, vec![batch, tokens_2, num_heads, head_dim]);
         let k2 = permute_bshd_to_bhsd(&k2_raw, batch, tokens_2, num_heads, head_dim);
         let v2 = permute_bshd_to_bhsd(&v2_raw, batch, tokens_2, num_heads, head_dim);
-        let (k_b, v_b) = cache.update(k2, v2)
+        let (k_b, v_b) = cache
+            .update(k2, v2)
             .unwrap_or_else(|e| panic!("[{tag}] KVCache update 2 failed: {e}"));
 
         let total_tokens = tokens_1 + tokens_2;
-        assert_eq!(cache.seq_len(), total_tokens, "[{tag}] seq_len after second update");
+        assert_eq!(
+            cache.seq_len(),
+            total_tokens,
+            "[{tag}] seq_len after second update"
+        );
 
         // Returned shape is [batch, num_heads, total_tokens, head_dim]
-        assert_eq!(k_b.shape(), &[batch, num_heads, total_tokens, head_dim], "[{tag}] k shape");
-        assert_eq!(v_b.shape(), &[batch, num_heads, total_tokens, head_dim], "[{tag}] v shape");
+        assert_eq!(
+            k_b.shape(),
+            &[batch, num_heads, total_tokens, head_dim],
+            "[{tag}] k shape"
+        );
+        assert_eq!(
+            v_b.shape(),
+            &[batch, num_heads, total_tokens, head_dim],
+            "[{tag}] v shape"
+        );
 
         // Convert returned [B, H, S, D] back to [B, S, H, D] for comparison with fixture.
         let k_b_bshd = permute_bhsd_to_bshd(&k_b, batch, num_heads, total_tokens, head_dim);
         let v_b_bshd = permute_bhsd_to_bshd(&v_b, batch, num_heads, total_tokens, head_dim);
-        tol::assert_close(&data_f32(&k_b_bshd), &expected_k, tol::F32_POINTWISE, &format!("{tag}/k"));
-        tol::assert_close(&data_f32(&v_b_bshd), &expected_v, tol::F32_POINTWISE, &format!("{tag}/v"));
+        tol::assert_close(
+            &data_f32(&k_b_bshd),
+            &expected_k,
+            tol::F32_POINTWISE,
+            &format!("{tag}/k"),
+        );
+        tol::assert_close(
+            &data_f32(&v_b_bshd),
+            &expected_v,
+            tol::F32_POINTWISE,
+            &format!("{tag}/v"),
+        );
 
         // Smoke: reset clears the cache.
         cache.reset();
@@ -1014,7 +1100,10 @@ fn transformer_encoder_layer_forward_matches_reference() {
         .filter(|f| f["op"] == "encoder_layer_forward")
         .collect();
 
-    assert!(!enc_fixtures.is_empty(), "No encoder_layer_forward fixtures found");
+    assert!(
+        !enc_fixtures.is_empty(),
+        "No encoder_layer_forward fixtures found"
+    );
 
     for fix in enc_fixtures {
         let tag = extract_str(fix, "tag");
@@ -1040,22 +1129,37 @@ fn transformer_encoder_layer_forward_matches_reference() {
         // SwiGLU emits "w1.weight" etc.; the encoder prefixes with "ffn."
         // giving "ffn.w1.weight". LayerNorm emits "weight" / "bias" directly.
         let enc_params: Vec<(&str, &str, Vec<usize>)> = vec![
-            ("self_attn.q_proj.weight",   "weight_q_proj",  vec![d_model, d_model]),
-            ("self_attn.k_proj.weight",   "weight_k_proj",  vec![d_model, d_model]),
-            ("self_attn.v_proj.weight",   "weight_v_proj",  vec![d_model, d_model]),
-            ("self_attn.out_proj.weight", "weight_out_proj", vec![d_model, d_model]),
-            ("ffn.w1.weight",             "ffn_w1",         vec![d_ff, d_model]),
-            ("ffn.w2.weight",             "ffn_w2",         vec![d_ff, d_model]),
-            ("ffn.w3.weight",             "ffn_w3",         vec![d_model, d_ff]),
-            ("norm1.weight",              "ln1_w",          vec![d_model]),
-            ("norm1.bias",                "ln1_b",          vec![d_model]),
-            ("norm2.weight",              "ln2_w",          vec![d_model]),
-            ("norm2.bias",                "ln2_b",          vec![d_model]),
+            (
+                "self_attn.q_proj.weight",
+                "weight_q_proj",
+                vec![d_model, d_model],
+            ),
+            (
+                "self_attn.k_proj.weight",
+                "weight_k_proj",
+                vec![d_model, d_model],
+            ),
+            (
+                "self_attn.v_proj.weight",
+                "weight_v_proj",
+                vec![d_model, d_model],
+            ),
+            (
+                "self_attn.out_proj.weight",
+                "weight_out_proj",
+                vec![d_model, d_model],
+            ),
+            ("ffn.w1.weight", "ffn_w1", vec![d_ff, d_model]),
+            ("ffn.w2.weight", "ffn_w2", vec![d_ff, d_model]),
+            ("ffn.w3.weight", "ffn_w3", vec![d_model, d_ff]),
+            ("norm1.weight", "ln1_w", vec![d_model]),
+            ("norm1.bias", "ln1_b", vec![d_model]),
+            ("norm2.weight", "ln2_w", vec![d_model]),
+            ("norm2.bias", "ln2_b", vec![d_model]),
         ];
         // Inject weights via load_state_dict — API drift fix (#902):
         // named_parameters_mut was removed; use load_state_dict instead.
-        let mut enc_state: ferrotorch_nn::module::StateDict<f32> =
-            std::collections::HashMap::new();
+        let mut enc_state: ferrotorch_nn::module::StateDict<f32> = std::collections::HashMap::new();
         for (param_name, fix_key, shape) in &enc_params {
             let t = tensor_f32(&extract_f64_list(fix, fix_key), shape.clone());
             enc_state.insert((*param_name).to_string(), t);
@@ -1087,7 +1191,10 @@ fn transformer_decoder_layer_forward_matches_reference() {
         .filter(|f| f["op"] == "decoder_layer_forward_with_memory")
         .collect();
 
-    assert!(!dec_fixtures.is_empty(), "No decoder_layer_forward_with_memory fixtures found");
+    assert!(
+        !dec_fixtures.is_empty(),
+        "No decoder_layer_forward_with_memory fixtures found"
+    );
 
     for fix in dec_fixtures {
         let tag = extract_str(fix, "tag");
@@ -1111,28 +1218,59 @@ fn transformer_decoder_layer_forward_matches_reference() {
         // "self_attn." or "cross_attn." giving full dotted paths. SwiGLU emits
         // "w1.weight" etc. prefixed with "ffn.". LayerNorm emits "weight"/"bias".
         let dec_params: Vec<(&str, &str, Vec<usize>)> = vec![
-            ("self_attn.q_proj.weight",    "self_attn_q_proj",   vec![d_model, d_model]),
-            ("self_attn.k_proj.weight",    "self_attn_k_proj",   vec![d_model, d_model]),
-            ("self_attn.v_proj.weight",    "self_attn_v_proj",   vec![d_model, d_model]),
-            ("self_attn.out_proj.weight",  "self_attn_out_proj", vec![d_model, d_model]),
-            ("cross_attn.q_proj.weight",   "cross_attn_q_proj",  vec![d_model, d_model]),
-            ("cross_attn.k_proj.weight",   "cross_attn_k_proj",  vec![d_model, d_model]),
-            ("cross_attn.v_proj.weight",   "cross_attn_v_proj",  vec![d_model, d_model]),
-            ("cross_attn.out_proj.weight", "cross_attn_out_proj",vec![d_model, d_model]),
-            ("ffn.w1.weight",              "ffn_w1",             vec![d_ff, d_model]),
-            ("ffn.w2.weight",              "ffn_w2",             vec![d_ff, d_model]),
-            ("ffn.w3.weight",              "ffn_w3",             vec![d_model, d_ff]),
-            ("norm1.weight",               "ln1_w",              vec![d_model]),
-            ("norm1.bias",                 "ln1_b",              vec![d_model]),
-            ("norm2.weight",               "ln2_w",              vec![d_model]),
-            ("norm2.bias",                 "ln2_b",              vec![d_model]),
-            ("norm3.weight",               "ln3_w",              vec![d_model]),
-            ("norm3.bias",                 "ln3_b",              vec![d_model]),
+            (
+                "self_attn.q_proj.weight",
+                "self_attn_q_proj",
+                vec![d_model, d_model],
+            ),
+            (
+                "self_attn.k_proj.weight",
+                "self_attn_k_proj",
+                vec![d_model, d_model],
+            ),
+            (
+                "self_attn.v_proj.weight",
+                "self_attn_v_proj",
+                vec![d_model, d_model],
+            ),
+            (
+                "self_attn.out_proj.weight",
+                "self_attn_out_proj",
+                vec![d_model, d_model],
+            ),
+            (
+                "cross_attn.q_proj.weight",
+                "cross_attn_q_proj",
+                vec![d_model, d_model],
+            ),
+            (
+                "cross_attn.k_proj.weight",
+                "cross_attn_k_proj",
+                vec![d_model, d_model],
+            ),
+            (
+                "cross_attn.v_proj.weight",
+                "cross_attn_v_proj",
+                vec![d_model, d_model],
+            ),
+            (
+                "cross_attn.out_proj.weight",
+                "cross_attn_out_proj",
+                vec![d_model, d_model],
+            ),
+            ("ffn.w1.weight", "ffn_w1", vec![d_ff, d_model]),
+            ("ffn.w2.weight", "ffn_w2", vec![d_ff, d_model]),
+            ("ffn.w3.weight", "ffn_w3", vec![d_model, d_ff]),
+            ("norm1.weight", "ln1_w", vec![d_model]),
+            ("norm1.bias", "ln1_b", vec![d_model]),
+            ("norm2.weight", "ln2_w", vec![d_model]),
+            ("norm2.bias", "ln2_b", vec![d_model]),
+            ("norm3.weight", "ln3_w", vec![d_model]),
+            ("norm3.bias", "ln3_b", vec![d_model]),
         ];
         // Inject weights via load_state_dict — API drift fix (#902):
         // named_parameters_mut was removed; use load_state_dict instead.
-        let mut dec_state: ferrotorch_nn::module::StateDict<f32> =
-            std::collections::HashMap::new();
+        let mut dec_state: ferrotorch_nn::module::StateDict<f32> = std::collections::HashMap::new();
         for (param_name, fix_key, shape) in &dec_params {
             let t = tensor_f32(&extract_f64_list(fix, fix_key), shape.clone());
             dec_state.insert((*param_name).to_string(), t);
@@ -1165,7 +1303,10 @@ fn softmax_backward_matches_reference() {
         .filter(|f| f["op"] == "softmax_backward")
         .collect();
 
-    assert!(!bw_fixtures.is_empty(), "No softmax_backward fixtures found");
+    assert!(
+        !bw_fixtures.is_empty(),
+        "No softmax_backward fixtures found"
+    );
 
     for fix in bw_fixtures {
         let tag = extract_str(fix, "tag");
@@ -1195,15 +1336,10 @@ fn softmax_backward_matches_reference() {
                 .unwrap();
                 // Run backward via SoftmaxBackward — fields are private; use ::new(input, output).
                 let backward = SoftmaxBackward::new(x.clone(), out.clone());
-                let grads = ferrotorch_core::tensor::GradFn::backward(&backward, &grad_output)
-                    .unwrap();
+                let grads =
+                    ferrotorch_core::tensor::GradFn::backward(&backward, &grad_output).unwrap();
                 let grad_input = grads[0].as_ref().expect("grad_input exists");
-                tol::assert_close(
-                    &data_f32(grad_input),
-                    &expected_grad,
-                    tol::F32_MATMUL,
-                    tag,
-                );
+                tol::assert_close(&data_f32(grad_input), &expected_grad, tol::F32_MATMUL, tag);
             }
             "float64" => {
                 let x = Tensor::<f64>::from_storage(
@@ -1220,15 +1356,10 @@ fn softmax_backward_matches_reference() {
                 )
                 .unwrap();
                 let backward = SoftmaxBackward::new(x.clone(), out.clone());
-                let grads = ferrotorch_core::tensor::GradFn::backward(&backward, &grad_output)
-                    .unwrap();
+                let grads =
+                    ferrotorch_core::tensor::GradFn::backward(&backward, &grad_output).unwrap();
                 let grad_input = grads[0].as_ref().expect("grad_input f64 exists");
-                tol::assert_close(
-                    &data_f64(grad_input),
-                    &expected_grad,
-                    tol::F64_MATMUL,
-                    tag,
-                );
+                tol::assert_close(&data_f64(grad_input), &expected_grad, tol::F64_MATMUL, tag);
             }
             other => panic!("Unexpected dtype {other:?} in softmax_backward fixture"),
         }
@@ -1246,7 +1377,10 @@ fn layernorm_backward_matches_reference() {
         .filter(|f| f["op"] == "layernorm_backward")
         .collect();
 
-    assert!(!bw_fixtures.is_empty(), "No layernorm_backward fixtures found");
+    assert!(
+        !bw_fixtures.is_empty(),
+        "No layernorm_backward fixtures found"
+    );
 
     for fix in bw_fixtures {
         let tag = extract_str(fix, "tag");
@@ -1256,7 +1390,7 @@ fn layernorm_backward_matches_reference() {
 
         let input_data = extract_f64_list(fix, "input_data");
         let _weight_data = extract_f64_list(fix, "weight_data"); // injected via param_f32 below
-        let _bias_data = extract_f64_list(fix, "bias_data");     // injected via param_f32 below
+        let _bias_data = extract_f64_list(fix, "bias_data"); // injected via param_f32 below
         let expected_grad_input = extract_f64_list(fix, "grad_input");
         let expected_grad_weight = extract_f64_list(fix, "grad_weight");
         let _expected_grad_bias = extract_f64_list(fix, "grad_bias"); // bias grad check cascade-deferred
@@ -1269,24 +1403,25 @@ fn layernorm_backward_matches_reference() {
         .unwrap();
 
         // LayerNorm::new(normalized_shape, eps, elementwise_affine) — eps before bool.
-        let mut ln = LayerNorm::<f32>::new(vec![d], 1e-5, true)
-            .expect("LayerNorm::new");
+        let mut ln = LayerNorm::<f32>::new(vec![d], 1e-5, true).expect("LayerNorm::new");
 
         // Inject fixture weights. bias is Parameter<T>, not Option<Parameter<T>>.
         ln.weight = param_f32(fix, "weight_data", vec![d]);
         ln.bias = param_f32(fix, "bias_data", vec![d]);
 
         // Forward pass — use Module::forward.
-        let out = ln.forward(&x)
+        let out = ln
+            .forward(&x)
             .unwrap_or_else(|e| panic!("[{tag}] LayerNorm forward failed: {e}"));
 
         // Backward via sum-reduction loss.
-        let loss = reduce_sum(&out)
-            .unwrap_or_else(|e| panic!("[{tag}] reduce_sum failed: {e}"));
-        loss.backward().unwrap_or_else(|e| panic!("[{tag}] backward failed: {e}"));
+        let loss = reduce_sum(&out).unwrap_or_else(|e| panic!("[{tag}] reduce_sum failed: {e}"));
+        loss.backward()
+            .unwrap_or_else(|e| panic!("[{tag}] backward failed: {e}"));
 
         // Tensor::grad() returns FerrotorchResult<Option<Tensor<T>>> — unwrap both layers.
-        let grad_x = x.grad()
+        let grad_x = x
+            .grad()
             .unwrap_or_else(|e| panic!("[{tag}] x.grad() lock error: {e}"))
             .unwrap_or_else(|| panic!("[{tag}] x has no grad"));
         tol::assert_close(
@@ -1296,7 +1431,9 @@ fn layernorm_backward_matches_reference() {
             &format!("{tag}/grad_input"),
         );
 
-        let grad_w = ln.weight.grad()
+        let grad_w = ln
+            .weight
+            .grad()
             .unwrap_or_else(|e| panic!("[{tag}] weight.grad() lock error: {e}"))
             .unwrap_or_else(|| panic!("[{tag}] weight has no grad"));
         tol::assert_close(
@@ -1319,7 +1456,10 @@ fn cross_entropy_backward_matches_reference() {
         .filter(|f| f["op"] == "cross_entropy_backward")
         .collect();
 
-    assert!(!bw_fixtures.is_empty(), "No cross_entropy_backward fixtures found");
+    assert!(
+        !bw_fixtures.is_empty(),
+        "No cross_entropy_backward fixtures found"
+    );
 
     for fix in bw_fixtures {
         let tag = extract_str(fix, "tag");
@@ -1360,14 +1500,10 @@ fn cross_entropy_backward_matches_reference() {
         loss.backward()
             .unwrap_or_else(|e| panic!("[{tag}] backward failed: {e}"));
 
-        let grad = logits.grad()
+        let grad = logits
+            .grad()
             .unwrap_or_else(|e| panic!("[{tag}] logits.grad() lock error: {e}"))
             .unwrap_or_else(|| panic!("[{tag}] logits has no grad"));
-        tol::assert_close(
-            &data_f32(&grad),
-            &expected_grad,
-            tol::F32_MATMUL,
-            tag,
-        );
+        tol::assert_close(&data_f32(&grad), &expected_grad, tol::F32_MATMUL, tag);
     }
 }

@@ -568,7 +568,13 @@ impl<T: Float> NestedTensor<T> {
             // layout already matches the trimmed shape (size 1 at the
             // front contributes nothing to the linear index).
             let comp_shape: Vec<usize> = (0..comp_ndim)
-                .map(|d| if d == ragged_dim { len_b } else { full_shape[d + 1] })
+                .map(|d| {
+                    if d == ragged_dim {
+                        len_b
+                    } else {
+                        full_shape[d + 1]
+                    }
+                })
                 .collect();
 
             // Sanity check: the linear extent must match the materialised
@@ -708,17 +714,8 @@ pub fn nested_scaled_dot_product_attention<T: Float>(
         // online-softmax kernel via the registered `GpuBackend`. If the
         // backend declines (unsupported dtype, shape, etc.), fall
         // through to the composite path below -- never CPU detour.
-        if try_flash_attention_gpu_component::<T>(
-            q,
-            k,
-            v,
-            seq_q,
-            seq_k,
-            d_k,
-            d_v,
-            &mut outputs,
-            i,
-        )? {
+        if try_flash_attention_gpu_component::<T>(q, k, v, seq_q, seq_k, d_k, d_v, &mut outputs, i)?
+        {
             continue;
         }
 

@@ -22,13 +22,13 @@
 
 use std::collections::HashMap;
 
-use ferrotorch_core::numeric_cast::cast;
-use ferrotorch_core::{FerrotorchError, FerrotorchResult, Float, Tensor, TensorStorage};
 use ferrotorch_core::grad_fns::activation::relu;
 use ferrotorch_core::grad_fns::shape::reshape;
+use ferrotorch_core::numeric_cast::cast;
+use ferrotorch_core::{FerrotorchError, FerrotorchResult, Float, Tensor, TensorStorage};
+use ferrotorch_nn::Linear;
 use ferrotorch_nn::module::Module;
 use ferrotorch_nn::parameter::Parameter;
-use ferrotorch_nn::Linear;
 
 use crate::models::detection::fpn::FeaturePyramidNetwork;
 use crate::models::detection::rpn::{Rpn, RpnConfig};
@@ -133,10 +133,7 @@ impl<T: Float> TwoMlpHead<T> {
     /// Returns `(class_logits, box_deltas)`:
     /// - `class_logits` `[N, num_classes]`
     /// - `box_deltas`   `[N, num_classes * 4]`
-    pub fn forward(
-        &self,
-        roi_features: &Tensor<T>,
-    ) -> FerrotorchResult<(Tensor<T>, Tensor<T>)> {
+    pub fn forward(&self, roi_features: &Tensor<T>) -> FerrotorchResult<(Tensor<T>, Tensor<T>)> {
         let n = roi_features.shape()[0];
         let flat_size = roi_features.numel() / n;
         let x = reshape(roi_features, &[n as isize, flat_size as isize])?;
@@ -270,10 +267,7 @@ impl<T: Float> FasterRcnn<T> {
     /// `images` — `[B, 3, H, W]` float tensor (RGB, any scale).
     ///
     /// Returns a `Vec<Detections<T>>` of length `B`.
-    pub fn forward(
-        &self,
-        images: &Tensor<T>,
-    ) -> FerrotorchResult<Vec<Detections<T>>> {
+    pub fn forward(&self, images: &Tensor<T>) -> FerrotorchResult<Vec<Detections<T>>> {
         if images.ndim() != 4 || images.shape()[1] != 3 {
             return Err(FerrotorchError::InvalidArgument {
                 message: format!(
@@ -316,11 +310,7 @@ impl<T: Float> FasterRcnn<T> {
             if proposals.shape()[0] == 0 {
                 // No proposals → empty detections for this image.
                 per_image_detections.push(Detections {
-                    boxes: Tensor::from_storage(
-                        TensorStorage::cpu(vec![]),
-                        vec![0, 4],
-                        false,
-                    )?,
+                    boxes: Tensor::from_storage(TensorStorage::cpu(vec![]), vec![0, 4], false)?,
                     scores: Tensor::from_storage(
                         TensorStorage::cpu(vec![]),
                         vec![0, self.num_classes],
@@ -370,11 +360,8 @@ impl<T: Float> FasterRcnn<T> {
                 }
 
                 let k = indices.len();
-                let boxes_t = Tensor::from_storage(
-                    TensorStorage::cpu(roi_boxes),
-                    vec![k, 5],
-                    false,
-                )?;
+                let boxes_t =
+                    Tensor::from_storage(TensorStorage::cpu(roi_boxes), vec![k, 5], false)?;
 
                 let roi_out = roi_align(
                     feat,
@@ -430,7 +417,9 @@ impl<T: Float> FasterRcnn<T> {
                     let row = &scores_data[i * self.num_classes..(i + 1) * self.num_classes];
                     row.iter()
                         .enumerate()
-                        .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
+                        .max_by(|(_, a), (_, b)| {
+                            a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal)
+                        })
                         .map(|(idx, _)| idx)
                         .unwrap_or(0)
                 })
@@ -608,7 +597,11 @@ mod tests {
     #[test]
     fn test_faster_rcnn_named_params_prefixes() {
         let model = make_model();
-        let names: Vec<String> = model.named_parameters().into_iter().map(|(n, _)| n).collect();
+        let names: Vec<String> = model
+            .named_parameters()
+            .into_iter()
+            .map(|(n, _)| n)
+            .collect();
         assert!(names.iter().any(|n| n.starts_with("backbone.")));
         assert!(names.iter().any(|n| n.starts_with("fpn.")));
         assert!(names.iter().any(|n| n.starts_with("rpn.")));
@@ -619,9 +612,7 @@ mod tests {
     fn test_faster_rcnn_forward_output_structure() {
         let model = make_model();
         // Small 64×64 image to keep the test fast.
-        let img = no_grad(|| {
-            ferrotorch_core::randn(&[1, 3, 64, 64]).unwrap()
-        });
+        let img = no_grad(|| ferrotorch_core::randn(&[1, 3, 64, 64]).unwrap());
         let dets = no_grad(|| model.forward(&img).unwrap());
         assert_eq!(dets.len(), 1, "one detection list per image");
         let d = &dets[0];

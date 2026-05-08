@@ -97,14 +97,13 @@ fn device() -> GpuDevice {
 // ---------------------------------------------------------------------------
 
 fn fixture_path() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("tests/conformance/fixtures/gpu_kernels.json")
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/conformance/fixtures/gpu_kernels.json")
 }
 
 fn load_fixtures() -> Value {
     let path = fixture_path();
-    let raw = std::fs::read_to_string(&path)
-        .unwrap_or_else(|e| panic!("failed to read {path:?}: {e}"));
+    let raw =
+        std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("failed to read {path:?}: {e}"));
     serde_json::from_str(&raw).expect("gpu_kernels.json parse")
 }
 
@@ -665,7 +664,9 @@ fn kernel_broadcast_add_matches_reference() {
     let a_shape = vec![rows, cols];
     let b_shape = vec![cols];
     let out_shape = vec![rows, cols];
-    let out = ferrotorch_gpu::kernels::gpu_broadcast_add(&a, &b, &a_shape, &b_shape, &out_shape, &dev).unwrap();
+    let out =
+        ferrotorch_gpu::kernels::gpu_broadcast_add(&a, &b, &a_shape, &b_shape, &out_shape, &dev)
+            .unwrap();
     let actual = gpu_to_cpu(&out, &dev).unwrap();
     assert_close_f32(&actual, &expected, TOL_ELEMENTWISE, "gpu_broadcast_add");
 }
@@ -689,7 +690,9 @@ fn kernel_broadcast_sub_matches_reference() {
     let out_shape = vec![rows, cols];
     // Just verify it returns Ok and produces the right shape — sub fixture
     // is tested via the conformance-core gpu::* lanes; here we prove reachability.
-    let out = ferrotorch_gpu::kernels::gpu_broadcast_sub(&a, &b, &a_shape, &b_shape, &out_shape, &dev).unwrap();
+    let out =
+        ferrotorch_gpu::kernels::gpu_broadcast_sub(&a, &b, &a_shape, &b_shape, &out_shape, &dev)
+            .unwrap();
     let actual = gpu_to_cpu(&out, &dev).unwrap();
     assert_eq!(actual.len(), rows * cols, "broadcast_sub shape");
 }
@@ -711,7 +714,9 @@ fn kernel_broadcast_mul_matches_reference() {
     let a_shape = vec![rows, cols];
     let b_shape = vec![cols];
     let out_shape = vec![rows, cols];
-    let out = ferrotorch_gpu::kernels::gpu_broadcast_mul(&a, &b, &a_shape, &b_shape, &out_shape, &dev).unwrap();
+    let out =
+        ferrotorch_gpu::kernels::gpu_broadcast_mul(&a, &b, &a_shape, &b_shape, &out_shape, &dev)
+            .unwrap();
     let actual = gpu_to_cpu(&out, &dev).unwrap();
     assert_close_f32(&actual, &expected, TOL_ELEMENTWISE, "gpu_broadcast_mul");
 }
@@ -854,7 +859,11 @@ fn kernel_sum_axis_matches_reference() {
     let a = cpu_to_gpu(&a_h, &dev).unwrap();
     // gpu_sum_axis(a, outer, axis_size, inner, dev).
     // For a [rows, cols] tensor summed along axis=1: outer=rows, axis_size=cols, inner=1.
-    let (outer, axis_size, inner) = if axis == 1 { (rows, cols, 1) } else { (1, rows, cols) };
+    let (outer, axis_size, inner) = if axis == 1 {
+        (rows, cols, 1)
+    } else {
+        (1, rows, cols)
+    };
     let out = ferrotorch_gpu::kernels::gpu_sum_axis(&a, outer, axis_size, inner, &dev).unwrap();
     let actual = gpu_to_cpu(&out, &dev).unwrap();
     assert_close_f32(&actual, &expected, TOL_REDUCTION, "gpu_sum_axis");
@@ -902,7 +911,8 @@ fn kernel_cummax_matches_reference() {
     let dev = device();
     let a = cpu_to_gpu(&a_h, &dev).unwrap();
     // gpu_cummax returns (values, indices)
-    let (out_vals, _out_idx) = ferrotorch_gpu::kernels::gpu_cummax(&a, 1, a_h.len(), 1, &dev).unwrap();
+    let (out_vals, _out_idx) =
+        ferrotorch_gpu::kernels::gpu_cummax(&a, 1, a_h.len(), 1, &dev).unwrap();
     let actual = gpu_to_cpu(&out_vals, &dev).unwrap();
     assert_close_f32(&actual, &expected, TOL_REDUCTION, "gpu_cummax");
 }
@@ -918,7 +928,8 @@ fn kernel_cummin_matches_reference() {
     let dev = device();
     let a = cpu_to_gpu(&a_h, &dev).unwrap();
     // gpu_cummin returns (values, indices)
-    let (out_vals, _out_idx) = ferrotorch_gpu::kernels::gpu_cummin(&a, 1, a_h.len(), 1, &dev).unwrap();
+    let (out_vals, _out_idx) =
+        ferrotorch_gpu::kernels::gpu_cummin(&a, 1, a_h.len(), 1, &dev).unwrap();
     let actual = gpu_to_cpu(&out_vals, &dev).unwrap();
     assert_close_f32(&actual, &expected, TOL_REDUCTION, "gpu_cummin");
 }
@@ -1039,13 +1050,11 @@ fn kernel_batchnorm_forward_shape_and_stats() {
     let c = 2usize;
     let h = 2usize;
     let w = 2usize;
-    let spatial = h * w;          // H*W = 4
+    let spatial = h * w; // H*W = 4
     let total_per_ch = n * spatial; // N*H*W = 16
 
     // Input values spread so per-channel mean != 0 and std != 1 before normalisation.
-    let input_data: Vec<f32> = (0..n * c * h * w)
-        .map(|i| (i as f32 * 0.3) - 2.0)
-        .collect();
+    let input_data: Vec<f32> = (0..n * c * h * w).map(|i| (i as f32 * 0.3) - 2.0).collect();
     // gamma=1, beta=0 => output should be normalised with zero mean and unit std.
     let weight = vec![1.0f32; c];
     let bias = vec![0.0f32; c];
@@ -1080,8 +1089,8 @@ fn kernel_batchnorm_forward_shape_and_stats() {
             }
         }
         let mean: f32 = ch_vals.iter().sum::<f32>() / ch_vals.len() as f32;
-        let var: f32 = ch_vals.iter().map(|x| (x - mean).powi(2)).sum::<f32>()
-            / ch_vals.len() as f32;
+        let var: f32 =
+            ch_vals.iter().map(|x| (x - mean).powi(2)).sum::<f32>() / ch_vals.len() as f32;
         let std = var.sqrt();
         assert!(
             mean.abs() < 1e-4,
@@ -1119,11 +1128,15 @@ fn kernel_embed_lookup_matches_reference() {
     // gpu_embed_lookup_batch takes f32-encoded indices on GPU.
     let ids_f32: Vec<f32> = token_ids.iter().map(|&x| x as f32).collect();
     let ids = cpu_to_gpu(&ids_f32, &dev).unwrap();
-    let out =
-        ferrotorch_gpu::kernels::gpu_embed_lookup_batch(&ids, &w, token_ids.len(), d, &dev)
-            .unwrap();
+    let out = ferrotorch_gpu::kernels::gpu_embed_lookup_batch(&ids, &w, token_ids.len(), d, &dev)
+        .unwrap();
     let actual = gpu_to_cpu(&out, &dev).unwrap();
-    assert_close_f32(&actual, &expected, TOL_ELEMENTWISE, "gpu_embed_lookup_batch");
+    assert_close_f32(
+        &actual,
+        &expected,
+        TOL_ELEMENTWISE,
+        "gpu_embed_lookup_batch",
+    );
 }
 
 #[test]
@@ -1142,9 +1155,7 @@ fn kernel_index_select_1d_matches_reference() {
 
     let src = cpu_to_gpu(&input_h, &dev).unwrap();
     let idx_buf = cpu_to_gpu(&idx_f32, &dev).unwrap();
-    let out =
-        ferrotorch_gpu::kernels::gpu_index_select_1d(&src, &idx_buf, &dev)
-            .unwrap();
+    let out = ferrotorch_gpu::kernels::gpu_index_select_1d(&src, &idx_buf, &dev).unwrap();
     let actual = gpu_to_cpu(&out, &dev).unwrap();
     assert_close_f32(&actual, &expected, TOL_ELEMENTWISE, "gpu_index_select_1d");
 }
@@ -1183,9 +1194,7 @@ fn kernel_scatter_add_rows_reachable() {
 
     let g = cpu_to_gpu(&grad, &dev).unwrap();
     let i = cpu_to_gpu(&ids_f32, &dev).unwrap();
-    let out =
-        ferrotorch_gpu::kernels::gpu_scatter_add_rows(&g, &i, vocab_size, d, &dev)
-            .unwrap();
+    let out = ferrotorch_gpu::kernels::gpu_scatter_add_rows(&g, &i, vocab_size, d, &dev).unwrap();
     let actual = gpu_to_cpu(&out, &dev).unwrap();
     assert_eq!(actual.len(), vocab_size * d);
 }
@@ -1213,8 +1222,7 @@ fn kernel_slice_write_read_roundtrip() {
     ferrotorch_gpu::kernels::gpu_slice_write(&src_buf, &mut dst, rows, d, max_len, 0, &dev)
         .unwrap();
     // len=1 reads 1 position per batch -> output shape [rows, 1, d] = rows * d elements
-    let out =
-        ferrotorch_gpu::kernels::gpu_slice_read(&dst, rows, d, 1, max_len, &dev).unwrap();
+    let out = ferrotorch_gpu::kernels::gpu_slice_read(&dst, rows, d, 1, max_len, &dev).unwrap();
     let actual = gpu_to_cpu(&out, &dev).unwrap();
     assert_close_f32(&actual, &src, 0.0, "slice_write + slice_read roundtrip");
 }
@@ -1238,9 +1246,16 @@ fn kernel_strided_split_matches_reference() {
         ferrotorch_gpu::kernels::gpu_strided_split(&inp, cols * 2, 0, cols, 1, rows * cols, &dev)
             .unwrap();
     // Extract right half: offset=cols
-    let right =
-        ferrotorch_gpu::kernels::gpu_strided_split(&inp, cols * 2, cols, cols, 1, rows * cols, &dev)
-            .unwrap();
+    let right = ferrotorch_gpu::kernels::gpu_strided_split(
+        &inp,
+        cols * 2,
+        cols,
+        cols,
+        1,
+        rows * cols,
+        &dev,
+    )
+    .unwrap();
     let left_actual = gpu_to_cpu(&left, &dev).unwrap();
     let right_actual = gpu_to_cpu(&right, &dev).unwrap();
     assert_close_f32(&left_actual, &expected_left, 0.0, "strided_split left");
@@ -1266,10 +1281,14 @@ fn kernel_strided_cat_matches_reference() {
     let total_cols = cols * 2;
     let n_chunk = rows * cols;
     let mut out = alloc_zeros_f32(rows * total_cols, &dev).unwrap();
-    ferrotorch_gpu::kernels::gpu_strided_cat(&left, &mut out, total_cols, 0, cols, 1, n_chunk, &dev)
-        .unwrap();
-    ferrotorch_gpu::kernels::gpu_strided_cat(&right, &mut out, total_cols, cols, cols, 1, n_chunk, &dev)
-        .unwrap();
+    ferrotorch_gpu::kernels::gpu_strided_cat(
+        &left, &mut out, total_cols, 0, cols, 1, n_chunk, &dev,
+    )
+    .unwrap();
+    ferrotorch_gpu::kernels::gpu_strided_cat(
+        &right, &mut out, total_cols, cols, cols, 1, n_chunk, &dev,
+    )
+    .unwrap();
     let actual = gpu_to_cpu(&out, &dev).unwrap();
     assert_close_f32(&actual, &expected, 0.0, "strided_cat");
 }
@@ -1418,7 +1437,11 @@ fn kernel_inplace_ops_reachable() {
         let result = gpu_to_cpu(&out, &dev).unwrap();
         assert_eq!(result.len(), 4);
         for (i, (&r, (&av, &bv))) in result.iter().zip(a_h.iter().zip(b_h.iter())).enumerate() {
-            assert!((r - (av + bv)).abs() < 1e-6, "add_into[{i}]: {r} != {}", av + bv);
+            assert!(
+                (r - (av + bv)).abs() < 1e-6,
+                "add_into[{i}]: {r} != {}",
+                av + bv
+            );
         }
     }
     // gpu_mul_into(a, b, out: &mut, device) — out[i] = a[i] * b[i]
@@ -1489,7 +1512,12 @@ fn kernel_fused_adam_matches_reference() {
     // Adam param update tolerance: 1e-5 relative (lr-scaled gradient step)
     assert_close_f32(&actual_param, &expected_param, 1e-5, "adam param");
     assert_close_f32(&actual_ea, &expected_ea, TOL_ELEMENTWISE, "adam exp_avg");
-    assert_close_f32(&actual_eas, &expected_eas, TOL_ELEMENTWISE, "adam exp_avg_sq");
+    assert_close_f32(
+        &actual_eas,
+        &expected_eas,
+        TOL_ELEMENTWISE,
+        "adam exp_avg_sq",
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -1520,7 +1548,12 @@ fn kernel_fused_gru_forward_matches_reference() {
         ferrotorch_gpu::kernels::gpu_fused_gru_forward(&ig, &hg, &bih, &bhh, &hx, hsz, &dev)
             .unwrap();
     let actual_hy = gpu_to_cpu(&hy, &dev).unwrap();
-    assert_close_f32(&actual_hy, &expected_hy, TOL_TRANSCENDENTAL, "gru_forward hy");
+    assert_close_f32(
+        &actual_hy,
+        &expected_hy,
+        TOL_TRANSCENDENTAL,
+        "gru_forward hy",
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -1549,8 +1582,9 @@ fn kernel_maxpool2d_matches_reference() {
     let inp = cpu_to_gpu(&inp_h, &dev).unwrap();
     let [b, c, h, w] = [inp_shape[0], inp_shape[1], inp_shape[2], inp_shape[3]];
     // gpu_maxpool2d returns (CudaBuffer<f32>, [usize; 4])
-    let (out, _out_shape) = ferrotorch_gpu::kernels::gpu_maxpool2d(&inp, b, c, h, w, kh, kw, sh, sw, 0, 0, &dev)
-        .unwrap();
+    let (out, _out_shape) =
+        ferrotorch_gpu::kernels::gpu_maxpool2d(&inp, b, c, h, w, kh, kw, sh, sw, 0, 0, &dev)
+            .unwrap();
     let actual = gpu_to_cpu(&out, &dev).unwrap();
     assert_close_f32(&actual, &expected, TOL_ELEMENTWISE, "gpu_maxpool2d");
 }
@@ -1578,10 +1612,9 @@ fn kernel_avgpool2d_matches_reference() {
     let [b, c, h, w] = [inp_shape[0], inp_shape[1], inp_shape[2], inp_shape[3]];
     // Fix #894: cascade_skip removed. avgpool2d_forward_kernel PTX had a non-ASCII
     // em-dash in comments causing CUDA_ERROR_INVALID_PTX on sm_86 JIT; replaced with --.
-    let (out, _out_shape) = ferrotorch_gpu::kernels::gpu_avgpool2d(
-        &inp, b, c, h, w, kh, kw, sh, sw, 0, 0, &dev,
-    )
-    .unwrap();
+    let (out, _out_shape) =
+        ferrotorch_gpu::kernels::gpu_avgpool2d(&inp, b, c, h, w, kh, kw, sh, sw, 0, 0, &dev)
+            .unwrap();
     let actual = gpu_to_cpu(&out, &dev).unwrap();
     assert_close_f32(&actual, &expected, TOL_ELEMENTWISE, "gpu_avgpool2d");
 }
@@ -1685,7 +1718,17 @@ fn flash_attention_f32_matches_reference() {
     let v = cpu_to_gpu(&v_h, &dev).unwrap();
 
     let out = ferrotorch_gpu::flash_attention::gpu_flash_attention_f32(
-        &q, &k, &v, n_q, n_k, d, d_v, batch_heads, scale, false, &dev,
+        &q,
+        &k,
+        &v,
+        n_q,
+        n_k,
+        d,
+        d_v,
+        batch_heads,
+        scale,
+        false,
+        &dev,
     )
     .unwrap();
     let actual = gpu_to_cpu(&out, &dev).unwrap();
@@ -1725,11 +1768,26 @@ fn flash_attention_f32_causal_matches_reference() {
     let v = cpu_to_gpu(&v_h, &dev).unwrap();
 
     let out = ferrotorch_gpu::flash_attention::gpu_flash_attention_f32(
-        &q, &k, &v, n_q, n_k, d, d_v, batch_heads, scale, true, &dev,
+        &q,
+        &k,
+        &v,
+        n_q,
+        n_k,
+        d,
+        d_v,
+        batch_heads,
+        scale,
+        true,
+        &dev,
     )
     .unwrap();
     let actual = gpu_to_cpu(&out, &dev).unwrap();
-    assert_close_f32(&actual, &expected, TOL_FLASH_F32, "flash_attention_f32_causal");
+    assert_close_f32(
+        &actual,
+        &expected,
+        TOL_FLASH_F32,
+        "flash_attention_f32_causal",
+    );
 }
 
 #[test]
@@ -1765,7 +1823,17 @@ fn flash_attention_f64_matches_reference() {
     let v = cpu_to_gpu(&v_h, &dev).unwrap();
 
     let out = ferrotorch_gpu::flash_attention::gpu_flash_attention_f64(
-        &q, &k, &v, n_q, n_k, d, d_v, batch_heads, scale, false, &dev,
+        &q,
+        &k,
+        &v,
+        n_q,
+        n_k,
+        d,
+        d_v,
+        batch_heads,
+        scale,
+        false,
+        &dev,
     )
     .unwrap();
     let actual = gpu_to_cpu(&out, &dev).unwrap();
@@ -1803,9 +1871,10 @@ fn sparse_spmm_csr_f32_matches_reference() {
     let dev = device();
     let handle = ferrotorch_gpu::sparse::CusparseHandle::new().unwrap();
     let dense = cpu_to_gpu(&dense_h, &dev).unwrap();
-    let out =
-        ferrotorch_gpu::sparse::gpu_spmm_csr_f32(&handle, &crow, &col, &vals, &dense, m, k, n, &dev)
-            .unwrap();
+    let out = ferrotorch_gpu::sparse::gpu_spmm_csr_f32(
+        &handle, &crow, &col, &vals, &dense, m, k, n, &dev,
+    )
+    .unwrap();
     let actual = gpu_to_cpu(&out, &dev).unwrap();
     assert_close_f32(&actual, &expected, TOL_SPMM_F32, "spmm_csr_f32");
 }
@@ -1834,9 +1903,10 @@ fn sparse_spmm_csr_f64_matches_reference() {
     let dev = device();
     let handle = ferrotorch_gpu::sparse::CusparseHandle::new().unwrap();
     let dense = cpu_to_gpu(&dense_h, &dev).unwrap();
-    let out =
-        ferrotorch_gpu::sparse::gpu_spmm_csr_f64(&handle, &crow, &col, &vals, &dense, m, k, n, &dev)
-            .unwrap();
+    let out = ferrotorch_gpu::sparse::gpu_spmm_csr_f64(
+        &handle, &crow, &col, &vals, &dense, m, k, n, &dev,
+    )
+    .unwrap();
     let actual = gpu_to_cpu(&out, &dev).unwrap();
     assert_close_f64(&actual, &expected, TOL_SPMM_F64, "spmm_csr_f64");
 }
@@ -1947,9 +2017,10 @@ fn sparse_csc_to_dense_f32_matches_reference() {
 
     let dev = device();
     let handle = ferrotorch_gpu::sparse::CusparseHandle::new().unwrap();
-    let out =
-        ferrotorch_gpu::sparse::gpu_csc_to_dense_f32(&handle, &col_ptr, &row_idx, &csc_vals, m, n, &dev)
-            .unwrap();
+    let out = ferrotorch_gpu::sparse::gpu_csc_to_dense_f32(
+        &handle, &col_ptr, &row_idx, &csc_vals, m, n, &dev,
+    )
+    .unwrap();
     let actual = gpu_to_cpu(&out, &dev).unwrap();
     assert_close_f32(&actual, &expected, 0.0, "csc_to_dense_f32");
 }
@@ -1969,9 +2040,10 @@ fn sparse_csc_to_dense_f64_reachable() {
 
     let dev = device();
     let handle = ferrotorch_gpu::sparse::CusparseHandle::new().unwrap();
-    let out =
-        ferrotorch_gpu::sparse::gpu_csc_to_dense_f64(&handle, &col_ptr, &row_idx, &csc_vals, m, n, &dev)
-            .unwrap();
+    let out = ferrotorch_gpu::sparse::gpu_csc_to_dense_f64(
+        &handle, &col_ptr, &row_idx, &csc_vals, m, n, &dev,
+    )
+    .unwrap();
     let actual = gpu_to_cpu(&out, &dev).unwrap();
     assert_eq!(actual.len(), m * n);
 }
@@ -2157,9 +2229,10 @@ fn conv_conv2d_f32_no_bias_matches_reference() {
     let dev = device();
     let inp = cpu_to_gpu(&inp_h, &dev).unwrap();
     let wt = cpu_to_gpu(&wt_h, &dev).unwrap();
-    let (out, _out_shape) =
-        ferrotorch_gpu::conv::gpu_conv2d_f32(&inp, &wt, None, inp_shape, wt_shape, stride, padding, &dev)
-            .unwrap();
+    let (out, _out_shape) = ferrotorch_gpu::conv::gpu_conv2d_f32(
+        &inp, &wt, None, inp_shape, wt_shape, stride, padding, &dev,
+    )
+    .unwrap();
     let actual = gpu_to_cpu(&out, &dev).unwrap();
     assert_close_f32(&actual, &expected, TOL_CONV_F32, "conv2d_no_bias");
 }
@@ -2259,9 +2332,10 @@ fn conv_conv2d_f32_padded_matches_reference() {
     let dev = device();
     let inp = cpu_to_gpu(&inp_h, &dev).unwrap();
     let wt = cpu_to_gpu(&wt_h, &dev).unwrap();
-    let (out, _out_shape) =
-        ferrotorch_gpu::conv::gpu_conv2d_f32(&inp, &wt, None, inp_shape, wt_shape, stride, padding, &dev)
-            .unwrap();
+    let (out, _out_shape) = ferrotorch_gpu::conv::gpu_conv2d_f32(
+        &inp, &wt, None, inp_shape, wt_shape, stride, padding, &dev,
+    )
+    .unwrap();
     let actual = gpu_to_cpu(&out, &dev).unwrap();
     assert_close_f32(&actual, &expected, TOL_CONV_F32, "conv2d_padded");
 }
@@ -2305,9 +2379,10 @@ fn conv_conv2d_f32_multichannel_matches_reference() {
     let dev = device();
     let inp = cpu_to_gpu(&inp_h, &dev).unwrap();
     let wt = cpu_to_gpu(&wt_h, &dev).unwrap();
-    let (out, _out_shape) =
-        ferrotorch_gpu::conv::gpu_conv2d_f32(&inp, &wt, None, inp_shape, wt_shape, stride, padding, &dev)
-            .unwrap();
+    let (out, _out_shape) = ferrotorch_gpu::conv::gpu_conv2d_f32(
+        &inp, &wt, None, inp_shape, wt_shape, stride, padding, &dev,
+    )
+    .unwrap();
     let actual = gpu_to_cpu(&out, &dev).unwrap();
     assert_close_f32(&actual, &expected, TOL_CONV_F32, "conv2d_multichannel");
 }

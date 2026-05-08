@@ -102,7 +102,10 @@ fn gpu_gelu_none_f32_matches_cpu() {
     let y_cpu = gelu_with(&cpu, GeluApproximate::None).expect("cpu gelu_with(None)");
     let y_gpu = gelu_with(&gpu, GeluApproximate::None).expect("gpu gelu_with(None)");
 
-    assert!(y_gpu.is_cuda(), "gpu gelu_with(None) result must stay on GPU");
+    assert!(
+        y_gpu.is_cuda(),
+        "gpu gelu_with(None) result must stay on GPU"
+    );
 
     let cpu_vals = read_back_f32(&y_cpu);
     let gpu_vals = read_back_f32(&y_gpu);
@@ -197,7 +200,10 @@ fn gpu_gelu_none_f32_backward_loads_and_runs() {
     let y_cpu = gelu_with(&cpu_g, GeluApproximate::None).expect("cpu gelu_with(None) fwd");
     let loss_cpu = y_cpu.sum_all().expect("cpu sum");
     backward(&loss_cpu).expect("cpu backward");
-    let cpu_grad = cpu_g.grad().expect("cpu grad lookup").expect("cpu grad attached");
+    let cpu_grad = cpu_g
+        .grad()
+        .expect("cpu grad lookup")
+        .expect("cpu grad attached");
     let cpu_grad_vals = read_back_f32(&cpu_grad);
     for (i, (g_val, want)) in g_data.iter().zip(cpu_grad_vals.iter()).enumerate() {
         let d = (g_val - want).abs();

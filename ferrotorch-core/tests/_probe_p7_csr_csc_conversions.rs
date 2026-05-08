@@ -192,14 +192,7 @@ fn p7_csc_to_dense_on_cuda_basic_f64() {
 fn p7_csc_to_dense_on_cuda_single_row_f32() {
     ensure_cuda_backend();
     // 1x4 single-row matrix.
-    let coo = CooTensor::<f32>::new(
-        vec![0, 0],
-        vec![1, 3],
-        vec![1.5, -2.5],
-        1,
-        4,
-    )
-    .expect("coo");
+    let coo = CooTensor::<f32>::new(vec![0, 0], vec![1, 3], vec![1.5, -2.5], 1, 4).expect("coo");
     let csr = CsrTensor::from_coo(&coo).expect("csr");
     let csc = CscTensor::from_csr(&csr);
 
@@ -343,14 +336,8 @@ fn p7_empty_matrix_cuda_f32() {
 #[test]
 fn p7_single_row_cuda_f32() {
     ensure_cuda_backend();
-    let coo = CooTensor::<f32>::new(
-        vec![0, 0, 0],
-        vec![0, 2, 4],
-        vec![1.0, 2.0, 3.0],
-        1,
-        5,
-    )
-    .expect("single-row coo");
+    let coo = CooTensor::<f32>::new(vec![0, 0, 0], vec![0, 2, 4], vec![1.0, 2.0, 3.0], 1, 5)
+        .expect("single-row coo");
     let csr = CsrTensor::from_coo_on(&coo, Device::Cuda(0)).expect("csr gpu");
     let csc = CscTensor::from_csr_on(&csr, Device::Cuda(0)).expect("csc gpu");
     let dense = csc.to_dense_on(Device::Cuda(0)).expect("dense gpu");

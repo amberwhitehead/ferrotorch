@@ -222,14 +222,17 @@ fn coverage_substring(path: &str) -> &str {
 #[test]
 fn surface_coverage_gate() {
     let all_sources: &[(&str, &str)] = &[
-        ("conformance_event.rs",       SOURCE_EVENT),
-        ("conformance_schedule.rs",    SOURCE_SCHEDULE),
+        ("conformance_event.rs", SOURCE_EVENT),
+        ("conformance_schedule.rs", SOURCE_SCHEDULE),
         ("conformance_cuda_timing.rs", SOURCE_CUDA_TIMING),
-        ("conformance_flops.rs",       SOURCE_FLOPS),
-        ("conformance_report.rs",      SOURCE_REPORT),
+        ("conformance_flops.rs", SOURCE_FLOPS),
+        ("conformance_report.rs", SOURCE_REPORT),
         // Include this file too — it names every inventory path in the
         // INVENTORY constant above.
-        ("conformance_surface_coverage.rs", include_str!("conformance_surface_coverage.rs")),
+        (
+            "conformance_surface_coverage.rs",
+            include_str!("conformance_surface_coverage.rs"),
+        ),
     ];
 
     let total = INVENTORY.len();
@@ -245,9 +248,7 @@ fn surface_coverage_gate() {
         // Derive the search substring (last two :: components).
         let needle = coverage_substring(path);
 
-        let covered = all_sources
-            .iter()
-            .any(|(_file, src)| src.contains(needle));
+        let covered = all_sources.iter().any(|(_file, src)| src.contains(needle));
 
         if !covered {
             uncovered.push(path);

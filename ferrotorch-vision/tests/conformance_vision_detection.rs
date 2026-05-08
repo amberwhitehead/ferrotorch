@@ -20,7 +20,7 @@
 #![allow(
     clippy::cast_possible_truncation,
     clippy::cast_precision_loss,
-    clippy::uninlined_format_args,
+    clippy::uninlined_format_args
 )]
 
 use ferrotorch_core::{no_grad, randn};
@@ -57,7 +57,11 @@ fn test_anchor_generator_torchvision_default_count() {
     let anchor_gen = AnchorGenerator::default_fasterrcnn();
     let fm_sizes = vec![(1, 1); 5];
     let anchors = anchor_gen.generate_anchors::<f32>(&fm_sizes).unwrap();
-    assert_eq!(anchors.shape(), &[15, 4], "15 anchors for 5 levels x 3 ratios x 1x1");
+    assert_eq!(
+        anchors.shape(),
+        &[15, 4],
+        "15 anchors for 5 levels x 3 ratios x 1x1"
+    );
 }
 
 /// C2 - FPN constructs and produces 5 output levels with 256 channels each.
@@ -68,7 +72,9 @@ fn test_fpn_construction_and_output_channels() {
     let out = no_grad(|| fpn.forward(&features).unwrap());
 
     for key in ["p2", "p3", "p4", "p5", "p6"] {
-        let t = out.get(key).unwrap_or_else(|| panic!("FPN missing level {key}"));
+        let t = out
+            .get(key)
+            .unwrap_or_else(|| panic!("FPN missing level {key}"));
         assert_eq!(
             t.shape()[1],
             256,
@@ -87,10 +93,10 @@ fn test_fpn_spatial_sizes() {
     let out = no_grad(|| fpn.forward(&features).unwrap());
 
     assert_eq!(out["p2"].shape(), &[1, 256, 16, 16], "p2 spatial mismatch");
-    assert_eq!(out["p3"].shape(), &[1, 256, 8, 8],   "p3 spatial mismatch");
-    assert_eq!(out["p4"].shape(), &[1, 256, 4, 4],   "p4 spatial mismatch");
-    assert_eq!(out["p5"].shape(), &[1, 256, 2, 2],   "p5 spatial mismatch");
-    assert_eq!(out["p6"].shape(), &[1, 256, 1, 1],   "p6 spatial mismatch");
+    assert_eq!(out["p3"].shape(), &[1, 256, 8, 8], "p3 spatial mismatch");
+    assert_eq!(out["p4"].shape(), &[1, 256, 4, 4], "p4 spatial mismatch");
+    assert_eq!(out["p5"].shape(), &[1, 256, 2, 2], "p5 spatial mismatch");
+    assert_eq!(out["p6"].shape(), &[1, 256, 1, 1], "p6 spatial mismatch");
 }
 
 /// C4 - RPN head produces correct objectness and delta shapes.
@@ -123,10 +129,22 @@ fn test_fasterrcnn_named_parameter_prefixes() {
         .into_iter()
         .map(|(n, _)| n)
         .collect();
-    assert!(names.iter().any(|n| n.starts_with("backbone.")), "missing backbone params");
-    assert!(names.iter().any(|n| n.starts_with("fpn.")),       "missing fpn params");
-    assert!(names.iter().any(|n| n.starts_with("rpn.")),       "missing rpn params");
-    assert!(names.iter().any(|n| n.starts_with("head.")),      "missing head params");
+    assert!(
+        names.iter().any(|n| n.starts_with("backbone.")),
+        "missing backbone params"
+    );
+    assert!(
+        names.iter().any(|n| n.starts_with("fpn.")),
+        "missing fpn params"
+    );
+    assert!(
+        names.iter().any(|n| n.starts_with("rpn.")),
+        "missing rpn params"
+    );
+    assert!(
+        names.iter().any(|n| n.starts_with("head.")),
+        "missing head params"
+    );
 }
 
 // ===========================================================================
@@ -143,9 +161,9 @@ fn test_forward_64x64_output_structure() {
     assert_eq!(dets.len(), 1, "one detection list per image");
     let d = &dets[0];
     assert_eq!(d.boxes.shape().len(), 2, "boxes must be 2-D");
-    assert_eq!(d.boxes.shape()[1], 4,   "boxes must have 4 coords");
+    assert_eq!(d.boxes.shape()[1], 4, "boxes must have 4 coords");
     assert_eq!(d.scores.shape().len(), 2, "scores must be 2-D");
-    assert_eq!(d.scores.shape()[1], 91,   "scores must have 91 classes");
+    assert_eq!(d.scores.shape()[1], 91, "scores must have 91 classes");
     let n = d.boxes.shape()[0];
     assert_eq!(d.labels.len(), n, "label count must match box count");
 }
@@ -156,7 +174,11 @@ fn test_forward_batch2_returns_two_detection_lists() {
     let model = fasterrcnn_resnet50_fpn::<f32>(91).unwrap();
     let imgs = no_grad(|| randn(&[2, 3, 64, 64]).unwrap());
     let dets = no_grad(|| model.forward(&imgs).unwrap());
-    assert_eq!(dets.len(), 2, "expect one detection list per image in batch");
+    assert_eq!(
+        dets.len(),
+        2,
+        "expect one detection list per image in batch"
+    );
 }
 
 /// P3 - Score tensor values are valid probabilities: each row sums to ~1.
@@ -197,8 +219,14 @@ fn test_forward_boxes_within_image() {
             let y1 = data[i * 4 + 1];
             let x2 = data[i * 4 + 2];
             let y2 = data[i * 4 + 3];
-            assert!(x1 >= 0.0 && x2 <= w as f32, "box {i}: x out of [0,{w}]: {x1}..{x2}");
-            assert!(y1 >= 0.0 && y2 <= h as f32, "box {i}: y out of [0,{h}]: {y1}..{y2}");
+            assert!(
+                x1 >= 0.0 && x2 <= w as f32,
+                "box {i}: x out of [0,{w}]: {x1}..{x2}"
+            );
+            assert!(
+                y1 >= 0.0 && y2 <= h as f32,
+                "box {i}: y out of [0,{h}]: {y1}..{y2}"
+            );
         }
     }
 }
@@ -308,9 +336,15 @@ fn test_train_eval_toggle() {
     let mut model = fasterrcnn_resnet50_fpn::<f32>(91).unwrap();
     assert!(!model.is_training(), "model should start in eval mode");
     model.train();
-    assert!(model.is_training(), "model.train() should set training=true");
+    assert!(
+        model.is_training(),
+        "model.train() should set training=true"
+    );
     model.eval();
-    assert!(!model.is_training(), "model.eval() should set training=false");
+    assert!(
+        !model.is_training(),
+        "model.eval() should set training=false"
+    );
 }
 
 // ===========================================================================
@@ -326,7 +360,11 @@ fn test_mask_head_spatial_preservation() {
     let head = MaskHead::<f32>::new(256).unwrap();
     let x = randn(&[4, 256, 14, 14]).unwrap();
     let out = no_grad(|| head.forward(&x).unwrap());
-    assert_eq!(out.shape(), &[4, 256, 14, 14], "MaskHead must preserve 14×14 spatial size");
+    assert_eq!(
+        out.shape(),
+        &[4, 256, 14, 14],
+        "MaskHead must preserve 14×14 spatial size"
+    );
 }
 
 /// M2 - MaskPredictor doubles spatial resolution via deconv.
@@ -356,15 +394,19 @@ fn test_maskrcnn_forward_output_structure() {
     assert_eq!(dets.len(), 1, "one MaskDetections per image");
     let d = &dets[0];
     let n = d.boxes.shape()[0];
-    assert_eq!(d.boxes.shape().len(), 2,   "boxes must be 2-D");
-    assert_eq!(d.boxes.shape()[1], 4,       "boxes must have 4 coords");
-    assert_eq!(d.scores.shape().len(), 2,   "scores must be 2-D");
-    assert_eq!(d.scores.shape()[1], 91,     "scores must have 91 classes");
-    assert_eq!(d.labels.len(), n,           "label count must match box count");
-    assert_eq!(d.masks.shape()[0], n,       "mask batch dim must match proposal count");
-    assert_eq!(d.masks.shape()[1], 91,      "masks must have 91 class channels");
-    assert_eq!(d.masks.shape()[2], 28,      "mask height must be 28");
-    assert_eq!(d.masks.shape()[3], 28,      "mask width must be 28");
+    assert_eq!(d.boxes.shape().len(), 2, "boxes must be 2-D");
+    assert_eq!(d.boxes.shape()[1], 4, "boxes must have 4 coords");
+    assert_eq!(d.scores.shape().len(), 2, "scores must be 2-D");
+    assert_eq!(d.scores.shape()[1], 91, "scores must have 91 classes");
+    assert_eq!(d.labels.len(), n, "label count must match box count");
+    assert_eq!(
+        d.masks.shape()[0],
+        n,
+        "mask batch dim must match proposal count"
+    );
+    assert_eq!(d.masks.shape()[1], 91, "masks must have 91 class channels");
+    assert_eq!(d.masks.shape()[2], 28, "mask height must be 28");
+    assert_eq!(d.masks.shape()[3], 28, "mask width must be 28");
 }
 
 /// M4 - Batch of 2 images returns two MaskDetections entries.
@@ -373,7 +415,11 @@ fn test_maskrcnn_forward_batch2() {
     let model = maskrcnn_resnet50_fpn::<f32>(91).unwrap();
     let imgs = no_grad(|| randn(&[2, 3, 64, 64]).unwrap());
     let dets = no_grad(|| model.forward(&imgs).unwrap());
-    assert_eq!(dets.len(), 2, "expect one MaskDetections per image in batch");
+    assert_eq!(
+        dets.len(),
+        2,
+        "expect one MaskDetections per image in batch"
+    );
 }
 
 /// M5 - Named parameters carry expected prefix hierarchy.
@@ -452,9 +498,15 @@ fn test_maskrcnn_train_eval_toggle() {
     let mut model = maskrcnn_resnet50_fpn::<f32>(91).unwrap();
     assert!(!model.is_training(), "model should start in eval mode");
     model.train();
-    assert!(model.is_training(), "model.train() should set training=true");
+    assert!(
+        model.is_training(),
+        "model.train() should set training=true"
+    );
     model.eval();
-    assert!(!model.is_training(), "model.eval() should set training=false");
+    assert!(
+        !model.is_training(),
+        "model.eval() should set training=false"
+    );
 }
 
 /// M11 - 512×512 end-to-end forward completes without error.

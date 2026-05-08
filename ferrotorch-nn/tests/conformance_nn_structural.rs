@@ -28,24 +28,15 @@
 )]
 
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 
+use ferrotorch_core::{FerrotorchResult, Float, Tensor, TensorStorage};
 use ferrotorch_nn::{
-    Buffer,
-    GRU, LSTM, RNN, RNNNonlinearity,
-    HookedModule,
-    LoRALinear,
-    Module,
-    ModuleDict, ModuleList, Sequential,
-    ObserverType, QatConfig,
-    Parameter,
-    ParameterDict, ParameterList,
-    prepare_qat,
-    pack_padded_sequence, pad_packed_sequence,
-    linear::Linear,
+    Buffer, GRU, HookedModule, LSTM, LoRALinear, Module, ModuleDict, ModuleList, ObserverType,
+    Parameter, ParameterDict, ParameterList, QatConfig, RNN, RNNNonlinearity, Sequential,
+    linear::Linear, pack_padded_sequence, pad_packed_sequence, prepare_qat,
 };
-use ferrotorch_core::{Float, FerrotorchResult, Tensor, TensorStorage};
 
 // ---------------------------------------------------------------------------
 // Layer-2 fixture loader
@@ -137,14 +128,24 @@ impl<T: Float> Module<T> for IdentityScaled<T> {
     fn forward(&self, input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
         Ok(input.clone())
     }
-    fn parameters(&self) -> Vec<&Parameter<T>> { vec![&self.weight] }
-    fn parameters_mut(&mut self) -> Vec<&mut Parameter<T>> { vec![&mut self.weight] }
+    fn parameters(&self) -> Vec<&Parameter<T>> {
+        vec![&self.weight]
+    }
+    fn parameters_mut(&mut self) -> Vec<&mut Parameter<T>> {
+        vec![&mut self.weight]
+    }
     fn named_parameters(&self) -> Vec<(String, &Parameter<T>)> {
         vec![("weight".into(), &self.weight)]
     }
-    fn train(&mut self) { self.training = true; }
-    fn eval(&mut self) { self.training = false; }
-    fn is_training(&self) -> bool { self.training }
+    fn train(&mut self) {
+        self.training = true;
+    }
+    fn eval(&mut self) {
+        self.training = false;
+    }
+    fn is_training(&self) -> bool {
+        self.training
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -188,18 +189,30 @@ impl<T: Float> Module<T> for ParentWithBuffer<T> {
         }
         out
     }
-    fn buffers(&self) -> Vec<&Buffer<T>> { vec![&self.running_mean] }
-    fn buffers_mut(&mut self) -> Vec<&mut Buffer<T>> { vec![&mut self.running_mean] }
+    fn buffers(&self) -> Vec<&Buffer<T>> {
+        vec![&self.running_mean]
+    }
+    fn buffers_mut(&mut self) -> Vec<&mut Buffer<T>> {
+        vec![&mut self.running_mean]
+    }
     fn named_buffers(&self) -> Vec<(String, &Buffer<T>)> {
         vec![("running_mean".into(), &self.running_mean)]
     }
-    fn children(&self) -> Vec<&dyn Module<T>> { vec![&self.child] }
+    fn children(&self) -> Vec<&dyn Module<T>> {
+        vec![&self.child]
+    }
     fn named_children(&self) -> Vec<(String, &dyn Module<T>)> {
         vec![("child".into(), &self.child)]
     }
-    fn train(&mut self) { self.child.train(); }
-    fn eval(&mut self) { self.child.eval(); }
-    fn is_training(&self) -> bool { self.child.is_training() }
+    fn train(&mut self) {
+        self.child.train();
+    }
+    fn eval(&mut self) {
+        self.child.eval();
+    }
+    fn is_training(&self) -> bool {
+        self.child.is_training()
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -227,11 +240,7 @@ fn container_sequential_nested_forward_matches_fixture() {
         Box::new(lin2) as Box<dyn Module<f32>>,
     ]);
 
-    let x = Tensor::from_storage(
-        TensorStorage::cpu(vec![1.0f32; 8]),
-        vec![2, 4],
-        false,
-    ).unwrap();
+    let x = Tensor::from_storage(TensorStorage::cpu(vec![1.0f32; 8]), vec![2, 4], false).unwrap();
 
     let output = seq.forward(&x).unwrap();
 
@@ -240,7 +249,12 @@ fn container_sequential_nested_forward_matches_fixture() {
     // Verify against fixture expected.
     let expected = json_to_f32_flat(&fx["expected"]["output"]);
     let tol = 1e-5f32;
-    assert_close_f32(output.data().unwrap(), &expected, tol, "sequential_nested_forward");
+    assert_close_f32(
+        output.data().unwrap(),
+        &expected,
+        tol,
+        "sequential_nested_forward",
+    );
 }
 
 /// conformance_nn_structural: ferrotorch_nn::Sequential parameter naming uses index prefix
@@ -274,7 +288,7 @@ fn container_sequential_train_eval_propagation() {
 #[test]
 fn container_module_list_get_push_semantics() {
     let mut list = ModuleList::new(vec![
-        Box::new(IdentityScaled::<f32>::new(3).unwrap()) as Box<dyn Module<f32>>,
+        Box::new(IdentityScaled::<f32>::new(3).unwrap()) as Box<dyn Module<f32>>
     ]);
     assert_eq!(list.len(), 1);
     assert!(!list.is_empty());
@@ -299,18 +313,19 @@ fn container_module_list_manual_chain_matches_fixture() {
         Box::new(lin_b) as Box<dyn Module<f32>>,
     ]);
 
-    let x = Tensor::from_storage(
-        TensorStorage::cpu(vec![2.0f32; 3]),
-        vec![1, 3],
-        false,
-    ).unwrap();
+    let x = Tensor::from_storage(TensorStorage::cpu(vec![2.0f32; 3]), vec![1, 3], false).unwrap();
 
     let y1 = list.get(0).unwrap().forward(&x).unwrap();
     let y2 = list.get(1).unwrap().forward(&y1).unwrap();
 
     assert_eq!(y2.shape(), &[1, 2]);
     let expected = json_to_f32_flat(&fx["expected"]["output"]);
-    assert_close_f32(y2.data().unwrap(), &expected, 1e-5, "module_list_manual_chain");
+    assert_close_f32(
+        y2.data().unwrap(),
+        &expected,
+        1e-5,
+        "module_list_manual_chain",
+    );
 }
 
 /// conformance_nn_structural: ferrotorch_nn::ModuleDict insertion order and forward
@@ -328,17 +343,18 @@ fn container_module_dict_encoder_decoder_matches_fixture() {
     dict.insert("encoder", Box::new(enc));
     dict.insert("decoder", Box::new(dec));
 
-    let x = Tensor::from_storage(
-        TensorStorage::cpu(vec![1.0f32; 4]),
-        vec![1, 4],
-        false,
-    ).unwrap();
+    let x = Tensor::from_storage(TensorStorage::cpu(vec![1.0f32; 4]), vec![1, 4], false).unwrap();
 
     let enc_out = dict.get("encoder").unwrap().forward(&x).unwrap();
     let dec_out = dict.get("decoder").unwrap().forward(&enc_out).unwrap();
 
     let expected_dec = json_to_f32_flat(&fx["expected"]["dec_output"]);
-    assert_close_f32(dec_out.data().unwrap(), &expected_dec, 1e-5, "module_dict_encoder_decoder");
+    assert_close_f32(
+        dec_out.data().unwrap(),
+        &expected_dec,
+        1e-5,
+        "module_dict_encoder_decoder",
+    );
 }
 
 /// conformance_nn_structural: ferrotorch_nn::ModuleDict keys maintain insertion order
@@ -367,13 +383,17 @@ fn module_state_dict_includes_params_and_buffers() {
     keys.sort();
 
     let mut expected_keys: Vec<String> = fx["expected_keys"]
-        .as_array().unwrap()
+        .as_array()
+        .unwrap()
         .iter()
         .map(|v| v.as_str().unwrap().to_string())
         .collect();
     expected_keys.sort();
 
-    assert_eq!(keys, expected_keys.iter().map(|s| s.as_str()).collect::<Vec<_>>());
+    assert_eq!(
+        keys,
+        expected_keys.iter().map(|s| s.as_str()).collect::<Vec<_>>()
+    );
     assert_eq!(sd.len(), fx["expected_count"].as_u64().unwrap() as usize);
 }
 
@@ -387,7 +407,8 @@ fn module_named_modules_paths_match_fixture() {
 
     let paths: Vec<&str> = named.iter().map(|(p, _)| p.as_str()).collect();
     let expected_paths: Vec<&str> = fx["expected_paths"]
-        .as_array().unwrap()
+        .as_array()
+        .unwrap()
         .iter()
         .map(|v| v.as_str().unwrap())
         .collect();
@@ -429,7 +450,10 @@ fn module_requires_grad_freeze_all_params() {
 fn module_load_state_dict_strict_rejects_unknown_keys() {
     let mut m = ParentWithBuffer::<f32>::new().unwrap();
     let mut sd = m.state_dict();
-    sd.insert("nonexistent_param".into(), ferrotorch_core::zeros::<f32>(&[1]).unwrap());
+    sd.insert(
+        "nonexistent_param".into(),
+        ferrotorch_core::zeros::<f32>(&[1]).unwrap(),
+    );
 
     // strict=true must error on unknown key
     assert!(m.load_state_dict(&sd, true).is_err());
@@ -464,10 +488,18 @@ fn parameter_requires_grad_always_true() {
 fn parameter_from_slice_shape_matches_fixture() {
     let fixtures = fixtures_json();
     let fx = fixture_by_id(&fixtures, "parameter_from_slice_shape");
-    let data: Vec<f32> = fx["data"].as_array().unwrap()
-        .iter().map(|v| v.as_f64().unwrap() as f32).collect();
-    let shape: Vec<usize> = fx["shape"].as_array().unwrap()
-        .iter().map(|v| v.as_u64().unwrap() as usize).collect();
+    let data: Vec<f32> = fx["data"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_f64().unwrap() as f32)
+        .collect();
+    let shape: Vec<usize> = fx["shape"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_u64().unwrap() as usize)
+        .collect();
 
     let p = Parameter::from_slice(&data, &shape).unwrap();
     assert_eq!(p.shape(), shape.as_slice());
@@ -506,13 +538,19 @@ fn parameter_list_named_params_index_keys() {
     let fx = fixture_by_id(&fixtures, "parameter_list_named_indexed");
     let count = fx["count"].as_u64().unwrap() as usize;
 
-    let params: Vec<Parameter<f32>> = (0..count).map(|i| Parameter::zeros(&[i + 1]).unwrap()).collect();
+    let params: Vec<Parameter<f32>> = (0..count)
+        .map(|i| Parameter::zeros(&[i + 1]).unwrap())
+        .collect();
     let list = ParameterList::from_vec(params);
 
     let named = list.named_parameters();
     let keys: Vec<&str> = named.iter().map(|(k, _)| k.as_str()).collect();
-    let expected_keys: Vec<&str> = fx["expected_keys"].as_array().unwrap()
-        .iter().map(|v| v.as_str().unwrap()).collect();
+    let expected_keys: Vec<&str> = fx["expected_keys"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_str().unwrap())
+        .collect();
     assert_eq!(keys, expected_keys);
 }
 
@@ -521,8 +559,12 @@ fn parameter_list_named_params_index_keys() {
 fn parameter_dict_sorted_keys_match_fixture() {
     let fixtures = fixtures_json();
     let fx = fixture_by_id(&fixtures, "parameter_dict_sorted_keys");
-    let insert_order: Vec<&str> = fx["insert_order"].as_array().unwrap()
-        .iter().map(|v| v.as_str().unwrap()).collect();
+    let insert_order: Vec<&str> = fx["insert_order"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_str().unwrap())
+        .collect();
 
     let mut dict = ParameterDict::<f32>::new();
     for (i, key) in insert_order.iter().enumerate() {
@@ -531,8 +573,12 @@ fn parameter_dict_sorted_keys_match_fixture() {
 
     let named = dict.named_parameters();
     let keys: Vec<&str> = named.iter().map(|(k, _)| k.as_str()).collect();
-    let expected: Vec<&str> = fx["expected_key_order"].as_array().unwrap()
-        .iter().map(|v| v.as_str().unwrap()).collect();
+    let expected: Vec<&str> = fx["expected_key_order"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_str().unwrap())
+        .collect();
     assert_eq!(keys, expected);
 }
 
@@ -575,7 +621,9 @@ fn buffer_never_requires_grad() {
     assert!(!b.requires_grad(), "Buffer must never require grad");
 
     // Even if we set_data with a requires_grad tensor, must stay false.
-    let t = ferrotorch_core::ones::<f32>(&[3, 4]).unwrap().requires_grad_(true);
+    let t = ferrotorch_core::ones::<f32>(&[3, 4])
+        .unwrap()
+        .requires_grad_(true);
     let mut b2 = Buffer::from_slice(&[0.0f32; 12], &[3, 4]).unwrap();
     b2.set_data(t);
     assert!(!b2.requires_grad());
@@ -595,7 +643,10 @@ fn buffer_to_cpu_preserves_data() {
 fn buffer_included_in_state_dict() {
     let m = ParentWithBuffer::<f32>::new().unwrap();
     let sd = m.state_dict();
-    assert!(sd.contains_key("running_mean"), "running_mean buffer must appear in state_dict");
+    assert!(
+        sd.contains_key("running_mean"),
+        "running_mean buffer must appear in state_dict"
+    );
     assert_eq!(sd["running_mean"].shape(), &[2]);
 }
 
@@ -635,7 +686,10 @@ fn hooks_forward_pre_hook_replaces_input() {
     let x = Tensor::from_storage(TensorStorage::cpu(vec![9.0f32; 3]), vec![3], false).unwrap();
     let out = hooked.forward(&x).unwrap();
     let data = out.data().unwrap();
-    assert!(data.iter().all(|&v| v == 0.0), "pre-hook must zero out input");
+    assert!(
+        data.iter().all(|&v| v == 0.0),
+        "pre-hook must zero out input"
+    );
 }
 
 /// conformance_nn_structural: ferrotorch_nn HookHandle::remove stops the hook firing
@@ -656,7 +710,11 @@ fn hooks_handle_remove_stops_hook() {
     handle.remove();
 
     hooked.forward(&x).unwrap();
-    assert_eq!(count.load(Ordering::Relaxed), 1, "hook must not fire after remove");
+    assert_eq!(
+        count.load(Ordering::Relaxed),
+        1,
+        "hook must not fire after remove"
+    );
 }
 
 /// conformance_nn_structural: multiple hooks fire in registration order
@@ -700,8 +758,12 @@ fn rnn_lstm_single_step_output_shape() {
     let fx = fixture_by_id(&fixtures, "lstm_single_step_shape");
     let hidden_size = fx["inputs"]["hidden_size"].as_u64().unwrap() as usize;
     let num_layers = fx["inputs"]["num_layers"].as_u64().unwrap() as usize;
-    let x_shape: Vec<usize> = fx["inputs"]["x_shape"].as_array().unwrap()
-        .iter().map(|v| v.as_u64().unwrap() as usize).collect();
+    let x_shape: Vec<usize> = fx["inputs"]["x_shape"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_u64().unwrap() as usize)
+        .collect();
     let x_val = fx["inputs"]["x_value"].as_f64().unwrap() as f32;
     let w_val = fx["inputs"]["weight_value"].as_f64().unwrap() as f32;
 
@@ -717,24 +779,51 @@ fn rnn_lstm_single_step_output_shape() {
         TensorStorage::cpu(vec![x_val; x_shape.iter().product()]),
         x_shape.clone(),
         false,
-    ).unwrap();
+    )
+    .unwrap();
 
     let (output, (h_n, c_n)) = lstm.forward_with_state(&x, None).unwrap();
 
-    let exp_out_shape: Vec<usize> = fx["expected"]["output_shape"].as_array().unwrap()
-        .iter().map(|v| v.as_u64().unwrap() as usize).collect();
-    let exp_hn_shape: Vec<usize> = fx["expected"]["h_n_shape"].as_array().unwrap()
-        .iter().map(|v| v.as_u64().unwrap() as usize).collect();
+    let exp_out_shape: Vec<usize> = fx["expected"]["output_shape"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_u64().unwrap() as usize)
+        .collect();
+    let exp_hn_shape: Vec<usize> = fx["expected"]["h_n_shape"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_u64().unwrap() as usize)
+        .collect();
 
-    assert_eq!(output.shape(), exp_out_shape.as_slice(), "LSTM output shape mismatch");
-    assert_eq!(h_n.shape(), exp_hn_shape.as_slice(), "LSTM h_n shape mismatch");
+    assert_eq!(
+        output.shape(),
+        exp_out_shape.as_slice(),
+        "LSTM output shape mismatch"
+    );
+    assert_eq!(
+        h_n.shape(),
+        exp_hn_shape.as_slice(),
+        "LSTM h_n shape mismatch"
+    );
 
     // Numerical check against fixture.
     let expected_out = json_to_f32_flat(&fx["expected"]["output"]);
     let tol = fx["tolerance"].as_f64().unwrap_or(1e-4) as f32;
-    assert_close_f32(output.data().unwrap(), &expected_out, tol, "lstm_single_step_output");
+    assert_close_f32(
+        output.data().unwrap(),
+        &expected_out,
+        tol,
+        "lstm_single_step_output",
+    );
     let expected_hn = json_to_f32_flat(&fx["expected"]["h_n"]);
-    assert_close_f32(h_n.data().unwrap(), &expected_hn, tol, "lstm_single_step_h_n");
+    assert_close_f32(
+        h_n.data().unwrap(),
+        &expected_hn,
+        tol,
+        "lstm_single_step_h_n",
+    );
 
     let _ = c_n; // shape already checked via h_n symmetry
 }
@@ -749,8 +838,12 @@ fn rnn_lstm_multistep_trajectory() {
     let w_val = fx["inputs"]["weight_value"].as_f64().unwrap() as f32;
 
     let x_flat = json_to_f32_flat(&fx["inputs"]["x"]);
-    let x_shape: Vec<usize> = fx["inputs"]["x_shape"].as_array().unwrap()
-        .iter().map(|v| v.as_u64().unwrap() as usize).collect();
+    let x_shape: Vec<usize> = fx["inputs"]["x_shape"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_u64().unwrap() as usize)
+        .collect();
 
     let input_size = x_shape[2];
     let mut lstm = LSTM::<f32>::new(input_size, hidden_size, num_layers).unwrap();
@@ -763,8 +856,12 @@ fn rnn_lstm_multistep_trajectory() {
     let x = Tensor::from_storage(TensorStorage::cpu(x_flat), x_shape.clone(), false).unwrap();
     let (output, (h_n, c_n)) = lstm.forward_with_state(&x, None).unwrap();
 
-    let exp_out_shape: Vec<usize> = fx["expected"]["output_shape"].as_array().unwrap()
-        .iter().map(|v| v.as_u64().unwrap() as usize).collect();
+    let exp_out_shape: Vec<usize> = fx["expected"]["output_shape"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_u64().unwrap() as usize)
+        .collect();
     assert_eq!(output.shape(), exp_out_shape.as_slice());
 
     let tol = fx["tolerance"].as_f64().unwrap_or(1e-4) as f32;
@@ -772,7 +869,12 @@ fn rnn_lstm_multistep_trajectory() {
     assert_close_f32(h_n.data().unwrap(), &expected_hn, tol, "lstm_multistep_h_n");
 
     let expected_out = json_to_f32_flat(&fx["expected"]["output"]);
-    assert_close_f32(output.data().unwrap(), &expected_out, tol, "lstm_multistep_output");
+    assert_close_f32(
+        output.data().unwrap(),
+        &expected_out,
+        tol,
+        "lstm_multistep_output",
+    );
 
     let _ = c_n;
 }
@@ -794,7 +896,8 @@ fn rnn_lstm_module_forward_produces_correct_output_shape() {
         TensorStorage::cpu(vec![0.1f32; 2 * 5 * 4]),
         vec![2, 5, 4],
         false,
-    ).unwrap();
+    )
+    .unwrap();
     let out = Module::<f32>::forward(&lstm, &x).unwrap();
     assert_eq!(out.shape(), &[2, 5, 3]);
 }
@@ -810,8 +913,12 @@ fn rnn_gru_single_step_output_shape() {
     let fx = fixture_by_id(&fixtures, "gru_single_step_shape");
     let hidden_size = fx["inputs"]["hidden_size"].as_u64().unwrap() as usize;
     let num_layers = fx["inputs"]["num_layers"].as_u64().unwrap() as usize;
-    let x_shape: Vec<usize> = fx["inputs"]["x_shape"].as_array().unwrap()
-        .iter().map(|v| v.as_u64().unwrap() as usize).collect();
+    let x_shape: Vec<usize> = fx["inputs"]["x_shape"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_u64().unwrap() as usize)
+        .collect();
     let x_val = fx["inputs"]["x_value"].as_f64().unwrap() as f32;
     let w_val = fx["inputs"]["weight_value"].as_f64().unwrap() as f32;
 
@@ -826,20 +933,34 @@ fn rnn_gru_single_step_output_shape() {
         TensorStorage::cpu(vec![x_val; x_shape.iter().product()]),
         x_shape.clone(),
         false,
-    ).unwrap();
+    )
+    .unwrap();
 
     let (output, h_n) = gru.forward(&x, None).unwrap();
 
-    let exp_out_shape: Vec<usize> = fx["expected"]["output_shape"].as_array().unwrap()
-        .iter().map(|v| v.as_u64().unwrap() as usize).collect();
-    let exp_hn_shape: Vec<usize> = fx["expected"]["h_n_shape"].as_array().unwrap()
-        .iter().map(|v| v.as_u64().unwrap() as usize).collect();
+    let exp_out_shape: Vec<usize> = fx["expected"]["output_shape"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_u64().unwrap() as usize)
+        .collect();
+    let exp_hn_shape: Vec<usize> = fx["expected"]["h_n_shape"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_u64().unwrap() as usize)
+        .collect();
     assert_eq!(output.shape(), exp_out_shape.as_slice());
     assert_eq!(h_n.shape(), exp_hn_shape.as_slice());
 
     let tol = fx["tolerance"].as_f64().unwrap_or(1e-4) as f32;
     let expected_out = json_to_f32_flat(&fx["expected"]["output"]);
-    assert_close_f32(output.data().unwrap(), &expected_out, tol, "gru_single_step_output");
+    assert_close_f32(
+        output.data().unwrap(),
+        &expected_out,
+        tol,
+        "gru_single_step_output",
+    );
 }
 
 /// conformance_nn_structural: ferrotorch_nn::GRU multi-step trajectory
@@ -852,8 +973,12 @@ fn rnn_gru_multistep_trajectory() {
     let w_val = fx["inputs"]["weight_value"].as_f64().unwrap() as f32;
 
     let x_flat = json_to_f32_flat(&fx["inputs"]["x"]);
-    let x_shape: Vec<usize> = fx["inputs"]["x_shape"].as_array().unwrap()
-        .iter().map(|v| v.as_u64().unwrap() as usize).collect();
+    let x_shape: Vec<usize> = fx["inputs"]["x_shape"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_u64().unwrap() as usize)
+        .collect();
     let input_size = x_shape[2];
 
     let mut gru = GRU::<f32>::with_num_layers(input_size, hidden_size, num_layers).unwrap();
@@ -866,8 +991,12 @@ fn rnn_gru_multistep_trajectory() {
     let x = Tensor::from_storage(TensorStorage::cpu(x_flat), x_shape.clone(), false).unwrap();
     let (output, h_n) = gru.forward(&x, None).unwrap();
 
-    let exp_out_shape: Vec<usize> = fx["expected"]["output_shape"].as_array().unwrap()
-        .iter().map(|v| v.as_u64().unwrap() as usize).collect();
+    let exp_out_shape: Vec<usize> = fx["expected"]["output_shape"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_u64().unwrap() as usize)
+        .collect();
     assert_eq!(output.shape(), exp_out_shape.as_slice());
 
     let tol = fx["tolerance"].as_f64().unwrap_or(1e-4) as f32;
@@ -894,14 +1023,18 @@ fn rnn_tanh_single_step_shape_and_values() {
     let fx = fixture_by_id(&fixtures, "rnn_tanh_single_step");
     let hidden_size = fx["inputs"]["hidden_size"].as_u64().unwrap() as usize;
     let num_layers = fx["inputs"]["num_layers"].as_u64().unwrap() as usize;
-    let x_shape: Vec<usize> = fx["inputs"]["x_shape"].as_array().unwrap()
-        .iter().map(|v| v.as_u64().unwrap() as usize).collect();
+    let x_shape: Vec<usize> = fx["inputs"]["x_shape"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_u64().unwrap() as usize)
+        .collect();
     let x_val = fx["inputs"]["x_value"].as_f64().unwrap() as f32;
     let w_val = fx["inputs"]["weight_value"].as_f64().unwrap() as f32;
 
-    let mut rnn = RNN::<f32>::with_options(
-        x_shape[2], hidden_size, num_layers, RNNNonlinearity::Tanh,
-    ).unwrap();
+    let mut rnn =
+        RNN::<f32>::with_options(x_shape[2], hidden_size, num_layers, RNNNonlinearity::Tanh)
+            .unwrap();
     for p in rnn.parameters_mut() {
         let shape = p.shape().to_vec();
         let n = p.numel();
@@ -912,20 +1045,34 @@ fn rnn_tanh_single_step_shape_and_values() {
         TensorStorage::cpu(vec![x_val; x_shape.iter().product()]),
         x_shape.clone(),
         false,
-    ).unwrap();
+    )
+    .unwrap();
 
     let (output, h_n) = rnn.forward_with_state(&x, None).unwrap();
 
-    let exp_out_shape: Vec<usize> = fx["expected"]["output_shape"].as_array().unwrap()
-        .iter().map(|v| v.as_u64().unwrap() as usize).collect();
-    let exp_hn_shape: Vec<usize> = fx["expected"]["h_n_shape"].as_array().unwrap()
-        .iter().map(|v| v.as_u64().unwrap() as usize).collect();
+    let exp_out_shape: Vec<usize> = fx["expected"]["output_shape"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_u64().unwrap() as usize)
+        .collect();
+    let exp_hn_shape: Vec<usize> = fx["expected"]["h_n_shape"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_u64().unwrap() as usize)
+        .collect();
     assert_eq!(output.shape(), exp_out_shape.as_slice());
     assert_eq!(h_n.shape(), exp_hn_shape.as_slice());
 
     let tol = fx["tolerance"].as_f64().unwrap_or(1e-4) as f32;
     let expected_out = json_to_f32_flat(&fx["expected"]["output"]);
-    assert_close_f32(output.data().unwrap(), &expected_out, tol, "rnn_tanh_single_step");
+    assert_close_f32(
+        output.data().unwrap(),
+        &expected_out,
+        tol,
+        "rnn_tanh_single_step",
+    );
 }
 
 /// conformance_nn_structural: ferrotorch_nn::RNN multi-step trajectory
@@ -938,13 +1085,17 @@ fn rnn_tanh_multistep_trajectory() {
     let w_val = fx["inputs"]["weight_value"].as_f64().unwrap() as f32;
 
     let x_flat = json_to_f32_flat(&fx["inputs"]["x"]);
-    let x_shape: Vec<usize> = fx["inputs"]["x_shape"].as_array().unwrap()
-        .iter().map(|v| v.as_u64().unwrap() as usize).collect();
+    let x_shape: Vec<usize> = fx["inputs"]["x_shape"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_u64().unwrap() as usize)
+        .collect();
     let input_size = x_shape[2];
 
-    let mut rnn = RNN::<f32>::with_options(
-        input_size, hidden_size, num_layers, RNNNonlinearity::Tanh,
-    ).unwrap();
+    let mut rnn =
+        RNN::<f32>::with_options(input_size, hidden_size, num_layers, RNNNonlinearity::Tanh)
+            .unwrap();
     for p in rnn.parameters_mut() {
         let shape = p.shape().to_vec();
         let n = p.numel();
@@ -954,13 +1105,22 @@ fn rnn_tanh_multistep_trajectory() {
     let x = Tensor::from_storage(TensorStorage::cpu(x_flat), x_shape.clone(), false).unwrap();
     let (output, h_n) = rnn.forward_with_state(&x, None).unwrap();
 
-    let exp_out_shape: Vec<usize> = fx["expected"]["output_shape"].as_array().unwrap()
-        .iter().map(|v| v.as_u64().unwrap() as usize).collect();
+    let exp_out_shape: Vec<usize> = fx["expected"]["output_shape"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_u64().unwrap() as usize)
+        .collect();
     assert_eq!(output.shape(), exp_out_shape.as_slice());
 
     let tol = fx["tolerance"].as_f64().unwrap_or(1e-3) as f32;
     let expected_hn = json_to_f32_flat(&fx["expected"]["h_n"]);
-    assert_close_f32(h_n.data().unwrap(), &expected_hn, tol, "rnn_tanh_multistep_h_n");
+    assert_close_f32(
+        h_n.data().unwrap(),
+        &expected_hn,
+        tol,
+        "rnn_tanh_multistep_h_n",
+    );
 }
 
 /// conformance_nn_structural: ferrotorch_nn::RNN parameter count is num_layers * 4
@@ -984,20 +1144,31 @@ fn rnn_utils_pack_padded_batch_sizes() {
     let batch = fx["inputs"]["batch"].as_u64().unwrap() as usize;
     let max_seq = fx["inputs"]["max_seq_len"].as_u64().unwrap() as usize;
     let features = fx["inputs"]["features"].as_u64().unwrap() as usize;
-    let lengths: Vec<usize> = fx["inputs"]["lengths"].as_array().unwrap()
-        .iter().map(|v| v.as_u64().unwrap() as usize).collect();
+    let lengths: Vec<usize> = fx["inputs"]["lengths"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_u64().unwrap() as usize)
+        .collect();
 
-    let data: Vec<f32> = (0..(batch * max_seq * features)).map(|i| i as f32).collect();
+    let data: Vec<f32> = (0..(batch * max_seq * features))
+        .map(|i| i as f32)
+        .collect();
     let input = Tensor::from_storage(
         TensorStorage::cpu(data),
         vec![batch, max_seq, features],
         false,
-    ).unwrap();
+    )
+    .unwrap();
 
     let packed = pack_padded_sequence(&input, &lengths, true, true).unwrap();
 
-    let expected_bs: Vec<usize> = fx["expected"]["batch_sizes"].as_array().unwrap()
-        .iter().map(|v| v.as_u64().unwrap() as usize).collect();
+    let expected_bs: Vec<usize> = fx["expected"]["batch_sizes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_u64().unwrap() as usize)
+        .collect();
     assert_eq!(packed.batch_sizes, expected_bs);
 }
 
@@ -1015,13 +1186,26 @@ fn rnn_utils_pack_padded_data_order() {
 
     let packed = pack_padded_sequence(&input, &lengths, true, true).unwrap();
 
-    let expected_bs: Vec<usize> = fx["expected"]["batch_sizes"].as_array().unwrap()
-        .iter().map(|v| v.as_u64().unwrap() as usize).collect();
+    let expected_bs: Vec<usize> = fx["expected"]["batch_sizes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_u64().unwrap() as usize)
+        .collect();
     assert_eq!(packed.batch_sizes, expected_bs);
 
-    let expected_packed: Vec<f32> = fx["expected"]["packed_data"].as_array().unwrap()
-        .iter().map(|v| v.as_f64().unwrap() as f32).collect();
-    assert_close_f32(packed.data.data().unwrap(), &expected_packed, 1e-7, "pack_padded_data_order");
+    let expected_packed: Vec<f32> = fx["expected"]["packed_data"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_f64().unwrap() as f32)
+        .collect();
+    assert_close_f32(
+        packed.data.data().unwrap(),
+        &expected_packed,
+        1e-7,
+        "pack_padded_data_order",
+    );
 }
 
 /// conformance_nn_structural: pad_packed_sequence round-trips pack with correct shapes
@@ -1032,8 +1216,12 @@ fn rnn_utils_pad_packed_sequence_roundtrip() {
     let batch = fx["inputs"]["batch"].as_u64().unwrap() as usize;
     let max_seq = fx["inputs"]["max_seq_len"].as_u64().unwrap() as usize;
     let features = fx["inputs"]["features"].as_u64().unwrap() as usize;
-    let lengths: Vec<usize> = fx["inputs"]["lengths"].as_array().unwrap()
-        .iter().map(|v| v.as_u64().unwrap() as usize).collect();
+    let lengths: Vec<usize> = fx["inputs"]["lengths"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_u64().unwrap() as usize)
+        .collect();
 
     // Build a test input with value = (b*1000 + t*10 + f) so positions are identifiable.
     let mut data = Vec::with_capacity(batch * max_seq * features);
@@ -1044,17 +1232,30 @@ fn rnn_utils_pad_packed_sequence_roundtrip() {
             }
         }
     }
-    let input = Tensor::from_storage(TensorStorage::cpu(data.clone()), vec![batch, max_seq, features], false).unwrap();
+    let input = Tensor::from_storage(
+        TensorStorage::cpu(data.clone()),
+        vec![batch, max_seq, features],
+        false,
+    )
+    .unwrap();
 
     let packed = pack_padded_sequence(&input, &lengths, true, true).unwrap();
     let (output, out_lengths) = pad_packed_sequence(&packed, true, 0.0f32).unwrap();
 
-    let expected_out_lengths: Vec<usize> = fx["expected"]["output_lengths"].as_array().unwrap()
-        .iter().map(|v| v.as_u64().unwrap() as usize).collect();
+    let expected_out_lengths: Vec<usize> = fx["expected"]["output_lengths"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_u64().unwrap() as usize)
+        .collect();
     assert_eq!(out_lengths, expected_out_lengths);
 
-    let expected_shape: Vec<usize> = fx["expected"]["output_shape"].as_array().unwrap()
-        .iter().map(|v| v.as_u64().unwrap() as usize).collect();
+    let expected_shape: Vec<usize> = fx["expected"]["output_shape"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_u64().unwrap() as usize)
+        .collect();
     assert_eq!(output.shape(), expected_shape.as_slice());
 
     // Non-padding positions must match original.
@@ -1064,9 +1265,15 @@ fn rnn_utils_pad_packed_sequence_roundtrip() {
             for f in 0..features {
                 let idx = b * max_seq * features + t * features + f;
                 if t < len_b {
-                    assert_eq!(out_data[idx], data[idx], "roundtrip mismatch at b={b} t={t} f={f}");
+                    assert_eq!(
+                        out_data[idx], data[idx],
+                        "roundtrip mismatch at b={b} t={t} f={f}"
+                    );
                 } else {
-                    assert_eq!(out_data[idx], 0.0f32, "padding must be 0.0 at b={b} t={t} f={f}");
+                    assert_eq!(
+                        out_data[idx], 0.0f32,
+                        "padding must be 0.0 at b={b} t={t} f={f}"
+                    );
                 }
             }
         }
@@ -1081,20 +1288,37 @@ fn rnn_utils_pack_padded_unsorted() {
     let batch = fx["inputs"]["batch"].as_u64().unwrap() as usize;
     let max_seq = fx["inputs"]["max_seq_len"].as_u64().unwrap() as usize;
     let features = fx["inputs"]["features"].as_u64().unwrap() as usize;
-    let lengths: Vec<usize> = fx["inputs"]["lengths"].as_array().unwrap()
-        .iter().map(|v| v.as_u64().unwrap() as usize).collect();
+    let lengths: Vec<usize> = fx["inputs"]["lengths"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_u64().unwrap() as usize)
+        .collect();
 
-    let data: Vec<f32> = (0..(batch * max_seq * features)).map(|i| i as f32).collect();
+    let data: Vec<f32> = (0..(batch * max_seq * features))
+        .map(|i| i as f32)
+        .collect();
     let input = Tensor::from_storage(
-        TensorStorage::cpu(data), vec![batch, max_seq, features], false,
-    ).unwrap();
+        TensorStorage::cpu(data),
+        vec![batch, max_seq, features],
+        false,
+    )
+    .unwrap();
 
     let packed = pack_padded_sequence(&input, &lengths, true, false).unwrap();
 
-    let expected_bs: Vec<usize> = fx["expected"]["batch_sizes"].as_array().unwrap()
-        .iter().map(|v| v.as_u64().unwrap() as usize).collect();
-    let expected_si: Vec<usize> = fx["expected"]["sorted_indices"].as_array().unwrap()
-        .iter().map(|v| v.as_u64().unwrap() as usize).collect();
+    let expected_bs: Vec<usize> = fx["expected"]["batch_sizes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_u64().unwrap() as usize)
+        .collect();
+    let expected_si: Vec<usize> = fx["expected"]["sorted_indices"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_u64().unwrap() as usize)
+        .collect();
     assert_eq!(packed.batch_sizes, expected_bs);
     assert_eq!(packed.sorted_indices, expected_si);
 }
@@ -1105,7 +1329,10 @@ fn rnn_utils_enforce_sorted_rejects_unsorted() {
     let data: Vec<f32> = (0..30).map(|i| i as f32).collect();
     let input = Tensor::from_storage(TensorStorage::cpu(data), vec![3, 5, 2], false).unwrap();
     let result = pack_padded_sequence(&input, &[2usize, 5, 3], true, true);
-    assert!(result.is_err(), "enforce_sorted=true must reject unsorted lengths");
+    assert!(
+        result.is_err(),
+        "enforce_sorted=true must reject unsorted lengths"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -1131,19 +1358,29 @@ fn lora_zero_b_forward_matches_base_fixture() {
     // lora_b is zero-initialized in LoRALinear::new — contribution should be zero.
     let lora = LoRALinear::new(base, rank, alpha, 0.0).unwrap();
 
-    let x_shape: Vec<usize> = fx["inputs"]["x_shape"].as_array().unwrap()
-        .iter().map(|v| v.as_u64().unwrap() as usize).collect();
+    let x_shape: Vec<usize> = fx["inputs"]["x_shape"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_u64().unwrap() as usize)
+        .collect();
     let x = Tensor::from_storage(
         TensorStorage::cpu(vec![1.0f32; x_shape.iter().product()]),
         x_shape,
         false,
-    ).unwrap();
+    )
+    .unwrap();
 
     let output = lora.forward(&x).unwrap();
 
     let expected = json_to_f32_flat(&fx["expected"]["output"]);
     let tol = 1e-5f32;
-    assert_close_f32(output.data().unwrap(), &expected, tol, "lora_zero_b_matches_base");
+    assert_close_f32(
+        output.data().unwrap(),
+        &expected,
+        tol,
+        "lora_zero_b_matches_base",
+    );
 }
 
 /// conformance_nn_structural: ferrotorch_nn::LoRALinear forward with known A, B
@@ -1168,24 +1405,35 @@ fn lora_forward_known_weights_matches_fixture() {
     let mut lora = LoRALinear::new(base, rank, alpha, 0.0).unwrap();
     // lora_a and lora_b are private; use load_state_dict to inject known values.
     let mut sd = lora.state_dict();
-    sd.insert("lora_a".into(), Tensor::from_storage(
-        TensorStorage::cpu(lora_a_data), vec![rank, in_f], false,
-    ).unwrap());
-    sd.insert("lora_b".into(), Tensor::from_storage(
-        TensorStorage::cpu(lora_b_data), vec![out_f, rank], false,
-    ).unwrap());
+    sd.insert(
+        "lora_a".into(),
+        Tensor::from_storage(TensorStorage::cpu(lora_a_data), vec![rank, in_f], false).unwrap(),
+    );
+    sd.insert(
+        "lora_b".into(),
+        Tensor::from_storage(TensorStorage::cpu(lora_b_data), vec![out_f, rank], false).unwrap(),
+    );
     lora.load_state_dict(&sd, true).unwrap();
 
     let x_flat = json_to_f32_flat(&fx["inputs"]["x"]);
-    let x_shape: Vec<usize> = fx["inputs"]["x_shape"].as_array().unwrap()
-        .iter().map(|v| v.as_u64().unwrap() as usize).collect();
+    let x_shape: Vec<usize> = fx["inputs"]["x_shape"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_u64().unwrap() as usize)
+        .collect();
     let x = Tensor::from_storage(TensorStorage::cpu(x_flat), x_shape, false).unwrap();
 
     let output = lora.forward(&x).unwrap();
 
     let expected = json_to_f32_flat(&fx["expected"]["output"]);
     let tol = 1e-5f32;
-    assert_close_f32(output.data().unwrap(), &expected, tol, "lora_forward_known_weights");
+    assert_close_f32(
+        output.data().unwrap(),
+        &expected,
+        tol,
+        "lora_forward_known_weights",
+    );
 }
 
 /// conformance_nn_structural: ferrotorch_nn::LoRALinear merge produces same output as pre-merge forward
@@ -1204,8 +1452,12 @@ fn lora_merge_produces_same_output() {
     let lora_b_data = json_to_f32_flat(&fx["inputs"]["lora_b"]);
 
     let x_flat = json_to_f32_flat(&fx["inputs"]["x"]);
-    let x_shape: Vec<usize> = fx["inputs"]["x_shape"].as_array().unwrap()
-        .iter().map(|v| v.as_u64().unwrap() as usize).collect();
+    let x_shape: Vec<usize> = fx["inputs"]["x_shape"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_u64().unwrap() as usize)
+        .collect();
 
     let mut base = Linear::<f32>::new(in_f, out_f, true).unwrap();
     base.weight = Parameter::from_slice(&base_weight, &[out_f, in_f]).unwrap();
@@ -1214,15 +1466,18 @@ fn lora_merge_produces_same_output() {
     let mut lora = LoRALinear::new(base, rank, alpha, 0.0).unwrap();
     // lora_a and lora_b are private; use load_state_dict to inject known values.
     let mut sd = lora.state_dict();
-    sd.insert("lora_a".into(), Tensor::from_storage(
-        TensorStorage::cpu(lora_a_data), vec![rank, in_f], false,
-    ).unwrap());
-    sd.insert("lora_b".into(), Tensor::from_storage(
-        TensorStorage::cpu(lora_b_data), vec![out_f, rank], false,
-    ).unwrap());
+    sd.insert(
+        "lora_a".into(),
+        Tensor::from_storage(TensorStorage::cpu(lora_a_data), vec![rank, in_f], false).unwrap(),
+    );
+    sd.insert(
+        "lora_b".into(),
+        Tensor::from_storage(TensorStorage::cpu(lora_b_data), vec![out_f, rank], false).unwrap(),
+    );
     lora.load_state_dict(&sd, true).unwrap();
 
-    let x = Tensor::from_storage(TensorStorage::cpu(x_flat.clone()), x_shape.clone(), false).unwrap();
+    let x =
+        Tensor::from_storage(TensorStorage::cpu(x_flat.clone()), x_shape.clone(), false).unwrap();
     let pre_merge = lora.forward(&x).unwrap();
     let pre_data = pre_merge.data().unwrap().to_vec();
 
@@ -1255,8 +1510,14 @@ fn lora_state_dict_excludes_base_weight() {
     let sd = lora.state_dict();
     assert!(sd.contains_key("lora_a"));
     assert!(sd.contains_key("lora_b"));
-    assert!(!sd.contains_key("weight"), "base weight must NOT be in state_dict");
-    assert!(!sd.contains_key("bias"), "base bias must NOT be in state_dict");
+    assert!(
+        !sd.contains_key("weight"),
+        "base weight must NOT be in state_dict"
+    );
+    assert!(
+        !sd.contains_key("bias"),
+        "base bias must NOT be in state_dict"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -1274,8 +1535,14 @@ fn qat_config_default_symmetric_int8_fields() {
     let expected_ad = fx["expected"]["activation_dtype"].as_str().unwrap();
     assert_eq!(format!("{:?}", c.weight_dtype), expected_wd);
     assert_eq!(format!("{:?}", c.activation_dtype), expected_ad);
-    assert_eq!(c.weight_symmetric, fx["expected"]["weight_symmetric"].as_bool().unwrap());
-    assert_eq!(c.activation_symmetric, fx["expected"]["activation_symmetric"].as_bool().unwrap());
+    assert_eq!(
+        c.weight_symmetric,
+        fx["expected"]["weight_symmetric"].as_bool().unwrap()
+    );
+    assert_eq!(
+        c.activation_symmetric,
+        fx["expected"]["activation_symmetric"].as_bool().unwrap()
+    );
 }
 
 /// conformance_nn_structural: ferrotorch_nn::QatConfig::per_channel_int8 observer type
@@ -1300,8 +1567,12 @@ fn qat_config_int4_int8_dtype_fields() {
 fn qat_prepare_qat_registers_weight_layers() {
     let fixtures = fixtures_json();
     let fx = fixture_by_id(&fixtures, "prepare_qat_registers_weight_layers");
-    let param_names: Vec<&str> = fx["param_names"].as_array().unwrap()
-        .iter().map(|v| v.as_str().unwrap()).collect();
+    let param_names: Vec<&str> = fx["param_names"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_str().unwrap())
+        .collect();
 
     // Build a minimal module that advertises these named parameters.
     struct FakeModule {
@@ -1311,8 +1582,12 @@ fn qat_prepare_qat_registers_weight_layers() {
         training: bool,
     }
     impl Module<f32> for FakeModule {
-        fn forward(&self, input: &Tensor<f32>) -> FerrotorchResult<Tensor<f32>> { Ok(input.clone()) }
-        fn parameters(&self) -> Vec<&Parameter<f32>> { vec![&self.p0w, &self.p0b, &self.p1w] }
+        fn forward(&self, input: &Tensor<f32>) -> FerrotorchResult<Tensor<f32>> {
+            Ok(input.clone())
+        }
+        fn parameters(&self) -> Vec<&Parameter<f32>> {
+            vec![&self.p0w, &self.p0b, &self.p1w]
+        }
         fn parameters_mut(&mut self) -> Vec<&mut Parameter<f32>> {
             vec![&mut self.p0w, &mut self.p0b, &mut self.p1w]
         }
@@ -1323,9 +1598,15 @@ fn qat_prepare_qat_registers_weight_layers() {
                 ("1.weight".into(), &self.p1w),
             ]
         }
-        fn train(&mut self) { self.training = true; }
-        fn eval(&mut self) { self.training = false; }
-        fn is_training(&self) -> bool { self.training }
+        fn train(&mut self) {
+            self.training = true;
+        }
+        fn eval(&mut self) {
+            self.training = false;
+        }
+        fn is_training(&self) -> bool {
+            self.training
+        }
     }
 
     let m = FakeModule {
@@ -1339,27 +1620,41 @@ fn qat_prepare_qat_registers_weight_layers() {
     let qat_model = prepare_qat(&m, QatConfig::default_symmetric_int8());
 
     let expected_count = fx["expected"]["layer_count"].as_u64().unwrap() as usize;
-    assert_eq!(qat_model.layers.len(), expected_count,
-        "prepare_qat must register exactly {} layers", expected_count);
+    assert_eq!(
+        qat_model.layers.len(),
+        expected_count,
+        "prepare_qat must register exactly {} layers",
+        expected_count
+    );
 
-    let expected_layer_names: Vec<&str> = fx["expected"]["layer_names"].as_array().unwrap()
-        .iter().map(|v| v.as_str().unwrap()).collect();
+    let expected_layer_names: Vec<&str> = fx["expected"]["layer_names"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_str().unwrap())
+        .collect();
     for name in expected_layer_names {
-        assert!(qat_model.layers.contains_key(name),
-            "QatModel must have layer '{name}'");
+        assert!(
+            qat_model.layers.contains_key(name),
+            "QatModel must have layer '{name}'"
+        );
     }
 }
 
 /// conformance_nn_structural: ferrotorch_nn::QatModel fake_quantize_weights INT8 parity
 #[test]
 fn qat_fake_quantize_int8_parity() {
-    use ferrotorch_core::quantize::FakeQuantize;
     use ferrotorch_core::QuantDtype;
+    use ferrotorch_core::quantize::FakeQuantize;
 
     let fixtures = fixtures_json();
     let fx = fixture_by_id(&fixtures, "fake_quantize_int8_parity");
-    let values: Vec<f32> = fx["inputs"]["values"].as_array().unwrap()
-        .iter().map(|v| v.as_f64().unwrap() as f32).collect();
+    let values: Vec<f32> = fx["inputs"]["values"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_f64().unwrap() as f32)
+        .collect();
     let max_abs_error = fx["expected"]["max_abs_error"].as_f64().unwrap() as f32;
 
     let mut fq = FakeQuantize::new(QuantDtype::Int8);

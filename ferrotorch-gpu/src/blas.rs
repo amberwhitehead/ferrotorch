@@ -2413,7 +2413,7 @@ pub fn gpu_bmm_bf16(
         // BF16 strides are in u16 elements (2 bytes each, vs. 4 for f32).
         let stride_a_bf16 = (k * n) as i64; // B batch stride in u16 elements
         let stride_b_bf16 = (m * k) as i64; // A batch stride in u16 elements
-        let stride_c = (m * n) as i64;      // C batch stride in f32 elements
+        let stride_c = (m * n) as i64; // C batch stride in f32 elements
 
         // SAFETY:
         // - `cublas_result::gemm_strided_batched_ex` is the unsafe FFI shim

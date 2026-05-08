@@ -182,7 +182,11 @@ fn exported_program_binary_roundtrip_all_static() {
     assert_eq!(loaded.output_shape, original.output_shape);
     assert_eq!(loaded.state_dict.len(), original.state_dict.len());
     for (k, v) in &original.state_dict {
-        assert_eq!(loaded.state_dict.get(k), Some(v), "state_dict mismatch for {k}");
+        assert_eq!(
+            loaded.state_dict.get(k),
+            Some(v),
+            "state_dict mismatch for {k}"
+        );
     }
     // Specs preserved
     assert_eq!(loaded.input_specs.len(), 1);
@@ -240,7 +244,10 @@ fn exported_program_deserialize_rejects_unsupported_version() {
     bytes[7] = 0;
     let err = ExportedProgram::deserialize(&bytes).unwrap_err();
     let msg = err.to_string();
-    assert!(msg.contains("unsupported version"), "unexpected error: {msg}");
+    assert!(
+        msg.contains("unsupported version"),
+        "unexpected error: {msg}"
+    );
 }
 
 #[test]
@@ -250,7 +257,10 @@ fn exported_program_deserialize_rejects_truncated_data() {
     for trunc in [0, 4, 8, 12] {
         if trunc < bytes.len() {
             let result = ExportedProgram::deserialize(&bytes[..trunc]);
-            assert!(result.is_err(), "expected error for truncation to {trunc} bytes");
+            assert!(
+                result.is_err(),
+                "expected error for truncation to {trunc} bytes"
+            );
         }
     }
 }
@@ -339,7 +349,10 @@ fn check_inputs_rejects_wrong_input_count() {
     let empty: Vec<Tensor<f32>> = vec![];
     let err = program.check_inputs(&empty).unwrap_err();
     let msg = err.to_string();
-    assert!(msg.contains("expected 1 inputs, got 0"), "unexpected: {msg}");
+    assert!(
+        msg.contains("expected 1 inputs, got 0"),
+        "unexpected: {msg}"
+    );
 }
 
 #[test]
@@ -401,7 +414,9 @@ fn check_inputs_rejects_zero_dynamic_dim() {
 fn run_with_guards_runs_valid_input() {
     let program = dynamic_batch_program();
     let x: Tensor<f32> = ferrotorch_core::zeros(&[8, 10]).unwrap();
-    let out = program.run_with_guards(&[x]).expect("run_with_guards failed");
+    let out = program
+        .run_with_guards(&[x])
+        .expect("run_with_guards failed");
     assert_eq!(out.shape(), &[8, 10]);
 }
 
@@ -447,9 +462,13 @@ impl ferrotorch_nn::Module<f32> for ReluModule {
 
     // ReluModule has no parameters or training-mode state; train/eval are
     // no-ops by design (analogous to torch.nn.ReLU which carries no state).
-    fn train(&mut self) { /* no training-mode state */ }
-    fn eval(&mut self) { /* no training-mode state */ }
-    fn is_training(&self) -> bool { false }
+    fn train(&mut self) { /* no training-mode state */
+    }
+    fn eval(&mut self) { /* no training-mode state */
+    }
+    fn is_training(&self) -> bool {
+        false
+    }
 }
 
 #[test]
@@ -649,7 +668,9 @@ fn ir_graph_serialize_all_op_kinds() {
 
 #[test]
 fn jit_error_tracing_error_display() {
-    let e = JitError::TracingError { message: "test failure".to_string() };
+    let e = JitError::TracingError {
+        message: "test failure".to_string(),
+    };
     let msg = e.to_string();
     assert!(msg.contains("tracing error"), "unexpected: {msg}");
     assert!(msg.contains("test failure"), "unexpected: {msg}");
@@ -657,7 +678,9 @@ fn jit_error_tracing_error_display() {
 
 #[test]
 fn jit_error_unsupported_op_display() {
-    let e = JitError::UnsupportedOp { op: "some_op".to_string() };
+    let e = JitError::UnsupportedOp {
+        op: "some_op".to_string(),
+    };
     let msg = e.to_string();
     assert!(msg.contains("unsupported operation"), "unexpected: {msg}");
     assert!(msg.contains("some_op"), "unexpected: {msg}");
@@ -677,7 +700,9 @@ fn jit_error_shape_mismatch_display() {
 
 #[test]
 fn jit_error_codegen_error_display() {
-    let e = JitError::CodegenError { message: "ptx failed".to_string() };
+    let e = JitError::CodegenError {
+        message: "ptx failed".to_string(),
+    };
     let msg = e.to_string();
     assert!(msg.contains("codegen error"), "unexpected: {msg}");
     assert!(msg.contains("ptx failed"), "unexpected: {msg}");
@@ -685,7 +710,9 @@ fn jit_error_codegen_error_display() {
 
 #[test]
 fn jit_error_serialization_error_display() {
-    let e = JitError::SerializationError { message: "truncated".to_string() };
+    let e = JitError::SerializationError {
+        message: "truncated".to_string(),
+    };
     let msg = e.to_string();
     assert!(msg.contains("serialization error"), "unexpected: {msg}");
     assert!(msg.contains("truncated"), "unexpected: {msg}");
@@ -715,7 +742,9 @@ fn jit_error_export_error_display() {
 
 #[test]
 fn jit_error_parameter_error_display() {
-    let e = JitError::ParameterError { message: "bad lr".to_string() };
+    let e = JitError::ParameterError {
+        message: "bad lr".to_string(),
+    };
     let msg = e.to_string();
     assert!(msg.contains("parameter error"), "unexpected: {msg}");
     assert!(msg.contains("bad lr"), "unexpected: {msg}");
@@ -736,7 +765,9 @@ fn jit_error_unsupported_display() {
 #[test]
 fn jit_error_converts_to_ferrotorch_error() {
     use ferrotorch_core::error::FerrotorchError;
-    let jit_err = JitError::TracingError { message: "boom".to_string() };
+    let jit_err = JitError::TracingError {
+        message: "boom".to_string(),
+    };
     let ft_err: FerrotorchError = jit_err.into();
     let msg = ft_err.to_string();
     assert!(msg.contains("boom"), "unexpected: {msg}");
@@ -760,7 +791,10 @@ fn autotune_key_from_graph_is_stable() {
     let input_shapes = vec![vec![2usize, 4]];
     let key1 = AutotuneKey::from_graph(&g, &input_shapes);
     let key2 = AutotuneKey::from_graph(&g, &input_shapes);
-    assert_eq!(key1, key2, "AutotuneKey must be stable for the same graph + shapes");
+    assert_eq!(
+        key1, key2,
+        "AutotuneKey must be stable for the same graph + shapes"
+    );
 }
 
 #[test]
@@ -768,7 +802,10 @@ fn autotune_key_differs_for_different_shapes() {
     let g = make_simple_graph();
     let key_a = AutotuneKey::from_graph(&g, &[vec![2, 4]]);
     let key_b = AutotuneKey::from_graph(&g, &[vec![4, 4]]);
-    assert_ne!(key_a, key_b, "AutotuneKey must differ when input shapes differ");
+    assert_ne!(
+        key_a, key_b,
+        "AutotuneKey must differ when input shapes differ"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -860,9 +897,16 @@ fn autotuner_clear_cache_empties_cache() {
         .with_warmup(0);
     let inputs: Vec<Vec<f64>> = vec![vec![0.0f64; 8]];
     tuner.tune(&g, &inputs).expect("tune failed");
-    assert!(tuner.cache_size() > 0, "cache should not be empty after tune");
+    assert!(
+        tuner.cache_size() > 0,
+        "cache should not be empty after tune"
+    );
     tuner.clear_cache();
-    assert_eq!(tuner.cache_size(), 0, "cache_size() must be 0 after clear_cache");
+    assert_eq!(
+        tuner.cache_size(),
+        0,
+        "cache_size() must be 0 after clear_cache"
+    );
 }
 
 #[test]

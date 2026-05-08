@@ -36,8 +36,8 @@ use ferrotorch_core::{Tensor, TensorStorage, grad_fns};
 use ferrotorch_nn::Module;
 use ferrotorch_vision::models::{
     BasicBlock, Bottleneck, FeatureExtractor, convnext_tiny, densenet121, efficientnet_b0,
-    inception_v3, mobilenet_v2, mobilenet_v3_small, resnet18, resnet34, resnet50, swin_tiny,
-    unet, vgg11, vgg16, vit_b_16, yolo,
+    inception_v3, mobilenet_v2, mobilenet_v3_small, resnet18, resnet34, resnet50, swin_tiny, unet,
+    vgg11, vgg16, vit_b_16, yolo,
 };
 use ferrotorch_vision::{get_model, list_models, register_model};
 use serde::Deserialize;
@@ -130,10 +130,7 @@ fn bottleneck_new_constructor() {
 fn resnet18_construction_smoke() {
     let model = resnet18::<f32>(10).expect("resnet18 construction");
     let n = model.num_parameters();
-    assert!(
-        n > 10_000,
-        "resnet18 param count {n} suspiciously low"
-    );
+    assert!(n > 10_000, "resnet18 param count {n} suspiciously low");
 }
 
 #[test]
@@ -201,8 +198,10 @@ fn resnet18_num_parameters_method() {
 fn resnet34_construction_smoke() {
     let model = resnet34::<f32>(10).expect("resnet34 construction");
     let n = model.num_parameters();
-    assert!(n > resnet18::<f32>(10).unwrap().num_parameters(),
-        "resnet34 should have more params than resnet18");
+    assert!(
+        n > resnet18::<f32>(10).unwrap().num_parameters(),
+        "resnet34 should have more params than resnet18"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -281,8 +280,10 @@ fn vgg11_num_parameters_method() {
 #[test]
 fn vgg16_construction_smoke() {
     let model = vgg16::<f32>(10).expect("vgg16 construction");
-    assert!(model.num_parameters() > vgg11::<f32>(10).unwrap().num_parameters(),
-        "vgg16 should have more params than vgg11");
+    assert!(
+        model.num_parameters() > vgg11::<f32>(10).unwrap().num_parameters(),
+        "vgg16 should have more params than vgg11"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -318,8 +319,8 @@ fn get_model_resnet18_smoke() {
     let _fix = get_fixture(&ff.fixtures, "get_model_resnet18_smoke")
         .expect("fixture get_model_resnet18_smoke not found");
 
-    let model = get_model("resnet18", false, 10)
-        .expect("get_model('resnet18', false, 10) must succeed");
+    let model =
+        get_model("resnet18", false, 10).expect("get_model('resnet18', false, 10) must succeed");
     // Model must be usable.
     let data = vec![0.0_f32; 3 * 32 * 32];
     let x = make_f32(data, vec![1, 3, 32, 32]);
@@ -358,9 +359,7 @@ fn register_model_smoke() {
 /// `pixel[b, c, h, w] = ((b * C * H * W + c * H * W + h * W + w) % 256) as f32 / 255.0`
 fn make_chw_pattern(batch: usize, c: usize, h: usize, w: usize) -> Tensor<f32> {
     let numel = batch * c * h * w;
-    let data: Vec<f32> = (0..numel)
-        .map(|i| (i % 256) as f32 / 255.0)
-        .collect();
+    let data: Vec<f32> = (0..numel).map(|i| (i % 256) as f32 / 255.0).collect();
     make_f32(data, vec![batch, c, h, w])
 }
 
@@ -415,18 +414,16 @@ fn unet_forward_backward_gradient_finite() {
     let model = unet::<f32>(1).expect("unet construction");
     let numel = 3 * 16 * 16;
     let data: Vec<f32> = (0..numel).map(|i| (i % 256) as f32 / 255.0).collect();
-    let x = Tensor::from_storage(
-        TensorStorage::cpu(data),
-        vec![1, 3, 16, 16],
-        true,
-    )
-    .unwrap();
+    let x = Tensor::from_storage(TensorStorage::cpu(data), vec![1, 3, 16, 16], true).unwrap();
 
     let out = model.forward(&x).expect("unet forward");
     let loss = grad_fns::reduction::sum(&out).expect("sum loss");
     loss.backward().expect("unet backward");
 
-    let grad = x.grad().expect("grad() must succeed").expect("input must have grad");
+    let grad = x
+        .grad()
+        .expect("grad() must succeed")
+        .expect("input must have grad");
     let gdata = grad.data().expect("grad data");
     assert!(
         gdata.iter().all(|v| v.is_finite()),
@@ -443,12 +440,7 @@ fn unet_gradient_nonzero_on_params() {
     let mut model = unet::<f32>(1).expect("unet construction");
     let numel = 3 * 16 * 16;
     let data: Vec<f32> = (0..numel).map(|i| (i % 256) as f32 / 255.0).collect();
-    let x = Tensor::from_storage(
-        TensorStorage::cpu(data),
-        vec![1, 3, 16, 16],
-        false,
-    )
-    .unwrap();
+    let x = Tensor::from_storage(TensorStorage::cpu(data), vec![1, 3, 16, 16], false).unwrap();
 
     // Parameters must require grad for grads to accumulate on them.
     for p in model.parameters_mut() {
@@ -491,10 +483,7 @@ fn unet_snapshot_deterministic_output() {
 
     assert_eq!(d1.len(), d2.len(), "output length must match");
     for (i, (a, b)) in d1.iter().zip(d2.iter()).enumerate() {
-        assert_eq!(
-            a, b,
-            "UNet output[{i}] not deterministic: {a} != {b}"
-        );
+        assert_eq!(a, b, "UNet output[{i}] not deterministic: {a} != {b}");
     }
 }
 
@@ -596,18 +585,16 @@ fn yolo_forward_backward_gradient_finite() {
     let model = yolo::<f32>(2).expect("yolo construction");
     let numel = 3 * 32 * 32;
     let data: Vec<f32> = (0..numel).map(|i| (i % 256) as f32 / 255.0).collect();
-    let x = Tensor::from_storage(
-        TensorStorage::cpu(data),
-        vec![1, 3, 32, 32],
-        true,
-    )
-    .unwrap();
+    let x = Tensor::from_storage(TensorStorage::cpu(data), vec![1, 3, 32, 32], true).unwrap();
 
     let out = model.forward(&x).expect("yolo forward");
     let loss = grad_fns::reduction::sum(&out).expect("sum loss");
     loss.backward().expect("yolo backward");
 
-    let grad = x.grad().expect("grad() must succeed").expect("input must have grad");
+    let grad = x
+        .grad()
+        .expect("grad() must succeed")
+        .expect("input must have grad");
     let gdata = grad.data().expect("grad data");
     assert!(
         gdata.iter().all(|v| v.is_finite()),
@@ -631,10 +618,7 @@ fn yolo_snapshot_deterministic_output() {
     let d2 = out2.data().expect("out2 data");
 
     for (i, (a, b)) in d1.iter().zip(d2.iter()).enumerate() {
-        assert_eq!(
-            a, b,
-            "YOLO output[{i}] not deterministic: {a} != {b}"
-        );
+        assert_eq!(a, b, "YOLO output[{i}] not deterministic: {a} != {b}");
     }
 }
 
@@ -674,11 +658,8 @@ fn create_feature_extractor_smoke() {
 
     // Integration test: FeatureExtractor wrapping UNet, requesting two nodes.
     let model = unet::<f32>(1).expect("unet construction");
-    let extractor = FeatureExtractor::new(
-        model,
-        vec!["enc1".to_string(), "head".to_string()],
-    )
-    .expect("FeatureExtractor::new must succeed for valid UNet nodes");
+    let extractor = FeatureExtractor::new(model, vec!["enc1".to_string(), "head".to_string()])
+        .expect("FeatureExtractor::new must succeed for valid UNet nodes");
 
     let x = make_chw_pattern(1, 3, 32, 32);
     let features = extractor.forward(&x).expect("FeatureExtractor forward");
@@ -707,8 +688,7 @@ fn feature_extractor_unet_enc1_shape() {
 fn feature_extractor_unet_bottleneck_shape() {
     // bottleneck: [B, 1024, H/16, W/16] after 4 maxpools.
     let model = unet::<f32>(1).expect("unet construction");
-    let extractor =
-        FeatureExtractor::new(model, vec!["bottleneck".to_string()]).unwrap();
+    let extractor = FeatureExtractor::new(model, vec!["bottleneck".to_string()]).unwrap();
     let x = make_chw_pattern(1, 3, 32, 32);
     let features = extractor.forward(&x).unwrap();
     let bn = &features["bottleneck"];
@@ -739,8 +719,7 @@ fn feature_extractor_unet_all_nodes_present() {
 fn feature_extractor_yolo_stage5_shape() {
     // stage5 output: [B, 512, 13, 13] for a 416x416 input.
     let model = yolo::<f32>(20).expect("yolo construction");
-    let extractor =
-        FeatureExtractor::new(model, vec!["stage5".to_string()]).unwrap();
+    let extractor = FeatureExtractor::new(model, vec!["stage5".to_string()]).unwrap();
     let x = make_chw_pattern(1, 3, 416, 416);
     let features = extractor.forward(&x).unwrap();
     let s5 = &features["stage5"];
@@ -757,12 +736,8 @@ fn feature_extractor_yolo_output_matches_module_forward() {
     let model = yolo::<f32>(2).expect("yolo construction");
     // Use small input so this test is fast.
     let x = make_chw_pattern(1, 3, 32, 32);
-    let module_out = ferrotorch_core::no_grad(|| {
-        Module::<f32>::forward(&model, &x).unwrap()
-    });
-    let all = ferrotorch_core::no_grad(|| {
-        model.forward_features(&x).unwrap()
-    });
+    let module_out = ferrotorch_core::no_grad(|| Module::<f32>::forward(&model, &x).unwrap());
+    let all = ferrotorch_core::no_grad(|| model.forward_features(&x).unwrap());
     let head_out = all.get("head").expect("head must be in forward_features");
     assert_eq!(
         module_out.shape(),
@@ -798,7 +773,10 @@ fn feature_extractor_rejects_invalid_unet_node() {
 fn feature_extractor_rejects_invalid_yolo_node() {
     let model = yolo::<f32>(20).expect("yolo construction");
     let result = FeatureExtractor::new(model, vec!["layer3".to_string()]);
-    assert!(result.is_err(), "must reject 'layer3' which is not a YOLO node");
+    assert!(
+        result.is_err(),
+        "must reject 'layer3' which is not a YOLO node"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -821,8 +799,8 @@ fn model_registry_type_usable() {
 #[test]
 fn mnist_constants_match_reference() {
     let ff = load_fixtures();
-    let fix = get_fixture(&ff.fixtures, "mnist_constants")
-        .expect("fixture mnist_constants not found");
+    let fix =
+        get_fixture(&ff.fixtures, "mnist_constants").expect("fixture mnist_constants not found");
 
     let exp_h = fix["expected_height"].as_u64().unwrap() as usize;
     let exp_w = fix["expected_width"].as_u64().unwrap() as usize;
@@ -861,7 +839,10 @@ fn mnist_sample_struct() {
     use ferrotorch_data::Dataset;
     use ferrotorch_vision::{Mnist, Split};
     let ds = Mnist::<f32>::synthetic(Split::Train, 1).expect("Mnist::synthetic");
-    assert!(ds.len() >= 1, "Mnist::synthetic must produce at least one sample");
+    assert!(
+        ds.len() >= 1,
+        "Mnist::synthetic must produce at least one sample"
+    );
     let sample = ds.get(0).expect("Mnist::get(0)");
     // Access public fields: image (Tensor<f32>) and label (u8).
     assert_eq!(sample.image.ndim(), 3, "MnistSample::image must be 3-D");
@@ -1375,8 +1356,8 @@ fn vit_b_16_custom_num_classes() {
 fn vit_b_16_deterministic_forward() {
     // Use small 32x32 input (4 patches) to keep this fast.
     use ferrotorch_vision::models::VisionTransformer;
-    let model = VisionTransformer::<f32>::new(32, 16, 3, 10, 64, 2, 4, 4)
-        .expect("small ViT construction");
+    let model =
+        VisionTransformer::<f32>::new(32, 16, 3, 10, 64, 2, 4, 4).expect("small ViT construction");
     let x = make_chw_pattern(1, 3, 32, 32);
     let out1 = ferrotorch_core::no_grad(|| model.forward(&x).unwrap());
     let out2 = ferrotorch_core::no_grad(|| model.forward(&x).unwrap());
@@ -1543,7 +1524,11 @@ fn mobilenet_v2_v2_determinism_fixture() {
     let d1 = out1.data().unwrap();
     let d2 = out2.data().unwrap();
 
-    assert_eq!(d1.len(), d2.len(), "MobileNetV2 V.2: output length mismatch");
+    assert_eq!(
+        d1.len(),
+        d2.len(),
+        "MobileNetV2 V.2: output length mismatch"
+    );
     for (i, (a, b)) in d1.iter().zip(d2.iter()).enumerate() {
         assert_eq!(
             a, b,
@@ -1636,9 +1621,7 @@ fn mobilenet_v3_small_v2_output_finite_fixture() {
     // Fixture: mobilenet_v3_small_v2_output_finite in fixtures_v_parity.json
     let ff = load_fixtures_v_parity();
     let _fix = get_fixture(&ff.fixtures, "mobilenet_v3_small_v2_output_finite")
-        .expect(
-            "fixture mobilenet_v3_small_v2_output_finite not found in fixtures_v_parity.json",
-        );
+        .expect("fixture mobilenet_v3_small_v2_output_finite not found in fixtures_v_parity.json");
 
     let model = mobilenet_v3_small::<f32>(1000).expect("mobilenet_v3_small construction");
     let x = make_chw_pattern(1, 3, 224, 224);
@@ -1668,9 +1651,7 @@ fn mobilenet_v3_small_v2_custom_classes_fixture() {
     // Fixture: mobilenet_v3_small_v2_custom_classes in fixtures_v_parity.json
     let ff = load_fixtures_v_parity();
     let fix = get_fixture(&ff.fixtures, "mobilenet_v3_small_v2_custom_classes")
-        .expect(
-            "fixture mobilenet_v3_small_v2_custom_classes not found in fixtures_v_parity.json",
-        );
+        .expect("fixture mobilenet_v3_small_v2_custom_classes not found in fixtures_v_parity.json");
 
     let expected_shape: Vec<usize> = fix["expected_output_shape"]
         .as_array()
@@ -1711,7 +1692,11 @@ fn mobilenet_v3_small_v2_determinism_fixture() {
     let d1 = out1.data().unwrap();
     let d2 = out2.data().unwrap();
 
-    assert_eq!(d1.len(), d2.len(), "MobileNetV3-Small V.2: output length mismatch");
+    assert_eq!(
+        d1.len(),
+        d2.len(),
+        "MobileNetV3-Small V.2: output length mismatch"
+    );
     for (i, (a, b)) in d1.iter().zip(d2.iter()).enumerate() {
         assert_eq!(
             a, b,
@@ -2045,7 +2030,14 @@ fn vit_b_16_v3_determinism_fixture() {
 
     use ferrotorch_vision::models::VisionTransformer;
     let model = VisionTransformer::<f32>::new(
-        image_size, patch_size, 3, num_classes, embed_dim, depth, num_heads, mlp_ratio,
+        image_size,
+        patch_size,
+        3,
+        num_classes,
+        embed_dim,
+        depth,
+        num_heads,
+        mlp_ratio,
     )
     .expect("small ViT construction");
 
@@ -2056,7 +2048,10 @@ fn vit_b_16_v3_determinism_fixture() {
     let d2 = out2.data().unwrap();
 
     for (i, (a, b)) in d1.iter().zip(d2.iter()).enumerate() {
-        assert_eq!(a, b, "ViT-B/16 V.3: output[{i}] not deterministic: {a} != {b}");
+        assert_eq!(
+            a, b,
+            "ViT-B/16 V.3: output[{i}] not deterministic: {a} != {b}"
+        );
     }
 }
 
@@ -2217,7 +2212,11 @@ fn densenet121_v3_determinism_fixture() {
     let d1 = out1.data().unwrap();
     let d2 = out2.data().unwrap();
 
-    assert_eq!(d1.len(), d2.len(), "DenseNet-121 V.3: output length mismatch");
+    assert_eq!(
+        d1.len(),
+        d2.len(),
+        "DenseNet-121 V.3: output length mismatch"
+    );
     for (i, (a, b)) in d1.iter().zip(d2.iter()).enumerate() {
         assert_eq!(
             a, b,
@@ -2415,7 +2414,11 @@ fn inception_v3_v4_determinism_fixture() {
     let d1 = out1.data().unwrap();
     let d2 = out2.data().unwrap();
 
-    assert_eq!(d1.len(), d2.len(), "InceptionV3 V.4: output length mismatch");
+    assert_eq!(
+        d1.len(),
+        d2.len(),
+        "InceptionV3 V.4: output length mismatch"
+    );
     for (i, (a, b)) in d1.iter().zip(d2.iter()).enumerate() {
         assert_eq!(
             a, b,
@@ -2602,7 +2605,11 @@ fn convnext_tiny_v1_determinism_fixture() {
     let d1 = out1.data().unwrap();
     let d2 = out2.data().unwrap();
 
-    assert_eq!(d1.len(), d2.len(), "ConvNeXt-Tiny V.1: output length mismatch");
+    assert_eq!(
+        d1.len(),
+        d2.len(),
+        "ConvNeXt-Tiny V.1: output length mismatch"
+    );
     for (i, (a, b)) in d1.iter().zip(d2.iter()).enumerate() {
         assert_eq!(
             a, b,
@@ -2788,7 +2795,11 @@ fn efficientnet_b0_v1_determinism_fixture() {
     let d1 = out1.data().unwrap();
     let d2 = out2.data().unwrap();
 
-    assert_eq!(d1.len(), d2.len(), "EfficientNet-B0 V.1: output length mismatch");
+    assert_eq!(
+        d1.len(),
+        d2.len(),
+        "EfficientNet-B0 V.1: output length mismatch"
+    );
     for (i, (a, b)) in d1.iter().zip(d2.iter()).enumerate() {
         assert_eq!(
             a, b,

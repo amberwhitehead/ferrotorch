@@ -47,7 +47,10 @@ fn make_cpu_f64(data: Vec<f64>, shape: Vec<usize>) -> Tensor<f64> {
 fn probe_step1_reshape_f64_cuda() {
     ensure_cuda_backend();
     // B=1, H=1, n_q=4, d=4 -> 16 elems
-    let q = upload_f64(make_cpu_f64((0..16).map(|i| i as f64).collect(), vec![1, 1, 4, 4]));
+    let q = upload_f64(make_cpu_f64(
+        (0..16).map(|i| i as f64).collect(),
+        vec![1, 1, 4, 4],
+    ));
     let r = shape::reshape(&q, &[1, 4, 4]).expect("reshape f64 CUDA failed");
     assert_eq!(r.shape(), &[1, 4, 4]);
     let cpu = r.cpu().expect("D2H readback");
@@ -59,7 +62,10 @@ fn probe_step1_reshape_f64_cuda() {
 #[test]
 fn probe_step2_transpose_f64_cuda() {
     ensure_cuda_backend();
-    let k = upload_f64(make_cpu_f64((0..16).map(|i| i as f64).collect(), vec![1, 4, 4]));
+    let k = upload_f64(make_cpu_f64(
+        (0..16).map(|i| i as f64).collect(),
+        vec![1, 4, 4],
+    ));
     let kt = k.transpose(1, 2).expect("transpose f64 CUDA failed");
     assert_eq!(kt.shape(), &[1, 4, 4]);
     eprintln!("step2 OK: transpose f64 CUDA");
@@ -68,8 +74,14 @@ fn probe_step2_transpose_f64_cuda() {
 #[test]
 fn probe_step3_bmm_f64_cuda() {
     ensure_cuda_backend();
-    let a = upload_f64(make_cpu_f64((0..16).map(|i| i as f64).collect(), vec![1, 4, 4]));
-    let b = upload_f64(make_cpu_f64((0..16).map(|i| i as f64 * 0.1).collect(), vec![1, 4, 4]));
+    let a = upload_f64(make_cpu_f64(
+        (0..16).map(|i| i as f64).collect(),
+        vec![1, 4, 4],
+    ));
+    let b = upload_f64(make_cpu_f64(
+        (0..16).map(|i| i as f64 * 0.1).collect(),
+        vec![1, 4, 4],
+    ));
     let r = linalg::bmm_differentiable(&a, &b).expect("bmm_differentiable f64 CUDA failed");
     assert_eq!(r.shape(), &[1, 4, 4]);
     let cpu = r.cpu().expect("D2H readback");
@@ -83,11 +95,17 @@ fn probe_step3b_bmm_after_transpose_f64_cuda() {
     // bmm() runs `.contiguous()?` on it before the GPU dispatch — so this step
     // exercises that internal contiguous() path on f64 CUDA.
     ensure_cuda_backend();
-    let q = upload_f64(make_cpu_f64((0..16).map(|i| i as f64).collect(), vec![1, 4, 4]));
-    let k = upload_f64(make_cpu_f64((0..16).map(|i| i as f64 * 0.1).collect(), vec![1, 4, 4]));
+    let q = upload_f64(make_cpu_f64(
+        (0..16).map(|i| i as f64).collect(),
+        vec![1, 4, 4],
+    ));
+    let k = upload_f64(make_cpu_f64(
+        (0..16).map(|i| i as f64 * 0.1).collect(),
+        vec![1, 4, 4],
+    ));
     let kt = k.transpose(1, 2).expect("transpose");
-    let r = linalg::bmm_differentiable(&q, &kt)
-        .expect("bmm_differentiable(q, k.t()) f64 CUDA failed");
+    let r =
+        linalg::bmm_differentiable(&q, &kt).expect("bmm_differentiable(q, k.t()) f64 CUDA failed");
     assert_eq!(r.shape(), &[1, 4, 4]);
     let cpu = r.cpu().expect("D2H readback");
     let _v = cpu.data().expect("read CPU data after readback").to_vec();
@@ -104,7 +122,10 @@ fn probe_step4_scalar_mul_f64_cuda() {
         .expect("creation::scalar f64 failed")
         .to(Device::Cuda(0))
         .expect("upload scalar to CUDA");
-    let scores = upload_f64(make_cpu_f64((0..16).map(|i| i as f64).collect(), vec![1, 4, 4]));
+    let scores = upload_f64(make_cpu_f64(
+        (0..16).map(|i| i as f64).collect(),
+        vec![1, 4, 4],
+    ));
     let r = arithmetic::mul(&scores, &scale_t).expect("scalar mul f64 CUDA failed");
     assert_eq!(r.shape(), &[1, 4, 4]);
     let cpu = r.cpu().expect("D2H readback");
@@ -115,7 +136,10 @@ fn probe_step4_scalar_mul_f64_cuda() {
 #[test]
 fn probe_step5_softmax_f64_cuda() {
     ensure_cuda_backend();
-    let s = upload_f64(make_cpu_f64((0..16).map(|i| i as f64 * 0.1).collect(), vec![1, 1, 4, 4]));
+    let s = upload_f64(make_cpu_f64(
+        (0..16).map(|i| i as f64 * 0.1).collect(),
+        vec![1, 1, 4, 4],
+    ));
     let r = activation::softmax(&s).expect("softmax f64 CUDA failed");
     assert_eq!(r.shape(), &[1, 1, 4, 4]);
     let cpu = r.cpu().expect("D2H readback");
@@ -126,9 +150,18 @@ fn probe_step5_softmax_f64_cuda() {
 #[test]
 fn probe_step6_full_chain_f64_cuda() {
     ensure_cuda_backend();
-    let q = upload_f64(make_cpu_f64((0..16).map(|i| i as f64 * 0.1).collect(), vec![1, 1, 4, 4]));
-    let k = upload_f64(make_cpu_f64((0..16).map(|i| i as f64 * 0.1).collect(), vec![1, 1, 4, 4]));
-    let v = upload_f64(make_cpu_f64((0..16).map(|i| i as f64 * 0.1).collect(), vec![1, 1, 4, 4]));
+    let q = upload_f64(make_cpu_f64(
+        (0..16).map(|i| i as f64 * 0.1).collect(),
+        vec![1, 1, 4, 4],
+    ));
+    let k = upload_f64(make_cpu_f64(
+        (0..16).map(|i| i as f64 * 0.1).collect(),
+        vec![1, 1, 4, 4],
+    ));
+    let v = upload_f64(make_cpu_f64(
+        (0..16).map(|i| i as f64 * 0.1).collect(),
+        vec![1, 1, 4, 4],
+    ));
     let out = flex_attention::flex_attention::<
         f64,
         fn(&Tensor<f64>, usize, usize) -> FerrotorchResult<Tensor<f64>>,
@@ -145,9 +178,18 @@ fn probe_step6_full_chain_f64_cuda() {
 fn probe_step7_two_heads_baseline_f64_cuda() {
     ensure_cuda_backend();
     let n = 2 * 4 * 4;
-    let q = upload_f64(make_cpu_f64((0..n).map(|i| i as f64 * 0.1).collect(), vec![1, 2, 4, 4]));
-    let k = upload_f64(make_cpu_f64((0..n).map(|i| i as f64 * 0.1).collect(), vec![1, 2, 4, 4]));
-    let v = upload_f64(make_cpu_f64((0..n).map(|i| i as f64 * 0.1).collect(), vec![1, 2, 4, 4]));
+    let q = upload_f64(make_cpu_f64(
+        (0..n).map(|i| i as f64 * 0.1).collect(),
+        vec![1, 2, 4, 4],
+    ));
+    let k = upload_f64(make_cpu_f64(
+        (0..n).map(|i| i as f64 * 0.1).collect(),
+        vec![1, 2, 4, 4],
+    ));
+    let v = upload_f64(make_cpu_f64(
+        (0..n).map(|i| i as f64 * 0.1).collect(),
+        vec![1, 2, 4, 4],
+    ));
     let out = flex_attention::flex_attention::<
         f64,
         fn(&Tensor<f64>, usize, usize) -> FerrotorchResult<Tensor<f64>>,
@@ -164,9 +206,18 @@ fn probe_step8_rect_baseline_f64_cuda() {
     let q_n = 2 * 3 * 4;
     let k_n = 2 * 5 * 4;
     let v_n = 2 * 5 * 4;
-    let q = upload_f64(make_cpu_f64((0..q_n).map(|i| i as f64 * 0.1).collect(), vec![2, 1, 3, 4]));
-    let k = upload_f64(make_cpu_f64((0..k_n).map(|i| i as f64 * 0.1).collect(), vec![2, 1, 5, 4]));
-    let v = upload_f64(make_cpu_f64((0..v_n).map(|i| i as f64 * 0.1).collect(), vec![2, 1, 5, 4]));
+    let q = upload_f64(make_cpu_f64(
+        (0..q_n).map(|i| i as f64 * 0.1).collect(),
+        vec![2, 1, 3, 4],
+    ));
+    let k = upload_f64(make_cpu_f64(
+        (0..k_n).map(|i| i as f64 * 0.1).collect(),
+        vec![2, 1, 5, 4],
+    ));
+    let v = upload_f64(make_cpu_f64(
+        (0..v_n).map(|i| i as f64 * 0.1).collect(),
+        vec![2, 1, 5, 4],
+    ));
     let out = flex_attention::flex_attention::<
         f64,
         fn(&Tensor<f64>, usize, usize) -> FerrotorchResult<Tensor<f64>>,
@@ -183,9 +234,18 @@ fn probe_step9_dv_neq_d_baseline_f64_cuda() {
     let q_n = 2 * 2 * 4 * 4;
     let k_n = 2 * 2 * 4 * 4;
     let v_n = 2 * 2 * 4 * 6;
-    let q = upload_f64(make_cpu_f64((0..q_n).map(|i| i as f64 * 0.1).collect(), vec![2, 2, 4, 4]));
-    let k = upload_f64(make_cpu_f64((0..k_n).map(|i| i as f64 * 0.1).collect(), vec![2, 2, 4, 4]));
-    let v = upload_f64(make_cpu_f64((0..v_n).map(|i| i as f64 * 0.1).collect(), vec![2, 2, 4, 6]));
+    let q = upload_f64(make_cpu_f64(
+        (0..q_n).map(|i| i as f64 * 0.1).collect(),
+        vec![2, 2, 4, 4],
+    ));
+    let k = upload_f64(make_cpu_f64(
+        (0..k_n).map(|i| i as f64 * 0.1).collect(),
+        vec![2, 2, 4, 4],
+    ));
+    let v = upload_f64(make_cpu_f64(
+        (0..v_n).map(|i| i as f64 * 0.1).collect(),
+        vec![2, 2, 4, 6],
+    ));
     let out = flex_attention::flex_attention::<
         f64,
         fn(&Tensor<f64>, usize, usize) -> FerrotorchResult<Tensor<f64>>,
@@ -201,9 +261,18 @@ fn probe_step9_dv_neq_d_baseline_f64_cuda() {
 #[test]
 fn probe_step10_backward_single_head_f64_cuda() {
     ensure_cuda_backend();
-    let q = upload_f64(make_cpu_f64((0..16).map(|i| i as f64 * 0.1).collect(), vec![1, 1, 4, 4]));
-    let k = upload_f64(make_cpu_f64((0..16).map(|i| i as f64 * 0.1).collect(), vec![1, 1, 4, 4]));
-    let v = upload_f64(make_cpu_f64((0..16).map(|i| i as f64 * 0.1).collect(), vec![1, 1, 4, 4]));
+    let q = upload_f64(make_cpu_f64(
+        (0..16).map(|i| i as f64 * 0.1).collect(),
+        vec![1, 1, 4, 4],
+    ));
+    let k = upload_f64(make_cpu_f64(
+        (0..16).map(|i| i as f64 * 0.1).collect(),
+        vec![1, 1, 4, 4],
+    ));
+    let v = upload_f64(make_cpu_f64(
+        (0..16).map(|i| i as f64 * 0.1).collect(),
+        vec![1, 1, 4, 4],
+    ));
     // Switch on requires_grad post-upload.
     let q = q.requires_grad_(true);
     let k = k.requires_grad_(true);
@@ -215,8 +284,7 @@ fn probe_step10_backward_single_head_f64_cuda() {
     >(&q, &k, &v, None)
     .expect("flex_attention f64 CUDA backward forward failed");
 
-    let loss =
-        ferrotorch_core::grad_fns::reduction::sum(&out).expect("sum f64");
+    let loss = ferrotorch_core::grad_fns::reduction::sum(&out).expect("sum f64");
     loss.backward().expect("backward f64");
     let _gq = q.grad().unwrap().expect("grad_q f64");
     let _gk = k.grad().unwrap().expect("grad_k f64");
@@ -235,10 +303,8 @@ fn probe_step5b_softmax_with_neg_inf_f64_cuda() {
     // Row 3: [0.1, 0.2, 0.3, 0.4]     -> expect normal softmax over 4
     let neg_inf = f64::NEG_INFINITY;
     let data: Vec<f64> = vec![
-        0.0, neg_inf, neg_inf, neg_inf,
-        0.5, 0.5, neg_inf, neg_inf,
-        0.3, 0.5, 0.7, neg_inf,
-        0.1, 0.2, 0.3, 0.4,
+        0.0, neg_inf, neg_inf, neg_inf, 0.5, 0.5, neg_inf, neg_inf, 0.3, 0.5, 0.7, neg_inf, 0.1,
+        0.2, 0.3, 0.4,
     ];
     let s = upload_f64(make_cpu_f64(data, vec![1, 1, 4, 4]));
     let r = activation::softmax(&s).expect("softmax with -inf f64 CUDA failed");
@@ -256,10 +322,8 @@ fn probe_step5c_softmax_with_neg_inf_f32_cuda() {
     ensure_cuda_backend();
     let neg_inf = f32::NEG_INFINITY;
     let data: Vec<f32> = vec![
-        0.0, neg_inf, neg_inf, neg_inf,
-        0.5, 0.5, neg_inf, neg_inf,
-        0.3, 0.5, 0.7, neg_inf,
-        0.1, 0.2, 0.3, 0.4,
+        0.0, neg_inf, neg_inf, neg_inf, 0.5, 0.5, neg_inf, neg_inf, 0.3, 0.5, 0.7, neg_inf, 0.1,
+        0.2, 0.3, 0.4,
     ];
     let t = Tensor::from_storage(TensorStorage::cpu(data), vec![1, 1, 4, 4], false)
         .expect("make_cpu_f32")
@@ -314,9 +378,18 @@ fn probe_step13_single_head_causal_f32_cuda() {
 #[test]
 fn probe_step12c_single_head_alibi_only_f64_cuda() {
     ensure_cuda_backend();
-    let q = upload_f64(make_cpu_f64((0..16).map(|i| i as f64 * 0.1).collect(), vec![1, 1, 4, 4]));
-    let k = upload_f64(make_cpu_f64((0..16).map(|i| i as f64 * 0.1).collect(), vec![1, 1, 4, 4]));
-    let v = upload_f64(make_cpu_f64((0..16).map(|i| i as f64 * 0.1).collect(), vec![1, 1, 4, 4]));
+    let q = upload_f64(make_cpu_f64(
+        (0..16).map(|i| i as f64 * 0.1).collect(),
+        vec![1, 1, 4, 4],
+    ));
+    let k = upload_f64(make_cpu_f64(
+        (0..16).map(|i| i as f64 * 0.1).collect(),
+        vec![1, 1, 4, 4],
+    ));
+    let v = upload_f64(make_cpu_f64(
+        (0..16).map(|i| i as f64 * 0.1).collect(),
+        vec![1, 1, 4, 4],
+    ));
     let bias: Vec<f64> = (0..16).map(|i| i as f64 * 0.01).collect();
     let bias_t = upload_f64(make_cpu_f64(bias, vec![4, 4]));
     let closure = move |s: &Tensor<f64>, _b: usize, _h: usize| -> FerrotorchResult<Tensor<f64>> {
@@ -338,9 +411,18 @@ fn probe_step12c_single_head_alibi_only_f64_cuda() {
 #[test]
 fn probe_step12b_single_head_causal_f64_cuda() {
     ensure_cuda_backend();
-    let q = upload_f64(make_cpu_f64((0..16).map(|i| i as f64 * 0.1).collect(), vec![1, 1, 4, 4]));
-    let k = upload_f64(make_cpu_f64((0..16).map(|i| i as f64 * 0.1).collect(), vec![1, 1, 4, 4]));
-    let v = upload_f64(make_cpu_f64((0..16).map(|i| i as f64 * 0.1).collect(), vec![1, 1, 4, 4]));
+    let q = upload_f64(make_cpu_f64(
+        (0..16).map(|i| i as f64 * 0.1).collect(),
+        vec![1, 1, 4, 4],
+    ));
+    let k = upload_f64(make_cpu_f64(
+        (0..16).map(|i| i as f64 * 0.1).collect(),
+        vec![1, 1, 4, 4],
+    ));
+    let v = upload_f64(make_cpu_f64(
+        (0..16).map(|i| i as f64 * 0.1).collect(),
+        vec![1, 1, 4, 4],
+    ));
     // Causal mask addend: lower triangle is 0, upper triangle is -inf.
     let mask: Vec<f64> = (0..4)
         .flat_map(|i| (0..4).map(move |j| if j <= i { 0.0 } else { f64::NEG_INFINITY }))
@@ -368,9 +450,18 @@ fn probe_step12b_single_head_causal_f64_cuda() {
 fn probe_step12_two_heads_with_score_mod_f64_cuda() {
     ensure_cuda_backend();
     let n = 2 * 4 * 4;
-    let q = upload_f64(make_cpu_f64((0..n).map(|i| i as f64 * 0.1).collect(), vec![1, 2, 4, 4]));
-    let k = upload_f64(make_cpu_f64((0..n).map(|i| i as f64 * 0.1).collect(), vec![1, 2, 4, 4]));
-    let v = upload_f64(make_cpu_f64((0..n).map(|i| i as f64 * 0.1).collect(), vec![1, 2, 4, 4]));
+    let q = upload_f64(make_cpu_f64(
+        (0..n).map(|i| i as f64 * 0.1).collect(),
+        vec![1, 2, 4, 4],
+    ));
+    let k = upload_f64(make_cpu_f64(
+        (0..n).map(|i| i as f64 * 0.1).collect(),
+        vec![1, 2, 4, 4],
+    ));
+    let v = upload_f64(make_cpu_f64(
+        (0..n).map(|i| i as f64 * 0.1).collect(),
+        vec![1, 2, 4, 4],
+    ));
     // Score mod that adds zero (no-op semantically, but exercises the closure path).
     let bias = upload_f64(make_cpu_f64(vec![0.0; 16], vec![4, 4]));
     let closure = move |s: &Tensor<f64>, _b: usize, _h: usize| -> FerrotorchResult<Tensor<f64>> {
@@ -395,9 +486,18 @@ fn probe_step12_two_heads_with_score_mod_f64_cuda() {
 fn probe_step11_backward_two_heads_f64_cuda() {
     ensure_cuda_backend();
     let n = 2 * 4 * 4;
-    let q = upload_f64(make_cpu_f64((0..n).map(|i| i as f64 * 0.1).collect(), vec![1, 2, 4, 4]));
-    let k = upload_f64(make_cpu_f64((0..n).map(|i| i as f64 * 0.1).collect(), vec![1, 2, 4, 4]));
-    let v = upload_f64(make_cpu_f64((0..n).map(|i| i as f64 * 0.1).collect(), vec![1, 2, 4, 4]));
+    let q = upload_f64(make_cpu_f64(
+        (0..n).map(|i| i as f64 * 0.1).collect(),
+        vec![1, 2, 4, 4],
+    ));
+    let k = upload_f64(make_cpu_f64(
+        (0..n).map(|i| i as f64 * 0.1).collect(),
+        vec![1, 2, 4, 4],
+    ));
+    let v = upload_f64(make_cpu_f64(
+        (0..n).map(|i| i as f64 * 0.1).collect(),
+        vec![1, 2, 4, 4],
+    ));
     let q = q.requires_grad_(true);
     let k = k.requires_grad_(true);
     let v = v.requires_grad_(true);
@@ -407,8 +507,7 @@ fn probe_step11_backward_two_heads_f64_cuda() {
         fn(&Tensor<f64>, usize, usize) -> FerrotorchResult<Tensor<f64>>,
     >(&q, &k, &v, None)
     .expect("flex_attention f64 CUDA two_heads backward forward failed");
-    let loss =
-        ferrotorch_core::grad_fns::reduction::sum(&out).expect("sum f64");
+    let loss = ferrotorch_core::grad_fns::reduction::sum(&out).expect("sum f64");
     loss.backward().expect("backward f64");
     let _gq = q.grad().unwrap().expect("grad_q f64");
     let _gk = k.grad().unwrap().expect("grad_k f64");

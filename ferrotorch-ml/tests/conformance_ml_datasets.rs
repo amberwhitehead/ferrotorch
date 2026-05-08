@@ -99,10 +99,7 @@ fn find(file: &FixtureFile, op: &str) -> Fixture {
 
 fn check_label_range(y_data: &[f64], label_min: i64, label_max: i64, label: &str) {
     for &v in y_data {
-        assert!(
-            v.fract() == 0.0,
-            "{label}: label {v} is not integer-valued"
-        );
+        assert!(v.fract() == 0.0, "{label}: label {v} is not integer-valued");
         let vi = v as i64;
         assert!(
             vi >= label_min && vi <= label_max,
@@ -137,8 +134,16 @@ fn make_classification_shape_and_labels() {
     let (x, y) = make_classification::<f64>(n_samples, n_features, n_classes, random_state)
         .expect("make_classification");
 
-    assert_eq!(x.shape(), expected_x.as_slice(), "make_classification X shape");
-    assert_eq!(y.shape(), expected_y.as_slice(), "make_classification y shape");
+    assert_eq!(
+        x.shape(),
+        expected_x.as_slice(),
+        "make_classification X shape"
+    );
+    assert_eq!(
+        y.shape(),
+        expected_y.as_slice(),
+        "make_classification y shape"
+    );
 
     let y_data = y.data().expect("y data");
     check_label_range(y_data, label_min, label_max, "make_classification");
@@ -245,8 +250,7 @@ fn make_circles_binary_labels_and_shape() {
     let label_min = f.label_min.expect("label_min");
     let label_max = f.label_max.expect("label_max");
 
-    let (x, y) =
-        make_circles::<f64>(n_samples, noise, factor, random_state).expect("make_circles");
+    let (x, y) = make_circles::<f64>(n_samples, noise, factor, random_state).expect("make_circles");
 
     assert_eq!(x.shape(), expected_x.as_slice(), "make_circles X shape");
     assert_eq!(y.shape(), expected_y.as_slice(), "make_circles y shape");
@@ -314,12 +318,28 @@ fn load_breast_cancer_shape_and_labels() {
 
     let (x, y) = load_breast_cancer::<f64>().expect("load_breast_cancer");
 
-    assert_eq!(x.shape(), expected_x.as_slice(), "load_breast_cancer X shape");
-    assert_eq!(y.shape(), expected_y.as_slice(), "load_breast_cancer y shape");
+    assert_eq!(
+        x.shape(),
+        expected_x.as_slice(),
+        "load_breast_cancer X shape"
+    );
+    assert_eq!(
+        y.shape(),
+        expected_y.as_slice(),
+        "load_breast_cancer y shape"
+    );
     // Binary classification — labels are 0 or 1.
-    check_label_range(y.data().expect("y"), label_min, label_max, "load_breast_cancer");
+    check_label_range(
+        y.data().expect("y"),
+        label_min,
+        label_max,
+        "load_breast_cancer",
+    );
     for &v in y.data().expect("y") {
-        assert!(v == 0.0 || v == 1.0, "load_breast_cancer: label {v} not binary");
+        assert!(
+            v == 0.0 || v == 1.0,
+            "load_breast_cancer: label {v} not binary"
+        );
     }
     check_x_finite(x.data().expect("x"), "load_breast_cancer");
 }

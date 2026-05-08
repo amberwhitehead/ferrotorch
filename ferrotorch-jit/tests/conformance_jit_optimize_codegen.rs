@@ -65,8 +65,10 @@ use ferrotorch_jit::fusion::{
 };
 use ferrotorch_jit::graph::{Dtype, IrGraph, IrOpKind};
 use ferrotorch_jit::memory_plan::plan_memory;
-use ferrotorch_jit::optimize::{OptimizationConfig, constant_fold, dead_code_eliminate,
-                                fuse_elementwise, optimize, pattern_fuse};
+use ferrotorch_jit::optimize::{
+    OptimizationConfig, constant_fold, dead_code_eliminate, fuse_elementwise, optimize,
+    pattern_fuse,
+};
 
 /// True when the output value of `graph` is produced by a Constant node.
 /// This is the canonical conformance check for constant_fold: after folding,
@@ -77,7 +79,12 @@ fn output_is_constant(graph: &IrGraph) -> bool {
         Some(&v) => v,
         None => return false,
     };
-    let producer_id = match graph.values.iter().find(|v| v.id == out_val).and_then(|v| v.producer) {
+    let producer_id = match graph
+        .values
+        .iter()
+        .find(|v| v.id == out_val)
+        .and_then(|v| v.producer)
+    {
         Some(id) => id,
         None => return false,
     };
@@ -214,7 +221,11 @@ fn opt_dce_cascading_removal() {
 
     assert_eq!(g.node_count(), 5);
     dead_code_eliminate(&mut g);
-    assert_eq!(g.node_count(), 2, "cascading DCE should remove 3 dead nodes");
+    assert_eq!(
+        g.node_count(),
+        2,
+        "cascading DCE should remove 3 dead nodes"
+    );
 }
 
 #[test]
@@ -226,7 +237,11 @@ fn opt_dce_preserves_graph_outputs() {
     g.set_outputs(vec![c]);
 
     dead_code_eliminate(&mut g);
-    assert_eq!(g.node_count(), 1, "constant that is a graph output must not be removed");
+    assert_eq!(
+        g.node_count(),
+        1,
+        "constant that is a graph output must not be removed"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -291,8 +306,11 @@ fn opt_fuse_elementwise_does_not_fuse_through_branch() {
     let relu_out = relu_outs[0];
     let (_, neg_outs) = g.add_node(IrOpKind::Neg, vec![relu_out], vec![vec![4]]);
     let (_, sigmoid_outs) = g.add_node(IrOpKind::Sigmoid, vec![relu_out], vec![vec![4]]);
-    let (_, add_outs) =
-        g.add_node(IrOpKind::Add, vec![neg_outs[0], sigmoid_outs[0]], vec![vec![4]]);
+    let (_, add_outs) = g.add_node(
+        IrOpKind::Add,
+        vec![neg_outs[0], sigmoid_outs[0]],
+        vec![vec![4]],
+    );
     g.set_outputs(vec![add_outs[0]]);
 
     fuse_elementwise(&mut g);
@@ -331,7 +349,11 @@ fn opt_pattern_fuse_linear_relu() {
         "pattern_fuse should reduce node count"
     );
 
-    let fused = g.nodes.iter().find(|n| n.id == linear_id).expect("linear node must persist");
+    let fused = g
+        .nodes
+        .iter()
+        .find(|n| n.id == linear_id)
+        .expect("linear node must persist");
     assert!(
         matches!(&fused.op, IrOpKind::FusedLinearActivation { .. }),
         "linear node should become FusedLinearActivation"
@@ -373,13 +395,15 @@ fn opt_full_pipeline_idempotent() {
 
     // Idempotency: second pass must not further change the node count.
     assert_eq!(
-        count_after_first,
-        count_after_second,
+        count_after_first, count_after_second,
         "optimize is not idempotent: first={count_after_first}, second={count_after_second}"
     );
 
     // Memory plan should be returned on the first pass.
-    assert!(plan1.is_some(), "optimize with default config must return a MemoryPlan");
+    assert!(
+        plan1.is_some(),
+        "optimize with default config must return a MemoryPlan"
+    );
     let plan = plan1.unwrap();
     assert!(plan.num_slots > 0);
     assert!(plan.planned_total <= plan.naive_total);
@@ -402,7 +426,11 @@ fn opt_config_disables_all_passes() {
     };
     let before = g.node_count();
     let plan = optimize(&mut g, &cfg);
-    assert_eq!(g.node_count(), before, "all-disabled config must not change the graph");
+    assert_eq!(
+        g.node_count(),
+        before,
+        "all-disabled config must not change the graph"
+    );
     assert!(plan.is_none(), "memory_planning=false must return None");
 }
 
@@ -582,14 +610,23 @@ fn fusion_ptx_generation_header_structure() {
 
     assert!(ptx.contains(".version 7.0"), "PTX must have .version 7.0");
     assert!(ptx.contains(".target sm_52"), "PTX must target sm_52");
-    assert!(ptx.contains(".address_size 64"), "PTX must have 64-bit addresses");
+    assert!(
+        ptx.contains(".address_size 64"),
+        "PTX must have 64-bit addresses"
+    );
     assert!(
         ptx.contains(".visible .entry fused_kernel"),
         "PTX must declare fused_kernel entry"
     );
     assert!(ptx.contains("in_ptr"), "PTX must declare in_ptr parameter");
-    assert!(ptx.contains("out_ptr"), "PTX must declare out_ptr parameter");
-    assert!(ptx.contains("st.global.f32"), "PTX must store result globally");
+    assert!(
+        ptx.contains("out_ptr"),
+        "PTX must declare out_ptr parameter"
+    );
+    assert!(
+        ptx.contains("st.global.f32"),
+        "PTX must store result globally"
+    );
     assert!(ptx.contains("ret;"), "PTX must have a ret instruction");
 }
 
@@ -599,8 +636,14 @@ fn fusion_ptx_generation_sigmoid_uses_ex2_rcp() {
     let mut chain = FusedChain::new();
     chain.push(FusedOp::Sigmoid);
     let ptx = chain.generate_ptx().unwrap();
-    assert!(ptx.contains("ex2.approx.f32"), "sigmoid PTX must use ex2.approx.f32");
-    assert!(ptx.contains("rcp.approx.f32"), "sigmoid PTX must use rcp.approx.f32");
+    assert!(
+        ptx.contains("ex2.approx.f32"),
+        "sigmoid PTX must use ex2.approx.f32"
+    );
+    assert!(
+        ptx.contains("rcp.approx.f32"),
+        "sigmoid PTX must use rcp.approx.f32"
+    );
 }
 
 #[test]
@@ -609,7 +652,10 @@ fn fusion_ptx_generation_sqrt_uses_sqrt_approx() {
     let mut chain = FusedChain::new();
     chain.push(FusedOp::Sqrt);
     let ptx = chain.generate_ptx().unwrap();
-    assert!(ptx.contains("sqrt.approx.f32"), "sqrt PTX must use sqrt.approx.f32");
+    assert!(
+        ptx.contains("sqrt.approx.f32"),
+        "sqrt PTX must use sqrt.approx.f32"
+    );
 }
 
 #[test]
@@ -618,8 +664,14 @@ fn fusion_ptx_generation_pow_uses_lg2_ex2() {
     let mut chain = FusedChain::new();
     chain.push(FusedOp::Pow(3.0));
     let ptx = chain.generate_ptx().unwrap();
-    assert!(ptx.contains("lg2.approx.f32"), "pow PTX must use lg2.approx.f32");
-    assert!(ptx.contains("ex2.approx.f32"), "pow PTX must use ex2.approx.f32");
+    assert!(
+        ptx.contains("lg2.approx.f32"),
+        "pow PTX must use lg2.approx.f32"
+    );
+    assert!(
+        ptx.contains("ex2.approx.f32"),
+        "pow PTX must use ex2.approx.f32"
+    );
 }
 
 #[test]
@@ -649,19 +701,37 @@ fn fusion_c_codegen_header_structure() {
     chain.push(FusedOp::Neg);
     let c = chain.generate_c("fused_relu_neg").unwrap();
 
-    assert!(c.contains("#include <math.h>"), "C code must include math.h");
-    assert!(c.contains("void fused_relu_neg("), "C code must have correct function name");
-    assert!(c.contains("#pragma omp simd"), "C code must have SIMD pragma");
+    assert!(
+        c.contains("#include <math.h>"),
+        "C code must include math.h"
+    );
+    assert!(
+        c.contains("void fused_relu_neg("),
+        "C code must have correct function name"
+    );
+    assert!(
+        c.contains("#pragma omp simd"),
+        "C code must have SIMD pragma"
+    );
     assert!(c.contains("for (int i = 0"), "C code must have a loop");
-    assert!(c.contains("out[i] = val;"), "C code must store result to out[i]");
+    assert!(
+        c.contains("out[i] = val;"),
+        "C code must store result to out[i]"
+    );
 }
 
 #[test]
 fn fusion_generate_reduction_c_sum() {
     let c = generate_reduction_c(ReductionKind::Sum, "reduce_sum").unwrap();
-    assert!(c.contains("float acc = 0.0f"), "sum reduction must init acc to 0");
+    assert!(
+        c.contains("float acc = 0.0f"),
+        "sum reduction must init acc to 0"
+    );
     assert!(c.contains("acc += in[i]"), "sum reduction must accumulate");
-    assert!(c.contains("out[0] = acc"), "sum reduction must store to out[0]");
+    assert!(
+        c.contains("out[0] = acc"),
+        "sum reduction must store to out[0]"
+    );
 }
 
 #[test]
@@ -708,9 +778,15 @@ fn fusion_flag_default_off() {
 fn fusion_flag_scoped_on_inside_closure() {
     assert!(!is_fusion_enabled());
     with_fusion(|| {
-        assert!(is_fusion_enabled(), "fusion flag must be true inside with_fusion");
+        assert!(
+            is_fusion_enabled(),
+            "fusion flag must be true inside with_fusion"
+        );
     });
-    assert!(!is_fusion_enabled(), "fusion flag must be restored after with_fusion");
+    assert!(
+        !is_fusion_enabled(),
+        "fusion flag must be restored after with_fusion"
+    );
 }
 
 #[test]
@@ -721,7 +797,10 @@ fn fusion_flag_nested_restores_outer() {
             assert!(is_fusion_enabled());
         });
         // Inner scope restores to true (not false).
-        assert!(is_fusion_enabled(), "inner with_fusion must restore outer true state");
+        assert!(
+            is_fusion_enabled(),
+            "inner with_fusion must restore outer true state"
+        );
     });
     assert!(!is_fusion_enabled());
 }
@@ -841,7 +920,10 @@ fn dag_fuse_dag_elementwise_emits_loop_ir() {
     let groups = find_fusion_groups(&g);
     let loops_per_group = fuse_dag(&groups, &g);
     assert_eq!(loops_per_group.len(), 1);
-    assert!(!loops_per_group[0].is_empty(), "elementwise group must emit non-empty LoopIR");
+    assert!(
+        !loops_per_group[0].is_empty(),
+        "elementwise group must emit non-empty LoopIR"
+    );
 }
 
 #[test]
@@ -882,7 +964,10 @@ fn dag_fuse_dag_reduction_emits_accumulator() {
     assert!(!loops_per_group[0].is_empty());
     match &loops_per_group[0][0] {
         LoopIR::Let { var, .. } => {
-            assert_eq!(var, "acc", "first LoopIR stmt of reduction must be Let{{acc}}");
+            assert_eq!(
+                var, "acc",
+                "first LoopIR stmt of reduction must be Let{{acc}}"
+            );
         }
         other => panic!("expected Let{{acc}}, got {other:?}"),
     }
@@ -937,7 +1022,11 @@ fn codegen_compiled_graph_output_shape_preserved() {
     let (g, _) = build_relu_sqrt_graph();
     let backend = InterpreterBackend;
     let compiled = backend.compile(&g).unwrap();
-    assert_eq!(compiled.output_shape(), &[3], "output shape must match input shape [3]");
+    assert_eq!(
+        compiled.output_shape(),
+        &[3],
+        "output shape must match input shape [3]"
+    );
 }
 
 #[test]
@@ -951,7 +1040,9 @@ fn codegen_native_backend_add_two_inputs() {
 
     let backend = NativeBackend;
     let compiled = backend.compile(&g).unwrap();
-    let out = compiled.execute(&[vec![1.0, 2.0, 3.0], vec![10.0, 20.0, 30.0]]).unwrap();
+    let out = compiled
+        .execute(&[vec![1.0, 2.0, 3.0], vec![10.0, 20.0, 30.0]])
+        .unwrap();
     assert_close("add_two_inputs", &out, &[11.0, 22.0, 33.0], 1e-10);
 }
 
@@ -959,7 +1050,11 @@ fn codegen_native_backend_add_two_inputs() {
 // MODULE: codegen_cpu — CpuCodegen::generate_rust_source structural checks
 // ---------------------------------------------------------------------------
 
-fn loops_for(ops: &[IrOpKind], inputs: &[&str], n: usize) -> Vec<ferrotorch_jit::codegen_ir::LoopIR> {
+fn loops_for(
+    ops: &[IrOpKind],
+    inputs: &[&str],
+    n: usize,
+) -> Vec<ferrotorch_jit::codegen_ir::LoopIR> {
     codegen_ir::lower_to_loops(ops, inputs, "out", n)
 }
 
@@ -969,10 +1064,22 @@ fn codegen_cpu_neg_contains_inline_always_and_signature() {
     let loops = loops_for(&[IrOpKind::Neg], &["in0"], 4);
     let src = CpuCodegen::generate_rust_source(&loops, "kernel_neg");
 
-    assert!(src.contains("#[inline(always)]"), "must contain #[inline(always)]");
-    assert!(src.contains("pub unsafe fn kernel_neg"), "must have correct fn name");
-    assert!(src.contains("inputs: &[&[f64]]"), "must take &[&[f64]] inputs");
-    assert!(src.contains("output: &mut [f64]"), "must take &mut [f64] output");
+    assert!(
+        src.contains("#[inline(always)]"),
+        "must contain #[inline(always)]"
+    );
+    assert!(
+        src.contains("pub unsafe fn kernel_neg"),
+        "must have correct fn name"
+    );
+    assert!(
+        src.contains("inputs: &[&[f64]]"),
+        "must take &[&[f64]] inputs"
+    );
+    assert!(
+        src.contains("output: &mut [f64]"),
+        "must take &mut [f64] output"
+    );
     assert!(src.contains("for"), "must contain a loop");
 }
 
@@ -1007,7 +1114,10 @@ fn codegen_cpu_matmul_triple_loop() {
     assert!(src.contains("for i in"), "matmul must have i loop");
     assert!(src.contains("for j in"), "matmul must have j loop");
     assert!(src.contains("for p in"), "matmul must have p loop");
-    assert!(src.contains("let mut acc"), "matmul must declare accumulator");
+    assert!(
+        src.contains("let mut acc"),
+        "matmul must declare accumulator"
+    );
 }
 
 #[test]
@@ -1053,8 +1163,14 @@ fn codegen_gpu_cuda_source_neg_f32_has_global_kernel() {
     let loops = loops_for(&[IrOpKind::Neg], &["in0"], 4);
     let src = GpuCodegen::generate_cuda_source(&loops, "cuda_neg", 1, Dtype::F32).unwrap();
 
-    assert!(src.contains("__global__ void cuda_neg"), "must declare __global__ kernel");
-    assert!(src.contains("float* __restrict__"), "f32 dtype must use float*");
+    assert!(
+        src.contains("__global__ void cuda_neg"),
+        "must declare __global__ kernel"
+    );
+    assert!(
+        src.contains("float* __restrict__"),
+        "f32 dtype must use float*"
+    );
     assert!(src.contains("blockIdx.x"), "must use blockIdx.x");
     assert!(src.contains("threadIdx.x"), "must use threadIdx.x");
 }
@@ -1089,7 +1205,10 @@ fn codegen_gpu_ptx_source_f32_neg_has_header() {
 
     assert!(ptx.contains(".version"), "PTX must have .version header");
     assert!(ptx.contains(".target sm_52"), "PTX must target sm_52");
-    assert!(ptx.contains(".address_size 64"), "PTX must use 64-bit addresses");
+    assert!(
+        ptx.contains(".address_size 64"),
+        "PTX must use 64-bit addresses"
+    );
 }
 
 #[test]
@@ -1098,7 +1217,10 @@ fn codegen_gpu_cuda_source_f64_uses_double_type() {
     let loops = loops_for(&[IrOpKind::Neg], &["in0"], 4);
     let src = GpuCodegen::generate_cuda_source(&loops, "cuda_neg_f64", 1, Dtype::F64).unwrap();
 
-    assert!(src.contains("double"), "f64 dtype CUDA source must use 'double'");
+    assert!(
+        src.contains("double"),
+        "f64 dtype CUDA source must use 'double'"
+    );
 }
 
 #[test]
@@ -1221,7 +1343,10 @@ fn jit_compile_cache_hit_on_identical_loops() {
     let loops = loops_for(&[IrOpKind::Neg], &["in0"], 5);
     let k1 = compile_loop_ir_kernel(&loops, 1, 5).unwrap();
     let k2 = compile_loop_ir_kernel(&loops, 1, 5).unwrap();
-    assert!(Arc::ptr_eq(&k1, &k2), "identical loops must return same Arc (cache hit)");
+    assert!(
+        Arc::ptr_eq(&k1, &k2),
+        "identical loops must return same Arc (cache hit)"
+    );
 }
 
 #[test]
@@ -1247,15 +1372,18 @@ fn jit_execute_rejects_short_output_buffer() {
 
 #[test]
 fn jit_unsupported_loop_ir_returns_err() {
-    use ferrotorch_jit::codegen_ir::{Expr, LoopIR};
     use ferrotorch_core::error::FerrotorchError;
+    use ferrotorch_jit::codegen_ir::{Expr, LoopIR};
     let loops = vec![LoopIR::If {
         condition: Expr::var("c"),
         then_body: vec![],
         else_body: vec![],
     }];
     let result = compile_loop_ir_kernel(&loops, 1, 1);
-    assert!(matches!(result, Err(FerrotorchError::InvalidArgument { .. })));
+    assert!(matches!(
+        result,
+        Err(FerrotorchError::InvalidArgument { .. })
+    ));
 }
 
 // ---------------------------------------------------------------------------
@@ -1325,11 +1453,19 @@ fn autotune_cache_hit_returns_single_timing_row() {
 
     let first = tuner.tune(&g, &inputs).unwrap();
     assert_eq!(first.all_timings().len(), 2, "first tune: 2 timing rows");
-    assert_eq!(tuner.cache_size(), 1, "cache must have 1 entry after first tune");
+    assert_eq!(
+        tuner.cache_size(),
+        1,
+        "cache must have 1 entry after first tune"
+    );
 
     let second = tuner.tune(&g, &inputs).unwrap();
     assert_eq!(second.all_timings().len(), 1, "cache hit: 1 timing row");
-    assert_eq!(second.winner_name(), first.winner_name(), "cache hit winner must match first");
+    assert_eq!(
+        second.winner_name(),
+        first.winner_name(),
+        "cache hit winner must match first"
+    );
 }
 
 #[test]
@@ -1347,7 +1483,10 @@ fn autotune_key_is_shape_sensitive() {
 
     let k1 = AutotuneKey::from_graph(&g1, &[vec![4]]);
     let k2 = AutotuneKey::from_graph(&g2, &[vec![8]]);
-    assert_ne!(k1, k2, "different input shapes must produce different autotune keys");
+    assert_ne!(
+        k1, k2,
+        "different input shapes must produce different autotune keys"
+    );
 }
 
 #[test]
@@ -1385,7 +1524,11 @@ fn autotune_clear_cache_forces_retune() {
     assert_eq!(tuner.cache_size(), 0, "cache must be empty after clear");
 
     let third = tuner.tune(&g, &inputs).unwrap();
-    assert_eq!(third.all_timings().len(), 2, "after cache clear: full tune with 2 rows");
+    assert_eq!(
+        third.all_timings().len(),
+        2,
+        "after cache clear: full tune with 2 rows"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -1415,7 +1558,11 @@ fn mem_simple_chain_reuses_buffers() {
         plan.planned_total,
         plan.naive_total
     );
-    assert_eq!(plan.assignments.len(), 3, "all 3 values must have assignments");
+    assert_eq!(
+        plan.assignments.len(),
+        3,
+        "all 3 values must have assignments"
+    );
     assert!(plan.savings_percent() > 0.0, "savings must be positive");
 }
 
@@ -1426,8 +1573,11 @@ fn mem_diamond_concurrent_values_different_slots() {
     let x = g.add_input(vec![50]);
     let (_, relu_outs) = g.add_node(IrOpKind::Relu, vec![x], vec![vec![50]]);
     let (_, sig_outs) = g.add_node(IrOpKind::Sigmoid, vec![x], vec![vec![50]]);
-    let (_, add_outs) =
-        g.add_node(IrOpKind::Add, vec![relu_outs[0], sig_outs[0]], vec![vec![50]]);
+    let (_, add_outs) = g.add_node(
+        IrOpKind::Add,
+        vec![relu_outs[0], sig_outs[0]],
+        vec![vec![50]],
+    );
     g.set_outputs(vec![add_outs[0]]);
 
     let plan = plan_memory(&g);
@@ -1454,7 +1604,10 @@ fn mem_long_chain_savings_positive() {
 
     let plan = plan_memory(&g);
 
-    assert_eq!(plan.naive_total, 5000, "naive total for 5 values * 1000 must be 5000");
+    assert_eq!(
+        plan.naive_total, 5000,
+        "naive total for 5 values * 1000 must be 5000"
+    );
     assert!(
         plan.num_slots < 5,
         "long chain should reuse slots; got {}",
@@ -1494,11 +1647,19 @@ fn mem_all_values_assigned_and_slots_valid() {
     let plan = plan_memory(&g);
 
     // Every value must have an assignment.
-    assert_eq!(plan.assignments.len(), g.value_count(), "every value must be assigned");
+    assert_eq!(
+        plan.assignments.len(),
+        g.value_count(),
+        "every value must be assigned"
+    );
 
     // Every slot index must be in-range.
     for &slot in plan.assignments.values() {
-        assert!(slot < plan.num_slots, "slot {slot} must be < num_slots {}", plan.num_slots);
+        assert!(
+            slot < plan.num_slots,
+            "slot {slot} must be < num_slots {}",
+            plan.num_slots
+        );
     }
 }
 

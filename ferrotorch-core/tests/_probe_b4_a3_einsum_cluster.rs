@@ -31,13 +31,13 @@
 //! This file is a permanent test — it pins both bugs so that future
 //! refactors of `einsum.rs` can't silently re-introduce either failure mode.
 
-use ferrotorch_core::einsum::einsum_differentiable;
-#[cfg(feature = "gpu")]
-use ferrotorch_core::einsum::einsum;
-use ferrotorch_core::storage::TensorStorage;
-use ferrotorch_core::tensor::Tensor;
 #[cfg(feature = "gpu")]
 use ferrotorch_core::Device;
+#[cfg(feature = "gpu")]
+use ferrotorch_core::einsum::einsum;
+use ferrotorch_core::einsum::einsum_differentiable;
+use ferrotorch_core::storage::TensorStorage;
+use ferrotorch_core::tensor::Tensor;
 
 #[cfg(feature = "gpu")]
 fn t_f32(data: &[f32], shape: &[usize]) -> Tensor<f32> {
@@ -79,7 +79,8 @@ fn cpu_einsum_axis_sum_backward_projects_via_broadcast() {
     assert_close(r.data().unwrap(), &[6.0, 15.0], 1e-6, "fwd axis_sum");
 
     let loss = ferrotorch_core::grad_fns::reduction::sum(&r).expect("loss");
-    loss.backward().expect("backward must not crash on axis_sum projection");
+    loss.backward()
+        .expect("backward must not crash on axis_sum projection");
     let grad = a.grad().unwrap().expect("a should have grad");
     assert_eq!(grad.shape(), &[2, 3]);
     assert_close(
@@ -100,7 +101,8 @@ fn cpu_einsum_full_reduce_backward_projects_via_broadcast() {
     assert!((r.item().unwrap() - 10.0).abs() < 1e-6);
 
     let loss = ferrotorch_core::grad_fns::reduction::sum(&r).expect("loss");
-    loss.backward().expect("backward must not crash on full reduction");
+    loss.backward()
+        .expect("backward must not crash on full reduction");
     let grad = a.grad().unwrap().expect("a should have grad");
     assert_close(
         grad.data().unwrap(),
@@ -159,7 +161,12 @@ fn cpu_einsum_trace_backward_still_works() {
     loss.backward().expect("backward");
     let grad = a.grad().unwrap().expect("grad");
     // Gradient of trace w.r.t. matrix is the identity matrix.
-    assert_close(grad.data().unwrap(), &[1.0, 0.0, 0.0, 1.0], 1e-6, "trace grad");
+    assert_close(
+        grad.data().unwrap(),
+        &[1.0, 0.0, 0.0, 1.0],
+        1e-6,
+        "trace grad",
+    );
 }
 
 // ---------------------------------------------------------------------------

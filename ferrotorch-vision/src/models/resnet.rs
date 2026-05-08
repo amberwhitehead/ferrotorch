@@ -15,10 +15,10 @@ use ferrotorch_core::grad_fns::arithmetic::add;
 use ferrotorch_core::grad_fns::shape::reshape;
 use ferrotorch_core::{FerrotorchResult, Float, Tensor};
 
-use ferrotorch_nn::norm::BatchNorm2d;
 use ferrotorch_nn::Conv2d;
 use ferrotorch_nn::Linear;
 use ferrotorch_nn::module::Module;
+use ferrotorch_nn::norm::BatchNorm2d;
 use ferrotorch_nn::parameter::Parameter;
 use ferrotorch_nn::pooling::{AdaptiveAvgPool2d, MaxPool2d};
 
@@ -828,7 +828,7 @@ mod tests {
         let block = BasicBlock::<f32>::new(64, 64, 1).unwrap();
         let count: usize = block.parameters().iter().map(|p| p.numel()).sum();
         let expected_no_ds = 2 * 64 * 64 * 3 * 3   // conv1 + conv2
-                           + 2 * (2 * 64);           // bn1 + bn2 (weight+bias)
+                           + 2 * (2 * 64); // bn1 + bn2 (weight+bias)
         assert_eq!(count, expected_no_ds);
 
         // With downsample: 2 convs + 2 BNs + ds_conv + ds_bn.
@@ -839,7 +839,7 @@ mod tests {
                      + 128 * 128 * 3 * 3   // conv2: 128->128
                      + 2 * 128             // bn2
                      + 64 * 128            // downsample conv: 64->128
-                     + 2 * 128;            // downsample bn
+                     + 2 * 128; // downsample bn
         assert_eq!(count, expected);
     }
 

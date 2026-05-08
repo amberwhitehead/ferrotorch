@@ -411,12 +411,7 @@ fn check_f64(label: &str, actual: &[f64], expected: &[f64], tol: f64) {
 ///   `softmax_f64` already exists, and `mul_f64` / `broadcast_mul_f64`
 ///   already route on `is_f64::<T>()`. f64 baseline GPU now matches
 ///   PyTorch parity end-to-end on every fixture shape.
-fn cascade_skip(
-    _op: &str,
-    _device_label: &str,
-    _dtype: &str,
-    _tag: &str,
-) -> Option<&'static str> {
+fn cascade_skip(_op: &str, _device_label: &str, _dtype: &str, _tag: &str) -> Option<&'static str> {
     None
 }
 

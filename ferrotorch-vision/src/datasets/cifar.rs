@@ -146,12 +146,8 @@ impl<T: Float> Cifar10<T> {
             Split::Test => vec!["test_batch.bin"],
         };
 
-        let (images, labels) = load_cifar_batches::<T>(
-            root,
-            &batch_files,
-            CifarFormat::Cifar10,
-            Self::NUM_CLASSES,
-        )?;
+        let (images, labels) =
+            load_cifar_batches::<T>(root, &batch_files, CifarFormat::Cifar10, Self::NUM_CLASSES)?;
 
         Ok(Self {
             images,
@@ -261,12 +257,8 @@ impl<T: Float> Cifar100<T> {
             Split::Test => vec!["test.bin"],
         };
 
-        let (images, labels) = load_cifar_batches::<T>(
-            root,
-            &batch_files,
-            CifarFormat::Cifar100,
-            Self::NUM_CLASSES,
-        )?;
+        let (images, labels) =
+            load_cifar_batches::<T>(root, &batch_files, CifarFormat::Cifar100, Self::NUM_CLASSES)?;
 
         Ok(Self {
             images,
@@ -396,8 +388,7 @@ fn load_cifar_batches<T: Float>(
                 .collect::<FerrotorchResult<Vec<T>>>()?;
 
             let storage = TensorStorage::cpu(data);
-            let tensor =
-                Tensor::from_storage(storage, vec![CHANNELS, HEIGHT, WIDTH], false)?;
+            let tensor = Tensor::from_storage(storage, vec![CHANNELS, HEIGHT, WIDTH], false)?;
             images.push(tensor);
             labels.push(label);
         }

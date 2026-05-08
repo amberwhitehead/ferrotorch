@@ -190,7 +190,10 @@ fn api_model_url_construction_matches_reference() {
         let repo_id = f["repo_id"].as_str().unwrap();
         let expected_url = f["expected_url"].as_str().unwrap();
         let actual = format!("https://huggingface.co/api/models/{repo_id}");
-        assert_eq!(actual, expected_url, "api_model_url mismatch for {repo_id:?}");
+        assert_eq!(
+            actual, expected_url,
+            "api_model_url mismatch for {repo_id:?}"
+        );
     }
 }
 
@@ -555,7 +558,10 @@ fn model_info_deserialize_matches_reference() {
             .filter_map(|v| v.as_str())
             .collect();
         let actual_names: Vec<&str> = info.siblings.iter().map(|s| s.rfilename.as_str()).collect();
-        assert_eq!(actual_names, expected_names, "label={label}: siblings filenames");
+        assert_eq!(
+            actual_names, expected_names,
+            "label={label}: siblings filenames"
+        );
     }
 }
 
@@ -714,8 +720,8 @@ fn hub_cache_path_for_model_extension_matches_reference() {
 
     // ModelInfo is #[non_exhaustive] — obtain instances from the registry.
     // resnet50 uses SafeTensors format.
-    let info_st = get_model_info("resnet50")
-        .expect("resnet50 must be in the registry for this test");
+    let info_st =
+        get_model_info("resnet50").expect("resnet50 must be in the registry for this test");
     assert_eq!(info_st.format, WeightsFormat::SafeTensors);
     assert_eq!(
         cache.path_for_model(info_st),
@@ -732,10 +738,7 @@ fn hub_cache_path_for_model_extension_matches_reference() {
     //
     // The ".fts" extension branch is covered by HubCache unit tests in
     // ferrotorch-hub/src/cache.rs (same-crate visibility).
-    let all_formats: Vec<WeightsFormat> = list_models()
-        .iter()
-        .map(|m| m.format)
-        .collect();
+    let all_formats: Vec<WeightsFormat> = list_models().iter().map(|m| m.format).collect();
     // At least some SafeTensors entries must exist (registry is non-empty)
     assert!(
         all_formats.contains(&WeightsFormat::SafeTensors),
@@ -788,7 +791,10 @@ fn hub_cache_clear_removes_files() {
 #[test]
 fn hub_cache_clear_on_nonexistent_dir_is_ok() {
     let cache = HubCache::new("/tmp/ferrotorch_hub_conformance_nonexistent_dir_99999");
-    assert!(cache.clear().is_ok(), "clear on nonexistent dir should be Ok");
+    assert!(
+        cache.clear().is_ok(),
+        "clear on nonexistent dir should be Ok"
+    );
 }
 
 #[test]
@@ -805,7 +811,9 @@ fn hub_cache_store_creates_directory() {
     let cache = HubCache::new(&nested);
 
     assert!(!nested.exists(), "dir should not exist before store");
-    cache.store("weights", b"data").expect("store into new nested dir");
+    cache
+        .store("weights", b"data")
+        .expect("store into new nested dir");
     assert!(nested.exists(), "dir should exist after store");
     assert!(cache.has("weights"));
 }
@@ -867,8 +875,7 @@ fn registry_get_model_info_matches_reference() {
 
         if expected_some {
             let info = info.unwrap();
-            let expected_params =
-                f["expected_num_parameters"].as_u64().unwrap() as usize;
+            let expected_params = f["expected_num_parameters"].as_u64().unwrap() as usize;
             assert_eq!(
                 info.num_parameters, expected_params,
                 "get_model_info({name:?}): num_parameters mismatch"
@@ -926,9 +933,8 @@ fn registry_all_models_have_valid_fields() {
         let models = f["models"].as_array().unwrap();
         for m in models {
             let name = m["name"].as_str().unwrap();
-            let info = get_model_info(name).unwrap_or_else(|| {
-                panic!("registry_known_models: {name:?} not found in registry")
-            });
+            let info = get_model_info(name)
+                .unwrap_or_else(|| panic!("registry_known_models: {name:?} not found in registry"));
             assert!(!info.name.is_empty(), "{name}: name must not be empty");
             assert!(
                 !info.description.is_empty(),
@@ -943,7 +949,10 @@ fn registry_all_models_have_valid_fields() {
                 64,
                 "{name}: SHA-256 must be 64 hex chars"
             );
-            assert!(info.num_parameters > 0, "{name}: num_parameters must be > 0");
+            assert!(
+                info.num_parameters > 0,
+                "{name}: num_parameters must be > 0"
+            );
         }
     }
 }
@@ -955,7 +964,10 @@ fn registry_all_models_have_valid_fields() {
 #[test]
 fn load_pretrained_unknown_model_errors() {
     let result = ferrotorch_hub::load_pretrained::<f32>("totally_fake_conformance_model");
-    assert!(result.is_err(), "load_pretrained(unknown) should return Err");
+    assert!(
+        result.is_err(),
+        "load_pretrained(unknown) should return Err"
+    );
     let msg = result.unwrap_err().to_string();
     assert!(
         msg.contains("Unknown model") || msg.contains("unknown") || msg.contains("not found"),
@@ -993,7 +1005,10 @@ fn hf_download_model_offline_preconditions() {
     // We verify the pattern is stable against the fixture expectations.
     let file = load_fixtures();
     let cases = fixtures_by_op(&file, "resolve_url");
-    assert!(!cases.is_empty(), "no resolve_url fixtures for URL pattern check");
+    assert!(
+        !cases.is_empty(),
+        "no resolve_url fixtures for URL pattern check"
+    );
 
     for f in cases {
         let repo = f["repo"].as_str().unwrap();
@@ -1024,9 +1039,16 @@ fn hub_smoke_hf_download_model() {
         "hub_smoke_hf_download_model: expected Ok, got {result:?}"
     );
     // config.json must have been written to the cache
-    let config_path = dir.path().join("google-bert/bert-base-uncased").join("config.json");
+    let config_path = dir
+        .path()
+        .join("google-bert/bert-base-uncased")
+        .join("config.json");
     assert!(
-        config_path.exists() || dir.path().join("google-bert/bert-base-uncased/config.json").exists(),
+        config_path.exists()
+            || dir
+                .path()
+                .join("google-bert/bert-base-uncased/config.json")
+                .exists(),
         "hub_smoke_hf_download_model: config.json not found in cache"
     );
 }
@@ -1095,7 +1117,10 @@ fn get_model_network_path_offline_preconditions() {
     // but we include it here as the offline half of the #839 pair so the
     // coverage story is symmetric.
     let result = ferrotorch_hub::get_model("");
-    assert!(result.is_err(), "get_model(\"\") must return Err (offline precondition)");
+    assert!(
+        result.is_err(),
+        "get_model(\"\") must return Err (offline precondition)"
+    );
     let msg = result.unwrap_err().to_string();
     assert!(
         msg.contains("must not be empty"),

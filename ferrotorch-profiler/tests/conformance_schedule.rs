@@ -37,8 +37,7 @@ fn fixtures_json() -> serde_json::Value {
             p.display()
         )
     });
-    serde_json::from_slice(&bytes)
-        .unwrap_or_else(|e| panic!("parse {}: {e}", p.display()))
+    serde_json::from_slice(&bytes).unwrap_or_else(|e| panic!("parse {}: {e}", p.display()))
 }
 
 /// Parse a JSON phase string into `SchedulePhase`.
@@ -139,7 +138,7 @@ fn schedule_on_trace_ready_fires_once_per_cycle() {
         .find(|f| f["id"].as_str() == Some("schedule_active1_repeat3"))
         .expect("schedule_active1_repeat3 fixture");
 
-    let wait   = fix["wait"].as_u64().unwrap();
+    let wait = fix["wait"].as_u64().unwrap();
     let warmup = fix["warmup"].as_u64().unwrap();
     let active = fix["active"].as_u64().unwrap();
     let repeat = fix["repeat"].as_u64().unwrap();
@@ -247,9 +246,9 @@ fn schedule_step_and_cycle_tracking() {
 fn schedule_phase_display_strings() {
     // torch.profiler uses string labels for its schedule phases in logs/exports.
     assert_eq!(SchedulePhase::Waiting.to_string(), "Waiting");
-    assert_eq!(SchedulePhase::Warmup.to_string(),  "Warmup");
-    assert_eq!(SchedulePhase::Active.to_string(),  "Active");
-    assert_eq!(SchedulePhase::Done.to_string(),    "Done");
+    assert_eq!(SchedulePhase::Warmup.to_string(), "Warmup");
+    assert_eq!(SchedulePhase::Active.to_string(), "Active");
+    assert_eq!(SchedulePhase::Done.to_string(), "Done");
 }
 
 // ---------------------------------------------------------------------------

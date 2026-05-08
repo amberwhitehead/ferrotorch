@@ -874,7 +874,10 @@ fn bool_empty_reduction_identities() {
     let z = BoolTensor::zeros(&[0]);
     assert_eq!(z.numel(), 0);
     assert!(!z.any(), "BoolTensor::zeros(&[0]).any() must be false");
-    assert!(z.all(), "BoolTensor::zeros(&[0]).all() must be true (AND identity)");
+    assert!(
+        z.all(),
+        "BoolTensor::zeros(&[0]).all() must be true (AND identity)"
+    );
     assert_eq!(z.count_true(), 0);
 
     let from_vec = BoolTensor::from_vec(vec![], vec![0]).expect("empty from_vec");

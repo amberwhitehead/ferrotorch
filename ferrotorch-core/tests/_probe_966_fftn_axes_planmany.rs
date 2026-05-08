@@ -22,8 +22,8 @@
 
 use std::sync::Once;
 
-use ferrotorch_core::{Device, Tensor, TensorStorage};
 use ferrotorch_core::fft::{fftn, ifftn};
+use ferrotorch_core::{Device, Tensor, TensorStorage};
 
 const F64_FFT_TOL: f64 = 1e-10;
 const F32_FFT_TOL: f32 = 1e-4;
@@ -195,7 +195,10 @@ fn p966_fftn_axes_n2_n1_3d_f64() {
     let cpu_result = fftn(&cpu_tensor, None, Some(&[-2isize, -1])).expect("cpu fftn axes=[-2,-1]");
     let gpu_result = fftn(&gpu_tensor, None, Some(&[-2isize, -1])).expect("gpu fftn axes=[-2,-1]");
 
-    assert!(gpu_result.is_cuda(), "gpu fftn axes=[-2,-1] must stay on CUDA");
+    assert!(
+        gpu_result.is_cuda(),
+        "gpu fftn axes=[-2,-1] must stay on CUDA"
+    );
     assert_eq!(gpu_result.shape(), cpu_result.shape());
     let cpu_vals = read_back_f64(&cpu_result);
     let gpu_vals = read_back_f64(&gpu_result);
@@ -246,7 +249,13 @@ fn p966_ifftn_roundtrip_axes_neg1_f64() {
     // Use values with non-trivial imaginary parts so the round-trip is
     // a meaningful test (not just real-input zeros in imaginary slots).
     let data: Vec<f64> = (0..n)
-        .map(|i| if i % 2 == 0 { i as f64 * 0.1 } else { -(i as f64) * 0.05 })
+        .map(|i| {
+            if i % 2 == 0 {
+                i as f64 * 0.1
+            } else {
+                -(i as f64) * 0.05
+            }
+        })
         .collect();
     let shape = [d, h, w, 2];
 

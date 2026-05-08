@@ -14,28 +14,44 @@ use ferrotorch_core::{BoolTensor, IntTensor};
 fn bool_zeros_empty_1d_has_numel_zero() {
     let t = BoolTensor::zeros(&[0]);
     assert_eq!(t.shape(), &[0_usize]);
-    assert_eq!(t.numel(), 0, "BoolTensor::zeros(&[0]).numel() must be 0 (PyTorch parity)");
+    assert_eq!(
+        t.numel(),
+        0,
+        "BoolTensor::zeros(&[0]).numel() must be 0 (PyTorch parity)"
+    );
 }
 
 #[test]
 fn bool_zeros_scalar_has_numel_one() {
     let t = BoolTensor::zeros(&[]);
     assert_eq!(t.shape(), &[] as &[usize]);
-    assert_eq!(t.numel(), 1, "BoolTensor::zeros(&[]).numel() must be 1 (0-d scalar)");
+    assert_eq!(
+        t.numel(),
+        1,
+        "BoolTensor::zeros(&[]).numel() must be 1 (0-d scalar)"
+    );
 }
 
 #[test]
 fn int_zeros_empty_1d_has_numel_zero() {
     let t = IntTensor::<i64>::zeros(&[0]);
     assert_eq!(t.shape(), &[0_usize]);
-    assert_eq!(t.numel(), 0, "IntTensor::zeros(&[0]).numel() must be 0 (PyTorch parity)");
+    assert_eq!(
+        t.numel(),
+        0,
+        "IntTensor::zeros(&[0]).numel() must be 0 (PyTorch parity)"
+    );
 }
 
 #[test]
 fn int_zeros_scalar_has_numel_one() {
     let t = IntTensor::<i64>::zeros(&[]);
     assert_eq!(t.shape(), &[] as &[usize]);
-    assert_eq!(t.numel(), 1, "IntTensor::zeros(&[]).numel() must be 1 (0-d scalar)");
+    assert_eq!(
+        t.numel(),
+        1,
+        "IntTensor::zeros(&[]).numel() must be 1 (0-d scalar)"
+    );
 }
 
 #[test]
@@ -86,7 +102,9 @@ fn bool_ones_empty_1d_has_numel_zero() {
 fn bool_reshape_to_empty_preserves_numel_zero() {
     // Build an empty tensor via from_vec, reshape to another empty layout.
     let t = BoolTensor::from_vec(vec![], vec![0]).expect("empty");
-    let r = t.reshape(&[2, 0, 3]).expect("reshape empty -> empty must succeed");
+    let r = t
+        .reshape(&[2, 0, 3])
+        .expect("reshape empty -> empty must succeed");
     assert_eq!(r.shape(), &[2_usize, 0, 3]);
     assert_eq!(r.numel(), 0);
 }
@@ -94,7 +112,9 @@ fn bool_reshape_to_empty_preserves_numel_zero() {
 #[test]
 fn int_reshape_to_empty_preserves_numel_zero() {
     let t = IntTensor::<i32>::from_vec(vec![], vec![0]).expect("empty");
-    let r = t.reshape(&[0, 5]).expect("reshape empty -> empty must succeed");
+    let r = t
+        .reshape(&[0, 5])
+        .expect("reshape empty -> empty must succeed");
     assert_eq!(r.shape(), &[0_usize, 5]);
     assert_eq!(r.numel(), 0);
 }

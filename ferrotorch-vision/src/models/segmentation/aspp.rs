@@ -20,12 +20,12 @@
 
 use ferrotorch_core::grad_fns::activation::relu;
 use ferrotorch_core::{FerrotorchResult, Float, Tensor, TensorStorage};
+use ferrotorch_nn::module::Module;
 use ferrotorch_nn::norm::BatchNorm2d;
+use ferrotorch_nn::parameter::Parameter;
 use ferrotorch_nn::pooling::AdaptiveAvgPool2d;
 use ferrotorch_nn::upsample::{InterpolateMode, interpolate};
 use ferrotorch_nn::{Conv2d, Dropout};
-use ferrotorch_nn::module::Module;
-use ferrotorch_nn::parameter::Parameter;
 
 // ---------------------------------------------------------------------------
 // DilatedConv2d — Conv2d with dilation (same-size output, no bias)
@@ -175,8 +175,7 @@ fn dilated_conv2d_forward<T: Float>(
                                     let iw = iw_signed as usize;
                                     let in_idx =
                                         b * c_in * h_in * w_in + ci * h_in * w_in + ih * w_in + iw;
-                                    let w_idx =
-                                        co * c_in * 9 + ci * 9 + kh * 3 + kw;
+                                    let w_idx = co * c_in * 9 + ci * 9 + kh * 3 + kw;
                                     acc += input_data[in_idx] * w_data[w_idx];
                                 }
                             }
@@ -556,7 +555,11 @@ fn concat_channels<T: Float>(tensors: &[Tensor<T>]) -> FerrotorchResult<Tensor<T
         c_offset += c;
     }
 
-    Tensor::from_storage(TensorStorage::cpu(output), vec![batch, total_c, h, w], false)
+    Tensor::from_storage(
+        TensorStorage::cpu(output),
+        vec![batch, total_c, h, w],
+        false,
+    )
 }
 
 // ---------------------------------------------------------------------------

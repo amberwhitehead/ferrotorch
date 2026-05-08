@@ -194,30 +194,26 @@ impl<T: Float> SparseTensor<T> {
         // on `cusparseDenseToSparse_*` when the input is CUDA. SparseTensor
         // storage stays CPU-resident — we read the CSR triplet back to host
         // (the storage model the CPU path also produces).
-        if tensor.is_cuda()
-            && <T as num_traits::Zero>::is_zero(&threshold)
-            && tensor.ndim() == 2
-        {
+        if tensor.is_cuda() && <T as num_traits::Zero>::is_zero(&threshold) && tensor.ndim() == 2 {
             if let Some(backend) = crate::gpu_dispatch::gpu_backend() {
                 let dense_contig = tensor.contiguous()?;
                 let dense_handle = dense_contig.gpu_handle()?;
                 let m = dense_contig.shape()[0];
                 let n = dense_contig.shape()[1];
 
-                let csr_opt: Option<(Vec<Vec<usize>>, Vec<T>)> =
-                    if TypeId::of::<T>() == TypeId::of::<f32>() {
-                        let (crow, col, vals) =
-                            backend.dense_to_sparse_csr_f32(dense_handle, m, n)?;
-                        let (idx, vals_t) = csr_to_coo_t::<T>(&crow, &col, vals_to_t::<T, f32>(vals))?;
-                        Some((idx, vals_t))
-                    } else if TypeId::of::<T>() == TypeId::of::<f64>() {
-                        let (crow, col, vals) =
-                            backend.dense_to_sparse_csr_f64(dense_handle, m, n)?;
-                        let (idx, vals_t) = csr_to_coo_t::<T>(&crow, &col, vals_to_t::<T, f64>(vals))?;
-                        Some((idx, vals_t))
-                    } else {
-                        None
-                    };
+                let csr_opt: Option<(Vec<Vec<usize>>, Vec<T>)> = if TypeId::of::<T>()
+                    == TypeId::of::<f32>()
+                {
+                    let (crow, col, vals) = backend.dense_to_sparse_csr_f32(dense_handle, m, n)?;
+                    let (idx, vals_t) = csr_to_coo_t::<T>(&crow, &col, vals_to_t::<T, f32>(vals))?;
+                    Some((idx, vals_t))
+                } else if TypeId::of::<T>() == TypeId::of::<f64>() {
+                    let (crow, col, vals) = backend.dense_to_sparse_csr_f64(dense_handle, m, n)?;
+                    let (idx, vals_t) = csr_to_coo_t::<T>(&crow, &col, vals_to_t::<T, f64>(vals))?;
+                    Some((idx, vals_t))
+                } else {
+                    None
+                };
 
                 if let Some((indices, values)) = csr_opt {
                     let nnz = values.len();
@@ -936,10 +932,8 @@ impl<T: Float> CooTensor<T> {
             {
                 // Coalesce + row-sort on host (cuSPARSE contract).
                 let coalesced = self.coalesce();
-                let row_u32: Vec<u32> =
-                    coalesced.row_indices.iter().map(|&v| v as u32).collect();
-                let col_u32: Vec<u32> =
-                    coalesced.col_indices.iter().map(|&v| v as u32).collect();
+                let row_u32: Vec<u32> = coalesced.row_indices.iter().map(|&v| v as u32).collect();
+                let col_u32: Vec<u32> = coalesced.col_indices.iter().map(|&v| v as u32).collect();
 
                 // We only need the CSR row pointers + column indices from
                 // the COO→CSR conversion; values pass through unchanged
@@ -1314,10 +1308,8 @@ impl<T: Float> CsrTensor<T> {
                 // Coalesce on host so values are summed and rows arrive
                 // sorted (cuSPARSE contract).
                 let coalesced = coo.coalesce();
-                let row_u32: Vec<u32> =
-                    coalesced.row_indices.iter().map(|&v| v as u32).collect();
-                let col_u32: Vec<u32> =
-                    coalesced.col_indices.iter().map(|&v| v as u32).collect();
+                let row_u32: Vec<u32> = coalesced.row_indices.iter().map(|&v| v as u32).collect();
+                let col_u32: Vec<u32> = coalesced.col_indices.iter().map(|&v| v as u32).collect();
 
                 let (crow, col, vals_t) = if TypeId::of::<T>() == TypeId::of::<f32>() {
                     let vals_f32 = unsafe {
@@ -1644,8 +1636,7 @@ pub fn sparse_matmul_24<T: Float>(
                         b_dense_data.len() * std::mem::size_of::<f32>(),
                     )
                 };
-                let b_handle =
-                    backend.cpu_to_gpu(b_bytes, std::mem::size_of::<f32>(), ordinal)?;
+                let b_handle = backend.cpu_to_gpu(b_bytes, std::mem::size_of::<f32>(), ordinal)?;
 
                 let a_handle = a.gpu_handle()?;
                 match backend.sparse_matmul_24_f32(a_handle, &b_handle, m, k, n) {
@@ -1847,8 +1838,7 @@ impl<T: Float> CscTensor<T> {
                 && let Some(backend) = crate::gpu_dispatch::gpu_backend()
             {
                 let col_ptrs_u32: Vec<u32> = self.col_ptrs.iter().map(|&v| v as u32).collect();
-                let row_idx_u32: Vec<u32> =
-                    self.row_indices.iter().map(|&v| v as u32).collect();
+                let row_idx_u32: Vec<u32> = self.row_indices.iter().map(|&v| v as u32).collect();
 
                 let out_handle = if TypeId::of::<T>() == TypeId::of::<f32>() {
                     let values_f32 = unsafe {
@@ -1938,9 +1928,8 @@ impl<T: Float> CscTensor<T> {
                                 csr.values.len(),
                             )
                         };
-                        let (cp, ri, v) = backend.csr_to_csc_f32(
-                            &crow, &col, vals_f32, ord, csr.nrows, csr.ncols,
-                        )?;
+                        let (cp, ri, v) = backend
+                            .csr_to_csc_f32(&crow, &col, vals_f32, ord, csr.nrows, csr.ncols)?;
                         (cp, ri, vals_to_t::<T, f32>(v))
                     } else {
                         let vals_f64 = unsafe {
@@ -1949,15 +1938,13 @@ impl<T: Float> CscTensor<T> {
                                 csr.values.len(),
                             )
                         };
-                        let (cp, ri, v) = backend.csr_to_csc_f64(
-                            &crow, &col, vals_f64, ord, csr.nrows, csr.ncols,
-                        )?;
+                        let (cp, ri, v) = backend
+                            .csr_to_csc_f64(&crow, &col, vals_f64, ord, csr.nrows, csr.ncols)?;
                         (cp, ri, vals_to_t::<T, f64>(v))
                     };
 
                 let col_ptrs: Vec<usize> = col_ptrs_u32.into_iter().map(|v| v as usize).collect();
-                let row_indices: Vec<usize> =
-                    row_idx_u32.into_iter().map(|v| v as usize).collect();
+                let row_indices: Vec<usize> = row_idx_u32.into_iter().map(|v| v as usize).collect();
                 return Self::new(col_ptrs, row_indices, values_t, csr.nrows, csr.ncols);
             }
         }
@@ -1990,8 +1977,7 @@ impl<T: Float> CscTensor<T> {
                 // `(col_ptrs', row_indices', vals')` is the CSR of `self`
                 // since transposing twice round-trips.
                 let col_ptrs_u32: Vec<u32> = self.col_ptrs.iter().map(|&v| v as u32).collect();
-                let row_idx_u32: Vec<u32> =
-                    self.row_indices.iter().map(|&v| v as u32).collect();
+                let row_idx_u32: Vec<u32> = self.row_indices.iter().map(|&v| v as u32).collect();
 
                 let (crow_u32, col_u32, values_t) = if TypeId::of::<T>() == TypeId::of::<f32>() {
                     let vals_f32 = unsafe {
@@ -2029,13 +2015,7 @@ impl<T: Float> CscTensor<T> {
 
                 let row_ptrs: Vec<usize> = crow_u32.into_iter().map(|v| v as usize).collect();
                 let col_indices: Vec<usize> = col_u32.into_iter().map(|v| v as usize).collect();
-                return CsrTensor::new(
-                    row_ptrs,
-                    col_indices,
-                    values_t,
-                    self.nrows,
-                    self.ncols,
-                );
+                return CsrTensor::new(row_ptrs, col_indices, values_t, self.nrows, self.ncols);
             }
         }
 
@@ -2224,9 +2204,7 @@ impl<T: Float> SparseGrad<T> {
         for (k, &idx) in self.indices.iter().enumerate() {
             if idx >= leading {
                 return Err(FerrotorchError::InvalidArgument {
-                    message: format!(
-                        "SparseGrad::apply_sgd: index {idx} >= {leading} (slot {k})"
-                    ),
+                    message: format!("SparseGrad::apply_sgd: index {idx} >= {leading} (slot {k})"),
                 });
             }
         }
@@ -2262,15 +2240,11 @@ impl<T: Float> SparseGrad<T> {
                             self.values.len() * std::mem::size_of::<f32>(),
                         )
                     };
-                    let values_handle = backend.cpu_to_gpu(
-                        values_bytes,
-                        std::mem::size_of::<f32>(),
-                        ordinal,
-                    )?;
+                    let values_handle =
+                        backend.cpu_to_gpu(values_bytes, std::mem::size_of::<f32>(), ordinal)?;
 
                     // 2. Indices as f32 (scatter_add_rows_f32 ABI).
-                    let indices_f32: Vec<f32> =
-                        self.indices.iter().map(|&i| i as f32).collect();
+                    let indices_f32: Vec<f32> = self.indices.iter().map(|&i| i as f32).collect();
                     // SAFETY: indices_f32 is a freshly-built Vec<f32> living
                     // for the duration of the call.
                     let idx_bytes = unsafe {
@@ -2279,11 +2253,8 @@ impl<T: Float> SparseGrad<T> {
                             indices_f32.len() * std::mem::size_of::<f32>(),
                         )
                     };
-                    let idx_handle = backend.cpu_to_gpu(
-                        idx_bytes,
-                        std::mem::size_of::<f32>(),
-                        ordinal,
-                    )?;
+                    let idx_handle =
+                        backend.cpu_to_gpu(idx_bytes, std::mem::size_of::<f32>(), ordinal)?;
 
                     // 3. Scatter-add rows to a dense [leading, slab_size]
                     //    buffer (zero-initialized inside the kernel).
@@ -2297,8 +2268,7 @@ impl<T: Float> SparseGrad<T> {
                     // 4. Scale by lr (lr is T = f32 under the TypeId guard).
                     let lr_f32: f32 = num_traits::ToPrimitive::to_f32(&lr).ok_or_else(|| {
                         FerrotorchError::InvalidArgument {
-                            message: "SparseGrad::apply_sgd: lr not representable as f32"
-                                .into(),
+                            message: "SparseGrad::apply_sgd: lr not representable as f32".into(),
                         }
                     })?;
                     let scaled = backend.scale_f32(&dense_grad, lr_f32)?;
@@ -2328,13 +2298,9 @@ impl<T: Float> SparseGrad<T> {
                             self.values.len() * std::mem::size_of::<f64>(),
                         )
                     };
-                    let values_handle = backend.cpu_to_gpu(
-                        values_bytes,
-                        std::mem::size_of::<f64>(),
-                        ordinal,
-                    )?;
-                    let indices_f32: Vec<f32> =
-                        self.indices.iter().map(|&i| i as f32).collect();
+                    let values_handle =
+                        backend.cpu_to_gpu(values_bytes, std::mem::size_of::<f64>(), ordinal)?;
+                    let indices_f32: Vec<f32> = self.indices.iter().map(|&i| i as f32).collect();
                     // SAFETY: see above.
                     let idx_bytes = unsafe {
                         std::slice::from_raw_parts(
@@ -2342,11 +2308,8 @@ impl<T: Float> SparseGrad<T> {
                             indices_f32.len() * std::mem::size_of::<f32>(),
                         )
                     };
-                    let idx_handle = backend.cpu_to_gpu(
-                        idx_bytes,
-                        std::mem::size_of::<f32>(),
-                        ordinal,
-                    )?;
+                    let idx_handle =
+                        backend.cpu_to_gpu(idx_bytes, std::mem::size_of::<f32>(), ordinal)?;
 
                     let dense_grad = backend.scatter_add_rows_f64(
                         &values_handle,
@@ -2356,8 +2319,7 @@ impl<T: Float> SparseGrad<T> {
                     )?;
                     let lr_f64: f64 = num_traits::ToPrimitive::to_f64(&lr).ok_or_else(|| {
                         FerrotorchError::InvalidArgument {
-                            message: "SparseGrad::apply_sgd: lr not representable as f64"
-                                .into(),
+                            message: "SparseGrad::apply_sgd: lr not representable as f64".into(),
                         }
                     })?;
                     let scaled = backend.scale_f64(&dense_grad, lr_f64)?;

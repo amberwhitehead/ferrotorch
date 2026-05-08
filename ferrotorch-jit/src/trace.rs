@@ -153,7 +153,10 @@ fn infer_cat_axis(input_shapes: &[Vec<usize>], output_shape: &[usize]) -> Option
     }
     let ndim = output_shape.len();
     for ax in 0..ndim {
-        let sum: usize = input_shapes.iter().map(|s| s.get(ax).copied().unwrap_or(0)).sum();
+        let sum: usize = input_shapes
+            .iter()
+            .map(|s| s.get(ax).copied().unwrap_or(0))
+            .sum();
         if sum == output_shape[ax] {
             // Verify all other axes match the first input.
             let first = &input_shapes[0];

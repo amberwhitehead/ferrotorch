@@ -439,8 +439,7 @@ where
         // `compressed` / `compressed_scratch` so we can re-borrow
         // `compressed` for the matmul below.
         {
-            let (b_dense_ptr, _b_dense_sync) =
-                b_dense_decompressed.inner().device_ptr(&stream);
+            let (b_dense_ptr, _b_dense_sync) = b_dense_decompressed.inner().device_ptr(&stream);
             let (compressed_ptr, _compressed_sync) = compressed.device_ptr_mut(&stream);
             let (compressed_scratch_ptr, _compressed_scratch_sync) =
                 compressed_scratch.device_ptr_mut(&stream);
@@ -469,8 +468,7 @@ where
         // before we move `out_slice` into the returned `CudaBuffer`.
         {
             let (a_ptr, _a_sync) = a_dense.inner().device_ptr(&stream);
-            let (compressed_ptr_ro, _compressed_sync_ro) =
-                compressed.device_ptr_mut(&stream);
+            let (compressed_ptr_ro, _compressed_sync_ro) = compressed.device_ptr_mut(&stream);
             let (out_ptr, _out_sync) = out_slice.device_ptr_mut(&stream);
             let (workspace_ptr, _workspace_sync) = workspace.device_ptr_mut(&stream);
 

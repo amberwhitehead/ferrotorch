@@ -111,14 +111,22 @@ fn p8_packed_add_via_gpu_composite_f32() {
         "Tensor + Tensor must stay on CUDA when both inputs are CUDA"
     );
 
-    let gpu_packed =
-        PackedNestedTensor::<f32>::from_data_tensor(&tsum_gpu, pa.offsets().to_vec(), tail.to_vec())
-            .expect("repack");
+    let gpu_packed = PackedNestedTensor::<f32>::from_data_tensor(
+        &tsum_gpu,
+        pa.offsets().to_vec(),
+        tail.to_vec(),
+    )
+    .expect("repack");
     assert_eq!(gpu_packed.offsets(), pa.offsets());
     assert_eq!(gpu_packed.tail_shape(), &tail);
     assert_eq!(gpu_packed.num_components(), 3);
 
-    for (i, (g, e)) in gpu_packed.data().iter().zip(cpu_sum.data().iter()).enumerate() {
+    for (i, (g, e)) in gpu_packed
+        .data()
+        .iter()
+        .zip(cpu_sum.data().iter())
+        .enumerate()
+    {
         assert!(
             (g - e).abs() < F32_TOL,
             "elem {i}: gpu={g} cpu={e} diff={}",
@@ -172,9 +180,12 @@ fn p8_packed_sub_mul_div_via_gpu_composite_f32() {
         ("div", gpu_div, cpu_div),
     ] {
         assert!(gpu_t.is_cuda(), "{label}: must stay on CUDA");
-        let g_packed =
-            PackedNestedTensor::<f32>::from_data_tensor(&gpu_t, pa.offsets().to_vec(), tail.to_vec())
-                .expect("repack");
+        let g_packed = PackedNestedTensor::<f32>::from_data_tensor(
+            &gpu_t,
+            pa.offsets().to_vec(),
+            tail.to_vec(),
+        )
+        .expect("repack");
         for (i, (g, e)) in g_packed.data().iter().zip(cpu_p.data().iter()).enumerate() {
             assert!(
                 (g - e).abs() < F32_TOL * (1.0 + e.abs()),
@@ -215,8 +226,9 @@ fn p8_packed_add_via_gpu_composite_f64() {
     let tsum = (&ta + &tb).unwrap();
     assert!(tsum.is_cuda());
 
-    let g = PackedNestedTensor::<f64>::from_data_tensor(&tsum, pa.offsets().to_vec(), tail.to_vec())
-        .unwrap();
+    let g =
+        PackedNestedTensor::<f64>::from_data_tensor(&tsum, pa.offsets().to_vec(), tail.to_vec())
+            .unwrap();
     for (i, (a, b)) in g.data().iter().zip(cpu.data().iter()).enumerate() {
         assert!((a - b).abs() < F64_TOL, "elem {i}: gpu={a} cpu={b}");
     }
@@ -352,7 +364,10 @@ fn p8_sparse_grad_apply_sgd_cuda_f32_empty_grad_is_noop() {
     assert!(gpu_param.is_cuda(), "empty grad must keep param on CUDA");
     let gpu_data = gpu_param.cpu().unwrap().data().unwrap().to_vec();
     for (i, (g, e)) in gpu_data.iter().zip(param_data.iter()).enumerate() {
-        assert!((g - e).abs() < F32_TOL, "empty-noop elem {i}: gpu={g} cpu={e}");
+        assert!(
+            (g - e).abs() < F32_TOL,
+            "empty-noop elem {i}: gpu={g} cpu={e}"
+        );
     }
 }
 
@@ -364,7 +379,10 @@ fn p8_sparse_grad_apply_sgd_cuda_f32_index_out_of_bounds() {
 
     let grad = SparseGrad::<f32>::new(vec![5], vec![1.0, 1.0, 1.0, 1.0], vec![4]).unwrap();
     let res = grad.apply_sgd(&mut gpu_param, 0.1);
-    assert!(res.is_err(), "out-of-range index must error before any kernel launch");
+    assert!(
+        res.is_err(),
+        "out-of-range index must error before any kernel launch"
+    );
 }
 
 #[test]

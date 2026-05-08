@@ -339,8 +339,7 @@ impl GpuBackend for CudaBackendImpl {
                 //   `Vec<u16>` before `data` is touched again; no aliasing.
                 // - No `&mut` aliases: `data: &[u8]` is a shared borrow throughout.
                 let u16_vec: Vec<u16> = unsafe {
-                    let slice =
-                        std::slice::from_raw_parts(data.as_ptr() as *const u16, count);
+                    let slice = std::slice::from_raw_parts(data.as_ptr() as *const u16, count);
                     slice.to_vec()
                 };
                 let slice = dev
@@ -351,9 +350,7 @@ impl GpuBackend for CudaBackendImpl {
                 Ok(GpuBufferHandle::new(Box::new(slice), device, len))
             }
             other => Err(FerrotorchError::InvalidArgument {
-                message: format!(
-                    "cpu_to_gpu: unsupported elem_size {other} (expected 2, 4, or 8)"
-                ),
+                message: format!("cpu_to_gpu: unsupported elem_size {other} (expected 2, 4, or 8)"),
             }),
         }
     }
@@ -1885,8 +1882,7 @@ impl GpuBackend for CudaBackendImpl {
         let a_buf = Self::unwrap_buffer(a)?;
         let b_buf = Self::unwrap_buffer(b)?;
         let dev = self.device(a.device_ordinal())?;
-        let result =
-            crate::blas::gpu_dot_f32(a_buf, b_buf, n, dev).map_err(Self::map_gpu_err)?;
+        let result = crate::blas::gpu_dot_f32(a_buf, b_buf, n, dev).map_err(Self::map_gpu_err)?;
         Ok(Self::wrap_buffer(result, a.device_ordinal()))
     }
 
@@ -1899,8 +1895,7 @@ impl GpuBackend for CudaBackendImpl {
         let a_buf = Self::unwrap_buffer_f64(a)?;
         let b_buf = Self::unwrap_buffer_f64(b)?;
         let dev = self.device(a.device_ordinal())?;
-        let result =
-            crate::blas::gpu_dot_f64(a_buf, b_buf, n, dev).map_err(Self::map_gpu_err)?;
+        let result = crate::blas::gpu_dot_f64(a_buf, b_buf, n, dev).map_err(Self::map_gpu_err)?;
         Ok(Self::wrap_buffer_f64(result, a.device_ordinal()))
     }
 
@@ -1914,8 +1909,7 @@ impl GpuBackend for CudaBackendImpl {
         let a_buf = Self::unwrap_buffer(a)?;
         let x_buf = Self::unwrap_buffer(x)?;
         let dev = self.device(a.device_ordinal())?;
-        let result =
-            crate::blas::gpu_mv_f32(a_buf, x_buf, m, k, dev).map_err(Self::map_gpu_err)?;
+        let result = crate::blas::gpu_mv_f32(a_buf, x_buf, m, k, dev).map_err(Self::map_gpu_err)?;
         Ok(Self::wrap_buffer(result, a.device_ordinal()))
     }
 
@@ -1929,8 +1923,7 @@ impl GpuBackend for CudaBackendImpl {
         let a_buf = Self::unwrap_buffer_f64(a)?;
         let x_buf = Self::unwrap_buffer_f64(x)?;
         let dev = self.device(a.device_ordinal())?;
-        let result =
-            crate::blas::gpu_mv_f64(a_buf, x_buf, m, k, dev).map_err(Self::map_gpu_err)?;
+        let result = crate::blas::gpu_mv_f64(a_buf, x_buf, m, k, dev).map_err(Self::map_gpu_err)?;
         Ok(Self::wrap_buffer_f64(result, a.device_ordinal()))
     }
 
@@ -1944,8 +1937,7 @@ impl GpuBackend for CudaBackendImpl {
         let x_buf = Self::unwrap_buffer(x)?;
         let b_buf = Self::unwrap_buffer(b)?;
         let dev = self.device(x.device_ordinal())?;
-        let result =
-            crate::blas::gpu_vm_f32(x_buf, b_buf, k, n, dev).map_err(Self::map_gpu_err)?;
+        let result = crate::blas::gpu_vm_f32(x_buf, b_buf, k, n, dev).map_err(Self::map_gpu_err)?;
         Ok(Self::wrap_buffer(result, x.device_ordinal()))
     }
 
@@ -1959,8 +1951,7 @@ impl GpuBackend for CudaBackendImpl {
         let x_buf = Self::unwrap_buffer_f64(x)?;
         let b_buf = Self::unwrap_buffer_f64(b)?;
         let dev = self.device(x.device_ordinal())?;
-        let result =
-            crate::blas::gpu_vm_f64(x_buf, b_buf, k, n, dev).map_err(Self::map_gpu_err)?;
+        let result = crate::blas::gpu_vm_f64(x_buf, b_buf, k, n, dev).map_err(Self::map_gpu_err)?;
         Ok(Self::wrap_buffer_f64(result, x.device_ordinal()))
     }
 
@@ -2259,8 +2250,8 @@ impl GpuBackend for CudaBackendImpl {
         let a_buf = Self::unwrap_buffer(a)?;
         let b_buf = Self::unwrap_buffer(b)?;
         let dev = self.device(a.device_ordinal())?;
-        let result = crate::blas::gpu_matmul_bf16(a_buf, b_buf, m, k, n, dev)
-            .map_err(Self::map_gpu_err)?;
+        let result =
+            crate::blas::gpu_matmul_bf16(a_buf, b_buf, m, k, n, dev).map_err(Self::map_gpu_err)?;
         Ok(Self::wrap_buffer(result, a.device_ordinal()))
     }
 
@@ -2288,12 +2279,12 @@ impl GpuBackend for CudaBackendImpl {
         cols: usize,
     ) -> FerrotorchResult<GpuBufferHandle> {
         // The bf16 softmax handle carries a CudaSlice<u16> (bf16 bit patterns).
-        let buf = a
-            .downcast_ref::<cudarc::driver::CudaSlice<u16>>()
-            .ok_or(FerrotorchError::InvalidArgument {
+        let buf = a.downcast_ref::<cudarc::driver::CudaSlice<u16>>().ok_or(
+            FerrotorchError::InvalidArgument {
                 message: "softmax_bf16_f32: GPU handle does not contain a CudaSlice<u16> (bf16)"
                     .into(),
-            })?;
+            },
+        )?;
         let dev = self.device(a.device_ordinal())?;
         let result = crate::kernels::gpu_softmax_bf16_f32(buf, rows, cols, dev)
             .map_err(Self::map_gpu_err)?;
@@ -2308,19 +2299,19 @@ impl GpuBackend for CudaBackendImpl {
         b: &GpuBufferHandle,
         n: usize,
     ) -> FerrotorchResult<GpuBufferHandle> {
-        let a_buf = a
-            .downcast_ref::<cudarc::driver::CudaSlice<u16>>()
-            .ok_or(FerrotorchError::InvalidArgument {
+        let a_buf = a.downcast_ref::<cudarc::driver::CudaSlice<u16>>().ok_or(
+            FerrotorchError::InvalidArgument {
                 message: "add_bf16_f32: handle `a` does not contain CudaSlice<u16> (bf16)".into(),
-            })?;
-        let b_buf = b
-            .downcast_ref::<cudarc::driver::CudaSlice<u16>>()
-            .ok_or(FerrotorchError::InvalidArgument {
+            },
+        )?;
+        let b_buf = b.downcast_ref::<cudarc::driver::CudaSlice<u16>>().ok_or(
+            FerrotorchError::InvalidArgument {
                 message: "add_bf16_f32: handle `b` does not contain CudaSlice<u16> (bf16)".into(),
-            })?;
+            },
+        )?;
         let dev = self.device(a.device_ordinal())?;
-        let result = crate::kernels::gpu_add_bf16_f32(a_buf, b_buf, n, dev)
-            .map_err(Self::map_gpu_err)?;
+        let result =
+            crate::kernels::gpu_add_bf16_f32(a_buf, b_buf, n, dev).map_err(Self::map_gpu_err)?;
         Ok(Self::wrap_buffer(result, a.device_ordinal()))
     }
 
@@ -2330,19 +2321,19 @@ impl GpuBackend for CudaBackendImpl {
         b: &GpuBufferHandle,
         n: usize,
     ) -> FerrotorchResult<GpuBufferHandle> {
-        let a_buf = a
-            .downcast_ref::<cudarc::driver::CudaSlice<u16>>()
-            .ok_or(FerrotorchError::InvalidArgument {
+        let a_buf = a.downcast_ref::<cudarc::driver::CudaSlice<u16>>().ok_or(
+            FerrotorchError::InvalidArgument {
                 message: "sub_bf16_f32: handle `a` does not contain CudaSlice<u16> (bf16)".into(),
-            })?;
-        let b_buf = b
-            .downcast_ref::<cudarc::driver::CudaSlice<u16>>()
-            .ok_or(FerrotorchError::InvalidArgument {
+            },
+        )?;
+        let b_buf = b.downcast_ref::<cudarc::driver::CudaSlice<u16>>().ok_or(
+            FerrotorchError::InvalidArgument {
                 message: "sub_bf16_f32: handle `b` does not contain CudaSlice<u16> (bf16)".into(),
-            })?;
+            },
+        )?;
         let dev = self.device(a.device_ordinal())?;
-        let result = crate::kernels::gpu_sub_bf16_f32(a_buf, b_buf, n, dev)
-            .map_err(Self::map_gpu_err)?;
+        let result =
+            crate::kernels::gpu_sub_bf16_f32(a_buf, b_buf, n, dev).map_err(Self::map_gpu_err)?;
         Ok(Self::wrap_buffer(result, a.device_ordinal()))
     }
 
@@ -2352,19 +2343,19 @@ impl GpuBackend for CudaBackendImpl {
         b: &GpuBufferHandle,
         n: usize,
     ) -> FerrotorchResult<GpuBufferHandle> {
-        let a_buf = a
-            .downcast_ref::<cudarc::driver::CudaSlice<u16>>()
-            .ok_or(FerrotorchError::InvalidArgument {
+        let a_buf = a.downcast_ref::<cudarc::driver::CudaSlice<u16>>().ok_or(
+            FerrotorchError::InvalidArgument {
                 message: "mul_bf16_f32: handle `a` does not contain CudaSlice<u16> (bf16)".into(),
-            })?;
-        let b_buf = b
-            .downcast_ref::<cudarc::driver::CudaSlice<u16>>()
-            .ok_or(FerrotorchError::InvalidArgument {
+            },
+        )?;
+        let b_buf = b.downcast_ref::<cudarc::driver::CudaSlice<u16>>().ok_or(
+            FerrotorchError::InvalidArgument {
                 message: "mul_bf16_f32: handle `b` does not contain CudaSlice<u16> (bf16)".into(),
-            })?;
+            },
+        )?;
         let dev = self.device(a.device_ordinal())?;
-        let result = crate::kernels::gpu_mul_bf16_f32(a_buf, b_buf, n, dev)
-            .map_err(Self::map_gpu_err)?;
+        let result =
+            crate::kernels::gpu_mul_bf16_f32(a_buf, b_buf, n, dev).map_err(Self::map_gpu_err)?;
         Ok(Self::wrap_buffer(result, a.device_ordinal()))
     }
 
@@ -2374,19 +2365,19 @@ impl GpuBackend for CudaBackendImpl {
         b: &GpuBufferHandle,
         n: usize,
     ) -> FerrotorchResult<GpuBufferHandle> {
-        let a_buf = a
-            .downcast_ref::<cudarc::driver::CudaSlice<u16>>()
-            .ok_or(FerrotorchError::InvalidArgument {
+        let a_buf = a.downcast_ref::<cudarc::driver::CudaSlice<u16>>().ok_or(
+            FerrotorchError::InvalidArgument {
                 message: "div_bf16_f32: handle `a` does not contain CudaSlice<u16> (bf16)".into(),
-            })?;
-        let b_buf = b
-            .downcast_ref::<cudarc::driver::CudaSlice<u16>>()
-            .ok_or(FerrotorchError::InvalidArgument {
+            },
+        )?;
+        let b_buf = b.downcast_ref::<cudarc::driver::CudaSlice<u16>>().ok_or(
+            FerrotorchError::InvalidArgument {
                 message: "div_bf16_f32: handle `b` does not contain CudaSlice<u16> (bf16)".into(),
-            })?;
+            },
+        )?;
         let dev = self.device(a.device_ordinal())?;
-        let result = crate::kernels::gpu_div_bf16_f32(a_buf, b_buf, n, dev)
-            .map_err(Self::map_gpu_err)?;
+        let result =
+            crate::kernels::gpu_div_bf16_f32(a_buf, b_buf, n, dev).map_err(Self::map_gpu_err)?;
         Ok(Self::wrap_buffer(result, a.device_ordinal()))
     }
 
@@ -2399,11 +2390,11 @@ impl GpuBackend for CudaBackendImpl {
         axis_size: usize,
         inner: usize,
     ) -> FerrotorchResult<GpuBufferHandle> {
-        let a_buf = a
-            .downcast_ref::<cudarc::driver::CudaSlice<u16>>()
-            .ok_or(FerrotorchError::InvalidArgument {
+        let a_buf = a.downcast_ref::<cudarc::driver::CudaSlice<u16>>().ok_or(
+            FerrotorchError::InvalidArgument {
                 message: "sum_axis_bf16_f32: handle does not contain CudaSlice<u16> (bf16)".into(),
-            })?;
+            },
+        )?;
         let dev = self.device(a.device_ordinal())?;
         let result = crate::kernels::gpu_sum_axis_bf16_f32(a_buf, outer, axis_size, inner, dev)
             .map_err(Self::map_gpu_err)?;
@@ -2417,12 +2408,11 @@ impl GpuBackend for CudaBackendImpl {
         axis_size: usize,
         inner: usize,
     ) -> FerrotorchResult<GpuBufferHandle> {
-        let a_buf = a
-            .downcast_ref::<cudarc::driver::CudaSlice<u16>>()
-            .ok_or(FerrotorchError::InvalidArgument {
-                message: "mean_axis_bf16_f32: handle does not contain CudaSlice<u16> (bf16)"
-                    .into(),
-            })?;
+        let a_buf = a.downcast_ref::<cudarc::driver::CudaSlice<u16>>().ok_or(
+            FerrotorchError::InvalidArgument {
+                message: "mean_axis_bf16_f32: handle does not contain CudaSlice<u16> (bf16)".into(),
+            },
+        )?;
         let dev = self.device(a.device_ordinal())?;
         let result = crate::kernels::gpu_mean_axis_bf16_f32(a_buf, outer, axis_size, inner, dev)
             .map_err(Self::map_gpu_err)?;
@@ -2431,35 +2421,26 @@ impl GpuBackend for CudaBackendImpl {
 
     // -- bf16 activations (#963) ---------------------------------------------
 
-    fn relu_bf16_f32(
-        &self,
-        a: &GpuBufferHandle,
-        n: usize,
-    ) -> FerrotorchResult<GpuBufferHandle> {
-        let a_buf = a
-            .downcast_ref::<cudarc::driver::CudaSlice<u16>>()
-            .ok_or(FerrotorchError::InvalidArgument {
+    fn relu_bf16_f32(&self, a: &GpuBufferHandle, n: usize) -> FerrotorchResult<GpuBufferHandle> {
+        let a_buf = a.downcast_ref::<cudarc::driver::CudaSlice<u16>>().ok_or(
+            FerrotorchError::InvalidArgument {
                 message: "relu_bf16_f32: handle does not contain CudaSlice<u16> (bf16)".into(),
-            })?;
+            },
+        )?;
         let dev = self.device(a.device_ordinal())?;
-        let result = crate::kernels::gpu_relu_bf16_f32(a_buf, n, dev)
-            .map_err(Self::map_gpu_err)?;
+        let result = crate::kernels::gpu_relu_bf16_f32(a_buf, n, dev).map_err(Self::map_gpu_err)?;
         Ok(Self::wrap_buffer(result, a.device_ordinal()))
     }
 
-    fn sigmoid_bf16_f32(
-        &self,
-        a: &GpuBufferHandle,
-        n: usize,
-    ) -> FerrotorchResult<GpuBufferHandle> {
-        let a_buf = a
-            .downcast_ref::<cudarc::driver::CudaSlice<u16>>()
-            .ok_or(FerrotorchError::InvalidArgument {
+    fn sigmoid_bf16_f32(&self, a: &GpuBufferHandle, n: usize) -> FerrotorchResult<GpuBufferHandle> {
+        let a_buf = a.downcast_ref::<cudarc::driver::CudaSlice<u16>>().ok_or(
+            FerrotorchError::InvalidArgument {
                 message: "sigmoid_bf16_f32: handle does not contain CudaSlice<u16> (bf16)".into(),
-            })?;
+            },
+        )?;
         let dev = self.device(a.device_ordinal())?;
-        let result = crate::kernels::gpu_sigmoid_bf16_f32(a_buf, n, dev)
-            .map_err(Self::map_gpu_err)?;
+        let result =
+            crate::kernels::gpu_sigmoid_bf16_f32(a_buf, n, dev).map_err(Self::map_gpu_err)?;
         Ok(Self::wrap_buffer(result, a.device_ordinal()))
     }
 
@@ -3711,8 +3692,7 @@ impl GpuBackend for CudaBackendImpl {
     ) -> FerrotorchResult<GpuBufferHandle> {
         let a_buf = Self::unwrap_buffer(a)?;
         let dev = self.device(a.device_ordinal())?;
-        let out =
-            crate::cufft::gpu_ihfft_f32(a_buf, batch, n, dev).map_err(Self::map_gpu_err)?;
+        let out = crate::cufft::gpu_ihfft_f32(a_buf, batch, n, dev).map_err(Self::map_gpu_err)?;
         Ok(Self::wrap_buffer(out, a.device_ordinal()))
     }
 
@@ -3724,8 +3704,7 @@ impl GpuBackend for CudaBackendImpl {
     ) -> FerrotorchResult<GpuBufferHandle> {
         let a_buf = Self::unwrap_buffer_f64(a)?;
         let dev = self.device(a.device_ordinal())?;
-        let out =
-            crate::cufft::gpu_ihfft_f64(a_buf, batch, n, dev).map_err(Self::map_gpu_err)?;
+        let out = crate::cufft::gpu_ihfft_f64(a_buf, batch, n, dev).map_err(Self::map_gpu_err)?;
         Ok(Self::wrap_buffer_f64(out, a.device_ordinal()))
     }
 
@@ -3901,9 +3880,16 @@ impl GpuBackend for CudaBackendImpl {
     ) -> FerrotorchResult<GpuBufferHandle> {
         let dev = self.device(device_ordinal)?;
         let handle = self.cusparse()?;
-        let out =
-            crate::sparse::gpu_sparse_to_dense_csr_f32(handle, crow_indices, col_indices, values, m, n, dev)
-                .map_err(Self::map_gpu_err)?;
+        let out = crate::sparse::gpu_sparse_to_dense_csr_f32(
+            handle,
+            crow_indices,
+            col_indices,
+            values,
+            m,
+            n,
+            dev,
+        )
+        .map_err(Self::map_gpu_err)?;
         Ok(Self::wrap_buffer(out, device_ordinal))
     }
 
@@ -3918,9 +3904,16 @@ impl GpuBackend for CudaBackendImpl {
     ) -> FerrotorchResult<GpuBufferHandle> {
         let dev = self.device(device_ordinal)?;
         let handle = self.cusparse()?;
-        let out =
-            crate::sparse::gpu_sparse_to_dense_csr_f64(handle, crow_indices, col_indices, values, m, n, dev)
-                .map_err(Self::map_gpu_err)?;
+        let out = crate::sparse::gpu_sparse_to_dense_csr_f64(
+            handle,
+            crow_indices,
+            col_indices,
+            values,
+            m,
+            n,
+            dev,
+        )
+        .map_err(Self::map_gpu_err)?;
         Ok(Self::wrap_buffer_f64(out, device_ordinal))
     }
 
@@ -3968,16 +3961,9 @@ impl GpuBackend for CudaBackendImpl {
     ) -> FerrotorchResult<GpuBufferHandle> {
         let dev = self.device(device_ordinal)?;
         let handle = self.cusparse()?;
-        let out = crate::sparse::gpu_csc_to_dense_f32(
-            handle,
-            col_ptrs,
-            row_indices,
-            values,
-            m,
-            n,
-            dev,
-        )
-        .map_err(Self::map_gpu_err)?;
+        let out =
+            crate::sparse::gpu_csc_to_dense_f32(handle, col_ptrs, row_indices, values, m, n, dev)
+                .map_err(Self::map_gpu_err)?;
         Ok(Self::wrap_buffer(out, device_ordinal))
     }
 
@@ -3992,16 +3978,9 @@ impl GpuBackend for CudaBackendImpl {
     ) -> FerrotorchResult<GpuBufferHandle> {
         let dev = self.device(device_ordinal)?;
         let handle = self.cusparse()?;
-        let out = crate::sparse::gpu_csc_to_dense_f64(
-            handle,
-            col_ptrs,
-            row_indices,
-            values,
-            m,
-            n,
-            dev,
-        )
-        .map_err(Self::map_gpu_err)?;
+        let out =
+            crate::sparse::gpu_csc_to_dense_f64(handle, col_ptrs, row_indices, values, m, n, dev)
+                .map_err(Self::map_gpu_err)?;
         Ok(Self::wrap_buffer_f64(out, device_ordinal))
     }
 

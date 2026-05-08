@@ -37,7 +37,15 @@ fn ensure_cuda_backend() {
 const F32_MATMUL_GPU: f32 = 1e-3;
 const F64_MATMUL_GPU: f64 = 1e-9;
 
-fn cpu_reference_f32(q: &[f32], k: &[f32], v: &[f32], sq: usize, sk: usize, d: usize, dv: usize) -> Vec<f32> {
+fn cpu_reference_f32(
+    q: &[f32],
+    k: &[f32],
+    v: &[f32],
+    sq: usize,
+    sk: usize,
+    d: usize,
+    dv: usize,
+) -> Vec<f32> {
     let scale = 1.0_f32 / (d as f32).sqrt();
     // Q @ K^T
     let mut scores = vec![0.0_f32; sq * sk];
@@ -77,7 +85,15 @@ fn cpu_reference_f32(q: &[f32], k: &[f32], v: &[f32], sq: usize, sk: usize, d: u
     out
 }
 
-fn cpu_reference_f64(q: &[f64], k: &[f64], v: &[f64], sq: usize, sk: usize, d: usize, dv: usize) -> Vec<f64> {
+fn cpu_reference_f64(
+    q: &[f64],
+    k: &[f64],
+    v: &[f64],
+    sq: usize,
+    sk: usize,
+    d: usize,
+    dv: usize,
+) -> Vec<f64> {
     let scale = 1.0_f64 / (d as f64).sqrt();
     let mut scores = vec![0.0_f64; sq * sk];
     for qi in 0..sq {
@@ -123,9 +139,15 @@ where
 }
 
 fn run_case_f32(sq: usize, sk: usize, d: usize, dv: usize, label: &str) {
-    let q: Vec<f32> = (0..sq * d).map(|i| ((i * 7 + 3) % 50) as f32 / 50.0 - 0.5).collect();
-    let k: Vec<f32> = (0..sk * d).map(|i| ((i * 11 + 5) % 50) as f32 / 50.0 - 0.5).collect();
-    let v: Vec<f32> = (0..sk * dv).map(|i| ((i * 13 + 7) % 50) as f32 / 50.0 - 0.5).collect();
+    let q: Vec<f32> = (0..sq * d)
+        .map(|i| ((i * 7 + 3) % 50) as f32 / 50.0 - 0.5)
+        .collect();
+    let k: Vec<f32> = (0..sk * d)
+        .map(|i| ((i * 11 + 5) % 50) as f32 / 50.0 - 0.5)
+        .collect();
+    let v: Vec<f32> = (0..sk * dv)
+        .map(|i| ((i * 13 + 7) % 50) as f32 / 50.0 - 0.5)
+        .collect();
 
     let expected = cpu_reference_f32(&q, &k, &v, sq, sk, d, dv);
 
@@ -139,7 +161,10 @@ fn run_case_f32(sq: usize, sk: usize, d: usize, dv: usize, label: &str) {
 
     let result = nested_scaled_dot_product_attention(&qn, &kn, &vn).expect("flash sdpa");
     let comp = &result.tensors()[0];
-    assert!(comp.is_cuda(), "[{label}] result component must remain CUDA");
+    assert!(
+        comp.is_cuda(),
+        "[{label}] result component must remain CUDA"
+    );
     assert_eq!(comp.shape(), &[sq, dv], "[{label}] output shape");
     let host = comp.cpu().expect("gpu->cpu").data().expect("data").to_vec();
     assert_eq!(host.len(), expected.len(), "[{label}] len");
@@ -160,9 +185,15 @@ fn run_case_f32(sq: usize, sk: usize, d: usize, dv: usize, label: &str) {
 }
 
 fn run_case_f64(sq: usize, sk: usize, d: usize, dv: usize, label: &str) {
-    let q: Vec<f64> = (0..sq * d).map(|i| ((i * 7 + 3) % 50) as f64 / 50.0 - 0.5).collect();
-    let k: Vec<f64> = (0..sk * d).map(|i| ((i * 11 + 5) % 50) as f64 / 50.0 - 0.5).collect();
-    let v: Vec<f64> = (0..sk * dv).map(|i| ((i * 13 + 7) % 50) as f64 / 50.0 - 0.5).collect();
+    let q: Vec<f64> = (0..sq * d)
+        .map(|i| ((i * 7 + 3) % 50) as f64 / 50.0 - 0.5)
+        .collect();
+    let k: Vec<f64> = (0..sk * d)
+        .map(|i| ((i * 11 + 5) % 50) as f64 / 50.0 - 0.5)
+        .collect();
+    let v: Vec<f64> = (0..sk * dv)
+        .map(|i| ((i * 13 + 7) % 50) as f64 / 50.0 - 0.5)
+        .collect();
 
     let expected = cpu_reference_f64(&q, &k, &v, sq, sk, d, dv);
 
@@ -176,7 +207,10 @@ fn run_case_f64(sq: usize, sk: usize, d: usize, dv: usize, label: &str) {
 
     let result = nested_scaled_dot_product_attention(&qn, &kn, &vn).expect("flash sdpa f64");
     let comp = &result.tensors()[0];
-    assert!(comp.is_cuda(), "[{label}] result component must remain CUDA");
+    assert!(
+        comp.is_cuda(),
+        "[{label}] result component must remain CUDA"
+    );
     assert_eq!(comp.shape(), &[sq, dv], "[{label}] output shape");
     let host = comp.cpu().expect("gpu->cpu").data().expect("data").to_vec();
     assert_eq!(host.len(), expected.len(), "[{label}] len");
@@ -322,9 +356,15 @@ fn p5_f32_multi_component_nested() {
     for &(sq, sk) in &[(8usize, 8), (16, 16), (24, 32)] {
         let d = 16;
         let dv = 16;
-        let q: Vec<f32> = (0..sq * d).map(|i| ((i * 7) % 50) as f32 / 50.0 - 0.5).collect();
-        let kv: Vec<f32> = (0..sk * d).map(|i| ((i * 11) % 50) as f32 / 50.0 - 0.5).collect();
-        let v: Vec<f32> = (0..sk * dv).map(|i| ((i * 13) % 50) as f32 / 50.0 - 0.5).collect();
+        let q: Vec<f32> = (0..sq * d)
+            .map(|i| ((i * 7) % 50) as f32 / 50.0 - 0.5)
+            .collect();
+        let kv: Vec<f32> = (0..sk * d)
+            .map(|i| ((i * 11) % 50) as f32 / 50.0 - 0.5)
+            .collect();
+        let v: Vec<f32> = (0..sk * dv)
+            .map(|i| ((i * 13) % 50) as f32 / 50.0 - 0.5)
+            .collect();
 
         let exp = cpu_reference_f32(&q, &kv, &v, sq, sk, d, dv);
         expected.push((exp, sq, dv));

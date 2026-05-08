@@ -120,7 +120,9 @@ fn every_public_item_has_a_conformance_reference_or_exclusion() {
     let tests_dir: PathBuf = [env!("CARGO_MANIFEST_DIR"), "tests"].iter().collect();
 
     // 1. Load surface inventory.
-    let inventory_path = tests_dir.join("conformance").join("_surface_inventory.toml");
+    let inventory_path = tests_dir
+        .join("conformance")
+        .join("_surface_inventory.toml");
     let inventory_raw = std::fs::read_to_string(&inventory_path).unwrap_or_else(|e| {
         panic!(
             "Cannot read surface inventory at {}: {e}",
@@ -131,7 +133,9 @@ fn every_public_item_has_a_conformance_reference_or_exclusion() {
     let all_items: HashSet<String> = inventory_phases.keys().cloned().collect();
 
     // 2. Load exclusions.
-    let exclusions_path = tests_dir.join("conformance").join("_surface_exclusions.toml");
+    let exclusions_path = tests_dir
+        .join("conformance")
+        .join("_surface_exclusions.toml");
     let exclusions_raw = std::fs::read_to_string(&exclusions_path).unwrap_or_else(|e| {
         panic!(
             "Cannot read exclusions file at {}: {e}",
@@ -168,11 +172,7 @@ fn every_public_item_has_a_conformance_reference_or_exclusion() {
     }
 
     // Combined text across all present files — used for soft-warn matching.
-    let combined_text: String = phase_text
-        .values()
-        .cloned()
-        .collect::<Vec<_>>()
-        .join("\n");
+    let combined_text: String = phase_text.values().cloned().collect::<Vec<_>>().join("\n");
 
     // C8.4 file must be present since we own it.
     let c84_text = phase_text
@@ -196,14 +196,12 @@ fn every_public_item_has_a_conformance_reference_or_exclusion() {
 
         // Match on leaf name (last `::` segment) OR full path.
         let leaf = item.rsplit("::").next().unwrap_or(item.as_str());
-        let in_combined =
-            combined_text.contains(leaf) || combined_text.contains(item.as_str());
+        let in_combined = combined_text.contains(leaf) || combined_text.contains(item.as_str());
 
         match phase {
             "C8.4" => {
                 // Hard: C8.4 file is present (we wrote it), must reference the item.
-                let referenced =
-                    c84_text.contains(leaf) || c84_text.contains(item.as_str());
+                let referenced = c84_text.contains(leaf) || c84_text.contains(item.as_str());
                 if !referenced {
                     uncovered_hard.push(format!("{item} (leaf={leaf})"));
                 }
@@ -233,9 +231,7 @@ fn every_public_item_has_a_conformance_reference_or_exclusion() {
         for (path, phase) in &uncovered_soft {
             eprintln!("  [{phase}] {path}");
         }
-        eprintln!(
-            "  Items in absent-file phases become hard failures once those files land."
-        );
+        eprintln!("  Items in absent-file phases become hard failures once those files land.");
     }
 
     // Hard failures.
@@ -373,7 +369,9 @@ fn c8_4_key_names_all_referenced() {
 fn surface_inventory_and_exclusions_are_readable() {
     let tests_dir: PathBuf = [env!("CARGO_MANIFEST_DIR"), "tests"].iter().collect();
 
-    let inventory_path = tests_dir.join("conformance").join("_surface_inventory.toml");
+    let inventory_path = tests_dir
+        .join("conformance")
+        .join("_surface_inventory.toml");
     let inventory_raw =
         std::fs::read_to_string(&inventory_path).expect("_surface_inventory.toml must be readable");
     let phases = extract_inventory_phases(&inventory_raw);
@@ -382,7 +380,9 @@ fn surface_inventory_and_exclusions_are_readable() {
         "inventory should contain at least one item (got 0)"
     );
 
-    let exclusions_path = tests_dir.join("conformance").join("_surface_exclusions.toml");
+    let exclusions_path = tests_dir
+        .join("conformance")
+        .join("_surface_exclusions.toml");
     let exclusions_raw = std::fs::read_to_string(&exclusions_path)
         .expect("_surface_exclusions.toml must be readable");
     let excluded = extract_toml_paths(&exclusions_raw);

@@ -90,7 +90,10 @@ fn p2_spmm_cusparse_basic_f32() {
 
     // GPU path. Pre-fix this errors with GpuTensorNotAccessible from `dense.data()?`.
     let out = sp.spmm(&dense_gpu).expect("cusparse spmm f32");
-    assert!(out.is_cuda(), "spmm output must remain on CUDA when input was CUDA");
+    assert!(
+        out.is_cuda(),
+        "spmm output must remain on CUDA when input was CUDA"
+    );
     assert_eq!(out.shape(), &[4, 3]);
 
     let out_cpu = out.cpu().expect("out gpu->cpu");
@@ -117,7 +120,10 @@ fn p2_spmm_cusparse_basic_f64() {
     let cpu_data = cpu_ref.data().expect("cpu data").to_vec();
 
     let out = sp.spmm(&dense_gpu).expect("cusparse spmm f64");
-    assert!(out.is_cuda(), "spmm output must remain on CUDA when input was CUDA");
+    assert!(
+        out.is_cuda(),
+        "spmm output must remain on CUDA when input was CUDA"
+    );
     assert_eq!(out.shape(), &[4, 3]);
 
     let out_cpu = out.cpu().expect("out gpu->cpu");
@@ -147,7 +153,10 @@ fn p2_spmm_cusparse_empty_nnz_f32() {
     let out_cpu = out.cpu().expect("out gpu->cpu");
     let out_data = out_cpu.data().expect("out data");
     for (i, &v) in out_data.iter().enumerate() {
-        assert!(v.abs() < F32_MATMUL_GPU, "empty spmm elem {i}: got {v}, want 0");
+        assert!(
+            v.abs() < F32_MATMUL_GPU,
+            "empty spmm elem {i}: got {v}, want 0"
+        );
     }
 }
 

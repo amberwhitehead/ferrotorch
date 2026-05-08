@@ -183,9 +183,7 @@ mod test_error {
 
 /// `rng` module — seeded reproducibility, state snapshot, fork/join.
 mod test_rng {
-    use ferrotorch_gpu::rng::{
-        PhiloxGenerator, PhiloxState, cuda_rng_manager, fork_rng, join_rng,
-    };
+    use ferrotorch_gpu::rng::{PhiloxGenerator, PhiloxState, cuda_rng_manager, fork_rng, join_rng};
 
     // -- PhiloxGenerator basics --
 
@@ -283,10 +281,7 @@ mod test_rng {
         let vals = g.generate_uniform(50);
         assert_eq!(vals.len(), 50, "generate_uniform length mismatch");
         for &v in &vals {
-            assert!(
-                (0.0..1.0).contains(&v),
-                "uniform value out of [0,1): {v}"
-            );
+            assert!((0.0..1.0).contains(&v), "uniform value out of [0,1): {v}");
         }
     }
 
@@ -333,10 +328,7 @@ mod test_rng {
     #[test]
     fn philox_state_from_parts_invalid_offset_errors() {
         let result = PhiloxState::from_parts(0, 0, 4);
-        assert!(
-            result.is_err(),
-            "offset=4 should return Err(InvalidState)"
-        );
+        assert!(result.is_err(), "offset=4 should return Err(InvalidState)");
     }
 
     // -- CudaRngManager (via global singleton) --
@@ -503,7 +495,10 @@ mod test_rng {
         let states = vec![PhiloxState::new(0, 1)];
         // 2 devices, 1 state → error.
         let result = join_rng(&[0, 1], states);
-        assert!(result.is_err(), "join_rng with mismatched lengths must error");
+        assert!(
+            result.is_err(),
+            "join_rng with mismatched lengths must error"
+        );
     }
 
     #[test]
@@ -712,9 +707,7 @@ mod test_graph {
         use std::sync::Arc;
 
         use ferrotorch_gpu::device::GpuDevice;
-        use ferrotorch_gpu::graph::{
-            CapturePool, begin_capture_with_pool, end_capture_with_pool,
-        };
+        use ferrotorch_gpu::graph::{CapturePool, begin_capture_with_pool, end_capture_with_pool};
         use ferrotorch_gpu::transfer::{alloc_zeros_f32, cpu_to_gpu};
 
         // Serialize graph capture across tests in this binary so the CUDA
@@ -759,7 +752,10 @@ mod test_graph {
         assert_eq!(graph.pool_buffer_count(), 0, "no buffers donated to pool");
 
         graph.upload().expect("upload");
-        assert!(graph.is_uploaded(), "is_uploaded must be true after upload()");
+        assert!(
+            graph.is_uploaded(),
+            "is_uploaded must be true after upload()"
+        );
 
         graph.launch().expect("launch 1");
         assert_eq!(graph.num_replays(), 1, "num_replays after first launch");
@@ -777,29 +773,21 @@ mod test_graph {
 #[cfg(feature = "cuda")]
 mod test_tensor_bridge {
     use ferrotorch_core::{Tensor, TensorStorage};
-    use ferrotorch_gpu::{GpuFloat, GpuTensor, cuda, cuda_default, tensor_to_cpu, tensor_to_gpu};
     use ferrotorch_gpu::device::GpuDevice;
+    use ferrotorch_gpu::{GpuFloat, GpuTensor, cuda, cuda_default, tensor_to_cpu, tensor_to_gpu};
 
     fn device() -> GpuDevice {
         GpuDevice::new(0).expect("GpuDevice::new")
     }
 
     fn cpu_f32(data: &[f32], shape: &[usize]) -> Tensor<f32> {
-        Tensor::from_storage(
-            TensorStorage::cpu(data.to_vec()),
-            shape.to_vec(),
-            false,
-        )
-        .expect("cpu_f32")
+        Tensor::from_storage(TensorStorage::cpu(data.to_vec()), shape.to_vec(), false)
+            .expect("cpu_f32")
     }
 
     fn cpu_f64(data: &[f64], shape: &[usize]) -> Tensor<f64> {
-        Tensor::from_storage(
-            TensorStorage::cpu(data.to_vec()),
-            shape.to_vec(),
-            false,
-        )
-        .expect("cpu_f64")
+        Tensor::from_storage(TensorStorage::cpu(data.to_vec()), shape.to_vec(), false)
+            .expect("cpu_f64")
     }
 
     #[test]
@@ -809,7 +797,11 @@ mod test_tensor_bridge {
         let dev = device();
         let gpu_tensor: GpuTensor<f32> = tensor_to_gpu(&cpu_tensor, &dev).expect("tensor_to_gpu");
 
-        assert_eq!(gpu_tensor.shape(), &[2usize, 3], "shape mismatch after tensor_to_gpu");
+        assert_eq!(
+            gpu_tensor.shape(),
+            &[2usize, 3],
+            "shape mismatch after tensor_to_gpu"
+        );
         assert_eq!(gpu_tensor.numel(), 6, "numel mismatch after tensor_to_gpu");
         assert_eq!(gpu_tensor.ndim(), 2, "ndim mismatch");
         assert_eq!(
@@ -877,10 +869,8 @@ mod test_tensor_bridge {
     #[test]
     fn gpu_tensor_add_f32() {
         let dev = device();
-        let a = tensor_to_gpu(&cpu_f32(&[1.0, 2.0, 3.0], &[3]), &dev)
-            .expect("tensor_to_gpu a");
-        let b = tensor_to_gpu(&cpu_f32(&[4.0, 5.0, 6.0], &[3]), &dev)
-            .expect("tensor_to_gpu b");
+        let a = tensor_to_gpu(&cpu_f32(&[1.0, 2.0, 3.0], &[3]), &dev).expect("tensor_to_gpu a");
+        let b = tensor_to_gpu(&cpu_f32(&[4.0, 5.0, 6.0], &[3]), &dev).expect("tensor_to_gpu b");
 
         let out = a.add(&b).expect("GpuTensor::add");
         let result = tensor_to_cpu(&out).expect("tensor_to_cpu");
@@ -895,10 +885,8 @@ mod test_tensor_bridge {
     #[test]
     fn gpu_tensor_sub_f32() {
         let dev = device();
-        let a = tensor_to_gpu(&cpu_f32(&[10.0, 20.0, 30.0], &[3]), &dev)
-            .expect("tensor_to_gpu a");
-        let b = tensor_to_gpu(&cpu_f32(&[1.0, 2.0, 3.0], &[3]), &dev)
-            .expect("tensor_to_gpu b");
+        let a = tensor_to_gpu(&cpu_f32(&[10.0, 20.0, 30.0], &[3]), &dev).expect("tensor_to_gpu a");
+        let b = tensor_to_gpu(&cpu_f32(&[1.0, 2.0, 3.0], &[3]), &dev).expect("tensor_to_gpu b");
 
         let out = a.sub(&b).expect("GpuTensor::sub");
         let result = tensor_to_cpu(&out).expect("tensor_to_cpu");
@@ -913,10 +901,8 @@ mod test_tensor_bridge {
     #[test]
     fn gpu_tensor_mul_f32() {
         let dev = device();
-        let a = tensor_to_gpu(&cpu_f32(&[2.0, 3.0, 4.0], &[3]), &dev)
-            .expect("tensor_to_gpu a");
-        let b = tensor_to_gpu(&cpu_f32(&[5.0, 6.0, 7.0], &[3]), &dev)
-            .expect("tensor_to_gpu b");
+        let a = tensor_to_gpu(&cpu_f32(&[2.0, 3.0, 4.0], &[3]), &dev).expect("tensor_to_gpu a");
+        let b = tensor_to_gpu(&cpu_f32(&[5.0, 6.0, 7.0], &[3]), &dev).expect("tensor_to_gpu b");
 
         let out = a.mul(&b).expect("GpuTensor::mul");
         let result = tensor_to_cpu(&out).expect("tensor_to_cpu");
@@ -940,13 +926,9 @@ mod test_tensor_bridge {
     #[test]
     fn gpu_tensor_debug_format_non_empty() {
         let dev = device();
-        let t = tensor_to_gpu(&cpu_f32(&[0.0; 6], &[2, 3]), &dev)
-            .expect("tensor_to_gpu");
+        let t = tensor_to_gpu(&cpu_f32(&[0.0; 6], &[2, 3]), &dev).expect("tensor_to_gpu");
         let s = format!("{t:?}");
-        assert!(
-            s.contains("GpuTensor"),
-            "Debug must contain type name: {s}"
-        );
+        assert!(s.contains("GpuTensor"), "Debug must contain type name: {s}");
     }
 
     #[test]
@@ -989,7 +971,10 @@ mod test_backend_impl {
     #[test]
     fn cuda_backend_impl_new_succeeds() {
         let backend = CudaBackendImpl::new();
-        assert!(backend.is_ok(), "CudaBackendImpl::new must succeed on this machine");
+        assert!(
+            backend.is_ok(),
+            "CudaBackendImpl::new must succeed on this machine"
+        );
     }
 
     #[test]
@@ -1206,11 +1191,7 @@ mod test_backend_impl {
         let out = backend.log_f32(&a).expect("log_f32");
         let vals = download_f32(backend, &out);
         assert!((vals[0] - 0.0).abs() < 1e-5, "log(1) ≈ 0: {}", vals[0]);
-        assert!(
-            (vals[1] - 1.0).abs() < 1e-4,
-            "log(e) ≈ 1: {}",
-            vals[1]
-        );
+        assert!((vals[1] - 1.0).abs() < 1e-4, "log(e) ≈ 1: {}", vals[1]);
     }
 
     #[test]
@@ -1254,7 +1235,11 @@ mod test_backend_impl {
         let out = backend.sigmoid_f32(&a).expect("sigmoid_f32");
         let vals = download_f32(backend, &out);
         // sigmoid(0) = 0.5
-        assert!((vals[0] - 0.5).abs() < 1e-4, "sigmoid(0) ≈ 0.5: {}", vals[0]);
+        assert!(
+            (vals[0] - 0.5).abs() < 1e-4,
+            "sigmoid(0) ≈ 0.5: {}",
+            vals[0]
+        );
     }
 
     #[test]
@@ -1343,9 +1328,17 @@ mod test_backend_impl {
         ensure_init();
         let backend = gpu_dispatch::gpu_backend().expect("backend");
         let f32_handle = upload_f32(backend, &[1.0]);
-        assert_eq!(backend.buffer_elem_size(&f32_handle), 4, "f32 elem_size should be 4");
+        assert_eq!(
+            backend.buffer_elem_size(&f32_handle),
+            4,
+            "f32 elem_size should be 4"
+        );
         let f64_handle = upload_f64(backend, &[1.0]);
-        assert_eq!(backend.buffer_elem_size(&f64_handle), 8, "f64 elem_size should be 8");
+        assert_eq!(
+            backend.buffer_elem_size(&f64_handle),
+            8,
+            "f64 elem_size should be 8"
+        );
     }
 
     // -- Matmul --
@@ -1359,9 +1352,7 @@ mod test_backend_impl {
         let mat: Vec<f32> = vec![1.0, 2.0, 3.0, 4.0];
         let a = upload_f32(backend, &identity);
         let b = upload_f32(backend, &mat);
-        let out = backend
-            .matmul_f32(&a, &b, 2, 2, 2)
-            .expect("matmul_f32");
+        let out = backend.matmul_f32(&a, &b, 2, 2, 2).expect("matmul_f32");
         let vals = download_f32(backend, &out);
         // Row-major: [[1,2],[3,4]]
         let expected = [1.0f32, 2.0, 3.0, 4.0];
@@ -1524,9 +1515,8 @@ mod test_lib_exports {
     fn free_functions_compile() {
         // Just confirm they're accessible from the crate root.
         let _ = ferrotorch_gpu::graph_pool_handle as fn() -> _;
-        let _ = ferrotorch_gpu::release_graph_pool_handle
-            as fn(ferrotorch_gpu::GraphPoolHandle) -> _;
-        let _ = ferrotorch_gpu::capture_pool_for_handle
-            as fn(ferrotorch_gpu::GraphPoolHandle) -> _;
+        let _ =
+            ferrotorch_gpu::release_graph_pool_handle as fn(ferrotorch_gpu::GraphPoolHandle) -> _;
+        let _ = ferrotorch_gpu::capture_pool_for_handle as fn(ferrotorch_gpu::GraphPoolHandle) -> _;
     }
 }

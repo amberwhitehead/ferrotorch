@@ -24,9 +24,7 @@ use std::path::PathBuf;
 use serde::Deserialize;
 use serde_json::Value;
 
-use ferrotorch_cubecl::{
-    CubeDevice, CubeRuntime, DfaMaskInputs, GgufBlockKind,
-};
+use ferrotorch_cubecl::{CubeDevice, CubeRuntime, DfaMaskInputs, GgufBlockKind};
 
 // ---------------------------------------------------------------------------
 // Fixture loading
@@ -78,8 +76,7 @@ fn load_fixtures() -> FixtureFile {
             p.display()
         )
     });
-    serde_json::from_slice(&bytes)
-        .unwrap_or_else(|e| panic!("parse {}: {e}", p.display()))
+    serde_json::from_slice(&bytes).unwrap_or_else(|e| panic!("parse {}: {e}", p.display()))
 }
 
 fn find(file: &FixtureFile, op: &str) -> Fixture {
@@ -143,12 +140,11 @@ fn try_wgpu_runtime() -> Option<CubeRuntime> {
 // always returns None. Defined unconditionally so all call sites compile.
 // ---------------------------------------------------------------------------
 
-#[allow(unused_variables, reason = "unreachable when no backend feature; args kept for call-site symmetry")]
-fn read_back(
-    rt: &CubeRuntime,
-    handle: cubecl::server::Handle,
-    n: usize,
-) -> Vec<f32> {
+#[allow(
+    unused_variables,
+    reason = "unreachable when no backend feature; args kept for call-site symmetry"
+)]
+fn read_back(rt: &CubeRuntime, handle: cubecl::server::Handle, n: usize) -> Vec<f32> {
     // SAFETY: this function is only ever called after `try_wgpu_runtime()`
     // returned `Some`, which is only possible when a backend feature is compiled.
     #[cfg(any(feature = "wgpu", feature = "cuda", feature = "rocm"))]
@@ -243,8 +239,7 @@ fn cube_runtime_is_available_compile_flag_consistent() {
     let available = CubeRuntime::is_available();
     // When no GPU feature is compiled in, auto() must return None (never panics).
     if !available {
-        let result =
-            std::panic::catch_unwind(std::panic::AssertUnwindSafe(CubeRuntime::auto));
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(CubeRuntime::auto));
         let is_none = matches!(result, Ok(None) | Err(_));
         assert!(
             is_none,
@@ -278,8 +273,12 @@ fn gguf_block_kind_meta_matches_fixtures() {
     let cases = f.cases.as_ref().expect("cases").as_array().expect("array");
     for case in cases {
         let variant = case["variant"].as_str().expect("variant");
-        let expected_bytes = case["expected_block_bytes"].as_u64().expect("expected_block_bytes") as usize;
-        let expected_elems = case["expected_block_elements"].as_u64().expect("expected_block_elements") as usize;
+        let expected_bytes = case["expected_block_bytes"]
+            .as_u64()
+            .expect("expected_block_bytes") as usize;
+        let expected_elems = case["expected_block_elements"]
+            .as_u64()
+            .expect("expected_block_elements") as usize;
 
         let kind = match variant {
             "Q4_0" => GgufBlockKind::Q4_0,
@@ -535,8 +534,8 @@ fn portable_matmul_2x3x2_matches_cpu() {
 
     let a = ferrotorch_core::from_vec(a_data.clone(), &[m, k]).expect("tensor a");
     let b = ferrotorch_core::from_vec(b_data.clone(), &[k, n]).expect("tensor b");
-    let (handle, shape) = ferrotorch_cubecl::ops::portable_matmul(&a, &b, &rt)
-        .expect("portable_matmul");
+    let (handle, shape) =
+        ferrotorch_cubecl::ops::portable_matmul(&a, &b, &rt).expect("portable_matmul");
     assert_eq!(shape, vec![m, n]);
     let actual = read_back(&rt, handle, m * n);
     assert_slice_close(&actual, expected, atol, "portable_matmul_2x3_3x2");
@@ -559,8 +558,8 @@ fn portable_matmul_identity_4x4_matches_cpu() {
 
     let a = ferrotorch_core::from_vec(a_data.clone(), &[m, k]).expect("tensor a");
     let b = ferrotorch_core::from_vec(b_data.clone(), &[k, n]).expect("tensor b");
-    let (handle, shape) = ferrotorch_cubecl::ops::portable_matmul(&a, &b, &rt)
-        .expect("portable_matmul");
+    let (handle, shape) =
+        ferrotorch_cubecl::ops::portable_matmul(&a, &b, &rt).expect("portable_matmul");
     assert_eq!(shape, vec![m, n]);
     let actual = read_back(&rt, handle, m * n);
     assert_slice_close(&actual, expected, atol, "portable_matmul_identity_4x4");
@@ -583,8 +582,8 @@ fn portable_matmul_4x4_matches_cpu() {
 
     let a = ferrotorch_core::from_vec(a_data.clone(), &[m, k]).expect("tensor a");
     let b = ferrotorch_core::from_vec(b_data.clone(), &[k, n]).expect("tensor b");
-    let (handle, shape) = ferrotorch_cubecl::ops::portable_matmul(&a, &b, &rt)
-        .expect("portable_matmul");
+    let (handle, shape) =
+        ferrotorch_cubecl::ops::portable_matmul(&a, &b, &rt).expect("portable_matmul");
     assert_eq!(shape, vec![m, n]);
     let actual = read_back(&rt, handle, m * n);
     assert_slice_close(&actual, expected, atol, "portable_matmul_4x4");
@@ -611,8 +610,7 @@ macro_rules! test_portable_poly_op {
             let atol = f.atol.unwrap_or(1e-3) as f32;
 
             let x = ferrotorch_core::from_vec(x_data.clone(), shape).expect("tensor x");
-            let (handle, _shape) =
-                $portable_fn(&x, degree, &rt).expect(stringify!($portable_fn));
+            let (handle, _shape) = $portable_fn(&x, degree, &rt).expect(stringify!($portable_fn));
             let n: usize = shape.iter().product();
             let actual = read_back(&rt, handle, n);
             assert_slice_close(&actual, expected, atol, $op_fixture);
@@ -816,8 +814,8 @@ fn gguf_block_kind_block_bytes_via_qualified_path() {
 // ---------------------------------------------------------------------------
 
 use ferrotorch_cubecl::{
-    split_q4_0_blocks, split_q4_1_blocks, split_q5_0_blocks, split_q5_1_blocks,
-    split_q8_0_blocks, split_q8_1_blocks,
+    split_q4_0_blocks, split_q4_1_blocks, split_q5_0_blocks, split_q5_1_blocks, split_q8_0_blocks,
+    split_q8_1_blocks,
 };
 
 #[test]
@@ -1012,9 +1010,6 @@ fn fixture_file_covers_every_conformance_op() {
     ];
 
     for r in &required {
-        assert!(
-            ops.contains(r),
-            "fixture file missing required op {r:?}"
-        );
+        assert!(ops.contains(r), "fixture file missing required op {r:?}");
     }
 }

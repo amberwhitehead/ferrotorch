@@ -139,10 +139,7 @@ fn mmap_single_file_f64_matches_heap_load() {
     let mmap_data = from_mmap["param"].data().unwrap();
     assert_eq!(heap_data.len(), mmap_data.len(), "element count mismatch");
     for (i, (h, m)) in heap_data.iter().zip(mmap_data.iter()).enumerate() {
-        assert!(
-            (h - m).abs() < 1e-12,
-            "param[{i}]: heap={h}, mmap={m}"
-        );
+        assert!((h - m).abs() < 1e-12, "param[{i}]: heap={h}, mmap={m}");
     }
 }
 
@@ -156,7 +153,10 @@ fn mmap_single_file_empty_state_dict() {
     save_safetensors(&sd, &path).unwrap();
 
     let from_mmap: StateDict<f32> = load_safetensors_mmap(&path).unwrap();
-    assert!(from_mmap.is_empty(), "mmap load of empty state dict must be empty");
+    assert!(
+        from_mmap.is_empty(),
+        "mmap load of empty state dict must be empty"
+    );
 }
 
 /// mmap load returns an error for a nonexistent file.
@@ -180,7 +180,10 @@ fn mmap_single_file_returns_owned_data() {
     let path = tmp.path().join("owned.safetensors");
 
     let mut sd: StateDict<f32> = HashMap::new();
-    sd.insert("w".to_string(), make_f32(vec![1.0, 2.0, 3.0, 4.0], vec![2, 2]));
+    sd.insert(
+        "w".to_string(),
+        make_f32(vec![1.0, 2.0, 3.0, 4.0], vec![2, 2]),
+    );
     save_safetensors(&sd, &path).unwrap();
 
     let loaded = load_safetensors_mmap::<f32>(&path).unwrap();
@@ -203,7 +206,10 @@ fn mmap_single_file_preserves_shapes() {
     let path = tmp.path().join("shapes.safetensors");
 
     let mut sd: StateDict<f32> = HashMap::new();
-    sd.insert("conv.weight".to_string(), make_f32(vec![0.0; 24], vec![2, 3, 2, 2]));
+    sd.insert(
+        "conv.weight".to_string(),
+        make_f32(vec![0.0; 24], vec![2, 3, 2, 2]),
+    );
     sd.insert("fc.bias".to_string(), make_f32(vec![1.0; 4], vec![4]));
     save_safetensors(&sd, &path).unwrap();
 
@@ -288,7 +294,10 @@ fn mmap_sharded_index_tensor_not_in_shard_error() {
     std::fs::write(&index_path, index_json).unwrap();
 
     let result: Result<StateDict<f32>, _> = load_safetensors_sharded_mmap(&index_path);
-    assert!(result.is_err(), "expected error when index tensor is absent from shard");
+    assert!(
+        result.is_err(),
+        "expected error when index tensor is absent from shard"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -325,10 +334,7 @@ fn mmap_pytorch_matches_heap_pytorch_load() {
         let heap_data = heap_tensor.data().unwrap();
         let mmap_data = mmap_tensor.data().unwrap();
         for (i, (h, m)) in heap_data.iter().zip(mmap_data.iter()).enumerate() {
-            assert!(
-                (h - m).abs() < 1e-7,
-                "[{name}][{i}]: heap={h}, mmap={m}"
-            );
+            assert!((h - m).abs() < 1e-7, "[{name}][{i}]: heap={h}, mmap={m}");
         }
     }
 }
@@ -336,9 +342,11 @@ fn mmap_pytorch_matches_heap_pytorch_load() {
 /// mmap pytorch load returns an error for a nonexistent file.
 #[test]
 fn mmap_pytorch_missing_file_error() {
-    let result: Result<StateDict<f32>, _> =
-        load_pytorch_state_dict_mmap("/nonexistent/model.pt");
-    assert!(result.is_err(), "expected error for nonexistent pytorch mmap file");
+    let result: Result<StateDict<f32>, _> = load_pytorch_state_dict_mmap("/nonexistent/model.pt");
+    assert!(
+        result.is_err(),
+        "expected error for nonexistent pytorch mmap file"
+    );
 }
 
 /// mmap pytorch load returns owned data — overwriting the file does not

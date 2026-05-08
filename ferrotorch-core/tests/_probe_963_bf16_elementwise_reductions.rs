@@ -58,9 +58,8 @@ fn f32_to_bf16_bits(v: f32) -> u16 {
 /// Upload f32 slice as bf16 bit patterns (CudaSlice<u16> handle, elem_size=2).
 fn upload_bf16(data: &[f32]) -> gpu_dispatch::GpuBufferHandle {
     let bf16_vals: Vec<u16> = data.iter().map(|&v| f32_to_bf16_bits(v)).collect();
-    let bytes: &[u8] = unsafe {
-        std::slice::from_raw_parts(bf16_vals.as_ptr() as *const u8, bf16_vals.len() * 2)
-    };
+    let bytes: &[u8] =
+        unsafe { std::slice::from_raw_parts(bf16_vals.as_ptr() as *const u8, bf16_vals.len() * 2) };
     let backend = gpu_dispatch::gpu_backend().expect("backend");
     backend.cpu_to_gpu(bytes, 2, 0).expect("upload bf16")
 }
@@ -117,7 +116,9 @@ fn p963_add_bf16_f32_zero_len() {
     let backend = gpu_dispatch::gpu_backend().expect("backend");
     let a = upload_bf16(&[]);
     let b = upload_bf16(&[]);
-    let r = backend.add_bf16_f32(&a, &b, 0).expect("zero-len add must not error");
+    let r = backend
+        .add_bf16_f32(&a, &b, 0)
+        .expect("zero-len add must not error");
     assert_eq!(r.len(), 0);
 }
 
@@ -232,7 +233,11 @@ fn p963_sum_axis_bf16_f32_inner_dim() {
     let result = backend
         .sum_axis_bf16_f32(&a_gpu, 1, 3, 2)
         .expect("sum_axis_bf16_f32 inner_dim");
-    check("sum_axis_bf16_f32_inner_dim", &download_f32(&result), &expected);
+    check(
+        "sum_axis_bf16_f32_inner_dim",
+        &download_f32(&result),
+        &expected,
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -259,7 +264,11 @@ fn p963_mean_axis_bf16_f32_basic() {
 
     assert_eq!(result.len(), 2);
     assert_eq!(result.device_ordinal(), 0);
-    check("mean_axis_bf16_f32_basic", &download_f32(&result), &expected);
+    check(
+        "mean_axis_bf16_f32_basic",
+        &download_f32(&result),
+        &expected,
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -298,10 +307,12 @@ fn p963_relu_bf16_f32_all_negative() {
     let expected = vec![0.0f32; 4];
 
     let x_gpu = upload_bf16(&x);
-    let result = backend
-        .relu_bf16_f32(&x_gpu, 4)
-        .expect("relu all-negative");
-    check("relu_bf16_f32_all_negative", &download_f32(&result), &expected);
+    let result = backend.relu_bf16_f32(&x_gpu, 4).expect("relu all-negative");
+    check(
+        "relu_bf16_f32_all_negative",
+        &download_f32(&result),
+        &expected,
+    );
 }
 
 // ---------------------------------------------------------------------------

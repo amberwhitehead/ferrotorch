@@ -10,11 +10,11 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use ferrotorch_core::{Tensor, TensorStorage};
 use ferrotorch_data::{
     Compose, DataLoader, Normalize, RandomCrop, RandomHorizontalFlip, ToTensor, Transform,
     VecDataset, WorkerMode, default_collate, default_collate_pair, manual_seed,
 };
-use ferrotorch_core::{Tensor, TensorStorage};
 use serde::Deserialize;
 
 // ---------------------------------------------------------------------------
@@ -101,12 +101,7 @@ fn dataloader_sequential() {
 
         let batches: Vec<Vec<f64>> = loader
             .iter(0)
-            .map(|r| {
-                r.unwrap()
-                    .into_iter()
-                    .map(|v| v as f64)
-                    .collect()
-            })
+            .map(|r| r.unwrap().into_iter().map(|v| v as f64).collect())
             .collect();
 
         assert_eq!(
@@ -152,7 +147,10 @@ fn dataloader_drop_last() {
             .map(|r| r.unwrap().into_iter().map(|v| v as f64).collect())
             .collect();
 
-        assert_eq!(batches, expected, "DataLoader drop_last batch content mismatch");
+        assert_eq!(
+            batches, expected,
+            "DataLoader drop_last batch content mismatch"
+        );
         assert_eq!(
             batches.len(),
             expected_num_batches,
@@ -188,10 +186,7 @@ fn dataloader_shuffle_coverage() {
             .seed(42)
             .prefetch_factor(0);
 
-        let mut all: Vec<i32> = loader
-            .iter(0)
-            .flat_map(|r| r.unwrap())
-            .collect();
+        let mut all: Vec<i32> = loader.iter(0).flat_map(|r| r.unwrap()).collect();
         all.sort_unstable();
 
         assert_eq!(
@@ -389,13 +384,14 @@ fn collate_stack_1d() {
             .map(|v| v.as_u64().unwrap() as usize)
             .collect();
 
-        let tensors: Vec<Tensor<f32>> = rows
-            .iter()
-            .map(|row| t32(row, &input_shape))
-            .collect();
+        let tensors: Vec<Tensor<f32>> = rows.iter().map(|row| t32(row, &input_shape)).collect();
 
         let batch = default_collate(tensors).unwrap();
-        assert_eq!(batch.shape(), expected_shape.as_slice(), "stack_1d shape mismatch");
+        assert_eq!(
+            batch.shape(),
+            expected_shape.as_slice(),
+            "stack_1d shape mismatch"
+        );
         assert_eq!(
             batch.data_vec().unwrap(),
             expected_data,
@@ -445,7 +441,10 @@ fn collate_stack_2d() {
         let tensors: Vec<Tensor<f32>> = (0..num_samples)
             .map(|i| {
                 let start = i * numel_per_sample;
-                t32(&expected_data_flat[start..start + numel_per_sample], &input_shape)
+                t32(
+                    &expected_data_flat[start..start + numel_per_sample],
+                    &input_shape,
+                )
             })
             .collect();
 
@@ -508,12 +507,7 @@ fn normalize_two_channel() {
             .as_array()
             .unwrap()
             .iter()
-            .flat_map(|row| {
-                row.as_array()
-                    .unwrap()
-                    .iter()
-                    .map(|v| v.as_f64().unwrap())
-            })
+            .flat_map(|row| row.as_array().unwrap().iter().map(|v| v.as_f64().unwrap()))
             .collect();
         let input_shape: Vec<usize> = fx["input_shape"]
             .as_array()
@@ -537,12 +531,7 @@ fn normalize_two_channel() {
             .as_array()
             .unwrap()
             .iter()
-            .flat_map(|row| {
-                row.as_array()
-                    .unwrap()
-                    .iter()
-                    .map(|v| v.as_f64().unwrap())
-            })
+            .flat_map(|row| row.as_array().unwrap().iter().map(|v| v.as_f64().unwrap()))
             .collect();
 
         let tensor = t64(&input_flat, &input_shape);
@@ -550,7 +539,11 @@ fn normalize_two_channel() {
         let out = norm.apply(tensor).unwrap();
         let got = out.data_vec().unwrap();
 
-        assert_eq!(got.len(), expected_flat.len(), "Normalize output length mismatch");
+        assert_eq!(
+            got.len(),
+            expected_flat.len(),
+            "Normalize output length mismatch"
+        );
         for (i, (&g, &e)) in got.iter().zip(expected_flat.iter()).enumerate() {
             assert!(
                 (g - e).abs() < 1e-9,
@@ -572,12 +565,7 @@ fn normalize_identity() {
             .as_array()
             .unwrap()
             .iter()
-            .flat_map(|row| {
-                row.as_array()
-                    .unwrap()
-                    .iter()
-                    .map(|v| v.as_f64().unwrap())
-            })
+            .flat_map(|row| row.as_array().unwrap().iter().map(|v| v.as_f64().unwrap()))
             .collect();
         let mean: Vec<f64> = fx["mean"]
             .as_array()
@@ -595,12 +583,7 @@ fn normalize_identity() {
             .as_array()
             .unwrap()
             .iter()
-            .flat_map(|row| {
-                row.as_array()
-                    .unwrap()
-                    .iter()
-                    .map(|v| v.as_f64().unwrap())
-            })
+            .flat_map(|row| row.as_array().unwrap().iter().map(|v| v.as_f64().unwrap()))
             .collect();
 
         // Shape: input is [[1, 2, 3]] => [1, 3]
@@ -659,7 +642,10 @@ fn compose_chains_in_order() {
     let got = out.data_vec().unwrap();
     // [5/5, 10/5, 15/5] = [1.0, 2.0, 3.0] then /1.0 => same
     for (i, (&g, &e)) in got.iter().zip([1.0_f64, 2.0, 3.0].iter()).enumerate() {
-        assert!((g - e).abs() < 1e-9, "Compose index {i}: got {g}, expected {e}");
+        assert!(
+            (g - e).abs() < 1e-9,
+            "Compose index {i}: got {g}, expected {e}"
+        );
     }
 }
 

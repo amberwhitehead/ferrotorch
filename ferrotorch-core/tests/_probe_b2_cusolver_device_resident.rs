@@ -80,7 +80,11 @@ fn b2_895_blas_no_silent_cpu_fallback() {
         .expect("gpu_matmul_f32");
 
     // §3: result must be on device, not a host Vec.
-    assert_eq!(c_buf.device_ordinal(), 0, "#895: matmul result must be on cuda:0");
+    assert_eq!(
+        c_buf.device_ordinal(),
+        0,
+        "#895: matmul result must be on cuda:0"
+    );
     assert_eq!(c_buf.len(), 16, "#895: 4x4 result has 16 elements");
 }
 
@@ -125,7 +129,9 @@ fn b2_896_svd_f32_outputs_on_device() {
     let n = 4usize;
     let k = m.min(n);
 
-    let raw: Vec<f32> = (0..m * n).map(|i| ((i * 7 + 3) % 17) as f32 * 0.1 - 0.8).collect();
+    let raw: Vec<f32> = (0..m * n)
+        .map(|i| ((i * 7 + 3) % 17) as f32 * 0.1 - 0.8)
+        .collect();
     let a = from_vec::<f32>(raw.clone(), &[m, n])
         .expect("from_vec f32")
         .to(Device::Cuda(0))
@@ -134,12 +140,24 @@ fn b2_896_svd_f32_outputs_on_device() {
     let (u, s, vh) = linalg::svd(&a).expect("linalg::svd f32");
 
     // §3 assertion — outputs must be on CUDA.
-    assert!(u.is_cuda(), "#896: SVD U must be on CUDA (was: {:?})", u.device());
-    assert!(s.is_cuda(), "#896: SVD S must be on CUDA (was: {:?})", s.device());
-    assert!(vh.is_cuda(), "#896: SVD Vh must be on CUDA (was: {:?})", vh.device());
+    assert!(
+        u.is_cuda(),
+        "#896: SVD U must be on CUDA (was: {:?})",
+        u.device()
+    );
+    assert!(
+        s.is_cuda(),
+        "#896: SVD S must be on CUDA (was: {:?})",
+        s.device()
+    );
+    assert!(
+        vh.is_cuda(),
+        "#896: SVD Vh must be on CUDA (was: {:?})",
+        vh.device()
+    );
 
     assert_eq!(u.shape(), &[m, k], "#896: U shape");
-    assert_eq!(s.shape(), &[k],    "#896: S shape");
+    assert_eq!(s.shape(), &[k], "#896: S shape");
     assert_eq!(vh.shape(), &[k, n], "#896: Vh shape");
 
     // Numerical check: ||U @ diag(S) @ Vh - A||_F / ||A||_F < 1e-4.
@@ -163,7 +181,10 @@ fn b2_896_svd_f32_outputs_on_device() {
         }
     }
     let rel = rel_frob_f32(&recon, &a_v);
-    assert!(rel < 1e-4_f32, "#896: SVD f32 reconstruction rel error {rel:.6e} > 1e-4");
+    assert!(
+        rel < 1e-4_f32,
+        "#896: SVD f32 reconstruction rel error {rel:.6e} > 1e-4"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -178,7 +199,9 @@ fn b2_896_svd_f64_outputs_on_device() {
     let n = 3usize;
     let k = m.min(n);
 
-    let raw: Vec<f64> = (0..m * n).map(|i| ((i * 11 + 5) % 19) as f64 * 0.1 - 0.9).collect();
+    let raw: Vec<f64> = (0..m * n)
+        .map(|i| ((i * 11 + 5) % 19) as f64 * 0.1 - 0.9)
+        .collect();
     let a = from_vec::<f64>(raw.clone(), &[m, n])
         .expect("from_vec f64")
         .to(Device::Cuda(0))
@@ -190,8 +213,8 @@ fn b2_896_svd_f64_outputs_on_device() {
     assert!(s.is_cuda(), "#896: SVD f64 S must be on CUDA");
     assert!(vh.is_cuda(), "#896: SVD f64 Vh must be on CUDA");
 
-    assert_eq!(u.shape(), &[m, k],  "#896: f64 U shape");
-    assert_eq!(s.shape(), &[k],     "#896: f64 S shape");
+    assert_eq!(u.shape(), &[m, k], "#896: f64 U shape");
+    assert_eq!(s.shape(), &[k], "#896: f64 S shape");
     assert_eq!(vh.shape(), &[k, n], "#896: f64 Vh shape");
 
     let u_v: Vec<f64> = u.cpu().expect("U cpu").data().expect("U data").to_vec();
@@ -214,7 +237,10 @@ fn b2_896_svd_f64_outputs_on_device() {
         }
     }
     let rel = rel_frob_f64(&recon, &a_v);
-    assert!(rel < 1e-9_f64, "#896: SVD f64 reconstruction rel error {rel:.12e} > 1e-9");
+    assert!(
+        rel < 1e-9_f64,
+        "#896: SVD f64 reconstruction rel error {rel:.12e} > 1e-9"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -231,7 +257,9 @@ fn b2_635_qr_f32_outputs_on_device() {
     let n = 4usize;
     let k = m.min(n);
 
-    let raw: Vec<f32> = (0..m * n).map(|i| ((i * 13 + 7) % 23) as f32 * 0.1 - 1.1).collect();
+    let raw: Vec<f32> = (0..m * n)
+        .map(|i| ((i * 13 + 7) % 23) as f32 * 0.1 - 1.1)
+        .collect();
     let a = from_vec::<f32>(raw.clone(), &[m, n])
         .expect("from_vec f32")
         .to(Device::Cuda(0))
@@ -240,8 +268,16 @@ fn b2_635_qr_f32_outputs_on_device() {
     let (q, r) = linalg::qr(&a).expect("linalg::qr f32");
 
     // §3 assertion.
-    assert!(q.is_cuda(), "#635: QR Q must be on CUDA (was: {:?})", q.device());
-    assert!(r.is_cuda(), "#635: QR R must be on CUDA (was: {:?})", r.device());
+    assert!(
+        q.is_cuda(),
+        "#635: QR Q must be on CUDA (was: {:?})",
+        q.device()
+    );
+    assert!(
+        r.is_cuda(),
+        "#635: QR R must be on CUDA (was: {:?})",
+        r.device()
+    );
 
     assert_eq!(q.shape(), &[m, k], "#635: Q shape");
     assert_eq!(r.shape(), &[k, n], "#635: R shape");
@@ -272,7 +308,10 @@ fn b2_635_qr_f32_outputs_on_device() {
         }
     }
     let rel = rel_frob_f32(&recon, &a_v);
-    assert!(rel < 1e-4_f32, "#635: QR f32 reconstruction rel error {rel:.6e} > 1e-4");
+    assert!(
+        rel < 1e-4_f32,
+        "#635: QR f32 reconstruction rel error {rel:.6e} > 1e-4"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -287,7 +326,9 @@ fn b2_635_qr_f64_outputs_on_device() {
     let n = 3usize;
     let k = m.min(n);
 
-    let raw: Vec<f64> = (0..m * n).map(|i| ((i * 17 + 9) % 29) as f64 * 0.1 - 1.4).collect();
+    let raw: Vec<f64> = (0..m * n)
+        .map(|i| ((i * 17 + 9) % 29) as f64 * 0.1 - 1.4)
+        .collect();
     let a = from_vec::<f64>(raw.clone(), &[m, n])
         .expect("from_vec f64")
         .to(Device::Cuda(0))
@@ -325,5 +366,8 @@ fn b2_635_qr_f64_outputs_on_device() {
         }
     }
     let rel = rel_frob_f64(&recon, &a_v);
-    assert!(rel < 1e-9_f64, "#635: QR f64 reconstruction rel error {rel:.12e} > 1e-9");
+    assert!(
+        rel < 1e-9_f64,
+        "#635: QR f64 reconstruction rel error {rel:.12e} > 1e-9"
+    );
 }

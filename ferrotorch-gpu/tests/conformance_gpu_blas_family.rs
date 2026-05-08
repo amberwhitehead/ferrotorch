@@ -247,16 +247,17 @@ fn blas_sgemm_4x4_f32() {
             0,
             "blas f32 ({tag}): result must be on device 0"
         );
-        assert_eq!(
-            c_buf.len(),
-            m * n,
-            "blas f32 ({tag}): output length"
-        );
+        assert_eq!(c_buf.len(), m * n, "blas f32 ({tag}): output length");
 
         let got = ferrotorch_gpu::transfer::gpu_to_cpu(&c_buf, &device)
             .unwrap_or_else(|e| panic!("blas f32 download ({tag}): {e}"));
 
-        assert_close_f32(&got, &expected, 1e-3, &format!("blas::gpu_matmul_f32 {tag}"));
+        assert_close_f32(
+            &got,
+            &expected,
+            1e-3,
+            &format!("blas::gpu_matmul_f32 {tag}"),
+        );
     }
 }
 
@@ -287,13 +288,22 @@ fn blas_dgemm_4x4_f64() {
         let c_buf = blas::gpu_matmul_f64(&a_buf, &b_buf, m, k, n, &device)
             .unwrap_or_else(|e| panic!("gpu_matmul_f64 ({tag}): {e}"));
 
-        assert_eq!(c_buf.device_ordinal(), 0, "blas f64 ({tag}): result on device 0");
+        assert_eq!(
+            c_buf.device_ordinal(),
+            0,
+            "blas f64 ({tag}): result on device 0"
+        );
         assert_eq!(c_buf.len(), m * n, "blas f64 ({tag}): output length");
 
         let got = ferrotorch_gpu::transfer::gpu_to_cpu(&c_buf, &device)
             .unwrap_or_else(|e| panic!("blas f64 download ({tag}): {e}"));
 
-        assert_close_f64(&got, &expected, 1e-9, &format!("blas::gpu_matmul_f64 {tag}"));
+        assert_close_f64(
+            &got,
+            &expected,
+            1e-9,
+            &format!("blas::gpu_matmul_f64 {tag}"),
+        );
     }
 }
 
@@ -325,7 +335,11 @@ fn blas_bmm_f32_batch2() {
         let c_buf = blas::gpu_bmm_f32(&a_buf, &b_buf, batch, m, k, n, &device)
             .unwrap_or_else(|e| panic!("gpu_bmm_f32 ({tag}): {e}"));
 
-        assert_eq!(c_buf.device_ordinal(), 0, "bmm f32 ({tag}): result on device 0");
+        assert_eq!(
+            c_buf.device_ordinal(),
+            0,
+            "bmm f32 ({tag}): result on device 0"
+        );
         assert_eq!(c_buf.len(), batch * m * n, "bmm f32 ({tag}): output length");
 
         let got = ferrotorch_gpu::transfer::gpu_to_cpu(&c_buf, &device)
@@ -344,10 +358,7 @@ fn blas_matmul_shape_error() {
     let b = ferrotorch_gpu::transfer::cpu_to_gpu(&[1.0f32, 2.0, 3.0, 4.0], &device).unwrap();
     // Claim it's [2, 3] × [3, 2] but buffers are length 4 each (2×2) — shape mismatch.
     let result = blas::gpu_matmul_f32(&a, &b, 2, 3, 2, &device);
-    assert!(
-        result.is_err(),
-        "expected Err on shape mismatch but got Ok"
-    );
+    assert!(result.is_err(), "expected Err on shape mismatch but got Ok");
 }
 
 // ===========================================================================
@@ -379,7 +390,8 @@ fn cufft_c2c_f32_forward() {
 
         // Result must stay on device.
         assert_eq!(
-            out_buf.device_ordinal(), 0,
+            out_buf.device_ordinal(),
+            0,
             "cufft c2c f32 ({tag}): result on device 0"
         );
         assert_eq!(
@@ -393,7 +405,12 @@ fn cufft_c2c_f32_forward() {
 
         // FFT tolerance: 1e-4 absolute for f32 (rounding in cuFFT butterfly).
         let tol = if inverse { 2e-4 } else { 1e-4 };
-        assert_close_f32(&got, &expected, tol, &format!("cufft::gpu_fft_c2c_f32 {tag}"));
+        assert_close_f32(
+            &got,
+            &expected,
+            tol,
+            &format!("cufft::gpu_fft_c2c_f32 {tag}"),
+        );
     }
 }
 
@@ -420,12 +437,21 @@ fn cufft_c2c_f64_forward() {
             .unwrap_or_else(|e| panic!("gpu_fft_c2c_f64 ({tag}): {e}"));
 
         assert_eq!(out_buf.device_ordinal(), 0, "cufft c2c f64 ({tag}): device");
-        assert_eq!(out_buf.len(), batch * n * 2, "cufft c2c f64 ({tag}): output length");
+        assert_eq!(
+            out_buf.len(),
+            batch * n * 2,
+            "cufft c2c f64 ({tag}): output length"
+        );
 
         let got = ferrotorch_gpu::transfer::gpu_to_cpu(&out_buf, &device)
             .unwrap_or_else(|e| panic!("cufft f64 download ({tag}): {e}"));
 
-        assert_close_f64(&got, &expected, 1e-10, &format!("cufft::gpu_fft_c2c_f64 {tag}"));
+        assert_close_f64(
+            &got,
+            &expected,
+            1e-10,
+            &format!("cufft::gpu_fft_c2c_f64 {tag}"),
+        );
     }
 }
 
@@ -453,12 +479,21 @@ fn cufft_rfft_r2c_f32() {
         // R2C output length = batch * (n/2+1) * 2.
         let expected_out_len = batch * (n / 2 + 1) * 2;
         assert_eq!(out_buf.device_ordinal(), 0, "rfft f32 ({tag}): device");
-        assert_eq!(out_buf.len(), expected_out_len, "rfft f32 ({tag}): output length");
+        assert_eq!(
+            out_buf.len(),
+            expected_out_len,
+            "rfft f32 ({tag}): output length"
+        );
 
         let got = ferrotorch_gpu::transfer::gpu_to_cpu(&out_buf, &device)
             .unwrap_or_else(|e| panic!("rfft f32 download ({tag}): {e}"));
 
-        assert_close_f32(&got, &expected, 1e-4, &format!("cufft::gpu_rfft_r2c_f32 {tag}"));
+        assert_close_f32(
+            &got,
+            &expected,
+            1e-4,
+            &format!("cufft::gpu_rfft_r2c_f32 {tag}"),
+        );
     }
 }
 
@@ -484,12 +519,21 @@ fn cufft_irfft_c2r_f32() {
             .unwrap_or_else(|e| panic!("gpu_irfft_c2r_f32 ({tag}): {e}"));
 
         assert_eq!(out_buf.device_ordinal(), 0, "irfft f32 ({tag}): device");
-        assert_eq!(out_buf.len(), batch * n_out, "irfft f32 ({tag}): output length");
+        assert_eq!(
+            out_buf.len(),
+            batch * n_out,
+            "irfft f32 ({tag}): output length"
+        );
 
         let got = ferrotorch_gpu::transfer::gpu_to_cpu(&out_buf, &device)
             .unwrap_or_else(|e| panic!("irfft f32 download ({tag}): {e}"));
 
-        assert_close_f32(&got, &expected, 1e-4, &format!("cufft::gpu_irfft_c2r_f32 {tag}"));
+        assert_close_f32(
+            &got,
+            &expected,
+            1e-4,
+            &format!("cufft::gpu_irfft_c2r_f32 {tag}"),
+        );
     }
 }
 
@@ -535,7 +579,12 @@ fn cusolver_svd_4x4_f32() {
         assert_eq!(vh.len(), k * n, "svd f32 ({tag}): Vh length");
 
         // S values match reference (sorted descending).
-        assert_close_f32(&s, &expected_s, 1e-4, &format!("cusolver::gpu_svd_f32 S {tag}"));
+        assert_close_f32(
+            &s,
+            &expected_s,
+            1e-4,
+            &format!("cusolver::gpu_svd_f32 S {tag}"),
+        );
 
         // Reconstruction: A_ref = U @ diag(S) @ Vh.
         // U is [m,k], diag(S) is [k,k], Vh is [k,n].
@@ -583,7 +632,12 @@ fn cusolver_svd_4x4_f64() {
         assert_eq!(s.len(), k, "svd f64 ({tag}): S length");
         assert_eq!(vh.len(), k * n, "svd f64 ({tag}): Vh length");
 
-        assert_close_f64(&s, &expected_s, 1e-9, &format!("cusolver::gpu_svd_f64 S {tag}"));
+        assert_close_f64(
+            &s,
+            &expected_s,
+            1e-9,
+            &format!("cusolver::gpu_svd_f64 S {tag}"),
+        );
 
         // Reconstruction.
         let mut svh = vec![0.0f64; k * n];
@@ -721,9 +775,21 @@ fn cusolver_svd_dev_f32_device_resident() {
             .unwrap_or_else(|e| panic!("gpu_svd_f32_dev ({tag}): {e}"));
 
         // §3 assertion: outputs must be on device, not on host.
-        assert_eq!(u_buf.device_ordinal(), 0, "svd_dev f32 ({tag}): U on wrong device");
-        assert_eq!(s_buf.device_ordinal(), 0, "svd_dev f32 ({tag}): S on wrong device");
-        assert_eq!(vh_buf.device_ordinal(), 0, "svd_dev f32 ({tag}): Vh on wrong device");
+        assert_eq!(
+            u_buf.device_ordinal(),
+            0,
+            "svd_dev f32 ({tag}): U on wrong device"
+        );
+        assert_eq!(
+            s_buf.device_ordinal(),
+            0,
+            "svd_dev f32 ({tag}): S on wrong device"
+        );
+        assert_eq!(
+            vh_buf.device_ordinal(),
+            0,
+            "svd_dev f32 ({tag}): Vh on wrong device"
+        );
 
         assert_eq!(u_buf.len(), m * k, "svd_dev f32 ({tag}): U length");
         assert_eq!(s_buf.len(), k, "svd_dev f32 ({tag}): S length");
@@ -777,9 +843,21 @@ fn cusolver_svd_dev_f64_device_resident() {
         let (u_buf, s_buf, vh_buf) = cusolver::gpu_svd_f64_dev(&a_buf, m, n, &device)
             .unwrap_or_else(|e| panic!("gpu_svd_f64_dev ({tag}): {e}"));
 
-        assert_eq!(u_buf.device_ordinal(), 0, "svd_dev f64 ({tag}): U on wrong device");
-        assert_eq!(s_buf.device_ordinal(), 0, "svd_dev f64 ({tag}): S on wrong device");
-        assert_eq!(vh_buf.device_ordinal(), 0, "svd_dev f64 ({tag}): Vh on wrong device");
+        assert_eq!(
+            u_buf.device_ordinal(),
+            0,
+            "svd_dev f64 ({tag}): U on wrong device"
+        );
+        assert_eq!(
+            s_buf.device_ordinal(),
+            0,
+            "svd_dev f64 ({tag}): S on wrong device"
+        );
+        assert_eq!(
+            vh_buf.device_ordinal(),
+            0,
+            "svd_dev f64 ({tag}): Vh on wrong device"
+        );
 
         assert_eq!(u_buf.len(), m * k, "svd_dev f64 ({tag}): U length");
         assert_eq!(s_buf.len(), k, "svd_dev f64 ({tag}): S length");
@@ -841,8 +919,16 @@ fn cusolver_qr_dev_f32_device_resident() {
             .unwrap_or_else(|e| panic!("gpu_qr_f32_dev ({tag}): {e}"));
 
         // §3 assertion: Q and R must live on device.
-        assert_eq!(q_buf.device_ordinal(), 0, "qr_dev f32 ({tag}): Q on wrong device");
-        assert_eq!(r_buf.device_ordinal(), 0, "qr_dev f32 ({tag}): R on wrong device");
+        assert_eq!(
+            q_buf.device_ordinal(),
+            0,
+            "qr_dev f32 ({tag}): Q on wrong device"
+        );
+        assert_eq!(
+            r_buf.device_ordinal(),
+            0,
+            "qr_dev f32 ({tag}): R on wrong device"
+        );
 
         assert_eq!(q_buf.len(), m * k, "qr_dev f32 ({tag}): Q length");
         assert_eq!(r_buf.len(), k * n, "qr_dev f32 ({tag}): R length");
@@ -856,7 +942,11 @@ fn cusolver_qr_dev_f32_device_resident() {
         // q is [m,k] row-major; qt is [k,m]; qt@q is [k,k].
         let qt: Vec<f32> = {
             let mut t = vec![0.0f32; k * m];
-            for i in 0..m { for j in 0..k { t[j * m + i] = q[i * k + j]; } }
+            for i in 0..m {
+                for j in 0..k {
+                    t[j * m + i] = q[i * k + j];
+                }
+            }
             t
         };
         let qtq = matmul_f32(&qt, &q, k, m, k);
@@ -902,8 +992,16 @@ fn cusolver_qr_dev_f64_device_resident() {
         let (q_buf, r_buf) = cusolver::gpu_qr_f64_dev(&a_buf, m, n, &device)
             .unwrap_or_else(|e| panic!("gpu_qr_f64_dev ({tag}): {e}"));
 
-        assert_eq!(q_buf.device_ordinal(), 0, "qr_dev f64 ({tag}): Q on wrong device");
-        assert_eq!(r_buf.device_ordinal(), 0, "qr_dev f64 ({tag}): R on wrong device");
+        assert_eq!(
+            q_buf.device_ordinal(),
+            0,
+            "qr_dev f64 ({tag}): Q on wrong device"
+        );
+        assert_eq!(
+            r_buf.device_ordinal(),
+            0,
+            "qr_dev f64 ({tag}): R on wrong device"
+        );
 
         assert_eq!(q_buf.len(), m * k, "qr_dev f64 ({tag}): Q length");
         assert_eq!(r_buf.len(), k * n, "qr_dev f64 ({tag}): R length");
@@ -916,7 +1014,11 @@ fn cusolver_qr_dev_f64_device_resident() {
         // Q^T @ Q ~ I_k.
         let qt: Vec<f64> = {
             let mut t = vec![0.0f64; k * m];
-            for i in 0..m { for j in 0..k { t[j * m + i] = q[i * k + j]; } }
+            for i in 0..m {
+                for j in 0..k {
+                    t[j * m + i] = q[i * k + j];
+                }
+            }
             t
         };
         let qtq = matmul_f64(&qt, &q, k, m, k);
@@ -991,14 +1093,23 @@ fn cusparselt_spmm_8x8_f32() {
         // Handle must drop without crash here (tests `cusparseLtDestroy` path).
         drop(handle);
 
-        assert_eq!(c_buf.device_ordinal(), 0, "cusparselt ({tag}): result on device 0");
+        assert_eq!(
+            c_buf.device_ordinal(),
+            0,
+            "cusparselt ({tag}): result on device 0"
+        );
         assert_eq!(c_buf.len(), m * n, "cusparselt ({tag}): output length");
 
         let got = ferrotorch_gpu::transfer::gpu_to_cpu(&c_buf, &device)
             .unwrap_or_else(|e| panic!("cusparselt download ({tag}): {e}"));
 
         // TF32 accumulation mode has looser tolerance than f32 exact arithmetic.
-        assert_close_f32(&got, &expected, 5e-3, &format!("cusparselt::gpu_sparse_matmul_24 {tag}"));
+        assert_close_f32(
+            &got,
+            &expected,
+            5e-3,
+            &format!("cusparselt::gpu_sparse_matmul_24 {tag}"),
+        );
     }
 }
 
@@ -1067,7 +1178,12 @@ fn bf16_mul_n16() {
         // Compare as f32 decoded from bf16 bits.
         let got_f32: Vec<f32> = got_bits.iter().map(|&b| bf16_bits_to_f32(b)).collect();
         let exp_f32: Vec<f32> = expected_bits.iter().map(|&b| bf16_bits_to_f32(b)).collect();
-        assert_close_f32(&got_f32, &exp_f32, 1.0 / 128.0, &format!("bf16::gpu_mul_bf16 {tag}"));
+        assert_close_f32(
+            &got_f32,
+            &exp_f32,
+            1.0 / 128.0,
+            &format!("bf16::gpu_mul_bf16 {tag}"),
+        );
     }
 }
 
@@ -1104,7 +1220,12 @@ fn bf16_add_n16() {
 
         let got_f32: Vec<f32> = got_bits.iter().map(|&b| bf16_bits_to_f32(b)).collect();
         let exp_f32: Vec<f32> = expected_bits.iter().map(|&b| bf16_bits_to_f32(b)).collect();
-        assert_close_f32(&got_f32, &exp_f32, 1.0 / 128.0, &format!("bf16::gpu_add_bf16 {tag}"));
+        assert_close_f32(
+            &got_f32,
+            &exp_f32,
+            1.0 / 128.0,
+            &format!("bf16::gpu_add_bf16 {tag}"),
+        );
     }
 }
 
@@ -1138,7 +1259,12 @@ fn bf16_silu_n16() {
         let got_f32: Vec<f32> = got_bits.iter().map(|&b| bf16_bits_to_f32(b)).collect();
         let exp_f32: Vec<f32> = expected_bits.iter().map(|&b| bf16_bits_to_f32(b)).collect();
         // SiLU uses exp2.approx — looser tolerance.
-        assert_close_f32(&got_f32, &exp_f32, 1.0 / 64.0, &format!("bf16::gpu_silu_bf16 {tag}"));
+        assert_close_f32(
+            &got_f32,
+            &exp_f32,
+            1.0 / 64.0,
+            &format!("bf16::gpu_silu_bf16 {tag}"),
+        );
     }
 }
 
@@ -1172,7 +1298,12 @@ fn bf16_relu_n16() {
         let got_f32: Vec<f32> = got_bits.iter().map(|&b| bf16_bits_to_f32(b)).collect();
         let exp_f32: Vec<f32> = expected_bits.iter().map(|&b| bf16_bits_to_f32(b)).collect();
         // ReLU is exact: max(0, x) with no rounding. Exact bf16 bit match expected.
-        assert_close_f32(&got_f32, &exp_f32, 1.0 / 128.0, &format!("bf16::gpu_relu_bf16 {tag}"));
+        assert_close_f32(
+            &got_f32,
+            &exp_f32,
+            1.0 / 128.0,
+            &format!("bf16::gpu_relu_bf16 {tag}"),
+        );
     }
 }
 

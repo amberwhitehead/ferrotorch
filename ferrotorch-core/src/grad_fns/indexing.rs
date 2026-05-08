@@ -461,12 +461,8 @@ impl<T: Float> GradFn<T> for GatherBackward<T> {
                 _ => unreachable!(),
             };
             let backend = gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
-            let dst_indices = gather_dst_flat_indices(
-                &self.index,
-                &self.index_shape,
-                input_shape,
-                self.dim,
-            );
+            let dst_indices =
+                gather_dst_flat_indices(&self.index, &self.index_shape, input_shape, self.dim);
             let idx_handle = upload_f32_to_gpu(&dst_indices, ordinal)?;
             // scatter_add_1d_f32 treats grad_output as a flat 1-D buffer and
             // accumulates each element at its flat destination index.
@@ -563,15 +559,10 @@ impl<T: Float> GradFn<T> for ScatterBackward<T> {
 
             let grad_input = if self.input.requires_grad() {
                 // Build a 1.0/0.0 mask for the written positions, upload, zero them out.
-                let mask_f32 = scatter_write_mask(
-                    &self.index,
-                    &self.index_shape,
-                    input_shape,
-                    self.dim,
-                );
+                let mask_f32 =
+                    scatter_write_mask(&self.index, &self.index_shape, input_shape, self.dim);
                 let mask_handle = upload_f32_to_gpu(&mask_f32, ordinal)?;
-                let result_h =
-                    backend.masked_zero_f32(grad_output.gpu_handle()?, &mask_handle)?;
+                let result_h = backend.masked_zero_f32(grad_output.gpu_handle()?, &mask_handle)?;
                 Some(Tensor::from_storage(
                     TensorStorage::gpu(result_h),
                     input_shape.to_vec(),
@@ -583,12 +574,8 @@ impl<T: Float> GradFn<T> for ScatterBackward<T> {
 
             let grad_src = if self.src.requires_grad() {
                 // Gather grad_output at the flat positions that scatter wrote into.
-                let src_indices = scatter_src_flat_indices(
-                    &self.index,
-                    &self.index_shape,
-                    input_shape,
-                    self.dim,
-                );
+                let src_indices =
+                    scatter_src_flat_indices(&self.index, &self.index_shape, input_shape, self.dim);
                 let idx_handle = upload_f32_to_gpu(&src_indices, ordinal)?;
                 let result_h =
                     backend.index_select_1d_f32(grad_output.gpu_handle()?, &idx_handle)?;
@@ -720,12 +707,8 @@ impl<T: Float> GradFn<T> for ScatterAddBackward<T> {
             };
 
             let grad_src = if self.src.requires_grad() {
-                let src_indices = scatter_src_flat_indices(
-                    &self.index,
-                    &self.index_shape,
-                    input_shape,
-                    self.dim,
-                );
+                let src_indices =
+                    scatter_src_flat_indices(&self.index, &self.index_shape, input_shape, self.dim);
                 let idx_handle = upload_f32_to_gpu(&src_indices, ordinal)?;
                 let result_h =
                     backend.index_select_1d_f32(grad_output.gpu_handle()?, &idx_handle)?;
@@ -833,16 +816,21 @@ impl<T: Float> GradFn<T> for WhereCondBackward<T> {
             let backend = gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
 
             // condition_mask: 1.0 where condition=true, 0.0 where false.
-            let condition_mask: Vec<f32> =
-                self.condition.iter().map(|&c| if c { 1.0f32 } else { 0.0 }).collect();
+            let condition_mask: Vec<f32> = self
+                .condition
+                .iter()
+                .map(|&c| if c { 1.0f32 } else { 0.0 })
+                .collect();
             // not_mask: 1.0 where condition=false (used to zero grad_x at those positions).
-            let not_mask: Vec<f32> =
-                self.condition.iter().map(|&c| if c { 0.0f32 } else { 1.0 }).collect();
+            let not_mask: Vec<f32> = self
+                .condition
+                .iter()
+                .map(|&c| if c { 0.0f32 } else { 1.0 })
+                .collect();
 
             let grad_x = if self.x.requires_grad() {
                 let not_mask_h = upload_f32_to_gpu(&not_mask, ordinal)?;
-                let result_h =
-                    backend.masked_zero_f32(grad_output.gpu_handle()?, &not_mask_h)?;
+                let result_h = backend.masked_zero_f32(grad_output.gpu_handle()?, &not_mask_h)?;
                 Some(Tensor::from_storage(
                     TensorStorage::gpu(result_h),
                     self.x.shape().to_vec(),
@@ -854,8 +842,7 @@ impl<T: Float> GradFn<T> for WhereCondBackward<T> {
 
             let grad_y = if self.y.requires_grad() {
                 let cond_mask_h = upload_f32_to_gpu(&condition_mask, ordinal)?;
-                let result_h =
-                    backend.masked_zero_f32(grad_output.gpu_handle()?, &cond_mask_h)?;
+                let result_h = backend.masked_zero_f32(grad_output.gpu_handle()?, &cond_mask_h)?;
                 Some(Tensor::from_storage(
                     TensorStorage::gpu(result_h),
                     self.y.shape().to_vec(),

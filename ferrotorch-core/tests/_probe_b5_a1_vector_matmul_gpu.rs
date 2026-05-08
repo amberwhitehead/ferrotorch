@@ -146,7 +146,10 @@ fn gpu_dot_f32_matches_cpu() {
         let y_mm = matmul_differentiable(&a_gpu, &b_gpu).expect("matmul 1Dx1D");
 
         assert!(y_dot.is_cuda(), "n={n}: dot result must stay on GPU");
-        assert!(y_mm.is_cuda(), "n={n}: matmul 1Dx1D result must stay on GPU");
+        assert!(
+            y_mm.is_cuda(),
+            "n={n}: matmul 1Dx1D result must stay on GPU"
+        );
         assert_eq!(y_dot.shape(), &[] as &[usize], "n={n}: dot returns scalar");
 
         let want = cpu_dot_ref_f32(&a_vals, &b_vals);
@@ -184,7 +187,10 @@ fn gpu_dot_f64_matches_cpu() {
         let y_mm = matmul_differentiable(&a_gpu, &b_gpu).expect("matmul 1Dx1D f64");
 
         assert!(y_dot.is_cuda(), "n={n}: dot f64 result must stay on GPU");
-        assert!(y_mm.is_cuda(), "n={n}: matmul 1Dx1D f64 result must stay on GPU");
+        assert!(
+            y_mm.is_cuda(),
+            "n={n}: matmul 1Dx1D f64 result must stay on GPU"
+        );
 
         let want = cpu_dot_ref_f64(&a_vals, &b_vals);
         let got_dot = read_back_f64(&y_dot);
@@ -223,7 +229,10 @@ fn run_mv_f32_case(m: usize, k: usize) {
     let y_mm = matmul_differentiable(&a_gpu, &x_gpu).expect("matmul 2Dx1D");
 
     assert!(y_mv.is_cuda(), "m={m} k={k}: mv result must stay on GPU");
-    assert!(y_mm.is_cuda(), "m={m} k={k}: matmul 2Dx1D result must stay on GPU");
+    assert!(
+        y_mm.is_cuda(),
+        "m={m} k={k}: matmul 2Dx1D result must stay on GPU"
+    );
     assert_eq!(y_mv.shape(), &[m]);
     assert_eq!(y_mm.shape(), &[m]);
 
@@ -236,12 +245,14 @@ fn run_mv_f32_case(m: usize, k: usize) {
         assert!(
             d_mv <= F32_MATMUL_GPU,
             "mv_f32 m={m} k={k} i={i}: got={} want={} diff={d_mv} gate={F32_MATMUL_GPU}",
-            got_mv[i], want[i]
+            got_mv[i],
+            want[i]
         );
         assert!(
             d_mm <= F32_MATMUL_GPU,
             "matmul 2Dx1D f32 m={m} k={k} i={i}: got={} want={} diff={d_mm} gate={F32_MATMUL_GPU}",
-            got_mm[i], want[i]
+            got_mm[i],
+            want[i]
         );
     }
 }
@@ -269,12 +280,14 @@ fn run_mv_f64_case(m: usize, k: usize) {
         assert!(
             d_mv <= gate,
             "mv_f64 m={m} k={k} i={i}: diff={d_mv} gate={gate} got={} want={}",
-            got_mv[i], want[i]
+            got_mv[i],
+            want[i]
         );
         assert!(
             d_mm <= gate,
             "matmul 2Dx1D f64 m={m} k={k} i={i}: diff={d_mm} gate={gate} got={} want={}",
-            got_mm[i], want[i]
+            got_mm[i],
+            want[i]
         );
     }
 }
@@ -283,7 +296,16 @@ fn run_mv_f64_case(m: usize, k: usize) {
 fn gpu_mv_f32_matches_cpu() {
     ensure_cuda_backend();
     // m and k vary independently; mix sizes to stress alignment/loop.
-    let cases = [(0, 0), (3, 0), (0, 5), (4, 4), (3, 7), (7, 3), (1024, 64), (64, 1024)];
+    let cases = [
+        (0, 0),
+        (3, 0),
+        (0, 5),
+        (4, 4),
+        (3, 7),
+        (7, 3),
+        (1024, 64),
+        (64, 1024),
+    ];
     for (m, k) in cases {
         run_mv_f32_case(m, k);
     }
@@ -292,7 +314,16 @@ fn gpu_mv_f32_matches_cpu() {
 #[test]
 fn gpu_mv_f64_matches_cpu() {
     ensure_cuda_backend();
-    let cases = [(0, 0), (3, 0), (0, 5), (4, 4), (3, 7), (7, 3), (1024, 64), (64, 1024)];
+    let cases = [
+        (0, 0),
+        (3, 0),
+        (0, 5),
+        (4, 4),
+        (3, 7),
+        (7, 3),
+        (1024, 64),
+        (64, 1024),
+    ];
     for (m, k) in cases {
         run_mv_f64_case(m, k);
     }
@@ -321,7 +352,8 @@ fn run_vm_f32_case(k: usize, n: usize) {
         assert!(
             d <= F32_MATMUL_GPU,
             "vm f32 k={k} n={n} j={j}: got={} want={} diff={d} gate={F32_MATMUL_GPU}",
-            got[j], want[j]
+            got[j],
+            want[j]
         );
     }
 }
@@ -341,17 +373,23 @@ fn run_vm_f64_case(k: usize, n: usize) {
     let gate = F64_MATMUL_GPU.max(1e-12 * (k as f64).max(1.0));
     for j in 0..n {
         let d = (got[j] - want[j]).abs();
-        assert!(
-            d <= gate,
-            "vm f64 k={k} n={n} j={j}: diff={d} gate={gate}"
-        );
+        assert!(d <= gate, "vm f64 k={k} n={n} j={j}: diff={d} gate={gate}");
     }
 }
 
 #[test]
 fn gpu_vm_f32_matches_cpu() {
     ensure_cuda_backend();
-    let cases = [(0, 0), (0, 5), (5, 0), (4, 4), (7, 3), (3, 7), (64, 1024), (1024, 64)];
+    let cases = [
+        (0, 0),
+        (0, 5),
+        (5, 0),
+        (4, 4),
+        (7, 3),
+        (3, 7),
+        (64, 1024),
+        (1024, 64),
+    ];
     for (k, n) in cases {
         run_vm_f32_case(k, n);
     }
@@ -360,7 +398,16 @@ fn gpu_vm_f32_matches_cpu() {
 #[test]
 fn gpu_vm_f64_matches_cpu() {
     ensure_cuda_backend();
-    let cases = [(0, 0), (0, 5), (5, 0), (4, 4), (7, 3), (3, 7), (64, 1024), (1024, 64)];
+    let cases = [
+        (0, 0),
+        (0, 5),
+        (5, 0),
+        (4, 4),
+        (7, 3),
+        (3, 7),
+        (64, 1024),
+        (1024, 64),
+    ];
     for (k, n) in cases {
         run_vm_f64_case(k, n);
     }

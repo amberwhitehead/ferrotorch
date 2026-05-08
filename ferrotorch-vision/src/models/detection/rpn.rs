@@ -18,12 +18,12 @@
 //! the surviving proposals are returned as a flat `[N_proposals, 4]` tensor
 //! in xyxy pixel coords.
 
+use ferrotorch_core::grad_fns::activation::relu;
 use ferrotorch_core::numeric_cast::cast;
 use ferrotorch_core::{FerrotorchResult, Float, Tensor, TensorStorage};
+use ferrotorch_nn::Conv2d;
 use ferrotorch_nn::module::Module;
 use ferrotorch_nn::parameter::Parameter;
-use ferrotorch_nn::{Conv2d};
-use ferrotorch_core::grad_fns::activation::relu;
 
 use crate::models::detection::anchor_utils::{AnchorGenerator, decode_boxes};
 use crate::ops::{clip_boxes_to_image, nms, remove_small_boxes};
@@ -49,8 +49,7 @@ impl<T: Float> RpnHead<T> {
     pub fn new(in_channels: usize, num_anchors: usize) -> FerrotorchResult<Self> {
         let conv = Conv2d::new(in_channels, in_channels, (3, 3), (1, 1), (1, 1), true)?;
         let cls_logits = Conv2d::new(in_channels, num_anchors, (1, 1), (1, 1), (0, 0), true)?;
-        let bbox_pred =
-            Conv2d::new(in_channels, num_anchors * 4, (1, 1), (1, 1), (0, 0), true)?;
+        let bbox_pred = Conv2d::new(in_channels, num_anchors * 4, (1, 1), (1, 1), (0, 0), true)?;
         Ok(Self {
             conv,
             cls_logits,
@@ -63,10 +62,7 @@ impl<T: Float> RpnHead<T> {
     /// Returns `(objectness_logits, bbox_deltas)`:
     /// - `objectness_logits`: `[B, A, H, W]`
     /// - `bbox_deltas`: `[B, A*4, H, W]`
-    pub fn forward_level(
-        &self,
-        x: &Tensor<T>,
-    ) -> FerrotorchResult<(Tensor<T>, Tensor<T>)> {
+    pub fn forward_level(&self, x: &Tensor<T>) -> FerrotorchResult<(Tensor<T>, Tensor<T>)> {
         let h = self.conv.forward(x)?;
         let h = relu(&h)?;
         let logits = self.cls_logits.forward(&h)?;
@@ -294,8 +290,11 @@ impl<T: Float> Rpn<T> {
             nms_scores_data.push(sel_scores[i]);
         }
 
-        let nms_boxes_t =
-            Tensor::from_storage(TensorStorage::cpu(nms_boxes_data.clone()), vec![nms_n, 4], false)?;
+        let nms_boxes_t = Tensor::from_storage(
+            TensorStorage::cpu(nms_boxes_data.clone()),
+            vec![nms_n, 4],
+            false,
+        )?;
         let nms_scores_t =
             Tensor::from_storage(TensorStorage::cpu(nms_scores_data), vec![nms_n], false)?;
 
@@ -366,9 +365,7 @@ mod tests {
         let p6 = randn(&[1, 256, 1, 1]).unwrap();
 
         let cfg = RpnConfig::default_eval([64, 64]);
-        let proposals = rpn
-            .forward(&[&p2, &p3, &p4, &p5, &p6], &cfg)
-            .unwrap();
+        let proposals = rpn.forward(&[&p2, &p3, &p4, &p5, &p6], &cfg).unwrap();
 
         // Should produce some proposals; shape is [N, 4].
         assert_eq!(proposals.shape().len(), 2);
@@ -386,9 +383,7 @@ mod tests {
 
         let image_size = [128, 128];
         let cfg = RpnConfig::default_eval(image_size);
-        let proposals = rpn
-            .forward(&[&p2, &p3, &p4, &p5, &p6], &cfg)
-            .unwrap();
+        let proposals = rpn.forward(&[&p2, &p3, &p4, &p5, &p6], &cfg).unwrap();
 
         if proposals.shape()[0] > 0 {
             let data = proposals.data_vec().unwrap();

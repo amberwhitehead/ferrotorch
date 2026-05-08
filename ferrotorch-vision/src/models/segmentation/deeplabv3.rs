@@ -27,12 +27,12 @@
 use ferrotorch_core::grad_fns::activation::relu;
 use ferrotorch_core::grad_fns::arithmetic::add;
 use ferrotorch_core::{FerrotorchResult, Float, Tensor};
-use ferrotorch_nn::norm::BatchNorm2d;
-use ferrotorch_nn::upsample::{InterpolateMode, interpolate};
 use ferrotorch_nn::Conv2d;
 use ferrotorch_nn::module::Module;
+use ferrotorch_nn::norm::BatchNorm2d;
 use ferrotorch_nn::parameter::Parameter;
 use ferrotorch_nn::pooling::MaxPool2d;
+use ferrotorch_nn::upsample::{InterpolateMode, interpolate};
 
 use super::aspp::{Aspp, DilatedConv2d};
 
@@ -45,7 +45,14 @@ fn conv1x1<T: Float>(
     out_planes: usize,
     stride: usize,
 ) -> FerrotorchResult<Conv2d<T>> {
-    Conv2d::new(in_planes, out_planes, (1, 1), (stride, stride), (0, 0), false)
+    Conv2d::new(
+        in_planes,
+        out_planes,
+        (1, 1),
+        (stride, stride),
+        (0, 0),
+        false,
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -74,11 +81,7 @@ impl<T: Float> DilatedBottleneck<T> {
     /// Create a dilated bottleneck.
     ///
     /// `dilation` is applied to the 3×3 middle conv. Stride is always 1.
-    fn new(
-        in_planes: usize,
-        planes: usize,
-        dilation: usize,
-    ) -> FerrotorchResult<Self> {
+    fn new(in_planes: usize, planes: usize, dilation: usize) -> FerrotorchResult<Self> {
         let conv1 = conv1x1(in_planes, planes, 1)?;
         let bn1 = BatchNorm2d::new(planes, 1e-5, 0.1, true)?;
         let conv2_dilated = DilatedConv2d::new(planes, planes, dilation)?;
@@ -398,10 +401,14 @@ fn make_dilated_layer<T: Float>(
 ) -> FerrotorchResult<Vec<Box<dyn Module<T>>>> {
     let mut blocks: Vec<Box<dyn Module<T>>> = Vec::with_capacity(num_blocks);
     // First block may need a downsample projection if channels change.
-    blocks.push(Box::new(DilatedBottleneck::new(in_planes, planes, dilation)?));
+    blocks.push(Box::new(DilatedBottleneck::new(
+        in_planes, planes, dilation,
+    )?));
     let out_planes = planes * EXPANSION;
     for _ in 1..num_blocks {
-        blocks.push(Box::new(DilatedBottleneck::new(out_planes, planes, dilation)?));
+        blocks.push(Box::new(DilatedBottleneck::new(
+            out_planes, planes, dilation,
+        )?));
     }
     Ok(blocks)
 }
@@ -680,7 +687,11 @@ mod tests {
     #[test]
     fn test_deeplabv3_named_parameter_prefixes() {
         let model = deeplabv3_resnet50::<f32>(21).unwrap();
-        let names: Vec<String> = model.named_parameters().into_iter().map(|(n, _)| n).collect();
+        let names: Vec<String> = model
+            .named_parameters()
+            .into_iter()
+            .map(|(n, _)| n)
+            .collect();
         assert!(names.iter().any(|n| n.starts_with("backbone.")));
         assert!(names.iter().any(|n| n.starts_with("head.")));
     }

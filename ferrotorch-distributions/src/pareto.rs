@@ -132,7 +132,10 @@ impl<T: Float> Distribution<T> for Pareto<T> {
     fn variance(&self) -> FerrotorchResult<Tensor<T>> {
         // Reference: torch.distributions.Pareto.variance
         // variance = scale^2 * alpha / ((alpha-1)^2 * (alpha-2))  when alpha > 2, else inf
-        crate::fallback::check_gpu_fallback_opt_in(&[&self.scale, &self.alpha], "Pareto::variance")?;
+        crate::fallback::check_gpu_fallback_opt_in(
+            &[&self.scale, &self.alpha],
+            "Pareto::variance",
+        )?;
         let s = self.scale.data()?;
         let a = self.alpha.data()?;
         let one = <T as num_traits::One>::one();

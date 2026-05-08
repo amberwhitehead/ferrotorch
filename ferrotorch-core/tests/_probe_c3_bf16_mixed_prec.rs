@@ -58,9 +58,8 @@ fn upload_f32(data: &[f32]) -> gpu_dispatch::GpuBufferHandle {
     let backend = gpu_dispatch::gpu_backend().expect("backend registered");
     // SAFETY: reinterpreting &[f32] as &[u8] — same alignment / length
     // contract as every other test in the suite (backend_impl.rs tests).
-    let bytes: &[u8] = unsafe {
-        std::slice::from_raw_parts(data.as_ptr() as *const u8, data.len() * 4)
-    };
+    let bytes: &[u8] =
+        unsafe { std::slice::from_raw_parts(data.as_ptr() as *const u8, data.len() * 4) };
     backend.cpu_to_gpu(bytes, 4, 0).expect("upload f32")
 }
 
@@ -71,9 +70,8 @@ fn download_f32(handle: &gpu_dispatch::GpuBufferHandle) -> Vec<f32> {
     // SAFETY: gpu_to_cpu returns bytes originally from a Vec<f32> allocation
     // (see backend_impl gpu_to_cpu implementation); alignment and element
     // count are both correct.
-    let f32_slice: &[f32] = unsafe {
-        std::slice::from_raw_parts(bytes.as_ptr() as *const f32, bytes.len() / 4)
-    };
+    let f32_slice: &[f32] =
+        unsafe { std::slice::from_raw_parts(bytes.as_ptr() as *const f32, bytes.len() / 4) };
     f32_slice.to_vec()
 }
 
@@ -97,9 +95,8 @@ fn f32_to_bf16_bits(v: f32) -> u16 {
 fn upload_bf16(data: &[f32]) -> gpu_dispatch::GpuBufferHandle {
     // Convert f32 -> bf16 bit patterns on the host, then upload as u16 bytes.
     let bf16_vals: Vec<u16> = data.iter().map(|&v| f32_to_bf16_bits(v)).collect();
-    let bytes: &[u8] = unsafe {
-        std::slice::from_raw_parts(bf16_vals.as_ptr() as *const u8, bf16_vals.len() * 2)
-    };
+    let bytes: &[u8] =
+        unsafe { std::slice::from_raw_parts(bf16_vals.as_ptr() as *const u8, bf16_vals.len() * 2) };
     // elem_size = 2 so the backend stores them as CudaBuffer<u16> / CudaSlice<u16>.
     let backend = gpu_dispatch::gpu_backend().expect("backend registered");
     backend.cpu_to_gpu(bytes, 2, 0).expect("upload bf16")
@@ -147,8 +144,8 @@ fn c3_matmul_bf16_f32_basic() {
     ensure_cuda_backend();
     let backend = gpu_dispatch::gpu_backend().expect("backend");
 
-    let a = vec![1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0];         // [2, 3]
-    let b = vec![7.0f32, 8.0, 9.0, 10.0, 11.0, 12.0];       // [3, 2]
+    let a = vec![1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0]; // [2, 3]
+    let b = vec![7.0f32, 8.0, 9.0, 10.0, 11.0, 12.0]; // [3, 2]
     let expected = cpu_matmul_ref(&a, &b, 2, 3, 2);
 
     let a_gpu = upload_f32(&a);

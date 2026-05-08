@@ -35,8 +35,7 @@ fn fixtures_json() -> serde_json::Value {
             p.display()
         )
     });
-    serde_json::from_slice(&bytes)
-        .unwrap_or_else(|e| panic!("parse {}: {e}", p.display()))
+    serde_json::from_slice(&bytes).unwrap_or_else(|e| panic!("parse {}: {e}", p.display()))
 }
 
 /// Run one flops fixture and assert the expected value.

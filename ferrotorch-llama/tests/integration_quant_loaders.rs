@@ -55,12 +55,11 @@ use std::path::Path;
 
 use ferrotorch_core::{Tensor, TensorStorage};
 use ferrotorch_hub::{HubCache, hf_download_model};
-use ferrotorch_llama::{
-    LlamaActivation, LlamaConfig, LlamaForCausalLM,
-    dequantize_awq_q4, dequantize_gptq_q4,
-    AwqQ4, GptqQ4,
-};
 use ferrotorch_llama::quant_loaders::{HqqWeights, dequantize_hqq};
+use ferrotorch_llama::{
+    AwqQ4, GptqQ4, LlamaActivation, LlamaConfig, LlamaForCausalLM, dequantize_awq_q4,
+    dequantize_gptq_q4,
+};
 use ferrotorch_nn::module::StateDict;
 use ferrotorch_serialize::load_safetensors_auto;
 use serde_json::Value;
@@ -114,8 +113,8 @@ const PROMPT_IDS: &[u32] = &[1, 15043, 29892, 3186, 29991];
 /// Load `ferrotorch-llama/tests/fixtures/quant_loader_expected.json`.
 fn load_expected_fixture() -> Value {
     let manifest_dir = env!("CARGO_MANIFEST_DIR");
-    let path = std::path::PathBuf::from(manifest_dir)
-        .join("tests/fixtures/quant_loader_expected.json");
+    let path =
+        std::path::PathBuf::from(manifest_dir).join("tests/fixtures/quant_loader_expected.json");
     let text = std::fs::read_to_string(&path).unwrap_or_else(|e| {
         panic!(
             "Cannot read quant_loader expected fixture at {}: {e}\n\
@@ -226,7 +225,12 @@ fn gptq_smoke() {
     let seq_len = PROMPT_IDS.len();
     let last_logits = &logits_data[(seq_len - 1) * vocab..seq_len * vocab];
 
-    assert_allclose(last_logits, &expected, F32_TRANSCENDENTAL, "gptq_smoke/last_logits");
+    assert_allclose(
+        last_logits,
+        &expected,
+        F32_TRANSCENDENTAL,
+        "gptq_smoke/last_logits",
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -276,7 +280,12 @@ fn awq_smoke() {
     let seq_len = PROMPT_IDS.len();
     let last_logits = &logits_data[(seq_len - 1) * vocab..seq_len * vocab];
 
-    assert_allclose(last_logits, &expected, F32_TRANSCENDENTAL, "awq_smoke/last_logits");
+    assert_allclose(
+        last_logits,
+        &expected,
+        F32_TRANSCENDENTAL,
+        "awq_smoke/last_logits",
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -326,7 +335,12 @@ fn hqq_smoke() {
     let seq_len = PROMPT_IDS.len();
     let last_logits = &logits_data[(seq_len - 1) * vocab..seq_len * vocab];
 
-    assert_allclose(last_logits, &expected, F32_TRANSCENDENTAL, "hqq_smoke/last_logits");
+    assert_allclose(
+        last_logits,
+        &expected,
+        F32_TRANSCENDENTAL,
+        "hqq_smoke/last_logits",
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -385,8 +399,8 @@ fn load_llama_config_from_dir(model_dir: &Path) -> LlamaConfig {
 /// Build a [`LlamaForCausalLM`], inject `state_dict`, run `forward_from_ids`
 /// on [`PROMPT_IDS`], and return the logit tensor `[1, seq_len, vocab_size]`.
 fn run_forward(cfg: LlamaConfig, state_dict: StateDict<f32>) -> Tensor<f32> {
-    let mut model = LlamaForCausalLM::<f32>::new(cfg)
-        .expect("run_forward: LlamaForCausalLM::new failed");
+    let mut model =
+        LlamaForCausalLM::<f32>::new(cfg).expect("run_forward: LlamaForCausalLM::new failed");
     model
         .load_hf_state_dict(&state_dict, false)
         .expect("run_forward: load_hf_state_dict failed");
@@ -405,10 +419,7 @@ fn run_forward(cfg: LlamaConfig, state_dict: StateDict<f32>) -> Tensor<f32> {
 /// state dict.  Non-quantized tensors (norms, embeddings, lm_head) are
 /// passed through unchanged.
 #[allow(clippy::manual_checked_ops)]
-fn dequantize_gptq_state_dict(
-    raw_sd: &StateDict<f32>,
-    cfg: &LlamaConfig,
-) -> StateDict<f32> {
+fn dequantize_gptq_state_dict(raw_sd: &StateDict<f32>, cfg: &LlamaConfig) -> StateDict<f32> {
     let mut out: StateDict<f32> = HashMap::new();
 
     // Collect unique weight prefixes that have a `qweight` tensor.
@@ -443,7 +454,9 @@ fn dequantize_gptq_state_dict(
         let qzeros_raw = qzeros_t
             .data_vec()
             .expect("dequantize_gptq: qzeros data_vec");
-        let scales_raw = scales_t.data_vec().expect("dequantize_gptq: scales data_vec");
+        let scales_raw = scales_t
+            .data_vec()
+            .expect("dequantize_gptq: scales data_vec");
 
         // Reinterpret f32 storage as i32 (packed int4 tiles are stored as
         // raw bytes in safetensors; the f32 loader preserves the bit pattern).
@@ -451,10 +464,7 @@ fn dequantize_gptq_state_dict(
             .iter()
             .map(|&f| f32::to_bits(f) as i32)
             .collect();
-        let qzeros_i32: Vec<i32> = qzeros_raw
-            .iter()
-            .map(|&f| f32::to_bits(f) as i32)
-            .collect();
+        let qzeros_i32: Vec<i32> = qzeros_raw.iter().map(|&f| f32::to_bits(f) as i32).collect();
 
         let g_idx: Option<Vec<i32>> = raw_sd.get(&g_idx_key).map(|t| {
             t.data_vec()
@@ -518,10 +528,7 @@ fn dequantize_gptq_state_dict(
 /// the parallel `*.qzeros` and `*.scales` tensors, dequantize to f32, and
 /// emit standard `*.weight` keys.  Non-quantized tensors pass through.
 #[allow(clippy::manual_checked_ops)]
-fn dequantize_awq_state_dict(
-    raw_sd: &StateDict<f32>,
-    cfg: &LlamaConfig,
-) -> StateDict<f32> {
+fn dequantize_awq_state_dict(raw_sd: &StateDict<f32>, cfg: &LlamaConfig) -> StateDict<f32> {
     let mut out: StateDict<f32> = HashMap::new();
 
     let prefixes: std::collections::BTreeSet<String> = raw_sd
@@ -554,16 +561,15 @@ fn dequantize_awq_state_dict(
         let qzeros_raw = qzeros_t
             .data_vec()
             .expect("dequantize_awq: qzeros data_vec");
-        let scales_raw = scales_t.data_vec().expect("dequantize_awq: scales data_vec");
+        let scales_raw = scales_t
+            .data_vec()
+            .expect("dequantize_awq: scales data_vec");
 
         let qweight_i32: Vec<i32> = qweight_raw
             .iter()
             .map(|&f| f32::to_bits(f) as i32)
             .collect();
-        let qzeros_i32: Vec<i32> = qzeros_raw
-            .iter()
-            .map(|&f| f32::to_bits(f) as i32)
-            .collect();
+        let qzeros_i32: Vec<i32> = qzeros_raw.iter().map(|&f| f32::to_bits(f) as i32).collect();
 
         // AWQ qweight: [K, N/8] → in_features=K, out_features=N/8*8.
         let in_features = qweight_shape[0];
@@ -594,10 +600,7 @@ fn dequantize_awq_state_dict(
 
     // Pass through non-quantized tensors.
     for (k, v) in raw_sd {
-        if !k.ends_with(".qweight")
-            && !k.ends_with(".qzeros")
-            && !k.ends_with(".scales")
-        {
+        if !k.ends_with(".qweight") && !k.ends_with(".qzeros") && !k.ends_with(".scales") {
             out.insert(k.clone(), v.clone());
         }
     }
@@ -616,10 +619,7 @@ fn dequantize_awq_state_dict(
 ///
 /// HQQ checkpoints store: `{prefix}.W_q`, `{prefix}.meta.scale`,
 /// `{prefix}.meta.zero`, `{prefix}.meta.nbits`.
-fn dequantize_hqq_state_dict(
-    raw_sd: &StateDict<f32>,
-    cfg: &LlamaConfig,
-) -> StateDict<f32> {
+fn dequantize_hqq_state_dict(raw_sd: &StateDict<f32>, cfg: &LlamaConfig) -> StateDict<f32> {
     let mut out: StateDict<f32> = HashMap::new();
 
     let prefixes: std::collections::BTreeSet<String> = raw_sd

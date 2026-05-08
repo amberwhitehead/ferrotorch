@@ -33,12 +33,10 @@ use serde_json::Value;
 /// (resolved at compile time via `CARGO_MANIFEST_DIR`).
 fn load_fixtures() -> Value {
     let manifest_dir = env!("CARGO_MANIFEST_DIR");
-    let path = std::path::PathBuf::from(manifest_dir)
-        .join("tests/conformance/fixtures/llama.json");
+    let path = std::path::PathBuf::from(manifest_dir).join("tests/conformance/fixtures/llama.json");
     let text = std::fs::read_to_string(&path)
         .unwrap_or_else(|e| panic!("cannot read fixture file {}: {e}", path.display()));
-    serde_json::from_str(&text)
-        .unwrap_or_else(|e| panic!("fixture JSON parse error: {e}"))
+    serde_json::from_str(&text).unwrap_or_else(|e| panic!("fixture JSON parse error: {e}"))
 }
 
 /// Find a fixture with the given `op` and `tag`.
@@ -169,7 +167,9 @@ fn run_rms_norm_fixture(fx: &Value) {
         .unwrap_or_else(|e| panic!("{ctx}: forward failed: {e}"));
 
     assert_shape(&out, &input_shape, &ctx);
-    let actual = out.data_vec().unwrap_or_else(|e| panic!("{ctx}: data_vec failed: {e}"));
+    let actual = out
+        .data_vec()
+        .unwrap_or_else(|e| panic!("{ctx}: data_vec failed: {e}"));
     assert_allclose(&actual, &expected, F32_MATMUL_TOL, &ctx);
 }
 
@@ -558,11 +558,10 @@ fn conformance_decoder_layer_seq4_2norm_attn_mlp() {
 // Full causal LM forward tests
 // ---------------------------------------------------------------------------
 
-fn build_causal_lm_state_dict(
-    fx: &Value,
-    cfg: &LlamaConfig,
-) -> StateDict<f32> {
-    let sd_json = fx["state_dict"].as_object().expect("state_dict must be a JSON object");
+fn build_causal_lm_state_dict(fx: &Value, cfg: &LlamaConfig) -> StateDict<f32> {
+    let sd_json = fx["state_dict"]
+        .as_object()
+        .expect("state_dict must be a JSON object");
     let hidden = cfg.hidden_size;
     let vocab = cfg.vocab_size;
     let intermediate = cfg.intermediate_size;
@@ -599,8 +598,7 @@ fn build_causal_lm_state_dict(
             panic!("build_causal_lm_state_dict: unrecognised key {key}");
         };
 
-        let tensor = from_vec(data, &shape)
-            .unwrap_or_else(|e| panic!("tensor for {key}: {e}"));
+        let tensor = from_vec(data, &shape).unwrap_or_else(|e| panic!("tensor for {key}: {e}"));
         // The fixture uses model-prefixed names (HF layout).  LlamaForCausalLM::load_state_dict
         // expects model-prefixed keys, so we keep them as-is.
         sd.insert(key.clone(), tensor);
@@ -658,8 +656,7 @@ fn run_causal_lm_fixture(fx: &Value, cfg: &LlamaConfig) {
         .map(|(i, _)| i as u32)
         .expect("logits must be non-empty");
     assert_eq!(
-        greedy,
-        greedy_next_token,
+        greedy, greedy_next_token,
         "{ctx}: greedy next token mismatch: got {greedy} expected {greedy_next_token}"
     );
 }
@@ -669,7 +666,10 @@ fn conformance_causal_lm_end_to_end_seq4() {
     let root = load_fixtures();
     let cfg = tiny_cfg(&root);
     let fixtures = root["fixtures"].as_array().unwrap();
-    run_causal_lm_fixture(get_fixture(fixtures, "causal_lm_forward", "end_to_end_seq4"), &cfg);
+    run_causal_lm_fixture(
+        get_fixture(fixtures, "causal_lm_forward", "end_to_end_seq4"),
+        &cfg,
+    );
 }
 
 #[test]
@@ -677,7 +677,10 @@ fn conformance_causal_lm_single_token() {
     let root = load_fixtures();
     let cfg = tiny_cfg(&root);
     let fixtures = root["fixtures"].as_array().unwrap();
-    run_causal_lm_fixture(get_fixture(fixtures, "causal_lm_forward", "single_token"), &cfg);
+    run_causal_lm_fixture(
+        get_fixture(fixtures, "causal_lm_forward", "single_token"),
+        &cfg,
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -722,7 +725,11 @@ fn run_config_validation_fixture(fx: &Value) {
 fn conformance_config_validation_zero_hidden_size() {
     let root = load_fixtures();
     let fixtures = root["fixtures"].as_array().unwrap();
-    run_config_validation_fixture(get_fixture(fixtures, "config_validation", "zero_hidden_size"));
+    run_config_validation_fixture(get_fixture(
+        fixtures,
+        "config_validation",
+        "zero_hidden_size",
+    ));
 }
 
 #[test]

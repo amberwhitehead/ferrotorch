@@ -86,8 +86,7 @@ fn load_fixtures() -> FixtureFile {
             path.display()
         )
     });
-    serde_json::from_str(&raw)
-        .unwrap_or_else(|e| panic!("parse {} failed: {e}", path.display()))
+    serde_json::from_str(&raw).unwrap_or_else(|e| panic!("parse {} failed: {e}", path.display()))
 }
 
 // ---------------------------------------------------------------------------
@@ -363,11 +362,19 @@ struct MockOptimizer<T: Float> {
 
 impl<T: Float> MockOptimizer<T> {
     fn new(lr: f64) -> Self {
-        Self { lr, param_groups: Vec::new(), step_called: false }
+        Self {
+            lr,
+            param_groups: Vec::new(),
+            step_called: false,
+        }
     }
     fn with_params(lr: f64, params: Vec<Parameter<T>>) -> Self {
         let group = ParamGroup::new(params, lr);
-        Self { lr, param_groups: vec![group], step_called: false }
+        Self {
+            lr,
+            param_groups: vec![group],
+            step_called: false,
+        }
     }
 }
 
@@ -384,13 +391,27 @@ impl<T: Float> Optimizer<T> for MockOptimizer<T> {
         }
         Ok(())
     }
-    fn lr(&self) -> f64 { self.lr }
-    fn set_lr(&mut self, lr: f64) { self.lr = lr; }
-    fn param_groups(&self) -> &[ParamGroup<T>] { &self.param_groups }
-    fn param_groups_mut(&mut self) -> &mut [ParamGroup<T>] { &mut self.param_groups }
-    fn add_param_group(&mut self, g: ParamGroup<T>) { self.param_groups.push(g); }
-    fn state_dict(&self) -> FerrotorchResult<OptimizerState> { Ok(OptimizerState::new()) }
-    fn load_state_dict(&mut self, _: &OptimizerState) -> FerrotorchResult<()> { Ok(()) }
+    fn lr(&self) -> f64 {
+        self.lr
+    }
+    fn set_lr(&mut self, lr: f64) {
+        self.lr = lr;
+    }
+    fn param_groups(&self) -> &[ParamGroup<T>] {
+        &self.param_groups
+    }
+    fn param_groups_mut(&mut self) -> &mut [ParamGroup<T>] {
+        &mut self.param_groups
+    }
+    fn add_param_group(&mut self, g: ParamGroup<T>) {
+        self.param_groups.push(g);
+    }
+    fn state_dict(&self) -> FerrotorchResult<OptimizerState> {
+        Ok(OptimizerState::new())
+    }
+    fn load_state_dict(&mut self, _: &OptimizerState) -> FerrotorchResult<()> {
+        Ok(())
+    }
 }
 
 // ===========================================================================
@@ -418,7 +439,8 @@ fn ema_single_step_matches_reference() {
         assert!(
             (g - exp_f32).abs() < tolerance::F32_EMA_CPU,
             "[{}] element {i}: expected {exp_f32}, got {g} (label: {})",
-            f.kind, f.label
+            f.kind,
+            f.label
         );
     }
 }
@@ -440,7 +462,8 @@ fn ema_multi_step_matches_reference() {
         assert!(
             (got - exp_f32).abs() < tolerance::F32_EMA_CPU,
             "[{}] step {step_idx}: expected {exp_f32}, got {got} (label: {})",
-            f.kind, f.label
+            f.kind,
+            f.label
         );
     }
 }
@@ -461,7 +484,8 @@ fn ema_decay_zero_full_replace() {
     assert!(
         (got - exp).abs() < tolerance::F32_EMA_CPU,
         "[{}] expected {exp}, got {got} (label: {})",
-        f.kind, f.label
+        f.kind,
+        f.label
     );
 }
 
@@ -481,7 +505,8 @@ fn ema_decay_one_freezes_shadow() {
     assert!(
         (got - exp).abs() < tolerance::F32_EMA_CPU,
         "[{}] expected {exp}, got {got} (label: {})",
-        f.kind, f.label
+        f.kind,
+        f.label
     );
 }
 
@@ -513,13 +538,20 @@ fn ema_apply_and_restore_roundtrip() {
 #[test]
 fn swa_running_mean_matches_reference() {
     let fx = load_fixtures();
-    let f = fx.swa.iter().find(|f| f.kind == "swa_running_mean").unwrap();
+    let f = fx
+        .swa
+        .iter()
+        .find(|f| f.kind == "swa_running_mean")
+        .unwrap();
 
     let p = Parameter::from_slice(&[0.0f32], &[1]).unwrap();
     let mut avg = AveragedModel::new(std::slice::from_ref(&p), AveragingStrategy::Swa);
 
-    for (step_idx, (&checkpoint, &exp)) in
-        f.checkpoints.iter().zip(f.expected_running.iter()).enumerate()
+    for (step_idx, (&checkpoint, &exp)) in f
+        .checkpoints
+        .iter()
+        .zip(f.expected_running.iter())
+        .enumerate()
     {
         no_grad(|| unsafe { p.tensor().update_data(&[checkpoint as f32]) }).unwrap();
         avg.update_parameters(std::slice::from_ref(&p)).unwrap();
@@ -537,7 +569,11 @@ fn swa_running_mean_matches_reference() {
 #[test]
 fn swa_identical_checkpoints_converge_to_value() {
     let fx = load_fixtures();
-    let f = fx.swa.iter().find(|f| f.kind == "swa_identical_checkpoints").unwrap();
+    let f = fx
+        .swa
+        .iter()
+        .find(|f| f.kind == "swa_identical_checkpoints")
+        .unwrap();
 
     let val = f.checkpoint_value as f32;
     let p = Parameter::from_slice(&[val], &[1]).unwrap();
@@ -558,10 +594,17 @@ fn swa_identical_checkpoints_converge_to_value() {
 #[test]
 fn swa_ema_strategy_matches_reference() {
     let fx = load_fixtures();
-    let f = fx.swa.iter().find(|f| f.kind == "swa_ema_two_steps").unwrap();
+    let f = fx
+        .swa
+        .iter()
+        .find(|f| f.kind == "swa_ema_two_steps")
+        .unwrap();
 
     let p = Parameter::from_slice(&[f.first_checkpoint as f32], &[1]).unwrap();
-    let mut avg = AveragedModel::new(std::slice::from_ref(&p), AveragingStrategy::Ema(f.ema_decay));
+    let mut avg = AveragedModel::new(
+        std::slice::from_ref(&p),
+        AveragingStrategy::Ema(f.ema_decay),
+    );
 
     // First update: copies the first checkpoint.
     avg.update_parameters(std::slice::from_ref(&p)).unwrap();
@@ -594,8 +637,16 @@ fn swa_apply_to_sets_param_to_average() {
 
     avg.apply_to(std::slice::from_ref(&p)).unwrap();
     let data = p.data().unwrap();
-    assert!((data[0] - 2.0f32).abs() < 1e-5f32, "expected 2.0, got {}", data[0]);
-    assert!((data[1] - 3.0f32).abs() < 1e-5f32, "expected 3.0, got {}", data[1]);
+    assert!(
+        (data[0] - 2.0f32).abs() < 1e-5f32,
+        "expected 2.0, got {}",
+        data[0]
+    );
+    assert!(
+        (data[1] - 3.0f32).abs() < 1e-5f32,
+        "expected 3.0, got {}",
+        data[1]
+    );
 }
 
 // ===========================================================================
@@ -607,7 +658,11 @@ fn swalr_cosine_sequence_matches_reference() {
     let fx = load_fixtures();
     let f = fx.swalr.iter().find(|f| f.kind == "swalr_cosine").unwrap();
 
-    let mut sched = Swalr::new(f.swa_lr, f.anneal_epochs, ferrotorch_optim::swa::AnnealStrategy::Cosine);
+    let mut sched = Swalr::new(
+        f.swa_lr,
+        f.anneal_epochs,
+        ferrotorch_optim::swa::AnnealStrategy::Cosine,
+    );
     let mut opt: MockOptimizer<f32> = MockOptimizer::new(f.initial_lr);
 
     for (step_idx, &exp_lr) in f.lr_sequence.iter().enumerate() {
@@ -615,7 +670,8 @@ fn swalr_cosine_sequence_matches_reference() {
         assert!(
             (opt.lr - exp_lr).abs() < 1e-10,
             "[swalr_cosine] step {step_idx}: expected {exp_lr}, got {} (label: {})",
-            opt.lr, f.label
+            opt.lr,
+            f.label
         );
     }
 
@@ -623,16 +679,26 @@ fn swalr_cosine_sequence_matches_reference() {
     assert!(
         (opt.lr - f.expected_final_lr).abs() < 1e-10,
         "[swalr_cosine] final lr: expected {}, got {} (label: {})",
-        f.expected_final_lr, opt.lr, f.label
+        f.expected_final_lr,
+        opt.lr,
+        f.label
     );
 }
 
 #[test]
 fn swalr_cosine_midpoint_matches_reference() {
     let fx = load_fixtures();
-    let f = fx.swalr.iter().find(|f| f.kind == "swalr_cosine_midpoint").unwrap();
+    let f = fx
+        .swalr
+        .iter()
+        .find(|f| f.kind == "swalr_cosine_midpoint")
+        .unwrap();
 
-    let mut sched = Swalr::new(f.swa_lr, f.anneal_epochs, ferrotorch_optim::swa::AnnealStrategy::Cosine);
+    let mut sched = Swalr::new(
+        f.swa_lr,
+        f.anneal_epochs,
+        ferrotorch_optim::swa::AnnealStrategy::Cosine,
+    );
     let mut opt: MockOptimizer<f32> = MockOptimizer::new(f.initial_lr);
 
     for _ in 0..f.step {
@@ -642,16 +708,26 @@ fn swalr_cosine_midpoint_matches_reference() {
     assert!(
         (opt.lr - f.expected_lr).abs() < 1e-10,
         "[swalr_cosine_midpoint] expected {}, got {} (label: {})",
-        f.expected_lr, opt.lr, f.label
+        f.expected_lr,
+        opt.lr,
+        f.label
     );
 }
 
 #[test]
 fn swalr_linear_midpoint_matches_reference() {
     let fx = load_fixtures();
-    let f = fx.swalr.iter().find(|f| f.kind == "swalr_linear_midpoint").unwrap();
+    let f = fx
+        .swalr
+        .iter()
+        .find(|f| f.kind == "swalr_linear_midpoint")
+        .unwrap();
 
-    let mut sched = Swalr::new(f.swa_lr, f.anneal_epochs, ferrotorch_optim::swa::AnnealStrategy::Linear);
+    let mut sched = Swalr::new(
+        f.swa_lr,
+        f.anneal_epochs,
+        ferrotorch_optim::swa::AnnealStrategy::Linear,
+    );
     let mut opt: MockOptimizer<f32> = MockOptimizer::new(f.initial_lr);
 
     for _ in 0..f.step {
@@ -661,16 +737,26 @@ fn swalr_linear_midpoint_matches_reference() {
     assert!(
         (opt.lr - f.expected_lr).abs() < 1e-10,
         "[swalr_linear_midpoint] expected {}, got {} (label: {})",
-        f.expected_lr, opt.lr, f.label
+        f.expected_lr,
+        opt.lr,
+        f.label
     );
 }
 
 #[test]
 fn swalr_linear_endpoint_matches_reference() {
     let fx = load_fixtures();
-    let f = fx.swalr.iter().find(|f| f.kind == "swalr_linear_endpoint").unwrap();
+    let f = fx
+        .swalr
+        .iter()
+        .find(|f| f.kind == "swalr_linear_endpoint")
+        .unwrap();
 
-    let mut sched = Swalr::new(f.swa_lr, f.anneal_epochs, ferrotorch_optim::swa::AnnealStrategy::Linear);
+    let mut sched = Swalr::new(
+        f.swa_lr,
+        f.anneal_epochs,
+        ferrotorch_optim::swa::AnnealStrategy::Linear,
+    );
     let mut opt: MockOptimizer<f32> = MockOptimizer::new(f.initial_lr);
 
     for _ in 0..f.step {
@@ -680,16 +766,26 @@ fn swalr_linear_endpoint_matches_reference() {
     assert!(
         (opt.lr - f.expected_lr).abs() < 1e-10,
         "[swalr_linear_endpoint] expected {}, got {} (label: {})",
-        f.expected_lr, opt.lr, f.label
+        f.expected_lr,
+        opt.lr,
+        f.label
     );
 }
 
 #[test]
 fn swalr_post_anneal_stays_at_swa_lr() {
     let fx = load_fixtures();
-    let f = fx.swalr.iter().find(|f| f.kind == "swalr_cosine_post_anneal").unwrap();
+    let f = fx
+        .swalr
+        .iter()
+        .find(|f| f.kind == "swalr_cosine_post_anneal")
+        .unwrap();
 
-    let mut sched = Swalr::new(f.swa_lr, f.anneal_epochs, ferrotorch_optim::swa::AnnealStrategy::Cosine);
+    let mut sched = Swalr::new(
+        f.swa_lr,
+        f.anneal_epochs,
+        ferrotorch_optim::swa::AnnealStrategy::Cosine,
+    );
     let mut opt: MockOptimizer<f32> = MockOptimizer::new(f.initial_lr);
 
     for _ in 0..f.step {
@@ -699,7 +795,9 @@ fn swalr_post_anneal_stays_at_swa_lr() {
     assert!(
         (opt.lr - f.expected_lr).abs() < 1e-10,
         "[swalr_post_anneal] expected {}, got {} (label: {})",
-        f.expected_lr, opt.lr, f.label
+        f.expected_lr,
+        opt.lr,
+        f.label
     );
 }
 
@@ -710,13 +808,14 @@ fn swalr_post_anneal_stays_at_swa_lr() {
 #[test]
 fn lbfgs_converges_on_quadratic() {
     let fx = load_fixtures();
-    let f = fx.lbfgs.iter().find(|f| f.kind == "lbfgs_quadratic_convergence").unwrap();
+    let f = fx
+        .lbfgs
+        .iter()
+        .find(|f| f.kind == "lbfgs_quadratic_convergence")
+        .unwrap();
 
     let p = scalar_param(f.initial_x);
-    let mut opt = Lbfgs::new(
-        vec![p],
-        LbfgsConfig::default().with_lr(f.lr),
-    );
+    let mut opt = Lbfgs::new(vec![p], LbfgsConfig::default().with_lr(f.lr));
 
     for _ in 0..f.n_steps {
         opt.zero_grad().unwrap();
@@ -730,20 +829,23 @@ fn lbfgs_converges_on_quadratic() {
     assert!(
         val.abs() < f.convergence_tolerance * tolerance::CONVERGENCE_MARGIN,
         "[lbfgs_quadratic_convergence] expected |x| < {}, got |x| = {} (label: {})",
-        f.convergence_tolerance, val.abs(), f.label
+        f.convergence_tolerance,
+        val.abs(),
+        f.label
     );
 }
 
 #[test]
 fn lbfgs_converges_on_multidim_quadratic() {
     let fx = load_fixtures();
-    let f = fx.lbfgs.iter().find(|f| f.kind == "lbfgs_multidim_quadratic_convergence").unwrap();
+    let f = fx
+        .lbfgs
+        .iter()
+        .find(|f| f.kind == "lbfgs_multidim_quadratic_convergence")
+        .unwrap();
 
     let params: Vec<Parameter<f64>> = f.initial_params.iter().map(|&v| scalar_param(v)).collect();
-    let mut opt = Lbfgs::new(
-        params,
-        LbfgsConfig::default().with_lr(f.lr),
-    );
+    let mut opt = Lbfgs::new(params, LbfgsConfig::default().with_lr(f.lr));
 
     for _ in 0..f.n_steps {
         opt.zero_grad().unwrap();
@@ -761,7 +863,9 @@ fn lbfgs_converges_on_multidim_quadratic() {
         assert!(
             val.abs() < f.convergence_tolerance * tolerance::CONVERGENCE_MARGIN,
             "[lbfgs_multidim] param[{i}]: expected |v| < {}, got |v| = {} (label: {})",
-            f.convergence_tolerance, val.abs(), f.label
+            f.convergence_tolerance,
+            val.abs(),
+            f.label
         );
     }
 }
@@ -802,7 +906,9 @@ fn lbfgs_history_bounded_by_history_size() {
     let history_size = 3usize;
     let mut opt = Lbfgs::new(
         vec![p],
-        LbfgsConfig::default().with_lr(0.1).with_history_size(history_size),
+        LbfgsConfig::default()
+            .with_lr(0.1)
+            .with_history_size(history_size),
     );
 
     for _ in 0..15 {
@@ -830,9 +936,15 @@ fn lbfgs_step_requires_closure_for_line_search() {
         LbfgsConfig::default().with_line_search_fn(Some(LineSearchFn::StrongWolfe)),
     );
     let grad = t64(&[1.0], &[]);
-    opt.param_groups_mut()[0].params()[0].tensor().set_grad(Some(grad)).unwrap();
+    opt.param_groups_mut()[0].params()[0]
+        .tensor()
+        .set_grad(Some(grad))
+        .unwrap();
     let result = opt.step();
-    assert!(result.is_err(), "[lbfgs_contract] step without closure should error");
+    assert!(
+        result.is_err(),
+        "[lbfgs_contract] step without closure should error"
+    );
 }
 
 // ===========================================================================
@@ -842,22 +954,30 @@ fn lbfgs_step_requires_closure_for_line_search() {
 #[test]
 fn grad_scaler_default_init_scale_matches_reference() {
     let fx = load_fixtures();
-    let f = fx.grad_scaler.iter()
-        .find(|f| f.kind == "grad_scaler_default_init_scale").unwrap();
+    let f = fx
+        .grad_scaler
+        .iter()
+        .find(|f| f.kind == "grad_scaler_default_init_scale")
+        .unwrap();
 
     let scaler = GradScaler::<f32>::new(GradScalerConfig::default());
     assert!(
         (scaler.get_scale() - f.expected_init_scale).abs() < tolerance::F64_OPTIMIZER_CPU,
         "[grad_scaler_default] expected {}, got {} (label: {})",
-        f.expected_init_scale, scaler.get_scale(), f.label
+        f.expected_init_scale,
+        scaler.get_scale(),
+        f.label
     );
 }
 
 #[test]
 fn grad_scaler_inf_halves_scale_matches_reference() {
     let fx = load_fixtures();
-    let f = fx.grad_scaler.iter()
-        .find(|f| f.kind == "grad_scaler_inf_halves_scale").unwrap();
+    let f = fx
+        .grad_scaler
+        .iter()
+        .find(|f| f.kind == "grad_scaler_inf_halves_scale")
+        .unwrap();
 
     let config = GradScalerConfig::default()
         .with_init_scale(f.init_scale)
@@ -871,13 +991,18 @@ fn grad_scaler_inf_halves_scale_matches_reference() {
     let mut opt = MockOptimizer::with_params(0.01, vec![p]);
     let stepped = scaler.step(&mut opt).unwrap();
     assert!(!stepped, "[grad_scaler_inf] step should be skipped");
-    assert!(!opt.step_called, "[grad_scaler_inf] optimizer must not be called");
+    assert!(
+        !opt.step_called,
+        "[grad_scaler_inf] optimizer must not be called"
+    );
 
     scaler.update();
     assert!(
         (scaler.get_scale() - f.expected_scale_after_update).abs() < tolerance::F64_OPTIMIZER_CPU,
         "[grad_scaler_inf] expected scale {}, got {} (label: {})",
-        f.expected_scale_after_update, scaler.get_scale(), f.label
+        f.expected_scale_after_update,
+        scaler.get_scale(),
+        f.label
     );
 }
 
@@ -898,8 +1023,11 @@ fn grad_scaler_nan_skips_step() {
 #[test]
 fn grad_scaler_growth_after_interval_matches_reference() {
     let fx = load_fixtures();
-    let f = fx.grad_scaler.iter()
-        .find(|f| f.kind == "grad_scaler_growth_after_interval").unwrap();
+    let f = fx
+        .grad_scaler
+        .iter()
+        .find(|f| f.kind == "grad_scaler_growth_after_interval")
+        .unwrap();
 
     let config = GradScalerConfig::default()
         .with_init_scale(f.init_scale)
@@ -920,15 +1048,20 @@ fn grad_scaler_growth_after_interval_matches_reference() {
     assert!(
         (scaler.get_scale() - f.expected_scale_after_growth).abs() < tolerance::F64_OPTIMIZER_CPU,
         "[grad_scaler_growth] expected scale {}, got {} (label: {})",
-        f.expected_scale_after_growth, scaler.get_scale(), f.label
+        f.expected_scale_after_growth,
+        scaler.get_scale(),
+        f.label
     );
 }
 
 #[test]
 fn grad_scaler_state_dict_roundtrip_matches_reference() {
     let fx = load_fixtures();
-    let f = fx.grad_scaler.iter()
-        .find(|f| f.kind == "grad_scaler_state_dict_roundtrip").unwrap();
+    let f = fx
+        .grad_scaler
+        .iter()
+        .find(|f| f.kind == "grad_scaler_state_dict_roundtrip")
+        .unwrap();
 
     let config = GradScalerConfig::default()
         .with_init_scale(f.init_scale)
@@ -954,7 +1087,9 @@ fn grad_scaler_state_dict_roundtrip_matches_reference() {
     assert!(
         (state.scale_factor - f.init_scale).abs() < tolerance::F64_OPTIMIZER_CPU,
         "[grad_scaler_state_dict] scale: expected {}, got {} (label: {})",
-        f.init_scale, state.scale_factor, f.label
+        f.init_scale,
+        state.scale_factor,
+        f.label
     );
 
     // Round-trip into a fresh scaler.
@@ -985,7 +1120,10 @@ fn grad_scaler_disabled_passthrough() {
     let mut opt = MockOptimizer::with_params(0.01, vec![p]);
     let stepped = scaler.step(&mut opt).unwrap();
     assert!(stepped, "[grad_scaler_disabled] should always step");
-    assert!(opt.step_called, "[grad_scaler_disabled] optimizer must be called");
+    assert!(
+        opt.step_called,
+        "[grad_scaler_disabled] optimizer must be called"
+    );
 }
 
 #[test]
@@ -1004,9 +1142,21 @@ fn grad_scaler_unscale_divides_gradients() {
 
     let unscaled = opt.param_groups()[0].params()[0].grad().unwrap().unwrap();
     let data = unscaled.data().unwrap();
-    assert!((data[0] - 1.0f32).abs() < 1e-5f32, "expected 1.0, got {}", data[0]);
-    assert!((data[1] - 2.0f32).abs() < 1e-5f32, "expected 2.0, got {}", data[1]);
-    assert!((data[2] - 3.0f32).abs() < 1e-5f32, "expected 3.0, got {}", data[2]);
+    assert!(
+        (data[0] - 1.0f32).abs() < 1e-5f32,
+        "expected 1.0, got {}",
+        data[0]
+    );
+    assert!(
+        (data[1] - 2.0f32).abs() < 1e-5f32,
+        "expected 2.0, got {}",
+        data[1]
+    );
+    assert!(
+        (data[2] - 3.0f32).abs() < 1e-5f32,
+        "expected 3.0, got {}",
+        data[2]
+    );
 }
 
 // ===========================================================================
@@ -1016,8 +1166,11 @@ fn grad_scaler_unscale_divides_gradients() {
 #[test]
 fn grad_accumulator_should_step_cycle_matches_reference() {
     let fx = load_fixtures();
-    let f = fx.grad_accumulator.iter()
-        .find(|f| f.kind == "grad_accum_should_step_cycle").unwrap();
+    let f = fx
+        .grad_accumulator
+        .iter()
+        .find(|f| f.kind == "grad_accum_should_step_cycle")
+        .unwrap();
 
     let mut acc = GradientAccumulator::new(f.accumulation_steps);
     for (call_idx, &expected) in f.expected_results.iter().enumerate() {
@@ -1033,8 +1186,11 @@ fn grad_accumulator_should_step_cycle_matches_reference() {
 #[test]
 fn grad_accumulator_scale_loss_matches_reference() {
     let fx = load_fixtures();
-    let f = fx.grad_accumulator.iter()
-        .find(|f| f.kind == "grad_accum_scale_loss").unwrap();
+    let f = fx
+        .grad_accumulator
+        .iter()
+        .find(|f| f.kind == "grad_accum_scale_loss")
+        .unwrap();
 
     let acc = GradientAccumulator::new(f.accumulation_steps);
     let loss = t64(&[f.loss], &[1]);
@@ -1043,15 +1199,19 @@ fn grad_accumulator_scale_loss_matches_reference() {
     assert!(
         (got - f.expected_scaled).abs() < tolerance::F64_OPTIMIZER_CPU,
         "[grad_accum_scale] expected {}, got {got} (label: {})",
-        f.expected_scaled, f.label
+        f.expected_scaled,
+        f.label
     );
 }
 
 #[test]
 fn grad_accumulator_scale_loss_identity_with_steps_one() {
     let fx = load_fixtures();
-    let f = fx.grad_accumulator.iter()
-        .find(|f| f.kind == "grad_accum_scale_loss_identity").unwrap();
+    let f = fx
+        .grad_accumulator
+        .iter()
+        .find(|f| f.kind == "grad_accum_scale_loss_identity")
+        .unwrap();
 
     let acc = GradientAccumulator::new(f.accumulation_steps);
     let loss = t64(&[f.loss], &[1]);
@@ -1060,15 +1220,19 @@ fn grad_accumulator_scale_loss_identity_with_steps_one() {
     assert!(
         (got - f.expected_scaled).abs() < tolerance::F64_OPTIMIZER_CPU,
         "[grad_accum_identity] expected {}, got {got} (label: {})",
-        f.expected_scaled, f.label
+        f.expected_scaled,
+        f.label
     );
 }
 
 #[test]
 fn grad_accumulator_mean_over_batches_matches_reference() {
     let fx = load_fixtures();
-    let f = fx.grad_accumulator.iter()
-        .find(|f| f.kind == "grad_accum_mean_over_batches").unwrap();
+    let f = fx
+        .grad_accumulator
+        .iter()
+        .find(|f| f.kind == "grad_accum_mean_over_batches")
+        .unwrap();
 
     let acc = GradientAccumulator::new(f.n_accumulate);
     let mut total_scaled = 0.0f64;
@@ -1080,7 +1244,8 @@ fn grad_accumulator_mean_over_batches_matches_reference() {
     assert!(
         (total_scaled - f.expected_mean_loss).abs() < tolerance::F64_OPTIMIZER_CPU,
         "[grad_accum_mean] expected {}, got {total_scaled} (label: {})",
-        f.expected_mean_loss, f.label
+        f.expected_mean_loss,
+        f.label
     );
 }
 
@@ -1098,13 +1263,18 @@ fn grad_accumulator_zero_steps_panics() {
 #[test]
 fn diff_sgd_step_matches_reference() {
     let fx = load_fixtures();
-    let f = fx.differentiable.iter().find(|f| f.kind == "diff_sgd_step").unwrap();
+    let f = fx
+        .differentiable
+        .iter()
+        .find(|f| f.kind == "diff_sgd_step")
+        .unwrap();
 
     let param = Tensor::from_storage(
         TensorStorage::cpu(f.param.clone()),
         vec![f.param.len()],
         true,
-    ).unwrap();
+    )
+    .unwrap();
     let grad = t64(&f.grad, &[f.grad.len()]);
     let out = diff_sgd_step(&[param], &[grad], f.lr).unwrap();
 
@@ -1121,11 +1291,17 @@ fn diff_sgd_step_matches_reference() {
 #[test]
 fn diff_sgd_step_multi_param_matches_reference() {
     let fx = load_fixtures();
-    let f = fx.differentiable.iter().find(|f| f.kind == "diff_sgd_step_multi_param").unwrap();
+    let f = fx
+        .differentiable
+        .iter()
+        .find(|f| f.kind == "diff_sgd_step_multi_param")
+        .unwrap();
 
-    let params: Vec<Tensor<f64>> = f.params.iter().map(|p| {
-        Tensor::from_storage(TensorStorage::cpu(p.clone()), vec![p.len()], true).unwrap()
-    }).collect();
+    let params: Vec<Tensor<f64>> = f
+        .params
+        .iter()
+        .map(|p| Tensor::from_storage(TensorStorage::cpu(p.clone()), vec![p.len()], true).unwrap())
+        .collect();
     let grads: Vec<Tensor<f64>> = f.grads.iter().map(|g| t64(g, &[g.len()])).collect();
     let out = diff_sgd_step(&params, &grads, f.lr).unwrap();
 
@@ -1144,13 +1320,18 @@ fn diff_sgd_step_multi_param_matches_reference() {
 #[test]
 fn diff_sgd_momentum_step_matches_reference() {
     let fx = load_fixtures();
-    let f = fx.differentiable.iter().find(|f| f.kind == "diff_sgd_momentum_step").unwrap();
+    let f = fx
+        .differentiable
+        .iter()
+        .find(|f| f.kind == "diff_sgd_momentum_step")
+        .unwrap();
 
     let param = Tensor::from_storage(
         TensorStorage::cpu(f.param.clone()),
         vec![f.param.len()],
         true,
-    ).unwrap();
+    )
+    .unwrap();
     let grad = t64(&f.grad, &[f.grad.len()]);
     let v_prev = t64(&f.v_prev, &[f.v_prev.len()]);
 
@@ -1179,19 +1360,27 @@ fn diff_sgd_momentum_step_matches_reference() {
 #[test]
 fn diff_sgd_momentum_first_step_matches_reference() {
     let fx = load_fixtures();
-    let f = fx.differentiable.iter().find(|f| f.kind == "diff_sgd_momentum_step_first").unwrap();
+    let f = fx
+        .differentiable
+        .iter()
+        .find(|f| f.kind == "diff_sgd_momentum_step_first")
+        .unwrap();
 
-    let params: Vec<Tensor<f64>> = f.param.iter().map(|&v| {
-        Tensor::from_storage(TensorStorage::cpu(vec![v]), vec![], true).unwrap()
-    }).collect();
-    let grads: Vec<Tensor<f64>> = f.grad.iter().map(|&v| {
-        t64(&[v], &[])
-    }).collect();
+    let params: Vec<Tensor<f64>> = f
+        .param
+        .iter()
+        .map(|&v| Tensor::from_storage(TensorStorage::cpu(vec![v]), vec![], true).unwrap())
+        .collect();
+    let grads: Vec<Tensor<f64>> = f.grad.iter().map(|&v| t64(&[v], &[])).collect();
 
     let (new_params, new_velocities) =
         diff_sgd_momentum_step(&params, &grads, &[], f.lr, f.momentum).unwrap();
 
-    for (i, (got_v, &exp_v)) in new_velocities.iter().zip(f.expected_v_new.iter()).enumerate() {
+    for (i, (got_v, &exp_v)) in new_velocities
+        .iter()
+        .zip(f.expected_v_new.iter())
+        .enumerate()
+    {
         let v = got_v.data().unwrap()[0];
         assert!(
             (v - exp_v).abs() < tolerance::F64_OPTIMIZER_CPU,
@@ -1213,11 +1402,8 @@ fn diff_sgd_momentum_first_step_matches_reference() {
 fn diff_sgd_step_autograd_edge_to_param() {
     // Property test: adapted = param - lr*grad has an autograd edge to param.
     use ferrotorch_core::grad_fns::reduction::sum;
-    let theta = Tensor::from_storage(
-        TensorStorage::cpu(vec![1.0f64, 2.0, 3.0]),
-        vec![3],
-        true,
-    ).unwrap();
+    let theta =
+        Tensor::from_storage(TensorStorage::cpu(vec![1.0f64, 2.0, 3.0]), vec![3], true).unwrap();
     let grad = t64(&[0.1, 0.2, 0.3], &[3]);
     let adapted = diff_sgd_step(std::slice::from_ref(&theta), &[grad], 0.1).unwrap();
     let loss = sum(&adapted[0]).unwrap();
@@ -1238,7 +1424,11 @@ fn diff_sgd_step_autograd_edge_to_param() {
 #[test]
 fn foreach_elemwise_max_matches_reference() {
     let fx = load_fixtures();
-    let f = fx.foreach_utils.iter().find(|f| f.kind == "elemwise_max").unwrap();
+    let f = fx
+        .foreach_utils
+        .iter()
+        .find(|f| f.kind == "elemwise_max")
+        .unwrap();
 
     let a: Vec<f64> = f.a.clone();
     let b: Vec<f64> = f.b.clone();
@@ -1260,14 +1450,19 @@ fn foreach_elemwise_max_matches_reference() {
 #[test]
 fn foreach_f64_scalar_on_produces_correct_value() {
     let fx = load_fixtures();
-    let f = fx.foreach_utils.iter().find(|f| f.kind == "f64_scalar_on").unwrap();
+    let f = fx
+        .foreach_utils
+        .iter()
+        .find(|f| f.kind == "f64_scalar_on")
+        .unwrap();
 
     let scalar = f64_scalar_on::<f64>(f.value, ferrotorch_core::Device::Cpu).unwrap();
     let got = scalar.data().unwrap()[0];
     assert!(
         (got - f.expected_scalar).abs() < tolerance::F64_OPTIMIZER_CPU,
         "[foreach_scalar] expected {}, got {got} (label: {})",
-        f.expected_scalar, f.label
+        f.expected_scalar,
+        f.label
     );
 }
 
@@ -1278,35 +1473,47 @@ fn foreach_f64_scalar_on_produces_correct_value() {
 #[test]
 fn param_group_default_weight_decay_matches_reference() {
     let fx = load_fixtures();
-    let f = fx.optimizer.iter()
-        .find(|f| f.kind == "param_group_default_weight_decay").unwrap();
+    let f = fx
+        .optimizer
+        .iter()
+        .find(|f| f.kind == "param_group_default_weight_decay")
+        .unwrap();
 
     let p = Parameter::<f64>::zeros(&[2]).unwrap();
     let group = ParamGroup::new(vec![p], f.lr);
     assert!(
         (group.weight_decay - f.expected_weight_decay).abs() < tolerance::F64_OPTIMIZER_CPU,
         "[param_group_wd] expected {}, got {} (label: {})",
-        f.expected_weight_decay, group.weight_decay, f.label
+        f.expected_weight_decay,
+        group.weight_decay,
+        f.label
     );
     assert!(
         (group.lr - f.lr).abs() < tolerance::F64_OPTIMIZER_CPU,
         "[param_group_lr] expected {}, got {} (label: {})",
-        f.lr, group.lr, f.label
+        f.lr,
+        group.lr,
+        f.label
     );
 }
 
 #[test]
 fn param_group_with_weight_decay_builder_matches_reference() {
     let fx = load_fixtures();
-    let f = fx.optimizer.iter()
-        .find(|f| f.kind == "param_group_with_weight_decay").unwrap();
+    let f = fx
+        .optimizer
+        .iter()
+        .find(|f| f.kind == "param_group_with_weight_decay")
+        .unwrap();
 
     let p = Parameter::<f64>::zeros(&[2]).unwrap();
     let group = ParamGroup::new(vec![p], f.lr).with_weight_decay(f.weight_decay);
     assert!(
         (group.weight_decay - f.weight_decay).abs() < tolerance::F64_OPTIMIZER_CPU,
         "[param_group_wd_builder] expected {}, got {} (label: {})",
-        f.weight_decay, group.weight_decay, f.label
+        f.weight_decay,
+        group.weight_decay,
+        f.label
     );
 }
 
@@ -1317,7 +1524,11 @@ fn param_group_with_weight_decay_builder_matches_reference() {
 #[test]
 fn muon_newton_schulz_produces_orthogonal_matrix() {
     let fx = load_fixtures();
-    let f = fx.muon.iter().find(|f| f.kind == "muon_ns_orthogonality").unwrap();
+    let f = fx
+        .muon
+        .iter()
+        .find(|f| f.kind == "muon_ns_orthogonality")
+        .unwrap();
 
     // Run a Muon step on a 2x2 parameter with the given input as the gradient
     // (no-momentum, no-nesterov), then verify the parameter moved in an
@@ -1329,11 +1540,8 @@ fn muon_newton_schulz_produces_orthogonal_matrix() {
     // We drive the property through a Muon step and inspect parameter movement.
     let g_flat: Vec<f64> = f.input.iter().flat_map(|row| row.iter().copied()).collect();
     let p = param_from(&[1.0, 0.0, 0.0, 1.0], &[2, 2]); // identity matrix
-    let grad_t = Tensor::from_storage(
-        TensorStorage::cpu(g_flat.clone()),
-        vec![2, 2],
-        false,
-    ).unwrap();
+    let grad_t =
+        Tensor::from_storage(TensorStorage::cpu(g_flat.clone()), vec![2, 2], false).unwrap();
     p.set_grad(Some(grad_t)).unwrap();
 
     let config = MuonConfig::new(0.1)
@@ -1351,7 +1559,8 @@ fn muon_newton_schulz_produces_orthogonal_matrix() {
     let lr = 0.1f64;
     // g_orth[i] = (identity[i] - param_new[i]) / lr
     let identity = [1.0, 0.0, 0.0, 1.0];
-    let g_orth: Vec<f64> = identity.iter()
+    let g_orth: Vec<f64> = identity
+        .iter()
         .zip(param_new.iter())
         .map(|(&id, &pn)| (id - pn) / lr)
         .collect();
@@ -1366,23 +1575,41 @@ fn muon_newton_schulz_produces_orthogonal_matrix() {
         }
     }
     let tol = f.tolerance;
-    assert!((product[0] - 1.0).abs() < tol, "[muon_ns] (0,0)={} not ~1.0", product[0]);
-    assert!((product[3] - 1.0).abs() < tol, "[muon_ns] (1,1)={} not ~1.0", product[3]);
-    assert!(product[1].abs() < tol, "[muon_ns] (0,1)={} not ~0.0", product[1]);
-    assert!(product[2].abs() < tol, "[muon_ns] (1,0)={} not ~0.0", product[2]);
+    assert!(
+        (product[0] - 1.0).abs() < tol,
+        "[muon_ns] (0,0)={} not ~1.0",
+        product[0]
+    );
+    assert!(
+        (product[3] - 1.0).abs() < tol,
+        "[muon_ns] (1,1)={} not ~1.0",
+        product[3]
+    );
+    assert!(
+        product[1].abs() < tol,
+        "[muon_ns] (0,1)={} not ~0.0",
+        product[1]
+    );
+    assert!(
+        product[2].abs() < tol,
+        "[muon_ns] (1,0)={} not ~0.0",
+        product[2]
+    );
 }
 
 #[test]
 fn muon_converges_on_quadratic() {
     let fx = load_fixtures();
-    let f = fx.muon.iter().find(|f| f.kind == "muon_convergence_1d").unwrap();
+    let f = fx
+        .muon
+        .iter()
+        .find(|f| f.kind == "muon_convergence_1d")
+        .unwrap();
 
     let init: Vec<f64> = f.initial_param.clone();
     let p = param_from(&init, &[init.len()]);
 
-    let config = MuonConfig::new(f.lr)
-        .momentum(0.9)
-        .nesterov(true);
+    let config = MuonConfig::new(f.lr).momentum(0.9).nesterov(true);
     let mut muon = Muon::new(vec![p], config);
 
     for _ in 0..f.n_steps {
@@ -1391,8 +1618,11 @@ fn muon_converges_on_quadratic() {
             TensorStorage::cpu(current.clone()),
             vec![current.len()],
             false,
-        ).unwrap();
-        muon.param_groups_mut()[0].params()[0].set_grad(Some(grad)).unwrap();
+        )
+        .unwrap();
+        muon.param_groups_mut()[0].params()[0]
+            .set_grad(Some(grad))
+            .unwrap();
         muon.step().unwrap();
     }
 
@@ -1401,7 +1631,8 @@ fn muon_converges_on_quadratic() {
     assert!(
         norm_sq < f.convergence_tolerance_norm_sq * tolerance::CONVERGENCE_MARGIN,
         "[muon_convergence] ||x||^2 = {norm_sq} not < {} (label: {})",
-        f.convergence_tolerance_norm_sq, f.label
+        f.convergence_tolerance_norm_sq,
+        f.label
     );
 }
 
@@ -1412,16 +1643,17 @@ fn muon_state_dict_roundtrip_preserves_momentum_buffers() {
     let config = MuonConfig::new(0.02).momentum(0.95);
     let mut muon = Muon::new(vec![p], config);
 
-    let grad = Tensor::from_storage(
-        TensorStorage::cpu(vec![1.0f64, 2.0]),
-        vec![2],
-        false,
-    ).unwrap();
-    muon.param_groups_mut()[0].params()[0].set_grad(Some(grad)).unwrap();
+    let grad = Tensor::from_storage(TensorStorage::cpu(vec![1.0f64, 2.0]), vec![2], false).unwrap();
+    muon.param_groups_mut()[0].params()[0]
+        .set_grad(Some(grad))
+        .unwrap();
     muon.step().unwrap();
 
     let state = muon.state_dict().unwrap();
-    assert!(!state.is_empty(), "[muon_state_dict] should be non-empty after a step");
+    assert!(
+        !state.is_empty(),
+        "[muon_state_dict] should be non-empty after a step"
+    );
 
     let p2 = param_from(&[5.0, 5.0], &[2]);
     let mut muon2 = Muon::new(vec![p2], MuonConfig::new(0.02).momentum(0.95));
@@ -1429,8 +1661,12 @@ fn muon_state_dict_roundtrip_preserves_momentum_buffers() {
 
     let state2 = muon2.state_dict().unwrap();
     assert_eq!(
-        state.get("0_0").map(|m| m.get("momentum_buffer").map(|v| v.len())),
-        state2.get("0_0").map(|m| m.get("momentum_buffer").map(|v| v.len())),
+        state
+            .get("0_0")
+            .map(|m| m.get("momentum_buffer").map(|v| v.len())),
+        state2
+            .get("0_0")
+            .map(|m| m.get("momentum_buffer").map(|v| v.len())),
         "[muon_state_dict] momentum buffer length should round-trip"
     );
 }
@@ -1442,23 +1678,33 @@ fn muon_state_dict_roundtrip_preserves_momentum_buffers() {
 #[test]
 fn kfac_factor_update_arithmetic_matches_reference() {
     let fx = load_fixtures();
-    let f = fx.kfac.iter().find(|f| f.kind == "kfac_factor_update").unwrap();
+    let f = fx
+        .kfac
+        .iter()
+        .find(|f| f.kind == "kfac_factor_update")
+        .unwrap();
 
     let n_features = f.activation[0].len();
     let n_batch = f.activation.len();
-    let flat_act: Vec<f64> = f.activation.iter().flat_map(|r| r.iter().copied()).collect();
+    let flat_act: Vec<f64> = f
+        .activation
+        .iter()
+        .flat_map(|r| r.iter().copied())
+        .collect();
     let act_t = Tensor::from_storage(
         TensorStorage::cpu(flat_act),
         vec![n_batch, n_features],
         false,
-    ).unwrap();
+    )
+    .unwrap();
 
     // out_features = 1 for simplicity; gradient is all ones.
     let grad_t = Tensor::from_storage(
         TensorStorage::cpu(vec![1.0f64; n_batch]),
         vec![n_batch, 1],
         false,
-    ).unwrap();
+    )
+    .unwrap();
 
     let p = param_from(&vec![0.0f64; n_features], &[1, n_features]);
     let config = KfacConfig::default().with_momentum(0.0); // no EMA blending
@@ -1466,7 +1712,8 @@ fn kfac_factor_update_arithmetic_matches_reference() {
     kfac.update_factors("g0_p0", &act_t, &grad_t).unwrap();
 
     let factors = kfac.state_dict().unwrap();
-    let a_factor = factors.get("g0_p0")
+    let a_factor = factors
+        .get("g0_p0")
         .and_then(|e| e.get("a_factor"))
         .expect("a_factor must be present");
 
@@ -1499,11 +1746,8 @@ fn kfac_falls_back_to_sgd_without_factors() {
     let grad_data = vec![0.1, 0.2, 0.3];
 
     let p = param_from(&data, &[3]);
-    let grad_t = Tensor::from_storage(
-        TensorStorage::cpu(grad_data.clone()),
-        vec![3],
-        false,
-    ).unwrap();
+    let grad_t =
+        Tensor::from_storage(TensorStorage::cpu(grad_data.clone()), vec![3], false).unwrap();
     p.tensor().set_grad(Some(grad_t)).unwrap();
 
     let config = KfacConfig::default()
@@ -1517,7 +1761,11 @@ fn kfac_falls_back_to_sgd_without_factors() {
     kfac.step().unwrap();
 
     let updated = kfac.param_groups()[0].params()[0].data().unwrap().to_vec();
-    for (i, (&got, (&orig, &g))) in updated.iter().zip(data.iter().zip(grad_data.iter())).enumerate() {
+    for (i, (&got, (&orig, &g))) in updated
+        .iter()
+        .zip(data.iter().zip(grad_data.iter()))
+        .enumerate()
+    {
         let exp = orig - lr * g;
         assert!(
             (got - exp).abs() < tolerance::F64_OPTIMIZER_CPU,
@@ -1565,30 +1813,45 @@ fn kfac_state_dict_roundtrip() {
         TensorStorage::cpu(vec![1.0, 0.0, 0.0, 1.0]),
         vec![2, 2],
         false,
-    ).unwrap();
+    )
+    .unwrap();
     let grad_out = Tensor::from_storage(
         TensorStorage::cpu(vec![1.0, 0.0, 0.0, 1.0]),
         vec![2, 2],
         false,
-    ).unwrap();
+    )
+    .unwrap();
     kfac.update_factors("g0_p0", &act, &grad_out).unwrap();
 
     let grad_t = Tensor::from_storage(
         TensorStorage::cpu(vec![0.1, 0.2, 0.3, 0.4]),
         vec![2, 2],
         false,
-    ).unwrap();
-    kfac.param_groups_mut()[0].params()[0].tensor().set_grad(Some(grad_t)).unwrap();
+    )
+    .unwrap();
+    kfac.param_groups_mut()[0].params()[0]
+        .tensor()
+        .set_grad(Some(grad_t))
+        .unwrap();
     kfac.step().unwrap();
 
     let saved = kfac.state_dict().unwrap();
-    assert!(saved.contains_key("__kfac_meta__"), "[kfac_state] meta key must exist");
-    assert!(saved.contains_key("g0_p0"), "[kfac_state] factor key must exist");
+    assert!(
+        saved.contains_key("__kfac_meta__"),
+        "[kfac_state] meta key must exist"
+    );
+    assert!(
+        saved.contains_key("g0_p0"),
+        "[kfac_state] factor key must exist"
+    );
     assert_eq!(saved["__kfac_meta__"]["step_count"][0] as usize, 1);
 
     let p2 = param_from(&[1.0, 2.0, 3.0, 4.0], &[2, 2]);
     let mut kfac2 = Kfac::new(vec![p2], config);
     kfac2.load_state_dict(&saved).unwrap();
 
-    assert_eq!(kfac2.state_dict().unwrap()["__kfac_meta__"]["step_count"][0] as usize, 1);
+    assert_eq!(
+        kfac2.state_dict().unwrap()["__kfac_meta__"]["step_count"][0] as usize,
+        1
+    );
 }

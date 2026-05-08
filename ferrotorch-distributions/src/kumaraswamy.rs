@@ -140,8 +140,7 @@ impl<T: Float> Distribution<T> for Kumaraswamy<T> {
             let bf = num_traits::ToPrimitive::to_f64(&b[i]).unwrap();
             // digamma(b+1) via shift-then-asymptotic expansion.
             let digamma_b1 = T::from(digamma_f64(bf + 1.0)).unwrap();
-            let h = (one - one / a[i]) * (euler + digamma_b1)
-                + (one - one / b[i])
+            let h = (one - one / a[i]) * (euler + digamma_b1) + (one - one / b[i])
                 - a[i].ln()
                 - b[i].ln();
             out.push(h);

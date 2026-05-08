@@ -73,7 +73,12 @@ fn p4_to_padded_3_components_ragged_dim0_f32() {
     assert_eq!(&data[8..12], &[0.0; 4]);
 
     // batch 1: [(11..22)]  (3 rows × 4 cols, fully populated)
-    assert_eq!(&data[12..24], &[11.0, 12.0, 13.0, 14.0, 15.0, 16.0, 17.0, 18.0, 19.0, 20.0, 21.0, 22.0]);
+    assert_eq!(
+        &data[12..24],
+        &[
+            11.0, 12.0, 13.0, 14.0, 15.0, 16.0, 17.0, 18.0, 19.0, 20.0, 21.0, 22.0
+        ]
+    );
 
     // batch 2: [(101..104) | zeros(8)]
     assert_eq!(&data[24..28], &[101.0, 102.0, 103.0, 104.0]);
@@ -106,10 +111,15 @@ fn p4_from_padded_round_trip_ragged_dim0_f32() {
     let r0 = recovered.tensors()[0].cpu().unwrap();
     let r1 = recovered.tensors()[1].cpu().unwrap();
     let r2 = recovered.tensors()[2].cpu().unwrap();
-    assert_eq!(r0.data().unwrap(), &[1.0_f32, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0]);
+    assert_eq!(
+        r0.data().unwrap(),
+        &[1.0_f32, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0]
+    );
     assert_eq!(
         r1.data().unwrap(),
-        &[11.0_f32, 12.0, 13.0, 14.0, 15.0, 16.0, 17.0, 18.0, 19.0, 20.0, 21.0, 22.0]
+        &[
+            11.0_f32, 12.0, 13.0, 14.0, 15.0, 16.0, 17.0, 18.0, 19.0, 20.0, 21.0, 22.0
+        ]
     );
     assert_eq!(r2.data().unwrap(), &[101.0_f32, 102.0, 103.0, 104.0]);
 }

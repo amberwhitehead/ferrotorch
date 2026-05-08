@@ -50,8 +50,8 @@ const LR_TOL: f64 = 1e-9;
 // Mock optimizer (mirrors the pattern used by unit tests in scheduler modules)
 // ---------------------------------------------------------------------------
 
-use ferrotorch_optim::optimizer::{Optimizer, OptimizerState, ParamGroup};
 use ferrotorch_core::FerrotorchResult;
+use ferrotorch_optim::optimizer::{Optimizer, OptimizerState, ParamGroup};
 
 struct MockOptimizer {
     lr: f64,
@@ -127,8 +127,7 @@ fn load_fixtures() -> SchedulerFixtures {
     .collect();
     let raw = std::fs::read_to_string(&path)
         .unwrap_or_else(|e| panic!("Failed to read {}: {e}", path.display()));
-    serde_json::from_str(&raw)
-        .unwrap_or_else(|e| panic!("Failed to parse {}: {e}", path.display()))
+    serde_json::from_str(&raw).unwrap_or_else(|e| panic!("Failed to parse {}: {e}", path.display()))
 }
 
 // ---------------------------------------------------------------------------
@@ -238,7 +237,8 @@ fn multi_step_lr_matches_reference() {
             actual.push(opt.lr);
         }
 
-        let label = format!("MultiStepLR(base_lr={base_lr}, milestones={milestones:?}, gamma={gamma})");
+        let label =
+            format!("MultiStepLR(base_lr={base_lr}, milestones={milestones:?}, gamma={gamma})");
         assert_lr_sequence(&label, &actual, &case.lr_sequence);
     }
 }
@@ -317,7 +317,10 @@ fn cosine_annealing_warm_restarts_matches_reference() {
         .iter()
         .filter(|f| f.scheduler == "CosineAnnealingWarmRestarts")
         .collect();
-    assert!(!cases.is_empty(), "no CosineAnnealingWarmRestarts fixtures found");
+    assert!(
+        !cases.is_empty(),
+        "no CosineAnnealingWarmRestarts fixtures found"
+    );
 
     for case in cases {
         let p = &case.params;
@@ -590,8 +593,14 @@ fn cyclic_lr_matches_reference() {
             other => panic!("unknown CyclicMode: {other}"),
         };
 
-        let mut sched =
-            CyclicLR::new(base_lr, max_lr, step_size_up, Some(step_size_down), mode, gamma);
+        let mut sched = CyclicLR::new(
+            base_lr,
+            max_lr,
+            step_size_up,
+            Some(step_size_down),
+            mode,
+            gamma,
+        );
         let mut opt = MockOptimizer::new(base_lr);
         let mut actual = Vec::with_capacity(case.n_steps);
 

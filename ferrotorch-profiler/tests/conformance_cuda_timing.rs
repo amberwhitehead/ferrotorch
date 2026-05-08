@@ -24,8 +24,8 @@
 //! Reference: `torch.profiler.ProfilerActivity.CUDA`,
 //! `cudarc::driver::{CudaContext, CudaStream, CudaEvent}`.
 
-use ferrotorch_profiler::{ProfileConfig, with_profiler};
 use ferrotorch_profiler::GpuTimingPair;
+use ferrotorch_profiler::{ProfileConfig, with_profiler};
 
 // ---------------------------------------------------------------------------
 // Test: GpuTimingPair public fields are accessible (structural)
@@ -35,10 +35,13 @@ use ferrotorch_profiler::GpuTimingPair;
 fn cuda_timing_gpu_timing_pair_fields_accessible() {
     let pair = GpuTimingPair {
         start_us: 1_000,
-        end_us:   2_500,
+        end_us: 2_500,
     };
-    assert_eq!(pair.start_us, 1_000, "GpuTimingPair::start_us must be readable");
-    assert_eq!(pair.end_us, 2_500,   "GpuTimingPair::end_us must be readable");
+    assert_eq!(
+        pair.start_us, 1_000,
+        "GpuTimingPair::start_us must be readable"
+    );
+    assert_eq!(pair.end_us, 2_500, "GpuTimingPair::end_us must be readable");
 }
 
 // ---------------------------------------------------------------------------
@@ -47,7 +50,10 @@ fn cuda_timing_gpu_timing_pair_fields_accessible() {
 
 #[test]
 fn cuda_timing_gpu_timing_pair_is_copy() {
-    let original = GpuTimingPair { start_us: 10, end_us: 20 };
+    let original = GpuTimingPair {
+        start_us: 10,
+        end_us: 20,
+    };
     let copy = original; // copy, not move
     assert_eq!(original.start_us, copy.start_us);
     assert_eq!(original.end_us, copy.end_us);
@@ -120,7 +126,10 @@ fn cuda_timing_flush_cuda_kernels_noop_without_feature() {
 fn cuda_timing_push_gpu_event_device_type_is_cuda() {
     use ferrotorch_profiler::DeviceType;
 
-    let timing = GpuTimingPair { start_us: 0, end_us: 150 };
+    let timing = GpuTimingPair {
+        start_us: 0,
+        end_us: 150,
+    };
     let ((), report) = with_profiler(ProfileConfig::default(), |p| {
         p.push_gpu_event("gemm", "cuda_kernel", timing);
     });
@@ -144,7 +153,10 @@ fn cuda_timing_push_gpu_event_device_type_is_cuda() {
 
 #[test]
 fn cuda_timing_push_gpu_event_duration_from_timing_pair() {
-    let timing = GpuTimingPair { start_us: 1_000, end_us: 1_400 };
+    let timing = GpuTimingPair {
+        start_us: 1_000,
+        end_us: 1_400,
+    };
     let ((), report) = with_profiler(ProfileConfig::default(), |p| {
         p.push_gpu_event("relu_cuda", "cuda_kernel", timing);
     });
@@ -161,13 +173,19 @@ fn cuda_timing_push_gpu_event_duration_from_timing_pair() {
 
 #[test]
 fn cuda_timing_push_gpu_event_name_and_category_preserved() {
-    let timing = GpuTimingPair { start_us: 0, end_us: 1 };
+    let timing = GpuTimingPair {
+        start_us: 0,
+        end_us: 1,
+    };
     let ((), report) = with_profiler(ProfileConfig::default(), |p| {
         p.push_gpu_event("fused_mha_fwd", "cuda_kernel", timing);
     });
     let ev = &report.events()[0];
-    assert_eq!(ev.name,     "fused_mha_fwd", "event name must be preserved");
-    assert_eq!(ev.category, "cuda_kernel",   "event category must be preserved");
+    assert_eq!(ev.name, "fused_mha_fwd", "event name must be preserved");
+    assert_eq!(
+        ev.category, "cuda_kernel",
+        "event category must be preserved"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -181,7 +199,14 @@ fn cuda_timing_push_gpu_event_name_and_category_preserved() {
 fn cuda_timing_push_gpu_event_inactive_returns_none() {
     let ((), report) = with_profiler(ProfileConfig::default(), |p| {
         p.stop();
-        let idx = p.push_gpu_event("kernel", "cuda_kernel", GpuTimingPair { start_us: 0, end_us: 50 });
+        let idx = p.push_gpu_event(
+            "kernel",
+            "cuda_kernel",
+            GpuTimingPair {
+                start_us: 0,
+                end_us: 50,
+            },
+        );
         assert_eq!(idx, None, "push_gpu_event must return None after stop()");
     });
     assert_eq!(
@@ -205,10 +230,20 @@ fn cuda_timing_has_gpu_events_transitions_on_push() {
             let ((), r) = with_profiler(ProfileConfig::default(), |_| {});
             r
         };
-        assert!(!pre_report.has_gpu_events(), "fresh report must not have GPU events");
+        assert!(
+            !pre_report.has_gpu_events(),
+            "fresh report must not have GPU events"
+        );
 
         // Push one GPU event.
-        p.push_gpu_event("sgemm", "cuda_kernel", GpuTimingPair { start_us: 0, end_us: 10 });
+        p.push_gpu_event(
+            "sgemm",
+            "cuda_kernel",
+            GpuTimingPair {
+                start_us: 0,
+                end_us: 10,
+            },
+        );
     });
     assert!(
         report.has_gpu_events(),

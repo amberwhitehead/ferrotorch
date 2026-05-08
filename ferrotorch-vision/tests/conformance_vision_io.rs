@@ -11,14 +11,15 @@
 #![allow(
     clippy::cast_possible_truncation,
     clippy::cast_precision_loss,
-    clippy::uninlined_format_args,
+    clippy::uninlined_format_args
 )]
 
 use std::path::PathBuf;
 
 use ferrotorch_core::{Tensor, TensorStorage};
-use ferrotorch_vision::{raw_image_to_tensor, read_image, read_image_rgba,
-    read_image_as_tensor, tensor_to_raw_image};
+use ferrotorch_vision::{
+    raw_image_to_tensor, read_image, read_image_as_tensor, read_image_rgba, tensor_to_raw_image,
+};
 use serde::Deserialize;
 
 // cascade_skip is defined but only invoked conditionally; allow unused in this
@@ -109,7 +110,10 @@ fn raw_image_to_tensor_4x4_rgb_matches_reference() {
         .collect();
     // Reinterpret u8 bytes as a float tensor in HWC order (u8/255), then transpose CHW.
     // Easier: write to a tempfile PNG and read back to get a proper RawImage.
-    let tmp = tempfile::Builder::new().suffix(".png").tempfile().expect("tempfile");
+    let tmp = tempfile::Builder::new()
+        .suffix(".png")
+        .tempfile()
+        .expect("tempfile");
     let path = tmp.path().to_path_buf();
     {
         use ferrotorch_vision::write_image;
@@ -130,11 +134,7 @@ fn raw_image_to_tensor_4x4_rgb_matches_reference() {
             }
             v
         };
-        let t = Tensor::from_storage(
-            TensorStorage::cpu(chw_data),
-            vec![3, 4, 4],
-            false,
-        ).unwrap();
+        let t = Tensor::from_storage(TensorStorage::cpu(chw_data), vec![3, 4, 4], false).unwrap();
         write_image(&path, &tensor_to_raw_image(&t).unwrap()).expect("write_image");
     }
     let raw = read_image(&path).expect("read_image");
@@ -142,7 +142,12 @@ fn raw_image_to_tensor_4x4_rgb_matches_reference() {
     let out: Tensor<f64> = raw_image_to_tensor(&raw).unwrap();
 
     assert_eq!(out.shape(), &expected_shape[..]);
-    assert_close_f64(out.data().unwrap(), &expected_data, 1e-6, "raw_image_to_tensor");
+    assert_close_f64(
+        out.data().unwrap(),
+        &expected_data,
+        1e-6,
+        "raw_image_to_tensor",
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -200,7 +205,10 @@ fn tensor_to_raw_image_roundtrip() {
 fn read_image_returns_err_on_missing_file() {
     // read_image must return Err for a non-existent path, not panic.
     let result = read_image("/nonexistent/path/no_file.png");
-    assert!(result.is_err(), "read_image must return Err for missing file");
+    assert!(
+        result.is_err(),
+        "read_image must return Err for missing file"
+    );
 }
 
 #[test]
@@ -263,7 +271,7 @@ fn write_image_and_read_back_roundtrip() {
 
 #[test]
 fn write_tensor_as_image_roundtrip() {
-    use ferrotorch_vision::{write_tensor_as_image};
+    use ferrotorch_vision::write_tensor_as_image;
 
     let tmp = tempfile::Builder::new()
         .suffix(".png")
@@ -303,18 +311,17 @@ fn write_tensor_as_jpeg_roundtrip_lossy_tolerance() {
 
     // [3, 8, 8] CHW tensor — large enough for JPEG block structure (8×8 DCT).
     let data: Vec<f32> = (0..192).map(|i| (i as f32) / 192.0).collect();
-    let t = Tensor::from_storage(
-        TensorStorage::cpu(data.clone()),
-        vec![3, 8, 8],
-        false,
-    )
-    .unwrap();
+    let t = Tensor::from_storage(TensorStorage::cpu(data.clone()), vec![3, 8, 8], false).unwrap();
 
     write_tensor_as_image(&path, &t).expect("write_tensor_as_image JPEG");
 
     // Read back as tensor.
     let loaded: Tensor<f32> = read_image_as_tensor(&path).expect("read JPEG back as tensor");
-    assert_eq!(loaded.shape(), &[3, 8, 8], "JPEG round-trip: shape must be preserved");
+    assert_eq!(
+        loaded.shape(),
+        &[3, 8, 8],
+        "JPEG round-trip: shape must be preserved"
+    );
 
     let orig = t.data().unwrap();
     let back = loaded.data().unwrap();

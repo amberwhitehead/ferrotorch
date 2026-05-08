@@ -205,7 +205,11 @@ impl<T: Float> GradFn<T> for MvBackward<T> {
                 } else {
                     backend.matmul_f32(go_h, x_h, m, 1, k)?
                 };
-                Some(Tensor::from_storage(TensorStorage::gpu(result_h), vec![m, k], false)?)
+                Some(Tensor::from_storage(
+                    TensorStorage::gpu(result_h),
+                    vec![m, k],
+                    false,
+                )?)
             } else {
                 None
             };
@@ -225,7 +229,11 @@ impl<T: Float> GradFn<T> for MvBackward<T> {
                 } else {
                     backend.mv_f32(&at_h, go_h, k, m)?
                 };
-                Some(Tensor::from_storage(TensorStorage::gpu(result_h), vec![k], false)?)
+                Some(Tensor::from_storage(
+                    TensorStorage::gpu(result_h),
+                    vec![k],
+                    false,
+                )?)
             } else {
                 None
             };
@@ -512,7 +520,11 @@ impl<T: Float> GradFn<T> for MatmulBackward<T> {
                         } else {
                             backend.mv_f32(b_h, go_h, k, n)?
                         };
-                        Some(Tensor::from_storage(TensorStorage::gpu(result_h), vec![k], false)?)
+                        Some(Tensor::from_storage(
+                            TensorStorage::gpu(result_h),
+                            vec![k],
+                            false,
+                        )?)
                     } else {
                         None
                     };
@@ -677,13 +689,10 @@ fn broadcast_matmul_backward<T: Float>(
             // Step 2: for each remaining dim that is size-1 in target but >1 in current,
             // sum along that dim (keepdim=true to preserve alignment).
             let cur_shape = current.shape().to_vec();
-            for (d, (&cur_size, &tgt_size)) in
-                cur_shape.iter().zip(target.iter()).enumerate()
-            {
+            for (d, (&cur_size, &tgt_size)) in cur_shape.iter().zip(target.iter()).enumerate() {
                 if tgt_size == 1 && cur_size != 1 {
                     // sum_dim uses i64 dim index; d is already in-bounds after leading collapse.
-                    current =
-                        crate::grad_fns::reduction::sum_dim(&current, d as i64, true)?;
+                    current = crate::grad_fns::reduction::sum_dim(&current, d as i64, true)?;
                 }
             }
 
@@ -1327,8 +1336,16 @@ pub fn mv_differentiable<T: Float>(a: &Tensor<T>, x: &Tensor<T>) -> FerrotorchRe
         if let Some(backend) = gpu_backend() {
             // Materialise non-contiguous views (e.g. permute/transpose) so the
             // row-major-trick in cuBLAS sees contiguous strides.
-            let a = if a.is_contiguous() { a.clone() } else { a.contiguous()? };
-            let x = if x.is_contiguous() { x.clone() } else { x.contiguous()? };
+            let a = if a.is_contiguous() {
+                a.clone()
+            } else {
+                a.contiguous()?
+            };
+            let x = if x.is_contiguous() {
+                x.clone()
+            } else {
+                x.contiguous()?
+            };
             let handle = if is_f32::<T>() {
                 backend.mv_f32(a.gpu_handle()?, x.gpu_handle()?, m, k)?
             } else if is_f64::<T>() {
@@ -1383,8 +1400,16 @@ pub fn dot_differentiable<T: Float>(a: &Tensor<T>, b: &Tensor<T>) -> FerrotorchR
     // f32 and f64 and so must ferrotorch's.
     if a.is_cuda() && a.device() == b.device() {
         if let Some(backend) = gpu_backend() {
-            let a = if a.is_contiguous() { a.clone() } else { a.contiguous()? };
-            let b = if b.is_contiguous() { b.clone() } else { b.contiguous()? };
+            let a = if a.is_contiguous() {
+                a.clone()
+            } else {
+                a.contiguous()?
+            };
+            let b = if b.is_contiguous() {
+                b.clone()
+            } else {
+                b.contiguous()?
+            };
             let n = a.shape().first().copied().unwrap_or(0);
             let handle = if is_f32::<T>() {
                 backend.dot_f32(a.gpu_handle()?, b.gpu_handle()?, n)?
@@ -1480,10 +1505,7 @@ pub fn matmul_differentiable<T: Float>(
         let n = b.shape()[1];
         if k != b.shape()[0] {
             return Err(FerrotorchError::ShapeMismatch {
-                message: format!(
-                    "matmul 1D x 2D: a is [{k}], b is {:?}",
-                    b.shape()
-                ),
+                message: format!("matmul 1D x 2D: a is [{k}], b is {:?}", b.shape()),
             });
         }
         let handle = if is_f32::<T>() {

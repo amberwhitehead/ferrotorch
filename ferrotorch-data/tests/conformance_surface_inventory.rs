@@ -377,7 +377,10 @@ fn surface_inventory_writes_json() {
     let json = render_json(&unique);
     let toml_body = render_toml(&unique);
 
-    let conf_dir = out_json_path().parent().expect("conformance dir").to_path_buf();
+    let conf_dir = out_json_path()
+        .parent()
+        .expect("conformance dir")
+        .to_path_buf();
     fs::create_dir_all(&conf_dir).expect("mkdir conformance");
     fs::write(out_json_path(), &json).expect("write _surface.json");
     fs::write(out_toml_path(), &toml_body).expect("write _surface_inventory.toml");

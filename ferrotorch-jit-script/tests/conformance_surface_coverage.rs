@@ -176,8 +176,7 @@ fn tracking_issue_valid(s: &str) -> bool {
     {
         return false;
     }
-    let hash_form =
-        s.starts_with('#') && s[1..].chars().all(|c| c.is_ascii_digit()) && s.len() > 1;
+    let hash_form = s.starts_with('#') && s[1..].chars().all(|c| c.is_ascii_digit()) && s.len() > 1;
     let url_form = s.starts_with("http://") || s.starts_with("https://");
     hash_form || url_form
 }

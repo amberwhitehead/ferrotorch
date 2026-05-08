@@ -28,10 +28,10 @@
 
 use std::sync::Once;
 
+use ferrotorch_core::Device;
 use ferrotorch_core::einsum::einsum;
 use ferrotorch_core::storage::TensorStorage;
 use ferrotorch_core::tensor::Tensor;
-use ferrotorch_core::Device;
 
 const F32_MATMUL_GPU: f32 = 1e-3;
 const F64_MATMUL_GPU: f64 = 1e-9;
@@ -60,11 +60,19 @@ fn upload_f64(t: Tensor<f64>) -> Tensor<f64> {
 }
 
 fn read_f32(t: &Tensor<f32>) -> Vec<f32> {
-    let cpu = if t.is_cuda() { t.cpu().unwrap() } else { t.clone() };
+    let cpu = if t.is_cuda() {
+        t.cpu().unwrap()
+    } else {
+        t.clone()
+    };
     cpu.data().unwrap().to_vec()
 }
 fn read_f64(t: &Tensor<f64>) -> Vec<f64> {
-    let cpu = if t.is_cuda() { t.cpu().unwrap() } else { t.clone() };
+    let cpu = if t.is_cuda() {
+        t.cpu().unwrap()
+    } else {
+        t.clone()
+    };
     cpu.data().unwrap().to_vec()
 }
 
@@ -114,9 +122,18 @@ fn gpu_einsum_trace_2d_f32_works() {
     ensure_cuda_backend();
     let a = upload_f32(t_f32(&mat4x4_f32(), &[4, 4]));
     let r = einsum("ii->", &[&a]).expect("einsum trace f32 on cuda");
-    assert!(r.is_cuda(), "trace f32 result must stay on device, got {:?}", r.device());
+    assert!(
+        r.is_cuda(),
+        "trace f32 result must stay on device, got {:?}",
+        r.device()
+    );
     let host = read_f32(&r);
-    assert_close_f32(&host, &[1.0 + 6.0 + 11.0 + 16.0], F32_MATMUL_GPU, "trace f32");
+    assert_close_f32(
+        &host,
+        &[1.0 + 6.0 + 11.0 + 16.0],
+        F32_MATMUL_GPU,
+        "trace f32",
+    );
 }
 
 #[test]
@@ -124,9 +141,18 @@ fn gpu_einsum_trace_2d_f64_works() {
     ensure_cuda_backend();
     let a = upload_f64(t_f64(&mat4x4_f64(), &[4, 4]));
     let r = einsum("ii->", &[&a]).expect("einsum trace f64 on cuda");
-    assert!(r.is_cuda(), "trace f64 result must stay on device, got {:?}", r.device());
+    assert!(
+        r.is_cuda(),
+        "trace f64 result must stay on device, got {:?}",
+        r.device()
+    );
     let host = read_f64(&r);
-    assert_close_f64(&host, &[1.0 + 6.0 + 11.0 + 16.0], F64_MATMUL_GPU, "trace f64");
+    assert_close_f64(
+        &host,
+        &[1.0 + 6.0 + 11.0 + 16.0],
+        F64_MATMUL_GPU,
+        "trace f64",
+    );
 }
 
 #[test]
@@ -167,7 +193,14 @@ fn gpu_einsum_diagonal_2d_f64_works() {
 // ---------------------------------------------------------------------------
 
 // CPU reference: einsum("ijk,jkl->il", a:[2,3,4], b:[3,4,5]) -> [2,5]
-fn ref_ijk_jkl_il_f64(a: &[f64], b: &[f64], i_n: usize, j_n: usize, k_n: usize, l_n: usize) -> Vec<f64> {
+fn ref_ijk_jkl_il_f64(
+    a: &[f64],
+    b: &[f64],
+    i_n: usize,
+    j_n: usize,
+    k_n: usize,
+    l_n: usize,
+) -> Vec<f64> {
     let mut out = vec![0.0_f64; i_n * l_n];
     for i in 0..i_n {
         for l in 0..l_n {
@@ -254,14 +287,8 @@ fn gpu_einsum_batch_multi_axis_bijk_bjkl_bil_f32_works() {
                 let mut acc = 0.0_f64;
                 for jj in 0..j_n {
                     for kk in 0..k_n {
-                        let a_idx = bi * (i_n * j_n * k_n)
-                            + ii * (j_n * k_n)
-                            + jj * k_n
-                            + kk;
-                        let b_idx = bi * (j_n * k_n * l_n)
-                            + jj * (k_n * l_n)
-                            + kk * l_n
-                            + ll;
+                        let a_idx = bi * (i_n * j_n * k_n) + ii * (j_n * k_n) + jj * k_n + kk;
+                        let b_idx = bi * (j_n * k_n * l_n) + jj * (k_n * l_n) + kk * l_n + ll;
                         acc += a_d[a_idx] * b_d[b_idx];
                     }
                 }

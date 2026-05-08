@@ -1699,9 +1699,15 @@ mod gpu {
             &[1, 4],
         );
 
-        let t1 = cpu_t1.to(ferrotorch_core::Device::Cuda(0)).expect("t1->gpu");
-        let t2 = cpu_t2.to(ferrotorch_core::Device::Cuda(0)).expect("t2->gpu");
-        let t3 = cpu_t3.to(ferrotorch_core::Device::Cuda(0)).expect("t3->gpu");
+        let t1 = cpu_t1
+            .to(ferrotorch_core::Device::Cuda(0))
+            .expect("t1->gpu");
+        let t2 = cpu_t2
+            .to(ferrotorch_core::Device::Cuda(0))
+            .expect("t2->gpu");
+        let t3 = cpu_t3
+            .to(ferrotorch_core::Device::Cuda(0))
+            .expect("t3->gpu");
 
         let nt = NestedTensor::new(vec![t1, t2, t3], 0).expect("nested");
         let padded = nt.to_padded(0.0_f32).expect("gpu to_padded");
@@ -1772,8 +1778,12 @@ mod gpu {
 
         let cpu_t1 = make_tensor_f32(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0], &[2, 3]);
         let cpu_t2 = make_tensor_f32(&[7.0, 8.0, 9.0, 10.0], &[2, 2]);
-        let t1 = cpu_t1.to(ferrotorch_core::Device::Cuda(0)).expect("t1->gpu");
-        let t2 = cpu_t2.to(ferrotorch_core::Device::Cuda(0)).expect("t2->gpu");
+        let t1 = cpu_t1
+            .to(ferrotorch_core::Device::Cuda(0))
+            .expect("t1->gpu");
+        let t2 = cpu_t2
+            .to(ferrotorch_core::Device::Cuda(0))
+            .expect("t2->gpu");
 
         let nt = NestedTensor::new(vec![t1, t2], 1).expect("nested ragged_dim=1");
         let padded = nt.to_padded(0.0_f32).expect("gpu to_padded");
@@ -1856,10 +1866,7 @@ mod gpu {
         let cpu_v_n = NestedTensor::new(vec![cpu_v], 0).expect("cpu vn");
         let cpu_out = nested_scaled_dot_product_attention(&cpu_q_n, &cpu_k_n, &cpu_v_n)
             .expect("cpu sdpa oracle");
-        let oracle = cpu_out.tensors()[0]
-            .data()
-            .expect("oracle data")
-            .to_vec();
+        let oracle = cpu_out.tensors()[0].data().expect("oracle data").to_vec();
 
         // GPU path through the FlashAttention kernel.
         let gpu_q = make_tensor_f32(
@@ -1885,8 +1892,8 @@ mod gpu {
         let gpu_k_n = NestedTensor::new(vec![gpu_k], 0).expect("gpu kn");
         let gpu_v_n = NestedTensor::new(vec![gpu_v], 0).expect("gpu vn");
 
-        let gpu_out = nested_scaled_dot_product_attention(&gpu_q_n, &gpu_k_n, &gpu_v_n)
-            .expect("gpu sdpa");
+        let gpu_out =
+            nested_scaled_dot_product_attention(&gpu_q_n, &gpu_k_n, &gpu_v_n).expect("gpu sdpa");
         let comp = &gpu_out.tensors()[0];
         assert!(
             comp.is_cuda(),
@@ -1947,10 +1954,8 @@ mod gpu {
             })
             .collect();
 
-        let pa =
-            PackedNestedTensor::<f32>::from_sequences(seq_a, &lengths, &tail).expect("pa");
-        let pb =
-            PackedNestedTensor::<f32>::from_sequences(seq_b, &lengths, &tail).expect("pb");
+        let pa = PackedNestedTensor::<f32>::from_sequences(seq_a, &lengths, &tail).expect("pa");
+        let pb = PackedNestedTensor::<f32>::from_sequences(seq_b, &lengths, &tail).expect("pb");
 
         // CPU oracles for each binary op.
         let cpu_add = pa.add(&pb).unwrap();
@@ -1990,10 +1995,7 @@ mod gpu {
             assert_eq!(g.num_components(), 3);
             for (i, (g, e)) in g.data().iter().zip(cpu_p.data().iter()).enumerate() {
                 let tol = tolerance::F32_ELEMENTWISE * (1.0 + e.abs());
-                assert!(
-                    (g - e).abs() < tol,
-                    "{label} elem {i}: gpu={g} cpu={e}"
-                );
+                assert!((g - e).abs() < tol, "{label} elem {i}: gpu={g} cpu={e}");
             }
         }
 
@@ -2098,10 +2100,7 @@ mod gpu {
         ensure_cuda_backend();
 
         let dense_data: Vec<f64> = vec![
-            0.0, 1.0, 0.0, 2.0,
-            0.0, 0.0, 3.0, 0.0,
-            4.0, 0.0, 0.0, 5.0,
-            0.0, 6.0, 0.0, 0.0,
+            0.0, 1.0, 0.0, 2.0, 0.0, 0.0, 3.0, 0.0, 4.0, 0.0, 0.0, 5.0, 0.0, 6.0, 0.0, 0.0,
         ];
         let dense_cpu = make_tensor_f32(&dense_data, &[4, 4]);
         let dense_gpu = dense_cpu
@@ -2110,8 +2109,7 @@ mod gpu {
 
         // Pre-fix: SparseTensor::from_dense calls tensor.data() which
         // returns GpuTensorNotAccessible for a CUDA tensor.
-        let sp = SparseTensor::<f32>::from_dense(&dense_gpu, 0.0)
-            .expect("gpu from_dense");
+        let sp = SparseTensor::<f32>::from_dense(&dense_gpu, 0.0).expect("gpu from_dense");
         assert_eq!(sp.shape(), &[4, 4]);
         assert_eq!(sp.nnz(), 6, "expected 6 non-zero entries");
 

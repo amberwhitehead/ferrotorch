@@ -89,28 +89,24 @@ fn surface_coverage_gate() {
     let manifest_dir = env!("CARGO_MANIFEST_DIR");
 
     // Load inventory.
-    let inv_path = std::path::PathBuf::from(manifest_dir)
-        .join("tests/conformance/_surface_inventory.toml");
+    let inv_path =
+        std::path::PathBuf::from(manifest_dir).join("tests/conformance/_surface_inventory.toml");
     let inv_text = std::fs::read_to_string(&inv_path)
         .unwrap_or_else(|e| panic!("cannot read {}: {e}", inv_path.display()));
-    let inventory: InventoryFile = toml::from_str(&inv_text)
-        .unwrap_or_else(|e| panic!("inventory TOML parse error: {e}"));
+    let inventory: InventoryFile =
+        toml::from_str(&inv_text).unwrap_or_else(|e| panic!("inventory TOML parse error: {e}"));
 
     // Load exclusions.
-    let excl_path = std::path::PathBuf::from(manifest_dir)
-        .join("tests/conformance/_surface_exclusions.toml");
+    let excl_path =
+        std::path::PathBuf::from(manifest_dir).join("tests/conformance/_surface_exclusions.toml");
     let excl_text = std::fs::read_to_string(&excl_path)
         .unwrap_or_else(|e| panic!("cannot read {}: {e}", excl_path.display()));
-    let exclusions: ExclusionsFile = toml::from_str(&excl_text)
-        .unwrap_or_else(|e| panic!("exclusions TOML parse error: {e}"));
+    let exclusions: ExclusionsFile =
+        toml::from_str(&excl_text).unwrap_or_else(|e| panic!("exclusions TOML parse error: {e}"));
 
     // Build lookup sets.
     let covered: HashSet<&str> = COVERED.iter().copied().collect();
-    let excluded: HashSet<String> = exclusions
-        .excluded
-        .iter()
-        .map(|e| e.path.clone())
-        .collect();
+    let excluded: HashSet<String> = exclusions.excluded.iter().map(|e| e.path.clone()).collect();
 
     // Validate: every inventory item must be covered or excluded.
     let mut ungated: Vec<String> = Vec::new();

@@ -17,11 +17,11 @@
 //! 6. `acceptance_rate_metric` — the `SpecDecodeOutput::acceptance_rate`
 //!    accessor returns the correct ratio.
 
+use ferrotorch_core::FerrotorchError;
+use ferrotorch_llama::config::{LlamaActivation, LlamaConfig};
 use ferrotorch_llama::{
     LlamaForCausalLM, LlamaHandle, SpecDecodeConfig, SpecDecodeOutput, speculative_decode,
 };
-use ferrotorch_llama::config::{LlamaActivation, LlamaConfig};
-use ferrotorch_core::FerrotorchError;
 
 /// Tiny 2-layer Llama config: vocab=128, dim=64, 2 layers, 4 heads.
 /// This is the synthetic "no weights download" config for C.8.
@@ -130,7 +130,11 @@ fn different_draft_accepted_less_than_identical() {
     };
 
     let out_eq = speculative_decode(&draft_eq, &target_eq, &prompt, &cfg).unwrap();
-    assert_eq!(out_eq.acceptance_rate(), 1.0, "identical models: rate must be 1.0");
+    assert_eq!(
+        out_eq.acceptance_rate(),
+        1.0,
+        "identical models: rate must be 1.0"
+    );
 
     // Different draft model.
     let draft_model = LlamaForCausalLM::<f32>::new(tiny_cfg()).unwrap();
@@ -194,8 +198,7 @@ fn empty_prompt_rejected() {
     let draft = LlamaHandle::new(&model);
     let target = LlamaHandle::new(&model);
 
-    let err = speculative_decode(&draft, &target, &[], &SpecDecodeConfig::default())
-        .unwrap_err();
+    let err = speculative_decode(&draft, &target, &[], &SpecDecodeConfig::default()).unwrap_err();
     assert!(
         matches!(err, FerrotorchError::InvalidArgument { .. }),
         "expected InvalidArgument for empty prompt, got {err:?}"
@@ -214,10 +217,7 @@ fn acceptance_rate_metric() {
         proposed_count: 8,
     };
     let rate = out.acceptance_rate();
-    assert!(
-        (rate - 0.75).abs() < 1e-12,
-        "expected 0.75, got {rate}"
-    );
+    assert!((rate - 0.75).abs() < 1e-12, "expected 0.75, got {rate}");
 
     // Zero proposed → rate = 1.0 by convention.
     let out_empty = SpecDecodeOutput {

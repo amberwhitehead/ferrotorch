@@ -703,17 +703,16 @@ fn einsum_two_gpu<T: Float>(
         {
             // Find the contracted char: in both a_subs and b_subs but
             // not in out_subs.
-            let contracted: Option<char> = a_subs.iter().copied().find(|c| {
-                b_subs.contains(c) && !out_subs.contains(c)
-            });
+            let contracted: Option<char> = a_subs
+                .iter()
+                .copied()
+                .find(|c| b_subs.contains(c) && !out_subs.contains(c));
             if let Some(c) = contracted {
                 // The other chars: one from A (= a_other), one from B
                 // (= b_other). Both must appear in out_subs.
                 let a_other = if a_subs[0] == c { a_subs[1] } else { a_subs[0] };
                 let b_other = if b_subs[0] == c { b_subs[1] } else { b_subs[0] };
-                if a_other != b_other
-                    && out_subs.contains(&a_other)
-                    && out_subs.contains(&b_other)
+                if a_other != b_other && out_subs.contains(&a_other) && out_subs.contains(&b_other)
                 {
                     // Position the contracted dim: A wants c at axis 1, B at axis 0.
                     let a_oriented = if a_subs[1] == c {
@@ -728,10 +727,8 @@ fn einsum_two_gpu<T: Float>(
                         let permuted = crate::methods::permute_t(b, &[1, 0])?;
                         crate::methods::contiguous_t(&permuted)?
                     };
-                    let mm = crate::grad_fns::linalg::matmul_differentiable(
-                        &a_oriented,
-                        &b_oriented,
-                    )?;
+                    let mm =
+                        crate::grad_fns::linalg::matmul_differentiable(&a_oriented, &b_oriented)?;
                     // mm has shape [a_other_size, b_other_size]; permute
                     // if out_subs order doesn't match.
                     if out_subs[0] == a_other && out_subs[1] == b_other {
@@ -761,20 +758,22 @@ fn einsum_two_gpu<T: Float>(
         {
             let bat = a_subs[0];
             // Distinct chars within each operand, batch char only at leading position.
-            let a_uniq = a_subs[0] != a_subs[1]
-                && a_subs[1] != a_subs[2]
-                && a_subs[0] != a_subs[2];
-            let b_uniq = b_subs[0] != b_subs[1]
-                && b_subs[1] != b_subs[2]
-                && b_subs[0] != b_subs[2];
-            if a_uniq && b_uniq && bat != out_subs[1] && bat != out_subs[2] && out_subs[1] != out_subs[2] {
+            let a_uniq = a_subs[0] != a_subs[1] && a_subs[1] != a_subs[2] && a_subs[0] != a_subs[2];
+            let b_uniq = b_subs[0] != b_subs[1] && b_subs[1] != b_subs[2] && b_subs[0] != b_subs[2];
+            if a_uniq
+                && b_uniq
+                && bat != out_subs[1]
+                && bat != out_subs[2]
+                && out_subs[1] != out_subs[2]
+            {
                 // Find the contracted char: in a (excluding bat) and b
                 // (excluding bat) but not in out.
                 let a_non_batch = [a_subs[1], a_subs[2]];
                 let b_non_batch = [b_subs[1], b_subs[2]];
-                let contracted: Option<char> = a_non_batch.iter().copied().find(|c| {
-                    b_non_batch.contains(c) && !out_subs.contains(c)
-                });
+                let contracted: Option<char> = a_non_batch
+                    .iter()
+                    .copied()
+                    .find(|c| b_non_batch.contains(c) && !out_subs.contains(c));
                 if let Some(c) = contracted {
                     let a_other = if a_subs[1] == c { a_subs[2] } else { a_subs[1] };
                     let b_other = if b_subs[1] == c { b_subs[2] } else { b_subs[1] };
@@ -1093,9 +1092,8 @@ fn einsum_two_gpu_general<T: Float>(
     // bmm_result shape: [batch_total, free_a_total, free_b_total].
 
     // Reshape back to [batch..., free_a..., free_b...].
-    let mut intermediate_shape: Vec<isize> = Vec::with_capacity(
-        batch_sizes.len() + free_a_sizes.len() + free_b_sizes.len(),
-    );
+    let mut intermediate_shape: Vec<isize> =
+        Vec::with_capacity(batch_sizes.len() + free_a_sizes.len() + free_b_sizes.len());
     intermediate_shape.extend(batch_sizes.iter().map(|&n| n as isize));
     intermediate_shape.extend(free_a_sizes.iter().map(|&n| n as isize));
     intermediate_shape.extend(free_b_sizes.iter().map(|&n| n as isize));
@@ -1693,7 +1691,13 @@ impl<T: Float> GradFn<T> for EinsumBackwardSingle<T> {
         // chars at the trailing positions to get an unsqueezed
         // shape matching `intermediate_shape` modulo size-1 axes.
         let unsqueezed_shape: Vec<usize> = (0..intermediate_chars.len())
-            .map(|i| if i < out_subs.len() { intermediate_shape[i] } else { 1 })
+            .map(|i| {
+                if i < out_subs.len() {
+                    intermediate_shape[i]
+                } else {
+                    1
+                }
+            })
             .collect();
 
         // Use reshape (view_reshape) — grad_output is contiguous

@@ -63,12 +63,20 @@ fn probe_b1_gelu_tanh_ptx_after() {
     const REL_TOL: f32 = 1e-4;
     for (i, (&act, &exp)) in actual.iter().zip(expected.iter()).enumerate() {
         let abs_err = (act - exp).abs();
-        let rel_err = if exp.abs() > 1e-3 { abs_err / exp.abs() } else { abs_err };
+        let rel_err = if exp.abs() > 1e-3 {
+            abs_err / exp.abs()
+        } else {
+            abs_err
+        };
         assert!(
             abs_err <= ABS_TOL || rel_err <= REL_TOL,
             "probe B1 #893 AFTER: index {i} x={:.3} actual={:.6} expected={:.6} \
              abs_err={:.2e} rel_err={:.2e}",
-            inputs[i], act, exp, abs_err, rel_err
+            inputs[i],
+            act,
+            exp,
+            abs_err,
+            rel_err
         );
     }
 }

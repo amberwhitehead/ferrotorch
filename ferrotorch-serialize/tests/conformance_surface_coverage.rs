@@ -31,7 +31,10 @@ struct SurfaceInventory {
 struct SurfaceItem {
     path: String,
     kind: String,
-    #[allow(dead_code, reason = "deserialized for forward-compat with future reporting")]
+    #[allow(
+        dead_code,
+        reason = "deserialized for forward-compat with future reporting"
+    )]
     signature: String,
 }
 
@@ -84,8 +87,7 @@ fn read_exclusions() -> Vec<Exclusion> {
     if !p.exists() {
         return Vec::new();
     }
-    let body =
-        fs::read_to_string(&p).unwrap_or_else(|e| panic!("read {}: {e}", p.display()));
+    let body = fs::read_to_string(&p).unwrap_or_else(|e| panic!("read {}: {e}", p.display()));
     let parsed: ExclusionsFile =
         toml::from_str(&body).unwrap_or_else(|e| panic!("parse {}: {e}", p.display()));
     parsed.exclusions
@@ -113,8 +115,8 @@ fn read_conformance_test_sources() -> String {
         if path.extension().and_then(|s| s.to_str()) != Some("rs") {
             continue;
         }
-        let body = fs::read_to_string(&path)
-            .unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
+        let body =
+            fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
         combined.push_str(&body);
         combined.push('\n');
     }
@@ -166,8 +168,7 @@ fn tracking_issue_valid(s: &str) -> bool {
         return false;
     }
     // Accept `#NNN` (crosslink convention) or a full URL.
-    let hash_form =
-        s.starts_with('#') && s[1..].chars().all(|c| c.is_ascii_digit()) && s.len() > 1;
+    let hash_form = s.starts_with('#') && s[1..].chars().all(|c| c.is_ascii_digit()) && s.len() > 1;
     let url_form = s.starts_with("http://") || s.starts_with("https://");
     hash_form || url_form
 }

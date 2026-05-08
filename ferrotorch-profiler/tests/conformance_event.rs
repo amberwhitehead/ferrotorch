@@ -34,8 +34,7 @@ fn fixtures_json() -> serde_json::Value {
             p.display()
         )
     });
-    serde_json::from_slice(&bytes)
-        .unwrap_or_else(|e| panic!("parse {}: {e}", p.display()))
+    serde_json::from_slice(&bytes).unwrap_or_else(|e| panic!("parse {}: {e}", p.display()))
 }
 
 fn event_fixtures(all: &serde_json::Value) -> &Vec<serde_json::Value> {
@@ -169,7 +168,10 @@ fn event_memory_alloc_positive_bytes() {
     let events = run_and_get_events("event_memory_alloc", &all);
     assert_eq!(events.len(), 1, "expected 1 memory event");
     let ev = &events[0];
-    assert_eq!(ev.category, "memory", "memory events must have category = memory");
+    assert_eq!(
+        ev.category, "memory",
+        "memory events must have category = memory"
+    );
     assert_eq!(
         ev.memory_bytes,
         Some(4096),
@@ -350,7 +352,10 @@ fn memory_category_display_strings() {
     // are interpretable by standard tooling.
     assert_eq!(MemoryCategory::Activations.to_string(), "activations");
     assert_eq!(MemoryCategory::Parameters.to_string(), "parameters");
-    assert_eq!(MemoryCategory::OptimizerState.to_string(), "optimizer_state");
+    assert_eq!(
+        MemoryCategory::OptimizerState.to_string(),
+        "optimizer_state"
+    );
     assert_eq!(MemoryCategory::Gradients.to_string(), "gradients");
     assert_eq!(MemoryCategory::Other.to_string(), "other");
 }

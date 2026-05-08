@@ -120,14 +120,18 @@ fn every_public_item_has_a_conformance_reference_or_exclusion() {
     let tests_dir: PathBuf = [env!("CARGO_MANIFEST_DIR"), "tests"].iter().collect();
 
     // 1. Load surface inventory
-    let inventory_path = tests_dir.join("conformance").join("_surface_inventory.toml");
+    let inventory_path = tests_dir
+        .join("conformance")
+        .join("_surface_inventory.toml");
     let inventory_raw = std::fs::read_to_string(&inventory_path)
         .unwrap_or_else(|e| panic!("Cannot read surface inventory: {e}"));
     let inventory_phases = extract_inventory_phases(&inventory_raw);
     let all_items: HashSet<String> = inventory_phases.keys().cloned().collect();
 
     // 2. Load exclusions
-    let exclusions_path = tests_dir.join("conformance").join("_surface_exclusions.toml");
+    let exclusions_path = tests_dir
+        .join("conformance")
+        .join("_surface_exclusions.toml");
     let exclusions_raw = std::fs::read_to_string(&exclusions_path)
         .unwrap_or_else(|e| panic!("Cannot read exclusions file: {e}"));
     let excluded_items = extract_toml_paths(&exclusions_raw);
@@ -178,12 +182,16 @@ fn every_public_item_has_a_conformance_reference_or_exclusion() {
         }
 
         // Determine phase
-        let phase = inventory_phases.get(item).map(|s| s.as_str()).unwrap_or("unknown");
+        let phase = inventory_phases
+            .get(item)
+            .map(|s| s.as_str())
+            .unwrap_or("unknown");
 
         // Extract the leaf name (last :: segment) for substring match
         let leaf = item.rsplit("::").next().unwrap_or(item);
         // Also match on the full qualified path
-        let referenced_in_combined = combined_text.contains(leaf) || combined_text.contains(item.as_str());
+        let referenced_in_combined =
+            combined_text.contains(leaf) || combined_text.contains(item.as_str());
 
         match phase {
             "C6.4" => {
@@ -290,9 +298,11 @@ fn c6_4_scheduler_names_all_referenced() {
 fn surface_inventory_and_exclusions_are_readable() {
     let tests_dir: PathBuf = [env!("CARGO_MANIFEST_DIR"), "tests"].iter().collect();
 
-    let inventory_path = tests_dir.join("conformance").join("_surface_inventory.toml");
-    let inventory_raw = std::fs::read_to_string(&inventory_path)
-        .expect("_surface_inventory.toml must be readable");
+    let inventory_path = tests_dir
+        .join("conformance")
+        .join("_surface_inventory.toml");
+    let inventory_raw =
+        std::fs::read_to_string(&inventory_path).expect("_surface_inventory.toml must be readable");
     let phases = extract_inventory_phases(&inventory_raw);
     assert!(
         phases.len() >= 50,
@@ -300,7 +310,9 @@ fn surface_inventory_and_exclusions_are_readable() {
         phases.len()
     );
 
-    let exclusions_path = tests_dir.join("conformance").join("_surface_exclusions.toml");
+    let exclusions_path = tests_dir
+        .join("conformance")
+        .join("_surface_exclusions.toml");
     let exclusions_raw = std::fs::read_to_string(&exclusions_path)
         .expect("_surface_exclusions.toml must be readable");
     let excluded = extract_toml_paths(&exclusions_raw);

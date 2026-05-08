@@ -27,10 +27,8 @@
 //!   "Implemented speculative decoding per Leviathan et al. 2023; draft+target+verifier
 //!    with token-level acceptance criterion + residual sampling on rejection"
 
-use ferrotorch_llama::{
-    LlamaForCausalLM, LlamaHandle, SpecDecodeConfig, speculative_decode,
-};
 use ferrotorch_llama::config::{LlamaActivation, LlamaConfig};
+use ferrotorch_llama::{LlamaForCausalLM, LlamaHandle, SpecDecodeConfig, speculative_decode};
 
 /// Synthetic 2-layer Llama config matching the C.8 spec:
 /// vocab=128, dim=64, n_layers=2.  No weight downloads needed.
@@ -81,8 +79,7 @@ fn c8_probe_k4_draft_target_acceptance_rate_vs_random() {
     );
     assert_eq!(out_identical.tokens.len(), cfg.max_new_tokens);
     assert_eq!(
-        out_identical.proposed_count,
-        out_identical.accepted_count,
+        out_identical.proposed_count, out_identical.accepted_count,
         "all proposals should be accepted for identical models"
     );
 
@@ -101,10 +98,7 @@ fn c8_probe_k4_draft_target_acceptance_rate_vs_random() {
         "acceptance rate {rate:.4} outside [0, 1]"
     );
     // proposed_count must equal max_new_tokens rounds × K (at least once).
-    assert!(
-        out_random.proposed_count > 0,
-        "proposed_count must be > 0"
-    );
+    assert!(out_random.proposed_count > 0, "proposed_count must be > 0");
 
     eprintln!(
         "c8_probe_k4: identical rate={:.4}, random rate={:.4} ({}/{} accepted)",
@@ -124,12 +118,7 @@ fn c8_probe_k4_draft_target_acceptance_rate_vs_random() {
 #[test]
 fn c8_probe_acceptance_criterion_draft_equals_target() {
     let model = LlamaForCausalLM::<f32>::new(c8_config()).unwrap();
-    let prompts: &[&[u32]] = &[
-        &[1],
-        &[1, 2, 3],
-        &[10, 20, 30, 40, 50],
-        &[0, 127, 63, 64],
-    ];
+    let prompts: &[&[u32]] = &[&[1], &[1, 2, 3], &[10, 20, 30, 40, 50], &[0, 127, 63, 64]];
 
     for (i, prompt) in prompts.iter().enumerate() {
         let draft = LlamaHandle::new(&model);
@@ -167,8 +156,8 @@ fn c8_probe_acceptance_criterion_draft_equals_target() {
 #[test]
 fn c8_probe_acceptance_criterion_quoted_source() {
     // Use a synthetic ModelHandle whose distributions we control exactly.
-    use ferrotorch_llama::spec_decode::ModelHandle;
     use ferrotorch_core::FerrotorchResult;
+    use ferrotorch_llama::spec_decode::ModelHandle;
 
     /// A model that always assigns probability 1.0 to token `always_token`
     /// and 0.0 to everything else (logit = 0 for `always_token`, -inf rest).
@@ -191,8 +180,14 @@ fn c8_probe_acceptance_criterion_quoted_source() {
     // Every draft proposal (token 5) will be rejected because
     // p(5) = 0 < q(5) = 1 → accept_prob = 0 → always reject.
     // The corrected token from residual norm(max(0, p−q)) = norm(p) = token 10.
-    let draft = PeakedModel { always_token: 5, vocab: 128 };
-    let target = PeakedModel { always_token: 10, vocab: 128 };
+    let draft = PeakedModel {
+        always_token: 5,
+        vocab: 128,
+    };
+    let target = PeakedModel {
+        always_token: 10,
+        vocab: 128,
+    };
 
     let cfg = SpecDecodeConfig {
         draft_k: 4,

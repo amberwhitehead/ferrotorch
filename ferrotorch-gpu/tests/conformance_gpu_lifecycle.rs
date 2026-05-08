@@ -20,14 +20,12 @@ mod lifecycle {
     use std::sync::Arc;
 
     use ferrotorch_gpu::allocator::{
-        CudaAllocator, StreamId, get_allocation_size, round_size,
-        MIN_BLOCK_SIZE, MIN_LARGE_ALLOC, ROUND_LARGE, SMALL_BUFFER, SMALL_SIZE,
+        CudaAllocator, MIN_BLOCK_SIZE, MIN_LARGE_ALLOC, ROUND_LARGE, SMALL_BUFFER, SMALL_SIZE,
+        StreamId, get_allocation_size, round_size,
     };
     use ferrotorch_gpu::device::GpuDevice;
     use ferrotorch_gpu::error::GpuError;
-    use ferrotorch_gpu::memory_guard::{
-        MemoryGuardBuilder, MemoryHook, OomPolicy, PressureLevel,
-    };
+    use ferrotorch_gpu::memory_guard::{MemoryGuardBuilder, MemoryHook, OomPolicy, PressureLevel};
     use ferrotorch_gpu::pool::{
         self, empty_cache, empty_cache_all, pool_return, pool_return_with_stream, pool_take,
         pool_take_stream, record_stream, reset_pool_stats, round_len,
@@ -84,8 +82,9 @@ mod lifecycle {
             env!("CARGO_MANIFEST_DIR"),
             "/tests/conformance/fixtures_lifecycle.json"
         );
-        let text = std::fs::read_to_string(path)
-            .expect("fixtures_lifecycle.json must exist; run scripts/regenerate_gpu_lifecycle_fixtures.py");
+        let text = std::fs::read_to_string(path).expect(
+            "fixtures_lifecycle.json must exist; run scripts/regenerate_gpu_lifecycle_fixtures.py",
+        );
         serde_json::from_str(&text).expect("fixtures_lifecycle.json must be valid JSON")
     }
 
@@ -150,7 +149,11 @@ mod lifecycle {
             );
             n += 1;
         }
-        assert!(n >= 6, "expected at least 6 get_allocation_size fixtures; got {}", n);
+        assert!(
+            n >= 6,
+            "expected at least 6 get_allocation_size fixtures; got {}",
+            n
+        );
     }
 
     /// conformance_gpu_lifecycle: ferrotorch_gpu::allocator::MIN_BLOCK_SIZE
@@ -188,7 +191,11 @@ mod lifecycle {
     fn allocator_new_starts_at_zero() {
         let device = cascade_skip!();
         let alloc = CudaAllocator::new(Arc::new(device));
-        assert_eq!(alloc.memory_allocated(), 0, "fresh allocator: allocated == 0");
+        assert_eq!(
+            alloc.memory_allocated(),
+            0,
+            "fresh allocator: allocated == 0"
+        );
         assert_eq!(
             alloc.max_memory_allocated(),
             0,
@@ -222,8 +229,12 @@ mod lifecycle {
         let fixtures = fixtures_json();
         let fx = fixture_by_id(&fixtures, "alloc_free_decreases_bytes");
         let count = fx["inputs"]["count"].as_u64().expect("count") as usize;
-        let expected_after_alloc = fx["expected_allocated_after_alloc"].as_u64().expect("expected") as usize;
-        let expected_after_free = fx["expected_allocated_after_free"].as_u64().expect("expected") as usize;
+        let expected_after_alloc = fx["expected_allocated_after_alloc"]
+            .as_u64()
+            .expect("expected") as usize;
+        let expected_after_free = fx["expected_allocated_after_free"]
+            .as_u64()
+            .expect("expected") as usize;
 
         let device = cascade_skip!();
         let alloc = CudaAllocator::new(Arc::new(device));
@@ -302,7 +313,11 @@ mod lifecycle {
         let device = cascade_skip!();
         let alloc = CudaAllocator::new(Arc::new(device));
         let buf = cascade_skip!(alloc.alloc_zeros::<f32>(0));
-        assert_eq!(alloc.memory_allocated(), 0, "zero-element alloc must not change allocated bytes");
+        assert_eq!(
+            alloc.memory_allocated(),
+            0,
+            "zero-element alloc must not change allocated bytes"
+        );
         assert_eq!(buf.len(), 0);
         assert!(buf.is_empty());
         alloc.free(buf);
@@ -323,12 +338,20 @@ mod lifecycle {
         let stream = StreamId(1);
 
         let (idx, _actual) = alloc.cache_insert(2048, 4096, 0x1000, stream);
-        assert_eq!(alloc.cache_stats().1, 1, "cache_insert must count as a miss");
+        assert_eq!(
+            alloc.cache_stats().1,
+            1,
+            "cache_insert must count as a miss"
+        );
 
         alloc.cache_free(idx);
         let found = alloc.cache_find(512, stream);
         assert!(found.is_some(), "cache_find after cache_free must hit");
-        assert_eq!(alloc.cache_stats().0, 1, "cache_find hit must increment hit counter");
+        assert_eq!(
+            alloc.cache_stats().0,
+            1,
+            "cache_find hit must increment hit counter"
+        );
     }
 
     /// conformance_gpu_lifecycle: ferrotorch_gpu::allocator::CudaAllocator::empty_cache
@@ -346,7 +369,10 @@ mod lifecycle {
         alloc.cache_insert(1024, 4096, 0x1000, stream);
         alloc.cache_free(0);
 
-        assert!(alloc.free_block_count() > 0, "should have free blocks before empty_cache");
+        assert!(
+            alloc.free_block_count() > 0,
+            "should have free blocks before empty_cache"
+        );
         alloc.empty_cache();
         assert_eq!(
             alloc.free_block_count(),
@@ -381,9 +407,17 @@ mod lifecycle {
         let host: Vec<f32> = vec![1.0, 2.0, 3.0, 4.0, 5.0];
         let buf = cascade_skip!(cpu_to_gpu(&host, &device));
 
-        assert_eq!(buf.len(), 5, "CudaBuffer::len must equal the number of elements transferred");
+        assert_eq!(
+            buf.len(),
+            5,
+            "CudaBuffer::len must equal the number of elements transferred"
+        );
         assert!(!buf.is_empty(), "non-empty buffer must not report is_empty");
-        assert_eq!(buf.device_ordinal(), 0, "device_ordinal must match the device used for transfer");
+        assert_eq!(
+            buf.device_ordinal(),
+            0,
+            "device_ordinal must match the device used for transfer"
+        );
     }
 
     /// conformance_gpu_lifecycle: ferrotorch_gpu::buffer::CudaBuffer::is_empty (empty case)
@@ -595,7 +629,11 @@ mod lifecycle {
 
         let back = cascade_skip!(gpu_to_cpu(&gpu_buf, &device));
         for (i, (&a, &b)) in back.iter().zip(expected.iter()).enumerate() {
-            assert_eq!(a, b, "H2D+D2H f32 round-trip bit-exact mismatch at index {}", i);
+            assert_eq!(
+                a, b,
+                "H2D+D2H f32 round-trip bit-exact mismatch at index {}",
+                i
+            );
         }
     }
 
@@ -617,7 +655,11 @@ mod lifecycle {
         let gpu_buf = cascade_skip!(cpu_to_gpu(&expected, &device));
         let back = cascade_skip!(gpu_to_cpu(&gpu_buf, &device));
         for (i, (&a, &b)) in back.iter().zip(expected.iter()).enumerate() {
-            assert_eq!(a, b, "H2D+D2H f64 round-trip bit-exact mismatch at index {}", i);
+            assert_eq!(
+                a, b,
+                "H2D+D2H f64 round-trip bit-exact mismatch at index {}",
+                i
+            );
         }
     }
 
@@ -646,11 +688,7 @@ mod lifecycle {
         assert_eq!(back.len(), n);
         // Check first 1000 elements against fixture pattern.
         for (i, &val) in back.iter().enumerate().take(1000) {
-            assert_eq!(
-                val, i as f32,
-                "large transfer: element {} mismatch",
-                i
-            );
+            assert_eq!(val, i as f32, "large transfer: element {} mismatch", i);
         }
     }
 
@@ -745,9 +783,15 @@ mod lifecycle {
         // error variant exists and its pattern is correct structurally.
         //
         // We confirm that DeviceMismatch is reachable by constructing it directly.
-        let err = GpuError::DeviceMismatch { expected: 1, got: 0 };
+        let err = GpuError::DeviceMismatch {
+            expected: 1,
+            got: 0,
+        };
         match err {
-            GpuError::DeviceMismatch { expected: 1, got: 0 } => {}
+            GpuError::DeviceMismatch {
+                expected: 1,
+                got: 0,
+            } => {}
             other => panic!("DeviceMismatch pattern broken: {:?}", other),
         }
 
@@ -801,8 +845,8 @@ mod lifecycle {
         let device = cascade_skip!();
         let ctx = device.context().clone();
 
-        let err = StreamPool::get_stream(&ctx, 9999)
-            .expect_err("ordinal >= MAX_DEVICES must return Err");
+        let err =
+            StreamPool::get_stream(&ctx, 9999).expect_err("ordinal >= MAX_DEVICES must return Err");
         assert!(
             matches!(err, GpuError::InvalidDevice { .. }),
             "expected InvalidDevice, got: {:?}",
@@ -822,7 +866,10 @@ mod lifecycle {
 
         // Ensure clean state.
         clear_current_stream(dev);
-        assert!(get_current_stream(dev).is_none(), "should start with no current stream");
+        assert!(
+            get_current_stream(dev).is_none(),
+            "should start with no current stream"
+        );
 
         let s1 = cascade_skip!(ctx.new_stream());
         let s2 = cascade_skip!(ctx.new_stream());
@@ -852,7 +899,10 @@ mod lifecycle {
         );
 
         clear_current_stream(dev);
-        assert!(get_current_stream(dev).is_none(), "clear_current_stream must remove the entry");
+        assert!(
+            get_current_stream(dev).is_none(),
+            "clear_current_stream must remove the entry"
+        );
     }
 
     /// conformance_gpu_lifecycle: ferrotorch_gpu::stream::StreamGuard::new (no previous)
@@ -892,7 +942,10 @@ mod lifecycle {
         cascade_skip!(event.synchronize());
 
         let complete = cascade_skip!(event.query());
-        assert!(complete, "event.query() after synchronize() must return true");
+        assert!(
+            complete,
+            "event.query() after synchronize() must return true"
+        );
     }
 
     /// conformance_gpu_lifecycle: ferrotorch_gpu::stream::CudaEventWrapper::new_with_timing
@@ -969,7 +1022,8 @@ mod lifecycle {
         assert!(
             greatest <= least,
             "priority range invariant: greatest ({}) <= least ({})",
-            greatest, least
+            greatest,
+            least
         );
 
         let high = cascade_skip!(new_stream_with_priority(&ctx, StreamPriority::High));
@@ -989,14 +1043,28 @@ mod lifecycle {
         let ctx = device.context().clone();
         let dev = 0usize;
 
-        let _ = cascade_skip!(StreamPool::get_priority_stream(&ctx, dev, StreamPriority::High));
-        let _ = cascade_skip!(StreamPool::get_priority_stream(&ctx, dev, StreamPriority::Low));
+        let _ = cascade_skip!(StreamPool::get_priority_stream(
+            &ctx,
+            dev,
+            StreamPriority::High
+        ));
+        let _ = cascade_skip!(StreamPool::get_priority_stream(
+            &ctx,
+            dev,
+            StreamPriority::Low
+        ));
 
         let high_size = StreamPool::priority_pool_size(dev, StreamPriority::High);
         let low_size = StreamPool::priority_pool_size(dev, StreamPriority::Low);
 
-        assert!(high_size > 0, "High priority pool must be populated after first access");
-        assert!(low_size > 0, "Low priority pool must be populated after first access");
+        assert!(
+            high_size > 0,
+            "High priority pool must be populated after first access"
+        );
+        assert!(
+            low_size > 0,
+            "Low priority pool must be populated after first access"
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -1011,7 +1079,10 @@ mod lifecycle {
         let device = cascade_skip!();
         let guard = cascade_skip!(MemoryGuardBuilder::new(Arc::new(device)).build());
         let stats = guard.stats();
-        assert_eq!(stats.used_bytes, 0, "fresh MemoryGuard must have used_bytes == 0");
+        assert_eq!(
+            stats.used_bytes, 0,
+            "fresh MemoryGuard must have used_bytes == 0"
+        );
     }
 
     /// conformance_gpu_lifecycle: ferrotorch_gpu::memory_guard::MemoryGuard::safe_alloc
@@ -1156,7 +1227,10 @@ mod lifecycle {
         match result {
             Ok(buf) => guard.free(buf),
             Err(GpuError::Driver(_)) => {} // no GPU — acceptable skip
-            Err(e) => panic!("#891 regression: hook should have unblocked alloc with used_bytes=0, got {:?}", e),
+            Err(e) => panic!(
+                "#891 regression: hook should have unblocked alloc with used_bytes=0, got {:?}",
+                e
+            ),
         }
     }
 
@@ -1167,7 +1241,11 @@ mod lifecycle {
         let device = cascade_skip!();
         let guard = cascade_skip!(MemoryGuardBuilder::new(Arc::new(device)).build());
         guard.set_budget(1 << 20);
-        assert_eq!(guard.budget(), 1 << 20, "budget() must reflect set_budget()");
+        assert_eq!(
+            guard.budget(),
+            1 << 20,
+            "budget() must reflect set_budget()"
+        );
         // Unlimited.
         guard.set_budget(0);
         assert_eq!(guard.budget(), 0);
@@ -1294,7 +1372,8 @@ mod lifecycle {
         assert!(
             free <= total,
             "free device memory must be <= total ({} <= {})",
-            free, total
+            free,
+            total
         );
         // Also verify the guard accessor.
         assert_eq!(guarded.guard().device().ordinal(), 0);
@@ -1332,7 +1411,11 @@ mod lifecycle {
     #[test]
     fn device_new_ordinal_zero() {
         let device = cascade_skip!();
-        assert_eq!(device.ordinal(), 0, "GpuDevice::new(0) must report ordinal == 0");
+        assert_eq!(
+            device.ordinal(),
+            0,
+            "GpuDevice::new(0) must report ordinal == 0"
+        );
     }
 
     /// conformance_gpu_lifecycle: ferrotorch_gpu::device::GpuDevice::stream
@@ -1351,7 +1434,10 @@ mod lifecycle {
         let device = cascade_skip!();
         let p1 = Arc::as_ptr(device.default_stream());
         let p2 = Arc::as_ptr(device.default_stream());
-        assert_eq!(p1, p2, "default_stream must return the same Arc on repeated calls");
+        assert_eq!(
+            p1, p2,
+            "default_stream must return the same Arc on repeated calls"
+        );
     }
 
     /// conformance_gpu_lifecycle: ferrotorch_gpu::device::GpuDevice::new (invalid ordinal)

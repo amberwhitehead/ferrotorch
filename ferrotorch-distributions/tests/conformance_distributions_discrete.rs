@@ -19,8 +19,8 @@ use std::path::PathBuf;
 
 use ferrotorch_core::creation::{from_slice, scalar};
 use ferrotorch_distributions::{
-    Bernoulli, Categorical, Distribution, Exponential, Gamma, Multinomial, Normal, OneHotCategorical,
-    Poisson, RelaxedBernoulli, RelaxedOneHotCategorical,
+    Bernoulli, Categorical, Distribution, Exponential, Gamma, Multinomial, Normal,
+    OneHotCategorical, Poisson, RelaxedBernoulli, RelaxedOneHotCategorical,
     constraints::{self, Constraint},
     kl::kl_divergence,
 };
@@ -35,8 +35,7 @@ fn fixtures() -> Value {
         .join("tests")
         .join("conformance")
         .join("fixtures.json");
-    let body = std::fs::read_to_string(&p)
-        .unwrap_or_else(|e| panic!("read fixtures.json: {e}"));
+    let body = std::fs::read_to_string(&p).unwrap_or_else(|e| panic!("read fixtures.json: {e}"));
     serde_json::from_str(&body).expect("parse fixtures.json")
 }
 
@@ -97,11 +96,36 @@ fn bernoulli_fixtures_log_prob_mean_variance_entropy() {
 
         let x0 = scalar(0.0f64).unwrap();
         let x1 = scalar(1.0f64).unwrap();
-        assert_close(d.log_prob(&x0).unwrap().item().unwrap(), f(&case["log_prob_0"]), TOL, &format!("Bernoulli[{label}] log_prob(0)"));
-        assert_close(d.log_prob(&x1).unwrap().item().unwrap(), f(&case["log_prob_1"]), TOL, &format!("Bernoulli[{label}] log_prob(1)"));
-        assert_close(d.mean().unwrap().item().unwrap(), f(&case["mean"]), TOL, &format!("Bernoulli[{label}] mean"));
-        assert_close(d.variance().unwrap().item().unwrap(), f(&case["variance"]), TOL, &format!("Bernoulli[{label}] variance"));
-        assert_close(d.entropy().unwrap().item().unwrap(), f(&case["entropy"]), TOL, &format!("Bernoulli[{label}] entropy"));
+        assert_close(
+            d.log_prob(&x0).unwrap().item().unwrap(),
+            f(&case["log_prob_0"]),
+            TOL,
+            &format!("Bernoulli[{label}] log_prob(0)"),
+        );
+        assert_close(
+            d.log_prob(&x1).unwrap().item().unwrap(),
+            f(&case["log_prob_1"]),
+            TOL,
+            &format!("Bernoulli[{label}] log_prob(1)"),
+        );
+        assert_close(
+            d.mean().unwrap().item().unwrap(),
+            f(&case["mean"]),
+            TOL,
+            &format!("Bernoulli[{label}] mean"),
+        );
+        assert_close(
+            d.variance().unwrap().item().unwrap(),
+            f(&case["variance"]),
+            TOL,
+            &format!("Bernoulli[{label}] variance"),
+        );
+        assert_close(
+            d.entropy().unwrap().item().unwrap(),
+            f(&case["entropy"]),
+            TOL,
+            &format!("Bernoulli[{label}] entropy"),
+        );
     }
 }
 
@@ -147,10 +171,20 @@ fn categorical_fixtures_log_prob_entropy() {
         for (cls, &exp_val) in exp_lp.iter().enumerate() {
             let x_t = scalar(cls as f64).unwrap();
             let lp = d.log_prob(&x_t).unwrap().item().unwrap();
-            assert_close(lp, exp_val, TOL, &format!("Categorical[{label}] log_prob(class={cls})"));
+            assert_close(
+                lp,
+                exp_val,
+                TOL,
+                &format!("Categorical[{label}] log_prob(class={cls})"),
+            );
         }
 
-        assert_close(d.entropy().unwrap().item().unwrap(), f(&case["entropy"]), TOL, &format!("Categorical[{label}] entropy"));
+        assert_close(
+            d.entropy().unwrap().item().unwrap(),
+            f(&case["entropy"]),
+            TOL,
+            &format!("Categorical[{label}] entropy"),
+        );
     }
 }
 
@@ -160,7 +194,10 @@ fn categorical_sample_class_range() {
     let d = Categorical::new(probs).unwrap();
     let s = d.sample(&[100]).unwrap();
     for &v in s.data_vec().unwrap().iter() {
-        assert!((0.0..3.0).contains(&v), "Categorical sample {v} out of [0,3)");
+        assert!(
+            (0.0..3.0).contains(&v),
+            "Categorical sample {v} out of [0,3)"
+        );
     }
 }
 
@@ -188,17 +225,36 @@ fn multinomial_fixtures_log_prob_mean_variance() {
         let probs_t = from_slice::<f64>(&probs_v, &[k]).unwrap();
         let d = Multinomial::new(total, probs_t).unwrap();
 
-        let counts_v: Vec<f64> = case["x_counts"].as_array().unwrap()
-            .iter().map(|v| v.as_f64().unwrap()).collect();
+        let counts_v: Vec<f64> = case["x_counts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_f64().unwrap())
+            .collect();
         let counts_t = from_slice::<f64>(&counts_v, &[k]).unwrap();
         let lp = d.log_prob(&counts_t).unwrap().item().unwrap();
-        assert_close(lp, f(&case["log_prob"]), TOL, &format!("Multinomial[{label}] log_prob"));
+        assert_close(
+            lp,
+            f(&case["log_prob"]),
+            TOL,
+            &format!("Multinomial[{label}] log_prob"),
+        );
 
         let mean = d.mean().unwrap().data_vec().unwrap();
-        assert_close_vec(&mean, &fvec(&case["mean"]), TOL, &format!("Multinomial[{label}] mean"));
+        assert_close_vec(
+            &mean,
+            &fvec(&case["mean"]),
+            TOL,
+            &format!("Multinomial[{label}] mean"),
+        );
 
         let var = d.variance().unwrap().data_vec().unwrap();
-        assert_close_vec(&var, &fvec(&case["variance"]), TOL, &format!("Multinomial[{label}] variance"));
+        assert_close_vec(
+            &var,
+            &fvec(&case["variance"]),
+            TOL,
+            &format!("Multinomial[{label}] variance"),
+        );
     }
 }
 
@@ -211,7 +267,12 @@ fn multinomial_sample_shape_and_count_sum() {
     let s = d.sample(&[]).unwrap();
     assert_eq!(s.shape(), &[3]);
     let sum: f64 = s.data_vec().unwrap().iter().sum();
-    assert_close(sum, total as f64, TOL, "Multinomial sample sum == total_count");
+    assert_close(
+        sum,
+        total as f64,
+        TOL,
+        "Multinomial sample sum == total_count",
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -235,10 +296,25 @@ fn poisson_fixtures_log_prob_mean_variance() {
         let k_pts = fvec(&case["k_points"]);
         let k_t = from_slice::<f64>(&k_pts, &[k_pts.len()]).unwrap();
         let lp = d.log_prob(&k_t).unwrap().data_vec().unwrap();
-        assert_close_vec(&lp, &fvec(&case["log_prob"]), TOL, &format!("Poisson[{label}] log_prob"));
+        assert_close_vec(
+            &lp,
+            &fvec(&case["log_prob"]),
+            TOL,
+            &format!("Poisson[{label}] log_prob"),
+        );
 
-        assert_close(Distribution::mean(&d).unwrap().item().unwrap(), f(&case["mean"]), TOL, &format!("Poisson[{label}] mean"));
-        assert_close(Distribution::variance(&d).unwrap().item().unwrap(), f(&case["variance"]), TOL, &format!("Poisson[{label}] variance"));
+        assert_close(
+            Distribution::mean(&d).unwrap().item().unwrap(),
+            f(&case["mean"]),
+            TOL,
+            &format!("Poisson[{label}] mean"),
+        );
+        assert_close(
+            Distribution::variance(&d).unwrap().item().unwrap(),
+            f(&case["variance"]),
+            TOL,
+            &format!("Poisson[{label}] variance"),
+        );
     }
 }
 
@@ -247,7 +323,10 @@ fn poisson_sample_non_negative_integers() {
     let d = Poisson::new(scalar(3.0f64).unwrap()).unwrap();
     let s = d.sample(&[50]).unwrap();
     for &v in s.data_vec().unwrap().iter() {
-        assert!(v >= 0.0 && v.fract() == 0.0, "Poisson sample {v} must be non-negative integer");
+        assert!(
+            v >= 0.0 && v.fract() == 0.0,
+            "Poisson sample {v} must be non-negative integer"
+        );
     }
 }
 
@@ -281,10 +360,20 @@ fn one_hot_categorical_fixtures_log_prob_entropy() {
             oh[cls] = 1.0;
             let oh_t = from_slice::<f64>(&oh, &[k]).unwrap();
             let lp = d.log_prob(&oh_t).unwrap().item().unwrap();
-            assert_close(lp, exp_val, TOL, &format!("OneHotCategorical[{label}] log_prob(class={cls})"));
+            assert_close(
+                lp,
+                exp_val,
+                TOL,
+                &format!("OneHotCategorical[{label}] log_prob(class={cls})"),
+            );
         }
 
-        assert_close(d.entropy().unwrap().item().unwrap(), f(&case["entropy"]), TOL, &format!("OneHotCategorical[{label}] entropy"));
+        assert_close(
+            d.entropy().unwrap().item().unwrap(),
+            f(&case["entropy"]),
+            TOL,
+            &format!("OneHotCategorical[{label}] entropy"),
+        );
     }
 }
 
@@ -327,7 +416,12 @@ fn relaxed_bernoulli_fixtures_log_prob() {
         let x_t = from_slice::<f64>(&x_pts, &[x_pts.len()]).unwrap();
         let lp = d.log_prob(&x_t).unwrap().data_vec().unwrap();
         let exp_lp = fvec(&case["log_prob"]);
-        assert_close_vec(&lp, &exp_lp, TOL, &format!("RelaxedBernoulli[{label}] log_prob"));
+        assert_close_vec(
+            &lp,
+            &exp_lp,
+            TOL,
+            &format!("RelaxedBernoulli[{label}] log_prob"),
+        );
     }
 }
 
@@ -336,7 +430,10 @@ fn relaxed_bernoulli_rsample_in_unit_interval() {
     let d = RelaxedBernoulli::new(0.5f64, scalar(0.7f64).unwrap()).unwrap();
     let s = d.rsample(&[50]).unwrap();
     for &v in s.data_vec().unwrap().iter() {
-        assert!(v > 0.0 && v < 1.0, "RelaxedBernoulli rsample {v} not in (0,1)");
+        assert!(
+            v > 0.0 && v < 1.0,
+            "RelaxedBernoulli rsample {v} not in (0,1)"
+        );
     }
 }
 
@@ -366,7 +463,12 @@ fn relaxed_one_hot_categorical_fixtures_log_prob() {
         let x_v = fvec(&case["x_point_uniform"]);
         let x_t = from_slice::<f64>(&x_v, &[k]).unwrap();
         let lp = d.log_prob(&x_t).unwrap().item().unwrap();
-        assert_close(lp, f(&case["log_prob_at_uniform"]), TOL, &format!("RelaxedOneHotCategorical[{label}] log_prob"));
+        assert_close(
+            lp,
+            f(&case["log_prob_at_uniform"]),
+            TOL,
+            &format!("RelaxedOneHotCategorical[{label}] log_prob"),
+        );
     }
 }
 
@@ -378,7 +480,12 @@ fn relaxed_one_hot_categorical_rsample_sums_to_one() {
     let data = s.data_vec().unwrap();
     for row in data.chunks(3) {
         let sum: f64 = row.iter().sum();
-        assert_close(sum, 1.0, 1e-4, "RelaxedOneHotCategorical rsample row sum ≈ 1");
+        assert_close(
+            sum,
+            1.0,
+            1e-4,
+            "RelaxedOneHotCategorical rsample row sum ≈ 1",
+        );
     }
 }
 
@@ -392,8 +499,16 @@ fn kl_divergence_normal_normal() {
     for case in fix["kl_divergence"].as_array().unwrap() {
         if case["label"].as_str().unwrap().starts_with("normal") {
             let label = case["label"].as_str().unwrap();
-            let p = Normal::new(scalar(f(&case["p_loc"])).unwrap(), scalar(f(&case["p_scale"])).unwrap()).unwrap();
-            let q = Normal::new(scalar(f(&case["q_loc"])).unwrap(), scalar(f(&case["q_scale"])).unwrap()).unwrap();
+            let p = Normal::new(
+                scalar(f(&case["p_loc"])).unwrap(),
+                scalar(f(&case["p_scale"])).unwrap(),
+            )
+            .unwrap();
+            let q = Normal::new(
+                scalar(f(&case["q_loc"])).unwrap(),
+                scalar(f(&case["q_scale"])).unwrap(),
+            )
+            .unwrap();
             let kl = kl_divergence(&p, &q).unwrap().item().unwrap();
             assert_close(kl, f(&case["kl"]), TOL, &format!("kl_divergence[{label}]"));
         }
@@ -408,7 +523,12 @@ fn kl_divergence_bernoulli_bernoulli() {
             let p = Bernoulli::new(scalar(f(&case["p_probs"])).unwrap()).unwrap();
             let q = Bernoulli::new(scalar(f(&case["q_probs"])).unwrap()).unwrap();
             let kl = kl_divergence(&p, &q).unwrap().item().unwrap();
-            assert_close(kl, f(&case["kl"]), TOL, "kl_divergence[bernoulli_bernoulli]");
+            assert_close(
+                kl,
+                f(&case["kl"]),
+                TOL,
+                "kl_divergence[bernoulli_bernoulli]",
+            );
         }
     }
 }
@@ -418,8 +538,16 @@ fn kl_divergence_gamma_gamma() {
     let fix = fixtures();
     for case in fix["kl_divergence"].as_array().unwrap() {
         if case["label"] == "gamma_gamma" {
-            let p = Gamma::new(scalar(f(&case["p_concentration"])).unwrap(), scalar(f(&case["p_rate"])).unwrap()).unwrap();
-            let q = Gamma::new(scalar(f(&case["q_concentration"])).unwrap(), scalar(f(&case["q_rate"])).unwrap()).unwrap();
+            let p = Gamma::new(
+                scalar(f(&case["p_concentration"])).unwrap(),
+                scalar(f(&case["p_rate"])).unwrap(),
+            )
+            .unwrap();
+            let q = Gamma::new(
+                scalar(f(&case["q_concentration"])).unwrap(),
+                scalar(f(&case["q_rate"])).unwrap(),
+            )
+            .unwrap();
             let kl = kl_divergence(&p, &q).unwrap().item().unwrap();
             assert_close(kl, f(&case["kl"]), TOL, "kl_divergence[gamma_gamma]");
         }
@@ -434,7 +562,12 @@ fn kl_divergence_exponential_exponential() {
             let p = Exponential::new(scalar(f(&case["p_rate"])).unwrap()).unwrap();
             let q = Exponential::new(scalar(f(&case["q_rate"])).unwrap()).unwrap();
             let kl = kl_divergence(&p, &q).unwrap().item().unwrap();
-            assert_close(kl, f(&case["kl"]), TOL, "kl_divergence[exponential_exponential]");
+            assert_close(
+                kl,
+                f(&case["kl"]),
+                TOL,
+                "kl_divergence[exponential_exponential]",
+            );
         }
     }
 }
@@ -444,9 +577,21 @@ fn kl_divergence_self_is_zero() {
     // KL(P || P) should be 0.0 for Normal.
     let fix = fixtures();
     for case in fix["kl_divergence"].as_array().unwrap() {
-        if case.get("expected_zero").and_then(|v| v.as_bool()).unwrap_or(false) {
-            let p = Normal::new(scalar(f(&case["p_loc"])).unwrap(), scalar(f(&case["p_scale"])).unwrap()).unwrap();
-            let q = Normal::new(scalar(f(&case["q_loc"])).unwrap(), scalar(f(&case["q_scale"])).unwrap()).unwrap();
+        if case
+            .get("expected_zero")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false)
+        {
+            let p = Normal::new(
+                scalar(f(&case["p_loc"])).unwrap(),
+                scalar(f(&case["p_scale"])).unwrap(),
+            )
+            .unwrap();
+            let q = Normal::new(
+                scalar(f(&case["q_loc"])).unwrap(),
+                scalar(f(&case["q_scale"])).unwrap(),
+            )
+            .unwrap();
             let kl = kl_divergence(&p, &q).unwrap().item().unwrap();
             assert_close(kl, 0.0, TOL, "kl_divergence self == 0");
         }
@@ -458,7 +603,10 @@ fn kl_divergence_unsupported_pair_returns_error() {
     // Exponential vs Normal — no registered formula.
     let p = Exponential::new(scalar(1.0f64).unwrap()).unwrap();
     let q = Normal::new(scalar(0.0f64).unwrap(), scalar(1.0f64).unwrap()).unwrap();
-    assert!(kl_divergence(&p, &q).is_err(), "unsupported KL pair should error");
+    assert!(
+        kl_divergence(&p, &q).is_err(),
+        "unsupported KL pair should error"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -596,19 +744,30 @@ fn constraint_fixture_real_positive_unit_interval() {
     let fix = fixtures();
     for case in fix["constraints"].as_array().unwrap() {
         let label = case["label"].as_str().unwrap();
-        let values: Vec<f64> = case["values"].as_array().unwrap().iter().map(parse_val).collect();
-        let expected: Vec<bool> = case["expected_check"].as_array().unwrap()
-            .iter().map(|v| v.as_bool().unwrap()).collect();
+        let values: Vec<f64> = case["values"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(parse_val)
+            .collect();
+        let expected: Vec<bool> = case["expected_check"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_bool().unwrap())
+            .collect();
 
         for (val_f, exp_bool) in values.iter().zip(expected.iter()) {
             let actual = match label {
-                "real"          => constraints::real().check(*val_f),
-                "positive"      => constraints::positive().check(*val_f),
+                "real" => constraints::real().check(*val_f),
+                "positive" => constraints::positive().check(*val_f),
                 "unit_interval" => constraints::unit_interval().check(*val_f),
                 _ => continue,
             };
-            assert_eq!(actual, *exp_bool,
-                "Constraint[{label}].check({val_f}) expected {exp_bool}, got {actual}");
+            assert_eq!(
+                actual, *exp_bool,
+                "Constraint[{label}].check({val_f}) expected {exp_bool}, got {actual}"
+            );
         }
     }
 }

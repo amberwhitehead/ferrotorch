@@ -116,7 +116,10 @@ fn p3_to_dense_on_cuda_basic_f64() {
     let gpu_dense = sp
         .to_dense_on(Device::Cuda(0))
         .expect("gpu to_dense_on f64");
-    assert!(gpu_dense.is_cuda(), "to_dense_on(Cuda) output must remain on CUDA");
+    assert!(
+        gpu_dense.is_cuda(),
+        "to_dense_on(Cuda) output must remain on CUDA"
+    );
 
     let gpu_back = gpu_dense.cpu().expect("gpu->cpu");
     let gpu_data = gpu_back.data().expect("gpu->cpu data");
@@ -286,10 +289,7 @@ fn p3_from_dense_cuda_basic_f64() {
     ensure_cuda_backend();
 
     let dense_data: Vec<f64> = vec![
-        0.0, 1.0, 0.0, 2.0,
-        0.0, 0.0, 3.0, 0.0,
-        4.0, 0.0, 0.0, 5.0,
-        0.0, 6.0, 0.0, 0.0,
+        0.0, 1.0, 0.0, 2.0, 0.0, 0.0, 3.0, 0.0, 4.0, 0.0, 0.0, 5.0, 0.0, 6.0, 0.0, 0.0,
     ];
     let dense_cpu = from_vec::<f64>(dense_data.clone(), &[4, 4]).expect("dense cpu");
     let dense_gpu = dense_cpu.to(Device::Cuda(0)).expect("dense->gpu");
@@ -328,10 +328,7 @@ fn p3_from_dense_cuda_round_trip_to_dense_on_f32() {
     ensure_cuda_backend();
 
     let dense_data: Vec<f32> = vec![
-        0.0, 1.5, 0.0, -2.0,
-        3.0, 0.0, 0.0, 0.0,
-        0.0, 0.0, 4.5, 0.0,
-        0.0, -6.0, 0.0, 0.5,
+        0.0, 1.5, 0.0, -2.0, 3.0, 0.0, 0.0, 0.0, 0.0, 0.0, 4.5, 0.0, 0.0, -6.0, 0.0, 0.5,
     ];
     let dense_cpu = from_vec::<f32>(dense_data.clone(), &[4, 4]).expect("dense cpu");
     let dense_gpu = dense_cpu.to(Device::Cuda(0)).expect("dense->gpu");

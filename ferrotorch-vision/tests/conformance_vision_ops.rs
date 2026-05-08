@@ -12,17 +12,16 @@
     clippy::cast_possible_truncation,
     clippy::cast_precision_loss,
     clippy::cast_sign_loss,
-    clippy::uninlined_format_args,
+    clippy::uninlined_format_args
 )]
 
 use std::path::PathBuf;
 
 use ferrotorch_core::{Tensor, TensorStorage};
 use ferrotorch_vision::ops::{
-    BoxFormat, LossReduction, batched_nms, box_area, box_convert, box_iou,
-    clip_boxes_to_image, complete_box_iou, distance_box_iou, focal_loss,
-    generalized_box_iou, nms, remove_small_boxes, roi_align, roi_pool,
-    sigmoid_focal_loss,
+    BoxFormat, LossReduction, batched_nms, box_area, box_convert, box_iou, clip_boxes_to_image,
+    complete_box_iou, distance_box_iou, focal_loss, generalized_box_iou, nms, remove_small_boxes,
+    roi_align, roi_pool, sigmoid_focal_loss,
 };
 use serde::Deserialize;
 
@@ -131,7 +130,12 @@ fn box_convert_xyxy_to_xywh_matches_reference() {
 
     let boxes = make_f64(input_data, input_shape);
     let out = box_convert(&boxes, BoxFormat::Xyxy, BoxFormat::Xywh).unwrap();
-    assert_close_f64(out.data().unwrap(), &expected_data, 1e-6, "box_convert_xyxy_to_xywh");
+    assert_close_f64(
+        out.data().unwrap(),
+        &expected_data,
+        1e-6,
+        "box_convert_xyxy_to_xywh",
+    );
 }
 
 #[test]
@@ -151,7 +155,12 @@ fn box_convert_xywh_to_cxcywh_matches_reference() {
 
     let boxes = make_f64(input_data, input_shape);
     let out = box_convert(&boxes, BoxFormat::Xywh, BoxFormat::Cxcywh).unwrap();
-    assert_close_f64(out.data().unwrap(), &expected_data, 1e-6, "box_convert_xywh_to_cxcywh");
+    assert_close_f64(
+        out.data().unwrap(),
+        &expected_data,
+        1e-6,
+        "box_convert_xywh_to_cxcywh",
+    );
 }
 
 #[test]
@@ -171,7 +180,12 @@ fn box_convert_xyxy_to_cxcywh_matches_reference() {
 
     let boxes = make_f64(input_data, input_shape);
     let out = box_convert(&boxes, BoxFormat::Xyxy, BoxFormat::Cxcywh).unwrap();
-    assert_close_f64(out.data().unwrap(), &expected_data, 1e-6, "box_convert_xyxy_to_cxcywh");
+    assert_close_f64(
+        out.data().unwrap(),
+        &expected_data,
+        1e-6,
+        "box_convert_xyxy_to_cxcywh",
+    );
 }
 
 #[test]
@@ -190,8 +204,8 @@ fn box_convert_identity_same_format() {
 #[test]
 fn box_area_matches_reference() {
     let ff = load_fixtures();
-    let fix = get_fixture(&ff.fixtures, "box_area_mixed")
-        .expect("fixture box_area_mixed not found");
+    let fix =
+        get_fixture(&ff.fixtures, "box_area_mixed").expect("fixture box_area_mixed not found");
 
     let input_data = flatten_f64(&fix["input"]);
     let expected_data = flatten_f64(&fix["expected"]);
@@ -214,8 +228,7 @@ fn box_area_matches_reference() {
 #[test]
 fn box_iou_matches_reference() {
     let ff = load_fixtures();
-    let fix = get_fixture(&ff.fixtures, "box_iou_2x2")
-        .expect("fixture box_iou_2x2 not found");
+    let fix = get_fixture(&ff.fixtures, "box_iou_2x2").expect("fixture box_iou_2x2 not found");
 
     let a_data = flatten_f64(&fix["input_a"]);
     let b_data = flatten_f64(&fix["input_b"]);
@@ -264,7 +277,12 @@ fn clip_boxes_to_image_matches_reference() {
 
     let boxes = make_f64(input_data, input_shape);
     let out = clip_boxes_to_image(&boxes, [h, w]).unwrap();
-    assert_close_f64(out.data().unwrap(), &expected_data, 1e-9, "clip_boxes_to_image");
+    assert_close_f64(
+        out.data().unwrap(),
+        &expected_data,
+        1e-9,
+        "clip_boxes_to_image",
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -304,8 +322,7 @@ fn remove_small_boxes_matches_reference() {
 #[test]
 fn nms_iou_0p5_matches_reference() {
     let ff = load_fixtures();
-    let fix = get_fixture(&ff.fixtures, "nms_iou_0p5")
-        .expect("fixture nms_iou_0p5 not found");
+    let fix = get_fixture(&ff.fixtures, "nms_iou_0p5").expect("fixture nms_iou_0p5 not found");
 
     let boxes_data = flatten_f64(&fix["input_boxes"]);
     let scores_data = flatten_f64(&fix["input_scores"]);
@@ -330,7 +347,9 @@ fn nms_iou_0p5_matches_reference() {
 #[test]
 fn batched_nms_shape_contract() {
     // Two boxes in class 0, one box in class 1. All should be kept (no overlap).
-    let boxes_data = vec![0.0_f64, 0.0, 5.0, 5.0, 6.0, 6.0, 11.0, 11.0, 0.0, 0.0, 5.0, 5.0];
+    let boxes_data = vec![
+        0.0_f64, 0.0, 5.0, 5.0, 6.0, 6.0, 11.0, 11.0, 0.0, 0.0, 5.0, 5.0,
+    ];
     let scores_data = vec![0.9_f64, 0.8, 0.7];
     let idxs: Vec<u32> = [0u32, 0, 1].into(); // class labels per box
 
@@ -339,10 +358,7 @@ fn batched_nms_shape_contract() {
 
     let keep = batched_nms(&boxes, &scores, &idxs, 0.5).unwrap();
     // All three boxes are in different classes or non-overlapping — all kept.
-    assert!(
-        !keep.is_empty(),
-        "batched_nms should keep at least one box"
-    );
+    assert!(!keep.is_empty(), "batched_nms should keep at least one box");
 }
 
 // ---------------------------------------------------------------------------
@@ -366,7 +382,12 @@ fn sigmoid_focal_loss_none_matches_reference() {
     let out = sigmoid_focal_loss(&inputs, &targets, alpha, gamma, LossReduction::None).unwrap();
 
     // Focal loss tolerance 1e-5 (sigmoid + log arithmetic).
-    assert_close_f64(out.data().unwrap(), &expected_data, 1e-5, "sigmoid_focal_loss_none");
+    assert_close_f64(
+        out.data().unwrap(),
+        &expected_data,
+        1e-5,
+        "sigmoid_focal_loss_none",
+    );
 }
 
 #[test]
@@ -457,7 +478,12 @@ fn generalized_box_iou_matches_reference() {
     let boxes2 = make_f64(b_data, b_shape);
     let out = generalized_box_iou(&boxes1, &boxes2).unwrap();
 
-    assert_close_f64(out.data().unwrap(), &expected_data, 1e-5, "generalized_box_iou");
+    assert_close_f64(
+        out.data().unwrap(),
+        &expected_data,
+        1e-5,
+        "generalized_box_iou",
+    );
 }
 
 // ---------------------------------------------------------------------------

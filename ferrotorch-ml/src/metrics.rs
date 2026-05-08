@@ -164,8 +164,8 @@ where
 {
     let yt = tensor_to_array1(y_true)?;
     let yp = tensor_to_array1(y_pred)?;
-    let pct = ferrolearn_metrics::mean_absolute_percentage_error(&yt, &yp)
-        .map_err(map_metric_err)?;
+    let pct =
+        ferrolearn_metrics::mean_absolute_percentage_error(&yt, &yp).map_err(map_metric_err)?;
     // ferrolearn returns the percentage form (×100); divide back to fraction.
     let hundred = <T as num_traits::NumCast>::from(100_u8).unwrap_or_else(num_traits::one::<T>);
     Ok(pct / hundred)

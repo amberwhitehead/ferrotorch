@@ -54,8 +54,7 @@ fn probe_b1_avgpool2d_ptx_after() {
     // BEFORE fix: Err(PtxCompileFailed { kernel: "avgpool2d_forward_kernel", ... INVALID_PTX })
     // AFTER  fix: Ok((output, [1, 1, 2, 2]))
     let (out, out_shape) = ferrotorch_gpu::kernels::gpu_avgpool2d(
-        &inp,
-        1, // batch
+        &inp, 1, // batch
         1, // channels
         4, // h_in
         4, // w_in
@@ -69,7 +68,11 @@ fn probe_b1_avgpool2d_ptx_after() {
     )
     .expect("AFTER fix #894: avgpool2d_forward_kernel must JIT-compile and run on sm_86");
 
-    assert_eq!(out_shape, [1, 1, 2, 2], "probe B1 #894: output shape mismatch");
+    assert_eq!(
+        out_shape,
+        [1, 1, 2, 2],
+        "probe B1 #894: output shape mismatch"
+    );
 
     let actual = gpu_to_cpu(&out, &dev).unwrap();
     assert_eq!(actual.len(), 4, "probe B1 #894: output length");

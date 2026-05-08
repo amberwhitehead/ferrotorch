@@ -20,9 +20,9 @@
 //! He et al., "Mask R-CNN", ICCV 2017.
 //! torchvision 0.21.x `maskrcnn_resnet50_fpn(weights=None)`.
 
+use ferrotorch_core::grad_fns::activation::relu;
 use ferrotorch_core::numeric_cast::cast;
 use ferrotorch_core::{FerrotorchError, FerrotorchResult, Float, Tensor, TensorStorage};
-use ferrotorch_core::grad_fns::activation::relu;
 use ferrotorch_nn::module::Module;
 use ferrotorch_nn::parameter::Parameter;
 use ferrotorch_nn::{Conv2d, ConvTranspose2d};
@@ -55,7 +55,12 @@ impl<T: Float> MaskHead<T> {
         let conv2 = Conv2d::new(256, 256, (3, 3), (1, 1), (1, 1), true)?;
         let conv3 = Conv2d::new(256, 256, (3, 3), (1, 1), (1, 1), true)?;
         let conv4 = Conv2d::new(256, 256, (3, 3), (1, 1), (1, 1), true)?;
-        Ok(Self { conv1, conv2, conv3, conv4 })
+        Ok(Self {
+            conv1,
+            conv2,
+            conv3,
+            conv4,
+        })
     }
 
     /// Forward on `[N, in_channels, H, W]` → `[N, 256, H, W]`.
@@ -130,17 +135,12 @@ impl<T: Float> MaskPredictor<T> {
     /// `in_channels` is typically 256 (the MaskHead output channels).
     /// `num_classes` includes background at index 0.
     pub fn new(in_channels: usize, num_classes: usize) -> FerrotorchResult<Self> {
-        let deconv = ConvTranspose2d::new(
-            in_channels,
-            256,
-            (2, 2),
-            (2, 2),
-            (0, 0),
-            (0, 0),
-            true,
-        )?;
+        let deconv = ConvTranspose2d::new(in_channels, 256, (2, 2), (2, 2), (0, 0), (0, 0), true)?;
         let conv_logits = Conv2d::new(256, num_classes, (1, 1), (1, 1), (0, 0), true)?;
-        Ok(Self { deconv, conv_logits })
+        Ok(Self {
+            deconv,
+            conv_logits,
+        })
     }
 
     /// Forward on `[N, in_channels, 14, 14]` → `[N, num_classes, 28, 28]`.
@@ -233,8 +233,7 @@ impl<T: Float> MaskRcnn<T> {
     const FPN_LEVEL_KEYS: [&'static str; 5] = ["p2", "p3", "p4", "p5", "p6"];
 
     /// Spatial scales for FPN levels p2..p6 (1/stride).
-    const FPN_SPATIAL_SCALES: [f64; 5] =
-        [1.0 / 4.0, 1.0 / 8.0, 1.0 / 16.0, 1.0 / 32.0, 1.0 / 64.0];
+    const FPN_SPATIAL_SCALES: [f64; 5] = [1.0 / 4.0, 1.0 / 8.0, 1.0 / 16.0, 1.0 / 32.0, 1.0 / 64.0];
 
     /// Create a new Mask R-CNN from scratch.
     ///
@@ -340,11 +339,8 @@ impl<T: Float> MaskRcnn<T> {
                 }
 
                 let k = indices.len();
-                let boxes_t = Tensor::from_storage(
-                    TensorStorage::cpu(roi_boxes),
-                    vec![k, 5],
-                    false,
-                )?;
+                let boxes_t =
+                    Tensor::from_storage(TensorStorage::cpu(roi_boxes), vec![k, 5], false)?;
 
                 let roi_out = roi_align(
                     &feat_single,
@@ -421,11 +417,7 @@ impl<T: Float> Module<T> for MaskRcnn<T> {
         let dets = MaskRcnn::forward(self, input)?;
         if dets.is_empty() || dets[0].masks.shape()[0] == 0 {
             let nc = self.num_classes;
-            return Tensor::from_storage(
-                TensorStorage::cpu(vec![]),
-                vec![0, nc, 28, 28],
-                false,
-            );
+            return Tensor::from_storage(TensorStorage::cpu(vec![]), vec![0, nc, 28, 28], false);
         }
         Ok(dets[0].masks.clone())
     }
@@ -564,7 +556,11 @@ mod tests {
     #[test]
     fn test_mask_rcnn_named_params_prefixes() {
         let model = make_model();
-        let names: Vec<String> = model.named_parameters().into_iter().map(|(n, _)| n).collect();
+        let names: Vec<String> = model
+            .named_parameters()
+            .into_iter()
+            .map(|(n, _)| n)
+            .collect();
         assert!(names.iter().any(|n| n.starts_with("faster_rcnn.")));
         assert!(names.iter().any(|n| n.starts_with("mask_head.")));
         assert!(names.iter().any(|n| n.starts_with("mask_predictor.")));
@@ -575,7 +571,11 @@ mod tests {
         let head = MaskHead::<f32>::new(256).unwrap();
         let x = ferrotorch_core::randn(&[4, 256, 14, 14]).unwrap();
         let out = head.forward(&x).unwrap();
-        assert_eq!(out.shape(), &[4, 256, 14, 14], "mask head preserves spatial size");
+        assert_eq!(
+            out.shape(),
+            &[4, 256, 14, 14],
+            "mask head preserves spatial size"
+        );
     }
 
     #[test]
@@ -583,7 +583,11 @@ mod tests {
         let predictor = MaskPredictor::<f32>::new(256, 91).unwrap();
         let x = ferrotorch_core::randn(&[4, 256, 14, 14]).unwrap();
         let out = predictor.forward(&x).unwrap();
-        assert_eq!(out.shape(), &[4, 91, 28, 28], "mask predictor 2x upsample + num_classes");
+        assert_eq!(
+            out.shape(),
+            &[4, 91, 28, 28],
+            "mask predictor 2x upsample + num_classes"
+        );
     }
 
     #[test]

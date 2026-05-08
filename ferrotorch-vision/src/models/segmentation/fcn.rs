@@ -23,11 +23,11 @@
 
 use ferrotorch_core::grad_fns::activation::relu;
 use ferrotorch_core::{FerrotorchResult, Float, Tensor};
+use ferrotorch_nn::module::Module;
 use ferrotorch_nn::norm::BatchNorm2d;
+use ferrotorch_nn::parameter::Parameter;
 use ferrotorch_nn::upsample::{InterpolateMode, interpolate};
 use ferrotorch_nn::{Conv2d, Dropout};
-use ferrotorch_nn::module::Module;
-use ferrotorch_nn::parameter::Parameter;
 
 use crate::models::feature_extractor::IntermediateFeatures;
 use crate::models::resnet::{ResNet, resnet50};
@@ -305,7 +305,11 @@ mod tests {
     #[test]
     fn test_fcn_named_parameter_prefixes() {
         let model = fcn_resnet50::<f32>(21).unwrap();
-        let names: Vec<String> = model.named_parameters().into_iter().map(|(n, _)| n).collect();
+        let names: Vec<String> = model
+            .named_parameters()
+            .into_iter()
+            .map(|(n, _)| n)
+            .collect();
         assert!(names.iter().any(|n| n.starts_with("backbone.")));
         assert!(names.iter().any(|n| n.starts_with("head.")));
     }

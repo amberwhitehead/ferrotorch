@@ -72,10 +72,7 @@ fn sequential_sampler_indices() {
 
         let s = SequentialSampler::new(n);
         let got = s.indices(0);
-        assert_eq!(
-            got, expected,
-            "SequentialSampler(n={n}) indices mismatch"
-        );
+        assert_eq!(got, expected, "SequentialSampler(n={n}) indices mismatch");
     }
 }
 
@@ -85,7 +82,10 @@ fn sequential_sampler_epoch_invariant() {
     let s = SequentialSampler::new(6);
     let e0 = s.indices(0);
     let e5 = s.indices(5);
-    assert_eq!(e0, e5, "SequentialSampler should produce same order every epoch");
+    assert_eq!(
+        e0, e5,
+        "SequentialSampler should produce same order every epoch"
+    );
 }
 
 /// `SequentialSampler::len` matches the construction size.
@@ -144,7 +144,10 @@ fn random_sampler_epoch_varies() {
     let s = RandomSampler::new(20, 42);
     let e0 = s.indices(0);
     let e1 = s.indices(1);
-    assert_ne!(e0, e1, "RandomSampler different epochs should produce different order");
+    assert_ne!(
+        e0, e1,
+        "RandomSampler different epochs should produce different order"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -169,7 +172,10 @@ fn shuffle_with_seed_different_seeds() {
     let mut b: Vec<usize> = (0..100).collect();
     shuffle_with_seed(&mut a, 1);
     shuffle_with_seed(&mut b, 2);
-    assert_ne!(a, b, "different seeds should produce different permutations");
+    assert_ne!(
+        a, b,
+        "different seeds should produce different permutations"
+    );
 }
 
 /// `shuffle_with_seed` is a permutation: the sorted output equals the sorted input.

@@ -20708,8 +20708,8 @@ pub fn gpu_batchnorm_forward(
         }
     };
 
-    let total = input.len();                    // N * C * H * W
-    let total_per_ch = total / channels;        // N * H * W  (= N * spatial)
+    let total = input.len(); // N * C * H * W
+    let total_per_ch = total / channels; // N * H * W  (= N * spatial)
 
     let mut output = alloc_zeros_f32(total, device)?;
     let mut save_mean = alloc_zeros_f32(channels, device)?;
@@ -20726,10 +20726,10 @@ pub fn gpu_batchnorm_forward(
         shared_mem_bytes: 256 * 4 * 2,
     };
 
-    let channels_u32    = channels as u32;
-    let spatial_u32     = spatial as u32;
+    let channels_u32 = channels as u32;
+    let spatial_u32 = spatial as u32;
     let total_per_ch_u32 = total_per_ch as u32;
-    let training_u32    = u32::from(training);
+    let training_u32 = u32::from(training);
 
     // SAFETY:
     // - `f` is a valid PTX `CudaFunction` for `batchnorm_forward_kernel`
@@ -25687,10 +25687,7 @@ DONE:
 /// Negates every imaginary part: `buf[2*i+1] = -buf[2*i+1]` for all `i`.
 /// Returns the buffer (modified in-place, returned for call-chain ergonomics).
 #[cfg(feature = "cuda")]
-pub fn gpu_conj_f32(
-    mut buf: CudaBuffer<f32>,
-    device: &GpuDevice,
-) -> GpuResult<CudaBuffer<f32>> {
+pub fn gpu_conj_f32(mut buf: CudaBuffer<f32>, device: &GpuDevice) -> GpuResult<CudaBuffer<f32>> {
     use cudarc::driver::PushKernelArg;
 
     if buf.len() % 2 != 0 {
@@ -25749,20 +25746,14 @@ pub fn gpu_conj_f32(
 }
 
 #[cfg(not(feature = "cuda"))]
-pub fn gpu_conj_f32(
-    _buf: CudaBuffer<f32>,
-    _device: &GpuDevice,
-) -> GpuResult<CudaBuffer<f32>> {
+pub fn gpu_conj_f32(_buf: CudaBuffer<f32>, _device: &GpuDevice) -> GpuResult<CudaBuffer<f32>> {
     Err(GpuError::NoCudaFeature)
 }
 
 /// In-place complex conjugate for an f64 interleaved buffer.
 /// Negates every imaginary part: `buf[2*i+1] = -buf[2*i+1]` for all `i`.
 #[cfg(feature = "cuda")]
-pub fn gpu_conj_f64(
-    mut buf: CudaBuffer<f64>,
-    device: &GpuDevice,
-) -> GpuResult<CudaBuffer<f64>> {
+pub fn gpu_conj_f64(mut buf: CudaBuffer<f64>, device: &GpuDevice) -> GpuResult<CudaBuffer<f64>> {
     use cudarc::driver::PushKernelArg;
 
     if buf.len() % 2 != 0 {
@@ -25821,10 +25812,7 @@ pub fn gpu_conj_f64(
 }
 
 #[cfg(not(feature = "cuda"))]
-pub fn gpu_conj_f64(
-    _buf: CudaBuffer<f64>,
-    _device: &GpuDevice,
-) -> GpuResult<CudaBuffer<f64>> {
+pub fn gpu_conj_f64(_buf: CudaBuffer<f64>, _device: &GpuDevice) -> GpuResult<CudaBuffer<f64>> {
     Err(GpuError::NoCudaFeature)
 }
 
@@ -26296,11 +26284,7 @@ pub fn gpu_relu_bf16_f32(
 
 /// Stub for non-CUDA builds.
 #[cfg(not(feature = "cuda"))]
-pub fn gpu_relu_bf16_f32(
-    _a: &(),
-    _n: usize,
-    _device: &GpuDevice,
-) -> GpuResult<CudaBuffer<f32>> {
+pub fn gpu_relu_bf16_f32(_a: &(), _n: usize, _device: &GpuDevice) -> GpuResult<CudaBuffer<f32>> {
     Err(GpuError::NoCudaFeature)
 }
 
@@ -26365,11 +26349,7 @@ pub fn gpu_sigmoid_bf16_f32(
 
 /// Stub for non-CUDA builds.
 #[cfg(not(feature = "cuda"))]
-pub fn gpu_sigmoid_bf16_f32(
-    _a: &(),
-    _n: usize,
-    _device: &GpuDevice,
-) -> GpuResult<CudaBuffer<f32>> {
+pub fn gpu_sigmoid_bf16_f32(_a: &(), _n: usize, _device: &GpuDevice) -> GpuResult<CudaBuffer<f32>> {
     Err(GpuError::NoCudaFeature)
 }
 

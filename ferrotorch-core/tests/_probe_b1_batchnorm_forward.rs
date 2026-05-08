@@ -44,7 +44,7 @@ fn probe_b1_batchnorm_forward_after() {
         .map(|i| (i as f32 * 0.07) - 3.0)
         .collect();
     let weight = vec![1.0f32; c]; // gamma = 1
-    let bias = vec![0.0f32; c];   // beta  = 0
+    let bias = vec![0.0f32; c]; // beta  = 0
     let running_mean = vec![0.0f32; c];
     let running_var = vec![1.0f32; c];
 
@@ -76,8 +76,8 @@ fn probe_b1_batchnorm_forward_after() {
             }
         }
         let mean: f32 = ch_vals.iter().sum::<f32>() / ch_vals.len() as f32;
-        let var: f32 = ch_vals.iter().map(|x| (x - mean).powi(2)).sum::<f32>()
-            / ch_vals.len() as f32;
+        let var: f32 =
+            ch_vals.iter().map(|x| (x - mean).powi(2)).sum::<f32>() / ch_vals.len() as f32;
         let std = var.sqrt();
         assert!(
             mean.abs() < 1e-3,
