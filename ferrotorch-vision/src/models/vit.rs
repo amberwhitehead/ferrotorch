@@ -50,13 +50,23 @@ impl<T: Float> PatchEmbed<T> {
     /// * `embed_dim` -- output embedding dimension per patch.
     /// * `patch_size` -- spatial size of each patch (both height and width).
     pub fn new(in_channels: usize, embed_dim: usize, patch_size: usize) -> FerrotorchResult<Self> {
+        // bias=true matches torchvision `vit_b_16`'s `conv_proj` (which uses
+        // the default `bias=True` of `nn.Conv2d`). Phase 4 (#999/#1001)
+        // surfaced the prior bias=false as a structural divergence — the
+        // strict torchvision-→-ferrotorch loader rejected `conv_proj.bias`
+        // as "no mapping to a ferrotorch parameter". Switching to bias=true
+        // adds `embed_dim` learnable scalars (768 for ViT-B/16 — negligible
+        // relative to the ~86M total) and makes ferrotorch's PatchEmbed
+        // numerically faithful to the reference. The test-side remap
+        // (`remap_torchvision_to_ferrotorch_vit_keys`) translates
+        // `conv_proj.bias` → `patch_embed.proj.bias` accordingly.
         let proj = Conv2d::new(
             in_channels,
             embed_dim,
             (patch_size, patch_size),
             (patch_size, patch_size),
             (0, 0),
-            false,
+            true,
         )?;
 
         Ok(Self {
@@ -105,6 +115,16 @@ impl<T: Float> Module<T> for PatchEmbed<T> {
             .into_iter()
             .map(|(name, p)| (format!("proj.{name}"), p))
             .collect()
+    }
+
+    // Phase 4 (#995): mirror `named_parameters` so a Phase 2-style
+    // walk reaches the inner Conv2d at path `proj`.
+    fn children(&self) -> Vec<&dyn Module<T>> {
+        vec![&self.proj]
+    }
+
+    fn named_children(&self) -> Vec<(String, &dyn Module<T>)> {
+        vec![("proj".to_string(), &self.proj)]
     }
 
     fn train(&mut self) {
@@ -266,6 +286,29 @@ impl<T: Float> Module<T> for TransformerBlock<T> {
             params.push((format!("mlp.fc2.{name}"), p));
         }
         params
+    }
+
+    // Phase 4 (#995): mirror the `named_parameters` paths above so a
+    // Phase 2-style walk reaches every sub-module under each block —
+    // `norm1` / `attn` / `norm2` / `mlp.fc1` / `mlp.fc2`.
+    fn children(&self) -> Vec<&dyn Module<T>> {
+        vec![
+            &self.norm1,
+            &self.attn,
+            &self.norm2,
+            &self.mlp_fc1,
+            &self.mlp_fc2,
+        ]
+    }
+
+    fn named_children(&self) -> Vec<(String, &dyn Module<T>)> {
+        vec![
+            ("norm1".to_string(), &self.norm1),
+            ("attn".to_string(), &self.attn),
+            ("norm2".to_string(), &self.norm2),
+            ("mlp.fc1".to_string(), &self.mlp_fc1),
+            ("mlp.fc2".to_string(), &self.mlp_fc2),
+        ]
     }
 
     fn train(&mut self) {
@@ -500,6 +543,35 @@ impl<T: Float> Module<T> for VisionTransformer<T> {
         params
     }
 
+    // Phase 4 (#995): expose patch_embed + every TransformerBlock + the
+    // final norm/head so the BN-buffer-style loader can walk into each
+    // block's `norm1` / `attn` / `mlp.fc1` paths. ViT has no BN buffers
+    // so the override is a no-op for the resnet50 fixture path, but the
+    // ViT remap test (#999) uses `named_descendants_dyn` to locate
+    // sub-modules indirectly via `parameters_mut`-keyed traversal.
+    // Following torchvision-shaped paths: `patch_embed` / `blocks.<i>` /
+    // `norm` / `head` (matches `named_parameters` above).
+    fn children(&self) -> Vec<&dyn Module<T>> {
+        let mut out: Vec<&dyn Module<T>> = vec![&self.patch_embed];
+        for block in &self.blocks {
+            out.push(block);
+        }
+        out.push(&self.norm);
+        out.push(&self.head);
+        out
+    }
+
+    fn named_children(&self) -> Vec<(String, &dyn Module<T>)> {
+        let mut out: Vec<(String, &dyn Module<T>)> =
+            vec![("patch_embed".to_string(), &self.patch_embed)];
+        for (i, block) in self.blocks.iter().enumerate() {
+            out.push((format!("blocks.{i}"), block));
+        }
+        out.push(("norm".to_string(), &self.norm));
+        out.push(("head".to_string(), &self.head));
+        out
+    }
+
     fn train(&mut self) {
         self.training = true;
     }
@@ -677,8 +749,11 @@ mod tests {
     fn test_patch_embed_parameter_count() {
         let pe = PatchEmbed::<f32>::new(3, 768, 16).unwrap();
         let count: usize = pe.parameters().iter().map(|p| p.numel()).sum();
-        // Conv2d(3, 768, 16, 16) weight: 768 * 3 * 16 * 16 = 589824, no bias
-        assert_eq!(count, 768 * 3 * 16 * 16);
+        // Conv2d(3, 768, 16, 16) weight: 768 * 3 * 16 * 16 = 589824
+        // plus Conv2d bias: 768 (Phase 4 #999/#1001 — bias=true now
+        // matches torchvision conv_proj's default).
+        // Total: 589824 + 768 = 590592.
+        assert_eq!(count, 768 * 3 * 16 * 16 + 768);
     }
 
     // -----------------------------------------------------------------------

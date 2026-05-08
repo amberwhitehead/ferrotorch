@@ -492,6 +492,72 @@ impl<T: Float> Module<T> for UNet<T> {
         params
     }
 
+    // Phase 4 (#995): expose every Conv2d sub-module under the same
+    // dotted-path layout as `named_parameters`. UNet's internal
+    // EncoderBlock / DecoderBlock helpers are not themselves
+    // `Module<T>` (they predate the trait), so we project their
+    // contents directly here. UNet has no BN buffers so this override
+    // does not change loader behaviour for any existing fixture, but
+    // it satisfies the #995 sweep contract — every vision model in
+    // `src/models/` overrides `named_children`.
+    fn children(&self) -> Vec<&dyn Module<T>> {
+        vec![
+            &self.enc1.conv1,
+            &self.enc1.conv2,
+            &self.enc2.conv1,
+            &self.enc2.conv2,
+            &self.enc3.conv1,
+            &self.enc3.conv2,
+            &self.enc4.conv1,
+            &self.enc4.conv2,
+            &self.pool,
+            &self.bottleneck_conv1,
+            &self.bottleneck_conv2,
+            &self.dec4.reduce,
+            &self.dec4.conv1,
+            &self.dec4.conv2,
+            &self.dec3.reduce,
+            &self.dec3.conv1,
+            &self.dec3.conv2,
+            &self.dec2.reduce,
+            &self.dec2.conv1,
+            &self.dec2.conv2,
+            &self.dec1.reduce,
+            &self.dec1.conv1,
+            &self.dec1.conv2,
+            &self.head,
+        ]
+    }
+
+    fn named_children(&self) -> Vec<(String, &dyn Module<T>)> {
+        vec![
+            ("enc1.conv1".to_string(), &self.enc1.conv1),
+            ("enc1.conv2".to_string(), &self.enc1.conv2),
+            ("enc2.conv1".to_string(), &self.enc2.conv1),
+            ("enc2.conv2".to_string(), &self.enc2.conv2),
+            ("enc3.conv1".to_string(), &self.enc3.conv1),
+            ("enc3.conv2".to_string(), &self.enc3.conv2),
+            ("enc4.conv1".to_string(), &self.enc4.conv1),
+            ("enc4.conv2".to_string(), &self.enc4.conv2),
+            ("pool".to_string(), &self.pool),
+            ("bottleneck.conv1".to_string(), &self.bottleneck_conv1),
+            ("bottleneck.conv2".to_string(), &self.bottleneck_conv2),
+            ("dec4.reduce".to_string(), &self.dec4.reduce),
+            ("dec4.conv1".to_string(), &self.dec4.conv1),
+            ("dec4.conv2".to_string(), &self.dec4.conv2),
+            ("dec3.reduce".to_string(), &self.dec3.reduce),
+            ("dec3.conv1".to_string(), &self.dec3.conv1),
+            ("dec3.conv2".to_string(), &self.dec3.conv2),
+            ("dec2.reduce".to_string(), &self.dec2.reduce),
+            ("dec2.conv1".to_string(), &self.dec2.conv1),
+            ("dec2.conv2".to_string(), &self.dec2.conv2),
+            ("dec1.reduce".to_string(), &self.dec1.reduce),
+            ("dec1.conv1".to_string(), &self.dec1.conv1),
+            ("dec1.conv2".to_string(), &self.dec1.conv2),
+            ("head".to_string(), &self.head),
+        ]
+    }
+
     fn train(&mut self) {
         self.training = true;
     }

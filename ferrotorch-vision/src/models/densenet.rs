@@ -107,6 +107,16 @@ impl<T: Float> Module<T> for DenseLayer<T> {
         }
         p
     }
+    // Phase 4 (#995): expose direct children mirroring `named_parameters`.
+    fn children(&self) -> Vec<&dyn Module<T>> {
+        vec![&self.bn_conv, &self.body_conv]
+    }
+    fn named_children(&self) -> Vec<(String, &dyn Module<T>)> {
+        vec![
+            ("bn_conv".to_string(), &self.bn_conv),
+            ("body_conv".to_string(), &self.body_conv),
+        ]
+    }
     fn train(&mut self) {
         self.training = true;
     }
@@ -184,6 +194,20 @@ impl<T: Float> Module<T> for DenseBlock<T> {
         }
         p
     }
+    // Phase 4 (#995): expose direct children mirroring `named_parameters`.
+    fn children(&self) -> Vec<&dyn Module<T>> {
+        self.layers
+            .iter()
+            .map(|l| l as &dyn Module<T>)
+            .collect()
+    }
+    fn named_children(&self) -> Vec<(String, &dyn Module<T>)> {
+        self.layers
+            .iter()
+            .enumerate()
+            .map(|(i, l)| (format!("layer{i}"), l as &dyn Module<T>))
+            .collect()
+    }
     fn train(&mut self) {
         self.training = true;
         for l in self.layers.iter_mut() {
@@ -237,6 +261,20 @@ impl<T: Float> Module<T> for TransitionLayer<T> {
     }
     fn named_parameters(&self) -> Vec<(String, &Parameter<T>)> {
         self.conv.named_parameters()
+    }
+    // Phase 4 (#995): TransitionLayer's `named_parameters` flattens the
+    // inner Conv2d's keys directly (no prefix), so it behaves as a leaf
+    // for path purposes. We still expose the conv + pool as children
+    // so a tree walk can identify them under whatever path the parent
+    // gave the TransitionLayer (e.g. `trans1` in DenseNet).
+    fn children(&self) -> Vec<&dyn Module<T>> {
+        vec![&self.conv, &self.pool]
+    }
+    fn named_children(&self) -> Vec<(String, &dyn Module<T>)> {
+        vec![
+            ("conv".to_string(), &self.conv),
+            ("pool".to_string(), &self.pool),
+        ]
     }
     fn train(&mut self) {
         self.training = true;
@@ -401,6 +439,37 @@ impl<T: Float> Module<T> for DenseNet<T> {
             p.push((format!("classifier.{n}"), param));
         }
         p
+    }
+
+    // Phase 4 (#995): expose direct children mirroring `named_parameters`.
+    fn children(&self) -> Vec<&dyn Module<T>> {
+        vec![
+            &self.stem,
+            &self.block1,
+            &self.trans1,
+            &self.block2,
+            &self.trans2,
+            &self.block3,
+            &self.trans3,
+            &self.block4,
+            &self.avgpool,
+            &self.classifier,
+        ]
+    }
+
+    fn named_children(&self) -> Vec<(String, &dyn Module<T>)> {
+        vec![
+            ("stem".to_string(), &self.stem),
+            ("block1".to_string(), &self.block1),
+            ("trans1".to_string(), &self.trans1),
+            ("block2".to_string(), &self.block2),
+            ("trans2".to_string(), &self.trans2),
+            ("block3".to_string(), &self.block3),
+            ("trans3".to_string(), &self.trans3),
+            ("block4".to_string(), &self.block4),
+            ("avgpool".to_string(), &self.avgpool),
+            ("classifier".to_string(), &self.classifier),
+        ]
     }
 
     fn train(&mut self) {

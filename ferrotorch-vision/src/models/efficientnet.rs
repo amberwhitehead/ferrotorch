@@ -115,6 +115,18 @@ impl<T: Float> Module<T> for ConvBlock<T> {
         self.conv.named_parameters()
     }
 
+    // Phase 4 (#995): ConvBlock flattens its inner Conv2d's keys (no
+    // prefix), so it is a leaf for path purposes. Still expose the
+    // conv as a child so a tree walk can identify it under whatever
+    // path the parent gave the ConvBlock (e.g. `stages.<i>` in
+    // EfficientNet).
+    fn children(&self) -> Vec<&dyn Module<T>> {
+        vec![&self.conv]
+    }
+    fn named_children(&self) -> Vec<(String, &dyn Module<T>)> {
+        vec![("conv".to_string(), &self.conv)]
+    }
+
     fn train(&mut self) {
         self.training = true;
     }
@@ -363,6 +375,29 @@ impl<T: Float> Module<T> for EfficientNet<T> {
         }
 
         params
+    }
+
+    // Phase 4 (#995): expose direct children mirroring `named_parameters`.
+    fn children(&self) -> Vec<&dyn Module<T>> {
+        let mut out: Vec<&dyn Module<T>> = vec![&self.stem_conv];
+        for block in &self.stages {
+            out.push(block.as_ref());
+        }
+        out.push(&self.head_conv);
+        out.push(&self.avgpool);
+        out.push(&self.fc);
+        out
+    }
+
+    fn named_children(&self) -> Vec<(String, &dyn Module<T>)> {
+        let mut out: Vec<(String, &dyn Module<T>)> = vec![("stem_conv".to_string(), &self.stem_conv)];
+        for (i, block) in self.stages.iter().enumerate() {
+            out.push((format!("stages.{i}"), block.as_ref()));
+        }
+        out.push(("head_conv".to_string(), &self.head_conv));
+        out.push(("avgpool".to_string(), &self.avgpool));
+        out.push(("fc".to_string(), &self.fc));
+        out
     }
 
     fn train(&mut self) {

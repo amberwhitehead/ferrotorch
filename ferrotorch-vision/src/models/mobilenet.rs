@@ -157,6 +157,27 @@ impl<T: Float> Module<T> for InvertedResidual<T> {
         p
     }
 
+    // Phase 4 (#995): expose direct children mirroring `named_parameters`.
+    fn children(&self) -> Vec<&dyn Module<T>> {
+        let mut out: Vec<&dyn Module<T>> = Vec::new();
+        if let Some(ref e) = self.expand {
+            out.push(e);
+        }
+        out.push(&self.depthwise);
+        out.push(&self.project);
+        out
+    }
+
+    fn named_children(&self) -> Vec<(String, &dyn Module<T>)> {
+        let mut out: Vec<(String, &dyn Module<T>)> = Vec::new();
+        if let Some(ref e) = self.expand {
+            out.push(("expand".to_string(), e));
+        }
+        out.push(("depthwise".to_string(), &self.depthwise));
+        out.push(("project".to_string(), &self.project));
+        out
+    }
+
     fn train(&mut self) {
         self.training = true;
     }
@@ -326,6 +347,29 @@ impl<T: Float> Module<T> for MobileNetV2<T> {
             p.push((format!("classifier.{n}"), param));
         }
         p
+    }
+
+    // Phase 4 (#995): expose direct children mirroring `named_parameters`.
+    fn children(&self) -> Vec<&dyn Module<T>> {
+        let mut out: Vec<&dyn Module<T>> = vec![&self.stem];
+        for block in &self.blocks {
+            out.push(block);
+        }
+        out.push(&self.last_conv);
+        out.push(&self.avgpool);
+        out.push(&self.classifier);
+        out
+    }
+
+    fn named_children(&self) -> Vec<(String, &dyn Module<T>)> {
+        let mut out: Vec<(String, &dyn Module<T>)> = vec![("stem".to_string(), &self.stem)];
+        for (i, block) in self.blocks.iter().enumerate() {
+            out.push((format!("blocks.{i}"), block));
+        }
+        out.push(("last_conv".to_string(), &self.last_conv));
+        out.push(("avgpool".to_string(), &self.avgpool));
+        out.push(("classifier".to_string(), &self.classifier));
+        out
     }
 
     fn train(&mut self) {
@@ -519,6 +563,17 @@ impl<T: Float> Module<T> for V3Block<T> {
     fn named_parameters(&self) -> Vec<(String, &Parameter<T>)> {
         self.conv.named_parameters()
     }
+    // Phase 4 (#995): V3Block flattens its inner Conv2d's keys (no
+    // prefix), so it is a leaf for path purposes. Still expose the
+    // conv as a child so a tree walk can identify it under whatever
+    // path the parent gave the V3Block (e.g. `blocks.<i>` in
+    // MobileNetV3Small).
+    fn children(&self) -> Vec<&dyn Module<T>> {
+        vec![&self.conv]
+    }
+    fn named_children(&self) -> Vec<(String, &dyn Module<T>)> {
+        vec![("conv".to_string(), &self.conv)]
+    }
     fn train(&mut self) {
         self.training = true;
     }
@@ -629,6 +684,29 @@ impl<T: Float> Module<T> for MobileNetV3Small<T> {
             p.push((format!("classifier.{n}"), param));
         }
         p
+    }
+
+    // Phase 4 (#995): expose direct children mirroring `named_parameters`.
+    fn children(&self) -> Vec<&dyn Module<T>> {
+        let mut out: Vec<&dyn Module<T>> = vec![&self.stem];
+        for block in &self.blocks {
+            out.push(block);
+        }
+        out.push(&self.last_conv);
+        out.push(&self.avgpool);
+        out.push(&self.classifier);
+        out
+    }
+
+    fn named_children(&self) -> Vec<(String, &dyn Module<T>)> {
+        let mut out: Vec<(String, &dyn Module<T>)> = vec![("stem".to_string(), &self.stem)];
+        for (i, block) in self.blocks.iter().enumerate() {
+            out.push((format!("blocks.{i}"), block));
+        }
+        out.push(("last_conv".to_string(), &self.last_conv));
+        out.push(("avgpool".to_string(), &self.avgpool));
+        out.push(("classifier".to_string(), &self.classifier));
+        out
     }
 
     fn train(&mut self) {

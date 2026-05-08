@@ -193,6 +193,32 @@ impl<T: Float> Module<T> for InceptionModule<T> {
         p
     }
 
+    // Phase 4 (#995): expose direct children mirroring `named_parameters`.
+    fn children(&self) -> Vec<&dyn Module<T>> {
+        vec![
+            &self.branch1x1,
+            &self.branch3x3_reduce,
+            &self.branch3x3,
+            &self.branch_double_reduce,
+            &self.branch_double_3x3a,
+            &self.branch_double_3x3b,
+            &self.branch_pool,
+            &self.branch_pool_proj,
+        ]
+    }
+    fn named_children(&self) -> Vec<(String, &dyn Module<T>)> {
+        vec![
+            ("branch1x1".to_string(), &self.branch1x1),
+            ("branch3x3_reduce".to_string(), &self.branch3x3_reduce),
+            ("branch3x3".to_string(), &self.branch3x3),
+            ("branch_double_reduce".to_string(), &self.branch_double_reduce),
+            ("branch_double_3x3a".to_string(), &self.branch_double_3x3a),
+            ("branch_double_3x3b".to_string(), &self.branch_double_3x3b),
+            ("branch_pool".to_string(), &self.branch_pool),
+            ("branch_pool_proj".to_string(), &self.branch_pool_proj),
+        ]
+    }
+
     fn train(&mut self) {
         self.training = true;
     }
@@ -320,6 +346,31 @@ impl<T: Float> Module<T> for InceptionV3<T> {
             p.push((format!("classifier.{n}"), param));
         }
         p
+    }
+
+    // Phase 4 (#995): expose direct children mirroring `named_parameters`.
+    fn children(&self) -> Vec<&dyn Module<T>> {
+        vec![
+            &self.stem_conv1,
+            &self.stem_conv2,
+            &self.module_a,
+            &self.module_b,
+            &self.module_c,
+            &self.avgpool,
+            &self.classifier,
+        ]
+    }
+
+    fn named_children(&self) -> Vec<(String, &dyn Module<T>)> {
+        vec![
+            ("stem_conv1".to_string(), &self.stem_conv1),
+            ("stem_conv2".to_string(), &self.stem_conv2),
+            ("module_a".to_string(), &self.module_a),
+            ("module_b".to_string(), &self.module_b),
+            ("module_c".to_string(), &self.module_c),
+            ("avgpool".to_string(), &self.avgpool),
+            ("classifier".to_string(), &self.classifier),
+        ]
     }
 
     fn train(&mut self) {

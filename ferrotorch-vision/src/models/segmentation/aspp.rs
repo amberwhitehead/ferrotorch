@@ -96,6 +96,16 @@ impl<T: Float> Module<T> for DilatedConv2d<T> {
         out
     }
 
+    // Phase 4 (#995): expose the BN child so the loader can reach
+    // `bn.running_mean` / `bn.running_var` under whatever path the
+    // parent gave the DilatedConv2d (e.g. `1` / `2` / `3` in Aspp).
+    fn children(&self) -> Vec<&dyn Module<T>> {
+        vec![&self.bn]
+    }
+    fn named_children(&self) -> Vec<(String, &dyn Module<T>)> {
+        vec![("bn".to_string(), &self.bn)]
+    }
+
     fn train(&mut self) {
         self.training = true;
         self.bn.train();
@@ -249,6 +259,17 @@ impl<T: Float> Module<T> for ASPPConv1x1<T> {
         out
     }
 
+    // Phase 4 (#995): expose conv + BN children mirroring `named_parameters`.
+    fn children(&self) -> Vec<&dyn Module<T>> {
+        vec![&self.conv, &self.bn]
+    }
+    fn named_children(&self) -> Vec<(String, &dyn Module<T>)> {
+        vec![
+            ("conv".to_string(), &self.conv),
+            ("bn".to_string(), &self.bn),
+        ]
+    }
+
     fn train(&mut self) {
         self.training = true;
         self.conv.train();
@@ -333,6 +354,21 @@ impl<T: Float> Module<T> for ASPPPooling<T> {
             out.push((format!("bn.{k}"), v));
         }
         out
+    }
+
+    // Phase 4 (#995): expose avgpool + conv + BN children. Avgpool is
+    // a leaf with no params but inclusion keeps the tree faithful for
+    // future-proof traversal; the named_parameters above intentionally
+    // skips it.
+    fn children(&self) -> Vec<&dyn Module<T>> {
+        vec![&self.avgpool, &self.conv, &self.bn]
+    }
+    fn named_children(&self) -> Vec<(String, &dyn Module<T>)> {
+        vec![
+            ("avgpool".to_string(), &self.avgpool),
+            ("conv".to_string(), &self.conv),
+            ("bn".to_string(), &self.bn),
+        ]
     }
 
     fn train(&mut self) {
@@ -486,6 +522,32 @@ impl<T: Float> Module<T> for Aspp<T> {
             out.push((format!("project_bn.{k}"), v));
         }
         out
+    }
+
+    // Phase 4 (#995): expose direct children mirroring `named_parameters`.
+    fn children(&self) -> Vec<&dyn Module<T>> {
+        vec![
+            &self.conv1,
+            &self.conv_r6,
+            &self.conv_r12,
+            &self.conv_r18,
+            &self.pool,
+            &self.project,
+            &self.project_bn,
+            &self.dropout,
+        ]
+    }
+    fn named_children(&self) -> Vec<(String, &dyn Module<T>)> {
+        vec![
+            ("0".to_string(), &self.conv1),
+            ("1".to_string(), &self.conv_r6),
+            ("2".to_string(), &self.conv_r12),
+            ("3".to_string(), &self.conv_r18),
+            ("4".to_string(), &self.pool),
+            ("project".to_string(), &self.project),
+            ("project_bn".to_string(), &self.project_bn),
+            ("dropout".to_string(), &self.dropout),
+        ]
     }
 
     fn train(&mut self) {

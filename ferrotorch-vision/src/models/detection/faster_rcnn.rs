@@ -494,6 +494,17 @@ impl<T: Float> Module<T> for FasterRcnn<T> {
         out
     }
 
+    // Phase 4 (#995): expose the ResNet backbone as a child so the
+    // Phase 2 BN-buffer loader walks into it. FPN / RPN / TwoMlpHead
+    // are inherent-method helpers (NOT `Module<T>` impls) — they
+    // own no BN buffers, so we do not project them via this hook.
+    fn children(&self) -> Vec<&dyn Module<T>> {
+        vec![&self.backbone]
+    }
+    fn named_children(&self) -> Vec<(String, &dyn Module<T>)> {
+        vec![("backbone".to_string(), &self.backbone)]
+    }
+
     fn train(&mut self) {
         self.training = true;
         self.backbone.train();

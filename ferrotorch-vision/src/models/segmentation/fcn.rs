@@ -114,6 +114,21 @@ impl<T: Float> Module<T> for FcnHead<T> {
         out
     }
 
+    // Phase 4 (#995): expose direct children mirroring `named_parameters`.
+    // The torchvision-shaped indices `0` / `1` / `4` are kept so the
+    // path → module index agrees with the fixture descriptors.
+    fn children(&self) -> Vec<&dyn Module<T>> {
+        vec![&self.conv, &self.bn, &self.dropout, &self.classifier]
+    }
+    fn named_children(&self) -> Vec<(String, &dyn Module<T>)> {
+        vec![
+            ("0".to_string(), &self.conv),
+            ("1".to_string(), &self.bn),
+            ("3".to_string(), &self.dropout),
+            ("4".to_string(), &self.classifier),
+        ]
+    }
+
     fn train(&mut self) {
         self.training = true;
         self.conv.train();
@@ -223,6 +238,19 @@ impl<T: Float> Module<T> for Fcn<T> {
             out.push((format!("head.{k}"), v));
         }
         out
+    }
+
+    // Phase 4 (#995): expose backbone + head children. The backbone's
+    // own `named_children` does NOT prefix with `backbone.<...>`, so we
+    // wrap it under `backbone` here to match `named_parameters` above.
+    fn children(&self) -> Vec<&dyn Module<T>> {
+        vec![&self.backbone, &self.head]
+    }
+    fn named_children(&self) -> Vec<(String, &dyn Module<T>)> {
+        vec![
+            ("backbone".to_string(), &self.backbone),
+            ("head".to_string(), &self.head),
+        ]
     }
 
     fn train(&mut self) {

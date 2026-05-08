@@ -2966,8 +2966,8 @@
     {
       "id": "resnet50_value_parity",
       "model": "resnet50",
-      "issue": "#983",
-      "construction": "tvm.resnet50(weights=None) under torch.manual_seed(0)",
+      "issue": "#1001",
+      "construction": "tvm.resnet50(weights=ResNet50_Weights.DEFAULT) \u2014 torchvision ImageNet-1k pretrained weights with non-trivial BN running stats",
       "input_seed": 1234,
       "input_shape": [
         1,
@@ -2982,11 +2982,11 @@
       ],
       "output_dtype": "f32",
       "weights_path": "fixtures/resnet50_value_parity.safetensors",
-      "weights_sha256": "10458d6eda40943cd941f9d03cfef665359a0f296d0b739088d45dd37a648a6b",
+      "weights_sha256": "5b2a6f715522ff813d178319ac05c90958de81a3467b84840f660fc4c938c1d8",
       "input_path": "fixtures/resnet50_value_parity_input.bin",
       "input_sha256": "ad2dec95d939bc585b08a708f3a487796e8ba811d0fc20affe5bcc1fea580d14",
       "expected_output_path": "fixtures/resnet50_value_parity_output.bin",
-      "expected_output_sha256": "421ae9fae55dbd2bda155d750951a613af4098122ef1a38592a89edd3ffecb66",
+      "expected_output_sha256": "cd9b1d10c47c00f499910e743876b8f8ba4203e0b9517035f8bbf7973235e69c",
       "param_keys": [
         "bn1.bias",
         "bn1.weight",
@@ -3315,7 +3315,7 @@
       ],
       "abs_tolerance": 0.001,
       "rel_tolerance": 0.01,
-      "note": "Reference produced via torchvision.models.resnet50(weights=None) with deterministic seeded initialisation, run in eval() mode with default running_mean=0 / running_var=1 in every BN. Comparison runs in eval mode on the ferrotorch side too \u2014 both frameworks therefore use identical (zero-mean, unit-var) BN statistics, removing the need to load BN running buffers in Phase 1A. num_batches_tracked is integer-typed so it is excluded from the safetensors payload by design."
+      "note": "Reference produced via torchvision.models.resnet50(weights=ResNet50_Weights.DEFAULT) \u2014 pretrained ImageNet-1k weights. BN running_mean / running_var carry real statistics from training, not construction defaults; the ferrotorch-side loader applies them via the Phase 2 BN-buffer setters once the Phase 4 named_children sweep (#995) makes every BN module reachable from `Module::named_descendants_dyn`. num_batches_tracked is integer-typed so it is excluded from the safetensors payload by design."
     },
     {
       "id": "swin_t_value_parity",

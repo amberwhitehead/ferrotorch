@@ -43,15 +43,13 @@ use ferrotorch_vision::{get_model, list_models, register_model};
 use serde::Deserialize;
 
 // ---------------------------------------------------------------------------
-// cascade_skip macro
+// (cascade_skip macro removed in Phase 4 (#1001)) — both call sites at
+// lines :149 / :241 fired only when BN was absent (pre-#860). With #860
+// closed, ferrotorch's ResNet-18 / VGG-11 param counts now agree with
+// torchvision exactly, so the assertions stand on their own and the
+// macro is no longer reachable. Deleting it keeps "no cascade_skip in
+// new code" from being silently re-introducible later.
 // ---------------------------------------------------------------------------
-
-macro_rules! cascade_skip {
-    ($reason:literal) => {{
-        eprintln!("  [cascade_skip] {} — {}", module_path!(), $reason);
-        return;
-    }};
-}
 
 // ---------------------------------------------------------------------------
 // Fixture helpers
@@ -143,11 +141,15 @@ fn resnet18_num_parameters_matches_reference() {
     let model = resnet18::<f32>(10).unwrap();
     let actual = model.num_parameters();
 
-    // Slight divergence is expected if ferrotorch omits BatchNorm. Accept if within 5%.
-    if actual != expected {
-        // ferrotorch omits BatchNorm2d — divergence is expected and tracked.
-        cascade_skip!("resnet18 param count diverges from torchvision (BatchNorm absent) — #860");
-    }
+    // ferrotorch's ResNet-18 includes BatchNorm2d (matches torchvision).
+    // The Phase 4 (#1001) cleanup removed a dead defensive
+    // `cascade_skip!(... #860)` branch that fired only when BN was
+    // absent — #860 is closed and the count now agrees with the
+    // reference exactly, so the assertion below is the load-bearing
+    // check. Keeping the cascade_skip would be failure mode #15
+    // (silent CPU fallback)'s test-side analogue: a "skip on
+    // divergence" branch that hides regressions instead of surfacing
+    // them.
     assert_eq!(
         actual, expected,
         "resnet18 num_parameters mismatch: actual={actual} expected={expected}"
@@ -237,9 +239,10 @@ fn vgg11_num_parameters_matches_reference() {
     let model = vgg11::<f32>(10).unwrap();
     let actual = model.num_parameters();
 
-    if actual != expected {
-        cascade_skip!("vgg11 param count diverges from torchvision (BatchNorm absent) — #860");
-    }
+    // Phase 4 (#1001) cleanup: removed a dead defensive
+    // `cascade_skip!(... #860)` branch. #860 is closed and ferrotorch's
+    // VGG11 param count agrees with the reference exactly. See the
+    // matching note on `resnet18_num_parameters_matches_reference`.
     assert_eq!(actual, expected, "vgg11 num_parameters mismatch");
 }
 
@@ -3388,6 +3391,271 @@ mod value_parity_pipeline {
         d.buffer_keys.clone()
     }
 
+    // ── ViT-B/16 torchvision → ferrotorch state-dict remap (#999) ───────
+    //
+    // Closes the parameter-naming divergence the Phase 3 ViT value-parity
+    // surfaced (vit_b_16_value_parity #[ignore]'d under #999). Operates
+    // on `StateDict<f32>` only — no `src/` change, so ferrotorch's
+    // public ViT API is preserved.
+    //
+    // Schema map (8 string renames + 2 fused-QKV splits):
+    //
+    //   torchvision                                       ferrotorch
+    //   --------------------------------------------------------------
+    //   conv_proj.{weight,bias}                        →  patch_embed.proj.{weight,bias}
+    //   class_token                                    →  cls_token
+    //   encoder.pos_embedding                          →  pos_embed
+    //   encoder.ln.{weight,bias}                       →  norm.{weight,bias}
+    //   heads.head.{weight,bias}                       →  head.{weight,bias}
+    //   encoder.layers.encoder_layer_<N>.ln_1.{w,b}    →  blocks.<N>.norm1.{w,b}
+    //   encoder.layers.encoder_layer_<N>.ln_2.{w,b}    →  blocks.<N>.norm2.{w,b}
+    //   encoder.layers.encoder_layer_<N>.mlp.0.{w,b}   →  blocks.<N>.mlp.fc1.{w,b}
+    //   encoder.layers.encoder_layer_<N>.mlp.3.{w,b}   →  blocks.<N>.mlp.fc2.{w,b}
+    //   encoder.layers.encoder_layer_<N>.self_attention.out_proj.{w,b}
+    //                                                  →  blocks.<N>.attn.out_proj.{weight,bias}
+    //   encoder.layers.encoder_layer_<N>.self_attention.in_proj_weight
+    //                                          → SPLIT  blocks.<N>.attn.{q,k,v}_proj.weight
+    //   encoder.layers.encoder_layer_<N>.self_attention.in_proj_bias
+    //                                          → SPLIT  blocks.<N>.attn.{q,k,v}_proj.bias
+    //
+    // Why split fused QKV: torchvision's `nn.MultiheadAttention` stores
+    // QKV as a single fused tensor of shape `[3*embed_dim, embed_dim]`
+    // (and `[3*embed_dim]` for the bias), with the layout
+    // `[Wq; Wk; Wv]` along dim 0 (cf. PyTorch's
+    // `torch.nn.functional.multi_head_attention_forward`). ferrotorch
+    // exposes them as separate `q_proj` / `k_proj` / `v_proj`
+    // Parameters of shape `[embed_dim, embed_dim]`, so the loader's
+    // shape check would reject the fused tensor outright. The remap
+    // chunks dim 0 into thirds before insertion so each ferrotorch
+    // parameter sees the correct `[embed_dim, embed_dim]` slice.
+
+    /// Translate a torchvision `vit_b_16` state dict into ferrotorch's
+    /// schema. Returns the rewritten state dict on success; returns
+    /// `Err(FerrotorchError::ShapeMismatch)` if a fused QKV tensor's
+    /// dim-0 length is not divisible by 3 (a wrong-shape weight blob
+    /// would produce silently-wrong chunk slices, which is failure
+    /// mode #13 partial-weight-load-passes).
+    pub(super) fn remap_torchvision_to_ferrotorch_vit_keys(
+        state: StateDict<f32>,
+    ) -> FerrotorchResult<StateDict<f32>> {
+        let mut out: StateDict<f32> = StateDict::new();
+
+        for (key, tensor) in state.into_iter() {
+            // ── Stem renames ──
+            if key == "conv_proj.weight" {
+                out.insert("patch_embed.proj.weight".to_string(), tensor);
+                continue;
+            }
+            if key == "conv_proj.bias" {
+                out.insert("patch_embed.proj.bias".to_string(), tensor);
+                continue;
+            }
+            if key == "class_token" {
+                out.insert("cls_token".to_string(), tensor);
+                continue;
+            }
+            if key == "encoder.pos_embedding" {
+                out.insert("pos_embed".to_string(), tensor);
+                continue;
+            }
+
+            // ── Final norm + classifier head renames ──
+            if let Some(rest) = key.strip_prefix("encoder.ln.") {
+                out.insert(format!("norm.{rest}"), tensor);
+                continue;
+            }
+            if let Some(rest) = key.strip_prefix("heads.head.") {
+                out.insert(format!("head.{rest}"), tensor);
+                continue;
+            }
+
+            // ── Per-block renames ──
+            if let Some(rest) = key.strip_prefix("encoder.layers.encoder_layer_") {
+                // rest looks like "<N>.ln_1.weight" / "<N>.self_attention.in_proj_weight" etc.
+                let (idx_str, suffix) = rest
+                    .split_once('.')
+                    .ok_or_else(|| FerrotorchError::InvalidArgument {
+                        message: format!(
+                            "ViT remap: malformed encoder layer key {key:?} \
+                             — expected `encoder.layers.encoder_layer_<N>.<...>`"
+                        ),
+                    })?;
+                let block_idx: usize =
+                    idx_str.parse().map_err(|_| FerrotorchError::InvalidArgument {
+                        message: format!(
+                            "ViT remap: encoder layer key {key:?} has \
+                             non-integer block index {idx_str:?}"
+                        ),
+                    })?;
+                let prefix = format!("blocks.{block_idx}");
+
+                // ln_1 → norm1, ln_2 → norm2.
+                if let Some(rest) = suffix.strip_prefix("ln_1.") {
+                    out.insert(format!("{prefix}.norm1.{rest}"), tensor);
+                    continue;
+                }
+                if let Some(rest) = suffix.strip_prefix("ln_2.") {
+                    out.insert(format!("{prefix}.norm2.{rest}"), tensor);
+                    continue;
+                }
+
+                // mlp.0 → mlp.fc1, mlp.3 → mlp.fc2 (mlp.1 is GELU,
+                // mlp.2 is dropout — neither has parameters).
+                if let Some(rest) = suffix.strip_prefix("mlp.0.") {
+                    out.insert(format!("{prefix}.mlp.fc1.{rest}"), tensor);
+                    continue;
+                }
+                if let Some(rest) = suffix.strip_prefix("mlp.3.") {
+                    out.insert(format!("{prefix}.mlp.fc2.{rest}"), tensor);
+                    continue;
+                }
+
+                // out_proj passes through with the same trailing component.
+                if let Some(rest) = suffix.strip_prefix("self_attention.out_proj.") {
+                    out.insert(format!("{prefix}.attn.out_proj.{rest}"), tensor);
+                    continue;
+                }
+
+                // Fused QKV split. dim 0 = 3 * embed_dim = 2304 for ViT-B.
+                if suffix == "self_attention.in_proj_weight" {
+                    let (q, k, v) = split_fused_qkv_2d(&tensor, &key)?;
+                    out.insert(format!("{prefix}.attn.q_proj.weight"), q);
+                    out.insert(format!("{prefix}.attn.k_proj.weight"), k);
+                    out.insert(format!("{prefix}.attn.v_proj.weight"), v);
+                    continue;
+                }
+                if suffix == "self_attention.in_proj_bias" {
+                    let (q, k, v) = split_fused_qkv_1d(&tensor, &key)?;
+                    out.insert(format!("{prefix}.attn.q_proj.bias"), q);
+                    out.insert(format!("{prefix}.attn.k_proj.bias"), k);
+                    out.insert(format!("{prefix}.attn.v_proj.bias"), v);
+                    continue;
+                }
+
+                return Err(FerrotorchError::InvalidArgument {
+                    message: format!(
+                        "ViT remap: unhandled per-block key {key:?} \
+                         (suffix={suffix:?}). Add a remap arm or update \
+                         the schema map docstring."
+                    ),
+                });
+            }
+
+            // Any key not matched above is unexpected; surface it so the
+            // strict loader's "unmapped key" check fires with a helpful
+            // diagnostic (rather than silently passing through and
+            // producing a non-actionable error from the loader).
+            return Err(FerrotorchError::InvalidArgument {
+                message: format!("ViT remap: unrecognised torchvision key {key:?}"),
+            });
+        }
+
+        Ok(out)
+    }
+
+    /// Split a `[3*E, E]` fused QKV weight tensor into three `[E, E]`
+    /// tensors `(Wq, Wk, Wv)`. The torchvision layout puts Q first,
+    /// then K, then V along dim 0 (matches PyTorch's
+    /// `torch.nn.functional.multi_head_attention_forward`).
+    ///
+    /// On a wrong-shape input (dim 0 not divisible by 3, or non-2D
+    /// tensor) returns `Err(FerrotorchError::ShapeMismatch)` so the
+    /// loader's downstream shape check is never reached with a
+    /// silently-truncated chunk — failure mode #13.
+    fn split_fused_qkv_2d(
+        fused: &Tensor<f32>,
+        diag_key: &str,
+    ) -> FerrotorchResult<(Tensor<f32>, Tensor<f32>, Tensor<f32>)> {
+        let shape = fused.shape();
+        if shape.len() != 2 {
+            return Err(FerrotorchError::ShapeMismatch {
+                message: format!(
+                    "ViT remap: fused QKV weight {diag_key:?} must be 2-D, got shape {shape:?}"
+                ),
+            });
+        }
+        let total_rows = shape[0];
+        let cols = shape[1];
+        if total_rows % 3 != 0 {
+            return Err(FerrotorchError::ShapeMismatch {
+                message: format!(
+                    "ViT remap: fused QKV weight {diag_key:?} dim 0 = {total_rows} \
+                     is not divisible by 3 (Q/K/V chunk size would be fractional)"
+                ),
+            });
+        }
+        let chunk = total_rows / 3;
+
+        let data = fused
+            .data()
+            .map_err(|e| FerrotorchError::InvalidArgument {
+                message: format!(
+                    "ViT remap: failed to read fused QKV weight {diag_key:?}: {e}"
+                ),
+            })?
+            .to_vec();
+        let row_bytes = cols;
+        let q_data: Vec<f32> = data[0..chunk * row_bytes].to_vec();
+        let k_data: Vec<f32> = data[chunk * row_bytes..2 * chunk * row_bytes].to_vec();
+        let v_data: Vec<f32> = data[2 * chunk * row_bytes..3 * chunk * row_bytes].to_vec();
+        let chunk_shape = vec![chunk, cols];
+        let q = Tensor::from_storage(TensorStorage::cpu(q_data), chunk_shape.clone(), false)?;
+        let k = Tensor::from_storage(TensorStorage::cpu(k_data), chunk_shape.clone(), false)?;
+        let v = Tensor::from_storage(TensorStorage::cpu(v_data), chunk_shape, false)?;
+        Ok((q, k, v))
+    }
+
+    /// Split a `[3*E]` fused QKV bias tensor into three `[E]` tensors.
+    /// Same Q/K/V order as [`split_fused_qkv_2d`].
+    fn split_fused_qkv_1d(
+        fused: &Tensor<f32>,
+        diag_key: &str,
+    ) -> FerrotorchResult<(Tensor<f32>, Tensor<f32>, Tensor<f32>)> {
+        let shape = fused.shape();
+        if shape.len() != 1 {
+            return Err(FerrotorchError::ShapeMismatch {
+                message: format!(
+                    "ViT remap: fused QKV bias {diag_key:?} must be 1-D, got shape {shape:?}"
+                ),
+            });
+        }
+        let total = shape[0];
+        if total % 3 != 0 {
+            return Err(FerrotorchError::ShapeMismatch {
+                message: format!(
+                    "ViT remap: fused QKV bias {diag_key:?} length {total} \
+                     is not divisible by 3"
+                ),
+            });
+        }
+        let chunk = total / 3;
+
+        let data = fused
+            .data()
+            .map_err(|e| FerrotorchError::InvalidArgument {
+                message: format!(
+                    "ViT remap: failed to read fused QKV bias {diag_key:?}: {e}"
+                ),
+            })?
+            .to_vec();
+        let q = Tensor::from_storage(
+            TensorStorage::cpu(data[0..chunk].to_vec()),
+            vec![chunk],
+            false,
+        )?;
+        let k = Tensor::from_storage(
+            TensorStorage::cpu(data[chunk..2 * chunk].to_vec()),
+            vec![chunk],
+            false,
+        )?;
+        let v = Tensor::from_storage(
+            TensorStorage::cpu(data[2 * chunk..3 * chunk].to_vec()),
+            vec![chunk],
+            false,
+        )?;
+        Ok((q, k, v))
+    }
+
     // ── Per-element allclose ─────────────────────────────────────────────
 
     /// Per-element `torch.allclose`-shaped check.
@@ -3562,6 +3830,54 @@ mod value_parity_pipeline {
         model_label: &str,
         build_model: impl FnOnce() -> Box<dyn Module<f32>>,
     ) {
+        run_value_parity_test_inner(
+            fixture_id,
+            regenerate_target,
+            model_label,
+            build_model,
+            None,
+        )
+    }
+
+    /// Function-pointer alias for the ViT (#999) state-dict remap and
+    /// any future per-model schema translators. Lives at module scope
+    /// so clippy's `type_complexity` lint stops complaining about the
+    /// public surfaces that thread this signature through.
+    pub(super) type StateDictRemapFn =
+        fn(StateDict<f32>) -> FerrotorchResult<StateDict<f32>>;
+
+    /// Variant of [`run_value_parity_test`] that applies a caller-supplied
+    /// state-dict remap BEFORE the strict loader runs. Used by ViT-B/16
+    /// (#999) to translate torchvision's parameter-naming schema and to
+    /// split fused QKV tensors into ferrotorch's separate
+    /// `attn.q_proj` / `attn.k_proj` / `attn.v_proj` projections.
+    ///
+    /// The remap operates on `StateDict<f32>` only — no `src/` change,
+    /// so the per-model adoption logic stays test-only and ferrotorch's
+    /// public ViT API is preserved (Phase 4 pre-flight, divergence #2).
+    pub(super) fn run_value_parity_test_with_state_remap(
+        fixture_id: &str,
+        regenerate_target: &str,
+        model_label: &str,
+        build_model: impl FnOnce() -> Box<dyn Module<f32>>,
+        remap: StateDictRemapFn,
+    ) {
+        run_value_parity_test_inner(
+            fixture_id,
+            regenerate_target,
+            model_label,
+            build_model,
+            Some(remap),
+        )
+    }
+
+    fn run_value_parity_test_inner(
+        fixture_id: &str,
+        regenerate_target: &str,
+        model_label: &str,
+        build_model: impl FnOnce() -> Box<dyn Module<f32>>,
+        remap: Option<StateDictRemapFn>,
+    ) {
         let fixture = require_fixture(fixture_id, regenerate_target);
         assert_fixture_well_formed(&fixture, model_label);
 
@@ -3571,6 +3887,18 @@ mod value_parity_pipeline {
             input,
             expected,
         } = fixture;
+
+        // Apply the test-side remap (if any) to translate torchvision's
+        // parameter-naming schema into ferrotorch's. The transformed
+        // state dict is what the strict loader sees — every well-
+        // formedness check (no extra keys, no missing ferrotorch
+        // params, no shape mismatch) runs against the remapped names.
+        let state = match remap {
+            Some(f) => f(state).unwrap_or_else(|e| {
+                panic!("{model_label}: state-dict remap failed: {e}")
+            }),
+            None => state,
+        };
 
         // Build the model on CPU. The CPU assertion is repeated post-load
         // and post-forward so a future implicit-GPU regression cannot
@@ -3669,13 +3997,20 @@ mod value_parity_pipeline {
         pub(super) model_label: &'a str,
         /// Build a fresh `dyn Module<f32>` on CPU each time.
         pub(super) build_model: fn() -> Box<dyn Module<f32>>,
-        /// A parameter key the probe set assumes exists in the fixture
-        /// (used by the "missing ferrotorch param" + "shape mismatch"
-        /// probes). Must be present in `descriptor.param_keys`.
+        /// A parameter key the probe set assumes exists in the **state
+        /// dict the loader will see** (used by the "missing ferrotorch
+        /// param" + "shape mismatch" probes). When `state_remap` is
+        /// `None`, this is a torchvision key from
+        /// `descriptor.param_keys`; when `state_remap` is `Some`, it is
+        /// the post-remap (ferrotorch-shaped) name.
         pub(super) missing_param_key: &'a str,
         /// A BN buffer key the probe set assumes exists in the fixture.
         /// Must be present in `descriptor.buffer_keys`.
         pub(super) bn_buffer_key: &'a str,
+        /// Optional state-dict remap (Phase 4 #999): translate
+        /// torchvision keys → ferrotorch keys before the loader runs.
+        /// `None` keeps the legacy direct-mapping behaviour.
+        pub(super) state_remap: Option<StateDictRemapFn>,
     }
 
     fn require_fixture_for_probe(cfg: &ProbeConfig<'_>) -> LoadedFixture {
@@ -3688,18 +4023,41 @@ mod value_parity_pipeline {
         }
     }
 
+    /// Apply the probe's optional state-dict remap. Returns the
+    /// (possibly transformed) state. Probes call this once at the
+    /// start so all subsequent perturbations operate on the
+    /// post-remap key set the loader will see.
+    fn apply_probe_remap(
+        cfg: &ProbeConfig<'_>,
+        state: StateDict<f32>,
+    ) -> StateDict<f32> {
+        match cfg.state_remap {
+            Some(f) => f(state).unwrap_or_else(|e| {
+                panic!("{}: state-dict remap failed: {e}", cfg.model_label)
+            }),
+            None => state,
+        }
+    }
+
     pub(super) fn probe_loader_rejects_unmapped_torchvision_key(cfg: &ProbeConfig<'_>) {
-        let mut fix = require_fixture_for_probe(cfg);
-        fix.state.insert(
+        let fix = require_fixture_for_probe(cfg);
+        let LoadedFixture {
+            descriptor,
+            state,
+            input: _,
+            expected: _,
+        } = fix;
+        let mut state = apply_probe_remap(cfg, state);
+        state.insert(
             "bogus.unmapped.key".to_string(),
             ferrotorch_core::zeros::<f32>(&[1]).unwrap(),
         );
         let mut model = (cfg.build_model)();
-        let buffer_keys = buffer_keys_from_descriptor(&fix.descriptor);
+        let buffer_keys = buffer_keys_from_descriptor(&descriptor);
         let err = load_torchvision_state_into_module(
             cfg.model_label,
             model.as_mut(),
-            &fix.state,
+            &state,
             &buffer_keys,
         )
         .expect_err("loader must reject an unmapped key");
@@ -3712,23 +4070,29 @@ mod value_parity_pipeline {
     }
 
     pub(super) fn probe_loader_rejects_missing_ferrotorch_param(cfg: &ProbeConfig<'_>) {
-        let mut fix = require_fixture_for_probe(cfg);
+        let fix = require_fixture_for_probe(cfg);
+        let LoadedFixture {
+            descriptor,
+            state,
+            input: _,
+            expected: _,
+        } = fix;
+        let mut state = apply_probe_remap(cfg, state);
         let key = cfg.missing_param_key;
         assert!(
-            fix.state.contains_key(key),
-            "{}: probe assumes {key} is present in fixture",
+            state.contains_key(key),
+            "{}: probe assumes {key} is present in (post-remap) state dict",
             cfg.model_label
         );
-        let _ = fix
-            .state
+        let _ = state
             .remove(key)
             .unwrap_or_else(|| panic!("{key} present (asserted above)"));
         let mut model = (cfg.build_model)();
-        let buffer_keys = buffer_keys_from_descriptor(&fix.descriptor);
+        let buffer_keys = buffer_keys_from_descriptor(&descriptor);
         let err = load_torchvision_state_into_module(
             cfg.model_label,
             model.as_mut(),
-            &fix.state,
+            &state,
             &buffer_keys,
         )
         .expect_err("loader must reject a missing ferrotorch param");
@@ -3741,24 +4105,31 @@ mod value_parity_pipeline {
     }
 
     pub(super) fn probe_loader_rejects_shape_mismatch(cfg: &ProbeConfig<'_>) {
-        let mut fix = require_fixture_for_probe(cfg);
+        let fix = require_fixture_for_probe(cfg);
+        let LoadedFixture {
+            descriptor,
+            state,
+            input: _,
+            expected: _,
+        } = fix;
+        let mut state = apply_probe_remap(cfg, state);
         let key = cfg.missing_param_key;
         assert!(
-            fix.state.contains_key(key),
-            "{}: probe assumes {key} is present in fixture",
+            state.contains_key(key),
+            "{}: probe assumes {key} is present in (post-remap) state dict",
             cfg.model_label
         );
         // A shape that no real parameter would have — guarantees mismatch.
-        fix.state.insert(
+        state.insert(
             key.to_string(),
             ferrotorch_core::zeros::<f32>(&[7, 13]).unwrap(),
         );
         let mut model = (cfg.build_model)();
-        let buffer_keys = buffer_keys_from_descriptor(&fix.descriptor);
+        let buffer_keys = buffer_keys_from_descriptor(&descriptor);
         let err = load_torchvision_state_into_module(
             cfg.model_label,
             model.as_mut(),
-            &fix.state,
+            &state,
             &buffer_keys,
         )
         .expect_err("loader must reject shape mismatch");
@@ -3809,6 +4180,7 @@ mod value_parity_pipeline {
         build_model: build_resnet50,
         missing_param_key: "fc.bias",
         bn_buffer_key: "bn1.running_mean",
+        state_remap: None,
     };
 
     #[test]
@@ -3873,6 +4245,7 @@ mod value_parity_pipeline {
         build_model: build_densenet121,
         missing_param_key: "classifier.bias",
         bn_buffer_key: "features.norm0.running_mean",
+        state_remap: None,
     };
 
     #[test]
@@ -3923,6 +4296,7 @@ mod value_parity_pipeline {
         build_model: build_mobilenet_v2,
         missing_param_key: "classifier.1.bias",
         bn_buffer_key: "features.0.1.running_mean",
+        state_remap: None,
     };
 
     #[test]
@@ -3973,6 +4347,7 @@ mod value_parity_pipeline {
         build_model: build_mobilenet_v3_small,
         missing_param_key: "classifier.3.bias",
         bn_buffer_key: "features.0.1.running_mean",
+        state_remap: None,
     };
 
     #[test]
@@ -4023,6 +4398,7 @@ mod value_parity_pipeline {
         build_model: build_efficientnet_b0,
         missing_param_key: "classifier.1.bias",
         bn_buffer_key: "features.0.1.running_mean",
+        state_remap: None,
     };
 
     #[test]
@@ -4073,6 +4449,7 @@ mod value_parity_pipeline {
         build_model: build_inception_v3,
         missing_param_key: "classifier.bias",
         bn_buffer_key: "Conv2d_1a_3x3.bn.running_mean",
+        state_remap: None,
     };
 
     #[test]
@@ -4124,6 +4501,7 @@ mod value_parity_pipeline {
         build_model: build_fcn_resnet50,
         missing_param_key: "head.4.weight",
         bn_buffer_key: "backbone.bn1.running_mean",
+        state_remap: None,
     };
 
     #[test]
@@ -4214,6 +4592,25 @@ mod value_parity_pipeline {
         // probe call sites that consume `bn_buffer_key` are gated by an
         // explicit `#[ignore]` on this model.
         bn_buffer_key: "encoder.layers.encoder_layer_0.ln_1.weight",
+        state_remap: None,
+    };
+
+    /// Phase 4 (#999) ViT-B/16 probe variant that runs the
+    /// torchvision → ferrotorch state-dict remap before perturbing the
+    /// state. `missing_param_key` therefore references a ferrotorch
+    /// (post-remap) name — the loader's strict checks operate on the
+    /// rewritten key set.
+    const VIT_B_16_REMAPPED_PROBE: ProbeConfig<'static> = ProbeConfig {
+        fixture_id: "vit_b_16_value_parity",
+        regenerate_target: "vit_b_16",
+        model_label: "ViT-B/16",
+        build_model: build_vit_b_16,
+        // After the remap, `heads.head.bias` becomes `head.bias` (see
+        // `remap_torchvision_to_ferrotorch_vit_keys`).
+        missing_param_key: "head.bias",
+        // ViT has no BN buffers; the BN-buffer probe is omitted.
+        bn_buffer_key: "norm.weight",
+        state_remap: Some(remap_torchvision_to_ferrotorch_vit_keys),
     };
 
     // STOP-AND-REPORT under the Phase 3 pre-flight (#996): the architect's
@@ -4242,33 +4639,40 @@ mod value_parity_pipeline {
     // _output_finite / _custom_num_classes / _deterministic_forward
     // tests continue to pass post-migration.
 
+    // Phase 4 (#1001) closes #999: the test-side state-dict remap
+    // (`remap_torchvision_to_ferrotorch_vit_keys` above) translates
+    // torchvision's parameter-naming schema into ferrotorch's, splits
+    // the fused QKV in_proj weight + bias along dim 0 into separate
+    // `q_proj` / `k_proj` / `v_proj` Parameters, then hands the
+    // rewritten state dict to the same strict loader Phase 1A/1B uses.
+    // The honest-fail probes below (unmapped key / missing param /
+    // shape mismatch) exercise the rewritten state dict so they
+    // genuinely test the loader's contract on the post-remap names.
+
     #[test]
-    #[ignore = "#999 ViT-B/16 named_parameters schema (blocks.<N>.norm1, attn, mlp.fc1) does not match torchvision vit_b_16 (encoder.layers.encoder_layer_<N>.ln_1, self_attention, mlp.0/3); strict loader cannot adopt torchvision weights until a schema-rename phase lands. #996 permute-pattern CPU-pull bug is fixed but parameter-schema divergence remains."]
     fn vit_b_16_value_parity() {
-        run_value_parity_test(
+        run_value_parity_test_with_state_remap(
             VIT_B_16_PROBE.fixture_id,
             VIT_B_16_PROBE.regenerate_target,
             VIT_B_16_PROBE.model_label,
             build_vit_b_16,
+            remap_torchvision_to_ferrotorch_vit_keys,
         );
     }
 
     #[test]
-    #[ignore = "#999 ViT-B/16 named_parameters schema divergence vs torchvision vit_b_16"]
     fn vit_b_16_loader_rejects_unmapped_torchvision_key() {
-        probe_loader_rejects_unmapped_torchvision_key(&VIT_B_16_PROBE);
+        probe_loader_rejects_unmapped_torchvision_key(&VIT_B_16_REMAPPED_PROBE);
     }
 
     #[test]
-    #[ignore = "#999 ViT-B/16 named_parameters schema divergence vs torchvision vit_b_16"]
     fn vit_b_16_loader_rejects_missing_ferrotorch_param() {
-        probe_loader_rejects_missing_ferrotorch_param(&VIT_B_16_PROBE);
+        probe_loader_rejects_missing_ferrotorch_param(&VIT_B_16_REMAPPED_PROBE);
     }
 
     #[test]
-    #[ignore = "#999 ViT-B/16 named_parameters schema divergence vs torchvision vit_b_16"]
     fn vit_b_16_loader_rejects_shape_mismatch() {
-        probe_loader_rejects_shape_mismatch(&VIT_B_16_PROBE);
+        probe_loader_rejects_shape_mismatch(&VIT_B_16_REMAPPED_PROBE);
     }
 
     // -- ConvNeXt-T (torchvision: convnext_tiny) ------------------------ //
@@ -4289,6 +4693,7 @@ mod value_parity_pipeline {
         // torchvision-side LayerNorm weight key so the precondition
         // typechecks (consumed by no enabled probe).
         bn_buffer_key: "features.0.1.weight",
+        state_remap: None,
     };
 
     #[test]
@@ -4335,6 +4740,7 @@ mod value_parity_pipeline {
         // Swin has no BN buffers; populated with a torchvision-side
         // LayerNorm weight key so the precondition typechecks.
         bn_buffer_key: "features.0.2.weight",
+        state_remap: None,
     };
 
     #[test]
@@ -4600,5 +5006,218 @@ mod value_parity_pipeline {
             Device::Cpu,
             "BN eval forward must stay on CPU"
         );
+    }
+
+    /// Phase 4 (#995) end-to-end: with the named_children sweep applied
+    /// to every vision model, the Phase 2 BN-buffer loader must now
+    /// reach every BN inside a real `resnet50()`. This test:
+    ///
+    ///   1. Builds an actual `resnet50` (NOT a hand-rolled wrapper).
+    ///   2. Reads the resnet50 fixture's full state dict — guarantees
+    ///      every parameter + BN buffer key is present.
+    ///   3. Overwrites two canonical BN buffer keys with distinctive
+    ///      synthetic running stats (mean=42, var=4) so the post-load
+    ///      values cannot collide with construction defaults
+    ///      (mean=0, var=1) or with the on-disk fixture values.
+    ///   4. Runs the loader, then asserts the targeted BNs report the
+    ///      synthetic values back via `running_mean()` / `running_var()`.
+    ///   5. Probes a non-targeted BN to confirm the loader didn't apply
+    ///      the synthetic values to the wrong path.
+    ///
+    /// Without the named_children sweep this test FAILS — the loader
+    /// hits its Phase 1A "skipped_unreachable" branch for every BN
+    /// path and the running stats stay at construction defaults.
+    /// With the sweep applied, the loader walks the tree and the
+    /// setters fire, so the assertions hold.
+    #[test]
+    fn loader_applies_bn_buffers_to_real_resnet50() {
+        let model_label = "ResNet50-real-bn-loader";
+        let fixture_id = "resnet50_value_parity";
+
+        // Require the resnet50 fixture so every BN buffer key the
+        // descriptor declares is present in the state dict.
+        let fixture = require_fixture(fixture_id, "resnet50");
+        let LoadedFixture {
+            descriptor,
+            mut state,
+            input: _,
+            expected: _,
+        } = fixture;
+
+        // Synthetic BN buffer values that cannot collide with the
+        // construction defaults (0.0 / 1.0). Picking 42.0 / 4.0 makes
+        // a missed setter call obvious in any post-load assertion.
+        let num_features_layer1_bn1: usize = 64; // Bottleneck inner width
+        let num_features_bn1: usize = 64; // stem BN
+        let synthetic_mean_layer1: Vec<f32> = vec![42.0_f32; num_features_layer1_bn1];
+        let synthetic_var_layer1: Vec<f32> = vec![4.0_f32; num_features_layer1_bn1];
+        let synthetic_mean_bn1: Vec<f32> = vec![17.0_f32; num_features_bn1];
+        let synthetic_var_bn1: Vec<f32> = vec![9.0_f32; num_features_bn1];
+
+        // Overwrite the two targeted BN buffer keys in the state dict.
+        let target_layer1_path = "layer1.0.bn1";
+        let target_bn1_path = "bn1";
+        let probe_untouched_path = "layer4.2.bn3";
+        let key_layer1_mean = format!("{target_layer1_path}.running_mean");
+        let key_layer1_var = format!("{target_layer1_path}.running_var");
+        let key_bn1_mean = format!("{target_bn1_path}.running_mean");
+        let key_bn1_var = format!("{target_bn1_path}.running_var");
+        let key_untouched_mean = format!("{probe_untouched_path}.running_mean");
+
+        // Pre-condition: the fixture descriptor lists every targeted
+        // key (otherwise the loader's "expected BN buffer missing"
+        // check would fire and the test would never reach the
+        // assertion below).
+        for k in [
+            &key_layer1_mean,
+            &key_layer1_var,
+            &key_bn1_mean,
+            &key_bn1_var,
+            &key_untouched_mean,
+        ] {
+            assert!(
+                descriptor.buffer_keys.iter().any(|b| b == k),
+                "fixture descriptor must list buffer key {k} for the test \
+                 precondition to hold"
+            );
+            assert!(
+                state.contains_key(k.as_str()),
+                "state dict must contain key {k} after fixture load"
+            );
+        }
+
+        // Replace the targeted keys with synthetic tensors. Loader
+        // shape-checks against `num_features` for each BN, so we MUST
+        // use the right per-channel length (64 for both stem.bn1 and
+        // layer1.0.bn1's reduced inner width).
+        state.insert(
+            key_layer1_mean.clone(),
+            Tensor::from_storage(
+                TensorStorage::cpu(synthetic_mean_layer1.clone()),
+                vec![num_features_layer1_bn1],
+                false,
+            )
+            .expect("synthetic running_mean tensor"),
+        );
+        state.insert(
+            key_layer1_var.clone(),
+            Tensor::from_storage(
+                TensorStorage::cpu(synthetic_var_layer1.clone()),
+                vec![num_features_layer1_bn1],
+                false,
+            )
+            .expect("synthetic running_var tensor"),
+        );
+        state.insert(
+            key_bn1_mean.clone(),
+            Tensor::from_storage(
+                TensorStorage::cpu(synthetic_mean_bn1.clone()),
+                vec![num_features_bn1],
+                false,
+            )
+            .expect("synthetic stem running_mean tensor"),
+        );
+        state.insert(
+            key_bn1_var.clone(),
+            Tensor::from_storage(
+                TensorStorage::cpu(synthetic_var_bn1.clone()),
+                vec![num_features_bn1],
+                false,
+            )
+            .expect("synthetic stem running_var tensor"),
+        );
+
+        // Build a real ResNet50 — exactly what `resnet50_value_parity`
+        // exercises, NOT a hand-rolled wrapper.
+        let mut model: Box<dyn Module<f32>> =
+            Box::new(resnet50::<f32>(1000).expect("resnet50 construction"));
+
+        // Run the loader. With Phase 4 named_children overrides, this
+        // walks the module tree, finds every BN path, and applies the
+        // synthetic values via `set_running_mean` / `set_running_var`.
+        let buffer_keys: Vec<String> = descriptor.buffer_keys.clone();
+        load_torchvision_state_into_module(model_label, model.as_mut(), &state, &buffer_keys)
+            .expect("loader must succeed end-to-end on real resnet50 with named_children sweep");
+
+        // Walk the tree to look up the targeted modules and read back
+        // their running stats. The setters widen f32 → f64, so we
+        // compare in f64 against the synthetic source-of-truth.
+        let mut path_to_module: std::collections::HashMap<String, &dyn Module<f32>> =
+            std::collections::HashMap::new();
+        for (name, child) in model.named_descendants_dyn() {
+            path_to_module.insert(name, child);
+        }
+
+        for (path, expected_mean, expected_var) in [
+            (
+                target_bn1_path,
+                synthetic_mean_bn1.iter().map(|&v| v as f64).collect::<Vec<_>>(),
+                synthetic_var_bn1.iter().map(|&v| v as f64).collect::<Vec<_>>(),
+            ),
+            (
+                target_layer1_path,
+                synthetic_mean_layer1
+                    .iter()
+                    .map(|&v| v as f64)
+                    .collect::<Vec<_>>(),
+                synthetic_var_layer1
+                    .iter()
+                    .map(|&v| v as f64)
+                    .collect::<Vec<_>>(),
+            ),
+        ] {
+            let bn_module = path_to_module
+                .get(path)
+                .copied()
+                .unwrap_or_else(|| panic!("named_descendants_dyn missing BN path {path}"));
+            let any = bn_module
+                .as_any()
+                .unwrap_or_else(|| panic!("BN at {path} did not opt into as_any"));
+            let bn = any.downcast_ref::<BatchNorm2d<f32>>().unwrap_or_else(|| {
+                panic!("BN at {path} did not downcast to BatchNorm2d<f32>")
+            });
+            let post_mean = bn.running_mean();
+            let post_var = bn.running_var();
+            assert_eq!(
+                post_mean, expected_mean,
+                "{path}: running_mean was not loaded — \
+                 named_children sweep failed to expose this BN to the loader"
+            );
+            assert_eq!(
+                post_var, expected_var,
+                "{path}: running_var was not loaded"
+            );
+        }
+
+        // Confirm the loader did NOT apply the synthetic values to a
+        // non-targeted BN — `layer4.2.bn3.running_mean` should reflect
+        // the on-disk fixture value, NOT the synthetic 42.0/17.0
+        // values we injected at the two targeted paths. (For a random-
+        // init torchvision fixture the values are non-trivial floats
+        // produced by the seed, so any of {0.0, 17.0, 42.0} would be a
+        // diagnostic mismatch.)
+        let untouched_bn = path_to_module
+            .get(probe_untouched_path)
+            .copied()
+            .unwrap_or_else(|| {
+                panic!(
+                    "named_descendants_dyn missing BN path {probe_untouched_path} — \
+                     the override should expose every BN, not just the targeted ones"
+                )
+            });
+        let untouched_any = untouched_bn
+            .as_any()
+            .expect("untouched BN must opt into as_any");
+        let untouched_bn = untouched_any
+            .downcast_ref::<BatchNorm2d<f32>>()
+            .expect("untouched BN must downcast to BatchNorm2d<f32>");
+        let untouched_mean = untouched_bn.running_mean();
+        for (i, &v) in untouched_mean.iter().enumerate() {
+            assert!(
+                v != 42.0 && v != 17.0,
+                "{probe_untouched_path}: running_mean[{i}] = {v} matches a \
+                 synthetic injection value — loader misrouted a BN buffer"
+            );
+        }
     }
 }

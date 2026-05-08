@@ -189,6 +189,36 @@ impl<T: Float> Module<T> for DilatedBottleneck<T> {
         out
     }
 
+    // Phase 4 (#995): expose direct children mirroring `named_parameters`.
+    fn children(&self) -> Vec<&dyn Module<T>> {
+        let mut out: Vec<&dyn Module<T>> = vec![
+            &self.conv1,
+            &self.bn1,
+            &self.conv2_dilated,
+            &self.conv3,
+            &self.bn3,
+        ];
+        if let Some((ref c, ref b)) = self.downsample {
+            out.push(c);
+            out.push(b);
+        }
+        out
+    }
+    fn named_children(&self) -> Vec<(String, &dyn Module<T>)> {
+        let mut out: Vec<(String, &dyn Module<T>)> = vec![
+            ("conv1".to_string(), &self.conv1),
+            ("bn1".to_string(), &self.bn1),
+            ("conv2".to_string(), &self.conv2_dilated),
+            ("conv3".to_string(), &self.conv3),
+            ("bn3".to_string(), &self.bn3),
+        ];
+        if let Some((ref c, ref b)) = self.downsample {
+            out.push(("downsample.0".to_string(), c));
+            out.push(("downsample.1".to_string(), b));
+        }
+        out
+    }
+
     fn train(&mut self) {
         self.training = true;
         self.bn1.train();
@@ -328,6 +358,46 @@ impl<T: Float> Module<T> for ResNet50Dilated<T> {
         named_layer_params(&self.layer2, "backbone.layer2", &mut out);
         named_layer_params(&self.layer3, "backbone.layer3", &mut out);
         named_layer_params(&self.layer4, "backbone.layer4", &mut out);
+        out
+    }
+
+    // Phase 4 (#995): expose direct children mirroring the
+    // `backbone.<...>` paths in `named_parameters`.
+    fn children(&self) -> Vec<&dyn Module<T>> {
+        let mut out: Vec<&dyn Module<T>> = vec![&self.conv1, &self.bn1, &self.maxpool];
+        for b in &self.layer1 {
+            out.push(b.as_ref());
+        }
+        for b in &self.layer2 {
+            out.push(b.as_ref());
+        }
+        for b in &self.layer3 {
+            out.push(b.as_ref());
+        }
+        for b in &self.layer4 {
+            out.push(b.as_ref());
+        }
+        out
+    }
+
+    fn named_children(&self) -> Vec<(String, &dyn Module<T>)> {
+        let mut out: Vec<(String, &dyn Module<T>)> = vec![
+            ("backbone.conv1".to_string(), &self.conv1),
+            ("backbone.bn1".to_string(), &self.bn1),
+            ("backbone.maxpool".to_string(), &self.maxpool),
+        ];
+        for (i, b) in self.layer1.iter().enumerate() {
+            out.push((format!("backbone.layer1.{i}"), b.as_ref()));
+        }
+        for (i, b) in self.layer2.iter().enumerate() {
+            out.push((format!("backbone.layer2.{i}"), b.as_ref()));
+        }
+        for (i, b) in self.layer3.iter().enumerate() {
+            out.push((format!("backbone.layer3.{i}"), b.as_ref()));
+        }
+        for (i, b) in self.layer4.iter().enumerate() {
+            out.push((format!("backbone.layer4.{i}"), b.as_ref()));
+        }
         out
     }
 
@@ -507,6 +577,17 @@ impl<T: Float> Module<T> for DeepLabV3Head<T> {
         out
     }
 
+    // Phase 4 (#995): expose aspp + classifier children.
+    fn children(&self) -> Vec<&dyn Module<T>> {
+        vec![&self.aspp, &self.classifier]
+    }
+    fn named_children(&self) -> Vec<(String, &dyn Module<T>)> {
+        vec![
+            ("aspp".to_string(), &self.aspp),
+            ("classifier".to_string(), &self.classifier),
+        ]
+    }
+
     fn train(&mut self) {
         self.training = true;
         self.aspp.train();
@@ -604,6 +685,21 @@ impl<T: Float> Module<T> for DeepLabV3<T> {
             out.push((format!("head.{k}"), v));
         }
         out
+    }
+
+    // Phase 4 (#995): expose backbone + head children. Note that the
+    // backbone's own `named_children` already prefixes its children
+    // with `backbone.<...>`, so we forward it as the empty path here
+    // (root-level pass-through) to keep the descendant walk consistent
+    // with `named_parameters` above.
+    fn children(&self) -> Vec<&dyn Module<T>> {
+        vec![&self.backbone, &self.head]
+    }
+    fn named_children(&self) -> Vec<(String, &dyn Module<T>)> {
+        vec![
+            (String::new(), &self.backbone),
+            ("head".to_string(), &self.head),
+        ]
     }
 
     fn train(&mut self) {

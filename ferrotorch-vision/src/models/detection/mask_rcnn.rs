@@ -452,6 +452,36 @@ impl<T: Float> Module<T> for MaskRcnn<T> {
         out
     }
 
+    // Phase 4 (#995): expose `faster_rcnn` so the BN-buffer loader walks
+    // into the wrapped ResNet backbone, plus the mask-branch `Conv2d`s.
+    // `MaskHead` / `MaskPredictor` are inherent-method helpers (NOT
+    // `Module<T>` impls), so we project their inner Conv2d's directly.
+    fn children(&self) -> Vec<&dyn Module<T>> {
+        vec![
+            &self.faster_rcnn,
+            &self.mask_head.conv1,
+            &self.mask_head.conv2,
+            &self.mask_head.conv3,
+            &self.mask_head.conv4,
+            &self.mask_predictor.deconv,
+            &self.mask_predictor.conv_logits,
+        ]
+    }
+    fn named_children(&self) -> Vec<(String, &dyn Module<T>)> {
+        vec![
+            ("faster_rcnn".to_string(), &self.faster_rcnn),
+            ("mask_head.conv1".to_string(), &self.mask_head.conv1),
+            ("mask_head.conv2".to_string(), &self.mask_head.conv2),
+            ("mask_head.conv3".to_string(), &self.mask_head.conv3),
+            ("mask_head.conv4".to_string(), &self.mask_head.conv4),
+            ("mask_predictor.deconv".to_string(), &self.mask_predictor.deconv),
+            (
+                "mask_predictor.conv_logits".to_string(),
+                &self.mask_predictor.conv_logits,
+            ),
+        ]
+    }
+
     fn train(&mut self) {
         self.training = true;
         self.faster_rcnn.train();

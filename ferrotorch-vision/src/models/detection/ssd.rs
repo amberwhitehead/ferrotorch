@@ -138,6 +138,16 @@ impl<T: Float> Module<T> for L2Norm<T> {
         vec![("weight".to_string(), &self.weight)]
     }
 
+    // Phase 4 (#995): L2Norm has a single learnable `weight` Parameter
+    // and no sub-modules, so it remains a leaf. Override returns an
+    // explicit empty Vec to make the "no children" intent obvious.
+    fn children(&self) -> Vec<&dyn Module<T>> {
+        Vec::new()
+    }
+    fn named_children(&self) -> Vec<(String, &dyn Module<T>)> {
+        Vec::new()
+    }
+
     fn train(&mut self) {
         self.training = true;
     }
@@ -245,6 +255,22 @@ impl<T: Float> Module<T> for ConvBnRelu<T> {
             for (n, p) in bn.named_parameters() {
                 out.push((format!("bn.{n}"), p));
             }
+        }
+        out
+    }
+
+    // Phase 4 (#995): expose direct children mirroring `named_parameters`.
+    fn children(&self) -> Vec<&dyn Module<T>> {
+        let mut out: Vec<&dyn Module<T>> = vec![&self.conv];
+        if let Some(ref bn) = self.bn {
+            out.push(bn);
+        }
+        out
+    }
+    fn named_children(&self) -> Vec<(String, &dyn Module<T>)> {
+        let mut out: Vec<(String, &dyn Module<T>)> = vec![("conv".to_string(), &self.conv)];
+        if let Some(ref bn) = self.bn {
+            out.push(("bn".to_string(), bn));
         }
         out
     }
@@ -1107,6 +1133,58 @@ impl<T: Float> Module<T> for Ssd300<T> {
         }
         for (n, p) in self.head.named_parameters() {
             out.push((format!("head.{n}"), p));
+        }
+        out
+    }
+
+    // Phase 4 (#995): expose direct children mirroring `named_parameters`.
+    // SsdHead is not a `Module<T>` (it has its own `forward(&[Tensor])`
+    // signature), so we project its `cls_heads` / `reg_heads` directly
+    // here under the `head.<...>` paths.
+    fn children(&self) -> Vec<&dyn Module<T>> {
+        let mut out: Vec<&dyn Module<T>> = Vec::new();
+        for f in &self.features_stage1 {
+            out.push(f);
+        }
+        out.push(&self.l2_norm);
+        for f in &self.features_stage2 {
+            out.push(f);
+        }
+        out.push(&self.conv6);
+        out.push(&self.conv7);
+        for block in &self.extra {
+            out.push(&block[0]);
+            out.push(&block[1]);
+        }
+        for h in &self.head.cls_heads {
+            out.push(h);
+        }
+        for h in &self.head.reg_heads {
+            out.push(h);
+        }
+        out
+    }
+
+    fn named_children(&self) -> Vec<(String, &dyn Module<T>)> {
+        let mut out: Vec<(String, &dyn Module<T>)> = Vec::new();
+        for (i, f) in self.features_stage1.iter().enumerate() {
+            out.push((format!("features_stage1.{i}"), f));
+        }
+        out.push(("l2_norm".to_string(), &self.l2_norm));
+        for (i, f) in self.features_stage2.iter().enumerate() {
+            out.push((format!("features_stage2.{i}"), f));
+        }
+        out.push(("conv6".to_string(), &self.conv6));
+        out.push(("conv7".to_string(), &self.conv7));
+        for (i, block) in self.extra.iter().enumerate() {
+            out.push((format!("extra.{i}.0"), &block[0]));
+            out.push((format!("extra.{i}.1"), &block[1]));
+        }
+        for (i, h) in self.head.cls_heads.iter().enumerate() {
+            out.push((format!("head.cls_heads.{i}"), h));
+        }
+        for (i, h) in self.head.reg_heads.iter().enumerate() {
+            out.push((format!("head.reg_heads.{i}"), h));
         }
         out
     }

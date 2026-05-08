@@ -176,6 +176,27 @@ impl<T: Float> Module<T> for SwinBlock<T> {
         params
     }
 
+    // Phase 4 (#995): expose direct children mirroring `named_parameters`.
+    fn children(&self) -> Vec<&dyn Module<T>> {
+        vec![
+            &self.norm1,
+            &self.attn,
+            &self.norm2,
+            &self.mlp_fc1,
+            &self.mlp_fc2,
+        ]
+    }
+
+    fn named_children(&self) -> Vec<(String, &dyn Module<T>)> {
+        vec![
+            ("norm1".to_string(), &self.norm1),
+            ("attn".to_string(), &self.attn),
+            ("norm2".to_string(), &self.norm2),
+            ("mlp.fc1".to_string(), &self.mlp_fc1),
+            ("mlp.fc2".to_string(), &self.mlp_fc2),
+        ]
+    }
+
     fn train(&mut self) {
         self.training = true;
     }
@@ -509,6 +530,42 @@ impl<T: Float> Module<T> for SwinTransformer<T> {
             params.push((format!("head.{name}"), p));
         }
         params
+    }
+
+    // Phase 4 (#995): expose every block + per-stage downsample +
+    // norm/head using the same `stages.<i>.blocks.<j>` /
+    // `stages.<i>.downsample` layout as `named_parameters`. SwinStage
+    // is an internal helper struct (not a `Module`), so we project its
+    // contents directly here.
+    fn children(&self) -> Vec<&dyn Module<T>> {
+        let mut out: Vec<&dyn Module<T>> = vec![&self.patch_embed];
+        for stage in &self.stages {
+            for block in &stage.blocks {
+                out.push(block);
+            }
+            if let Some(ref ds) = stage.downsample {
+                out.push(ds);
+            }
+        }
+        out.push(&self.norm);
+        out.push(&self.head);
+        out
+    }
+
+    fn named_children(&self) -> Vec<(String, &dyn Module<T>)> {
+        let mut out: Vec<(String, &dyn Module<T>)> =
+            vec![("patch_embed".to_string(), &self.patch_embed)];
+        for (i, stage) in self.stages.iter().enumerate() {
+            for (j, block) in stage.blocks.iter().enumerate() {
+                out.push((format!("stages.{i}.blocks.{j}"), block));
+            }
+            if let Some(ref ds) = stage.downsample {
+                out.push((format!("stages.{i}.downsample"), ds));
+            }
+        }
+        out.push(("norm".to_string(), &self.norm));
+        out.push(("head".to_string(), &self.head));
+        out
     }
 
     fn train(&mut self) {

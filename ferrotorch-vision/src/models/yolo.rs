@@ -85,6 +85,21 @@ impl<T: Float> Module<T> for BackboneStage<T> {
         self.conv.named_parameters()
     }
 
+    // Phase 4 (#995): BackboneStage flattens its inner Conv2d's keys
+    // (no prefix), so it is a leaf for path purposes. Still expose
+    // both the conv and the pool as children so a tree walk can
+    // identify them under whatever path the parent gave the stage
+    // (e.g. `backbone.stage1` in Yolo).
+    fn children(&self) -> Vec<&dyn Module<T>> {
+        vec![&self.conv, &self.pool]
+    }
+    fn named_children(&self) -> Vec<(String, &dyn Module<T>)> {
+        vec![
+            ("conv".to_string(), &self.conv),
+            ("pool".to_string(), &self.pool),
+        ]
+    }
+
     fn train(&mut self) {
         self.training = true;
     }
@@ -239,6 +254,28 @@ impl<T: Float> Module<T> for Yolo<T> {
             params.push((format!("head.{name}"), p));
         }
         params
+    }
+
+    // Phase 4 (#995): expose direct children mirroring `named_parameters`.
+    fn children(&self) -> Vec<&dyn Module<T>> {
+        vec![
+            &self.stage1,
+            &self.stage2,
+            &self.stage3,
+            &self.stage4,
+            &self.stage5,
+            &self.head,
+        ]
+    }
+    fn named_children(&self) -> Vec<(String, &dyn Module<T>)> {
+        vec![
+            ("backbone.stage1".to_string(), &self.stage1),
+            ("backbone.stage2".to_string(), &self.stage2),
+            ("backbone.stage3".to_string(), &self.stage3),
+            ("backbone.stage4".to_string(), &self.stage4),
+            ("backbone.stage5".to_string(), &self.stage5),
+            ("head".to_string(), &self.head),
+        ]
     }
 
     fn train(&mut self) {

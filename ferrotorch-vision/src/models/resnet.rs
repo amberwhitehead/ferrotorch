@@ -193,6 +193,37 @@ impl<T: Float> Module<T> for BasicBlock<T> {
         params
     }
 
+    // Phase 4 (#995): expose direct children so the Phase 2 BN-buffer
+    // loader can reach `bn1` / `bn2` / `downsample.1` via
+    // `named_descendants_dyn()`. The torchvision-shaped path layout
+    // (`downsample.{0,1}` for the conv+BN pair) matches `named_parameters`
+    // above so the loader's path-keyed index agrees with the fixture
+    // descriptors. Default `Module::named_children` returns an empty
+    // Vec — without this override every BN running statistic is
+    // silently skipped (Phase 1A fallback).
+    fn children(&self) -> Vec<&dyn Module<T>> {
+        let mut out: Vec<&dyn Module<T>> = vec![&self.conv1, &self.bn1, &self.conv2, &self.bn2];
+        if let Some((ref ds_conv, ref ds_bn)) = self.downsample {
+            out.push(ds_conv);
+            out.push(ds_bn);
+        }
+        out
+    }
+
+    fn named_children(&self) -> Vec<(String, &dyn Module<T>)> {
+        let mut out: Vec<(String, &dyn Module<T>)> = vec![
+            ("conv1".to_string(), &self.conv1),
+            ("bn1".to_string(), &self.bn1),
+            ("conv2".to_string(), &self.conv2),
+            ("bn2".to_string(), &self.bn2),
+        ];
+        if let Some((ref ds_conv, ref ds_bn)) = self.downsample {
+            out.push(("downsample.0".to_string(), ds_conv));
+            out.push(("downsample.1".to_string(), ds_bn));
+        }
+        out
+    }
+
     fn train(&mut self) {
         self.training = true;
         self.bn1.train();
@@ -370,6 +401,41 @@ impl<T: Float> Module<T> for Bottleneck<T> {
             }
         }
         params
+    }
+
+    // Phase 4 (#995): direct-children override mirroring `named_parameters`
+    // above so `named_descendants_dyn()` reaches `bn1` / `bn2` / `bn3` /
+    // `downsample.1` for the BN-buffer loader.
+    fn children(&self) -> Vec<&dyn Module<T>> {
+        let mut out: Vec<&dyn Module<T>> = vec![
+            &self.conv1,
+            &self.bn1,
+            &self.conv2,
+            &self.bn2,
+            &self.conv3,
+            &self.bn3,
+        ];
+        if let Some((ref ds_conv, ref ds_bn)) = self.downsample {
+            out.push(ds_conv);
+            out.push(ds_bn);
+        }
+        out
+    }
+
+    fn named_children(&self) -> Vec<(String, &dyn Module<T>)> {
+        let mut out: Vec<(String, &dyn Module<T>)> = vec![
+            ("conv1".to_string(), &self.conv1),
+            ("bn1".to_string(), &self.bn1),
+            ("conv2".to_string(), &self.conv2),
+            ("bn2".to_string(), &self.bn2),
+            ("conv3".to_string(), &self.conv3),
+            ("bn3".to_string(), &self.bn3),
+        ];
+        if let Some((ref ds_conv, ref ds_bn)) = self.downsample {
+            out.push(("downsample.0".to_string(), ds_conv));
+            out.push(("downsample.1".to_string(), ds_bn));
+        }
+        out
     }
 
     fn train(&mut self) {
@@ -611,6 +677,54 @@ impl<T: Float> Module<T> for ResNet<T> {
             params.push((format!("fc.{name}"), p));
         }
         params
+    }
+
+    // Phase 4 (#995): expose stem + every residual block + head so the
+    // Phase 2 loader's `named_descendants_dyn()` walk reaches every BN
+    // in the network — `bn1` (stem), `layer{i}.{j}.{bn1,bn2,bn3,
+    // downsample.1}` (residual stages). The torchvision-shaped layout
+    // is identical to `named_parameters` above so the loader's
+    // path → module index agrees with the fixture descriptors.
+    fn children(&self) -> Vec<&dyn Module<T>> {
+        let mut out: Vec<&dyn Module<T>> = vec![&self.conv1, &self.bn1, &self.maxpool];
+        for block in &self.layer1 {
+            out.push(block.as_ref());
+        }
+        for block in &self.layer2 {
+            out.push(block.as_ref());
+        }
+        for block in &self.layer3 {
+            out.push(block.as_ref());
+        }
+        for block in &self.layer4 {
+            out.push(block.as_ref());
+        }
+        out.push(&self.avgpool);
+        out.push(&self.fc);
+        out
+    }
+
+    fn named_children(&self) -> Vec<(String, &dyn Module<T>)> {
+        let mut out: Vec<(String, &dyn Module<T>)> = vec![
+            ("conv1".to_string(), &self.conv1),
+            ("bn1".to_string(), &self.bn1),
+            ("maxpool".to_string(), &self.maxpool),
+        ];
+        for (i, block) in self.layer1.iter().enumerate() {
+            out.push((format!("layer1.{i}"), block.as_ref()));
+        }
+        for (i, block) in self.layer2.iter().enumerate() {
+            out.push((format!("layer2.{i}"), block.as_ref()));
+        }
+        for (i, block) in self.layer3.iter().enumerate() {
+            out.push((format!("layer3.{i}"), block.as_ref()));
+        }
+        for (i, block) in self.layer4.iter().enumerate() {
+            out.push((format!("layer4.{i}"), block.as_ref()));
+        }
+        out.push(("avgpool".to_string(), &self.avgpool));
+        out.push(("fc".to_string(), &self.fc));
+        out
     }
 
     fn train(&mut self) {

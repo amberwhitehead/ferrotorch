@@ -294,28 +294,50 @@ def _emit_value_parity_descriptor(
 
 
 def _value_parity_resnet50(fixtures_dir, st_save_file):
-    """torchvision.models.resnet50(weights=None), 1×3×224×224 input."""
+    """torchvision.models.resnet50(weights=ResNet50_Weights.DEFAULT), 1×3×224×224 input.
+
+    Phase 4 (#1001): switched from `weights=None` to the torchvision-default
+    ImageNet-1k pretrained weights (`ResNet50_Weights.DEFAULT` ≡
+    `ResNet50_Weights.IMAGENET1K_V2`). This pulls real BN running statistics
+    onto the fixture (running_mean / running_var no longer 0 / 1), so the
+    ferrotorch-side `resnet50_value_parity` test now exercises the Phase 2
+    BN-buffer loader's setter path end-to-end against pretrained ImageNet
+    weights — the strongest possible proof of architectural parity.
+
+    The download size is roughly 100 MB (resnet50-11ad3fa6.pth or v2 sibling)
+    and is cached by torchvision under `~/.cache/torch/hub/checkpoints/`. If
+    the network is unreachable, torchvision raises and this function MUST
+    fail — silently falling back to `weights=None` would re-introduce
+    failure mode #3 (silent fallback re-introduction), which the Phase 4
+    pre-flight forbids.
+    """
     import torchvision.models as tvm
+    from torchvision.models import ResNet50_Weights
+
     return _emit_value_parity_descriptor(
         fixtures_dir=fixtures_dir,
         st_save_file=st_save_file,
         fixture_id="resnet50_value_parity",
         model_name="resnet50",
-        issue="#983",
-        construction_note="tvm.resnet50(weights=None) under torch.manual_seed(0)",
+        issue="#1001",
+        construction_note=(
+            "tvm.resnet50(weights=ResNet50_Weights.DEFAULT) — torchvision "
+            "ImageNet-1k pretrained weights with non-trivial BN running stats"
+        ),
         weight_seed=0,
         input_seed=1234,
         input_shape=(1, 3, 224, 224),
-        model_factory=lambda: tvm.resnet50(weights=None),
+        model_factory=lambda: tvm.resnet50(weights=ResNet50_Weights.DEFAULT),
         descriptor_note=(
-            "Reference produced via torchvision.models.resnet50(weights=None) "
-            "with deterministic seeded initialisation, run in eval() mode "
-            "with default running_mean=0 / running_var=1 in every BN. "
-            "Comparison runs in eval mode on the ferrotorch side too — both "
-            "frameworks therefore use identical (zero-mean, unit-var) BN "
-            "statistics, removing the need to load BN running buffers in "
-            "Phase 1A. num_batches_tracked is integer-typed so it is "
-            "excluded from the safetensors payload by design."
+            "Reference produced via torchvision.models.resnet50("
+            "weights=ResNet50_Weights.DEFAULT) — pretrained ImageNet-1k "
+            "weights. BN running_mean / running_var carry real statistics "
+            "from training, not construction defaults; the ferrotorch-side "
+            "loader applies them via the Phase 2 BN-buffer setters once the "
+            "Phase 4 named_children sweep (#995) makes every BN module "
+            "reachable from `Module::named_descendants_dyn`. "
+            "num_batches_tracked is integer-typed so it is excluded from "
+            "the safetensors payload by design."
         ),
     )
 

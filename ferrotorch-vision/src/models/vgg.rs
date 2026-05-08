@@ -28,7 +28,16 @@ struct ConvReLU<T: Float> {
 impl<T: Float> ConvReLU<T> {
     fn new(in_channels: usize, out_channels: usize) -> FerrotorchResult<Self> {
         Ok(Self {
-            conv: Conv2d::new(in_channels, out_channels, (3, 3), (1, 1), (1, 1), false)?,
+            // bias=true matches torchvision `vgg11/16` (which uses the
+            // default `bias=True` of `nn.Conv2d`). Phase 4 (#1001)
+            // surfaced the prior bias=false as a structural divergence
+            // — the `vgg11_num_parameters_matches_reference` fixture
+            // expected 128_807_306 params, ferrotorch produced
+            // 128_804_554 (diff 2752 = sum of per-stage conv biases).
+            // The dead-defensive `cascade_skip!(... #860)` branch had
+            // hidden this divergence; cleaning it up surfaced the
+            // real fix needed here.
+            conv: Conv2d::new(in_channels, out_channels, (3, 3), (1, 1), (1, 1), true)?,
             training: true,
         })
     }
@@ -326,6 +335,37 @@ impl<T: Float> Module<T> for VGG<T> {
             }
         }
         params
+    }
+
+    // Phase 4 (#995): expose every `features.<i>` and `classifier.<i>`
+    // entry so a Phase 2-style buffer-loader walk can reach them. VGG
+    // is BN-free in this codebase (the file header above declares so),
+    // so no BN buffers flow through, but the override keeps the
+    // module tree non-empty for future loader work and for the #995
+    // sweep contract (every vision model in `src/models/` must
+    // override `named_children`).
+    fn children(&self) -> Vec<&dyn Module<T>> {
+        let mut out: Vec<&dyn Module<T>> = Vec::new();
+        for layer in &self.features {
+            out.push(layer.as_ref());
+        }
+        out.push(&self.avgpool);
+        for layer in &self.classifier {
+            out.push(layer.as_ref());
+        }
+        out
+    }
+
+    fn named_children(&self) -> Vec<(String, &dyn Module<T>)> {
+        let mut out: Vec<(String, &dyn Module<T>)> = Vec::new();
+        for (i, layer) in self.features.iter().enumerate() {
+            out.push((format!("features.{i}"), layer.as_ref()));
+        }
+        out.push(("avgpool".to_string(), &self.avgpool));
+        for (i, layer) in self.classifier.iter().enumerate() {
+            out.push((format!("classifier.{i}"), layer.as_ref()));
+        }
+        out
     }
 
     fn train(&mut self) {

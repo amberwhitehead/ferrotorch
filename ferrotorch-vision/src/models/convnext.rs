@@ -168,6 +168,20 @@ impl<T: Float> Module<T> for ConvNeXtBlock<T> {
         params
     }
 
+    // Phase 4 (#995): expose direct children mirroring `named_parameters`.
+    fn children(&self) -> Vec<&dyn Module<T>> {
+        vec![&self.dwconv, &self.norm, &self.pwconv1, &self.pwconv2]
+    }
+
+    fn named_children(&self) -> Vec<(String, &dyn Module<T>)> {
+        vec![
+            ("dwconv".to_string(), &self.dwconv),
+            ("norm".to_string(), &self.norm),
+            ("pwconv1".to_string(), &self.pwconv1),
+            ("pwconv2".to_string(), &self.pwconv2),
+        ]
+    }
+
     fn train(&mut self) {
         self.training = true;
     }
@@ -237,6 +251,18 @@ impl<T: Float> Module<T> for Downsample<T> {
             params.push((format!("conv.{name}"), p));
         }
         params
+    }
+
+    // Phase 4 (#995): expose direct children mirroring `named_parameters`.
+    fn children(&self) -> Vec<&dyn Module<T>> {
+        vec![&self.norm, &self.conv]
+    }
+
+    fn named_children(&self) -> Vec<(String, &dyn Module<T>)> {
+        vec![
+            ("norm".to_string(), &self.norm),
+            ("conv".to_string(), &self.conv),
+        ]
     }
 
     fn train(&mut self) {
@@ -456,6 +482,47 @@ impl<T: Float> Module<T> for ConvNeXt<T> {
             params.push((format!("head.fc.{name}"), p));
         }
         params
+    }
+
+    // Phase 4 (#995): expose direct children using the same dotted
+    // path layout as `named_parameters`. ConvNeXt has no BN buffers
+    // so the override does not change loader behaviour for any
+    // existing fixture, but it satisfies the #995 sweep contract
+    // (every vision model overrides `named_children`) and keeps the
+    // module tree introspectable for future work.
+    fn children(&self) -> Vec<&dyn Module<T>> {
+        let mut out: Vec<&dyn Module<T>> = vec![&self.stem_conv, &self.stem_norm];
+        for stage in &self.stages {
+            for block in stage {
+                out.push(block);
+            }
+        }
+        for ds in &self.downsamples {
+            out.push(ds);
+        }
+        out.push(&self.avgpool);
+        out.push(&self.head_norm);
+        out.push(&self.head_fc);
+        out
+    }
+
+    fn named_children(&self) -> Vec<(String, &dyn Module<T>)> {
+        let mut out: Vec<(String, &dyn Module<T>)> = vec![
+            ("stem.conv".to_string(), &self.stem_conv),
+            ("stem.norm".to_string(), &self.stem_norm),
+        ];
+        for (s, stage) in self.stages.iter().enumerate() {
+            for (i, block) in stage.iter().enumerate() {
+                out.push((format!("stages.{s}.{i}"), block));
+            }
+        }
+        for (i, ds) in self.downsamples.iter().enumerate() {
+            out.push((format!("downsample.{i}"), ds));
+        }
+        out.push(("avgpool".to_string(), &self.avgpool));
+        out.push(("head.norm".to_string(), &self.head_norm));
+        out.push(("head.fc".to_string(), &self.head_fc));
+        out
     }
 
     fn train(&mut self) {
