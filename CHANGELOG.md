@@ -7,6 +7,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ## [Unreleased]
 
 ### Changed
+- Audit-Fix Phase 4: xpu null-sink suite (#1015 #1050-#1057) (#1075)
 - Audit-Fix Phase 3: ONNX magic-byte tautologies in serialize crate (#1015 #1041 #1042 #1043 #1044) (#1074)
 - Phase 11: Swin-T shifted-window attention (#998) → 15/15 vision parity (#1013)
 - Add shifted-window attention so Swin-T matches torchvision parameter schema (#998)
@@ -44,6 +45,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - ferrotorch-core: `gelu()` (no-arg) default is now `GeluApproximate::None` (exact erf-based: `x * 0.5 * (1 + erf(x / √2))`), matching `torch.nn.GELU()`'s `approximate='none'` default. Previously the no-arg path defaulted to `GeluApproximate::Sigmoid` (`x * sigmoid(1.702 * x)`), producing ~6e-3 absolute deviation from PyTorch. **Migration**: callers relying on the historical fast-sigmoid default must opt in explicitly via `gelu_with(input, GeluApproximate::Sigmoid)` (LLM/transformer paths in `ferrotorch-llama` etc. will silently get the slower-but-more-precise erf path after upgrade — adjust if performance matters more than parity in your call site). `gelu_with(_, GeluApproximate::Tanh)` (PyTorch's `approximate='tanh'`) and `gelu_with(_, GeluApproximate::None)` are unchanged. The enum discriminant order is unchanged; only the `#[default]` attribute moved (closes #794).
 
 ### Fixed
+- BROKEN xpu: all_op_symbols_resolve is compile-only with zero runtime assertions (conformance_xpu.rs) — should be cfg(test) check, not #[test]; #1015 (#1057)
+- BROKEN xpu: xpu_device_new_errors_without_backend accepts every non-Ok(Ok) outcome (conformance_xpu.rs) — cannot fail under any circumstances; #1015 (#1056)
+- BROKEN xpu: xpu_device_metadata_parity compares two hardcoded literal strings (conformance_xpu.rs) — tautological xpu:0 string compare, real Display never invoked; #1015 (#1055)
+- BROKEN xpu: xpu_matmul_rejects_1d_input_contract is fixture metadata only (conformance_xpu.rs) — actual xpu_matmul never invoked; #1015 (#1054)
+- BROKEN xpu: make_xpu_tensor_errors_without_backend ends in unconditional cascade_skip (conformance_xpu.rs) — no path can reach an assertion; #1015 (#1053)
+- BROKEN xpu: polynomial_ops_api_shape uses null-sink helper (conformance_xpu.rs) — eight calls through assertion-free helper; #1015 (#1052)
+- BROKEN xpu: unary_ops_api_shape uses null-sink helper (conformance_xpu.rs) — ten calls through assertion-free helper; #1015 (#1051)
+- BROKEN xpu: binary_ops_api_shape uses null-sink helper (conformance_xpu.rs) — assert_stub_op_returns_device_unavailable is let _ = op_label; zero assertions; #1015 (#1050)
 - BROKEN serialize: onnx_export_from_program asserts only bytes[0] == 0x08 (conformance_serialize.rs:1725) — magic-byte-only; #1015 (#1044)
 - BROKEN serialize: onnx_export_onnx asserts only bytes[0] == 0x08 (conformance_serialize.rs:1704) — magic-byte-only; #1015 (#1043)
 - BROKEN serialize: onnx_export_ir_graph_to_onnx asserts only bytes[0] == 0x08 (conformance_serialize.rs:1690) — magic-byte-only; #1015 (#1042)
