@@ -889,6 +889,31 @@ def gen_lora_fixtures():
 
         # --- LoRA merge correctness ---
         # After merging, forward through base == pre-merge lora forward.
+        # Also emit the PyTorch-computed pre-merge output so the test can anchor
+        # the pre-merge forward against an external reference (not just the
+        # post_merge == pre_merge self-consistency check).
+        merge_in_features = 4
+        merge_out_features = 3
+        merge_rank = 2
+        merge_alpha = 1.0
+        merge_base_weight = torch.tensor(
+            [[1.0, 2.0, 3.0, 4.0], [5.0, 6.0, 7.0, 8.0], [9.0, 10.0, 11.0, 12.0]],
+            dtype=torch.float32,
+        )
+        merge_base_bias = torch.tensor([0.1, 0.2, 0.3], dtype=torch.float32)
+        merge_lora_a = torch.tensor(
+            [[0.1, 0.2, 0.3, 0.4], [0.5, 0.6, 0.7, 0.8]], dtype=torch.float32
+        )  # [rank, in_features]
+        merge_lora_b = torch.tensor(
+            [[1.0, 0.0], [0.0, 1.0], [0.5, 0.5]], dtype=torch.float32
+        )  # [out_features, rank]
+        merge_x = torch.tensor(
+            [[1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0]], dtype=torch.float32
+        )  # [batch, in_features]
+        merge_scale = merge_alpha / merge_rank
+        merge_w_merged = merge_base_weight + merge_scale * (merge_lora_b @ merge_lora_a)
+        merge_output = merge_x @ merge_w_merged.T + merge_base_bias  # [batch, out_features]
+
         fixtures.append({
             "id": "lora_merge_produces_same_output",
             "module": "lora",
@@ -898,21 +923,27 @@ def gen_lora_fixtures():
                 "Forward via merged base == pre-merge LoRA forward."
             ),
             "inputs": {
-                "in_features": 4,
-                "out_features": 3,
-                "rank": 2,
-                "alpha": 1.0,
-                "base_weight": [[1.0,2.0,3.0,4.0],[5.0,6.0,7.0,8.0],[9.0,10.0,11.0,12.0]],
-                "base_bias": [0.1, 0.2, 0.3],
-                "lora_a": [[0.1,0.2,0.3,0.4],[0.5,0.6,0.7,0.8]],
-                "lora_b": [[1.0,0.0],[0.0,1.0],[0.5,0.5]],
-                "x": [[1.0,0.0,0.0,0.0],[0.0,1.0,0.0,0.0]],
-                "x_shape": [2, 4],
+                "in_features": merge_in_features,
+                "out_features": merge_out_features,
+                "rank": merge_rank,
+                "alpha": merge_alpha,
+                "base_weight": to_list(merge_base_weight),
+                "base_bias": to_list(merge_base_bias),
+                "lora_a": to_list(merge_lora_a),
+                "lora_b": to_list(merge_lora_b),
+                "x": to_list(merge_x),
+                "x_shape": list(merge_x.shape),
             },
             "expected": {
-                "merged_weight_shape": [3, 4],
+                "merged_weight_shape": [merge_out_features, merge_in_features],
+                "expected_output": _round(to_list(merge_output)),
+                "expected_output_shape": list(merge_output.shape),
             },
-            "note": "After merge, base.forward(x) must equal pre-merge lora.forward(x) within 1e-5.",
+            "note": (
+                "After merge, base.forward(x) must equal pre-merge lora.forward(x)"
+                " within 1e-5. expected_output is x @ (W + (alpha/r)*B@A)^T + b,"
+                " computed via PyTorch."
+            ),
         })
 
     else:
@@ -971,8 +1002,16 @@ def gen_lora_fixtures():
                 "x": [[1.0,0.0,0.0,0.0],[0.0,1.0,0.0,0.0]],
                 "x_shape": [2, 4],
             },
-            "expected": {"merged_weight_shape": [3, 4]},
-            "note": "After merge, base.forward(x) must equal pre-merge lora.forward(x) within 1e-5.",
+            "expected": {
+                "merged_weight_shape": [3, 4],
+                # x @ (W + (alpha/r)*B@A)^T + b — pre-computed (torch 2.x, fp32).
+                "expected_output": [[1.15, 5.45, 9.45], [2.2, 6.5, 10.5]],
+                "expected_output_shape": [2, 3],
+            },
+            "note": (
+                "After merge, base.forward(x) must equal pre-merge lora.forward(x)"
+                " within 1e-5. expected_output is the analytic merged forward."
+            ),
         })
 
     return fixtures

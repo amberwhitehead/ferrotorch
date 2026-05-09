@@ -548,35 +548,68 @@ fn standard_attention_matches_reference() {
     }
 }
 
-/// Smoke test: flash_attention and standard_attention agree on same input.
+/// Layer-3 test: flash_attention and standard_attention BOTH match the PyTorch
+/// reference for fixtures where the two ops have compatible shape constraints
+/// (n_q == n_k, d == d_v, causal=false). The agreement claim is anchored to an
+/// external reference rather than mutual self-consistency.
 #[test]
 fn flash_and_standard_attention_agree() {
-    // Build a small input: batch=1, n=8, d=16, causal=false
-    let data: Vec<f32> = (0..128).map(|i| (i as f32) * 0.01 - 0.64).collect();
-    let q = Tensor::<f32>::from_storage(TensorStorage::cpu(data.clone()), vec![1, 8, 16], false)
-        .unwrap();
-    let k = Tensor::<f32>::from_storage(
-        TensorStorage::cpu(data.iter().rev().cloned().collect()),
-        vec![1, 8, 16],
-        false,
-    )
-    .unwrap();
-    let v = Tensor::<f32>::from_storage(
-        TensorStorage::cpu(data.iter().map(|x| x * 0.5).collect()),
-        vec![1, 8, 16],
-        false,
-    )
-    .unwrap();
+    let fixtures = load_fixtures();
 
-    let fa_out = flash_attention::<f32>(&q, &k, &v, false, 4).expect("flash_attention");
-    let sa_out = standard_attention::<f32>(&q, &k, &v, false).expect("standard_attention");
+    // Use flash_attention fixtures whose shapes are also valid for
+    // standard_attention (square QK length, matching d / d_v, non-causal).
+    let agree_fixtures: Vec<_> = fixtures
+        .iter()
+        .filter(|f| {
+            f["op"] == "flash_attention"
+                && extract_str(f, "dtype") == "float32"
+                && !extract_bool(f, "causal")
+                && extract_usize(f, "n_q") == extract_usize(f, "n_k")
+                && extract_usize(f, "d") == extract_usize(f, "d_v")
+        })
+        .collect();
 
-    tol::assert_close(
-        &data_f32(&fa_out),
-        &data_f32(&sa_out),
-        tol::F32_MATMUL,
-        "flash_vs_standard",
+    assert!(
+        !agree_fixtures.is_empty(),
+        "No flash/standard-compatible fixtures found"
     );
+
+    for fix in agree_fixtures {
+        let tag = extract_str(fix, "tag");
+        let batch = extract_usize(fix, "batch");
+        let n = extract_usize(fix, "n_q");
+        let d = extract_usize(fix, "d");
+
+        let q_data = extract_f64_list(fix, "q_data");
+        let k_data = extract_f64_list(fix, "k_data");
+        let v_data = extract_f64_list(fix, "v_data");
+        let expected = extract_f64_list(fix, "expected_output");
+
+        let q = tensor_f32(&q_data, vec![batch, n, d]);
+        let k = tensor_f32(&k_data, vec![batch, n, d]);
+        let v = tensor_f32(&v_data, vec![batch, n, d]);
+
+        let fa_out = flash_attention::<f32>(&q, &k, &v, false, 4)
+            .unwrap_or_else(|e| panic!("[{tag}] flash_attention failed: {e}"));
+        let sa_out = standard_attention::<f32>(&q, &k, &v, false)
+            .unwrap_or_else(|e| panic!("[{tag}] standard_attention failed: {e}"));
+
+        assert_eq!(fa_out.shape(), &[batch, n, d], "[{tag}] flash shape");
+        assert_eq!(sa_out.shape(), &[batch, n, d], "[{tag}] standard shape");
+
+        tol::assert_close(
+            &data_f32(&fa_out),
+            &expected,
+            tol::F32_MATMUL,
+            &format!("{tag}/flash_vs_reference"),
+        );
+        tol::assert_close(
+            &data_f32(&sa_out),
+            &expected,
+            tol::F32_MATMUL,
+            &format!("{tag}/standard_vs_reference"),
+        );
+    }
 }
 
 // ── 3. flex_attention ─────────────────────────────────────────────────────
@@ -1393,7 +1426,7 @@ fn layernorm_backward_matches_reference() {
         let _bias_data = extract_f64_list(fix, "bias_data"); // injected via param_f32 below
         let expected_grad_input = extract_f64_list(fix, "grad_input");
         let expected_grad_weight = extract_f64_list(fix, "grad_weight");
-        let _expected_grad_bias = extract_f64_list(fix, "grad_bias"); // bias grad check cascade-deferred
+        let expected_grad_bias = extract_f64_list(fix, "grad_bias");
 
         let x = Tensor::<f32>::from_storage(
             TensorStorage::cpu(input_data.iter().map(|&v| v as f32).collect()),
@@ -1441,6 +1474,18 @@ fn layernorm_backward_matches_reference() {
             &expected_grad_weight,
             tol::F32_MATMUL,
             &format!("{tag}/grad_weight"),
+        );
+
+        let grad_b = ln
+            .bias
+            .grad()
+            .unwrap_or_else(|e| panic!("[{tag}] bias.grad() lock error: {e}"))
+            .unwrap_or_else(|| panic!("[{tag}] bias has no grad"));
+        tol::assert_close(
+            &data_f32(&grad_b),
+            &expected_grad_bias,
+            tol::F32_MATMUL,
+            &format!("{tag}/grad_bias"),
         );
     }
 }

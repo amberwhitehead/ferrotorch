@@ -1,7 +1,7 @@
 {
   "version": "torch==2.11.0",
   "generated_by": "scripts/regenerate_nn_structural_fixtures.py",
-  "generated_at": "2026-05-07T17:07:39.343698+00:00",
+  "generated_at": "2026-05-09T21:19:53.733334+00:00",
   "description": "Reference fixtures for ferrotorch-nn C9.3 structural+recurrent+extension conformance suite. Covers 10 modules: container, module, parameter, parameter_container, buffer, hooks, rnn, rnn_utils, lora, qat.",
   "fixture_count": 38,
   "fixtures": [
@@ -1118,22 +1118,22 @@
           ]
         ],
         "base_bias": [
-          0.1,
-          0.2,
-          0.3
+          0.10000000149011612,
+          0.20000000298023224,
+          0.30000001192092896
         ],
         "lora_a": [
           [
-            0.1,
-            0.2,
-            0.3,
-            0.4
+            0.10000000149011612,
+            0.20000000298023224,
+            0.30000001192092896,
+            0.4000000059604645
           ],
           [
             0.5,
-            0.6,
-            0.7,
-            0.8
+            0.6000000238418579,
+            0.699999988079071,
+            0.800000011920929
           ]
         ],
         "lora_b": [
@@ -1173,9 +1173,25 @@
         "merged_weight_shape": [
           3,
           4
+        ],
+        "expected_output": [
+          [
+            1.15,
+            5.4499998,
+            9.4499998
+          ],
+          [
+            2.1999998,
+            6.5,
+            10.5
+          ]
+        ],
+        "expected_output_shape": [
+          2,
+          3
         ]
       },
-      "note": "After merge, base.forward(x) must equal pre-merge lora.forward(x) within 1e-5."
+      "note": "After merge, base.forward(x) must equal pre-merge lora.forward(x) within 1e-5. expected_output is x @ (W + (alpha/r)*B@A)^T + b, computed via PyTorch."
     },
     {
       "id": "qat_config_int8_symmetric",

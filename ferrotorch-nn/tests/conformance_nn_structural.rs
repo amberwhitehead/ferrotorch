@@ -1476,10 +1476,17 @@ fn lora_merge_produces_same_output() {
     );
     lora.load_state_dict(&sd, true).unwrap();
 
+    let expected_output = json_to_f32_flat(&fx["expected"]["expected_output"]);
+
     let x =
         Tensor::from_storage(TensorStorage::cpu(x_flat.clone()), x_shape.clone(), false).unwrap();
     let pre_merge = lora.forward(&x).unwrap();
     let pre_data = pre_merge.data().unwrap().to_vec();
+
+    // External-reference anchor: pre-merge LoRA forward must match the
+    // PyTorch-computed merged forward, otherwise the post==pre check below
+    // is self-consistency without a ground truth.
+    assert_close_f32(&pre_data, &expected_output, 1e-5, "lora_merge/pre");
 
     lora.merge().unwrap();
 
