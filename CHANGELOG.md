@@ -7,6 +7,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ## [Unreleased]
 
 ### Changed
+- Audit-Fix Phase 6: jit zero-input shape-only tests (#1015 #1034 #1035) (#1078)
 - Audit-Fix Phase 5: train assertion-free stubs (#1015 #1030-#1033) (#1077)
 - Audit-Fix Phase 4: xpu null-sink suite (#1015 #1050-#1057) (#1075)
 - Audit-Fix Phase 3: ONNX magic-byte tautologies in serialize crate (#1015 #1041 #1042 #1043 #1044) (#1074)
@@ -46,6 +47,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - ferrotorch-core: `gelu()` (no-arg) default is now `GeluApproximate::None` (exact erf-based: `x * 0.5 * (1 + erf(x / √2))`), matching `torch.nn.GELU()`'s `approximate='none'` default. Previously the no-arg path defaulted to `GeluApproximate::Sigmoid` (`x * sigmoid(1.702 * x)`), producing ~6e-3 absolute deviation from PyTorch. **Migration**: callers relying on the historical fast-sigmoid default must opt in explicitly via `gelu_with(input, GeluApproximate::Sigmoid)` (LLM/transformer paths in `ferrotorch-llama` etc. will silently get the slower-but-more-precise erf path after upgrade — adjust if performance matters more than parity in your call site). `gelu_with(_, GeluApproximate::Tanh)` (PyTorch's `approximate='tanh'`) and `gelu_with(_, GeluApproximate::None)` are unchanged. The enum discriminant order is unchanged; only the `#[default]` attribute moved (closes #794).
 
 ### Fixed
+- BROKEN jit: run_unchecked_executes_relu_graph zeros input + shape-only (conformance_jit_export.rs:431) — same trap as run_with_guards; #1015 (#1035)
+- BROKEN jit: run_with_guards_runs_valid_input zeros input + shape-only (conformance_jit_export.rs:414) — relu(0)=0 regardless of kernel correctness; #1015 (#1034)
 - BROKEN train: grad_accum_mean_loss doesn't exercise n_accumulate (conformance_train.rs:1165) — tests LossMetric::compute, not gradient accumulation plumbing; #1015 (#1033)
 - BROKEN train: tensorboard_callback_new is assertion-free constructor (conformance_train.rs:1430) — passes if constructor doesn't panic; #1015 (#1032)
 - BROKEN train: tensorboard_writer_add_scalars only checks is_ok (conformance_train.rs:1414) — no assertion that file was written or content is meaningful; #1015 (#1031)
