@@ -55,6 +55,7 @@
 
 use std::collections::HashMap;
 
+use ferrotorch_core::storage::TensorStorage;
 use ferrotorch_core::tensor::Tensor;
 use ferrotorch_jit::autotune::{AutotuneCandidate, AutotuneKey, Autotuner};
 use ferrotorch_jit::codegen::InterpreterBackend;
@@ -413,11 +414,44 @@ fn check_inputs_rejects_zero_dynamic_dim() {
 #[test]
 fn run_with_guards_runs_valid_input() {
     let program = dynamic_batch_program();
-    let x: Tensor<f32> = ferrotorch_core::zeros(&[8, 10]).unwrap();
+    // Mixed-sign input so that relu's clamp-at-zero behavior is observable:
+    // a stub returning zeros(&[8, 10]) of the right shape would no longer pass.
+    // i ∈ 0..80 → values span -40.0..=39.0, guaranteeing both signs.
+    let data: Vec<f32> = (0..80).map(|i| (i as f32) - 40.0).collect();
+    let x: Tensor<f32> =
+        Tensor::from_storage(TensorStorage::cpu(data.clone()), vec![8, 10], false).unwrap();
     let out = program
         .run_with_guards(&[x])
         .expect("run_with_guards failed");
     assert_eq!(out.shape(), &[8, 10]);
+
+    // Elementwise relu verification: out[i] == max(0.0, data[i]).
+    let out_slice = out.data().expect("output data on CPU");
+    assert_eq!(out_slice.len(), data.len());
+    for (i, (&inp, &got)) in data.iter().zip(out_slice.iter()).enumerate() {
+        let expected = inp.max(0.0);
+        assert_eq!(
+            got, expected,
+            "relu mismatch at idx {i}: input={inp}, got={got}, expected={expected}"
+        );
+    }
+
+    // Sabotage probes: input must contain a negative, output must contain
+    // both an exact 0.0 (clamp happened) and a strictly positive value
+    // (pass-through happened). A shape-only stub returning a fresh zeros
+    // tensor would fail the "at least one positive output" check.
+    assert!(
+        data.iter().any(|&v| v < 0.0),
+        "test setup invariant: input must contain at least one negative value"
+    );
+    assert!(
+        out_slice.contains(&0.0),
+        "expected at least one clamped-to-zero output (relu of negative input)"
+    );
+    assert!(
+        out_slice.iter().any(|&v| v > 0.0),
+        "expected at least one strictly positive output (relu pass-through)"
+    );
 }
 
 #[test]
@@ -429,11 +463,44 @@ fn run_with_guards_rejects_bad_input_without_running_graph() {
 
 #[test]
 fn run_unchecked_executes_relu_graph() {
-    // ExportedProgram::run bypasses guards — still must return correct shape.
+    // ExportedProgram::run bypasses guards — still must return correct shape
+    // AND correct relu values. Mixed-sign input ensures a stub returning a
+    // fresh zeros(&[4, 10]) of the right shape would fail this test.
+    // i ∈ 0..40 → values span -20.0..=19.0, guaranteeing both signs.
     let program = all_static_program();
-    let x: Tensor<f32> = ferrotorch_core::zeros(&[4, 10]).unwrap();
+    let data: Vec<f32> = (0..40).map(|i| (i as f32) - 20.0).collect();
+    let x: Tensor<f32> =
+        Tensor::from_storage(TensorStorage::cpu(data.clone()), vec![4, 10], false).unwrap();
     let out = program.run(&[x]).expect("run failed");
     assert_eq!(out.shape(), &[4, 10]);
+
+    // Elementwise relu verification: out[i] == max(0.0, data[i]).
+    let out_slice = out.data().expect("output data on CPU");
+    assert_eq!(out_slice.len(), data.len());
+    for (i, (&inp, &got)) in data.iter().zip(out_slice.iter()).enumerate() {
+        let expected = inp.max(0.0);
+        assert_eq!(
+            got, expected,
+            "relu mismatch at idx {i}: input={inp}, got={got}, expected={expected}"
+        );
+    }
+
+    // Sabotage probes: input must contain a negative, output must contain
+    // both an exact 0.0 (clamp happened) and a strictly positive value
+    // (pass-through happened). A shape-only stub returning a fresh zeros
+    // tensor would fail the "at least one positive output" check.
+    assert!(
+        data.iter().any(|&v| v < 0.0),
+        "test setup invariant: input must contain at least one negative value"
+    );
+    assert!(
+        out_slice.contains(&0.0),
+        "expected at least one clamped-to-zero output (relu of negative input)"
+    );
+    assert!(
+        out_slice.iter().any(|&v| v > 0.0),
+        "expected at least one strictly positive output (relu pass-through)"
+    );
 }
 
 // ---------------------------------------------------------------------------
