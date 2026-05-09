@@ -5531,8 +5531,15 @@ mod value_parity_pipeline {
         state_remap: None,
     };
 
+    // Phase 11 (#998 / #1013): the ferrotorch swin.rs rebuild lands the
+    // torchvision-shaped ShiftedWindowAttention primitive (qkv fused
+    // Linear, proj, learned relative_position_bias_table, precomputed
+    // relative_position_index, cyclic shift via roll, attention-mask
+    // construction). named_parameters() now matches torchvision's
+    // swin_t state-dict 1:1 — verified by
+    // tests/probe_swin_named_params_vs_torchvision.rs. The 4
+    // pre-Phase-11 #[ignore = "#998 …"] markers are removed here.
     #[test]
-    #[ignore = "#998 Swin-T uses standard global attention (not shifted-window) — named_parameters cannot match torchvision swin_t state_dict keys; #996 permute-pattern CPU-pull bug is fixed but architectural divergence remains"]
     fn swin_t_value_parity() {
         run_value_parity_test(
             SWIN_T_PROBE.fixture_id,
@@ -5543,19 +5550,16 @@ mod value_parity_pipeline {
     }
 
     #[test]
-    #[ignore = "#998 Swin-T global-vs-shifted-window attention divergence"]
     fn swin_t_loader_rejects_unmapped_torchvision_key() {
         probe_loader_rejects_unmapped_torchvision_key(&SWIN_T_PROBE);
     }
 
     #[test]
-    #[ignore = "#998 Swin-T global-vs-shifted-window attention divergence"]
     fn swin_t_loader_rejects_missing_ferrotorch_param() {
         probe_loader_rejects_missing_ferrotorch_param(&SWIN_T_PROBE);
     }
 
     #[test]
-    #[ignore = "#998 Swin-T global-vs-shifted-window attention divergence"]
     fn swin_t_loader_rejects_shape_mismatch() {
         probe_loader_rejects_shape_mismatch(&SWIN_T_PROBE);
     }
