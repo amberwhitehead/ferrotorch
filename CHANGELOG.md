@@ -43,6 +43,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - ferrotorch-core: `gelu()` (no-arg) default is now `GeluApproximate::None` (exact erf-based: `x * 0.5 * (1 + erf(x / √2))`), matching `torch.nn.GELU()`'s `approximate='none'` default. Previously the no-arg path defaulted to `GeluApproximate::Sigmoid` (`x * sigmoid(1.702 * x)`), producing ~6e-3 absolute deviation from PyTorch. **Migration**: callers relying on the historical fast-sigmoid default must opt in explicitly via `gelu_with(input, GeluApproximate::Sigmoid)` (LLM/transformer paths in `ferrotorch-llama` etc. will silently get the slower-but-more-precise erf path after upgrade — adjust if performance matters more than parity in your call site). `gelu_with(_, GeluApproximate::Tanh)` (PyTorch's `approximate='tanh'`) and `gelu_with(_, GeluApproximate::None)` are unchanged. The enum discriminant order is unchanged; only the `#[default]` attribute moved (closes #794).
 
 ### Fixed
+- BROKEN ml: fowlkes_mallows_score_perfect_is_one tautological perfect-fixture (conformance_ml_metrics.rs) — identical labels, expected=1.0; #1015 (#1068)
+- BROKEN ml: v_measure_score_perfect_is_one tautological perfect-fixture (conformance_ml_metrics.rs) — identical labels, expected=1.0; #1015 (#1067)
+- BROKEN ml: completeness_score_perfect_is_one tautological perfect-fixture (conformance_ml_metrics.rs) — identical labels, expected=1.0; #1015 (#1066)
+- BROKEN ml: homogeneity_score_perfect_is_one tautological perfect-fixture (conformance_ml_metrics.rs) — identical labels, expected=1.0; #1015 (#1065)
+- BROKEN ml: adjusted_mutual_info_score_matches_sklearn tautological perfect-fixture (conformance_ml_metrics.rs) — labels_true == labels_pred, expected=1.0; #1015 (#1064)
+- BROKEN ml: normalized_mutual_info_score_perfect_is_one tautological (conformance_ml_metrics.rs) — labels_true == labels_pred fixture, expected=1.0; stub returning 1.0 for identical inputs passes; #1015 (#1063)
 - BROKEN nn: lazy_norm_lazy_batch_norm_1d_matches_pytorch elides running_mean/var/num_features (conformance_nn_norm_activation_loss.rs:1679) — running stats updated by training fwd never checked; #1015 (#1027)
 - BROKEN nn: norm_batch_norm_3d_matches_pytorch elides running_mean/var (conformance_nn_norm_activation_loss.rs:379) — same elision pattern; #1015 (#1026)
 - BROKEN nn: norm_batch_norm_2d_matches_pytorch elides running_mean/var (conformance_nn_norm_activation_loss.rs:331) — same elision pattern; #1015 (#1025)
