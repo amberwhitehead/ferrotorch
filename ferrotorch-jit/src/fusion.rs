@@ -2,9 +2,15 @@
 //! kernel generation.
 //!
 //! The fusion engine intercepts tensor operations, buffers sequences of
-//! elementwise ops, and executes them as a single fused operation -- either on
-//! the CPU via [`FusedChain::execute_cpu`] or on the GPU via a dynamically
-//! generated PTX kernel ([`FusedChain::generate_ptx`]).
+//! elementwise ops, and executes them as a single fused operation on the CPU
+//! via [`FusedChain::execute_cpu`]. A PTX code generator
+//! ([`FusedChain::generate_ptx`]) is also provided, but no GPU runtime
+//! executor is wired through `ferrotorch-jit` today; tensor-level
+//! [`apply_fused`] therefore returns
+//! [`FerrotorchError::NotImplementedOnCuda`](ferrotorch_core::error::FerrotorchError::NotImplementedOnCuda)
+//! on CUDA inputs. Routing CUDA inputs through the generated PTX kernel is
+//! tracked in #1138 (workspace-level `ferrotorch-jit` ↔ `ferrotorch-gpu`
+//! integration).
 //!
 //! # Thread-local fusion context
 //!
@@ -1072,13 +1078,35 @@ pub fn estimate_matmul_dims(
 // Tensor-level fusion helper
 // ---------------------------------------------------------------------------
 
-/// Apply a [`FusedChain`] to a tensor, producing a new tensor on the same
-/// device with the same shape.
+/// Apply a [`FusedChain`] to a CPU tensor, producing a new CPU tensor with
+/// the same shape.
 ///
-/// Currently executes on the CPU. When a CUDA device is available the chain
-/// could be dispatched via the PTX kernel returned by
-/// [`FusedChain::generate_ptx`].
+/// # CPU-only
+///
+/// On CUDA inputs this returns
+/// [`FerrotorchError::NotImplementedOnCuda`]. The
+/// [`FusedChain::generate_ptx`] code generator exists today but no runtime
+/// executor is wired through `ferrotorch-jit`. Routing CUDA inputs through
+/// the PTX kernel is tracked in #1138 (workspace-level
+/// `ferrotorch-jit` ↔ `ferrotorch-gpu` integration).
+///
+/// # Errors
+///
+/// - [`FerrotorchError::NotImplementedOnCuda`]: input is on a CUDA device.
+/// - Propagates any error from [`FusedChain::execute_cpu`] or
+///   [`Tensor::from_storage`] (including the `GpuTensorNotAccessible` /
+///   `InvalidArgument` errors `Tensor::data` may raise on non-CPU storage
+///   variants such as cubecl or non-contiguous tensors).
+///
+/// [`FerrotorchError::NotImplementedOnCuda`]: ferrotorch_core::error::FerrotorchError::NotImplementedOnCuda
 pub fn apply_fused<T: Float>(input: &Tensor<T>, chain: &FusedChain) -> FerrotorchResult<Tensor<T>> {
+    if input.is_cuda() {
+        return Err(
+            ferrotorch_core::error::FerrotorchError::NotImplementedOnCuda {
+                op: "apply_fused (FusedChain PTX runtime executor not yet wired; tracked in #1138)",
+            },
+        );
+    }
     let data = input.data()?;
     let result = chain.execute_cpu(data)?;
     Tensor::from_storage(TensorStorage::cpu(result), input.shape().to_vec(), false)
@@ -1381,5 +1409,94 @@ mod tests {
         assert_eq!(format!("{}", FusedOp::Relu), "relu");
         assert_eq!(format!("{}", FusedOp::ScalarAdd(1.5)), "scalar_add(1.5)");
         assert_eq!(format!("{}", FusedOp::Pow(2.0)), "pow(2)");
+    }
+
+    // -- apply_fused doc-drift + CUDA-error guards (Pass 5.B.4 / #1106) -------
+
+    /// Mechanical doc-drift guard for [`apply_fused`].
+    ///
+    /// The pre-Pass-5.B.4 doc claimed `apply_fused` produced "a new tensor on
+    /// the same device" and that "When a CUDA device is available the chain
+    /// could be dispatched via the PTX kernel". Both claims were false:
+    /// `Tensor::data()` Errs on CUDA, so the function never produced a
+    /// CUDA output, and no runtime PTX executor is wired (see #1138).
+    ///
+    /// This test reads the source of `fusion.rs` and asserts the
+    /// `apply_fused` docstring no longer contains either misleading phrase.
+    /// Locating the span by anchoring on the `pub fn apply_fused` signature
+    /// keeps the guard from triggering on this very test's own doc comment.
+    #[test]
+    fn apply_fused_doc_does_not_promise_same_device() {
+        let src = include_str!("fusion.rs");
+        let sig_idx = src
+            .find("pub fn apply_fused<")
+            .expect("apply_fused signature must exist in fusion.rs");
+        // Walk backward from the signature to the start of its doc block.
+        let prelude = &src[..sig_idx];
+        let doc_start = prelude.rfind("\n\n").map_or(0, |i| i + 2);
+        let doc_block = &prelude[doc_start..];
+        assert!(
+            !doc_block.contains("same device"),
+            "apply_fused doc must not claim 'same device'; doc was:\n{doc_block}"
+        );
+        assert!(
+            !doc_block.contains("could be dispatched"),
+            "apply_fused doc must not claim PTX 'could be dispatched'; doc was:\n{doc_block}"
+        );
+        // Positive guard: the doc must reference the follow-up issue tracking
+        // the unwired PTX runtime executor.
+        assert!(
+            doc_block.contains("#1138"),
+            "apply_fused doc must cite follow-up #1138; doc was:\n{doc_block}"
+        );
+    }
+
+    /// Discriminating test for the [`apply_fused`] CUDA guard.
+    ///
+    /// On a CUDA-having runtime, constructing a CUDA tensor and calling
+    /// `apply_fused` must return
+    /// `Err(FerrotorchError::NotImplementedOnCuda { op })` where `op`
+    /// references the follow-up issue (#1138).
+    ///
+    /// # CUDA-runtime gap (honest underclaim)
+    ///
+    /// This Linux WSL2 development environment does not expose a CUDA
+    /// device. The test is gated on `Tensor::cuda()` succeeding; on a
+    /// CPU-only host the call returns `Err(DeviceUnavailable)` and the
+    /// test exits early (compiles + links, but does not exercise the
+    /// guarded branch). The doc-drift test above is therefore the
+    /// load-bearing Linux-runnable discriminator for #1106; this test
+    /// becomes load-bearing on a CUDA-having CI runner.
+    #[test]
+    fn apply_fused_errs_on_cuda_input_with_clear_message() {
+        let storage = TensorStorage::cpu(vec![1.0f32, 2.0, 3.0, 4.0]);
+        let cpu_tensor = Tensor::from_storage(storage, vec![4], false).unwrap();
+        // Try to move onto CUDA. If no CUDA runtime is available this
+        // returns Err(DeviceUnavailable) — exit early per the gap noted
+        // in the doc above.
+        let cuda_tensor = match cpu_tensor.cuda() {
+            Ok(t) => t,
+            Err(_) => return,
+        };
+
+        let mut chain = FusedChain::new();
+        chain.push(FusedOp::Relu);
+
+        let result = apply_fused(&cuda_tensor, &chain);
+        match result {
+            Err(ferrotorch_core::error::FerrotorchError::NotImplementedOnCuda { op }) => {
+                assert!(
+                    op.contains("apply_fused"),
+                    "error op must name apply_fused; got: {op}"
+                );
+                assert!(
+                    op.contains("#1138"),
+                    "error op must cite follow-up issue #1138; got: {op}"
+                );
+            }
+            other => panic!(
+                "expected NotImplementedOnCuda for CUDA input to apply_fused, got {other:?}"
+            ),
+        }
     }
 }
