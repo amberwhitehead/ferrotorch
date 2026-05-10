@@ -7,6 +7,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ## [Unreleased]
 
 ### Changed
+- Audit-Fix Phase 10: jit + jit-script cluster (#1015 #1036-#1039) (#1084)
 - Audit-Fix Phase 9: cubecl cluster (#1015 #1045-#1049) (#1082)
 - Audit-Fix Phase 8: nn cluster (#1015 #1021 #1022 #1023) (#1081)
 - Audit-Fix Phase 7: core BROKENs (#1015 #1016-#1020) (#1079)
@@ -50,6 +51,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - ferrotorch-core: `gelu()` (no-arg) default is now `GeluApproximate::None` (exact erf-based: `x * 0.5 * (1 + erf(x / √2))`), matching `torch.nn.GELU()`'s `approximate='none'` default. Previously the no-arg path defaulted to `GeluApproximate::Sigmoid` (`x * sigmoid(1.702 * x)`), producing ~6e-3 absolute deviation from PyTorch. **Migration**: callers relying on the historical fast-sigmoid default must opt in explicitly via `gelu_with(input, GeluApproximate::Sigmoid)` (LLM/transformer paths in `ferrotorch-llama` etc. will silently get the slower-but-more-precise erf path after upgrade — adjust if performance matters more than parity in your call site). `gelu_with(_, GeluApproximate::Tanh)` (PyTorch's `approximate='tanh'`) and `gelu_with(_, GeluApproximate::None)` are unchanged. The enum discriminant order is unchanged; only the `#[default]` attribute moved (closes #794).
 
 ### Fixed
+- BROKEN jit-script: script_error_cases_are_cascade_skipped_in_fixtures is fixture metadata check (conformance_jit_script.rs:401) — never invokes the macro, only checks JSON strings; #1015 (#1039)
+- BROKEN jit: aot_graph_pair_structure structure-only, no numeric check (conformance_jit_interpreter.rs:1202) — wrong gradients in backward graph would pass; #1015 (#1038)
+- BROKEN jit: autotuner_result_winner_time_is_nonzero_or_zero is assertion-free (conformance_jit_export.rs:913) — both return values discarded with let _; #1015 (#1037)
+- BROKEN jit: export_single_input_produces_program asserts node_count >= 1 + shape (conformance_jit_export.rs:475) — graph with bookkeeping Output node only would pass; #1015 (#1036)
 - BROKEN cubecl: portable_matmul_inner_dim_mismatch_returns_error guarded by try_wgpu_runtime (conformance_cubecl.rs) — same gate issue as portable_add; #1015 (#1049)
 - BROKEN cubecl: portable_add_shape_mismatch_returns_error guarded by try_wgpu_runtime (conformance_cubecl.rs) — CPU-side shape validation never tested on no-GPU CI; #1015 (#1048)
 - BROKEN cubecl: cube_device_ordinal_via_qualified_path discards return value (conformance_cubecl.rs) — let _ = CubeDevice::ordinal(&dev) is assertion-free; #1015 (#1047)
