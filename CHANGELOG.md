@@ -7,6 +7,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ## [Unreleased]
 
 ### Changed
+- Hardware testing: exercise cascade_skip'd CUDA paths on RTX 3090 (#1095)
 - Persist audit-fix series lessons to MEMORY.md (#1094)
 - Bump workspace to v0.5.1 + cargo fmt (#1093)
 - Audit-Fix Phase 16: 4 ergonomic follow-ups (#1072 #1076 #1083 #1087) (#1092)

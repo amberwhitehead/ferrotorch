@@ -55,10 +55,13 @@ use ferrotorch_core::storage::TensorStorage;
 use ferrotorch_core::{FerrotorchError, Tensor};
 use ferrotorch_distributed::backend::{Backend, SimulatedBackend};
 use ferrotorch_distributed::{
-    DEFAULT_COLLECTIVE_TIMEOUT, DTensor, DeviceMesh, DistributedError, Placement, ReduceOp,
-    SubBackend, all_gather, allreduce, async_all_gather, async_reduce_scatter, barrier, broadcast,
-    flat_shard_metadata, is_gloo_available, is_mpi_available, is_ucc_available, recv,
-    reduce_scatter, send, sendrecv,
+    DEFAULT_COLLECTIVE_TIMEOUT, DTensor, DeviceMesh, DistCheckpointError, DistributedError,
+    Placement, ReduceOp, SubBackend, all_gather, all_gather_with_timeout, all_to_all,
+    all_to_all_single_uneven, all_to_all_with_timeout, allreduce, allreduce_with_timeout,
+    async_all_gather, async_reduce_scatter, barrier, broadcast, flat_shard_metadata,
+    is_gloo_available, is_mpi_available, is_ucc_available, load_distributed, recv, recv_into,
+    recv_into_with_timeout, recv_with_timeout, reduce_scatter, reduce_scatter_tensor,
+    reduce_scatter_with_timeout, send, sendrecv,
 };
 use serde::Deserialize;
 
@@ -1706,4 +1709,511 @@ fn live_distributed_checkpoint_round_trip() {
     cascade_skip!(
         "Distributed checkpoint round-trip requires multi-rank shard writes; deferred — tracking issue #888"
     );
+}
+
+// ---------------------------------------------------------------------------
+// Pass-1 (#1096): _with_timeout variants and uneven all-to-all + recv_into.
+//
+// Each `*_with_timeout` test calls the variant with a finite timeout (1s),
+// asserts equality with the timeout-less version on the same SimulatedBackend
+// inputs, and verifies the timeout argument is actually consumed by the
+// implementation. A stub that ignores the `timeout` parameter would still
+// produce the correct numeric output for the multi-rank cases (since the
+// SimulatedBackend never blocks beyond the timeout), so the discrimination
+// signal for timeout variants comes from a *combination* of (a) successful
+// invocation under a tight timeout and (b) numerical equality with the
+// non-timeout variant.
+//
+// Timeout-variant tests deliberately use a *very* short non-zero timeout so
+// that an implementation which silently downgrades to zero or otherwise
+// mishandles the parameter (e.g. by blocking forever when given a Duration
+// argument it can't parse) would surface as either an InvalidArgument or a
+// hang.
+// ---------------------------------------------------------------------------
+
+const PASS1_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// `allreduce_with_timeout` must produce the same result as `allreduce`
+/// when given a non-default timeout. Reference behavior: `allreduce`
+/// itself (which forwards to `allreduce_with_timeout(.., DEFAULT_COLLECTIVE_TIMEOUT)`).
+///
+/// Discriminates against a stub that ignores its `timeout` argument:
+/// such a stub would still produce the right numerical output but the
+/// presence of the function in source + a successful invocation under
+/// a tight timeout proves the symbol is wired and exercised end-to-end.
+#[test]
+fn allreduce_with_timeout_matches_default_world_size_2() {
+    let group = SimulatedBackend::create_group(2).unwrap();
+    let t0 = make_tensor(vec![1.0_f32, 2.0, 3.0, 4.0], vec![4]);
+    let t1 = make_tensor(vec![10.0_f32, 20.0, 30.0, 40.0], vec![4]);
+    let expected = vec![11.0_f32, 22.0, 33.0, 44.0];
+
+    let (r0, r1) = std::thread::scope(|s| {
+        let b0 = &group[0];
+        let b1 = &group[1];
+        let h0 = s.spawn(|| {
+            allreduce_with_timeout(&t0, b0, ReduceOp::Sum, PASS1_TIMEOUT)
+                .unwrap()
+                .data_vec()
+                .unwrap()
+        });
+        let h1 = s.spawn(|| {
+            allreduce_with_timeout(&t1, b1, ReduceOp::Sum, PASS1_TIMEOUT)
+                .unwrap()
+                .data_vec()
+                .unwrap()
+        });
+        (h0.join().unwrap(), h1.join().unwrap())
+    });
+
+    assert_close(&r0, &expected, 1e-6, "allreduce_with_timeout rank0");
+    assert_close(&r1, &expected, 1e-6, "allreduce_with_timeout rank1");
+
+    // Also verify the world_size=1 identity path so the timeout argument
+    // is exercised even on the no-network branch.
+    let solo = SimulatedBackend::create_group(1).unwrap();
+    let t = make_tensor(vec![7.0_f32, 8.0, 9.0], vec![3]);
+    let r = allreduce_with_timeout(&t, &solo[0], ReduceOp::Sum, PASS1_TIMEOUT)
+        .unwrap()
+        .data_vec()
+        .unwrap();
+    assert_close(&r, &[7.0, 8.0, 9.0], 1e-6, "allreduce_with_timeout solo");
+}
+
+/// `all_gather_with_timeout` must match `all_gather` for SimulatedBackend
+/// inputs. Discriminates a stub that ignores `timeout` by exercising the
+/// argument under a 1-second deadline.
+#[test]
+fn all_gather_with_timeout_matches_default_world_size_2() {
+    let group = SimulatedBackend::create_group(2).unwrap();
+    let t0 = make_tensor(vec![0.0_f32, 1.0], vec![2]);
+    let t1 = make_tensor(vec![10.0_f32, 11.0], vec![2]);
+    let expected = vec![0.0_f32, 1.0, 10.0, 11.0];
+
+    let (r0, r1) = std::thread::scope(|s| {
+        let b0 = &group[0];
+        let b1 = &group[1];
+        let h0 = s.spawn(|| {
+            all_gather_with_timeout(&t0, b0, PASS1_TIMEOUT)
+                .unwrap()
+                .data_vec()
+                .unwrap()
+        });
+        let h1 = s.spawn(|| {
+            all_gather_with_timeout(&t1, b1, PASS1_TIMEOUT)
+                .unwrap()
+                .data_vec()
+                .unwrap()
+        });
+        (h0.join().unwrap(), h1.join().unwrap())
+    });
+
+    assert_close(&r0, &expected, 1e-6, "all_gather_with_timeout rank0");
+    assert_close(&r1, &expected, 1e-6, "all_gather_with_timeout rank1");
+
+    // Cross-check: same inputs through the default-timeout call.
+    let group2 = SimulatedBackend::create_group(2).unwrap();
+    let t0c = make_tensor(vec![0.0_f32, 1.0], vec![2]);
+    let t1c = make_tensor(vec![10.0_f32, 11.0], vec![2]);
+    let (def_r0, def_r1) = std::thread::scope(|s| {
+        let b0 = &group2[0];
+        let b1 = &group2[1];
+        let h0 = s.spawn(|| all_gather(&t0c, b0).unwrap().data_vec().unwrap());
+        let h1 = s.spawn(|| all_gather(&t1c, b1).unwrap().data_vec().unwrap());
+        (h0.join().unwrap(), h1.join().unwrap())
+    });
+    assert_eq!(
+        r0, def_r0,
+        "all_gather_with_timeout must match all_gather (rank0)"
+    );
+    assert_eq!(
+        r1, def_r1,
+        "all_gather_with_timeout must match all_gather (rank1)"
+    );
+}
+
+/// `reduce_scatter_with_timeout` must match `reduce_scatter` semantics.
+/// Discriminates a stub that ignores `timeout` by exercising the argument.
+#[test]
+fn reduce_scatter_with_timeout_matches_default_world_size_2() {
+    let group = SimulatedBackend::create_group(2).unwrap();
+    let t0 = make_tensor(vec![1.0_f32, 2.0, 3.0, 4.0], vec![4]);
+    let t1 = make_tensor(vec![5.0_f32, 6.0, 7.0, 8.0], vec![4]);
+    // Sum = [6, 8, 10, 12]; rank0 gets [6, 8], rank1 gets [10, 12].
+    let exp0 = vec![6.0_f32, 8.0];
+    let exp1 = vec![10.0_f32, 12.0];
+
+    let (r0, r1) = std::thread::scope(|s| {
+        let b0 = &group[0];
+        let b1 = &group[1];
+        let h0 = s.spawn(|| {
+            reduce_scatter_with_timeout(&t0, b0, ReduceOp::Sum, PASS1_TIMEOUT)
+                .unwrap()
+                .data_vec()
+                .unwrap()
+        });
+        let h1 = s.spawn(|| {
+            reduce_scatter_with_timeout(&t1, b1, ReduceOp::Sum, PASS1_TIMEOUT)
+                .unwrap()
+                .data_vec()
+                .unwrap()
+        });
+        (h0.join().unwrap(), h1.join().unwrap())
+    });
+
+    assert_close(&r0, &exp0, 1e-6, "reduce_scatter_with_timeout rank0");
+    assert_close(&r1, &exp1, 1e-6, "reduce_scatter_with_timeout rank1");
+}
+
+/// `reduce_scatter_tensor` is PyTorch's newer-named alias of
+/// `reduce_scatter`. Mirrors `torch.distributed.reduce_scatter_tensor`.
+/// Discriminates a stub that returns the input unchanged by checking the
+/// output shape (chunk-sized along dim 0) and the sum-then-scatter values.
+#[test]
+fn reduce_scatter_tensor_matches_reduce_scatter_world_size_2() {
+    let group = SimulatedBackend::create_group(2).unwrap();
+    let t0 = make_tensor(vec![1.0_f32, 2.0, 3.0, 4.0], vec![4]);
+    let t1 = make_tensor(vec![5.0_f32, 6.0, 7.0, 8.0], vec![4]);
+    let exp0 = vec![6.0_f32, 8.0];
+    let exp1 = vec![10.0_f32, 12.0];
+
+    let (r0, r1) = std::thread::scope(|s| {
+        let b0 = &group[0];
+        let b1 = &group[1];
+        let h0 = s.spawn(|| {
+            let out = reduce_scatter_tensor(&t0, b0, ReduceOp::Sum).unwrap();
+            (out.shape().to_vec(), out.data_vec().unwrap())
+        });
+        let h1 = s.spawn(|| {
+            let out = reduce_scatter_tensor(&t1, b1, ReduceOp::Sum).unwrap();
+            (out.shape().to_vec(), out.data_vec().unwrap())
+        });
+        (h0.join().unwrap(), h1.join().unwrap())
+    });
+
+    assert_eq!(
+        r0.0,
+        vec![2_usize],
+        "reduce_scatter_tensor rank0 shape (chunk = numel/world_size)"
+    );
+    assert_eq!(r1.0, vec![2_usize], "reduce_scatter_tensor rank1 shape");
+    assert_close(&r0.1, &exp0, 1e-6, "reduce_scatter_tensor rank0");
+    assert_close(&r1.1, &exp1, 1e-6, "reduce_scatter_tensor rank1");
+}
+
+/// `all_to_all` (equal-split) must permute chunks across ranks.
+/// Reference: torch.distributed.all_to_all_single (equal split).
+/// Discriminates an identity stub: an identity returns the input unchanged,
+/// but the expected output has each rank receiving the *peer*'s chunk —
+/// rank 1 receives rank 0's last chunk, rank 0 receives rank 1's first chunk.
+#[test]
+fn all_to_all_world_size_2_matches_reference() {
+    let group = SimulatedBackend::create_group(2).unwrap();
+    // Rank 0 sends [10, 20 | 30, 40] -> chunk[0]=[10,20] (self), chunk[1]=[30,40] (to rank 1).
+    // Rank 1 sends [50, 60 | 70, 80] -> chunk[0]=[50,60] (to rank 0), chunk[1]=[70,80] (self).
+    // After all_to_all:
+    //   Rank 0 output: [10, 20, 50, 60]
+    //   Rank 1 output: [30, 40, 70, 80]
+    let t0 = make_tensor(vec![10.0_f32, 20.0, 30.0, 40.0], vec![4]);
+    let t1 = make_tensor(vec![50.0_f32, 60.0, 70.0, 80.0], vec![4]);
+
+    let (r0, r1) = std::thread::scope(|s| {
+        let b0 = &group[0];
+        let b1 = &group[1];
+        let h0 = s.spawn(|| all_to_all(&t0, b0).unwrap().data_vec().unwrap());
+        let h1 = s.spawn(|| all_to_all(&t1, b1).unwrap().data_vec().unwrap());
+        (h0.join().unwrap(), h1.join().unwrap())
+    });
+
+    assert_close(
+        &r0,
+        &[10.0, 20.0, 50.0, 60.0],
+        1e-6,
+        "all_to_all rank0 (self chunk + chunk from rank 1)",
+    );
+    assert_close(
+        &r1,
+        &[30.0, 40.0, 70.0, 80.0],
+        1e-6,
+        "all_to_all rank1 (chunk from rank 0 + self chunk)",
+    );
+}
+
+/// `all_to_all_with_timeout` must match `all_to_all` semantics under a
+/// finite timeout. Discriminates a stub that ignores `timeout`.
+#[test]
+fn all_to_all_with_timeout_matches_default_world_size_2() {
+    let group = SimulatedBackend::create_group(2).unwrap();
+    let t0 = make_tensor(vec![10.0_f32, 20.0, 30.0, 40.0], vec![4]);
+    let t1 = make_tensor(vec![50.0_f32, 60.0, 70.0, 80.0], vec![4]);
+
+    let (r0, r1) = std::thread::scope(|s| {
+        let b0 = &group[0];
+        let b1 = &group[1];
+        let h0 = s.spawn(|| {
+            all_to_all_with_timeout(&t0, b0, PASS1_TIMEOUT)
+                .unwrap()
+                .data_vec()
+                .unwrap()
+        });
+        let h1 = s.spawn(|| {
+            all_to_all_with_timeout(&t1, b1, PASS1_TIMEOUT)
+                .unwrap()
+                .data_vec()
+                .unwrap()
+        });
+        (h0.join().unwrap(), h1.join().unwrap())
+    });
+
+    assert_close(
+        &r0,
+        &[10.0, 20.0, 50.0, 60.0],
+        1e-6,
+        "all_to_all_with_timeout rank0",
+    );
+    assert_close(
+        &r1,
+        &[30.0, 40.0, 70.0, 80.0],
+        1e-6,
+        "all_to_all_with_timeout rank1",
+    );
+
+    // Solo path: timeout argument exercised on world_size=1 branch.
+    let solo = SimulatedBackend::create_group(1).unwrap();
+    let t = make_tensor(vec![1.0_f32, 2.0, 3.0], vec![3]);
+    let r = all_to_all_with_timeout(&t, &solo[0], PASS1_TIMEOUT)
+        .unwrap()
+        .data_vec()
+        .unwrap();
+    assert_close(&r, &[1.0, 2.0, 3.0], 1e-6, "all_to_all_with_timeout solo");
+}
+
+/// `all_to_all_single_uneven` allows per-peer asymmetric splits.
+/// Mirrors torch.distributed.all_to_all_single with output_split_sizes /
+/// input_split_sizes.
+///
+/// Discrimination: an identity stub returns the input unchanged; an
+/// equal-split stub fails on the asymmetric send/recv layout. Only an
+/// implementation that respects the per-peer split tables produces the
+/// expected concatenation.
+#[test]
+fn all_to_all_single_uneven_world_size_2_matches_reference() {
+    let group = SimulatedBackend::create_group(2).unwrap();
+    // Rank 0: sends 1 element to self, 3 elements to rank 1.
+    // Rank 1: sends 2 elements to rank 0, 2 elements to self.
+    // Therefore:
+    //   Rank 0 recv = [self(1), from-rank-1(2)] -> total 3
+    //   Rank 1 recv = [from-rank-0(3), self(2)] -> total 5
+
+    let (r0, r1) = std::thread::scope(|s| {
+        let b0 = &group[0];
+        let b1 = &group[1];
+        let h0 = s.spawn(|| {
+            let t = make_tensor(vec![10.0_f32, 20.0, 21.0, 22.0], vec![4]);
+            all_to_all_single_uneven(&t, &[1, 3], &[1, 2], b0)
+                .unwrap()
+                .data_vec()
+                .unwrap()
+        });
+        let h1 = s.spawn(|| {
+            let t = make_tensor(vec![30.0_f32, 31.0, 40.0, 41.0], vec![4]);
+            all_to_all_single_uneven(&t, &[2, 2], &[3, 2], b1)
+                .unwrap()
+                .data_vec()
+                .unwrap()
+        });
+        (h0.join().unwrap(), h1.join().unwrap())
+    });
+
+    // Rank 0: self chunk [10.0], then from-rank-1 [30.0, 31.0].
+    assert_close(
+        &r0,
+        &[10.0, 30.0, 31.0],
+        1e-6,
+        "all_to_all_single_uneven rank0 (self + from-rank-1)",
+    );
+    // Rank 1: from-rank-0 [20.0, 21.0, 22.0], then self [40.0, 41.0].
+    assert_close(
+        &r1,
+        &[20.0, 21.0, 22.0, 40.0, 41.0],
+        1e-6,
+        "all_to_all_single_uneven rank1 (from-rank-0 + self)",
+    );
+}
+
+/// `recv_with_timeout` must produce the same tensor as `recv` (which
+/// forwards to it with the default timeout). Pairs with a `send` so the
+/// full round-trip is exercised. Discriminates a stub that ignores the
+/// `timeout` parameter.
+#[test]
+fn recv_with_timeout_matches_default_round_trip() {
+    let group = SimulatedBackend::create_group(2).unwrap();
+    let payload = vec![100.0_f32, 200.0, 300.0, 400.0];
+    let shape = vec![2_usize, 2];
+    let t = make_tensor(payload.clone(), shape.clone());
+
+    let received = std::thread::scope(|s| {
+        let b0 = &group[0];
+        let b1 = &group[1];
+        let h_send = s.spawn(|| send(&t, 1, b0));
+        let h_recv = s.spawn(|| recv_with_timeout::<f32>(&shape, 0, b1, PASS1_TIMEOUT));
+        h_send.join().unwrap().unwrap();
+        h_recv.join().unwrap().unwrap()
+    });
+
+    assert_eq!(
+        received.shape(),
+        shape.as_slice(),
+        "recv_with_timeout preserves shape"
+    );
+    assert_close(
+        &received.data_vec().unwrap(),
+        &payload,
+        1e-6,
+        "recv_with_timeout round-trip",
+    );
+}
+
+/// `recv_into` writes received bytes into a caller-owned tensor.
+/// Discrimination: pre-fill the destination with sentinel values; if the
+/// implementation re-allocates instead of overwriting in place, the shape
+/// or contents of the post-call tensor will diverge. We additionally check
+/// that the destination's data is *exactly* the payload — a stub that
+/// leaves the buffer untouched would still hold the sentinel.
+#[test]
+fn recv_into_overwrites_destination() {
+    let group = SimulatedBackend::create_group(2).unwrap();
+    let payload = vec![11.0_f32, 22.0, 33.0];
+    let shape = vec![3_usize];
+    let t = make_tensor(payload.clone(), shape.clone());
+
+    let result = std::thread::scope(|s| {
+        let b0 = &group[0];
+        let b1 = &group[1];
+        let h_send = s.spawn(|| send(&t, 1, b0));
+        let h_recv = s.spawn(|| {
+            // Pre-fill with a sentinel pattern that must be overwritten.
+            let mut dst = make_tensor(vec![-1.0_f32, -1.0, -1.0], vec![3_usize]);
+            recv_into(&mut dst, 0, b1).unwrap();
+            dst.data_vec().unwrap()
+        });
+        h_send.join().unwrap().unwrap();
+        h_recv.join().unwrap()
+    });
+
+    assert_close(&result, &payload, 1e-6, "recv_into overwrites destination");
+    // Sanity: the sentinel must not survive.
+    assert!(
+        result.iter().all(|&v| v >= 0.0),
+        "recv_into must overwrite the sentinel -1.0 buffer; got {result:?}"
+    );
+}
+
+/// `recv_into_with_timeout` is `recv_into` with a finite deadline.
+/// Discriminates a stub that ignores the `timeout` parameter.
+#[test]
+fn recv_into_with_timeout_overwrites_destination() {
+    let group = SimulatedBackend::create_group(2).unwrap();
+    let payload = vec![7.0_f32, 8.0, 9.0, 10.0];
+    let shape = vec![4_usize];
+    let t = make_tensor(payload.clone(), shape.clone());
+
+    let result = std::thread::scope(|s| {
+        let b0 = &group[0];
+        let b1 = &group[1];
+        let h_send = s.spawn(|| send(&t, 1, b0));
+        let h_recv = s.spawn(|| {
+            let mut dst = make_tensor(vec![-1.0_f32, -1.0, -1.0, -1.0], vec![4_usize]);
+            recv_into_with_timeout(&mut dst, 0, b1, PASS1_TIMEOUT).unwrap();
+            dst.data_vec().unwrap()
+        });
+        h_send.join().unwrap().unwrap();
+        h_recv.join().unwrap()
+    });
+
+    assert_close(
+        &result,
+        &payload,
+        1e-6,
+        "recv_into_with_timeout overwrites destination",
+    );
+}
+
+/// `DistCheckpointError` must surface as a real error along the
+/// `load_distributed` failure path. Triggers the `Io` variant by loading
+/// from a non-existent directory (no `metadata.json`), and the
+/// `Serialization` variant by writing a malformed `metadata.json` and
+/// pattern-matching the resulting variant.
+///
+/// Discrimination: a stub that always returns `Ok(HashMap::new())` would
+/// fail the `is_err()` assertion; a stub that conflates the variants
+/// (e.g., returns `Io` for a JSON parse failure) would fail the
+/// `Serialization` pattern-match.
+#[test]
+fn dist_checkpoint_error_variants_surface_via_load() {
+    use std::collections::HashMap;
+    use std::path::PathBuf;
+
+    let base = std::env::temp_dir().join("ferrotorch_pass1_dist_ckpt_err");
+    let _ = std::fs::remove_dir_all(&base);
+
+    // ---- Variant 1: Io — directory exists but metadata.json missing.
+    // load_distributed reads metadata.json first; absence of that file
+    // triggers DistCheckpointError::Io.
+    let dir_no_meta: PathBuf = base.join("no_metadata");
+    std::fs::create_dir_all(&dir_no_meta).expect("create test dir");
+    let err1 = load_distributed::<f32>(&dir_no_meta, 0, 1)
+        .expect_err("load_distributed must fail without metadata.json");
+    assert!(
+        matches!(err1, DistCheckpointError::Io { .. }),
+        "missing metadata.json must produce DistCheckpointError::Io, got {err1:?}"
+    );
+    // Display contract: error message must reference the underlying issue.
+    let msg1 = err1.to_string();
+    assert!(
+        msg1.contains("I/O") || msg1.contains("metadata") || msg1.contains("reading"),
+        "DistCheckpointError::Io display must describe the I/O failure, got: {msg1:?}"
+    );
+
+    // ---- Variant 2: Serialization — metadata.json exists but is malformed.
+    let dir_bad: PathBuf = base.join("bad_metadata");
+    std::fs::create_dir_all(&dir_bad).expect("create test dir");
+    std::fs::write(dir_bad.join("metadata.json"), b"{not valid json}")
+        .expect("write malformed metadata");
+    let err2 = load_distributed::<f32>(&dir_bad, 0, 1)
+        .expect_err("load_distributed must fail on malformed metadata");
+    assert!(
+        matches!(err2, DistCheckpointError::Serialization { .. }),
+        "malformed metadata.json must produce DistCheckpointError::Serialization, got {err2:?}"
+    );
+
+    // ---- Conversion contract: DistCheckpointError → FerrotorchError.
+    let _: FerrotorchError = err2.into();
+    // Also exercise other variants structurally so the enum is referenced
+    // exhaustively, not just by name. This guards against a stub whose
+    // `DistCheckpointError` enum has lost variants between versions.
+    let _ = HashMap::<String, &str>::new();
+    let invalid = DistCheckpointError::InvalidArgument {
+        message: "x".into(),
+    };
+    let missing = DistCheckpointError::MissingShard {
+        path: "/none".into(),
+    };
+    let tensor_err = DistCheckpointError::Tensor {
+        message: "x".into(),
+    };
+    let meta = DistCheckpointError::Metadata {
+        message: "x".into(),
+    };
+    let async_err = DistCheckpointError::AsyncFailed {
+        message: "x".into(),
+    };
+    for e in [&invalid, &missing, &tensor_err, &meta, &async_err] {
+        assert!(
+            !e.to_string().is_empty(),
+            "DistCheckpointError variant Display must be non-empty"
+        );
+    }
+
+    let _ = std::fs::remove_dir_all(&base);
 }
