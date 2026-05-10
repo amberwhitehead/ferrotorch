@@ -7,6 +7,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ## [Unreleased]
 
 ### Changed
+- Audit-Fix Phase 12: optim+serialize+distributions cluster (#1015 #1028 #1029 #1040 #1058) (#1086)
 - Audit-Fix Phase 11: ml ranking metrics cluster (#1015 #1069 #1070 #1071) (#1085)
 - Audit-Fix Phase 10: jit + jit-script cluster (#1015 #1036-#1039) (#1084)
 - Audit-Fix Phase 9: cubecl cluster (#1015 #1045-#1049) (#1082)
@@ -52,6 +53,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - ferrotorch-core: `gelu()` (no-arg) default is now `GeluApproximate::None` (exact erf-based: `x * 0.5 * (1 + erf(x / √2))`), matching `torch.nn.GELU()`'s `approximate='none'` default. Previously the no-arg path defaulted to `GeluApproximate::Sigmoid` (`x * sigmoid(1.702 * x)`), producing ~6e-3 absolute deviation from PyTorch. **Migration**: callers relying on the historical fast-sigmoid default must opt in explicitly via `gelu_with(input, GeluApproximate::Sigmoid)` (LLM/transformer paths in `ferrotorch-llama` etc. will silently get the slower-but-more-precise erf path after upgrade — adjust if performance matters more than parity in your call site). `gelu_with(_, GeluApproximate::Tanh)` (PyTorch's `approximate='tanh'`) and `gelu_with(_, GeluApproximate::None)` are unchanged. The enum discriminant order is unchanged; only the `#[default]` attribute moved (closes #794).
 
 ### Fixed
+- BROKEN distributions: multivariate_normal_fixtures_log_prob_entropy_mean compares d.mean() to loc_v (conformance_distributions_continuous.rs:918) — self-referential, fixture mean key never read; #1015 (#1058)
+- BROKEN serialize: gguf_value_variants is tautological enum pattern match (conformance_serialize.rs:1584) — never loads from fixture, just constructs and matches; #1015 (#1040)
+- BROKEN optim: muon_state_dict_roundtrip_preserves_momentum_buffers compares only length (conformance_optim_advanced.rs:1640) — zeroed momentum on load passes; #1015 (#1029)
+- BROKEN optim: kfac_factor_update_arithmetic off-diagonal check is fixture-vs-fixture (conformance_optim_advanced.rs:1679) — actual a_factor off-diag never read; #1015 (#1028)
 - BROKEN ml: ndcg_score_perfect_matches_sklearn y_true == y_score (conformance_ml_metrics.rs) — identity path only, normalisation path untested; #1015 (#1071)
 - BROKEN ml: label_ranking_loss_matches_sklearn perfect-ranking fixture (conformance_ml_metrics.rs) — same fixture as lrap, expected=0.0; #1015 (#1070)
 - BROKEN ml: label_ranking_average_precision_score_matches_sklearn perfect-ranking fixture (conformance_ml_metrics.rs) — every true label at rank 1, expected=1.0; #1015 (#1069)
