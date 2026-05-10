@@ -15,13 +15,19 @@ readme = "README.md"
 [features]
 default = []
 # Enables NVRTC-based PTX compilation for f64 transcendental kernels
-# (#748 / #749). When this feature is off, generate_ptx_source for an f64
-# graph that contains exp/log/sqrt/tanh/sigmoid/gelu/silu returns
-# Err(JitError::Unsupported) with a message naming the missing feature.
-# When the feature is on, the codegen routes the f64 transcendental case
-# through NVRTC (which auto-resolves libdevice's __nv_exp/__nv_log/...)
-# and returns valid PTX with libdevice math inlined.
-cuda = ["dep:cudarc"]
+# (#748 / #749) **and the FusedChain PTX runtime executor**. When this
+# feature is off, generate_ptx_source for an f64 graph that contains
+# exp/log/sqrt/tanh/sigmoid/gelu/silu returns Err(JitError::Unsupported)
+# with a message naming the missing feature, and `apply_fused` on a CUDA
+# tensor returns `FerrotorchError::NotImplementedOnCuda`. When the feature
+# is on, the codegen routes the f64 transcendental case through NVRTC
+# (which auto-resolves libdevice's __nv_exp/__nv_log/...) and returns
+# valid PTX with libdevice math inlined, **and `apply_fused` routes CUDA
+# inputs through `fusion_gpu::apply_fused_gpu` — FusedChain PTX (f32
+# direct + f64 via NVRTC-libdevice) → `ferrotorch-gpu`'s module cache →
+# kernel launch on the input's device, returning a device-resident
+# Tensor.**
+cuda = ["dep:cudarc", "dep:ferrotorch-gpu"]
 
 [dependencies]
 ferrotorch-core = { workspace = true }
@@ -38,10 +44,16 @@ cranelift-native = "0.131"
 # Pure-Rust math intrinsics (exp/log/sin/cos/...) made available to the JIT
 # via cranelift's symbol resolution.
 libm = "0.2"
-# Optional: NVRTC for the f64 transcendental PTX path (#748). Gated behind
+# Optional: NVRTC for the f64 transcendental PTX path (#748) and PTX
+# compilation for the FusedChain runtime executor (#1138). Gated behind
 # the `cuda` feature so the default `cargo build -p ferrotorch-jit` still
 # works on machines without a CUDA toolkit.
 cudarc = { workspace = true, optional = true }
+# Optional: the CUDA runtime executor for `apply_fused` lives in
+# `fusion_gpu` and needs `ferrotorch-gpu`'s `GpuDevice`, `module_cache`,
+# and `CudaBuffer` types. Gated behind `cuda` for the same reason as
+# cudarc. (#1138)
+ferrotorch-gpu = { workspace = true, optional = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

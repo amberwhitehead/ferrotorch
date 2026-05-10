@@ -2609,6 +2609,7 @@ dependencies = [
  "cranelift-native",
  "cudarc",
  "ferrotorch-core",
+ "ferrotorch-gpu",
  "ferrotorch-nn",
  "libm",
  "num-traits",

@@ -7,6 +7,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ## [Unreleased]
 
 ### Changed
+- Wire FusedChain PTX runtime executor end-to-end on CUDA: add ferrotorch-gpu dep to ferrotorch-jit under `cuda` feature; extend FusedChain to f64 via factored NVRTC-libdevice helper; extend ferrotorch-gpu module_cache with owned-string variant; apply_fused now transparently dispatches CUDA inputs to GPU. 9 GPU-runtime tests + 2 cache tests pass on RTX 3090. Closes #1138 entirely (no follow-ups).
 - Pass 5.B.4: ferrotorch-jit fusion.rs apply_fused — explicit is_cuda() guard returning NotImplementedOnCuda (was implicit GpuTensorNotAccessible from Tensor::data); doc rewrite removes aspirational PTX claim; PTX runtime executor wiring deferred to #1138 (#1106)
 - Pass 5.B.2: deduplicate ferrotorch-train clip_grad_norm_/clip_grad_value_ — delete CPU-only forks, re-export device-dispatching versions from ferrotorch-nn (CUDA gradients now correctly dispatch to gpu_reduce_sum/gpu_scale/gpu_clamp); EmaCallback identified as stale-no-op (API takes &[Vec<T>] by design) (#1104)
 - Pass 5.B.1: migrate distributions transforms.rs (Exp/Affine/Sigmoid/Tanh/Softplus/Compose Transforms + TransformedDistribution::log_prob) to device-resident autograd-aware ops; dirichlet/MVN deferred via Pattern A follow-ups #1136/#1137 (blocked on GPU lgamma/digamma/cholesky) (#1103)

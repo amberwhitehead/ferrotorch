@@ -71,10 +71,18 @@ pub mod graph_break;
 pub mod interpreter;
 pub mod memory_plan;
 pub mod module;
+pub mod nvrtc;
 pub mod optimize;
 pub mod serialize;
 pub mod symbolic;
 pub mod trace;
+
+/// GPU runtime executor for [`fusion::FusedChain`]. Gated behind the
+/// `cuda` feature so the default workspace build remains CUDA-toolkit-free;
+/// without the feature this module is omitted and [`fusion::apply_fused`]
+/// returns `NotImplementedOnCuda` on CUDA inputs.
+#[cfg(feature = "cuda")]
+pub mod fusion_gpu;
 
 pub use aot_autograd::{AotGraphPair, compile_aot, decompose_forward_backward};
 pub use autotune::{AutotuneCandidate, AutotuneKey, AutotuneResult, Autotuner};

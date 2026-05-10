@@ -3,14 +3,22 @@
 //!
 //! The fusion engine intercepts tensor operations, buffers sequences of
 //! elementwise ops, and executes them as a single fused operation on the CPU
-//! via [`FusedChain::execute_cpu`]. A PTX code generator
-//! ([`FusedChain::generate_ptx`]) is also provided, but no GPU runtime
-//! executor is wired through `ferrotorch-jit` today; tensor-level
-//! [`apply_fused`] therefore returns
+//! via [`FusedChain::execute_cpu`]. PTX code generators are also provided —
+//! [`FusedChain::generate_ptx`] / [`FusedChain::generate_ptx_named`] for f32
+//! (direct PTX emission with `.f32` arithmetic and `*.approx.f32`
+//! transcendentals) and [`FusedChain::generate_cuda_source_f64_named`] for
+//! f64 (CUDA C source compiled via NVRTC + libdevice at apply time, since
+//! PTX has no `*.approx.f64` hardware instructions).
+//!
+//! Tensor-level [`apply_fused`] runs on the CPU by default and — when the
+//! `cuda` feature is enabled — dispatches CUDA inputs through
+//! [`fusion_gpu::apply_fused_gpu`](crate::fusion_gpu::apply_fused_gpu),
+//! which compiles the chain's PTX (f32 directly or f64 via NVRTC),
+//! caches the resulting `CudaFunction` in `ferrotorch-gpu::module_cache`,
+//! launches it on the input's device, and returns a device-resident
+//! Tensor. Without the `cuda` feature, CUDA inputs return
 //! [`FerrotorchError::NotImplementedOnCuda`](ferrotorch_core::error::FerrotorchError::NotImplementedOnCuda)
-//! on CUDA inputs. Routing CUDA inputs through the generated PTX kernel is
-//! tracked in #1138 (workspace-level `ferrotorch-jit` ↔ `ferrotorch-gpu`
-//! integration).
+//! with an op message asking the caller to build with `--features cuda`.
 //!
 //! # Thread-local fusion context
 //!
@@ -497,6 +505,122 @@ impl FusedChain {
 
 DONE:
     ret;
+}}
+"
+        ))
+    }
+
+    /// Generate a CUDA C `__global__` kernel that applies this fused chain
+    /// elementwise on `double` (f64) inputs. The kernel signature is:
+    ///
+    /// ```c
+    /// __global__ void <kernel_name>(const double* in, double* out, int n)
+    /// ```
+    ///
+    /// This is the source string consumed by the f64 GPU path
+    /// (`fusion_gpu::apply_fused_gpu_f64_internal`). It is compiled to PTX
+    /// at apply time by [`crate::nvrtc::compile_cuda_source_to_ptx`], which
+    /// links libdevice (`__nv_exp`, `__nv_log`, `__nv_tanh`, ...) — PTX has
+    /// no `*.approx.f64` hardware instructions for transcendentals, so
+    /// emitting raw f64 PTX would be invalid; NVRTC + libdevice is the
+    /// correct lowering (precedent: [`crate::codegen_gpu`]'s f64
+    /// transcendental path, #748 / #749).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ferrotorch_core::error::FerrotorchError::InvalidArgument`]
+    /// if the chain contains a binary op (Add/Sub/Mul/Div) or if
+    /// `kernel_name` is not a valid C identifier.
+    pub fn generate_cuda_source_f64_named(&self, kernel_name: &str) -> FerrotorchResult<String> {
+        validate_identifier(kernel_name)?;
+
+        for op in &self.ops {
+            if matches!(
+                op,
+                FusedOp::Add | FusedOp::Sub | FusedOp::Mul | FusedOp::Div
+            ) {
+                return Err(ferrotorch_core::error::FerrotorchError::InvalidArgument {
+                    message: format!(
+                        "generate_cuda_source_f64_named: binary op '{op}' in unary FusedChain \
+                         requires a second input pointer and cannot be lowered to a \
+                         single-input kernel"
+                    ),
+                });
+            }
+        }
+
+        let mut body_lines: Vec<String> = Vec::new();
+        for op in &self.ops {
+            match op {
+                FusedOp::Add | FusedOp::Sub | FusedOp::Mul | FusedOp::Div => {
+                    unreachable!("binary ops rejected by early validation");
+                }
+                FusedOp::Neg => {
+                    body_lines.push("        val = -val;".into());
+                }
+                FusedOp::Relu => {
+                    // fmax(double, double) — libdevice resolves under NVRTC.
+                    body_lines.push("        val = (val > 0.0) ? val : 0.0;".into());
+                }
+                FusedOp::Sigmoid => {
+                    body_lines.push("        val = 1.0 / (1.0 + exp(-val));".into());
+                }
+                FusedOp::Tanh => {
+                    body_lines.push("        val = tanh(val);".into());
+                }
+                FusedOp::Gelu => {
+                    // Tanh-based GELU approximation, matching the CPU and
+                    // f32 PTX paths for cross-backend bit-stability.
+                    body_lines.push("        {".into());
+                    body_lines.push("            double x3 = val * val * val;".into());
+                    body_lines.push(
+                        "            double inner = 0.7978845608028654 * (val + 0.044715 * x3);"
+                            .into(),
+                    );
+                    body_lines.push(
+                        "            val = val * 0.5 * (1.0 + tanh(inner));".into(),
+                    );
+                    body_lines.push("        }".into());
+                }
+                FusedOp::Silu => {
+                    body_lines.push(
+                        "        { double s = 1.0 / (1.0 + exp(-val)); val = val * s; }".into(),
+                    );
+                }
+                FusedOp::Sqrt => {
+                    body_lines.push("        val = sqrt(val);".into());
+                }
+                FusedOp::Abs => {
+                    body_lines.push("        val = fabs(val);".into());
+                }
+                FusedOp::Exp => {
+                    body_lines.push("        val = exp(val);".into());
+                }
+                FusedOp::Log => {
+                    body_lines.push("        val = log(val);".into());
+                }
+                FusedOp::Pow(p) => {
+                    body_lines.push(format!("        val = pow(val, {p:.17});"));
+                }
+                FusedOp::ScalarMul(s) => {
+                    body_lines.push(format!("        val = val * {s:.17};"));
+                }
+                FusedOp::ScalarAdd(s) => {
+                    body_lines.push(format!("        val = val + {s:.17};"));
+                }
+            }
+        }
+        let body = body_lines.join("\n");
+
+        Ok(format!(
+            "\
+__global__ void {kernel_name}(const double* in, double* out, int n) {{
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < n) {{
+        double val = in[i];
+{body}
+        out[i] = val;
+    }}
 }}
 "
         ))
@@ -1078,34 +1202,67 @@ pub fn estimate_matmul_dims(
 // Tensor-level fusion helper
 // ---------------------------------------------------------------------------
 
-/// Apply a [`FusedChain`] to a CPU tensor, producing a new CPU tensor with
-/// the same shape.
+/// Apply a [`FusedChain`] to a tensor, producing a new tensor with an
+/// identical shape that resides on the input's device.
 ///
-/// # CPU-only
+/// # CPU
 ///
-/// On CUDA inputs this returns
-/// [`FerrotorchError::NotImplementedOnCuda`]. The
-/// [`FusedChain::generate_ptx`] code generator exists today but no runtime
-/// executor is wired through `ferrotorch-jit`. Routing CUDA inputs through
-/// the PTX kernel is tracked in #1138 (workspace-level
-/// `ferrotorch-jit` ↔ `ferrotorch-gpu` integration).
+/// On CPU inputs the chain is executed via [`FusedChain::execute_cpu`] —
+/// a single allocation is reused as the operations are applied in place.
+///
+/// # CUDA (with `cuda` feature)
+///
+/// On CUDA inputs the call is forwarded to
+/// [`fusion_gpu::apply_fused_gpu`](crate::fusion_gpu::apply_fused_gpu),
+/// which:
+///
+/// 1. Generates the chain's PTX — f32 directly via
+///    [`FusedChain::generate_ptx_named`], f64 via
+///    [`FusedChain::generate_cuda_source_f64_named`] + NVRTC-libdevice
+///    (`crate::nvrtc::compile_cuda_source_to_ptx`).
+/// 2. Compiles + caches the resulting `CudaFunction` via
+///    `ferrotorch-gpu::module_cache::get_or_compile_owned` (keyed on
+///    PTX hash × device ordinal so each unique chain pays the
+///    compilation cost once).
+/// 3. Launches the kernel on the input's stream and returns a
+///    device-resident Tensor.
+///
+/// # CUDA (without `cuda` feature)
+///
+/// Returns [`FerrotorchError::NotImplementedOnCuda`] with an op message
+/// directing the caller to build with the `cuda` feature.
 ///
 /// # Errors
 ///
-/// - [`FerrotorchError::NotImplementedOnCuda`]: input is on a CUDA device.
+/// - [`FerrotorchError::NotImplementedOnCuda`]: input is on a CUDA device
+///   but the crate was built without the `cuda` feature, or the chain's
+///   dtype is neither f32 nor f64.
+/// - [`FerrotorchError::InvalidArgument`]: chain contains a binary op
+///   (Add/Sub/Mul/Div) on the GPU path, or CUDA launch / NVRTC compile
+///   failure.
 /// - Propagates any error from [`FusedChain::execute_cpu`] or
-///   [`Tensor::from_storage`] (including the `GpuTensorNotAccessible` /
-///   `InvalidArgument` errors `Tensor::data` may raise on non-CPU storage
-///   variants such as cubecl or non-contiguous tensors).
+///   [`Tensor::from_storage`] on the CPU path (including the
+///   `GpuTensorNotAccessible` / `InvalidArgument` errors `Tensor::data`
+///   may raise on non-CPU storage variants such as cubecl or
+///   non-contiguous tensors).
 ///
 /// [`FerrotorchError::NotImplementedOnCuda`]: ferrotorch_core::error::FerrotorchError::NotImplementedOnCuda
+/// [`FerrotorchError::InvalidArgument`]: ferrotorch_core::error::FerrotorchError::InvalidArgument
 pub fn apply_fused<T: Float>(input: &Tensor<T>, chain: &FusedChain) -> FerrotorchResult<Tensor<T>> {
     if input.is_cuda() {
-        return Err(
-            ferrotorch_core::error::FerrotorchError::NotImplementedOnCuda {
-                op: "apply_fused (FusedChain PTX runtime executor not yet wired; tracked in #1138)",
-            },
-        );
+        #[cfg(feature = "cuda")]
+        {
+            return crate::fusion_gpu::apply_fused_gpu(input, chain);
+        }
+        #[cfg(not(feature = "cuda"))]
+        {
+            return Err(
+                ferrotorch_core::error::FerrotorchError::NotImplementedOnCuda {
+                    op: "apply_fused: build with the `cuda` feature to enable GPU dispatch \
+                         via FusedChain PTX → ferrotorch-gpu module cache",
+                },
+            );
+        }
     }
     let data = input.data()?;
     let result = chain.execute_cpu(data)?;
@@ -1415,18 +1572,11 @@ mod tests {
 
     /// Mechanical doc-drift guard for [`apply_fused`].
     ///
-    /// The pre-Pass-5.B.4 doc claimed `apply_fused` produced "a new tensor on
-    /// the same device" and that "When a CUDA device is available the chain
-    /// could be dispatched via the PTX kernel". Both claims were false:
-    /// `Tensor::data()` Errs on CUDA, so the function never produced a
-    /// CUDA output, and no runtime PTX executor is wired (see #1138).
-    ///
-    /// This test reads the source of `fusion.rs` and asserts the
-    /// `apply_fused` docstring no longer contains either misleading phrase.
-    /// Locating the span by anchoring on the `pub fn apply_fused` signature
-    /// keeps the guard from triggering on this very test's own doc comment.
+    /// The Pass-5.B.4 doc had two known mis-claims plus a follow-up
+    /// placeholder. This guard now enforces all three are gone after the
+    /// runtime-executor landing dispatch.
     #[test]
-    fn apply_fused_doc_does_not_promise_same_device() {
+    fn apply_fused_doc_does_not_mention_1138() {
         let src = include_str!("fusion.rs");
         let sig_idx = src
             .find("pub fn apply_fused<")
@@ -1435,45 +1585,52 @@ mod tests {
         let prelude = &src[..sig_idx];
         let doc_start = prelude.rfind("\n\n").map_or(0, |i| i + 2);
         let doc_block = &prelude[doc_start..];
+        // Regression: prior false claim "same device".
         assert!(
             !doc_block.contains("same device"),
             "apply_fused doc must not claim 'same device'; doc was:\n{doc_block}"
         );
+        // Regression: prior false claim "could be dispatched".
         assert!(
             !doc_block.contains("could be dispatched"),
             "apply_fused doc must not claim PTX 'could be dispatched'; doc was:\n{doc_block}"
         );
-        // Positive guard: the doc must reference the follow-up issue tracking
-        // the unwired PTX runtime executor.
+        // The follow-up issue was a placeholder; with the runtime
+        // executor landed, the doc must no longer cite it.
+        let placeholder = format!("#{}", 1138);
         assert!(
-            doc_block.contains("#1138"),
-            "apply_fused doc must cite follow-up #1138; doc was:\n{doc_block}"
+            !doc_block.contains(&placeholder),
+            "apply_fused doc must NOT reference the closed follow-up issue; doc was:\n{doc_block}"
+        );
+        // The placeholder phrase pattern must not return.
+        let placeholder_phrase = format!("{} #", "tracked in");
+        assert!(
+            !doc_block.contains(&placeholder_phrase),
+            "apply_fused doc must not contain a 'tracked-in' placeholder phrase; \
+             doc was:\n{doc_block}"
         );
     }
 
-    /// Discriminating test for the [`apply_fused`] CUDA guard.
+    /// Discriminating test for the [`apply_fused`] CUDA dispatch entry.
     ///
-    /// On a CUDA-having runtime, constructing a CUDA tensor and calling
-    /// `apply_fused` must return
-    /// `Err(FerrotorchError::NotImplementedOnCuda { op })` where `op`
-    /// references the follow-up issue (#1138).
+    /// **Without the `cuda` feature**, calling `apply_fused` on a CUDA
+    /// tensor must return `NotImplementedOnCuda` with an op message
+    /// pointing the user at the `cuda` build feature. (With the `cuda`
+    /// feature on, the CUDA path runs end-to-end; see
+    /// `fusion_gpu::tests::*` for those discriminators.)
     ///
     /// # CUDA-runtime gap (honest underclaim)
     ///
-    /// This Linux WSL2 development environment does not expose a CUDA
-    /// device. The test is gated on `Tensor::cuda()` succeeding; on a
-    /// CPU-only host the call returns `Err(DeviceUnavailable)` and the
-    /// test exits early (compiles + links, but does not exercise the
-    /// guarded branch). The doc-drift test above is therefore the
-    /// load-bearing Linux-runnable discriminator for #1106; this test
-    /// becomes load-bearing on a CUDA-having CI runner.
+    /// On a CPU-only host, `Tensor::cuda()` returns
+    /// `Err(DeviceUnavailable)` and the test exits early. With the
+    /// `cuda` feature OFF on a CUDA-having host, this test fails
+    /// fast with a clear error message — exactly the user-facing
+    /// outcome we want.
+    #[cfg(not(feature = "cuda"))]
     #[test]
-    fn apply_fused_errs_on_cuda_input_with_clear_message() {
+    fn apply_fused_errs_on_cuda_input_without_cuda_feature() {
         let storage = TensorStorage::cpu(vec![1.0f32, 2.0, 3.0, 4.0]);
         let cpu_tensor = Tensor::from_storage(storage, vec![4], false).unwrap();
-        // Try to move onto CUDA. If no CUDA runtime is available this
-        // returns Err(DeviceUnavailable) — exit early per the gap noted
-        // in the doc above.
         let cuda_tensor = match cpu_tensor.cuda() {
             Ok(t) => t,
             Err(_) => return,
@@ -1490,12 +1647,13 @@ mod tests {
                     "error op must name apply_fused; got: {op}"
                 );
                 assert!(
-                    op.contains("#1138"),
-                    "error op must cite follow-up issue #1138; got: {op}"
+                    op.contains("cuda"),
+                    "error op must direct user to the `cuda` feature; got: {op}"
                 );
             }
             other => panic!(
-                "expected NotImplementedOnCuda for CUDA input to apply_fused, got {other:?}"
+                "expected NotImplementedOnCuda for CUDA input to apply_fused without \
+                 `cuda` feature, got {other:?}"
             ),
         }
     }

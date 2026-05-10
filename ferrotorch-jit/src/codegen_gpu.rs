@@ -1234,7 +1234,7 @@ fn f64_transcendental_ptx(
 
     #[cfg(feature = "cuda")]
     {
-        compile_cuda_source_to_ptx(&cuda_source, fn_name)
+        crate::nvrtc::compile_cuda_source_to_ptx(&cuda_source, fn_name)
     }
 
     #[cfg(not(feature = "cuda"))]
@@ -1251,73 +1251,9 @@ fn f64_transcendental_ptx(
     }
 }
 
-/// NVRTC-compile a CUDA C source string to a PTX module string.
-///
-/// NVRTC links libdevice automatically when the source uses f64 math
-/// intrinsics (`exp`, `log`, `tanh`, `pow`, ...), so the resulting PTX
-/// has no unresolved external symbols — every `__nv_*` call is replaced
-/// with libdevice's polynomial expansion inlined into the kernel.
-///
-/// `kernel_name` is documented in the error message for traceability;
-/// NVRTC does not need it for compilation (the kernel's `__global__`
-/// declaration in `cuda_source` is what NVRTC keys on).
-#[cfg(feature = "cuda")]
-fn compile_cuda_source_to_ptx(cuda_source: &str, kernel_name: &str) -> Result<String, JitError> {
-    use cudarc::nvrtc::{CompileOptions, compile_ptx_with_opts};
-
-    // NVRTC ships its own math intrinsics (`exp`, `log`, `sqrt`, `tanh`,
-    // `pow`, ...) for both f32 and f64 — these are auto-available without
-    // any `#include`. The `#include <math.h>` line that
-    // `generate_cuda_source` prepends targets host nvcc compilation,
-    // where libc's <math.h> declares the host overloads. NVRTC has no
-    // host headers in its include path and rejects the line. Strip it
-    // before compilation; the device-math symbols are still resolved.
-    //
-    // We also rewrite `__global__ void <name>(...)` to
-    // `extern "C" __global__ void <name>(...)`. Without `extern "C"`,
-    // NVRTC C++-mangles the symbol (e.g.
-    // `_Z9k_f64_expPKdPdi`); cudarc's `cuModuleGetFunction` keys on the
-    // unmangled name so the load would fail. The CUDA C codegen's
-    // `__global__` declarations are flat C-style signatures, so
-    // `extern "C"` is safe — there's no overloading to disambiguate.
-    let nvrtc_source = cuda_source
-        .lines()
-        .filter(|l| !l.trim().starts_with("#include <math.h>"))
-        .map(|l| {
-            if l.starts_with("__global__ void ") {
-                format!("extern \"C\" {l}")
-            } else {
-                l.to_string()
-            }
-        })
-        .collect::<Vec<_>>()
-        .join("\n");
-
-    // sm_75 is the floor for non-deprecated NVRTC targets in CUDA 13.x
-    // (Volta sm_70 emits a deprecation warning) and supports f64
-    // hardware ops on every Turing-and-newer GPU. libdevice's
-    // polynomial expansions for f64 transcendentals depend on f64 FMA,
-    // which is universally available at this baseline.
-    let opts = CompileOptions {
-        arch: Some("compute_75"),
-        // `--use_fast_math` would enable approximate intrinsics that
-        // sacrifice f64 precision; we want libdevice's IEEE-correct
-        // polynomial expansions instead.
-        ..Default::default()
-    };
-
-    let ptx = compile_ptx_with_opts(&nvrtc_source, opts).map_err(|e| JitError::CodegenError {
-        message: format!(
-            "NVRTC compile of CUDA C source for f64 transcendental kernel '{kernel_name}' failed: {e}"
-        ),
-    })?;
-
-    // `ptx.to_src()` returns the PTX text. NVRTC stores the compiled
-    // image as a CString-bytes payload internally; `to_src` decodes it
-    // back to a regular Rust String for downstream `Ptx::from_src`
-    // consumption.
-    Ok(ptx.to_src())
-}
+// NVRTC compile helper moved to `crate::nvrtc::compile_cuda_source_to_ptx`
+// so both this f64-transcendental path (#748/#749) and the FusedChain
+// runtime executor can share a single implementation.
 
 // ---------------------------------------------------------------------------
 // Helpers for reduction detection

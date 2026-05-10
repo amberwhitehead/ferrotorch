@@ -23,6 +23,8 @@
 #[cfg(feature = "cuda")]
 use std::collections::HashMap;
 #[cfg(feature = "cuda")]
+use std::hash::{Hash, Hasher};
+#[cfg(feature = "cuda")]
 use std::sync::{Arc, LazyLock, Mutex};
 
 #[cfg(feature = "cuda")]
@@ -38,6 +40,17 @@ use cudarc::nvrtc::Ptx;
 /// used on device 1, so the ordinal is part of the key.
 #[cfg(feature = "cuda")]
 static MODULE_CACHE: LazyLock<Mutex<HashMap<(&'static str, u32), CudaFunction>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// Global cache for owned-string PTX modules (e.g. the FusedChain runtime
+/// executor — every fused chain produces a unique PTX string at runtime,
+/// so the `&'static str`-keyed [`MODULE_CACHE`] cannot be used).
+///
+/// The key is `(blake-style hash of ptx_src, device_ordinal)`. The hash is
+/// computed once on insert and once on lookup; this avoids leaking the
+/// `String` to give the cache a `&'static str` view.
+#[cfg(feature = "cuda")]
+static OWNED_MODULE_CACHE: LazyLock<Mutex<HashMap<(u64, u32), CudaFunction>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
 /// Get a compiled kernel function, compiling the PTX only on first use.
@@ -73,6 +86,79 @@ pub fn get_or_compile(
     }
     let module = ctx.load_module(Ptx::from_src(ptx_src))?;
     let func = module.load_function(kernel_name)?;
+    cache.insert(key, func.clone());
+    Ok(func)
+}
+
+/// Get a compiled kernel function from owned PTX + name strings.
+///
+/// This is the runtime-PTX sibling of [`get_or_compile`]. Use it when the
+/// PTX source and entry-point name are produced at runtime (e.g. from
+/// [`crate::module_cache`]'s caller in `ferrotorch-jit::fusion_gpu`, where
+/// every [`crate::module_cache`]-using FusedChain is unique). The
+/// `&'static str` requirements of [`get_or_compile`] cannot be met by
+/// runtime-built strings; this fn accepts owned `String`s and caches by a
+/// hash of `ptx_src`.
+///
+/// # Cache key
+///
+/// The cache is keyed on `(hash(ptx_src), device_ordinal)`. The
+/// `DefaultHasher` is used because the cache is in-process and a chosen
+/// collision would only let an adversary substitute one of their own
+/// fused chains for another — both inside the same trust boundary.
+///
+/// # Memory growth
+///
+/// On a cache miss this fn leaks `ptx_src` and `kernel_name` via
+/// [`Box::leak`] to satisfy cudarc's `&'static`-like internal requirements
+/// for module/function metadata, then inserts the resulting
+/// [`CudaFunction`] into the global cache. Memory grows with the number
+/// of unique `(ptx_src, device_ordinal)` tuples — **bounded by the number
+/// of application-distinct `FusedChain`s** (typical use case: a handful
+/// to a few tens). The cached entry itself is small (cudarc's
+/// `CudaFunction` is roughly a pointer + name); the dominant cost is
+/// PTX compilation, which is what this cache is designed to skip.
+///
+/// # Arguments
+///
+/// - `ctx`            — CUDA context (from `device.context()`).
+/// - `ptx_src`        — owned PTX source string.
+/// - `kernel_name`    — owned entry-point name inside the PTX module.
+/// - `device_ordinal` — CUDA device ordinal (so kernels compiled for
+///   device 0 are not reused on device 1).
+///
+/// # Errors
+///
+/// Returns [`DriverError`] if PTX compilation or function lookup fails.
+#[cfg(feature = "cuda")]
+pub fn get_or_compile_owned(
+    ctx: &Arc<CudaContext>,
+    ptx_src: String,
+    kernel_name: String,
+    device_ordinal: u32,
+) -> Result<CudaFunction, DriverError> {
+    // Compute the cache key from the PTX hash. The hasher is the std
+    // `DefaultHasher`; collisions only matter for adversarial inputs,
+    // and the cache lives entirely inside a single process's trust
+    // boundary.
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    ptx_src.hash(&mut hasher);
+    let ptx_hash = hasher.finish();
+    let key = (ptx_hash, device_ordinal);
+
+    let mut cache = OWNED_MODULE_CACHE.lock().unwrap();
+    if let Some(func) = cache.get(&key) {
+        return Ok(func.clone());
+    }
+
+    // Cache miss: leak the strings so they satisfy cudarc's internal
+    // `&'static`-like requirements for the module's metadata. The bound
+    // on growth is documented above: one leaked PTX + name pair per
+    // unique FusedChain × device.
+    let leaked_ptx: &'static str = Box::leak(ptx_src.into_boxed_str());
+    let leaked_name: &'static str = Box::leak(kernel_name.into_boxed_str());
+    let module = ctx.load_module(Ptx::from_src(leaked_ptx))?;
+    let func = module.load_function(leaked_name)?;
     cache.insert(key, func.clone());
     Ok(func)
 }
@@ -175,6 +261,182 @@ mod tests {
             "module_cache timing: 1st call = {:?}, 2nd call = {:?}",
             d1, d2,
         );
+    }
+
+    /// Smoke-test the runtime-PTX cache: two calls with the same PTX
+    /// string return the same cached function — the caching invariant
+    /// the FusedChain runtime executor depends on.
+    #[test]
+    fn get_or_compile_owned_returns_same_function_on_repeated_calls() {
+        // Minimal valid PTX kernel — pattern lifted from NEG_PTX (above)
+        // to guarantee the driver accepts it. Copies one f32 per thread.
+        let ptx = "\
+.version 7.0
+.target sm_52
+.address_size 64
+
+.visible .entry id_kernel_owned_cache_test(
+    .param .u64 in_ptr,
+    .param .u64 out_ptr,
+    .param .u32 n
+) {
+    .reg .u32 %r_tid, %bid, %bdim, %n_reg;
+    .reg .u64 %a, %out, %off;
+    .reg .f32 %va;
+    .reg .pred %p;
+
+    ld.param.u64 %a, [in_ptr];
+    ld.param.u64 %out, [out_ptr];
+    ld.param.u32 %n_reg, [n];
+
+    mov.u32 %bid, %ctaid.x;
+    mov.u32 %bdim, %ntid.x;
+    mov.u32 %r_tid, %tid.x;
+    mad.lo.u32 %r_tid, %bid, %bdim, %r_tid;
+
+    setp.ge.u32 %p, %r_tid, %n_reg;
+    @%p bra DONE;
+
+    cvt.u64.u32 %off, %r_tid;
+    shl.b64 %off, %off, 2;
+
+    add.u64 %a, %a, %off;
+    add.u64 %out, %out, %off;
+
+    ld.global.f32 %va, [%a];
+    st.global.f32 [%out], %va;
+
+DONE:
+    ret;
+}
+"
+        .to_string();
+
+        let dev = crate::device::GpuDevice::new(0).expect("CUDA device 0");
+        let ctx = dev.context();
+
+        let f1 = super::get_or_compile_owned(
+            ctx,
+            ptx.clone(),
+            "id_kernel_owned_cache_test".to_string(),
+            dev.ordinal() as u32,
+        )
+        .expect("first compile");
+        let f2 = super::get_or_compile_owned(
+            ctx,
+            ptx.clone(),
+            "id_kernel_owned_cache_test".to_string(),
+            dev.ordinal() as u32,
+        )
+        .expect("second (cached) compile");
+
+        // cudarc's CudaFunction wraps a CUfunction handle; cloning is
+        // by-value of the handle. Use the debug repr as a coarse identity
+        // proxy: a fresh compile would change the underlying CUfunction
+        // (different module load), so identical debug strings here are
+        // strong evidence the cache hit.
+        assert_eq!(format!("{f1:?}"), format!("{f2:?}"));
+    }
+
+    /// Different PTX source must produce a different cached function
+    /// (cache key correctness — the cache must not collide).
+    #[test]
+    fn get_or_compile_owned_different_ptx_returns_different_function() {
+        // Two kernels with different entry-point names AND different
+        // bodies (a no-op vs. a negate). They must NOT share a cache
+        // entry; the new entry's hashed key differs from the first.
+        let ptx_a = "\
+.version 7.0
+.target sm_52
+.address_size 64
+
+.visible .entry id_kernel_owned_diff_a(
+    .param .u64 in_ptr,
+    .param .u64 out_ptr,
+    .param .u32 n
+) {
+    .reg .u32 %r_tid, %bid, %bdim, %n_reg;
+    .reg .u64 %a, %out, %off;
+    .reg .f32 %va;
+    .reg .pred %p;
+    ld.param.u64 %a, [in_ptr];
+    ld.param.u64 %out, [out_ptr];
+    ld.param.u32 %n_reg, [n];
+    mov.u32 %bid, %ctaid.x;
+    mov.u32 %bdim, %ntid.x;
+    mov.u32 %r_tid, %tid.x;
+    mad.lo.u32 %r_tid, %bid, %bdim, %r_tid;
+    setp.ge.u32 %p, %r_tid, %n_reg;
+    @%p bra DONE;
+    cvt.u64.u32 %off, %r_tid;
+    shl.b64 %off, %off, 2;
+    add.u64 %a, %a, %off;
+    add.u64 %out, %out, %off;
+    ld.global.f32 %va, [%a];
+    st.global.f32 [%out], %va;
+DONE:
+    ret;
+}
+"
+        .to_string();
+
+        let ptx_b = "\
+.version 7.0
+.target sm_52
+.address_size 64
+
+.visible .entry id_kernel_owned_diff_b(
+    .param .u64 in_ptr,
+    .param .u64 out_ptr,
+    .param .u32 n
+) {
+    .reg .u32 %r_tid, %bid, %bdim, %n_reg;
+    .reg .u64 %a, %out, %off;
+    .reg .f32 %va;
+    .reg .pred %p;
+    ld.param.u64 %a, [in_ptr];
+    ld.param.u64 %out, [out_ptr];
+    ld.param.u32 %n_reg, [n];
+    mov.u32 %bid, %ctaid.x;
+    mov.u32 %bdim, %ntid.x;
+    mov.u32 %r_tid, %tid.x;
+    mad.lo.u32 %r_tid, %bid, %bdim, %r_tid;
+    setp.ge.u32 %p, %r_tid, %n_reg;
+    @%p bra DONE;
+    cvt.u64.u32 %off, %r_tid;
+    shl.b64 %off, %off, 2;
+    add.u64 %a, %a, %off;
+    add.u64 %out, %out, %off;
+    ld.global.f32 %va, [%a];
+    neg.f32 %va, %va;
+    st.global.f32 [%out], %va;
+DONE:
+    ret;
+}
+"
+        .to_string();
+
+        let dev = crate::device::GpuDevice::new(0).expect("CUDA device 0");
+        let ctx = dev.context();
+
+        let f_a = super::get_or_compile_owned(
+            ctx,
+            ptx_a,
+            "id_kernel_owned_diff_a".to_string(),
+            dev.ordinal() as u32,
+        )
+        .expect("compile a");
+        let f_b = super::get_or_compile_owned(
+            ctx,
+            ptx_b,
+            "id_kernel_owned_diff_b".to_string(),
+            dev.ordinal() as u32,
+        )
+        .expect("compile b");
+
+        // Different PTX → different cache entry → distinct CUfunction
+        // handles; the debug reprs must differ.
+        assert_ne!(format!("{f_a:?}"), format!("{f_b:?}"));
     }
 
     /// Regression: `broadcast_div_kernel` PTX must load on the driver.
