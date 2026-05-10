@@ -1178,19 +1178,45 @@ fn download_weights_http_offline_preconditions() {
 }
 
 /// Ignored integration test: exercises download_weights over HTTP.
-/// End-to-end coverage (download + SHA verify) lives in load_pretrained_smoke.rs.
-/// Run with: cargo test -p ferrotorch-hub -- --ignored hub_smoke_download_weights
+/// End-to-end coverage (download + SHA verify) lives in load_pretrained_smoke.rs;
+/// this test is the conformance-suite mirror that pins the public API surface
+/// at compile time (typed fn-pointer pin) and exercises the same network path
+/// when run with `--ignored` on a network-enabled box.
+/// Run with: cargo test -p ferrotorch-hub --features http -- --ignored hub_smoke_download_weights
 #[cfg(feature = "http")]
 #[test]
-#[ignore = "requires network; gated for offline CI — full coverage in load_pretrained_smoke.rs; run with: cargo test -p ferrotorch-hub -- --ignored hub_smoke_download_weights"]
+#[ignore = "requires network; gated for offline CI — full coverage in load_pretrained_smoke.rs; run with: cargo test -p ferrotorch-hub --features http -- --ignored hub_smoke_download_weights"]
+#[allow(clippy::type_complexity)]
 fn hub_smoke_download_weights() {
-    // Delegated to load_pretrained_smoke::download_weights_mobilenet_v3_small_sha_verifies
-    // which provides the definitive SHA-256 + cache write verification (#739).
-    // This stub exists so the hub_smoke_ naming pattern is complete.
-    eprintln!(
-        "hub_smoke_download_weights: full coverage in \
-         load_pretrained_smoke::download_weights_mobilenet_v3_small_sha_verifies; \
-         run cargo test -p ferrotorch-hub -- --ignored load_pretrained"
+    use ferrotorch_core::FerrotorchResult;
+    use ferrotorch_hub::registry::ModelInfo;
+    use ferrotorch_hub::{HubCache, download_weights};
+
+    // Compile-time signature pin. A drift in argument order, parameter
+    // ownership, or the return type fails to type-check here, so the
+    // compile is itself a load-bearing assertion. Mirrors the Phase-4
+    // (#1055 xpu) typed fn-pointer pattern.
+    let _signature_pin: fn(&ModelInfo, &HubCache) -> FerrotorchResult<std::path::PathBuf> =
+        download_weights;
+
+    // Real network call: HTTP GET → SHA-256 verify → cache write. Only
+    // executes when the test is invoked with `--ignored` (it is gated by
+    // `#[ignore]` above). Mirrors the canonical assertion in
+    // load_pretrained_smoke::download_weights_mobilenet_v3_small_sha_verifies
+    // (#739).
+    let dir = tempfile::tempdir().expect("tempdir for download cache");
+    let cache = HubCache::new(dir.path());
+    let info = ferrotorch_hub::get_model_info("mobilenet_v3_small")
+        .expect("mobilenet_v3_small must be in the registry");
+    let path = download_weights(info, &cache)
+        .expect("download + SHA verify must succeed for the pinned hash");
+    assert!(path.exists(), "downloaded file must exist on disk");
+    let bytes = std::fs::metadata(&path)
+        .expect("stat downloaded file")
+        .len();
+    assert!(
+        bytes > 1_000_000,
+        "downloaded file looks too small: {bytes} bytes (expected ~10 MB)"
     );
 }
 
@@ -1210,18 +1236,38 @@ fn load_pretrained_http_offline_preconditions() {
 }
 
 /// Ignored integration test: exercises load_pretrained's HTTP download path.
-/// Full end-to-end coverage lives in load_pretrained_smoke.rs.
-/// Run with: cargo test -p ferrotorch-hub -- --ignored hub_smoke_load_pretrained
+/// Full end-to-end coverage lives in load_pretrained_smoke.rs; this test is
+/// the conformance-suite mirror that pins the public API surface at compile
+/// time (typed fn-pointer pin) and exercises the same network path when run
+/// with `--ignored` on a network-enabled box.
+/// Run with: cargo test -p ferrotorch-hub --features http -- --ignored hub_smoke_load_pretrained
 #[cfg(feature = "http")]
 #[test]
-#[ignore = "requires network; gated for offline CI — full coverage in load_pretrained_smoke.rs; run with: cargo test -p ferrotorch-hub -- --ignored load_pretrained"]
+#[ignore = "requires network; gated for offline CI — full coverage in load_pretrained_smoke.rs; run with: cargo test -p ferrotorch-hub --features http -- --ignored load_pretrained"]
 fn hub_smoke_load_pretrained() {
-    // Delegated to load_pretrained_smoke::load_pretrained_vit_b_16_end_to_end
-    // which provides definitive end-to-end load + parse + parameter-count
-    // verification (#749 / #739).
-    eprintln!(
-        "hub_smoke_load_pretrained: full coverage in \
-         load_pretrained_smoke::load_pretrained_vit_b_16_end_to_end; \
-         run cargo test -p ferrotorch-hub -- --ignored load_pretrained"
+    use ferrotorch_core::FerrotorchResult;
+    use ferrotorch_hub::load_pretrained;
+    use ferrotorch_nn::StateDict;
+
+    // Compile-time signature pin for the f32 instantiation. A drift in
+    // argument type, lifetime, or generic position fails to type-check
+    // here, so the compile is itself a load-bearing assertion. Mirrors
+    // the Phase-4 (#1055 xpu) typed fn-pointer pattern.
+    let _signature_pin: fn(&str) -> FerrotorchResult<StateDict<f32>> = load_pretrained::<f32>;
+
+    // Real network call: registry lookup → download_weights → SHA verify
+    // → SafeTensors parse → typed StateDict. Only executes when the test
+    // is invoked with `--ignored` (it is gated by `#[ignore]` above).
+    // Mirrors the canonical assertion in
+    // load_pretrained_smoke::load_pretrained_vit_b_16_end_to_end (#749 / #739).
+    let state_dict =
+        load_pretrained::<f32>("vit_b_16").expect("load_pretrained::<f32> must succeed");
+    let total: usize = state_dict
+        .values()
+        .map(ferrotorch_core::Tensor::numel)
+        .sum();
+    assert!(
+        total > 1_000_000,
+        "loaded StateDict has only {total} elements; expected ~86M for ViT-B/16"
     );
 }

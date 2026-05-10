@@ -300,6 +300,18 @@ fn chat_template_round_trip_matches_minijinja() {
     let prompt = apply_chat_template(SIMPLE_TPL, &messages, false, None, None).expect("render");
     let direct_ids = encode(&tok, &prompt, false).expect("encode");
 
+    // Hand-computed expected output of `SIMPLE_TPL` against `messages`,
+    // computed by walking the minijinja template manually (the `\n`
+    // characters below are literal newlines, not escape sequences).
+    // This is the external reference the test was missing — without it,
+    // the prior assertions only proved `apply_chat_template` agrees with
+    // itself. Now we anchor the renderer to a fixed string.
+    const EXPECTED_RENDERED: &str = "<|start_header_id|>system<|end_header_id|>\n\nYou are helpful.<|eot_id|><|start_header_id|>user<|end_header_id|>\n\nHi.<|eot_id|>";
+    assert_eq!(
+        prompt, EXPECTED_RENDERED,
+        "minijinja render must match the hand-computed expected string"
+    );
+
     let (combined_prompt, combined_ids) =
         apply_chat_template_to_ids(&tok, SIMPLE_TPL, &messages, false, None, None, false)
             .expect("apply_chat_template_to_ids");

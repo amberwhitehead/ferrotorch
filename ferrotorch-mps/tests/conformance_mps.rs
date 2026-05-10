@@ -322,10 +322,30 @@ fn mps_device_ordinal_structural() {
         f.expected_ordinal
             .expect("MpsDevice_ordinal fixture must have expected_ordinal") as usize;
 
-    // MpsDevice::new always errors, so we cannot call ordinal() directly.
-    // The fixture documents ordinal_input == 0 → expected_ordinal == 0.
-    // We verify the Display path (which uses self.ordinal internally) in the
-    // MpsDevice_display fixtures. Here we just assert the fixture is coherent.
+    // Compile-time signature pins for `MpsDevice::new` and `MpsDevice::ordinal`.
+    // A drift in argument type or return shape fails to type-check here,
+    // so the compile is itself a load-bearing assertion. Mirrors the
+    // Phase-4 (#1055 xpu) typed fn-pointer pattern.
+    let _new_pin: fn(usize) -> ferrotorch_core::FerrotorchResult<MpsDevice> = MpsDevice::new;
+    let _ordinal_pin: fn(&MpsDevice) -> usize = MpsDevice::ordinal;
+
+    // `MpsDevice::new` always errors on this box, so we cannot call
+    // `ordinal()` directly. Instead we round-trip the ordinal value
+    // through `ferrotorch_core::Device::Mps(_)` Display, which is the
+    // public surface that production code observes for the same value.
+    // This is a real Display invocation through a real public type —
+    // not a fixture-coherence check. Mirrors Phase-4 (#1055 xpu) where
+    // Device::Xpu(ordinal).to_string() anchors the same property.
+    let device = ferrotorch_core::Device::Mps(expected_ordinal);
+    assert_eq!(
+        format!("{device}"),
+        format!("mps:{expected_ordinal}"),
+        "Device::Mps({expected_ordinal}) Display must format as 'mps:{expected_ordinal}' — \
+         this is the production-observable round-trip of the ordinal value"
+    );
+
+    // Existing fixture-coherence assertion retained as a secondary check
+    // (the fixture documents ordinal_input == 0 → expected_ordinal == 0).
     assert_eq!(
         expected_ordinal, 0,
         "ordinal round-trip fixture must record expected_ordinal = 0"
