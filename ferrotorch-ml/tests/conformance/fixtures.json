@@ -5,7 +5,7 @@
     "python_executable": "/usr/sbin/python3",
     "python_version": "3.13.13 (main, Apr  8 2026, 00:00:00) [GCC 15.2.1 20260123 (Red Hat 15.2.1-7)]",
     "platform": "Linux-6.6.87.2-microsoft-standard-WSL2-x86_64-with-glibc2.41",
-    "generated_at": "2026-05-09T13:37:08.906904+00:00",
+    "generated_at": "2026-05-10T01:25:31.948959+00:00",
     "random_state": 42,
     "description": "scikit-learn 1.5.x reference fixtures for ferrotorch-ml conformance. Tracking issue #840."
   },
@@ -1302,6 +1302,64 @@
         ]
       ],
       "expected": 0.0,
+      "tol": 1e-09
+    },
+    {
+      "op": "label_ranking_average_precision_score_imperfect",
+      "y_true": [
+        [
+          1,
+          0,
+          0
+        ],
+        [
+          0,
+          1,
+          0
+        ]
+      ],
+      "y_score": [
+        [
+          0.1,
+          0.5,
+          0.9
+        ],
+        [
+          0.5,
+          0.1,
+          0.9
+        ]
+      ],
+      "expected": 0.3333333333333333,
+      "tol": 1e-09
+    },
+    {
+      "op": "label_ranking_loss_imperfect",
+      "y_true": [
+        [
+          1,
+          0,
+          0
+        ],
+        [
+          0,
+          1,
+          0
+        ]
+      ],
+      "y_score": [
+        [
+          0.1,
+          0.5,
+          0.9
+        ],
+        [
+          0.5,
+          0.1,
+          0.9
+        ]
+      ],
+      "expected": 1.0,
       "tol": 1e-09
     },
     {

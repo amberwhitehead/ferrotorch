@@ -755,6 +755,26 @@ fn ndcg_score_perfect_matches_sklearn() {
         f.tol.unwrap_or(1e-9),
         "ndcg_perfect",
     );
+
+    // Phase 11 audit-fix (closes #1071, tracking #1015): the fixture above
+    // uses identity inputs (y_true == y_score) which collapses NDCG to 1.0 —
+    // a stub returning the constant 1.0 trivially passes. Cross-discriminate
+    // by re-using the same y_true with a *reversed*-rank score vector and
+    // assert the result is strictly < perfect. This forces the
+    // implementation to actually order by score, gain by relevance, and
+    // discount by position rather than echo a constant.
+    let ys_shuffled = tensor1d(&[1.0_f64, 2.0, 3.0, 4.0]);
+    let actual_shuffled = ndcg_score(&yt, &ys_shuffled, None).expect("ndcg_shuffled");
+    assert!(
+        actual_shuffled < actual,
+        "ndcg shuffled-score result ({actual_shuffled}) must be strictly less than \
+         the perfect-ranking result ({actual}); a constant-returning stub would fail",
+    );
+    // sklearn 1.5.2: ndcg_score([[3,2,1,0]], [[1,2,3,4]]) ≈ 0.6138273133441086
+    assert!(
+        actual_shuffled < 0.99,
+        "ndcg shuffled-score result ({actual_shuffled}) is suspiciously close to 1.0",
+    );
 }
 
 #[test]
@@ -801,6 +821,34 @@ fn label_ranking_average_precision_score_matches_sklearn() {
     check_f64(actual, expected_f64(&f), f.tol.unwrap_or(1e-9), "lrap");
 }
 
+/// Phase 11 audit-fix (closes #1069, tracking #1015): sibling discriminator
+/// for `label_ranking_average_precision_score_matches_sklearn`. The perfect
+/// fixture above places each positive label at rank 1 in its row, collapsing
+/// LRAP to 1.0 — a stub returning the constant 1.0 trivially passes. This
+/// imperfect fixture re-uses the same y_true but reverses the score order so
+/// each positive is ranked last; the sklearn-derived expected value is
+/// ≈ 0.3333..., not 1.0, forcing the implementation to actually compute the
+/// rank-precision sum.
+#[test]
+fn label_ranking_average_precision_score_imperfect_matches_sklearn() {
+    let file = load_fixtures();
+    let f = find(&file, "label_ranking_average_precision_score_imperfect");
+    let (yt_flat, yt_rows, yt_cols) = parse_score_2d(f.y_true.as_ref().expect("y_true"));
+    let yt = tensor2d(yt_flat, yt_rows, yt_cols);
+    let (ys_flat, ys_rows, ys_cols) = parse_score_2d(f.y_score.as_ref().expect("y_score"));
+    let ys = tensor2d(ys_flat, ys_rows, ys_cols);
+    let actual = label_ranking_average_precision_score(&yt, &ys).expect("lrap_imperfect");
+    let expected = expected_f64(&f);
+    // Discrimination guard: expected must NOT be the perfect-ranking value;
+    // otherwise the fixture is no harder than the perfect one.
+    assert!(
+        expected < 0.999,
+        "lrap_imperfect: fixture expected ({expected}) is too close to 1.0; \
+         the imperfect fixture must produce a non-perfect LRAP",
+    );
+    check_f64(actual, expected, f.tol.unwrap_or(1e-9), "lrap_imperfect");
+}
+
 #[test]
 fn label_ranking_loss_matches_sklearn() {
     let file = load_fixtures();
@@ -815,6 +863,38 @@ fn label_ranking_loss_matches_sklearn() {
         expected_f64(&f),
         f.tol.unwrap_or(1e-9),
         "label_ranking_loss",
+    );
+}
+
+/// Phase 11 audit-fix (closes #1070, tracking #1015): sibling discriminator
+/// for `label_ranking_loss_matches_sklearn`. The perfect fixture above ranks
+/// each positive at rank 1, collapsing label_ranking_loss to 0.0 — a stub
+/// returning the constant 0.0 trivially passes. This imperfect fixture
+/// re-uses the same y_true but reverses the score order so each positive is
+/// ranked last; the sklearn-derived expected value is 1.0 (worst loss), not
+/// 0.0, forcing the implementation to actually count misranked label pairs.
+#[test]
+fn label_ranking_loss_imperfect_matches_sklearn() {
+    let file = load_fixtures();
+    let f = find(&file, "label_ranking_loss_imperfect");
+    let (yt_flat, yt_rows, yt_cols) = parse_score_2d(f.y_true.as_ref().expect("y_true"));
+    let yt = tensor2d(yt_flat, yt_rows, yt_cols);
+    let (ys_flat, ys_rows, ys_cols) = parse_score_2d(f.y_score.as_ref().expect("y_score"));
+    let ys = tensor2d(ys_flat, ys_rows, ys_cols);
+    let actual = label_ranking_loss(&yt, &ys).expect("label_ranking_loss_imperfect");
+    let expected = expected_f64(&f);
+    // Discrimination guard: expected must be strictly > 0.0 so a stub
+    // returning the perfect-fixture value (0.0) cannot satisfy this test.
+    assert!(
+        expected > 0.0,
+        "label_ranking_loss_imperfect: fixture expected ({expected}) must be \
+         strictly greater than 0.0",
+    );
+    check_f64(
+        actual,
+        expected,
+        f.tol.unwrap_or(1e-9),
+        "label_ranking_loss_imperfect",
     );
 }
 

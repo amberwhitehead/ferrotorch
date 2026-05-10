@@ -408,6 +408,29 @@ add("label_ranking_loss",
     expected=float(label_ranking_loss(y_lrap_true, y_lrap_score)),
     tol=1e-9)
 
+# Phase 11 audit-fix (closes #1069 #1070, tracking #1015): the perfect-only
+# LRAP/LRL fixtures above place the positive labels at rank 1 in their rows,
+# which collapses LRAP to 1.0 and LRL to 0.0 — values a stub returning the
+# constant easily passes. The imperfect fixture below uses the *same* y_true
+# but reverses the score order so each positive label is ranked last; this
+# forces the implementation to actually compute the metric. sklearn-derived
+# expected values: LRAP ≈ 0.3333..., LRL = 1.0.
+y_lrap_true_imperfect = np.array([[1, 0, 0], [0, 1, 0]])
+y_lrap_score_imperfect = np.array([[0.1, 0.5, 0.9], [0.5, 0.1, 0.9]])
+add("label_ranking_average_precision_score_imperfect",
+    y_true=y_lrap_true_imperfect.tolist(),
+    y_score=y_lrap_score_imperfect.tolist(),
+    expected=float(label_ranking_average_precision_score(
+        y_lrap_true_imperfect, y_lrap_score_imperfect)),
+    tol=1e-9)
+
+add("label_ranking_loss_imperfect",
+    y_true=y_lrap_true_imperfect.tolist(),
+    y_score=y_lrap_score_imperfect.tolist(),
+    expected=float(label_ranking_loss(
+        y_lrap_true_imperfect, y_lrap_score_imperfect)),
+    tol=1e-9)
+
 y_cov_true = np.array([[1, 0, 0, 1]])
 y_cov_score = np.array([[0.9, 0.4, 0.5, 0.1]])
 add("coverage_error",
