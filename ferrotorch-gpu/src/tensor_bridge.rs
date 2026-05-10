@@ -820,6 +820,11 @@ impl<T: GpuFloat> GpuTensor<T> {
         // parameter, which lives for the whole function body.
         let b_buf = bias.map(|b| unsafe { transmute_buffer_ref::<T, f32>(&b.buffer) });
 
+        // `GpuTensor::conv2d` is the dense-conv legacy API (no groups, no
+        // dilation) — Pass 2A extends `gpu_conv2d_f32` with both, but the
+        // public `GpuTensor` surface stays dense. Forward `(1, 1)` and `1`
+        // so the kernel takes the dense fast path (no per-group weight
+        // copy, im2col with dilation == 1).
         let (out_buf, out_shape) = gpu_conv2d_f32(
             a_buf,
             w_buf,
@@ -828,6 +833,8 @@ impl<T: GpuFloat> GpuTensor<T> {
             weight_shape,
             stride,
             padding,
+            (1, 1),
+            1,
             &self.device,
         )?;
 

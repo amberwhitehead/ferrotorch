@@ -567,29 +567,43 @@ impl<T: Float> Module<T> for Conv2d<T> {
 
         // ---- GPU fast path: fully on-device conv2d ----
         //
-        // The CUDA backend's `conv2d_f32` signature does NOT accept groups
-        // or dilation (see ferrotorch-gpu/src/conv.rs); extending it is
-        // backend territory and tracked separately. Until that lands we
-        // EXPLICITLY gate the GPU dispatch on the dense + non-dilated case.
-        // Failure mode #15 (CPU-pull-disguised-as-device-op) is avoided by
-        // making the detour visible at the dispatch boundary, NOT inside
-        // the kernel.
+        // Pass 2A (#1003): the CUDA backend's `conv2d_f32` accepts groups
+        // and dilation natively. Every f32 CUDA input dispatches to the
+        // GPU regardless of `groups` / `dilation`; the kernel does the
+        // per-group im2col + GEMM on-device. The pre-Pass-2A
+        // `gpu_eligible = groups == 1 && dilation == (1, 1)` gate is
+        // gone — keeping it would be a stub-shaped CPU detour that
+        // failure mode #15 explicitly forbids.
+        //
+        // Note: the weight layout passed to the backend is
+        // `[C_out, C_in / groups, kH, kW]` — the PyTorch grouped-conv
+        // convention. `Conv2d::new_full` already constructs `self.weight`
+        // in that shape (see `Conv2d::new_full` for the `in_per_group =
+        // in_channels / groups` slice).
         let is_f32 = std::mem::size_of::<T>() == 4;
-        let gpu_eligible = groups == 1 && self.dilation == (1, 1);
-        if gpu_eligible && is_f32 && input.is_cuda() {
+        if is_f32 && input.is_cuda() {
             if let Some(backend) = ferrotorch_core::gpu_dispatch::gpu_backend() {
                 let bias_handle = self
                     .bias
                     .as_ref()
                     .and_then(|b| b.tensor().gpu_handle().ok());
+                let weight_shape = self.weight.tensor().shape();
+                let weight_dim4: [usize; 4] = [
+                    weight_shape[0],
+                    weight_shape[1],
+                    weight_shape[2],
+                    weight_shape[3],
+                ];
                 let (out_handle, out_shape) = backend.conv2d_f32(
                     input.gpu_handle()?,
                     self.weight.tensor().gpu_handle()?,
                     bias_handle,
                     [batch, c_in, h, w],
-                    [self.out_channels, self.in_channels, kh, kw],
+                    weight_dim4,
                     self.stride,
                     self.padding,
+                    self.dilation,
+                    groups,
                 )?;
 
                 let result = Tensor::from_storage(

@@ -2667,6 +2667,12 @@ pub trait GpuBackend: Send + Sync {
 
     /// GPU Conv2d forward: im2col + GEMM + bias add, entirely on-device.
     ///
+    /// Supports the full `Conv2d::new_full` parameter surface: `groups`
+    /// partitions input/output channels and `dilation` spaces the kernel
+    /// taps. The dispatch happens on the GPU for every value of these
+    /// parameters; there is no CPU detour. Pass `groups = 1` and
+    /// `dilation = (1, 1)` for the dense convolution case.
+    ///
     /// Returns `(output_handle, output_shape)` where output_shape is `[B, C_out, H_out, W_out]`.
     #[allow(clippy::too_many_arguments)]
     fn conv2d_f32(
@@ -2678,11 +2684,15 @@ pub trait GpuBackend: Send + Sync {
         _weight_shape: [usize; 4],
         _stride: (usize, usize),
         _padding: (usize, usize),
+        _dilation: (usize, usize),
+        _groups: usize,
     ) -> FerrotorchResult<(GpuBufferHandle, [usize; 4])> {
         Err(FerrotorchError::InvalidArgument {
             message: "conv2d_f32 GPU op not yet implemented".into(),
         })
     }
+    /// GPU Conv2d forward (f64). See [`Self::conv2d_f32`] for parameter
+    /// semantics — this is the f64 companion.
     #[allow(clippy::too_many_arguments)]
     fn conv2d_f64(
         &self,
@@ -2693,6 +2703,8 @@ pub trait GpuBackend: Send + Sync {
         _weight_shape: [usize; 4],
         _stride: (usize, usize),
         _padding: (usize, usize),
+        _dilation: (usize, usize),
+        _groups: usize,
     ) -> FerrotorchResult<(GpuBufferHandle, [usize; 4])> {
         Err(FerrotorchError::InvalidArgument {
             message: "conv2d_f64 GPU op not yet implemented".into(),

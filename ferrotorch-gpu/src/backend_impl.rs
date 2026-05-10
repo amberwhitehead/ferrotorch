@@ -1703,6 +1703,8 @@ impl GpuBackend for CudaBackendImpl {
         weight_shape: [usize; 4],
         stride: (usize, usize),
         padding: (usize, usize),
+        dilation: (usize, usize),
+        groups: usize,
     ) -> FerrotorchResult<(GpuBufferHandle, [usize; 4])> {
         let input_buf = Self::unwrap_buffer(input)?;
         let weight_buf = Self::unwrap_buffer(weight)?;
@@ -1719,6 +1721,8 @@ impl GpuBackend for CudaBackendImpl {
             weight_shape,
             stride,
             padding,
+            dilation,
+            groups,
             dev,
         )
         .map_err(Self::map_gpu_err)?;

@@ -184,23 +184,34 @@ fn im2col_cpu(
 // PTX kernel source strings
 // ---------------------------------------------------------------------------
 
-/// PTX kernel for im2col: rearranges input patches into columns on the GPU.
+/// PTX kernel for im2col with dilation + group support.
 ///
 /// Each thread computes ONE element of the column matrix
-/// `[col_rows, col_cols]`.  Global thread index maps to `(row, col)`:
+/// `[col_rows, col_cols]` for a single batch element and a single group.
+/// The caller passes `channels` = channels-per-group (`C_in / groups`)
+/// and `channel_offset` = `g * channels-per-group` so the kernel can read
+/// from the correct contiguous channel slab in the original `[B, C_in, H, W]`
+/// input. With `groups == 1` and `dilation == (1, 1)` this matches the
+/// original pre-Pass-2A im2col.
+///
+/// Global thread index maps to `(row, col)`:
 ///
 /// - `row = tid / col_cols`
 /// - `col = tid % col_cols`
 ///
 /// From `(row, col)` we derive the input coordinate:
 ///
-/// - `c  = row / (kH * kW)`
+/// - `c  = row / (kH * kW)`              (channel within the group)
 /// - `kh = (row / kW) % kH`
 /// - `kw = row % kW`
 /// - `oh = col / W_out`
 /// - `ow = col % W_out`
-/// - `ih = oh * stride_h + kh - pad_h`
-/// - `iw = ow * stride_w + kw - pad_w`
+/// - `ih = oh * stride_h + kh * dil_h - pad_h`
+/// - `iw = ow * stride_w + kw * dil_w - pad_w`
+///
+/// The input read uses channel `channel_offset + c` so the kernel sees the
+/// per-group slice of the dense `[B, C_in, H, W]` input directly without
+/// a copy.
 ///
 /// If `(ih, iw)` is in-bounds, we read from the input; otherwise we write 0.
 #[cfg(feature = "cuda")]
@@ -213,6 +224,8 @@ const IM2COL_PTX: &str = "\
     .param .u64 input_ptr,
     .param .u64 output_ptr,
     .param .u32 batch_idx,
+    .param .u32 c_in_total,
+    .param .u32 channel_offset,
     .param .u32 channels,
     .param .u32 height,
     .param .u32 width,
@@ -222,17 +235,22 @@ const IM2COL_PTX: &str = "\
     .param .u32 stride_w,
     .param .u32 pad_h,
     .param .u32 pad_w,
+    .param .u32 dil_h,
+    .param .u32 dil_w,
     .param .u32 h_out,
     .param .u32 w_out,
     .param .u32 col_rows,
     .param .u32 col_cols
 ) {
     .reg .u32 %gtid, %bid, %bdim, %n_total;
-    .reg .u32 %batch, %C, %H, %W, %kH, %kW, %sH, %sW, %pH, %pW, %hO, %wO;
+    .reg .u32 %batch, %CTOT, %COFF, %C, %H, %W, %kH, %kW, %sH, %sW, %pH, %pW;
+    .reg .u32 %dH, %dW, %hO, %wO;
     .reg .u32 %cR, %cC;
     .reg .u32 %row, %col, %c, %kh, %kw, %oh, %ow;
+    .reg .u32 %c_global;
     .reg .u32 %kHkW, %HW, %CHW;
     .reg .u32 %ih_raw, %iw_raw, %ih, %iw;
+    .reg .u32 %kh_d, %kw_d;
     .reg .u32 %t0;
     .reg .u64 %inp, %outp, %off64;
     .reg .f32 %val, %zero;
@@ -243,6 +261,8 @@ const IM2COL_PTX: &str = "\
     ld.param.u64 %inp,   [input_ptr];
     ld.param.u64 %outp,  [output_ptr];
     ld.param.u32 %batch, [batch_idx];
+    ld.param.u32 %CTOT,  [c_in_total];
+    ld.param.u32 %COFF,  [channel_offset];
     ld.param.u32 %C,     [channels];
     ld.param.u32 %H,     [height];
     ld.param.u32 %W,     [width];
@@ -252,6 +272,8 @@ const IM2COL_PTX: &str = "\
     ld.param.u32 %sW,    [stride_w];
     ld.param.u32 %pH,    [pad_h];
     ld.param.u32 %pW,    [pad_w];
+    ld.param.u32 %dH,    [dil_h];
+    ld.param.u32 %dW,    [dil_w];
     ld.param.u32 %hO,    [h_out];
     ld.param.u32 %wO,    [w_out];
     ld.param.u32 %cR,    [col_rows];
@@ -275,7 +297,7 @@ const IM2COL_PTX: &str = "\
     // kHkW = kH * kW
     mul.lo.u32 %kHkW, %kH, %kW;
 
-    // c  = row / (kH * kW)
+    // c  = row / (kH * kW)   (channel within the group)
     div.u32 %c, %row, %kHkW;
 
     // kh = (row / kW) % kH
@@ -289,10 +311,15 @@ const IM2COL_PTX: &str = "\
     div.u32 %oh, %col, %wO;
     rem.u32 %ow, %col, %wO;
 
-    // ih_raw = oh * stride_h + kh   (before subtracting pad)
-    mad.lo.u32 %ih_raw, %oh, %sH, %kh;
-    // iw_raw = ow * stride_w + kw
-    mad.lo.u32 %iw_raw, %ow, %sW, %kw;
+    // Apply dilation to the kernel offsets:
+    // kh_d = kh * dil_h, kw_d = kw * dil_w
+    mul.lo.u32 %kh_d, %kh, %dH;
+    mul.lo.u32 %kw_d, %kw, %dW;
+
+    // ih_raw = oh * stride_h + kh_d   (before subtracting pad)
+    mad.lo.u32 %ih_raw, %oh, %sH, %kh_d;
+    // iw_raw = ow * stride_w + kw_d
+    mad.lo.u32 %iw_raw, %ow, %sW, %kw_d;
 
     // Check bounds: ih_raw >= pad_h  &&  iw_raw >= pad_w
     //               (ih_raw - pad_h) < H  &&  (iw_raw - pad_w) < W
@@ -316,12 +343,15 @@ const IM2COL_PTX: &str = "\
 
     @!%p_in_bounds bra WRITE_OUT;
 
-    // Read input[batch * C*H*W + c * H*W + ih * W + iw]
+    // c_global = channel_offset + c (channel into the dense [B, C_in, H, W] input)
+    add.u32 %c_global, %COFF, %c;
+
+    // Read input[batch * C_in_total*H*W + c_global * H*W + ih * W + iw]
     mul.lo.u32 %HW, %H, %W;
-    mul.lo.u32 %CHW, %C, %HW;
-    // offset = batch*CHW + c*HW + ih*W + iw
+    mul.lo.u32 %CHW, %CTOT, %HW;
+    // offset = batch*CHW + c_global*HW + ih*W + iw
     mad.lo.u32 %t0, %batch, %CHW, %iw;
-    mad.lo.u32 %t0, %c, %HW, %t0;
+    mad.lo.u32 %t0, %c_global, %HW, %t0;
     mad.lo.u32 %t0, %ih, %W, %t0;
 
     // Byte offset (f32 = 4 bytes)
@@ -444,13 +474,18 @@ fn launch_cfg(n: usize) -> GpuResult<cudarc::driver::LaunchConfig> {
 ///
 /// - `input` -- GPU buffer containing `[B, C_in, H, W]` flattened in
 ///   row-major order.
-/// - `weight` -- GPU buffer containing `[C_out, C_in, kH, kW]` flattened
-///   in row-major order.
+/// - `weight` -- GPU buffer containing
+///   `[C_out, C_in / groups, kH, kW]` flattened in row-major order. The
+///   second axis is the per-group input channel count, matching PyTorch's
+///   grouped-convolution layout.
 /// - `bias` -- optional GPU buffer containing `[C_out]` bias values.
 /// - `input_shape` -- `[B, C_in, H, W]`.
-/// - `weight_shape` -- `[C_out, C_in, kH, kW]`.
+/// - `weight_shape` -- `[C_out, C_in / groups, kH, kW]`.
 /// - `stride` -- `(stride_h, stride_w)`.
 /// - `padding` -- `(pad_h, pad_w)`.
+/// - `dilation` -- `(dil_h, dil_w)`. `(1, 1)` for the dense case.
+/// - `groups` -- channel-group count. `1` for the dense case. Must divide
+///   both `C_in` and `C_out`.
 /// - `device` -- the GPU device that owns all buffers.
 ///
 /// # Returns
@@ -461,7 +496,7 @@ fn launch_cfg(n: usize) -> GpuResult<cudarc::driver::LaunchConfig> {
 /// # Errors
 ///
 /// - [`GpuError::ShapeMismatch`] if buffer lengths are inconsistent with
-///   shapes.
+///   shapes, or if `groups` does not divide both `C_in` and `C_out`.
 /// - [`GpuError::DeviceMismatch`] if buffers are on different devices.
 /// - [`GpuError::Driver`] or [`GpuError::Blas`] on CUDA runtime errors.
 #[allow(clippy::too_many_arguments)]
@@ -474,19 +509,47 @@ pub fn gpu_conv2d_f32(
     weight_shape: [usize; 4],
     stride: (usize, usize),
     padding: (usize, usize),
+    dilation: (usize, usize),
+    groups: usize,
     device: &GpuDevice,
 ) -> GpuResult<(CudaBuffer<f32>, [usize; 4])> {
     use cudarc::driver::PushKernelArg;
 
     let [batch, c_in, h, w] = input_shape;
-    let [c_out, c_in_w, kh, kw] = weight_shape;
+    let [c_out, c_in_per_group_w, kh, kw] = weight_shape;
 
-    // Validate channel consistency.
-    if c_in != c_in_w {
+    // Validate groups.
+    if groups == 0 {
         return Err(GpuError::ShapeMismatch {
             op: "conv2d",
-            expected: vec![c_in],
-            got: vec![c_in_w],
+            expected: vec![1],
+            got: vec![0],
+        });
+    }
+    if c_in % groups != 0 || c_out % groups != 0 {
+        return Err(GpuError::ShapeMismatch {
+            op: "conv2d",
+            expected: vec![c_in, c_out],
+            got: vec![groups, groups],
+        });
+    }
+    let c_in_per_group = c_in / groups;
+    let c_out_per_group = c_out / groups;
+
+    // Weight's input-channel axis must equal c_in / groups (PyTorch layout).
+    if c_in_per_group_w != c_in_per_group {
+        return Err(GpuError::ShapeMismatch {
+            op: "conv2d",
+            expected: vec![c_in_per_group],
+            got: vec![c_in_per_group_w],
+        });
+    }
+
+    if dilation.0 == 0 || dilation.1 == 0 {
+        return Err(GpuError::ShapeMismatch {
+            op: "conv2d",
+            expected: vec![1, 1],
+            got: vec![dilation.0, dilation.1],
         });
     }
 
@@ -500,7 +563,7 @@ pub fn gpu_conv2d_f32(
         });
     }
 
-    let expected_weight_len = c_out * c_in * kh * kw;
+    let expected_weight_len = c_out * c_in_per_group * kh * kw;
     if weight.len() != expected_weight_len {
         return Err(GpuError::ShapeMismatch {
             op: "conv2d",
@@ -533,9 +596,13 @@ pub fn gpu_conv2d_f32(
         });
     }
 
+    // Effective kernel extent after dilation.
+    let eff_kh = dilation.0 * (kh - 1) + 1;
+    let eff_kw = dilation.1 * (kw - 1) + 1;
+
     // Compute output spatial dimensions.
-    let h_out = (h + 2 * padding.0 - kh) / stride.0 + 1;
-    let w_out = (w + 2 * padding.1 - kw) / stride.1 + 1;
+    let h_out = (h + 2 * padding.0 - eff_kh) / stride.0 + 1;
+    let w_out = (w + 2 * padding.1 - eff_kw) / stride.1 + 1;
     let output_shape = [batch, c_out, h_out, w_out];
 
     // Handle degenerate case.
@@ -544,18 +611,34 @@ pub fn gpu_conv2d_f32(
         return Ok((out, output_shape));
     }
 
-    let col_rows = c_in * kh * kw;
+    // Per-group im2col / GEMM dimensions.
+    let group_col_rows = c_in_per_group * kh * kw;
     let col_cols = h_out * w_out;
-    let col_elems = col_rows * col_cols;
+    let group_col_elems = group_col_rows * col_cols;
+    let group_out_elems = c_out_per_group * col_cols;
     let out_elems_per_batch = c_out * col_cols;
     let total_out_elems = batch * out_elems_per_batch;
+    let weight_per_group_elems = c_out_per_group * c_in_per_group * kh * kw;
 
     // -----------------------------------------------------------------------
     // Allocate GPU buffers (all on-device, no CPU roundtrips)
     // -----------------------------------------------------------------------
 
-    // Column buffer: reused for each batch element [col_rows, col_cols].
-    let mut col_buf = crate::transfer::alloc_zeros_f32(col_elems, device)?;
+    // Column buffer: reused for each (batch, group) pair —
+    // shape [group_col_rows, col_cols].
+    let mut col_buf = crate::transfer::alloc_zeros_f32(group_col_elems, device)?;
+
+    // Per-group weight buffer (reused across batches/groups for groups > 1).
+    // For groups == 1 we pass `weight` directly to GEMM and skip this copy
+    // entirely so the dense path is unchanged.
+    let mut weight_group_buf = if groups > 1 {
+        Some(crate::transfer::alloc_zeros_f32(
+            weight_per_group_elems,
+            device,
+        )?)
+    } else {
+        None
+    };
 
     // Full output buffer: [B, C_out, H_out * W_out] contiguous.
     let mut output_buf = crate::transfer::alloc_zeros_f32(total_out_elems, device)?;
@@ -582,85 +665,136 @@ pub fn gpu_conv2d_f32(
     };
 
     // -----------------------------------------------------------------------
-    // Per-batch loop: im2col -> GEMM -> D2D copy -> bias add
+    // Per-(batch, group) loop: im2col -> GEMM -> D2D copy -> bias add
     // -----------------------------------------------------------------------
 
-    let im2col_cfg = launch_cfg(col_elems)?;
+    let im2col_cfg = launch_cfg(group_col_elems)?;
+
+    let c_in_total_u32 = c_in as u32;
+    let channels_u32 = c_in_per_group as u32;
+    let height_u32 = h as u32;
+    let width_u32 = w as u32;
+    let kh_u32 = kh as u32;
+    let kw_u32 = kw as u32;
+    let sh_u32 = stride.0 as u32;
+    let sw_u32 = stride.1 as u32;
+    let ph_u32 = padding.0 as u32;
+    let pw_u32 = padding.1 as u32;
+    let dh_u32 = dilation.0 as u32;
+    let dw_u32 = dilation.1 as u32;
+    let ho_u32 = h_out as u32;
+    let wo_u32 = w_out as u32;
+    let cr_u32 = group_col_rows as u32;
+    let cc_u32 = col_cols as u32;
 
     for b in 0..batch {
         let b_u32 = b as u32;
-        let channels_u32 = c_in as u32;
-        let height_u32 = h as u32;
-        let width_u32 = w as u32;
-        let kh_u32 = kh as u32;
-        let kw_u32 = kw as u32;
-        let sh_u32 = stride.0 as u32;
-        let sw_u32 = stride.1 as u32;
-        let ph_u32 = padding.0 as u32;
-        let pw_u32 = padding.1 as u32;
-        let ho_u32 = h_out as u32;
-        let wo_u32 = w_out as u32;
-        let cr_u32 = col_rows as u32;
-        let cc_u32 = col_cols as u32;
 
-        // --- im2col: input (GPU) -> col_buf (GPU) ---
-        //
-        // SAFETY: The kernel reads from `input` within the batch-element
-        // region `[b * C*H*W .. (b+1) * C*H*W]` and writes to `col_buf`
-        // which is `col_rows * col_cols` elements.  Both buffers are
-        // device-resident with sufficient length.  The grid covers exactly
-        // `col_elems` threads.
-        unsafe {
-            stream
-                .launch_builder(&im2col_fn)
-                .arg(input.inner())
-                .arg(col_buf.inner_mut())
-                .arg(&b_u32)
-                .arg(&channels_u32)
-                .arg(&height_u32)
-                .arg(&width_u32)
-                .arg(&kh_u32)
-                .arg(&kw_u32)
-                .arg(&sh_u32)
-                .arg(&sw_u32)
-                .arg(&ph_u32)
-                .arg(&pw_u32)
-                .arg(&ho_u32)
-                .arg(&wo_u32)
-                .arg(&cr_u32)
-                .arg(&cc_u32)
-                .launch(im2col_cfg)?;
+        for g in 0..groups {
+            let channel_offset_u32 = (g * c_in_per_group) as u32;
+
+            // --- im2col: input (GPU) -> col_buf (GPU) for this (b, g) ---
+            //
+            // SAFETY: The kernel reads from `input` within the batch-element
+            // region for batch `b` and channels
+            // `[g*c_in_per_group .. (g+1)*c_in_per_group]`, and writes to
+            // `col_buf` which holds `group_col_rows * col_cols` elements.
+            // Both buffers are device-resident with sufficient length. The
+            // grid covers exactly `group_col_elems` threads.
+            unsafe {
+                stream
+                    .launch_builder(&im2col_fn)
+                    .arg(input.inner())
+                    .arg(col_buf.inner_mut())
+                    .arg(&b_u32)
+                    .arg(&c_in_total_u32)
+                    .arg(&channel_offset_u32)
+                    .arg(&channels_u32)
+                    .arg(&height_u32)
+                    .arg(&width_u32)
+                    .arg(&kh_u32)
+                    .arg(&kw_u32)
+                    .arg(&sh_u32)
+                    .arg(&sw_u32)
+                    .arg(&ph_u32)
+                    .arg(&pw_u32)
+                    .arg(&dh_u32)
+                    .arg(&dw_u32)
+                    .arg(&ho_u32)
+                    .arg(&wo_u32)
+                    .arg(&cr_u32)
+                    .arg(&cc_u32)
+                    .launch(im2col_cfg)?;
+            }
+
+            // --- Per-group GEMM: w_g @ col_buf ---
+            // w_g:    [c_out_per_group, group_col_rows]
+            // col_buf:[group_col_rows, col_cols]
+            // result: [c_out_per_group, col_cols]
+            //
+            // For groups > 1 we copy the contiguous chunk of `weight`
+            // belonging to group `g` into the reusable `weight_group_buf`
+            // (D2D, all on-device). For groups == 1 we pass `weight`
+            // directly so the dense path takes zero extra copies.
+            let gemm_out = if let Some(wg_buf) = weight_group_buf.as_mut() {
+                let w_start = g * weight_per_group_elems;
+                let w_end = w_start + weight_per_group_elems;
+                let w_src = weight.inner().slice(w_start..w_end);
+                let mut w_dst = wg_buf.inner_mut().slice_mut(0..weight_per_group_elems);
+                stream.memcpy_dtod(&w_src, &mut w_dst)?;
+                gpu_matmul_f32(
+                    wg_buf,
+                    &col_buf,
+                    c_out_per_group,
+                    group_col_rows,
+                    col_cols,
+                    device,
+                )?
+            } else {
+                gpu_matmul_f32(
+                    weight,
+                    &col_buf,
+                    c_out_per_group,
+                    group_col_rows,
+                    col_cols,
+                    device,
+                )?
+            };
+
+            // --- D2D copy: gemm_out -> output_buf[b, group_slice] ---
+            //
+            // Output for batch b, group g sits at:
+            //   output_buf[b * out_elems_per_batch + g * group_out_elems ..]
+            // The destination is a contiguous chunk because the channel axis
+            // is the slow-moving axis in [B, C_out, col_cols].
+            let out_start = b * out_elems_per_batch + g * group_out_elems;
+            let out_end = out_start + group_out_elems;
+            let gemm_view = gemm_out.inner().slice(0..group_out_elems);
+            let mut out_view = output_buf.inner_mut().slice_mut(out_start..out_end);
+            stream.memcpy_dtod(&gemm_view, &mut out_view)?;
         }
 
-        // --- GEMM: weight @ col_buf -> gemm_out (all on GPU) ---
-        // weight:  [C_out, col_rows]
-        // col_buf: [col_rows, col_cols]
-        // result:  [C_out, col_cols]
-        let gemm_out = gpu_matmul_f32(weight, &col_buf, c_out, col_rows, col_cols, device)?;
-
-        // --- D2D copy: gemm_out -> output_buf[b * out_elems_per_batch ..] ---
-        // Slice gemm_out to the logical length — the underlying CudaSlice may
-        // be larger due to pool rounding (alloc_zeros_f32 rounds up).
-        let out_start = b * out_elems_per_batch;
-        let out_end = out_start + out_elems_per_batch;
-        let gemm_view = gemm_out.inner().slice(0..out_elems_per_batch);
-        let mut out_view = output_buf.inner_mut().slice_mut(out_start..out_end);
-        stream.memcpy_dtod(&gemm_view, &mut out_view)?;
-
-        // --- Bias add (if present, in-place on output_buf) ---
+        // --- Bias add (if present, in-place on output_buf for this batch) ---
         if let (Some(bias_buf), Some(bias_func)) = (bias, &bias_fn) {
             let n_bias = out_elems_per_batch as u32;
             let spatial = col_cols as u32;
             let bias_cfg = launch_cfg(out_elems_per_batch)?;
 
+            let batch_start = b * out_elems_per_batch;
+            let batch_end = batch_start + out_elems_per_batch;
+
             // We need to launch the bias kernel on the sub-region of
             // output_buf for this batch element.  We pass a mutable view.
-            let mut out_view = output_buf.inner_mut().slice_mut(out_start..out_end);
+            let mut out_view = output_buf.inner_mut().slice_mut(batch_start..batch_end);
 
             // SAFETY: The kernel reads `out_elems_per_batch` elements from
             // the output sub-region and `c_out` elements from `bias_buf`,
             // then writes back the summed values.  All buffers are
-            // device-resident with sufficient length.
+            // device-resident with sufficient length. The bias kernel uses
+            // `c = i / spatial_size`, which yields the correct C_out index
+            // for the contiguous `[C_out, col_cols]` batch slab regardless
+            // of `groups` (the channel axis is dense across groups in the
+            // output).
             unsafe {
                 stream
                     .launch_builder(bias_func)
@@ -678,6 +812,7 @@ pub fn gpu_conv2d_f32(
 
 /// Stub -- always returns [`GpuError::NoCudaFeature`].
 #[cfg(not(feature = "cuda"))]
+#[allow(clippy::too_many_arguments)]
 pub fn gpu_conv2d_f32(
     _input: &CudaBuffer<f32>,
     _weight: &CudaBuffer<f32>,
@@ -686,6 +821,8 @@ pub fn gpu_conv2d_f32(
     _weight_shape: [usize; 4],
     _stride: (usize, usize),
     _padding: (usize, usize),
+    _dilation: (usize, usize),
+    _groups: usize,
     _device: &GpuDevice,
 ) -> GpuResult<(CudaBuffer<f32>, [usize; 4])> {
     Err(GpuError::NoCudaFeature)
@@ -792,6 +929,8 @@ mod tests {
             [1, 1, 3, 3],
             (1, 1),
             (0, 0),
+            (1, 1),
+            1,
             &dev,
         )
         .expect("gpu_conv2d_f32");
@@ -821,6 +960,8 @@ mod tests {
             [1, 1, 3, 3],
             (1, 1),
             (1, 1),
+            (1, 1),
+            1,
             &dev,
         )
         .expect("gpu_conv2d_f32");
@@ -850,6 +991,8 @@ mod tests {
             [1, 1, 3, 3],
             (2, 2),
             (0, 0),
+            (1, 1),
+            1,
             &dev,
         )
         .expect("gpu_conv2d_f32");
@@ -906,6 +1049,8 @@ mod tests {
             weight_shape,
             stride,
             padding,
+            (1, 1),
+            1,
             &dev,
         )
         .expect("gpu_conv2d_f32");
@@ -956,6 +1101,8 @@ mod tests {
             weight_shape,
             stride,
             padding,
+            (1, 1),
+            1,
             &dev,
         )
         .expect("gpu_conv2d_f32");
@@ -1012,6 +1159,8 @@ mod tests {
             weight_shape,
             stride,
             padding,
+            (1, 1),
+            1,
             &dev,
         )
         .expect("gpu_conv2d_f32");
@@ -1064,6 +1213,8 @@ mod tests {
             weight_shape,
             stride,
             padding,
+            (1, 1),
+            1,
             &dev,
         )
         .expect("gpu_conv2d_f32");
@@ -1094,6 +1245,8 @@ mod tests {
             [2, 5, 3, 3],
             (1, 1),
             (0, 0),
+            (1, 1),
+            1,
             &dev,
         )
         .unwrap_err();
@@ -1123,6 +1276,8 @@ mod tests {
             [1, 1, 3, 3],
             (1, 1),
             (0, 0),
+            (1, 1),
+            1,
             &dev,
         )
         .unwrap_err();
@@ -1153,6 +1308,8 @@ mod tests {
             [2, 1, 3, 3],
             (1, 1),
             (0, 0),
+            (1, 1),
+            1,
             &dev,
         )
         .unwrap_err();
@@ -1198,6 +1355,8 @@ mod tests {
             weight_shape,
             stride,
             padding,
+            (1, 1),
+            1,
             &dev,
         )
         .expect("gpu_conv2d_f32");
@@ -1257,6 +1416,8 @@ mod tests {
             weight_shape,
             stride,
             padding,
+            (1, 1),
+            1,
             &dev,
         )
         .expect("gpu_conv2d_f32");
@@ -1265,5 +1426,170 @@ mod tests {
 
         let out_host = gpu_to_cpu(&out_gpu, &dev).expect("gpu_to_cpu");
         assert_close(&out_host, &expected_output, 1e-2, "conv2d gpu pipeline");
+    }
+
+    // -- Pass 2A: groups + dilation natively on the GPU -----------------------
+
+    /// Pure CPU reference for grouped + dilated conv2d. Done by direct
+    /// O(N) loops rather than im2col so the test depends on the math, not
+    /// a shared im2col implementation.
+    #[allow(clippy::too_many_arguments)]
+    fn cpu_conv2d_groups_dilation_reference(
+        input: &[f32],
+        weight: &[f32],
+        bias: Option<&[f32]>,
+        input_shape: [usize; 4],
+        weight_shape: [usize; 4],
+        stride: (usize, usize),
+        padding: (usize, usize),
+        dilation: (usize, usize),
+        groups: usize,
+    ) -> (Vec<f32>, [usize; 4]) {
+        let [batch, c_in, h, w] = input_shape;
+        let [c_out, c_in_per_group, kh, kw] = weight_shape;
+        assert_eq!(c_in % groups, 0);
+        assert_eq!(c_out % groups, 0);
+        assert_eq!(c_in_per_group, c_in / groups);
+
+        let eff_kh = dilation.0 * (kh - 1) + 1;
+        let eff_kw = dilation.1 * (kw - 1) + 1;
+        let h_out = (h + 2 * padding.0 - eff_kh) / stride.0 + 1;
+        let w_out = (w + 2 * padding.1 - eff_kw) / stride.1 + 1;
+        let c_out_per_group = c_out / groups;
+
+        let mut output = vec![0.0f32; batch * c_out * h_out * w_out];
+
+        for b in 0..batch {
+            for g in 0..groups {
+                for co_g in 0..c_out_per_group {
+                    let co = g * c_out_per_group + co_g;
+                    for oh in 0..h_out {
+                        for ow in 0..w_out {
+                            let mut sum = 0.0f32;
+                            for ci_g in 0..c_in_per_group {
+                                let ci = g * c_in_per_group + ci_g;
+                                for ki in 0..kh {
+                                    for kj in 0..kw {
+                                        let ih = (oh * stride.0 + ki * dilation.0)
+                                            as isize
+                                            - padding.0 as isize;
+                                        let iw = (ow * stride.1 + kj * dilation.1)
+                                            as isize
+                                            - padding.1 as isize;
+                                        if ih >= 0
+                                            && iw >= 0
+                                            && (ih as usize) < h
+                                            && (iw as usize) < w
+                                        {
+                                            let in_idx = b * c_in * h * w
+                                                + ci * h * w
+                                                + (ih as usize) * w
+                                                + (iw as usize);
+                                            // weight is [C_out, C_in/groups, kH, kW]
+                                            let w_idx = co * c_in_per_group * kh * kw
+                                                + ci_g * kh * kw
+                                                + ki * kw
+                                                + kj;
+                                            sum += input[in_idx] * weight[w_idx];
+                                        }
+                                    }
+                                }
+                            }
+                            if let Some(bd) = bias {
+                                sum += bd[co];
+                            }
+                            let out_idx =
+                                b * c_out * h_out * w_out + co * h_out * w_out + oh * w_out + ow;
+                            output[out_idx] = sum;
+                        }
+                    }
+                }
+            }
+        }
+
+        (output, [batch, c_out, h_out, w_out])
+    }
+
+    /// Pass 2A north-star test: GPU conv2d with `groups=2` and
+    /// `dilation=(2, 2)` matches the CPU reference within F32 elementwise
+    /// tolerance. A stub that ignores `groups` (e.g. fold groups back to
+    /// 1, or take the dense path) produces a different output sum and
+    /// fails this test on the very first batch row — see the
+    /// discrimination claim in the audit notes.
+    #[test]
+    fn conv2d_groups_dilation_native_gpu() {
+        let dev = GpuDevice::new(0).expect("CUDA device 0");
+
+        // Realistic shape with both groups > 1 and dilation > 1.
+        // c_in=4, groups=2 -> c_in/group=2; c_out=6, groups=2 -> c_out/group=3.
+        let batch = 2usize;
+        let c_in = 4usize;
+        let c_out = 6usize;
+        let groups = 2usize;
+        let kh = 3usize;
+        let kw = 3usize;
+        let h = 9usize;
+        let w = 9usize;
+        let stride = (1, 1);
+        let padding = (2, 2);
+        let dilation = (2, 2);
+
+        let input_shape = [batch, c_in, h, w];
+        let weight_shape = [c_out, c_in / groups, kh, kw];
+
+        let input_len: usize = input_shape.iter().product();
+        let weight_len: usize = weight_shape.iter().product();
+
+        // Deterministic non-trivial data.
+        let input_data: Vec<f32> = (0..input_len)
+            .map(|i| ((i * 7 + 13) % 97) as f32 / 97.0 - 0.5)
+            .collect();
+        let weight_data: Vec<f32> = (0..weight_len)
+            .map(|i| ((i * 11 + 5) % 53) as f32 / 53.0 - 0.5)
+            .collect();
+        let bias_data: Vec<f32> = (0..c_out).map(|i| (i as f32 - 3.0) * 0.1).collect();
+
+        // CPU reference (independent of im2col_cpu — see helper).
+        let (expected, expected_shape) = cpu_conv2d_groups_dilation_reference(
+            &input_data,
+            &weight_data,
+            Some(&bias_data),
+            input_shape,
+            weight_shape,
+            stride,
+            padding,
+            dilation,
+            groups,
+        );
+
+        // GPU.
+        let input_gpu = cpu_to_gpu(&input_data, &dev).expect("input to gpu");
+        let weight_gpu = cpu_to_gpu(&weight_data, &dev).expect("weight to gpu");
+        let bias_gpu = cpu_to_gpu(&bias_data, &dev).expect("bias to gpu");
+
+        let (out_gpu, out_shape) = gpu_conv2d_f32(
+            &input_gpu,
+            &weight_gpu,
+            Some(&bias_gpu),
+            input_shape,
+            weight_shape,
+            stride,
+            padding,
+            dilation,
+            groups,
+            &dev,
+        )
+        .expect("gpu_conv2d_f32 groups+dilation");
+
+        assert_eq!(out_shape, expected_shape);
+
+        let out_host = gpu_to_cpu(&out_gpu, &dev).expect("gpu_to_cpu");
+        // F32 elementwise tolerance for fused matmul + im2col + bias add.
+        assert_close(
+            &out_host,
+            &expected,
+            1e-5,
+            "conv2d groups=2 dilation=(2,2)",
+        );
     }
 }
