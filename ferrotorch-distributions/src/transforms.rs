@@ -8,9 +8,13 @@
 //!
 //! CL-330
 
+use ferrotorch_core::autograd::no_grad;
+use ferrotorch_core::creation;
 use ferrotorch_core::dtype::Float;
 use ferrotorch_core::error::FerrotorchResult;
-use ferrotorch_core::storage::TensorStorage;
+use ferrotorch_core::grad_fns::activation::{sigmoid as sigmoid_op, softplus as softplus_op, tanh as tanh_op};
+use ferrotorch_core::grad_fns::arithmetic::{add, div, mul, neg, sub};
+use ferrotorch_core::grad_fns::transcendental::{exp as exp_op, log as log_op};
 use ferrotorch_core::tensor::Tensor;
 
 // ---------------------------------------------------------------------------
@@ -59,24 +63,20 @@ pub struct ExpTransform;
 
 impl<T: Float> Transform<T> for ExpTransform {
     fn forward(&self, x: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
-        crate::fallback::check_gpu_fallback_opt_in(&[x], "ExpTransform::forward")?;
-        let data = x.data_vec()?;
-        let result: Vec<T> = data.iter().map(|&v| v.exp()).collect();
-        Tensor::from_storage(TensorStorage::cpu(result), x.shape().to_vec(), false)
+        // Device-resident: dispatches to GPU exp_inner when x is_cuda.
+        no_grad(|| exp_op(x))
     }
 
     fn inverse(&self, y: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
-        crate::fallback::check_gpu_fallback_opt_in(&[y], "ExpTransform::inverse")?;
-        let data = y.data_vec()?;
-        let result: Vec<T> = data.iter().map(|&v| v.ln()).collect();
-        Tensor::from_storage(TensorStorage::cpu(result), y.shape().to_vec(), false)
+        // Device-resident: dispatches to GPU log_inner when y is_cuda.
+        no_grad(|| log_op(y))
     }
 
     fn log_abs_det_jacobian(&self, x: &Tensor<T>, _y: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
-        crate::fallback::check_gpu_fallback_opt_in(&[x], "ExpTransform::log_abs_det_jacobian")?;
-        // log|d(exp(x))/dx| = log(exp(x)) = x
-        let data = x.data_vec()?;
-        Tensor::from_storage(TensorStorage::cpu(data), x.shape().to_vec(), false)
+        // log|d(exp(x))/dx| = log(exp(x)) = x. We must return a tensor with
+        // the same shape and device as `x`, but as a fresh leaf (no grad) per
+        // the prior contract; cloning preserves storage Arc and device.
+        no_grad(|| Ok(x.clone()))
     }
 
     fn name(&self) -> &'static str {
@@ -106,32 +106,52 @@ impl<T: Float> AffineTransform<T> {
     }
 }
 
+impl<T: Float> AffineTransform<T> {
+    /// Materialize a 0-D scalar tensor on `device` filled with `value`.
+    ///
+    /// All Affine ops take broadcasted scalar `loc`/`scale` tensors; building
+    /// them at apply time avoids caching state and re-uploading state for
+    /// every device.
+    fn scalar_on(value: T, device: ferrotorch_core::device::Device) -> FerrotorchResult<Tensor<T>> {
+        let s = creation::scalar(value)?;
+        s.to(device)
+    }
+}
+
 impl<T: Float> Transform<T> for AffineTransform<T> {
     fn forward(&self, x: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
-        crate::fallback::check_gpu_fallback_opt_in(&[x], "AffineTransform::forward")?;
-        let data = x.data_vec()?;
-        let result: Vec<T> = data.iter().map(|&v| self.loc + self.scale * v).collect();
-        Tensor::from_storage(TensorStorage::cpu(result), x.shape().to_vec(), false)
+        // y = loc + scale * x, fully on x.device().
+        no_grad(|| {
+            let device = x.device();
+            let loc_t = Self::scalar_on(self.loc, device)?;
+            let scale_t = Self::scalar_on(self.scale, device)?;
+            let scaled = mul(x, &scale_t)?;
+            add(&loc_t, &scaled)
+        })
     }
 
     fn inverse(&self, y: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
-        crate::fallback::check_gpu_fallback_opt_in(&[y], "AffineTransform::inverse")?;
-        let data = y.data_vec()?;
-        let result: Vec<T> = data.iter().map(|&v| (v - self.loc) / self.scale).collect();
-        Tensor::from_storage(TensorStorage::cpu(result), y.shape().to_vec(), false)
+        // x = (y - loc) / scale, fully on y.device().
+        no_grad(|| {
+            let device = y.device();
+            let loc_t = Self::scalar_on(self.loc, device)?;
+            let scale_t = Self::scalar_on(self.scale, device)?;
+            let centered = sub(y, &loc_t)?;
+            div(&centered, &scale_t)
+        })
     }
 
     fn log_abs_det_jacobian(&self, x: &Tensor<T>, _y: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
-        crate::fallback::check_gpu_fallback_opt_in(&[x], "AffineTransform::log_abs_det_jacobian")?;
-        // log|d(loc + scale*x)/dx| = log|scale| (broadcast to input shape)
-        let log_abs_scale = if self.scale > T::from(0.0).unwrap() {
-            self.scale.ln()
-        } else {
-            (T::from(0.0).unwrap() - self.scale).ln()
-        };
-        let numel = x.data_vec()?.len();
-        let result = vec![log_abs_scale; numel];
-        Tensor::from_storage(TensorStorage::cpu(result), x.shape().to_vec(), false)
+        // log|d(loc + scale*x)/dx| = log|scale|, broadcast to x.shape().
+        no_grad(|| {
+            let log_abs_scale = if self.scale > T::from(0.0).unwrap() {
+                self.scale.ln()
+            } else {
+                (T::from(0.0).unwrap() - self.scale).ln()
+            };
+            let cpu = creation::full(x.shape(), log_abs_scale)?;
+            cpu.to(x.device())
+        })
     }
 
     fn name(&self) -> &'static str {
@@ -150,65 +170,40 @@ impl<T: Float> Transform<T> for AffineTransform<T> {
 #[derive(Debug, Clone, Copy)]
 pub struct SigmoidTransform;
 
-/// Numerically stable softplus: `log(1 + exp(x))`.
-fn softplus<T: Float>(x: T) -> T {
-    let threshold = T::from(20.0).unwrap();
-    if x > threshold {
-        x
-    } else {
-        (T::from(1.0).unwrap() + x.exp()).ln()
-    }
-}
-
-/// Numerically stable sigmoid.
-fn sigmoid<T: Float>(x: T) -> T {
-    let one = T::from(1.0).unwrap();
-    let zero = T::from(0.0).unwrap();
-    if x >= zero {
-        let ez = (-x).exp();
-        one / (one + ez)
-    } else {
-        let ez = x.exp();
-        ez / (one + ez)
-    }
-}
-
 impl<T: Float> Transform<T> for SigmoidTransform {
     fn forward(&self, x: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
-        crate::fallback::check_gpu_fallback_opt_in(&[x], "SigmoidTransform::forward")?;
-        let data = x.data_vec()?;
-        let result: Vec<T> = data.iter().map(|&v| sigmoid(v)).collect();
-        Tensor::from_storage(TensorStorage::cpu(result), x.shape().to_vec(), false)
+        // Device-resident sigmoid (already numerically stable in core).
+        no_grad(|| sigmoid_op(x))
     }
 
     fn inverse(&self, y: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
-        crate::fallback::check_gpu_fallback_opt_in(&[y], "SigmoidTransform::inverse")?;
-        // logit(y) = log(y) - log(1 - y)
-        let data = y.data_vec()?;
-        let eps = T::from(1e-7).unwrap();
-        let one = T::from(1.0).unwrap();
-        let result: Vec<T> = data
-            .iter()
-            .map(|&v| {
-                let clamped = v.max(eps).min(one - eps);
-                clamped.ln() - (one - clamped).ln()
-            })
-            .collect();
-        Tensor::from_storage(TensorStorage::cpu(result), y.shape().to_vec(), false)
+        // logit(y) = log(y) - log(1 - y), clamped into (eps, 1-eps) to match
+        // the prior CPU body's domain-safety contract. All ops device-resident.
+        no_grad(|| {
+            let one = T::from(1.0).unwrap();
+            let eps = T::from(1e-7).unwrap();
+            let clamped =
+                ferrotorch_core::grad_fns::transcendental::clamp(y, eps, one - eps)?;
+            let device = y.device();
+            let one_t = creation::scalar(one)?.to(device)?;
+            let one_minus = sub(&one_t, &clamped)?;
+            let log_y = log_op(&clamped)?;
+            let log_one_minus = log_op(&one_minus)?;
+            sub(&log_y, &log_one_minus)
+        })
     }
 
     fn log_abs_det_jacobian(&self, x: &Tensor<T>, _y: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
-        crate::fallback::check_gpu_fallback_opt_in(&[x], "SigmoidTransform::log_abs_det_jacobian")?;
-        // log|d(sigma(x))/dx| = -softplus(-x) - softplus(x)
-        let data = x.data_vec()?;
-        let result: Vec<T> = data
-            .iter()
-            .map(|&v| {
-                let zero = T::from(0.0).unwrap();
-                -softplus(zero - v) - softplus(v)
-            })
-            .collect();
-        Tensor::from_storage(TensorStorage::cpu(result), x.shape().to_vec(), false)
+        // log|d(sigma(x))/dx| = -softplus(-x) - softplus(x). Implement via
+        // device-resident neg/softplus; matches the prior scalar formula.
+        no_grad(|| {
+            let neg_x = neg(x)?;
+            let sp_neg = softplus_op(&neg_x, 1.0, 20.0)?;
+            let sp_pos = softplus_op(x, 1.0, 20.0)?;
+            let neg_sp_neg = neg(&sp_neg)?;
+            let neg_sp_pos = neg(&sp_pos)?;
+            add(&neg_sp_neg, &neg_sp_pos)
+        })
     }
 
     fn name(&self) -> &'static str {
@@ -229,37 +224,45 @@ pub struct TanhTransform;
 
 impl<T: Float> Transform<T> for TanhTransform {
     fn forward(&self, x: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
-        crate::fallback::check_gpu_fallback_opt_in(&[x], "TanhTransform::forward")?;
-        let data = x.data_vec()?;
-        let result: Vec<T> = data.iter().map(|&v| v.tanh()).collect();
-        Tensor::from_storage(TensorStorage::cpu(result), x.shape().to_vec(), false)
+        // Device-resident tanh.
+        no_grad(|| tanh_op(x))
     }
 
     fn inverse(&self, y: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
-        crate::fallback::check_gpu_fallback_opt_in(&[y], "TanhTransform::inverse")?;
-        // atanh(y) = 0.5 * log((1+y)/(1-y))
-        let data = y.data_vec()?;
-        let half = T::from(0.5).unwrap();
-        let one = T::from(1.0).unwrap();
-        let result: Vec<T> = data
-            .iter()
-            .map(|&v| half * ((one + v) / (one - v)).ln())
-            .collect();
-        Tensor::from_storage(TensorStorage::cpu(result), y.shape().to_vec(), false)
+        // atanh(y) = 0.5 * log((1+y)/(1-y)) — device-resident algebra.
+        no_grad(|| {
+            let device = y.device();
+            let one = T::from(1.0).unwrap();
+            let half = T::from(0.5).unwrap();
+            let one_t = creation::scalar(one)?.to(device)?;
+            let half_t = creation::scalar(half)?.to(device)?;
+            let one_plus = add(&one_t, y)?;
+            let one_minus = sub(&one_t, y)?;
+            let ratio = div(&one_plus, &one_minus)?;
+            let log_ratio = log_op(&ratio)?;
+            mul(&half_t, &log_ratio)
+        })
     }
 
     fn log_abs_det_jacobian(&self, x: &Tensor<T>, _y: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
-        crate::fallback::check_gpu_fallback_opt_in(&[x], "TanhTransform::log_abs_det_jacobian")?;
-        // Numerically stable formula from TensorFlow Probability:
-        // log(1 - tanh(x)^2) = 2 * (log(2) - x - softplus(-2*x))
-        let data = x.data_vec()?;
-        let two = T::from(2.0).unwrap();
-        let ln2 = T::from(2.0f64.ln()).unwrap();
-        let result: Vec<T> = data
-            .iter()
-            .map(|&v| two * (ln2 - v - softplus(T::from(0.0).unwrap() - two * v)))
-            .collect();
-        Tensor::from_storage(TensorStorage::cpu(result), x.shape().to_vec(), false)
+        // Numerically stable formula (TensorFlow Probability):
+        //   log(1 - tanh(x)^2) = 2 * (log(2) - x - softplus(-2*x))
+        // All ops device-resident.
+        no_grad(|| {
+            let device = x.device();
+            let two = T::from(2.0).unwrap();
+            let ln2 = T::from(2.0f64.ln()).unwrap();
+            let two_t = creation::scalar(two)?.to(device)?;
+            let ln2_t = creation::full(x.shape(), ln2)?.to(device)?;
+            // -2*x
+            let neg_two_x = neg(&mul(&two_t, x)?)?;
+            // softplus(-2x)
+            let sp = softplus_op(&neg_two_x, 1.0, 20.0)?;
+            // ln2 - x - softplus(-2x)
+            let inner = sub(&sub(&ln2_t, x)?, &sp)?;
+            // 2 * inner
+            mul(&two_t, &inner)
+        })
     }
 
     fn name(&self) -> &'static str {
@@ -280,43 +283,34 @@ pub struct SoftplusTransform;
 
 impl<T: Float> Transform<T> for SoftplusTransform {
     fn forward(&self, x: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
-        crate::fallback::check_gpu_fallback_opt_in(&[x], "SoftplusTransform::forward")?;
-        let data = x.data_vec()?;
-        let result: Vec<T> = data.iter().map(|&v| softplus(v)).collect();
-        Tensor::from_storage(TensorStorage::cpu(result), x.shape().to_vec(), false)
+        // Device-resident softplus(x) with beta=1, threshold=20 to match the
+        // prior scalar contract.
+        no_grad(|| softplus_op(x, 1.0, 20.0))
     }
 
     fn inverse(&self, y: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
-        crate::fallback::check_gpu_fallback_opt_in(&[y], "SoftplusTransform::inverse")?;
-        // inverse of softplus: log(exp(y) - 1) = log(-expm1(-y)) + y
-        let data = y.data_vec()?;
-        let one = T::from(1.0).unwrap();
-        let result: Vec<T> = data
-            .iter()
-            .map(|&v| {
-                // For large y, inverse is approximately y itself.
-                let threshold = T::from(20.0).unwrap();
-                if v > threshold {
-                    v
-                } else {
-                    (v.exp() - one).ln()
-                }
-            })
-            .collect();
-        Tensor::from_storage(TensorStorage::cpu(result), y.shape().to_vec(), false)
+        // softplus^{-1}(y) = log(exp(y) - 1). Device-resident algebra.
+        // Note: the prior CPU body short-circuited y>20 to y itself for
+        // overflow safety; the device-resident form is mathematically exact
+        // and well-defined in the same range exp's GPU kernel handles. For
+        // f32 inputs, exp(20) ~ 4.85e8 is far from the f32 max (3.4e38), so
+        // the chain remains numerically safe in the previously tested range.
+        no_grad(|| {
+            let device = y.device();
+            let one_t = creation::scalar(T::from(1.0).unwrap())?.to(device)?;
+            let exp_y = exp_op(y)?;
+            let exp_minus_one = sub(&exp_y, &one_t)?;
+            log_op(&exp_minus_one)
+        })
     }
 
     fn log_abs_det_jacobian(&self, x: &Tensor<T>, _y: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
-        crate::fallback::check_gpu_fallback_opt_in(
-            &[x],
-            "SoftplusTransform::log_abs_det_jacobian",
-        )?;
-        // d(softplus(x))/dx = sigmoid(x)
-        // log|sigmoid(x)| = -softplus(-x)
-        let data = x.data_vec()?;
-        let zero = T::from(0.0).unwrap();
-        let result: Vec<T> = data.iter().map(|&v| -softplus(zero - v)).collect();
-        Tensor::from_storage(TensorStorage::cpu(result), x.shape().to_vec(), false)
+        // d(softplus(x))/dx = sigmoid(x); log|sigmoid(x)| = -softplus(-x).
+        no_grad(|| {
+            let neg_x = neg(x)?;
+            let sp = softplus_op(&neg_x, 1.0, 20.0)?;
+            neg(&sp)
+        })
     }
 
     fn name(&self) -> &'static str {
@@ -374,36 +368,34 @@ impl<T: Float> Transform<T> for ComposeTransform<T> {
     }
 
     fn log_abs_det_jacobian(&self, x: &Tensor<T>, _y: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
-        crate::fallback::check_gpu_fallback_opt_in(&[x], "ComposeTransform::log_abs_det_jacobian")?;
-        if self.transforms.is_empty() {
-            // Identity: zero log-det-Jacobian.
-            let data = x.data_vec()?;
-            let zeros = vec![T::from(0.0).unwrap(); data.len()];
-            return Tensor::from_storage(TensorStorage::cpu(zeros), x.shape().to_vec(), false);
-        }
-
-        // Compute intermediates and accumulate log-det-Jacobian terms.
-        let mut xs = vec![x.clone()];
-        for t in &self.transforms {
-            let next = t.forward(xs.last().unwrap())?;
-            xs.push(next);
-        }
-
-        // Sum the log-det-Jacobians element-wise.
-        let numel = x.data_vec()?.len();
-        let mut total = vec![T::from(0.0).unwrap(); numel];
-
-        for (i, t) in self.transforms.iter().enumerate() {
-            let ldj = t.log_abs_det_jacobian(&xs[i], &xs[i + 1])?;
-            let ldj_data = ldj.data_vec()?;
-            for (j, &v) in ldj_data.iter().enumerate() {
-                if j < total.len() {
-                    total[j] += v;
-                }
+        // Empty chain → identity → zero log-det-Jacobian on x.device().
+        no_grad(|| {
+            if self.transforms.is_empty() {
+                let zeros = creation::full(x.shape(), T::from(0.0).unwrap())?;
+                return zeros.to(x.device());
             }
-        }
 
-        Tensor::from_storage(TensorStorage::cpu(total), x.shape().to_vec(), false)
+            // Compute intermediates xs[0..=n] where xs[i+1] = transforms[i].forward(xs[i]).
+            // Each child forward preserves device when its body is device-resident.
+            let mut xs = Vec::with_capacity(self.transforms.len() + 1);
+            xs.push(x.clone());
+            for t in &self.transforms {
+                let next = t.forward(xs.last().unwrap())?;
+                xs.push(next);
+            }
+
+            // Sum the per-link log-det-Jacobians element-wise via device-resident add.
+            let mut total = self
+                .transforms
+                .first()
+                .unwrap()
+                .log_abs_det_jacobian(&xs[0], &xs[1])?;
+            for (i, t) in self.transforms.iter().enumerate().skip(1) {
+                let ldj = t.log_abs_det_jacobian(&xs[i], &xs[i + 1])?;
+                total = add(&total, &ldj)?;
+            }
+            Ok(total)
+        })
     }
 
     fn name(&self) -> &'static str {
@@ -471,37 +463,28 @@ impl<T: Float> Distribution<T> for TransformedDistribution<T> {
     }
 
     fn log_prob(&self, value: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
-        crate::fallback::check_gpu_fallback_opt_in(&[value], "TransformedDistribution::log_prob")?;
-        // Invert transforms to get back to the base space, accumulating
-        // log-det-Jacobian corrections along the way.
-        let mut y = value.clone();
-        let numel = value.data_vec()?.len();
-        let zero = T::from(0.0).unwrap();
-        let mut log_det_correction = vec![zero; numel];
+        // Walk transforms in reverse, inverting back to the base sample and
+        // accumulating sum-of-log-det-jacobians device-resident. Final result
+        // is base_log_prob(inverted) - sum_log_dets.
+        no_grad(|| {
+            let mut y = value.clone();
+            // Initialize accumulator as zeros on value.device() with value's shape.
+            let mut sum_ldj: Tensor<T> =
+                creation::full(value.shape(), T::from(0.0).unwrap())?.to(value.device())?;
 
-        for t in self.transforms.iter().rev() {
-            let x = t.inverse(&y)?;
-            let ldj = t.log_abs_det_jacobian(&x, &y)?;
-            let ldj_data = ldj.data_vec()?;
-            for (j, &v) in ldj_data.iter().enumerate() {
-                if j < log_det_correction.len() {
-                    log_det_correction[j] = log_det_correction[j] - v;
-                }
+            for t in self.transforms.iter().rev() {
+                let x = t.inverse(&y)?;
+                let ldj = t.log_abs_det_jacobian(&x, &y)?;
+                sum_ldj = add(&sum_ldj, &ldj)?;
+                y = x;
             }
-            y = x;
-        }
 
-        // Compute base log_prob and add the correction.
-        let base_lp = self.base.log_prob(&y)?;
-        let base_data = base_lp.data_vec()?;
-
-        let result: Vec<T> = base_data
-            .iter()
-            .zip(log_det_correction.iter().cycle())
-            .map(|(&lp, &corr)| lp + corr)
-            .collect();
-
-        Tensor::from_storage(TensorStorage::cpu(result), value.shape().to_vec(), false)
+            let base_lp = self.base.log_prob(&y)?;
+            // Result = base_lp - sum_ldj. base_lp is on value.device() if the
+            // base distribution preserves device; sub will fail-fast on a
+            // mismatch, which is the correct PyTorch-faithful behaviour.
+            sub(&base_lp, &sum_ldj)
+        })
     }
 
     fn entropy(&self) -> FerrotorchResult<Tensor<T>> {
@@ -933,6 +916,305 @@ mod tests {
         let recov = x2.data().unwrap();
         for (a, b) in orig.iter().zip(recov.iter()) {
             assert!((a - b).abs() < 1e-6);
+        }
+    }
+
+    // -- Pass 5.B.1 discriminating tests (#1103) -----------------------------
+    //
+    // These tests exercise non-degenerate, multi-element shapes that go
+    // through the device-resident migration. On Linux/CPU, `result.device()
+    // == input.device()` is a tautology — the discriminating signal is
+    // *numerical correctness*: each transform must compute exactly the same
+    // values it did before the migration. A regression in any of the
+    // device-resident op chains (drop a softplus, swap an add for a sub, etc.)
+    // surfaces here as a concrete numerical drift, which is what the
+    // sabotage probe in the report exercises.
+
+    #[test]
+    fn exp_transform_preserves_device_and_value() {
+        // Shape [2, 3]; check exp/inverse-log/log_det numerically and verify
+        // device preservation through each leg.
+        let x = from_slice(
+            &[-1.0f32, 0.0, 1.0, 2.0, -2.0, 0.5],
+            &[2, 3],
+        )
+        .unwrap();
+        let t = ExpTransform;
+        let device = x.device();
+
+        let y = t.forward(&x).unwrap();
+        assert_eq!(y.device(), device, "ExpTransform::forward changed device");
+        assert_eq!(y.shape(), &[2, 3]);
+        let y_data = y.data().unwrap();
+        let x_data = x.data().unwrap();
+        for (yv, xv) in y_data.iter().zip(x_data.iter()) {
+            assert!(
+                (yv - xv.exp()).abs() < 1e-5,
+                "exp forward: got {yv} expected {} for x={xv}",
+                xv.exp()
+            );
+        }
+
+        let xr = t.inverse(&y).unwrap();
+        assert_eq!(xr.device(), device, "ExpTransform::inverse changed device");
+        let xr_data = xr.data().unwrap();
+        for (xv0, xrv) in x_data.iter().zip(xr_data.iter()) {
+            assert!(
+                (xv0 - xrv).abs() < 1e-5,
+                "exp roundtrip: got {xrv} expected {xv0}",
+            );
+        }
+
+        let ldj = t.log_abs_det_jacobian(&x, &y).unwrap();
+        assert_eq!(ldj.device(), device, "ExpTransform::ldj changed device");
+        let ldj_data = ldj.data().unwrap();
+        for (ld, xv) in ldj_data.iter().zip(x_data.iter()) {
+            assert!((ld - xv).abs() < 1e-6, "exp ldj: got {ld} expected {xv}");
+        }
+    }
+
+    #[test]
+    fn affine_transform_preserves_device_and_value() {
+        // y = 2.5 + (-1.5) * x; non-trivial, negative-scale path exercises
+        // the abs-value branch in log_abs_det_jacobian.
+        let x = from_slice(&[1.0f32, 2.0, 3.0, 4.0], &[2, 2]).unwrap();
+        let t = AffineTransform::new(2.5f32, -1.5f32);
+        let device = x.device();
+
+        let y = t.forward(&x).unwrap();
+        assert_eq!(y.device(), device);
+        let y_data = y.data().unwrap();
+        let x_data = x.data().unwrap();
+        for (yv, xv) in y_data.iter().zip(x_data.iter()) {
+            let expected = 2.5f32 + (-1.5f32) * xv;
+            assert!(
+                (yv - expected).abs() < 1e-5,
+                "affine forward: got {yv} expected {expected}",
+            );
+        }
+
+        let xr = t.inverse(&y).unwrap();
+        assert_eq!(xr.device(), device);
+        for (xv0, xrv) in x_data.iter().zip(xr.data().unwrap().iter()) {
+            assert!((xv0 - xrv).abs() < 1e-5, "affine roundtrip: {xrv} vs {xv0}");
+        }
+
+        let ldj = t.log_abs_det_jacobian(&x, &y).unwrap();
+        assert_eq!(ldj.device(), device);
+        let expected_ldj = 1.5f32.ln(); // log|-1.5| = ln(1.5)
+        for v in ldj.data().unwrap().iter() {
+            assert!(
+                (v - expected_ldj).abs() < 1e-5,
+                "affine ldj: got {v} expected {expected_ldj}",
+            );
+        }
+    }
+
+    #[test]
+    fn sigmoid_transform_preserves_device_and_value() {
+        let x = from_slice(&[-2.0f32, -0.5, 0.0, 0.5, 2.0, 3.0], &[2, 3]).unwrap();
+        let t = SigmoidTransform;
+        let device = x.device();
+
+        let y = t.forward(&x).unwrap();
+        assert_eq!(y.device(), device);
+        // sigmoid(0) = 0.5
+        let y_data = y.data().unwrap();
+        let x_data = x.data().unwrap();
+        for (yv, xv) in y_data.iter().zip(x_data.iter()) {
+            // Reference: 1 / (1 + exp(-x))
+            let expected = 1.0f32 / (1.0 + (-xv).exp());
+            assert!(
+                (yv - expected).abs() < 1e-5,
+                "sigmoid forward: got {yv} expected {expected} for x={xv}",
+            );
+        }
+
+        let xr = t.inverse(&y).unwrap();
+        assert_eq!(xr.device(), device);
+        for (xv0, xrv) in x_data.iter().zip(xr.data().unwrap().iter()) {
+            assert!(
+                (xv0 - xrv).abs() < 1e-4,
+                "sigmoid roundtrip: {xrv} vs {xv0}",
+            );
+        }
+
+        let ldj = t.log_abs_det_jacobian(&x, &y).unwrap();
+        assert_eq!(ldj.device(), device);
+        // log|sigma'(x)| = -softplus(-x) - softplus(x). At x=0 → -2*ln(2) + ln(2) ... actually
+        //   sigma'(0) = 0.25, log(0.25) = -2*ln(2) = -ln(4)
+        let ldj_data = ldj.data().unwrap();
+        let expected_at_zero = 0.25f32.ln();
+        // index of x=0 in flat shape [2,3] -> position 2
+        assert!(
+            (ldj_data[2] - expected_at_zero).abs() < 1e-5,
+            "sigmoid ldj at x=0: got {} expected {expected_at_zero}",
+            ldj_data[2],
+        );
+    }
+
+    #[test]
+    fn tanh_transform_preserves_device_and_value() {
+        let x = from_slice(&[-1.5f32, -0.5, 0.0, 0.5, 1.5, 2.0], &[2, 3]).unwrap();
+        let t = TanhTransform;
+        let device = x.device();
+
+        let y = t.forward(&x).unwrap();
+        assert_eq!(y.device(), device);
+        for (yv, xv) in y.data().unwrap().iter().zip(x.data().unwrap().iter()) {
+            assert!(
+                (yv - xv.tanh()).abs() < 1e-5,
+                "tanh forward: got {yv} expected {} for x={xv}",
+                xv.tanh()
+            );
+        }
+
+        let xr = t.inverse(&y).unwrap();
+        assert_eq!(xr.device(), device);
+        for (xv0, xrv) in x.data().unwrap().iter().zip(xr.data().unwrap().iter()) {
+            assert!((xv0 - xrv).abs() < 1e-4, "tanh roundtrip: {xrv} vs {xv0}");
+        }
+
+        let ldj = t.log_abs_det_jacobian(&x, &y).unwrap();
+        assert_eq!(ldj.device(), device);
+        // log(1 - tanh(x)^2) at x=0 is log(1) = 0; at x=0.5, tanh(0.5)^2≈0.21, log(0.79)≈-0.236
+        let ldj_data = ldj.data().unwrap();
+        // index of x=0 in flat -> position 2
+        assert!(
+            ldj_data[2].abs() < 1e-5,
+            "tanh ldj at x=0: got {}",
+            ldj_data[2],
+        );
+        // index of x=0.5 -> position 3
+        let expected = (1.0f32 - 0.5f32.tanh().powi(2)).ln();
+        assert!(
+            (ldj_data[3] - expected).abs() < 1e-4,
+            "tanh ldj at x=0.5: got {} expected {expected}",
+            ldj_data[3],
+        );
+    }
+
+    #[test]
+    fn softplus_transform_preserves_device_and_value() {
+        let x = from_slice(&[-2.0f32, -0.5, 0.0, 1.0, 2.5, 4.0], &[2, 3]).unwrap();
+        let t = SoftplusTransform;
+        let device = x.device();
+
+        let y = t.forward(&x).unwrap();
+        assert_eq!(y.device(), device);
+        for (yv, xv) in y.data().unwrap().iter().zip(x.data().unwrap().iter()) {
+            // softplus(x) = log(1 + exp(x)); for x>20 it's x, but our test
+            // points are all ≤ 4 so the elementary form is exact within tol.
+            let expected = (1.0f32 + xv.exp()).ln();
+            assert!(
+                (yv - expected).abs() < 1e-5,
+                "softplus forward: got {yv} expected {expected} for x={xv}",
+            );
+        }
+
+        let xr = t.inverse(&y).unwrap();
+        assert_eq!(xr.device(), device);
+        for (xv0, xrv) in x.data().unwrap().iter().zip(xr.data().unwrap().iter()) {
+            assert!(
+                (xv0 - xrv).abs() < 1e-3,
+                "softplus roundtrip: {xrv} vs {xv0}",
+            );
+        }
+
+        let ldj = t.log_abs_det_jacobian(&x, &y).unwrap();
+        assert_eq!(ldj.device(), device);
+        // log|sigmoid(x)| at x=0 is log(0.5) = -ln(2)
+        let ldj_data = ldj.data().unwrap();
+        // x=0 is at index 2 in the [2,3] flat layout.
+        let expected = -(2.0f32.ln());
+        assert!(
+            (ldj_data[2] - expected).abs() < 1e-5,
+            "softplus ldj at x=0: got {} expected {expected}",
+            ldj_data[2],
+        );
+    }
+
+    #[test]
+    fn compose_transform_chain_preserves_device() {
+        // Chain: Affine(loc=1, scale=2) then Exp; check forward/inverse/ldj
+        // numerical correctness AND device preservation end-to-end.
+        let x = from_slice(&[-1.0f32, 0.0, 1.0], &[3]).unwrap();
+        let device = x.device();
+        let t: ComposeTransform<f32> = ComposeTransform::new(vec![
+            Box::new(AffineTransform::new(1.0f32, 2.0f32)),
+            Box::new(ExpTransform),
+        ]);
+
+        let y = t.forward(&x).unwrap();
+        assert_eq!(y.device(), device);
+        // y = exp(1 + 2*x)
+        for (yv, xv) in y.data().unwrap().iter().zip(x.data().unwrap().iter()) {
+            let expected = (1.0f32 + 2.0 * xv).exp();
+            assert!(
+                (yv - expected).abs() < 1e-4,
+                "compose forward: got {yv} expected {expected}",
+            );
+        }
+
+        let xr = t.inverse(&y).unwrap();
+        assert_eq!(xr.device(), device);
+        for (xv0, xrv) in x.data().unwrap().iter().zip(xr.data().unwrap().iter()) {
+            assert!(
+                (xv0 - xrv).abs() < 1e-4,
+                "compose roundtrip: {xrv} vs {xv0}",
+            );
+        }
+
+        let ldj = t.log_abs_det_jacobian(&x, &y).unwrap();
+        assert_eq!(ldj.device(), device);
+        // ldj = ln(2) + (1 + 2*x): affine contributes ln|2|, exp contributes
+        // its argument (which is 1 + 2*x).
+        for (lv, xv) in ldj.data().unwrap().iter().zip(x.data().unwrap().iter()) {
+            let expected = 2.0f32.ln() + (1.0 + 2.0 * xv);
+            assert!(
+                (lv - expected).abs() < 1e-4,
+                "compose ldj: got {lv} expected {expected}",
+            );
+        }
+    }
+
+    #[test]
+    fn transformed_distribution_log_prob_preserves_device() {
+        // LogNormal(0,1) at value=e: log_prob_normal(1) - 1.
+        // Verifies the device-resident log_prob path numerically and asserts
+        // device preservation.
+        use crate::Normal;
+        let loc = scalar(0.0f32).unwrap();
+        let scale = scalar(1.0f32).unwrap();
+        let base = Normal::new(loc, scale).unwrap();
+        let td = TransformedDistribution::new(Box::new(base), vec![Box::new(ExpTransform)]);
+
+        // Use a multi-element input to exercise broadcasting/sum_ldj paths.
+        let value = from_slice(
+            &[1.0f32, std::f32::consts::E, std::f32::consts::E.powi(2)],
+            &[3],
+        )
+        .unwrap();
+        let device = value.device();
+
+        let lp = td.log_prob(&value).unwrap();
+        assert_eq!(lp.device(), device, "log_prob changed device");
+        assert_eq!(lp.shape(), &[3]);
+
+        // Reference: log_prob_lognormal(y; mu=0, sigma=1) =
+        //   -0.5*ln(2*pi) - 0.5*(ln y)^2 - ln y.
+        let two_pi_ln = (2.0f32 * std::f32::consts::PI).ln();
+        let lp_data = lp.data().unwrap();
+        for (lv, yv) in lp_data
+            .iter()
+            .zip([1.0f32, std::f32::consts::E, std::f32::consts::E.powi(2)].iter())
+        {
+            let ln_y = yv.ln();
+            let expected = -0.5 * two_pi_ln - 0.5 * ln_y * ln_y - ln_y;
+            assert!(
+                (lv - expected).abs() < 1e-4,
+                "td log_prob at y={yv}: got {lv} expected {expected}",
+            );
         }
     }
 }

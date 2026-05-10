@@ -7,6 +7,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ## [Unreleased]
 
 ### Changed
+- Pass 5.B.1: migrate distributions transforms.rs (Exp/Affine/Sigmoid/Tanh/Softplus/Compose Transforms + TransformedDistribution::log_prob) to device-resident autograd-aware ops; dirichlet/MVN deferred via Pattern A follow-ups #1136/#1137 (blocked on GPU lgamma/digamma/cholesky) (#1103)
 - Pass 5.B.5: migrate ferrotorch-data Normalize/RandomCrop/RandomHorizontalFlip to device-resident autograd-aware ops (no more silent CPU demote on CUDA inputs); RandomHorizontalFlip CUDA path blocked on #1098 (#1107)
 - Pass 5.A.4: refresh closed-tracker citations in distributed gloo/mpi/ucc/gpu_collective skeletons (closed #459/#668 → live #1132/#1133/#1134/#1135); strengthen crate-root docstring + skeleton-test discrimination (#1102)
 - Pass 5.A.3: fix MPS softmax_f32 + sum_axis_f32 silent miscompute for non-pow-2 reduction widths via dispatcher-side `pow2_tg_width` rounding (#1101)
