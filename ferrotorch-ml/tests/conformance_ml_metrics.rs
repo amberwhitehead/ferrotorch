@@ -1089,7 +1089,6 @@ fn normalized_mutual_info_score_mixed_matches_sklearn() {
 }
 
 #[test]
-#[ignore = "#1073 ferrolearn-metrics AMI diverges from sklearn (0.225 vs 0.299 on mixed labels); #[ignore] until ferrolearn fix lands"]
 fn adjusted_mutual_info_score_mixed_matches_sklearn() {
     let file = load_fixtures();
     let f = find(&file, "adjusted_mutual_info_score_mixed");
