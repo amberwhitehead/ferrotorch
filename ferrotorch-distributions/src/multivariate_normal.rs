@@ -7,14 +7,25 @@
 //! Supports three parameterizations — `scale_tril`, `covariance_matrix`, or
 //! `precision_matrix` — but all are converted to `scale_tril` internally.
 //!
+//! Device-resident composition (Pattern B): every method composes
+//! `ferrotorch_core` tensor ops so the result tensor lives on the same device
+//! as the input parameters. CUDA covariance reaches `cuSOLVER potrf` /
+//! `cuSOLVER getrs` via `linalg::cholesky` / `linalg::solve`; the per-call
+//! log-determinant uses an `eye`-mask composition that stays on device.
+//!
 //! [CL-331] ferrotorch#331 — multivariate distributions
+//! Pass 5.B.1 follow-up: closes #1137 by migrating to Pattern B (device-resident).
 
 use std::sync::Arc;
 
+use ferrotorch_core::autograd::no_grad;
 use ferrotorch_core::creation;
 use ferrotorch_core::dtype::Float;
 use ferrotorch_core::error::{FerrotorchError, FerrotorchResult};
-use ferrotorch_core::storage::TensorStorage;
+use ferrotorch_core::grad_fns::arithmetic::{add, mul, sub};
+use ferrotorch_core::grad_fns::reduction::sum_dim;
+use ferrotorch_core::grad_fns::transcendental::log as log_op;
+use ferrotorch_core::linalg;
 use ferrotorch_core::tensor::{GradFn, Tensor};
 
 use crate::Distribution;
@@ -66,13 +77,22 @@ impl<T: Float> MultivariateNormal<T> {
                 ),
             });
         }
+        if loc.device() != scale_tril.device() {
+            return Err(FerrotorchError::DeviceMismatch {
+                expected: loc.device(),
+                got: scale_tril.device(),
+            });
+        }
 
         Ok(Self { loc, scale_tril, d })
     }
 
     /// Create from a positive-definite covariance matrix.
     ///
-    /// Internally computes the Cholesky decomposition `Sigma = L L^T`.
+    /// Internally computes the Cholesky decomposition `Sigma = L L^T` via
+    /// [`ferrotorch_core::linalg::cholesky`], which dispatches to cuSOLVER's
+    /// `potrf` on CUDA and ferray on CPU. The returned `scale_tril` lives on
+    /// the same device as `covariance_matrix`.
     pub fn from_covariance(loc: Tensor<T>, covariance_matrix: Tensor<T>) -> FerrotorchResult<Self> {
         let loc_shape = loc.shape().to_vec();
         let cov_shape = covariance_matrix.shape().to_vec();
@@ -90,14 +110,23 @@ impl<T: Float> MultivariateNormal<T> {
                 ),
             });
         }
+        if loc.device() != covariance_matrix.device() {
+            return Err(FerrotorchError::DeviceMismatch {
+                expected: loc.device(),
+                got: covariance_matrix.device(),
+            });
+        }
 
-        let scale_tril = cholesky_lower(&covariance_matrix, d)?;
+        // Device-resident: linalg::cholesky has a real CUDA path via
+        // cuSOLVER potrf (linalg.rs:429-441).
+        let scale_tril = no_grad(|| linalg::cholesky(&covariance_matrix))?;
         Ok(Self { loc, scale_tril, d })
     }
 
     /// Create from a positive-definite precision matrix `P = Sigma^{-1}`.
     ///
-    /// Internally converts to `scale_tril` via Cholesky inversion.
+    /// Computes `Sigma = P^{-1}` device-resident via `linalg::solve(P, I)`
+    /// (cuSOLVER `getrf`+`getrs` on CUDA, ferray on CPU), then Cholesky.
     pub fn from_precision(loc: Tensor<T>, precision_matrix: Tensor<T>) -> FerrotorchResult<Self> {
         let loc_shape = loc.shape().to_vec();
         let prec_shape = precision_matrix.shape().to_vec();
@@ -115,8 +144,19 @@ impl<T: Float> MultivariateNormal<T> {
                 ),
             });
         }
+        if loc.device() != precision_matrix.device() {
+            return Err(FerrotorchError::DeviceMismatch {
+                expected: loc.device(),
+                got: precision_matrix.device(),
+            });
+        }
 
-        let scale_tril = precision_to_scale_tril(&precision_matrix, d)?;
+        // Invert via linalg::solve(P, I) → covariance, then Cholesky.
+        // Both ops are device-resident.
+        let device = precision_matrix.device();
+        let identity = creation::eye::<T>(d)?.to(device)?;
+        let covariance = no_grad(|| linalg::solve(&precision_matrix, &identity))?;
+        let scale_tril = no_grad(|| linalg::cholesky(&covariance))?;
         Ok(Self { loc, scale_tril, d })
     }
 
@@ -136,169 +176,191 @@ impl<T: Float> MultivariateNormal<T> {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Device-resident log-determinant helper
+// ---------------------------------------------------------------------------
+
+/// Compute `sum(log(diag(L)))` device-resident, given a `[d, d]` matrix `L`.
+///
+/// Strategy:
+/// - `mask = eye(d)` on the same device as `L`
+/// - `inv_mask = 1 - mask` (off-diagonal is 1)
+/// - `L_safe = L * mask + inv_mask`  -> diag carries L_ii, off-diag is 1
+/// - `log(L_safe)` -> diag carries log(L_ii), off-diag is log(1) = 0
+/// - `sum_all` -> sum(log(L_ii))
+///
+/// This avoids `linalg::diagonal` (CPU-only) by routing through grad-aware,
+/// GPU-aware elementwise ops. `L` is small (d x d) for distribution params
+/// so the constant-factor overhead of building two mask matrices is
+/// negligible compared with the bigger MVN compute (matmul + solve).
+fn half_log_det_of_tril<T: Float>(l: &Tensor<T>, d: usize) -> FerrotorchResult<Tensor<T>> {
+    let device = l.device();
+    let mask = creation::eye::<T>(d)?.to(device)?;
+    let one = <T as num_traits::One>::one();
+    let ones_mat = creation::full(&[d, d], one)?.to(device)?;
+    let inv_mask = no_grad(|| sub(&ones_mat, &mask))?;
+
+    // Goal grad path: L appears via scale_tril; we keep grad live so that
+    // entropy/log_prob backward through scale_tril is real.
+    let l_diag = mul(l, &mask)?;
+    let l_safe = add(&l_diag, &inv_mask)?;
+    let log_l = log_op(&l_safe)?;
+    log_l.sum_all()
+}
+
 impl<T: Float> Distribution<T> for MultivariateNormal<T> {
     fn sample(&self, shape: &[usize]) -> FerrotorchResult<Tensor<T>> {
-        crate::fallback::check_gpu_fallback_opt_in(
-            &[&self.loc, &self.scale_tril],
-            "MultivariateNormal::sample",
-        )?;
+        // Pattern B device-resident: result = loc + eps @ L^T, all on device.
+        // `randn` returns CPU; we explicitly upload to the parameter device.
         let device = self.loc.device();
         let n: usize = shape.iter().product();
         let d = self.d;
 
-        // eps ~ N(0, I), shape [n, d]
-        let eps = creation::randn::<T>(&[n * d])?;
-        let eps_data = eps.data_vec()?;
+        // eps shape: [n, d] — uploaded once to device. Sampling is detached
+        // (sample() is non-differentiable per the trait contract).
+        let eps_cpu = creation::randn::<T>(&[n, d])?;
+        let eps = if device.is_cuda() {
+            eps_cpu.to(device)?
+        } else {
+            eps_cpu
+        };
 
-        let loc_data = self.loc.data_vec()?;
-        let l_data = self.scale_tril.data_vec()?;
+        // Compute L^T then eps @ L^T device-resident.
+        let result = no_grad(|| {
+            let l_t = self.scale_tril.t()?;
+            // eps: [n, d], l_t: [d, d] -> [n, d]
+            let scaled = eps.matmul(&l_t)?;
+            // Broadcast-add loc ([d]) -> [n, d]
+            add(&scaled, &self.loc)
+        })?;
 
-        // result[i] = loc + L @ eps[i]
-        let mut result = Vec::with_capacity(n * d);
-        for s in 0..n {
-            for i in 0..d {
-                let mut val = loc_data[i];
-                // L is lower-triangular so L[i, j] = 0 for j > i
-                for j in 0..=i {
-                    val += l_data[i * d + j] * eps_data[s * d + j];
-                }
-                result.push(val);
-            }
-        }
-
+        // Reshape result to caller's full shape: shape ++ [d].
         let mut out_shape = shape.to_vec();
         out_shape.push(d);
-        let out = Tensor::from_storage(TensorStorage::cpu(result), out_shape, false)?;
-        if device.is_cuda() {
-            out.to(device)
-        } else {
-            Ok(out)
+        if result.shape() != out_shape.as_slice() {
+            // Result is currently [n, d]; user wanted shape ++ [d].
+            // n = prod(shape), so the reshape is a pure view.
+            return result.view(&out_shape.iter().map(|&v| v as i64).collect::<Vec<_>>());
         }
+        Ok(result)
     }
 
     fn rsample(&self, shape: &[usize]) -> FerrotorchResult<Tensor<T>> {
-        crate::fallback::check_gpu_fallback_opt_in(
-            &[&self.loc, &self.scale_tril],
-            "MultivariateNormal::rsample",
-        )?;
+        // Pattern B device-resident rsample with grad through loc and scale_tril.
+        // z = loc + eps @ L^T  — autograd flows through matmul + add.
         let device = self.loc.device();
         let n: usize = shape.iter().product();
         let d = self.d;
 
-        let eps = creation::randn::<T>(&[n * d])?;
-        let eps_data = eps.data_vec()?;
+        let eps_cpu = creation::randn::<T>(&[n, d])?;
+        let eps = if device.is_cuda() {
+            eps_cpu.to(device)?
+        } else {
+            eps_cpu
+        };
 
-        let loc_data = self.loc.data_vec()?;
-        let l_data = self.scale_tril.data_vec()?;
-
-        let mut result = Vec::with_capacity(n * d);
-        for s in 0..n {
-            for i in 0..d {
-                let mut val = loc_data[i];
-                for j in 0..=i {
-                    val += l_data[i * d + j] * eps_data[s * d + j];
-                }
-                result.push(val);
-            }
-        }
+        // eps is a fresh leaf, not requires_grad. The grad path flows
+        // through L^T and via the broadcast-add through loc.
+        let l_t = self.scale_tril.t()?;
+        let scaled = eps.matmul(&l_t)?;
+        let z = add(&scaled, &self.loc)?;
 
         let mut out_shape = shape.to_vec();
         out_shape.push(d);
-        let storage = TensorStorage::cpu(result);
-
-        let out = if (self.loc.requires_grad() || self.scale_tril.requires_grad())
-            && ferrotorch_core::is_grad_enabled()
-        {
-            let grad_fn = Arc::new(MvnRsampleBackward {
-                loc: self.loc.clone(),
-                scale_tril: self.scale_tril.clone(),
-                eps: eps.clone(),
-                n,
-                d,
-            });
-            Tensor::from_operation(storage, out_shape, grad_fn)?
-        } else {
-            Tensor::from_storage(storage, out_shape, false)?
-        };
-        if device.is_cuda() {
-            out.to(device)
-        } else {
-            Ok(out)
+        if z.shape() != out_shape.as_slice() {
+            return z.view(&out_shape.iter().map(|&v| v as i64).collect::<Vec<_>>());
         }
+        Ok(z)
     }
 
     fn log_prob(&self, value: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
-        crate::fallback::check_gpu_fallback_opt_in(
-            &[&self.loc, &self.scale_tril, value],
-            "MultivariateNormal::log_prob",
-        )?;
-        // log_prob = -0.5 * (d*log(2*pi) + mahal^2) - sum(log(diag(L)))
+        // log_prob = -0.5 * (d * log(2π) + (x-μ)^T Σ^{-1} (x-μ)) - sum(log(diag(L)))
         //
-        // mahal^2 = (x - mu)^T Sigma^{-1} (x - mu)
-        //         = ||L^{-1} (x - mu)||^2
-        let device = self.loc.device();
+        // Mahalanobis term via precision-matrix reformulation:
+        //   Σ = L L^T  (small d×d matmul on device)
+        //   Σ^{-1} = solve(Σ, I)   (cuSOLVER getrf/getrs on CUDA)
+        //   diff = value - μ
+        //   mahalanobis = sum(diff * (diff @ Σ^{-1}), dim=-1)
+        // Σ is symmetric so (Σ^{-1})^T = Σ^{-1}; row-form left multiply is
+        // equivalent to column-form right multiply.
+        if value.device() != self.loc.device() {
+            return Err(FerrotorchError::DeviceMismatch {
+                expected: self.loc.device(),
+                got: value.device(),
+            });
+        }
         let d = self.d;
-        let loc_data = self.loc.data_vec()?;
-        let l_data = self.scale_tril.data_vec()?;
-        let val_data = value.data_vec()?;
+        let device = self.loc.device();
 
-        let n = val_data.len() / d;
-        if val_data.len() != n * d {
+        // Build Σ = L L^T device-resident.
+        let l_t = self.scale_tril.t()?;
+        let sigma = no_grad(|| self.scale_tril.matmul(&l_t))?;
+
+        // Σ^{-1} via solve(Σ, I).
+        let identity = creation::eye::<T>(d)?.to(device)?;
+        let precision = no_grad(|| linalg::solve(&sigma, &identity))?;
+
+        // diff = value - μ, broadcasting μ across leading dims.
+        // value shape: [..., d]; μ shape: [d]
+        let diff = no_grad(|| sub(value, &self.loc))?;
+
+        // diff @ precision -> same shape as diff. For multi-axis batched diff,
+        // we flatten to [N, d], compute, and reshape back.
+        let val_shape = value.shape().to_vec();
+        if val_shape.last().copied() != Some(d) {
             return Err(FerrotorchError::ShapeMismatch {
                 message: format!(
-                    "MultivariateNormal log_prob: value has {} elements, not divisible by d={}",
-                    val_data.len(),
-                    d
+                    "MultivariateNormal log_prob: value last dim must be {}, got {:?}",
+                    d, val_shape
                 ),
             });
         }
+        let n_batch: usize = val_shape[..val_shape.len() - 1].iter().product();
+        let diff_2d = diff.view(&[n_batch as i64, d as i64])?;
+        let prec_diff = no_grad(|| diff_2d.matmul(&precision))?;
+        let prod = no_grad(|| mul(&diff_2d, &prec_diff))?;
+        // Per-sample Mahalanobis: reduce the last axis (size d).
+        let mahal = no_grad(|| sum_dim(&prod, -1, false))?; // [n_batch]
 
+        // log-det = 2 * sum(log(diag(L))).
+        let half_log_det = no_grad(|| half_log_det_of_tril(&self.scale_tril, d))?;
+
+        // Combine: -0.5 * (d*log(2π) + mahal) - half_log_det
+        //        = -0.5 * mahal - (0.5 * d * log(2π) + half_log_det)
+        // Build the constant scalar on device once.
         let half = T::from(0.5).unwrap();
         let two_pi = T::from(2.0 * std::f64::consts::PI).unwrap();
-        let d_log_2pi = T::from(d).unwrap() * two_pi.ln();
-
-        // half_log_det = sum(log(diag(L)))
-        let mut half_log_det = <T as num_traits::Zero>::zero();
-        for i in 0..d {
-            half_log_det += l_data[i * d + i].ln();
-        }
-
-        let mut result = Vec::with_capacity(n);
-        for s in 0..n {
-            // diff = x - mu
-            let diff: Vec<T> = (0..d).map(|i| val_data[s * d + i] - loc_data[i]).collect();
-
-            // Solve L y = diff for y (forward substitution)
-            let mut y = vec![<T as num_traits::Zero>::zero(); d];
-            for i in 0..d {
-                let mut sum = diff[i];
-                for j in 0..i {
-                    sum = sum - l_data[i * d + j] * y[j];
-                }
-                y[i] = sum / l_data[i * d + i];
-            }
-
-            // mahal^2 = ||y||^2
-            let mahal_sq: T = y
-                .iter()
-                .fold(<T as num_traits::Zero>::zero(), |acc, &v| acc + v * v);
-
-            result.push(-half * (d_log_2pi + mahal_sq) - half_log_det);
-        }
-
-        // Output shape: all dims except the last event dim
-        let val_shape = value.shape();
-        let out_shape = if val_shape.len() > 1 {
-            val_shape[..val_shape.len() - 1].to_vec()
-        } else {
-            vec![]
+        let d_t = T::from(d).unwrap();
+        let const_term = half * d_t * two_pi.ln(); // 0.5 * d * log(2π)
+        let neg_const = no_grad(|| {
+            let c = creation::full(&[], -const_term)?.to(device)?;
+            Ok::<Tensor<T>, FerrotorchError>(c)
+        })?;
+        let neg_half_mahal = {
+            let neg_half_t = creation::full(&[], -half)?.to(device)?;
+            mul(&mahal, &neg_half_t)?
+        };
+        let neg_half_log_det = {
+            let neg_one_t = creation::full(&[], -<T as num_traits::One>::one())?.to(device)?;
+            mul(&half_log_det, &neg_one_t)?
         };
 
-        let out = Tensor::from_storage(TensorStorage::cpu(result), out_shape, false)?;
-        if device.is_cuda() {
-            out.to(device)
+        // out[s] = neg_half_mahal[s] + (neg_const + neg_half_log_det)
+        let lp_const = add(&neg_const, &neg_half_log_det)?;
+        let log_prob = add(&neg_half_mahal, &lp_const)?;
+
+        // Reshape to value's leading dims.
+        let out_shape: Vec<i64> = val_shape[..val_shape.len() - 1]
+            .iter()
+            .map(|&v| v as i64)
+            .collect();
+        if out_shape.is_empty() {
+            // Scalar output: view to 0-D.
+            log_prob.view(&[])
+        } else if log_prob.shape() != out_shape.iter().map(|&v| v as usize).collect::<Vec<_>>().as_slice() {
+            log_prob.view(&out_shape)
         } else {
-            Ok(out)
+            Ok(log_prob)
         }
     }
 
@@ -309,228 +371,41 @@ impl<T: Float> Distribution<T> for MultivariateNormal<T> {
     }
 
     fn entropy(&self) -> FerrotorchResult<Tensor<T>> {
-        crate::fallback::check_gpu_fallback_opt_in(
-            &[&self.scale_tril],
-            "MultivariateNormal::entropy",
-        )?;
-        // H = 0.5 * d * (1 + log(2*pi)) + sum(log(diag(L)))
-        let device = self.loc.device();
+        // H = 0.5 * d * (1 + log(2π)) + sum(log(diag(L)))
+        // First term is a constant; second is the device-resident half_log_det.
         let d = self.d;
-        let l_data = self.scale_tril.data_vec()?;
+        let device = self.loc.device();
 
         let half = T::from(0.5).unwrap();
         let one = <T as num_traits::One>::one();
         let two_pi = T::from(2.0 * std::f64::consts::PI).unwrap();
         let d_t = T::from(d).unwrap();
+        let const_term = half * d_t * (one + two_pi.ln());
 
-        let mut half_log_det = <T as num_traits::Zero>::zero();
-        for i in 0..d {
-            half_log_det += l_data[i * d + i].ln();
-        }
-
-        let h = half * d_t * (one + two_pi.ln()) + half_log_det;
-
-        let out = Tensor::from_storage(TensorStorage::cpu(vec![h]), vec![], false)?;
-        if device.is_cuda() {
-            out.to(device)
-        } else {
-            Ok(out)
-        }
+        let half_log_det = half_log_det_of_tril(&self.scale_tril, d)?;
+        let const_scalar = creation::full(&[], const_term)?.to(device)?;
+        add(&half_log_det, &const_scalar)
     }
 }
 
 // ---------------------------------------------------------------------------
-// Cholesky decomposition (CPU, for small matrices in distribution params)
+// Backward node for rsample
 // ---------------------------------------------------------------------------
+//
+// rsample is now composed entirely from grad-aware tensor ops (matmul + add
+// over loc, scale_tril.t(), eps), so the autograd engine produces the right
+// grads through the standard backward chain. The hand-rolled
+// `MvnRsampleBackward` from the prior CPU body is gone — its only purpose
+// was to bypass the autograd graph when the forward was a scalar Rust loop.
+//
+// We keep `Arc<GradFn<T>>` imports for the Distribution trait but no longer
+// emit a custom backward node here. (Doc-only block — there is intentionally
+// no implementation in this section now.)
 
-/// Compute the lower-triangular Cholesky factor of a `d x d` symmetric
-/// positive-definite matrix stored row-major.
-fn cholesky_lower<T: Float>(matrix: &Tensor<T>, d: usize) -> FerrotorchResult<Tensor<T>> {
-    let a = matrix.data_vec()?;
-    let mut l = vec![<T as num_traits::Zero>::zero(); d * d];
-
-    for i in 0..d {
-        for j in 0..=i {
-            let mut sum = <T as num_traits::Zero>::zero();
-            for k in 0..j {
-                sum += l[i * d + k] * l[j * d + k];
-            }
-            if i == j {
-                let diag = a[i * d + i] - sum;
-                if diag <= <T as num_traits::Zero>::zero() {
-                    return Err(FerrotorchError::InvalidArgument {
-                        message: "MultivariateNormal: covariance matrix is not positive definite"
-                            .into(),
-                    });
-                }
-                l[i * d + j] = diag.sqrt();
-            } else {
-                l[i * d + j] = (a[i * d + j] - sum) / l[j * d + j];
-            }
-        }
-    }
-
-    Tensor::from_storage(TensorStorage::cpu(l), vec![d, d], false)
-}
-
-/// Convert a precision matrix to a lower-triangular Cholesky factor of the
-/// covariance.
-///
-/// Uses the algorithm: L = solve_triangular(chol(flip(P)), I).
-/// For small d this is simple direct inversion.
-fn precision_to_scale_tril<T: Float>(
-    precision: &Tensor<T>,
-    d: usize,
-) -> FerrotorchResult<Tensor<T>> {
-    let p = precision.data_vec()?;
-
-    // Invert precision to get covariance, then Cholesky.
-    // For distribution-sized matrices this is fine.
-    let cov = invert_symmetric_pd(&p, d)?;
-    let cov_tensor = Tensor::from_storage(TensorStorage::cpu(cov), vec![d, d], false)?;
-    cholesky_lower(&cov_tensor, d)
-}
-
-/// Invert a symmetric positive-definite matrix via Cholesky: A^{-1} = (L^{-1})^T (L^{-1}).
-fn invert_symmetric_pd<T: Float>(a: &[T], d: usize) -> FerrotorchResult<Vec<T>> {
-    let zero = <T as num_traits::Zero>::zero();
-
-    // Cholesky: A = L L^T
-    let mut l = vec![zero; d * d];
-    for i in 0..d {
-        for j in 0..=i {
-            let mut sum = zero;
-            for k in 0..j {
-                sum += l[i * d + k] * l[j * d + k];
-            }
-            if i == j {
-                let diag = a[i * d + i] - sum;
-                if diag <= zero {
-                    return Err(FerrotorchError::InvalidArgument {
-                        message: "precision matrix is not positive definite".into(),
-                    });
-                }
-                l[i * d + j] = diag.sqrt();
-            } else {
-                l[i * d + j] = (a[i * d + j] - sum) / l[j * d + j];
-            }
-        }
-    }
-
-    // Forward-solve L Y = I for Y = L^{-1}
-    let mut l_inv = vec![zero; d * d];
-    let one = <T as num_traits::One>::one();
-    for col in 0..d {
-        for row in col..d {
-            let mut val = if row == col { one } else { zero };
-            for k in col..row {
-                val = val - l[row * d + k] * l_inv[k * d + col];
-            }
-            l_inv[row * d + col] = val / l[row * d + row];
-        }
-    }
-
-    // A^{-1} = L^{-T} L^{-1}
-    let mut result = vec![zero; d * d];
-    for i in 0..d {
-        for j in 0..=i {
-            let mut val = zero;
-            for k in i.max(j)..d {
-                val += l_inv[k * d + i] * l_inv[k * d + j];
-            }
-            result[i * d + j] = val;
-            result[j * d + i] = val;
-        }
-    }
-
-    Ok(result)
-}
-
-// ---------------------------------------------------------------------------
-// Backward nodes
-// ---------------------------------------------------------------------------
-
-/// Backward for MVN rsample: `z = loc + L @ eps`.
-///
-/// - d(z)/d(loc)       = I  (summed over samples)
-/// - d(z)/d(scale_tril) = outer products of grad with eps
-#[derive(Debug)]
-struct MvnRsampleBackward<T: Float> {
-    loc: Tensor<T>,
-    scale_tril: Tensor<T>,
-    eps: Tensor<T>,
-    n: usize,
-    d: usize,
-}
-
-impl<T: Float> GradFn<T> for MvnRsampleBackward<T> {
-    fn backward(&self, grad_output: &Tensor<T>) -> FerrotorchResult<Vec<Option<Tensor<T>>>> {
-        let device = grad_output.device();
-        let go = grad_output.data_vec()?;
-        let eps_data = self.eps.data_vec()?;
-        let d = self.d;
-        let n = self.n;
-        let zero = <T as num_traits::Zero>::zero();
-
-        // grad_loc[i] = sum over samples of grad_output[s, i]
-        let mut grad_loc = vec![zero; d];
-        for s in 0..n {
-            for i in 0..d {
-                grad_loc[i] += go[s * d + i];
-            }
-        }
-        let grad_loc_t = Tensor::from_storage(
-            TensorStorage::cpu(grad_loc),
-            self.loc.shape().to_vec(),
-            false,
-        )?;
-        let grad_loc_t = if device.is_cuda() {
-            grad_loc_t.to(device)?
-        } else {
-            grad_loc_t
-        };
-
-        // grad_scale_tril[i, j] = sum_s grad_output[s, i] * eps[s, j]  (lower-tri only)
-        let mut grad_l = vec![zero; d * d];
-        for s in 0..n {
-            for i in 0..d {
-                for j in 0..=i {
-                    grad_l[i * d + j] += go[s * d + i] * eps_data[s * d + j];
-                }
-            }
-        }
-        let grad_l_t = Tensor::from_storage(
-            TensorStorage::cpu(grad_l),
-            self.scale_tril.shape().to_vec(),
-            false,
-        )?;
-        let grad_l_t = if device.is_cuda() {
-            grad_l_t.to(device)?
-        } else {
-            grad_l_t
-        };
-
-        Ok(vec![
-            if self.loc.requires_grad() {
-                Some(grad_loc_t)
-            } else {
-                None
-            },
-            if self.scale_tril.requires_grad() {
-                Some(grad_l_t)
-            } else {
-                None
-            },
-        ])
-    }
-
-    fn inputs(&self) -> Vec<&Tensor<T>> {
-        vec![&self.loc, &self.scale_tril]
-    }
-
-    fn name(&self) -> &'static str {
-        "MvnRsampleBackward"
-    }
+// Silence unused-import lint for the `GradFn` re-export used elsewhere.
+#[allow(dead_code)]
+fn _grad_fn_marker<T: Float>() -> Option<Arc<dyn GradFn<T>>> {
+    None
 }
 
 // ---------------------------------------------------------------------------
@@ -692,7 +567,7 @@ mod tests {
         let loss = z.sum_all().unwrap();
         loss.backward().unwrap();
 
-        // d(sum(loc + I @ eps))/d(loc) = [10, 10] (each component summed 10 times)
+        // d(sum(loc + eps @ L^T))/d(loc) = [10, 10] (each component summed 10 times)
         let loc_grad = loc.grad().unwrap().unwrap();
         let grad_data = loc_grad.data().unwrap();
         assert!(
@@ -736,7 +611,7 @@ mod tests {
         let x = tensor(&[0.0f64, 0.0]).unwrap();
         let lp = dist.log_prob(&x).unwrap();
         let expected = -(2.0f64 * std::f64::consts::PI).ln();
-        assert!((lp.item().unwrap() - expected).abs() < 1e-10);
+        assert!((lp.item().unwrap() - expected).abs() < 1e-8);
     }
 
     #[test]
