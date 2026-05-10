@@ -210,8 +210,12 @@ fn is_mps_available_matches_fixture() {
 // mps_device_count — fixture-driven
 // ---------------------------------------------------------------------------
 
-/// `mps_device_count()` must return `0` on non-MPS platforms and always `0`
-/// in the ferrotorch stub.
+/// `mps_device_count()` must return `0` on non-MPS platforms.
+///
+/// On macOS hosts where the fixture (typically generated on a non-Apple
+/// box, hence `expected == 0`) disagrees with the live ferrotorch impl
+/// (which returns `1` when Metal is present), the test cascade_skips —
+/// matching the `is_mps_available_matches_fixture` divergence pattern.
 #[test]
 fn mps_device_count_matches_fixture() {
     let file = load_fixtures();
@@ -225,9 +229,21 @@ fn mps_device_count_matches_fixture() {
         .expect("mps_device_count fixture must have u64 `expected`")
         as usize;
 
+    let actual = mps_device_count();
+
+    #[cfg(target_os = "macos")]
+    {
+        if actual != fixture_expected {
+            cascade_skip!(
+                "macOS host with live Metal device disagrees with non-MPS fixture; \
+                 ferrotorch_mps::mps_device_count() reflects MTLCreateSystemDefaultDevice — \
+                 tracking issue #451"
+            );
+        }
+    }
+
     assert_eq!(
-        mps_device_count(),
-        fixture_expected,
+        actual, fixture_expected,
         "mps_device_count() must match fixture"
     );
 }
@@ -236,8 +252,12 @@ fn mps_device_count_matches_fixture() {
 // MpsDevice::new — error contract
 // ---------------------------------------------------------------------------
 
-/// `MpsDevice::new(0)` must return `Err(DeviceUnavailable)` until the MPS
-/// kernel layer lands. The fixture documents this as the expected error.
+/// `MpsDevice::new(0)` returns `Err(DeviceUnavailable)` on every non-macOS
+/// platform; the fixture documents this as the expected error. On macOS
+/// hosts with a Metal device the live impl returns `Ok` and the test
+/// cascade_skips because the fixture (generated on a non-Apple box) does
+/// not represent the macOS contract — mirroring the
+/// `is_mps_available_matches_fixture` pattern.
 #[test]
 fn mps_device_new_error_contract() {
     let file = load_fixtures();
@@ -254,27 +274,59 @@ fn mps_device_new_error_contract() {
         "fixture must document DeviceUnavailable for MpsDevice::new"
     );
 
-    // Assert ferrotorch matches the fixture contract.
-    let result = MpsDevice::new(0);
-    assert!(
-        matches!(result, Err(FerrotorchError::DeviceUnavailable)),
-        "MpsDevice::new(0) must return Err(DeviceUnavailable), got: {result:?}"
-    );
+    #[cfg(target_os = "macos")]
+    {
+        // On macOS the live impl may diverge from the non-Apple fixture.
+        let result = MpsDevice::new(0);
+        match result {
+            Err(FerrotorchError::DeviceUnavailable) => {
+                // Headless/CI macOS with no Metal device — agrees with fixture.
+                let result_n = MpsDevice::new(7);
+                assert!(
+                    matches!(result_n, Err(FerrotorchError::DeviceUnavailable)),
+                    "MpsDevice::new(7) must return Err(DeviceUnavailable) when Metal is absent, got: {result_n:?}"
+                );
+            }
+            Ok(_) | Err(FerrotorchError::InvalidArgument { .. }) => {
+                cascade_skip!(
+                    "macOS host with live Metal device — MpsDevice::new(0) returns Ok and \
+                     non-zero ordinals return InvalidArgument; non-Apple fixture does not \
+                     represent the macOS contract — tracking issue #451"
+                );
+            }
+            Err(e) => panic!("unexpected error from MpsDevice::new(0) on macOS: {e:?}"),
+        }
+    }
 
-    // Also verify a non-zero ordinal follows the same contract.
-    let result_n = MpsDevice::new(7);
-    assert!(
-        matches!(result_n, Err(FerrotorchError::DeviceUnavailable)),
-        "MpsDevice::new(7) must return Err(DeviceUnavailable), got: {result_n:?}"
-    );
+    #[cfg(not(target_os = "macos"))]
+    {
+        // Assert ferrotorch matches the fixture contract on every non-macOS host.
+        let result = MpsDevice::new(0);
+        assert!(
+            matches!(result, Err(FerrotorchError::DeviceUnavailable)),
+            "MpsDevice::new(0) must return Err(DeviceUnavailable), got: {result:?}"
+        );
+
+        // Also verify a non-zero ordinal follows the same contract.
+        let result_n = MpsDevice::new(7);
+        assert!(
+            matches!(result_n, Err(FerrotorchError::DeviceUnavailable)),
+            "MpsDevice::new(7) must return Err(DeviceUnavailable), got: {result_n:?}"
+        );
+    }
 }
 
 // ---------------------------------------------------------------------------
 // MpsDevice::count — fixture-driven
 // ---------------------------------------------------------------------------
 
-/// `MpsDevice::count()` and the free `mps_device_count()` must both return `0`
-/// on non-MPS platforms. The fixture records `0` as the expected value.
+/// `MpsDevice::count()` and the free `mps_device_count()` must both return
+/// `0` on non-MPS platforms. The fixture records `0` as the expected value.
+///
+/// On macOS hosts with a Metal device the live impl returns `1` and the
+/// test cascade_skips — same pattern as `mps_device_count_matches_fixture`.
+/// The cross-spelling agreement (`MpsDevice::count() == mps_device_count()`)
+/// is enforced unconditionally because both delegate to the same source.
 #[test]
 fn mps_device_count_method_matches_fixture() {
     let file = load_fixtures();
@@ -288,16 +340,28 @@ fn mps_device_count_method_matches_fixture() {
         .expect("MpsDevice_count fixture must have u64 `expected`")
         as usize;
 
-    assert_eq!(
-        MpsDevice::count(),
-        fixture_expected,
-        "MpsDevice::count() must match fixture"
-    );
-    // Both spellings must agree.
+    // Both spellings must agree on every platform — they share an impl.
     assert_eq!(
         MpsDevice::count(),
         mps_device_count(),
         "MpsDevice::count() and mps_device_count() must return the same value"
+    );
+
+    #[cfg(target_os = "macos")]
+    {
+        if MpsDevice::count() != fixture_expected {
+            cascade_skip!(
+                "macOS host with live Metal device disagrees with non-MPS fixture; \
+                 MpsDevice::count() reflects MTLCreateSystemDefaultDevice — \
+                 tracking issue #451"
+            );
+        }
+    }
+
+    assert_eq!(
+        MpsDevice::count(),
+        fixture_expected,
+        "MpsDevice::count() must match fixture"
     );
 }
 
@@ -427,6 +491,65 @@ fn mps_device_display_matches_fixture() {
              expected display {:?}, got {:?}",
             expected_display, actual
         );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// macOS-only discriminating tests for MpsDevice + mps_device_count wiring
+// (Pass 5.A.2, #1100). These compile only on macOS targets and would fail
+// against the pre-Pass-5.A.2 hardcoded `Err`/`0` implementation.
+// ---------------------------------------------------------------------------
+
+/// On macOS, `mps_device_count()` must reflect `is_mps_available()`.
+/// A pre-Pass-5.A.2 hardcoded `0` would fail this test on any host with a
+/// live Metal device. Anti-zero-stub guard for the macOS branch.
+#[cfg(target_os = "macos")]
+#[test]
+fn mps_device_count_macos_reflects_metal_availability() {
+    let expected = if is_mps_available() { 1 } else { 0 };
+    assert_eq!(mps_device_count(), expected);
+    assert_eq!(MpsDevice::count(), expected);
+}
+
+/// On macOS with a live Metal device, `MpsDevice::new(0)` returns `Ok`
+/// and the device's ordinal round-trips. A pre-Pass-5.A.2 hardcoded
+/// `Err(DeviceUnavailable)` would fail the `Ok` branch on any Apple host.
+#[cfg(target_os = "macos")]
+#[test]
+fn mps_device_new_macos_ok_when_metal_present() {
+    if !is_mps_available() {
+        cascade_skip!(
+            "macOS host without a Metal device — DeviceUnavailable is the expected outcome; \
+             this test requires a live Metal device to discriminate the Ok branch"
+        );
+    }
+    let dev = MpsDevice::new(0).expect("MpsDevice::new(0) must succeed when Metal is available");
+    assert_eq!(dev.ordinal(), 0);
+    assert_eq!(format!("{dev}"), "mps:0");
+}
+
+/// On macOS with Metal present, non-zero ordinals must be rejected with
+/// `Err(InvalidArgument)` — Apple Silicon is single-device. A pre-Pass-5.A.2
+/// hardcoded `Err(DeviceUnavailable)` would surface the wrong variant.
+#[cfg(target_os = "macos")]
+#[test]
+fn mps_device_new_macos_rejects_nonzero_ordinal_with_invalid_argument() {
+    if !is_mps_available() {
+        cascade_skip!(
+            "macOS host without a Metal device — DeviceUnavailable masks the InvalidArgument \
+             variant; this test requires a live Metal device to discriminate"
+        );
+    }
+    match MpsDevice::new(7) {
+        Err(FerrotorchError::InvalidArgument { message }) => {
+            assert!(
+                message.contains("ordinal") || message.contains("single"),
+                "InvalidArgument message must mention ordinal/single-device contract, got: {message:?}"
+            );
+        }
+        other => panic!(
+            "MpsDevice::new(7) on macOS w/ Metal must return Err(InvalidArgument), got: {other:?}"
+        ),
     }
 }
 

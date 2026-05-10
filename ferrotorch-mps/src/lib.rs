@@ -124,10 +124,10 @@ pub fn is_mps_available() -> bool {
 
 /// An opaque handle for an Apple-Silicon Metal device.
 ///
-/// `MpsDevice` is `Copy` because it wraps a single `usize`. Construction
-/// always fails with [`FerrotorchError::DeviceUnavailable`] until the
-/// kernel layer (#451) lands; the type is exported now so downstream
-/// generic code can name it in signatures and trait bounds today.
+/// `MpsDevice` is `Copy` because it wraps a single `usize`. On macOS hosts
+/// with a Metal device present, [`MpsDevice::new(0)`](Self::new) returns
+/// `Ok`; on every other platform construction fails with
+/// [`FerrotorchError::DeviceUnavailable`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct MpsDevice {
     ordinal: usize,
@@ -136,22 +136,53 @@ pub struct MpsDevice {
 impl MpsDevice {
     /// Try to construct a device handle for the given ordinal.
     ///
+    /// On macOS, returns `Ok` for `ordinal == 0` when [`is_mps_available`]
+    /// reports a Metal device present, [`FerrotorchError::InvalidArgument`]
+    /// for any non-zero ordinal (Apple Silicon exposes a single integrated
+    /// GPU; ordinals > 0 have no PyTorch-faithful meaning), and
+    /// [`FerrotorchError::DeviceUnavailable`] when no Metal device is found.
+    ///
+    /// On every other platform, always returns
+    /// [`FerrotorchError::DeviceUnavailable`] — Metal does not exist outside
+    /// macOS.
+    ///
     /// # Errors
     ///
-    /// Always returns [`FerrotorchError::DeviceUnavailable`] until the MPS
-    /// kernel layer lands (issue #451).
-    pub fn new(_ordinal: usize) -> FerrotorchResult<Self> {
-        Err(FerrotorchError::DeviceUnavailable)
+    /// - [`FerrotorchError::DeviceUnavailable`]: non-macOS platform, or no
+    ///   Metal device found on macOS.
+    /// - [`FerrotorchError::InvalidArgument`]: macOS-only, when `ordinal != 0`
+    ///   on a system that does have Metal — Apple Silicon is single-device.
+    pub fn new(ordinal: usize) -> FerrotorchResult<Self> {
+        #[cfg(target_os = "macos")]
+        {
+            if !is_mps_available() {
+                return Err(FerrotorchError::DeviceUnavailable);
+            }
+            if ordinal != 0 {
+                return Err(FerrotorchError::InvalidArgument {
+                    message: format!(
+                        "Apple Silicon exposes a single integrated GPU; \
+                         MpsDevice ordinal {ordinal} is unsupported (only 0 is valid)"
+                    ),
+                });
+            }
+            Ok(Self { ordinal: 0 })
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            let _ = ordinal;
+            Err(FerrotorchError::DeviceUnavailable)
+        }
     }
 
     /// Number of MPS devices the system reports.
     ///
-    /// Always `0` until the kernel layer (#451) lands. Provided as an
-    /// associated function in addition to the free [`mps_device_count`]
-    /// for callers that prefer the type-anchored spelling.
+    /// Delegates to the free [`mps_device_count`] for a single source of
+    /// truth. Provided as an associated function in addition to the free
+    /// function for callers that prefer the type-anchored spelling.
     #[must_use]
     pub fn count() -> usize {
-        0
+        mps_device_count()
     }
 
     /// Device ordinal (0 = system default GPU).
@@ -175,10 +206,20 @@ impl fmt::Display for MpsDevice {
 /// module-scoped `torch.cuda.device_count()` / `torch.mps.device_count()`
 /// idiom rather than the type-anchored Rust idiom.
 ///
-/// Always returns `0` until the kernel layer (#451) lands.
+/// On macOS: returns `1` when a Metal device is present (Apple Silicon
+/// exposes a single integrated GPU), `0` otherwise.
+///
+/// On every other platform: always returns `0`.
 #[must_use]
 pub fn mps_device_count() -> usize {
-    0
+    #[cfg(target_os = "macos")]
+    {
+        if is_mps_available() { 1 } else { 0 }
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        0
+    }
 }
 
 /// Initialize the MPS Metal backend and register it with `ferrotorch-core`.
@@ -224,18 +265,86 @@ mod tests {
         let _ = is_mps_available();
     }
 
+    /// On non-macOS targets `MpsDevice::new` always returns
+    /// `DeviceUnavailable` — Metal does not exist outside macOS.
+    #[cfg(not(target_os = "macos"))]
     #[test]
-    fn mps_device_new_always_unavailable() {
+    fn mps_device_new_non_macos_returns_unavailable() {
         assert!(matches!(
             MpsDevice::new(0),
             Err(FerrotorchError::DeviceUnavailable)
         ));
+        // Non-zero ordinals follow the same contract on non-macOS.
+        assert!(matches!(
+            MpsDevice::new(7),
+            Err(FerrotorchError::DeviceUnavailable)
+        ));
     }
 
+    /// On macOS `MpsDevice::new(0)` is `Ok` iff a Metal device is present.
+    /// This is the anti-zero-stub guard for the macOS branch — a hardcoded
+    /// `Err(DeviceUnavailable)` on macOS would fail this test on any host
+    /// where `is_mps_available()` is `true`.
+    #[cfg(target_os = "macos")]
     #[test]
-    fn mps_device_count_is_zero() {
+    fn mps_device_new_macos_returns_ok_when_available() {
+        match MpsDevice::new(0) {
+            Ok(d) => {
+                assert_eq!(d.ordinal(), 0);
+                assert!(
+                    is_mps_available(),
+                    "MpsDevice::new(0) returned Ok but is_mps_available() == false"
+                );
+            }
+            Err(FerrotorchError::DeviceUnavailable) => {
+                assert!(
+                    !is_mps_available(),
+                    "MpsDevice::new(0) returned DeviceUnavailable but is_mps_available() == true"
+                );
+            }
+            Err(e) => panic!("unexpected error from MpsDevice::new(0) on macOS: {e:?}"),
+        }
+    }
+
+    /// On macOS, `MpsDevice::new(N)` for `N != 0` must return
+    /// `Err(InvalidArgument)` whenever Metal is available — Apple Silicon
+    /// exposes a single integrated GPU.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn mps_device_new_macos_rejects_nonzero_ordinal() {
+        if !is_mps_available() {
+            // No Metal device → DeviceUnavailable takes precedence over
+            // ordinal validation. Either is acceptable in this branch.
+            assert!(matches!(
+                MpsDevice::new(7),
+                Err(FerrotorchError::DeviceUnavailable)
+            ));
+            return;
+        }
+        assert!(matches!(
+            MpsDevice::new(7),
+            Err(FerrotorchError::InvalidArgument { .. })
+        ));
+    }
+
+    /// On non-macOS targets `mps_device_count()` and `MpsDevice::count()`
+    /// are always `0`.
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn mps_device_count_is_zero_on_non_macos() {
         assert_eq!(mps_device_count(), 0);
         assert_eq!(MpsDevice::count(), 0);
+    }
+
+    /// On macOS, `mps_device_count()` mirrors `is_mps_available()` exactly
+    /// (1 when present, 0 when absent), and `MpsDevice::count()` agrees
+    /// with the free function.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn mps_device_count_macos_matches_metal_availability() {
+        let expected = if is_mps_available() { 1 } else { 0 };
+        assert_eq!(mps_device_count(), expected);
+        assert_eq!(MpsDevice::count(), mps_device_count());
     }
 
     /// On non-macOS `init_mps_backend()` always returns `DeviceUnavailable`.
