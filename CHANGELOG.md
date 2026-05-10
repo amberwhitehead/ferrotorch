@@ -7,6 +7,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ## [Unreleased]
 
 ### Changed
+- ferrotorch-distributed: 11 public items lack conformance reference (surface-coverage gate failure) (#1096)
 - Hardware testing: exercise cascade_skip'd CUDA paths on RTX 3090 (#1095)
 - Persist audit-fix series lessons to MEMORY.md (#1094)
 - Bump workspace to v0.5.1 + cargo fmt (#1093)
