@@ -5,6 +5,9 @@
 //! - [`roll`] — circular shift along a dimension
 //! - [`cdist`] — pairwise distance matrix
 
+use std::sync::Arc;
+
+use crate::autograd::no_grad::is_grad_enabled;
 use crate::dtype::Float;
 use crate::error::{FerrotorchError, FerrotorchResult};
 use crate::storage::TensorStorage;
@@ -164,6 +167,11 @@ pub fn diagflat<T: Float>(input: &Tensor<T>, diagonal: i64) -> FerrotorchResult<
 /// Elements shifted past the last position wrap to the beginning.
 ///
 /// Matches PyTorch's `torch.roll`.
+///
+/// Autograd: when `input.requires_grad()` and grad is enabled, the result
+/// carries a [`RollBackward`](crate::grad_fns::shape::RollBackward) grad_fn
+/// that pushes gradients back through the inverse shift
+/// (`grad_input = roll(grad_output, -shifts, dim)`).
 pub fn roll<T: Float>(input: &Tensor<T>, shifts: i64, dim: usize) -> FerrotorchResult<Tensor<T>> {
     if input.is_cuda() {
         return Err(FerrotorchError::NotImplementedOnCuda { op: "roll" });
@@ -176,30 +184,66 @@ pub fn roll<T: Float>(input: &Tensor<T>, shifts: i64, dim: usize) -> FerrotorchR
     }
 
     let data = input.data_vec()?;
-    let numel = data.len();
     let dim_size = shape[dim] as i64;
-    let shift = ((shifts % dim_size) + dim_size) % dim_size; // normalize to positive
+    // Empty axis: roll is a no-op, but we still need a grad_fn for graph continuity.
+    let shift_norm = if dim_size == 0 {
+        0
+    } else {
+        ((shifts % dim_size) + dim_size) % dim_size
+    };
 
-    if shift == 0 {
+    if shift_norm == 0 {
+        // Early-return preserves the existing eval-mode behaviour. There is
+        // no shape change and the data is identical, so identity-grad is
+        // correct: forwarding `input.clone()` keeps the upstream grad_fn
+        // intact when it exists.
         return Ok(input.clone());
     }
 
+    let out = roll_cpu_inner(&data, shape, shift_norm as usize, dim);
+
+    if input.requires_grad() && is_grad_enabled() {
+        let grad_fn = Arc::new(crate::grad_fns::shape::RollBackward::new(
+            input.clone(),
+            shifts,
+            dim,
+        ));
+        Tensor::from_operation(TensorStorage::cpu(out), shape.to_vec(), grad_fn)
+    } else {
+        Tensor::from_storage(TensorStorage::cpu(out), shape.to_vec(), false)
+    }
+}
+
+/// CPU shift kernel shared by `roll` (forward) and `RollBackward` (backward).
+///
+/// Performs `out[..., new_d, ...] = data[..., d, ...]` where
+/// `new_d = (d + shift_norm) % dim_size`. `shift_norm` is the
+/// already-normalized non-negative shift (`shift_norm < dim_size`).
+///
+/// `shape[dim]` is assumed > 0 (callers handle the empty-axis early return).
+pub(crate) fn roll_cpu_inner<T: Float>(
+    data: &[T],
+    shape: &[usize],
+    shift_norm: usize,
+    dim: usize,
+) -> Vec<T> {
+    let numel = data.len();
+    let dim_size = shape[dim];
     let inner: usize = shape[dim + 1..].iter().product();
-    let outer: usize = numel / (shape[dim] * inner);
+    let outer: usize = numel / (dim_size * inner);
     let mut out = vec![<T as num_traits::Zero>::zero(); numel];
 
     for o in 0..outer {
-        for d in 0..shape[dim] {
-            let new_d = ((d as i64 + shift) % dim_size) as usize;
+        for d in 0..dim_size {
+            let new_d = (d + shift_norm) % dim_size;
             for i in 0..inner {
-                let src = o * shape[dim] * inner + d * inner + i;
-                let dst = o * shape[dim] * inner + new_d * inner + i;
+                let src = o * dim_size * inner + d * inner + i;
+                let dst = o * dim_size * inner + new_d * inner + i;
                 out[dst] = data[src];
             }
         }
     }
-
-    Tensor::from_storage(TensorStorage::cpu(out), shape.to_vec(), false)
+    out
 }
 
 /// Pairwise distance matrix between two sets of vectors.

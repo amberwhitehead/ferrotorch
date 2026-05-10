@@ -916,6 +916,101 @@ pub fn cat<T: Float>(tensors: &[Tensor<T>], axis: isize) -> FerrotorchResult<Ten
 }
 
 // ---------------------------------------------------------------------------
+// RollBackward
+// ---------------------------------------------------------------------------
+
+/// Backward for `roll(x, shifts, dim)` (cyclic shift along one axis).
+///
+/// Forward: `output[..., (d + shifts) mod n, ...] = input[..., d, ...]`.
+///
+/// VJP: cyclic shift is a permutation, so its Jacobian is the corresponding
+/// permutation matrix and the VJP is the inverse permutation:
+///   `grad_input = roll(grad_output, -shifts, dim)`
+///
+/// We replay the forward kernel with `-shifts` against `grad_output` instead
+/// of calling back into `crate::ops::tensor_ops::roll` so that the resulting
+/// grad tensor is unconditionally a leaf (no nested grad_fn) and so we can
+/// reuse the already-validated CPU shift loop.
+#[derive(Debug)]
+pub struct RollBackward<T: Float> {
+    /// Saved input handle (for shape and `requires_grad` propagation).
+    input: Tensor<T>,
+    /// The original (un-normalized) shift used in the forward pass. The
+    /// backward applies `-shifts`.
+    shifts: i64,
+    /// The axis along which the forward roll was performed.
+    dim: usize,
+}
+
+impl<T: Float> RollBackward<T> {
+    pub fn new(input: Tensor<T>, shifts: i64, dim: usize) -> Self {
+        Self {
+            input,
+            shifts,
+            dim,
+        }
+    }
+}
+
+impl<T: Float> GradFn<T> for RollBackward<T> {
+    fn backward(&self, grad_output: &Tensor<T>) -> FerrotorchResult<Vec<Option<Tensor<T>>>> {
+        if !is_grad_enabled() {
+            return Ok(vec![None]);
+        }
+        if !self.input.requires_grad() {
+            return Ok(vec![None]);
+        }
+
+        // Roll has no GPU forward path yet; the grad_output here mirrors
+        // wherever the forward output landed, so a CUDA grad_output here
+        // would only happen if some upstream op materialized one. Surface
+        // the same not-implemented error rather than silently CPU-pulling.
+        if grad_output.is_cuda() {
+            return Err(FerrotorchError::NotImplementedOnCuda {
+                op: "roll backward",
+            });
+        }
+
+        let shape = self.input.shape();
+        let dim_size = shape[self.dim] as i64;
+
+        // Inverse shift: forward used `shifts`, backward uses `-shifts`.
+        // We re-normalize against the (positive) dim_size.
+        let shift_norm = if dim_size == 0 {
+            0
+        } else {
+            (((-self.shifts) % dim_size) + dim_size) % dim_size
+        };
+
+        let go_data = grad_output.data_vec()?;
+
+        let grad = if shift_norm == 0 {
+            // Inverse shift collapses to identity (e.g. shifts ≡ 0 mod n).
+            go_data
+        } else {
+            crate::ops::tensor_ops::roll_cpu_inner(
+                &go_data,
+                shape,
+                shift_norm as usize,
+                self.dim,
+            )
+        };
+
+        let grad_tensor =
+            Tensor::from_storage(TensorStorage::cpu(grad), shape.to_vec(), false)?;
+        Ok(vec![Some(grad_tensor)])
+    }
+
+    fn inputs(&self) -> Vec<&Tensor<T>> {
+        vec![&self.input]
+    }
+
+    fn name(&self) -> &'static str {
+        "RollBackward"
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
@@ -1436,5 +1531,135 @@ mod tests {
         assert!(y.grad_fn().is_none());
         assert_eq!(y.shape(), &[3]);
         assert_eq!(y.data().unwrap(), &[1.0, 2.0, 3.0]);
+    }
+
+    // -- roll backward (#1014) --
+
+    #[test]
+    fn test_roll_forward_registers_grad_fn() {
+        // Forward must attach RollBackward when input requires_grad.
+        let x = leaf(&[1.0, 2.0, 3.0, 4.0, 5.0], &[5], true);
+        let y = crate::ops::tensor_ops::roll(&x, 2, 0).unwrap();
+        // shifts=2 along dim 0 of size 5: [1,2,3,4,5] -> [4,5,1,2,3]
+        assert_eq!(y.data().unwrap(), &[4.0, 5.0, 1.0, 2.0, 3.0]);
+        assert!(y.requires_grad());
+        assert!(!y.is_leaf());
+        assert_eq!(y.grad_fn().unwrap().name(), "RollBackward");
+    }
+
+    #[test]
+    fn test_roll_zero_shift_early_return() {
+        // shifts ≡ 0 mod dim_size collapses to identity. The result is
+        // a clone of the input; if the input is a leaf with requires_grad,
+        // the clone is also a leaf — there's nothing to backprop through
+        // that wasn't already trivial.
+        let x = leaf(&[1.0, 2.0, 3.0], &[3], true);
+        let y = crate::ops::tensor_ops::roll(&x, 0, 0).unwrap();
+        assert_eq!(y.data().unwrap(), &[1.0, 2.0, 3.0]);
+        // shifts=3 mod 3 = 0 → also identity.
+        let y2 = crate::ops::tensor_ops::roll(&x, 3, 0).unwrap();
+        assert_eq!(y2.data().unwrap(), &[1.0, 2.0, 3.0]);
+    }
+
+    #[test]
+    fn test_roll_backward_simple_1d_hand_computed() {
+        // x = [10, 20, 30, 40, 50], requires_grad
+        // y = roll(x, 2, 0) = [40, 50, 10, 20, 30]
+        // loss = sum(y * w) where w = [1, 2, 3, 4, 5]
+        //
+        // dy/dx_i is a permutation: y_j = x_{(j - 2) mod 5}, so the
+        // backward maps grad_y[j] back to x[(j - 2) mod 5]. With
+        // grad_y = w = [1,2,3,4,5], the expected grad_x equals
+        // roll(grad_y, -2, 0) = [3, 4, 5, 1, 2].
+        let x = leaf(&[10.0, 20.0, 30.0, 40.0, 50.0], &[5], true);
+        let y = crate::ops::tensor_ops::roll(&x, 2, 0).unwrap();
+
+        // Use a custom WeightedSumBackward: loss = sum(y[i] * w[i]),
+        // grad_y = w. This gives a non-uniform grad_y, which exposes
+        // the permutation direction (uniform ones would be invariant
+        // under any roll and could not detect a sign error).
+        #[derive(Debug)]
+        struct WeightedSumBackward<T: Float> {
+            input: Tensor<T>,
+            weights: Vec<T>,
+        }
+        impl<T: Float> GradFn<T> for WeightedSumBackward<T> {
+            fn backward(
+                &self,
+                _grad_output: &Tensor<T>,
+            ) -> FerrotorchResult<Vec<Option<Tensor<T>>>> {
+                let g = Tensor::from_storage(
+                    TensorStorage::cpu(self.weights.clone()),
+                    self.input.shape().to_vec(),
+                    false,
+                )?;
+                Ok(vec![Some(g)])
+            }
+            fn inputs(&self) -> Vec<&Tensor<T>> {
+                vec![&self.input]
+            }
+            fn name(&self) -> &'static str {
+                "WeightedSumBackward"
+            }
+        }
+
+        let w = vec![1.0_f32, 2.0, 3.0, 4.0, 5.0];
+        let total: f32 = y
+            .data()
+            .unwrap()
+            .iter()
+            .zip(w.iter())
+            .map(|(yi, wi)| yi * wi)
+            .sum();
+        let loss = Tensor::from_operation(
+            TensorStorage::cpu(vec![total]),
+            vec![],
+            Arc::new(WeightedSumBackward {
+                input: y.clone(),
+                weights: w,
+            }),
+        )
+        .unwrap();
+
+        backward(&loss).unwrap();
+
+        let grad = x.grad().unwrap().expect("x should have a gradient");
+        let gd = grad.data().unwrap();
+        // Expected: roll([1,2,3,4,5], -2, 0) = [3, 4, 5, 1, 2]
+        let expected = [3.0, 4.0, 5.0, 1.0, 2.0];
+        for (i, (&g, &e)) in gd.iter().zip(expected.iter()).enumerate() {
+            assert!((g - e).abs() < 1e-6, "grad[{i}] = {g}, expected {e}");
+        }
+    }
+
+    #[test]
+    fn test_roll_backward_negative_shift_2d() {
+        // x: shape [2, 3], data [[1,2,3],[4,5,6]]
+        // y = roll(x, -1, 1) shifts each row left by 1:
+        //   row 0: [2, 3, 1]
+        //   row 1: [5, 6, 4]
+        // grad_y = [[1, 10, 100], [1000, 10000, 100000]]
+        // backward: grad_x = roll(grad_y, +1, 1):
+        //   row 0: [100, 1, 10]
+        //   row 1: [100000, 1000, 10000]
+        let x = leaf(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0], &[2, 3], true);
+        let y = crate::ops::tensor_ops::roll(&x, -1, 1).unwrap();
+        assert_eq!(y.data().unwrap(), &[2.0, 3.0, 1.0, 5.0, 6.0, 4.0]);
+
+        // Apply RollBackward directly with a hand-built grad_output.
+        let grad_output = Tensor::from_storage(
+            TensorStorage::cpu(vec![1.0_f32, 10.0, 100.0, 1000.0, 10000.0, 100000.0]),
+            vec![2, 3],
+            false,
+        )
+        .unwrap();
+        let grad_fn = y.grad_fn().expect("y must carry RollBackward");
+        let grads = grad_fn.backward(&grad_output).unwrap();
+        let g = grads[0].as_ref().expect("grad must be Some");
+        let gd = g.data().unwrap();
+        let expected = [100.0_f32, 1.0, 10.0, 100000.0, 1000.0, 10000.0];
+        for (i, (&got, &exp)) in gd.iter().zip(expected.iter()).enumerate() {
+            assert!((got - exp).abs() < 1e-6, "grad[{i}] = {got}, expected {exp}");
+        }
     }
 }

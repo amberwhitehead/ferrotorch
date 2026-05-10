@@ -60,9 +60,11 @@
 use ferrotorch_core::creation::zeros;
 use ferrotorch_core::grad_fns::activation::softmax;
 use ferrotorch_core::grad_fns::arithmetic::{add, mul};
+use ferrotorch_core::grad_fns::indexing::index_select_dim;
 use ferrotorch_core::grad_fns::linalg::matmul_differentiable;
 use ferrotorch_core::grad_fns::reduction::mean_dim;
 use ferrotorch_core::grad_fns::shape::cat;
+use ferrotorch_core::int_tensor::IntTensor;
 use ferrotorch_core::ops::tensor_ops::roll;
 use ferrotorch_core::{FerrotorchResult, Float, Tensor, TensorStorage};
 
@@ -236,45 +238,57 @@ impl<T: Float> ShiftedWindowAttention<T> {
     /// Mirrors torchvision's `_get_relative_position_bias`:
     ///   bias_table[index].view(N, N, num_heads).permute(2, 0, 1)
     ///
-    /// We perform the integer-index gather on CPU because:
-    /// 1. `relative_position_index` is NOT a Parameter — there are no
-    ///    grad implications from the gather itself.
-    /// 2. The gather is over a tiny `[(2*ws-1)^2, num_heads]` table
-    ///    (largest is `[169, 24] = 16 KB f32`), so a `data_vec()` pull
-    ///    here does not touch any large activation tensor — failure
-    ///    mode #15 (CPU-pull-disguised-as-device-op for HOT-PATH
-    ///    activations) does NOT apply to this small bias gather.
-    /// 3. The output of this helper is a fresh tensor that downstream
-    ///    `add` consumes with full broadcast semantics; the eval-mode
-    ///    value path is identical to torchvision's bit-for-bit.
+    /// Uses [`index_select_dim`] over `dim=0` of the
+    /// `[(2*ws-1)^2, num_heads]` table. This is autograd-correct: the
+    /// returned tensor's gradient flows back through
+    /// `IndexSelectDimBackward`, scatter-adding into
+    /// `relative_position_bias_table.grad()`. Closes the last hot-path
+    /// `data_vec()` pull in this module (#1014).
     ///
-    /// For training-time gradient flow into the bias TABLE itself, a
-    /// future migration would route through a differentiable gather
-    /// (e.g. `index_select` over the flattened table); tracked under
-    /// the same #1014 follow-up that covers `roll` backward. Eval-mode
-    /// parity does not require it.
+    /// CUDA fallback: `index_select_dim` only has a CPU forward today.
+    /// When the table parameter sits on CUDA we run the gather CPU-side
+    /// and ship the result back — preserving eval-mode value parity on
+    /// CUDA. Training on CUDA needs a GPU `index_select_dim` kernel
+    /// (separate follow-up); the CPU path covers the immediate
+    /// "Swin-T trains end-to-end" north-star contract.
     fn build_relative_position_bias(&self) -> FerrotorchResult<Tensor<T>> {
         let ws = self.window_size;
         let n = ws * ws;
         let nh = self.num_heads;
-        let table_data = self.relative_position_bias_table.data_vec()?;
-        let mut gathered = Vec::with_capacity(n * n * nh);
-        for &idx_i64 in &self.relative_position_index {
-            let row_start = (idx_i64 as usize) * nh;
-            gathered.extend_from_slice(&table_data[row_start..row_start + nh]);
-        }
+        let table = self.relative_position_bias_table.tensor();
+        let table_device = table.device();
+
+        // Build a 1-D IntTensor<i64> from the pre-computed index buffer
+        // (length `n*n`, values in `0..(2*ws-1)^2`). The IntTensor wrapper
+        // is CPU-resident and cheap (<= 49*49 = 2401 i64s).
+        let idx = IntTensor::<i64>::from_slice(&self.relative_position_index, &[n * n])?;
+
+        // Differentiable index_select on dim=0: output shape
+        // [N*N, num_heads]. CPU-only forward; if the table is on CUDA we
+        // do the gather on a CPU mirror and ship back.
+        let gathered = if table.is_cuda() {
+            let cpu_table = table.to(ferrotorch_core::Device::Cpu)?;
+            // CPU-side gather; eval-mode parity preserved (no grad needed
+            // when the table lives on CUDA — that path is currently
+            // inference-only; CUDA training awaits a GPU kernel).
+            let g = index_select_dim(&cpu_table, 0, &idx)?;
+            g.to(table_device)?
+        } else {
+            // CPU table: fully autograd-routed. requires_grad on the
+            // Parameter propagates through index_select_dim into its
+            // IndexSelectDimBackward, then through the permute /
+            // contiguous / view chain that follows.
+            index_select_dim(table, 0, &idx)?
+        };
+
         // gathered is laid out as [N*N, num_heads]. View as [N, N, num_heads]
         // then permute to [num_heads, N, N], then unsqueeze leading 1 →
         // [1, num_heads, N, N] for batched broadcast over [B*nW, num_heads, N, N].
-        let bias = Tensor::from_storage(
-            TensorStorage::cpu(gathered),
-            vec![n, n, nh],
-            false, // not part of the autograd graph for eval-mode
-        )?
-        .to(self.relative_position_bias_table.tensor().device())?
-        .permute(&[2, 0, 1])?
-        .contiguous()?
-        .view(&[1, nh as i64, n as i64, n as i64])?;
+        let bias = gathered
+            .view(&[n as i64, n as i64, nh as i64])?
+            .permute(&[2, 0, 1])?
+            .contiguous()?
+            .view(&[1, nh as i64, n as i64, n as i64])?;
         Ok(bias)
     }
 }
@@ -1691,5 +1705,107 @@ mod tests {
         fn assert_send_sync<T: Send + Sync>() {}
         assert_send_sync::<SwinTransformer<f32>>();
         assert_send_sync::<SwinBlock<f32>>();
+    }
+
+    // -----------------------------------------------------------------------
+    // Pass 3 (#1014) — training-mode autograd end-to-end
+    // -----------------------------------------------------------------------
+    //
+    // After Pass 3, `roll` and `index_select_dim` both register grad_fns,
+    // so a `ShiftedWindowAttention` forward over a `requires_grad=true`
+    // input yields a tensor whose graph reaches every learnable
+    // parameter — including `relative_position_bias_table` (gathered via
+    // index_select_dim) and the qkv/proj weights (matmuls).
+    //
+    // This test asserts the *training-mode* north star: relative position
+    // bias table receives a non-zero gradient end-to-end. Pre-Pass 3 the
+    // table never accumulated gradient (the gather went through
+    // `data_vec()` and was therefore detached from the graph).
+
+    #[test]
+    fn test_shifted_window_attention_training_mode_grads_flow() {
+        // Use shift=3 so the cyclic-shift codepath is exercised — this is
+        // also the codepath that depends on `RollBackward` for gradient
+        // flow through the (un-)shift wrappers.
+        let attn = ShiftedWindowAttention::<f32>::new(96, 7, 3, 3).unwrap();
+
+        // Drive the forward with a non-trivial input so the gathered
+        // bias actually contributes to the output.
+        let input_data: Vec<f32> = (0..(14 * 14 * 96)).map(|i| (i as f32) * 1e-3).collect();
+        let input = leaf_4d(&input_data, [1, 14, 14, 96], true);
+
+        // No `no_grad` — we want the autograd graph.
+        let output = attn.forward(&input).unwrap();
+        assert_eq!(output.shape(), &[1, 14, 14, 96]);
+
+        // Reduce to a scalar via a custom SumBackward (mirrors the same
+        // pattern used in the indexing / shape unit tests). We can't use
+        // ferrotorch's high-level `mean`/`sum` here without pulling in
+        // additional crates, but a hand-rolled SumBackward is both cheap
+        // and intentionally explicit.
+        use ferrotorch_core::tensor::GradFn;
+        use std::sync::Arc;
+        #[derive(Debug)]
+        struct SumBackward {
+            input: Tensor<f32>,
+        }
+        impl GradFn<f32> for SumBackward {
+            fn backward(
+                &self,
+                _go: &Tensor<f32>,
+            ) -> ferrotorch_core::FerrotorchResult<Vec<Option<Tensor<f32>>>> {
+                let n = self.input.numel();
+                let g = Tensor::from_storage(
+                    TensorStorage::cpu(vec![1.0_f32; n]),
+                    self.input.shape().to_vec(),
+                    false,
+                )?;
+                Ok(vec![Some(g)])
+            }
+            fn inputs(&self) -> Vec<&Tensor<f32>> {
+                vec![&self.input]
+            }
+            fn name(&self) -> &'static str {
+                "SumBackward"
+            }
+        }
+
+        let total: f32 = output.data().unwrap().iter().sum();
+        let loss = Tensor::from_operation(
+            TensorStorage::cpu(vec![total]),
+            vec![],
+            Arc::new(SumBackward {
+                input: output.clone(),
+            }),
+        )
+        .unwrap();
+
+        ferrotorch_core::autograd::graph::backward(&loss).unwrap();
+
+        // Bias table grad must be Some and non-zero.
+        let table = attn.relative_position_bias_table.tensor();
+        let g = table
+            .grad()
+            .unwrap()
+            .expect("relative_position_bias_table.grad() must be Some after Pass 3");
+        let gd = g.data().unwrap();
+        let max_abs = gd.iter().fold(0.0f32, |acc, &v| acc.max(v.abs()));
+        assert!(
+            max_abs > 0.0,
+            "relative_position_bias_table grad must contain at least one non-zero entry; got max_abs={max_abs}"
+        );
+
+        // Input grad also non-zero (sanity: the roll/unroll path is
+        // gradient-transparent — input grad must be populated).
+        let ig = input
+            .grad()
+            .unwrap()
+            .expect("input.grad() must be Some after Pass 3");
+        let igd = ig.data().unwrap();
+        let in_max_abs = igd.iter().fold(0.0f32, |acc, &v| acc.max(v.abs()));
+        assert!(
+            in_max_abs > 0.0,
+            "input grad must contain at least one non-zero entry; got max_abs={in_max_abs}"
+        );
     }
 }

@@ -948,6 +948,224 @@ pub fn index_select_1d_it<T: Float, I: IntElement>(
     index_select_1d(input, &idx_usize)
 }
 
+// ---------------------------------------------------------------------------
+// index_select_dim — N-D, gather along arbitrary axis with 1-D indices (#1014)
+// ---------------------------------------------------------------------------
+
+/// Backward function for [`index_select_dim`].
+///
+/// Forward (for `dim = D`): `output[..., i, ...] = input[..., indices[i], ...]`,
+/// i.e. each "slice" along `dim` of `output` at position `i` is a copy of the
+/// `input` slice at position `indices[i]`.
+///
+/// VJP: scatter-add `grad_output` back along `dim` at positions `indices`,
+/// accumulating duplicates. This is the N-D analogue of the 1-D
+/// `IndexSelectBackward` above.
+#[derive(Debug)]
+pub struct IndexSelectDimBackward<T: Float> {
+    /// Saved input handle (for shape and `requires_grad` propagation).
+    pub input: Tensor<T>,
+    /// The dimension along which selection was performed.
+    pub dim: usize,
+    /// The 1-D index vector used during the forward pass.
+    pub indices: Vec<usize>,
+}
+
+impl<T: Float> GradFn<T> for IndexSelectDimBackward<T> {
+    fn backward(&self, grad_output: &Tensor<T>) -> FerrotorchResult<Vec<Option<Tensor<T>>>> {
+        if !is_grad_enabled() {
+            return Ok(vec![None]);
+        }
+        if !self.input.requires_grad() {
+            return Ok(vec![None]);
+        }
+
+        let input_shape = self.input.shape();
+        let input_numel: usize = input_shape.iter().product();
+        let dim = self.dim;
+        let outer: usize = input_shape[..dim].iter().product();
+        let inner: usize = input_shape[dim + 1..].iter().product();
+        let in_dim_size = input_shape[dim];
+        let out_dim_size = self.indices.len();
+
+        // GPU path: scatter-add via the existing 1-D kernel. We compute the
+        // flat destination index in input-space for every element of
+        // grad_output (which is dense, in C-order, with shape replacing
+        // `dim` by `out_dim_size`), upload, and reuse `scatter_add_1d_f32`.
+        if grad_output.is_cuda() {
+            let ordinal = match grad_output.device() {
+                Device::Cuda(o) => o,
+                _ => unreachable!(),
+            };
+            let backend = gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
+
+            // Build flat destination indices, one per grad_output element.
+            //
+            // For grad_output with C-contiguous layout
+            //   [outer, out_dim_size, inner]
+            // and target buffer (= input space) with layout
+            //   [outer, in_dim_size, inner]
+            // a grad_output element at flat position
+            //   o * out_dim_size * inner + i * inner + k
+            // maps to flat dst position
+            //   o * in_dim_size * inner + indices[i] * inner + k
+            let go_numel = outer * out_dim_size * inner;
+            let mut dst_indices: Vec<f32> = Vec::with_capacity(go_numel);
+            for o in 0..outer {
+                for i in 0..out_dim_size {
+                    let dst_i = self.indices[i];
+                    let base = o * in_dim_size * inner + dst_i * inner;
+                    for k in 0..inner {
+                        dst_indices.push((base + k) as f32);
+                    }
+                }
+            }
+
+            let idx_handle = upload_f32_to_gpu(&dst_indices, ordinal)?;
+            let result_handle =
+                backend.scatter_add_1d_f32(grad_output.gpu_handle()?, &idx_handle, input_numel)?;
+            let grad_tensor = Tensor::from_storage(
+                TensorStorage::gpu(result_handle),
+                input_shape.to_vec(),
+                false,
+            )?;
+            return Ok(vec![Some(grad_tensor)]);
+        }
+
+        // CPU path: scatter-add directly.
+        let go_data = grad_output.data_vec()?;
+        let mut grad_input = vec![<T as num_traits::Zero>::zero(); input_numel];
+        for o in 0..outer {
+            for i in 0..out_dim_size {
+                let dst_i = self.indices[i];
+                let go_base = o * out_dim_size * inner + i * inner;
+                let gi_base = o * in_dim_size * inner + dst_i * inner;
+                for k in 0..inner {
+                    grad_input[gi_base + k] += go_data[go_base + k];
+                }
+            }
+        }
+
+        let grad_tensor =
+            Tensor::from_storage(TensorStorage::cpu(grad_input), input_shape.to_vec(), false)?;
+        Ok(vec![Some(grad_tensor)])
+    }
+
+    fn inputs(&self) -> Vec<&Tensor<T>> {
+        vec![&self.input]
+    }
+
+    fn name(&self) -> &'static str {
+        "IndexSelectDimBackward"
+    }
+}
+
+/// Differentiable N-D `index_select`: gathers slices along `dim` of `input`
+/// using a 1-D vector of indices.
+///
+/// Mirrors `torch.index_select(input, dim, indices)`:
+///
+/// ```text
+/// output[..., i, ...] = input[..., indices[i], ...]   (slice at axis `dim`)
+/// ```
+///
+/// The output has the same shape as `input` except `output.shape()[dim] ==
+/// indices.len()`. Indices may repeat — duplicates accumulate in backward.
+///
+/// If `input.requires_grad()` and grad is enabled, the result carries an
+/// [`IndexSelectDimBackward`] grad_fn whose VJP scatter-adds `grad_output`
+/// along `dim` back at the saved `indices` positions.
+pub fn index_select_dim<T: Float, I: IntElement>(
+    input: &Tensor<T>,
+    dim: usize,
+    indices: &IntTensor<I>,
+) -> FerrotorchResult<Tensor<T>> {
+    if input.is_cuda() {
+        // Pass 3 scope is CPU-correct + autograd-correct. A GPU forward
+        // would need a dedicated index_select_dim_f32 kernel; surface
+        // explicitly rather than silently CPU-pulling activations
+        // (failure mode #15).
+        return Err(FerrotorchError::NotImplementedOnCuda {
+            op: "index_select_dim",
+        });
+    }
+
+    let input_shape = input.shape();
+    let ndim = input_shape.len();
+    if ndim == 0 {
+        return Err(FerrotorchError::InvalidArgument {
+            message: "index_select_dim: input must have at least 1 dimension".into(),
+        });
+    }
+    if dim >= ndim {
+        return Err(FerrotorchError::InvalidArgument {
+            message: format!(
+                "index_select_dim: dim {dim} out of range for shape {input_shape:?}"
+            ),
+        });
+    }
+    if indices.ndim() != 1 {
+        return Err(FerrotorchError::ShapeMismatch {
+            message: format!(
+                "index_select_dim: indices must be 1-D, got shape {:?}",
+                indices.shape()
+            ),
+        });
+    }
+
+    let in_dim_size = input_shape[dim];
+    // Validate + widen indices.
+    let mut idx_usize: Vec<usize> = Vec::with_capacity(indices.numel());
+    for v in indices.data() {
+        let i = v.to_i64();
+        if i < 0 {
+            return Err(FerrotorchError::InvalidArgument {
+                message: format!("index_select_dim: negative index {i} not allowed"),
+            });
+        }
+        let iu = i as usize;
+        if iu >= in_dim_size {
+            return Err(FerrotorchError::IndexOutOfBounds {
+                index: iu,
+                axis: dim,
+                size: in_dim_size,
+            });
+        }
+        idx_usize.push(iu);
+    }
+
+    // Compute output: same shape but axis `dim` replaced by indices.len().
+    let mut output_shape = input_shape.to_vec();
+    output_shape[dim] = idx_usize.len();
+    let out_numel: usize = output_shape.iter().product();
+
+    let outer: usize = input_shape[..dim].iter().product();
+    let inner: usize = input_shape[dim + 1..].iter().product();
+    let out_dim_size = idx_usize.len();
+
+    let in_data = input.data_vec()?;
+    let mut out = vec![<T as num_traits::Zero>::zero(); out_numel];
+    for o in 0..outer {
+        for i in 0..out_dim_size {
+            let src_i = idx_usize[i];
+            let in_base = o * in_dim_size * inner + src_i * inner;
+            let out_base = o * out_dim_size * inner + i * inner;
+            out[out_base..out_base + inner].copy_from_slice(&in_data[in_base..in_base + inner]);
+        }
+    }
+
+    if input.requires_grad() && is_grad_enabled() {
+        let grad_fn = Arc::new(IndexSelectDimBackward {
+            input: input.clone(),
+            dim,
+            indices: idx_usize,
+        });
+        Tensor::from_operation(TensorStorage::cpu(out), output_shape, grad_fn)
+    } else {
+        Tensor::from_storage(TensorStorage::cpu(out), output_shape, false)
+    }
+}
+
 #[cfg(test)]
 mod first_class_wrappers_tests {
     use super::*;
@@ -1304,5 +1522,244 @@ mod tests {
             Tensor::from_storage(TensorStorage::cpu(vec![1.0, 1.0]), vec![2], false).unwrap();
         let result = gf.backward(&grad_output);
         assert!(result.is_ok());
+    }
+
+    // -- index_select_dim (#1014) --
+
+    #[test]
+    fn test_index_select_dim_2d_dim0_forward() {
+        // input: shape [4, 3]
+        //   row 0: [10, 11, 12]
+        //   row 1: [20, 21, 22]
+        //   row 2: [30, 31, 32]
+        //   row 3: [40, 41, 42]
+        // indices: [3, 0, 2]
+        // output: shape [3, 3]
+        //   row 0 = input row 3 = [40, 41, 42]
+        //   row 1 = input row 0 = [10, 11, 12]
+        //   row 2 = input row 2 = [30, 31, 32]
+        let input = Tensor::from_storage(
+            TensorStorage::cpu(vec![
+                10.0_f32, 11.0, 12.0, 20.0, 21.0, 22.0, 30.0, 31.0, 32.0, 40.0, 41.0, 42.0,
+            ]),
+            vec![4, 3],
+            false,
+        )
+        .unwrap();
+        let idx: IntTensor<i64> = IntTensor::from_vec(vec![3, 0, 2], vec![3]).unwrap();
+        let out = index_select_dim(&input, 0, &idx).unwrap();
+        assert_eq!(out.shape(), &[3, 3]);
+        assert_eq!(
+            out.data().unwrap(),
+            &[40.0, 41.0, 42.0, 10.0, 11.0, 12.0, 30.0, 31.0, 32.0]
+        );
+    }
+
+    #[test]
+    fn test_index_select_dim_2d_dim1_forward() {
+        // input: shape [2, 4]
+        //   [[1, 2, 3, 4],
+        //    [5, 6, 7, 8]]
+        // dim=1, indices=[1, 3, 0]
+        // output: shape [2, 3]
+        //   [[2, 4, 1],
+        //    [6, 8, 5]]
+        let input = Tensor::from_storage(
+            TensorStorage::cpu(vec![1.0_f32, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0]),
+            vec![2, 4],
+            false,
+        )
+        .unwrap();
+        let idx: IntTensor<i64> = IntTensor::from_vec(vec![1, 3, 0], vec![3]).unwrap();
+        let out = index_select_dim(&input, 1, &idx).unwrap();
+        assert_eq!(out.shape(), &[2, 3]);
+        assert_eq!(out.data().unwrap(), &[2.0, 4.0, 1.0, 6.0, 8.0, 5.0]);
+    }
+
+    #[test]
+    fn test_index_select_dim_registers_grad_fn() {
+        let input = Tensor::from_storage(
+            TensorStorage::cpu(vec![1.0_f32, 2.0, 3.0, 4.0, 5.0, 6.0]),
+            vec![3, 2],
+            true,
+        )
+        .unwrap();
+        let idx: IntTensor<i64> = IntTensor::from_vec(vec![0, 2], vec![2]).unwrap();
+        let out = index_select_dim(&input, 0, &idx).unwrap();
+        assert!(out.requires_grad());
+        assert!(!out.is_leaf());
+        assert_eq!(out.grad_fn().unwrap().name(), "IndexSelectDimBackward");
+    }
+
+    #[test]
+    fn test_index_select_dim_backward_simple_2d() {
+        // input: [4, 2], indices [2, 0, 2] along dim=0 → output [3, 2]
+        // grad_output =
+        //   [[1, 10],
+        //    [100, 1000],
+        //    [10000, 100000]]
+        // expected grad_input (scatter-add along dim 0, accumulating dups):
+        //   row 0: from grad_output row 1            -> [100, 1000]
+        //   row 1: untouched                         -> [0, 0]
+        //   row 2: from grad_output rows 0 + 2       -> [1+10000, 10+100000] = [10001, 100010]
+        //   row 3: untouched                         -> [0, 0]
+        let input = Tensor::from_storage(
+            TensorStorage::cpu(vec![
+                1.0_f32, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, // arbitrary
+            ]),
+            vec![4, 2],
+            true,
+        )
+        .unwrap();
+        let idx: IntTensor<i64> = IntTensor::from_vec(vec![2, 0, 2], vec![3]).unwrap();
+        let out = index_select_dim(&input, 0, &idx).unwrap();
+
+        let grad_output = Tensor::from_storage(
+            TensorStorage::cpu(vec![1.0_f32, 10.0, 100.0, 1000.0, 10000.0, 100000.0]),
+            vec![3, 2],
+            false,
+        )
+        .unwrap();
+
+        let grads = out.grad_fn().unwrap().backward(&grad_output).unwrap();
+        let g = grads[0].as_ref().unwrap();
+        assert_eq!(g.shape(), &[4, 2]);
+        let gd = g.data().unwrap();
+        let expected = [100.0_f32, 1000.0, 0.0, 0.0, 10001.0, 100010.0, 0.0, 0.0];
+        for (i, (&got, &exp)) in gd.iter().zip(expected.iter()).enumerate() {
+            assert!(
+                (got - exp).abs() < 1e-3,
+                "grad[{i}] = {got}, expected {exp}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_index_select_dim_backward_dim1() {
+        // input: [2, 4], indices [3, 1] along dim=1 → output [2, 2]
+        // grad_output =
+        //   [[1, 10], [100, 1000]]
+        // expected grad_input (per-row scatter into 4 columns at cols 3 and 1):
+        //   row 0: [0, 10, 0, 1]
+        //   row 1: [0, 1000, 0, 100]
+        let input = Tensor::from_storage(
+            TensorStorage::cpu(vec![1.0_f32, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0]),
+            vec![2, 4],
+            true,
+        )
+        .unwrap();
+        let idx: IntTensor<i64> = IntTensor::from_vec(vec![3, 1], vec![2]).unwrap();
+        let out = index_select_dim(&input, 1, &idx).unwrap();
+
+        let grad_output = Tensor::from_storage(
+            TensorStorage::cpu(vec![1.0_f32, 10.0, 100.0, 1000.0]),
+            vec![2, 2],
+            false,
+        )
+        .unwrap();
+        let grads = out.grad_fn().unwrap().backward(&grad_output).unwrap();
+        let g = grads[0].as_ref().unwrap();
+        assert_eq!(g.shape(), &[2, 4]);
+        let gd = g.data().unwrap();
+        let expected = [0.0_f32, 10.0, 0.0, 1.0, 0.0, 1000.0, 0.0, 100.0];
+        for (i, (&got, &exp)) in gd.iter().zip(expected.iter()).enumerate() {
+            assert!((got - exp).abs() < 1e-6, "grad[{i}] = {got}, expected {exp}");
+        }
+    }
+
+    #[test]
+    fn test_index_select_dim_e2e_via_autograd() {
+        // End-to-end: drive the gradient through the autograd graph (rather
+        // than calling backward() directly on the grad_fn) and verify the
+        // input.grad() lands on the bias-table parameter equivalent.
+        // input: [3, 2] = [[1,2],[3,4],[5,6]], indices [0, 2, 0] on dim=0
+        // out: [3, 2] = [[1,2],[5,6],[1,2]]
+        // sum(out) = 1+2+5+6+1+2 = 17
+        // grad_out (from sum) = ones([3, 2])
+        // grad_input (scatter-add along dim 0):
+        //   row 0: from out rows 0 and 2 -> [2, 2]
+        //   row 1: untouched              -> [0, 0]
+        //   row 2: from out row 1         -> [1, 1]
+        let x = Tensor::from_storage(
+            TensorStorage::cpu(vec![1.0_f32, 2.0, 3.0, 4.0, 5.0, 6.0]),
+            vec![3, 2],
+            true,
+        )
+        .unwrap();
+        let idx: IntTensor<i64> = IntTensor::from_vec(vec![0, 2, 0], vec![3]).unwrap();
+        let out = index_select_dim(&x, 0, &idx).unwrap();
+        let total: f32 = out.data().unwrap().iter().sum();
+        let loss = Tensor::from_operation(
+            TensorStorage::cpu(vec![total]),
+            vec![],
+            Arc::new({
+                #[derive(Debug)]
+                struct SumBackward<T: Float> {
+                    input: Tensor<T>,
+                }
+                impl<T: Float> GradFn<T> for SumBackward<T> {
+                    fn backward(
+                        &self,
+                        _go: &Tensor<T>,
+                    ) -> FerrotorchResult<Vec<Option<Tensor<T>>>> {
+                        let n = self.input.numel();
+                        let ones = vec![<T as num_traits::One>::one(); n];
+                        let g = Tensor::from_storage(
+                            TensorStorage::cpu(ones),
+                            self.input.shape().to_vec(),
+                            false,
+                        )?;
+                        Ok(vec![Some(g)])
+                    }
+                    fn inputs(&self) -> Vec<&Tensor<T>> {
+                        vec![&self.input]
+                    }
+                    fn name(&self) -> &'static str {
+                        "SumBackward"
+                    }
+                }
+                SumBackward {
+                    input: out.clone(),
+                }
+            }),
+        )
+        .unwrap();
+
+        crate::autograd::graph::backward(&loss).unwrap();
+
+        let grad = x.grad().unwrap().expect("x.grad() should be Some");
+        assert_eq!(grad.shape(), &[3, 2]);
+        let gd = grad.data().unwrap();
+        let expected = [2.0_f32, 2.0, 0.0, 0.0, 1.0, 1.0];
+        for (i, (&got, &exp)) in gd.iter().zip(expected.iter()).enumerate() {
+            assert!((got - exp).abs() < 1e-6, "grad[{i}] = {got}, expected {exp}");
+        }
+    }
+
+    #[test]
+    fn test_index_select_dim_rejects_2d_indices() {
+        let x = Tensor::from_storage(TensorStorage::cpu(vec![1.0_f32; 6]), vec![3, 2], false)
+            .unwrap();
+        let idx: IntTensor<i64> = IntTensor::from_vec(vec![0, 1, 0, 1], vec![2, 2]).unwrap();
+        let err = index_select_dim(&x, 0, &idx).unwrap_err();
+        assert!(matches!(err, FerrotorchError::ShapeMismatch { .. }));
+    }
+
+    #[test]
+    fn test_index_select_dim_rejects_oob() {
+        let x = Tensor::from_storage(TensorStorage::cpu(vec![1.0_f32; 6]), vec![3, 2], false)
+            .unwrap();
+        let idx: IntTensor<i64> = IntTensor::from_vec(vec![0, 7], vec![2]).unwrap();
+        let err = index_select_dim(&x, 0, &idx).unwrap_err();
+        assert!(matches!(err, FerrotorchError::IndexOutOfBounds { .. }));
+    }
+
+    #[test]
+    fn test_index_select_dim_rejects_negative() {
+        let x = Tensor::from_storage(TensorStorage::cpu(vec![1.0_f32; 6]), vec![3, 2], false)
+            .unwrap();
+        let idx: IntTensor<i64> = IntTensor::from_vec(vec![0, -1], vec![2]).unwrap();
+        let err = index_select_dim(&x, 0, &idx).unwrap_err();
+        assert!(matches!(err, FerrotorchError::InvalidArgument { .. }));
     }
 }
