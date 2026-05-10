@@ -1589,11 +1589,41 @@ fn gguf_value_variants() {
     let bv = GgufValue::Bool(true);
     let av = GgufValue::Array(vec![GgufValue::Uint32(1), GgufValue::Uint32(2)]);
 
-    assert!(matches!(sv, GgufValue::String(_)));
-    assert!(matches!(uv, GgufValue::Uint32(42)));
-    assert!(matches!(fv, GgufValue::Float32(_)));
-    assert!(matches!(bv, GgufValue::Bool(true)));
-    assert!(matches!(av, GgufValue::Array(_)));
+    // Destructure each variant and assert the inner value — a stub that
+    // returns `GgufValue::String(String::new())` for every variant must fail.
+    match &sv {
+        GgufValue::String(s) => assert_eq!(s, "hello"),
+        other => panic!("expected GgufValue::String, got {other:?}"),
+    }
+    match &uv {
+        GgufValue::Uint32(n) => assert_eq!(*n, 42u32),
+        other => panic!("expected GgufValue::Uint32, got {other:?}"),
+    }
+    match &fv {
+        GgufValue::Float32(x) => assert!(
+            (*x - 1.5f32).abs() < f32::EPSILON,
+            "expected Float32(1.5), got {x}"
+        ),
+        other => panic!("expected GgufValue::Float32, got {other:?}"),
+    }
+    match &bv {
+        GgufValue::Bool(b) => assert!(*b, "expected Bool(true)"),
+        other => panic!("expected GgufValue::Bool, got {other:?}"),
+    }
+    match &av {
+        GgufValue::Array(items) => {
+            assert_eq!(items.len(), 2, "expected Array of length 2");
+            match &items[0] {
+                GgufValue::Uint32(n) => assert_eq!(*n, 1u32),
+                other => panic!("expected items[0] = Uint32(1), got {other:?}"),
+            }
+            match &items[1] {
+                GgufValue::Uint32(n) => assert_eq!(*n, 2u32),
+                other => panic!("expected items[1] = Uint32(2), got {other:?}"),
+            }
+        }
+        other => panic!("expected GgufValue::Array, got {other:?}"),
+    }
 }
 
 /// GgmlType: variant matching on parsed tensor type.

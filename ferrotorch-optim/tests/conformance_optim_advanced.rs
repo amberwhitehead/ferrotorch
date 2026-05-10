@@ -1660,15 +1660,28 @@ fn muon_state_dict_roundtrip_preserves_momentum_buffers() {
     muon2.load_state_dict(&state).unwrap();
 
     let state2 = muon2.state_dict().unwrap();
+
+    // Element-wise comparison of the momentum buffer — a stub that loads
+    // zeros (or any other length-preserving value) is rejected here.
+    let buf1: &Vec<f64> = state
+        .get("0_0")
+        .and_then(|m| m.get("momentum_buffer"))
+        .expect("[muon_state_dict] state must contain 0_0/momentum_buffer");
+    let buf2: &Vec<f64> = state2
+        .get("0_0")
+        .and_then(|m| m.get("momentum_buffer"))
+        .expect("[muon_state_dict] state2 must contain 0_0/momentum_buffer after load");
     assert_eq!(
-        state
-            .get("0_0")
-            .map(|m| m.get("momentum_buffer").map(|v| v.len())),
-        state2
-            .get("0_0")
-            .map(|m| m.get("momentum_buffer").map(|v| v.len())),
-        "[muon_state_dict] momentum buffer length should round-trip"
+        buf1.len(),
+        buf2.len(),
+        "[muon_state_dict] momentum buffer length must round-trip"
     );
+    for (i, (&a, &b)) in buf1.iter().zip(buf2.iter()).enumerate() {
+        assert!(
+            (a - b).abs() < tolerance::F64_OPTIMIZER_CPU,
+            "[muon_state_dict] momentum_buffer[{i}]: original {a} vs round-tripped {b}"
+        );
+    }
 }
 
 // ===========================================================================
@@ -1726,9 +1739,26 @@ fn kfac_factor_update_arithmetic_matches_reference() {
             f.label
         );
     }
-    // Off-diagonal entries should be ~0.
+    // Off-diagonal entries should be ~0 (centered/orthogonal activations).
+    // Walk the actual computed matrix and assert each off-diagonal element
+    // produced by the implementation is near zero — this catches a stub that
+    // populates only the diagonal or returns the identity matrix unchanged.
+    for i in 0..n_features {
+        for j in 0..n_features {
+            if i == j {
+                continue;
+            }
+            let got = a_factor[i * n_features + j];
+            assert!(
+                got.abs() < tolerance::F64_OPTIMIZER_CPU,
+                "[kfac_factors] off-diag[{i},{j}]: expected ~0, got {got} (label: {})",
+                f.label
+            );
+        }
+    }
+    // Secondary guard: the fixture's recorded off-diagonal expectations are
+    // themselves ~0 (so the empirical bound above matches the reference).
     for &exp in &f.expected_a_factor_offdiag {
-        // We verify the fixture expectation is small.
         assert!(
             exp.abs() < tolerance::F64_OPTIMIZER_CPU,
             "[kfac_factors] off-diag fixture {exp} is not zero (label: {})",
