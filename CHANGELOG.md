@@ -7,6 +7,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ## [Unreleased]
 
 ### Changed
+- Audit-Fix Phase 9: cubecl cluster (#1015 #1045-#1049) (#1082)
 - Audit-Fix Phase 8: nn cluster (#1015 #1021 #1022 #1023) (#1081)
 - Audit-Fix Phase 7: core BROKENs (#1015 #1016-#1020) (#1079)
 - Audit-Fix Phase 6: jit zero-input shape-only tests (#1015 #1034 #1035) (#1078)
@@ -49,6 +50,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - ferrotorch-core: `gelu()` (no-arg) default is now `GeluApproximate::None` (exact erf-based: `x * 0.5 * (1 + erf(x / √2))`), matching `torch.nn.GELU()`'s `approximate='none'` default. Previously the no-arg path defaulted to `GeluApproximate::Sigmoid` (`x * sigmoid(1.702 * x)`), producing ~6e-3 absolute deviation from PyTorch. **Migration**: callers relying on the historical fast-sigmoid default must opt in explicitly via `gelu_with(input, GeluApproximate::Sigmoid)` (LLM/transformer paths in `ferrotorch-llama` etc. will silently get the slower-but-more-precise erf path after upgrade — adjust if performance matters more than parity in your call site). `gelu_with(_, GeluApproximate::Tanh)` (PyTorch's `approximate='tanh'`) and `gelu_with(_, GeluApproximate::None)` are unchanged. The enum discriminant order is unchanged; only the `#[default]` attribute moved (closes #794).
 
 ### Fixed
+- BROKEN cubecl: portable_matmul_inner_dim_mismatch_returns_error guarded by try_wgpu_runtime (conformance_cubecl.rs) — same gate issue as portable_add; #1015 (#1049)
+- BROKEN cubecl: portable_add_shape_mismatch_returns_error guarded by try_wgpu_runtime (conformance_cubecl.rs) — CPU-side shape validation never tested on no-GPU CI; #1015 (#1048)
+- BROKEN cubecl: cube_device_ordinal_via_qualified_path discards return value (conformance_cubecl.rs) — let _ = CubeDevice::ordinal(&dev) is assertion-free; #1015 (#1047)
+- BROKEN cubecl: cube_runtime_new_without_backend_feature_errors early-returns when backend present (conformance_cubecl.rs) — interesting case never tested; #1015 (#1046)
+- BROKEN cubecl: cube_runtime_is_available_compile_flag_consistent skips body when backend present (conformance_cubecl.rs) — passes unconditionally with zero assertions in real-GPU build; #1015 (#1045)
 - BROKEN nn: layernorm_backward_matches_reference silently drops bias grad (conformance_nn_attention.rs:1373) — let _expected_grad_bias never asserted; #1015 (#1023)
 - BROKEN nn: lora_merge_produces_same_output is pure self-consistency (conformance_nn_structural.rs:1441) — pre-merge vs post-merge with no external reference; #1015 (#1022)
 - BROKEN nn: flash_and_standard_attention_agree compares two ferrotorch impls vs each other (conformance_nn_attention.rs:553) — shared bug invisible; #1015 (#1021)
