@@ -437,6 +437,124 @@ def map_fasterrcnn_keys(
     return out, used_tv, filled_ft, intentional_drop_tv
 
 
+def _map_keypointrcnn_box_head(
+    tv_sd: dict[str, torch.Tensor],
+    ft_prefix: str,
+    ft_keys: dict[str, list],
+    out: dict[str, torch.Tensor],
+    used_tv: set[str],
+    filled_ft: set[str],
+) -> None:
+    """Map FasterRCNN's RPN + ROI box head for KeypointRCNN.
+
+    Same as `_map_fasterrcnn_heads` except the box predictor for keypointrcnn
+    has `num_classes=2` (bg + person), so `cls_score` is `[2, 1024]` and
+    `bbox_pred` is `[8, 1024]`. Both `_check_shape` calls inside use the
+    ferrotorch-side recorded shape, so we just need to point at the same
+    torchvision keys.
+    """
+    pairs = [
+        # RPN — torchvision wraps the 3x3 conv in a Sequential ((Conv2d, ReLU))
+        # at module index 0.
+        (f"{ft_prefix}rpn.head.conv.weight", "rpn.head.conv.0.0.weight"),
+        (f"{ft_prefix}rpn.head.conv.bias",   "rpn.head.conv.0.0.bias"),
+        (f"{ft_prefix}rpn.head.cls_logits.weight", "rpn.head.cls_logits.weight"),
+        (f"{ft_prefix}rpn.head.cls_logits.bias",   "rpn.head.cls_logits.bias"),
+        (f"{ft_prefix}rpn.head.bbox_pred.weight",  "rpn.head.bbox_pred.weight"),
+        (f"{ft_prefix}rpn.head.bbox_pred.bias",    "rpn.head.bbox_pred.bias"),
+        # ROI box head (2 classes for keypointrcnn).
+        (f"{ft_prefix}head.fc6.weight",         "roi_heads.box_head.fc6.weight"),
+        (f"{ft_prefix}head.fc6.bias",           "roi_heads.box_head.fc6.bias"),
+        (f"{ft_prefix}head.fc7.weight",         "roi_heads.box_head.fc7.weight"),
+        (f"{ft_prefix}head.fc7.bias",           "roi_heads.box_head.fc7.bias"),
+        (f"{ft_prefix}head.cls_score.weight",   "roi_heads.box_predictor.cls_score.weight"),
+        (f"{ft_prefix}head.cls_score.bias",     "roi_heads.box_predictor.cls_score.bias"),
+        (f"{ft_prefix}head.bbox_pred.weight",   "roi_heads.box_predictor.bbox_pred.weight"),
+        (f"{ft_prefix}head.bbox_pred.bias",     "roi_heads.box_predictor.bbox_pred.bias"),
+    ]
+    for ft_k, tv_k in pairs:
+        if tv_k not in tv_sd:
+            raise SystemExit(f"keypointrcnn box head: missing torchvision key '{tv_k}'")
+        _check_shape(ft_k, tv_sd[tv_k], ft_keys[ft_k])
+        out[ft_k] = tv_sd[tv_k]
+        used_tv.add(tv_k)
+        filled_ft.add(ft_k)
+
+
+def map_keypointrcnn_keys(
+    tv_sd: dict[str, torch.Tensor],
+    ft_keys: dict[str, list],
+) -> tuple[dict[str, torch.Tensor], set[str], set[str], set[str]]:
+    """Map KeypointRCNN ResNet50+FPN state_dict to ferrotorch keys.
+
+    Same backbone+FPN+RPN as MaskRCNN, but:
+      - 2-class box predictor (bg + person) — keys are unchanged, shapes
+        differ from the 91-class MaskRCNN/FasterRCNN.
+      - No mask head.
+      - 8-conv KeypointRCNNHeads at `roi_heads.keypoint_head.{0,2,4,6,8,10,12,14}`
+        (the odd indices are ReLUs in the torchvision Sequential, no
+        parameters). Mapped to ferrotorch `keypoint_head.conv{0,2,...,14}`.
+      - Single ConvTranspose2d at `roi_heads.keypoint_predictor.kps_score_lowres`,
+        mapped to ferrotorch `keypoint_predictor.kps_score_lowres`.
+    """
+    out: dict[str, torch.Tensor] = {}
+    used_tv: set[str] = set()
+    filled_ft: set[str] = set()
+    intentional_drop_tv: set[str] = set()
+
+    _map_resnet50_backbone(
+        tv_sd, "backbone.body", "faster_rcnn.backbone", ft_keys,
+        out, used_tv, filled_ft,
+    )
+    _fill_resnet_fc_random(ft_keys, "faster_rcnn.backbone", out, filled_ft)
+    _map_fpn_with_bias(
+        tv_sd, "backbone.fpn", "faster_rcnn.fpn", ft_keys,
+        out, used_tv, filled_ft, intentional_drop_tv,
+    )
+    _map_keypointrcnn_box_head(
+        tv_sd, "faster_rcnn.", ft_keys, out, used_tv, filled_ft,
+    )
+
+    # KeypointRCNNHeads: 8 conv layers at even indices in the torchvision
+    # `nn.Sequential`. The odd indices are ReLU (no params).
+    for i in (0, 2, 4, 6, 8, 10, 12, 14):
+        tv_w = f"roi_heads.keypoint_head.{i}.weight"
+        tv_b = f"roi_heads.keypoint_head.{i}.bias"
+        ft_w = f"keypoint_head.conv{i}.weight"
+        ft_b = f"keypoint_head.conv{i}.bias"
+        if tv_w not in tv_sd or tv_b not in tv_sd:
+            raise SystemExit(
+                f"keypointrcnn: torchvision key '{tv_w}' or '{tv_b}' missing"
+            )
+        _check_shape(ft_w, tv_sd[tv_w], ft_keys[ft_w])
+        _check_shape(ft_b, tv_sd[tv_b], ft_keys[ft_b])
+        out[ft_w] = tv_sd[tv_w]
+        out[ft_b] = tv_sd[tv_b]
+        used_tv.update({tv_w, tv_b})
+        filled_ft.update({ft_w, ft_b})
+
+    # KeypointRCNNPredictor: single ConvTranspose2d.
+    pairs = [
+        (
+            "keypoint_predictor.kps_score_lowres.weight",
+            "roi_heads.keypoint_predictor.kps_score_lowres.weight",
+        ),
+        (
+            "keypoint_predictor.kps_score_lowres.bias",
+            "roi_heads.keypoint_predictor.kps_score_lowres.bias",
+        ),
+    ]
+    for ft_k, tv_k in pairs:
+        if tv_k not in tv_sd:
+            raise SystemExit(f"keypointrcnn predictor: missing '{tv_k}'")
+        _check_shape(ft_k, tv_sd[tv_k], ft_keys[ft_k])
+        out[ft_k] = tv_sd[tv_k]
+        used_tv.add(tv_k)
+        filled_ft.add(ft_k)
+
+    return out, used_tv, filled_ft, intentional_drop_tv
+
+
 def map_maskrcnn_keys(
     tv_sd: dict[str, torch.Tensor],
     ft_keys: dict[str, list],
@@ -964,6 +1082,27 @@ MODELS: dict[str, dict] = {
             "detector: single anchor/location + centerness branch, GroupNorm "
             "in 4-conv shared trunks for both class and regression heads, "
             "sigmoid scoring gated by centerness."
+        ),
+    ),
+    "keypointrcnn_resnet50_fpn": dict(
+        factory=lambda: tv_detection.keypointrcnn_resnet50_fpn(weights="COCO_V1"),
+        weights_enum="COCO_V1",
+        num_classes=2,
+        mapper=map_keypointrcnn_keys,
+        # FPN bias drops same as fasterrcnn/maskrcnn (the post-#1141 ferrotorch
+        # FPN is bias=True so this is actually NO drops — but keep True so the
+        # README explainer covers the documented FPN-bias provenance).
+        has_intentional_drops=True,
+        param_count=59_137_258,
+        description=(
+            "Keypoint R-CNN with ResNet-50 + FPN backbone for COCO person "
+            "keypoint detection. Re-keyed from torchvision 0.21 "
+            "`keypointrcnn_resnet50_fpn` "
+            "(`KeypointRCNN_ResNet50_FPN_Weights.COCO_V1`). Same FasterRCNN "
+            "body as #1141 (with FPN biases) but with num_classes=2 "
+            "(background + person) for the box predictor, plus an 8-conv "
+            "KeypointRCNNHeads (256→512→...→512) and a single-deconv "
+            "KeypointRCNNPredictor outputting 17 keypoint heatmap channels."
         ),
     ),
 }

@@ -37,7 +37,7 @@ use crate::models::detection::roi_heads_postprocess::{
 use crate::models::detection::rpn::{Rpn, RpnConfig};
 use crate::models::feature_extractor::IntermediateFeatures;
 use crate::models::resnet::{ResNet, resnet50};
-use crate::ops::roi_align;
+use crate::ops::roi_align_with_aligned;
 
 // ---------------------------------------------------------------------------
 // ROI-level assignment
@@ -60,13 +60,18 @@ fn assign_fpn_levels<T: Float>(
     let data = proposals.data_vec()?;
     let n = proposals.shape()[0];
     let mut levels = Vec::with_capacity(n);
+    // Matches torchvision `LevelMapper.eps = 1e-6`: the eps is added to the
+    // pre-floor value so boxes whose true level sits exactly on an integer
+    // boundary fall on the upper side instead of the lower one. This is a
+    // small numerical-stability nudge that mirrors torchvision exactly. (#1145)
+    const LEVEL_MAPPER_EPS: f64 = 1e-6;
     for i in 0..n {
         let x1 = data[i * 4].to_f64().unwrap_or(0.0);
         let y1 = data[i * 4 + 1].to_f64().unwrap_or(0.0);
         let x2 = data[i * 4 + 2].to_f64().unwrap_or(0.0);
         let y2 = data[i * 4 + 3].to_f64().unwrap_or(0.0);
         let area = ((x2 - x1) * (y2 - y1)).max(1.0);
-        let level = (k0 + (area.sqrt() / canonical_size).log2())
+        let level = (k0 + (area.sqrt() / canonical_size).log2() + LEVEL_MAPPER_EPS)
             .floor()
             .clamp(min_level as f64, max_level as f64) as usize;
         levels.push(level);
@@ -375,12 +380,16 @@ impl<T: Float> FasterRcnn<T> {
                 let boxes_t =
                     Tensor::from_storage(TensorStorage::cpu(roi_boxes), vec![k, 5], false)?;
 
-                let roi_out = roi_align(
+                // torchvision's `MultiScaleRoIAlign` uses `aligned=false`
+                // (legacy mode) for the box head — match pretrained-weight
+                // semantics by setting `aligned=false` here. (#1145)
+                let roi_out = roi_align_with_aligned(
                     feat,
                     &boxes_t,
                     (self.roi_output_size, self.roi_output_size),
                     scale,
                     2, // sampling_ratio=2 as in torchvision default
+                    false,
                 )?;
 
                 // roi_out: [K, 256, 7, 7] — store each row.

@@ -33,7 +33,9 @@ use ferrotorch_core::{FerrotorchError, FerrotorchResult, Tensor};
 use ferrotorch_nn::{InterpolateMode, Module, interpolate};
 use ferrotorch_vision::io::read_image_as_tensor;
 use ferrotorch_vision::models::bn_buffer_loader::apply_bn_buffers_from_state_dict;
-use ferrotorch_vision::models::detection::{MaskRcnn, maskrcnn_resnet50_fpn};
+use ferrotorch_vision::models::detection::{
+    KeypointRcnn, MaskRcnn, keypointrcnn_resnet50_fpn, maskrcnn_resnet50_fpn,
+};
 use ferrotorch_vision::models::get_model;
 
 fn parse_args() -> Result<(String, PathBuf, PathBuf), String> {
@@ -90,6 +92,9 @@ fn num_classes_for(model: &str) -> Result<usize, String> {
         // #1144: FCOS COCO_V1 — same 91-class convention; sigmoid scoring
         // gated by centerness.
         "fcos_resnet50_fpn" => Ok(91),
+        // #1145: KeypointRCNN COCO_V1 — 2 classes (background + person).
+        // The keypoint count (17) is fixed in the architecture constructor.
+        "keypointrcnn_resnet50_fpn" => Ok(2),
         other => Err(format!("unknown model: {other}")),
     }
 }
@@ -196,7 +201,8 @@ fn preprocess_for_model(model: &str, raw_chw: Tensor<f32>) -> FerrotorchResult<T
         "fasterrcnn_resnet50_fpn"
         | "maskrcnn_resnet50_fpn"
         | "retinanet_resnet50_fpn"
-        | "fcos_resnet50_fpn" => {
+        | "fcos_resnet50_fpn"
+        | "keypointrcnn_resnet50_fpn" => {
             // torchvision GeneralizedRCNNTransform: scale so min side = 800,
             // max side ≤ 1333; preserve aspect ratio.
             let min_size = 800.0_f64;
@@ -393,6 +399,114 @@ fn run_maskrcnn_dump(input: &Tensor<f32>, output_path: &PathBuf) -> Result<(), S
     Ok(())
 }
 
+/// Build, weight-load, and run a KeypointRcnn directly (not via the registry's
+/// `Box<dyn Module>`) so we can extract the full `KeypointDetections`
+/// (boxes + scores + keypoints + keypoint_scores). The registry's
+/// `Module::forward` only returns 1-D post-NMS scores, which is sufficient
+/// for the per-image score harness check but NOT for keypoint pixel-distance
+/// validation (#1145 harness criterion `mean_kp_pixel_diff`).
+///
+/// Replicates `models::registry::maybe_load_pretrained`'s weight-loading
+/// exactly: hub lookup → safetensors load → `load_state_dict(strict=false)`
+/// → BN buffer apply.
+fn run_keypointrcnn_dump(input: &Tensor<f32>, output_path: &PathBuf) -> Result<(), String> {
+    let mut model = keypointrcnn_resnet50_fpn::<f32>()
+        .map_err(|e| format!("keypointrcnn_resnet50_fpn: {e}"))?;
+    let info = ferrotorch_hub::registry::get_model_info("keypointrcnn_resnet50_fpn")
+        .ok_or_else(|| {
+            "ferrotorch_hub::registry: no entry for 'keypointrcnn_resnet50_fpn'".to_string()
+        })?;
+    let cache = ferrotorch_hub::cache::HubCache::with_default_dir();
+    let path = ferrotorch_hub::download::download_weights(info, &cache)
+        .map_err(|e| format!("download_weights: {e}"))?;
+    let state_dict = match info.format {
+        ferrotorch_hub::registry::WeightsFormat::SafeTensors => {
+            ferrotorch_serialize::load_safetensors::<f32>(&path)
+                .map_err(|e| format!("load_safetensors: {e}"))?
+        }
+        ferrotorch_hub::registry::WeightsFormat::FerrotorchStateDict => {
+            ferrotorch_serialize::load_state_dict::<f32>(&path)
+                .map_err(|e| format!("load_state_dict: {e}"))?
+        }
+    };
+    model
+        .load_state_dict(&state_dict, false)
+        .map_err(|e| format!("load_state_dict (apply): {e}"))?;
+    apply_bn_buffers_from_state_dict(&model as &dyn Module<f32>, &state_dict)
+        .map_err(|e| format!("apply_bn_buffers: {e}"))?;
+    model.eval();
+    eprintln!("[inference_dump] keypointrcnn loaded; running KeypointRcnn::forward...");
+
+    let dets = KeypointRcnn::forward(&model, input).map_err(|e| format!("forward: {e}"))?;
+
+    // Pull first-image detections (we only ever pass batch=1).
+    let (scores, boxes, keypoints, keypoint_scores) = if let Some(d) = dets.into_iter().next() {
+        (d.scores, d.boxes, d.keypoints, d.keypoint_scores)
+    } else {
+        // Zero detections — emit empty tensors with correct shapes.
+        let scores = Tensor::from_storage(
+            ferrotorch_core::TensorStorage::cpu(vec![]),
+            vec![0usize],
+            false,
+        )
+        .map_err(|e| format!("empty scores: {e}"))?;
+        let boxes = Tensor::from_storage(
+            ferrotorch_core::TensorStorage::cpu(vec![]),
+            vec![0, 4],
+            false,
+        )
+        .map_err(|e| format!("empty boxes: {e}"))?;
+        let keypoints = Tensor::from_storage(
+            ferrotorch_core::TensorStorage::cpu(vec![]),
+            vec![0, 17, 3],
+            false,
+        )
+        .map_err(|e| format!("empty keypoints: {e}"))?;
+        let kp_scores = Tensor::from_storage(
+            ferrotorch_core::TensorStorage::cpu(vec![]),
+            vec![0, 17],
+            false,
+        )
+        .map_err(|e| format!("empty kp_scores: {e}"))?;
+        (scores, boxes, keypoints, kp_scores)
+    };
+
+    eprintln!(
+        "[inference_dump] keypointrcnn output: scores={:?}, boxes={:?}, keypoints={:?}, keypoint_scores={:?}",
+        scores.shape(),
+        boxes.shape(),
+        keypoints.shape(),
+        keypoint_scores.shape(),
+    );
+
+    // Primary output: scores (matches retinanet/fcos/fasterrcnn convention).
+    dump_tensor(&scores, output_path).map_err(|e| format!("dump_tensor scores: {e}"))?;
+
+    // Companion files: `<output>.boxes.bin`, `.keypoints.bin`, `.keypoint_scores.bin`.
+    // The harness uses boxes for IoU-based pairing (rust↔tv) and then
+    // computes per-keypoint pixel L2 distance on matched pairs.
+    let mk_path = |suffix: &str| -> PathBuf {
+        let mut p = output_path.clone();
+        let fname = format!(
+            "{}.{suffix}.bin",
+            output_path.file_name().and_then(|n| n.to_str()).unwrap_or("out")
+        );
+        p.set_file_name(fname);
+        p
+    };
+    let boxes_path = mk_path("boxes");
+    let keypoints_path = mk_path("keypoints");
+    let kp_scores_path = mk_path("keypoint_scores");
+    dump_tensor(&boxes, &boxes_path).map_err(|e| format!("dump_tensor boxes: {e}"))?;
+    dump_tensor(&keypoints, &keypoints_path).map_err(|e| format!("dump_tensor keypoints: {e}"))?;
+    dump_tensor(&keypoint_scores, &kp_scores_path)
+        .map_err(|e| format!("dump_tensor keypoint_scores: {e}"))?;
+    eprintln!(
+        "[inference_dump] dumped scores={output_path:?}, boxes={boxes_path:?}, keypoints={keypoints_path:?}, keypoint_scores={kp_scores_path:?}"
+    );
+    Ok(())
+}
+
 fn main() -> Result<(), String> {
     let (model_name, image_path, output_path) = parse_args()?;
     let num_classes = num_classes_for(&model_name)?;
@@ -414,6 +528,14 @@ fn main() -> Result<(), String> {
     // This is harness instrumentation only — no model code is changed.
     if model_name == "maskrcnn_resnet50_fpn" {
         return run_maskrcnn_dump(&input, &output_path);
+    }
+
+    // KeypointRCNN likewise needs companion boxes + keypoints + keypoint_scores
+    // dumps so the #1139 harness can pair rust↔tv detections by box-IoU
+    // (mAP-style) and compute per-keypoint pixel L2 distance — Module::forward
+    // alone only exposes the 1-D scores.
+    if model_name == "keypointrcnn_resnet50_fpn" {
+        return run_keypointrcnn_dump(&input, &output_path);
     }
 
     // Build model via the architect-mandated registry path; this loads

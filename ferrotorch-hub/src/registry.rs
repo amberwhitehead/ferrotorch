@@ -297,6 +297,23 @@ static MODELS: &[ModelInfo] = &[
         format: WeightsFormat::SafeTensors,
         num_parameters: 32_269_600,
     },
+    // #1145: Keypoint R-CNN with ResNet-50 FPN backbone for COCO person
+    // keypoint detection. Pinned from torchvision 0.21
+    // `KeypointRCNN_ResNet50_FPN_Weights.COCO_V1`. Same FasterRCNN body as
+    // #1141 (with FPN biases) but with `num_classes=2` (bg + person) for
+    // the box predictor and an 8-conv KeypointRCNNHeads + single-deconv
+    // KeypointRCNNPredictor outputting 17 keypoint heatmap channels. The
+    // SHA-256 below is the placeholder pin; updated by
+    // `scripts/pin_pretrained_weights.py keypointrcnn_resnet50_fpn` after
+    // upload to ferrotorch/keypointrcnn_resnet50_fpn on HF.
+    ModelInfo {
+        name: "keypointrcnn_resnet50_fpn",
+        description: "Keypoint R-CNN with ResNet-50 + FPN backbone for COCO person keypoint detection (#1145, COCO_V1)",
+        weights_url: "https://huggingface.co/ferrotorch/keypointrcnn_resnet50_fpn/resolve/main/model.safetensors",
+        weights_sha256: "73e282340493d58731dc08314df5f4f483fd537f55b3bb2fc188c17cfd922dfb",
+        format: WeightsFormat::SafeTensors,
+        num_parameters: 59_137_258,
+    },
 ];
 
 /// List all available pretrained models.

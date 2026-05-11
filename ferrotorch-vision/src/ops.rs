@@ -729,7 +729,8 @@ fn bilinear_sample<T: Float>(
 /// Region of Interest Align: bilinear feature extraction per RoI.
 ///
 /// Mirrors `torchvision.ops.roi_align(input, boxes, output_size, spatial_scale,
-/// sampling_ratio, aligned=true)`.
+/// sampling_ratio, aligned=true)` exactly — this is the Detectron2-style
+/// half-pixel-aligned variant.
 ///
 /// - `input`: feature map `[B, C, H, W]`.
 /// - `boxes`: `[K, 5]` rows of `(batch_idx, x1, y1, x2, y2)` in pixel coords
@@ -742,19 +743,40 @@ fn bilinear_sample<T: Float>(
 ///   the explicit per-bin grid resolution.
 ///
 /// Returns `[K, C, out_h, out_w]`. Empty boxes (`x2 < x1 || y2 < y1`) yield
-/// all-zero output for that row. (#610)
-// justification: 5 args today, but the signature mirrors torchvision's
-// `roi_align(input, boxes, output_size, spatial_scale, sampling_ratio)`
-// and is on a near-term path to gain `aligned: bool` for parity. Keeping
-// the allow documents that the arg count is intentional rather than a
-// missed refactor.
-#[allow(clippy::too_many_arguments)]
+/// all-zero output for that row.
+///
+/// For the torchvision **legacy** variant (`aligned=False`, used by the
+/// pretrained COCO FasterRCNN / MaskRCNN / KeypointRCNN detection heads)
+/// use [`roi_align_with_aligned`] with `aligned = false`. (#610, #1145)
 pub fn roi_align<T: Float>(
     input: &Tensor<T>,
     boxes: &Tensor<T>,
     output_size: (usize, usize),
     spatial_scale: f64,
     sampling_ratio: usize,
+) -> FerrotorchResult<Tensor<T>> {
+    roi_align_with_aligned(input, boxes, output_size, spatial_scale, sampling_ratio, true)
+}
+
+/// Region of Interest Align with explicit `aligned` toggle, matching
+/// torchvision's `torchvision.ops.roi_align(..., aligned=<bool>)`.
+///
+/// Set `aligned = true` for the Detectron2-style half-pixel-aligned variant
+/// (subtract `0.5` from box coordinates before scaling — used by newer
+/// detection models). Set `aligned = false` for the **legacy** variant
+/// (no half-pixel offset, `roi_w / roi_h` clamped to `min=1.0`) used by
+/// torchvision's pretrained COCO FasterRCNN / MaskRCNN / KeypointRCNN
+/// boxes / masks / keypoints. (#1145)
+///
+/// Parameters are identical to [`roi_align`]; see its docs for details.
+#[allow(clippy::too_many_arguments)]
+pub fn roi_align_with_aligned<T: Float>(
+    input: &Tensor<T>,
+    boxes: &Tensor<T>,
+    output_size: (usize, usize),
+    spatial_scale: f64,
+    sampling_ratio: usize,
+    aligned: bool,
 ) -> FerrotorchResult<Tensor<T>> {
     if input.ndim() != 4 {
         return Err(FerrotorchError::ShapeMismatch {
@@ -793,6 +815,7 @@ pub fn roi_align<T: Float>(
 
     let mut out = vec![zero; k * c * out_h * out_w];
 
+    let one: T = cast::<f64, T>(1.0)?;
     for i in 0..k {
         let batch_idx = box_data[i * 5].to_usize().unwrap_or(0);
         if batch_idx >= b {
@@ -802,14 +825,23 @@ pub fn roi_align<T: Float>(
                 size: b,
             });
         }
-        // Map box to feature-map coords with `aligned=true`: subtract 0.5
-        // before scaling so the box centers align with feature pixel centers.
-        let x1 = box_data[i * 5 + 1] * scale - half;
-        let y1 = box_data[i * 5 + 2] * scale - half;
-        let x2 = box_data[i * 5 + 3] * scale - half;
-        let y2 = box_data[i * 5 + 4] * scale - half;
-        let roi_w = max_t(x2 - x1, zero);
-        let roi_h = max_t(y2 - y1, zero);
+        // Map box to feature-map coords. With `aligned=true` (Detectron2
+        // convention) we subtract 0.5 before scaling so box centres align
+        // with feature pixel centres. With `aligned=false` (torchvision
+        // legacy, used by pretrained COCO FasterRCNN/MaskRCNN/KeypointRCNN)
+        // there is no half-pixel offset, and the ROI width/height are
+        // clamped to `min=1.0` to mimic the legacy CUDA kernel. (#1145)
+        let offset = if aligned { half } else { zero };
+        let x1 = box_data[i * 5 + 1] * scale - offset;
+        let y1 = box_data[i * 5 + 2] * scale - offset;
+        let x2 = box_data[i * 5 + 3] * scale - offset;
+        let y2 = box_data[i * 5 + 4] * scale - offset;
+        let mut roi_w = max_t(x2 - x1, zero);
+        let mut roi_h = max_t(y2 - y1, zero);
+        if !aligned {
+            roi_w = max_t(roi_w, one);
+            roi_h = max_t(roi_h, one);
+        }
 
         let bin_h = roi_h / cast::<usize, T>(out_h)?;
         let bin_w = roi_w / cast::<usize, T>(out_w)?;
@@ -1290,6 +1322,53 @@ mod tests {
         let boxes = from_slice::<f64>(&[0.0; 4], &[1, 4]).unwrap(); // wrong: needs [_, 5]
         let err = roi_align(&input, &boxes, (1, 1), 1.0, 1).unwrap_err();
         assert!(matches!(err, FerrotorchError::ShapeMismatch { .. }));
+    }
+
+    /// `roi_align_with_aligned(aligned=false)` matches the torchvision
+    /// **legacy** kernel: no half-pixel offset and a `min=1.0` clamp on
+    /// `roi_width` / `roi_height`. The `aligned=true` overload is the
+    /// Detectron2 variant — the two are explicitly distinguishable on a
+    /// box whose feature-space extent is < 1 pixel after scaling. (#1145)
+    #[test]
+    fn roi_align_with_aligned_distinguishes_legacy_vs_detectron2() {
+        // 1×1×4×4 input, simple "centred" values so the difference between
+        // aligned modes is observable.
+        let input = from_slice::<f64>(
+            &[
+                1.0, 2.0, 3.0, 4.0,
+                5.0, 6.0, 7.0, 8.0,
+                9.0, 10.0, 11.0, 12.0,
+                13.0, 14.0, 15.0, 16.0,
+            ],
+            &[1, 1, 4, 4],
+        )
+        .unwrap();
+        // A box at [0.5, 0.5, 1.5, 1.5] in feature coords (scale=1.0).
+        let boxes = from_slice::<f64>(&[0.0, 0.5, 0.5, 1.5, 1.5], &[1, 5]).unwrap();
+
+        let out_true = roi_align_with_aligned(&input, &boxes, (1, 1), 1.0, 2, true).unwrap();
+        let out_false = roi_align_with_aligned(&input, &boxes, (1, 1), 1.0, 2, false).unwrap();
+
+        let v_true = out_true.data().unwrap()[0];
+        let v_false = out_false.data().unwrap()[0];
+        // `aligned=true` subtracts 0.5 from the box → ROI in [0, 0, 1, 1] →
+        // upper-left 2×2 mean ≈ (1 + 2 + 5 + 6) / 4 ≈ 3.5.
+        assert!(
+            (v_true - 3.5).abs() < 0.5,
+            "aligned=true expected ≈3.5, got {v_true}",
+        );
+        // `aligned=false` keeps the box at [0.5, 0.5, 1.5, 1.5] and the
+        // legacy `roi_w / roi_h` clamp to 1.0 leaves it unchanged → ROI
+        // mean is computed centred near pixel (1, 1) ≈ 6.0.
+        assert!(
+            (v_false - 6.0).abs() < 0.5,
+            "aligned=false expected ≈6.0, got {v_false}",
+        );
+        // The two modes MUST disagree (this is the whole point of the API):
+        assert!(
+            (v_true - v_false).abs() > 1.0,
+            "aligned=true and aligned=false should give materially different results",
+        );
     }
 
     #[test]

@@ -29,7 +29,7 @@ use ferrotorch_nn::{Conv2d, ConvTranspose2d};
 
 use crate::models::detection::faster_rcnn::{FasterRcnn, fasterrcnn_resnet50_fpn};
 use crate::models::detection::roi_heads_postprocess::postprocess_masks;
-use crate::ops::roi_align;
+use crate::ops::roi_align_with_aligned;
 
 // ---------------------------------------------------------------------------
 // MaskHead — 4 conv layers producing [N, 256, roi_H, roi_W]
@@ -352,12 +352,16 @@ impl<T: Float> MaskRcnn<T> {
                 let boxes_t =
                     Tensor::from_storage(TensorStorage::cpu(roi_boxes), vec![k, 5], false)?;
 
-                let roi_out = roi_align(
+                // torchvision's `MultiScaleRoIAlign` (mask head) uses
+                // `aligned=false` (legacy) — match pretrained-weight
+                // semantics. (#1145)
+                let roi_out = roi_align_with_aligned(
                     &feat_single,
                     &boxes_t,
                     (self.mask_roi_size, self.mask_roi_size),
                     scale,
                     2,
+                    false,
                 )?;
 
                 let channels = feat_single.shape()[1];
@@ -556,7 +560,8 @@ pub fn maskrcnn_resnet50_fpn<T: Float>(num_classes: usize) -> FerrotorchResult<M
 
 /// FPN level assignment for mask ROIs.
 ///
-/// Same formula as Faster R-CNN's `assign_fpn_levels`.
+/// Same formula as Faster R-CNN's `assign_fpn_levels` — mirrors torchvision's
+/// `LevelMapper` (including the `eps = 1e-6` numerical nudge). (#1145)
 fn assign_fpn_levels_mask<T: Float>(
     proposals: &Tensor<T>,
     k0: f64,
@@ -567,13 +572,14 @@ fn assign_fpn_levels_mask<T: Float>(
     let data = proposals.data_vec()?;
     let n = proposals.shape()[0];
     let mut levels = Vec::with_capacity(n);
+    const LEVEL_MAPPER_EPS: f64 = 1e-6;
     for i in 0..n {
         let x1 = data[i * 4].to_f64().unwrap_or(0.0);
         let y1 = data[i * 4 + 1].to_f64().unwrap_or(0.0);
         let x2 = data[i * 4 + 2].to_f64().unwrap_or(0.0);
         let y2 = data[i * 4 + 3].to_f64().unwrap_or(0.0);
         let area = ((x2 - x1) * (y2 - y1)).max(1.0);
-        let level = (k0 + (area.sqrt() / canonical_size).log2())
+        let level = (k0 + (area.sqrt() / canonical_size).log2() + LEVEL_MAPPER_EPS)
             .floor()
             .clamp(min_level as f64, max_level as f64) as usize;
         levels.push(level);

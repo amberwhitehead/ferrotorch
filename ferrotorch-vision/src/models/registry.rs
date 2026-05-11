@@ -354,6 +354,22 @@ fn default_registry() -> ModelRegistry<f32> {
         }),
     );
 
+    // #1145: Keypoint R-CNN with ResNet-50 FPN backbone for COCO person
+    // keypoint detection. The COCO pretrained checkpoint is hard-wired to
+    // `num_classes=2` (background + person) and `num_keypoints=17`; the
+    // `num_classes` registry arg is ignored to match torchvision's
+    // `keypointrcnn_resnet50_fpn()` default. The keypoint-specific layers
+    // (KeypointHead + KeypointPredictor) are added on top of the FasterRCNN
+    // body via composition — no body-code duplication.
+    registry.register_model(
+        "keypointrcnn_resnet50_fpn",
+        Box::new(|pretrained, _num_classes| {
+            maybe_load_pretrained(pretrained, "keypointrcnn_resnet50_fpn", || {
+                super::detection::keypointrcnn_resnet50_fpn::<f32>()
+            })
+        }),
+    );
+
     registry
 }
 
@@ -486,6 +502,7 @@ mod tests {
         assert!(names.contains(&"ssd300_vgg16".to_string()));
         assert!(names.contains(&"retinanet_resnet50_fpn".to_string()));
         assert!(names.contains(&"fcos_resnet50_fpn".to_string()));
+        assert!(names.contains(&"keypointrcnn_resnet50_fpn".to_string()));
     }
 
     #[test]
@@ -545,6 +562,7 @@ mod tests {
             "ssd300_vgg16",
             "retinanet_resnet50_fpn",
             "fcos_resnet50_fpn",
+            "keypointrcnn_resnet50_fpn",
         ];
         for name in canonical {
             let info = ferrotorch_hub::registry::get_model_info(name);

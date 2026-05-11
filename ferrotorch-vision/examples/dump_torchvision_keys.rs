@@ -15,8 +15,8 @@
 
 use ferrotorch_nn::Module;
 use ferrotorch_vision::models::detection::{
-    fasterrcnn_resnet50_fpn, fcos_resnet50_fpn, maskrcnn_resnet50_fpn, retinanet_resnet50_fpn,
-    ssd300_vgg16,
+    fasterrcnn_resnet50_fpn, fcos_resnet50_fpn, keypointrcnn_resnet50_fpn, maskrcnn_resnet50_fpn,
+    retinanet_resnet50_fpn, ssd300_vgg16,
 };
 use ferrotorch_vision::models::segmentation::{deeplabv3_resnet50, fcn_resnet50};
 
@@ -49,6 +49,8 @@ fn main() {
     // #1144: FCOS COCO_V1 — same 91-class convention; sigmoid scoring gated
     // by a separate centerness branch.
     let fcos = fcos_resnet50_fpn::<f32>(91).expect("fcos_resnet50_fpn build");
+    // #1145: Keypoint R-CNN COCO_V1 — 2 classes (bg + person), 17 keypoints.
+    let krcnn = keypointrcnn_resnet50_fpn::<f32>().expect("keypointrcnn_resnet50_fpn build");
 
     let out = serde_json::json!({
         "ssd300_vgg16": dump(&ssd),
@@ -58,6 +60,7 @@ fn main() {
         "fcn_resnet50": dump(&fcn),
         "retinanet_resnet50_fpn": dump(&retina),
         "fcos_resnet50_fpn": dump(&fcos),
+        "keypointrcnn_resnet50_fpn": dump(&krcnn),
     });
     println!("{}", serde_json::to_string_pretty(&out).unwrap());
 }
