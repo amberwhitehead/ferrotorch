@@ -26,6 +26,7 @@ members = [
     "ferrotorch-bert",
     "ferrotorch-whisper",
     "ferrotorch-diffusion",
+    "ferrotorch-graph",
 ]
 
 [workspace.package]
@@ -65,6 +66,7 @@ ferrotorch-mps = { version = "0.5.1", path = "ferrotorch-mps" }
 ferrotorch-bert = { version = "0.5.1", path = "ferrotorch-bert" }
 ferrotorch-whisper = { version = "0.5.1", path = "ferrotorch-whisper" }
 ferrotorch-diffusion = { version = "0.5.1", path = "ferrotorch-diffusion" }
+ferrotorch-graph = { version = "0.5.1", path = "ferrotorch-graph" }
 
 # ferray ecosystem
 ferray-core = { version = "0.3", features = ["bf16"] }

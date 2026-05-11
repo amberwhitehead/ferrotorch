@@ -571,6 +571,29 @@ static MODELS: &[ModelInfo] = &[
         format: WeightsFormat::FerrotorchStateDict,
         num_parameters: 0,
     },
+    // #1157: gcn-cora (PyG GCNConv-pair trained on Cora) — first
+    // pinned graph neural network. Two-layer GCN matching
+    // `torch_geometric.nn.GCNConv` defaults (add_self_loops=True,
+    // normalize=True, improved=False, bias=True), hidden=16, trained
+    // for 200 epochs with Adam(lr=0.01, weight_decay=5e-4) + cross-
+    // entropy on the Cora train_mask under torch.manual_seed(42). MIT-
+    // licensed (Planetoid Cora is freely available, the trained
+    // weights are originally produced here). The mirror ships the
+    // canonical PyG state_dict (`conv{1,2}.lin.weight`, `conv{1,2}.bias`
+    // — no key drops or renames) plus `_value_parity_{x,edge_index,y,
+    // logits}.bin` so the `scripts/verify_gnn_inference.py` harness
+    // (and the `conformance_gcn_cora` cargo test) can compare
+    // ferrotorch's full-graph logits against a frozen `torch_geometric==2.7.0`
+    // reference forward pass without re-running the 200-epoch training
+    // loop in CI. Frozen test_acc on Cora's test_mask: 80.4%.
+    ModelInfo {
+        name: "gcn-cora",
+        description: "GCN-on-Cora (PyG GCNConv-pair, 1433->16->7, trained 200 epochs): first ferrotorch graph neural network real-artifact baseline, parity vs torch_geometric (#1157).",
+        weights_url: "https://huggingface.co/ferrotorch/gcn-cora/resolve/main/model.safetensors",
+        weights_sha256: "7566ea9e517959e3dd30ce006ac1cf542d72c805f6f63a996c9e537737890cdc",
+        format: WeightsFormat::SafeTensors,
+        num_parameters: 23_063,
+    },
 ];
 
 /// List all available pretrained models.
