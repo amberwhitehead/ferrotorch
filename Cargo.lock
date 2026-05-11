@@ -2474,6 +2474,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "ferrotorch-bert"
+version = "0.5.1"
+dependencies = [
+ "ferrotorch-core",
+ "ferrotorch-hub",
+ "ferrotorch-nn",
+ "ferrotorch-serialize",
+ "ferrotorch-tokenize",
+ "num-traits",
+ "safetensors",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.18",
+]
+
+[[package]]
 name = "ferrotorch-core"
 version = "0.5.1"
 dependencies = [

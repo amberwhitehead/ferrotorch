@@ -350,6 +350,33 @@ static MODELS: &[ModelInfo] = &[
         format: WeightsFormat::SafeTensors,
         num_parameters: 134_515_008,
     },
+    // #1148: all-MiniLM-L6-v2 (sentence-transformers/all-MiniLM-L6-v2) —
+    // first pinned BERT-family encoder-only sentence-embedding model.
+    // 22M params, 6 layers, 384 hidden, GELU FFN, post-norm residual,
+    // learned absolute position embeddings. Sentence pipeline = mean
+    // pool over attention mask + L2 normalize. Apache-2.0. Mirrored
+    // byte-for-byte from upstream by `scripts/pin_pretrained_text_weights.py`
+    // (HF key layout matches `BertModel::named_parameters()` exactly;
+    // the pin script verifies every parameter key + shape and confirms
+    // the only un-mapped upstream keys are `embeddings.position_ids`
+    // (a buffer regenerated each forward) and `pooler.*` (unused by
+    // sentence-transformers) — both intentionally dropped by
+    // `BertModel::load_hf_state_dict` and surfaced in the returned
+    // `DropReport` so the FPN-bias silent-drop bug (#1141) cannot
+    // recur). The mirror also ships `_value_parity_{input,output,token_ids}`
+    // so the `scripts/verify_text_embedding_inference.py` harness (and
+    // the `conformance_pretrained_text_embedding` cargo test) can
+    // compare ferrotorch's sentence embedding against a frozen
+    // `sentence_transformers==5.4.1` reference forward pass without
+    // re-running it in CI.
+    ModelInfo {
+        name: "all-MiniLM-L6-v2",
+        description: "all-MiniLM-L6-v2 (sentence-transformers/all-MiniLM-L6-v2): 22M-param BERT-family sentence-embedding model, Apache 2.0, real-artifact baseline for sentence-embedding parity vs sentence_transformers (#1148)",
+        weights_url: "https://huggingface.co/ferrotorch/all-MiniLM-L6-v2/resolve/main/model.safetensors",
+        weights_sha256: "53aa51172d142c89d9012cce15ae4d6cc0ca6895895114379cacb4fab128d9db",
+        format: WeightsFormat::SafeTensors,
+        num_parameters: 22_565_376,
+    },
 ];
 
 /// List all available pretrained models.

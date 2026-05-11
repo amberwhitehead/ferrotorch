@@ -1,0 +1,37 @@
+[package]
+name = "ferrotorch-bert"
+description = "BERT-family encoder-only model composition and sentence-embedding inference for ferrotorch"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
+readme = "README.md"
+
+[features]
+default = []
+
+[dependencies]
+ferrotorch-core = { workspace = true }
+ferrotorch-nn = { workspace = true }
+ferrotorch-serialize = { workspace = true }
+ferrotorch-hub = { workspace = true }
+num-traits = { workspace = true }
+safetensors = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tempfile = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+ferrotorch-tokenize = { workspace = true }
+ferrotorch-serialize = { workspace = true }
+tempfile = { workspace = true }
+
+[[example]]
+name = "text_embedding_dump"
+path = "examples/text_embedding_dump.rs"
