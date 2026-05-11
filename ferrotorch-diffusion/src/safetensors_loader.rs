@@ -14,6 +14,7 @@ use ferrotorch_core::{FerrotorchError, FerrotorchResult, Float};
 use ferrotorch_nn::module::{Module, StateDict};
 use ferrotorch_serialize::load_safetensors;
 
+use crate::clip_text_encoder::{ClipTextConfig, ClipTextEncoder};
 use crate::config::VaeDecoderConfig;
 use crate::unet::UNet2DConditionModel;
 use crate::unet_config::UNet2DConditionConfig;
@@ -169,6 +170,135 @@ pub fn load_unet<T: Float>(
     let mut unet = UNet2DConditionModel::<T>::new(cfg)?;
     let report = unet.load_hf_state_dict(&state, strict)?;
     Ok((unet, report))
+}
+
+// ---------------------------------------------------------------------------
+// ClipTextEncoder loader
+// ---------------------------------------------------------------------------
+
+/// Read a single non-sharded safetensors file into a typed `StateDict`,
+/// dropping any int64 `position_ids` buffer BEFORE the generic-`T`
+/// decode. The CLIP-text checkpoint ships an
+/// `embeddings.position_ids` (or `text_model.embeddings.position_ids`)
+/// `[1, 77]` int64 buffer that would poison a `load_safetensors::<f32>`
+/// pass because i64 is not representable as f32 in the underlying
+/// dispatch. Mirrors the trick `ferrotorch-bert`'s loader uses.
+fn load_safetensors_clip_filtered<T: Float>(
+    weights_path: &Path,
+) -> FerrotorchResult<(StateDict<T>, bool)> {
+    use safetensors::SafeTensors;
+
+    let bytes =
+        std::fs::read(weights_path).map_err(|e| FerrotorchError::InvalidArgument {
+            message: format!(
+                "load_safetensors_clip_filtered: failed to read {}: {e}",
+                weights_path.display()
+            ),
+        })?;
+    let st = SafeTensors::deserialize(&bytes).map_err(|e| FerrotorchError::InvalidArgument {
+        message: format!(
+            "load_safetensors_clip_filtered: failed to parse {}: {e}",
+            weights_path.display()
+        ),
+    })?;
+    let mut keep: Vec<String> = Vec::new();
+    let mut had_position_ids = false;
+    for k in st.names() {
+        let s: &str = k.as_str();
+        // The position_ids buffer is the only int64 surface in
+        // CLIPTextModel and it has no parameter slot on our side.
+        if s == "embeddings.position_ids" || s == "text_model.embeddings.position_ids" {
+            had_position_ids = true;
+            continue;
+        }
+        keep.push(String::from(s));
+    }
+
+    // Re-serialize only the kept tensors into an in-memory safetensors
+    // blob and feed that to `load_safetensors::<T>`. Reuses the audited
+    // generic decoder instead of re-implementing dtype dispatch here.
+    let mut subset: Vec<(String, safetensors::tensor::TensorView<'_>)> =
+        Vec::with_capacity(keep.len());
+    for k in &keep {
+        let v = st.tensor(k).map_err(|e| FerrotorchError::InvalidArgument {
+            message: format!(
+                "load_safetensors_clip_filtered: missing tensor {k:?} after filter: {e}"
+            ),
+        })?;
+        subset.push((k.clone(), v));
+    }
+    let serialized = safetensors::serialize(subset, &None).map_err(|e| {
+        FerrotorchError::InvalidArgument {
+            message: format!("load_safetensors_clip_filtered: re-serialize failed: {e}"),
+        }
+    })?;
+    let tmp = tempfile::NamedTempFile::new().map_err(|e| FerrotorchError::InvalidArgument {
+        message: format!("load_safetensors_clip_filtered: tempfile: {e}"),
+    })?;
+    std::fs::write(tmp.path(), &serialized).map_err(|e| FerrotorchError::InvalidArgument {
+        message: format!("load_safetensors_clip_filtered: tempfile write: {e}"),
+    })?;
+    let state = load_safetensors::<T>(tmp.path())?;
+    Ok((state, had_position_ids))
+}
+
+/// Load a [`ClipTextEncoder`] from a CLIP text-tower
+/// `model.safetensors` file plus a parsed [`ClipTextConfig`].
+///
+/// Accepts both upstream layouts:
+///   - bare `embeddings.* / encoder.* / final_layer_norm.*` (what the
+///     pin script normalises to).
+///   - `text_model.<rest>` prefix (what the upstream HF checkpoint
+///     ships).
+///
+/// The int64 `embeddings.position_ids` buffer (a `[1, max_pos]`
+/// `arange(max_pos)` constant regenerated each forward pass) is
+/// dropped at decode time and surfaced via the returned
+/// [`DropReport`].
+///
+/// `strict=false` is required when the upstream checkpoint carries the
+/// position_ids buffer (the default for `runwayml/stable-diffusion-v1-5`'s
+/// `text_encoder/model.safetensors`).
+///
+/// # Errors
+///
+/// Propagates safetensors parse errors, [`ClipTextEncoder`] construction
+/// errors, and any per-key shape / strict-mode mismatch.
+pub fn load_clip_text_encoder<T: Float>(
+    weights_path: &Path,
+    cfg: ClipTextConfig,
+    strict: bool,
+) -> FerrotorchResult<(ClipTextEncoder<T>, DropReport)> {
+    let (mut state, had_position_ids) =
+        load_safetensors_clip_filtered::<T>(weights_path).map_err(|e| {
+            FerrotorchError::InvalidArgument {
+                message: format!(
+                    "load_clip_text_encoder: failed to decode safetensors {}: {e}",
+                    weights_path.display()
+                ),
+            }
+        })?;
+
+    // Re-insert a placeholder entry for the position_ids buffer (with
+    // the upstream key it actually used) so the model's DropReport
+    // captures it as an intentionally-dropped upstream key. The
+    // placeholder tensor is never consumed — `load_hf_state_dict`
+    // drops the entry before any parameter slot sees it.
+    if had_position_ids {
+        let key = if state
+            .keys()
+            .any(|k| k.starts_with("text_model."))
+        {
+            "text_model.embeddings.position_ids".to_string()
+        } else {
+            "embeddings.position_ids".to_string()
+        };
+        state.insert(key, ferrotorch_core::zeros::<T>(&[1])?);
+    }
+
+    let mut enc = ClipTextEncoder::<T>::new(cfg)?;
+    let report = enc.load_hf_state_dict(&state, strict)?;
+    Ok((enc, report))
 }
 
 /// Load a [`VaeDecoder`] from a VAE `diffusion_pytorch_model.safetensors`

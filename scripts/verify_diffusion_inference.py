@@ -96,6 +96,20 @@ TOL: dict[str, dict[str, Any]] = {
             "_value_parity_predicted_noise.bin",
         ),
     ),
+    "sd-v1-5-clip-text-encoder": dict(
+        kind="clip",
+        cosine_sim_min=0.999,
+        max_abs=0.5,
+        ref_shape=(1, 77, 768),
+        ref_file="_value_parity_last_hidden_state.bin",
+        rust_example="clip_text_encode_dump",
+        mirror_files=(
+            "config.json",
+            "model.safetensors",
+            "_value_parity_input_ids.bin",
+            "_value_parity_last_hidden_state.bin",
+        ),
+    ),
 }
 
 
@@ -175,6 +189,8 @@ def run_rust_dump(
             "--timestep", str(files["_value_parity_timestep.bin"]),
             "--text-embedding", str(files["_value_parity_text_embedding.bin"]),
         ]
+    elif tol["kind"] == "clip":
+        cmd += ["--input-ids", str(files["_value_parity_input_ids.bin"])]
     else:
         raise RuntimeError(f"{model_name}: unknown kind {tol['kind']!r}")
     print(f"  running: {' '.join(cmd)}", flush=True)

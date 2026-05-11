@@ -58,6 +58,7 @@ from diffusers import AutoencoderKL, UNet2DConditionModel
 from huggingface_hub import HfApi, hf_hub_download
 from safetensors import safe_open
 from safetensors.torch import save_file
+from transformers import CLIPTextModel, CLIPTokenizer
 
 
 # ---------------------------------------------------------------------------
@@ -126,6 +127,25 @@ MODELS: dict[str, DiffusionModelInfo] = {
         license="openrail",
         # Full UNet parameter count. Recorded at pin time.
         param_count=859_520_964,
+    ),
+    "sd-v1-5-clip-text-encoder": DiffusionModelInfo(
+        name="sd-v1-5-clip-text-encoder",
+        upstream_repo="runwayml/stable-diffusion-v1-5",
+        upstream_subfolder="text_encoder",
+        description=(
+            "Stable Diffusion 1.5 CLIP text encoder "
+            "(runwayml/stable-diffusion-v1-5, text_encoder/ subfolder; the "
+            "text tower of openai/clip-vit-large-patch14). 12 transformer "
+            "layers, hidden_size=768, intermediate_size=3072, "
+            "num_attention_heads=12, max_position_embeddings=77, "
+            "vocab_size=49408, hidden_act=quick_gelu, layer_norm_eps=1e-5. "
+            "Causal self-attention. ~123M-param text conditioner. RAIL-M "
+            "licensed. Real-artifact baseline for SD CLIP text encoder "
+            "parity vs transformers (#1152)."
+        ),
+        license="openrail",
+        # Full CLIPTextModel parameter count. Recorded at pin time.
+        param_count=123_060_480,
     ),
 }
 
@@ -252,9 +272,11 @@ def convert_one(info: DiffusionModelInfo, out_root: Path) -> tuple[str, Path, in
         return convert_vae_decoder(info, out_root)
     if info.upstream_subfolder == "unet":
         return convert_unet(info, out_root)
+    if info.upstream_subfolder == "text_encoder":
+        return convert_clip_text_encoder(info, out_root)
     raise SystemExit(
         f"{info.name}: unknown upstream_subfolder {info.upstream_subfolder!r}; "
-        f"this script only knows 'vae' and 'unet'."
+        f"this script only knows 'vae', 'unet', and 'text_encoder'."
     )
 
 
@@ -891,6 +913,326 @@ def render_unet_readme(
     """)
 
 
+PARITY_PROMPT = "a photograph of an astronaut riding a horse"
+
+
+def convert_clip_text_encoder(info: DiffusionModelInfo, out_root: Path) -> tuple[str, Path, int]:
+    """Download SD-1.5's CLIP text encoder, verify the architecture
+    matches what ferrotorch-diffusion consumes, tokenize a fixed
+    prompt, run the reference forward pass, and dump the parity probe.
+
+    The pin is whole-model byte-for-byte: every key in
+    `text_encoder/model.safetensors` is consumed by
+    `ferrotorch_diffusion::ClipTextEncoder` (modulo the int64
+    `position_ids` buffer that ferrotorch regenerates each forward).
+    The parity probe ships the pre-tokenized input ids so the
+    ferrotorch side does not need a tokenizer (#1152's scope is the
+    encoder, not the BPE tokenizer)."""
+    print(f"\n=== {info.name} <- {info.upstream_repo}/{info.upstream_subfolder} ===",
+          flush=True)
+
+    out_dir = out_root / info.name
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    # ---- Download upstream config + weights from the text_encoder/ ----
+    upstream_files = [
+        ("config.json", "config.json"),
+        ("model.safetensors", "model.safetensors"),
+    ]
+    local_paths: dict[str, Path] = {}
+    for upstream_name, local_name in upstream_files:
+        try:
+            p = hf_hub_download(
+                repo_id=info.upstream_repo,
+                filename=f"{info.upstream_subfolder}/{upstream_name}",
+            )
+        except Exception as e:
+            raise SystemExit(
+                f"{info.name}: failed to download upstream "
+                f"{info.upstream_subfolder}/{upstream_name} from "
+                f"{info.upstream_repo}: {e}"
+            )
+        target = out_dir / local_name
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(Path(p).read_bytes())
+        local_paths[local_name] = target
+        print(f"  fetched {upstream_name} -> {target}", flush=True)
+
+    cfg = json.loads(local_paths["config.json"].read_text())
+    print(
+        f"  config: hidden_size={cfg.get('hidden_size')} "
+        f"intermediate_size={cfg.get('intermediate_size')} "
+        f"num_attention_heads={cfg.get('num_attention_heads')} "
+        f"num_hidden_layers={cfg.get('num_hidden_layers')} "
+        f"max_position_embeddings={cfg.get('max_position_embeddings')} "
+        f"vocab_size={cfg.get('vocab_size')} "
+        f"hidden_act={cfg.get('hidden_act')} "
+        f"layer_norm_eps={cfg.get('layer_norm_eps')}",
+        flush=True,
+    )
+
+    # ---- Architecture sanity. ferrotorch-diffusion's ClipTextEncoder
+    #      only supports the SD-1.5 CLIP-ViT-L/14 text-tower flavour
+    #      today (quick_gelu activation, learned absolute position,
+    #      causal mask, head_dim divides hidden_size). Refuse to pin
+    #      anything else. ------------------------------------------------
+    if cfg.get("hidden_act") != "quick_gelu":
+        raise SystemExit(
+            f"{info.name}: unsupported hidden_act {cfg.get('hidden_act')!r}. "
+            f"ferrotorch-diffusion's CLIP text encoder uses quick_gelu only "
+            f"(x * sigmoid(1.702 * x))."
+        )
+    hidden_size = int(cfg["hidden_size"])
+    num_heads = int(cfg["num_attention_heads"])
+    if hidden_size % num_heads != 0:
+        raise SystemExit(
+            f"{info.name}: hidden_size {hidden_size} not divisible by "
+            f"num_attention_heads {num_heads}."
+        )
+    max_pos = int(cfg["max_position_embeddings"])
+    vocab_size = int(cfg["vocab_size"])
+    n_layers = int(cfg["num_hidden_layers"])
+
+    # ---- Read the upstream state dict. CLIP-ViT-L/14 text tower has
+    #      ~123M params, ~197 keys. ferrotorch-diffusion's loader
+    #      consumes the upstream layout natively (modulo the int64
+    #      position_ids buffer). -----------------------------------------
+    with safe_open(local_paths["model.safetensors"], framework="pt") as f:
+        full_keys = list(f.keys())
+        full_tensors: dict[str, torch.Tensor] = {}
+        for k in full_keys:
+            t = f.get_tensor(k)
+            full_tensors[k] = t
+
+    # Expected top-level prefixes. The upstream HF safetensors uses
+    # the `text_model.` prefix (CLIPTextModel wrapper); the
+    # ferrotorch loader strips it transparently.
+    allowed_prefixes = (
+        "text_model.embeddings.token_embedding.",
+        "text_model.embeddings.position_embedding.",
+        "text_model.encoder.",
+        "text_model.final_layer_norm.",
+        # Buffer — dropped by both sides.
+        "text_model.embeddings.position_ids",
+    )
+
+    stray = sorted(
+        k for k in full_keys if not any(
+            (k.startswith(p) if not p.endswith(".") else k.startswith(p))
+            or k == p
+            for p in allowed_prefixes
+        )
+    )
+    if stray:
+        raise SystemExit(
+            f"{info.name}: upstream CLIP text encoder safetensors carries "
+            f"keys outside ferrotorch's consumed prefix set: {stray[:10]} "
+            f"({len(stray)} total). Refusing to pin."
+        )
+
+    # ---- Re-pack the parameters (no key rename; drop only the
+    #      position_ids int64 buffer that has no parameter slot on
+    #      either side). -------------------------------------------------
+    clip_tensors: dict[str, torch.Tensor] = {}
+    dropped_buffer_keys: list[str] = []
+    for k, t in full_tensors.items():
+        if k == "text_model.embeddings.position_ids":
+            dropped_buffer_keys.append(k)
+            continue
+        # Force fp32 contiguous on the mirror — matches every other
+        # ferrotorch pretrained pin and keeps the loader simple.
+        clip_tensors[k] = t.to(torch.float32).contiguous().clone()
+
+    weights_path = out_dir / "model.safetensors"
+    save_file(clip_tensors, str(weights_path))
+    actual_param_count = sum(t.numel() for t in clip_tensors.values())
+    print(
+        f"  re-packed model.safetensors "
+        f"({weights_path.stat().st_size} bytes, {len(clip_tensors)} keys, "
+        f"{actual_param_count:,} scalar parameters; "
+        f"dropped int64 buffers: {dropped_buffer_keys})",
+        flush=True,
+    )
+
+    # ---- Tokenize the fixed parity prompt with the CLIP tokenizer.
+    #      The tokenizer is part of the SD-1.5 bundle (subfolder
+    #      `tokenizer/`); the resulting input_ids are padded with the
+    #      pad token (= eos = 49407) to `max_pos` (= 77 for SD 1.5). --
+    print("  tokenizing parity prompt…", flush=True)
+    tokenizer = CLIPTokenizer.from_pretrained(
+        info.upstream_repo, subfolder="tokenizer",
+    )
+    enc = tokenizer(
+        [PARITY_PROMPT],
+        padding="max_length",
+        max_length=max_pos,
+        truncation=True,
+        return_tensors="pt",
+    )
+    input_ids: torch.Tensor = enc["input_ids"].to(torch.int64)  # [1, 77]
+    if tuple(input_ids.shape) != (1, max_pos):
+        raise SystemExit(
+            f"{info.name}: tokenized input_ids shape {tuple(input_ids.shape)} "
+            f"!= [1, {max_pos}]"
+        )
+    if input_ids.max().item() >= vocab_size:
+        raise SystemExit(
+            f"{info.name}: tokenized input_ids max {int(input_ids.max())} "
+            f">= vocab_size {vocab_size}"
+        )
+    print(
+        f"  input_ids: shape={tuple(input_ids.shape)} dtype={input_ids.dtype} "
+        f"first={input_ids[0, :8].tolist()} "
+        f"last={input_ids[0, -3:].tolist()}",
+        flush=True,
+    )
+
+    # ---- Run the upstream reference forward (eval, fp32, no grad). ---
+    print("  running upstream CLIPTextModel.forward (eval, fp32)…", flush=True)
+    text_model = CLIPTextModel.from_pretrained(
+        info.upstream_repo, subfolder=info.upstream_subfolder,
+        torch_dtype=torch.float32,
+    )
+    text_model.eval()
+    with torch.no_grad():
+        out = text_model(input_ids=input_ids, return_dict=True)
+        last_hidden_state = out.last_hidden_state  # [1, 77, 768]
+    lhs_np = last_hidden_state.cpu().numpy().astype(np.float32)
+    expected_shape = (1, max_pos, hidden_size)
+    if lhs_np.shape != expected_shape:
+        raise SystemExit(
+            f"{info.name}: last_hidden_state shape {lhs_np.shape} != "
+            f"{expected_shape}"
+        )
+    print(
+        f"  last_hidden_state: shape={lhs_np.shape} "
+        f"min={lhs_np.min():.4f} max={lhs_np.max():.4f} "
+        f"mean={lhs_np.mean():.4f} std={lhs_np.std():.4f}",
+        flush=True,
+    )
+
+    # ---- Dump parity probe. The on-disk representation of
+    #      `_value_parity_input_ids.bin` is the standard
+    #      `[u32 ndim][u32 shape][f32 data]` layout (with the int64
+    #      tokenizer ids losslessly cast to f32 — every CLIP-BPE id
+    #      fits in 24 bits). --------------------------------------------
+    ids_as_f32 = input_ids.cpu().numpy().astype(np.int64).astype(np.float32)
+    parity_ids = out_dir / "_value_parity_input_ids.bin"
+    dump_f32(ids_as_f32, parity_ids)
+    parity_lhs = out_dir / "_value_parity_last_hidden_state.bin"
+    dump_f32(lhs_np, parity_lhs)
+    print(
+        f"  wrote parity probe: "
+        f"{parity_ids.name} ({parity_ids.stat().st_size}b), "
+        f"{parity_lhs.name} ({parity_lhs.stat().st_size}b)",
+        flush=True,
+    )
+
+    # ---- SHA of the re-packed safetensors. ----------------------------
+    sha = sha256_of(weights_path)
+    print(f"  model.safetensors SHA-256: {sha}", flush=True)
+
+    # ---- README. -----------------------------------------------------
+    readme_path = out_dir / "README.md"
+    readme_path.write_text(
+        render_clip_text_encoder_readme(
+            info, cfg, sha, actual_param_count, max_pos, dropped_buffer_keys,
+        )
+    )
+    print(f"  wrote {readme_path}", flush=True)
+
+    return sha, out_dir, actual_param_count
+
+
+def render_clip_text_encoder_readme(
+    info: DiffusionModelInfo,
+    cfg: dict,
+    sha: str,
+    actual_param_count: int,
+    max_pos: int,
+    dropped_buffer_keys: list[str],
+) -> str:
+    return textwrap.dedent(f"""\
+        ---
+        license: {info.license}
+        tags:
+          - stable-diffusion
+          - clip
+          - text-encoder
+          - ferrotorch
+        ---
+
+        # `ferrotorch/{info.name}`
+
+        {info.description}
+
+        ## Provenance
+
+        * Upstream: `{info.upstream_repo}` (subfolder `{info.upstream_subfolder}/`),
+          {info.license}.
+        * Conversion script:
+          [`ferrotorch/scripts/pin_pretrained_diffusion_weights.py`](https://github.com/dollspace-gay/ferrotorch/blob/main/scripts/pin_pretrained_diffusion_weights.py).
+        * Ferrotorch issue: <https://github.com/dollspace-gay/ferrotorch/issues/1152>.
+        * SHA-256 of `model.safetensors` (this file is pinned in
+          `ferrotorch-hub/src/registry.rs`): `{sha}`.
+        * Number of trainable parameters in the text encoder:
+          **{actual_param_count:,}**.
+        * Config snapshot:
+          hidden_size={cfg.get('hidden_size')},
+          intermediate_size={cfg.get('intermediate_size')},
+          num_attention_heads={cfg.get('num_attention_heads')},
+          num_hidden_layers={cfg.get('num_hidden_layers')},
+          max_position_embeddings={cfg.get('max_position_embeddings')},
+          vocab_size={cfg.get('vocab_size')},
+          hidden_act={cfg.get('hidden_act')!r},
+          layer_norm_eps={cfg.get('layer_norm_eps')}.
+        * Dropped upstream int64 buffer keys (not parameters on either
+          side): `{dropped_buffer_keys}`.
+
+        ## Value-parity probe
+
+        Two extra files are uploaded so the ferrotorch-side harness can
+        reproduce the parity verdict without re-running the upstream
+        `CLIPTextModel`:
+
+        * `_value_parity_input_ids.bin` — pre-tokenized input ids for
+          the fixed prompt
+          `"{PARITY_PROMPT}"`,
+          padded to `[1, {max_pos}]` with the CLIP pad/eos token. Stored
+          as f32 (every CLIP-BPE id fits in 24 bits so the cast is
+          lossless). Shipped so the Rust side does not need a tokenizer
+          on the parity hot path.
+        * `_value_parity_last_hidden_state.bin` — float32
+          `last_hidden_state` `[1, {max_pos}, {cfg.get('hidden_size')}]` from
+          `CLIPTextModel(input_ids=input_ids, return_dict=True).last_hidden_state`
+          on float32 weights in eval mode. Same dump format as every
+          other ferrotorch artifact:
+          `[u32 ndim][u32 × ndim shape][f32 × prod(shape)]` little-endian.
+
+        ## How to load
+
+        ```rust
+        use ferrotorch_diffusion::{{ClipTextConfig, load_clip_text_encoder}};
+        use ferrotorch_hub::{{HubCache, hf_download_model}};
+
+        let cache = HubCache::with_default_dir();
+        let repo_dir = hf_download_model("ferrotorch/{info.name}", "main", &cache)?;
+        let cfg = ClipTextConfig::from_file(&repo_dir.join("config.json"))?;
+        let (encoder, _drop_report) = load_clip_text_encoder::<f32>(
+            &repo_dir.join("model.safetensors"),
+            cfg,
+            /* strict = */ false,
+        )?;
+        let ids: Vec<u32> = /* CLIP-BPE tokenized prompt, length max_position_embeddings */;
+        let last_hidden_state = encoder.forward_from_ids(&ids)?;  // [1, 77, 768]
+        ```
+
+        ## Upstream license
+
+        {RAIL_LICENSE_SUMMARY}
+    """)
+
+
 def hf_upload(info: DiffusionModelInfo, out_dir: Path) -> None:
     api = HfApi()
     repo_id = f"ferrotorch/{info.name}"
@@ -916,6 +1258,12 @@ def hf_upload(info: DiffusionModelInfo, out_dir: Path) -> None:
             "_value_parity_predicted_noise.bin",
         ]
         commit_msg = f"feat: pin UNet artifact for {info.name} (#1151)"
+    elif info.upstream_subfolder == "text_encoder":
+        files += [
+            "_value_parity_input_ids.bin",
+            "_value_parity_last_hidden_state.bin",
+        ]
+        commit_msg = f"feat: pin CLIP text encoder artifact for {info.name} (#1152)"
     else:
         commit_msg = f"feat: pin artifact for {info.name}"
     for fname in files:

@@ -99,6 +99,7 @@
 
 pub mod attention;
 pub mod blocks;
+pub mod clip_text_encoder;
 pub mod config;
 pub mod resnet_block_time;
 pub mod safetensors_loader;
@@ -109,9 +110,13 @@ pub mod vae;
 
 pub use attention::{Attention, BasicTransformerBlock, FeedForward, Transformer2DModel};
 pub use blocks::{AttnBlock2D, Downsample2D, ResnetBlock2D, UNetMidBlock2D, UpDecoderBlock2D, Upsample2D};
+pub use clip_text_encoder::{
+    ClipEncoder, ClipEncoderLayer, ClipMlp, ClipSelfAttention, ClipTextConfig, ClipTextEmbeddings,
+    ClipTextEncoder,
+};
 pub use config::VaeDecoderConfig;
 pub use resnet_block_time::ResnetBlock2DTime;
-pub use safetensors_loader::{load_unet, load_vae_decoder, DropReport};
+pub use safetensors_loader::{load_clip_text_encoder, load_unet, load_vae_decoder, DropReport};
 pub use time_embedding::{TimestepEmbedding, Timesteps};
 pub use unet::{
     AnyDownBlock, AnyUpBlock, CrossAttnDownBlock2D, CrossAttnUpBlock2D, DownBlock2D, UNet2DConditionModel,

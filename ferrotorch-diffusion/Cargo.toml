@@ -41,3 +41,7 @@ path = "examples/unet_predict_dump.rs"
 [[example]]
 name = "unet_probe_dump"
 path = "examples/unet_probe_dump.rs"
+
+[[example]]
+name = "clip_text_encode_dump"
+path = "examples/clip_text_encode_dump.rs"

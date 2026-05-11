@@ -468,6 +468,38 @@ static MODELS: &[ModelInfo] = &[
         format: WeightsFormat::SafeTensors,
         num_parameters: 859_520_964,
     },
+    // #1152: sd-v1-5-clip-text-encoder (runwayml/stable-diffusion-v1-5
+    // text_encoder/ subfolder) — third and final Stable-Diffusion
+    // sub-model pin (Phase B.3c). The text tower of CLIP-ViT-L/14:
+    // CLIPTextEmbeddings (token + learned absolute position lookup),
+    // 12 transformer layers (pre-LN, causal self-attention with
+    // q/k/v/out projections all biased, QuickGELU MLP), and a final
+    // LayerNorm. hidden_size=768, intermediate_size=3072,
+    // num_attention_heads=12 (head_dim=64), max_position_embeddings=77,
+    // vocab_size=49408, hidden_act=quick_gelu, layer_norm_eps=1e-5.
+    // ~123M-param text conditioner; SD-1.5 feeds its
+    // `last_hidden_state` straight into the UNet's cross-attention.
+    // CreativeML Open RAIL-M licensed. Mirrored byte-for-byte from
+    // upstream — ferrotorch-diffusion's `ClipTextEncoder` consumes the
+    // HF key layout natively (modulo the int64
+    // `text_model.embeddings.position_ids` buffer, which is
+    // regenerated each forward and dropped via DropReport). The pin
+    // script verifies the hidden_act is `quick_gelu`, refuses any
+    // unknown key prefix, and dumps a tokenized parity probe
+    // (`_value_parity_input_ids.bin` for the fixed prompt
+    // "a photograph of an astronaut riding a horse" padded to 77, and
+    // `_value_parity_last_hidden_state.bin` for the reference forward
+    // output) so the harness can verify ferrotorch's
+    // `last_hidden_state` against a frozen transformers reference
+    // without re-running the upstream model.
+    ModelInfo {
+        name: "sd-v1-5-clip-text-encoder",
+        description: "Stable Diffusion 1.5 CLIP text encoder (runwayml/stable-diffusion-v1-5 text_encoder/; the text tower of openai/clip-vit-large-patch14): 123M-param causal-self-attention text conditioner (12 layers, hidden=768, heads=12, QuickGELU MLP, max_pos=77, vocab=49408), RAIL-M, real-artifact baseline for SD CLIP text encoder parity vs transformers (#1152)",
+        weights_url: "https://huggingface.co/ferrotorch/sd-v1-5-clip-text-encoder/resolve/main/model.safetensors",
+        weights_sha256: "52de4b2426c9e31a63dadec5d111f766af7304b1ab205872b060c274727861de",
+        format: WeightsFormat::SafeTensors,
+        num_parameters: 123_060_480,
+    },
 ];
 
 /// List all available pretrained models.
