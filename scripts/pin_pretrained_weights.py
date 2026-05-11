@@ -691,6 +691,129 @@ def map_retinanet_keys(
     return out, used_tv, filled_ft, intentional_drop_tv
 
 
+def map_fcos_keys(
+    tv_sd: dict[str, torch.Tensor],
+    ft_keys: dict[str, list],
+) -> tuple[dict[str, torch.Tensor], set[str], set[str], set[str]]:
+    """Map FCOS ResNet50+FPN state_dict to ferrotorch keys.
+
+    Architecture sharing with RetinaNet:
+    - ResNet-50 backbone via `backbone.body.*`.
+    - FPN P3..P7 with `inner_blocks` / `layer_blocks` / `extra_blocks.{p6,p7}`.
+
+    Differences from RetinaNet:
+    - Heads use 4× (Conv + GroupNorm + ReLU) instead of 4× Conv. torchvision
+      lays this out as `nn.Sequential(Conv, GN, ReLU, Conv, GN, ReLU, ...)`,
+      so the Conv lives at indices 0, 3, 6, 9 and GroupNorm at 1, 4, 7, 10.
+      Ferrotorch named_parameters mirror this indexing so the mapping is
+      almost identity.
+    - The regression head has TWO output convs sharing the trunk:
+      `bbox_reg` (4 channels) and `bbox_ctrness` (1 channel — the
+      centerness branch unique to FCOS).
+    - No `cls_logits` bias prior init in pretrained (torchvision overwrites it
+      anyway).
+    """
+    out: dict[str, torch.Tensor] = {}
+    used_tv: set[str] = set()
+    filled_ft: set[str] = set()
+    intentional_drop_tv: set[str] = set()
+
+    # ResNet-50 backbone — same body wrapping as RetinaNet/FasterRCNN.
+    _map_resnet50_backbone(
+        tv_sd, "backbone.body", "backbone", ft_keys,
+        out, used_tv, filled_ft,
+    )
+    _fill_resnet_fc_random(ft_keys, "backbone", out, filled_ft)
+
+    # FPN — 3 lateral / output blocks (inner_blocks.0..2 → lateral3..5),
+    # then LastLevelP6P7 extras. Identical to RetinaNet (#1143).
+    fpn_tv = "backbone.fpn"
+    fpn_ft = "fpn"
+    for i, level in enumerate([3, 4, 5]):
+        for kind in ("weight", "bias"):
+            tv_w = f"{fpn_tv}.inner_blocks.{i}.0.{kind}"
+            ft_w = f"{fpn_ft}.lateral{level}.{kind}"
+            if tv_w not in tv_sd:
+                raise SystemExit(
+                    f"fcos: torchvision key '{tv_w}' missing "
+                    f"(needed for '{ft_w}')"
+                )
+            _check_shape(ft_w, tv_sd[tv_w], ft_keys[ft_w])
+            out[ft_w] = tv_sd[tv_w]
+            used_tv.add(tv_w)
+            filled_ft.add(ft_w)
+
+            tv_o = f"{fpn_tv}.layer_blocks.{i}.0.{kind}"
+            ft_o = f"{fpn_ft}.output{level}.{kind}"
+            if tv_o not in tv_sd:
+                raise SystemExit(
+                    f"fcos: torchvision key '{tv_o}' missing "
+                    f"(needed for '{ft_o}')"
+                )
+            _check_shape(ft_o, tv_sd[tv_o], ft_keys[ft_o])
+            out[ft_o] = tv_sd[tv_o]
+            used_tv.add(tv_o)
+            filled_ft.add(ft_o)
+
+    for px in ("p6", "p7"):
+        for kind in ("weight", "bias"):
+            tv_k = f"{fpn_tv}.extra_blocks.{px}.{kind}"
+            ft_k = f"{fpn_ft}.{px}.{kind}"
+            if tv_k not in tv_sd:
+                raise SystemExit(
+                    f"fcos: torchvision key '{tv_k}' missing "
+                    f"(needed for '{ft_k}')"
+                )
+            _check_shape(ft_k, tv_sd[tv_k], ft_keys[ft_k])
+            out[ft_k] = tv_sd[tv_k]
+            used_tv.add(tv_k)
+            filled_ft.add(ft_k)
+
+    # Head trunks: Conv at idx 0,3,6,9 + GroupNorm at idx 1,4,7,10 (ReLU at
+    # 2,5,8,11 contributes no params). Same indexing on both sides — the
+    # mapping is identity.
+    head_indices = [0, 1, 3, 4, 6, 7, 9, 10]
+    for head_name in ("classification_head", "regression_head"):
+        for idx in head_indices:
+            for kind in ("weight", "bias"):
+                tv_k = f"head.{head_name}.conv.{idx}.{kind}"
+                ft_k = f"{head_name}.conv.{idx}.{kind}"
+                if tv_k not in tv_sd:
+                    raise SystemExit(
+                        f"fcos: torchvision key '{tv_k}' missing "
+                        f"(needed for '{ft_k}')"
+                    )
+                _check_shape(ft_k, tv_sd[tv_k], ft_keys[ft_k])
+                out[ft_k] = tv_sd[tv_k]
+                used_tv.add(tv_k)
+                filled_ft.add(ft_k)
+
+    # Final output convs.
+    for kind in ("weight", "bias"):
+        tv_k = f"head.classification_head.cls_logits.{kind}"
+        ft_k = f"classification_head.cls_logits.{kind}"
+        _check_shape(ft_k, tv_sd[tv_k], ft_keys[ft_k])
+        out[ft_k] = tv_sd[tv_k]
+        used_tv.add(tv_k)
+        filled_ft.add(ft_k)
+
+        tv_k = f"head.regression_head.bbox_reg.{kind}"
+        ft_k = f"regression_head.bbox_reg.{kind}"
+        _check_shape(ft_k, tv_sd[tv_k], ft_keys[ft_k])
+        out[ft_k] = tv_sd[tv_k]
+        used_tv.add(tv_k)
+        filled_ft.add(ft_k)
+
+        tv_k = f"head.regression_head.bbox_ctrness.{kind}"
+        ft_k = f"regression_head.bbox_ctrness.{kind}"
+        _check_shape(ft_k, tv_sd[tv_k], ft_keys[ft_k])
+        out[ft_k] = tv_sd[tv_k]
+        used_tv.add(tv_k)
+        filled_ft.add(ft_k)
+
+    return out, used_tv, filled_ft, intentional_drop_tv
+
+
 def map_fcn_keys(
     tv_sd: dict[str, torch.Tensor],
     ft_keys: dict[str, list],
@@ -825,6 +948,22 @@ MODELS: dict[str, dict] = {
             "COCO. Re-keyed from torchvision 0.21 `retinanet_resnet50_fpn` "
             "(`RetinaNet_ResNet50_FPN_Weights.COCO_V1`). 9 anchors/location, "
             "shared 4-conv class/reg heads, sigmoid scoring."
+        ),
+    ),
+    "fcos_resnet50_fpn": dict(
+        factory=lambda: tv_detection.fcos_resnet50_fpn(weights="COCO_V1"),
+        weights_enum="COCO_V1",
+        num_classes=91,
+        mapper=map_fcos_keys,
+        has_intentional_drops=False,
+        param_count=32_269_600,
+        description=(
+            "FCOS with ResNet-50 + FPN(P3-P7) backbone, pretrained on COCO. "
+            "Re-keyed from torchvision 0.21 `fcos_resnet50_fpn` "
+            "(`FCOS_ResNet50_FPN_Weights.COCO_V1`). Anchor-free one-stage "
+            "detector: single anchor/location + centerness branch, GroupNorm "
+            "in 4-conv shared trunks for both class and regression heads, "
+            "sigmoid scoring gated by centerness."
         ),
     ),
 }

@@ -15,7 +15,8 @@
 
 use ferrotorch_nn::Module;
 use ferrotorch_vision::models::detection::{
-    fasterrcnn_resnet50_fpn, maskrcnn_resnet50_fpn, retinanet_resnet50_fpn, ssd300_vgg16,
+    fasterrcnn_resnet50_fpn, fcos_resnet50_fpn, maskrcnn_resnet50_fpn, retinanet_resnet50_fpn,
+    ssd300_vgg16,
 };
 use ferrotorch_vision::models::segmentation::{deeplabv3_resnet50, fcn_resnet50};
 
@@ -45,6 +46,9 @@ fn main() {
     // #1143: RetinaNet uses 91 classes for the COCO_V1 checkpoint (no
     // explicit background; sigmoid per-class scoring).
     let retina = retinanet_resnet50_fpn::<f32>(91).expect("retinanet_resnet50_fpn build");
+    // #1144: FCOS COCO_V1 — same 91-class convention; sigmoid scoring gated
+    // by a separate centerness branch.
+    let fcos = fcos_resnet50_fpn::<f32>(91).expect("fcos_resnet50_fpn build");
 
     let out = serde_json::json!({
         "ssd300_vgg16": dump(&ssd),
@@ -53,6 +57,7 @@ fn main() {
         "deeplabv3_resnet50": dump(&dl3),
         "fcn_resnet50": dump(&fcn),
         "retinanet_resnet50_fpn": dump(&retina),
+        "fcos_resnet50_fpn": dump(&fcos),
     });
     println!("{}", serde_json::to_string_pretty(&out).unwrap());
 }

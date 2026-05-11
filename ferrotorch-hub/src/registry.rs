@@ -284,6 +284,19 @@ static MODELS: &[ModelInfo] = &[
         format: WeightsFormat::SafeTensors,
         num_parameters: 34_014_999,
     },
+    // #1144: FCOS anchor-free one-stage detector with ResNet-50 + FPN(P3-P7)
+    // backbone for object detection. Pinned from torchvision 0.21
+    // `FCOS_ResNet50_FPN_Weights.COCO_V1`. Distinct from RetinaNet:
+    // single anchor per cell + centerness branch + GroupNorm heads;
+    // shares the FPN P3-P7 with LastLevelP6P7 structure.
+    ModelInfo {
+        name: "fcos_resnet50_fpn",
+        description: "FCOS with ResNet-50 + FPN(P3-P7) backbone for anchor-free object detection (#1144, COCO_V1)",
+        weights_url: "https://huggingface.co/ferrotorch/fcos_resnet50_fpn/resolve/main/model.safetensors",
+        weights_sha256: "f6446fb9456ed6845f142eff160eae6b67313e6690079b4512a15e274d06e325",
+        format: WeightsFormat::SafeTensors,
+        num_parameters: 32_269_600,
+    },
 ];
 
 /// List all available pretrained models.
@@ -376,6 +389,7 @@ mod tests {
             "deeplabv3_resnet50",
             "fcn_resnet50",
             "retinanet_resnet50_fpn",
+            "fcos_resnet50_fpn",
         ];
         for name in expected {
             assert!(

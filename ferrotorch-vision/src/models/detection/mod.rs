@@ -13,6 +13,7 @@
 
 pub mod anchor_utils;
 pub mod faster_rcnn;
+pub mod fcos;
 pub mod fpn;
 pub mod mask_rcnn;
 pub mod retinanet;
@@ -22,6 +23,11 @@ pub mod ssd;
 
 pub use anchor_utils::AnchorGenerator;
 pub use faster_rcnn::{Detections, FasterRcnn, TwoMlpHead, fasterrcnn_resnet50_fpn};
+// FCOS — note: `fcos::Detections` is *not* re-exported (collides with
+// `faster_rcnn::Detections`). Use the qualified path
+// `crate::models::detection::fcos::Detections` when the per-image
+// detection struct is needed.
+pub use fcos::{Fcos, FcosClassificationHead, FcosRegressionHead, fcos_resnet50_fpn};
 pub use fpn::{FPN_OUT_CHANNELS, FeaturePyramidNetwork};
 pub use mask_rcnn::{MaskDetections, MaskHead, MaskPredictor, MaskRcnn, maskrcnn_resnet50_fpn};
 // RetinaNet — note: `retinanet::Detections` is *not* re-exported here to avoid

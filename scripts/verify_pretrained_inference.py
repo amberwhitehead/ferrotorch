@@ -52,10 +52,12 @@ import torch.nn.functional as F
 from PIL import Image
 from torchvision.models.detection import (
     FasterRCNN_ResNet50_FPN_Weights,
+    FCOS_ResNet50_FPN_Weights,
     MaskRCNN_ResNet50_FPN_Weights,
     RetinaNet_ResNet50_FPN_Weights,
     SSD300_VGG16_Weights,
     fasterrcnn_resnet50_fpn,
+    fcos_resnet50_fpn,
     maskrcnn_resnet50_fpn,
     retinanet_resnet50_fpn,
     ssd300_vgg16,
@@ -119,6 +121,12 @@ TOL = {
     # threshold 0.05 is sensitive to f32 conv drift at low scores; same
     # rationale as fasterrcnn).
     "retinanet_resnet50_fpn": dict(abs_score_top5=0.02, n_det_ratio_min=0.80),
+    # #1144: FCOS — same Module::forward contract as retinanet/fasterrcnn
+    # (post-NMS `[N_det]` scores). Different from RetinaNet only in the
+    # score formula: `sqrt(sigmoid(cls) * sigmoid(centerness))`. The
+    # `n_det_ratio>=0.80` floor handles the same f32 conv-accumulation
+    # drift around the (much higher) score_thresh=0.2 gate.
+    "fcos_resnet50_fpn": dict(abs_score_top5=0.02, n_det_ratio_min=0.80),
     "maskrcnn_resnet50_fpn": dict(
         score_thresh_for_matching=0.5,  # drop NMS-borderline detections before pairing
         box_iou_match_thresh=0.5,       # standard COCO mAP box-IoU match threshold
@@ -159,6 +167,7 @@ def preprocess(model: str, chw: torch.Tensor) -> torch.Tensor:
         "fasterrcnn_resnet50_fpn",
         "maskrcnn_resnet50_fpn",
         "retinanet_resnet50_fpn",
+        "fcos_resnet50_fpn",
     ):
         s_min = 800.0 / min(h, w)
         s_max = 1333.0 / max(h, w)
@@ -266,6 +275,17 @@ def torchvision_module_equivalent(
         # contract as fasterrcnn — post-NMS `[N_det]` sigmoid scores.
         weights = RetinaNet_ResNet50_FPN_Weights.COCO_V1
         m = retinanet_resnet50_fpn(weights=weights).to(DEVICE).eval()
+        _patch_detection_transform(m)
+        with torch.no_grad():
+            preds = m([input_bchw[0].to(DEVICE)])
+        return preds[0]["scores"].detach().cpu().numpy().astype(np.float32)
+
+    if model_name == "fcos_resnet50_fpn":
+        # #1144: FCOS anchor-free one-stage detector. Same Module::forward
+        # contract as retinanet/fasterrcnn — post-NMS `[N_det]` scores
+        # (sqrt(sigmoid(cls) * sigmoid(centerness))).
+        weights = FCOS_ResNet50_FPN_Weights.COCO_V1
+        m = fcos_resnet50_fpn(weights=weights).to(DEVICE).eval()
         _patch_detection_transform(m)
         with torch.no_grad():
             preds = m([input_bchw[0].to(DEVICE)])
@@ -591,10 +611,15 @@ def verify_one(model_name: str, image_id: int, verbose: bool) -> CompareResult:
             rust_out.shape, tv_out.shape, extra,
         )
 
-    if model_name in ("fasterrcnn_resnet50_fpn", "retinanet_resnet50_fpn"):
-        # #1143: RetinaNet reuses the same comparison logic as fasterrcnn —
-        # both expose post-NMS 1-D `[N_det]` scores via Module::forward and
-        # the harness criterion (top-5 abs match + n_det_ratio) is identical.
+    if model_name in (
+        "fasterrcnn_resnet50_fpn",
+        "retinanet_resnet50_fpn",
+        "fcos_resnet50_fpn",
+    ):
+        # #1144: FCOS reuses the same comparison logic as fasterrcnn/retinanet
+        # — all three expose post-NMS 1-D `[N_det]` scores via Module::forward
+        # and the harness criterion (top-5 abs match + n_det_ratio) is
+        # identical.
         tol = TOL[model_name]
         # Detection-score comparison: we use top-5 (or all if fewer) sorted scores
         # rather than full top-K. High-confidence detections (rank 0-4) should
