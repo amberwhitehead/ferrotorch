@@ -402,6 +402,39 @@ static MODELS: &[ModelInfo] = &[
         format: WeightsFormat::SafeTensors,
         num_parameters: 8_208_384,
     },
+    // #1150: sd-v1-5-vae-decoder (runwayml/stable-diffusion-v1-5 vae/ subfolder)
+    // — first Stable-Diffusion sub-model pin (Phase B.3a). Decoder half
+    // of AutoencoderKL: post_quant_conv (Conv2d 4 -> 4, k=1) + Decoder
+    // (conv_in 4 -> 512, UNetMidBlock2D with one 1-head spatial
+    // attention sandwiched between two ResnetBlock2D at 512ch, four
+    // UpDecoderBlock2D with 3 resnets each and nearest-2x upsample on
+    // all but the last block, GroupNorm32 + SiLU + conv_out 128 -> 3).
+    // ~49.5M-param decoder slice. CreativeML Open RAIL-M licensed. The
+    // mirror carries ONLY the decoder slice of `vae/diffusion_pytorch_model.safetensors`
+    // — the encoder + quant_conv keys are dropped during the pin (see
+    // `scripts/pin_pretrained_diffusion_weights.py`). The deprecated
+    // VAE-attention key names (`query/key/value/proj_attn`) are
+    // renamed to the canonical `to_q/to_k/to_v/to_out.0` form during
+    // the pin (mirroring diffusers's `_convert_deprecated_attention_blocks`
+    // so the on-disk mirror does not need a Rust-side rename pass), and
+    // the upstream `[C, C, 1, 1]` "conv-as-linear" weights are squeezed
+    // to `[C, C]` to fit ferrotorch's `Linear` shape. Mirrored
+    // byte-for-byte from upstream for the decoder keys; the pin script
+    // verifies every parameter key + shape and refuses to pin if any
+    // decoder key is unmapped. The mirror also ships
+    // `_value_parity_{latent,image}.bin` so the
+    // `scripts/verify_diffusion_inference.py` harness (and the
+    // `conformance_pretrained_diffusion` cargo test) can compare
+    // ferrotorch's decoded image against a frozen `diffusers==0.38.0`
+    // reference forward pass without re-running it in CI.
+    ModelInfo {
+        name: "sd-v1-5-vae-decoder",
+        description: "Stable Diffusion 1.5 VAE decoder (runwayml/stable-diffusion-v1-5 vae/): 49.5M-param decoder half of AutoencoderKL, RAIL-M, real-artifact baseline for SD VAE decoder parity vs diffusers (#1150)",
+        weights_url: "https://huggingface.co/ferrotorch/sd-v1-5-vae-decoder/resolve/main/model.safetensors",
+        weights_sha256: "5210b518f8d4e829355197aa79855c206678e91d13467a580123222c75c5a131",
+        format: WeightsFormat::SafeTensors,
+        num_parameters: 49_490_199,
+    },
 ];
 
 /// List all available pretrained models.
