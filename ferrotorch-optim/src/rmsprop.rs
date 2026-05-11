@@ -266,7 +266,11 @@ impl<T: Float> Rmsprop<T> {
                     let square_avg_new =
                         add(&mul(&sq_old, &alpha_t)?, &mul(&g_sq, &one_minus_alpha_t)?)?;
 
-                    // avg denominator.
+                    // avg denominator. Matches torch.optim.RMSprop:
+                    // eps is added *outside* the sqrt — `sqrt(square_avg) + eps`,
+                    // not `sqrt(square_avg + eps)`. See the matching comment
+                    // in the legacy CPU path above for the algorithm-level
+                    // citation (#1155).
                     let (avg, grad_avg_new) = if centered {
                         let ga_old = self.foreach_state[&key]
                             .grad_avg
@@ -275,15 +279,15 @@ impl<T: Float> Rmsprop<T> {
                             .clone();
                         let grad_avg_new_t =
                             add(&mul(&ga_old, &alpha_t)?, &mul(&grad, &one_minus_alpha_t)?)?;
-                        // avg = sqrt(square_avg - grad_avg^2 + eps)
+                        // avg = sqrt(square_avg - grad_avg^2) + eps
                         let ga_sq = mul(&grad_avg_new_t, &grad_avg_new_t)?;
                         let inner = sub(&square_avg_new, &ga_sq)?;
-                        let inner_eps = add(&inner, &eps_t)?;
-                        (sqrt(&inner_eps)?, Some(grad_avg_new_t))
+                        let sq = sqrt(&inner)?;
+                        (add(&sq, &eps_t)?, Some(grad_avg_new_t))
                     } else {
-                        // avg = sqrt(square_avg + eps)
-                        let inner = add(&square_avg_new, &eps_t)?;
-                        (sqrt(&inner)?, None)
+                        // avg = sqrt(square_avg) + eps
+                        let sq = sqrt(&square_avg_new)?;
+                        (add(&sq, &eps_t)?, None)
                     };
 
                     // Compute update and momentum buffer.
@@ -424,26 +428,36 @@ impl<T: Float> Optimizer<T> for Rmsprop<T> {
                         *sq = alpha_t * *sq + one_minus_alpha * g * g;
                     }
 
-                    // Compute denominator `avg`.
+                    // Compute denominator `avg`. Matches torch.optim.RMSprop:
+                    // eps is added *outside* the sqrt — `sqrt(square_avg) + eps`,
+                    // not `sqrt(square_avg + eps)`. Adding eps inside the
+                    // sqrt yields a strictly larger denominator on the very
+                    // first step (when square_avg starts at 0), so the very
+                    // first parameter delta diverges from PyTorch by orders
+                    // of magnitude. See `torch.optim.rmsprop._single_tensor_rmsprop`:
+                    //   avg = square_avg.sqrt()
+                    //   avg = avg.add_(eps)
+                    // Bug surfaced by the Phase C.2 trajectory harness
+                    // (#1155).
                     let avg: Vec<T> = if centered {
                         // Update grad_avg.
                         let ga = state.grad_avg.as_mut().unwrap();
                         for (ga_i, &g) in ga.iter_mut().zip(grad.iter()) {
                             *ga_i = alpha_t * *ga_i + one_minus_alpha * g;
                         }
-                        // avg = sqrt(square_avg - grad_avg^2 + eps)
+                        // avg = sqrt(square_avg - grad_avg^2) + eps
                         state
                             .square_avg
                             .iter()
                             .zip(ga.iter())
-                            .map(|(&sq, &ga_i)| (sq - ga_i * ga_i + eps_t).sqrt())
+                            .map(|(&sq, &ga_i)| (sq - ga_i * ga_i).sqrt() + eps_t)
                             .collect()
                     } else {
-                        // avg = sqrt(square_avg + eps)
+                        // avg = sqrt(square_avg) + eps
                         state
                             .square_avg
                             .iter()
-                            .map(|&sq| (sq + eps_t).sqrt())
+                            .map(|&sq| sq.sqrt() + eps_t)
                             .collect()
                     };
 
@@ -780,10 +794,11 @@ mod tests {
         opt.step().unwrap();
 
         // square_avg = 0.9 * 0 + 0.1 * 16 = 1.6
-        // avg = sqrt(1.6 + 1e-8)
-        // param = 2.0 - 0.1 * 4.0 / avg
+        // avg        = sqrt(1.6) + 1e-8   (eps OUTSIDE sqrt, matching
+        //                                   torch.optim.RMSprop — fix #1155)
+        // param      = 2.0 - 0.1 * 4.0 / avg
         let val = read_param(&p)[0];
-        let expected = 2.0 - 0.1 * 4.0 / (1.6_f32 + 1e-8).sqrt();
+        let expected = 2.0 - 0.1 * 4.0 / ((1.6_f32).sqrt() + 1e-8);
         assert!(
             (val - expected).abs() < 1e-5,
             "expected {expected}, got {val}"

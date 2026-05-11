@@ -500,6 +500,41 @@ static MODELS: &[ModelInfo] = &[
         format: WeightsFormat::SafeTensors,
         num_parameters: 123_060_480,
     },
+    // #1155: optimizer-trajectories-v1 — Phase C.2 frozen-gradient
+    // optimizer-step parity fixtures. The mirror is a fixture *bundle*
+    // (`bundle.tar`) plus 130 individual `.bin`/`meta.json` files
+    // partitioned across 10 per-config subfolders
+    // (sgd_plain / sgd_momentum / sgd_nesterov / adam_default /
+    //  adam_explicit / adamw_decoupled / rmsprop_default /
+    //  rmsprop_momentum / adagrad_default / adagrad_explicit). Each
+    // subfolder ships:
+    //   * initial_params.bin     — params before step 0
+    //   * gradients_step_K.bin   — frozen gradient at step K (K=0..9)
+    //   * final_params.bin       — params after 10 torch.optim steps
+    //   * meta.json              — config + shapes + dtype
+    // The reference trajectories are produced by torch.optim against a
+    // fixed 3-layer MLP (Linear(64,32) ReLU Linear(32,16) ReLU
+    // Linear(16,8)) under MSELoss with seeded inputs/targets, so the
+    // harness can verify ferrotorch's Optimizer::step math without any
+    // autograd interaction on the ferrotorch side
+    // (`scripts/verify_optimizer_inference.py` +
+    //  `ferrotorch-optim/examples/optimizer_trajectory_dump.rs` +
+    //  `ferrotorch-optim/tests/conformance_optimizer_trajectories.rs`).
+    // `weights_url`/`weights_sha256` point at the tar bundle so this
+    // registry entry has the same shape as the rest of the table; the
+    // verify harness itself pulls individual files via hf_hub_download
+    // (it does not call `download_and_verify` on the tar). The
+    // FerrotorchStateDict format tag indicates "not a HF safetensors
+    // checkpoint" — the bundle is a single-file convenience archive
+    // and not consumed by the safetensors loader.
+    ModelInfo {
+        name: "optimizer-trajectories-v1",
+        description: "Phase C.2 frozen-gradient optimizer trajectory fixtures: SGD/Adam/AdamW/RMSprop/Adagrad x 10 configs, 3-layer MLP (64-32-16-8), 10 steps each. Reference trajectories from torch.optim for byte-comparing ferrotorch Optimizer::step math. Apache 2.0; real-artifact baseline for Optimizer parity vs torch.optim (#1155).",
+        weights_url: "https://huggingface.co/ferrotorch/optimizer-trajectories-v1/resolve/main/bundle.tar",
+        weights_sha256: "81775049cad752d2650192e2d5ed3e51c2e1dd8effa9ad912d15c382de63c8ea",
+        format: WeightsFormat::FerrotorchStateDict,
+        num_parameters: 0,
+    },
 ];
 
 /// List all available pretrained models.
