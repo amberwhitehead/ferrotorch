@@ -535,6 +535,42 @@ static MODELS: &[ModelInfo] = &[
         format: WeightsFormat::FerrotorchStateDict,
         num_parameters: 0,
     },
+    // #1156: dataloader-batches-v1 — Phase C.3 DataLoader iteration
+    // parity fixtures. The mirror is a fixture *bundle* (`bundle.tar`)
+    // plus per-config subfolders (sequential / sequential_droplast /
+    // shuffled_seeded / shuffled_droplast / batch_size_3). Each subfolder
+    // ships one `meta.json` and one `batch_XXXX.bin` per batch
+    // (each .bin is a multi-tensor file holding [B, 8] features and
+    // [B] labels for that batch).
+    //
+    // The reference batch sequences are produced by
+    // `torch.utils.data.DataLoader` against a fixed 10-item dict-style
+    // dataset, so the harness can verify ferrotorch-data's
+    // `DataLoader::iter` against torch's iteration without re-running
+    // torch at verification time
+    // (`scripts/verify_dataloader_inference.py` +
+    //  `ferrotorch-data/examples/dataloader_iterate_dump.rs` +
+    //  `ferrotorch-data/tests/conformance_dataloader_iteration.rs`).
+    //
+    // For shuffled configs the harness compares SET-equality (rust's
+    // `rand` crate uses a different PRNG than torch's `torch.Generator`
+    // so the *order* of items cannot byte-match; only the *multiset* of
+    // items is asserted). Sequential configs use ORDER-equality. This
+    // is the same trade-off documented in
+    // `conformance_data_loader::dataloader_shuffle_coverage`.
+    //
+    // `weights_url`/`weights_sha256` point at the tar bundle so this
+    // registry entry has the same shape as the rest of the table; the
+    // verify harness itself pulls individual files via hf_hub_download
+    // (it does not call `download_and_verify` on the tar).
+    ModelInfo {
+        name: "dataloader-batches-v1",
+        description: "Phase C.3 DataLoader iteration parity fixtures: 5 torch.utils.data configs (sequential, sequential_droplast, shuffled_seeded, shuffled_droplast, batch_size_3) over a fixed 10-item dict dataset with [8]-dim f32 features and integer labels. Reference batch sequences from torch.utils.data.DataLoader for verifying ferrotorch-data's DataLoader iteration order, drop_last semantics, and shuffle item coverage. Apache 2.0; real-artifact baseline for DataLoader parity vs torch.utils.data (#1156).",
+        weights_url: "https://huggingface.co/ferrotorch/dataloader-batches-v1/resolve/main/bundle.tar",
+        weights_sha256: "c6a9f938f27f174b3fc74bd26f6083464c6bf37e3d4ab7ddaa0109c62bd15ce7",
+        format: WeightsFormat::FerrotorchStateDict,
+        num_parameters: 0,
+    },
 ];
 
 /// List all available pretrained models.
