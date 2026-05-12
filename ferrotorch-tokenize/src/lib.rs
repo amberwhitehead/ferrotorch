@@ -241,12 +241,38 @@ pub fn apply_chat_template(
             ))
         },
     );
-    // `strftime_now` is referenced by some templates (Llama 3.1 system prompt).
-    // Provide a stub that returns the empty string — callers wanting real
-    // dates should preprocess the template.
+    // `strftime_now` is referenced by some templates (Llama 3.1 system prompt
+    // includes e.g. `{{ strftime_now('%d %b %Y') }}`). Format the current local
+    // wall-clock time using chrono's strftime-compatible `format_with_items`.
+    //
+    // `chrono::format::StrftimeItems` parses the format string once and emits
+    // `Item::Error` for invalid specifiers; we surface that as a template
+    // error rather than silently producing a malformed string.
     env.add_function(
         "strftime_now",
-        |_fmt: String| -> Result<String, minijinja::Error> { Ok(String::new()) },
+        |fmt: String| -> Result<String, minijinja::Error> {
+            use std::fmt::Write as _;
+            let items: Vec<chrono::format::Item<'_>> =
+                chrono::format::StrftimeItems::new(&fmt).collect();
+            if items
+                .iter()
+                .any(|item| matches!(item, chrono::format::Item::Error))
+            {
+                return Err(minijinja::Error::new(
+                    minijinja::ErrorKind::InvalidOperation,
+                    format!("strftime_now: invalid format string {fmt:?}"),
+                ));
+            }
+            let now = chrono::Local::now();
+            let mut buf = String::new();
+            write!(buf, "{}", now.format_with_items(items.iter())).map_err(|e| {
+                minijinja::Error::new(
+                    minijinja::ErrorKind::InvalidOperation,
+                    format!("strftime_now: formatting failed: {e}"),
+                )
+            })?;
+            Ok(buf)
+        },
     );
 
     env.add_template("chat", template)
@@ -544,6 +570,61 @@ mod tests {
             None,
         );
         assert!(s.is_err());
+    }
+
+    #[test]
+    fn chat_template_strftime_now_renders_wall_clock_date() {
+        // Recognized English 3-letter month abbreviations chrono's `%b` emits.
+        const MONTHS: &[&str] = &[
+            "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+        ];
+        // Llama 3.1's official system template references
+        // `{{ strftime_now('%d %b %Y') }}` inside the system header. We
+        // assert structural properties (non-empty, 4-digit year, valid
+        // 3-letter month abbreviation) so the test is wall-clock-driven
+        // without being date-of-execution-fragile.
+        let template = "{{ strftime_now('%d %b %Y') }}";
+        let s = apply_chat_template(template, &[], false, None, None).unwrap();
+        assert!(!s.is_empty(), "strftime_now produced empty string: {s:?}");
+
+        // `%d %b %Y` → e.g. "12 May 2026". Split: day | month | year.
+        let parts: Vec<&str> = s.split_whitespace().collect();
+        assert_eq!(parts.len(), 3, "expected `DD Mon YYYY`, got {s:?}");
+
+        // Day: 1-2 digits, 01-31.
+        let day: u32 = parts[0]
+            .parse()
+            .unwrap_or_else(|_| panic!("day not numeric in {s:?}"));
+        assert!((1..=31).contains(&day), "day out of range: {s:?}");
+
+        assert!(
+            MONTHS.contains(&parts[1]),
+            "month abbreviation not recognized in {s:?}"
+        );
+
+        // Year: 4 digits, plausibly in this century.
+        let year: u32 = parts[2]
+            .parse()
+            .unwrap_or_else(|_| panic!("year not numeric in {s:?}"));
+        assert_eq!(parts[2].len(), 4, "expected 4-digit year in {s:?}");
+        assert!(
+            (2000..=2999).contains(&year),
+            "year out of plausible range: {s:?}"
+        );
+    }
+
+    #[test]
+    fn chat_template_strftime_now_rejects_malformed_format_string() {
+        // A trailing `%` with no specifier is an `Item::Error` in chrono's
+        // strftime parser — the function must surface a template error
+        // rather than rendering an empty / garbled string.
+        let template = "{{ strftime_now('%') }}";
+        let err = apply_chat_template(template, &[], false, None, None).unwrap_err();
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("strftime_now") || msg.contains("invalid"),
+            "expected strftime_now error to surface: got {msg:?}"
+        );
     }
 
     #[test]

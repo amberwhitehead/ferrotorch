@@ -18,6 +18,10 @@ tokenizers = { workspace = true }
 minijinja = "2"
 serde = { workspace = true }
 serde_json = { workspace = true }
+# `strftime_now` (called by Llama 3.1 / similar chat templates) renders the
+# current wall-clock date with chrono's strftime-compatible `format()`.
+# Default features bring clock + `Local::now()`; that is what we need.
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
 
 # Conformance test infrastructure (Phase 1 — issue #758).
 # `syn` parses `src/lib.rs` to enumerate the public API surface.

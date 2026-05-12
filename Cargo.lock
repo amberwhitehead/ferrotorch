@@ -2828,6 +2828,7 @@ dependencies = [
 name = "ferrotorch-tokenize"
 version = "0.5.1"
 dependencies = [
+ "chrono",
  "ferrotorch-core",
  "minijinja",
  "quote",
