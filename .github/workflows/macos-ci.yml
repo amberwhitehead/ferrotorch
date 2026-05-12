@@ -1,0 +1,64 @@
+name: macOS Apple Silicon CI
+
+# Runs the `ferrotorch-mps` build, tests, and clippy on a real
+# `macos-latest` Apple Silicon runner so that the
+# `#[cfg(target_os = "macos")]`-gated MPS code paths and tests actually
+# execute. The crate has no `[features]` table, so we do not pass
+# `--all-features` (the host-default feature set is the full surface).
+#
+# Tracking issue: #1131.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+# Cancel in-flight runs for the same ref when a new commit lands so the
+# Apple Silicon minute budget is not wasted on stale commits.
+concurrency:
+  group: macos-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -D warnings
+
+jobs:
+  test-mps:
+    name: ferrotorch-mps (macOS Apple Silicon)
+    # `macos-latest` resolves to an Apple Silicon (M-series) runner image
+    # on the free tier for public repos as of 2024.
+    runs-on: macos-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain (stable, with clippy)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - name: Cache cargo registry, index, and target
+        uses: Swatinem/rust-cache@v2
+        with:
+          # Scope the cache to the macOS job so it doesn't collide with
+          # any future Linux jobs that share `Cargo.lock`.
+          shared-key: macos-mps
+          workspaces: . -> target
+
+      - name: cargo build -p ferrotorch-mps
+        run: cargo build -p ferrotorch-mps
+
+      - name: cargo test -p ferrotorch-mps --lib
+        run: cargo test -p ferrotorch-mps --lib
+
+      - name: cargo test -p ferrotorch-mps --test conformance_mps
+        run: cargo test -p ferrotorch-mps --test conformance_mps
+
+      - name: cargo test -p ferrotorch-mps --test conformance_surface_coverage
+        run: cargo test -p ferrotorch-mps --test conformance_surface_coverage
+
+      - name: cargo clippy -p ferrotorch-mps
+        run: cargo clippy -p ferrotorch-mps --all-targets -- -D warnings
