@@ -100,4 +100,4 @@ pub use discovery::{
 pub use download::hf_download_model;
 pub use download::{download_weights, load_pretrained};
 pub use hf_config::HfTransformerConfig;
-pub use registry::{ModelInfo, WeightsFormat, get_model_info, list_models};
+pub use registry::{EntryKind, ModelInfo, WeightsFormat, get_model_info, list_models};

@@ -13,6 +13,25 @@ pub enum WeightsFormat {
     FerrotorchStateDict,
 }
 
+/// Classifies a registry entry as a real model with learnable weights or a
+/// parity / verification fixture bundle that ships data but no parameters.
+///
+/// Both kinds are stored in the same [`MODELS`] table because they share the
+/// same lifecycle (URL + SHA-256 pin, downloaded via `hf_download_model` or
+/// `download_and_verify`); the kind tag exists so consumers and the registry
+/// integrity test can distinguish "this entry should have >0 params" from
+/// "this entry is a data bundle and `num_parameters == 0` is the correct
+/// value."
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EntryKind {
+    /// Real pretrained weights. `num_parameters` must be `> 0`.
+    Model,
+    /// Parity / verification fixture (data bundle, no learnable params).
+    /// `num_parameters` must be `0` — the test enforces this so a real
+    /// model cannot silently masquerade as a fixture.
+    Fixture,
+}
+
 /// Metadata for a pretrained model.
 ///
 /// Marked `#[non_exhaustive]` so future fields (e.g. license, license_url,
@@ -47,8 +66,14 @@ pub struct ModelInfo {
     pub weights_sha256: &'static str,
     /// Serialization format of the weights file.
     pub format: WeightsFormat,
-    /// Total number of learnable parameters.
+    /// Total number of learnable parameters. Must be `> 0` when
+    /// `kind == EntryKind::Model` and exactly `0` when
+    /// `kind == EntryKind::Fixture`; the registry integrity test enforces
+    /// both directions so the convention cannot drift silently.
     pub num_parameters: usize,
+    /// Whether this entry is a real model or a parity-fixture data bundle.
+    /// See [`EntryKind`] for the contract on `num_parameters`.
+    pub kind: EntryKind,
 }
 
 /// Static registry of known pretrained models.
@@ -75,6 +100,7 @@ static MODELS: &[ModelInfo] = &[
         weights_sha256: "80c49dee3da4822c009c5a7fe591e9223c5a2cfcf95a4067ca4dfb5a7b89c612",
         format: WeightsFormat::SafeTensors,
         num_parameters: 11_689_512,
+        kind: EntryKind::Model,
     },
     ModelInfo {
         name: "resnet34",
@@ -83,6 +109,7 @@ static MODELS: &[ModelInfo] = &[
         weights_sha256: "829a220f9529d2b1ffdc8719d3273463001e0daf411eaf1916865d9db62c0ed2",
         format: WeightsFormat::SafeTensors,
         num_parameters: 21_797_672,
+        kind: EntryKind::Model,
     },
     ModelInfo {
         name: "resnet50",
@@ -91,6 +118,7 @@ static MODELS: &[ModelInfo] = &[
         weights_sha256: "773525d5821de224f8f30c33377b7a795d7863e08522698200d3217d3f2a41bb",
         format: WeightsFormat::SafeTensors,
         num_parameters: 25_557_032,
+        kind: EntryKind::Model,
     },
     ModelInfo {
         name: "vgg11",
@@ -99,6 +127,7 @@ static MODELS: &[ModelInfo] = &[
         weights_sha256: "682c023808812148d4e60c76d80ad83dbeaf5d50eb1a952a0b836895003151e5",
         format: WeightsFormat::SafeTensors,
         num_parameters: 132_863_336,
+        kind: EntryKind::Model,
     },
     ModelInfo {
         name: "vgg16",
@@ -107,6 +136,7 @@ static MODELS: &[ModelInfo] = &[
         weights_sha256: "57b026918159a6bf9faf8405c3a551903768e7138989d9c6224a14227203fad8",
         format: WeightsFormat::SafeTensors,
         num_parameters: 138_357_544,
+        kind: EntryKind::Model,
     },
     ModelInfo {
         name: "vit_b_16",
@@ -115,6 +145,7 @@ static MODELS: &[ModelInfo] = &[
         weights_sha256: "32aa17d6e17b43500f531d5f6dc9bc93e56ed8841b8a75682e1bb295d722405b",
         format: WeightsFormat::SafeTensors,
         num_parameters: 86_567_656,
+        kind: EntryKind::Model,
     },
     ModelInfo {
         name: "efficientnet_b0",
@@ -123,6 +154,7 @@ static MODELS: &[ModelInfo] = &[
         weights_sha256: "d569899762ea9b1384ee07f4af64805cf8caa1c55f9253ebb1080dc40e87a2cd",
         format: WeightsFormat::SafeTensors,
         num_parameters: 5_288_548,
+        kind: EntryKind::Model,
     },
     ModelInfo {
         name: "swin_tiny",
@@ -131,6 +163,7 @@ static MODELS: &[ModelInfo] = &[
         weights_sha256: "fb01861f793143135fa0d6cd97b1631e4b33eaa3ee162bbea9e62de1c76ebac1",
         format: WeightsFormat::SafeTensors,
         num_parameters: 28_288_354,
+        kind: EntryKind::Model,
     },
     ModelInfo {
         name: "convnext_tiny",
@@ -139,6 +172,7 @@ static MODELS: &[ModelInfo] = &[
         weights_sha256: "08b9dc9c3a3a29421de7996761e176501896d1ae7fc3085cf56a643772329276",
         format: WeightsFormat::SafeTensors,
         num_parameters: 28_589_128,
+        kind: EntryKind::Model,
     },
     ModelInfo {
         name: "unet",
@@ -155,6 +189,7 @@ static MODELS: &[ModelInfo] = &[
         weights_sha256: "0000000000000000000000000000000000000000000000000000000000000000",
         format: WeightsFormat::SafeTensors,
         num_parameters: 31_037_633,
+        kind: EntryKind::Model,
     },
     ModelInfo {
         name: "yolo",
@@ -170,6 +205,7 @@ static MODELS: &[ModelInfo] = &[
         weights_sha256: "2c4e3810fa8d8f67764cdbf72a18b34d516bff223649870ae8a5653e6aadb890",
         format: WeightsFormat::SafeTensors,
         num_parameters: 61_949_149,
+        kind: EntryKind::Model,
     },
     // CL-436: MobileNetV2, MobileNetV3-Small, DenseNet-121, Inception v3.
     // Parameter counts reflect the *real* architectures from the original
@@ -181,6 +217,7 @@ static MODELS: &[ModelInfo] = &[
         weights_sha256: "55ea4fb3a96010b933710ebf44fc965b070d5cd054d3f35e44f2d1320b4a714e",
         format: WeightsFormat::SafeTensors,
         num_parameters: 3_504_872,
+        kind: EntryKind::Model,
     },
     ModelInfo {
         name: "mobilenet_v3_small",
@@ -189,6 +226,7 @@ static MODELS: &[ModelInfo] = &[
         weights_sha256: "46d2c063b18125884c48937afa4c49e18128869e52e8db96df48bf0a4d7ff697",
         format: WeightsFormat::SafeTensors,
         num_parameters: 2_542_856,
+        kind: EntryKind::Model,
     },
     ModelInfo {
         name: "densenet121",
@@ -197,6 +235,7 @@ static MODELS: &[ModelInfo] = &[
         weights_sha256: "c894c6d9caa317a8ca1942986dee7a16a86c77734a4d691d2abe05389cfef358",
         format: WeightsFormat::SafeTensors,
         num_parameters: 7_978_856,
+        kind: EntryKind::Model,
     },
     ModelInfo {
         name: "inception_v3",
@@ -205,6 +244,7 @@ static MODELS: &[ModelInfo] = &[
         weights_sha256: "9c452c63a67fd03a38a78c401ba12d4be0e926df63c93403de3a29f6df20fefb",
         format: WeightsFormat::SafeTensors,
         num_parameters: 27_161_264,
+        kind: EntryKind::Model,
     },
     // #1130: Faster R-CNN with ResNet-50 FPN backbone for object detection.
     // Pinned from torchvision 0.21 `FasterRCNN_ResNet50_FPN_Weights.COCO_V1`,
@@ -226,6 +266,7 @@ static MODELS: &[ModelInfo] = &[
         weights_sha256: "1d8a19e81e91f5ce86ce5a65127dda566d6ae1fb7e2e64596d1ecf373ed06494",
         format: WeightsFormat::SafeTensors,
         num_parameters: 41_810_455,
+        kind: EntryKind::Model,
     },
     // #1130: Mask R-CNN with ResNet-50 FPN backbone + mask head.
     // Pinned from torchvision 0.21 `MaskRCNN_ResNet50_FPN_Weights.COCO_V1`.
@@ -237,6 +278,7 @@ static MODELS: &[ModelInfo] = &[
         weights_sha256: "dc472afa1ba8bb321c142b05c7f4a6ca20ee0ae191087d4e8f1030af7cfb3d2e",
         format: WeightsFormat::SafeTensors,
         num_parameters: 44_456_562,
+        kind: EntryKind::Model,
     },
     // #1130: DeepLabV3 with ResNet-50 dilated backbone + ASPP head.
     // Pinned from torchvision 0.21
@@ -248,6 +290,7 @@ static MODELS: &[ModelInfo] = &[
         weights_sha256: "88133b09e057aa20609436d8333ca812378a7bc727fe305275e2690eb2375dc1",
         format: WeightsFormat::SafeTensors,
         num_parameters: 42_004_074,
+        kind: EntryKind::Model,
     },
     // #1130: FCN with ResNet-50 backbone + FCN head.
     // Pinned from torchvision 0.21
@@ -259,6 +302,7 @@ static MODELS: &[ModelInfo] = &[
         weights_sha256: "8419d91ad57f4156e3a6add39abd43caf0a3761083743fe0a5dddf470ffdabf7",
         format: WeightsFormat::SafeTensors,
         num_parameters: 35_322_218,
+        kind: EntryKind::Model,
     },
     // #1146: LRASPP MobileNetV3-Large dilated backbone for lightweight
     // semantic segmentation. Pinned from torchvision 0.21
@@ -274,6 +318,7 @@ static MODELS: &[ModelInfo] = &[
         weights_sha256: "00c25a1d022772ca379a48bccdd052829a5d18535a4fff49623a516ef500a159",
         format: WeightsFormat::SafeTensors,
         num_parameters: 3_221_538,
+        kind: EntryKind::Model,
     },
     // #1130: SSD300 with VGG-16 backbone for object detection.
     // Pinned from torchvision 0.21 `SSD300_VGG16_Weights.COCO_V1`.
@@ -284,6 +329,7 @@ static MODELS: &[ModelInfo] = &[
         weights_sha256: "2db78702af742ec5882bc62e068e5337f366bc1dc00f069c34bbce91c5109dfe",
         format: WeightsFormat::SafeTensors,
         num_parameters: 35_641_826,
+        kind: EntryKind::Model,
     },
     // #1143: RetinaNet with ResNet-50 + FPN(P3-P7) backbone for object
     // detection. Pinned from torchvision 0.21
@@ -298,6 +344,7 @@ static MODELS: &[ModelInfo] = &[
         weights_sha256: "2f3593e7a2a1c15c5f2f7e6327e3c3d9de3cb4839922956ffec14b22f362b448",
         format: WeightsFormat::SafeTensors,
         num_parameters: 34_014_999,
+        kind: EntryKind::Model,
     },
     // #1144: FCOS anchor-free one-stage detector with ResNet-50 + FPN(P3-P7)
     // backbone for object detection. Pinned from torchvision 0.21
@@ -311,6 +358,7 @@ static MODELS: &[ModelInfo] = &[
         weights_sha256: "f6446fb9456ed6845f142eff160eae6b67313e6690079b4512a15e274d06e325",
         format: WeightsFormat::SafeTensors,
         num_parameters: 32_269_600,
+        kind: EntryKind::Model,
     },
     // #1145: Keypoint R-CNN with ResNet-50 FPN backbone for COCO person
     // keypoint detection. Pinned from torchvision 0.21
@@ -328,6 +376,7 @@ static MODELS: &[ModelInfo] = &[
         weights_sha256: "73e282340493d58731dc08314df5f4f483fd537f55b3bb2fc188c17cfd922dfb",
         format: WeightsFormat::SafeTensors,
         num_parameters: 59_137_258,
+        kind: EntryKind::Model,
     },
     // #1147: SmolLM-135M (HuggingFaceTB/SmolLM-135M) — first pinned
     // causal LM (Llama architecture, 135M params, tie_word_embeddings).
@@ -349,6 +398,7 @@ static MODELS: &[ModelInfo] = &[
         weights_sha256: "c7a387d6fe81ca6dd304aeb809bda3932ff1bbef3ca41c9484502f2f448dc093",
         format: WeightsFormat::SafeTensors,
         num_parameters: 134_515_008,
+        kind: EntryKind::Model,
     },
     // #1148: all-MiniLM-L6-v2 (sentence-transformers/all-MiniLM-L6-v2) —
     // first pinned BERT-family encoder-only sentence-embedding model.
@@ -376,6 +426,7 @@ static MODELS: &[ModelInfo] = &[
         weights_sha256: "53aa51172d142c89d9012cce15ae4d6cc0ca6895895114379cacb4fab128d9db",
         format: WeightsFormat::SafeTensors,
         num_parameters: 22_565_376,
+        kind: EntryKind::Model,
     },
     // #1149: whisper-tiny-encoder (openai/whisper-tiny) — first pinned
     // Whisper-family audio encoder. 4-layer 6-head encoder, d_model=384,
@@ -401,6 +452,7 @@ static MODELS: &[ModelInfo] = &[
         weights_sha256: "4ce29194b87ef05385203f8b09914f5c3b060200c2b503d6d420459ffb80a294",
         format: WeightsFormat::SafeTensors,
         num_parameters: 8_208_384,
+        kind: EntryKind::Model,
     },
     // #1150: sd-v1-5-vae-decoder (runwayml/stable-diffusion-v1-5 vae/ subfolder)
     // — first Stable-Diffusion sub-model pin (Phase B.3a). Decoder half
@@ -434,6 +486,7 @@ static MODELS: &[ModelInfo] = &[
         weights_sha256: "5210b518f8d4e829355197aa79855c206678e91d13467a580123222c75c5a131",
         format: WeightsFormat::SafeTensors,
         num_parameters: 49_490_199,
+        kind: EntryKind::Model,
     },
     // #1151: sd-v1-5-unet (runwayml/stable-diffusion-v1-5 unet/ subfolder)
     // — second Stable-Diffusion sub-model pin (Phase B.3b). Full
@@ -467,6 +520,7 @@ static MODELS: &[ModelInfo] = &[
         weights_sha256: "2a79ed44ee0eb33080c28498a200a3c79f112db86ddf5bfc81744793d56ab8b9",
         format: WeightsFormat::SafeTensors,
         num_parameters: 859_520_964,
+        kind: EntryKind::Model,
     },
     // #1152: sd-v1-5-clip-text-encoder (runwayml/stable-diffusion-v1-5
     // text_encoder/ subfolder) — third and final Stable-Diffusion
@@ -499,6 +553,7 @@ static MODELS: &[ModelInfo] = &[
         weights_sha256: "52de4b2426c9e31a63dadec5d111f766af7304b1ab205872b060c274727861de",
         format: WeightsFormat::SafeTensors,
         num_parameters: 123_060_480,
+        kind: EntryKind::Model,
     },
     // #1155: optimizer-trajectories-v1 — Phase C.2 frozen-gradient
     // optimizer-step parity fixtures. The mirror is a fixture *bundle*
@@ -534,6 +589,7 @@ static MODELS: &[ModelInfo] = &[
         weights_sha256: "81775049cad752d2650192e2d5ed3e51c2e1dd8effa9ad912d15c382de63c8ea",
         format: WeightsFormat::FerrotorchStateDict,
         num_parameters: 0,
+        kind: EntryKind::Fixture,
     },
     // #1156: dataloader-batches-v1 — Phase C.3 DataLoader iteration
     // parity fixtures. The mirror is a fixture *bundle* (`bundle.tar`)
@@ -570,6 +626,7 @@ static MODELS: &[ModelInfo] = &[
         weights_sha256: "c6a9f938f27f174b3fc74bd26f6083464c6bf37e3d4ab7ddaa0109c62bd15ce7",
         format: WeightsFormat::FerrotorchStateDict,
         num_parameters: 0,
+        kind: EntryKind::Fixture,
     },
     // #1157: gcn-cora (PyG GCNConv-pair trained on Cora) — first
     // pinned graph neural network. Two-layer GCN matching
@@ -593,6 +650,7 @@ static MODELS: &[ModelInfo] = &[
         weights_sha256: "7566ea9e517959e3dd30ce006ac1cf542d72c805f6f63a996c9e537737890cdc",
         format: WeightsFormat::SafeTensors,
         num_parameters: 23_063,
+        kind: EntryKind::Model,
     },
     // #1158: ppo-cartpole-v1 (sb3/ppo-CartPole-v1, mirrored byte-for-byte
     // from the canonical sb3 zoo zip): first reinforcement-learning policy
@@ -623,6 +681,7 @@ static MODELS: &[ModelInfo] = &[
         weights_sha256: "89c360d918f0e0582761cb8c0ecb9f2ed48606cd839ac5765d84a6df6b4d3769",
         format: WeightsFormat::SafeTensors,
         num_parameters: 9_155,
+        kind: EntryKind::Model,
     },
     // #1159: ml-sklearn-parity-v1 — Phase D.3 sklearn parity fixtures for
     // the tabular/classical-ML gap. The mirror is a fixture *bundle*
@@ -662,6 +721,7 @@ static MODELS: &[ModelInfo] = &[
         weights_sha256: "baafb9b5a10669cad13c39320923f9fa5482291dac8ab2395503390bc4bc4a3e",
         format: WeightsFormat::FerrotorchStateDict,
         num_parameters: 0,
+        kind: EntryKind::Fixture,
     },
     // #1161: training-trajectory-v1 — Phase E end-to-end training parity
     // fixtures. The mirror is a fixture *bundle* (`bundle.tar`) plus the
@@ -709,6 +769,7 @@ static MODELS: &[ModelInfo] = &[
         weights_sha256: "0bf88f958b75f0bf4d5b8806bc3cf55f3563c8d46114c966b5f1e30acd661bb7",
         format: WeightsFormat::FerrotorchStateDict,
         num_parameters: 0,
+        kind: EntryKind::Fixture,
     },
     // #1163: sd-v1-5-generation-trajectory — Phase F end-to-end SD-1.5
     // text-to-image generation parity fixtures. The mirror is a
@@ -770,6 +831,7 @@ static MODELS: &[ModelInfo] = &[
         weights_sha256: "5fa7bd809e3aaa120a79c744801de44342a2e22ab82137cd5fe0d43302924c6e",
         format: WeightsFormat::FerrotorchStateDict,
         num_parameters: 0,
+        kind: EntryKind::Fixture,
     },
     // #1167: distributions-parity-v1 — Phase G.1 torch.distributions
     // parity fixtures. The mirror is a fixture *bundle* (`bundle.tar`)
@@ -829,6 +891,7 @@ static MODELS: &[ModelInfo] = &[
         weights_sha256: "bae19e48e3a4c6b5040557298fe037d4e4fccc832237b7a3522bc76ba6bf9f9e",
         format: WeightsFormat::FerrotorchStateDict,
         num_parameters: 0,
+        kind: EntryKind::Fixture,
     },
     // #1168: tokenizer-parity-v1 — Phase G.2 HF tokenizer parity
     // fixtures for `ferrotorch-tokenize`. The mirror is a fixture
@@ -887,6 +950,7 @@ static MODELS: &[ModelInfo] = &[
         weights_sha256: "8d949235bb5cfaaea8916dcce001d17fd4b4383c2d5e033272397cf9545d1ef6",
         format: WeightsFormat::FerrotorchStateDict,
         num_parameters: 0,
+        kind: EntryKind::Fixture,
     },
     // #1169: serialize-parity-v1 — Phase G.3 ferrotorch-serialize
     // format-parity fixtures. The mirror is a fixture *bundle*
@@ -1000,6 +1064,7 @@ static MODELS: &[ModelInfo] = &[
         weights_sha256: "7c20267db5706421e7367c4d275346114a43ff6d55e6ff1aa11069bc45562296",
         format: WeightsFormat::FerrotorchStateDict,
         num_parameters: 0,
+        kind: EntryKind::Fixture,
     },
     // #1170: jit-trace-parity-v1 — Phase G.4 ferrotorch-jit tracing +
     // AoT-compile real-artifact parity fixture. A 2-layer MLP
@@ -1044,6 +1109,7 @@ static MODELS: &[ModelInfo] = &[
         weights_sha256: "960a3828138faeffc7d9595c6bfa1c089c78103015ce3fda6aa7cdc1a3ba02cd",
         format: WeightsFormat::SafeTensors,
         num_parameters: 212,
+        kind: EntryKind::Model,
     },
 ];
 
@@ -1166,11 +1232,22 @@ mod tests {
                 "SHA-256 hex digest must be 64 characters for model '{}'",
                 model.name
             );
-            assert!(
-                model.num_parameters > 0,
-                "model '{}' must have >0 parameters",
-                model.name
-            );
+            // EntryKind discriminates real models from parity-fixture data
+            // bundles. Models must have >0 learnable params; fixtures are
+            // pure data and must report exactly 0 (so a real model cannot
+            // silently masquerade as a fixture and skip the param check).
+            match model.kind {
+                EntryKind::Model => assert!(
+                    model.num_parameters > 0,
+                    "model '{}' (kind=Model) must have >0 parameters",
+                    model.name,
+                ),
+                EntryKind::Fixture => assert_eq!(
+                    model.num_parameters, 0,
+                    "fixture '{}' (kind=Fixture) must have num_parameters == 0",
+                    model.name,
+                ),
+            }
         }
     }
 }

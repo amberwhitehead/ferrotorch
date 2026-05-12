@@ -661,6 +661,7 @@ mod tests {
             weights_sha256: "",
             format: WeightsFormat::SafeTensors,
             num_parameters: 0,
+            kind: crate::registry::EntryKind::Fixture,
         };
         assert_eq!(super::canonical_filename(&info), "resnet50.safetensors");
     }
@@ -675,6 +676,7 @@ mod tests {
             weights_sha256: "",
             format: WeightsFormat::FerrotorchStateDict,
             num_parameters: 0,
+            kind: crate::registry::EntryKind::Fixture,
         };
         assert_eq!(super::canonical_filename(&info), "mymodel.fts");
     }

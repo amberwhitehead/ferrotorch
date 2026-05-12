@@ -40,6 +40,17 @@ jobs:
         with:
           components: clippy
 
+      # core-math-sys (pulled in transitively via ferray-ufunc) is a
+      # Rust binding around GNU CORE-MATH. Its build.rs needs pkg-config
+      # and the gmp/mpfr math libs on macOS — these are NOT pre-installed
+      # on the macos-latest runner image. Without them the build silently
+      # fails with the only stdout being `cargo:rerun-if-env-changed=TARGET`.
+      # Tracking: #1175.
+      - name: Install macOS build deps for core-math-sys
+        run: |
+          brew update
+          brew install pkg-config gmp mpfr || brew upgrade pkg-config gmp mpfr
+
       - name: Cache cargo registry, index, and target
         uses: Swatinem/rust-cache@v2
         with:
@@ -48,8 +59,11 @@ jobs:
           shared-key: macos-mps
           workspaces: . -> target
 
+      # -v surfaces the build.rs failure message if `core-math-sys`
+      # (or any other transitive C-wrapping crate) breaks on this runner.
+      # Without -v cargo eats build.rs stdout and we see no error.
       - name: cargo build -p ferrotorch-mps
-        run: cargo build -p ferrotorch-mps
+        run: cargo build -p ferrotorch-mps -v
 
       - name: cargo test -p ferrotorch-mps --lib
         run: cargo test -p ferrotorch-mps --lib

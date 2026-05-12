@@ -534,7 +534,7 @@ fn run_gpu(
     _init_latent: &Tensor<f32>,
     _steps: usize,
     _guidance: f32,
-) -> FerrotorchResult<(Tensor<f32>, Tensor<f32>, Tensor<f32>, Vec<PipelineStepDump<f32>>)> {
+) -> FerrotorchResult<RunBundle> {
     Err(ferrotorch_core::FerrotorchError::InvalidArgument {
         message: "--device gpu requires the `cuda` cargo feature \
                   (build with `--features=cuda`)"

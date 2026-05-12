@@ -278,6 +278,7 @@ mod tests {
             weights_sha256: "",
             format: crate::registry::WeightsFormat::SafeTensors,
             num_parameters: 0,
+            kind: crate::registry::EntryKind::Fixture,
         };
         assert_eq!(
             cache.path_for_model(&info),
@@ -296,6 +297,7 @@ mod tests {
             weights_sha256: "",
             format: crate::registry::WeightsFormat::FerrotorchStateDict,
             num_parameters: 0,
+            kind: crate::registry::EntryKind::Fixture,
         };
         assert_eq!(cache.path_for_model(&info), dir.path().join("mymodel.fts"));
     }
