@@ -26,3 +26,11 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 toml = "1"
 tempfile = { workspace = true }
+
+# Multi-epoch training-trajectory dump binary used by the cross-runtime
+# parity harness in `scripts/verify_training_trajectory.py` and the
+# `#[ignore]`-gated wrapper test
+# `tests/conformance_multi_epoch_training.rs` (#1161).
+[[example]]
+name = "multi_epoch_train_dump"
+path = "examples/multi_epoch_train_dump.rs"

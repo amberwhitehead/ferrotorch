@@ -663,6 +663,53 @@ static MODELS: &[ModelInfo] = &[
         format: WeightsFormat::FerrotorchStateDict,
         num_parameters: 0,
     },
+    // #1161: training-trajectory-v1 — Phase E end-to-end training parity
+    // fixtures. The mirror is a fixture *bundle* (`bundle.tar`) plus the
+    // following individual files:
+    //   * initial_state.safetensors / epoch_0_state.safetensors  — start
+    //   * epoch_{1..5}_state.safetensors                         — post-epoch
+    //   * X_full.bin / y_full.bin                                — dataset
+    //   * meta.json                                              — config
+    //
+    // The reference trajectory is produced by running `torch.optim.Adam`
+    // against a fixed 3-layer MLP (Linear(64,32) ReLU Linear(32,16) ReLU
+    // Linear(16,8)) under `F.mse_loss(reduction='mean')` with sequential
+    // iteration over a deterministic 100-sample regression dataset
+    // (batch_size=4, drop_last=False — 25 batches per epoch, 5 epochs,
+    // 125 optimizer steps total). The per-epoch state_dict captures the
+    // *combined* behavior of forward (linear + relu), loss (MSE mean),
+    // backward (live autograd, not frozen gradients), optimizer (Adam
+    // state initialization + per-step update math), and DataLoader
+    // sequential iteration. If any one of those diverges from torch the
+    // harness will catch it as state_dict drift after epoch K.
+    //
+    // Distinguishing this from #1155: that pin verifies optimizer math
+    // *in isolation* by replaying frozen gradients, so a divergence
+    // there fingers an optimizer. This pin verifies the full integrated
+    // stack with live autograd, so a divergence here fingers autograd /
+    // loss / dataloader integration *given* the optimizers already pass
+    // their frozen-gradient gate. Companion files:
+    //   * `scripts/pin_pretrained_training_trajectory.py`
+    //   * `scripts/verify_training_trajectory.py`
+    //   * `ferrotorch-train/examples/multi_epoch_train_dump.rs`
+    //   * `ferrotorch-train/tests/conformance_multi_epoch_training.rs`
+    //
+    // `weights_url`/`weights_sha256` point at the tar bundle so this
+    // registry entry has the same shape as the rest of the parity
+    // bundles; the verify harness itself pulls individual files via
+    // `hf_hub_download` and does not consume the tar. The
+    // FerrotorchStateDict format tag indicates "not a HF safetensors
+    // checkpoint" — the bundle is a single-file convenience archive
+    // (the per-epoch state_dicts inside *are* safetensors files but
+    // they are pulled separately, not via this registry entry's URL).
+    ModelInfo {
+        name: "training-trajectory-v1",
+        description: "Phase E multi-epoch training-trajectory fixtures: 3-layer MLP (64-32-16-8) trained with Adam(lr=1e-3) + MSE on a deterministic 100-sample dataset for 5 epochs (25 batches/epoch, batch_size=4, sequential). Reference state_dicts from torch + autograd for verifying ferrotorch's full training stack (forward + loss + backward + optimizer + dataloader) against torch. Apache 2.0; real-artifact baseline for end-to-end training parity vs torch (#1161).",
+        weights_url: "https://huggingface.co/ferrotorch/training-trajectory-v1/resolve/main/bundle.tar",
+        weights_sha256: "0bf88f958b75f0bf4d5b8806bc3cf55f3563c8d46114c966b5f1e30acd661bb7",
+        format: WeightsFormat::FerrotorchStateDict,
+        num_parameters: 0,
+    },
 ];
 
 /// List all available pretrained models.
