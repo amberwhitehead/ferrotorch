@@ -1576,4 +1576,354 @@ mod tests {
         let c = calinski_harabasz_score(&x, &labels).unwrap();
         assert!(c.is_finite() && c > 0.0);
     }
+
+    // ---------------------------------------------------------------------
+    // Discriminating fixtures — sklearn-derived reference values (#1114).
+    //
+    // The perfect-prediction tests above are kept as edge-case sanity
+    // checks. The fixtures below feed *mixed* inputs where a constant-
+    // returning stub (e.g. `fn metric(_, _) -> T { T::one() }`) would
+    // fail at least one assertion. All reference values are computed
+    // offline via scikit-learn 1.5 against the same fixtures.
+    // ---------------------------------------------------------------------
+
+    /// Regression family — sklearn quickstart fixture
+    /// `y_true = [3, -0.5, 2, 7]`, `y_pred = [2.5, 0, 2, 8]`.
+    ///
+    /// Reference values from sklearn.metrics (≥1.5):
+    ///   r2_score                     = 0.9486081370449679
+    ///   mean_squared_error           = 0.375
+    ///   root_mean_squared_error      = sqrt(0.375)
+    ///   mean_absolute_error          = 0.5
+    ///   max_error                    = 1.0
+    ///   median_absolute_error        = 0.5
+    ///   explained_variance_score     = 0.9571734475374732
+    #[test]
+    fn regression_family_sklearn_fixture() {
+        let y_true = tensor(&[3.0_f64, -0.5, 2.0, 7.0]).unwrap();
+        let y_pred = tensor(&[2.5_f64, 0.0, 2.0, 8.0]).unwrap();
+        assert!(close(
+            r2_score(&y_true, &y_pred).unwrap(),
+            0.948_608_137_044_967_9,
+            1e-12,
+        ));
+        assert!(close(
+            mean_squared_error(&y_true, &y_pred).unwrap(),
+            0.375,
+            1e-12,
+        ));
+        assert!(close(
+            root_mean_squared_error(&y_true, &y_pred).unwrap(),
+            0.375_f64.sqrt(),
+            1e-12,
+        ));
+        assert!(close(
+            mean_absolute_error(&y_true, &y_pred).unwrap(),
+            0.5,
+            1e-12,
+        ));
+        assert!(close(max_error(&y_true, &y_pred).unwrap(), 1.0, 1e-12));
+        assert!(close(
+            median_absolute_error(&y_true, &y_pred).unwrap(),
+            0.5,
+            1e-12,
+        ));
+        assert!(close(
+            explained_variance_score(&y_true, &y_pred).unwrap(),
+            0.957_173_447_537_473_2,
+            1e-12,
+        ));
+    }
+
+    /// MAPE has its own fixture because the sklearn quickstart fixture
+    /// has a zero in `y_true` (undefined relative error).
+    ///   y_true = [3, 1, 2, 7], y_pred = [2.5, 0, 2, 8]
+    ///   sklearn.mean_absolute_percentage_error -> 0.32738095238095235
+    #[test]
+    fn mape_sklearn_fixture() {
+        let y_true = tensor(&[3.0_f64, 1.0, 2.0, 7.0]).unwrap();
+        let y_pred = tensor(&[2.5_f64, 0.0, 2.0, 8.0]).unwrap();
+        let m = mean_absolute_percentage_error(&y_true, &y_pred).unwrap();
+        assert!(close(m, 0.327_380_952_380_952_4, 1e-12), "got {m}");
+    }
+
+    /// Classification family — 6-sample binary fixture
+    ///   y_true = [1, 0, 1, 1, 0, 1], y_pred = [1, 0, 0, 1, 1, 1]
+    ///   TP=3, FP=1, FN=1, TN=1
+    ///
+    /// Reference values from sklearn.metrics:
+    ///   accuracy_score             = 4/6 = 0.6666...
+    ///   precision_score (binary)   = 3/4 = 0.75
+    ///   recall_score    (binary)   = 3/4 = 0.75
+    ///   f1_score        (binary)   = 0.75
+    ///   hamming_loss               = 2/6 = 0.3333...
+    ///   balanced_accuracy_score    = 0.625
+    ///   matthews_corrcoef          = 0.25
+    ///   cohen_kappa_score          = 0.25
+    ///   zero_one_loss (normalize)  = 0.3333...
+    ///   zero_one_loss (count)      = 2.0
+    #[test]
+    fn classification_family_sklearn_fixture() {
+        let y_true = tensor(&[1.0_f64, 0.0, 1.0, 1.0, 0.0, 1.0]).unwrap();
+        let y_pred = tensor(&[1.0_f64, 0.0, 0.0, 1.0, 1.0, 1.0]).unwrap();
+        let one_third = 1.0_f64 / 3.0;
+        assert!(close(
+            accuracy_score(&y_true, &y_pred).unwrap(),
+            2.0 / 3.0,
+            1e-12,
+        ));
+        assert!(close(
+            precision_score(&y_true, &y_pred, Average::Binary).unwrap(),
+            0.75,
+            1e-12,
+        ));
+        assert!(close(
+            recall_score(&y_true, &y_pred, Average::Binary).unwrap(),
+            0.75,
+            1e-12,
+        ));
+        assert!(close(
+            f1_score(&y_true, &y_pred, Average::Binary).unwrap(),
+            0.75,
+            1e-12,
+        ));
+        assert!(close(hamming_loss(&y_true, &y_pred).unwrap(), one_third, 1e-12));
+        assert!(close(
+            balanced_accuracy_score(&y_true, &y_pred, false).unwrap(),
+            0.625,
+            1e-12,
+        ));
+        assert!(close(
+            matthews_corrcoef(&y_true, &y_pred).unwrap(),
+            0.25,
+            1e-12,
+        ));
+        assert!(close(
+            cohen_kappa_score(&y_true, &y_pred).unwrap(),
+            0.25,
+            1e-12,
+        ));
+        assert!(close(
+            zero_one_loss(&y_true, &y_pred, true).unwrap(),
+            one_third,
+            1e-12,
+        ));
+        assert!(close(
+            zero_one_loss(&y_true, &y_pred, false).unwrap(),
+            2.0,
+            1e-12,
+        ));
+    }
+
+    /// Ranking + calibration family — sklearn examples
+    ///   y_true  = [0, 0, 1, 1]
+    ///   y_score = [0.1, 0.4, 0.35, 0.8]   (not perfectly separable)
+    ///   roc_auc_score          -> 0.75
+    ///   average_precision      -> 0.8333333333333333
+    ///
+    ///   y_true  = [0, 1, 1, 0], y_prob = [0.1, 0.9, 0.7, 0.3]
+    ///   brier_score_loss       -> 0.05
+    ///   d2_brier_score = 1 - 0.05/0.25 = 0.8
+    ///     (null Brier uses ŷ = mean(y_true) = 0.5 → 0.25)
+    ///
+    ///   y_true = [0, 1, 1, 0], y_prob = [[0.9,0.1],[0.2,0.8],[0.3,0.7],[0.6,0.4]]
+    ///   log_loss -> 0.2990011586691898
+    #[test]
+    fn ranking_calibration_family_sklearn_fixture() {
+        // ROC-AUC + average precision (imperfect separation).
+        let y_true = tensor(&[0.0_f64, 0.0, 1.0, 1.0]).unwrap();
+        let y_score = tensor(&[0.1_f64, 0.4, 0.35, 0.8]).unwrap();
+        assert!(close(roc_auc_score(&y_true, &y_score).unwrap(), 0.75, 1e-12));
+        assert!(close(
+            average_precision_score(&y_true, &y_score).unwrap(),
+            5.0 / 6.0,
+            1e-12,
+        ));
+
+        // Brier + D² Brier on a 1-D probability fixture.
+        let y_true_b = tensor(&[0.0_f64, 1.0, 1.0, 0.0]).unwrap();
+        let y_prob_b = tensor(&[0.1_f64, 0.9, 0.7, 0.3]).unwrap();
+        assert!(close(
+            brier_score_loss(&y_true_b, &y_prob_b).unwrap(),
+            0.05,
+            1e-12,
+        ));
+        assert!(close(d2_brier_score(&y_true_b, &y_prob_b).unwrap(), 0.8, 1e-12));
+
+        // log_loss with non-trivial 2-D probabilities.
+        let y_true_ll = tensor(&[0.0_f64, 1.0, 1.0, 0.0]).unwrap();
+        let y_prob_ll = Tensor::from_storage(
+            ferrotorch_core::storage::TensorStorage::cpu(vec![
+                0.9_f64, 0.1, 0.2, 0.8, 0.3, 0.7, 0.6, 0.4,
+            ]),
+            vec![4, 2],
+            false,
+        )
+        .unwrap();
+        let l = log_loss(&y_true_ll, &y_prob_ll).unwrap();
+        assert!(close(l, 0.299_001_158_669_189_8, 1e-9), "got {l}");
+    }
+
+    /// Top-k accuracy — fixture with strict orderings so k=1 and k=2
+    /// give *different* answers (and k=2 is not trivially 1.0).
+    ///   y_true  = [0, 1, 2, 1]
+    ///   y_score = [[0.7,0.2,0.1],   // top1={0}, top2={0,1}      true=0 → k1 hit, k2 hit
+    ///              [0.5,0.4,0.1],   // top1={0}, top2={0,1}      true=1 → k1 miss, k2 hit
+    ///              [0.2,0.3,0.5],   // top1={2}, top2={2,1}      true=2 → k1 hit, k2 hit
+    ///              [0.5,0.1,0.4]]   // top1={0}, top2={0,2}      true=1 → k1 miss, k2 MISS
+    /// Reference values from sklearn.metrics.top_k_accuracy_score:
+    ///   k=1 -> 0.5     k=2 -> 0.75
+    #[test]
+    fn top_k_accuracy_sklearn_fixture() {
+        let y_true = tensor(&[0.0_f64, 1.0, 2.0, 1.0]).unwrap();
+        let y_score = Tensor::from_storage(
+            ferrotorch_core::storage::TensorStorage::cpu(vec![
+                0.7_f64, 0.2, 0.1, // true 0: k1 hit
+                0.5, 0.4, 0.1, // true 1: k1 miss, k2 hit
+                0.2, 0.3, 0.5, // true 2: k1 hit
+                0.5, 0.1, 0.4, // true 1: k1 miss, k2 miss
+            ]),
+            vec![4, 3],
+            false,
+        )
+        .unwrap();
+        assert!(close(
+            top_k_accuracy_score(&y_true, &y_score, 1).unwrap(),
+            0.5,
+            1e-12,
+        ));
+        assert!(close(
+            top_k_accuracy_score(&y_true, &y_score, 2).unwrap(),
+            0.75,
+            1e-12,
+        ));
+    }
+
+    /// Single-query NDCG/DCG with an *imperfect* ranking.
+    ///   y_true  = [3, 2, 1, 0]
+    ///   y_score = [2, 3, 1, 0]   (top two swapped)
+    /// sklearn.metrics.ndcg_score (single row) -> 0.9224945116765986
+    /// sklearn.metrics.dcg_score  (single row) -> 4.3927892607143715
+    #[test]
+    fn ndcg_dcg_imperfect_fixture() {
+        let y_true = tensor(&[3.0_f64, 2.0, 1.0, 0.0]).unwrap();
+        let y_score = tensor(&[2.0_f64, 3.0, 1.0, 0.0]).unwrap();
+        let n = ndcg_score(&y_true, &y_score, None).unwrap();
+        let d = dcg_score(&y_true, &y_score, None).unwrap();
+        assert!(close(n, 0.922_494_511_676_598_6, 1e-9), "got ndcg={n}");
+        assert!(close(d, 4.392_789_260_714_371_5, 1e-9), "got dcg={d}");
+    }
+
+    /// Multi-label ranking metrics — sklearn user-guide fixture
+    ///   y_true  = [[1,0,0], [0,0,1]]
+    ///   y_score = [[0.75,0.5,1.0], [1.0,0.2,0.1]]
+    /// Reference values:
+    ///   coverage_error                              -> 2.5
+    ///   label_ranking_average_precision_score       -> 0.41666666666666663
+    ///   label_ranking_loss                          -> 0.75
+    #[test]
+    fn multilabel_ranking_family_sklearn_fixture() {
+        let y_true = Tensor::from_storage(
+            ferrotorch_core::storage::TensorStorage::cpu(vec![
+                1.0_f64, 0.0, 0.0, 0.0, 0.0, 1.0,
+            ]),
+            vec![2, 3],
+            false,
+        )
+        .unwrap();
+        let y_score = Tensor::from_storage(
+            ferrotorch_core::storage::TensorStorage::cpu(vec![
+                0.75_f64, 0.5, 1.0, 1.0, 0.2, 0.1,
+            ]),
+            vec![2, 3],
+            false,
+        )
+        .unwrap();
+        assert!(close(coverage_error(&y_true, &y_score).unwrap(), 2.5, 1e-12));
+        assert!(close(
+            label_ranking_average_precision_score(&y_true, &y_score).unwrap(),
+            5.0 / 12.0,
+            1e-12,
+        ));
+        assert!(close(
+            label_ranking_loss(&y_true, &y_score).unwrap(),
+            0.75,
+            1e-12,
+        ));
+    }
+
+    /// Clustering family — partial-overlap fixture
+    ///   labels_true = [0, 0, 0, 1, 1, 1]
+    ///   labels_pred = [0, 0, 1, 1, 2, 2]   (3 predicted clusters vs 2 true)
+    /// Reference values from sklearn.metrics:
+    ///   adjusted_rand_score          -> 0.24242424242424243
+    ///   adjusted_mutual_info_score   -> 0.2987924581708901
+    ///   normalized_mutual_info_score -> 0.5158037429793889
+    ///   homogeneity_score            -> 0.6666666666666669
+    ///   completeness_score           -> 0.420619835714305
+    ///   v_measure_score              -> 0.5158037429793889  (== NMI here)
+    ///   fowlkes_mallows_score        -> 0.4714045207910317
+    #[test]
+    fn clustering_family_sklearn_fixture() {
+        let labels_true = tensor(&[0.0_f64, 0.0, 0.0, 1.0, 1.0, 1.0]).unwrap();
+        let labels_pred = tensor(&[0.0_f64, 0.0, 1.0, 1.0, 2.0, 2.0]).unwrap();
+        assert!(close(
+            adjusted_rand_score(&labels_true, &labels_pred).unwrap(),
+            0.242_424_242_424_242_43,
+            1e-9,
+        ));
+        assert!(close(
+            adjusted_mutual_info_score(&labels_true, &labels_pred).unwrap(),
+            0.298_792_458_170_890_1,
+            1e-9,
+        ));
+        let nmi = normalized_mutual_info_score(&labels_true, &labels_pred).unwrap();
+        assert!(close(nmi, 0.515_803_742_979_388_9, 1e-9));
+        assert!(close(
+            homogeneity_score(&labels_true, &labels_pred).unwrap(),
+            0.666_666_666_666_666_9,
+            1e-9,
+        ));
+        assert!(close(
+            completeness_score(&labels_true, &labels_pred).unwrap(),
+            0.420_619_835_714_305,
+            1e-9,
+        ));
+        assert!(close(
+            v_measure_score(&labels_true, &labels_pred).unwrap(),
+            nmi,
+            1e-12,
+        ));
+        assert!(close(
+            fowlkes_mallows_score(&labels_true, &labels_pred).unwrap(),
+            0.471_404_520_791_031_7,
+            1e-9,
+        ));
+    }
+
+    /// Internal cluster-validity metrics — two clean clusters in 2-D
+    ///   X = [[0,0],[0.1,0.1],[0.2,0],[5,5],[5.1,5.1],[5,4.9]]
+    ///   y = [0,0,0,1,1,1]
+    /// Reference values from sklearn.metrics:
+    ///   silhouette_score        -> 0.9774475143745391
+    ///   davies_bouldin_score    -> 0.02554201915374283
+    ///   calinski_harabasz_score -> 5513.125000000018
+    #[test]
+    fn internal_cluster_validity_sklearn_fixture() {
+        let x = Tensor::from_storage(
+            ferrotorch_core::storage::TensorStorage::cpu(vec![
+                0.0_f64, 0.0, 0.1, 0.1, 0.2, 0.0, 5.0, 5.0, 5.1, 5.1, 5.0, 4.9,
+            ]),
+            vec![6, 2],
+            false,
+        )
+        .unwrap();
+        let labels = tensor(&[0.0_f64, 0.0, 0.0, 1.0, 1.0, 1.0]).unwrap();
+        let s = silhouette_score(&x, &labels).unwrap();
+        let d = davies_bouldin_score(&x, &labels).unwrap();
+        let c = calinski_harabasz_score(&x, &labels).unwrap();
+        assert!(close(s, 0.977_447_514_374_539_1, 1e-9), "silhouette={s}");
+        assert!(close(d, 0.025_542_019_153_742_83, 1e-9), "db={d}");
+        assert!(close(c, 5_513.125_000_000_018, 1e-6), "ch={c}");
+    }
 }
