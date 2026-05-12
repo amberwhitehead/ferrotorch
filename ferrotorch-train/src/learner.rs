@@ -531,6 +531,85 @@ mod tests {
         }
     }
 
+    // -- Real-loss test helpers (#1116) --------------------------------------
+    //
+    // Three of the construction-only tests below were upgraded to drive the
+    // full `fit()` / `evaluate()` path against a real MSE loss and a real
+    // SGD optimizer, so the test suite actually exercises gradient flow.
+    //
+    // The fixture is deliberately the smallest model with a learnable
+    // parameter where MSE backprop has a measurable effect:
+    //
+    //   * `ferrotorch_nn::Linear<f32>(1, 1, bias=false)`     — single weight `w`.
+    //   * targets `y = TRUE_W * x` with `TRUE_W = 3.0`       — exact linear fit.
+    //   * loss closure `mse_loss(pred, target)`              — reduction = mean.
+    //   * `Sgd(lr = 0.05)`                                   — large enough lr
+    //                                                          for 5 epochs to
+    //                                                          visibly move `w`.
+    //
+    // The dataset is small and deterministic (5 batches of 4 samples each),
+    // so the tests stay fast (well under 1s) while still letting us assert
+    // both "loss decreases" and "parameter changes" robustly.
+
+    /// Target slope used by the synthetic regression fixture.
+    const TRUE_W: f32 = 3.0;
+    /// Initial weight value the model is forced to before training. Picked
+    /// far enough from `TRUE_W` that 5 epochs of SGD@0.05 noticeably reduce
+    /// the loss, but not so far that gradients explode.
+    const INIT_W: f32 = 0.5;
+
+    fn mse_loss_fn() -> LossFn<f32> {
+        Box::new(ferrotorch_nn::functional::mse_loss)
+    }
+
+    /// Build a `Linear(1, 1, bias=false)` whose single weight is set to
+    /// `INIT_W` — gives every real-loss test the same deterministic start.
+    fn build_linear_fixture() -> FerrotorchResult<ferrotorch_nn::Linear<f32>> {
+        let mut layer = ferrotorch_nn::Linear::<f32>::new(1, 1, false)?;
+        // Linear's weight has shape [out_features, in_features] = [1, 1].
+        let init = ferrotorch_core::from_vec(vec![INIT_W], &[1, 1])?;
+        layer.weight.set_data(init);
+        Ok(layer)
+    }
+
+    /// Synthetic regression batches: `y = TRUE_W * x` over the inputs
+    /// `[0.0, 1.0, 2.0, 3.0]` repeated for 5 batches per epoch. Returns a
+    /// closure compatible with `Learner::fit` / `Learner::evaluate`.
+    #[allow(clippy::type_complexity)]
+    fn regression_data()
+    -> impl Fn() -> std::vec::IntoIter<FerrotorchResult<(Tensor<f32>, Tensor<f32>)>> {
+        || {
+            const N_BATCHES: usize = 5;
+            let xs: [f32; 4] = [0.0, 1.0, 2.0, 3.0];
+            let mut batches: Vec<FerrotorchResult<(Tensor<f32>, Tensor<f32>)>> =
+                Vec::with_capacity(N_BATCHES);
+            for _ in 0..N_BATCHES {
+                let x = match ferrotorch_core::from_vec(xs.to_vec(), &[4, 1]) {
+                    Ok(t) => t,
+                    Err(e) => {
+                        batches.push(Err(e));
+                        continue;
+                    }
+                };
+                let y_vec: Vec<f32> = xs.iter().map(|v| TRUE_W * v).collect();
+                let y = match ferrotorch_core::from_vec(y_vec, &[4, 1]) {
+                    Ok(t) => t,
+                    Err(e) => {
+                        batches.push(Err(e));
+                        continue;
+                    }
+                };
+                batches.push(Ok((x, y)));
+            }
+            batches.into_iter()
+        }
+    }
+
+    /// Read the scalar weight value out of a `Linear(1, 1, bias=false)`.
+    fn read_weight(layer: &ferrotorch_nn::Linear<f32>) -> FerrotorchResult<f32> {
+        Ok(layer.weight.data_vec()?[0])
+    }
+
     // -- Construction tests --------------------------------------------------
 
     #[test]
@@ -559,45 +638,165 @@ mod tests {
         );
     }
 
+    // -- Real-loss training tests (#1116) -----------------------------------
+    //
+    // These three tests replace the original construction-only variants
+    // (`test_learner_with_metrics`, `test_learner_with_callbacks`,
+    // `test_learner_model_accessors`). Each now drives the full `fit()` or
+    // `evaluate()` path against `mse_loss` and a real `Sgd` optimizer,
+    // while still exercising the `with_train_metric` / `with_val_metric` /
+    // `with_callback` / `model()` / `model_mut()` surface APIs the
+    // originals were guarding.
+
+    /// `fit()` must drive the per-epoch training loss meaningfully
+    /// downward when the loss is real MSE and the optimizer actually
+    /// updates the parameter. Also exercises `with_train_metric` and
+    /// `with_val_metric` (counts after construction match), and the
+    /// returned `TrainingHistory` (5 epochs recorded).
     #[test]
-    fn test_learner_with_metrics() {
+    fn test_learner_fit_with_metrics_decreases_loss() {
         use crate::metric::LossMetric;
+        use ferrotorch_optim::{Sgd, SgdConfig};
 
-        let model = DummyModule::<f32>::new().unwrap();
-        let optimizer: Box<dyn Optimizer<f32>> = Box::new(DummyOptimizer { lr: 0.01 });
-        let loss_fn: LossFn<f32> = Box::new(|pred, _target| Ok(pred.clone()));
+        let layer = build_linear_fixture().expect("build Linear fixture");
+        let params: Vec<Parameter<f32>> = layer.parameters().iter().map(|p| (*p).clone()).collect();
+        let optimizer: Box<dyn Optimizer<f32>> = Box::new(Sgd::new(params, SgdConfig::new(0.05)));
 
-        let learner = Learner::new(model, optimizer, loss_fn)
+        let mut learner = Learner::new(layer, optimizer, mse_loss_fn())
             .with_train_metric(Box::new(LossMetric::new()))
             .with_val_metric(Box::new(LossMetric::new()));
 
+        // Sanity-check the surface API the original construction test
+        // covered: both metric vectors saw the registration.
         assert_eq!(learner.train_metrics.len(), 1);
         assert_eq!(learner.val_metrics.len(), 1);
+
+        let data = regression_data();
+        let history = learner
+            .fit(
+                &data,
+                None::<&dyn Fn() -> std::vec::IntoIter<FerrotorchResult<(Tensor<f32>, Tensor<f32>)>>>,
+                5,
+            )
+            .expect("fit should succeed on the synthetic regression task");
+
+        // 5 epochs were actually run.
+        assert_eq!(history.epochs.len(), 5);
+
+        // The per-epoch mean training loss must drop monotonically across
+        // the whole run — for a 1-D linear model on a noiseless linear
+        // target with SGD@0.05, that's the expected behavior. A flat
+        // trajectory (e.g. optimizer.step() got skipped or gradients
+        // were zeroed before stepping) would trip this assertion.
+        let first = history.epochs.first().unwrap().train_loss;
+        let last = history.epochs.last().unwrap().train_loss;
+        assert!(
+            last < first * 0.5,
+            "expected fit() to at least halve the train loss, got first={first}, last={last}"
+        );
+        // And the absolute loss must be small (the model converges to
+        // within ~0.5 MSE of the true slope on this fixture).
+        assert!(
+            last < 0.5,
+            "expected final train loss < 0.5, got last={last}"
+        );
     }
 
+    /// `fit()` must visibly change the model's parameter values via
+    /// backprop. This is the canonical sabotage probe: a `fit()` that
+    /// either skips `optimizer.step()` or zeros gradients before stepping
+    /// would leave the weight untouched and fail this test. Also
+    /// exercises `with_callback`.
     #[test]
-    fn test_learner_with_callbacks() {
+    fn test_learner_fit_changes_parameters() {
         use crate::callback::EarlyStopping;
+        use ferrotorch_optim::{Sgd, SgdConfig};
 
-        let model = DummyModule::<f32>::new().unwrap();
-        let optimizer: Box<dyn Optimizer<f32>> = Box::new(DummyOptimizer { lr: 0.01 });
-        let loss_fn: LossFn<f32> = Box::new(|pred, _target| Ok(pred.clone()));
+        let layer = build_linear_fixture().expect("build Linear fixture");
+        let initial_w = read_weight(&layer).expect("read initial weight");
+        assert!(
+            (initial_w - INIT_W).abs() < 1e-6,
+            "fixture must start at INIT_W={INIT_W}, got {initial_w}"
+        );
 
-        let learner = Learner::new(model, optimizer, loss_fn)
-            .with_callback(Box::new(EarlyStopping::new(5, 0.001)));
+        let params: Vec<Parameter<f32>> = layer.parameters().iter().map(|p| (*p).clone()).collect();
+        let optimizer: Box<dyn Optimizer<f32>> = Box::new(Sgd::new(params, SgdConfig::new(0.05)));
 
+        // EarlyStopping with a very loose patience won't fire over 5
+        // epochs — its presence here is only to keep the
+        // `with_callback` surface-API coverage the original test had.
+        let mut learner = Learner::new(layer, optimizer, mse_loss_fn())
+            .with_callback(Box::new(EarlyStopping::new(100, 0.0)));
         assert_eq!(learner.callbacks.len(), 1);
+
+        let data = regression_data();
+        learner
+            .fit(
+                &data,
+                None::<&dyn Fn() -> std::vec::IntoIter<FerrotorchResult<(Tensor<f32>, Tensor<f32>)>>>,
+                5,
+            )
+            .expect("fit succeeds");
+
+        let final_w = read_weight(learner.model()).expect("read final weight");
+        // The weight must have moved meaningfully toward TRUE_W=3.0.
+        // We assert a generous lower bound (≥ 0.5 absolute change) so
+        // the test is robust to small numerical differences but still
+        // fails decisively if the optimizer step is a no-op.
+        let delta = (final_w - initial_w).abs();
+        assert!(
+            delta >= 0.5,
+            "fit() must change the weight by ≥0.5: initial={initial_w}, final={final_w}, delta={delta}"
+        );
+        // The direction must be toward the true slope — guards against
+        // a backward-sign regression.
+        assert!(
+            final_w > initial_w && final_w < TRUE_W + 1.0,
+            "weight should approach TRUE_W from below: initial={initial_w}, final={final_w}, TRUE_W={TRUE_W}"
+        );
     }
 
+    /// `evaluate()` must report a non-zero, mathematically meaningful
+    /// loss when the model's prediction does not match the target. With
+    /// `w = INIT_W = 0.5` on inputs `xs = [0, 1, 2, 3]` and target
+    /// `y = 3*x`, the per-sample squared errors are `(0.5*x - 3*x)^2 =
+    /// (2.5*x)^2`, so the analytic mean is
+    /// `mean((2.5 * [0,1,2,3])^2) = mean([0, 6.25, 25, 56.25]) = 21.875`.
+    /// Also exercises `model()` and `model_mut()` accessors before/after
+    /// evaluate to confirm `evaluate()` flips `is_training()` to false.
     #[test]
-    fn test_learner_model_accessors() {
-        let model = DummyModule::<f32>::new().unwrap();
-        let optimizer: Box<dyn Optimizer<f32>> = Box::new(DummyOptimizer { lr: 0.01 });
-        let loss_fn: LossFn<f32> = Box::new(|pred, _target| Ok(pred.clone()));
+    fn test_learner_evaluate_reports_meaningful_loss() {
+        use ferrotorch_optim::{Sgd, SgdConfig};
 
-        let mut learner = Learner::new(model, optimizer, loss_fn);
+        let layer = build_linear_fixture().expect("build Linear fixture");
+        let params: Vec<Parameter<f32>> = layer.parameters().iter().map(|p| (*p).clone()).collect();
+        let optimizer: Box<dyn Optimizer<f32>> = Box::new(Sgd::new(params, SgdConfig::new(0.05)));
+
+        let mut learner = Learner::new(layer, optimizer, mse_loss_fn());
+
+        // model() / model_mut() surface check (original test's content).
         assert!(learner.model().is_training());
         learner.model_mut().eval();
+        assert!(!learner.model().is_training());
+        learner.model_mut().train();
+
+        let data = regression_data();
+        let eval = learner
+            .evaluate(&data)
+            .expect("evaluate should succeed on synthetic regression");
+
+        // Analytic mean MSE for w=INIT_W=0.5 vs target=3*x on xs=[0,1,2,3]:
+        //   per-sample: ((0.5 - 3)*x)^2 = (2.5*x)^2 = 6.25*x^2
+        //   mean over [0,1,4,9] = 14/4 = 3.5, scaled by 6.25 = 21.875.
+        let expected = 21.875_f64;
+        assert!(
+            (eval.loss - expected).abs() < 1e-3,
+            "evaluate() loss should match analytic MSE {expected}, got {}",
+            eval.loss
+        );
+
+        // evaluate() must leave the model in eval mode (the contract
+        // documented on `evaluate`/`evaluate_iter`).
         assert!(!learner.model().is_training());
     }
 
