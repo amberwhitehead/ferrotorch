@@ -12,7 +12,47 @@ pub trait Sampler: Send + Sync {
     }
 }
 
-/// Fisher-Yates shuffle with a deterministic xorshift64 PRNG.
+/// Advance an xorshift64 state and return the next u64.
+#[inline]
+fn xorshift64(state: &mut u64) -> u64 {
+    let mut s = *state;
+    s ^= s << 13;
+    s ^= s >> 7;
+    s ^= s << 17;
+    *state = s;
+    s
+}
+
+/// Draw an unbiased uniform integer in `0..bound` using Lemire's
+/// nearly-divisionless rejection method on the high bits of a 128-bit product.
+///
+/// `bound` must be `> 0`. The naive `xorshift64() % bound` is doubly broken:
+/// (a) it has modulo bias whenever `bound` does not divide `2^64`; (b) it
+/// pulls from the *low* bits of xorshift64, which have known weak entropy.
+/// Multiplying by `bound` and taking the upper 64 bits reads from the *high*
+/// bits and yields a near-uniform `[0, bound)` integer; the residual `lo`
+/// portion is then rejection-tested against `(-bound) mod bound` (== the
+/// leftover zone `2^64 mod bound`) to remove the remaining bias.
+#[inline]
+fn bounded_u64(state: &mut u64, bound: u64) -> u64 {
+    debug_assert!(bound > 0);
+    let mut r = xorshift64(state);
+    let mut prod = (r as u128) * (bound as u128);
+    let mut lo = prod as u64;
+    if lo < bound {
+        // `(-bound) mod bound` = `2^64 mod bound`; the rejection threshold.
+        let t = bound.wrapping_neg() % bound;
+        while lo < t {
+            r = xorshift64(state);
+            prod = (r as u128) * (bound as u128);
+            lo = prod as u64;
+        }
+    }
+    (prod >> 64) as u64
+}
+
+/// Fisher-Yates shuffle with a deterministic xorshift64 PRNG and
+/// rejection-sampled (unbiased) index draws.
 ///
 /// This is the shared shuffle primitive used by [`RandomSampler`] and
 /// [`DistributedSampler`].
@@ -22,10 +62,8 @@ pub fn shuffle_with_seed(indices: &mut [usize], seed: u64) {
         state = 0xdeadbeefcafe;
     }
     for i in (1..indices.len()).rev() {
-        state ^= state << 13;
-        state ^= state >> 7;
-        state ^= state << 17;
-        let j = (state as usize) % (i + 1);
+        let bound = (i + 1) as u64;
+        let j = bounded_u64(&mut state, bound) as usize;
         indices.swap(i, j);
     }
 }
@@ -220,26 +258,100 @@ impl WeightedRandomSampler {
         }
     }
 
-    /// Advance the xorshift64 state and return the next u64.
+    /// Draw a uniform `f64` in `(0, 1]` from the xorshift64 stream using the
+    /// top 53 mantissa bits (the well-randomized portion).
     #[inline]
-    fn xorshift64(state: &mut u64) -> u64 {
-        let mut s = *state;
-        s ^= s << 13;
-        s ^= s >> 7;
-        s ^= s << 17;
-        *state = s;
-        s
+    fn unit_uniform(state: &mut u64) -> f64 {
+        let bits = xorshift64(state) >> 11;
+        let u = (bits as f64) / ((1u64 << 53) as f64);
+        // Map any literal 0 to the smallest positive ulp so callers can take
+        // `ln(u)` or `u.powf(1/w)` without producing -inf / 0^positive.
+        if u == 0.0 { f64::from_bits(1) } else { u }
+    }
+}
+
+/// Walker's alias table — O(N) preprocess, O(1) per draw.
+///
+/// Given a non-negative weight vector `w`, partitions the unit interval into
+/// `n` equal-width buckets. Each bucket `i` is split between the original
+/// index `i` (with probability `prob[i]`) and an "alias" index `alias[i]`.
+/// A single draw picks a bucket uniformly, then flips a biased coin against
+/// `prob[i]` to choose between `i` and `alias[i]`.
+///
+/// Construction follows Vose's (1991) algorithm: scale each weight to mean 1,
+/// then pair "small" (< 1) bins with "large" (≥ 1) bins until all are balanced.
+#[derive(Debug, Clone)]
+struct AliasTable {
+    prob: Vec<f64>,
+    alias: Vec<usize>,
+}
+
+impl AliasTable {
+    /// Build the alias table from a non-empty, non-negative weight vector.
+    fn new(weights: &[f64]) -> Self {
+        let n = weights.len();
+        debug_assert!(n > 0, "AliasTable: weights must not be empty");
+        let total: f64 = weights.iter().sum();
+        debug_assert!(total > 0.0, "AliasTable: total weight must be positive");
+
+        // Scaled probabilities: each entry is `n * w_i / total`, mean 1.
+        let scale = (n as f64) / total;
+        let mut scaled: Vec<f64> = weights.iter().map(|&w| w * scale).collect();
+        let mut prob = vec![0.0f64; n];
+        let mut alias = vec![0usize; n];
+
+        // Vose: partition indices into "small" (scaled < 1) and "large" (≥ 1).
+        let mut small: Vec<usize> = Vec::with_capacity(n);
+        let mut large: Vec<usize> = Vec::with_capacity(n);
+        for (i, &p) in scaled.iter().enumerate() {
+            if p < 1.0 {
+                small.push(i);
+            } else {
+                large.push(i);
+            }
+        }
+
+        // CAUTION: do *not* use `while let (Some(s), Some(l)) = (small.pop(), large.pop())`
+        // — that consumes from both stacks on every iteration, including the one
+        // where the pattern match fails, silently dropping the surviving entry.
+        while !small.is_empty() && !large.is_empty() {
+            let s = small.pop().expect("small non-empty checked above");
+            let l = large.pop().expect("large non-empty checked above");
+            prob[s] = scaled[s];
+            alias[s] = l;
+            scaled[l] = (scaled[l] + scaled[s]) - 1.0;
+            if scaled[l] < 1.0 {
+                small.push(l);
+            } else {
+                large.push(l);
+            }
+        }
+        // Leftover entries have scaled ≈ 1; assign prob = 1 (alias unused).
+        for l in large {
+            prob[l] = 1.0;
+            alias[l] = l;
+        }
+        for s in small {
+            // Floating-point underflow can occasionally strand a small entry;
+            // treat it as full.
+            prob[s] = 1.0;
+            alias[s] = s;
+        }
+
+        Self { prob, alias }
     }
 
-    /// Draw one index using the inverse-CDF method on the cumulative weights.
-    fn weighted_sample(cumulative: &[f64], total: f64, rng_state: &mut u64) -> usize {
-        let u = Self::xorshift64(rng_state);
-        // Map to (0, 1].
-        let r = ((u >> 11) as f64) / ((1u64 << 53) as f64) * total;
-        // Binary search: first index where cumulative[i] > r.
-        cumulative
-            .partition_point(|&c| c <= r)
-            .min(cumulative.len() - 1)
+    /// Draw one index in O(1).
+    #[inline]
+    fn draw(&self, state: &mut u64) -> usize {
+        let n = self.prob.len();
+        let bucket = bounded_u64(state, n as u64) as usize;
+        let u = WeightedRandomSampler::unit_uniform(state);
+        if u <= self.prob[bucket] {
+            bucket
+        } else {
+            self.alias[bucket]
+        }
     }
 }
 
@@ -250,39 +362,84 @@ impl Sampler for WeightedRandomSampler {
             rng_state = 0xdeadbeefcafe;
         }
 
-        // Build cumulative weight array.
-        let mut cumulative = Vec::with_capacity(self.weights.len());
-        let mut acc = 0.0f64;
-        for &w in &self.weights {
-            acc += w;
-            cumulative.push(acc);
-        }
-        let total = acc;
-
         if self.replacement {
+            // Walker's alias method: O(N) preprocess, O(1) per draw.
+            let table = AliasTable::new(&self.weights);
             (0..self.num_samples)
-                .map(|_| Self::weighted_sample(&cumulative, total, &mut rng_state))
+                .map(|_| table.draw(&mut rng_state))
                 .collect()
         } else {
-            // Without replacement: draw from shrinking pool.
-            let mut live_weights: Vec<f64> = self.weights.clone();
-            let mut result = Vec::with_capacity(self.num_samples);
+            // Efraimidis–Spirakis (A-Res) weighted reservoir sampling.
+            //
+            // For each item i with weight w_i > 0, compute key
+            //   k_i = ln(u_i) / w_i, u_i ~ Uniform(0, 1].
+            // (Equivalent up to monotonic transform to the canonical
+            // `u_i^(1/w_i)`; using log-space avoids underflow when w_i is large.)
+            // The top-k keys form a uniform weighted sample of size k *without
+            // replacement*. A min-heap of size num_samples keeps the running
+            // cost at O(N log num_samples) instead of the previous O(N²)
+            // cumulative-rebuild loop.
+            use std::cmp::Ordering;
+            use std::collections::BinaryHeap;
 
-            for _ in 0..self.num_samples {
-                // Rebuild cumulative for live weights.
-                let mut cum = Vec::with_capacity(live_weights.len());
-                let mut a = 0.0f64;
-                for &w in &live_weights {
-                    a += w;
-                    cum.push(a);
-                }
-                let t = a;
-
-                let idx = Self::weighted_sample(&cum, t, &mut rng_state);
-                result.push(idx);
-                live_weights[idx] = 0.0; // Remove from pool.
+            #[derive(Copy, Clone)]
+            struct HeapEntry {
+                key: f64,
+                idx: usize,
             }
-            result
+            impl PartialEq for HeapEntry {
+                fn eq(&self, other: &Self) -> bool {
+                    self.key == other.key && self.idx == other.idx
+                }
+            }
+            impl Eq for HeapEntry {}
+            impl PartialOrd for HeapEntry {
+                fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+                    Some(self.cmp(other))
+                }
+            }
+            impl Ord for HeapEntry {
+                fn cmp(&self, other: &Self) -> Ordering {
+                    // Reverse the natural f64 ordering so BinaryHeap (a max-heap)
+                    // behaves as a min-heap on `key`. Tie-break on idx to stay
+                    // deterministic. Keys are never NaN: `unit_uniform` returns
+                    // (0, 1] and weights are non-negative.
+                    other
+                        .key
+                        .partial_cmp(&self.key)
+                        .unwrap_or(Ordering::Equal)
+                        .then_with(|| other.idx.cmp(&self.idx))
+                }
+            }
+
+            let k = self.num_samples;
+            let mut heap: BinaryHeap<HeapEntry> = BinaryHeap::with_capacity(k + 1);
+
+            for (idx, &w) in self.weights.iter().enumerate() {
+                if w <= 0.0 {
+                    continue; // Zero-weight items are excluded from the pool.
+                }
+                let u = Self::unit_uniform(&mut rng_state);
+                let key = u.ln() / w;
+                if heap.len() < k {
+                    heap.push(HeapEntry { key, idx });
+                } else if let Some(top) = heap.peek() {
+                    // Min-heap on `key`: replace only when the new key ranks
+                    // higher (i.e. larger) than the current minimum.
+                    if key > top.key {
+                        heap.pop();
+                        heap.push(HeapEntry { key, idx });
+                    }
+                }
+            }
+
+            assert!(
+                heap.len() == k,
+                "WeightedRandomSampler: only {} non-zero-weight items but \
+                 num_samples = {k}",
+                heap.len()
+            );
+            heap.into_iter().map(|e| e.idx).collect()
         }
     }
 

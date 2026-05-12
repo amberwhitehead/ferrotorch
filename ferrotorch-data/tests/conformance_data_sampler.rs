@@ -58,10 +58,12 @@ fn fixtures_of_kind<'a>(
 #[test]
 fn sequential_sampler_indices() {
     let fixtures = load_fixtures();
+    let mut matched: usize = 0;
     for fx in fixtures_of_kind(&fixtures, "sequential_sampler") {
         if fx["subtest"].as_str() != Some("indices") {
             continue;
         }
+        matched += 1;
         let n = fx["n"].as_u64().unwrap() as usize;
         let expected: Vec<usize> = fx["expected_indices"]
             .as_array()
@@ -74,6 +76,11 @@ fn sequential_sampler_indices() {
         let got = s.indices(0);
         assert_eq!(got, expected, "SequentialSampler(n={n}) indices mismatch");
     }
+    assert!(
+        matched > 0,
+        "no fixtures matched kind=sequential_sampler subtest=indices — \
+         did the fixture file get regenerated?"
+    );
 }
 
 /// `SequentialSampler` returns the same order every epoch.
@@ -107,10 +114,12 @@ fn sequential_sampler_len() {
 #[test]
 fn random_sampler_is_permutation() {
     let fixtures = load_fixtures();
+    let mut matched: usize = 0;
     for fx in fixtures_of_kind(&fixtures, "random_sampler") {
         if fx["subtest"].as_str() != Some("is_permutation") {
             continue;
         }
+        matched += 1;
         let n = fx["n"].as_u64().unwrap() as usize;
         let seed = fx["seed"].as_u64().unwrap();
 
@@ -126,6 +135,11 @@ fn random_sampler_is_permutation() {
             "RandomSampler(n={n}) result must be a permutation of 0..n"
         );
     }
+    assert!(
+        matched > 0,
+        "no fixtures matched kind=random_sampler subtest=is_permutation — \
+         did the fixture file get regenerated?"
+    );
 }
 
 /// Calling `indices` twice with the same epoch yields the same ordering.
@@ -200,10 +214,12 @@ fn shuffle_with_seed_is_permutation() {
 #[test]
 fn batch_sampler_sequential_no_drop() {
     let fixtures = load_fixtures();
+    let mut matched: usize = 0;
     for fx in fixtures_of_kind(&fixtures, "batch_sampler") {
         if fx["subtest"].as_str() != Some("sequential_no_drop") {
             continue;
         }
+        matched += 1;
         let n = fx["n"].as_u64().unwrap() as usize;
         let batch_size = fx["batch_size"].as_u64().unwrap() as usize;
         let drop_last = fx["drop_last"].as_bool().unwrap();
@@ -225,16 +241,23 @@ fn batch_sampler_sequential_no_drop() {
         let got = bs.batches(0);
         assert_eq!(got, expected, "BatchSampler sequential_no_drop mismatch");
     }
+    assert!(
+        matched > 0,
+        "no fixtures matched kind=batch_sampler subtest=sequential_no_drop — \
+         did the fixture file get regenerated?"
+    );
 }
 
 /// `BatchSampler::batches` with `drop_last=true` drops the final incomplete batch.
 #[test]
 fn batch_sampler_sequential_drop_last() {
     let fixtures = load_fixtures();
+    let mut matched: usize = 0;
     for fx in fixtures_of_kind(&fixtures, "batch_sampler") {
         if fx["subtest"].as_str() != Some("sequential_drop_last") {
             continue;
         }
+        matched += 1;
         let n = fx["n"].as_u64().unwrap() as usize;
         let batch_size = fx["batch_size"].as_u64().unwrap() as usize;
         let drop_last = fx["drop_last"].as_bool().unwrap();
@@ -256,16 +279,23 @@ fn batch_sampler_sequential_drop_last() {
         let got = bs.batches(0);
         assert_eq!(got, expected, "BatchSampler sequential_drop_last mismatch");
     }
+    assert!(
+        matched > 0,
+        "no fixtures matched kind=batch_sampler subtest=sequential_drop_last — \
+         did the fixture file get regenerated?"
+    );
 }
 
 /// `BatchSampler::batches` with exact divisor produces no remainder batch.
 #[test]
 fn batch_sampler_exact_division() {
     let fixtures = load_fixtures();
+    let mut matched: usize = 0;
     for fx in fixtures_of_kind(&fixtures, "batch_sampler") {
         if fx["subtest"].as_str() != Some("exact_division") {
             continue;
         }
+        matched += 1;
         let n = fx["n"].as_u64().unwrap() as usize;
         let batch_size = fx["batch_size"].as_u64().unwrap() as usize;
         let drop_last = fx["drop_last"].as_bool().unwrap();
@@ -287,6 +317,11 @@ fn batch_sampler_exact_division() {
         let got = bs.batches(0);
         assert_eq!(got, expected, "BatchSampler exact_division mismatch");
     }
+    assert!(
+        matched > 0,
+        "no fixtures matched kind=batch_sampler subtest=exact_division — \
+         did the fixture file get regenerated?"
+    );
 }
 
 /// `BatchSampler::num_batches` reports the correct count for several
@@ -316,10 +351,12 @@ fn batch_sampler_num_batches() {
 #[test]
 fn weighted_random_sampler_heavy_bias() {
     let fixtures = load_fixtures();
+    let mut matched: usize = 0;
     for fx in fixtures_of_kind(&fixtures, "weighted_random_sampler") {
         if fx["subtest"].as_str() != Some("heavy_bias") {
             continue;
         }
+        matched += 1;
         let weights: Vec<f64> = fx["weights"]
             .as_array()
             .unwrap()
@@ -341,6 +378,11 @@ fn weighted_random_sampler_heavy_bias() {
              should exceed {threshold} (70% of {n_samples})"
         );
     }
+    assert!(
+        matched > 0,
+        "no fixtures matched kind=weighted_random_sampler subtest=heavy_bias — \
+         did the fixture file get regenerated?"
+    );
 }
 
 /// `WeightedRandomSampler` produces indices only within `0..weights.len()`.
@@ -371,10 +413,12 @@ fn weighted_random_sampler_len() {
 #[test]
 fn distributed_sampler_sequential_partition() {
     let fixtures = load_fixtures();
+    let mut matched: usize = 0;
     for fx in fixtures_of_kind(&fixtures, "distributed_sampler") {
         if fx["subtest"].as_str() != Some("sequential_partition") {
             continue;
         }
+        matched += 1;
         let n = fx["n"].as_u64().unwrap() as usize;
         let num_replicas = fx["num_replicas"].as_u64().unwrap() as usize;
         let rank = fx["rank"].as_u64().unwrap() as usize;
@@ -400,6 +444,11 @@ fn distributed_sampler_sequential_partition() {
             "DistributedSampler per-rank length mismatch"
         );
     }
+    assert!(
+        matched > 0,
+        "no fixtures matched kind=distributed_sampler subtest=sequential_partition — \
+         did the fixture file get regenerated?"
+    );
 }
 
 /// With shuffle enabled and a fixed seed, `indices` is reproducible.

@@ -62,10 +62,12 @@ fn t32(data: &[f32], shape: &[usize]) -> Tensor<f32> {
 #[test]
 fn vec_dataset_len() {
     let fixtures = load_fixtures();
+    let mut matched: usize = 0;
     for fx in fixtures_of_kind(&fixtures, "vec_dataset") {
         if fx["subtest"].as_str() != Some("len") {
             continue;
         }
+        matched += 1;
         let n = fx["n"].as_u64().unwrap() as usize;
         let expected_len = fx["expected_len"].as_u64().unwrap() as usize;
 
@@ -76,16 +78,23 @@ fn vec_dataset_len() {
             "VecDataset(n={n}).len() should be {expected_len}"
         );
     }
+    assert!(
+        matched > 0,
+        "no fixtures matched kind=vec_dataset subtest=len — \
+         did the fixture file get regenerated?"
+    );
 }
 
 /// `VecDataset::get` returns the value at the given index.
 #[test]
 fn vec_dataset_get() {
     let fixtures = load_fixtures();
+    let mut matched: usize = 0;
     for fx in fixtures_of_kind(&fixtures, "vec_dataset") {
         if fx["subtest"].as_str() != Some("get") {
             continue;
         }
+        matched += 1;
         let n = fx["n"].as_u64().unwrap() as usize;
         let index = fx["index"].as_u64().unwrap() as usize;
         let expected_value = fx["expected_value"].as_u64().unwrap() as usize;
@@ -97,16 +106,23 @@ fn vec_dataset_get() {
             "VecDataset(n={n}).get({index}) expected {expected_value}"
         );
     }
+    assert!(
+        matched > 0,
+        "no fixtures matched kind=vec_dataset subtest=get — \
+         did the fixture file get regenerated?"
+    );
 }
 
 /// `VecDataset::get` with an out-of-bounds index returns `Err(IndexOutOfBounds)`.
 #[test]
 fn vec_dataset_get_oob() {
     let fixtures = load_fixtures();
+    let mut matched: usize = 0;
     for fx in fixtures_of_kind(&fixtures, "vec_dataset") {
         if fx["subtest"].as_str() != Some("get_oob") {
             continue;
         }
+        matched += 1;
         let n = fx["n"].as_u64().unwrap() as usize;
         let index = fx["index"].as_u64().unwrap() as usize;
 
@@ -117,6 +133,11 @@ fn vec_dataset_get_oob() {
             "VecDataset(n={n}).get({index}) should return Err for OOB index"
         );
     }
+    assert!(
+        matched > 0,
+        "no fixtures matched kind=vec_dataset subtest=get_oob — \
+         did the fixture file get regenerated?"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -141,10 +162,12 @@ fn tensor_dataset_is_empty() {
 #[test]
 fn tensor_dataset_len() {
     let fixtures = load_fixtures();
+    let mut matched: usize = 0;
     for fx in fixtures_of_kind(&fixtures, "tensor_dataset") {
         if fx["subtest"].as_str() != Some("len") {
             continue;
         }
+        matched += 1;
         let x_shape: Vec<usize> = fx["x_shape"]
             .as_array()
             .unwrap()
@@ -177,16 +200,23 @@ fn tensor_dataset_len() {
         );
         assert!(!ds.is_empty());
     }
+    assert!(
+        matched > 0,
+        "no fixtures matched kind=tensor_dataset subtest=len — \
+         did the fixture file get regenerated?"
+    );
 }
 
 /// `TensorDataset::get(i)` returns the i-th row of each stored tensor.
 #[test]
 fn tensor_dataset_get() {
     let fixtures = load_fixtures();
+    let mut matched: usize = 0;
     for fx in fixtures_of_kind(&fixtures, "tensor_dataset") {
         if fx["subtest"].as_str() != Some("get") {
             continue;
         }
+        matched += 1;
 
         let index = fx["index"].as_u64().unwrap() as usize;
         let x_shape: Vec<usize> = fx["x_shape"]
@@ -248,6 +278,11 @@ fn tensor_dataset_get() {
             "TensorDataset.get({index}) y scalar mismatch"
         );
     }
+    assert!(
+        matched > 0,
+        "no fixtures matched kind=tensor_dataset subtest=get — \
+         did the fixture file get regenerated?"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -279,10 +314,12 @@ fn worker_info_clone() {
 #[test]
 fn concat_dataset_len() {
     let fixtures = load_fixtures();
+    let mut matched: usize = 0;
     for fx in fixtures_of_kind(&fixtures, "concat_dataset") {
         if fx["subtest"].as_str() != Some("len") {
             continue;
         }
+        matched += 1;
         let sizes: Vec<usize> = fx["sizes"]
             .as_array()
             .unwrap()
@@ -316,16 +353,23 @@ fn concat_dataset_len() {
             "ConcatDataset(sizes={sizes:?}).len() should be {expected_len}"
         );
     }
+    assert!(
+        matched > 0,
+        "no fixtures matched kind=concat_dataset subtest=len — \
+         did the fixture file get regenerated?"
+    );
 }
 
 /// `ConcatDataset::get(i)` maps to the correct sub-dataset and local index.
 #[test]
 fn concat_dataset_get() {
     let fixtures = load_fixtures();
+    let mut matched: usize = 0;
     for fx in fixtures_of_kind(&fixtures, "concat_dataset") {
         if fx["subtest"].as_str() != Some("get") {
             continue;
         }
+        matched += 1;
         let sizes: Vec<usize> = fx["sizes"]
             .as_array()
             .unwrap()
@@ -360,6 +404,11 @@ fn concat_dataset_get() {
             "ConcatDataset.get({index}) expected {expected_value}"
         );
     }
+    assert!(
+        matched > 0,
+        "no fixtures matched kind=concat_dataset subtest=get — \
+         did the fixture file get regenerated?"
+    );
 }
 
 /// `ConcatDataset::new` returns `Err` when given an empty list.
@@ -377,10 +426,12 @@ fn concat_dataset_empty_err() {
 #[test]
 fn chain_dataset_iter_order() {
     let fixtures = load_fixtures();
+    let mut matched: usize = 0;
     for fx in fixtures_of_kind(&fixtures, "chain_dataset") {
         if fx["subtest"].as_str() != Some("iter_order") {
             continue;
         }
+        matched += 1;
         let a_values: Vec<i32> = fx["a_values"]
             .as_array()
             .unwrap()
@@ -408,6 +459,11 @@ fn chain_dataset_iter_order() {
             .collect();
         assert_eq!(got, expected, "ChainDataset iter_order mismatch");
     }
+    assert!(
+        matched > 0,
+        "no fixtures matched kind=chain_dataset subtest=iter_order — \
+         did the fixture file get regenerated?"
+    );
 }
 
 /// `ChainDataset::new` returns `Err` when given an empty list.

@@ -69,10 +69,12 @@ fn t64(data: &[f64], shape: &[usize]) -> Tensor<f64> {
 #[test]
 fn dataloader_sequential() {
     let fixtures = load_fixtures();
+    let mut matched: usize = 0;
     for fx in fixtures_of_kind(&fixtures, "dataloader") {
         if fx["subtest"].as_str() != Some("sequential") {
             continue;
         }
+        matched += 1;
         let n = fx["n"].as_u64().unwrap() as usize;
         let batch_size = fx["batch_size"].as_u64().unwrap() as usize;
         let shuffle = fx["shuffle"].as_bool().unwrap();
@@ -109,16 +111,23 @@ fn dataloader_sequential() {
             "DataLoader sequential(n={n}, batch={batch_size}) mismatch"
         );
     }
+    assert!(
+        matched > 0,
+        "no fixtures matched kind=dataloader subtest=sequential — \
+         did the fixture file get regenerated?"
+    );
 }
 
 /// `DataLoader` with `drop_last=true` drops the final partial batch.
 #[test]
 fn dataloader_drop_last() {
     let fixtures = load_fixtures();
+    let mut matched: usize = 0;
     for fx in fixtures_of_kind(&fixtures, "dataloader") {
         if fx["subtest"].as_str() != Some("drop_last") {
             continue;
         }
+        matched += 1;
         let n = fx["n"].as_u64().unwrap() as usize;
         let batch_size = fx["batch_size"].as_u64().unwrap() as usize;
         let drop_last = fx["drop_last"].as_bool().unwrap();
@@ -157,6 +166,11 @@ fn dataloader_drop_last() {
             "DataLoader drop_last num_batches mismatch"
         );
     }
+    assert!(
+        matched > 0,
+        "no fixtures matched kind=dataloader subtest=drop_last — \
+         did the fixture file get regenerated?"
+    );
 }
 
 /// Shuffled `DataLoader` covers all n samples exactly once per epoch
@@ -166,10 +180,12 @@ fn dataloader_drop_last() {
 #[test]
 fn dataloader_shuffle_coverage() {
     let fixtures = load_fixtures();
+    let mut matched: usize = 0;
     for fx in fixtures_of_kind(&fixtures, "dataloader") {
         if fx["subtest"].as_str() != Some("shuffle_coverage") {
             continue;
         }
+        matched += 1;
         let n = fx["n"].as_u64().unwrap() as usize;
         let batch_size = fx["batch_size"].as_u64().unwrap() as usize;
         let expected_sorted: Vec<i32> = fx["expected_sorted_indices"]
@@ -194,16 +210,23 @@ fn dataloader_shuffle_coverage() {
             "DataLoader shuffle_coverage: sorted output should equal 0..n"
         );
     }
+    assert!(
+        matched > 0,
+        "no fixtures matched kind=dataloader subtest=shuffle_coverage — \
+         did the fixture file get regenerated?"
+    );
 }
 
 /// `DataLoader::len` counts the number of batches it will produce.
 #[test]
 fn dataloader_num_batches() {
     let fixtures = load_fixtures();
+    let mut matched: usize = 0;
     for fx in fixtures_of_kind(&fixtures, "dataloader") {
         if fx["subtest"].as_str() != Some("num_batches") {
             continue;
         }
+        matched += 1;
         let n = fx["n"].as_u64().unwrap() as usize;
         let batch_size = fx["batch_size"].as_u64().unwrap() as usize;
         let drop_last = fx["drop_last"].as_bool().unwrap_or(false);
@@ -221,6 +244,11 @@ fn dataloader_num_batches() {
              should be {expected_num_batches}"
         );
     }
+    assert!(
+        matched > 0,
+        "no fixtures matched kind=dataloader subtest=num_batches — \
+         did the fixture file get regenerated?"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -343,10 +371,12 @@ fn dataloader_iter_collated_no_fn_returns_err() {
 #[test]
 fn collate_stack_1d() {
     let fixtures = load_fixtures();
+    let mut matched: usize = 0;
     for fx in fixtures_of_kind(&fixtures, "collate") {
         if fx["subtest"].as_str() != Some("stack_1d") {
             continue;
         }
+        matched += 1;
         let rows: Vec<Vec<f32>> = fx["samples"]
             .as_array()
             .unwrap()
@@ -398,16 +428,23 @@ fn collate_stack_1d() {
             "stack_1d data mismatch"
         );
     }
+    assert!(
+        matched > 0,
+        "no fixtures matched kind=collate subtest=stack_1d — \
+         did the fixture file get regenerated?"
+    );
 }
 
 /// `default_collate` stacks 2-D tensors into a 3-D batch.
 #[test]
 fn collate_stack_2d() {
     let fixtures = load_fixtures();
+    let mut matched: usize = 0;
     for fx in fixtures_of_kind(&fixtures, "collate") {
         if fx["subtest"].as_str() != Some("stack_2d") {
             continue;
         }
+        matched += 1;
         let num_samples = fx["num_samples"].as_u64().unwrap() as usize;
         let input_shape: Vec<usize> = fx["input_shape"]
             .as_array()
@@ -460,6 +497,11 @@ fn collate_stack_2d() {
             "stack_2d data mismatch"
         );
     }
+    assert!(
+        matched > 0,
+        "no fixtures matched kind=collate subtest=stack_2d — \
+         did the fixture file get regenerated?"
+    );
 }
 
 /// `default_collate` returns `Err` for an empty input.
@@ -499,10 +541,12 @@ fn collate_pair_empty_returns_err() {
 #[test]
 fn normalize_two_channel() {
     let fixtures = load_fixtures();
+    let mut matched: usize = 0;
     for fx in fixtures_of_kind(&fixtures, "normalize") {
         if fx["subtest"].as_str() != Some("two_channel") {
             continue;
         }
+        matched += 1;
         let input_flat: Vec<f64> = fx["input"]
             .as_array()
             .unwrap()
@@ -551,16 +595,23 @@ fn normalize_two_channel() {
             );
         }
     }
+    assert!(
+        matched > 0,
+        "no fixtures matched kind=normalize subtest=two_channel — \
+         did the fixture file get regenerated?"
+    );
 }
 
 /// `Normalize` with mean=0 and std=1 is the identity.
 #[test]
 fn normalize_identity() {
     let fixtures = load_fixtures();
+    let mut matched: usize = 0;
     for fx in fixtures_of_kind(&fixtures, "normalize") {
         if fx["subtest"].as_str() != Some("identity") {
             continue;
         }
+        matched += 1;
         let input_flat: Vec<f64> = fx["input"]
             .as_array()
             .unwrap()
@@ -599,6 +650,11 @@ fn normalize_identity() {
             );
         }
     }
+    assert!(
+        matched > 0,
+        "no fixtures matched kind=normalize subtest=identity — \
+         did the fixture file get regenerated?"
+    );
 }
 
 /// `Normalize::new` returns `Err` when mean and std have different lengths.
