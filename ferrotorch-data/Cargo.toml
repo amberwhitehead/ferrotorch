@@ -16,6 +16,7 @@ readme = "README.md"
 ferrotorch-core = { workspace = true }
 ferrotorch-gpu = { workspace = true, optional = true }
 rayon = { workspace = true }
+crossbeam-channel = { workspace = true }
 num-traits = { workspace = true }
 # `image` is used by `transforms::ToTensor::apply` to convert
 # `image::DynamicImage` into a `[C, H, W]` `Tensor<f32>` with values in

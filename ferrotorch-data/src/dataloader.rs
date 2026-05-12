@@ -1,8 +1,9 @@
-use std::collections::{BinaryHeap, VecDeque};
-use std::sync::mpsc::{self, Receiver, SyncSender};
-use std::sync::{Arc, Mutex};
+use std::collections::BinaryHeap;
+use std::panic::{AssertUnwindSafe, catch_unwind};
+use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 
+use crossbeam_channel::{Receiver, Sender, bounded};
 use ferrotorch_core::{Device, FerrotorchError, FerrotorchResult};
 use rayon::prelude::*;
 
@@ -633,11 +634,21 @@ impl<D: Dataset> ExactSizeIterator for DataLoaderIter<'_, D> where D::Sample: Se
 /// A bounded channel of capacity `prefetch_factor` buffers batches ahead
 /// of the consumer. The background thread terminates when the channel is
 /// closed (either by exhausting the dataset or by dropping this iterator).
+///
+/// If the background producer panics, the panic is caught at the thread
+/// boundary and reported on the next call to [`PrefetchIter::next`] as
+/// `FerrotorchError::WorkerPanic`; the thread handle is joined on drop
+/// so panics are never silently swallowed.
 pub struct PrefetchIter<D: Dataset> {
-    receiver: Receiver<FerrotorchResult<Vec<D::Sample>>>,
+    /// The receiver is stored in an `Option` so [`Drop`] can drop it
+    /// *before* joining the producer thread. If the receiver stayed
+    /// alive across the join, a producer blocked on `Sender::send` for
+    /// a full channel would never observe a disconnect and the join
+    /// would deadlock the consumer.
+    receiver: Option<Receiver<FerrotorchResult<Vec<D::Sample>>>>,
     /// Handle to the background thread. Joined on drop to ensure clean
-    /// shutdown and propagate panics.
-    _handle: JoinHandle<()>,
+    /// shutdown and surface any uncaught panic.
+    handle: Option<JoinHandle<()>>,
     /// Total number of batches the background thread will produce.
     total_batches: usize,
     /// Number of batches consumed so far.
@@ -673,26 +684,38 @@ where
     ) -> Self {
         let total_batches = compute_batch_count(indices.len(), batch_size, drop_last);
 
-        // Bounded channel — at most `prefetch_factor` batches buffered.
-        let (tx, rx) =
-            mpsc::sync_channel::<FerrotorchResult<Vec<D::Sample>>>(prefetch_factor.max(1));
+        // Bounded crossbeam channel — at most `prefetch_factor` batches
+        // buffered. crossbeam_channel's `bounded` cleanly signals closure
+        // by dropping senders, so no sentinel value is needed.
+        let (tx, rx) = bounded::<FerrotorchResult<Vec<D::Sample>>>(prefetch_factor.max(1));
 
+        let tx_for_panic = tx.clone();
         let handle = thread::spawn(move || {
-            Self::producer_loop(
-                dataset,
-                indices,
-                batch_size,
-                drop_last,
-                num_workers,
-                transfer_fn,
-                pin_memory,
-                tx,
-            );
+            // Catch any unwinding panic from inside the producer and
+            // forward it to the consumer as a structured error, instead
+            // of letting the channel close silently.
+            let result = catch_unwind(AssertUnwindSafe(|| {
+                Self::producer_loop(
+                    dataset,
+                    indices,
+                    batch_size,
+                    drop_last,
+                    num_workers,
+                    transfer_fn,
+                    pin_memory,
+                    tx,
+                );
+            }));
+            if let Err(payload) = result {
+                let _ = tx_for_panic.send(Err(FerrotorchError::WorkerPanic {
+                    message: panic_payload_message(&*payload),
+                }));
+            }
         });
 
         PrefetchIter {
-            receiver: rx,
-            _handle: handle,
+            receiver: Some(rx),
+            handle: Some(handle),
             total_batches,
             consumed: 0,
         }
@@ -711,7 +734,7 @@ where
         num_workers: usize,
         transfer_fn: Option<TransferFn<D::Sample>>,
         pin_memory: bool,
-        tx: SyncSender<FerrotorchResult<Vec<D::Sample>>>,
+        tx: Sender<FerrotorchResult<Vec<D::Sample>>>,
     ) {
         let mut pos = 0;
         loop {
@@ -780,12 +803,18 @@ where
         if self.consumed >= self.total_batches {
             return None;
         }
-        match self.receiver.recv() {
+        // The receiver is only `None` after the consumer has been
+        // dropped — `Drop::drop` is the only path that takes it. While
+        // the iterator is in use it is always `Some`.
+        let rx = self.receiver.as_ref()?;
+        match rx.recv() {
             Ok(batch) => {
                 self.consumed += 1;
                 Some(batch)
             }
-            // Channel disconnected — producer finished or panicked.
+            // Channel disconnected — producer finished. If the producer
+            // panicked it would have forwarded a WorkerPanic error before
+            // the channel closed (see `PrefetchIter::new`).
             Err(_) => None,
         }
     }
@@ -797,6 +826,19 @@ where
 }
 
 impl<D: Dataset + 'static> ExactSizeIterator for PrefetchIter<D> where D::Sample: Send + 'static {}
+
+impl<D: Dataset> Drop for PrefetchIter<D> {
+    fn drop(&mut self) {
+        // Order matters: drop the receiver *first* so the producer's
+        // next `Sender::send` returns `Err(Disconnected)` and unblocks
+        // the producer thread. Then join the handle to observe any
+        // uncaught panic.
+        self.receiver = None;
+        if let Some(handle) = self.handle.take() {
+            let _ = handle.join();
+        }
+    }
+}
 
 // ---------------------------------------------------------------------------
 // MultiWorkerIter — cross-batch parallel loading
@@ -848,22 +890,29 @@ impl<S> Ord for SeqEntry<S> {
 }
 
 /// Cross-batch multi-worker iterator. `num_workers` threads each pull
-/// `WorkItem`s from a shared work queue, load the batch (applying
-/// device transfer if configured), and push a `WorkResult` back on a
-/// result channel. The iterator reorders results by sequence number
-/// so the consumer sees them in sampler order.
+/// `WorkItem`s from a shared work-queue channel, load the batch
+/// (applying device transfer if configured), and push a `WorkResult`
+/// back on a result channel. The iterator reorders results by
+/// sequence number so the consumer sees them in sampler order.
 ///
 /// Bounded parallelism: at most `in_flight` work items are dispatched
 /// at once so memory use stays predictable.
+///
+/// Worker-thread panics are caught at the thread boundary via
+/// [`std::panic::catch_unwind`] and forwarded over the result channel
+/// as `FerrotorchError::WorkerPanic { message }`, so a panicking
+/// `Dataset::get` (or transfer closure) is observable to the consumer
+/// instead of silently closing the channel.
 pub struct MultiWorkerIter<D: Dataset> {
-    result_rx: Receiver<WorkResult<D::Sample>>,
-    /// Work queue shared with the worker threads; the dispatcher
-    /// pushes onto the back and workers pop from the front under the
-    /// mutex. `None` as a sentinel tells workers to shut down.
-    work_queue: Arc<Mutex<VecDeque<Option<WorkItem>>>>,
-    /// Condvar signaled when new work is pushed or when the queue is
-    /// closed (so workers waiting on an empty queue can wake up).
-    work_cv: Arc<std::sync::Condvar>,
+    /// Result channel receiver. Wrapped in `Option` so [`Drop::drop`]
+    /// can release it *before* joining the worker threads — a worker
+    /// blocked on `Sender::send` to a full result channel would
+    /// otherwise never observe a disconnect and deadlock the join.
+    result_rx: Option<Receiver<WorkResult<D::Sample>>>,
+    /// Crossbeam channel sender for dispatching work items to the
+    /// worker pool. Dropping the sender (via `close_work_queue`) cleanly
+    /// signals all workers to exit; no sentinel value is required.
+    work_tx: Option<Sender<WorkItem>>,
     /// Next sequence number the dispatcher should hand out.
     next_dispatch_seq: usize,
     /// Next sequence number the consumer should yield.
@@ -881,14 +930,12 @@ pub struct MultiWorkerIter<D: Dataset> {
     batch_plans: Vec<Vec<usize>>,
     /// Worker thread handles. Joined on drop.
     worker_handles: Vec<JoinHandle<()>>,
-    /// Whether the work queue has been closed (sentinel sent).
-    closed: bool,
 }
 
-// Manual `Debug`: `Receiver`, `Mutex<VecDeque<Option<WorkItem>>>`,
-// `BinaryHeap<SeqEntry<D::Sample>>`, and `JoinHandle` either lack
-// `Debug` for arbitrary `D::Sample` or carry per-thread state that is
-// not useful in diagnostics. Print only the dispatcher bookkeeping.
+// Manual `Debug`: `Receiver`, `Sender`, `BinaryHeap<SeqEntry<D::Sample>>`,
+// and `JoinHandle` either lack `Debug` for arbitrary `D::Sample` or
+// carry per-thread state that is not useful in diagnostics. Print only
+// the dispatcher bookkeeping.
 impl<D: Dataset> std::fmt::Debug for MultiWorkerIter<D> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("MultiWorkerIter")
@@ -898,7 +945,7 @@ impl<D: Dataset> std::fmt::Debug for MultiWorkerIter<D> {
             .field("max_in_flight", &self.max_in_flight)
             .field("total_batches", &self.total_batches)
             .field("workers", &self.worker_handles.len())
-            .field("closed", &self.closed)
+            .field("closed", &self.work_tx.is_none())
             .finish()
     }
 }
@@ -933,94 +980,83 @@ where
             pos = end;
         }
 
-        let work_queue: Arc<Mutex<VecDeque<Option<WorkItem>>>> =
-            Arc::new(Mutex::new(VecDeque::new()));
-        let work_cv = Arc::new(std::sync::Condvar::new());
-        let (result_tx, result_rx) =
-            mpsc::sync_channel::<WorkResult<D::Sample>>(max_in_flight.max(1));
+        // Crossbeam channels: work queue is a bounded SPMC channel
+        // (dispatcher → workers), result queue is bounded MPSC
+        // (workers → consumer). Capacities default to `max_in_flight`
+        // so dispatch never outruns the in-flight bound.
+        let cap = max_in_flight.max(1);
+        let (work_tx, work_rx) = bounded::<WorkItem>(cap);
+        let (result_tx, result_rx) = bounded::<WorkResult<D::Sample>>(cap);
 
-        // Spawn worker threads.
+        // Spawn worker threads. Each worker holds a clone of the work
+        // receiver and the result sender; when the dispatcher drops
+        // its `work_tx`, `work_rx.recv()` returns `Err(disconnected)`
+        // and the worker exits — no sentinel value needed.
         let mut worker_handles = Vec::with_capacity(num_workers);
         for _ in 0..num_workers {
             let dataset_w = Arc::clone(&dataset);
-            let queue_w = Arc::clone(&work_queue);
-            let cv_w = Arc::clone(&work_cv);
-            let tx_w = result_tx.clone();
+            let work_rx_w = work_rx.clone();
+            let result_tx_w = result_tx.clone();
             let transfer_w = transfer_fn.clone();
             let handle = thread::spawn(move || {
-                worker_loop(dataset_w, queue_w, cv_w, tx_w, transfer_w, pin_memory);
+                worker_loop(dataset_w, work_rx_w, result_tx_w, transfer_w, pin_memory);
             });
             worker_handles.push(handle);
         }
-        // Drop our clone of the sender so the channel closes when all
-        // workers drop theirs.
+        // Drop our clones of the channel endpoints we don't need any
+        // more so the channels close as soon as the workers go down or
+        // the dispatcher goes down, respectively.
+        drop(work_rx);
         drop(result_tx);
 
         MultiWorkerIter {
-            result_rx,
-            work_queue,
-            work_cv,
+            result_rx: Some(result_rx),
+            work_tx: Some(work_tx),
             next_dispatch_seq: 0,
             next_yield_seq: 0,
             reorder_buf: BinaryHeap::new(),
             in_flight_count: 0,
-            max_in_flight: max_in_flight.max(1),
+            max_in_flight: cap,
             total_batches,
             batch_plans,
             worker_handles,
-            closed: false,
         }
     }
 
-    /// Push more work items to the queue until we hit max_in_flight or
-    /// exhaust the plan.
+    /// Push more work items onto the work channel until we hit
+    /// `max_in_flight` or exhaust the plan.
     ///
-    /// Returns `Err(LockPoisoned)` if the work queue mutex is poisoned
-    /// (i.e., a worker panicked while holding the lock).
-    fn refill_work_queue(&mut self) -> FerrotorchResult<()> {
+    /// If every worker has exited (channel disconnected) before the
+    /// plan is drained — typically the all-workers-panicked path —
+    /// the function returns silently; subsequent reads of the result
+    /// channel will surface the per-worker `WorkerPanic` errors that
+    /// the workers forwarded before exiting.
+    fn refill_work_queue(&mut self) {
+        let Some(tx) = self.work_tx.as_ref() else {
+            return;
+        };
         while self.in_flight_count < self.max_in_flight
             && self.next_dispatch_seq < self.total_batches
         {
             let seq = self.next_dispatch_seq;
             let indices = self.batch_plans[seq].clone();
-            {
-                let mut queue =
-                    self.work_queue
-                        .lock()
-                        .map_err(|e| FerrotorchError::LockPoisoned {
-                            message: format!("MultiWorkerIter work queue poisoned: {e}"),
-                        })?;
-                queue.push_back(Some(WorkItem { seq, indices }));
+            match tx.send(WorkItem { seq, indices }) {
+                Ok(()) => {
+                    self.next_dispatch_seq += 1;
+                    self.in_flight_count += 1;
+                }
+                Err(_) => return,
             }
-            self.work_cv.notify_one();
-            self.next_dispatch_seq += 1;
-            self.in_flight_count += 1;
         }
-        Ok(())
     }
 
-    /// Signal all workers to exit by pushing one `None` sentinel per
-    /// worker and notifying all waiters.
-    ///
-    /// Returns `Err(LockPoisoned)` if the work queue mutex is poisoned.
-    fn close_work_queue(&mut self) -> FerrotorchResult<()> {
-        if self.closed {
-            return Ok(());
-        }
-        {
-            let mut queue = self
-                .work_queue
-                .lock()
-                .map_err(|e| FerrotorchError::LockPoisoned {
-                    message: format!("MultiWorkerIter work queue poisoned on close: {e}"),
-                })?;
-            for _ in 0..self.worker_handles.len() {
-                queue.push_back(None);
-            }
-        }
-        self.work_cv.notify_all();
-        self.closed = true;
-        Ok(())
+    /// Signal all workers to exit by dropping the work-queue sender.
+    /// Idempotent across multiple calls.
+    fn close_work_queue(&mut self) {
+        // Dropping the only remaining `Sender` makes every worker's
+        // `Receiver::recv()` return `Err(Disconnected)`, which the
+        // worker loop treats as a clean shutdown signal.
+        self.work_tx = None;
     }
 }
 
@@ -1034,16 +1070,12 @@ where
         // Iteration done — close the work queue so workers exit and
         // return None. Idempotent across multiple next() calls.
         if self.next_yield_seq >= self.total_batches {
-            // Ignore close errors here: if the mutex is poisoned at this
-            // point the workers are already dead, so we just stop.
-            let _ = self.close_work_queue();
+            self.close_work_queue();
             return None;
         }
 
-        // Keep the workers busy; propagate lock-poison as an Err batch.
-        if let Err(e) = self.refill_work_queue() {
-            return Some(Err(e));
-        }
+        // Keep the workers busy.
+        self.refill_work_queue();
 
         // Serve out-of-order results from the reorder buffer first.
         loop {
@@ -1060,17 +1092,24 @@ where
                 }
             }
             // Not in buffer yet — receive the next completion.
-            match self.result_rx.recv() {
+            // The receiver is only `None` after `Drop::drop` has taken
+            // it; while the iterator is in use it is always `Some`.
+            let rx = self.result_rx.as_ref()?;
+            match rx.recv() {
                 Ok(WorkResult { seq, batch }) => {
                     self.in_flight_count -= 1;
                     self.reorder_buf.push(SeqEntry { seq, batch });
                     // Dispatch more work as soon as a slot frees up.
-                    if let Err(e) = self.refill_work_queue() {
-                        return Some(Err(e));
-                    }
+                    self.refill_work_queue();
                 }
                 Err(_) => {
-                    // Channel closed unexpectedly — no more batches.
+                    // Result channel disconnected — every worker has
+                    // exited. If a worker panicked it would have
+                    // forwarded a `WorkerPanic` error before exiting
+                    // (see `worker_loop`), so we'd have already drained
+                    // it above. Reaching here without exhausting the
+                    // plan means every worker is gone with no message
+                    // left to surface — stop iteration.
                     return None;
                 }
             }
@@ -1087,115 +1126,115 @@ impl<D: Dataset + 'static> ExactSizeIterator for MultiWorkerIter<D> where D::Sam
 
 impl<D: Dataset> Drop for MultiWorkerIter<D> {
     fn drop(&mut self) {
-        // Close the queue if the consumer dropped us before
-        // exhausting the iterator.
-        if !self.closed {
-            // If the mutex is poisoned (a worker panicked while holding
-            // it) we can't push sentinels, but notify_all() still wakes
-            // waiting threads so they can observe the broken state.
-            if let Ok(mut queue) = self.work_queue.lock() {
-                for _ in 0..self.worker_handles.len() {
-                    queue.push_back(None);
-                }
-            }
-            self.work_cv.notify_all();
-            self.closed = true;
-        }
-        // Join all workers. Panics propagate as thread-panic messages
-        // but are not re-raised — dropping an iterator should never
-        // panic.
+        // Shutdown order matters:
+        //   1. Drop the work sender so workers stop pulling new items
+        //      (`work_rx.recv` returns `Err(Disconnected)`).
+        //   2. Drop the result receiver so any worker still mid-flight
+        //      and blocked on `tx.send` to a full result channel sees
+        //      the disconnect and exits — otherwise the join below
+        //      would deadlock.
+        //   3. Join all worker handles. Panics inside the worker body
+        //      are caught by `worker_loop` and forwarded as
+        //      `WorkerPanic`; the bare `JoinHandle::join` here is the
+        //      belt-and-braces case for a panic on the wire-up path
+        //      itself. Dropping an iterator should never panic, so we
+        //      swallow the join error.
+        self.work_tx = None;
+        self.result_rx = None;
         for handle in self.worker_handles.drain(..) {
             let _ = handle.join();
         }
     }
 }
 
+/// Extract a printable message from a `catch_unwind` payload.
+///
+/// The payload is `Box<dyn Any + Send>`; conventional Rust panics carry
+/// either a `&'static str` (literal `panic!`) or a `String` (formatted
+/// `panic!`). Anything else is reported as an opaque marker so callers
+/// always get a non-empty message.
+///
+/// The `'static` bound is required by `Any::downcast_ref` — without it
+/// the cast back to the original payload type silently fails (the test
+/// `worker_panic_surfaces_as_error` enforces this).
+fn panic_payload_message(payload: &(dyn std::any::Any + Send + 'static)) -> String {
+    if let Some(s) = payload.downcast_ref::<&'static str>() {
+        (*s).to_string()
+    } else if let Some(s) = payload.downcast_ref::<String>() {
+        s.clone()
+    } else {
+        "<non-string panic payload>".to_string()
+    }
+}
+
 /// The worker loop executed by every spawned thread. Pulls one
-/// `WorkItem` at a time from the shared queue, loads the batch,
+/// `WorkItem` at a time from the shared work channel, loads the batch,
 /// applies the optional device transfer, and sends the `WorkResult`
-/// back to the main thread. Exits when the queue yields a `None`
-/// sentinel or when the result channel is closed.
+/// back to the main thread. Exits when the work channel is
+/// disconnected (dispatcher dropped its sender) or when the result
+/// channel is closed.
+///
+/// Per-item work (`Dataset::get` and the transfer closure) is wrapped
+/// in [`std::panic::catch_unwind`]; on panic, a `WorkerPanic` result is
+/// forwarded to the consumer instead of letting the thread unwind and
+/// silently close the channel.
 fn worker_loop<D: Dataset + 'static>(
     dataset: Arc<D>,
-    queue: Arc<Mutex<VecDeque<Option<WorkItem>>>>,
-    cv: Arc<std::sync::Condvar>,
-    tx: SyncSender<WorkResult<D::Sample>>,
+    work_rx: Receiver<WorkItem>,
+    tx: Sender<WorkResult<D::Sample>>,
     transfer_fn: Option<TransferFn<D::Sample>>,
     pin_memory: bool,
 ) where
     D::Sample: Send + 'static,
 {
     loop {
-        // Pop one work item or shutdown sentinel.
-        let item_opt: Option<WorkItem> = {
-            // If the mutex is poisoned, send a LockPoisoned error back
-            // to the dispatcher and exit cleanly rather than panicking.
-            let mut guard = match queue.lock() {
-                Ok(g) => g,
-                Err(e) => {
-                    let _ = tx.send(WorkResult {
-                        seq: usize::MAX,
-                        batch: Err(FerrotorchError::LockPoisoned {
-                            message: format!("worker queue mutex poisoned: {e}"),
-                        }),
-                    });
-                    return;
-                }
-            };
-            loop {
-                if let Some(front) = guard.pop_front() {
-                    break front;
-                }
-                // If the condvar wait returns a poisoned guard, extract
-                // it anyway — the poison is on the mutex, and we've
-                // already handled the lock-acquire case above; here the
-                // guard came from a prior successful lock so we can
-                // continue with the (possibly stale) state.
-                guard = match cv.wait(guard) {
-                    Ok(g) => g,
-                    Err(poisoned) => poisoned.into_inner(),
-                };
-            }
+        let item = match work_rx.recv() {
+            Ok(it) => it,
+            Err(_) => return, // dispatcher dropped its sender — shutdown
         };
 
-        let item = match item_opt {
-            Some(it) => it,
-            None => return, // shutdown
-        };
+        let seq = item.seq;
+        let indices = item.indices;
+        let dataset = Arc::clone(&dataset);
+        let transfer_fn = transfer_fn.clone();
 
-        // Load the batch sequentially. Cross-batch workers already
-        // give us batch-level parallelism, so intra-batch rayon
-        // parallelism is unnecessary here (and counter-productive if
-        // num_workers exceeds physical cores).
-        let mut batch = Vec::with_capacity(item.indices.len());
-        let mut err = None;
-        for idx in item.indices {
-            match dataset.get(idx) {
-                Ok(sample) => batch.push(sample),
-                Err(e) => {
-                    err = Some(e);
-                    break;
+        // Catch any unwinding panic in the dataset getter or transfer
+        // closure and forward it as a structured error.
+        let payload = catch_unwind(AssertUnwindSafe(|| {
+            // Load the batch sequentially. Cross-batch workers already
+            // give us batch-level parallelism, so intra-batch rayon
+            // parallelism is unnecessary here (and counter-productive
+            // if num_workers exceeds physical cores).
+            let mut batch = Vec::with_capacity(indices.len());
+            let mut err = None;
+            for idx in indices {
+                match dataset.get(idx) {
+                    Ok(sample) => batch.push(sample),
+                    Err(e) => {
+                        err = Some(e);
+                        break;
+                    }
                 }
             }
-        }
+            match err {
+                Some(e) => Err(e),
+                None => match &transfer_fn {
+                    Some(f) => f(batch, pin_memory),
+                    None => Ok(batch),
+                },
+            }
+        }));
 
-        let result: FerrotorchResult<Vec<D::Sample>> = match err {
-            Some(e) => Err(e),
-            None => match &transfer_fn {
-                Some(f) => f(batch, pin_memory),
-                None => Ok(batch),
-            },
+        let result: FerrotorchResult<Vec<D::Sample>> = match payload {
+            Ok(r) => r,
+            Err(p) => Err(FerrotorchError::WorkerPanic {
+                message: panic_payload_message(&*p),
+            }),
         };
 
         // Send result back. If the receiver dropped, the consumer has
         // torn down the iterator — exit quietly.
-        if tx
-            .send(WorkResult {
-                seq: item.seq,
-                batch: result,
-            })
-            .is_err()
-        {
+        if tx.send(WorkResult { seq, batch: result }).is_err() {
             return;
         }
     }

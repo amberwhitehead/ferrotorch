@@ -2540,6 +2540,7 @@ name = "ferrotorch-data"
 version = "0.5.1"
 dependencies = [
  "arrow",
+ "crossbeam-channel",
  "ferray-numpy-interop",
  "ferrotorch-core",
  "ferrotorch-gpu",

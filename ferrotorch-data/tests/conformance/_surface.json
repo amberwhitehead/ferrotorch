@@ -108,6 +108,7 @@
     { "path": "ferrotorch_data::transforms::RandomHorizontalFlip", "kind": "struct", "signature": "# [derive (Debug , Clone , Copy)] pub struct RandomHorizontalFlip< T : Float >" },
     { "path": "ferrotorch_data::transforms::RandomHorizontalFlip <T>::new", "kind": "method", "signature": "fn new (p : f64) -> FerrotorchResult < Self >" },
     { "path": "ferrotorch_data::transforms::ToTensor", "kind": "struct", "signature": "# [derive (Debug , Clone , Copy , Default)] pub struct ToTensor" },
+    { "path": "ferrotorch_data::transforms::ToTensor::apply", "kind": "method", "signature": "fn apply (& self , image : & image :: DynamicImage) -> FerrotorchResult < Tensor < f32 > >" },
     { "path": "ferrotorch_data::transforms::Transform", "kind": "trait", "signature": "pub trait Transform< T : Float >" },
     { "path": "ferrotorch_data::transforms::manual_seed", "kind": "fn", "signature": "fn manual_seed (seed : u64)" }
   ]

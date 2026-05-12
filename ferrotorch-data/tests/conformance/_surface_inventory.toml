@@ -3,7 +3,7 @@
 
 [meta]
 crate = "ferrotorch_data"
-item_count = 108
+item_count = 109
 
 [[item]]
 path = "ferrotorch_data::BatchIter"
@@ -534,6 +534,11 @@ signature = "fn new (p : f64) -> FerrotorchResult < Self >"
 path = "ferrotorch_data::transforms::ToTensor"
 kind = "struct"
 signature = "# [derive (Debug , Clone , Copy , Default)] pub struct ToTensor"
+
+[[item]]
+path = "ferrotorch_data::transforms::ToTensor::apply"
+kind = "method"
+signature = "fn apply (& self , image : & image :: DynamicImage) -> FerrotorchResult < Tensor < f32 > >"
 
 [[item]]
 path = "ferrotorch_data::transforms::Transform"

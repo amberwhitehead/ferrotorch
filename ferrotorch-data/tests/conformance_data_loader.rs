@@ -849,3 +849,71 @@ fn transform_trait_object_safe() {
     let out = t.apply(input).unwrap();
     assert_eq!(out.data_vec().unwrap(), data);
 }
+
+// ---------------------------------------------------------------------------
+// MultiWorkerIter — worker panic surfacing (#1121)
+// ---------------------------------------------------------------------------
+
+/// A dataset whose `get(idx)` panics on a designated index. Used to
+/// verify that a panicking `Dataset::get` running inside a
+/// `WorkerMode::CrossBatch` worker thread is surfaced to the consumer
+/// as `FerrotorchError::WorkerPanic` instead of silently terminating
+/// iteration (the pre-#1121 behaviour was "channel closes, `next()`
+/// returns `None`" — a panic was indistinguishable from a clean exit).
+struct PanickingDataset {
+    n: usize,
+    panic_at: usize,
+}
+
+impl ferrotorch_data::Dataset for PanickingDataset {
+    type Sample = i32;
+
+    fn len(&self) -> usize {
+        self.n
+    }
+
+    fn get(&self, index: usize) -> ferrotorch_core::FerrotorchResult<Self::Sample> {
+        if index == self.panic_at {
+            panic!("synthetic worker panic at index {index}");
+        }
+        Ok(index as i32)
+    }
+}
+
+/// `WorkerMode::CrossBatch` with a panicking dataset surfaces the panic
+/// as `FerrotorchError::WorkerPanic { message }` instead of dropping
+/// the channel silently. The first three batches (indices 0..3 across
+/// `batch_size=1`) yield `Ok`; the fourth (index 3) yields the panic
+/// error carrying the synthetic panic message.
+#[test]
+fn worker_panic_surfaces_as_error() {
+    let ds = Arc::new(PanickingDataset { n: 8, panic_at: 3 });
+    // Single worker, single in-flight slot → deterministic completion
+    // order; batch_size=1 → seq i loads index i, so the panic lands on
+    // batch 3 and earlier batches reach the consumer Ok.
+    let loader = DataLoader::new(ds, 1)
+        .unwrap()
+        .num_workers(1)
+        .worker_mode(WorkerMode::CrossBatch)
+        .prefetch_factor(1);
+
+    let mut it = loader.iter(0);
+
+    // First three batches: indices 0, 1, 2 — all `Ok`.
+    for expected in 0i32..3 {
+        let batch = it.next().expect("batch present").expect("batch ok");
+        assert_eq!(batch, vec![expected], "batch {expected} should be Ok");
+    }
+
+    // Fourth batch: index 3 — worker panics, error surfaces here.
+    let next = it.next().expect("a fourth result must be observed");
+    match next {
+        Err(ferrotorch_core::FerrotorchError::WorkerPanic { message }) => {
+            assert!(
+                message.contains("synthetic worker panic at index 3"),
+                "WorkerPanic message should carry the synthetic panic payload, got: {message}",
+            );
+        }
+        other => panic!("expected FerrotorchError::WorkerPanic, got: {other:?}"),
+    }
+}

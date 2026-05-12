@@ -92,6 +92,7 @@ cubecl-hip = "0.10.0-pre.2"
 # Core dependencies
 thiserror = "2.0"
 rayon = "1.11"
+crossbeam-channel = "0.5"
 half = { version = "2.4", features = ["num-traits", "bytemuck"] }
 num-traits = "0.2"
 bytemuck = "1"
