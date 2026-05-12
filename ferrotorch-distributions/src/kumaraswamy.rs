@@ -10,6 +10,7 @@ use ferrotorch_core::storage::TensorStorage;
 use ferrotorch_core::tensor::Tensor;
 
 use crate::Distribution;
+use crate::special_fns::{digamma_scalar, lgamma_scalar};
 
 /// Kumaraswamy distribution parameterized by concentration parameters `a` > 0
 /// and `b` > 0.
@@ -137,9 +138,9 @@ impl<T: Float> Distribution<T> for Kumaraswamy<T> {
 
         let mut out = Vec::with_capacity(a.len());
         for i in 0..a.len() {
-            let bf = num_traits::ToPrimitive::to_f64(&b[i]).unwrap();
-            // digamma(b+1) via shift-then-asymptotic expansion.
-            let digamma_b1 = T::from(digamma_f64(bf + 1.0)).unwrap();
+            // digamma(b+1) via canonical shifted-asymptotic expansion in
+            // special_fns. Valid for all b > 0 (integer or fractional).
+            let digamma_b1 = digamma_scalar(b[i] + one);
             let h = (one - one / a[i]) * (euler + digamma_b1) + (one - one / b[i])
                 - a[i].ln()
                 - b[i].ln();
@@ -253,31 +254,6 @@ impl<T: Float> Distribution<T> for Kumaraswamy<T> {
         }
         Tensor::from_storage(TensorStorage::cpu(out), self.a.shape().to_vec(), false)
     }
-}
-
-/// Digamma (psi) function for f64 via asymptotic expansion with argument shift.
-/// Valid for all x > 0 (integer or fractional).
-fn digamma_f64(mut x: f64) -> f64 {
-    let mut result = 0.0;
-    // Shift argument up until x >= 6 for asymptotic accuracy.
-    while x < 6.0 {
-        result -= 1.0 / x;
-        x += 1.0;
-    }
-    // Asymptotic: psi(x) ~ ln(x) - 1/(2x) - 1/(12x^2) + 1/(120x^4) - 1/(252x^6)
-    let x2 = x * x;
-    result += x.ln() - 0.5 / x - 1.0 / (12.0 * x2) + 1.0 / (120.0 * x2 * x2)
-        - 1.0 / (252.0 * x2 * x2 * x2);
-    result
-}
-
-/// Scalar lgamma via the existing tensor-shaped `special::lgamma` op.
-/// Avoids reimplementing the Lanczos series for a single scalar evaluation.
-fn lgamma_scalar<T: Float>(x: T) -> T {
-    let t = Tensor::from_storage(TensorStorage::cpu(vec![x]), vec![1], false)
-        .expect("lgamma_scalar: scalar tensor build");
-    let r = ferrotorch_core::special::lgamma(&t).expect("lgamma_scalar: lgamma op");
-    r.data().expect("lgamma_scalar: lgamma data")[0]
 }
 
 #[cfg(test)]

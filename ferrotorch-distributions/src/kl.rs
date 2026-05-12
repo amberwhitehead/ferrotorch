@@ -12,7 +12,7 @@ use ferrotorch_core::error::{FerrotorchError, FerrotorchResult};
 use ferrotorch_core::storage::TensorStorage;
 use ferrotorch_core::tensor::Tensor;
 
-use crate::special_fns::digamma_scalar;
+use crate::special_fns::{digamma_scalar, lgamma_scalar};
 use crate::{
     Bernoulli, Categorical, Distribution, Exponential, Gamma, Laplace, Normal, Poisson, Uniform,
 };
@@ -480,42 +480,9 @@ fn kl_gamma_scalar<T: Float>(pa: T, pb: T, qa: T, qb: T) -> T {
     // (pa - qa) * digamma(pa) - lnGamma(pa) + lnGamma(qa)
     //   + qa * (ln pb - ln qb) + pa * (qb - pb) / pb
     let dig_pa = digamma_scalar(pa);
-    let ln_gamma_pa = ln_gamma_scalar(pa);
-    let ln_gamma_qa = ln_gamma_scalar(qa);
+    let ln_gamma_pa = lgamma_scalar(pa);
+    let ln_gamma_qa = lgamma_scalar(qa);
     (pa - qa) * dig_pa - ln_gamma_pa + ln_gamma_qa + qa * (pb.ln() - qb.ln()) + pa * (qb - pb) / pb
-}
-
-/// Lanczos approximation for log Γ(x) — uses the f64 `libm`-style
-/// series. The absolute error is ~1e-12 for x > 0.5, which is fine
-/// for KL divergence computations that are themselves lossy.
-fn ln_gamma_scalar<T: Float>(x: T) -> T {
-    let x_f64 = x.to_f64().unwrap_or(f64::NAN);
-    let result_f64 = ln_gamma_f64(x_f64);
-    T::from(result_f64).unwrap()
-}
-
-/// log Γ(x) via the Stirling-series recurrence used by
-/// num-traits / libm. Valid for x > 0. For x <= 0 the reflection
-/// formula would apply, but the Gamma distribution constrains
-/// shape > 0 anyway.
-fn ln_gamma_f64(x: f64) -> f64 {
-    // Stirling's approximation with Kemp coefficients: accurate to
-    // ~1e-12 across x > 0.5. Follows the same structure used by
-    // `special_fns::lgamma_scalar` in ferrotorch.
-    if x <= 0.0 {
-        return f64::INFINITY;
-    }
-    // Shift to x >= 5 so Stirling converges, then subtract log terms.
-    let mut x = x;
-    let mut acc = 0.0;
-    while x < 5.0 {
-        acc -= x.ln();
-        x += 1.0;
-    }
-    // Asymptotic Stirling series.
-    let inv = 1.0 / (x * x);
-    let sum = (1.0 / 12.0) - inv * ((1.0 / 360.0) - inv * (1.0 / 1260.0));
-    acc + (x - 0.5) * x.ln() - x + 0.5 * (2.0 * std::f64::consts::PI).ln() + sum / x
 }
 
 /// KL(Poisson(λ1) || Poisson(λ2))
@@ -916,9 +883,10 @@ mod tests {
         let p = Gamma::new(scalar(2.0f32).unwrap(), scalar(3.0f32).unwrap()).unwrap();
         let q = Gamma::new(scalar(2.0f32).unwrap(), scalar(3.0f32).unwrap()).unwrap();
         let kl = kl_divergence(&p, &q).unwrap();
-        // Small tolerance because Stirling approximation has some error.
+        // Lanczos lgamma is accurate to ~1e-12 f64; f32 round-trip dominates
+        // the error budget here.
         assert!(
-            kl.item().unwrap().abs() < 1e-3,
+            kl.item().unwrap().abs() < 1e-6,
             "KL(Gamma same) should be near 0, got {}",
             kl.item().unwrap()
         );
@@ -933,7 +901,7 @@ mod tests {
         let kl = kl_divergence(&p, &q).unwrap();
         let expected = 2.0_f32.ln() - 0.5;
         assert!(
-            (kl.item().unwrap() - expected).abs() < 2e-3,
+            (kl.item().unwrap() - expected).abs() < 1e-6,
             "expected {expected}, got {}",
             kl.item().unwrap()
         );
@@ -986,7 +954,7 @@ mod tests {
         let kl = kl_divergence(&p, &q).unwrap();
         let expected = 2.0_f32.ln() - 0.5;
         assert!(
-            (kl.item().unwrap() - expected).abs() < 2e-3,
+            (kl.item().unwrap() - expected).abs() < 1e-6,
             "expected {expected}, got {}",
             kl.item().unwrap()
         );
@@ -999,7 +967,7 @@ mod tests {
         let q = Gamma::new(scalar(1.0f32).unwrap(), scalar(1.0f32).unwrap()).unwrap();
         let kl = kl_divergence(&p, &q).unwrap();
         assert!(
-            kl.item().unwrap().abs() < 1e-3,
+            kl.item().unwrap().abs() < 1e-6,
             "KL(Exp(1)||Gamma(1,1)) should be 0, got {}",
             kl.item().unwrap()
         );
@@ -1010,11 +978,13 @@ mod tests {
     #[test]
     fn test_ln_gamma_known_values() {
         // lnΓ(1) = 0, lnΓ(2) = 0, lnΓ(3) = ln(2) ≈ 0.6931,
-        // lnΓ(4) = ln(6) ≈ 1.7918, lnΓ(5) = ln(24) ≈ 3.1781
-        assert!((ln_gamma_f64(1.0) - 0.0).abs() < 1e-8);
-        assert!((ln_gamma_f64(2.0) - 0.0).abs() < 1e-8);
-        assert!((ln_gamma_f64(3.0) - 2.0f64.ln()).abs() < 1e-6);
-        assert!((ln_gamma_f64(4.0) - 6.0f64.ln()).abs() < 1e-6);
-        assert!((ln_gamma_f64(5.0) - 24.0f64.ln()).abs() < 1e-6);
+        // lnΓ(4) = ln(6) ≈ 1.7918, lnΓ(5) = ln(24) ≈ 3.1781.
+        // After consolidation onto Lanczos in special_fns, error is < 1e-12
+        // for x > 0.5 — tighten tolerance accordingly.
+        assert!((lgamma_scalar(1.0f64) - 0.0).abs() < 1e-12);
+        assert!((lgamma_scalar(2.0f64) - 0.0).abs() < 1e-12);
+        assert!((lgamma_scalar(3.0f64) - 2.0f64.ln()).abs() < 1e-12);
+        assert!((lgamma_scalar(4.0f64) - 6.0f64.ln()).abs() < 1e-12);
+        assert!((lgamma_scalar(5.0f64) - 24.0f64.ln()).abs() < 1e-12);
     }
 }

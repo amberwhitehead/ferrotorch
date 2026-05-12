@@ -10,6 +10,7 @@ use ferrotorch_core::storage::TensorStorage;
 use ferrotorch_core::tensor::Tensor;
 
 use crate::Distribution;
+use crate::special_fns::lgamma_scalar;
 
 /// Weibull distribution parameterized by `scale` (lambda) and
 /// `concentration` (k, also called shape parameter).
@@ -243,19 +244,6 @@ impl<T: Float> Distribution<T> for Weibull<T> {
         }
         Tensor::from_storage(TensorStorage::cpu(out), self.scale.shape().to_vec(), false)
     }
-}
-
-/// Scalar lgamma — Lanczos approximation. Mirrors the impl in
-/// `ferrotorch_core::special::lgamma_scalar` but kept inline here so this
-/// crate doesn't need an extra dependency hop just for property closures.
-fn lgamma_scalar<T: Float>(x: T) -> T {
-    // Use ferrotorch_core's special-fn surface via a tiny Tensor wrapper.
-    // This is the simplest path that stays correct and avoids reimplementing
-    // Lanczos here.
-    let t = Tensor::from_storage(TensorStorage::cpu(vec![x]), vec![1], false)
-        .expect("lgamma_scalar: scalar tensor build");
-    let r = ferrotorch_core::special::lgamma(&t).expect("lgamma_scalar: lgamma op");
-    r.data().expect("lgamma_scalar: lgamma data")[0]
 }
 
 #[cfg(test)]

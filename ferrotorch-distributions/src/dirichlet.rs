@@ -36,6 +36,7 @@ use ferrotorch_core::storage::TensorStorage;
 use ferrotorch_core::tensor::{GradFn, Tensor};
 
 use crate::Distribution;
+use crate::special_fns::digamma_scalar;
 
 /// Dirichlet distribution parameterized by `concentration` (alpha).
 ///
@@ -459,25 +460,6 @@ impl<T: Float> GradFn<T> for DirichletRsampleBackward<T> {
     fn name(&self) -> &'static str {
         "DirichletRsampleBackward"
     }
-}
-
-/// Scalar digamma used inside the backward kernel only. Matches the f64
-/// digamma in `ferrotorch_core::special` to f32/f64 precision.
-fn digamma_scalar<T: Float>(x: T) -> T {
-    let x64 = x.to_f64().unwrap();
-    T::from(digamma_f64(x64)).unwrap()
-}
-
-fn digamma_f64(mut x: f64) -> f64 {
-    let mut result = 0.0;
-    while x < 6.0 {
-        result -= 1.0 / x;
-        x += 1.0;
-    }
-    let x2 = x * x;
-    result += x.ln() - 0.5 / x - 1.0 / (12.0 * x2) + 1.0 / (120.0 * x2 * x2)
-        - 1.0 / (252.0 * x2 * x2 * x2);
-    result
 }
 
 // ---------------------------------------------------------------------------

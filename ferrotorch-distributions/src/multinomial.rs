@@ -16,6 +16,7 @@ use ferrotorch_core::storage::TensorStorage;
 use ferrotorch_core::tensor::Tensor;
 
 use crate::Distribution;
+use crate::special_fns::lgamma_scalar;
 
 /// Multinomial distribution parameterized by `total_count` (number of trials)
 /// and `probs` (category probabilities).
@@ -200,13 +201,13 @@ impl<T: Float> Distribution<T> for Multinomial<T> {
             let n_total: T = (0..k).map(|j| val_data[s * k + j]).fold(zero, |a, b| a + b);
 
             // lgamma(n+1) - sum(lgamma(x_k+1)) + sum(x_k * log(p_k))
-            let log_factorial_n = lgamma_t(n_total + one);
+            let log_factorial_n = lgamma_scalar(n_total + one);
             let mut log_factorial_xs = zero;
             let mut log_powers = zero;
 
             for j in 0..k {
                 let x_j = val_data[s * k + j];
-                log_factorial_xs += lgamma_t(x_j + one);
+                log_factorial_xs += lgamma_scalar(x_j + one);
                 if x_j > zero {
                     log_powers += x_j * self.log_probs[j];
                 }
@@ -301,14 +302,14 @@ impl<T: Float> Distribution<T> for Multinomial<T> {
         // Approximate multinomial entropy via:
         // H = n * H_cat + 0.5 * (K-1) * ln(2*pi*n/e) + ... (normal approx)
         // Simpler: H ≈ n * H_cat (good for moderate-large n)
-        let h = n_t * cat_entropy - lgamma_t(n_t + one);
+        let h = n_t * cat_entropy - lgamma_scalar(n_t + one);
 
         // Add the expected sum of lgamma(x_k + 1) term (approximation)
         // For each category: E[lgamma(X_k + 1)] ≈ lgamma(n*p_k + 1) for large n
         let mut correction = zero;
         for &pj in &probs_data {
             let p = (pj / total).max(eps);
-            correction += lgamma_t(n_t * p + one);
+            correction += lgamma_scalar(n_t * p + one);
         }
         let h = h + correction;
 
@@ -319,47 +320,6 @@ impl<T: Float> Distribution<T> for Multinomial<T> {
             Ok(out)
         }
     }
-}
-
-// ---------------------------------------------------------------------------
-// Scalar special functions (shared with dirichlet)
-// ---------------------------------------------------------------------------
-
-fn lgamma_t<T: Float>(x: T) -> T {
-    let x64 = x.to_f64().unwrap();
-    T::from(lgamma_f64(x64)).unwrap()
-}
-
-fn lgamma_f64(x: f64) -> f64 {
-    if x <= 0.0 && x == x.floor() {
-        return f64::INFINITY;
-    }
-
-    let coeffs: [f64; 6] = [
-        76.180_091_729_471_46,
-        -86.505_320_329_416_77,
-        24.014_098_240_830_91,
-        -1.231_739_572_450_155,
-        0.001_208_650_973_866_179,
-        -5.395_239_384_953_e-6,
-    ];
-
-    if x < 0.5 {
-        let sin_pi_x = (std::f64::consts::PI * x).sin();
-        if sin_pi_x.abs() < 1e-30 {
-            return f64::INFINITY;
-        }
-        return std::f64::consts::PI.ln() - sin_pi_x.abs().ln() - lgamma_f64(1.0 - x);
-    }
-
-    let x_adj = x - 1.0;
-    let mut ser = 1.000_000_000_190_015;
-    for (i, &c) in coeffs.iter().enumerate() {
-        ser += c / (x_adj + 1.0 + i as f64);
-    }
-
-    let tmp = x_adj + 5.5;
-    (2.0 * std::f64::consts::PI).sqrt().ln() + tmp.ln() * (x_adj + 0.5) - tmp + ser.ln()
 }
 
 // ---------------------------------------------------------------------------
