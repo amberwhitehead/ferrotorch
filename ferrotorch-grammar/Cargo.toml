@@ -1,0 +1,31 @@
+[package]
+name = "ferrotorch-grammar"
+description = "Constrained-decoding grammar processors (JSON-schema → token-allow masks) for ferrotorch"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[features]
+default = []
+cuda = [
+    "dep:ferrotorch-cubecl",
+    "dep:cubecl",
+    "dep:cubecl-cuda",
+    "ferrotorch-cubecl/cuda",
+]
+
+[dependencies]
+ferrotorch-cubecl = { workspace = true, optional = true }
+cubecl = { workspace = true, optional = true }
+cubecl-cuda = { workspace = true, optional = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }

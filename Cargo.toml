@@ -20,6 +20,7 @@ members = [
     "ferrotorch-hub",
     "ferrotorch-tokenize",
     "ferrotorch-llama",
+    "ferrotorch-grammar",
     "ferrotorch-ml",
     "ferrotorch-jit-script",
     "ferrotorch-mps",
@@ -61,6 +62,7 @@ ferrotorch-profiler = { version = "0.5.1", path = "ferrotorch-profiler" }
 ferrotorch-hub = { version = "0.5.1", path = "ferrotorch-hub" }
 ferrotorch-tokenize = { version = "0.5.1", path = "ferrotorch-tokenize" }
 ferrotorch-llama = { version = "0.5.1", path = "ferrotorch-llama" }
+ferrotorch-grammar = { version = "0.5.1", path = "ferrotorch-grammar" }
 ferrotorch-ml = { version = "0.5.1", path = "ferrotorch-ml" }
 ferrotorch-jit-script = { version = "0.5.1", path = "ferrotorch-jit-script" }
 ferrotorch-mps = { version = "0.5.1", path = "ferrotorch-mps" }

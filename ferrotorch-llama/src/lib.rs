@@ -147,7 +147,13 @@ pub mod generation;
 pub mod gguf_remap;
 #[cfg(feature = "cuda")]
 pub mod gpu;
-pub mod grammar;
+/// Re-export of [`ferrotorch_grammar`] for backward compatibility.
+///
+/// The constrained-decoding grammar processors used to live in
+/// `ferrotorch_llama::grammar`; in v0.5.1 they were extracted into a
+/// standalone [`ferrotorch_grammar`] crate. This alias keeps the old
+/// path working so existing callers compile unchanged.
+pub use ferrotorch_grammar as grammar;
 pub mod layer;
 pub mod mlp;
 pub mod model;

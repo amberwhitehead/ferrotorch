@@ -860,7 +860,7 @@ fn run_dfa_on_gpu<R: Runtime>(
 #[cfg(all(test, feature = "cuda"))]
 mod cuda_tests {
     use super::*;
-    use crate::grammar::schema::Schema;
+    use crate::schema::Schema;
     use cubecl_cuda::{CudaDevice, CudaRuntime};
     use serde_json::json;
 
@@ -1623,7 +1623,7 @@ mod cuda_tests {
 
         // Sanity: directly verify the underlying API too.
         assert!(matches!(
-            crate::grammar::schema::Schema::from_json_schema(&json!({
+            crate::schema::Schema::from_json_schema(&json!({
                 "type": "object",
                 "properties": {"v": {"type": "boolean"}},
                 "required": ["v"]

@@ -28,10 +28,13 @@
 //! at the harness level and the GPU smoke test at the runtime
 //! CUDA-availability check.
 
+#[cfg(feature = "cuda")]
 use std::path::PathBuf;
+#[cfg(feature = "cuda")]
 use std::process::Command;
 
 /// Resolve the workspace root from this crate's `CARGO_MANIFEST_DIR`.
+#[cfg(feature = "cuda")]
 fn workspace_root() -> PathBuf {
     let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     manifest
