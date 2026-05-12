@@ -3427,7 +3427,6 @@ mod gpu {
             ("tril", tril(&cuda_2d, 0).map(drop)),
             ("diag", diag(&cuda_2d, 0).map(drop)),
             ("diagflat", diagflat(&cuda_2d, 0).map(drop)),
-            ("roll", roll(&cuda_2d, 1, 0).map(drop)),
         ] {
             match r {
                 Err(FerrotorchError::NotImplementedOnCuda { op: _ }) => {}
@@ -3480,6 +3479,115 @@ mod gpu {
         match topk(&cuda_a, 2, true) {
             Err(FerrotorchError::NotImplementedOnCuda { op: _ }) => {}
             other => panic!("expected NotImplementedOnCuda for topk, got {other:?}"),
+        }
+    }
+
+    // Discriminating test for #1097: roll<f32> on CUDA must match the CPU
+    // path bit-exact (pure gather; no float drift), and the backward via
+    // RollBackward must match the CPU backward bit-exact on CUDA.
+    #[test]
+    fn gpu_roll_matches_cpu_forward_and_backward() {
+        use ferrotorch_core::autograd::no_grad::no_grad;
+        ensure_cuda_backend();
+
+        // ---- Forward: a 3-D case that exercises all three of
+        // (outer > 1, dim_size > 1, inner > 1) so the kernel's index math
+        // is genuinely covered.
+        let shape = vec![2usize, 4, 3];
+        let n: usize = shape.iter().product();
+        let data: Vec<f64> = (0..n).map(|i| (i as f64) * 0.5 - 1.0).collect();
+
+        for &(shifts, dim) in &[(1_i64, 1_usize), (-1, 0), (3, 1), (-2, 2), (0, 0), (4, 1)] {
+            no_grad(|| {
+                let cpu_in = make_cpu_f32(&data, &shape, false);
+                let cuda_in = cpu_in.to(Device::Cuda(0)).expect("upload");
+
+                let cpu_out = roll(&cpu_in, shifts, dim).expect("cpu roll");
+                let cuda_out = roll(&cuda_in, shifts, dim).expect("gpu roll");
+
+                // The CUDA output must land back on CUDA (no silent
+                // CPU-fallback — `rust-gpu-discipline` §3).
+                assert!(
+                    cuda_out.is_cuda(),
+                    "roll on CUDA tensor must produce a CUDA tensor (shifts={shifts}, dim={dim})"
+                );
+
+                let cpu_v = read_back_f32(&cpu_out);
+                let gpu_v = read_back_f32(&cuda_out);
+                assert_eq!(
+                    cpu_v.len(),
+                    gpu_v.len(),
+                    "length mismatch (shifts={shifts}, dim={dim})"
+                );
+                for (i, (&c, &g)) in cpu_v.iter().zip(gpu_v.iter()).enumerate() {
+                    // Pure gather: must be bit-exact in f32.
+                    assert_eq!(
+                        c, g,
+                        "roll mismatch at i={i} (shifts={shifts}, dim={dim}): cpu={c}, gpu={g}"
+                    );
+                }
+            });
+        }
+
+        // ---- Backward: drive RollBackward on both CPU and CUDA with a
+        // hand-built grad_output and compare the input grads bit-exactly.
+        // Using `requires_grad=true` so the forward attaches the grad_fn,
+        // then invoking the grad_fn directly with the grad_output on the
+        // right device exercises the new GPU backward path.
+        let bshape = vec![2usize, 5];
+        let bn: usize = bshape.iter().product();
+        let bdata: Vec<f64> = (0..bn).map(|i| (i as f64 + 1.0) * 0.125).collect();
+        let go_data_f32: Vec<f32> = (0..bn).map(|i| (i as f32 + 1.0) * 3.0).collect();
+
+        for &(shifts, dim) in &[(1_i64, 1_usize), (-2, 1), (1, 0)] {
+            // CPU reference
+            let cpu_x = make_cpu_f32(&bdata, &bshape, true);
+            let cpu_y = roll(&cpu_x, shifts, dim).expect("cpu roll fwd");
+            let cpu_go = Tensor::from_storage(
+                TensorStorage::cpu(go_data_f32.clone()),
+                bshape.clone(),
+                false,
+            )
+            .expect("cpu go");
+            let cpu_grad_fn = cpu_y.grad_fn().expect("cpu must carry RollBackward");
+            let cpu_grads = cpu_grad_fn.backward(&cpu_go).expect("cpu backward");
+            let cpu_g = cpu_grads[0]
+                .as_ref()
+                .expect("cpu grad must be Some")
+                .data()
+                .expect("cpu grad data")
+                .to_vec();
+
+            // CUDA path
+            let cuda_x = make_cpu_f32(&bdata, &bshape, true)
+                .to(Device::Cuda(0))
+                .expect("upload cuda_x");
+            let cuda_y = roll(&cuda_x, shifts, dim).expect("cuda roll fwd");
+            assert!(cuda_y.is_cuda());
+            let cuda_go = Tensor::from_storage(
+                TensorStorage::cpu(go_data_f32.clone()),
+                bshape.clone(),
+                false,
+            )
+            .expect("make cpu go")
+            .to(Device::Cuda(0))
+            .expect("upload cuda go");
+            let cuda_grad_fn = cuda_y.grad_fn().expect("cuda must carry RollBackward");
+            let cuda_grads = cuda_grad_fn.backward(&cuda_go).expect("cuda backward");
+            let cuda_grad = cuda_grads[0].as_ref().expect("cuda grad must be Some");
+            assert!(
+                cuda_grad.is_cuda(),
+                "RollBackward on CUDA grad_output must produce a CUDA grad (shifts={shifts}, dim={dim})"
+            );
+            let cuda_g = read_back_f32(cuda_grad);
+
+            assert_eq!(cpu_g.len(), cuda_g.len());
+            for (i, (&c, &g)) in cpu_g.iter().zip(cuda_g.iter()).enumerate() {
+                assert_eq!(
+                    c, g,
+                    "RollBackward mismatch at i={i} (shifts={shifts}, dim={dim}): cpu={c}, gpu={g}"
+                );
+            }
         }
     }
 }

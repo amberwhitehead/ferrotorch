@@ -163,6 +163,8 @@ pub mod module_cache;
 pub mod pool;
 pub mod rng;
 #[cfg(feature = "cuda")]
+pub mod roll;
+#[cfg(feature = "cuda")]
 pub mod sparse;
 pub mod stream;
 pub mod tensor_bridge;
@@ -195,6 +197,8 @@ pub use error::{GpuError, GpuResult};
 pub use flash_attention::{gpu_flash_attention_f32, gpu_flash_attention_f64};
 #[cfg(feature = "cuda")]
 pub use group_norm::gpu_group_norm_f32;
+#[cfg(feature = "cuda")]
+pub use roll::gpu_roll_f32;
 #[cfg(feature = "cuda")]
 pub use upsample::gpu_nearest_upsample2x_f32;
 pub use graph::{

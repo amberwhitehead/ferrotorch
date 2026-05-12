@@ -1445,6 +1445,24 @@ pub trait GpuBackend: Send + Sync {
         })
     }
 
+    // Roll (cyclic shift) along a single axis. The `(outer, dim_size, inner)`
+    // factorization mirrors the cumulative ops above; `shift_norm` is the
+    // already-normalized non-negative shift with `0 <= shift_norm < dim_size`.
+    // Forward and backward both call this method (the backward simply
+    // negates the original shift before normalizing).
+    fn roll_f32(
+        &self,
+        _a: &GpuBufferHandle,
+        _outer: usize,
+        _dim_size: usize,
+        _inner: usize,
+        _shift_norm: usize,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::InvalidArgument {
+            message: "roll_f32 GPU op not yet implemented".into(),
+        })
+    }
+
     // Clamp: out[i] = max(min_val, min(max_val, x[i]))
     fn clamp_f32(
         &self,

@@ -961,16 +961,6 @@ impl<T: Float> GradFn<T> for RollBackward<T> {
             return Ok(vec![None]);
         }
 
-        // Roll has no GPU forward path yet; the grad_output here mirrors
-        // wherever the forward output landed, so a CUDA grad_output here
-        // would only happen if some upstream op materialized one. Surface
-        // the same not-implemented error rather than silently CPU-pulling.
-        if grad_output.is_cuda() {
-            return Err(FerrotorchError::NotImplementedOnCuda {
-                op: "roll backward",
-            });
-        }
-
         let shape = self.input.shape();
         let dim_size = shape[self.dim] as i64;
 
@@ -981,6 +971,49 @@ impl<T: Float> GradFn<T> for RollBackward<T> {
         } else {
             (((-self.shifts) % dim_size) + dim_size) % dim_size
         };
+
+        // GPU fast path: when the grad arrives on CUDA, reuse the same
+        // `roll_f32` kernel that powers the forward pass. The op is its
+        // own VJP up to negating the shift; the kernel doesn't care
+        // whether the caller is forward or backward.
+        if grad_output.is_cuda() {
+            if is_f32::<T>() {
+                if let Some(backend) = crate::gpu_dispatch::gpu_backend() {
+                    if shift_norm == 0 {
+                        // Inverse shift collapses to identity — clone the
+                        // grad tensor's storage so the upstream input
+                        // receives a leaf-grad with no grad_fn (matches
+                        // the CPU branch below).
+                        let grad_handle =
+                            backend.clone_buffer(grad_output.gpu_handle()?)?;
+                        let grad_tensor = Tensor::from_storage(
+                            TensorStorage::gpu(grad_handle),
+                            shape.to_vec(),
+                            false,
+                        )?;
+                        return Ok(vec![Some(grad_tensor)]);
+                    }
+                    let outer: usize = shape[..self.dim].iter().product();
+                    let inner: usize = shape[self.dim + 1..].iter().product();
+                    let handle = backend.roll_f32(
+                        grad_output.gpu_handle()?,
+                        outer,
+                        shape[self.dim],
+                        inner,
+                        shift_norm as usize,
+                    )?;
+                    let grad_tensor = Tensor::from_storage(
+                        TensorStorage::gpu(handle),
+                        shape.to_vec(),
+                        false,
+                    )?;
+                    return Ok(vec![Some(grad_tensor)]);
+                }
+            }
+            return Err(FerrotorchError::NotImplementedOnCuda {
+                op: "roll backward",
+            });
+        }
 
         let go_data = grad_output.data_vec()?;
 
