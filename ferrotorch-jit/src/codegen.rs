@@ -960,8 +960,139 @@ fn resolve_group_dtype(
     Ok(chosen.unwrap_or(Dtype::F32))
 }
 
+/// Outcome of compiling a graph through [`InductorBackend::compile_with_status`].
+///
+/// Distinguishes a real JIT compile from a fallback delegation to the
+/// interpreter. This exists because silent fallback (returning a
+/// [`CompiledGraph`] backed by the interpreter from a call site that
+/// requested the inductor JIT) violates the rust-gpu-discipline / audit
+/// requirement that backend choice is observable by callers.
+///
+/// Callers that want opt-in interpreter fallback should call
+/// [`InductorBackend::compile_with_status`] and accept the
+/// [`Self::FellBackToInterpreter`] variant. Callers that want strict JIT
+/// semantics should use the [`Codegen::compile`] trait method, which
+/// returns [`crate::error::JitError::UnsupportedOp`] for non-JIT-able graphs
+/// rather than silently delegating.
+#[derive(Debug)]
+pub enum InductorCompileStatus {
+    /// The graph was JIT-compiled through the inductor pipeline. The
+    /// returned [`CompiledGraph`] executes the generated native code.
+    Compiled(CompiledGraph),
+    /// The graph shape was outside the JIT path (e.g. multi-group,
+    /// non-elementwise, reductions). The returned [`CompiledGraph`]
+    /// is backed by the [`InterpreterBackend`]; callers can still execute
+    /// it, but they now know the inductor fast path was not taken.
+    FellBackToInterpreter(CompiledGraph),
+}
+
+impl InductorCompileStatus {
+    /// Whether this status represents a real inductor JIT compile.
+    pub fn is_compiled(&self) -> bool {
+        matches!(self, Self::Compiled(_))
+    }
+
+    /// Whether this status represents an interpreter fallback.
+    pub fn is_fallback(&self) -> bool {
+        matches!(self, Self::FellBackToInterpreter(_))
+    }
+
+    /// Consume the status and return the underlying [`CompiledGraph`].
+    pub fn into_compiled_graph(self) -> CompiledGraph {
+        match self {
+            Self::Compiled(c) | Self::FellBackToInterpreter(c) => c,
+        }
+    }
+
+    /// Borrow the underlying [`CompiledGraph`] without consuming the status.
+    pub fn compiled_graph(&self) -> &CompiledGraph {
+        match self {
+            Self::Compiled(c) | Self::FellBackToInterpreter(c) => c,
+        }
+    }
+}
+
+impl InductorBackend {
+    /// Compile a graph through the inductor pipeline, explicitly reporting
+    /// whether the JIT fast path was taken or whether the call had to fall
+    /// back to the interpreter.
+    ///
+    /// This is the structured analogue of [`Codegen::compile`]: it surfaces
+    /// the fallback decision in the return type so callers can distinguish a
+    /// real JIT compile from an interpreter delegation. The trait
+    /// [`Codegen::compile`] method on `InductorBackend` refuses the
+    /// fallback case with [`crate::error::JitError::UnsupportedOp`] to keep
+    /// the silent-fallback path from re-emerging through the generic
+    /// `Codegen` trait.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Err` for GPU targets that have no runtime executor wired
+    /// (`JitError::GpuBackendUnavailable`), for graphs whose codegen
+    /// validation fails, or if the JIT compile itself errors. The
+    /// non-JIT-able `CpuRust` path is reported as
+    /// `Ok(FellBackToInterpreter(_))`, not an error.
+    pub fn compile_with_status(
+        &self,
+        graph: &IrGraph,
+    ) -> FerrotorchResult<InductorCompileStatus> {
+        // For the CpuRust target, attempt the real JIT path: lower the fusion
+        // group's LoopIR into cranelift IR and JIT-compile in-process into
+        // mapped executable pages, then dispatch to it on every `execute`
+        // call. Graphs that are a single elementwise fusion group are fully
+        // JIT'd; anything else falls back to the interpreter.
+        if self.target == InductorTarget::CpuRust {
+            if let Some(compiled) = try_jit_compile_cpu_rust(graph)? {
+                return Ok(InductorCompileStatus::Compiled(compiled));
+            }
+        }
+
+        // GPU targets: ferrotorch-jit generates GPU source strings (CUDA C /
+        // PTX) but does not yet wire them to a real GPU runtime executor.
+        // Silently routing GPU-targeted compile() to the CPU interpreter
+        // violates rust-gpu-discipline §3 (PyTorch parity): PyTorch's Inductor
+        // falls back to eager-GPU, not to a CPU interpreter.
+        if matches!(
+            self.target,
+            InductorTarget::GpuCuda | InductorTarget::GpuPtx
+        ) {
+            // #729: Validate per-group dtype uniformity (and surface
+            // unsupported f64 transcendentals on PTX) before declaring the
+            // GPU runtime unavailable. This gives callers the more precise
+            // diagnosis when both apply.
+            let _ = self.generate(graph)?;
+        }
+        if self.target == InductorTarget::GpuCuda {
+            return Err(crate::error::JitError::GpuBackendUnavailable {
+                target: "GpuCuda".to_string(),
+                reason: "no GPU runtime executor is wired through ferrotorch-jit compile()"
+                    .to_string(),
+            }
+            .into());
+        }
+        if self.target == InductorTarget::GpuPtx {
+            return Err(crate::error::JitError::GpuBackendUnavailable {
+                target: "GpuPtx".to_string(),
+                reason: "no GPU runtime executor is wired through ferrotorch-jit compile()"
+                    .to_string(),
+            }
+            .into());
+        }
+
+        // CpuRust target with a graph the JIT path can't handle: generate
+        // source for inspection (validation side-effect), then fall back to
+        // the interpreter. The fallback is explicit in the return type — the
+        // caller learns which side of the JIT cutoff their graph landed on.
+        let _sources = self.generate(graph)?;
+        let interp = InterpreterBackend.compile(graph)?;
+        Ok(InductorCompileStatus::FellBackToInterpreter(interp))
+    }
+}
+
 impl Codegen for InductorBackend {
     fn compile(&self, graph: &IrGraph) -> FerrotorchResult<CompiledGraph> {
+        // Delegate to the structured variant and refuse silent fallback.
+        //
         // For the CpuRust target, attempt the real JIT path: lower the fusion
         // group's LoopIR into cranelift IR and JIT-compile in-process into
         // mapped executable pages, then dispatch to it on every `execute`
@@ -1016,12 +1147,23 @@ impl Codegen for InductorBackend {
             .into());
         }
 
-        // CpuRust target with a graph the JIT path can't handle: generate
-        // source for inspection, then fall back to the interpreter. The JIT
-        // path above takes the fast path for single-fusion-group elementwise
-        // graphs; this fallback covers the long tail.
+        // CpuRust target with a graph the JIT path can't handle.
+        //
+        // Per audit #1110, the `Codegen` trait's `compile()` must NOT silently
+        // delegate to the interpreter — that erases the JIT/interpreter
+        // distinction at this call site. We still validate by generating the
+        // source (the validation side-effect we used to keep) but then surface
+        // a structured `UnsupportedOp` error pointing the caller at
+        // `InductorBackend::compile_with_status`, which exposes the fallback
+        // explicitly via `InductorCompileStatus::FellBackToInterpreter`.
         let _sources = self.generate(graph)?;
-        InterpreterBackend.compile(graph)
+        Err(crate::error::JitError::UnsupportedOp {
+            op: "InductorBackend::compile/CpuRust: graph shape outside the JIT fast path \
+                 (use InductorBackend::compile_with_status to opt in to interpreter fallback \
+                 via InductorCompileStatus::FellBackToInterpreter)"
+                .to_string(),
+        }
+        .into())
     }
 
     fn name(&self) -> &str {
@@ -1569,17 +1711,101 @@ mod tests {
     }
 
     #[test]
-    fn test_inductor_compile_runs_interpreter_fallback() {
-        // Graph: y = x + x
+    fn test_inductor_compile_with_status_reports_fallback() {
+        // Graph: y = x + x — the JIT path bails on duplicate value inputs
+        // (`Add(x, x)`), so this triggers the interpreter fallback. Per
+        // audit #1110 the fallback must be explicit; `compile_with_status`
+        // surfaces it via `InductorCompileStatus::FellBackToInterpreter`,
+        // and the legacy `Codegen::compile` trait method refuses the
+        // silent delegation with `JitError::UnsupportedOp`.
         let mut g = IrGraph::new();
         let x = g.add_input(vec![3]);
         let (_, add_outs) = g.add_node(IrOpKind::Add, vec![x, x], vec![vec![3]]);
         g.set_outputs(vec![add_outs[0]]);
 
         let backend = InductorBackend::new(InductorTarget::CpuRust);
-        let compiled = backend.compile(&g).unwrap();
+
+        // Trait `compile()` no longer silently delegates: it errors out.
+        let trait_result = backend.compile(&g);
+        assert!(
+            trait_result.is_err(),
+            "Codegen::compile must refuse silent interpreter delegation; got Ok"
+        );
+        let err_msg = trait_result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("compile_with_status"),
+            "error must point callers at compile_with_status; got: {err_msg}"
+        );
+
+        // Explicit-status variant succeeds and reports the fallback.
+        let status = backend
+            .compile_with_status(&g)
+            .expect("compile_with_status should succeed on non-JIT-able graph");
+        assert!(
+            status.is_fallback(),
+            "Add(x, x) must hit the interpreter fallback, got Compiled"
+        );
+        assert!(
+            !status.is_compiled(),
+            "Add(x, x) must NOT report a real JIT compile"
+        );
+        let compiled = status.into_compiled_graph();
         let result = compiled.execute(&[vec![1.0, 2.0, 3.0]]).unwrap();
         assert_close(&result, &[2.0, 4.0, 6.0], 1e-10);
+    }
+
+    /// Discriminating test for the audit #1110 finding-C silent-fallback
+    /// regression. Asserts that callers can distinguish a real JIT compile
+    /// from an interpreter delegation:
+    ///
+    /// - A single-input elementwise Neg graph takes the JIT fast path and
+    ///   `compile_with_status` returns `Compiled(_)`.
+    /// - A Matmul graph cannot be JIT'd and `compile_with_status` returns
+    ///   `FellBackToInterpreter(_)`.
+    /// - The trait `compile()` succeeds for the JIT case and ERRORS for the
+    ///   fallback case — proving the silent delegate is gone.
+    #[test]
+    fn test_inductor_compile_silent_fallback_is_surfaced() {
+        if !have_rustc() {
+            return;
+        }
+
+        // JIT-able graph: single-input Neg.
+        let mut g_jit = IrGraph::new();
+        let xj = g_jit.add_input(vec![3]);
+        let (_, neg_outs) = g_jit.add_node(IrOpKind::Neg, vec![xj], vec![vec![3]]);
+        g_jit.set_outputs(vec![neg_outs[0]]);
+
+        let backend = InductorBackend::new(InductorTarget::CpuRust);
+        let jit_status = backend.compile_with_status(&g_jit).unwrap();
+        assert!(
+            jit_status.is_compiled(),
+            "single-input Neg must take the JIT fast path"
+        );
+        assert!(
+            backend.compile(&g_jit).is_ok(),
+            "Codegen::compile must succeed on JIT-able graphs"
+        );
+
+        // Non-JIT-able graph: Matmul (not elementwise).
+        let mut g_mm = IrGraph::new();
+        let a = g_mm.add_input(vec![2, 3]);
+        let b = g_mm.add_input(vec![3, 2]);
+        let (_, mm_outs) = g_mm.add_node(IrOpKind::Matmul, vec![a, b], vec![vec![2, 2]]);
+        g_mm.set_outputs(vec![mm_outs[0]]);
+
+        let mm_status = backend.compile_with_status(&g_mm).unwrap();
+        assert!(
+            mm_status.is_fallback(),
+            "Matmul must hit the interpreter fallback"
+        );
+
+        // The discriminating bit: the trait method must NOT silently delegate.
+        let trait_result = backend.compile(&g_mm);
+        assert!(
+            trait_result.is_err(),
+            "Codegen::compile on Matmul must Err (no silent fallback); got Ok"
+        );
     }
 
     /// `compile()` on `GpuCuda` must return `Err` — not silently fall back to the
@@ -1919,16 +2145,31 @@ mod tests {
             return;
         }
         // x -> sum (single reduction, not elementwise) → JIT path not taken
-        // → InterpreterBackend fallback produces the correct scalar.
+        // → fallback to the interpreter. Per audit #1110 the fallback is
+        // now surfaced explicitly via compile_with_status; the trait
+        // `compile()` errors instead of silently delegating.
         let mut g = IrGraph::new();
         let x = g.add_input(vec![4]);
         let (_, sum_outs) = g.add_node(IrOpKind::Sum, vec![x], vec![vec![1]]);
         g.set_outputs(vec![sum_outs[0]]);
 
-        let compiled = InductorBackend::new(InductorTarget::CpuRust)
-            .compile(&g)
+        let backend = InductorBackend::new(InductorTarget::CpuRust);
+
+        // Silent fallback is forbidden — the trait `compile()` errors.
+        assert!(
+            backend.compile(&g).is_err(),
+            "reduction graph must not silently fall through Codegen::compile"
+        );
+
+        let status = backend.compile_with_status(&g).unwrap();
+        assert!(
+            status.is_fallback(),
+            "Sum is not elementwise, expected interpreter fallback"
+        );
+        let out = status
+            .into_compiled_graph()
+            .execute(&[vec![1.0, 2.0, 3.0, 4.0]])
             .unwrap();
-        let out = compiled.execute(&[vec![1.0, 2.0, 3.0, 4.0]]).unwrap();
         assert_close(&out, &[10.0], 1e-10);
     }
 
@@ -1937,20 +2178,30 @@ mod tests {
         if !have_rustc() {
             return;
         }
-        // Matmul is not elementwise → falls back to the interpreter.
+        // Matmul is not elementwise → falls back to the interpreter via the
+        // explicit-status API. Per audit #1110, the trait `compile()` errors.
         let mut g = IrGraph::new();
         let a = g.add_input(vec![2, 3]);
         let b = g.add_input(vec![3, 2]);
         let (_, mm_outs) = g.add_node(IrOpKind::Matmul, vec![a, b], vec![vec![2, 2]]);
         g.set_outputs(vec![mm_outs[0]]);
 
-        let compiled = InductorBackend::new(InductorTarget::CpuRust)
-            .compile(&g)
-            .unwrap();
+        let backend = InductorBackend::new(InductorTarget::CpuRust);
+        assert!(
+            backend.compile(&g).is_err(),
+            "matmul graph must not silently fall through Codegen::compile"
+        );
+
+        let status = backend.compile_with_status(&g).unwrap();
+        assert!(
+            status.is_fallback(),
+            "Matmul is not elementwise, expected interpreter fallback"
+        );
         // Simple matmul: [[1,2,3],[4,5,6]] @ [[1,2],[3,4],[5,6]]
         //   = [[1+6+15, 2+8+18], [4+15+30, 8+20+36]]
         //   = [[22, 28], [49, 64]]
-        let out = compiled
+        let out = status
+            .into_compiled_graph()
             .execute(&[
                 vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0],
                 vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0],

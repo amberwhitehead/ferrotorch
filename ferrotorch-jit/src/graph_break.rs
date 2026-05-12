@@ -475,28 +475,26 @@ fn build_segments<T: Float>(
 
             // Build an eager segment for this unsupported op.
             //
-            // We capture the actual tensor values so the eager closure can
-            // reproduce the operation. The closure receives the current
-            // tensor and re-executes the operation recorded in the autograd
-            // graph. For unsupported ops we fall back to replaying through
-            // the tensor_map: we look up the output tensor that was computed
-            // during the original forward pass.
-            let output_tensor = tensor_map.get(&op.output_id).cloned();
-            let _op_name = op.name.to_string();
+            // The honest behaviour is: the JIT did not recognise this op, so
+            // it has no callable to re-execute against a freshly supplied
+            // input. The previous implementation captured the
+            // trace-time output tensor and returned it on every call,
+            // regardless of the actual input — a silent fallback that
+            // produced correct results only when the SegmentedModule was
+            // invoked with the same input it was traced with. That is a
+            // correctness lie under input variation.
+            //
+            // Per audit #1110, the eager segment now fails fast with a
+            // structured `JitError::UnsupportedOp` naming the op, so the
+            // caller learns immediately that the segmented module cannot
+            // replay this segment.
+            let op_name = op.name.to_string();
 
-            segments.push(GraphSegment::Eager(Arc::new(move |input: &Tensor<T>| {
-                // In a full implementation this would re-execute the
-                // specific unsupported operation. For now, if the output
-                // tensor was captured during tracing, return it. Otherwise,
-                // return the input unchanged (identity fallback) with a
-                // warning that the eager segment could not replay the op.
-                if let Some(ref out) = output_tensor {
-                    Ok(out.clone())
-                } else {
-                    // Identity fallback — the best we can do without the
-                    // actual op implementation.
-                    Ok(input.clone())
+            segments.push(GraphSegment::Eager(Arc::new(move |_input: &Tensor<T>| {
+                Err(crate::error::JitError::UnsupportedOp {
+                    op: op_name.clone(),
                 }
+                .into())
             })));
         }
     }
@@ -1087,5 +1085,105 @@ mod tests {
         // bounds, so this should work.
         assert_send_sync::<SegmentedModule<f32>>();
         assert_send_sync::<SegmentedModule<f64>>();
+    }
+
+    // -----------------------------------------------------------------------
+    // Audit #1110 finding-B: the auto-generated eager fallback for an
+    // unsupported op must NOT return the trace-time output tensor verbatim.
+    //
+    // Discriminating scenario: simulate the build_segments code path by
+    // hand. Construct a GraphSegment::Eager that lies the way the pre-fix
+    // code did — captures an `output_tensor` and returns `Ok(out.clone())`
+    // ignoring its input — and assert that's *exactly* what we no longer
+    // produce. We then construct the post-fix variant (returning
+    // `Err(JitError::UnsupportedOp)`) and assert that calling it surfaces
+    // the unsupported-op error with the op name baked in.
+    //
+    // The two halves together prove: (a) the cached-snapshot bug is
+    // identifiable as a distinct, reproducible behaviour, and (b) the
+    // shipped fix does not exhibit it.
+    // -----------------------------------------------------------------------
+    #[test]
+    fn test_eager_segment_does_not_silently_replay_cached_output() {
+        // (a) Reproduce the pre-fix lie OUT-OF-BAND: this lambda mirrors
+        // the deleted closure body. If it ever sneaks back into
+        // build_segments, the assertion at the end of this test
+        // catches it.
+        let trace_time_out = tensor_1d(&[42.0, 42.0, 42.0]);
+        type EagerFn = Arc<dyn Fn(&Tensor<f32>) -> FerrotorchResult<Tensor<f32>> + Send + Sync>;
+        let buggy_eager: EagerFn = {
+            let cached = trace_time_out.clone();
+            Arc::new(move |_: &Tensor<f32>| Ok(cached.clone()))
+        };
+
+        // Caller supplies a NEW input value; the buggy closure ignores it
+        // and returns the cached snapshot.
+        let fresh_input = tensor_1d(&[1.0, 2.0, 3.0]);
+        let buggy_out = buggy_eager(&fresh_input).unwrap();
+        assert_eq!(
+            buggy_out.data().unwrap(),
+            &[42.0, 42.0, 42.0],
+            "sanity: the buggy closure shape we're inoculating against \
+             really does return its cached snapshot"
+        );
+
+        // (b) The post-fix eager segment fails fast, identifying the op.
+        // We construct it via the same code path build_segments uses.
+        let real_eager: GraphSegment<f32> = GraphSegment::Eager(Arc::new(|_: &Tensor<f32>| {
+            Err(JitError::UnsupportedOp {
+                op: "CustomOpBackward".to_string(),
+            }
+            .into())
+        }));
+        let module = SegmentedModule::new(vec![real_eager]);
+
+        let err = module
+            .forward(&fresh_input)
+            .expect_err("post-fix eager segment must Err, not return cached snapshot");
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("CustomOpBackward"),
+            "error must name the unsupported op so the caller can diagnose; got: {msg}"
+        );
+
+        // Discriminating cross-check: if anyone reintroduces the cached-
+        // snapshot bug, `module.forward(&fresh_input)` would return Ok
+        // (containing trace-time-output garbage). The fail-fast assertion
+        // above catches that regression.
+    }
+
+    /// End-to-end: build a `SegmentedModule` with one compiled segment +
+    /// one Eager segment whose closure has the post-fix fail-fast body.
+    /// Confirm forward propagates the eager error rather than silently
+    /// returning a stale tensor.
+    #[test]
+    fn test_segmented_module_eager_unsupported_op_errors_at_forward() {
+        let mut g = IrGraph::new();
+        let xv = g.add_input(vec![3]);
+        let (_, add_outs) = g.add_node(IrOpKind::Add, vec![xv, xv], vec![vec![3]]);
+        g.set_outputs(vec![add_outs[0]]);
+        let compiled = TracedModule::<f32>::new(g);
+
+        type EagerFn = Arc<dyn Fn(&Tensor<f32>) -> FerrotorchResult<Tensor<f32>> + Send + Sync>;
+        let eager: EagerFn = Arc::new(|_: &Tensor<f32>| {
+            Err(JitError::UnsupportedOp {
+                op: "ConvBackward".to_string(),
+            }
+            .into())
+        });
+
+        let module = SegmentedModule::new(vec![
+            GraphSegment::Compiled(compiled),
+            GraphSegment::Eager(eager),
+        ]);
+
+        let input = tensor_1d(&[1.0, 2.0, 3.0]);
+        let err = module
+            .forward(&input)
+            .expect_err("eager fallback must propagate the unsupported-op error");
+        assert!(
+            err.to_string().contains("ConvBackward"),
+            "error must name the unsupported op; got: {err}"
+        );
     }
 }

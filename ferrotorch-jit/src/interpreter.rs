@@ -22,6 +22,22 @@ use ferrotorch_core::tensor::Tensor;
 use crate::graph::{IrGraph, IrNodeId, IrOpKind, IrValueId};
 
 // ---------------------------------------------------------------------------
+// Internal aliases
+// ---------------------------------------------------------------------------
+
+/// Outputs + captured intermediate tensors, in the order requested.
+///
+/// Returned by [`interpret_multi_with_captures`]: the first vector is the
+/// graph's declared outputs, the second is the captured intermediates.
+type OutputsAndCaptures<T> = (Vec<Tensor<T>>, Vec<Tensor<T>>);
+
+/// Populated value map + the topological ordering used to populate it.
+///
+/// Used internally to share the graph walk between [`interpret_multi`] and
+/// [`interpret_multi_with_captures`].
+type ValuesAndTopo<T> = (HashMap<IrValueId, Tensor<T>>, Vec<IrNodeId>);
+
+// ---------------------------------------------------------------------------
 // Interpreter
 // ---------------------------------------------------------------------------
 
@@ -97,6 +113,109 @@ pub fn interpret_multi<T: Float>(
     graph: &IrGraph,
     inputs: &[Tensor<T>],
 ) -> FerrotorchResult<Vec<Tensor<T>>> {
+    let (values, _topo) = interpret_collect_values(graph, inputs)?;
+    extract_outputs(graph, &values)
+}
+
+/// Execute an IR graph and additionally capture the tensors produced by a
+/// specified subset of forward-graph nodes.
+///
+/// This is the primitive used by [`crate::module::AotCompiledModule::forward_with_ctx`]
+/// to honour [`crate::aot_autograd::AotGraphPair::saved_tensor_indices`]:
+/// AOT autograd reports which forward nodes produce values needed by the
+/// backward pass, and this function returns those captured tensors in the
+/// same order as the requested indices.
+///
+/// # Arguments
+///
+/// * `graph` - The IR graph to interpret. Must have at least one output.
+/// * `inputs` - Concrete tensors, one per graph input.
+/// * `capture_topo_indices` - Topological indices into the forward graph's
+///   topological order. Each captured tensor is the **first output** of the
+///   node at that topological position.
+///
+/// # Returns
+///
+/// A tuple `(outputs, captured)` where:
+/// - `outputs` is the graph's declared outputs in declaration order.
+/// - `captured` is one tensor per entry in `capture_topo_indices`, in the
+///   same order. If a requested index points to a node with no outputs
+///   (e.g. an `Output` marker), the corresponding entry is the node's
+///   declared inputs[0] tensor — matching the interpreter's treatment of
+///   `Output` nodes as identity forwarders.
+///
+/// # Errors
+///
+/// - Input count does not match `graph.input_values.len()`.
+/// - Any `capture_topo_indices` entry is out of range for the graph's
+///   topological order.
+/// - The captured node produced no value during interpretation (graph is
+///   malformed for this purpose).
+pub fn interpret_multi_with_captures<T: Float>(
+    graph: &IrGraph,
+    inputs: &[Tensor<T>],
+    capture_topo_indices: &[usize],
+) -> FerrotorchResult<OutputsAndCaptures<T>> {
+    let (values, topo) = interpret_collect_values(graph, inputs)?;
+
+    // Validate every requested index up-front so we surface a precise error
+    // rather than an interpreter-internal lookup failure.
+    let mut captured: Vec<Tensor<T>> = Vec::with_capacity(capture_topo_indices.len());
+    let node_map: HashMap<IrNodeId, &crate::graph::IrNode> =
+        graph.nodes.iter().map(|n| (n.id, n)).collect();
+    for &topo_idx in capture_topo_indices {
+        let node_id = *topo.get(topo_idx).ok_or_else(|| {
+            FerrotorchError::InvalidArgument {
+                message: format!(
+                    "interpret_multi_with_captures: capture topo index {topo_idx} is out of \
+                     range for graph with {} topologically ordered nodes",
+                    topo.len()
+                ),
+            }
+        })?;
+        let node = node_map.get(&node_id).ok_or_else(|| {
+            FerrotorchError::Internal {
+                message: format!(
+                    "interpret_multi_with_captures: node {node_id:?} at topo index {topo_idx} \
+                     missing from node_map (graph corruption)"
+                ),
+            }
+        })?;
+        // For nodes with outputs, capture the first output value.
+        // The `Output` marker has its input forwarded into its output slot
+        // by interpret_collect_values, so the same lookup works.
+        let value_id = *node.outputs.first().ok_or_else(|| {
+            FerrotorchError::InvalidArgument {
+                message: format!(
+                    "interpret_multi_with_captures: requested capture at topo index {topo_idx} \
+                     (node {node_id:?}) but that node has no outputs to capture"
+                ),
+            }
+        })?;
+        let tensor = values
+            .get(&value_id)
+            .cloned()
+            .ok_or_else(|| FerrotorchError::InvalidArgument {
+                message: format!(
+                    "interpret_multi_with_captures: value {value_id:?} at topo index {topo_idx} \
+                     was not produced during interpretation"
+                ),
+            })?;
+        captured.push(tensor);
+    }
+
+    let outputs = extract_outputs(graph, &values)?;
+    Ok((outputs, captured))
+}
+
+/// Walk the IR graph in topological order, populating an `IrValueId -> Tensor`
+/// map for every value produced. Used as the shared core of
+/// [`interpret_multi`] and [`interpret_multi_with_captures`] so that capturing
+/// intermediate tensors does not require re-executing the graph.
+fn interpret_collect_values<T: Float>(
+    graph: &IrGraph,
+    inputs: &[Tensor<T>],
+) -> FerrotorchResult<ValuesAndTopo<T>> {
     // 1. Validate input count.
     if inputs.len() != graph.input_values.len() {
         return Err(FerrotorchError::InvalidArgument {
@@ -123,7 +242,7 @@ pub fn interpret_multi<T: Float>(
     // 4. Walk nodes in topological order.
     let topo = graph.topological_order();
 
-    for node_id in topo {
+    for &node_id in &topo {
         let node = node_map[&node_id];
 
         match &node.op {
@@ -418,11 +537,18 @@ pub fn interpret_multi<T: Float>(
         }
     }
 
-    // 6. Return all graph outputs in declaration order.
-    //
-    // Use get + clone (not remove) so the same value can be listed as
-    // multiple outputs without the second lookup failing. Tensor::clone
-    // is an Arc clone so this is cheap.
+    Ok((values, topo))
+}
+
+/// Extract the graph's declared outputs from a populated value map.
+///
+/// Use get + clone (not remove) so the same value can be listed as
+/// multiple outputs without the second lookup failing. `Tensor::clone`
+/// is an `Arc` clone so this is cheap.
+fn extract_outputs<T: Float>(
+    graph: &IrGraph,
+    values: &HashMap<IrValueId, Tensor<T>>,
+) -> FerrotorchResult<Vec<Tensor<T>>> {
     let mut results = Vec::with_capacity(graph.output_values.len());
     for &output_id in &graph.output_values {
         let t =

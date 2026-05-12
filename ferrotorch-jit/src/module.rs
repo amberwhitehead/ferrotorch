@@ -13,7 +13,7 @@ use ferrotorch_nn::module::Module;
 use ferrotorch_nn::parameter::Parameter;
 
 use crate::graph::IrGraph;
-use crate::interpreter::interpret;
+use crate::interpreter::{interpret, interpret_multi_with_captures};
 use crate::optimize::{OptimizationConfig, optimize};
 use crate::trace::trace;
 
@@ -340,16 +340,44 @@ impl<T: Float> AotCompiledModule<T> {
     /// Execute the forward pass and save intermediate tensors.
     ///
     /// Returns the forward output tensor and saves intermediates for
-    /// the backward pass.
+    /// the backward pass. The saved set is determined by
+    /// [`Self::saved_tensor_indices`] — each topological index identifies a
+    /// node in the forward graph whose first output is captured at
+    /// interpretation time. The captured tensors are stored in the same
+    /// order, which is the order the backward graph (produced by
+    /// [`crate::aot_autograd::decompose_forward_backward`]) expects as the
+    /// first `saved_tensor_indices().len()` inputs.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if forward interpretation fails or any saved index
+    /// is out of range / refers to a node with no captureable output.
     pub fn forward_with_ctx(&mut self, inputs: &[Tensor<T>]) -> FerrotorchResult<Tensor<T>> {
-        // Execute forward graph.
-        let output = interpret(&self.forward_graph, inputs)?;
+        // Execute forward graph and capture the intermediates named by
+        // `saved_tensor_indices` in a single pass — no re-execution.
+        //
+        // `saved_tensor_indices` entries are topological positions into the
+        // forward graph; `interpret_multi_with_captures` returns the first
+        // output value of each named node in the same order, matching what
+        // the backward graph expects as its leading inputs.
+        let (mut outputs, captured) = interpret_multi_with_captures(
+            &self.forward_graph,
+            inputs,
+            &self.saved_tensor_indices,
+        )?;
 
-        // Save intermediate tensors from the forward execution.
-        // Re-execute to collect intermediates at the saved indices.
-        // For now, save the inputs themselves since they're needed
-        // for backward.
-        self.saved_tensors = inputs.to_vec();
+        if outputs.len() != 1 {
+            return Err(FerrotorchError::InvalidArgument {
+                message: format!(
+                    "AotCompiledModule::forward_with_ctx: forward graph must have exactly one \
+                     output, got {}",
+                    outputs.len()
+                ),
+            });
+        }
+        let output = outputs.remove(0);
+
+        self.saved_tensors = captured;
 
         Ok(output)
     }
@@ -385,6 +413,18 @@ impl<T: Float> AotCompiledModule<T> {
     /// The saved tensor indices from AOT decomposition.
     pub fn saved_tensor_indices(&self) -> &[usize] {
         &self.saved_tensor_indices
+    }
+
+    /// The tensors captured by the most recent
+    /// [`Self::forward_with_ctx`] call, in the same order as
+    /// [`Self::saved_tensor_indices`].
+    ///
+    /// Empty until `forward_with_ctx` has been called at least once.
+    /// Exposed so callers (and tests) can verify that the saved-by-index
+    /// contract reported by AOT autograd is actually honoured at forward
+    /// time — see audit #1110 finding-A.
+    pub fn saved_tensors(&self) -> &[Tensor<T>] {
+        &self.saved_tensors
     }
 }
 
@@ -924,5 +964,142 @@ mod tests {
     fn test_traced_module_from_bytes_garbage_input_errors() {
         let r = TracedModule::<f32>::from_bytes(&[0xFF, 0xFE, 0xFD]);
         assert!(r.is_err());
+    }
+
+    // -----------------------------------------------------------------------
+    // Audit #1110 finding-A: AotCompiledModule::forward_with_ctx must
+    // honour saved_tensor_indices, not stash `inputs.to_vec()` and lie.
+    //
+    // Discriminating scenario: build a forward graph `sum(mul(a, b))`.
+    // `decompose_forward_backward` reports `saved_tensor_indices = [0, 1, 2]`
+    // — the inputs `a`, `b` (topo 0/1) AND the `Mul` intermediate (topo 2).
+    // The pre-fix implementation stashed `inputs.to_vec()`, length 2, then
+    // appended `grad_output`, producing 3 backward inputs versus the
+    // expected 4 — a silent contract violation that surfaced only when
+    // someone actually invoked `backward`.
+    //
+    // The fix uses `interpret_multi_with_captures` to capture all three
+    // saved tensors in one forward pass. The discriminating assertions
+    // below all fail under the pre-fix code.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_forward_with_ctx_captures_intermediate_not_just_inputs() {
+        use crate::aot_autograd::decompose_forward_backward;
+        use crate::graph::{IrGraph, IrOpKind};
+
+        // Build forward graph: y = sum(mul(a, b)). Mul produces an internal
+        // value that the backward pass must read; storing only the inputs is
+        // not enough.
+        let mut fwd = IrGraph::new();
+        let a = fwd.add_input(vec![3]);
+        let b = fwd.add_input(vec![3]);
+        let (_, mul_outs) = fwd.add_node(IrOpKind::Mul, vec![a, b], vec![vec![3]]);
+        let (_, sum_outs) = fwd.add_node(IrOpKind::Sum, vec![mul_outs[0]], vec![vec![1]]);
+        fwd.set_outputs(vec![sum_outs[0]]);
+
+        let pair = decompose_forward_backward(&fwd).unwrap();
+
+        // Sanity: there is at least one saved index beyond the bare inputs.
+        // (If there weren't, the test would not discriminate.)
+        assert!(
+            pair.saved_tensor_indices.len() > 2,
+            "test fixture invalid: expected saved_tensor_indices to include \
+             both inputs AND the Mul intermediate, got {:?}",
+            pair.saved_tensor_indices
+        );
+        let expected_saved_count = pair.saved_tensor_indices.len();
+
+        let mut aot = AotCompiledModule::<f32>::new(
+            pair.forward.clone(),
+            pair.backward.clone(),
+            pair.saved_tensor_indices.clone(),
+        );
+
+        let a_in = tensor_1d(&[1.0, 2.0, 3.0]);
+        let b_in = tensor_1d(&[4.0, 5.0, 6.0]);
+        let _ = aot.forward_with_ctx(&[a_in, b_in]).unwrap();
+
+        // The discriminator: forward_with_ctx must save EXACTLY as many
+        // tensors as saved_tensor_indices entries — not `inputs.len()`.
+        // Pre-fix `saved_tensors == inputs.to_vec()` had length 2, while
+        // the saved-index contract requires 3+.
+        assert_eq!(
+            aot.saved_tensors().len(),
+            expected_saved_count,
+            "forward_with_ctx must capture one tensor per saved_tensor_indices \
+             entry; pre-fix it stashed inputs.to_vec() ({}) instead of the named \
+             intermediates ({})",
+            2,
+            expected_saved_count,
+        );
+    }
+
+    /// Stronger discriminator: `forward_with_ctx` must capture the *correct*
+    /// tensor values for each saved index. We compare against the values
+    /// the interpreter produces at the same topological positions —
+    /// swapping in `inputs.to_vec()` would give numerically wrong saves
+    /// (e.g. the Mul output of [4, 10, 18] would be missing entirely).
+    #[test]
+    fn test_forward_with_ctx_captured_intermediate_value_matches_interpreter() {
+        use crate::aot_autograd::decompose_forward_backward;
+        use crate::graph::{IrGraph, IrOpKind};
+        use crate::interpreter::interpret_multi_with_captures;
+
+        let mut fwd = IrGraph::new();
+        let a = fwd.add_input(vec![3]);
+        let b = fwd.add_input(vec![3]);
+        let (_, mul_outs) = fwd.add_node(IrOpKind::Mul, vec![a, b], vec![vec![3]]);
+        let (_, sum_outs) = fwd.add_node(IrOpKind::Sum, vec![mul_outs[0]], vec![vec![1]]);
+        fwd.set_outputs(vec![sum_outs[0]]);
+
+        let pair = decompose_forward_backward(&fwd).unwrap();
+        let mut aot = AotCompiledModule::<f32>::new(
+            pair.forward.clone(),
+            pair.backward.clone(),
+            pair.saved_tensor_indices.clone(),
+        );
+
+        let a_data = vec![1.0_f32, 2.0, 3.0];
+        let b_data = vec![4.0_f32, 5.0, 6.0];
+        let inputs = [tensor_1d(&a_data), tensor_1d(&b_data)];
+        let out = aot.forward_with_ctx(&inputs).unwrap();
+        // sum([1*4, 2*5, 3*6]) = 4 + 10 + 18 = 32
+        assert_close(out.data().unwrap(), &[32.0], 1e-5);
+
+        // Cross-check: independently interpret the augmented forward graph
+        // with the same captures. The tensors captured by forward_with_ctx
+        // must match value-for-value. Pre-fix `inputs.to_vec()` would only
+        // contain {a, b}, missing the [4, 10, 18] Mul intermediate.
+        let (_, reference_captures) = interpret_multi_with_captures::<f32>(
+            &pair.forward,
+            &inputs,
+            &pair.saved_tensor_indices,
+        )
+        .unwrap();
+
+        assert_eq!(
+            aot.saved_tensors().len(),
+            reference_captures.len(),
+            "forward_with_ctx and interpret_multi_with_captures must agree \
+             on the number of saved tensors"
+        );
+
+        // Find the Mul intermediate among the captures: it's the 3-elt
+        // vector with values [4, 10, 18]. Asserting it appears in
+        // saved_tensors proves the intermediate was captured.
+        let saw_mul_intermediate = aot
+            .saved_tensors()
+            .iter()
+            .any(|t| t.data().is_ok_and(|d| d == [4.0, 10.0, 18.0]));
+        assert!(
+            saw_mul_intermediate,
+            "saved_tensors must contain the Mul intermediate [4, 10, 18]; \
+             got {:?}",
+            aot.saved_tensors()
+                .iter()
+                .map(|t| t.data().unwrap().to_vec())
+                .collect::<Vec<_>>()
+        );
     }
 }

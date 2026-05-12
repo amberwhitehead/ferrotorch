@@ -87,7 +87,8 @@ pub mod fusion_gpu;
 pub use aot_autograd::{AotGraphPair, compile_aot, decompose_forward_backward};
 pub use autotune::{AutotuneCandidate, AutotuneKey, AutotuneResult, Autotuner};
 pub use codegen::{
-    Codegen, CompiledGraph, InductorBackend, InductorTarget, InterpreterBackend, NativeBackend,
+    Codegen, CompiledGraph, InductorBackend, InductorCompileStatus, InductorTarget,
+    InterpreterBackend, NativeBackend,
 };
 pub use codegen_cpu::CpuCodegen;
 pub use codegen_gpu::GpuCodegen;
@@ -105,7 +106,7 @@ pub use fusion::{
     with_fusion,
 };
 pub use graph_break::{GraphSegment, SegmentedModule, TraceResult, trace_with_breaks};
-pub use interpreter::{interpret, interpret_multi};
+pub use interpreter::{interpret, interpret_multi, interpret_multi_with_captures};
 pub use memory_plan::{MemoryPlan, plan_memory};
 pub use module::{AotCompiledModule, CompileConfig, TracedModule, compile, compile_with_config};
 pub use optimize::{OptimizationConfig, optimize};
