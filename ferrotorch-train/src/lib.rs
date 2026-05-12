@@ -12,7 +12,7 @@
 //! | [`Metric`] | Accumulate batch-level values into epoch-level summaries |
 //! | [`Callback`] | Hook into epoch/batch boundaries (early stopping, logging, EMA) |
 //! | [`TrainingHistory`] | Record of per-epoch results |
-//! | [`checkpoint`] | Gradient checkpointing: recompute forward in backward |
+//! | [`checkpoint`] | Gradient checkpointing: recompute forward in backward (routes through `ferrotorch_core::autograd::checkpoint::checkpoint`; on CUDA, saves/restores GPU RNG state and autocast snapshot so dropout masks are identical during recomputation) |
 //! | [`amp`] | Automatic mixed precision: autocast + GradScaler |
 //! | [`clip_grad_norm_`] | Clip total gradient norm across parameters |
 //! | [`clip_grad_value_`] | Clamp individual gradient elements |

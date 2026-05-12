@@ -74,9 +74,17 @@ pub enum StorageBuffer<T: Element> {
     /// recorded. Tensors built on this variant carry shape and dtype
     /// info but cannot be read or written. Used for shape inference
     /// and dry-run model construction. CL-395.
+    ///
+    /// An optional `fill_value` records the (single, scalar) value a
+    /// `full_meta`-style constructor would have materialised if the
+    /// tensor were on a real device. The data is still not stored —
+    /// callers cannot read individual elements — but the metadata lets
+    /// `full_meta(shape, value)` round-trip the fill through e.g.
+    /// `meta_fill_value()` and lets shape-inference code that cares
+    /// distinguish "uninitialised meta" from "would-be filled meta".
     Meta {
         numel: usize,
-        _phantom: std::marker::PhantomData<T>,
+        fill_value: Option<T>,
     },
 }
 
@@ -96,9 +104,35 @@ impl<T: Element> TensorStorage<T> {
         Self {
             data: StorageBuffer::Meta {
                 numel,
-                _phantom: std::marker::PhantomData,
+                fill_value: None,
             },
             device: Device::Meta,
+        }
+    }
+
+    /// Create a meta storage with the given element count and a recorded
+    /// fill value. The fill is metadata only — no backing memory is
+    /// allocated and individual elements cannot be read — but
+    /// [`Self::meta_fill_value`] will return `Some(value)` so callers
+    /// (e.g. `full_meta(shape, value)`) can round-trip the requested
+    /// fill.
+    pub fn meta_filled(numel: usize, value: T) -> Self {
+        Self {
+            data: StorageBuffer::Meta {
+                numel,
+                fill_value: Some(value),
+            },
+            device: Device::Meta,
+        }
+    }
+
+    /// Recorded fill value for a meta tensor, if one was supplied at
+    /// construction time. Returns `None` for non-meta storage and for
+    /// meta storage created without a fill (i.e. via [`Self::meta`]).
+    pub fn meta_fill_value(&self) -> Option<&T> {
+        match &self.data {
+            StorageBuffer::Meta { fill_value, .. } => fill_value.as_ref(),
+            _ => None,
         }
     }
 
@@ -386,7 +420,13 @@ impl<T: Element> TensorStorage<T> {
                     device: self.device,
                 })
             }
-            StorageBuffer::Meta { numel, .. } => Ok(Self::meta(*numel)),
+            StorageBuffer::Meta { numel, fill_value } => Ok(Self {
+                data: StorageBuffer::Meta {
+                    numel: *numel,
+                    fill_value: fill_value.clone(),
+                },
+                device: self.device,
+            }),
         }
     }
 

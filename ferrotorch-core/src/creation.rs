@@ -263,10 +263,20 @@ pub fn ones_meta<T: Float>(shape: &[usize]) -> FerrotorchResult<Tensor<T>> {
     zeros_meta(shape)
 }
 
-/// Create a meta tensor with the given shape. Identical in behavior to
-/// [`zeros_meta`] but exists for API symmetry. CL-395.
-pub fn full_meta<T: Float>(shape: &[usize], _value: T) -> FerrotorchResult<Tensor<T>> {
-    zeros_meta(shape)
+/// Create a meta tensor with the given shape, recording `value` as the
+/// fill that would have been materialised on a real device.
+///
+/// Meta tensors carry no element-wise data, so individual elements still
+/// cannot be read. The recorded fill is available via
+/// [`crate::storage::TensorStorage::meta_fill_value`] (and the
+/// [`Tensor::meta_fill_value`] convenience wrapper) so that shape-inference
+/// code can distinguish "uninitialised meta" (`zeros_meta`, `ones_meta`)
+/// from "would-be filled meta" (`full_meta(shape, value)`) and so that the
+/// constructor's `value` parameter is observable rather than silently
+/// discarded. CL-395.
+pub fn full_meta<T: Float>(shape: &[usize], value: T) -> FerrotorchResult<Tensor<T>> {
+    let numel: usize = shape.iter().product();
+    Tensor::from_storage(TensorStorage::meta_filled(numel, value), shape.to_vec(), false)
 }
 
 /// Create a meta tensor matching the shape of `other`. Always allocates
@@ -576,7 +586,7 @@ mod tests {
 
     #[test]
     #[allow(clippy::approx_constant)] // 3.14 is an arbitrary test fill value, not π.
-    fn test_full_meta_and_ones_meta_alias_zeros_meta() {
+    fn test_meta_constructors_share_shape_and_meta_flag() {
         let z: Tensor<f64> = zeros_meta(&[2, 2]).unwrap();
         let o: Tensor<f64> = ones_meta(&[2, 2]).unwrap();
         let f: Tensor<f64> = full_meta(&[2, 2], 3.14).unwrap();
@@ -584,5 +594,37 @@ mod tests {
         assert_eq!(z.shape(), o.shape());
         assert_eq!(z.shape(), f.shape());
         assert!(z.is_meta() && o.is_meta() && f.is_meta());
+    }
+
+    #[test]
+    // reason: 2.5 and 0.0 are sentinel fill values; the test asserts
+    // the exact recorded scalar round-trips, so equality is correct.
+    #[allow(clippy::float_cmp)]
+    fn test_full_meta_records_value_and_discriminates_by_fill() {
+        // Discriminating fixture for the "_value silently ignored" audit:
+        // two `full_meta` tensors of identical shape but different fills
+        // MUST be distinguishable through the meta_fill_value() metadata.
+        let a: Tensor<f64> = full_meta(&[2, 3], 2.5).unwrap();
+        let b: Tensor<f64> = full_meta(&[2, 3], 0.0).unwrap();
+        let z: Tensor<f64> = zeros_meta(&[2, 3]).unwrap();
+
+        // All three are meta tensors of the same shape.
+        assert_eq!(a.shape(), &[2, 3]);
+        assert_eq!(b.shape(), &[2, 3]);
+        assert_eq!(z.shape(), &[2, 3]);
+        assert!(a.is_meta() && b.is_meta() && z.is_meta());
+
+        // The fill parameter is observable, not silently discarded.
+        assert_eq!(a.meta_fill_value(), Some(&2.5));
+        assert_eq!(b.meta_fill_value(), Some(&0.0));
+
+        // The two `full_meta` results discriminate on the recorded fill —
+        // 2.5 vs 0.0 must produce different metadata.
+        assert_ne!(a.meta_fill_value(), b.meta_fill_value());
+
+        // Plain `zeros_meta` records no fill (distinguishable from
+        // `full_meta(_, 0.0)` at the metadata layer).
+        assert_eq!(z.meta_fill_value(), None);
+        assert_ne!(z.meta_fill_value(), b.meta_fill_value());
     }
 }

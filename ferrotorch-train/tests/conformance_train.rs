@@ -37,9 +37,10 @@
 )]
 
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use ferrotorch_core::{Tensor, TensorStorage};
-use ferrotorch_nn::Parameter;
+use ferrotorch_nn::{Module, Parameter};
 use ferrotorch_train::amp::{AmpContext, AutocastDtype, GradScalerConfig};
 use ferrotorch_train::callback::Callback;
 use ferrotorch_train::checkpoint::checkpoint_sequential;
@@ -1269,13 +1270,13 @@ fn checkpoint_sequential_product() {
         .find(|c| c.kind == "checkpoint_sequential_product")
         .expect("checkpoint_sequential_product fixture not found");
 
-    let modules: Vec<ScaleModule> = f
+    let modules: Vec<Arc<dyn Module<f32>>> = f
         .scale_factors
         .iter()
-        .map(|&sf| ScaleModule { factor: sf as f32 })
+        .map(|&sf| Arc::new(ScaleModule { factor: sf as f32 }) as Arc<dyn Module<f32>>)
         .collect();
     let input = ferrotorch_core::scalar(f.input_val as f32).unwrap();
-    let output = checkpoint_sequential(&modules, f.segments, &input)
+    let output = checkpoint_sequential(modules, f.segments, &input)
         .unwrap_or_else(|e| panic!("[{}] checkpoint_sequential error: {e}", f.label));
     let got = output.item().unwrap() as f64;
     assert!(
@@ -1296,13 +1297,13 @@ fn checkpoint_sequential_single_module() {
         .find(|c| c.kind == "checkpoint_sequential_single")
         .expect("checkpoint_sequential_single fixture not found");
 
-    let modules: Vec<ScaleModule> = f
+    let modules: Vec<Arc<dyn Module<f32>>> = f
         .scale_factors
         .iter()
-        .map(|&sf| ScaleModule { factor: sf as f32 })
+        .map(|&sf| Arc::new(ScaleModule { factor: sf as f32 }) as Arc<dyn Module<f32>>)
         .collect();
     let input = ferrotorch_core::scalar(f.input_val as f32).unwrap();
-    let output = checkpoint_sequential(&modules, f.segments, &input)
+    let output = checkpoint_sequential(modules, f.segments, &input)
         .unwrap_or_else(|e| panic!("[{}] checkpoint_sequential error: {e}", f.label));
     let got = output.item().unwrap() as f64;
     assert!(

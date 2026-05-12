@@ -327,7 +327,7 @@ signature = "pub use ferrotorch_core::autograd::checkpoint::checkpoint"
 [[item]]
 path = "ferrotorch_train::checkpoint::checkpoint_sequential"
 kind = "fn"
-signature = "pub fn checkpoint_sequential<M, T>(modules: &[M], segments: usize, input: &Tensor<T>) -> FerrotorchResult<Tensor<T>>"
+signature = "pub fn checkpoint_sequential<T: Float>(modules: Vec<Arc<dyn Module<T>>>, segments: usize, input: &Tensor<T>) -> FerrotorchResult<Tensor<T>>"
 
 # ── grad_utils module ────────────────────────────────────────────────────────
 

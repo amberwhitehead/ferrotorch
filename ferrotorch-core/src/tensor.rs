@@ -1074,6 +1074,22 @@ impl<T: Float> Tensor<T> {
         self.device().is_meta()
     }
 
+    /// Recorded fill value for a meta tensor, if it was constructed with one
+    /// (e.g. via [`crate::creation::full_meta`]). Returns `None` for any
+    /// non-meta tensor and for meta tensors created without a fill (e.g.
+    /// via [`crate::creation::zeros_meta`] / [`crate::creation::ones_meta`]
+    /// / [`crate::creation::meta_like`]).
+    ///
+    /// Meta tensors carry no element-wise data, so the per-element fill
+    /// cannot be read back — this is metadata only — but it lets callers
+    /// distinguish a `full_meta(shape, 2.5)` tensor from a `full_meta(shape,
+    /// 0.0)` tensor (or from a plain `zeros_meta(shape)`), which closes the
+    /// "`_value` is silently ignored" gap.
+    #[inline]
+    pub fn meta_fill_value(&self) -> Option<&T> {
+        self.inner.storage.meta_fill_value()
+    }
+
     /// Returns `true` if this tensor is on a CUDA GPU.
     #[inline]
     pub fn is_cuda(&self) -> bool {

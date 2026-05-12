@@ -1372,30 +1372,126 @@ fn float_to_norm_order<T: Into<f64>>(ord: T) -> ferray_linalg::NormOrder {
 // Vector products (cross / multi_dot)
 // ===========================================================================
 
-/// 3-element vector cross product `a × b`.
+/// Vector cross product `a × b` along the given axis.
 ///
-/// Both inputs must be 1-D length-3 tensors today (matching ferray-linalg's
-/// scalar cross). The `dim` argument is reserved for future torch-style
-/// dispatch over arbitrary shapes with a length-3 axis; it is currently
-/// ignored. Mirrors `torch.linalg.cross` for the 1-D case. CPU-only.
+/// The axis selected by `dim` must have size 3 for both inputs, and the two
+/// tensors must share the same shape. `dim` follows torch conventions:
+/// non-negative indices count from the front, negative indices count from
+/// the back (e.g. `-1` selects the last axis).
+///
+/// For a 1-D length-3 input pair this matches `numpy.cross` and
+/// `torch.linalg.cross(..., dim=-1)`; for N-D tensors with one length-3
+/// axis it produces the same shape with the cross product computed across
+/// the 3 elements along `dim`, mirroring `torch.linalg.cross`.
+///
+/// CPU-only.
 pub fn cross<T: Float>(a: &Tensor<T>, b: &Tensor<T>, dim: i64) -> FerrotorchResult<Tensor<T>> {
     require_cpu(a, "cross")?;
     require_cpu(b, "cross")?;
 
-    if is_f32::<T>() {
-        let a_arr = tensor_to_arraydyn_f32(a)?;
-        let b_arr = tensor_to_arraydyn_f32(b)?;
-        let _ = dim; // ferray's cross hardcodes the last axis with size 3
-        let r = ferray_linalg::cross(&a_arr, &b_arr).map_err(FerrotorchError::Ferray)?;
-        let data = slice_f32_to_vec::<T>(r.as_slice().unwrap());
-        Tensor::from_storage(TensorStorage::cpu(data), r.shape().to_vec(), false)
-    } else if is_f64::<T>() {
-        let a_arr = tensor_to_arraydyn_f64(a)?;
-        let b_arr = tensor_to_arraydyn_f64(b)?;
-        let _ = dim; // ferray's cross hardcodes the last axis with size 3
-        let r = ferray_linalg::cross(&a_arr, &b_arr).map_err(FerrotorchError::Ferray)?;
-        let data = slice_to_vec::<T>(r.as_slice().unwrap());
-        Tensor::from_storage(TensorStorage::cpu(data), r.shape().to_vec(), false)
+    let a_shape = a.shape();
+    let b_shape = b.shape();
+    if a_shape != b_shape {
+        return Err(FerrotorchError::InvalidArgument {
+            message: format!(
+                "cross: inputs must share the same shape, got {a_shape:?} and {b_shape:?}"
+            ),
+        });
+    }
+    if a_shape.is_empty() {
+        return Err(FerrotorchError::InvalidArgument {
+            message: "cross: inputs must have at least one dimension".into(),
+        });
+    }
+
+    let rank = a_shape.len() as i64;
+    let axis = if dim < 0 { dim + rank } else { dim };
+    if axis < 0 || axis >= rank {
+        return Err(FerrotorchError::InvalidArgument {
+            message: format!(
+                "cross: dim {dim} is out of range for tensor of rank {rank}"
+            ),
+        });
+    }
+    let axis = axis as usize;
+    if a_shape[axis] != 3 {
+        return Err(FerrotorchError::InvalidArgument {
+            message: format!(
+                "cross: axis {axis} must have size 3, got shape {a_shape:?}"
+            ),
+        });
+    }
+
+    // Row-major strides for the input shape.
+    let strides = {
+        let mut s = vec![1usize; a_shape.len()];
+        for i in (0..a_shape.len().saturating_sub(1)).rev() {
+            s[i] = s[i + 1] * a_shape[i + 1];
+        }
+        s
+    };
+    let stride_axis = strides[axis];
+
+    // Number of independent cross products to compute = numel / 3.
+    let numel: usize = a_shape.iter().product();
+    let groups = numel / 3;
+
+    // Enumerate the base offset of each group (one fixed element along the
+    // chosen axis, varying over all other axes in row-major order).
+    let mut base_offsets: Vec<usize> = Vec::with_capacity(groups);
+    let other_dims: Vec<usize> = a_shape
+        .iter()
+        .enumerate()
+        .filter_map(|(i, &d)| if i == axis { None } else { Some(d) })
+        .collect();
+    let other_strides: Vec<usize> = strides
+        .iter()
+        .enumerate()
+        .filter_map(|(i, &s)| if i == axis { None } else { Some(s) })
+        .collect();
+    let mut idx = vec![0usize; other_dims.len()];
+    'outer: loop {
+        let off: usize = idx
+            .iter()
+            .zip(other_strides.iter())
+            .map(|(i, s)| i * s)
+            .sum();
+        base_offsets.push(off);
+        // Increment the multi-index (last axis fastest).
+        if other_dims.is_empty() {
+            break;
+        }
+        for k in (0..other_dims.len()).rev() {
+            idx[k] += 1;
+            if idx[k] < other_dims[k] {
+                continue 'outer;
+            }
+            idx[k] = 0;
+            if k == 0 {
+                break 'outer;
+            }
+        }
+    }
+    debug_assert_eq!(base_offsets.len(), groups);
+
+    let a_data = a.data()?;
+    let b_data = b.data()?;
+    let mut out: Vec<T> = vec![<T as num_traits::Zero>::zero(); numel];
+    for &base in &base_offsets {
+        let a0 = a_data[base];
+        let a1 = a_data[base + stride_axis];
+        let a2 = a_data[base + 2 * stride_axis];
+        let b0 = b_data[base];
+        let b1 = b_data[base + stride_axis];
+        let b2 = b_data[base + 2 * stride_axis];
+        // c[i] = a[(i+1) % 3] * b[(i+2) % 3] - a[(i+2) % 3] * b[(i+1) % 3]
+        out[base] = a1 * b2 - a2 * b1;
+        out[base + stride_axis] = a2 * b0 - a0 * b2;
+        out[base + 2 * stride_axis] = a0 * b1 - a1 * b0;
+    }
+
+    if is_f32::<T>() || is_f64::<T>() {
+        Tensor::from_storage(TensorStorage::cpu(out), a_shape.to_vec(), false)
     } else {
         Err(FerrotorchError::InvalidArgument {
             message: "linalg op requires f32 or f64".into(),
@@ -2663,6 +2759,99 @@ mod tests {
         assert!(d[0].abs() < 1e-10);
         assert!(d[1].abs() < 1e-10);
         assert!((d[2] - 1.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_cross_dim_zero_vs_dim_last_differ() {
+        // Discriminating fixture for the "dim silently ignored" audit:
+        // a [3, 3] tensor pair where dim=0 (column-wise 3-vectors) and
+        // dim=-1 (row-wise 3-vectors) MUST produce different outputs.
+        //
+        // Row-major layout for the same nine elements:
+        //   a = [[1, 2, 3],
+        //        [4, 5, 6],
+        //        [7, 8, 9]]
+        //   b = [[9, 8, 7],
+        //        [6, 5, 4],
+        //        [3, 2, 1]]
+        #[rustfmt::skip]
+        let a = t(
+            &[1.0, 2.0, 3.0,
+              4.0, 5.0, 6.0,
+              7.0, 8.0, 9.0],
+            &[3, 3],
+        );
+        #[rustfmt::skip]
+        let b = t(
+            &[9.0, 8.0, 7.0,
+              6.0, 5.0, 4.0,
+              3.0, 2.0, 1.0],
+            &[3, 3],
+        );
+
+        // dim=-1: cross product along each row.
+        //   row 0: (1,2,3) × (9,8,7)
+        //     = (2*7 - 3*8, 3*9 - 1*7, 1*8 - 2*9) = (-10, 20, -10)
+        //   row 1: (4,5,6) × (6,5,4) = (5*4 - 6*5, 6*6 - 4*4, 4*5 - 5*6)
+        //     = (-10, 20, -10)
+        //   row 2: (7,8,9) × (3,2,1) = (8*1 - 9*2, 9*3 - 7*1, 7*2 - 8*3)
+        //     = (-10, 20, -10)
+        let r_last = cross(&a, &b, -1).unwrap();
+        assert_eq!(r_last.shape(), &[3, 3]);
+        let d_last = r_last.data().unwrap();
+        let expect_last = [
+            -10.0, 20.0, -10.0,
+            -10.0, 20.0, -10.0,
+            -10.0, 20.0, -10.0,
+        ];
+        for (got, exp) in d_last.iter().zip(expect_last.iter()) {
+            assert!((got - exp).abs() < 1e-10, "dim=-1 got {got}, exp {exp}");
+        }
+
+        // dim=0: each column is a 3-vector. Column j of a × column j of b.
+        //   col 0: (1,4,7) × (9,6,3)
+        //     = (4*3 - 7*6, 7*9 - 1*3, 1*6 - 4*9) = (-30, 60, -30)
+        //   col 1: (2,5,8) × (8,5,2)
+        //     = (5*2 - 8*5, 8*8 - 2*2, 2*5 - 5*8) = (-30, 60, -30)
+        //   col 2: (3,6,9) × (7,4,1)
+        //     = (6*1 - 9*4, 9*7 - 3*1, 3*4 - 6*7) = (-30, 60, -30)
+        // Laid out row-major in the [3, 3] output:
+        //   [[-30, -30, -30],
+        //    [ 60,  60,  60],
+        //    [-30, -30, -30]]
+        let r_first = cross(&a, &b, 0).unwrap();
+        assert_eq!(r_first.shape(), &[3, 3]);
+        let d_first = r_first.data().unwrap();
+        let expect_first = [
+            -30.0, -30.0, -30.0,
+             60.0,  60.0,  60.0,
+            -30.0, -30.0, -30.0,
+        ];
+        for (got, exp) in d_first.iter().zip(expect_first.iter()) {
+            assert!((got - exp).abs() < 1e-10, "dim=0 got {got}, exp {exp}");
+        }
+
+        // The two outputs MUST differ on this non-trivial fixture —
+        // the audit failure was that they were identical because the
+        // `dim` parameter was being silently ignored.
+        assert_ne!(d_last, d_first);
+    }
+
+    #[test]
+    fn test_cross_dim_out_of_range_errors() {
+        let a = t(&[1.0, 0.0, 0.0], &[3]);
+        let b = t(&[0.0, 1.0, 0.0], &[3]);
+        assert!(cross(&a, &b, 5).is_err());
+        assert!(cross(&a, &b, -2).is_err());
+    }
+
+    #[test]
+    fn test_cross_dim_size_must_be_three() {
+        // shape [2, 4] — neither axis is length 3.
+        let a = t(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0], &[2, 4]);
+        let b = t(&[8.0, 7.0, 6.0, 5.0, 4.0, 3.0, 2.0, 1.0], &[2, 4]);
+        assert!(cross(&a, &b, 0).is_err());
+        assert!(cross(&a, &b, -1).is_err());
     }
 
     #[test]
