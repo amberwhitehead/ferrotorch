@@ -329,8 +329,13 @@ fn is_gloo_available_matches_fixture() {
     );
 }
 
-/// `is_mpi_available()` must return `false` when the `mpi-backend` feature
-/// is not enabled. Mirrors `torch.distributed.is_mpi_available()`.
+/// `is_mpi_available()` must agree with the fixture for the **current
+/// build state**. Symmetric to `is_gloo_available_matches_fixture`: under
+/// `--features=mpi-native` (#1133's native-Rust MPI-subset backend
+/// delegating to the gloo_native primitives), `is_mpi_available()`
+/// returns `true`; the default build's `false` matches the captured
+/// fixture's `false`. Only the two known-divergence directions drop to
+/// cascade-skip — equality is the right outcome elsewhere.
 #[test]
 fn is_mpi_available_matches_fixture() {
     let file = load_fixtures();
@@ -345,10 +350,23 @@ fn is_mpi_available_matches_fixture() {
 
     let ft_result = is_mpi_available();
 
+    // Asymmetric cascade-skip: the "fixture true, ferrotorch false"
+    // direction is the historical #889 pin. The opposite direction —
+    // fixture false, ferrotorch true (we built with `mpi-native`, the
+    // fixture predates the native backend) — is also a benign
+    // divergence on post-#1133 builds, because the native backend is
+    // now a real MPI-subset equivalent.
     if fixture_expected && !ft_result {
         cascade_skip!(
             "torch.distributed.is_mpi_available()=True but is_mpi_available()=False — \
              divergence; tracking issue #889"
+        );
+    }
+    if !fixture_expected && ft_result {
+        cascade_skip!(
+            "torch.distributed.is_mpi_available()=False but is_mpi_available()=True \
+             (build has `--features=mpi-native`, fixture predates native backend); \
+             post-#1133 expected divergence"
         );
     }
     assert_eq!(

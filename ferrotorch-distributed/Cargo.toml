@@ -27,14 +27,24 @@ nccl = ["gpu", "dep:libc"]
 # path.
 gloo-backend = []
 gloo-native = ["gloo-backend"]
-# Skeleton flags for the remaining backends (replaces closed #459). The
-# Gloo skeleton has been replaced by the native impl above; MPI / UCC
-# still ship API contracts only (modules always compile); enabling these
-# flags is what would turn on the actual FFI binding layers, tracked in
-# follow-ups #1133 (mpi) / #1134 (ucc) once a CI host with the
-# corresponding C library is available.
-mpi-backend = []
+# Skeleton flag for UCC (replaces closed #459, live in #1134). Module
+# always compiles; enabling this flag is what would turn on the actual
+# FFI binding layer once a CI host with the corresponding C library is
+# available.
 ucc-backend = []
+# `mpi-backend` was originally a fail-fast skeleton flag awaiting a C-FFI
+# binding (Open MPI / MPICH). #1133 replaces that skeleton with a
+# **native-Rust** MPI-subset backend that delegates to the `gloo_native`
+# primitives (ring allreduce / tree broadcast / ring barrier / full-mesh
+# send-recv): the subset of the MPI standard PyTorch's
+# `init_process_group(backend="mpi")` actually uses maps 1:1 onto those
+# operations. `mpi-native` is the forward-spelling alias that wires in
+# the real native impl; `mpi-backend` is retained for source-level
+# compatibility and aliases to the same code path. Both enable
+# `gloo-backend` because the actual transport / collective primitives
+# live in `gloo_native::`.
+mpi-native = ["gloo-backend"]
+mpi-backend = ["mpi-native"]
 
 [dependencies]
 ferrotorch-core = { workspace = true }

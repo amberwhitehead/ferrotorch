@@ -137,16 +137,22 @@
 //!   either, they return `Err` (PyTorch parity). See [`gpu_collective`]
 //!   for details.
 //!
-//! - **Skeleton backends** ([`gloo_backend`] / [`mpi_backend`] /
-//!   [`ucc_backend`], requires `gloo-backend` / `mpi-backend` /
-//!   `ucc-backend` feature respectively, all default off) — API contracts
-//!   only. Construction returns
+//! - **Native-Rust backends** ([`gloo_backend`] / [`mpi_backend`],
+//!   require `gloo-backend` / `mpi-native` feature respectively, both
+//!   default off) — pure-Rust TCP transport with textbook ring allreduce /
+//!   tree broadcast / ring barrier collectives. No C/C++ FFI. #1132
+//!   landed the gloo backend; #1133 landed the MPI-subset backend
+//!   delegating to the same gloo_native primitives. With the feature
+//!   off, construction returns
 //!   [`DistributedError::BackendUnavailable`](error::DistributedError::BackendUnavailable)
-//!   when the corresponding feature is off, and every
-//!   [`Backend`](backend::Backend) trait method also returns that error.
-//!   The features unlock real FFI bindings (Gloo: C++; MPI: C via the
-//!   `mpi` crate; UCC: C library) — tracked in #1132, #1133, #1134
-//!   respectively (replacing closed #459). Use
+//!   for source-compat with the original #459 skeleton contract. The
+//!   legacy `mpi-backend` feature name aliases to `mpi-native`.
+//!
+//! - **Skeleton backends** ([`ucc_backend`], requires `ucc-backend`
+//!   feature, default off) — API contract only. Construction returns
+//!   [`DistributedError::BackendUnavailable`](error::DistributedError::BackendUnavailable)
+//!   when the feature is off. The feature would unlock a real binding
+//!   (UCC C library) — tracked in #1134 (replacing closed #459). Use
 //!   [`is_gloo_available`](gloo_backend::is_gloo_available),
 //!   [`is_mpi_available`](mpi_backend::is_mpi_available), and
 //!   [`is_ucc_available`](ucc_backend::is_ucc_available) to discriminate
