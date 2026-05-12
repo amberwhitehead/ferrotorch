@@ -76,3 +76,15 @@ serde_json = { workspace = true }
 # package graph. The test code is gated on `cfg(feature = "gpu")` so the
 # binary contains no GPU references on non-CUDA builds.
 ferrotorch-gpu = { workspace = true }
+
+# Phase G.5 autograd backward parity harness — drives torch.autograd
+# reference grads against ferrotorch-core's `backward()` for the 25
+# canonical-op fixtures pinned at `ferrotorch/autograd-parity-v1`
+# (#1171). The example loads + dumps tensors via tiny inline binary
+# I/O so it pulls in zero extra deps. Companion files:
+#   * `scripts/pin_pretrained_autograd_fixtures.py`
+#   * `scripts/verify_autograd_inference.py`
+#   * `tests/conformance_autograd_parity.rs` (`#[ignore]`-gated)
+[[example]]
+name = "autograd_dump"
+path = "examples/autograd_dump.rs"
