@@ -173,6 +173,8 @@ pub mod dtensor;
 pub mod error;
 pub mod fsdp;
 pub mod gloo_backend;
+#[cfg(feature = "gloo-backend")]
+pub(crate) mod gloo_native;
 pub mod mpi_backend;
 pub mod p2p;
 pub mod pipeline;

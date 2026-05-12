@@ -1,115 +1,250 @@
-//! Gloo backend skeleton (tracked in #1132).
+//! Gloo backend public surface (issue #1132).
 //!
-//! [Gloo](https://github.com/facebookincubator/gloo) is the standard
-//! CPU-only collective-communication library used by PyTorch's
-//! `torch.distributed` when NCCL isn't available (or when ranks include
-//! CPU-only nodes). Architecturally it sits parallel to NCCL: a stand-alone
-//! C++ library exposing allreduce / allgather / broadcast / scatter / etc.
-//! with TCP, IB-verbs, and uv backends.
+//! The original #459 skeleton was a fail-fast stub that returned
+//! [`DistributedError::BackendUnavailable`] from every collective method
+//! while deferring the real binding work to a hypothetical `gloo-sys`
+//! C++ FFI crate. #1132 replaces that skeleton with a **native-Rust**
+//! implementation: pure `std::net::TcpStream` transport, length-prefixed
+//! framing, and textbook ring/tree collective algorithms. No `cc` crate,
+//! no `bindgen`, no `libgloo` link.
 //!
-//! # Status
+//! # Public surface
 //!
-//! This module ships the **API contract** so callers can already write
-//! `Backend::Gloo` paths and get a clear runtime error when the actual
-//! Gloo bindings aren't compiled in. Default off via the `gloo-backend`
-//! feature flag — non-Gloo builds (the workspace's primary CI target) get
-//! the "unavailable" path at runtime without the C++ dep tree.
+//! - [`GlooBackend`] — the user-facing handle. Implements
+//!   [`Backend`](crate::backend::Backend); construction goes through a
+//!   PyTorch-compatible rendezvous (`MASTER_ADDR`, `MASTER_PORT`, `RANK`,
+//!   `WORLD_SIZE`).
+//! - [`is_gloo_available`] — returns `true` iff the build was compiled
+//!   with the `gloo-backend` feature.
 //!
-//! # Why a skeleton
+//! # Feature gate
 //!
-//! The full Gloo binding would need:
-//! 1. A `gloo-sys` crate with the C++ FFI (Gloo is C++; needs `bindgen`
-//!    + a `cmake`-driven build of libgloo).
-//! 2. A Rust wrapper exposing the collective ops we use today (allreduce,
-//!    allgather, broadcast, barrier, send/recv).
-//! 3. CI coverage on Linux + macOS — Gloo doesn't ship Windows officially.
+//! Default off. Under `--features=gloo-backend`, the real native
+//! implementation is compiled in. Without the feature, [`GlooBackend::new`]
+//! and the env-var constructor still exist (so callers can write
+//! `Backend::Gloo` paths) but return
+//! [`DistributedError::BackendUnavailable`].
 //!
-//! That's a 2000+ LOC effort with a real C++ dep, so this skeleton lets
-//! the public API stabilise first. Tracked separately as #1132
-//! (replaces closed #459).
+//! The feature name retains the historical `gloo-backend` spelling (rather
+//! than `gloo-native`) to avoid a breaking rename of #459's published
+//! surface — see the `_surface_inventory.toml` entries and the
+//! `is_gloo_available_matches_fixture` conformance test.
 
 use std::time::Duration;
 
 use ferrotorch_core::FerrotorchResult;
 
 use crate::backend::Backend;
+#[cfg(not(feature = "gloo-backend"))]
 use crate::error::DistributedError;
 
+#[cfg(feature = "gloo-backend")]
+mod native {
+    pub use crate::gloo_native::{GlooBackendInner, GlooRendezvousConfig};
+}
+
 /// Returns `true` when this build was compiled with the `gloo-backend`
-/// feature enabled. Always `false` otherwise.
+/// feature enabled (which wires in the native-Rust TCP backend from #1132).
+///
+/// The same predicate covered the #459 fail-fast skeleton; #1132 keeps the
+/// signature stable so downstream code that switches on this function does
+/// not break.
 pub fn is_gloo_available() -> bool {
     cfg!(feature = "gloo-backend")
 }
 
-/// Skeleton Gloo backend handle. Construction fails with
-/// [`DistributedError::BackendUnavailable`] on non-Gloo builds.
+/// Native-Rust Gloo backend handle.
+///
+/// Construction:
+///
+/// - [`GlooBackend::new`] — explicit rank / world-size / master-addr.
+/// - [`GlooBackend::from_env`] — read `MASTER_ADDR` / `MASTER_PORT` /
+///   `RANK` / `WORLD_SIZE` (PyTorch-compatible).
+///
+/// Without the `gloo-backend` cargo feature, every constructor returns
+/// [`DistributedError::BackendUnavailable`]. The struct itself is still
+/// present so `dyn Backend` type erasure paths compile against it.
 #[derive(Debug)]
 pub struct GlooBackend {
-    rank: usize,
-    world_size: usize,
+    /// `Some` on feature-enabled builds; `None` is unreachable (constructors
+    /// reject before reaching here when the feature is off, and the field
+    /// is the only inhabitant otherwise). The `Option` is required so the
+    /// no-feature struct has a layout — `()` would also work but `Option`
+    /// lets us share one impl block across both builds.
+    #[cfg(feature = "gloo-backend")]
+    inner: native::GlooBackendInner,
+    #[cfg(not(feature = "gloo-backend"))]
+    _phantom: std::marker::PhantomData<()>,
 }
 
 impl GlooBackend {
-    /// Try to initialise a Gloo backend for the given rank / world size.
+    /// Construct a Gloo backend with explicit parameters.
     ///
-    /// Returns [`DistributedError::BackendUnavailable`] when the
-    /// `gloo-backend` feature is off.
-    pub fn new(rank: usize, world_size: usize) -> FerrotorchResult<Self> {
-        if !is_gloo_available() {
-            return Err(DistributedError::BackendUnavailable { backend: "gloo" }.into());
+    /// * `rank` — this process's rank.
+    /// * `world_size` — total number of ranks. Must be `>= 2`.
+    /// * `master_addr` — `host:port` of rank 0's rendezvous listener
+    ///   (matches PyTorch's `MASTER_ADDR:MASTER_PORT` convention).
+    ///
+    /// # Errors
+    ///
+    /// - [`DistributedError::BackendUnavailable`] without the
+    ///   `gloo-backend` feature.
+    /// - [`DistributedError::InvalidWorldSize`] / [`DistributedError::InvalidRank`]
+    ///   on out-of-range inputs.
+    /// - [`DistributedError::Io`] on rendezvous network failures.
+    #[allow(unused_variables)] // Args are real when the feature is on.
+    pub fn new(rank: usize, world_size: usize, master_addr: &str) -> FerrotorchResult<Self> {
+        #[cfg(feature = "gloo-backend")]
+        {
+            use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
+            let cfg = native::GlooRendezvousConfig {
+                master_addr: master_addr.to_string(),
+                rank,
+                world_size,
+                bind_addr: SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 0)),
+            };
+            let inner = native::GlooBackendInner::new(&cfg)?;
+            Ok(Self { inner })
         }
-        Ok(Self { rank, world_size })
+        #[cfg(not(feature = "gloo-backend"))]
+        {
+            Err(DistributedError::BackendUnavailable { backend: "gloo" }.into())
+        }
+    }
+
+    /// Construct a Gloo backend from PyTorch's standard env vars:
+    /// `MASTER_ADDR`, `MASTER_PORT`, `RANK`, `WORLD_SIZE`.
+    ///
+    /// # Errors
+    ///
+    /// See [`GlooBackend::new`]. Additionally returns
+    /// [`DistributedError::Io`] if any required env var is missing or
+    /// fails to parse as a `usize`.
+    pub fn from_env() -> FerrotorchResult<Self> {
+        #[cfg(feature = "gloo-backend")]
+        {
+            let cfg = native::GlooRendezvousConfig::from_env()?;
+            let inner = native::GlooBackendInner::new(&cfg)?;
+            Ok(Self { inner })
+        }
+        #[cfg(not(feature = "gloo-backend"))]
+        {
+            Err(DistributedError::BackendUnavailable { backend: "gloo" }.into())
+        }
+    }
+
+    /// Ring-allreduce a contiguous `f32` slice **in place** with element-wise
+    /// sum across all ranks. Available only with the `gloo-backend` feature.
+    #[cfg(feature = "gloo-backend")]
+    pub fn ring_allreduce_sum_f32(&self, data: &mut [f32]) -> FerrotorchResult<()> {
+        self.inner.ring_allreduce_sum_f32(data)
+    }
+
+    /// Tree-broadcast a contiguous `f32` slice from `root`. Available only
+    /// with the `gloo-backend` feature.
+    #[cfg(feature = "gloo-backend")]
+    pub fn tree_broadcast_f32(&self, data: &mut [f32], root: usize) -> FerrotorchResult<()> {
+        self.inner.tree_broadcast_f32(data, root)
     }
 }
 
 impl Backend for GlooBackend {
     fn rank(&self) -> usize {
-        self.rank
+        #[cfg(feature = "gloo-backend")]
+        {
+            self.inner.rank()
+        }
+        #[cfg(not(feature = "gloo-backend"))]
+        {
+            // Unreachable in practice: construction always errors without
+            // the feature, so no caller can hold a `GlooBackend` instance
+            // here. A panic would be confusing — return 0 to keep the
+            // surface total. This matches the #459 contract.
+            0
+        }
     }
 
     fn world_size(&self) -> usize {
-        self.world_size
+        #[cfg(feature = "gloo-backend")]
+        {
+            Backend::world_size(&self.inner)
+        }
+        #[cfg(not(feature = "gloo-backend"))]
+        {
+            0
+        }
     }
 
-    fn send(&self, _data: &[u8], _dst_rank: usize) -> FerrotorchResult<()> {
-        Err(DistributedError::BackendUnavailable { backend: "gloo" }.into())
+    #[allow(unused_variables)]
+    fn send(&self, data: &[u8], dst_rank: usize) -> FerrotorchResult<()> {
+        #[cfg(feature = "gloo-backend")]
+        {
+            self.inner.send(data, dst_rank)
+        }
+        #[cfg(not(feature = "gloo-backend"))]
+        {
+            Err(DistributedError::BackendUnavailable { backend: "gloo" }.into())
+        }
     }
 
-    fn recv(&self, _dst: &mut [u8], _src_rank: usize) -> FerrotorchResult<()> {
-        Err(DistributedError::BackendUnavailable { backend: "gloo" }.into())
+    #[allow(unused_variables)]
+    fn recv(&self, dst: &mut [u8], src_rank: usize) -> FerrotorchResult<()> {
+        #[cfg(feature = "gloo-backend")]
+        {
+            self.inner.recv(dst, src_rank)
+        }
+        #[cfg(not(feature = "gloo-backend"))]
+        {
+            Err(DistributedError::BackendUnavailable { backend: "gloo" }.into())
+        }
     }
 
+    #[allow(unused_variables)]
     fn recv_timeout(
         &self,
-        _dst: &mut [u8],
-        _src_rank: usize,
-        _timeout: Duration,
+        dst: &mut [u8],
+        src_rank: usize,
+        timeout: Duration,
     ) -> FerrotorchResult<()> {
-        Err(DistributedError::BackendUnavailable { backend: "gloo" }.into())
+        #[cfg(feature = "gloo-backend")]
+        {
+            self.inner.recv_timeout(dst, src_rank, timeout)
+        }
+        #[cfg(not(feature = "gloo-backend"))]
+        {
+            Err(DistributedError::BackendUnavailable { backend: "gloo" }.into())
+        }
     }
 
     fn barrier(&self) -> FerrotorchResult<()> {
-        Err(DistributedError::BackendUnavailable { backend: "gloo" }.into())
+        #[cfg(feature = "gloo-backend")]
+        {
+            self.inner.barrier()
+        }
+        #[cfg(not(feature = "gloo-backend"))]
+        {
+            Err(DistributedError::BackendUnavailable { backend: "gloo" }.into())
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(not(feature = "gloo-backend"))]
     use ferrotorch_core::FerrotorchError;
 
+    #[cfg(not(feature = "gloo-backend"))]
     #[test]
     fn gloo_unavailable_without_feature() {
         // Non-vacuous discrimination: when the `gloo-backend` feature is
         // off (the default), construction must fail with a
         // `DistributedError::BackendUnavailable { backend: "gloo" }`,
         // which converts to `FerrotorchError::InvalidArgument { message }`
-        // whose `message` carries the backend name.
-        if is_gloo_available() {
-            // Feature is on; the unavailable contract doesn't apply.
-            return;
-        }
-        let err = GlooBackend::new(0, 2).expect_err("default build must err");
+        // whose `message` carries the backend name. This test preserves
+        // the #459 contract validated by `is_gloo_available_matches_fixture`.
+        // Feature-on path is exercised in `gloo_native::tests` instead.
+        let err = GlooBackend::new(0, 2, "127.0.0.1:0").expect_err("default build must err");
         match err {
             FerrotorchError::InvalidArgument { ref message } => {
                 assert!(
@@ -127,10 +262,23 @@ mod tests {
         }
     }
 
+    #[cfg(not(feature = "gloo-backend"))]
+    #[test]
+    fn gloo_from_env_unavailable_without_feature() {
+        let err = GlooBackend::from_env().expect_err("default build must err");
+        match err {
+            FerrotorchError::InvalidArgument { message } => {
+                assert!(message.contains("`gloo`"));
+            }
+            other => panic!("expected InvalidArgument, got {other:?}"),
+        }
+    }
+
     #[test]
     fn is_gloo_available_default_off() {
         // The default workspace build does not enable `gloo-backend`, so
-        // this returns false. A future Gloo build would flip this.
+        // this returns false. Feature-enabled builds exercise the live
+        // path via the native-module tests instead.
         if !cfg!(feature = "gloo-backend") {
             assert!(!is_gloo_available());
         }

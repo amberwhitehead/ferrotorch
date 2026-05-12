@@ -16,13 +16,23 @@ readme = "README.md"
 default = []
 gpu = ["dep:ferrotorch-gpu"]
 nccl = ["gpu", "dep:libc"]
-# Skeleton flags for the additional backends (replaces closed #459). The
-# crates themselves still have the API contracts in place (Gloo/MPI/UCC
-# modules always compile); enabling these flags is what turns on the actual
-# FFI binding layers, which are not yet implemented and will live in
-# follow-ups #1132 (gloo) / #1133 (mpi) / #1134 (ucc) once a CI host with
-# the corresponding C library is available.
+# `gloo-backend` toggles the native-Rust Gloo backend wired in #1132 —
+# pure-Rust TCP transport with textbook ring allreduce / tree broadcast /
+# ring barrier collectives. No C/C++ FFI: the original #459 skeleton's
+# C++-binding plan was redirected to a native implementation per the
+# closure-task user directive.
+#
+# `gloo-native` is a forward-compatible alias retained so downstream
+# crates referring to either name continue to resolve to the same code
+# path.
 gloo-backend = []
+gloo-native = ["gloo-backend"]
+# Skeleton flags for the remaining backends (replaces closed #459). The
+# Gloo skeleton has been replaced by the native impl above; MPI / UCC
+# still ship API contracts only (modules always compile); enabling these
+# flags is what would turn on the actual FFI binding layers, tracked in
+# follow-ups #1133 (mpi) / #1134 (ucc) once a CI host with the
+# corresponding C library is available.
 mpi-backend = []
 ucc-backend = []
 

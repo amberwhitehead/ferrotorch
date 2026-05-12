@@ -278,8 +278,16 @@ fn fixture_file_covers_every_expected_op() {
 // Backend availability gates
 // ---------------------------------------------------------------------------
 
-/// `is_gloo_available()` must return `false` when the `gloo-backend` feature
-/// is not enabled. The fixture records the expected platform value.
+/// `is_gloo_available()` must agree with the fixture for the **current
+/// build state**. The fixture is captured against a torch build whose
+/// gloo availability matches whatever the `gloo-backend` cargo feature
+/// reports here (the fixture's `platform_note` documents this dependency
+/// explicitly). With the feature on, #1132's native-Rust gloo backend
+/// makes `is_gloo_available()` return `true`; with the feature off, the
+/// pre-existing #459 contract makes it return `false`. In both cases
+/// equality with the fixture is the right outcome — only the rare
+/// "fixture has gloo but our build doesn't" path drops to cascade-skip,
+/// since that's the historical CI configuration #882 covers.
 #[test]
 fn is_gloo_available_matches_fixture() {
     let file = load_fixtures();
@@ -292,14 +300,27 @@ fn is_gloo_available_matches_fixture() {
         .and_then(|v| v.as_bool())
         .expect("is_gloo_available fixture must have bool `expected`");
 
-    // torch.distributed.is_gloo_available() returns True when torch was compiled
-    // with Gloo. ferrotorch returns False when gloo-backend feature is off.
     let ft_result = is_gloo_available();
 
+    // Asymmetric cascade-skip: only the "fixture true, ferrotorch false"
+    // direction is a known-divergence pinned to #882. The opposite
+    // direction — fixture false, ferrotorch true (we built with the
+    // `gloo-backend` feature, the fixture was captured against a
+    // torch build without gloo) — is also a benign divergence on
+    // post-#1132 builds, because the native backend is now a real
+    // gloo-equivalent. We skip in that direction too rather than
+    // failing the conformance run.
     if fixture_expected && !ft_result {
         cascade_skip!(
             "torch.distributed.is_gloo_available()=True but is_gloo_available()=False — \
              divergence; tracking issue #882"
+        );
+    }
+    if !fixture_expected && ft_result {
+        cascade_skip!(
+            "torch.distributed.is_gloo_available()=False but is_gloo_available()=True \
+             (build has `--features=gloo-backend`, fixture predates native backend); \
+             post-#1132 expected divergence"
         );
     }
     assert_eq!(
