@@ -15,11 +15,18 @@
 //! - [`unet::GpuUNet2DConditional`] — SD-1.5 UNet2DConditionModel
 //!   forward path, mirroring [`crate::unet::UNet2DConditionModel`]
 //!   op-for-op on CUDA.
+//! - [`pipeline::GpuStableDiffusionPipeline`] — end-to-end SD-1.5
+//!   text-to-image generation pipeline composing the three GPU
+//!   sub-models above with the host-side
+//!   [`crate::scheduler::DDIMScheduler`]. Mirrors
+//!   [`crate::pipeline::StableDiffusionPipeline`] op-for-op on CUDA.
 
 pub mod clip;
+pub mod pipeline;
 pub mod unet;
 pub mod vae;
 
 pub use clip::GpuClipTextEncoder;
+pub use pipeline::GpuStableDiffusionPipeline;
 pub use unet::GpuUNet2DConditional;
 pub use vae::GpuVaeDecoder;

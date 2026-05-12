@@ -710,6 +710,67 @@ static MODELS: &[ModelInfo] = &[
         format: WeightsFormat::FerrotorchStateDict,
         num_parameters: 0,
     },
+    // #1163: sd-v1-5-generation-trajectory — Phase F end-to-end SD-1.5
+    // text-to-image generation parity fixtures. The mirror is a
+    // fixture *bundle* (`bundle.tar`) plus per-stage individual files:
+    //   * prompt_input_ids.bin   — `[1, 77]` CLIP-BPE tokenized prompt
+    //                              "a photograph of an astronaut riding a horse"
+    //   * uncond_input_ids.bin   — `[1, 77]` CLIP-BPE tokenized empty prompt
+    //   * cond_embeds.bin        — `[1, 77, 768]` CLIP last_hidden_state
+    //                              for the prompt
+    //   * uncond_embeds.bin      — `[1, 77, 768]` CLIP last_hidden_state
+    //                              for the empty negative prompt
+    //   * init_latent.bin        — `[1, 4, 64, 64]` Gaussian noise from
+    //                              torch.Generator(device='cpu').manual_seed(42)
+    //                              (the rust pipeline reads this back because
+    //                              rust's `rand::StdRng` PRNG does not match
+    //                              torch's; cf. #1156 sklearn shuffled
+    //                              configs which take the same approach)
+    //   * step_K_{noise_pred_uncond,noise_pred_cond,guided_noise,latent_after}.bin
+    //                            — per-step UNet outputs (unconditional +
+    //                              conditional), the CFG-blended noise
+    //                              (uncond + 7.5 * (cond - uncond)), and the
+    //                              latent emitted by the DDIM scheduler
+    //                              step. K runs 0..3 for the 4-step recipe.
+    //   * final_image.bin        — `[1, 3, 512, 512]` decoded image in
+    //                              [-1, 1] from `vae.decode(latent / 0.18215)`
+    //   * meta.json              — prompt / seed / steps / guidance scale /
+    //                              timesteps list / scheduler config string
+    //
+    // The reference trajectory is produced by running
+    // `diffusers.StableDiffusionPipeline.from_pretrained(
+    //    "runwayml/stable-diffusion-v1-5", torch_dtype=torch.float32,
+    //    safety_checker=None,
+    // )` with `DDIMScheduler.from_config(pipe.scheduler.config)` for
+    // `num_inference_steps=4, guidance_scale=7.5` on the fixed prompt
+    // above. The 4-step recipe yields `timesteps=[751, 501, 251, 1]`
+    // (Leading spacing + `steps_offset=1`); 4 steps is a quick-iteration
+    // setting that still exercises every component (CLIP encode * 2,
+    // UNet * 8 [4 steps * CFG], scheduler * 4, VAE decode * 1).
+    //
+    // ferrotorch-side companion files:
+    //   * `scripts/pin_pretrained_sd_pipeline.py`
+    //   * `scripts/verify_sd_pipeline_inference.py`
+    //   * `ferrotorch-diffusion/examples/sd_pipeline_dump.rs`
+    //   * `ferrotorch-diffusion/src/scheduler.rs` (new DDIMScheduler)
+    //   * `ferrotorch-diffusion/src/pipeline.rs` (new StableDiffusionPipeline)
+    //   * `ferrotorch-diffusion/tests/conformance_sd_pipeline.rs`
+    //
+    // `weights_url`/`weights_sha256` point at the tar bundle so this
+    // registry entry has the same shape as the rest of the parity
+    // bundles; the verify harness itself pulls individual files via
+    // `hf_hub_download` and does not consume the tar. The
+    // FerrotorchStateDict format tag indicates "not a HF safetensors
+    // checkpoint" — the bundle is a single-file convenience archive
+    // and not consumed by the safetensors loader.
+    ModelInfo {
+        name: "sd-v1-5-generation-trajectory",
+        description: "Phase F SD-1.5 end-to-end text-to-image generation trajectory fixtures: prompt=\"a photograph of an astronaut riding a horse\", seed=42, num_inference_steps=4, guidance_scale=7.5, DDIMScheduler(scaled_linear, scaled_linear, eps prediction, leading spacing, steps_offset=1). Captures CLIP cond/uncond embeddings, initial Gaussian noise, every per-step (noise_pred_uncond, noise_pred_cond, guided_noise, latent_after_step) record, and the final VAE-decoded image. CreativeML Open RAIL-M; real-artifact baseline for SD-1.5 text-to-image generation parity vs diffusers (#1163).",
+        weights_url: "https://huggingface.co/ferrotorch/sd-v1-5-generation-trajectory/resolve/main/bundle.tar",
+        weights_sha256: "5fa7bd809e3aaa120a79c744801de44342a2e22ab82137cd5fe0d43302924c6e",
+        format: WeightsFormat::FerrotorchStateDict,
+        num_parameters: 0,
+    },
 ];
 
 /// List all available pretrained models.
