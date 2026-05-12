@@ -42,17 +42,30 @@ use ferrotorch_core::{FerrotorchResult, Tensor, TensorStorage};
 use ferrotorch_diffusion::{load_vae_decoder, VaeDecoderConfig};
 use ferrotorch_hub::{hf_download_model, HubCache};
 
+/// Target device for the forward pass.
+///
+/// `--device gpu` requires the `cuda` cargo feature; without it the
+/// example errors out at arg-parse time so a missing-feature build
+/// can't silently fall back to CPU.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Device {
+    Cpu,
+    Gpu,
+}
+
 #[derive(Debug)]
 struct Args {
     model: String,
     output: PathBuf,
     latent: Option<PathBuf>,
+    device: Device,
 }
 
 fn parse_args() -> Result<Args, String> {
     let mut model: Option<String> = None;
     let mut output: Option<PathBuf> = None;
     let mut latent: Option<PathBuf> = None;
+    let mut device = Device::Cpu;
     let argv: Vec<String> = std::env::args().collect();
     let mut i = 1usize;
     while i < argv.len() {
@@ -73,6 +86,15 @@ fn parse_args() -> Result<Args, String> {
                 ));
                 i += 2;
             }
+            "--device" => {
+                let v = argv.get(i + 1).ok_or("--device needs a value (cpu|gpu)")?;
+                device = match v.as_str() {
+                    "cpu" => Device::Cpu,
+                    "gpu" => Device::Gpu,
+                    other => return Err(format!("--device must be cpu|gpu, got {other:?}")),
+                };
+                i += 2;
+            }
             other => return Err(format!("unknown argument {other:?}")),
         }
     }
@@ -80,6 +102,7 @@ fn parse_args() -> Result<Args, String> {
         model: model.ok_or("--model is required (e.g. --model sd-v1-5-vae-decoder)")?,
         output: output.ok_or("--output is required (path to decoded image .bin)")?,
         latent,
+        device,
     })
 }
 
@@ -195,7 +218,7 @@ fn run() -> FerrotorchResult<()> {
         weights_path.display()
     );
     let (decoder, drop_report) =
-        load_vae_decoder::<f32>(&weights_path, cfg, /* strict = */ false)?;
+        load_vae_decoder::<f32>(&weights_path, cfg.clone(), /* strict = */ false)?;
     eprintln!(
         "[vae_decode_dump] loaded weights: dropped_keys={}",
         drop_report.dropped.len(),
@@ -205,7 +228,13 @@ fn run() -> FerrotorchResult<()> {
     // The on-disk latent is already pre-multiplied by `scaling_factor`
     // (matching the SD pipeline convention): `decode_with_scaling`
     // divides on the way in.
-    let out = decoder.decode_with_scaling(&latent)?;
+    let out = match args.device {
+        Device::Cpu => {
+            eprintln!("[vae_decode_dump] device = cpu");
+            decoder.decode_with_scaling(&latent)?
+        }
+        Device::Gpu => run_gpu(&decoder, &latent, &cfg)?,
+    };
     let out_shape = out.shape();
     let out_data = out.data()?;
     assert_eq!(
@@ -263,6 +292,46 @@ fn locate_weights(dir: &Path) -> FerrotorchResult<PathBuf> {
             "neither model.safetensors nor diffusion_pytorch_model.safetensors found in {}",
             dir.display()
         ),
+    })
+}
+
+/// GPU forward path. Builds the [`GpuVaeDecoder`] from the already-
+/// loaded CPU decoder's state-dict and runs `decode` on device 0.
+///
+/// Without the `cuda` cargo feature this is a hard error — the example
+/// must refuse to silently fall back to CPU when the harness asked
+/// for GPU.
+#[cfg(feature = "cuda")]
+fn run_gpu(
+    decoder: &ferrotorch_diffusion::VaeDecoder<f32>,
+    latent: &Tensor<f32>,
+    _cfg: &VaeDecoderConfig,
+) -> FerrotorchResult<Tensor<f32>> {
+    use ferrotorch_diffusion::gpu::GpuVaeDecoder;
+    use ferrotorch_gpu::GpuDevice;
+
+    eprintln!("[vae_decode_dump] device = gpu");
+    let device = GpuDevice::new(0).map_err(|e| ferrotorch_core::FerrotorchError::InvalidArgument {
+        message: format!("GpuDevice::new(0) failed: {e}"),
+    })?;
+    let (gpu, report) = GpuVaeDecoder::from_module(decoder, &device)?;
+    eprintln!(
+        "[vae_decode_dump] gpu state-dict load: dropped_keys={}",
+        report.dropped.len(),
+    );
+    gpu.decode(latent)
+}
+
+#[cfg(not(feature = "cuda"))]
+fn run_gpu(
+    _decoder: &ferrotorch_diffusion::VaeDecoder<f32>,
+    _latent: &Tensor<f32>,
+    _cfg: &VaeDecoderConfig,
+) -> FerrotorchResult<Tensor<f32>> {
+    Err(ferrotorch_core::FerrotorchError::InvalidArgument {
+        message: "--device gpu requires the `cuda` cargo feature \
+                  (build with `--features=cuda`)"
+            .into(),
     })
 }
 

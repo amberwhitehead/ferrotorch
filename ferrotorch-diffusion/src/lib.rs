@@ -101,8 +101,12 @@ pub mod attention;
 pub mod blocks;
 pub mod clip_text_encoder;
 pub mod config;
+#[cfg(feature = "cuda")]
+pub mod gpu;
+pub mod pipeline;
 pub mod resnet_block_time;
 pub mod safetensors_loader;
+pub mod scheduler;
 pub mod time_embedding;
 pub mod unet;
 pub mod unet_config;
@@ -115,8 +119,10 @@ pub use clip_text_encoder::{
     ClipTextEncoder,
 };
 pub use config::VaeDecoderConfig;
+pub use pipeline::{PipelineStepDump, StableDiffusionPipeline};
 pub use resnet_block_time::ResnetBlock2DTime;
 pub use safetensors_loader::{load_clip_text_encoder, load_unet, load_vae_decoder, DropReport};
+pub use scheduler::{BetaSchedule, DDIMConfig, DDIMScheduler, PredictionType, TimestepSpacing};
 pub use time_embedding::{TimestepEmbedding, Timesteps};
 pub use unet::{
     AnyDownBlock, AnyUpBlock, CrossAttnDownBlock2D, CrossAttnUpBlock2D, DownBlock2D, UNet2DConditionModel,

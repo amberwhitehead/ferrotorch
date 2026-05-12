@@ -155,6 +155,8 @@ pub mod device;
 pub mod error;
 pub mod flash_attention;
 pub mod graph;
+#[cfg(feature = "cuda")]
+pub mod group_norm;
 pub mod kernels;
 pub mod memory_guard;
 pub mod module_cache;
@@ -165,6 +167,8 @@ pub mod sparse;
 pub mod stream;
 pub mod tensor_bridge;
 pub mod transfer;
+#[cfg(feature = "cuda")]
+pub mod upsample;
 
 // Re-exports for ergonomic use.
 pub use allocator::CudaAllocator;
@@ -189,6 +193,10 @@ pub use conv::gpu_conv2d_f32;
 pub use device::GpuDevice;
 pub use error::{GpuError, GpuResult};
 pub use flash_attention::{gpu_flash_attention_f32, gpu_flash_attention_f64};
+#[cfg(feature = "cuda")]
+pub use group_norm::gpu_group_norm_f32;
+#[cfg(feature = "cuda")]
+pub use upsample::gpu_nearest_upsample2x_f32;
 pub use graph::{
     CaptureMode, CapturePool, CaptureStatus, CapturedGraph, GraphPoolHandle, begin_capture,
     capture_pool_for_handle, end_capture, end_capture_with_pool, graph_pool_handle,

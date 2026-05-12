@@ -14,12 +14,22 @@ readme = "README.md"
 
 [features]
 default = []
+# CUDA GPU backend for SD-family inference. Pulls in ferrotorch-gpu and
+# cudarc so the optional `gpu::GpuVaeDecoder` (and follow-ups for UNet /
+# CLIP) can run weights resident in VRAM. Default builds do NOT require
+# a GPU.
+cuda = [
+    "dep:ferrotorch-gpu",
+    "dep:cudarc",
+]
 
 [dependencies]
 ferrotorch-core = { workspace = true }
 ferrotorch-nn = { workspace = true }
 ferrotorch-serialize = { workspace = true }
 ferrotorch-hub = { workspace = true }
+ferrotorch-gpu = { workspace = true, optional = true }
+cudarc = { workspace = true, optional = true }
 num-traits = { workspace = true }
 safetensors = { workspace = true }
 serde = { workspace = true }
@@ -45,3 +55,7 @@ path = "examples/unet_probe_dump.rs"
 [[example]]
 name = "clip_text_encode_dump"
 path = "examples/clip_text_encode_dump.rs"
+
+[[example]]
+name = "sd_pipeline_dump"
+path = "examples/sd_pipeline_dump.rs"
