@@ -27,11 +27,24 @@ nccl = ["gpu", "dep:libc"]
 # path.
 gloo-backend = []
 gloo-native = ["gloo-backend"]
-# Skeleton flag for UCC (replaces closed #459, live in #1134). Module
-# always compiles; enabling this flag is what would turn on the actual
-# FFI binding layer once a CI host with the corresponding C library is
-# available.
-ucc-backend = []
+# `ucc-backend` was originally a fail-fast skeleton flag awaiting a C-FFI
+# binding (UCC C library). #1134 replaces that skeleton with a
+# **native-Rust** UCC router that delegates CPU collectives to the
+# `gloo_native` primitives (ring allreduce / tree broadcast / ring barrier
+# / full-mesh send-recv) and — with `ucc-native-gpu` — routes GPU-tensor
+# collectives through the NCCL fast path (#1135). UCC's value is the
+# *unified* routing across transports, not a single new transport, so the
+# router shape is what closed-task expectations actually drive.
+#
+# `ucc-native` wires the real native implementation; `ucc-backend` is
+# retained as a source-compat alias resolving to the same code path.
+# Both enable `gloo-backend` because CPU collectives live in
+# `gloo_native::`. `ucc-native-gpu` additionally enables `nccl` to wire
+# in the GPU fast path. No `ucc-sys`, no `libucc.so` link — pure-Rust
+# replacement for the original "wait on UCC C ABI" plan.
+ucc-native = ["gloo-backend"]
+ucc-backend = ["ucc-native"]
+ucc-native-gpu = ["ucc-native", "nccl"]
 # `mpi-backend` was originally a fail-fast skeleton flag awaiting a C-FFI
 # binding (Open MPI / MPICH). #1133 replaces that skeleton with a
 # **native-Rust** MPI-subset backend that delegates to the `gloo_native`

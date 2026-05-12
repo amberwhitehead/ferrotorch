@@ -375,8 +375,9 @@ fn is_mpi_available_matches_fixture() {
     );
 }
 
-/// `is_ucc_available()` must return `false` when the `ucc-backend` feature
-/// is not enabled. Mirrors `torch.distributed.is_ucc_available()`.
+/// `is_ucc_available()` must return `false` when neither the
+/// `ucc-native` nor its `ucc-backend` alias feature is enabled.
+/// Mirrors `torch.distributed.is_ucc_available()`.
 #[test]
 fn is_ucc_available_matches_fixture() {
     let file = load_fixtures();
@@ -391,10 +392,24 @@ fn is_ucc_available_matches_fixture() {
 
     let ft_result = is_ucc_available();
 
+    // Asymmetric cascade-skip: the "fixture true, ferrotorch false"
+    // direction is the historical #890 pin. The opposite direction —
+    // fixture false, ferrotorch true (we built with `ucc-native`, the
+    // fixture predates the native router) — is also a benign
+    // divergence on post-#1134 builds, because the native backend is
+    // now a real UCC-router equivalent (CPU via gloo_native, GPU via
+    // NCCL under `ucc-native-gpu`).
     if fixture_expected && !ft_result {
         cascade_skip!(
             "torch.distributed.is_ucc_available()=True but is_ucc_available()=False — \
              divergence; tracking issue #890"
+        );
+    }
+    if !fixture_expected && ft_result {
+        cascade_skip!(
+            "torch.distributed.is_ucc_available()=False but is_ucc_available()=True \
+             (build has `--features=ucc-native`, fixture predates native router); \
+             post-#1134 expected divergence"
         );
     }
     assert_eq!(
