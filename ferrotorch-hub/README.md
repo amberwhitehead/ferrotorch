@@ -26,6 +26,14 @@ for model in list_models() {
 let state_dict = load_pretrained::<f32>("resnet50").unwrap();
 ```
 
+> Note: a handful of entries in the registry (e.g., the placeholder
+> `unet`, `maskrcnn_resnet50_fpn`, and `deeplabv3_resnet50` rows) ship
+> with an all-zero `weights_sha256` because no authoritative public
+> mirror has been pinned yet. `load_pretrained` and `download_weights`
+> deliberately fail-fast on those entries with `InvalidArgument` rather
+> than silently skipping verification — see `registry.rs` for the
+> per-entry rationale.
+
 ## Part of ferrotorch
 
 This crate is one component of the [ferrotorch](https://github.com/dollspace-gay/ferrotorch) workspace.

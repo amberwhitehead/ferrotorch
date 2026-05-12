@@ -8,7 +8,7 @@ Operation profiling and Chrome trace export for ferrotorch.
 - **`with_profiler`** -- scoped profiling that captures a `ProfileReport` from a closure
 - **`ProfileReport`** -- summary with `table()` for human-readable output and Chrome trace JSON export (`chrome://tracing`)
 - **`ProfileEvent`** -- individual timing event with operation name, category, and input shapes
-- **`OpSummary`** -- aggregated statistics per operation type (count, total time, mean, min, max)
+- **`OpSummary`** -- aggregated statistics per operation type (count, total time, mean, max), split between CPU and CUDA invocations
 - **`ProfileConfig`** -- configure which events to record
 
 ## Quick start

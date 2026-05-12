@@ -1,4 +1,4 @@
-// CL-325 — default_collate: stack tensors into batches
+// default_collate: stack tensors into batches.
 
 use ferrotorch_core::{FerrotorchError, FerrotorchResult, Float, Tensor, stack};
 

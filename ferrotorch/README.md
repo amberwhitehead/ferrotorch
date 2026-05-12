@@ -9,8 +9,8 @@ This is the umbrella crate that re-exports all ferrotorch sub-crates through a s
 ### Always included
 - **ferrotorch-core** — Tensor, autograd, 80+ differentiable ops, complex / sparse / named tensors, FFT, signal, masked, quantization, einops
 - **ferrotorch-nn** — Module trait, 30+ layers (Linear, Conv1d/2d, LSTM, GRU, Attention, norms, activations, lazy modules), losses, LoRA
-- **ferrotorch-optim** — 19 optimizers (SGD, Adam, AdamW, Adamax, NAdam, RAdam, Adagrad, Adadelta, Adafactor, RMSprop, Rprop, ASGD, SparseAdam, L-BFGS, Muon, K-FAC, EMA, SWA), 12+ LR schedulers, gradient clipping
-- **ferrotorch-data** — Dataset, DataLoader (parallel via rayon), DistributedSampler, collation, transforms, NumPy/Arrow interop
+- **ferrotorch-optim** — 18 optimizers (SGD, Adam, AdamW, Adamax, NAdam, RAdam, Adagrad, Adadelta, Adafactor, RMSprop, Rprop, ASGD, SparseAdam, L-BFGS, Muon, K-FAC, EMA, SWA), 12+ LR schedulers, gradient clipping
+- **ferrotorch-data** — Dataset, DataLoader (parallel via rayon), DistributedSampler, collation, transforms, Apache Arrow / Polars interop (feature `arrow`)
 - **ferrotorch-vision** — 10 classification (ResNet, VGG, ViT-B/16, EfficientNet-B0, ConvNeXt-T, Swin-T, MobileNetV2, MobileNetV3, DenseNet-121, InceptionV3), 3 detection (Faster R-CNN, Mask R-CNN, SSD300), 2 segmentation (DeepLabV3, FCN), plus U-Net and YOLO; MNIST/CIFAR/ImageFolder datasets; image I/O
 
 ### Default features (opt-out with `default-features = false`)
@@ -60,18 +60,26 @@ fn main() -> FerrotorchResult<()> {
 ## Submodules
 
 ```rust
-use ferrotorch::nn::*;           // layers, losses, activations
-use ferrotorch::optim::*;        // optimizers, schedulers
-use ferrotorch::data::*;         // datasets, dataloaders
-use ferrotorch::vision::*;       // models, transforms
-use ferrotorch::train::*;        // Learner, callbacks
-use ferrotorch::serialize::*;    // ONNX, safetensors
-use ferrotorch::jit::*;          // tracing, IR
+// Always-on submodules (matching the `[features]` defaults):
+use ferrotorch::nn::*;            // layers, losses, activations
+use ferrotorch::optim::*;         // optimizers, schedulers
+use ferrotorch::data::*;          // datasets, dataloaders, samplers
+use ferrotorch::vision::*;        // models, transforms
+use ferrotorch::train::*;         // Learner, callbacks, metrics
+use ferrotorch::serialize::*;     // SafeTensors, GGUF, ONNX, PyTorch import
+use ferrotorch::jit::*;           // tracing JIT, IR graph
 use ferrotorch::distributions::*; // probability distributions
-use ferrotorch::tokenize::*;     // HF tokenizer wrapper
-// feature-gated:
-// use ferrotorch::llama::*;     // Llama 3 model + inferencer
-// use ferrotorch::ml::*;        // sklearn-compatible adapter
+use ferrotorch::profiler::*;      // Profiler, Chrome trace export
+use ferrotorch::hub::*;           // pretrained model registry + cache
+use ferrotorch::tokenize::*;      // HuggingFace tokenizer wrapper
+// Feature-gated submodules (opt-in via the matching feature flag):
+// use ferrotorch::gpu::*;         // `gpu`         — CUDA backend
+// use ferrotorch::cubecl::*;      // `cubecl`      — portable CUDA/WGPU/ROCm
+// use ferrotorch::mps::*;         // `mps`         — Apple Silicon Metal
+// use ferrotorch::xpu::*;         // `xpu`         — Intel Arc via CubeCL wgpu
+// use ferrotorch::distributed::*; // `distributed` — DDP, collectives, TCP/Gloo
+// use ferrotorch::llama::*;       // `llama`       — Llama 3 model + inferencer
+// use ferrotorch::ml::*;          // `ml`          — sklearn-compatible adapter
 ```
 
 ## Part of ferrotorch

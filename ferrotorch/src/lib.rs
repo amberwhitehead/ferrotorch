@@ -19,8 +19,8 @@
 //!
 //! See the `prelude` module for the items most users want, and the per-feature
 //! modules (`nn`, `optim`, `data`, `vision`, `train`, `serialize`, `jit`,
-//! `distributions`, `profiler`, `hub`, `tokenize`, `gpu`, `cubecl`, `mps`,
-//! `xpu`, `distributed`, `llama`, `ml`) for sub-crate access.
+//! `jit_script`, `distributions`, `profiler`, `hub`, `tokenize`, `gpu`,
+//! `cubecl`, `mps`, `xpu`, `distributed`, `llama`, `ml`) for sub-crate access.
 //!
 //! Lint baseline mirrors the per-crate convention used across the workspace
 //! (`ferrotorch-core`, `ferrotorch-jit`, `ferrotorch-cubecl`, etc.). Workspace

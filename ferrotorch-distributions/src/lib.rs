@@ -35,6 +35,10 @@
 //! | [`OneHotCategorical`] | `probs` | No (discrete) |
 //! | [`RelaxedBernoulli`] | `temperature`, `probs` | Yes (Concrete relaxation) |
 //! | [`RelaxedOneHotCategorical`] | `temperature`, `probs` | Yes (Concrete relaxation) |
+//! | [`Pareto`] | `scale`, `alpha` | No (rsample not yet implemented) |
+//! | [`Kumaraswamy`] | `concentration1`, `concentration0` | No (rsample not yet implemented) |
+//! | [`VonMises`] | `loc`, `concentration` | No (rejection sampling) |
+//! | [`Weibull`] | `scale`, `concentration` | No (rsample not yet implemented) |
 //!
 //! # Infrastructure
 //!

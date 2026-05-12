@@ -29,7 +29,7 @@ use crate::sampler::{RandomSampler, Sampler, SequentialSampler};
 ///   in parallel. This mirrors PyTorch's multi-process DataLoader
 ///   pipeline (except using threads instead of processes, since Rust
 ///   has no GIL to work around). Batches are reordered to preserve
-///   deterministic output ordering. CL-377.
+///   deterministic output ordering.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum WorkerMode {
     /// Load samples within a single batch in parallel (rayon pool).
@@ -221,7 +221,7 @@ impl<D: Dataset> DataLoader<D> {
     ///   single batch in parallel via rayon.
     /// - [`WorkerMode::CrossBatch`] spawns `num_workers` dedicated
     ///   threads that produce independent batches in parallel, with a
-    ///   reorder buffer to preserve ordering. CL-377.
+    ///   reorder buffer to preserve ordering.
     pub fn worker_mode(mut self, mode: WorkerMode) -> Self {
         self.worker_mode = mode;
         self
@@ -492,7 +492,6 @@ pub enum BatchIter<'a, D: Dataset> {
     Prefetch(PrefetchIter<D>),
     /// Cross-batch parallel loading via `num_workers` dedicated
     /// threads, with a reorder buffer to preserve sampler order.
-    /// CL-377.
     MultiWorker(MultiWorkerIter<D>),
 }
 
@@ -2089,7 +2088,7 @@ mod tests {
     // ToDevice::to_device_pinned instead of ToDevice::to_device. The
     // DeviceSample test impl tracks which method was called via the
     // `pinned` field, letting us verify the dispatch path is correct
-    // without needing a real CUDA device. CL-378
+    // without needing a real CUDA device.
 
     #[test]
     fn test_pin_memory_default_off_uses_to_device() {
@@ -2304,7 +2303,7 @@ mod tests {
         drop(it);
     }
 
-    // ── CL-377: cross-batch multi-worker pipeline ─────────────────
+    // ── cross-batch multi-worker pipeline ─────────────────────────
 
     #[test]
     fn test_multi_worker_default_is_intra_batch() {

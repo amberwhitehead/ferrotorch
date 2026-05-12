@@ -14,14 +14,22 @@ State dict and checkpoint serialization for ferrotorch — SafeTensors, GGUF, ON
 ## Quick start
 
 ```rust
+use ferrotorch_nn::StateDict;
 use ferrotorch_serialize::{save_state_dict, load_state_dict};
 
-// Save model weights
-save_state_dict(&model, "model.safetensors")?;
+// Build (or extract) a state dict and save to disk.
+let state: StateDict<f32> = model.state_dict();
+save_state_dict(&state, "model.bin")?;
 
-// Load into a new model
-load_state_dict(&mut new_model, "model.safetensors")?;
+// Load returns a fresh state dict; copy it into a target model via
+// `Module::load_state_dict` (the trailing `bool` is the strict flag —
+// when true, any key mismatch is an error).
+let loaded: StateDict<f32> = load_state_dict::<f32>("model.bin")?;
+new_model.load_state_dict(&loaded, true)?;
 ```
+
+For the SafeTensors container format, use `save_safetensors` / `load_safetensors`
+(same `StateDict<T>` shape, different on-disk encoding).
 
 ## Part of ferrotorch
 

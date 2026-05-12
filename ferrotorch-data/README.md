@@ -12,10 +12,10 @@ Data loading, batching, transforms, and device transfer for ferrotorch.
   - `prefetch_factor` — background thread pipeline that hides I/O latency
   - `shuffle`, `drop_last`, `seed`, custom `collate_fn`
   - Automatic device transfer via `.device()` + `ToDevice` trait
-  - **`pin_memory(true)`** — page-locked host memory + DMA for ~2x faster CPU→GPU transfers (CL-378)
-- **Samplers** — `SequentialSampler`, `RandomSampler`, `DistributedSampler`, custom sampler injection via `Sampler` trait
+  - **`pin_memory(true)`** — page-locked host memory + DMA for ~2x faster CPU→GPU transfers
+- **Samplers** — `SequentialSampler`, `RandomSampler`, `DistributedSampler`, `WeightedRandomSampler`, `BatchSampler`, custom sampler injection via the `Sampler` trait
 - **Transforms** — `ToTensor`, `Normalize`, `RandomCrop`, `RandomHorizontalFlip`, `Compose`, `Transform` trait with seedable RNG
-- **Interop** — NumPy `.npy`/`.npz` and Apache Arrow / Parquet readers via `interop::{load_numpy, load_npz, ArrowDataset}`
+- **Interop** (feature `arrow`) — Apache Arrow / Polars bridges: `tensor_to_arrow_array`, `tensor_to_arrow_arrayref`, `tensor_from_arrow_array`, `record_batch_to_tensor`, `dataframe_to_tensor`
 
 ## Quick start
 

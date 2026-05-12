@@ -12,12 +12,11 @@
 #![warn(clippy::all, clippy::pedantic)]
 #![deny(rust_2018_idioms)]
 // `missing_docs` and `missing_debug_implementations` are held at `allow`
-// while the workspace-wide rustdoc / `Debug` pass is tracked as a
-// follow-up issue (mirrors ferrotorch-core / -nn / -vision precedent —
-// diverging unilaterally from a leaf crate would be Step 4 architectural
-// unilateralism). The `Debug` impls flagged by audit findings #6 and #7
-// have been added; remaining holes (auxiliary samplers, collate helpers)
-// are not part of this dispatch's scope.
+// while the workspace-wide rustdoc / `Debug` pass is incremental
+// (mirrors ferrotorch-core / -nn / -vision precedent — diverging
+// unilaterally from a leaf crate would be architectural unilateralism).
+// Core loader / dataset / iterator types do carry `Debug` impls;
+// remaining holes are in auxiliary samplers and collate helpers.
 #![allow(missing_docs, missing_debug_implementations)]
 // Pedantic lints we explicitly accept across this crate. Each allow names
 // a concrete reason — the alternative would be churn-for-zero-benefit or
