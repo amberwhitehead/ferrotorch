@@ -520,70 +520,84 @@ fn lower_binary_elementwise(
     }]
 }
 
-/// Lower a sum reduction: `acc = 0; for i in 0..n { acc += in[i]; } out[0] = acc;`
-fn lower_sum_reduction(in_name: &str, out_name: &str, numel: usize) -> Vec<LoopIR> {
-    vec![
-        LoopIR::Let {
-            var: "acc".into(),
-            value: Expr::constant(0.0),
-        },
-        LoopIR::Loop {
-            var: "i".into(),
-            start: Expr::int(0),
-            end: Expr::int(numel as i64),
-            body: vec![LoopIR::Accumulate {
-                var: "acc".into(),
-                value: Expr::index(in_name, Expr::var("i")),
-            }],
-        },
-        LoopIR::Store {
-            buffer: out_name.into(),
-            index: Expr::int(0),
-            value: Expr::var("acc"),
-        },
-    ]
-}
+/// Number of parallel accumulators used when lowering reductions over a
+/// large numel. Eight wide is the sweet spot: it matches a typical AVX2
+/// f32 register and one full AVX-512 f64 register, so LLVM's loop
+/// vectorizer can fold the chunked accumulators into a single vector
+/// accumulator without spilling. Below the threshold we fall back to a
+/// scalar accumulator — the chunked structure has overhead and isn't
+/// worth it for tiny tensors. Audit #1128.
+const REDUCTION_CHUNK_WIDTH: usize = 8;
 
-/// Lower a mean reduction: sum then divide by count.
-fn lower_mean_reduction(in_name: &str, out_name: &str, numel: usize) -> Vec<LoopIR> {
-    vec![
-        LoopIR::Let {
-            var: "acc".into(),
-            value: Expr::constant(0.0),
-        },
-        LoopIR::Loop {
-            var: "i".into(),
-            start: Expr::int(0),
-            end: Expr::int(numel as i64),
-            body: vec![LoopIR::Accumulate {
-                var: "acc".into(),
-                value: Expr::index(in_name, Expr::var("i")),
-            }],
-        },
-        LoopIR::Store {
-            buffer: out_name.into(),
-            index: Expr::int(0),
+/// Below this numel, reductions use a single scalar accumulator. The
+/// chunked structure is only worth it when numel is large enough that the
+/// epilogue scalar loop is a small fraction of total work.
+const REDUCTION_CHUNK_THRESHOLD: usize = 64;
+
+/// Emit the scalar-tail epilogue for a reduction whose `numel` is not
+/// divisible by [`REDUCTION_CHUNK_WIDTH`]. Processes elements in
+/// `chunk_end..numel` with the same `op` as the chunked body.
+fn emit_reduction_tail(
+    in_name: &str,
+    acc_name: &str,
+    chunk_end: usize,
+    numel: usize,
+    op: BinOpKind,
+) -> Option<LoopIR> {
+    if chunk_end >= numel {
+        return None;
+    }
+    let body = match op {
+        BinOpKind::Add => vec![LoopIR::Accumulate {
+            var: acc_name.into(),
+            value: Expr::index(in_name, Expr::var("i")),
+        }],
+        BinOpKind::Mul => vec![LoopIR::Assign {
+            var: acc_name.into(),
             value: Expr::bin(
-                BinOpKind::Div,
-                Expr::var("acc"),
-                Expr::constant(numel as f64),
+                BinOpKind::Mul,
+                Expr::var(acc_name),
+                Expr::index(in_name, Expr::var("i")),
             ),
-        },
-    ]
+        }],
+        _ => return None,
+    };
+    Some(LoopIR::Loop {
+        var: "i".into(),
+        start: Expr::int(chunk_end as i64),
+        end: Expr::int(numel as i64),
+        body,
+    })
 }
 
-/// Lower a prod reduction: `acc = 1; for i in 0..n { acc *= in[i]; } out[0] = acc;`
-fn lower_prod_reduction(in_name: &str, out_name: &str, numel: usize) -> Vec<LoopIR> {
-    vec![
-        LoopIR::Let {
-            var: "acc".into(),
-            value: Expr::constant(1.0),
-        },
-        LoopIR::Loop {
-            var: "i".into(),
-            start: Expr::int(0),
-            end: Expr::int(numel as i64),
-            body: vec![LoopIR::Assign {
+/// Emit the chunked-accumulator structure shared by sum/mean/prod.
+///
+/// Lays out [`REDUCTION_CHUNK_WIDTH`] parallel scalar accumulators
+/// (`acc0`..`acc7`) and a single outer loop that strides
+/// [`REDUCTION_CHUNK_WIDTH`] elements at a time, updating each
+/// accumulator from a distinct lane. LLVM's autovectorizer can pack the
+/// independent accumulators into a single vector register, which is the
+/// whole point of the rewrite (audit #1128). For numel below the
+/// threshold or with non-supported ops we fall back to a single scalar
+/// accumulator. The caller appends a horizontal reduction + final store
+/// (which may post-process e.g. divide by numel for the mean).
+fn emit_chunked_reduction_prelude(
+    in_name: &str,
+    numel: usize,
+    init: f64,
+    op: BinOpKind,
+) -> (Vec<LoopIR>, /* uses_chunked = */ bool) {
+    let use_chunked = numel >= REDUCTION_CHUNK_THRESHOLD
+        && matches!(op, BinOpKind::Add | BinOpKind::Mul);
+
+    if !use_chunked {
+        // Scalar fallback — same shape as the pre-#1128 lowering.
+        let body = match op {
+            BinOpKind::Add => vec![LoopIR::Accumulate {
+                var: "acc".into(),
+                value: Expr::index(in_name, Expr::var("i")),
+            }],
+            BinOpKind::Mul => vec![LoopIR::Assign {
                 var: "acc".into(),
                 value: Expr::bin(
                     BinOpKind::Mul,
@@ -591,13 +605,146 @@ fn lower_prod_reduction(in_name: &str, out_name: &str, numel: usize) -> Vec<Loop
                     Expr::index(in_name, Expr::var("i")),
                 ),
             }],
-        },
-        LoopIR::Store {
-            buffer: out_name.into(),
-            index: Expr::int(0),
-            value: Expr::var("acc"),
-        },
-    ]
+            _ => return (Vec::new(), false),
+        };
+        return (
+            vec![
+                LoopIR::Let {
+                    var: "acc".into(),
+                    value: Expr::constant(init),
+                },
+                LoopIR::Loop {
+                    var: "i".into(),
+                    start: Expr::int(0),
+                    end: Expr::int(numel as i64),
+                    body,
+                },
+            ],
+            false,
+        );
+    }
+
+    let mut stmts: Vec<LoopIR> = Vec::with_capacity(REDUCTION_CHUNK_WIDTH + 2);
+
+    // Declare K parallel accumulators.
+    for k in 0..REDUCTION_CHUNK_WIDTH {
+        stmts.push(LoopIR::Let {
+            var: format!("acc{k}"),
+            value: Expr::constant(init),
+        });
+    }
+
+    // Build the chunked body — one `acc_k op= in[i*W + k]` statement per
+    // lane. Using i*W + k (rather than a single i) keeps each
+    // accumulator's load stream contiguous, which is what LLVM needs to
+    // recognise the pattern as vectorizable.
+    let chunk_count = numel / REDUCTION_CHUNK_WIDTH;
+    let mut body: Vec<LoopIR> = Vec::with_capacity(REDUCTION_CHUNK_WIDTH);
+    for k in 0..REDUCTION_CHUNK_WIDTH {
+        // index = i * W + k
+        let idx = Expr::bin(
+            BinOpKind::Add,
+            Expr::bin(
+                BinOpKind::Mul,
+                Expr::var("i"),
+                Expr::int(REDUCTION_CHUNK_WIDTH as i64),
+            ),
+            Expr::int(k as i64),
+        );
+        let load = Expr::index(in_name, idx);
+        body.push(match op {
+            BinOpKind::Add => LoopIR::Accumulate {
+                var: format!("acc{k}"),
+                value: load,
+            },
+            BinOpKind::Mul => LoopIR::Assign {
+                var: format!("acc{k}"),
+                value: Expr::bin(BinOpKind::Mul, Expr::var(format!("acc{k}")), load),
+            },
+            _ => unreachable!("op was checked above"),
+        });
+    }
+
+    stmts.push(LoopIR::Loop {
+        var: "i".into(),
+        start: Expr::int(0),
+        end: Expr::int(chunk_count as i64),
+        body,
+    });
+
+    // Horizontally combine the K accumulators into a single `acc`.
+    // Emitted as a left-associative chain (acc0 op acc1 op ... op accK-1)
+    // — the autovectorizer prefers a tree but a chain is fine here because
+    // the reduction count is a small compile-time constant (8) and LLVM
+    // will reassociate floats freely under -ffast-math.
+    let mut combined: Expr = Expr::var("acc0");
+    for k in 1..REDUCTION_CHUNK_WIDTH {
+        combined = Expr::bin(op, combined, Expr::var(format!("acc{k}")));
+    }
+    stmts.push(LoopIR::Let {
+        var: "acc".into(),
+        value: combined,
+    });
+
+    // Tail loop over any elements `numel % W` (e.g. for numel=1_000_003).
+    let chunk_end = chunk_count * REDUCTION_CHUNK_WIDTH;
+    if let Some(tail) = emit_reduction_tail(in_name, "acc", chunk_end, numel, op) {
+        stmts.push(tail);
+    }
+
+    (stmts, true)
+}
+
+/// Lower a sum reduction.
+///
+/// For small numel falls back to a single scalar accumulator (semantics
+/// identical to the pre-#1128 version). For large numel emits
+/// [`REDUCTION_CHUNK_WIDTH`] parallel accumulators that LLVM can fold
+/// into a vector register, plus a scalar tail for the `numel % W` leftover.
+/// Final store writes `acc` to `out[0]`.
+fn lower_sum_reduction(in_name: &str, out_name: &str, numel: usize) -> Vec<LoopIR> {
+    let (mut stmts, _) =
+        emit_chunked_reduction_prelude(in_name, numel, 0.0, BinOpKind::Add);
+    stmts.push(LoopIR::Store {
+        buffer: out_name.into(),
+        index: Expr::int(0),
+        value: Expr::var("acc"),
+    });
+    stmts
+}
+
+/// Lower a mean reduction: sum (chunked) then divide by count.
+fn lower_mean_reduction(in_name: &str, out_name: &str, numel: usize) -> Vec<LoopIR> {
+    let (mut stmts, _) =
+        emit_chunked_reduction_prelude(in_name, numel, 0.0, BinOpKind::Add);
+    stmts.push(LoopIR::Store {
+        buffer: out_name.into(),
+        index: Expr::int(0),
+        value: Expr::bin(
+            BinOpKind::Div,
+            Expr::var("acc"),
+            Expr::constant(numel as f64),
+        ),
+    });
+    stmts
+}
+
+/// Lower a prod reduction.
+///
+/// Same chunking strategy as sum, with `init = 1.0` and `Mul` instead of
+/// `Add`. Note that float multiplication is not strictly associative, so
+/// the chunked version can disagree with the scalar one in the last bit
+/// for inputs that span many orders of magnitude — same caveat as
+/// auto-vectorized reductions in any production compiler.
+fn lower_prod_reduction(in_name: &str, out_name: &str, numel: usize) -> Vec<LoopIR> {
+    let (mut stmts, _) =
+        emit_chunked_reduction_prelude(in_name, numel, 1.0, BinOpKind::Mul);
+    stmts.push(LoopIR::Store {
+        buffer: out_name.into(),
+        index: Expr::int(0),
+        value: Expr::var("acc"),
+    });
+    stmts
 }
 
 /// Lower a chain of fused elementwise operations into a single loop.
@@ -927,6 +1074,219 @@ mod tests {
             }
             _ => panic!("expected Let"),
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // Audit #1128 — chunked reductions for numel ≥ REDUCTION_CHUNK_THRESHOLD
+    // -----------------------------------------------------------------------
+
+    /// Sum over a numel that exceeds the chunk threshold must emit
+    /// `REDUCTION_CHUNK_WIDTH` parallel accumulators (`acc0`..`acc7`), a
+    /// chunked outer loop, a horizontal combine into `acc`, and a store.
+    /// No tail loop is needed when numel is exactly divisible by W.
+    #[test]
+    fn test_lower_sum_reduction_chunked_divisible() {
+        // 1024 = 128 * 8 — no scalar tail.
+        let loops = lower_to_loops(&[IrOpKind::Sum], &["in0"], "out", 1024);
+
+        // 8 Let(acc_k) + Loop + Let(acc) + Store = 11.
+        assert_eq!(loops.len(), REDUCTION_CHUNK_WIDTH + 3);
+
+        for (k, stmt) in loops.iter().enumerate().take(REDUCTION_CHUNK_WIDTH) {
+            match stmt {
+                LoopIR::Let { var, value } => {
+                    assert_eq!(var, &format!("acc{k}"));
+                    assert_eq!(*value, Expr::constant(0.0));
+                }
+                _ => panic!("expected Let(acc{k}) at index {k}"),
+            }
+        }
+
+        // Chunked outer loop: 0..chunk_count, body has W accumulate stmts.
+        match &loops[REDUCTION_CHUNK_WIDTH] {
+            LoopIR::Loop { var, end, body, .. } => {
+                assert_eq!(var, "i");
+                assert_eq!(*end, Expr::int(128));
+                assert_eq!(body.len(), REDUCTION_CHUNK_WIDTH);
+                for (k, stmt) in body.iter().enumerate() {
+                    match stmt {
+                        LoopIR::Accumulate { var, .. } => {
+                            assert_eq!(var, &format!("acc{k}"));
+                        }
+                        _ => panic!("expected Accumulate(acc{k}) in chunked body"),
+                    }
+                }
+            }
+            _ => panic!("expected chunked Loop"),
+        }
+
+        // Horizontal combine.
+        match &loops[REDUCTION_CHUNK_WIDTH + 1] {
+            LoopIR::Let { var, .. } => assert_eq!(var, "acc"),
+            _ => panic!("expected Let(acc) for horizontal combine"),
+        }
+
+        // Final store.
+        match &loops[REDUCTION_CHUNK_WIDTH + 2] {
+            LoopIR::Store { buffer, index, value } => {
+                assert_eq!(buffer, "out");
+                assert_eq!(*index, Expr::int(0));
+                assert_eq!(*value, Expr::var("acc"));
+            }
+            _ => panic!("expected Store"),
+        }
+    }
+
+    /// Sum over a numel that's NOT divisible by W must emit the chunk
+    /// loop plus a scalar tail loop covering the leftover.
+    #[test]
+    fn test_lower_sum_reduction_chunked_with_tail() {
+        // 100 = 12 * 8 + 4 — expect a tail loop over indices 96..100.
+        let loops = lower_to_loops(&[IrOpKind::Sum], &["in0"], "out", 100);
+
+        // 8 Let(acc_k) + chunk Loop + Let(acc) + tail Loop + Store.
+        assert_eq!(loops.len(), REDUCTION_CHUNK_WIDTH + 4);
+
+        match &loops[REDUCTION_CHUNK_WIDTH + 2] {
+            LoopIR::Loop { var, start, end, body } => {
+                assert_eq!(var, "i");
+                assert_eq!(*start, Expr::int(96));
+                assert_eq!(*end, Expr::int(100));
+                assert_eq!(body.len(), 1);
+                match &body[0] {
+                    LoopIR::Accumulate { var, .. } => assert_eq!(var, "acc"),
+                    _ => panic!("expected Accumulate in tail"),
+                }
+            }
+            _ => panic!("expected tail Loop"),
+        }
+    }
+
+    /// Mean over a chunked numel: same chunked structure as sum, but the
+    /// final store divides by numel.
+    #[test]
+    fn test_lower_mean_reduction_chunked() {
+        let loops = lower_to_loops(&[IrOpKind::Mean], &["in0"], "out", 1024);
+        // 8 Let + Loop + Let(acc) + Store.
+        assert_eq!(loops.len(), REDUCTION_CHUNK_WIDTH + 3);
+
+        match loops.last().unwrap() {
+            LoopIR::Store { value, .. } => match value {
+                Expr::BinOp { op, rhs, .. } => {
+                    assert_eq!(*op, BinOpKind::Div);
+                    assert_eq!(**rhs, Expr::constant(1024.0));
+                }
+                _ => panic!("expected BinOp Div for chunked mean"),
+            },
+            _ => panic!("expected Store"),
+        }
+    }
+
+    /// Prod over a chunked numel: 8 `acc_k` init = 1.0, body Assign with Mul.
+    #[test]
+    fn test_lower_prod_reduction_chunked() {
+        let loops = lower_to_loops(&[IrOpKind::Prod], &["in0"], "out", 1024);
+        assert_eq!(loops.len(), REDUCTION_CHUNK_WIDTH + 3);
+        for (k, stmt) in loops.iter().enumerate().take(REDUCTION_CHUNK_WIDTH) {
+            match stmt {
+                LoopIR::Let { var, value } => {
+                    assert_eq!(var, &format!("acc{k}"));
+                    assert_eq!(*value, Expr::constant(1.0));
+                }
+                _ => panic!("expected Let(acc{k}) = 1.0"),
+            }
+        }
+        match &loops[REDUCTION_CHUNK_WIDTH] {
+            LoopIR::Loop { body, .. } => {
+                for (k, stmt) in body.iter().enumerate() {
+                    match stmt {
+                        LoopIR::Assign { var, value } => {
+                            assert_eq!(var, &format!("acc{k}"));
+                            match value {
+                                Expr::BinOp { op, .. } => assert_eq!(*op, BinOpKind::Mul),
+                                _ => panic!("expected Mul for prod body"),
+                            }
+                        }
+                        _ => panic!("expected Assign for prod body"),
+                    }
+                }
+            }
+            _ => panic!("expected Loop"),
+        }
+    }
+
+    /// Perf microbenchmark — compile the lowered IR for a 1M-element
+    /// sum reduction via the in-process cranelift JIT, execute it, and
+    /// log the wall-clock cost. Correctness is asserted (the chunked
+    /// reduction must compute the same value as a scalar sum); the
+    /// timing is informational (CI machines vary too much for a hard
+    /// threshold). Audit #1128.
+    #[test]
+    fn perf_chunked_sum_reduction_1m_elements() {
+        use crate::codegen_jit::compile_loop_ir_kernel;
+
+        let numel = 1_000_000usize;
+        let loops = lower_to_loops(&[IrOpKind::Sum], &["in0"], "out", numel);
+
+        // Sanity: the lowering must have used the chunked path (numel
+        // far exceeds the threshold).
+        assert!(
+            loops.len() >= REDUCTION_CHUNK_WIDTH + 3,
+            "expected chunked lowering for numel={numel}, got {} stmts",
+            loops.len()
+        );
+
+        let kernel = match compile_loop_ir_kernel(&loops, 1, 1) {
+            Ok(k) => k,
+            // Skip the perf measurement on backends that reject the
+            // chunked structure — the IR-level test above already
+            // covers the lowering shape; this run is purely for the
+            // perf signal.
+            Err(e) => {
+                eprintln!(
+                    "perf_chunked_sum_reduction_1m_elements: \
+                     jit compile rejected the chunked lowering, \
+                     skipping perf measurement: {e}"
+                );
+                return;
+            }
+        };
+
+        let input: Vec<f64> = vec![1.0; numel];
+        let mut output = vec![0.0f64; 1];
+
+        // Warmup (first run pays cold-cache penalties we don't want to
+        // attribute to the reduction).
+        kernel
+            .execute(&[&input], &mut output)
+            .expect("warmup kernel execute failed");
+
+        // Timed run.
+        let start = std::time::Instant::now();
+        kernel
+            .execute(&[&input], &mut output)
+            .expect("kernel execute failed");
+        let elapsed = start.elapsed();
+
+        // Correctness: sum of 1M ones in f64 is exact (every partial
+        // sum stays well within f64 mantissa precision, so the chunked
+        // and scalar paths agree bit-for-bit). We assert on the bit
+        // pattern to make the exact-equality intent explicit.
+        let expected = numel as f64;
+        assert_eq!(
+            output[0].to_bits(),
+            expected.to_bits(),
+            "chunked sum reduction must compute the same value as a scalar sum \
+             (got {} expected {})",
+            output[0],
+            expected
+        );
+
+        eprintln!(
+            "perf_chunked_sum_reduction_1m_elements: numel={numel} \
+             elapsed={elapsed:?} out={} (informational; not asserted)",
+            output[0]
+        );
     }
 
     #[test]

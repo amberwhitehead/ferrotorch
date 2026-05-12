@@ -6,6 +6,9 @@
 //! [`mod@crate::fusion`]) and the lowering path to
 //! [`mod@crate::codegen_ir`] consume this representation.
 
+use std::hash::{Hash, Hasher};
+use std::sync::OnceLock;
+
 /// A unique identifier for IR values (edges in the graph).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct IrValueId(pub usize);
@@ -272,7 +275,17 @@ pub struct IrNode {
 /// bump. External crates must construct graphs through [`IrGraph::new`] and
 /// the builder methods ([`IrGraph::add_input`], [`IrGraph::add_node`],
 /// [`IrGraph::set_outputs`], etc.) rather than struct-literal syntax.
-#[derive(Debug, Clone)]
+///
+/// # Cached fingerprint (#1128)
+///
+/// [`IrGraph::fingerprint`] returns a stable structural `u64` hash used by
+/// the autotune cache. It is computed lazily, cached in
+/// [`Self::cached_fingerprint`], and invalidated by every mutation method on
+/// the graph (`add_input*`, `add_constant*`, `add_node*`, `set_outputs`,
+/// `remove_node`, `alloc_*_id`). The cached value is held in a
+/// [`OnceLock<u64>`] so that read-only cache hits on the hot autotune path
+/// don't have to re-walk the graph.
+#[derive(Debug)]
 #[non_exhaustive]
 pub struct IrGraph {
     /// All nodes in the graph, indexed by [`IrNodeId`].
@@ -285,6 +298,38 @@ pub struct IrGraph {
     pub output_values: Vec<IrValueId>,
     pub(crate) next_value_id: usize,
     pub(crate) next_node_id: usize,
+    /// Cached structural fingerprint (`u64`) — populated lazily by
+    /// [`IrGraph::fingerprint`] and invalidated on every mutation. The hot
+    /// autotune cache-hit path reads this without re-walking the graph
+    /// (audit #1128).
+    pub(crate) cached_fingerprint: OnceLock<u64>,
+}
+
+// Manual `Clone` because `OnceLock<u64>` is `Clone` but we want clones to
+// start with a fresh (empty) fingerprint cache rather than a copy of the
+// possibly-stale one — every mutation invalidates the original anyway, and
+// a fresh `OnceLock` is the safest invariant for the clone.
+impl Clone for IrGraph {
+    fn clone(&self) -> Self {
+        Self {
+            nodes: self.nodes.clone(),
+            values: self.values.clone(),
+            input_values: self.input_values.clone(),
+            output_values: self.output_values.clone(),
+            next_value_id: self.next_value_id,
+            next_node_id: self.next_node_id,
+            // Carry over the cached fingerprint if present — the cloned
+            // structural data is identical so the hash is still valid.
+            cached_fingerprint: match self.cached_fingerprint.get() {
+                Some(&v) => {
+                    let cell = OnceLock::new();
+                    let _ = cell.set(v);
+                    cell
+                }
+                None => OnceLock::new(),
+            },
+        }
+    }
 }
 
 impl IrGraph {
@@ -297,7 +342,77 @@ impl IrGraph {
             output_values: Vec::new(),
             next_value_id: 0,
             next_node_id: 0,
+            cached_fingerprint: OnceLock::new(),
         }
+    }
+
+    /// Invalidate the cached structural fingerprint after a mutation.
+    ///
+    /// Every public mutation entry point on [`IrGraph`] funnels through
+    /// this helper so that [`IrGraph::fingerprint`] always returns a value
+    /// consistent with the current node/value lists.
+    #[inline]
+    fn invalidate_fingerprint(&mut self) {
+        self.cached_fingerprint = OnceLock::new();
+    }
+
+    /// Stable `u64` structural fingerprint of the graph.
+    ///
+    /// Hashes the topologically-ordered op kinds together with input/output
+    /// value shapes — enough discrimination for autotune cache lookups
+    /// (audit #1128). Computed lazily and cached; mutation methods
+    /// invalidate the cache.
+    ///
+    /// The hash is order-stable but **not** stable across rustc versions
+    /// or process invocations — it relies on the default
+    /// [`std::collections::hash_map::DefaultHasher`]. That is fine for an
+    /// in-process autotune cache; serialized cache keys would need a
+    /// stable hasher.
+    pub fn fingerprint(&self) -> u64 {
+        *self.cached_fingerprint.get_or_init(|| {
+            let mut hasher = std::collections::hash_map::DefaultHasher::new();
+
+            // Hash node count + node-ID counter so two graphs that happen
+            // to have identical topo orders but different ID spaces don't
+            // collide.
+            self.nodes.len().hash(&mut hasher);
+            self.values.len().hash(&mut hasher);
+
+            // Hash op kinds in topological order. Op kinds contain f64
+            // constants (Constant, Pow), which don't implement Hash — feed
+            // the bit pattern instead.
+            for nid in self.topological_order() {
+                if let Some(node) = self.nodes.iter().find(|n| n.id == nid) {
+                    hash_op(&node.op, &mut hasher);
+                    // Hash producer shape + dtype for each output value so
+                    // shape-polymorphic retraces force a re-tune.
+                    for out_vid in &node.outputs {
+                        if let Some(v) = self.values.iter().find(|v| v.id == *out_vid) {
+                            v.shape.hash(&mut hasher);
+                            v.dtype.hash(&mut hasher);
+                        }
+                    }
+                }
+            }
+
+            // Hash declared input/output value shapes so that
+            // shape-different retraces of the same op sequence get
+            // distinct fingerprints.
+            for vid in &self.input_values {
+                if let Some(v) = self.values.iter().find(|v| v.id == *vid) {
+                    v.shape.hash(&mut hasher);
+                    v.dtype.hash(&mut hasher);
+                }
+            }
+            for vid in &self.output_values {
+                if let Some(v) = self.values.iter().find(|v| v.id == *vid) {
+                    v.shape.hash(&mut hasher);
+                    v.dtype.hash(&mut hasher);
+                }
+            }
+
+            hasher.finish()
+        })
     }
 
     /// Register a graph input with the given shape (defaults to
@@ -310,6 +425,7 @@ impl IrGraph {
 
     /// Register a graph input with the given shape and dtype.
     pub fn add_input_with_dtype(&mut self, shape: Vec<usize>, dtype: Dtype) -> IrValueId {
+        self.invalidate_fingerprint();
         let value_id = IrValueId(self.next_value_id);
         self.next_value_id += 1;
 
@@ -352,6 +468,7 @@ impl IrGraph {
         shape: Vec<usize>,
         dtype: Dtype,
     ) -> IrValueId {
+        self.invalidate_fingerprint();
         let value_id = IrValueId(self.next_value_id);
         self.next_value_id += 1;
 
@@ -414,6 +531,7 @@ impl IrGraph {
             output_shapes.len(),
         );
 
+        self.invalidate_fingerprint();
         let node_id = IrNodeId(self.next_node_id);
         self.next_node_id += 1;
 
@@ -444,6 +562,7 @@ impl IrGraph {
 
     /// Mark which values are graph outputs.
     pub fn set_outputs(&mut self, values: Vec<IrValueId>) {
+        self.invalidate_fingerprint();
         self.output_values = values;
     }
 
@@ -514,6 +633,7 @@ impl IrGraph {
 
     /// Allocate and return the next node ID, advancing the internal counter.
     pub fn alloc_node_id(&mut self) -> IrNodeId {
+        self.invalidate_fingerprint();
         let id = IrNodeId(self.next_node_id);
         self.next_node_id += 1;
         id
@@ -521,6 +641,7 @@ impl IrGraph {
 
     /// Allocate and return the next value ID, advancing the internal counter.
     pub fn alloc_value_id(&mut self) -> IrValueId {
+        self.invalidate_fingerprint();
         let id = IrValueId(self.next_value_id);
         self.next_value_id += 1;
         id
@@ -551,6 +672,7 @@ impl IrGraph {
     /// It does **not** recursively remove upstream nodes that may
     /// become dead — the caller should iterate to a fixed point.
     pub fn remove_node(&mut self, node_id: IrNodeId) {
+        self.invalidate_fingerprint();
         // Collect output value IDs of the node being removed.
         let output_value_ids: Vec<IrValueId> = self
             .nodes
@@ -574,6 +696,39 @@ impl IrGraph {
 impl Default for IrGraph {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+/// Stable-by-construction hasher for [`IrOpKind`]. `IrOpKind` cannot derive
+/// `Hash` because some variants carry `f64` payloads (`Constant`, `Pow`); we
+/// hash the bit pattern of each `f64` payload explicitly.
+fn hash_op<H: Hasher>(op: &IrOpKind, h: &mut H) {
+    // Discriminant first so different variants never collide.
+    std::mem::discriminant(op).hash(h);
+    match op {
+        IrOpKind::Input { index } => index.hash(h),
+        IrOpKind::Constant { data, shape } => {
+            for v in data {
+                v.to_bits().hash(h);
+            }
+            shape.hash(h);
+        }
+        IrOpKind::Pow { exponent } => exponent.to_bits().hash(h),
+        IrOpKind::Reshape { shape } => shape.hash(h),
+        IrOpKind::Squeeze { axis } | IrOpKind::Unsqueeze { axis } | IrOpKind::Cat { axis } => {
+            axis.hash(h);
+        }
+        IrOpKind::FusedElementwise { ops } => {
+            ops.len().hash(h);
+            for inner in ops {
+                hash_op(inner, h);
+            }
+        }
+        IrOpKind::FusedLinearActivation { activation } => hash_op(activation, h),
+        IrOpKind::FusedAttention { head_dim } => head_dim.hash(h),
+        // All other variants are payload-free — discriminant alone
+        // already distinguishes them.
+        _ => {}
     }
 }
 

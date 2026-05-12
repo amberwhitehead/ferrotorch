@@ -62,35 +62,37 @@ use crate::graph::IrGraph;
 
 /// Structural fingerprint of a graph used as a cache key.
 ///
-/// Combines the shape of every graph input with the sequence of op
-/// discriminants in topological order. Two graphs with the same
-/// fingerprint are structurally identical up to constant values and
-/// node IDs, which is sufficient for autotune cache lookup because
-/// tuning operates at the shape-times-op-sequence level.
+/// Combines the graph's lazily-cached structural fingerprint
+/// ([`IrGraph::fingerprint`]) with the caller-provided input shapes.
+///
+/// Audit #1128 — the previous implementation rebuilt this key on every
+/// `tune` call by walking topo + nodes + values per input value and
+/// stringifying every op. The cache-hit fast path paid the full O(inputs ×
+/// values) build cost before doing the `HashMap` lookup. The current
+/// implementation reads the cached `u64` fingerprint off the graph
+/// (computed once at construction time, invalidated on mutation) and adds
+/// the input shapes; the hot path is now a `u64` read plus an input-shape
+/// `.to_vec()`.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct AutotuneKey {
+    /// Cached structural fingerprint of the graph (see
+    /// [`IrGraph::fingerprint`]).
+    pub graph_fingerprint: u64,
     /// Concrete input shapes (one `Vec<usize>` per input).
     pub input_shapes: Vec<Vec<usize>>,
-    /// Topologically-ordered op-kind fingerprints.
-    /// We use a lightweight string representation instead of a full
-    /// `IrOpKind` hash because `IrOpKind` contains f64 constants which
-    /// don't implement `Hash`.
-    pub op_sequence: Vec<String>,
 }
 
 impl AutotuneKey {
     /// Build a cache key from an IR graph and the caller-provided
     /// input shapes.
+    ///
+    /// Reads the graph's cached `u64` fingerprint
+    /// ([`IrGraph::fingerprint`]) — computed lazily on first call and
+    /// reused on every subsequent call until the graph mutates.
     pub fn from_graph(graph: &IrGraph, input_shapes: &[Vec<usize>]) -> Self {
-        let topo = graph.topological_order();
-        let node_map: HashMap<_, _> = graph.nodes.iter().map(|n| (n.id, n)).collect();
-        let op_sequence: Vec<String> = topo
-            .iter()
-            .map(|nid| format!("{:?}", node_map[nid].op))
-            .collect();
         Self {
+            graph_fingerprint: graph.fingerprint(),
             input_shapes: input_shapes.to_vec(),
-            op_sequence,
         }
     }
 }
@@ -266,17 +268,20 @@ impl Autotuner {
             });
         }
 
-        // Derive input shapes from the graph for the cache key.
-        // The graph's input_values each have a shape field.
+        // Derive input shapes from the graph for the cache key. Build a
+        // single value-id -> shape map (O(values)) then look up each
+        // input (O(inputs)) — the previous code did the nested
+        // O(inputs × values) walk on every `tune` call, including cache
+        // hits (audit #1128).
+        let shape_by_id: HashMap<_, _> =
+            graph.values.iter().map(|v| (v.id, &v.shape)).collect();
         let input_shapes: Vec<Vec<usize>> = graph
             .input_values
             .iter()
             .map(|vid| {
-                graph
-                    .values
-                    .iter()
-                    .find(|v| v.id == *vid)
-                    .map(|v| v.shape.clone())
+                shape_by_id
+                    .get(vid)
+                    .map(|s| (*s).clone())
                     .unwrap_or_default()
             })
             .collect();
@@ -515,5 +520,36 @@ mod tests {
         let r = tuner.tune(&g, &inputs).unwrap();
         assert_eq!(r.winner_name(), "interp");
         assert_eq!(r.all_timings().len(), 1);
+    }
+
+    /// Audit #1128 — the autotune key now reads a cached `u64`
+    /// fingerprint off the graph instead of stringifying every op. Verify
+    /// that two key builds for the same graph hit the cached path
+    /// (identical fingerprint) and that mutating the graph invalidates
+    /// the cache.
+    #[test]
+    fn test_autotune_key_uses_cached_fingerprint() {
+        let (g, _inputs) = build_unary_chain_graph();
+        let f1 = g.fingerprint();
+        let f2 = g.fingerprint();
+        assert_eq!(f1, f2, "fingerprint must be stable across calls");
+
+        // Build two keys for the same graph + shapes — they must compare
+        // equal and share the same fingerprint field.
+        let k1 = AutotuneKey::from_graph(&g, &[vec![3]]);
+        let k2 = AutotuneKey::from_graph(&g, &[vec![3]]);
+        assert_eq!(k1, k2);
+        assert_eq!(k1.graph_fingerprint, f1);
+
+        // Mutating the graph (add a node) must invalidate the
+        // fingerprint cache — the new fingerprint must differ.
+        let mut g_mut = g.clone();
+        let extra = g_mut.add_input(vec![3]);
+        let _ = extra; // suppress unused
+        let f3 = g_mut.fingerprint();
+        assert_ne!(
+            f1, f3,
+            "fingerprint must change when a node is added to the graph"
+        );
     }
 }

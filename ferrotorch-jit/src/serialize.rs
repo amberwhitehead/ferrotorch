@@ -595,6 +595,9 @@ impl IrGraph {
             output_values,
             next_value_id: max_value_id,
             next_node_id: max_node_id,
+            // Deserialized graph starts with a fresh fingerprint cache;
+            // it'll be lazily computed on first fingerprint query.
+            cached_fingerprint: std::sync::OnceLock::new(),
         })
     }
 }
