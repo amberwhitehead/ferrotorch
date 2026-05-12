@@ -18,7 +18,9 @@ use std::collections::{HashMap, HashSet};
 use std::fs::File;
 use std::path::{Path, PathBuf};
 
+use half::{bf16, f16};
 use memmap2::Mmap;
+use rayon::prelude::*;
 use safetensors::serialize_to_file;
 use safetensors::tensor::{Dtype, SafeTensors, TensorView};
 use serde::Deserialize;
@@ -28,35 +30,24 @@ use ferrotorch_core::{FerrotorchError, FerrotorchResult, Float, Tensor, TensorSt
 use ferrotorch_nn::StateDict;
 
 /// Convert IEEE 754 half-precision (f16) bits to f32.
+///
+/// CL-1127 part B: thin wrapper over `half::f16::from_bits().to_f32()` so
+/// we delegate the subnormal / Inf / NaN edge cases to the well-tested
+/// `half` crate, which lowers to a vectorizable scalar op (`cvtph2ps` when
+/// F16C is available on x86-64, table lookup otherwise).
+#[inline]
 fn half_to_f32(bits: u16) -> f32 {
-    let sign = u32::from((bits >> 15) & 1);
-    let exp = u32::from((bits >> 10) & 0x1F);
-    let frac = u32::from(bits & 0x3FF);
+    f16::from_bits(bits).to_f32()
+}
 
-    if exp == 0 {
-        if frac == 0 {
-            // Zero
-            f32::from_bits(sign << 31)
-        } else {
-            // Subnormal f16 → normal f32
-            let mut e = 1u32;
-            let mut f = frac;
-            while (f & 0x400) == 0 {
-                f <<= 1;
-                e += 1;
-            }
-            let f32_exp = 127 - 15 - e + 1;
-            let f32_frac = (f & 0x3FF) << 13;
-            f32::from_bits((sign << 31) | (f32_exp << 23) | f32_frac)
-        }
-    } else if exp == 31 {
-        // Inf or NaN
-        f32::from_bits((sign << 31) | (0xFF << 23) | (frac << 13))
-    } else {
-        // Normal
-        let f32_exp = exp + 127 - 15;
-        f32::from_bits((sign << 31) | (f32_exp << 23) | (frac << 13))
-    }
+/// Convert `bfloat16` bits to f32 by left-shifting into the upper 16 bits.
+///
+/// `bf16` shares its 8-bit exponent layout with `f32`, so the conversion
+/// is bit-exact and reduces to an `unpcklwd` + `pslld` pair on x86-64 once
+/// LLVM auto-vectorizes the loop body. (CL-1127 part B.)
+#[inline]
+fn bf16_to_f32(bits: u16) -> f32 {
+    bf16::from_bits(bits).to_f32()
 }
 
 /// Return the `safetensors::Dtype` that corresponds to the concrete `Float`
@@ -192,16 +183,52 @@ fn decode_view<T: Float>(name: &str, view: &TensorView<'_>) -> FerrotorchResult<
             });
         }
 
-        let mut float_data: Vec<T> = Vec::with_capacity(numel);
-        for i in 0..numel {
-            let lo = byte_data[i * 2];
-            let hi = byte_data[i * 2 + 1];
-            let f32_val = if is_bf16 {
-                // bf16: top 16 bits of f32
-                f32::from_bits((u32::from(hi)) << 24 | (u32::from(lo)) << 16)
+        // CL-1127 part B (vectorized fast path): reinterpret the byte buffer
+        // as `&[u16]` of LE-encoded half-floats in one shot, then delegate
+        // the conversion to `half::{bf16,f16}::to_f32`. The `half` crate
+        // exposes that as a `#[inline]` scalar function that LLVM
+        // auto-vectorizes (`unpcklwd` + `pslld` for bf16 on x86-64,
+        // `cvtph2ps` for f16 when F16C is available). The previous scalar
+        // loop did byte-by-byte hi/lo assembly *plus* a fallible
+        // `cast::<f32, T>` on every element, which inhibited SIMD.
+        let raw_u16: &[u16] = bytemuck::cast_slice(byte_data);
+        debug_assert_eq!(raw_u16.len(), numel);
+
+        // Specialize the trivial `T == f32` path: the saturating cast helper
+        // is a no-op for f32→f32 (every f32 maps to itself), so the loop
+        // collapses to a pure `half::*_to_f32` map — exactly the shape the
+        // audit (CL-1127) wanted so LLVM SIMD fires.
+        if std::any::TypeId::of::<T>() == std::any::TypeId::of::<f32>() {
+            let f32_data: Vec<f32> = if is_bf16 {
+                raw_u16.iter().map(|&b| bf16_to_f32(b)).collect()
             } else {
-                // f16: IEEE 754 half-precision
-                let bits = (u16::from(hi)) << 8 | u16::from(lo);
+                raw_u16.iter().map(|&b| half_to_f32(b)).collect()
+            };
+            // SAFETY: TypeId::of::<T>() == TypeId::of::<f32>() above implies
+            // `Vec<f32>` and `Vec<T>` have identical layout (same element
+            // size, alignment, drop semantics — both are `Copy` floats with
+            // no Drop). The transmute is over the `Vec` itself (allocation +
+            // length + capacity), not its contents, so no bit pattern is
+            // re-interpreted and no aliasing arises. The `Vec<f32>` is moved
+            // into `ManuallyDrop` before `from_raw_parts`, so the original
+            // allocation is transferred wholesale exactly once.
+            let typed: Vec<T> = unsafe {
+                let mut md = std::mem::ManuallyDrop::new(f32_data);
+                Vec::from_raw_parts(md.as_mut_ptr().cast::<T>(), md.len(), md.capacity())
+            };
+            return Tensor::from_storage(TensorStorage::cpu(typed), shape, false);
+        }
+
+        // Generic path (T == f64 today, or any narrower Float added later):
+        // route every element through the saturating `cast::<f32, T>` to
+        // keep the same error semantics as the previous scalar loop. The
+        // half→f32 stage still vectorizes; only the per-element cast is
+        // sequential.
+        let mut float_data: Vec<T> = Vec::with_capacity(numel);
+        for &bits in raw_u16 {
+            let f32_val = if is_bf16 {
+                bf16_to_f32(bits)
+            } else {
                 half_to_f32(bits)
             };
             float_data.push(cast::<f32, T>(f32_val)?);
@@ -220,15 +247,34 @@ fn decode_view<T: Float>(name: &str, view: &TensorView<'_>) -> FerrotorchResult<
                 ),
             });
         }
+        // CL-1127 part B: reinterpret the byte buffer as `&[f32]` in one
+        // shot rather than walking 4-byte chunks with `try_into` +
+        // `from_le_bytes` on every element. Every f32 bit pattern is valid
+        // (including NaN payloads), so `bytemuck::try_cast_slice` either
+        // succeeds (aligned input from a real safetensors header) or we
+        // fall back to the scalar `from_le_bytes` loop (misaligned mmap).
         let mut data: Vec<T> = Vec::with_capacity(numel);
-        for chunk in byte_data.chunks_exact(4) {
-            let arr: [u8; 4] = chunk
-                .try_into()
-                .map_err(|e| FerrotorchError::InvalidArgument {
-                    message: format!("malformed safetensors chunk for tensor '{name}': {e}"),
-                })?;
-            let f32_val = f32::from_le_bytes(arr);
-            data.push(cast::<f32, T>(f32_val)?);
+        match bytemuck::try_cast_slice::<u8, f32>(byte_data) {
+            Ok(raw_f32) => {
+                debug_assert_eq!(raw_f32.len(), numel);
+                for &v in raw_f32 {
+                    data.push(cast::<f32, T>(v)?);
+                }
+            }
+            Err(_) => {
+                for chunk in byte_data.chunks_exact(4) {
+                    let arr: [u8; 4] =
+                        chunk
+                            .try_into()
+                            .map_err(|e| FerrotorchError::InvalidArgument {
+                                message: format!(
+                                    "malformed safetensors chunk for tensor '{name}': {e}"
+                                ),
+                            })?;
+                    let f32_val = f32::from_le_bytes(arr);
+                    data.push(cast::<f32, T>(f32_val)?);
+                }
+            }
         }
         return Tensor::from_storage(TensorStorage::cpu(data), shape, false);
     }
@@ -259,25 +305,87 @@ fn decode_view<T: Float>(name: &str, view: &TensorView<'_>) -> FerrotorchResult<
 
     // Reinterpret bytes as T values (little-endian assumption, same as
     // the safetensors specification).
-    let data: Vec<T> = byte_data
-        .chunks_exact(elem_size)
-        .map(|chunk| {
-            let mut bytes = [0u8; 8];
-            bytes[..elem_size].copy_from_slice(chunk);
-            // SAFETY: `expected = st_dtype::<T>()` succeeded above only for
-            // `T: Float` with `size_of::<T>() == 4` (f32) or `8` (f64), and
-            // `elem_size = size_of::<T>()` is set from that match — so
-            // `elem_size` here is always 4 or 8, and `chunks_exact` hands
-            // us exactly that many bytes which we copy fully into `bytes`.
-            // `bytes` is an 8-byte stack array; we only read `elem_size`
-            // of its bytes, all of which are initialized by the
-            // `copy_from_slice`. `read_unaligned` requires no alignment, so
-            // the cast from `*const u8` to `*const T` at any address is
-            // sound. Every bit pattern is a valid `f32`/`f64` (NaNs
-            // included), so the read cannot produce an invalid value.
-            unsafe { std::ptr::read_unaligned(bytes.as_ptr().cast::<T>()) }
-        })
-        .collect();
+    //
+    // CL-1127 part B: fast path uses `bytemuck::try_cast_slice` to
+    // reinterpret the byte buffer as a `&[f32]` / `&[f64]` slice (matching
+    // `elem_size`), then transmutes the resulting `Vec` to `Vec<T>` via a
+    // TypeId guard. This replaces the previous scalar `read_unaligned`
+    // chunk-by-chunk loop with a single contiguous `to_vec` that LLVM
+    // lowers to `memcpy` — material on Llama-class checkpoints where this
+    // path dominates the F32 single-file load. If the source buffer is
+    // misaligned (`cast_slice` fails), fall back to the safe scalar loop.
+    let data: Vec<T> =
+        if elem_size == 4 && std::any::TypeId::of::<T>() == std::any::TypeId::of::<f32>() {
+            match bytemuck::try_cast_slice::<u8, f32>(byte_data) {
+                Ok(slice) => {
+                    let v_f32 = slice.to_vec();
+                    // SAFETY: TypeId::of::<T>() == TypeId::of::<f32>() above
+                    // implies T and f32 have identical layout. We transmute the
+                    // `Vec` (allocation + length + capacity) wholesale; no
+                    // element is reinterpreted, and `Vec::from_raw_parts` takes
+                    // ownership of the original allocation exactly once.
+                    unsafe {
+                        let mut md = std::mem::ManuallyDrop::new(v_f32);
+                        Vec::from_raw_parts(md.as_mut_ptr().cast::<T>(), md.len(), md.capacity())
+                    }
+                }
+                Err(_) => byte_data
+                    .chunks_exact(elem_size)
+                    .map(|chunk| {
+                        let arr: [u8; 4] = chunk.try_into().expect("chunks_exact 4");
+                        let v = f32::from_le_bytes(arr);
+                        // SAFETY: T == f32 here (TypeId match above), every f32
+                        // bit pattern is valid (including NaN payloads), so the
+                        // reinterpret-as-T is sound.
+                        unsafe { std::mem::transmute_copy::<f32, T>(&v) }
+                    })
+                    .collect(),
+            }
+        } else if elem_size == 8 && std::any::TypeId::of::<T>() == std::any::TypeId::of::<f64>() {
+            match bytemuck::try_cast_slice::<u8, f64>(byte_data) {
+                Ok(slice) => {
+                    let v_f64 = slice.to_vec();
+                    // SAFETY: see f32 branch above — identical layout argument.
+                    unsafe {
+                        let mut md = std::mem::ManuallyDrop::new(v_f64);
+                        Vec::from_raw_parts(md.as_mut_ptr().cast::<T>(), md.len(), md.capacity())
+                    }
+                }
+                Err(_) => byte_data
+                    .chunks_exact(elem_size)
+                    .map(|chunk| {
+                        let arr: [u8; 8] = chunk.try_into().expect("chunks_exact 8");
+                        let v = f64::from_le_bytes(arr);
+                        // SAFETY: T == f64 here, every f64 bit pattern is valid.
+                        unsafe { std::mem::transmute_copy::<f64, T>(&v) }
+                    })
+                    .collect(),
+            }
+        } else {
+            // Generic fallback: a future `Float` type that's neither f32 nor
+            // f64 lands here. `expected = st_dtype::<T>()` only succeeds for
+            // size 4 or 8 today, so this branch is unreachable in practice.
+            byte_data
+                .chunks_exact(elem_size)
+                .map(|chunk| {
+                    let mut bytes = [0u8; 8];
+                    bytes[..elem_size].copy_from_slice(chunk);
+                    // SAFETY: `expected = st_dtype::<T>()` succeeded above only
+                    // for `T: Float` with `size_of::<T>() == 4` (f32) or `8`
+                    // (f64), and `elem_size = size_of::<T>()` is set from that
+                    // match — so `elem_size` here is always 4 or 8, and
+                    // `chunks_exact` hands us exactly that many bytes which we
+                    // copy fully into `bytes`. `bytes` is an 8-byte stack
+                    // array; we only read `elem_size` of its bytes, all of
+                    // which are initialized by the `copy_from_slice`.
+                    // `read_unaligned` requires no alignment, so the cast from
+                    // `*const u8` to `*const T` at any address is sound. Every
+                    // bit pattern is a valid `f32`/`f64` (NaNs included), so
+                    // the read cannot produce an invalid value.
+                    unsafe { std::ptr::read_unaligned(bytes.as_ptr().cast::<T>()) }
+                })
+                .collect()
+        };
 
     Tensor::from_storage(TensorStorage::cpu(data), shape, false)
 }
@@ -401,18 +509,38 @@ pub fn load_safetensors_sharded<T: Float>(
     let index = SafeTensorsIndex::from_file(index_path)?;
 
     let grouped = index.group_by_shard();
-    let mut state: StateDict<T> = HashMap::with_capacity(index.weight_map.len());
 
-    // Deterministic shard order for reproducible loads.
+    // Deterministic shard order for reproducible loads. Even with parallel
+    // shard decoding the *final* HashMap insertion order is irrelevant, but
+    // we still sort the work units so the rayon partitioner sees a stable
+    // workload and so that any error message ("shard X is missing tensor
+    // Y") names the same shard run-to-run for the same inputs.
     let mut shard_files: Vec<&String> = grouped.keys().collect();
     shard_files.sort();
 
-    for shard_file in shard_files {
-        let shard_path = dir.join(shard_file);
-        let expected_keys = grouped
-            .get(shard_file)
-            .expect("grouped map built from shard_files keys");
-        load_one_shard_into::<T>(&shard_path, expected_keys, &mut state)?;
+    // CL-1127 part A: decode every shard in parallel. Shards live in
+    // independent files, the safetensors header lookups don't share state,
+    // and `decode_view` only touches its own borrowed bytes plus per-call
+    // `Vec<T>` allocations. We collect each shard's tensors into its own
+    // `StateDict<T>` and merge serially at the end (the final merge is
+    // O(total tensors) hash inserts, dwarfed by the per-shard byte
+    // traversal we just parallelized). The previous loop was strictly
+    // sequential even though each shard load is I/O- and CPU-bound and
+    // embarrassingly parallel across files.
+    let per_shard: Vec<StateDict<T>> = shard_files
+        .par_iter()
+        .map(|shard_file| {
+            let shard_path = dir.join(shard_file.as_str());
+            let expected_keys = grouped
+                .get(*shard_file)
+                .expect("grouped map built from shard_files keys");
+            load_one_shard_owned::<T>(&shard_path, expected_keys)
+        })
+        .collect::<FerrotorchResult<Vec<_>>>()?;
+
+    let mut state: StateDict<T> = HashMap::with_capacity(index.weight_map.len());
+    for shard_state in per_shard {
+        state.extend(shard_state);
     }
 
     // Cross-check: every key declared in the index must now be present.
@@ -427,18 +555,19 @@ pub fn load_safetensors_sharded<T: Float>(
     Ok(state)
 }
 
-/// Read one safetensors shard from disk and extract exactly the tensors
-/// named in `expected_keys`, storing them in `state`.
+/// Read one safetensors shard from disk and return the decoded tensors as
+/// an owned [`StateDict`], independent of any caller-side aggregate state.
 ///
-/// Any tensor present in the shard but not in `expected_keys` is skipped
-/// (HF index is authoritative). Any `expected_keys` entry that is not in
-/// the shard produces a [`FerrotorchError::InvalidArgument`] so a
-/// corrupt index is caught early.
-fn load_one_shard_into<T: Float>(
+/// Used by [`load_safetensors_sharded`] (CL-1127 part A) so that each
+/// shard can be decoded on its own rayon worker thread without
+/// synchronizing on a shared map. Any tensor present in the shard but not
+/// in `expected_keys` is skipped (the HF index is authoritative). Any
+/// `expected_keys` entry that is not in the shard produces a
+/// [`FerrotorchError::InvalidArgument`] so a corrupt index is caught early.
+fn load_one_shard_owned<T: Float>(
     shard_path: &Path,
     expected_keys: &[String],
-    state: &mut StateDict<T>,
-) -> FerrotorchResult<()> {
+) -> FerrotorchResult<StateDict<T>> {
     let file_data = std::fs::read(shard_path).map_err(|e| FerrotorchError::InvalidArgument {
         message: format!("failed to read shard {}: {e}", shard_path.display()),
     })?;
@@ -447,10 +576,23 @@ fn load_one_shard_into<T: Float>(
             message: format!("failed to parse shard {}: {e}", shard_path.display()),
         })?;
 
+    decode_shard_tensors::<T>(shard_path, expected_keys, &st)
+}
+
+/// Decode the subset of `st.tensors()` named in `expected_keys` into a
+/// fresh `StateDict<T>`. Shared between the read-into-memory and mmap
+/// shard paths so the dtype handling and missing-key validation stay in
+/// one place.
+fn decode_shard_tensors<T: Float>(
+    shard_path: &Path,
+    expected_keys: &[String],
+    st: &SafeTensors<'_>,
+) -> FerrotorchResult<StateDict<T>> {
     let expected_set: HashSet<&str> = expected_keys
         .iter()
         .map(std::string::String::as_str)
         .collect();
+    let mut state: StateDict<T> = HashMap::with_capacity(expected_keys.len());
     let mut found: HashSet<String> = HashSet::with_capacity(expected_keys.len());
 
     let tensors = st.tensors();
@@ -475,6 +617,23 @@ fn load_one_shard_into<T: Float>(
         }
     }
 
+    Ok(state)
+}
+
+/// Read one safetensors shard from disk and merge its tensors into `state`.
+///
+/// Thin sequential wrapper around [`load_one_shard_owned`] retained for
+/// the progress-callback and filtered-load paths, which still load
+/// shard-by-shard sequentially to preserve their per-shard semantics (one
+/// callback fire per shard / predicate evaluated under the caller's
+/// thread).
+fn load_one_shard_into<T: Float>(
+    shard_path: &Path,
+    expected_keys: &[String],
+    state: &mut StateDict<T>,
+) -> FerrotorchResult<()> {
+    let shard_state = load_one_shard_owned::<T>(shard_path, expected_keys)?;
+    state.extend(shard_state);
     Ok(())
 }
 
@@ -629,17 +788,30 @@ pub fn load_safetensors_sharded_mmap<T: Float>(
     let index = SafeTensorsIndex::from_file(index_path)?;
 
     let grouped = index.group_by_shard();
-    let mut state: StateDict<T> = HashMap::with_capacity(index.weight_map.len());
 
     let mut shard_files: Vec<&String> = grouped.keys().collect();
     shard_files.sort();
 
-    for shard_file in shard_files {
-        let shard_path = dir.join(shard_file);
-        let expected_keys = grouped
-            .get(shard_file)
-            .expect("grouped map built from shard_files keys");
-        load_one_shard_into_mmap::<T>(&shard_path, expected_keys, &mut state)?;
+    // CL-1127 part A: mirror of [`load_safetensors_sharded`] — each shard's
+    // mmap is opened on a rayon worker, decoded into an owned
+    // `StateDict<T>`, and merged serially at the end. mmap doesn't share
+    // state between shards, so this is sound; the parallel mapping cost vs.
+    // sequential is bounded by the file system's page cache and is dwarfed
+    // by the decode-time savings.
+    let per_shard: Vec<StateDict<T>> = shard_files
+        .par_iter()
+        .map(|shard_file| {
+            let shard_path = dir.join(shard_file.as_str());
+            let expected_keys = grouped
+                .get(*shard_file)
+                .expect("grouped map built from shard_files keys");
+            load_one_shard_owned_mmap::<T>(&shard_path, expected_keys)
+        })
+        .collect::<FerrotorchResult<Vec<_>>>()?;
+
+    let mut state: StateDict<T> = HashMap::with_capacity(index.weight_map.len());
+    for shard_state in per_shard {
+        state.extend(shard_state);
     }
 
     for key in index.weight_map.keys() {
@@ -653,14 +825,13 @@ pub fn load_safetensors_sharded_mmap<T: Float>(
     Ok(state)
 }
 
-/// mmap counterpart of [`load_one_shard_into`]. The mmap is dropped at the
-/// end of this function — owned `Tensor<T>` buffers in `state` are
-/// independent of it.
-fn load_one_shard_into_mmap<T: Float>(
+/// mmap counterpart of [`load_one_shard_owned`]. The mmap is dropped at
+/// the end of this function — owned `Tensor<T>` buffers in the returned
+/// `StateDict<T>` are independent of it. (CL-1127 part A.)
+fn load_one_shard_owned_mmap<T: Float>(
     shard_path: &Path,
     expected_keys: &[String],
-    state: &mut StateDict<T>,
-) -> FerrotorchResult<()> {
+) -> FerrotorchResult<StateDict<T>> {
     let file = File::open(shard_path).map_err(|e| FerrotorchError::InvalidArgument {
         message: format!("failed to open shard {}: {e}", shard_path.display()),
     })?;
@@ -673,33 +844,7 @@ fn load_one_shard_into_mmap<T: Float>(
         message: format!("failed to parse shard {}: {e}", shard_path.display()),
     })?;
 
-    let expected_set: HashSet<&str> = expected_keys
-        .iter()
-        .map(std::string::String::as_str)
-        .collect();
-    let mut found: HashSet<String> = HashSet::with_capacity(expected_keys.len());
-
-    let tensors = st.tensors();
-    for (name, view) in &tensors {
-        if !expected_set.contains(name.as_str()) {
-            continue;
-        }
-        let tensor = decode_view::<T>(name, view)?;
-        state.insert(name.clone(), tensor);
-        found.insert(name.clone());
-    }
-
-    for key in expected_keys {
-        if !found.contains(key) {
-            return Err(FerrotorchError::InvalidArgument {
-                message: format!(
-                    "safetensors shard {} is missing tensor \"{key}\" declared in the index",
-                    shard_path.display()
-                ),
-            });
-        }
-    }
-    Ok(())
+    decode_shard_tensors::<T>(shard_path, expected_keys, &st)
 }
 
 /// Sharded loader that returns only tensors whose name is accepted by
@@ -1476,5 +1621,267 @@ mod tests {
         let result: StateDict<f32> =
             load_safetensors_sharded_filtered(&index_path, |k| k.contains("nonexistent")).unwrap();
         assert!(result.is_empty());
+    }
+
+    // -----------------------------------------------------------------------
+    // CL-1127 Part C: vectorized bf16/f16 upcast — bit-exact verification.
+    //
+    // The optimisation in `decode_view` swaps the scalar byte-by-byte hi/lo
+    // assembly + per-element `cast::<f32, T>` loop for a `bytemuck::cast_slice`
+    // + `half::*::to_f32` map. The cast must remain *byte-exact* with the
+    // pre-optimisation behaviour, because the audit framing in #1127 is
+    // explicitly "pure perf — bit-exact must hold". These tests build small
+    // bf16 / f16 safetensors files via the upstream `safetensors` crate
+    // (byte-identical to what HF Python emits) and verify the decoded f32
+    // buffer matches the reference `half::*::to_f32` mapping applied to
+    // the same raw bits.
+    // -----------------------------------------------------------------------
+
+    /// Write a tiny safetensors file holding a single tensor at the given
+    /// dtype with the given raw little-endian bytes. We bypass our own
+    /// `save_safetensors` (which only emits F32/F64) and call the upstream
+    /// crate directly, the same way `HuggingFace` does.
+    fn write_typed_st(path: &Path, name: &str, dtype: Dtype, shape: &[usize], bytes: &[u8]) {
+        let view = TensorView::new(dtype, shape.to_vec(), bytes).unwrap();
+        safetensors::serialize_to_file([(name.to_string(), view)], &None, path).unwrap();
+    }
+
+    #[test]
+    fn bf16_upcast_is_bit_exact() {
+        // Build a bf16 tensor whose bits exercise every interesting region:
+        //   ±0, ±1.0, ±small, ±large, ±Inf, NaN, denormal.
+        let bf16_bits: Vec<u16> = vec![
+            0x0000, // +0.0
+            0x8000, // -0.0
+            0x3F80, // +1.0
+            0xBF80, // -1.0
+            0x4049, // +π upper bits (~3.140625)
+            0x7F80, // +Inf
+            0xFF80, // -Inf
+            0x7FC0, // qNaN
+            0x0001, // smallest positive subnormal
+            0x4080, // +4.0
+            0xC080, // -4.0
+            0x4248, // +50.0
+        ];
+        let raw: Vec<u8> = bf16_bits.iter().flat_map(|b| b.to_le_bytes()).collect();
+
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("bf16.safetensors");
+        write_typed_st(&path, "w", Dtype::BF16, &[bf16_bits.len()], &raw);
+
+        let loaded: StateDict<f32> = load_safetensors(&path).unwrap();
+        let got = loaded["w"].data().unwrap();
+
+        // Reference: each bf16 bit pattern routed through `bf16::to_f32` is
+        // the bit-exact contract we are claiming to preserve.
+        let expected: Vec<f32> = bf16_bits
+            .iter()
+            .map(|&b| half::bf16::from_bits(b).to_f32())
+            .collect();
+        assert_eq!(got.len(), expected.len());
+        for (i, (g, e)) in got.iter().zip(expected.iter()).enumerate() {
+            // `to_bits` so NaN compares equal when bit patterns match.
+            assert_eq!(
+                g.to_bits(),
+                e.to_bits(),
+                "bf16 element {i}: got bits 0x{:08X}, want 0x{:08X}",
+                g.to_bits(),
+                e.to_bits()
+            );
+        }
+    }
+
+    #[test]
+    fn f16_upcast_is_bit_exact() {
+        // Same coverage as the bf16 test but with IEEE 754 binary16 bits.
+        let f16_bits: Vec<u16> = vec![
+            0x0000, // +0.0
+            0x8000, // -0.0
+            0x3C00, // +1.0
+            0xBC00, // -1.0
+            0x4248, // +π in f16 (~3.140625)
+            0x7C00, // +Inf
+            0xFC00, // -Inf
+            0x7E00, // qNaN
+            0x0001, // smallest positive subnormal
+            0x7BFF, // max finite (~65504)
+            0xFBFF, // min finite (-65504)
+            0x4900, // +10.0
+        ];
+        let raw: Vec<u8> = f16_bits.iter().flat_map(|b| b.to_le_bytes()).collect();
+
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("f16.safetensors");
+        write_typed_st(&path, "w", Dtype::F16, &[f16_bits.len()], &raw);
+
+        let loaded: StateDict<f32> = load_safetensors(&path).unwrap();
+        let got = loaded["w"].data().unwrap();
+
+        let expected: Vec<f32> = f16_bits
+            .iter()
+            .map(|&b| half::f16::from_bits(b).to_f32())
+            .collect();
+        assert_eq!(got.len(), expected.len());
+        for (i, (g, e)) in got.iter().zip(expected.iter()).enumerate() {
+            assert_eq!(
+                g.to_bits(),
+                e.to_bits(),
+                "f16 element {i}: got bits 0x{:08X}, want 0x{:08X}",
+                g.to_bits(),
+                e.to_bits()
+            );
+        }
+    }
+
+    #[test]
+    fn bf16_upcast_to_f64_is_bit_exact() {
+        // The bf16/f16→T path has a generic branch when T != f32 (e.g.
+        // T == f64). Exercise it explicitly so the saturating-cast branch
+        // is also bit-exact.
+        let bf16_bits: Vec<u16> = vec![
+            0x0000, 0x3F80, 0xBF80, 0x4049, 0x7F80, 0xFF80, 0x4080, 0xC080,
+        ];
+        let raw: Vec<u8> = bf16_bits.iter().flat_map(|b| b.to_le_bytes()).collect();
+
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("bf16_to_f64.safetensors");
+        write_typed_st(&path, "w", Dtype::BF16, &[bf16_bits.len()], &raw);
+
+        let loaded: StateDict<f64> = load_safetensors(&path).unwrap();
+        let got = loaded["w"].data().unwrap();
+
+        // Reference: f64 cast must agree with the f32 widening for every
+        // bit pattern produced by the bf16→f32 stage. The `cast<f32,f64>`
+        // widening is bit-exact for all finite values because every f32
+        // is representable as f64; Inf passes through.
+        let expected: Vec<f64> = bf16_bits
+            .iter()
+            .map(|&b| f64::from(half::bf16::from_bits(b).to_f32()))
+            .collect();
+        assert_eq!(got.len(), expected.len());
+        for (i, (g, e)) in got.iter().zip(expected.iter()).enumerate() {
+            assert_eq!(
+                g.to_bits(),
+                e.to_bits(),
+                "bf16→f64 element {i}: got bits 0x{:016X}, want 0x{:016X}",
+                g.to_bits(),
+                e.to_bits()
+            );
+        }
+    }
+
+    #[test]
+    fn f32_reinterpret_is_bit_exact() {
+        // The same-size T path uses bytemuck::try_cast_slice + Vec transmute.
+        // Verify it preserves every f32 bit pattern, including NaN payloads
+        // and ±0 — these are exactly the patterns the previous
+        // `read_unaligned` loop preserved, so the new code must match.
+        let f32_bits: Vec<u32> = vec![
+            0x0000_0000, // +0.0
+            0x8000_0000, // -0.0
+            0x3F80_0000, // 1.0
+            0xBF80_0000, // -1.0
+            0x4049_0FDB, // π
+            0x7F80_0000, // +Inf
+            0xFF80_0000, // -Inf
+            0x7FC0_0000, // canonical qNaN
+            0x7FC0_DEAD, // qNaN with payload
+            0x0080_0000, // smallest positive normal
+            0x007F_FFFF, // largest positive subnormal
+        ];
+        let raw: Vec<u8> = f32_bits.iter().flat_map(|b| b.to_le_bytes()).collect();
+
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("f32_bits.safetensors");
+        write_typed_st(&path, "w", Dtype::F32, &[f32_bits.len()], &raw);
+
+        let loaded: StateDict<f32> = load_safetensors(&path).unwrap();
+        let got = loaded["w"].data().unwrap();
+
+        assert_eq!(got.len(), f32_bits.len());
+        for (i, (g, e)) in got.iter().zip(f32_bits.iter()).enumerate() {
+            assert_eq!(
+                g.to_bits(),
+                *e,
+                "f32 element {i}: got 0x{:08X}, want 0x{e:08X}",
+                g.to_bits()
+            );
+        }
+    }
+
+    #[test]
+    fn sharded_parallel_loader_merges_many_shards() {
+        // CL-1127 part A coverage: spin up 8 shards in parallel and verify
+        // the result matches a sequentially-built reference. Any race or
+        // partial merge would fail this test.
+        let tmp = tempfile::tempdir().unwrap();
+        let mut shards: Vec<(String, StateDict<f32>)> = Vec::new();
+        for shard_idx in 0..8u32 {
+            let mut sd: StateDict<f32> = HashMap::new();
+            for tensor_idx in 0..4u32 {
+                let key = format!("shard_{shard_idx}.tensor_{tensor_idx}.weight");
+                let base = (shard_idx * 4 + tensor_idx) as f32;
+                let data: Vec<f32> = (0..16).map(|j| base + j as f32 * 0.125).collect();
+                sd.insert(key, make_tensor_f32(data, vec![4, 4]));
+            }
+            let fname = format!("model-{:05}-of-00008.safetensors", shard_idx + 1);
+            write_shard(tmp.path(), &fname, &sd);
+            shards.push((fname, sd));
+        }
+
+        let shard_refs: Vec<(&str, &StateDict<f32>)> =
+            shards.iter().map(|(f, sd)| (f.as_str(), sd)).collect();
+        let index_path = write_index(tmp.path(), "model.safetensors.index.json", &shard_refs);
+
+        let parallel: StateDict<f32> = load_safetensors_sharded(&index_path).unwrap();
+        assert_eq!(parallel.len(), 8 * 4);
+
+        // Reference: every (key, data) pair must survive the parallel load
+        // bit-exactly.
+        for (_, sd) in &shards {
+            for (key, tensor) in sd {
+                let loaded = parallel.get(key).expect("missing key after parallel load");
+                assert_eq!(loaded.shape(), tensor.shape());
+                assert_eq!(loaded.data().unwrap(), tensor.data().unwrap());
+            }
+        }
+    }
+
+    #[test]
+    fn sharded_parallel_mmap_loader_merges_many_shards() {
+        // Same scenario but through the mmap path so the rayon parallelism
+        // on Mmap-backed SafeTensors deserialisation is exercised.
+        let tmp = tempfile::tempdir().unwrap();
+        let mut shards: Vec<(String, StateDict<f32>)> = Vec::new();
+        for shard_idx in 0..6u32 {
+            let mut sd: StateDict<f32> = HashMap::new();
+            for tensor_idx in 0..3u32 {
+                let key = format!("mmap_shard_{shard_idx}.t_{tensor_idx}");
+                let base = (shard_idx * 3 + tensor_idx) as f32;
+                let data: Vec<f32> = (0..9).map(|j| base + j as f32).collect();
+                sd.insert(key, make_tensor_f32(data, vec![3, 3]));
+            }
+            let fname = format!("mmap-{:05}-of-00006.safetensors", shard_idx + 1);
+            write_shard(tmp.path(), &fname, &sd);
+            shards.push((fname, sd));
+        }
+
+        let shard_refs: Vec<(&str, &StateDict<f32>)> =
+            shards.iter().map(|(f, sd)| (f.as_str(), sd)).collect();
+        let index_path = write_index(tmp.path(), "model.safetensors.index.json", &shard_refs);
+
+        let parallel: StateDict<f32> = load_safetensors_sharded_mmap(&index_path).unwrap();
+        assert_eq!(parallel.len(), 6 * 3);
+
+        for (_, sd) in &shards {
+            for (key, tensor) in sd {
+                let loaded = parallel
+                    .get(key)
+                    .expect("missing key after parallel mmap load");
+                assert_eq!(loaded.shape(), tensor.shape());
+                assert_eq!(loaded.data().unwrap(), tensor.data().unwrap());
+            }
+        }
     }
 }
