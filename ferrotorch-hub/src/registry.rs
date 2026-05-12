@@ -771,6 +771,65 @@ static MODELS: &[ModelInfo] = &[
         format: WeightsFormat::FerrotorchStateDict,
         num_parameters: 0,
     },
+    // #1167: distributions-parity-v1 — Phase G.1 torch.distributions
+    // parity fixtures. The mirror is a fixture *bundle* (`bundle.tar`)
+    // plus per-config subfolders. There are 17 distribution configs
+    // (normal_{standard,shifted}, beta_25, gamma_21, cauchy_standard,
+    //  exponential_1p5, uniform_neg2_3, lognormal_0_p5, laplace_0_1,
+    //  halfnormal_1, studentt_df5, bernoulli_p3, poisson_3,
+    //  categorical_k4, dirichlet_k4, mvn_3d, multinomial_k3_n20)
+    // and 8 KL pairs (kl_{normal,bernoulli,uniform,categorical,
+    //  laplace,exponential,gamma,poisson}_*). Each distribution
+    // subfolder ships:
+    //   * params.json           — params + family + metadata
+    //   * test_points.bin       — fixed test points where log_prob is evaluated
+    //   * sample.bin            — [N, *event_shape] torch reference samples
+    //                             (provenance only — moment-based compare)
+    //   * log_prob.bin          — [M] reference log_prob at test_points
+    //   * entropy.bin           — [1 or B] reference entropy
+    //                             (absent when torch lacks entropy(),
+    //                             e.g. Poisson, Multinomial)
+    //   * ref_moments.json      — sample mean + variance of the torch sample
+    // KL subfolders ship `params.json` + `kl.bin`.
+    //
+    // The reference fixtures are produced by `torch.distributions.*`
+    // under `torch.manual_seed(42)` with N=10000 samples per config,
+    // so the harness can verify ferrotorch-distributions's sample
+    // moments, log_prob, entropy, and KL divergence against torch
+    // without re-running torch at verification time
+    // (`scripts/verify_distributions_inference.py` +
+    //  `ferrotorch-distributions/examples/distributions_dump.rs` +
+    //  `ferrotorch-distributions/tests/conformance_torch_parity.rs`).
+    //
+    // The harness compares **moments** (mean, var) for sample data —
+    // not byte-level sample sequences — because ferrotorch_core's
+    // `creation::rand`/`randn` use a time-seeded xorshift PRNG, not
+    // torch's seeded Philox. Per-metric tolerances are:
+    //   * sample mean : max_abs <= 0.05    (MC noise budget at N=10000)
+    //   * sample var  : max_abs <= 0.10    (variance estimator noise)
+    //   * log_prob    : max_abs <= 1e-4
+    //   * entropy     : max_abs <= 1e-4
+    //   * KL          : max_abs <= 1e-4
+    // For three distributions (cauchy_standard, laplace_0_1,
+    // multinomial_k3_n20) the per-axis sample variance has an MC
+    // noise floor above the global 0.10 tolerance — these skip the
+    // moment comparison but keep all analytical metrics under the
+    // 1e-4 floor.
+    //
+    // `weights_url`/`weights_sha256` point at the tar bundle so this
+    // registry entry has the same shape as the rest of the parity
+    // bundles; the verify harness itself pulls individual files via
+    // `hf_hub_download` and does not consume the tar. The
+    // FerrotorchStateDict format tag indicates "not a HF safetensors
+    // checkpoint" — the bundle is a single-file convenience archive.
+    ModelInfo {
+        name: "distributions-parity-v1",
+        description: "Phase G.1 torch.distributions parity fixtures: 17 canonical distribution configs (Normal, Beta, Gamma, Cauchy, Dirichlet, Exponential, Bernoulli, Categorical, Uniform, LogNormal, Multinomial, Poisson, StudentT, MultivariateNormal, HalfNormal, Laplace) plus 8 KL pairs (Normal-Normal, Bernoulli-Bernoulli, Uniform-Uniform, Categorical-Categorical, Laplace-Laplace, Exponential-Exponential, Gamma-Gamma, Poisson-Poisson). Reference samples (N=10000 with torch.manual_seed(42)), log_prob at fixed test points, entropy, and KL divergence from torch.distributions. Apache 2.0; real-artifact baseline for ferrotorch-distributions parity vs torch.distributions (#1167).",
+        weights_url: "https://huggingface.co/ferrotorch/distributions-parity-v1/resolve/main/bundle.tar",
+        weights_sha256: "bae19e48e3a4c6b5040557298fe037d4e4fccc832237b7a3522bc76ba6bf9f9e",
+        format: WeightsFormat::FerrotorchStateDict,
+        num_parameters: 0,
+    },
 ];
 
 /// List all available pretrained models.
