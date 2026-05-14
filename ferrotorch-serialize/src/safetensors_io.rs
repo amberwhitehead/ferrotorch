@@ -411,6 +411,17 @@ pub fn load_safetensors<T: Float>(path: impl AsRef<Path>) -> FerrotorchResult<St
     let tensor_list = st.tensors();
     let mut state: StateDict<T> = HashMap::with_capacity(tensor_list.len());
 
+    // Serial decode. A rayon `par_iter` was investigated under
+    // ferrotorch#1178 and shown to *regress* native-`f32` checkpoints
+    // (SD-1.5 UNet: 315 s sequential → 379 s parallel on a 16-core
+    // RTX 3090 box) because `decode_view` for an `F32` file is a pure
+    // memcpy from mmap to owned `Vec<f32>` — memory-bandwidth-bound
+    // rather than CPU-bound, so spawning workers only adds page-fault
+    // and allocator contention. The parallel variant would win on
+    // `bf16` / `f16` files (which carry a per-element half→f32
+    // up-cast in addition to the copy) — once we want that win, the
+    // dispatcher needs to switch on `view.dtype()` rather than
+    // unconditionally parallelize. Tracked for follow-up.
     for (name, view) in &tensor_list {
         let tensor = decode_view::<T>(name, view)?;
         state.insert(name.clone(), tensor);
