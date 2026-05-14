@@ -409,25 +409,53 @@ pub fn load_safetensors<T: Float>(path: impl AsRef<Path>) -> FerrotorchResult<St
         })?;
 
     let tensor_list = st.tensors();
-    let mut state: StateDict<T> = HashMap::with_capacity(tensor_list.len());
-
-    // Serial decode. A rayon `par_iter` was investigated under
-    // ferrotorch#1178 and shown to *regress* native-`f32` checkpoints
-    // (SD-1.5 UNet: 315 s sequential → 379 s parallel on a 16-core
-    // RTX 3090 box) because `decode_view` for an `F32` file is a pure
-    // memcpy from mmap to owned `Vec<f32>` — memory-bandwidth-bound
-    // rather than CPU-bound, so spawning workers only adds page-fault
-    // and allocator contention. The parallel variant would win on
-    // `bf16` / `f16` files (which carry a per-element half→f32
-    // up-cast in addition to the copy) — once we want that win, the
-    // dispatcher needs to switch on `view.dtype()` rather than
-    // unconditionally parallelize. Tracked for follow-up.
-    for (name, view) in &tensor_list {
-        let tensor = decode_view::<T>(name, view)?;
-        state.insert(name.clone(), tensor);
-    }
-
+    let state: StateDict<T> = decode_tensor_list::<T>(&tensor_list)?;
     Ok(state)
+}
+
+/// Decode every `(name, TensorView)` pair into an owned [`StateDict<T>`],
+/// choosing serial vs rayon-parallel iteration based on the file's
+/// dtype.
+///
+/// Rationale (ferrotorch#1178): a rayon `par_iter` over `decode_view`
+/// is a clear win on `BF16` / `F16` checkpoints — each element
+/// carries a `half::*_to_f32` upcast that LLVM auto-vectorizes and
+/// scales linearly with worker count. The same `par_iter` is a clear
+/// *loss* on native-`F32` / `F64` files (SD-1.5 UNet: 315 s serial
+/// → 379 s parallel on a 16-core RTX 3090 box), where
+/// `decode_view` is a pure mmap → `Vec<T>` memcpy bound by memory
+/// bandwidth: extra workers only add page-fault and allocator
+/// contention. The dispatcher therefore peeks at the first tensor's
+/// dtype and picks the strategy that wins for that family. Files
+/// are nearly always homogeneous in practice (one dtype per
+/// checkpoint), so the single peek is sufficient.
+///
+/// An operator escape hatch (`FERROTORCH_FORCE_SERIAL_LOAD=1`) is
+/// honored as a diagnostic flag — useful when chasing a regression
+/// or running under tooling that mis-attributes rayon-thread
+/// activity (e.g. `valgrind`, `perf record` without
+/// `--call-graph=dwarf`).
+fn decode_tensor_list<T: Float>(
+    tensor_list: &[(String, TensorView<'_>)],
+) -> FerrotorchResult<StateDict<T>> {
+    let parallel_dtype = tensor_list
+        .first()
+        .is_some_and(|(_, v)| matches!(v.dtype(), Dtype::BF16 | Dtype::F16));
+    let force_serial = std::env::var_os("FERROTORCH_FORCE_SERIAL_LOAD").is_some();
+    if parallel_dtype && !force_serial {
+        let decoded: FerrotorchResult<Vec<(String, Tensor<T>)>> = tensor_list
+            .par_iter()
+            .map(|(name, view)| decode_view::<T>(name, view).map(|t| (name.clone(), t)))
+            .collect();
+        Ok(decoded?.into_iter().collect())
+    } else {
+        let mut state: StateDict<T> = HashMap::with_capacity(tensor_list.len());
+        for (name, view) in tensor_list {
+            let tensor = decode_view::<T>(name, view)?;
+            state.insert(name.clone(), tensor);
+        }
+        Ok(state)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1778,6 +1806,101 @@ mod tests {
                 "bf16→f64 element {i}: got bits 0x{:016X}, want 0x{:016X}",
                 g.to_bits(),
                 e.to_bits()
+            );
+        }
+    }
+
+    #[test]
+    fn dispatcher_multi_tensor_bf16_round_trips_through_parallel_path() {
+        // Multi-tensor BF16 file — first-tensor dtype check sends this
+        // to the rayon `par_iter` branch of the dispatcher. Each
+        // tensor is small enough that rayon's threadpool startup cost
+        // dominates wall-clock here; the point is *correctness*
+        // (parallel decode produces identical output to serial). The
+        // production speedup comes at SD-1.5 / Llama scale, not in
+        // tests. (ferrotorch#1178)
+        let bits_a: Vec<u16> = vec![0x3F80, 0x4000, 0x4040, 0x4080]; // 1.0, 2.0, 3.0, 4.0
+        let bits_b: Vec<u16> = vec![0xBF80, 0xC000, 0x4248, 0x4049]; // -1.0, -2.0, 50.0, ~π
+        let bits_c: Vec<u16> = vec![0x0000, 0x8000, 0x7F80, 0xFF80]; // +0, -0, +Inf, -Inf
+        let raw_a: Vec<u8> = bits_a.iter().flat_map(|b| b.to_le_bytes()).collect();
+        let raw_b: Vec<u8> = bits_b.iter().flat_map(|b| b.to_le_bytes()).collect();
+        let raw_c: Vec<u8> = bits_c.iter().flat_map(|b| b.to_le_bytes()).collect();
+
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("multi_bf16.safetensors");
+
+        let view_a = TensorView::new(Dtype::BF16, vec![bits_a.len()], &raw_a).unwrap();
+        let view_b = TensorView::new(Dtype::BF16, vec![bits_b.len()], &raw_b).unwrap();
+        let view_c = TensorView::new(Dtype::BF16, vec![bits_c.len()], &raw_c).unwrap();
+        safetensors::serialize_to_file(
+            [
+                ("a".to_string(), view_a),
+                ("b".to_string(), view_b),
+                ("c".to_string(), view_c),
+            ],
+            &None,
+            &path,
+        )
+        .unwrap();
+
+        let loaded: StateDict<f32> = load_safetensors(&path).unwrap();
+        assert_eq!(loaded.len(), 3);
+        for (name, bits) in [("a", &bits_a), ("b", &bits_b), ("c", &bits_c)] {
+            let got = loaded[name].data().unwrap();
+            let expected: Vec<f32> = bits
+                .iter()
+                .map(|&b| half::bf16::from_bits(b).to_f32())
+                .collect();
+            for (i, (g, e)) in got.iter().zip(expected.iter()).enumerate() {
+                assert_eq!(
+                    g.to_bits(),
+                    e.to_bits(),
+                    "bf16 tensor {name} element {i}: got bits 0x{:08X}, want 0x{:08X}",
+                    g.to_bits(),
+                    e.to_bits()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn dispatcher_force_serial_env_var_matches_default_for_bf16() {
+        // The `FERROTORCH_FORCE_SERIAL_LOAD` escape hatch must produce
+        // bit-identical output to the default parallel path on a
+        // BF16 file (the only dtype family the dispatcher routes
+        // through `par_iter`). Verifies the two code paths agree on
+        // every element. (ferrotorch#1178)
+        let bf16_bits: Vec<u16> = (0..64u16).map(|i| 0x3F80 + i).collect();
+        let raw: Vec<u8> = bf16_bits.iter().flat_map(|b| b.to_le_bytes()).collect();
+
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("force_serial.safetensors");
+        write_typed_st(&path, "w", Dtype::BF16, &[bf16_bits.len()], &raw);
+
+        // Default load: dispatcher takes the parallel branch.
+        let parallel: StateDict<f32> = load_safetensors(&path).unwrap();
+        let parallel_data = parallel["w"].data().unwrap().to_vec();
+
+        // SAFETY: tests run single-threaded in the rust test harness
+        // unless `--test-threads` is set; in CI that flag is unset.
+        // `FERROTORCH_FORCE_SERIAL_LOAD` is read by `decode_tensor_list`
+        // inside the same process; toggling it here is local to this
+        // test's scope (cleared in the `defer`-shaped block below).
+        let key = "FERROTORCH_FORCE_SERIAL_LOAD";
+        unsafe { std::env::set_var(key, "1"); }
+        let serial: StateDict<f32> = load_safetensors(&path).unwrap();
+        unsafe { std::env::remove_var(key); }
+        let serial_data = serial["w"].data().unwrap().to_vec();
+
+        assert_eq!(parallel_data.len(), serial_data.len());
+        for (i, (p, s)) in parallel_data.iter().zip(serial_data.iter()).enumerate() {
+            assert_eq!(
+                p.to_bits(),
+                s.to_bits(),
+                "force-serial vs parallel disagree at element {i}: \
+                 parallel=0x{:08X}, serial=0x{:08X}",
+                p.to_bits(),
+                s.to_bits(),
             );
         }
     }

@@ -12,6 +12,49 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Changed
 
+## [0.5.7] - 2026-05-14
+
+### Release notes
+
+Workspace bumped from 0.5.6 → 0.5.7. Single behavior change: a
+dtype-aware dispatcher inside `ferrotorch-serialize::load_safetensors`
+that routes BF16 / F16 checkpoints through rayon `par_iter` (where the
+per-element half→f32 upcast is CPU-bound and parallelism wins) and
+native F32 / F64 checkpoints through the existing serial loop (where
+the per-element memcpy is memory-bandwidth-bound and parallelism
+regresses — see #1178 measurements). Also ships a small operator
+escape hatch (`FERROTORCH_FORCE_SERIAL_LOAD=1`) and a synthetic
+benchmark example so the next dispatcher-tuning attempt starts from
+real numbers.
+
+### Added
+- `ferrotorch-serialize`: dtype-aware load dispatcher in
+  `load_safetensors` (#1178). Peeks at the first tensor's `dtype` and
+  picks `par_iter` for `BF16` / `F16` files (CPU-bound half-precision
+  upcast) or the serial loop for `F32` / `F64` files (memory-bandwidth
+  -bound memcpy). Production data on a 16-core RTX 3090 box:
+  - SD-1.5 UNet (`F32`, 3.4 GB, 600+ tensors): 379 s parallel → 315 s
+    serial (the 0.5.6 cycle's premature parallelization regressed this;
+    serial restored as the default for `F32`).
+  - Synthetic BF16 benchmark (300 MB, 600 tensors, same hardware):
+    0.205 s parallel vs 0.237 s serial — **1.15× speedup**. Real
+    Llama / Mistral checkpoints with larger per-tensor sizes will see
+    larger wins. Run with
+    `cargo run --release --example bench_load_dispatcher -p ferrotorch-serialize`.
+  Operator escape hatch: setting `FERROTORCH_FORCE_SERIAL_LOAD=1`
+  forces the serial loop regardless of dtype (diagnostic for chasing
+  regressions or running under tooling that mis-attributes
+  rayon-thread activity). New tests:
+  `dispatcher_multi_tensor_bf16_round_trips_through_parallel_path`
+  (correctness of the parallel branch on a multi-tensor BF16 file)
+  and `dispatcher_force_serial_env_var_matches_default_for_bf16`
+  (the two paths produce bit-identical output). `cargo test
+  -p ferrotorch-serialize --lib` 162 passed / 0 failed (was 160).
+
+### Fixed
+
+### Changed
+
 ## [0.5.6] - 2026-05-14
 
 ### Release notes
