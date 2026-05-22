@@ -432,11 +432,7 @@ impl GpuBackend for MtlBackend {
         elem_size: usize,
         device: usize,
     ) -> FerrotorchResult<GpuBufferHandle> {
-        let elem_count = if elem_size == 0 {
-            0
-        } else {
-            data.len() / elem_size
-        };
+        let elem_count = data.len().checked_div(elem_size).unwrap_or(0);
         let buf = self.alloc_buffer(data.len(), elem_count)?;
 
         // Shared-mode buffers expose a CPU-accessible pointer directly.
