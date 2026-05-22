@@ -195,12 +195,6 @@ pub use conv::gpu_conv2d_f32;
 pub use device::GpuDevice;
 pub use error::{GpuError, GpuResult};
 pub use flash_attention::{gpu_flash_attention_f32, gpu_flash_attention_f64};
-#[cfg(feature = "cuda")]
-pub use group_norm::gpu_group_norm_f32;
-#[cfg(feature = "cuda")]
-pub use roll::gpu_roll_f32;
-#[cfg(feature = "cuda")]
-pub use upsample::gpu_nearest_upsample2x_f32;
 pub use graph::{
     CaptureMode, CapturePool, CaptureStatus, CapturedGraph, GraphPoolHandle, begin_capture,
     capture_pool_for_handle, end_capture, end_capture_with_pool, graph_pool_handle,
@@ -211,6 +205,8 @@ pub use graph::{
     GraphCaptureGuard, begin_capture_with_mode, begin_capture_with_pool, capture_status,
     is_stream_capturing,
 };
+#[cfg(feature = "cuda")]
+pub use group_norm::gpu_group_norm_f32;
 pub use kernels::{gpu_add, gpu_mul, gpu_neg, gpu_relu, gpu_sub};
 pub use kernels::{
     gpu_add_into, gpu_add_into_on_stream, gpu_embed_lookup_into, gpu_gelu_into, gpu_layernorm_into,
@@ -229,8 +225,14 @@ pub use memory_guard::{
 };
 pub use pool::{cached_bytes, empty_cache, empty_cache_all, round_len};
 pub use rng::{CudaRngManager, PhiloxGenerator, PhiloxState, cuda_rng_manager, fork_rng, join_rng};
+#[cfg(feature = "cuda")]
+pub use roll::gpu_roll_f32;
 pub use tensor_bridge::{GpuFloat, GpuTensor, cuda, cuda_default, tensor_to_cpu, tensor_to_gpu};
+#[cfg(feature = "cuda")]
+pub use transfer::alloc_zeros_bf16;
 pub use transfer::{alloc_zeros, alloc_zeros_f32, alloc_zeros_f64, cpu_to_gpu, gpu_to_cpu};
+#[cfg(feature = "cuda")]
+pub use upsample::gpu_nearest_upsample2x_f32;
 
 // ---------------------------------------------------------------------------
 // cuSPARSE feature-flag smoke test

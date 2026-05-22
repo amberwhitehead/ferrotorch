@@ -874,6 +874,50 @@ pub trait GpuBackend: Send + Sync {
         })
     }
 
+    /// Matrix multiply: bf16 inputs → bf16 output via cuBLAS GemmEx
+    /// (`CUDA_R_16BF` operands, `CUBLAS_COMPUTE_32F` accumulator).
+    ///
+    /// Both input handles must carry a `CudaSlice<u16>` (each u16 is a bf16
+    /// bit pattern — top 16 bits of an f32). The result is also a
+    /// `CudaSlice<u16>` of shape `[m, n]`. This is the foundational op for
+    /// bf16-resident inference (weights + activations stay bf16 in VRAM,
+    /// halving VRAM vs. f32) and is what unblocks `Tensor<bf16> @
+    /// Tensor<bf16>` on CUDA without an upstream-side cast to f32.
+    fn matmul_bf16_bf16(
+        &self,
+        _a: &GpuBufferHandle,
+        _b: &GpuBufferHandle,
+        _m: usize,
+        _k: usize,
+        _n: usize,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::InvalidArgument {
+            message: "matmul_bf16_bf16 GPU op not implemented for this backend".into(),
+        })
+    }
+
+    /// Batched matrix multiply: bf16 inputs → bf16 output via cuBLAS
+    /// GemmStridedBatchedEx.
+    ///
+    /// Each batch element is a row-major matmul of shapes `A:[M,K]`,
+    /// `B:[K,N]`, producing `C:[M,N]`. Per-batch strides default to
+    /// `m*k`, `k*n`, `m*n` (contiguous batches). Both input handles
+    /// must carry `CudaSlice<u16>` (bf16 bit patterns); the output is
+    /// a `CudaSlice<u16>` of total size `batch * m * n`.
+    fn bmm_bf16_bf16(
+        &self,
+        _a: &GpuBufferHandle,
+        _b: &GpuBufferHandle,
+        _batch: usize,
+        _m: usize,
+        _k: usize,
+        _n: usize,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::InvalidArgument {
+            message: "bmm_bf16_bf16 GPU op not implemented for this backend".into(),
+        })
+    }
+
     /// Row-wise softmax: bf16 input (stored as `u16` bit-pattern buffer) →
     /// f32 output via PTX kernel with f32 accumulator.
     ///

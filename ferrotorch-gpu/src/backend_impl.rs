@@ -171,6 +171,30 @@ impl CudaBackendImpl {
             })
     }
 
+    /// Wrap a `CudaSlice<u16>` (bf16 bit-pattern storage) into a type-erased
+    /// [`GpuBufferHandle`]. bf16 buffers are stored as `CudaSlice<u16>` rather
+    /// than `CudaBuffer<T>` so they match the input type of every `*_bf16`
+    /// PTX kernel in [`crate::bf16`] and `gpu_matmul_bf16_bf16` in
+    /// [`crate::blas`] without an extra unwrap step.
+    #[cfg(feature = "cuda")]
+    fn wrap_buffer_bf16(buf: cudarc::driver::CudaSlice<u16>, ordinal: usize) -> GpuBufferHandle {
+        let len = buf.len();
+        GpuBufferHandle::new(Box::new(buf), ordinal, len)
+    }
+
+    /// Extract a `&CudaSlice<u16>` (bf16 bit-pattern storage) from a
+    /// [`GpuBufferHandle`].
+    #[cfg(feature = "cuda")]
+    fn unwrap_buffer_bf16(
+        handle: &GpuBufferHandle,
+    ) -> FerrotorchResult<&cudarc::driver::CudaSlice<u16>> {
+        handle
+            .downcast_ref::<cudarc::driver::CudaSlice<u16>>()
+            .ok_or(FerrotorchError::InvalidArgument {
+                message: "GPU handle does not contain a CudaSlice<u16> (bf16)".into(),
+            })
+    }
+
     /// Convert a [`crate::error::GpuError`] into a [`FerrotorchError`].
     fn map_gpu_err(e: crate::error::GpuError) -> FerrotorchError {
         FerrotorchError::InvalidArgument {
@@ -201,6 +225,10 @@ impl GpuBackend for CudaBackendImpl {
         } else if let Ok(buf) = Self::unwrap_buffer_f64(handle) {
             let (ptr, _sync) = buf.inner().device_ptr(&stream);
             ptr as *const std::ffi::c_void
+        } else if let Ok(slice) = Self::unwrap_buffer_bf16(handle) {
+            // bf16 storage: `CudaSlice<u16>` (u16 holds bf16 bit pattern).
+            let (ptr, _sync) = slice.device_ptr(&stream);
+            ptr as *const std::ffi::c_void
         } else {
             std::ptr::null()
         }
@@ -220,6 +248,9 @@ impl GpuBackend for CudaBackendImpl {
         } else if let Some(buf) = handle.downcast_mut::<CudaBuffer<f64>>() {
             let (ptr, _sync) = buf.inner_mut().device_ptr_mut(&stream);
             ptr as *mut std::ffi::c_void
+        } else if let Some(slice) = handle.downcast_mut::<cudarc::driver::CudaSlice<u16>>() {
+            let (ptr, _sync) = slice.device_ptr_mut(&stream);
+            ptr as *mut std::ffi::c_void
         } else {
             std::ptr::null_mut()
         }
@@ -230,6 +261,8 @@ impl GpuBackend for CudaBackendImpl {
             4 // f32
         } else if Self::unwrap_buffer_f64(handle).is_ok() {
             8 // f64
+        } else if Self::unwrap_buffer_bf16(handle).is_ok() {
+            2 // bf16 (u16 bit pattern)
         } else {
             0
         }
@@ -314,14 +347,14 @@ impl GpuBackend for CudaBackendImpl {
                 Ok(Self::wrap_buffer_f64(buf, device))
             }
             2 => {
-                // elem_size == 2: bf16 bit patterns stored as u16.
-                // Used by softmax_bf16_f32: caller passes a `&[u8]` view of a
-                // `Vec<u16>` (bf16 bit-patterns); we upload to a `CudaSlice<u16>`
-                // on-device and box it directly into a GpuBufferHandle (not a
-                // CudaBuffer<T> wrapper) so `softmax_bf16_f32` can downcast to
-                // `CudaSlice<u16>`.
+                // elem_size == 2: bf16 bit patterns stored as u16. The handle
+                // carries a raw `CudaSlice<u16>` (not a `CudaBuffer<T>` wrapper)
+                // so every consumer in this crate — `softmax_bf16_f32`,
+                // `add_bf16_f32`, `gpu_matmul_bf16_bf16`, all `*_bf16` PTX
+                // kernels — downcasts to the same type without an extra
+                // `unwrap_buffer_*` indirection.
                 //
-                // clone_htod requires `&Vec<T: DeviceRepr>` (cudarc 0.19 API);
+                // `clone_htod` requires `&Vec<T: DeviceRepr>` (cudarc 0.19 API);
                 // `u16` satisfies DeviceRepr. We reinterpret the `&[u8]` bytes
                 // as a `Vec<u16>` by reading pairs of bytes. `bytemuck::cast_slice`
                 // is not available here, so we reinterpret via from_raw_parts
@@ -346,8 +379,7 @@ impl GpuBackend for CudaBackendImpl {
                     .stream()
                     .clone_htod(&u16_vec)
                     .map_err(|e| Self::map_gpu_err(crate::error::GpuError::Driver(e)))?;
-                let len = slice.len();
-                Ok(GpuBufferHandle::new(Box::new(slice), device, len))
+                Ok(Self::wrap_buffer_bf16(slice, device))
             }
             other => Err(FerrotorchError::InvalidArgument {
                 message: format!("cpu_to_gpu: unsupported elem_size {other} (expected 2, 4, or 8)"),
@@ -429,7 +461,7 @@ impl GpuBackend for CudaBackendImpl {
     fn gpu_to_cpu(&self, handle: &GpuBufferHandle) -> FerrotorchResult<Vec<u8>> {
         let dev = self.device(handle.device_ordinal())?;
 
-        // Try f32 first, then f64.
+        // Try f32 first, then f64, then bf16 (CudaSlice<u16> bit pattern).
         if let Ok(buf) = Self::unwrap_buffer(handle) {
             let f32_data = crate::transfer::gpu_to_cpu(buf, dev).map_err(Self::map_gpu_err)?;
 
@@ -460,9 +492,36 @@ impl GpuBackend for CudaBackendImpl {
                 Vec::from_raw_parts(ptr, len, cap)
             };
             Ok(bytes)
+        } else if let Ok(slice) = Self::unwrap_buffer_bf16(handle) {
+            // bf16 storage: raw `CudaSlice<u16>` (no `CudaBuffer<T>` wrapper).
+            // `clone_dtoh` copies the whole slice including any rounded-up
+            // tail; bf16 buffers do not currently use the pool, so the slice
+            // length equals the logical length and no truncation is needed.
+            let u16_data = dev
+                .stream()
+                .clone_dtoh(slice)
+                .map_err(|e| Self::map_gpu_err(crate::error::GpuError::Driver(e)))?;
+
+            // Reinterpret Vec<u16> as Vec<u8> without copying.
+            // SAFETY: u16 has alignment 2 and size 2. We adjust len and capacity
+            // accordingly; the original Vec is consumed via ManuallyDrop so its
+            // destructor never runs and the allocation stays live under its
+            // new u8-typed handle (Layout::array::<u16>(cap) and
+            // Layout::array::<u8>(cap*2) describe the same byte range).
+            let bytes = unsafe {
+                let mut v = std::mem::ManuallyDrop::new(u16_data);
+                let ptr = v.as_mut_ptr() as *mut u8;
+                let len = v.len() * 2;
+                let cap = v.capacity() * 2;
+                Vec::from_raw_parts(ptr, len, cap)
+            };
+            Ok(bytes)
         } else {
             Err(FerrotorchError::InvalidArgument {
-                message: "gpu_to_cpu: handle is neither CudaBuffer<f32> nor CudaBuffer<f64>".into(),
+                message: "gpu_to_cpu: handle is not a recognised dtype \
+                          (expected CudaBuffer<f32>, CudaBuffer<f64>, \
+                          or CudaSlice<u16> for bf16)"
+                    .into(),
             })
         }
     }
@@ -471,12 +530,17 @@ impl GpuBackend for CudaBackendImpl {
         // Clone via GPU -> CPU -> GPU round-trip.
         // Correct but not optimal; a device-to-device memcpy would be better.
         let bytes = self.gpu_to_cpu(handle)?;
-        // Determine elem_size from the concrete buffer type.
-        let elem_size = if handle.downcast_ref::<CudaBuffer<f64>>().is_some() {
-            8
-        } else {
-            4
-        };
+        // Determine elem_size from the concrete buffer type. f64 is checked
+        // first because `unwrap_buffer_bf16` (CudaSlice<u16>) and the
+        // `CudaBuffer<f32>` default both map to 4-byte interpretations if
+        // checked in the wrong order — but `downcast_ref` already enforces
+        // the concrete type, so order only matters for the default arm.
+        let elem_size = self.buffer_elem_size(handle);
+        if elem_size == 0 {
+            return Err(FerrotorchError::InvalidArgument {
+                message: "clone_buffer: handle has no recognised dtype".into(),
+            });
+        }
         self.cpu_to_gpu(&bytes, elem_size, handle.device_ordinal())
     }
 
@@ -497,6 +561,12 @@ impl GpuBackend for CudaBackendImpl {
     ) -> FerrotorchResult<GpuBufferHandle> {
         let dev = self.device(device)?;
         match elem_size {
+            2 => {
+                // bf16 (u16 bit pattern).
+                let slice =
+                    crate::transfer::alloc_zeros_bf16(len, dev).map_err(Self::map_gpu_err)?;
+                Ok(Self::wrap_buffer_bf16(slice, device))
+            }
             4 => {
                 let buf = crate::transfer::alloc_zeros_f32(len, dev).map_err(Self::map_gpu_err)?;
                 Ok(Self::wrap_buffer(buf, device))
@@ -506,7 +576,9 @@ impl GpuBackend for CudaBackendImpl {
                 Ok(Self::wrap_buffer_f64(buf, device))
             }
             other => Err(FerrotorchError::InvalidArgument {
-                message: format!("alloc_zeros: unsupported elem_size {other} (expected 4 or 8)"),
+                message: format!(
+                    "alloc_zeros: unsupported elem_size {other} (expected 2, 4, or 8)"
+                ),
             }),
         }
     }
@@ -2300,6 +2372,44 @@ impl GpuBackend for CudaBackendImpl {
         let result = crate::blas::gpu_bmm_bf16(a_buf, b_buf, batch, m, k, n, dev)
             .map_err(Self::map_gpu_err)?;
         Ok(Self::wrap_buffer(result, a.device_ordinal()))
+    }
+
+    fn matmul_bf16_bf16(
+        &self,
+        a: &GpuBufferHandle,
+        b: &GpuBufferHandle,
+        m: usize,
+        k: usize,
+        n: usize,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        let a_buf = Self::unwrap_buffer_bf16(a)?;
+        let b_buf = Self::unwrap_buffer_bf16(b)?;
+        let dev = self.device(a.device_ordinal())?;
+        let result = crate::blas::gpu_matmul_bf16_bf16(a_buf, b_buf, m, k, n, dev)
+            .map_err(Self::map_gpu_err)?;
+        Ok(Self::wrap_buffer_bf16(result, a.device_ordinal()))
+    }
+
+    fn bmm_bf16_bf16(
+        &self,
+        a: &GpuBufferHandle,
+        b: &GpuBufferHandle,
+        batch: usize,
+        m: usize,
+        k: usize,
+        n: usize,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        let a_buf = Self::unwrap_buffer_bf16(a)?;
+        let b_buf = Self::unwrap_buffer_bf16(b)?;
+        let dev = self.device(a.device_ordinal())?;
+        // Contiguous-batch strides: per-batch shapes A:[M,K], B:[K,N].
+        let stride_a = m * k;
+        let stride_b = k * n;
+        let result = crate::blas::gpu_matmul_bf16_bf16_strided_batched(
+            a_buf, b_buf, m, k, n, batch, stride_a, stride_b, 1.0, dev,
+        )
+        .map_err(Self::map_gpu_err)?;
+        Ok(Self::wrap_buffer_bf16(result, a.device_ordinal()))
     }
 
     fn softmax_bf16_f32(
@@ -4512,6 +4622,144 @@ mod tests {
             assert!(
                 (got - exp).abs() < 1e-3,
                 "element {i}: got {got}, expected {exp}",
+            );
+        }
+    }
+
+    /// Round-trip `Vec<u16>` (bf16 bit patterns) → CudaSlice<u16> → `Vec<u16>`
+    /// via the type-erased dispatcher. Reproduces the upstream-decode
+    /// failure mode (#15 / #18: "gpu_to_cpu: handle is neither
+    /// CudaBuffer<f32> nor CudaBuffer<f64>") and confirms the bf16 branch
+    /// now matches.
+    #[test]
+    fn test_roundtrip_bf16() {
+        ensure_init();
+        let backend = gpu_dispatch::gpu_backend().expect("backend registered");
+
+        // bf16 bit patterns for {0.0, 1.0, -1.0, 2.5, -3.5, 100.0}. We
+        // pre-quantize via half::bf16 so the round-trip is lossless (no
+        // f32→bf16 conversion kernel involved).
+        let host: Vec<u16> = [0.0_f32, 1.0, -1.0, 2.5, -3.5, 100.0]
+            .iter()
+            .map(|&x| half::bf16::from_f32(x).to_bits())
+            .collect();
+
+        // SAFETY:
+        // - `host` is a `Vec<u16>` (2-byte-aligned allocation). Cast to
+        //   `*const u8` is sound (u8 align 1 ≤ u16 align 2).
+        // - `host.len() * 2 == 12` matches the u16 byte extent exactly.
+        // - The slice is consumed by `cpu_to_gpu` before `host` is reused.
+        let bytes: &[u8] = unsafe {
+            std::slice::from_raw_parts(
+                host.as_ptr() as *const u8,
+                host.len() * std::mem::size_of::<u16>(),
+            )
+        };
+
+        let handle = backend.cpu_to_gpu(bytes, 2, 0).expect("cpu_to_gpu bf16");
+        assert_eq!(handle.len(), host.len());
+        assert_eq!(handle.device_ordinal(), 0);
+        assert_eq!(backend.buffer_elem_size(&handle), 2);
+
+        let back_bytes = backend.gpu_to_cpu(&handle).expect("gpu_to_cpu bf16");
+        assert_eq!(back_bytes.len(), host.len() * 2);
+
+        // SAFETY:
+        // - `back_bytes` was constructed by `gpu_to_cpu` (bf16 branch) via
+        //   `Vec::from_raw_parts` from a `ManuallyDrop<Vec<u16>>`; the
+        //   allocation pointer inherits u16's 2-byte alignment.
+        // - `back_bytes.len() / 2 == host.len()` covers exactly the u16
+        //   byte extent.
+        // - Every u16 bit pattern is a valid u16 — the bytes are unchanged
+        //   by the CUDA memcpy.
+        let back: &[u16] = unsafe {
+            std::slice::from_raw_parts(back_bytes.as_ptr() as *const u16, back_bytes.len() / 2)
+        };
+        assert_eq!(back, &host[..]);
+
+        // clone_buffer must also work on bf16 handles (#15 / #18 ask for
+        // a full round-trip including device-side clones).
+        let cloned = backend.clone_buffer(&handle).expect("clone_buffer bf16");
+        assert_eq!(cloned.len(), host.len());
+        let cloned_bytes = backend.gpu_to_cpu(&cloned).expect("gpu_to_cpu cloned");
+        let cloned_back: &[u16] = unsafe {
+            std::slice::from_raw_parts(cloned_bytes.as_ptr() as *const u16, cloned_bytes.len() / 2)
+        };
+        assert_eq!(cloned_back, &host[..]);
+    }
+
+    /// Allocate a zeroed bf16 buffer via the dispatcher and confirm the
+    /// elem_size=2 branch wires through to `alloc_zeros_bf16`.
+    #[test]
+    fn test_alloc_zeros_bf16() {
+        ensure_init();
+        let backend = gpu_dispatch::gpu_backend().expect("backend registered");
+        let handle = backend.alloc_zeros(8, 2, 0).expect("alloc_zeros bf16");
+        assert_eq!(handle.len(), 8);
+        assert_eq!(backend.buffer_elem_size(&handle), 2);
+
+        let bytes = backend.gpu_to_cpu(&handle).expect("gpu_to_cpu zeros");
+        assert_eq!(bytes.len(), 16);
+        assert!(bytes.iter().all(|&b| b == 0));
+    }
+
+    /// 4×4 bf16 matmul via the type-erased dispatcher (matmul_bf16_bf16).
+    /// Inputs and outputs are bf16-stored; the cuBLAS path accumulates in
+    /// f32 and rounds back to bf16 on store. Tolerance accounts for the
+    /// ~3e-3 bf16 mantissa quantum on each accumulator output.
+    #[test]
+    fn test_matmul_bf16_bf16_dispatcher() {
+        ensure_init();
+        let backend = gpu_dispatch::gpu_backend().expect("backend registered");
+
+        // A: 2x3, B: 3x2, expected C: 2x2 = [[58, 64], [139, 154]] (matches
+        // test_matmul_f32 layout so the contract maps 1:1).
+        let a_f32: Vec<f32> = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0];
+        let b_f32: Vec<f32> = vec![7.0, 8.0, 9.0, 10.0, 11.0, 12.0];
+        let expected_f32: Vec<f32> = vec![58.0, 64.0, 139.0, 154.0];
+
+        let a_bf16: Vec<u16> = a_f32
+            .iter()
+            .map(|&x| half::bf16::from_f32(x).to_bits())
+            .collect();
+        let b_bf16: Vec<u16> = b_f32
+            .iter()
+            .map(|&x| half::bf16::from_f32(x).to_bits())
+            .collect();
+
+        // SAFETY: u16 → u8 byte view (u8 align 1 ≤ u16 align 2; byte length
+        // exactly matches u16 byte extent; slice consumed before reuse).
+        let a_bytes: &[u8] =
+            unsafe { std::slice::from_raw_parts(a_bf16.as_ptr() as *const u8, a_bf16.len() * 2) };
+        let b_bytes: &[u8] =
+            unsafe { std::slice::from_raw_parts(b_bf16.as_ptr() as *const u8, b_bf16.len() * 2) };
+
+        let a_handle = backend.cpu_to_gpu(a_bytes, 2, 0).expect("cpu_to_gpu a");
+        let b_handle = backend.cpu_to_gpu(b_bytes, 2, 0).expect("cpu_to_gpu b");
+
+        let result = backend
+            .matmul_bf16_bf16(&a_handle, &b_handle, 2, 3, 2)
+            .expect("matmul_bf16_bf16");
+        assert_eq!(result.len(), 4);
+        assert_eq!(backend.buffer_elem_size(&result), 2);
+
+        let result_bytes = backend.gpu_to_cpu(&result).expect("gpu_to_cpu result");
+        // SAFETY: result was wrapped as CudaSlice<u16>; gpu_to_cpu's bf16
+        // branch returns a u16-aligned byte buffer of length 8 (4 elements
+        // × 2 bytes), and every u16 bit pattern is a valid bf16.
+        let result_bf16: &[u16] = unsafe {
+            std::slice::from_raw_parts(result_bytes.as_ptr() as *const u16, result_bytes.len() / 2)
+        };
+
+        // Convert bf16 → f32 for comparison; bf16's 8-bit mantissa puts the
+        // ULP at this scale (~58..154) around 0.5, so tolerance 1.0 is
+        // generous-but-tight (matches the existing f32→bf16→cuBLAS path's
+        // tolerance bands in blas.rs).
+        for (i, (&got_bits, &exp)) in result_bf16.iter().zip(expected_f32.iter()).enumerate() {
+            let got = half::bf16::from_bits(got_bits).to_f32();
+            assert!(
+                (got - exp).abs() < 1.0,
+                "element {i}: got {got}, expected {exp}"
             );
         }
     }

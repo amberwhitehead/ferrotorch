@@ -97,6 +97,43 @@ pub fn alloc_zeros_f32(len: usize, device: &GpuDevice) -> GpuResult<CudaBuffer<f
     ))
 }
 
+/// Allocate a zero-initialized `CudaSlice<u16>` carrying `len` bf16 elements.
+///
+/// bf16 storage convention in ferrotorch-gpu: each `u16` element holds a bf16
+/// bit pattern (top 16 bits of an f32). The returned `CudaSlice<u16>` is the
+/// same shape consumed by every `*_bf16` PTX kernel in [`crate::bf16`] and by
+/// the `gpu_matmul_bf16_bf16` family in [`crate::blas`].
+///
+/// Unlike [`alloc_zeros_f32`] / [`alloc_zeros_f64`], this returns a raw
+/// `CudaSlice<u16>` instead of a [`CudaBuffer`] wrapper. The bf16 paths in
+/// the dispatcher (`softmax_bf16_f32`, `add_bf16_f32`, etc.) downcast handles
+/// directly to `CudaSlice<u16>`, so wrapping in `CudaBuffer<T>` would force
+/// changes in every existing bf16 dispatcher branch.
+///
+/// The CUDA pool is not consulted: pool entries are keyed by `(ordinal, len,
+/// elem_size)` and pool returns the original `Box<dyn Any>` (currently typed
+/// `CudaSlice<f32>` / `CudaSlice<f64>`). Adding a u16-typed pool path is a
+/// follow-up — bf16 buffers are short-lived intermediates in the forward
+/// pass and the pool-miss cost is dominated by the matmul itself.
+///
+/// # Errors
+///
+/// Returns [`GpuError::Driver`] if the underlying `cuMemAllocAsync` /
+/// `cuMemsetD8Async` calls fail.
+#[cfg(feature = "cuda")]
+pub fn alloc_zeros_bf16(
+    len: usize,
+    device: &GpuDevice,
+) -> GpuResult<cudarc::driver::CudaSlice<u16>> {
+    Ok(device.stream().alloc_zeros::<u16>(len)?)
+}
+
+/// Stub — always returns [`GpuError::NoCudaFeature`].
+#[cfg(not(feature = "cuda"))]
+pub fn alloc_zeros_bf16(_len: usize, _device: &GpuDevice) -> GpuResult<()> {
+    Err(GpuError::NoCudaFeature)
+}
+
 /// Allocate a zero-initialized [`CudaBuffer<f64>`] on the given device.
 ///
 /// Pool-aware variant for f64 buffers. See [`alloc_zeros_f32`] for details.
@@ -330,6 +367,38 @@ mod tests {
 
         let host = gpu_to_cpu(&buf, &device).expect("gpu_to_cpu");
         assert!(host.iter().all(|&x| x == 0.0));
+    }
+
+    #[test]
+    fn alloc_zeros_bf16_basic() {
+        let device = GpuDevice::new(0).expect("CUDA device 0");
+        let slice = alloc_zeros_bf16(1024, &device).expect("alloc_zeros_bf16");
+        assert_eq!(slice.len(), 1024);
+
+        let host = device
+            .stream()
+            .clone_dtoh(&slice)
+            .expect("clone_dtoh bf16 zeros");
+        assert!(host.iter().all(|&x| x == 0));
+    }
+
+    #[test]
+    fn round_trip_bf16() {
+        let device = GpuDevice::new(0).expect("CUDA device 0");
+        // Hand-rolled bf16 bit patterns for {0.0, 1.0, -1.0, 2.5, -3.5}.
+        // bf16 is the top 16 bits of an f32; we encode via half::bf16
+        // round-to-nearest-even so this test does not depend on the
+        // f32->bf16 conversion kernel.
+        let host: Vec<u16> = [0.0_f32, 1.0, -1.0, 2.5, -3.5]
+            .iter()
+            .map(|&x| half::bf16::from_f32(x).to_bits())
+            .collect();
+
+        let slice = device.stream().clone_htod(&host).expect("clone_htod bf16");
+        assert_eq!(slice.len(), host.len());
+
+        let back = device.stream().clone_dtoh(&slice).expect("clone_dtoh bf16");
+        assert_eq!(back, host);
     }
 
     #[test]
