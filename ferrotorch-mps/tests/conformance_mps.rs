@@ -173,8 +173,12 @@ fn fixture_file_covers_every_expected_op() {
 // is_mps_available — fixture-driven
 // ---------------------------------------------------------------------------
 
-/// `is_mps_available()` must always return `false` on non-Apple platforms
-/// and always `false` in the ferrotorch stub until #451 lands.
+/// `is_mps_available()` must return `false` on non-Apple platforms (no Metal
+/// API) and mirror `MTLCreateSystemDefaultDevice` presence on macOS. On macOS
+/// hosts with a live Metal device the fixture (typically generated on a
+/// non-Apple CI box, hence `expected == false`) can disagree with the live
+/// ferrotorch value — mirror the `mps_device_count_matches_fixture`
+/// cascade_skip pattern in that case.
 #[test]
 fn is_mps_available_matches_fixture() {
     let file = load_fixtures();
@@ -187,9 +191,18 @@ fn is_mps_available_matches_fixture() {
         .and_then(|v| v.as_bool())
         .expect("is_mps_available fixture must have bool `expected`");
 
-    // On non-Apple platforms torch.mps.is_available() returns False.
-    // ferrotorch's stub also returns False. They must agree.
     let ft_available = is_mps_available();
+
+    #[cfg(target_os = "macos")]
+    {
+        if ft_available != fixture_expected {
+            cascade_skip!(
+                "macOS host with live Metal device disagrees with non-MPS fixture; \
+                 is_mps_available() reflects MTLCreateSystemDefaultDevice — \
+                 tracking issue #451"
+            );
+        }
+    }
 
     if fixture_expected && !ft_available {
         // torch reports MPS available but ferrotorch disagrees.
@@ -199,7 +212,6 @@ fn is_mps_available_matches_fixture() {
              divergence; tracking issue #451"
         );
     }
-    // The stub always returns false; if the fixture also says false, they agree.
     assert_eq!(
         ft_available, fixture_expected,
         "is_mps_available() parity with torch.mps.is_available()"
@@ -420,10 +432,10 @@ fn mps_device_ordinal_structural() {
 // init_mps_backend — error contract
 // ---------------------------------------------------------------------------
 
-/// `init_mps_backend()` must return `Err(DeviceUnavailable)` until the MPS
-/// kernel layer lands. The fixture documents this as the expected ferrotorch
-/// error; `torch.mps` has no direct equivalent (synchronize() would raise on
-/// non-MPS).
+/// `init_mps_backend()` returns `Err(DeviceUnavailable)` on non-Apple
+/// platforms and on macOS hosts without a Metal device (typical CI runner).
+/// On macOS hosts with a live Metal device the call now succeeds — mirror
+/// the `mps_device_count_matches_fixture` cascade_skip pattern in that case.
 #[test]
 fn init_mps_backend_error_contract() {
     let file = load_fixtures();
@@ -440,6 +452,18 @@ fn init_mps_backend_error_contract() {
     );
 
     let result = init_mps_backend();
+
+    #[cfg(target_os = "macos")]
+    {
+        if !matches!(result, Err(FerrotorchError::DeviceUnavailable)) {
+            cascade_skip!(
+                "macOS host with live Metal device disagrees with non-MPS fixture; \
+                 init_mps_backend() succeeded against MTLCreateSystemDefaultDevice — \
+                 tracking issue #451"
+            );
+        }
+    }
+
     assert!(
         matches!(result, Err(FerrotorchError::DeviceUnavailable)),
         "init_mps_backend() must return Err(DeviceUnavailable), got: {result:?}"
@@ -800,9 +824,7 @@ fn softmax_f32_matches_cpu_reference_at_non_pow2_cols() {
             .collect();
 
         let bytes: Vec<u8> = input.iter().flat_map(|f| f.to_le_bytes()).collect();
-        let handle = backend
-            .cpu_to_gpu(&bytes, 4, 0)
-            .expect("cpu_to_gpu input");
+        let handle = backend.cpu_to_gpu(&bytes, 4, 0).expect("cpu_to_gpu input");
         let out_handle = backend
             .softmax_f32(&handle, rows, cols)
             .expect("softmax_f32 dispatch");
@@ -934,9 +956,7 @@ fn softmax_f32_uniform_input_at_non_pow2_cols() {
     let rows: usize = 1;
     let zeros = vec![0.0_f32; rows * cols];
     let bytes: Vec<u8> = zeros.iter().flat_map(|f| f.to_le_bytes()).collect();
-    let handle = backend
-        .cpu_to_gpu(&bytes, 4, 0)
-        .expect("cpu_to_gpu zeros");
+    let handle = backend.cpu_to_gpu(&bytes, 4, 0).expect("cpu_to_gpu zeros");
     let out_handle = backend
         .softmax_f32(&handle, rows, cols)
         .expect("softmax_f32 zeros");
