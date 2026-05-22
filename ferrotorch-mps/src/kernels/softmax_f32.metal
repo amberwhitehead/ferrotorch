@@ -22,11 +22,14 @@ kernel void softmax_f32(
     device       float* out [[ buffer(1) ]],
     constant     uint&  rows [[ buffer(2) ]],
     constant     uint&  cols [[ buffer(3) ]],
-    uint2 tgid   [[ threadgroup_position_in_grid ]],
+    // Apple's MSL compiler (Xcode 16+) rejects mixed scalar/vector attribute
+    // declarations on the same kernel. Dispatch is (rows, 1, 1) 1-D, so a
+    // scalar `tgid` matches the other scalar `tid` / `tcount` attributes.
+    uint  tgid   [[ threadgroup_position_in_grid ]],
     uint  tid    [[ thread_index_in_threadgroup ]],
     uint  tcount [[ threads_per_threadgroup ]]
 ) {
-    uint row = tgid.x;
+    uint row = tgid;
     if (row >= rows) return;
 
     device const float* row_in  = inp + row * cols;

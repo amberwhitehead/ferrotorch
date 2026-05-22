@@ -73,6 +73,24 @@
     // repetition is the disambiguator that prevents glob-import collisions
     // with sibling backends like `ferrotorch-gpu`.
     clippy::module_name_repetitions,
+    // Tensor shape components (rows, cols, batch, m, k, n) are bounded by the
+    // kernel-launch contract — MSL setBytes accepts u32, and a tensor dim
+    // overflowing u32 (>4G) is rejected upstream. Truncation is impossible
+    // in practice and `u32::try_from(...).unwrap()` adds noise without value.
+    clippy::cast_possible_truncation,
+    // Metal's `setBytes_length_atIndex` takes `NonNull<c_void>` to a small
+    // scalar that lives on the stack; the `&n_u32 as *const u32 as *mut _`
+    // pattern is the standard way to spell this in objc2-metal.
+    clippy::ref_as_ptr,
+    clippy::borrow_as_ptr,
+    // MSL kernel dispatchers borrow matrix dims with the canonical math names
+    // (m, k, n, a, b). These are PyTorch / BLAS convention, not Rust style.
+    clippy::similar_names,
+    clippy::many_single_char_names,
+    // The `Pipelines` struct holds compiled kernels grouped by dtype; the
+    // `_f32` postfix is intentional and disambiguates from future `_bf16` /
+    // `_f16` siblings (#19).
+    clippy::struct_field_names,
 )]
 #![deny(missing_docs)]
 
@@ -102,8 +120,9 @@ pub use backend::MtlBackend;
 
 /// Returns `true` if this build can run MPS kernels on the current host.
 ///
-/// On macOS: delegates to `MTLDevice::new()` — returns `true` when a Metal
-/// device is present (Apple Silicon or Intel Mac with AMD/Intel GPU).
+/// On macOS: delegates to `MTLCreateSystemDefaultDevice` — returns `true`
+/// when a Metal device is present (Apple Silicon or Intel Mac with AMD/Intel
+/// GPU).
 ///
 /// On all other platforms: always returns `false`. The Metal API does not
 /// exist outside macOS so there is no platform-conditional lie here.
@@ -111,10 +130,10 @@ pub use backend::MtlBackend;
 pub fn is_mps_available() -> bool {
     #[cfg(target_os = "macos")]
     {
-        // SAFETY: MTLCreateSystemDefaultDevice returns nil when no Metal
-        // device is available; we only test for presence, never dereference
-        // the returned pointer beyond the nil check.
-        unsafe { objc2_metal::MTLDevice::new().is_some() }
+        // MTLCreateSystemDefaultDevice returns None when no Metal device is
+        // available; we only test for presence, never dereference the
+        // returned pointer beyond the Option check.
+        objc2_metal::MTLCreateSystemDefaultDevice().is_some()
     }
     #[cfg(not(target_os = "macos"))]
     {
@@ -214,7 +233,7 @@ impl fmt::Display for MpsDevice {
 pub fn mps_device_count() -> usize {
     #[cfg(target_os = "macos")]
     {
-        if is_mps_available() { 1 } else { 0 }
+        usize::from(is_mps_available())
     }
     #[cfg(not(target_os = "macos"))]
     {
@@ -342,7 +361,7 @@ mod tests {
     #[cfg(target_os = "macos")]
     #[test]
     fn mps_device_count_macos_matches_metal_availability() {
-        let expected = if is_mps_available() { 1 } else { 0 };
+        let expected = usize::from(is_mps_available());
         assert_eq!(mps_device_count(), expected);
         assert_eq!(MpsDevice::count(), mps_device_count());
     }
@@ -359,9 +378,9 @@ mod tests {
         ));
         #[cfg(target_os = "macos")]
         match init_mps_backend() {
-            Ok(()) => {}
-            Err(FerrotorchError::DeviceUnavailable) => {}
-            Err(FerrotorchError::InvalidArgument { .. }) => {}
+            Ok(())
+            | Err(FerrotorchError::DeviceUnavailable | FerrotorchError::InvalidArgument { .. }) => {
+            }
             Err(e) => panic!("unexpected error from init_mps_backend: {e:?}"),
         }
     }

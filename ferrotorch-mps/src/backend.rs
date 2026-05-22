@@ -28,7 +28,7 @@
 //!
 //! # Buffer representation
 //!
-//! GPU buffers are `Arc<MtlBuffer>` (a newtype around `Retained<MTLBuffer>`)
+//! GPU buffers are `Arc<MtlBuffer>` (a newtype around `Retained<ProtocolObject<dyn MTLBuffer>>`)
 //! stored in `GpuBufferHandle::inner` via type-erasure. Downcast via
 //! `handle.downcast_ref::<Arc<MtlBuffer>>()`.
 
@@ -37,12 +37,14 @@
 use std::sync::Arc;
 
 use ferrotorch_core::error::{FerrotorchError, FerrotorchResult};
-use ferrotorch_core::gpu_dispatch::{GpuBackend, GpuBufferHandle, GpuRngState};
+use ferrotorch_core::gpu_dispatch::{GpuBackend, GpuBufferHandle};
 use objc2::rc::Retained;
+use objc2::runtime::ProtocolObject;
 use objc2_foundation::NSString;
 use objc2_metal::{
-    MTLBuffer, MTLCommandBuffer, MTLCommandQueue, MTLComputeCommandEncoder,
-    MTLComputePipelineState, MTLDevice, MTLFunction, MTLLibrary, MTLSize, MTLStorageMode,
+    MTLBuffer, MTLCommandBuffer, MTLCommandEncoder, MTLCommandQueue, MTLComputeCommandEncoder,
+    MTLComputePipelineState, MTLCreateSystemDefaultDevice, MTLDevice, MTLFunction, MTLLibrary,
+    MTLResourceOptions, MTLSize,
 };
 
 use crate::kernels;
@@ -66,9 +68,17 @@ use crate::kernels;
 /// reference-counting for retained objects; the `Arc` wrapper here expresses
 /// that invariant at the Rust type level.
 pub struct MtlBuffer {
-    pub(crate) inner: Retained<MTLBuffer>,
+    pub(crate) inner: Retained<ProtocolObject<dyn MTLBuffer>>,
     /// Number of elements (not bytes) in the buffer.
     pub(crate) elem_count: usize,
+}
+
+impl std::fmt::Debug for MtlBuffer {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MtlBuffer")
+            .field("elem_count", &self.elem_count)
+            .finish_non_exhaustive()
+    }
 }
 
 // SAFETY: Metal buffers use ObjC ARC for memory management, which is
@@ -83,7 +93,7 @@ unsafe impl Sync for MtlBuffer {}
 
 /// Lazily-compiled `MTLComputePipelineState` for a single MSL kernel function.
 struct Pipeline {
-    state: Retained<MTLComputePipelineState>,
+    state: Retained<ProtocolObject<dyn MTLComputePipelineState>>,
 }
 
 // SAFETY: Same rationale as MtlBuffer — ObjC ARC, Metal serialises access.
@@ -108,34 +118,35 @@ struct Pipelines {
 // Helper: compile one MTLLibrary + extract one function + build pipeline
 // ---------------------------------------------------------------------------
 
-fn compile_pipeline(device: &MTLDevice, source: &str, fn_name: &str) -> FerrotorchResult<Pipeline> {
-    // SAFETY: All objc2-metal calls go through the safe Rust bindings from
-    // objc2-metal 0.3.2. The pointer casts inside `NSString::from_str` and
-    // `newLibraryWithSource_options_error` are managed by the crate.
-    unsafe {
-        let src = NSString::from_str(source);
-        let options = None; // use default MTLCompileOptions
-        let lib: Retained<MTLLibrary> = device
-            .newLibraryWithSource_options_error(&src, options)
-            .map_err(|e| FerrotorchError::InvalidArgument {
-                message: format!("MSL compile failed for `{fn_name}`: {e:?}"),
-            })?;
+fn compile_pipeline(
+    device: &ProtocolObject<dyn MTLDevice>,
+    source: &str,
+    fn_name: &str,
+) -> FerrotorchResult<Pipeline> {
+    // All objc2-metal calls go through the safe Rust bindings from
+    // objc2-metal 0.3.2 — the methods used here are not marked `unsafe`.
+    let src = NSString::from_str(source);
+    let options = None; // use default MTLCompileOptions
+    let lib: Retained<ProtocolObject<dyn MTLLibrary>> = device
+        .newLibraryWithSource_options_error(&src, options)
+        .map_err(|e| FerrotorchError::InvalidArgument {
+            message: format!("MSL compile failed for `{fn_name}`: {e:?}"),
+        })?;
 
-        let name = NSString::from_str(fn_name);
-        let func: Retained<MTLFunction> =
-            lib.newFunctionWithName(&name)
-                .ok_or_else(|| FerrotorchError::InvalidArgument {
-                    message: format!("MSL function `{fn_name}` not found in library"),
-                })?;
+    let name = NSString::from_str(fn_name);
+    let func: Retained<ProtocolObject<dyn MTLFunction>> = lib
+        .newFunctionWithName(&name)
+        .ok_or_else(|| FerrotorchError::InvalidArgument {
+            message: format!("MSL function `{fn_name}` not found in library"),
+        })?;
 
-        let pipeline: Retained<MTLComputePipelineState> = device
-            .newComputePipelineStateWithFunction_error(&func)
-            .map_err(|e| FerrotorchError::InvalidArgument {
-                message: format!("MTLComputePipelineState creation failed for `{fn_name}`: {e:?}"),
-            })?;
+    let pipeline: Retained<ProtocolObject<dyn MTLComputePipelineState>> = device
+        .newComputePipelineStateWithFunction_error(&func)
+        .map_err(|e| FerrotorchError::InvalidArgument {
+            message: format!("MTLComputePipelineState creation failed for `{fn_name}`: {e:?}"),
+        })?;
 
-        Ok(Pipeline { state: pipeline })
-    }
+    Ok(Pipeline { state: pipeline })
 }
 
 // ---------------------------------------------------------------------------
@@ -167,8 +178,8 @@ fn compile_pipeline(device: &MTLDevice, source: &str, fn_name: &str) -> Ferrotor
 //   pow2_tg_width(1023) = 1024
 //   pow2_tg_width(1024) = 1024
 //   pow2_tg_width(2000) = 1024  // capped
-fn pow2_tg_width(n: usize) -> u64 {
-    n.min(1024).next_power_of_two() as u64
+fn pow2_tg_width(n: usize) -> usize {
+    n.min(1024).next_power_of_two()
 }
 
 // ---------------------------------------------------------------------------
@@ -180,8 +191,8 @@ fn pow2_tg_width(n: usize) -> u64 {
 /// Holds a reference to the system default Metal device, a command queue,
 /// and the compiled pipeline states for all 10 Sprint C.7 kernels.
 pub struct MtlBackend {
-    device: Retained<MTLDevice>,
-    queue: Retained<MTLCommandQueue>,
+    device: Retained<ProtocolObject<dyn MTLDevice>>,
+    queue: Retained<ProtocolObject<dyn MTLCommandQueue>>,
     pipelines: Pipelines,
 }
 
@@ -207,16 +218,15 @@ impl MtlBackend {
     /// Returns [`FerrotorchError::InvalidArgument`] if any MSL kernel fails
     /// to compile — which indicates a ferrotorch bug, not a user error.
     pub fn new() -> FerrotorchResult<Self> {
-        // SAFETY: MTLCreateSystemDefaultDevice returns nil when no Metal device
-        // is present; the `?` propagates that as DeviceUnavailable.
-        let device: Retained<MTLDevice> =
-            unsafe { MTLDevice::new() }.ok_or(FerrotorchError::DeviceUnavailable)?;
+        // MTLCreateSystemDefaultDevice returns None when no Metal device is
+        // present; the `?` propagates that as DeviceUnavailable.
+        let device: Retained<ProtocolObject<dyn MTLDevice>> =
+            MTLCreateSystemDefaultDevice().ok_or(FerrotorchError::DeviceUnavailable)?;
 
-        let queue: Retained<MTLCommandQueue> =
-            unsafe { device.newCommandQueue() }.ok_or_else(|| {
-                FerrotorchError::InvalidArgument {
-                    message: "MTLDevice::newCommandQueue returned nil".into(),
-                }
+        let queue: Retained<ProtocolObject<dyn MTLCommandQueue>> = device
+            .newCommandQueue()
+            .ok_or_else(|| FerrotorchError::InvalidArgument {
+                message: "MTLDevice::newCommandQueue returned nil".into(),
             })?;
 
         // Compile all MSL sources — fail fast on any compilation error.
@@ -255,14 +265,13 @@ impl MtlBackend {
 
     /// Allocate a new `MTLBuffer` of `byte_len` bytes (shared storage mode).
     fn alloc_buffer(&self, byte_len: usize, elem_count: usize) -> FerrotorchResult<Arc<MtlBuffer>> {
-        // SAFETY: Metal manages the buffer memory; Rust holds a retained ref.
-        let buf: Retained<MTLBuffer> = unsafe {
-            self.device
-                .newBufferWithLength_options(byte_len, MTLStorageMode::Shared as u64)
-                .ok_or_else(|| FerrotorchError::InvalidArgument {
-                    message: format!("MTLDevice::newBufferWithLength({byte_len}) returned nil"),
-                })?
-        };
+        // Metal manages the buffer memory; Rust holds a retained ref.
+        let buf: Retained<ProtocolObject<dyn MTLBuffer>> = self
+            .device
+            .newBufferWithLength_options(byte_len, MTLResourceOptions::StorageModeShared)
+            .ok_or_else(|| FerrotorchError::InvalidArgument {
+                message: format!("MTLDevice::newBufferWithLength({byte_len}) returned nil"),
+            })?;
         Ok(Arc::new(MtlBuffer {
             inner: buf,
             elem_count,
@@ -276,7 +285,7 @@ impl MtlBackend {
     }
 
     /// Downcast a `GpuBufferHandle` to `&Arc<MtlBuffer>`.
-    fn downcast_buf<'a>(handle: &'a GpuBufferHandle) -> FerrotorchResult<&'a Arc<MtlBuffer>> {
+    fn downcast_buf(handle: &GpuBufferHandle) -> FerrotorchResult<&Arc<MtlBuffer>> {
         handle
             .downcast_ref::<Arc<MtlBuffer>>()
             .ok_or_else(|| FerrotorchError::InvalidArgument {
@@ -290,12 +299,9 @@ impl MtlBackend {
     /// All current kernels use synchronous dispatch so callers can read
     /// results immediately. A future async path can replace this with
     /// addScheduledHandler + addCompletedHandler without changing the API.
-    fn commit_and_wait(cmd_buf: &MTLCommandBuffer) -> FerrotorchResult<()> {
-        unsafe {
-            cmd_buf.commit();
-            cmd_buf.waitUntilCompleted();
-        }
-        Ok(())
+    fn commit_and_wait(cmd_buf: &ProtocolObject<dyn MTLCommandBuffer>) {
+        cmd_buf.commit();
+        cmd_buf.waitUntilCompleted();
     }
 
     /// Launch a 1-D elementwise binary kernel (add/sub/mul/div).
@@ -311,12 +317,15 @@ impl MtlBackend {
 
         let out_buf = self.alloc_buffer(n * 4, n)?;
 
-        let cmd_buf: Retained<MTLCommandBuffer> = unsafe { self.queue.commandBuffer() }
+        let cmd_buf: Retained<ProtocolObject<dyn MTLCommandBuffer>> = self
+            .queue
+            .commandBuffer()
             .ok_or_else(|| FerrotorchError::InvalidArgument {
                 message: "MTLCommandQueue::commandBuffer returned nil".into(),
             })?;
 
-        let enc: Retained<MTLComputeCommandEncoder> = unsafe { cmd_buf.computeCommandEncoder() }
+        let enc: Retained<ProtocolObject<dyn MTLComputeCommandEncoder>> = cmd_buf
+            .computeCommandEncoder()
             .ok_or_else(|| FerrotorchError::InvalidArgument {
                 message: "MTLCommandBuffer::computeCommandEncoder returned nil".into(),
             })?;
@@ -335,7 +344,7 @@ impl MtlBackend {
 
             let tg_size = pipeline.state.maxTotalThreadsPerThreadgroup().min(256);
             let grid = MTLSize {
-                width: n as u64,
+                width: n,
                 height: 1,
                 depth: 1,
             };
@@ -348,7 +357,7 @@ impl MtlBackend {
             enc.endEncoding();
         }
 
-        Self::commit_and_wait(&cmd_buf)?;
+        Self::commit_and_wait(&cmd_buf);
         Ok(Self::wrap_buffer(out_buf, a.device_ordinal()))
     }
 
@@ -362,12 +371,15 @@ impl MtlBackend {
         let n = a.len();
         let out_buf = self.alloc_buffer(n * 4, n)?;
 
-        let cmd_buf: Retained<MTLCommandBuffer> = unsafe { self.queue.commandBuffer() }
+        let cmd_buf: Retained<ProtocolObject<dyn MTLCommandBuffer>> = self
+            .queue
+            .commandBuffer()
             .ok_or_else(|| FerrotorchError::InvalidArgument {
                 message: "MTLCommandQueue::commandBuffer returned nil".into(),
             })?;
 
-        let enc: Retained<MTLComputeCommandEncoder> = unsafe { cmd_buf.computeCommandEncoder() }
+        let enc: Retained<ProtocolObject<dyn MTLComputeCommandEncoder>> = cmd_buf
+            .computeCommandEncoder()
             .ok_or_else(|| FerrotorchError::InvalidArgument {
                 message: "MTLCommandBuffer::computeCommandEncoder returned nil".into(),
             })?;
@@ -385,7 +397,7 @@ impl MtlBackend {
 
             let tg_size = pipeline.state.maxTotalThreadsPerThreadgroup().min(256);
             let grid = MTLSize {
-                width: n as u64,
+                width: n,
                 height: 1,
                 depth: 1,
             };
@@ -398,7 +410,7 @@ impl MtlBackend {
             enc.endEncoding();
         }
 
-        Self::commit_and_wait(&cmd_buf)?;
+        Self::commit_and_wait(&cmd_buf);
         Ok(Self::wrap_buffer(out_buf, a.device_ordinal()))
     }
 }
@@ -420,21 +432,16 @@ impl GpuBackend for MtlBackend {
         elem_size: usize,
         device: usize,
     ) -> FerrotorchResult<GpuBufferHandle> {
-        let elem_count = if elem_size == 0 {
-            0
-        } else {
-            data.len() / elem_size
-        };
+        let elem_count = data.len().checked_div(elem_size).unwrap_or(0);
         let buf = self.alloc_buffer(data.len(), elem_count)?;
 
         // Shared-mode buffers expose a CPU-accessible pointer directly.
         // SAFETY: buffer is exclusively owned here; no GPU command is in
-        // flight at this point.
+        // flight at this point. `contents()` returns `NonNull<c_void>` —
+        // non-null by construction for shared-mode buffers.
         unsafe {
             let ptr = buf.inner.contents();
-            if !ptr.is_null() {
-                std::ptr::copy_nonoverlapping(data.as_ptr(), ptr.cast::<u8>(), data.len());
-            }
+            std::ptr::copy_nonoverlapping(data.as_ptr(), ptr.as_ptr().cast::<u8>(), data.len());
         }
 
         Ok(Self::wrap_buffer(buf, device))
@@ -442,19 +449,15 @@ impl GpuBackend for MtlBackend {
 
     fn gpu_to_cpu(&self, handle: &GpuBufferHandle) -> FerrotorchResult<Vec<u8>> {
         let buf = Self::downcast_buf(handle)?;
-        let byte_len = unsafe { buf.inner.length() } as usize;
+        let byte_len = buf.inner.length();
 
         // SAFETY: Shared-mode buffer contents are CPU-accessible after the
         // most recent command buffer completes (guaranteed by commit_and_wait
-        // in every kernel dispatch path).
+        // in every kernel dispatch path). `contents()` returns
+        // `NonNull<c_void>` — non-null by construction.
         let slice = unsafe {
             let ptr = buf.inner.contents();
-            if ptr.is_null() {
-                return Err(FerrotorchError::InvalidArgument {
-                    message: "MTLBuffer::contents() returned null on shared-mode buffer".into(),
-                });
-            }
-            std::slice::from_raw_parts(ptr.cast::<u8>(), byte_len)
+            std::slice::from_raw_parts(ptr.as_ptr().cast::<u8>(), byte_len)
         };
         Ok(slice.to_vec())
     }
@@ -474,12 +477,11 @@ impl GpuBackend for MtlBackend {
         let buf = self.alloc_buffer(byte_len, len)?;
 
         // Shared-mode buffers are zero-initialised by the Metal runtime.
-        // Explicitly zero for clarity / defence-in-depth.
+        // Explicitly zero for clarity / defence-in-depth. `contents()` returns
+        // `NonNull<c_void>` — non-null by construction.
         unsafe {
             let ptr = buf.inner.contents();
-            if !ptr.is_null() {
-                std::ptr::write_bytes(ptr.cast::<u8>(), 0u8, byte_len);
-            }
+            std::ptr::write_bytes(ptr.as_ptr().cast::<u8>(), 0u8, byte_len);
         }
 
         Ok(Self::wrap_buffer(buf, device))
@@ -555,12 +557,15 @@ impl GpuBackend for MtlBackend {
         let out_len = m * n;
         let out_buf = self.alloc_buffer(out_len * 4, out_len)?;
 
-        let cmd_buf: Retained<MTLCommandBuffer> = unsafe { self.queue.commandBuffer() }
+        let cmd_buf: Retained<ProtocolObject<dyn MTLCommandBuffer>> = self
+            .queue
+            .commandBuffer()
             .ok_or_else(|| FerrotorchError::InvalidArgument {
                 message: "MTLCommandQueue::commandBuffer returned nil".into(),
             })?;
 
-        let enc: Retained<MTLComputeCommandEncoder> = unsafe { cmd_buf.computeCommandEncoder() }
+        let enc: Retained<ProtocolObject<dyn MTLComputeCommandEncoder>> = cmd_buf
+            .computeCommandEncoder()
             .ok_or_else(|| FerrotorchError::InvalidArgument {
                 message: "MTLCommandBuffer::computeCommandEncoder returned nil".into(),
             })?;
@@ -596,15 +601,15 @@ impl GpuBackend for MtlBackend {
                 depth: 1,
             };
             let grid = MTLSize {
-                width: n as u64,
-                height: m as u64,
+                width: n,
+                height: m,
                 depth: 1,
             };
             enc.dispatchThreads_threadsPerThreadgroup(grid, tg);
             enc.endEncoding();
         }
 
-        Self::commit_and_wait(&cmd_buf)?;
+        Self::commit_and_wait(&cmd_buf);
         Ok(Self::wrap_buffer(out_buf, a.device_ordinal()))
     }
 
@@ -622,12 +627,15 @@ impl GpuBackend for MtlBackend {
         let out_len = batch * m * n;
         let out_buf = self.alloc_buffer(out_len * 4, out_len)?;
 
-        let cmd_buf: Retained<MTLCommandBuffer> = unsafe { self.queue.commandBuffer() }
+        let cmd_buf: Retained<ProtocolObject<dyn MTLCommandBuffer>> = self
+            .queue
+            .commandBuffer()
             .ok_or_else(|| FerrotorchError::InvalidArgument {
                 message: "MTLCommandQueue::commandBuffer returned nil".into(),
             })?;
 
-        let enc: Retained<MTLComputeCommandEncoder> = unsafe { cmd_buf.computeCommandEncoder() }
+        let enc: Retained<ProtocolObject<dyn MTLComputeCommandEncoder>> = cmd_buf
+            .computeCommandEncoder()
             .ok_or_else(|| FerrotorchError::InvalidArgument {
                 message: "MTLCommandBuffer::computeCommandEncoder returned nil".into(),
             })?;
@@ -669,15 +677,15 @@ impl GpuBackend for MtlBackend {
                 depth: 1,
             };
             let grid = MTLSize {
-                width: n as u64,
-                height: m as u64,
-                depth: batch as u64,
+                width: n,
+                height: m,
+                depth: batch,
             };
             enc.dispatchThreads_threadsPerThreadgroup(grid, tg);
             enc.endEncoding();
         }
 
-        Self::commit_and_wait(&cmd_buf)?;
+        Self::commit_and_wait(&cmd_buf);
         Ok(Self::wrap_buffer(out_buf, a.device_ordinal()))
     }
 
@@ -693,12 +701,15 @@ impl GpuBackend for MtlBackend {
         let out_len = rows * cols;
         let out_buf = self.alloc_buffer(out_len * 4, out_len)?;
 
-        let cmd_buf: Retained<MTLCommandBuffer> = unsafe { self.queue.commandBuffer() }
+        let cmd_buf: Retained<ProtocolObject<dyn MTLCommandBuffer>> = self
+            .queue
+            .commandBuffer()
             .ok_or_else(|| FerrotorchError::InvalidArgument {
                 message: "MTLCommandQueue::commandBuffer returned nil".into(),
             })?;
 
-        let enc: Retained<MTLComputeCommandEncoder> = unsafe { cmd_buf.computeCommandEncoder() }
+        let enc: Retained<ProtocolObject<dyn MTLComputeCommandEncoder>> = cmd_buf
+            .computeCommandEncoder()
             .ok_or_else(|| FerrotorchError::InvalidArgument {
                 message: "MTLCommandBuffer::computeCommandEncoder returned nil".into(),
             })?;
@@ -728,7 +739,7 @@ impl GpuBackend for MtlBackend {
 
             // One threadgroup per row.
             let grid = MTLSize {
-                width: rows as u64,
+                width: rows,
                 height: 1,
                 depth: 1,
             };
@@ -741,7 +752,7 @@ impl GpuBackend for MtlBackend {
             enc.endEncoding();
         }
 
-        Self::commit_and_wait(&cmd_buf)?;
+        Self::commit_and_wait(&cmd_buf);
         Ok(Self::wrap_buffer(out_buf, a.device_ordinal()))
     }
 
@@ -766,12 +777,15 @@ impl GpuBackend for MtlBackend {
         let out_len = outer * inner;
         let out_buf = self.alloc_buffer(out_len * 4, out_len)?;
 
-        let cmd_buf: Retained<MTLCommandBuffer> = unsafe { self.queue.commandBuffer() }
+        let cmd_buf: Retained<ProtocolObject<dyn MTLCommandBuffer>> = self
+            .queue
+            .commandBuffer()
             .ok_or_else(|| FerrotorchError::InvalidArgument {
                 message: "MTLCommandQueue::commandBuffer returned nil".into(),
             })?;
 
-        let enc: Retained<MTLComputeCommandEncoder> = unsafe { cmd_buf.computeCommandEncoder() }
+        let enc: Retained<ProtocolObject<dyn MTLComputeCommandEncoder>> = cmd_buf
+            .computeCommandEncoder()
             .ok_or_else(|| FerrotorchError::InvalidArgument {
                 message: "MTLCommandBuffer::computeCommandEncoder returned nil".into(),
             })?;
@@ -806,7 +820,7 @@ impl GpuBackend for MtlBackend {
 
             // One threadgroup per output element.
             let grid = MTLSize {
-                width: out_len as u64,
+                width: out_len,
                 height: 1,
                 depth: 1,
             };
@@ -819,7 +833,7 @@ impl GpuBackend for MtlBackend {
             enc.endEncoding();
         }
 
-        Self::commit_and_wait(&cmd_buf)?;
+        Self::commit_and_wait(&cmd_buf);
         Ok(Self::wrap_buffer(out_buf, a.device_ordinal()))
     }
 
@@ -844,6 +858,262 @@ impl GpuBackend for MtlBackend {
             message: "MSL kernel needed: dropout_f32 — follow-up #626".into(),
         })
     }
+
+    // -- GpuBackend trait surface that has accumulated upstream without MSL
+    //    implementations. Each method returns Err so MPSBackend is a valid
+    //    trait impl on macOS-CI and the build stays green. Real Metal
+    //    implementations are tracked in follow-up #626 (the same issue every
+    //    other "MSL kernel needed" stub above references).
+
+    fn broadcast_add_f32(
+        &self,
+        _a: &GpuBufferHandle,
+        _b: &GpuBufferHandle,
+        _a_shape: &[usize],
+        _b_shape: &[usize],
+        _out_shape: &[usize],
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::InvalidArgument {
+            message: "MSL kernel needed: broadcast_add_f32 — follow-up #626".into(),
+        })
+    }
+
+    fn broadcast_sub_f32(
+        &self,
+        _a: &GpuBufferHandle,
+        _b: &GpuBufferHandle,
+        _a_shape: &[usize],
+        _b_shape: &[usize],
+        _out_shape: &[usize],
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::InvalidArgument {
+            message: "MSL kernel needed: broadcast_sub_f32 — follow-up #626".into(),
+        })
+    }
+
+    fn broadcast_mul_f32(
+        &self,
+        _a: &GpuBufferHandle,
+        _b: &GpuBufferHandle,
+        _a_shape: &[usize],
+        _b_shape: &[usize],
+        _out_shape: &[usize],
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::InvalidArgument {
+            message: "MSL kernel needed: broadcast_mul_f32 — follow-up #626".into(),
+        })
+    }
+
+    fn broadcast_div_f32(
+        &self,
+        _a: &GpuBufferHandle,
+        _b: &GpuBufferHandle,
+        _a_shape: &[usize],
+        _b_shape: &[usize],
+        _out_shape: &[usize],
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::InvalidArgument {
+            message: "MSL kernel needed: broadcast_div_f32 — follow-up #626".into(),
+        })
+    }
+
+    fn transpose_2d_f32(
+        &self,
+        _a: &GpuBufferHandle,
+        _m: usize,
+        _n: usize,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::InvalidArgument {
+            message: "MSL kernel needed: transpose_2d_f32 — follow-up #626".into(),
+        })
+    }
+
+    fn permute_0213_f32(
+        &self,
+        _a: &GpuBufferHandle,
+        _d0: usize,
+        _d1: usize,
+        _d2: usize,
+        _d3: usize,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::InvalidArgument {
+            message: "MSL kernel needed: permute_0213_f32 — follow-up #626".into(),
+        })
+    }
+
+    fn layernorm_f32(
+        &self,
+        _input: &GpuBufferHandle,
+        _weight: &GpuBufferHandle,
+        _bias: &GpuBufferHandle,
+        _rows: usize,
+        _cols: usize,
+        _eps: f32,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::InvalidArgument {
+            message: "MSL kernel needed: layernorm_f32 — follow-up #626".into(),
+        })
+    }
+
+    fn slice_write_f32(
+        &self,
+        _src: &GpuBufferHandle,
+        _dst: &mut GpuBufferHandle,
+        _n_batch: usize,
+        _d: usize,
+        _max_len: usize,
+        _pos: usize,
+    ) -> FerrotorchResult<()> {
+        Err(FerrotorchError::InvalidArgument {
+            message: "MSL kernel needed: slice_write_f32 — follow-up #626".into(),
+        })
+    }
+
+    fn slice_read_f32(
+        &self,
+        _src: &GpuBufferHandle,
+        _n_batch: usize,
+        _d: usize,
+        _len: usize,
+        _max_len: usize,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::InvalidArgument {
+            message: "MSL kernel needed: slice_read_f32 — follow-up #626".into(),
+        })
+    }
+
+    fn embed_lookup_f32(
+        &self,
+        _idx: &GpuBufferHandle,
+        _weight: &GpuBufferHandle,
+        _d: usize,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::InvalidArgument {
+            message: "MSL kernel needed: embed_lookup_f32 — follow-up #626".into(),
+        })
+    }
+
+    fn embed_lookup_batch_f32(
+        &self,
+        _indices: &GpuBufferHandle,
+        _weight: &GpuBufferHandle,
+        _n: usize,
+        _d: usize,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::InvalidArgument {
+            message: "MSL kernel needed: embed_lookup_batch_f32 — follow-up #626".into(),
+        })
+    }
+
+    fn scatter_add_rows_f32(
+        &self,
+        _grad_output: &GpuBufferHandle,
+        _indices: &GpuBufferHandle,
+        _num_embeddings: usize,
+        _d: usize,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::InvalidArgument {
+            message: "MSL kernel needed: scatter_add_rows_f32 — follow-up #626".into(),
+        })
+    }
+
+    fn scale_f32(&self, _a: &GpuBufferHandle, _scalar: f32) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::InvalidArgument {
+            message: "MSL kernel needed: scale_f32 — follow-up #626".into(),
+        })
+    }
+
+    fn relu_backward_f32(
+        &self,
+        _grad: &GpuBufferHandle,
+        _input: &GpuBufferHandle,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::InvalidArgument {
+            message: "MSL kernel needed: relu_backward_f32 — follow-up #626".into(),
+        })
+    }
+
+    fn gelu_backward_f32(
+        &self,
+        _grad: &GpuBufferHandle,
+        _input: &GpuBufferHandle,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::InvalidArgument {
+            message: "MSL kernel needed: gelu_backward_f32 — follow-up #626".into(),
+        })
+    }
+
+    fn gelu_backward_erf_f32(
+        &self,
+        _grad: &GpuBufferHandle,
+        _input: &GpuBufferHandle,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::InvalidArgument {
+            message: "MSL kernel needed: gelu_backward_erf_f32 — follow-up #626".into(),
+        })
+    }
+
+    fn index_select_1d_f32(
+        &self,
+        _input: &GpuBufferHandle,
+        _indices: &GpuBufferHandle,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::InvalidArgument {
+            message: "MSL kernel needed: index_select_1d_f32 — follow-up #626".into(),
+        })
+    }
+
+    fn scatter_add_1d_f32(
+        &self,
+        _grad_output: &GpuBufferHandle,
+        _indices: &GpuBufferHandle,
+        _input_len: usize,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::InvalidArgument {
+            message: "MSL kernel needed: scatter_add_1d_f32 — follow-up #626".into(),
+        })
+    }
+
+    fn index_select_dim_f32(
+        &self,
+        _input: &GpuBufferHandle,
+        _indices: &GpuBufferHandle,
+        _outer: usize,
+        _in_dim_size: usize,
+        _out_dim_size: usize,
+        _inner: usize,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::InvalidArgument {
+            message: "MSL kernel needed: index_select_dim_f32 — follow-up #626".into(),
+        })
+    }
+
+    fn masked_fill_f32(
+        &self,
+        _input: &GpuBufferHandle,
+        _mask: &GpuBufferHandle,
+        _value: f32,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::InvalidArgument {
+            message: "MSL kernel needed: masked_fill_f32 — follow-up #626".into(),
+        })
+    }
+
+    fn masked_zero_f32(
+        &self,
+        _grad: &GpuBufferHandle,
+        _mask: &GpuBufferHandle,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::InvalidArgument {
+            message: "MSL kernel needed: masked_zero_f32 — follow-up #626".into(),
+        })
+    }
+
+    fn has_inf_nan_f32(&self, _a: &GpuBufferHandle) -> FerrotorchResult<bool> {
+        Err(FerrotorchError::InvalidArgument {
+            message: "MSL kernel needed: has_inf_nan_f32 — follow-up #626".into(),
+        })
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -861,9 +1131,12 @@ impl GpuBackend for MtlBackend {
 /// - [`FerrotorchError::InvalidArgument`]: MSL compilation failed (ferrotorch bug).
 pub fn init_mps_backend_metal() -> FerrotorchResult<()> {
     let backend = MtlBackend::new()?;
-    ferrotorch_core::gpu_dispatch::register_gpu_backend(Box::new(backend)).map_err(|e| {
+    ferrotorch_core::gpu_dispatch::register_gpu_backend(Box::new(backend)).map_err(|_| {
+        // `register_gpu_backend` uses `OnceLock::set` — the only failure mode
+        // is that a backend has already been registered. The Err payload is
+        // the rejected `Box<dyn GpuBackend>`, which doesn't implement Display.
         FerrotorchError::InvalidArgument {
-            message: format!("MPS backend registration failed: {e}"),
+            message: "MPS backend registration failed: a GPU backend is already registered".into(),
         }
     })
 }
@@ -903,14 +1176,15 @@ mod tests {
         for &n in &[1usize, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024] {
             assert_eq!(
                 pow2_tg_width(n),
-                n as u64,
+                n,
                 "pow-2 input {n} must round-trip unchanged"
             );
         }
     }
 
-    /// Verify MtlBackend::new() either succeeds or returns DeviceUnavailable.
-    /// Never panics, never returns an unexpected error variant.
+    /// Verify [`MtlBackend::new`] either succeeds or returns
+    /// [`FerrotorchError::DeviceUnavailable`]. Never panics, never returns an
+    /// unexpected error variant.
     #[test]
     fn mtl_backend_new_succeeds_or_unavailable() {
         match MtlBackend::new() {
@@ -928,8 +1202,9 @@ mod tests {
         }
     }
 
-    /// Round-trip f32 data through cpu_to_gpu → gpu_to_cpu on a real Metal device.
-    /// cascade_skip if no Metal device is present (CI without GPU).
+    /// Round-trip f32 data through `cpu_to_gpu` → `gpu_to_cpu` on a real
+    /// Metal device. `cascade_skip` if no Metal device is present (CI
+    /// without GPU).
     #[test]
     fn mtl_buffer_round_trip() {
         let backend = match MtlBackend::new() {

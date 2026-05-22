@@ -27,12 +27,15 @@ kernel void sum_axis_f32(
     constant     uint&  outer    [[ buffer(2) ]],
     constant     uint&  axis_len [[ buffer(3) ]],
     constant     uint&  inner    [[ buffer(4) ]],
-    uint2 tgid   [[ threadgroup_position_in_grid ]],
+    // Apple's MSL compiler (Xcode 16+) rejects mixed scalar/vector attribute
+    // declarations on the same kernel. Dispatch is (outer*inner, 1, 1) 1-D,
+    // so a scalar `tgid` matches the other scalar attributes.
+    uint  tgid   [[ threadgroup_position_in_grid ]],
     uint  tid    [[ thread_index_in_threadgroup ]],
     uint  tcount [[ threads_per_threadgroup ]]
 ) {
     // Decode flat threadgroup index into (o, i)
-    uint flat = tgid.x;
+    uint flat = tgid;
     if (flat >= outer * inner) return;
     uint o = flat / inner;
     uint i = flat % inner;
