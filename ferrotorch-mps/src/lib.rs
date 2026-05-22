@@ -114,7 +114,7 @@ pub fn is_mps_available() -> bool {
         // SAFETY: MTLCreateSystemDefaultDevice returns nil when no Metal
         // device is available; we only test for presence, never dereference
         // the returned pointer beyond the nil check.
-        unsafe { objc2_metal::MTLDevice::new().is_some() }
+        unsafe { <dyn objc2_metal::MTLDevice>::new().is_some() }
     }
     #[cfg(not(target_os = "macos"))]
     {
