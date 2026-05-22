@@ -10592,6 +10592,89 @@ DONE:
 }
 ";
 
+/// PTX source for `strided_cat_u16_kernel`: byte-oriented `u16` cat used by
+/// the dtype-generic `strided_cat` dispatch (covers `bf16` / `f16`, see
+/// `aten::cat_out_cuda` in PyTorch which dispatches by scalar type at the
+/// host and the kernel body is a pure strided memcpy).
+///
+/// Same indexing math as [`STRIDED_CAT_PTX`] but with 2-byte loads/stores
+/// (`ld.global.u16` / `st.global.u16`) and a byte-offset shift of 1
+/// (`shl.b64 %off, %off, 1`) instead of 4 bytes for f32. No arithmetic on
+/// the values — the kernel is a pure copy, so the data interpretation
+/// (`bf16`, `f16`, `u16`) is irrelevant to correctness.
+#[cfg(feature = "cuda")]
+pub(crate) const STRIDED_CAT_U16_PTX: &str = "\
+.version 7.0
+.target sm_52
+.address_size 64
+
+.visible .entry strided_cat_u16_kernel(
+    .param .u64 input_ptr,
+    .param .u64 output_ptr,
+    .param .u32 total_along_axis,
+    .param .u32 cat_offset,
+    .param .u32 part_size,
+    .param .u32 inner_size,
+    .param .u32 n
+) {
+    .reg .u32 %r_tid, %bid, %bdim, %n_reg;
+    .reg .u32 %total_ax, %cat_off, %part_sz, %inner_sz;
+    .reg .u32 %outer_idx, %within, %chunk_stride, %dst_idx, %base_off;
+    .reg .u64 %in, %out, %off;
+    .reg .u16 %val;
+    .reg .pred %p;
+
+    ld.param.u64 %in, [input_ptr];
+    ld.param.u64 %out, [output_ptr];
+    ld.param.u32 %total_ax, [total_along_axis];
+    ld.param.u32 %cat_off, [cat_offset];
+    ld.param.u32 %part_sz, [part_size];
+    ld.param.u32 %inner_sz, [inner_size];
+    ld.param.u32 %n_reg, [n];
+
+    mov.u32 %bid, %ctaid.x;
+    mov.u32 %bdim, %ntid.x;
+    mov.u32 %r_tid, %tid.x;
+    mad.lo.u32 %r_tid, %bid, %bdim, %r_tid;
+
+    setp.ge.u32 %p, %r_tid, %n_reg;
+    @%p bra DONE;
+
+    // chunk_stride = part_size * inner_size
+    mul.lo.u32 %chunk_stride, %part_sz, %inner_sz;
+
+    // outer_idx = r_tid / chunk_stride
+    div.u32 %outer_idx, %r_tid, %chunk_stride;
+
+    // within = r_tid % chunk_stride
+    rem.u32 %within, %r_tid, %chunk_stride;
+
+    // base_off = cat_offset * inner_size
+    mul.lo.u32 %base_off, %cat_off, %inner_sz;
+
+    // dst_idx = outer_idx * total_along_axis * inner_size + base_off + within
+    mul.lo.u32 %dst_idx, %outer_idx, %total_ax;
+    mul.lo.u32 %dst_idx, %dst_idx, %inner_sz;
+    add.u32 %dst_idx, %dst_idx, %base_off;
+    add.u32 %dst_idx, %dst_idx, %within;
+
+    // Load from in[r_tid] (2 bytes per element).
+    cvt.u64.u32 %off, %r_tid;
+    shl.b64 %off, %off, 1;
+    add.u64 %off, %in, %off;
+    ld.global.u16 %val, [%off];
+
+    // Store to out[dst_idx] (2 bytes per element).
+    cvt.u64.u32 %off, %dst_idx;
+    shl.b64 %off, %off, 1;
+    add.u64 %off, %out, %off;
+    st.global.u16 [%off], %val;
+
+DONE:
+    ret;
+}
+";
+
 /// PTX source for `strided_copy_kernel`: general strided→contiguous
 /// gather with up to 8 dimensions. CL-496.
 ///
@@ -19814,6 +19897,114 @@ pub fn gpu_strided_cat_f64(
     }
 
     Ok(())
+}
+
+/// Concatenate a `u16` sub-tensor into a larger output at an axis offset on
+/// GPU. Used by the dtype-generic `strided_cat` dispatch for `bf16` / `f16`
+/// tensors (both are stored as `CudaSlice<u16>` bit-patterns and the kernel
+/// body is a pure byte copy).
+#[cfg(feature = "cuda")]
+#[allow(clippy::too_many_arguments)]
+pub fn gpu_strided_cat_u16(
+    input: &cudarc::driver::CudaSlice<u16>,
+    output: &mut cudarc::driver::CudaSlice<u16>,
+    total_along_axis: usize,
+    cat_offset: usize,
+    part_size: usize,
+    inner_size: usize,
+    n: usize,
+    device: &GpuDevice,
+) -> GpuResult<()> {
+    use cudarc::driver::PushKernelArg;
+
+    // The `CudaSlice<u16>` does not expose `device_ordinal()` (it's not a
+    // `CudaBuffer<T>`); the caller is responsible for confirming the slice
+    // lives on `device`, exactly as the bf16 fast paths in `crate::bf16`
+    // do (e.g., `gpu_add_bf16_f32`). No validate_* call here — the slice
+    // came from the same `GpuBufferHandle` whose device ordinal was used to
+    // resolve `device` in `CudaBackendImpl::strided_cat`.
+
+    let ctx = device.context();
+    let stream = device.stream();
+
+    let f = match crate::module_cache::get_or_compile(
+        ctx,
+        STRIDED_CAT_U16_PTX,
+        "strided_cat_u16_kernel",
+        device.ordinal() as u32,
+    ) {
+        Ok(f) => f,
+        Err(e) => {
+            return Err(GpuError::PtxCompileFailed {
+                kernel: "strided_cat_u16_kernel",
+                source: e,
+            });
+        }
+    };
+
+    let cfg = launch_cfg(n)?;
+    let total_ax_u32 = total_along_axis as u32;
+    let offset_u32 = cat_offset as u32;
+    let part_sz_u32 = part_size as u32;
+    let inner_u32 = inner_size as u32;
+    let n_u32 = n as u32;
+
+    // SAFETY:
+    // - `f` is a valid PTX `CudaFunction` for `strided_cat_u16_kernel`
+    //   resolved by `module_cache::get_or_compile` above; the ABI
+    //   `(in_ptr, out_ptr, total_along_axis, cat_offset, part_size,
+    //   inner_size, n)` matches `STRIDED_CAT_U16_PTX`.
+    // - `input: &CudaSlice<u16>` has length `n` (caller's contract — the
+    //   `strided_cat` trait method passes `t_numel`, which is the number
+    //   of source elements). `output: &mut CudaSlice<u16>` is the
+    //   destination, sized by the caller to cover
+    //   `outer * total_along_axis * inner_size` u16 elements; the kernel
+    //   writes `output[(outer_idx * total_along_axis + cat_offset +
+    //   part_idx) * inner_size + within_idx]` for each of the `n`
+    //   threads. Caller contract `cat_offset + part_size <=
+    //   total_along_axis` keeps every write in-bounds.
+    // - No aliasing: `output: &mut` is exclusively borrowed; `input: &`
+    //   is a shared borrow — Rust borrow rules forbid the same allocation
+    //   being both, and the trait method (`CudaBackendImpl::strided_cat`)
+    //   gets these via independent `downcast_ref` / `downcast_mut` calls
+    //   on the `GpuBufferHandle` so the underlying buffers are distinct.
+    // - `n_u32 = n as u32` cannot truncate: `launch_cfg(n)?` returns
+    //   `Err` if `n > u32::MAX`. The other casts are per-axis dims; the
+    //   product `n = outer * part_size * inner_size` already bounds them.
+    // - cudarc enqueues the launch on `stream`; the seven arg refs live
+    //   until the trailing `?`. Stream sync is the caller's
+    //   responsibility (consistent with every other strided kernel in
+    //   this file).
+    unsafe {
+        stream
+            .launch_builder(&f)
+            .arg(input)
+            .arg(&mut *output)
+            .arg(&total_ax_u32)
+            .arg(&offset_u32)
+            .arg(&part_sz_u32)
+            .arg(&inner_u32)
+            .arg(&n_u32)
+            .launch(cfg)?;
+    }
+
+    Ok(())
+}
+
+/// Stub for non-CUDA builds.
+#[cfg(not(feature = "cuda"))]
+#[allow(clippy::too_many_arguments)]
+pub fn gpu_strided_cat_u16(
+    _input: &(),
+    _output: &mut (),
+    _total_along_axis: usize,
+    _cat_offset: usize,
+    _part_size: usize,
+    _inner_size: usize,
+    _n: usize,
+    _device: &GpuDevice,
+) -> GpuResult<()> {
+    Err(GpuError::NoCudaFeature)
 }
 
 // ---------------------------------------------------------------------------

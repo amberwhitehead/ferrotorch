@@ -2076,35 +2076,31 @@ pub trait GpuBackend: Send + Sync {
         })
     }
 
-    // Strided cat: write a sub-tensor into a larger buffer at an offset along one axis on GPU.
+    // Strided cat: write a sub-tensor into a larger buffer at an offset along
+    // one axis on GPU. Dtype-generic via `elem_size`: PyTorch's
+    // `aten::cat_out_cuda` (`aten/src/ATen/native/cuda/Shape.cu`) does the same
+    // — the host computes the scalar size once, then dispatches into a
+    // strided-memcpy kernel whose body only depends on element width (no
+    // arithmetic). Concrete backends are expected to support at least
+    // `elem_size in {2, 4, 8}` (covers `bf16`/`f16`, `f32`, `f64`); other
+    // widths must return an error so the caller can fall back rather than
+    // silently produce wrong data.
     #[allow(clippy::too_many_arguments)]
-    fn strided_cat_f32(
+    fn strided_cat(
         &self,
-        _input: &GpuBufferHandle,
-        _output: &mut GpuBufferHandle,
+        _src: &GpuBufferHandle,
+        _dst: &mut GpuBufferHandle,
         _total_along_axis: usize,
-        _cat_offset: usize,
-        _part_size: usize,
-        _inner_size: usize,
-        _n: usize,
+        _offset: usize,
+        _t_axis_size: usize,
+        _inner: usize,
+        _t_numel: usize,
+        elem_size: usize,
     ) -> FerrotorchResult<()> {
         Err(FerrotorchError::InvalidArgument {
-            message: "strided_cat_f32 GPU op not yet implemented".into(),
-        })
-    }
-    #[allow(clippy::too_many_arguments)]
-    fn strided_cat_f64(
-        &self,
-        _input: &GpuBufferHandle,
-        _output: &mut GpuBufferHandle,
-        _total_along_axis: usize,
-        _cat_offset: usize,
-        _part_size: usize,
-        _inner_size: usize,
-        _n: usize,
-    ) -> FerrotorchResult<()> {
-        Err(FerrotorchError::InvalidArgument {
-            message: "strided_cat_f64 GPU op not yet implemented".into(),
+            message: format!(
+                "strided_cat (elem_size={elem_size}) GPU op not implemented for this backend"
+            ),
         })
     }
 

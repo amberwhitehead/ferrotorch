@@ -1582,33 +1582,6 @@ impl GpuBackend for CudaBackendImpl {
         Ok(Self::wrap_buffer_f64(result, input.device_ordinal()))
     }
 
-    fn strided_cat_f64(
-        &self,
-        input: &GpuBufferHandle,
-        output: &mut GpuBufferHandle,
-        total_along_axis: usize,
-        cat_offset: usize,
-        part_size: usize,
-        inner_size: usize,
-        n: usize,
-    ) -> FerrotorchResult<()> {
-        let in_buf = Self::unwrap_buffer_f64(input)?;
-        let dev = self.device(input.device_ordinal())?;
-        let out_buf = Self::unwrap_buffer_f64_mut(output)?;
-        crate::kernels::gpu_strided_cat_f64(
-            in_buf,
-            out_buf,
-            total_along_axis,
-            cat_offset,
-            part_size,
-            inner_size,
-            n,
-            dev,
-        )
-        .map_err(Self::map_gpu_err)?;
-        Ok(())
-    }
-
     // f64 indexing ops
 
     fn index_select_1d_f64(
@@ -3381,36 +3354,90 @@ impl GpuBackend for CudaBackendImpl {
         .map_err(Self::map_gpu_err)
     }
 
-    fn strided_cat_f32(
+    fn strided_cat(
         &self,
-        input: &GpuBufferHandle,
-        output: &mut GpuBufferHandle,
+        src: &GpuBufferHandle,
+        dst: &mut GpuBufferHandle,
         total_along_axis: usize,
-        cat_offset: usize,
-        part_size: usize,
-        inner_size: usize,
-        n: usize,
+        offset: usize,
+        t_axis_size: usize,
+        inner: usize,
+        t_numel: usize,
+        elem_size: usize,
     ) -> FerrotorchResult<()> {
-        let in_buf = Self::unwrap_buffer(input)?;
-        let dev = self.device(input.device_ordinal())?;
-        let out_buf =
-            output
-                .downcast_mut::<CudaBuffer<f32>>()
-                .ok_or(FerrotorchError::InvalidArgument {
-                    message: "strided_cat_f32: output is not CudaBuffer<f32>".into(),
-                })?;
-        crate::kernels::gpu_strided_cat(
-            in_buf,
-            out_buf,
-            total_along_axis,
-            cat_offset,
-            part_size,
-            inner_size,
-            n,
-            dev,
-        )
-        .map_err(Self::map_gpu_err)?;
-        Ok(())
+        // Mirrors PyTorch's `aten::cat_out_cuda`
+        // (`aten/src/ATen/native/cuda/Shape.cu`): host-level dispatch on the
+        // scalar size, then a pure-memcpy kernel whose body only differs in
+        // element width. For each supported `elem_size` we route to the
+        // matching specialized kernel (no arithmetic — the data type is only
+        // a copy width).
+        let dev = self.device(src.device_ordinal())?;
+        match elem_size {
+            2 => {
+                // bf16 / f16 — both stored as `CudaSlice<u16>`.
+                let in_slice = Self::unwrap_buffer_bf16(src)?;
+                let out_slice = dst
+                    .downcast_mut::<cudarc::driver::CudaSlice<u16>>()
+                    .ok_or(FerrotorchError::InvalidArgument {
+                        message: "strided_cat: output is not a 2-byte (u16) buffer".into(),
+                    })?;
+                crate::kernels::gpu_strided_cat_u16(
+                    in_slice,
+                    out_slice,
+                    total_along_axis,
+                    offset,
+                    t_axis_size,
+                    inner,
+                    t_numel,
+                    dev,
+                )
+                .map_err(Self::map_gpu_err)?;
+                Ok(())
+            }
+            4 => {
+                // f32.
+                let in_buf = Self::unwrap_buffer(src)?;
+                let out_buf = dst
+                    .downcast_mut::<CudaBuffer<f32>>()
+                    .ok_or(FerrotorchError::InvalidArgument {
+                        message: "strided_cat: output is not CudaBuffer<f32>".into(),
+                    })?;
+                crate::kernels::gpu_strided_cat(
+                    in_buf,
+                    out_buf,
+                    total_along_axis,
+                    offset,
+                    t_axis_size,
+                    inner,
+                    t_numel,
+                    dev,
+                )
+                .map_err(Self::map_gpu_err)?;
+                Ok(())
+            }
+            8 => {
+                // f64.
+                let in_buf = Self::unwrap_buffer_f64(src)?;
+                let out_buf = Self::unwrap_buffer_f64_mut(dst)?;
+                crate::kernels::gpu_strided_cat_f64(
+                    in_buf,
+                    out_buf,
+                    total_along_axis,
+                    offset,
+                    t_axis_size,
+                    inner,
+                    t_numel,
+                    dev,
+                )
+                .map_err(Self::map_gpu_err)?;
+                Ok(())
+            }
+            other => Err(FerrotorchError::InvalidArgument {
+                message: format!(
+                    "strided_cat: unsupported elem_size={other} on CUDA (supported: 2, 4, 8)"
+                ),
+            }),
+        }
     }
 
     // -- cuSOLVER linear algebra -------------------------------------------------

@@ -669,7 +669,12 @@ impl<T: Float> GradFn<T> for SplitBackward<T> {
         }
 
         // GPU fast path: allocate zeros on GPU, strided_cat the gradient into it.
-        if grad_output.is_cuda() && (is_f32::<T>() || is_f64::<T>()) {
+        // Dtype-generic dispatch mirrors PyTorch's `aten::cat_out_cuda` — the
+        // host computes `elem_size = size_of::<T>()` once and passes it to the
+        // backend, which routes to the matching byte-width copy kernel
+        // (`bf16`/`f16` = 2, `f32` = 4, `f64` = 8).
+        let elem_size = std::mem::size_of::<T>();
+        if grad_output.is_cuda() && matches!(elem_size, 2 | 4 | 8) {
             if let Some(backend) = crate::gpu_dispatch::gpu_backend() {
                 let orig_shape = self.input.shape();
                 let ndim = orig_shape.len();
@@ -681,34 +686,21 @@ impl<T: Float> GradFn<T> for SplitBackward<T> {
                 let total_along_dim = orig_shape[self.dim];
                 let orig_numel: usize = orig_shape.iter().product();
                 let device_ord = grad_output.gpu_handle()?.device_ordinal();
-                let f64_path = is_f64::<T>();
-                let elem_size = if f64_path { 8 } else { 4 };
 
                 let mut zeros_handle = backend.alloc_zeros(orig_numel, elem_size, device_ord)?;
 
                 let go_handle = grad_output.gpu_handle()?;
                 let chunk_numel = grad_output.numel();
-                if f64_path {
-                    backend.strided_cat_f64(
-                        go_handle,
-                        &mut zeros_handle,
-                        total_along_dim,
-                        self.offset,
-                        self.chunk_size,
-                        inner,
-                        chunk_numel,
-                    )?;
-                } else {
-                    backend.strided_cat_f32(
-                        go_handle,
-                        &mut zeros_handle,
-                        total_along_dim,
-                        self.offset,
-                        self.chunk_size,
-                        inner,
-                        chunk_numel,
-                    )?;
-                }
+                backend.strided_cat(
+                    go_handle,
+                    &mut zeros_handle,
+                    total_along_dim,
+                    self.offset,
+                    self.chunk_size,
+                    inner,
+                    chunk_numel,
+                    elem_size,
+                )?;
 
                 let grad_tensor = Tensor::from_storage(
                     TensorStorage::gpu(zeros_handle),
@@ -810,8 +802,11 @@ pub fn cat<T: Float>(tensors: &[Tensor<T>], axis: isize) -> FerrotorchResult<Ten
     let device = tensors[0].device();
 
     // GPU fast path: allocate output on GPU, then strided_cat each input — no CPU
-    // download needed.
-    if device.is_cuda() && (is_f32::<T>() || is_f64::<T>()) {
+    // download needed. Mirrors `aten::cat_out_cuda` (PyTorch): host computes
+    // `elem_size` once, backend dispatches by element width into a pure-memcpy
+    // kernel — no per-dtype trait method explosion.
+    let elem_size = std::mem::size_of::<T>();
+    if device.is_cuda() && matches!(elem_size, 2 | 4 | 8) {
         if let Some(backend) = crate::gpu_dispatch::gpu_backend() {
             let inner: usize = if norm_axis + 1 < ndim {
                 out_shape[norm_axis + 1..].iter().product()
@@ -820,8 +815,6 @@ pub fn cat<T: Float>(tensors: &[Tensor<T>], axis: isize) -> FerrotorchResult<Ten
             };
             let out_numel: usize = out_shape.iter().product();
             let device_ord = tensors[0].gpu_handle()?.device_ordinal();
-            let f64_path = is_f64::<T>();
-            let elem_size = if f64_path { 8 } else { 4 };
 
             let mut out_handle = backend.alloc_zeros(out_numel, elem_size, device_ord)?;
 
@@ -830,27 +823,16 @@ pub fn cat<T: Float>(tensors: &[Tensor<T>], axis: isize) -> FerrotorchResult<Ten
                 let t_axis_size = t.shape()[norm_axis];
                 let t_numel = t.numel();
                 let t_handle = t.gpu_handle()?;
-                if f64_path {
-                    backend.strided_cat_f64(
-                        t_handle,
-                        &mut out_handle,
-                        total_along_axis,
-                        offset,
-                        t_axis_size,
-                        inner,
-                        t_numel,
-                    )?;
-                } else {
-                    backend.strided_cat_f32(
-                        t_handle,
-                        &mut out_handle,
-                        total_along_axis,
-                        offset,
-                        t_axis_size,
-                        inner,
-                        t_numel,
-                    )?;
-                }
+                backend.strided_cat(
+                    t_handle,
+                    &mut out_handle,
+                    total_along_axis,
+                    offset,
+                    t_axis_size,
+                    inner,
+                    t_numel,
+                    elem_size,
+                )?;
                 offset += t_axis_size;
             }
 
@@ -866,7 +848,9 @@ pub fn cat<T: Float>(tensors: &[Tensor<T>], axis: isize) -> FerrotorchResult<Ten
         }
     }
 
-    // CPU path — non-f32 GPU tensors have no GPU kernel, error out.
+    // CPU path — GPU tensors with an `elem_size` not in {2, 4, 8} (e.g.,
+    // hypothetical future complex types) have no GPU kernel, error out
+    // rather than silently spilling to host.
     if device.is_cuda() {
         return Err(crate::error::FerrotorchError::NotImplementedOnCuda { op: "cat" });
     }

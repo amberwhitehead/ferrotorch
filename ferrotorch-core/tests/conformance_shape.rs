@@ -3291,6 +3291,43 @@ mod gpu {
         run_cat_for_device("cuda:0", Device::Cuda(0));
     }
 
+    /// End-to-end Tensor<bf16> cat on CUDA — verifies the dtype-generic
+    /// `strided_cat` path (#22, #1181) at the public `core::cat` surface,
+    /// not just the backend trait. Previously `Tensor::<bf16>::cat` on
+    /// `Device::Cuda(0)` returned `NotImplementedOnCuda { op: "cat" }`;
+    /// the byte-oriented dispatch now routes 2-byte elements to the new
+    /// `strided_cat_u16_kernel` (see ferrotorch-gpu/src/kernels.rs).
+    #[test]
+    fn gpu_cat_bf16_end_to_end() {
+        use half::bf16;
+        ensure_cuda_backend();
+
+        // Two simple bf16 tensors that round-trip through f32 without loss
+        // (small integers are exactly representable in bf16).
+        let a_data: Vec<bf16> = (0..6).map(|i| bf16::from_f32(i as f32)).collect();
+        let b_data: Vec<bf16> = (10..19).map(|i| bf16::from_f32(i as f32)).collect();
+        let a = Tensor::from_storage(TensorStorage::cpu(a_data), vec![2, 3], false)
+            .expect("a bf16 cpu");
+        let b = Tensor::from_storage(TensorStorage::cpu(b_data), vec![3, 3], false)
+            .expect("b bf16 cpu");
+
+        let want = cat(&[a.clone(), b.clone()], 0).expect("cpu cat bf16");
+        let a_gpu = a.to(Device::Cuda(0)).expect("upload a");
+        let b_gpu = b.to(Device::Cuda(0)).expect("upload b");
+        let got = cat(&[a_gpu, b_gpu], 0).expect(
+            "GPU bf16 cat must succeed (was NotImplementedOnCuda before #1181)",
+        );
+        assert!(got.is_cuda(), "GPU cat result must stay on CUDA");
+        assert_eq!(got.shape(), &[5, 3]);
+
+        let got_cpu = got.cpu().expect("download");
+        let want_bits: Vec<u16> =
+            want.data().unwrap().iter().map(|v| v.to_bits()).collect();
+        let got_bits: Vec<u16> =
+            got_cpu.data().unwrap().iter().map(|v| v.to_bits()).collect();
+        assert_eq!(got_bits, want_bits, "bit-exact bf16 cat required");
+    }
+
     #[test]
     fn gpu_split() {
         ensure_cuda_backend();
