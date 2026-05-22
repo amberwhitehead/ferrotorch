@@ -8,6 +8,30 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Added
 
+- `ferrotorch-gpu::gpu_layernorm_bf16` and `gpu_gelu_bf16` PTX kernels
+  (sm_53+, RTX 3090 tested). LayerNorm reduces mean+variance in f32 via
+  per-row shared-memory tree-reduce, applies bf16 γ/β, then rounds back
+  to bf16 (RNE). GELU computes exact-erf via Hastings' degree-5
+  polynomial (~1.5e-7 max abs error, below bf16 ULP) in f32 and rounds
+  back to bf16. Both consume Maxine's raw `CudaSlice<u16>` storage
+  convention from #19 directly — no extra wrappers (#17).
+- `GpuBackend::layernorm_bf16_bf16`, `gelu_bf16_bf16`,
+  `matmul_bf16_bf16_nt`, `softmax_bf16_bf16`, `add_bf16_bf16`,
+  `mul_bf16_bf16`, `scale_bf16_bf16`, `silu_bf16_bf16`, and
+  `relu_bf16_bf16` trait methods on the GPU dispatcher; `CudaBackendImpl`
+  routes each to the matching cuBLAS/PTX kernel. Default trait impls
+  return `Err(InvalidArgument)` so non-CUDA backends compile unchanged
+  (no silent CPU fallback) (#17).
+- `ferrotorch-gpu/tests/bf16_vit_block_e2e.rs`: end-to-end ViT-style
+  transformer block forward pass (LN → QKV → softmax(QK^T·scale) → @V →
+  out_proj → +residual → LN → fc1 → GELU → fc2 → +residual) on bf16 GPU
+  tensors. Bit-exact match against the CPU bf16 reference
+  (cosine_sim = 1.000000, max_abs = 0.000000) (#17).
+- `ferrotorch-core/tests/_probe_issue17_bf16_tensor_dispatch.rs`:
+  Tensor<bf16> → GpuBufferHandle → backend.*_bf16_bf16 routing probe
+  covering matmul, layernorm, gelu, silu, relu, scale, add, mul, and
+  softmax (#17).
+
 ### Fixed
 
 ### Changed

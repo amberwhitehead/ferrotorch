@@ -3251,6 +3251,131 @@ pub trait GpuBackend: Send + Sync {
             message: "sparse_matmul_24_bf16 GPU op not implemented for this backend (build with --features cusparselt)".into(),
         })
     }
+
+    // -- bf16 → bf16 native dispatch (#17) -----------------------------------
+    //
+    // These trait methods stay in bf16 end-to-end (inputs *and* outputs are
+    // `CudaSlice<u16>` bit-pattern handles, matching the storage convention
+    // used by every `*_bf16` PTX kernel in `ferrotorch-gpu::bf16` and the
+    // `gpu_matmul_bf16_bf16` family in `ferrotorch-gpu::blas`). The earlier
+    // `*_bf16_f32` family widens to f32 on the output (PyTorch-autocast
+    // parity); these `*_bf16_bf16` variants preserve bf16 storage end-to-end
+    // for the ViT / CLIP-style inference pipeline.
+    //
+    // Default impls return `Unsupported` so non-CUDA backends compile
+    // unchanged — there is NO silent CPU fallback (rust-gpu-discipline §3).
+    // The CUDA implementation is in `ferrotorch-gpu::backend_impl`.
+
+    /// bf16 fused-transpose matmul `C = A @ B^T`.
+    ///
+    /// `A: [m, k]`, `B: [n, k]` (row-major; the transpose is folded into
+    /// the cuBLAS `transb` flag with no extra memory traffic). Returns a
+    /// `[m, n]` bf16 buffer.
+    fn matmul_bf16_bf16_nt(
+        &self,
+        _a: &GpuBufferHandle,
+        _b: &GpuBufferHandle,
+        _m: usize,
+        _k: usize,
+        _n: usize,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::InvalidArgument {
+            message: "matmul_bf16_bf16_nt GPU op not implemented for this backend".into(),
+        })
+    }
+
+    /// Row-wise softmax: bf16 input → bf16 output via PTX kernel with
+    /// f32 accumulator (max-find, exp-sum, normalize all in f32; only the
+    /// final store rounds back to bf16). The bf16 round-trip is the
+    /// HuggingFace bf16 attention contract.
+    fn softmax_bf16_bf16(
+        &self,
+        _a: &GpuBufferHandle,
+        _rows: usize,
+        _cols: usize,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::InvalidArgument {
+            message: "softmax_bf16_bf16 GPU op not implemented for this backend".into(),
+        })
+    }
+
+    /// bf16 LayerNorm with per-channel γ/β (also bf16).
+    /// `input: [rows, cols]`, `gamma: [cols]`, `beta: [cols]`. The per-row
+    /// mean and variance reduce in f32; the final scale-shift result rounds
+    /// back to bf16 with round-to-nearest-even.
+    fn layernorm_bf16_bf16(
+        &self,
+        _input: &GpuBufferHandle,
+        _gamma: &GpuBufferHandle,
+        _beta: &GpuBufferHandle,
+        _rows: usize,
+        _cols: usize,
+        _eps: f32,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::InvalidArgument {
+            message: "layernorm_bf16_bf16 GPU op not implemented for this backend".into(),
+        })
+    }
+
+    /// bf16 GELU activation `out = 0.5 * x * (1 + erf(x / sqrt(2)))`,
+    /// computed in f32 (Hastings degree-5 erf polynomial; ≤1.5e-7 max abs
+    /// error, well below bf16 ULP) and rounded back to bf16. ViT and CLIP
+    /// MLP blocks use this exact formulation.
+    fn gelu_bf16_bf16(&self, _a: &GpuBufferHandle) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::InvalidArgument {
+            message: "gelu_bf16_bf16 GPU op not implemented for this backend".into(),
+        })
+    }
+
+    /// bf16 SiLU activation `out = x * sigmoid(x)`, f32 internal, bf16 RNE
+    /// store back.
+    fn silu_bf16_bf16(&self, _a: &GpuBufferHandle) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::InvalidArgument {
+            message: "silu_bf16_bf16 GPU op not implemented for this backend".into(),
+        })
+    }
+
+    /// bf16 ReLU activation `out = max(0, x)` (clamp on the bf16 sign bit).
+    fn relu_bf16_bf16(&self, _a: &GpuBufferHandle) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::InvalidArgument {
+            message: "relu_bf16_bf16 GPU op not implemented for this backend".into(),
+        })
+    }
+
+    /// bf16 elementwise add `out = a + b`. f32 internal, bf16 RNE store back.
+    fn add_bf16_bf16(
+        &self,
+        _a: &GpuBufferHandle,
+        _b: &GpuBufferHandle,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::InvalidArgument {
+            message: "add_bf16_bf16 GPU op not implemented for this backend".into(),
+        })
+    }
+
+    /// bf16 elementwise multiply `out = a * b`. f32 internal, bf16 RNE
+    /// store back.
+    fn mul_bf16_bf16(
+        &self,
+        _a: &GpuBufferHandle,
+        _b: &GpuBufferHandle,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::InvalidArgument {
+            message: "mul_bf16_bf16 GPU op not implemented for this backend".into(),
+        })
+    }
+
+    /// bf16 scalar multiply `out = a * scalar`. Used to fold
+    /// `1 / sqrt(head_dim)` into attention scores.
+    fn scale_bf16_bf16(
+        &self,
+        _a: &GpuBufferHandle,
+        _scalar: f32,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::InvalidArgument {
+            message: "scale_bf16_bf16 GPU op not implemented for this backend".into(),
+        })
+    }
 }
 
 static GPU_BACKEND: OnceLock<Box<dyn GpuBackend>> = OnceLock::new();

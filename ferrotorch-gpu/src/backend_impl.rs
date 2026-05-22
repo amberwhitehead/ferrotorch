@@ -4344,6 +4344,129 @@ impl GpuBackend for CudaBackendImpl {
     // is the only one currently exercised through this trait surface,
     // matching the SemiStructuredSparseTensor<T: Float> = f32/f64
     // generic constraint.
+
+    // -- bf16 → bf16 native dispatch (#17) -----------------------------------
+    //
+    // Trait surface for bf16-resident inference (ViT, CLIP, Llama-style
+    // transformer blocks). Each method extracts the underlying
+    // `CudaSlice<u16>` from the handle (Maxine's storage convention from
+    // #19), launches the matching PTX/cuBLAS kernel, and re-wraps the
+    // resulting `CudaSlice<u16>` into a `GpuBufferHandle`. No `.cpu()` /
+    // host readback / silent fallback — bf16 ops without a backing kernel
+    // would `Err(InvalidArgument)` via the trait default (rust-gpu-discipline
+    // §3 PyTorch parity).
+
+    #[cfg(feature = "cuda")]
+    fn matmul_bf16_bf16_nt(
+        &self,
+        a: &GpuBufferHandle,
+        b: &GpuBufferHandle,
+        m: usize,
+        k: usize,
+        n: usize,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        let a_buf = Self::unwrap_buffer_bf16(a)?;
+        let b_buf = Self::unwrap_buffer_bf16(b)?;
+        let dev = self.device(a.device_ordinal())?;
+        let result = crate::blas::gpu_matmul_bf16_bf16_nt(a_buf, b_buf, m, k, n, dev)
+            .map_err(Self::map_gpu_err)?;
+        Ok(Self::wrap_buffer_bf16(result, a.device_ordinal()))
+    }
+
+    #[cfg(feature = "cuda")]
+    fn softmax_bf16_bf16(
+        &self,
+        a: &GpuBufferHandle,
+        rows: usize,
+        cols: usize,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        let buf = Self::unwrap_buffer_bf16(a)?;
+        let dev = self.device(a.device_ordinal())?;
+        let result = crate::bf16::gpu_softmax_bf16(buf, rows, cols, dev)
+            .map_err(Self::map_gpu_err)?;
+        Ok(Self::wrap_buffer_bf16(result, a.device_ordinal()))
+    }
+
+    #[cfg(feature = "cuda")]
+    fn layernorm_bf16_bf16(
+        &self,
+        input: &GpuBufferHandle,
+        gamma: &GpuBufferHandle,
+        beta: &GpuBufferHandle,
+        rows: usize,
+        cols: usize,
+        eps: f32,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        let in_buf = Self::unwrap_buffer_bf16(input)?;
+        let g_buf = Self::unwrap_buffer_bf16(gamma)?;
+        let b_buf = Self::unwrap_buffer_bf16(beta)?;
+        let dev = self.device(input.device_ordinal())?;
+        let result = crate::bf16::gpu_layernorm_bf16(in_buf, g_buf, b_buf, rows, cols, eps, dev)
+            .map_err(Self::map_gpu_err)?;
+        Ok(Self::wrap_buffer_bf16(result, input.device_ordinal()))
+    }
+
+    #[cfg(feature = "cuda")]
+    fn gelu_bf16_bf16(&self, a: &GpuBufferHandle) -> FerrotorchResult<GpuBufferHandle> {
+        let buf = Self::unwrap_buffer_bf16(a)?;
+        let dev = self.device(a.device_ordinal())?;
+        let result = crate::bf16::gpu_gelu_bf16(buf, dev).map_err(Self::map_gpu_err)?;
+        Ok(Self::wrap_buffer_bf16(result, a.device_ordinal()))
+    }
+
+    #[cfg(feature = "cuda")]
+    fn silu_bf16_bf16(&self, a: &GpuBufferHandle) -> FerrotorchResult<GpuBufferHandle> {
+        let buf = Self::unwrap_buffer_bf16(a)?;
+        let dev = self.device(a.device_ordinal())?;
+        let result = crate::bf16::gpu_silu_bf16(buf, dev).map_err(Self::map_gpu_err)?;
+        Ok(Self::wrap_buffer_bf16(result, a.device_ordinal()))
+    }
+
+    #[cfg(feature = "cuda")]
+    fn relu_bf16_bf16(&self, a: &GpuBufferHandle) -> FerrotorchResult<GpuBufferHandle> {
+        let buf = Self::unwrap_buffer_bf16(a)?;
+        let dev = self.device(a.device_ordinal())?;
+        let result = crate::bf16::gpu_relu_bf16(buf, dev).map_err(Self::map_gpu_err)?;
+        Ok(Self::wrap_buffer_bf16(result, a.device_ordinal()))
+    }
+
+    #[cfg(feature = "cuda")]
+    fn add_bf16_bf16(
+        &self,
+        a: &GpuBufferHandle,
+        b: &GpuBufferHandle,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        let a_buf = Self::unwrap_buffer_bf16(a)?;
+        let b_buf = Self::unwrap_buffer_bf16(b)?;
+        let dev = self.device(a.device_ordinal())?;
+        let result = crate::bf16::gpu_add_bf16(a_buf, b_buf, dev).map_err(Self::map_gpu_err)?;
+        Ok(Self::wrap_buffer_bf16(result, a.device_ordinal()))
+    }
+
+    #[cfg(feature = "cuda")]
+    fn mul_bf16_bf16(
+        &self,
+        a: &GpuBufferHandle,
+        b: &GpuBufferHandle,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        let a_buf = Self::unwrap_buffer_bf16(a)?;
+        let b_buf = Self::unwrap_buffer_bf16(b)?;
+        let dev = self.device(a.device_ordinal())?;
+        let result = crate::bf16::gpu_mul_bf16(a_buf, b_buf, dev).map_err(Self::map_gpu_err)?;
+        Ok(Self::wrap_buffer_bf16(result, a.device_ordinal()))
+    }
+
+    #[cfg(feature = "cuda")]
+    fn scale_bf16_bf16(
+        &self,
+        a: &GpuBufferHandle,
+        scalar: f32,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        let buf = Self::unwrap_buffer_bf16(a)?;
+        let dev = self.device(a.device_ordinal())?;
+        let result = crate::bf16::gpu_scale_bf16(buf, scalar, dev).map_err(Self::map_gpu_err)?;
+        Ok(Self::wrap_buffer_bf16(result, a.device_ordinal()))
+    }
 }
 
 // ---------------------------------------------------------------------------

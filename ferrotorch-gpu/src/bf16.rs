@@ -2632,6 +2632,522 @@ pub fn gpu_block_reduce_max_abs_bf16(
 }
 
 // ===========================================================================
+// LayerNorm bf16 -- per-row, f32 accumulator, mean + variance (#17)
+// ===========================================================================
+//
+// One block per row. Three passes, each using a shared-memory tree
+// reduction in f32:
+//   1. sum(x)                                   -> mean
+//   2. sum((x - mean)^2)                        -> var
+//   3. write (x - mean) / sqrt(var + eps) * gamma + beta, rounded to bf16
+//
+// gamma and beta are bf16 `[cols]` vectors (HuggingFace ViT / CLIP store
+// `nn.LayerNorm` weight/bias in bf16 alongside model weights).
+//
+// bf16 reduction MUST be in f32: bf16's 7-bit mantissa causes catastrophic
+// cancellation when computing `sum((x - mean)^2)` for inputs with O(1)
+// magnitude on a 768-wide row. The PTX kernel below decodes each bf16 to
+// f32 (lossless top-half copy), reduces in f32, and rounds back to bf16
+// via RNE only on the final store.
+const LAYERNORM_BF16_PTX: &str = "\
+.version 7.0
+.target sm_52
+.address_size 64
+
+.shared .align 4 .f32 layernorm_bf16_sdata[256];
+
+.visible .entry layernorm_bf16_kernel(
+    .param .u64 in_ptr,
+    .param .u64 gamma_ptr,
+    .param .u64 beta_ptr,
+    .param .u64 out_ptr,
+    .param .u32 rows,
+    .param .u32 cols,
+    .param .f32 eps
+) {
+    .reg .u32 %r_tid, %bid, %bdim, %rows_reg, %cols_reg, %j, %half, %otid;
+    .reg .u64 %in, %gam, %bet, %out, %row_off, %off, %sbase, %saddr;
+    .reg .b16 %x_b16, %g_b16, %b_b16, %zero16;
+    .reg .b32 %x_u32, %g_u32, %b_u32, %bits, %round, %lsb;
+    .reg .f32 %x_f, %g_f, %b_f, %sum, %mean, %diff, %var, %eps_r, %inv_std, %normed, %r_f, %other, %n_f;
+    .reg .pred %p, %lp, %rp;
+
+    ld.param.u64 %in, [in_ptr];
+    ld.param.u64 %gam, [gamma_ptr];
+    ld.param.u64 %bet, [beta_ptr];
+    ld.param.u64 %out, [out_ptr];
+    ld.param.u32 %rows_reg, [rows];
+    ld.param.u32 %cols_reg, [cols];
+    ld.param.f32 %eps_r, [eps];
+
+    mov.u64 %sbase, layernorm_bf16_sdata;
+
+    mov.u32 %bid, %ctaid.x;
+    mov.u32 %bdim, %ntid.x;
+    mov.u32 %r_tid, %tid.x;
+
+    setp.ge.u32 %p, %bid, %rows_reg;
+    @%p bra DONE;
+
+    cvt.u64.u32 %row_off, %bid;
+    cvt.u64.u32 %off, %cols_reg;
+    mul.lo.u64 %row_off, %row_off, %off;
+    shl.b64 %row_off, %row_off, 1;
+    cvt.rn.f32.u32 %n_f, %cols_reg;
+
+    mov.b16 %zero16, 0;
+
+    // Phase 1: sum(x) in f32 -> mean
+    mov.f32 %sum, 0f00000000;
+    mov.u32 %j, %r_tid;
+SM:
+    setp.ge.u32 %lp, %j, %cols_reg;
+    @%lp bra SMD;
+    cvt.u64.u32 %off, %j;
+    shl.b64 %off, %off, 1;
+    add.u64 %off, %in, %off;
+    add.u64 %off, %off, %row_off;
+    ld.global.b16 %x_b16, [%off];
+    mov.b32 %x_u32, {%zero16, %x_b16};
+    mov.b32 %x_f, %x_u32;
+    add.f32 %sum, %sum, %x_f;
+    add.u32 %j, %j, %bdim;
+    bra SM;
+SMD:
+    cvt.u64.u32 %off, %r_tid;
+    shl.b64 %off, %off, 2;
+    add.u64 %saddr, %sbase, %off;
+    st.shared.f32 [%saddr], %sum;
+    bar.sync 0;
+
+    mov.u32 %half, %bdim;
+MR:
+    shr.u32 %half, %half, 1;
+    setp.eq.u32 %rp, %half, 0;
+    @%rp bra MRD;
+    setp.ge.u32 %rp, %r_tid, %half;
+    @%rp bra MRS;
+    add.u32 %otid, %r_tid, %half;
+    cvt.u64.u32 %off, %otid;
+    shl.b64 %off, %off, 2;
+    add.u64 %saddr, %sbase, %off;
+    ld.shared.f32 %other, [%saddr];
+    cvt.u64.u32 %off, %r_tid;
+    shl.b64 %off, %off, 2;
+    add.u64 %saddr, %sbase, %off;
+    ld.shared.f32 %sum, [%saddr];
+    add.f32 %sum, %sum, %other;
+    st.shared.f32 [%saddr], %sum;
+MRS:
+    bar.sync 0;
+    bra MR;
+MRD:
+    ld.shared.f32 %sum, [%sbase];
+    div.approx.f32 %mean, %sum, %n_f;
+    bar.sync 0;
+
+    // Phase 2: sum((x - mean)^2) in f32 -> var
+    mov.f32 %var, 0f00000000;
+    mov.u32 %j, %r_tid;
+SV:
+    setp.ge.u32 %lp, %j, %cols_reg;
+    @%lp bra SVD;
+    cvt.u64.u32 %off, %j;
+    shl.b64 %off, %off, 1;
+    add.u64 %off, %in, %off;
+    add.u64 %off, %off, %row_off;
+    ld.global.b16 %x_b16, [%off];
+    mov.b32 %x_u32, {%zero16, %x_b16};
+    mov.b32 %x_f, %x_u32;
+    sub.f32 %diff, %x_f, %mean;
+    fma.rn.f32 %var, %diff, %diff, %var;
+    add.u32 %j, %j, %bdim;
+    bra SV;
+SVD:
+    cvt.u64.u32 %off, %r_tid;
+    shl.b64 %off, %off, 2;
+    add.u64 %saddr, %sbase, %off;
+    st.shared.f32 [%saddr], %var;
+    bar.sync 0;
+
+    mov.u32 %half, %bdim;
+VR:
+    shr.u32 %half, %half, 1;
+    setp.eq.u32 %rp, %half, 0;
+    @%rp bra VRD;
+    setp.ge.u32 %rp, %r_tid, %half;
+    @%rp bra VRS;
+    add.u32 %otid, %r_tid, %half;
+    cvt.u64.u32 %off, %otid;
+    shl.b64 %off, %off, 2;
+    add.u64 %saddr, %sbase, %off;
+    ld.shared.f32 %other, [%saddr];
+    cvt.u64.u32 %off, %r_tid;
+    shl.b64 %off, %off, 2;
+    add.u64 %saddr, %sbase, %off;
+    ld.shared.f32 %var, [%saddr];
+    add.f32 %var, %var, %other;
+    st.shared.f32 [%saddr], %var;
+VRS:
+    bar.sync 0;
+    bra VR;
+VRD:
+    ld.shared.f32 %var, [%sbase];
+    div.approx.f32 %var, %var, %n_f;
+    add.f32 %var, %var, %eps_r;
+    sqrt.approx.f32 %inv_std, %var;
+    rcp.approx.f32 %inv_std, %inv_std;
+    bar.sync 0;
+
+    // Phase 3: out = ((x - mean) * inv_std) * gamma + beta, rounded to bf16
+    mov.u32 %j, %r_tid;
+NM:
+    setp.ge.u32 %lp, %j, %cols_reg;
+    @%lp bra NMD;
+    cvt.u64.u32 %off, %j;
+    shl.b64 %off, %off, 1;
+    add.u64 %off, %in, %off;
+    add.u64 %off, %off, %row_off;
+    ld.global.b16 %x_b16, [%off];
+    mov.b32 %x_u32, {%zero16, %x_b16};
+    mov.b32 %x_f, %x_u32;
+    sub.f32 %normed, %x_f, %mean;
+    mul.f32 %normed, %normed, %inv_std;
+
+    cvt.u64.u32 %off, %j;
+    shl.b64 %off, %off, 1;
+    add.u64 %off, %gam, %off;
+    ld.global.b16 %g_b16, [%off];
+    mov.b32 %g_u32, {%zero16, %g_b16};
+    mov.b32 %g_f, %g_u32;
+
+    cvt.u64.u32 %off, %j;
+    shl.b64 %off, %off, 1;
+    add.u64 %off, %bet, %off;
+    ld.global.b16 %b_b16, [%off];
+    mov.b32 %b_u32, {%zero16, %b_b16};
+    mov.b32 %b_f, %b_u32;
+
+    fma.rn.f32 %r_f, %g_f, %normed, %b_f;
+
+    mov.b32 %bits, %r_f;
+    shr.u32 %lsb, %bits, 16;
+    and.b32 %lsb, %lsb, 1;
+    add.u32 %round, %bits, 0x7FFF;
+    add.u32 %round, %round, %lsb;
+    shr.u32 %bits, %round, 16;
+
+    cvt.u64.u32 %off, %j;
+    shl.b64 %off, %off, 1;
+    add.u64 %off, %out, %off;
+    add.u64 %off, %off, %row_off;
+    st.global.u16 [%off], %bits;
+    add.u32 %j, %j, %bdim;
+    bra NM;
+NMD:
+
+DONE:
+    ret;
+}
+";
+
+/// Apply LayerNorm to a bf16 `[rows, cols]` row-major tensor on the GPU.
+///
+/// Computes
+/// `out[r, c] = ((input[r, c] - mean(row r)) / sqrt(var(row r) + eps)) * gamma[c] + beta[c]`,
+/// where the row's mean and variance are reduced in f32 and the final
+/// result is rounded back to bf16 with round-to-nearest-even.
+///
+/// `gamma` (weight) and `beta` (bias) are bf16 `[cols]` vectors. Returns
+/// an empty allocation when `rows == 0 || cols == 0`. Errors with
+/// [`GpuError::ShapeMismatch`] if any input is shorter than required.
+pub fn gpu_layernorm_bf16(
+    input: &cudarc::driver::CudaSlice<u16>,
+    gamma: &cudarc::driver::CudaSlice<u16>,
+    beta: &cudarc::driver::CudaSlice<u16>,
+    rows: usize,
+    cols: usize,
+    eps: f32,
+    device: &GpuDevice,
+) -> GpuResult<cudarc::driver::CudaSlice<u16>> {
+    if rows == 0 || cols == 0 {
+        return Ok(device.stream().alloc_zeros::<u16>(rows * cols)?);
+    }
+    if input.len() < rows * cols {
+        return Err(GpuError::ShapeMismatch {
+            op: "layernorm_bf16",
+            expected: vec![rows, cols],
+            got: vec![input.len()],
+        });
+    }
+    if gamma.len() < cols {
+        return Err(GpuError::ShapeMismatch {
+            op: "layernorm_bf16",
+            expected: vec![cols],
+            got: vec![gamma.len()],
+        });
+    }
+    if beta.len() < cols {
+        return Err(GpuError::ShapeMismatch {
+            op: "layernorm_bf16",
+            expected: vec![cols],
+            got: vec![beta.len()],
+        });
+    }
+
+    let ctx = device.context();
+    let stream = device.stream();
+    let f = get_or_compile(
+        ctx,
+        LAYERNORM_BF16_PTX,
+        "layernorm_bf16_kernel",
+        device.ordinal() as u32,
+    )
+    .map_err(|e| GpuError::PtxCompileFailed {
+        kernel: "layernorm_bf16_kernel",
+        source: e,
+    })?;
+
+    let mut out = stream.alloc_zeros::<u16>(rows * cols)?;
+    let cfg = LaunchConfig {
+        grid_dim: (rows as u32, 1, 1),
+        block_dim: (BLOCK_SIZE, 1, 1),
+        shared_mem_bytes: 0,
+    };
+    let rows_u32 = rows as u32;
+    let cols_u32 = cols as u32;
+    // SAFETY:
+    // - `f` is a valid PTX function compiled above via
+    //   `module_cache::get_or_compile` from `LAYERNORM_BF16_PTX`; the
+    //   entry point `layernorm_bf16_kernel` has signature
+    //   (in_ptr: u64, gamma_ptr: u64, beta_ptr: u64, out_ptr: u64,
+    //   rows: u32, cols: u32, eps: f32), matching the seven args
+    //   pushed below in order.
+    // - `input.len() >= rows * cols`, `gamma.len() >= cols`,
+    //   `beta.len() >= cols` are checked above; the empty-shape
+    //   early-return ensures `rows > 0 && cols > 0` at launch.
+    // - `out` was alloc'd `rows * cols` u16 elements from `stream`;
+    //   we hold the only `&mut out`, so it is non-aliased with the
+    //   immutable `input`/`gamma`/`beta` refs and exclusively owned by
+    //   `stream` until launch completes.
+    // - `eps` is a stack f32 borrowed only for the `arg(&eps)` call;
+    //   its address outlives the kernel-arg copy.
+    // - One block per row (grid_dim.x = rows) with `setp.ge.u32 %p,
+    //   %bid, %rows_reg` and `setp.ge.u32 %lp, %j, %cols_reg`
+    //   confining reads/writes to `[0, rows * cols)` of `input`/`out`
+    //   and `[0, cols)` of `gamma`/`beta`.
+    // - `rows`, `cols` fit in u32: the product was used to size `out`,
+    //   so any 64-bit truncation would have already failed.
+    unsafe {
+        stream
+            .launch_builder(&f)
+            .arg(input)
+            .arg(gamma)
+            .arg(beta)
+            .arg(&mut out)
+            .arg(&rows_u32)
+            .arg(&cols_u32)
+            .arg(&eps)
+            .launch(cfg)?;
+    }
+    Ok(out)
+}
+
+// ===========================================================================
+// GELU bf16 -- exact erf via Hastings polynomial, f32 accumulator (#17)
+// ===========================================================================
+//
+// `gelu(x) = 0.5 * x * (1 + erf(x / sqrt(2)))`.
+//
+// Computed elementwise in f32: bf16 -> f32 (lossless top-half copy),
+// erf via Hastings' degree-5 polynomial (max abs error ~1.5e-7, well
+// below bf16's 2^-7 ULP so the rounded bf16 output is bit-identical to
+// using a `erff()` device call), then round-to-nearest-even back to
+// bf16.
+//
+// Hastings reference:
+//   erf(|x|) ~= 1 - (((((a5*t + a4)*t + a3)*t + a2)*t + a1) * t) * exp(-x*x)
+// with t = 1 / (1 + p*|x|) and constants
+//   p  = 0.3275911,
+//   a1 = 0.254829592, a2 = -0.284496736, a3 = 1.421413741,
+//   a4 = -1.453152027, a5 = 1.061405429.
+// Sign is restored from the input.
+//
+// All `.reg` declarations are declared at the top of the function (PTX
+// rejects mid-function `.reg`); polynomial constants are encoded as
+// hex IEEE-754 f32 bit patterns.
+const GELU_BF16_PTX: &str = "\
+.version 7.0
+.target sm_53
+.address_size 64
+
+.visible .entry gelu_bf16_kernel(
+    .param .u64 in_ptr,
+    .param .u64 out_ptr,
+    .param .u32 n
+) {
+    .reg .u32 %r_tid, %bid, %bdim, %n_reg;
+    .reg .u64 %in, %out, %off;
+    .reg .b16 %x_b16, %zero16;
+    .reg .b32 %x_u32, %bits, %round, %lsb;
+    .reg .f32 %x, %inv_sqrt2, %arg, %erf_v, %one, %half_c, %sum, %y;
+    .reg .f32 %ax, %t, %p_const, %one2, %neg_xx, %log2e, %exp_v, %poly, %c_a1, %c_a2, %c_a3, %c_a4, %c_a5;
+    .reg .pred %p, %signp;
+
+    ld.param.u64 %in, [in_ptr];
+    ld.param.u64 %out, [out_ptr];
+    ld.param.u32 %n_reg, [n];
+
+    mov.u32 %bid, %ctaid.x;
+    mov.u32 %bdim, %ntid.x;
+    mov.u32 %r_tid, %tid.x;
+    mad.lo.u32 %r_tid, %bid, %bdim, %r_tid;
+
+    setp.ge.u32 %p, %r_tid, %n_reg;
+    @%p bra DONE;
+
+    cvt.u64.u32 %off, %r_tid;
+    shl.b64 %off, %off, 1;
+    add.u64 %in, %in, %off;
+    add.u64 %out, %out, %off;
+
+    ld.global.b16 %x_b16, [%in];
+    mov.b16 %zero16, 0;
+    mov.b32 %x_u32, {%zero16, %x_b16};
+    mov.b32 %x, %x_u32;
+
+    // arg = x / sqrt(2); 1/sqrt(2) = 0.70710678118f -> 0x3F3504F3
+    mov.f32 %inv_sqrt2, 0f3F3504F3;
+    mul.f32 %arg, %x, %inv_sqrt2;
+
+    // ax = |arg|
+    abs.f32 %ax, %arg;
+
+    // t = 1 / (1 + 0.3275911 * ax); p = 0.3275911 -> 0x3EA7BA05
+    mov.f32 %p_const, 0f3EA7BA05;
+    mov.f32 %one2, 0f3F800000;
+    fma.rn.f32 %t, %p_const, %ax, %one2;
+    rcp.approx.f32 %t, %t;
+
+    // exp_v = exp(-ax*ax) computed as 2^((-ax*ax) * log2(e));
+    // log2(e) = 1.4426950408 -> 0x3FB8AA3B.
+    mul.f32 %neg_xx, %ax, %ax;
+    neg.f32 %neg_xx, %neg_xx;
+    mov.f32 %log2e, 0f3FB8AA3B;
+    mul.f32 %neg_xx, %neg_xx, %log2e;
+    ex2.approx.f32 %exp_v, %neg_xx;
+
+    // Horner-eval poly = ((((a5*t + a4)*t + a3)*t + a2)*t + a1) * t
+    //   a5 =  1.061405429 -> 0x3F87DC22
+    //   a4 = -1.453152027 -> 0xBFBA00E3
+    //   a3 =  1.421413741 -> 0x3FB5F0E3
+    //   a2 = -0.284496736 -> 0xBE91A98E
+    //   a1 =  0.254829592 -> 0x3E827906
+    mov.f32 %c_a5, 0f3F87DC22;
+    mov.f32 %c_a4, 0fBFBA00E3;
+    mov.f32 %c_a3, 0f3FB5F0E3;
+    mov.f32 %c_a2, 0fBE91A98E;
+    mov.f32 %c_a1, 0f3E827906;
+    mul.f32 %poly, %c_a5, %t;
+    add.f32 %poly, %poly, %c_a4;
+    mul.f32 %poly, %poly, %t;
+    add.f32 %poly, %poly, %c_a3;
+    mul.f32 %poly, %poly, %t;
+    add.f32 %poly, %poly, %c_a2;
+    mul.f32 %poly, %poly, %t;
+    add.f32 %poly, %poly, %c_a1;
+    mul.f32 %poly, %poly, %t;
+
+    // erf(|arg|) = 1 - poly * exp_v
+    mul.f32 %poly, %poly, %exp_v;
+    mov.f32 %one, 0f3F800000;
+    sub.f32 %erf_v, %one, %poly;
+
+    // Restore sign: if arg < 0, erf_v = -erf_v
+    setp.lt.f32 %signp, %arg, 0f00000000;
+    @%signp neg.f32 %erf_v, %erf_v;
+
+    // y = 0.5 * x * (1 + erf_v)
+    add.f32 %sum, %one, %erf_v;
+    mov.f32 %half_c, 0f3F000000;
+    mul.f32 %y, %half_c, %x;
+    mul.f32 %y, %y, %sum;
+
+    // Round-to-nearest-even f32 -> bf16.
+    mov.b32 %bits, %y;
+    shr.u32 %lsb, %bits, 16;
+    and.b32 %lsb, %lsb, 1;
+    add.u32 %round, %bits, 0x7FFF;
+    add.u32 %round, %round, %lsb;
+    shr.u32 %bits, %round, 16;
+    st.global.u16 [%out], %bits;
+
+DONE:
+    ret;
+}
+";
+
+/// Apply GELU activation `gelu(x) = 0.5 * x * (1 + erf(x / sqrt(2)))`
+/// elementwise to a bf16 GPU buffer.
+///
+/// Computed in f32 (bf16 -> f32 -> erf approximation -> bf16) to
+/// preserve precision; bf16's 7-bit mantissa cannot represent `erf`
+/// near zero accurately enough for the activation contract. The erf
+/// approximation is Hastings' polynomial (<=1.5e-7 absolute error),
+/// well below bf16's ULP, so the bf16-rounded output is identical to
+/// what a full `erff` call would produce.
+pub fn gpu_gelu_bf16(
+    input: &cudarc::driver::CudaSlice<u16>,
+    device: &GpuDevice,
+) -> GpuResult<cudarc::driver::CudaSlice<u16>> {
+    let n = input.len();
+    if n == 0 {
+        return Ok(device.stream().alloc_zeros::<u16>(0)?);
+    }
+    let ctx = device.context();
+    let stream = device.stream();
+    let f = get_or_compile(
+        ctx,
+        GELU_BF16_PTX,
+        "gelu_bf16_kernel",
+        device.ordinal() as u32,
+    )
+    .map_err(|e| GpuError::PtxCompileFailed {
+        kernel: "gelu_bf16_kernel",
+        source: e,
+    })?;
+
+    let mut out = stream.alloc_zeros::<u16>(n)?;
+    let cfg = launch_1d(n);
+    let n_u32 = n as u32;
+    // SAFETY:
+    // - `f` is a valid PTX function compiled above via
+    //   `module_cache::get_or_compile` from `GELU_BF16_PTX`; entry
+    //   point `gelu_bf16_kernel` has signature (in_ptr: u64,
+    //   out_ptr: u64, n: u32) matching the three args pushed below.
+    // - `n = input.len()` is bound above; the early-return at
+    //   `n == 0` ensures the launch only runs for `n > 0`.
+    // - `out` was alloc'd `n` u16 elements; we hold the only
+    //   `&mut out`, so it is non-aliased with the immutable `input`
+    //   and exclusively owned by `stream` until launch completes.
+    // - The kernel reads `input[i]` and writes `out[i]` only within
+    //   `[0, n)` per the PTX bound-check
+    //   `setp.ge.u32 %p, %r_tid, %n_reg`.
+    // - `n` fits in u32: `launch_1d` cast `n as u32` to compute the
+    //   grid, so the cast on `n_u32` is non-truncating for any `n`
+    //   the grid covers.
+    unsafe {
+        stream
+            .launch_builder(&f)
+            .arg(input)
+            .arg(&mut out)
+            .arg(&n_u32)
+            .launch(cfg)?;
+    }
+    Ok(out)
+}
+
+// ===========================================================================
 // Tests
 // ===========================================================================
 
