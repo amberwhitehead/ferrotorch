@@ -23,6 +23,26 @@ concurrency:
 env:
   CARGO_TERM_COLOR: always
   RUSTFLAGS: -D warnings
+  # core-math-sys's build.rs reads `TARGET_CPU` and passes it as
+  # `-march=$TARGET_CPU` to clang, defaulting to `native`. clang on the
+  # `macos-latest` runner rejects `-march=native` whenever `--target=
+  # arm64-apple-macosx` is also on the command line (cc-rs always passes
+  # an explicit `--target=` on macOS), failing the build with
+  # `ToolExecError ... -march=native`. Use `armv8.4-a` — clang accepts
+  # this `-march=` value under the explicit darwin target, and M1+ all
+  # implement at least armv8.4-a so the resulting binary still runs on
+  # every M-series CPU. (`apple-m1` is a `-mcpu=` value, not `-march=`,
+  # so `flag_if_supported` silently drops it.)
+  TARGET_CPU: armv8.4-a
+  # core-math-sys 1.0.0's vendored `compoundf.c` calls `exit(1)` without
+  # including `<stdlib.h>` (line 813). Apple Clang 17 (Xcode 16.4+,
+  # shipped on the `macos-latest` runner) treats implicit function
+  # declarations as a hard error per ISO C99, killing the build with
+  # `-Wimplicit-function-declaration`. Downgrade to a warning — this
+  # mirrors the existing workaround in `forecast-bio/decode`'s
+  # `.cargo/config.toml` for the same upstream bug, and matches what
+  # ferray-ufunc itself does internally for non-macOS targets.
+  CFLAGS: -Wno-implicit-function-declaration
 
 jobs:
   test-mps:
@@ -58,6 +78,34 @@ jobs:
           # any future Linux jobs that share `Cargo.lock`.
           shared-key: macos-mps
           workspaces: . -> target
+
+      # Surface the actual clang stderr if `core-math-sys`'s cc::Build
+      # fails. `cargo_warnings(false)` in that crate's build.rs hides
+      # the compiler's stderr behind a `ToolExecError` summary, so the
+      # CI log shows the failing command but not what clang actually
+      # complained about. `cargo fetch` populates the registry-src tree
+      # so the probe can read the crate's vendored sources, then we
+      # rerun the failing clang command directly with stderr visible.
+      - name: Diagnostic — clang version + compoundf.c standalone probe
+        continue-on-error: true
+        run: |
+          set -x
+          clang --version
+          xcrun --show-sdk-path
+          cargo fetch --locked || true
+          CRATE=$(find ~/.cargo/registry/src -maxdepth 2 -name "core-math-sys-*" -type d | head -1)
+          echo "core-math-sys crate at: $CRATE"
+          if [ -n "$CRATE" ]; then
+            clang \
+              --target=arm64-apple-macosx \
+              -mmacosx-version-min=15.5 \
+              -march=${TARGET_CPU:-armv8.4-a} \
+              -O0 -fPIC -Wall -Wextra \
+              -c "$CRATE/vendor/src/binary32/compound/compoundf.c" \
+              -o /tmp/compoundf.o 2>&1 || true
+          else
+            echo "core-math-sys crate dir not found after cargo fetch — diagnostic skipped"
+          fi
 
       # -v surfaces the build.rs failure message if `core-math-sys`
       # (or any other transitive C-wrapping crate) breaks on this runner.
