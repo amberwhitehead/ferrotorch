@@ -3,6 +3,7 @@ pub mod elementwise;
 pub mod higher_order;
 pub mod indexing;
 pub mod linalg;
+pub mod phase2c;
 pub mod scatter;
 pub mod search;
 pub mod tensor_ops;

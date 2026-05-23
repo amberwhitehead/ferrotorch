@@ -3915,6 +3915,115 @@ pub trait GpuBackend: Send + Sync {
     fn int_max(&self, _a: &GpuBufferHandle) -> FerrotorchResult<GpuBufferHandle> {
         Err(FerrotorchError::NotImplementedOnCuda { op: "int_max" })
     }
+
+    // ── argmax / argmin / gather / cast — crosslink #1185 Phase 2c ───────────
+    //
+    // Cross-world integer ops that unblock the GPU-resident token/sampling path
+    // (Llama generation loop). All dispatch on the relevant `DType` tag(s)
+    // internally; the result stays GPU-resident. Default bodies return a
+    // structured error so non-CUDA backends compile (PyTorch parity §3).
+
+    /// Argmax over a value buffer (any float/int `DType`), returning an
+    /// **I64-tagged** index handle (PyTorch returns int64 indices).
+    ///
+    /// Logical layout `[outer, dim_size, inner]` (contiguous, C-order). Global
+    /// reduction = `outer=1, inner=1, dim_size=numel`; along-dim = the obvious
+    /// factorisation. Tie-break is the FIRST occurrence. The output handle has
+    /// `outer * inner` elements. Dispatches on `src.dtype()` for the value type.
+    fn argmax(
+        &self,
+        _src: &GpuBufferHandle,
+        _outer: usize,
+        _dim_size: usize,
+        _inner: usize,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::NotImplementedOnCuda { op: "argmax" })
+    }
+
+    /// Argmin over a value buffer; see [`Self::argmax`]. Returns an I64 handle.
+    fn argmin(
+        &self,
+        _src: &GpuBufferHandle,
+        _outer: usize,
+        _dim_size: usize,
+        _inner: usize,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::NotImplementedOnCuda { op: "argmin" })
+    }
+
+    /// `index_select(dim)` driven by a GPU-resident integer index handle.
+    ///
+    /// `src` is the value buffer (layout `[outer, in_dim, inner]`); `index` is
+    /// an I32/I64-tagged handle of `out_dim` entries. Output is a value handle
+    /// of `outer * out_dim * inner` elements with the same `DType` as `src`.
+    /// Dispatches on `(src.dtype(), index.dtype())`.
+    #[allow(clippy::too_many_arguments)]
+    fn index_select_intidx(
+        &self,
+        _src: &GpuBufferHandle,
+        _index: &GpuBufferHandle,
+        _outer: usize,
+        _in_dim: usize,
+        _out_dim: usize,
+        _inner: usize,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::NotImplementedOnCuda {
+            op: "index_select_intidx",
+        })
+    }
+
+    /// `gather(dim)` driven by a GPU-resident integer index handle.
+    ///
+    /// `src` layout `[outer, in_dim, inner]`; `index` (I32/I64) AND output both
+    /// have layout `[outer, out_dim, inner]` (the index is parallel to the
+    /// output). Output `DType` matches `src`. Dispatches on
+    /// `(src.dtype(), index.dtype())`.
+    #[allow(clippy::too_many_arguments)]
+    fn gather_intidx(
+        &self,
+        _src: &GpuBufferHandle,
+        _index: &GpuBufferHandle,
+        _outer: usize,
+        _in_dim: usize,
+        _out_dim: usize,
+        _inner: usize,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::NotImplementedOnCuda {
+            op: "gather_intidx",
+        })
+    }
+
+    /// Cast a float buffer (`src.dtype()` ∈ {F32,F64,BF16,F16}) to an integer
+    /// buffer tagged `dst` (∈ {I32,I64}), truncating toward zero (PyTorch
+    /// `.to(int)`). Result stays GPU-resident.
+    fn cast_f_to_i(
+        &self,
+        _src: &GpuBufferHandle,
+        _dst: DType,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::NotImplementedOnCuda { op: "cast_f_to_i" })
+    }
+
+    /// Cast an integer buffer (`src.dtype()` ∈ {I32,I64}) to a float buffer
+    /// tagged `dst` (∈ {F32,F64,BF16,F16}), round-to-nearest-even.
+    fn cast_i_to_f(
+        &self,
+        _src: &GpuBufferHandle,
+        _dst: DType,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::NotImplementedOnCuda { op: "cast_i_to_f" })
+    }
+
+    /// Cast an integer buffer between i32 and i64 (`src.dtype()` and `dst`
+    /// each ∈ {I32,I64}). Widen sign-extends; narrow wraps (PyTorch CUDA
+    /// `.to(int)` semantics).
+    fn cast_i_to_i(
+        &self,
+        _src: &GpuBufferHandle,
+        _dst: DType,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::NotImplementedOnCuda { op: "cast_i_to_i" })
+    }
 }
 
 static GPU_BACKEND: OnceLock<Box<dyn GpuBackend>> = OnceLock::new();

@@ -353,16 +353,14 @@ impl<I: IntElement> IntTensor<I> {
     /// (rust-gpu-discipline §3) forbids — the caller must `.to(Device::Cpu)`
     /// explicitly first.
     pub fn cast<J: IntElement>(&self) -> FerrotorchResult<IntTensor<J>> {
-        // Phase 2c follow-up: integer cross-dtype cast as a real GPU kernel.
-        // Until then, refuse to silently move a GPU IntTensor to host for the
-        // cast — return a structured error so the caller opts into the D2H copy
-        // via an explicit `.to(Device::Cpu)`.
-        let data = self.data().map_err(|e| match e {
-            FerrotorchError::GpuTensorNotAccessible => FerrotorchError::NotImplementedOnCuda {
-                op: "IntTensor::cast",
-            },
-            other => other,
-        })?;
+        // GPU path (#1185 Phase 2c): when CUDA-resident, run a real i32↔i64
+        // cast kernel and keep the result on-device — no host round-trip.
+        // `cast_gpu` returns `None` for non-CUDA tensors so the CPU reference
+        // below runs unchanged.
+        if let Some(result) = self.cast_gpu::<J>() {
+            return result;
+        }
+        let data = self.data()?;
         let mut out: Vec<J> = Vec::with_capacity(data.len());
         for (i, &v) in data.iter().enumerate() {
             let widened = v.to_i64();
@@ -420,7 +418,7 @@ impl<I: IntElement> IntTensor<I> {
     /// The handle must carry the matching `DType` tag (`I32` / `I64`) — this
     /// is what every Phase-2b GPU op returns. Mirrors
     /// `Tensor::from_storage(TensorStorage::gpu(h), ...)`.
-    fn from_gpu_handle(handle: GpuBufferHandle, shape: Vec<usize>) -> Self {
+    pub(crate) fn from_gpu_handle(handle: GpuBufferHandle, shape: Vec<usize>) -> Self {
         debug_assert_eq!(
             handle.dtype(),
             I::dtype(),
