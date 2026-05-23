@@ -24,6 +24,11 @@ fn is_f64<T: Float>() -> bool {
     TypeId::of::<T>() == TypeId::of::<f64>()
 }
 
+#[inline]
+fn is_bf16<T: Float>() -> bool {
+    TypeId::of::<T>() == TypeId::of::<half::bf16>()
+}
+
 // ---------------------------------------------------------------------------
 // ReLU
 // ---------------------------------------------------------------------------
@@ -732,13 +737,17 @@ pub fn sigmoid<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
 }
 
 fn sigmoid_inner<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
-    if input.is_cuda() && (is_f32::<T>() || is_f64::<T>()) {
+    if input.is_cuda() && (is_f32::<T>() || is_f64::<T>() || is_bf16::<T>()) {
         let backend = gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
-        let handle = if is_f32::<T>() {
-            backend.sigmoid_f32(input.gpu_handle()?)?
-        } else {
-            backend.sigmoid_f64(input.gpu_handle()?)?
-        };
+        // #23: bf16 dispatch via `dispatch_floating_dtype!` — no silent CPU
+        // fallback for GPU bf16 inputs.
+        let handle: crate::gpu_dispatch::GpuBufferHandle = crate::dispatch_floating_dtype!(
+            T,
+            "sigmoid",
+            f32 => backend.sigmoid_f32(input.gpu_handle()?),
+            f64 => backend.sigmoid_f64(input.gpu_handle()?),
+            bf16 => backend.sigmoid_bf16_bf16(input.gpu_handle()?),
+        )?;
         let storage = TensorStorage::gpu(handle);
         let shape = input.shape().to_vec();
 
@@ -782,13 +791,17 @@ pub fn tanh<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
 }
 
 fn tanh_inner<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
-    if input.is_cuda() && (is_f32::<T>() || is_f64::<T>()) {
+    if input.is_cuda() && (is_f32::<T>() || is_f64::<T>() || is_bf16::<T>()) {
         let backend = gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
-        let handle = if is_f32::<T>() {
-            backend.tanh_f32(input.gpu_handle()?)?
-        } else {
-            backend.tanh_f64(input.gpu_handle()?)?
-        };
+        // #23: bf16 routes through `tanh_bf16_bf16` (f32 internal via the
+        // `(e^(2x)-1)/(e^(2x)+1)` PTX kernel).
+        let handle: crate::gpu_dispatch::GpuBufferHandle = crate::dispatch_floating_dtype!(
+            T,
+            "tanh",
+            f32 => backend.tanh_f32(input.gpu_handle()?),
+            f64 => backend.tanh_f64(input.gpu_handle()?),
+            bf16 => backend.tanh_bf16_bf16(input.gpu_handle()?),
+        )?;
         let storage = TensorStorage::gpu(handle);
         let shape = input.shape().to_vec();
 
@@ -980,15 +993,19 @@ fn softmax_inner<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
     let shape = input.shape().to_vec();
 
     // GPU fast path: dispatch to native softmax kernel.
-    if input.is_cuda() && (is_f32::<T>() || is_f64::<T>()) {
+    if input.is_cuda() && (is_f32::<T>() || is_f64::<T>() || is_bf16::<T>()) {
         if let Some(backend) = crate::gpu_dispatch::gpu_backend() {
             let last_dim = *shape.last().unwrap_or(&1);
             let rows = input.numel() / last_dim.max(1);
-            let handle = if is_f32::<T>() {
-                backend.softmax_f32(input.gpu_handle()?, rows, last_dim)?
-            } else {
-                backend.softmax_f64(input.gpu_handle()?, rows, last_dim)?
-            };
+            // #23: bf16 routes through `softmax_bf16_bf16` (existing kernel
+            // from #17; this site was the missing dispatch arm).
+            let handle: crate::gpu_dispatch::GpuBufferHandle = crate::dispatch_floating_dtype!(
+                T,
+                "softmax",
+                f32 => backend.softmax_f32(input.gpu_handle()?, rows, last_dim),
+                f64 => backend.softmax_f64(input.gpu_handle()?, rows, last_dim),
+                bf16 => backend.softmax_bf16_bf16(input.gpu_handle()?, rows, last_dim),
+            )?;
 
             return if is_grad_enabled() && input.requires_grad() {
                 // Clone the result buffer so backward can reference the output.

@@ -86,6 +86,7 @@ pub mod device;
 pub mod dispatch;
 mod display;
 pub mod dtype;
+pub mod dtype_dispatch;
 pub mod einops;
 pub mod einsum;
 pub mod error;

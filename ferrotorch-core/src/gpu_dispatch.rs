@@ -3372,6 +3372,149 @@ pub trait GpuBackend: Send + Sync {
             message: "scale_bf16_bf16 GPU op not implemented for this backend".into(),
         })
     }
+
+    // ─── Issue #23: bf16 dispatch-gap closure ──────────────────────────────
+    //
+    // These trait methods close the dispatcher gap surfaced by
+    // forecast-bio/ferrotorch#23. They cover sub / div / neg, broadcast
+    // {add, sub, mul, div}, sum / mean (both scalar + axis), and the
+    // transcendentals exp / log / tanh / sigmoid. Each has a default
+    // `Err(NotImplementedOnCuda)` body so non-CUDA backends (cubecl,
+    // mps, xpu) compile untouched; the CUDA backend overrides them in
+    // `ferrotorch-gpu::backend_impl`.
+
+    /// bf16 elementwise subtract `out = a - b`. f32 internal, bf16 RNE store back.
+    fn sub_bf16_bf16(
+        &self,
+        _a: &GpuBufferHandle,
+        _b: &GpuBufferHandle,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::NotImplementedOnCuda { op: "sub_bf16_bf16" })
+    }
+
+    /// bf16 elementwise divide `out = a / b`. f32 internal, bf16 RNE store back.
+    fn div_bf16_bf16(
+        &self,
+        _a: &GpuBufferHandle,
+        _b: &GpuBufferHandle,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::NotImplementedOnCuda { op: "div_bf16_bf16" })
+    }
+
+    /// bf16 elementwise negate `out = -a`. Implemented as a sign-bit XOR
+    /// on the u16 bit pattern — no f32 round-trip.
+    fn neg_bf16_bf16(&self, _a: &GpuBufferHandle) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::NotImplementedOnCuda { op: "neg_bf16_bf16" })
+    }
+
+    /// bf16 broadcast add. `a_shape`, `b_shape` are the original shapes;
+    /// `out_shape` is the numpy-style broadcasted output shape.
+    fn broadcast_add_bf16(
+        &self,
+        _a: &GpuBufferHandle,
+        _b: &GpuBufferHandle,
+        _a_shape: &[usize],
+        _b_shape: &[usize],
+        _out_shape: &[usize],
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::NotImplementedOnCuda { op: "broadcast_add_bf16" })
+    }
+
+    /// bf16 broadcast sub.
+    fn broadcast_sub_bf16(
+        &self,
+        _a: &GpuBufferHandle,
+        _b: &GpuBufferHandle,
+        _a_shape: &[usize],
+        _b_shape: &[usize],
+        _out_shape: &[usize],
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::NotImplementedOnCuda { op: "broadcast_sub_bf16" })
+    }
+
+    /// bf16 broadcast mul.
+    fn broadcast_mul_bf16(
+        &self,
+        _a: &GpuBufferHandle,
+        _b: &GpuBufferHandle,
+        _a_shape: &[usize],
+        _b_shape: &[usize],
+        _out_shape: &[usize],
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::NotImplementedOnCuda { op: "broadcast_mul_bf16" })
+    }
+
+    /// bf16 broadcast div.
+    fn broadcast_div_bf16(
+        &self,
+        _a: &GpuBufferHandle,
+        _b: &GpuBufferHandle,
+        _a_shape: &[usize],
+        _b_shape: &[usize],
+        _out_shape: &[usize],
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::NotImplementedOnCuda { op: "broadcast_div_bf16" })
+    }
+
+    /// bf16 sum-reduce to scalar. PyTorch parity: accumulator is f32, final
+    /// store rounds back to bf16 with round-to-nearest-even.
+    fn sum_bf16_bf16(&self, _a: &GpuBufferHandle) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::NotImplementedOnCuda { op: "sum_bf16_bf16" })
+    }
+
+    /// bf16 mean-reduce to scalar. Computed via sum_bf16_bf16 / n on-device.
+    fn mean_bf16_bf16(&self, _a: &GpuBufferHandle) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::NotImplementedOnCuda { op: "mean_bf16_bf16" })
+    }
+
+    /// bf16 axis-reduce sum. `shape` is the full input shape; `axis` is
+    /// the index of the dimension being reduced. Output has the same shape
+    /// minus the reduced dim (caller may keepdim if desired). f32
+    /// accumulator, bf16 round-back.
+    fn sum_axis_bf16_bf16(
+        &self,
+        _a: &GpuBufferHandle,
+        _shape: &[usize],
+        _axis: usize,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::NotImplementedOnCuda { op: "sum_axis_bf16_bf16" })
+    }
+
+    /// bf16 axis-reduce mean. Same shape/axis contract as
+    /// [`sum_axis_bf16_bf16`]. f32 accumulator, divides by `shape[axis]`
+    /// before bf16 round-back.
+    fn mean_axis_bf16_bf16(
+        &self,
+        _a: &GpuBufferHandle,
+        _shape: &[usize],
+        _axis: usize,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::NotImplementedOnCuda { op: "mean_axis_bf16_bf16" })
+    }
+
+    /// bf16 elementwise exp. f32 internal via `ex2.approx.f32(x * log2(e))`,
+    /// bf16 RNE store back.
+    fn exp_bf16_bf16(&self, _a: &GpuBufferHandle) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::NotImplementedOnCuda { op: "exp_bf16_bf16" })
+    }
+
+    /// bf16 elementwise natural log. f32 internal via
+    /// `lg2.approx.f32(x) * ln(2)`, bf16 RNE store back.
+    fn log_bf16_bf16(&self, _a: &GpuBufferHandle) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::NotImplementedOnCuda { op: "log_bf16_bf16" })
+    }
+
+    /// bf16 elementwise tanh. f32 internal via `(e^(2x) - 1)/(e^(2x) + 1)`,
+    /// bf16 RNE store back.
+    fn tanh_bf16_bf16(&self, _a: &GpuBufferHandle) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::NotImplementedOnCuda { op: "tanh_bf16_bf16" })
+    }
+
+    /// bf16 elementwise sigmoid `1 / (1 + exp(-x))`. f32 internal, bf16 RNE
+    /// store back.
+    fn sigmoid_bf16_bf16(&self, _a: &GpuBufferHandle) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::NotImplementedOnCuda { op: "sigmoid_bf16_bf16" })
+    }
 }
 
 static GPU_BACKEND: OnceLock<Box<dyn GpuBackend>> = OnceLock::new();

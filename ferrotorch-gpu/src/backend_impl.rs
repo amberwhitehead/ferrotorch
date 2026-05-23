@@ -4494,6 +4494,215 @@ impl GpuBackend for CudaBackendImpl {
         let result = crate::bf16::gpu_scale_bf16(buf, scalar, dev).map_err(Self::map_gpu_err)?;
         Ok(Self::wrap_buffer_bf16(result, a.device_ordinal()))
     }
+
+    // ─── Issue #23: bf16 dispatch-gap closure ──────────────────────────────
+    //
+    // Trait method impls covering the gaps surfaced by
+    // `_probe_23_bf16_op_sweep.rs`. Each delegates to the PTX kernel in
+    // `crate::bf16`. No silent CPU fallback (rust-gpu-discipline §3):
+    // failures propagate as `Err(GpuError::*)` via `map_gpu_err`.
+
+    #[cfg(feature = "cuda")]
+    fn sub_bf16_bf16(
+        &self,
+        a: &GpuBufferHandle,
+        b: &GpuBufferHandle,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        let a_buf = Self::unwrap_buffer_bf16(a)?;
+        let b_buf = Self::unwrap_buffer_bf16(b)?;
+        let dev = self.device(a.device_ordinal())?;
+        let result = crate::bf16::gpu_sub_bf16(a_buf, b_buf, dev).map_err(Self::map_gpu_err)?;
+        Ok(Self::wrap_buffer_bf16(result, a.device_ordinal()))
+    }
+
+    #[cfg(feature = "cuda")]
+    fn div_bf16_bf16(
+        &self,
+        a: &GpuBufferHandle,
+        b: &GpuBufferHandle,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        let a_buf = Self::unwrap_buffer_bf16(a)?;
+        let b_buf = Self::unwrap_buffer_bf16(b)?;
+        let dev = self.device(a.device_ordinal())?;
+        let result = crate::bf16::gpu_div_bf16(a_buf, b_buf, dev).map_err(Self::map_gpu_err)?;
+        Ok(Self::wrap_buffer_bf16(result, a.device_ordinal()))
+    }
+
+    #[cfg(feature = "cuda")]
+    fn neg_bf16_bf16(&self, a: &GpuBufferHandle) -> FerrotorchResult<GpuBufferHandle> {
+        let buf = Self::unwrap_buffer_bf16(a)?;
+        let dev = self.device(a.device_ordinal())?;
+        let result = crate::bf16::gpu_neg_bf16(buf, dev).map_err(Self::map_gpu_err)?;
+        Ok(Self::wrap_buffer_bf16(result, a.device_ordinal()))
+    }
+
+    #[cfg(feature = "cuda")]
+    fn broadcast_add_bf16(
+        &self,
+        a: &GpuBufferHandle,
+        b: &GpuBufferHandle,
+        a_shape: &[usize],
+        b_shape: &[usize],
+        out_shape: &[usize],
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        let a_buf = Self::unwrap_buffer_bf16(a)?;
+        let b_buf = Self::unwrap_buffer_bf16(b)?;
+        let dev = self.device(a.device_ordinal())?;
+        let result =
+            crate::bf16::gpu_broadcast_add_bf16(a_buf, b_buf, a_shape, b_shape, out_shape, dev)
+                .map_err(Self::map_gpu_err)?;
+        Ok(Self::wrap_buffer_bf16(result, a.device_ordinal()))
+    }
+
+    #[cfg(feature = "cuda")]
+    fn broadcast_sub_bf16(
+        &self,
+        a: &GpuBufferHandle,
+        b: &GpuBufferHandle,
+        a_shape: &[usize],
+        b_shape: &[usize],
+        out_shape: &[usize],
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        let a_buf = Self::unwrap_buffer_bf16(a)?;
+        let b_buf = Self::unwrap_buffer_bf16(b)?;
+        let dev = self.device(a.device_ordinal())?;
+        let result =
+            crate::bf16::gpu_broadcast_sub_bf16(a_buf, b_buf, a_shape, b_shape, out_shape, dev)
+                .map_err(Self::map_gpu_err)?;
+        Ok(Self::wrap_buffer_bf16(result, a.device_ordinal()))
+    }
+
+    #[cfg(feature = "cuda")]
+    fn broadcast_mul_bf16(
+        &self,
+        a: &GpuBufferHandle,
+        b: &GpuBufferHandle,
+        a_shape: &[usize],
+        b_shape: &[usize],
+        out_shape: &[usize],
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        let a_buf = Self::unwrap_buffer_bf16(a)?;
+        let b_buf = Self::unwrap_buffer_bf16(b)?;
+        let dev = self.device(a.device_ordinal())?;
+        let result =
+            crate::bf16::gpu_broadcast_mul_bf16(a_buf, b_buf, a_shape, b_shape, out_shape, dev)
+                .map_err(Self::map_gpu_err)?;
+        Ok(Self::wrap_buffer_bf16(result, a.device_ordinal()))
+    }
+
+    #[cfg(feature = "cuda")]
+    fn broadcast_div_bf16(
+        &self,
+        a: &GpuBufferHandle,
+        b: &GpuBufferHandle,
+        a_shape: &[usize],
+        b_shape: &[usize],
+        out_shape: &[usize],
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        let a_buf = Self::unwrap_buffer_bf16(a)?;
+        let b_buf = Self::unwrap_buffer_bf16(b)?;
+        let dev = self.device(a.device_ordinal())?;
+        let result =
+            crate::bf16::gpu_broadcast_div_bf16(a_buf, b_buf, a_shape, b_shape, out_shape, dev)
+                .map_err(Self::map_gpu_err)?;
+        Ok(Self::wrap_buffer_bf16(result, a.device_ordinal()))
+    }
+
+    #[cfg(feature = "cuda")]
+    fn sum_bf16_bf16(&self, a: &GpuBufferHandle) -> FerrotorchResult<GpuBufferHandle> {
+        let buf = Self::unwrap_buffer_bf16(a)?;
+        let dev = self.device(a.device_ordinal())?;
+        let result = crate::bf16::gpu_sum_bf16(buf, dev).map_err(Self::map_gpu_err)?;
+        Ok(Self::wrap_buffer_bf16(result, a.device_ordinal()))
+    }
+
+    #[cfg(feature = "cuda")]
+    fn mean_bf16_bf16(&self, a: &GpuBufferHandle) -> FerrotorchResult<GpuBufferHandle> {
+        let buf = Self::unwrap_buffer_bf16(a)?;
+        let dev = self.device(a.device_ordinal())?;
+        let result = crate::bf16::gpu_mean_bf16(buf, dev).map_err(Self::map_gpu_err)?;
+        Ok(Self::wrap_buffer_bf16(result, a.device_ordinal()))
+    }
+
+    #[cfg(feature = "cuda")]
+    fn sum_axis_bf16_bf16(
+        &self,
+        a: &GpuBufferHandle,
+        shape: &[usize],
+        axis: usize,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        if axis >= shape.len() {
+            return Err(FerrotorchError::InvalidArgument {
+                message: format!(
+                    "sum_axis_bf16_bf16: axis {axis} out of bounds for shape {shape:?}"
+                ),
+            });
+        }
+        let outer: usize = shape[..axis].iter().product();
+        let axis_size = shape[axis];
+        let inner: usize = shape[axis + 1..].iter().product();
+        let buf = Self::unwrap_buffer_bf16(a)?;
+        let dev = self.device(a.device_ordinal())?;
+        let result = crate::bf16::gpu_sum_axis_bf16_bf16(buf, outer, axis_size, inner, dev)
+            .map_err(Self::map_gpu_err)?;
+        Ok(Self::wrap_buffer_bf16(result, a.device_ordinal()))
+    }
+
+    #[cfg(feature = "cuda")]
+    fn mean_axis_bf16_bf16(
+        &self,
+        a: &GpuBufferHandle,
+        shape: &[usize],
+        axis: usize,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        if axis >= shape.len() {
+            return Err(FerrotorchError::InvalidArgument {
+                message: format!(
+                    "mean_axis_bf16_bf16: axis {axis} out of bounds for shape {shape:?}"
+                ),
+            });
+        }
+        let outer: usize = shape[..axis].iter().product();
+        let axis_size = shape[axis];
+        let inner: usize = shape[axis + 1..].iter().product();
+        let buf = Self::unwrap_buffer_bf16(a)?;
+        let dev = self.device(a.device_ordinal())?;
+        let result = crate::bf16::gpu_mean_axis_bf16_bf16(buf, outer, axis_size, inner, dev)
+            .map_err(Self::map_gpu_err)?;
+        Ok(Self::wrap_buffer_bf16(result, a.device_ordinal()))
+    }
+
+    #[cfg(feature = "cuda")]
+    fn exp_bf16_bf16(&self, a: &GpuBufferHandle) -> FerrotorchResult<GpuBufferHandle> {
+        let buf = Self::unwrap_buffer_bf16(a)?;
+        let dev = self.device(a.device_ordinal())?;
+        let result = crate::bf16::gpu_exp_bf16(buf, dev).map_err(Self::map_gpu_err)?;
+        Ok(Self::wrap_buffer_bf16(result, a.device_ordinal()))
+    }
+
+    #[cfg(feature = "cuda")]
+    fn log_bf16_bf16(&self, a: &GpuBufferHandle) -> FerrotorchResult<GpuBufferHandle> {
+        let buf = Self::unwrap_buffer_bf16(a)?;
+        let dev = self.device(a.device_ordinal())?;
+        let result = crate::bf16::gpu_log_bf16(buf, dev).map_err(Self::map_gpu_err)?;
+        Ok(Self::wrap_buffer_bf16(result, a.device_ordinal()))
+    }
+
+    #[cfg(feature = "cuda")]
+    fn tanh_bf16_bf16(&self, a: &GpuBufferHandle) -> FerrotorchResult<GpuBufferHandle> {
+        let buf = Self::unwrap_buffer_bf16(a)?;
+        let dev = self.device(a.device_ordinal())?;
+        let result = crate::bf16::gpu_tanh_bf16(buf, dev).map_err(Self::map_gpu_err)?;
+        Ok(Self::wrap_buffer_bf16(result, a.device_ordinal()))
+    }
+
+    #[cfg(feature = "cuda")]
+    fn sigmoid_bf16_bf16(&self, a: &GpuBufferHandle) -> FerrotorchResult<GpuBufferHandle> {
+        let buf = Self::unwrap_buffer_bf16(a)?;
+        let dev = self.device(a.device_ordinal())?;
+        let result = crate::bf16::gpu_sigmoid_bf16(buf, dev).map_err(Self::map_gpu_err)?;
+        Ok(Self::wrap_buffer_bf16(result, a.device_ordinal()))
+    }
 }
 
 // ---------------------------------------------------------------------------

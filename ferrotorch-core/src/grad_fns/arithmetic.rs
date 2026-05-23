@@ -27,6 +27,12 @@ fn is_f32<T: Float>() -> bool {
     TypeId::of::<T>() == TypeId::of::<f32>()
 }
 
+/// Returns `true` if `T` is `half::bf16` (#23).
+#[inline]
+fn is_bf16<T: Float>() -> bool {
+    TypeId::of::<T>() == TypeId::of::<half::bf16>()
+}
+
 /// Materialize a CUDA tensor into a fresh buffer whose backing storage
 /// length exactly matches the logical numel, when needed.
 ///
@@ -367,37 +373,48 @@ fn add_inner<T: Float>(a: &Tensor<T>, b: &Tensor<T>) -> FerrotorchResult<Tensor<
         let b_c = ensure_contig_for_gpu(b)?;
 
         let needs_broadcast = a_c.shape() != b_c.shape();
-        let (handle, out_shape) = if needs_broadcast {
-            let out_shape = broadcast_shapes(a_c.shape(), b_c.shape())?;
-            let h = if is_f64::<T>() {
-                backend.broadcast_add_f64(
-                    a_c.gpu_handle()?,
-                    b_c.gpu_handle()?,
-                    a_c.shape(),
-                    b_c.shape(),
-                    &out_shape,
-                )?
+        let (handle, out_shape): (crate::gpu_dispatch::GpuBufferHandle, Vec<usize>) =
+            if needs_broadcast {
+                let out_shape = broadcast_shapes(a_c.shape(), b_c.shape())?;
+                // #23: dtype dispatch via `dispatch_floating_dtype!`
+                // enumerates every supported dtype (f32, f64, bf16) in one
+                // place; no silent f32 fallthrough for bf16.
+                let h: crate::gpu_dispatch::GpuBufferHandle = crate::dispatch_floating_dtype!(
+                    T,
+                    "broadcast_add",
+                    f32 => backend.broadcast_add_f32(
+                        a_c.gpu_handle()?,
+                        b_c.gpu_handle()?,
+                        a_c.shape(),
+                        b_c.shape(),
+                        &out_shape,
+                    ),
+                    f64 => backend.broadcast_add_f64(
+                        a_c.gpu_handle()?,
+                        b_c.gpu_handle()?,
+                        a_c.shape(),
+                        b_c.shape(),
+                        &out_shape,
+                    ),
+                    bf16 => backend.broadcast_add_bf16(
+                        a_c.gpu_handle()?,
+                        b_c.gpu_handle()?,
+                        a_c.shape(),
+                        b_c.shape(),
+                        &out_shape,
+                    ),
+                )?;
+                (h, out_shape)
             } else {
-                backend.broadcast_add_f32(
-                    a_c.gpu_handle()?,
-                    b_c.gpu_handle()?,
-                    a_c.shape(),
-                    b_c.shape(),
-                    &out_shape,
-                )?
+                let h: crate::gpu_dispatch::GpuBufferHandle = crate::dispatch_floating_dtype!(
+                    T,
+                    "add",
+                    f32 => backend.add_f32(a_c.gpu_handle()?, b_c.gpu_handle()?),
+                    f64 => backend.add_f64(a_c.gpu_handle()?, b_c.gpu_handle()?),
+                    bf16 => backend.add_bf16_bf16(a_c.gpu_handle()?, b_c.gpu_handle()?),
+                )?;
+                (h, a_c.shape().to_vec())
             };
-            (h, out_shape)
-        } else if is_f64::<T>() {
-            (
-                backend.add_f64(a_c.gpu_handle()?, b_c.gpu_handle()?)?,
-                a_c.shape().to_vec(),
-            )
-        } else {
-            (
-                backend.add_f32(a_c.gpu_handle()?, b_c.gpu_handle()?)?,
-                a_c.shape().to_vec(),
-            )
-        };
         let storage = TensorStorage::gpu(handle);
 
         if needs_grad(a, b) {
@@ -497,37 +514,46 @@ fn sub_inner<T: Float>(a: &Tensor<T>, b: &Tensor<T>) -> FerrotorchResult<Tensor<
         let b_c = ensure_contig_for_gpu(b)?;
 
         let needs_broadcast = a_c.shape() != b_c.shape();
-        let (handle, out_shape) = if needs_broadcast {
-            let out_shape = broadcast_shapes(a_c.shape(), b_c.shape())?;
-            let h = if is_f64::<T>() {
-                backend.broadcast_sub_f64(
-                    a_c.gpu_handle()?,
-                    b_c.gpu_handle()?,
-                    a_c.shape(),
-                    b_c.shape(),
-                    &out_shape,
-                )?
+        let (handle, out_shape): (crate::gpu_dispatch::GpuBufferHandle, Vec<usize>) =
+            if needs_broadcast {
+                let out_shape = broadcast_shapes(a_c.shape(), b_c.shape())?;
+                // #23: see arithmetic::add_inner for the rationale.
+                let h: crate::gpu_dispatch::GpuBufferHandle = crate::dispatch_floating_dtype!(
+                    T,
+                    "broadcast_sub",
+                    f32 => backend.broadcast_sub_f32(
+                        a_c.gpu_handle()?,
+                        b_c.gpu_handle()?,
+                        a_c.shape(),
+                        b_c.shape(),
+                        &out_shape,
+                    ),
+                    f64 => backend.broadcast_sub_f64(
+                        a_c.gpu_handle()?,
+                        b_c.gpu_handle()?,
+                        a_c.shape(),
+                        b_c.shape(),
+                        &out_shape,
+                    ),
+                    bf16 => backend.broadcast_sub_bf16(
+                        a_c.gpu_handle()?,
+                        b_c.gpu_handle()?,
+                        a_c.shape(),
+                        b_c.shape(),
+                        &out_shape,
+                    ),
+                )?;
+                (h, out_shape)
             } else {
-                backend.broadcast_sub_f32(
-                    a_c.gpu_handle()?,
-                    b_c.gpu_handle()?,
-                    a_c.shape(),
-                    b_c.shape(),
-                    &out_shape,
-                )?
+                let h: crate::gpu_dispatch::GpuBufferHandle = crate::dispatch_floating_dtype!(
+                    T,
+                    "sub",
+                    f32 => backend.sub_f32(a_c.gpu_handle()?, b_c.gpu_handle()?),
+                    f64 => backend.sub_f64(a_c.gpu_handle()?, b_c.gpu_handle()?),
+                    bf16 => backend.sub_bf16_bf16(a_c.gpu_handle()?, b_c.gpu_handle()?),
+                )?;
+                (h, a_c.shape().to_vec())
             };
-            (h, out_shape)
-        } else if is_f64::<T>() {
-            (
-                backend.sub_f64(a_c.gpu_handle()?, b_c.gpu_handle()?)?,
-                a_c.shape().to_vec(),
-            )
-        } else {
-            (
-                backend.sub_f32(a_c.gpu_handle()?, b_c.gpu_handle()?)?,
-                a_c.shape().to_vec(),
-            )
-        };
         let storage = TensorStorage::gpu(handle);
 
         if needs_grad(a, b) {
@@ -655,37 +681,46 @@ fn mul_inner<T: Float>(a: &Tensor<T>, b: &Tensor<T>) -> FerrotorchResult<Tensor<
         let b_c = ensure_contig_for_gpu(b)?;
 
         let needs_broadcast = a_c.shape() != b_c.shape();
-        let (handle, out_shape) = if needs_broadcast {
-            let out_shape = broadcast_shapes(a_c.shape(), b_c.shape())?;
-            let h = if is_f64::<T>() {
-                backend.broadcast_mul_f64(
-                    a_c.gpu_handle()?,
-                    b_c.gpu_handle()?,
-                    a_c.shape(),
-                    b_c.shape(),
-                    &out_shape,
-                )?
+        let (handle, out_shape): (crate::gpu_dispatch::GpuBufferHandle, Vec<usize>) =
+            if needs_broadcast {
+                let out_shape = broadcast_shapes(a_c.shape(), b_c.shape())?;
+                // #23: see arithmetic::add_inner for the rationale.
+                let h: crate::gpu_dispatch::GpuBufferHandle = crate::dispatch_floating_dtype!(
+                    T,
+                    "broadcast_mul",
+                    f32 => backend.broadcast_mul_f32(
+                        a_c.gpu_handle()?,
+                        b_c.gpu_handle()?,
+                        a_c.shape(),
+                        b_c.shape(),
+                        &out_shape,
+                    ),
+                    f64 => backend.broadcast_mul_f64(
+                        a_c.gpu_handle()?,
+                        b_c.gpu_handle()?,
+                        a_c.shape(),
+                        b_c.shape(),
+                        &out_shape,
+                    ),
+                    bf16 => backend.broadcast_mul_bf16(
+                        a_c.gpu_handle()?,
+                        b_c.gpu_handle()?,
+                        a_c.shape(),
+                        b_c.shape(),
+                        &out_shape,
+                    ),
+                )?;
+                (h, out_shape)
             } else {
-                backend.broadcast_mul_f32(
-                    a_c.gpu_handle()?,
-                    b_c.gpu_handle()?,
-                    a_c.shape(),
-                    b_c.shape(),
-                    &out_shape,
-                )?
+                let h: crate::gpu_dispatch::GpuBufferHandle = crate::dispatch_floating_dtype!(
+                    T,
+                    "mul",
+                    f32 => backend.mul_f32(a_c.gpu_handle()?, b_c.gpu_handle()?),
+                    f64 => backend.mul_f64(a_c.gpu_handle()?, b_c.gpu_handle()?),
+                    bf16 => backend.mul_bf16_bf16(a_c.gpu_handle()?, b_c.gpu_handle()?),
+                )?;
+                (h, a_c.shape().to_vec())
             };
-            (h, out_shape)
-        } else if is_f64::<T>() {
-            (
-                backend.mul_f64(a_c.gpu_handle()?, b_c.gpu_handle()?)?,
-                a_c.shape().to_vec(),
-            )
-        } else {
-            (
-                backend.mul_f32(a_c.gpu_handle()?, b_c.gpu_handle()?)?,
-                a_c.shape().to_vec(),
-            )
-        };
         let storage = TensorStorage::gpu(handle);
 
         if needs_grad(a, b) {
@@ -789,7 +824,10 @@ pub fn div<T: Float>(a: &Tensor<T>, b: &Tensor<T>) -> FerrotorchResult<Tensor<T>
 }
 
 fn div_inner<T: Float>(a: &Tensor<T>, b: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
-    if a.is_cuda() && (is_f32::<T>() || is_f64::<T>()) {
+    // #23: drop the `(is_f32 || is_f64)` guard — bf16 now has a real GPU
+    // kernel via `div_bf16_bf16`. Other dtypes fall back to the CPU branch
+    // below via `dispatch_floating_dtype!` returning NotImplementedOnCuda.
+    if a.is_cuda() && (is_f32::<T>() || is_f64::<T>() || is_bf16::<T>()) {
         let backend =
             crate::gpu_dispatch::gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
 
@@ -798,34 +836,45 @@ fn div_inner<T: Float>(a: &Tensor<T>, b: &Tensor<T>) -> FerrotorchResult<Tensor<
         let b_c = ensure_contig_for_gpu(b)?;
 
         let needs_broadcast = a_c.shape() != b_c.shape();
-        let (handle, out_shape) = if needs_broadcast {
-            let out_shape = broadcast_shapes(a_c.shape(), b_c.shape())?;
-            let h = if is_f64::<T>() {
-                backend.broadcast_div_f64(
-                    a_c.gpu_handle()?,
-                    b_c.gpu_handle()?,
-                    a_c.shape(),
-                    b_c.shape(),
-                    &out_shape,
-                )?
+        let (handle, out_shape): (crate::gpu_dispatch::GpuBufferHandle, Vec<usize>) =
+            if needs_broadcast {
+                let out_shape = broadcast_shapes(a_c.shape(), b_c.shape())?;
+                let h: crate::gpu_dispatch::GpuBufferHandle = crate::dispatch_floating_dtype!(
+                    T,
+                    "broadcast_div",
+                    f32 => backend.broadcast_div_f32(
+                        a_c.gpu_handle()?,
+                        b_c.gpu_handle()?,
+                        a_c.shape(),
+                        b_c.shape(),
+                        &out_shape,
+                    ),
+                    f64 => backend.broadcast_div_f64(
+                        a_c.gpu_handle()?,
+                        b_c.gpu_handle()?,
+                        a_c.shape(),
+                        b_c.shape(),
+                        &out_shape,
+                    ),
+                    bf16 => backend.broadcast_div_bf16(
+                        a_c.gpu_handle()?,
+                        b_c.gpu_handle()?,
+                        a_c.shape(),
+                        b_c.shape(),
+                        &out_shape,
+                    ),
+                )?;
+                (h, out_shape)
             } else {
-                backend.broadcast_div_f32(
-                    a_c.gpu_handle()?,
-                    b_c.gpu_handle()?,
-                    a_c.shape(),
-                    b_c.shape(),
-                    &out_shape,
-                )?
+                let h: crate::gpu_dispatch::GpuBufferHandle = crate::dispatch_floating_dtype!(
+                    T,
+                    "div",
+                    f32 => backend.div_f32(a_c.gpu_handle()?, b_c.gpu_handle()?),
+                    f64 => backend.div_f64(a_c.gpu_handle()?, b_c.gpu_handle()?),
+                    bf16 => backend.div_bf16_bf16(a_c.gpu_handle()?, b_c.gpu_handle()?),
+                )?;
+                (h, a_c.shape().to_vec())
             };
-            (h, out_shape)
-        } else {
-            let h = if is_f32::<T>() {
-                backend.div_f32(a_c.gpu_handle()?, b_c.gpu_handle()?)?
-            } else {
-                backend.div_f64(a_c.gpu_handle()?, b_c.gpu_handle()?)?
-            };
-            (h, a_c.shape().to_vec())
-        };
         let storage = TensorStorage::gpu(handle);
 
         if needs_grad(a, b) {
@@ -904,11 +953,15 @@ fn neg_inner<T: Float>(a: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
             crate::gpu_dispatch::gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
         // #812 cluster: materialize non-contiguous CUDA views before kernel.
         let a_c = ensure_contig_for_gpu(a)?;
-        let handle = if is_f64::<T>() {
-            backend.neg_f64(a_c.gpu_handle()?)?
-        } else {
-            backend.neg_f32(a_c.gpu_handle()?)?
-        };
+        // #23: bf16 routes through `neg_bf16_bf16` (sign-bit XOR PTX kernel,
+        // no f32 round-trip needed since bf16 is IEEE-shaped).
+        let handle: crate::gpu_dispatch::GpuBufferHandle = crate::dispatch_floating_dtype!(
+            T,
+            "neg",
+            f32 => backend.neg_f32(a_c.gpu_handle()?),
+            f64 => backend.neg_f64(a_c.gpu_handle()?),
+            bf16 => backend.neg_bf16_bf16(a_c.gpu_handle()?),
+        )?;
         let storage = TensorStorage::gpu(handle);
         let shape = a_c.shape().to_vec();
 

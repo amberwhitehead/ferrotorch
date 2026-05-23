@@ -3148,6 +3148,1333 @@ pub fn gpu_gelu_bf16(
 }
 
 // ===========================================================================
+// Issue #23: bf16 dispatch-gap closure
+// ---------------------------------------------------------------------------
+// PTX kernels + launchers for the missing bf16 arithmetic / transcendental /
+// reduction / broadcast ops that the dispatcher refactor in
+// `ferrotorch-core/src/grad_fns/*` now routes through `dispatch_floating_dtype!`.
+//
+// All kernels follow the documented bf16 pattern in this module: storage is
+// `CudaSlice<u16>` (bf16 bit pattern), arithmetic happens in `.f32` registers
+// per thread (PyTorch parity — bf16 ops on Ampere/Hopper accumulate in f32),
+// and the final store rounds back to bf16 with round-to-nearest-even.
+// ===========================================================================
+
+// ─── Elementwise PTX for SUB / DIV / NEG ────────────────────────────────────
+
+const SUB_BF16_PTX: &str = "\
+.version 7.0
+.target sm_52
+.address_size 64
+
+.visible .entry sub_bf16_kernel(
+    .param .u64 a_ptr,
+    .param .u64 b_ptr,
+    .param .u64 out_ptr,
+    .param .u32 n
+) {
+    .reg .u32 %r_tid, %bid, %bdim, %n_reg;
+    .reg .u64 %a, %b, %out, %off;
+    .reg .b16 %a_b16, %b_b16, %zero16;
+    .reg .b32 %a_u32, %b_u32, %bits, %round, %lsb;
+    .reg .f32 %va, %vb, %vr;
+    .reg .pred %p;
+
+    ld.param.u64 %a, [a_ptr];
+    ld.param.u64 %b, [b_ptr];
+    ld.param.u64 %out, [out_ptr];
+    ld.param.u32 %n_reg, [n];
+
+    mov.u32 %bid, %ctaid.x;
+    mov.u32 %bdim, %ntid.x;
+    mov.u32 %r_tid, %tid.x;
+    mad.lo.u32 %r_tid, %bid, %bdim, %r_tid;
+
+    setp.ge.u32 %p, %r_tid, %n_reg;
+    @%p bra DONE;
+
+    cvt.u64.u32 %off, %r_tid;
+    shl.b64 %off, %off, 1;
+    add.u64 %a, %a, %off;
+    add.u64 %b, %b, %off;
+    add.u64 %out, %out, %off;
+
+    ld.global.b16 %a_b16, [%a];
+    ld.global.b16 %b_b16, [%b];
+    mov.b16 %zero16, 0;
+    mov.b32 %a_u32, {%zero16, %a_b16};
+    mov.b32 %b_u32, {%zero16, %b_b16};
+    mov.b32 %va, %a_u32;
+    mov.b32 %vb, %b_u32;
+
+    sub.f32 %vr, %va, %vb;
+
+    mov.b32 %bits, %vr;
+    shr.u32 %lsb, %bits, 16;
+    and.b32 %lsb, %lsb, 1;
+    add.u32 %round, %bits, 0x7FFF;
+    add.u32 %round, %round, %lsb;
+    shr.u32 %bits, %round, 16;
+    st.global.u16 [%out], %bits;
+
+DONE:
+    ret;
+}
+";
+
+const DIV_BF16_PTX: &str = "\
+.version 7.0
+.target sm_52
+.address_size 64
+
+.visible .entry div_bf16_kernel(
+    .param .u64 a_ptr,
+    .param .u64 b_ptr,
+    .param .u64 out_ptr,
+    .param .u32 n
+) {
+    .reg .u32 %r_tid, %bid, %bdim, %n_reg;
+    .reg .u64 %a, %b, %out, %off;
+    .reg .b16 %a_b16, %b_b16, %zero16;
+    .reg .b32 %a_u32, %b_u32, %bits, %round, %lsb;
+    .reg .f32 %va, %vb, %vr;
+    .reg .pred %p;
+
+    ld.param.u64 %a, [a_ptr];
+    ld.param.u64 %b, [b_ptr];
+    ld.param.u64 %out, [out_ptr];
+    ld.param.u32 %n_reg, [n];
+
+    mov.u32 %bid, %ctaid.x;
+    mov.u32 %bdim, %ntid.x;
+    mov.u32 %r_tid, %tid.x;
+    mad.lo.u32 %r_tid, %bid, %bdim, %r_tid;
+
+    setp.ge.u32 %p, %r_tid, %n_reg;
+    @%p bra DONE;
+
+    cvt.u64.u32 %off, %r_tid;
+    shl.b64 %off, %off, 1;
+    add.u64 %a, %a, %off;
+    add.u64 %b, %b, %off;
+    add.u64 %out, %out, %off;
+
+    ld.global.b16 %a_b16, [%a];
+    ld.global.b16 %b_b16, [%b];
+    mov.b16 %zero16, 0;
+    mov.b32 %a_u32, {%zero16, %a_b16};
+    mov.b32 %b_u32, {%zero16, %b_b16};
+    mov.b32 %va, %a_u32;
+    mov.b32 %vb, %b_u32;
+
+    div.approx.f32 %vr, %va, %vb;
+
+    mov.b32 %bits, %vr;
+    shr.u32 %lsb, %bits, 16;
+    and.b32 %lsb, %lsb, 1;
+    add.u32 %round, %bits, 0x7FFF;
+    add.u32 %round, %round, %lsb;
+    shr.u32 %bits, %round, 16;
+    st.global.u16 [%out], %bits;
+
+DONE:
+    ret;
+}
+";
+
+/// Elementwise `out = a - b` on bf16 (u16-stored) GPU buffers. (#23)
+pub fn gpu_sub_bf16(
+    a: &cudarc::driver::CudaSlice<u16>,
+    b: &cudarc::driver::CudaSlice<u16>,
+    device: &GpuDevice,
+) -> GpuResult<cudarc::driver::CudaSlice<u16>> {
+    launch_binary(a, b, device, SUB_BF16_PTX, "sub_bf16_kernel")
+}
+
+/// Elementwise `out = a / b` on bf16 (u16-stored) GPU buffers. (#23)
+pub fn gpu_div_bf16(
+    a: &cudarc::driver::CudaSlice<u16>,
+    b: &cudarc::driver::CudaSlice<u16>,
+    device: &GpuDevice,
+) -> GpuResult<cudarc::driver::CudaSlice<u16>> {
+    launch_binary(a, b, device, DIV_BF16_PTX, "div_bf16_kernel")
+}
+
+/// Elementwise `out = -a` on bf16 (u16-stored) GPU buffers. (#23)
+///
+/// Implemented as `scale_bf16(a, -1.0)` to avoid a separate PTX kernel
+/// for a one-instruction op. The scale kernel already does `bf16 → f32
+/// → mul.f32 → bf16` round-trip on-device, and multiplying by `-1.0` is
+/// exact in f32 (no rounding error from the scale itself), so the
+/// semantics match a hand-rolled `neg` kernel.
+pub fn gpu_neg_bf16(
+    a: &cudarc::driver::CudaSlice<u16>,
+    device: &GpuDevice,
+) -> GpuResult<cudarc::driver::CudaSlice<u16>> {
+    gpu_scale_bf16(a, -1.0_f32, device)
+}
+
+// ─── Unary elementwise transcendentals (#23: exp, log, tanh, sigmoid) ───────
+
+// Helper that launches a unary u16-in / u16-out PTX with a `(a_ptr, out_ptr, n)`
+// signature. exp/log/tanh/sigmoid all share this shape.
+fn launch_unary(
+    a: &cudarc::driver::CudaSlice<u16>,
+    device: &GpuDevice,
+    ptx: &'static str,
+    kernel_name: &'static str,
+) -> GpuResult<cudarc::driver::CudaSlice<u16>> {
+    let n = a.len();
+    if n == 0 {
+        return Ok(device.stream().alloc_zeros::<u16>(0)?);
+    }
+    let ctx = device.context();
+    let stream = device.stream();
+    let f = get_or_compile(ctx, ptx, kernel_name, device.ordinal() as u32).map_err(|e| {
+        GpuError::PtxCompileFailed {
+            kernel: kernel_name,
+            source: e,
+        }
+    })?;
+    let mut out = stream.alloc_zeros::<u16>(n)?;
+    let cfg = launch_1d(n);
+    let n_u32 = n as u32;
+    // SAFETY:
+    // - `f` resolves to a PTX entry with the unary `(a_ptr, out_ptr, n)`
+    //   signature shared by `exp_bf16_kernel` / `log_bf16_kernel` /
+    //   `tanh_bf16_kernel` / `sigmoid_bf16_kernel`. (See the PTX literals
+    //   below — all three params, in this exact order.)
+    // - `a` is the caller's bf16 input buffer of length `n`; bound-check in
+    //   PTX ensures only `[0, n)` is read.
+    // - `out` is freshly alloc'd above with `n` elements and exclusively
+    //   bound here.
+    // - `n_u32` is non-truncating because `launch_1d(n)` already cast
+    //   `n as u32` to compute the grid.
+    unsafe {
+        stream
+            .launch_builder(&f)
+            .arg(a)
+            .arg(&mut out)
+            .arg(&n_u32)
+            .launch(cfg)?;
+    }
+    Ok(out)
+}
+
+// exp via ex2.approx.f32 on x * log2(e); inputs/outputs round-trip through
+// bf16. Max relative error of ex2.approx.f32 is ~2^-23 on the f32 input,
+// which is far inside one bf16 ULP (7-bit mantissa) for the typical input
+// range of softmax / layer norm post-shift.
+const EXP_BF16_PTX: &str = "\
+.version 7.0
+.target sm_52
+.address_size 64
+
+.visible .entry exp_bf16_kernel(
+    .param .u64 a_ptr,
+    .param .u64 out_ptr,
+    .param .u32 n
+) {
+    .reg .u32 %r_tid, %bid, %bdim, %n_reg;
+    .reg .u64 %a, %out, %off;
+    .reg .b16 %a_b16, %zero16;
+    .reg .b32 %a_u32, %bits, %round, %lsb;
+    .reg .f32 %va, %x, %log2e, %vr;
+    .reg .pred %p;
+
+    ld.param.u64 %a, [a_ptr];
+    ld.param.u64 %out, [out_ptr];
+    ld.param.u32 %n_reg, [n];
+
+    mov.u32 %bid, %ctaid.x;
+    mov.u32 %bdim, %ntid.x;
+    mov.u32 %r_tid, %tid.x;
+    mad.lo.u32 %r_tid, %bid, %bdim, %r_tid;
+
+    setp.ge.u32 %p, %r_tid, %n_reg;
+    @%p bra DONE;
+
+    cvt.u64.u32 %off, %r_tid;
+    shl.b64 %off, %off, 1;
+    add.u64 %a, %a, %off;
+    add.u64 %out, %out, %off;
+
+    ld.global.b16 %a_b16, [%a];
+    mov.b16 %zero16, 0;
+    mov.b32 %a_u32, {%zero16, %a_b16};
+    mov.b32 %va, %a_u32;
+
+    // exp(x) = 2^(x * log2(e)); log2(e) = 0x3FB8AA3B as f32 bits.
+    mov.f32 %log2e, 0f3FB8AA3B;
+    mul.f32 %x, %va, %log2e;
+    ex2.approx.f32 %vr, %x;
+
+    mov.b32 %bits, %vr;
+    shr.u32 %lsb, %bits, 16;
+    and.b32 %lsb, %lsb, 1;
+    add.u32 %round, %bits, 0x7FFF;
+    add.u32 %round, %round, %lsb;
+    shr.u32 %bits, %round, 16;
+    st.global.u16 [%out], %bits;
+
+DONE:
+    ret;
+}
+";
+
+// log: ln(x) = lg2(x) * ln(2). Uses `lg2.approx.f32` (PTX log2 intrinsic) +
+// `mul.f32` with the ln(2) immediate inline (matching the existing
+// `log_f32_kernel` shape from `kernels.rs:11310-11314`).
+const LOG_BF16_PTX: &str = "\
+.version 7.0
+.target sm_52
+.address_size 64
+
+.visible .entry log_bf16_kernel(
+    .param .u64 a_ptr,
+    .param .u64 out_ptr,
+    .param .u32 n
+) {
+    .reg .u32 %r_tid, %bid, %bdim, %n_reg;
+    .reg .u64 %a, %out, %off;
+    .reg .b16 %a_b16, %zero16;
+    .reg .b32 %a_u32, %bits, %round, %lsb;
+    .reg .f32 %va, %vr;
+    .reg .pred %p;
+
+    ld.param.u64 %a, [a_ptr];
+    ld.param.u64 %out, [out_ptr];
+    ld.param.u32 %n_reg, [n];
+
+    mov.u32 %bid, %ctaid.x;
+    mov.u32 %bdim, %ntid.x;
+    mov.u32 %r_tid, %tid.x;
+    mad.lo.u32 %r_tid, %bid, %bdim, %r_tid;
+
+    setp.ge.u32 %p, %r_tid, %n_reg;
+    @%p bra DONE;
+
+    cvt.u64.u32 %off, %r_tid;
+    shl.b64 %off, %off, 1;
+    add.u64 %a, %a, %off;
+    add.u64 %out, %out, %off;
+
+    ld.global.b16 %a_b16, [%a];
+    mov.b16 %zero16, 0;
+    mov.b32 %a_u32, {%zero16, %a_b16};
+    mov.b32 %va, %a_u32;
+
+    // ln(x) = lg2(x) * ln(2). Use the immediate-form mul (matches the
+    // existing `log_f32_kernel` shape).
+    lg2.approx.f32 %vr, %va;
+    mul.f32 %vr, %vr, 0f3F317218;
+
+    mov.b32 %bits, %vr;
+    shr.u32 %lsb, %bits, 16;
+    and.b32 %lsb, %lsb, 1;
+    add.u32 %round, %bits, 0x7FFF;
+    add.u32 %round, %round, %lsb;
+    shr.u32 %bits, %round, 16;
+    st.global.u16 [%out], %bits;
+
+DONE:
+    ret;
+}
+";
+
+// tanh(x) = (e^(2x) - 1) / (e^(2x) + 1). Uses ex2.approx.f32 internally.
+// For |x| > ~9 the formula saturates to ±1 in f32 anyway, so no special
+// large-x branch is needed.
+const TANH_BF16_PTX: &str = "\
+.version 7.0
+.target sm_52
+.address_size 64
+
+.visible .entry tanh_bf16_kernel(
+    .param .u64 a_ptr,
+    .param .u64 out_ptr,
+    .param .u32 n
+) {
+    .reg .u32 %r_tid, %bid, %bdim, %n_reg;
+    .reg .u64 %a, %out, %off;
+    .reg .b16 %a_b16, %zero16;
+    .reg .b32 %a_u32, %bits, %round, %lsb;
+    .reg .f32 %va, %two_x, %log2e, %arg, %e, %num, %den, %vr, %one;
+    .reg .pred %p;
+
+    ld.param.u64 %a, [a_ptr];
+    ld.param.u64 %out, [out_ptr];
+    ld.param.u32 %n_reg, [n];
+
+    mov.u32 %bid, %ctaid.x;
+    mov.u32 %bdim, %ntid.x;
+    mov.u32 %r_tid, %tid.x;
+    mad.lo.u32 %r_tid, %bid, %bdim, %r_tid;
+
+    setp.ge.u32 %p, %r_tid, %n_reg;
+    @%p bra DONE;
+
+    cvt.u64.u32 %off, %r_tid;
+    shl.b64 %off, %off, 1;
+    add.u64 %a, %a, %off;
+    add.u64 %out, %out, %off;
+
+    ld.global.b16 %a_b16, [%a];
+    mov.b16 %zero16, 0;
+    mov.b32 %a_u32, {%zero16, %a_b16};
+    mov.b32 %va, %a_u32;
+
+    // e^(2x) via ex2.approx.f32((2x) * log2(e)).
+    add.f32 %two_x, %va, %va;
+    mov.f32 %log2e, 0f3FB8AA3B;
+    mul.f32 %arg, %two_x, %log2e;
+    ex2.approx.f32 %e, %arg;
+
+    mov.f32 %one, 0f3F800000;
+    sub.f32 %num, %e, %one;
+    add.f32 %den, %e, %one;
+    div.approx.f32 %vr, %num, %den;
+
+    mov.b32 %bits, %vr;
+    shr.u32 %lsb, %bits, 16;
+    and.b32 %lsb, %lsb, 1;
+    add.u32 %round, %bits, 0x7FFF;
+    add.u32 %round, %round, %lsb;
+    shr.u32 %bits, %round, 16;
+    st.global.u16 [%out], %bits;
+
+DONE:
+    ret;
+}
+";
+
+// sigmoid(x) = 1 / (1 + e^(-x)). Same ex2.approx.f32 path as silu's
+// internal sigmoid.
+const SIGMOID_BF16_PTX: &str = "\
+.version 7.0
+.target sm_52
+.address_size 64
+
+.visible .entry sigmoid_bf16_kernel(
+    .param .u64 a_ptr,
+    .param .u64 out_ptr,
+    .param .u32 n
+) {
+    .reg .u32 %r_tid, %bid, %bdim, %n_reg;
+    .reg .u64 %a, %out, %off;
+    .reg .b16 %a_b16, %zero16;
+    .reg .b32 %a_u32, %bits, %round, %lsb;
+    .reg .f32 %va, %neg_a, %log2e, %arg, %e, %one, %denom, %vr;
+    .reg .pred %p;
+
+    ld.param.u64 %a, [a_ptr];
+    ld.param.u64 %out, [out_ptr];
+    ld.param.u32 %n_reg, [n];
+
+    mov.u32 %bid, %ctaid.x;
+    mov.u32 %bdim, %ntid.x;
+    mov.u32 %r_tid, %tid.x;
+    mad.lo.u32 %r_tid, %bid, %bdim, %r_tid;
+
+    setp.ge.u32 %p, %r_tid, %n_reg;
+    @%p bra DONE;
+
+    cvt.u64.u32 %off, %r_tid;
+    shl.b64 %off, %off, 1;
+    add.u64 %a, %a, %off;
+    add.u64 %out, %out, %off;
+
+    ld.global.b16 %a_b16, [%a];
+    mov.b16 %zero16, 0;
+    mov.b32 %a_u32, {%zero16, %a_b16};
+    mov.b32 %va, %a_u32;
+
+    neg.f32 %neg_a, %va;
+    mov.f32 %log2e, 0f3FB8AA3B;
+    mul.f32 %arg, %neg_a, %log2e;
+    ex2.approx.f32 %e, %arg;
+    mov.f32 %one, 0f3F800000;
+    add.f32 %denom, %one, %e;
+    div.approx.f32 %vr, %one, %denom;
+
+    mov.b32 %bits, %vr;
+    shr.u32 %lsb, %bits, 16;
+    and.b32 %lsb, %lsb, 1;
+    add.u32 %round, %bits, 0x7FFF;
+    add.u32 %round, %round, %lsb;
+    shr.u32 %bits, %round, 16;
+    st.global.u16 [%out], %bits;
+
+DONE:
+    ret;
+}
+";
+
+/// Elementwise `out = exp(a)` on bf16 (u16-stored) GPU buffers. (#23)
+pub fn gpu_exp_bf16(
+    a: &cudarc::driver::CudaSlice<u16>,
+    device: &GpuDevice,
+) -> GpuResult<cudarc::driver::CudaSlice<u16>> {
+    launch_unary(a, device, EXP_BF16_PTX, "exp_bf16_kernel")
+}
+
+/// Elementwise `out = ln(a)` on bf16 (u16-stored) GPU buffers. (#23)
+pub fn gpu_log_bf16(
+    a: &cudarc::driver::CudaSlice<u16>,
+    device: &GpuDevice,
+) -> GpuResult<cudarc::driver::CudaSlice<u16>> {
+    launch_unary(a, device, LOG_BF16_PTX, "log_bf16_kernel")
+}
+
+/// Elementwise `out = tanh(a)` on bf16 (u16-stored) GPU buffers. (#23)
+pub fn gpu_tanh_bf16(
+    a: &cudarc::driver::CudaSlice<u16>,
+    device: &GpuDevice,
+) -> GpuResult<cudarc::driver::CudaSlice<u16>> {
+    launch_unary(a, device, TANH_BF16_PTX, "tanh_bf16_kernel")
+}
+
+/// Elementwise `out = sigmoid(a) = 1 / (1 + exp(-a))` on bf16 GPU buffers. (#23)
+pub fn gpu_sigmoid_bf16(
+    a: &cudarc::driver::CudaSlice<u16>,
+    device: &GpuDevice,
+) -> GpuResult<cudarc::driver::CudaSlice<u16>> {
+    launch_unary(a, device, SIGMOID_BF16_PTX, "sigmoid_bf16_kernel")
+}
+
+// ─── Reductions (sum, mean) on bf16 with f32 accumulator (#23) ──────────────
+//
+// PyTorch parity: bf16 `sum` / `mean` MUST accumulate in f32 to avoid
+// catastrophic precision loss when summing more than ~256 7-bit-mantissa
+// values. Each kernel computes the reduction in f32 and stores the final
+// scalar (or axis result) rounded back to bf16 with RNE.
+
+/// Sum-reduce a bf16 buffer to a scalar (1-element) bf16 buffer.
+/// Accumulator is f32 (PyTorch parity for bf16 reductions). (#23)
+///
+/// Implemented as a single-element axis reduction via
+/// [`gpu_sum_axis_bf16_bf16`] with `outer=1, axis_size=n, inner=1`. The
+/// axis-reduce kernel already does an f32 accumulator → bf16 round-back
+/// per output element, which is what `sum` wants for the scalar case.
+pub fn gpu_sum_bf16(
+    a: &cudarc::driver::CudaSlice<u16>,
+    device: &GpuDevice,
+) -> GpuResult<cudarc::driver::CudaSlice<u16>> {
+    let n = a.len();
+    if n == 0 {
+        // PyTorch: sum of empty tensor is 0.
+        return Ok(device.stream().alloc_zeros::<u16>(1)?);
+    }
+    gpu_sum_axis_bf16_bf16(a, 1, n, 1, device)
+}
+
+/// Mean of a bf16 buffer to a scalar (1-element) bf16 buffer. (#23)
+/// Computes the sum via [`gpu_sum_bf16`] then divides on-device by `n`.
+pub fn gpu_mean_bf16(
+    a: &cudarc::driver::CudaSlice<u16>,
+    device: &GpuDevice,
+) -> GpuResult<cudarc::driver::CudaSlice<u16>> {
+    let n = a.len();
+    if n == 0 {
+        // PyTorch raises on mean of empty; mirror that here via NaN scalar
+        // (bf16 quiet NaN = 0x7FC0).
+        let stream = device.stream();
+        let mut out = stream.alloc_zeros::<u16>(1)?;
+        let nan_bits = vec![0x7FC0_u16];
+        stream.memcpy_htod(&nan_bits, &mut out)?;
+        return Ok(out);
+    }
+    // Sum first.
+    let sum = gpu_sum_bf16(a, device)?;
+    // Then in-place scale by 1/n. `gpu_scale_bf16` returns a new buffer.
+    let inv_n = 1.0f32 / (n as f32);
+    crate::bf16::gpu_scale_bf16(&sum, inv_n, device)
+}
+
+// Block-stride axis reduction. Given a bf16 buffer interpreted as
+// [outer, axis, inner] (numpy-style), sum reduce along `axis` and produce
+// a bf16 buffer of shape [outer, inner]. f32 accumulator inside.
+// Each output element (oi, ii) accumulates `axis_size` values; we launch
+// one thread per output element and serial-sum (axis_size is usually
+// small — e.g., 768 for hidden_dim).
+const SUM_AXIS_BF16_BF16_PTX: &str = "\
+.version 7.0
+.target sm_52
+.address_size 64
+
+.visible .entry sum_axis_bf16_bf16_kernel(
+    .param .u64 a_ptr,
+    .param .u64 out_ptr,
+    .param .u32 outer,
+    .param .u32 axis_size,
+    .param .u32 inner,
+    .param .u32 do_mean
+) {
+    .reg .u32 %r_tid, %bid, %bdim, %outer_r, %axis_r, %inner_r;
+    .reg .u32 %total_out, %oi, %ii, %k, %a_idx, %do_mean_r;
+    .reg .u64 %a, %out, %off;
+    .reg .b16 %a_b16, %zero16;
+    .reg .b32 %a_u32, %bits, %round, %lsb;
+    .reg .f32 %acc, %va, %scale;
+    .reg .pred %p;
+
+    ld.param.u64 %a, [a_ptr];
+    ld.param.u64 %out, [out_ptr];
+    ld.param.u32 %outer_r, [outer];
+    ld.param.u32 %axis_r, [axis_size];
+    ld.param.u32 %inner_r, [inner];
+    ld.param.u32 %do_mean_r, [do_mean];
+
+    mov.u32 %bid, %ctaid.x;
+    mov.u32 %bdim, %ntid.x;
+    mov.u32 %r_tid, %tid.x;
+    mad.lo.u32 %r_tid, %bid, %bdim, %r_tid;
+
+    mul.lo.u32 %total_out, %outer_r, %inner_r;
+    setp.ge.u32 %p, %r_tid, %total_out;
+    @%p bra DONE;
+
+    div.u32 %oi, %r_tid, %inner_r;
+    rem.u32 %ii, %r_tid, %inner_r;
+
+    mov.f32 %acc, 0f00000000;
+    mov.u32 %k, 0;
+LOOP:
+    setp.ge.u32 %p, %k, %axis_r;
+    @%p bra LOOP_END;
+
+    // a_idx = oi * axis_size * inner + k * inner + ii.
+    mul.lo.u32 %a_idx, %oi, %axis_r;
+    add.u32 %a_idx, %a_idx, %k;
+    mul.lo.u32 %a_idx, %a_idx, %inner_r;
+    add.u32 %a_idx, %a_idx, %ii;
+
+    cvt.u64.u32 %off, %a_idx;
+    shl.b64 %off, %off, 1;
+    add.u64 %off, %a, %off;
+    ld.global.b16 %a_b16, [%off];
+    mov.b16 %zero16, 0;
+    mov.b32 %a_u32, {%zero16, %a_b16};
+    mov.b32 %va, %a_u32;
+    add.f32 %acc, %acc, %va;
+
+    add.u32 %k, %k, 1;
+    bra LOOP;
+LOOP_END:
+
+    // If do_mean, divide by axis_size.
+    setp.eq.u32 %p, %do_mean_r, 0;
+    @%p bra STORE;
+    cvt.rn.f32.u32 %scale, %axis_r;
+    div.approx.f32 %acc, %acc, %scale;
+
+STORE:
+    mov.b32 %bits, %acc;
+    shr.u32 %lsb, %bits, 16;
+    and.b32 %lsb, %lsb, 1;
+    add.u32 %round, %bits, 0x7FFF;
+    add.u32 %round, %round, %lsb;
+    shr.u32 %bits, %round, 16;
+
+    cvt.u64.u32 %off, %r_tid;
+    shl.b64 %off, %off, 1;
+    add.u64 %off, %out, %off;
+    st.global.u16 [%off], %bits;
+
+DONE:
+    ret;
+}
+";
+
+/// Axis-reduce sum: bf16 [outer, axis, inner] → bf16 [outer, inner]. (#23)
+/// f32 accumulator (PyTorch parity).
+pub fn gpu_sum_axis_bf16_bf16(
+    a: &cudarc::driver::CudaSlice<u16>,
+    outer: usize,
+    axis_size: usize,
+    inner: usize,
+    device: &GpuDevice,
+) -> GpuResult<cudarc::driver::CudaSlice<u16>> {
+    let total = outer.checked_mul(inner).ok_or(GpuError::ShapeMismatch {
+        op: "sum_axis_bf16_bf16",
+        expected: vec![outer, inner],
+        got: vec![usize::MAX],
+    })?;
+    let stream = device.stream();
+    if total == 0 {
+        return Ok(stream.alloc_zeros::<u16>(0)?);
+    }
+    let ctx = device.context();
+    let f = get_or_compile(
+        ctx,
+        SUM_AXIS_BF16_BF16_PTX,
+        "sum_axis_bf16_bf16_kernel",
+        device.ordinal() as u32,
+    )
+    .map_err(|e| GpuError::PtxCompileFailed {
+        kernel: "sum_axis_bf16_bf16_kernel",
+        source: e,
+    })?;
+    let mut out = stream.alloc_zeros::<u16>(total)?;
+    let cfg = launch_1d(total);
+    let outer_u32 = outer as u32;
+    let axis_u32 = axis_size as u32;
+    let inner_u32 = inner as u32;
+    let do_mean: u32 = 0;
+    // SAFETY:
+    // - `f` is the PTX `sum_axis_bf16_bf16_kernel` whose entry-point
+    //   signature is (a_ptr, out_ptr, outer, axis_size, inner, do_mean).
+    //   The six args below match in order.
+    // - `a` is the caller's bf16 input. The kernel reads `a[oi * axis *
+    //   inner + k * inner + ii]` for `(oi, ii)` derived from the global
+    //   thread id `[0, outer*inner)` and `k ∈ [0, axis_size)`; the
+    //   bound check at the top ensures threads beyond `total` short-circuit.
+    // - `out` is freshly alloc'd `total` u16 elements.
+    // - `outer_u32 * inner_u32` was checked for overflow above; `axis_u32`
+    //   was passed in by the caller as `usize` and assumed bounded.
+    // - `do_mean = 0` selects the sum path; the kernel's mean branch is
+    //   skipped via the `setp.eq.u32 %p, %do_mean_r, 0` guard.
+    unsafe {
+        stream
+            .launch_builder(&f)
+            .arg(a)
+            .arg(&mut out)
+            .arg(&outer_u32)
+            .arg(&axis_u32)
+            .arg(&inner_u32)
+            .arg(&do_mean)
+            .launch(cfg)?;
+    }
+    Ok(out)
+}
+
+/// Axis-reduce mean: bf16 [outer, axis, inner] → bf16 [outer, inner]. (#23)
+/// f32 accumulator, divides by axis_size in f32 before rounding back.
+pub fn gpu_mean_axis_bf16_bf16(
+    a: &cudarc::driver::CudaSlice<u16>,
+    outer: usize,
+    axis_size: usize,
+    inner: usize,
+    device: &GpuDevice,
+) -> GpuResult<cudarc::driver::CudaSlice<u16>> {
+    let total = outer.checked_mul(inner).ok_or(GpuError::ShapeMismatch {
+        op: "mean_axis_bf16_bf16",
+        expected: vec![outer, inner],
+        got: vec![usize::MAX],
+    })?;
+    let stream = device.stream();
+    if total == 0 {
+        return Ok(stream.alloc_zeros::<u16>(0)?);
+    }
+    if axis_size == 0 {
+        // PyTorch: mean over zero-length axis = NaN.
+        let mut out = stream.alloc_zeros::<u16>(total)?;
+        let nan_bits = vec![0x7FC0_u16; total];
+        stream.memcpy_htod(&nan_bits, &mut out)?;
+        return Ok(out);
+    }
+    let ctx = device.context();
+    let f = get_or_compile(
+        ctx,
+        SUM_AXIS_BF16_BF16_PTX,
+        "sum_axis_bf16_bf16_kernel",
+        device.ordinal() as u32,
+    )
+    .map_err(|e| GpuError::PtxCompileFailed {
+        kernel: "sum_axis_bf16_bf16_kernel",
+        source: e,
+    })?;
+    let mut out = stream.alloc_zeros::<u16>(total)?;
+    let cfg = launch_1d(total);
+    let outer_u32 = outer as u32;
+    let axis_u32 = axis_size as u32;
+    let inner_u32 = inner as u32;
+    let do_mean: u32 = 1;
+    // SAFETY: identical to gpu_sum_axis_bf16_bf16 above except `do_mean = 1`
+    // routes the kernel through its `div.approx.f32 %acc, %acc, %scale`
+    // arm before the round-and-store epilogue.
+    unsafe {
+        stream
+            .launch_builder(&f)
+            .arg(a)
+            .arg(&mut out)
+            .arg(&outer_u32)
+            .arg(&axis_u32)
+            .arg(&inner_u32)
+            .arg(&do_mean)
+            .launch(cfg)?;
+    }
+    Ok(out)
+}
+
+// ─── Broadcast binary ops (#23: add/sub/mul/div on N-D broadcast shapes) ────
+//
+// PyTorch parity: for each output element, decompose the flat output index
+// into N-D coordinates, dot with broadcast strides for each operand, load
+// the bf16 elements, compute in f32, and round back to bf16. Mirrors the
+// f32 `BROADCAST_*_PTX` kernels in `kernels.rs` for layout, but with bf16
+// load/store + f32 compute.
+
+const BROADCAST_ADD_BF16_PTX: &str = "\
+.version 7.0
+.target sm_52
+.address_size 64
+
+.visible .entry broadcast_add_bf16_kernel(
+    .param .u64 a_ptr,
+    .param .u64 b_ptr,
+    .param .u64 out_ptr,
+    .param .u64 a_strides_ptr,
+    .param .u64 b_strides_ptr,
+    .param .u64 out_shape_ptr,
+    .param .u32 n,
+    .param .u32 ndim
+) {
+    .reg .u32 %r_tid, %bid, %bdim, %n_reg, %ndim_reg;
+    .reg .u32 %remaining, %a_idx, %b_idx, %d;
+    .reg .u32 %shape_d, %a_str_d, %b_str_d, %coord;
+    .reg .u64 %a, %b, %out, %a_str, %b_str, %oshape;
+    .reg .u64 %off_a, %off_b, %off_out, %d64, %tmp;
+    .reg .b16 %a_b16, %b_b16, %zero16;
+    .reg .b32 %a_u32, %b_u32, %bits, %round, %lsb;
+    .reg .f32 %va, %vb, %vr;
+    .reg .pred %p, %loop_p;
+
+    ld.param.u64 %a, [a_ptr];
+    ld.param.u64 %b, [b_ptr];
+    ld.param.u64 %out, [out_ptr];
+    ld.param.u64 %a_str, [a_strides_ptr];
+    ld.param.u64 %b_str, [b_strides_ptr];
+    ld.param.u64 %oshape, [out_shape_ptr];
+    ld.param.u32 %n_reg, [n];
+    ld.param.u32 %ndim_reg, [ndim];
+
+    mov.u32 %bid, %ctaid.x;
+    mov.u32 %bdim, %ntid.x;
+    mov.u32 %r_tid, %tid.x;
+    mad.lo.u32 %r_tid, %bid, %bdim, %r_tid;
+
+    setp.ge.u32 %p, %r_tid, %n_reg;
+    @%p bra DONE;
+
+    mov.u32 %remaining, %r_tid;
+    mov.u32 %a_idx, 0;
+    mov.u32 %b_idx, 0;
+    mov.u32 %d, %ndim_reg;
+
+LOOP:
+    setp.eq.u32 %loop_p, %d, 0;
+    @%loop_p bra END_LOOP;
+
+    sub.u32 %d, %d, 1;
+    cvt.u64.u32 %d64, %d;
+    shl.b64 %d64, %d64, 2;
+    add.u64 %tmp, %oshape, %d64;
+    ld.global.u32 %shape_d, [%tmp];
+    add.u64 %tmp, %a_str, %d64;
+    ld.global.u32 %a_str_d, [%tmp];
+    add.u64 %tmp, %b_str, %d64;
+    ld.global.u32 %b_str_d, [%tmp];
+    rem.u32 %coord, %remaining, %shape_d;
+    div.u32 %remaining, %remaining, %shape_d;
+    mad.lo.u32 %a_idx, %coord, %a_str_d, %a_idx;
+    mad.lo.u32 %b_idx, %coord, %b_str_d, %b_idx;
+    bra LOOP;
+END_LOOP:
+
+    // Load bf16 from a, b (2-byte stride).
+    cvt.u64.u32 %off_a, %a_idx;
+    shl.b64 %off_a, %off_a, 1;
+    add.u64 %off_a, %a, %off_a;
+    ld.global.b16 %a_b16, [%off_a];
+
+    cvt.u64.u32 %off_b, %b_idx;
+    shl.b64 %off_b, %off_b, 1;
+    add.u64 %off_b, %b, %off_b;
+    ld.global.b16 %b_b16, [%off_b];
+
+    mov.b16 %zero16, 0;
+    mov.b32 %a_u32, {%zero16, %a_b16};
+    mov.b32 %b_u32, {%zero16, %b_b16};
+    mov.b32 %va, %a_u32;
+    mov.b32 %vb, %b_u32;
+    add.f32 %vr, %va, %vb;
+
+    // Round to bf16 and store.
+    mov.b32 %bits, %vr;
+    shr.u32 %lsb, %bits, 16;
+    and.b32 %lsb, %lsb, 1;
+    add.u32 %round, %bits, 0x7FFF;
+    add.u32 %round, %round, %lsb;
+    shr.u32 %bits, %round, 16;
+
+    cvt.u64.u32 %off_out, %r_tid;
+    shl.b64 %off_out, %off_out, 1;
+    add.u64 %off_out, %out, %off_out;
+    st.global.u16 [%off_out], %bits;
+
+DONE:
+    ret;
+}
+";
+
+const BROADCAST_SUB_BF16_PTX: &str = "\
+.version 7.0
+.target sm_52
+.address_size 64
+
+.visible .entry broadcast_sub_bf16_kernel(
+    .param .u64 a_ptr,
+    .param .u64 b_ptr,
+    .param .u64 out_ptr,
+    .param .u64 a_strides_ptr,
+    .param .u64 b_strides_ptr,
+    .param .u64 out_shape_ptr,
+    .param .u32 n,
+    .param .u32 ndim
+) {
+    .reg .u32 %r_tid, %bid, %bdim, %n_reg, %ndim_reg;
+    .reg .u32 %remaining, %a_idx, %b_idx, %d;
+    .reg .u32 %shape_d, %a_str_d, %b_str_d, %coord;
+    .reg .u64 %a, %b, %out, %a_str, %b_str, %oshape;
+    .reg .u64 %off_a, %off_b, %off_out, %d64, %tmp;
+    .reg .b16 %a_b16, %b_b16, %zero16;
+    .reg .b32 %a_u32, %b_u32, %bits, %round, %lsb;
+    .reg .f32 %va, %vb, %vr;
+    .reg .pred %p, %loop_p;
+
+    ld.param.u64 %a, [a_ptr];
+    ld.param.u64 %b, [b_ptr];
+    ld.param.u64 %out, [out_ptr];
+    ld.param.u64 %a_str, [a_strides_ptr];
+    ld.param.u64 %b_str, [b_strides_ptr];
+    ld.param.u64 %oshape, [out_shape_ptr];
+    ld.param.u32 %n_reg, [n];
+    ld.param.u32 %ndim_reg, [ndim];
+
+    mov.u32 %bid, %ctaid.x;
+    mov.u32 %bdim, %ntid.x;
+    mov.u32 %r_tid, %tid.x;
+    mad.lo.u32 %r_tid, %bid, %bdim, %r_tid;
+
+    setp.ge.u32 %p, %r_tid, %n_reg;
+    @%p bra DONE;
+
+    mov.u32 %remaining, %r_tid;
+    mov.u32 %a_idx, 0;
+    mov.u32 %b_idx, 0;
+    mov.u32 %d, %ndim_reg;
+LOOP:
+    setp.eq.u32 %loop_p, %d, 0;
+    @%loop_p bra END_LOOP;
+    sub.u32 %d, %d, 1;
+    cvt.u64.u32 %d64, %d;
+    shl.b64 %d64, %d64, 2;
+    add.u64 %tmp, %oshape, %d64;
+    ld.global.u32 %shape_d, [%tmp];
+    add.u64 %tmp, %a_str, %d64;
+    ld.global.u32 %a_str_d, [%tmp];
+    add.u64 %tmp, %b_str, %d64;
+    ld.global.u32 %b_str_d, [%tmp];
+    rem.u32 %coord, %remaining, %shape_d;
+    div.u32 %remaining, %remaining, %shape_d;
+    mad.lo.u32 %a_idx, %coord, %a_str_d, %a_idx;
+    mad.lo.u32 %b_idx, %coord, %b_str_d, %b_idx;
+    bra LOOP;
+END_LOOP:
+    cvt.u64.u32 %off_a, %a_idx;
+    shl.b64 %off_a, %off_a, 1;
+    add.u64 %off_a, %a, %off_a;
+    ld.global.b16 %a_b16, [%off_a];
+    cvt.u64.u32 %off_b, %b_idx;
+    shl.b64 %off_b, %off_b, 1;
+    add.u64 %off_b, %b, %off_b;
+    ld.global.b16 %b_b16, [%off_b];
+    mov.b16 %zero16, 0;
+    mov.b32 %a_u32, {%zero16, %a_b16};
+    mov.b32 %b_u32, {%zero16, %b_b16};
+    mov.b32 %va, %a_u32;
+    mov.b32 %vb, %b_u32;
+    sub.f32 %vr, %va, %vb;
+    mov.b32 %bits, %vr;
+    shr.u32 %lsb, %bits, 16;
+    and.b32 %lsb, %lsb, 1;
+    add.u32 %round, %bits, 0x7FFF;
+    add.u32 %round, %round, %lsb;
+    shr.u32 %bits, %round, 16;
+    cvt.u64.u32 %off_out, %r_tid;
+    shl.b64 %off_out, %off_out, 1;
+    add.u64 %off_out, %out, %off_out;
+    st.global.u16 [%off_out], %bits;
+DONE:
+    ret;
+}
+";
+
+const BROADCAST_MUL_BF16_PTX: &str = "\
+.version 7.0
+.target sm_52
+.address_size 64
+
+.visible .entry broadcast_mul_bf16_kernel(
+    .param .u64 a_ptr,
+    .param .u64 b_ptr,
+    .param .u64 out_ptr,
+    .param .u64 a_strides_ptr,
+    .param .u64 b_strides_ptr,
+    .param .u64 out_shape_ptr,
+    .param .u32 n,
+    .param .u32 ndim
+) {
+    .reg .u32 %r_tid, %bid, %bdim, %n_reg, %ndim_reg;
+    .reg .u32 %remaining, %a_idx, %b_idx, %d;
+    .reg .u32 %shape_d, %a_str_d, %b_str_d, %coord;
+    .reg .u64 %a, %b, %out, %a_str, %b_str, %oshape;
+    .reg .u64 %off_a, %off_b, %off_out, %d64, %tmp;
+    .reg .b16 %a_b16, %b_b16, %zero16;
+    .reg .b32 %a_u32, %b_u32, %bits, %round, %lsb;
+    .reg .f32 %va, %vb, %vr;
+    .reg .pred %p, %loop_p;
+
+    ld.param.u64 %a, [a_ptr];
+    ld.param.u64 %b, [b_ptr];
+    ld.param.u64 %out, [out_ptr];
+    ld.param.u64 %a_str, [a_strides_ptr];
+    ld.param.u64 %b_str, [b_strides_ptr];
+    ld.param.u64 %oshape, [out_shape_ptr];
+    ld.param.u32 %n_reg, [n];
+    ld.param.u32 %ndim_reg, [ndim];
+
+    mov.u32 %bid, %ctaid.x;
+    mov.u32 %bdim, %ntid.x;
+    mov.u32 %r_tid, %tid.x;
+    mad.lo.u32 %r_tid, %bid, %bdim, %r_tid;
+    setp.ge.u32 %p, %r_tid, %n_reg;
+    @%p bra DONE;
+    mov.u32 %remaining, %r_tid;
+    mov.u32 %a_idx, 0;
+    mov.u32 %b_idx, 0;
+    mov.u32 %d, %ndim_reg;
+LOOP:
+    setp.eq.u32 %loop_p, %d, 0;
+    @%loop_p bra END_LOOP;
+    sub.u32 %d, %d, 1;
+    cvt.u64.u32 %d64, %d;
+    shl.b64 %d64, %d64, 2;
+    add.u64 %tmp, %oshape, %d64;
+    ld.global.u32 %shape_d, [%tmp];
+    add.u64 %tmp, %a_str, %d64;
+    ld.global.u32 %a_str_d, [%tmp];
+    add.u64 %tmp, %b_str, %d64;
+    ld.global.u32 %b_str_d, [%tmp];
+    rem.u32 %coord, %remaining, %shape_d;
+    div.u32 %remaining, %remaining, %shape_d;
+    mad.lo.u32 %a_idx, %coord, %a_str_d, %a_idx;
+    mad.lo.u32 %b_idx, %coord, %b_str_d, %b_idx;
+    bra LOOP;
+END_LOOP:
+    cvt.u64.u32 %off_a, %a_idx;
+    shl.b64 %off_a, %off_a, 1;
+    add.u64 %off_a, %a, %off_a;
+    ld.global.b16 %a_b16, [%off_a];
+    cvt.u64.u32 %off_b, %b_idx;
+    shl.b64 %off_b, %off_b, 1;
+    add.u64 %off_b, %b, %off_b;
+    ld.global.b16 %b_b16, [%off_b];
+    mov.b16 %zero16, 0;
+    mov.b32 %a_u32, {%zero16, %a_b16};
+    mov.b32 %b_u32, {%zero16, %b_b16};
+    mov.b32 %va, %a_u32;
+    mov.b32 %vb, %b_u32;
+    mul.f32 %vr, %va, %vb;
+    mov.b32 %bits, %vr;
+    shr.u32 %lsb, %bits, 16;
+    and.b32 %lsb, %lsb, 1;
+    add.u32 %round, %bits, 0x7FFF;
+    add.u32 %round, %round, %lsb;
+    shr.u32 %bits, %round, 16;
+    cvt.u64.u32 %off_out, %r_tid;
+    shl.b64 %off_out, %off_out, 1;
+    add.u64 %off_out, %out, %off_out;
+    st.global.u16 [%off_out], %bits;
+DONE:
+    ret;
+}
+";
+
+const BROADCAST_DIV_BF16_PTX: &str = "\
+.version 7.0
+.target sm_52
+.address_size 64
+
+.visible .entry broadcast_div_bf16_kernel(
+    .param .u64 a_ptr,
+    .param .u64 b_ptr,
+    .param .u64 out_ptr,
+    .param .u64 a_strides_ptr,
+    .param .u64 b_strides_ptr,
+    .param .u64 out_shape_ptr,
+    .param .u32 n,
+    .param .u32 ndim
+) {
+    .reg .u32 %r_tid, %bid, %bdim, %n_reg, %ndim_reg;
+    .reg .u32 %remaining, %a_idx, %b_idx, %d;
+    .reg .u32 %shape_d, %a_str_d, %b_str_d, %coord;
+    .reg .u64 %a, %b, %out, %a_str, %b_str, %oshape;
+    .reg .u64 %off_a, %off_b, %off_out, %d64, %tmp;
+    .reg .b16 %a_b16, %b_b16, %zero16;
+    .reg .b32 %a_u32, %b_u32, %bits, %round, %lsb;
+    .reg .f32 %va, %vb, %vr;
+    .reg .pred %p, %loop_p;
+
+    ld.param.u64 %a, [a_ptr];
+    ld.param.u64 %b, [b_ptr];
+    ld.param.u64 %out, [out_ptr];
+    ld.param.u64 %a_str, [a_strides_ptr];
+    ld.param.u64 %b_str, [b_strides_ptr];
+    ld.param.u64 %oshape, [out_shape_ptr];
+    ld.param.u32 %n_reg, [n];
+    ld.param.u32 %ndim_reg, [ndim];
+
+    mov.u32 %bid, %ctaid.x;
+    mov.u32 %bdim, %ntid.x;
+    mov.u32 %r_tid, %tid.x;
+    mad.lo.u32 %r_tid, %bid, %bdim, %r_tid;
+    setp.ge.u32 %p, %r_tid, %n_reg;
+    @%p bra DONE;
+    mov.u32 %remaining, %r_tid;
+    mov.u32 %a_idx, 0;
+    mov.u32 %b_idx, 0;
+    mov.u32 %d, %ndim_reg;
+LOOP:
+    setp.eq.u32 %loop_p, %d, 0;
+    @%loop_p bra END_LOOP;
+    sub.u32 %d, %d, 1;
+    cvt.u64.u32 %d64, %d;
+    shl.b64 %d64, %d64, 2;
+    add.u64 %tmp, %oshape, %d64;
+    ld.global.u32 %shape_d, [%tmp];
+    add.u64 %tmp, %a_str, %d64;
+    ld.global.u32 %a_str_d, [%tmp];
+    add.u64 %tmp, %b_str, %d64;
+    ld.global.u32 %b_str_d, [%tmp];
+    rem.u32 %coord, %remaining, %shape_d;
+    div.u32 %remaining, %remaining, %shape_d;
+    mad.lo.u32 %a_idx, %coord, %a_str_d, %a_idx;
+    mad.lo.u32 %b_idx, %coord, %b_str_d, %b_idx;
+    bra LOOP;
+END_LOOP:
+    cvt.u64.u32 %off_a, %a_idx;
+    shl.b64 %off_a, %off_a, 1;
+    add.u64 %off_a, %a, %off_a;
+    ld.global.b16 %a_b16, [%off_a];
+    cvt.u64.u32 %off_b, %b_idx;
+    shl.b64 %off_b, %off_b, 1;
+    add.u64 %off_b, %b, %off_b;
+    ld.global.b16 %b_b16, [%off_b];
+    mov.b16 %zero16, 0;
+    mov.b32 %a_u32, {%zero16, %a_b16};
+    mov.b32 %b_u32, {%zero16, %b_b16};
+    mov.b32 %va, %a_u32;
+    mov.b32 %vb, %b_u32;
+    div.approx.f32 %vr, %va, %vb;
+    mov.b32 %bits, %vr;
+    shr.u32 %lsb, %bits, 16;
+    and.b32 %lsb, %lsb, 1;
+    add.u32 %round, %bits, 0x7FFF;
+    add.u32 %round, %round, %lsb;
+    shr.u32 %bits, %round, 16;
+    cvt.u64.u32 %off_out, %r_tid;
+    shl.b64 %off_out, %off_out, 1;
+    add.u64 %off_out, %out, %off_out;
+    st.global.u16 [%off_out], %bits;
+DONE:
+    ret;
+}
+";
+
+// Computes row-major contiguous strides for `shape`, with broadcast (0)
+// stride for dims of size 1. Mirrors the helper in `kernels.rs`.
+fn broadcast_strides_bf16(shape: &[usize], out_shape: &[usize]) -> Vec<u32> {
+    let offset = out_shape.len() - shape.len();
+    let mut strides = vec![0_u32; out_shape.len()];
+    if !shape.is_empty() {
+        let mut row_major = vec![1_usize; shape.len()];
+        for i in (0..shape.len().saturating_sub(1)).rev() {
+            row_major[i] = row_major[i + 1] * shape[i + 1];
+        }
+        for (i, st) in strides.iter_mut().enumerate() {
+            if i < offset {
+                *st = 0;
+            } else {
+                let si = i - offset;
+                if shape[si] == 1 {
+                    *st = 0;
+                } else {
+                    *st = row_major[si] as u32;
+                }
+            }
+        }
+    }
+    strides
+}
+
+#[allow(clippy::too_many_arguments)]
+fn launch_broadcast_binary_bf16(
+    a: &cudarc::driver::CudaSlice<u16>,
+    b: &cudarc::driver::CudaSlice<u16>,
+    a_shape: &[usize],
+    b_shape: &[usize],
+    out_shape: &[usize],
+    device: &GpuDevice,
+    ptx: &'static str,
+    kernel_name: &'static str,
+) -> GpuResult<cudarc::driver::CudaSlice<u16>> {
+    let out_numel: usize = out_shape.iter().product();
+    let stream = device.stream();
+    if out_numel == 0 {
+        return Ok(stream.alloc_zeros::<u16>(0)?);
+    }
+    let a_str = broadcast_strides_bf16(a_shape, out_shape);
+    let b_str = broadcast_strides_bf16(b_shape, out_shape);
+    let shape_u32: Vec<u32> = out_shape.iter().map(|&d| d as u32).collect();
+
+    let ctx = device.context();
+    let f = get_or_compile(ctx, ptx, kernel_name, device.ordinal() as u32).map_err(|e| {
+        GpuError::PtxCompileFailed {
+            kernel: kernel_name,
+            source: e,
+        }
+    })?;
+    let a_str_buf = crate::transfer::cpu_to_gpu(&a_str, device)?;
+    let b_str_buf = crate::transfer::cpu_to_gpu(&b_str, device)?;
+    let shape_buf = crate::transfer::cpu_to_gpu(&shape_u32, device)?;
+    let mut out = stream.alloc_zeros::<u16>(out_numel)?;
+    let cfg = launch_1d(out_numel);
+    let n_u32 = out_numel as u32;
+    let ndim_u32 = out_shape.len() as u32;
+
+    // SAFETY:
+    // - `f` resolves to one of the four `broadcast_*_bf16_kernel` PTX
+    //   entry points with signature
+    //   (a_ptr, b_ptr, out_ptr, a_str_ptr, b_str_ptr, shape_ptr, n, ndim).
+    //   The eight args below match in order.
+    // - `a`, `b` are caller-supplied bf16 input buffers; the kernel only
+    //   reads them at indices computed by collapsing `out_shape` against
+    //   `a_str` / `b_str`. Broadcast (size-1) dims have stride 0 in the
+    //   stride buffers, so the resulting linear offset stays inside the
+    //   caller's buffers.
+    // - `a_str_buf`, `b_str_buf`, `shape_buf` were freshly uploaded above
+    //   from `&[u32]` slices of length `out_shape.len()` (== `ndim_u32`).
+    // - `out` is freshly alloc'd `out_numel` u16 elements and uniquely
+    //   borrowed by this scope.
+    // - `n_u32` is non-truncating because `launch_1d` already cast it.
+    // - `ndim_u32` is bounded by upstream rank validation; in practice this
+    //   is ≤8 (see ensure_contig_for_gpu).
+    unsafe {
+        let _kp = &a_str_buf; // keep alive
+        let _kp2 = &b_str_buf;
+        let _kp3 = &shape_buf;
+        stream
+            .launch_builder(&f)
+            .arg(a)
+            .arg(b)
+            .arg(&mut out)
+            .arg(a_str_buf.inner())
+            .arg(b_str_buf.inner())
+            .arg(shape_buf.inner())
+            .arg(&n_u32)
+            .arg(&ndim_u32)
+            .launch(cfg)?;
+    }
+    Ok(out)
+}
+
+/// Broadcast add `out[i] = a[bcast_a(i)] + b[bcast_b(i)]` on bf16 buffers. (#23)
+pub fn gpu_broadcast_add_bf16(
+    a: &cudarc::driver::CudaSlice<u16>,
+    b: &cudarc::driver::CudaSlice<u16>,
+    a_shape: &[usize],
+    b_shape: &[usize],
+    out_shape: &[usize],
+    device: &GpuDevice,
+) -> GpuResult<cudarc::driver::CudaSlice<u16>> {
+    launch_broadcast_binary_bf16(
+        a,
+        b,
+        a_shape,
+        b_shape,
+        out_shape,
+        device,
+        BROADCAST_ADD_BF16_PTX,
+        "broadcast_add_bf16_kernel",
+    )
+}
+
+/// Broadcast sub `out[i] = a[bcast_a(i)] - b[bcast_b(i)]` on bf16 buffers. (#23)
+pub fn gpu_broadcast_sub_bf16(
+    a: &cudarc::driver::CudaSlice<u16>,
+    b: &cudarc::driver::CudaSlice<u16>,
+    a_shape: &[usize],
+    b_shape: &[usize],
+    out_shape: &[usize],
+    device: &GpuDevice,
+) -> GpuResult<cudarc::driver::CudaSlice<u16>> {
+    launch_broadcast_binary_bf16(
+        a,
+        b,
+        a_shape,
+        b_shape,
+        out_shape,
+        device,
+        BROADCAST_SUB_BF16_PTX,
+        "broadcast_sub_bf16_kernel",
+    )
+}
+
+/// Broadcast mul `out[i] = a[bcast_a(i)] * b[bcast_b(i)]` on bf16 buffers. (#23)
+pub fn gpu_broadcast_mul_bf16(
+    a: &cudarc::driver::CudaSlice<u16>,
+    b: &cudarc::driver::CudaSlice<u16>,
+    a_shape: &[usize],
+    b_shape: &[usize],
+    out_shape: &[usize],
+    device: &GpuDevice,
+) -> GpuResult<cudarc::driver::CudaSlice<u16>> {
+    launch_broadcast_binary_bf16(
+        a,
+        b,
+        a_shape,
+        b_shape,
+        out_shape,
+        device,
+        BROADCAST_MUL_BF16_PTX,
+        "broadcast_mul_bf16_kernel",
+    )
+}
+
+/// Broadcast div `out[i] = a[bcast_a(i)] / b[bcast_b(i)]` on bf16 buffers. (#23)
+pub fn gpu_broadcast_div_bf16(
+    a: &cudarc::driver::CudaSlice<u16>,
+    b: &cudarc::driver::CudaSlice<u16>,
+    a_shape: &[usize],
+    b_shape: &[usize],
+    out_shape: &[usize],
+    device: &GpuDevice,
+) -> GpuResult<cudarc::driver::CudaSlice<u16>> {
+    launch_broadcast_binary_bf16(
+        a,
+        b,
+        a_shape,
+        b_shape,
+        out_shape,
+        device,
+        BROADCAST_DIV_BF16_PTX,
+        "broadcast_div_bf16_kernel",
+    )
+}
+
+// ===========================================================================
 // Tests
 // ===========================================================================
 

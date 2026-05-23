@@ -28,6 +28,12 @@ fn is_f64<T: Float>() -> bool {
     TypeId::of::<T>() == TypeId::of::<f64>()
 }
 
+/// Returns `true` if `T` is `half::bf16` (#23).
+#[inline]
+fn is_bf16<T: Float>() -> bool {
+    TypeId::of::<T>() == TypeId::of::<half::bf16>()
+}
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
@@ -98,13 +104,17 @@ pub fn exp<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
 }
 
 fn exp_inner<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
-    if input.is_cuda() && (is_f32::<T>() || is_f64::<T>()) {
+    if input.is_cuda() && (is_f32::<T>() || is_f64::<T>() || is_bf16::<T>()) {
         let backend = gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
-        let handle = if is_f32::<T>() {
-            backend.exp_f32(input.gpu_handle()?)?
-        } else {
-            backend.exp_f64(input.gpu_handle()?)?
-        };
+        // #23: bf16 routes through `exp_bf16_bf16` (PTX ex2.approx.f32 with
+        // f32 internal accumulator, bf16 RNE store-back).
+        let handle: crate::gpu_dispatch::GpuBufferHandle = crate::dispatch_floating_dtype!(
+            T,
+            "exp",
+            f32 => backend.exp_f32(input.gpu_handle()?),
+            f64 => backend.exp_f64(input.gpu_handle()?),
+            bf16 => backend.exp_bf16_bf16(input.gpu_handle()?),
+        )?;
         let storage = TensorStorage::gpu(handle);
         let shape = input.shape().to_vec();
 
@@ -195,13 +205,17 @@ pub fn log<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
 }
 
 fn log_inner<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
-    if input.is_cuda() && (is_f32::<T>() || is_f64::<T>()) {
+    if input.is_cuda() && (is_f32::<T>() || is_f64::<T>() || is_bf16::<T>()) {
         let backend = gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
-        let handle = if is_f32::<T>() {
-            backend.log_f32(input.gpu_handle()?)?
-        } else {
-            backend.log_f64(input.gpu_handle()?)?
-        };
+        // #23: bf16 routes through `log_bf16_bf16` (PTX lg2.approx.f32 *
+        // ln(2), bf16 RNE store-back).
+        let handle: crate::gpu_dispatch::GpuBufferHandle = crate::dispatch_floating_dtype!(
+            T,
+            "log",
+            f32 => backend.log_f32(input.gpu_handle()?),
+            f64 => backend.log_f64(input.gpu_handle()?),
+            bf16 => backend.log_bf16_bf16(input.gpu_handle()?),
+        )?;
         let storage = TensorStorage::gpu(handle);
         let shape = input.shape().to_vec();
 

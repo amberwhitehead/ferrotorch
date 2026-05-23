@@ -104,17 +104,18 @@ pub fn sum<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
 }
 
 fn sum_inner<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
-    let is_f32 = std::any::TypeId::of::<T>() == std::any::TypeId::of::<f32>();
-    let is_f64 = std::any::TypeId::of::<T>() == std::any::TypeId::of::<f64>();
-
-    if input.is_cuda() && (is_f32 || is_f64) {
+    if input.is_cuda() {
         let backend =
             crate::gpu_dispatch::gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
-        let handle = if is_f32 {
-            backend.sum_f32(input.gpu_handle()?, input.numel())?
-        } else {
-            backend.sum_f64(input.gpu_handle()?, input.numel())?
-        };
+        // #23: bf16 now has a real GPU sum kernel (f32 accumulator,
+        // bf16 RNE store back).
+        let handle: crate::gpu_dispatch::GpuBufferHandle = crate::dispatch_floating_dtype!(
+            T,
+            "sum",
+            f32 => backend.sum_f32(input.gpu_handle()?, input.numel()),
+            f64 => backend.sum_f64(input.gpu_handle()?, input.numel()),
+            bf16 => backend.sum_bf16_bf16(input.gpu_handle()?),
+        )?;
         let storage = TensorStorage::gpu(handle);
         let shape = vec![];
 
@@ -126,8 +127,6 @@ fn sum_inner<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
         } else {
             Tensor::from_storage(storage, shape, false)
         }
-    } else if input.is_cuda() {
-        Err(FerrotorchError::NotImplementedOnCuda { op: "sum" })
     } else {
         let result = elementwise::sum(input)?;
 
@@ -232,50 +231,53 @@ pub fn mean<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
 
 fn mean_inner<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
     // GPU path: use GPU sum kernel + scalar divide (avoids CPU round-trip).
-    let is_f32 = std::any::TypeId::of::<T>() == std::any::TypeId::of::<f32>();
-    let is_f64 = std::any::TypeId::of::<T>() == std::any::TypeId::of::<f64>();
-    let result = if input.is_cuda() && (is_f32 || is_f64) {
+    let result = if input.is_cuda() {
         if let Some(backend) = crate::gpu_dispatch::gpu_backend() {
             let device = input.device();
             let ordinal = match device {
                 crate::device::Device::Cuda(o) => o,
                 _ => 0,
             };
-            let mean_handle = if is_f32 {
-                let sum_handle = backend.sum_f32(input.gpu_handle()?, input.numel())?;
-                let n = input.numel() as f32;
-                let inv_n_data = [1.0f32 / n];
-                // SAFETY: `inv_n_data` is a stack array of one f32 (length 1,
-                // initialized just above), borrowed for this scope. Reading
-                // its 4 bytes (1 * size_of::<f32>()) as &[u8] is sound: f32
-                // has no padding, no niches, and the requested length matches
-                // the actual byte size of the array.
-                let inv_n_bytes: &[u8] = unsafe {
-                    std::slice::from_raw_parts(
-                        inv_n_data.as_ptr().cast::<u8>(),
-                        inv_n_data.len() * 4,
-                    )
-                };
-                let inv_handle = backend.cpu_to_gpu(inv_n_bytes, 4, ordinal)?;
-                backend.mul_f32(&sum_handle, &inv_handle)?
-            } else {
-                let sum_handle = backend.sum_f64(input.gpu_handle()?, input.numel())?;
-                let n = input.numel() as f64;
-                let inv_n_data = [1.0f64 / n];
-                // SAFETY: `inv_n_data` is a stack array of one f64 (length 1,
-                // initialized just above), borrowed for this scope. Reading
-                // its 8 bytes (1 * size_of::<f64>()) as &[u8] is sound: f64
-                // has no padding, no niches, and the requested length matches
-                // the actual byte size of the array.
-                let inv_n_bytes: &[u8] = unsafe {
-                    std::slice::from_raw_parts(
-                        inv_n_data.as_ptr().cast::<u8>(),
-                        inv_n_data.len() * 8,
-                    )
-                };
-                let inv_handle = backend.cpu_to_gpu(inv_n_bytes, 8, ordinal)?;
-                backend.mul_f64(&sum_handle, &inv_handle)?
-            };
+            // #23: dispatch by dtype. bf16 routes to `mean_bf16_bf16`
+            // (sum_bf16 + on-device scale by 1/n, both in f32 accumulator).
+            let mean_handle: crate::gpu_dispatch::GpuBufferHandle = crate::dispatch_floating_dtype!(
+                T,
+                "mean",
+                f32 => {
+                    let sum_handle = backend.sum_f32(input.gpu_handle()?, input.numel())?;
+                    let n = input.numel() as f32;
+                    let inv_n_data = [1.0f32 / n];
+                    // SAFETY: `inv_n_data` is a stack array of one f32, borrowed
+                    // for this scope. Reading 4 bytes (1 * size_of::<f32>()) as
+                    // &[u8] is sound: f32 has no padding/niches and the length
+                    // matches the array's byte size.
+                    let inv_n_bytes: &[u8] = unsafe {
+                        std::slice::from_raw_parts(
+                            inv_n_data.as_ptr().cast::<u8>(),
+                            inv_n_data.len() * 4,
+                        )
+                    };
+                    let inv_handle = backend.cpu_to_gpu(inv_n_bytes, 4, ordinal)?;
+                    Ok::<_, crate::error::FerrotorchError>(backend.mul_f32(&sum_handle, &inv_handle)?)
+                },
+                f64 => {
+                    let sum_handle = backend.sum_f64(input.gpu_handle()?, input.numel())?;
+                    let n = input.numel() as f64;
+                    let inv_n_data = [1.0f64 / n];
+                    // SAFETY: same as f32 arm with f64 width (8 bytes).
+                    let inv_n_bytes: &[u8] = unsafe {
+                        std::slice::from_raw_parts(
+                            inv_n_data.as_ptr().cast::<u8>(),
+                            inv_n_data.len() * 8,
+                        )
+                    };
+                    let inv_handle = backend.cpu_to_gpu(inv_n_bytes, 8, ordinal)?;
+                    Ok::<_, crate::error::FerrotorchError>(backend.mul_f64(&sum_handle, &inv_handle)?)
+                },
+                bf16 => Ok::<_, crate::error::FerrotorchError>(
+                    backend.mean_bf16_bf16(input.gpu_handle()?)?
+                ),
+            )?;
             Tensor::from_storage(TensorStorage::gpu(mean_handle), vec![], false)?
         } else {
             elementwise::mean(input)?
@@ -797,15 +799,18 @@ fn sum_dim_inner<T: Float>(
     }
 
     // GPU path: use sum_axis kernel (no CPU round-trip).
-    let is_f32 = std::any::TypeId::of::<T>() == std::any::TypeId::of::<f32>();
-    let is_f64 = std::any::TypeId::of::<T>() == std::any::TypeId::of::<f64>();
-    if input.is_cuda() && (is_f32 || is_f64) {
+    if input.is_cuda() {
         if let Some(backend) = crate::gpu_dispatch::gpu_backend() {
-            let handle = if is_f32 {
-                backend.sum_axis_f32(input.gpu_handle()?, in_shape, norm_dim)?
-            } else {
-                backend.sum_axis_f64(input.gpu_handle()?, in_shape, norm_dim)?
-            };
+            // #23: bf16 routes through `sum_axis_bf16_bf16` (f32 accumulator,
+            // bf16 RNE store-back). The shape+axis signature is identical
+            // across all three dtypes.
+            let handle: crate::gpu_dispatch::GpuBufferHandle = crate::dispatch_floating_dtype!(
+                T,
+                "sum_dim",
+                f32 => backend.sum_axis_f32(input.gpu_handle()?, in_shape, norm_dim),
+                f64 => backend.sum_axis_f64(input.gpu_handle()?, in_shape, norm_dim),
+                bf16 => backend.sum_axis_bf16_bf16(input.gpu_handle()?, in_shape, norm_dim),
+            )?;
 
             let storage = TensorStorage::gpu(handle);
             return if is_grad_enabled() && input.requires_grad() {
@@ -819,11 +824,7 @@ fn sum_dim_inner<T: Float>(
                 Tensor::from_storage(storage, out_shape, false)
             };
         }
-    }
-
-    // Non-f32 CUDA tensors are not supported — user must call .cpu() explicitly.
-    if input.is_cuda() {
-        return Err(FerrotorchError::NotImplementedOnCuda { op: "sum_dim" });
+        return Err(FerrotorchError::DeviceUnavailable);
     }
     let input_ref = if input.is_contiguous() {
         input.clone()
@@ -1070,25 +1071,28 @@ fn mean_dim_inner<T: Float>(
     // GPU path: native sum-then-scale on the existing backend kernels.
     // Mirrors `sum_dim_inner`'s dispatch but composes a second op
     // (`scale_f32(1/dim_size)`) so the result stays on-device end-to-end.
-    let is_f32 = std::any::TypeId::of::<T>() == std::any::TypeId::of::<f32>();
-    let is_f64 = std::any::TypeId::of::<T>() == std::any::TypeId::of::<f64>();
-    if input.is_cuda() && (is_f32 || is_f64) {
+    if input.is_cuda() {
         if let Some(backend) = crate::gpu_dispatch::gpu_backend() {
-            let summed_handle = if is_f32 {
-                backend.sum_axis_f32(input.gpu_handle()?, in_shape, norm_dim)?
-            } else {
-                backend.sum_axis_f64(input.gpu_handle()?, in_shape, norm_dim)?
-            };
-            // Divide by dim_size on-device. Both f32 and f64 dispatch
-            // through the GpuBackend trait so the concrete CudaBackendImpl
-            // override is reached (issue #788 — previously the f64 path
-            // fell through to NotImplementedOnCuda even though
-            // scale_f64 was implemented).
-            let mean_handle = if is_f32 {
-                backend.scale_f32(&summed_handle, 1.0 / dim_size as f32)?
-            } else {
-                backend.scale_f64(&summed_handle, 1.0 / dim_size as f64)?
-            };
+            // #23: bf16 routes through `mean_axis_bf16_bf16` (f32 accumulator,
+            // divide-by-axis-size + bf16 RNE store-back in the same kernel —
+            // no separate `scale` op needed). f32/f64 keep the
+            // sum + scale composition because their reductions return the
+            // same dtype (no internal divide).
+            let mean_handle: crate::gpu_dispatch::GpuBufferHandle = crate::dispatch_floating_dtype!(
+                T,
+                "mean_dim",
+                f32 => {
+                    let s = backend.sum_axis_f32(input.gpu_handle()?, in_shape, norm_dim)?;
+                    Ok::<_, crate::error::FerrotorchError>(backend.scale_f32(&s, 1.0 / dim_size as f32)?)
+                },
+                f64 => {
+                    let s = backend.sum_axis_f64(input.gpu_handle()?, in_shape, norm_dim)?;
+                    Ok::<_, crate::error::FerrotorchError>(backend.scale_f64(&s, 1.0 / dim_size as f64)?)
+                },
+                bf16 => Ok::<_, crate::error::FerrotorchError>(
+                    backend.mean_axis_bf16_bf16(input.gpu_handle()?, in_shape, norm_dim)?
+                ),
+            )?;
             let storage = TensorStorage::gpu(mean_handle);
             return if is_grad_enabled() && input.requires_grad() {
                 let grad_fn = Arc::new(MeanDimBackward {
@@ -1101,11 +1105,7 @@ fn mean_dim_inner<T: Float>(
                 Tensor::from_storage(storage, out_shape, false)
             };
         }
-    }
-
-    // No GPU handler matched; bail rather than silently round-trip.
-    if input.is_cuda() {
-        return Err(FerrotorchError::NotImplementedOnCuda { op: "mean_dim" });
+        return Err(FerrotorchError::DeviceUnavailable);
     }
 
     let in_data = input.data()?;

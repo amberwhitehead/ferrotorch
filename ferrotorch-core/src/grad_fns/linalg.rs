@@ -800,22 +800,21 @@ pub fn mm_differentiable<T: Float>(a: &Tensor<T>, b: &Tensor<T>) -> FerrotorchRe
         let m = a.shape()[0];
         let k = a.shape()[1];
         let n = b.shape()[1];
-        // Dtype-aware GPU dispatch (#800): forward must mirror backward, which
-        // already branches on `is_f64::<T>()`. Calling `matmul_f32` for an f64
-        // tensor handle returns "GPU handle does not contain a CudaBuffer<f32>".
-        let handle = if is_f32::<T>() {
-            // When autocast says ReducedPrecision and inputs are f32 on GPU,
-            // use the f16-accumulate path (falls back to f32 if no kernel).
-            if autocast_guard("mm") == Some(AutocastCategory::ReducedPrecision) {
-                backend.matmul_f16_f32(a.gpu_handle()?, b.gpu_handle()?, m, k, n)?
-            } else {
-                backend.matmul_f32(a.gpu_handle()?, b.gpu_handle()?, m, k, n)?
-            }
-        } else if is_f64::<T>() {
-            backend.matmul_f64(a.gpu_handle()?, b.gpu_handle()?, m, k, n)?
-        } else {
-            return Err(FerrotorchError::NotImplementedOnCuda { op: "mm" });
-        };
+        // Dtype-aware GPU dispatch (#800 + #23): bf16 routes to
+        // `matmul_bf16_bf16` (cuBLAS GemmEx, f32 accumulator).
+        let handle: crate::gpu_dispatch::GpuBufferHandle = crate::dispatch_floating_dtype!(
+            T,
+            "mm",
+            f32 => {
+                if autocast_guard("mm") == Some(AutocastCategory::ReducedPrecision) {
+                    backend.matmul_f16_f32(a.gpu_handle()?, b.gpu_handle()?, m, k, n)
+                } else {
+                    backend.matmul_f32(a.gpu_handle()?, b.gpu_handle()?, m, k, n)
+                }
+            },
+            f64 => backend.matmul_f64(a.gpu_handle()?, b.gpu_handle()?, m, k, n),
+            bf16 => backend.matmul_bf16_bf16(a.gpu_handle()?, b.gpu_handle()?, m, k, n),
+        )?;
         let storage = TensorStorage::gpu(handle);
         let shape = vec![m, n];
 
@@ -1531,23 +1530,24 @@ pub fn matmul_differentiable<T: Float>(
         let m = a.shape()[0];
         let k = a.shape()[1];
         let n = b.shape()[1];
-        // Dtype-aware GPU dispatch (#800): forward must branch on f32 vs. f64
-        // just as the sibling 2D paths (`mm_differentiable`, etc.) do. The
-        // previous unconditional `matmul_f32` path surfaced "GPU handle does
-        // not contain a CudaBuffer<f32>" for f64 tensors.
-        let handle = if is_f32::<T>() {
-            // When autocast says ReducedPrecision and inputs are f32 on GPU,
-            // use the f16-accumulate path (falls back to f32 if no kernel).
-            if autocast_guard("matmul") == Some(AutocastCategory::ReducedPrecision) {
-                backend.matmul_f16_f32(a.gpu_handle()?, b.gpu_handle()?, m, k, n)?
-            } else {
-                backend.matmul_f32(a.gpu_handle()?, b.gpu_handle()?, m, k, n)?
-            }
-        } else if is_f64::<T>() {
-            backend.matmul_f64(a.gpu_handle()?, b.gpu_handle()?, m, k, n)?
-        } else {
-            return Err(FerrotorchError::NotImplementedOnCuda { op: "matmul" });
-        };
+        // Dtype-aware GPU dispatch (#800 + #23): bf16 now routes to
+        // `matmul_bf16_bf16` (existing cuBLAS GemmEx path from #17).
+        let handle: crate::gpu_dispatch::GpuBufferHandle = crate::dispatch_floating_dtype!(
+            T,
+            "matmul",
+            f32 => {
+                // When autocast says ReducedPrecision and inputs are f32 on
+                // GPU, use the f16-accumulate path (falls back to f32 if no
+                // kernel).
+                if autocast_guard("matmul") == Some(AutocastCategory::ReducedPrecision) {
+                    backend.matmul_f16_f32(a.gpu_handle()?, b.gpu_handle()?, m, k, n)
+                } else {
+                    backend.matmul_f32(a.gpu_handle()?, b.gpu_handle()?, m, k, n)
+                }
+            },
+            f64 => backend.matmul_f64(a.gpu_handle()?, b.gpu_handle()?, m, k, n),
+            bf16 => backend.matmul_bf16_bf16(a.gpu_handle()?, b.gpu_handle()?, m, k, n),
+        )?;
         let storage = TensorStorage::gpu(handle);
         let shape = vec![m, n];
 
