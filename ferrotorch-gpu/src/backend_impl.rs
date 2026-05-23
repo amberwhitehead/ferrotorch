@@ -1066,13 +1066,124 @@ impl GpuBackend for CudaBackendImpl {
     }
 
     fn clone_buffer(&self, handle: &GpuBufferHandle) -> FerrotorchResult<GpuBufferHandle> {
-        // Clone via GPU -> CPU -> GPU round-trip.
-        // Correct but not optimal; a device-to-device memcpy would be better.
-        let bytes = self.gpu_to_cpu(handle)?;
-        // The dtype tag is authoritative: re-upload under the source handle's
-        // own dtype so the clone carries the identical tag (PyTorch parity —
-        // a clone preserves the ScalarType, never re-infers it from bytes).
-        self.cpu_to_gpu(&bytes, handle.dtype(), handle.device_ordinal())
+        // Device-to-device copy — NEVER through host RAM (crosslink #1185
+        // hardening, task #36). Every `.clone()` of a GPU tensor of any dtype
+        // routes here, so the old GPU->CPU->GPU round trip was a silent host
+        // crossing in a universal hot op. Each arm unwraps the concrete typed
+        // buffer and calls `CudaSlice::try_clone`, which allocates a fresh
+        // device slice and schedules a `memcpy_dtod_async` (cudarc 0.19.4
+        // `CudaSlice::try_clone` -> `CudaStream::clone_dtod` ->
+        // `CudaStream::memcpy_dtod`); when source and destination share the
+        // same CUDA context — always true for a same-handle clone — that is a
+        // pure `result::memcpy_dtod_async`, with no host staging.
+        //
+        // The dtype tag is authoritative and is preserved exactly: each arm is
+        // selected on `handle.dtype()` and rewraps with the matching dtype tag
+        // (PyTorch parity — a clone preserves the ScalarType, never re-infers
+        // it from bytes).
+        //
+        // LENGTH PRESERVATION: for the `CudaBuffer<T>`-backed dtypes the
+        // underlying `CudaSlice` may be longer than the logical element count
+        // — pooled buffers round their allocation up (see `pool::round_len`,
+        // 256-element granularity), so a 4-element f32 tensor sits in a
+        // 256-element slice. `try_clone` copies the whole slice, but the new
+        // handle MUST carry the SAME logical `len`/`alloc_len` as the source
+        // (otherwise a clone of a 4-element grad buffer would report length
+        // 256 and break downstream length checks). We therefore rebuild a
+        // non-pooled `CudaBuffer` with the source's logical `len`/`alloc_len`
+        // (the clone is non-pooled: it never returns to the pool on drop,
+        // matching how `wrap_slice_*` non-pool their inputs). bf16/f16 store a
+        // bare `CudaSlice<u16>` (never pooled — slice length == logical
+        // length), so they wrap the cloned slice directly.
+        let ordinal = handle.device_ordinal();
+        let map_drv = |e| Self::map_gpu_err(crate::error::GpuError::Driver(e));
+        match handle.dtype() {
+            DType::F32 => {
+                let buf = Self::unwrap_buffer(handle)?;
+                let slice = buf.inner().try_clone().map_err(map_drv)?;
+                let cloned = CudaBuffer {
+                    data: Some(slice),
+                    len: buf.len(),
+                    alloc_len: buf.alloc_len(),
+                    device_ordinal: ordinal,
+                    pool_fn: None,
+                };
+                Ok(Self::wrap_buffer(cloned, ordinal))
+            }
+            DType::F64 => {
+                let buf = Self::unwrap_buffer_f64(handle)?;
+                let slice = buf.inner().try_clone().map_err(map_drv)?;
+                let cloned = CudaBuffer {
+                    data: Some(slice),
+                    len: buf.len(),
+                    alloc_len: buf.alloc_len(),
+                    device_ordinal: ordinal,
+                    pool_fn: None,
+                };
+                Ok(Self::wrap_buffer_f64(cloned, ordinal))
+            }
+            DType::BF16 => {
+                // bf16 storage is a bare `CudaSlice<u16>` bit pattern (never
+                // pooled — slice length equals the logical length).
+                let slice = Self::unwrap_buffer_bf16(handle)?;
+                let cloned = slice.try_clone().map_err(map_drv)?;
+                Ok(Self::wrap_buffer_bf16(cloned, ordinal))
+            }
+            DType::F16 => {
+                // f16 shares `CudaSlice<u16>` storage with bf16; the F16 tag
+                // is the only discriminator and is preserved by rewrapping
+                // via `wrap_buffer_f16`.
+                let slice = Self::unwrap_buffer_f16(handle)?;
+                let cloned = slice.try_clone().map_err(map_drv)?;
+                Ok(Self::wrap_buffer_f16(cloned, ordinal))
+            }
+            DType::I32 => {
+                let buf = Self::unwrap_buffer_i32(handle)?;
+                let slice = buf.inner().try_clone().map_err(map_drv)?;
+                let cloned = CudaBuffer {
+                    data: Some(slice),
+                    len: buf.len(),
+                    alloc_len: buf.alloc_len(),
+                    device_ordinal: ordinal,
+                    pool_fn: None,
+                };
+                Ok(Self::wrap_buffer_i32(cloned, ordinal))
+            }
+            DType::I64 => {
+                let buf = Self::unwrap_buffer_i64(handle)?;
+                let slice = buf.inner().try_clone().map_err(map_drv)?;
+                let cloned = CudaBuffer {
+                    data: Some(slice),
+                    len: buf.len(),
+                    alloc_len: buf.alloc_len(),
+                    device_ordinal: ordinal,
+                    pool_fn: None,
+                };
+                Ok(Self::wrap_buffer_i64(cloned, ordinal))
+            }
+            DType::Bool => {
+                // Bool storage is a native `CudaBuffer<u8>`.
+                let buf = Self::unwrap_buffer_bool(handle)?;
+                let slice = buf.inner().try_clone().map_err(map_drv)?;
+                let cloned = CudaBuffer {
+                    data: Some(slice),
+                    len: buf.len(),
+                    alloc_len: buf.alloc_len(),
+                    device_ordinal: ordinal,
+                    pool_fn: None,
+                };
+                Ok(Self::wrap_buffer_bool(cloned, ordinal))
+            }
+            // PyTorch parity: any other dtype has no on-device storage type in
+            // this backend, so cloning it is a structured error — never a
+            // silent host round trip.
+            other => Err(FerrotorchError::InvalidArgument {
+                message: format!(
+                    "clone_buffer: dtype {other} has no device-to-device copy \
+                     path on CUDA (supported: F32, F64, BF16, F16, I32, I64, Bool)"
+                ),
+            }),
+        }
     }
 
     fn has_inf_nan_f32(&self, a: &GpuBufferHandle) -> FerrotorchResult<bool> {
