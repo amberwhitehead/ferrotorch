@@ -1636,7 +1636,7 @@ pub fn sparse_matmul_24<T: Float>(
                         b_dense_data.len() * std::mem::size_of::<f32>(),
                     )
                 };
-                let b_handle = backend.cpu_to_gpu(b_bytes, std::mem::size_of::<f32>(), ordinal)?;
+                let b_handle = backend.cpu_to_gpu(b_bytes, crate::dtype::DType::F32, ordinal)?;
 
                 let a_handle = a.gpu_handle()?;
                 match backend.sparse_matmul_24_f32(a_handle, &b_handle, m, k, n) {
@@ -2241,7 +2241,7 @@ impl<T: Float> SparseGrad<T> {
                         )
                     };
                     let values_handle =
-                        backend.cpu_to_gpu(values_bytes, std::mem::size_of::<f32>(), ordinal)?;
+                        backend.cpu_to_gpu(values_bytes, crate::dtype::DType::F32, ordinal)?;
 
                     // 2. Indices as f32 (scatter_add_rows_f32 ABI).
                     let indices_f32: Vec<f32> = self.indices.iter().map(|&i| i as f32).collect();
@@ -2253,8 +2253,10 @@ impl<T: Float> SparseGrad<T> {
                             indices_f32.len() * std::mem::size_of::<f32>(),
                         )
                     };
+                    // Index data is currently stored as an F32 bit-pattern
+                    // (scatter_add_rows_f32 ABI); revisit in the integer phase.
                     let idx_handle =
-                        backend.cpu_to_gpu(idx_bytes, std::mem::size_of::<f32>(), ordinal)?;
+                        backend.cpu_to_gpu(idx_bytes, crate::dtype::DType::F32, ordinal)?;
 
                     // 3. Scatter-add rows to a dense [leading, slab_size]
                     //    buffer (zero-initialized inside the kernel).
@@ -2299,7 +2301,7 @@ impl<T: Float> SparseGrad<T> {
                         )
                     };
                     let values_handle =
-                        backend.cpu_to_gpu(values_bytes, std::mem::size_of::<f64>(), ordinal)?;
+                        backend.cpu_to_gpu(values_bytes, crate::dtype::DType::F64, ordinal)?;
                     let indices_f32: Vec<f32> = self.indices.iter().map(|&i| i as f32).collect();
                     // SAFETY: see above.
                     let idx_bytes = unsafe {
@@ -2308,8 +2310,10 @@ impl<T: Float> SparseGrad<T> {
                             indices_f32.len() * std::mem::size_of::<f32>(),
                         )
                     };
+                    // Index data is currently stored as an F32 bit-pattern
+                    // (scatter_add_rows ABI); revisit in the integer phase.
                     let idx_handle =
-                        backend.cpu_to_gpu(idx_bytes, std::mem::size_of::<f32>(), ordinal)?;
+                        backend.cpu_to_gpu(idx_bytes, crate::dtype::DType::F32, ordinal)?;
 
                     let dense_grad = backend.scatter_add_rows_f64(
                         &values_handle,

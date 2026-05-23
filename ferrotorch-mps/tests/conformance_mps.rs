@@ -824,7 +824,9 @@ fn softmax_f32_matches_cpu_reference_at_non_pow2_cols() {
             .collect();
 
         let bytes: Vec<u8> = input.iter().flat_map(|f| f.to_le_bytes()).collect();
-        let handle = backend.cpu_to_gpu(&bytes, 4, 0).expect("cpu_to_gpu input");
+        let handle = backend
+            .cpu_to_gpu(&bytes, ferrotorch_core::DType::F32, 0)
+            .expect("cpu_to_gpu input");
         let out_handle = backend
             .softmax_f32(&handle, rows, cols)
             .expect("softmax_f32 dispatch");
@@ -888,7 +890,7 @@ fn sum_axis_f32_matches_cpu_reference_at_non_pow2_axis_len() {
         let ones = vec![1.0_f32; axis_len];
         let bytes: Vec<u8> = ones.iter().flat_map(|f| f.to_le_bytes()).collect();
         let handle = backend
-            .cpu_to_gpu(&bytes, 4, 0)
+            .cpu_to_gpu(&bytes, ferrotorch_core::DType::F32, 0)
             .expect("cpu_to_gpu ones input");
         let out_handle = backend
             .sum_axis_f32(&handle, &[axis_len], 0)
@@ -912,7 +914,7 @@ fn sum_axis_f32_matches_cpu_reference_at_non_pow2_axis_len() {
         let input: Vec<f32> = (0..axis_len).map(|i| (i as f32) * 0.001_f32).collect();
         let bytes: Vec<u8> = input.iter().flat_map(|f| f.to_le_bytes()).collect();
         let handle = backend
-            .cpu_to_gpu(&bytes, 4, 0)
+            .cpu_to_gpu(&bytes, ferrotorch_core::DType::F32, 0)
             .expect("cpu_to_gpu det input");
         let out_handle = backend
             .sum_axis_f32(&handle, &[axis_len], 0)
@@ -956,7 +958,9 @@ fn softmax_f32_uniform_input_at_non_pow2_cols() {
     let rows: usize = 1;
     let zeros = vec![0.0_f32; rows * cols];
     let bytes: Vec<u8> = zeros.iter().flat_map(|f| f.to_le_bytes()).collect();
-    let handle = backend.cpu_to_gpu(&bytes, 4, 0).expect("cpu_to_gpu zeros");
+    let handle = backend
+        .cpu_to_gpu(&bytes, ferrotorch_core::DType::F32, 0)
+        .expect("cpu_to_gpu zeros");
     let out_handle = backend
         .softmax_f32(&handle, rows, cols)
         .expect("softmax_f32 zeros");

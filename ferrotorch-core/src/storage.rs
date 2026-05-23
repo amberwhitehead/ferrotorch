@@ -161,7 +161,7 @@ impl<T: Element> TensorStorage<T> {
                         data.len() * std::mem::size_of::<T>(),
                     )
                 };
-                let handle = backend.cpu_to_gpu(bytes, std::mem::size_of::<T>(), ordinal)?;
+                let handle = backend.cpu_to_gpu(bytes, T::dtype(), ordinal)?;
                 Ok(Self::gpu(handle))
             }
             Device::Xpu(_) => Err(crate::error::FerrotorchError::InvalidArgument {
@@ -199,8 +199,7 @@ impl<T: Element> TensorStorage<T> {
                         data.len() * std::mem::size_of::<T>(),
                     )
                 };
-                let handle =
-                    backend.cpu_to_gpu_pinned(bytes, std::mem::size_of::<T>(), ordinal)?;
+                let handle = backend.cpu_to_gpu_pinned(bytes, T::dtype(), ordinal)?;
                 Ok(Self::gpu(handle))
             }
             Device::Xpu(_) => Err(crate::error::FerrotorchError::InvalidArgument {
@@ -455,8 +454,10 @@ impl<T: Element> TensorStorage<T> {
                 let elem_size = std::mem::size_of::<T>();
                 let start = offset * elem_size;
                 let end = (offset + numel) * elem_size;
+                // Re-upload the sliced bytes under the *source handle's* dtype
+                // tag so the subregion preserves the original ScalarType.
                 let handle =
-                    backend.cpu_to_gpu(&bytes[start..end], elem_size, h.device_ordinal())?;
+                    backend.cpu_to_gpu(&bytes[start..end], h.dtype(), h.device_ordinal())?;
                 Ok(Self {
                     data: StorageBuffer::Gpu(handle),
                     device: self.device,

@@ -24,7 +24,7 @@
 
 use std::any::TypeId;
 
-use ferrotorch_core::dtype::Float;
+use ferrotorch_core::dtype::{DType, Float};
 use ferrotorch_core::error::{FerrotorchError, FerrotorchResult};
 use ferrotorch_core::gpu_dispatch::GpuBufferHandle;
 use ferrotorch_core::storage::TensorStorage;
@@ -293,7 +293,7 @@ fn wrap_output_f32<T: Float>(
 ) -> FerrotorchResult<Tensor<T>> {
     debug_assert_eq!(TypeId::of::<T>(), TypeId::of::<f32>());
     let len = buf.len();
-    let handle = GpuBufferHandle::new(Box::new(buf), device_ordinal, len);
+    let handle = GpuBufferHandle::new(Box::new(buf), device_ordinal, len, DType::F32);
     let storage: TensorStorage<T> = TensorStorage::gpu(handle);
     Tensor::from_storage(storage, shape, false)
 }
@@ -306,7 +306,7 @@ fn wrap_output_f64<T: Float>(
 ) -> FerrotorchResult<Tensor<T>> {
     debug_assert_eq!(TypeId::of::<T>(), TypeId::of::<f64>());
     let len = buf.len();
-    let handle = GpuBufferHandle::new(Box::new(buf), device_ordinal, len);
+    let handle = GpuBufferHandle::new(Box::new(buf), device_ordinal, len, DType::F64);
     let storage: TensorStorage<T> = TensorStorage::gpu(handle);
     Tensor::from_storage(storage, shape, false)
 }

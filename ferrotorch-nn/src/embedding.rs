@@ -15,6 +15,7 @@ use ferrotorch_core::autograd::no_grad::is_grad_enabled;
 use ferrotorch_core::device::Device;
 use ferrotorch_core::gpu_dispatch::{GpuBufferHandle, gpu_backend};
 use ferrotorch_core::tensor::GradFn;
+use ferrotorch_core::dtype::DType;
 use ferrotorch_core::{FerrotorchError, FerrotorchResult, Float, Tensor, TensorStorage};
 
 use crate::init;
@@ -46,7 +47,7 @@ fn upload_f32_to_gpu(data: &[f32], ordinal: usize) -> FerrotorchResult<GpuBuffer
     // No interior mutability — `data` is a shared reference and `f32` has no padding.
     let bytes: &[u8] =
         unsafe { std::slice::from_raw_parts(data.as_ptr() as *const u8, data.len() * 4) };
-    backend.cpu_to_gpu(bytes, 4, ordinal)
+    backend.cpu_to_gpu(bytes, DType::F32, ordinal)
 }
 
 // ---------------------------------------------------------------------------
@@ -111,7 +112,8 @@ impl<T: Float> GradFn<T> for EmbeddingBackward<T> {
                 for b in &mut gw_bytes[start_byte..end_byte] {
                     *b = 0;
                 }
-                gw_handle = backend.cpu_to_gpu(&gw_bytes, elem_size, ordinal)?;
+                let gw_dtype = if f64_path { DType::F64 } else { DType::F32 };
+                gw_handle = backend.cpu_to_gpu(&gw_bytes, gw_dtype, ordinal)?;
             }
 
             let grad_tensor = Tensor::from_storage(
@@ -542,7 +544,7 @@ impl<T: Float> Module<T> for Embedding<T> {
                     output_data.len() * std::mem::size_of::<T>(),
                 )
             };
-            let handle = backend.cpu_to_gpu(bytes, std::mem::size_of::<T>(), ordinal)?;
+            let handle = backend.cpu_to_gpu(bytes, T::dtype(), ordinal)?;
             TensorStorage::gpu(handle)
         } else {
             TensorStorage::cpu(output_data)

@@ -13,6 +13,7 @@
 
 use std::sync::{Arc, OnceLock};
 
+use ferrotorch_core::dtype::DType;
 use ferrotorch_core::error::{FerrotorchError, FerrotorchResult};
 use ferrotorch_core::gpu_dispatch::{GpuBackend, GpuBufferHandle, GpuRngState};
 
@@ -121,20 +122,32 @@ impl CudaBackendImpl {
             })
     }
 
-    /// Wrap a `CudaBuffer<f32>` into a type-erased [`GpuBufferHandle`].
+    /// Wrap a `CudaBuffer<f32>` into a type-erased [`GpuBufferHandle`],
+    /// tagging it `DType::F32` (the authoritative element-type tag).
     fn wrap_buffer(buf: CudaBuffer<f32>, ordinal: usize) -> GpuBufferHandle {
         let len = buf.len();
-        GpuBufferHandle::new(Box::new(buf), ordinal, len)
+        GpuBufferHandle::new(Box::new(buf), ordinal, len, DType::F32)
     }
 
-    /// Wrap a `CudaBuffer<f64>` into a type-erased [`GpuBufferHandle`].
+    /// Wrap a `CudaBuffer<f64>` into a type-erased [`GpuBufferHandle`],
+    /// tagging it `DType::F64`.
     fn wrap_buffer_f64(buf: CudaBuffer<f64>, ordinal: usize) -> GpuBufferHandle {
         let len = buf.len();
-        GpuBufferHandle::new(Box::new(buf), ordinal, len)
+        GpuBufferHandle::new(Box::new(buf), ordinal, len, DType::F64)
     }
 
     /// Extract a `&CudaBuffer<f32>` from a [`GpuBufferHandle`].
+    ///
+    /// The `dtype` tag is the fast, authoritative check (PyTorch parity); the
+    /// `downcast_ref` is the safety net that catches a tag/storage mismatch.
+    /// In later phases this tag check is what stops an i32 handle (also 4
+    /// bytes) from being silently read as f32.
     fn unwrap_buffer(handle: &GpuBufferHandle) -> FerrotorchResult<&CudaBuffer<f32>> {
+        if handle.dtype() != DType::F32 {
+            return Err(FerrotorchError::InvalidArgument {
+                message: format!("expected F32 buffer, handle is tagged {}", handle.dtype()),
+            });
+        }
         handle
             .downcast_ref::<CudaBuffer<f32>>()
             .ok_or(FerrotorchError::InvalidArgument {
@@ -144,6 +157,11 @@ impl CudaBackendImpl {
 
     /// Extract a `&mut CudaBuffer<f32>` from a [`GpuBufferHandle`].
     fn unwrap_buffer_mut(handle: &mut GpuBufferHandle) -> FerrotorchResult<&mut CudaBuffer<f32>> {
+        if handle.dtype() != DType::F32 {
+            return Err(FerrotorchError::InvalidArgument {
+                message: format!("expected F32 buffer, handle is tagged {}", handle.dtype()),
+            });
+        }
         handle
             .downcast_mut::<CudaBuffer<f32>>()
             .ok_or(FerrotorchError::InvalidArgument {
@@ -155,6 +173,11 @@ impl CudaBackendImpl {
     fn unwrap_buffer_f64_mut(
         handle: &mut GpuBufferHandle,
     ) -> FerrotorchResult<&mut CudaBuffer<f64>> {
+        if handle.dtype() != DType::F64 {
+            return Err(FerrotorchError::InvalidArgument {
+                message: format!("expected F64 buffer, handle is tagged {}", handle.dtype()),
+            });
+        }
         handle
             .downcast_mut::<CudaBuffer<f64>>()
             .ok_or(FerrotorchError::InvalidArgument {
@@ -164,6 +187,11 @@ impl CudaBackendImpl {
 
     /// Extract a `&CudaBuffer<f64>` from a [`GpuBufferHandle`].
     fn unwrap_buffer_f64(handle: &GpuBufferHandle) -> FerrotorchResult<&CudaBuffer<f64>> {
+        if handle.dtype() != DType::F64 {
+            return Err(FerrotorchError::InvalidArgument {
+                message: format!("expected F64 buffer, handle is tagged {}", handle.dtype()),
+            });
+        }
         handle
             .downcast_ref::<CudaBuffer<f64>>()
             .ok_or(FerrotorchError::InvalidArgument {
@@ -179,7 +207,10 @@ impl CudaBackendImpl {
     #[cfg(feature = "cuda")]
     fn wrap_buffer_bf16(buf: cudarc::driver::CudaSlice<u16>, ordinal: usize) -> GpuBufferHandle {
         let len = buf.len();
-        GpuBufferHandle::new(Box::new(buf), ordinal, len)
+        // bf16 storage is a `CudaSlice<u16>` bit pattern; the `DType::BF16` tag
+        // is what tells it apart from a (future) f16 `CudaSlice<u16>` — same
+        // byte width, distinguished only by the tag (PyTorch parity).
+        GpuBufferHandle::new(Box::new(buf), ordinal, len, DType::BF16)
     }
 
     /// Extract a `&CudaSlice<u16>` (bf16 bit-pattern storage) from a
@@ -188,6 +219,14 @@ impl CudaBackendImpl {
     fn unwrap_buffer_bf16(
         handle: &GpuBufferHandle,
     ) -> FerrotorchResult<&cudarc::driver::CudaSlice<u16>> {
+        // Tag check first: bf16 and (future) f16 both store as `CudaSlice<u16>`,
+        // so the `downcast_ref` alone cannot tell them apart. The `DType::BF16`
+        // tag is the authoritative discriminator (PyTorch parity).
+        if handle.dtype() != DType::BF16 {
+            return Err(FerrotorchError::InvalidArgument {
+                message: format!("expected BF16 buffer, handle is tagged {}", handle.dtype()),
+            });
+        }
         handle
             .downcast_ref::<cudarc::driver::CudaSlice<u16>>()
             .ok_or(FerrotorchError::InvalidArgument {
@@ -257,26 +296,20 @@ impl GpuBackend for CudaBackendImpl {
     }
 
     fn buffer_elem_size(&self, handle: &GpuBufferHandle) -> usize {
-        if Self::unwrap_buffer(handle).is_ok() {
-            4 // f32
-        } else if Self::unwrap_buffer_f64(handle).is_ok() {
-            8 // f64
-        } else if Self::unwrap_buffer_bf16(handle).is_ok() {
-            2 // bf16 (u16 bit pattern)
-        } else {
-            0
-        }
+        // PyTorch parity: byte width is derived from the authoritative dtype
+        // tag, not probed from the erased concrete buffer type.
+        handle.dtype().size_of()
     }
 
     fn cpu_to_gpu(
         &self,
         data: &[u8],
-        elem_size: usize,
+        dtype: DType,
         device: usize,
     ) -> FerrotorchResult<GpuBufferHandle> {
         let dev = self.device(device)?;
-        match elem_size {
-            4 => {
+        match dtype {
+            DType::F32 => {
                 let count = data.len() / 4;
                 // SAFETY:
                 // - The caller (ferrotorch-core) guarantees that `data` is the
@@ -315,7 +348,7 @@ impl GpuBackend for CudaBackendImpl {
                 let buf = crate::transfer::cpu_to_gpu(f32_data, dev).map_err(Self::map_gpu_err)?;
                 Ok(Self::wrap_buffer(buf, device))
             }
-            8 => {
+            DType::F64 => {
                 let count = data.len() / 8;
                 // SAFETY:
                 // - The caller (ferrotorch-core) guarantees that `data` is the
@@ -346,8 +379,8 @@ impl GpuBackend for CudaBackendImpl {
                 let buf = crate::transfer::cpu_to_gpu(f64_data, dev).map_err(Self::map_gpu_err)?;
                 Ok(Self::wrap_buffer_f64(buf, device))
             }
-            2 => {
-                // elem_size == 2: bf16 bit patterns stored as u16. The handle
+            DType::BF16 => {
+                // bf16 bit patterns stored as u16. The handle
                 // carries a raw `CudaSlice<u16>` (not a `CudaBuffer<T>` wrapper)
                 // so every consumer in this crate — `softmax_bf16_f32`,
                 // `add_bf16_f32`, `gpu_matmul_bf16_bf16`, all `*_bf16` PTX
@@ -381,8 +414,15 @@ impl GpuBackend for CudaBackendImpl {
                     .map_err(|e| Self::map_gpu_err(crate::error::GpuError::Driver(e)))?;
                 Ok(Self::wrap_buffer_bf16(slice, device))
             }
+            // PyTorch parity (rust-gpu-discipline §3): unsupported (dtype,
+            // CUDA) combinations return a structured error rather than a
+            // silent CPU detour. f16 / integer / bool land here until their
+            // respective dtype-parity phases add real CUDA buffer support.
             other => Err(FerrotorchError::InvalidArgument {
-                message: format!("cpu_to_gpu: unsupported elem_size {other} (expected 2, 4, or 8)"),
+                message: format!(
+                    "cpu_to_gpu: dtype {other} not supported on CUDA \
+                     (supported: F32, F64, BF16)"
+                ),
             }),
         }
     }
@@ -390,12 +430,12 @@ impl GpuBackend for CudaBackendImpl {
     fn cpu_to_gpu_pinned(
         &self,
         data: &[u8],
-        elem_size: usize,
+        dtype: DType,
         device: usize,
     ) -> FerrotorchResult<GpuBufferHandle> {
         let dev = self.device(device)?;
-        match elem_size {
-            4 => {
+        match dtype {
+            DType::F32 => {
                 let count = data.len() / 4;
                 // SAFETY:
                 // - The caller (ferrotorch-core) guarantees that `data` is the
@@ -426,12 +466,12 @@ impl GpuBackend for CudaBackendImpl {
                     crate::transfer::cpu_to_gpu_pinned(f32_data, dev).map_err(Self::map_gpu_err)?;
                 Ok(Self::wrap_buffer(buf, device))
             }
-            8 => {
+            DType::F64 => {
                 let count = data.len() / 8;
                 // SAFETY:
                 // - The caller (ferrotorch-core) guarantees that `data` is the
                 //   byte serialisation of a contiguous `&[f64]`; this is the
-                //   `elem_size == 8` arm's precondition documented at the
+                //   `DType::F64` arm's precondition documented at the
                 //   trait method (see gpu_dispatch.rs).
                 // - f64 has size 8 and align 8 (Rust reference: primitive data
                 //   layout). `count = data.len() / 8` is exact; the source
@@ -450,9 +490,13 @@ impl GpuBackend for CudaBackendImpl {
                     crate::transfer::cpu_to_gpu_pinned(f64_data, dev).map_err(Self::map_gpu_err)?;
                 Ok(Self::wrap_buffer_f64(buf, device))
             }
+            // PyTorch parity: the pinned path supports the same f32/f64 dtypes
+            // as before (no pinned bf16 transfer existed); any other dtype is a
+            // structured error, not a silent fallback.
             other => Err(FerrotorchError::InvalidArgument {
                 message: format!(
-                    "cpu_to_gpu_pinned: unsupported elem_size {other} (expected 4 or 8)"
+                    "cpu_to_gpu_pinned: dtype {other} not supported on CUDA \
+                     (supported: F32, F64)"
                 ),
             }),
         }
@@ -530,18 +574,10 @@ impl GpuBackend for CudaBackendImpl {
         // Clone via GPU -> CPU -> GPU round-trip.
         // Correct but not optimal; a device-to-device memcpy would be better.
         let bytes = self.gpu_to_cpu(handle)?;
-        // Determine elem_size from the concrete buffer type. f64 is checked
-        // first because `unwrap_buffer_bf16` (CudaSlice<u16>) and the
-        // `CudaBuffer<f32>` default both map to 4-byte interpretations if
-        // checked in the wrong order — but `downcast_ref` already enforces
-        // the concrete type, so order only matters for the default arm.
-        let elem_size = self.buffer_elem_size(handle);
-        if elem_size == 0 {
-            return Err(FerrotorchError::InvalidArgument {
-                message: "clone_buffer: handle has no recognised dtype".into(),
-            });
-        }
-        self.cpu_to_gpu(&bytes, elem_size, handle.device_ordinal())
+        // The dtype tag is authoritative: re-upload under the source handle's
+        // own dtype so the clone carries the identical tag (PyTorch parity —
+        // a clone preserves the ScalarType, never re-infers it from bytes).
+        self.cpu_to_gpu(&bytes, handle.dtype(), handle.device_ordinal())
     }
 
     fn has_inf_nan_f32(&self, a: &GpuBufferHandle) -> FerrotorchResult<bool> {
@@ -556,28 +592,30 @@ impl GpuBackend for CudaBackendImpl {
     fn alloc_zeros(
         &self,
         len: usize,
-        elem_size: usize,
+        dtype: DType,
         device: usize,
     ) -> FerrotorchResult<GpuBufferHandle> {
         let dev = self.device(device)?;
-        match elem_size {
-            2 => {
+        match dtype {
+            DType::BF16 => {
                 // bf16 (u16 bit pattern).
                 let slice =
                     crate::transfer::alloc_zeros_bf16(len, dev).map_err(Self::map_gpu_err)?;
                 Ok(Self::wrap_buffer_bf16(slice, device))
             }
-            4 => {
+            DType::F32 => {
                 let buf = crate::transfer::alloc_zeros_f32(len, dev).map_err(Self::map_gpu_err)?;
                 Ok(Self::wrap_buffer(buf, device))
             }
-            8 => {
+            DType::F64 => {
                 let buf = crate::transfer::alloc_zeros_f64(len, dev).map_err(Self::map_gpu_err)?;
                 Ok(Self::wrap_buffer_f64(buf, device))
             }
+            // PyTorch parity: unsupported (dtype, CUDA) → structured error.
             other => Err(FerrotorchError::InvalidArgument {
                 message: format!(
-                    "alloc_zeros: unsupported elem_size {other} (expected 2, 4, or 8)"
+                    "alloc_zeros: dtype {other} not supported on CUDA \
+                     (supported: F32, F64, BF16)"
                 ),
             }),
         }
@@ -4819,7 +4857,7 @@ mod tests {
             )
         };
 
-        let handle = backend.cpu_to_gpu(bytes, 4, 0).expect("cpu_to_gpu");
+        let handle = backend.cpu_to_gpu(bytes, DType::F32, 0).expect("cpu_to_gpu");
         assert_eq!(handle.len(), 5);
         assert_eq!(handle.device_ordinal(), 0);
 
@@ -4878,8 +4916,8 @@ mod tests {
         let b_bytes: &[u8] =
             unsafe { std::slice::from_raw_parts(b_data.as_ptr() as *const u8, b_data.len() * 4) };
 
-        let a_handle = backend.cpu_to_gpu(a_bytes, 4, 0).expect("cpu_to_gpu a");
-        let b_handle = backend.cpu_to_gpu(b_bytes, 4, 0).expect("cpu_to_gpu b");
+        let a_handle = backend.cpu_to_gpu(a_bytes, DType::F32, 0).expect("cpu_to_gpu a");
+        let b_handle = backend.cpu_to_gpu(b_bytes, DType::F32, 0).expect("cpu_to_gpu b");
 
         let result = backend.add_f32(&a_handle, &b_handle).expect("add_f32");
         assert_eq!(result.len(), 4);
@@ -4950,8 +4988,8 @@ mod tests {
         let b_bytes: &[u8] =
             unsafe { std::slice::from_raw_parts(b_data.as_ptr() as *const u8, b_data.len() * 4) };
 
-        let a_handle = backend.cpu_to_gpu(a_bytes, 4, 0).expect("cpu_to_gpu a");
-        let b_handle = backend.cpu_to_gpu(b_bytes, 4, 0).expect("cpu_to_gpu b");
+        let a_handle = backend.cpu_to_gpu(a_bytes, DType::F32, 0).expect("cpu_to_gpu a");
+        let b_handle = backend.cpu_to_gpu(b_bytes, DType::F32, 0).expect("cpu_to_gpu b");
 
         let result = backend
             .matmul_f32(&a_handle, &b_handle, 2, 3, 2)
@@ -5015,7 +5053,7 @@ mod tests {
             )
         };
 
-        let handle = backend.cpu_to_gpu(bytes, 2, 0).expect("cpu_to_gpu bf16");
+        let handle = backend.cpu_to_gpu(bytes, DType::BF16, 0).expect("cpu_to_gpu bf16");
         assert_eq!(handle.len(), host.len());
         assert_eq!(handle.device_ordinal(), 0);
         assert_eq!(backend.buffer_elem_size(&handle), 2);
@@ -5053,7 +5091,7 @@ mod tests {
     fn test_alloc_zeros_bf16() {
         ensure_init();
         let backend = gpu_dispatch::gpu_backend().expect("backend registered");
-        let handle = backend.alloc_zeros(8, 2, 0).expect("alloc_zeros bf16");
+        let handle = backend.alloc_zeros(8, DType::BF16, 0).expect("alloc_zeros bf16");
         assert_eq!(handle.len(), 8);
         assert_eq!(backend.buffer_elem_size(&handle), 2);
 
@@ -5093,8 +5131,8 @@ mod tests {
         let b_bytes: &[u8] =
             unsafe { std::slice::from_raw_parts(b_bf16.as_ptr() as *const u8, b_bf16.len() * 2) };
 
-        let a_handle = backend.cpu_to_gpu(a_bytes, 2, 0).expect("cpu_to_gpu a");
-        let b_handle = backend.cpu_to_gpu(b_bytes, 2, 0).expect("cpu_to_gpu b");
+        let a_handle = backend.cpu_to_gpu(a_bytes, DType::BF16, 0).expect("cpu_to_gpu a");
+        let b_handle = backend.cpu_to_gpu(b_bytes, DType::BF16, 0).expect("cpu_to_gpu b");
 
         let result = backend
             .matmul_bf16_bf16(&a_handle, &b_handle, 2, 3, 2)

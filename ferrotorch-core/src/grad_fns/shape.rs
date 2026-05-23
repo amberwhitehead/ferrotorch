@@ -445,8 +445,14 @@ pub fn expand<T: Float>(input: &Tensor<T>, new_shape: &[usize]) -> FerrotorchRes
     if input.is_cuda() && (is_f32::<T>() || is_f64::<T>()) {
         if let Some(backend) = crate::gpu_dispatch::gpu_backend() {
             let device_ord = input.gpu_handle()?.device_ordinal();
-            let elem_size = if is_f64::<T>() { 8 } else { 4 };
-            let zeros = backend.alloc_zeros(1, elem_size, device_ord)?;
+            // This GPU fast path is gated on `is_f32 || is_f64` above, so the
+            // scalar zeros buffer is tagged to match (f64 → F64, else F32).
+            let zeros_dtype = if is_f64::<T>() {
+                crate::dtype::DType::F64
+            } else {
+                crate::dtype::DType::F32
+            };
+            let zeros = backend.alloc_zeros(1, zeros_dtype, device_ord)?;
             let expanded = if is_f64::<T>() {
                 backend.broadcast_add_f64(input.gpu_handle()?, &zeros, in_shape, &[1], new_shape)?
             } else {
@@ -687,7 +693,7 @@ impl<T: Float> GradFn<T> for SplitBackward<T> {
                 let orig_numel: usize = orig_shape.iter().product();
                 let device_ord = grad_output.gpu_handle()?.device_ordinal();
 
-                let mut zeros_handle = backend.alloc_zeros(orig_numel, elem_size, device_ord)?;
+                let mut zeros_handle = backend.alloc_zeros(orig_numel, T::dtype(), device_ord)?;
 
                 let go_handle = grad_output.gpu_handle()?;
                 let chunk_numel = grad_output.numel();
@@ -816,7 +822,7 @@ pub fn cat<T: Float>(tensors: &[Tensor<T>], axis: isize) -> FerrotorchResult<Ten
             let out_numel: usize = out_shape.iter().product();
             let device_ord = tensors[0].gpu_handle()?.device_ordinal();
 
-            let mut out_handle = backend.alloc_zeros(out_numel, elem_size, device_ord)?;
+            let mut out_handle = backend.alloc_zeros(out_numel, T::dtype(), device_ord)?;
 
             let mut offset = 0usize;
             for t in tensors {

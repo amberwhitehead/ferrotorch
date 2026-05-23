@@ -257,7 +257,8 @@ fn mean_inner<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
                             inv_n_data.len() * 4,
                         )
                     };
-                    let inv_handle = backend.cpu_to_gpu(inv_n_bytes, 4, ordinal)?;
+                    let inv_handle =
+                        backend.cpu_to_gpu(inv_n_bytes, crate::dtype::DType::F32, ordinal)?;
                     Ok::<_, crate::error::FerrotorchError>(backend.mul_f32(&sum_handle, &inv_handle)?)
                 },
                 f64 => {
@@ -271,7 +272,8 @@ fn mean_inner<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
                             inv_n_data.len() * 8,
                         )
                     };
-                    let inv_handle = backend.cpu_to_gpu(inv_n_bytes, 8, ordinal)?;
+                    let inv_handle =
+                        backend.cpu_to_gpu(inv_n_bytes, crate::dtype::DType::F64, ordinal)?;
                     Ok::<_, crate::error::FerrotorchError>(backend.mul_f64(&sum_handle, &inv_handle)?)
                 },
                 bf16 => Ok::<_, crate::error::FerrotorchError>(

@@ -60,7 +60,9 @@ fn upload_f32(data: &[f32]) -> gpu_dispatch::GpuBufferHandle {
     // contract as every other test in the suite (backend_impl.rs tests).
     let bytes: &[u8] =
         unsafe { std::slice::from_raw_parts(data.as_ptr() as *const u8, data.len() * 4) };
-    backend.cpu_to_gpu(bytes, 4, 0).expect("upload f32")
+    backend
+        .cpu_to_gpu(bytes, ferrotorch_core::DType::F32, 0)
+        .expect("upload f32")
 }
 
 /// Download a GPU f32 handle back to a `Vec<f32>`.
@@ -97,9 +99,11 @@ fn upload_bf16(data: &[f32]) -> gpu_dispatch::GpuBufferHandle {
     let bf16_vals: Vec<u16> = data.iter().map(|&v| f32_to_bf16_bits(v)).collect();
     let bytes: &[u8] =
         unsafe { std::slice::from_raw_parts(bf16_vals.as_ptr() as *const u8, bf16_vals.len() * 2) };
-    // elem_size = 2 so the backend stores them as CudaBuffer<u16> / CudaSlice<u16>.
+    // DType::BF16 so the backend stores them as CudaSlice<u16>.
     let backend = gpu_dispatch::gpu_backend().expect("backend registered");
-    backend.cpu_to_gpu(bytes, 2, 0).expect("upload bf16")
+    backend
+        .cpu_to_gpu(bytes, ferrotorch_core::DType::BF16, 0)
+        .expect("upload bf16")
 }
 
 /// Reference: CPU matrix multiply C = A @ B (row-major, f32).

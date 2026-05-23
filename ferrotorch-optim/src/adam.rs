@@ -10,6 +10,7 @@ use std::any::TypeId;
 use std::collections::HashMap;
 use std::collections::hash_map::Entry;
 
+use ferrotorch_core::dtype::DType;
 use ferrotorch_core::gpu_dispatch::{GpuBufferHandle, gpu_backend};
 use ferrotorch_core::numeric_cast::cast;
 use ferrotorch_core::{FerrotorchError, FerrotorchResult, Float, Tensor, no_grad};
@@ -449,8 +450,10 @@ impl<T: Float> Optimizer<T> for Adam<T> {
                     // satisfies clippy::map_entry, which would otherwise
                     // flag the contains_key+insert pair.
                     if let Entry::Vacant(slot) = self.state.entry(key) {
-                        let gpu_m = backend.alloc_zeros(numel, std::mem::size_of::<f32>(), ordinal);
-                        let gpu_v = backend.alloc_zeros(numel, std::mem::size_of::<f32>(), ordinal);
+                        // GPU fast-path is gated on `is_f32`, so the Adam
+                        // moment buffers are F32.
+                        let gpu_m = backend.alloc_zeros(numel, DType::F32, ordinal);
+                        let gpu_v = backend.alloc_zeros(numel, DType::F32, ordinal);
                         match (gpu_m, gpu_v) {
                             (Ok(m), Ok(v)) => {
                                 slot.insert(AdamParamState {

@@ -34,7 +34,7 @@ fn upload_f32_to_gpu(
     // underlying allocation; the resulting slice does not outlive `data`.
     let bytes: &[u8] =
         unsafe { std::slice::from_raw_parts(data.as_ptr().cast::<u8>(), data.len() * 4) };
-    backend.cpu_to_gpu(bytes, 4, ordinal)
+    backend.cpu_to_gpu(bytes, crate::dtype::DType::F32, ordinal)
 }
 
 /// For `ScatterBackward` grad_input: build a flat boolean mask (1.0 at positions

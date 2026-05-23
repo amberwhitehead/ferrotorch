@@ -1019,9 +1019,12 @@ mod test_backend_impl {
         let backend = gpu_dispatch::gpu_backend().expect("backend");
         let host: Vec<f32> = vec![1.0, 2.0, 3.0, 4.0, 5.0];
         let bytes = f32_to_bytes(&host);
-        let handle = backend.cpu_to_gpu(&bytes, 4, 0).expect("cpu_to_gpu f32");
+        let handle = backend
+            .cpu_to_gpu(&bytes, ferrotorch_core::DType::F32, 0)
+            .expect("cpu_to_gpu f32");
         assert_eq!(handle.len(), 5);
         assert_eq!(handle.device_ordinal(), 0);
+        assert_eq!(handle.dtype(), ferrotorch_core::DType::F32);
 
         let back_bytes = backend.gpu_to_cpu(&handle).expect("gpu_to_cpu f32");
         let back = bytes_to_f32(&back_bytes);
@@ -1034,8 +1037,11 @@ mod test_backend_impl {
         let backend = gpu_dispatch::gpu_backend().expect("backend");
         let host: Vec<f64> = vec![1.1, 2.2, 3.3];
         let bytes = f64_to_bytes(&host);
-        let handle = backend.cpu_to_gpu(&bytes, 8, 0).expect("cpu_to_gpu f64");
+        let handle = backend
+            .cpu_to_gpu(&bytes, ferrotorch_core::DType::F64, 0)
+            .expect("cpu_to_gpu f64");
         assert_eq!(handle.len(), 3);
+        assert_eq!(handle.dtype(), ferrotorch_core::DType::F64);
 
         let back_bytes = backend.gpu_to_cpu(&handle).expect("gpu_to_cpu f64");
         let back = bytes_to_f64(&back_bytes);
@@ -1048,19 +1054,24 @@ mod test_backend_impl {
     }
 
     #[test]
-    fn backend_cpu_to_gpu_invalid_elem_size_errors() {
+    fn backend_cpu_to_gpu_unsupported_dtype_errors() {
         ensure_init();
         let backend = gpu_dispatch::gpu_backend().expect("backend");
         let bytes = vec![0u8; 4];
-        let result = backend.cpu_to_gpu(&bytes, 3, 0); // elem_size 3 is invalid
-        assert!(result.is_err(), "invalid elem_size should return Err");
+        // I32 has no CUDA buffer support in Phase 0 (PyTorch parity: unsupported
+        // (dtype, CUDA) → structured Err, never a silent CPU detour). It is also
+        // 4 bytes, so this proves dispatch keys on the tag, not the byte width.
+        let result = backend.cpu_to_gpu(&bytes, ferrotorch_core::DType::I32, 0);
+        assert!(result.is_err(), "unsupported dtype should return Err");
     }
 
     #[test]
     fn backend_alloc_zeros_f32() {
         ensure_init();
         let backend = gpu_dispatch::gpu_backend().expect("backend");
-        let handle = backend.alloc_zeros(8, 4, 0).expect("alloc_zeros f32");
+        let handle = backend
+            .alloc_zeros(8, ferrotorch_core::DType::F32, 0)
+            .expect("alloc_zeros f32");
         assert_eq!(handle.len(), 8);
         let back_bytes = backend.gpu_to_cpu(&handle).expect("gpu_to_cpu");
         let back = bytes_to_f32(&back_bytes);
@@ -1074,16 +1085,19 @@ mod test_backend_impl {
     fn backend_alloc_zeros_f64() {
         ensure_init();
         let backend = gpu_dispatch::gpu_backend().expect("backend");
-        let handle = backend.alloc_zeros(4, 8, 0).expect("alloc_zeros f64");
+        let handle = backend
+            .alloc_zeros(4, ferrotorch_core::DType::F64, 0)
+            .expect("alloc_zeros f64");
         assert_eq!(handle.len(), 4);
     }
 
     #[test]
-    fn backend_alloc_zeros_invalid_elem_size_errors() {
+    fn backend_alloc_zeros_unsupported_dtype_errors() {
         ensure_init();
         let backend = gpu_dispatch::gpu_backend().expect("backend");
-        let result = backend.alloc_zeros(4, 3, 0);
-        assert!(result.is_err(), "invalid elem_size should return Err");
+        // I32 is unsupported on CUDA in Phase 0 → structured Err.
+        let result = backend.alloc_zeros(4, ferrotorch_core::DType::I32, 0);
+        assert!(result.is_err(), "unsupported dtype should return Err");
     }
 
     #[test]
@@ -1092,7 +1106,9 @@ mod test_backend_impl {
         let backend = gpu_dispatch::gpu_backend().expect("backend");
         let host: Vec<f32> = vec![1.0, 2.0, 3.0];
         let bytes = f32_to_bytes(&host);
-        let handle = backend.cpu_to_gpu(&bytes, 4, 0).expect("cpu_to_gpu");
+        let handle = backend
+            .cpu_to_gpu(&bytes, ferrotorch_core::DType::F32, 0)
+            .expect("cpu_to_gpu");
         let cloned = backend.clone_buffer(&handle).expect("clone_buffer");
         assert_eq!(cloned.len(), handle.len());
         assert_eq!(cloned.device_ordinal(), handle.device_ordinal());
@@ -1399,7 +1415,9 @@ mod test_backend_impl {
         data: &[f32],
     ) -> ferrotorch_core::gpu_dispatch::GpuBufferHandle {
         let bytes = f32_to_bytes(data);
-        backend.cpu_to_gpu(&bytes, 4, 0).expect("upload_f32")
+        backend
+            .cpu_to_gpu(&bytes, ferrotorch_core::DType::F32, 0)
+            .expect("upload_f32")
     }
 
     fn upload_f64(
@@ -1407,7 +1425,9 @@ mod test_backend_impl {
         data: &[f64],
     ) -> ferrotorch_core::gpu_dispatch::GpuBufferHandle {
         let bytes = f64_to_bytes(data);
-        backend.cpu_to_gpu(&bytes, 8, 0).expect("upload_f64")
+        backend
+            .cpu_to_gpu(&bytes, ferrotorch_core::DType::F64, 0)
+            .expect("upload_f64")
     }
 
     fn download_f32(

@@ -45,7 +45,7 @@ fn bytes_to_bf16(bytes: &[u8]) -> Vec<bf16> {
 
 fn upload(data: &[bf16], backend: &dyn GpuBackend) -> GpuBufferHandle {
     backend
-        .cpu_to_gpu(bf16_slice_bytes(data), 2, 0)
+        .cpu_to_gpu(bf16_slice_bytes(data), ferrotorch_core::DType::BF16, 0)
         .expect("cpu_to_gpu bf16")
 }
 

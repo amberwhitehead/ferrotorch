@@ -1410,7 +1410,9 @@ fn gpu_buffer_handle_any_round_trip() {
     // downcast_ref, downcast_mut, into_inner) without needing a real
     // GPU.
     let inner: Vec<u8> = vec![0u8; 16];
-    let mut h = GpuBufferHandle::new(Box::new(inner), 0, 16);
+    // Inner type is arbitrary (this tests type-erasure mechanics, not dtype
+    // dispatch); tag with F32 as a placeholder.
+    let mut h = GpuBufferHandle::new(Box::new(inner), 0, 16, ferrotorch_core::DType::F32);
     assert_eq!(h.len(), 16);
     assert!(!h.is_empty());
     assert_eq!(h.device_ordinal(), 0);
@@ -1426,7 +1428,7 @@ fn gpu_buffer_handle_any_round_trip() {
 
 #[test]
 fn gpu_buffer_handle_empty() {
-    let h = GpuBufferHandle::new(Box::new(Vec::<u8>::new()), 0, 0);
+    let h = GpuBufferHandle::new(Box::new(Vec::<u8>::new()), 0, 0, ferrotorch_core::DType::F32);
     assert!(h.is_empty());
     assert_eq!(h.len(), 0);
 }

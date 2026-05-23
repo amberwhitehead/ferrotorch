@@ -7,6 +7,7 @@
 use std::any::Any;
 use std::sync::OnceLock;
 
+use crate::dtype::DType;
 use crate::error::{FerrotorchError, FerrotorchResult};
 
 // ---------------------------------------------------------------------------
@@ -83,24 +84,50 @@ impl GpuRngState {
 /// ferrotorch-core doesn't know what's inside -- the GPU backend provides
 /// the concrete type (e.g., `CudaBuffer<f32>`). We store it as
 /// `Box<dyn Any + Send + Sync>` for type erasure.
+///
+/// # The `dtype` tag (PyTorch parity)
+///
+/// PyTorch's `StorageImpl` holds raw bytes with no dtype; the `ScalarType`
+/// tag lives above storage on `TensorImpl::data_type_` as runtime metadata.
+/// `Half` and `BFloat16` are both 2 bytes and are told apart *only* by that
+/// tag, never by byte width. This handle mirrors that: [`Self::dtype`] is the
+/// authoritative element-type tag. Backends dispatch on the tag, not on the
+/// erased concrete type or the byte width — so f16 vs. bf16 (both 2 bytes)
+/// and (in later phases) i32 vs. f32 (both 4 bytes) never collide.
 pub struct GpuBufferHandle {
     pub(crate) inner: Box<dyn Any + Send + Sync>,
     pub(crate) device_ordinal: usize,
     pub(crate) len: usize,
+    pub(crate) dtype: DType,
 }
 
 impl GpuBufferHandle {
-    pub fn new(inner: Box<dyn Any + Send + Sync>, device_ordinal: usize, len: usize) -> Self {
+    pub fn new(
+        inner: Box<dyn Any + Send + Sync>,
+        device_ordinal: usize,
+        len: usize,
+        dtype: DType,
+    ) -> Self {
         Self {
             inner,
             device_ordinal,
             len,
+            dtype,
         }
     }
 
     #[inline]
     pub fn device_ordinal(&self) -> usize {
         self.device_ordinal
+    }
+
+    /// The authoritative element-type tag for the bytes this handle owns.
+    ///
+    /// This is the PyTorch `ScalarType` analog: it, not the byte width or the
+    /// erased concrete buffer type, decides how the data is interpreted.
+    #[inline]
+    pub fn dtype(&self) -> DType {
+        self.dtype
     }
 
     #[inline]
@@ -133,6 +160,7 @@ impl std::fmt::Debug for GpuBufferHandle {
             .field("inner", &"<dyn Any + Send + Sync>")
             .field("device", &self.device_ordinal)
             .field("len", &self.len)
+            .field("dtype", &self.dtype)
             .finish()
     }
 }
@@ -144,10 +172,15 @@ pub trait GpuBackend: Send + Sync {
     /// Downcast to `&dyn Any` for backend-specific access (e.g., getting the
     /// underlying `GpuDevice` for CUDA graph capture).
     fn as_any(&self) -> &dyn std::any::Any;
+    /// Copy CPU bytes to GPU, tagging the resulting handle with `dtype`.
+    ///
+    /// `dtype` is the PyTorch `ScalarType` analog: it is the authoritative
+    /// element-type tag for `data` and decides the concrete on-device buffer
+    /// type. The element size is derived internally via `dtype.size_of()`.
     fn cpu_to_gpu(
         &self,
         data: &[u8],
-        elem_size: usize,
+        dtype: DType,
         device: usize,
     ) -> FerrotorchResult<GpuBufferHandle>;
     fn gpu_to_cpu(&self, handle: &GpuBufferHandle) -> FerrotorchResult<Vec<u8>>;
@@ -166,28 +199,34 @@ pub trait GpuBackend: Send + Sync {
     }
 
     /// Get the element size (in bytes) of the data stored in a buffer handle.
-    /// Returns 0 if unknown.
-    fn buffer_elem_size(&self, _handle: &GpuBufferHandle) -> usize {
-        0
+    ///
+    /// Derived from the handle's authoritative [`GpuBufferHandle::dtype`] tag
+    /// (PyTorch parity: byte width is a function of the `ScalarType`, never the
+    /// other way around). Returns 0 if unknown.
+    fn buffer_elem_size(&self, handle: &GpuBufferHandle) -> usize {
+        handle.dtype().size_of()
     }
 
     /// Copy CPU data to GPU via pinned (page-locked) host memory.
     ///
     /// ~2x faster than [`cpu_to_gpu`] for large buffers due to DMA transfers.
-    /// Falls back to regular `cpu_to_gpu` by default.
+    /// Falls back to regular `cpu_to_gpu` by default. `dtype` is the
+    /// authoritative element-type tag for `data` (see [`Self::cpu_to_gpu`]).
     fn cpu_to_gpu_pinned(
         &self,
         data: &[u8],
-        elem_size: usize,
+        dtype: DType,
         device: usize,
     ) -> FerrotorchResult<GpuBufferHandle> {
-        self.cpu_to_gpu(data, elem_size, device)
+        self.cpu_to_gpu(data, dtype, device)
     }
     fn clone_buffer(&self, handle: &GpuBufferHandle) -> FerrotorchResult<GpuBufferHandle>;
+    /// Allocate a zero-initialised device buffer of `len` elements, tagged
+    /// with `dtype`. Element size is derived via `dtype.size_of()`.
     fn alloc_zeros(
         &self,
         len: usize,
-        elem_size: usize,
+        dtype: DType,
         device: usize,
     ) -> FerrotorchResult<GpuBufferHandle>;
 
@@ -3540,17 +3579,22 @@ mod tests {
 
     #[test]
     fn test_gpu_buffer_handle() {
-        let handle = GpuBufferHandle::new(Box::new(42u64), 0, 100);
+        // Inner type is arbitrary here (this exercises the type-erasure
+        // mechanics, not dtype dispatch); tag with F32 as a placeholder.
+        let handle = GpuBufferHandle::new(Box::new(42u64), 0, 100, DType::F32);
         assert_eq!(handle.device_ordinal(), 0);
         assert_eq!(handle.len(), 100);
         assert!(!handle.is_empty());
         assert_eq!(handle.downcast_ref::<u64>(), Some(&42));
+        assert_eq!(handle.dtype(), DType::F32);
     }
 
     #[test]
     fn test_gpu_buffer_handle_debug() {
-        let handle = GpuBufferHandle::new(Box::new(()), 1, 50);
+        let handle = GpuBufferHandle::new(Box::new(()), 1, 50, DType::F64);
         let s = format!("{handle:?}");
         assert!(s.contains("device: 1"));
+        // The Debug impl now surfaces the dtype tag.
+        assert!(s.contains("dtype"));
     }
 }

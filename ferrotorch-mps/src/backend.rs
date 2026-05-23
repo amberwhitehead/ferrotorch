@@ -36,6 +36,7 @@
 
 use std::sync::Arc;
 
+use ferrotorch_core::dtype::DType;
 use ferrotorch_core::error::{FerrotorchError, FerrotorchResult};
 use ferrotorch_core::gpu_dispatch::{GpuBackend, GpuBufferHandle};
 use objc2::rc::Retained;
@@ -281,7 +282,9 @@ impl MtlBackend {
     /// Wrap an `Arc<MtlBuffer>` in a `GpuBufferHandle`.
     fn wrap_buffer(buf: Arc<MtlBuffer>, device_ordinal: usize) -> GpuBufferHandle {
         let len = buf.elem_count;
-        GpuBufferHandle::new(Box::new(buf), device_ordinal, len)
+        // This backend's buffers are always f32 (see `buffer_elem_size`); tag
+        // the handle accordingly so the authoritative dtype matches the bytes.
+        GpuBufferHandle::new(Box::new(buf), device_ordinal, len, DType::F32)
     }
 
     /// Downcast a `GpuBufferHandle` to `&Arc<MtlBuffer>`.
@@ -429,9 +432,10 @@ impl GpuBackend for MtlBackend {
     fn cpu_to_gpu(
         &self,
         data: &[u8],
-        elem_size: usize,
+        dtype: DType,
         device: usize,
     ) -> FerrotorchResult<GpuBufferHandle> {
+        let elem_size = dtype.size_of();
         let elem_count = data.len().checked_div(elem_size).unwrap_or(0);
         let buf = self.alloc_buffer(data.len(), elem_count)?;
 
@@ -464,16 +468,16 @@ impl GpuBackend for MtlBackend {
 
     fn clone_buffer(&self, handle: &GpuBufferHandle) -> FerrotorchResult<GpuBufferHandle> {
         let src_bytes = self.gpu_to_cpu(handle)?;
-        self.cpu_to_gpu(&src_bytes, 4, handle.device_ordinal())
+        self.cpu_to_gpu(&src_bytes, handle.dtype(), handle.device_ordinal())
     }
 
     fn alloc_zeros(
         &self,
         len: usize,
-        elem_size: usize,
+        dtype: DType,
         device: usize,
     ) -> FerrotorchResult<GpuBufferHandle> {
-        let byte_len = len * elem_size;
+        let byte_len = len * dtype.size_of();
         let buf = self.alloc_buffer(byte_len, len)?;
 
         // Shared-mode buffers are zero-initialised by the Metal runtime.
@@ -1221,7 +1225,7 @@ mod tests {
 
         let src: Vec<f32> = vec![1.0_f32, 2.0, 3.0, 4.0];
         let bytes: Vec<u8> = src.iter().flat_map(|f| f.to_le_bytes()).collect();
-        let handle = backend.cpu_to_gpu(&bytes, 4, 0).expect("cpu_to_gpu");
+        let handle = backend.cpu_to_gpu(&bytes, DType::F32, 0).expect("cpu_to_gpu");
         assert_eq!(handle.len(), 4);
 
         let back = backend.gpu_to_cpu(&handle).expect("gpu_to_cpu");

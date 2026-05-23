@@ -61,7 +61,9 @@ fn upload_bf16(data: &[f32]) -> gpu_dispatch::GpuBufferHandle {
     let bytes: &[u8] =
         unsafe { std::slice::from_raw_parts(bf16_vals.as_ptr() as *const u8, bf16_vals.len() * 2) };
     let backend = gpu_dispatch::gpu_backend().expect("backend");
-    backend.cpu_to_gpu(bytes, 2, 0).expect("upload bf16")
+    backend
+        .cpu_to_gpu(bytes, ferrotorch_core::DType::BF16, 0)
+        .expect("upload bf16")
 }
 
 /// Download f32 GPU handle.

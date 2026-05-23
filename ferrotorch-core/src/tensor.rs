@@ -816,7 +816,7 @@ impl<T: Float> Tensor<T> {
                         std::mem::size_of_val(cpu_data),
                     )
                 };
-                let handle = backend.cpu_to_gpu(bytes, std::mem::size_of::<T>(), ordinal)?;
+                let handle = backend.cpu_to_gpu(bytes, T::dtype(), ordinal)?;
                 let storage = TensorStorage::gpu(handle);
                 if needs_grad_fn {
                     let grad_fn = Arc::new(ToDeviceBackward {
@@ -1194,7 +1194,7 @@ impl<T: Float> Tensor<T> {
                     std::mem::size_of_val(new_data),
                 )
             };
-            let new_handle = backend.cpu_to_gpu(bytes, std::mem::size_of::<T>(), ordinal)?;
+            let new_handle = backend.cpu_to_gpu(bytes, T::dtype(), ordinal)?;
             storage.data = crate::storage::StorageBuffer::Gpu(new_handle);
         } else {
             // is_gpu() branch above already routed Gpu storage; try_as_mut_slice
