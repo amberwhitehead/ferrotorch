@@ -2643,6 +2643,149 @@ pub fn gpu_matmul_bf16_bf16(
     Err(GpuError::NoCudaFeature)
 }
 
+// ---------------------------------------------------------------------------
+// F16 (IEEE float16) storage matmul via cublasGemmEx
+// ---------------------------------------------------------------------------
+
+/// Matrix multiply on f16-stored operands with f32 compute.
+///
+/// `A`, `B` are row-major `[M,K]` and `[K,N]`, each element stored as IEEE
+/// float16 (`u16` bit layout). `C = A @ B` is written back as f16. The
+/// `cublasGemmEx` call uses operand/output type `CUDA_R_16F` and compute
+/// type `CUBLAS_COMPUTE_32F`, so dot products accumulate in f32 then round
+/// back to f16 for storage.
+///
+/// This is the f16 sibling of [`gpu_matmul_bf16_bf16`]: byte-identical
+/// launch shape, the *only* difference is the cuBLAS dtype enum
+/// (`CUDA_R_16F` vs `CUDA_R_16BF`). f16 buffers are tagged `DType::F16`
+/// on the handle (crosslink #1185 Phase 1), distinguishing them from bf16
+/// despite the shared `CudaSlice<u16>` storage.
+#[cfg(feature = "cuda")]
+pub fn gpu_matmul_f16_f16(
+    a: &cudarc::driver::CudaSlice<u16>,
+    b: &cudarc::driver::CudaSlice<u16>,
+    m: usize,
+    k: usize,
+    n: usize,
+    device: &GpuDevice,
+) -> GpuResult<cudarc::driver::CudaSlice<u16>> {
+    use core::ffi::c_void;
+    use cudarc::cublas::{result as cublas_result, sys as cublas_sys};
+    use cudarc::driver::{DevicePtr, DevicePtrMut};
+
+    if a.len() < m * k {
+        return Err(GpuError::ShapeMismatch {
+            op: "matmul_f16_f16",
+            expected: vec![m, k],
+            got: vec![a.len()],
+        });
+    }
+    if b.len() < k * n {
+        return Err(GpuError::ShapeMismatch {
+            op: "matmul_f16_f16",
+            expected: vec![k, n],
+            got: vec![b.len()],
+        });
+    }
+    if m == 0 || k == 0 || n == 0 {
+        return Ok(device.stream().alloc_zeros::<u16>(m * n)?);
+    }
+
+    let m_i32 = i32::try_from(m).map_err(|_| GpuError::ShapeMismatch {
+        op: "matmul_f16_f16",
+        expected: vec![i32::MAX as usize],
+        got: vec![m],
+    })?;
+    let k_i32 = i32::try_from(k).map_err(|_| GpuError::ShapeMismatch {
+        op: "matmul_f16_f16",
+        expected: vec![i32::MAX as usize],
+        got: vec![k],
+    })?;
+    let n_i32 = i32::try_from(n).map_err(|_| GpuError::ShapeMismatch {
+        op: "matmul_f16_f16",
+        expected: vec![i32::MAX as usize],
+        got: vec![n],
+    })?;
+
+    let mut c = device.stream().alloc_zeros::<u16>(m * n)?;
+
+    let alpha: f32 = 1.0;
+    let beta: f32 = 0.0;
+    let blas = device.blas();
+    let stream = device.stream();
+
+    {
+        let (a_ptr, _ra) = a.device_ptr(&stream);
+        let (b_ptr, _rb) = b.device_ptr(&stream);
+        let (c_ptr, _rc) = c.device_ptr_mut(&stream);
+
+        // SAFETY:
+        // - `cublas_result::gemm_ex` is the unsafe FFI shim around
+        //   `cublasGemmEx`. This call mirrors `gpu_matmul_bf16_bf16`
+        //   verbatim except the operand/output dtype enum is `CUDA_R_16F`
+        //   (IEEE float16) instead of `CUDA_R_16BF`.
+        // - Handle: `*blas.handle()` is a valid `cublasHandle_t` bound to
+        //   `device`'s stream.
+        // - Device pointers `a_ptr`/`b_ptr`/`c_ptr` come from `DevicePtr`/
+        //   `DevicePtrMut`; the `_ra`/`_rb`/`_rc` `SyncOnDrop` records stay
+        //   alive in this block scope and order the GEMM against any later
+        //   free or read of the same buffers.
+        // - Buffer lengths/dtype: `a`/`b` are `CudaSlice<u16>` with
+        //   `a.len() >= m*k` and `b.len() >= k*n` (guards above); each u16
+        //   holds an IEEE f16 bit pattern. `c` is freshly allocated as
+        //   `m*n` u16s. `CUDA_R_16F` is the matching cuBLAS dtype.
+        // - Row-major / column-major equivalence: cuBLAS is column-major,
+        //   so to get row-major `C = A @ B` we compute `C^T = B^T @ A^T`,
+        //   passing `b_ptr` as cuBLAS A and `a_ptr` as cuBLAS B with cuBLAS
+        //   `m=n_i32, n=m_i32, k=k_i32, lda=n, ldb=k, ldc=n`.
+        // - Compute type `CUBLAS_COMPUTE_32F` accumulates in f32 then rounds
+        //   to f16 on store. `beta=0.0f32` overwrites C.
+        // - alpha/beta are host f32 locals; cuBLAS default pointer mode is
+        //   host so this matches.
+        // - Dimensions `m_i32`/`k_i32`/`n_i32` are `i32::try_from`-guarded.
+        // - Aliasing: `a`/`b` are distinct `&CudaSlice<u16>`; `c` is a
+        //   freshly allocated `&mut CudaSlice<u16>`. No overlap.
+        unsafe {
+            cublas_result::gemm_ex(
+                *blas.handle(),
+                cublas_sys::cublasOperation_t::CUBLAS_OP_N,
+                cublas_sys::cublasOperation_t::CUBLAS_OP_N,
+                n_i32,
+                m_i32,
+                k_i32,
+                (&alpha) as *const f32 as *const c_void,
+                b_ptr as *const c_void,
+                cublas_sys::cudaDataType_t::CUDA_R_16F,
+                n_i32,
+                a_ptr as *const c_void,
+                cublas_sys::cudaDataType_t::CUDA_R_16F,
+                k_i32,
+                (&beta) as *const f32 as *const c_void,
+                c_ptr as *mut c_void,
+                cublas_sys::cudaDataType_t::CUDA_R_16F,
+                n_i32,
+                cublas_sys::cublasComputeType_t::CUBLAS_COMPUTE_32F,
+                cublas_sys::cublasGemmAlgo_t::CUBLAS_GEMM_DEFAULT,
+            )?;
+        }
+    }
+
+    Ok(c)
+}
+
+/// Stub -- always returns [`GpuError::NoCudaFeature`].
+#[cfg(not(feature = "cuda"))]
+pub fn gpu_matmul_f16_f16(
+    _a: &(),
+    _b: &(),
+    _m: usize,
+    _k: usize,
+    _n: usize,
+    _device: &GpuDevice,
+) -> GpuResult<()> {
+    Err(GpuError::NoCudaFeature)
+}
+
 /// `C = A @ B^T` on bf16-stored operands, f32 compute.
 ///
 /// `A` is row-major `[M, K]`; `B` is row-major `[N, K]` (so `B^T` is

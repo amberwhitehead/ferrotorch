@@ -28,6 +28,11 @@ pub trait Float: Element + num_traits::Float + std::ops::AddAssign {}
 impl Float for f32 {}
 impl Float for f64 {}
 impl Float for half::bf16 {}
+/// IEEE float16 (`half::f16`) — distinct from bf16. Same 2-byte storage
+/// width but a 5-bit exponent / 10-bit mantissa (vs. bf16's 8/7), trading
+/// dynamic range for precision. Disambiguated from bf16 on-device by the
+/// `DType::F16` handle tag (GPU dtype-parity epic, crosslink #1185 Phase 1).
+impl Float for half::f16 {}
 
 #[cfg(test)]
 mod tests {
@@ -45,6 +50,22 @@ mod tests {
     #[test]
     fn bf16_element_dtype() {
         assert_eq!(<half::bf16 as Element>::dtype(), DType::BF16);
+    }
+
+    #[test]
+    fn f16_is_float() {
+        // Compile-time check: IEEE f16 satisfies the Float trait, distinct
+        // from bf16 (GPU dtype-parity epic, crosslink #1185 Phase 1).
+        fn assert_float<T: Float>() {}
+        assert_float::<half::f16>();
+    }
+
+    #[test]
+    fn f16_element_dtype() {
+        // The authoritative tag for IEEE float16 is DType::F16, NOT BF16 —
+        // this is what disambiguates the two 2-byte float types on-device.
+        assert_eq!(<half::f16 as Element>::dtype(), DType::F16);
+        assert_ne!(<half::f16 as Element>::dtype(), DType::BF16);
     }
 
     #[test]

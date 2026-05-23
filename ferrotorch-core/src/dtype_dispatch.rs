@@ -99,7 +99,8 @@ macro_rules! dispatch_floating_dtype {
         $op:literal,
         f32 => $f32_arm:expr,
         f64 => $f64_arm:expr,
-        bf16 => $bf16_arm:expr $(,)?
+        bf16 => $bf16_arm:expr,
+        f16 => $f16_arm:expr $(,)?
     ) => {{
         if ::std::any::TypeId::of::<$scalar_t>() == ::std::any::TypeId::of::<f32>() {
             $f32_arm
@@ -107,6 +108,8 @@ macro_rules! dispatch_floating_dtype {
             $f64_arm
         } else if ::std::any::TypeId::of::<$scalar_t>() == ::std::any::TypeId::of::<half::bf16>() {
             $bf16_arm
+        } else if ::std::any::TypeId::of::<$scalar_t>() == ::std::any::TypeId::of::<half::f16>() {
+            $f16_arm
         } else {
             ::std::result::Result::Err($crate::error::FerrotorchError::NotImplementedOnCuda { op: $op })
         }
@@ -136,6 +139,15 @@ pub fn is_bf16<T: 'static>() -> bool {
     ::std::any::TypeId::of::<T>() == ::std::any::TypeId::of::<half::bf16>()
 }
 
+/// Returns `true` if `T` is `half::f16` (IEEE float16 — distinct from
+/// bf16). Used by the same forward-path CUDA guards that admit bf16
+/// (GPU dtype-parity epic, crosslink #1185 Phase 1).
+#[inline]
+#[must_use]
+pub fn is_f16<T: 'static>() -> bool {
+    ::std::any::TypeId::of::<T>() == ::std::any::TypeId::of::<half::f16>()
+}
+
 #[cfg(test)]
 mod tests {
     use crate::error::{FerrotorchError, FerrotorchResult};
@@ -147,6 +159,7 @@ mod tests {
             f32 => Ok("f32"),
             f64 => Ok("f64"),
             bf16 => Ok("bf16"),
+            f16 => Ok("f16"),
         )
     }
 
@@ -163,6 +176,14 @@ mod tests {
     #[test]
     fn dispatch_bf16() {
         assert_eq!(run_test::<half::bf16>().unwrap(), "bf16");
+    }
+
+    #[test]
+    fn dispatch_f16() {
+        // Phase 1 (crosslink #1185): the macro routes IEEE f16 to its own
+        // arm, distinct from bf16 — both are 2 bytes but `TypeId` keeps
+        // them apart, mirroring PyTorch's separate Half / BFloat16 dispatch.
+        assert_eq!(run_test::<half::f16>().unwrap(), "f16");
     }
 
     #[test]

@@ -33,6 +33,12 @@ fn is_bf16<T: Float>() -> bool {
     TypeId::of::<T>() == TypeId::of::<half::bf16>()
 }
 
+/// Returns `true` if `T` is `half::f16` (IEEE float16, crosslink #1185 Phase 1).
+#[inline]
+fn is_f16<T: Float>() -> bool {
+    TypeId::of::<T>() == TypeId::of::<half::f16>()
+}
+
 /// Materialize a CUDA tensor into a fresh buffer whose backing storage
 /// length exactly matches the logical numel, when needed.
 ///
@@ -403,6 +409,13 @@ fn add_inner<T: Float>(a: &Tensor<T>, b: &Tensor<T>) -> FerrotorchResult<Tensor<
                         b_c.shape(),
                         &out_shape,
                     ),
+                    f16 => backend.broadcast_add_f16(
+                        a_c.gpu_handle()?,
+                        b_c.gpu_handle()?,
+                        a_c.shape(),
+                        b_c.shape(),
+                        &out_shape,
+                    ),
                 )?;
                 (h, out_shape)
             } else {
@@ -412,6 +425,7 @@ fn add_inner<T: Float>(a: &Tensor<T>, b: &Tensor<T>) -> FerrotorchResult<Tensor<
                     f32 => backend.add_f32(a_c.gpu_handle()?, b_c.gpu_handle()?),
                     f64 => backend.add_f64(a_c.gpu_handle()?, b_c.gpu_handle()?),
                     bf16 => backend.add_bf16_bf16(a_c.gpu_handle()?, b_c.gpu_handle()?),
+                    f16 => backend.add_f16(a_c.gpu_handle()?, b_c.gpu_handle()?),
                 )?;
                 (h, a_c.shape().to_vec())
             };
@@ -542,6 +556,13 @@ fn sub_inner<T: Float>(a: &Tensor<T>, b: &Tensor<T>) -> FerrotorchResult<Tensor<
                         b_c.shape(),
                         &out_shape,
                     ),
+                    f16 => backend.broadcast_sub_f16(
+                        a_c.gpu_handle()?,
+                        b_c.gpu_handle()?,
+                        a_c.shape(),
+                        b_c.shape(),
+                        &out_shape,
+                    ),
                 )?;
                 (h, out_shape)
             } else {
@@ -551,6 +572,7 @@ fn sub_inner<T: Float>(a: &Tensor<T>, b: &Tensor<T>) -> FerrotorchResult<Tensor<
                     f32 => backend.sub_f32(a_c.gpu_handle()?, b_c.gpu_handle()?),
                     f64 => backend.sub_f64(a_c.gpu_handle()?, b_c.gpu_handle()?),
                     bf16 => backend.sub_bf16_bf16(a_c.gpu_handle()?, b_c.gpu_handle()?),
+                    f16 => backend.sub_f16(a_c.gpu_handle()?, b_c.gpu_handle()?),
                 )?;
                 (h, a_c.shape().to_vec())
             };
@@ -709,6 +731,13 @@ fn mul_inner<T: Float>(a: &Tensor<T>, b: &Tensor<T>) -> FerrotorchResult<Tensor<
                         b_c.shape(),
                         &out_shape,
                     ),
+                    f16 => backend.broadcast_mul_f16(
+                        a_c.gpu_handle()?,
+                        b_c.gpu_handle()?,
+                        a_c.shape(),
+                        b_c.shape(),
+                        &out_shape,
+                    ),
                 )?;
                 (h, out_shape)
             } else {
@@ -718,6 +747,7 @@ fn mul_inner<T: Float>(a: &Tensor<T>, b: &Tensor<T>) -> FerrotorchResult<Tensor<
                     f32 => backend.mul_f32(a_c.gpu_handle()?, b_c.gpu_handle()?),
                     f64 => backend.mul_f64(a_c.gpu_handle()?, b_c.gpu_handle()?),
                     bf16 => backend.mul_bf16_bf16(a_c.gpu_handle()?, b_c.gpu_handle()?),
+                    f16 => backend.mul_f16(a_c.gpu_handle()?, b_c.gpu_handle()?),
                 )?;
                 (h, a_c.shape().to_vec())
             };
@@ -827,7 +857,7 @@ fn div_inner<T: Float>(a: &Tensor<T>, b: &Tensor<T>) -> FerrotorchResult<Tensor<
     // #23: drop the `(is_f32 || is_f64)` guard — bf16 now has a real GPU
     // kernel via `div_bf16_bf16`. Other dtypes fall back to the CPU branch
     // below via `dispatch_floating_dtype!` returning NotImplementedOnCuda.
-    if a.is_cuda() && (is_f32::<T>() || is_f64::<T>() || is_bf16::<T>()) {
+    if a.is_cuda() && (is_f32::<T>() || is_f64::<T>() || is_bf16::<T>() || is_f16::<T>()) {
         let backend =
             crate::gpu_dispatch::gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
 
@@ -863,6 +893,13 @@ fn div_inner<T: Float>(a: &Tensor<T>, b: &Tensor<T>) -> FerrotorchResult<Tensor<
                         b_c.shape(),
                         &out_shape,
                     ),
+                    f16 => backend.broadcast_div_f16(
+                        a_c.gpu_handle()?,
+                        b_c.gpu_handle()?,
+                        a_c.shape(),
+                        b_c.shape(),
+                        &out_shape,
+                    ),
                 )?;
                 (h, out_shape)
             } else {
@@ -872,6 +909,7 @@ fn div_inner<T: Float>(a: &Tensor<T>, b: &Tensor<T>) -> FerrotorchResult<Tensor<
                     f32 => backend.div_f32(a_c.gpu_handle()?, b_c.gpu_handle()?),
                     f64 => backend.div_f64(a_c.gpu_handle()?, b_c.gpu_handle()?),
                     bf16 => backend.div_bf16_bf16(a_c.gpu_handle()?, b_c.gpu_handle()?),
+                    f16 => backend.div_f16(a_c.gpu_handle()?, b_c.gpu_handle()?),
                 )?;
                 (h, a_c.shape().to_vec())
             };
@@ -961,6 +999,7 @@ fn neg_inner<T: Float>(a: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
             f32 => backend.neg_f32(a_c.gpu_handle()?),
             f64 => backend.neg_f64(a_c.gpu_handle()?),
             bf16 => backend.neg_bf16_bf16(a_c.gpu_handle()?),
+            f16 => backend.neg_f16(a_c.gpu_handle()?),
         )?;
         let storage = TensorStorage::gpu(handle);
         let shape = a_c.shape().to_vec();
@@ -1179,15 +1218,19 @@ pub fn sqrt<T: Float>(a: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
 }
 
 fn sqrt_inner<T: Float>(a: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
-    if a.is_cuda() && (is_f32::<T>() || is_f64::<T>()) {
+    if a.is_cuda() && (is_f32::<T>() || is_f64::<T>() || is_f16::<T>()) {
         let backend =
             crate::gpu_dispatch::gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
         // #812 cluster: materialize non-contiguous CUDA views before kernel.
         let a_c = ensure_contig_for_gpu(a)?;
+        // crosslink #1185 Phase 1: f16 routes to the native `sqrt_f16` PTX
+        // kernel (sqrt.approx.f32, f16 RNE store) — no CPU fallthrough.
         let handle = if is_f32::<T>() {
             backend.sqrt_f32(a_c.gpu_handle()?)?
-        } else {
+        } else if is_f64::<T>() {
             backend.sqrt_f64(a_c.gpu_handle()?)?
+        } else {
+            backend.sqrt_f16(a_c.gpu_handle()?)?
         };
         let storage = TensorStorage::gpu(handle);
         let shape = a_c.shape().to_vec();

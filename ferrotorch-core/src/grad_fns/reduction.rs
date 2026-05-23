@@ -115,6 +115,7 @@ fn sum_inner<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
             f32 => backend.sum_f32(input.gpu_handle()?, input.numel()),
             f64 => backend.sum_f64(input.gpu_handle()?, input.numel()),
             bf16 => backend.sum_bf16_bf16(input.gpu_handle()?),
+            f16 => backend.sum_f16(input.gpu_handle()?),
         )?;
         let storage = TensorStorage::gpu(handle);
         let shape = vec![];
@@ -278,6 +279,9 @@ fn mean_inner<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
                 },
                 bf16 => Ok::<_, crate::error::FerrotorchError>(
                     backend.mean_bf16_bf16(input.gpu_handle()?)?
+                ),
+                f16 => Ok::<_, crate::error::FerrotorchError>(
+                    backend.mean_f16(input.gpu_handle()?)?
                 ),
             )?;
             Tensor::from_storage(TensorStorage::gpu(mean_handle), vec![], false)?
@@ -812,6 +816,7 @@ fn sum_dim_inner<T: Float>(
                 f32 => backend.sum_axis_f32(input.gpu_handle()?, in_shape, norm_dim),
                 f64 => backend.sum_axis_f64(input.gpu_handle()?, in_shape, norm_dim),
                 bf16 => backend.sum_axis_bf16_bf16(input.gpu_handle()?, in_shape, norm_dim),
+                f16 => backend.sum_axis_f16(input.gpu_handle()?, in_shape, norm_dim),
             )?;
 
             let storage = TensorStorage::gpu(handle);
@@ -1093,6 +1098,9 @@ fn mean_dim_inner<T: Float>(
                 },
                 bf16 => Ok::<_, crate::error::FerrotorchError>(
                     backend.mean_axis_bf16_bf16(input.gpu_handle()?, in_shape, norm_dim)?
+                ),
+                f16 => Ok::<_, crate::error::FerrotorchError>(
+                    backend.mean_axis_f16(input.gpu_handle()?, in_shape, norm_dim)?
                 ),
             )?;
             let storage = TensorStorage::gpu(mean_handle);

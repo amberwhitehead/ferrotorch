@@ -143,6 +143,8 @@ pub mod allocator;
 pub mod backend_impl;
 #[cfg(feature = "cuda")]
 pub mod bf16;
+#[cfg(feature = "cuda")]
+pub mod f16;
 pub mod blas;
 pub mod buffer;
 pub mod conv;

@@ -34,6 +34,12 @@ fn is_bf16<T: Float>() -> bool {
     TypeId::of::<T>() == TypeId::of::<half::bf16>()
 }
 
+/// Returns `true` if `T` is `half::f16` (IEEE float16, crosslink #1185 Phase 1).
+#[inline]
+fn is_f16<T: Float>() -> bool {
+    TypeId::of::<T>() == TypeId::of::<half::f16>()
+}
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
@@ -104,7 +110,7 @@ pub fn exp<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
 }
 
 fn exp_inner<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
-    if input.is_cuda() && (is_f32::<T>() || is_f64::<T>() || is_bf16::<T>()) {
+    if input.is_cuda() && (is_f32::<T>() || is_f64::<T>() || is_bf16::<T>() || is_f16::<T>()) {
         let backend = gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
         // #23: bf16 routes through `exp_bf16_bf16` (PTX ex2.approx.f32 with
         // f32 internal accumulator, bf16 RNE store-back).
@@ -114,6 +120,7 @@ fn exp_inner<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
             f32 => backend.exp_f32(input.gpu_handle()?),
             f64 => backend.exp_f64(input.gpu_handle()?),
             bf16 => backend.exp_bf16_bf16(input.gpu_handle()?),
+            f16 => backend.exp_f16(input.gpu_handle()?),
         )?;
         let storage = TensorStorage::gpu(handle);
         let shape = input.shape().to_vec();
@@ -205,7 +212,7 @@ pub fn log<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
 }
 
 fn log_inner<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
-    if input.is_cuda() && (is_f32::<T>() || is_f64::<T>() || is_bf16::<T>()) {
+    if input.is_cuda() && (is_f32::<T>() || is_f64::<T>() || is_bf16::<T>() || is_f16::<T>()) {
         let backend = gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
         // #23: bf16 routes through `log_bf16_bf16` (PTX lg2.approx.f32 *
         // ln(2), bf16 RNE store-back).
@@ -215,6 +222,7 @@ fn log_inner<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
             f32 => backend.log_f32(input.gpu_handle()?),
             f64 => backend.log_f64(input.gpu_handle()?),
             bf16 => backend.log_bf16_bf16(input.gpu_handle()?),
+            f16 => backend.log_f16(input.gpu_handle()?),
         )?;
         let storage = TensorStorage::gpu(handle);
         let shape = input.shape().to_vec();

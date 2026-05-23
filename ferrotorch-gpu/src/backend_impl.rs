@@ -234,6 +234,42 @@ impl CudaBackendImpl {
             })
     }
 
+    /// Wrap a `CudaSlice<u16>` (IEEE f16 bit-pattern storage) into a
+    /// type-erased [`GpuBufferHandle`] tagged `DType::F16`.
+    ///
+    /// f16 and bf16 share `CudaSlice<u16>` storage; the `DType::F16` tag is
+    /// the *only* thing that disambiguates them (crosslink #1185 Phase 1).
+    #[cfg(feature = "cuda")]
+    fn wrap_buffer_f16(buf: cudarc::driver::CudaSlice<u16>, ordinal: usize) -> GpuBufferHandle {
+        let len = buf.len();
+        GpuBufferHandle::new(Box::new(buf), ordinal, len, DType::F16)
+    }
+
+    /// Extract a `&CudaSlice<u16>` (IEEE f16 bit-pattern storage) from a
+    /// [`GpuBufferHandle`], asserting the `DType::F16` tag first.
+    ///
+    /// MANDATORY disambiguation: f16 and bf16 both downcast to
+    /// `CudaSlice<u16>`, so the `downcast_ref` alone cannot tell them apart.
+    /// The tag check rejects a BF16-tagged handle here (and
+    /// [`Self::unwrap_buffer_bf16`] rejects an F16-tagged handle), preventing
+    /// an f16 buffer from being silently fed to a bf16 kernel (PyTorch
+    /// parity — `ScalarType` is authoritative, not storage width).
+    #[cfg(feature = "cuda")]
+    fn unwrap_buffer_f16(
+        handle: &GpuBufferHandle,
+    ) -> FerrotorchResult<&cudarc::driver::CudaSlice<u16>> {
+        if handle.dtype() != DType::F16 {
+            return Err(FerrotorchError::InvalidArgument {
+                message: format!("expected F16 buffer, handle is tagged {}", handle.dtype()),
+            });
+        }
+        handle
+            .downcast_ref::<cudarc::driver::CudaSlice<u16>>()
+            .ok_or(FerrotorchError::InvalidArgument {
+                message: "GPU handle does not contain a CudaSlice<u16> (f16)".into(),
+            })
+    }
+
     /// Convert a [`crate::error::GpuError`] into a [`FerrotorchError`].
     fn map_gpu_err(e: crate::error::GpuError) -> FerrotorchError {
         FerrotorchError::InvalidArgument {
@@ -266,6 +302,11 @@ impl GpuBackend for CudaBackendImpl {
             ptr as *const std::ffi::c_void
         } else if let Ok(slice) = Self::unwrap_buffer_bf16(handle) {
             // bf16 storage: `CudaSlice<u16>` (u16 holds bf16 bit pattern).
+            let (ptr, _sync) = slice.device_ptr(&stream);
+            ptr as *const std::ffi::c_void
+        } else if let Ok(slice) = Self::unwrap_buffer_f16(handle) {
+            // f16 storage: `CudaSlice<u16>` (u16 holds IEEE f16 bit pattern),
+            // distinguished from bf16 only by the `DType::F16` tag.
             let (ptr, _sync) = slice.device_ptr(&stream);
             ptr as *const std::ffi::c_void
         } else {
@@ -414,14 +455,42 @@ impl GpuBackend for CudaBackendImpl {
                     .map_err(|e| Self::map_gpu_err(crate::error::GpuError::Driver(e)))?;
                 Ok(Self::wrap_buffer_bf16(slice, device))
             }
+            DType::F16 => {
+                // IEEE float16 bit patterns stored as u16. Byte-identical
+                // transport to the BF16 arm above — the ONLY difference is
+                // the handle is tagged `DType::F16` (crosslink #1185 Phase 1),
+                // which `unwrap_buffer_f16` asserts so an f16 buffer is never
+                // fed to a bf16 kernel.
+                let count = data.len() / 2;
+                // SAFETY:
+                // - Caller guarantees `data` is the byte view of a `Vec<u16>`
+                //   (f16 `repr(transparent)` over u16) with
+                //   `data.len() == count * 2`.
+                // - u16 has size 2 and align 2; the source allocation is
+                //   2-byte-aligned and `data.as_ptr()` inherits that.
+                // - `from_raw_parts` reads exactly `count * 2 == data.len()`
+                //   bytes — no overrun.
+                // - The `&[u16]` is immediately `.to_vec()`'d into an owned
+                //   `Vec<u16>` before `data` is touched again; no aliasing.
+                // - No `&mut` aliases: `data: &[u8]` is a shared borrow.
+                let u16_vec: Vec<u16> = unsafe {
+                    let slice = std::slice::from_raw_parts(data.as_ptr() as *const u16, count);
+                    slice.to_vec()
+                };
+                let slice = dev
+                    .stream()
+                    .clone_htod(&u16_vec)
+                    .map_err(|e| Self::map_gpu_err(crate::error::GpuError::Driver(e)))?;
+                Ok(Self::wrap_buffer_f16(slice, device))
+            }
             // PyTorch parity (rust-gpu-discipline §3): unsupported (dtype,
             // CUDA) combinations return a structured error rather than a
-            // silent CPU detour. f16 / integer / bool land here until their
+            // silent CPU detour. Integer / bool dtypes land here until their
             // respective dtype-parity phases add real CUDA buffer support.
             other => Err(FerrotorchError::InvalidArgument {
                 message: format!(
                     "cpu_to_gpu: dtype {other} not supported on CUDA \
-                     (supported: F32, F64, BF16)"
+                     (supported: F32, F64, BF16, F16)"
                 ),
             }),
         }
@@ -560,11 +629,33 @@ impl GpuBackend for CudaBackendImpl {
                 Vec::from_raw_parts(ptr, len, cap)
             };
             Ok(bytes)
+        } else if let Ok(slice) = Self::unwrap_buffer_f16(handle) {
+            // f16 storage: raw `CudaSlice<u16>` tagged `DType::F16`. Same
+            // dtoh path as bf16 (byte-identical width); the tag check in
+            // `unwrap_buffer_f16` is what routes us here vs. the bf16 arm.
+            let u16_data = dev
+                .stream()
+                .clone_dtoh(slice)
+                .map_err(|e| Self::map_gpu_err(crate::error::GpuError::Driver(e)))?;
+
+            // Reinterpret Vec<u16> as Vec<u8> without copying.
+            // SAFETY: u16 has alignment 2 and size 2; len/capacity adjusted
+            // accordingly. The original Vec is consumed via ManuallyDrop so
+            // its destructor never runs and the allocation stays live under
+            // its new u8-typed handle.
+            let bytes = unsafe {
+                let mut v = std::mem::ManuallyDrop::new(u16_data);
+                let ptr = v.as_mut_ptr() as *mut u8;
+                let len = v.len() * 2;
+                let cap = v.capacity() * 2;
+                Vec::from_raw_parts(ptr, len, cap)
+            };
+            Ok(bytes)
         } else {
             Err(FerrotorchError::InvalidArgument {
                 message: "gpu_to_cpu: handle is not a recognised dtype \
                           (expected CudaBuffer<f32>, CudaBuffer<f64>, \
-                          or CudaSlice<u16> for bf16)"
+                          or CudaSlice<u16> for bf16/f16)"
                     .into(),
             })
         }
@@ -603,6 +694,14 @@ impl GpuBackend for CudaBackendImpl {
                     crate::transfer::alloc_zeros_bf16(len, dev).map_err(Self::map_gpu_err)?;
                 Ok(Self::wrap_buffer_bf16(slice, device))
             }
+            DType::F16 => {
+                // f16 (u16 bit pattern). Zero is 0x0000 in both f16 and bf16,
+                // so the bf16 zero-alloc helper produces a byte-correct f16
+                // buffer; only the handle tag (F16) differs.
+                let slice =
+                    crate::transfer::alloc_zeros_bf16(len, dev).map_err(Self::map_gpu_err)?;
+                Ok(Self::wrap_buffer_f16(slice, device))
+            }
             DType::F32 => {
                 let buf = crate::transfer::alloc_zeros_f32(len, dev).map_err(Self::map_gpu_err)?;
                 Ok(Self::wrap_buffer(buf, device))
@@ -615,7 +714,7 @@ impl GpuBackend for CudaBackendImpl {
             other => Err(FerrotorchError::InvalidArgument {
                 message: format!(
                     "alloc_zeros: dtype {other} not supported on CUDA \
-                     (supported: F32, F64, BF16)"
+                     (supported: F32, F64, BF16, F16)"
                 ),
             }),
         }
@@ -4741,6 +4840,342 @@ impl GpuBackend for CudaBackendImpl {
         let result = crate::bf16::gpu_sigmoid_bf16(buf, dev).map_err(Self::map_gpu_err)?;
         Ok(Self::wrap_buffer_bf16(result, a.device_ordinal()))
     }
+
+    // ── IEEE float16 (f16) ops — crosslink #1185 Phase 1 ─────────────────────
+    //
+    // Each unwraps with `unwrap_buffer_f16` (asserts the F16 tag, rejecting a
+    // BF16-tagged handle), dispatches to the matching `crate::f16::gpu_*_f16`
+    // PTX/cuBLAS kernel, and re-wraps with `wrap_buffer_f16` (F16 tag).
+
+    #[cfg(feature = "cuda")]
+    fn add_f16(
+        &self,
+        a: &GpuBufferHandle,
+        b: &GpuBufferHandle,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        let a_buf = Self::unwrap_buffer_f16(a)?;
+        let b_buf = Self::unwrap_buffer_f16(b)?;
+        let dev = self.device(a.device_ordinal())?;
+        let result = crate::f16::gpu_add_f16(a_buf, b_buf, dev).map_err(Self::map_gpu_err)?;
+        Ok(Self::wrap_buffer_f16(result, a.device_ordinal()))
+    }
+
+    #[cfg(feature = "cuda")]
+    fn sub_f16(
+        &self,
+        a: &GpuBufferHandle,
+        b: &GpuBufferHandle,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        let a_buf = Self::unwrap_buffer_f16(a)?;
+        let b_buf = Self::unwrap_buffer_f16(b)?;
+        let dev = self.device(a.device_ordinal())?;
+        let result = crate::f16::gpu_sub_f16(a_buf, b_buf, dev).map_err(Self::map_gpu_err)?;
+        Ok(Self::wrap_buffer_f16(result, a.device_ordinal()))
+    }
+
+    #[cfg(feature = "cuda")]
+    fn mul_f16(
+        &self,
+        a: &GpuBufferHandle,
+        b: &GpuBufferHandle,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        let a_buf = Self::unwrap_buffer_f16(a)?;
+        let b_buf = Self::unwrap_buffer_f16(b)?;
+        let dev = self.device(a.device_ordinal())?;
+        let result = crate::f16::gpu_mul_f16(a_buf, b_buf, dev).map_err(Self::map_gpu_err)?;
+        Ok(Self::wrap_buffer_f16(result, a.device_ordinal()))
+    }
+
+    #[cfg(feature = "cuda")]
+    fn div_f16(
+        &self,
+        a: &GpuBufferHandle,
+        b: &GpuBufferHandle,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        let a_buf = Self::unwrap_buffer_f16(a)?;
+        let b_buf = Self::unwrap_buffer_f16(b)?;
+        let dev = self.device(a.device_ordinal())?;
+        let result = crate::f16::gpu_div_f16(a_buf, b_buf, dev).map_err(Self::map_gpu_err)?;
+        Ok(Self::wrap_buffer_f16(result, a.device_ordinal()))
+    }
+
+    #[cfg(feature = "cuda")]
+    fn neg_f16(&self, a: &GpuBufferHandle) -> FerrotorchResult<GpuBufferHandle> {
+        let buf = Self::unwrap_buffer_f16(a)?;
+        let dev = self.device(a.device_ordinal())?;
+        let result = crate::f16::gpu_neg_f16(buf, dev).map_err(Self::map_gpu_err)?;
+        Ok(Self::wrap_buffer_f16(result, a.device_ordinal()))
+    }
+
+    #[cfg(feature = "cuda")]
+    fn scale_f16(&self, a: &GpuBufferHandle, scale: f32) -> FerrotorchResult<GpuBufferHandle> {
+        let buf = Self::unwrap_buffer_f16(a)?;
+        let dev = self.device(a.device_ordinal())?;
+        let result = crate::f16::gpu_scale_f16(buf, scale, dev).map_err(Self::map_gpu_err)?;
+        Ok(Self::wrap_buffer_f16(result, a.device_ordinal()))
+    }
+
+    #[cfg(feature = "cuda")]
+    fn broadcast_add_f16(
+        &self,
+        a: &GpuBufferHandle,
+        b: &GpuBufferHandle,
+        a_shape: &[usize],
+        b_shape: &[usize],
+        out_shape: &[usize],
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        let a_buf = Self::unwrap_buffer_f16(a)?;
+        let b_buf = Self::unwrap_buffer_f16(b)?;
+        let dev = self.device(a.device_ordinal())?;
+        let result =
+            crate::f16::gpu_broadcast_add_f16(a_buf, b_buf, a_shape, b_shape, out_shape, dev)
+                .map_err(Self::map_gpu_err)?;
+        Ok(Self::wrap_buffer_f16(result, a.device_ordinal()))
+    }
+
+    #[cfg(feature = "cuda")]
+    fn broadcast_sub_f16(
+        &self,
+        a: &GpuBufferHandle,
+        b: &GpuBufferHandle,
+        a_shape: &[usize],
+        b_shape: &[usize],
+        out_shape: &[usize],
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        let a_buf = Self::unwrap_buffer_f16(a)?;
+        let b_buf = Self::unwrap_buffer_f16(b)?;
+        let dev = self.device(a.device_ordinal())?;
+        let result =
+            crate::f16::gpu_broadcast_sub_f16(a_buf, b_buf, a_shape, b_shape, out_shape, dev)
+                .map_err(Self::map_gpu_err)?;
+        Ok(Self::wrap_buffer_f16(result, a.device_ordinal()))
+    }
+
+    #[cfg(feature = "cuda")]
+    fn broadcast_mul_f16(
+        &self,
+        a: &GpuBufferHandle,
+        b: &GpuBufferHandle,
+        a_shape: &[usize],
+        b_shape: &[usize],
+        out_shape: &[usize],
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        let a_buf = Self::unwrap_buffer_f16(a)?;
+        let b_buf = Self::unwrap_buffer_f16(b)?;
+        let dev = self.device(a.device_ordinal())?;
+        let result =
+            crate::f16::gpu_broadcast_mul_f16(a_buf, b_buf, a_shape, b_shape, out_shape, dev)
+                .map_err(Self::map_gpu_err)?;
+        Ok(Self::wrap_buffer_f16(result, a.device_ordinal()))
+    }
+
+    #[cfg(feature = "cuda")]
+    fn broadcast_div_f16(
+        &self,
+        a: &GpuBufferHandle,
+        b: &GpuBufferHandle,
+        a_shape: &[usize],
+        b_shape: &[usize],
+        out_shape: &[usize],
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        let a_buf = Self::unwrap_buffer_f16(a)?;
+        let b_buf = Self::unwrap_buffer_f16(b)?;
+        let dev = self.device(a.device_ordinal())?;
+        let result =
+            crate::f16::gpu_broadcast_div_f16(a_buf, b_buf, a_shape, b_shape, out_shape, dev)
+                .map_err(Self::map_gpu_err)?;
+        Ok(Self::wrap_buffer_f16(result, a.device_ordinal()))
+    }
+
+    #[cfg(feature = "cuda")]
+    fn sum_f16(&self, a: &GpuBufferHandle) -> FerrotorchResult<GpuBufferHandle> {
+        let buf = Self::unwrap_buffer_f16(a)?;
+        let dev = self.device(a.device_ordinal())?;
+        let result = crate::f16::gpu_sum_f16(buf, dev).map_err(Self::map_gpu_err)?;
+        Ok(Self::wrap_buffer_f16(result, a.device_ordinal()))
+    }
+
+    #[cfg(feature = "cuda")]
+    fn mean_f16(&self, a: &GpuBufferHandle) -> FerrotorchResult<GpuBufferHandle> {
+        let buf = Self::unwrap_buffer_f16(a)?;
+        let dev = self.device(a.device_ordinal())?;
+        let result = crate::f16::gpu_mean_f16(buf, dev).map_err(Self::map_gpu_err)?;
+        Ok(Self::wrap_buffer_f16(result, a.device_ordinal()))
+    }
+
+    #[cfg(feature = "cuda")]
+    fn sum_axis_f16(
+        &self,
+        a: &GpuBufferHandle,
+        shape: &[usize],
+        axis: usize,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        if axis >= shape.len() {
+            return Err(FerrotorchError::InvalidArgument {
+                message: format!("sum_axis_f16: axis {axis} out of bounds for shape {shape:?}"),
+            });
+        }
+        let outer: usize = shape[..axis].iter().product();
+        let axis_size = shape[axis];
+        let inner: usize = shape[axis + 1..].iter().product();
+        let buf = Self::unwrap_buffer_f16(a)?;
+        let dev = self.device(a.device_ordinal())?;
+        let result = crate::f16::gpu_sum_axis_f16(buf, outer, axis_size, inner, dev)
+            .map_err(Self::map_gpu_err)?;
+        Ok(Self::wrap_buffer_f16(result, a.device_ordinal()))
+    }
+
+    #[cfg(feature = "cuda")]
+    fn mean_axis_f16(
+        &self,
+        a: &GpuBufferHandle,
+        shape: &[usize],
+        axis: usize,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        if axis >= shape.len() {
+            return Err(FerrotorchError::InvalidArgument {
+                message: format!("mean_axis_f16: axis {axis} out of bounds for shape {shape:?}"),
+            });
+        }
+        let outer: usize = shape[..axis].iter().product();
+        let axis_size = shape[axis];
+        let inner: usize = shape[axis + 1..].iter().product();
+        let buf = Self::unwrap_buffer_f16(a)?;
+        let dev = self.device(a.device_ordinal())?;
+        let result = crate::f16::gpu_mean_axis_f16(buf, outer, axis_size, inner, dev)
+            .map_err(Self::map_gpu_err)?;
+        Ok(Self::wrap_buffer_f16(result, a.device_ordinal()))
+    }
+
+    #[cfg(feature = "cuda")]
+    fn exp_f16(&self, a: &GpuBufferHandle) -> FerrotorchResult<GpuBufferHandle> {
+        let buf = Self::unwrap_buffer_f16(a)?;
+        let dev = self.device(a.device_ordinal())?;
+        let result = crate::f16::gpu_exp_f16(buf, dev).map_err(Self::map_gpu_err)?;
+        Ok(Self::wrap_buffer_f16(result, a.device_ordinal()))
+    }
+
+    #[cfg(feature = "cuda")]
+    fn log_f16(&self, a: &GpuBufferHandle) -> FerrotorchResult<GpuBufferHandle> {
+        let buf = Self::unwrap_buffer_f16(a)?;
+        let dev = self.device(a.device_ordinal())?;
+        let result = crate::f16::gpu_log_f16(buf, dev).map_err(Self::map_gpu_err)?;
+        Ok(Self::wrap_buffer_f16(result, a.device_ordinal()))
+    }
+
+    #[cfg(feature = "cuda")]
+    fn tanh_f16(&self, a: &GpuBufferHandle) -> FerrotorchResult<GpuBufferHandle> {
+        let buf = Self::unwrap_buffer_f16(a)?;
+        let dev = self.device(a.device_ordinal())?;
+        let result = crate::f16::gpu_tanh_f16(buf, dev).map_err(Self::map_gpu_err)?;
+        Ok(Self::wrap_buffer_f16(result, a.device_ordinal()))
+    }
+
+    #[cfg(feature = "cuda")]
+    fn sigmoid_f16(&self, a: &GpuBufferHandle) -> FerrotorchResult<GpuBufferHandle> {
+        let buf = Self::unwrap_buffer_f16(a)?;
+        let dev = self.device(a.device_ordinal())?;
+        let result = crate::f16::gpu_sigmoid_f16(buf, dev).map_err(Self::map_gpu_err)?;
+        Ok(Self::wrap_buffer_f16(result, a.device_ordinal()))
+    }
+
+    #[cfg(feature = "cuda")]
+    fn sqrt_f16(&self, a: &GpuBufferHandle) -> FerrotorchResult<GpuBufferHandle> {
+        let buf = Self::unwrap_buffer_f16(a)?;
+        let dev = self.device(a.device_ordinal())?;
+        let result = crate::f16::gpu_sqrt_f16(buf, dev).map_err(Self::map_gpu_err)?;
+        Ok(Self::wrap_buffer_f16(result, a.device_ordinal()))
+    }
+
+    #[cfg(feature = "cuda")]
+    fn relu_f16(&self, a: &GpuBufferHandle) -> FerrotorchResult<GpuBufferHandle> {
+        let buf = Self::unwrap_buffer_f16(a)?;
+        let dev = self.device(a.device_ordinal())?;
+        let result = crate::f16::gpu_relu_f16(buf, dev).map_err(Self::map_gpu_err)?;
+        Ok(Self::wrap_buffer_f16(result, a.device_ordinal()))
+    }
+
+    #[cfg(feature = "cuda")]
+    fn silu_f16(&self, a: &GpuBufferHandle) -> FerrotorchResult<GpuBufferHandle> {
+        let buf = Self::unwrap_buffer_f16(a)?;
+        let dev = self.device(a.device_ordinal())?;
+        let result = crate::f16::gpu_silu_f16(buf, dev).map_err(Self::map_gpu_err)?;
+        Ok(Self::wrap_buffer_f16(result, a.device_ordinal()))
+    }
+
+    #[cfg(feature = "cuda")]
+    fn gelu_f16(&self, a: &GpuBufferHandle) -> FerrotorchResult<GpuBufferHandle> {
+        let buf = Self::unwrap_buffer_f16(a)?;
+        let dev = self.device(a.device_ordinal())?;
+        let result = crate::f16::gpu_gelu_f16(buf, dev).map_err(Self::map_gpu_err)?;
+        Ok(Self::wrap_buffer_f16(result, a.device_ordinal()))
+    }
+
+    #[cfg(feature = "cuda")]
+    fn softmax_f16(
+        &self,
+        a: &GpuBufferHandle,
+        rows: usize,
+        cols: usize,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        let buf = Self::unwrap_buffer_f16(a)?;
+        let dev = self.device(a.device_ordinal())?;
+        let result = crate::f16::gpu_softmax_f16(buf, rows, cols, dev).map_err(Self::map_gpu_err)?;
+        Ok(Self::wrap_buffer_f16(result, a.device_ordinal()))
+    }
+
+    #[cfg(feature = "cuda")]
+    fn layernorm_f16(
+        &self,
+        input: &GpuBufferHandle,
+        gamma: &GpuBufferHandle,
+        beta: &GpuBufferHandle,
+        rows: usize,
+        cols: usize,
+        eps: f32,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        let in_buf = Self::unwrap_buffer_f16(input)?;
+        let g_buf = Self::unwrap_buffer_f16(gamma)?;
+        let b_buf = Self::unwrap_buffer_f16(beta)?;
+        let dev = self.device(input.device_ordinal())?;
+        let result = crate::f16::gpu_layernorm_f16(in_buf, g_buf, b_buf, rows, cols, eps, dev)
+            .map_err(Self::map_gpu_err)?;
+        Ok(Self::wrap_buffer_f16(result, input.device_ordinal()))
+    }
+
+    #[cfg(feature = "cuda")]
+    fn rmsnorm_f16(
+        &self,
+        input: &GpuBufferHandle,
+        weight: &GpuBufferHandle,
+        rows: usize,
+        cols: usize,
+        eps: f32,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        let in_buf = Self::unwrap_buffer_f16(input)?;
+        let w_buf = Self::unwrap_buffer_f16(weight)?;
+        let dev = self.device(input.device_ordinal())?;
+        let result = crate::f16::gpu_rmsnorm_f16(in_buf, w_buf, rows, cols, eps, dev)
+            .map_err(Self::map_gpu_err)?;
+        Ok(Self::wrap_buffer_f16(result, input.device_ordinal()))
+    }
+
+    #[cfg(feature = "cuda")]
+    fn matmul_f16_f16(
+        &self,
+        a: &GpuBufferHandle,
+        b: &GpuBufferHandle,
+        m: usize,
+        k: usize,
+        n: usize,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        let a_buf = Self::unwrap_buffer_f16(a)?;
+        let b_buf = Self::unwrap_buffer_f16(b)?;
+        let dev = self.device(a.device_ordinal())?;
+        let result =
+            crate::blas::gpu_matmul_f16_f16(a_buf, b_buf, m, k, n, dev).map_err(Self::map_gpu_err)?;
+        Ok(Self::wrap_buffer_f16(result, a.device_ordinal()))
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -5083,6 +5518,96 @@ mod tests {
             std::slice::from_raw_parts(cloned_bytes.as_ptr() as *const u16, cloned_bytes.len() / 2)
         };
         assert_eq!(cloned_back, &host[..]);
+    }
+
+    /// Round-trip f16 (IEEE float16) through the type-erased dispatcher and
+    /// prove the f16/bf16 DType-tag disambiguation (crosslink #1185 Phase 1).
+    ///
+    /// Both dtypes store as `CudaSlice<u16>`, so the ONLY thing keeping them
+    /// apart is the `GpuBufferHandle` tag. This test asserts:
+    ///   1. an f16 upload is tagged `DType::F16` and round-trips bit-exact;
+    ///   2. an F16-tagged handle fed to a bf16 backend op returns `Err`
+    ///      (NOT garbage) — i.e. `unwrap_buffer_bf16` rejects the F16 tag;
+    ///   3. a BF16-tagged handle fed to an f16 backend op returns `Err` too.
+    #[test]
+    fn test_f16_bf16_tag_disambiguation() {
+        ensure_init();
+        let backend = gpu_dispatch::gpu_backend().expect("backend registered");
+
+        // f16 bit patterns for {0.0, 1.0, -1.0, 2.5, -3.5, 100.0}.
+        let host: Vec<u16> = [0.0_f32, 1.0, -1.0, 2.5, -3.5, 100.0]
+            .iter()
+            .map(|&x| half::f16::from_f32(x).to_bits())
+            .collect();
+        // SAFETY: `host` is a 2-byte-aligned `Vec<u16>`; cast to `*const u8`
+        // is sound and `host.len() * 2` matches the byte extent exactly. The
+        // slice is consumed by `cpu_to_gpu` before `host` is reused.
+        let bytes: &[u8] = unsafe {
+            std::slice::from_raw_parts(
+                host.as_ptr() as *const u8,
+                host.len() * std::mem::size_of::<u16>(),
+            )
+        };
+
+        let f16_handle = backend.cpu_to_gpu(bytes, DType::F16, 0).expect("cpu_to_gpu f16");
+        // (1) tag is F16, NOT BF16; elem_size derives from the tag.
+        assert_eq!(f16_handle.dtype(), DType::F16);
+        assert_ne!(f16_handle.dtype(), DType::BF16);
+        assert_eq!(backend.buffer_elem_size(&f16_handle), 2);
+
+        // f16 round-trips bit-exact through the F16 gpu_to_cpu branch.
+        let back_bytes = backend.gpu_to_cpu(&f16_handle).expect("gpu_to_cpu f16");
+        // SAFETY: `back_bytes` came from `gpu_to_cpu` via from_raw_parts on a
+        // `ManuallyDrop<Vec<u16>>` (2-byte aligned); `len / 2 == host.len()`.
+        let back: &[u16] = unsafe {
+            std::slice::from_raw_parts(back_bytes.as_ptr() as *const u16, back_bytes.len() / 2)
+        };
+        assert_eq!(back, &host[..], "f16 round-trip must be bit-exact");
+
+        // (2) Feed the F16-tagged handle to a *bf16* backend op. The bf16
+        // path unwraps via `unwrap_buffer_bf16`, whose tag check must reject
+        // the F16 tag → structured Err, never silent garbage.
+        let mismatch = backend.add_bf16_bf16(&f16_handle, &f16_handle);
+        assert!(
+            mismatch.is_err(),
+            "F16-tagged handle fed to add_bf16_bf16 must Err, got Ok"
+        );
+        if let Err(e) = mismatch {
+            let msg = format!("{e}");
+            assert!(
+                msg.contains("BF16") || msg.contains("expected BF16"),
+                "error must name the BF16 tag mismatch, got: {msg}"
+            );
+        }
+
+        // (3) Symmetric: a BF16-tagged handle fed to an f16 backend op Errs.
+        let bf16_host: Vec<u16> = [0.0_f32, 1.0]
+            .iter()
+            .map(|&x| half::bf16::from_f32(x).to_bits())
+            .collect();
+        // SAFETY: same as `bytes` above with a 2-element u16 source.
+        let bf16_bytes: &[u8] = unsafe {
+            std::slice::from_raw_parts(
+                bf16_host.as_ptr() as *const u8,
+                bf16_host.len() * std::mem::size_of::<u16>(),
+            )
+        };
+        let bf16_handle = backend
+            .cpu_to_gpu(bf16_bytes, DType::BF16, 0)
+            .expect("cpu_to_gpu bf16");
+        assert_eq!(bf16_handle.dtype(), DType::BF16);
+        let rev_mismatch = backend.add_f16(&bf16_handle, &bf16_handle);
+        assert!(
+            rev_mismatch.is_err(),
+            "BF16-tagged handle fed to add_f16 must Err, got Ok"
+        );
+        if let Err(e) = rev_mismatch {
+            let msg = format!("{e}");
+            assert!(
+                msg.contains("F16") || msg.contains("expected F16"),
+                "error must name the F16 tag mismatch, got: {msg}"
+            );
+        }
     }
 
     /// Allocate a zeroed bf16 buffer via the dispatcher and confirm the

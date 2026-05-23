@@ -3554,6 +3554,228 @@ pub trait GpuBackend: Send + Sync {
     fn sigmoid_bf16_bf16(&self, _a: &GpuBufferHandle) -> FerrotorchResult<GpuBufferHandle> {
         Err(FerrotorchError::NotImplementedOnCuda { op: "sigmoid_bf16_bf16" })
     }
+
+    // ── IEEE float16 (f16) ops — crosslink #1185 Phase 1 ─────────────────────
+    //
+    // f16 storage is `CudaSlice<u16>` (same width as bf16) but the
+    // `GpuBufferHandle` carries `DType::F16`, so `unwrap_buffer_f16` asserts
+    // the F16 tag and rejects a BF16-tagged handle (and vice-versa). All math
+    // happens in f32 registers per thread (native `cvt.f32.f16` /
+    // `cvt.rn.f16.f32`); reductions accumulate in f32 (PyTorch parity). These
+    // default bodies return a structured error so non-CUDA backends compile
+    // unchanged; `CudaBackendImpl` overrides each one.
+
+    /// f16 elementwise `out = a + b`, f32 compute, f16 RNE store.
+    fn add_f16(
+        &self,
+        _a: &GpuBufferHandle,
+        _b: &GpuBufferHandle,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::NotImplementedOnCuda { op: "add_f16" })
+    }
+
+    /// f16 elementwise `out = a - b`, f32 compute, f16 RNE store.
+    fn sub_f16(
+        &self,
+        _a: &GpuBufferHandle,
+        _b: &GpuBufferHandle,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::NotImplementedOnCuda { op: "sub_f16" })
+    }
+
+    /// f16 elementwise `out = a * b`, f32 compute, f16 RNE store.
+    fn mul_f16(
+        &self,
+        _a: &GpuBufferHandle,
+        _b: &GpuBufferHandle,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::NotImplementedOnCuda { op: "mul_f16" })
+    }
+
+    /// f16 elementwise `out = a / b`, f32 compute, f16 RNE store.
+    fn div_f16(
+        &self,
+        _a: &GpuBufferHandle,
+        _b: &GpuBufferHandle,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::NotImplementedOnCuda { op: "div_f16" })
+    }
+
+    /// f16 elementwise `out = -a`.
+    fn neg_f16(&self, _a: &GpuBufferHandle) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::NotImplementedOnCuda { op: "neg_f16" })
+    }
+
+    /// f16 multiply every element by an f32 scalar (`out = a * scale`).
+    fn scale_f16(&self, _a: &GpuBufferHandle, _scale: f32) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::NotImplementedOnCuda { op: "scale_f16" })
+    }
+
+    /// f16 broadcast add over N-D broadcast shapes.
+    fn broadcast_add_f16(
+        &self,
+        _a: &GpuBufferHandle,
+        _b: &GpuBufferHandle,
+        _a_shape: &[usize],
+        _b_shape: &[usize],
+        _out_shape: &[usize],
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::NotImplementedOnCuda { op: "broadcast_add_f16" })
+    }
+
+    /// f16 broadcast sub over N-D broadcast shapes.
+    fn broadcast_sub_f16(
+        &self,
+        _a: &GpuBufferHandle,
+        _b: &GpuBufferHandle,
+        _a_shape: &[usize],
+        _b_shape: &[usize],
+        _out_shape: &[usize],
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::NotImplementedOnCuda { op: "broadcast_sub_f16" })
+    }
+
+    /// f16 broadcast mul over N-D broadcast shapes.
+    fn broadcast_mul_f16(
+        &self,
+        _a: &GpuBufferHandle,
+        _b: &GpuBufferHandle,
+        _a_shape: &[usize],
+        _b_shape: &[usize],
+        _out_shape: &[usize],
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::NotImplementedOnCuda { op: "broadcast_mul_f16" })
+    }
+
+    /// f16 broadcast div over N-D broadcast shapes.
+    fn broadcast_div_f16(
+        &self,
+        _a: &GpuBufferHandle,
+        _b: &GpuBufferHandle,
+        _a_shape: &[usize],
+        _b_shape: &[usize],
+        _out_shape: &[usize],
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::NotImplementedOnCuda { op: "broadcast_div_f16" })
+    }
+
+    /// f16 sum-reduce to scalar. f32 accumulator (PyTorch parity).
+    fn sum_f16(&self, _a: &GpuBufferHandle) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::NotImplementedOnCuda { op: "sum_f16" })
+    }
+
+    /// f16 mean-reduce to scalar. Computed via `sum_f16 / n` on-device.
+    fn mean_f16(&self, _a: &GpuBufferHandle) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::NotImplementedOnCuda { op: "mean_f16" })
+    }
+
+    /// f16 axis sum-reduce. f32 accumulator; collapses `shape[axis]`.
+    fn sum_axis_f16(
+        &self,
+        _a: &GpuBufferHandle,
+        _shape: &[usize],
+        _axis: usize,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::NotImplementedOnCuda { op: "sum_axis_f16" })
+    }
+
+    /// f16 axis mean-reduce. f32 accumulator; divides by `shape[axis]`.
+    fn mean_axis_f16(
+        &self,
+        _a: &GpuBufferHandle,
+        _shape: &[usize],
+        _axis: usize,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::NotImplementedOnCuda { op: "mean_axis_f16" })
+    }
+
+    /// f16 elementwise `out = exp(a)`. f32 internal, f16 RNE store.
+    fn exp_f16(&self, _a: &GpuBufferHandle) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::NotImplementedOnCuda { op: "exp_f16" })
+    }
+
+    /// f16 elementwise `out = ln(a)`. f32 internal, f16 RNE store.
+    fn log_f16(&self, _a: &GpuBufferHandle) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::NotImplementedOnCuda { op: "log_f16" })
+    }
+
+    /// f16 elementwise tanh. f32 internal, f16 RNE store.
+    fn tanh_f16(&self, _a: &GpuBufferHandle) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::NotImplementedOnCuda { op: "tanh_f16" })
+    }
+
+    /// f16 elementwise sigmoid `1 / (1 + exp(-x))`. f32 internal, f16 RNE store.
+    fn sigmoid_f16(&self, _a: &GpuBufferHandle) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::NotImplementedOnCuda { op: "sigmoid_f16" })
+    }
+
+    /// f16 elementwise `out = sqrt(a)`. f32 internal, f16 RNE store.
+    fn sqrt_f16(&self, _a: &GpuBufferHandle) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::NotImplementedOnCuda { op: "sqrt_f16" })
+    }
+
+    /// f16 elementwise ReLU `max(0, a)`.
+    fn relu_f16(&self, _a: &GpuBufferHandle) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::NotImplementedOnCuda { op: "relu_f16" })
+    }
+
+    /// f16 elementwise SiLU `a * sigmoid(a)`. f32 internal, f16 RNE store.
+    fn silu_f16(&self, _a: &GpuBufferHandle) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::NotImplementedOnCuda { op: "silu_f16" })
+    }
+
+    /// f16 elementwise GELU `0.5 * x * (1 + erf(x / sqrt(2)))`. f32 internal.
+    fn gelu_f16(&self, _a: &GpuBufferHandle) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::NotImplementedOnCuda { op: "gelu_f16" })
+    }
+
+    /// f16 row-wise softmax over `[rows, cols]`. f32 accumulator, f16 store.
+    fn softmax_f16(
+        &self,
+        _a: &GpuBufferHandle,
+        _rows: usize,
+        _cols: usize,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::NotImplementedOnCuda { op: "softmax_f16" })
+    }
+
+    /// f16 LayerNorm over `[rows, cols]` with f16 gamma/beta. f32 reductions.
+    fn layernorm_f16(
+        &self,
+        _input: &GpuBufferHandle,
+        _gamma: &GpuBufferHandle,
+        _beta: &GpuBufferHandle,
+        _rows: usize,
+        _cols: usize,
+        _eps: f32,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::NotImplementedOnCuda { op: "layernorm_f16" })
+    }
+
+    /// f16 RMSNorm over `[rows, cols]` with f16 weight. f32 reductions.
+    fn rmsnorm_f16(
+        &self,
+        _input: &GpuBufferHandle,
+        _weight: &GpuBufferHandle,
+        _rows: usize,
+        _cols: usize,
+        _eps: f32,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::NotImplementedOnCuda { op: "rmsnorm_f16" })
+    }
+
+    /// f16-resident matmul `C = A @ B` (cuBLAS GemmEx, `CUDA_R_16F` operands,
+    /// f32 compute). `A: [m, k]`, `B: [k, n]`, `C: [m, n]`.
+    fn matmul_f16_f16(
+        &self,
+        _a: &GpuBufferHandle,
+        _b: &GpuBufferHandle,
+        _m: usize,
+        _k: usize,
+        _n: usize,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::NotImplementedOnCuda { op: "matmul_f16_f16" })
+    }
 }
 
 static GPU_BACKEND: OnceLock<Box<dyn GpuBackend>> = OnceLock::new();

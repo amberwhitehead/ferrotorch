@@ -73,7 +73,7 @@ ferrotorch-graph = { version = "0.5.8", path = "ferrotorch-graph" }
 ferrotorch-rl = { version = "0.5.8", path = "ferrotorch-rl" }
 
 # ferray ecosystem
-ferray-core = { version = "0.3", features = ["bf16"] }
+ferray-core = { version = "0.3", features = ["bf16", "f16"] }
 ferray-ufunc = "0.3"
 ferray-linalg = "0.3"
 ferray-random = "0.3"

@@ -814,6 +814,7 @@ pub fn mm_differentiable<T: Float>(a: &Tensor<T>, b: &Tensor<T>) -> FerrotorchRe
             },
             f64 => backend.matmul_f64(a.gpu_handle()?, b.gpu_handle()?, m, k, n),
             bf16 => backend.matmul_bf16_bf16(a.gpu_handle()?, b.gpu_handle()?, m, k, n),
+            f16 => backend.matmul_f16_f16(a.gpu_handle()?, b.gpu_handle()?, m, k, n),
         )?;
         let storage = TensorStorage::gpu(handle);
         let shape = vec![m, n];
@@ -1547,6 +1548,7 @@ pub fn matmul_differentiable<T: Float>(
             },
             f64 => backend.matmul_f64(a.gpu_handle()?, b.gpu_handle()?, m, k, n),
             bf16 => backend.matmul_bf16_bf16(a.gpu_handle()?, b.gpu_handle()?, m, k, n),
+            f16 => backend.matmul_f16_f16(a.gpu_handle()?, b.gpu_handle()?, m, k, n),
         )?;
         let storage = TensorStorage::gpu(handle);
         let shape = vec![m, n];
