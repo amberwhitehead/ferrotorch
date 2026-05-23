@@ -1324,26 +1324,11 @@ impl GpuBackend for CudaBackendImpl {
         a: &GpuBufferHandle,
         b: &GpuBufferHandle,
     ) -> FerrotorchResult<GpuBufferHandle> {
-        // f32 + bf16 routing. The trait keeps its `_f32` name because every
-        // existing caller (ferrotorch-core/grad_fns, autograd, inplace) drops
-        // here for both `Tensor<f32>` and `Tensor<bf16>` on CUDA; the bf16
-        // tail dispatches to the existing `gpu_add_bf16` PTX kernel. See
-        // forecast-bio/ferrotorch#23.
-        let ordinal = a.device_ordinal();
-        let dev = self.device(ordinal)?;
-        if let (Ok(a_buf), Ok(b_buf)) = (Self::unwrap_buffer(a), Self::unwrap_buffer(b)) {
-            let result = crate::kernels::gpu_add(a_buf, b_buf, dev).map_err(Self::map_gpu_err)?;
-            return Ok(Self::wrap_buffer(result, ordinal));
-        }
-        if let (Ok(a_buf), Ok(b_buf)) = (Self::unwrap_buffer_bf16(a), Self::unwrap_buffer_bf16(b)) {
-            let result = crate::bf16::gpu_add_bf16(a_buf, b_buf, dev).map_err(Self::map_gpu_err)?;
-            return Ok(Self::wrap_buffer_bf16(result, ordinal));
-        }
-        Err(FerrotorchError::InvalidArgument {
-            message:
-                "add_f32: GPU handles must both be CudaBuffer<f32> or both CudaSlice<u16> (bf16)"
-                    .into(),
-        })
+        let a_buf = Self::unwrap_buffer(a)?;
+        let b_buf = Self::unwrap_buffer(b)?;
+        let dev = self.device(a.device_ordinal())?;
+        let result = crate::kernels::gpu_add(a_buf, b_buf, dev).map_err(Self::map_gpu_err)?;
+        Ok(Self::wrap_buffer(result, a.device_ordinal()))
     }
 
     fn sub_f32(
@@ -1363,22 +1348,11 @@ impl GpuBackend for CudaBackendImpl {
         a: &GpuBufferHandle,
         b: &GpuBufferHandle,
     ) -> FerrotorchResult<GpuBufferHandle> {
-        // f32 + bf16 routing — see `add_f32` for context (ferrotorch#23).
-        let ordinal = a.device_ordinal();
-        let dev = self.device(ordinal)?;
-        if let (Ok(a_buf), Ok(b_buf)) = (Self::unwrap_buffer(a), Self::unwrap_buffer(b)) {
-            let result = crate::kernels::gpu_mul(a_buf, b_buf, dev).map_err(Self::map_gpu_err)?;
-            return Ok(Self::wrap_buffer(result, ordinal));
-        }
-        if let (Ok(a_buf), Ok(b_buf)) = (Self::unwrap_buffer_bf16(a), Self::unwrap_buffer_bf16(b)) {
-            let result = crate::bf16::gpu_mul_bf16(a_buf, b_buf, dev).map_err(Self::map_gpu_err)?;
-            return Ok(Self::wrap_buffer_bf16(result, ordinal));
-        }
-        Err(FerrotorchError::InvalidArgument {
-            message:
-                "mul_f32: GPU handles must both be CudaBuffer<f32> or both CudaSlice<u16> (bf16)"
-                    .into(),
-        })
+        let a_buf = Self::unwrap_buffer(a)?;
+        let b_buf = Self::unwrap_buffer(b)?;
+        let dev = self.device(a.device_ordinal())?;
+        let result = crate::kernels::gpu_mul(a_buf, b_buf, dev).map_err(Self::map_gpu_err)?;
+        Ok(Self::wrap_buffer(result, a.device_ordinal()))
     }
 
     fn neg_f32(&self, a: &GpuBufferHandle) -> FerrotorchResult<GpuBufferHandle> {
@@ -1389,20 +1363,10 @@ impl GpuBackend for CudaBackendImpl {
     }
 
     fn relu_f32(&self, a: &GpuBufferHandle) -> FerrotorchResult<GpuBufferHandle> {
-        // f32 + bf16 routing — see `add_f32` for context (ferrotorch#23).
-        let ordinal = a.device_ordinal();
-        let dev = self.device(ordinal)?;
-        if let Ok(a_buf) = Self::unwrap_buffer(a) {
-            let result = crate::kernels::gpu_relu(a_buf, dev).map_err(Self::map_gpu_err)?;
-            return Ok(Self::wrap_buffer(result, ordinal));
-        }
-        if let Ok(a_buf) = Self::unwrap_buffer_bf16(a) {
-            let result = crate::bf16::gpu_relu_bf16(a_buf, dev).map_err(Self::map_gpu_err)?;
-            return Ok(Self::wrap_buffer_bf16(result, ordinal));
-        }
-        Err(FerrotorchError::InvalidArgument {
-            message: "relu_f32: GPU handle must be CudaBuffer<f32> or CudaSlice<u16> (bf16)".into(),
-        })
+        let a_buf = Self::unwrap_buffer(a)?;
+        let dev = self.device(a.device_ordinal())?;
+        let result = crate::kernels::gpu_relu(a_buf, dev).map_err(Self::map_gpu_err)?;
+        Ok(Self::wrap_buffer(result, a.device_ordinal()))
     }
 
     fn div_f32(
@@ -2876,23 +2840,11 @@ impl GpuBackend for CudaBackendImpl {
         rows: usize,
         cols: usize,
     ) -> FerrotorchResult<GpuBufferHandle> {
-        // f32 + bf16 routing — see `add_f32` for context (ferrotorch#23).
-        let ordinal = a.device_ordinal();
-        let dev = self.device(ordinal)?;
-        if let Ok(a_buf) = Self::unwrap_buffer(a) {
-            let result =
-                crate::kernels::gpu_softmax(a_buf, rows, cols, dev).map_err(Self::map_gpu_err)?;
-            return Ok(Self::wrap_buffer(result, ordinal));
-        }
-        if let Ok(a_buf) = Self::unwrap_buffer_bf16(a) {
-            let result =
-                crate::bf16::gpu_softmax_bf16(a_buf, rows, cols, dev).map_err(Self::map_gpu_err)?;
-            return Ok(Self::wrap_buffer_bf16(result, ordinal));
-        }
-        Err(FerrotorchError::InvalidArgument {
-            message: "softmax_f32: GPU handle must be CudaBuffer<f32> or CudaSlice<u16> (bf16)"
-                .into(),
-        })
+        let a_buf = Self::unwrap_buffer(a)?;
+        let dev = self.device(a.device_ordinal())?;
+        let result =
+            crate::kernels::gpu_softmax(a_buf, rows, cols, dev).map_err(Self::map_gpu_err)?;
+        Ok(Self::wrap_buffer(result, a.device_ordinal()))
     }
 
     fn dropout_f32(
@@ -3340,20 +3292,10 @@ impl GpuBackend for CudaBackendImpl {
     }
 
     fn gelu_f32(&self, a: &GpuBufferHandle) -> FerrotorchResult<GpuBufferHandle> {
-        // f32 + bf16 routing — see `add_f32` for context (ferrotorch#23).
-        let ordinal = a.device_ordinal();
-        let dev = self.device(ordinal)?;
-        if let Ok(a_buf) = Self::unwrap_buffer(a) {
-            let result = crate::kernels::gpu_gelu(a_buf, dev).map_err(Self::map_gpu_err)?;
-            return Ok(Self::wrap_buffer(result, ordinal));
-        }
-        if let Ok(a_buf) = Self::unwrap_buffer_bf16(a) {
-            let result = crate::bf16::gpu_gelu_bf16(a_buf, dev).map_err(Self::map_gpu_err)?;
-            return Ok(Self::wrap_buffer_bf16(result, ordinal));
-        }
-        Err(FerrotorchError::InvalidArgument {
-            message: "gelu_f32: GPU handle must be CudaBuffer<f32> or CudaSlice<u16> (bf16)".into(),
-        })
+        let a_buf = Self::unwrap_buffer(a)?;
+        let dev = self.device(a.device_ordinal())?;
+        let result = crate::kernels::gpu_gelu(a_buf, dev).map_err(Self::map_gpu_err)?;
+        Ok(Self::wrap_buffer(result, a.device_ordinal()))
     }
 
     fn gelu_tanh_f32(&self, a: &GpuBufferHandle) -> FerrotorchResult<GpuBufferHandle> {
@@ -3379,31 +3321,13 @@ impl GpuBackend for CudaBackendImpl {
         cols: usize,
         eps: f32,
     ) -> FerrotorchResult<GpuBufferHandle> {
-        // f32 + bf16 routing — see `add_f32` for context (ferrotorch#23).
-        let ordinal = input.device_ordinal();
-        let dev = self.device(ordinal)?;
-        if let (Ok(in_buf), Ok(w_buf), Ok(b_buf)) = (
-            Self::unwrap_buffer(input),
-            Self::unwrap_buffer(weight),
-            Self::unwrap_buffer(bias),
-        ) {
-            let result = crate::kernels::gpu_layernorm(in_buf, w_buf, b_buf, rows, cols, eps, dev)
-                .map_err(Self::map_gpu_err)?;
-            return Ok(Self::wrap_buffer(result, ordinal));
-        }
-        if let (Ok(in_buf), Ok(w_buf), Ok(b_buf)) = (
-            Self::unwrap_buffer_bf16(input),
-            Self::unwrap_buffer_bf16(weight),
-            Self::unwrap_buffer_bf16(bias),
-        ) {
-            let result =
-                crate::bf16::gpu_layernorm_bf16(in_buf, w_buf, b_buf, rows, cols, eps, dev)
-                    .map_err(Self::map_gpu_err)?;
-            return Ok(Self::wrap_buffer_bf16(result, ordinal));
-        }
-        Err(FerrotorchError::InvalidArgument {
-            message: "layernorm_f32: input/weight/bias must all be CudaBuffer<f32> or all CudaSlice<u16> (bf16)".into(),
-        })
+        let in_buf = Self::unwrap_buffer(input)?;
+        let w_buf = Self::unwrap_buffer(weight)?;
+        let b_buf = Self::unwrap_buffer(bias)?;
+        let dev = self.device(input.device_ordinal())?;
+        let result = crate::kernels::gpu_layernorm(in_buf, w_buf, b_buf, rows, cols, eps, dev)
+            .map_err(Self::map_gpu_err)?;
+        Ok(Self::wrap_buffer(result, input.device_ordinal()))
     }
 
     fn rmsnorm_f32(
@@ -3414,25 +3338,12 @@ impl GpuBackend for CudaBackendImpl {
         cols: usize,
         eps: f32,
     ) -> FerrotorchResult<GpuBufferHandle> {
-        // f32 + bf16 routing — see `add_f32` for context (ferrotorch#23).
-        let ordinal = input.device_ordinal();
-        let dev = self.device(ordinal)?;
-        if let (Ok(in_buf), Ok(w_buf)) = (Self::unwrap_buffer(input), Self::unwrap_buffer(weight)) {
-            let result = crate::kernels::gpu_rmsnorm(in_buf, w_buf, rows, cols, eps, dev)
-                .map_err(Self::map_gpu_err)?;
-            return Ok(Self::wrap_buffer(result, ordinal));
-        }
-        if let (Ok(in_buf), Ok(w_buf)) = (
-            Self::unwrap_buffer_bf16(input),
-            Self::unwrap_buffer_bf16(weight),
-        ) {
-            let result = crate::bf16::gpu_rmsnorm_bf16(in_buf, w_buf, rows, cols, eps, dev)
-                .map_err(Self::map_gpu_err)?;
-            return Ok(Self::wrap_buffer_bf16(result, ordinal));
-        }
-        Err(FerrotorchError::InvalidArgument {
-            message: "rmsnorm_f32: input/weight must both be CudaBuffer<f32> or both CudaSlice<u16> (bf16)".into(),
-        })
+        let in_buf = Self::unwrap_buffer(input)?;
+        let w_buf = Self::unwrap_buffer(weight)?;
+        let dev = self.device(input.device_ordinal())?;
+        let result = crate::kernels::gpu_rmsnorm(in_buf, w_buf, rows, cols, eps, dev)
+            .map_err(Self::map_gpu_err)?;
+        Ok(Self::wrap_buffer(result, input.device_ordinal()))
     }
 
     fn rmsnorm_backward_f32(
@@ -3539,23 +3450,10 @@ impl GpuBackend for CudaBackendImpl {
     }
 
     fn scale_f32(&self, a: &GpuBufferHandle, scalar: f32) -> FerrotorchResult<GpuBufferHandle> {
-        // f32 + bf16 routing — see `add_f32` for context (ferrotorch#23).
-        let ordinal = a.device_ordinal();
-        let dev = self.device(ordinal)?;
-        if let Ok(a_buf) = Self::unwrap_buffer(a) {
-            let result =
-                crate::kernels::gpu_scale(a_buf, scalar, dev).map_err(Self::map_gpu_err)?;
-            return Ok(Self::wrap_buffer(result, ordinal));
-        }
-        if let Ok(a_buf) = Self::unwrap_buffer_bf16(a) {
-            let result =
-                crate::bf16::gpu_scale_bf16(a_buf, scalar, dev).map_err(Self::map_gpu_err)?;
-            return Ok(Self::wrap_buffer_bf16(result, ordinal));
-        }
-        Err(FerrotorchError::InvalidArgument {
-            message: "scale_f32: GPU handle must be CudaBuffer<f32> or CudaSlice<u16> (bf16)"
-                .into(),
-        })
+        let a_buf = Self::unwrap_buffer(a)?;
+        let dev = self.device(a.device_ordinal())?;
+        let result = crate::kernels::gpu_scale(a_buf, scalar, dev).map_err(Self::map_gpu_err)?;
+        Ok(Self::wrap_buffer(result, a.device_ordinal()))
     }
 
     fn relu_backward_f32(
@@ -3751,20 +3649,10 @@ impl GpuBackend for CudaBackendImpl {
     }
 
     fn silu_f32(&self, a: &GpuBufferHandle) -> FerrotorchResult<GpuBufferHandle> {
-        // f32 + bf16 routing — see `add_f32` for context (ferrotorch#23).
-        let ordinal = a.device_ordinal();
-        let dev = self.device(ordinal)?;
-        if let Ok(a_buf) = Self::unwrap_buffer(a) {
-            let result = crate::kernels::gpu_silu(a_buf, dev).map_err(Self::map_gpu_err)?;
-            return Ok(Self::wrap_buffer(result, ordinal));
-        }
-        if let Ok(a_buf) = Self::unwrap_buffer_bf16(a) {
-            let result = crate::bf16::gpu_silu_bf16(a_buf, dev).map_err(Self::map_gpu_err)?;
-            return Ok(Self::wrap_buffer_bf16(result, ordinal));
-        }
-        Err(FerrotorchError::InvalidArgument {
-            message: "silu_f32: GPU handle must be CudaBuffer<f32> or CudaSlice<u16> (bf16)".into(),
-        })
+        let a_buf = Self::unwrap_buffer(a)?;
+        let dev = self.device(a.device_ordinal())?;
+        let result = crate::kernels::gpu_silu(a_buf, dev).map_err(Self::map_gpu_err)?;
+        Ok(Self::wrap_buffer(result, a.device_ordinal()))
     }
 
     fn silu_backward_f32(
