@@ -270,6 +270,60 @@ impl CudaBackendImpl {
             })
     }
 
+    /// Wrap a `CudaBuffer<i32>` into a type-erased [`GpuBufferHandle`] tagged
+    /// `DType::I32`.
+    ///
+    /// Integer device storage (GPU dtype-parity epic, crosslink #1185 Phase
+    /// 2a). i32 has cudarc `DeviceRepr` natively, so — unlike bf16/f16 which
+    /// stash a bit pattern in `CudaSlice<u16>` — the buffer holds a real
+    /// `CudaBuffer<i32>`. The `DType::I32` tag is what stops it being read as
+    /// f32 (same 4-byte width). No integer compute kernels exist yet (Phase
+    /// 2b); this is storage/transport only.
+    fn wrap_buffer_i32(buf: CudaBuffer<i32>, ordinal: usize) -> GpuBufferHandle {
+        let len = buf.len();
+        GpuBufferHandle::new(Box::new(buf), ordinal, len, DType::I32)
+    }
+
+    /// Extract a `&CudaBuffer<i32>` from a [`GpuBufferHandle`], asserting the
+    /// `DType::I32` tag first (PyTorch parity — the ScalarType tag is
+    /// authoritative; the `downcast_ref` is the safety net).
+    fn unwrap_buffer_i32(handle: &GpuBufferHandle) -> FerrotorchResult<&CudaBuffer<i32>> {
+        if handle.dtype() != DType::I32 {
+            return Err(FerrotorchError::InvalidArgument {
+                message: format!("expected I32 buffer, handle is tagged {}", handle.dtype()),
+            });
+        }
+        handle
+            .downcast_ref::<CudaBuffer<i32>>()
+            .ok_or(FerrotorchError::InvalidArgument {
+                message: "GPU handle does not contain a CudaBuffer<i32>".into(),
+            })
+    }
+
+    /// Wrap a `CudaBuffer<i64>` into a type-erased [`GpuBufferHandle`] tagged
+    /// `DType::I64` (crosslink #1185 Phase 2a). i64 has cudarc `DeviceRepr`
+    /// natively. The `DType::I64` tag is what stops it being read as f64 (same
+    /// 8-byte width).
+    fn wrap_buffer_i64(buf: CudaBuffer<i64>, ordinal: usize) -> GpuBufferHandle {
+        let len = buf.len();
+        GpuBufferHandle::new(Box::new(buf), ordinal, len, DType::I64)
+    }
+
+    /// Extract a `&CudaBuffer<i64>` from a [`GpuBufferHandle`], asserting the
+    /// `DType::I64` tag first.
+    fn unwrap_buffer_i64(handle: &GpuBufferHandle) -> FerrotorchResult<&CudaBuffer<i64>> {
+        if handle.dtype() != DType::I64 {
+            return Err(FerrotorchError::InvalidArgument {
+                message: format!("expected I64 buffer, handle is tagged {}", handle.dtype()),
+            });
+        }
+        handle
+            .downcast_ref::<CudaBuffer<i64>>()
+            .ok_or(FerrotorchError::InvalidArgument {
+                message: "GPU handle does not contain a CudaBuffer<i64>".into(),
+            })
+    }
+
     /// Convert a [`crate::error::GpuError`] into a [`FerrotorchError`].
     fn map_gpu_err(e: crate::error::GpuError) -> FerrotorchError {
         FerrotorchError::InvalidArgument {
@@ -309,6 +363,14 @@ impl GpuBackend for CudaBackendImpl {
             // distinguished from bf16 only by the `DType::F16` tag.
             let (ptr, _sync) = slice.device_ptr(&stream);
             ptr as *const std::ffi::c_void
+        } else if let Ok(buf) = Self::unwrap_buffer_i32(handle) {
+            // i32 storage: real `CudaBuffer<i32>` (crosslink #1185 Phase 2a).
+            let (ptr, _sync) = buf.inner().device_ptr(&stream);
+            ptr as *const std::ffi::c_void
+        } else if let Ok(buf) = Self::unwrap_buffer_i64(handle) {
+            // i64 storage: real `CudaBuffer<i64>` (crosslink #1185 Phase 2a).
+            let (ptr, _sync) = buf.inner().device_ptr(&stream);
+            ptr as *const std::ffi::c_void
         } else {
             std::ptr::null()
         }
@@ -330,6 +392,14 @@ impl GpuBackend for CudaBackendImpl {
             ptr as *mut std::ffi::c_void
         } else if let Some(slice) = handle.downcast_mut::<cudarc::driver::CudaSlice<u16>>() {
             let (ptr, _sync) = slice.device_ptr_mut(&stream);
+            ptr as *mut std::ffi::c_void
+        } else if let Some(buf) = handle.downcast_mut::<CudaBuffer<i32>>() {
+            // i32 storage (crosslink #1185 Phase 2a).
+            let (ptr, _sync) = buf.inner_mut().device_ptr_mut(&stream);
+            ptr as *mut std::ffi::c_void
+        } else if let Some(buf) = handle.downcast_mut::<CudaBuffer<i64>>() {
+            // i64 storage (crosslink #1185 Phase 2a).
+            let (ptr, _sync) = buf.inner_mut().device_ptr_mut(&stream);
             ptr as *mut std::ffi::c_void
         } else {
             std::ptr::null_mut()
@@ -483,14 +553,56 @@ impl GpuBackend for CudaBackendImpl {
                     .map_err(|e| Self::map_gpu_err(crate::error::GpuError::Driver(e)))?;
                 Ok(Self::wrap_buffer_f16(slice, device))
             }
+            DType::I32 => {
+                // Integer device storage (crosslink #1185 Phase 2a). i32 has
+                // cudarc `DeviceRepr` natively — no `CudaSlice<u16>` bit-pattern
+                // trick (bf16/f16) — so we upload a real `&[i32]` and tag the
+                // handle `DType::I32`. No integer compute kernels exist yet
+                // (Phase 2b); this is storage/transport only.
+                let count = data.len() / 4;
+                // SAFETY:
+                // - Caller (ferrotorch-core `IntTensor::to` / `TensorStorage::
+                //   on_device`) guarantees `data` is the byte serialisation of a
+                //   contiguous `&[i32]` with `data.len() == count * 4`.
+                // - i32 has size 4 and align 4 (Rust reference, primitive data
+                //   layout); the source `Vec<i32>` allocation is 4-byte-aligned
+                //   and `data.as_ptr()` inherits that alignment.
+                // - `from_raw_parts` reads exactly `count * 4 == data.len()`
+                //   bytes — no overrun.
+                // - Lifetime: the reinterpreted `&[i32]` is bounded by `data`
+                //   and consumed by `transfer::cpu_to_gpu` before this frame
+                //   returns; no dangling reference escapes.
+                // - No `&mut` aliases: `data: &[u8]` is a shared borrow.
+                let i32_data: &[i32] =
+                    unsafe { std::slice::from_raw_parts(data.as_ptr() as *const i32, count) };
+                let buf = crate::transfer::cpu_to_gpu(i32_data, dev).map_err(Self::map_gpu_err)?;
+                Ok(Self::wrap_buffer_i32(buf, device))
+            }
+            DType::I64 => {
+                // Integer device storage (crosslink #1185 Phase 2a). i64 has
+                // cudarc `DeviceRepr` natively; upload a real `&[i64]` and tag
+                // the handle `DType::I64`.
+                let count = data.len() / 8;
+                // SAFETY: same invariants as the I32 arm, with element width 8
+                // (i64 size 8, align 8). `count = data.len() / 8` is exact when
+                // the caller honours the `&[i64]` byte-serialisation contract;
+                // `from_raw_parts` reads exactly `data.len()` bytes; the slice
+                // is consumed by `transfer::cpu_to_gpu` before this frame
+                // returns; `data` is a shared borrow so no `&mut [i64]` alias.
+                let i64_data: &[i64] =
+                    unsafe { std::slice::from_raw_parts(data.as_ptr() as *const i64, count) };
+                let buf = crate::transfer::cpu_to_gpu(i64_data, dev).map_err(Self::map_gpu_err)?;
+                Ok(Self::wrap_buffer_i64(buf, device))
+            }
             // PyTorch parity (rust-gpu-discipline §3): unsupported (dtype,
             // CUDA) combinations return a structured error rather than a
-            // silent CPU detour. Integer / bool dtypes land here until their
-            // respective dtype-parity phases add real CUDA buffer support.
+            // silent CPU detour. Remaining integer / bool dtypes land here
+            // until their respective dtype-parity phases add real CUDA buffer
+            // support.
             other => Err(FerrotorchError::InvalidArgument {
                 message: format!(
                     "cpu_to_gpu: dtype {other} not supported on CUDA \
-                     (supported: F32, F64, BF16, F16)"
+                     (supported: F32, F64, BF16, F16, I32, I64)"
                 ),
             }),
         }
@@ -559,13 +671,40 @@ impl GpuBackend for CudaBackendImpl {
                     crate::transfer::cpu_to_gpu_pinned(f64_data, dev).map_err(Self::map_gpu_err)?;
                 Ok(Self::wrap_buffer_f64(buf, device))
             }
-            // PyTorch parity: the pinned path supports the same f32/f64 dtypes
-            // as before (no pinned bf16 transfer existed); any other dtype is a
-            // structured error, not a silent fallback.
+            DType::I32 => {
+                // Integer pinned transport (crosslink #1185 Phase 2a). i32 has
+                // cudarc `DeviceRepr + ValidAsZeroBits + Copy`, so the generic
+                // pinned path applies. Tag the handle `DType::I32`.
+                let count = data.len() / 4;
+                // SAFETY: identical invariants to the `cpu_to_gpu` I32 arm —
+                // `data` is the byte serialisation of a contiguous `&[i32]`
+                // (size 4, align 4), `count = data.len() / 4` is exact, the
+                // reinterpreted `&[i32]` is bounded by `data` and consumed by
+                // `cpu_to_gpu_pinned` before this frame returns, and `data` is
+                // a shared borrow so no `&mut [i32]` alias exists.
+                let i32_data: &[i32] =
+                    unsafe { std::slice::from_raw_parts(data.as_ptr() as *const i32, count) };
+                let buf =
+                    crate::transfer::cpu_to_gpu_pinned(i32_data, dev).map_err(Self::map_gpu_err)?;
+                Ok(Self::wrap_buffer_i32(buf, device))
+            }
+            DType::I64 => {
+                // Integer pinned transport (crosslink #1185 Phase 2a). i64 has
+                // cudarc `DeviceRepr + ValidAsZeroBits + Copy`. Tag `DType::I64`.
+                let count = data.len() / 8;
+                // SAFETY: same as the I32 pinned arm with element width 8.
+                let i64_data: &[i64] =
+                    unsafe { std::slice::from_raw_parts(data.as_ptr() as *const i64, count) };
+                let buf =
+                    crate::transfer::cpu_to_gpu_pinned(i64_data, dev).map_err(Self::map_gpu_err)?;
+                Ok(Self::wrap_buffer_i64(buf, device))
+            }
+            // PyTorch parity: any other dtype is a structured error, not a
+            // silent fallback.
             other => Err(FerrotorchError::InvalidArgument {
                 message: format!(
                     "cpu_to_gpu_pinned: dtype {other} not supported on CUDA \
-                     (supported: F32, F64)"
+                     (supported: F32, F64, I32, I64)"
                 ),
             }),
         }
@@ -651,11 +790,48 @@ impl GpuBackend for CudaBackendImpl {
                 Vec::from_raw_parts(ptr, len, cap)
             };
             Ok(bytes)
+        } else if let Ok(buf) = Self::unwrap_buffer_i32(handle) {
+            // i32 device storage (crosslink #1185 Phase 2a). Real
+            // `CudaBuffer<i32>` (not a `CudaSlice<u16>` bit pattern), so the
+            // generic `transfer::gpu_to_cpu` D2H path applies directly.
+            let i32_data = crate::transfer::gpu_to_cpu(buf, dev).map_err(Self::map_gpu_err)?;
+
+            // Reinterpret Vec<i32> as Vec<u8> without copying.
+            // SAFETY: i32 has alignment 4 and size 4; len/capacity adjusted
+            // accordingly. The original Vec is consumed via ManuallyDrop so its
+            // destructor never runs and the allocation stays live under its new
+            // u8-typed handle (the byte ranges Layout::array::<i32>(cap) and
+            // Layout::array::<u8>(cap*4) describe are identical).
+            let bytes = unsafe {
+                let mut v = std::mem::ManuallyDrop::new(i32_data);
+                let ptr = v.as_mut_ptr() as *mut u8;
+                let len = v.len() * 4;
+                let cap = v.capacity() * 4;
+                Vec::from_raw_parts(ptr, len, cap)
+            };
+            Ok(bytes)
+        } else if let Ok(buf) = Self::unwrap_buffer_i64(handle) {
+            // i64 device storage (crosslink #1185 Phase 2a). Real
+            // `CudaBuffer<i64>`; generic D2H path applies.
+            let i64_data = crate::transfer::gpu_to_cpu(buf, dev).map_err(Self::map_gpu_err)?;
+
+            // Reinterpret Vec<i64> as Vec<u8> without copying.
+            // SAFETY: i64 has alignment 8 and size 8; len/capacity adjusted
+            // accordingly. ManuallyDrop keeps the allocation live under the new
+            // u8-typed handle (identical byte range to the i64 Vec).
+            let bytes = unsafe {
+                let mut v = std::mem::ManuallyDrop::new(i64_data);
+                let ptr = v.as_mut_ptr() as *mut u8;
+                let len = v.len() * 8;
+                let cap = v.capacity() * 8;
+                Vec::from_raw_parts(ptr, len, cap)
+            };
+            Ok(bytes)
         } else {
             Err(FerrotorchError::InvalidArgument {
                 message: "gpu_to_cpu: handle is not a recognised dtype \
                           (expected CudaBuffer<f32>, CudaBuffer<f64>, \
-                          or CudaSlice<u16> for bf16/f16)"
+                          CudaSlice<u16> for bf16/f16, or CudaBuffer<i32>/<i64>)"
                     .into(),
             })
         }
@@ -710,11 +886,29 @@ impl GpuBackend for CudaBackendImpl {
                 let buf = crate::transfer::alloc_zeros_f64(len, dev).map_err(Self::map_gpu_err)?;
                 Ok(Self::wrap_buffer_f64(buf, device))
             }
+            DType::I32 => {
+                // Integer zero-alloc (crosslink #1185 Phase 2a). i32 has cudarc
+                // `DeviceRepr + ValidAsZeroBits`; the generic (non-pooled)
+                // `alloc_zeros::<i32>` applies. The integer pool path is a
+                // follow-up (the pool is keyed by elem_size and currently only
+                // stocks f32/f64 slices); zero-init IntTensors are rare so the
+                // pool-miss cost is acceptable for Phase 2a.
+                let buf: CudaBuffer<i32> =
+                    crate::transfer::alloc_zeros(len, dev).map_err(Self::map_gpu_err)?;
+                Ok(Self::wrap_buffer_i32(buf, device))
+            }
+            DType::I64 => {
+                // Integer zero-alloc (crosslink #1185 Phase 2a). i64 has cudarc
+                // `DeviceRepr + ValidAsZeroBits`; generic `alloc_zeros::<i64>`.
+                let buf: CudaBuffer<i64> =
+                    crate::transfer::alloc_zeros(len, dev).map_err(Self::map_gpu_err)?;
+                Ok(Self::wrap_buffer_i64(buf, device))
+            }
             // PyTorch parity: unsupported (dtype, CUDA) → structured error.
             other => Err(FerrotorchError::InvalidArgument {
                 message: format!(
                     "alloc_zeros: dtype {other} not supported on CUDA \
-                     (supported: F32, F64, BF16, F16)"
+                     (supported: F32, F64, BF16, F16, I32, I64)"
                 ),
             }),
         }

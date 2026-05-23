@@ -1057,12 +1057,44 @@ mod test_backend_impl {
     fn backend_cpu_to_gpu_unsupported_dtype_errors() {
         ensure_init();
         let backend = gpu_dispatch::gpu_backend().expect("backend");
+        // U8 has no CUDA buffer support yet (PyTorch parity: unsupported
+        // (dtype, CUDA) → structured Err, never a silent CPU detour). It is
+        // 1 byte, distinct from any supported dtype's width, so this proves
+        // dispatch keys on the tag.
         let bytes = vec![0u8; 4];
-        // I32 has no CUDA buffer support in Phase 0 (PyTorch parity: unsupported
-        // (dtype, CUDA) → structured Err, never a silent CPU detour). It is also
-        // 4 bytes, so this proves dispatch keys on the tag, not the byte width.
-        let result = backend.cpu_to_gpu(&bytes, ferrotorch_core::DType::I32, 0);
+        let result = backend.cpu_to_gpu(&bytes, ferrotorch_core::DType::U8, 0);
         assert!(result.is_err(), "unsupported dtype should return Err");
+    }
+
+    #[test]
+    fn backend_cpu_to_gpu_i32_i64_supported_round_trip() {
+        // crosslink #1185 Phase 2a: integer device storage. I32 (4 bytes) and
+        // I64 (8 bytes) are now supported on CUDA; the handle carries the
+        // authoritative tag so an i32 buffer is NOT read as f32 (same width).
+        ensure_init();
+        let backend = gpu_dispatch::gpu_backend().expect("backend");
+
+        // i32 round-trip, including the extreme values.
+        let i32_host: Vec<i32> = vec![1, -2, i32::MIN, i32::MAX, 0];
+        let i32_bytes: Vec<u8> = i32_host.iter().flat_map(|v| v.to_ne_bytes()).collect();
+        let h32 = backend
+            .cpu_to_gpu(&i32_bytes, ferrotorch_core::DType::I32, 0)
+            .expect("cpu_to_gpu i32");
+        assert_eq!(h32.dtype(), ferrotorch_core::DType::I32, "i32 tag");
+        assert_eq!(backend.buffer_elem_size(&h32), 4, "i32 elem size");
+        let back32 = backend.gpu_to_cpu(&h32).expect("gpu_to_cpu i32");
+        assert_eq!(back32, i32_bytes, "i32 bytes round-trip bit-exact");
+
+        // i64 round-trip.
+        let i64_host: Vec<i64> = vec![1, -2, i64::MIN, i64::MAX, 0];
+        let i64_bytes: Vec<u8> = i64_host.iter().flat_map(|v| v.to_ne_bytes()).collect();
+        let h64 = backend
+            .cpu_to_gpu(&i64_bytes, ferrotorch_core::DType::I64, 0)
+            .expect("cpu_to_gpu i64");
+        assert_eq!(h64.dtype(), ferrotorch_core::DType::I64, "i64 tag");
+        assert_eq!(backend.buffer_elem_size(&h64), 8, "i64 elem size");
+        let back64 = backend.gpu_to_cpu(&h64).expect("gpu_to_cpu i64");
+        assert_eq!(back64, i64_bytes, "i64 bytes round-trip bit-exact");
     }
 
     #[test]
@@ -1095,9 +1127,38 @@ mod test_backend_impl {
     fn backend_alloc_zeros_unsupported_dtype_errors() {
         ensure_init();
         let backend = gpu_dispatch::gpu_backend().expect("backend");
-        // I32 is unsupported on CUDA in Phase 0 → structured Err.
-        let result = backend.alloc_zeros(4, ferrotorch_core::DType::I32, 0);
+        // U8 is unsupported on CUDA → structured Err (PyTorch parity).
+        let result = backend.alloc_zeros(4, ferrotorch_core::DType::U8, 0);
         assert!(result.is_err(), "unsupported dtype should return Err");
+    }
+
+    #[test]
+    fn backend_alloc_zeros_i32_i64() {
+        // crosslink #1185 Phase 2a: zero-init integer device buffers.
+        ensure_init();
+        let backend = gpu_dispatch::gpu_backend().expect("backend");
+
+        let h32 = backend
+            .alloc_zeros(8, ferrotorch_core::DType::I32, 0)
+            .expect("alloc_zeros i32");
+        assert_eq!(h32.len(), 8);
+        assert_eq!(h32.dtype(), ferrotorch_core::DType::I32);
+        let bytes32 = backend.gpu_to_cpu(&h32).expect("gpu_to_cpu i32");
+        assert!(
+            bytes32.iter().all(|&b| b == 0),
+            "alloc_zeros i32 must be all-zero"
+        );
+
+        let h64 = backend
+            .alloc_zeros(4, ferrotorch_core::DType::I64, 0)
+            .expect("alloc_zeros i64");
+        assert_eq!(h64.len(), 4);
+        assert_eq!(h64.dtype(), ferrotorch_core::DType::I64);
+        let bytes64 = backend.gpu_to_cpu(&h64).expect("gpu_to_cpu i64");
+        assert!(
+            bytes64.iter().all(|&b| b == 0),
+            "alloc_zeros i64 must be all-zero"
+        );
     }
 
     #[test]

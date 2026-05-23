@@ -936,7 +936,7 @@ pub fn index_select_1d_it<T: Float, I: IntElement>(
         });
     }
     let mut idx_usize: Vec<usize> = Vec::with_capacity(indices.numel());
-    for v in indices.data() {
+    for v in indices.data()? {
         let i = v.to_i64();
         if i < 0 {
             return Err(FerrotorchError::InvalidArgument {
@@ -1128,7 +1128,7 @@ pub fn index_select_dim<T: Float, I: IntElement>(
     let in_dim_size = input_shape[dim];
     // Validate + widen indices.
     let mut idx_usize: Vec<usize> = Vec::with_capacity(indices.numel());
-    for v in indices.data() {
+    for v in indices.data()? {
         let i = v.to_i64();
         if i < 0 {
             return Err(FerrotorchError::InvalidArgument {

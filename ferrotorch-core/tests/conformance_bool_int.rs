@@ -1087,6 +1087,7 @@ fn run_int_zeros_for_dtype<I: IntElement + PartialEq + From<i8>>(
     assert_eq!(z.ndim(), f.ndim.expect("ndim"));
     let actual: Vec<i64> = z
         .data()
+        .expect("data")
         .iter()
         .map(|&v| <i64 as From<I>>::from(v))
         .collect();
@@ -1132,6 +1133,7 @@ fn run_int_from_vec_for_dtype<I: IntElement + PartialEq + From<i8>>(
     assert_eq!(t.ndim(), f.ndim.expect("ndim"));
     let actual: Vec<i64> = t
         .data()
+        .expect("data")
         .iter()
         .map(|&v| <i64 as From<I>>::from(v))
         .collect();
@@ -1180,12 +1182,12 @@ fn int_from_slice_constructor() {
                     .map(|&v| i32::try_from_i64(v).expect("fits in i32"))
                     .collect();
                 let t = IntTensor::<i32>::from_slice(&typed, shape).expect("from_slice");
-                let actual: Vec<i64> = t.data().iter().map(|&v| v as i64).collect();
+                let actual: Vec<i64> = t.data().expect("data").iter().map(|&v| v as i64).collect();
                 assert_int_eq(&actual, expected, &label);
             }
             Some("i64") => {
                 let t = IntTensor::<i64>::from_slice(in_data, shape).expect("from_slice");
-                assert_int_eq(t.data(), expected, &label);
+                assert_int_eq(t.data().expect("data"), expected, &label);
             }
             other => panic!("unexpected dtype {other:?}"),
         }
@@ -1210,14 +1212,14 @@ fn int_arange_constructor() {
                 let t = IntTensor::<i32>::arange(n).expect("arange");
                 assert_eq!(t.numel(), f.numel.expect("numel"));
                 assert_eq!(t.ndim(), f.ndim.expect("ndim"));
-                let actual: Vec<i64> = t.data().iter().map(|&v| v as i64).collect();
+                let actual: Vec<i64> = t.data().expect("data").iter().map(|&v| v as i64).collect();
                 assert_int_eq(&actual, expected, &label);
             }
             Some("i64") => {
                 let t = IntTensor::<i64>::arange(n).expect("arange");
                 assert_eq!(t.numel(), f.numel.expect("numel"));
                 assert_eq!(t.ndim(), f.ndim.expect("ndim"));
-                assert_int_eq(t.data(), expected, &label);
+                assert_int_eq(t.data().expect("data"), expected, &label);
             }
             other => panic!("unexpected dtype {other:?}"),
         }
@@ -1244,7 +1246,7 @@ fn int_scalar_constructor() {
                 assert_eq!(t.shape(), &[] as &[usize], "{label} 0-d shape");
                 assert_eq!(t.numel(), 1, "{label} 0-d has numel=1");
                 assert_eq!(t.ndim(), 0, "{label} 0-d ndim=0");
-                let actual: Vec<i64> = t.data().iter().map(|&v| v as i64).collect();
+                let actual: Vec<i64> = t.data().expect("data").iter().map(|&v| v as i64).collect();
                 assert_int_eq(&actual, expected, &label);
             }
             Some("i64") => {
@@ -1252,7 +1254,7 @@ fn int_scalar_constructor() {
                 assert_eq!(t.shape(), &[] as &[usize]);
                 assert_eq!(t.numel(), 1);
                 assert_eq!(t.ndim(), 0);
-                assert_int_eq(t.data(), expected, &label);
+                assert_int_eq(t.data().expect("data"), expected, &label);
             }
             other => panic!("unexpected dtype {other:?}"),
         }
@@ -1283,7 +1285,7 @@ fn int_reshape_preserves_data() {
                 let a = IntTensor::<i32>::from_vec(typed, in_shape.clone()).expect("from_vec");
                 let r = a.reshape(new_shape).expect("reshape");
                 assert_eq!(r.shape(), new_shape.as_slice(), "{label} shape");
-                let actual: Vec<i64> = r.data().iter().map(|&v| v as i64).collect();
+                let actual: Vec<i64> = r.data().expect("data").iter().map(|&v| v as i64).collect();
                 assert_int_eq(&actual, expected, &label);
             }
             Some("i64") => {
@@ -1291,7 +1293,7 @@ fn int_reshape_preserves_data() {
                     .expect("from_vec");
                 let r = a.reshape(new_shape).expect("reshape");
                 assert_eq!(r.shape(), new_shape.as_slice());
-                assert_int_eq(r.data(), expected, &label);
+                assert_int_eq(r.data().expect("data"), expected, &label);
             }
             other => panic!("unexpected dtype {other:?}"),
         }
@@ -1361,7 +1363,7 @@ fn int_cast_in_range_and_oob() {
                     assert!(r.is_err(), "{label} must Err");
                 } else {
                     let r = r.expect("cast");
-                    assert_int_eq(r.data(), expected.unwrap(), &label);
+                    assert_int_eq(r.data().expect("data"), expected.unwrap(), &label);
                     assert_eq!(r.dtype_name(), "i64");
                 }
             }
@@ -1373,7 +1375,7 @@ fn int_cast_in_range_and_oob() {
                     assert!(r.is_err(), "{label} must Err on OOB cast");
                 } else {
                     let r = r.expect("cast");
-                    let actual: Vec<i64> = r.data().iter().map(|&v| v as i64).collect();
+                    let actual: Vec<i64> = r.data().expect("data").iter().map(|&v| v as i64).collect();
                     assert_int_eq(&actual, expected.unwrap(), &label);
                     assert_eq!(r.dtype_name(), "i32");
                 }

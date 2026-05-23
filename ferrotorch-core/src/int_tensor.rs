@@ -1,26 +1,49 @@
 //! Integer-typed tensors for indexing, embedding lookups, and any other
 //! workload that needs first-class non-float storage. (#596)
 //!
-//! `IntTensor<I>` is a CPU-resident, contiguous tensor of integers
-//! (`i32` or `i64`). It is intentionally **not** generic over `Float`
-//! — the existing `Tensor<T: Float>` is the right type for differentiable
-//! float math. `IntTensor` is for indices and counts where autograd is
-//! a category error.
+//! `IntTensor<I>` is a contiguous tensor of integers (`i32` or `i64`). It is
+//! intentionally **not** generic over `Float` — the existing `Tensor<T: Float>`
+//! is the right type for differentiable float math. `IntTensor` is for indices
+//! and counts where autograd is a category error (mirroring PyTorch's runtime
+//! `isDifferentiableType(ScalarType) == false` for integer dtypes).
+//!
+//! # Device residency (crosslink #1185 Phase 2a)
+//!
+//! As of Phase 2a, `IntTensor` is **device-aware**: its data lives in a
+//! [`TensorStorage<I>`] that carries its own [`Device`]. Integer data can be
+//! uploaded to CUDA and read back, reusing the Phase-0 DType-tagged raw-byte
+//! transport (`GpuBackend::cpu_to_gpu` / `gpu_to_cpu`) — exactly the machinery
+//! `Tensor<T>::to` uses. This is PyTorch's model: an integer tensor is ordinary
+//! raw-byte storage plus a `ScalarType` tag (`I32` / `I64`).
+//!
+//! Phase 2a adds **no integer compute kernels** (that is Phase 2b). It only
+//! gives `IntTensor` a device, GPU storage, host↔device transfer, and handle
+//! access so a later phase can launch kernels.
 //!
 //! # Conversions
 //!
-//! - [`Tensor::to_int`] — round-then-cast a float tensor to ints
-//! - [`IntTensor::to_float`] — widen back into a float tensor
+//! - `Tensor::to_int` — round-then-cast a float tensor to ints
+//! - `IntTensor::to_float` — widen back into a float tensor
 //!
 //! Both copy data; there is no shared-storage path because the element
-//! sizes differ.
+//! sizes differ. (These cross-type conversions are not yet implemented as
+//! methods — see the Phase 2c follow-up note on cross-dtype GPU casts below.)
 
-use std::sync::Arc;
-
+use crate::device::Device;
+use crate::dtype::Element;
 use crate::error::{FerrotorchError, FerrotorchResult};
+use crate::gpu_dispatch::GpuBufferHandle;
+use crate::storage::TensorStorage;
 
 /// Element types supported by [`IntTensor`].
-pub trait IntElement: Copy + Send + Sync + 'static + std::fmt::Debug + std::fmt::Display {
+///
+/// The [`Element`](crate::dtype::Element) bound (added in crosslink #1185 Phase
+/// 2a) is what lets a [`TensorStorage<I>`] hold integer data and tag the GPU
+/// handle with the right `ScalarType` (`i32` → `DType::I32`, `i64` →
+/// `DType::I64`). Both i32 and i64 already satisfy it via ferray.
+pub trait IntElement:
+    Element + Copy + Send + Sync + 'static + std::fmt::Debug + std::fmt::Display
+{
     /// Bit-width of one element, used for dtype tagging.
     const BITS: u32;
     /// Returns this element type's printable name (e.g. `"i32"`).
@@ -61,17 +84,32 @@ impl IntElement for i64 {
     }
 }
 
-/// CPU-resident, contiguous tensor of integers. `Arc<Vec<I>>` storage so
-/// clones are cheap and shape views are trivial.
-#[derive(Debug, Clone)]
+/// Contiguous tensor of integers (`i32` or `i64`), device-aware.
+///
+/// Data lives in a [`TensorStorage<I>`] (CPU `Vec<I>` or a CUDA
+/// [`GpuBufferHandle`]); the storage carries its own [`Device`]. CPU-resident
+/// behaviour is byte-identical to the pre-Phase-2a `Arc<Vec<I>>` design.
+#[derive(Debug)]
 pub struct IntTensor<I: IntElement> {
-    data: Arc<Vec<I>>,
+    storage: TensorStorage<I>,
     shape: Vec<usize>,
 }
 
+impl<I: IntElement> Clone for IntTensor<I> {
+    /// Clone the tensor. For CPU storage this clones the `Vec`; for GPU storage
+    /// it allocates a new device buffer with the same contents (via the
+    /// backend's `clone_buffer`). Delegates to [`TensorStorage::clone`].
+    fn clone(&self) -> Self {
+        Self {
+            storage: self.storage.clone(),
+            shape: self.shape.clone(),
+        }
+    }
+}
+
 impl<I: IntElement> IntTensor<I> {
-    /// Build from a Vec + shape. Returns an error if `data.len()` does
-    /// not match the shape's total numel.
+    /// Build from a Vec + shape (CPU-resident). Returns an error if
+    /// `data.len()` does not match the shape's total numel.
     pub fn from_vec(data: Vec<I>, shape: Vec<usize>) -> FerrotorchResult<Self> {
         // PyTorch parity: shape=[] is a 0-d scalar (numel=1); shape=[0]
         // (or any shape with a zero axis) is empty (numel=0). The previous
@@ -92,17 +130,17 @@ impl<I: IntElement> IntTensor<I> {
             });
         }
         Ok(Self {
-            data: Arc::new(data),
+            storage: TensorStorage::cpu(data),
             shape,
         })
     }
 
-    /// Build from a slice + shape (clones into a fresh `Vec`).
+    /// Build from a slice + shape (clones into a fresh `Vec`; CPU-resident).
     pub fn from_slice(data: &[I], shape: &[usize]) -> FerrotorchResult<Self> {
         Self::from_vec(data.to_vec(), shape.to_vec())
     }
 
-    /// Zeros of the given shape.
+    /// Zeros of the given shape (CPU-resident).
     pub fn zeros(shape: &[usize]) -> Self {
         // shape=[] -> 0-d scalar (numel 1); shape=[0] -> empty (numel 0). (#805)
         let total: usize = if shape.is_empty() {
@@ -112,12 +150,12 @@ impl<I: IntElement> IntTensor<I> {
         };
         let zero = I::try_from_i64(0).expect("0 fits in any IntElement");
         Self {
-            data: Arc::new(vec![zero; total]),
+            storage: TensorStorage::cpu(vec![zero; total]),
             shape: shape.to_vec(),
         }
     }
 
-    /// 1-D `arange`-style `[0, 1, ..., n-1]`.
+    /// 1-D `arange`-style `[0, 1, ..., n-1]` (CPU-resident).
     pub fn arange(n: usize) -> FerrotorchResult<Self> {
         let mut data: Vec<I> = Vec::with_capacity(n);
         for i in 0..n {
@@ -133,10 +171,10 @@ impl<I: IntElement> IntTensor<I> {
         Self::from_vec(data, vec![n])
     }
 
-    /// 0-d scalar.
+    /// 0-d scalar (CPU-resident).
     pub fn scalar(v: I) -> Self {
         Self {
-            data: Arc::new(vec![v]),
+            storage: TensorStorage::cpu(vec![v]),
             shape: Vec::new(),
         }
     }
@@ -148,7 +186,7 @@ impl<I: IntElement> IntTensor<I> {
 
     /// Total number of elements.
     pub fn numel(&self) -> usize {
-        self.data.len()
+        self.storage.len()
     }
 
     /// Number of dimensions.
@@ -156,9 +194,31 @@ impl<I: IntElement> IntTensor<I> {
         self.shape.len()
     }
 
-    /// Borrow the contiguous buffer.
-    pub fn data(&self) -> &[I] {
-        &self.data
+    /// The device this tensor's storage resides on.
+    #[inline]
+    pub fn device(&self) -> Device {
+        self.storage.device()
+    }
+
+    /// Returns `true` if this tensor is on a CUDA GPU.
+    #[inline]
+    pub fn is_cuda(&self) -> bool {
+        self.device().is_cuda()
+    }
+
+    /// Borrow the contiguous buffer as a host slice.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FerrotorchError::GpuTensorNotAccessible`] if the tensor is on a
+    /// GPU (CUDA / XPU) device, or is a meta tensor. This mirrors
+    /// `Tensor::data` and prevents callers from silently reading device memory
+    /// as a host slice — call [`Self::to(Device::Cpu)`](Self::to) first to
+    /// transfer.
+    pub fn data(&self) -> FerrotorchResult<&[I]> {
+        // try_as_slice returns Err(GpuTensorNotAccessible) for Gpu/Cubecl/Meta
+        // storage — exactly the contract we want (no silent host readback).
+        self.storage.try_as_slice()
     }
 
     /// Element type name (`"i32"` / `"i64"`).
@@ -166,11 +226,145 @@ impl<I: IntElement> IntTensor<I> {
         I::dtype_name()
     }
 
-    /// Cast this `IntTensor<I>` to `IntTensor<J>`. Returns an error on
-    /// out-of-range elements.
+    /// Get the CUDA buffer handle. Returns `Err` for CPU (and other non-CUDA)
+    /// tensors, mirroring `Tensor::gpu_handle`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FerrotorchError::InvalidArgument`] when the tensor is not
+    /// CUDA-resident.
+    pub fn gpu_handle(&self) -> FerrotorchResult<&GpuBufferHandle> {
+        self.storage
+            .gpu_handle()
+            .ok_or(FerrotorchError::InvalidArgument {
+                message: "IntTensor is not on a CUDA GPU".into(),
+            })
+    }
+
+    /// Move this tensor to `device`, returning a new tensor.
+    ///
+    /// Reuses the same DType-tagged raw-byte transport as `Tensor<T>::to`:
+    /// CPU→CUDA uploads via `GpuBackend::cpu_to_gpu` (handle tagged `I::dtype()`
+    /// = `DType::I32` / `I64`), CUDA→CPU reads back via `gpu_to_cpu`. Both are
+    /// bit-exact. On-device→same-device is a cheap storage clone.
+    ///
+    /// This is the **explicit** transfer entry point (PyTorch parity — like
+    /// `.cuda()` / `.cpu()`). The host-readback inside the CUDA→CPU arm is the
+    /// user-requested D2H copy, not a silent fallback.
+    ///
+    /// # Errors
+    ///
+    /// - [`FerrotorchError::DeviceUnavailable`] if no GPU backend is registered.
+    /// - [`FerrotorchError::InvalidArgument`] for unsupported device pairs
+    ///   (XPU / MPS are not wired for `IntTensor` in Phase 2a).
+    pub fn to(&self, device: Device) -> FerrotorchResult<IntTensor<I>> {
+        if self.device() == device {
+            // Same device: clone the storage (CPU Vec clone, or GPU
+            // clone_buffer). No transfer.
+            return Ok(self.clone());
+        }
+
+        match (self.device(), device) {
+            (Device::Cpu, Device::Cuda(_)) => {
+                // H2D upload. on_device serialises the CPU Vec to bytes, tags
+                // them I::dtype(), and calls GpuBackend::cpu_to_gpu — the same
+                // path Tensor<T>::to(Cuda) uses.
+                let data = self.data()?.to_vec();
+                let storage = TensorStorage::on_device(data, device)?;
+                Ok(Self {
+                    storage,
+                    shape: self.shape.clone(),
+                })
+            }
+            (Device::Cuda(_), Device::Cpu) => {
+                // D2H readback — the user explicitly requested .to(Cpu).
+                let backend = crate::gpu_dispatch::gpu_backend()
+                    .ok_or(FerrotorchError::DeviceUnavailable)?;
+                let handle = self.gpu_handle()?;
+                let bytes = backend.gpu_to_cpu(handle)?;
+                let elem_size = std::mem::size_of::<I>();
+                if bytes.len() % elem_size != 0 {
+                    return Err(FerrotorchError::InvalidArgument {
+                        message: format!(
+                            "IntTensor::to(Cpu): D2H readback of {} bytes is not a multiple \
+                             of size_of::<{}>()={elem_size}",
+                            bytes.len(),
+                            I::dtype_name()
+                        ),
+                    });
+                }
+                // SAFETY: `bytes` is the raw byte serialisation of the GPU
+                // buffer, originally written by an upload of `I`-sized values
+                // (the cpu_to_gpu I32/I64 arm). We reconstruct a `Vec<I>` from
+                // the same allocation: ManuallyDrop prevents the Vec<u8>
+                // destructor from freeing it, then ptr/len/cap are reused with
+                // len/cap divided by size_of::<I>(). This is sound because:
+                //   - `I` is i32 or i64, both plain integer types with no
+                //     padding and no invalid bit patterns (every bit pattern is
+                //     a valid value).
+                //   - `bytes.len()` is a multiple of size_of::<I>() (checked
+                //     above); ferrotorch-gpu's gpu_to_cpu builds the Vec<u8>
+                //     from a Vec<I> via the inverse ManuallyDrop reinterpret,
+                //     so capacity is also a size_of::<I>() multiple and the
+                //     allocator layout is compatible.
+                //   - The source allocation is I-aligned (it came from a Vec<I>
+                //     reinterpreted to Vec<u8>), so casting the pointer back to
+                //     *mut I restores correct alignment.
+                let data: Vec<I> = unsafe {
+                    let mut bytes = std::mem::ManuallyDrop::new(bytes);
+                    let len = bytes.len() / elem_size;
+                    let cap = bytes.capacity() / elem_size;
+                    Vec::from_raw_parts(bytes.as_mut_ptr().cast::<I>(), len, cap)
+                };
+                Ok(Self {
+                    storage: TensorStorage::cpu(data),
+                    shape: self.shape.clone(),
+                })
+            }
+            (Device::Cuda(_), Device::Cuda(_)) => {
+                // Cross-GPU (different ordinals; same-ordinal handled by the
+                // early `self.device() == device` return). Route through CPU,
+                // mirroring Tensor<T>::to.
+                let cpu = self.to(Device::Cpu)?;
+                cpu.to(device)
+            }
+            // XPU / MPS for IntTensor are out of scope for Phase 2a: the XPU
+            // upload requires a CubeRuntime (owned by ferrotorch-xpu) and MPS
+            // its own backend, neither of which Phase 2a wires for integers.
+            // PyTorch parity (rust-gpu-discipline §3): structured error, never
+            // a silent CPU detour.
+            (from, to) => Err(FerrotorchError::InvalidArgument {
+                message: format!(
+                    "IntTensor::to: unsupported device transfer {from:?} -> {to:?} \
+                     (Phase 2a supports CPU <-> CUDA only)"
+                ),
+            }),
+        }
+    }
+
+    /// Cast this `IntTensor<I>` to `IntTensor<J>` (CPU only). Returns an error
+    /// on out-of-range elements.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FerrotorchError::NotImplementedOnCuda`] if `self` is on CUDA:
+    /// integer cross-width cast kernels are Phase 2c. Performing it on host
+    /// would require a silent D2H round trip, which the device-error policy
+    /// (rust-gpu-discipline §3) forbids — the caller must `.to(Device::Cpu)`
+    /// explicitly first.
     pub fn cast<J: IntElement>(&self) -> FerrotorchResult<IntTensor<J>> {
-        let mut out: Vec<J> = Vec::with_capacity(self.data.len());
-        for (i, &v) in self.data.iter().enumerate() {
+        // Phase 2c follow-up: integer cross-dtype cast as a real GPU kernel.
+        // Until then, refuse to silently move a GPU IntTensor to host for the
+        // cast — return a structured error so the caller opts into the D2H copy
+        // via an explicit `.to(Device::Cpu)`.
+        let data = self.data().map_err(|e| match e {
+            FerrotorchError::GpuTensorNotAccessible => FerrotorchError::NotImplementedOnCuda {
+                op: "IntTensor::cast",
+            },
+            other => other,
+        })?;
+        let mut out: Vec<J> = Vec::with_capacity(data.len());
+        for (i, &v) in data.iter().enumerate() {
             let widened = v.to_i64();
             out.push(
                 J::try_from_i64(widened).ok_or(FerrotorchError::InvalidArgument {
@@ -184,7 +378,11 @@ impl<I: IntElement> IntTensor<I> {
         IntTensor::<J>::from_vec(out, self.shape.clone())
     }
 
-    /// Reshape (must preserve numel; no data copy).
+    /// Reshape (must preserve numel; no data copy on CPU).
+    ///
+    /// Works for any device residency: the reshape is metadata-only, and the
+    /// storage is cloned (cheap for CPU; a `clone_buffer` for GPU, matching the
+    /// existing `Clone` semantics — no host readback).
     pub fn reshape(&self, shape: &[usize]) -> FerrotorchResult<Self> {
         // shape=[] -> 0-d scalar (numel 1); shape=[0,...] -> empty (numel 0). (#805)
         let new_total: usize = if shape.is_empty() {
@@ -192,18 +390,16 @@ impl<I: IntElement> IntTensor<I> {
         } else {
             shape.iter().product()
         };
-        if new_total != self.data.len() {
+        let cur = self.storage.len();
+        if new_total != cur {
             return Err(FerrotorchError::ShapeMismatch {
                 message: format!(
-                    "IntTensor::reshape: new shape {:?} (numel {}) != current numel {}",
-                    shape,
-                    new_total,
-                    self.data.len()
+                    "IntTensor::reshape: new shape {shape:?} (numel {new_total}) != current numel {cur}"
                 ),
             });
         }
         Ok(Self {
-            data: Arc::clone(&self.data),
+            storage: self.storage.clone(),
             shape: shape.to_vec(),
         })
     }
@@ -213,10 +409,11 @@ impl<I: IntElement> std::fmt::Display for IntTensor<I> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "IntTensor<{}>(shape={:?}, len={})",
+            "IntTensor<{}>(shape={:?}, len={}, device={:?})",
             I::dtype_name(),
             self.shape,
-            self.data.len()
+            self.storage.len(),
+            self.device(),
         )
     }
 }
@@ -230,7 +427,7 @@ mod tests {
         let t = IntTensor::<i32>::from_vec(vec![1, 2, 3, 4], vec![2, 2]).unwrap();
         assert_eq!(t.shape(), &[2, 2]);
         assert_eq!(t.numel(), 4);
-        assert_eq!(t.data(), &[1, 2, 3, 4]);
+        assert_eq!(t.data().unwrap(), &[1, 2, 3, 4]);
     }
 
     #[test]
@@ -243,13 +440,13 @@ mod tests {
     fn zeros_correct_size() {
         let t = IntTensor::<i64>::zeros(&[3, 4]);
         assert_eq!(t.numel(), 12);
-        assert!(t.data().iter().all(|&x| x == 0));
+        assert!(t.data().unwrap().iter().all(|&x| x == 0));
     }
 
     #[test]
     fn arange_sequence() {
         let t = IntTensor::<i32>::arange(5).unwrap();
-        assert_eq!(t.data(), &[0, 1, 2, 3, 4]);
+        assert_eq!(t.data().unwrap(), &[0, 1, 2, 3, 4]);
     }
 
     #[test]
@@ -265,7 +462,7 @@ mod tests {
     fn cast_i64_to_i32_in_range() {
         let t = IntTensor::<i64>::from_vec(vec![1, -1, 100], vec![3]).unwrap();
         let c = t.cast::<i32>().unwrap();
-        assert_eq!(c.data(), &[1, -1, 100]);
+        assert_eq!(c.data().unwrap(), &[1, -1, 100]);
         assert_eq!(c.dtype_name(), "i32");
     }
 
@@ -281,7 +478,7 @@ mod tests {
         let t = IntTensor::<i32>::from_vec(vec![1, 2, 3, 4, 5, 6], vec![6]).unwrap();
         let r = t.reshape(&[2, 3]).unwrap();
         assert_eq!(r.shape(), &[2, 3]);
-        assert_eq!(r.data(), &[1, 2, 3, 4, 5, 6]);
+        assert_eq!(r.data().unwrap(), &[1, 2, 3, 4, 5, 6]);
     }
 
     #[test]
@@ -296,7 +493,7 @@ mod tests {
         let t = IntTensor::<i64>::scalar(42);
         assert_eq!(t.shape(), &[] as &[usize]);
         assert_eq!(t.numel(), 1);
-        assert_eq!(t.data()[0], 42);
+        assert_eq!(t.data().unwrap()[0], 42);
     }
 
     #[test]
@@ -308,10 +505,22 @@ mod tests {
     }
 
     #[test]
-    fn clone_shares_data_arc() {
+    fn cpu_tensor_reports_cpu_device() {
+        // Phase 2a: CPU-resident IntTensors report Device::Cpu and are not
+        // CUDA. (GPU residency is exercised in the _probe_phase2a_int_device
+        // integration probe, which requires the gpu feature + hardware.)
+        let t = IntTensor::<i32>::arange(4).unwrap();
+        assert_eq!(t.device(), Device::Cpu);
+        assert!(!t.is_cuda());
+        // gpu_handle on a CPU tensor errors (not on GPU).
+        assert!(t.gpu_handle().is_err());
+    }
+
+    #[test]
+    fn clone_preserves_cpu_data() {
         let t = IntTensor::<i32>::arange(4).unwrap();
         let t2 = t.clone();
-        // Same Arc → same buffer ptr.
-        assert!(Arc::ptr_eq(&t.data, &t2.data));
+        assert_eq!(t2.data().unwrap(), &[0, 1, 2, 3]);
+        assert_eq!(t2.device(), Device::Cpu);
     }
 }
