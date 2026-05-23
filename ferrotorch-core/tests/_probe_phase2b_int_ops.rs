@@ -236,7 +236,11 @@ fn run_for_width<I: IntElement>(pass: &mut usize, fail: &mut usize) {
     );
 
     // floor_divide / remainder — the negative-operand correctness cases.
-    let fd: Vec<i64> = a.iter().zip(b.iter()).map(|(&x, &y)| ref_floor_div(x, y)).collect();
+    let fd: Vec<i64> = a
+        .iter()
+        .zip(b.iter())
+        .map(|(&x, &y)| ref_floor_div(x, y))
+        .collect();
     check_binary::<I>(
         "floor_div",
         &a,
@@ -249,7 +253,11 @@ fn run_for_width<I: IntElement>(pass: &mut usize, fail: &mut usize) {
     );
     // Spot-check the canonical value from the spec: -7 floor_div 2 == -4.
     assert_eq!(ref_floor_div(-7, 2), -4, "reference floor_div(-7,2)");
-    let rem: Vec<i64> = a.iter().zip(b.iter()).map(|(&x, &y)| ref_remainder(x, y)).collect();
+    let rem: Vec<i64> = a
+        .iter()
+        .zip(b.iter())
+        .map(|(&x, &y)| ref_remainder(x, y))
+        .collect();
     check_binary::<I>(
         "remainder",
         &a,
@@ -266,11 +274,38 @@ fn run_for_width<I: IntElement>(pass: &mut usize, fail: &mut usize) {
 
     // bitwise and / or / xor
     let band: Vec<i64> = a.iter().zip(b.iter()).map(|(&x, &y)| x & y).collect();
-    check_binary::<I>("bitand", &a, &b, &shape, &band, |x, y| x.bitand(y).unwrap(), pass, fail);
+    check_binary::<I>(
+        "bitand",
+        &a,
+        &b,
+        &shape,
+        &band,
+        |x, y| x.bitand(y).unwrap(),
+        pass,
+        fail,
+    );
     let bor: Vec<i64> = a.iter().zip(b.iter()).map(|(&x, &y)| x | y).collect();
-    check_binary::<I>("bitor", &a, &b, &shape, &bor, |x, y| x.bitor(y).unwrap(), pass, fail);
+    check_binary::<I>(
+        "bitor",
+        &a,
+        &b,
+        &shape,
+        &bor,
+        |x, y| x.bitor(y).unwrap(),
+        pass,
+        fail,
+    );
     let bxor: Vec<i64> = a.iter().zip(b.iter()).map(|(&x, &y)| x ^ y).collect();
-    check_binary::<I>("bitxor", &a, &b, &shape, &bxor, |x, y| x.bitxor(y).unwrap(), pass, fail);
+    check_binary::<I>(
+        "bitxor",
+        &a,
+        &b,
+        &shape,
+        &bxor,
+        |x, y| x.bitxor(y).unwrap(),
+        pass,
+        fail,
+    );
 
     // shl / shr (arithmetic). Shift counts in-range; include a negative
     // operand for shr so the sign-extension is exercised: -8 >> 1 == -4.
@@ -287,7 +322,16 @@ fn run_for_width<I: IntElement>(pass: &mut usize, fail: &mut usize) {
             }
         })
         .collect();
-    check_binary::<I>("shl", &sa, &sb, &shape, &shl_exp, |x, y| x.shl(y).unwrap(), pass, fail);
+    check_binary::<I>(
+        "shl",
+        &sa,
+        &sb,
+        &shape,
+        &shl_exp,
+        |x, y| x.shl(y).unwrap(),
+        pass,
+        fail,
+    );
     let shr_exp: Vec<i64> = sa
         .iter()
         .zip(sb.iter())
@@ -299,7 +343,16 @@ fn run_for_width<I: IntElement>(pass: &mut usize, fail: &mut usize) {
             }
         })
         .collect();
-    check_binary::<I>("shr (arith)", &sa, &sb, &shape, &shr_exp, |x, y| x.shr(y).unwrap(), pass, fail);
+    check_binary::<I>(
+        "shr (arith)",
+        &sa,
+        &sb,
+        &shape,
+        &shr_exp,
+        |x, y| x.shr(y).unwrap(),
+        pass,
+        fail,
+    );
     // Spec spot-check: -8 >> 1 == -4 (arithmetic shift on signed). The operands
     // are literals to document the spec value, so eq_op (constant comparison)
     // is expected here.
@@ -320,9 +373,23 @@ fn run_for_width<I: IntElement>(pass: &mut usize, fail: &mut usize) {
     );
     let bnot: Vec<i64> = a
         .iter()
-        .map(|&x| if I::BITS == 32 { (!(x as i32)) as i64 } else { !x })
+        .map(|&x| {
+            if I::BITS == 32 {
+                (!(x as i32)) as i64
+            } else {
+                !x
+            }
+        })
         .collect();
-    check_unary::<I>("bitnot", &a, &shape, &bnot, |x| x.bitnot().unwrap(), pass, fail);
+    check_unary::<I>(
+        "bitnot",
+        &a,
+        &shape,
+        &bnot,
+        |x| x.bitnot().unwrap(),
+        pass,
+        fail,
+    );
 
     // reductions: sum / prod / min / max
     let red = [3_i64, -1, 4, -2, 5];

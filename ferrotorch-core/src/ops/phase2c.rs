@@ -90,7 +90,8 @@ fn tensor_arg<T: Float>(
     };
 
     if input.is_cuda() {
-        let backend = crate::gpu_dispatch::gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
+        let backend =
+            crate::gpu_dispatch::gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
         let h = input.gpu_handle()?;
         let out_h = if is_max {
             backend.argmax(h, outer, dim_size, inner)?
@@ -131,7 +132,8 @@ fn inttensor_arg<I: IntElement>(
     };
 
     if input.is_cuda() {
-        let backend = crate::gpu_dispatch::gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
+        let backend =
+            crate::gpu_dispatch::gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
         let h = input.gpu_handle()?;
         let out_h = if is_max {
             backend.argmax(h, outer, dim_size, inner)?
@@ -263,8 +265,14 @@ impl<T: Float> Tensor<T> {
         } else {
             let data = input.data_vec()?;
             let idx = index_as_i64(&indices.to(Device::Cpu)?)?;
-            let out =
-                index_select_ref(&data, &idx, outer, in_dim, inner, <T as num_traits::Zero>::zero());
+            let out = index_select_ref(
+                &data,
+                &idx,
+                outer,
+                in_dim,
+                inner,
+                <T as num_traits::Zero>::zero(),
+            );
             Tensor::from_storage(TensorStorage::cpu(out), out_shape, false)
         }
     }
@@ -301,7 +309,13 @@ impl<T: Float> Tensor<T> {
             let data = input.data_vec()?;
             let idx = index_as_i64(&index.to(Device::Cpu)?)?;
             let out = gather_ref(
-                &data, &idx, outer, in_dim, out_dim, inner, <T as num_traits::Zero>::zero(),
+                &data,
+                &idx,
+                outer,
+                in_dim,
+                out_dim,
+                inner,
+                <T as num_traits::Zero>::zero(),
             );
             Tensor::from_storage(TensorStorage::cpu(out), out_shape, false)
         }
@@ -324,9 +338,11 @@ impl<T: Float> Tensor<T> {
                 // Truncate toward zero (PyTorch `.to(int)`): drop the fraction.
                 let truncated = num_traits::Float::trunc(v);
                 let as_i64 = float_to_i64_trunc(truncated);
-                out.push(I::try_from_i64(as_i64).ok_or(FerrotorchError::InvalidArgument {
-                    message: format!("to_int: value out of range for {}", I::dtype_name()),
-                })?);
+                out.push(
+                    I::try_from_i64(as_i64).ok_or(FerrotorchError::InvalidArgument {
+                        message: format!("to_int: value out of range for {}", I::dtype_name()),
+                    })?,
+                );
             }
             IntTensor::<I>::from_vec(out, shape)
         }
@@ -450,11 +466,11 @@ impl<I: IntElement> IntTensor<I> {
             let data = self.data()?;
             let mut out: Vec<T> = Vec::with_capacity(data.len());
             for &v in data {
-                out.push(
-                    num_traits::NumCast::from(v.to_i64()).ok_or(FerrotorchError::InvalidArgument {
+                out.push(num_traits::NumCast::from(v.to_i64()).ok_or(
+                    FerrotorchError::InvalidArgument {
                         message: "to_float: integer not representable in target float".into(),
-                    })?,
-                );
+                    },
+                )?);
             }
             Tensor::from_storage(TensorStorage::cpu(out), shape, false)
         }
@@ -487,7 +503,10 @@ impl<I: IntElement> IntTensor<I> {
 
 fn check_same_device(a: Device, b: Device, op: &str) -> FerrotorchResult<()> {
     if a != b {
-        return Err(FerrotorchError::DeviceMismatch { expected: a, got: b });
+        return Err(FerrotorchError::DeviceMismatch {
+            expected: a,
+            got: b,
+        });
     }
     let _ = op;
     Ok(())
@@ -515,12 +534,9 @@ fn gather_check_shapes(
     for (ax, (&isz, &xsz)) in index_shape.iter().zip(input_shape.iter()).enumerate() {
         if ax != dim && isz > xsz {
             return Err(FerrotorchError::ShapeMismatch {
-                message: format!(
-                    "{op}: index dim {ax} size {isz} exceeds input size {xsz}"
-                ),
+                message: format!("{op}: index dim {ax} size {isz} exceeds input size {xsz}"),
             });
         }
     }
     Ok(())
 }
-

@@ -46,8 +46,16 @@ fn run_one(
     f: impl FnOnce() -> ferrotorch_core::FerrotorchResult<()>,
 ) -> OpResult {
     match f() {
-        Ok(()) => OpResult { op, pass: true, err: None },
-        Err(e) => OpResult { op, pass: false, err: Some(format!("{e:?}")) },
+        Ok(()) => OpResult {
+            op,
+            pass: true,
+            err: None,
+        },
+        Err(e) => OpResult {
+            op,
+            pass: false,
+            err: Some(format!("{e:?}")),
+        },
     }
 }
 

@@ -234,9 +234,7 @@ fn check_attention_mask(pass: &mut usize, fail: &mut usize) {
     let n = 3usize;
     let scores: Vec<f32> = (0..n * n).map(|i| i as f32 + 1.0).collect();
     // Causal: keep scores[i][j] where j <= i, else -inf.
-    let mask_h: Vec<bool> = (0..n)
-        .flat_map(|i| (0..n).map(move |j| j <= i))
-        .collect();
+    let mask_h: Vec<bool> = (0..n).flat_map(|i| (0..n).map(move |j| j <= i)).collect();
     let neg_inf = f32::NEG_INFINITY;
 
     let expected: Vec<f32> = scores
@@ -263,10 +261,10 @@ fn check_attention_mask(pass: &mut usize, fail: &mut usize) {
     let resident = masked.is_cuda();
     let vals = masked.to(Device::Cpu).unwrap().data_vec().unwrap();
     // Compare with -inf-aware equality.
-    let vals_ok = vals
-        .iter()
-        .zip(&expected)
-        .all(|(&a, &b)| a == b || (a.is_infinite() && b.is_infinite() && a.is_sign_negative() == b.is_sign_negative()));
+    let vals_ok = vals.iter().zip(&expected).all(|(&a, &b)| {
+        a == b
+            || (a.is_infinite() && b.is_infinite() && a.is_sign_negative() == b.is_sign_negative())
+    });
     let ok = resident && masked.shape() == [n, n] && vals_ok;
     record(
         "attention where_cond(causal, scores, -inf)",

@@ -28,6 +28,7 @@
 
 use std::sync::Once;
 
+use ferrotorch_core::Tensor;
 use ferrotorch_core::autograd::graph::backward_with_grad;
 use ferrotorch_core::bool_tensor::BoolTensor;
 use ferrotorch_core::device::Device;
@@ -36,7 +37,6 @@ use ferrotorch_core::grad_fns::indexing::{
 };
 use ferrotorch_core::ops::indexing::masked_select;
 use ferrotorch_core::tensor::GradFn;
-use ferrotorch_core::Tensor;
 
 static GPU_INIT: Once = Once::new();
 
@@ -89,7 +89,9 @@ fn approx_eq(a: &[f32], b: &[f32]) -> bool {
     a.len() == b.len()
         && a.iter().zip(b).all(|(&x, &y)| {
             x == y
-                || (x.is_infinite() && y.is_infinite() && x.is_sign_negative() == y.is_sign_negative())
+                || (x.is_infinite()
+                    && y.is_infinite()
+                    && x.is_sign_negative() == y.is_sign_negative())
                 || (x - y).abs() < 1e-5
         })
 }

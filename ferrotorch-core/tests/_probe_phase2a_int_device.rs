@@ -22,11 +22,11 @@
 
 use std::sync::Once;
 
+use ferrotorch_core::DType;
 use ferrotorch_core::device::Device;
 use ferrotorch_core::error::FerrotorchError;
 use ferrotorch_core::gpu_dispatch;
 use ferrotorch_core::int_tensor::IntTensor;
-use ferrotorch_core::DType;
 
 static GPU_INIT: Once = Once::new();
 

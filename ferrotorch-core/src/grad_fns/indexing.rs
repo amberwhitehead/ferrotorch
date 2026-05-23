@@ -973,8 +973,7 @@ impl<T: Float> GradFn<T> for MaskedSelectBackward<T> {
                 j += 1;
             }
         }
-        let grad_tensor =
-            Tensor::from_storage(TensorStorage::cpu(grad_input), input_shape, false)?;
+        let grad_tensor = Tensor::from_storage(TensorStorage::cpu(grad_input), input_shape, false)?;
         Ok(vec![Some(grad_tensor)])
     }
 

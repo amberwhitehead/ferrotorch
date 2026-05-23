@@ -1378,7 +1378,8 @@ fn int_cast_in_range_and_oob() {
                     assert!(r.is_err(), "{label} must Err on OOB cast");
                 } else {
                     let r = r.expect("cast");
-                    let actual: Vec<i64> = r.data().expect("data").iter().map(|&v| v as i64).collect();
+                    let actual: Vec<i64> =
+                        r.data().expect("data").iter().map(|&v| v as i64).collect();
                     assert_int_eq(&actual, expected.unwrap(), &label);
                     assert_eq!(r.dtype_name(), "i32");
                 }

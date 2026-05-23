@@ -1428,7 +1428,12 @@ fn gpu_buffer_handle_any_round_trip() {
 
 #[test]
 fn gpu_buffer_handle_empty() {
-    let h = GpuBufferHandle::new(Box::new(Vec::<u8>::new()), 0, 0, ferrotorch_core::DType::F32);
+    let h = GpuBufferHandle::new(
+        Box::new(Vec::<u8>::new()),
+        0,
+        0,
+        ferrotorch_core::DType::F32,
+    );
     assert!(h.is_empty());
     assert_eq!(h.len(), 0);
 }

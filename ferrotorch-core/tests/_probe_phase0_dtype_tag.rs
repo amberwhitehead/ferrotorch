@@ -23,10 +23,10 @@
 
 use std::sync::Once;
 
+use ferrotorch_core::DType;
 use ferrotorch_core::creation::from_slice;
 use ferrotorch_core::device::Device;
 use ferrotorch_core::gpu_dispatch;
-use ferrotorch_core::DType;
 use half::bf16;
 
 static GPU_INIT: Once = Once::new();

@@ -239,8 +239,8 @@ impl BoolTensor {
                 // D2H readback — the user explicitly requested .to(Cpu). The
                 // backend returns the raw bytes (one byte per bool, each 0/1);
                 // reconstruct Vec<bool> from them.
-                let backend = crate::gpu_dispatch::gpu_backend()
-                    .ok_or(FerrotorchError::DeviceUnavailable)?;
+                let backend =
+                    crate::gpu_dispatch::gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
                 let handle = self.gpu_handle()?;
                 let bytes = backend.gpu_to_cpu(handle)?;
                 // Each byte is 0 or 1 (kernels emit canonical 0/1; uploads were
@@ -312,7 +312,8 @@ impl BoolTensor {
             &GpuBufferHandle,
         ) -> FerrotorchResult<GpuBufferHandle>,
     ) -> FerrotorchResult<Self> {
-        let backend = crate::gpu_dispatch::gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
+        let backend =
+            crate::gpu_dispatch::gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
         let h = gpu(backend, self.gpu_handle()?)?;
         Ok(Self::from_gpu_handle(h, self.shape.clone()))
     }
@@ -428,7 +429,8 @@ impl BoolTensor {
             &GpuBufferHandle,
         ) -> FerrotorchResult<GpuBufferHandle>,
     ) -> FerrotorchResult<bool> {
-        let backend = crate::gpu_dispatch::gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
+        let backend =
+            crate::gpu_dispatch::gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
         let reduced = gpu(backend, self.gpu_handle()?)?;
         // The reduced handle is a 1-element Bool buffer. Read back the single
         // scalar byte (allowed: it is the result, like has_inf_nan's flag).
@@ -611,7 +613,8 @@ impl BoolTensor {
         if self.is_cuda() {
             let backend =
                 crate::gpu_dispatch::gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
-            let h = backend.cast_bool_to_f(self.gpu_handle()?, <T as crate::dtype::Element>::dtype())?;
+            let h = backend
+                .cast_bool_to_f(self.gpu_handle()?, <T as crate::dtype::Element>::dtype())?;
             return Tensor::from_storage(TensorStorage::gpu(h), self.shape.clone(), false);
         }
         let one = T::from(1.0).unwrap();
@@ -675,9 +678,18 @@ mod tests {
     fn pointwise_and_or_xor() {
         let a = BoolTensor::from_vec(vec![true, false, true, false], vec![4]).unwrap();
         let b = BoolTensor::from_vec(vec![true, true, false, false], vec![4]).unwrap();
-        assert_eq!(a.and(&b).unwrap().data().unwrap(), &[true, false, false, false]);
-        assert_eq!(a.or(&b).unwrap().data().unwrap(), &[true, true, true, false]);
-        assert_eq!(a.xor(&b).unwrap().data().unwrap(), &[false, true, true, false]);
+        assert_eq!(
+            a.and(&b).unwrap().data().unwrap(),
+            &[true, false, false, false]
+        );
+        assert_eq!(
+            a.or(&b).unwrap().data().unwrap(),
+            &[true, true, true, false]
+        );
+        assert_eq!(
+            a.xor(&b).unwrap().data().unwrap(),
+            &[false, true, true, false]
+        );
     }
 
     #[test]
@@ -765,8 +777,14 @@ mod tests {
     fn compare_ge_le() {
         let a = crate::creation::from_slice::<f32>(&[1.0, 2.0, 3.0], &[3]).unwrap();
         let b = crate::creation::from_slice::<f32>(&[1.0, 3.0, 2.0], &[3]).unwrap();
-        assert_eq!(BoolTensor::ge(&a, &b).unwrap().data().unwrap(), &[true, false, true]);
-        assert_eq!(BoolTensor::le(&a, &b).unwrap().data().unwrap(), &[true, true, false]);
+        assert_eq!(
+            BoolTensor::ge(&a, &b).unwrap().data().unwrap(),
+            &[true, false, true]
+        );
+        assert_eq!(
+            BoolTensor::le(&a, &b).unwrap().data().unwrap(),
+            &[true, true, false]
+        );
     }
 
     #[test]

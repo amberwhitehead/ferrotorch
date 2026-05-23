@@ -75,8 +75,10 @@ macro_rules! index_select_ptx {
     ($kname:literal, $wsh:literal, $ish:literal, $ldi:literal, $icvt:literal,
      $ldv:literal, $stv:literal, $vreg:literal, $ireg:literal) => {
         concat!(
-".version 7.0\n.target sm_52\n.address_size 64\n",
-".visible .entry ", $kname, "(
+            ".version 7.0\n.target sm_52\n.address_size 64\n",
+            ".visible .entry ",
+            $kname,
+            "(
     .param .u64 in_ptr, .param .u64 idx_ptr, .param .u64 out_ptr,
     .param .u32 outer, .param .u32 in_dim, .param .u32 out_dim,
     .param .u32 inner, .param .u32 total
@@ -84,8 +86,12 @@ macro_rules! index_select_ptx {
     .reg .u32 %gtid, %bid, %bdim, %tot, %indim, %outdim, %inn;
     .reg .u32 %o, %rem, %i, %k, %slab, %sel, %srcelem;
     .reg .u64 %in, %idx, %out, %off, %addr;
-    .reg ", $ireg, " %selv;
-    .reg ", $vreg, " %v;
+    .reg ",
+            $ireg,
+            " %selv;
+    .reg ",
+            $vreg,
+            " %v;
     .reg .pred %p;
 
     ld.param.u64 %in, [in_ptr];
@@ -106,24 +112,39 @@ macro_rules! index_select_ptx {
     div.u32 %i, %rem, %inn;
     rem.u32 %k, %rem, %inn;
 
-    cvt.u64.u32 %off, %i; shl.b64 %off, %off, ", $ish, "; add.u64 %addr, %idx, %off;
-    ", $ldi, " %selv, [%addr];
-    cvt.u32.", $icvt, " %sel, %selv;
+    cvt.u64.u32 %off, %i; shl.b64 %off, %off, ",
+            $ish,
+            "; add.u64 %addr, %idx, %off;
+    ",
+            $ldi,
+            " %selv, [%addr];
+    cvt.u32.",
+            $icvt,
+            " %sel, %selv;
 
     mul.lo.u32 %srcelem, %o, %indim;
     add.u32 %srcelem, %srcelem, %sel;
     mul.lo.u32 %srcelem, %srcelem, %inn;
     add.u32 %srcelem, %srcelem, %k;
 
-    cvt.u64.u32 %off, %srcelem; shl.b64 %off, %off, ", $wsh, "; add.u64 %addr, %in, %off;
-    ", $ldv, " %v, [%addr];
+    cvt.u64.u32 %off, %srcelem; shl.b64 %off, %off, ",
+            $wsh,
+            "; add.u64 %addr, %in, %off;
+    ",
+            $ldv,
+            " %v, [%addr];
 
-    cvt.u64.u32 %off, %gtid; shl.b64 %off, %off, ", $wsh, "; add.u64 %addr, %out, %off;
-    ", $stv, " [%addr], %v;
+    cvt.u64.u32 %off, %gtid; shl.b64 %off, %off, ",
+            $wsh,
+            "; add.u64 %addr, %out, %off;
+    ",
+            $stv,
+            " [%addr], %v;
 DONE:
     ret;
 }
-")
+"
+        )
     };
 }
 
@@ -132,8 +153,10 @@ macro_rules! gather_ptx {
     ($kname:literal, $wsh:literal, $ish:literal, $ldi:literal, $icvt:literal,
      $ldv:literal, $stv:literal, $vreg:literal, $ireg:literal) => {
         concat!(
-".version 7.0\n.target sm_52\n.address_size 64\n",
-".visible .entry ", $kname, "(
+            ".version 7.0\n.target sm_52\n.address_size 64\n",
+            ".visible .entry ",
+            $kname,
+            "(
     .param .u64 in_ptr, .param .u64 idx_ptr, .param .u64 out_ptr,
     .param .u32 outer, .param .u32 in_dim, .param .u32 out_dim,
     .param .u32 inner, .param .u32 total
@@ -141,8 +164,12 @@ macro_rules! gather_ptx {
     .reg .u32 %gtid, %bid, %bdim, %tot, %indim, %outdim, %inn;
     .reg .u32 %o, %rem, %k, %slab, %sel, %srcelem;
     .reg .u64 %in, %idx, %out, %off, %addr;
-    .reg ", $ireg, " %selv;
-    .reg ", $vreg, " %v;
+    .reg ",
+            $ireg,
+            " %selv;
+    .reg ",
+            $vreg,
+            " %v;
     .reg .pred %p;
 
     ld.param.u64 %in, [in_ptr];
@@ -162,42 +189,177 @@ macro_rules! gather_ptx {
     rem.u32 %rem, %gtid, %slab;
     rem.u32 %k, %rem, %inn;
 
-    cvt.u64.u32 %off, %gtid; shl.b64 %off, %off, ", $ish, "; add.u64 %addr, %idx, %off;
-    ", $ldi, " %selv, [%addr];
-    cvt.u32.", $icvt, " %sel, %selv;
+    cvt.u64.u32 %off, %gtid; shl.b64 %off, %off, ",
+            $ish,
+            "; add.u64 %addr, %idx, %off;
+    ",
+            $ldi,
+            " %selv, [%addr];
+    cvt.u32.",
+            $icvt,
+            " %sel, %selv;
 
     mul.lo.u32 %srcelem, %o, %indim;
     add.u32 %srcelem, %srcelem, %sel;
     mul.lo.u32 %srcelem, %srcelem, %inn;
     add.u32 %srcelem, %srcelem, %k;
 
-    cvt.u64.u32 %off, %srcelem; shl.b64 %off, %off, ", $wsh, "; add.u64 %addr, %in, %off;
-    ", $ldv, " %v, [%addr];
+    cvt.u64.u32 %off, %srcelem; shl.b64 %off, %off, ",
+            $wsh,
+            "; add.u64 %addr, %in, %off;
+    ",
+            $ldv,
+            " %v, [%addr];
 
-    cvt.u64.u32 %off, %gtid; shl.b64 %off, %off, ", $wsh, "; add.u64 %addr, %out, %off;
-    ", $stv, " [%addr], %v;
+    cvt.u64.u32 %off, %gtid; shl.b64 %off, %off, ",
+            $wsh,
+            "; add.u64 %addr, %out, %off;
+    ",
+            $stv,
+            " [%addr], %v;
 DONE:
     ret;
 }
-")
+"
+        )
     };
 }
 
 // ── index_select PTX constants (value width × index width) ──────────────────
-const ISEL_W2_I32_PTX: &str = index_select_ptx!("isel_w2_i32_kernel", "1", "2", "ld.global.s32", "s32", "ld.global.u16", "st.global.u16", ".u16", ".s32");
-const ISEL_W2_I64_PTX: &str = index_select_ptx!("isel_w2_i64_kernel", "1", "3", "ld.global.s64", "s64", "ld.global.u16", "st.global.u16", ".u16", ".s64");
-const ISEL_W4_I32_PTX: &str = index_select_ptx!("isel_w4_i32_kernel", "2", "2", "ld.global.s32", "s32", "ld.global.u32", "st.global.u32", ".u32", ".s32");
-const ISEL_W4_I64_PTX: &str = index_select_ptx!("isel_w4_i64_kernel", "2", "3", "ld.global.s64", "s64", "ld.global.u32", "st.global.u32", ".u32", ".s64");
-const ISEL_W8_I32_PTX: &str = index_select_ptx!("isel_w8_i32_kernel", "3", "2", "ld.global.s32", "s32", "ld.global.u64", "st.global.u64", ".u64", ".s32");
-const ISEL_W8_I64_PTX: &str = index_select_ptx!("isel_w8_i64_kernel", "3", "3", "ld.global.s64", "s64", "ld.global.u64", "st.global.u64", ".u64", ".s64");
+const ISEL_W2_I32_PTX: &str = index_select_ptx!(
+    "isel_w2_i32_kernel",
+    "1",
+    "2",
+    "ld.global.s32",
+    "s32",
+    "ld.global.u16",
+    "st.global.u16",
+    ".u16",
+    ".s32"
+);
+const ISEL_W2_I64_PTX: &str = index_select_ptx!(
+    "isel_w2_i64_kernel",
+    "1",
+    "3",
+    "ld.global.s64",
+    "s64",
+    "ld.global.u16",
+    "st.global.u16",
+    ".u16",
+    ".s64"
+);
+const ISEL_W4_I32_PTX: &str = index_select_ptx!(
+    "isel_w4_i32_kernel",
+    "2",
+    "2",
+    "ld.global.s32",
+    "s32",
+    "ld.global.u32",
+    "st.global.u32",
+    ".u32",
+    ".s32"
+);
+const ISEL_W4_I64_PTX: &str = index_select_ptx!(
+    "isel_w4_i64_kernel",
+    "2",
+    "3",
+    "ld.global.s64",
+    "s64",
+    "ld.global.u32",
+    "st.global.u32",
+    ".u32",
+    ".s64"
+);
+const ISEL_W8_I32_PTX: &str = index_select_ptx!(
+    "isel_w8_i32_kernel",
+    "3",
+    "2",
+    "ld.global.s32",
+    "s32",
+    "ld.global.u64",
+    "st.global.u64",
+    ".u64",
+    ".s32"
+);
+const ISEL_W8_I64_PTX: &str = index_select_ptx!(
+    "isel_w8_i64_kernel",
+    "3",
+    "3",
+    "ld.global.s64",
+    "s64",
+    "ld.global.u64",
+    "st.global.u64",
+    ".u64",
+    ".s64"
+);
 
 // ── gather PTX constants ────────────────────────────────────────────────────
-const GATHER_W2_I32_PTX: &str = gather_ptx!("gather_w2_i32_kernel", "1", "2", "ld.global.s32", "s32", "ld.global.u16", "st.global.u16", ".u16", ".s32");
-const GATHER_W2_I64_PTX: &str = gather_ptx!("gather_w2_i64_kernel", "1", "3", "ld.global.s64", "s64", "ld.global.u16", "st.global.u16", ".u16", ".s64");
-const GATHER_W4_I32_PTX: &str = gather_ptx!("gather_w4_i32_kernel", "2", "2", "ld.global.s32", "s32", "ld.global.u32", "st.global.u32", ".u32", ".s32");
-const GATHER_W4_I64_PTX: &str = gather_ptx!("gather_w4_i64_kernel", "2", "3", "ld.global.s64", "s64", "ld.global.u32", "st.global.u32", ".u32", ".s64");
-const GATHER_W8_I32_PTX: &str = gather_ptx!("gather_w8_i32_kernel", "3", "2", "ld.global.s32", "s32", "ld.global.u64", "st.global.u64", ".u64", ".s32");
-const GATHER_W8_I64_PTX: &str = gather_ptx!("gather_w8_i64_kernel", "3", "3", "ld.global.s64", "s64", "ld.global.u64", "st.global.u64", ".u64", ".s64");
+const GATHER_W2_I32_PTX: &str = gather_ptx!(
+    "gather_w2_i32_kernel",
+    "1",
+    "2",
+    "ld.global.s32",
+    "s32",
+    "ld.global.u16",
+    "st.global.u16",
+    ".u16",
+    ".s32"
+);
+const GATHER_W2_I64_PTX: &str = gather_ptx!(
+    "gather_w2_i64_kernel",
+    "1",
+    "3",
+    "ld.global.s64",
+    "s64",
+    "ld.global.u16",
+    "st.global.u16",
+    ".u16",
+    ".s64"
+);
+const GATHER_W4_I32_PTX: &str = gather_ptx!(
+    "gather_w4_i32_kernel",
+    "2",
+    "2",
+    "ld.global.s32",
+    "s32",
+    "ld.global.u32",
+    "st.global.u32",
+    ".u32",
+    ".s32"
+);
+const GATHER_W4_I64_PTX: &str = gather_ptx!(
+    "gather_w4_i64_kernel",
+    "2",
+    "3",
+    "ld.global.s64",
+    "s64",
+    "ld.global.u32",
+    "st.global.u32",
+    ".u32",
+    ".s64"
+);
+const GATHER_W8_I32_PTX: &str = gather_ptx!(
+    "gather_w8_i32_kernel",
+    "3",
+    "2",
+    "ld.global.s32",
+    "s32",
+    "ld.global.u64",
+    "st.global.u64",
+    ".u64",
+    ".s32"
+);
+const GATHER_W8_I64_PTX: &str = gather_ptx!(
+    "gather_w8_i64_kernel",
+    "3",
+    "3",
+    "ld.global.s64",
+    "s64",
+    "ld.global.u64",
+    "st.global.u64",
+    ".u64",
+    ".s64"
+);
 
 /// Byte width of a value element, used to pick the copy kernel.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -309,8 +471,7 @@ fn gathr_ptx(vw: ValWidth, iw: IdxWidth) -> (&'static str, &'static str) {
 
 macro_rules! select_entry {
     ($name:ident, $vty:ty, $vw:expr, $idxty:ty, $iw:expr, $sel:ident) => {
-        #[doc = concat!("`", stringify!($sel), "` on a ", stringify!($vty),
-            " value buffer with a ", stringify!($idxty), " index buffer.")]
+        #[doc = concat!("`", stringify!($sel), "` on a ", stringify!($vty), " value buffer with a ", stringify!($idxty), " index buffer.")]
         #[allow(clippy::too_many_arguments)]
         pub fn $name(
             input: &CudaSlice<$vty>,
@@ -328,28 +489,168 @@ macro_rules! select_entry {
 }
 
 // index_select: value f32/f64/i32/i64/u16(f16,bf16) × index i32/i64
-select_entry!(isel_f32_i32, f32, ValWidth::W4, i32, IdxWidth::I32, isel_ptx);
-select_entry!(isel_f32_i64, f32, ValWidth::W4, i64, IdxWidth::I64, isel_ptx);
-select_entry!(isel_f64_i32, f64, ValWidth::W8, i32, IdxWidth::I32, isel_ptx);
-select_entry!(isel_f64_i64, f64, ValWidth::W8, i64, IdxWidth::I64, isel_ptx);
-select_entry!(isel_i32_i32, i32, ValWidth::W4, i32, IdxWidth::I32, isel_ptx);
-select_entry!(isel_i32_i64, i32, ValWidth::W4, i64, IdxWidth::I64, isel_ptx);
-select_entry!(isel_i64_i32, i64, ValWidth::W8, i32, IdxWidth::I32, isel_ptx);
-select_entry!(isel_i64_i64, i64, ValWidth::W8, i64, IdxWidth::I64, isel_ptx);
-select_entry!(isel_u16_i32, u16, ValWidth::W2, i32, IdxWidth::I32, isel_ptx);
-select_entry!(isel_u16_i64, u16, ValWidth::W2, i64, IdxWidth::I64, isel_ptx);
+select_entry!(
+    isel_f32_i32,
+    f32,
+    ValWidth::W4,
+    i32,
+    IdxWidth::I32,
+    isel_ptx
+);
+select_entry!(
+    isel_f32_i64,
+    f32,
+    ValWidth::W4,
+    i64,
+    IdxWidth::I64,
+    isel_ptx
+);
+select_entry!(
+    isel_f64_i32,
+    f64,
+    ValWidth::W8,
+    i32,
+    IdxWidth::I32,
+    isel_ptx
+);
+select_entry!(
+    isel_f64_i64,
+    f64,
+    ValWidth::W8,
+    i64,
+    IdxWidth::I64,
+    isel_ptx
+);
+select_entry!(
+    isel_i32_i32,
+    i32,
+    ValWidth::W4,
+    i32,
+    IdxWidth::I32,
+    isel_ptx
+);
+select_entry!(
+    isel_i32_i64,
+    i32,
+    ValWidth::W4,
+    i64,
+    IdxWidth::I64,
+    isel_ptx
+);
+select_entry!(
+    isel_i64_i32,
+    i64,
+    ValWidth::W8,
+    i32,
+    IdxWidth::I32,
+    isel_ptx
+);
+select_entry!(
+    isel_i64_i64,
+    i64,
+    ValWidth::W8,
+    i64,
+    IdxWidth::I64,
+    isel_ptx
+);
+select_entry!(
+    isel_u16_i32,
+    u16,
+    ValWidth::W2,
+    i32,
+    IdxWidth::I32,
+    isel_ptx
+);
+select_entry!(
+    isel_u16_i64,
+    u16,
+    ValWidth::W2,
+    i64,
+    IdxWidth::I64,
+    isel_ptx
+);
 
 // gather: same matrix
-select_entry!(gather_f32_i32, f32, ValWidth::W4, i32, IdxWidth::I32, gathr_ptx);
-select_entry!(gather_f32_i64, f32, ValWidth::W4, i64, IdxWidth::I64, gathr_ptx);
-select_entry!(gather_f64_i32, f64, ValWidth::W8, i32, IdxWidth::I32, gathr_ptx);
-select_entry!(gather_f64_i64, f64, ValWidth::W8, i64, IdxWidth::I64, gathr_ptx);
-select_entry!(gather_i32_i32, i32, ValWidth::W4, i32, IdxWidth::I32, gathr_ptx);
-select_entry!(gather_i32_i64, i32, ValWidth::W4, i64, IdxWidth::I64, gathr_ptx);
-select_entry!(gather_i64_i32, i64, ValWidth::W8, i32, IdxWidth::I32, gathr_ptx);
-select_entry!(gather_i64_i64, i64, ValWidth::W8, i64, IdxWidth::I64, gathr_ptx);
-select_entry!(gather_u16_i32, u16, ValWidth::W2, i32, IdxWidth::I32, gathr_ptx);
-select_entry!(gather_u16_i64, u16, ValWidth::W2, i64, IdxWidth::I64, gathr_ptx);
+select_entry!(
+    gather_f32_i32,
+    f32,
+    ValWidth::W4,
+    i32,
+    IdxWidth::I32,
+    gathr_ptx
+);
+select_entry!(
+    gather_f32_i64,
+    f32,
+    ValWidth::W4,
+    i64,
+    IdxWidth::I64,
+    gathr_ptx
+);
+select_entry!(
+    gather_f64_i32,
+    f64,
+    ValWidth::W8,
+    i32,
+    IdxWidth::I32,
+    gathr_ptx
+);
+select_entry!(
+    gather_f64_i64,
+    f64,
+    ValWidth::W8,
+    i64,
+    IdxWidth::I64,
+    gathr_ptx
+);
+select_entry!(
+    gather_i32_i32,
+    i32,
+    ValWidth::W4,
+    i32,
+    IdxWidth::I32,
+    gathr_ptx
+);
+select_entry!(
+    gather_i32_i64,
+    i32,
+    ValWidth::W4,
+    i64,
+    IdxWidth::I64,
+    gathr_ptx
+);
+select_entry!(
+    gather_i64_i32,
+    i64,
+    ValWidth::W8,
+    i32,
+    IdxWidth::I32,
+    gathr_ptx
+);
+select_entry!(
+    gather_i64_i64,
+    i64,
+    ValWidth::W8,
+    i64,
+    IdxWidth::I64,
+    gathr_ptx
+);
+select_entry!(
+    gather_u16_i32,
+    u16,
+    ValWidth::W2,
+    i32,
+    IdxWidth::I32,
+    gathr_ptx
+);
+select_entry!(
+    gather_u16_i64,
+    u16,
+    ValWidth::W2,
+    i64,
+    IdxWidth::I64,
+    gathr_ptx
+);
 
 #[cfg(test)]
 mod tests {
@@ -363,40 +664,55 @@ mod tests {
     fn index_select_dim0_f32_i64() {
         let d = dev();
         // input [4,2] rows; select rows [2,0,2] -> output [3,2]
-        let inp = d.stream().clone_htod(&vec![0.0f32,1.0, 2.0,3.0, 4.0,5.0, 6.0,7.0]).unwrap();
+        let inp = d
+            .stream()
+            .clone_htod(&vec![0.0f32, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0])
+            .unwrap();
         let idx = d.stream().clone_htod(&vec![2i64, 0, 2]).unwrap();
         // outer=1 in_dim=4 out_dim=3 inner=2
         let out = isel_f32_i64(&inp, &idx, 1, 4, 3, 2, &d).unwrap();
-        assert_eq!(d.stream().clone_dtoh(&out).unwrap(), vec![4.0f32,5.0, 0.0,1.0, 4.0,5.0]);
+        assert_eq!(
+            d.stream().clone_dtoh(&out).unwrap(),
+            vec![4.0f32, 5.0, 0.0, 1.0, 4.0, 5.0]
+        );
     }
 
     #[test]
     fn index_select_dim1_f32_i32() {
         let d = dev();
         // input [2,3], select along dim=1 indices [2,0] -> outer=2 in_dim=3 out_dim=2 inner=1
-        let inp = d.stream().clone_htod(&vec![10.0f32,11.0,12.0, 20.0,21.0,22.0]).unwrap();
+        let inp = d
+            .stream()
+            .clone_htod(&vec![10.0f32, 11.0, 12.0, 20.0, 21.0, 22.0])
+            .unwrap();
         let idx = d.stream().clone_htod(&vec![2i32, 0]).unwrap();
         let out = isel_f32_i32(&inp, &idx, 2, 3, 2, 1, &d).unwrap();
-        assert_eq!(d.stream().clone_dtoh(&out).unwrap(), vec![12.0f32,10.0, 22.0,20.0]);
+        assert_eq!(
+            d.stream().clone_dtoh(&out).unwrap(),
+            vec![12.0f32, 10.0, 22.0, 20.0]
+        );
     }
 
     #[test]
     fn gather_dim1_i32_values() {
         let d = dev();
         // gather along dim=1: input [2,3], index [2,2] -> outer=2 in_dim=3 out_dim=2 inner=1
-        let inp = d.stream().clone_htod(&vec![5i32,6,7, 8,9,10]).unwrap();
-        let idx = d.stream().clone_htod(&vec![0i64,2, 2,1]).unwrap();
+        let inp = d.stream().clone_htod(&vec![5i32, 6, 7, 8, 9, 10]).unwrap();
+        let idx = d.stream().clone_htod(&vec![0i64, 2, 2, 1]).unwrap();
         let out = gather_i32_i64(&inp, &idx, 2, 3, 2, 1, &d).unwrap();
         // row0: in[0,0]=5 in[0,2]=7 ; row1: in[1,2]=10 in[1,1]=9
-        assert_eq!(d.stream().clone_dtoh(&out).unwrap(), vec![5i32,7, 10,9]);
+        assert_eq!(d.stream().clone_dtoh(&out).unwrap(), vec![5i32, 7, 10, 9]);
     }
 
     #[test]
     fn index_select_f64_and_i64_values() {
         let d = dev();
-        let inp = d.stream().clone_htod(&vec![1.5f64,2.5, 3.5,4.5]).unwrap();
+        let inp = d.stream().clone_htod(&vec![1.5f64, 2.5, 3.5, 4.5]).unwrap();
         let idx = d.stream().clone_htod(&vec![1i32, 0]).unwrap();
         let out = isel_f64_i32(&inp, &idx, 1, 2, 2, 2, &d).unwrap();
-        assert_eq!(d.stream().clone_dtoh(&out).unwrap(), vec![3.5f64,4.5, 1.5,2.5]);
+        assert_eq!(
+            d.stream().clone_dtoh(&out).unwrap(),
+            vec![3.5f64, 4.5, 1.5, 2.5]
+        );
     }
 }

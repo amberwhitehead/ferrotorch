@@ -13,9 +13,9 @@ use std::sync::Arc;
 
 use ferrotorch_core::autograd::no_grad::is_grad_enabled;
 use ferrotorch_core::device::Device;
+use ferrotorch_core::dtype::DType;
 use ferrotorch_core::gpu_dispatch::{GpuBufferHandle, gpu_backend};
 use ferrotorch_core::tensor::GradFn;
-use ferrotorch_core::dtype::DType;
 use ferrotorch_core::{FerrotorchError, FerrotorchResult, Float, Tensor, TensorStorage};
 
 use crate::init;

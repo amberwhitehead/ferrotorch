@@ -714,7 +714,10 @@ mod tests {
     #[test]
     fn f32_to_i32_truncates_toward_zero() {
         let d = dev();
-        let h = d.stream().clone_htod(&vec![1.9f32, -1.9, 2.0, -2.5, 0.0]).unwrap();
+        let h = d
+            .stream()
+            .clone_htod(&vec![1.9f32, -1.9, 2.0, -2.5, 0.0])
+            .unwrap();
         let r = cast_f32_to_i32(&h, h.len(), &d).unwrap();
         assert_eq!(d.stream().clone_dtoh(&r).unwrap(), vec![1i32, -1, 2, -2, 0]);
     }
@@ -742,9 +745,15 @@ mod tests {
         let d = dev();
         let h = d.stream().clone_htod(&vec![5i64, -9, 123456]).unwrap();
         let narrowed = cast_i64_to_i32(&h, h.len(), &d).unwrap();
-        assert_eq!(d.stream().clone_dtoh(&narrowed).unwrap(), vec![5i32, -9, 123456]);
+        assert_eq!(
+            d.stream().clone_dtoh(&narrowed).unwrap(),
+            vec![5i32, -9, 123456]
+        );
         let f = cast_i64_to_f64(&h, h.len(), &d).unwrap();
-        assert_eq!(d.stream().clone_dtoh(&f).unwrap(), vec![5.0f64, -9.0, 123456.0]);
+        assert_eq!(
+            d.stream().clone_dtoh(&f).unwrap(),
+            vec![5.0f64, -9.0, 123456.0]
+        );
     }
 
     #[test]
@@ -755,24 +764,40 @@ mod tests {
         assert_eq!(d.stream().clone_dtoh(&r).unwrap(), vec![9i64, -9]);
         let hi = d.stream().clone_htod(&vec![3i32, -4, 256]).unwrap();
         let bf = cast_i32_to_bf16(&hi, hi.len(), &d).unwrap();
-        let bf_h: Vec<f32> = d.stream().clone_dtoh(&bf).unwrap().into_iter()
-            .map(|b| half::bf16::from_bits(b).to_f32()).collect();
+        let bf_h: Vec<f32> = d
+            .stream()
+            .clone_dtoh(&bf)
+            .unwrap()
+            .into_iter()
+            .map(|b| half::bf16::from_bits(b).to_f32())
+            .collect();
         assert_eq!(bf_h, vec![3.0f32, -4.0, 256.0]);
         let f16 = cast_i32_to_f16(&hi, hi.len(), &d).unwrap();
-        let f16_h: Vec<f32> = d.stream().clone_dtoh(&f16).unwrap().into_iter()
-            .map(|b| half::f16::from_bits(b).to_f32()).collect();
+        let f16_h: Vec<f32> = d
+            .stream()
+            .clone_dtoh(&f16)
+            .unwrap()
+            .into_iter()
+            .map(|b| half::f16::from_bits(b).to_f32())
+            .collect();
         assert_eq!(f16_h, vec![3.0f32, -4.0, 256.0]);
     }
 
     #[test]
     fn bf16_f16_to_int_truncate() {
         let d = dev();
-        let bf: Vec<u16> = [1.9f32, -2.9].iter().map(|&v| half::bf16::from_f32(v).to_bits()).collect();
+        let bf: Vec<u16> = [1.9f32, -2.9]
+            .iter()
+            .map(|&v| half::bf16::from_f32(v).to_bits())
+            .collect();
         let hb = d.stream().clone_htod(&bf).unwrap();
         let r = cast_bf16_to_i32(&hb, hb.len(), &d).unwrap();
         // bf16(1.9) rounds to ~1.898..; trunc -> 1. bf16(-2.9) -> ~-2.90; trunc -> -2
         assert_eq!(d.stream().clone_dtoh(&r).unwrap(), vec![1i32, -2]);
-        let f: Vec<u16> = [4.5f32, -5.5].iter().map(|&v| half::f16::from_f32(v).to_bits()).collect();
+        let f: Vec<u16> = [4.5f32, -5.5]
+            .iter()
+            .map(|&v| half::f16::from_f32(v).to_bits())
+            .collect();
         let hf = d.stream().clone_htod(&f).unwrap();
         let r2 = cast_f16_to_i64(&hf, hf.len(), &d).unwrap();
         assert_eq!(d.stream().clone_dtoh(&r2).unwrap(), vec![4i64, -5]);
@@ -788,6 +813,9 @@ mod tests {
         assert_eq!(d.stream().clone_dtoh(&c).unwrap(), vec![big, -big, 7]);
         let hi = d.stream().clone_htod(&vec![i32::MIN, i32::MAX, 0]).unwrap();
         let ci = cast_i32_copy(&hi, hi.len(), &d).unwrap();
-        assert_eq!(d.stream().clone_dtoh(&ci).unwrap(), vec![i32::MIN, i32::MAX, 0]);
+        assert_eq!(
+            d.stream().clone_dtoh(&ci).unwrap(),
+            vec![i32::MIN, i32::MAX, 0]
+        );
     }
 }

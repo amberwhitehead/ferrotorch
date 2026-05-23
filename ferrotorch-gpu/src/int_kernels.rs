@@ -1391,43 +1391,83 @@ fn launch_reduce<T: DeviceRepr + ValidAsZeroBits>(
 // ---------------------------------------------------------------------------
 
 /// Elementwise `out = a + b` (i32, on-device, wrapping on overflow).
-pub fn gpu_add_i32(a: &CudaSlice<i32>, b: &CudaSlice<i32>, d: &GpuDevice) -> GpuResult<CudaSlice<i32>> {
+pub fn gpu_add_i32(
+    a: &CudaSlice<i32>,
+    b: &CudaSlice<i32>,
+    d: &GpuDevice,
+) -> GpuResult<CudaSlice<i32>> {
     launch_binary(a, b, d, ADD_I32_PTX, "add_i32_kernel")
 }
 /// Elementwise `out = a - b` (i32).
-pub fn gpu_sub_i32(a: &CudaSlice<i32>, b: &CudaSlice<i32>, d: &GpuDevice) -> GpuResult<CudaSlice<i32>> {
+pub fn gpu_sub_i32(
+    a: &CudaSlice<i32>,
+    b: &CudaSlice<i32>,
+    d: &GpuDevice,
+) -> GpuResult<CudaSlice<i32>> {
     launch_binary(a, b, d, SUB_I32_PTX, "sub_i32_kernel")
 }
 /// Elementwise `out = a * b` (i32, wrapping).
-pub fn gpu_mul_i32(a: &CudaSlice<i32>, b: &CudaSlice<i32>, d: &GpuDevice) -> GpuResult<CudaSlice<i32>> {
+pub fn gpu_mul_i32(
+    a: &CudaSlice<i32>,
+    b: &CudaSlice<i32>,
+    d: &GpuDevice,
+) -> GpuResult<CudaSlice<i32>> {
     launch_binary(a, b, d, MUL_I32_PTX, "mul_i32_kernel")
 }
 /// Elementwise floor division `out = floor_divide(a, b)` (i32, floors to −∞).
-pub fn gpu_floor_div_i32(a: &CudaSlice<i32>, b: &CudaSlice<i32>, d: &GpuDevice) -> GpuResult<CudaSlice<i32>> {
+pub fn gpu_floor_div_i32(
+    a: &CudaSlice<i32>,
+    b: &CudaSlice<i32>,
+    d: &GpuDevice,
+) -> GpuResult<CudaSlice<i32>> {
     launch_binary(a, b, d, FLOORDIV_I32_PTX, "floordiv_i32_kernel")
 }
 /// Elementwise `out = remainder(a, b)` (i32, sign of divisor).
-pub fn gpu_remainder_i32(a: &CudaSlice<i32>, b: &CudaSlice<i32>, d: &GpuDevice) -> GpuResult<CudaSlice<i32>> {
+pub fn gpu_remainder_i32(
+    a: &CudaSlice<i32>,
+    b: &CudaSlice<i32>,
+    d: &GpuDevice,
+) -> GpuResult<CudaSlice<i32>> {
     launch_binary(a, b, d, REMAINDER_I32_PTX, "remainder_i32_kernel")
 }
 /// Elementwise bitwise AND (i32).
-pub fn gpu_bitand_i32(a: &CudaSlice<i32>, b: &CudaSlice<i32>, d: &GpuDevice) -> GpuResult<CudaSlice<i32>> {
+pub fn gpu_bitand_i32(
+    a: &CudaSlice<i32>,
+    b: &CudaSlice<i32>,
+    d: &GpuDevice,
+) -> GpuResult<CudaSlice<i32>> {
     launch_binary(a, b, d, BITAND_I32_PTX, "bitand_i32_kernel")
 }
 /// Elementwise bitwise OR (i32).
-pub fn gpu_bitor_i32(a: &CudaSlice<i32>, b: &CudaSlice<i32>, d: &GpuDevice) -> GpuResult<CudaSlice<i32>> {
+pub fn gpu_bitor_i32(
+    a: &CudaSlice<i32>,
+    b: &CudaSlice<i32>,
+    d: &GpuDevice,
+) -> GpuResult<CudaSlice<i32>> {
     launch_binary(a, b, d, BITOR_I32_PTX, "bitor_i32_kernel")
 }
 /// Elementwise bitwise XOR (i32).
-pub fn gpu_bitxor_i32(a: &CudaSlice<i32>, b: &CudaSlice<i32>, d: &GpuDevice) -> GpuResult<CudaSlice<i32>> {
+pub fn gpu_bitxor_i32(
+    a: &CudaSlice<i32>,
+    b: &CudaSlice<i32>,
+    d: &GpuDevice,
+) -> GpuResult<CudaSlice<i32>> {
     launch_binary(a, b, d, BITXOR_I32_PTX, "bitxor_i32_kernel")
 }
 /// Elementwise left shift `out = a << b` (i32).
-pub fn gpu_shl_i32(a: &CudaSlice<i32>, b: &CudaSlice<i32>, d: &GpuDevice) -> GpuResult<CudaSlice<i32>> {
+pub fn gpu_shl_i32(
+    a: &CudaSlice<i32>,
+    b: &CudaSlice<i32>,
+    d: &GpuDevice,
+) -> GpuResult<CudaSlice<i32>> {
     launch_binary(a, b, d, SHL_I32_PTX, "shl_i32_kernel")
 }
 /// Elementwise arithmetic right shift `out = a >> b` (i32, sign-extending).
-pub fn gpu_shr_i32(a: &CudaSlice<i32>, b: &CudaSlice<i32>, d: &GpuDevice) -> GpuResult<CudaSlice<i32>> {
+pub fn gpu_shr_i32(
+    a: &CudaSlice<i32>,
+    b: &CudaSlice<i32>,
+    d: &GpuDevice,
+) -> GpuResult<CudaSlice<i32>> {
     launch_binary(a, b, d, SHR_I32_PTX, "shr_i32_kernel")
 }
 /// Elementwise negate `out = -a` (i32).
@@ -1448,11 +1488,25 @@ pub fn gpu_prod_i32(a: &CudaSlice<i32>, d: &GpuDevice) -> GpuResult<CudaSlice<i3
 }
 /// Min-reduce to a 1-element buffer (i32).
 pub fn gpu_min_i32(a: &CudaSlice<i32>, d: &GpuDevice) -> GpuResult<CudaSlice<i32>> {
-    launch_reduce(a, d, REDUCE_I32_PTX, "reduce_i32_kernel", REDUCE_MIN, i32::MAX)
+    launch_reduce(
+        a,
+        d,
+        REDUCE_I32_PTX,
+        "reduce_i32_kernel",
+        REDUCE_MIN,
+        i32::MAX,
+    )
 }
 /// Max-reduce to a 1-element buffer (i32).
 pub fn gpu_max_i32(a: &CudaSlice<i32>, d: &GpuDevice) -> GpuResult<CudaSlice<i32>> {
-    launch_reduce(a, d, REDUCE_I32_PTX, "reduce_i32_kernel", REDUCE_MAX, i32::MIN)
+    launch_reduce(
+        a,
+        d,
+        REDUCE_I32_PTX,
+        "reduce_i32_kernel",
+        REDUCE_MAX,
+        i32::MIN,
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -1460,43 +1514,83 @@ pub fn gpu_max_i32(a: &CudaSlice<i32>, d: &GpuDevice) -> GpuResult<CudaSlice<i32
 // ---------------------------------------------------------------------------
 
 /// Elementwise `out = a + b` (i64, wrapping).
-pub fn gpu_add_i64(a: &CudaSlice<i64>, b: &CudaSlice<i64>, d: &GpuDevice) -> GpuResult<CudaSlice<i64>> {
+pub fn gpu_add_i64(
+    a: &CudaSlice<i64>,
+    b: &CudaSlice<i64>,
+    d: &GpuDevice,
+) -> GpuResult<CudaSlice<i64>> {
     launch_binary(a, b, d, ADD_I64_PTX, "add_i64_kernel")
 }
 /// Elementwise `out = a - b` (i64).
-pub fn gpu_sub_i64(a: &CudaSlice<i64>, b: &CudaSlice<i64>, d: &GpuDevice) -> GpuResult<CudaSlice<i64>> {
+pub fn gpu_sub_i64(
+    a: &CudaSlice<i64>,
+    b: &CudaSlice<i64>,
+    d: &GpuDevice,
+) -> GpuResult<CudaSlice<i64>> {
     launch_binary(a, b, d, SUB_I64_PTX, "sub_i64_kernel")
 }
 /// Elementwise `out = a * b` (i64, wrapping).
-pub fn gpu_mul_i64(a: &CudaSlice<i64>, b: &CudaSlice<i64>, d: &GpuDevice) -> GpuResult<CudaSlice<i64>> {
+pub fn gpu_mul_i64(
+    a: &CudaSlice<i64>,
+    b: &CudaSlice<i64>,
+    d: &GpuDevice,
+) -> GpuResult<CudaSlice<i64>> {
     launch_binary(a, b, d, MUL_I64_PTX, "mul_i64_kernel")
 }
 /// Elementwise floor division (i64, floors to −∞).
-pub fn gpu_floor_div_i64(a: &CudaSlice<i64>, b: &CudaSlice<i64>, d: &GpuDevice) -> GpuResult<CudaSlice<i64>> {
+pub fn gpu_floor_div_i64(
+    a: &CudaSlice<i64>,
+    b: &CudaSlice<i64>,
+    d: &GpuDevice,
+) -> GpuResult<CudaSlice<i64>> {
     launch_binary(a, b, d, FLOORDIV_I64_PTX, "floordiv_i64_kernel")
 }
 /// Elementwise remainder (i64, sign of divisor).
-pub fn gpu_remainder_i64(a: &CudaSlice<i64>, b: &CudaSlice<i64>, d: &GpuDevice) -> GpuResult<CudaSlice<i64>> {
+pub fn gpu_remainder_i64(
+    a: &CudaSlice<i64>,
+    b: &CudaSlice<i64>,
+    d: &GpuDevice,
+) -> GpuResult<CudaSlice<i64>> {
     launch_binary(a, b, d, REMAINDER_I64_PTX, "remainder_i64_kernel")
 }
 /// Elementwise bitwise AND (i64).
-pub fn gpu_bitand_i64(a: &CudaSlice<i64>, b: &CudaSlice<i64>, d: &GpuDevice) -> GpuResult<CudaSlice<i64>> {
+pub fn gpu_bitand_i64(
+    a: &CudaSlice<i64>,
+    b: &CudaSlice<i64>,
+    d: &GpuDevice,
+) -> GpuResult<CudaSlice<i64>> {
     launch_binary(a, b, d, BITAND_I64_PTX, "bitand_i64_kernel")
 }
 /// Elementwise bitwise OR (i64).
-pub fn gpu_bitor_i64(a: &CudaSlice<i64>, b: &CudaSlice<i64>, d: &GpuDevice) -> GpuResult<CudaSlice<i64>> {
+pub fn gpu_bitor_i64(
+    a: &CudaSlice<i64>,
+    b: &CudaSlice<i64>,
+    d: &GpuDevice,
+) -> GpuResult<CudaSlice<i64>> {
     launch_binary(a, b, d, BITOR_I64_PTX, "bitor_i64_kernel")
 }
 /// Elementwise bitwise XOR (i64).
-pub fn gpu_bitxor_i64(a: &CudaSlice<i64>, b: &CudaSlice<i64>, d: &GpuDevice) -> GpuResult<CudaSlice<i64>> {
+pub fn gpu_bitxor_i64(
+    a: &CudaSlice<i64>,
+    b: &CudaSlice<i64>,
+    d: &GpuDevice,
+) -> GpuResult<CudaSlice<i64>> {
     launch_binary(a, b, d, BITXOR_I64_PTX, "bitxor_i64_kernel")
 }
 /// Elementwise left shift (i64).
-pub fn gpu_shl_i64(a: &CudaSlice<i64>, b: &CudaSlice<i64>, d: &GpuDevice) -> GpuResult<CudaSlice<i64>> {
+pub fn gpu_shl_i64(
+    a: &CudaSlice<i64>,
+    b: &CudaSlice<i64>,
+    d: &GpuDevice,
+) -> GpuResult<CudaSlice<i64>> {
     launch_binary(a, b, d, SHL_I64_PTX, "shl_i64_kernel")
 }
 /// Elementwise arithmetic right shift (i64, sign-extending).
-pub fn gpu_shr_i64(a: &CudaSlice<i64>, b: &CudaSlice<i64>, d: &GpuDevice) -> GpuResult<CudaSlice<i64>> {
+pub fn gpu_shr_i64(
+    a: &CudaSlice<i64>,
+    b: &CudaSlice<i64>,
+    d: &GpuDevice,
+) -> GpuResult<CudaSlice<i64>> {
     launch_binary(a, b, d, SHR_I64_PTX, "shr_i64_kernel")
 }
 /// Elementwise negate (i64).
@@ -1517,9 +1611,23 @@ pub fn gpu_prod_i64(a: &CudaSlice<i64>, d: &GpuDevice) -> GpuResult<CudaSlice<i6
 }
 /// Min-reduce (i64).
 pub fn gpu_min_i64(a: &CudaSlice<i64>, d: &GpuDevice) -> GpuResult<CudaSlice<i64>> {
-    launch_reduce(a, d, REDUCE_I64_PTX, "reduce_i64_kernel", REDUCE_MIN, i64::MAX)
+    launch_reduce(
+        a,
+        d,
+        REDUCE_I64_PTX,
+        "reduce_i64_kernel",
+        REDUCE_MIN,
+        i64::MAX,
+    )
 }
 /// Max-reduce (i64).
 pub fn gpu_max_i64(a: &CudaSlice<i64>, d: &GpuDevice) -> GpuResult<CudaSlice<i64>> {
-    launch_reduce(a, d, REDUCE_I64_PTX, "reduce_i64_kernel", REDUCE_MAX, i64::MIN)
+    launch_reduce(
+        a,
+        d,
+        REDUCE_I64_PTX,
+        "reduce_i64_kernel",
+        REDUCE_MAX,
+        i64::MIN,
+    )
 }

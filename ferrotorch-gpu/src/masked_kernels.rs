@@ -574,11 +574,16 @@ pub fn count_true(mask: &CudaSlice<u8>, device: &GpuDevice) -> GpuResult<usize> 
         return Ok(0);
     }
     let ctx = device.context();
-    let f = get_or_compile(ctx, COUNT_TRUE_PTX, "count_true_kernel", device.ordinal() as u32)
-        .map_err(|e| GpuError::PtxCompileFailed {
-            kernel: "count_true_kernel",
-            source: e,
-        })?;
+    let f = get_or_compile(
+        ctx,
+        COUNT_TRUE_PTX,
+        "count_true_kernel",
+        device.ordinal() as u32,
+    )
+    .map_err(|e| GpuError::PtxCompileFailed {
+        kernel: "count_true_kernel",
+        source: e,
+    })?;
     let mut out = stream.alloc_zeros::<i32>(1)?;
     let cfg = LaunchConfig {
         grid_dim: (1, 1, 1),
@@ -624,8 +629,9 @@ fn launch_compact<T: DeviceRepr + ValidAsZeroBits>(
         return Ok(stream.alloc_zeros::<T>(0)?);
     }
     let ctx = device.context();
-    let f = crate::module_cache::get_or_compile_owned(ctx, ptx, kernel_name, device.ordinal() as u32)
-        .map_err(|e| GpuError::PtxCompileFailed {
+    let f =
+        crate::module_cache::get_or_compile_owned(ctx, ptx, kernel_name, device.ordinal() as u32)
+            .map_err(|e| GpuError::PtxCompileFailed {
             kernel: "masked_select_compact",
             source: e,
         })?;
@@ -684,9 +690,9 @@ fn launch_scatter<T: DeviceRepr + ValidAsZeroBits>(
     let f =
         crate::module_cache::get_or_compile_owned(ctx, ptx, kernel_name, device.ordinal() as u32)
             .map_err(|e| GpuError::PtxCompileFailed {
-                kernel: "masked_scatter",
-                source: e,
-            })?;
+            kernel: "masked_scatter",
+            source: e,
+        })?;
     // out_numel-element zeroed buffer: positions where mask is false stay 0.
     let mut out = stream.alloc_zeros::<T>(out_numel)?;
     // Single block, single active thread (thread 0 scatters serially).
@@ -728,7 +734,14 @@ pub fn masked_fill_f32(
     value: f32,
     d: &GpuDevice,
 ) -> GpuResult<CudaSlice<f32>> {
-    launch_masked_fill(input, mask, value, d, MASKED_FILL_F32_PTX, "masked_fill_f32_kernel")
+    launch_masked_fill(
+        input,
+        mask,
+        value,
+        d,
+        MASKED_FILL_F32_PTX,
+        "masked_fill_f32_kernel",
+    )
 }
 
 /// masked_fill for f64.
@@ -738,7 +751,14 @@ pub fn masked_fill_f64(
     value: f64,
     d: &GpuDevice,
 ) -> GpuResult<CudaSlice<f64>> {
-    launch_masked_fill(input, mask, value, d, MASKED_FILL_F64_PTX, "masked_fill_f64_kernel")
+    launch_masked_fill(
+        input,
+        mask,
+        value,
+        d,
+        MASKED_FILL_F64_PTX,
+        "masked_fill_f64_kernel",
+    )
 }
 
 /// masked_fill for f16 (u16 bits). `value` is the f32 fill, narrowed in-kernel.
@@ -748,7 +768,14 @@ pub fn masked_fill_f16(
     value: f32,
     d: &GpuDevice,
 ) -> GpuResult<CudaSlice<u16>> {
-    launch_masked_fill(input, mask, value, d, MASKED_FILL_F16_PTX, "masked_fill_f16_kernel")
+    launch_masked_fill(
+        input,
+        mask,
+        value,
+        d,
+        MASKED_FILL_F16_PTX,
+        "masked_fill_f16_kernel",
+    )
 }
 
 /// masked_fill for bf16 (u16 bits). `value` is the f32 fill, narrowed in-kernel.
@@ -758,7 +785,14 @@ pub fn masked_fill_bf16(
     value: f32,
     d: &GpuDevice,
 ) -> GpuResult<CudaSlice<u16>> {
-    launch_masked_fill(input, mask, value, d, MASKED_FILL_BF16_PTX, "masked_fill_bf16_kernel")
+    launch_masked_fill(
+        input,
+        mask,
+        value,
+        d,
+        MASKED_FILL_BF16_PTX,
+        "masked_fill_bf16_kernel",
+    )
 }
 
 /// masked_fill for i32. `value` is the fill, passed as raw 32-bit.
@@ -768,7 +802,14 @@ pub fn masked_fill_i32(
     value: i32,
     d: &GpuDevice,
 ) -> GpuResult<CudaSlice<i32>> {
-    launch_masked_fill(input, mask, value, d, MASKED_FILL_I32_PTX, "masked_fill_i32_kernel")
+    launch_masked_fill(
+        input,
+        mask,
+        value,
+        d,
+        MASKED_FILL_I32_PTX,
+        "masked_fill_i32_kernel",
+    )
 }
 
 /// masked_fill for i64. `value` is the fill, passed as raw 64-bit.
@@ -778,7 +819,14 @@ pub fn masked_fill_i64(
     value: i64,
     d: &GpuDevice,
 ) -> GpuResult<CudaSlice<i64>> {
-    launch_masked_fill(input, mask, value, d, MASKED_FILL_I64_PTX, "masked_fill_i64_kernel")
+    launch_masked_fill(
+        input,
+        mask,
+        value,
+        d,
+        MASKED_FILL_I64_PTX,
+        "masked_fill_i64_kernel",
+    )
 }
 
 /// where (ternary select) for a 32-bit value dtype (f32 / i32).
@@ -788,7 +836,11 @@ pub fn where_32<T: DeviceRepr + ValidAsZeroBits>(
     y: &CudaSlice<T>,
     d: &GpuDevice,
 ) -> GpuResult<CudaSlice<T>> {
-    debug_assert_eq!(std::mem::size_of::<T>(), 4, "where_32 requires a 4-byte element");
+    debug_assert_eq!(
+        std::mem::size_of::<T>(),
+        4,
+        "where_32 requires a 4-byte element"
+    );
     launch_where(cond, x, y, d, WHERE_32_PTX, "where_32_kernel")
 }
 
@@ -799,7 +851,11 @@ pub fn where_64<T: DeviceRepr + ValidAsZeroBits>(
     y: &CudaSlice<T>,
     d: &GpuDevice,
 ) -> GpuResult<CudaSlice<T>> {
-    debug_assert_eq!(std::mem::size_of::<T>(), 8, "where_64 requires an 8-byte element");
+    debug_assert_eq!(
+        std::mem::size_of::<T>(),
+        8,
+        "where_64 requires an 8-byte element"
+    );
     launch_where(cond, x, y, d, WHERE_64_PTX, "where_64_kernel")
 }
 
@@ -825,7 +881,14 @@ pub fn masked_select_32<T: DeviceRepr + ValidAsZeroBits>(
 ) -> GpuResult<(CudaSlice<T>, usize)> {
     let len = count_true(mask, d)?;
     let ptx = compact_ptx("masked_select_compact_32", 2, "b32", ".reg .b32 %val;");
-    let out = launch_compact(input, mask, len, d, ptx, "masked_select_compact_32".to_string())?;
+    let out = launch_compact(
+        input,
+        mask,
+        len,
+        d,
+        ptx,
+        "masked_select_compact_32".to_string(),
+    )?;
     Ok((out, len))
 }
 
@@ -837,7 +900,14 @@ pub fn masked_select_64<T: DeviceRepr + ValidAsZeroBits>(
 ) -> GpuResult<(CudaSlice<T>, usize)> {
     let len = count_true(mask, d)?;
     let ptx = compact_ptx("masked_select_compact_64", 3, "b64", ".reg .b64 %val;");
-    let out = launch_compact(input, mask, len, d, ptx, "masked_select_compact_64".to_string())?;
+    let out = launch_compact(
+        input,
+        mask,
+        len,
+        d,
+        ptx,
+        "masked_select_compact_64".to_string(),
+    )?;
     Ok((out, len))
 }
 
@@ -849,7 +919,14 @@ pub fn masked_select_16(
 ) -> GpuResult<(CudaSlice<u16>, usize)> {
     let len = count_true(mask, d)?;
     let ptx = compact_ptx("masked_select_compact_16", 1, "b16", ".reg .b16 %val;");
-    let out = launch_compact(input, mask, len, d, ptx, "masked_select_compact_16".to_string())?;
+    let out = launch_compact(
+        input,
+        mask,
+        len,
+        d,
+        ptx,
+        "masked_select_compact_16".to_string(),
+    )?;
     Ok((out, len))
 }
 
@@ -862,9 +939,20 @@ pub fn masked_scatter_32<T: DeviceRepr + ValidAsZeroBits>(
     out_numel: usize,
     d: &GpuDevice,
 ) -> GpuResult<CudaSlice<T>> {
-    debug_assert_eq!(std::mem::size_of::<T>(), 4, "masked_scatter_32 requires a 4-byte element");
+    debug_assert_eq!(
+        std::mem::size_of::<T>(),
+        4,
+        "masked_scatter_32 requires a 4-byte element"
+    );
     let ptx = scatter_ptx("masked_scatter_32", 2, "b32", ".reg .b32 %val;");
-    launch_scatter(grad, mask, out_numel, d, ptx, "masked_scatter_32".to_string())
+    launch_scatter(
+        grad,
+        mask,
+        out_numel,
+        d,
+        ptx,
+        "masked_scatter_32".to_string(),
+    )
 }
 
 /// masked_scatter for a 64-bit value dtype (f64 / i64).
@@ -874,9 +962,20 @@ pub fn masked_scatter_64<T: DeviceRepr + ValidAsZeroBits>(
     out_numel: usize,
     d: &GpuDevice,
 ) -> GpuResult<CudaSlice<T>> {
-    debug_assert_eq!(std::mem::size_of::<T>(), 8, "masked_scatter_64 requires an 8-byte element");
+    debug_assert_eq!(
+        std::mem::size_of::<T>(),
+        8,
+        "masked_scatter_64 requires an 8-byte element"
+    );
     let ptx = scatter_ptx("masked_scatter_64", 3, "b64", ".reg .b64 %val;");
-    launch_scatter(grad, mask, out_numel, d, ptx, "masked_scatter_64".to_string())
+    launch_scatter(
+        grad,
+        mask,
+        out_numel,
+        d,
+        ptx,
+        "masked_scatter_64".to_string(),
+    )
 }
 
 /// masked_scatter for a 16-bit value dtype (f16 / bf16; pure 16-bit bit copy,
@@ -888,7 +987,14 @@ pub fn masked_scatter_16(
     d: &GpuDevice,
 ) -> GpuResult<CudaSlice<u16>> {
     let ptx = scatter_ptx("masked_scatter_16", 1, "b16", ".reg .b16 %val;");
-    launch_scatter(grad, mask, out_numel, d, ptx, "masked_scatter_16".to_string())
+    launch_scatter(
+        grad,
+        mask,
+        out_numel,
+        d,
+        ptx,
+        "masked_scatter_16".to_string(),
+    )
 }
 
 #[cfg(test)]
@@ -905,23 +1011,38 @@ mod tests {
         let input = d.stream().clone_htod(&vec![1.0f32, 2.0, 3.0, 4.0]).unwrap();
         let mask = d.stream().clone_htod(&vec![0u8, 1, 0, 1]).unwrap();
         let r = masked_fill_f32(&input, &mask, -9.0, &d).unwrap();
-        assert_eq!(d.stream().clone_dtoh(&r).unwrap(), vec![1.0f32, -9.0, 3.0, -9.0]);
+        assert_eq!(
+            d.stream().clone_dtoh(&r).unwrap(),
+            vec![1.0f32, -9.0, 3.0, -9.0]
+        );
     }
 
     #[test]
     fn where_32_selects() {
         let d = dev();
         let cond = d.stream().clone_htod(&vec![1u8, 0, 1, 0]).unwrap();
-        let x = d.stream().clone_htod(&vec![10.0f32, 20.0, 30.0, 40.0]).unwrap();
-        let y = d.stream().clone_htod(&vec![-1.0f32, -2.0, -3.0, -4.0]).unwrap();
+        let x = d
+            .stream()
+            .clone_htod(&vec![10.0f32, 20.0, 30.0, 40.0])
+            .unwrap();
+        let y = d
+            .stream()
+            .clone_htod(&vec![-1.0f32, -2.0, -3.0, -4.0])
+            .unwrap();
         let r = where_32::<f32>(&cond, &x, &y, &d).unwrap();
-        assert_eq!(d.stream().clone_dtoh(&r).unwrap(), vec![10.0f32, -2.0, 30.0, -4.0]);
+        assert_eq!(
+            d.stream().clone_dtoh(&r).unwrap(),
+            vec![10.0f32, -2.0, 30.0, -4.0]
+        );
     }
 
     #[test]
     fn masked_select_32_compacts() {
         let d = dev();
-        let input = d.stream().clone_htod(&vec![1.0f32, 2.0, 3.0, 4.0, 5.0]).unwrap();
+        let input = d
+            .stream()
+            .clone_htod(&vec![1.0f32, 2.0, 3.0, 4.0, 5.0])
+            .unwrap();
         let mask = d.stream().clone_htod(&vec![1u8, 0, 1, 1, 0]).unwrap();
         let (out, len) = masked_select_32::<f32>(&input, &mask, &d).unwrap();
         assert_eq!(len, 3);

@@ -66,10 +66,10 @@ fn launch_1d(n: usize) -> LaunchConfig {
 /// float and integer comparison kernels.
 fn cmp_ptx(
     kernel_name: &str,
-    in_shift: u32,   // log2(IN_BYTES): f32/i32→2, f64/i64→3
-    load_ty: &str,   // "f32" | "f64" | "s32" | "s64"
-    reg_decl: &str,  // register decls for the value regs
-    setp: &str,      // e.g. "setp.lt.f32 %c, %va, %vb;"
+    in_shift: u32,  // log2(IN_BYTES): f32/i32→2, f64/i64→3
+    load_ty: &str,  // "f32" | "f64" | "s32" | "s64"
+    reg_decl: &str, // register decls for the value regs
+    setp: &str,     // e.g. "setp.lt.f32 %c, %va, %vb;"
 ) -> String {
     format!(
         "\
@@ -372,11 +372,12 @@ fn launch_cmp<T: DeviceRepr + ValidAsZeroBits>(
     // operator), so use the owned-string cache, which hashes the PTX, compiles
     // once, and reuses thereafter. `kernel_name` is the entry-point name inside
     // that PTX. `err_label` is a `'static` family name for error reporting only.
-    let f = get_or_compile_owned(ctx, ptx, kernel_name, device.ordinal() as u32)
-        .map_err(|e| GpuError::PtxCompileFailed {
+    let f = get_or_compile_owned(ctx, ptx, kernel_name, device.ordinal() as u32).map_err(|e| {
+        GpuError::PtxCompileFailed {
             kernel: err_label,
             source: e,
-        })?;
+        }
+    })?;
     let mut out = stream.alloc_zeros::<u8>(n)?;
     let cfg = launch_1d(n);
     let n_u32 = n as u32;
@@ -436,11 +437,16 @@ fn launch_not(a: &CudaSlice<u8>, device: &GpuDevice) -> GpuResult<CudaSlice<u8>>
         return Ok(stream.alloc_zeros::<u8>(0)?);
     }
     let ctx = device.context();
-    let f = get_or_compile(ctx, NOT_BOOL_PTX, "not_bool_kernel", device.ordinal() as u32)
-        .map_err(|e| GpuError::PtxCompileFailed {
-            kernel: "not_bool_kernel",
-            source: e,
-        })?;
+    let f = get_or_compile(
+        ctx,
+        NOT_BOOL_PTX,
+        "not_bool_kernel",
+        device.ordinal() as u32,
+    )
+    .map_err(|e| GpuError::PtxCompileFailed {
+        kernel: "not_bool_kernel",
+        source: e,
+    })?;
     let mut out = stream.alloc_zeros::<u8>(n)?;
     let cfg = launch_1d(n);
     let n_u32 = n as u32;
@@ -477,11 +483,16 @@ fn launch_reduce_bool(
         return Ok(stream.clone_htod(&host)?);
     }
     let ctx = device.context();
-    let f = get_or_compile(ctx, REDUCE_BOOL_PTX, "reduce_bool_kernel", device.ordinal() as u32)
-        .map_err(|e| GpuError::PtxCompileFailed {
-            kernel: "reduce_bool_kernel",
-            source: e,
-        })?;
+    let f = get_or_compile(
+        ctx,
+        REDUCE_BOOL_PTX,
+        "reduce_bool_kernel",
+        device.ordinal() as u32,
+    )
+    .map_err(|e| GpuError::PtxCompileFailed {
+        kernel: "reduce_bool_kernel",
+        source: e,
+    })?;
     let mut out = stream.alloc_zeros::<u8>(1)?;
     // Single block, single active thread (thread 0 folds serially).
     let cfg = LaunchConfig {
@@ -597,19 +608,31 @@ pub fn gpu_cmp_f16(
 }
 
 /// Logical AND of two u8 bool buffers → u8 0/1 buffer.
-pub fn gpu_and_bool(a: &CudaSlice<u8>, b: &CudaSlice<u8>, d: &GpuDevice) -> GpuResult<CudaSlice<u8>> {
+pub fn gpu_and_bool(
+    a: &CudaSlice<u8>,
+    b: &CudaSlice<u8>,
+    d: &GpuDevice,
+) -> GpuResult<CudaSlice<u8>> {
     let ptx = logic_bin_ptx("and_bool_kernel", "and");
     launch_logic_bin(a, b, d, ptx, "and_bool_kernel")
 }
 
 /// Logical OR of two u8 bool buffers → u8 0/1 buffer.
-pub fn gpu_or_bool(a: &CudaSlice<u8>, b: &CudaSlice<u8>, d: &GpuDevice) -> GpuResult<CudaSlice<u8>> {
+pub fn gpu_or_bool(
+    a: &CudaSlice<u8>,
+    b: &CudaSlice<u8>,
+    d: &GpuDevice,
+) -> GpuResult<CudaSlice<u8>> {
     let ptx = logic_bin_ptx("or_bool_kernel", "or");
     launch_logic_bin(a, b, d, ptx, "or_bool_kernel")
 }
 
 /// Logical XOR of two u8 bool buffers → u8 0/1 buffer.
-pub fn gpu_xor_bool(a: &CudaSlice<u8>, b: &CudaSlice<u8>, d: &GpuDevice) -> GpuResult<CudaSlice<u8>> {
+pub fn gpu_xor_bool(
+    a: &CudaSlice<u8>,
+    b: &CudaSlice<u8>,
+    d: &GpuDevice,
+) -> GpuResult<CudaSlice<u8>> {
     let ptx = logic_bin_ptx("xor_bool_kernel", "xor");
     launch_logic_bin(a, b, d, ptx, "xor_bool_kernel")
 }

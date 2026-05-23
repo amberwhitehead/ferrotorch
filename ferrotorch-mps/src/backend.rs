@@ -1225,7 +1225,9 @@ mod tests {
 
         let src: Vec<f32> = vec![1.0_f32, 2.0, 3.0, 4.0];
         let bytes: Vec<u8> = src.iter().flat_map(|f| f.to_le_bytes()).collect();
-        let handle = backend.cpu_to_gpu(&bytes, DType::F32, 0).expect("cpu_to_gpu");
+        let handle = backend
+            .cpu_to_gpu(&bytes, DType::F32, 0)
+            .expect("cpu_to_gpu");
         assert_eq!(handle.len(), 4);
 
         let back = backend.gpu_to_cpu(&handle).expect("gpu_to_cpu");

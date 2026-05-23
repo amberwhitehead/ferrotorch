@@ -174,7 +174,11 @@ mod cuda_cusolver_compat {
         }
 
         // 2. Likely fixed CUDA 12.x roots (newest first).
-        for root in ["/usr/local/cuda-12.9", "/usr/local/cuda-12.8", "/usr/local/cuda-12"] {
+        for root in [
+            "/usr/local/cuda-12.9",
+            "/usr/local/cuda-12.8",
+            "/usr/local/cuda-12",
+        ] {
             dirs.push(PathBuf::from(root).join("targets/x86_64-linux/lib"));
             dirs.push(PathBuf::from(root).join("lib64"));
         }

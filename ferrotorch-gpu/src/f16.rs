@@ -985,11 +985,16 @@ pub fn gpu_scale_f16(
     }
     let ctx = device.context();
     let stream = device.stream();
-    let f = get_or_compile(ctx, SCALE_F16_PTX, "scale_f16_kernel", device.ordinal() as u32)
-        .map_err(|e| GpuError::PtxCompileFailed {
-            kernel: "scale_f16_kernel",
-            source: e,
-        })?;
+    let f = get_or_compile(
+        ctx,
+        SCALE_F16_PTX,
+        "scale_f16_kernel",
+        device.ordinal() as u32,
+    )
+    .map_err(|e| GpuError::PtxCompileFailed {
+        kernel: "scale_f16_kernel",
+        source: e,
+    })?;
 
     let mut out = stream.alloc_zeros::<u16>(n)?;
     let cfg = launch_1d(n);
@@ -1137,11 +1142,16 @@ pub fn gpu_sum_axis_f16(
         return Ok(stream.alloc_zeros::<u16>(0)?);
     }
     let ctx = device.context();
-    let f = get_or_compile(ctx, SUM_AXIS_F16_PTX, "sum_axis_f16_kernel", device.ordinal() as u32)
-        .map_err(|e| GpuError::PtxCompileFailed {
-            kernel: "sum_axis_f16_kernel",
-            source: e,
-        })?;
+    let f = get_or_compile(
+        ctx,
+        SUM_AXIS_F16_PTX,
+        "sum_axis_f16_kernel",
+        device.ordinal() as u32,
+    )
+    .map_err(|e| GpuError::PtxCompileFailed {
+        kernel: "sum_axis_f16_kernel",
+        source: e,
+    })?;
     let mut out = stream.alloc_zeros::<u16>(total)?;
     let cfg = launch_1d(total);
     let outer_u32 = outer as u32;
@@ -1199,11 +1209,16 @@ pub fn gpu_mean_axis_f16(
         return Ok(out);
     }
     let ctx = device.context();
-    let f = get_or_compile(ctx, SUM_AXIS_F16_PTX, "sum_axis_f16_kernel", device.ordinal() as u32)
-        .map_err(|e| GpuError::PtxCompileFailed {
-            kernel: "sum_axis_f16_kernel",
-            source: e,
-        })?;
+    let f = get_or_compile(
+        ctx,
+        SUM_AXIS_F16_PTX,
+        "sum_axis_f16_kernel",
+        device.ordinal() as u32,
+    )
+    .map_err(|e| GpuError::PtxCompileFailed {
+        kernel: "sum_axis_f16_kernel",
+        source: e,
+    })?;
     let mut out = stream.alloc_zeros::<u16>(total)?;
     let cfg = launch_1d(total);
     let outer_u32 = outer as u32;
@@ -1461,11 +1476,16 @@ pub fn gpu_softmax_f16(
     }
     let ctx = device.context();
     let stream = device.stream();
-    let f = get_or_compile(ctx, SOFTMAX_F16_PTX, "softmax_f16_kernel", device.ordinal() as u32)
-        .map_err(|e| GpuError::PtxCompileFailed {
-            kernel: "softmax_f16_kernel",
-            source: e,
-        })?;
+    let f = get_or_compile(
+        ctx,
+        SOFTMAX_F16_PTX,
+        "softmax_f16_kernel",
+        device.ordinal() as u32,
+    )
+    .map_err(|e| GpuError::PtxCompileFailed {
+        kernel: "softmax_f16_kernel",
+        source: e,
+    })?;
 
     let mut out = stream.alloc_zeros::<u16>(rows * cols)?;
     let cfg = LaunchConfig {
@@ -1855,11 +1875,16 @@ pub fn gpu_layernorm_f16(
     }
     let ctx = device.context();
     let stream = device.stream();
-    let f = get_or_compile(ctx, LAYERNORM_F16_PTX, "layernorm_f16_kernel", device.ordinal() as u32)
-        .map_err(|e| GpuError::PtxCompileFailed {
-            kernel: "layernorm_f16_kernel",
-            source: e,
-        })?;
+    let f = get_or_compile(
+        ctx,
+        LAYERNORM_F16_PTX,
+        "layernorm_f16_kernel",
+        device.ordinal() as u32,
+    )
+    .map_err(|e| GpuError::PtxCompileFailed {
+        kernel: "layernorm_f16_kernel",
+        source: e,
+    })?;
 
     let mut out = stream.alloc_zeros::<u16>(rows * cols)?;
     let cfg = LaunchConfig {
@@ -1925,11 +1950,16 @@ pub fn gpu_rmsnorm_f16(
     }
     let ctx = device.context();
     let stream = device.stream();
-    let f = get_or_compile(ctx, RMSNORM_F16_PTX, "rmsnorm_f16_kernel", device.ordinal() as u32)
-        .map_err(|e| GpuError::PtxCompileFailed {
-            kernel: "rmsnorm_f16_kernel",
-            source: e,
-        })?;
+    let f = get_or_compile(
+        ctx,
+        RMSNORM_F16_PTX,
+        "rmsnorm_f16_kernel",
+        device.ordinal() as u32,
+    )
+    .map_err(|e| GpuError::PtxCompileFailed {
+        kernel: "rmsnorm_f16_kernel",
+        source: e,
+    })?;
 
     let mut out = stream.alloc_zeros::<u16>(rows * cols)?;
     let cfg = LaunchConfig {

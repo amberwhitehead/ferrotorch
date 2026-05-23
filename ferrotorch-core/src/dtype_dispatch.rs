@@ -111,7 +111,9 @@ macro_rules! dispatch_floating_dtype {
         } else if ::std::any::TypeId::of::<$scalar_t>() == ::std::any::TypeId::of::<half::f16>() {
             $f16_arm
         } else {
-            ::std::result::Result::Err($crate::error::FerrotorchError::NotImplementedOnCuda { op: $op })
+            ::std::result::Result::Err($crate::error::FerrotorchError::NotImplementedOnCuda {
+                op: $op,
+            })
         }
     }};
 }

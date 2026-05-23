@@ -62,12 +62,22 @@ struct OpResult {
 
 fn run(name: &'static str, f: impl FnOnce() -> Result<(), String>) -> OpResult {
     match f() {
-        Ok(()) => OpResult { name, pass: true, err: None },
-        Err(e) => OpResult { name, pass: false, err: Some(e) },
+        Ok(()) => OpResult {
+            name,
+            pass: true,
+            err: None,
+        },
+        Err(e) => OpResult {
+            name,
+            pass: false,
+            err: Some(e),
+        },
     }
 }
 
-fn check(t: Result<Tensor<half::bf16>, ferrotorch_core::error::FerrotorchError>) -> Result<(), String> {
+fn check(
+    t: Result<Tensor<half::bf16>, ferrotorch_core::error::FerrotorchError>,
+) -> Result<(), String> {
     match t {
         Ok(_) => Ok(()),
         Err(e) => Err(format!("{e}")),
@@ -92,13 +102,21 @@ fn bf16_op_sweep_gpu() {
 
     // 2-D reduction inputs.
     let mat = bf16_cuda(
-        &(0..16).map(|i| (i as f32) * 0.1 + 0.2).collect::<Vec<f32>>(),
+        &(0..16)
+            .map(|i| (i as f32) * 0.1 + 0.2)
+            .collect::<Vec<f32>>(),
         &[4, 4],
     );
 
     // matmul inputs.
-    let m_a = bf16_cuda(&(0..6).map(|i| (i as f32) * 0.1).collect::<Vec<f32>>(), &[2, 3]);
-    let m_b = bf16_cuda(&(0..6).map(|i| (i as f32) * 0.2).collect::<Vec<f32>>(), &[3, 2]);
+    let m_a = bf16_cuda(
+        &(0..6).map(|i| (i as f32) * 0.1).collect::<Vec<f32>>(),
+        &[2, 3],
+    );
+    let m_b = bf16_cuda(
+        &(0..6).map(|i| (i as f32) * 0.2).collect::<Vec<f32>>(),
+        &[3, 2],
+    );
 
     let mut results = Vec::new();
 
@@ -107,7 +125,9 @@ fn bf16_op_sweep_gpu() {
     results.push(run("sub", || check(a.clone() - b.clone())));
     results.push(run("mul", || check(a.clone() * b.clone())));
     results.push(run("neg", || check(-a.clone())));
-    results.push(run("broadcast_add", || check(a_row.clone() + b_col.clone())));
+    results.push(run("broadcast_add", || {
+        check(a_row.clone() + b_col.clone())
+    }));
 
     // ─── Pattern B: reductions / matmul with NotImplementedOnCuda guard ──
     results.push(run("sum", || {
@@ -122,10 +142,18 @@ fn bf16_op_sweep_gpu() {
 
     // ─── Pattern C: ops that fall through to CPU helpers via is_cuda guard ─
     results.push(run("div", || check(a.clone() / b.clone())));
-    results.push(run("exp", || check(ferrotorch_core::grad_fns::transcendental::exp(&a))));
-    results.push(run("log", || check(ferrotorch_core::grad_fns::transcendental::log(&a))));
-    results.push(run("tanh", || check(ferrotorch_core::grad_fns::activation::tanh(&a))));
-    results.push(run("sigmoid", || check(ferrotorch_core::grad_fns::activation::sigmoid(&a))));
+    results.push(run("exp", || {
+        check(ferrotorch_core::grad_fns::transcendental::exp(&a))
+    }));
+    results.push(run("log", || {
+        check(ferrotorch_core::grad_fns::transcendental::log(&a))
+    }));
+    results.push(run("tanh", || {
+        check(ferrotorch_core::grad_fns::activation::tanh(&a))
+    }));
+    results.push(run("sigmoid", || {
+        check(ferrotorch_core::grad_fns::activation::sigmoid(&a))
+    }));
     results.push(run("softmax", || {
         // softmax needs at least 2D-shape with last dim
         let x = bf16_cuda(&data, &[1, n]);
@@ -136,7 +164,13 @@ fn bf16_op_sweep_gpu() {
     results.push(run("matmul_bf16_backend_direct", || {
         let backend = ferrotorch_core::gpu_dispatch::gpu_backend().expect("backend");
         backend
-            .matmul_bf16_bf16(m_a.gpu_handle().unwrap(), m_b.gpu_handle().unwrap(), 2, 3, 2)
+            .matmul_bf16_bf16(
+                m_a.gpu_handle().unwrap(),
+                m_b.gpu_handle().unwrap(),
+                2,
+                3,
+                2,
+            )
             .map(|_| ())
             .map_err(|e| format!("{e}"))
     }));

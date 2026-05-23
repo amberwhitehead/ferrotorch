@@ -376,10 +376,7 @@ impl CudaBackendImpl {
     /// `crate::int_kernels` (#1185 Phase 2b) output, which produces a bare
     /// `CudaSlice` rather than a `CudaBuffer`.
     #[cfg(feature = "cuda")]
-    fn wrap_slice_i32(
-        slice: cudarc::driver::CudaSlice<i32>,
-        ordinal: usize,
-    ) -> GpuBufferHandle {
+    fn wrap_slice_i32(slice: cudarc::driver::CudaSlice<i32>, ordinal: usize) -> GpuBufferHandle {
         let len = slice.len();
         let buf = CudaBuffer {
             data: Some(slice),
@@ -395,10 +392,7 @@ impl CudaBackendImpl {
     /// [`GpuBufferHandle`] (#1185 Phase 2b). Counterpart of
     /// [`Self::wrap_slice_i32`].
     #[cfg(feature = "cuda")]
-    fn wrap_slice_i64(
-        slice: cudarc::driver::CudaSlice<i64>,
-        ordinal: usize,
-    ) -> GpuBufferHandle {
+    fn wrap_slice_i64(slice: cudarc::driver::CudaSlice<i64>, ordinal: usize) -> GpuBufferHandle {
         let len = slice.len();
         let buf = CudaBuffer {
             data: Some(slice),
@@ -473,38 +467,100 @@ impl CudaBackendImpl {
             ($val:expr, $g32:path, $g64:path, $s32:path, $s64:path, $wrap:expr) => {{
                 let r = if is_gather {
                     if i32idx {
-                        $g32($val, Self::unwrap_buffer_i32(index)?.inner(), outer, in_dim, out_dim, inner, dev)
+                        $g32(
+                            $val,
+                            Self::unwrap_buffer_i32(index)?.inner(),
+                            outer,
+                            in_dim,
+                            out_dim,
+                            inner,
+                            dev,
+                        )
                     } else {
-                        $g64($val, Self::unwrap_buffer_i64(index)?.inner(), outer, in_dim, out_dim, inner, dev)
+                        $g64(
+                            $val,
+                            Self::unwrap_buffer_i64(index)?.inner(),
+                            outer,
+                            in_dim,
+                            out_dim,
+                            inner,
+                            dev,
+                        )
                     }
                 } else if i32idx {
-                    $s32($val, Self::unwrap_buffer_i32(index)?.inner(), outer, in_dim, out_dim, inner, dev)
+                    $s32(
+                        $val,
+                        Self::unwrap_buffer_i32(index)?.inner(),
+                        outer,
+                        in_dim,
+                        out_dim,
+                        inner,
+                        dev,
+                    )
                 } else {
-                    $s64($val, Self::unwrap_buffer_i64(index)?.inner(), outer, in_dim, out_dim, inner, dev)
+                    $s64(
+                        $val,
+                        Self::unwrap_buffer_i64(index)?.inner(),
+                        outer,
+                        in_dim,
+                        out_dim,
+                        inner,
+                        dev,
+                    )
                 }
                 .map_err(Self::map_gpu_err)?;
                 Ok($wrap(r, ord))
             }};
         }
         match src.dtype() {
-            DType::F32 => run!(Self::unwrap_buffer(src)?.inner(),
-                gi::gather_f32_i32, gi::gather_f32_i64, gi::isel_f32_i32, gi::isel_f32_i64,
-                Self::wrap_slice_f32),
-            DType::F64 => run!(Self::unwrap_buffer_f64(src)?.inner(),
-                gi::gather_f64_i32, gi::gather_f64_i64, gi::isel_f64_i32, gi::isel_f64_i64,
-                Self::wrap_slice_f64),
-            DType::I32 => run!(Self::unwrap_buffer_i32(src)?.inner(),
-                gi::gather_i32_i32, gi::gather_i32_i64, gi::isel_i32_i32, gi::isel_i32_i64,
-                Self::wrap_slice_i32),
-            DType::I64 => run!(Self::unwrap_buffer_i64(src)?.inner(),
-                gi::gather_i64_i32, gi::gather_i64_i64, gi::isel_i64_i32, gi::isel_i64_i64,
-                Self::wrap_slice_i64),
-            DType::F16 => run!(Self::unwrap_buffer_f16(src)?,
-                gi::gather_u16_i32, gi::gather_u16_i64, gi::isel_u16_i32, gi::isel_u16_i64,
-                Self::wrap_buffer_f16),
-            DType::BF16 => run!(Self::unwrap_buffer_bf16(src)?,
-                gi::gather_u16_i32, gi::gather_u16_i64, gi::isel_u16_i32, gi::isel_u16_i64,
-                Self::wrap_buffer_bf16),
+            DType::F32 => run!(
+                Self::unwrap_buffer(src)?.inner(),
+                gi::gather_f32_i32,
+                gi::gather_f32_i64,
+                gi::isel_f32_i32,
+                gi::isel_f32_i64,
+                Self::wrap_slice_f32
+            ),
+            DType::F64 => run!(
+                Self::unwrap_buffer_f64(src)?.inner(),
+                gi::gather_f64_i32,
+                gi::gather_f64_i64,
+                gi::isel_f64_i32,
+                gi::isel_f64_i64,
+                Self::wrap_slice_f64
+            ),
+            DType::I32 => run!(
+                Self::unwrap_buffer_i32(src)?.inner(),
+                gi::gather_i32_i32,
+                gi::gather_i32_i64,
+                gi::isel_i32_i32,
+                gi::isel_i32_i64,
+                Self::wrap_slice_i32
+            ),
+            DType::I64 => run!(
+                Self::unwrap_buffer_i64(src)?.inner(),
+                gi::gather_i64_i32,
+                gi::gather_i64_i64,
+                gi::isel_i64_i32,
+                gi::isel_i64_i64,
+                Self::wrap_slice_i64
+            ),
+            DType::F16 => run!(
+                Self::unwrap_buffer_f16(src)?,
+                gi::gather_u16_i32,
+                gi::gather_u16_i64,
+                gi::isel_u16_i32,
+                gi::isel_u16_i64,
+                Self::wrap_buffer_f16
+            ),
+            DType::BF16 => run!(
+                Self::unwrap_buffer_bf16(src)?,
+                gi::gather_u16_i32,
+                gi::gather_u16_i64,
+                gi::isel_u16_i32,
+                gi::isel_u16_i64,
+                Self::wrap_buffer_bf16
+            ),
             other => Err(FerrotorchError::InvalidArgument {
                 message: format!("{op}: unsupported value dtype {other}"),
             }),
@@ -5661,7 +5717,8 @@ impl GpuBackend for CudaBackendImpl {
     ) -> FerrotorchResult<GpuBufferHandle> {
         let buf = Self::unwrap_buffer_f16(a)?;
         let dev = self.device(a.device_ordinal())?;
-        let result = crate::f16::gpu_softmax_f16(buf, rows, cols, dev).map_err(Self::map_gpu_err)?;
+        let result =
+            crate::f16::gpu_softmax_f16(buf, rows, cols, dev).map_err(Self::map_gpu_err)?;
         Ok(Self::wrap_buffer_f16(result, a.device_ordinal()))
     }
 
@@ -5713,8 +5770,8 @@ impl GpuBackend for CudaBackendImpl {
         let a_buf = Self::unwrap_buffer_f16(a)?;
         let b_buf = Self::unwrap_buffer_f16(b)?;
         let dev = self.device(a.device_ordinal())?;
-        let result =
-            crate::blas::gpu_matmul_f16_f16(a_buf, b_buf, m, k, n, dev).map_err(Self::map_gpu_err)?;
+        let result = crate::blas::gpu_matmul_f16_f16(a_buf, b_buf, m, k, n, dev)
+            .map_err(Self::map_gpu_err)?;
         Ok(Self::wrap_buffer_f16(result, a.device_ordinal()))
     }
 
@@ -5813,14 +5870,14 @@ impl GpuBackend for CudaBackendImpl {
         match a.dtype() {
             DType::I32 => {
                 let av = Self::unwrap_buffer_i32(a)?;
-                let r = crate::int_kernels::gpu_neg_i32(av.inner(), dev)
-                    .map_err(Self::map_gpu_err)?;
+                let r =
+                    crate::int_kernels::gpu_neg_i32(av.inner(), dev).map_err(Self::map_gpu_err)?;
                 Ok(Self::wrap_slice_i32(r, a.device_ordinal()))
             }
             DType::I64 => {
                 let av = Self::unwrap_buffer_i64(a)?;
-                let r = crate::int_kernels::gpu_neg_i64(av.inner(), dev)
-                    .map_err(Self::map_gpu_err)?;
+                let r =
+                    crate::int_kernels::gpu_neg_i64(av.inner(), dev).map_err(Self::map_gpu_err)?;
                 Ok(Self::wrap_slice_i64(r, a.device_ordinal()))
             }
             _ => Err(FerrotorchError::NotImplementedOnCuda { op: "int_neg" }),
@@ -6039,14 +6096,14 @@ impl GpuBackend for CudaBackendImpl {
         match a.dtype() {
             DType::I32 => {
                 let av = Self::unwrap_buffer_i32(a)?;
-                let r = crate::int_kernels::gpu_sum_i32(av.inner(), dev)
-                    .map_err(Self::map_gpu_err)?;
+                let r =
+                    crate::int_kernels::gpu_sum_i32(av.inner(), dev).map_err(Self::map_gpu_err)?;
                 Ok(Self::wrap_slice_i32(r, a.device_ordinal()))
             }
             DType::I64 => {
                 let av = Self::unwrap_buffer_i64(a)?;
-                let r = crate::int_kernels::gpu_sum_i64(av.inner(), dev)
-                    .map_err(Self::map_gpu_err)?;
+                let r =
+                    crate::int_kernels::gpu_sum_i64(av.inner(), dev).map_err(Self::map_gpu_err)?;
                 Ok(Self::wrap_slice_i64(r, a.device_ordinal()))
             }
             _ => Err(FerrotorchError::NotImplementedOnCuda { op: "int_sum" }),
@@ -6059,14 +6116,14 @@ impl GpuBackend for CudaBackendImpl {
         match a.dtype() {
             DType::I32 => {
                 let av = Self::unwrap_buffer_i32(a)?;
-                let r = crate::int_kernels::gpu_prod_i32(av.inner(), dev)
-                    .map_err(Self::map_gpu_err)?;
+                let r =
+                    crate::int_kernels::gpu_prod_i32(av.inner(), dev).map_err(Self::map_gpu_err)?;
                 Ok(Self::wrap_slice_i32(r, a.device_ordinal()))
             }
             DType::I64 => {
                 let av = Self::unwrap_buffer_i64(a)?;
-                let r = crate::int_kernels::gpu_prod_i64(av.inner(), dev)
-                    .map_err(Self::map_gpu_err)?;
+                let r =
+                    crate::int_kernels::gpu_prod_i64(av.inner(), dev).map_err(Self::map_gpu_err)?;
                 Ok(Self::wrap_slice_i64(r, a.device_ordinal()))
             }
             _ => Err(FerrotorchError::NotImplementedOnCuda { op: "int_prod" }),
@@ -6079,14 +6136,14 @@ impl GpuBackend for CudaBackendImpl {
         match a.dtype() {
             DType::I32 => {
                 let av = Self::unwrap_buffer_i32(a)?;
-                let r = crate::int_kernels::gpu_min_i32(av.inner(), dev)
-                    .map_err(Self::map_gpu_err)?;
+                let r =
+                    crate::int_kernels::gpu_min_i32(av.inner(), dev).map_err(Self::map_gpu_err)?;
                 Ok(Self::wrap_slice_i32(r, a.device_ordinal()))
             }
             DType::I64 => {
                 let av = Self::unwrap_buffer_i64(a)?;
-                let r = crate::int_kernels::gpu_min_i64(av.inner(), dev)
-                    .map_err(Self::map_gpu_err)?;
+                let r =
+                    crate::int_kernels::gpu_min_i64(av.inner(), dev).map_err(Self::map_gpu_err)?;
                 Ok(Self::wrap_slice_i64(r, a.device_ordinal()))
             }
             _ => Err(FerrotorchError::NotImplementedOnCuda { op: "int_min" }),
@@ -6099,14 +6156,14 @@ impl GpuBackend for CudaBackendImpl {
         match a.dtype() {
             DType::I32 => {
                 let av = Self::unwrap_buffer_i32(a)?;
-                let r = crate::int_kernels::gpu_max_i32(av.inner(), dev)
-                    .map_err(Self::map_gpu_err)?;
+                let r =
+                    crate::int_kernels::gpu_max_i32(av.inner(), dev).map_err(Self::map_gpu_err)?;
                 Ok(Self::wrap_slice_i32(r, a.device_ordinal()))
             }
             DType::I64 => {
                 let av = Self::unwrap_buffer_i64(a)?;
-                let r = crate::int_kernels::gpu_max_i64(av.inner(), dev)
-                    .map_err(Self::map_gpu_err)?;
+                let r =
+                    crate::int_kernels::gpu_max_i64(av.inner(), dev).map_err(Self::map_gpu_err)?;
                 Ok(Self::wrap_slice_i64(r, a.device_ordinal()))
             }
             _ => Err(FerrotorchError::NotImplementedOnCuda { op: "int_max" }),
@@ -6127,17 +6184,47 @@ impl GpuBackend for CudaBackendImpl {
         let ord = src.device_ordinal();
         let r = match src.dtype() {
             DType::F32 => crate::reduce_arg::gpu_argmax_f32(
-                Self::unwrap_buffer(src)?.inner(), outer, dim_size, inner, dev),
+                Self::unwrap_buffer(src)?.inner(),
+                outer,
+                dim_size,
+                inner,
+                dev,
+            ),
             DType::F64 => crate::reduce_arg::gpu_argmax_f64(
-                Self::unwrap_buffer_f64(src)?.inner(), outer, dim_size, inner, dev),
+                Self::unwrap_buffer_f64(src)?.inner(),
+                outer,
+                dim_size,
+                inner,
+                dev,
+            ),
             DType::F16 => crate::reduce_arg::gpu_argmax_f16(
-                Self::unwrap_buffer_f16(src)?, outer, dim_size, inner, dev),
+                Self::unwrap_buffer_f16(src)?,
+                outer,
+                dim_size,
+                inner,
+                dev,
+            ),
             DType::BF16 => crate::reduce_arg::gpu_argmax_bf16(
-                Self::unwrap_buffer_bf16(src)?, outer, dim_size, inner, dev),
+                Self::unwrap_buffer_bf16(src)?,
+                outer,
+                dim_size,
+                inner,
+                dev,
+            ),
             DType::I32 => crate::reduce_arg::gpu_argmax_i32(
-                Self::unwrap_buffer_i32(src)?.inner(), outer, dim_size, inner, dev),
+                Self::unwrap_buffer_i32(src)?.inner(),
+                outer,
+                dim_size,
+                inner,
+                dev,
+            ),
             DType::I64 => crate::reduce_arg::gpu_argmax_i64(
-                Self::unwrap_buffer_i64(src)?.inner(), outer, dim_size, inner, dev),
+                Self::unwrap_buffer_i64(src)?.inner(),
+                outer,
+                dim_size,
+                inner,
+                dev,
+            ),
             other => {
                 return Err(FerrotorchError::InvalidArgument {
                     message: format!("argmax: unsupported value dtype {other}"),
@@ -6160,17 +6247,47 @@ impl GpuBackend for CudaBackendImpl {
         let ord = src.device_ordinal();
         let r = match src.dtype() {
             DType::F32 => crate::reduce_arg::gpu_argmin_f32(
-                Self::unwrap_buffer(src)?.inner(), outer, dim_size, inner, dev),
+                Self::unwrap_buffer(src)?.inner(),
+                outer,
+                dim_size,
+                inner,
+                dev,
+            ),
             DType::F64 => crate::reduce_arg::gpu_argmin_f64(
-                Self::unwrap_buffer_f64(src)?.inner(), outer, dim_size, inner, dev),
+                Self::unwrap_buffer_f64(src)?.inner(),
+                outer,
+                dim_size,
+                inner,
+                dev,
+            ),
             DType::F16 => crate::reduce_arg::gpu_argmin_f16(
-                Self::unwrap_buffer_f16(src)?, outer, dim_size, inner, dev),
+                Self::unwrap_buffer_f16(src)?,
+                outer,
+                dim_size,
+                inner,
+                dev,
+            ),
             DType::BF16 => crate::reduce_arg::gpu_argmin_bf16(
-                Self::unwrap_buffer_bf16(src)?, outer, dim_size, inner, dev),
+                Self::unwrap_buffer_bf16(src)?,
+                outer,
+                dim_size,
+                inner,
+                dev,
+            ),
             DType::I32 => crate::reduce_arg::gpu_argmin_i32(
-                Self::unwrap_buffer_i32(src)?.inner(), outer, dim_size, inner, dev),
+                Self::unwrap_buffer_i32(src)?.inner(),
+                outer,
+                dim_size,
+                inner,
+                dev,
+            ),
             DType::I64 => crate::reduce_arg::gpu_argmin_i64(
-                Self::unwrap_buffer_i64(src)?.inner(), outer, dim_size, inner, dev),
+                Self::unwrap_buffer_i64(src)?.inner(),
+                outer,
+                dim_size,
+                inner,
+                dev,
+            ),
             other => {
                 return Err(FerrotorchError::InvalidArgument {
                     message: format!("argmin: unsupported value dtype {other}"),
@@ -6208,31 +6325,51 @@ impl GpuBackend for CudaBackendImpl {
     }
 
     #[cfg(feature = "cuda")]
-    fn cast_f_to_i(
-        &self,
-        src: &GpuBufferHandle,
-        dst: DType,
-    ) -> FerrotorchResult<GpuBufferHandle> {
+    fn cast_f_to_i(&self, src: &GpuBufferHandle, dst: DType) -> FerrotorchResult<GpuBufferHandle> {
         use crate::cast_kernels as ck;
         let dev = self.device(src.device_ordinal())?;
         let ord = src.device_ordinal();
         match (src.dtype(), dst) {
             (DType::F32, DType::I32) => Ok(Self::wrap_slice_i32(
-                ck::cast_f32_to_i32(Self::unwrap_buffer(src)?.inner(), src.len(), dev).map_err(Self::map_gpu_err)?, ord)),
+                ck::cast_f32_to_i32(Self::unwrap_buffer(src)?.inner(), src.len(), dev)
+                    .map_err(Self::map_gpu_err)?,
+                ord,
+            )),
             (DType::F32, DType::I64) => Ok(Self::wrap_slice_i64(
-                ck::cast_f32_to_i64(Self::unwrap_buffer(src)?.inner(), src.len(), dev).map_err(Self::map_gpu_err)?, ord)),
+                ck::cast_f32_to_i64(Self::unwrap_buffer(src)?.inner(), src.len(), dev)
+                    .map_err(Self::map_gpu_err)?,
+                ord,
+            )),
             (DType::F64, DType::I32) => Ok(Self::wrap_slice_i32(
-                ck::cast_f64_to_i32(Self::unwrap_buffer_f64(src)?.inner(), src.len(), dev).map_err(Self::map_gpu_err)?, ord)),
+                ck::cast_f64_to_i32(Self::unwrap_buffer_f64(src)?.inner(), src.len(), dev)
+                    .map_err(Self::map_gpu_err)?,
+                ord,
+            )),
             (DType::F64, DType::I64) => Ok(Self::wrap_slice_i64(
-                ck::cast_f64_to_i64(Self::unwrap_buffer_f64(src)?.inner(), src.len(), dev).map_err(Self::map_gpu_err)?, ord)),
+                ck::cast_f64_to_i64(Self::unwrap_buffer_f64(src)?.inner(), src.len(), dev)
+                    .map_err(Self::map_gpu_err)?,
+                ord,
+            )),
             (DType::F16, DType::I32) => Ok(Self::wrap_slice_i32(
-                ck::cast_f16_to_i32(Self::unwrap_buffer_f16(src)?, src.len(), dev).map_err(Self::map_gpu_err)?, ord)),
+                ck::cast_f16_to_i32(Self::unwrap_buffer_f16(src)?, src.len(), dev)
+                    .map_err(Self::map_gpu_err)?,
+                ord,
+            )),
             (DType::F16, DType::I64) => Ok(Self::wrap_slice_i64(
-                ck::cast_f16_to_i64(Self::unwrap_buffer_f16(src)?, src.len(), dev).map_err(Self::map_gpu_err)?, ord)),
+                ck::cast_f16_to_i64(Self::unwrap_buffer_f16(src)?, src.len(), dev)
+                    .map_err(Self::map_gpu_err)?,
+                ord,
+            )),
             (DType::BF16, DType::I32) => Ok(Self::wrap_slice_i32(
-                ck::cast_bf16_to_i32(Self::unwrap_buffer_bf16(src)?, src.len(), dev).map_err(Self::map_gpu_err)?, ord)),
+                ck::cast_bf16_to_i32(Self::unwrap_buffer_bf16(src)?, src.len(), dev)
+                    .map_err(Self::map_gpu_err)?,
+                ord,
+            )),
             (DType::BF16, DType::I64) => Ok(Self::wrap_slice_i64(
-                ck::cast_bf16_to_i64(Self::unwrap_buffer_bf16(src)?, src.len(), dev).map_err(Self::map_gpu_err)?, ord)),
+                ck::cast_bf16_to_i64(Self::unwrap_buffer_bf16(src)?, src.len(), dev)
+                    .map_err(Self::map_gpu_err)?,
+                ord,
+            )),
             (s, d) => Err(FerrotorchError::InvalidArgument {
                 message: format!("cast_f_to_i: unsupported {s} -> {d}"),
             }),
@@ -6240,31 +6377,51 @@ impl GpuBackend for CudaBackendImpl {
     }
 
     #[cfg(feature = "cuda")]
-    fn cast_i_to_f(
-        &self,
-        src: &GpuBufferHandle,
-        dst: DType,
-    ) -> FerrotorchResult<GpuBufferHandle> {
+    fn cast_i_to_f(&self, src: &GpuBufferHandle, dst: DType) -> FerrotorchResult<GpuBufferHandle> {
         use crate::cast_kernels as ck;
         let dev = self.device(src.device_ordinal())?;
         let ord = src.device_ordinal();
         match (src.dtype(), dst) {
             (DType::I32, DType::F32) => Ok(Self::wrap_slice_f32(
-                ck::cast_i32_to_f32(Self::unwrap_buffer_i32(src)?.inner(), src.len(), dev).map_err(Self::map_gpu_err)?, ord)),
+                ck::cast_i32_to_f32(Self::unwrap_buffer_i32(src)?.inner(), src.len(), dev)
+                    .map_err(Self::map_gpu_err)?,
+                ord,
+            )),
             (DType::I32, DType::F64) => Ok(Self::wrap_slice_f64(
-                ck::cast_i32_to_f64(Self::unwrap_buffer_i32(src)?.inner(), src.len(), dev).map_err(Self::map_gpu_err)?, ord)),
+                ck::cast_i32_to_f64(Self::unwrap_buffer_i32(src)?.inner(), src.len(), dev)
+                    .map_err(Self::map_gpu_err)?,
+                ord,
+            )),
             (DType::I32, DType::F16) => Ok(Self::wrap_buffer_f16(
-                ck::cast_i32_to_f16(Self::unwrap_buffer_i32(src)?.inner(), src.len(), dev).map_err(Self::map_gpu_err)?, ord)),
+                ck::cast_i32_to_f16(Self::unwrap_buffer_i32(src)?.inner(), src.len(), dev)
+                    .map_err(Self::map_gpu_err)?,
+                ord,
+            )),
             (DType::I32, DType::BF16) => Ok(Self::wrap_buffer_bf16(
-                ck::cast_i32_to_bf16(Self::unwrap_buffer_i32(src)?.inner(), src.len(), dev).map_err(Self::map_gpu_err)?, ord)),
+                ck::cast_i32_to_bf16(Self::unwrap_buffer_i32(src)?.inner(), src.len(), dev)
+                    .map_err(Self::map_gpu_err)?,
+                ord,
+            )),
             (DType::I64, DType::F32) => Ok(Self::wrap_slice_f32(
-                ck::cast_i64_to_f32(Self::unwrap_buffer_i64(src)?.inner(), src.len(), dev).map_err(Self::map_gpu_err)?, ord)),
+                ck::cast_i64_to_f32(Self::unwrap_buffer_i64(src)?.inner(), src.len(), dev)
+                    .map_err(Self::map_gpu_err)?,
+                ord,
+            )),
             (DType::I64, DType::F64) => Ok(Self::wrap_slice_f64(
-                ck::cast_i64_to_f64(Self::unwrap_buffer_i64(src)?.inner(), src.len(), dev).map_err(Self::map_gpu_err)?, ord)),
+                ck::cast_i64_to_f64(Self::unwrap_buffer_i64(src)?.inner(), src.len(), dev)
+                    .map_err(Self::map_gpu_err)?,
+                ord,
+            )),
             (DType::I64, DType::F16) => Ok(Self::wrap_buffer_f16(
-                ck::cast_i64_to_f16(Self::unwrap_buffer_i64(src)?.inner(), src.len(), dev).map_err(Self::map_gpu_err)?, ord)),
+                ck::cast_i64_to_f16(Self::unwrap_buffer_i64(src)?.inner(), src.len(), dev)
+                    .map_err(Self::map_gpu_err)?,
+                ord,
+            )),
             (DType::I64, DType::BF16) => Ok(Self::wrap_buffer_bf16(
-                ck::cast_i64_to_bf16(Self::unwrap_buffer_i64(src)?.inner(), src.len(), dev).map_err(Self::map_gpu_err)?, ord)),
+                ck::cast_i64_to_bf16(Self::unwrap_buffer_i64(src)?.inner(), src.len(), dev)
+                    .map_err(Self::map_gpu_err)?,
+                ord,
+            )),
             (s, d) => Err(FerrotorchError::InvalidArgument {
                 message: format!("cast_i_to_f: unsupported {s} -> {d}"),
             }),
@@ -6272,27 +6429,35 @@ impl GpuBackend for CudaBackendImpl {
     }
 
     #[cfg(feature = "cuda")]
-    fn cast_i_to_i(
-        &self,
-        src: &GpuBufferHandle,
-        dst: DType,
-    ) -> FerrotorchResult<GpuBufferHandle> {
+    fn cast_i_to_i(&self, src: &GpuBufferHandle, dst: DType) -> FerrotorchResult<GpuBufferHandle> {
         use crate::cast_kernels as ck;
         let dev = self.device(src.device_ordinal())?;
         let ord = src.device_ordinal();
         match (src.dtype(), dst) {
             (DType::I32, DType::I64) => Ok(Self::wrap_slice_i64(
-                ck::cast_i32_to_i64(Self::unwrap_buffer_i32(src)?.inner(), src.len(), dev).map_err(Self::map_gpu_err)?, ord)),
+                ck::cast_i32_to_i64(Self::unwrap_buffer_i32(src)?.inner(), src.len(), dev)
+                    .map_err(Self::map_gpu_err)?,
+                ord,
+            )),
             (DType::I64, DType::I32) => Ok(Self::wrap_slice_i32(
-                ck::cast_i64_to_i32(Self::unwrap_buffer_i64(src)?.inner(), src.len(), dev).map_err(Self::map_gpu_err)?, ord)),
+                ck::cast_i64_to_i32(Self::unwrap_buffer_i64(src)?.inner(), src.len(), dev)
+                    .map_err(Self::map_gpu_err)?,
+                ord,
+            )),
             // Same-dtype "cast" is a full-value-preserving on-device copy
             // (NO host round trip — `clone_buffer` round-trips via CPU, which
             // §3 forbids here; and a narrow-then-widen would corrupt i64 values
             // outside the i32 range).
             (DType::I32, DType::I32) => Ok(Self::wrap_slice_i32(
-                ck::cast_i32_copy(Self::unwrap_buffer_i32(src)?.inner(), src.len(), dev).map_err(Self::map_gpu_err)?, ord)),
+                ck::cast_i32_copy(Self::unwrap_buffer_i32(src)?.inner(), src.len(), dev)
+                    .map_err(Self::map_gpu_err)?,
+                ord,
+            )),
             (DType::I64, DType::I64) => Ok(Self::wrap_slice_i64(
-                ck::cast_i64_copy(Self::unwrap_buffer_i64(src)?.inner(), src.len(), dev).map_err(Self::map_gpu_err)?, ord)),
+                ck::cast_i64_copy(Self::unwrap_buffer_i64(src)?.inner(), src.len(), dev)
+                    .map_err(Self::map_gpu_err)?,
+                ord,
+            )),
             (s, d) => Err(FerrotorchError::InvalidArgument {
                 message: format!("cast_i_to_i: unsupported {s} -> {d}"),
             }),
@@ -6451,7 +6616,10 @@ impl GpuBackend for CudaBackendImpl {
         use crate::cast_kernels as ck;
         if src.dtype() != DType::Bool {
             return Err(FerrotorchError::InvalidArgument {
-                message: format!("cast_bool_to_f: src is tagged {}, expected Bool", src.dtype()),
+                message: format!(
+                    "cast_bool_to_f: src is tagged {}, expected Bool",
+                    src.dtype()
+                ),
             });
         }
         let dev = self.device(src.device_ordinal())?;
@@ -6492,7 +6660,10 @@ impl GpuBackend for CudaBackendImpl {
         use crate::masked_kernels as mk;
         if mask.dtype() != DType::Bool {
             return Err(FerrotorchError::InvalidArgument {
-                message: format!("masked_fill: mask is tagged {}, expected Bool", mask.dtype()),
+                message: format!(
+                    "masked_fill: mask is tagged {}, expected Bool",
+                    mask.dtype()
+                ),
             });
         }
         if input.len() != mask.len() {
@@ -6529,13 +6700,23 @@ impl GpuBackend for CudaBackendImpl {
                 ord,
             )),
             DType::I32 => Ok(Self::wrap_slice_i32(
-                mk::masked_fill_i32(Self::unwrap_buffer_i32(input)?.inner(), mb, value as i32, dev)
-                    .map_err(Self::map_gpu_err)?,
+                mk::masked_fill_i32(
+                    Self::unwrap_buffer_i32(input)?.inner(),
+                    mb,
+                    value as i32,
+                    dev,
+                )
+                .map_err(Self::map_gpu_err)?,
                 ord,
             )),
             DType::I64 => Ok(Self::wrap_slice_i64(
-                mk::masked_fill_i64(Self::unwrap_buffer_i64(input)?.inner(), mb, value as i64, dev)
-                    .map_err(Self::map_gpu_err)?,
+                mk::masked_fill_i64(
+                    Self::unwrap_buffer_i64(input)?.inner(),
+                    mb,
+                    value as i64,
+                    dev,
+                )
+                .map_err(Self::map_gpu_err)?,
                 ord,
             )),
             _ => Err(FerrotorchError::NotImplementedOnCuda {
@@ -6559,7 +6740,11 @@ impl GpuBackend for CudaBackendImpl {
         }
         if x.dtype() != y.dtype() {
             return Err(FerrotorchError::InvalidArgument {
-                message: format!("where_cond: x/y dtypes differ ({} vs {})", x.dtype(), y.dtype()),
+                message: format!(
+                    "where_cond: x/y dtypes differ ({} vs {})",
+                    x.dtype(),
+                    y.dtype()
+                ),
             });
         }
         if x.len() != y.len() || x.len() != cond.len() {
@@ -6577,33 +6762,63 @@ impl GpuBackend for CudaBackendImpl {
         let cb = Self::unwrap_buffer_bool(cond)?.inner();
         match x.dtype() {
             DType::F32 => Ok(Self::wrap_slice_f32(
-                mk::where_32::<f32>(cb, Self::unwrap_buffer(x)?.inner(), Self::unwrap_buffer(y)?.inner(), dev)
-                    .map_err(Self::map_gpu_err)?,
+                mk::where_32::<f32>(
+                    cb,
+                    Self::unwrap_buffer(x)?.inner(),
+                    Self::unwrap_buffer(y)?.inner(),
+                    dev,
+                )
+                .map_err(Self::map_gpu_err)?,
                 ord,
             )),
             DType::F64 => Ok(Self::wrap_slice_f64(
-                mk::where_64::<f64>(cb, Self::unwrap_buffer_f64(x)?.inner(), Self::unwrap_buffer_f64(y)?.inner(), dev)
-                    .map_err(Self::map_gpu_err)?,
+                mk::where_64::<f64>(
+                    cb,
+                    Self::unwrap_buffer_f64(x)?.inner(),
+                    Self::unwrap_buffer_f64(y)?.inner(),
+                    dev,
+                )
+                .map_err(Self::map_gpu_err)?,
                 ord,
             )),
             DType::F16 => Ok(Self::wrap_buffer_f16(
-                mk::where_16(cb, Self::unwrap_buffer_f16(x)?, Self::unwrap_buffer_f16(y)?, dev)
-                    .map_err(Self::map_gpu_err)?,
+                mk::where_16(
+                    cb,
+                    Self::unwrap_buffer_f16(x)?,
+                    Self::unwrap_buffer_f16(y)?,
+                    dev,
+                )
+                .map_err(Self::map_gpu_err)?,
                 ord,
             )),
             DType::BF16 => Ok(Self::wrap_buffer_bf16(
-                mk::where_16(cb, Self::unwrap_buffer_bf16(x)?, Self::unwrap_buffer_bf16(y)?, dev)
-                    .map_err(Self::map_gpu_err)?,
+                mk::where_16(
+                    cb,
+                    Self::unwrap_buffer_bf16(x)?,
+                    Self::unwrap_buffer_bf16(y)?,
+                    dev,
+                )
+                .map_err(Self::map_gpu_err)?,
                 ord,
             )),
             DType::I32 => Ok(Self::wrap_slice_i32(
-                mk::where_32::<i32>(cb, Self::unwrap_buffer_i32(x)?.inner(), Self::unwrap_buffer_i32(y)?.inner(), dev)
-                    .map_err(Self::map_gpu_err)?,
+                mk::where_32::<i32>(
+                    cb,
+                    Self::unwrap_buffer_i32(x)?.inner(),
+                    Self::unwrap_buffer_i32(y)?.inner(),
+                    dev,
+                )
+                .map_err(Self::map_gpu_err)?,
                 ord,
             )),
             DType::I64 => Ok(Self::wrap_slice_i64(
-                mk::where_64::<i64>(cb, Self::unwrap_buffer_i64(x)?.inner(), Self::unwrap_buffer_i64(y)?.inner(), dev)
-                    .map_err(Self::map_gpu_err)?,
+                mk::where_64::<i64>(
+                    cb,
+                    Self::unwrap_buffer_i64(x)?.inner(),
+                    Self::unwrap_buffer_i64(y)?.inner(),
+                    dev,
+                )
+                .map_err(Self::map_gpu_err)?,
                 ord,
             )),
             _ => Err(FerrotorchError::NotImplementedOnCuda { op: "where_cond" }),
@@ -6619,7 +6834,10 @@ impl GpuBackend for CudaBackendImpl {
         use crate::masked_kernels as mk;
         if mask.dtype() != DType::Bool {
             return Err(FerrotorchError::InvalidArgument {
-                message: format!("masked_select: mask is tagged {}, expected Bool", mask.dtype()),
+                message: format!(
+                    "masked_select: mask is tagged {}, expected Bool",
+                    mask.dtype()
+                ),
             });
         }
         if input.len() != mask.len() {
@@ -6648,15 +6866,13 @@ impl GpuBackend for CudaBackendImpl {
                 Ok((Self::wrap_slice_f64(out, ord), len))
             }
             DType::F16 => {
-                let (out, len) =
-                    mk::masked_select_16(Self::unwrap_buffer_f16(input)?, mb, dev)
-                        .map_err(Self::map_gpu_err)?;
+                let (out, len) = mk::masked_select_16(Self::unwrap_buffer_f16(input)?, mb, dev)
+                    .map_err(Self::map_gpu_err)?;
                 Ok((Self::wrap_buffer_f16(out, ord), len))
             }
             DType::BF16 => {
-                let (out, len) =
-                    mk::masked_select_16(Self::unwrap_buffer_bf16(input)?, mb, dev)
-                        .map_err(Self::map_gpu_err)?;
+                let (out, len) = mk::masked_select_16(Self::unwrap_buffer_bf16(input)?, mb, dev)
+                    .map_err(Self::map_gpu_err)?;
                 Ok((Self::wrap_buffer_bf16(out, ord), len))
             }
             DType::I32 => {
@@ -6687,7 +6903,10 @@ impl GpuBackend for CudaBackendImpl {
         use crate::masked_kernels as mk;
         if mask.dtype() != DType::Bool {
             return Err(FerrotorchError::InvalidArgument {
-                message: format!("masked_scatter: mask is tagged {}, expected Bool", mask.dtype()),
+                message: format!(
+                    "masked_scatter: mask is tagged {}, expected Bool",
+                    mask.dtype()
+                ),
             });
         }
         if mask.len() != out_numel {
@@ -6704,13 +6923,23 @@ impl GpuBackend for CudaBackendImpl {
         let mb = Self::unwrap_buffer_bool(mask)?.inner();
         match grad_compact.dtype() {
             DType::F32 => Ok(Self::wrap_slice_f32(
-                mk::masked_scatter_32::<f32>(Self::unwrap_buffer(grad_compact)?.inner(), mb, out_numel, dev)
-                    .map_err(Self::map_gpu_err)?,
+                mk::masked_scatter_32::<f32>(
+                    Self::unwrap_buffer(grad_compact)?.inner(),
+                    mb,
+                    out_numel,
+                    dev,
+                )
+                .map_err(Self::map_gpu_err)?,
                 ord,
             )),
             DType::F64 => Ok(Self::wrap_slice_f64(
-                mk::masked_scatter_64::<f64>(Self::unwrap_buffer_f64(grad_compact)?.inner(), mb, out_numel, dev)
-                    .map_err(Self::map_gpu_err)?,
+                mk::masked_scatter_64::<f64>(
+                    Self::unwrap_buffer_f64(grad_compact)?.inner(),
+                    mb,
+                    out_numel,
+                    dev,
+                )
+                .map_err(Self::map_gpu_err)?,
                 ord,
             )),
             DType::F16 => Ok(Self::wrap_buffer_f16(
@@ -6724,13 +6953,23 @@ impl GpuBackend for CudaBackendImpl {
                 ord,
             )),
             DType::I32 => Ok(Self::wrap_slice_i32(
-                mk::masked_scatter_32::<i32>(Self::unwrap_buffer_i32(grad_compact)?.inner(), mb, out_numel, dev)
-                    .map_err(Self::map_gpu_err)?,
+                mk::masked_scatter_32::<i32>(
+                    Self::unwrap_buffer_i32(grad_compact)?.inner(),
+                    mb,
+                    out_numel,
+                    dev,
+                )
+                .map_err(Self::map_gpu_err)?,
                 ord,
             )),
             DType::I64 => Ok(Self::wrap_slice_i64(
-                mk::masked_scatter_64::<i64>(Self::unwrap_buffer_i64(grad_compact)?.inner(), mb, out_numel, dev)
-                    .map_err(Self::map_gpu_err)?,
+                mk::masked_scatter_64::<i64>(
+                    Self::unwrap_buffer_i64(grad_compact)?.inner(),
+                    mb,
+                    out_numel,
+                    dev,
+                )
+                .map_err(Self::map_gpu_err)?,
                 ord,
             )),
             _ => Err(FerrotorchError::NotImplementedOnCuda {
@@ -6854,7 +7093,9 @@ mod tests {
             )
         };
 
-        let handle = backend.cpu_to_gpu(bytes, DType::F32, 0).expect("cpu_to_gpu");
+        let handle = backend
+            .cpu_to_gpu(bytes, DType::F32, 0)
+            .expect("cpu_to_gpu");
         assert_eq!(handle.len(), 5);
         assert_eq!(handle.device_ordinal(), 0);
 
@@ -6913,8 +7154,12 @@ mod tests {
         let b_bytes: &[u8] =
             unsafe { std::slice::from_raw_parts(b_data.as_ptr() as *const u8, b_data.len() * 4) };
 
-        let a_handle = backend.cpu_to_gpu(a_bytes, DType::F32, 0).expect("cpu_to_gpu a");
-        let b_handle = backend.cpu_to_gpu(b_bytes, DType::F32, 0).expect("cpu_to_gpu b");
+        let a_handle = backend
+            .cpu_to_gpu(a_bytes, DType::F32, 0)
+            .expect("cpu_to_gpu a");
+        let b_handle = backend
+            .cpu_to_gpu(b_bytes, DType::F32, 0)
+            .expect("cpu_to_gpu b");
 
         let result = backend.add_f32(&a_handle, &b_handle).expect("add_f32");
         assert_eq!(result.len(), 4);
@@ -6985,8 +7230,12 @@ mod tests {
         let b_bytes: &[u8] =
             unsafe { std::slice::from_raw_parts(b_data.as_ptr() as *const u8, b_data.len() * 4) };
 
-        let a_handle = backend.cpu_to_gpu(a_bytes, DType::F32, 0).expect("cpu_to_gpu a");
-        let b_handle = backend.cpu_to_gpu(b_bytes, DType::F32, 0).expect("cpu_to_gpu b");
+        let a_handle = backend
+            .cpu_to_gpu(a_bytes, DType::F32, 0)
+            .expect("cpu_to_gpu a");
+        let b_handle = backend
+            .cpu_to_gpu(b_bytes, DType::F32, 0)
+            .expect("cpu_to_gpu b");
 
         let result = backend
             .matmul_f32(&a_handle, &b_handle, 2, 3, 2)
@@ -7050,7 +7299,9 @@ mod tests {
             )
         };
 
-        let handle = backend.cpu_to_gpu(bytes, DType::BF16, 0).expect("cpu_to_gpu bf16");
+        let handle = backend
+            .cpu_to_gpu(bytes, DType::BF16, 0)
+            .expect("cpu_to_gpu bf16");
         assert_eq!(handle.len(), host.len());
         assert_eq!(handle.device_ordinal(), 0);
         assert_eq!(backend.buffer_elem_size(&handle), 2);
@@ -7111,7 +7362,9 @@ mod tests {
             )
         };
 
-        let f16_handle = backend.cpu_to_gpu(bytes, DType::F16, 0).expect("cpu_to_gpu f16");
+        let f16_handle = backend
+            .cpu_to_gpu(bytes, DType::F16, 0)
+            .expect("cpu_to_gpu f16");
         // (1) tag is F16, NOT BF16; elem_size derives from the tag.
         assert_eq!(f16_handle.dtype(), DType::F16);
         assert_ne!(f16_handle.dtype(), DType::BF16);
@@ -7178,7 +7431,9 @@ mod tests {
     fn test_alloc_zeros_bf16() {
         ensure_init();
         let backend = gpu_dispatch::gpu_backend().expect("backend registered");
-        let handle = backend.alloc_zeros(8, DType::BF16, 0).expect("alloc_zeros bf16");
+        let handle = backend
+            .alloc_zeros(8, DType::BF16, 0)
+            .expect("alloc_zeros bf16");
         assert_eq!(handle.len(), 8);
         assert_eq!(backend.buffer_elem_size(&handle), 2);
 
@@ -7218,8 +7473,12 @@ mod tests {
         let b_bytes: &[u8] =
             unsafe { std::slice::from_raw_parts(b_bf16.as_ptr() as *const u8, b_bf16.len() * 2) };
 
-        let a_handle = backend.cpu_to_gpu(a_bytes, DType::BF16, 0).expect("cpu_to_gpu a");
-        let b_handle = backend.cpu_to_gpu(b_bytes, DType::BF16, 0).expect("cpu_to_gpu b");
+        let a_handle = backend
+            .cpu_to_gpu(a_bytes, DType::BF16, 0)
+            .expect("cpu_to_gpu a");
+        let b_handle = backend
+            .cpu_to_gpu(b_bytes, DType::BF16, 0)
+            .expect("cpu_to_gpu b");
 
         let result = backend
             .matmul_bf16_bf16(&a_handle, &b_handle, 2, 3, 2)

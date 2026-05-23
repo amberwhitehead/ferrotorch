@@ -278,8 +278,8 @@ impl<I: IntElement> IntTensor<I> {
             }
             (Device::Cuda(_), Device::Cpu) => {
                 // D2H readback — the user explicitly requested .to(Cpu).
-                let backend = crate::gpu_dispatch::gpu_backend()
-                    .ok_or(FerrotorchError::DeviceUnavailable)?;
+                let backend =
+                    crate::gpu_dispatch::gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
                 let handle = self.gpu_handle()?;
                 let bytes = backend.gpu_to_cpu(handle)?;
                 let elem_size = std::mem::size_of::<I>();

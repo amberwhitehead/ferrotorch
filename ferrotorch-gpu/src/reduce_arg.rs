@@ -602,10 +602,9 @@ fn launch_argreduce<V: DeviceRepr + ValidAsZeroBits>(
     kernel_name: &'static str,
     op: u32,
 ) -> GpuResult<CudaSlice<i64>> {
-    let total = outer.checked_mul(inner).ok_or(GpuError::LengthMismatch {
-        a: outer,
-        b: inner,
-    })?;
+    let total = outer
+        .checked_mul(inner)
+        .ok_or(GpuError::LengthMismatch { a: outer, b: inner })?;
     let expect = outer
         .checked_mul(dim_size)
         .and_then(|x| x.checked_mul(inner))
@@ -638,12 +637,8 @@ fn launch_argreduce<V: DeviceRepr + ValidAsZeroBits>(
     })?;
     let mut out = stream.alloc_zeros::<i64>(total)?;
     let cfg = launch_1d(total);
-    let (outer_u, dim_u, inner_u, total_u) = (
-        outer as u32,
-        dim_size as u32,
-        inner as u32,
-        total as u32,
-    );
+    let (outer_u, dim_u, inner_u, total_u) =
+        (outer as u32, dim_size as u32, inner as u32, total as u32);
     // SAFETY:
     // - `f` is the PTX entry `kernel_name`; its 7-arg signature
     //   (in_ptr, out_ptr, outer, dim_size, inner, total, op) matches the
@@ -688,14 +683,62 @@ macro_rules! arg_entry {
     };
 }
 
-arg_entry!(gpu_argmax_f32, f32, ARGREDUCE_F32_PTX, "argreduce_f32_kernel", ARG_MAX);
-arg_entry!(gpu_argmin_f32, f32, ARGREDUCE_F32_PTX, "argreduce_f32_kernel", ARG_MIN);
-arg_entry!(gpu_argmax_f64, f64, ARGREDUCE_F64_PTX, "argreduce_f64_kernel", ARG_MAX);
-arg_entry!(gpu_argmin_f64, f64, ARGREDUCE_F64_PTX, "argreduce_f64_kernel", ARG_MIN);
-arg_entry!(gpu_argmax_i32, i32, ARGREDUCE_I32_PTX, "argreduce_i32_kernel", ARG_MAX);
-arg_entry!(gpu_argmin_i32, i32, ARGREDUCE_I32_PTX, "argreduce_i32_kernel", ARG_MIN);
-arg_entry!(gpu_argmax_i64, i64, ARGREDUCE_I64_PTX, "argreduce_i64_kernel", ARG_MAX);
-arg_entry!(gpu_argmin_i64, i64, ARGREDUCE_I64_PTX, "argreduce_i64_kernel", ARG_MIN);
+arg_entry!(
+    gpu_argmax_f32,
+    f32,
+    ARGREDUCE_F32_PTX,
+    "argreduce_f32_kernel",
+    ARG_MAX
+);
+arg_entry!(
+    gpu_argmin_f32,
+    f32,
+    ARGREDUCE_F32_PTX,
+    "argreduce_f32_kernel",
+    ARG_MIN
+);
+arg_entry!(
+    gpu_argmax_f64,
+    f64,
+    ARGREDUCE_F64_PTX,
+    "argreduce_f64_kernel",
+    ARG_MAX
+);
+arg_entry!(
+    gpu_argmin_f64,
+    f64,
+    ARGREDUCE_F64_PTX,
+    "argreduce_f64_kernel",
+    ARG_MIN
+);
+arg_entry!(
+    gpu_argmax_i32,
+    i32,
+    ARGREDUCE_I32_PTX,
+    "argreduce_i32_kernel",
+    ARG_MAX
+);
+arg_entry!(
+    gpu_argmin_i32,
+    i32,
+    ARGREDUCE_I32_PTX,
+    "argreduce_i32_kernel",
+    ARG_MIN
+);
+arg_entry!(
+    gpu_argmax_i64,
+    i64,
+    ARGREDUCE_I64_PTX,
+    "argreduce_i64_kernel",
+    ARG_MAX
+);
+arg_entry!(
+    gpu_argmin_i64,
+    i64,
+    ARGREDUCE_I64_PTX,
+    "argreduce_i64_kernel",
+    ARG_MIN
+);
 
 /// `argmax` over an f16 (bit-pattern `u16`) value buffer.
 pub fn gpu_argmax_f16(
@@ -705,7 +748,16 @@ pub fn gpu_argmax_f16(
     inner: usize,
     d: &GpuDevice,
 ) -> GpuResult<CudaSlice<i64>> {
-    launch_argreduce(input, outer, dim_size, inner, d, ARGREDUCE_F16_PTX, "argreduce_f16_kernel", ARG_MAX)
+    launch_argreduce(
+        input,
+        outer,
+        dim_size,
+        inner,
+        d,
+        ARGREDUCE_F16_PTX,
+        "argreduce_f16_kernel",
+        ARG_MAX,
+    )
 }
 /// `argmin` over an f16 (bit-pattern `u16`) value buffer.
 pub fn gpu_argmin_f16(
@@ -715,7 +767,16 @@ pub fn gpu_argmin_f16(
     inner: usize,
     d: &GpuDevice,
 ) -> GpuResult<CudaSlice<i64>> {
-    launch_argreduce(input, outer, dim_size, inner, d, ARGREDUCE_F16_PTX, "argreduce_f16_kernel", ARG_MIN)
+    launch_argreduce(
+        input,
+        outer,
+        dim_size,
+        inner,
+        d,
+        ARGREDUCE_F16_PTX,
+        "argreduce_f16_kernel",
+        ARG_MIN,
+    )
 }
 /// `argmax` over a bf16 (bit-pattern `u16`) value buffer.
 pub fn gpu_argmax_bf16(
@@ -725,7 +786,16 @@ pub fn gpu_argmax_bf16(
     inner: usize,
     d: &GpuDevice,
 ) -> GpuResult<CudaSlice<i64>> {
-    launch_argreduce(input, outer, dim_size, inner, d, ARGREDUCE_BF16_PTX, "argreduce_bf16_kernel", ARG_MAX)
+    launch_argreduce(
+        input,
+        outer,
+        dim_size,
+        inner,
+        d,
+        ARGREDUCE_BF16_PTX,
+        "argreduce_bf16_kernel",
+        ARG_MAX,
+    )
 }
 /// `argmin` over a bf16 (bit-pattern `u16`) value buffer.
 pub fn gpu_argmin_bf16(
@@ -735,7 +805,16 @@ pub fn gpu_argmin_bf16(
     inner: usize,
     d: &GpuDevice,
 ) -> GpuResult<CudaSlice<i64>> {
-    launch_argreduce(input, outer, dim_size, inner, d, ARGREDUCE_BF16_PTX, "argreduce_bf16_kernel", ARG_MIN)
+    launch_argreduce(
+        input,
+        outer,
+        dim_size,
+        inner,
+        d,
+        ARGREDUCE_BF16_PTX,
+        "argreduce_bf16_kernel",
+        ARG_MIN,
+    )
 }
 
 #[cfg(test)]
@@ -749,7 +828,10 @@ mod tests {
     #[test]
     fn argmax_argmin_f32_global() {
         let d = dev();
-        let h = d.stream().clone_htod(&vec![3.0f32, 1.0, 4.0, 1.0, 5.0, 9.0, 2.0]).unwrap();
+        let h = d
+            .stream()
+            .clone_htod(&vec![3.0f32, 1.0, 4.0, 1.0, 5.0, 9.0, 2.0])
+            .unwrap();
         let mx = gpu_argmax_f32(&h, 1, 7, 1, &d).unwrap();
         let mn = gpu_argmin_f32(&h, 1, 7, 1, &d).unwrap();
         assert_eq!(d.stream().clone_dtoh(&mx).unwrap(), vec![5i64]);
@@ -769,7 +851,10 @@ mod tests {
     fn argmax_f32_along_dim() {
         let d = dev();
         // shape [2,3], argmax along dim=1 -> outer=2 dim=3 inner=1
-        let h = d.stream().clone_htod(&vec![1.0f32, 9.0, 2.0, 7.0, 3.0, 4.0]).unwrap();
+        let h = d
+            .stream()
+            .clone_htod(&vec![1.0f32, 9.0, 2.0, 7.0, 3.0, 4.0])
+            .unwrap();
         let mx = gpu_argmax_f32(&h, 2, 3, 1, &d).unwrap();
         assert_eq!(d.stream().clone_dtoh(&mx).unwrap(), vec![1i64, 0i64]);
     }
@@ -778,7 +863,10 @@ mod tests {
     fn argmax_along_dim0_inner() {
         let d = dev();
         // shape [2,3], argmax along dim=0 -> outer=1 dim=2 inner=3
-        let h = d.stream().clone_htod(&vec![1.0f32, 9.0, 2.0, 7.0, 3.0, 4.0]).unwrap();
+        let h = d
+            .stream()
+            .clone_htod(&vec![1.0f32, 9.0, 2.0, 7.0, 3.0, 4.0])
+            .unwrap();
         let mx = gpu_argmax_f32(&h, 1, 2, 3, &d).unwrap();
         // col0: 1 vs 7 ->1 ; col1: 9 vs 3 ->0; col2: 2 vs 4 ->1
         assert_eq!(d.stream().clone_dtoh(&mx).unwrap(), vec![1i64, 0i64, 1i64]);
@@ -798,11 +886,17 @@ mod tests {
     #[test]
     fn argmax_f16_bf16() {
         let d = dev();
-        let f16bits: Vec<u16> = [1.0f32, 5.0, 2.0].iter().map(|&v| half::f16::from_f32(v).to_bits()).collect();
+        let f16bits: Vec<u16> = [1.0f32, 5.0, 2.0]
+            .iter()
+            .map(|&v| half::f16::from_f32(v).to_bits())
+            .collect();
         let h16 = d.stream().clone_htod(&f16bits).unwrap();
         let mx = gpu_argmax_f16(&h16, 1, 3, 1, &d).unwrap();
         assert_eq!(d.stream().clone_dtoh(&mx).unwrap(), vec![1i64]);
-        let bf16bits: Vec<u16> = [1.0f32, 2.0, 8.0].iter().map(|&v| half::bf16::from_f32(v).to_bits()).collect();
+        let bf16bits: Vec<u16> = [1.0f32, 2.0, 8.0]
+            .iter()
+            .map(|&v| half::bf16::from_f32(v).to_bits())
+            .collect();
         let hb = d.stream().clone_htod(&bf16bits).unwrap();
         let mx2 = gpu_argmax_bf16(&hb, 1, 3, 1, &d).unwrap();
         assert_eq!(d.stream().clone_dtoh(&mx2).unwrap(), vec![2i64]);

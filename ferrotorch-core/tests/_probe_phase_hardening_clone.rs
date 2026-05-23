@@ -33,11 +33,11 @@
 
 use std::sync::Once;
 
+use ferrotorch_core::DType;
 use ferrotorch_core::bool_tensor::BoolTensor;
 use ferrotorch_core::creation::from_vec;
 use ferrotorch_core::device::Device;
 use ferrotorch_core::int_tensor::IntTensor;
-use ferrotorch_core::DType;
 
 static GPU_INIT: Once = Once::new();
 
@@ -99,7 +99,9 @@ fn main_check(pass: &mut usize, fail: &mut usize) {
         record(
             "f32 clone",
             resident && tag && deep_copy_and_independent,
-            &format!("resident={resident} tag={tag} deep_copy_independent={deep_copy_and_independent}"),
+            &format!(
+                "resident={resident} tag={tag} deep_copy_independent={deep_copy_and_independent}"
+            ),
             pass,
             fail,
         );
@@ -140,7 +142,9 @@ fn main_check(pass: &mut usize, fail: &mut usize) {
         record(
             "f64 clone",
             resident && tag && deep_copy_and_independent,
-            &format!("resident={resident} tag={tag} deep_copy_independent={deep_copy_and_independent}"),
+            &format!(
+                "resident={resident} tag={tag} deep_copy_independent={deep_copy_and_independent}"
+            ),
             pass,
             fail,
         );
@@ -187,7 +191,9 @@ fn main_check(pass: &mut usize, fail: &mut usize) {
         record(
             "bf16 clone",
             resident && tag && deep_copy_and_independent,
-            &format!("resident={resident} tag={tag} deep_copy_independent={deep_copy_and_independent}"),
+            &format!(
+                "resident={resident} tag={tag} deep_copy_independent={deep_copy_and_independent}"
+            ),
             pass,
             fail,
         );
@@ -233,7 +239,9 @@ fn main_check(pass: &mut usize, fail: &mut usize) {
         record(
             "f16 clone",
             resident && tag && deep_copy_and_independent,
-            &format!("resident={resident} tag={tag} deep_copy_independent={deep_copy_and_independent}"),
+            &format!(
+                "resident={resident} tag={tag} deep_copy_independent={deep_copy_and_independent}"
+            ),
             pass,
             fail,
         );
@@ -274,7 +282,9 @@ fn main_check(pass: &mut usize, fail: &mut usize) {
         record(
             "i32 clone",
             resident && tag && deep_copy_and_independent,
-            &format!("resident={resident} tag={tag} deep_copy_independent={deep_copy_and_independent}"),
+            &format!(
+                "resident={resident} tag={tag} deep_copy_independent={deep_copy_and_independent}"
+            ),
             pass,
             fail,
         );
@@ -315,7 +325,9 @@ fn main_check(pass: &mut usize, fail: &mut usize) {
         record(
             "i64 clone",
             resident && tag && deep_copy_and_independent,
-            &format!("resident={resident} tag={tag} deep_copy_independent={deep_copy_and_independent}"),
+            &format!(
+                "resident={resident} tag={tag} deep_copy_independent={deep_copy_and_independent}"
+            ),
             pass,
             fail,
         );
@@ -356,7 +368,9 @@ fn main_check(pass: &mut usize, fail: &mut usize) {
         record(
             "bool clone",
             resident && tag && deep_copy_and_independent,
-            &format!("resident={resident} tag={tag} deep_copy_independent={deep_copy_and_independent}"),
+            &format!(
+                "resident={resident} tag={tag} deep_copy_independent={deep_copy_and_independent}"
+            ),
             pass,
             fail,
         );

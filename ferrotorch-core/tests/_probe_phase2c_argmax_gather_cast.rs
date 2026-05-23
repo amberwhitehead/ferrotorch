@@ -55,25 +55,41 @@ fn phase2c_argmax_gather_cast() {
             && mn.is_cuda()
             && mx.to(Device::Cpu).unwrap().data().unwrap() == [5i64]
             && mn.to(Device::Cpu).unwrap().data().unwrap() == [1i64];
-        record(&mut pass, &mut fail, "argmax/argmin f32 global (is_cuda + values)", ok);
+        record(
+            &mut pass,
+            &mut fail,
+            "argmax/argmin f32 global (is_cuda + values)",
+            ok,
+        );
 
         // tie: two maxima -> first index
-        let tie = from_vec::<f32>(vec![5.0, 1.0, 5.0, 2.0], &[4]).unwrap().to(Device::Cuda(0)).unwrap();
+        let tie = from_vec::<f32>(vec![5.0, 1.0, 5.0, 2.0], &[4])
+            .unwrap()
+            .to(Device::Cuda(0))
+            .unwrap();
         let tmx = tie.argmax(None).unwrap();
         record(
-            &mut pass, &mut fail,
+            &mut pass,
+            &mut fail,
             "argmax f32 tie -> first index",
             tmx.is_cuda() && tmx.to(Device::Cpu).unwrap().data().unwrap() == [0i64],
         );
 
         // along dim=1 on a [2,3] tensor
-        let m = from_vec::<f32>(vec![1.0, 9.0, 2.0, 7.0, 3.0, 4.0], &[2, 3]).unwrap()
-            .to(Device::Cuda(0)).unwrap();
+        let m = from_vec::<f32>(vec![1.0, 9.0, 2.0, 7.0, 3.0, 4.0], &[2, 3])
+            .unwrap()
+            .to(Device::Cuda(0))
+            .unwrap();
         let amx = m.argmax(Some(1)).unwrap();
         let ok_dim = amx.is_cuda()
             && amx.shape() == [2]
             && amx.to(Device::Cpu).unwrap().data().unwrap() == [1i64, 0i64];
-        record(&mut pass, &mut fail, "argmax f32 dim=1 (shape [2] + values)", ok_dim);
+        record(
+            &mut pass,
+            &mut fail,
+            "argmax f32 dim=1 (shape [2] + values)",
+            ok_dim,
+        );
     }
 
     // ── argmax/argmin on i32 (value dtype = int) ────────────────────────────
@@ -86,7 +102,12 @@ fn phase2c_argmax_gather_cast() {
             && mn.is_cuda()
             && mx.to(Device::Cpu).unwrap().data().unwrap() == [1i64] // first 7
             && mn.to(Device::Cpu).unwrap().data().unwrap() == [0i64]; // -3
-        record(&mut pass, &mut fail, "argmax/argmin i32 global (is_cuda + values + tie)", ok);
+        record(
+            &mut pass,
+            &mut fail,
+            "argmax/argmin i32 global (is_cuda + values + tie)",
+            ok,
+        );
     }
 
     // ── 2. index_select(dim=0) + gather using a GPU-resident IntTensor ──────
@@ -105,7 +126,12 @@ fn phase2c_argmax_gather_cast() {
             && sel.shape() == [3, 2]
             && sel.to(Device::Cpu).unwrap().data_vec().unwrap()
                 == vec![4.0f32, 5.0, 0.0, 1.0, 4.0, 5.0];
-        record(&mut pass, &mut fail, "index_select(dim=0) f32 + i64 idx (is_cuda + values)", ok_sel);
+        record(
+            &mut pass,
+            &mut fail,
+            "index_select(dim=0) f32 + i64 idx (is_cuda + values)",
+            ok_sel,
+        );
 
         // gather dim=1 on a [2,3] table with a [2,2] index
         let t2 = from_vec::<f32>(vec![10.0, 11.0, 12.0, 20.0, 21.0, 22.0], &[2, 3])
@@ -119,9 +145,13 @@ fn phase2c_argmax_gather_cast() {
         let g = t2.gather(1, &gidx).unwrap();
         let ok_gather = g.is_cuda()
             && g.shape() == [2, 2]
-            && g.to(Device::Cpu).unwrap().data_vec().unwrap()
-                == vec![10.0f32, 12.0, 22.0, 21.0];
-        record(&mut pass, &mut fail, "gather(dim=1) f32 + i64 idx (is_cuda + values)", ok_gather);
+            && g.to(Device::Cpu).unwrap().data_vec().unwrap() == vec![10.0f32, 12.0, 22.0, 21.0];
+        record(
+            &mut pass,
+            &mut fail,
+            "gather(dim=1) f32 + i64 idx (is_cuda + values)",
+            ok_gather,
+        );
     }
 
     // ── 3. casts: f32->i32 (truncate), i32->f32, i32->i64, f32->i64 ─────────
@@ -131,14 +161,24 @@ fn phase2c_argmax_gather_cast() {
             .to(Device::Cuda(0))
             .unwrap();
         let i32t = f.to_int::<i32>().unwrap();
-        let ok_fi = i32t.is_cuda()
-            && i32t.to(Device::Cpu).unwrap().data().unwrap() == [1i32, -1, 2, -2];
-        record(&mut pass, &mut fail, "cast f32->i32 truncate (is_cuda + values)", ok_fi);
+        let ok_fi =
+            i32t.is_cuda() && i32t.to(Device::Cpu).unwrap().data().unwrap() == [1i32, -1, 2, -2];
+        record(
+            &mut pass,
+            &mut fail,
+            "cast f32->i32 truncate (is_cuda + values)",
+            ok_fi,
+        );
 
         let i64t = f.to_int::<i64>().unwrap();
-        let ok_fi64 = i64t.is_cuda()
-            && i64t.to(Device::Cpu).unwrap().data().unwrap() == [1i64, -1, 2, -2];
-        record(&mut pass, &mut fail, "cast f32->i64 truncate (is_cuda + values)", ok_fi64);
+        let ok_fi64 =
+            i64t.is_cuda() && i64t.to(Device::Cpu).unwrap().data().unwrap() == [1i64, -1, 2, -2];
+        record(
+            &mut pass,
+            &mut fail,
+            "cast f32->i64 truncate (is_cuda + values)",
+            ok_fi64,
+        );
 
         let ii = IntTensor::<i32>::from_vec(vec![-5, 7, 0], vec![3])
             .unwrap()
@@ -147,12 +187,22 @@ fn phase2c_argmax_gather_cast() {
         let ff = ii.to_float::<f32>().unwrap();
         let ok_if = ff.is_cuda()
             && ff.to(Device::Cpu).unwrap().data_vec().unwrap() == vec![-5.0f32, 7.0, 0.0];
-        record(&mut pass, &mut fail, "cast i32->f32 (is_cuda + values)", ok_if);
+        record(
+            &mut pass,
+            &mut fail,
+            "cast i32->f32 (is_cuda + values)",
+            ok_if,
+        );
 
         let widened = ii.cast::<i64>().unwrap();
-        let ok_ii = widened.is_cuda()
-            && widened.to(Device::Cpu).unwrap().data().unwrap() == [-5i64, 7, 0];
-        record(&mut pass, &mut fail, "cast i32->i64 GPU (is_cuda + values)", ok_ii);
+        let ok_ii =
+            widened.is_cuda() && widened.to(Device::Cpu).unwrap().data().unwrap() == [-5i64, 7, 0];
+        record(
+            &mut pass,
+            &mut fail,
+            "cast i32->i64 GPU (is_cuda + values)",
+            ok_ii,
+        );
     }
 
     // ── 4. END-TO-END no-round-trip Llama token path ───────────────────────
@@ -178,22 +228,43 @@ fn phase2c_argmax_gather_cast() {
 
         assert!(table.is_cuda(), "embedding table must be CUDA-resident");
         assert!(tokens.is_cuda(), "token ids must be CUDA-resident");
-        println!("  residency: table.is_cuda()={} tokens.is_cuda()={}", table.is_cuda(), tokens.is_cuda());
+        println!(
+            "  residency: table.is_cuda()={} tokens.is_cuda()={}",
+            table.is_cuda(),
+            tokens.is_cuda()
+        );
 
         // 1) gather embedding rows for the tokens (GPU)
         let embeds = table.index_select(0, &tokens).unwrap();
-        assert!(embeds.is_cuda(), "index_select output must stay on CUDA (no round trip)");
-        println!("  residency: embeds.is_cuda()={} shape={:?}", embeds.is_cuda(), embeds.shape());
+        assert!(
+            embeds.is_cuda(),
+            "index_select output must stay on CUDA (no round trip)"
+        );
+        println!(
+            "  residency: embeds.is_cuda()={} shape={:?}",
+            embeds.is_cuda(),
+            embeds.shape()
+        );
 
         // 2) a float op (GPU)
         let activated = embeds.relu().unwrap();
-        assert!(activated.is_cuda(), "relu output must stay on CUDA (no round trip)");
+        assert!(
+            activated.is_cuda(),
+            "relu output must stay on CUDA (no round trip)"
+        );
         println!("  residency: activated.is_cuda()={}", activated.is_cuda());
 
         // 3) argmax along the last dim -> next-token-style i64 indices (GPU)
         let next = activated.argmax(Some(-1)).unwrap();
-        assert!(next.is_cuda(), "argmax output must stay on CUDA (no round trip)");
-        println!("  residency: next_indices.is_cuda()={} shape={:?}", next.is_cuda(), next.shape());
+        assert!(
+            next.is_cuda(),
+            "argmax output must stay on CUDA (no round trip)"
+        );
+        println!(
+            "  residency: next_indices.is_cuda()={} shape={:?}",
+            next.is_cuda(),
+            next.shape()
+        );
 
         // CPU reference: rows [3,0,2] -> relu -> argmax over dim
         let reference: Vec<i64> = [3usize, 0, 2]
@@ -213,7 +284,12 @@ fn phase2c_argmax_gather_cast() {
         let got = next.to(Device::Cpu).unwrap().data().unwrap().to_vec();
         let ok_e2e = next.is_cuda() && next.shape() == [3] && got == reference;
         println!("  e2e indices: got={got:?} reference={reference:?}");
-        record(&mut pass, &mut fail, "END-TO-END token path: every intermediate is_cuda + final values", ok_e2e);
+        record(
+            &mut pass,
+            &mut fail,
+            "END-TO-END token path: every intermediate is_cuda + final values",
+            ok_e2e,
+        );
     }
 
     // ── 5. CPU paths agree (parity sanity, no GPU) ──────────────────────────
@@ -221,13 +297,18 @@ fn phase2c_argmax_gather_cast() {
         let cpu = from_vec::<f32>(vec![1.0, 9.0, 2.0, 7.0, 3.0, 4.0], &[2, 3]).unwrap();
         let amx = cpu.argmax(Some(1)).unwrap();
         record(
-            &mut pass, &mut fail,
+            &mut pass,
+            &mut fail,
             "CPU argmax dim=1 matches reference",
             !amx.is_cuda() && amx.to(Device::Cpu).unwrap().data().unwrap() == [1i64, 0i64],
         );
-        let ci = from_vec::<f32>(vec![1.9, -1.9], &[2]).unwrap().to_int::<i32>().unwrap();
+        let ci = from_vec::<f32>(vec![1.9, -1.9], &[2])
+            .unwrap()
+            .to_int::<i32>()
+            .unwrap();
         record(
-            &mut pass, &mut fail,
+            &mut pass,
+            &mut fail,
             "CPU f32->i32 truncate matches reference",
             ci.data().unwrap() == [1i32, -1],
         );

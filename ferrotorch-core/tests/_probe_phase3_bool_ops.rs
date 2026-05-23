@@ -124,9 +124,7 @@ fn run_six_int<I: ferrotorch_core::int_tensor::IntElement>(
 ) {
     let a = [1i64, 2, 3, 4, 5];
     let b = [5i64, 2, 1, 4, 0];
-    let to_i = |v: &[i64]| -> Vec<I> {
-        v.iter().map(|&x| I::try_from_i64(x).unwrap()).collect()
-    };
+    let to_i = |v: &[i64]| -> Vec<I> { v.iter().map(|&x| I::try_from_i64(x).unwrap()).collect() };
     let a_g = IntTensor::<I>::from_vec(to_i(&a), vec![5])
         .unwrap()
         .to(Device::Cuda(0))
@@ -280,10 +278,7 @@ fn check_logical(pass: &mut usize, fail: &mut usize) {
         .unwrap();
 
     let cases: [(&str, Vec<bool>); 4] = [
-        (
-            "and",
-            a.iter().zip(&b).map(|(&x, &y)| x && y).collect(),
-        ),
+        ("and", a.iter().zip(&b).map(|(&x, &y)| x && y).collect()),
         ("or", a.iter().zip(&b).map(|(&x, &y)| x || y).collect()),
         ("xor", a.iter().zip(&b).map(|(&x, &y)| x ^ y).collect()),
         ("not(a)", a.iter().map(|&x| !x).collect()),
@@ -334,11 +329,7 @@ fn check_reductions(pass: &mut usize, fail: &mut usize) {
 
     record(
         "any/all on GPU (reduction on device)",
-        mixed.is_cuda()
-            && any_mixed
-            && !all_mixed
-            && !any_false
-            && all_true,
+        mixed.is_cuda() && any_mixed && !all_mixed && !any_false && all_true,
         &format!(
             "any(mixed)={any_mixed} all(mixed)={all_mixed} any(allfalse)={any_false} all(alltrue)={all_true}"
         ),

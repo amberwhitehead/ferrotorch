@@ -3537,7 +3537,9 @@ pub trait GpuBackend: Send + Sync {
         _a: &GpuBufferHandle,
         _b: &GpuBufferHandle,
     ) -> FerrotorchResult<GpuBufferHandle> {
-        Err(FerrotorchError::NotImplementedOnCuda { op: "sub_bf16_bf16" })
+        Err(FerrotorchError::NotImplementedOnCuda {
+            op: "sub_bf16_bf16",
+        })
     }
 
     /// bf16 elementwise divide `out = a / b`. f32 internal, bf16 RNE store back.
@@ -3546,13 +3548,17 @@ pub trait GpuBackend: Send + Sync {
         _a: &GpuBufferHandle,
         _b: &GpuBufferHandle,
     ) -> FerrotorchResult<GpuBufferHandle> {
-        Err(FerrotorchError::NotImplementedOnCuda { op: "div_bf16_bf16" })
+        Err(FerrotorchError::NotImplementedOnCuda {
+            op: "div_bf16_bf16",
+        })
     }
 
     /// bf16 elementwise negate `out = -a`. Implemented as a sign-bit XOR
     /// on the u16 bit pattern — no f32 round-trip.
     fn neg_bf16_bf16(&self, _a: &GpuBufferHandle) -> FerrotorchResult<GpuBufferHandle> {
-        Err(FerrotorchError::NotImplementedOnCuda { op: "neg_bf16_bf16" })
+        Err(FerrotorchError::NotImplementedOnCuda {
+            op: "neg_bf16_bf16",
+        })
     }
 
     /// bf16 broadcast add. `a_shape`, `b_shape` are the original shapes;
@@ -3565,7 +3571,9 @@ pub trait GpuBackend: Send + Sync {
         _b_shape: &[usize],
         _out_shape: &[usize],
     ) -> FerrotorchResult<GpuBufferHandle> {
-        Err(FerrotorchError::NotImplementedOnCuda { op: "broadcast_add_bf16" })
+        Err(FerrotorchError::NotImplementedOnCuda {
+            op: "broadcast_add_bf16",
+        })
     }
 
     /// bf16 broadcast sub.
@@ -3577,7 +3585,9 @@ pub trait GpuBackend: Send + Sync {
         _b_shape: &[usize],
         _out_shape: &[usize],
     ) -> FerrotorchResult<GpuBufferHandle> {
-        Err(FerrotorchError::NotImplementedOnCuda { op: "broadcast_sub_bf16" })
+        Err(FerrotorchError::NotImplementedOnCuda {
+            op: "broadcast_sub_bf16",
+        })
     }
 
     /// bf16 broadcast mul.
@@ -3589,7 +3599,9 @@ pub trait GpuBackend: Send + Sync {
         _b_shape: &[usize],
         _out_shape: &[usize],
     ) -> FerrotorchResult<GpuBufferHandle> {
-        Err(FerrotorchError::NotImplementedOnCuda { op: "broadcast_mul_bf16" })
+        Err(FerrotorchError::NotImplementedOnCuda {
+            op: "broadcast_mul_bf16",
+        })
     }
 
     /// bf16 broadcast div.
@@ -3601,18 +3613,24 @@ pub trait GpuBackend: Send + Sync {
         _b_shape: &[usize],
         _out_shape: &[usize],
     ) -> FerrotorchResult<GpuBufferHandle> {
-        Err(FerrotorchError::NotImplementedOnCuda { op: "broadcast_div_bf16" })
+        Err(FerrotorchError::NotImplementedOnCuda {
+            op: "broadcast_div_bf16",
+        })
     }
 
     /// bf16 sum-reduce to scalar. PyTorch parity: accumulator is f32, final
     /// store rounds back to bf16 with round-to-nearest-even.
     fn sum_bf16_bf16(&self, _a: &GpuBufferHandle) -> FerrotorchResult<GpuBufferHandle> {
-        Err(FerrotorchError::NotImplementedOnCuda { op: "sum_bf16_bf16" })
+        Err(FerrotorchError::NotImplementedOnCuda {
+            op: "sum_bf16_bf16",
+        })
     }
 
     /// bf16 mean-reduce to scalar. Computed via sum_bf16_bf16 / n on-device.
     fn mean_bf16_bf16(&self, _a: &GpuBufferHandle) -> FerrotorchResult<GpuBufferHandle> {
-        Err(FerrotorchError::NotImplementedOnCuda { op: "mean_bf16_bf16" })
+        Err(FerrotorchError::NotImplementedOnCuda {
+            op: "mean_bf16_bf16",
+        })
     }
 
     /// bf16 axis-reduce sum. `shape` is the full input shape; `axis` is
@@ -3625,7 +3643,9 @@ pub trait GpuBackend: Send + Sync {
         _shape: &[usize],
         _axis: usize,
     ) -> FerrotorchResult<GpuBufferHandle> {
-        Err(FerrotorchError::NotImplementedOnCuda { op: "sum_axis_bf16_bf16" })
+        Err(FerrotorchError::NotImplementedOnCuda {
+            op: "sum_axis_bf16_bf16",
+        })
     }
 
     /// bf16 axis-reduce mean. Same shape/axis contract as
@@ -3637,31 +3657,41 @@ pub trait GpuBackend: Send + Sync {
         _shape: &[usize],
         _axis: usize,
     ) -> FerrotorchResult<GpuBufferHandle> {
-        Err(FerrotorchError::NotImplementedOnCuda { op: "mean_axis_bf16_bf16" })
+        Err(FerrotorchError::NotImplementedOnCuda {
+            op: "mean_axis_bf16_bf16",
+        })
     }
 
     /// bf16 elementwise exp. f32 internal via `ex2.approx.f32(x * log2(e))`,
     /// bf16 RNE store back.
     fn exp_bf16_bf16(&self, _a: &GpuBufferHandle) -> FerrotorchResult<GpuBufferHandle> {
-        Err(FerrotorchError::NotImplementedOnCuda { op: "exp_bf16_bf16" })
+        Err(FerrotorchError::NotImplementedOnCuda {
+            op: "exp_bf16_bf16",
+        })
     }
 
     /// bf16 elementwise natural log. f32 internal via
     /// `lg2.approx.f32(x) * ln(2)`, bf16 RNE store back.
     fn log_bf16_bf16(&self, _a: &GpuBufferHandle) -> FerrotorchResult<GpuBufferHandle> {
-        Err(FerrotorchError::NotImplementedOnCuda { op: "log_bf16_bf16" })
+        Err(FerrotorchError::NotImplementedOnCuda {
+            op: "log_bf16_bf16",
+        })
     }
 
     /// bf16 elementwise tanh. f32 internal via `(e^(2x) - 1)/(e^(2x) + 1)`,
     /// bf16 RNE store back.
     fn tanh_bf16_bf16(&self, _a: &GpuBufferHandle) -> FerrotorchResult<GpuBufferHandle> {
-        Err(FerrotorchError::NotImplementedOnCuda { op: "tanh_bf16_bf16" })
+        Err(FerrotorchError::NotImplementedOnCuda {
+            op: "tanh_bf16_bf16",
+        })
     }
 
     /// bf16 elementwise sigmoid `1 / (1 + exp(-x))`. f32 internal, bf16 RNE
     /// store back.
     fn sigmoid_bf16_bf16(&self, _a: &GpuBufferHandle) -> FerrotorchResult<GpuBufferHandle> {
-        Err(FerrotorchError::NotImplementedOnCuda { op: "sigmoid_bf16_bf16" })
+        Err(FerrotorchError::NotImplementedOnCuda {
+            op: "sigmoid_bf16_bf16",
+        })
     }
 
     // ── IEEE float16 (f16) ops — crosslink #1185 Phase 1 ─────────────────────
@@ -3729,7 +3759,9 @@ pub trait GpuBackend: Send + Sync {
         _b_shape: &[usize],
         _out_shape: &[usize],
     ) -> FerrotorchResult<GpuBufferHandle> {
-        Err(FerrotorchError::NotImplementedOnCuda { op: "broadcast_add_f16" })
+        Err(FerrotorchError::NotImplementedOnCuda {
+            op: "broadcast_add_f16",
+        })
     }
 
     /// f16 broadcast sub over N-D broadcast shapes.
@@ -3741,7 +3773,9 @@ pub trait GpuBackend: Send + Sync {
         _b_shape: &[usize],
         _out_shape: &[usize],
     ) -> FerrotorchResult<GpuBufferHandle> {
-        Err(FerrotorchError::NotImplementedOnCuda { op: "broadcast_sub_f16" })
+        Err(FerrotorchError::NotImplementedOnCuda {
+            op: "broadcast_sub_f16",
+        })
     }
 
     /// f16 broadcast mul over N-D broadcast shapes.
@@ -3753,7 +3787,9 @@ pub trait GpuBackend: Send + Sync {
         _b_shape: &[usize],
         _out_shape: &[usize],
     ) -> FerrotorchResult<GpuBufferHandle> {
-        Err(FerrotorchError::NotImplementedOnCuda { op: "broadcast_mul_f16" })
+        Err(FerrotorchError::NotImplementedOnCuda {
+            op: "broadcast_mul_f16",
+        })
     }
 
     /// f16 broadcast div over N-D broadcast shapes.
@@ -3765,7 +3801,9 @@ pub trait GpuBackend: Send + Sync {
         _b_shape: &[usize],
         _out_shape: &[usize],
     ) -> FerrotorchResult<GpuBufferHandle> {
-        Err(FerrotorchError::NotImplementedOnCuda { op: "broadcast_div_f16" })
+        Err(FerrotorchError::NotImplementedOnCuda {
+            op: "broadcast_div_f16",
+        })
     }
 
     /// f16 sum-reduce to scalar. f32 accumulator (PyTorch parity).
@@ -3795,7 +3833,9 @@ pub trait GpuBackend: Send + Sync {
         _shape: &[usize],
         _axis: usize,
     ) -> FerrotorchResult<GpuBufferHandle> {
-        Err(FerrotorchError::NotImplementedOnCuda { op: "mean_axis_f16" })
+        Err(FerrotorchError::NotImplementedOnCuda {
+            op: "mean_axis_f16",
+        })
     }
 
     /// f16 elementwise `out = exp(a)`. f32 internal, f16 RNE store.
@@ -3858,7 +3898,9 @@ pub trait GpuBackend: Send + Sync {
         _cols: usize,
         _eps: f32,
     ) -> FerrotorchResult<GpuBufferHandle> {
-        Err(FerrotorchError::NotImplementedOnCuda { op: "layernorm_f16" })
+        Err(FerrotorchError::NotImplementedOnCuda {
+            op: "layernorm_f16",
+        })
     }
 
     /// f16 RMSNorm over `[rows, cols]` with f16 weight. f32 reductions.
@@ -3883,7 +3925,9 @@ pub trait GpuBackend: Send + Sync {
         _k: usize,
         _n: usize,
     ) -> FerrotorchResult<GpuBufferHandle> {
-        Err(FerrotorchError::NotImplementedOnCuda { op: "matmul_f16_f16" })
+        Err(FerrotorchError::NotImplementedOnCuda {
+            op: "matmul_f16_f16",
+        })
     }
 
     // ── Integer (i32 / i64) ops — crosslink #1185 Phase 2b ───────────────────
@@ -3938,7 +3982,9 @@ pub trait GpuBackend: Send + Sync {
         _a: &GpuBufferHandle,
         _b: &GpuBufferHandle,
     ) -> FerrotorchResult<GpuBufferHandle> {
-        Err(FerrotorchError::NotImplementedOnCuda { op: "int_floor_div" })
+        Err(FerrotorchError::NotImplementedOnCuda {
+            op: "int_floor_div",
+        })
     }
 
     /// Integer remainder `out = remainder(a, b)` (sign of the DIVISOR,
@@ -4210,7 +4256,9 @@ pub trait GpuBackend: Send + Sync {
         _src: &GpuBufferHandle,
         _dst: DType,
     ) -> FerrotorchResult<GpuBufferHandle> {
-        Err(FerrotorchError::NotImplementedOnCuda { op: "cast_bool_to_f" })
+        Err(FerrotorchError::NotImplementedOnCuda {
+            op: "cast_bool_to_f",
+        })
     }
 }
 

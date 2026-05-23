@@ -24,10 +24,10 @@
 
 use std::sync::Once;
 
+use ferrotorch_core::Tensor;
 use ferrotorch_core::creation::from_vec;
 use ferrotorch_core::device::Device;
 use ferrotorch_core::error::FerrotorchError;
-use ferrotorch_core::Tensor;
 
 static GPU_INIT: Once = Once::new();
 
@@ -103,8 +103,16 @@ fn run(
     })();
 
     match outcome {
-        Ok(()) => OpResult { name, pass: true, err: None },
-        Err(e) => OpResult { name, pass: false, err: Some(e) },
+        Ok(()) => OpResult {
+            name,
+            pass: true,
+            err: None,
+        },
+        Err(e) => OpResult {
+            name,
+            pass: false,
+            err: Some(e),
+        },
     }
 }
 
@@ -303,7 +311,10 @@ fn f16_op_sweep_gpu() {
     println!("PASS: {pass}, FAIL: {fail}, TOTAL: {total}");
     println!("===================================================\n");
 
-    assert_eq!(fail, 0, "f16 op sweep had {fail} failures (see table above)");
+    assert_eq!(
+        fail, 0,
+        "f16 op sweep had {fail} failures (see table above)"
+    );
 }
 
 /// Minimal erf for the GELU reference (Abramowitz & Stegun 7.1.26, the same
