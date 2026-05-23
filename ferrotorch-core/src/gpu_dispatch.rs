@@ -11,6 +11,46 @@ use crate::dtype::DType;
 use crate::error::{FerrotorchError, FerrotorchResult};
 
 // ---------------------------------------------------------------------------
+// CompareOp — the comparison operator for `GpuBackend::compare` (Phase 3b)
+// ---------------------------------------------------------------------------
+
+/// The six elementwise comparison operators (`torch.{eq,ne,lt,le,gt,ge}`),
+/// passed to [`GpuBackend::compare`] which produces a `DType::Bool`-tagged
+/// (u8 0/1) output. PyTorch parity: the comparison's result dtype is `bool`
+/// regardless of the input value dtype.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CompareOp {
+    /// `a == b`.
+    Eq,
+    /// `a != b`.
+    Ne,
+    /// `a < b`.
+    Lt,
+    /// `a <= b`.
+    Le,
+    /// `a > b`.
+    Gt,
+    /// `a >= b`.
+    Ge,
+}
+
+impl CompareOp {
+    /// Stable kernel-name suffix (`"eq"`, `"ne"`, …) used to select the PTX
+    /// entry point in the CUDA backend.
+    #[must_use]
+    pub fn suffix(self) -> &'static str {
+        match self {
+            CompareOp::Eq => "eq",
+            CompareOp::Ne => "ne",
+            CompareOp::Lt => "lt",
+            CompareOp::Le => "le",
+            CompareOp::Gt => "gt",
+            CompareOp::Ge => "ge",
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // GpuRngState — serializable GPU RNG state for checkpoint save/restore
 // ---------------------------------------------------------------------------
 
@@ -4023,6 +4063,85 @@ pub trait GpuBackend: Send + Sync {
         _dst: DType,
     ) -> FerrotorchResult<GpuBufferHandle> {
         Err(FerrotorchError::NotImplementedOnCuda { op: "cast_i_to_i" })
+    }
+
+    // ── Boolean / comparison ops — crosslink #1185 Phase 3b ──────────────────
+    //
+    // Comparisons read a VALUE buffer (`a.dtype()` ∈ {F32,F64,BF16,F16,I32,I64})
+    // and produce a `DType::Bool`-tagged output (u8, 0/1) — PyTorch parity: the
+    // comparison result dtype is always `bool`. Logical ops read and write Bool
+    // (u8) buffers. Reductions any/all fold a Bool buffer to a 1-element Bool
+    // buffer. All dispatch on the relevant `DType` tag internally in the CUDA
+    // backend; results stay GPU-resident (no host round-trip). Default bodies
+    // return a structured error so non-CUDA backends compile (PyTorch parity §3).
+
+    /// Elementwise comparison `out[i] = (a[i] OP b[i]) ? 1u8 : 0u8`.
+    ///
+    /// Reads the value dtype from `a.dtype()` to pick the kernel; `a` and `b`
+    /// must carry the same dtype and length. The returned handle is tagged
+    /// `DType::Bool` (u8 storage). `op` selects the operator.
+    fn compare(
+        &self,
+        _a: &GpuBufferHandle,
+        _b: &GpuBufferHandle,
+        _op: CompareOp,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::NotImplementedOnCuda { op: "compare" })
+    }
+
+    /// Elementwise logical AND of two Bool (u8) buffers → Bool (u8).
+    fn bool_and(
+        &self,
+        _a: &GpuBufferHandle,
+        _b: &GpuBufferHandle,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::NotImplementedOnCuda { op: "bool_and" })
+    }
+
+    /// Elementwise logical OR of two Bool (u8) buffers → Bool (u8).
+    fn bool_or(
+        &self,
+        _a: &GpuBufferHandle,
+        _b: &GpuBufferHandle,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::NotImplementedOnCuda { op: "bool_or" })
+    }
+
+    /// Elementwise logical XOR of two Bool (u8) buffers → Bool (u8).
+    fn bool_xor(
+        &self,
+        _a: &GpuBufferHandle,
+        _b: &GpuBufferHandle,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::NotImplementedOnCuda { op: "bool_xor" })
+    }
+
+    /// Elementwise logical NOT of a Bool (u8) buffer → Bool (u8).
+    fn bool_not(&self, _a: &GpuBufferHandle) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::NotImplementedOnCuda { op: "bool_not" })
+    }
+
+    /// Global OR-reduction (`torch.any`) of a Bool (u8) buffer → 1-element
+    /// Bool (u8) buffer holding 1 if any element is nonzero, else 0.
+    fn bool_any(&self, _a: &GpuBufferHandle) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::NotImplementedOnCuda { op: "bool_any" })
+    }
+
+    /// Global AND-reduction (`torch.all`) of a Bool (u8) buffer → 1-element
+    /// Bool (u8) buffer holding 1 if all elements are nonzero, else 0.
+    fn bool_all(&self, _a: &GpuBufferHandle) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::NotImplementedOnCuda { op: "bool_all" })
+    }
+
+    /// Cast a Bool (u8) buffer to a float buffer tagged `dst`
+    /// (∈ {F32,F64,BF16,F16}): `true → 1.0`, `false → 0.0`. Result stays
+    /// GPU-resident.
+    fn cast_bool_to_f(
+        &self,
+        _src: &GpuBufferHandle,
+        _dst: DType,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::NotImplementedOnCuda { op: "cast_bool_to_f" })
     }
 }
 

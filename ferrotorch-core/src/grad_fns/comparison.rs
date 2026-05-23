@@ -141,7 +141,7 @@ pub fn where_bt<T: Float>(
             ),
         });
     }
-    where_(cond.data(), x, y)
+    where_(cond.data()?, x, y)
 }
 
 #[cfg(test)]

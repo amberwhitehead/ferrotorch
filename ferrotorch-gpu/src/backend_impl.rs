@@ -324,6 +324,52 @@ impl CudaBackendImpl {
             })
     }
 
+    /// Wrap a `CudaBuffer<u8>` (boolean storage) into a type-erased
+    /// [`GpuBufferHandle`] tagged `DType::Bool` (crosslink #1185 Phase 3a).
+    ///
+    /// A `bool` is one byte holding 0 or 1; on device it is stored as a native
+    /// `CudaBuffer<u8>` (u8 has cudarc `DeviceRepr`). The `DType::Bool` tag is
+    /// what stops a bool buffer being read as a (future) i8/u8 integer — the
+    /// same role the F16/BF16 tags play for the two 2-byte float types.
+    fn wrap_buffer_bool(buf: CudaBuffer<u8>, ordinal: usize) -> GpuBufferHandle {
+        let len = buf.len();
+        GpuBufferHandle::new(Box::new(buf), ordinal, len, DType::Bool)
+    }
+
+    /// Extract a `&CudaBuffer<u8>` (boolean storage) from a [`GpuBufferHandle`],
+    /// asserting the `DType::Bool` tag first (PyTorch parity — the ScalarType
+    /// tag is authoritative; the `downcast_ref` is the safety net).
+    fn unwrap_buffer_bool(handle: &GpuBufferHandle) -> FerrotorchResult<&CudaBuffer<u8>> {
+        if handle.dtype() != DType::Bool {
+            return Err(FerrotorchError::InvalidArgument {
+                message: format!("expected Bool buffer, handle is tagged {}", handle.dtype()),
+            });
+        }
+        handle
+            .downcast_ref::<CudaBuffer<u8>>()
+            .ok_or(FerrotorchError::InvalidArgument {
+                message: "GPU handle does not contain a CudaBuffer<u8> (bool)".into(),
+            })
+    }
+
+    /// Wrap a raw `CudaSlice<u8>` (the native bool kernel result type) into a
+    /// non-pooled [`CudaBuffer<u8>`] and then a `DType::Bool`-tagged
+    /// [`GpuBufferHandle`]. Mirror of `wrap_slice_i32` for the
+    /// [`crate::bool_kernels`] (#1185 Phase 3b) output, which produces a bare
+    /// `CudaSlice<u8>` rather than a `CudaBuffer`.
+    #[cfg(feature = "cuda")]
+    fn wrap_slice_bool(slice: cudarc::driver::CudaSlice<u8>, ordinal: usize) -> GpuBufferHandle {
+        let len = slice.len();
+        let buf = CudaBuffer {
+            data: Some(slice),
+            len,
+            alloc_len: len,
+            device_ordinal: ordinal,
+            pool_fn: None,
+        };
+        Self::wrap_buffer_bool(buf, ordinal)
+    }
+
     /// Wrap a raw `CudaSlice<i32>` (the native integer kernel result type)
     /// into a non-pooled [`CudaBuffer<i32>`] and then a `DType::I32`-tagged
     /// [`GpuBufferHandle`]. Mirror of `wrap_buffer_i32` for the
@@ -512,6 +558,10 @@ impl GpuBackend for CudaBackendImpl {
             // i64 storage: real `CudaBuffer<i64>` (crosslink #1185 Phase 2a).
             let (ptr, _sync) = buf.inner().device_ptr(&stream);
             ptr as *const std::ffi::c_void
+        } else if let Ok(buf) = Self::unwrap_buffer_bool(handle) {
+            // bool storage: real `CudaBuffer<u8>` (crosslink #1185 Phase 3a).
+            let (ptr, _sync) = buf.inner().device_ptr(&stream);
+            ptr as *const std::ffi::c_void
         } else {
             std::ptr::null()
         }
@@ -540,6 +590,10 @@ impl GpuBackend for CudaBackendImpl {
             ptr as *mut std::ffi::c_void
         } else if let Some(buf) = handle.downcast_mut::<CudaBuffer<i64>>() {
             // i64 storage (crosslink #1185 Phase 2a).
+            let (ptr, _sync) = buf.inner_mut().device_ptr_mut(&stream);
+            ptr as *mut std::ffi::c_void
+        } else if let Some(buf) = handle.downcast_mut::<CudaBuffer<u8>>() {
+            // bool storage: `CudaBuffer<u8>` (crosslink #1185 Phase 3a).
             let (ptr, _sync) = buf.inner_mut().device_ptr_mut(&stream);
             ptr as *mut std::ffi::c_void
         } else {
@@ -735,15 +789,30 @@ impl GpuBackend for CudaBackendImpl {
                 let buf = crate::transfer::cpu_to_gpu(i64_data, dev).map_err(Self::map_gpu_err)?;
                 Ok(Self::wrap_buffer_i64(buf, device))
             }
+            DType::Bool => {
+                // Boolean device storage (crosslink #1185 Phase 3a). A `bool` is
+                // one byte holding 0 or 1; cudarc has no `DeviceRepr` for `bool`,
+                // so we store it as a native `CudaBuffer<u8>` (u8 IS `DeviceRepr`)
+                // and tag the handle `DType::Bool`. The `&[u8]` view of the
+                // serialised `&[bool]` is byte-identical — no value translation.
+                let count = data.len(); // 1 byte per bool
+                // `data` is already `&[u8]`; the bytes are exactly the `bool`
+                // values (each 0 or 1) reinterpreted, which `u8` reads back
+                // identically. No `from_raw_parts` reinterpret is needed (unlike
+                // the multi-byte arms): a bool slice IS a byte slice here.
+                debug_assert_eq!(count, data.len());
+                let buf = crate::transfer::cpu_to_gpu(data, dev).map_err(Self::map_gpu_err)?;
+                Ok(Self::wrap_buffer_bool(buf, device))
+            }
             // PyTorch parity (rust-gpu-discipline §3): unsupported (dtype,
             // CUDA) combinations return a structured error rather than a
-            // silent CPU detour. Remaining integer / bool dtypes land here
+            // silent CPU detour. Remaining integer dtypes land here
             // until their respective dtype-parity phases add real CUDA buffer
             // support.
             other => Err(FerrotorchError::InvalidArgument {
                 message: format!(
                     "cpu_to_gpu: dtype {other} not supported on CUDA \
-                     (supported: F32, F64, BF16, F16, I32, I64)"
+                     (supported: F32, F64, BF16, F16, I32, I64, Bool)"
                 ),
             }),
         }
@@ -840,12 +909,20 @@ impl GpuBackend for CudaBackendImpl {
                     crate::transfer::cpu_to_gpu_pinned(i64_data, dev).map_err(Self::map_gpu_err)?;
                 Ok(Self::wrap_buffer_i64(buf, device))
             }
+            DType::Bool => {
+                // Boolean pinned transport (crosslink #1185 Phase 3a). `bool` is
+                // one byte; stored as `CudaBuffer<u8>` (u8 is DeviceRepr). The
+                // `&[u8]` is already the byte view of the `&[bool]`.
+                let buf =
+                    crate::transfer::cpu_to_gpu_pinned(data, dev).map_err(Self::map_gpu_err)?;
+                Ok(Self::wrap_buffer_bool(buf, device))
+            }
             // PyTorch parity: any other dtype is a structured error, not a
             // silent fallback.
             other => Err(FerrotorchError::InvalidArgument {
                 message: format!(
                     "cpu_to_gpu_pinned: dtype {other} not supported on CUDA \
-                     (supported: F32, F64, I32, I64)"
+                     (supported: F32, F64, I32, I64, Bool)"
                 ),
             }),
         }
@@ -968,11 +1045,21 @@ impl GpuBackend for CudaBackendImpl {
                 Vec::from_raw_parts(ptr, len, cap)
             };
             Ok(bytes)
+        } else if let Ok(buf) = Self::unwrap_buffer_bool(handle) {
+            // bool device storage (crosslink #1185 Phase 3a). Real
+            // `CudaBuffer<u8>`; the D2H readback is already a `Vec<u8>`, and the
+            // raw-byte transport's `Vec<u8>` IS the byte serialisation — no
+            // reinterpret needed (each byte is 0 or 1, a valid `bool`). The
+            // caller (`BoolTensor::to(Cpu)`) reconstructs `Vec<bool>` from these
+            // bytes.
+            let u8_data = crate::transfer::gpu_to_cpu(buf, dev).map_err(Self::map_gpu_err)?;
+            Ok(u8_data)
         } else {
             Err(FerrotorchError::InvalidArgument {
                 message: "gpu_to_cpu: handle is not a recognised dtype \
                           (expected CudaBuffer<f32>, CudaBuffer<f64>, \
-                          CudaSlice<u16> for bf16/f16, or CudaBuffer<i32>/<i64>)"
+                          CudaSlice<u16> for bf16/f16, CudaBuffer<i32>/<i64>, \
+                          or CudaBuffer<u8> for bool)"
                     .into(),
             })
         }
@@ -1045,11 +1132,19 @@ impl GpuBackend for CudaBackendImpl {
                     crate::transfer::alloc_zeros(len, dev).map_err(Self::map_gpu_err)?;
                 Ok(Self::wrap_buffer_i64(buf, device))
             }
+            DType::Bool => {
+                // Boolean zero-alloc (crosslink #1185 Phase 3a). bool stored as
+                // `CudaBuffer<u8>` (u8 has `DeviceRepr + ValidAsZeroBits`); a
+                // zero byte is `false`, so generic `alloc_zeros::<u8>` is correct.
+                let buf: CudaBuffer<u8> =
+                    crate::transfer::alloc_zeros(len, dev).map_err(Self::map_gpu_err)?;
+                Ok(Self::wrap_buffer_bool(buf, device))
+            }
             // PyTorch parity: unsupported (dtype, CUDA) → structured error.
             other => Err(FerrotorchError::InvalidArgument {
                 message: format!(
                     "alloc_zeros: dtype {other} not supported on CUDA \
-                     (supported: F32, F64, BF16, F16, I32, I64)"
+                     (supported: F32, F64, BF16, F16, I32, I64, Bool)"
                 ),
             }),
         }
@@ -6089,6 +6184,187 @@ impl GpuBackend for CudaBackendImpl {
                 ck::cast_i64_copy(Self::unwrap_buffer_i64(src)?.inner(), src.len(), dev).map_err(Self::map_gpu_err)?, ord)),
             (s, d) => Err(FerrotorchError::InvalidArgument {
                 message: format!("cast_i_to_i: unsupported {s} -> {d}"),
+            }),
+        }
+    }
+
+    // ── Boolean / comparison ops — crosslink #1185 Phase 3b ──────────────────
+    //
+    // `compare` reads the value dtype from `a.dtype()` to pick the kernel
+    // (PyTorch-style dispatch on the ScalarType tag) and produces a
+    // `DType::Bool`-tagged (u8 0/1) output. Logical ops read/write Bool (u8)
+    // buffers. any/all fold a Bool buffer to a 1-element Bool buffer. All keep
+    // the result GPU-resident — no host round-trip — and unsupported tags
+    // return a structured error (PyTorch parity, rust-gpu-discipline §3).
+
+    #[cfg(feature = "cuda")]
+    fn compare(
+        &self,
+        a: &GpuBufferHandle,
+        b: &GpuBufferHandle,
+        op: ferrotorch_core::gpu_dispatch::CompareOp,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        use crate::bool_kernels as bk;
+        if a.dtype() != b.dtype() {
+            return Err(FerrotorchError::InvalidArgument {
+                message: format!(
+                    "compare: operand dtypes differ ({} vs {})",
+                    a.dtype(),
+                    b.dtype()
+                ),
+            });
+        }
+        let dev = self.device(a.device_ordinal())?;
+        let ord = a.device_ordinal();
+        let suffix = op.suffix();
+        let r = match a.dtype() {
+            DType::F32 => bk::gpu_cmp_f32(
+                Self::unwrap_buffer(a)?.inner(),
+                Self::unwrap_buffer(b)?.inner(),
+                suffix,
+                dev,
+            ),
+            DType::F64 => bk::gpu_cmp_f64(
+                Self::unwrap_buffer_f64(a)?.inner(),
+                Self::unwrap_buffer_f64(b)?.inner(),
+                suffix,
+                dev,
+            ),
+            DType::I32 => bk::gpu_cmp_i32(
+                Self::unwrap_buffer_i32(a)?.inner(),
+                Self::unwrap_buffer_i32(b)?.inner(),
+                suffix,
+                dev,
+            ),
+            DType::I64 => bk::gpu_cmp_i64(
+                Self::unwrap_buffer_i64(a)?.inner(),
+                Self::unwrap_buffer_i64(b)?.inner(),
+                suffix,
+                dev,
+            ),
+            DType::BF16 => bk::gpu_cmp_bf16(
+                Self::unwrap_buffer_bf16(a)?,
+                Self::unwrap_buffer_bf16(b)?,
+                suffix,
+                dev,
+            ),
+            DType::F16 => bk::gpu_cmp_f16(
+                Self::unwrap_buffer_f16(a)?,
+                Self::unwrap_buffer_f16(b)?,
+                suffix,
+                dev,
+            ),
+            _ => return Err(FerrotorchError::NotImplementedOnCuda { op: "compare" }),
+        };
+        Ok(Self::wrap_slice_bool(r.map_err(Self::map_gpu_err)?, ord))
+    }
+
+    #[cfg(feature = "cuda")]
+    fn bool_and(
+        &self,
+        a: &GpuBufferHandle,
+        b: &GpuBufferHandle,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        let dev = self.device(a.device_ordinal())?;
+        let r = crate::bool_kernels::gpu_and_bool(
+            Self::unwrap_buffer_bool(a)?.inner(),
+            Self::unwrap_buffer_bool(b)?.inner(),
+            dev,
+        )
+        .map_err(Self::map_gpu_err)?;
+        Ok(Self::wrap_slice_bool(r, a.device_ordinal()))
+    }
+
+    #[cfg(feature = "cuda")]
+    fn bool_or(
+        &self,
+        a: &GpuBufferHandle,
+        b: &GpuBufferHandle,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        let dev = self.device(a.device_ordinal())?;
+        let r = crate::bool_kernels::gpu_or_bool(
+            Self::unwrap_buffer_bool(a)?.inner(),
+            Self::unwrap_buffer_bool(b)?.inner(),
+            dev,
+        )
+        .map_err(Self::map_gpu_err)?;
+        Ok(Self::wrap_slice_bool(r, a.device_ordinal()))
+    }
+
+    #[cfg(feature = "cuda")]
+    fn bool_xor(
+        &self,
+        a: &GpuBufferHandle,
+        b: &GpuBufferHandle,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        let dev = self.device(a.device_ordinal())?;
+        let r = crate::bool_kernels::gpu_xor_bool(
+            Self::unwrap_buffer_bool(a)?.inner(),
+            Self::unwrap_buffer_bool(b)?.inner(),
+            dev,
+        )
+        .map_err(Self::map_gpu_err)?;
+        Ok(Self::wrap_slice_bool(r, a.device_ordinal()))
+    }
+
+    #[cfg(feature = "cuda")]
+    fn bool_not(&self, a: &GpuBufferHandle) -> FerrotorchResult<GpuBufferHandle> {
+        let dev = self.device(a.device_ordinal())?;
+        let r = crate::bool_kernels::gpu_not_bool(Self::unwrap_buffer_bool(a)?.inner(), dev)
+            .map_err(Self::map_gpu_err)?;
+        Ok(Self::wrap_slice_bool(r, a.device_ordinal()))
+    }
+
+    #[cfg(feature = "cuda")]
+    fn bool_any(&self, a: &GpuBufferHandle) -> FerrotorchResult<GpuBufferHandle> {
+        let dev = self.device(a.device_ordinal())?;
+        let r = crate::bool_kernels::gpu_any_bool(Self::unwrap_buffer_bool(a)?.inner(), dev)
+            .map_err(Self::map_gpu_err)?;
+        Ok(Self::wrap_slice_bool(r, a.device_ordinal()))
+    }
+
+    #[cfg(feature = "cuda")]
+    fn bool_all(&self, a: &GpuBufferHandle) -> FerrotorchResult<GpuBufferHandle> {
+        let dev = self.device(a.device_ordinal())?;
+        let r = crate::bool_kernels::gpu_all_bool(Self::unwrap_buffer_bool(a)?.inner(), dev)
+            .map_err(Self::map_gpu_err)?;
+        Ok(Self::wrap_slice_bool(r, a.device_ordinal()))
+    }
+
+    #[cfg(feature = "cuda")]
+    fn cast_bool_to_f(
+        &self,
+        src: &GpuBufferHandle,
+        dst: DType,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        use crate::cast_kernels as ck;
+        if src.dtype() != DType::Bool {
+            return Err(FerrotorchError::InvalidArgument {
+                message: format!("cast_bool_to_f: src is tagged {}, expected Bool", src.dtype()),
+            });
+        }
+        let dev = self.device(src.device_ordinal())?;
+        let ord = src.device_ordinal();
+        let inb = Self::unwrap_buffer_bool(src)?.inner();
+        match dst {
+            DType::F32 => Ok(Self::wrap_slice_f32(
+                ck::cast_bool_to_f32(inb, src.len(), dev).map_err(Self::map_gpu_err)?,
+                ord,
+            )),
+            DType::F64 => Ok(Self::wrap_slice_f64(
+                ck::cast_bool_to_f64(inb, src.len(), dev).map_err(Self::map_gpu_err)?,
+                ord,
+            )),
+            DType::F16 => Ok(Self::wrap_buffer_f16(
+                ck::cast_bool_to_f16(inb, src.len(), dev).map_err(Self::map_gpu_err)?,
+                ord,
+            )),
+            DType::BF16 => Ok(Self::wrap_buffer_bf16(
+                ck::cast_bool_to_bf16(inb, src.len(), dev).map_err(Self::map_gpu_err)?,
+                ord,
+            )),
+            d => Err(FerrotorchError::InvalidArgument {
+                message: format!("cast_bool_to_f: unsupported Bool -> {d}"),
             }),
         }
     }

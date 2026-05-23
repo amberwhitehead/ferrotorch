@@ -918,7 +918,7 @@ pub fn masked_fill_bt<T: Float>(
             ),
         });
     }
-    masked_fill(input, mask.data(), value)
+    masked_fill(input, mask.data()?, value)
 }
 
 /// `index_select_1d` taking an [`IntTensor`] of indices. The index tensor

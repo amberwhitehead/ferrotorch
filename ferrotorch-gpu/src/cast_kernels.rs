@@ -456,6 +456,104 @@ DONE: ret;
 }
 ";
 
+// ── bool → float (crosslink #1185 Phase 3b) ────────────────────────────────
+//
+// Bool input is a `CudaSlice<u8>` (1 byte per element, value 0 or 1; the
+// `DType::Bool` tag distinguishes it from an integer u8). Each kernel reads
+// the byte, normalises it to 0/1 via a predicate (so any nonzero maps to true),
+// converts to the output float type, and writes it. PyTorch parity:
+// `bool_tensor.float()` → 1.0 for true, 0.0 for false.
+
+const BOOL_TO_F32_PTX: &str = "\
+.version 7.0
+.target sm_52
+.address_size 64
+.visible .entry bool_to_f32_kernel(.param .u64 in_ptr, .param .u64 out_ptr, .param .u32 n) {
+    .reg .u32 %idx, %bid, %bdim, %nr, %iv;
+    .reg .u64 %in, %out, %ioff, %ooff;
+    .reg .u16 %bv; .reg .f32 %r; .reg .pred %p, %nz;
+    ld.param.u64 %in, [in_ptr]; ld.param.u64 %out, [out_ptr]; ld.param.u32 %nr, [n];
+    mov.u32 %bid, %ctaid.x; mov.u32 %bdim, %ntid.x; mov.u32 %idx, %tid.x;
+    mad.lo.u32 %idx, %bid, %bdim, %idx;
+    setp.ge.u32 %p, %idx, %nr; @%p bra DONE;
+    cvt.u64.u32 %ioff, %idx; add.u64 %in, %in, %ioff;
+    ld.global.u8 %bv, [%in];
+    setp.ne.u16 %nz, %bv, 0; selp.u32 %iv, 1, 0, %nz;
+    cvt.rn.f32.u32 %r, %iv;
+    cvt.u64.u32 %ooff, %idx; shl.b64 %ooff, %ooff, 2; add.u64 %out, %out, %ooff;
+    st.global.f32 [%out], %r;
+DONE: ret;
+}
+";
+
+const BOOL_TO_F64_PTX: &str = "\
+.version 7.0
+.target sm_52
+.address_size 64
+.visible .entry bool_to_f64_kernel(.param .u64 in_ptr, .param .u64 out_ptr, .param .u32 n) {
+    .reg .u32 %idx, %bid, %bdim, %nr, %iv;
+    .reg .u64 %in, %out, %ioff, %ooff;
+    .reg .u16 %bv; .reg .f64 %r; .reg .pred %p, %nz;
+    ld.param.u64 %in, [in_ptr]; ld.param.u64 %out, [out_ptr]; ld.param.u32 %nr, [n];
+    mov.u32 %bid, %ctaid.x; mov.u32 %bdim, %ntid.x; mov.u32 %idx, %tid.x;
+    mad.lo.u32 %idx, %bid, %bdim, %idx;
+    setp.ge.u32 %p, %idx, %nr; @%p bra DONE;
+    cvt.u64.u32 %ioff, %idx; add.u64 %in, %in, %ioff;
+    ld.global.u8 %bv, [%in];
+    setp.ne.u16 %nz, %bv, 0; selp.u32 %iv, 1, 0, %nz;
+    cvt.rn.f64.u32 %r, %iv;
+    cvt.u64.u32 %ooff, %idx; shl.b64 %ooff, %ooff, 3; add.u64 %out, %out, %ooff;
+    st.global.f64 [%out], %r;
+DONE: ret;
+}
+";
+
+// bool → f16: u32(0/1) → f32 → f16 (cvt.rn.f16.f32, sm_53+).
+const BOOL_TO_F16_PTX: &str = "\
+.version 7.0
+.target sm_53
+.address_size 64
+.visible .entry bool_to_f16_kernel(.param .u64 in_ptr, .param .u64 out_ptr, .param .u32 n) {
+    .reg .u32 %idx, %bid, %bdim, %nr, %iv;
+    .reg .u64 %in, %out, %ioff, %ooff;
+    .reg .u16 %bv; .reg .f32 %f; .reg .b16 %r; .reg .pred %p, %nz;
+    ld.param.u64 %in, [in_ptr]; ld.param.u64 %out, [out_ptr]; ld.param.u32 %nr, [n];
+    mov.u32 %bid, %ctaid.x; mov.u32 %bdim, %ntid.x; mov.u32 %idx, %tid.x;
+    mad.lo.u32 %idx, %bid, %bdim, %idx;
+    setp.ge.u32 %p, %idx, %nr; @%p bra DONE;
+    cvt.u64.u32 %ioff, %idx; add.u64 %in, %in, %ioff;
+    ld.global.u8 %bv, [%in];
+    setp.ne.u16 %nz, %bv, 0; selp.u32 %iv, 1, 0, %nz;
+    cvt.rn.f32.u32 %f, %iv; cvt.rn.f16.f32 %r, %f;
+    cvt.u64.u32 %ooff, %idx; shl.b64 %ooff, %ooff, 1; add.u64 %out, %out, %ooff;
+    st.global.b16 [%out], %r;
+DONE: ret;
+}
+";
+
+// bool → bf16: u32(0/1) → f32 → bf16 (cvt.rn.bf16.f32, sm_80+).
+const BOOL_TO_BF16_PTX: &str = "\
+.version 7.8
+.target sm_80
+.address_size 64
+.visible .entry bool_to_bf16_kernel(.param .u64 in_ptr, .param .u64 out_ptr, .param .u32 n) {
+    .reg .u32 %idx, %bid, %bdim, %nr, %iv;
+    .reg .u64 %in, %out, %ioff, %ooff;
+    .reg .u16 %bv; .reg .f32 %f; .reg .b16 %r; .reg .pred %p, %nz;
+    ld.param.u64 %in, [in_ptr]; ld.param.u64 %out, [out_ptr]; ld.param.u32 %nr, [n];
+    mov.u32 %bid, %ctaid.x; mov.u32 %bdim, %ntid.x; mov.u32 %idx, %tid.x;
+    mad.lo.u32 %idx, %bid, %bdim, %idx;
+    setp.ge.u32 %p, %idx, %nr; @%p bra DONE;
+    cvt.u64.u32 %ioff, %idx; add.u64 %in, %in, %ioff;
+    ld.global.u8 %bv, [%in];
+    setp.ne.u16 %nz, %bv, 0; selp.u32 %iv, 1, 0, %nz;
+    cvt.rn.f32.u32 %f, %iv; cvt.rn.bf16.f32 %r, %f;
+    cvt.u64.u32 %ooff, %idx; shl.b64 %ooff, %ooff, 1; add.u64 %out, %out, %ooff;
+    st.global.b16 [%out], %r;
+DONE: ret;
+}
+";
+
 /// Launch an elementwise cast kernel from `IN` to `OUT` native element types,
 /// returning a fresh resident `CudaSlice<OUT>` of `n` elements.
 fn launch_cast<IN: DeviceRepr + ValidAsZeroBits, OUT: DeviceRepr + ValidAsZeroBits>(
@@ -586,6 +684,23 @@ pub fn cast_i32_copy(x: &CudaSlice<i32>, n: usize, d: &GpuDevice) -> GpuResult<C
 /// Same-dtype i64 identity copy (full-value preserving, GPU-resident).
 pub fn cast_i64_copy(x: &CudaSlice<i64>, n: usize, d: &GpuDevice) -> GpuResult<CudaSlice<i64>> {
     launch_cast(x, n, d, I64_COPY_PTX, "i64_copy_kernel")
+}
+// bool (u8 0/1) → float (crosslink #1185 Phase 3b)
+/// Cast bool (u8) → f32 (`true → 1.0`, `false → 0.0`).
+pub fn cast_bool_to_f32(x: &CudaSlice<u8>, n: usize, d: &GpuDevice) -> GpuResult<CudaSlice<f32>> {
+    launch_cast(x, n, d, BOOL_TO_F32_PTX, "bool_to_f32_kernel")
+}
+/// Cast bool (u8) → f64 (`true → 1.0`, `false → 0.0`).
+pub fn cast_bool_to_f64(x: &CudaSlice<u8>, n: usize, d: &GpuDevice) -> GpuResult<CudaSlice<f64>> {
+    launch_cast(x, n, d, BOOL_TO_F64_PTX, "bool_to_f64_kernel")
+}
+/// Cast bool (u8) → f16 (u16 bits; `true → 1.0`, `false → 0.0`).
+pub fn cast_bool_to_f16(x: &CudaSlice<u8>, n: usize, d: &GpuDevice) -> GpuResult<CudaSlice<u16>> {
+    launch_cast(x, n, d, BOOL_TO_F16_PTX, "bool_to_f16_kernel")
+}
+/// Cast bool (u8) → bf16 (u16 bits; `true → 1.0`, `false → 0.0`).
+pub fn cast_bool_to_bf16(x: &CudaSlice<u8>, n: usize, d: &GpuDevice) -> GpuResult<CudaSlice<u16>> {
+    launch_cast(x, n, d, BOOL_TO_BF16_PTX, "bool_to_bf16_kernel")
 }
 
 #[cfg(test)]

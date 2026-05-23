@@ -146,6 +146,8 @@ pub mod bf16;
 #[cfg(feature = "cuda")]
 pub mod f16;
 #[cfg(feature = "cuda")]
+pub mod bool_kernels;
+#[cfg(feature = "cuda")]
 pub mod int_kernels;
 #[cfg(feature = "cuda")]
 pub mod reduce_arg;

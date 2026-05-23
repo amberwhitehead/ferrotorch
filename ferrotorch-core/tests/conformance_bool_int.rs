@@ -539,7 +539,7 @@ fn bool_zeros_constructor() {
         assert_eq!(z.numel(), f.numel.expect("numel"), "{label} numel");
         assert_eq!(z.ndim(), f.ndim.expect("ndim"), "{label} ndim");
         let expected = f.out_bool_data.as_ref().expect("out_bool_data");
-        assert_bool_eq(z.data(), expected, &label);
+        assert_bool_eq(z.data().expect("data"), expected, &label);
     }
 }
 
@@ -560,7 +560,7 @@ fn bool_ones_constructor() {
         assert_eq!(o.numel(), f.numel.expect("numel"));
         assert_eq!(o.ndim(), f.ndim.expect("ndim"));
         let expected = f.out_bool_data.as_ref().expect("out_bool_data");
-        assert_bool_eq(o.data(), expected, &label);
+        assert_bool_eq(o.data().expect("data"), expected, &label);
     }
 }
 
@@ -582,7 +582,7 @@ fn bool_from_vec_constructor() {
         assert_eq!(t.numel(), f.numel.expect("numel"));
         assert_eq!(t.ndim(), f.ndim.expect("ndim"));
         let expected = f.out_bool_data.as_ref().expect("out_bool_data");
-        assert_bool_eq(t.data(), expected, &label);
+        assert_bool_eq(t.data().expect("data"), expected, &label);
     }
 }
 
@@ -602,7 +602,7 @@ fn bool_from_slice_constructor() {
         let t = BoolTensor::from_slice(in_data, shape).expect("from_slice");
         assert_eq!(t.shape(), shape.as_slice(), "{label} shape");
         let expected = f.out_bool_data.as_ref().expect("out_bool_data");
-        assert_bool_eq(t.data(), expected, &label);
+        assert_bool_eq(t.data().expect("data"), expected, &label);
     }
 }
 
@@ -648,7 +648,7 @@ fn run_from_predicate_for_dtype<T: ferrotorch_core::dtype::Float>(
         other => panic!("unknown predicate {other:?}"),
     }
     .expect("from_predicate");
-    assert_bool_eq(mask.data(), expected, label);
+    assert_bool_eq(mask.data().expect("data"), expected, label);
 }
 
 #[test]
@@ -700,7 +700,7 @@ fn bool_not_pointwise() {
         let a = BoolTensor::from_vec(a_data.clone(), shape.clone()).expect("from_vec");
         let n = a.not();
         let expected = f.out_bool_data.as_ref().expect("out_bool_data");
-        assert_bool_eq(n.data(), expected, &label);
+        assert_bool_eq(n.data().expect("data"), expected, &label);
     }
 }
 
@@ -722,7 +722,7 @@ fn bool_and_pointwise() {
         let b = BoolTensor::from_vec(b_data.clone(), shape.clone()).expect("from_vec");
         let r = a.and(&b).expect("and");
         let expected = f.out_bool_data.as_ref().expect("out_bool_data");
-        assert_bool_eq(r.data(), expected, &label);
+        assert_bool_eq(r.data().expect("data"), expected, &label);
     }
 }
 
@@ -744,7 +744,7 @@ fn bool_or_pointwise() {
         let b = BoolTensor::from_vec(b_data.clone(), shape.clone()).expect("from_vec");
         let r = a.or(&b).expect("or");
         let expected = f.out_bool_data.as_ref().expect("out_bool_data");
-        assert_bool_eq(r.data(), expected, &label);
+        assert_bool_eq(r.data().expect("data"), expected, &label);
     }
 }
 
@@ -766,7 +766,7 @@ fn bool_xor_pointwise() {
         let b = BoolTensor::from_vec(b_data.clone(), shape.clone()).expect("from_vec");
         let r = a.xor(&b).expect("xor");
         let expected = f.out_bool_data.as_ref().expect("out_bool_data");
-        assert_bool_eq(r.data(), expected, &label);
+        assert_bool_eq(r.data().expect("data"), expected, &label);
     }
 }
 
@@ -798,7 +798,7 @@ fn bool_any_reduction() {
         let shape = f.shape.as_ref().expect("shape");
         let a_data = f.bool_a_data.as_ref().expect("bool_a_data");
         let a = BoolTensor::from_vec(a_data.clone(), shape.clone()).expect("from_vec");
-        let actual = a.any();
+        let actual = a.any().expect("any");
         let expected = f.out_scalar_bool.expect("out_scalar_bool");
         assert_eq!(actual, expected, "{label} any");
     }
@@ -818,7 +818,7 @@ fn bool_all_reduction() {
         let shape = f.shape.as_ref().expect("shape");
         let a_data = f.bool_a_data.as_ref().expect("bool_a_data");
         let a = BoolTensor::from_vec(a_data.clone(), shape.clone()).expect("from_vec");
-        let actual = a.all();
+        let actual = a.all().expect("all");
         let expected = f.out_scalar_bool.expect("out_scalar_bool");
         assert_eq!(actual, expected, "{label} all");
     }
@@ -838,7 +838,7 @@ fn bool_count_true_reduction() {
         let shape = f.shape.as_ref().expect("shape");
         let a_data = f.bool_a_data.as_ref().expect("bool_a_data");
         let a = BoolTensor::from_vec(a_data.clone(), shape.clone()).expect("from_vec");
-        let actual = a.count_true();
+        let actual = a.count_true().expect("count_true");
         let expected = f.out_scalar_uint.expect("out_scalar_uint");
         assert_eq!(actual, expected, "{label} count_true");
     }
@@ -873,17 +873,20 @@ fn bool_empty_reduction_identities() {
     // BoolTensor-level (was blocked on #805, now live).
     let z = BoolTensor::zeros(&[0]);
     assert_eq!(z.numel(), 0);
-    assert!(!z.any(), "BoolTensor::zeros(&[0]).any() must be false");
     assert!(
-        z.all(),
+        !z.any().expect("any"),
+        "BoolTensor::zeros(&[0]).any() must be false"
+    );
+    assert!(
+        z.all().expect("all"),
         "BoolTensor::zeros(&[0]).all() must be true (AND identity)"
     );
-    assert_eq!(z.count_true(), 0);
+    assert_eq!(z.count_true().expect("count_true"), 0);
 
     let from_vec = BoolTensor::from_vec(vec![], vec![0]).expect("empty from_vec");
     assert_eq!(from_vec.numel(), 0);
-    assert!(!from_vec.any());
-    assert!(from_vec.all());
+    assert!(!from_vec.any().expect("any"));
+    assert!(from_vec.all().expect("all"));
 }
 
 // ---------------------------------------------------------------------------
@@ -921,7 +924,7 @@ fn run_compare_for_dtype<T: ferrotorch_core::dtype::Float>(
         other => panic!("unknown compare op {other:?}"),
     }
     .expect("compare");
-    assert_bool_eq(r.data(), expected, label);
+    assert_bool_eq(r.data().expect("data"), expected, label);
 }
 
 fn run_compare_op(op: &str) {
@@ -1024,7 +1027,7 @@ fn bool_reshape_preserves_data() {
         let r = a.reshape(new_shape).expect("reshape");
         assert_eq!(r.shape(), new_shape.as_slice(), "{label} shape");
         let expected = f.out_bool_data.as_ref().expect("out_bool_data");
-        assert_bool_eq(r.data(), expected, &label);
+        assert_bool_eq(r.data().expect("data"), expected, &label);
     }
 }
 
