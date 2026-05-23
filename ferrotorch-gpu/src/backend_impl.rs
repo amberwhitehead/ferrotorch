@@ -6368,6 +6368,203 @@ impl GpuBackend for CudaBackendImpl {
             }),
         }
     }
+
+    // ── Phase 3c: mask-driven ops with a GPU-resident Bool mask ──────────────
+
+    #[cfg(feature = "cuda")]
+    fn masked_fill_dt(
+        &self,
+        input: &GpuBufferHandle,
+        mask: &GpuBufferHandle,
+        value: f64,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        use crate::masked_kernels as mk;
+        if mask.dtype() != DType::Bool {
+            return Err(FerrotorchError::InvalidArgument {
+                message: format!("masked_fill: mask is tagged {}, expected Bool", mask.dtype()),
+            });
+        }
+        if input.len() != mask.len() {
+            return Err(FerrotorchError::InvalidArgument {
+                message: format!(
+                    "masked_fill: input numel {} != mask numel {}",
+                    input.len(),
+                    mask.len()
+                ),
+            });
+        }
+        let dev = self.device(input.device_ordinal())?;
+        let ord = input.device_ordinal();
+        let mb = Self::unwrap_buffer_bool(mask)?.inner();
+        match input.dtype() {
+            DType::F32 => Ok(Self::wrap_slice_f32(
+                mk::masked_fill_f32(Self::unwrap_buffer(input)?.inner(), mb, value as f32, dev)
+                    .map_err(Self::map_gpu_err)?,
+                ord,
+            )),
+            DType::F64 => Ok(Self::wrap_slice_f64(
+                mk::masked_fill_f64(Self::unwrap_buffer_f64(input)?.inner(), mb, value, dev)
+                    .map_err(Self::map_gpu_err)?,
+                ord,
+            )),
+            DType::F16 => Ok(Self::wrap_buffer_f16(
+                mk::masked_fill_f16(Self::unwrap_buffer_f16(input)?, mb, value as f32, dev)
+                    .map_err(Self::map_gpu_err)?,
+                ord,
+            )),
+            DType::BF16 => Ok(Self::wrap_buffer_bf16(
+                mk::masked_fill_bf16(Self::unwrap_buffer_bf16(input)?, mb, value as f32, dev)
+                    .map_err(Self::map_gpu_err)?,
+                ord,
+            )),
+            DType::I32 => Ok(Self::wrap_slice_i32(
+                mk::masked_fill_i32(Self::unwrap_buffer_i32(input)?.inner(), mb, value as i32, dev)
+                    .map_err(Self::map_gpu_err)?,
+                ord,
+            )),
+            DType::I64 => Ok(Self::wrap_slice_i64(
+                mk::masked_fill_i64(Self::unwrap_buffer_i64(input)?.inner(), mb, value as i64, dev)
+                    .map_err(Self::map_gpu_err)?,
+                ord,
+            )),
+            _ => Err(FerrotorchError::NotImplementedOnCuda {
+                op: "masked_fill_dt",
+            }),
+        }
+    }
+
+    #[cfg(feature = "cuda")]
+    fn where_cond(
+        &self,
+        cond: &GpuBufferHandle,
+        x: &GpuBufferHandle,
+        y: &GpuBufferHandle,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        use crate::masked_kernels as mk;
+        if cond.dtype() != DType::Bool {
+            return Err(FerrotorchError::InvalidArgument {
+                message: format!("where_cond: cond is tagged {}, expected Bool", cond.dtype()),
+            });
+        }
+        if x.dtype() != y.dtype() {
+            return Err(FerrotorchError::InvalidArgument {
+                message: format!("where_cond: x/y dtypes differ ({} vs {})", x.dtype(), y.dtype()),
+            });
+        }
+        if x.len() != y.len() || x.len() != cond.len() {
+            return Err(FerrotorchError::InvalidArgument {
+                message: format!(
+                    "where_cond: numel mismatch (cond {}, x {}, y {})",
+                    cond.len(),
+                    x.len(),
+                    y.len()
+                ),
+            });
+        }
+        let dev = self.device(x.device_ordinal())?;
+        let ord = x.device_ordinal();
+        let cb = Self::unwrap_buffer_bool(cond)?.inner();
+        match x.dtype() {
+            DType::F32 => Ok(Self::wrap_slice_f32(
+                mk::where_32::<f32>(cb, Self::unwrap_buffer(x)?.inner(), Self::unwrap_buffer(y)?.inner(), dev)
+                    .map_err(Self::map_gpu_err)?,
+                ord,
+            )),
+            DType::F64 => Ok(Self::wrap_slice_f64(
+                mk::where_64::<f64>(cb, Self::unwrap_buffer_f64(x)?.inner(), Self::unwrap_buffer_f64(y)?.inner(), dev)
+                    .map_err(Self::map_gpu_err)?,
+                ord,
+            )),
+            DType::F16 => Ok(Self::wrap_buffer_f16(
+                mk::where_16(cb, Self::unwrap_buffer_f16(x)?, Self::unwrap_buffer_f16(y)?, dev)
+                    .map_err(Self::map_gpu_err)?,
+                ord,
+            )),
+            DType::BF16 => Ok(Self::wrap_buffer_bf16(
+                mk::where_16(cb, Self::unwrap_buffer_bf16(x)?, Self::unwrap_buffer_bf16(y)?, dev)
+                    .map_err(Self::map_gpu_err)?,
+                ord,
+            )),
+            DType::I32 => Ok(Self::wrap_slice_i32(
+                mk::where_32::<i32>(cb, Self::unwrap_buffer_i32(x)?.inner(), Self::unwrap_buffer_i32(y)?.inner(), dev)
+                    .map_err(Self::map_gpu_err)?,
+                ord,
+            )),
+            DType::I64 => Ok(Self::wrap_slice_i64(
+                mk::where_64::<i64>(cb, Self::unwrap_buffer_i64(x)?.inner(), Self::unwrap_buffer_i64(y)?.inner(), dev)
+                    .map_err(Self::map_gpu_err)?,
+                ord,
+            )),
+            _ => Err(FerrotorchError::NotImplementedOnCuda { op: "where_cond" }),
+        }
+    }
+
+    #[cfg(feature = "cuda")]
+    fn masked_select(
+        &self,
+        input: &GpuBufferHandle,
+        mask: &GpuBufferHandle,
+    ) -> FerrotorchResult<(GpuBufferHandle, usize)> {
+        use crate::masked_kernels as mk;
+        if mask.dtype() != DType::Bool {
+            return Err(FerrotorchError::InvalidArgument {
+                message: format!("masked_select: mask is tagged {}, expected Bool", mask.dtype()),
+            });
+        }
+        if input.len() != mask.len() {
+            return Err(FerrotorchError::InvalidArgument {
+                message: format!(
+                    "masked_select: input numel {} != mask numel {}",
+                    input.len(),
+                    mask.len()
+                ),
+            });
+        }
+        let dev = self.device(input.device_ordinal())?;
+        let ord = input.device_ordinal();
+        let mb = Self::unwrap_buffer_bool(mask)?.inner();
+        match input.dtype() {
+            DType::F32 => {
+                let (out, len) =
+                    mk::masked_select_32::<f32>(Self::unwrap_buffer(input)?.inner(), mb, dev)
+                        .map_err(Self::map_gpu_err)?;
+                Ok((Self::wrap_slice_f32(out, ord), len))
+            }
+            DType::F64 => {
+                let (out, len) =
+                    mk::masked_select_64::<f64>(Self::unwrap_buffer_f64(input)?.inner(), mb, dev)
+                        .map_err(Self::map_gpu_err)?;
+                Ok((Self::wrap_slice_f64(out, ord), len))
+            }
+            DType::F16 => {
+                let (out, len) =
+                    mk::masked_select_16(Self::unwrap_buffer_f16(input)?, mb, dev)
+                        .map_err(Self::map_gpu_err)?;
+                Ok((Self::wrap_buffer_f16(out, ord), len))
+            }
+            DType::BF16 => {
+                let (out, len) =
+                    mk::masked_select_16(Self::unwrap_buffer_bf16(input)?, mb, dev)
+                        .map_err(Self::map_gpu_err)?;
+                Ok((Self::wrap_buffer_bf16(out, ord), len))
+            }
+            DType::I32 => {
+                let (out, len) =
+                    mk::masked_select_32::<i32>(Self::unwrap_buffer_i32(input)?.inner(), mb, dev)
+                        .map_err(Self::map_gpu_err)?;
+                Ok((Self::wrap_slice_i32(out, ord), len))
+            }
+            DType::I64 => {
+                let (out, len) =
+                    mk::masked_select_64::<i64>(Self::unwrap_buffer_i64(input)?.inner(), mb, dev)
+                        .map_err(Self::map_gpu_err)?;
+                Ok((Self::wrap_slice_i64(out, ord), len))
+            }
+            _ => Err(FerrotorchError::NotImplementedOnCuda {
+                op: "masked_select",
+            }),
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------

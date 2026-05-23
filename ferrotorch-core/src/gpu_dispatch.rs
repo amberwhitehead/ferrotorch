@@ -1856,6 +1856,57 @@ pub trait GpuBackend: Send + Sync {
             message: "masked_fill_f64 GPU op not yet implemented".into(),
         })
     }
+    // masked_fill with a GPU-resident Bool (u8) mask, dispatched on input.dtype()
+    // (crosslink #1185 Phase 3c). `out[i] = mask[i]!=0 ? value : input[i]`.
+    // Covers f32/f64/bf16/f16 (+ i32/i64). The scalar `value` is passed as f64
+    // and converted to the input dtype in the backend (for bf16/f16 it is
+    // narrowed in-kernel). `mask` MUST be tagged `DType::Bool` and have the same
+    // numel as `input`; the result keeps `input`'s dtype and stays GPU-resident.
+    // Unlike `masked_fill_f32`, the mask is the resident bool buffer — no
+    // float-mask upload, no host crossing.
+    fn masked_fill_dt(
+        &self,
+        _input: &GpuBufferHandle,
+        _mask: &GpuBufferHandle,
+        _value: f64,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::NotImplementedOnCuda {
+            op: "masked_fill_dt",
+        })
+    }
+
+    // where_cond / torch.where with a GPU-resident Bool (u8) condition
+    // (crosslink #1185 Phase 3c). `out[i] = cond[i]!=0 ? x[i] : y[i]`, dispatched
+    // on x.dtype(). `cond` MUST be tagged `DType::Bool`; `x.dtype() == y.dtype()`
+    // and all three buffers MUST have equal numel. The result keeps x's dtype and
+    // stays GPU-resident. Covers f32/f64/bf16/f16 (+ i32/i64).
+    fn where_cond(
+        &self,
+        _cond: &GpuBufferHandle,
+        _x: &GpuBufferHandle,
+        _y: &GpuBufferHandle,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::NotImplementedOnCuda { op: "where_cond" })
+    }
+
+    // masked_select stream compaction (crosslink #1185 Phase 3c). Returns
+    // `(out, len)` where `out` is a 1-D GPU-resident buffer of x's dtype holding
+    // the `len` elements of `input` where `mask` is true. `mask` MUST be tagged
+    // `DType::Bool` with the same numel as `input`. `len` is the on-device true
+    // count read once to the host to size the data-dependent output — that single
+    // integer is the result SHAPE, not a data round-trip (PyTorch parity: a CUDA
+    // sync sizes `torch.masked_select`'s output). Covers f32/f64/bf16/f16
+    // (+ i32/i64).
+    fn masked_select(
+        &self,
+        _input: &GpuBufferHandle,
+        _mask: &GpuBufferHandle,
+    ) -> FerrotorchResult<(GpuBufferHandle, usize)> {
+        Err(FerrotorchError::NotImplementedOnCuda {
+            op: "masked_select",
+        })
+    }
+
     // masked_zero: out[i] = mask[i] ? 0.0 : grad[i]  (backward of masked_fill)
     fn masked_zero_f32(
         &self,

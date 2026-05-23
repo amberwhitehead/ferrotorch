@@ -383,6 +383,132 @@ pub fn where_cond<T: Float>(
     }
 }
 
+/// Ternary selection taking a [`BoolTensor`] condition: `output[i] =
+/// cond[i] ? x[i] : y[i]`. Mirrors `torch.where(cond, x, y)`.
+///
+/// All three tensors must share shape and device. When `cond`, `x`, and `y`
+/// are CUDA-resident (same device), the select runs on the GPU through a real
+/// PTX kernel dispatched on `x`'s dtype and the result stays GPU-resident — NO
+/// host crossing (crosslink #1185 Phase 3c). Otherwise it builds the host
+/// `&[bool]` and delegates to the CPU [`where_cond`] (autograd-aware).
+pub fn where_cond_bt<T: Float>(
+    cond: &crate::bool_tensor::BoolTensor,
+    x: &Tensor<T>,
+    y: &Tensor<T>,
+) -> FerrotorchResult<Tensor<T>> {
+    if x.shape() != y.shape() {
+        return Err(FerrotorchError::ShapeMismatch {
+            message: format!(
+                "where_cond_bt: x shape {:?} != y shape {:?}",
+                x.shape(),
+                y.shape()
+            ),
+        });
+    }
+    if cond.shape() != x.shape() {
+        return Err(FerrotorchError::ShapeMismatch {
+            message: format!(
+                "where_cond_bt: cond shape {:?} != x shape {:?}",
+                cond.shape(),
+                x.shape()
+            ),
+        });
+    }
+
+    // GPU-resident fast path: all three on the same CUDA device.
+    if x.is_cuda() && y.is_cuda() && cond.is_cuda() {
+        if x.device() != y.device() {
+            return Err(FerrotorchError::DeviceMismatch {
+                expected: x.device(),
+                got: y.device(),
+            });
+        }
+        if x.device() != cond.device() {
+            return Err(FerrotorchError::DeviceMismatch {
+                expected: x.device(),
+                got: cond.device(),
+            });
+        }
+        let backend =
+            crate::gpu_dispatch::gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
+        let h = backend.where_cond(cond.gpu_handle()?, x.gpu_handle()?, y.gpu_handle()?)?;
+        let storage = TensorStorage::gpu(h);
+        let output_shape = x.shape().to_vec();
+
+        if needs_grad(x, y) {
+            // Autograd needs the host condition for the VJP routing. The grad
+            // case for where is uncommon on a resident attention path; pull the
+            // cond to host once to keep backward correct (resident-bool backward
+            // is a follow-up).
+            let cond_cpu = cond.to(crate::device::Device::Cpu)?;
+            let grad_fn = Arc::new(crate::grad_fns::indexing::WhereCondBackward {
+                x: x.clone(),
+                y: y.clone(),
+                condition: cond_cpu.data()?.to_vec(),
+            });
+            return Tensor::from_operation(storage, output_shape, grad_fn);
+        }
+        return Tensor::from_storage(storage, output_shape, false);
+    }
+
+    // CPU (or mixed-residency) path: materialise the host condition and delegate
+    // to the autograd-aware CPU `where_cond`. `cond.data()?` errors if the cond
+    // is on GPU while x/y are not — the correct device-mismatch signal.
+    where_cond(cond.data()?, x, y)
+}
+
+/// `masked_select(input, mask)` — return a 1-D tensor of the elements of
+/// `input` where `mask` is true, in flat C-order. Mirrors
+/// `torch.masked_select`. `mask` must have the same numel as `input`.
+///
+/// On CUDA (input + mask resident, same device) this runs a GPU stream
+/// compaction (crosslink #1185 Phase 3c): an on-device count of the true mask
+/// bytes sizes the output, then a compaction kernel writes the kept elements —
+/// the result stays GPU-resident. The single integer COUNT crosses to the host
+/// to size the data-dependent output; that scalar is the result SHAPE, not a
+/// data round-trip (PyTorch parity: a CUDA sync sizes `masked_select`'s
+/// output). No gradient is attached (matches the host-mask masked ops here).
+pub fn masked_select<T: Float>(
+    input: &Tensor<T>,
+    mask: &crate::bool_tensor::BoolTensor,
+) -> FerrotorchResult<Tensor<T>> {
+    if mask.numel() != input.numel() {
+        return Err(FerrotorchError::ShapeMismatch {
+            message: format!(
+                "masked_select: mask numel {} != input numel {}",
+                mask.numel(),
+                input.numel()
+            ),
+        });
+    }
+
+    if input.is_cuda() && mask.is_cuda() {
+        if input.device() != mask.device() {
+            return Err(FerrotorchError::DeviceMismatch {
+                expected: input.device(),
+                got: mask.device(),
+            });
+        }
+        let backend =
+            crate::gpu_dispatch::gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
+        let (handle, len) = backend.masked_select(input.gpu_handle()?, mask.gpu_handle()?)?;
+        return Tensor::from_storage(TensorStorage::gpu(handle), vec![len], false);
+    }
+
+    // CPU (or mixed-residency) path: walk the host data + mask. `mask.data()?` /
+    // `input.data_vec()` error on a GPU operand whose counterpart is on host,
+    // which is the correct device-mismatch signal.
+    let data = input.data_vec()?;
+    let mask_h = mask.data()?;
+    let out: Vec<T> = data
+        .iter()
+        .zip(mask_h.iter())
+        .filter_map(|(&v, &m)| if m { Some(v) } else { None })
+        .collect();
+    let len = out.len();
+    Tensor::from_storage(TensorStorage::cpu(out), vec![len], false)
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------

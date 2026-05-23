@@ -171,7 +171,9 @@ pub use masked::{
 pub use methods::{chunk_t, contiguous_t, permute_t, split_t, view_t};
 pub use nested::{NestedTensor, PackedNestedTensor, nested_scaled_dot_product_attention};
 pub use ops::cumulative::CumExtremeResult;
-pub use ops::indexing::{gather, scatter, scatter_add, where_cond};
+pub use ops::indexing::{
+    gather, masked_select, scatter, scatter_add, where_cond, where_cond_bt,
+};
 pub use ops::scatter::scatter_add_segments;
 pub use ops::search::{bucketize, histc, meshgrid, searchsorted, topk, unique, unique_consecutive};
 pub use ops::tensor_ops::{cdist, diag, diagflat, roll, tril, triu};

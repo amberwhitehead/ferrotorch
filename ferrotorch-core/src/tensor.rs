@@ -1112,6 +1112,40 @@ impl<T: Float> Tensor<T> {
             })
     }
 
+    /// `masked_fill(mask, value)` — `out[i] = mask[i] ? value : self[i]`,
+    /// returning a new tensor of the same shape (mask convention "true → fill",
+    /// matching `torch.Tensor.masked_fill`). `mask` must have the same numel as
+    /// `self` and live on the same device.
+    ///
+    /// When both `self` and `mask` are CUDA-resident, the fill runs on the GPU
+    /// (real PTX kernel dispatched on `self`'s dtype) and the result stays
+    /// GPU-resident — NO host crossing (crosslink #1185 Phase 3c). Otherwise it
+    /// takes the CPU path. Carries a `MaskedFillBackward` grad_fn when grad is
+    /// required.
+    #[inline]
+    pub fn masked_fill(
+        &self,
+        mask: &crate::bool_tensor::BoolTensor,
+        value: T,
+    ) -> FerrotorchResult<Tensor<T>> {
+        crate::grad_fns::indexing::masked_fill_bt(self, mask, value)
+    }
+
+    /// `masked_select(mask)` — return a 1-D tensor of the elements of `self`
+    /// where `mask` is true, in flat C-order (`torch.Tensor.masked_select`).
+    ///
+    /// On CUDA (self + mask resident, same device) this runs a GPU stream
+    /// compaction; the result stays GPU-resident. The single output-length
+    /// integer crosses to the host to size the data-dependent output (the result
+    /// shape, not a data round-trip — PyTorch parity).
+    #[inline]
+    pub fn masked_select(
+        &self,
+        mask: &crate::bool_tensor::BoolTensor,
+    ) -> FerrotorchResult<Tensor<T>> {
+        crate::ops::indexing::masked_select(self, mask)
+    }
+
     /// Borrow the underlying data as a mutable flat slice.
     ///
     /// # Safety

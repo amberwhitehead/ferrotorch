@@ -918,6 +918,45 @@ pub fn masked_fill_bt<T: Float>(
             ),
         });
     }
+
+    // GPU-resident fast path (crosslink #1185 Phase 3c): both input and mask
+    // live on CUDA — dispatch on input.dtype() through the resident-bool kernel.
+    // The mask is the resident `DType::Bool` buffer; NO float-mask upload, NO
+    // host crossing. The fill `value` is the only scalar passed (as f64; halves
+    // narrow it in-kernel). Requires same device for both operands.
+    if input.is_cuda() && mask.is_cuda() {
+        if input.device() != mask.device() {
+            return Err(FerrotorchError::DeviceMismatch {
+                expected: input.device(),
+                got: mask.device(),
+            });
+        }
+        let backend = gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
+        let value_f64 = num_traits::ToPrimitive::to_f64(&value).unwrap_or(0.0);
+        let result_handle =
+            backend.masked_fill_dt(input.gpu_handle()?, mask.gpu_handle()?, value_f64)?;
+        let storage = TensorStorage::gpu(result_handle);
+        let output_shape = input.shape().to_vec();
+
+        if input.requires_grad() && is_grad_enabled() {
+            // Autograd needs the boolean mask host-side for the masked-zero VJP.
+            // The grad case is rare for masked_fill (attention masks don't carry
+            // grad); pulling the mask to host once here keeps the backward
+            // working without a resident-bool backward kernel (a follow-up).
+            let mask_cpu = mask.to(Device::Cpu)?;
+            let grad_fn = Arc::new(MaskedFillBackward {
+                input: input.clone(),
+                mask: mask_cpu.data()?.to_vec(),
+            });
+            return Tensor::from_operation(storage, output_shape, grad_fn);
+        }
+        return Tensor::from_storage(storage, output_shape, false);
+    }
+
+    // CPU (or mixed-residency) path: delegate to the host `&[bool]` variant,
+    // which itself handles a CUDA `input` with a host mask (legacy float-mask
+    // upload). `mask.data()?` errors if the mask is on GPU but input is not,
+    // which is the correct device-mismatch signal.
     masked_fill(input, mask.data()?, value)
 }
 

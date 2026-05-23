@@ -154,6 +154,8 @@ pub mod reduce_arg;
 #[cfg(feature = "cuda")]
 pub mod cast_kernels;
 #[cfg(feature = "cuda")]
+pub mod masked_kernels;
+#[cfg(feature = "cuda")]
 pub mod gather_int;
 pub mod blas;
 pub mod buffer;
