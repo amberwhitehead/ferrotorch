@@ -324,6 +324,46 @@ impl CudaBackendImpl {
             })
     }
 
+    /// Wrap a raw `CudaSlice<i32>` (the native integer kernel result type)
+    /// into a non-pooled [`CudaBuffer<i32>`] and then a `DType::I32`-tagged
+    /// [`GpuBufferHandle`]. Mirror of `wrap_buffer_i32` for the
+    /// `crate::int_kernels` (#1185 Phase 2b) output, which produces a bare
+    /// `CudaSlice` rather than a `CudaBuffer`.
+    #[cfg(feature = "cuda")]
+    fn wrap_slice_i32(
+        slice: cudarc::driver::CudaSlice<i32>,
+        ordinal: usize,
+    ) -> GpuBufferHandle {
+        let len = slice.len();
+        let buf = CudaBuffer {
+            data: Some(slice),
+            len,
+            alloc_len: len,
+            device_ordinal: ordinal,
+            pool_fn: None,
+        };
+        Self::wrap_buffer_i32(buf, ordinal)
+    }
+
+    /// Wrap a raw `CudaSlice<i64>` into a `DType::I64`-tagged
+    /// [`GpuBufferHandle`] (#1185 Phase 2b). Counterpart of
+    /// [`Self::wrap_slice_i32`].
+    #[cfg(feature = "cuda")]
+    fn wrap_slice_i64(
+        slice: cudarc::driver::CudaSlice<i64>,
+        ordinal: usize,
+    ) -> GpuBufferHandle {
+        let len = slice.len();
+        let buf = CudaBuffer {
+            data: Some(slice),
+            len,
+            alloc_len: len,
+            device_ordinal: ordinal,
+            pool_fn: None,
+        };
+        Self::wrap_buffer_i64(buf, ordinal)
+    }
+
     /// Convert a [`crate::error::GpuError`] into a [`FerrotorchError`].
     fn map_gpu_err(e: crate::error::GpuError) -> FerrotorchError {
         FerrotorchError::InvalidArgument {
@@ -5369,6 +5409,401 @@ impl GpuBackend for CudaBackendImpl {
         let result =
             crate::blas::gpu_matmul_f16_f16(a_buf, b_buf, m, k, n, dev).map_err(Self::map_gpu_err)?;
         Ok(Self::wrap_buffer_f16(result, a.device_ordinal()))
+    }
+
+    // ── Integer (i32 / i64) ops — crosslink #1185 Phase 2b ───────────────────
+    //
+    // Runtime dispatch on the ScalarType tag (PyTorch style): each method
+    // switches on `a.dtype()`, unwraps with the tag-asserting Phase-2a
+    // `unwrap_buffer_i32`/`i64` (rejecting a mismatched tag), launches the
+    // matching `crate::int_kernels::gpu_*_i{32,64}` PTX kernel on the native
+    // integer buffer, and re-wraps the resident `CudaSlice` result with
+    // `wrap_slice_i{32,64}` (correct DType tag). No f32/f64 detour, no host
+    // round-trip. An unsupported tag returns `NotImplementedOnCuda` (PyTorch
+    // parity — rust-gpu-discipline §3).
+
+    #[cfg(feature = "cuda")]
+    fn int_add(
+        &self,
+        a: &GpuBufferHandle,
+        b: &GpuBufferHandle,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        let dev = self.device(a.device_ordinal())?;
+        match a.dtype() {
+            DType::I32 => {
+                let av = Self::unwrap_buffer_i32(a)?;
+                let bv = Self::unwrap_buffer_i32(b)?;
+                let r = crate::int_kernels::gpu_add_i32(av.inner(), bv.inner(), dev)
+                    .map_err(Self::map_gpu_err)?;
+                Ok(Self::wrap_slice_i32(r, a.device_ordinal()))
+            }
+            DType::I64 => {
+                let av = Self::unwrap_buffer_i64(a)?;
+                let bv = Self::unwrap_buffer_i64(b)?;
+                let r = crate::int_kernels::gpu_add_i64(av.inner(), bv.inner(), dev)
+                    .map_err(Self::map_gpu_err)?;
+                Ok(Self::wrap_slice_i64(r, a.device_ordinal()))
+            }
+            _ => Err(FerrotorchError::NotImplementedOnCuda { op: "int_add" }),
+        }
+    }
+
+    #[cfg(feature = "cuda")]
+    fn int_sub(
+        &self,
+        a: &GpuBufferHandle,
+        b: &GpuBufferHandle,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        let dev = self.device(a.device_ordinal())?;
+        match a.dtype() {
+            DType::I32 => {
+                let av = Self::unwrap_buffer_i32(a)?;
+                let bv = Self::unwrap_buffer_i32(b)?;
+                let r = crate::int_kernels::gpu_sub_i32(av.inner(), bv.inner(), dev)
+                    .map_err(Self::map_gpu_err)?;
+                Ok(Self::wrap_slice_i32(r, a.device_ordinal()))
+            }
+            DType::I64 => {
+                let av = Self::unwrap_buffer_i64(a)?;
+                let bv = Self::unwrap_buffer_i64(b)?;
+                let r = crate::int_kernels::gpu_sub_i64(av.inner(), bv.inner(), dev)
+                    .map_err(Self::map_gpu_err)?;
+                Ok(Self::wrap_slice_i64(r, a.device_ordinal()))
+            }
+            _ => Err(FerrotorchError::NotImplementedOnCuda { op: "int_sub" }),
+        }
+    }
+
+    #[cfg(feature = "cuda")]
+    fn int_mul(
+        &self,
+        a: &GpuBufferHandle,
+        b: &GpuBufferHandle,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        let dev = self.device(a.device_ordinal())?;
+        match a.dtype() {
+            DType::I32 => {
+                let av = Self::unwrap_buffer_i32(a)?;
+                let bv = Self::unwrap_buffer_i32(b)?;
+                let r = crate::int_kernels::gpu_mul_i32(av.inner(), bv.inner(), dev)
+                    .map_err(Self::map_gpu_err)?;
+                Ok(Self::wrap_slice_i32(r, a.device_ordinal()))
+            }
+            DType::I64 => {
+                let av = Self::unwrap_buffer_i64(a)?;
+                let bv = Self::unwrap_buffer_i64(b)?;
+                let r = crate::int_kernels::gpu_mul_i64(av.inner(), bv.inner(), dev)
+                    .map_err(Self::map_gpu_err)?;
+                Ok(Self::wrap_slice_i64(r, a.device_ordinal()))
+            }
+            _ => Err(FerrotorchError::NotImplementedOnCuda { op: "int_mul" }),
+        }
+    }
+
+    #[cfg(feature = "cuda")]
+    fn int_neg(&self, a: &GpuBufferHandle) -> FerrotorchResult<GpuBufferHandle> {
+        let dev = self.device(a.device_ordinal())?;
+        match a.dtype() {
+            DType::I32 => {
+                let av = Self::unwrap_buffer_i32(a)?;
+                let r = crate::int_kernels::gpu_neg_i32(av.inner(), dev)
+                    .map_err(Self::map_gpu_err)?;
+                Ok(Self::wrap_slice_i32(r, a.device_ordinal()))
+            }
+            DType::I64 => {
+                let av = Self::unwrap_buffer_i64(a)?;
+                let r = crate::int_kernels::gpu_neg_i64(av.inner(), dev)
+                    .map_err(Self::map_gpu_err)?;
+                Ok(Self::wrap_slice_i64(r, a.device_ordinal()))
+            }
+            _ => Err(FerrotorchError::NotImplementedOnCuda { op: "int_neg" }),
+        }
+    }
+
+    #[cfg(feature = "cuda")]
+    fn int_floor_div(
+        &self,
+        a: &GpuBufferHandle,
+        b: &GpuBufferHandle,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        let dev = self.device(a.device_ordinal())?;
+        match a.dtype() {
+            DType::I32 => {
+                let av = Self::unwrap_buffer_i32(a)?;
+                let bv = Self::unwrap_buffer_i32(b)?;
+                let r = crate::int_kernels::gpu_floor_div_i32(av.inner(), bv.inner(), dev)
+                    .map_err(Self::map_gpu_err)?;
+                Ok(Self::wrap_slice_i32(r, a.device_ordinal()))
+            }
+            DType::I64 => {
+                let av = Self::unwrap_buffer_i64(a)?;
+                let bv = Self::unwrap_buffer_i64(b)?;
+                let r = crate::int_kernels::gpu_floor_div_i64(av.inner(), bv.inner(), dev)
+                    .map_err(Self::map_gpu_err)?;
+                Ok(Self::wrap_slice_i64(r, a.device_ordinal()))
+            }
+            _ => Err(FerrotorchError::NotImplementedOnCuda {
+                op: "int_floor_div",
+            }),
+        }
+    }
+
+    #[cfg(feature = "cuda")]
+    fn int_remainder(
+        &self,
+        a: &GpuBufferHandle,
+        b: &GpuBufferHandle,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        let dev = self.device(a.device_ordinal())?;
+        match a.dtype() {
+            DType::I32 => {
+                let av = Self::unwrap_buffer_i32(a)?;
+                let bv = Self::unwrap_buffer_i32(b)?;
+                let r = crate::int_kernels::gpu_remainder_i32(av.inner(), bv.inner(), dev)
+                    .map_err(Self::map_gpu_err)?;
+                Ok(Self::wrap_slice_i32(r, a.device_ordinal()))
+            }
+            DType::I64 => {
+                let av = Self::unwrap_buffer_i64(a)?;
+                let bv = Self::unwrap_buffer_i64(b)?;
+                let r = crate::int_kernels::gpu_remainder_i64(av.inner(), bv.inner(), dev)
+                    .map_err(Self::map_gpu_err)?;
+                Ok(Self::wrap_slice_i64(r, a.device_ordinal()))
+            }
+            _ => Err(FerrotorchError::NotImplementedOnCuda {
+                op: "int_remainder",
+            }),
+        }
+    }
+
+    #[cfg(feature = "cuda")]
+    fn int_bitand(
+        &self,
+        a: &GpuBufferHandle,
+        b: &GpuBufferHandle,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        let dev = self.device(a.device_ordinal())?;
+        match a.dtype() {
+            DType::I32 => {
+                let av = Self::unwrap_buffer_i32(a)?;
+                let bv = Self::unwrap_buffer_i32(b)?;
+                let r = crate::int_kernels::gpu_bitand_i32(av.inner(), bv.inner(), dev)
+                    .map_err(Self::map_gpu_err)?;
+                Ok(Self::wrap_slice_i32(r, a.device_ordinal()))
+            }
+            DType::I64 => {
+                let av = Self::unwrap_buffer_i64(a)?;
+                let bv = Self::unwrap_buffer_i64(b)?;
+                let r = crate::int_kernels::gpu_bitand_i64(av.inner(), bv.inner(), dev)
+                    .map_err(Self::map_gpu_err)?;
+                Ok(Self::wrap_slice_i64(r, a.device_ordinal()))
+            }
+            _ => Err(FerrotorchError::NotImplementedOnCuda { op: "int_bitand" }),
+        }
+    }
+
+    #[cfg(feature = "cuda")]
+    fn int_bitor(
+        &self,
+        a: &GpuBufferHandle,
+        b: &GpuBufferHandle,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        let dev = self.device(a.device_ordinal())?;
+        match a.dtype() {
+            DType::I32 => {
+                let av = Self::unwrap_buffer_i32(a)?;
+                let bv = Self::unwrap_buffer_i32(b)?;
+                let r = crate::int_kernels::gpu_bitor_i32(av.inner(), bv.inner(), dev)
+                    .map_err(Self::map_gpu_err)?;
+                Ok(Self::wrap_slice_i32(r, a.device_ordinal()))
+            }
+            DType::I64 => {
+                let av = Self::unwrap_buffer_i64(a)?;
+                let bv = Self::unwrap_buffer_i64(b)?;
+                let r = crate::int_kernels::gpu_bitor_i64(av.inner(), bv.inner(), dev)
+                    .map_err(Self::map_gpu_err)?;
+                Ok(Self::wrap_slice_i64(r, a.device_ordinal()))
+            }
+            _ => Err(FerrotorchError::NotImplementedOnCuda { op: "int_bitor" }),
+        }
+    }
+
+    #[cfg(feature = "cuda")]
+    fn int_bitxor(
+        &self,
+        a: &GpuBufferHandle,
+        b: &GpuBufferHandle,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        let dev = self.device(a.device_ordinal())?;
+        match a.dtype() {
+            DType::I32 => {
+                let av = Self::unwrap_buffer_i32(a)?;
+                let bv = Self::unwrap_buffer_i32(b)?;
+                let r = crate::int_kernels::gpu_bitxor_i32(av.inner(), bv.inner(), dev)
+                    .map_err(Self::map_gpu_err)?;
+                Ok(Self::wrap_slice_i32(r, a.device_ordinal()))
+            }
+            DType::I64 => {
+                let av = Self::unwrap_buffer_i64(a)?;
+                let bv = Self::unwrap_buffer_i64(b)?;
+                let r = crate::int_kernels::gpu_bitxor_i64(av.inner(), bv.inner(), dev)
+                    .map_err(Self::map_gpu_err)?;
+                Ok(Self::wrap_slice_i64(r, a.device_ordinal()))
+            }
+            _ => Err(FerrotorchError::NotImplementedOnCuda { op: "int_bitxor" }),
+        }
+    }
+
+    #[cfg(feature = "cuda")]
+    fn int_bitnot(&self, a: &GpuBufferHandle) -> FerrotorchResult<GpuBufferHandle> {
+        let dev = self.device(a.device_ordinal())?;
+        match a.dtype() {
+            DType::I32 => {
+                let av = Self::unwrap_buffer_i32(a)?;
+                let r = crate::int_kernels::gpu_bitnot_i32(av.inner(), dev)
+                    .map_err(Self::map_gpu_err)?;
+                Ok(Self::wrap_slice_i32(r, a.device_ordinal()))
+            }
+            DType::I64 => {
+                let av = Self::unwrap_buffer_i64(a)?;
+                let r = crate::int_kernels::gpu_bitnot_i64(av.inner(), dev)
+                    .map_err(Self::map_gpu_err)?;
+                Ok(Self::wrap_slice_i64(r, a.device_ordinal()))
+            }
+            _ => Err(FerrotorchError::NotImplementedOnCuda { op: "int_bitnot" }),
+        }
+    }
+
+    #[cfg(feature = "cuda")]
+    fn int_shl(
+        &self,
+        a: &GpuBufferHandle,
+        b: &GpuBufferHandle,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        let dev = self.device(a.device_ordinal())?;
+        match a.dtype() {
+            DType::I32 => {
+                let av = Self::unwrap_buffer_i32(a)?;
+                let bv = Self::unwrap_buffer_i32(b)?;
+                let r = crate::int_kernels::gpu_shl_i32(av.inner(), bv.inner(), dev)
+                    .map_err(Self::map_gpu_err)?;
+                Ok(Self::wrap_slice_i32(r, a.device_ordinal()))
+            }
+            DType::I64 => {
+                let av = Self::unwrap_buffer_i64(a)?;
+                let bv = Self::unwrap_buffer_i64(b)?;
+                let r = crate::int_kernels::gpu_shl_i64(av.inner(), bv.inner(), dev)
+                    .map_err(Self::map_gpu_err)?;
+                Ok(Self::wrap_slice_i64(r, a.device_ordinal()))
+            }
+            _ => Err(FerrotorchError::NotImplementedOnCuda { op: "int_shl" }),
+        }
+    }
+
+    #[cfg(feature = "cuda")]
+    fn int_shr(
+        &self,
+        a: &GpuBufferHandle,
+        b: &GpuBufferHandle,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        let dev = self.device(a.device_ordinal())?;
+        match a.dtype() {
+            DType::I32 => {
+                let av = Self::unwrap_buffer_i32(a)?;
+                let bv = Self::unwrap_buffer_i32(b)?;
+                let r = crate::int_kernels::gpu_shr_i32(av.inner(), bv.inner(), dev)
+                    .map_err(Self::map_gpu_err)?;
+                Ok(Self::wrap_slice_i32(r, a.device_ordinal()))
+            }
+            DType::I64 => {
+                let av = Self::unwrap_buffer_i64(a)?;
+                let bv = Self::unwrap_buffer_i64(b)?;
+                let r = crate::int_kernels::gpu_shr_i64(av.inner(), bv.inner(), dev)
+                    .map_err(Self::map_gpu_err)?;
+                Ok(Self::wrap_slice_i64(r, a.device_ordinal()))
+            }
+            _ => Err(FerrotorchError::NotImplementedOnCuda { op: "int_shr" }),
+        }
+    }
+
+    #[cfg(feature = "cuda")]
+    fn int_sum(&self, a: &GpuBufferHandle) -> FerrotorchResult<GpuBufferHandle> {
+        let dev = self.device(a.device_ordinal())?;
+        match a.dtype() {
+            DType::I32 => {
+                let av = Self::unwrap_buffer_i32(a)?;
+                let r = crate::int_kernels::gpu_sum_i32(av.inner(), dev)
+                    .map_err(Self::map_gpu_err)?;
+                Ok(Self::wrap_slice_i32(r, a.device_ordinal()))
+            }
+            DType::I64 => {
+                let av = Self::unwrap_buffer_i64(a)?;
+                let r = crate::int_kernels::gpu_sum_i64(av.inner(), dev)
+                    .map_err(Self::map_gpu_err)?;
+                Ok(Self::wrap_slice_i64(r, a.device_ordinal()))
+            }
+            _ => Err(FerrotorchError::NotImplementedOnCuda { op: "int_sum" }),
+        }
+    }
+
+    #[cfg(feature = "cuda")]
+    fn int_prod(&self, a: &GpuBufferHandle) -> FerrotorchResult<GpuBufferHandle> {
+        let dev = self.device(a.device_ordinal())?;
+        match a.dtype() {
+            DType::I32 => {
+                let av = Self::unwrap_buffer_i32(a)?;
+                let r = crate::int_kernels::gpu_prod_i32(av.inner(), dev)
+                    .map_err(Self::map_gpu_err)?;
+                Ok(Self::wrap_slice_i32(r, a.device_ordinal()))
+            }
+            DType::I64 => {
+                let av = Self::unwrap_buffer_i64(a)?;
+                let r = crate::int_kernels::gpu_prod_i64(av.inner(), dev)
+                    .map_err(Self::map_gpu_err)?;
+                Ok(Self::wrap_slice_i64(r, a.device_ordinal()))
+            }
+            _ => Err(FerrotorchError::NotImplementedOnCuda { op: "int_prod" }),
+        }
+    }
+
+    #[cfg(feature = "cuda")]
+    fn int_min(&self, a: &GpuBufferHandle) -> FerrotorchResult<GpuBufferHandle> {
+        let dev = self.device(a.device_ordinal())?;
+        match a.dtype() {
+            DType::I32 => {
+                let av = Self::unwrap_buffer_i32(a)?;
+                let r = crate::int_kernels::gpu_min_i32(av.inner(), dev)
+                    .map_err(Self::map_gpu_err)?;
+                Ok(Self::wrap_slice_i32(r, a.device_ordinal()))
+            }
+            DType::I64 => {
+                let av = Self::unwrap_buffer_i64(a)?;
+                let r = crate::int_kernels::gpu_min_i64(av.inner(), dev)
+                    .map_err(Self::map_gpu_err)?;
+                Ok(Self::wrap_slice_i64(r, a.device_ordinal()))
+            }
+            _ => Err(FerrotorchError::NotImplementedOnCuda { op: "int_min" }),
+        }
+    }
+
+    #[cfg(feature = "cuda")]
+    fn int_max(&self, a: &GpuBufferHandle) -> FerrotorchResult<GpuBufferHandle> {
+        let dev = self.device(a.device_ordinal())?;
+        match a.dtype() {
+            DType::I32 => {
+                let av = Self::unwrap_buffer_i32(a)?;
+                let r = crate::int_kernels::gpu_max_i32(av.inner(), dev)
+                    .map_err(Self::map_gpu_err)?;
+                Ok(Self::wrap_slice_i32(r, a.device_ordinal()))
+            }
+            DType::I64 => {
+                let av = Self::unwrap_buffer_i64(a)?;
+                let r = crate::int_kernels::gpu_max_i64(av.inner(), dev)
+                    .map_err(Self::map_gpu_err)?;
+                Ok(Self::wrap_slice_i64(r, a.device_ordinal()))
+            }
+            _ => Err(FerrotorchError::NotImplementedOnCuda { op: "int_max" }),
+        }
     }
 }
 

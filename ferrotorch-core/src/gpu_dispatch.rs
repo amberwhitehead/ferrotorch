@@ -3776,6 +3776,145 @@ pub trait GpuBackend: Send + Sync {
     ) -> FerrotorchResult<GpuBufferHandle> {
         Err(FerrotorchError::NotImplementedOnCuda { op: "matmul_f16_f16" })
     }
+
+    // ── Integer (i32 / i64) ops — crosslink #1185 Phase 2b ───────────────────
+    //
+    // Runtime dispatch on the ScalarType tag (PyTorch style): ONE trait method
+    // per op, which switches on `a.dtype()` internally in the CUDA backend
+    // (`DType::I32` → i32 kernel, `DType::I64` → i64 kernel, else structured
+    // error). This mirrors PyTorch's dispatcher routing on `ScalarType` rather
+    // than minting a separate symbol per (op, width). Native `CudaBuffer<i32>`
+    // / `CudaBuffer<i64>` storage — no `CudaSlice<u16>` bit-pattern trick, no
+    // f32/f64 detour, no host round-trip. Each default body returns a
+    // structured error so non-CUDA backends compile unchanged; `CudaBackendImpl`
+    // overrides them in `ferrotorch-gpu::backend_impl`.
+
+    /// Integer elementwise `out = a + b` (i32 / i64, wrapping on overflow).
+    /// Dispatches on `a.dtype()`. Inputs must be same width and length.
+    fn int_add(
+        &self,
+        _a: &GpuBufferHandle,
+        _b: &GpuBufferHandle,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::NotImplementedOnCuda { op: "int_add" })
+    }
+
+    /// Integer elementwise `out = a - b` (i32 / i64, wrapping).
+    fn int_sub(
+        &self,
+        _a: &GpuBufferHandle,
+        _b: &GpuBufferHandle,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::NotImplementedOnCuda { op: "int_sub" })
+    }
+
+    /// Integer elementwise `out = a * b` (i32 / i64, wrapping).
+    fn int_mul(
+        &self,
+        _a: &GpuBufferHandle,
+        _b: &GpuBufferHandle,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::NotImplementedOnCuda { op: "int_mul" })
+    }
+
+    /// Integer elementwise negate `out = -a`.
+    fn int_neg(&self, _a: &GpuBufferHandle) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::NotImplementedOnCuda { op: "int_neg" })
+    }
+
+    /// Integer floor division `out = floor_divide(a, b)` (floors toward −∞,
+    /// `torch.floor_divide` semantics — NOT C truncation).
+    fn int_floor_div(
+        &self,
+        _a: &GpuBufferHandle,
+        _b: &GpuBufferHandle,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::NotImplementedOnCuda { op: "int_floor_div" })
+    }
+
+    /// Integer remainder `out = remainder(a, b)` (sign of the DIVISOR,
+    /// `torch.remainder` / Python semantics — NOT C `%`).
+    fn int_remainder(
+        &self,
+        _a: &GpuBufferHandle,
+        _b: &GpuBufferHandle,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::NotImplementedOnCuda {
+            op: "int_remainder",
+        })
+    }
+
+    /// Integer elementwise bitwise AND.
+    fn int_bitand(
+        &self,
+        _a: &GpuBufferHandle,
+        _b: &GpuBufferHandle,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::NotImplementedOnCuda { op: "int_bitand" })
+    }
+
+    /// Integer elementwise bitwise OR.
+    fn int_bitor(
+        &self,
+        _a: &GpuBufferHandle,
+        _b: &GpuBufferHandle,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::NotImplementedOnCuda { op: "int_bitor" })
+    }
+
+    /// Integer elementwise bitwise XOR.
+    fn int_bitxor(
+        &self,
+        _a: &GpuBufferHandle,
+        _b: &GpuBufferHandle,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::NotImplementedOnCuda { op: "int_bitxor" })
+    }
+
+    /// Integer elementwise bitwise NOT `out = !a`.
+    fn int_bitnot(&self, _a: &GpuBufferHandle) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::NotImplementedOnCuda { op: "int_bitnot" })
+    }
+
+    /// Integer elementwise left shift `out = a << b`.
+    fn int_shl(
+        &self,
+        _a: &GpuBufferHandle,
+        _b: &GpuBufferHandle,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::NotImplementedOnCuda { op: "int_shl" })
+    }
+
+    /// Integer elementwise arithmetic right shift `out = a >> b`
+    /// (sign-extending, matching PyTorch `__rshift__` on signed dtypes).
+    fn int_shr(
+        &self,
+        _a: &GpuBufferHandle,
+        _b: &GpuBufferHandle,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::NotImplementedOnCuda { op: "int_shr" })
+    }
+
+    /// Integer sum-reduce to a 1-element buffer (same width accumulator,
+    /// wrapping — PyTorch does NOT upcast integer `sum`).
+    fn int_sum(&self, _a: &GpuBufferHandle) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::NotImplementedOnCuda { op: "int_sum" })
+    }
+
+    /// Integer product-reduce to a 1-element buffer (same width, wrapping).
+    fn int_prod(&self, _a: &GpuBufferHandle) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::NotImplementedOnCuda { op: "int_prod" })
+    }
+
+    /// Integer min-reduce to a 1-element buffer.
+    fn int_min(&self, _a: &GpuBufferHandle) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::NotImplementedOnCuda { op: "int_min" })
+    }
+
+    /// Integer max-reduce to a 1-element buffer.
+    fn int_max(&self, _a: &GpuBufferHandle) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::NotImplementedOnCuda { op: "int_max" })
+    }
 }
 
 static GPU_BACKEND: OnceLock<Box<dyn GpuBackend>> = OnceLock::new();

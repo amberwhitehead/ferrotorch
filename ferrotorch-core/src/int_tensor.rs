@@ -403,6 +403,374 @@ impl<I: IntElement> IntTensor<I> {
             shape: shape.to_vec(),
         })
     }
+
+    // ── Compute ops (CPU + GPU, runtime dispatch) — #1185 Phase 2b ───────────
+    //
+    // Each op runs on CUDA when `self.is_cuda()` (real PTX kernel, the result
+    // stays GPU-resident — no `.to(Cpu)`, no host readback), and on CPU
+    // otherwise via a simple correct reference loop matching the SAME
+    // PyTorch semantics the GPU kernels implement (esp. the floor_divide /
+    // remainder sign rules and arithmetic shr). Binary ops require both
+    // operands on the same device and the same shape (broadcasting is out of
+    // scope for Phase 2b); a mismatch is a structured error, never a silent
+    // device-mix or CPU detour (rust-gpu-discipline §3).
+
+    /// Construct a GPU-resident `IntTensor` from a CUDA buffer handle + shape.
+    ///
+    /// The handle must carry the matching `DType` tag (`I32` / `I64`) — this
+    /// is what every Phase-2b GPU op returns. Mirrors
+    /// `Tensor::from_storage(TensorStorage::gpu(h), ...)`.
+    fn from_gpu_handle(handle: GpuBufferHandle, shape: Vec<usize>) -> Self {
+        debug_assert_eq!(
+            handle.dtype(),
+            I::dtype(),
+            "from_gpu_handle: handle dtype tag must match IntElement"
+        );
+        Self {
+            storage: TensorStorage::gpu(handle),
+            shape,
+        }
+    }
+
+    /// Assert both operands live on the same device and have the same shape.
+    fn check_binary(&self, other: &IntTensor<I>, op: &'static str) -> FerrotorchResult<()> {
+        if self.device() != other.device() {
+            return Err(FerrotorchError::DeviceMismatch {
+                expected: self.device(),
+                got: other.device(),
+            });
+        }
+        if self.shape != other.shape {
+            return Err(FerrotorchError::ShapeMismatch {
+                message: format!(
+                    "IntTensor::{op}: operand shapes differ {:?} vs {:?} \
+                     (broadcasting is out of scope for Phase 2b — same shape only)",
+                    self.shape, other.shape
+                ),
+            });
+        }
+        Ok(())
+    }
+
+    /// Run a binary op: GPU kernel when CUDA-resident, else CPU reference `f`.
+    fn binary_op(
+        &self,
+        other: &IntTensor<I>,
+        op: &'static str,
+        gpu: impl FnOnce(
+            &dyn crate::gpu_dispatch::GpuBackend,
+            &GpuBufferHandle,
+            &GpuBufferHandle,
+        ) -> FerrotorchResult<GpuBufferHandle>,
+        f: impl Fn(I, I) -> I,
+    ) -> FerrotorchResult<IntTensor<I>> {
+        self.check_binary(other, op)?;
+        if self.is_cuda() {
+            let backend =
+                crate::gpu_dispatch::gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
+            let h = gpu(backend, self.gpu_handle()?, other.gpu_handle()?)?;
+            Ok(IntTensor::from_gpu_handle(h, self.shape.clone()))
+        } else {
+            let a = self.data()?;
+            let b = other.data()?;
+            let out: Vec<I> = a.iter().zip(b.iter()).map(|(&x, &y)| f(x, y)).collect();
+            IntTensor::from_vec(out, self.shape.clone())
+        }
+    }
+
+    /// Run a unary op: GPU kernel when CUDA-resident, else CPU reference `f`.
+    fn unary_op(
+        &self,
+        gpu: impl FnOnce(
+            &dyn crate::gpu_dispatch::GpuBackend,
+            &GpuBufferHandle,
+        ) -> FerrotorchResult<GpuBufferHandle>,
+        f: impl Fn(I) -> I,
+    ) -> FerrotorchResult<IntTensor<I>> {
+        if self.is_cuda() {
+            let backend =
+                crate::gpu_dispatch::gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
+            let h = gpu(backend, self.gpu_handle()?)?;
+            Ok(IntTensor::from_gpu_handle(h, self.shape.clone()))
+        } else {
+            let a = self.data()?;
+            let out: Vec<I> = a.iter().map(|&x| f(x)).collect();
+            IntTensor::from_vec(out, self.shape.clone())
+        }
+    }
+
+    /// Run a reduction: GPU kernel when CUDA-resident, else CPU left-fold `f`
+    /// seeded by the first element. Returns a 0-d (scalar) tensor (numel 1).
+    fn reduce_op(
+        &self,
+        op: &'static str,
+        gpu: impl FnOnce(
+            &dyn crate::gpu_dispatch::GpuBackend,
+            &GpuBufferHandle,
+        ) -> FerrotorchResult<GpuBufferHandle>,
+        empty: Option<I>,
+        f: impl Fn(I, I) -> I,
+    ) -> FerrotorchResult<IntTensor<I>> {
+        if self.is_cuda() {
+            // Empty min/max are undefined in PyTorch; sum/prod have an identity.
+            if self.numel() == 0 {
+                match empty {
+                    Some(id) => return Ok(IntTensor::scalar(id)),
+                    None => {
+                        return Err(FerrotorchError::InvalidArgument {
+                            message: format!(
+                                "IntTensor::{op}: reduction of an empty tensor is undefined"
+                            ),
+                        });
+                    }
+                }
+            }
+            let backend =
+                crate::gpu_dispatch::gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
+            let h = gpu(backend, self.gpu_handle()?)?;
+            // Reductions collapse to a 0-d scalar (numel 1).
+            Ok(IntTensor::from_gpu_handle(h, Vec::new()))
+        } else {
+            let a = self.data()?;
+            match a.split_first() {
+                Some((&first, rest)) => {
+                    let acc = rest.iter().fold(first, |acc, &x| f(acc, x));
+                    Ok(IntTensor::scalar(acc))
+                }
+                None => match empty {
+                    Some(id) => Ok(IntTensor::scalar(id)),
+                    None => Err(FerrotorchError::InvalidArgument {
+                        message: format!(
+                            "IntTensor::{op}: reduction of an empty tensor is undefined"
+                        ),
+                    }),
+                },
+            }
+        }
+    }
+
+    /// Elementwise `a + b` (wrapping on overflow — PyTorch integer semantics).
+    pub fn add(&self, other: &IntTensor<I>) -> FerrotorchResult<IntTensor<I>> {
+        self.binary_op(
+            other,
+            "add",
+            |b, x, y| b.int_add(x, y),
+            |x, y| I::try_from_i64(x.to_i64().wrapping_add(y.to_i64())).unwrap_or(x),
+        )
+    }
+
+    /// Elementwise `a - b` (wrapping).
+    pub fn sub(&self, other: &IntTensor<I>) -> FerrotorchResult<IntTensor<I>> {
+        self.binary_op(
+            other,
+            "sub",
+            |b, x, y| b.int_sub(x, y),
+            |x, y| I::try_from_i64(x.to_i64().wrapping_sub(y.to_i64())).unwrap_or(x),
+        )
+    }
+
+    /// Elementwise `a * b` (wrapping).
+    pub fn mul(&self, other: &IntTensor<I>) -> FerrotorchResult<IntTensor<I>> {
+        self.binary_op(
+            other,
+            "mul",
+            |b, x, y| b.int_mul(x, y),
+            |x, y| int_wrapping_mul(x, y),
+        )
+    }
+
+    /// Elementwise negate `-a` (wrapping; `-i*::MIN == i*::MIN`).
+    pub fn neg(&self) -> FerrotorchResult<IntTensor<I>> {
+        self.unary_op(
+            |b, x| b.int_neg(x),
+            |x| I::try_from_i64(0_i64.wrapping_sub(x.to_i64())).unwrap_or(x),
+        )
+    }
+
+    /// Elementwise floor division (`torch.floor_divide`: floors toward −∞).
+    pub fn floor_div(&self, other: &IntTensor<I>) -> FerrotorchResult<IntTensor<I>> {
+        self.binary_op(
+            other,
+            "floor_div",
+            |b, x, y| b.int_floor_div(x, y),
+            int_floor_div_ref,
+        )
+    }
+
+    /// Elementwise remainder (`torch.remainder`: sign of the divisor).
+    pub fn remainder(&self, other: &IntTensor<I>) -> FerrotorchResult<IntTensor<I>> {
+        self.binary_op(
+            other,
+            "remainder",
+            |b, x, y| b.int_remainder(x, y),
+            int_remainder_ref,
+        )
+    }
+
+    /// Elementwise bitwise AND.
+    pub fn bitand(&self, other: &IntTensor<I>) -> FerrotorchResult<IntTensor<I>> {
+        self.binary_op(
+            other,
+            "bitand",
+            |b, x, y| b.int_bitand(x, y),
+            |x, y| I::try_from_i64(x.to_i64() & y.to_i64()).unwrap_or(x),
+        )
+    }
+
+    /// Elementwise bitwise OR.
+    pub fn bitor(&self, other: &IntTensor<I>) -> FerrotorchResult<IntTensor<I>> {
+        self.binary_op(
+            other,
+            "bitor",
+            |b, x, y| b.int_bitor(x, y),
+            |x, y| I::try_from_i64(x.to_i64() | y.to_i64()).unwrap_or(x),
+        )
+    }
+
+    /// Elementwise bitwise XOR.
+    pub fn bitxor(&self, other: &IntTensor<I>) -> FerrotorchResult<IntTensor<I>> {
+        self.binary_op(
+            other,
+            "bitxor",
+            |b, x, y| b.int_bitxor(x, y),
+            |x, y| I::try_from_i64(x.to_i64() ^ y.to_i64()).unwrap_or(x),
+        )
+    }
+
+    /// Elementwise bitwise NOT (`!a`).
+    pub fn bitnot(&self) -> FerrotorchResult<IntTensor<I>> {
+        self.unary_op(|b, x| b.int_bitnot(x), int_bitnot_ref)
+    }
+
+    /// Elementwise left shift `a << b`.
+    pub fn shl(&self, other: &IntTensor<I>) -> FerrotorchResult<IntTensor<I>> {
+        self.binary_op(other, "shl", |b, x, y| b.int_shl(x, y), int_shl_ref)
+    }
+
+    /// Elementwise arithmetic right shift `a >> b` (sign-extending).
+    pub fn shr(&self, other: &IntTensor<I>) -> FerrotorchResult<IntTensor<I>> {
+        self.binary_op(other, "shr", |b, x, y| b.int_shr(x, y), int_shr_ref)
+    }
+
+    /// Sum-reduce to a 0-d scalar (wrapping accumulator; identity 0 on empty).
+    pub fn sum(&self) -> FerrotorchResult<IntTensor<I>> {
+        self.reduce_op(
+            "sum",
+            |b, x| b.int_sum(x),
+            Some(I::try_from_i64(0).expect("0 fits any IntElement")),
+            |acc, x| I::try_from_i64(acc.to_i64().wrapping_add(x.to_i64())).unwrap_or(acc),
+        )
+    }
+
+    /// Product-reduce to a 0-d scalar (wrapping; identity 1 on empty).
+    pub fn prod(&self) -> FerrotorchResult<IntTensor<I>> {
+        self.reduce_op(
+            "prod",
+            |b, x| b.int_prod(x),
+            Some(I::try_from_i64(1).expect("1 fits any IntElement")),
+            int_wrapping_mul,
+        )
+    }
+
+    /// Min-reduce to a 0-d scalar (errors on empty, PyTorch parity).
+    pub fn min(&self) -> FerrotorchResult<IntTensor<I>> {
+        self.reduce_op(
+            "min",
+            |b, x| b.int_min(x),
+            None,
+            |acc, x| if x.to_i64() < acc.to_i64() { x } else { acc },
+        )
+    }
+
+    /// Max-reduce to a 0-d scalar (errors on empty, PyTorch parity).
+    pub fn max(&self) -> FerrotorchResult<IntTensor<I>> {
+        self.reduce_op(
+            "max",
+            |b, x| b.int_max(x),
+            None,
+            |acc, x| if x.to_i64() > acc.to_i64() { x } else { acc },
+        )
+    }
+}
+
+/// Wrapping integer multiply at the element type's width (matches the GPU
+/// `mul.lo.s{32,64}` kernel, which truncates to the operand width).
+fn int_wrapping_mul<I: IntElement>(x: I, y: I) -> I {
+    let prod = match I::BITS {
+        32 => (x.to_i64() as i32).wrapping_mul(y.to_i64() as i32) as i64,
+        _ => x.to_i64().wrapping_mul(y.to_i64()),
+    };
+    I::try_from_i64(prod).unwrap_or(x)
+}
+
+/// CPU reference for `torch.floor_divide`: truncated quotient corrected to
+/// floor toward −∞ (subtract 1 when the remainder is nonzero and the operand
+/// signs differ). Division by zero mirrors the GPU's implementation-defined
+/// result by returning 0 (PyTorch on CUDA does not trap; the value is
+/// unspecified, so we pick a stable sentinel rather than panicking).
+fn int_floor_div_ref<I: IntElement>(x: I, y: I) -> I {
+    let a = x.to_i64();
+    let b = y.to_i64();
+    if b == 0 {
+        return I::try_from_i64(0).unwrap_or(x);
+    }
+    let q = a.wrapping_div(b);
+    let r = a.wrapping_rem(b);
+    let q = if r != 0 && ((r < 0) != (b < 0)) {
+        q.wrapping_sub(1)
+    } else {
+        q
+    };
+    I::try_from_i64(q).unwrap_or(x)
+}
+
+/// CPU reference for `torch.remainder`: result has the sign of the divisor.
+/// `remainder(a,b) = a - floor_divide(a,b)*b`. Division by zero returns 0
+/// (see [`int_floor_div_ref`]).
+fn int_remainder_ref<I: IntElement>(x: I, y: I) -> I {
+    let a = x.to_i64();
+    let b = y.to_i64();
+    if b == 0 {
+        return I::try_from_i64(0).unwrap_or(x);
+    }
+    let r = a.wrapping_rem(b);
+    let r = if r != 0 && ((r < 0) != (b < 0)) {
+        r.wrapping_add(b)
+    } else {
+        r
+    };
+    I::try_from_i64(r).unwrap_or(x)
+}
+
+/// CPU reference for bitwise NOT at the element's width.
+fn int_bitnot_ref<I: IntElement>(x: I) -> I {
+    let v = match I::BITS {
+        32 => !(x.to_i64() as i32) as i64,
+        _ => !x.to_i64(),
+    };
+    I::try_from_i64(v).unwrap_or(x)
+}
+
+/// CPU reference for left shift at the element's width (logical, wrapping the
+/// shift count modulo the bit-width to match PTX `shl` on out-of-range counts).
+fn int_shl_ref<I: IntElement>(x: I, y: I) -> I {
+    let sh = (y.to_i64() as u32) & (I::BITS - 1);
+    let v = match I::BITS {
+        32 => ((x.to_i64() as i32).wrapping_shl(sh)) as i64,
+        _ => x.to_i64().wrapping_shl(sh),
+    };
+    I::try_from_i64(v).unwrap_or(x)
+}
+
+/// CPU reference for arithmetic (sign-extending) right shift at the element's
+/// width — matches PyTorch `__rshift__` on signed dtypes and PTX `shr.s`.
+fn int_shr_ref<I: IntElement>(x: I, y: I) -> I {
+    let sh = (y.to_i64() as u32) & (I::BITS - 1);
+    let v = match I::BITS {
+        32 => ((x.to_i64() as i32).wrapping_shr(sh)) as i64,
+        _ => x.to_i64().wrapping_shr(sh),
+    };
+    I::try_from_i64(v).unwrap_or(x)
 }
 
 impl<I: IntElement> std::fmt::Display for IntTensor<I> {

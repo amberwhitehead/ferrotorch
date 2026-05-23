@@ -145,6 +145,8 @@ pub mod backend_impl;
 pub mod bf16;
 #[cfg(feature = "cuda")]
 pub mod f16;
+#[cfg(feature = "cuda")]
+pub mod int_kernels;
 pub mod blas;
 pub mod buffer;
 pub mod conv;
