@@ -587,8 +587,8 @@ fn emit_chunked_reduction_prelude(
     init: f64,
     op: BinOpKind,
 ) -> (Vec<LoopIR>, /* uses_chunked = */ bool) {
-    let use_chunked = numel >= REDUCTION_CHUNK_THRESHOLD
-        && matches!(op, BinOpKind::Add | BinOpKind::Mul);
+    let use_chunked =
+        numel >= REDUCTION_CHUNK_THRESHOLD && matches!(op, BinOpKind::Add | BinOpKind::Mul);
 
     if !use_chunked {
         // Scalar fallback — same shape as the pre-#1128 lowering.
@@ -703,8 +703,7 @@ fn emit_chunked_reduction_prelude(
 /// into a vector register, plus a scalar tail for the `numel % W` leftover.
 /// Final store writes `acc` to `out[0]`.
 fn lower_sum_reduction(in_name: &str, out_name: &str, numel: usize) -> Vec<LoopIR> {
-    let (mut stmts, _) =
-        emit_chunked_reduction_prelude(in_name, numel, 0.0, BinOpKind::Add);
+    let (mut stmts, _) = emit_chunked_reduction_prelude(in_name, numel, 0.0, BinOpKind::Add);
     stmts.push(LoopIR::Store {
         buffer: out_name.into(),
         index: Expr::int(0),
@@ -715,8 +714,7 @@ fn lower_sum_reduction(in_name: &str, out_name: &str, numel: usize) -> Vec<LoopI
 
 /// Lower a mean reduction: sum (chunked) then divide by count.
 fn lower_mean_reduction(in_name: &str, out_name: &str, numel: usize) -> Vec<LoopIR> {
-    let (mut stmts, _) =
-        emit_chunked_reduction_prelude(in_name, numel, 0.0, BinOpKind::Add);
+    let (mut stmts, _) = emit_chunked_reduction_prelude(in_name, numel, 0.0, BinOpKind::Add);
     stmts.push(LoopIR::Store {
         buffer: out_name.into(),
         index: Expr::int(0),
@@ -737,8 +735,7 @@ fn lower_mean_reduction(in_name: &str, out_name: &str, numel: usize) -> Vec<Loop
 /// for inputs that span many orders of magnitude — same caveat as
 /// auto-vectorized reductions in any production compiler.
 fn lower_prod_reduction(in_name: &str, out_name: &str, numel: usize) -> Vec<LoopIR> {
-    let (mut stmts, _) =
-        emit_chunked_reduction_prelude(in_name, numel, 1.0, BinOpKind::Mul);
+    let (mut stmts, _) = emit_chunked_reduction_prelude(in_name, numel, 1.0, BinOpKind::Mul);
     stmts.push(LoopIR::Store {
         buffer: out_name.into(),
         index: Expr::int(0),
@@ -1128,7 +1125,11 @@ mod tests {
 
         // Final store.
         match &loops[REDUCTION_CHUNK_WIDTH + 2] {
-            LoopIR::Store { buffer, index, value } => {
+            LoopIR::Store {
+                buffer,
+                index,
+                value,
+            } => {
                 assert_eq!(buffer, "out");
                 assert_eq!(*index, Expr::int(0));
                 assert_eq!(*value, Expr::var("acc"));
@@ -1148,7 +1149,12 @@ mod tests {
         assert_eq!(loops.len(), REDUCTION_CHUNK_WIDTH + 4);
 
         match &loops[REDUCTION_CHUNK_WIDTH + 2] {
-            LoopIR::Loop { var, start, end, body } => {
+            LoopIR::Loop {
+                var,
+                start,
+                end,
+                body,
+            } => {
                 assert_eq!(var, "i");
                 assert_eq!(*start, Expr::int(96));
                 assert_eq!(*end, Expr::int(100));

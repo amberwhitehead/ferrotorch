@@ -46,9 +46,7 @@ use ferrotorch_core::grad_fns::activation::{
 };
 use ferrotorch_core::grad_fns::arithmetic::{add, div, mul, pow, sub};
 use ferrotorch_core::grad_fns::indexing::index_select_dim;
-use ferrotorch_core::grad_fns::linalg::{
-    bmm_differentiable, linear_fused, matmul_differentiable,
-};
+use ferrotorch_core::grad_fns::linalg::{bmm_differentiable, linear_fused, matmul_differentiable};
 use ferrotorch_core::grad_fns::reduction::{mean_dim, sum_dim};
 use ferrotorch_core::grad_fns::shape::{cat, reshape};
 use ferrotorch_core::grad_fns::transcendental::{exp, log};
@@ -137,8 +135,7 @@ fn read_f32_tensor(path: &Path) -> Result<(Vec<usize>, Vec<f32>), String> {
 
 fn write_f32_tensor(path: &Path, shape: &[usize], data: &[f32]) -> Result<(), String> {
     if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)
-            .map_err(|e| format!("mkdir {}: {e}", parent.display()))?;
+        std::fs::create_dir_all(parent).map_err(|e| format!("mkdir {}: {e}", parent.display()))?;
     }
     let mut f = File::create(path).map_err(|e| format!("create {}: {e}", path.display()))?;
     f.write_all(&(shape.len() as u32).to_le_bytes())
@@ -167,7 +164,11 @@ fn load_leaf(
     name: &str,
     requires_grad: bool,
 ) -> Result<Tensor<f32>, String> {
-    let p = fixture_dir.join(op).join(config).join("inputs").join(format!("{name}.bin"));
+    let p = fixture_dir
+        .join(op)
+        .join(config)
+        .join("inputs")
+        .join(format!("{name}.bin"));
     let (shape, data) = read_f32_tensor(&p)?;
     Tensor::from_storage(TensorStorage::cpu(data), shape, requires_grad)
         .map_err(|e| format!("from_storage {name}: {e}"))
@@ -179,11 +180,7 @@ fn dump_tensor(out_dir: &Path, rel: &str, t: &Tensor<f32>) -> Result<(), String>
     write_f32_tensor(&out_dir.join(rel), &shape, &data)
 }
 
-fn dump_grad(
-    out_dir: &Path,
-    name: &str,
-    leaf: &Tensor<f32>,
-) -> Result<(), String> {
+fn dump_grad(out_dir: &Path, name: &str, leaf: &Tensor<f32>) -> Result<(), String> {
     let g = leaf
         .grad()
         .map_err(|e| format!("grad() {name}: {e}"))?
@@ -207,20 +204,22 @@ fn run_op(args: &Args) -> Result<(), String> {
         "matmul_2d" => {
             let a = load_leaf(fd, op, cfg, "a", true)?;
             let b = load_leaf(fd, op, cfg, "b", true)?;
-            let out = matmul_differentiable(&a, &b)
-                .map_err(|e| format!("matmul forward: {e}"))?;
+            let out = matmul_differentiable(&a, &b).map_err(|e| format!("matmul forward: {e}"))?;
             dump_tensor(od, "forward_out.bin", &out)?;
-            out.sum_to_scalar()?.backward().map_err(|e| format!("backward: {e}"))?;
+            out.sum_to_scalar()?
+                .backward()
+                .map_err(|e| format!("backward: {e}"))?;
             dump_grad(od, "a", &a)?;
             dump_grad(od, "b", &b)?;
         }
         "bmm" => {
             let a = load_leaf(fd, op, cfg, "a", true)?;
             let b = load_leaf(fd, op, cfg, "b", true)?;
-            let out = bmm_differentiable(&a, &b)
-                .map_err(|e| format!("bmm forward: {e}"))?;
+            let out = bmm_differentiable(&a, &b).map_err(|e| format!("bmm forward: {e}"))?;
             dump_tensor(od, "forward_out.bin", &out)?;
-            out.sum_to_scalar()?.backward().map_err(|e| format!("backward: {e}"))?;
+            out.sum_to_scalar()?
+                .backward()
+                .map_err(|e| format!("backward: {e}"))?;
             dump_grad(od, "a", &a)?;
             dump_grad(od, "b", &b)?;
         }
@@ -230,10 +229,12 @@ fn run_op(args: &Args) -> Result<(), String> {
             let x = load_leaf(fd, op, cfg, "input", true)?;
             let w = load_leaf(fd, op, cfg, "weight", true)?;
             let b = load_leaf(fd, op, cfg, "bias", true)?;
-            let out = linear_fused(&x, &w, Some(&b))
-                .map_err(|e| format!("linear_fused forward: {e}"))?;
+            let out =
+                linear_fused(&x, &w, Some(&b)).map_err(|e| format!("linear_fused forward: {e}"))?;
             dump_tensor(od, "forward_out.bin", &out)?;
-            out.sum_to_scalar()?.backward().map_err(|e| format!("backward: {e}"))?;
+            out.sum_to_scalar()?
+                .backward()
+                .map_err(|e| format!("backward: {e}"))?;
             dump_grad(od, "input", &x)?;
             dump_grad(od, "weight", &w)?;
             dump_grad(od, "bias", &b)?;
@@ -252,7 +253,9 @@ fn run_op(args: &Args) -> Result<(), String> {
             }
             .map_err(|e| format!("{op} forward: {e}"))?;
             dump_tensor(od, "forward_out.bin", &out)?;
-            out.sum_to_scalar()?.backward().map_err(|e| format!("backward: {e}"))?;
+            out.sum_to_scalar()?
+                .backward()
+                .map_err(|e| format!("backward: {e}"))?;
             dump_grad(od, "x", &x)?;
         }
 
@@ -264,7 +267,9 @@ fn run_op(args: &Args) -> Result<(), String> {
             let x = load_leaf(fd, op, cfg, "x", true)?;
             let out = log_softmax(&x).map_err(|e| format!("{op} forward: {e}"))?;
             dump_tensor(od, "forward_out.bin", &out)?;
-            out.sum_to_scalar()?.backward().map_err(|e| format!("backward: {e}"))?;
+            out.sum_to_scalar()?
+                .backward()
+                .map_err(|e| format!("backward: {e}"))?;
             dump_grad(od, "x", &x)?;
         }
 
@@ -279,10 +284,11 @@ fn run_op(args: &Args) -> Result<(), String> {
             let x = load_leaf(fd, op, cfg, "x", true)?;
             let target = load_leaf(fd, op, cfg, "target", false)?;
             let sm = softmax(&x).map_err(|e| format!("softmax forward: {e}"))?;
-            let out = mul(&sm, &target)
-                .map_err(|e| format!("softmax * target: {e}"))?;
+            let out = mul(&sm, &target).map_err(|e| format!("softmax * target: {e}"))?;
             dump_tensor(od, "forward_out.bin", &out)?;
-            out.sum_to_scalar()?.backward().map_err(|e| format!("backward: {e}"))?;
+            out.sum_to_scalar()?
+                .backward()
+                .map_err(|e| format!("backward: {e}"))?;
             dump_grad(od, "x", &x)?;
         }
 
@@ -290,19 +296,21 @@ fn run_op(args: &Args) -> Result<(), String> {
         "sum_dim" => {
             let x = load_leaf(fd, op, cfg, "x", true)?;
             let (dim, keepdim) = parse_sum_dim_config(cfg)?;
-            let out = sum_dim(&x, dim, keepdim)
-                .map_err(|e| format!("sum_dim forward: {e}"))?;
+            let out = sum_dim(&x, dim, keepdim).map_err(|e| format!("sum_dim forward: {e}"))?;
             dump_tensor(od, "forward_out.bin", &out)?;
-            out.sum_to_scalar()?.backward().map_err(|e| format!("backward: {e}"))?;
+            out.sum_to_scalar()?
+                .backward()
+                .map_err(|e| format!("backward: {e}"))?;
             dump_grad(od, "x", &x)?;
         }
         "mean_dim" => {
             let x = load_leaf(fd, op, cfg, "x", true)?;
             // The single pinned config is `3x5x7_dim1_nokeep` — dim=1, keepdim=false.
-            let out = mean_dim(&x, 1, false)
-                .map_err(|e| format!("mean_dim forward: {e}"))?;
+            let out = mean_dim(&x, 1, false).map_err(|e| format!("mean_dim forward: {e}"))?;
             dump_tensor(od, "forward_out.bin", &out)?;
-            out.sum_to_scalar()?.backward().map_err(|e| format!("backward: {e}"))?;
+            out.sum_to_scalar()?
+                .backward()
+                .map_err(|e| format!("backward: {e}"))?;
             dump_grad(od, "x", &x)?;
         }
 
@@ -319,7 +327,9 @@ fn run_op(args: &Args) -> Result<(), String> {
             }
             .map_err(|e| format!("{op} forward: {e}"))?;
             dump_tensor(od, "forward_out.bin", &out)?;
-            out.sum_to_scalar()?.backward().map_err(|e| format!("backward: {e}"))?;
+            out.sum_to_scalar()?
+                .backward()
+                .map_err(|e| format!("backward: {e}"))?;
             dump_grad(od, "a", &a)?;
             dump_grad(od, "b", &b)?;
         }
@@ -330,7 +340,9 @@ fn run_op(args: &Args) -> Result<(), String> {
             let out = if op == "log" { log(&x) } else { exp(&x) }
                 .map_err(|e| format!("{op} forward: {e}"))?;
             dump_tensor(od, "forward_out.bin", &out)?;
-            out.sum_to_scalar()?.backward().map_err(|e| format!("backward: {e}"))?;
+            out.sum_to_scalar()?
+                .backward()
+                .map_err(|e| format!("backward: {e}"))?;
             dump_grad(od, "x", &x)?;
         }
 
@@ -340,7 +352,9 @@ fn run_op(args: &Args) -> Result<(), String> {
             // Single pinned config: exponent = 2.5
             let out = pow(&x, 2.5).map_err(|e| format!("pow forward: {e}"))?;
             dump_tensor(od, "forward_out.bin", &out)?;
-            out.sum_to_scalar()?.backward().map_err(|e| format!("backward: {e}"))?;
+            out.sum_to_scalar()?
+                .backward()
+                .map_err(|e| format!("backward: {e}"))?;
             dump_grad(od, "x", &x)?;
         }
 
@@ -350,7 +364,9 @@ fn run_op(args: &Args) -> Result<(), String> {
             // The single config reshapes [2,3,4] -> [6,4].
             let out = reshape(&x, &[6, 4]).map_err(|e| format!("reshape forward: {e}"))?;
             dump_tensor(od, "forward_out.bin", &out)?;
-            out.sum_to_scalar()?.backward().map_err(|e| format!("backward: {e}"))?;
+            out.sum_to_scalar()?
+                .backward()
+                .map_err(|e| format!("backward: {e}"))?;
             dump_grad(od, "x", &x)?;
         }
         "transpose" => {
@@ -359,10 +375,16 @@ fn run_op(args: &Args) -> Result<(), String> {
             // call .contiguous() to make backward shape-stable (matches
             // the torch reference, which also calls .contiguous() so
             // .sum() reduces over a materialized layout).
-            let t = x.transpose(0, 1).map_err(|e| format!("transpose forward: {e}"))?;
-            let out = t.contiguous().map_err(|e| format!("transpose.contiguous: {e}"))?;
+            let t = x
+                .transpose(0, 1)
+                .map_err(|e| format!("transpose forward: {e}"))?;
+            let out = t
+                .contiguous()
+                .map_err(|e| format!("transpose.contiguous: {e}"))?;
             dump_tensor(od, "forward_out.bin", &out)?;
-            out.sum_to_scalar()?.backward().map_err(|e| format!("backward: {e}"))?;
+            out.sum_to_scalar()?
+                .backward()
+                .map_err(|e| format!("backward: {e}"))?;
             dump_grad(od, "x", &x)?;
         }
         "cat" => {
@@ -372,7 +394,9 @@ fn run_op(args: &Args) -> Result<(), String> {
             let out = cat(&[a.clone(), b.clone(), c.clone()], 0)
                 .map_err(|e| format!("cat forward: {e}"))?;
             dump_tensor(od, "forward_out.bin", &out)?;
-            out.sum_to_scalar()?.backward().map_err(|e| format!("backward: {e}"))?;
+            out.sum_to_scalar()?
+                .backward()
+                .map_err(|e| format!("backward: {e}"))?;
             dump_grad(od, "a", &a)?;
             dump_grad(od, "b", &b)?;
             dump_grad(od, "c", &c)?;
@@ -382,9 +406,8 @@ fn run_op(args: &Args) -> Result<(), String> {
         "embedding" => {
             // weight: [vocab, emb], indices: f32-encoded long indices.
             let weight = load_leaf(fd, op, cfg, "weight", true)?;
-            let (idx_shape, idx_data) = read_f32_tensor(
-                &fd.join(op).join(cfg).join("inputs").join("indices.bin"),
-            )?;
+            let (idx_shape, idx_data) =
+                read_f32_tensor(&fd.join(op).join(cfg).join("inputs").join("indices.bin"))?;
             if idx_shape.len() != 1 {
                 return Err(format!("embedding indices must be 1-D, got {idx_shape:?}"));
             }
@@ -394,7 +417,9 @@ fn run_op(args: &Args) -> Result<(), String> {
             let out = index_select_dim(&weight, 0, &idx_tensor)
                 .map_err(|e| format!("index_select_dim forward: {e}"))?;
             dump_tensor(od, "forward_out.bin", &out)?;
-            out.sum_to_scalar()?.backward().map_err(|e| format!("backward: {e}"))?;
+            out.sum_to_scalar()?
+                .backward()
+                .map_err(|e| format!("backward: {e}"))?;
             dump_grad(od, "weight", &weight)?;
         }
 
@@ -415,8 +440,8 @@ fn run_op(args: &Args) -> Result<(), String> {
                 .contiguous()
                 .map_err(|e| format!("attention K^T.contiguous: {e}"))?;
 
-            let scores = bmm_differentiable(&q, &k_t)
-                .map_err(|e| format!("attention Q @ K^T: {e}"))?;
+            let scores =
+                bmm_differentiable(&q, &k_t).map_err(|e| format!("attention Q @ K^T: {e}"))?;
             // scores * scale via mul with a same-shape constant tensor.
             let scale_t = Tensor::from_storage(
                 TensorStorage::cpu(vec![scale; scores.numel()]),
@@ -424,14 +449,15 @@ fn run_op(args: &Args) -> Result<(), String> {
                 false,
             )
             .map_err(|e| format!("attention scale tensor: {e}"))?;
-            let scaled = mul(&scores, &scale_t)
-                .map_err(|e| format!("attention scale mul: {e}"))?;
+            let scaled = mul(&scores, &scale_t).map_err(|e| format!("attention scale mul: {e}"))?;
             let attn = softmax(&scaled).map_err(|e| format!("attention softmax: {e}"))?;
-            let out = bmm_differentiable(&attn, &v)
-                .map_err(|e| format!("attention attn @ V: {e}"))?;
+            let out =
+                bmm_differentiable(&attn, &v).map_err(|e| format!("attention attn @ V: {e}"))?;
 
             dump_tensor(od, "forward_out.bin", &out)?;
-            out.sum_to_scalar()?.backward().map_err(|e| format!("backward: {e}"))?;
+            out.sum_to_scalar()?
+                .backward()
+                .map_err(|e| format!("backward: {e}"))?;
             dump_grad(od, "q", &q)?;
             dump_grad(od, "k", &k)?;
             dump_grad(od, "v", &v)?;
@@ -471,8 +497,7 @@ impl SumToScalar for Tensor<f32> {
     fn sum_to_scalar(&self) -> Result<Tensor<f32>, String> {
         // `grad_fns::reduction::sum` already produces a 0-D scalar by
         // reducing over every axis; it's the canonical "total sum" op.
-        ferrotorch_core::grad_fns::reduction::sum(self)
-            .map_err(|e| format!("sum_to_scalar: {e}"))
+        ferrotorch_core::grad_fns::reduction::sum(self).map_err(|e| format!("sum_to_scalar: {e}"))
     }
 }
 

@@ -98,11 +98,12 @@ fn apply_fused_gpu_f32_internal<T: Float>(
     debug_assert_eq!(TypeId::of::<T>(), TypeId::of::<f32>());
 
     let handle = input.gpu_handle()?;
-    let buffer = handle
-        .downcast_ref::<CudaBuffer<f32>>()
-        .ok_or(FerrotorchError::InvalidArgument {
-            message: "apply_fused: CUDA tensor's GPU handle is not a CudaBuffer<f32>".into(),
-        })?;
+    let buffer =
+        handle
+            .downcast_ref::<CudaBuffer<f32>>()
+            .ok_or(FerrotorchError::InvalidArgument {
+                message: "apply_fused: CUDA tensor's GPU handle is not a CudaBuffer<f32>".into(),
+            })?;
     let n = buffer.len();
 
     // GpuDevice::new(ordinal) on cudarc is a context lookup (CudaContext::new
@@ -181,11 +182,12 @@ fn apply_fused_gpu_f64_internal<T: Float>(
     debug_assert_eq!(TypeId::of::<T>(), TypeId::of::<f64>());
 
     let handle = input.gpu_handle()?;
-    let buffer = handle
-        .downcast_ref::<CudaBuffer<f64>>()
-        .ok_or(FerrotorchError::InvalidArgument {
-            message: "apply_fused: CUDA tensor's GPU handle is not a CudaBuffer<f64>".into(),
-        })?;
+    let buffer =
+        handle
+            .downcast_ref::<CudaBuffer<f64>>()
+            .ok_or(FerrotorchError::InvalidArgument {
+                message: "apply_fused: CUDA tensor's GPU handle is not a CudaBuffer<f64>".into(),
+            })?;
     let n = buffer.len();
 
     let device = GpuDevice::new(handle.device_ordinal()).map_err(|e| map_gpu_err(&e))?;

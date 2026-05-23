@@ -331,7 +331,8 @@ impl<T: Float> Rpn<T> {
         let nms_scores_t =
             Tensor::from_storage(TensorStorage::cpu(nms_scores_data), vec![nms_n], false)?;
 
-        let keep_nms = batched_nms::<f64>(&nms_boxes_t, &nms_scores_t, &nms_levels, cfg.nms_thresh)?;
+        let keep_nms =
+            batched_nms::<f64>(&nms_boxes_t, &nms_scores_t, &nms_levels, cfg.nms_thresh)?;
 
         // ---- Post-NMS top-K ----
         let post_n = cfg.post_nms_top_n.min(keep_nms.len());

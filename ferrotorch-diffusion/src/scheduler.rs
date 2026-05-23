@@ -205,8 +205,9 @@ impl DDIMScheduler {
         }
         if self.config.prediction_type != PredictionType::Epsilon {
             return Err(FerrotorchError::InvalidArgument {
-                message: "DDIMScheduler::set_timesteps: only PredictionType::Epsilon is implemented"
-                    .into(),
+                message:
+                    "DDIMScheduler::set_timesteps: only PredictionType::Epsilon is implemented"
+                        .into(),
             });
         }
         let n_train = self.config.num_train_timesteps;

@@ -306,8 +306,7 @@ mod tests {
     impl Module<f32> for CountingScale {
         fn forward(&self, input: &Tensor<f32>) -> FerrotorchResult<Tensor<f32>> {
             use ferrotorch_core::grad_fns::arithmetic::mul;
-            self.calls
-                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             let s = ferrotorch_core::scalar(self.factor)?;
             mul(input, &s)
         }
@@ -402,10 +401,7 @@ mod tests {
         );
 
         // Gradient correctness: d/dx [x * 2 * 5] = 10.
-        let grad = input
-            .grad()
-            .unwrap()
-            .expect("input should have a gradient");
+        let grad = input.grad().unwrap().expect("input should have a gradient");
         let g = grad.item().unwrap();
         assert!((g - 10.0).abs() < 1e-5, "expected grad=10.0, got {g}");
     }

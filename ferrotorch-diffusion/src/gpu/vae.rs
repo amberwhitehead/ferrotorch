@@ -223,12 +223,32 @@ impl GpuVaeDecoder {
         )?;
 
         // Mid block: resnets[0], attn[0], resnets[1] (all at top_c).
-        let mid_resnet0 =
-            pop_resnet(&mut state, "decoder.mid_block.resnets.0", top_c, top_c, groups, eps, &device)?;
-        let mid_attn0 =
-            pop_attn(&mut state, "decoder.mid_block.attentions.0", top_c, groups, eps, &device)?;
-        let mid_resnet1 =
-            pop_resnet(&mut state, "decoder.mid_block.resnets.1", top_c, top_c, groups, eps, &device)?;
+        let mid_resnet0 = pop_resnet(
+            &mut state,
+            "decoder.mid_block.resnets.0",
+            top_c,
+            top_c,
+            groups,
+            eps,
+            &device,
+        )?;
+        let mid_attn0 = pop_attn(
+            &mut state,
+            "decoder.mid_block.attentions.0",
+            top_c,
+            groups,
+            eps,
+            &device,
+        )?;
+        let mid_resnet1 = pop_resnet(
+            &mut state,
+            "decoder.mid_block.resnets.1",
+            top_c,
+            top_c,
+            groups,
+            eps,
+            &device,
+        )?;
         let mid_block = GpuMidBlock {
             resnets: vec![mid_resnet0, mid_resnet1],
             attentions: vec![mid_attn0],
@@ -254,9 +274,19 @@ impl GpuVaeDecoder {
             } else {
                 let prefix = format!("decoder.up_blocks.{bi}.upsamplers.0.conv");
                 let conv = pop_conv(
-                    &mut state, &prefix, out_c, out_c, (3, 3), (1, 1), (1, 1), &device,
+                    &mut state,
+                    &prefix,
+                    out_c,
+                    out_c,
+                    (3, 3),
+                    (1, 1),
+                    (1, 1),
+                    &device,
                 )?;
-                Some(GpuUpsample { conv, channels: out_c })
+                Some(GpuUpsample {
+                    conv,
+                    channels: out_c,
+                })
             };
             up_blocks.push(GpuUpDecoderBlock { resnets, upsample });
             prev_out = out_c;
@@ -264,11 +294,22 @@ impl GpuVaeDecoder {
 
         // conv_norm_out + conv_out
         let conv_norm_out = pop_groupnorm(
-            &mut state, "decoder.conv_norm_out", groups, bottom_c, eps, &device,
+            &mut state,
+            "decoder.conv_norm_out",
+            groups,
+            bottom_c,
+            eps,
+            &device,
         )?;
         let conv_out = pop_conv(
-            &mut state, "decoder.conv_out", bottom_c, config.out_channels,
-            (3, 3), (1, 1), (1, 1), &device,
+            &mut state,
+            "decoder.conv_out",
+            bottom_c,
+            config.out_channels,
+            (3, 3),
+            (1, 1),
+            (1, 1),
+            &device,
         )?;
 
         // Whatever is left in `state` is unmapped — surface as DropReport.
@@ -347,7 +388,10 @@ impl GpuVaeDecoder {
 
         // post_quant_conv (1x1)
         let (mut hbuf, mut hshape) = conv_forward(
-            &self.post_quant_conv, &x, [b, self.config.latent_channels, h, w], &self.device,
+            &self.post_quant_conv,
+            &x,
+            [b, self.config.latent_channels, h, w],
+            &self.device,
         )?;
 
         // conv_in (3x3 pad 1, latent -> top_c)
@@ -371,8 +415,7 @@ impl GpuVaeDecoder {
         // conv_norm_out -> SiLU -> conv_out
         hbuf = group_norm_forward(&self.conv_norm_out, &hbuf, hshape, &self.device)?;
         hbuf = gpu_silu(&hbuf, &self.device).map_err(gpu_err)?;
-        let (out_buf, out_shape) =
-            conv_forward(&self.conv_out, &hbuf, hshape, &self.device)?;
+        let (out_buf, out_shape) = conv_forward(&self.conv_out, &hbuf, hshape, &self.device)?;
 
         // Download.
         let out_data = gpu_to_cpu(&out_buf, &self.device).map_err(gpu_err)?;
@@ -485,11 +528,32 @@ pub(super) fn pop_resnet(
 ) -> FerrotorchResult<GpuResnet> {
     let norm1 = pop_groupnorm(state, &format!("{prefix}.norm1"), groups, in_c, eps, device)?;
     let conv1 = pop_conv(
-        state, &format!("{prefix}.conv1"), in_c, out_c, (3, 3), (1, 1), (1, 1), device,
+        state,
+        &format!("{prefix}.conv1"),
+        in_c,
+        out_c,
+        (3, 3),
+        (1, 1),
+        (1, 1),
+        device,
     )?;
-    let norm2 = pop_groupnorm(state, &format!("{prefix}.norm2"), groups, out_c, eps, device)?;
+    let norm2 = pop_groupnorm(
+        state,
+        &format!("{prefix}.norm2"),
+        groups,
+        out_c,
+        eps,
+        device,
+    )?;
     let conv2 = pop_conv(
-        state, &format!("{prefix}.conv2"), out_c, out_c, (3, 3), (1, 1), (1, 1), device,
+        state,
+        &format!("{prefix}.conv2"),
+        out_c,
+        out_c,
+        (3, 3),
+        (1, 1),
+        (1, 1),
+        device,
     )?;
     let conv_shortcut = if in_c == out_c {
         None
@@ -525,13 +589,22 @@ pub(super) fn pop_attn(
     device: &GpuDevice,
 ) -> FerrotorchResult<GpuAttn> {
     let group_norm = pop_groupnorm(
-        state, &format!("{prefix}.group_norm"), groups, channels, eps, device,
+        state,
+        &format!("{prefix}.group_norm"),
+        groups,
+        channels,
+        eps,
+        device,
     )?;
     let to_q = pop_linear(state, &format!("{prefix}.to_q"), channels, channels, device)?;
     let to_k = pop_linear(state, &format!("{prefix}.to_k"), channels, channels, device)?;
     let to_v = pop_linear(state, &format!("{prefix}.to_v"), channels, channels, device)?;
     let to_out_0 = pop_linear(
-        state, &format!("{prefix}.to_out.0"), channels, channels, device,
+        state,
+        &format!("{prefix}.to_out.0"),
+        channels,
+        channels,
+        device,
     )?;
     Ok(GpuAttn {
         group_norm,
@@ -582,8 +655,18 @@ pub(super) fn group_norm_forward(
             ),
         });
     }
-    gpu_group_norm_f32(x, &g.weight, &g.bias, b, c, g.num_groups, h * w, g.eps, device)
-        .map_err(gpu_err)
+    gpu_group_norm_f32(
+        x,
+        &g.weight,
+        &g.bias,
+        b,
+        c,
+        g.num_groups,
+        h * w,
+        g.eps,
+        device,
+    )
+    .map_err(gpu_err)
 }
 
 /// Apply `y = x @ W^T + b` for an `[m, in_f]` x against an `[out_f,
@@ -647,7 +730,9 @@ pub(super) fn resnet_forward(
         // The kernel API expects an owned `CudaBuffer<f32>`, so we
         // perform a device-to-device copy via a host bounce. To avoid
         // allocations, route through `gpu_add` directly below.
-        return gpu_add(&h, x, device).map(|sum| (sum, h_shape)).map_err(gpu_err);
+        return gpu_add(&h, x, device)
+            .map(|sum| (sum, h_shape))
+            .map_err(gpu_err);
     };
     let sum = gpu_add(&h, &res, device).map_err(gpu_err)?;
     Ok((sum, h_shape))
@@ -662,10 +747,7 @@ pub(super) fn attn_forward(
     let [b, c, h, w] = shape;
     if c != a.channels {
         return Err(FerrotorchError::ShapeMismatch {
-            message: format!(
-                "GpuVaeDecoder::attn: expected C={}, got {}",
-                a.channels, c
-            ),
+            message: format!("GpuVaeDecoder::attn: expected C={}, got {}", a.channels, c),
         });
     }
     let hw = h * w;
@@ -698,12 +780,30 @@ pub(super) fn attn_forward(
     // q, k, v projections: each is Linear(C, C) applied to a
     // [B*HW, C] flat buffer (Linear is row-wise).
     let m = b * hw;
-    let q = linear_xwt_plus_b(&a.to_q.weight, (a.to_q.out_features, a.to_q.in_features),
-                              &a.to_q.bias, &normed_hwc, m, device)?;
-    let k = linear_xwt_plus_b(&a.to_k.weight, (a.to_k.out_features, a.to_k.in_features),
-                              &a.to_k.bias, &normed_hwc, m, device)?;
-    let v = linear_xwt_plus_b(&a.to_v.weight, (a.to_v.out_features, a.to_v.in_features),
-                              &a.to_v.bias, &normed_hwc, m, device)?;
+    let q = linear_xwt_plus_b(
+        &a.to_q.weight,
+        (a.to_q.out_features, a.to_q.in_features),
+        &a.to_q.bias,
+        &normed_hwc,
+        m,
+        device,
+    )?;
+    let k = linear_xwt_plus_b(
+        &a.to_k.weight,
+        (a.to_k.out_features, a.to_k.in_features),
+        &a.to_k.bias,
+        &normed_hwc,
+        m,
+        device,
+    )?;
+    let v = linear_xwt_plus_b(
+        &a.to_v.weight,
+        (a.to_v.out_features, a.to_v.in_features),
+        &a.to_v.bias,
+        &normed_hwc,
+        m,
+        device,
+    )?;
 
     // Single-head attention:
     //   scores = (q @ k^T) * (1/sqrt(C))  -> [B, HW, HW]

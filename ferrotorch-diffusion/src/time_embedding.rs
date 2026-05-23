@@ -122,11 +122,9 @@ impl Timesteps {
         })?;
         let mut out = vec![zero_t; batch * self.num_channels];
         for (b, &t) in ts_data.iter().enumerate() {
-            let t_f64: f64 = t
-                .to_f64()
-                .ok_or_else(|| FerrotorchError::InvalidArgument {
-                    message: "Timesteps::forward_t: failed to cast timestep into f64".into(),
-                })?;
+            let t_f64: f64 = t.to_f64().ok_or_else(|| FerrotorchError::InvalidArgument {
+                message: "Timesteps::forward_t: failed to cast timestep into f64".into(),
+            })?;
             for (i, &freq) in freqs.iter().enumerate() {
                 let arg = t_f64 * freq;
                 let cos_v = arg.cos();
@@ -136,16 +134,14 @@ impl Timesteps {
                 } else {
                     (sin_v, cos_v)
                 };
-                out[b * self.num_channels + i] = T::from(left).ok_or_else(|| {
-                    FerrotorchError::InvalidArgument {
+                out[b * self.num_channels + i] =
+                    T::from(left).ok_or_else(|| FerrotorchError::InvalidArgument {
                         message: "Timesteps: cast left value to T failed".into(),
-                    }
-                })?;
-                out[b * self.num_channels + half + i] = T::from(right).ok_or_else(|| {
-                    FerrotorchError::InvalidArgument {
+                    })?;
+                out[b * self.num_channels + half + i] =
+                    T::from(right).ok_or_else(|| FerrotorchError::InvalidArgument {
                         message: "Timesteps: cast right value to T failed".into(),
-                    }
-                })?;
+                    })?;
             }
         }
         Tensor::from_storage(
@@ -282,9 +278,7 @@ impl<T: Float> Module<T> for TimestepEmbedding<T> {
             for k in state.keys() {
                 if !(k.starts_with("linear_1.") || k.starts_with("linear_2.")) {
                     return Err(FerrotorchError::InvalidArgument {
-                        message: format!(
-                            "unexpected key in TimestepEmbedding state_dict: \"{k}\""
-                        ),
+                        message: format!("unexpected key in TimestepEmbedding state_dict: \"{k}\""),
                     });
                 }
             }
@@ -330,12 +324,8 @@ mod tests {
     #[test]
     fn timestep_embedding_shapes() {
         let mlp = TimestepEmbedding::<f32>::new(8, 16).unwrap();
-        let x = Tensor::from_storage(
-            TensorStorage::cpu(vec![0.5f32; 8]),
-            vec![1, 8],
-            false,
-        )
-        .unwrap();
+        let x =
+            Tensor::from_storage(TensorStorage::cpu(vec![0.5f32; 8]), vec![1, 8], false).unwrap();
         let y = mlp.forward(&x).unwrap();
         assert_eq!(y.shape(), &[1, 16]);
     }

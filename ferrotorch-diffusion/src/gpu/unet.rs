@@ -570,8 +570,14 @@ impl GpuUNet2DConditional {
         }
 
         // ---- Output head ---------------------------------------------
-        let conv_norm_out =
-            pop_groupnorm(&mut state, "conv_norm_out", groups, bocs[0], resnet_eps, &device)?;
+        let conv_norm_out = pop_groupnorm(
+            &mut state,
+            "conv_norm_out",
+            groups,
+            bocs[0],
+            resnet_eps,
+            &device,
+        )?;
         let conv_out = pop_conv(
             &mut state,
             "conv_out",
@@ -810,8 +816,7 @@ impl GpuUNet2DConditional {
             let popped: Vec<(CudaBuffer<f32>, [usize; 4])> = skips.split_off(split_at);
             // CPU code reverses popped so resnet[0] gets the most
             // recently pushed skip.
-            let popped_rev: Vec<(CudaBuffer<f32>, [usize; 4])> =
-                popped.into_iter().rev().collect();
+            let popped_rev: Vec<(CudaBuffer<f32>, [usize; 4])> = popped.into_iter().rev().collect();
 
             match ub {
                 AnyGpuUp::CrossAttn(blk) => {
@@ -823,14 +828,8 @@ impl GpuUNet2DConditional {
                     {
                         let (cat_buf, cat_shape) =
                             cat_channels(&h_buf, h_shape, skip_buf, *skip_shape, &self.device)?;
-                        let (rb, rs) = resnet_time_forward(
-                            r,
-                            &cat_buf,
-                            cat_shape,
-                            &temb,
-                            b,
-                            &self.device,
-                        )?;
+                        let (rb, rs) =
+                            resnet_time_forward(r, &cat_buf, cat_shape, &temb, b, &self.device)?;
                         let (ab, asz) = transformer_2d_forward(
                             a,
                             &rb,
@@ -852,19 +851,11 @@ impl GpuUNet2DConditional {
                     }
                 }
                 AnyGpuUp::Plain(blk) => {
-                    for (r, (skip_buf, skip_shape)) in
-                        blk.resnets.iter().zip(popped_rev.iter())
-                    {
+                    for (r, (skip_buf, skip_shape)) in blk.resnets.iter().zip(popped_rev.iter()) {
                         let (cat_buf, cat_shape) =
                             cat_channels(&h_buf, h_shape, skip_buf, *skip_shape, &self.device)?;
-                        let (rb, rs) = resnet_time_forward(
-                            r,
-                            &cat_buf,
-                            cat_shape,
-                            &temb,
-                            b,
-                            &self.device,
-                        )?;
+                        let (rb, rs) =
+                            resnet_time_forward(r, &cat_buf, cat_shape, &temb, b, &self.device)?;
                         h_buf = rb;
                         h_shape = rs;
                     }
@@ -904,10 +895,7 @@ fn gpu_err(e: GpuError) -> FerrotorchError {
 /// copy is 320 KB. Cumulative skip-clone traffic per forward is below
 /// 20 MB which is well under the noise vs. the kernel compute. Perf
 /// follow-up is a device-to-device clone; correctness first.
-fn clone_buf(
-    buf: &CudaBuffer<f32>,
-    device: &GpuDevice,
-) -> FerrotorchResult<CudaBuffer<f32>> {
+fn clone_buf(buf: &CudaBuffer<f32>, device: &GpuDevice) -> FerrotorchResult<CudaBuffer<f32>> {
     let host = gpu_to_cpu(buf, device).map_err(gpu_err)?;
     cpu_to_gpu(&host, device).map_err(gpu_err)
 }
@@ -919,9 +907,11 @@ fn pop_tensor(
     expected_len: usize,
     device: &GpuDevice,
 ) -> FerrotorchResult<CudaBuffer<f32>> {
-    let t = state.remove(key).ok_or_else(|| FerrotorchError::InvalidArgument {
-        message: format!("GpuUNet2DConditional: missing tensor {key:?}"),
-    })?;
+    let t = state
+        .remove(key)
+        .ok_or_else(|| FerrotorchError::InvalidArgument {
+            message: format!("GpuUNet2DConditional: missing tensor {key:?}"),
+        })?;
     let data = t.data()?;
     if data.len() != expected_len {
         return Err(FerrotorchError::ShapeMismatch {
@@ -1017,9 +1007,11 @@ fn pop_linear(
     device: &GpuDevice,
 ) -> FerrotorchResult<GpuLinearT> {
     let w_key = format!("{prefix}.weight");
-    let w = state.remove(&w_key).ok_or_else(|| FerrotorchError::InvalidArgument {
-        message: format!("GpuUNet2DConditional: missing tensor {w_key:?}"),
-    })?;
+    let w = state
+        .remove(&w_key)
+        .ok_or_else(|| FerrotorchError::InvalidArgument {
+            message: format!("GpuUNet2DConditional: missing tensor {w_key:?}"),
+        })?;
     let w_data = w.data()?;
     if w_data.len() != out_f * in_f {
         return Err(FerrotorchError::ShapeMismatch {
@@ -1081,7 +1073,14 @@ fn pop_resnet_time(
         true,
         device,
     )?;
-    let norm2 = pop_groupnorm(state, &format!("{prefix}.norm2"), groups, out_c, eps, device)?;
+    let norm2 = pop_groupnorm(
+        state,
+        &format!("{prefix}.norm2"),
+        groups,
+        out_c,
+        eps,
+        device,
+    )?;
     let conv2 = pop_conv(
         state,
         &format!("{prefix}.conv2"),
@@ -1132,9 +1131,30 @@ fn pop_attention(
     let inner_dim = heads * dim_head;
     let kv_dim = cross_attention_dim.unwrap_or(query_dim);
     // SD-1.5 sets bias=False on q/k/v.
-    let to_q = pop_linear(state, &format!("{prefix}.to_q"), query_dim, inner_dim, false, device)?;
-    let to_k = pop_linear(state, &format!("{prefix}.to_k"), kv_dim, inner_dim, false, device)?;
-    let to_v = pop_linear(state, &format!("{prefix}.to_v"), kv_dim, inner_dim, false, device)?;
+    let to_q = pop_linear(
+        state,
+        &format!("{prefix}.to_q"),
+        query_dim,
+        inner_dim,
+        false,
+        device,
+    )?;
+    let to_k = pop_linear(
+        state,
+        &format!("{prefix}.to_k"),
+        kv_dim,
+        inner_dim,
+        false,
+        device,
+    )?;
+    let to_v = pop_linear(
+        state,
+        &format!("{prefix}.to_v"),
+        kv_dim,
+        inner_dim,
+        false,
+        device,
+    )?;
     // to_out.0 always has bias.
     let to_out_0 = pop_linear(
         state,
@@ -1238,8 +1258,14 @@ fn pop_transformer_2d(
     device: &GpuDevice,
 ) -> FerrotorchResult<GpuTransformer2D> {
     let inner_dim = heads * dim_head;
-    let norm =
-        pop_groupnorm(state, &format!("{prefix}.norm"), groups, in_channels, eps, device)?;
+    let norm = pop_groupnorm(
+        state,
+        &format!("{prefix}.norm"),
+        groups,
+        in_channels,
+        eps,
+        device,
+    )?;
     let proj_in = pop_conv(
         state,
         &format!("{prefix}.proj_in"),
@@ -1366,8 +1392,18 @@ fn group_norm_forward(
             ),
         });
     }
-    gpu_group_norm_f32(x, &g.weight, &g.bias, b, c, g.num_groups, h * w, g.eps, device)
-        .map_err(gpu_err)
+    gpu_group_norm_f32(
+        x,
+        &g.weight,
+        &g.bias,
+        b,
+        c,
+        g.num_groups,
+        h * w,
+        g.eps,
+        device,
+    )
+    .map_err(gpu_err)
 }
 
 fn layer_norm_forward(
@@ -1395,8 +1431,15 @@ fn linear_forward(
     m: usize,
     device: &GpuDevice,
 ) -> FerrotorchResult<CudaBuffer<f32>> {
-    let y = gpu_matmul_f32(x, &lin.weight_t, m, lin.in_features, lin.out_features, device)
-        .map_err(gpu_err)?;
+    let y = gpu_matmul_f32(
+        x,
+        &lin.weight_t,
+        m,
+        lin.in_features,
+        lin.out_features,
+        device,
+    )
+    .map_err(gpu_err)?;
     if let Some(bias) = &lin.bias {
         gpu_broadcast_add(
             &y,
@@ -1618,14 +1661,21 @@ fn transformer_2d_forward(
     let mut hidden_seq = transpose_bchw_to_bnc(&proj_in_buf, b, inner, hw, device)?;
 
     for block in &t.blocks {
-        hidden_seq =
-            basic_transformer_block_forward(block, &hidden_seq, b, hw, ehs, s_text, cross_dim, device)?;
+        hidden_seq = basic_transformer_block_forward(
+            block,
+            &hidden_seq,
+            b,
+            hw,
+            ehs,
+            s_text,
+            cross_dim,
+            device,
+        )?;
     }
 
     // Back to spatial: [B, HW, inner] -> [B, inner, H, W]
     let hidden_back = transpose_bnc_to_bchw(&hidden_seq, b, inner, hw, device)?;
-    let (proj_out_buf, _) =
-        conv_forward(&t.proj_out, &hidden_back, [b, inner, h, w], device)?;
+    let (proj_out_buf, _) = conv_forward(&t.proj_out, &hidden_back, [b, inner, h, w], device)?;
 
     // Residual is `x` (not `normed`) — matches diffusers.
     let summed = gpu_add(&proj_out_buf, x, device).map_err(gpu_err)?;

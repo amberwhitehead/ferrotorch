@@ -69,7 +69,9 @@ const EXPECTED_PASS_LINES: &[&str] = &[
 #[ignore = "Requires network access — enable with --ignored"]
 fn pretrained_distributions_parity_smoke() {
     let root = workspace_root();
-    let harness = root.join("scripts").join("verify_distributions_inference.py");
+    let harness = root
+        .join("scripts")
+        .join("verify_distributions_inference.py");
     assert!(
         harness.is_file(),
         "harness missing at {}",

@@ -254,13 +254,7 @@ mod tests {
     use super::*;
     use crate::transfer::{cpu_to_gpu, gpu_to_cpu};
 
-    fn cpu_nearest_upsample2x_ref(
-        x: &[f32],
-        b: usize,
-        c: usize,
-        h: usize,
-        w: usize,
-    ) -> Vec<f32> {
+    fn cpu_nearest_upsample2x_ref(x: &[f32], b: usize, c: usize, h: usize, w: usize) -> Vec<f32> {
         let oh = 2 * h;
         let ow = 2 * w;
         let mut out = vec![0.0f32; b * c * oh * ow];

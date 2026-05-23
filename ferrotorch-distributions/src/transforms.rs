@@ -12,7 +12,9 @@ use ferrotorch_core::autograd::no_grad;
 use ferrotorch_core::creation;
 use ferrotorch_core::dtype::Float;
 use ferrotorch_core::error::FerrotorchResult;
-use ferrotorch_core::grad_fns::activation::{sigmoid as sigmoid_op, softplus as softplus_op, tanh as tanh_op};
+use ferrotorch_core::grad_fns::activation::{
+    sigmoid as sigmoid_op, softplus as softplus_op, tanh as tanh_op,
+};
 use ferrotorch_core::grad_fns::arithmetic::{add, div, mul, neg, sub};
 use ferrotorch_core::grad_fns::transcendental::{exp as exp_op, log as log_op};
 use ferrotorch_core::tensor::Tensor;
@@ -224,8 +226,7 @@ impl<T: Float> Transform<T> for SigmoidTransform {
         no_grad(|| {
             let one = T::from(1.0).unwrap();
             let eps = T::from(1e-7).unwrap();
-            let clamped =
-                ferrotorch_core::grad_fns::transcendental::clamp(y, eps, one - eps)?;
+            let clamped = ferrotorch_core::grad_fns::transcendental::clamp(y, eps, one - eps)?;
             let device = y.device();
             let one_t = creation::scalar(one)?.to(device)?;
             let one_minus = sub(&one_t, &clamped)?;
@@ -1017,8 +1018,7 @@ mod tests {
         let loc = scalar(0.0f32).unwrap();
         let scale = scalar(1.0f32).unwrap();
         let base = Normal::new(loc.clone(), scale.clone()).unwrap();
-        let td: TransformedDistribution<f32> =
-            TransformedDistribution::new(Box::new(base), vec![]);
+        let td: TransformedDistribution<f32> = TransformedDistribution::new(Box::new(base), vec![]);
         let base2 = Normal::new(loc, scale).unwrap();
         let ent = td.entropy().unwrap().item().unwrap();
         let base_ent = base2.entropy().unwrap().item().unwrap();
@@ -1112,10 +1112,8 @@ mod tests {
         );
         let ent_td = td.entropy().unwrap().item().unwrap();
         let half = 0.5f32;
-        let expected = half
-            + half * (2.0f32 * std::f32::consts::PI).ln()
-            + 2.0f32.ln()
-            + 3.0f32.ln();
+        let expected =
+            half + half * (2.0f32 * std::f32::consts::PI).ln() + 2.0f32.ln() + 3.0f32.ln();
         assert!(
             (ent_td - expected).abs() < 1e-5,
             "affine-chain entropy: td={ent_td} expected={expected}",
@@ -1151,7 +1149,10 @@ mod tests {
         let base = Normal::new(loc, scale).unwrap();
         let td = TransformedDistribution::new(
             Box::new(base),
-            vec![Box::new(ExpTransform), Box::new(AffineTransform::new(0.0f32, 1.0))],
+            vec![
+                Box::new(ExpTransform),
+                Box::new(AffineTransform::new(0.0f32, 1.0)),
+            ],
         );
         let err = td.entropy().unwrap_err();
         let msg = format!("{err}");
@@ -1209,11 +1210,7 @@ mod tests {
     fn exp_transform_preserves_device_and_value() {
         // Shape [2, 3]; check exp/inverse-log/log_det numerically and verify
         // device preservation through each leg.
-        let x = from_slice(
-            &[-1.0f32, 0.0, 1.0, 2.0, -2.0, 0.5],
-            &[2, 3],
-        )
-        .unwrap();
+        let x = from_slice(&[-1.0f32, 0.0, 1.0, 2.0, -2.0, 0.5], &[2, 3]).unwrap();
         let t = ExpTransform;
         let device = x.device();
 

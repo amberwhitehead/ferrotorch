@@ -179,27 +179,25 @@ const SPECS: &[LoaderSpec] = &[
 ];
 
 fn lookup_spec(name: &str) -> Result<&'static LoaderSpec, String> {
-    SPECS
-        .iter()
-        .find(|s| s.name == name)
-        .ok_or_else(|| {
-            format!(
-                "unknown config {name:?}; known: {:?}",
-                SPECS.iter().map(|s| s.name).collect::<Vec<_>>()
-            )
-        })
+    SPECS.iter().find(|s| s.name == name).ok_or_else(|| {
+        format!(
+            "unknown config {name:?}; known: {:?}",
+            SPECS.iter().map(|s| s.name).collect::<Vec<_>>()
+        )
+    })
 }
 
 // ---------------------------------------------------------------------------
 // Multi-tensor binary format (mirrors the Python pin script).
 // ---------------------------------------------------------------------------
 
-fn write_multi_tensor_f32(
-    path: &Path,
-    tensors: &[(Vec<usize>, Vec<f32>)],
-) -> std::io::Result<()> {
+fn write_multi_tensor_f32(path: &Path, tensors: &[(Vec<usize>, Vec<f32>)]) -> std::io::Result<()> {
     let mut f = File::create(path)?;
-    f.write_all(&u32::try_from(tensors.len()).expect("num_tensors fits u32").to_le_bytes())?;
+    f.write_all(
+        &u32::try_from(tensors.len())
+            .expect("num_tensors fits u32")
+            .to_le_bytes(),
+    )?;
     for (shape, data) in tensors {
         let expect: usize = shape.iter().product();
         assert_eq!(
@@ -271,8 +269,7 @@ fn run() -> Result<(), String> {
     let mut batch_sizes: Vec<usize> = Vec::new();
     let mut batch_count: usize = 0;
     for (bi, batch_result) in loader.iter(0).enumerate() {
-        let batch =
-            batch_result.map_err(|e| format!("loader.iter().next() batch {bi}: {e}"))?;
+        let batch = batch_result.map_err(|e| format!("loader.iter().next() batch {bi}: {e}"))?;
         let b = batch.len();
         if b == 0 {
             return Err(format!("batch {bi}: zero items"));
@@ -292,15 +289,10 @@ fn run() -> Result<(), String> {
         let bin_path = args.output_dir.join(format!("batch_{bi:04}.bin"));
         write_multi_tensor_f32(
             &bin_path,
-            &[
-                (vec![b, FEATURE_DIM], features),
-                (vec![b], labels),
-            ],
+            &[(vec![b, FEATURE_DIM], features), (vec![b], labels)],
         )
         .map_err(|e| format!("write {}: {e}", bin_path.display()))?;
-        eprintln!(
-            "[dataloader_iterate_dump]   batch {bi}: size={b}  labels={label_summary:?}"
-        );
+        eprintln!("[dataloader_iterate_dump]   batch {bi}: size={b}  labels={label_summary:?}");
     }
 
     if batch_count == 0 {

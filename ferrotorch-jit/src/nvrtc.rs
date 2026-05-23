@@ -75,9 +75,7 @@ pub fn compile_cuda_source_to_ptx(
     };
 
     let ptx = compile_ptx_with_opts(&nvrtc_source, opts).map_err(|e| JitError::CodegenError {
-        message: format!(
-            "NVRTC compile of CUDA C source for kernel '{kernel_name}' failed: {e}"
-        ),
+        message: format!("NVRTC compile of CUDA C source for kernel '{kernel_name}' failed: {e}"),
     })?;
 
     Ok(ptx.to_src())
@@ -93,8 +91,6 @@ pub fn compile_cuda_source_to_ptx(
     kernel_name: &str,
 ) -> Result<String, JitError> {
     Err(JitError::CodegenError {
-        message: format!(
-            "NVRTC compile of kernel '{kernel_name}' requires the `cuda` feature"
-        ),
+        message: format!("NVRTC compile of kernel '{kernel_name}' requires the `cuda` feature"),
     })
 }

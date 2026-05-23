@@ -84,9 +84,7 @@ pub fn scatter_add_segments<T: Float>(
     let shape = src.shape();
     if shape.len() != 2 {
         return Err(FerrotorchError::ShapeMismatch {
-            message: format!(
-                "scatter_add_segments: src must be 2-D [E, D], got shape {shape:?}"
-            ),
+            message: format!("scatter_add_segments: src must be 2-D [E, D], got shape {shape:?}"),
         });
     }
     let e = shape[0];
@@ -108,9 +106,7 @@ pub fn scatter_add_segments<T: Float>(
     for (e_idx, &dst_i64) in index.iter().enumerate() {
         if dst_i64 < 0 {
             return Err(FerrotorchError::InvalidArgument {
-                message: format!(
-                    "scatter_add_segments: index[{e_idx}] = {dst_i64} is negative"
-                ),
+                message: format!("scatter_add_segments: index[{e_idx}] = {dst_i64} is negative"),
             });
         }
         let dst = dst_i64 as usize;

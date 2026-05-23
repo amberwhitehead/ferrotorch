@@ -707,7 +707,11 @@ mod tests {
         let mut policy = MlpPolicy::new(MlpPolicyConfig::cartpole_v1()).unwrap();
 
         // mlp_extractor weights: all identity-like, biases zero.
-        policy.mlp_extractor.policy_net_0.weight.set_data(ident(64, 4));
+        policy
+            .mlp_extractor
+            .policy_net_0
+            .weight
+            .set_data(ident(64, 4));
         policy
             .mlp_extractor
             .policy_net_0
@@ -715,7 +719,11 @@ mod tests {
             .as_mut()
             .unwrap()
             .set_data(zeros_vec(64));
-        policy.mlp_extractor.policy_net_2.weight.set_data(ident(64, 64));
+        policy
+            .mlp_extractor
+            .policy_net_2
+            .weight
+            .set_data(ident(64, 64));
         policy
             .mlp_extractor
             .policy_net_2
@@ -723,7 +731,11 @@ mod tests {
             .as_mut()
             .unwrap()
             .set_data(zeros_vec(64));
-        policy.mlp_extractor.value_net_0.weight.set_data(ident(64, 4));
+        policy
+            .mlp_extractor
+            .value_net_0
+            .weight
+            .set_data(ident(64, 4));
         policy
             .mlp_extractor
             .value_net_0
@@ -731,7 +743,11 @@ mod tests {
             .as_mut()
             .unwrap()
             .set_data(zeros_vec(64));
-        policy.mlp_extractor.value_net_2.weight.set_data(ident(64, 64));
+        policy
+            .mlp_extractor
+            .value_net_2
+            .weight
+            .set_data(ident(64, 64));
         policy
             .mlp_extractor
             .value_net_2
@@ -776,10 +792,7 @@ mod tests {
         let got_logits = out.action_logits.data_vec().unwrap();
         let got_value = out.value.data_vec().unwrap();
         for (g, e) in got_logits.iter().zip(expected_logits.iter()) {
-            assert!(
-                (g - e).abs() < 1e-6,
-                "logit mismatch: got={g} expected={e}"
-            );
+            assert!((g - e).abs() < 1e-6, "logit mismatch: got={g} expected={e}");
         }
         assert!(
             (got_value[0] - expected_value).abs() < 1e-6,

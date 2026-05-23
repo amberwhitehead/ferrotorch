@@ -113,7 +113,16 @@ impl<T: Float> ConvBnAct<T> {
         act: Option<ActivationKind>,
     ) -> FerrotorchResult<Self> {
         Self::new_with_dilation(
-            in_ch, out_ch, kernel, stride, padding, 1, groups, bn_eps, bn_momentum, act,
+            in_ch,
+            out_ch,
+            kernel,
+            stride,
+            padding,
+            1,
+            groups,
+            bn_eps,
+            bn_momentum,
+            act,
         )
     }
 
@@ -872,78 +881,168 @@ const MOBILENET_V3_SMALL_CFG: [V3BlockCfg; 11] = [
 const MOBILENET_V3_LARGE_CFG: [V3BlockCfg; 15] = [
     // 0: 16→16,  k3, exp=16,  SE=F, HS=F, s=1
     V3BlockCfg {
-        in_ch: 16, kernel: 3, expanded: 16, out_ch: 16,
-        use_se: false, use_hs: false, stride: 1, dilation: 1,
+        in_ch: 16,
+        kernel: 3,
+        expanded: 16,
+        out_ch: 16,
+        use_se: false,
+        use_hs: false,
+        stride: 1,
+        dilation: 1,
     },
     // 1: 16→24,  k3, exp=64,  SE=F, HS=F, s=2
     V3BlockCfg {
-        in_ch: 16, kernel: 3, expanded: 64, out_ch: 24,
-        use_se: false, use_hs: false, stride: 2, dilation: 1,
+        in_ch: 16,
+        kernel: 3,
+        expanded: 64,
+        out_ch: 24,
+        use_se: false,
+        use_hs: false,
+        stride: 2,
+        dilation: 1,
     },
     // 2: 24→24,  k3, exp=72,  SE=F, HS=F, s=1
     V3BlockCfg {
-        in_ch: 24, kernel: 3, expanded: 72, out_ch: 24,
-        use_se: false, use_hs: false, stride: 1, dilation: 1,
+        in_ch: 24,
+        kernel: 3,
+        expanded: 72,
+        out_ch: 24,
+        use_se: false,
+        use_hs: false,
+        stride: 1,
+        dilation: 1,
     },
     // 3: 24→40,  k5, exp=72,  SE=T, HS=F, s=2
     V3BlockCfg {
-        in_ch: 24, kernel: 5, expanded: 72, out_ch: 40,
-        use_se: true,  use_hs: false, stride: 2, dilation: 1,
+        in_ch: 24,
+        kernel: 5,
+        expanded: 72,
+        out_ch: 40,
+        use_se: true,
+        use_hs: false,
+        stride: 2,
+        dilation: 1,
     },
     // 4: 40→40,  k5, exp=120, SE=T, HS=F, s=1  ← LRASPP "low" tap (after this)
     V3BlockCfg {
-        in_ch: 40, kernel: 5, expanded: 120, out_ch: 40,
-        use_se: true,  use_hs: false, stride: 1, dilation: 1,
+        in_ch: 40,
+        kernel: 5,
+        expanded: 120,
+        out_ch: 40,
+        use_se: true,
+        use_hs: false,
+        stride: 1,
+        dilation: 1,
     },
     // 5: 40→40,  k5, exp=120, SE=T, HS=F, s=1
     V3BlockCfg {
-        in_ch: 40, kernel: 5, expanded: 120, out_ch: 40,
-        use_se: true,  use_hs: false, stride: 1, dilation: 1,
+        in_ch: 40,
+        kernel: 5,
+        expanded: 120,
+        out_ch: 40,
+        use_se: true,
+        use_hs: false,
+        stride: 1,
+        dilation: 1,
     },
     // 6: 40→80,  k3, exp=240, SE=F, HS=T, s=2
     V3BlockCfg {
-        in_ch: 40, kernel: 3, expanded: 240, out_ch: 80,
-        use_se: false, use_hs: true,  stride: 2, dilation: 1,
+        in_ch: 40,
+        kernel: 3,
+        expanded: 240,
+        out_ch: 80,
+        use_se: false,
+        use_hs: true,
+        stride: 2,
+        dilation: 1,
     },
     // 7: 80→80,  k3, exp=200, SE=F, HS=T, s=1
     V3BlockCfg {
-        in_ch: 80, kernel: 3, expanded: 200, out_ch: 80,
-        use_se: false, use_hs: true,  stride: 1, dilation: 1,
+        in_ch: 80,
+        kernel: 3,
+        expanded: 200,
+        out_ch: 80,
+        use_se: false,
+        use_hs: true,
+        stride: 1,
+        dilation: 1,
     },
     // 8: 80→80,  k3, exp=184, SE=F, HS=T, s=1
     V3BlockCfg {
-        in_ch: 80, kernel: 3, expanded: 184, out_ch: 80,
-        use_se: false, use_hs: true,  stride: 1, dilation: 1,
+        in_ch: 80,
+        kernel: 3,
+        expanded: 184,
+        out_ch: 80,
+        use_se: false,
+        use_hs: true,
+        stride: 1,
+        dilation: 1,
     },
     // 9: 80→80,  k3, exp=184, SE=F, HS=T, s=1
     V3BlockCfg {
-        in_ch: 80, kernel: 3, expanded: 184, out_ch: 80,
-        use_se: false, use_hs: true,  stride: 1, dilation: 1,
+        in_ch: 80,
+        kernel: 3,
+        expanded: 184,
+        out_ch: 80,
+        use_se: false,
+        use_hs: true,
+        stride: 1,
+        dilation: 1,
     },
     // 10: 80→112, k3, exp=480, SE=T, HS=T, s=1
     V3BlockCfg {
-        in_ch: 80, kernel: 3, expanded: 480, out_ch: 112,
-        use_se: true,  use_hs: true,  stride: 1, dilation: 1,
+        in_ch: 80,
+        kernel: 3,
+        expanded: 480,
+        out_ch: 112,
+        use_se: true,
+        use_hs: true,
+        stride: 1,
+        dilation: 1,
     },
     // 11: 112→112, k3, exp=672, SE=T, HS=T, s=1
     V3BlockCfg {
-        in_ch: 112, kernel: 3, expanded: 672, out_ch: 112,
-        use_se: true,  use_hs: true,  stride: 1, dilation: 1,
+        in_ch: 112,
+        kernel: 3,
+        expanded: 672,
+        out_ch: 112,
+        use_se: true,
+        use_hs: true,
+        stride: 1,
+        dilation: 1,
     },
     // 12: 112→160, k5, exp=672, SE=T, HS=T, s=2 (dilated variant: s=1, dil=2)
     V3BlockCfg {
-        in_ch: 112, kernel: 5, expanded: 672, out_ch: 160,
-        use_se: true,  use_hs: true,  stride: 2, dilation: 1,
+        in_ch: 112,
+        kernel: 5,
+        expanded: 672,
+        out_ch: 160,
+        use_se: true,
+        use_hs: true,
+        stride: 2,
+        dilation: 1,
     },
     // 13: 160→160, k5, exp=960, SE=T, HS=T, s=1 (dilated variant: dil=2)
     V3BlockCfg {
-        in_ch: 160, kernel: 5, expanded: 960, out_ch: 160,
-        use_se: true,  use_hs: true,  stride: 1, dilation: 1,
+        in_ch: 160,
+        kernel: 5,
+        expanded: 960,
+        out_ch: 160,
+        use_se: true,
+        use_hs: true,
+        stride: 1,
+        dilation: 1,
     },
     // 14: 160→160, k5, exp=960, SE=T, HS=T, s=1 (dilated variant: dil=2)
     V3BlockCfg {
-        in_ch: 160, kernel: 5, expanded: 960, out_ch: 160,
-        use_se: true,  use_hs: true,  stride: 1, dilation: 1,
+        in_ch: 160,
+        kernel: 5,
+        expanded: 960,
+        out_ch: 160,
+        use_se: true,
+        use_hs: true,
+        stride: 1,
+        dilation: 1,
     },
 ];
 
@@ -1597,10 +1696,7 @@ impl<T: Float> MobileNetV3Large<T> {
     /// matching shape `[B, 40, H/8, W/8]` so the shape check did not
     /// detect the off-by-one. The per-block parity probe surfaced the
     /// mismatch (block 3 matched torchvision's "low" tap; block 4 did not).
-    pub fn forward_low_high(
-        &self,
-        input: &Tensor<T>,
-    ) -> FerrotorchResult<(Tensor<T>, Tensor<T>)> {
+    pub fn forward_low_high(&self, input: &Tensor<T>) -> FerrotorchResult<(Tensor<T>, Tensor<T>)> {
         let mut x = self.stem.forward(input)?;
         let mut low: Option<Tensor<T>> = None;
         for (i, block) in self.blocks.iter().enumerate() {
@@ -1612,8 +1708,7 @@ impl<T: Float> MobileNetV3Large<T> {
         }
         let high = self.head.forward(&x)?;
         let low = low.ok_or_else(|| ferrotorch_core::FerrotorchError::Internal {
-            message: "MobileNetV3Large::forward_low_high: failed to capture features[4] tap"
-                .into(),
+            message: "MobileNetV3Large::forward_low_high: failed to capture features[4] tap".into(),
         })?;
         Ok((low, high))
     }

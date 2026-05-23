@@ -99,11 +99,7 @@ fn parse_args() -> Result<Args, String> {
     while i < argv.len() {
         match argv[i].as_str() {
             "--model" => {
-                model = Some(
-                    argv.get(i + 1)
-                        .ok_or("--model needs a value")?
-                        .clone(),
-                );
+                model = Some(argv.get(i + 1).ok_or("--model needs a value")?.clone());
                 i += 2;
             }
             "--output" => {
@@ -113,11 +109,7 @@ fn parse_args() -> Result<Args, String> {
                 i += 2;
             }
             "--prompt" => {
-                prompt = Some(
-                    argv.get(i + 1)
-                        .ok_or("--prompt needs a value")?
-                        .clone(),
-                );
+                prompt = Some(argv.get(i + 1).ok_or("--prompt needs a value")?.clone());
                 i += 2;
             }
             "--device" => {
@@ -131,15 +123,12 @@ fn parse_args() -> Result<Args, String> {
                         // configuration the example can satisfy.
                         if !cfg!(feature = "cuda") {
                             return Err(
-                                "--device gpu requires building with `--features cuda`"
-                                    .to_string(),
+                                "--device gpu requires building with `--features cuda`".to_string()
                             );
                         }
                         Device::Gpu
                     }
-                    other => return Err(format!(
-                        "--device must be 'cpu' or 'gpu', got {other:?}"
-                    )),
+                    other => return Err(format!("--device must be 'cpu' or 'gpu', got {other:?}")),
                 };
                 i += 2;
             }
@@ -298,9 +287,8 @@ fn run_gpu_forward(
 }
 
 fn run() -> FerrotorchResult<()> {
-    let args = parse_args().map_err(|m| ferrotorch_core::FerrotorchError::InvalidArgument {
-        message: m,
-    })?;
+    let args = parse_args()
+        .map_err(|m| ferrotorch_core::FerrotorchError::InvalidArgument { message: m })?;
 
     let repo = format!("ferrotorch/{}", args.model);
     eprintln!(
@@ -314,9 +302,7 @@ fn run() -> FerrotorchResult<()> {
     eprintln!(
         "[llm_inference_dump] cached at {} ({} files)",
         repo_dir.display(),
-        std::fs::read_dir(&repo_dir)
-            .map(|r| r.count())
-            .unwrap_or(0)
+        std::fs::read_dir(&repo_dir).map(|r| r.count()).unwrap_or(0)
     );
 
     // -- 2. Parse config + tokenizer. ------------------------------------
@@ -344,10 +330,7 @@ fn run() -> FerrotorchResult<()> {
         let parity = repo_dir.join("_value_parity_input.txt");
         let raw = std::fs::read_to_string(&parity).map_err(|e| {
             ferrotorch_core::FerrotorchError::InvalidArgument {
-                message: format!(
-                    "missing parity-probe prompt {}: {e}",
-                    parity.display()
-                ),
+                message: format!("missing parity-probe prompt {}: {e}", parity.display()),
             }
         })?;
         raw.trim_end_matches('\n').to_string()
@@ -369,17 +352,12 @@ fn run() -> FerrotorchResult<()> {
     if frozen_path.exists() {
         let frozen = read_token_ids_json(&frozen_path).map_err(|e| {
             ferrotorch_core::FerrotorchError::InvalidArgument {
-                message: format!(
-                    "failed reading {}: {e}",
-                    frozen_path.display()
-                ),
+                message: format!("failed reading {}: {e}", frozen_path.display()),
             }
         })?;
         if frozen != local_ids {
             return Err(ferrotorch_core::FerrotorchError::InvalidArgument {
-                message: format!(
-                    "tokenizer mismatch: local={local_ids:?} vs frozen={frozen:?}"
-                ),
+                message: format!("tokenizer mismatch: local={local_ids:?} vs frozen={frozen:?}"),
             });
         }
         eprintln!("[llm_inference_dump] local encode matches frozen token_ids");
@@ -397,10 +375,7 @@ fn run() -> FerrotorchResult<()> {
 
     write_dump_f32(&args.output, &shape, &data).map_err(|e| {
         ferrotorch_core::FerrotorchError::InvalidArgument {
-            message: format!(
-                "failed writing logits to {}: {e}",
-                args.output.display()
-            ),
+            message: format!("failed writing logits to {}: {e}", args.output.display()),
         }
     })?;
     eprintln!(
@@ -444,10 +419,7 @@ fn run() -> FerrotorchResult<()> {
     let mut out = String::new();
     out.push('{');
     out.push_str(&format!("\"device\":\"{device_tag}\","));
-    out.push_str(&format!(
-        "\"shape\":[{},{},{}],",
-        shape[0], seq_len, vocab
-    ));
+    out.push_str(&format!("\"shape\":[{},{},{}],", shape[0], seq_len, vocab));
     out.push_str(&format!("\"seq_len\":{seq_len},"));
     out.push_str(&format!("\"vocab\":{vocab},"));
     out.push_str(&format!("\"argmax_last\":{argmax_last_id},"));

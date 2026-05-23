@@ -39,8 +39,8 @@ use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
 use ferrotorch_core::{FerrotorchResult, Tensor, TensorStorage};
-use ferrotorch_diffusion::{load_vae_decoder, VaeDecoderConfig};
-use ferrotorch_hub::{hf_download_model, HubCache};
+use ferrotorch_diffusion::{VaeDecoderConfig, load_vae_decoder};
+use ferrotorch_hub::{HubCache, hf_download_model};
 
 /// Target device for the forward pass.
 ///
@@ -151,9 +151,8 @@ fn write_dump_f32(path: &Path, shape: &[usize], data: &[f32]) -> std::io::Result
 }
 
 fn run() -> FerrotorchResult<()> {
-    let args = parse_args().map_err(|m| ferrotorch_core::FerrotorchError::InvalidArgument {
-        message: m,
-    })?;
+    let args = parse_args()
+        .map_err(|m| ferrotorch_core::FerrotorchError::InvalidArgument { message: m })?;
 
     let repo = format!("ferrotorch/{}", args.model);
     eprintln!("[vae_decode_dump] repo = {repo}");
@@ -198,13 +197,14 @@ fn run() -> FerrotorchResult<()> {
         }
         parity
     };
-    let (lat_shape, lat_data) =
-        read_dump_f32(&latent_path).map_err(|e| ferrotorch_core::FerrotorchError::InvalidArgument {
+    let (lat_shape, lat_data) = read_dump_f32(&latent_path).map_err(|e| {
+        ferrotorch_core::FerrotorchError::InvalidArgument {
             message: format!(
                 "failed to read latent input from {}: {e}",
                 latent_path.display()
             ),
-        })?;
+        }
+    })?;
     eprintln!(
         "[vae_decode_dump] latent: shape={lat_shape:?} from {}",
         latent_path.display(),
@@ -213,10 +213,7 @@ fn run() -> FerrotorchResult<()> {
 
     // -- 4. Load weights and build decoder. -----------------------------
     let weights_path = locate_weights(&repo_dir)?;
-    eprintln!(
-        "[vae_decode_dump] weights file: {}",
-        weights_path.display()
-    );
+    eprintln!("[vae_decode_dump] weights file: {}", weights_path.display());
     let (decoder, drop_report) =
         load_vae_decoder::<f32>(&weights_path, cfg.clone(), /* strict = */ false)?;
     eprintln!(
@@ -311,9 +308,10 @@ fn run_gpu(
     use ferrotorch_gpu::GpuDevice;
 
     eprintln!("[vae_decode_dump] device = gpu");
-    let device = GpuDevice::new(0).map_err(|e| ferrotorch_core::FerrotorchError::InvalidArgument {
-        message: format!("GpuDevice::new(0) failed: {e}"),
-    })?;
+    let device =
+        GpuDevice::new(0).map_err(|e| ferrotorch_core::FerrotorchError::InvalidArgument {
+            message: format!("GpuDevice::new(0) failed: {e}"),
+        })?;
     let (gpu, report) = GpuVaeDecoder::from_module(decoder, &device)?;
     eprintln!(
         "[vae_decode_dump] gpu state-dict load: dropped_keys={}",

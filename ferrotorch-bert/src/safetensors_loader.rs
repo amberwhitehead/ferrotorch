@@ -48,13 +48,12 @@ fn load_safetensors_filtered<T: Float>(weights_path: &Path) -> FerrotorchResult<
             weights_path.display()
         ),
     })?;
-    let st =
-        SafeTensors::deserialize(&bytes).map_err(|e| FerrotorchError::InvalidArgument {
-            message: format!(
-                "load_safetensors_filtered: failed to parse {}: {e}",
-                weights_path.display()
-            ),
-        })?;
+    let st = SafeTensors::deserialize(&bytes).map_err(|e| FerrotorchError::InvalidArgument {
+        message: format!(
+            "load_safetensors_filtered: failed to parse {}: {e}",
+            weights_path.display()
+        ),
+    })?;
     let mut keep: Vec<String> = Vec::new();
     for k in st.names() {
         let s: &str = k.as_str();
@@ -70,17 +69,14 @@ fn load_safetensors_filtered<T: Float>(weights_path: &Path) -> FerrotorchResult<
         Vec::with_capacity(keep.len());
     for k in &keep {
         let v = st.tensor(k).map_err(|e| FerrotorchError::InvalidArgument {
-            message: format!(
-                "load_safetensors_filtered: missing tensor {k:?} after filter: {e}"
-            ),
+            message: format!("load_safetensors_filtered: missing tensor {k:?} after filter: {e}"),
         })?;
         subset.push((k.clone(), v));
     }
-    let serialized = safetensors::serialize(subset, &None).map_err(|e| {
-        FerrotorchError::InvalidArgument {
+    let serialized =
+        safetensors::serialize(subset, &None).map_err(|e| FerrotorchError::InvalidArgument {
             message: format!("load_safetensors_filtered: re-serialize failed: {e}"),
-        }
-    })?;
+        })?;
     let tmp = tempfile::NamedTempFile::new().map_err(|e| FerrotorchError::InvalidArgument {
         message: format!("load_safetensors_filtered: tempfile: {e}"),
     })?;
@@ -112,13 +108,12 @@ pub fn load_bert_model<T: Float>(
     // Probe the raw safetensors to learn which upstream keys are
     // present (so the DropReport reflects the upstream checkpoint, not
     // the post-filter view).
-    let raw_bytes =
-        std::fs::read(weights_path).map_err(|e| FerrotorchError::InvalidArgument {
-            message: format!(
-                "load_bert_model: failed to read safetensors {}: {e}",
-                weights_path.display()
-            ),
-        })?;
+    let raw_bytes = std::fs::read(weights_path).map_err(|e| FerrotorchError::InvalidArgument {
+        message: format!(
+            "load_bert_model: failed to read safetensors {}: {e}",
+            weights_path.display()
+        ),
+    })?;
     let raw_st = safetensors::SafeTensors::deserialize(&raw_bytes).map_err(|e| {
         FerrotorchError::InvalidArgument {
             message: format!(

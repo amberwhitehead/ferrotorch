@@ -61,21 +61,17 @@ pub fn load_gcn_net(
     num_classes: usize,
     strict: bool,
 ) -> FerrotorchResult<(GcnNet, DropReport)> {
-    let state = load_safetensors::<f32>(weights_path).map_err(|e| {
-        FerrotorchError::InvalidArgument {
+    let state =
+        load_safetensors::<f32>(weights_path).map_err(|e| FerrotorchError::InvalidArgument {
             message: format!(
                 "load_gcn_net: failed to decode safetensors {}: {e}",
                 weights_path.display()
             ),
-        }
-    })?;
+        })?;
 
     let mut net = GcnNet::new(in_features, hidden, num_classes)?;
-    let expected: std::collections::HashSet<String> = net
-        .named_parameters()
-        .into_iter()
-        .map(|(n, _)| n)
-        .collect();
+    let expected: std::collections::HashSet<String> =
+        net.named_parameters().into_iter().map(|(n, _)| n).collect();
     let mut unmapped: Vec<String> = Vec::new();
     for k in state.keys() {
         if !expected.contains(k) {
@@ -85,9 +81,7 @@ pub fn load_gcn_net(
     unmapped.sort();
     if strict && !unmapped.is_empty() {
         return Err(FerrotorchError::InvalidArgument {
-            message: format!(
-                "load_gcn_net: unmapped upstream keys (strict mode): {unmapped:?}"
-            ),
+            message: format!("load_gcn_net: unmapped upstream keys (strict mode): {unmapped:?}"),
         });
     }
 
@@ -132,10 +126,7 @@ mod tests {
             let v = &dst_params[k];
             assert_eq!(v.len(), vexp.len(), "len mismatch for {k}");
             for (a, b) in v.iter().zip(vexp.iter()) {
-                assert!(
-                    (a - b).abs() < 1e-7,
-                    "value mismatch in {k}: {a} vs {b}"
-                );
+                assert!((a - b).abs() < 1e-7, "value mismatch in {k}: {a} vs {b}");
             }
         }
     }

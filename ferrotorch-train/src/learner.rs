@@ -672,13 +672,17 @@ mod tests {
         assert_eq!(learner.val_metrics.len(), 1);
 
         let data = regression_data();
-        let history = learner
-            .fit(
-                &data,
-                None::<&dyn Fn() -> std::vec::IntoIter<FerrotorchResult<(Tensor<f32>, Tensor<f32>)>>>,
-                5,
-            )
-            .expect("fit should succeed on the synthetic regression task");
+        let history =
+            learner
+                .fit(
+                    &data,
+                    None::<
+                        &dyn Fn()
+                            -> std::vec::IntoIter<FerrotorchResult<(Tensor<f32>, Tensor<f32>)>>,
+                    >,
+                    5,
+                )
+                .expect("fit should succeed on the synthetic regression task");
 
         // 5 epochs were actually run.
         assert_eq!(history.epochs.len(), 5);

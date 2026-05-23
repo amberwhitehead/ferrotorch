@@ -66,7 +66,9 @@ impl<T: Float> VaeDecoder<T> {
         for (k, v) in hf_state {
             // Try (a) bare-VAE prefix → as-is; (b) full-pipeline
             // `vae.<rest>` prefix → strip the `vae.` and accept.
-            let after_vae = k.strip_prefix("vae.").map_or_else(|| k.clone(), str::to_owned);
+            let after_vae = k
+                .strip_prefix("vae.")
+                .map_or_else(|| k.clone(), str::to_owned);
             if after_vae.starts_with("post_quant_conv.") || after_vae.starts_with("decoder.") {
                 remapped.insert(after_vae, v.clone());
                 continue;
@@ -116,7 +118,9 @@ impl<T: Float> UNet2DConditionModel<T> {
         let mut remapped: StateDict<T> = HashMap::with_capacity(hf_state.len());
         let mut dropped: Vec<String> = Vec::new();
         for (k, v) in hf_state {
-            let after_unet = k.strip_prefix("unet.").map_or_else(|| k.clone(), str::to_owned);
+            let after_unet = k
+                .strip_prefix("unet.")
+                .map_or_else(|| k.clone(), str::to_owned);
             let is_unet_key = after_unet.starts_with("time_embedding.")
                 || after_unet.starts_with("conv_in.")
                 || after_unet.starts_with("down_blocks.")
@@ -189,13 +193,12 @@ fn load_safetensors_clip_filtered<T: Float>(
 ) -> FerrotorchResult<(StateDict<T>, bool)> {
     use safetensors::SafeTensors;
 
-    let bytes =
-        std::fs::read(weights_path).map_err(|e| FerrotorchError::InvalidArgument {
-            message: format!(
-                "load_safetensors_clip_filtered: failed to read {}: {e}",
-                weights_path.display()
-            ),
-        })?;
+    let bytes = std::fs::read(weights_path).map_err(|e| FerrotorchError::InvalidArgument {
+        message: format!(
+            "load_safetensors_clip_filtered: failed to read {}: {e}",
+            weights_path.display()
+        ),
+    })?;
     let st = SafeTensors::deserialize(&bytes).map_err(|e| FerrotorchError::InvalidArgument {
         message: format!(
             "load_safetensors_clip_filtered: failed to parse {}: {e}",
@@ -228,11 +231,10 @@ fn load_safetensors_clip_filtered<T: Float>(
         })?;
         subset.push((k.clone(), v));
     }
-    let serialized = safetensors::serialize(subset, &None).map_err(|e| {
-        FerrotorchError::InvalidArgument {
+    let serialized =
+        safetensors::serialize(subset, &None).map_err(|e| FerrotorchError::InvalidArgument {
             message: format!("load_safetensors_clip_filtered: re-serialize failed: {e}"),
-        }
-    })?;
+        })?;
     let tmp = tempfile::NamedTempFile::new().map_err(|e| FerrotorchError::InvalidArgument {
         message: format!("load_safetensors_clip_filtered: tempfile: {e}"),
     })?;
@@ -286,10 +288,7 @@ pub fn load_clip_text_encoder<T: Float>(
     // placeholder tensor is never consumed — `load_hf_state_dict`
     // drops the entry before any parameter slot sees it.
     if had_position_ids {
-        let key = if state
-            .keys()
-            .any(|k| k.starts_with("text_model."))
-        {
+        let key = if state.keys().any(|k| k.starts_with("text_model.")) {
             "text_model.embeddings.position_ids".to_string()
         } else {
             "embeddings.position_ids".to_string()
@@ -372,7 +371,9 @@ impl<T: Float> VaeEncoder<T> {
         for (k, v) in hf_state {
             // (a) bare-VAE prefix → as-is; (b) full-pipeline `vae.<rest>`
             // prefix → strip the `vae.` and accept.
-            let after_vae = k.strip_prefix("vae.").map_or_else(|| k.clone(), str::to_owned);
+            let after_vae = k
+                .strip_prefix("vae.")
+                .map_or_else(|| k.clone(), str::to_owned);
             if after_vae.starts_with("encoder.") || after_vae.starts_with("quant_conv.") {
                 remapped.insert(after_vae, v.clone());
                 continue;
@@ -673,7 +674,13 @@ mod tests {
                 "encoder dropped unexpected key: {k}"
             );
         }
-        assert!(!dec_rep.dropped.is_empty(), "decoder should have dropped some keys");
-        assert!(!enc_rep.dropped.is_empty(), "encoder should have dropped some keys");
+        assert!(
+            !dec_rep.dropped.is_empty(),
+            "decoder should have dropped some keys"
+        );
+        assert!(
+            !enc_rep.dropped.is_empty(),
+            "encoder should have dropped some keys"
+        );
     }
 }

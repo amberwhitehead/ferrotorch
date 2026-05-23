@@ -3314,17 +3314,19 @@ mod gpu {
         let want = cat(&[a.clone(), b.clone()], 0).expect("cpu cat bf16");
         let a_gpu = a.to(Device::Cuda(0)).expect("upload a");
         let b_gpu = b.to(Device::Cuda(0)).expect("upload b");
-        let got = cat(&[a_gpu, b_gpu], 0).expect(
-            "GPU bf16 cat must succeed (was NotImplementedOnCuda before #1181)",
-        );
+        let got = cat(&[a_gpu, b_gpu], 0)
+            .expect("GPU bf16 cat must succeed (was NotImplementedOnCuda before #1181)");
         assert!(got.is_cuda(), "GPU cat result must stay on CUDA");
         assert_eq!(got.shape(), &[5, 3]);
 
         let got_cpu = got.cpu().expect("download");
-        let want_bits: Vec<u16> =
-            want.data().unwrap().iter().map(|v| v.to_bits()).collect();
-        let got_bits: Vec<u16> =
-            got_cpu.data().unwrap().iter().map(|v| v.to_bits()).collect();
+        let want_bits: Vec<u16> = want.data().unwrap().iter().map(|v| v.to_bits()).collect();
+        let got_bits: Vec<u16> = got_cpu
+            .data()
+            .unwrap()
+            .iter()
+            .map(|v| v.to_bits())
+            .collect();
         assert_eq!(got_bits, want_bits, "bit-exact bf16 cat required");
     }
 

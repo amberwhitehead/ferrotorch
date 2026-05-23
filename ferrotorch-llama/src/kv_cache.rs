@@ -53,9 +53,7 @@ impl<T: Float> LayerKvCache<T> {
         let shape = self.k.shape();
         if shape.len() != 3 {
             return Err(FerrotorchError::ShapeMismatch {
-                message: format!(
-                    "LayerKvCache: expected 3-D K shape [Hkv, S, d], got {shape:?}"
-                ),
+                message: format!("LayerKvCache: expected 3-D K shape [Hkv, S, d], got {shape:?}"),
             });
         }
         Ok(shape[1])
@@ -211,10 +209,7 @@ impl<T: Float> LlamaKvCache<T> {
                 .iter()
                 .map(|(k, v)| LayerKvCache::from_single_token(k.clone(), v.clone()))
                 .collect::<FerrotorchResult<Vec<_>>>()?;
-            return Ok(Self {
-                layers,
-                seq_len: 1,
-            });
+            return Ok(Self { layers, seq_len: 1 });
         }
         if new_layer_kv.len() != self.layers.len() {
             return Err(FerrotorchError::InvalidArgument {

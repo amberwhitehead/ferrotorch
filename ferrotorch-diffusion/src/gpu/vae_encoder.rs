@@ -64,9 +64,8 @@ use crate::safetensors_loader::DropReport;
 use crate::vae_encoder::VaeEncoder;
 
 use super::vae::{
-    GpuConv2d, GpuMidBlock, GpuResnet, attn_forward, conv_forward, gpu_err,
+    GpuConv2d, GpuGroupNorm, GpuMidBlock, GpuResnet, attn_forward, conv_forward, gpu_err,
     group_norm_forward, pop_attn, pop_conv, pop_groupnorm, pop_resnet, resnet_forward,
-    GpuGroupNorm,
 };
 
 /// Diffusers clamp range for `DiagonalGaussianDistribution.logvar`.
@@ -213,19 +212,39 @@ impl GpuVaeEncoder {
                 Some(GpuDownsample { conv, channels: c })
             };
 
-            down_blocks.push(GpuDownEncoderBlock { resnets, downsample });
+            down_blocks.push(GpuDownEncoderBlock {
+                resnets,
+                downsample,
+            });
             prev_out = c;
         }
 
         // Mid-block at the deepest channel count.
         let mid_resnet0 = pop_resnet(
-            &mut state, "encoder.mid_block.resnets.0", top_c, top_c, groups, eps, &device,
+            &mut state,
+            "encoder.mid_block.resnets.0",
+            top_c,
+            top_c,
+            groups,
+            eps,
+            &device,
         )?;
         let mid_attn0 = pop_attn(
-            &mut state, "encoder.mid_block.attentions.0", top_c, groups, eps, &device,
+            &mut state,
+            "encoder.mid_block.attentions.0",
+            top_c,
+            groups,
+            eps,
+            &device,
         )?;
         let mid_resnet1 = pop_resnet(
-            &mut state, "encoder.mid_block.resnets.1", top_c, top_c, groups, eps, &device,
+            &mut state,
+            "encoder.mid_block.resnets.1",
+            top_c,
+            top_c,
+            groups,
+            eps,
+            &device,
         )?;
         let mid_block = GpuMidBlock {
             resnets: vec![mid_resnet0, mid_resnet1],
@@ -234,7 +253,12 @@ impl GpuVaeEncoder {
 
         // conv_norm_out: GroupNorm at top_c channels.
         let conv_norm_out = pop_groupnorm(
-            &mut state, "encoder.conv_norm_out", groups, top_c, eps, &device,
+            &mut state,
+            "encoder.conv_norm_out",
+            groups,
+            top_c,
+            eps,
+            &device,
         )?;
 
         // conv_out: 3×3, top → 2 * latent_c (concat of mean / logvar).
@@ -322,8 +346,7 @@ impl GpuVaeEncoder {
         }
 
         // conv_in
-        let (mut hbuf, mut hshape) =
-            conv_forward(&self.conv_in, x, [b, c_in, h, w], &self.device)?;
+        let (mut hbuf, mut hshape) = conv_forward(&self.conv_in, x, [b, c_in, h, w], &self.device)?;
 
         // down_blocks: each is a sequence of resnets, then optional stride-2 downsample.
         for block in &self.down_blocks {
@@ -336,12 +359,9 @@ impl GpuVaeEncoder {
         }
 
         // mid_block: resnet0 → attn → resnet1
-        (hbuf, hshape) =
-            resnet_forward(&self.mid_block.resnets[0], &hbuf, hshape, &self.device)?;
-        (hbuf, hshape) =
-            attn_forward(&self.mid_block.attentions[0], &hbuf, hshape, &self.device)?;
-        (hbuf, hshape) =
-            resnet_forward(&self.mid_block.resnets[1], &hbuf, hshape, &self.device)?;
+        (hbuf, hshape) = resnet_forward(&self.mid_block.resnets[0], &hbuf, hshape, &self.device)?;
+        (hbuf, hshape) = attn_forward(&self.mid_block.attentions[0], &hbuf, hshape, &self.device)?;
+        (hbuf, hshape) = resnet_forward(&self.mid_block.resnets[1], &hbuf, hshape, &self.device)?;
 
         // conv_norm_out → SiLU → conv_out → quant_conv
         hbuf = group_norm_forward(&self.conv_norm_out, &hbuf, hshape, &self.device)?;
@@ -425,10 +445,8 @@ impl GpuVaeEncoder {
         }
         let data = image.data()?;
         let x = cpu_to_gpu(data, &self.device).map_err(gpu_err)?;
-        let (params_buf, params_shape) = self.forward_to_params(
-            &x,
-            [shape[0], shape[1], shape[2], shape[3]],
-        )?;
+        let (params_buf, params_shape) =
+            self.forward_to_params(&x, [shape[0], shape[1], shape[2], shape[3]])?;
         // Trip-wire callback: the caller can assert that params_buf is a
         // genuine CudaBuffer<f32> with the right size. The type system
         // already proves GPU residency; the probe lets the test inspect
@@ -465,10 +483,8 @@ impl GpuVaeEncoder {
         }
         let data = image.data()?;
         let x = cpu_to_gpu(data, &self.device).map_err(gpu_err)?;
-        let (params_buf, params_shape) = self.forward_to_params(
-            &x,
-            [shape[0], shape[1], shape[2], shape[3]],
-        )?;
+        let (params_buf, params_shape) =
+            self.forward_to_params(&x, [shape[0], shape[1], shape[2], shape[3]])?;
         diag_gauss_sample_with_scale_gpu(
             &params_buf,
             params_shape,
@@ -570,8 +586,7 @@ fn diag_gauss_sample_with_scale_gpu(
         // Mode: return mean * scaling_factor. No clamp needed for the
         // mean (clamp is purely a logvar-domain operation; the mode is
         // just the mean tensor itself, scaled).
-        let scaled =
-            gpu_scale(&mean_buf, scaling_factor, device).map_err(gpu_err)?;
+        let scaled = gpu_scale(&mean_buf, scaling_factor, device).map_err(gpu_err)?;
         return Ok((scaled, out_shape));
     }
 
@@ -747,10 +762,11 @@ mod tests {
                 // Read back the params, verify mean and logvar halves are
                 // distinct (proves the channel-split path is real,
                 // not e.g. a uniform fill from a botched CPU detour).
-                let host = gpu_to_cpu(params_buf, &device)
-                    .map_err(|e| FerrotorchError::InvalidArgument {
+                let host = gpu_to_cpu(params_buf, &device).map_err(|e| {
+                    FerrotorchError::InvalidArgument {
                         message: format!("probe readback failed: {e}"),
-                    })?;
+                    }
+                })?;
                 let half = expected / 2;
                 let mean = &host[..half];
                 let logvar = &host[half..];

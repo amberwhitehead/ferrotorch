@@ -60,18 +60,13 @@ impl Graph {
         for (i, &v) in edge_index.iter().enumerate() {
             if v < 0 || (v as usize) >= n {
                 return Err(FerrotorchError::InvalidArgument {
-                    message: format!(
-                        "Graph::new: edge_index[{i}] = {v} out of range [0, {n})"
-                    ),
+                    message: format!("Graph::new: edge_index[{i}] = {v} out of range [0, {n})"),
                 });
             }
         }
         if y.len() != n {
             return Err(FerrotorchError::ShapeMismatch {
-                message: format!(
-                    "Graph::new: y length {} != num_nodes {n}",
-                    y.len()
-                ),
+                message: format!("Graph::new: y length {} != num_nodes {n}", y.len()),
             });
         }
         Ok(Self {

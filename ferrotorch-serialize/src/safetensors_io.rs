@@ -421,7 +421,7 @@ pub fn load_safetensors<T: Float>(path: impl AsRef<Path>) -> FerrotorchResult<St
 /// is a clear win on `BF16` / `F16` checkpoints — each element
 /// carries a `half::*_to_f32` upcast that LLVM auto-vectorizes and
 /// scales linearly with worker count. The same `par_iter` is a clear
-/// *loss* on native-`F32` / `F64` files (SD-1.5 UNet: 315 s serial
+/// *loss* on native-`F32` / `F64` files (SD-1.5 `UNet`: 315 s serial
 /// → 379 s parallel on a 16-core RTX 3090 box), where
 /// `decode_view` is a pure mmap → `Vec<T>` memcpy bound by memory
 /// bandwidth: extra workers only add page-fault and allocator
@@ -1887,9 +1887,13 @@ mod tests {
         // inside the same process; toggling it here is local to this
         // test's scope (cleared in the `defer`-shaped block below).
         let key = "FERROTORCH_FORCE_SERIAL_LOAD";
-        unsafe { std::env::set_var(key, "1"); }
+        unsafe {
+            std::env::set_var(key, "1");
+        }
         let serial: StateDict<f32> = load_safetensors(&path).unwrap();
-        unsafe { std::env::remove_var(key); }
+        unsafe {
+            std::env::remove_var(key);
+        }
         let serial_data = serial["w"].data().unwrap().to_vec();
 
         assert_eq!(parallel_data.len(), serial_data.len());

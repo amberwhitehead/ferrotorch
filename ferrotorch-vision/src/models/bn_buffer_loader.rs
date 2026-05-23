@@ -56,8 +56,8 @@
 
 use ferrotorch_core::{FerrotorchError, FerrotorchResult, Float};
 use ferrotorch_nn::Module;
-use ferrotorch_nn::norm::{BatchNorm1d, BatchNorm2d, BatchNorm3d};
 use ferrotorch_nn::StateDict;
+use ferrotorch_nn::norm::{BatchNorm1d, BatchNorm2d, BatchNorm3d};
 
 /// The three BN buffer-key suffixes torchvision emits. A key qualifies
 /// as a BN buffer key iff `key.ends_with('.' + suffix)` for one of
@@ -104,8 +104,7 @@ fn clamp_running_var_noise<T: Float>(slice: &[T]) -> Vec<T> {
     // future T cannot represent 1e-6 (`from` returns None) we fall
     // back to NOT clamping anything — the setter then surfaces the
     // negative as an error, preserving the loud-failure contract.
-    let tol: T = T::from(RUNNING_VAR_CLAMP_TOL_F64)
-        .unwrap_or_else(<T as num_traits::Zero>::zero);
+    let tol: T = T::from(RUNNING_VAR_CLAMP_TOL_F64).unwrap_or_else(<T as num_traits::Zero>::zero);
     let zero = <T as num_traits::Zero>::zero();
     slice
         .iter()
@@ -341,12 +340,14 @@ fn bn_nbt_from_slice<T: Float>(full_key: &str, value: &[T]) -> FerrotorchResult<
             ),
         });
     }
-    let v = value[0].to_f64().ok_or_else(|| FerrotorchError::InvalidArgument {
-        message: format!(
-            "bn_buffer_loader: num_batches_tracked buffer \"{full_key}\" \
+    let v = value[0]
+        .to_f64()
+        .ok_or_else(|| FerrotorchError::InvalidArgument {
+            message: format!(
+                "bn_buffer_loader: num_batches_tracked buffer \"{full_key}\" \
              element could not be widened to f64"
-        ),
-    })?;
+            ),
+        })?;
     if !v.is_finite() || v < 0.0 || v.fract() != 0.0 {
         return Err(FerrotorchError::InvalidArgument {
             message: format!(
@@ -448,14 +449,8 @@ mod tests {
     fn loader_applies_running_mean_and_var() {
         let model = WithBn::new(4);
         let mut state: StateDict<f32> = StateDict::new();
-        state.insert(
-            "bn.running_mean".to_string(),
-            t1(vec![1.0, 2.0, 3.0, 4.0]),
-        );
-        state.insert(
-            "bn.running_var".to_string(),
-            t1(vec![0.5, 0.6, 0.7, 0.8]),
-        );
+        state.insert("bn.running_mean".to_string(), t1(vec![1.0, 2.0, 3.0, 4.0]));
+        state.insert("bn.running_var".to_string(), t1(vec![0.5, 0.6, 0.7, 0.8]));
 
         apply_bn_buffers_from_state_dict(&model as &dyn Module<f32>, &state).unwrap();
 

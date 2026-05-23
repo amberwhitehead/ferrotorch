@@ -1403,7 +1403,10 @@ fn max_pool2d_impl<T: Float>(
         if pad_h < kernel || pad_w < kernel {
             (1, 1)
         } else {
-            ((pad_h - kernel).div_ceil(stride) + 1, (pad_w - kernel).div_ceil(stride) + 1)
+            (
+                (pad_h - kernel).div_ceil(stride) + 1,
+                (pad_w - kernel).div_ceil(stride) + 1,
+            )
         }
     } else {
         (
@@ -1735,23 +1738,17 @@ mod tests {
         // (21-1 = 20 classes × 8732 anchors = 174_640 candidates). With our caps and
         // per-class NMS the result must collapse to exactly 200.
         let cls_data = vec![0.0f32; n_anchors * nc];
-        let cls_logits = Tensor::from_storage(
-            TensorStorage::cpu(cls_data),
-            vec![1, n_anchors, nc],
-            false,
-        )
-        .unwrap();
+        let cls_logits =
+            Tensor::from_storage(TensorStorage::cpu(cls_data), vec![1, n_anchors, nc], false)
+                .unwrap();
 
         // bbox_regression: [1, 8732, 4] — all zeros. Decoded boxes then equal
         // the prior boxes (cx, cy, w, h), which are diverse across feature-map
         // scales so per-class NMS at IoU=0.45 leaves many survivors per class.
         let reg_data = vec![0.0f32; n_anchors * 4];
-        let bbox_regression = Tensor::from_storage(
-            TensorStorage::cpu(reg_data),
-            vec![1, n_anchors, 4],
-            false,
-        )
-        .unwrap();
+        let bbox_regression =
+            Tensor::from_storage(TensorStorage::cpu(reg_data), vec![1, n_anchors, 4], false)
+                .unwrap();
 
         let dets = model
             .postprocess_single(&cls_logits, &bbox_regression, 0, [300, 300])
@@ -1780,7 +1777,10 @@ mod tests {
             assert!(
                 scores[i - 1] >= scores[i] - 1e-6,
                 "post-cap scores must be non-increasing: scores[{}]={} < scores[{}]={}",
-                i - 1, scores[i - 1], i, scores[i],
+                i - 1,
+                scores[i - 1],
+                i,
+                scores[i],
             );
         }
     }

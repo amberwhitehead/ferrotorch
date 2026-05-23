@@ -55,8 +55,7 @@ pub const N_FREQS: usize = N_FFT / 2 + 1;
 /// extractor stores). Byte-for-byte identical to the reference filter so
 /// any drift between this module and the reference cannot be blamed on
 /// a different mel scale.
-const MEL_FILTERS_BYTES: &[u8] =
-    include_bytes!("../assets/mel_filters_80x201.bin");
+const MEL_FILTERS_BYTES: &[u8] = include_bytes!("../assets/mel_filters_80x201.bin");
 
 /// Decode the embedded `[80, 201]` mel filter bank into an owned `Vec<f32>`.
 fn mel_filters() -> Vec<f32> {
@@ -123,7 +122,10 @@ fn hann_window() -> Vec<f64> {
 /// sample buffer.
 fn reflect_pad(audio: &[f64], pad: usize) -> Vec<f64> {
     let n = audio.len();
-    assert!(n > pad, "reflect_pad: pad ({pad}) must be < input length ({n})");
+    assert!(
+        n > pad,
+        "reflect_pad: pad ({pad}) must be < input length ({n})"
+    );
     let mut out = Vec::with_capacity(n + 2 * pad);
     // Leading reflected pad: audio[pad], audio[pad-1], ..., audio[1]
     for i in (1..=pad).rev() {

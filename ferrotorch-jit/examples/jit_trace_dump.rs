@@ -55,12 +55,12 @@ use std::fs::File;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
-use ferrotorch_core::{from_slice, FerrotorchError, FerrotorchResult, Tensor};
+use ferrotorch_core::{FerrotorchError, FerrotorchResult, Tensor, from_slice};
 use ferrotorch_hub::load_pretrained;
-use ferrotorch_jit::{compile, trace, TracedModule};
+use ferrotorch_jit::{TracedModule, compile, trace};
+use ferrotorch_nn::Linear;
 use ferrotorch_nn::module::Module;
 use ferrotorch_nn::parameter::Parameter;
-use ferrotorch_nn::Linear;
 
 // ---------------------------------------------------------------------------
 // CLI
@@ -173,7 +173,10 @@ impl Mlp {
         })
     }
 
-    fn load_pin(&mut self, state: &std::collections::HashMap<String, Tensor<f32>>) -> Result<(), String> {
+    fn load_pin(
+        &mut self,
+        state: &std::collections::HashMap<String, Tensor<f32>>,
+    ) -> Result<(), String> {
         let l1_w = state
             .get("l1_weight")
             .ok_or("pin state_dict missing key `l1_weight`")?;
@@ -199,13 +202,13 @@ impl Mlp {
         let l1_b_data = to_data(l1_b)?;
         let l2_w_data = to_data(l2_w)?;
         let l2_b_data = to_data(l2_b)?;
-        self.l1.weight =
-            Parameter::from_slice(&l1_w_data, &l1_w_shape).map_err(|e| format!("l1.weight: {e}"))?;
+        self.l1.weight = Parameter::from_slice(&l1_w_data, &l1_w_shape)
+            .map_err(|e| format!("l1.weight: {e}"))?;
         self.l1.bias = Some(
             Parameter::from_slice(&l1_b_data, &l1_b_shape).map_err(|e| format!("l1.bias: {e}"))?,
         );
-        self.l2.weight =
-            Parameter::from_slice(&l2_w_data, &l2_w_shape).map_err(|e| format!("l2.weight: {e}"))?;
+        self.l2.weight = Parameter::from_slice(&l2_w_data, &l2_w_shape)
+            .map_err(|e| format!("l2.weight: {e}"))?;
         self.l2.bias = Some(
             Parameter::from_slice(&l2_b_data, &l2_b_shape).map_err(|e| format!("l2.bias: {e}"))?,
         );
@@ -226,9 +229,7 @@ impl Mlp {
 /// Returns a tuple `(state_dict, fixture_dir)` for the pinned model.
 /// `fixture_dir` is whatever the user passed via `--fixture-dir`; the
 /// caller falls back to other locations if it's `None`.
-fn load_model_state(
-    model: &str,
-) -> Result<std::collections::HashMap<String, Tensor<f32>>, String> {
+fn load_model_state(model: &str) -> Result<std::collections::HashMap<String, Tensor<f32>>, String> {
     load_pretrained::<f32>(model).map_err(|e| match e {
         FerrotorchError::InvalidArgument { message } => format!("hub load_pretrained: {message}"),
         other => format!("hub load_pretrained: {other}"),
@@ -265,7 +266,10 @@ fn main() -> Result<(), String> {
         .map_err(|e| format!("mkdir {}: {e}", args.output_dir.display()))?;
 
     eprintln!("[jit_trace_dump] model = {}", args.model);
-    eprintln!("[jit_trace_dump] output-dir = {}", args.output_dir.display());
+    eprintln!(
+        "[jit_trace_dump] output-dir = {}",
+        args.output_dir.display()
+    );
 
     // ---- Load pinned state + fixtures. -----------------------------------
     let state = load_model_state(&args.model)?;
@@ -322,15 +326,18 @@ fn main() -> Result<(), String> {
          Linear({hidden}->{out_features})",
     );
 
-    let mut mlp = Mlp::new(in_features, hidden, out_features)
-        .map_err(|e| format!("Mlp::new: {e}"))?;
+    let mut mlp =
+        Mlp::new(in_features, hidden, out_features).map_err(|e| format!("Mlp::new: {e}"))?;
     mlp.load_pin(&state)?;
 
     // ---- Build the input tensor. ------------------------------------------
-    let input = from_slice::<f32>(&input_data, &input_shape).map_err(|e| format!("from_slice input: {e}"))?;
+    let input = from_slice::<f32>(&input_data, &input_shape)
+        .map_err(|e| format!("from_slice input: {e}"))?;
 
     // ---- 1) Eager forward. ------------------------------------------------
-    let eager_out = mlp.forward(&input).map_err(|e| format!("eager forward: {e}"))?;
+    let eager_out = mlp
+        .forward(&input)
+        .map_err(|e| format!("eager forward: {e}"))?;
     let eager_shape = eager_out.shape().to_vec();
     let eager_vec = eager_out
         .data()
@@ -396,7 +403,11 @@ fn main() -> Result<(), String> {
         "[jit_trace_dump] traced output shape={traced_shape:?} sample={:?}",
         &traced_vec[..traced_vec.len().min(4)]
     );
-    write_f32_tensor(&args.output_dir.join("traced.bin"), &traced_shape, &traced_vec)?;
+    write_f32_tensor(
+        &args.output_dir.join("traced.bin"),
+        &traced_shape,
+        &traced_vec,
+    )?;
 
     // ---- 3) Compiled forward. --------------------------------------------
     // `compile()` re-traces + applies constant_fold + dce + fusion +

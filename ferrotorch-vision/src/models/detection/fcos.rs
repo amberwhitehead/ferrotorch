@@ -294,22 +294,8 @@ pub struct FcosRegressionHead<T: Float> {
 impl<T: Float> FcosRegressionHead<T> {
     pub fn new(in_channels: usize, num_anchors: usize) -> FerrotorchResult<Self> {
         let trunk = FcosConvGnTrunk::new(in_channels)?;
-        let bbox_reg = Conv2d::new(
-            in_channels,
-            num_anchors * 4,
-            (3, 3),
-            (1, 1),
-            (1, 1),
-            true,
-        )?;
-        let bbox_ctrness = Conv2d::new(
-            in_channels,
-            num_anchors,
-            (3, 3),
-            (1, 1),
-            (1, 1),
-            true,
-        )?;
+        let bbox_reg = Conv2d::new(in_channels, num_anchors * 4, (3, 3), (1, 1), (1, 1), true)?;
+        let bbox_ctrness = Conv2d::new(in_channels, num_anchors, (3, 3), (1, 1), (1, 1), true)?;
         Ok(Self {
             trunk,
             bbox_reg,
@@ -320,10 +306,7 @@ impl<T: Float> FcosRegressionHead<T> {
 
     /// Forward on a single feature map. Returns
     /// `(bbox_reg [B, H*W*A, 4], bbox_ctrness [B, H*W*A, 1])`.
-    pub fn forward_level(
-        &self,
-        x: &Tensor<T>,
-    ) -> FerrotorchResult<(Tensor<T>, Tensor<T>)> {
+    pub fn forward_level(&self, x: &Tensor<T>) -> FerrotorchResult<(Tensor<T>, Tensor<T>)> {
         let h = self.trunk.forward(x)?;
         // bbox_reg goes through ReLU on every forward.
         let raw_reg = self.bbox_reg.forward(&h)?;
@@ -493,11 +476,8 @@ impl<T: Float> Fcos<T> {
     pub fn new(num_classes: usize) -> FerrotorchResult<Self> {
         let backbone = resnet50(1)?;
         let fpn = RetinaFpn::new()?;
-        let classification_head = FcosClassificationHead::new(
-            FPN_OUT_CHANNELS,
-            FCOS_NUM_ANCHORS_PER_LOC,
-            num_classes,
-        )?;
+        let classification_head =
+            FcosClassificationHead::new(FPN_OUT_CHANNELS, FCOS_NUM_ANCHORS_PER_LOC, num_classes)?;
         let regression_head = FcosRegressionHead::new(FPN_OUT_CHANNELS, FCOS_NUM_ANCHORS_PER_LOC)?;
         Ok(Self {
             backbone,
@@ -613,8 +593,7 @@ impl<T: Float> Fcos<T> {
                 // ALL (anchor, class) combinations together.
                 let mut cand: Vec<(usize, f64)> = Vec::new();
                 for anchor_idx in 0..hwa {
-                    let ctr_logit =
-                        ctr_data[ctr_offset + anchor_idx].to_f64().unwrap_or(0.0);
+                    let ctr_logit = ctr_data[ctr_offset + anchor_idx].to_f64().unwrap_or(0.0);
                     let ctr_sig = 1.0 / (1.0 + (-ctr_logit).exp());
                     for class_idx in 0..k {
                         let cls_logit = cls_data[cls_offset + anchor_idx * k + class_idx]
@@ -631,9 +610,7 @@ impl<T: Float> Fcos<T> {
 
                 // Per-level top-K (1000), descending sort.
                 if cand.len() > FCOS_TOPK_CANDIDATES {
-                    cand.sort_by(|a, b| {
-                        b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal)
-                    });
+                    cand.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
                     cand.truncate(FCOS_TOPK_CANDIDATES);
                 }
 
@@ -688,16 +665,8 @@ impl<T: Float> Fcos<T> {
 
             if all_scores.is_empty() {
                 per_image_detections.push(Detections {
-                    boxes: Tensor::from_storage(
-                        TensorStorage::cpu(vec![]),
-                        vec![0, 4],
-                        false,
-                    )?,
-                    scores: Tensor::from_storage(
-                        TensorStorage::cpu(vec![]),
-                        vec![0usize],
-                        false,
-                    )?,
+                    boxes: Tensor::from_storage(TensorStorage::cpu(vec![]), vec![0, 4], false)?,
+                    scores: Tensor::from_storage(TensorStorage::cpu(vec![]), vec![0usize], false)?,
                     labels: vec![],
                 });
                 continue;
@@ -705,18 +674,12 @@ impl<T: Float> Fcos<T> {
 
             // Cross-class batched NMS.
             let n_all = all_scores.len();
-            let boxes_f64 = Tensor::from_storage(
-                TensorStorage::cpu(all_boxes.clone()),
-                vec![n_all, 4],
-                false,
-            )?;
+            let boxes_f64 =
+                Tensor::from_storage(TensorStorage::cpu(all_boxes.clone()), vec![n_all, 4], false)?;
             // Re-clip (no-op for valid boxes).
             let boxes_clipped = clip_boxes_to_image(&boxes_f64, [img_h, img_w])?;
-            let scores_f64 = Tensor::from_storage(
-                TensorStorage::cpu(all_scores.clone()),
-                vec![n_all],
-                false,
-            )?;
+            let scores_f64 =
+                Tensor::from_storage(TensorStorage::cpu(all_scores.clone()), vec![n_all], false)?;
             let idxs: Vec<u32> = all_labels.iter().map(|&l| l as u32).collect();
             let keep = batched_nms::<f64>(&boxes_clipped, &scores_f64, &idxs, FCOS_NMS_THRESH)?;
 
@@ -739,16 +702,8 @@ impl<T: Float> Fcos<T> {
             }
             let n_out = out_scores.len();
             per_image_detections.push(Detections {
-                boxes: Tensor::from_storage(
-                    TensorStorage::cpu(out_boxes),
-                    vec![n_out, 4],
-                    false,
-                )?,
-                scores: Tensor::from_storage(
-                    TensorStorage::cpu(out_scores),
-                    vec![n_out],
-                    false,
-                )?,
+                boxes: Tensor::from_storage(TensorStorage::cpu(out_boxes), vec![n_out, 4], false)?,
+                scores: Tensor::from_storage(TensorStorage::cpu(out_scores), vec![n_out], false)?,
                 labels: out_labels,
             });
         }
@@ -1024,15 +979,13 @@ mod tests {
         //   (0,1): [4,-4,12,4]   (cx=8, cy=0)
         //   (1,0): [-4,4,4,12]   (cx=0, cy=8)
         //   (1,1): [4,4,12,12]   (cx=8, cy=8)
-        let lvls = fcos_anchors_per_level::<f32>(&[(2, 2), (1, 1), (1, 1), (1, 1), (1, 1)], (16, 16))
-            .unwrap();
+        let lvls =
+            fcos_anchors_per_level::<f32>(&[(2, 2), (1, 1), (1, 1), (1, 1), (1, 1)], (16, 16))
+                .unwrap();
         let l0 = lvls[0].data_vec().unwrap();
         assert_eq!(l0.len(), 16);
         let expected: [f32; 16] = [
-            -4.0, -4.0, 4.0, 4.0,
-            4.0, -4.0, 12.0, 4.0,
-            -4.0, 4.0, 4.0, 12.0,
-            4.0, 4.0, 12.0, 12.0,
+            -4.0, -4.0, 4.0, 4.0, 4.0, -4.0, 12.0, 4.0, -4.0, 4.0, 4.0, 12.0, 4.0, 4.0, 12.0, 12.0,
         ];
         for i in 0..16 {
             assert!((l0[i] - expected[i]).abs() < 1e-4, "i={i} got {l0:?}");

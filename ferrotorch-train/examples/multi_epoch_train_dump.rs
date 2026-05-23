@@ -261,8 +261,7 @@ fn load_initial_state(model: &mut Mlp, path: &Path) -> FerrotorchResult<()> {
     // already verifies shapes, but a missing key + strict=true
     // returns Err; this guards against future loader changes that
     // could silently skip keys.
-    let by_name: HashMap<String, &Parameter<f32>> =
-        model.named_parameters().into_iter().collect();
+    let by_name: HashMap<String, &Parameter<f32>> = model.named_parameters().into_iter().collect();
     for k in PARAM_KEYS {
         if !by_name.contains_key(k) {
             return Err(FerrotorchError::Internal {
@@ -333,15 +332,15 @@ fn run() -> FerrotorchResult<()> {
     );
 
     std::fs::create_dir_all(&args.output_dir).map_err(|e| FerrotorchError::InvalidArgument {
-        message: format!(
-            "create output_dir {}: {e}",
-            args.output_dir.display()
-        ),
+        message: format!("create output_dir {}: {e}", args.output_dir.display()),
     })?;
 
     // -- Build & load model. ---------------------------------------------
     let mut model = Mlp::new()?;
-    load_initial_state(&mut model, &args.fixture_dir.join("initial_state.safetensors"))?;
+    load_initial_state(
+        &mut model,
+        &args.fixture_dir.join("initial_state.safetensors"),
+    )?;
     model.train();
     eprintln!(
         "[multi_epoch_train_dump] loaded initial_state ({} params)",
@@ -389,7 +388,10 @@ fn run() -> FerrotorchResult<()> {
     // is a `const` assertion rather than a runtime guard. Moving it
     // out of the hot path also keeps the inner loop free of dead
     // branches.
-    const _: () = assert!(N % BATCH == 0, "expected N % BATCH == 0 for drop_last semantics");
+    const _: () = assert!(
+        N % BATCH == 0,
+        "expected N % BATCH == 0 for drop_last semantics"
+    );
     let mut epoch_losses: Vec<f64> = Vec::with_capacity(EPOCHS);
 
     for epoch in 0..EPOCHS {
@@ -417,10 +419,7 @@ fn run() -> FerrotorchResult<()> {
                 let v = loss.data_vec()?;
                 if v.len() != 1 {
                     return Err(FerrotorchError::Internal {
-                        message: format!(
-                            "expected scalar mse loss, got numel={}",
-                            v.len()
-                        ),
+                        message: format!("expected scalar mse loss, got numel={}", v.len()),
                     });
                 }
                 Ok(f64::from(v[0]))

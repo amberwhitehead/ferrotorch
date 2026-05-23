@@ -157,9 +157,7 @@ fn read_dump_i64(path: &Path) -> std::io::Result<(Vec<usize>, Vec<i64>)> {
     f.read_exact(&mut bytes)?;
     for (i, slot) in data.iter_mut().enumerate() {
         let b = &bytes[i * 8..(i + 1) * 8];
-        *slot = i64::from_le_bytes([
-            b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7],
-        ]);
+        *slot = i64::from_le_bytes([b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7]]);
     }
     Ok((shape, data))
 }
@@ -196,9 +194,7 @@ fn run() -> FerrotorchResult<()> {
     eprintln!(
         "[gcn_inference_dump] cached at {} ({} files)",
         repo_dir.display(),
-        std::fs::read_dir(&repo_dir)
-            .map(|r| r.count())
-            .unwrap_or(0)
+        std::fs::read_dir(&repo_dir).map(|r| r.count()).unwrap_or(0)
     );
 
     // -- 2. Read x and edge_index from local files. -------------------------
@@ -234,9 +230,7 @@ fn run() -> FerrotorchResult<()> {
         });
     }
     let num_edges = ei_shape[1];
-    eprintln!(
-        "[gcn_inference_dump] edge_index shape = {ei_shape:?} (E={num_edges})"
-    );
+    eprintln!("[gcn_inference_dump] edge_index shape = {ei_shape:?} (E={num_edges})");
 
     // -- 3. Build GcnNet and load pinned weights. ---------------------------
     let weights_path = repo_dir.join("model.safetensors");
@@ -266,10 +260,8 @@ fn run() -> FerrotorchResult<()> {
     }
 
     // -- 5. Dump + verdict line. -------------------------------------------
-    write_dump_f32(&args.output, &shape, &data).map_err(|e| {
-        FerrotorchError::InvalidArgument {
-            message: format!("failed writing {}: {e}", args.output.display()),
-        }
+    write_dump_f32(&args.output, &shape, &data).map_err(|e| FerrotorchError::InvalidArgument {
+        message: format!("failed writing {}: {e}", args.output.display()),
     })?;
     eprintln!(
         "[gcn_inference_dump] wrote {} ({} bytes, shape={shape:?})",

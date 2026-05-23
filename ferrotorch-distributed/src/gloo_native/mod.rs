@@ -95,17 +95,23 @@ impl GlooBackendInner {
 
     fn send_inner(&self, data: &[u8], dst: usize) -> GlooResult<()> {
         let conn = self.conn(dst)?;
-        let mut stream = conn.writer.lock().map_err(|e| DistributedError::LockPoisoned {
-            message: format!("gloo_native send rank {} -> {dst}: {e}", self.rank),
-        })?;
+        let mut stream = conn
+            .writer
+            .lock()
+            .map_err(|e| DistributedError::LockPoisoned {
+                message: format!("gloo_native send rank {} -> {dst}: {e}", self.rank),
+            })?;
         send_msg(&mut stream, data)
     }
 
     fn recv_inner(&self, dst: &mut [u8], src: usize, timeout: Duration) -> GlooResult<()> {
         let conn = self.conn(src)?;
-        let mut stream = conn.reader.lock().map_err(|e| DistributedError::LockPoisoned {
-            message: format!("gloo_native recv rank {src} -> {}: {e}", self.rank),
-        })?;
+        let mut stream = conn
+            .reader
+            .lock()
+            .map_err(|e| DistributedError::LockPoisoned {
+                message: format!("gloo_native recv rank {src} -> {}: {e}", self.rank),
+            })?;
         with_read_timeout(&mut stream, timeout, |s| recv_msg_into(s, dst))
     }
 
@@ -131,9 +137,8 @@ impl GlooBackendInner {
         let byte_len = std::mem::size_of_val(data);
         // Cast through a raw pointer is the canonical safe-by-construction
         // shape; `[f32]::as_mut_ptr()` returns a unique pointer.
-        let bytes: &mut [u8] = unsafe {
-            std::slice::from_raw_parts_mut(data.as_mut_ptr().cast::<u8>(), byte_len)
-        };
+        let bytes: &mut [u8] =
+            unsafe { std::slice::from_raw_parts_mut(data.as_mut_ptr().cast::<u8>(), byte_len) };
         ring_allreduce_sum_f32_bytes(self, bytes, timeout).map_err(Into::into)
     }
 
@@ -152,9 +157,8 @@ impl GlooBackendInner {
     ) -> FerrotorchResult<()> {
         let byte_len = std::mem::size_of_val(data);
         // SAFETY: identical reasoning to `ring_allreduce_sum_f32_with_timeout`.
-        let bytes: &mut [u8] = unsafe {
-            std::slice::from_raw_parts_mut(data.as_mut_ptr().cast::<u8>(), byte_len)
-        };
+        let bytes: &mut [u8] =
+            unsafe { std::slice::from_raw_parts_mut(data.as_mut_ptr().cast::<u8>(), byte_len) };
         tree_broadcast_f32_bytes(self, bytes, root, timeout).map_err(Into::into)
     }
 }
@@ -238,7 +242,10 @@ mod tests {
             })
             .collect();
 
-        handles.into_iter().map(|h| h.join().expect("join")).collect()
+        handles
+            .into_iter()
+            .map(|h| h.join().expect("join"))
+            .collect()
     }
 
     #[test]

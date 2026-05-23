@@ -121,12 +121,7 @@ impl<T: Float> Encoder<T> {
         for (i, &c) in cfg.block_out_channels.iter().enumerate() {
             let is_final = i == num_blocks - 1;
             down_blocks.push(DownEncoderBlock2D::<T>::new(
-                prev_out,
-                c,
-                resnets,
-                groups,
-                resnet_eps,
-                !is_final,
+                prev_out, c, resnets, groups, resnet_eps, !is_final,
             )?);
             prev_out = c;
         }
@@ -134,8 +129,7 @@ impl<T: Float> Encoder<T> {
         // Mid-block at the deepest channel count.
         let mid_block = UNetMidBlock2D::<T>::new(top_channels, groups, resnet_eps)?;
 
-        let conv_norm_out =
-            GroupNorm::<T>::new(groups, top_channels, resnet_eps, true)?;
+        let conv_norm_out = GroupNorm::<T>::new(groups, top_channels, resnet_eps, true)?;
         // The `2 *` factor produces the concatenated mean/logvar tensor.
         let conv_out = Conv2d::<T>::new(
             top_channels,
@@ -351,20 +345,17 @@ impl<T: Float> VaeEncoder<T> {
     ///
     /// Returns the underlying [`FerrotorchError`] for shape or
     /// arithmetic failures.
-    pub fn encode_with_scaling(
-        &self,
-        image: &Tensor<T>,
-        seed: u64,
-    ) -> FerrotorchResult<Tensor<T>> {
+    pub fn encode_with_scaling(&self, image: &Tensor<T>, seed: u64) -> FerrotorchResult<Tensor<T>> {
         let dist = self.encode(image)?;
         let sample = dist.sample_with_seed(seed)?;
-        let sf = T::from(self.config.scaling_factor)
-            .ok_or_else(|| FerrotorchError::InvalidArgument {
+        let sf = T::from(self.config.scaling_factor).ok_or_else(|| {
+            FerrotorchError::InvalidArgument {
                 message: format!(
                     "VaeEncoder::encode_with_scaling: cannot cast scaling_factor={} into Float",
                     self.config.scaling_factor
                 ),
-            })?;
+            }
+        })?;
         let sf_t = ferrotorch_core::scalar::<T>(sf)?;
         ferrotorch_core::grad_fns::arithmetic::mul(&sample, &sf_t)
     }
@@ -477,10 +468,7 @@ impl<T: Float> DiagonalGaussianDistribution<T> {
     /// Returns [`FerrotorchError::ShapeMismatch`] when the channel
     /// dimension is not `2 * latent_channels`. Propagates downstream
     /// errors from the chunk / clamp ops.
-    pub fn from_parameters(
-        params: &Tensor<T>,
-        latent_channels: usize,
-    ) -> FerrotorchResult<Self> {
+    pub fn from_parameters(params: &Tensor<T>, latent_channels: usize) -> FerrotorchResult<Self> {
         if params.ndim() != 4 || params.shape()[1] != 2 * latent_channels {
             return Err(FerrotorchError::ShapeMismatch {
                 message: format!(
@@ -544,8 +532,7 @@ impl<T: Float> DiagonalGaussianDistribution<T> {
                 .into(),
         })?;
         let half_t = ferrotorch_core::scalar::<T>(half)?;
-        let scaled_logvar =
-            ferrotorch_core::grad_fns::arithmetic::mul(&self.logvar, &half_t)?;
+        let scaled_logvar = ferrotorch_core::grad_fns::arithmetic::mul(&self.logvar, &half_t)?;
         let std = ferrotorch_core::grad_fns::transcendental::exp(&scaled_logvar)?;
         let noise = ferrotorch_core::grad_fns::arithmetic::mul(&std, &eps)?;
         ferrotorch_core::grad_fns::arithmetic::add(&self.mean, &noise)
@@ -561,7 +548,11 @@ impl<T: Float> DiagonalGaussianDistribution<T> {
 fn randn_with_seed<T: Float>(shape: &[usize], seed: u64) -> FerrotorchResult<Tensor<T>> {
     let numel: usize = shape.iter().product();
     let mut data = Vec::with_capacity(numel);
-    let mut state = if seed == 0 { 0x0000_dead_beef_cafe } else { seed };
+    let mut state = if seed == 0 {
+        0x0000_dead_beef_cafe
+    } else {
+        seed
+    };
 
     let mut next_uniform = || -> f64 {
         state ^= state << 13;
@@ -576,9 +567,11 @@ fn randn_with_seed<T: Float>(shape: &[usize], seed: u64) -> FerrotorchResult<Ten
         let u2 = next_uniform();
         let r = (-2.0 * u1.ln()).sqrt();
         let theta = 2.0 * std::f64::consts::PI * u2;
-        data.push(T::from(r * theta.cos()).ok_or_else(|| FerrotorchError::InvalidArgument {
-            message: "randn_with_seed: cannot cast Box-Muller output into Float".into(),
-        })?);
+        data.push(
+            T::from(r * theta.cos()).ok_or_else(|| FerrotorchError::InvalidArgument {
+                message: "randn_with_seed: cannot cast Box-Muller output into Float".into(),
+            })?,
+        );
         if i + 1 < numel {
             data.push(T::from(r * theta.sin()).ok_or_else(|| {
                 FerrotorchError::InvalidArgument {
@@ -716,12 +709,8 @@ mod tests {
         // fixed seed.
         let l = 4;
         let zeros = vec![0.0f32; 2 * l * 3 * 3];
-        let params = Tensor::from_storage(
-            TensorStorage::cpu(zeros),
-            vec![1, 2 * l, 3, 3],
-            false,
-        )
-        .unwrap();
+        let params =
+            Tensor::from_storage(TensorStorage::cpu(zeros), vec![1, 2 * l, 3, 3], false).unwrap();
         let dist = DiagonalGaussianDistribution::<f32>::from_parameters(&params, l).unwrap();
         let s1 = dist.sample_with_seed(42).unwrap();
         let s2 = dist.sample_with_seed(42).unwrap();
@@ -742,7 +731,10 @@ mod tests {
                 break;
             }
         }
-        assert!(differ, "sample_with_seed(42) and sample_with_seed(43) produced identical output");
+        assert!(
+            differ,
+            "sample_with_seed(42) and sample_with_seed(43) produced identical output"
+        );
     }
 
     #[test]

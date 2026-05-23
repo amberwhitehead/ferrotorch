@@ -411,7 +411,11 @@ mod tests {
             for (rank, buf) in bufs.iter_mut().enumerate() {
                 let ch = &channels;
                 handles.push(s.spawn(move || {
-                    let r = RankView { my_rank: rank, world_size: 2, ch };
+                    let r = RankView {
+                        my_rank: rank,
+                        world_size: 2,
+                        ch,
+                    };
                     ring_allreduce_sum_f32_bytes(&r, buf, Duration::from_secs(5))
                         .expect("allreduce");
                 }));
@@ -452,7 +456,11 @@ mod tests {
             for (rank, buf) in bufs.iter_mut().enumerate() {
                 let ch = &channels;
                 handles.push(s.spawn(move || {
-                    let r = RankView { my_rank: rank, world_size, ch };
+                    let r = RankView {
+                        my_rank: rank,
+                        world_size,
+                        ch,
+                    };
                     ring_allreduce_sum_f32_bytes(&r, buf, Duration::from_secs(5))
                         .expect("allreduce");
                 }));
@@ -485,7 +493,11 @@ mod tests {
             for (rank, buf) in bufs.iter_mut().enumerate() {
                 let ch = &channels;
                 handles.push(s.spawn(move || {
-                    let r = RankView { my_rank: rank, world_size, ch };
+                    let r = RankView {
+                        my_rank: rank,
+                        world_size,
+                        ch,
+                    };
                     ring_allreduce_sum_f32_bytes(&r, buf, Duration::from_secs(5))
                         .expect("allreduce");
                 }));
@@ -524,7 +536,11 @@ mod tests {
             for (rank, buf) in bufs.iter_mut().enumerate() {
                 let ch = &channels;
                 handles.push(s.spawn(move || {
-                    let r = RankView { my_rank: rank, world_size, ch };
+                    let r = RankView {
+                        my_rank: rank,
+                        world_size,
+                        ch,
+                    };
                     tree_broadcast_f32_bytes(&r, buf, 1, Duration::from_secs(5))
                         .expect("broadcast");
                 }));
@@ -557,7 +573,11 @@ mod tests {
                 let ch = &channels;
                 let entered_ref = &entered;
                 handles.push(s.spawn(move || {
-                    let r = RankView { my_rank: rank, world_size, ch };
+                    let r = RankView {
+                        my_rank: rank,
+                        world_size,
+                        ch,
+                    };
                     // Mark entered, then barrier. After barrier returns,
                     // every rank must have marked entered.
                     entered_ref.fetch_add(1, std::sync::atomic::Ordering::SeqCst);

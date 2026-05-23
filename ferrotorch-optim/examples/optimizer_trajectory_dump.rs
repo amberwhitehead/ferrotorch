@@ -55,8 +55,8 @@ use std::path::{Path, PathBuf};
 use ferrotorch_core::{FerrotorchError, FerrotorchResult, Tensor, TensorStorage};
 use ferrotorch_nn::Parameter;
 use ferrotorch_optim::{
-    Adagrad, AdagradConfig, Adam, AdamConfig, AdamW, AdamWConfig, Optimizer, ParamGroup,
-    Rmsprop, RmspropConfig, Sgd, SgdConfig,
+    Adagrad, AdagradConfig, Adam, AdamConfig, AdamW, AdamWConfig, Optimizer, ParamGroup, Rmsprop,
+    RmspropConfig, Sgd, SgdConfig,
 };
 
 const NUM_STEPS: usize = 10;
@@ -103,8 +103,11 @@ fn parse_args() -> Result<Args, String> {
                 i += 2;
             }
             "--config-name" => {
-                config_name =
-                    Some(argv.get(i + 1).ok_or("--config-name needs a value")?.clone());
+                config_name = Some(
+                    argv.get(i + 1)
+                        .ok_or("--config-name needs a value")?
+                        .clone(),
+                );
                 i += 2;
             }
             "--output" => {
@@ -134,8 +137,7 @@ fn parse_args() -> Result<Args, String> {
 type DumpedTensor = (Vec<usize>, Vec<f32>);
 
 fn read_multi_tensor_f32(path: &Path) -> Result<Vec<DumpedTensor>, String> {
-    let mut f =
-        File::open(path).map_err(|e| format!("open {}: {e}", path.display()))?;
+    let mut f = File::open(path).map_err(|e| format!("open {}: {e}", path.display()))?;
     let mut buf = [0u8; 4];
     f.read_exact(&mut buf)
         .map_err(|e| format!("read num_tensors from {}: {e}", path.display()))?;
@@ -147,16 +149,14 @@ fn read_multi_tensor_f32(path: &Path) -> Result<Vec<DumpedTensor>, String> {
         let ndim = u32::from_le_bytes(buf) as usize;
         let mut shape = Vec::with_capacity(ndim);
         for di in 0..ndim {
-            f.read_exact(&mut buf).map_err(|e| {
-                format!("read shape[{ti}][{di}] from {}: {e}", path.display())
-            })?;
+            f.read_exact(&mut buf)
+                .map_err(|e| format!("read shape[{ti}][{di}] from {}: {e}", path.display()))?;
             shape.push(u32::from_le_bytes(buf) as usize);
         }
         let numel: usize = shape.iter().product();
         let mut data_bytes = vec![0u8; numel * 4];
-        f.read_exact(&mut data_bytes).map_err(|e| {
-            format!("read data[{ti}] from {}: {e}", path.display())
-        })?;
+        f.read_exact(&mut data_bytes)
+            .map_err(|e| format!("read data[{ti}] from {}: {e}", path.display()))?;
         let mut data = Vec::with_capacity(numel);
         for chunk in data_bytes.chunks_exact(4) {
             data.push(f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]));
@@ -166,10 +166,7 @@ fn read_multi_tensor_f32(path: &Path) -> Result<Vec<DumpedTensor>, String> {
     Ok(out)
 }
 
-fn write_multi_tensor_f32(
-    path: &Path,
-    tensors: &[(Vec<usize>, Vec<f32>)],
-) -> std::io::Result<()> {
+fn write_multi_tensor_f32(path: &Path, tensors: &[(Vec<usize>, Vec<f32>)]) -> std::io::Result<()> {
     let mut f = File::create(path)?;
     f.write_all(&(tensors.len() as u32).to_le_bytes())?;
     for (shape, data) in tensors {
@@ -385,9 +382,8 @@ fn build_optimizer(
                 cfg = cfg.with_weight_decay(wd);
             }
             // Adagrad's `new` takes pre-built groups, not a flat param list.
-            let group = ParamGroup::new(params, lr).with_weight_decay(
-                hp.weight_decay.unwrap_or(0.0),
-            );
+            let group =
+                ParamGroup::new(params, lr).with_weight_decay(hp.weight_decay.unwrap_or(0.0));
             Ok(Box::new(Adagrad::new(vec![group], cfg)))
         }
         other => Err(format!("unknown optimizer {other}")),
@@ -415,10 +411,8 @@ fn run() -> FerrotorchResult<()> {
     eprintln!("[optimizer_trajectory_dump] hparams = {hp:?}");
 
     let init_path = args.fixture_dir.join("initial_params.bin");
-    let init = read_multi_tensor_f32(&init_path).map_err(|e| {
-        FerrotorchError::InvalidArgument {
-            message: format!("read initial_params.bin: {e}"),
-        }
+    let init = read_multi_tensor_f32(&init_path).map_err(|e| FerrotorchError::InvalidArgument {
+        message: format!("read initial_params.bin: {e}"),
     })?;
     if init.len() != NUM_PARAMS {
         return Err(FerrotorchError::InvalidArgument {
@@ -445,21 +439,19 @@ fn run() -> FerrotorchResult<()> {
     let param_clones: Vec<Parameter<f32>> = params.to_vec();
 
     // -- 3. Build the optimizer. ----------------------------------------
-    let mut opt =
-        build_optimizer(&args.optimizer, &hp, params).map_err(|e| {
-            FerrotorchError::InvalidArgument {
-                message: format!("build_optimizer: {e}"),
-            }
-        })?;
+    let mut opt = build_optimizer(&args.optimizer, &hp, params).map_err(|e| {
+        FerrotorchError::InvalidArgument {
+            message: format!("build_optimizer: {e}"),
+        }
+    })?;
 
     // -- 4. Drive the 10 steps. -----------------------------------------
     for step in 0..NUM_STEPS {
         let grad_path = args.fixture_dir.join(format!("gradients_step_{step}.bin"));
-        let grads = read_multi_tensor_f32(&grad_path).map_err(|e| {
-            FerrotorchError::InvalidArgument {
+        let grads =
+            read_multi_tensor_f32(&grad_path).map_err(|e| FerrotorchError::InvalidArgument {
                 message: format!("read {}: {e}", grad_path.display()),
-            }
-        })?;
+            })?;
         if grads.len() != NUM_PARAMS {
             return Err(FerrotorchError::InvalidArgument {
                 message: format!(

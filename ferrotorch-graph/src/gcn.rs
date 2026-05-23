@@ -95,17 +95,11 @@ impl GcnConv {
     /// `edge_index` is a flat `[2, E]` COO buffer — row 0 holds the
     /// source endpoint and row 1 the destination endpoint of each
     /// edge.
-    pub fn forward(
-        &self,
-        x: &Tensor<f32>,
-        edge_index: &[i64],
-    ) -> FerrotorchResult<Tensor<f32>> {
+    pub fn forward(&self, x: &Tensor<f32>, edge_index: &[i64]) -> FerrotorchResult<Tensor<f32>> {
         let shape = x.shape();
         if shape.len() != 2 {
             return Err(FerrotorchError::ShapeMismatch {
-                message: format!(
-                    "GcnConv::forward: x must be 2-D [N, F], got shape {shape:?}"
-                ),
+                message: format!("GcnConv::forward: x must be 2-D [N, F], got shape {shape:?}"),
             });
         }
         let n = shape[0];
@@ -232,9 +226,9 @@ impl Module<f32> for GcnConv {
         // standard `state_dict / load_state_dict` plumbing works, but
         // refuse the call.
         Err(FerrotorchError::InvalidArgument {
-            message:
-                "GcnConv::Module::forward: call GcnConv::forward(x, edge_index) instead — \
-                 the graph-aware variant needs the edge list".into(),
+            message: "GcnConv::Module::forward: call GcnConv::forward(x, edge_index) instead — \
+                 the graph-aware variant needs the edge list"
+                .into(),
         })
     }
 
@@ -300,11 +294,7 @@ impl GcnNet {
     /// Construct a `GcnNet` with zero-initialized parameters. The
     /// loader replaces them with the pinned safetensors values before
     /// the first forward.
-    pub fn new(
-        in_features: usize,
-        hidden: usize,
-        num_classes: usize,
-    ) -> FerrotorchResult<Self> {
+    pub fn new(in_features: usize, hidden: usize, num_classes: usize) -> FerrotorchResult<Self> {
         let conv1 = GcnConv::new(in_features, hidden)?;
         let conv2 = GcnConv::new(hidden, num_classes)?;
         Ok(Self {
@@ -334,11 +324,7 @@ impl GcnNet {
 
     /// Inference forward: `[N, in_features] -> [N, num_classes]` logits.
     /// Matches PyG `examples/gcn.py` at eval (no dropout).
-    pub fn forward(
-        &self,
-        x: &Tensor<f32>,
-        edge_index: &[i64],
-    ) -> FerrotorchResult<Tensor<f32>> {
+    pub fn forward(&self, x: &Tensor<f32>, edge_index: &[i64]) -> FerrotorchResult<Tensor<f32>> {
         let h = self.conv1.forward(x, edge_index)?;
         // ReLU after conv1.
         let h_data = h.data_vec()?;
@@ -346,11 +332,8 @@ impl GcnNet {
         for (out_v, &in_v) in relu.iter_mut().zip(h_data.iter()) {
             *out_v = if in_v > 0.0 { in_v } else { 0.0 };
         }
-        let h_relu = Tensor::<f32>::from_storage(
-            TensorStorage::cpu(relu),
-            h.shape().to_vec(),
-            false,
-        )?;
+        let h_relu =
+            Tensor::<f32>::from_storage(TensorStorage::cpu(relu), h.shape().to_vec(), false)?;
         self.conv2.forward(&h_relu, edge_index)
     }
 }
@@ -358,9 +341,7 @@ impl GcnNet {
 impl Module<f32> for GcnNet {
     fn forward(&self, _input: &Tensor<f32>) -> FerrotorchResult<Tensor<f32>> {
         Err(FerrotorchError::InvalidArgument {
-            message:
-                "GcnNet::Module::forward: call GcnNet::forward(x, edge_index) instead"
-                    .into(),
+            message: "GcnNet::Module::forward: call GcnNet::forward(x, edge_index) instead".into(),
         })
     }
 
@@ -435,11 +416,7 @@ mod tests {
     #[test]
     fn gcn_net_named_parameters_match_pyg_layout() {
         let net = GcnNet::new(8, 4, 3).unwrap();
-        let names: Vec<String> = net
-            .named_parameters()
-            .into_iter()
-            .map(|(n, _)| n)
-            .collect();
+        let names: Vec<String> = net.named_parameters().into_iter().map(|(n, _)| n).collect();
         let mut have = names;
         have.sort();
         assert_eq!(

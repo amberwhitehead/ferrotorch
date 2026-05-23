@@ -130,12 +130,7 @@ impl<T: Float> ResnetBlock2DTime<T> {
         // Time bias: silu(temb) -> Linear -> [B, out_channels, 1, 1]
         let temb_silu = self.activation.forward(temb)?;
         let temb_proj = self.time_emb_proj.forward(&temb_silu)?;
-        let temb_4d = temb_proj.reshape_t(&[
-            b as isize,
-            self.out_channels as isize,
-            1,
-            1,
-        ])?;
+        let temb_4d = temb_proj.reshape_t(&[b as isize, self.out_channels as isize, 1, 1])?;
         h = ferrotorch_core::grad_fns::arithmetic::add(&h, &temb_4d)?;
         // h = silu(norm2(h)); h = conv2(h)
         h = self.norm2.forward(&h)?;
@@ -235,9 +230,7 @@ impl<T: Float> Module<T> for ResnetBlock2DTime<T> {
                     || k.starts_with("conv_shortcut.");
                 if !ok {
                     return Err(FerrotorchError::InvalidArgument {
-                        message: format!(
-                            "unexpected key in ResnetBlock2DTime state_dict: \"{k}\""
-                        ),
+                        message: format!("unexpected key in ResnetBlock2DTime state_dict: \"{k}\""),
                     });
                 }
             }
@@ -270,12 +263,8 @@ mod tests {
             false,
         )
         .unwrap();
-        let t = Tensor::from_storage(
-            TensorStorage::cpu(vec![0.01f32; 32]),
-            vec![1, 32],
-            false,
-        )
-        .unwrap();
+        let t = Tensor::from_storage(TensorStorage::cpu(vec![0.01f32; 32]), vec![1, 32], false)
+            .unwrap();
         let y = r.forward_t(&x, &t).unwrap();
         assert_eq!(y.shape(), &[1, 16, 4, 4]);
     }
@@ -290,12 +279,8 @@ mod tests {
             false,
         )
         .unwrap();
-        let t = Tensor::from_storage(
-            TensorStorage::cpu(vec![0.01f32; 32]),
-            vec![1, 32],
-            false,
-        )
-        .unwrap();
+        let t = Tensor::from_storage(TensorStorage::cpu(vec![0.01f32; 32]), vec![1, 32], false)
+            .unwrap();
         let y = r.forward_t(&x, &t).unwrap();
         assert_eq!(y.shape(), &[1, 32, 4, 4]);
     }

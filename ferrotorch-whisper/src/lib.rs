@@ -103,7 +103,7 @@ pub mod layer;
 pub mod safetensors_loader;
 
 pub use attention::WhisperEncoderSelfAttention;
-pub use audio::{log_mel_spectrogram, N_FRAMES, N_MELS, SAMPLE_RATE};
+pub use audio::{N_FRAMES, N_MELS, SAMPLE_RATE, log_mel_spectrogram};
 pub use config::{HfWhisperConfig, WhisperConfig};
 pub use encoder::{DropReport, WhisperConvStem, WhisperEncoder};
 pub use layer::WhisperEncoderLayer;

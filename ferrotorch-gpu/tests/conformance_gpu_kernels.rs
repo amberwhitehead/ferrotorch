@@ -2230,7 +2230,16 @@ fn conv_conv2d_f32_no_bias_matches_reference() {
     let inp = cpu_to_gpu(&inp_h, &dev).unwrap();
     let wt = cpu_to_gpu(&wt_h, &dev).unwrap();
     let (out, _out_shape) = ferrotorch_gpu::conv::gpu_conv2d_f32(
-        &inp, &wt, None, inp_shape, wt_shape, stride, padding, (1, 1), 1, &dev,
+        &inp,
+        &wt,
+        None,
+        inp_shape,
+        wt_shape,
+        stride,
+        padding,
+        (1, 1),
+        1,
+        &dev,
     )
     .unwrap();
     let actual = gpu_to_cpu(&out, &dev).unwrap();
@@ -2335,7 +2344,16 @@ fn conv_conv2d_f32_padded_matches_reference() {
     let inp = cpu_to_gpu(&inp_h, &dev).unwrap();
     let wt = cpu_to_gpu(&wt_h, &dev).unwrap();
     let (out, _out_shape) = ferrotorch_gpu::conv::gpu_conv2d_f32(
-        &inp, &wt, None, inp_shape, wt_shape, stride, padding, (1, 1), 1, &dev,
+        &inp,
+        &wt,
+        None,
+        inp_shape,
+        wt_shape,
+        stride,
+        padding,
+        (1, 1),
+        1,
+        &dev,
     )
     .unwrap();
     let actual = gpu_to_cpu(&out, &dev).unwrap();
@@ -2382,7 +2400,16 @@ fn conv_conv2d_f32_multichannel_matches_reference() {
     let inp = cpu_to_gpu(&inp_h, &dev).unwrap();
     let wt = cpu_to_gpu(&wt_h, &dev).unwrap();
     let (out, _out_shape) = ferrotorch_gpu::conv::gpu_conv2d_f32(
-        &inp, &wt, None, inp_shape, wt_shape, stride, padding, (1, 1), 1, &dev,
+        &inp,
+        &wt,
+        None,
+        inp_shape,
+        wt_shape,
+        stride,
+        padding,
+        (1, 1),
+        1,
+        &dev,
     )
     .unwrap();
     let actual = gpu_to_cpu(&out, &dev).unwrap();

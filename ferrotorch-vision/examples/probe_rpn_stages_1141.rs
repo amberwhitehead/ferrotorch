@@ -56,15 +56,16 @@ fn parse_args() -> Result<(PathBuf, PathBuf), String> {
                 i += 2;
             }
             "--out" => {
-                output = Some(PathBuf::from(
-                    args.get(i + 1).ok_or("--out needs a value")?,
-                ));
+                output = Some(PathBuf::from(args.get(i + 1).ok_or("--out needs a value")?));
                 i += 2;
             }
             other => return Err(format!("unknown arg: {other}")),
         }
     }
-    Ok((image.ok_or("--image required")?, output.ok_or("--out required")?))
+    Ok((
+        image.ok_or("--image required")?,
+        output.ok_or("--out required")?,
+    ))
 }
 
 fn bilinear_resize_chw_to_bchw(
@@ -79,7 +80,13 @@ fn bilinear_resize_chw_to_bchw(
         vec![1, shape[0], shape[1], shape[2]],
         false,
     )?;
-    interpolate(&bchw, Some([out_h, out_w]), None, InterpolateMode::Bilinear, false)
+    interpolate(
+        &bchw,
+        Some([out_h, out_w]),
+        None,
+        InterpolateMode::Bilinear,
+        false,
+    )
 }
 
 fn normalize_bchw(
@@ -132,24 +139,21 @@ fn preprocess(raw: Tensor<f32>) -> FerrotorchResult<Tensor<f32>> {
         for r in 0..out_h {
             let src_base = (ci * out_h + r) * out_w;
             let dst_base = (ci * pad_h + r) * pad_w;
-            padded[dst_base..dst_base + out_w]
-                .copy_from_slice(&nd[src_base..src_base + out_w]);
+            padded[dst_base..dst_base + out_w].copy_from_slice(&nd[src_base..src_base + out_w]);
         }
     }
-    Tensor::from_storage(
-        TensorStorage::cpu(padded),
-        vec![1, c, pad_h, pad_w],
-        false,
-    )
+    Tensor::from_storage(TensorStorage::cpu(padded), vec![1, c, pad_h, pad_w], false)
 }
 
 /// Build a fasterrcnn and load pretrained weights with the same logic
 /// the registry uses (so the probe sees the actual production model).
 fn build_model() -> FerrotorchResult<FasterRcnn<f32>> {
     let mut model = fasterrcnn_resnet50_fpn::<f32>(91)?;
-    let info = ferrotorch_hub::registry::get_model_info("fasterrcnn_resnet50_fpn")
-        .ok_or_else(|| FerrotorchError::InvalidArgument {
-            message: "no hub entry for fasterrcnn_resnet50_fpn".into(),
+    let info =
+        ferrotorch_hub::registry::get_model_info("fasterrcnn_resnet50_fpn").ok_or_else(|| {
+            FerrotorchError::InvalidArgument {
+                message: "no hub entry for fasterrcnn_resnet50_fpn".into(),
+            }
         })?;
     let cache = ferrotorch_hub::cache::HubCache::with_default_dir();
     let path = ferrotorch_hub::download::download_weights(info, &cache)?;
@@ -174,8 +178,8 @@ fn main() -> Result<(), String> {
     let (img_path, out_path) = parse_args()?;
     eprintln!("[probe_rpn_stages_1141] image={img_path:?} out={out_path:?}");
 
-    let raw = read_image_as_tensor::<f32>(&img_path)
-        .map_err(|e| format!("read_image_as_tensor: {e}"))?;
+    let raw =
+        read_image_as_tensor::<f32>(&img_path).map_err(|e| format!("read_image_as_tensor: {e}"))?;
     let input = preprocess(raw).map_err(|e| format!("preprocess: {e}"))?;
     let img_h = input.shape()[2];
     let img_w = input.shape()[3];
@@ -229,7 +233,9 @@ fn main() -> Result<(), String> {
     let all_anchors = anchor_gen
         .generate_anchors_for_image::<f32>(&fm_sizes, (img_h, img_w))
         .map_err(|e| format!("generate_anchors_for_image: {e}"))?;
-    let anc_data = all_anchors.data_vec().map_err(|e| format!("anc data: {e}"))?;
+    let anc_data = all_anchors
+        .data_vec()
+        .map_err(|e| format!("anc data: {e}"))?;
     let mut offset = 0usize;
     for (i, &k) in level_keys.iter().enumerate() {
         let n = fm_sizes[i].0 * fm_sizes[i].1 * anchor_gen.num_anchors_per_location(i);
@@ -261,9 +267,8 @@ fn main() -> Result<(), String> {
                 }
             }
         }
-        let deltas_t =
-            Tensor::from_storage(TensorStorage::cpu(flat_d), vec![n, 4], false)
-                .map_err(|e| format!("deltas tensor: {e}"))?;
+        let deltas_t = Tensor::from_storage(TensorStorage::cpu(flat_d), vec![n, 4], false)
+            .map_err(|e| format!("deltas tensor: {e}"))?;
         // Slice the anchors for this level.
         let anc_slice: Vec<f32> = anc_data[offset * 4..(offset + n) * 4].to_vec();
         let anc_t = Tensor::from_storage(TensorStorage::cpu(anc_slice), vec![n, 4], false)
@@ -283,8 +288,7 @@ fn main() -> Result<(), String> {
         .map_err(|e| format!("rpn forward: {e}"))?;
     sd.insert("proposals_post_nms".into(), proposals);
 
-    save_safetensors::<f32>(&sd, &out_path)
-        .map_err(|e| format!("save_safetensors: {e}"))?;
+    save_safetensors::<f32>(&sd, &out_path).map_err(|e| format!("save_safetensors: {e}"))?;
 
     // Also write a tiny JSON sidecar with image size / level shapes / counts.
     let mut json = String::new();
@@ -305,7 +309,8 @@ fn main() -> Result<(), String> {
     let mut jp = out_path.clone();
     jp.set_extension("json");
     let mut f = File::create(&jp).map_err(|e| format!("json create: {e}"))?;
-    f.write_all(json.as_bytes()).map_err(|e| format!("json write: {e}"))?;
+    f.write_all(json.as_bytes())
+        .map_err(|e| format!("json write: {e}"))?;
 
     eprintln!("[probe_rpn_stages_1141] dumped tensors to {out_path:?}");
     eprintln!("[probe_rpn_stages_1141] dumped metadata to {jp:?}");

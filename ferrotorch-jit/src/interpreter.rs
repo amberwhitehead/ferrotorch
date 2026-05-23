@@ -164,43 +164,43 @@ pub fn interpret_multi_with_captures<T: Float>(
     let node_map: HashMap<IrNodeId, &crate::graph::IrNode> =
         graph.nodes.iter().map(|n| (n.id, n)).collect();
     for &topo_idx in capture_topo_indices {
-        let node_id = *topo.get(topo_idx).ok_or_else(|| {
-            FerrotorchError::InvalidArgument {
+        let node_id = *topo
+            .get(topo_idx)
+            .ok_or_else(|| FerrotorchError::InvalidArgument {
                 message: format!(
                     "interpret_multi_with_captures: capture topo index {topo_idx} is out of \
                      range for graph with {} topologically ordered nodes",
                     topo.len()
                 ),
-            }
-        })?;
-        let node = node_map.get(&node_id).ok_or_else(|| {
-            FerrotorchError::Internal {
+            })?;
+        let node = node_map
+            .get(&node_id)
+            .ok_or_else(|| FerrotorchError::Internal {
                 message: format!(
                     "interpret_multi_with_captures: node {node_id:?} at topo index {topo_idx} \
                      missing from node_map (graph corruption)"
                 ),
-            }
-        })?;
+            })?;
         // For nodes with outputs, capture the first output value.
         // The `Output` marker has its input forwarded into its output slot
         // by interpret_collect_values, so the same lookup works.
-        let value_id = *node.outputs.first().ok_or_else(|| {
-            FerrotorchError::InvalidArgument {
+        let value_id = *node
+            .outputs
+            .first()
+            .ok_or_else(|| FerrotorchError::InvalidArgument {
                 message: format!(
                     "interpret_multi_with_captures: requested capture at topo index {topo_idx} \
                      (node {node_id:?}) but that node has no outputs to capture"
                 ),
-            }
-        })?;
-        let tensor = values
-            .get(&value_id)
-            .cloned()
-            .ok_or_else(|| FerrotorchError::InvalidArgument {
+            })?;
+        let tensor = values.get(&value_id).cloned().ok_or_else(|| {
+            FerrotorchError::InvalidArgument {
                 message: format!(
                     "interpret_multi_with_captures: value {value_id:?} at topo index {topo_idx} \
                      was not produced during interpretation"
                 ),
-            })?;
+            }
+        })?;
         captured.push(tensor);
     }
 

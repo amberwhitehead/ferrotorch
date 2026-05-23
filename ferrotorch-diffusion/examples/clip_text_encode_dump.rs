@@ -41,8 +41,8 @@ use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
 use ferrotorch_core::{FerrotorchResult, Tensor, TensorStorage};
-use ferrotorch_diffusion::{load_clip_text_encoder, ClipTextConfig};
-use ferrotorch_hub::{hf_download_model, HubCache};
+use ferrotorch_diffusion::{ClipTextConfig, load_clip_text_encoder};
+use ferrotorch_hub::{HubCache, hf_download_model};
 
 /// Target device for the forward pass.
 ///
@@ -173,9 +173,8 @@ fn resolve_input_ids(user_override: Option<&Path>, repo_dir: &Path) -> Ferrotorc
 }
 
 fn run() -> FerrotorchResult<()> {
-    let args = parse_args().map_err(|m| ferrotorch_core::FerrotorchError::InvalidArgument {
-        message: m,
-    })?;
+    let args = parse_args()
+        .map_err(|m| ferrotorch_core::FerrotorchError::InvalidArgument { message: m })?;
 
     let repo = format!("ferrotorch/{}", args.model);
     eprintln!("[clip_text_encode_dump] repo = {repo}");
@@ -220,9 +219,7 @@ fn run() -> FerrotorchResult<()> {
     // 1-D id vector. Verify shape is [1, S] (or [S]) and flatten.
     if !(ids_shape.len() == 1 || (ids_shape.len() == 2 && ids_shape[0] == 1)) {
         return Err(ferrotorch_core::FerrotorchError::ShapeMismatch {
-            message: format!(
-                "expected input_ids shape [S] or [1, S], got {ids_shape:?}",
-            ),
+            message: format!("expected input_ids shape [S] or [1, S], got {ids_shape:?}",),
         });
     }
     let seq_len = if ids_shape.len() == 1 {
@@ -244,9 +241,7 @@ fn run() -> FerrotorchResult<()> {
     for (i, &v) in ids_data.iter().enumerate() {
         if !v.is_finite() || v < 0.0 || v.fract() != 0.0 || v > u32::MAX as f32 {
             return Err(ferrotorch_core::FerrotorchError::InvalidArgument {
-                message: format!(
-                    "input_ids entry {i} ({v}) is not a non-negative integer"
-                ),
+                message: format!("input_ids entry {i} ({v}) is not a non-negative integer"),
             });
         }
         let idv = v as u32;

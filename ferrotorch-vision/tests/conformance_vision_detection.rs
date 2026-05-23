@@ -169,12 +169,12 @@ fn test_forward_64x64_output_structure() {
     let n = d.boxes.shape()[0];
     assert_eq!(d.boxes.shape().len(), 2, "boxes must be 2-D");
     assert_eq!(d.boxes.shape()[1], 4, "boxes must have 4 coords");
-    assert_eq!(d.scores.shape().len(), 1, "scores must be 1-D (one per detection)");
     assert_eq!(
-        d.scores.shape()[0],
-        n,
-        "scores count must match box count"
+        d.scores.shape().len(),
+        1,
+        "scores must be 1-D (one per detection)"
     );
+    assert_eq!(d.scores.shape()[0], n, "scores count must match box count");
     assert_eq!(d.labels.len(), n, "label count must match box count");
 }
 
@@ -430,8 +430,16 @@ fn test_maskrcnn_forward_output_structure() {
         1,
         "post-paste masks have a single class channel (class-selected)"
     );
-    assert_eq!(d.masks.shape()[2], h, "pasted mask height must equal image height");
-    assert_eq!(d.masks.shape()[3], w, "pasted mask width must equal image width");
+    assert_eq!(
+        d.masks.shape()[2],
+        h,
+        "pasted mask height must equal image height"
+    );
+    assert_eq!(
+        d.masks.shape()[3],
+        w,
+        "pasted mask width must equal image width"
+    );
 }
 
 /// M4 - Batch of 2 images returns two MaskDetections entries.

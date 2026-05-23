@@ -72,7 +72,9 @@ fn main() -> Result<(), Box<dyn Error>> {
     // Path A: default dispatch (parallel for BF16).
     // SAFETY: single-threaded benchmark, the env var manipulation
     // is local to this process.
-    unsafe { std::env::remove_var("FERROTORCH_FORCE_SERIAL_LOAD"); }
+    unsafe {
+        std::env::remove_var("FERROTORCH_FORCE_SERIAL_LOAD");
+    }
     let t0 = Instant::now();
     let parallel: StateDict<f32> = load_safetensors(&path)?;
     let parallel_elapsed = t0.elapsed();
@@ -81,17 +83,19 @@ fn main() -> Result<(), Box<dyn Error>> {
     drop(parallel);
 
     // Path B: force-serial.
-    unsafe { std::env::set_var("FERROTORCH_FORCE_SERIAL_LOAD", "1"); }
+    unsafe {
+        std::env::set_var("FERROTORCH_FORCE_SERIAL_LOAD", "1");
+    }
     let t0 = Instant::now();
     let serial: StateDict<f32> = load_safetensors(&path)?;
     let serial_elapsed = t0.elapsed();
     assert_eq!(serial.len(), N_TENSORS);
-    unsafe { std::env::remove_var("FERROTORCH_FORCE_SERIAL_LOAD"); }
+    unsafe {
+        std::env::remove_var("FERROTORCH_FORCE_SERIAL_LOAD");
+    }
     println!("serial:   {:.3} s", serial_elapsed.as_secs_f64());
 
     let speedup = serial_elapsed.as_secs_f64() / parallel_elapsed.as_secs_f64();
-    println!(
-        "speedup:  {speedup:.2}× (parallel wins iff >1, regresses iff <1)"
-    );
+    println!("speedup:  {speedup:.2}× (parallel wins iff >1, regresses iff <1)");
     Ok(())
 }

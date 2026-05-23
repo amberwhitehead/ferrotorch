@@ -297,9 +297,7 @@ impl<T: Float> Module<T> for BertSelfOutput<T> {
             for key in state.keys() {
                 if !prefixes.iter().any(|p| key.starts_with(&format!("{p}."))) {
                     return Err(FerrotorchError::InvalidArgument {
-                        message: format!(
-                            "unexpected key in BertSelfOutput state_dict: \"{key}\""
-                        ),
+                        message: format!("unexpected key in BertSelfOutput state_dict: \"{key}\""),
                     });
                 }
             }
@@ -404,9 +402,7 @@ impl<T: Float> Module<T> for BertAttention<T> {
             for key in state.keys() {
                 if !prefixes.iter().any(|p| key.starts_with(&format!("{p}."))) {
                     return Err(FerrotorchError::InvalidArgument {
-                        message: format!(
-                            "unexpected key in BertAttention state_dict: \"{key}\""
-                        ),
+                        message: format!("unexpected key in BertAttention state_dict: \"{key}\""),
                     });
                 }
             }

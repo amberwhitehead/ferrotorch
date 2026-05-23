@@ -388,7 +388,11 @@ mod tests {
     #[test]
     fn layer_named_parameters_match_hf_layout() {
         let layer = BertLayer::<f32>::new(&tiny_cfg()).unwrap();
-        let names: Vec<String> = layer.named_parameters().into_iter().map(|(n, _)| n).collect();
+        let names: Vec<String> = layer
+            .named_parameters()
+            .into_iter()
+            .map(|(n, _)| n)
+            .collect();
         // HF: encoder.layer.{i}.attention.self.{q,k,v}.{weight,bias}
         //     encoder.layer.{i}.attention.output.dense.{weight,bias}
         //     encoder.layer.{i}.attention.output.LayerNorm.{weight,bias}

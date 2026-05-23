@@ -1470,11 +1470,9 @@ mod tests {
                                 let ci = g * c_in_per_group + ci_g;
                                 for ki in 0..kh {
                                     for kj in 0..kw {
-                                        let ih = (oh * stride.0 + ki * dilation.0)
-                                            as isize
+                                        let ih = (oh * stride.0 + ki * dilation.0) as isize
                                             - padding.0 as isize;
-                                        let iw = (ow * stride.1 + kj * dilation.1)
-                                            as isize
+                                        let iw = (ow * stride.1 + kj * dilation.1) as isize
                                             - padding.1 as isize;
                                         if ih >= 0
                                             && iw >= 0
@@ -1585,11 +1583,6 @@ mod tests {
 
         let out_host = gpu_to_cpu(&out_gpu, &dev).expect("gpu_to_cpu");
         // F32 elementwise tolerance for fused matmul + im2col + bias add.
-        assert_close(
-            &out_host,
-            &expected,
-            1e-5,
-            "conv2d groups=2 dilation=(2,2)",
-        );
+        assert_close(&out_host, &expected, 1e-5, "conv2d groups=2 dilation=(2,2)");
     }
 }

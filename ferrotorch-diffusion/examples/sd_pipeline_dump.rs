@@ -44,11 +44,10 @@ use std::path::{Path, PathBuf};
 
 use ferrotorch_core::{FerrotorchResult, Tensor, TensorStorage};
 use ferrotorch_diffusion::{
-    load_clip_text_encoder, load_unet, load_vae_decoder, ClipTextConfig, DDIMConfig,
-    DDIMScheduler, PipelineStepDump, StableDiffusionPipeline, UNet2DConditionConfig,
-    VaeDecoderConfig,
+    ClipTextConfig, DDIMConfig, DDIMScheduler, PipelineStepDump, StableDiffusionPipeline,
+    UNet2DConditionConfig, VaeDecoderConfig, load_clip_text_encoder, load_unet, load_vae_decoder,
 };
-use ferrotorch_hub::{hf_download_model, HubCache};
+use ferrotorch_hub::{HubCache, hf_download_model};
 
 /// Target device for the forward passes.
 ///
@@ -194,9 +193,7 @@ fn write_dump_f32(path: &Path, shape: &[usize], data: &[f32]) -> std::io::Result
 }
 
 fn dump_tensor_to(path: &Path, t: &Tensor<f32>) -> Result<(), String> {
-    let data = t
-        .data()
-        .map_err(|e| format!("tensor.data() failed: {e}"))?;
+    let data = t.data().map_err(|e| format!("tensor.data() failed: {e}"))?;
     write_dump_f32(path, t.shape(), data).map_err(|e| format!("write {}: {e}", path.display()))
 }
 
@@ -236,9 +233,8 @@ fn read_input_ids(path: &Path) -> Result<Vec<u32>, String> {
 }
 
 fn run() -> FerrotorchResult<()> {
-    let args = parse_args().map_err(|m| ferrotorch_core::FerrotorchError::InvalidArgument {
-        message: m,
-    })?;
+    let args = parse_args()
+        .map_err(|m| ferrotorch_core::FerrotorchError::InvalidArgument { message: m })?;
     std::fs::create_dir_all(&args.output_dir).map_err(|e| {
         ferrotorch_core::FerrotorchError::InvalidArgument {
             message: format!(
@@ -285,7 +281,8 @@ fn run() -> FerrotorchResult<()> {
     );
 
     let vae_cfg = VaeDecoderConfig::from_file(&vae_dir.join("config.json"))?;
-    let (vae, vae_drop) = load_vae_decoder::<f32>(&locate_weights(&vae_dir)?, vae_cfg.clone(), false)?;
+    let (vae, vae_drop) =
+        load_vae_decoder::<f32>(&locate_weights(&vae_dir)?, vae_cfg.clone(), false)?;
     eprintln!(
         "[sd_pipeline_dump] VAE loaded (dropped {} keys)",
         vae_drop.dropped.len()
@@ -295,14 +292,16 @@ fn run() -> FerrotorchResult<()> {
     eprintln!("[sd_pipeline_dump] DDIM scheduler built (SD-1.5 defaults)");
 
     // ---- 3. Read the pinned tokenized inputs + init_latent. ---------------
-    let prompt_ids = read_input_ids(&traj_dir.join("prompt_input_ids.bin"))
-        .map_err(|e| ferrotorch_core::FerrotorchError::InvalidArgument {
+    let prompt_ids = read_input_ids(&traj_dir.join("prompt_input_ids.bin")).map_err(|e| {
+        ferrotorch_core::FerrotorchError::InvalidArgument {
             message: format!("read prompt_input_ids.bin: {e}"),
-        })?;
-    let uncond_ids = read_input_ids(&traj_dir.join("uncond_input_ids.bin"))
-        .map_err(|e| ferrotorch_core::FerrotorchError::InvalidArgument {
+        }
+    })?;
+    let uncond_ids = read_input_ids(&traj_dir.join("uncond_input_ids.bin")).map_err(|e| {
+        ferrotorch_core::FerrotorchError::InvalidArgument {
             message: format!("read uncond_input_ids.bin: {e}"),
-        })?;
+        }
+    })?;
     eprintln!(
         "[sd_pipeline_dump] prompt_ids: {} entries; uncond_ids: {} entries",
         prompt_ids.len(),
@@ -310,18 +309,15 @@ fn run() -> FerrotorchResult<()> {
     );
 
     // ---- 4. Load init_latent (rust PRNG != torch PRNG, so read it). -------
-    let (latent_shape, latent_data) = read_dump_f32(&traj_dir.join("init_latent.bin"))
-        .map_err(|e| ferrotorch_core::FerrotorchError::InvalidArgument {
-            message: format!("read init_latent.bin: {e}"),
+    let (latent_shape, latent_data) =
+        read_dump_f32(&traj_dir.join("init_latent.bin")).map_err(|e| {
+            ferrotorch_core::FerrotorchError::InvalidArgument {
+                message: format!("read init_latent.bin: {e}"),
+            }
         })?;
-    let init_latent = Tensor::<f32>::from_storage(
-        TensorStorage::cpu(latent_data),
-        latent_shape.clone(),
-        false,
-    )?;
-    eprintln!(
-        "[sd_pipeline_dump] loaded init_latent shape={latent_shape:?}",
-    );
+    let init_latent =
+        Tensor::<f32>::from_storage(TensorStorage::cpu(latent_data), latent_shape.clone(), false)?;
+    eprintln!("[sd_pipeline_dump] loaded init_latent shape={latent_shape:?}",);
 
     // ---- 5. Run encoder + diffusion loop on the chosen device. ------------
     eprintln!(
@@ -365,19 +361,16 @@ fn run() -> FerrotorchResult<()> {
     // above; the `drop` here is a no-op in that branch).
     drop((clip_drop, unet_drop, vae_drop));
 
-    dump_tensor_to(&args.output_dir.join("cond_embeds.bin"), &cond_embeds).map_err(|e| {
-        ferrotorch_core::FerrotorchError::InvalidArgument { message: e }
-    })?;
-    dump_tensor_to(&args.output_dir.join("uncond_embeds.bin"), &uncond_embeds).map_err(|e| {
-        ferrotorch_core::FerrotorchError::InvalidArgument { message: e }
-    })?;
+    dump_tensor_to(&args.output_dir.join("cond_embeds.bin"), &cond_embeds)
+        .map_err(|e| ferrotorch_core::FerrotorchError::InvalidArgument { message: e })?;
+    dump_tensor_to(&args.output_dir.join("uncond_embeds.bin"), &uncond_embeds)
+        .map_err(|e| ferrotorch_core::FerrotorchError::InvalidArgument { message: e })?;
 
     // Persist a copy of init_latent in the dump dir so the harness can
     // confirm byte-exact passthrough (the trivial "init_latent: PASS,
     // exact match" stage).
-    dump_tensor_to(&args.output_dir.join("init_latent.bin"), &init_latent).map_err(|e| {
-        ferrotorch_core::FerrotorchError::InvalidArgument { message: e }
-    })?;
+    dump_tensor_to(&args.output_dir.join("init_latent.bin"), &init_latent)
+        .map_err(|e| ferrotorch_core::FerrotorchError::InvalidArgument { message: e })?;
 
     for step in &dumps {
         eprintln!(
@@ -392,12 +385,16 @@ fn run() -> FerrotorchResult<()> {
         );
         let i = step.step;
         dump_tensor_to(
-            &args.output_dir.join(format!("step_{i}_noise_pred_uncond.bin")),
+            &args
+                .output_dir
+                .join(format!("step_{i}_noise_pred_uncond.bin")),
             &step.noise_pred_uncond,
         )
         .map_err(|e| ferrotorch_core::FerrotorchError::InvalidArgument { message: e })?;
         dump_tensor_to(
-            &args.output_dir.join(format!("step_{i}_noise_pred_cond.bin")),
+            &args
+                .output_dir
+                .join(format!("step_{i}_noise_pred_cond.bin")),
             &step.noise_pred_cond,
         )
         .map_err(|e| ferrotorch_core::FerrotorchError::InvalidArgument { message: e })?;
@@ -413,9 +410,8 @@ fn run() -> FerrotorchResult<()> {
         .map_err(|e| ferrotorch_core::FerrotorchError::InvalidArgument { message: e })?;
     }
 
-    dump_tensor_to(&args.output_dir.join("final_image.bin"), &image).map_err(|e| {
-        ferrotorch_core::FerrotorchError::InvalidArgument { message: e }
-    })?;
+    dump_tensor_to(&args.output_dir.join("final_image.bin"), &image)
+        .map_err(|e| ferrotorch_core::FerrotorchError::InvalidArgument { message: e })?;
     eprintln!(
         "[sd_pipeline_dump] final image shape={:?} |image|={:.3}",
         image.shape(),

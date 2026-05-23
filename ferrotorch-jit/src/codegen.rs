@@ -1032,10 +1032,7 @@ impl InductorBackend {
     /// validation fails, or if the JIT compile itself errors. The
     /// non-JIT-able `CpuRust` path is reported as
     /// `Ok(FellBackToInterpreter(_))`, not an error.
-    pub fn compile_with_status(
-        &self,
-        graph: &IrGraph,
-    ) -> FerrotorchResult<InductorCompileStatus> {
+    pub fn compile_with_status(&self, graph: &IrGraph) -> FerrotorchResult<InductorCompileStatus> {
         // For the CpuRust target, attempt the real JIT path: lower the fusion
         // group's LoopIR into cranelift IR and JIT-compile in-process into
         // mapped executable pages, then dispatch to it on every `execute`

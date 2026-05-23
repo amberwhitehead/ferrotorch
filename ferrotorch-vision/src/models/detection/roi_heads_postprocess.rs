@@ -254,8 +254,12 @@ pub fn postprocess_detections<T: Float>(
             let y2 = clipped_data[base + 3];
             let w = x2 - x1;
             let h = y2 - y1;
-            let w_ok = w.partial_cmp(&min_side).is_some_and(|o| o != std::cmp::Ordering::Less);
-            let h_ok = h.partial_cmp(&min_side).is_some_and(|o| o != std::cmp::Ordering::Less);
+            let w_ok = w
+                .partial_cmp(&min_side)
+                .is_some_and(|o| o != std::cmp::Ordering::Less);
+            let h_ok = h
+                .partial_cmp(&min_side)
+                .is_some_and(|o| o != std::cmp::Ordering::Less);
             if !(w_ok && h_ok) {
                 continue;
             }
@@ -278,13 +282,13 @@ pub fn postprocess_detections<T: Float>(
     }
 
     // 8) Per-class NMS via batched_nms.
-    let cand_boxes_t =
-        Tensor::from_storage(TensorStorage::cpu(cand_boxes.clone()), vec![n_cand, 4], false)?;
-    let cand_scores_t = Tensor::from_storage(
-        TensorStorage::cpu(cand_scores.clone()),
-        vec![n_cand],
+    let cand_boxes_t = Tensor::from_storage(
+        TensorStorage::cpu(cand_boxes.clone()),
+        vec![n_cand, 4],
         false,
     )?;
+    let cand_scores_t =
+        Tensor::from_storage(TensorStorage::cpu(cand_scores.clone()), vec![n_cand], false)?;
     let idxs: Vec<u32> = cand_labels.iter().map(|&l| l as u32).collect();
     let keep = batched_nms::<T>(&cand_boxes_t, &cand_scores_t, &idxs, ROI_NMS_THRESH)?;
 
@@ -392,11 +396,7 @@ pub fn postprocess_masks<T: Float>(
     let im_w = image_size[1];
 
     if n_det == 0 {
-        return Tensor::from_storage(
-            TensorStorage::cpu(vec![]),
-            vec![0, 1, im_h, im_w],
-            false,
-        );
+        return Tensor::from_storage(TensorStorage::cpu(vec![]), vec![0, 1, im_h, im_w], false);
     }
     if labels.len() != n_det {
         return Err(FerrotorchError::InvalidArgument {
@@ -436,11 +436,7 @@ pub fn postprocess_masks<T: Float>(
         // Return the sigmoid + class-select tensor `[N_det, 1, mh, mw]` — the
         // `maskrcnn_inference` output torchvision exposes from `RoIHeads.forward`
         // before `GeneralizedRCNNTransform.postprocess` runs `paste_masks_in_image`.
-        return Tensor::from_storage(
-            TensorStorage::cpu(selected),
-            vec![n_det, 1, mh, mw],
-            false,
-        );
+        return Tensor::from_storage(TensorStorage::cpu(selected), vec![n_det, 1, mh, mw], false);
     }
 
     // 3) torchvision `expand_masks`: pad masks by 1 px (so paste samples from a
@@ -509,8 +505,7 @@ pub fn postprocess_masks<T: Float>(
         let paste_h = paste_h as usize;
 
         // Build the padded mask as [1, 1, mh_pad, mw_pad] tensor for interpolate.
-        let pad_slice =
-            &padded[i * plane_pad..(i + 1) * plane_pad];
+        let pad_slice = &padded[i * plane_pad..(i + 1) * plane_pad];
         let m_tensor = Tensor::from_storage(
             TensorStorage::cpu(pad_slice.to_vec()),
             vec![1, 1, mh_pad, mw_pad],
@@ -572,15 +567,16 @@ mod tests {
     #[test]
     fn decode_per_class_identity_zero_deltas() {
         // Two proposals, three classes, zero deltas → every class-row = proposal.
-        let proposals = from_slice::<f32>(
-            &[10.0, 20.0, 50.0, 60.0, 0.0, 0.0, 100.0, 200.0],
-            &[2, 4],
+        let proposals =
+            from_slice::<f32>(&[10.0, 20.0, 50.0, 60.0, 0.0, 0.0, 100.0, 200.0], &[2, 4]).unwrap();
+        let deltas = from_slice::<f32>(&[0.0_f32; 24], &[2, 12]).unwrap();
+        let decoded = decode_per_class(
+            &proposals,
+            &deltas,
+            ROI_BOX_CODER_WEIGHTS,
+            ROI_BBOX_XFORM_CLIP,
         )
         .unwrap();
-        let deltas = from_slice::<f32>(&[0.0_f32; 24], &[2, 12]).unwrap();
-        let decoded =
-            decode_per_class(&proposals, &deltas, ROI_BOX_CODER_WEIGHTS, ROI_BBOX_XFORM_CLIP)
-                .unwrap();
         assert_eq!(decoded.shape(), &[2, 3, 4]);
         let d = decoded.data_vec().unwrap();
         // Row 0, class 0: should equal proposal 0 = [10, 20, 50, 60].
@@ -604,9 +600,13 @@ mod tests {
         let proposals = from_slice::<f32>(&[0.0, 0.0, 10.0, 20.0], &[1, 4]).unwrap();
         // One class. Set dx = wx = 10 → divided by wx = 1 → shift centre by 1 width.
         let deltas = from_slice::<f32>(&[10.0, 0.0, 0.0, 0.0], &[1, 4]).unwrap();
-        let decoded =
-            decode_per_class(&proposals, &deltas, ROI_BOX_CODER_WEIGHTS, ROI_BBOX_XFORM_CLIP)
-                .unwrap();
+        let decoded = decode_per_class(
+            &proposals,
+            &deltas,
+            ROI_BOX_CODER_WEIGHTS,
+            ROI_BBOX_XFORM_CLIP,
+        )
+        .unwrap();
         let d = decoded.data_vec().unwrap();
         // Centre shifts from x=5 to x=15. Width/height unchanged (10, 20).
         // New box centred at (15, 10) → [10, 0, 20, 20].
@@ -624,18 +624,26 @@ mod tests {
         // dw / ww = 100 → before clip, would explode via exp(100).
         // After clip to log(1000/16) ≈ 4.135 → pred_w = exp(4.135) * 10 ≈ 625.
         let big_pos = from_slice::<f32>(&[0.0, 0.0, 500.0, 0.0], &[1, 4]).unwrap();
-        let dec_pos =
-            decode_per_class(&proposals, &big_pos, ROI_BOX_CODER_WEIGHTS, ROI_BBOX_XFORM_CLIP)
-                .unwrap();
+        let dec_pos = decode_per_class(
+            &proposals,
+            &big_pos,
+            ROI_BOX_CODER_WEIGHTS,
+            ROI_BBOX_XFORM_CLIP,
+        )
+        .unwrap();
         let p = dec_pos.data_vec().unwrap();
         let w = p[2] - p[0];
         assert!(w > 500.0 && w < 700.0, "clamped width = {w}, expected ~625");
 
         // Large negative dw must NOT be clamped → exp(-100) * 10 ≈ 0.
         let big_neg = from_slice::<f32>(&[0.0, 0.0, -500.0, 0.0], &[1, 4]).unwrap();
-        let dec_neg =
-            decode_per_class(&proposals, &big_neg, ROI_BOX_CODER_WEIGHTS, ROI_BBOX_XFORM_CLIP)
-                .unwrap();
+        let dec_neg = decode_per_class(
+            &proposals,
+            &big_neg,
+            ROI_BOX_CODER_WEIGHTS,
+            ROI_BBOX_XFORM_CLIP,
+        )
+        .unwrap();
         let n = dec_neg.data_vec().unwrap();
         let wn = n[2] - n[0];
         assert!(wn < 1e-3, "neg dw should produce tiny width, got {wn}");
@@ -656,13 +664,9 @@ mod tests {
         // Zero deltas → predicted boxes = proposals.
         let deltas = from_slice::<f32>(&[0.0_f32; 16], &[2, 8]).unwrap();
         // Two heavily overlapping proposals.
-        let proposals = from_slice::<f32>(
-            &[10.0, 10.0, 50.0, 50.0, 12.0, 11.0, 51.0, 49.0],
-            &[2, 4],
-        )
-        .unwrap();
-        let det =
-            postprocess_detections::<f32>(&logits, &deltas, &proposals, [100, 100]).unwrap();
+        let proposals =
+            from_slice::<f32>(&[10.0, 10.0, 50.0, 50.0, 12.0, 11.0, 51.0, 49.0], &[2, 4]).unwrap();
+        let det = postprocess_detections::<f32>(&logits, &deltas, &proposals, [100, 100]).unwrap();
         assert_eq!(det.boxes.shape()[0], 1, "NMS should keep only one box");
         assert_eq!(det.scores.shape(), &[1]);
         assert_eq!(det.labels.len(), 1);
@@ -699,8 +703,7 @@ mod tests {
         )
         .unwrap();
 
-        let det = postprocess_detections::<f32>(&logits, &deltas, &proposals, [500, 500])
-            .unwrap();
+        let det = postprocess_detections::<f32>(&logits, &deltas, &proposals, [500, 500]).unwrap();
         assert_eq!(det.boxes.shape(), &[3, 4]);
         assert_eq!(det.scores.shape(), &[3]);
         assert_eq!(det.labels.len(), 3);
@@ -774,8 +777,7 @@ mod tests {
         // Detection 1 → predicted label 2 (channel of ~0.0).
         let labels = vec![1usize, 2];
         let boxes = from_slice::<f32>(&[0.0, 0.0, 1.0, 1.0, 0.0, 0.0, 1.0, 1.0], &[2, 4]).unwrap();
-        let out =
-            postprocess_masks::<f32>(&mask_logits, &labels, &boxes, [16, 16], false).unwrap();
+        let out = postprocess_masks::<f32>(&mask_logits, &labels, &boxes, [16, 16], false).unwrap();
         assert_eq!(out.shape(), &[2, 1, 4, 4]);
         let d = out.data_vec().unwrap();
         // Detection 0: picked class 1 → sigmoid(5) ≈ 0.993.

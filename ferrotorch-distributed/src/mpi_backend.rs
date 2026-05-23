@@ -419,7 +419,10 @@ mod tests {
                 })
             })
             .collect();
-        let backends: Vec<_> = handles.into_iter().map(|h| h.join().expect("join")).collect();
+        let backends: Vec<_> = handles
+            .into_iter()
+            .map(|h| h.join().expect("join"))
+            .collect();
 
         // Drive an allreduce: rank 0 has [1, 2, 3, 4]; rank 1 has
         // [10, 20, 30, 40]; expected sum [11, 22, 33, 44] on both.
@@ -464,7 +467,10 @@ mod tests {
                 })
             })
             .collect();
-        let backends: Vec<_> = handles.into_iter().map(|h| h.join().expect("join")).collect();
+        let backends: Vec<_> = handles
+            .into_iter()
+            .map(|h| h.join().expect("join"))
+            .collect();
 
         // Broadcast from rank 1 to ranks 0 and 2.
         let payload = vec![7.5f32, 8.25, 9.125];

@@ -1408,17 +1408,13 @@ pub fn cross<T: Float>(a: &Tensor<T>, b: &Tensor<T>, dim: i64) -> FerrotorchResu
     let axis = if dim < 0 { dim + rank } else { dim };
     if axis < 0 || axis >= rank {
         return Err(FerrotorchError::InvalidArgument {
-            message: format!(
-                "cross: dim {dim} is out of range for tensor of rank {rank}"
-            ),
+            message: format!("cross: dim {dim} is out of range for tensor of rank {rank}"),
         });
     }
     let axis = axis as usize;
     if a_shape[axis] != 3 {
         return Err(FerrotorchError::InvalidArgument {
-            message: format!(
-                "cross: axis {axis} must have size 3, got shape {a_shape:?}"
-            ),
+            message: format!("cross: axis {axis} must have size 3, got shape {a_shape:?}"),
         });
     }
 
@@ -2799,11 +2795,7 @@ mod tests {
         let r_last = cross(&a, &b, -1).unwrap();
         assert_eq!(r_last.shape(), &[3, 3]);
         let d_last = r_last.data().unwrap();
-        let expect_last = [
-            -10.0, 20.0, -10.0,
-            -10.0, 20.0, -10.0,
-            -10.0, 20.0, -10.0,
-        ];
+        let expect_last = [-10.0, 20.0, -10.0, -10.0, 20.0, -10.0, -10.0, 20.0, -10.0];
         for (got, exp) in d_last.iter().zip(expect_last.iter()) {
             assert!((got - exp).abs() < 1e-10, "dim=-1 got {got}, exp {exp}");
         }
@@ -2822,11 +2814,7 @@ mod tests {
         let r_first = cross(&a, &b, 0).unwrap();
         assert_eq!(r_first.shape(), &[3, 3]);
         let d_first = r_first.data().unwrap();
-        let expect_first = [
-            -30.0, -30.0, -30.0,
-             60.0,  60.0,  60.0,
-            -30.0, -30.0, -30.0,
-        ];
+        let expect_first = [-30.0, -30.0, -30.0, 60.0, 60.0, 60.0, -30.0, -30.0, -30.0];
         for (got, exp) in d_first.iter().zip(expect_first.iter()) {
             assert!((got - exp).abs() < 1e-10, "dim=0 got {got}, exp {exp}");
         }

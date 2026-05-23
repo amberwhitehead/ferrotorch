@@ -52,7 +52,9 @@ fn main() {
         WeightsFormat::SafeTensors => load_safetensors::<f32>(&path).expect("safetensors"),
         WeightsFormat::FerrotorchStateDict => load_state_dict::<f32>(&path).expect("state"),
     };
-    model.load_state_dict(&state_dict, false).expect("load_state_dict");
+    model
+        .load_state_dict(&state_dict, false)
+        .expect("load_state_dict");
     apply_bn_buffers_from_state_dict(&model as &dyn Module<f32>, &state_dict)
         .expect("apply_bn_buffers");
     model.eval();
@@ -79,7 +81,10 @@ fn main() {
     for (i, b) in staged.blocks.iter().enumerate() {
         dump_tensor(b, &PathBuf::from(format!("{out_dir}/block{i:02}.bin")));
     }
-    dump_tensor(&staged.head_conv, &PathBuf::from(format!("{out_dir}/head_conv.bin")));
+    dump_tensor(
+        &staged.head_conv,
+        &PathBuf::from(format!("{out_dir}/head_conv.bin")),
+    );
 
     // Run backbone explicitly to get (low, high).
     let (low, high) = model

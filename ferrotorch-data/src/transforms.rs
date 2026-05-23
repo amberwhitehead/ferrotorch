@@ -1,10 +1,10 @@
+#[cfg(test)]
+use ferrotorch_core::TensorStorage;
 use ferrotorch_core::autograd::no_grad;
 use ferrotorch_core::creation::from_vec;
 use ferrotorch_core::grad_fns::arithmetic::{div, sub};
 use ferrotorch_core::grad_fns::indexing::index_select_dim;
 use ferrotorch_core::{FerrotorchError, FerrotorchResult, Float, IntTensor, Tensor};
-#[cfg(test)]
-use ferrotorch_core::TensorStorage;
 use num_traits::NumCast;
 
 // ---------------------------------------------------------------------------
@@ -867,12 +867,9 @@ mod tests {
         let w = 4usize;
         let numel = c * h * w;
         let data: Vec<f32> = (0..numel).map(|i| i as f32).collect();
-        let cpu_input = Tensor::<f32>::from_storage(
-            TensorStorage::cpu(data.clone()),
-            vec![c, h, w],
-            false,
-        )
-        .unwrap();
+        let cpu_input =
+            Tensor::<f32>::from_storage(TensorStorage::cpu(data.clone()), vec![c, h, w], false)
+                .unwrap();
         let cuda_input = if let Ok(t) = cpu_input.cuda() {
             t
         } else {

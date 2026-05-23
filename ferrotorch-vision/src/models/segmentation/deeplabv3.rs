@@ -588,10 +588,8 @@ mod tests {
         // backbone wrapper). Inspect everything *under* the backbone for
         // leading dots — those are what the BN-buffer loader resolves
         // against the state-dict keys.
-        let backbone_descendants: Vec<&String> = descendants
-            .iter()
-            .filter(|n| !n.is_empty())
-            .collect();
+        let backbone_descendants: Vec<&String> =
+            descendants.iter().filter(|n| !n.is_empty()).collect();
         assert!(
             !backbone_descendants.is_empty(),
             "DeepLabV3 should expose backbone descendants",

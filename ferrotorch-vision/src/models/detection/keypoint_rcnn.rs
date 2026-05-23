@@ -200,13 +200,7 @@ impl<T: Float> KeypointPredictor<T> {
         let low_shape = low.shape();
         let h2 = low_shape[2] * 2;
         let w2 = low_shape[3] * 2;
-        interpolate(
-            &low,
-            Some([h2, w2]),
-            None,
-            InterpolateMode::Bilinear,
-            false,
-        )
+        interpolate(&low, Some([h2, w2]), None, InterpolateMode::Bilinear, false)
     }
 
     /// Trainable parameters.
@@ -464,11 +458,8 @@ impl<T: Float> KeypointRcnn<T> {
             // Shape: [N_det, num_keypoints, 28, 28].
 
             // ---- heatmaps_to_keypoints: per-ROI bicubic upsample → argmax → image coords ----
-            let (keypoints, keypoint_scores) = heatmaps_to_keypoints(
-                &kp_heatmaps,
-                &det.boxes,
-                self.num_keypoints,
-            )?;
+            let (keypoints, keypoint_scores) =
+                heatmaps_to_keypoints(&kp_heatmaps, &det.boxes, self.num_keypoints)?;
 
             results.push(KeypointDetections {
                 boxes: det.boxes,
@@ -705,9 +696,7 @@ pub fn heatmaps_to_keypoints<T: Float>(
     let roi_shape = rois.shape();
     if roi_shape.len() != 2 || roi_shape[1] != 4 || roi_shape[0] != n {
         return Err(FerrotorchError::InvalidArgument {
-            message: format!(
-                "heatmaps_to_keypoints: expected rois [{n}, 4], got {roi_shape:?}"
-            ),
+            message: format!("heatmaps_to_keypoints: expected rois [{n}, 4], got {roi_shape:?}"),
         });
     }
     let roi_data = rois.data_vec()?;
@@ -837,15 +826,11 @@ mod tests {
         assert!(names.iter().any(|n| n.starts_with("keypoint_predictor.")));
         // Specific torchvision-key parity for the keypoint subtrees.
         assert!(
-            names
-                .iter()
-                .any(|n| n == "keypoint_head.conv0.weight"),
+            names.iter().any(|n| n == "keypoint_head.conv0.weight"),
             "missing keypoint_head.conv0.weight in {names:?}",
         );
         assert!(
-            names
-                .iter()
-                .any(|n| n == "keypoint_head.conv14.weight"),
+            names.iter().any(|n| n == "keypoint_head.conv14.weight"),
             "missing keypoint_head.conv14.weight",
         );
         assert!(

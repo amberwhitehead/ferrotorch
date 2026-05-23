@@ -152,11 +152,12 @@ fn nccl_path_allreduce<T: GpuFloat>(
     let count = tensor.numel();
 
     // Output tensor — D2D copy of input so the call is non-destructive.
-    let out = tensor.try_clone().map_err(|e| {
-        ferrotorch_core::FerrotorchError::InvalidArgument {
-            message: format!("gpu_allreduce: D2D clone failed: {e}"),
-        }
-    })?;
+    let out =
+        tensor
+            .try_clone()
+            .map_err(|e| ferrotorch_core::FerrotorchError::InvalidArgument {
+                message: format!("gpu_allreduce: D2D clone failed: {e}"),
+            })?;
 
     // Raw device pointer to `out`'s storage. The pointer remains valid
     // for the duration of `out`'s `&mut` borrow below, which the NCCL
@@ -219,11 +220,12 @@ fn nccl_path_broadcast<T: GpuFloat>(
         world_size,
     })?;
 
-    let out = tensor.try_clone().map_err(|e| {
-        ferrotorch_core::FerrotorchError::InvalidArgument {
-            message: format!("gpu_broadcast: D2D clone failed: {e}"),
-        }
-    })?;
+    let out =
+        tensor
+            .try_clone()
+            .map_err(|e| ferrotorch_core::FerrotorchError::InvalidArgument {
+                message: format!("gpu_broadcast: D2D clone failed: {e}"),
+            })?;
     let ptr = out.cu_device_ptr() as *mut std::ffi::c_void;
 
     // SAFETY: calling `NcclBackend::broadcast_raw`, a `pub unsafe fn`.
@@ -633,8 +635,8 @@ mod tests {
         let input = [42.0_f32, 99.0, -7.5];
         let gt = gpu_from_slice(&input, &[3]);
 
-        let result = gpu_broadcast(&gt, &nccl, 0)
-            .expect("single-rank NCCL broadcast dispatch must succeed");
+        let result =
+            gpu_broadcast(&gt, &nccl, 0).expect("single-rank NCCL broadcast dispatch must succeed");
 
         assert_eq!(result.shape(), &[3]);
         let cpu = result.cpu().expect("result to CPU");

@@ -333,11 +333,7 @@ mod tests {
         // root cause of #1141 (924/1000 post-NMS proposal mismatch on
         // image 87038); this test prevents regression.
         let fpn = FeaturePyramidNetwork::<f32>::new().unwrap();
-        let names: Vec<String> = fpn
-            .named_parameters()
-            .into_iter()
-            .map(|(n, _)| n)
-            .collect();
+        let names: Vec<String> = fpn.named_parameters().into_iter().map(|(n, _)| n).collect();
         for k in [
             "lateral2.bias",
             "lateral3.bias",

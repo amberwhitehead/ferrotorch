@@ -82,10 +82,7 @@ pub enum StorageBuffer<T: Element> {
     /// `full_meta(shape, value)` round-trip the fill through e.g.
     /// `meta_fill_value()` and lets shape-inference code that cares
     /// distinguish "uninitialised meta" from "would-be filled meta".
-    Meta {
-        numel: usize,
-        fill_value: Option<T>,
-    },
+    Meta { numel: usize, fill_value: Option<T> },
 }
 
 impl<T: Element> TensorStorage<T> {

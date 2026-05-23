@@ -146,11 +146,10 @@ impl VaeDecoderConfig {
     /// a wrong-type field (e.g. `block_out_channels` not an array of
     /// integers).
     pub fn from_json_str(s: &str) -> FerrotorchResult<Self> {
-        let v: serde_json::Value = serde_json::from_str(s).map_err(|e| {
-            FerrotorchError::InvalidArgument {
+        let v: serde_json::Value =
+            serde_json::from_str(s).map_err(|e| FerrotorchError::InvalidArgument {
                 message: format!("VaeDecoderConfig::from_json_str: bad JSON: {e}"),
-            }
-        })?;
+            })?;
         let mut cfg = Self::default();
         if let Some(x) = v.get("out_channels").and_then(serde_json::Value::as_u64) {
             cfg.out_channels = x as usize;
@@ -158,7 +157,10 @@ impl VaeDecoderConfig {
         if let Some(x) = v.get("latent_channels").and_then(serde_json::Value::as_u64) {
             cfg.latent_channels = x as usize;
         }
-        if let Some(arr) = v.get("block_out_channels").and_then(serde_json::Value::as_array) {
+        if let Some(arr) = v
+            .get("block_out_channels")
+            .and_then(serde_json::Value::as_array)
+        {
             let mut out = Vec::with_capacity(arr.len());
             for e in arr {
                 let n = e.as_u64().ok_or_else(|| FerrotorchError::InvalidArgument {
@@ -171,7 +173,10 @@ impl VaeDecoderConfig {
             }
             cfg.block_out_channels = out;
         }
-        if let Some(x) = v.get("layers_per_block").and_then(serde_json::Value::as_u64) {
+        if let Some(x) = v
+            .get("layers_per_block")
+            .and_then(serde_json::Value::as_u64)
+        {
             cfg.layers_per_block = x as usize;
         }
         if let Some(x) = v.get("norm_num_groups").and_then(serde_json::Value::as_u64) {

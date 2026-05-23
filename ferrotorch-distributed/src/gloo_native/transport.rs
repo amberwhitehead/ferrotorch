@@ -90,11 +90,9 @@ pub(crate) fn recv_msg_into(stream: &mut TcpStream, dst: &mut [u8]) -> GlooResul
         });
     }
     if len > 0 {
-        stream
-            .read_exact(dst)
-            .map_err(|e| DistributedError::Io {
-                message: format!("gloo_native::transport recv_msg_into payload: {e}"),
-            })?;
+        stream.read_exact(dst).map_err(|e| DistributedError::Io {
+            message: format!("gloo_native::transport recv_msg_into payload: {e}"),
+        })?;
     }
     Ok(())
 }

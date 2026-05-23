@@ -273,8 +273,7 @@ impl Autotuner {
         // input (O(inputs)) — the previous code did the nested
         // O(inputs × values) walk on every `tune` call, including cache
         // hits (audit #1128).
-        let shape_by_id: HashMap<_, _> =
-            graph.values.iter().map(|v| (v.id, &v.shape)).collect();
+        let shape_by_id: HashMap<_, _> = graph.values.iter().map(|v| (v.id, &v.shape)).collect();
         let input_shapes: Vec<Vec<usize>> = graph
             .input_values
             .iter()

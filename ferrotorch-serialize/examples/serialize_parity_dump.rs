@@ -209,16 +209,16 @@ fn dump_gguf(fixture_dir: &Path, output_dir: &Path) -> Result<(), String> {
     println!("[gguf] {} tensors in file", file.tensors.len());
 
     let names_path = fixture_dir.join("sampled_tensor_names.json");
-    let names_body = fs::read(&names_path)
-        .map_err(|e| format!("read {}: {e}", names_path.display()))?;
+    let names_body =
+        fs::read(&names_path).map_err(|e| format!("read {}: {e}", names_path.display()))?;
     let names: Vec<String> = serde_json::from_slice(&names_body)
         .map_err(|e| format!("parse {}: {e}", names_path.display()))?;
     println!("[gguf] dequantizing {} sampled tensors", names.len());
 
     fs::create_dir_all(output_dir).map_err(|e| format!("mkdir {}: {e}", output_dir.display()))?;
     for name in &names {
-        let tensor = dequantize_gguf_tensor(&file, name)
-            .map_err(|e| format!("dequantize {name}: {e:?}"))?;
+        let tensor =
+            dequantize_gguf_tensor(&file, name).map_err(|e| format!("dequantize {name}: {e:?}"))?;
         let t_cpu = tensor
             .contiguous()
             .map_err(|e| format!("contiguous({name}): {e:?}"))?;
@@ -275,14 +275,14 @@ fn read_mlp_weights(path: &Path) -> Result<MlpWeights, String> {
     let (fc1_b_shape, fc1_b_data) = read_one("fc1.bias")?;
     let (fc2_w_shape, fc2_w_data) = read_one("fc2.weight")?;
     let (fc2_b_shape, fc2_b_data) = read_one("fc2.bias")?;
-    let fc1_w = from_slice(&fc1_w_data, &fc1_w_shape)
-        .map_err(|e| format!("fc1.weight tensor: {e:?}"))?;
-    let fc1_b = from_slice(&fc1_b_data, &fc1_b_shape)
-        .map_err(|e| format!("fc1.bias tensor: {e:?}"))?;
-    let fc2_w = from_slice(&fc2_w_data, &fc2_w_shape)
-        .map_err(|e| format!("fc2.weight tensor: {e:?}"))?;
-    let fc2_b = from_slice(&fc2_b_data, &fc2_b_shape)
-        .map_err(|e| format!("fc2.bias tensor: {e:?}"))?;
+    let fc1_w =
+        from_slice(&fc1_w_data, &fc1_w_shape).map_err(|e| format!("fc1.weight tensor: {e:?}"))?;
+    let fc1_b =
+        from_slice(&fc1_b_data, &fc1_b_shape).map_err(|e| format!("fc1.bias tensor: {e:?}"))?;
+    let fc2_w =
+        from_slice(&fc2_w_data, &fc2_w_shape).map_err(|e| format!("fc2.weight tensor: {e:?}"))?;
+    let fc2_b =
+        from_slice(&fc2_b_data, &fc2_b_shape).map_err(|e| format!("fc2.bias tensor: {e:?}"))?;
     Ok((fc1_w, fc1_b, fc2_w, fc2_b))
 }
 
@@ -309,26 +309,20 @@ fn dump_onnx(fixture_dir: &Path, output_dir: &Path) -> Result<(), String> {
     let mut fc2: Linear<f32> = Linear::new(hidden_features, out_features, true)
         .map_err(|e| format!("Linear::new(fc2): {e:?}"))?;
     fc1.weight.set_data(fc1_w);
-    fc1.bias
-        .as_mut()
-        .expect("fc1 bias=true")
-        .set_data(fc1_b);
+    fc1.bias.as_mut().expect("fc1 bias=true").set_data(fc1_b);
     fc2.weight.set_data(fc2_w);
-    fc2.bias
-        .as_mut()
-        .expect("fc2 bias=true")
-        .set_data(fc2_b);
+    fc2.bias.as_mut().expect("fc2 bias=true").set_data(fc2_b);
 
     // Forward the three fixed inputs through the ferrotorch MLP.
     for name in &["zeros", "ones", "random"] {
-        let (shape, data) =
-            read_single_tensor_f32(&fixture_dir.join(format!("input_{name}.bin")))?;
-        let x = from_slice(&data, &shape)
-            .map_err(|e| format!("input_{name} tensor: {e:?}"))?;
+        let (shape, data) = read_single_tensor_f32(&fixture_dir.join(format!("input_{name}.bin")))?;
+        let x = from_slice(&data, &shape).map_err(|e| format!("input_{name} tensor: {e:?}"))?;
         let h = fc1.forward(&x).map_err(|e| format!("fc1.forward: {e:?}"))?;
         let r = relu(&h).map_err(|e| format!("relu: {e:?}"))?;
         let y = fc2.forward(&r).map_err(|e| format!("fc2.forward: {e:?}"))?;
-        let y_cpu = y.contiguous().map_err(|e| format!("contiguous(y): {e:?}"))?;
+        let y_cpu = y
+            .contiguous()
+            .map_err(|e| format!("contiguous(y): {e:?}"))?;
         let y_data = y_cpu
             .data()
             .map_err(|e| format!("data(y): {e:?}"))?
@@ -393,7 +387,11 @@ fn dump_onnx(fixture_dir: &Path, output_dir: &Path) -> Result<(), String> {
         vec![x, fc1_w_val, fc1_b_val],
         vec![vec![1, hidden_features]],
     );
-    let (_, r_outs) = graph.add_node(IrOpKind::Relu, vec![h_outs[0]], vec![vec![1, hidden_features]]);
+    let (_, r_outs) = graph.add_node(
+        IrOpKind::Relu,
+        vec![h_outs[0]],
+        vec![vec![1, hidden_features]],
+    );
 
     let fc2_w_t = fc2.weight.tensor();
     let fc2_w_data: Vec<f64> = fc2_w_t

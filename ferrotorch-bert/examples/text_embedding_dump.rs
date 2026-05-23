@@ -50,11 +50,7 @@ fn parse_args() -> Result<Args, String> {
     while i < argv.len() {
         match argv[i].as_str() {
             "--model" => {
-                model = Some(
-                    argv.get(i + 1)
-                        .ok_or("--model needs a value")?
-                        .clone(),
-                );
+                model = Some(argv.get(i + 1).ok_or("--model needs a value")?.clone());
                 i += 2;
             }
             "--output" => {
@@ -64,11 +60,7 @@ fn parse_args() -> Result<Args, String> {
                 i += 2;
             }
             "--sentence" => {
-                sentence = Some(
-                    argv.get(i + 1)
-                        .ok_or("--sentence needs a value")?
-                        .clone(),
-                );
+                sentence = Some(argv.get(i + 1).ok_or("--sentence needs a value")?.clone());
                 i += 2;
             }
             other => return Err(format!("unknown argument {other:?}")),
@@ -103,9 +95,8 @@ fn write_dump_f32(path: &Path, shape: &[usize], data: &[f32]) -> std::io::Result
 }
 
 fn run() -> FerrotorchResult<()> {
-    let args = parse_args().map_err(|m| ferrotorch_core::FerrotorchError::InvalidArgument {
-        message: m,
-    })?;
+    let args = parse_args()
+        .map_err(|m| ferrotorch_core::FerrotorchError::InvalidArgument { message: m })?;
 
     let repo = format!("ferrotorch/{}", args.model);
     eprintln!("[text_embedding_dump] repo = {repo}");
@@ -116,9 +107,7 @@ fn run() -> FerrotorchResult<()> {
     eprintln!(
         "[text_embedding_dump] cached at {} ({} files)",
         repo_dir.display(),
-        std::fs::read_dir(&repo_dir)
-            .map(|r| r.count())
-            .unwrap_or(0)
+        std::fs::read_dir(&repo_dir).map(|r| r.count()).unwrap_or(0)
     );
 
     // -- 2. Parse config + tokenizer. ------------------------------------
@@ -187,9 +176,7 @@ fn run() -> FerrotorchResult<()> {
         })?;
         if frozen != input_ids {
             return Err(ferrotorch_core::FerrotorchError::InvalidArgument {
-                message: format!(
-                    "tokenizer mismatch: local={input_ids:?} vs frozen={frozen:?}"
-                ),
+                message: format!("tokenizer mismatch: local={input_ids:?} vs frozen={frozen:?}"),
             });
         }
         eprintln!("[text_embedding_dump] local encode matches frozen token_ids");
@@ -218,10 +205,7 @@ fn run() -> FerrotorchResult<()> {
 
     write_dump_f32(&args.output, shape, data).map_err(|e| {
         ferrotorch_core::FerrotorchError::InvalidArgument {
-            message: format!(
-                "failed writing embedding to {}: {e}",
-                args.output.display()
-            ),
+            message: format!("failed writing embedding to {}: {e}", args.output.display()),
         }
     })?;
     eprintln!(

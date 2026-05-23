@@ -928,11 +928,7 @@ pub struct RollBackward<T: Float> {
 
 impl<T: Float> RollBackward<T> {
     pub fn new(input: Tensor<T>, shifts: i64, dim: usize) -> Self {
-        Self {
-            input,
-            shifts,
-            dim,
-        }
+        Self { input, shifts, dim }
     }
 }
 
@@ -968,8 +964,7 @@ impl<T: Float> GradFn<T> for RollBackward<T> {
                         // grad tensor's storage so the upstream input
                         // receives a leaf-grad with no grad_fn (matches
                         // the CPU branch below).
-                        let grad_handle =
-                            backend.clone_buffer(grad_output.gpu_handle()?)?;
+                        let grad_handle = backend.clone_buffer(grad_output.gpu_handle()?)?;
                         let grad_tensor = Tensor::from_storage(
                             TensorStorage::gpu(grad_handle),
                             shape.to_vec(),
@@ -986,11 +981,8 @@ impl<T: Float> GradFn<T> for RollBackward<T> {
                         inner,
                         shift_norm as usize,
                     )?;
-                    let grad_tensor = Tensor::from_storage(
-                        TensorStorage::gpu(handle),
-                        shape.to_vec(),
-                        false,
-                    )?;
+                    let grad_tensor =
+                        Tensor::from_storage(TensorStorage::gpu(handle), shape.to_vec(), false)?;
                     return Ok(vec![Some(grad_tensor)]);
                 }
             }
@@ -1005,16 +997,10 @@ impl<T: Float> GradFn<T> for RollBackward<T> {
             // Inverse shift collapses to identity (e.g. shifts ≡ 0 mod n).
             go_data
         } else {
-            crate::ops::tensor_ops::roll_cpu_inner(
-                &go_data,
-                shape,
-                shift_norm as usize,
-                self.dim,
-            )
+            crate::ops::tensor_ops::roll_cpu_inner(&go_data, shape, shift_norm as usize, self.dim)
         };
 
-        let grad_tensor =
-            Tensor::from_storage(TensorStorage::cpu(grad), shape.to_vec(), false)?;
+        let grad_tensor = Tensor::from_storage(TensorStorage::cpu(grad), shape.to_vec(), false)?;
         Ok(vec![Some(grad_tensor)])
     }
 
@@ -1676,7 +1662,10 @@ mod tests {
         let gd = g.data().unwrap();
         let expected = [100.0_f32, 1.0, 10.0, 100000.0, 1000.0, 10000.0];
         for (i, (&got, &exp)) in gd.iter().zip(expected.iter()).enumerate() {
-            assert!((got - exp).abs() < 1e-6, "grad[{i}] = {got}, expected {exp}");
+            assert!(
+                (got - exp).abs() < 1e-6,
+                "grad[{i}] = {got}, expected {exp}"
+            );
         }
     }
 }

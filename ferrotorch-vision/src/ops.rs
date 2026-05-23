@@ -755,7 +755,14 @@ pub fn roi_align<T: Float>(
     spatial_scale: f64,
     sampling_ratio: usize,
 ) -> FerrotorchResult<Tensor<T>> {
-    roi_align_with_aligned(input, boxes, output_size, spatial_scale, sampling_ratio, true)
+    roi_align_with_aligned(
+        input,
+        boxes,
+        output_size,
+        spatial_scale,
+        sampling_ratio,
+        true,
+    )
 }
 
 /// Region of Interest Align with explicit `aligned` toggle, matching
@@ -1335,10 +1342,8 @@ mod tests {
         // aligned modes is observable.
         let input = from_slice::<f64>(
             &[
-                1.0, 2.0, 3.0, 4.0,
-                5.0, 6.0, 7.0, 8.0,
-                9.0, 10.0, 11.0, 12.0,
-                13.0, 14.0, 15.0, 16.0,
+                1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0, 13.0, 14.0, 15.0,
+                16.0,
             ],
             &[1, 1, 4, 4],
         )

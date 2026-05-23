@@ -164,9 +164,7 @@ fn run() -> FerrotorchResult<()> {
     eprintln!(
         "[ppo_policy_dump] cached at {} ({} files)",
         repo_dir.display(),
-        std::fs::read_dir(&repo_dir)
-            .map(|r| r.count())
-            .unwrap_or(0)
+        std::fs::read_dir(&repo_dir).map(|r| r.count()).unwrap_or(0)
     );
 
     // -- 2. Resolve the obs bin (CLI override > mirror's parity probe). -----
@@ -175,11 +173,10 @@ fn run() -> FerrotorchResult<()> {
     } else {
         repo_dir.join("_value_parity_obs.bin")
     };
-    let (obs_shape, obs_data) = read_dump_f32(&obs_path).map_err(|e| {
-        FerrotorchError::InvalidArgument {
+    let (obs_shape, obs_data) =
+        read_dump_f32(&obs_path).map_err(|e| FerrotorchError::InvalidArgument {
             message: format!("failed reading {}: {e}", obs_path.display()),
-        }
-    })?;
+        })?;
     if obs_shape.len() != 2 {
         return Err(FerrotorchError::ShapeMismatch {
             message: format!("--obs-bin must be 2-D [B, obs_dim], got {obs_shape:?}"),
@@ -189,10 +186,7 @@ fn run() -> FerrotorchResult<()> {
     let f_in = obs_shape[1];
     if f_in != args.obs_dim {
         return Err(FerrotorchError::ShapeMismatch {
-            message: format!(
-                "obs.shape()[-1] = {f_in} != --obs-dim {}",
-                args.obs_dim
-            ),
+            message: format!("obs.shape()[-1] = {f_in} != --obs-dim {}", args.obs_dim),
         });
     }
     let obs = Tensor::<f32>::from_storage(TensorStorage::cpu(obs_data), obs_shape.clone(), false)?;

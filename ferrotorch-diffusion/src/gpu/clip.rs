@@ -290,8 +290,7 @@ impl GpuClipTextEncoder {
         }
 
         // ---- Final LayerNorm ----------------------------------------------
-        let final_layer_norm =
-            pop_layernorm(&mut state, "final_layer_norm", hidden, eps, &device)?;
+        let final_layer_norm = pop_layernorm(&mut state, "final_layer_norm", hidden, eps, &device)?;
 
         // ---- Causal mask --------------------------------------------------
         //
@@ -466,13 +465,19 @@ impl GpuClipTextEncoder {
             // k_heads_t)` yields `[H, S, S]` scores. Done host-side once
             // per layer to stay within the kernel surface; perf
             // follow-up if needed.
-            let k_heads_t =
-                transpose_last_two(&k_heads, num_heads, s, head_dim, &self.device)?;
+            let k_heads_t = transpose_last_two(&k_heads, num_heads, s, head_dim, &self.device)?;
 
             // scores = (q_heads @ k_heads_t) / sqrt(head_dim)
-            let scores =
-                gpu_bmm_f32(&q_heads, &k_heads_t, num_heads, s, head_dim, s, &self.device)
-                    .map_err(gpu_err)?;
+            let scores = gpu_bmm_f32(
+                &q_heads,
+                &k_heads_t,
+                num_heads,
+                s,
+                head_dim,
+                s,
+                &self.device,
+            )
+            .map_err(gpu_err)?;
             let scale = (head_dim as f64).sqrt().recip() as f32;
             let scaled = gpu_scale(&scores, scale, &self.device).map_err(gpu_err)?;
 
@@ -494,16 +499,14 @@ impl GpuClipTextEncoder {
 
             // attended[h, i, :] = sum_j probs[h, i, j] * v[h, j, :]
             // probs: [H, S, S], v_heads: [H, S, head_dim] -> [H, S, head_dim]
-            let attended =
-                gpu_bmm_f32(&probs, &v_heads, num_heads, s, s, head_dim, &self.device)
-                    .map_err(gpu_err)?;
+            let attended = gpu_bmm_f32(&probs, &v_heads, num_heads, s, s, head_dim, &self.device)
+                .map_err(gpu_err)?;
 
             // [H, S, head_dim] → [S, hidden]
             let merged = reshape_heads_to_seq(&attended, num_heads, s, head_dim, &self.device)?;
 
             // out_proj + residual.
-            let attn_out =
-                linear_forward(&layer.self_attn.out_proj, &merged, s, &self.device)?;
+            let attn_out = linear_forward(&layer.self_attn.out_proj, &merged, s, &self.device)?;
             h = gpu_add(&h, &attn_out, &self.device).map_err(gpu_err)?;
 
             // ---- MLP sub-block ------------------------------------------
@@ -565,12 +568,7 @@ fn pop_layernorm(
     eps: f32,
     device: &GpuDevice,
 ) -> FerrotorchResult<GpuLayerNorm> {
-    let weight = pop_tensor(
-        state,
-        &format!("{prefix}.weight"),
-        normalized_shape,
-        device,
-    )?;
+    let weight = pop_tensor(state, &format!("{prefix}.weight"), normalized_shape, device)?;
     let bias = pop_tensor(state, &format!("{prefix}.bias"), normalized_shape, device)?;
     Ok(GpuLayerNorm {
         weight,
@@ -650,8 +648,15 @@ fn linear_forward(
     s: usize,
     device: &GpuDevice,
 ) -> FerrotorchResult<CudaBuffer<f32>> {
-    let y = gpu_matmul_f32(x, &lin.weight_t, s, lin.in_features, lin.out_features, device)
-        .map_err(gpu_err)?;
+    let y = gpu_matmul_f32(
+        x,
+        &lin.weight_t,
+        s,
+        lin.in_features,
+        lin.out_features,
+        device,
+    )
+    .map_err(gpu_err)?;
     gpu_broadcast_add(
         &y,
         &lin.bias,

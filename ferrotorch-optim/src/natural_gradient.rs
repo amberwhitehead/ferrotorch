@@ -290,10 +290,10 @@ impl<T: Float> Kfac<T> {
         let key_owned = param_name.to_string();
         let needs_init = !self.factors.contains_key(&key_owned);
         if needs_init {
-            let zero_a = ferrotorch_core::creation::zeros::<T>(&[in_features, in_features])?
-                .to(device)?;
-            let zero_g = ferrotorch_core::creation::zeros::<T>(&[out_features, out_features])?
-                .to(device)?;
+            let zero_a =
+                ferrotorch_core::creation::zeros::<T>(&[in_features, in_features])?.to(device)?;
+            let zero_g =
+                ferrotorch_core::creation::zeros::<T>(&[out_features, out_features])?.to(device)?;
             self.factors.insert(
                 key_owned.clone(),
                 KroneckerFactors {
@@ -442,8 +442,7 @@ impl<T: Float> Optimizer<T> for Kfac<T> {
                 // enough that subsequent `write!`s do not reallocate.
                 let mut key = std::mem::take(&mut self.param_key_buf);
                 key.clear();
-                write!(&mut key, "g{gi}_p{pi}")
-                    .expect("writing to a String never fails");
+                write!(&mut key, "g{gi}_p{pi}").expect("writing to a String never fails");
 
                 let step_result = no_grad(|| -> FerrotorchResult<()> {
                     // grad: device-resident (negated for maximize).
@@ -653,7 +652,11 @@ impl<T: Float> Optimizer<T> for Kfac<T> {
             entry.insert("g_factor".to_string(), g_f64);
 
             if let Some(ref buf) = factors.momentum_buf {
-                let buf_cpu = if buf.is_cuda() { buf.cpu()? } else { buf.clone() };
+                let buf_cpu = if buf.is_cuda() {
+                    buf.cpu()?
+                } else {
+                    buf.clone()
+                };
                 let buf_f64: Vec<f64> = buf_cpu
                     .data_vec()?
                     .iter()
@@ -711,11 +714,8 @@ impl<T: Float> Optimizer<T> for Kfac<T> {
                 .iter()
                 .map(|&v| cast::<f64, T>(v))
                 .collect::<FerrotorchResult<Vec<T>>>()?;
-            let a_factor = Tensor::from_storage(
-                TensorStorage::cpu(a_factor_t),
-                vec![a_size, a_size],
-                false,
-            )?;
+            let a_factor =
+                Tensor::from_storage(TensorStorage::cpu(a_factor_t), vec![a_size, a_size], false)?;
 
             let g_factor_f64 =
                 entry
@@ -728,11 +728,8 @@ impl<T: Float> Optimizer<T> for Kfac<T> {
                 .iter()
                 .map(|&v| cast::<f64, T>(v))
                 .collect::<FerrotorchResult<Vec<T>>>()?;
-            let g_factor = Tensor::from_storage(
-                TensorStorage::cpu(g_factor_t),
-                vec![g_size, g_size],
-                false,
-            )?;
+            let g_factor =
+                Tensor::from_storage(TensorStorage::cpu(g_factor_t), vec![g_size, g_size], false)?;
 
             let momentum_buf = if let Some(buf_f64) = entry.get("momentum_buf") {
                 let buf_t: Vec<T> = buf_f64
@@ -1458,22 +1455,20 @@ mod tests {
             Tensor::from_storage(TensorStorage::cpu(act_data.clone()), vec![2, 2], false).unwrap();
         let outg_cpu =
             Tensor::from_storage(TensorStorage::cpu(outg_data.clone()), vec![2, 2], false).unwrap();
-        kfac_cpu.update_factors("g0_p0", &act_cpu, &outg_cpu).unwrap();
+        kfac_cpu
+            .update_factors("g0_p0", &act_cpu, &outg_cpu)
+            .unwrap();
         kfac_cpu.step().unwrap();
-        let cpu_after: Vec<f64> = kfac_cpu.param_groups[0].params[0]
-            .data()
-            .unwrap()
-            .to_vec();
+        let cpu_after: Vec<f64> = kfac_cpu.param_groups[0].params[0].data().unwrap().to_vec();
 
         // CUDA run.
         let p_gpu = param_from(&init, &[2, 2])
             .to(ferrotorch_core::Device::Cuda(0))
             .unwrap();
-        let g_gpu =
-            Tensor::from_storage(TensorStorage::cpu(grad_data), vec![2, 2], false)
-                .unwrap()
-                .cuda()
-                .unwrap();
+        let g_gpu = Tensor::from_storage(TensorStorage::cpu(grad_data), vec![2, 2], false)
+            .unwrap()
+            .cuda()
+            .unwrap();
         p_gpu.tensor().set_grad(Some(g_gpu)).unwrap();
         let mut kfac_gpu = Kfac::new(vec![p_gpu], cfg);
         let act_gpu = Tensor::from_storage(TensorStorage::cpu(act_data), vec![2, 2], false)
@@ -1484,7 +1479,9 @@ mod tests {
             .unwrap()
             .cuda()
             .unwrap();
-        kfac_gpu.update_factors("g0_p0", &act_gpu, &outg_gpu).unwrap();
+        kfac_gpu
+            .update_factors("g0_p0", &act_gpu, &outg_gpu)
+            .unwrap();
         kfac_gpu.step().unwrap();
         let gpu_after: Vec<f64> = kfac_gpu.param_groups[0].params[0]
             .tensor()

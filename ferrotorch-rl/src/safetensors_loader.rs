@@ -68,14 +68,13 @@ pub fn load_ppo_policy(
     cfg: MlpPolicyConfig,
     strict: bool,
 ) -> FerrotorchResult<(MlpPolicy, DropReport)> {
-    let state = load_safetensors::<f32>(weights_path).map_err(|e| {
-        FerrotorchError::InvalidArgument {
+    let state =
+        load_safetensors::<f32>(weights_path).map_err(|e| FerrotorchError::InvalidArgument {
             message: format!(
                 "load_ppo_policy: failed to decode safetensors {}: {e}",
                 weights_path.display()
             ),
-        }
-    })?;
+        })?;
 
     let mut policy = MlpPolicy::new(cfg)?;
     let expected: std::collections::HashSet<String> = policy
@@ -92,9 +91,7 @@ pub fn load_ppo_policy(
     unmapped.sort();
     if strict && !unmapped.is_empty() {
         return Err(FerrotorchError::InvalidArgument {
-            message: format!(
-                "load_ppo_policy: unmapped upstream keys (strict mode): {unmapped:?}"
-            ),
+            message: format!("load_ppo_policy: unmapped upstream keys (strict mode): {unmapped:?}"),
         });
     }
 
@@ -211,10 +208,7 @@ mod tests {
         save_safetensors(&sd, &path).unwrap();
 
         let strict_err = load_ppo_policy(&path, cfg, /* strict = */ true);
-        assert!(
-            strict_err.is_err(),
-            "strict mode must reject unmapped keys"
-        );
+        assert!(strict_err.is_err(), "strict mode must reject unmapped keys");
 
         let (_p, report) = load_ppo_policy(&path, cfg, /* strict = */ false).unwrap();
         assert_eq!(report.unmapped, vec!["log_std".to_string()]);

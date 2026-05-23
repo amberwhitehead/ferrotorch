@@ -90,19 +90,13 @@ impl<T: Float> Decoder<T> {
         for (i, &c) in reversed.iter().enumerate() {
             let is_final = i == num_blocks - 1;
             up_blocks.push(UpDecoderBlock2D::<T>::new(
-                prev_out,
-                c,
-                resnets,
-                groups,
-                resnet_eps,
-                !is_final,
+                prev_out, c, resnets, groups, resnet_eps, !is_final,
             )?);
             prev_out = c;
         }
 
         let bottom_channels = cfg.block_out_channels[0];
-        let conv_norm_out =
-            GroupNorm::<T>::new(groups, bottom_channels, resnet_eps, true)?;
+        let conv_norm_out = GroupNorm::<T>::new(groups, bottom_channels, resnet_eps, true)?;
         let conv_out = Conv2d::<T>::new(
             bottom_channels,
             cfg.out_channels,
@@ -480,14 +474,9 @@ mod tests {
         )
         .unwrap();
         let inv = (1.0 / cfg.scaling_factor) as f32;
-        let scaled_data: Vec<f32> =
-            x.data().unwrap().iter().map(|&v| v * inv).collect();
-        let scaled = Tensor::from_storage(
-            TensorStorage::cpu(scaled_data),
-            vec![1, 4, 1, 1],
-            false,
-        )
-        .unwrap();
+        let scaled_data: Vec<f32> = x.data().unwrap().iter().map(|&v| v * inv).collect();
+        let scaled =
+            Tensor::from_storage(TensorStorage::cpu(scaled_data), vec![1, 4, 1, 1], false).unwrap();
         let a = v.decode_with_scaling(&x).unwrap();
         let b = v.forward(&scaled).unwrap();
         for (x, y) in a.data().unwrap().iter().zip(b.data().unwrap().iter()) {

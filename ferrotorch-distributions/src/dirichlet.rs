@@ -206,8 +206,7 @@ impl<T: Float> Distribution<T> for Dirichlet<T> {
             // Keep a clone of the result samples in the backward node so the
             // implicit-grad expression has access to the realized x_j.
             let samples_storage = TensorStorage::on_device(result.clone(), device)?;
-            let sample_tensor =
-                Tensor::from_storage(samples_storage, out_shape.clone(), false)?;
+            let sample_tensor = Tensor::from_storage(samples_storage, out_shape.clone(), false)?;
             let grad_fn = Arc::new(DirichletRsampleBackward {
                 concentration: self.concentration.clone(),
                 samples: sample_tensor,

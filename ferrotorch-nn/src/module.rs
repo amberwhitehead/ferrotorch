@@ -774,7 +774,11 @@ mod tests {
         let m = TransparentWrapper::<f32> {
             inner: ParentModule::new().unwrap(),
         };
-        let nd: Vec<String> = m.named_descendants_dyn().into_iter().map(|(n, _)| n).collect();
+        let nd: Vec<String> = m
+            .named_descendants_dyn()
+            .into_iter()
+            .map(|(n, _)| n)
+            .collect();
         // 2 entries: ("" -> inner) and ("child" -> grandchild).
         assert_eq!(nd, vec![String::new(), "child".to_string()]);
         for p in &nd {

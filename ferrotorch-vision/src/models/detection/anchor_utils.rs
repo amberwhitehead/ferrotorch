@@ -112,11 +112,8 @@ impl AnchorGenerator {
         &self,
         feature_map_sizes: &[(usize, usize)],
     ) -> FerrotorchResult<Tensor<T>> {
-        let strides: Vec<(usize, usize)> = self
-            .configs
-            .iter()
-            .map(|c| (c.stride, c.stride))
-            .collect();
+        let strides: Vec<(usize, usize)> =
+            self.configs.iter().map(|c| (c.stride, c.stride)).collect();
         self.generate_anchors_with_strides(feature_map_sizes, &strides)
     }
 
@@ -353,11 +350,7 @@ mod tests {
         // Count of p6 anchors per level (3 anchors per cell × 13 × 17 = 663).
         let p6_count = 13 * 17 * 3;
         // Find the offset of p6 in the flat tensor.
-        let pre_p6: usize = fm_sizes
-            .iter()
-            .take(4)
-            .map(|&(h, w)| h * w * 3)
-            .sum();
+        let pre_p6: usize = fm_sizes.iter().take(4).map(|&(h, w)| h * w * 3).sum();
 
         let a = anchors_for_image.data_vec().unwrap();
         let b = anchors_canonical.data_vec().unwrap();

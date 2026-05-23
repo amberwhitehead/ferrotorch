@@ -125,9 +125,7 @@ impl<T: Float> Module<T> for WhisperConvStem<T> {
             for key in state.keys() {
                 if !prefixes.iter().any(|p| key.starts_with(&format!("{p}."))) {
                     return Err(FerrotorchError::InvalidArgument {
-                        message: format!(
-                            "unexpected key in WhisperConvStem state_dict: \"{key}\""
-                        ),
+                        message: format!("unexpected key in WhisperConvStem state_dict: \"{key}\""),
                     });
                 }
             }
@@ -172,8 +170,7 @@ impl<T: Float> WhisperEncoder<T> {
         for _ in 0..cfg.encoder_layers {
             layers.push(WhisperEncoderLayer::new(&cfg)?);
         }
-        let embed_positions =
-            Parameter::zeros(&[cfg.max_source_positions, cfg.d_model])?;
+        let embed_positions = Parameter::zeros(&[cfg.max_source_positions, cfg.d_model])?;
         let layer_norm = LayerNorm::new(vec![cfg.d_model], eps, true)?;
         Ok(Self {
             conv_stem,
@@ -387,9 +384,7 @@ impl<T: Float> Module<T> for WhisperEncoder<T> {
                     || key.starts_with("layer_norm.");
                 if !ok {
                     return Err(FerrotorchError::InvalidArgument {
-                        message: format!(
-                            "unexpected key in WhisperEncoder state_dict: \"{key}\""
-                        ),
+                        message: format!("unexpected key in WhisperEncoder state_dict: \"{key}\""),
                     });
                 }
             }
@@ -474,11 +469,7 @@ fn transpose_b_c_t_to_b_t_c<T: Float>(
 /// Reshape the [max_pos, d_model] positional embedding parameter to
 /// `[1, max_pos, d_model]` so it broadcasts onto the encoder hidden
 /// state in the `add` op.
-fn reshape_pos<T: Float>(
-    p: &Parameter<T>,
-    pos: usize,
-    d: usize,
-) -> FerrotorchResult<Tensor<T>> {
+fn reshape_pos<T: Float>(p: &Parameter<T>, pos: usize, d: usize) -> FerrotorchResult<Tensor<T>> {
     let data = p.tensor().data_vec()?;
     Tensor::from_storage(TensorStorage::cpu(data), vec![1, pos, d], false)
 }
@@ -537,11 +528,7 @@ mod tests {
     #[test]
     fn named_parameters_match_hf_layout() {
         let enc = WhisperEncoder::<f32>::new(tiny_cfg()).unwrap();
-        let names: Vec<String> = enc
-            .named_parameters()
-            .into_iter()
-            .map(|(n, _)| n)
-            .collect();
+        let names: Vec<String> = enc.named_parameters().into_iter().map(|(n, _)| n).collect();
         for k in [
             "conv1.weight",
             "conv1.bias",
@@ -599,7 +586,9 @@ mod tests {
             "decoder.embed_tokens.weight".into(),
             ferrotorch_core::zeros::<f32>(&[4, 4]).unwrap(),
         );
-        let rep = enc.load_hf_state_dict(&hf_sd, /* strict = */ false).unwrap();
+        let rep = enc
+            .load_hf_state_dict(&hf_sd, /* strict = */ false)
+            .unwrap();
         assert_eq!(rep.dropped, vec!["decoder.embed_tokens.weight".to_string()]);
     }
 

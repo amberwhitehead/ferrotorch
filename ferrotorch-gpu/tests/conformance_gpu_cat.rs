@@ -32,18 +32,15 @@ fn ensure_cuda() {
 }
 
 fn cpu_t_f32(data: Vec<f32>, shape: &[usize]) -> Tensor<f32> {
-    Tensor::from_storage(TensorStorage::cpu(data), shape.to_vec(), false)
-        .expect("cpu tensor f32")
+    Tensor::from_storage(TensorStorage::cpu(data), shape.to_vec(), false).expect("cpu tensor f32")
 }
 
 fn cpu_t_f64(data: Vec<f64>, shape: &[usize]) -> Tensor<f64> {
-    Tensor::from_storage(TensorStorage::cpu(data), shape.to_vec(), false)
-        .expect("cpu tensor f64")
+    Tensor::from_storage(TensorStorage::cpu(data), shape.to_vec(), false).expect("cpu tensor f64")
 }
 
 fn cpu_t_bf16(data: Vec<bf16>, shape: &[usize]) -> Tensor<bf16> {
-    Tensor::from_storage(TensorStorage::cpu(data), shape.to_vec(), false)
-        .expect("cpu tensor bf16")
+    Tensor::from_storage(TensorStorage::cpu(data), shape.to_vec(), false).expect("cpu tensor bf16")
 }
 
 // ---------------------------------------------------------------------------
@@ -67,7 +64,10 @@ fn cat_f32_2d_axis0_matches_cpu() {
     let want_data = want.data().unwrap();
     let got_cpu = got.cpu().unwrap();
     let got_data = got_cpu.data().unwrap();
-    assert_eq!(got_data, want_data, "bit-exact equality required (pure memcpy)");
+    assert_eq!(
+        got_data, want_data,
+        "bit-exact equality required (pure memcpy)"
+    );
 }
 
 #[test]
@@ -79,7 +79,10 @@ fn cat_f32_2d_axis1_matches_cpu() {
 
     let want = cat(&[a.clone(), b.clone()], 1).unwrap();
     let got = cat(
-        &[a.to(Device::Cuda(0)).unwrap(), b.to(Device::Cuda(0)).unwrap()],
+        &[
+            a.to(Device::Cuda(0)).unwrap(),
+            b.to(Device::Cuda(0)).unwrap(),
+        ],
         1,
     )
     .unwrap();
@@ -97,7 +100,10 @@ fn cat_f32_3d_axis_neg1_matches_cpu() {
 
     let want = cat(&[a.clone(), b.clone()], -1).unwrap();
     let got = cat(
-        &[a.to(Device::Cuda(0)).unwrap(), b.to(Device::Cuda(0)).unwrap()],
+        &[
+            a.to(Device::Cuda(0)).unwrap(),
+            b.to(Device::Cuda(0)).unwrap(),
+        ],
         -1,
     )
     .unwrap();
@@ -113,14 +119,14 @@ fn cat_f32_4d_axis2_matches_cpu() {
     let na: usize = 2 * 3 * 4;
     let nb: usize = 2 * 5 * 4;
     let a = cpu_t_f32((0..na).map(|i| i as f32).collect(), &[1, 2, 3, 4]);
-    let b = cpu_t_f32(
-        (0..nb).map(|i| 1000.0 + i as f32).collect(),
-        &[1, 2, 5, 4],
-    );
+    let b = cpu_t_f32((0..nb).map(|i| 1000.0 + i as f32).collect(), &[1, 2, 5, 4]);
 
     let want = cat(&[a.clone(), b.clone()], 2).unwrap();
     let got = cat(
-        &[a.to(Device::Cuda(0)).unwrap(), b.to(Device::Cuda(0)).unwrap()],
+        &[
+            a.to(Device::Cuda(0)).unwrap(),
+            b.to(Device::Cuda(0)).unwrap(),
+        ],
         2,
     )
     .unwrap();
@@ -164,7 +170,10 @@ fn cat_f64_2d_axis0_matches_cpu() {
 
     let want = cat(&[a.clone(), b.clone()], 0).unwrap();
     let got = cat(
-        &[a.to(Device::Cuda(0)).unwrap(), b.to(Device::Cuda(0)).unwrap()],
+        &[
+            a.to(Device::Cuda(0)).unwrap(),
+            b.to(Device::Cuda(0)).unwrap(),
+        ],
         0,
     )
     .unwrap();
@@ -182,7 +191,10 @@ fn cat_f64_3d_axis1_matches_cpu() {
 
     let want = cat(&[a.clone(), b.clone()], 1).unwrap();
     let got = cat(
-        &[a.to(Device::Cuda(0)).unwrap(), b.to(Device::Cuda(0)).unwrap()],
+        &[
+            a.to(Device::Cuda(0)).unwrap(),
+            b.to(Device::Cuda(0)).unwrap(),
+        ],
         1,
     )
     .unwrap();
@@ -227,7 +239,10 @@ fn cat_bf16_2d_axis0_matches_cpu() {
 
     let want = cat(&[a.clone(), b.clone()], 0).unwrap();
     let got = cat(
-        &[a.to(Device::Cuda(0)).unwrap(), b.to(Device::Cuda(0)).unwrap()],
+        &[
+            a.to(Device::Cuda(0)).unwrap(),
+            b.to(Device::Cuda(0)).unwrap(),
+        ],
         0,
     )
     .unwrap();
@@ -236,7 +251,12 @@ fn cat_bf16_2d_axis0_matches_cpu() {
     // bf16: compare bit patterns — `cat` is a copy, so this must be exact.
     let want_bits: Vec<u16> = want.data().unwrap().iter().map(|v| v.to_bits()).collect();
     let got_cpu = got.cpu().unwrap();
-    let got_bits: Vec<u16> = got_cpu.data().unwrap().iter().map(|v| v.to_bits()).collect();
+    let got_bits: Vec<u16> = got_cpu
+        .data()
+        .unwrap()
+        .iter()
+        .map(|v| v.to_bits())
+        .collect();
     assert_eq!(got_bits, want_bits, "bit-exact bf16 equality required");
 }
 
@@ -250,7 +270,10 @@ fn cat_bf16_3d_axis1_matches_cpu() {
 
     let want = cat(&[a.clone(), b.clone()], 1).unwrap();
     let got = cat(
-        &[a.to(Device::Cuda(0)).unwrap(), b.to(Device::Cuda(0)).unwrap()],
+        &[
+            a.to(Device::Cuda(0)).unwrap(),
+            b.to(Device::Cuda(0)).unwrap(),
+        ],
         1,
     )
     .unwrap();
@@ -258,7 +281,12 @@ fn cat_bf16_3d_axis1_matches_cpu() {
     assert_eq!(got.shape(), want.shape());
     let want_bits: Vec<u16> = want.data().unwrap().iter().map(|v| v.to_bits()).collect();
     let got_cpu = got.cpu().unwrap();
-    let got_bits: Vec<u16> = got_cpu.data().unwrap().iter().map(|v| v.to_bits()).collect();
+    let got_bits: Vec<u16> = got_cpu
+        .data()
+        .unwrap()
+        .iter()
+        .map(|v| v.to_bits())
+        .collect();
     assert_eq!(got_bits, want_bits);
 }
 
@@ -275,7 +303,9 @@ fn cat_bf16_4d_axis_neg1_three_inputs() {
     let n_c: usize = 1 * 2 * 3 * 1;
     let a_vals: Vec<bf16> = (0..n_a).map(|i| bf16::from_f32(i as f32)).collect();
     let b_vals: Vec<bf16> = (0..n_b).map(|i| bf16::from_f32(i as f32 + 100.0)).collect();
-    let c_vals: Vec<bf16> = (0..n_c).map(|i| bf16::from_f32(i as f32 + 1000.0)).collect();
+    let c_vals: Vec<bf16> = (0..n_c)
+        .map(|i| bf16::from_f32(i as f32 + 1000.0))
+        .collect();
     let a = cpu_t_bf16(a_vals, &[1, 2, 3, 2]);
     let b = cpu_t_bf16(b_vals, &[1, 2, 3, 3]);
     let c = cpu_t_bf16(c_vals, &[1, 2, 3, 1]);
@@ -294,7 +324,12 @@ fn cat_bf16_4d_axis_neg1_three_inputs() {
     assert_eq!(got.shape(), want.shape());
     let want_bits: Vec<u16> = want.data().unwrap().iter().map(|v| v.to_bits()).collect();
     let got_cpu = got.cpu().unwrap();
-    let got_bits: Vec<u16> = got_cpu.data().unwrap().iter().map(|v| v.to_bits()).collect();
+    let got_bits: Vec<u16> = got_cpu
+        .data()
+        .unwrap()
+        .iter()
+        .map(|v| v.to_bits())
+        .collect();
     assert_eq!(got_bits, want_bits);
 }
 
@@ -323,7 +358,12 @@ fn cat_bf16_round_trip_bit_exact() {
     assert_eq!(got.shape(), &[8, 4]);
     let want_bits: Vec<u16> = want.data().unwrap().iter().map(|v| v.to_bits()).collect();
     let got_cpu = got.cpu().unwrap();
-    let got_bits: Vec<u16> = got_cpu.data().unwrap().iter().map(|v| v.to_bits()).collect();
+    let got_bits: Vec<u16> = got_cpu
+        .data()
+        .unwrap()
+        .iter()
+        .map(|v| v.to_bits())
+        .collect();
     assert_eq!(got_bits, want_bits);
     // And against the original input vector.
     let raw_bits: Vec<u16> = raw.iter().map(|v| v.to_bits()).collect();

@@ -27461,8 +27461,7 @@ mod tests {
                 let src_i = indices[i];
                 let in_base = o * in_dim_size * inner + src_i * inner;
                 let out_base = o * out_dim_size * inner + i * inner;
-                out[out_base..out_base + inner]
-                    .copy_from_slice(&input[in_base..in_base + inner]);
+                out[out_base..out_base + inner].copy_from_slice(&input[in_base..in_base + inner]);
             }
         }
         out
@@ -27480,8 +27479,7 @@ mod tests {
 
         let numel = outer * in_dim_size * inner;
         let input: Vec<f32> = (0..numel).map(|i| i as f32).collect();
-        let expected =
-            cpu_ref_index_select_dim(&input, &indices_usize, outer, in_dim_size, inner);
+        let expected = cpu_ref_index_select_dim(&input, &indices_usize, outer, in_dim_size, inner);
 
         let (dev, in_buf) = setup(&input);
         let idx_buf = cpu_to_gpu(&indices_f32, &dev).expect("cpu_to_gpu indices");
@@ -27510,8 +27508,7 @@ mod tests {
 
         let numel = outer * in_dim_size * inner;
         let input: Vec<f64> = (0..numel).map(|i| i as f64 + 0.25).collect();
-        let expected =
-            cpu_ref_index_select_dim(&input, &indices_usize, outer, in_dim_size, inner);
+        let expected = cpu_ref_index_select_dim(&input, &indices_usize, outer, in_dim_size, inner);
 
         let dev = GpuDevice::new(0).expect("CUDA device 0");
         let in_buf = cpu_to_gpu(&input, &dev).expect("cpu_to_gpu input f64");
@@ -27553,8 +27550,7 @@ mod tests {
             30.0, 31.0, 32.0, // row 2
             40.0, 41.0, 42.0, // row 3
         ];
-        let expected =
-            cpu_ref_index_select_dim(&input, &indices_usize, outer, in_dim_size, inner);
+        let expected = cpu_ref_index_select_dim(&input, &indices_usize, outer, in_dim_size, inner);
 
         let (dev, in_buf) = setup(&input);
         let idx_buf = cpu_to_gpu(&indices_f32, &dev).expect("cpu_to_gpu indices");
@@ -27590,8 +27586,7 @@ mod tests {
         let indices_f32: Vec<f32> = indices_usize.iter().map(|&u| u as f32).collect();
 
         let input: Vec<f32> = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0];
-        let expected =
-            cpu_ref_index_select_dim(&input, &indices_usize, outer, in_dim_size, inner);
+        let expected = cpu_ref_index_select_dim(&input, &indices_usize, outer, in_dim_size, inner);
         // Manual: each row reversed → [4,3,2,1, 8,7,6,5].
         assert_eq!(expected, vec![4.0, 3.0, 2.0, 1.0, 8.0, 7.0, 6.0, 5.0]);
 
@@ -27622,8 +27617,7 @@ mod tests {
         let indices_f32: Vec<f32> = indices_usize.iter().map(|&u| u as f32).collect();
 
         let input: Vec<f32> = vec![7.5, -3.0, 11.0];
-        let expected =
-            cpu_ref_index_select_dim(&input, &indices_usize, outer, in_dim_size, inner);
+        let expected = cpu_ref_index_select_dim(&input, &indices_usize, outer, in_dim_size, inner);
         // Manual: indices 0,0,1,1 → [7.5, 7.5, -3.0, -3.0].
         assert_eq!(expected, vec![7.5, 7.5, -3.0, -3.0]);
 
@@ -27656,8 +27650,7 @@ mod tests {
 
         let numel = outer * in_dim_size * inner;
         let input: Vec<f32> = (0..numel).map(|i| (i as f32) * 0.5 - 1.25).collect();
-        let expected =
-            cpu_ref_index_select_dim(&input, &indices_usize, outer, in_dim_size, inner);
+        let expected = cpu_ref_index_select_dim(&input, &indices_usize, outer, in_dim_size, inner);
 
         let (dev, in_buf) = setup(&input);
         let idx_buf = cpu_to_gpu(&indices_f32, &dev).expect("cpu_to_gpu indices");

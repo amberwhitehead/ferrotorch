@@ -3376,11 +3376,11 @@ impl GpuBackend for CudaBackendImpl {
             2 => {
                 // bf16 / f16 — both stored as `CudaSlice<u16>`.
                 let in_slice = Self::unwrap_buffer_bf16(src)?;
-                let out_slice = dst
-                    .downcast_mut::<cudarc::driver::CudaSlice<u16>>()
-                    .ok_or(FerrotorchError::InvalidArgument {
+                let out_slice = dst.downcast_mut::<cudarc::driver::CudaSlice<u16>>().ok_or(
+                    FerrotorchError::InvalidArgument {
                         message: "strided_cat: output is not a 2-byte (u16) buffer".into(),
-                    })?;
+                    },
+                )?;
                 crate::kernels::gpu_strided_cat_u16(
                     in_slice,
                     out_slice,
@@ -3397,11 +3397,11 @@ impl GpuBackend for CudaBackendImpl {
             4 => {
                 // f32.
                 let in_buf = Self::unwrap_buffer(src)?;
-                let out_buf = dst
-                    .downcast_mut::<CudaBuffer<f32>>()
-                    .ok_or(FerrotorchError::InvalidArgument {
+                let out_buf = dst.downcast_mut::<CudaBuffer<f32>>().ok_or(
+                    FerrotorchError::InvalidArgument {
                         message: "strided_cat: output is not CudaBuffer<f32>".into(),
-                    })?;
+                    },
+                )?;
                 crate::kernels::gpu_strided_cat(
                     in_buf,
                     out_buf,
@@ -4409,8 +4409,8 @@ impl GpuBackend for CudaBackendImpl {
     ) -> FerrotorchResult<GpuBufferHandle> {
         let buf = Self::unwrap_buffer_bf16(a)?;
         let dev = self.device(a.device_ordinal())?;
-        let result = crate::bf16::gpu_softmax_bf16(buf, rows, cols, dev)
-            .map_err(Self::map_gpu_err)?;
+        let result =
+            crate::bf16::gpu_softmax_bf16(buf, rows, cols, dev).map_err(Self::map_gpu_err)?;
         Ok(Self::wrap_buffer_bf16(result, a.device_ordinal()))
     }
 

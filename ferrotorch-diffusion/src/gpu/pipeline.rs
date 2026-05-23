@@ -198,10 +198,7 @@ impl GpuStableDiffusionPipeline {
         // Configure the scheduler and snapshot timesteps up front (set_timesteps
         // returns a borrow; collect so the loop body can still call &mut self
         // for `step`).
-        let timesteps: Vec<usize> = self
-            .scheduler
-            .set_timesteps(num_inference_steps)?
-            .to_vec();
+        let timesteps: Vec<usize> = self.scheduler.set_timesteps(num_inference_steps)?.to_vec();
 
         // latent = init_latent * scheduler.init_noise_sigma. Identity for
         // SD-1.5 DDIM but keep the multiplication explicit so future

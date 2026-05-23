@@ -57,9 +57,7 @@ fn workspace_root() -> PathBuf {
 #[ignore = "Requires network access — enable with --ignored"]
 fn pretrained_sd_v1_5_pipeline_parity_smoke() {
     let root = workspace_root();
-    let harness = root
-        .join("scripts")
-        .join("verify_sd_pipeline_inference.py");
+    let harness = root.join("scripts").join("verify_sd_pipeline_inference.py");
     assert!(
         harness.is_file(),
         "harness missing at {}",

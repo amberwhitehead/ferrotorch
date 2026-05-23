@@ -1054,14 +1054,7 @@ impl<T: Float> Module<T> for PatchMerging<T> {
         // the block index `k = dw*2 + dh` — i.e. `dw` is the outermost
         // sub-axis, hence the permutation `[0, 1, 3, 4, 2, 5]`.
         let merged = padded
-            .view(&[
-                batch as i64,
-                h2 as i64,
-                2,
-                w2 as i64,
-                2,
-                channels as i64,
-            ])?
+            .view(&[batch as i64, h2 as i64, 2, w2 as i64, 2, channels as i64])?
             .permute(&[0, 1, 3, 4, 2, 5])?
             .contiguous()?
             .view(&[batch as i64, h2 as i64, w2 as i64, (4 * channels) as i64])?;

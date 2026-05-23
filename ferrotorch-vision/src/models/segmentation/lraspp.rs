@@ -41,13 +41,13 @@ use ferrotorch_core::grad_fns::activation::sigmoid;
 use ferrotorch_core::grad_fns::arithmetic::{add, mul};
 use ferrotorch_core::{FerrotorchResult, Float, Tensor};
 
+use ferrotorch_nn::Conv2d;
 use ferrotorch_nn::activation::ReLU;
 use ferrotorch_nn::module::Module;
 use ferrotorch_nn::norm::BatchNorm2d;
 use ferrotorch_nn::parameter::Parameter;
 use ferrotorch_nn::pooling::AdaptiveAvgPool2d;
 use ferrotorch_nn::upsample::{InterpolateMode, interpolate};
-use ferrotorch_nn::Conv2d;
 
 use crate::models::mobilenet::{MobileNetV3Large, MobileNetV3LargeStaged};
 
@@ -123,11 +123,9 @@ impl<T: Float> LrasppHead<T> {
         // (no override — the head module uses bare `nn.BatchNorm2d`).
         let cbr_bn = BatchNorm2d::new(inter_channels, 1e-5, 0.1, true)?;
         let scale_pool = AdaptiveAvgPool2d::new((1, 1));
-        let scale_conv =
-            Conv2d::new(high_channels, inter_channels, (1, 1), (1, 1), (0, 0), false)?;
+        let scale_conv = Conv2d::new(high_channels, inter_channels, (1, 1), (1, 1), (0, 0), false)?;
         // Final classifiers carry bias=True (torchvision Conv2d default).
-        let low_classifier =
-            Conv2d::new(low_channels, num_classes, (1, 1), (1, 1), (0, 0), true)?;
+        let low_classifier = Conv2d::new(low_channels, num_classes, (1, 1), (1, 1), (0, 0), true)?;
         let high_classifier =
             Conv2d::new(inter_channels, num_classes, (1, 1), (1, 1), (0, 0), true)?;
         Ok(Self {
@@ -196,7 +194,8 @@ impl<T: Float> Module<T> for LrasppHead<T> {
         Err(ferrotorch_core::FerrotorchError::InvalidArgument {
             message:
                 "LrasppHead requires (low, high) features — call `forward_features(low, high)` \
-                 instead of the single-input `Module::forward`".into(),
+                 instead of the single-input `Module::forward`"
+                    .into(),
         })
     }
 
@@ -403,7 +402,13 @@ impl<T: Float> Module<T> for Lraspp<T> {
             .parameters()
             .into_iter()
             .zip(names.iter())
-            .filter_map(|(p, n)| if n.starts_with("classifier.") { None } else { Some(p) })
+            .filter_map(|(p, n)| {
+                if n.starts_with("classifier.") {
+                    None
+                } else {
+                    Some(p)
+                }
+            })
             .collect();
         p.extend(self.head.parameters());
         p
@@ -423,7 +428,13 @@ impl<T: Float> Module<T> for Lraspp<T> {
             .parameters_mut()
             .into_iter()
             .zip(names.iter())
-            .filter_map(|(p, n)| if n.starts_with("classifier.") { None } else { Some(p) })
+            .filter_map(|(p, n)| {
+                if n.starts_with("classifier.") {
+                    None
+                } else {
+                    Some(p)
+                }
+            })
             .collect();
         p.extend(self.head.parameters_mut());
         p
@@ -562,15 +573,27 @@ mod tests {
         // state-dict dump from
         // `lraspp_mobilenet_v3_large(weights='DEFAULT').state_dict()`).
         assert!(names.iter().any(|n| n == "backbone.features.0.0.weight"));
-        assert!(names.iter().any(|n| n == "backbone.features.1.block.0.0.weight"));
+        assert!(
+            names
+                .iter()
+                .any(|n| n == "backbone.features.1.block.0.0.weight")
+        );
         assert!(names.iter().any(|n| n == "backbone.features.16.0.weight"));
         assert!(names.iter().any(|n| n == "classifier.cbr.0.weight"));
         assert!(names.iter().any(|n| n == "classifier.cbr.1.weight"));
         assert!(names.iter().any(|n| n == "classifier.cbr.1.bias"));
         assert!(names.iter().any(|n| n == "classifier.scale.1.weight"));
-        assert!(names.iter().any(|n| n == "classifier.low_classifier.weight"));
+        assert!(
+            names
+                .iter()
+                .any(|n| n == "classifier.low_classifier.weight")
+        );
         assert!(names.iter().any(|n| n == "classifier.low_classifier.bias"));
-        assert!(names.iter().any(|n| n == "classifier.high_classifier.weight"));
+        assert!(
+            names
+                .iter()
+                .any(|n| n == "classifier.high_classifier.weight")
+        );
         assert!(names.iter().any(|n| n == "classifier.high_classifier.bias"));
     }
 

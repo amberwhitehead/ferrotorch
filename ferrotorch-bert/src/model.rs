@@ -117,9 +117,7 @@ impl<T: Float> Module<T> for BertEncoder<T> {
             for key in state.keys() {
                 if !key.starts_with("layer.") {
                     return Err(FerrotorchError::InvalidArgument {
-                        message: format!(
-                            "unexpected key in BertEncoder state_dict: \"{key}\""
-                        ),
+                        message: format!("unexpected key in BertEncoder state_dict: \"{key}\""),
                     });
                 }
             }
@@ -337,8 +335,7 @@ impl<T: Float> Module<T> for BertModel<T> {
         }
         self.embeddings
             .load_state_dict(&extract("embeddings"), strict)?;
-        self.encoder
-            .load_state_dict(&extract("encoder"), strict)?;
+        self.encoder.load_state_dict(&extract("encoder"), strict)?;
         Ok(())
     }
 }
@@ -619,7 +616,10 @@ mod tests {
         dropped.sort();
         assert_eq!(
             dropped,
-            vec!["pooler.dense.bias".to_string(), "pooler.dense.weight".to_string()]
+            vec![
+                "pooler.dense.bias".to_string(),
+                "pooler.dense.weight".to_string()
+            ]
         );
     }
 

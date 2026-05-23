@@ -276,7 +276,11 @@ pub fn ones_meta<T: Float>(shape: &[usize]) -> FerrotorchResult<Tensor<T>> {
 /// discarded. CL-395.
 pub fn full_meta<T: Float>(shape: &[usize], value: T) -> FerrotorchResult<Tensor<T>> {
     let numel: usize = shape.iter().product();
-    Tensor::from_storage(TensorStorage::meta_filled(numel, value), shape.to_vec(), false)
+    Tensor::from_storage(
+        TensorStorage::meta_filled(numel, value),
+        shape.to_vec(),
+        false,
+    )
 }
 
 /// Create a meta tensor matching the shape of `other`. Always allocates

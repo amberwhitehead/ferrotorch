@@ -357,7 +357,13 @@ impl<T: Float> Distribution<T> for MultivariateNormal<T> {
         if out_shape.is_empty() {
             // Scalar output: view to 0-D.
             log_prob.view(&[])
-        } else if log_prob.shape() != out_shape.iter().map(|&v| v as usize).collect::<Vec<_>>().as_slice() {
+        } else if log_prob.shape()
+            != out_shape
+                .iter()
+                .map(|&v| v as usize)
+                .collect::<Vec<_>>()
+                .as_slice()
+        {
             log_prob.view(&out_shape)
         } else {
             Ok(log_prob)

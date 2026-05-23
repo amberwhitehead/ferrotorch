@@ -32,7 +32,9 @@ fn workspace_root() -> PathBuf {
 #[ignore = "Requires network access — enable with --ignored"]
 fn pretrained_text_embedding_parity_smoke() {
     let root = workspace_root();
-    let harness = root.join("scripts").join("verify_text_embedding_inference.py");
+    let harness = root
+        .join("scripts")
+        .join("verify_text_embedding_inference.py");
     assert!(
         harness.is_file(),
         "harness missing at {}",

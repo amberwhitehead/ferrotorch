@@ -149,21 +149,24 @@ impl<T: Float> RetinaFpn<T> {
         &self,
         backbone_features: &HashMap<String, Tensor<T>>,
     ) -> FerrotorchResult<HashMap<String, Tensor<T>>> {
-        let c3 = backbone_features.get("layer2").ok_or_else(|| {
-            FerrotorchError::InvalidArgument {
-                message: "RetinaFpn: backbone_features missing 'layer2' (C3)".into(),
-            }
-        })?;
-        let c4 = backbone_features.get("layer3").ok_or_else(|| {
-            FerrotorchError::InvalidArgument {
-                message: "RetinaFpn: backbone_features missing 'layer3' (C4)".into(),
-            }
-        })?;
-        let c5 = backbone_features.get("layer4").ok_or_else(|| {
-            FerrotorchError::InvalidArgument {
-                message: "RetinaFpn: backbone_features missing 'layer4' (C5)".into(),
-            }
-        })?;
+        let c3 =
+            backbone_features
+                .get("layer2")
+                .ok_or_else(|| FerrotorchError::InvalidArgument {
+                    message: "RetinaFpn: backbone_features missing 'layer2' (C3)".into(),
+                })?;
+        let c4 =
+            backbone_features
+                .get("layer3")
+                .ok_or_else(|| FerrotorchError::InvalidArgument {
+                    message: "RetinaFpn: backbone_features missing 'layer3' (C4)".into(),
+                })?;
+        let c5 =
+            backbone_features
+                .get("layer4")
+                .ok_or_else(|| FerrotorchError::InvalidArgument {
+                    message: "RetinaFpn: backbone_features missing 'layer4' (C5)".into(),
+                })?;
 
         // Laterals.
         let lat5 = self.lateral5.forward(c5)?;
@@ -420,8 +423,7 @@ impl<T: Float> RetinaNetRegressionHead<T> {
         let conv1 = Conv2d::new(in_channels, in_channels, (3, 3), (1, 1), (1, 1), true)?;
         let conv2 = Conv2d::new(in_channels, in_channels, (3, 3), (1, 1), (1, 1), true)?;
         let conv3 = Conv2d::new(in_channels, in_channels, (3, 3), (1, 1), (1, 1), true)?;
-        let bbox_reg =
-            Conv2d::new(in_channels, num_anchors * 4, (3, 3), (1, 1), (1, 1), true)?;
+        let bbox_reg = Conv2d::new(in_channels, num_anchors * 4, (3, 3), (1, 1), (1, 1), true)?;
         Ok(Self {
             conv0,
             conv1,
@@ -765,9 +767,7 @@ impl<T: Float> RetinaNet<T> {
                 // Per-level top-K (1000) by descending score (stable sort
                 // matches torchvision's `topk` deterministic tie-break).
                 if cand.len() > RETINANET_TOPK_CANDIDATES {
-                    cand.sort_by(|a, b| {
-                        b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal)
-                    });
+                    cand.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
                     cand.truncate(RETINANET_TOPK_CANDIDATES);
                 }
 
@@ -832,16 +832,8 @@ impl<T: Float> RetinaNet<T> {
 
             if all_scores.is_empty() {
                 per_image_detections.push(Detections {
-                    boxes: Tensor::from_storage(
-                        TensorStorage::cpu(vec![]),
-                        vec![0, 4],
-                        false,
-                    )?,
-                    scores: Tensor::from_storage(
-                        TensorStorage::cpu(vec![]),
-                        vec![0usize],
-                        false,
-                    )?,
+                    boxes: Tensor::from_storage(TensorStorage::cpu(vec![]), vec![0, 4], false)?,
+                    scores: Tensor::from_storage(TensorStorage::cpu(vec![]), vec![0usize], false)?,
                     labels: vec![],
                 });
                 continue;
@@ -849,21 +841,16 @@ impl<T: Float> RetinaNet<T> {
 
             // Cross-class batched NMS (keyed by class label).
             let n_all = all_scores.len();
-            let boxes_f64 = Tensor::from_storage(
-                TensorStorage::cpu(all_boxes.clone()),
-                vec![n_all, 4],
-                false,
-            )?;
+            let boxes_f64 =
+                Tensor::from_storage(TensorStorage::cpu(all_boxes.clone()), vec![n_all, 4], false)?;
             // Re-clip (already per-level clipped above; this is a no-op for
             // valid boxes but a guard for any decoded-out-of-range result).
             let boxes_clipped = clip_boxes_to_image(&boxes_f64, [img_h, img_w])?;
-            let scores_f64 = Tensor::from_storage(
-                TensorStorage::cpu(all_scores.clone()),
-                vec![n_all],
-                false,
-            )?;
+            let scores_f64 =
+                Tensor::from_storage(TensorStorage::cpu(all_scores.clone()), vec![n_all], false)?;
             let idxs: Vec<u32> = all_labels.iter().map(|&l| l as u32).collect();
-            let keep = batched_nms::<f64>(&boxes_clipped, &scores_f64, &idxs, RETINANET_NMS_THRESH)?;
+            let keep =
+                batched_nms::<f64>(&boxes_clipped, &scores_f64, &idxs, RETINANET_NMS_THRESH)?;
 
             // detections_per_img cap.
             let post = keep
@@ -885,16 +872,8 @@ impl<T: Float> RetinaNet<T> {
             }
             let n_out = out_scores.len();
             per_image_detections.push(Detections {
-                boxes: Tensor::from_storage(
-                    TensorStorage::cpu(out_boxes),
-                    vec![n_out, 4],
-                    false,
-                )?,
-                scores: Tensor::from_storage(
-                    TensorStorage::cpu(out_scores),
-                    vec![n_out],
-                    false,
-                )?,
+                boxes: Tensor::from_storage(TensorStorage::cpu(out_boxes), vec![n_out, 4], false)?,
+                scores: Tensor::from_storage(TensorStorage::cpu(out_scores), vec![n_out], false)?,
                 labels: out_labels,
             });
         }

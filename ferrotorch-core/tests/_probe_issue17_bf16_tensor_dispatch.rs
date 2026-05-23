@@ -74,7 +74,13 @@ fn issue17_tensor_bf16_matmul_routes_to_gpu_kernel() {
     let b_t = cpu_bf16_tensor_on_cuda(&b_bf16, &[k, n]);
 
     let c_handle = backend
-        .matmul_bf16_bf16(a_t.gpu_handle().unwrap(), b_t.gpu_handle().unwrap(), m, k, n)
+        .matmul_bf16_bf16(
+            a_t.gpu_handle().unwrap(),
+            b_t.gpu_handle().unwrap(),
+            m,
+            k,
+            n,
+        )
         .expect("matmul_bf16_bf16 must launch real cuBLAS GemmEx kernel");
 
     let got = download_bf16(&c_handle);
@@ -189,10 +195,7 @@ fn issue17_tensor_bf16_activations_route_to_gpu_kernels() {
     let scaled_got = download_bf16(&scaled_h);
     let expected_scaled: Vec<f32> = a_bf16.iter().map(|x| x.to_f32() * 0.25).collect();
     let max_err = max_abs_err(&scaled_got, &expected_scaled);
-    assert!(
-        max_err < 1e-2,
-        "scale_bf16_bf16 routing: max_abs={max_err}"
-    );
+    assert!(max_err < 1e-2, "scale_bf16_bf16 routing: max_abs={max_err}");
 
     // add (self + self = 2*self)
     let added_h = backend

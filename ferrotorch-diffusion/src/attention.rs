@@ -890,7 +890,12 @@ mod tests {
         let y = ff.forward(&x).unwrap();
         assert_eq!(y.shape(), &[1, 5, 16]);
         let names: Vec<String> = ff.named_parameters().into_iter().map(|(n, _)| n).collect();
-        for k in ["net.0.proj.weight", "net.0.proj.bias", "net.2.weight", "net.2.bias"] {
+        for k in [
+            "net.0.proj.weight",
+            "net.0.proj.bias",
+            "net.2.weight",
+            "net.2.bias",
+        ] {
             assert!(names.iter().any(|n| n == k), "missing {k} in {names:?}");
         }
     }

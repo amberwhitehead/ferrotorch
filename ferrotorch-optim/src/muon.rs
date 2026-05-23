@@ -477,7 +477,11 @@ impl<T: Float> Optimizer<T> for Muon<T> {
             // Materialize device-resident momentum buffer to f64 for
             // serialization (mirrors the pattern used by other Pattern B
             // optimizers — only happens at checkpoint time, not per step).
-            let buf_cpu = if buf.is_cuda() { buf.cpu()? } else { buf.clone() };
+            let buf_cpu = if buf.is_cuda() {
+                buf.cpu()?
+            } else {
+                buf.clone()
+            };
             let buf_f64: Vec<f64> = buf_cpu
                 .data_vec()?
                 .iter()
@@ -512,8 +516,7 @@ impl<T: Float> Optimizer<T> for Muon<T> {
                     .iter()
                     .map(|&v| cast::<f64, T>(v))
                     .collect::<FerrotorchResult<Vec<T>>>()?;
-                let tensor =
-                    Tensor::from_storage(TensorStorage::cpu(cast_data), shape, false)?;
+                let tensor = Tensor::from_storage(TensorStorage::cpu(cast_data), shape, false)?;
                 self.momentum_buffers.insert(key.clone(), tensor);
             }
             if let Some(step_data) = entry.get("step") {
@@ -791,9 +794,7 @@ mod tests {
         }
         let p_cpu = Parameter::from_slice(&[1.0_f64, 0.0, 0.0, 1.0], &[2, 2]).unwrap();
         let p = p_cpu.to(ferrotorch_core::Device::Cuda(0)).unwrap();
-        let grad = leaf(&[2.0, 0.5, 0.5, 2.0], &[2, 2], false)
-            .cuda()
-            .unwrap();
+        let grad = leaf(&[2.0, 0.5, 0.5, 2.0], &[2, 2], false).cuda().unwrap();
         p.set_grad(Some(grad)).unwrap();
 
         let config = MuonConfig::new(0.1)
@@ -829,7 +830,10 @@ mod tests {
         p_cpu.set_grad(Some(g_cpu)).unwrap();
         let mut muon_cpu = Muon::new(
             vec![p_cpu],
-            MuonConfig::new(0.1).momentum(0.0).nesterov(false).ns_steps(5),
+            MuonConfig::new(0.1)
+                .momentum(0.0)
+                .nesterov(false)
+                .ns_steps(5),
         );
         muon_cpu.step().unwrap();
         let cpu_after: Vec<f64> = muon_cpu.param_groups()[0].params[0]
@@ -846,13 +850,13 @@ mod tests {
         p_gpu.set_grad(Some(g_gpu)).unwrap();
         let mut muon_gpu = Muon::new(
             vec![p_gpu],
-            MuonConfig::new(0.1).momentum(0.0).nesterov(false).ns_steps(5),
+            MuonConfig::new(0.1)
+                .momentum(0.0)
+                .nesterov(false)
+                .ns_steps(5),
         );
         muon_gpu.step().unwrap();
-        let gpu_after_t = muon_gpu.param_groups()[0].params[0]
-            .tensor()
-            .cpu()
-            .unwrap();
+        let gpu_after_t = muon_gpu.param_groups()[0].params[0].tensor().cpu().unwrap();
         let gpu_after: Vec<f64> = gpu_after_t.data().unwrap().to_vec();
 
         assert_eq!(cpu_after.len(), gpu_after.len());

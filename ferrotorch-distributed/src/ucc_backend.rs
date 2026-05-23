@@ -244,11 +244,12 @@ impl UccBackend {
             }
             .into());
         }
-        let mut slot = self.gpu_inner.lock().map_err(|e| {
-            crate::error::DistributedError::LockPoisoned {
-                message: format!("UccBackend::with_nccl: {e}"),
-            }
-        })?;
+        let mut slot =
+            self.gpu_inner
+                .lock()
+                .map_err(|e| crate::error::DistributedError::LockPoisoned {
+                    message: format!("UccBackend::with_nccl: {e}"),
+                })?;
         *slot = Some(nccl);
         Ok(())
     }
@@ -310,14 +311,14 @@ impl UccBackend {
                     message: format!("UccBackend::gpu_allreduce lock: {e}"),
                 }
             })?;
-            let nccl = slot.as_ref().ok_or_else(|| {
-                crate::error::DistributedError::UnsupportedOp {
-                    message: "UccBackend::gpu_allreduce: no NCCL communicator attached — \
+            let nccl =
+                slot.as_ref()
+                    .ok_or_else(|| crate::error::DistributedError::UnsupportedOp {
+                        message: "UccBackend::gpu_allreduce: no NCCL communicator attached — \
                               call UccBackend::with_nccl(...) on a `--features=ucc-native-gpu` \
                               build to enable the GPU fast path"
-                        .into(),
-                }
-            })?;
+                            .into(),
+                    })?;
             crate::gpu_collective::gpu_allreduce(tensor, &**nccl, op)
         }
         #[cfg(not(feature = "nccl"))]
@@ -353,14 +354,14 @@ impl UccBackend {
                     message: format!("UccBackend::gpu_broadcast lock: {e}"),
                 }
             })?;
-            let nccl = slot.as_ref().ok_or_else(|| {
-                crate::error::DistributedError::UnsupportedOp {
-                    message: "UccBackend::gpu_broadcast: no NCCL communicator attached — \
+            let nccl =
+                slot.as_ref()
+                    .ok_or_else(|| crate::error::DistributedError::UnsupportedOp {
+                        message: "UccBackend::gpu_broadcast: no NCCL communicator attached — \
                               call UccBackend::with_nccl(...) on a `--features=ucc-native-gpu` \
                               build to enable the GPU fast path"
-                        .into(),
-                }
-            })?;
+                            .into(),
+                    })?;
             crate::gpu_collective::gpu_broadcast(tensor, &**nccl, root)
         }
         #[cfg(not(feature = "nccl"))]
@@ -545,7 +546,10 @@ mod tests {
                 })
             })
             .collect();
-        let backends: Vec<_> = handles.into_iter().map(|h| h.join().expect("join")).collect();
+        let backends: Vec<_> = handles
+            .into_iter()
+            .map(|h| h.join().expect("join"))
+            .collect();
 
         // Drive an allreduce: rank 0 has [1, 2, 3, 4]; rank 1 has
         // [10, 20, 30, 40]; expected sum [11, 22, 33, 44] on both. The
@@ -591,7 +595,10 @@ mod tests {
                 })
             })
             .collect();
-        let backends: Vec<_> = handles.into_iter().map(|h| h.join().expect("join")).collect();
+        let backends: Vec<_> = handles
+            .into_iter()
+            .map(|h| h.join().expect("join"))
+            .collect();
 
         let payload = vec![7.5f32, 8.25, 9.125];
         let root = 1usize;
@@ -661,7 +668,10 @@ mod tests {
                 })
             })
             .collect();
-        let backends: Vec<_> = handles.into_iter().map(|h| h.join().expect("join")).collect();
+        let backends: Vec<_> = handles
+            .into_iter()
+            .map(|h| h.join().expect("join"))
+            .collect();
         let b0 = Arc::clone(&backends[0]);
 
         // Build a tiny GpuTensor on device 0.

@@ -87,9 +87,7 @@ impl FromStr for ParamKey {
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         let invalid = || FerrotorchError::InvalidArgument {
-            message: format!(
-                "ParamKey: expected 'g{{group}}_p{{param}}' format, got {s:?}"
-            ),
+            message: format!("ParamKey: expected 'g{{group}}_p{{param}}' format, got {s:?}"),
         };
         let rest = s.strip_prefix('g').ok_or_else(invalid)?;
         let (g_str, p_part) = rest.split_once("_p").ok_or_else(invalid)?;

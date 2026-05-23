@@ -167,8 +167,7 @@ impl<T: Float> Optimizer<T> for SparseAdam<T> {
                 // Update only non-zero gradient entries.
                 no_grad(|| -> FerrotorchResult<()> {
                     for i in 0..numel {
-                        let g =
-                            num_traits::ToPrimitive::to_f64(&self.grad_workspace[i]).unwrap();
+                        let g = num_traits::ToPrimitive::to_f64(&self.grad_workspace[i]).unwrap();
                         if g == 0.0 {
                             continue; // Skip zero gradients — this is the "sparse" part.
                         }

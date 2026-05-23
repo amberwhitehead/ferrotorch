@@ -191,10 +191,7 @@ impl<T: Float> StableDiffusionPipeline<T> {
         }
 
         // Configure the scheduler and capture timesteps up front.
-        let timesteps: Vec<usize> = self
-            .scheduler
-            .set_timesteps(num_inference_steps)?
-            .to_vec();
+        let timesteps: Vec<usize> = self.scheduler.set_timesteps(num_inference_steps)?.to_vec();
 
         // latent = init_latent * scheduler.init_noise_sigma. For SD-1.5
         // DDIM this is identity, but call out the multiplication so

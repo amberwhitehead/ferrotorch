@@ -11,9 +11,7 @@ use std::collections::HashMap;
 use ferrotorch_core::{FerrotorchError, FerrotorchResult, Float, Tensor};
 use ferrotorch_nn::module::{Module, StateDict};
 use ferrotorch_nn::parameter::Parameter;
-use ferrotorch_nn::{
-    Conv2d, GroupNorm, InterpolateMode, Linear, SiLU, Upsample,
-};
+use ferrotorch_nn::{Conv2d, GroupNorm, InterpolateMode, Linear, SiLU, Upsample};
 
 // ---------------------------------------------------------------------------
 // ResnetBlock2D
@@ -337,8 +335,7 @@ impl<T: Float> Module<T> for AttnBlock2D<T> {
         let scale_tensor = ferrotorch_core::scalar::<T>(scale_t)?;
         let k_t = k.transpose(1, 2)?.contiguous()?; // [B, C, HW]
         let scores = q.bmm(&k_t)?; // [B, HW, HW]
-        let scores_scaled =
-            ferrotorch_core::grad_fns::arithmetic::mul(&scores, &scale_tensor)?;
+        let scores_scaled = ferrotorch_core::grad_fns::arithmetic::mul(&scores, &scale_tensor)?;
         let probs = scores_scaled.softmax()?; // dim = -1 by default
         let attended = probs.bmm(&v)?; // [B, HW, C]
 
@@ -759,13 +756,10 @@ impl<T: Float> Module<T> for UpDecoderBlock2D<T> {
         };
         if strict {
             for k in state.keys() {
-                let ok =
-                    k.starts_with("resnets.") || k.starts_with("upsamplers.0.");
+                let ok = k.starts_with("resnets.") || k.starts_with("upsamplers.0.");
                 if !ok {
                     return Err(FerrotorchError::InvalidArgument {
-                        message: format!(
-                            "unexpected key in UpDecoderBlock2D state_dict: \"{k}\""
-                        ),
+                        message: format!("unexpected key in UpDecoderBlock2D state_dict: \"{k}\""),
                     });
                 }
             }
@@ -947,8 +941,7 @@ impl<T: Float> Module<T> for DownEncoderBlock2D<T> {
         };
         if strict {
             for k in state.keys() {
-                let ok =
-                    k.starts_with("resnets.") || k.starts_with("downsamplers.0.");
+                let ok = k.starts_with("resnets.") || k.starts_with("downsamplers.0.");
                 if !ok {
                     return Err(FerrotorchError::InvalidArgument {
                         message: format!(
@@ -1116,9 +1109,7 @@ impl<T: Float> Module<T> for UNetMidBlock2D<T> {
                 let ok = k.starts_with("attentions.") || k.starts_with("resnets.");
                 if !ok {
                     return Err(FerrotorchError::InvalidArgument {
-                        message: format!(
-                            "unexpected key in UNetMidBlock2D state_dict: \"{k}\""
-                        ),
+                        message: format!("unexpected key in UNetMidBlock2D state_dict: \"{k}\""),
                     });
                 }
             }

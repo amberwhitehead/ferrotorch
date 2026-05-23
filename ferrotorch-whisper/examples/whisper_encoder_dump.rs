@@ -36,10 +36,8 @@ use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
 use ferrotorch_core::{FerrotorchResult, Tensor, TensorStorage};
-use ferrotorch_hub::{hf_download_model, HubCache};
-use ferrotorch_whisper::{
-    HfWhisperConfig, WhisperConfig, load_whisper_encoder,
-};
+use ferrotorch_hub::{HubCache, hf_download_model};
+use ferrotorch_whisper::{HfWhisperConfig, WhisperConfig, load_whisper_encoder};
 
 #[derive(Debug)]
 struct Args {
@@ -67,9 +65,7 @@ fn parse_args() -> Result<Args, String> {
                 i += 2;
             }
             "--mel" => {
-                mel = Some(PathBuf::from(
-                    argv.get(i + 1).ok_or("--mel needs a value")?,
-                ));
+                mel = Some(PathBuf::from(argv.get(i + 1).ok_or("--mel needs a value")?));
                 i += 2;
             }
             other => return Err(format!("unknown argument {other:?}")),
@@ -127,9 +123,8 @@ fn write_dump_f32(path: &Path, shape: &[usize], data: &[f32]) -> std::io::Result
 }
 
 fn run() -> FerrotorchResult<()> {
-    let args = parse_args().map_err(|m| ferrotorch_core::FerrotorchError::InvalidArgument {
-        message: m,
-    })?;
+    let args = parse_args()
+        .map_err(|m| ferrotorch_core::FerrotorchError::InvalidArgument { message: m })?;
 
     let repo = format!("ferrotorch/{}", args.model);
     eprintln!("[whisper_encoder_dump] repo = {repo}");
@@ -173,10 +168,11 @@ fn run() -> FerrotorchResult<()> {
         }
         parity
     };
-    let (mel_shape, mel_data) =
-        read_dump_f32(&mel_path).map_err(|e| ferrotorch_core::FerrotorchError::InvalidArgument {
+    let (mel_shape, mel_data) = read_dump_f32(&mel_path).map_err(|e| {
+        ferrotorch_core::FerrotorchError::InvalidArgument {
             message: format!("failed to read mel input from {}: {e}", mel_path.display()),
-        })?;
+        }
+    })?;
     eprintln!(
         "[whisper_encoder_dump] mel: shape={mel_shape:?} from {}",
         mel_path.display(),

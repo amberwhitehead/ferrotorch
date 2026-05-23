@@ -156,11 +156,10 @@ impl UNet2DConditionConfig {
     /// Returns [`FerrotorchError::InvalidArgument`] on malformed JSON or
     /// any wrong-type field.
     pub fn from_json_str(s: &str) -> FerrotorchResult<Self> {
-        let v: serde_json::Value = serde_json::from_str(s).map_err(|e| {
-            FerrotorchError::InvalidArgument {
+        let v: serde_json::Value =
+            serde_json::from_str(s).map_err(|e| FerrotorchError::InvalidArgument {
                 message: format!("UNet2DConditionConfig::from_json_str: bad JSON: {e}"),
-            }
-        })?;
+            })?;
         let mut cfg = Self::default();
         if let Some(x) = v.get("in_channels").and_then(serde_json::Value::as_u64) {
             cfg.in_channels = x as usize;
@@ -168,7 +167,10 @@ impl UNet2DConditionConfig {
         if let Some(x) = v.get("out_channels").and_then(serde_json::Value::as_u64) {
             cfg.out_channels = x as usize;
         }
-        if let Some(arr) = v.get("block_out_channels").and_then(serde_json::Value::as_array) {
+        if let Some(arr) = v
+            .get("block_out_channels")
+            .and_then(serde_json::Value::as_array)
+        {
             let mut out = Vec::with_capacity(arr.len());
             for e in arr {
                 let n = e.as_u64().ok_or_else(|| FerrotorchError::InvalidArgument {
@@ -181,13 +183,22 @@ impl UNet2DConditionConfig {
             }
             cfg.block_out_channels = out;
         }
-        if let Some(x) = v.get("layers_per_block").and_then(serde_json::Value::as_u64) {
+        if let Some(x) = v
+            .get("layers_per_block")
+            .and_then(serde_json::Value::as_u64)
+        {
             cfg.layers_per_block = x as usize;
         }
-        if let Some(x) = v.get("attention_head_dim").and_then(serde_json::Value::as_u64) {
+        if let Some(x) = v
+            .get("attention_head_dim")
+            .and_then(serde_json::Value::as_u64)
+        {
             cfg.attention_head_dim = x as usize;
         }
-        if let Some(x) = v.get("cross_attention_dim").and_then(serde_json::Value::as_u64) {
+        if let Some(x) = v
+            .get("cross_attention_dim")
+            .and_then(serde_json::Value::as_u64)
+        {
             cfg.cross_attention_dim = x as usize;
         }
         if let Some(x) = v.get("norm_num_groups").and_then(serde_json::Value::as_u64) {
@@ -196,7 +207,10 @@ impl UNet2DConditionConfig {
         if let Some(x) = v.get("sample_size").and_then(serde_json::Value::as_u64) {
             cfg.sample_size = x as usize;
         }
-        if let Some(x) = v.get("flip_sin_to_cos").and_then(serde_json::Value::as_bool) {
+        if let Some(x) = v
+            .get("flip_sin_to_cos")
+            .and_then(serde_json::Value::as_bool)
+        {
             cfg.flip_sin_to_cos = x;
         }
         if let Some(x) = v.get("freq_shift").and_then(serde_json::Value::as_f64) {
@@ -209,7 +223,10 @@ impl UNet2DConditionConfig {
             cfg.transformer_layers_per_block = x as usize;
         }
         // Down/up block types: derive has_attn from CrossAttn* prefix.
-        if let Some(arr) = v.get("down_block_types").and_then(serde_json::Value::as_array) {
+        if let Some(arr) = v
+            .get("down_block_types")
+            .and_then(serde_json::Value::as_array)
+        {
             let mut out = Vec::with_capacity(arr.len());
             for e in arr {
                 let s = e.as_str().ok_or_else(|| FerrotorchError::InvalidArgument {
@@ -233,7 +250,10 @@ impl UNet2DConditionConfig {
             }
             cfg.down_block_has_attn = out;
         }
-        if let Some(arr) = v.get("up_block_types").and_then(serde_json::Value::as_array) {
+        if let Some(arr) = v
+            .get("up_block_types")
+            .and_then(serde_json::Value::as_array)
+        {
             let mut out = Vec::with_capacity(arr.len());
             for e in arr {
                 let s = e.as_str().ok_or_else(|| FerrotorchError::InvalidArgument {

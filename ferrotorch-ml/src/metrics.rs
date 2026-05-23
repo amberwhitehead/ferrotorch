@@ -1687,7 +1687,11 @@ mod tests {
             0.75,
             1e-12,
         ));
-        assert!(close(hamming_loss(&y_true, &y_pred).unwrap(), one_third, 1e-12));
+        assert!(close(
+            hamming_loss(&y_true, &y_pred).unwrap(),
+            one_third,
+            1e-12
+        ));
         assert!(close(
             balanced_accuracy_score(&y_true, &y_pred, false).unwrap(),
             0.625,
@@ -1733,7 +1737,11 @@ mod tests {
         // ROC-AUC + average precision (imperfect separation).
         let y_true = tensor(&[0.0_f64, 0.0, 1.0, 1.0]).unwrap();
         let y_score = tensor(&[0.1_f64, 0.4, 0.35, 0.8]).unwrap();
-        assert!(close(roc_auc_score(&y_true, &y_score).unwrap(), 0.75, 1e-12));
+        assert!(close(
+            roc_auc_score(&y_true, &y_score).unwrap(),
+            0.75,
+            1e-12
+        ));
         assert!(close(
             average_precision_score(&y_true, &y_score).unwrap(),
             5.0 / 6.0,
@@ -1748,7 +1756,11 @@ mod tests {
             0.05,
             1e-12,
         ));
-        assert!(close(d2_brier_score(&y_true_b, &y_prob_b).unwrap(), 0.8, 1e-12));
+        assert!(close(
+            d2_brier_score(&y_true_b, &y_prob_b).unwrap(),
+            0.8,
+            1e-12
+        ));
 
         // log_loss with non-trivial 2-D probabilities.
         let y_true_ll = tensor(&[0.0_f64, 1.0, 1.0, 0.0]).unwrap();
@@ -1824,22 +1836,22 @@ mod tests {
     #[test]
     fn multilabel_ranking_family_sklearn_fixture() {
         let y_true = Tensor::from_storage(
-            ferrotorch_core::storage::TensorStorage::cpu(vec![
-                1.0_f64, 0.0, 0.0, 0.0, 0.0, 1.0,
-            ]),
+            ferrotorch_core::storage::TensorStorage::cpu(vec![1.0_f64, 0.0, 0.0, 0.0, 0.0, 1.0]),
             vec![2, 3],
             false,
         )
         .unwrap();
         let y_score = Tensor::from_storage(
-            ferrotorch_core::storage::TensorStorage::cpu(vec![
-                0.75_f64, 0.5, 1.0, 1.0, 0.2, 0.1,
-            ]),
+            ferrotorch_core::storage::TensorStorage::cpu(vec![0.75_f64, 0.5, 1.0, 1.0, 0.2, 0.1]),
             vec![2, 3],
             false,
         )
         .unwrap();
-        assert!(close(coverage_error(&y_true, &y_score).unwrap(), 2.5, 1e-12));
+        assert!(close(
+            coverage_error(&y_true, &y_score).unwrap(),
+            2.5,
+            1e-12
+        ));
         assert!(close(
             label_ranking_average_precision_score(&y_true, &y_score).unwrap(),
             5.0 / 12.0,

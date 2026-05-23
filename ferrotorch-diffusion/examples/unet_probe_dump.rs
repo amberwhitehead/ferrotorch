@@ -12,8 +12,8 @@ use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
 use ferrotorch_core::{FerrotorchError, FerrotorchResult, Tensor, TensorStorage};
-use ferrotorch_diffusion::{load_unet, UNet2DConditionConfig};
-use ferrotorch_hub::{hf_download_model, HubCache};
+use ferrotorch_diffusion::{UNet2DConditionConfig, load_unet};
+use ferrotorch_hub::{HubCache, hf_download_model};
 use ferrotorch_nn::module::Module;
 
 fn read_dump_f32(path: &Path) -> FerrotorchResult<(Vec<usize>, Vec<f32>)> {
@@ -21,22 +21,25 @@ fn read_dump_f32(path: &Path) -> FerrotorchResult<(Vec<usize>, Vec<f32>)> {
         message: format!("open {}: {e}", path.display()),
     })?;
     let mut header4 = [0u8; 4];
-    f.read_exact(&mut header4).map_err(|e| FerrotorchError::InvalidArgument {
-        message: format!("read header from {}: {e}", path.display()),
-    })?;
+    f.read_exact(&mut header4)
+        .map_err(|e| FerrotorchError::InvalidArgument {
+            message: format!("read header from {}: {e}", path.display()),
+        })?;
     let ndim = u32::from_le_bytes(header4) as usize;
     let mut shape = vec![0usize; ndim];
     for entry in &mut shape {
-        f.read_exact(&mut header4).map_err(|e| FerrotorchError::InvalidArgument {
-            message: format!("read shape from {}: {e}", path.display()),
-        })?;
+        f.read_exact(&mut header4)
+            .map_err(|e| FerrotorchError::InvalidArgument {
+                message: format!("read shape from {}: {e}", path.display()),
+            })?;
         *entry = u32::from_le_bytes(header4) as usize;
     }
     let count: usize = shape.iter().product();
     let mut buf = vec![0u8; count * 4];
-    f.read_exact(&mut buf).map_err(|e| FerrotorchError::InvalidArgument {
-        message: format!("read data from {}: {e}", path.display()),
-    })?;
+    f.read_exact(&mut buf)
+        .map_err(|e| FerrotorchError::InvalidArgument {
+            message: format!("read data from {}: {e}", path.display()),
+        })?;
     let mut data = Vec::with_capacity(count);
     for chunk in buf.chunks_exact(4) {
         data.push(f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]));
@@ -51,17 +54,23 @@ fn write_dump(path: &Path, t: &Tensor<f32>) -> FerrotorchResult<()> {
         message: format!("create {}: {e}", path.display()),
     })?;
     f.write_all(&(shape.len() as u32).to_le_bytes())
-        .map_err(|e| FerrotorchError::InvalidArgument { message: e.to_string() })?;
+        .map_err(|e| FerrotorchError::InvalidArgument {
+            message: e.to_string(),
+        })?;
     for &d in shape {
         f.write_all(&(d as u32).to_le_bytes())
-            .map_err(|e| FerrotorchError::InvalidArgument { message: e.to_string() })?;
+            .map_err(|e| FerrotorchError::InvalidArgument {
+                message: e.to_string(),
+            })?;
     }
     let mut buf = Vec::with_capacity(data.len() * 4);
     for &v in data.iter() {
         buf.extend_from_slice(&v.to_le_bytes());
     }
     f.write_all(&buf)
-        .map_err(|e| FerrotorchError::InvalidArgument { message: e.to_string() })
+        .map_err(|e| FerrotorchError::InvalidArgument {
+            message: e.to_string(),
+        })
 }
 
 fn norm(d: &[f32]) -> f64 {
@@ -100,8 +109,7 @@ fn main() -> FerrotorchResult<()> {
 
     // Load config + weights + parity probe.
     let cfg = UNet2DConditionConfig::from_file(&repo_dir.join("config.json"))?;
-    let (lat_shape, lat_data) =
-        read_dump_f32(&repo_dir.join("_value_parity_noisy_latent.bin"))?;
+    let (lat_shape, lat_data) = read_dump_f32(&repo_dir.join("_value_parity_noisy_latent.bin"))?;
     let (ts_shape, ts_data) = read_dump_f32(&repo_dir.join("_value_parity_timestep.bin"))?;
     let (text_shape, text_data) =
         read_dump_f32(&repo_dir.join("_value_parity_text_embedding.bin"))?;
@@ -110,8 +118,11 @@ fn main() -> FerrotorchResult<()> {
     let timestep = Tensor::from_storage(TensorStorage::cpu(ts_data), ts_shape, false)?;
     let text = Tensor::from_storage(TensorStorage::cpu(text_data), text_shape, false)?;
 
-    let (unet, _drop) =
-        load_unet::<f32>(&repo_dir.join("model.safetensors"), cfg, /* strict = */ false)?;
+    let (unet, _drop) = load_unet::<f32>(
+        &repo_dir.join("model.safetensors"),
+        cfg,
+        /* strict = */ false,
+    )?;
 
     // -- Stage 1: time embedding. ---------------------------------------
     let t_proj = unet.time_proj.forward_t(&timestep)?;
@@ -190,17 +201,32 @@ fn main() -> FerrotorchResult<()> {
                                 let hh = attn.heads;
                                 let dd = attn.dim_head;
                                 let q = qraw
-                                    .reshape_t(&[bb as isize, nn as isize, hh as isize, dd as isize])?
+                                    .reshape_t(&[
+                                        bb as isize,
+                                        nn as isize,
+                                        hh as isize,
+                                        dd as isize,
+                                    ])?
                                     .transpose(1, 2)?
                                     .contiguous()?
                                     .reshape_t(&[(bb * hh) as isize, nn as isize, dd as isize])?;
                                 let k = kraw
-                                    .reshape_t(&[bb as isize, nn as isize, hh as isize, dd as isize])?
+                                    .reshape_t(&[
+                                        bb as isize,
+                                        nn as isize,
+                                        hh as isize,
+                                        dd as isize,
+                                    ])?
                                     .transpose(1, 2)?
                                     .contiguous()?
                                     .reshape_t(&[(bb * hh) as isize, nn as isize, dd as isize])?;
                                 let v = vraw
-                                    .reshape_t(&[bb as isize, nn as isize, hh as isize, dd as isize])?
+                                    .reshape_t(&[
+                                        bb as isize,
+                                        nn as isize,
+                                        hh as isize,
+                                        dd as isize,
+                                    ])?
                                     .transpose(1, 2)?
                                     .contiguous()?
                                     .reshape_t(&[(bb * hh) as isize, nn as isize, dd as isize])?;
@@ -213,7 +239,12 @@ fn main() -> FerrotorchResult<()> {
                                 let probs = scores_scaled.softmax()?;
                                 let attended = probs.bmm(&v)?;
                                 let merged = attended
-                                    .reshape_t(&[bb as isize, hh as isize, nn as isize, dd as isize])?
+                                    .reshape_t(&[
+                                        bb as isize,
+                                        hh as isize,
+                                        nn as isize,
+                                        dd as isize,
+                                    ])?
                                     .transpose(1, 2)?
                                     .contiguous()?
                                     .reshape_t(&[bb as isize, nn as isize, (hh * dd) as isize])?;
@@ -250,7 +281,12 @@ fn main() -> FerrotorchResult<()> {
                             // Reshape back and proj_out + residual.
                             let back = seq
                                 .transpose(1, 2)?
-                                .reshape_t(&[bdim as isize, inner as isize, hh as isize, ww as isize])?
+                                .reshape_t(&[
+                                    bdim as isize,
+                                    inner as isize,
+                                    hh as isize,
+                                    ww as isize,
+                                ])?
                                 .contiguous()?;
                             let po = a.proj_out.forward(&back)?;
                             report("03b_t2d_proj_out", &po)?;
@@ -323,6 +359,9 @@ fn main() -> FerrotorchResult<()> {
     report("13_predicted_noise", &h)?;
     write_dump(&out_dir.join("13_predicted_noise.bin"), &h)?;
 
-    eprintln!("[unet_probe_dump] wrote intermediates to {}", out_dir.display());
+    eprintln!(
+        "[unet_probe_dump] wrote intermediates to {}",
+        out_dir.display()
+    );
     Ok(())
 }

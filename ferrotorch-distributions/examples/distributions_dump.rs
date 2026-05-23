@@ -112,8 +112,7 @@ fn parse_args() -> Result<Args, String> {
 /// Read a single-tensor `[u32 ndim][u32 * ndim shape][f32 * prod(shape)]`
 /// little-endian file into `(shape, flat row-major data)`.
 fn read_single_tensor_f32(path: &Path) -> Result<(Vec<usize>, Vec<f32>), String> {
-    let mut f =
-        File::open(path).map_err(|e| format!("open {}: {e}", path.display()))?;
+    let mut f = File::open(path).map_err(|e| format!("open {}: {e}", path.display()))?;
     let mut buf4 = [0u8; 4];
     f.read_exact(&mut buf4)
         .map_err(|e| format!("read ndim from {}: {e}", path.display()))?;
@@ -330,30 +329,25 @@ fn dump_distribution(
 
         // ------------------------ Categorical -------------------------
         "categorical_k4" => {
-            let probs = from_slice(&[0.1f32, 0.3, 0.4, 0.2], &[4])
-                .map_err(|e| format!("probs: {e:?}"))?;
-            let dist =
-                Categorical::new(probs).map_err(|e| format!("Categorical::new: {e:?}"))?;
+            let probs =
+                from_slice(&[0.1f32, 0.3, 0.4, 0.2], &[4]).map_err(|e| format!("probs: {e:?}"))?;
+            let dist = Categorical::new(probs).map_err(|e| format!("Categorical::new: {e:?}"))?;
             run_univariate(&dist, &value()?)
         }
 
         // ------------------------- Dirichlet --------------------------
         "dirichlet_k4" => {
-            let conc = from_slice(&[1.0f32, 2.0, 3.0, 4.0], &[4])
-                .map_err(|e| format!("conc: {e:?}"))?;
+            let conc =
+                from_slice(&[1.0f32, 2.0, 3.0, 4.0], &[4]).map_err(|e| format!("conc: {e:?}"))?;
             let dist = Dirichlet::new(conc).map_err(|e| format!("Dirichlet::new: {e:?}"))?;
             run_multivariate(&dist, &value()?, 1)
         }
 
         // --------------------- MultivariateNormal ---------------------
         "mvn_3d" => {
-            let loc = from_slice(&[0.0f32, 0.0, 0.0], &[3])
-                .map_err(|e| format!("loc: {e:?}"))?;
-            let cov = from_slice(
-                &[1.0f32, 0.5, 0.2, 0.5, 1.0, 0.3, 0.2, 0.3, 1.0],
-                &[3, 3],
-            )
-            .map_err(|e| format!("cov: {e:?}"))?;
+            let loc = from_slice(&[0.0f32, 0.0, 0.0], &[3]).map_err(|e| format!("loc: {e:?}"))?;
+            let cov = from_slice(&[1.0f32, 0.5, 0.2, 0.5, 1.0, 0.3, 0.2, 0.3, 1.0], &[3, 3])
+                .map_err(|e| format!("cov: {e:?}"))?;
             let dist = MultivariateNormal::from_covariance(loc, cov)
                 .map_err(|e| format!("MVN::from_covariance: {e:?}"))?;
             run_multivariate(&dist, &value()?, 1)
@@ -374,10 +368,10 @@ fn dump_distribution(
 
         // ------------------------ Multinomial -------------------------
         "multinomial_k3_n20" => {
-            let probs = from_slice(&[0.2f32, 0.3, 0.5], &[3])
-                .map_err(|e| format!("probs: {e:?}"))?;
-            let dist = Multinomial::new(20, probs)
-                .map_err(|e| format!("Multinomial::new: {e:?}"))?;
+            let probs =
+                from_slice(&[0.2f32, 0.3, 0.5], &[3]).map_err(|e| format!("probs: {e:?}"))?;
+            let dist =
+                Multinomial::new(20, probs).map_err(|e| format!("Multinomial::new: {e:?}"))?;
             run_multivariate(&dist, &value()?, 1)
         }
 
@@ -386,14 +380,13 @@ fn dump_distribution(
 }
 
 /// Sample, log_prob, entropy for a scalar-event univariate distribution.
-fn run_univariate(
-    dist: &dyn Distribution<f32>,
-    value: &Tensor<f32>,
-) -> Result<DumpResult, String> {
+fn run_univariate(dist: &dyn Distribution<f32>, value: &Tensor<f32>) -> Result<DumpResult, String> {
     let samples = dist
         .sample(&[N_SAMPLES])
         .map_err(|e| format!("sample: {e:?}"))?;
-    let sample_data = samples.data_vec().map_err(|e| format!("sample data: {e:?}"))?;
+    let sample_data = samples
+        .data_vec()
+        .map_err(|e| format!("sample data: {e:?}"))?;
     let (m_shape, mean, var) = moments_mean_var(samples.shape(), &sample_data, 0);
 
     let lp = dist
@@ -435,9 +428,10 @@ fn run_multivariate(
     let samples = dist
         .sample(&[N_SAMPLES])
         .map_err(|e| format!("sample: {e:?}"))?;
-    let sample_data = samples.data_vec().map_err(|e| format!("sample data: {e:?}"))?;
-    let (m_shape, mean, var) =
-        moments_mean_var(samples.shape(), &sample_data, event_ndim);
+    let sample_data = samples
+        .data_vec()
+        .map_err(|e| format!("sample data: {e:?}"))?;
+    let (m_shape, mean, var) = moments_mean_var(samples.shape(), &sample_data, event_ndim);
 
     let lp = dist
         .log_prob(value)
@@ -480,10 +474,8 @@ fn dump_kl(config: &str) -> Result<DumpResult, String> {
             kl_divergence::<f32, _, _>(&p, &q).map_err(|e| format!("kl: {e:?}"))?
         }
         "kl_bernoulli_bernoulli" => {
-            let p = Bernoulli::new(scalar(0.3f32).unwrap())
-                .map_err(|e| format!("p: {e:?}"))?;
-            let q = Bernoulli::new(scalar(0.5f32).unwrap())
-                .map_err(|e| format!("q: {e:?}"))?;
+            let p = Bernoulli::new(scalar(0.3f32).unwrap()).map_err(|e| format!("p: {e:?}"))?;
+            let q = Bernoulli::new(scalar(0.5f32).unwrap()).map_err(|e| format!("q: {e:?}"))?;
             kl_divergence::<f32, _, _>(&p, &q).map_err(|e| format!("kl: {e:?}"))?
         }
         "kl_uniform_uniform" => {
@@ -498,10 +490,8 @@ fn dump_kl(config: &str) -> Result<DumpResult, String> {
                 .map_err(|e| format!("p_probs: {e:?}"))?;
             let q_probs = from_slice(&[0.25f32, 0.25, 0.25, 0.25], &[4])
                 .map_err(|e| format!("q_probs: {e:?}"))?;
-            let p =
-                Categorical::new(p_probs).map_err(|e| format!("p: {e:?}"))?;
-            let q =
-                Categorical::new(q_probs).map_err(|e| format!("q: {e:?}"))?;
+            let p = Categorical::new(p_probs).map_err(|e| format!("p: {e:?}"))?;
+            let q = Categorical::new(q_probs).map_err(|e| format!("q: {e:?}"))?;
             kl_divergence::<f32, _, _>(&p, &q).map_err(|e| format!("kl: {e:?}"))?
         }
         "kl_laplace_laplace" => {
@@ -512,10 +502,8 @@ fn dump_kl(config: &str) -> Result<DumpResult, String> {
             kl_divergence::<f32, _, _>(&p, &q).map_err(|e| format!("kl: {e:?}"))?
         }
         "kl_exponential_exponential" => {
-            let p = Exponential::new(scalar(1.5f32).unwrap())
-                .map_err(|e| format!("p: {e:?}"))?;
-            let q = Exponential::new(scalar(1.0f32).unwrap())
-                .map_err(|e| format!("q: {e:?}"))?;
+            let p = Exponential::new(scalar(1.5f32).unwrap()).map_err(|e| format!("p: {e:?}"))?;
+            let q = Exponential::new(scalar(1.0f32).unwrap()).map_err(|e| format!("q: {e:?}"))?;
             kl_divergence::<f32, _, _>(&p, &q).map_err(|e| format!("kl: {e:?}"))?
         }
         "kl_gamma_gamma" => {
@@ -526,18 +514,22 @@ fn dump_kl(config: &str) -> Result<DumpResult, String> {
             kl_divergence::<f32, _, _>(&p, &q).map_err(|e| format!("kl: {e:?}"))?
         }
         "kl_poisson_poisson" => {
-            let p = Poisson::new(scalar(3.0f32).unwrap())
-                .map_err(|e| format!("p: {e:?}"))?;
-            let q = Poisson::new(scalar(5.0f32).unwrap())
-                .map_err(|e| format!("q: {e:?}"))?;
+            let p = Poisson::new(scalar(3.0f32).unwrap()).map_err(|e| format!("p: {e:?}"))?;
+            let q = Poisson::new(scalar(5.0f32).unwrap()).map_err(|e| format!("q: {e:?}"))?;
             kl_divergence::<f32, _, _>(&p, &q).map_err(|e| format!("kl: {e:?}"))?
         }
         other => return Err(format!("unknown KL config {other:?}")),
     };
 
-    let kl_data = kl_tensor.data_vec().map_err(|e| format!("kl data: {e:?}"))?;
+    let kl_data = kl_tensor
+        .data_vec()
+        .map_err(|e| format!("kl data: {e:?}"))?;
     let kl_shape = kl_tensor.shape().to_vec();
-    let kl_shape = if kl_shape.is_empty() { vec![1] } else { kl_shape };
+    let kl_shape = if kl_shape.is_empty() {
+        vec![1]
+    } else {
+        kl_shape
+    };
 
     Ok(DumpResult {
         mean_shape: one_scalar(),
@@ -564,8 +556,7 @@ fn run() -> Result<(), String> {
         args.fixture_dir.display(),
         args.output_dir.display(),
     );
-    std::fs::create_dir_all(&args.output_dir)
-        .map_err(|e| format!("mkdir output_dir: {e}"))?;
+    std::fs::create_dir_all(&args.output_dir).map_err(|e| format!("mkdir output_dir: {e}"))?;
 
     let result = if args.config.starts_with("kl_") {
         dump_kl(&args.config)?
@@ -591,7 +582,9 @@ fn run() -> Result<(), String> {
         )
         .map_err(|e| format!("write var: {e}"))?;
         write_single_tensor_f32(
-            &args.output_dir.join(format!("{}_log_prob.bin", args.config)),
+            &args
+                .output_dir
+                .join(format!("{}_log_prob.bin", args.config)),
             &result.log_prob_shape,
             &result.log_prob_data,
         )

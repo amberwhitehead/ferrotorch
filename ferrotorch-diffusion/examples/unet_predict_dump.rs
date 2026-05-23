@@ -42,8 +42,8 @@ use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
 use ferrotorch_core::{FerrotorchResult, Tensor, TensorStorage};
-use ferrotorch_diffusion::{load_unet, UNet2DConditionConfig};
-use ferrotorch_hub::{hf_download_model, HubCache};
+use ferrotorch_diffusion::{UNet2DConditionConfig, load_unet};
+use ferrotorch_hub::{HubCache, hf_download_model};
 
 /// Target device for the forward pass.
 ///
@@ -196,9 +196,8 @@ fn resolve_input(
 }
 
 fn run() -> FerrotorchResult<()> {
-    let args = parse_args().map_err(|m| ferrotorch_core::FerrotorchError::InvalidArgument {
-        message: m,
-    })?;
+    let args = parse_args()
+        .map_err(|m| ferrotorch_core::FerrotorchError::InvalidArgument { message: m })?;
 
     let repo = format!("ferrotorch/{}", args.model);
     eprintln!("[unet_predict_dump] repo = {repo}");
@@ -248,13 +247,14 @@ fn run() -> FerrotorchResult<()> {
         "text-embedding",
     )?;
 
-    let (lat_shape, lat_data) =
-        read_dump_f32(&latent_path).map_err(|e| ferrotorch_core::FerrotorchError::InvalidArgument {
+    let (lat_shape, lat_data) = read_dump_f32(&latent_path).map_err(|e| {
+        ferrotorch_core::FerrotorchError::InvalidArgument {
             message: format!(
                 "failed to read noisy latent from {}: {e}",
                 latent_path.display()
             ),
-        })?;
+        }
+    })?;
     let (ts_shape, ts_data) = read_dump_f32(&timestep_path).map_err(|e| {
         ferrotorch_core::FerrotorchError::InvalidArgument {
             message: format!(
@@ -289,8 +289,7 @@ fn run() -> FerrotorchResult<()> {
         "[unet_predict_dump] weights file: {}",
         weights_path.display()
     );
-    let (unet, drop_report) =
-        load_unet::<f32>(&weights_path, cfg, /* strict = */ false)?;
+    let (unet, drop_report) = load_unet::<f32>(&weights_path, cfg, /* strict = */ false)?;
     eprintln!(
         "[unet_predict_dump] loaded weights: dropped_keys={}",
         drop_report.dropped.len(),

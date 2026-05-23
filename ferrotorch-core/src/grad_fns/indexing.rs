@@ -1113,9 +1113,7 @@ pub fn index_select_dim<T: Float, I: IntElement>(
     }
     if dim >= ndim {
         return Err(FerrotorchError::InvalidArgument {
-            message: format!(
-                "index_select_dim: dim {dim} out of range for shape {input_shape:?}"
-            ),
+            message: format!("index_select_dim: dim {dim} out of range for shape {input_shape:?}"),
         });
     }
     if indices.ndim() != 1 {
@@ -1737,7 +1735,10 @@ mod tests {
         let gd = g.data().unwrap();
         let expected = [0.0_f32, 10.0, 0.0, 1.0, 0.0, 1000.0, 0.0, 100.0];
         for (i, (&got, &exp)) in gd.iter().zip(expected.iter()).enumerate() {
-            assert!((got - exp).abs() < 1e-6, "grad[{i}] = {got}, expected {exp}");
+            assert!(
+                (got - exp).abs() < 1e-6,
+                "grad[{i}] = {got}, expected {exp}"
+            );
         }
     }
 
@@ -1792,9 +1793,7 @@ mod tests {
                         "SumBackward"
                     }
                 }
-                SumBackward {
-                    input: out.clone(),
-                }
+                SumBackward { input: out.clone() }
             }),
         )
         .unwrap();
@@ -1806,14 +1805,17 @@ mod tests {
         let gd = grad.data().unwrap();
         let expected = [2.0_f32, 2.0, 0.0, 0.0, 1.0, 1.0];
         for (i, (&got, &exp)) in gd.iter().zip(expected.iter()).enumerate() {
-            assert!((got - exp).abs() < 1e-6, "grad[{i}] = {got}, expected {exp}");
+            assert!(
+                (got - exp).abs() < 1e-6,
+                "grad[{i}] = {got}, expected {exp}"
+            );
         }
     }
 
     #[test]
     fn test_index_select_dim_rejects_2d_indices() {
-        let x = Tensor::from_storage(TensorStorage::cpu(vec![1.0_f32; 6]), vec![3, 2], false)
-            .unwrap();
+        let x =
+            Tensor::from_storage(TensorStorage::cpu(vec![1.0_f32; 6]), vec![3, 2], false).unwrap();
         let idx: IntTensor<i64> = IntTensor::from_vec(vec![0, 1, 0, 1], vec![2, 2]).unwrap();
         let err = index_select_dim(&x, 0, &idx).unwrap_err();
         assert!(matches!(err, FerrotorchError::ShapeMismatch { .. }));
@@ -1821,8 +1823,8 @@ mod tests {
 
     #[test]
     fn test_index_select_dim_rejects_oob() {
-        let x = Tensor::from_storage(TensorStorage::cpu(vec![1.0_f32; 6]), vec![3, 2], false)
-            .unwrap();
+        let x =
+            Tensor::from_storage(TensorStorage::cpu(vec![1.0_f32; 6]), vec![3, 2], false).unwrap();
         let idx: IntTensor<i64> = IntTensor::from_vec(vec![0, 7], vec![2]).unwrap();
         let err = index_select_dim(&x, 0, &idx).unwrap_err();
         assert!(matches!(err, FerrotorchError::IndexOutOfBounds { .. }));
@@ -1830,8 +1832,8 @@ mod tests {
 
     #[test]
     fn test_index_select_dim_rejects_negative() {
-        let x = Tensor::from_storage(TensorStorage::cpu(vec![1.0_f32; 6]), vec![3, 2], false)
-            .unwrap();
+        let x =
+            Tensor::from_storage(TensorStorage::cpu(vec![1.0_f32; 6]), vec![3, 2], false).unwrap();
         let idx: IntTensor<i64> = IntTensor::from_vec(vec![0, -1], vec![2]).unwrap();
         let err = index_select_dim(&x, 0, &idx).unwrap_err();
         assert!(matches!(err, FerrotorchError::InvalidArgument { .. }));

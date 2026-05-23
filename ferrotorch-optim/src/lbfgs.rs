@@ -269,8 +269,7 @@ impl<T: Float> Lbfgs<T> {
                         // device.
                         let numel = tensor.numel();
                         let device = tensor.device();
-                        let zeros =
-                            ferrotorch_core::creation::zeros::<T>(&[numel])?.to(device)?;
+                        let zeros = ferrotorch_core::creation::zeros::<T>(&[numel])?.to(device)?;
                         flats.push(zeros);
                     }
                 }
@@ -282,11 +281,7 @@ impl<T: Float> Lbfgs<T> {
 
     /// Scatter a flat 1-D [`Tensor<T>`] back into the parameter tensors
     /// (inside `no_grad`).
-    fn scatter_params(
-        &mut self,
-        flat: &Tensor<T>,
-        shapes: &[Vec<usize>],
-    ) -> FerrotorchResult<()> {
+    fn scatter_params(&mut self, flat: &Tensor<T>, shapes: &[Vec<usize>]) -> FerrotorchResult<()> {
         let mut offset = 0usize;
         let mut shape_idx = 0usize;
 
@@ -305,8 +300,7 @@ impl<T: Float> Lbfgs<T> {
                     // shape (also zero-copy when contiguous).
                     let chunk = flat.narrow(0, offset, numel)?;
                     let chunk_contig = chunk.contiguous()?;
-                    let reshaped: Vec<isize> =
-                        shape.iter().map(|&d| d as isize).collect();
+                    let reshaped: Vec<isize> = shape.iter().map(|&d| d as isize).collect();
                     let chunk_reshaped = if shape.is_empty() {
                         // 0-D scalar: leave as 1-element 1-D tensor and
                         // reshape via `view_reshape` (handles empty shape).
@@ -873,18 +867,20 @@ impl<T: Float> Optimizer<T> for Lbfgs<T> {
                     message: format!("missing '{key}' in L-BFGS state dict"),
                 })?;
 
-            let s_f64 = entry
-                .get("s")
-                .cloned()
-                .ok_or_else(|| FerrotorchError::InvalidArgument {
-                    message: format!("missing 's' in {key}"),
-                })?;
-            let y_f64 = entry
-                .get("y")
-                .cloned()
-                .ok_or_else(|| FerrotorchError::InvalidArgument {
-                    message: format!("missing 'y' in {key}"),
-                })?;
+            let s_f64 =
+                entry
+                    .get("s")
+                    .cloned()
+                    .ok_or_else(|| FerrotorchError::InvalidArgument {
+                        message: format!("missing 's' in {key}"),
+                    })?;
+            let y_f64 =
+                entry
+                    .get("y")
+                    .cloned()
+                    .ok_or_else(|| FerrotorchError::InvalidArgument {
+                        message: format!("missing 'y' in {key}"),
+                    })?;
             let rho = entry
                 .get("rho")
                 .and_then(|v| v.first())
@@ -898,15 +894,13 @@ impl<T: Float> Optimizer<T> for Lbfgs<T> {
                 .map(|&v| cast::<f64, T>(v))
                 .collect::<FerrotorchResult<Vec<T>>>()?;
             let s_len = s_t.len();
-            let s_tensor =
-                Tensor::from_storage(TensorStorage::cpu(s_t), vec![s_len], false)?;
+            let s_tensor = Tensor::from_storage(TensorStorage::cpu(s_t), vec![s_len], false)?;
             let y_t: Vec<T> = y_f64
                 .iter()
                 .map(|&v| cast::<f64, T>(v))
                 .collect::<FerrotorchResult<Vec<T>>>()?;
             let y_len = y_t.len();
-            let y_tensor =
-                Tensor::from_storage(TensorStorage::cpu(y_t), vec![y_len], false)?;
+            let y_tensor = Tensor::from_storage(TensorStorage::cpu(y_t), vec![y_len], false)?;
 
             self.state.s_history.push_back(s_tensor);
             self.state.y_history.push_back(y_tensor);
@@ -928,20 +922,18 @@ impl<T: Float> Optimizer<T> for Lbfgs<T> {
             }
             None => None,
         };
-        self.state.prev_flat_grad = match state
-            .get("prev_grad")
-            .and_then(|e| e.get("prev_flat_grad"))
-        {
-            Some(v) => {
-                let t: Vec<T> = v
-                    .iter()
-                    .map(|&x| cast::<f64, T>(x))
-                    .collect::<FerrotorchResult<Vec<T>>>()?;
-                let n = t.len();
-                Some(Tensor::from_storage(TensorStorage::cpu(t), vec![n], false)?)
-            }
-            None => None,
-        };
+        self.state.prev_flat_grad =
+            match state.get("prev_grad").and_then(|e| e.get("prev_flat_grad")) {
+                Some(v) => {
+                    let t: Vec<T> = v
+                        .iter()
+                        .map(|&x| cast::<f64, T>(x))
+                        .collect::<FerrotorchResult<Vec<T>>>()?;
+                    let n = t.len();
+                    Some(Tensor::from_storage(TensorStorage::cpu(t), vec![n], false)?)
+                }
+                None => None,
+            };
 
         Ok(())
     }
@@ -1539,10 +1531,7 @@ mod tests {
             loss.backward().unwrap();
             opt_gpu.step().unwrap();
         }
-        let gpu_t = opt_gpu.param_groups[0].params[0]
-            .tensor()
-            .cpu()
-            .unwrap();
+        let gpu_t = opt_gpu.param_groups[0].params[0].tensor().cpu().unwrap();
         let gpu_val = gpu_t.data().unwrap()[0];
 
         assert!(

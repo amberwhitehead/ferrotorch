@@ -464,13 +464,8 @@ impl<T: Float> UNetMidBlock2DCrossAttn<T> {
         // See CrossAttnDownBlock2D::new for the heads/dim_head footgun.
         let heads = attention_head_dim;
         let dim_head = channels / heads;
-        let r0 = ResnetBlock2DTime::<T>::new(
-            channels,
-            channels,
-            temb_channels,
-            norm_num_groups,
-            1e-5,
-        )?;
+        let r0 =
+            ResnetBlock2DTime::<T>::new(channels, channels, temb_channels, norm_num_groups, 1e-5)?;
         let attn = Transformer2DModel::<T>::new(
             channels,
             heads,
@@ -479,13 +474,8 @@ impl<T: Float> UNetMidBlock2DCrossAttn<T> {
             cross_attention_dim,
             norm_num_groups,
         )?;
-        let r1 = ResnetBlock2DTime::<T>::new(
-            channels,
-            channels,
-            temb_channels,
-            norm_num_groups,
-            1e-5,
-        )?;
+        let r1 =
+            ResnetBlock2DTime::<T>::new(channels, channels, temb_channels, norm_num_groups, 1e-5)?;
         Ok(Self {
             resnets: vec![r0, r1],
             attentions: vec![attn],
@@ -927,8 +917,7 @@ impl<T: Float> UpBlock2D<T> {
 impl<T: Float> Module<T> for UpBlock2D<T> {
     fn forward(&self, _input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
         Err(FerrotorchError::InvalidArgument {
-            message: "UpBlock2D::forward requires (x, skips, temb) — call forward_t instead"
-                .into(),
+            message: "UpBlock2D::forward requires (x, skips, temb) — call forward_t instead".into(),
         })
     }
     fn parameters(&self) -> Vec<&Parameter<T>> {
@@ -1160,8 +1149,7 @@ impl<T: Float> UNet2DConditionModel<T> {
         let time_embedding = TimestepEmbedding::<T>::new(bocs[0], temb_channels)?;
 
         // conv_in.
-        let conv_in =
-            Conv2d::<T>::new(cfg.in_channels, bocs[0], (3, 3), (1, 1), (1, 1), true)?;
+        let conv_in = Conv2d::<T>::new(cfg.in_channels, bocs[0], (3, 3), (1, 1), (1, 1), true)?;
 
         // Down blocks.
         let mut down_blocks: Vec<AnyDownBlock<T>> = Vec::with_capacity(num_blocks);
@@ -1254,8 +1242,7 @@ impl<T: Float> UNet2DConditionModel<T> {
         }
 
         let conv_norm_out = GroupNorm::<T>::new(groups, bocs[0], 1e-5, true)?;
-        let conv_out =
-            Conv2d::<T>::new(bocs[0], cfg.out_channels, (3, 3), (1, 1), (1, 1), true)?;
+        let conv_out = Conv2d::<T>::new(bocs[0], cfg.out_channels, (3, 3), (1, 1), (1, 1), true)?;
 
         Ok(Self {
             time_proj,
@@ -1532,12 +1519,8 @@ mod tests {
             false,
         )
         .unwrap();
-        let timesteps = Tensor::from_storage(
-            TensorStorage::cpu(vec![5.0f32]),
-            vec![1],
-            false,
-        )
-        .unwrap();
+        let timesteps =
+            Tensor::from_storage(TensorStorage::cpu(vec![5.0f32]), vec![1], false).unwrap();
         let ehs = Tensor::from_storage(
             TensorStorage::cpu(vec![0.01f32; 7 * 24]),
             vec![1, 7, 24],
@@ -1552,7 +1535,11 @@ mod tests {
     fn unet_named_parameters_includes_canonical_keys() {
         let cfg = tiny_cfg();
         let unet = UNet2DConditionModel::<f32>::new(cfg).unwrap();
-        let names: Vec<String> = unet.named_parameters().into_iter().map(|(n, _)| n).collect();
+        let names: Vec<String> = unet
+            .named_parameters()
+            .into_iter()
+            .map(|(n, _)| n)
+            .collect();
         for k in [
             "time_embedding.linear_1.weight",
             "time_embedding.linear_2.bias",

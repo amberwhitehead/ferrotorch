@@ -203,13 +203,22 @@ impl ClipTextConfig {
         if let Some(x) = v.get("hidden_size").and_then(serde_json::Value::as_u64) {
             cfg.hidden_size = x as usize;
         }
-        if let Some(x) = v.get("intermediate_size").and_then(serde_json::Value::as_u64) {
+        if let Some(x) = v
+            .get("intermediate_size")
+            .and_then(serde_json::Value::as_u64)
+        {
             cfg.intermediate_size = x as usize;
         }
-        if let Some(x) = v.get("num_attention_heads").and_then(serde_json::Value::as_u64) {
+        if let Some(x) = v
+            .get("num_attention_heads")
+            .and_then(serde_json::Value::as_u64)
+        {
             cfg.num_attention_heads = x as usize;
         }
-        if let Some(x) = v.get("num_hidden_layers").and_then(serde_json::Value::as_u64) {
+        if let Some(x) = v
+            .get("num_hidden_layers")
+            .and_then(serde_json::Value::as_u64)
+        {
             cfg.num_hidden_layers = x as usize;
         }
         if let Some(x) = v
@@ -1135,7 +1144,9 @@ impl<T: Float> ClipTextEncoder<T> {
         let mut dropped: Vec<String> = Vec::new();
         for (k, v) in hf_state {
             // Strip the optional `text_model.` prefix.
-            let after = k.strip_prefix("text_model.").map_or_else(|| k.clone(), str::to_owned);
+            let after = k
+                .strip_prefix("text_model.")
+                .map_or_else(|| k.clone(), str::to_owned);
 
             // `embeddings.position_ids` is a buffer — not a parameter on our
             // side. Drop in both modes; record so the pin script can audit.
@@ -1257,8 +1268,7 @@ impl<T: Float> Module<T> for ClipTextEncoder<T> {
         }
         self.embeddings
             .load_state_dict(&extract("embeddings"), strict)?;
-        self.encoder
-            .load_state_dict(&extract("encoder"), strict)?;
+        self.encoder.load_state_dict(&extract("encoder"), strict)?;
         self.final_layer_norm
             .load_state_dict(&extract("final_layer_norm"), strict)?;
         Ok(())
@@ -1443,7 +1453,11 @@ mod tests {
     #[test]
     fn encoder_layer_named_parameters_use_hf_layout() {
         let layer = ClipEncoderLayer::<f32>::new(&tiny_cfg()).unwrap();
-        let names: Vec<String> = layer.named_parameters().into_iter().map(|(n, _)| n).collect();
+        let names: Vec<String> = layer
+            .named_parameters()
+            .into_iter()
+            .map(|(n, _)| n)
+            .collect();
         for k in [
             "layer_norm1.weight",
             "layer_norm1.bias",
@@ -1529,7 +1543,10 @@ mod tests {
         );
         let mut dst = ClipTextEncoder::<f32>::new(tiny_cfg()).unwrap();
         let rep = dst.load_hf_state_dict(&prefixed, false).unwrap();
-        assert_eq!(rep.dropped, vec!["text_model.embeddings.position_ids".to_string()]);
+        assert_eq!(
+            rep.dropped,
+            vec!["text_model.embeddings.position_ids".to_string()]
+        );
         let ids = vec![1u32, 2, 3];
         let a = src.forward_from_ids(&ids).unwrap();
         let b = dst.forward_from_ids(&ids).unwrap();

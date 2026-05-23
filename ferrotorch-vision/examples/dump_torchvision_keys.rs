@@ -55,8 +55,7 @@ fn main() {
     let krcnn = keypointrcnn_resnet50_fpn::<f32>().expect("keypointrcnn_resnet50_fpn build");
     // #1146: LRASPP MobileNetV3-Large COCO_WITH_VOC_LABELS_V1 — 21 classes
     // (Pascal VOC background + 20 foreground).
-    let lraspp =
-        lraspp_mobilenet_v3_large::<f32>(21).expect("lraspp_mobilenet_v3_large build");
+    let lraspp = lraspp_mobilenet_v3_large::<f32>(21).expect("lraspp_mobilenet_v3_large build");
 
     let out = serde_json::json!({
         "ssd300_vgg16": dump(&ssd),

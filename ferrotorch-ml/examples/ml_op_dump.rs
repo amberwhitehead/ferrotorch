@@ -49,7 +49,7 @@ use ndarray::{Array1, Array2};
 
 use ferrolearn_core::traits::{Fit, FitTransform, Transform};
 use ferrolearn_decomp::PCA;
-use ferrolearn_model_sel::{train_test_split, KFold};
+use ferrolearn_model_sel::{KFold, train_test_split};
 use ferrolearn_preprocess::{OneHotEncoder, StandardScaler};
 
 // ---------------------------------------------------------------------------
@@ -272,7 +272,11 @@ fn run_pca_n4(args: &Args) -> Result<String, String> {
     write_multi_tensor_f32(&out_path, &[(vec![100, 4], y_f32.clone())])
         .map_err(|e| format!("write {}: {e}", out_path.display()))?;
 
-    let l2 = y_f32.iter().map(|&v| v as f64 * v as f64).sum::<f64>().sqrt();
+    let l2 = y_f32
+        .iter()
+        .map(|&v| v as f64 * v as f64)
+        .sum::<f64>()
+        .sqrt();
     Ok(format!(
         "{{\"config\":\"pca_n4\",\"output_shape\":[100,4],\"l2_norm\":{l2:.6}}}"
     ))
@@ -350,7 +354,10 @@ fn run_kfold_5(_args: &Args) -> Result<String, String> {
     let kf = KFold::new(n_splits).shuffle(true).random_state(42);
     let folds = kf.split(n_samples);
     if folds.len() != n_splits {
-        return Err(format!("KFold returned {} folds, expected {n_splits}", folds.len()));
+        return Err(format!(
+            "KFold returned {} folds, expected {n_splits}",
+            folds.len()
+        ));
     }
 
     // Emit a JSON manifest as the verdict line so the Python harness can
@@ -428,14 +435,12 @@ fn run_train_test_split_80_20(args: &Args) -> Result<String, String> {
 
     let mut train_indices: Vec<usize> = Vec::with_capacity(80);
     for r in x_train.rows() {
-        let idx = find_row(&r)
-            .ok_or_else(|| "train row not present in original X".to_string())?;
+        let idx = find_row(&r).ok_or_else(|| "train row not present in original X".to_string())?;
         train_indices.push(idx);
     }
     let mut test_indices: Vec<usize> = Vec::with_capacity(20);
     for r in x_test.rows() {
-        let idx = find_row(&r)
-            .ok_or_else(|| "test row not present in original X".to_string())?;
+        let idx = find_row(&r).ok_or_else(|| "test row not present in original X".to_string())?;
         test_indices.push(idx);
     }
 

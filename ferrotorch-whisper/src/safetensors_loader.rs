@@ -33,14 +33,13 @@ pub fn load_whisper_encoder<T: Float>(
     cfg: WhisperConfig,
     strict: bool,
 ) -> FerrotorchResult<(WhisperEncoder<T>, DropReport)> {
-    let state = load_safetensors::<T>(weights_path).map_err(|e| {
-        FerrotorchError::InvalidArgument {
+    let state =
+        load_safetensors::<T>(weights_path).map_err(|e| FerrotorchError::InvalidArgument {
             message: format!(
                 "load_whisper_encoder: failed to decode safetensors {}: {e}",
                 weights_path.display()
             ),
-        }
-    })?;
+        })?;
     let mut encoder = WhisperEncoder::<T>::new(cfg)?;
     let report = encoder.load_hf_state_dict(&state, strict)?;
     Ok((encoder, report))

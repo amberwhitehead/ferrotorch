@@ -577,9 +577,7 @@ DONE:
                         "            double inner = 0.7978845608028654 * (val + 0.044715 * x3);"
                             .into(),
                     );
-                    body_lines.push(
-                        "            val = val * 0.5 * (1.0 + tanh(inner));".into(),
-                    );
+                    body_lines.push("            val = val * 0.5 * (1.0 + tanh(inner));".into());
                     body_lines.push("        }".into());
                 }
                 FusedOp::Silu => {

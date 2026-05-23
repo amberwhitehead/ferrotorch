@@ -328,11 +328,7 @@ impl<T: Float> FasterRcnn<T> {
                 // No proposals → empty detections for this image.
                 per_image_detections.push(Detections {
                     boxes: Tensor::from_storage(TensorStorage::cpu(vec![]), vec![0, 4], false)?,
-                    scores: Tensor::from_storage(
-                        TensorStorage::cpu(vec![]),
-                        vec![0usize],
-                        false,
-                    )?,
+                    scores: Tensor::from_storage(TensorStorage::cpu(vec![]), vec![0usize], false)?,
                     labels: vec![],
                 });
                 continue;

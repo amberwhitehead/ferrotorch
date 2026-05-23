@@ -236,9 +236,7 @@ impl<T: Float> Module<T> for BertEmbeddings<T> {
             for key in state.keys() {
                 if !prefixes.iter().any(|p| key.starts_with(&format!("{p}."))) {
                     return Err(FerrotorchError::InvalidArgument {
-                        message: format!(
-                            "unexpected key in BertEmbeddings state_dict: \"{key}\""
-                        ),
+                        message: format!("unexpected key in BertEmbeddings state_dict: \"{key}\""),
                     });
                 }
             }

@@ -360,11 +360,8 @@ impl<T: Float> AotCompiledModule<T> {
         // forward graph; `interpret_multi_with_captures` returns the first
         // output value of each named node in the same order, matching what
         // the backward graph expects as its leading inputs.
-        let (mut outputs, captured) = interpret_multi_with_captures(
-            &self.forward_graph,
-            inputs,
-            &self.saved_tensor_indices,
-        )?;
+        let (mut outputs, captured) =
+            interpret_multi_with_captures(&self.forward_graph, inputs, &self.saved_tensor_indices)?;
 
         if outputs.len() != 1 {
             return Err(FerrotorchError::InvalidArgument {

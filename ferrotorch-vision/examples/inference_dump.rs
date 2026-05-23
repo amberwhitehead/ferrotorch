@@ -34,8 +34,8 @@ use ferrotorch_nn::{InterpolateMode, Module, interpolate};
 use ferrotorch_vision::io::read_image_as_tensor;
 use ferrotorch_vision::models::bn_buffer_loader::apply_bn_buffers_from_state_dict;
 use ferrotorch_vision::models::detection::{
-    FasterRcnn, KeypointRcnn, MaskRcnn, fasterrcnn_resnet50_fpn,
-    keypointrcnn_resnet50_fpn, maskrcnn_resnet50_fpn,
+    FasterRcnn, KeypointRcnn, MaskRcnn, fasterrcnn_resnet50_fpn, keypointrcnn_resnet50_fpn,
+    maskrcnn_resnet50_fpn,
 };
 use ferrotorch_vision::models::get_model;
 
@@ -49,11 +49,7 @@ fn parse_args() -> Result<(String, PathBuf, PathBuf), String> {
     while i < args.len() {
         match args[i].as_str() {
             "--model" => {
-                model = Some(
-                    args.get(i + 1)
-                        .ok_or("--model needs a value")?
-                        .clone(),
-                );
+                model = Some(args.get(i + 1).ok_or("--model needs a value")?.clone());
                 i += 2;
             }
             "--image" => {
@@ -164,11 +160,7 @@ fn normalize_bchw(
             }
         }
     }
-    Tensor::from_storage(
-        ferrotorch_core::TensorStorage::cpu(data),
-        shape,
-        false,
-    )
+    Tensor::from_storage(ferrotorch_core::TensorStorage::cpu(data), shape, false)
 }
 
 /// Build a `[1, 3, H_out, W_out]` input tensor following the model's
@@ -219,8 +211,7 @@ fn preprocess_for_model(model: &str, raw_chw: Tensor<f32>) -> FerrotorchResult<T
             let out_h = (h * scale).round() as usize;
             let out_w = (w * scale).round() as usize;
             let resized = bilinear_resize_chw_to_bchw(&raw_chw, out_h, out_w)?;
-            let normed =
-                normalize_bchw(&resized, [0.485, 0.456, 0.406], [0.229, 0.224, 0.225])?;
+            let normed = normalize_bchw(&resized, [0.485, 0.456, 0.406], [0.229, 0.224, 0.225])?;
             // Pad to multiple of 32 (FPN stride).
             let stride: usize = 32;
             let pad_h = out_h.div_ceil(stride) * stride;
@@ -308,10 +299,10 @@ fn dump_tensor(t: &Tensor<f32>, path: &PathBuf) -> FerrotorchResult<()> {
 /// exactly: hub lookup → safetensors load → `load_state_dict(strict=false)`
 /// → BN buffer apply.
 fn run_maskrcnn_dump(input: &Tensor<f32>, output_path: &PathBuf) -> Result<(), String> {
-    let mut model = maskrcnn_resnet50_fpn::<f32>(91)
-        .map_err(|e| format!("maskrcnn_resnet50_fpn: {e}"))?;
-    let info = ferrotorch_hub::registry::get_model_info("maskrcnn_resnet50_fpn")
-        .ok_or_else(|| {
+    let mut model =
+        maskrcnn_resnet50_fpn::<f32>(91).map_err(|e| format!("maskrcnn_resnet50_fpn: {e}"))?;
+    let info =
+        ferrotorch_hub::registry::get_model_info("maskrcnn_resnet50_fpn").ok_or_else(|| {
             "ferrotorch_hub::registry: no entry for 'maskrcnn_resnet50_fpn'".to_string()
         })?;
     let cache = ferrotorch_hub::cache::HubCache::with_default_dir();
@@ -356,12 +347,9 @@ fn run_maskrcnn_dump(input: &Tensor<f32>, output_path: &PathBuf) -> Result<(), S
             false,
         )
         .map_err(|e| format!("empty boxes: {e}"))?;
-        let scores = Tensor::from_storage(
-            ferrotorch_core::TensorStorage::cpu(vec![]),
-            vec![0],
-            false,
-        )
-        .map_err(|e| format!("empty scores: {e}"))?;
+        let scores =
+            Tensor::from_storage(ferrotorch_core::TensorStorage::cpu(vec![]), vec![0], false)
+                .map_err(|e| format!("empty scores: {e}"))?;
         (masks, boxes, scores)
     };
 
@@ -383,7 +371,10 @@ fn run_maskrcnn_dump(input: &Tensor<f32>, output_path: &PathBuf) -> Result<(), S
         let mut p = output_path.clone();
         let fname = format!(
             "{}.boxes.bin",
-            output_path.file_name().and_then(|n| n.to_str()).unwrap_or("out")
+            output_path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("out")
         );
         p.set_file_name(fname);
         p
@@ -392,7 +383,10 @@ fn run_maskrcnn_dump(input: &Tensor<f32>, output_path: &PathBuf) -> Result<(), S
         let mut p = output_path.clone();
         let fname = format!(
             "{}.scores.bin",
-            output_path.file_name().and_then(|n| n.to_str()).unwrap_or("out")
+            output_path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("out")
         );
         p.set_file_name(fname);
         p
@@ -418,10 +412,10 @@ fn run_maskrcnn_dump(input: &Tensor<f32>, output_path: &PathBuf) -> Result<(), S
 /// exactly: hub lookup → safetensors load → `load_state_dict(strict=false)`
 /// → BN buffer apply.
 fn run_fasterrcnn_dump(input: &Tensor<f32>, output_path: &PathBuf) -> Result<(), String> {
-    let mut model = fasterrcnn_resnet50_fpn::<f32>(91)
-        .map_err(|e| format!("fasterrcnn_resnet50_fpn: {e}"))?;
-    let info = ferrotorch_hub::registry::get_model_info("fasterrcnn_resnet50_fpn")
-        .ok_or_else(|| {
+    let mut model =
+        fasterrcnn_resnet50_fpn::<f32>(91).map_err(|e| format!("fasterrcnn_resnet50_fpn: {e}"))?;
+    let info =
+        ferrotorch_hub::registry::get_model_info("fasterrcnn_resnet50_fpn").ok_or_else(|| {
             "ferrotorch_hub::registry: no entry for 'fasterrcnn_resnet50_fpn'".to_string()
         })?;
     let cache = ferrotorch_hub::cache::HubCache::with_default_dir();
@@ -482,7 +476,10 @@ fn run_fasterrcnn_dump(input: &Tensor<f32>, output_path: &PathBuf) -> Result<(),
         let mut p = output_path.clone();
         let fname = format!(
             "{}.boxes.bin",
-            output_path.file_name().and_then(|n| n.to_str()).unwrap_or("out")
+            output_path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("out")
         );
         p.set_file_name(fname);
         p
@@ -505,8 +502,8 @@ fn run_fasterrcnn_dump(input: &Tensor<f32>, output_path: &PathBuf) -> Result<(),
 fn run_keypointrcnn_dump(input: &Tensor<f32>, output_path: &PathBuf) -> Result<(), String> {
     let mut model = keypointrcnn_resnet50_fpn::<f32>()
         .map_err(|e| format!("keypointrcnn_resnet50_fpn: {e}"))?;
-    let info = ferrotorch_hub::registry::get_model_info("keypointrcnn_resnet50_fpn")
-        .ok_or_else(|| {
+    let info =
+        ferrotorch_hub::registry::get_model_info("keypointrcnn_resnet50_fpn").ok_or_else(|| {
             "ferrotorch_hub::registry: no entry for 'keypointrcnn_resnet50_fpn'".to_string()
         })?;
     let cache = ferrotorch_hub::cache::HubCache::with_default_dir();
@@ -582,7 +579,10 @@ fn run_keypointrcnn_dump(input: &Tensor<f32>, output_path: &PathBuf) -> Result<(
         let mut p = output_path.clone();
         let fname = format!(
             "{}.{suffix}.bin",
-            output_path.file_name().and_then(|n| n.to_str()).unwrap_or("out")
+            output_path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("out")
         );
         p.set_file_name(fname);
         p
@@ -612,8 +612,7 @@ fn main() -> Result<(), String> {
     eprintln!("[inference_dump] raw image shape: {:?}", raw.shape());
 
     // Preprocess according to torchvision recipe for this model.
-    let input =
-        preprocess_for_model(&model_name, raw).map_err(|e| format!("preprocess: {e}"))?;
+    let input = preprocess_for_model(&model_name, raw).map_err(|e| format!("preprocess: {e}"))?;
     eprintln!("[inference_dump] preprocessed shape: {:?}", input.shape());
 
     // MaskRCNN takes a custom path so we can dump boxes + scores alongside
@@ -647,9 +646,7 @@ fn main() -> Result<(), String> {
     model.eval();
     eprintln!("[inference_dump] model loaded; running forward...");
 
-    let output = model
-        .forward(&input)
-        .map_err(|e| format!("forward: {e}"))?;
+    let output = model.forward(&input).map_err(|e| format!("forward: {e}"))?;
     eprintln!("[inference_dump] output shape: {:?}", output.shape());
 
     dump_tensor(&output, &output_path).map_err(|e| format!("dump_tensor: {e}"))?;

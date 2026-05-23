@@ -322,14 +322,9 @@ fn form_full_mesh(
     // inbound connections. Each connect sends a u64 LE peer rank as the
     // first frame so we can slot it into the right index.
     for _ in (cfg.rank + 1)..cfg.world_size {
-        let (mut stream, _) = peer_listener
-            .accept()
-            .map_err(|e| DistributedError::Io {
-                message: format!(
-                    "gloo_native rank {} accept full-mesh peer: {e}",
-                    cfg.rank,
-                ),
-            })?;
+        let (mut stream, _) = peer_listener.accept().map_err(|e| DistributedError::Io {
+            message: format!("gloo_native rank {} accept full-mesh peer: {e}", cfg.rank,),
+        })?;
         let mut rank_buf = [0u8; 8];
         stream
             .read_exact(&mut rank_buf)
@@ -418,7 +413,10 @@ mod tests {
             })
             .collect();
 
-        handles.into_iter().map(|h| h.join().expect("join")).collect()
+        handles
+            .into_iter()
+            .map(|h| h.join().expect("join"))
+            .collect()
     }
 
     #[test]
@@ -443,7 +441,10 @@ mod tests {
                 if peer == rank {
                     assert!(slot.is_none(), "rank {rank}: self-slot must be None");
                 } else {
-                    assert!(slot.is_some(), "rank {rank}: slot for peer {peer} must be Some");
+                    assert!(
+                        slot.is_some(),
+                        "rank {rank}: slot for peer {peer} must be Some"
+                    );
                 }
             }
         }

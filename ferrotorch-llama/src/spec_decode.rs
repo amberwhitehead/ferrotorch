@@ -326,8 +326,7 @@ pub fn speculative_decode<T: Float>(
         // This is the Leviathan et al. §3 Algorithm 1 batched-verify shape:
         // O(S) per round instead of the previous O((K+1) · S) — see #1129.
         // -----------------------------------------------------------------------
-        let verify_prefix: Vec<u32> =
-            context.iter().chain(draft_tokens.iter()).copied().collect();
+        let verify_prefix: Vec<u32> = context.iter().chain(draft_tokens.iter()).copied().collect();
         let all_logits = target.forward_ids_all_positions(&verify_prefix)?;
         if all_logits.len() != verify_prefix.len() {
             return Err(FerrotorchError::InvalidArgument {
@@ -815,8 +814,7 @@ mod tests {
             seed: Some(7),
             eos_token_ids: vec![],
         };
-        let out =
-            speculative_decode::<f32>(&draft, &target, &[1u32, 2, 3], &cfg).unwrap();
+        let out = speculative_decode::<f32>(&draft, &target, &[1u32, 2, 3], &cfg).unwrap();
         assert_eq!(out.tokens.len(), 12);
 
         // Verify uses the batched API exclusively — never the
