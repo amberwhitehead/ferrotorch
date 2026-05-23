@@ -6676,6 +6676,68 @@ impl GpuBackend for CudaBackendImpl {
             }),
         }
     }
+
+    #[cfg(feature = "cuda")]
+    fn masked_scatter(
+        &self,
+        grad_compact: &GpuBufferHandle,
+        mask: &GpuBufferHandle,
+        out_numel: usize,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        use crate::masked_kernels as mk;
+        if mask.dtype() != DType::Bool {
+            return Err(FerrotorchError::InvalidArgument {
+                message: format!("masked_scatter: mask is tagged {}, expected Bool", mask.dtype()),
+            });
+        }
+        if mask.len() != out_numel {
+            return Err(FerrotorchError::InvalidArgument {
+                message: format!(
+                    "masked_scatter: mask numel {} != out_numel {}",
+                    mask.len(),
+                    out_numel
+                ),
+            });
+        }
+        let dev = self.device(grad_compact.device_ordinal())?;
+        let ord = grad_compact.device_ordinal();
+        let mb = Self::unwrap_buffer_bool(mask)?.inner();
+        match grad_compact.dtype() {
+            DType::F32 => Ok(Self::wrap_slice_f32(
+                mk::masked_scatter_32::<f32>(Self::unwrap_buffer(grad_compact)?.inner(), mb, out_numel, dev)
+                    .map_err(Self::map_gpu_err)?,
+                ord,
+            )),
+            DType::F64 => Ok(Self::wrap_slice_f64(
+                mk::masked_scatter_64::<f64>(Self::unwrap_buffer_f64(grad_compact)?.inner(), mb, out_numel, dev)
+                    .map_err(Self::map_gpu_err)?,
+                ord,
+            )),
+            DType::F16 => Ok(Self::wrap_buffer_f16(
+                mk::masked_scatter_16(Self::unwrap_buffer_f16(grad_compact)?, mb, out_numel, dev)
+                    .map_err(Self::map_gpu_err)?,
+                ord,
+            )),
+            DType::BF16 => Ok(Self::wrap_buffer_bf16(
+                mk::masked_scatter_16(Self::unwrap_buffer_bf16(grad_compact)?, mb, out_numel, dev)
+                    .map_err(Self::map_gpu_err)?,
+                ord,
+            )),
+            DType::I32 => Ok(Self::wrap_slice_i32(
+                mk::masked_scatter_32::<i32>(Self::unwrap_buffer_i32(grad_compact)?.inner(), mb, out_numel, dev)
+                    .map_err(Self::map_gpu_err)?,
+                ord,
+            )),
+            DType::I64 => Ok(Self::wrap_slice_i64(
+                mk::masked_scatter_64::<i64>(Self::unwrap_buffer_i64(grad_compact)?.inner(), mb, out_numel, dev)
+                    .map_err(Self::map_gpu_err)?,
+                ord,
+            )),
+            _ => Err(FerrotorchError::NotImplementedOnCuda {
+                op: "masked_scatter",
+            }),
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------

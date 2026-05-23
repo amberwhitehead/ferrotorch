@@ -3080,7 +3080,7 @@ fn grad_fn_struct_paths_link() {
     };
     let _mf = MaskedFillBackward::<f32> {
         input: leaf.clone(),
-        mask: vec![false],
+        mask: BoolTensor::from_vec(vec![false], vec![1]).unwrap(),
     };
     let _sa = ScatterBackward::<f32> {
         input: leaf.clone(),
@@ -3099,7 +3099,7 @@ fn grad_fn_struct_paths_link() {
     let _w = WhereCondBackward::<f32> {
         x: leaf.clone(),
         y: leaf.clone(),
-        condition: vec![true],
+        condition: BoolTensor::from_vec(vec![true], vec![1]).unwrap(),
     };
 }
 

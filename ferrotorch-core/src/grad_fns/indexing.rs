@@ -289,13 +289,15 @@ pub fn index_select_1d<T: Float>(
 /// The gradient is zeroed at every position where the mask was true, because
 /// those positions were replaced by a constant and no longer depend on the input.
 ///
-/// The mask is stored as a flat `Vec<bool>` for GPU reconstruction.
+/// The mask is stored as a [`BoolTensor`], which is resident-capable: if the
+/// forward ran on GPU the mask stays on the device, so the backward routes
+/// through the resident Phase-3c masked op with NO host crossing.
 #[derive(Debug)]
 pub struct MaskedFillBackward<T: Float> {
     /// The original input tensor (saved for shape).
     pub input: Tensor<T>,
-    /// The full boolean mask from the forward pass.
-    pub mask: Vec<bool>,
+    /// The full boolean mask from the forward pass (CPU- or GPU-resident).
+    pub mask: BoolTensor,
 }
 
 impl<T: Float> GradFn<T> for MaskedFillBackward<T> {
@@ -304,20 +306,21 @@ impl<T: Float> GradFn<T> for MaskedFillBackward<T> {
             return Ok(vec![None]);
         }
 
-        if grad_output.is_cuda() {
-            // GPU path: masked-zero via GPU kernel.
+        // GPU-resident path (crosslink #1187 Phase 3d): grad_input = masked_fill(
+        // grad_output, mask, 0) — zero the gradient where the forward filled a
+        // constant. Both grad and the bool mask stay on the device; the resident
+        // `masked_fill_dt` kernel is dtype-generic (f32/f64/bf16/f16). NO mask
+        // host crossing, NO float-mask upload.
+        if grad_output.is_cuda() && self.mask.is_cuda() {
+            if grad_output.device() != self.mask.device() {
+                return Err(FerrotorchError::DeviceMismatch {
+                    expected: grad_output.device(),
+                    got: self.mask.device(),
+                });
+            }
             let backend = gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
-            let ordinal = match grad_output.device() {
-                Device::Cuda(o) => o,
-                _ => unreachable!(),
-            };
-            let mask_f32: Vec<f32> = self
-                .mask
-                .iter()
-                .map(|&m| if m { 1.0 } else { 0.0 })
-                .collect();
-            let mask_handle = upload_f32_to_gpu(&mask_f32, ordinal)?;
-            let result_handle = backend.masked_zero_f32(grad_output.gpu_handle()?, &mask_handle)?;
+            let result_handle =
+                backend.masked_fill_dt(grad_output.gpu_handle()?, self.mask.gpu_handle()?, 0.0)?;
             let grad_tensor = Tensor::from_storage(
                 TensorStorage::gpu(result_handle),
                 self.input.shape().to_vec(),
@@ -325,10 +328,13 @@ impl<T: Float> GradFn<T> for MaskedFillBackward<T> {
             )?;
             Ok(vec![Some(grad_tensor)])
         } else {
-            // CPU path: direct mask zeroing.
+            // CPU path: direct mask zeroing. `self.mask.data()?` borrows the host
+            // bool slice (errors if the mask is GPU-resident while grad is on
+            // host — the correct device-mismatch signal).
             let go_data = grad_output.data()?;
+            let mask_h = self.mask.data()?;
             let mut grad_input: Vec<T> = go_data.to_vec();
-            for (i, &m) in self.mask.iter().enumerate() {
+            for (i, &m) in mask_h.iter().enumerate() {
                 if m {
                     grad_input[i] = <T as num_traits::Zero>::zero();
                 }
@@ -393,9 +399,12 @@ pub fn masked_fill<T: Float>(
         let storage = TensorStorage::gpu(result_handle);
 
         if input.requires_grad() && is_grad_enabled() {
+            // This entry point inherently has a host `&[bool]`; wrap it as a CPU
+            // BoolTensor for storage. The backward struct now holds a BoolTensor
+            // (CPU here; the resident `masked_fill_bt` path stores a GPU one).
             let grad_fn = Arc::new(MaskedFillBackward {
                 input: input.clone(),
-                mask: mask.to_vec(),
+                mask: BoolTensor::from_slice(mask, &output_shape)?,
             });
             Tensor::from_operation(storage, output_shape, grad_fn)
         } else {
@@ -413,7 +422,7 @@ pub fn masked_fill<T: Float>(
         if input.requires_grad() && is_grad_enabled() {
             let grad_fn = Arc::new(MaskedFillBackward {
                 input: input.clone(),
-                mask: mask.to_vec(),
+                mask: BoolTensor::from_slice(mask, &output_shape)?,
             });
             Tensor::from_operation(TensorStorage::cpu(output_data), output_shape, grad_fn)
         } else {
@@ -794,8 +803,8 @@ pub struct WhereCondBackward<T: Float> {
     pub x: Tensor<T>,
     /// The y tensor from the forward pass.
     pub y: Tensor<T>,
-    /// The condition mask from the forward pass.
-    pub condition: Vec<bool>,
+    /// The condition mask from the forward pass (CPU- or GPU-resident).
+    pub condition: BoolTensor,
 }
 
 impl<T: Float> GradFn<T> for WhereCondBackward<T> {
@@ -804,33 +813,30 @@ impl<T: Float> GradFn<T> for WhereCondBackward<T> {
             return Ok(vec![None, None]);
         }
 
-        // §3 GPU-native path: upload the bool condition as a f32 mask (1.0=true, 0.0=false)
-        // and use masked_zero_f32 on-device:
-        //   grad_x[i] = condition[i] ? grad[i] : 0  → zero where condition=false (NOT-mask)
-        //   grad_y[i] = condition[i] ? 0 : grad[i]  → zero where condition=true  (mask)
-        if grad_output.is_cuda() {
-            let ordinal = match grad_output.device() {
-                Device::Cuda(o) => o,
-                _ => unreachable!(),
-            };
+        // GPU-resident path (crosslink #1187 Phase 3d):
+        //   grad_x[i] = cond[i] ? grad[i] : 0  → zero grad where cond is FALSE
+        //   grad_y[i] = cond[i] ? 0 : grad[i]  → zero grad where cond is TRUE
+        // Both legs reuse the resident `masked_fill_dt` Phase-3c kernel with the
+        // resident bool condition directly: `masked_fill(grad, mask, 0)` zeros
+        // grad at every position where `mask` is true. grad_y uses `cond`; grad_x
+        // uses `!cond` (the resident `bool_not`). NO float-mask upload, NO host
+        // crossing. `masked_fill_dt` is dtype-generic (f32/f64/bf16/f16) and
+        // allocates exact-length output buffers (PyTorch parity: VJP of `where`).
+        if grad_output.is_cuda() && self.condition.is_cuda() {
+            if grad_output.device() != self.condition.device() {
+                return Err(FerrotorchError::DeviceMismatch {
+                    expected: grad_output.device(),
+                    got: self.condition.device(),
+                });
+            }
             let backend = gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
-
-            // condition_mask: 1.0 where condition=true, 0.0 where false.
-            let condition_mask: Vec<f32> = self
-                .condition
-                .iter()
-                .map(|&c| if c { 1.0f32 } else { 0.0 })
-                .collect();
-            // not_mask: 1.0 where condition=false (used to zero grad_x at those positions).
-            let not_mask: Vec<f32> = self
-                .condition
-                .iter()
-                .map(|&c| if c { 0.0f32 } else { 1.0 })
-                .collect();
+            let cond_h = self.condition.gpu_handle()?;
+            let grad_h = grad_output.gpu_handle()?;
 
             let grad_x = if self.x.requires_grad() {
-                let not_mask_h = upload_f32_to_gpu(&not_mask, ordinal)?;
-                let result_h = backend.masked_zero_f32(grad_output.gpu_handle()?, &not_mask_h)?;
+                // Zero grad where cond is false ⇒ fill grad with 0 at !cond.
+                let not_cond = backend.bool_not(cond_h)?;
+                let result_h = backend.masked_fill_dt(grad_h, &not_cond, 0.0)?;
                 Some(Tensor::from_storage(
                     TensorStorage::gpu(result_h),
                     self.x.shape().to_vec(),
@@ -841,8 +847,8 @@ impl<T: Float> GradFn<T> for WhereCondBackward<T> {
             };
 
             let grad_y = if self.y.requires_grad() {
-                let cond_mask_h = upload_f32_to_gpu(&condition_mask, ordinal)?;
-                let result_h = backend.masked_zero_f32(grad_output.gpu_handle()?, &cond_mask_h)?;
+                // Zero grad where cond is true ⇒ fill grad with 0 at cond.
+                let result_h = backend.masked_fill_dt(grad_h, cond_h, 0.0)?;
                 Some(Tensor::from_storage(
                     TensorStorage::gpu(result_h),
                     self.y.shape().to_vec(),
@@ -855,12 +861,14 @@ impl<T: Float> GradFn<T> for WhereCondBackward<T> {
             return Ok(vec![grad_x, grad_y]);
         }
 
+        // CPU path. `self.condition.data()?` borrows the host bool slice (errors
+        // if the cond is GPU-resident while grad is on host).
         let go_data = grad_output.data_vec()?;
+        let cond = self.condition.data()?;
         let zero = <T as num_traits::Zero>::zero();
 
         let grad_x = if self.x.requires_grad() {
-            let gx: Vec<T> = self
-                .condition
+            let gx: Vec<T> = cond
                 .iter()
                 .zip(go_data.iter())
                 .map(|(&c, &g)| if c { g } else { zero })
@@ -872,8 +880,7 @@ impl<T: Float> GradFn<T> for WhereCondBackward<T> {
         };
 
         let grad_y = if self.y.requires_grad() {
-            let gy: Vec<T> = self
-                .condition
+            let gy: Vec<T> = cond
                 .iter()
                 .zip(go_data.iter())
                 .map(|(&c, &g)| if c { zero } else { g })
@@ -893,6 +900,90 @@ impl<T: Float> GradFn<T> for WhereCondBackward<T> {
 
     fn name(&self) -> &'static str {
         "WhereCondBackward"
+    }
+}
+
+// ---------------------------------------------------------------------------
+// masked_select (crosslink #1187 Phase 3d — masked_select IS differentiable)
+// ---------------------------------------------------------------------------
+
+/// Backward function for `masked_select`.
+///
+/// Forward: `output = compact(input[i] for i where mask[i])` — a 1-D tensor of
+/// the kept elements in flat C-order (length = #true).
+///
+/// VJP: scatter the compacted `grad_output` (length = #true) back into a zeros
+/// tensor of `input.numel()` at the flat positions where `mask` is true; every
+/// non-selected position gets 0. This is the exact inverse of the forward
+/// compaction (PyTorch parity — `torch.masked_select` is differentiable).
+///
+/// The mask is stored as a [`BoolTensor`]: resident if the forward ran on GPU,
+/// so the backward routes through the resident `masked_scatter` kernel with NO
+/// host crossing.
+#[derive(Debug)]
+pub struct MaskedSelectBackward<T: Float> {
+    /// The original input tensor (saved for shape + autograd graph linkage).
+    pub input: Tensor<T>,
+    /// The boolean mask from the forward pass (CPU- or GPU-resident).
+    pub mask: BoolTensor,
+}
+
+impl<T: Float> GradFn<T> for MaskedSelectBackward<T> {
+    fn backward(&self, grad_output: &Tensor<T>) -> FerrotorchResult<Vec<Option<Tensor<T>>>> {
+        if !is_grad_enabled() {
+            return Ok(vec![None]);
+        }
+
+        let input_shape = self.input.shape().to_vec();
+        let input_numel: usize = input_shape.iter().product();
+
+        // GPU-resident path (crosslink #1187 Phase 3d): scatter the compacted
+        // grad back into a zeros buffer of input.numel() at the true positions,
+        // via the resident `masked_scatter` kernel (inverse of the Phase-3c
+        // compaction). grad + bool mask stay on the device — NO host crossing.
+        if grad_output.is_cuda() && self.mask.is_cuda() {
+            if grad_output.device() != self.mask.device() {
+                return Err(FerrotorchError::DeviceMismatch {
+                    expected: grad_output.device(),
+                    got: self.mask.device(),
+                });
+            }
+            let backend = gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
+            let result_handle = backend.masked_scatter(
+                grad_output.gpu_handle()?,
+                self.mask.gpu_handle()?,
+                input_numel,
+            )?;
+            let grad_tensor =
+                Tensor::from_storage(TensorStorage::gpu(result_handle), input_shape, false)?;
+            return Ok(vec![Some(grad_tensor)]);
+        }
+
+        // CPU path: walk the host mask, scattering grad[j++] -> grad_input[i] at
+        // each true position. `self.mask.data()?` errors if the mask is GPU-
+        // resident while grad is on host (the correct device-mismatch signal).
+        let go_data = grad_output.data()?;
+        let mask_h = self.mask.data()?;
+        let zero = <T as num_traits::Zero>::zero();
+        let mut grad_input: Vec<T> = vec![zero; input_numel];
+        let mut j = 0usize;
+        for (i, &m) in mask_h.iter().enumerate() {
+            if m {
+                grad_input[i] = go_data[j];
+                j += 1;
+            }
+        }
+        let grad_tensor =
+            Tensor::from_storage(TensorStorage::cpu(grad_input), input_shape, false)?;
+        Ok(vec![Some(grad_tensor)])
+    }
+
+    fn inputs(&self) -> Vec<&Tensor<T>> {
+        vec![&self.input]
+    }
+
+    fn name(&self) -> &'static str {
+        "MaskedSelectBackward"
     }
 }
 
@@ -939,14 +1030,12 @@ pub fn masked_fill_bt<T: Float>(
         let output_shape = input.shape().to_vec();
 
         if input.requires_grad() && is_grad_enabled() {
-            // Autograd needs the boolean mask host-side for the masked-zero VJP.
-            // The grad case is rare for masked_fill (attention masks don't carry
-            // grad); pulling the mask to host once here keeps the backward
-            // working without a resident-bool backward kernel (a follow-up).
-            let mask_cpu = mask.to(Device::Cpu)?;
+            // Store the resident mask directly (cheap Arc/clone-on-storage) — the
+            // backward routes through the resident `masked_fill_dt` VJP with NO
+            // host crossing (crosslink #1187 Phase 3d). No `mask.to(Cpu)`.
             let grad_fn = Arc::new(MaskedFillBackward {
                 input: input.clone(),
-                mask: mask_cpu.data()?.to_vec(),
+                mask: mask.clone(),
             });
             return Tensor::from_operation(storage, output_shape, grad_fn);
         }

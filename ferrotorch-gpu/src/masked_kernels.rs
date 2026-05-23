@@ -393,6 +393,57 @@ DONE: ret;
 }
 
 // ===========================================================================
+// masked_scatter: serial scatter (the inverse of the compaction above)
+//
+// Signature: (grad_ptr, mask_ptr, out_ptr, n)
+//   grad: VAL_BYTES per element, length = #true (the compacted gradient)
+//   mask: 1 byte per element (u8 0/1), length n
+//   out:  VAL_BYTES per element, length n, PRE-ZEROED by the host (alloc_zeros)
+//   for each i in [0,n): if mask[i]!=0 { out[i] = grad[j++] }  (else left 0)
+// This is the VJP of masked_select: the compaction wrote input[i] -> out[j++]
+// for each true i, so the backward scatters grad[j++] -> out[i] at those same
+// positions and zeros everywhere else. One launched thread walks serially in
+// order (matching COMPACT/COUNT_TRUE above); a parallel prefix-sum scatter is a
+// perf follow-up. VAL_SHIFT is log2(VAL_BYTES). Out is left untouched (already
+// 0) where mask[i]==0, so no else-store is needed.
+// ===========================================================================
+fn scatter_ptx(kernel_name: &str, val_shift: u32, ld_st_ty: &str, reg_decl: &str) -> String {
+    format!(
+        "\
+.version 7.0
+.target sm_52
+.address_size 64
+.visible .entry {kernel_name}(.param .u64 grad_ptr, .param .u64 mask_ptr, .param .u64 out_ptr, .param .u32 n) {{
+    .reg .u32 %idx, %bid, %bdim, %nr, %i, %j;
+    .reg .u64 %gr, %mk, %out, %goff, %ooff, %gcur, %mcur, %ocur;
+    .reg .u16 %m; {reg_decl}
+    .reg .pred %only0, %p, %nz;
+    ld.param.u64 %gr, [grad_ptr]; ld.param.u64 %mk, [mask_ptr];
+    ld.param.u64 %out, [out_ptr]; ld.param.u32 %nr, [n];
+    mov.u32 %bid, %ctaid.x; mov.u32 %bdim, %ntid.x; mov.u32 %idx, %tid.x;
+    mad.lo.u32 %idx, %bid, %bdim, %idx;
+    setp.ne.u32 %only0, %idx, 0; @%only0 bra DONE;
+    mov.u32 %i, 0; mov.u32 %j, 0;
+LOOP:
+    setp.ge.u32 %p, %i, %nr; @%p bra DONE;
+    cvt.u64.u32 %ooff, %i; add.u64 %mcur, %mk, %ooff;
+    ld.global.u8 %m, [%mcur]; setp.ne.u16 %nz, %m, 0;
+    @!%nz bra NEXT;
+    // mask[i] true: out[i] = grad[j]
+    cvt.u64.u32 %goff, %j; shl.b64 %goff, %goff, {val_shift}; add.u64 %gcur, %gr, %goff;
+    ld.global.{ld_st_ty} %val, [%gcur];
+    shl.b64 %ooff, %ooff, {val_shift}; add.u64 %ocur, %out, %ooff;
+    st.global.{ld_st_ty} [%ocur], %val;
+    add.u32 %j, %j, 1;
+NEXT:
+    add.u32 %i, %i, 1; bra LOOP;
+DONE: ret;
+}}
+"
+    )
+}
+
+// ===========================================================================
 // Launch harness
 // ===========================================================================
 
@@ -606,6 +657,66 @@ fn launch_compact<T: DeviceRepr + ValidAsZeroBits>(
     Ok(out)
 }
 
+/// Serial scatter (inverse of [`launch_compact`]): write `grad[j++] -> out[i]`
+/// for each `i` where `mask[i] != 0`, leaving every other position 0. `out` is
+/// a fresh `out_numel`-element zeroed buffer; `grad` holds the compacted
+/// gradient (length = #true). Returns the resident `CudaSlice<T>` of length
+/// `out_numel`.
+fn launch_scatter<T: DeviceRepr + ValidAsZeroBits>(
+    grad: &CudaSlice<T>,
+    mask: &CudaSlice<u8>,
+    out_numel: usize,
+    device: &GpuDevice,
+    ptx: String,
+    kernel_name: String,
+) -> GpuResult<CudaSlice<T>> {
+    if mask.len() != out_numel {
+        return Err(GpuError::LengthMismatch {
+            a: mask.len(),
+            b: out_numel,
+        });
+    }
+    let stream = device.stream();
+    if out_numel == 0 {
+        return Ok(stream.alloc_zeros::<T>(0)?);
+    }
+    let ctx = device.context();
+    let f =
+        crate::module_cache::get_or_compile_owned(ctx, ptx, kernel_name, device.ordinal() as u32)
+            .map_err(|e| GpuError::PtxCompileFailed {
+                kernel: "masked_scatter",
+                source: e,
+            })?;
+    // out_numel-element zeroed buffer: positions where mask is false stay 0.
+    let mut out = stream.alloc_zeros::<T>(out_numel)?;
+    // Single block, single active thread (thread 0 scatters serially).
+    let cfg = LaunchConfig {
+        grid_dim: (1, 1, 1),
+        block_dim: (1, 1, 1),
+        shared_mem_bytes: 0,
+    };
+    let n_u32 = out_numel as u32;
+    // SAFETY:
+    // - `f` is the scatter PTX entry; signature (grad_ptr, mask_ptr, out_ptr, n)
+    //   matches the four args below.
+    // - `mask` is an out_numel-byte buffer; `grad` holds the #true compacted
+    //   elements. Thread 0 walks mask[0..out_numel) and reads grad[j] only as it
+    //   increments `j` once per true byte, so `j` never exceeds grad.len() (the
+    //   true count). `out` is a fresh out_numel-element buffer, exclusively
+    //   borrowed, not aliased with `grad`/`mask`.
+    // - `n_u32` is non-truncating for any host-allocatable contiguous buffer.
+    unsafe {
+        stream
+            .launch_builder(&f)
+            .arg(grad)
+            .arg(mask)
+            .arg(&mut out)
+            .arg(&n_u32)
+            .launch(cfg)?;
+    }
+    Ok(out)
+}
+
 // ===========================================================================
 // Public entry points
 // ===========================================================================
@@ -742,6 +853,44 @@ pub fn masked_select_16(
     Ok((out, len))
 }
 
+/// masked_scatter for a 32-bit value dtype (f32 / i32): scatter the compacted
+/// `grad` back into a zeros buffer of length `out_numel` at the positions where
+/// `mask` is true (the VJP of [`masked_select_32`]).
+pub fn masked_scatter_32<T: DeviceRepr + ValidAsZeroBits>(
+    grad: &CudaSlice<T>,
+    mask: &CudaSlice<u8>,
+    out_numel: usize,
+    d: &GpuDevice,
+) -> GpuResult<CudaSlice<T>> {
+    debug_assert_eq!(std::mem::size_of::<T>(), 4, "masked_scatter_32 requires a 4-byte element");
+    let ptx = scatter_ptx("masked_scatter_32", 2, "b32", ".reg .b32 %val;");
+    launch_scatter(grad, mask, out_numel, d, ptx, "masked_scatter_32".to_string())
+}
+
+/// masked_scatter for a 64-bit value dtype (f64 / i64).
+pub fn masked_scatter_64<T: DeviceRepr + ValidAsZeroBits>(
+    grad: &CudaSlice<T>,
+    mask: &CudaSlice<u8>,
+    out_numel: usize,
+    d: &GpuDevice,
+) -> GpuResult<CudaSlice<T>> {
+    debug_assert_eq!(std::mem::size_of::<T>(), 8, "masked_scatter_64 requires an 8-byte element");
+    let ptx = scatter_ptx("masked_scatter_64", 3, "b64", ".reg .b64 %val;");
+    launch_scatter(grad, mask, out_numel, d, ptx, "masked_scatter_64".to_string())
+}
+
+/// masked_scatter for a 16-bit value dtype (f16 / bf16; pure 16-bit bit copy,
+/// no decode — we only move bit patterns into their original slots).
+pub fn masked_scatter_16(
+    grad: &CudaSlice<u16>,
+    mask: &CudaSlice<u8>,
+    out_numel: usize,
+    d: &GpuDevice,
+) -> GpuResult<CudaSlice<u16>> {
+    let ptx = scatter_ptx("masked_scatter_16", 1, "b16", ".reg .b16 %val;");
+    launch_scatter(grad, mask, out_numel, d, ptx, "masked_scatter_16".to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -777,6 +926,32 @@ mod tests {
         let (out, len) = masked_select_32::<f32>(&input, &mask, &d).unwrap();
         assert_eq!(len, 3);
         assert_eq!(d.stream().clone_dtoh(&out).unwrap(), vec![1.0f32, 3.0, 4.0]);
+    }
+
+    #[test]
+    fn masked_scatter_32_is_inverse_of_compact() {
+        let d = dev();
+        // mask [1,0,1,1,0]; compacted grad [g0,g2,g3] scatters back to
+        // out = [g0, 0, g2, g3, 0].
+        let mask = d.stream().clone_htod(&vec![1u8, 0, 1, 1, 0]).unwrap();
+        let grad = d.stream().clone_htod(&vec![10.0f32, 30.0, 40.0]).unwrap();
+        let out = masked_scatter_32::<f32>(&grad, &mask, 5, &d).unwrap();
+        assert_eq!(
+            d.stream().clone_dtoh(&out).unwrap(),
+            vec![10.0f32, 0.0, 30.0, 40.0, 0.0]
+        );
+    }
+
+    #[test]
+    fn masked_scatter_16_bf16_bits_roundtrip() {
+        let d = dev();
+        // bf16 bit patterns for 1.0 (0x3F80) and 2.0 (0x4000).
+        let one = half::bf16::from_f32(1.0).to_bits();
+        let two = half::bf16::from_f32(2.0).to_bits();
+        let mask = d.stream().clone_htod(&vec![0u8, 1, 1]).unwrap();
+        let grad = d.stream().clone_htod(&vec![one, two]).unwrap();
+        let out = masked_scatter_16(&grad, &mask, 3, &d).unwrap();
+        assert_eq!(d.stream().clone_dtoh(&out).unwrap(), vec![0u16, one, two]);
     }
 
     #[test]

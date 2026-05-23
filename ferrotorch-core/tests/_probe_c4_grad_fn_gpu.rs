@@ -37,7 +37,7 @@ use ferrotorch_core::grad_fns::linalg::{
     dot_differentiable, matmul_differentiable, mv_differentiable,
 };
 use ferrotorch_core::tensor::GradFn;
-use ferrotorch_core::{Device, Tensor};
+use ferrotorch_core::{BoolTensor, Device, Tensor};
 
 /// F32 gradient tolerance (1 ULP at f32 near 1.0 is ~1.2e-7; 1e-5 gives margin
 /// for the extra PTX rounding vs the reference CPU path).
@@ -614,10 +614,16 @@ fn where_cond_backward_f32_gpu_stays_on_device() {
     let y_gpu = gpu_f32(y_data.clone(), &shape);
     let go_gpu = gpu_f32(vec![1.0; 6], &shape);
 
+    // GPU-resident condition (crosslink #1187 Phase 3d): the backward routes
+    // through the resident `where_cond` VJP, NO host crossing.
+    let cond_gpu = BoolTensor::from_slice(&condition, &shape)
+        .expect("cond")
+        .to(Device::Cuda(0))
+        .expect("cond to cuda");
     let grad_fn = WhereCondBackward {
         x: x_gpu.clone(),
         y: y_gpu.clone(),
-        condition: condition.clone(),
+        condition: cond_gpu,
     };
     let grads = grad_fn.backward(&go_gpu).expect("where_cond backward gpu");
     let grad_x = grads[0].as_ref().unwrap();
@@ -629,10 +635,11 @@ fn where_cond_backward_f32_gpu_stays_on_device() {
     let x_cpu = cpu_f32_grad(x_data.clone(), &shape);
     let y_cpu = cpu_f32_grad(y_data.clone(), &shape);
     let go_cpu = cpu_f32(vec![1.0; 6], &shape);
+    let cond_cpu = BoolTensor::from_slice(&condition, &shape).expect("cond cpu");
     let grad_fn_cpu = WhereCondBackward {
         x: x_cpu.clone(),
         y: y_cpu.clone(),
-        condition: condition.clone(),
+        condition: cond_cpu,
     };
     let grads_cpu = grad_fn_cpu
         .backward(&go_cpu)

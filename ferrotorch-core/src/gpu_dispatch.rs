@@ -1907,6 +1907,24 @@ pub trait GpuBackend: Send + Sync {
         })
     }
 
+    // masked_scatter — the resident VJP of `masked_select` (crosslink #1187
+    // Phase 3d). Scatter the compacted `grad_compact` (length = #true) back into
+    // a zeros buffer of `out_numel` elements at the flat C-order positions where
+    // `mask` is true: `out[i] = mask[i]!=0 ? grad_compact[j++] : 0`. `mask` MUST
+    // be tagged `DType::Bool` with `mask.len() == out_numel`; the result keeps
+    // `grad_compact`'s dtype and stays GPU-resident. Covers f32/f64/bf16/f16
+    // (+ i32/i64). This is the inverse of the Phase-3c compaction kernel.
+    fn masked_scatter(
+        &self,
+        _grad_compact: &GpuBufferHandle,
+        _mask: &GpuBufferHandle,
+        _out_numel: usize,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::NotImplementedOnCuda {
+            op: "masked_scatter",
+        })
+    }
+
     // masked_zero: out[i] = mask[i] ? 0.0 : grad[i]  (backward of masked_fill)
     fn masked_zero_f32(
         &self,

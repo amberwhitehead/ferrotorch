@@ -372,10 +372,13 @@ pub fn where_cond<T: Float>(
     let output_shape = x.shape().to_vec();
 
     if needs_grad(x, y) {
+        // This entry point inherently has a host `&[bool]`; wrap it as a CPU
+        // BoolTensor for storage. The backward struct now holds a BoolTensor
+        // (CPU here; the resident `where_cond_bt` path stores a GPU one).
         let grad_fn = Arc::new(crate::grad_fns::indexing::WhereCondBackward {
             x: x.clone(),
             y: y.clone(),
-            condition: condition.to_vec(),
+            condition: crate::bool_tensor::BoolTensor::from_slice(condition, &output_shape)?,
         });
         Tensor::from_operation(TensorStorage::cpu(output), output_shape, grad_fn)
     } else {
@@ -436,15 +439,13 @@ pub fn where_cond_bt<T: Float>(
         let output_shape = x.shape().to_vec();
 
         if needs_grad(x, y) {
-            // Autograd needs the host condition for the VJP routing. The grad
-            // case for where is uncommon on a resident attention path; pull the
-            // cond to host once to keep backward correct (resident-bool backward
-            // is a follow-up).
-            let cond_cpu = cond.to(crate::device::Device::Cpu)?;
+            // Store the resident cond directly (cheap Arc/clone-on-storage) — the
+            // backward routes through the resident `where_cond` VJP with NO host
+            // crossing (crosslink #1187 Phase 3d). No `cond.to(Cpu)`.
             let grad_fn = Arc::new(crate::grad_fns::indexing::WhereCondBackward {
                 x: x.clone(),
                 y: y.clone(),
-                condition: cond_cpu.data()?.to_vec(),
+                condition: cond.clone(),
             });
             return Tensor::from_operation(storage, output_shape, grad_fn);
         }
@@ -467,7 +468,13 @@ pub fn where_cond_bt<T: Float>(
 /// the result stays GPU-resident. The single integer COUNT crosses to the host
 /// to size the data-dependent output; that scalar is the result SHAPE, not a
 /// data round-trip (PyTorch parity: a CUDA sync sizes `masked_select`'s
-/// output). No gradient is attached (matches the host-mask masked ops here).
+/// output).
+///
+/// `masked_select` IS differentiable (PyTorch parity). When `input` requires
+/// grad and grad is enabled, the result carries a `MaskedSelectBackward` grad_fn
+/// that scatters the compacted gradient back into a zeros tensor of
+/// `input.numel()` at the selected positions. On the GPU path the backward stays
+/// resident via the `masked_scatter` kernel (crosslink #1187 Phase 3d).
 pub fn masked_select<T: Float>(
     input: &Tensor<T>,
     mask: &crate::bool_tensor::BoolTensor,
@@ -492,7 +499,20 @@ pub fn masked_select<T: Float>(
         let backend =
             crate::gpu_dispatch::gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
         let (handle, len) = backend.masked_select(input.gpu_handle()?, mask.gpu_handle()?)?;
-        return Tensor::from_storage(TensorStorage::gpu(handle), vec![len], false);
+        let storage = TensorStorage::gpu(handle);
+
+        // PyTorch parity: masked_select IS differentiable. Attach the backward
+        // (scatter the compacted grad back into a zeros tensor at the true mask
+        // positions). Store the resident mask directly — the backward stays
+        // GPU-resident, NO host crossing (crosslink #1187 Phase 3d).
+        if input.requires_grad() && is_grad_enabled() {
+            let grad_fn = Arc::new(crate::grad_fns::indexing::MaskedSelectBackward {
+                input: input.clone(),
+                mask: mask.clone(),
+            });
+            return Tensor::from_operation(storage, vec![len], grad_fn);
+        }
+        return Tensor::from_storage(storage, vec![len], false);
     }
 
     // CPU (or mixed-residency) path: walk the host data + mask. `mask.data()?` /
@@ -506,7 +526,17 @@ pub fn masked_select<T: Float>(
         .filter_map(|(&v, &m)| if m { Some(v) } else { None })
         .collect();
     let len = out.len();
-    Tensor::from_storage(TensorStorage::cpu(out), vec![len], false)
+    let storage = TensorStorage::cpu(out);
+
+    if input.requires_grad() && is_grad_enabled() {
+        let grad_fn = Arc::new(crate::grad_fns::indexing::MaskedSelectBackward {
+            input: input.clone(),
+            mask: mask.clone(),
+        });
+        Tensor::from_operation(storage, vec![len], grad_fn)
+    } else {
+        Tensor::from_storage(storage, vec![len], false)
+    }
 }
 
 // ---------------------------------------------------------------------------
