@@ -392,6 +392,26 @@ fn dispatch_f32(
             let value = value_kwarg("addcmul")?;
             grad_fns::arithmetic::addcmul(&input, &t1, &t2, value)?
         })),
+        // `torch.addcdiv(input, tensor1, tensor2, *, value=1)` — fused
+        // `out = input + value * tensor1 / tensor2` per
+        // `aten/src/ATen/native/PointwiseOps.cpp:66 TORCH_IMPL_FUNC(addcdiv_out)`
+        // and `_torch_docs.py:461`. ferrotorch's
+        // `arithmetic::addcdiv<T: Float>(input, t1, t2, value)` mirrors the
+        // 3-input ternary `build_ternary_op` at `PointwiseOps.cpp:51`;
+        // backward per `tools/autograd/derivatives.yaml`:
+        //   self    : grad
+        //   tensor1 : grad * (value / tensor2)
+        //   tensor2 : -grad * (value * tensor1 / (tensor2 * tensor2))
+        // 3 args via the existing `ternary()` helper + `value_kwarg` kwarg
+        // (default 1.0) — both helpers introduced for addcmul (#1200) and
+        // reused here per R-DEFER-8. Integer-dtype error path at
+        // `PointwiseOps.cpp:38-50 TORCH_META_FUNC(addcdiv)` is unreachable
+        // for `Tensor<T: Float>`. Closes blocker #1201.
+        "addcdiv" => Ok(Some({
+            let (input, t1, t2) = ternary("addcdiv")?;
+            let value = value_kwarg("addcdiv")?;
+            grad_fns::arithmetic::addcdiv(&input, &t1, &t2, value)?
+        })),
         // `torch.pow(input, exponent, *, out=None)` — `_torch_docs.py:8672`.
         // ferrotorch's `arithmetic::pow<T: Float>(a, exp: f64)` mirrors the
         // scalar-exponent overload at `aten/src/ATen/native/Pow.cpp:51
@@ -452,6 +472,7 @@ fn dispatch_ops() -> &'static [&'static str] {
         "fmod",
         "floor_divide",
         "addcmul",
+        "addcdiv",
     ]
 }
 

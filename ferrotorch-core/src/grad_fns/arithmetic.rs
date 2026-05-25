@@ -3084,6 +3084,323 @@ fn addcmul_inner<T: Float>(
 }
 
 // ===========================================================================
+// addcdiv (REQ-16)
+// ===========================================================================
+
+/// Backward node for `c = input + value * tensor1 / tensor2` (fused).
+///
+/// Per `tools/autograd/derivatives.yaml` (verified live 2026-05-25):
+///
+/// ```yaml
+/// - name: addcdiv(Tensor self, Tensor tensor1, Tensor tensor2, *, Scalar value=1) -> Tensor
+///   self: handle_r_to_c(self.scalar_type(), grad)
+///   tensor1: handle_r_to_c(tensor1.scalar_type(), grad * (value / tensor2).conj())
+///   tensor2: handle_r_to_c(tensor2.scalar_type(), -grad * (value * tensor1 / (tensor2 * tensor2)).conj())
+/// ```
+///
+/// For `T: Float` (no complex support in this `Tensor<T: Float>` family) the
+/// `handle_r_to_c` cast is a no-op and `.conj()` is the identity. The VJP
+/// reduces to:
+///
+/// - `d_input   = grad`
+/// - `d_tensor1 = grad * value / tensor2`
+/// - `d_tensor2 = -grad * value * tensor1 / (tensor2 * tensor2)`
+///
+/// Each gradient is reduced back to the original operand's shape via
+/// `reduce_grad_to_shape` (the 3-way broadcast in forward may have expanded
+/// any of the 3 operands).
+///
+/// At `tensor2 = 0` the d_tensor2 path produces NaN / ±Inf because of the
+/// `1/tensor2^2` factor; this matches upstream IEEE-754 div-by-zero (R-DEV-1).
+#[derive(Debug)]
+struct AddcdivBackward<T: Float> {
+    input: Tensor<T>,
+    tensor1: Tensor<T>,
+    tensor2: Tensor<T>,
+    value: f64,
+}
+
+impl<T: Float> GradFn<T> for AddcdivBackward<T> {
+    fn backward(&self, grad_output: &Tensor<T>) -> FerrotorchResult<Vec<Option<Tensor<T>>>> {
+        // d_input = grad (reduced to input.shape() under broadcasting).
+        let d_input = if self.input.requires_grad() {
+            Some(reduce_grad_to_shape(grad_output, self.input.shape())?)
+        } else {
+            None
+        };
+
+        // d_tensor1 = grad * value / tensor2 (reduced to tensor1.shape()).
+        // d_tensor2 = -grad * value * tensor1 / (tensor2 * tensor2) (reduced
+        // to tensor2.shape()).
+        //
+        // The chain runs under `no_grad` so the backward intermediates do not
+        // enter the graph (higher-order addcdiv is not exercised by op_db;
+        // non-higher-order backward parity is what this commit ships).
+        // `value` is scalar (no grad wrt it).
+        let value_t = T::from(self.value).ok_or_else(|| FerrotorchError::InvalidArgument {
+            message: format!(
+                "addcdiv backward: value={} cannot be represented in the tensor dtype",
+                self.value
+            ),
+        })?;
+
+        let d_tensor1 = if self.tensor1.requires_grad() {
+            // d_tensor1 = grad * value / tensor2.
+            // Compute `div(grad, tensor2)` (handles broadcasting) then scale
+            // by `value` via a 0-d tensor multiply.
+            let computed = no_grad(|| {
+                let g_over_t2 = div(grad_output, &self.tensor2)?;
+                let scale = Tensor::from_storage(
+                    TensorStorage::on_device(vec![value_t], grad_output.device())?,
+                    vec![],
+                    false,
+                )?;
+                mul(&g_over_t2, &scale)
+            })?;
+            Some(reduce_grad_to_shape(&computed, self.tensor1.shape())?)
+        } else {
+            None
+        };
+
+        let d_tensor2 = if self.tensor2.requires_grad() {
+            // d_tensor2 = -grad * value * tensor1 / (tensor2 * tensor2).
+            // Composed as: neg(grad) * tensor1 / tensor2 / tensor2 * value.
+            // (Two single-tensor divisions avoid materializing `tensor2^2`
+            // separately and let broadcasting flow naturally.)
+            let computed = no_grad(|| {
+                let neg_g = neg(grad_output)?;
+                let neg_g_t1 = mul(&neg_g, &self.tensor1)?;
+                let step1 = div(&neg_g_t1, &self.tensor2)?;
+                let step2 = div(&step1, &self.tensor2)?;
+                let scale = Tensor::from_storage(
+                    TensorStorage::on_device(vec![value_t], grad_output.device())?,
+                    vec![],
+                    false,
+                )?;
+                mul(&step2, &scale)
+            })?;
+            Some(reduce_grad_to_shape(&computed, self.tensor2.shape())?)
+        } else {
+            None
+        };
+
+        Ok(vec![d_input, d_tensor1, d_tensor2])
+    }
+
+    fn inputs(&self) -> Vec<&Tensor<T>> {
+        vec![&self.input, &self.tensor1, &self.tensor2]
+    }
+
+    fn name(&self) -> &'static str {
+        "AddcdivBackward"
+    }
+}
+
+/// `torch.addcdiv(input, tensor1, tensor2, *, value=1)` — fused
+/// `out = input + value * tensor1 / tensor2`.
+///
+/// Per `torch/_torch_docs.py:461-473`:
+///
+/// > addcdiv(input, tensor1, tensor2, *, value=1, out=None) -> Tensor
+/// >
+/// > Performs the element-wise division of :attr:`tensor1` by
+/// > :attr:`tensor2`, multiplies the result by the scalar :attr:`value`
+/// > and adds it to :attr:`input`.
+/// >
+/// > .. warning::
+/// >     Integer division with addcdiv is no longer supported, and in a
+/// >     future release addcdiv will perform a true division of tensor1
+/// >     and tensor2. ... for float inputs ... is just
+/// >     `(input + value * tensor1 / tensor2)`.
+/// >
+/// > .. math::
+/// >     \text{out}_i = \text{input}_i + \text{value} \times
+/// >                    \frac{\text{tensor1}_i}{\text{tensor2}_i}
+///
+/// The integer-dtype deprecation block at
+/// `aten/src/ATen/native/PointwiseOps.cpp:38-50 TORCH_META_FUNC(addcdiv)`
+/// hard-errors when both `tensor1` and `tensor2` are integral. ferrotorch's
+/// `Tensor<T: Float>` family only admits `f32`/`f64`/`bf16`/`f16`; the
+/// integer-only error path is unreachable here (R-DEV-1).
+///
+/// Upstream C++ entry point at `aten/src/ATen/native/PointwiseOps.cpp:66-73`:
+///
+/// ```cpp
+/// TORCH_IMPL_FUNC(addcdiv_out)
+/// (const Tensor& self,
+///  const Tensor& tensor1,
+///  const Tensor& tensor2,
+///  const Scalar& value,
+///  const Tensor& result) {
+///   addcdiv_stub(device_type(), *this, value);
+/// }
+/// ```
+///
+/// with meta function at `PointwiseOps.cpp:33-52` calling
+/// `build_ternary_op(maybe_get_output(), self, tensor1, tensor2)`. Backward
+/// per `tools/autograd/derivatives.yaml`:
+///
+/// ```yaml
+/// - name: addcdiv(Tensor self, Tensor tensor1, Tensor tensor2, *, Scalar value=1) -> Tensor
+///   self: handle_r_to_c(self.scalar_type(), grad)
+///   tensor1: handle_r_to_c(tensor1.scalar_type(), grad * (value / tensor2).conj())
+///   tensor2: handle_r_to_c(tensor2.scalar_type(), -grad * (value * tensor1 / (tensor2 * tensor2)).conj())
+/// ```
+///
+/// For `T: Float` (real-only) the `.conj()` is the identity and
+/// `handle_r_to_c` is a no-op. Edge cases (verified against the parity-sweep
+/// oracle):
+///
+/// - `addcdiv([1,2,3], [4,5,6], [2,2,2], value=1) = [3, 4.5, 6]`
+///   (e.g. `1 + 1*4/2 = 3`)
+/// - `addcdiv(input, t1, t2, value=0) = input` (the math degenerates to
+///   `input + 0` regardless of `tensor1`/`tensor2` — though `tensor2=0`
+///   still produces ±Inf*0 = NaN in the value=0 case per IEEE-754).
+/// - Division by zero: `addcdiv([1], [1], [0], value=1) = +Inf`;
+///   `addcdiv([1], [0], [0], value=1) = NaN` per IEEE-754
+///   (matches torch byte-for-byte).
+/// - NaN propagation: any of the 3 inputs containing NaN produces NaN at
+///   that position.
+/// - 3-way broadcasting: e.g. `addcdiv(shape=[3], shape=[2,3], shape=[2,3])`
+///   broadcasts `input` from `[3]` to `[2,3]`, producing shape `[2,3]`.
+///
+/// CPU-only in this commit. CUDA inputs flow through host-memory fallback
+/// (same pattern as `addcmul_inner` / `remainder_inner` / `fmod_inner`'s
+/// fallthrough). A dedicated GPU kernel can land under a separate blocker
+/// when a routed GPU consumer surfaces — no `.cpu()`-then-`.cuda()`
+/// round-trip is introduced (R-CODE-4 unaffected).
+///
+/// # Errors
+///
+/// - [`FerrotorchError::DeviceMismatch`] if any of `input`/`tensor1`/`tensor2`
+///   live on different devices.
+/// - Propagates any error from broadcasting / storage allocation.
+pub fn addcdiv<T: Float>(
+    input: &Tensor<T>,
+    tensor1: &Tensor<T>,
+    tensor2: &Tensor<T>,
+    value: f64,
+) -> FerrotorchResult<Tensor<T>> {
+    if input.device() != tensor1.device() {
+        return Err(FerrotorchError::DeviceMismatch {
+            expected: input.device(),
+            got: tensor1.device(),
+        });
+    }
+    if input.device() != tensor2.device() {
+        return Err(FerrotorchError::DeviceMismatch {
+            expected: input.device(),
+            got: tensor2.device(),
+        });
+    }
+
+    crate::profiler_hook::profile_op_scope(
+        "addcdiv",
+        "tensor_op",
+        &[input.shape(), tensor1.shape(), tensor2.shape()],
+        || addcdiv_inner(input, tensor1, tensor2, value),
+    )
+}
+
+fn addcdiv_inner<T: Float>(
+    input: &Tensor<T>,
+    tensor1: &Tensor<T>,
+    tensor2: &Tensor<T>,
+    value: f64,
+) -> FerrotorchResult<Tensor<T>> {
+    // 3-way broadcast: first broadcast tensor1 with tensor2, then with
+    // input. `broadcast_shapes` is binary, so we chain two calls.
+    let t12_shape = broadcast_shapes(tensor1.shape(), tensor2.shape())?;
+    let out_shape = broadcast_shapes(input.shape(), &t12_shape)?;
+    let device = input.device();
+
+    let input_data = input.data_vec()?;
+    let t1_data = tensor1.data_vec()?;
+    let t2_data = tensor2.data_vec()?;
+    let input_shape = input.shape().to_vec();
+    let t1_shape = tensor1.shape().to_vec();
+    let t2_shape = tensor2.shape().to_vec();
+    let out_numel: usize = out_shape.iter().product();
+
+    let mut result = vec![<T as num_traits::Zero>::zero(); out_numel.max(1)];
+
+    // C-contiguous strides for each operand (broadcast-padded to out_ndim).
+    let out_ndim = out_shape.len();
+    let pad_input = out_ndim - input_shape.len();
+    let pad_t1 = out_ndim - t1_shape.len();
+    let pad_t2 = out_ndim - t2_shape.len();
+
+    let strides_of = |shape: &[usize]| -> Vec<usize> {
+        let mut s = vec![1usize; shape.len()];
+        for d in (0..shape.len().saturating_sub(1)).rev() {
+            s[d] = s[d + 1] * shape[d + 1];
+        }
+        s
+    };
+    let input_strides = strides_of(&input_shape);
+    let t1_strides = strides_of(&t1_shape);
+    let t2_strides = strides_of(&t2_shape);
+
+    // Convert scalar `value` to T once. Returns NaN if value is NaN (T::from
+    // succeeds for f32/f64); the upstream contract allows arbitrary
+    // floating-point `value` including 0, negatives, NaN, ±Inf.
+    let value_t = T::from(value).ok_or_else(|| FerrotorchError::InvalidArgument {
+        message: format!("addcdiv: value={value} cannot be represented in the tensor dtype"),
+    })?;
+
+    for i in 0..out_numel {
+        // Decompose `i` into per-axis coords over `out_shape`.
+        let mut rem_i = i;
+        let mut coords = [0usize; 16];
+        for d in (0..out_ndim).rev() {
+            coords[d] = rem_i % out_shape[d];
+            rem_i /= out_shape[d];
+        }
+
+        // Map output coords to per-operand flat indices, collapsing
+        // broadcast (size==1) axes to coord 0.
+        let flatten = |shape: &[usize], strides: &[usize], pad: usize| -> usize {
+            let mut flat = 0usize;
+            for (d, &s) in strides.iter().enumerate() {
+                let oc = coords[d + pad];
+                let coord = if shape[d] == 1 { 0 } else { oc };
+                flat += coord * s;
+            }
+            flat
+        };
+        let i_flat = flatten(&input_shape, &input_strides, pad_input);
+        let t1_flat = flatten(&t1_shape, &t1_strides, pad_t1);
+        let t2_flat = flatten(&t2_shape, &t2_strides, pad_t2);
+
+        // Fused: out_i = input_i + value * tensor1_i / tensor2_i. R-DEV-1.
+        // IEEE-754 div-by-zero at tensor2_i=0 produces ±Inf (or NaN if
+        // tensor1_i=0 too) — matches upstream byte-for-byte.
+        result[i] = input_data[i_flat] + value_t * t1_data[t1_flat] / t2_data[t2_flat];
+    }
+
+    let storage = TensorStorage::on_device(result, device)?;
+    let out = Tensor::from_storage(storage, out_shape, false)?;
+
+    let needs_g = is_grad_enabled()
+        && (input.requires_grad() || tensor1.requires_grad() || tensor2.requires_grad());
+    if needs_g {
+        let (storage, shape) = out.into_storage_and_shape()?;
+        Tensor::from_operation(
+            storage,
+            shape,
+            Arc::new(AddcdivBackward {
+                input: input.clone(),
+                tensor1: tensor1.clone(),
+                tensor2: tensor2.clone(),
+                value,
+            }),
+        )
+    } else {
+        Ok(out)
+    }
+}
+
+// ===========================================================================
 // abs
 // ===========================================================================
 
@@ -4601,6 +4918,196 @@ mod tests {
             message: "addcmul backward: tensor2 gradient missing".into(),
         })?;
         assert_scalar_approx(&g_t2, 10.0, 1e-6);
+        Ok(())
+    }
+
+    // -----------------------------------------------------------------------
+    // addcdiv (REQ-16) tests
+    //
+    // R-CHAR-3: expected values are SYMBOLIC CONSTANTS derived from the
+    // upstream math `out_i = input_i + value * tensor1_i / tensor2_i` per
+    // `aten/src/ATen/native/PointwiseOps.cpp:66` and backward
+    // `d_input=grad, d_t1=grad*value/t2,
+    //  d_t2=-grad*value*t1/(t2*t2)` per
+    // `tools/autograd/derivatives.yaml` `name: addcdiv` (verified live
+    // 2026-05-25), NOT pulled from a pre-recorded fixture.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_addcdiv_forward_default_value() -> FerrotorchResult<()> {
+        // value=1 default: out = input + 1*t1/t2.
+        // input=[1,2,3], t1=[4,5,6], t2=[2,2,2].
+        //   out[0] = 1 + 4/2 = 3
+        //   out[1] = 2 + 5/2 = 4.5
+        //   out[2] = 3 + 6/2 = 6
+        let input = leaf_vec(&[1.0, 2.0, 3.0], false);
+        let t1 = leaf_vec(&[4.0, 5.0, 6.0], false);
+        let t2 = leaf_vec(&[2.0, 2.0, 2.0], false);
+        let c = addcdiv(&input, &t1, &t2, 1.0)?;
+        let d = c.data()?.to_vec();
+        let expected: [f32; 3] = [3.0, 4.5, 6.0];
+        for (i, (got, want)) in d.iter().zip(expected.iter()).enumerate() {
+            assert!(
+                (got - want).abs() < 1e-6,
+                "addcdiv[{i}] = {got}, expected {want}"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn test_addcdiv_forward_value_two() -> FerrotorchResult<()> {
+        // value=2: out = input + 2*t1/t2.
+        // input=[10, 20, 30], t1=[2, 4, 6], t2=[4, 4, 4].
+        //   out[0] = 10 + 2*2/4 = 10 + 1 = 11
+        //   out[1] = 20 + 2*4/4 = 20 + 2 = 22
+        //   out[2] = 30 + 2*6/4 = 30 + 3 = 33
+        let input = leaf_vec(&[10.0, 20.0, 30.0], false);
+        let t1 = leaf_vec(&[2.0, 4.0, 6.0], false);
+        let t2 = leaf_vec(&[4.0, 4.0, 4.0], false);
+        let c = addcdiv(&input, &t1, &t2, 2.0)?;
+        let d = c.data()?.to_vec();
+        let expected: [f32; 3] = [11.0, 22.0, 33.0];
+        for (i, (got, want)) in d.iter().zip(expected.iter()).enumerate() {
+            assert!(
+                (got - want).abs() < 1e-6,
+                "addcdiv[{i}] = {got}, expected {want}"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn test_addcdiv_forward_div_by_zero() -> FerrotorchResult<()> {
+        // IEEE-754: addcdiv([1], [1], [0], value=1) = 1 + 1*1/0 = +Inf
+        // addcdiv([1], [-1], [0], value=1) = 1 + 1*(-1)/0 = -Inf
+        // addcdiv([1], [0], [0], value=1) = 1 + 1*0/0 = NaN (0/0 = NaN)
+        let input = leaf_vec(&[1.0, 1.0, 1.0], false);
+        let t1 = leaf_vec(&[1.0, -1.0, 0.0], false);
+        let t2 = leaf_vec(&[0.0, 0.0, 0.0], false);
+        let c = addcdiv(&input, &t1, &t2, 1.0)?;
+        let d = c.data()?.to_vec();
+        assert!(
+            d[0].is_infinite() && d[0] > 0.0,
+            "addcdiv(1, 1, 0) expected +Inf, got {}",
+            d[0]
+        );
+        assert!(
+            d[1].is_infinite() && d[1] < 0.0,
+            "addcdiv(1, -1, 0) expected -Inf, got {}",
+            d[1]
+        );
+        assert!(
+            d[2].is_nan(),
+            "addcdiv(1, 0, 0) expected NaN (1 + 0/0), got {}",
+            d[2]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_addcdiv_forward_nan_propagation() -> FerrotorchResult<()> {
+        // NaN in any of the 3 inputs propagates to the output at that pos.
+        let input = leaf_vec(&[f32::NAN, 2.0, 3.0], false);
+        let t1 = leaf_vec(&[1.0, f32::NAN, 1.0], false);
+        let t2 = leaf_vec(&[1.0, 1.0, f32::NAN], false);
+        let c = addcdiv(&input, &t1, &t2, 1.0)?;
+        let d = c.data()?.to_vec();
+        assert!(d[0].is_nan(), "NaN in input must propagate (got {})", d[0]);
+        assert!(
+            d[1].is_nan(),
+            "NaN in tensor1 must propagate (got {})",
+            d[1]
+        );
+        assert!(
+            d[2].is_nan(),
+            "NaN in tensor2 must propagate (got {})",
+            d[2]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_addcdiv_broadcast_3way() -> FerrotorchResult<()> {
+        // Broadcast input=[3] against t1=[2,3] and t2=[2,3] -> out shape [2,3].
+        // input = [1, 2, 3] (broadcast across rows: [[1,2,3],[1,2,3]])
+        // t1    = [[10, 20, 30], [40, 50, 60]]
+        // t2    = [[2,  4,  5],  [8,  10, 12]]
+        // value = 1
+        // out   = input + t1 / t2:
+        //   row 0: [1 + 10/2,  2 + 20/4,  3 + 30/5]  = [6,  7,  9]
+        //   row 1: [1 + 40/8,  2 + 50/10, 3 + 60/12] = [6,  7,  8]
+        let input =
+            Tensor::from_storage(TensorStorage::cpu(vec![1.0_f32, 2.0, 3.0]), vec![3], false)?;
+        let t1 = Tensor::from_storage(
+            TensorStorage::cpu(vec![10.0_f32, 20.0, 30.0, 40.0, 50.0, 60.0]),
+            vec![2, 3],
+            false,
+        )?;
+        let t2 = Tensor::from_storage(
+            TensorStorage::cpu(vec![2.0_f32, 4.0, 5.0, 8.0, 10.0, 12.0]),
+            vec![2, 3],
+            false,
+        )?;
+        let c = addcdiv(&input, &t1, &t2, 1.0)?;
+        assert_eq!(c.shape(), &[2, 3], "addcdiv broadcast output shape");
+        let d = c.data()?.to_vec();
+        let expected: [f32; 6] = [6.0, 7.0, 9.0, 6.0, 7.0, 8.0];
+        for (i, (got, want)) in d.iter().zip(expected.iter()).enumerate() {
+            assert!(
+                (got - want).abs() < 1e-6,
+                "addcdiv broadcast[{i}] = {got}, expected {want}"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn test_addcdiv_backward_value_two() -> FerrotorchResult<()> {
+        // value=2. Per derivatives.yaml:
+        //   d_input   = grad
+        //   d_tensor1 = grad * value / tensor2 = grad * 2 / tensor2
+        //   d_tensor2 = -grad * value * tensor1 / (tensor2*tensor2)
+        //             = -grad * 2 * tensor1 / (tensor2*tensor2)
+        //
+        // Scalar case (input,t1,t2 = scalars), output is scalar, backward
+        // grad = 1 (default scalar seed).
+        //
+        // input=3, t1=8, t2=4, value=2:
+        //   forward: 3 + 2*8/4 = 3 + 4 = 7
+        //   d_input = 1
+        //   d_t1    = 1 * 2 / 4              = 0.5
+        //   d_t2    = -1 * 2 * 8 / (4*4)     = -16/16 = -1.0
+        let input = leaf_scalar(3.0, true);
+        let t1 = leaf_scalar(8.0, true);
+        let t2 = leaf_scalar(4.0, true);
+        let c = addcdiv(&input, &t1, &t2, 2.0)?;
+        assert!(c.grad_fn().is_some(), "addcdiv must attach grad_fn");
+        let fwd = c.data()?.to_vec();
+        assert!(
+            (fwd[0] - 7.0).abs() < 1e-6,
+            "addcdiv forward = {}, expected 7",
+            fwd[0]
+        );
+        c.backward()?;
+
+        // d_input = grad (=1)
+        let g_input = input
+            .grad()?
+            .ok_or_else(|| FerrotorchError::InvalidArgument {
+                message: "addcdiv backward: input gradient missing".into(),
+            })?;
+        assert_scalar_approx(&g_input, 1.0, 1e-6);
+        // d_t1 = grad * value / tensor2 = 1 * 2 / 4 = 0.5
+        let g_t1 = t1.grad()?.ok_or_else(|| FerrotorchError::InvalidArgument {
+            message: "addcdiv backward: tensor1 gradient missing".into(),
+        })?;
+        assert_scalar_approx(&g_t1, 0.5, 1e-6);
+        // d_t2 = -grad * value * tensor1 / (tensor2*tensor2) = -1*2*8/16 = -1
+        let g_t2 = t2.grad()?.ok_or_else(|| FerrotorchError::InvalidArgument {
+            message: "addcdiv backward: tensor2 gradient missing".into(),
+        })?;
+        assert_scalar_approx(&g_t2, -1.0, 1e-6);
         Ok(())
     }
 
