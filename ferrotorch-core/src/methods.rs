@@ -125,6 +125,58 @@ impl<T: Float> Tensor<T> {
         crate::grad_fns::arithmetic::fmod(self, other)
     }
 
+    /// `torch.Tensor.floor_divide(other)` — elementwise floor division
+    /// (true floor, toward `-infinity`).
+    ///
+    /// Mirrors `torch.floor_divide(input, other, *, out=None)` per
+    /// `torch/_torch_docs.py:4265-4296`:
+    ///
+    /// > Computes :attr:`input` divided by :attr:`other`, elementwise, and
+    /// > floors the result.
+    /// >
+    /// > .. math::
+    /// >     out_i = floor(input_i / other_i)
+    ///
+    /// Upstream entry at `aten/src/ATen/native/BinaryOps.cpp:979 Tensor
+    /// floor_divide(const Tensor& self, const Tensor& other)` dispatching
+    /// to `div_floor_stub` -> `div_floor_kernel` at
+    /// `aten/src/ATen/native/cpu/BinaryOpsKernel.cpp:297-349` ->
+    /// `c10::div_floor_floating` at `c10/util/generic_math.h:34-58`.
+    /// Registration at `torch/overrides.py:664 torch.floor_divide: lambda
+    /// input, other: -1`.
+    ///
+    /// `torch.floor_divide` was historically broken (performed trunc, NOT
+    /// floor) and `torch/_torch_docs.py:4267-4271` explicitly notes:
+    ///
+    /// > .. note::
+    /// >     Before PyTorch 1.13 :func:`torch.floor_divide` incorrectly
+    /// >     performed truncation division. To restore the previous
+    /// >     behavior use :func:`torch.div` with ``rounding_mode='trunc'``.
+    ///
+    /// As of PyTorch 1.13+ (and as of the upstream pin this ferrotorch is
+    /// translated against), `torch.floor_divide` performs TRUE FLOOR.
+    /// Verified live on 2026-05-25:
+    /// `torch.floor_divide(-7.0, 3.0).item() == -3.0`.
+    ///
+    /// Distinct from `remainder_t` and `fmod_t`. The 3-way identity
+    /// `a == floor_divide(a,b) * b + remainder(a,b)` holds; the
+    /// `fmod` sibling is the trunc-division remainder. For `a=-7, b=3`:
+    /// - `floor_divide(-7, 3) = -3` (true floor)
+    /// - `remainder(-7, 3) = 2`     (sign of divisor)
+    /// - `fmod(-7, 3) = -1`         (sign of dividend / trunc remainder)
+    ///
+    /// Backward: `torch.floor_divide` has no derivative — verified live
+    /// `grad_fn=<NotImplemented object>` raises `derivative for
+    /// aten::floor_divide is not implemented`. `FloorDivideBackward`
+    /// mirrors that by erroring on `.backward()`.
+    ///
+    /// The non-test production consumer wiring for
+    /// `arithmetic::floor_divide` per R-DEFER-1: this method is the
+    /// public, chainable surface that closes the consumer requirement.
+    pub fn floor_divide_t(&self, other: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
+        crate::grad_fns::arithmetic::floor_divide(self, other)
+    }
+
     // --- Transcendental ---
 
     pub fn exp_t(&self) -> FerrotorchResult<Tensor<T>> {

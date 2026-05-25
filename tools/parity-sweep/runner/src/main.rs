@@ -312,6 +312,25 @@ fn dispatch_f32(
             let (a, b) = binary("fmod")?;
             grad_fns::arithmetic::fmod(&a, &b)?
         })),
+        // `torch.floor_divide(input, other, *, out=None)` —
+        // `_torch_docs.py:4265-4296`. ferrotorch's
+        // `arithmetic::floor_divide<T: Float>(a, b)` mirrors the upstream
+        // CPU kernel at `aten/src/ATen/native/cpu/BinaryOpsKernel.cpp:297-349
+        // div_floor_kernel`'s floating-types branch which calls
+        // `c10::div_floor_floating` at `c10/util/generic_math.h:34-58`
+        // byte-for-byte. TRUE FLOOR semantics (toward -inf): verified live
+        // 2026-05-25 `torch.floor_divide(-7.0, 3.0) = -3.0`. The doc note
+        // at `_torch_docs.py:4267-4271` explicitly states the pre-1.13
+        // trunc-division behaviour is gone; current PyTorch performs
+        // floor. `floor_divide` is NOT in `derivatives.yaml` — upstream
+        // `grad_fn=<NotImplemented>` raises `derivative for
+        // aten::floor_divide is not implemented` on `.backward()`;
+        // `FloorDivideBackward` mirrors that error. Binary, no kwargs —
+        // `floor_divide` does not take alpha. Closes blocker #1197.
+        "floor_divide" => Ok(Some({
+            let (a, b) = binary("floor_divide")?;
+            grad_fns::arithmetic::floor_divide(&a, &b)?
+        })),
         // `torch.pow(input, exponent, *, out=None)` — `_torch_docs.py:8672`.
         // ferrotorch's `arithmetic::pow<T: Float>(a, exp: f64)` mirrors the
         // scalar-exponent overload at `aten/src/ATen/native/Pow.cpp:51
@@ -370,6 +389,7 @@ fn dispatch_ops() -> &'static [&'static str] {
         "reciprocal",
         "remainder",
         "fmod",
+        "floor_divide",
     ]
 }
 

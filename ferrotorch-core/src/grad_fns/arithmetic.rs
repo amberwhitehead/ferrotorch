@@ -2422,6 +2422,375 @@ fn fmod_inner<T: Float>(a: &Tensor<T>, b: &Tensor<T>) -> FerrotorchResult<Tensor
 }
 
 // ===========================================================================
+// floor_divide (REQ-12)
+// ===========================================================================
+
+/// Backward node for `c = floor_divide(a, b)` (TRUE-FLOOR semantics).
+///
+/// `floor_divide` is NOT listed in `tools/autograd/derivatives.yaml` (verified
+/// `grep 'floor_divide' /home/doll/pytorch/tools/autograd/derivatives.yaml`
+/// returns no entries). Live torch reports `grad_fn=<NotImplemented object>`
+/// and raises `derivative for aten::floor_divide is not implemented` when
+/// `.backward()` is invoked (verified 2026-05-25). The closest derivative
+/// surface is `div.Tensor_mode` at `derivatives.yaml:597-600`:
+///
+/// ```yaml
+/// - name: div.Tensor_mode(Tensor self, Tensor other, *, str? rounding_mode) -> Tensor
+///   self: div_tensor_self_backward(grad, other, self.scalar_type(), rounding_mode)
+///   other: div_tensor_other_backward(grad, self, other, rounding_mode)
+/// ```
+///
+/// whose backend definitions at
+/// `torch/csrc/autograd/FunctionsManual.cpp:674-708 div_tensor_{self,other}_backward`
+/// return `at::zeros_like(grad, ...)` whenever `rounding_mode.has_value()`.
+/// So a hypothetical `torch.div(a, b, rounding_mode="floor")` would emit
+/// zeros for both grads. But the user-facing `torch.floor_divide` does NOT
+/// take that path — it has no derivative entry at all, and PyTorch's
+/// `THPVariable_floor_divide` is wrapped in `TypeError_to_NotImplemented_`
+/// (`tools/autograd/templates/python_variable_methods.cpp:1279`), so the
+/// authentic upstream behaviour is "build the graph, error on backward".
+///
+/// Mirroring R-DEV-1: our `FloorDivideBackward::backward` returns
+/// `FerrotorchError::InvalidArgument` with a message that matches the
+/// upstream text. The grad_fn is attached when either operand requires
+/// grad (to enter the autograd graph like upstream does), but invoking
+/// `.backward()` errors — exactly the upstream contract.
+#[derive(Debug)]
+struct FloorDivideBackward<T: Float> {
+    a: Tensor<T>,
+    b: Tensor<T>,
+}
+
+impl<T: Float> GradFn<T> for FloorDivideBackward<T> {
+    fn backward(&self, _grad_output: &Tensor<T>) -> FerrotorchResult<Vec<Option<Tensor<T>>>> {
+        // Upstream raises `RuntimeError: derivative for aten::floor_divide is
+        // not implemented`. We surface the equivalent error via
+        // `InvalidArgument` (R-DEV-1: match the user-visible behaviour, which
+        // is "backward fails" — the precise exception TYPE differs because
+        // ferrotorch's error taxonomy is flatter than PyTorch's, but the
+        // failure outcome is identical).
+        Err(FerrotorchError::InvalidArgument {
+            message: "derivative for floor_divide is not implemented \
+                      (PyTorch parity: torch.floor_divide has no entry in \
+                      tools/autograd/derivatives.yaml and raises the same \
+                      error on .backward())"
+                .into(),
+        })
+    }
+
+    fn inputs(&self) -> Vec<&Tensor<T>> {
+        vec![&self.a, &self.b]
+    }
+
+    fn name(&self) -> &'static str {
+        "FloorDivideBackward"
+    }
+}
+
+/// `torch.floor_divide(input, other, *, out=None)` — elementwise floor
+/// division for `Tensor<T: Float>`.
+///
+/// Per `torch/_torch_docs.py:4265-4296 floor_divide(input, other, *,
+/// out=None) -> Tensor`:
+///
+/// > .. note::
+/// >     Before PyTorch 1.13 :func:`torch.floor_divide` incorrectly performed
+/// >     truncation division. To restore the previous behavior use
+/// >     :func:`torch.div` with ``rounding_mode='trunc'``.
+/// >
+/// > Computes :attr:`input` divided by :attr:`other`, elementwise, and floors
+/// > the result.
+/// >
+/// > .. math::
+/// >     \text{{out}}_i = \text{floor} \left( \frac{{\text{{input}}_i}}{{\text{{other}}_i}} \right)
+///
+/// So CURRENT torch.floor_divide (1.13+) performs TRUE FLOOR (toward
+/// -infinity), not trunc. Verified live on 2026-05-25:
+/// `torch.floor_divide(-7.0, 3.0).item() == -3.0` (true floor) and
+/// `torch.div(-7.0, 3.0, rounding_mode='floor').item() == -3.0` (same
+/// path).
+///
+/// Registered as `torch.floor_divide: lambda input, other: -1` at
+/// `torch/overrides.py:664`. The upstream C++ entry point for float
+/// tensors is at `aten/src/ATen/native/BinaryOps.cpp:979-984`:
+///
+/// ```cpp
+/// Tensor floor_divide(const Tensor& self, const Tensor& other) {
+///   Tensor result;
+///   auto iter = TensorIterator::binary_op(result, self, other);
+///   div_floor_stub(iter.device_type(), iter);
+///   return iter.output();
+/// }
+/// ```
+///
+/// dispatching to `div_floor_kernel` at
+/// `aten/src/ATen/native/cpu/BinaryOpsKernel.cpp:297-349` (CPU float
+/// branch, lines 335-346):
+///
+/// ```cpp
+/// AT_DISPATCH_FLOATING_TYPES_AND2(
+///     kBFloat16, kHalf, dtype, "div_floor_cpu", [&]() {
+///       cpu_kernel_vec(iter,
+///         [](scalar_t a, scalar_t b) -> scalar_t {
+///           return c10::div_floor_floating(a, b);
+///         },
+///         ...);
+///     });
+/// ```
+///
+/// which calls `c10::div_floor_floating` at
+/// `c10/util/generic_math.h:34-58`:
+///
+/// ```cpp
+/// template <typename scalar_t>
+/// inline C10_HOST_DEVICE scalar_t div_floor_floating(scalar_t a, scalar_t b)
+///     __ubsan_ignore_float_divide_by_zero__ {
+///   if (C10_UNLIKELY(b == 0)) {
+///     // Divide by zero: return standard IEEE result
+///     return a / b;
+///   }
+///
+///   auto mod = std::fmod(a, b);
+///   auto div = (a - mod) / b;
+///   if ((mod != 0) && (b < 0) != (mod < 0)) {
+///     div -= scalar_t(1);
+///   }
+///
+///   scalar_t floordiv;
+///   if (div != 0) {
+///     floordiv = std::floor(div);
+///     if (div - floordiv > scalar_t(0.5)) {
+///       floordiv += scalar_t(1.0);
+///     }
+///   } else {
+///     floordiv = C10_COMPAT_COPYSIGN(scalar_t(0), a / b);
+///   }
+///   return floordiv;
+/// }
+/// ```
+///
+/// The algorithm is more elaborate than a literal `(a / b).floor()` because
+/// `floor((a-mod)/b)` is the Python `__floordiv__` contract that maintains
+/// `a == (a // b) * b + remainder(a, b)` exactly even under floating-point
+/// rounding, plus an `±0` copysign step when the quotient rounds to zero.
+/// Matching it byte-for-byte is the R-DEV-1 numerical contract.
+///
+/// Edge cases (verified live against torch.floor_divide on 2026-05-25):
+///
+/// - `floor_divide(7, 3) = 2`
+/// - `floor_divide(-7, 3) = -3`  (true floor, NOT trunc — trunc would give -2)
+/// - `floor_divide(7, -3) = -3`
+/// - `floor_divide(-7, -3) = 2`
+/// - `floor_divide(5, 0) = +Inf` (IEEE-754 div: `5/0 = +Inf`)
+/// - `floor_divide(-5, 0) = -Inf`
+/// - `floor_divide(0, 0) = NaN`
+/// - `floor_divide(Inf, 3) = NaN` (because `fmod(Inf, 3) = NaN` propagates
+///   through the (a-mod)/b step)
+/// - `floor_divide(NaN, x) = NaN`, `floor_divide(x, NaN) = NaN`
+///
+/// **Contrast with `remainder` and `fmod`**:
+///
+/// - `floor_divide(-7, 3) = -3` (the quotient under floor division)
+/// - `remainder(-7, 3) = 2` (the remainder under floor division: `-7 - (-3)*3 = 2`)
+/// - `fmod(-7, 3) = -1` (the remainder under truncated division: `-7 - (-2)*3 = -1`)
+///
+/// The identity `a == floor_divide(a,b) * b + remainder(a,b)` holds:
+/// `-7 == (-3)*3 + 2 = -9 + 2 = -7`.
+///
+/// **Backward**: `floor_divide` is NOT in `derivatives.yaml`. Upstream
+/// `grad_fn` is `<NotImplemented object>` and `.backward()` raises
+/// `derivative for aten::floor_divide is not implemented`. We attach
+/// `FloorDivideBackward` which errors on `.backward()` to mirror that
+/// contract.
+///
+/// CPU-only in this commit. CUDA inputs flow through host-memory fallback
+/// — same pattern as `remainder_inner` / `fmod_inner` / `pow_inner`'s
+/// bf16/f16 fallthrough. No `.cpu()`-then-`.cuda()` round-trip is
+/// introduced, so R-CODE-4 does not bind.
+///
+/// # Errors
+///
+/// - [`FerrotorchError::DeviceMismatch`] if `a` and `b` live on different
+///   devices.
+/// - Propagates any error from broadcasting / storage allocation.
+pub fn floor_divide<T: Float>(a: &Tensor<T>, b: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
+    if a.device() != b.device() {
+        return Err(FerrotorchError::DeviceMismatch {
+            expected: a.device(),
+            got: b.device(),
+        });
+    }
+
+    if let Some(out) = crate::meta_propagate::binary_broadcast(a, b)? {
+        return Ok(out);
+    }
+
+    crate::profiler_hook::profile_op_scope(
+        "floor_divide",
+        "tensor_op",
+        &[a.shape(), b.shape()],
+        || floor_divide_inner(a, b),
+    )
+}
+
+fn floor_divide_inner<T: Float>(a: &Tensor<T>, b: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
+    // R-DEV-1 numerical contract: match upstream
+    // `c10/util/generic_math.h:35-58 div_floor_floating` byte-for-byte:
+    //
+    //   if (b == 0) return a / b;          // IEEE-754 div-by-zero
+    //   auto mod = std::fmod(a, b);
+    //   auto div = (a - mod) / b;
+    //   if ((mod != 0) && (b < 0) != (mod < 0)) div -= 1;
+    //   if (div != 0) {
+    //     floordiv = std::floor(div);
+    //     if (div - floordiv > 0.5) floordiv += 1;
+    //   } else {
+    //     floordiv = copysign(0, a / b);
+    //   }
+    //   return floordiv;
+    //
+    // The `(a - mod)/b` form (rather than `floor(a/b)` directly) is the
+    // Python `__floordiv__` contract that maintains
+    // `a == (a // b) * b + remainder(a, b)` exactly even under floating-
+    // point rounding; the post `if (div - floordiv > 0.5) floordiv += 1`
+    // step handles the edge case where rounding errors in `(a - mod) / b`
+    // push the result above the true floor. Matching this byte-for-byte
+    // is what brought parity-sweep below `rtol=1e-5, atol=1e-7` tolerance.
+    //
+    // Rust's `T::%` is C99 `fmod` (dividend-sign), same as `std::fmod`.
+    // `T::floor`, `T::abs`, and `T::copysign` are provided by
+    // `num_traits::Float`.
+    //
+    // Broadcasting: walks the broadcast iteration order over the output
+    // shape, same loop pattern as `remainder_inner` / `fmod_inner`. CPU
+    // host-memory fallthrough for CUDA inputs (no dedicated GPU kernel
+    // yet; same pattern as siblings).
+
+    let out_shape = broadcast_shapes(a.shape(), b.shape())?;
+    let device = a.device();
+
+    let a_data = a.data_vec()?;
+    let b_data = b.data_vec()?;
+    let a_shape = a.shape().to_vec();
+    let b_shape = b.shape().to_vec();
+    let out_numel: usize = out_shape.iter().product();
+
+    let mut result = vec![<T as num_traits::Zero>::zero(); out_numel.max(1)];
+
+    // Precompute c-contiguous strides for input shapes (broadcast-padded).
+    let out_ndim = out_shape.len();
+    let pad_a = out_ndim - a_shape.len();
+    let pad_b = out_ndim - b_shape.len();
+
+    let a_strides: Vec<usize> = {
+        let mut s = vec![1usize; a_shape.len()];
+        for d in (0..a_shape.len().saturating_sub(1)).rev() {
+            s[d] = s[d + 1] * a_shape[d + 1];
+        }
+        s
+    };
+    let b_strides: Vec<usize> = {
+        let mut s = vec![1usize; b_shape.len()];
+        for d in (0..b_shape.len().saturating_sub(1)).rev() {
+            s[d] = s[d + 1] * b_shape[d + 1];
+        }
+        s
+    };
+
+    let zero = <T as num_traits::Zero>::zero();
+    let one = <T as num_traits::One>::one();
+    let half = T::from(0.5_f64).unwrap_or(zero);
+
+    for i in 0..out_numel {
+        // Decompose `i` into per-axis coords over `out_shape`.
+        let mut rem_i = i;
+        let mut coords = [0usize; 16];
+        for d in (0..out_ndim).rev() {
+            coords[d] = rem_i % out_shape[d];
+            rem_i /= out_shape[d];
+        }
+
+        // Map output coords to a-flat / b-flat indices with broadcast
+        // collapsing (`size == 1` axes -> coord 0).
+        let mut a_flat = 0usize;
+        for (d, &s) in a_strides.iter().enumerate() {
+            let oc = coords[d + pad_a];
+            let coord = if a_shape[d] == 1 { 0 } else { oc };
+            a_flat += coord * s;
+        }
+        let mut b_flat = 0usize;
+        for (d, &s) in b_strides.iter().enumerate() {
+            let oc = coords[d + pad_b];
+            let coord = if b_shape[d] == 1 { 0 } else { oc };
+            b_flat += coord * s;
+        }
+
+        let av = a_data[a_flat];
+        let bv = b_data[b_flat];
+
+        // Mirror `c10::div_floor_floating` byte-for-byte. R-DEV-1.
+        let floordiv = if bv == zero {
+            // IEEE-754 div-by-zero path: `return a / b` directly.
+            // `5/0 = +Inf`, `-5/0 = -Inf`, `0/0 = NaN`.
+            av / bv
+        } else {
+            // mod = fmod(a, b) — Rust's `%` on f32/f64 is C99 fmod.
+            let m = av % bv;
+            // div = (a - mod) / b
+            let mut div = (av - m) / bv;
+            // If signs of `b` and `mod` differ AND mod != 0, subtract 1
+            // from div. This recovers the floor-direction adjustment when
+            // the (a-mod)/b path produced a quotient that's one-too-high
+            // because `fmod`'s sign-of-dividend differs from divisor's.
+            // Upstream `c10/util/generic_math.h:44-46` lines:
+            //   if ((mod != 0) && (b < 0) != (mod < 0)) {
+            //     div -= scalar_t(1);
+            //   }
+            // (Upstream does NOT also adjust `mod` here — only `div`. The
+            // remainder is not returned from this kernel.)
+            if m != zero && (bv < zero) != (m < zero) {
+                div = div - one;
+            }
+
+            // Final floor + 0.5-rounding fixup, matching upstream lines
+            // 48-57 of `c10/util/generic_math.h`. Clippy's `if_not_else`
+            // pedantic-tier lint wants the zero-branch first; the
+            // mathematical reading is "non-zero quotient -> standard
+            // floor with a 0.5 round-up guard; zero quotient -> copysign
+            // to preserve IEEE-754 ±0 sign":
+            if div == zero {
+                // copysign(0, a/b): when div rounds to 0, upstream
+                // explicitly uses `C10_COMPAT_COPYSIGN(0, a/b)` so the
+                // signed zero matches the IEEE-754 quotient sign.
+                let q = av / bv;
+                zero.copysign(q)
+            } else {
+                let f = div.floor();
+                if div - f > half { f + one } else { f }
+            }
+        };
+        result[i] = floordiv;
+    }
+
+    let storage = TensorStorage::on_device(result, device)?;
+    let out = Tensor::from_storage(storage, out_shape, false)?;
+
+    if needs_grad(a, b) {
+        let (storage, shape) = out.into_storage_and_shape()?;
+        Tensor::from_operation(
+            storage,
+            shape,
+            Arc::new(FloorDivideBackward {
+                a: a.clone(),
+                b: b.clone(),
+            }),
+        )
+    } else {
+        Ok(out)
+    }
+}
+
+// ===========================================================================
 // abs
 // ===========================================================================
 
@@ -3529,6 +3898,234 @@ mod tests {
         );
         assert_scalar_approx(&ga, expected_da, 1e-6);
         assert_scalar_approx(&gb, expected_db, 1e-6);
+        Ok(())
+    }
+
+    // -----------------------------------------------------------------------
+    // floor_divide (REQ-12) tests
+    //
+    // R-CHAR-3: Expected values constructed from explicit formulas /
+    // PyTorch upstream `c10/util/generic_math.h:34-58 div_floor_floating`
+    // — NOT by calling `arithmetic::floor_divide` on itself. Each value
+    // was additionally cross-checked live against torch.floor_divide on
+    // 2026-05-25.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_floor_divide_sign_pos_pos() -> FerrotorchResult<()> {
+        let a = leaf_scalar(7.0, false);
+        let b = leaf_scalar(3.0, false);
+        let c = floor_divide(&a, &b)?;
+        let expected: f32 = 2.0;
+        assert!(
+            (c.item()? - expected).abs() < 1e-6,
+            "floor_divide(7, 3) expected {expected}, got {}",
+            c.item()?,
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_floor_divide_sign_neg_pos() -> FerrotorchResult<()> {
+        let a = leaf_scalar(-7.0, false);
+        let b = leaf_scalar(3.0, false);
+        let c = floor_divide(&a, &b)?;
+        let expected: f32 = -3.0;
+        let trunc_would_be: f32 = -2.0;
+        assert!(
+            (c.item()? - expected).abs() < 1e-6,
+            "floor_divide(-7, 3) expected {expected} (true floor), got {} \
+             (trunc would give {trunc_would_be})",
+            c.item()?,
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_floor_divide_sign_pos_neg() -> FerrotorchResult<()> {
+        let a = leaf_scalar(7.0, false);
+        let b = leaf_scalar(-3.0, false);
+        let c = floor_divide(&a, &b)?;
+        let expected: f32 = -3.0;
+        assert!(
+            (c.item()? - expected).abs() < 1e-6,
+            "floor_divide(7, -3) expected {expected}, got {}",
+            c.item()?,
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_floor_divide_sign_neg_neg() -> FerrotorchResult<()> {
+        let a = leaf_scalar(-7.0, false);
+        let b = leaf_scalar(-3.0, false);
+        let c = floor_divide(&a, &b)?;
+        let expected: f32 = 2.0;
+        assert!(
+            (c.item()? - expected).abs() < 1e-6,
+            "floor_divide(-7, -3) expected {expected}, got {}",
+            c.item()?,
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_floor_divide_div_by_zero_pos() -> FerrotorchResult<()> {
+        let a = leaf_scalar(5.0, false);
+        let b = leaf_scalar(0.0, false);
+        let c = floor_divide(&a, &b)?;
+        let v = c.item()?;
+        assert!(
+            v.is_infinite() && v > 0.0,
+            "floor_divide(5, 0) expected +Inf, got {v}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_floor_divide_div_by_zero_neg() -> FerrotorchResult<()> {
+        let a = leaf_scalar(-5.0, false);
+        let b = leaf_scalar(0.0, false);
+        let c = floor_divide(&a, &b)?;
+        let v = c.item()?;
+        assert!(
+            v.is_infinite() && v < 0.0,
+            "floor_divide(-5, 0) expected -Inf, got {v}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_floor_divide_zero_by_zero() -> FerrotorchResult<()> {
+        let a = leaf_scalar(0.0, false);
+        let b = leaf_scalar(0.0, false);
+        let c = floor_divide(&a, &b)?;
+        let v = c.item()?;
+        assert!(v.is_nan(), "floor_divide(0, 0) expected NaN, got {v}");
+        Ok(())
+    }
+
+    #[test]
+    fn test_floor_divide_nan_propagation() -> FerrotorchResult<()> {
+        let nan = f32::NAN;
+        let a_nan = leaf_scalar(nan, false);
+        let b = leaf_scalar(3.0, false);
+        let c = floor_divide(&a_nan, &b)?;
+        assert!(c.item()?.is_nan(), "floor_divide(NaN, 3) -> NaN");
+
+        let a = leaf_scalar(5.0, false);
+        let b_nan = leaf_scalar(nan, false);
+        let c = floor_divide(&a, &b_nan)?;
+        assert!(c.item()?.is_nan(), "floor_divide(5, NaN) -> NaN");
+        Ok(())
+    }
+
+    #[test]
+    fn test_floor_divide_three_way_sign_contrast() -> FerrotorchResult<()> {
+        // R-CHAR-3 + dispatch spec mandatory 3-way contrast test:
+        // for (a=-7, b=3), `floor_divide`, `remainder`, `fmod` MUST all
+        // produce DIFFERENT outputs if implementations are distinct.
+        //
+        // Expected values (constructed by reasoning, NOT by calling the
+        // op under test on itself; cross-checked live against torch on
+        // 2026-05-25):
+        //   floor_divide(-7, 3) = -3        (true floor toward -inf)
+        //   remainder(-7, 3)    = 2         (sign of divisor; Python `%`)
+        //   fmod(-7, 3)         = -1        (sign of dividend; C99 fmod)
+        //
+        // Identity: a == floor_divide(a,b) * b + remainder(a,b):
+        //   -7 == (-3) * 3 + 2 = -9 + 2 = -7  ok
+        let a = leaf_scalar(-7.0, false);
+        let b = leaf_scalar(3.0, false);
+
+        let fd = floor_divide(&a, &b)?.item()?;
+        let rem = remainder(&a, &b)?.item()?;
+        let fm = fmod(&a, &b)?.item()?;
+
+        assert!(
+            (fd - (-3.0)).abs() < 1e-6,
+            "floor_divide(-7, 3) = -3, got {fd}"
+        );
+        assert!((rem - 2.0).abs() < 1e-6, "remainder(-7, 3) = 2, got {rem}");
+        assert!((fm - (-1.0)).abs() < 1e-6, "fmod(-7, 3) = -1, got {fm}");
+
+        // All three MUST differ — if any two collapse the implementations
+        // are not distinct.
+        assert!(
+            (fd - rem).abs() > 1e-3 && (fd - fm).abs() > 1e-3 && (rem - fm).abs() > 1e-3,
+            "3-way contrast (-7, 3) collapsed: fd={fd}, rem={rem}, fm={fm}",
+        );
+
+        // Identity: a == floor_divide(a, b) * b + remainder(a, b).
+        let recovered = fd * 3.0_f32 + rem;
+        assert!(
+            (recovered - (-7.0)).abs() < 1e-6,
+            "identity broken: floor_divide(a,b)*b + remainder(a,b) = {recovered}, expected -7",
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_floor_divide_no_grad_fn_when_inputs_detached() -> FerrotorchResult<()> {
+        let a = leaf_scalar(7.0, false);
+        let b = leaf_scalar(3.0, false);
+        let c = floor_divide(&a, &b)?;
+        assert!(
+            c.grad_fn().is_none(),
+            "floor_divide on requires_grad=false inputs should not attach grad_fn"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_floor_divide_backward_errors() -> FerrotorchResult<()> {
+        // R-DEV-1: mirror upstream's "derivative for aten::floor_divide is
+        // not implemented" RuntimeError. Verified live 2026-05-25:
+        //   c.grad_fn = <NotImplemented object>
+        //   c.sum().backward() -> RuntimeError: derivative for
+        //                        aten::floor_divide is not implemented
+        let a = leaf_scalar(7.0, true);
+        let b = leaf_scalar(3.0, true);
+        let c = floor_divide(&a, &b)?;
+        assert!(
+            c.grad_fn().is_some(),
+            "floor_divide on requires_grad=true inputs MUST attach grad_fn \
+             (upstream attaches <NotImplemented object>)"
+        );
+        let res = c.backward();
+        let err = res.expect_err(
+            "floor_divide backward must fail (upstream raises 'derivative for \
+             aten::floor_divide is not implemented')",
+        );
+        let is_invalid_arg_with_op_name = matches!(
+            &err,
+            FerrotorchError::InvalidArgument { message } if message.contains("floor_divide"),
+        );
+        assert!(
+            is_invalid_arg_with_op_name,
+            "expected InvalidArgument mentioning 'floor_divide', got {err:?}",
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_floor_divide_broadcast() -> FerrotorchResult<()> {
+        // Broadcast a [2] tensor against a [1] tensor. Expected per
+        // c10::div_floor_floating, NOT computed via floor_divide:
+        //   floor_divide([7.0, -7.0], [3.0]) = [2.0, -3.0]
+        // Verified live 2026-05-25 torch.floor_divide(tensor([7,-7]),
+        // tensor([3])) -> tensor([2., -3.]).
+        let a = leaf_vec(&[7.0, -7.0], false);
+        let b = leaf_vec(&[3.0], false);
+        let c = floor_divide(&a, &b)?;
+        let d = c.data()?.to_vec();
+        let expected: [f32; 2] = [2.0, -3.0];
+        for (i, (got, want)) in d.iter().zip(expected.iter()).enumerate() {
+            assert!(
+                (got - want).abs() < 1e-6,
+                "broadcast floor_divide[{i}] = {got}, expected {want}"
+            );
+        }
         Ok(())
     }
 
