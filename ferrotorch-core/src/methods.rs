@@ -19,6 +19,20 @@ impl<T: Float> Tensor<T> {
         crate::grad_fns::arithmetic::sub(self, other)
     }
 
+    /// `torch.Tensor.rsub(other, *, alpha=1)` — reverse subtract:
+    /// `self - alpha * other` is the `sub_t` semantic; rsub is the
+    /// operand-swapped variant returning `other - alpha * self`.
+    ///
+    /// Per upstream `aten/src/ATen/native/BinaryOps.cpp:1169 Tensor rsub(
+    /// const Tensor& self, const Tensor& other, const Scalar& alpha) {
+    /// return at::sub(other, self, alpha); }` — a literal operand-swap
+    /// delegation. The non-test production consumer wiring for
+    /// `arithmetic::rsub` per R-DEFER-1: this method is the public,
+    /// chainable surface that closes the consumer requirement.
+    pub fn rsub_t(&self, other: &Tensor<T>, alpha: f64) -> FerrotorchResult<Tensor<T>> {
+        crate::grad_fns::arithmetic::rsub(self, other, alpha)
+    }
+
     pub fn mul_t(&self, other: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
         crate::grad_fns::arithmetic::mul(self, other)
     }

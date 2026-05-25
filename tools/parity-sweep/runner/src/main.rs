@@ -228,6 +228,19 @@ fn dispatch_f32(
             let alpha = alpha_kwarg("sub")?;
             grad_fns::arithmetic::sub_scaled(&a, &b, alpha)?
         })),
+        // `torch.rsub(input, other, *, alpha=1)` — operand-swap delegation
+        // to sub per upstream `aten/src/ATen/native/BinaryOps.cpp:1169`:
+        // `Tensor rsub(self, other, alpha) { return at::sub(other, self,
+        // alpha); }`. ferrotorch's `arithmetic::rsub` mirrors this via
+        // `sub_scaled(b, a, alpha)` (R-DEV-1 byte-for-byte). op_db emits
+        // `rsub` (and `__rsub__`) samples; the `__rsub__` magic-method
+        // dispatch falls through here too because the wire args are
+        // identical (`args = [input, other]`, `kwargs = {alpha?}`).
+        "rsub" => Ok(Some({
+            let (a, b) = binary("rsub")?;
+            let alpha = alpha_kwarg("rsub")?;
+            grad_fns::arithmetic::rsub(&a, &b, alpha)?
+        })),
         "mul" => Ok(Some({ let (a, b) = binary("mul")?; grad_fns::arithmetic::mul(&a, &b)? })),
         "div" => Ok(Some({ let (a, b) = binary("div")?; grad_fns::arithmetic::div(&a, &b)? })),
         // Unary
@@ -278,7 +291,7 @@ fn dispatch_f32(
 }
 
 fn dispatch_ops() -> &'static [&'static str] {
-    &["add", "sub", "mul", "div", "neg", "abs", "sqrt", "pow"]
+    &["add", "sub", "mul", "div", "neg", "abs", "sqrt", "pow", "rsub"]
 }
 
 // ---------------------------------------------------------------------------

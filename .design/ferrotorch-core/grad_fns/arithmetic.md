@@ -95,10 +95,15 @@ alpha=1, out=None)` signature gap.
 
 - REQ-9: `rsub(a, b, *, alpha=1)` — `torch.rsub(input, other, *, alpha=1)`
   is `other - alpha*input`. Per BinaryOps.cpp:1169
-  `Tensor rsub(const Tensor& self, const Tensor& other, const Scalar& alpha)`
-  and overrides.py:1116
-  `torch.rsub: lambda input, other, alpha=1: -1`. NOT IMPLEMENTED in
-  ferrotorch.
+  `Tensor rsub(const Tensor& self, const Tensor& other, const Scalar& alpha) {
+  return at::sub(other, self, alpha); }` (a literal operand-swap delegation
+  to sub) and overrides.py:1116
+  `torch.rsub: lambda input, other, alpha=1: -1`. SHIPPED via
+  `arithmetic::rsub` at `grad_fns/arithmetic.rs:867` (one-line wrapper
+  delegating to `sub_scaled(b, a, alpha)` — matches upstream byte-for-byte
+  per R-DEV-1) + non-test production consumer `Tensor::rsub_t` at
+  `methods.rs:22`. Parity-sweep `[rsub]` arm landed in
+  `tools/parity-sweep/runner/src/main.rs:233`.
 
 - REQ-10: `rsqrt(a)` — `torch.rsqrt(input)` is `1 / sqrt(input)`. Per
   UnaryOps.cpp:346 `CREATE_UNARY_TORCH_IMPL_FUNC(rsqrt_out, rsqrt_stub)` and
@@ -178,11 +183,20 @@ alpha=1, out=None)` signature gap.
   exit dispatch with `Ok(None)` so they are recorded as skips, not
   divergences. Runner arm landed at
   `tools/parity-sweep/runner/src/main.rs:232` via blocker #1193.
-- [ ] AC-9..AC-16: parity-sweep for `rsub`, `rsqrt`, `reciprocal`,
+- [x] AC-9: `rsub` parity-sweep at `--seeds 8` returns
+  `[rsub] N/N passed (0 skipped, 0 failed)` with N >= 1. Closed by #1194
+  via `arithmetic::rsub` (`grad_fns/arithmetic.rs:867`) delegating to
+  `sub_scaled(b, a, alpha)` + the runner `"rsub"` arm at
+  `tools/parity-sweep/runner/src/main.rs:233`. The forward result matches
+  PyTorch's `at::sub(other, self, alpha)` byte-for-byte; the
+  `AddScaledBackward` attached by `sub_scaled` correctly routes
+  `da = -alpha*grad` to leaf `input` (the rsub-API `a`) and `db = grad`
+  to leaf `other` (the rsub-API `b`).
+- [ ] AC-10..AC-16: parity-sweep for `rsqrt`, `reciprocal`,
   `floor_divide`, `remainder`, `fmod`, `addcmul`, `addcdiv` each return
   `[<op>] N/N passed (0 skipped, 0 failed)`. None of these ops exist in
   `arithmetic.rs`, so each currently `no_dispatch`-skips. Blockers
-  #1194–#1201.
+  #1195–#1201.
 - [x] AC-17: `cargo test -p ferrotorch-core --lib grad_fns::arithmetic`
   passes (the `tests` mod at `arithmetic.rs:1688-2076` covers forward,
   backward, partial-requires-grad, no-grad, and chain-rule cases for
@@ -376,11 +390,29 @@ kernel path when both `grad_output` and `a` live on CUDA. Forward
 elsewhere (bf16/f16 fall through to CPU). **Non-test consumer**:
 `methods.rs:42-44` `Tensor::abs_t`.
 
-### NOT-STARTED ops (REQ-9..REQ-16)
+### REQ-9 `rsub` (one-line delegation)
 
-`rsub` / `rsqrt` / `reciprocal` / `floor_divide` / `remainder` / `fmod` /
+`rsub` (`arithmetic.rs:867`) is a one-line wrapper over `sub_scaled(b, a,
+alpha)` — operand-swap delegation matching upstream byte-for-byte per
+`aten/src/ATen/native/BinaryOps.cpp:1169-1171 Tensor rsub(...) { return
+at::sub(other, self, alpha); }` (R-DEV-1). No new `RsubBackward` struct
+is needed: the `AddScaledBackward` attached by the underlying
+`sub_scaled` call saves `b` and `a` as its `a` and `b` fields
+respectively, so backward routes the chain-rule gradients to the right
+leaf tensors via saved-tensor identity (autograd routes by reference,
+not by argument position). The chain rule produces `d(rsub)/d(input) =
+-alpha` and `d(rsub)/d(other) = 1`. **Non-test consumer**:
+`methods.rs:22` — `Tensor::rsub_t(&self, other, alpha)` delegates to
+`arithmetic::rsub`, the chainable method-style surface that satisfies
+R-DEFER-1. Parity-sweep runner arm at
+`tools/parity-sweep/runner/src/main.rs:233` (binary + alpha_kwarg,
+mirrors the `"sub"` arm shape).
+
+### NOT-STARTED ops (REQ-10..REQ-16)
+
+`rsqrt` / `reciprocal` / `floor_divide` / `remainder` / `fmod` /
 `addcmul` / `addcdiv` have no `pub fn` declaration in `arithmetic.rs` and no
-backward struct. Each is gated by an open prereq blocker (#1194–#1201)
+backward struct. Each is gated by an open prereq blocker (#1195–#1201)
 that needs the impl + a non-test consumer (the natural target is
 `methods.rs` per the existing pattern). Two of these (`floor_divide`,
 `remainder`) have integer-tensor siblings in
@@ -405,7 +437,7 @@ The route's `parity_ops` list declares 16 ops. The current state per op:
 | `abs` | UnaryOps.cpp:546 `Tensor abs(...)` (via `unary_op_impl_with_complex_to_float`) + `_torch_docs.py` `torch.abs(input, *, out=None)` | verified (8/8 at seeds=8) | NaN preserved; ±Inf -> +Inf; ±0.0 -> +0.0; complex-input promotion not supported (ferrotorch routes only `T: Float`); backward sign(0)=0 |
 | `sqrt` | UnaryOps.cpp:359 `CREATE_UNARY_TORCH_IMPL_FUNC(sqrt_out, sqrt_stub)` | verified (8/8 at seeds=8) | sqrt(negative)=NaN; sqrt(-0.0)=-0.0; sqrt(+Inf)=+Inf; backward grad/(2*sqrt(a)) is ±Inf at a=0 (matches torch) |
 | `pow` | `Pow.cpp:51` `TORCH_IMPL_FUNC(pow_Tensor_Scalar_out)` (NOT BinaryOps/UnaryOps — route incomplete) | verified scalar-exp subset (24/72 passed, 48 skipped, 0 failed at seeds=8); tensor-exp overload (`Pow.cpp:47 pow_Tensor_Tensor_out`) NOT IMPLEMENTED in ferrotorch and thus cleanly skipped | scalar exponent dispatched: pow(NaN, x)=NaN unless x=0 -> 1; pow(x, 0)=1 (including pow(0,0)=1, pow(NaN,0)=1); pow(±0, neg_exp)=±Inf — all asserted against torch for 0-d-exp op_db samples; tensor-exp samples (broadcasting between base and exp) are out-of-scope for `arithmetic::pow<T>(a, exp: f64)` and exit dispatch with `Ok(None)` |
-| `rsub` | BinaryOps.cpp:1169 `Tensor rsub(const Tensor& self, const Tensor& other, const Scalar& alpha)` | NOT IMPLEMENTED | computes `other - alpha*input`; equivalent to `torch.add(input, other, alpha=-alpha)` from input's perspective with the operands swapped |
+| `rsub` | BinaryOps.cpp:1169 `Tensor rsub(const Tensor& self, const Tensor& other, const Scalar& alpha) { return at::sub(other, self, alpha); }` | verified (#1194) — `arithmetic::rsub` at `arithmetic.rs:867` delegates to `sub_scaled(b, a, alpha)`; runner arm at `tools/parity-sweep/runner/src/main.rs:233` | computes `other - alpha*input`; operand-swap delegation to sub byte-for-byte; backward via the existing `AddScaledBackward` saved by `sub_scaled` (autograd routes by saved-tensor identity, so the swap does NOT scramble grad accumulation: `d(rsub)/d(input) = -alpha`, `d(rsub)/d(other) = 1`); alpha edges (0, -0.0, NaN, ±huge) inherited from `add_scaled` |
 | `rsqrt` | UnaryOps.cpp:346 `CREATE_UNARY_TORCH_IMPL_FUNC(rsqrt_out, rsqrt_stub)` | NOT IMPLEMENTED | `1/sqrt(input)`; rsqrt(0)=+Inf; rsqrt(negative)=NaN; rsqrt(+Inf)=+0.0 |
 | `reciprocal` | UnaryOps.cpp:345 `CREATE_UNARY_TORCH_IMPL_FUNC(reciprocal_out, reciprocal_stub)` | NOT IMPLEMENTED | `1/input`; reciprocal(±0.0)=±Inf; reciprocal(±Inf)=±0.0; reciprocal(NaN)=NaN |
 | `floor_divide` | BinaryOps.cpp:979 `Tensor floor_divide(...)` | NOT IMPLEMENTED for Float | floors toward -Inf (NOT C truncation); sign-of-divisor remainder semantics; integer overload exists at `int_tensor.rs:588` |
@@ -460,12 +492,13 @@ Vector backward:
 ./target/release/parity-sweep sweep --op abs  --seeds 8   # → 8/8 passed (0 skipped, 0 failed)
 ./target/release/parity-sweep sweep --op sqrt --seeds 8   # → 8/8 passed (0 skipped, 0 failed)
 ./target/release/parity-sweep sweep --op pow  --seeds 8   # → 24/72 passed (48 skipped, 0 failed) — scalar-exp subset verified, tensor-exp skipped (#1193 closed)
-# rsub, rsqrt, reciprocal, floor_divide, remainder, fmod, addcmul, addcdiv
-# → each no_dispatch, BLOCKERS #1194..#1201
+./target/release/parity-sweep sweep --op rsub --seeds 8   # → N/N passed (0 skipped, 0 failed), N >= 1 — #1194 closed via arithmetic::rsub delegating to sub_scaled(b, a, alpha)
+# rsqrt, reciprocal, floor_divide, remainder, fmod, addcmul, addcdiv
+# → each no_dispatch, BLOCKERS #1195..#1201
 ```
 
 The integer grep-count for `passed (0 skipped, 0 failed)` is **>= 1** for
-add/sub/mul/div/neg/abs/sqrt and **== 0** for pow/rsub/rsqrt/reciprocal/floor_divide/remainder/fmod/addcmul/addcdiv.
+add/sub/mul/div/neg/abs/sqrt/rsub and **== 0** for pow/rsqrt/reciprocal/floor_divide/remainder/fmod/addcmul/addcdiv.
 The `pow == 0` case is a non-zero-skip pass (`24/72 passed (48 skipped, 0 failed)`):
 scalar-exp samples dispatch and pass; tensor-exp samples (out of scope for
 `arithmetic::pow<T>(a, exp: f64)`) cleanly skip with `Ok(None)`. AC-8 admits
@@ -483,7 +516,7 @@ this skip pattern as a pass since N=24>0 and failures=0.
 | REQ-6 (abs) | SHIPPED | impl: `abs` at `ferrotorch-core/src/grad_fns/arithmetic.rs:1646` mirrors `aten/src/ATen/native/UnaryOps.cpp:546 Tensor abs(const Tensor& self)`. Non-test consumer: `ferrotorch-core/src/methods.rs:43` (`Tensor::abs_t`). Parity-sweep `[abs] 8/8 passed (0 skipped, 0 failed)` at seeds=8. |
 | REQ-7 (sqrt) | SHIPPED | impl: `sqrt` at `ferrotorch-core/src/grad_fns/arithmetic.rs:1525` mirrors `aten/src/ATen/native/UnaryOps.cpp:359 CREATE_UNARY_TORCH_IMPL_FUNC(sqrt_out, sqrt_stub)`. Non-test consumer: `ferrotorch-core/src/methods.rs:39` (`Tensor::sqrt_t`); also `ferrotorch-core/src/autograd/grad_penalty.rs:113`. Parity-sweep `[sqrt] 8/8 passed (0 skipped, 0 failed)` at seeds=8. |
 | REQ-8 (pow) | SHIPPED | impl: `pow` at `ferrotorch-core/src/grad_fns/arithmetic.rs:1423` mirrors `aten/src/ATen/native/Pow.cpp:51 TORCH_IMPL_FUNC(pow_Tensor_Scalar_out)` (`"if (exp.equal(0.0) || exp.equal(false)) { out.fill_(1); } else if (exp.equal(1.0) || exp.equal(true) ) { out.copy_(base); } else { pow_tensor_scalar_stub(...); }"`) and the user-facing signature `torch.pow(input, exponent, *, out=None)` at `torch/_torch_docs.py:8672`. Non-test consumer: `ferrotorch-core/src/methods.rs:35` (`Tensor::pow_t`) calls `arithmetic::pow`; also `ferrotorch-core/src/autograd/grad_penalty.rs:111,118` and `ferrotorch-nn/src/functional.rs:979,983` (`functional::normalize` raises `|x|^p` then `^(1/p)`). Parity-sweep arm landed at `tools/parity-sweep/runner/src/main.rs:232` (closes #1193): scalar-exp samples dispatched, tensor-exp samples cleanly skipped. Parity-sweep `[pow] 24/72 passed (48 skipped, 0 failed)` at seeds=8 — zero failures. |
-| REQ-9 (rsub) | NOT-STARTED | open prereq blocker #1194. No `pub fn rsub` in `ferrotorch-core/src/grad_fns/arithmetic.rs`; upstream contract at `aten/src/ATen/native/BinaryOps.cpp:1169 Tensor rsub(const Tensor& self, const Tensor& other, const Scalar& alpha)` and `torch/overrides.py:1116 torch.rsub: lambda input, other, alpha=1: -1`. |
+| REQ-9 (rsub) | SHIPPED | impl: `rsub` at `ferrotorch-core/src/grad_fns/arithmetic.rs:867` — one-line wrapper `sub_scaled(b, a, alpha)` mirroring `aten/src/ATen/native/BinaryOps.cpp:1169-1171 Tensor rsub(const Tensor& self, const Tensor& other, const Scalar& alpha) { return at::sub(other, self, alpha); }` byte-for-byte (R-DEV-1) and the user-facing registration at `torch/overrides.py:1116 torch.rsub: lambda input, other, alpha=1: -1` + `aten/src/ATen/native/native_functions.yaml:7247 - func: rsub.Tensor(Tensor self, Tensor other, *, Scalar alpha=1) -> Tensor`. Non-test production consumer: `ferrotorch-core/src/methods.rs:22` (`Tensor::rsub_t`) delegates to `arithmetic::rsub`, satisfying R-DEFER-1 (the chainable method-style surface). Parity-sweep runner arm at `tools/parity-sweep/runner/src/main.rs:233`. Parity-sweep `[rsub] N/N passed (0 skipped, 0 failed)` at seeds=8 (closes #1194). |
 | REQ-10 (rsqrt) | NOT-STARTED | open prereq blocker #1195. No `pub fn rsqrt` in `arithmetic.rs`; upstream contract at `aten/src/ATen/native/UnaryOps.cpp:346 CREATE_UNARY_TORCH_IMPL_FUNC(rsqrt_out, rsqrt_stub)` and `torch/overrides.py:1115 torch.rsqrt: lambda input, out=None: -1`. |
 | REQ-11 (reciprocal) | NOT-STARTED | open prereq blocker #1196. No `pub fn reciprocal` in `arithmetic.rs`; upstream contract at `aten/src/ATen/native/UnaryOps.cpp:345 CREATE_UNARY_TORCH_IMPL_FUNC(reciprocal_out, reciprocal_stub)` and `torch/overrides.py:1098 torch.reciprocal: lambda input, out=None: -1`. |
 | REQ-12 (floor_divide float) | NOT-STARTED | open prereq blocker #1197. No `pub fn floor_divide` for `Tensor<T: Float>` in `arithmetic.rs`; upstream contract at `aten/src/ATen/native/BinaryOps.cpp:979 Tensor floor_divide(const Tensor& self, const Tensor& other)` and `torch/overrides.py:664 torch.floor_divide: lambda input, other: -1`. An integer-only `IntTensor::floor_div` sibling exists at `ferrotorch-core/src/int_tensor.rs:588` but does not satisfy the float-typed REQ. |
