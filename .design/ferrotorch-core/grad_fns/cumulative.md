@@ -195,29 +195,38 @@ backward characterization tests including numerical-gradient checks).
 
 - [ ] AC-1: `cumsum` parity-sweep at `--seeds 8` returns
   `[cumsum] N/N passed (0 skipped, 0 failed)` with N >= 1. **Currently
-  fails**: `./target/release/parity-sweep sweep --op cumsum --seeds 8`
-  returns `[cumsum] 0/32 passed (32 skipped, 0 failed)` — every op_db
-  sample is skipped because the runner has no `"cumsum"` dispatch arm
-  (blocker #1230, #1193 precedent).
+  partial**: post-#1230 the runner dispatch arm lands at
+  `tools/parity-sweep/runner/src/main.rs:471 "cumsum" =>` so the sweep now
+  reports `[cumsum] 24/32 passed (0 skipped, 8 failed)` — 24 passes prove
+  forward parity for non-scalar inputs, but 8 op_db samples that pass
+  0-D scalar tensors hit the `ndim==0` rejection at
+  `ferrotorch-core/src/ops/cumulative.rs:49-56 validate_dim` (upstream
+  accepts 0-D and copies through per `ReduceOps.cpp:503-504`). Open
+  blocker: #1233 (0-D scalar divergence).
 - [ ] AC-2: `cumprod` parity-sweep at `--seeds 8` returns
   `[cumprod] N/N passed (0 skipped, 0 failed)` with N >= 1. **Currently
-  fails**: `./target/release/parity-sweep sweep --op cumprod --seeds 8`
-  returns `[cumprod] 0/80 passed (80 skipped, 0 failed)` (blocker #1230).
+  partial**: dispatch arm at `runner/src/main.rs:483 "cumprod" =>` post-
+  #1230 yields `[cumprod] 72/80 passed (0 skipped, 8 failed)` — same
+  0-D scalar divergence as AC-1. Open blocker: #1233.
 - [ ] AC-3: `cummax` parity-sweep at `--seeds 8` returns
   `[cummax] N/N passed (0 skipped, 0 failed)` with N >= 1. **Currently
-  fails**: `[cummax] 0/0 passed (24 skipped, 0 failed)` — runner has no
-  dispatch arm AND the upstream sample shape requires returning a tuple
-  `(values, indices)` which the parity-sweep equality check has no
-  precedent for (blocker #1230). Backward additionally diverges (blocker
-  #1231).
+  partial**: dispatch arm at `runner/src/main.rs:500 "cummax" =>` post-
+  #1230 selects only the `values` half of the (values, indices) tuple
+  (Option A: the sweep loop's `expected_v` extraction at
+  `runner/src/main.rs:982-991` selects `output[0]` when the oracle
+  returns a JSON array). Result: `[cummax] 16/24 passed (0 skipped,
+  8 failed)`. Failures are all 0-D scalar inputs (#1233); indices-parity
+  and differentiability divergences remain tracked under #1231.
 - [ ] AC-4: `cummin` parity-sweep at `--seeds 8` returns
   `[cummin] N/N passed (0 skipped, 0 failed)` with N >= 1. **Currently
-  fails**: `[cummin] 0/0 passed (24 skipped, 0 failed)` (blockers #1230,
-  #1231).
+  partial**: dispatch arm at `runner/src/main.rs:511 "cummin" =>` post-
+  #1230 yields `[cummin] 16/24 passed (0 skipped, 8 failed)` — symmetric
+  to AC-3. Open blockers: #1233 (0-D scalar), #1231 (indices + diff).
 - [ ] AC-5: `logcumsumexp` parity-sweep at `--seeds 8` returns
   `[logcumsumexp] N/N passed (0 skipped, 0 failed)` with N >= 1.
-  **Currently fails**: `[logcumsumexp] 0/48 passed (48 skipped, 0 failed)`
-  (blocker #1230).
+  **Currently partial**: dispatch arm at `runner/src/main.rs:526
+  "logcumsumexp" =>` post-#1230 yields `[logcumsumexp] 32/48 passed
+  (0 skipped, 16 failed)` — failures are all 0-D scalar inputs (#1233).
 - [x] AC-6: `cargo test -p ferrotorch-core grad_fns::cumulative` passes
   every forward and backward test in `cumulative.rs:355-913` — covering
   1D / 2D dim=0 / 2D dim=1 / 3D forward shape correctness, negative-dim
@@ -378,40 +387,44 @@ Located at `ferrotorch-core/src/grad_fns/cumulative.rs:355-913` (the
 
 ### Parity-sweep status
 
-The runner has NO dispatch arm for any cumulative op. Reproducer
+Post-#1230 the runner has dispatch arms for all five cumulative ops
+(`tools/parity-sweep/runner/src/main.rs:471-533`). Reproducer
 (`cd /home/doll/ferrotorch`):
 
 ```
 ./target/release/parity-sweep sweep --op cumsum       --seeds 8
-  => [cumsum] 0/32 passed (32 skipped, 0 failed)
+  => [cumsum] 24/32 passed (0 skipped, 8 failed)
 ./target/release/parity-sweep sweep --op cumprod      --seeds 8
-  => [cumprod] 0/80 passed (80 skipped, 0 failed)
+  => [cumprod] 72/80 passed (0 skipped, 8 failed)
 ./target/release/parity-sweep sweep --op cummax       --seeds 8
-  => [cummax] 0/0 passed (24 skipped, 0 failed)
+  => [cummax] 16/24 passed (0 skipped, 8 failed)
 ./target/release/parity-sweep sweep --op cummin       --seeds 8
-  => [cummin] 0/0 passed (24 skipped, 0 failed)
+  => [cummin] 16/24 passed (0 skipped, 8 failed)
 ./target/release/parity-sweep sweep --op logcumsumexp --seeds 8
-  => [logcumsumexp] 0/48 passed (48 skipped, 0 failed)
+  => [logcumsumexp] 32/48 passed (0 skipped, 16 failed)
 ```
 
-The expected grep count after blocker #1230 closes:
+Every failure is a 0-D scalar input (blocker #1233; upstream accepts
+0-D, ferrotorch's `ops/cumulative.rs:49-56 validate_dim` rejects). For
+cummax/cummin the dispatch implements Option A from the #1230 prompt:
+ferrotorch returns only `result.values`, and the sweep loop at
+`runner/src/main.rs:982-991` selects `output[0]` (values) from the
+oracle's JSON-array tuple response. Indices-parity is intentionally out
+of scope here and remains tracked under #1231.
 
-```
-for OP in cumsum cumprod cummax cummin logcumsumexp; do
-  ./target/release/parity-sweep sweep --op "$OP" --seeds 8 2>&1 \
-    | grep -c "passed (0 skipped, 0 failed)"
-done
-# expected: 1 1 1 1 1 (one match line per op invocation)
-```
+The expected grep count after blocker #1233 closes (0-D divergence
+fixed) is `1 1 1 1 1` — one match per op for `"passed (0 skipped, 0
+failed)"`. Until #1233 closes, the gate is the weaker but verified
+"every op reports >0 passes" (24, 72, 16, 16, 32 passes respectively).
 
 ## REQ status table
 
 | REQ | Status | Evidence |
 |---|---|---|
-| REQ-1 (cumsum) | NOT-STARTED | impl: `cumsum` at `ferrotorch-core/src/grad_fns/cumulative.rs:72` + `CumsumBackward` at `:35` mirroring `ReduceOps.cpp:511 TORCH_IMPL_FUNC(cumsum_out)` and `derivatives.yaml:529-531`; **no non-test production consumer** in `ferrotorch-*/src/` (only `lib.rs:159` re-export); parity-sweep `[cumsum] 0/32 passed (32 skipped, 0 failed)` — every sample skipped. Open blockers: #1230 (runner dispatch), #1232 (consumer wiring). |
-| REQ-2 (cumprod) | NOT-STARTED | impl: `cumprod` at `cumulative.rs:202` + `CumprodBackward` at `:103` mirroring `ReduceOps.cpp:519 TORCH_IMPL_FUNC(cumprod_out)` and `derivatives.yaml:525-527`; backward zeros-path is O(n^3) brute-force not upstream's composite-compliance masked-fill; **no non-test production consumer**; parity-sweep `[cumprod] 0/80 passed (80 skipped, 0 failed)`. Open blockers: #1230, #1232. |
-| REQ-3 (cummax) | NOT-STARTED | impl: `cummax` at `cumulative.rs:230` delegating to `ops/cumulative.rs:191 cummax_forward` mirroring `ReduceOps.cpp:860 Tensor cummax(...)`; non-test production consumer at `ferrotorch-core/src/einops.rs:796` inside `pub fn reduce<T: Float>` (uses `cmax.values`). **Diverges**: declared non-differentiable (contradicts `derivatives.yaml:533-535`); tie-break strict `>` (upstream `std::greater_equal`); NaN handling not mirrored. Parity-sweep `[cummax] 0/0 passed (24 skipped, 0 failed)`. Open blockers: #1230 (runner dispatch + tuple-output handling), #1231 (differentiability + tie-break + NaN). |
-| REQ-4 (cummin) | NOT-STARTED | impl: `cummin` at `cumulative.rs:240` delegating to `ops/cumulative.rs:272 cummin_forward` mirroring `ReduceOps.cpp:899 Tensor cummin(...)`; non-test production consumer at `ferrotorch-core/src/einops.rs:802`. Same divergences as REQ-3 (non-diff, strict `<` tie-break, NaN). Parity-sweep `[cummin] 0/0 passed (24 skipped, 0 failed)`. Open blockers: #1230, #1231. |
-| REQ-5 (logcumsumexp) | NOT-STARTED | impl: `logcumsumexp` at `cumulative.rs:322` + `LogcumsumexpBackward` at `:264` mirroring `ReduceOps.cpp:475 Tensor logcumsumexp(...)` and `derivatives.yaml:521-523`; backward formula matches `exp(input) * reverse_cumsum(grad * exp(-output))`. Numerical stability covered by `test_logcumsumexp_numerical_stability` (`:719-736`). **No non-test production consumer**. Parity-sweep `[logcumsumexp] 0/48 passed (48 skipped, 0 failed)`. Open blockers: #1230, #1232. |
+| REQ-1 (cumsum) | NOT-STARTED | impl: `cumsum` at `ferrotorch-core/src/grad_fns/cumulative.rs:72` + `CumsumBackward` at `:35` mirroring `ReduceOps.cpp:511 TORCH_IMPL_FUNC(cumsum_out)` and `derivatives.yaml:529-531`; **no non-test production consumer** in `ferrotorch-*/src/` (only `lib.rs:159` re-export, plus the parity-sweep runner dispatch arm at `tools/parity-sweep/runner/src/main.rs:471 "cumsum" =>` which lands as a TEST-SIDE consumer post-#1230 and does NOT satisfy R-DEFER-1's non-test production-consumer requirement). Parity-sweep post-#1230: `[cumsum] 24/32 passed (0 skipped, 8 failed)` — 24 forward-parity passes prove dispatch works; 8 failures are uniform 0-D scalar divergence (`validate_dim` rejects `ndim==0`). Open blockers: #1232 (production consumer wiring), #1233 (0-D scalar divergence). |
+| REQ-2 (cumprod) | NOT-STARTED | impl: `cumprod` at `cumulative.rs:202` + `CumprodBackward` at `:103` mirroring `ReduceOps.cpp:519 TORCH_IMPL_FUNC(cumprod_out)` and `derivatives.yaml:525-527`; backward zeros-path is O(n^3) brute-force not upstream's composite-compliance masked-fill; **no non-test production consumer** (runner dispatch arm at `runner/src/main.rs:483 "cumprod" =>` is TEST-SIDE per R-DEFER-1). Parity-sweep post-#1230: `[cumprod] 72/80 passed (0 skipped, 8 failed)` — 0-D scalar failures only. Open blockers: #1232, #1233. |
+| REQ-3 (cummax) | NOT-STARTED | impl: `cummax` at `cumulative.rs:230` delegating to `ops/cumulative.rs:191 cummax_forward` mirroring `ReduceOps.cpp:860 Tensor cummax(...)`; non-test production consumer at `ferrotorch-core/src/einops.rs:796` inside `pub fn reduce<T: Float>` (uses `cmax.values`). **Diverges**: declared non-differentiable (contradicts `derivatives.yaml:533-535`); tie-break strict `>` (upstream `std::greater_equal`); NaN handling not mirrored. Parity-sweep post-#1230: `[cummax] 16/24 passed (0 skipped, 8 failed)` via Option A (runner dispatch arm at `runner/src/main.rs:500 "cummax" =>` returns only `values`; sweep loop at `:982-991` selects `output[0]` from oracle's `[values, indices]` array). 0-D scalar failures only. Open blockers: #1231 (differentiability + tie-break + NaN), #1233 (0-D scalar). |
+| REQ-4 (cummin) | NOT-STARTED | impl: `cummin` at `cumulative.rs:240` delegating to `ops/cumulative.rs:272 cummin_forward` mirroring `ReduceOps.cpp:899 Tensor cummin(...)`; non-test production consumer at `ferrotorch-core/src/einops.rs:802`. Same divergences as REQ-3 (non-diff, strict `<` tie-break, NaN). Parity-sweep post-#1230: `[cummin] 16/24 passed (0 skipped, 8 failed)` (Option A symmetric to REQ-3; runner arm at `runner/src/main.rs:511 "cummin" =>`). Open blockers: #1231, #1233. |
+| REQ-5 (logcumsumexp) | NOT-STARTED | impl: `logcumsumexp` at `cumulative.rs:322` + `LogcumsumexpBackward` at `:264` mirroring `ReduceOps.cpp:475 Tensor logcumsumexp(...)` and `derivatives.yaml:521-523`; backward formula matches `exp(input) * reverse_cumsum(grad * exp(-output))`. Numerical stability covered by `test_logcumsumexp_numerical_stability` (`:719-736`). **No non-test production consumer** (runner dispatch arm at `runner/src/main.rs:526 "logcumsumexp" =>` is TEST-SIDE per R-DEFER-1). Parity-sweep post-#1230: `[logcumsumexp] 32/48 passed (0 skipped, 16 failed)` — 0-D scalar failures only. Open blockers: #1232, #1233. |
 | REQ-6 (dim normalization) | SHIPPED | impl: `normalize_axis(dim as isize, input.ndim())?` calls at `cumulative.rs:73, :203, :231, :241, :323` per `crate::shape::normalize_axis` mirroring `maybe_wrap_dim` at `ReduceOps.cpp:506, :622, :851, :890`; production consumer for the normalized result is each of the five `pub fn` bodies themselves (the normalized `dim` is stored into the `*Backward` struct and threaded into `from_storage`); reachable production callers: `einops.rs:796 / :802` invoke `cummax(view, 1)` / `cummin(view, 1)` triggering the normalize path. Tests at `cumulative.rs:420-428 test_cumsum_negative_dim` and `:830-835 test_cumsum_dim_out_of_bounds` cover the negative-dim and out-of-range cases. |
 | REQ-7 (reverse_cumsum helper) | SHIPPED | impl: `reverse_cumsum` at `ferrotorch-core/src/ops/cumulative.rs:109` mirroring `static Tensor reversed_cumsum(const Tensor& w, int64_t dim)` at `ReduceOps.cpp:527-529`; non-test production consumers at `ferrotorch-core/src/grad_fns/cumulative.rs:50` (CumsumBackward::backward) and `ferrotorch-core/src/grad_fns/cumulative.rs:291` (LogcumsumexpBackward::backward). The helper itself is internal scaffolding; its end-to-end exercise lands when REQ-1 and REQ-5 ship with runner-side parity coverage (blocker #1230). Forward and backward unit tests at `cumulative.rs:449-484` (`test_cumsum_backward_*`) and `:742-779` (`test_logcumsumexp_backward_1d`) verify it numerically through the consumer path. |

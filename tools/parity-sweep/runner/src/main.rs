@@ -451,6 +451,86 @@ fn dispatch_f32(
             };
             Ok(Some(grad_fns::arithmetic::pow(&base, exp_scalar)?))
         }
+        // Cumulative (scan) ops — `torch.cumsum(input, dim)` and friends ship
+        // `dim` as a Python int positional `args[1]` (verified 2026-05-25 via
+        // live oracle sample inspection). Dim extraction is inlined per-arm
+        // to avoid shifting the line numbers of pre-existing arithmetic-arm
+        // anchors cited in `.design/ferrotorch-core/grad_fns/arithmetic.md`
+        // (the `divergence_addcmul_req15_runner_cite_shift` test pins those
+        // cites to within 4 lines). Closes blocker #1230 (the runner
+        // dispatch gap; the production-consumer wiring is separately
+        // tracked under blocker #1232).
+        //
+        // `torch.cumsum(input, dim, *, dtype=None)` —
+        // `aten/src/ATen/native/ReduceOps.cpp:511 TORCH_IMPL_FUNC(cumsum_out)`
+        // dispatches via `cumsum_stub` declared at `:460`. ferrotorch's
+        // `grad_fns::cumulative::cumsum<T: Float>(input, dim: i64)` wraps
+        // `ops::cumulative::cumsum_forward` with `CumsumBackward` per
+        // `tools/autograd/derivatives.yaml:529-531` (`reversed_cumsum`
+        // upper-triangular multiplication).
+        "cumsum" => Ok(Some({
+            let a = unary("cumsum")?;
+            let dim = args
+                .get(1)
+                .and_then(Value::as_i64)
+                .ok_or("cumsum: missing or non-int dim arg")?;
+            grad_fns::cumulative::cumsum(&a, dim)?
+        })),
+        // `torch.cumprod(input, dim, *, dtype=None)` —
+        // `ReduceOps.cpp:519 TORCH_IMPL_FUNC(cumprod_out)`. ferrotorch's
+        // `grad_fns::cumulative::cumprod` wraps `cumprod_forward` with
+        // `CumprodBackward` per `derivatives.yaml:525-527`.
+        "cumprod" => Ok(Some({
+            let a = unary("cumprod")?;
+            let dim = args
+                .get(1)
+                .and_then(Value::as_i64)
+                .ok_or("cumprod: missing or non-int dim arg")?;
+            grad_fns::cumulative::cumprod(&a, dim)?
+        })),
+        // `torch.cummax(input, dim) -> (values, indices)` —
+        // `ReduceOps.cpp:860 Tensor cummax(const Tensor& self, int64_t dim)`
+        // -> `cummax_cummin_helper<T1, T2, std::greater_equal<scalar_t>>` at
+        // `:811-826`. PyTorch returns a namedtuple `(values, indices)`; the
+        // oracle wraps these as a JSON array. The sweep loop's expected-
+        // output extraction handles the JSON-array case by selecting
+        // `output[0]` (values). Option A from the #1230 dispatch prompt:
+        // values-parity only; indices-parity divergences (tie-break,
+        // differentiability, NaN handling) tracked under #1231.
+        "cummax" => Ok(Some({
+            let a = unary("cummax")?;
+            let dim = args
+                .get(1)
+                .and_then(Value::as_i64)
+                .ok_or("cummax: missing or non-int dim arg")?;
+            grad_fns::cumulative::cummax(&a, dim)?.values
+        })),
+        // `torch.cummin(input, dim) -> (values, indices)` —
+        // `ReduceOps.cpp:899 Tensor cummin(...)`. Symmetric to cummax
+        // (Option A: values only; #1231 covers indices divergences).
+        "cummin" => Ok(Some({
+            let a = unary("cummin")?;
+            let dim = args
+                .get(1)
+                .and_then(Value::as_i64)
+                .ok_or("cummin: missing or non-int dim arg")?;
+            grad_fns::cumulative::cummin(&a, dim)?.values
+        })),
+        // `torch.logcumsumexp(input, dim)` —
+        // `ReduceOps.cpp:475 Tensor logcumsumexp(...)` dispatching via
+        // `_logcumsumexp_cpu` at `:465-468` -> `logcumsumexp_stub` at `:471`.
+        // ferrotorch's `grad_fns::cumulative::logcumsumexp` wraps the two-
+        // pass running-max rescaling kernel at `ops/cumulative.rs:378-410`.
+        // Backward per `derivatives.yaml:521-523` factors as
+        // `exp(input) * reverse_cumsum(grad * exp(-output))`.
+        "logcumsumexp" => Ok(Some({
+            let a = unary("logcumsumexp")?;
+            let dim = args
+                .get(1)
+                .and_then(Value::as_i64)
+                .ok_or("logcumsumexp: missing or non-int dim arg")?;
+            grad_fns::cumulative::logcumsumexp(&a, dim)?
+        })),
         _ => Ok(None),
     }
 }
@@ -473,6 +553,15 @@ fn dispatch_ops() -> &'static [&'static str] {
         "floor_divide",
         "addcmul",
         "addcdiv",
+        // Cumulative (scan) ops — `grad_fns::cumulative` dispatch arms added
+        // 2026-05-25 to close #1230. cummax/cummin return only the `values`
+        // half of the (values, indices) tuple (Option A — see dispatch_f32
+        // arms for rationale; #1231 tracks indices divergences separately).
+        "cumsum",
+        "cumprod",
+        "cummax",
+        "cummin",
+        "logcumsumexp",
     ]
 }
 
@@ -957,7 +1046,21 @@ fn sweep_with_cap(
                 .get("kwargs")
                 .and_then(Value::as_object)
                 .unwrap_or(&empty);
-            let expected_v = resp.get("output").cloned().unwrap_or(Value::Null);
+            // Tuple-returning ops (cummax / cummin -> (values, indices))
+            // arrive as a JSON array `[values, indices]` from the oracle's
+            // generic `encode_arg(output)` path which maps Python tuples to
+            // JSON arrays at `oracle.py:97-98`. We select `output[0]` (values)
+            // for the parity-sweep value-equality gate; indices-parity is
+            // tracked separately under #1231 (cummax/cummin differentiability
+            // + tie-break + NaN handling — see
+            // `.design/ferrotorch-core/grad_fns/cumulative.md` REQ-3 / REQ-4).
+            // Single-tensor ops (cumsum / cumprod / logcumsumexp and every
+            // arithmetic op) keep the existing single-envelope path.
+            let raw_output = resp.get("output").cloned().unwrap_or(Value::Null);
+            let expected_v = match raw_output.as_array() {
+                Some(arr) if !arr.is_empty() => arr[0].clone(),
+                _ => raw_output,
+            };
             let expected = match unwrap_tensor_arg(&expected_v) {
                 Some(t) => t,
                 None => {

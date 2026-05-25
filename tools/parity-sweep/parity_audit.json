@@ -1,0 +1,209 @@
+{
+  "version": 1,
+  "_doc": "Per-op parity state. Updated by `parity-sweep sweep` runs and the orchestrator. status ∈ {missing, stub, diverges, verified, verified_with_deferred}. known_divergences are preserved as cheap regression seeds — never delete them, even when the bug is fixed. fixed_divergences holds entries that were resolved and migrated out of known_divergences; both lists are persistent.",
+  "ops": {
+    "add": {
+      "status": "verified",
+      "last_sweep_at": "2026-05-25T08:28:02Z",
+      "last_discriminator_at": "2026-05-25T09:30:00Z",
+      "last_recorrected_at": "2026-05-25T11:30:00Z",
+      "samples_attempted": 88,
+      "samples_passed": 88,
+      "samples_failed": 0,
+      "samples_skipped": 0,
+      "discriminator_rounds": 1,
+      "discriminator_probes": 76,
+      "discriminator_findings": 12,
+      "discriminator_findings_fixed": 12,
+      "discriminator_findings_deferred": 0,
+      "pytorch_source": "aten/src/ATen/native/BinaryOps.cpp (add_stub) + torch/overrides.py (signature: input, other, *, alpha=1, out=None)",
+      "ferrotorch_source": "ferrotorch-core/src/grad_fns/arithmetic.rs:351 (add), :560 (add_scaled), :595 (add_out), :620 (add_scaled_out); ferrotorch-core/src/inplace.rs:141 (add_), :160 (add_scaled_)",
+      "known_divergences": [],
+      "fixed_divergences": [
+        {
+          "sample_index": 9,
+          "kwargs": {
+            "alpha": 2
+          },
+          "root_cause": "ferrotorch::grad_fns::arithmetic::add signature was (a, b) — had no alpha parameter. torch computes a + alpha*b.",
+          "fix_ref": "ferrotorch-core/src/grad_fns/arithmetic.rs:560 add_scaled (introduced by reader-corrector)"
+        },
+        {
+          "sample_index": 10,
+          "kwargs": {
+            "alpha": -3.125
+          },
+          "root_cause": "same — missing alpha kwarg",
+          "fix_ref": "ferrotorch-core/src/grad_fns/arithmetic.rs:560 add_scaled"
+        },
+        {
+          "category": "noncontig_stride",
+          "probe_ids": ["transpose_2d", "transpose_both", "transpose_3d", "transpose_with_alpha", "transpose_with_nan"],
+          "root_cause": "fast_add / fast_mul / fast_sub / fast_div / scalar_map (ferrotorch-core/src/ops/elementwise.rs) called Tensor::data() which Errs on non-contiguous views. torch.add handles transposed/permuted views transparently. The same-shape SIMD fast paths now materialize non-contig inputs via .contiguous() before reading data(), matching binary_map's existing handling.",
+          "fix_ref": "ferrotorch-core/src/ops/elementwise.rs fast_add / fast_mul / fast_sub / fast_div / scalar_map (re-corrector)"
+        },
+        {
+          "category": "inplace",
+          "probe_ids": ["inplace_alpha", "inplace_broadcast"],
+          "root_cause": "ferrotorch::Tensor::add_ had no alpha kwarg and rejected broadcasting (torch's add_(other, *, alpha=1) supports both as long as the broadcast result equals self.shape()). Added add_scaled_(&self, other, alpha) at ferrotorch-core/src/inplace.rs:160 that routes through grad_fns::arithmetic::add_scaled and swaps storage in-place; add_ is now a thin alpha=1.0 alias.",
+          "fix_ref": "ferrotorch-core/src/inplace.rs:141 add_ (alias) + :160 add_scaled_ (re-corrector)"
+        },
+        {
+          "category": "out_kwarg",
+          "probe_ids": ["out_basic", "out_with_alpha", "out_broadcast", "out_wrong_shape", "out_nan"],
+          "root_cause": "ferrotorch had no `out=` kwarg / pre-allocated-output API. torch.add(*, out=t) writes into the provided tensor (and silently resizes it if its shape differs from the broadcast result — with a UserWarning that flags this as deprecated in future PyTorch). Implemented inline as `grad_fns::arithmetic::add_out` (alpha=1.0 alias) and `add_scaled_out(&out, &a, &b, alpha)` which (a) validates device match, (b) computes the result via the existing `add_scaled` path under `no_grad` (since `out=` is non-autograd-tracked per torch), (c) swaps the result storage into `out` via `update_storage` when shapes match or `update_storage_and_shape` when `out` must be resized. Required adding `Tensor::update_storage_and_shape` (ferrotorch-core/src/tensor.rs) which mirrors `update_storage`'s Arc<TensorInner> cast pattern and also rewrites shape/strides/offset in lockstep. Runner wires the `out_spec` kwarg through `materialize_ferrotorch_tensor` so the `out` envelope's fill (including NaN) is preserved before the write, then returns the post-write tensor's contents.",
+          "fix_ref": "ferrotorch-core/src/grad_fns/arithmetic.rs add_out / add_scaled_out + ferrotorch-core/src/tensor.rs update_storage_and_shape (re-corrector). Originally tracked as #1190; the cross-cutting concern dissolved when the first `_out` variant landed — `_out` as a function-naming convention is fine for now, and a workspace-wide trait can settle later when more ops grow `_out` variants. Issue #1190 closed."
+        }
+      ],
+      "deferred_divergences": [],
+      "discriminator_strong_passes": [
+        "NaN propagation (7/7): finite + NaN, NaN at any position, alpha=0 * NaN, alpha=NaN — all NaN positions match torch exactly.",
+        "+/-Inf and overflow (8/8): inf+inf, inf-inf=NaN, max+max=inf via F32_MAX token, inf*alpha=inf, 0*inf=NaN — all match.",
+        "Denormals (6/6): subnormal + 0, subnormal + subnormal, alpha-scaled subnormals — preserved, no flush-to-zero.",
+        "Empty tensors (6/6): [0], [0,5], [5,0], [2,0,3], empty + non-empty broadcast, alpha != 1 — all shape-preserving.",
+        "Scalar 0-dim tensors (6/6): [] preserved, [] + [3,4] broadcasts to [3,4], 0-dim NaN/Inf handled.",
+        "0-stride broadcasting (6/6): expand([1] -> [5,5]) + [5,5], expand row, NaN through expand — torch parity holds.",
+        "Alpha edges (9/9): alpha=0, alpha=-0.0, alpha=1.0 (fast path), alpha=2 (int) vs alpha=2.0 (float) bit-exact, alpha=tiny/huge/neg-huge, alpha=-1 (sub-equivalent).",
+        "Autograd identity (6/6): da=grad and db=alpha*grad correct on broadcast, alpha=2, alpha=-0.5, alpha=0; only-a requires_grad correctly produces grad_b=None.",
+        "Non-contig stride (6/6 after re-corrector): transpose_2d, transpose_both, transpose_3d, transpose_with_alpha, transpose_with_nan, transpose_already_in_strong_passes all materialize via .contiguous() and produce torch-bit-equivalent output.",
+        "In-place (5/5 after re-corrector): inplace_alpha + inplace_broadcast now route through add_scaled_; existing inplace probes unaffected.",
+        "out= kwarg (5/5 after re-corrector): out_basic, out_with_alpha, out_broadcast, out_wrong_shape (silently resizes `out` to broadcast shape, matching torch's current 2.x behavior + deprecation warning), out_nan (pre-fill NaN fully overwritten — no leak). Implemented via add_scaled_out + Tensor::update_storage_and_shape."
+      ]
+    },
+    "cumsum": {
+      "status": "diverges",
+      "last_sweep_at": "2026-05-25T13:00:00Z",
+      "samples_attempted": 32,
+      "samples_passed": 24,
+      "samples_failed": 8,
+      "samples_skipped": 0,
+      "pytorch_source": "aten/src/ATen/native/ReduceOps.cpp:511 TORCH_IMPL_FUNC(cumsum_out); tools/autograd/derivatives.yaml:529-531",
+      "ferrotorch_source": "ferrotorch-core/src/grad_fns/cumulative.rs:72 (cumsum) + :35 (CumsumBackward); ops/cumulative.rs:66 cumsum_forward + :109 reverse_cumsum",
+      "runner_arm": "tools/parity-sweep/runner/src/main.rs:471",
+      "known_divergences": [
+        {
+          "category": "scalar_0d",
+          "root_cause": "ferrotorch ops/cumulative.rs:49-56 validate_dim rejects ndim==0. Upstream torch.cumsum(torch.tensor(5.0), 0) returns tensor(5.) per ReduceOps.cpp:503-504 scalar branch.",
+          "tracking_blocker": "#1233"
+        },
+        {
+          "category": "no_production_consumer",
+          "root_cause": "Only lib.rs:159 re-export; no ferrotorch-*/src/ caller outside tests. Runner dispatch arm is a TEST-SIDE consumer per R-DEFER-1.",
+          "tracking_blocker": "#1232"
+        }
+      ]
+    },
+    "cumprod": {
+      "status": "diverges",
+      "last_sweep_at": "2026-05-25T13:00:00Z",
+      "samples_attempted": 80,
+      "samples_passed": 72,
+      "samples_failed": 8,
+      "samples_skipped": 0,
+      "pytorch_source": "aten/src/ATen/native/ReduceOps.cpp:519 TORCH_IMPL_FUNC(cumprod_out); tools/autograd/derivatives.yaml:525-527",
+      "ferrotorch_source": "ferrotorch-core/src/grad_fns/cumulative.rs:202 (cumprod) + :103 (CumprodBackward); ops/cumulative.rs:135 cumprod_forward",
+      "runner_arm": "tools/parity-sweep/runner/src/main.rs:483",
+      "known_divergences": [
+        {
+          "category": "scalar_0d",
+          "root_cause": "Same validate_dim rejection as cumsum.",
+          "tracking_blocker": "#1233"
+        },
+        {
+          "category": "no_production_consumer",
+          "root_cause": "Only lib.rs:159 re-export; runner dispatch is TEST-SIDE per R-DEFER-1.",
+          "tracking_blocker": "#1232"
+        },
+        {
+          "category": "backward_zeros_path_O_n3",
+          "root_cause": "ferrotorch's CumprodBackward zeros-path at grad_fns/cumulative.rs:142-160 is O(n^3) brute-force, not upstream's masked-fill composite-compliance algorithm. Numerically correct (test_cumprod_backward_with_zero verifies 1/8/0 expected gradients) but slower and not second-order-differentiable. Not a forward parity issue; not blocking the parity-sweep gate.",
+          "tracking_blocker": null
+        }
+      ]
+    },
+    "cummax": {
+      "status": "diverges",
+      "last_sweep_at": "2026-05-25T13:00:00Z",
+      "samples_attempted": 24,
+      "samples_passed": 16,
+      "samples_failed": 8,
+      "samples_skipped": 0,
+      "pytorch_source": "aten/src/ATen/native/ReduceOps.cpp:860 Tensor cummax(...); cummax_cummin_helper at :811-826; tools/autograd/derivatives.yaml:533-535",
+      "ferrotorch_source": "ferrotorch-core/src/grad_fns/cumulative.rs:230 (cummax) delegates to ops/cumulative.rs:191 cummax_forward; einops.rs:796 production consumer (values only, indices ignored)",
+      "runner_arm": "tools/parity-sweep/runner/src/main.rs:500 (Option A: returns .values only; sweep loop at :982-991 selects output[0] from oracle's [values, indices] JSON array)",
+      "known_divergences": [
+        {
+          "category": "scalar_0d",
+          "root_cause": "cummax_forward errors `cannot operate on a scalar (0-D) tensor`. Upstream returns (tensor(5.), tensor(0)) for a 0-D input.",
+          "tracking_blocker": "#1233"
+        },
+        {
+          "category": "indices_tie_break",
+          "root_cause": "ferrotorch ops/cumulative.rs:247 uses strict `>` so EARLIER index wins on equal values; upstream uses std::greater_equal so LATER wins.",
+          "tracking_blocker": "#1231"
+        },
+        {
+          "category": "non_differentiable",
+          "root_cause": "grad_fns/cumulative.rs:230 has no grad-fn; upstream derivatives.yaml:533-535 specifies cummaxmin_backward (scatter_add via indices).",
+          "tracking_blocker": "#1231"
+        },
+        {
+          "category": "nan_propagation",
+          "root_cause": "Upstream ReduceOps.cpp:819 isnan_(curr_elem) propagates NaN through running max; ferrotorch's strict `>` after NaN comparison keeps prior non-NaN value.",
+          "tracking_blocker": "#1231"
+        }
+      ]
+    },
+    "cummin": {
+      "status": "diverges",
+      "last_sweep_at": "2026-05-25T13:00:00Z",
+      "samples_attempted": 24,
+      "samples_passed": 16,
+      "samples_failed": 8,
+      "samples_skipped": 0,
+      "pytorch_source": "aten/src/ATen/native/ReduceOps.cpp:899 Tensor cummin(...); cummax_cummin_helper at :811-826; tools/autograd/derivatives.yaml:537-539",
+      "ferrotorch_source": "ferrotorch-core/src/grad_fns/cumulative.rs:240 (cummin) delegates to ops/cumulative.rs:272 cummin_forward; einops.rs:802 production consumer",
+      "runner_arm": "tools/parity-sweep/runner/src/main.rs:511 (Option A symmetric to cummax)",
+      "known_divergences": [
+        {
+          "category": "scalar_0d",
+          "root_cause": "Symmetric to cummax.",
+          "tracking_blocker": "#1233"
+        },
+        {
+          "category": "indices_tie_break",
+          "root_cause": "Strict `<` instead of std::less_equal.",
+          "tracking_blocker": "#1231"
+        },
+        {
+          "category": "non_differentiable",
+          "root_cause": "No grad-fn; upstream derivatives.yaml:537-539 specifies cummaxmin_backward.",
+          "tracking_blocker": "#1231"
+        }
+      ]
+    },
+    "logcumsumexp": {
+      "status": "diverges",
+      "last_sweep_at": "2026-05-25T13:00:00Z",
+      "samples_attempted": 48,
+      "samples_passed": 32,
+      "samples_failed": 16,
+      "samples_skipped": 0,
+      "pytorch_source": "aten/src/ATen/native/ReduceOps.cpp:475 Tensor logcumsumexp(...); tools/autograd/derivatives.yaml:521-523",
+      "ferrotorch_source": "ferrotorch-core/src/grad_fns/cumulative.rs:322 (logcumsumexp) + :264 (LogcumsumexpBackward); ops/cumulative.rs:352 logcumsumexp_forward (two-pass running-max rescaling for numerical stability)",
+      "runner_arm": "tools/parity-sweep/runner/src/main.rs:526",
+      "known_divergences": [
+        {
+          "category": "scalar_0d",
+          "root_cause": "Same validate_dim rejection as cumsum.",
+          "tracking_blocker": "#1233"
+        },
+        {
+          "category": "no_production_consumer",
+          "root_cause": "Only lib.rs:159 re-export; runner dispatch is TEST-SIDE per R-DEFER-1.",
+          "tracking_blocker": "#1232"
+        }
+      ]
+    }
+  }
+}
