@@ -14,8 +14,8 @@ use crate::autograd::no_grad::is_grad_enabled;
 use crate::dtype::Float;
 use crate::error::FerrotorchResult;
 use crate::ops::cumulative::{
-    cummax_forward, cummin_forward, cumprod_forward, cumsum_forward, logcumsumexp_forward,
-    reverse_cumsum, CumExtremeResult,
+    CumExtremeResult, cummax_forward, cummin_forward, cumprod_forward, cumsum_forward,
+    logcumsumexp_forward, reverse_cumsum,
 };
 use crate::shape::normalize_axis;
 use crate::storage::TensorStorage;
@@ -143,11 +143,21 @@ fn cumulative_scalar_identity<T: Float>(
     kind: ScalarBackwardKind,
 ) -> FerrotorchResult<Tensor<T>> {
     // PyTorch accepts dim ∈ {-1, 0} on a 0-D tensor; any other value
-    // raises `IndexError` (see e.g. cummax's message
-    // "Expected reduction dim -1 or 0 for scalar but got <N>").
+    // raises `IndexError`. cumsum/cumprod/logcumsumexp do NOT route
+    // through `zero_numel_check_dims`; they hit the `result.fill_(self)`
+    // branch in `impl_func_cum_ops` (aten/src/ATen/native/ReduceOps.cpp:501-504)
+    // and then call `c10::maybe_wrap_dim` in the non-0-D path. The error
+    // emitted on a bad dim is therefore from `maybe_wrap_dim_slow` at
+    // `c10/core/WrapDimMinimal.cpp:23-31`, which formats:
+    //   "Dimension out of range (expected to be in range of [<min>, <max>], but got <dim>)"
+    // For a 0-D tensor `dim_post_expr == 0` recurses with
+    // `dim_post_expr=1`, giving min=-1 and max=0.
     if dim != 0 && dim != -1 {
+        let _ = op_name; // upstream's wrap_dim message does not include the op name.
         return Err(crate::error::FerrotorchError::InvalidArgument {
-            message: format!("{op_name}: expected reduction dim -1 or 0 for scalar but got {dim}"),
+            message: format!(
+                "Dimension out of range (expected to be in range of [-1, 0], but got {dim})"
+            ),
         });
     }
 
@@ -405,10 +415,17 @@ fn cumextreme_scalar_identity<T: Float>(
     dim: i64,
     op_name: &str,
 ) -> FerrotorchResult<CumExtremeResult<T>> {
+    // PyTorch's `cummax_helper`/`cummin_helper` route 0-D through
+    // `zero_numel_check_dims` at
+    // `aten/src/ATen/native/ReduceOpsUtils.h:277-281`, which formats:
+    //   "<fn_name>: Expected reduction dim -1 or 0 for scalar but got <dim>"
+    // The `fn_name` arg is `"cummax()"` / `"cummin()"` per
+    // `aten/src/ATen/native/ReduceOps.cpp:840,879`. Capital 'E' on
+    // "Expected".
     if dim != 0 && dim != -1 {
         return Err(crate::error::FerrotorchError::InvalidArgument {
             message: format!(
-                "{op_name}(): expected reduction dim -1 or 0 for scalar but got {dim}"
+                "{op_name}(): Expected reduction dim -1 or 0 for scalar but got {dim}"
             ),
         });
     }
