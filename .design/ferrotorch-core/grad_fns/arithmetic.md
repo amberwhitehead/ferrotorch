@@ -53,10 +53,13 @@ alpha=1, out=None)` signature gap.
   `TORCH_IMPL_FUNC(sub_out)` calling `add_stub(device_type(), *this, -alpha)`
   (`aten/src/ATen/native/BinaryOps.cpp:434-439`) — sub is literally add with
   negated alpha. ferrotorch's `sub_scaled` matches that contract byte-for-byte
-  by delegating to `add_scaled(a, b, -alpha)`; the `SubBackward` VJP
-  `(grad, -grad)` for the plain `sub` path is preserved separately and
-  `sub_scaled` inherits `AddScaledBackward` for the alpha path
-  (`db = -alpha * grad`).
+  by delegating to `add_scaled(a, b, -alpha)`, and the plain `sub(a, b)` is
+  itself a one-line wrapper `sub_scaled(a, b, 1.0)`. The backward identity is
+  therefore `AddScaledBackward` (with `alpha = -1.0` for the plain path and
+  `alpha = -alpha` for the scaled path); ferrotorch carries no dedicated
+  subtract-backward grad-fn — the delegation collapses sub onto the
+  add-with-negated-alpha graph node so the forward and backward routing
+  match upstream's add-with-negated-alpha contract exactly (R-DEV-1).
 
 - REQ-3: `mul(a, b)` — forward `c = a * b` with broadcasting + autograd
   (`MulBackward` VJP returns `(grad*b, grad*a)` reduced). Mirrors `mul_stub`
@@ -453,34 +456,40 @@ REQ-1 SHIPPED claim rests on `add` + `add_scaled` having `methods.rs` /
 `inplace.rs` consumers respectively, not on `add_out` / `add_scaled_out`
 having direct consumers.
 
-### REQ-2 `sub` (lines 781-922)
+### REQ-2 `sub` / `sub_scaled` (delegation to `add_scaled`)
 
-`SubBackward` (`arithmetic.rs:790-813`) saves `a`/`b`; backward returns
-`(reduce(grad, a.shape()), reduce(-grad, b.shape()))` via a local
-`neg(grad)` call under `no_grad`. The forward `pub fn sub`
-(`arithmetic.rs:816-831`) and `sub_inner` (`arithmetic.rs:833-922`) follow
-the same shape as `add` — same `dispatch_floating_dtype!` macro for
-`sub_{f32,f64,bf16,f16}` / `broadcast_sub_{...}`, same CPU `fast_sub`
-fallthrough. **Non-test consumer**: `methods.rs:18-20`
-`Tensor::sub_t`; also `autograd::forward_ad:97-98` (dual-number forward
-subtraction primal+tangent), and `autograd::grad_penalty:117` builds the
-`norm - 1` term used by the WGAN-GP penalty.
+After commit `d0fd83f1a` (the post-#1215 delegation), `sub` no longer has
+its own backward grad-fn struct or its own subtract-inner private helper.
+Both were removed when `sub` was rewritten as a one-line wrapper around
+`sub_scaled`. The current shape is:
 
-`sub_scaled<T: Float>(a, b, alpha: f64)` (added at
-`arithmetic.rs:923-936`) is a thin alias that forwards to
-`add_scaled(a, b, -alpha)`. PyTorch's `torch.sub(input, other, *, alpha=1)`
-at BinaryOps.cpp:434 `TORCH_IMPL_FUNC(sub_out)` literally calls
-`add_stub(device_type(), *this, -alpha)` — the delegation matches upstream
-byte-for-byte (R-DEV-1). Broadcasting, GPU dispatch, the
-`AddScaledBackward` VJP (which naturally produces `db = -alpha * grad`),
-and the `alpha == 1.0` fast-path-to-plain-`add` are all inherited from
-`add_scaled` for free. **Non-test consumer**: `inplace.rs:266`
-`Tensor::sub_scaled_` delegates to `add_scaled_(other, -alpha)` and
-provides the in-place `torch.Tensor.sub_(other, *, alpha)` semantics by
-re-using the same shape-strict / broadcast / GPU fast-path machinery as
-`add_scaled_`. The `sub_out` / `sub_scaled_out` entry points are
-intentionally NOT shipped in this commit — out-of-scope per the #1192
-dispatch (vocabulary-only risk, separable). Blocker #1192 closed.
+- `pub fn sub<T: Float>(a, b)` at `arithmetic.rs:786` is a one-line
+  delegation: `sub_scaled(a, b, 1.0)`.
+- `pub fn sub_scaled<T: Float>(a, b, alpha: f64)` at `arithmetic.rs:815`
+  is a thin alias that forwards to `add_scaled(a, b, -alpha)`.
+
+PyTorch's `torch.sub(input, other, *, alpha=1)` at
+`aten/src/ATen/native/BinaryOps.cpp:434 TORCH_IMPL_FUNC(sub_out)`
+literally calls `add_stub(device_type(), *this, -alpha)` — the
+delegation matches upstream byte-for-byte (R-DEV-1). Broadcasting, GPU
+dispatch, the `AddScaledBackward` VJP (which naturally produces
+`db = -alpha * grad`, i.e. `-grad` when `alpha == 1`), and the
+`alpha == 1.0` fast-path-to-plain-`add` are all inherited from
+`add_scaled` for free. The backward identity is therefore
+`AddScaledBackward` for both the plain and alpha-kwarg paths (there is
+no dedicated subtract-backward grad-fn).
+
+**Non-test consumers**: `methods.rs:18` (`Tensor::sub_t`) calls
+`arithmetic::sub`; `autograd::forward_ad:97-98` (dual-number forward
+subtraction primal+tangent) calls `arithmetic::sub`;
+`autograd::grad_penalty:117` builds the `norm - 1` term used by the
+WGAN-GP penalty via `sub`; `inplace.rs:266` (`Tensor::sub_scaled_`)
+delegates to `add_scaled_(other, -alpha)`, providing the in-place
+`torch.Tensor.sub_(other, *, alpha)` semantics by re-using the same
+shape-strict / broadcast / GPU fast-path machinery as `add_scaled_`. The
+`sub_out` / `sub_scaled_out` entry points are intentionally NOT shipped
+in this commit — out-of-scope per the #1192 dispatch (vocabulary-only
+risk, separable). Blocker #1192 closed.
 
 ### REQ-3 `mul` (lines 928-1097)
 
@@ -491,7 +500,7 @@ calls so the backward pass enters the graph; otherwise it routes through
 `no_grad(|| mul(...))`. Forward `mul`/`mul_inner`
 (`arithmetic.rs:941-1097`) is structurally identical to `add`/`add_inner`
 with `mul_*` / `broadcast_mul_*` kernels and the CPU `fast_mul`
-fallthrough. **Non-test consumer**: `methods.rs:22-24` `Tensor::mul_t`;
+fallthrough. **Non-test consumer**: `methods.rs:36-38` `Tensor::mul_t`;
 also `einsum.rs:818,824,840,848` (the batch-matmul broadcast paths),
 `autograd::higher_order:471`, `autograd::grad_penalty:122,295`,
 `grad_fns::transcendental:73,278,355`.
@@ -513,9 +522,11 @@ quotient rule), `nn::loss.rs:136` (mean reduction), `transcendental.rs:175`
 `NegBackward` (`arithmetic.rs:1273-1290`) returns `-grad` under `no_grad`.
 Forward `neg`/`neg_inner` (`arithmetic.rs:1243-1334`) routes through
 `neg_{f32,f64,bf16_bf16,f16}` on CUDA and `unary_map(a, |x| -x)` on CPU.
-**Non-test consumer**: `methods.rs:30-32` `Tensor::neg_t`; also
+**Non-test consumer**: `methods.rs:44-46` `Tensor::neg_t`; also
 `vmap.rs:1017`, `autograd::forward_ad:126-127`, `transcendental.rs:354`,
-and recursive use inside `SubBackward` / `DivBackward` here.
+and recursive use inside `DivBackward` here (the former subtract-backward
+consumer was eliminated when `sub` was rewritten as a `sub_scaled` →
+`add_scaled` delegation in commit `d0fd83f1a`).
 
 ### REQ-8 `pow` (lines 1340-1461)
 
@@ -888,8 +899,8 @@ full impl-and-consumer evidence chain (`arithmetic.rs:2616` + `:2459` +
 
 | REQ | Status | Evidence |
 |---|---|---|
-| REQ-1 (add, add_scaled, add_out, add_scaled_out) | SHIPPED | impl: `add` at `ferrotorch-core/src/grad_fns/arithmetic.rs:351`, `add_scaled` at `:716`, `add_out` at `:619`, `add_scaled_out` at `:650` mirror `aten/src/ATen/native/BinaryOps.cpp:1176` (`Tensor add`) and the `add_stub` dispatch at `:377` + `torch/_torch_docs.py:358` signature `add(input, other, *, alpha=1, out=None)`. Non-test consumers: `ferrotorch-core/src/methods.rs:14` (`Tensor::add_t`) calls `arithmetic::add`; `ferrotorch-core/src/inplace.rs:167` (`Tensor::add_scaled_`) calls `arithmetic::add_scaled`. Parity-sweep `add` status `verified` per `tools/parity-sweep/parity_audit.json:5-72` (88/88 passed, 0 failed at seeds=8). |
-| REQ-2 (sub, sub_scaled) | SHIPPED | impl: `sub` at `ferrotorch-core/src/grad_fns/arithmetic.rs:786` (plain `c = a - b`) and `sub_scaled` at `:923` (the alpha-kwarg path, delegates to `add_scaled(a, b, -alpha)`) mirror `aten/src/ATen/native/BinaryOps.cpp:434-439 TORCH_IMPL_FUNC(sub_out) { add_stub(device_type(), *this, -alpha); ... }` byte-for-byte (R-DEV-1) and `torch/_torch_docs.py:10851` signature `sub(input, other, *, alpha=1, out=None)`. Non-test consumer: `ferrotorch-core/src/inplace.rs:266` (`Tensor::sub_scaled_`) calls `Tensor::add_scaled_(other, -alpha)`, which itself calls `arithmetic::add_scaled` (the same path `sub_scaled` flows through); also `ferrotorch-core/src/methods.rs:18` (`Tensor::sub_t`) calls `arithmetic::sub` and `ferrotorch-core/src/autograd/forward_ad.rs:97` (dual-number forward subtraction primal) calls `arithmetic::sub`. Parity-sweep `[sub] 88/88 passed (0 skipped, 0 failed)` at seeds=8 (closes #1192). |
+| REQ-1 (add, add_scaled, add_out, add_scaled_out) | SHIPPED | impl: `add` at `ferrotorch-core/src/grad_fns/arithmetic.rs:351`, `add_scaled` at `:708`, `add_out` at `:615`, `add_scaled_out` at `:642` mirror `aten/src/ATen/native/BinaryOps.cpp:1176` (`Tensor add`) and the `add_stub` dispatch at `:377` + `torch/_torch_docs.py:358` signature `add(input, other, *, alpha=1, out=None)`. Non-test consumers: `ferrotorch-core/src/methods.rs:14` (`Tensor::add_t`) calls `arithmetic::add`; `ferrotorch-core/src/inplace.rs:167` (`Tensor::add_scaled_`) calls `arithmetic::add_scaled`. Parity-sweep `add` status `verified` per `tools/parity-sweep/parity_audit.json:5-72` (88/88 passed, 0 failed at seeds=8). |
+| REQ-2 (sub, sub_scaled) | SHIPPED | impl: `sub` at `ferrotorch-core/src/grad_fns/arithmetic.rs:786` (one-line wrapper `sub_scaled(a, b, 1.0)`) and `sub_scaled` at `:815` (the alpha-kwarg path, delegates to `add_scaled(a, b, -alpha)`) mirror `aten/src/ATen/native/BinaryOps.cpp:434-439 TORCH_IMPL_FUNC(sub_out) { add_stub(device_type(), *this, -alpha); ... }` byte-for-byte (R-DEV-1) and `torch/_torch_docs.py:10851` signature `sub(input, other, *, alpha=1, out=None)`. Non-test consumer: `ferrotorch-core/src/inplace.rs:266` (`Tensor::sub_scaled_`) calls `Tensor::add_scaled_(other, -alpha)`, which itself calls `arithmetic::add_scaled` (the same path `sub_scaled` flows through); also `ferrotorch-core/src/methods.rs:18` (`Tensor::sub_t`) calls `arithmetic::sub` and `ferrotorch-core/src/autograd/forward_ad.rs:97` (dual-number forward subtraction primal) calls `arithmetic::sub`. Parity-sweep `[sub] 88/88 passed (0 skipped, 0 failed)` at seeds=8 (closes #1192). |
 | REQ-3 (mul) | SHIPPED | impl: `mul` at `ferrotorch-core/src/grad_fns/arithmetic.rs:941` mirrors `aten/src/ATen/native/BinaryOps.cpp:441 TORCH_IMPL_FUNC(mul_out)` + `mul_stub` at `:378`. Non-test consumer: `ferrotorch-core/src/methods.rs:36` (`Tensor::mul_t`); also `ferrotorch-core/src/einsum.rs:818`, `ferrotorch-core/src/autograd/grad_penalty.rs:122`. Parity-sweep `[mul] 72/72 passed (0 skipped, 0 failed)` at seeds=8. |
 | REQ-4 (div) | SHIPPED | impl: `div` at `ferrotorch-core/src/grad_fns/arithmetic.rs:1101` mirrors `aten/src/ATen/native/BinaryOps.cpp:447 TORCH_IMPL_FUNC(div_out)` via `div_true_stub`. Non-test consumer: `ferrotorch-core/src/methods.rs:40` (`Tensor::div_t`); also `ferrotorch-core/src/autograd/forward_ad.rs:114`, `ferrotorch-nn/src/loss.rs:136`. Parity-sweep `[div] 72/72 passed (0 skipped, 0 failed)` at seeds=8. NB: the `rounding_mode` kwarg (`floor`/`trunc`) is not implemented but those modes correspond to `floor_divide` / `trunc_divide`, themselves NOT-STARTED elsewhere in this table. |
 | REQ-5 (neg) | SHIPPED | impl: `neg` at `ferrotorch-core/src/grad_fns/arithmetic.rs:1243` mirrors `aten/src/ATen/native/UnaryOps.cpp:344 CREATE_UNARY_TORCH_IMPL_FUNC(neg_out, neg_stub)`. Non-test consumer: `ferrotorch-core/src/methods.rs:44` (`Tensor::neg_t`); also `ferrotorch-core/src/autograd/forward_ad.rs:126`. Parity-sweep `[neg] 8/8 passed (0 skipped, 0 failed)` at seeds=8. |

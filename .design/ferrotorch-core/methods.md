@@ -31,15 +31,17 @@ methods are public-API wrappers around them.
 
 ## Requirements
 
-- REQ-1: **Arithmetic methods** — `add_t / sub_t / mul_t / div_t / neg_t /
-  pow_t / sqrt_t / abs_t`. Each instance method must delegate to
+- REQ-1: **Arithmetic methods** — `add_t / sub_t / rsub_t / mul_t / div_t /
+  neg_t / pow_t / sqrt_t / abs_t`. Each instance method must delegate to
   `crate::grad_fns::arithmetic::<op>(self, ...)` preserving autograd, broadcast,
-  and dtype-promotion semantics. Mirrors `torch.Tensor.add / sub / mul / div /
-  neg / pow / sqrt / abs` per `torch/_tensor_docs.py:360 / 5102 / 3430 / 1735 /
-  3583 / 3823 / 4983 / 251` and the upstream stubs at
-  `aten/src/ATen/native/BinaryOps.cpp:434/441/447` (binary) and
-  `aten/src/ATen/native/UnaryOps.cpp:344+` (unary). The instance methods are
-  the contract `arithmetic.md`'s REQ-1..REQ-11 publish to the world.
+  and dtype-promotion semantics. Mirrors `torch.Tensor.add / sub / rsub / mul /
+  div / neg / pow / sqrt / abs` per `torch/_tensor_docs.py:360 / 5102 / 4625 /
+  3430 / 1735 / 3583 / 3823 / 4983 / 251` and the upstream stubs at
+  `aten/src/ATen/native/BinaryOps.cpp:434/441/447/1169` (binary, with `rsub`
+  at `:1169` as a literal `at::sub(other, self, alpha)` operand-swap
+  delegation) and `aten/src/ATen/native/UnaryOps.cpp:344+` (unary). The
+  instance methods are the contract `arithmetic.md`'s REQ-1..REQ-11 publish
+  to the world.
 
 - REQ-2: **Transcendental methods** — `exp_t / log_t / sin_t / cos_t /
   clamp_t`. Delegate to `crate::grad_fns::transcendental::<op>` mirroring
@@ -188,10 +190,13 @@ signatures users compile against. The pattern matches `torch.Tensor`'s C++
 side, where `Tensor::add()` is a method declared in `tensor.h` that
 delegates to the native `at::add` dispatcher.
 
-#### Arithmetic block (`methods.rs:14-44`) — REQ-1
+#### Arithmetic block (`methods.rs:14-84`) — REQ-1
 
 - `add_t(&Tensor)` → `arithmetic::add` (`grad_fns/arithmetic.rs`).
 - `sub_t(&Tensor)` → `arithmetic::sub`.
+- `rsub_t(&Tensor, alpha: f64)` → `arithmetic::rsub` (`methods.rs:32-34`),
+  the operand-swap delegation that mirrors upstream
+  `BinaryOps.cpp:1169 Tensor rsub(...) { return at::sub(other, self, alpha); }`.
 - `mul_t(&Tensor)` → `arithmetic::mul`.
 - `div_t(&Tensor)` → `arithmetic::div`.
 - `neg_t()` → `arithmetic::neg`.
@@ -199,7 +204,10 @@ delegates to the native `at::add` dispatcher.
 - `sqrt_t()` → `arithmetic::sqrt`.
 - `abs_t()` → `arithmetic::abs`.
 
-Non-test consumers: `ferrotorch-nn/src/hooks.rs:296,505 (add_t)`.
+Non-test consumers: `ferrotorch-nn/src/hooks.rs:296,505 (add_t)`. `rsub_t`
+is the chainable method-style surface that closes the R-DEFER-1
+production-consumer requirement for `arithmetic::rsub` per `arithmetic.md`
+REQ-9.
 
 #### Transcendental block (`methods.rs:48-66`) — REQ-2
 
@@ -452,7 +460,7 @@ the umbrella `add` arm.
 
 | REQ | Status | Evidence |
 |---|---|---|
-| REQ-1 (arithmetic methods) | SHIPPED | impl: `Tensor::add_t / sub_t / mul_t / div_t / neg_t / pow_t / sqrt_t / abs_t` at `ferrotorch-core/src/methods.rs:14-44` each delegate to `crate::grad_fns::arithmetic::<op>` mirroring `torch.Tensor.add / sub / mul / div / neg / pow / sqrt / abs` per `torch/_tensor_docs.py:360 / 5102 / 3430 / 1735 / 3583 / 3823 / 4983 / 251` and `aten/src/ATen/native/BinaryOps.cpp:434/441/447`. Non-test production consumer: `ferrotorch-nn/src/hooks.rs:296,505 input.add_t(...)`. Parity-sweep `add` arm verified 88/88 at seeds=8 (`tools/parity-sweep/parity_audit.json:5-72`). |
+| REQ-1 (arithmetic methods) | SHIPPED | impl: `Tensor::add_t / sub_t / rsub_t / mul_t / div_t / neg_t / pow_t / sqrt_t / abs_t` at `ferrotorch-core/src/methods.rs:14-84` each delegate to `crate::grad_fns::arithmetic::<op>` mirroring `torch.Tensor.add / sub / rsub / mul / div / neg / pow / sqrt / abs` per `torch/_tensor_docs.py:360 / 5102 / 4625 / 3430 / 1735 / 3583 / 3823 / 4983 / 251` and `aten/src/ATen/native/BinaryOps.cpp:434/441/447/1169` (`rsub` at `:1169` is the operand-swap delegation `at::sub(other, self, alpha)`). Non-test production consumer: `ferrotorch-nn/src/hooks.rs:296,505 input.add_t(...)`; `rsub_t` itself at `ferrotorch-core/src/methods.rs:32-34` is the production consumer for `arithmetic::rsub` per R-DEFER-1 (`arithmetic.md` REQ-9). Parity-sweep `add` arm verified 88/88 at seeds=8 (`tools/parity-sweep/parity_audit.json:5-72`); `rsub` arm landed via #1194. |
 | REQ-2 (transcendental methods) | SHIPPED | impl: `Tensor::exp_t / log_t / sin_t / cos_t / clamp_t` at `ferrotorch-core/src/methods.rs:48-66` delegate to `crate::grad_fns::transcendental::*` mirroring `torch.Tensor.exp / log / sin / cos / clamp` per `torch/_tensor_docs.py:1878 / 2992 / 4794 / 1288 / 1130`. Non-test production consumer: `ferrotorch-diffusion/src/vae_encoder.rs:499 logvar_raw.clamp_t(lo, hi)`. |
 | REQ-3 (activation methods) | SHIPPED | impl: `Tensor::relu / sigmoid / tanh_t / gelu / gelu_with / silu / softmax / log_softmax` at `ferrotorch-core/src/methods.rs:70-103` delegate to `crate::grad_fns::activation::*` mirroring `torch.Tensor.{sigmoid, tanh}` per `torch/_tensor_docs.py:4713,5522` and `torch/nn/functional.py:1718 relu / 2012 gelu / 2381 silu / 2245 log_softmax`. Non-test consumers: `ferrotorch-vision/src/models/detection/roi_heads_postprocess.rs:421 mask_logits.sigmoid()`, `ferrotorch-diffusion/src/attention.rs:196 scores_scaled.softmax()`, `ferrotorch-diffusion/src/blocks.rs:339 scores_scaled.softmax()`. |
 | REQ-4 (global reductions) | SHIPPED | impl: `Tensor::sum_all / mean_all / prod_all / amin / amax` at `ferrotorch-core/src/methods.rs:107-128` delegate to `crate::grad_fns::reduction::*` mirroring `torch.Tensor.sum / mean / prod / amin / amax` per `torch/_tensor_docs.py:5138 / 3304 / 3859 / 3349 / 3259`. Non-test consumers: `ferrotorch-distributions/src/multivariate_normal.rs:208 log_l.sum_all()`, `ferrotorch-core/src/stride_tricks.rs:679,707 view.sum_all() / contig.sum_all()`, `ferrotorch-core/src/grad_fns/activation.rs:3221,3236,3265 y.sum_all()`. |
