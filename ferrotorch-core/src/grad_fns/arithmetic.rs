@@ -767,147 +767,24 @@ pub fn add_scaled<T: Float>(
 // sub
 // ===========================================================================
 
-/// Backward node for `c = a - b`.
-///
-/// VJP: da = grad, db = -grad.
-#[derive(Debug)]
-struct SubBackward<T: Float> {
-    a: Tensor<T>,
-    b: Tensor<T>,
-}
-
-impl<T: Float> GradFn<T> for SubBackward<T> {
-    fn backward(&self, grad_output: &Tensor<T>) -> FerrotorchResult<Vec<Option<Tensor<T>>>> {
-        let da = if self.a.requires_grad() {
-            Some(reduce_grad_to_shape(grad_output, self.a.shape())?)
-        } else {
-            None
-        };
-        let db = if self.b.requires_grad() {
-            let neg_grad = no_grad(|| neg(grad_output))?;
-            Some(reduce_grad_to_shape(&neg_grad, self.b.shape())?)
-        } else {
-            None
-        };
-        Ok(vec![da, db])
-    }
-
-    fn inputs(&self) -> Vec<&Tensor<T>> {
-        vec![&self.a, &self.b]
-    }
-
-    fn name(&self) -> &'static str {
-        "SubBackward"
-    }
-}
-
 /// Elementwise subtraction: `c = a - b`.
+///
+/// This is the `alpha=1` thin path over [`sub_scaled`]: PyTorch's
+/// `torch.sub(input, other, *, alpha=1)` collapses to `sub_scaled(a, b, 1.0)`
+/// which in turn delegates to `add_scaled(a, b, -1.0)` — matching upstream's
+/// `TORCH_IMPL_FUNC(sub_out)` at `aten/src/ATen/native/BinaryOps.cpp:434-439`
+/// byte-for-byte (`add_stub(device_type(), *this, -alpha)`). Routing `sub`
+/// through `sub_scaled` makes every existing caller of `arithmetic::sub`
+/// (e.g. `Tensor::sub_t`, `dual_sub`) a transitive non-test production
+/// consumer of `sub_scaled` (closes #1215 / R-DEFER-1).
+///
+/// The forward result, broadcasting behavior, GPU/CPU dispatch, NaN/Inf
+/// propagation, and autograd VJP (`da = grad`, `db = -1.0 * grad = -grad`)
+/// are all numerically equivalent to the previous standalone `SubBackward`
+/// implementation: the grad_fn type just changes from `SubBackward` to
+/// `AddScaledBackward { alpha: -1.0 }`.
 pub fn sub<T: Float>(a: &Tensor<T>, b: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
-    if a.device() != b.device() {
-        return Err(FerrotorchError::DeviceMismatch {
-            expected: a.device(),
-            got: b.device(),
-        });
-    }
-
-    if let Some(out) = crate::meta_propagate::binary_broadcast(a, b)? {
-        return Ok(out);
-    }
-
-    crate::profiler_hook::profile_op_scope("sub", "tensor_op", &[a.shape(), b.shape()], || {
-        sub_inner(a, b)
-    })
-}
-
-fn sub_inner<T: Float>(a: &Tensor<T>, b: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
-    if a.is_cuda() {
-        let backend =
-            crate::gpu_dispatch::gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
-
-        // #812 cluster: materialize non-contiguous CUDA views before kernel.
-        let a_c = ensure_contig_for_gpu(a)?;
-        let b_c = ensure_contig_for_gpu(b)?;
-
-        let needs_broadcast = a_c.shape() != b_c.shape();
-        let (handle, out_shape): (crate::gpu_dispatch::GpuBufferHandle, Vec<usize>) =
-            if needs_broadcast {
-                let out_shape = broadcast_shapes(a_c.shape(), b_c.shape())?;
-                // #23: see arithmetic::add_inner for the rationale.
-                let h: crate::gpu_dispatch::GpuBufferHandle = crate::dispatch_floating_dtype!(
-                    T,
-                    "broadcast_sub",
-                    f32 => backend.broadcast_sub_f32(
-                        a_c.gpu_handle()?,
-                        b_c.gpu_handle()?,
-                        a_c.shape(),
-                        b_c.shape(),
-                        &out_shape,
-                    ),
-                    f64 => backend.broadcast_sub_f64(
-                        a_c.gpu_handle()?,
-                        b_c.gpu_handle()?,
-                        a_c.shape(),
-                        b_c.shape(),
-                        &out_shape,
-                    ),
-                    bf16 => backend.broadcast_sub_bf16(
-                        a_c.gpu_handle()?,
-                        b_c.gpu_handle()?,
-                        a_c.shape(),
-                        b_c.shape(),
-                        &out_shape,
-                    ),
-                    f16 => backend.broadcast_sub_f16(
-                        a_c.gpu_handle()?,
-                        b_c.gpu_handle()?,
-                        a_c.shape(),
-                        b_c.shape(),
-                        &out_shape,
-                    ),
-                )?;
-                (h, out_shape)
-            } else {
-                let h: crate::gpu_dispatch::GpuBufferHandle = crate::dispatch_floating_dtype!(
-                    T,
-                    "sub",
-                    f32 => backend.sub_f32(a_c.gpu_handle()?, b_c.gpu_handle()?),
-                    f64 => backend.sub_f64(a_c.gpu_handle()?, b_c.gpu_handle()?),
-                    bf16 => backend.sub_bf16_bf16(a_c.gpu_handle()?, b_c.gpu_handle()?),
-                    f16 => backend.sub_f16(a_c.gpu_handle()?, b_c.gpu_handle()?),
-                )?;
-                (h, a_c.shape().to_vec())
-            };
-        let storage = TensorStorage::gpu(handle);
-
-        if needs_grad(a, b) {
-            Tensor::from_operation(
-                storage,
-                out_shape,
-                Arc::new(SubBackward {
-                    a: a.clone(),
-                    b: b.clone(),
-                }),
-            )
-        } else {
-            Tensor::from_storage(storage, out_shape, false)
-        }
-    } else {
-        let result = crate::ops::elementwise::fast_sub(a, b)?;
-
-        if needs_grad(a, b) {
-            let (storage, shape) = result.into_storage_and_shape()?;
-            Tensor::from_operation(
-                storage,
-                shape,
-                Arc::new(SubBackward {
-                    a: a.clone(),
-                    b: b.clone(),
-                }),
-            )
-        } else {
-            Ok(result)
-        }
-    }
+    sub_scaled(a, b, 1.0)
 }
 
 /// Elementwise subtraction with a scalar multiplier on the second operand:
