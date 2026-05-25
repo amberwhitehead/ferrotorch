@@ -531,6 +531,43 @@ fn dispatch_f32(
                 .ok_or("logcumsumexp: missing or non-int dim arg")?;
             grad_fns::cumulative::logcumsumexp(&a, dim)?
         })),
+        // `torch.fake_quantize_per_tensor_affine(input, scale, zero_point,
+        // quant_min, quant_max)` — `torch/overrides.py:622`. Oracle emits
+        // `args = [input_tensor, scale: f64, zero_point: i64, quant_min: i64,
+        // quant_max: i64]` per `tools/parity-sweep/oracle.py:184
+        // ((input, scale, zp, qmin, qmax), {})`. ferrotorch impl at
+        // `ferrotorch-core/src/grad_fns/quantize_grad.rs:fake_quantize_per_tensor_affine`
+        // mirrors the upstream forward at `aten/src/ATen/native/quantized/
+        // FakeQuantPerTensorAffine.cpp:31-40` byte-for-byte (banker's
+        // rounding via `f64::round_ties_even`, NaN-safe clamp via
+        // `f64::min`/`f64::max`). Closes blocker #1238.
+        "fake_quantize_per_tensor_affine" => Ok(Some({
+            if args.len() < 5 {
+                return Err(format!(
+                    "fake_quantize_per_tensor_affine: expected 5 args, got {}",
+                    args.len()
+                )
+                .into());
+            }
+            let input = unwrap_tensor_arg(&args[0])
+                .ok_or("fake_quantize_per_tensor_affine: arg 0 not a tensor")?
+                .to_f32()?;
+            let scale = args[1]
+                .as_f64()
+                .ok_or("fake_quantize_per_tensor_affine: arg 1 (scale) not a JSON number")?;
+            let zero_point = args[2]
+                .as_i64()
+                .ok_or("fake_quantize_per_tensor_affine: arg 2 (zero_point) not a JSON integer")?;
+            let quant_min = args[3]
+                .as_i64()
+                .ok_or("fake_quantize_per_tensor_affine: arg 3 (quant_min) not a JSON integer")?;
+            let quant_max = args[4]
+                .as_i64()
+                .ok_or("fake_quantize_per_tensor_affine: arg 4 (quant_max) not a JSON integer")?;
+            grad_fns::quantize_grad::fake_quantize_per_tensor_affine(
+                &input, scale, zero_point, quant_min, quant_max,
+            )?
+        })),
         _ => Ok(None),
     }
 }
@@ -562,6 +599,8 @@ fn dispatch_ops() -> &'static [&'static str] {
         "cummax",
         "cummin",
         "logcumsumexp",
+        // Quantization: per-tensor affine fake quantize w/ STE backward. (#1238)
+        "fake_quantize_per_tensor_affine",
     ]
 }
 

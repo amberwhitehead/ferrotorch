@@ -26,7 +26,20 @@
 //!   `0`, `128`, and the all-positive-range cases that exercise the
 //!   non-clamped `zp` path.
 //! * **fake_quantize_differentiable** forward + STE backward against
-//!   PyTorch's `torch.fake_quantize_per_tensor_affine`.
+//!   PyTorch's `torch.fake_quantize_per_tensor_affine`. Post-#1238 close,
+//!   `fake_quantize_differentiable` is a back-compat alias for
+//!   `fake_quantize_per_tensor_affine` (the canonical upstream-faithful
+//!   name) and the tensor-qparams overload
+//!   `fake_quantize_per_tensor_affine_tensor_qparams` mirrors upstream's
+//!   `aten/src/ATen/native/quantized/FakeQuantPerTensorAffine.cpp:42-51`
+//!   tensor-qparams overload. Coverage of those new surfaces is via the
+//!   `#[cfg(test)] mod tests` block in
+//!   `ferrotorch-core/src/grad_fns/quantize_grad.rs` (unit tests
+//!   `tensor_qparams_matches_scalar_qparams`,
+//!   `fake_quantize_uses_banker_rounding_on_half_boundaries`,
+//!   `fake_quantize_ste_backward_matches_explicit_formula`) and via the
+//!   `parity-sweep` runner's `fake_quantize_per_tensor_affine` dispatch
+//!   arm in `tools/parity-sweep/runner/src/main.rs`.
 //! * **Pruning** bit-exact parity for `magnitude_prune` (mask × original)
 //!   and `apply_2_4_mask`. `sparsity_ratio` parity is exact (counting).
 //! * **Edge cases** required by the dispatch:

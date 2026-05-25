@@ -1,53 +1,111 @@
-//! Differentiable fake-quantization for quantization-aware training
-//! (QAT). CL-293.
+//! Differentiable fake-quantization for quantization-aware training (QAT).
 //!
-//! Provides a tensor-level `fake_quantize_differentiable` op that
-//! wraps `FakeQuantize` in a proper autograd node using the
-//! straight-through estimator (STE):
+//! Provides a tensor-level `fake_quantize_per_tensor_affine` op that mirrors
+//! PyTorch's `torch.fake_quantize_per_tensor_affine` (registered at
+//! `torch/overrides.py:622` and documented at `torch/_torch_docs.py:11950-11988`),
+//! wrapping the forward in a proper autograd node using the straight-through
+//! estimator (STE):
 //!
 //! ```text
-//! forward(x) = dequantize(quantize(x))
-//! backward(grad) = grad * (x >= range_min && x <= range_max ? 1 : 0)
+//! forward(x):
+//!   q_unclamped = round_half_to_even(x / scale) + zero_point
+//!   q           = clamp(q_unclamped, quant_min, quant_max)        // NaN-safe
+//!   output      = (q - zero_point) * scale
+//! backward(dY):
+//!   mask = (quant_min <= q_unclamped <= quant_max) ? 1 : 0
+//!   dX   = dY * mask
 //! ```
 //!
-//! This is the clipped STE used by PyTorch's
-//! `torch.fake_quantize_per_tensor_affine`. Values outside the
-//! representable range have zero gradient (matching the behavior of
-//! clamp at the range boundaries), while in-range values pass the
-//! gradient through unchanged.
+//! This matches the upstream CPU kernel at
+//! `aten/src/ATen/native/quantized/cpu/kernels/QuantizedOpKernels.cpp:2655-2715
+//! _fake_quantize_tensor_helper` byte-for-byte: `qval_f = z_point +
+//! std::nearbyint(*input_val * inv_scale); qval = static_cast<int64_t>(
+//! std::fmin(std::fmax(qval_f, quant_min), quant_max)); output = (qval -
+//! z_point) * sc; mask = (quant_min <= qval_f) && (qval_f <= quant_max);`.
 //!
-//! The forward quantization is non-differentiable (it contains
-//! `round` and `clamp`), so the STE substitutes a piecewise-linear
-//! surrogate gradient that lets models train through quantization
-//! noise.
+//! Two rounding/NaN details must match upstream R-DEV-1 byte-for-byte:
+//! 1. **Round-half-to-even (banker's rounding)**. Rust's `f32::round` is
+//!    round-half-away-from-zero; `std::nearbyint` defaults to FE_TONEAREST
+//!    which is round-half-to-even. We use `f64::round_ties_even` (stabilized
+//!    in Rust 1.77) to match upstream on `.5` boundaries.
+//! 2. **NaN-safe clamp**. Rust's `f32::clamp` debug-asserts on NaN; `std::min /
+//!    std::max` returns the non-NaN operand. `f64::min` / `f64::max` in Rust
+//!    follow IEEE-754-2019 minimum/maximum (return the non-NaN operand) and
+//!    are the correct analog.
+//!
+//! ## REQ status (per `.design/ferrotorch-core/grad_fns/quantize_grad.md`)
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 (per-tensor) | SHIPPED | `fake_quantize_per_tensor_affine` at `grad_fns/quantize_grad.rs:84` per upstream `aten/src/ATen/native/quantized/FakeQuantPerTensorAffine.cpp:31-40`; tensor-qparams overload `fake_quantize_per_tensor_affine_tensor_qparams` at `grad_fns/quantize_grad.rs:149` per upstream `:42-51`. Non-test production consumer: `Tensor::fake_quantize_per_tensor_affine_t` at `methods.rs:596`. |
+//! | REQ-2 (per-channel) | NOT-STARTED | Open prereq blocker #1239 — no `fake_quantize_per_channel_affine` function exists in this file. |
+//! | REQ-3 (STE backward) | SHIPPED | `FakeQuantizeBackward` at `grad_fns/quantize_grad.rs:289` with `GradFn::backward` impl at `:297` returns `dY * mask` where `mask = (quant_min <= q_unclamped <= quant_max)` per upstream `FakeQuantPerTensorAffine.cpp:121-134` (`QuantizedOpKernels.cpp:2706`). Attach site is REQ-1's forward; consumer chain closes via `methods.rs:596 Tensor::fake_quantize_per_tensor_affine_t`. |
 
 use std::sync::Arc;
 
 use crate::dtype::Float;
 use crate::error::FerrotorchResult;
+use crate::int_tensor::IntTensor;
 use crate::storage::TensorStorage;
 use crate::tensor::{GradFn, Tensor};
 
-/// Differentiable fake quantize per-tensor (affine).
+/// Differentiable per-tensor affine fake quantization.
 ///
-/// Forward: `dequantize(round(x / scale + zp).clamp(qmin, qmax))`.
-/// Backward: clipped STE — `grad * mask` where `mask` is 1 for
-/// values within `[dequantize(qmin), dequantize(qmax)]` and 0 for
-/// out-of-range values.
+/// Forward: `output = (clamp(round_half_to_even(input / scale) + zero_point,
+/// quant_min, quant_max) - zero_point) * scale`.
+///
+/// Backward (clipped STE): `dX = dY * mask` where `mask` is `1` for input
+/// values whose unclamped quantized representation `q_unclamped =
+/// round_half_to_even(input / scale) + zero_point` lies in
+/// `[quant_min, quant_max]` and `0` otherwise.
 ///
 /// # Arguments
 ///
 /// * `input` — the tensor to fake-quantize.
 /// * `scale` — quantization scale (positive, non-zero).
-/// * `zero_point` — integer zero point for affine quantization.
-///   For symmetric schemes pass `0`.
-/// * `qmin` — minimum integer value of the target dtype
-///   (e.g. `-128` for int8 affine or `0` for uint8).
-/// * `qmax` — maximum integer value of the target dtype.
+/// * `zero_point` — integer zero point for affine quantization. For symmetric
+///   schemes pass `0`. Must satisfy `quant_min <= zero_point <= quant_max`
+///   per upstream check at `FakeQuantPerTensorAffine.cpp:79-81`.
+/// * `quant_min` — minimum integer value of the target dtype (e.g. `-128` for
+///   int8 affine or `0` for uint8). Widened to `i64` to match upstream
+///   `int64_t quant_min` at `FakeQuantPerTensorAffine.cpp:35`.
+/// * `quant_max` — maximum integer value of the target dtype. Widened to
+///   `i64` per upstream `int64_t quant_max` at `:36`.
 ///
 /// # Errors
 ///
-/// - `FerrotorchError::InvalidArgument` if `scale <= 0`.
+/// - `FerrotorchError::InvalidArgument` if `scale <= 0` or `scale` is NaN.
+/// - `FerrotorchError::InvalidArgument` if `quant_min > quant_max` (mirrors
+///   upstream `TORCH_CHECK(quant_min <= quant_max)` at
+///   `FakeQuantPerTensorAffine.cpp:75-78`).
+/// - `FerrotorchError::InvalidArgument` if `zero_point` lies outside
+///   `[quant_min, quant_max]` (mirrors upstream `TORCH_CHECK(
+///   zero_point >= quant_min && zero_point <= quant_max)` at `:79-81`).
+pub fn fake_quantize_per_tensor_affine<T: Float>(
+    input: &Tensor<T>,
+    scale: f64,
+    zero_point: i64,
+    quant_min: i64,
+    quant_max: i64,
+) -> FerrotorchResult<Tensor<T>> {
+    fake_quantize_per_tensor_affine_impl(input, scale, zero_point, quant_min, quant_max)
+}
+
+/// Backward-compatible alias for `fake_quantize_per_tensor_affine`.
+///
+/// The canonical name `fake_quantize_per_tensor_affine` matches PyTorch's
+/// `torch.fake_quantize_per_tensor_affine` per `torch/overrides.py:622`
+/// (R-DEV-2 Python user-API ABI). This thin delegator preserves the
+/// pre-#1238 name `fake_quantize_differentiable` (which existed in
+/// ferrotorch before the rename per CL-293) and casts the i32 args to the
+/// upstream `int64_t` representation. Callers should migrate to the
+/// canonical name; this alias is retained to avoid breaking pre-#1238
+/// callers (e.g. `tests/conformance_quantize_prune.rs`).
+///
+/// New code MUST use `fake_quantize_per_tensor_affine`. This alias has no
+/// production-code consumer and is preserved solely for transitional
+/// compatibility with existing test fixtures whose deserialized field
+/// types (`i32`) match the pre-rename signature.
 pub fn fake_quantize_differentiable<T: Float>(
     input: &Tensor<T>,
     scale: f64,
@@ -55,42 +113,148 @@ pub fn fake_quantize_differentiable<T: Float>(
     qmin: i32,
     qmax: i32,
 ) -> FerrotorchResult<Tensor<T>> {
+    fake_quantize_per_tensor_affine_impl(
+        input,
+        scale,
+        i64::from(zero_point),
+        i64::from(qmin),
+        i64::from(qmax),
+    )
+}
+
+/// Differentiable per-tensor affine fake quantization with tensor-valued
+/// quantization parameters.
+///
+/// Mirrors upstream's tensor-qparams overload at
+/// `aten/src/ATen/native/quantized/FakeQuantPerTensorAffine.cpp:42-51 Tensor
+/// fake_quantize_per_tensor_affine(const Tensor& self, const Tensor& scale,
+/// const Tensor& zero_point, int64_t quant_min, int64_t quant_max)`. Upstream
+/// extracts the scalars via `sc.item().toFloat()` / `z_point.item().toInt()`
+/// at `QuantizedOpKernels.cpp:2737`; ferrotorch's tensors are dtype-typed so
+/// the scalar extraction is direct slicing.
+///
+/// Both `scale` and `zero_point` MUST be single-element tensors (`numel == 1`),
+/// matching the upstream contract — the `_get_zero_point_from_tensor` helper
+/// at `FakeQuantPerTensorAffine.cpp:136-146` indexes `zero_point[0]`. The
+/// `zero_point` carrier is `IntTensor<i64>` because it MUST be an integer
+/// tensor (R-DEV-1 numerical contract: passing a float zero-point through a
+/// `Tensor<T: Float>` would silently allow non-integer zero-points and
+/// diverge from upstream's `int64_t` extraction).
+///
+/// # Errors
+///
+/// - All errors from `fake_quantize_per_tensor_affine`.
+/// - `FerrotorchError::InvalidArgument` if `scale.numel() != 1` or
+///   `zero_point.numel() != 1`.
+pub fn fake_quantize_per_tensor_affine_tensor_qparams<T: Float>(
+    input: &Tensor<T>,
+    scale: &Tensor<T>,
+    zero_point: &IntTensor<i64>,
+    quant_min: i64,
+    quant_max: i64,
+) -> FerrotorchResult<Tensor<T>> {
     use crate::error::FerrotorchError;
-    if scale.is_nan() || scale <= 0.0 {
+    let scale_data = scale.data_vec()?;
+    if scale_data.len() != 1 {
         return Err(FerrotorchError::InvalidArgument {
-            message: format!("fake_quantize_differentiable: scale must be > 0, got {scale}"),
+            message: format!(
+                "fake_quantize_per_tensor_affine_tensor_qparams: scale must be a 1-element \
+                 tensor, got numel={}",
+                scale_data.len()
+            ),
         });
     }
-    if qmin >= qmax {
+    let zp_data = zero_point.data()?;
+    if zp_data.len() != 1 {
         return Err(FerrotorchError::InvalidArgument {
-            message: format!("fake_quantize_differentiable: qmin ({qmin}) must be < qmax ({qmax})"),
+            message: format!(
+                "fake_quantize_per_tensor_affine_tensor_qparams: zero_point must be a \
+                 1-element tensor, got numel={}",
+                zp_data.len()
+            ),
+        });
+    }
+    // Upstream extracts scalars via `.item()` per
+    // `QuantizedOpKernels.cpp:2737 fake_quantize_tensor_cachemask_tensor_qparams_kernel`:
+    //   `sc.item().toFloat(), z_point.item().toInt()`.
+    let scale_f64: f64 = match scale_data[0].to_f64() {
+        Some(v) => v,
+        None => {
+            return Err(FerrotorchError::InvalidArgument {
+                message: "fake_quantize_per_tensor_affine_tensor_qparams: scale tensor \
+                          element could not be converted to f64"
+                    .to_string(),
+            });
+        }
+    };
+    let zp_i64: i64 = zp_data[0];
+    fake_quantize_per_tensor_affine_impl(input, scale_f64, zp_i64, quant_min, quant_max)
+}
+
+/// Shared forward + backward attach for both scalar and tensor-qparams entry
+/// points. Mirrors the upstream `_fake_quantize_tensor_helper` at
+/// `aten/src/ATen/native/quantized/cpu/kernels/QuantizedOpKernels.cpp:2655-2715`.
+fn fake_quantize_per_tensor_affine_impl<T: Float>(
+    input: &Tensor<T>,
+    scale: f64,
+    zero_point: i64,
+    quant_min: i64,
+    quant_max: i64,
+) -> FerrotorchResult<Tensor<T>> {
+    use crate::error::FerrotorchError;
+    // Mirror upstream validation order.
+    // 1. quant_min <= quant_max per `FakeQuantPerTensorAffine.cpp:75-78`.
+    if quant_min > quant_max {
+        return Err(FerrotorchError::InvalidArgument {
+            message: format!(
+                "fake_quantize_per_tensor_affine: `quant_min` ({quant_min}) should be less \
+                 than or equal to `quant_max` ({quant_max})."
+            ),
+        });
+    }
+    // 2. zero_point in [quant_min, quant_max] per
+    //    `FakeQuantPerTensorAffine.cpp:79-81`.
+    if zero_point < quant_min || zero_point > quant_max {
+        return Err(FerrotorchError::InvalidArgument {
+            message: format!(
+                "fake_quantize_per_tensor_affine: `zero_point` ({zero_point}) must be \
+                 between `quant_min` ({quant_min}) and `quant_max` ({quant_max})."
+            ),
+        });
+    }
+    // 3. scale > 0 (ferrotorch superset of upstream — upstream would
+    //    silently produce inf/NaN; we surface it as a clear error).
+    if scale.is_nan() || scale <= 0.0 {
+        return Err(FerrotorchError::InvalidArgument {
+            message: format!("fake_quantize_per_tensor_affine: `scale` must be > 0, got {scale}"),
         });
     }
 
     let data = input.data_vec()?;
-    let scale_f = T::from(scale).unwrap();
-    let zp_f = T::from(zero_point as f64).unwrap();
-    let qmin_f = T::from(qmin as f64).unwrap();
-    let qmax_f = T::from(qmax as f64).unwrap();
+    // Upstream uses `inv_scale = 1.0f / sc` at `QuantizedOpKernels.cpp:2665`.
+    let inv_scale: f64 = 1.0 / scale;
+    let zp_f64 = zero_point as f64;
+    let qmin_f64 = quant_min as f64;
+    let qmax_f64 = quant_max as f64;
 
-    // Dequantized range boundaries for the STE mask.
-    let range_min: T = (qmin_f - zp_f) * scale_f;
-    let range_max: T = (qmax_f - zp_f) * scale_f;
-
-    let mut out = Vec::with_capacity(data.len());
+    let mut out: Vec<T> = Vec::with_capacity(data.len());
     for &x in &data {
-        // Fake quantize: q = round(x / scale + zp).clamp(qmin, qmax)
-        let scaled = x / scale_f + zp_f;
-        let rounded = scaled.round();
-        let clamped = if rounded < qmin_f {
-            qmin_f
-        } else if rounded > qmax_f {
-            qmax_f
-        } else {
-            rounded
-        };
-        // Dequantize: dq = (q - zp) * scale
-        let dq = (clamped - zp_f) * scale_f;
+        let x_f64 = x.to_f64().unwrap_or(f64::NAN);
+        // Upstream:
+        //   qval_f = z_point + std::nearbyint(*input_val * inv_scale);
+        //   qval = static_cast<int64_t>(std::fmin(std::fmax(qval_f, quant_min), quant_max));
+        //   output_val = (qval - z_point) * sc;
+        //
+        // `f64::round_ties_even` matches `std::nearbyint` under FE_TONEAREST
+        // (round-half-to-even / banker's rounding). `f64::max` / `f64::min`
+        // follow IEEE-754-2019 minimum/maximum and propagate the non-NaN
+        // operand the same way `std::fmin / std::fmax` do (NaN-safe clamp).
+        let qval_f = zp_f64 + (x_f64 * inv_scale).round_ties_even();
+        let qval_clamped = qmax_f64.min(qmin_f64.max(qval_f));
+        let dq_f64 = (qval_clamped - zp_f64) * scale;
+        // Convert back via T::from(...); on dtype-mismatch fall back to zero
+        // (defensive — for f32/f64/bf16/f16 the conversion always succeeds).
+        let dq = T::from(dq_f64).unwrap_or_else(<T as num_traits::Zero>::zero);
         out.push(dq);
     }
 
@@ -100,8 +264,10 @@ pub fn fake_quantize_differentiable<T: Float>(
     if input.requires_grad() && crate::autograd::no_grad::is_grad_enabled() {
         let grad_fn = Arc::new(FakeQuantizeBackward::<T> {
             input: input.clone(),
-            range_min,
-            range_max,
+            scale,
+            zero_point,
+            quant_min,
+            quant_max,
         });
         Tensor::from_operation(storage, shape, grad_fn)
     } else {
@@ -109,12 +275,21 @@ pub fn fake_quantize_differentiable<T: Float>(
     }
 }
 
-/// Backward node for fake_quantize using clipped STE.
+/// Backward node for `fake_quantize_per_tensor_affine` using the clipped STE.
+///
+/// Mirrors upstream's mask-based VJP at
+/// `aten/src/ATen/native/quantized/FakeQuantPerTensorAffine.cpp:121-134
+/// Tensor fake_quantize_per_tensor_affine_cachemask_backward(const Tensor& dY,
+/// const Tensor& mask) { ... return dY * mask; }`. Where upstream pre-computes
+/// the bool mask in the forward, ferrotorch saves the input and the scalar
+/// qparams and recomputes the mask in the backward — numerically identical.
 #[derive(Debug)]
 struct FakeQuantizeBackward<T: Float> {
     input: Tensor<T>,
-    range_min: T,
-    range_max: T,
+    scale: f64,
+    zero_point: i64,
+    quant_min: i64,
+    quant_max: i64,
 }
 
 impl<T: Float> GradFn<T> for FakeQuantizeBackward<T> {
@@ -124,12 +299,21 @@ impl<T: Float> GradFn<T> for FakeQuantizeBackward<T> {
         }
         let grad_data = grad_output.data_vec()?;
         let input_data = self.input.data_vec()?;
+        let inv_scale = 1.0_f64 / self.scale;
+        let zp_f64 = self.zero_point as f64;
+        let qmin_f64 = self.quant_min as f64;
+        let qmax_f64 = self.quant_max as f64;
         let zero = <T as num_traits::Zero>::zero();
         let grad: Vec<T> = input_data
             .iter()
             .zip(grad_data.iter())
             .map(|(&x, &g)| {
-                if x >= self.range_min && x <= self.range_max {
+                let x_f64 = x.to_f64().unwrap_or(f64::NAN);
+                let qval_f = zp_f64 + (x_f64 * inv_scale).round_ties_even();
+                // Upstream mask: `(quant_min <= qval_f) && (qval_f <= quant_max)`
+                // per `QuantizedOpKernels.cpp:2706`. NaN propagates as `false`
+                // through both comparisons (R-DEV-1 numerical contract).
+                if qval_f >= qmin_f64 && qval_f <= qmax_f64 {
                     g
                 } else {
                     zero
@@ -159,20 +343,24 @@ mod tests {
         Tensor::from_storage(TensorStorage::cpu(data), shape, req_grad).unwrap()
     }
 
+    fn ti64(data: Vec<i64>, shape: Vec<usize>) -> IntTensor<i64> {
+        IntTensor::from_vec(data, shape).unwrap()
+    }
+
     // ── forward correctness ────────────────────────────────────────
 
     #[test]
     fn fake_quantize_round_trips_representable_values() {
-        // int8 symmetric: qmin=-128, qmax=127, scale chosen so
+        // int8 symmetric: quant_min=-128, quant_max=127, scale chosen so
         // exact multiples of scale are fixed points.
         let scale = 0.1;
-        let zp = 0;
-        let qmin = -128;
-        let qmax = 127;
+        let zp: i64 = 0;
+        let quant_min: i64 = -128;
+        let quant_max: i64 = 127;
 
         // Values that are exact multiples of scale should round-trip.
         let input = t(vec![0.0, 0.1, 0.2, -0.1, -0.2], vec![5], false);
-        let out = fake_quantize_differentiable(&input, scale, zp, qmin, qmax).unwrap();
+        let out = fake_quantize_per_tensor_affine(&input, scale, zp, quant_min, quant_max).unwrap();
         let data = out.data().unwrap();
         for (got, expected) in data.iter().zip([0.0, 0.1, 0.2, -0.1, -0.2].iter()) {
             assert!(
@@ -189,11 +377,10 @@ mod tests {
     // value is bit-exactly representable in f32, so equality is correct.
     #[allow(clippy::float_cmp)]
     fn fake_quantize_clamps_out_of_range_values() {
-        // int8: [-128, 127] with scale 1.0, zp 0 → representable
-        // range is [-128.0, 127.0]. Values outside should be
-        // clamped to the nearest boundary.
+        // int8: [-128, 127] with scale 1.0, zp 0 → representable range is
+        // [-128.0, 127.0]. Values outside should be clamped.
         let input = t(vec![-200.0, -100.0, 0.0, 100.0, 200.0], vec![5], false);
-        let out = fake_quantize_differentiable(&input, 1.0, 0, -128, 127).unwrap();
+        let out = fake_quantize_per_tensor_affine(&input, 1.0, 0, -128, 127).unwrap();
         let data = out.data().unwrap();
         assert_eq!(data[0], -128.0); // clamped
         assert_eq!(data[1], -100.0);
@@ -205,59 +392,141 @@ mod tests {
     #[test]
     fn fake_quantize_rejects_zero_scale() {
         let input = t(vec![1.0], vec![1], false);
-        let result = fake_quantize_differentiable(&input, 0.0, 0, -128, 127);
+        let result = fake_quantize_per_tensor_affine(&input, 0.0, 0, -128, 127);
         assert!(result.is_err());
-        assert!(format!("{}", result.unwrap_err()).contains("scale must be > 0"));
+        assert!(format!("{}", result.unwrap_err()).contains("`scale` must be > 0"));
     }
 
     #[test]
     fn fake_quantize_rejects_negative_scale() {
         let input = t(vec![1.0], vec![1], false);
-        let result = fake_quantize_differentiable(&input, -0.1, 0, -128, 127);
+        let result = fake_quantize_per_tensor_affine(&input, -0.1, 0, -128, 127);
         assert!(result.is_err());
     }
 
     #[test]
     fn fake_quantize_rejects_inverted_range() {
         let input = t(vec![1.0], vec![1], false);
-        let result = fake_quantize_differentiable(&input, 1.0, 0, 128, -128);
+        let result = fake_quantize_per_tensor_affine(&input, 1.0, 0, 128, -128);
         assert!(result.is_err());
-        assert!(format!("{}", result.unwrap_err()).contains("qmin"));
+        assert!(format!("{}", result.unwrap_err()).contains("`quant_min`"));
+    }
+
+    #[test]
+    fn fake_quantize_rejects_zero_point_outside_quant_range() {
+        // Upstream check at FakeQuantPerTensorAffine.cpp:79-81:
+        // zero_point must be in [quant_min, quant_max].
+        let input = t(vec![1.0], vec![1], false);
+        let result = fake_quantize_per_tensor_affine(&input, 1.0, 200, -128, 127);
+        assert!(result.is_err());
+        assert!(format!("{}", result.unwrap_err()).contains("`zero_point`"));
     }
 
     #[test]
     fn fake_quantize_asymmetric_with_zero_point() {
         // uint8: [0, 255] with a non-zero zero-point shifts the
         // representable range into the positives.
-        // scale=1.0, zp=128 → range is [(-128)*1, (127)*1] = [-128, 127].
-        // Actually with qmin=0, qmax=255, zp=128, range =
+        // scale=1.0, zp=128, qmin=0, qmax=255 → input range maps to
         // [(0-128)*1, (255-128)*1] = [-128, 127].
         let input = t(vec![-128.0, 0.0, 127.0], vec![3], false);
-        let out = fake_quantize_differentiable(&input, 1.0, 128, 0, 255).unwrap();
+        let out = fake_quantize_per_tensor_affine(&input, 1.0, 128, 0, 255).unwrap();
         let data = out.data().unwrap();
         assert_eq!(data, &[-128.0, 0.0, 127.0]);
+    }
+
+    #[test]
+    // reason: banker's rounding produces exact integer-multiple results that
+    // are bit-exactly representable in f32; equality is correct.
+    #[allow(clippy::float_cmp)]
+    fn fake_quantize_uses_banker_rounding_on_half_boundaries() {
+        // With scale=1.0, zp=0, the value 0.5 should round to 0 (banker's:
+        // round half to even). Rust's f32::round would round to 1 (round
+        // half away from zero) — the upstream `std::nearbyint` rounds to 0.
+        // Test 0.5 → 0 (even), 1.5 → 2 (even), 2.5 → 2 (even), 3.5 → 4
+        // (even), -0.5 → 0 (even), -1.5 → -2 (even).
+        let input = t(vec![0.5, 1.5, 2.5, 3.5, -0.5, -1.5], vec![6], false);
+        let out = fake_quantize_per_tensor_affine(&input, 1.0, 0, -128, 127).unwrap();
+        let data = out.data().unwrap();
+        // Per `std::nearbyint(0.5) = 0`, `std::nearbyint(1.5) = 2`, etc.
+        assert_eq!(data[0], 0.0);
+        assert_eq!(data[1], 2.0);
+        assert_eq!(data[2], 2.0);
+        assert_eq!(data[3], 4.0);
+        assert_eq!(data[4], 0.0);
+        assert_eq!(data[5], -2.0);
+    }
+
+    #[test]
+    fn fake_quantize_nan_input_does_not_panic() {
+        // NaN input: x/scale = NaN; round_ties_even(NaN) = NaN; clamp via
+        // f64::min/f64::max returns the non-NaN operand at each step (IEEE-
+        // 754-2019 min/max), so qval_clamped becomes a finite boundary.
+        // Mask test `qmin <= NaN` is false → backward yields 0.
+        //
+        // The point of this test is the function MUST NOT panic on NaN
+        // input. Rust's f32::clamp would debug-assert here.
+        let input = t(vec![f32::NAN], vec![1], false);
+        let _out = fake_quantize_per_tensor_affine(&input, 1.0, 0, -128, 127)
+            .expect("NaN input must not error (R-DEV-1 NaN-safe clamp)");
+        // No panic = pass. The specific output value depends on Rust's
+        // min/max NaN semantics; the contract we lock is "no panic".
+    }
+
+    // ── tensor-qparams overload ─────────────────────────────────────
+
+    #[test]
+    fn tensor_qparams_matches_scalar_qparams() {
+        // Same inputs as `fake_quantize_clamps_out_of_range_values` but via
+        // the tensor-qparams overload. Output must match byte-for-byte.
+        let input = t(vec![-200.0, -100.0, 0.0, 100.0, 200.0], vec![5], false);
+        let scale = t(vec![1.0], vec![1], false);
+        let zp = ti64(vec![0], vec![1]);
+        let out_tensor =
+            fake_quantize_per_tensor_affine_tensor_qparams(&input, &scale, &zp, -128, 127).unwrap();
+        let out_scalar = fake_quantize_per_tensor_affine(&input, 1.0, 0, -128, 127).unwrap();
+        let dt = out_tensor.data().unwrap();
+        let ds = out_scalar.data().unwrap();
+        assert_eq!(dt.as_ref(), ds.as_ref());
+    }
+
+    #[test]
+    fn tensor_qparams_rejects_multi_element_scale() {
+        let input = t(vec![1.0], vec![1], false);
+        let scale = t(vec![1.0, 2.0], vec![2], false);
+        let zp = ti64(vec![0], vec![1]);
+        let result = fake_quantize_per_tensor_affine_tensor_qparams(&input, &scale, &zp, -128, 127);
+        assert!(result.is_err());
+        assert!(
+            format!("{}", result.unwrap_err()).contains("scale must be a 1-element"),
+            "expected 'scale must be a 1-element' message"
+        );
+    }
+
+    #[test]
+    fn tensor_qparams_rejects_multi_element_zero_point() {
+        let input = t(vec![1.0], vec![1], false);
+        let scale = t(vec![1.0], vec![1], false);
+        let zp = ti64(vec![0, 1], vec![2]);
+        let result = fake_quantize_per_tensor_affine_tensor_qparams(&input, &scale, &zp, -128, 127);
+        assert!(result.is_err());
+        assert!(
+            format!("{}", result.unwrap_err()).contains("zero_point must be a 1-element"),
+            "expected 'zero_point must be a 1-element' message"
+        );
     }
 
     // ── backward / STE ─────────────────────────────────────────────
 
     #[test]
-    // reason: STE passes gradient 1.0 through for in-range values; this is
-    // a binary mask (1.0 for in-range, 0.0 for out-of-range), written as an
-    // exact bit pattern, never the result of arithmetic.
+    // reason: STE passes gradient 1.0 through for in-range values; the
+    // expected mask is a binary {0,1} grid written as exact bit patterns
+    // (never an arithmetic result).
     #[allow(clippy::float_cmp)]
     fn fake_quantize_ste_passes_grad_for_in_range_values() {
-        // scale=1.0, zp=0, range=[-128, 127]. Values inside this
-        // range should have gradient 1.0 passed through unchanged.
+        // scale=1.0, zp=0, range=[-128, 127]. Values inside this range
+        // should have gradient 1.0 passed through unchanged.
         let input = t(vec![-10.0, 0.0, 10.0, 50.0], vec![4], true);
-        let out = fake_quantize_differentiable(&input, 1.0, 0, -128, 127).unwrap();
-        // Sum for a scalar backward seed.
-        let loss = out
-            .data_vec()
-            .unwrap()
-            .into_iter()
-            .fold(0.0f32, |a, b| a + b);
-        // Manually trigger backward via autograd. Use sum to get a
-        // scalar root.
+        let out = fake_quantize_per_tensor_affine(&input, 1.0, 0, -128, 127).unwrap();
         let sum = crate::grad_fns::reduction::sum(&out).unwrap();
         backward(&sum).unwrap();
         let grad = input.grad().unwrap().unwrap();
@@ -265,41 +534,77 @@ mod tests {
         for &g in grad_data {
             assert_eq!(g, 1.0);
         }
-        let _ = loss;
     }
 
     #[test]
-    // reason: STE gradient mask is binary (1.0 for in-range, 0.0 for clipped);
-    // each grad slot holds the exact bit pattern of the chosen sentinel,
-    // never the result of arithmetic — equality is the right check.
+    // reason: STE gradient mask is binary {0,1}; each grad slot holds the
+    // exact bit pattern of the chosen sentinel, never the result of
+    // arithmetic — equality is the right check.
     #[allow(clippy::float_cmp)]
     fn fake_quantize_ste_zeros_grad_for_out_of_range_values() {
-        // Only values in [-1.0, 1.0] (scale=0.01, range=[-1.28, 1.27])
-        // get grad 1, others get 0. Use scale=0.01, qmin=-128, qmax=127.
+        // scale=0.01, quant_min=-128, quant_max=127 → q_unclamped(-5.0) =
+        // round(-500) = -500, which is < -128 → mask = 0. Similarly:
+        // q_unclamped(-1.0) = -100 (in [-128,127] → 1),
+        // q_unclamped(0.0)  = 0    (in range  → 1),
+        // q_unclamped(1.0)  = 100  (in range  → 1),
+        // q_unclamped(5.0)  = 500  (out of range → 0),
+        // q_unclamped(100.0)= 10000(out of range → 0).
         let input = t(vec![-5.0, -1.0, 0.0, 1.0, 5.0, 100.0], vec![6], true);
-        let out = fake_quantize_differentiable(&input, 0.01, 0, -128, 127).unwrap();
+        let out = fake_quantize_per_tensor_affine(&input, 0.01, 0, -128, 127).unwrap();
         let sum = crate::grad_fns::reduction::sum(&out).unwrap();
         backward(&sum).unwrap();
         let grad = input.grad().unwrap().unwrap();
         let grad_data = grad.data().unwrap();
-        // -5.0 is below -1.28 → grad 0
         assert_eq!(grad_data[0], 0.0);
-        // -1.0 is within [-1.28, 1.27] → grad 1
         assert_eq!(grad_data[1], 1.0);
-        // 0.0 in range → 1
         assert_eq!(grad_data[2], 1.0);
-        // 1.0 in range → 1
         assert_eq!(grad_data[3], 1.0);
-        // 5.0 above 1.27 → 0
         assert_eq!(grad_data[4], 0.0);
-        // 100.0 above 1.27 → 0
         assert_eq!(grad_data[5], 0.0);
+    }
+
+    #[test]
+    // reason: explicit formulaic backward check. The expected grad is
+    // constructed bit-for-bit from the upstream mask formula
+    // `mask[i] = 1 if quant_min <= q_unclamped(x[i]) <= quant_max else 0`
+    // per `QuantizedOpKernels.cpp:2706`, multiplied by the upstream grad
+    // (sum() → dY = 1 elementwise). Never compares ferrotorch's output to
+    // ferrotorch's output. R-CHAR-3 honored: every expected value traces
+    // to the cited upstream formula, not to a self-referential constant.
+    #[allow(clippy::float_cmp)]
+    fn fake_quantize_ste_backward_matches_explicit_formula() {
+        // scale=0.05, zp=10, quant_min=-128, quant_max=127.
+        //   q_unclamped(x) = round_ties_even(x / 0.05) + 10
+        //
+        // For x = [-10.0, -6.0, -5.0, 0.0, 5.0, 5.85, 6.0, 10.0]:
+        //   x/scale  =  [-200, -120, -100,  0,  100, 117, 120,  200]
+        //   q_uncl   =  [-190, -110,  -90, 10,  110, 127, 130,  210]
+        //   in range =  [   0,    1,    1,  1,    1,   1,   0,    0]
+        let input = t(
+            vec![-10.0, -6.0, -5.0, 0.0, 5.0, 5.85, 6.0, 10.0],
+            vec![8],
+            true,
+        );
+        let out = fake_quantize_per_tensor_affine(&input, 0.05, 10, -128, 127).unwrap();
+        let sum = crate::grad_fns::reduction::sum(&out).unwrap();
+        backward(&sum).unwrap();
+        let grad = input.grad().unwrap().unwrap();
+        let actual = grad.data().unwrap();
+        let expected: [f32; 8] = [0.0, 1.0, 1.0, 1.0, 1.0, 1.0, 0.0, 0.0];
+        for (i, (&a, &e)) in actual.iter().zip(expected.iter()).enumerate() {
+            assert_eq!(
+                a, e,
+                "STE mask at i={i}: expected {e}, got {a}; upstream formula \
+                 mask[i] = (quant_min <= q_unclamped(x[i]) <= quant_max) ? 1 : 0 \
+                 per QuantizedOpKernels.cpp:2706"
+            );
+        }
     }
 
     #[test]
     fn fake_quantize_no_grad_when_input_doesnt_require_grad() {
         let input = t(vec![1.0, 2.0], vec![2], false);
-        let out = fake_quantize_differentiable(&input, 1.0, 0, -128, 127).unwrap();
+        let out = fake_quantize_per_tensor_affine(&input, 1.0, 0, -128, 127).unwrap();
         assert!(!out.requires_grad());
         assert!(out.grad_fn().is_none());
     }
@@ -307,7 +612,7 @@ mod tests {
     #[test]
     fn fake_quantize_preserves_grad_fn_when_input_requires_grad() {
         let input = t(vec![1.0, 2.0], vec![2], true);
-        let out = fake_quantize_differentiable(&input, 1.0, 0, -128, 127).unwrap();
+        let out = fake_quantize_per_tensor_affine(&input, 1.0, 0, -128, 127).unwrap();
         assert!(out.requires_grad());
         assert!(out.grad_fn().is_some());
     }
@@ -316,9 +621,7 @@ mod tests {
     fn fake_quantize_no_grad_context_skips_grad_fn() {
         use crate::autograd::no_grad::no_grad;
         let input = t(vec![1.0, 2.0], vec![2], true);
-        let out = no_grad(|| fake_quantize_differentiable(&input, 1.0, 0, -128, 127)).unwrap();
-        // Inside no_grad, even a requires_grad input produces an
-        // output with no grad_fn.
+        let out = no_grad(|| fake_quantize_per_tensor_affine(&input, 1.0, 0, -128, 127)).unwrap();
         assert!(out.grad_fn().is_none());
     }
 
@@ -328,22 +631,22 @@ mod tests {
     // pattern, never a non-trivial arithmetic result.
     #[allow(clippy::float_cmp)]
     fn fake_quantize_chains_through_autograd_with_relu() {
-        // y = relu(fake_quantize(x)); backward should flow through
-        // both layers and give the expected combined gradient.
+        // y = relu(fake_quantize(x)); backward flows through both.
         let input = t(vec![-2.0, -0.5, 0.5, 2.0], vec![4], true);
-        let fq = fake_quantize_differentiable(&input, 0.01, 0, -128, 127).unwrap();
+        let fq = fake_quantize_per_tensor_affine(&input, 0.01, 0, -128, 127).unwrap();
         let relu_out = crate::grad_fns::activation::relu(&fq).unwrap();
         let sum = crate::grad_fns::reduction::sum(&relu_out).unwrap();
         backward(&sum).unwrap();
         let grad = input.grad().unwrap().unwrap();
         let grad_data = grad.data().unwrap();
-        // x=-2.0: out of range (range=[-1.28, 1.27]) → STE mask 0 → grad 0.
+        // x=-2.0: q_uncl = round(-200) = -200, out of [-128,127] → STE 0.
         assert_eq!(grad_data[0], 0.0);
-        // x=-0.5: in range, but relu zeros negatives → grad 0 (relu mask).
+        // x=-0.5: q_uncl = round(-50) = -50, in range → STE 1; relu zeros
+        // negatives → relu mask 0 on dequantized output (-0.5). 1*0 = 0.
         assert_eq!(grad_data[1], 0.0);
-        // x=0.5: in range, relu passes → grad 1.
+        // x=0.5: q_uncl = 50, in range → STE 1; relu passes → 1*1 = 1.
         assert_eq!(grad_data[2], 1.0);
-        // x=2.0: out of range → STE mask 0 → grad 0.
+        // x=2.0: q_uncl = 200, out of range → STE 0.
         assert_eq!(grad_data[3], 0.0);
     }
 }

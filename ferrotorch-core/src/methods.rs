@@ -572,6 +572,39 @@ impl<T: Float> Tensor<T> {
         split_t(self, split_sizes, dim)
     }
 
+    // --- Quantization ---
+
+    /// `torch.Tensor.fake_quantize_per_tensor_affine(scale, zero_point,
+    /// quant_min, quant_max)` — per-tensor affine fake quantization with
+    /// autograd-tracked clipped STE backward.
+    ///
+    /// Mirrors `torch.fake_quantize_per_tensor_affine` per
+    /// `torch/overrides.py:622 torch.fake_quantize_per_tensor_affine: lambda
+    /// input, scale, zero_point, quant_min, quant_max: -1` and the upstream
+    /// implementation at `aten/src/ATen/native/quantized/
+    /// FakeQuantPerTensorAffine.cpp:31-40 Tensor fake_quantize_per_tensor_affine(
+    /// const Tensor& self, double scale, int64_t zero_point, int64_t quant_min,
+    /// int64_t quant_max)`. Backward per `tools/autograd/derivatives.yaml:673-674
+    /// fake_quantize_per_tensor_affine_cachemask_backward(grad, mask)` returning
+    /// `dY * mask` where the mask is `1` iff
+    /// `quant_min <= round_ties_even(input/scale) + zero_point <= quant_max`.
+    ///
+    /// The non-test production consumer wiring for
+    /// `grad_fns::quantize_grad::fake_quantize_per_tensor_affine` per
+    /// R-DEFER-1: this method is the public, chainable surface that closes
+    /// the consumer requirement for the per-tensor variant (blocker #1238).
+    pub fn fake_quantize_per_tensor_affine_t(
+        &self,
+        scale: f64,
+        zero_point: i64,
+        quant_min: i64,
+        quant_max: i64,
+    ) -> FerrotorchResult<Tensor<T>> {
+        crate::grad_fns::quantize_grad::fake_quantize_per_tensor_affine(
+            self, scale, zero_point, quant_min, quant_max,
+        )
+    }
+
     // --- PyTorch compatibility aliases ---
 
     /// Alias for `shape()`. Returns the tensor dimensions like PyTorch's `Tensor.size()`.
