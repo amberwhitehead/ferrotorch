@@ -83,6 +83,30 @@ impl<T: Float> Tensor<T> {
         crate::grad_fns::arithmetic::abs(self)
     }
 
+    /// `torch.Tensor.remainder(other)` — elementwise remainder with the
+    /// **sign of the divisor** (Python `%` / NumPy semantics).
+    ///
+    /// Mirrors `torch.remainder(input, other, *, out=None)` per
+    /// `torch/_torch_docs.py:9453-9472` and the upstream C++ entry at
+    /// `aten/src/ATen/native/BinaryOps.cpp:1184 Tensor remainder(const
+    /// Tensor& self, const Scalar& other)`. The float-tensor CPU
+    /// implementation is at `aten/src/ATen/native/cpu/BinaryOpsKernel.cpp:
+    /// 391-409 remainder_kernel`. Registration at
+    /// `torch/overrides.py:1100 torch.remainder: lambda input, other,
+    /// out=None: -1`.
+    ///
+    /// Distinct from `fmod_t` (dividend-sign / C99 semantics, REQ-14 NOT-
+    /// STARTED): for `remainder(-5, 3)` ferrotorch returns `1` (sign
+    /// matches divisor `+3`); `fmod(-5, 3)` returns `-2` (sign matches
+    /// dividend `-5`).
+    ///
+    /// The non-test production consumer wiring for `arithmetic::remainder`
+    /// per R-DEFER-1: this method is the public, chainable surface that
+    /// closes the consumer requirement.
+    pub fn remainder_t(&self, other: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
+        crate::grad_fns::arithmetic::remainder(self, other)
+    }
+
     // --- Transcendental ---
 
     pub fn exp_t(&self) -> FerrotorchResult<Tensor<T>> {

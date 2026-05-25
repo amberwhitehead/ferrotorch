@@ -284,6 +284,20 @@ fn dispatch_f32(
         "reciprocal" => Ok(Some(grad_fns::arithmetic::reciprocal(&unary(
             "reciprocal",
         )?)?)),
+        // `torch.remainder(input, other, *, out=None)` — `_torch_docs.py:9453-9472`.
+        // ferrotorch's `arithmetic::remainder<T: Float>(a, b)` mirrors the
+        // upstream CPU kernel at `aten/src/ATen/native/cpu/BinaryOpsKernel
+        // .cpp:391-409`'s `AT_DISPATCH_FLOATING_TYPES_AND_HALF` branch
+        // (`scalar_t mod = std::fmod(a, b); if ((mod != 0) && ((b < 0) !=
+        // (mod < 0))) mod += b;`). Sign-of-divisor (Python `%`) semantics
+        // distinct from `fmod` (dividend-sign / C99). Backward per
+        // `tools/autograd/derivatives.yaml:1455-1457`: `da = grad`,
+        // `db = -grad * floor(a / b)`. Binary, no kwargs — `remainder` does
+        // not take alpha. Closes blocker #1198.
+        "remainder" => Ok(Some({
+            let (a, b) = binary("remainder")?;
+            grad_fns::arithmetic::remainder(&a, &b)?
+        })),
         // `torch.pow(input, exponent, *, out=None)` — `_torch_docs.py:8672`.
         // ferrotorch's `arithmetic::pow<T: Float>(a, exp: f64)` mirrors the
         // scalar-exponent overload at `aten/src/ATen/native/Pow.cpp:51
@@ -340,6 +354,7 @@ fn dispatch_ops() -> &'static [&'static str] {
         "rsub",
         "rsqrt",
         "reciprocal",
+        "remainder",
     ]
 }
 
