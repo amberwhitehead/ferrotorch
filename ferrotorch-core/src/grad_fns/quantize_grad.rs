@@ -222,13 +222,14 @@ fn fake_quantize_per_tensor_affine_impl<T: Float>(
             ),
         });
     }
-    // 3. scale > 0 (ferrotorch superset of upstream — upstream would
-    //    silently produce inf/NaN; we surface it as a clear error).
-    if scale.is_nan() || scale <= 0.0 {
-        return Err(FerrotorchError::InvalidArgument {
-            message: format!("fake_quantize_per_tensor_affine: `scale` must be > 0, got {scale}"),
-        });
-    }
+    // NOTE: no `scale > 0` check — upstream `FakeQuantPerTensorAffine.cpp:75-81`
+    // only validates `quant_min <= quant_max` and the `zero_point` range; it
+    // silently proceeds for `scale <= 0` / `scale == NaN`, propagating IEEE-754
+    // Inf/NaN through `inv_scale = 1.0f / scale`. The clamp + dequant tail
+    // below handles all three pathological cases (scale=0 yields +0.0 via
+    // `(qmin/qmax - zp) * 0.0`, scale<0 double-negates back to input, scale=NaN
+    // propagates NaN end-to-end). Parallel to per-channel resolution in #1261
+    // / commit 36b245151. R-DEV-1 numerical contract. Closes #1265.
 
     let data = input.data_vec()?;
     // Upstream uses `float inv_scale = 1.0f / sc` at
@@ -841,20 +842,16 @@ mod tests {
         assert_eq!(data[4], 127.0); // clamped
     }
 
-    #[test]
-    fn fake_quantize_rejects_zero_scale() {
-        let input = t(vec![1.0], vec![1], false);
-        let result = fake_quantize_per_tensor_affine(&input, 0.0, 0, -128, 127);
-        assert!(result.is_err());
-        assert!(format!("{}", result.unwrap_err()).contains("`scale` must be > 0"));
-    }
-
-    #[test]
-    fn fake_quantize_rejects_negative_scale() {
-        let input = t(vec![1.0], vec![1], false);
-        let result = fake_quantize_per_tensor_affine(&input, -0.1, 0, -128, 127);
-        assert!(result.is_err());
-    }
+    // NOTE: previously `fake_quantize_rejects_zero_scale` and
+    // `fake_quantize_rejects_negative_scale` verified rejection of
+    // `scale <= 0` / `scale == NaN`. Upstream
+    // `FakeQuantPerTensorAffine.cpp:69-89` has no such check; ferrotorch
+    // now silently proceeds with the same clamp + dequant formula to match
+    // upstream byte-for-byte (R-DEV-1 numerical contract; closes #1265,
+    // parallel to per-channel #1261). The upstream behavior is now pinned
+    // by the divergence tests at
+    // `tests/divergence_quantize_grad_per_tensor_scale_check.rs::
+    // divergence_per_tensor_scale_{zero,negative,nan}_silently_{proceeds,propagates}`.
 
     #[test]
     fn fake_quantize_rejects_inverted_range() {

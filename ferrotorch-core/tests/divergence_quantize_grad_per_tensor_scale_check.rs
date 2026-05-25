@@ -52,12 +52,10 @@ use ferrotorch_core::{from_vec, grad_fns};
 ///
 /// Tracking: #1265
 #[test]
-#[ignore = "divergence: per-tensor rejects scale=0; upstream silently proceeds; tracking #1265"]
 fn divergence_per_tensor_scale_zero_silently_proceeds() {
     let input = from_vec(vec![5.0_f32], &[1]).unwrap();
-    let result = grad_fns::quantize_grad::fake_quantize_per_tensor_affine(
-        &input, 0.0_f64, 0, -128, 127,
-    );
+    let result =
+        grad_fns::quantize_grad::fake_quantize_per_tensor_affine(&input, 0.0_f64, 0, -128, 127);
     let out = result.expect(
         "upstream torch.fake_quantize_per_tensor_affine(5.0, scale=0.0, zp=0, -128, 127) \
          returns tensor([0.]) (live oracle 2026-05-25); ferrotorch rejects with \
@@ -69,7 +67,11 @@ fn divergence_per_tensor_scale_zero_silently_proceeds() {
     // Torch returns +0.0; allow either sign of zero (the f32-tensor-args path
     // returned +0.0 in our probe; per-tensor cast-first may differ from
     // per-channel's -0.0). The KEY divergence is that ferrotorch errored at all.
-    assert_eq!(actual[0], 0.0, "expected 0.0 (torch live oracle), got {}", actual[0]);
+    assert_eq!(
+        actual[0], 0.0,
+        "expected 0.0 (torch live oracle), got {}",
+        actual[0]
+    );
 }
 
 /// Divergence: per-tensor `scale<0` rejected by ferrotorch but upstream
@@ -83,12 +85,10 @@ fn divergence_per_tensor_scale_zero_silently_proceeds() {
 ///
 /// Tracking: #1265
 #[test]
-#[ignore = "divergence: per-tensor rejects scale<0; upstream silently proceeds; tracking #1265"]
 fn divergence_per_tensor_scale_negative_silently_proceeds() {
     let input = from_vec(vec![1.0_f32, 2.0, 3.0, 4.0], &[4]).unwrap();
-    let result = grad_fns::quantize_grad::fake_quantize_per_tensor_affine(
-        &input, -0.1_f64, 0, -128, 127,
-    );
+    let result =
+        grad_fns::quantize_grad::fake_quantize_per_tensor_affine(&input, -0.1_f64, 0, -128, 127);
     let out = result.expect(
         "upstream torch.fake_quantize_per_tensor_affine(..., scale=-0.1, ...) \
          returns tensor([1., 2., 3., 4.]) (live oracle 2026-05-25); ferrotorch \
@@ -116,12 +116,10 @@ fn divergence_per_tensor_scale_negative_silently_proceeds() {
 ///
 /// Tracking: #1265
 #[test]
-#[ignore = "divergence: per-tensor rejects scale=NaN; upstream propagates NaN; tracking #1265"]
 fn divergence_per_tensor_scale_nan_silently_propagates() {
     let input = from_vec(vec![1.0_f32, 2.0], &[2]).unwrap();
-    let result = grad_fns::quantize_grad::fake_quantize_per_tensor_affine(
-        &input, f64::NAN, 0, -128, 127,
-    );
+    let result =
+        grad_fns::quantize_grad::fake_quantize_per_tensor_affine(&input, f64::NAN, 0, -128, 127);
     let out = result.expect(
         "upstream torch.fake_quantize_per_tensor_affine(..., scale=NaN, ...) \
          returns tensor([nan, nan]) (live oracle 2026-05-25); ferrotorch rejects \
@@ -129,6 +127,14 @@ fn divergence_per_tensor_scale_nan_silently_propagates() {
          Tracking #1265.",
     );
     let actual = out.data().unwrap();
-    assert!(actual[0].is_nan(), "per-tensor NaN scale element 0: expected NaN, got {}", actual[0]);
-    assert!(actual[1].is_nan(), "per-tensor NaN scale element 1: expected NaN, got {}", actual[1]);
+    assert!(
+        actual[0].is_nan(),
+        "per-tensor NaN scale element 0: expected NaN, got {}",
+        actual[0]
+    );
+    assert!(
+        actual[1].is_nan(),
+        "per-tensor NaN scale element 1: expected NaN, got {}",
+        actual[1]
+    );
 }
