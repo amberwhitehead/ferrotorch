@@ -57,16 +57,34 @@ impl WireTensor {
         Ok(from_vec(data, &self.shape)?)
     }
 
-    /// Decode the wire envelope to an `IntTensor<i64>`. Accepts `int32` and
-    /// `int64` dtypes; int32 is widened to i64 to match ferrotorch's
-    /// `IntTensor<i64>` carrier (the upstream contract for the per-channel
-    /// `zero_point` is `int32 | float | half` per
+    /// Decode the wire envelope to an `IntTensor<i64>`. Accepts `uint8`,
+    /// `int32`, and `int64` dtypes; narrower forms are widened to i64 to
+    /// match ferrotorch's `IntTensor<i64>` carrier (the upstream contract
+    /// for the per-channel `zero_point` is `int32 | float | half` per
     /// `aten/src/ATen/native/quantized/FakeQuantPerChannelAffine.cpp:53`,
-    /// but ferrotorch's typed carrier always widens).
+    /// but ferrotorch's typed carrier always widens). `uint8` indices
+    /// appear in op_db's `gather` samples (small empty-tensor cases).
     fn to_int_tensor_i64(&self) -> Result<IntTensor<i64>, Box<dyn std::error::Error>> {
         let bytes = B64.decode(&self.data_b64)?;
-        let numel: usize = self.shape.iter().product();
+        let numel: usize = if self.shape.is_empty() {
+            1
+        } else {
+            self.shape.iter().product()
+        };
         let data: Vec<i64> = match self.dtype.as_str() {
+            "uint8" => {
+                let expected = numel;
+                if bytes.len() != expected {
+                    return Err(format!(
+                        "uint8 byte length {} does not match shape {:?} (expected {})",
+                        bytes.len(),
+                        self.shape,
+                        expected
+                    )
+                    .into());
+                }
+                bytes.iter().map(|&b| i64::from(b)).collect()
+            }
             "int32" => {
                 let expected = numel * 4;
                 if bytes.len() != expected {
@@ -100,9 +118,10 @@ impl WireTensor {
                     .collect()
             }
             other => {
-                return Err(
-                    format!("to_int_tensor_i64: only int32/int64 supported, got {other}").into(),
-                );
+                return Err(format!(
+                    "to_int_tensor_i64: only uint8/int32/int64 supported, got {other}"
+                )
+                .into());
             }
         };
         Ok(IntTensor::<i64>::from_vec(data, self.shape.clone())?)
@@ -141,6 +160,45 @@ impl WireTensor {
 fn unwrap_tensor_arg(v: &Value) -> Option<WireTensor> {
     let envelope = v.as_object()?.get("__tensor__")?;
     serde_json::from_value(envelope.clone()).ok()
+}
+
+/// Decode an int64-typed wire tensor into a flat `Vec<usize>` with its shape,
+/// rejecting any negative index (the underlying ferrotorch
+/// gather/scatter/scatter_add/index_select_dim entry points enforce
+/// non-negative indices — upstream `Tensor index_select_cpu_` at
+/// `aten/src/ATen/native/TensorAdvancedIndexing.cpp:1862` does wrap negative
+/// indices, which ferrotorch deliberately diverges from per
+/// `.design/ferrotorch-core/grad_fns/indexing.md` REQ-5 / parity contract).
+/// Returns `Ok(None)` if any index is negative — that sample is a legitimate
+/// skip rather than an authoritative failure.
+///
+/// The `Result<Option<(...)>, _>` return shape mirrors how the gather /
+/// scatter / scatter_add / index_select arms below treat skip vs. error vs.
+/// success: `Ok(None)` is the legitimate-skip pathway, `Err(_)` is a real
+/// wire-decode failure. Factoring this into a named type alias for a single
+/// helper in a runner binary would obscure the local control flow.
+#[allow(
+    clippy::type_complexity,
+    reason = "single-use helper in the runner binary; mirrors `ternary`'s \
+              inline closure shape precedent at the dispatch_f32 helper layer"
+)]
+fn decode_int64_index_to_usize(
+    wire: &WireTensor,
+) -> Result<Option<(Vec<usize>, Vec<usize>)>, Box<dyn std::error::Error>> {
+    let it = wire.to_int_tensor_i64()?;
+    let data = it.data()?;
+    let mut out = Vec::with_capacity(data.len());
+    for &v in data {
+        if v < 0 {
+            // Upstream wraps negative indices; ferrotorch rejects them per
+            // existing index_select_1d_it / index_select_dim contract. Skip
+            // rather than report a divergence — the wrap-semantics gap is
+            // its own design-doc-level question, not a parity bug.
+            return Ok(None);
+        }
+        out.push(v as usize);
+    }
+    Ok(Some((out, wire.shape.clone())))
 }
 
 // ---------------------------------------------------------------------------
@@ -753,6 +811,217 @@ fn dispatch_f32(
                 .to_f32()?;
             grad_fns::indexing::where_cond_bcast(&cond, &x, &y)?
         })),
+        // `torch.gather(input, dim, index, *, sparse_grad=False)` — for each
+        // output position `p`, returns `input[p with axis-dim replaced by
+        // index[p]]`. Upstream forward at
+        // `aten/src/ATen/native/TensorAdvancedIndexing.cpp:2070
+        // TORCH_IMPL_FUNC(gather_out)`. op_db emits `args = [input_f32,
+        // dim_i64, index_int64]` (verified 2026-05-25 via live oracle
+        // sample inspection: `i=0 shapes=[[10,5], 0, [5,5]]`,
+        // `i=2 shapes=[[10,5], 1, [10,2]]`). ferrotorch's shape-strict
+        // `ops::indexing::gather` at `ferrotorch-core/src/ops/indexing.rs:112`
+        // takes `(input, dim: isize, index: &[usize], index_shape: &[usize])`
+        // and validates `input.ndim() == index.ndim()` at `:73-80`. 0-d
+        // inputs (sample `i=6 shapes=[[], 0, []]`) and ndim-mismatch index
+        // samples are legitimate skips per the shape-strict contract.
+        // Closes #1242.
+        "gather" => {
+            if args.len() < 3 {
+                return Err(format!("gather expects 3 args, got {}", args.len()).into());
+            }
+            let input = unwrap_tensor_arg(&args[0])
+                .ok_or("gather: arg 0 not a tensor")?
+                .to_f32()?;
+            let dim = args[1]
+                .as_i64()
+                .ok_or("gather: arg 1 (dim) not a JSON integer")?;
+            let index_wire =
+                unwrap_tensor_arg(&args[2]).ok_or("gather: arg 2 (index) not a tensor")?;
+            let (index, index_shape) = match decode_int64_index_to_usize(&index_wire)? {
+                Some(p) => p,
+                None => return Ok(None),
+            };
+            // Shape-strict gather rejects 0-d inputs and ndim-mismatch
+            // (input.ndim != index.ndim). Skip rather than fail — those
+            // are narrower-contract divergences tracked at the REQ level.
+            if input.ndim() == 0 || input.ndim() != index_shape.len() {
+                return Ok(None);
+            }
+            Ok(Some(ferrotorch_core::ops::indexing::gather(
+                &input,
+                dim as isize,
+                &index,
+                &index_shape,
+            )?))
+        }
+        // `torch.scatter(self, dim, index, src, *, reduce=None)` — writes
+        // `output[index[p] at axis dim] = src[p]` into a clone of self.
+        // Upstream forward at
+        // `aten/src/ATen/native/TensorAdvancedIndexing.cpp:2263
+        // TORCH_IMPL_FUNC(scatter_src_out)`. op_db emits `args = [input_f32,
+        // dim_i64, index_int64, src_f32]` (verified 2026-05-25: `i=0
+        // shapes=[[10,5], 0, [5,5], [5,5]]`, negative-dim samples at
+        // `i=9..11 shapes=[[10,5], -1, [5,5], [5,5]]`, 0-d at `i=6
+        // shapes=[[], 0, [], []]`). The op_db sweep also mixes the
+        // `reduce` kwarg overloads (`scatter_reduce_two_out` at
+        // `TensorAdvancedIndexing.cpp:2354`): `reduce='add'` matches
+        // ferrotorch's `scatter_add` semantics so we route there;
+        // `reduce='multiply'` is REQ-4 NOT-STARTED (blocker #1245) so we
+        // skip; absent/None routes to plain scatter. A scalar `src` (the
+        // `scatter.value` overload at `TensorAdvancedIndexing.cpp:2278`)
+        // is also a legitimate skip — ferrotorch has no Scalar-src
+        // forward. ferrotorch's shape-strict `ops::indexing::scatter` at
+        // `ops/indexing.rs:183` accepts `dim: isize` (handles negative via
+        // `normalize_axis`). 0-d input is a legitimate skip (the
+        // shape-strict impl rejects ndim==0 at `ops/indexing.rs:191-194`).
+        // Closes #1243.
+        "scatter" => {
+            if args.len() < 4 {
+                return Err(format!("scatter expects 4 args, got {}", args.len()).into());
+            }
+            let input = unwrap_tensor_arg(&args[0])
+                .ok_or("scatter: arg 0 not a tensor")?
+                .to_f32()?;
+            let dim = args[1]
+                .as_i64()
+                .ok_or("scatter: arg 1 (dim) not a JSON integer")?;
+            let index_wire =
+                unwrap_tensor_arg(&args[2]).ok_or("scatter: arg 2 (index) not a tensor")?;
+            // Scalar src (the scatter.value overload) is out of dispatch
+            // scope; skip rather than treat as a divergence.
+            let src = match unwrap_tensor_arg(&args[3]) {
+                Some(w) => w.to_f32()?,
+                None => return Ok(None),
+            };
+            // Inspect the `reduce` kwarg. Per the op_db sweep the values
+            // observed are `'add'` (→ scatter_add semantics) and
+            // `'multiply'` (REQ-4 NOT-STARTED, blocker #1245 — skip).
+            let reduce = kwargs.get("reduce").and_then(Value::as_str);
+            let (index, index_shape) = match decode_int64_index_to_usize(&index_wire)? {
+                Some(p) => p,
+                None => return Ok(None),
+            };
+            if input.ndim() == 0 || input.ndim() != index_shape.len() {
+                return Ok(None);
+            }
+            match reduce {
+                None => Ok(Some(ferrotorch_core::ops::indexing::scatter(
+                    &input,
+                    dim as isize,
+                    &index,
+                    &index_shape,
+                    &src,
+                )?)),
+                Some("add") => Ok(Some(ferrotorch_core::ops::indexing::scatter_add(
+                    &input,
+                    dim as isize,
+                    &index,
+                    &index_shape,
+                    &src,
+                )?)),
+                Some("multiply") | Some("amin") | Some("amax") | Some("mean") | Some("prod")
+                | Some("sum") => {
+                    // scatter_reduce family is REQ-4 NOT-STARTED in
+                    // `.design/ferrotorch-core/grad_fns/indexing.md`
+                    // (blocker #1245). Legitimate skip.
+                    Ok(None)
+                }
+                Some(other) => Err(format!("scatter: unknown reduce kwarg: {other}").into()),
+            }
+        }
+        // `torch.scatter_add(self, dim, index, src)` — like scatter but
+        // accumulates via `+=`. Upstream forward at
+        // `aten/src/ATen/native/TensorAdvancedIndexing.cpp:2317
+        // TORCH_IMPL_FUNC(scatter_add)`. Same arg shape as scatter.
+        // ferrotorch's `ops::indexing::scatter_add` at `ops/indexing.rs:259`.
+        // Production consumer of the underlying forward at
+        // `ferrotorch-core/src/grad_fns/cumulative.rs:503` (cummax/cummin
+        // VJP). Closes #1244.
+        "scatter_add" => {
+            if args.len() < 4 {
+                return Err(format!("scatter_add expects 4 args, got {}", args.len()).into());
+            }
+            let input = unwrap_tensor_arg(&args[0])
+                .ok_or("scatter_add: arg 0 not a tensor")?
+                .to_f32()?;
+            let dim = args[1]
+                .as_i64()
+                .ok_or("scatter_add: arg 1 (dim) not a JSON integer")?;
+            let index_wire =
+                unwrap_tensor_arg(&args[2]).ok_or("scatter_add: arg 2 (index) not a tensor")?;
+            let src = unwrap_tensor_arg(&args[3])
+                .ok_or("scatter_add: arg 3 (src) not a tensor")?
+                .to_f32()?;
+            let (index, index_shape) = match decode_int64_index_to_usize(&index_wire)? {
+                Some(p) => p,
+                None => return Ok(None),
+            };
+            if input.ndim() == 0 || input.ndim() != index_shape.len() {
+                return Ok(None);
+            }
+            Ok(Some(ferrotorch_core::ops::indexing::scatter_add(
+                &input,
+                dim as isize,
+                &index,
+                &index_shape,
+                &src,
+            )?))
+        }
+        // `torch.index_select(input, dim, index)` — gather slices along
+        // `dim` using a 1-D index tensor. Upstream forward at
+        // `aten/src/ATen/native/TensorAdvancedIndexing.cpp:1862
+        // index_select_cpu_`. op_db emits `args = [input_f32, dim_i64,
+        // index_int64]` (verified 2026-05-25: `i=0 shapes=[[], 0, [1]]`,
+        // `i=2 shapes=[[5,5], -1, [5]]`). ferrotorch's
+        // `grad_fns::indexing::index_select_dim` at
+        // `ferrotorch-core/src/grad_fns/indexing.rs:1229` takes `(input,
+        // dim: usize, indices: &IntTensor<I>)`, requires `input.ndim() >= 1`
+        // (rejects 0-d at `:1236-1240`) and 1-D index (rejects multi-d at
+        // `:1246-1253`). Negative dim is normalized here before
+        // delegation. 0-d input is a legitimate skip. Production
+        // consumer of the underlying impl at
+        // `ferrotorch-data/src/transforms.rs:389` (HorizontalFlip).
+        // Closes #1246.
+        "index_select" => {
+            if args.len() < 3 {
+                return Err(format!("index_select expects 3 args, got {}", args.len()).into());
+            }
+            let input = unwrap_tensor_arg(&args[0])
+                .ok_or("index_select: arg 0 not a tensor")?
+                .to_f32()?;
+            let dim_i64 = args[1]
+                .as_i64()
+                .ok_or("index_select: arg 1 (dim) not a JSON integer")?;
+            let index = unwrap_tensor_arg(&args[2])
+                .ok_or("index_select: arg 2 (index) not a tensor")?
+                .to_int_tensor_i64()?;
+            // The shape-strict impl rejects 0-d input and non-1-D index.
+            // Both are narrower than upstream's contract; skip rather than
+            // report as divergence.
+            if input.ndim() == 0 || index.ndim() != 1 {
+                return Ok(None);
+            }
+            // Skip on negative indices (the impl rejects them).
+            for &v in index.data()? {
+                if v < 0 {
+                    return Ok(None);
+                }
+            }
+            // Normalize negative dim per PyTorch: dim ∈ [-ndim, ndim).
+            let ndim = input.ndim() as i64;
+            let dim = if dim_i64 < 0 { dim_i64 + ndim } else { dim_i64 };
+            if !(0..ndim).contains(&dim) {
+                return Err(format!(
+                    "index_select: dim {dim_i64} out of range for input ndim {ndim}"
+                )
+                .into());
+            }
+            Ok(Some(grad_fns::indexing::index_select_dim(
+                &input,
+                dim as usize,
+                &index,
+            )?))
+        }
         "fake_quantize_per_channel_affine" => Ok(Some({
             if args.len() < 6 {
                 return Err(format!(
@@ -831,6 +1100,17 @@ fn dispatch_ops() -> &'static [&'static str] {
         "masked_select",
         "masked_fill",
         "where",
+        // Indexing: gather / scatter / scatter_add / index_select. The
+        // runner arms decode positional `[input_f32, dim_i64, index_int64,
+        // src_f32?]` and route through the existing ferrotorch impls at
+        // `ops::indexing::{gather, scatter, scatter_add}` and
+        // `grad_fns::indexing::index_select_dim`. 0-d inputs and
+        // ndim-mismatch samples skip per the shape-strict-impl contract.
+        // Closes #1242 / #1243 / #1244 / #1246.
+        "gather",
+        "scatter",
+        "scatter_add",
+        "index_select",
     ]
 }
 

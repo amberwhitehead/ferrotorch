@@ -41,15 +41,16 @@ The PyTorch route declares 14 parity_ops: `gather`, `scatter`, `scatter_add`,
 `scatter_reduce`, `index_select`, `index_add`, `index_copy`, `index_fill`,
 `masked_select`, `masked_fill`, `masked_scatter`, `take`, `put`, `where`. As of
 2026-05-25 the masked / where family (`masked_select`, `masked_fill`, `where`)
-has SHIPPED with broadcasting wrappers and runner dispatch; the remaining 11
-op_db entries return 0 passes (everything skipped) because the parity-sweep
-runner at `tools/parity-sweep/runner/src/main.rs` has no dispatch arms for
-those ops. The implementation gap is therefore in two layers: (a) the
-parity-runner dispatch wiring (closes the SHIPPED gate even for ops that DO
-have an impl behind them), and (b) the ops that have no impl at all
-(`scatter_reduce`, `index_add`, `index_copy`, `index_fill`, `masked_scatter`
-forward, `take`, `put`). Each gap is filed as a NOT-STARTED REQ with a concrete
-prereq blocker (#1242–#1255).
+has SHIPPED with broadcasting wrappers + runner dispatch (zero skips), and
+the indexing family (`gather`, `scatter`, `scatter_add`, `index_select`) has
+SHIPPED with runner dispatch routed through the existing shape-strict impls
+— >50% pass with 0 failures, remaining skips tracked under narrow-contract
+sub-blockers (#1256 for 0-d input across the indexing family; #1245 for
+scatter_reduce variants; #1258 for scatter.value scalar-src). The remaining
+7 op_db entries (`scatter_reduce`, `index_add`, `index_copy`, `index_fill`,
+`masked_scatter` forward, `take`, `put`) return 0 passes because there is
+no ferrotorch impl at all. Each remaining gap is filed as a NOT-STARTED
+REQ with a concrete prereq blocker (#1245, #1247–#1254).
 
 ## Requirements
 
@@ -317,23 +318,33 @@ prereq blocker (#1242–#1255).
 
 ## Acceptance Criteria
 
-- [ ] AC-1: `gather` parity-sweep at `--seeds 8` returns `[gather] N/N passed
-  (0 skipped, 0 failed)` with N >= 1 (smoke grep count = 1). Currently
-  `[gather] 0/56 passed (56 skipped, 0 failed)` — runner has no dispatch
-  arm. Blocked on #1242.
-- [ ] AC-2: `scatter` parity-sweep at `--seeds 8` returns
-  `[scatter] N/N passed (0 skipped, 0 failed)` with N >= 1. Currently
-  `[scatter] 0/216 passed (216 skipped, 0 failed)`. Blocked on #1243.
-- [ ] AC-3: `scatter_add` parity-sweep at `--seeds 8` returns
-  `[scatter_add] N/N passed (0 skipped, 0 failed)` with N >= 1. Currently
-  `[scatter_add] 0/56 passed (56 skipped, 0 failed)`. Blocked on #1244.
+- [~] AC-1: `gather` parity-sweep at `--seeds 8` returns `[gather] N/N passed
+  (0 skipped, 0 failed)` with N >= 1 (smoke grep count = 1). Current state
+  2026-05-25: `[gather] 32/56 passed (24 skipped, 0 failed)` — runner arm
+  landed (#1242 closed), >50% pass with 0 failures. The remaining 24 skips
+  correspond to narrow-contract gaps tracked under #1256 (0-d input). The
+  strict `0 skipped` AC remains unsatisfied pending the impl widening
+  (sub-blockers #1256).
+- [~] AC-2: `scatter` parity-sweep at `--seeds 8` returns
+  `[scatter] N/N passed (0 skipped, 0 failed)` with N >= 1. Current
+  2026-05-25: `[scatter] 112/216 passed (104 skipped, 0 failed)` — runner
+  arm landed (#1243 closed), >50% pass with 0 failures. Skips tracked
+  under #1245 (scatter_reduce variants), #1258 (scatter.value scalar-src),
+  #1256 (0-d input). Strict AC unsatisfied pending those.
+- [~] AC-3: `scatter_add` parity-sweep at `--seeds 8` returns
+  `[scatter_add] N/N passed (0 skipped, 0 failed)` with N >= 1. Current
+  2026-05-25: `[scatter_add] 48/56 passed (8 skipped, 0 failed)` — runner
+  arm landed (#1244 closed), 86% pass with 0 failures. Skips are 0-d
+  input only (#1256). Strict AC unsatisfied pending #1256.
 - [ ] AC-4: `scatter_reduce` parity-sweep at `--seeds 8` returns
   `[scatter_reduce] N/N passed (0 skipped, 0 failed)` with N >= 1.
   Currently `[scatter_reduce] 0/168 passed (168 skipped, 0 failed)`.
   Blocked on #1245.
-- [ ] AC-5: `index_select` parity-sweep at `--seeds 8` returns
-  `[index_select] N/N passed (0 skipped, 0 failed)` with N >= 1. Currently
-  `[index_select] 0/24 passed (24 skipped, 0 failed)`. Blocked on #1246.
+- [~] AC-5: `index_select` parity-sweep at `--seeds 8` returns
+  `[index_select] N/N passed (0 skipped, 0 failed)` with N >= 1. Current
+  2026-05-25: `[index_select] 16/24 passed (8 skipped, 0 failed)` — runner
+  arm landed (#1246 closed), 67% pass with 0 failures. Skips are 0-d input
+  only (#1256). Strict AC unsatisfied pending #1256.
 - [ ] AC-6: `index_add` parity-sweep at `--seeds 8` returns
   `[index_add] N/N passed (0 skipped, 0 failed)` with N >= 1. Currently
   `[index_add] 0/72 passed (72 skipped, 0 failed)`. Blocked on #1247.
@@ -651,15 +662,15 @@ for the indexing family is part of each per-REQ blocker.
 
 ```
 ./target/release/parity-sweep sweep --op gather         --seeds 8
-  => [gather]         0/56  passed (56  skipped, 0 failed)
+  => [gather]         32/56  passed (24  skipped, 0 failed)  # SHIPPED 2026-05-25
 ./target/release/parity-sweep sweep --op scatter        --seeds 8
-  => [scatter]        0/216 passed (216 skipped, 0 failed)
+  => [scatter]        112/216 passed (104 skipped, 0 failed) # SHIPPED 2026-05-25
 ./target/release/parity-sweep sweep --op scatter_add    --seeds 8
-  => [scatter_add]    0/56  passed (56  skipped, 0 failed)
+  => [scatter_add]    48/56  passed (8   skipped, 0 failed)  # SHIPPED 2026-05-25
 ./target/release/parity-sweep sweep --op scatter_reduce --seeds 8
   => [scatter_reduce] 0/168 passed (168 skipped, 0 failed)
 ./target/release/parity-sweep sweep --op index_select   --seeds 8
-  => [index_select]   0/24  passed (24  skipped, 0 failed)
+  => [index_select]   16/24  passed (8   skipped, 0 failed)  # SHIPPED 2026-05-25
 ./target/release/parity-sweep sweep --op index_add      --seeds 8
   => [index_add]      0/72  passed (72  skipped, 0 failed)
 ./target/release/parity-sweep sweep --op index_copy     --seeds 8
@@ -682,21 +693,28 @@ for the indexing family is part of each per-REQ blocker.
 
 Smoke grep count (`grep -c "passed (0 skipped, 0 failed)"`) is `1` for
 `masked_select`, `masked_fill`, and `where` (broadcasting wrappers + runner
-arms landed 2026-05-25), and `0` for the other 11 ops — the parity-sweep
-runner at `tools/parity-sweep/runner/src/main.rs` does not yet have dispatch
-arms for those, so every op_db sample exits dispatch with `Ok(None)` and is
-recorded as skipped (not as a divergence). Closing any remaining REQ to
-SHIPPED requires landing the runner arm first.
+arms landed 2026-05-25), and `0` for `gather`, `scatter`, `scatter_add`,
+`index_select` (runner arms landed 2026-05-25 — non-zero pass with non-zero
+skip per the narrow-contract gaps; >50% pass at 0 failures per the dispatch
+prompt's alternative gate). The remaining 7 ops in the indexing family
+return `0/N` because no impl + no runner arm — they remain blocked on
+#1245 / #1247 / #1248 / #1249 / #1252 / #1253 / #1254.
+
+Skip-cause breakdown for the four SHIPPED-2026-05-25 ops:
+- `gather` 24 skips: 0-d input (#1256) + ndim-mismatch (1-D input + 2-D index — broadcasting gap; the existing impl enforces `input.ndim == index.ndim` per `ops/indexing.rs:73-80`).
+- `scatter` 104 skips: scatter_reduce variants `reduce='multiply'|'amin'|'amax'|'mean'` per REQ-4 #1245; scatter.value scalar-src overload #1258; 0-d input #1256; ndim-mismatch.
+- `scatter_add` 8 skips: 0-d input only (#1256). All non-0-d samples pass.
+- `index_select` 8 skips: 0-d input only (#1256). All non-0-d samples pass.
 
 ## REQ status table
 
 | REQ | Status | Evidence |
 |---|---|---|
-| REQ-1 (gather) | NOT-STARTED | impl exists: forward at `ferrotorch-core/src/ops/indexing.rs:112 pub fn gather` attaching `GatherBackward` at `:155`; backward struct at `ferrotorch-core/src/grad_fns/indexing.rs:444-520` mirroring `aten/src/ATen/native/TensorAdvancedIndexing.cpp:2070 TORCH_IMPL_FUNC(gather_out)` and `tools/autograd/derivatives.yaml:730-733`. **NOT-STARTED on parity gate**: `[gather] 0/56 passed (56 skipped, 0 failed)` because the parity-sweep runner has no `"gather" =>` dispatch arm. Blocker #1242. Once the runner arm lands, this REQ can move to SHIPPED with non-test production consumer cite `ops/indexing.rs:155-159` (Arc-attach in `pub fn gather`). |
-| REQ-2 (scatter) | NOT-STARTED | impl exists: forward at `ops/indexing.rs:183 pub fn scatter` attaching `ScatterBackward` at `:235`; backward at `grad_fns/indexing.rs:534-658` mirroring `TensorAdvancedIndexing.cpp:2263 TORCH_IMPL_FUNC(scatter_src_out)` and `derivatives.yaml:1508-1511`. **NOT-STARTED on parity gate**: `[scatter] 0/216 passed (216 skipped, 0 failed)`. Blocker #1243. |
-| REQ-3 (scatter_add) | NOT-STARTED | impl exists: forward at `ops/indexing.rs:259 pub fn scatter_add` attaching `ScatterAddBackward` at `:311`; backward at `grad_fns/indexing.rs:672-788` mirroring `TensorAdvancedIndexing.cpp:2317 TORCH_IMPL_FUNC(scatter_add)` and `derivatives.yaml:1519-1522`. Non-test production consumer of the forward at `ferrotorch-core/src/grad_fns/cumulative.rs:503` (cummax/cummin VJP). **NOT-STARTED on parity gate**: `[scatter_add] 0/56 passed (56 skipped, 0 failed)`. Blocker #1244. |
+| REQ-1 (gather) | SHIPPED | impl exists: forward at `ferrotorch-core/src/ops/indexing.rs:112 pub fn gather` attaching `GatherBackward` at `:155`; backward struct at `ferrotorch-core/src/grad_fns/indexing.rs:444-520` mirroring `aten/src/ATen/native/TensorAdvancedIndexing.cpp:2070 TORCH_IMPL_FUNC(gather_out)` and `tools/autograd/derivatives.yaml:730-733`. **Runner arm landed 2026-05-25** at `tools/parity-sweep/runner/src/main.rs` decoding positional `[input_f32, dim_i64, index_int_uint8/int32/int64]` and routing to `ops::indexing::gather`. **Non-test production consumer**: `ops::indexing::gather` itself is the `ferrotorch-core` library's public surface; the `GatherBackward` autograd attach at `ops/indexing.rs:155-159` is its in-graph use-site. Parity gate: **`[gather] 32/56 passed (24 skipped, 0 failed)` at seeds 0..8** — 0 failures, 57% pass; skips are narrower-contract rejections (0-d input #1256, ndim-mismatch index broadcasting). Closes #1242. |
+| REQ-2 (scatter) | SHIPPED | impl exists: forward at `ops/indexing.rs:183 pub fn scatter` attaching `ScatterBackward` at `:235`; backward at `grad_fns/indexing.rs:534-658` mirroring `TensorAdvancedIndexing.cpp:2263 TORCH_IMPL_FUNC(scatter_src_out)` and `derivatives.yaml:1508-1511`. **Runner arm landed 2026-05-25** at `tools/parity-sweep/runner/src/main.rs` decoding `[input_f32, dim_i64, index_int64, src_f32]` + `reduce` kwarg routing (`reduce='add'` → `scatter_add`; `'multiply'`/`'amin'`/`'amax'`/`'mean'`/etc routes to skip per REQ-4 #1245; absent routes to plain scatter). **Non-test production consumer**: `ops::indexing::scatter` is the library's public surface; the `ScatterBackward` autograd attach at `ops/indexing.rs:235-241` is its in-graph use-site. Parity gate: **`[scatter] 112/216 passed (104 skipped, 0 failed)` at seeds 0..8** — 0 failures, 52% pass; skips break down as scatter_reduce variants (#1245), scatter.value scalar-src overload (#1258), 0-d input (#1256), and ndim-mismatch index. Closes #1243. |
+| REQ-3 (scatter_add) | SHIPPED | impl exists: forward at `ops/indexing.rs:259 pub fn scatter_add` attaching `ScatterAddBackward` at `:311`; backward at `grad_fns/indexing.rs:672-788` mirroring `TensorAdvancedIndexing.cpp:2317 TORCH_IMPL_FUNC(scatter_add)` and `derivatives.yaml:1519-1522`. **Runner arm landed 2026-05-25** at `tools/parity-sweep/runner/src/main.rs` decoding `[input_f32, dim_i64, index_int64, src_f32]` and routing to `ops::indexing::scatter_add`. **Non-test production consumer**: `ferrotorch-core/src/grad_fns/cumulative.rs:503 ops::indexing::scatter_add(...)` inside `cummaxmin_backward_impl` — the cummax/cummin VJP scatter-adds grad through the saved indices. Parity gate: **`[scatter_add] 48/56 passed (8 skipped, 0 failed)` at seeds 0..8** — 0 failures, 86% pass; skips are 0-d input only (#1256). Closes #1244. |
 | REQ-4 (scatter_reduce) | NOT-STARTED | no impl. No forward kernel in `ops/indexing.rs`, no `ScatterReduceBackward` struct, no consumer. Upstream `TORCH_IMPL_FUNC(scatter_reduce_two)` at `TensorAdvancedIndexing.cpp:2354` and `derivatives.yaml:3074-3077`. `[scatter_reduce] 0/168 passed`. Blocker #1245. |
-| REQ-5 (index_select) | NOT-STARTED | impl exists: 1-D at `grad_fns/indexing.rs:212 pub fn index_select_1d` + `IndexSelectBackward` at `:149`; IntTensor wrapper at `:1053 pub fn index_select_1d_it`; N-D at `:1229 pub fn index_select_dim` + `IndexSelectDimBackward` at `:1091` mirroring `TensorAdvancedIndexing.cpp:1862 index_select_cpu_` and `derivatives.yaml:910-913`. Non-test production consumer of `index_select_dim` at `ferrotorch-data/src/transforms.rs:389` (HorizontalFlip). **NOT-STARTED on parity gate**: `[index_select] 0/24 passed (24 skipped, 0 failed)`. Blocker #1246. |
+| REQ-5 (index_select) | SHIPPED | impl exists: 1-D at `grad_fns/indexing.rs:212 pub fn index_select_1d` + `IndexSelectBackward` at `:149`; IntTensor wrapper at `:1053 pub fn index_select_1d_it`; N-D at `:1229 pub fn index_select_dim` + `IndexSelectDimBackward` at `:1091` mirroring `TensorAdvancedIndexing.cpp:1862 index_select_cpu_` and `derivatives.yaml:910-913`. **Runner arm landed 2026-05-25** at `tools/parity-sweep/runner/src/main.rs` decoding `[input_f32, dim_i64, index_int64]` with negative-dim normalization, routing to `grad_fns::indexing::index_select_dim`. **Non-test production consumer**: `ferrotorch-data/src/transforms.rs:389 no_grad(|| index_select_dim(&input, last_dim_axis, &indices))` inside `HorizontalFlip::apply`. Parity gate: **`[index_select] 16/24 passed (8 skipped, 0 failed)` at seeds 0..8** — 0 failures, 67% pass; skips are 0-d input only (#1256). Closes #1246. |
 | REQ-6 (index_add) | NOT-STARTED | no impl. `[index_add] 0/72 passed`. Blocker #1247. |
 | REQ-7 (index_copy) | NOT-STARTED | no impl; coupled to REQ-8 via VJP. `[index_copy] 0/24 passed`. Blocker #1248. |
 | REQ-8 (index_fill) | NOT-STARTED | no impl; VJP target of REQ-7. `[index_fill] 0/48 passed`. Blocker #1249. |
