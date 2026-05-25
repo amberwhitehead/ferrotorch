@@ -14,8 +14,8 @@ use crate::autograd::no_grad::is_grad_enabled;
 use crate::dtype::Float;
 use crate::error::FerrotorchResult;
 use crate::ops::cumulative::{
-    CumExtremeResult, cummax_forward, cummin_forward, cumprod_forward, cumsum_forward,
-    logcumsumexp_forward, reverse_cumsum,
+    cummax_forward, cummin_forward, cumprod_forward, cumsum_forward, logcumsumexp_forward,
+    reverse_cumsum, CumExtremeResult,
 };
 use crate::shape::normalize_axis;
 use crate::storage::TensorStorage;
@@ -39,6 +39,16 @@ pub struct CumsumBackward<T: Float> {
 
 impl<T: Float> GradFn<T> for CumsumBackward<T> {
     fn backward(&self, grad_output: &Tensor<T>) -> FerrotorchResult<Vec<Option<Tensor<T>>>> {
+        // 0-D fast path: cumsum on a scalar is the identity, so the VJP is
+        // also identity (`grad_input = grad_output`). Mirrors PyTorch's
+        // `impl_func_cum_ops` at `aten/src/ATen/native/ReduceOps.cpp:501-504`
+        // where the 0-D branch `result.fill_(self)` bypasses the cumsum
+        // stub entirely. `reverse_cumsum` is not 0-D-safe (its
+        // `dim_strides` helper indexes `shape[dim]`), so we must short
+        // circuit before reaching the kernel.
+        if self.input.ndim() == 0 {
+            return Ok(vec![Some(grad_output.clone())]);
+        }
         if grad_output.is_cuda() {
             return Err(crate::error::FerrotorchError::NotImplementedOnCuda {
                 op: "CumsumBackward",
@@ -69,7 +79,16 @@ impl<T: Float> GradFn<T> for CumsumBackward<T> {
 /// [`CumsumBackward`] node.
 ///
 /// `dim` supports negative indexing.
+///
+/// 0-D (scalar) inputs return the input copied through, matching PyTorch's
+/// `impl_func_cum_ops` 0-D branch at
+/// `aten/src/ATen/native/ReduceOps.cpp:501-504`. The only valid `dim`
+/// values for a scalar are `0` and `-1`; anything else mirrors upstream's
+/// `IndexError: Dimension out of range`.
 pub fn cumsum<T: Float>(input: &Tensor<T>, dim: i64) -> FerrotorchResult<Tensor<T>> {
+    if input.ndim() == 0 {
+        return cumulative_scalar_identity(input, dim, "cumsum", ScalarBackwardKind::Cumsum);
+    }
     let norm_dim = normalize_axis(dim as isize, input.ndim())?;
     let result = cumsum_forward(input, dim)?;
 
@@ -82,6 +101,100 @@ pub fn cumsum<T: Float>(input: &Tensor<T>, dim: i64) -> FerrotorchResult<Tensor<
         Tensor::from_operation(storage, shape, grad_fn)
     } else {
         Ok(result)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// 0-D scalar identity helper (shared by cumsum / cumprod / logcumsumexp)
+// ---------------------------------------------------------------------------
+
+/// Discriminant for [`cumulative_scalar_identity`] — picks which
+/// `*Backward` node to attach on the 0-D fast path.
+#[derive(Clone, Copy)]
+enum ScalarBackwardKind {
+    Cumsum,
+    Cumprod,
+    Logcumsumexp,
+}
+
+/// 0-D (scalar) fast path shared by `cumsum`, `cumprod`, and `logcumsumexp`.
+///
+/// PyTorch's `impl_func_cum_ops` (`aten/src/ATen/native/ReduceOps.cpp:501-504`)
+/// special-cases `self.dim() == 0` to `result.fill_(self)` — the scalar is
+/// copied through unchanged. Live-verified 2026-05-25 with torch 2.11.0:
+///
+/// ```text
+/// torch.cumsum(torch.tensor(5.0), 0)       == tensor(5.)
+/// torch.cumprod(torch.tensor(-3.5), 0)     == tensor(-3.5000)
+/// torch.logcumsumexp(torch.tensor(5.0), 0) == tensor(5.)
+/// torch.cumsum(torch.tensor(5.0), -1)      == tensor(5.)
+/// torch.cumsum(torch.tensor(5.0), 1)       -> IndexError: Dimension out of range
+/// ```
+///
+/// All three ops are the identity on a scalar, so their VJP is also the
+/// identity (`grad_input = grad_output`). The returned tensor carries the
+/// appropriate `*Backward` node when `input.requires_grad()` is true so
+/// the autograd graph stays connected; the saved `dim` is `0` because the
+/// only normalized scalar dim is `0`.
+fn cumulative_scalar_identity<T: Float>(
+    input: &Tensor<T>,
+    dim: i64,
+    op_name: &str,
+    kind: ScalarBackwardKind,
+) -> FerrotorchResult<Tensor<T>> {
+    // PyTorch accepts dim ∈ {-1, 0} on a 0-D tensor; any other value
+    // raises `IndexError` (see e.g. cummax's message
+    // "Expected reduction dim -1 or 0 for scalar but got <N>").
+    if dim != 0 && dim != -1 {
+        return Err(crate::error::FerrotorchError::InvalidArgument {
+            message: format!("{op_name}: expected reduction dim -1 or 0 for scalar but got {dim}"),
+        });
+    }
+
+    // Materialize a fresh storage with the input's single element so the
+    // returned tensor has a distinct identity from `input` (autograd
+    // graph invariant — Tensor::from_operation needs a new TensorId).
+    let scalar_val = input.item()?;
+    let result = Tensor::from_storage(TensorStorage::cpu(vec![scalar_val]), Vec::new(), false)?;
+
+    if !(is_grad_enabled() && input.requires_grad()) {
+        return Ok(result);
+    }
+
+    // Attach the op-specific *Backward. Each backward implements the
+    // identity VJP on 0-D (handled by its own ndim()==0 fast path).
+    let (storage, shape) = result.into_storage_and_shape()?;
+    match kind {
+        ScalarBackwardKind::Cumsum => {
+            let grad_fn = Arc::new(CumsumBackward {
+                input: input.clone(),
+                dim: 0,
+            });
+            Tensor::from_operation(storage, shape, grad_fn)
+        }
+        ScalarBackwardKind::Cumprod => {
+            // CumprodBackward saves `output` too; on 0-D the output
+            // equals the input. Materialize a fresh scalar tensor for
+            // it (semantically identical, distinct identity).
+            let saved_output =
+                Tensor::from_storage(TensorStorage::cpu(vec![scalar_val]), Vec::new(), false)?;
+            let grad_fn = Arc::new(CumprodBackward {
+                input: input.clone(),
+                output: saved_output,
+                dim: 0,
+            });
+            Tensor::from_operation(storage, shape, grad_fn)
+        }
+        ScalarBackwardKind::Logcumsumexp => {
+            let saved_output =
+                Tensor::from_storage(TensorStorage::cpu(vec![scalar_val]), Vec::new(), false)?;
+            let grad_fn = Arc::new(LogcumsumexpBackward {
+                input: input.clone(),
+                output: saved_output,
+                dim: 0,
+            });
+            Tensor::from_operation(storage, shape, grad_fn)
+        }
     }
 }
 
@@ -108,6 +221,15 @@ pub struct CumprodBackward<T: Float> {
 
 impl<T: Float> GradFn<T> for CumprodBackward<T> {
     fn backward(&self, grad_output: &Tensor<T>) -> FerrotorchResult<Vec<Option<Tensor<T>>>> {
+        // 0-D fast path: cumprod on a scalar is the identity (output ==
+        // input), so the VJP is also the identity. Mirrors PyTorch's
+        // `impl_func_cum_ops` 0-D branch at
+        // `aten/src/ATen/native/ReduceOps.cpp:501-504`. The triple-loop
+        // below uses `dim_strides` which would index `shape[0]` on an
+        // empty shape — we must short-circuit here.
+        if self.input.ndim() == 0 {
+            return Ok(vec![Some(grad_output.clone())]);
+        }
         if grad_output.is_cuda() || self.input.is_cuda() || self.output.is_cuda() {
             return Err(crate::error::FerrotorchError::NotImplementedOnCuda {
                 op: "CumprodBackward",
@@ -199,7 +321,14 @@ impl<T: Float> GradFn<T> for CumprodBackward<T> {
 /// [`CumprodBackward`] node.
 ///
 /// `dim` supports negative indexing.
+///
+/// 0-D (scalar) inputs return the input copied through (identity), matching
+/// PyTorch's `impl_func_cum_ops` at
+/// `aten/src/ATen/native/ReduceOps.cpp:501-504`.
 pub fn cumprod<T: Float>(input: &Tensor<T>, dim: i64) -> FerrotorchResult<Tensor<T>> {
+    if input.ndim() == 0 {
+        return cumulative_scalar_identity(input, dim, "cumprod", ScalarBackwardKind::Cumprod);
+    }
     let norm_dim = normalize_axis(dim as isize, input.ndim())?;
     let result = cumprod_forward(input, dim)?;
 
@@ -227,7 +356,16 @@ pub fn cumprod<T: Float>(input: &Tensor<T>, dim: i64) -> FerrotorchResult<Tensor
 ///
 /// This operation is **not differentiable** — the returned values tensor does
 /// not carry a gradient function.
+///
+/// 0-D (scalar) inputs return `CumExtremeResult { values: scalar copy,
+/// indices: vec![0] }`, matching PyTorch's `impl_func_cum_ops` 0-D branch
+/// at `aten/src/ATen/native/ReduceOps.cpp:501-504` (and live-verified
+/// 2026-05-25 with torch 2.11.0: `torch.cummax(torch.tensor(5.0), 0) ==
+/// (tensor(5.), tensor(0))`).
 pub fn cummax<T: Float>(input: &Tensor<T>, dim: i64) -> FerrotorchResult<CumExtremeResult<T>> {
+    if input.ndim() == 0 {
+        return cumextreme_scalar_identity(input, dim, "cummax");
+    }
     cummax_forward(input, dim)
 }
 
@@ -237,8 +375,49 @@ pub fn cummax<T: Float>(input: &Tensor<T>, dim: i64) -> FerrotorchResult<CumExtr
 /// running minimum.
 ///
 /// This operation is **not differentiable**.
+///
+/// 0-D (scalar) inputs return `CumExtremeResult { values: scalar copy,
+/// indices: vec![0] }`, matching PyTorch's `impl_func_cum_ops` 0-D branch
+/// at `aten/src/ATen/native/ReduceOps.cpp:501-504`.
 pub fn cummin<T: Float>(input: &Tensor<T>, dim: i64) -> FerrotorchResult<CumExtremeResult<T>> {
+    if input.ndim() == 0 {
+        return cumextreme_scalar_identity(input, dim, "cummin");
+    }
     cummin_forward(input, dim)
+}
+
+/// 0-D scalar fast path for `cummax` / `cummin`.
+///
+/// PyTorch's `impl_func_cum_ops` 0-D branch (`ReduceOps.cpp:501-504`)
+/// copies the scalar through. For the (values, indices) tuple ops the
+/// indices tensor is the scalar `0` (the only valid position on a
+/// 0-element-axis scalar). Live-verified 2026-05-25 with torch 2.11.0:
+///
+/// ```text
+/// torch.cummax(torch.tensor(5.0), 0)  -> (tensor(5.), tensor(0))
+/// torch.cummin(torch.tensor(-3.5), 0) -> (tensor(-3.5), tensor(0))
+/// torch.cummax(torch.tensor(5.0), 1)  -> IndexError: cummax(): Expected
+///                                       reduction dim -1 or 0 for scalar
+///                                       but got 1
+/// ```
+fn cumextreme_scalar_identity<T: Float>(
+    input: &Tensor<T>,
+    dim: i64,
+    op_name: &str,
+) -> FerrotorchResult<CumExtremeResult<T>> {
+    if dim != 0 && dim != -1 {
+        return Err(crate::error::FerrotorchError::InvalidArgument {
+            message: format!(
+                "{op_name}(): expected reduction dim -1 or 0 for scalar but got {dim}"
+            ),
+        });
+    }
+    let scalar_val = input.item()?;
+    let values = Tensor::from_storage(TensorStorage::cpu(vec![scalar_val]), Vec::new(), false)?;
+    Ok(CumExtremeResult {
+        values,
+        indices: vec![0],
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -269,6 +448,14 @@ pub struct LogcumsumexpBackward<T: Float> {
 
 impl<T: Float> GradFn<T> for LogcumsumexpBackward<T> {
     fn backward(&self, grad_output: &Tensor<T>) -> FerrotorchResult<Vec<Option<Tensor<T>>>> {
+        // 0-D fast path: logcumsumexp on a scalar is `log(exp(x)) == x`
+        // (the identity). VJP is identity. Mirrors PyTorch's 0-D
+        // short-circuit at `aten/src/ATen/native/ReduceOps.cpp:501-504`.
+        // The non-0-D body below calls `reverse_cumsum` which would
+        // index `shape[0]` on an empty shape — we must short-circuit.
+        if self.input.ndim() == 0 {
+            return Ok(vec![Some(grad_output.clone())]);
+        }
         if grad_output.is_cuda() || self.input.is_cuda() || self.output.is_cuda() {
             return Err(crate::error::FerrotorchError::NotImplementedOnCuda {
                 op: "LogcumsumexpBackward",
@@ -319,7 +506,20 @@ impl<T: Float> GradFn<T> for LogcumsumexpBackward<T> {
 /// [`LogcumsumexpBackward`] node.
 ///
 /// `dim` supports negative indexing.
+///
+/// 0-D (scalar) inputs return the input copied through (identity), matching
+/// PyTorch's `impl_func_cum_ops` at
+/// `aten/src/ATen/native/ReduceOps.cpp:501-504`. The numerical identity is
+/// `logcumsumexp(x) = log(exp(x)) = x` for a single-element scan.
 pub fn logcumsumexp<T: Float>(input: &Tensor<T>, dim: i64) -> FerrotorchResult<Tensor<T>> {
+    if input.ndim() == 0 {
+        return cumulative_scalar_identity(
+            input,
+            dim,
+            "logcumsumexp",
+            ScalarBackwardKind::Logcumsumexp,
+        );
+    }
     let norm_dim = normalize_axis(dim as isize, input.ndim())?;
     let result = logcumsumexp_forward(input, dim)?;
 
@@ -794,37 +994,134 @@ mod tests {
     }
 
     // =======================================================================
-    // Error cases
+    // 0-D (scalar) passthrough — closes blocker #1233.
+    //
+    // PyTorch accepts 0-D inputs and copies the scalar through unchanged.
+    // Mirrors `impl_func_cum_ops` at
+    // `aten/src/ATen/native/ReduceOps.cpp:501-504`:
+    //
+    //   if (self.dim() == 0) {
+    //     result.fill_(self);
+    //   }
+    //
+    // The expected values are NAMED CONSTANTS traced to live PyTorch
+    // (torch 2.11.0, verified 2026-05-25):
+    //   - PT_SCALAR_5_0       = 5.0  per `torch.cumsum(tensor(5.0), 0).item()`
+    //   - PT_SCALAR_NEG_3_5   = -3.5 per `torch.cumprod(tensor(-3.5), 0).item()`
+    //   - PT_SCALAR_INDEX_0   = 0    per `torch.cummax(tensor(5.0), 0)[1].item()`
+    // These satisfy R-CHAR-3 (named typed bits traceable to upstream
+    // file:line) — not the tautological pattern that compares ferrotorch
+    // to itself.
     // =======================================================================
 
+    const PT_SCALAR_5_0: f64 = 5.0;
+    const PT_SCALAR_NEG_3_5: f64 = -3.5;
+    const PT_SCALAR_INDEX_0: usize = 0;
+
     #[test]
-    fn test_cumsum_scalar_error() {
-        let x = Tensor::from_storage(TensorStorage::cpu(vec![1.0_f64]), vec![], false).unwrap();
-        assert!(cumsum(&x, 0).is_err());
+    fn test_cumsum_scalar_passthrough() {
+        let x =
+            Tensor::from_storage(TensorStorage::cpu(vec![PT_SCALAR_5_0]), vec![], false).unwrap();
+        let r = cumsum(&x, 0).unwrap();
+        assert_eq!(r.shape(), &[] as &[usize]);
+        assert!((r.item().unwrap() - PT_SCALAR_5_0).abs() < 1e-12);
+
+        // Negative dim wraps to 0 (matches PyTorch's maybe_wrap_dim).
+        let r_neg = cumsum(&x, -1).unwrap();
+        assert!((r_neg.item().unwrap() - PT_SCALAR_5_0).abs() < 1e-12);
     }
 
     #[test]
-    fn test_cumprod_scalar_error() {
-        let x = Tensor::from_storage(TensorStorage::cpu(vec![1.0_f64]), vec![], false).unwrap();
-        assert!(cumprod(&x, 0).is_err());
+    fn test_cumprod_scalar_passthrough() {
+        // Use a negative value so we are not accidentally testing 1.0
+        // (the multiplicative identity), which would mask a buggy
+        // multiplier.
+        let x = Tensor::from_storage(TensorStorage::cpu(vec![PT_SCALAR_NEG_3_5]), vec![], false)
+            .unwrap();
+        let r = cumprod(&x, 0).unwrap();
+        assert_eq!(r.shape(), &[] as &[usize]);
+        assert!((r.item().unwrap() - PT_SCALAR_NEG_3_5).abs() < 1e-12);
+
+        let r_neg = cumprod(&x, -1).unwrap();
+        assert!((r_neg.item().unwrap() - PT_SCALAR_NEG_3_5).abs() < 1e-12);
     }
 
     #[test]
-    fn test_cummax_scalar_error() {
-        let x = Tensor::from_storage(TensorStorage::cpu(vec![1.0_f64]), vec![], false).unwrap();
-        assert!(cummax(&x, 0).is_err());
+    fn test_cummax_scalar_passthrough() {
+        let x =
+            Tensor::from_storage(TensorStorage::cpu(vec![PT_SCALAR_5_0]), vec![], false).unwrap();
+        let r = cummax(&x, 0).unwrap();
+        assert_eq!(r.values.shape(), &[] as &[usize]);
+        assert!((r.values.item().unwrap() - PT_SCALAR_5_0).abs() < 1e-12);
+        assert_eq!(r.indices, vec![PT_SCALAR_INDEX_0]);
     }
 
     #[test]
-    fn test_cummin_scalar_error() {
-        let x = Tensor::from_storage(TensorStorage::cpu(vec![1.0_f64]), vec![], false).unwrap();
-        assert!(cummin(&x, 0).is_err());
+    fn test_cummin_scalar_passthrough() {
+        let x = Tensor::from_storage(TensorStorage::cpu(vec![PT_SCALAR_NEG_3_5]), vec![], false)
+            .unwrap();
+        let r = cummin(&x, 0).unwrap();
+        assert!((r.values.item().unwrap() - PT_SCALAR_NEG_3_5).abs() < 1e-12);
+        assert_eq!(r.indices, vec![PT_SCALAR_INDEX_0]);
     }
 
     #[test]
-    fn test_logcumsumexp_scalar_error() {
+    fn test_logcumsumexp_scalar_passthrough() {
+        // logcumsumexp(scalar) = log(exp(scalar)) = scalar.
+        let x =
+            Tensor::from_storage(TensorStorage::cpu(vec![PT_SCALAR_5_0]), vec![], false).unwrap();
+        let r = logcumsumexp(&x, 0).unwrap();
+        assert!((r.item().unwrap() - PT_SCALAR_5_0).abs() < 1e-12);
+    }
+
+    // dim-out-of-range cases for 0-D inputs still error, mirroring
+    // upstream's `IndexError`. cummax/cummin's error message uses the
+    // exact upstream phrasing "Expected reduction dim -1 or 0 for scalar".
+    #[test]
+    fn test_cumsum_scalar_dim_out_of_range() {
         let x = Tensor::from_storage(TensorStorage::cpu(vec![1.0_f64]), vec![], false).unwrap();
-        assert!(logcumsumexp(&x, 0).is_err());
+        assert!(cumsum(&x, 1).is_err());
+        assert!(cumsum(&x, -2).is_err());
+    }
+
+    #[test]
+    fn test_cummax_scalar_dim_out_of_range() {
+        let x = Tensor::from_storage(TensorStorage::cpu(vec![1.0_f64]), vec![], false).unwrap();
+        assert!(cummax(&x, 1).is_err());
+        assert!(cummin(&x, -2).is_err());
+    }
+
+    // Differentiable 0-D passthrough: the VJP is the identity, so a
+    // gradient of 1.0 flowing back from `loss = sum(scalar_cumsum_output)`
+    // arrives at the input as 1.0 unchanged.
+    #[test]
+    fn test_cumsum_scalar_backward_is_identity() {
+        let x = leaf(&[PT_SCALAR_5_0], &[], true);
+        let cs = cumsum(&x, 0).unwrap();
+        let loss = sum(&cs).unwrap();
+        loss.backward().unwrap();
+        let g = x.grad().unwrap().unwrap();
+        assert!((g.item().unwrap() - 1.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn test_cumprod_scalar_backward_is_identity() {
+        let x = leaf(&[PT_SCALAR_NEG_3_5], &[], true);
+        let cp = cumprod(&x, 0).unwrap();
+        let loss = sum(&cp).unwrap();
+        loss.backward().unwrap();
+        let g = x.grad().unwrap().unwrap();
+        assert!((g.item().unwrap() - 1.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn test_logcumsumexp_scalar_backward_is_identity() {
+        let x = leaf(&[PT_SCALAR_5_0], &[], true);
+        let lcs = logcumsumexp(&x, 0).unwrap();
+        let loss = sum(&lcs).unwrap();
+        loss.backward().unwrap();
+        let g = x.grad().unwrap().unwrap();
+        assert!((g.item().unwrap() - 1.0).abs() < 1e-12);
     }
 
     #[test]
