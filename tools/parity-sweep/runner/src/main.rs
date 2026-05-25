@@ -213,6 +213,38 @@ fn dispatch_f32(
             .to_f32()?;
         Ok(t)
     };
+    // 3-arg ternary helper for ops like `torch.addcmul(input, tensor1, tensor2,
+    // *, value=1)` and `torch.addcdiv` per `aten/src/ATen/native/PointwiseOps.cpp`.
+    // op_db emits `args = [input, tensor1, tensor2]` with `value` in kwargs.
+    // Reusable for blocker #1201 (addcdiv) — the helper is op-agnostic.
+    //
+    // The 3-tuple-of-Tensor return shape exactly mirrors `binary`'s 2-tuple
+    // form above; clippy's `type-complexity` lint fires on the inline
+    // closure return type, but factoring out a named type alias for a
+    // single-use helper in a runner binary obscures more than it clarifies.
+    #[allow(
+        clippy::type_complexity,
+        reason = "mirrors `binary`'s inline closure shape; runner-only helper, \
+                  not worth a one-shot type alias"
+    )]
+    let ternary = |name: &str| -> Result<
+        (Tensor<f32>, Tensor<f32>, Tensor<f32>),
+        Box<dyn std::error::Error>,
+    > {
+        if args.len() < 3 {
+            return Err(format!("{name} expects 3 args, got {}", args.len()).into());
+        }
+        let a = unwrap_tensor_arg(&args[0])
+            .ok_or_else(|| format!("{name} arg 0 not a tensor"))?
+            .to_f32()?;
+        let b = unwrap_tensor_arg(&args[1])
+            .ok_or_else(|| format!("{name} arg 1 not a tensor"))?
+            .to_f32()?;
+        let c = unwrap_tensor_arg(&args[2])
+            .ok_or_else(|| format!("{name} arg 2 not a tensor"))?
+            .to_f32()?;
+        Ok((a, b, c))
+    };
     // PyTorch's `torch.add(input, other, *, alpha=1)` (and friends) ships
     // `alpha` as a JSON number in the kwargs envelope. op_db only emits a
     // scalar here, so a Number is sufficient — defaults to 1.0 when absent.
@@ -222,6 +254,18 @@ fn dispatch_f32(
             Some(v) => v
                 .as_f64()
                 .ok_or_else(|| format!("{name}: alpha kwarg is not a JSON number: {v}").into()),
+        }
+    };
+    // `torch.addcmul(input, tensor1, tensor2, *, value=1)` ships `value` as
+    // a JSON number in the kwargs envelope (default 1.0 when absent). Same
+    // shape as `alpha_kwarg` above but renamed for clarity since the kwarg
+    // name is `value`, not `alpha`. Reusable for `addcdiv` (#1201).
+    let value_kwarg = |name: &str| -> Result<f64, Box<dyn std::error::Error>> {
+        match kwargs.get("value") {
+            None => Ok(1.0),
+            Some(v) => v
+                .as_f64()
+                .ok_or_else(|| format!("{name}: value kwarg is not a JSON number: {v}").into()),
         }
     };
 
@@ -331,6 +375,23 @@ fn dispatch_f32(
             let (a, b) = binary("floor_divide")?;
             grad_fns::arithmetic::floor_divide(&a, &b)?
         })),
+        // `torch.addcmul(input, tensor1, tensor2, *, value=1)` — fused
+        // `out = input + value * tensor1 * tensor2` per
+        // `aten/src/ATen/native/PointwiseOps.cpp:57 TORCH_IMPL_FUNC(addcmul_out)`
+        // and `_torch_docs.py:510`. ferrotorch's
+        // `arithmetic::addcmul<T: Float>(input, t1, t2, value)` mirrors the
+        // 3-input broadcast TensorIteratorConfig at `PointwiseOps.cpp:17-31`;
+        // backward per `tools/autograd/derivatives.yaml`:
+        //   self    : grad
+        //   tensor1 : grad * (tensor2 * value)
+        //   tensor2 : grad * (tensor1 * value)
+        // 3 args via the new `ternary()` helper + `value_kwarg` kwarg
+        // (default 1.0). Closes blocker #1200.
+        "addcmul" => Ok(Some({
+            let (input, t1, t2) = ternary("addcmul")?;
+            let value = value_kwarg("addcmul")?;
+            grad_fns::arithmetic::addcmul(&input, &t1, &t2, value)?
+        })),
         // `torch.pow(input, exponent, *, out=None)` — `_torch_docs.py:8672`.
         // ferrotorch's `arithmetic::pow<T: Float>(a, exp: f64)` mirrors the
         // scalar-exponent overload at `aten/src/ATen/native/Pow.cpp:51
@@ -390,6 +451,7 @@ fn dispatch_ops() -> &'static [&'static str] {
         "remainder",
         "fmod",
         "floor_divide",
+        "addcmul",
     ]
 }
 

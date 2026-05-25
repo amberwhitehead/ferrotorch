@@ -2791,6 +2791,299 @@ fn floor_divide_inner<T: Float>(a: &Tensor<T>, b: &Tensor<T>) -> FerrotorchResul
 }
 
 // ===========================================================================
+// addcmul (REQ-15)
+// ===========================================================================
+
+/// Backward node for `c = input + value * tensor1 * tensor2` (fused).
+///
+/// Per `tools/autograd/derivatives.yaml` (verified live 2026-05-25):
+///
+/// ```yaml
+/// - name: addcmul(Tensor self, Tensor tensor1, Tensor tensor2, *, Scalar value=1) -> Tensor
+///   self: handle_r_to_c(self.scalar_type(), grad)
+///   tensor1: handle_r_to_c(tensor1.scalar_type(), grad * (tensor2 * value).conj())
+///   tensor2: handle_r_to_c(tensor2.scalar_type(), grad * (tensor1 * value).conj())
+/// ```
+///
+/// For `T: Float` (no complex support in this `Tensor<T: Float>` family) the
+/// `handle_r_to_c` cast is a no-op and `.conj()` is the identity. The VJP
+/// reduces to:
+///
+/// - `d_input   = grad`
+/// - `d_tensor1 = grad * value * tensor2`
+/// - `d_tensor2 = grad * value * tensor1`
+///
+/// Each gradient is reduced back to the original operand's shape via
+/// `reduce_grad_to_shape` (the 3-way broadcast in forward may have expanded
+/// any of the 3 operands).
+#[derive(Debug)]
+struct AddcmulBackward<T: Float> {
+    input: Tensor<T>,
+    tensor1: Tensor<T>,
+    tensor2: Tensor<T>,
+    value: f64,
+}
+
+impl<T: Float> GradFn<T> for AddcmulBackward<T> {
+    fn backward(&self, grad_output: &Tensor<T>) -> FerrotorchResult<Vec<Option<Tensor<T>>>> {
+        // d_input = grad (reduced to input.shape() under broadcasting).
+        let d_input = if self.input.requires_grad() {
+            Some(reduce_grad_to_shape(grad_output, self.input.shape())?)
+        } else {
+            None
+        };
+
+        // d_tensor1 = grad * value * tensor2 (reduced to tensor1.shape()).
+        // d_tensor2 = grad * value * tensor1 (reduced to tensor2.shape()).
+        //
+        // The chain runs under `no_grad` so the backward intermediates do not
+        // enter the graph (higher-order addcmul is not exercised by op_db;
+        // non-higher-order backward parity is what this commit ships).
+        // `value` is scalar (no grad wrt it).
+        let value_t = T::from(self.value).ok_or_else(|| FerrotorchError::InvalidArgument {
+            message: format!(
+                "addcmul backward: value={} cannot be represented in the tensor dtype",
+                self.value
+            ),
+        })?;
+
+        let d_tensor1 = if self.tensor1.requires_grad() {
+            // d_tensor1 = grad * value * tensor2. We compute it as
+            // `mul(grad, tensor2)` (handles broadcasting) then scale by
+            // `value` via a 0-d tensor multiply.
+            let computed = no_grad(|| {
+                let g_t2 = mul(grad_output, &self.tensor2)?;
+                let scale = Tensor::from_storage(
+                    TensorStorage::on_device(vec![value_t], grad_output.device())?,
+                    vec![],
+                    false,
+                )?;
+                mul(&g_t2, &scale)
+            })?;
+            Some(reduce_grad_to_shape(&computed, self.tensor1.shape())?)
+        } else {
+            None
+        };
+
+        let d_tensor2 = if self.tensor2.requires_grad() {
+            let computed = no_grad(|| {
+                let g_t1 = mul(grad_output, &self.tensor1)?;
+                let scale = Tensor::from_storage(
+                    TensorStorage::on_device(vec![value_t], grad_output.device())?,
+                    vec![],
+                    false,
+                )?;
+                mul(&g_t1, &scale)
+            })?;
+            Some(reduce_grad_to_shape(&computed, self.tensor2.shape())?)
+        } else {
+            None
+        };
+
+        Ok(vec![d_input, d_tensor1, d_tensor2])
+    }
+
+    fn inputs(&self) -> Vec<&Tensor<T>> {
+        vec![&self.input, &self.tensor1, &self.tensor2]
+    }
+
+    fn name(&self) -> &'static str {
+        "AddcmulBackward"
+    }
+}
+
+/// `torch.addcmul(input, tensor1, tensor2, *, value=1)` — fused
+/// `out = input + value * tensor1 * tensor2`.
+///
+/// Per `torch/_torch_docs.py:510-544`:
+///
+/// > addcmul(input, tensor1, tensor2, *, value=1, out=None) -> Tensor
+/// >
+/// > Performs the element-wise multiplication of :attr:`tensor1` by
+/// > :attr:`tensor2`, multiplies the result by the scalar :attr:`value`
+/// > and adds it to :attr:`input`.
+/// >
+/// > .. math::
+/// >     \text{out}_i = \text{input}_i + \text{value} \times \text{tensor1}_i \times \text{tensor2}_i
+/// >
+/// > The shapes of :attr:`tensor`, :attr:`tensor1`, and :attr:`tensor2`
+/// > must be :ref:`broadcastable <broadcasting-semantics>`.
+///
+/// Registered as `torch.addcmul: lambda input, tensor1, tensor2, value=1,
+/// out=None: -1` at `torch/overrides.py:462`. The upstream C++ entry point
+/// is at `aten/src/ATen/native/PointwiseOps.cpp:57-64`:
+///
+/// ```cpp
+/// TORCH_IMPL_FUNC(addcmul_out)
+/// (const Tensor& self,
+///  const Tensor& tensor1,
+///  const Tensor& tensor2,
+///  const Scalar& value,
+///  const Tensor& result) {
+///   addcmul_stub(device_type(), *this, value);
+/// }
+/// ```
+///
+/// with meta function at `PointwiseOps.cpp:17-31` declaring the 3-input
+/// `TensorIteratorConfig` that broadcasts `self` / `tensor1` / `tensor2` to
+/// a common shape. Backward per `tools/autograd/derivatives.yaml`:
+///
+/// ```yaml
+/// - name: addcmul(Tensor self, Tensor tensor1, Tensor tensor2, *, Scalar value=1) -> Tensor
+///   self: handle_r_to_c(self.scalar_type(), grad)
+///   tensor1: handle_r_to_c(tensor1.scalar_type(), grad * (tensor2 * value).conj())
+///   tensor2: handle_r_to_c(tensor2.scalar_type(), grad * (tensor1 * value).conj())
+/// ```
+///
+/// For `T: Float` (real-only) the `.conj()` is the identity and
+/// `handle_r_to_c` is a no-op. Edge cases (verified against the parity-sweep
+/// oracle):
+///
+/// - `addcmul([1,2,3], [4,5,6], [7,8,9], value=1) = [29, 42, 57]`
+///   (e.g. `1 + 1*4*7 = 29`)
+/// - `addcmul(input, t1, t2, value=0) = input` (the `value=0` fast path
+///   reduces to the identity — though we don't special-case it; the math
+///   produces the same result).
+/// - NaN propagation: any of the 3 inputs containing NaN produces NaN at
+///   that position.
+/// - 3-way broadcasting: e.g. `addcmul(shape=[3], shape=[2,3], shape=[2,3])`
+///   broadcasts `input` from `[3]` to `[2,3]`, producing shape `[2,3]`.
+///
+/// CPU-only in this commit. CUDA inputs flow through host-memory fallback
+/// (same pattern as `remainder_inner` / `fmod_inner` / `floor_divide_inner`'s
+/// bf16/f16 fallthrough). A dedicated GPU kernel can land under a separate
+/// blocker when a routed GPU consumer surfaces — no `.cpu()`-then-`.cuda()`
+/// round-trip is introduced (R-CODE-4 unaffected).
+///
+/// # Errors
+///
+/// - [`FerrotorchError::DeviceMismatch`] if any of `input`/`tensor1`/`tensor2`
+///   live on different devices.
+/// - Propagates any error from broadcasting / storage allocation.
+pub fn addcmul<T: Float>(
+    input: &Tensor<T>,
+    tensor1: &Tensor<T>,
+    tensor2: &Tensor<T>,
+    value: f64,
+) -> FerrotorchResult<Tensor<T>> {
+    if input.device() != tensor1.device() {
+        return Err(FerrotorchError::DeviceMismatch {
+            expected: input.device(),
+            got: tensor1.device(),
+        });
+    }
+    if input.device() != tensor2.device() {
+        return Err(FerrotorchError::DeviceMismatch {
+            expected: input.device(),
+            got: tensor2.device(),
+        });
+    }
+
+    crate::profiler_hook::profile_op_scope(
+        "addcmul",
+        "tensor_op",
+        &[input.shape(), tensor1.shape(), tensor2.shape()],
+        || addcmul_inner(input, tensor1, tensor2, value),
+    )
+}
+
+fn addcmul_inner<T: Float>(
+    input: &Tensor<T>,
+    tensor1: &Tensor<T>,
+    tensor2: &Tensor<T>,
+    value: f64,
+) -> FerrotorchResult<Tensor<T>> {
+    // 3-way broadcast: first broadcast tensor1 with tensor2, then with
+    // input. `broadcast_shapes` is binary, so we chain two calls.
+    let t12_shape = broadcast_shapes(tensor1.shape(), tensor2.shape())?;
+    let out_shape = broadcast_shapes(input.shape(), &t12_shape)?;
+    let device = input.device();
+
+    let input_data = input.data_vec()?;
+    let t1_data = tensor1.data_vec()?;
+    let t2_data = tensor2.data_vec()?;
+    let input_shape = input.shape().to_vec();
+    let t1_shape = tensor1.shape().to_vec();
+    let t2_shape = tensor2.shape().to_vec();
+    let out_numel: usize = out_shape.iter().product();
+
+    let mut result = vec![<T as num_traits::Zero>::zero(); out_numel.max(1)];
+
+    // C-contiguous strides for each operand (broadcast-padded to out_ndim).
+    let out_ndim = out_shape.len();
+    let pad_input = out_ndim - input_shape.len();
+    let pad_t1 = out_ndim - t1_shape.len();
+    let pad_t2 = out_ndim - t2_shape.len();
+
+    let strides_of = |shape: &[usize]| -> Vec<usize> {
+        let mut s = vec![1usize; shape.len()];
+        for d in (0..shape.len().saturating_sub(1)).rev() {
+            s[d] = s[d + 1] * shape[d + 1];
+        }
+        s
+    };
+    let input_strides = strides_of(&input_shape);
+    let t1_strides = strides_of(&t1_shape);
+    let t2_strides = strides_of(&t2_shape);
+
+    // Convert scalar `value` to T once. Returns NaN if value is NaN (T::from
+    // succeeds for f32/f64); the upstream contract allows arbitrary
+    // floating-point `value` including 0, negatives, NaN, ±Inf.
+    let value_t = T::from(value).ok_or_else(|| FerrotorchError::InvalidArgument {
+        message: format!("addcmul: value={value} cannot be represented in the tensor dtype"),
+    })?;
+
+    for i in 0..out_numel {
+        // Decompose `i` into per-axis coords over `out_shape`.
+        let mut rem_i = i;
+        let mut coords = [0usize; 16];
+        for d in (0..out_ndim).rev() {
+            coords[d] = rem_i % out_shape[d];
+            rem_i /= out_shape[d];
+        }
+
+        // Map output coords to per-operand flat indices, collapsing
+        // broadcast (size==1) axes to coord 0.
+        let flatten = |shape: &[usize], strides: &[usize], pad: usize| -> usize {
+            let mut flat = 0usize;
+            for (d, &s) in strides.iter().enumerate() {
+                let oc = coords[d + pad];
+                let coord = if shape[d] == 1 { 0 } else { oc };
+                flat += coord * s;
+            }
+            flat
+        };
+        let i_flat = flatten(&input_shape, &input_strides, pad_input);
+        let t1_flat = flatten(&t1_shape, &t1_strides, pad_t1);
+        let t2_flat = flatten(&t2_shape, &t2_strides, pad_t2);
+
+        // Fused: out_i = input_i + value * tensor1_i * tensor2_i. R-DEV-1.
+        result[i] = input_data[i_flat] + value_t * t1_data[t1_flat] * t2_data[t2_flat];
+    }
+
+    let storage = TensorStorage::on_device(result, device)?;
+    let out = Tensor::from_storage(storage, out_shape, false)?;
+
+    let needs_g = is_grad_enabled()
+        && (input.requires_grad() || tensor1.requires_grad() || tensor2.requires_grad());
+    if needs_g {
+        let (storage, shape) = out.into_storage_and_shape()?;
+        Tensor::from_operation(
+            storage,
+            shape,
+            Arc::new(AddcmulBackward {
+                input: input.clone(),
+                tensor1: tensor1.clone(),
+                tensor2: tensor2.clone(),
+                value,
+            }),
+        )
+    } else {
+        Ok(out)
+    }
+}
+
+// ===========================================================================
 // abs
 // ===========================================================================
 
@@ -4126,6 +4419,188 @@ mod tests {
                 "broadcast floor_divide[{i}] = {got}, expected {want}"
             );
         }
+        Ok(())
+    }
+
+    // -----------------------------------------------------------------------
+    // addcmul (REQ-15) tests
+    //
+    // R-CHAR-3: expected values are SYMBOLIC CONSTANTS derived from the
+    // upstream math `out_i = input_i + value * tensor1_i * tensor2_i` per
+    // `aten/src/ATen/native/PointwiseOps.cpp:57` and backward
+    // `d_input=grad, d_t1=grad*value*t2, d_t2=grad*value*t1` per
+    // `tools/autograd/derivatives.yaml` (verified live 2026-05-25), NOT
+    // pulled from a pre-recorded fixture.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_addcmul_forward_default_value() -> FerrotorchResult<()> {
+        // value=1 default: out = input + 1*t1*t2.
+        // input=[1,2,3], t1=[4,5,6], t2=[7,8,9].
+        //   out[0] = 1 + 4*7 = 1 + 28 = 29
+        //   out[1] = 2 + 5*8 = 2 + 40 = 42
+        //   out[2] = 3 + 6*9 = 3 + 54 = 57
+        let input = leaf_vec(&[1.0, 2.0, 3.0], false);
+        let t1 = leaf_vec(&[4.0, 5.0, 6.0], false);
+        let t2 = leaf_vec(&[7.0, 8.0, 9.0], false);
+        let c = addcmul(&input, &t1, &t2, 1.0)?;
+        let d = c.data()?.to_vec();
+        let expected: [f32; 3] = [29.0, 42.0, 57.0];
+        for (i, (got, want)) in d.iter().zip(expected.iter()).enumerate() {
+            assert!(
+                (got - want).abs() < 1e-6,
+                "addcmul[{i}] = {got}, expected {want}"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn test_addcmul_forward_value_half() -> FerrotorchResult<()> {
+        // value=0.5: out = input + 0.5*t1*t2.
+        // input=[1,2,3], t1=[4,5,6], t2=[7,8,9].
+        //   out[0] = 1 + 0.5*4*7 = 1 + 14 = 15
+        //   out[1] = 2 + 0.5*5*8 = 2 + 20 = 22
+        //   out[2] = 3 + 0.5*6*9 = 3 + 27 = 30
+        let input = leaf_vec(&[1.0, 2.0, 3.0], false);
+        let t1 = leaf_vec(&[4.0, 5.0, 6.0], false);
+        let t2 = leaf_vec(&[7.0, 8.0, 9.0], false);
+        let c = addcmul(&input, &t1, &t2, 0.5)?;
+        let d = c.data()?.to_vec();
+        let expected: [f32; 3] = [15.0, 22.0, 30.0];
+        for (i, (got, want)) in d.iter().zip(expected.iter()).enumerate() {
+            assert!(
+                (got - want).abs() < 1e-6,
+                "addcmul[{i}] = {got}, expected {want}"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn test_addcmul_forward_value_negative_one() -> FerrotorchResult<()> {
+        // value=-1: out = input - t1*t2 (subtraction-via-addcmul case).
+        // input=[10, 20, 30], t1=[2, 3, 4], t2=[3, 4, 5].
+        //   out[0] = 10 - 2*3  = 10 - 6  = 4
+        //   out[1] = 20 - 3*4  = 20 - 12 = 8
+        //   out[2] = 30 - 4*5  = 30 - 20 = 10
+        let input = leaf_vec(&[10.0, 20.0, 30.0], false);
+        let t1 = leaf_vec(&[2.0, 3.0, 4.0], false);
+        let t2 = leaf_vec(&[3.0, 4.0, 5.0], false);
+        let c = addcmul(&input, &t1, &t2, -1.0)?;
+        let d = c.data()?.to_vec();
+        let expected: [f32; 3] = [4.0, 8.0, 10.0];
+        for (i, (got, want)) in d.iter().zip(expected.iter()).enumerate() {
+            assert!(
+                (got - want).abs() < 1e-6,
+                "addcmul[{i}] = {got}, expected {want}"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn test_addcmul_broadcast_3way() -> FerrotorchResult<()> {
+        // Broadcast input=[3] against t1=[2,3] and t2=[2,3] -> out shape [2,3].
+        // input = [1, 2, 3] (broadcast across rows: [[1,2,3],[1,2,3]])
+        // t1    = [[10, 20, 30], [40, 50, 60]]
+        // t2    = [[1, 1, 1], [2, 2, 2]]
+        // value = 1
+        // out   = input + t1 * t2:
+        //   row 0: [1 + 10*1, 2 + 20*1, 3 + 30*1] = [11, 22, 33]
+        //   row 1: [1 + 40*2, 2 + 50*2, 3 + 60*2] = [81, 102, 123]
+        let input =
+            Tensor::from_storage(TensorStorage::cpu(vec![1.0_f32, 2.0, 3.0]), vec![3], false)?;
+        let t1 = Tensor::from_storage(
+            TensorStorage::cpu(vec![10.0_f32, 20.0, 30.0, 40.0, 50.0, 60.0]),
+            vec![2, 3],
+            false,
+        )?;
+        let t2 = Tensor::from_storage(
+            TensorStorage::cpu(vec![1.0_f32, 1.0, 1.0, 2.0, 2.0, 2.0]),
+            vec![2, 3],
+            false,
+        )?;
+        let c = addcmul(&input, &t1, &t2, 1.0)?;
+        assert_eq!(c.shape(), &[2, 3], "addcmul broadcast output shape");
+        let d = c.data()?.to_vec();
+        let expected: [f32; 6] = [11.0, 22.0, 33.0, 81.0, 102.0, 123.0];
+        for (i, (got, want)) in d.iter().zip(expected.iter()).enumerate() {
+            assert!(
+                (got - want).abs() < 1e-6,
+                "addcmul broadcast[{i}] = {got}, expected {want}"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn test_addcmul_forward_nan_propagation() -> FerrotorchResult<()> {
+        // NaN in any of the 3 inputs propagates to the output at that pos.
+        let input = leaf_vec(&[f32::NAN, 2.0, 3.0], false);
+        let t1 = leaf_vec(&[1.0, f32::NAN, 1.0], false);
+        let t2 = leaf_vec(&[1.0, 1.0, f32::NAN], false);
+        let c = addcmul(&input, &t1, &t2, 1.0)?;
+        let d = c.data()?.to_vec();
+        assert!(d[0].is_nan(), "NaN in input must propagate (got {})", d[0]);
+        assert!(
+            d[1].is_nan(),
+            "NaN in tensor1 must propagate (got {})",
+            d[1]
+        );
+        assert!(
+            d[2].is_nan(),
+            "NaN in tensor2 must propagate (got {})",
+            d[2]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_addcmul_backward_value_two() -> FerrotorchResult<()> {
+        // value=2. Per derivatives.yaml:
+        //   d_input   = grad
+        //   d_tensor1 = grad * value * tensor2 = grad * 2 * tensor2
+        //   d_tensor2 = grad * value * tensor1 = grad * 2 * tensor1
+        //
+        // Scalar case (input,t1,t2 = scalars), output is scalar, backward
+        // grad = 1 (default scalar seed).
+        //
+        // input=3, t1=5, t2=7, value=2:
+        //   forward: 3 + 2*5*7 = 73
+        //   d_input  = 1
+        //   d_t1     = 1 * 2 * 7 = 14
+        //   d_t2     = 1 * 2 * 5 = 10
+        let input = leaf_scalar(3.0, true);
+        let t1 = leaf_scalar(5.0, true);
+        let t2 = leaf_scalar(7.0, true);
+        let c = addcmul(&input, &t1, &t2, 2.0)?;
+        assert!(c.grad_fn().is_some(), "addcmul must attach grad_fn");
+        let fwd = c.data()?.to_vec();
+        assert!(
+            (fwd[0] - 73.0).abs() < 1e-6,
+            "addcmul forward = {}, expected 73",
+            fwd[0]
+        );
+        c.backward()?;
+
+        // d_input = grad (=1)
+        let g_input = input
+            .grad()?
+            .ok_or_else(|| FerrotorchError::InvalidArgument {
+                message: "addcmul backward: input gradient missing".into(),
+            })?;
+        assert_scalar_approx(&g_input, 1.0, 1e-6);
+        // d_t1 = grad * value * tensor2 = 1 * 2 * 7 = 14
+        let g_t1 = t1.grad()?.ok_or_else(|| FerrotorchError::InvalidArgument {
+            message: "addcmul backward: tensor1 gradient missing".into(),
+        })?;
+        assert_scalar_approx(&g_t1, 14.0, 1e-6);
+        // d_t2 = grad * value * tensor1 = 1 * 2 * 5 = 10
+        let g_t2 = t2.grad()?.ok_or_else(|| FerrotorchError::InvalidArgument {
+            message: "addcmul backward: tensor2 gradient missing".into(),
+        })?;
+        assert_scalar_approx(&g_t2, 10.0, 1e-6);
         Ok(())
     }
 

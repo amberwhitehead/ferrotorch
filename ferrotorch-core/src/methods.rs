@@ -177,6 +177,42 @@ impl<T: Float> Tensor<T> {
         crate::grad_fns::arithmetic::floor_divide(self, other)
     }
 
+    /// `torch.Tensor.addcmul(tensor1, tensor2, *, value=1)` — fused
+    /// `self + value * tensor1 * tensor2` (receiver is `input`).
+    ///
+    /// Mirrors `torch.addcmul(input, tensor1, tensor2, *, value=1, out=None)`
+    /// per `torch/_torch_docs.py:510-544`:
+    ///
+    /// > Performs the element-wise multiplication of :attr:`tensor1` by
+    /// > :attr:`tensor2`, multiplies the result by the scalar :attr:`value`
+    /// > and adds it to :attr:`input`.
+    /// >
+    /// > .. math::
+    /// >     \text{out}_i = \text{input}_i + \text{value} \times \text{tensor1}_i \times \text{tensor2}_i
+    ///
+    /// Upstream C++ entry at `aten/src/ATen/native/PointwiseOps.cpp:57-64
+    /// TORCH_IMPL_FUNC(addcmul_out)`. Registration at
+    /// `torch/overrides.py:462 torch.addcmul: lambda input, tensor1, tensor2,
+    /// value=1, out=None: -1`.
+    ///
+    /// Broadcasting: the 3 input tensors (`self`, `tensor1`, `tensor2`) are
+    /// jointly broadcast to a common output shape. Backward: per
+    /// `tools/autograd/derivatives.yaml`, `d_input = grad`, `d_tensor1 =
+    /// grad * value * tensor2`, `d_tensor2 = grad * value * tensor1` (no
+    /// gradient with respect to the scalar `value`).
+    ///
+    /// The non-test production consumer wiring for `arithmetic::addcmul`
+    /// per R-DEFER-1: this method is the public, chainable surface that
+    /// closes the consumer requirement.
+    pub fn addcmul_t(
+        &self,
+        tensor1: &Tensor<T>,
+        tensor2: &Tensor<T>,
+        value: f64,
+    ) -> FerrotorchResult<Tensor<T>> {
+        crate::grad_fns::arithmetic::addcmul(self, tensor1, tensor2, value)
+    }
+
     // --- Transcendental ---
 
     pub fn exp_t(&self) -> FerrotorchResult<Tensor<T>> {
