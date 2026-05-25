@@ -359,7 +359,6 @@ fn divergence_per_channel_scale_negative_silently_proceeds() {
 ///
 /// Tracking: #1262
 #[test]
-#[ignore = "divergence: accepts f64 scale; upstream rejects with 'must be Float or BFloat16'; tracking #1262"]
 fn divergence_per_channel_f64_scale_silently_accepted() {
     // Contract: with `Tensor<f64>` input + `Tensor<f64>` scale, ferrotorch
     // MUST return Err whose message indicates the unsupported scale dtype,

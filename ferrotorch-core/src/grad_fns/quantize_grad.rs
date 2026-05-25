@@ -465,7 +465,34 @@ pub fn fake_quantize_per_channel_affine<T: Float>(
     quant_min: i64,
     quant_max: i64,
 ) -> FerrotorchResult<Tensor<T>> {
+    use std::any::TypeId;
+
     use crate::error::FerrotorchError;
+
+    // 0. scale.scalar_type() in {Float, BFloat16}
+    //    (FakeQuantPerChannelAffine.cpp:51-52
+    //     `TORCH_CHECK(scale.scalar_type() == ScalarType::Float
+    //         || scale.scalar_type() == at::kBFloat16,
+    //         "Scale must be Float or BFloat16, found ", scale.scalar_type());`).
+    //    Upstream's user-API contract (R-DEV-2) admits only f32 / bf16 scales;
+    //    f64 (Double) and f16 (Half) MUST be rejected. Closes #1262.
+    let scale_tid = TypeId::of::<T>();
+    if scale_tid != TypeId::of::<f32>() && scale_tid != TypeId::of::<half::bf16>() {
+        // Map ferrotorch's `T` to upstream's `ScalarType` print name so the
+        // error string matches torch's live phrasing
+        // ("Scale must be Float or BFloat16, found Double" verified
+        //  2026-05-25 against `torch.fake_quantize_per_channel_affine`).
+        let found = if scale_tid == TypeId::of::<f64>() {
+            "Double"
+        } else if scale_tid == TypeId::of::<half::f16>() {
+            "Half"
+        } else {
+            std::any::type_name::<T>()
+        };
+        return Err(FerrotorchError::InvalidArgument {
+            message: format!("Scale must be Float or BFloat16, found {found}"),
+        });
+    }
 
     // Upstream validation order:
     // 1. scale.dim() == 1 (FakeQuantPerChannelAffine.cpp:55)
