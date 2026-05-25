@@ -638,6 +638,60 @@ impl<T: Float> Tensor<T> {
         )
     }
 
+    // --- Indexing (REQ-8 from `.design/ferrotorch-core/grad_fns/indexing.md`) ---
+
+    /// `torch.Tensor.index_fill(dim, index, value)` — overwrite slices along
+    /// `dim` at `index` positions with the scalar `value`.
+    ///
+    /// Mirrors `torch.index_fill(input, dim, index, value)` per the upstream
+    /// docstring at `torch/_torch_docs.py:6563-6567 index_fill(dim, index,
+    /// value) -> Tensor [...] Out-of-place version of :meth:`torch.Tensor.
+    /// index_fill_`` and `torch/_tensor_docs.py:2489-2509` which gives the
+    /// canonical example
+    ///
+    /// ```text
+    /// >>> x = torch.tensor([[1, 2, 3], [4, 5, 6], [7, 8, 9]], dtype=torch.float)
+    /// >>> index = torch.tensor([0, 2])
+    /// >>> x.index_fill_(1, index, -1)
+    /// tensor([[-1.,  2., -1.],
+    ///         [-1.,  5., -1.],
+    ///         [-1.,  8., -1.]])
+    /// ```
+    ///
+    /// Upstream C++ entry at `aten/src/ATen/native/TensorAdvancedIndexing.cpp:
+    /// 1979 Tensor index_fill(const Tensor& self, int64_t dim, const Tensor&
+    /// index, const Scalar& source) { return self.clone(at::MemoryFormat::
+    /// Preserve).index_fill_(dim, index, source); }`. Registration at
+    /// `torch/overrides.py:710 torch.index_fill: lambda input, dim, index,
+    /// value: -1`.
+    ///
+    /// Backward per `tools/autograd/derivatives.yaml:884-887`:
+    /// `- name: index_fill.int_Scalar(Tensor self, int dim, Tensor index, Scalar value) -> Tensor`
+    /// / `self: grad.index_fill(dim, index, 0)` /
+    /// `index: non_differentiable` /
+    /// `result: self_t.index_fill(dim, index, 0)`
+    /// — gradient is zeroed at every position the fill overwrote (those
+    /// positions were replaced by a constant and no longer depend on the
+    /// input).
+    ///
+    /// `dim` follows PyTorch's negative-wrapping convention (`at::maybe_wrap_dim`
+    /// at `TensorAdvancedIndexing.cpp:1919`). The `index` tensor must be 1-D
+    /// or scalar (upstream `TORCH_CHECK(index.dim() <= 1)` at `:1920`).
+    /// Negative index values are rejected (R-DEV-1 narrower contract,
+    /// matching the rest of ferrotorch's `IntTensor` index validation).
+    ///
+    /// The non-test production consumer wiring for `grad_fns::indexing::
+    /// index_fill` per R-DEFER-1: this method is the public, chainable
+    /// surface that closes the consumer requirement (blocker #1249).
+    pub fn index_fill_t(
+        &self,
+        dim: i64,
+        index: &crate::int_tensor::IntTensor<i64>,
+        value: f64,
+    ) -> FerrotorchResult<Tensor<T>> {
+        crate::grad_fns::indexing::index_fill(self, dim, index, value)
+    }
+
     // --- PyTorch compatibility aliases ---
 
     /// Alias for `shape()`. Returns the tensor dimensions like PyTorch's `Tensor.size()`.

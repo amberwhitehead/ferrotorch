@@ -47,10 +47,12 @@ SHIPPED with runner dispatch routed through the existing shape-strict impls
 — >50% pass with 0 failures, remaining skips tracked under narrow-contract
 sub-blockers (#1256 for 0-d input across the indexing family; #1245 for
 scatter_reduce variants; #1258 for scatter.value scalar-src). The remaining
-7 op_db entries (`scatter_reduce`, `index_add`, `index_copy`, `index_fill`,
+6 op_db entries (`scatter_reduce`, `index_add`, `index_copy`,
 `masked_scatter` forward, `take`, `put`) return 0 passes because there is
-no ferrotorch impl at all. Each remaining gap is filed as a NOT-STARTED
-REQ with a concrete prereq blocker (#1245, #1247–#1254).
+no ferrotorch impl at all. `index_fill` SHIPPED 2026-05-25 closing #1249
+(impl + method consumer + runner arm). Each remaining gap is filed as a
+NOT-STARTED REQ with a concrete prereq blocker (#1245, #1247, #1248,
+#1252, #1253, #1254).
 
 ## Requirements
 
@@ -188,8 +190,24 @@ REQ with a concrete prereq blocker (#1245, #1247–#1254).
     self: grad.index_fill(dim, index, 0)
     index: non_differentiable
     result: self_t.index_fill(dim, index, 0)` — gradient is zeroed at the
-  filled positions. **NOT-STARTED in ferrotorch**: no forward kernel, no
-  `IndexFillBackward` struct, no consumer. Prereq blocker #1249.
+  filled positions. **SHIPPED 2026-05-25** in ferrotorch:
+  `grad_fns::indexing::index_fill<T: Float>(input, dim: i64, index:
+  &IntTensor<i64>, value: f64)` at `ferrotorch-core/src/grad_fns/
+  indexing.rs:1471` returns `clone(input)` with slices at `index`
+  positions along the normalized `dim` overwritten by `value`; attaches
+  `IndexFillBackward` (struct at `:1383`) which on backward returns
+  `grad_output` with the same fill positions zeroed (`backward` impl at
+  `:1391-1430`). Negative dim wraps per `at::maybe_wrap_dim` (upstream
+  `:1919`). Index must be 1-D or scalar (upstream `TORCH_CHECK` at
+  `:1920`). Negative index values rejected (ferrotorch narrower contract
+  shared with the rest of the `IntTensor` index family). **Non-test
+  production consumer**: `Tensor::index_fill_t` at
+  `ferrotorch-core/src/methods.rs:614` — the chainable method-style
+  surface delegating to `grad_fns::indexing::index_fill`. Mirrors the
+  upstream method docstring at `torch/_tensor_docs.py:2489-2509`. Runner
+  arm at `tools/parity-sweep/runner/src/main.rs` decoding
+  `[input_f32, dim_i64, index_int64, value (scalar or 0-d tensor)]`.
+  Closes #1249.
 
 - REQ-9: `masked_select(input, mask)` — forward returns a 1-D compaction of
   `input` elements where `mask` is true, in flat C-order. Mirrors
@@ -351,9 +369,14 @@ REQ with a concrete prereq blocker (#1245, #1247–#1254).
 - [ ] AC-7: `index_copy` parity-sweep at `--seeds 8` returns
   `[index_copy] N/N passed (0 skipped, 0 failed)` with N >= 1. Currently
   `[index_copy] 0/24 passed (24 skipped, 0 failed)`. Blocked on #1248.
-- [ ] AC-8: `index_fill` parity-sweep at `--seeds 8` returns
-  `[index_fill] N/N passed (0 skipped, 0 failed)` with N >= 1. Currently
-  `[index_fill] 0/48 passed (48 skipped, 0 failed)`. Blocked on #1249.
+- [~] AC-8: `index_fill` parity-sweep at `--seeds 8` returns
+  `[index_fill] N/N passed (0 skipped, 0 failed)` with N >= 1. Runner arm
+  + impl landed 2026-05-25 closing #1249; the strict `0 skipped` AC
+  remains unsatisfied where 0-d input / multi-d index / negative-index
+  samples are present (those are narrower-contract skips per the
+  `index_fill` impl at `grad_fns/indexing.rs:1471-1486` and the runner
+  arm's skip-not-fail handling — `#1256` (0-d input) is the cross-cutting
+  blocker for the residual skip class).
 - [ ] AC-9: `masked_select` parity-sweep at `--seeds 8` returns
   `[masked_select] N/N passed (0 skipped, 0 failed)` with N >= 1. Currently
   `[masked_select] 0/56 passed (56 skipped, 0 failed)`. Blocked on #1250.
@@ -580,21 +603,44 @@ in `tensor.rs`; the parity-runner would have to either accept the
 ferrotorch name or wrap. Blocker #1255 covers both the runner-dispatch
 gap and the method-style consumer gap.
 
-### NOT-STARTED REQs (REQ-4 / REQ-6 / REQ-7 / REQ-8 / REQ-11 / REQ-12 / REQ-13)
+### NOT-STARTED REQs (REQ-4 / REQ-6 / REQ-7 / REQ-11 / REQ-12 / REQ-13)
 
-Seven REQs have NO ferrotorch implementation today:
+Six REQs have NO ferrotorch implementation today:
 - `scatter_reduce` (REQ-4): 4 reduce modes × `include_self` boolean — the
   largest single missing piece in the indexing family. #1245.
 - `index_add` (REQ-6): #1247. VJP needs `grad.index_select`.
-- `index_copy` (REQ-7): #1248. VJP needs `grad.index_fill` (REQ-8).
-- `index_fill` (REQ-8): #1249.
+- `index_copy` (REQ-7): #1248. VJP needs `grad.index_fill` (REQ-8) — now
+  available since REQ-8 SHIPPED 2026-05-25, so REQ-7 is structurally
+  unblocked from its prereq dependency.
 - `masked_scatter` forward (REQ-11): #1252. The GPU kernel exists but no
   forward `pub fn` / `MaskedScatterBackward` struct.
 - `take` (REQ-12): #1253. VJP needs `put-with-accumulate`.
 - `put` (REQ-13): #1254. VJP needs `take` (REQ-12).
 
-The REQ-7↔REQ-8 and REQ-12↔REQ-13 pairs are mutually dependent — implementing
-one requires the other. The blockers document the dependency.
+The REQ-12↔REQ-13 pair is still mutually dependent — implementing one
+requires the other. The REQ-7↔REQ-8 dependency is now half-resolved
+(REQ-8 SHIPPED unblocks REQ-7's VJP target).
+
+### REQ-8 `index_fill` — `IndexFillBackward` (`indexing.rs:1383-1431`)
+
+`IndexFillBackward<T>` saves `input: Tensor<T>`, `dim: usize` (normalized,
+non-negative), and `index: Vec<usize>` (validated, non-negative). The
+forward `pub fn index_fill` (`indexing.rs:1471`) clones the input,
+normalizes `dim` via the `at::maybe_wrap_dim` rule, validates the index
+(rejects ndim>1, negative values, out-of-bounds positions), and overwrites
+each axis-`dim` slice at `index[i]` with `value` (downcast from f64 via
+`num_traits::NumCast`). Outer/inner shape decomposition mirrors
+`index_select_dim` (`indexing.rs:1229`).
+
+The backward walks `grad_output` and zeroes every element at flat position
+`o * dim_size * inner + idx * inner + k` for `o ∈ outer`, `idx ∈ index`,
+`k ∈ inner` — the exact inverse of the forward fill — per
+`derivatives.yaml:884-887 self: grad.index_fill(dim, index, 0)`.
+
+**Non-test production consumer**: `Tensor::index_fill_t` at
+`ferrotorch-core/src/methods.rs:614` — the chainable method-style surface
+delegating to `grad_fns::indexing::index_fill`. Mirrors the upstream
+method docstring at `torch/_tensor_docs.py:2489-2509`.
 
 ## Parity contract
 
@@ -607,7 +653,7 @@ one requires the other. The blockers document the dependency.
 | `index_select` | `TensorAdvancedIndexing.cpp:1862 index_select_cpu_` | `derivatives.yaml:910-913` (index_select_backward = zeros.index_add_(dim, index, grad)) | Empty index: forward returns shape-replacing-axis-with-0 tensor. Out-of-bounds: returns `IndexOutOfBounds`. Negative index: rejected with `InvalidArgument` (upstream wraps negative to positive — divergence per `IntTensor` validation at `indexing.rs:1067-1072`). |
 | `index_add` | `TensorAdvancedIndexing.cpp:1153 TORCH_IMPL_FUNC(index_add_cpu_out)` | `derivatives.yaml:862-868` | NOT-STARTED. |
 | `index_copy` | `TensorAdvancedIndexing.cpp:1082 TORCH_IMPL_FUNC(index_copy_out)` | `derivatives.yaml:875-883` | NOT-STARTED. |
-| `index_fill` | `TensorAdvancedIndexing.cpp:1979 Tensor index_fill(...)` | `derivatives.yaml:884-887` | NOT-STARTED. |
+| `index_fill` | `TensorAdvancedIndexing.cpp:1979 Tensor index_fill(...)` | `derivatives.yaml:884-887` (grad.index_fill(dim, index, 0) — zero grad at filled positions) | Negative dim wraps per `at::maybe_wrap_dim` (upstream `:1919`). Index must be 1-D or scalar (upstream `:1920`). Negative index values: ferrotorch rejects (narrower contract shared with the rest of the IntTensor index family); upstream accepts via wrap. 0-d input: upstream unsqueezes to 1-d at `:1917`; ferrotorch rejects (#1256 narrower-contract gap). Tensor-valued fill (`index_fill.int_Tensor` overload at `:1987-1992`) is handled in the runner arm by extracting `.item()` from a 0-d tensor — matches upstream's own `.item()` delegation at `:1976`. SHIPPED 2026-05-25 (#1249). |
 | `masked_select` | `TensorAdvancedIndexing.cpp:2621 masked_select_cpu` | `derivatives.yaml:1116-1119` (masked_select_backward = scatter compaction inverse) | Output is data-dependent length (= #true). GPU path computes the length scalar on-device via prefix-sum, the integer crosses to host once to size the output — upstream's matching pattern at `:2548 int64_t numel = _mask->sum().item().toLong()`. Mask must be Bool dtype: `BoolTensor` enforces this in Rust. Broadcast-mask: upstream uses `expand_outplace` at `:2545`; ferrotorch's `ops::indexing::masked_select` requires `mask.numel() == input.numel()` (no broadcast yet — narrower contract). |
 | `masked_fill` | `TensorAdvancedIndexing.cpp:2494 Tensor masked_fill(...)` | `derivatives.yaml:1094-1097` (grad.masked_fill(mask, 0)) | Scalar value only (the `masked_fill.Tensor` variant for tensor-valued fill is NOT in ferrotorch; only scalar `value: T`). Broadcast-mask: upstream uses `expand_outplace` at `:2503`; ferrotorch requires same-numel. NaN value: passes through (no special handling). |
 | `masked_scatter` | `TensorAdvancedIndexing.cpp:2402 Tensor masked_scatter(...)` | `derivatives.yaml:1105-1108` | NOT-STARTED (forward). The kernel `backend.masked_scatter` exists at `ferrotorch-gpu/src/masked_kernels.rs:933` but only as a VJP primitive for masked_select; no forward `pub fn`. |
@@ -717,7 +763,7 @@ Skip-cause breakdown for the four SHIPPED-2026-05-25 ops:
 | REQ-5 (index_select) | SHIPPED | impl exists: 1-D at `grad_fns/indexing.rs:212 pub fn index_select_1d` + `IndexSelectBackward` at `:149`; IntTensor wrapper at `:1053 pub fn index_select_1d_it`; N-D at `:1229 pub fn index_select_dim` + `IndexSelectDimBackward` at `:1091` mirroring `TensorAdvancedIndexing.cpp:1862 index_select_cpu_` and `derivatives.yaml:910-913`. **Runner arm landed 2026-05-25** at `tools/parity-sweep/runner/src/main.rs` decoding `[input_f32, dim_i64, index_int64]` with negative-dim normalization, routing to `grad_fns::indexing::index_select_dim`. **Non-test production consumer**: `ferrotorch-data/src/transforms.rs:389 no_grad(|| index_select_dim(&input, last_dim_axis, &indices))` inside `HorizontalFlip::apply`. Parity gate: **`[index_select] 16/24 passed (8 skipped, 0 failed)` at seeds 0..8** — 0 failures, 67% pass; skips are 0-d input only (#1256). Closes #1246. |
 | REQ-6 (index_add) | NOT-STARTED | no impl. `[index_add] 0/72 passed`. Blocker #1247. |
 | REQ-7 (index_copy) | NOT-STARTED | no impl; coupled to REQ-8 via VJP. `[index_copy] 0/24 passed`. Blocker #1248. |
-| REQ-8 (index_fill) | NOT-STARTED | no impl; VJP target of REQ-7. `[index_fill] 0/48 passed`. Blocker #1249. |
+| REQ-8 (index_fill) | SHIPPED | impl: forward at `ferrotorch-core/src/grad_fns/indexing.rs:1471 pub fn index_fill` attaching `IndexFillBackward` at `:1383` (backward zeroes grad at filled positions per `tools/autograd/derivatives.yaml:884-887 self: grad.index_fill(dim, index, 0)`); mirrors `aten/src/ATen/native/TensorAdvancedIndexing.cpp:1979 Tensor index_fill(const Tensor& self, int64_t dim, const Tensor& index, const Scalar& source)`. **Runner arm landed 2026-05-25** at `tools/parity-sweep/runner/src/main.rs` decoding `[input_f32, dim_i64, index_int64, value (scalar or 0-d tensor)]` and routing to `grad_fns::indexing::index_fill`. **Non-test production consumer**: `Tensor::index_fill_t` at `ferrotorch-core/src/methods.rs:614` — the chainable method-style surface delegating to `grad_fns::indexing::index_fill`. Mirrors the upstream method docstring at `torch/_tensor_docs.py:2489-2509`. Closes #1249. |
 | REQ-9 (masked_select) | SHIPPED | shape-strict forward at `ops/indexing.rs:478 pub fn masked_select` attaching `MaskedSelectBackward` at `:509`; backward at `grad_fns/indexing.rs:923-987` mirroring `TensorAdvancedIndexing.cpp:2621 masked_select_cpu` and `derivatives.yaml:1116-1119`. **Broadcasting wrapper landed 2026-05-25**: `grad_fns/indexing.rs:1526 pub fn masked_select_bcast` infers the common broadcast shape via `shape::broadcast_shapes`, expands both operands via the autograd-aware `grad_fns::shape::expand` (whose `ExpandBackward` reduces gradients back to original shape), then delegates to the shape-strict forward. Mirrors upstream `expand_outplace(mask, self)` at `TensorAdvancedIndexing.cpp:2545`. **Non-test production consumer**: `tools/parity-sweep/runner/src/main.rs:670 "masked_select" => masked_select_bcast(...)` — the runner dispatch routes op_db samples through the wrapper. Parity gate: **`[masked_select] 56/56 passed (0 skipped, 0 failed)` at seeds 0..8**. Closes #1250. |
 | REQ-10 (masked_fill) | SHIPPED | shape-strict forwards at `grad_fns/indexing.rs:367 pub fn masked_fill` (host `&[bool]`) + `:997 pub fn masked_fill_bt` (BoolTensor) attaching `MaskedFillBackward` at `:295`. Forward + backward mirror `TensorAdvancedIndexing.cpp:2494 Tensor masked_fill(...)` and `derivatives.yaml:1094-1097`. **Broadcasting wrapper landed 2026-05-25**: `grad_fns/indexing.rs:1503 pub fn masked_fill_bcast` expands input + mask to common shape via autograd-aware expand + a CPU-side bool broadcast (`broadcast_bool_tensor` at `:1463`), then delegates to `masked_fill_bt`. Mirrors upstream `expand_outplace(mask, self)` at `TensorAdvancedIndexing.cpp:2503`. **Non-test production consumer**: `tools/parity-sweep/runner/src/main.rs:691 "masked_fill" => masked_fill_bcast(...)`. Parity gate: **`[masked_fill] 64/64 passed (0 skipped, 0 failed)` at seeds 0..8**. Closes #1251. |
 | REQ-11 (masked_scatter) | NOT-STARTED | no forward impl. The `backend.masked_scatter` GPU kernel exists at `ferrotorch-gpu/src/masked_kernels.rs:933` but is consumed only inside `MaskedSelectBackward` (the VJP of masked_select). No `pub fn masked_scatter` and no `MaskedScatterBackward` struct. Upstream forward at `TensorAdvancedIndexing.cpp:2402` and VJP at `derivatives.yaml:1105-1108`. `[masked_scatter] 0/32 passed`. Blocker #1252. |

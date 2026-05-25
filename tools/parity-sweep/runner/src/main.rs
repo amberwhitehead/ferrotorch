@@ -1022,6 +1022,81 @@ fn dispatch_f32(
                 &index,
             )?))
         }
+        // `torch.index_fill(input, dim, index, value)` — fill slices along
+        // `dim` at `index` positions with the scalar `value`. Upstream forward
+        // at `aten/src/ATen/native/TensorAdvancedIndexing.cpp:1979 Tensor
+        // index_fill(const Tensor& self, int64_t dim, const Tensor& index,
+        // const Scalar& source)`. Op_db's `sample_inputs_index_fill` emits
+        // `args = [input_f32, dim_i64, index_int64, value]` where `value` is
+        // either a JSON number (the `index_fill.int_Scalar` overload at
+        // `:1979`) or a 0-d tensor envelope (the `index_fill.int_Tensor`
+        // overload at `:1987-1992` which delegates to `.item()` via `:1965-1976`).
+        // Verified 2026-05-25 by live oracle sample inspection:
+        //   i=0: args=[scalar_f32, 0, [1]_int64, -8.478373527526855]
+        //   i=3: args=[[1]_f32,    0, [1]_int64, {0-d float tensor envelope}]
+        // ferrotorch's shape-strict `grad_fns::indexing::index_fill` rejects
+        // 0-d input and multi-d index (REQ-8 narrower contract — see the
+        // matching `index_select` rejection at line 1001 above). Negative
+        // index values are also rejected per the IntTensor convention shared
+        // with `index_select_dim` (`indexing.rs:1259-1272`); the runner skips
+        // those samples rather than reporting a divergence.
+        // Closes #1249.
+        "index_fill" => {
+            if args.len() < 4 {
+                return Err(format!("index_fill expects 4 args, got {}", args.len()).into());
+            }
+            let input = unwrap_tensor_arg(&args[0])
+                .ok_or("index_fill: arg 0 not a tensor")?
+                .to_f32()?;
+            let dim_i64 = args[1]
+                .as_i64()
+                .ok_or("index_fill: arg 1 (dim) not a JSON integer")?;
+            let index = unwrap_tensor_arg(&args[2])
+                .ok_or("index_fill: arg 2 (index) not a tensor")?
+                .to_int_tensor_i64()?;
+            // value: JSON number, string-quoted int, or 0-d tensor envelope.
+            // Mirrors the masked_fill arm's scalar-decode at line 761.
+            let value_f64: f64 = if let Some(v) = args[3].as_f64() {
+                v
+            } else if let Some(v) = args[3].as_i64() {
+                v as f64
+            } else if let Some(s) = args[3].as_str() {
+                s.parse::<f64>()
+                    .map_err(|e| format!("index_fill: arg 3 string parse failed: {e}"))?
+            } else if let Some(wt) = unwrap_tensor_arg(&args[3]) {
+                if !wt.shape.is_empty() {
+                    // Upstream `TORCH_CHECK(source.dim() == 0, "index_fill_
+                    // only supports a 0-dimensional value tensor, ...")` at
+                    // `TensorAdvancedIndexing.cpp:1970-1975`. Non-0-d is a
+                    // legitimate skip (oracle never emits it, but
+                    // belt-and-braces).
+                    return Ok(None);
+                }
+                let t = wt.to_f32()?;
+                let d = t.data_vec()?;
+                d.first().copied().unwrap_or(0.0) as f64
+            } else {
+                return Err(
+                    format!("index_fill: arg 3 not a number/string/tensor: {}", args[3]).into(),
+                );
+            };
+            // The shape-strict impl rejects 0-d input, multi-d index, and
+            // negative index values. Skip those samples rather than report
+            // divergences — they're narrower-contract gaps tracked at the
+            // REQ level (#1256 for 0-d, the IntTensor convention for
+            // negative).
+            if input.ndim() == 0 || index.ndim() > 1 {
+                return Ok(None);
+            }
+            for &v in index.data()? {
+                if v < 0 {
+                    return Ok(None);
+                }
+            }
+            Ok(Some(grad_fns::indexing::index_fill(
+                &input, dim_i64, &index, value_f64,
+            )?))
+        }
         "fake_quantize_per_channel_affine" => Ok(Some({
             if args.len() < 6 {
                 return Err(format!(
@@ -1111,6 +1186,12 @@ fn dispatch_ops() -> &'static [&'static str] {
         "scatter",
         "scatter_add",
         "index_select",
+        // Indexing: `torch.index_fill(input, dim, index, value)` — overwrite
+        // slices at index positions with a scalar. Runner arm decodes
+        // `[input_f32, dim_i64, index_int64, value]` (scalar JSON number or
+        // 0-d tensor envelope per upstream `index_fill.int_Tensor` overload).
+        // Closes #1249.
+        "index_fill",
     ]
 }
 
