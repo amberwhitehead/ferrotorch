@@ -46,14 +46,17 @@ alpha=1, out=None)` signature gap.
   (`add_scaled_out`), both of which exist as sibling entry points in this
   module.
 
-- REQ-2: `sub(a, b)` — forward `c = a - b` with broadcasting + autograd
-  (`SubBackward` VJP returns `(grad, -grad)` reduced). PyTorch's
-  `torch.sub(input, other, *, alpha=1, out=None)` also takes an `alpha`
-  kwarg (BinaryOps.cpp:434–438 — `TORCH_IMPL_FUNC(sub_out)` calls
-  `add_stub(device_type(), *this, -alpha)` so `sub` is literally `add` with
-  negated alpha). ferrotorch's `sub` has NO alpha kwarg and NO `sub_scaled`
-  sibling — this is the same gap the add reader-corrector closed for `add`,
-  unfixed for `sub`.
+- REQ-2: `sub(a, b)` / `sub_scaled(a, b, alpha)` — forward `c = a - alpha*b`
+  with broadcasting + autograd. PyTorch's
+  `torch.sub(input, other, *, alpha=1, out=None)` (signature at
+  `torch/_torch_docs.py:10851`) is implemented in upstream as
+  `TORCH_IMPL_FUNC(sub_out)` calling `add_stub(device_type(), *this, -alpha)`
+  (`aten/src/ATen/native/BinaryOps.cpp:434-439`) — sub is literally add with
+  negated alpha. ferrotorch's `sub_scaled` matches that contract byte-for-byte
+  by delegating to `add_scaled(a, b, -alpha)`; the `SubBackward` VJP
+  `(grad, -grad)` for the plain `sub` path is preserved separately and
+  `sub_scaled` inherits `AddScaledBackward` for the alpha path
+  (`db = -alpha * grad`).
 
 - REQ-3: `mul(a, b)` — forward `c = a * b` with broadcasting + autograd
   (`MulBackward` VJP returns `(grad*b, grad*a)` reduced). Mirrors `mul_stub`
@@ -150,11 +153,13 @@ alpha=1, out=None)` signature gap.
 
 - [x] AC-1: `add` parity-sweep at `--seeds 8` returns `[add] 88/88 passed
   (0 skipped, 0 failed)` (grep-count `passed (0 skipped, 0 failed)` == 1).
-- [ ] AC-2: `sub` parity-sweep at `--seeds 8` returns 0 failures. Currently
-  `[sub] 72/88 passed (0 skipped, 16 failed)` — the 16 failures all hit
-  shape `[5, 5]` at sample indices `i=9` and `i=10`, which are the
-  `alpha=2` and `alpha=-3.125` op_db samples (same root-cause as the
-  original add alpha-gap blocker; blocker #1192).
+- [x] AC-2: `sub` parity-sweep at `--seeds 8` returns `[sub] 88/88 passed
+  (0 skipped, 0 failed)` (grep-count `passed (0 skipped, 0 failed)` == 1).
+  Closed by #1192 via `arithmetic::sub_scaled` + the parity-sweep runner
+  `"sub"` arm passing `alpha_kwarg("sub")` through to it. The 16 prior
+  failures (shape `[5,5]` at i=9 / i=10, the `alpha=2` / `alpha=-3.125`
+  op_db samples) now pass because `sub_scaled` delegates to
+  `add_scaled(a, b, -alpha)`.
 - [x] AC-3: `mul` parity-sweep at `--seeds 8` returns `[mul] 72/72 passed
   (0 skipped, 0 failed)`.
 - [x] AC-4: `div` parity-sweep at `--seeds 8` returns `[div] 72/72 passed
@@ -273,12 +278,21 @@ fallthrough. **Non-test consumer**: `methods.rs:18-20`
 subtraction primal+tangent), and `autograd::grad_penalty:117` builds the
 `norm - 1` term used by the WGAN-GP penalty.
 
-The signature `pub fn sub<T: Float>(a, b)` is missing the
-`alpha` kwarg. PyTorch's `torch.sub(input, other, *, alpha=1)` is at
-BinaryOps.cpp:434 — `TORCH_IMPL_FUNC(sub_out)` literally calls
-`add_stub(device_type(), *this, -alpha)`. No `sub_scaled` /
-`sub_scaled_out` / `sub_out` entry points exist. Blocker #1192 tracks the
-fix.
+`sub_scaled<T: Float>(a, b, alpha: f64)` (added at
+`arithmetic.rs:923-936`) is a thin alias that forwards to
+`add_scaled(a, b, -alpha)`. PyTorch's `torch.sub(input, other, *, alpha=1)`
+at BinaryOps.cpp:434 `TORCH_IMPL_FUNC(sub_out)` literally calls
+`add_stub(device_type(), *this, -alpha)` — the delegation matches upstream
+byte-for-byte (R-DEV-1). Broadcasting, GPU dispatch, the
+`AddScaledBackward` VJP (which naturally produces `db = -alpha * grad`),
+and the `alpha == 1.0` fast-path-to-plain-`add` are all inherited from
+`add_scaled` for free. **Non-test consumer**: `inplace.rs:265`
+`Tensor::sub_scaled_` delegates to `add_scaled_(other, -alpha)` and
+provides the in-place `torch.Tensor.sub_(other, *, alpha)` semantics by
+re-using the same shape-strict / broadcast / GPU fast-path machinery as
+`add_scaled_`. The `sub_out` / `sub_scaled_out` entry points are
+intentionally NOT shipped in this commit — out-of-scope per the #1192
+dispatch (vocabulary-only risk, separable). Blocker #1192 closed.
 
 ### REQ-3 `mul` (lines 928-1097)
 
@@ -384,7 +398,7 @@ The route's `parity_ops` list declares 16 ops. The current state per op:
 | op | upstream entry | parity-sweep status | edge-case contract |
 |---|---|---|---|
 | `add` | BinaryOps.cpp:434 (sub_out via add_stub w/ -alpha) + `_torch_docs.py:358` signature `add(input, other, *, alpha=1, out=None)` | verified (88/88 at seeds=8) | NaN propagates; +/-Inf preserved; denormals preserved (no FTZ); empty shapes preserved; scalar `[]` broadcasts; 0-stride expand broadcasts; alpha edges (0, -0.0, NaN, ±huge); type promotion not yet validated (op_db emits f32-only); non-contig views materialized via `strided_copy_*`; in-place via `add_scaled_`; `out=` via `add_scaled_out` |
-| `sub` | BinaryOps.cpp:434 `TORCH_IMPL_FUNC(sub_out)` (literally `add_stub(..., -alpha)`) + `_torch_docs.py:10851` signature `sub(input, other, *, alpha=1, out=None)` | DIVERGES (72/88 at seeds=8 — 16 failures on `alpha != 1.0` samples i=9, i=10 at shape `[5,5]`) | inherits add's contract but ferrotorch's `sub` has no `alpha` parameter so any alpha != 1 silently produces `a - b` |
+| `sub` | BinaryOps.cpp:434 `TORCH_IMPL_FUNC(sub_out)` (literally `add_stub(..., -alpha)`) + `_torch_docs.py:10851` signature `sub(input, other, *, alpha=1, out=None)` | verified (88/88 at seeds=8) — `arithmetic::sub_scaled` delegates to `add_scaled(a, b, -alpha)` matching upstream byte-for-byte | inherits add's contract via the `-alpha` delegation; NaN propagates; ±Inf preserved; alpha edges (0, -0.0, NaN, ±huge); broadcasting + grad inherited from `add_scaled` |
 | `mul` | BinaryOps.cpp:441 `TORCH_IMPL_FUNC(mul_out)` + `_torch_docs.py:7754` `mul(input, other, *, out=None)` | verified (72/72 at seeds=8) | NaN, ±Inf, denormals, empty, scalar, 0-stride, type promotion (not yet covered); no `out=` variant in ferrotorch |
 | `div` | BinaryOps.cpp:447 `TORCH_IMPL_FUNC(div_out)` + `_torch_docs.py:3926` `div(input, other, *, rounding_mode=None, out=None)` | verified (72/72 at seeds=8) | IEEE-754 div-by-zero produces ±Inf / NaN; no `rounding_mode` kwarg in ferrotorch (the `floor` / `trunc` modes are equivalent to `floor_divide` / `trunc_divide`, themselves NOT-STARTED here) |
 | `neg` | UnaryOps.cpp:344 `CREATE_UNARY_TORCH_IMPL_FUNC(neg_out, neg_stub)` + `_torch_docs.py` signature `torch.neg(input, *, out=None)` | verified (8/8 at seeds=8) | sign bit flipped; NaN preserved (payload may not be); ±Inf -> ∓Inf; ±0.0 -> ∓0.0 |
@@ -439,7 +453,7 @@ Vector backward:
 
 ```bash
 ./target/release/parity-sweep sweep --op add  --seeds 8   # → 88/88 passed (0 skipped, 0 failed)
-./target/release/parity-sweep sweep --op sub  --seeds 8   # → 72/88 passed (0 skipped, 16 failed) — BLOCKER #1192
+./target/release/parity-sweep sweep --op sub  --seeds 8   # → 88/88 passed (0 skipped, 0 failed) — #1192 closed via sub_scaled
 ./target/release/parity-sweep sweep --op mul  --seeds 8   # → 72/72 passed (0 skipped, 0 failed)
 ./target/release/parity-sweep sweep --op div  --seeds 8   # → 72/72 passed (0 skipped, 0 failed)
 ./target/release/parity-sweep sweep --op neg  --seeds 8   # → 8/8 passed (0 skipped, 0 failed)
@@ -451,7 +465,7 @@ Vector backward:
 ```
 
 The integer grep-count for `passed (0 skipped, 0 failed)` is **>= 1** for
-add/mul/div/neg/abs/sqrt and **== 0** for sub/pow/rsub/rsqrt/reciprocal/floor_divide/remainder/fmod/addcmul/addcdiv.
+add/sub/mul/div/neg/abs/sqrt and **== 0** for pow/rsub/rsqrt/reciprocal/floor_divide/remainder/fmod/addcmul/addcdiv.
 The `pow == 0` case is a non-zero-skip pass (`24/72 passed (48 skipped, 0 failed)`):
 scalar-exp samples dispatch and pass; tensor-exp samples (out of scope for
 `arithmetic::pow<T>(a, exp: f64)`) cleanly skip with `Ok(None)`. AC-8 admits
@@ -462,7 +476,7 @@ this skip pattern as a pass since N=24>0 and failures=0.
 | REQ | Status | Evidence |
 |---|---|---|
 | REQ-1 (add, add_scaled, add_out, add_scaled_out) | SHIPPED | impl: `add` at `ferrotorch-core/src/grad_fns/arithmetic.rs:351`, `add_scaled` at `:716`, `add_out` at `:619`, `add_scaled_out` at `:650` mirror `aten/src/ATen/native/BinaryOps.cpp:1176` (`Tensor add`) and the `add_stub` dispatch at `:377` + `torch/_torch_docs.py:358` signature `add(input, other, *, alpha=1, out=None)`. Non-test consumers: `ferrotorch-core/src/methods.rs:15` (`Tensor::add_t`) calls `arithmetic::add`; `ferrotorch-core/src/inplace.rs:213` (`Tensor::add_scaled_`) calls `arithmetic::add_scaled`. Parity-sweep `add` status `verified` per `tools/parity-sweep/parity_audit.json:5-72` (88/88 passed, 0 failed at seeds=8). |
-| REQ-2 (sub with alpha) | NOT-STARTED | open prereq blocker #1192. `arithmetic.rs:816 pub fn sub<T>(a, b)` has no `alpha` parameter; PyTorch `sub` signature at `BinaryOps.cpp:434` and `_torch_docs.py:10851` requires `*, alpha=1, out=None`. parity-sweep `[sub] 72/88 passed (0 skipped, 16 failed)` — failures all hit `alpha != 1` op_db samples. |
+| REQ-2 (sub, sub_scaled) | SHIPPED | impl: `sub` at `ferrotorch-core/src/grad_fns/arithmetic.rs:805` (plain `c = a - b`) and `sub_scaled` at `:923` (the alpha-kwarg path, delegates to `add_scaled(a, b, -alpha)`) mirror `aten/src/ATen/native/BinaryOps.cpp:434-439 TORCH_IMPL_FUNC(sub_out) { add_stub(device_type(), *this, -alpha); ... }` byte-for-byte (R-DEV-1) and `torch/_torch_docs.py:10851` signature `sub(input, other, *, alpha=1, out=None)`. Non-test consumer: `ferrotorch-core/src/inplace.rs:265` (`Tensor::sub_scaled_`) calls `Tensor::add_scaled_(other, -alpha)`, which itself calls `arithmetic::add_scaled` (the same path `sub_scaled` flows through); also `ferrotorch-core/src/methods.rs:18` (`Tensor::sub_t`) calls `arithmetic::sub` and `ferrotorch-core/src/autograd/forward_ad.rs:97` (dual-number forward subtraction primal) calls `arithmetic::sub`. Parity-sweep `[sub] 88/88 passed (0 skipped, 0 failed)` at seeds=8 (closes #1192). |
 | REQ-3 (mul) | SHIPPED | impl: `mul` at `ferrotorch-core/src/grad_fns/arithmetic.rs:991` mirrors `aten/src/ATen/native/BinaryOps.cpp:441 TORCH_IMPL_FUNC(mul_out)` + `mul_stub` at `:378`. Non-test consumer: `ferrotorch-core/src/methods.rs:23` (`Tensor::mul_t`); also `ferrotorch-core/src/einsum.rs:818`, `ferrotorch-core/src/autograd/grad_penalty.rs:122`. Parity-sweep `[mul] 72/72 passed (0 skipped, 0 failed)` at seeds=8. |
 | REQ-4 (div) | SHIPPED | impl: `div` at `ferrotorch-core/src/grad_fns/arithmetic.rs:1151` mirrors `aten/src/ATen/native/BinaryOps.cpp:447 TORCH_IMPL_FUNC(div_out)` via `div_true_stub`. Non-test consumer: `ferrotorch-core/src/methods.rs:27` (`Tensor::div_t`); also `ferrotorch-core/src/autograd/forward_ad.rs:114`, `ferrotorch-nn/src/loss.rs:136`. Parity-sweep `[div] 72/72 passed (0 skipped, 0 failed)` at seeds=8. NB: the `rounding_mode` kwarg (`floor`/`trunc`) is not implemented but those modes correspond to `floor_divide` / `trunc_divide`, themselves NOT-STARTED elsewhere in this table. |
 | REQ-5 (neg) | SHIPPED | impl: `neg` at `ferrotorch-core/src/grad_fns/arithmetic.rs:1293` mirrors `aten/src/ATen/native/UnaryOps.cpp:344 CREATE_UNARY_TORCH_IMPL_FUNC(neg_out, neg_stub)`. Non-test consumer: `ferrotorch-core/src/methods.rs:31` (`Tensor::neg_t`); also `ferrotorch-core/src/autograd/forward_ad.rs:126`. Parity-sweep `[neg] 8/8 passed (0 skipped, 0 failed)` at seeds=8. |

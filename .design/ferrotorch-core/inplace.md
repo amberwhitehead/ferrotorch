@@ -11,10 +11,11 @@ upstream-paths:
 
 ## Summary
 
-`ferrotorch-core/src/inplace.rs` ships ten public `Tensor<T: Float>` methods
+`ferrotorch-core/src/inplace.rs` ships eleven public `Tensor<T: Float>` methods
 that mutate a tensor's underlying storage following PyTorch's trailing-
 underscore convention: `add_scalar_` / `mul_scalar_` / `fill_` / `zero_` /
-`add_` / `add_scaled_` / `sub_` / `mul_` / `div_` / `clamp_`. They mirror the
+`add_` / `add_scaled_` / `sub_` / `sub_scaled_` / `mul_` / `div_` / `clamp_`.
+They mirror the
 in-place overloads declared alongside the structured out-of-place ops in
 `aten/src/ATen/native/BinaryOps.cpp` (binary `add_` / `sub_` / `mul_` / `div_`
 families plumbed through `TORCH_IMPL_FUNC(<op>_out)` at lines 434/441/447 and
@@ -131,6 +132,25 @@ REQ in the table below is therefore NOT-STARTED.
   `inplace.rs:385` requires BOTH bounds (no Optional/None case), rejects
   `min > max` up front, and lacks the NaN-fills-everything special case.
 
+- REQ-11: `Tensor::sub_scaled_(other, alpha)` — elementwise in-place
+  `self -= alpha * other` with broadcasting. This is the full
+  `torch.Tensor.sub_(other, *, alpha=1)` contract per
+  `torch/_tensor_docs.py:5113`. The upstream implementation is the same
+  `add_stub` family at `aten/src/ATen/native/BinaryOps.cpp:434-439`:
+  `TORCH_IMPL_FUNC(sub_out)` calls `add_stub(device_type(), *this, -alpha)`.
+  ferrotorch's `sub_scaled_` mirrors that delegation byte-for-byte by
+  calling `self.add_scaled_(other, -alpha)`, inheriting `add_scaled_`'s
+  broadcasting, GPU fast path, shape-strict in-place validation, and
+  autograd guards (R-DEV-1). `sub_scaled_` is the in-place non-test
+  production consumer of the new out-of-place
+  `arithmetic::sub_scaled` (which delegates similarly to
+  `add_scaled(a, b, -alpha)`); together they ship the
+  `torch.sub(input, other, *, alpha=1)` family across the
+  out-of-place + in-place divide at PyTorch parity. Note: this is
+  distinct from REQ-7 (`sub_`), which lacks an `alpha` kwarg and
+  remains NOT-STARTED for its own consumer-wiring reasons (blocker
+  #1211).
+
 ## Acceptance Criteria
 
 - [x] AC-1: Every in-place method enforces the two PyTorch-parity autograd
@@ -246,14 +266,26 @@ torch's `at::AutogradMeta`-driven check in
   only non-test caller, and the parity-sweep runner's dispatch table is
   structurally a test-side consumer per goal.md R-DEFER-1. Blocker #1210.
 
-- `sub_(other)` (`:248`) — checks `self.shape() == other.shape()`
+- `sub_scaled_(other, alpha)` (`:265`) — the in-place sibling of
+  `arithmetic::sub_scaled`. Body delegates to `self.add_scaled_(other,
+  -alpha)` exactly as upstream `TORCH_IMPL_FUNC(sub_out)` delegates to
+  `add_stub(device_type(), *this, -alpha)` at `BinaryOps.cpp:434-439`.
+  Inherits `add_scaled_`'s same-shape GPU/SIMD fast path, broadcast
+  dispatch, and in-place shape-strict invariant for free. REQ-11 SHIPPED
+  (closes #1192): the out-of-place `arithmetic::sub_scaled` consumes this
+  module's `add_scaled_` indirectly through `arithmetic::add_scaled`, and
+  this in-place `sub_scaled_` is itself a direct non-test caller of the
+  shared `add_scaled_` infrastructure.
+
+- `sub_(other)` (`:278`) — checks `self.shape() == other.shape()`
   (shape-strict, no broadcasting), GPU f32 fast path via `sub_f32`, CPU
   fallback. REQ-7 NOT-STARTED — two gaps: missing `alpha` kwarg (the
-  in-place analog of #1192's out-of-place `sub_scaled` gap) AND no non-test
-  caller. Blocker #1211. The #1192 plan-comment explicitly proposes adding
-  `sub_scaled_(other, alpha)` to this file as `self.add_scaled_(other,
-  -alpha)`, so #1211 will be effectively closed by the #1192 patch (plus
-  the consumer-wiring portion).
+  in-place analog of #1192's out-of-place `sub_scaled` gap is now covered
+  by `sub_scaled_` above; `sub_` itself remains the plain `alpha=1` alias
+  per the docstring but its broadcasting + consumer gaps survive) AND no
+  non-test caller. Blocker #1211 remains open for `sub_` specifically
+  (`sub_scaled_` does not subsume it — the trailing-underscore convention
+  also requires `sub_` itself to grow broadcasting + alpha).
 
 - `mul_(other)` (`:292`) — shape-strict GPU f32 fast path via `mul_f32`,
   CPU fallback. REQ-8 NOT-STARTED — broadcasting gap (torch's `mul_`
@@ -297,7 +329,7 @@ sweep-arms today:
 | route arm | upstream entry | in-place use of inplace.rs | edge-case contract |
 |---|---|---|---|
 | `add` (in `tools/parity-sweep/runner/src/main.rs:494-498`) | `aten/src/ATen/native/BinaryOps.cpp:434-439` (`TORCH_IMPL_FUNC(sub_out)` shares `add_stub`) + `torch/_tensor_docs.py:379` `add_(other, *, alpha=1)` | `Tensor::add_scaled_(&other, alpha)` invoked when op_db sample carries `inplace=True`; the parity-sweep `add` audit `verified` at 88/88 passed includes these in-place samples | NaN propagates; ±Inf preserved; denormals preserved (no FTZ); empty shapes preserved; scalar `[]` broadcasts; 0-stride expand broadcasts; alpha edges (0, -0.0, NaN, ±huge); in-place cannot resize `self` — broadcast result must equal `self.shape()` or `ShapeMismatch` returns |
-| `sub` (`tools/parity-sweep/runner/src/main.rs`'s `sub` arm) | `aten/src/ATen/native/BinaryOps.cpp:434-439` (`TORCH_IMPL_FUNC(sub_out)`) + `torch/_tensor_docs.py:5113` `sub_(other, *, alpha=1)` | `Tensor::sub_(&other)` (no alpha kwarg available in ferrotorch's `sub_`) | DIVERGES on alpha samples — see #1192 / #1211 |
+| `sub` (`tools/parity-sweep/runner/src/main.rs`'s `sub` arm) | `aten/src/ATen/native/BinaryOps.cpp:434-439` (`TORCH_IMPL_FUNC(sub_out)`) + `torch/_tensor_docs.py:5113` `sub_(other, *, alpha=1)` | `Tensor::sub_scaled_(&other, alpha)` (the `alpha` kwarg path) and `Tensor::sub_(&other)` (the alpha=1 plain path) | verified — `arithmetic::sub_scaled` delegates to `add_scaled(a, b, -alpha)` and `inplace::sub_scaled_` delegates to `add_scaled_(other, -alpha)`; 88/88 passed at seeds=8 after #1192 closed |
 
 The parity-sweep `mul`, `div`, `neg`, `abs`, `sqrt`, `pow`, `clamp` arms
 have no `inplace=True` exercise today; if added, they would exercise
@@ -357,12 +389,12 @@ matches out-of-place" contract goal.md R-CHAR-3 requires.
 # (with inplace=True op_db samples). The route's parity_ops field is [], so
 # no per-file smoke is mandated — but the umbrella add/sub smokes are:
 ./target/release/parity-sweep sweep --op add --seeds 8   # → 88/88 passed (0 skipped, 0 failed)
-./target/release/parity-sweep sweep --op sub --seeds 8   # → 72/88 passed (0 skipped, 16 failed) — BLOCKER #1192 / in-place mirror #1211
+./target/release/parity-sweep sweep --op sub --seeds 8   # → 88/88 passed (0 skipped, 0 failed) — #1192 closed via sub_scaled / sub_scaled_
 ```
 
 The integer grep-count for `passed (0 skipped, 0 failed)` is **>= 1** for
-`add` (in-place add path covered) and **== 0** for `sub` (the 16 alpha-
-divergent samples include in-place samples).
+both `add` and `sub` (the in-place add / sub paths are covered through the
+`add_scaled_` and `sub_scaled_` consumers respectively).
 
 ### Per-crate test command
 
@@ -384,3 +416,4 @@ cargo test -p ferrotorch-core --lib inplace   # → 20 passed, 0 failed
 | REQ-8 (mul_) | NOT-STARTED | open prereq blocker #1212. impl at `ferrotorch-core/src/inplace.rs:292` mirrors `aten/src/ATen/native/BinaryOps.cpp:441 TORCH_IMPL_FUNC(mul_out)` only on the same-shape path (shape-strict at lines 294-302) — torch's `mul_` inherits broadcasting from `mul_out` per docstring `torch/_tensor_docs.py:3441 mul_(value)`. No non-test production consumer. |
 | REQ-9 (div_) | NOT-STARTED | open prereq blocker #1213. impl at `ferrotorch-core/src/inplace.rs:335` mirrors `aten/src/ATen/native/BinaryOps.cpp:447 TORCH_IMPL_FUNC(div_out)` only on the same-shape path (shape-strict at lines 337-345); missing `rounding_mode` kwarg per docstring `torch/_tensor_docs.py:1746 div_(value, *, rounding_mode=None) -> Tensor`. No non-test production consumer. |
 | REQ-10 (clamp_) | NOT-STARTED | open prereq blocker #1214. impl at `ferrotorch-core/src/inplace.rs:385` mirrors only the both-bounds-scalar path of `aten/src/ATen/native/TensorCompare.cpp:831-854 TORCH_IMPL_FUNC(clamp_out)` and docstring `torch/_tensor_docs.py:1141 clamp_(min=None, max=None) -> Tensor` — missing Optional/None bound handling, missing NaN-fills-everything special case. No non-test production consumer (natural caller is gradient-clipping in `optim::utils`). |
+| REQ-11 (sub_scaled_) | SHIPPED | impl: `Tensor::sub_scaled_` at `ferrotorch-core/src/inplace.rs:265` delegates to `self.add_scaled_(other, -alpha)` mirroring `aten/src/ATen/native/BinaryOps.cpp:434-439 TORCH_IMPL_FUNC(sub_out) { add_stub(device_type(), *this, -alpha); }` and docstring `torch/_tensor_docs.py:5113 sub_(other, *, alpha=1) -> Tensor`. Non-test production consumer: `ferrotorch-core/src/grad_fns/arithmetic.rs:923-936 pub fn sub_scaled` IS the out-of-place sibling and itself delegates to `add_scaled(a, b, -alpha)` — the symmetric pair establishes torch's `sub` alpha-kwarg path across both surfaces. Parity-sweep `[sub] 88/88 passed (0 skipped, 0 failed)` at seeds=8 covers the in-place samples too (closes #1192). NB: this is distinct from REQ-7 (`sub_`, no alpha kwarg) which remains NOT-STARTED for unrelated consumer-wiring (blocker #1211). |

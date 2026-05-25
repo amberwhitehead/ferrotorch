@@ -214,14 +214,20 @@ fn dispatch_f32(
     match op {
         // Binary arithmetic. `torch.add(input, other, *, alpha=1)` is routed
         // through `arithmetic::add_scaled`; the alpha==1 case forwards to the
-        // existing `add` path with no extra allocation. (`sub` shares the same
-        // alpha kwarg but is not yet wired here — separate parity item.)
+        // existing `add` path with no extra allocation. `torch.sub(input,
+        // other, *, alpha=1)` routes through `arithmetic::sub_scaled` which
+        // delegates to `add_scaled(a, b, -alpha)` (matches PyTorch's own
+        // `TORCH_IMPL_FUNC(sub_out)` at `aten/src/ATen/native/BinaryOps.cpp:434`).
         "add" => Ok(Some({
             let (a, b) = binary("add")?;
             let alpha = alpha_kwarg("add")?;
             grad_fns::arithmetic::add_scaled(&a, &b, alpha)?
         })),
-        "sub" => Ok(Some({ let (a, b) = binary("sub")?; grad_fns::arithmetic::sub(&a, &b)? })),
+        "sub" => Ok(Some({
+            let (a, b) = binary("sub")?;
+            let alpha = alpha_kwarg("sub")?;
+            grad_fns::arithmetic::sub_scaled(&a, &b, alpha)?
+        })),
         "mul" => Ok(Some({ let (a, b) = binary("mul")?; grad_fns::arithmetic::mul(&a, &b)? })),
         "div" => Ok(Some({ let (a, b) = binary("div")?; grad_fns::arithmetic::div(&a, &b)? })),
         // Unary

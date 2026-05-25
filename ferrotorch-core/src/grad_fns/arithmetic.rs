@@ -462,6 +462,307 @@ fn add_inner<T: Float>(a: &Tensor<T>, b: &Tensor<T>) -> FerrotorchResult<Tensor<
     }
 }
 
+// ---------------------------------------------------------------------------
+// add_scaled: PyTorch-parity `torch.add(input, other, *, alpha=1)`
+// ---------------------------------------------------------------------------
+
+/// Backward node for `c = a + alpha * b`.
+///
+/// VJP: da = grad, db = alpha * grad.
+#[derive(Debug)]
+struct AddScaledBackward<T: Float> {
+    a: Tensor<T>,
+    b: Tensor<T>,
+    alpha: f64,
+}
+
+impl<T: Float> GradFn<T> for AddScaledBackward<T> {
+    fn backward(&self, grad_output: &Tensor<T>) -> FerrotorchResult<Vec<Option<Tensor<T>>>> {
+        let da = if self.a.requires_grad() {
+            Some(reduce_grad_to_shape(grad_output, self.a.shape())?)
+        } else {
+            None
+        };
+        let db = if self.b.requires_grad() {
+            // db = alpha * grad. `T::from(self.alpha)` is infallible for the
+            // Float types we support (f32/f64/bf16/f16) given a finite input;
+            // a NaN/Inf alpha is preserved by the cast, matching PyTorch.
+            let alpha_t: T = num_traits::cast::cast(self.alpha).ok_or_else(|| {
+                FerrotorchError::InvalidArgument {
+                    message: format!(
+                        "AddScaledBackward: alpha {} not representable in tensor dtype",
+                        self.alpha
+                    ),
+                }
+            })?;
+            let scaled = no_grad(|| scale_tensor(grad_output, alpha_t))?;
+            Some(reduce_grad_to_shape(&scaled, self.b.shape())?)
+        } else {
+            None
+        };
+        Ok(vec![da, db])
+    }
+
+    fn inputs(&self) -> Vec<&Tensor<T>> {
+        vec![&self.a, &self.b]
+    }
+
+    fn name(&self) -> &'static str {
+        "AddScaledBackward"
+    }
+}
+
+/// Scale a tensor by a scalar of the same dtype, on whichever device it lives.
+///
+/// Used by `add_scaled` (forward pre-scale of `b` and backward db = alpha*grad).
+/// Kept private — public callers should reach for `grad_fns::arithmetic::mul`
+/// with a scalar tensor, or the inplace `mul_scalar_`. This helper exists so we
+/// can stay generic over `T: Float` while routing to the dtype-specialised GPU
+/// `scale_*` kernels.
+fn scale_tensor<T: Float>(t: &Tensor<T>, alpha: T) -> FerrotorchResult<Tensor<T>> {
+    if t.is_cuda() {
+        let backend =
+            crate::gpu_dispatch::gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
+        let tc = ensure_contig_for_gpu(t)?;
+        let handle = if is_f32::<T>() {
+            // SAFETY: is_f32::<T>() holds, so T == f32 — `cast::<T,f32>` here is
+            // a no-op width-wise. Use num_traits cast for an explicit conversion.
+            let s: f32 = num_traits::cast::cast(alpha).ok_or(FerrotorchError::DeviceUnavailable)?;
+            backend.scale_f32(tc.gpu_handle()?, s)?
+        } else if is_f64::<T>() {
+            let s: f64 = num_traits::cast::cast(alpha).ok_or(FerrotorchError::DeviceUnavailable)?;
+            backend.scale_f64(tc.gpu_handle()?, s)?
+        } else if is_bf16::<T>() {
+            let s: f32 = num_traits::cast::cast(alpha).ok_or(FerrotorchError::DeviceUnavailable)?;
+            // bf16 scale routes through f32 scalar (matches existing bf16 kernels).
+            backend.scale_bf16_bf16(tc.gpu_handle()?, s)?
+        } else if is_f16::<T>() {
+            let s: f32 = num_traits::cast::cast(alpha).ok_or(FerrotorchError::DeviceUnavailable)?;
+            backend.scale_f16(tc.gpu_handle()?, s)?
+        } else {
+            return Err(FerrotorchError::NotImplementedOnCuda { op: "scale_tensor" });
+        };
+        Tensor::from_storage(TensorStorage::gpu(handle), tc.shape().to_vec(), false)
+    } else {
+        scalar_map(t, alpha, |x, s| x * s)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// add_out / add_scaled_out: PyTorch-parity `torch.add(input, other, *,
+// alpha=1, out=tensor)`.
+//
+// The `out=` kwarg in PyTorch writes the result into a caller-provided
+// pre-allocated tensor (in-place from the caller's perspective on `out`,
+// regardless of how the computation itself is staged). The semantics are:
+//
+//   1. `out.shape()` must equal the broadcast shape of `a` and `b`. PyTorch
+//      raises `RuntimeError: shape mismatch` otherwise.
+//   2. `out` may not be in the autograd graph (no grad_fn) and may not be a
+//      leaf with requires_grad=true — the write is not autograd-tracked.
+//      (PyTorch raises here too, with the same message as `add_`.)
+//   3. Devices of `a`, `b`, and `out` must match.
+//   4. NaN/Inf already present in `out` must be fully overwritten (no leak).
+//
+// Forward-only: `out=` is incompatible with attaching a grad_fn to `out`
+// (autograd ops never accept a pre-allocated `out`), so no backward node
+// is attached. This matches torch's behavior — `torch.add(a, b, out=c)`
+// returns `c` and does NOT add `c` to the autograd graph for `a`/`b`.
+//
+// Style note: these are sibling forward functions to `add` / `add_scaled`,
+// not methods on `Tensor`, because the natural call shape is
+// `add_scaled_out(&mut out, &a, &b, alpha)` rather than
+// `out.add_scaled_out_from(&a, &b, alpha)`. The trailing-underscore in-place
+// methods (e.g. `add_scaled_`) live on `Tensor` because their `self`
+// receiver is the natural target. The first `_out` variant in the workspace
+// lands here; a broader convention (a trait, a naming policy) can settle
+// when more ops grow `_out` variants.
+// ---------------------------------------------------------------------------
+
+/// Validate that `out` is eligible to receive a torch-style `out=` write.
+///
+/// Mirrors `inplace::check_inplace_allowed` (kept private to that module),
+/// but specialised to the `out=` op name so the error message is
+/// recognisable at the call site.
+fn check_out_allowed<T: Float>(out: &Tensor<T>, op_name: &str) -> FerrotorchResult<()> {
+    if out.grad_fn().is_some() {
+        return Err(FerrotorchError::InvalidArgument {
+            message: format!(
+                "{op_name}: `out` tensor is part of the computation graph \
+                 (has grad_fn = {:?}); cannot write into it",
+                out.grad_fn().map(|gf| gf.name()),
+            ),
+        });
+    }
+    if out.requires_grad() && out.is_leaf() {
+        return Err(FerrotorchError::InvalidArgument {
+            message: format!(
+                "{op_name}: `out` is a leaf tensor with requires_grad=true; \
+                 the write would not be tracked by autograd"
+            ),
+        });
+    }
+    Ok(())
+}
+
+/// `torch.add(a, b, *, out=out)` — write `a + b` into `out` in-place.
+///
+/// Thin `alpha = 1.0` wrapper over [`add_scaled_out`].
+///
+/// # Errors
+///
+/// See [`add_scaled_out`].
+pub fn add_out<T: Float>(out: &Tensor<T>, a: &Tensor<T>, b: &Tensor<T>) -> FerrotorchResult<()> {
+    add_scaled_out(out, a, b, 1.0)
+}
+
+/// `torch.add(a, b, *, alpha=alpha, out=out)` — write `a + alpha * b`
+/// into `out` in-place.
+///
+/// `out`'s shape must equal the broadcast result shape of `a` and `b`.
+/// `out`'s storage is replaced with the freshly-computed result; any
+/// values previously held by `out` (including NaN sentinels) are
+/// completely overwritten.
+///
+/// `out` is a `&Tensor` rather than `&mut Tensor` because `Tensor` carries
+/// its mutability through the `Arc<TensorStorage>` (matching `add_scaled_`
+/// / `update_storage`); the autograd-safety checks below enforce exclusive
+/// access at the semantic level.
+///
+/// # Errors
+///
+/// - [`FerrotorchError::DeviceMismatch`] if `a`, `b`, or `out` reside on
+///   different devices.
+/// - [`FerrotorchError::ShapeMismatch`] if `out.shape()` does not equal
+///   `broadcast_shapes(a.shape(), b.shape())`.
+/// - [`FerrotorchError::InvalidArgument`] if `out` has a `grad_fn` or is
+///   a leaf with `requires_grad = true` (matches PyTorch's `out=` rule).
+/// - [`FerrotorchError::InvalidArgument`] if `alpha` is not representable
+///   in the tensor's dtype.
+pub fn add_scaled_out<T: Float>(
+    out: &Tensor<T>,
+    a: &Tensor<T>,
+    b: &Tensor<T>,
+    alpha: f64,
+) -> FerrotorchResult<()> {
+    check_out_allowed(out, "add_scaled_out")?;
+
+    if a.device() != b.device() {
+        return Err(FerrotorchError::DeviceMismatch {
+            expected: a.device(),
+            got: b.device(),
+        });
+    }
+    if a.device() != out.device() {
+        return Err(FerrotorchError::DeviceMismatch {
+            expected: a.device(),
+            got: out.device(),
+        });
+    }
+
+    let broadcast_shape = broadcast_shapes(a.shape(), b.shape())?;
+
+    // Compute the result via the existing scalar/broadcast dispatch. We
+    // run inside `no_grad` so the temporary computation does not attach a
+    // grad_fn — `out=` is explicitly non-autograd-tracked per torch.
+    let result = no_grad(|| add_scaled(a, b, alpha))?;
+    let (storage, result_shape) = result.into_storage_and_shape()?;
+
+    // Shape policy: matches torch's CURRENT semantics — when `out.shape()`
+    // equals the broadcast shape, the write is purely a storage swap;
+    // when it differs, `out` is silently resized to the broadcast shape
+    // (PyTorch emits a `UserWarning` for this; it is being deprecated in
+    // a future release but is still the observed behavior in 2.x).
+    // Mirroring it keeps `torch.add(a, b, out=t)` bit-equivalent across
+    // both the matched-shape and resize cases.
+    if out.shape() == broadcast_shape.as_slice() {
+        // SAFETY: `check_out_allowed` proved `out` has no grad_fn and is
+        // not a requires_grad leaf, so no autograd machinery references
+        // its storage. `storage` was just produced by a freshly-allocated
+        // tensor with no outstanding aliases. Shape equality guarantees
+        // `storage.len() == out.numel()`, satisfying update_storage's
+        // length contract.
+        unsafe { out.update_storage(storage)? };
+    } else {
+        // Resize `out` to the broadcast shape and swap in the result
+        // storage atomically. `result_shape == broadcast_shape` because
+        // `add_scaled` returns the broadcast shape on success.
+        debug_assert_eq!(result_shape, broadcast_shape);
+        // SAFETY: same autograd argument as the matched-shape branch
+        // (check_out_allowed already validated). `update_storage_and_shape`
+        // verifies its own length invariant (storage.len() == new numel).
+        // The caller holds a unique semantic reference to `out` for the
+        // duration of this `out=` write — clones of `out` made before
+        // this call will observe the new shape after it returns, which
+        // matches torch's `Tensor.resize_` behavior exactly.
+        unsafe { out.update_storage_and_shape(storage, broadcast_shape)? };
+    }
+    Ok(())
+}
+
+/// Elementwise addition with a scalar multiplier on the second operand:
+/// `c = a + alpha * b`. This is the full PyTorch `torch.add(input, other,
+/// *, alpha=1)` semantic; the `alpha == 1.0` case is forwarded to [`add`]
+/// without an extra scaling pass so callers that don't need alpha pay no
+/// allocation cost.
+pub fn add_scaled<T: Float>(
+    a: &Tensor<T>,
+    b: &Tensor<T>,
+    alpha: f64,
+) -> FerrotorchResult<Tensor<T>> {
+    // Fast path: alpha == 1.0 is the existing `add` semantics verbatim.
+    // Exact equality is what we want here — we are skipping a scaling pass
+    // only when the multiplier is the identity. Any other alpha (including
+    // 0.9999..., -0.0, NaN, ±inf) must take the scaled path so torch parity
+    // holds bit-for-bit on the no-scale case while everything else flows
+    // through `scale_tensor` + `add_inner`.
+    #[allow(clippy::float_cmp)]
+    let is_identity = alpha == 1.0;
+    if is_identity {
+        return add(a, b);
+    }
+    if a.device() != b.device() {
+        return Err(FerrotorchError::DeviceMismatch {
+            expected: a.device(),
+            got: b.device(),
+        });
+    }
+    if let Some(out) = crate::meta_propagate::binary_broadcast(a, b)? {
+        return Ok(out);
+    }
+    crate::profiler_hook::profile_op_scope(
+        "add_scaled",
+        "tensor_op",
+        &[a.shape(), b.shape()],
+        || {
+            // Forward: scale `b`, then add. `no_grad` so the temporary `b_scaled`
+            // does not introduce its own MulScalarBackward node — we attach a
+            // single `AddScaledBackward` that handles the full VJP directly.
+            let alpha_t: T =
+                num_traits::cast::cast(alpha).ok_or_else(|| FerrotorchError::InvalidArgument {
+                    message: format!("add_scaled: alpha {alpha} not representable in tensor dtype"),
+                })?;
+            let b_scaled = no_grad(|| scale_tensor(b, alpha_t))?;
+            let result = no_grad(|| add_inner(a, &b_scaled))?;
+
+            if needs_grad(a, b) {
+                let (storage, shape) = result.into_storage_and_shape()?;
+                Tensor::from_operation(
+                    storage,
+                    shape,
+                    Arc::new(AddScaledBackward {
+                        a: a.clone(),
+                        b: b.clone(),
+                        alpha,
+                    }),
+                )
+            } else {
+                Ok(result)
+            }
+        },
+    )
+}
+
 // ===========================================================================
 // sub
 // ===========================================================================
@@ -607,6 +908,42 @@ fn sub_inner<T: Float>(a: &Tensor<T>, b: &Tensor<T>) -> FerrotorchResult<Tensor<
             Ok(result)
         }
     }
+}
+
+/// Elementwise subtraction with a scalar multiplier on the second operand:
+/// `c = a - alpha * b`. This is the full PyTorch
+/// `torch.sub(input, other, *, alpha=1)` semantic.
+///
+/// PyTorch's own implementation literally delegates `sub` to `add` with a
+/// negated alpha. Per `aten/src/ATen/native/BinaryOps.cpp:434-439`:
+///
+/// ```cpp
+/// TORCH_IMPL_FUNC(sub_out) (
+///   const Tensor& self, const Tensor& other, const Scalar& alpha, const Tensor& result
+/// ) {
+///   add_stub(device_type(), *this, -alpha);
+///   TORCH_INTERNAL_ASSERT(result.scalar_type() == output().dtype());
+/// }
+/// ```
+///
+/// We match that contract byte-for-byte by delegating to [`add_scaled`]
+/// with `-alpha` (R-DEV-1 numerical-contract match). The alpha-identity
+/// shortcut, broadcasting, device dispatch, and `SubBackward`-equivalent
+/// VJP (`da = grad, db = -alpha * grad`, naturally produced as
+/// `AddScaledBackward` with `-alpha`) all come for free from `add_scaled`.
+///
+/// # Errors
+///
+/// See [`add_scaled`].
+pub fn sub_scaled<T: Float>(
+    a: &Tensor<T>,
+    b: &Tensor<T>,
+    alpha: f64,
+) -> FerrotorchResult<Tensor<T>> {
+    // `-alpha` flips the sign for every finite alpha and for ±inf; for
+    // NaN, `-NaN` preserves the NaN payload bit (matching the `-alpha`
+    // produced by `c10::Scalar::operator-` in upstream's TORCH_IMPL_FUNC).
+    add_scaled(a, b, -alpha)
 }
 
 // ===========================================================================

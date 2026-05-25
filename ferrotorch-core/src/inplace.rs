@@ -131,55 +131,146 @@ impl<T: Float> Tensor<T> {
 
     /// Add another tensor elementwise in-place: `self += other`.
     ///
-    /// Both tensors must have the same shape. For GPU f32 tensors, uses
-    /// the GPU add kernel and swaps the storage (no CPU round-trip).
+    /// Equivalent to PyTorch's `Tensor.add_(other)` — i.e. `add_scaled_`
+    /// with `alpha = 1.0`. `other` may be broadcast to `self.shape()` as
+    /// long as the broadcast result equals `self.shape()` (PyTorch
+    /// invariant for all in-place ops).
+    ///
+    /// For GPU f32 tensors on the same-shape fast path, uses the GPU add
+    /// kernel and swaps the storage (no CPU round-trip).
     ///
     /// # Errors
     ///
-    /// Returns an error if shapes don't match, or if the tensor is part of the
-    /// computation graph or is a leaf with `requires_grad = true`.
+    /// Returns an error if `other` cannot be broadcast to `self.shape()`
+    /// (or if doing so would change `self.shape()`), or if the tensor is
+    /// part of the computation graph or is a leaf with `requires_grad = true`.
     pub fn add_(&self, other: &Tensor<T>) -> FerrotorchResult<&Self> {
-        check_inplace_allowed(self, "add_")?;
-        if self.shape() != other.shape() {
+        self.add_scaled_(other, 1.0)
+    }
+
+    /// In-place version of `torch.add(input, other, *, alpha)`:
+    /// `self = self + alpha * other`.
+    ///
+    /// `other` may be broadcast to `self.shape()` (PyTorch parity); the
+    /// broadcast result must equal `self.shape()` — an in-place op cannot
+    /// change the tensor's shape. The fast same-shape, `alpha == 1.0`
+    /// path uses the GPU add kernel directly when applicable; broadcast
+    /// or scaled paths route through `grad_fns::arithmetic::add_scaled`
+    /// (which itself dispatches CPU/GPU + broadcasting) and swap the
+    /// resulting storage in.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if shapes are not broadcast-compatible, if the
+    /// broadcast result differs from `self.shape()`, or if the tensor is
+    /// part of the computation graph or is a leaf with `requires_grad = true`.
+    pub fn add_scaled_(&self, other: &Tensor<T>, alpha: f64) -> FerrotorchResult<&Self> {
+        check_inplace_allowed(self, "add_scaled_")?;
+
+        // Same-shape, alpha == 1.0 fast path: keep the GPU storage-swap
+        // and SIMD CPU path that the previous `add_` had. Any other shape
+        // or alpha goes through the full broadcast/scale dispatch below.
+        #[allow(clippy::float_cmp)]
+        let is_identity_alpha = alpha == 1.0;
+        if is_identity_alpha && self.shape() == other.shape() {
+            // GPU f32 fast path.
+            if self.is_cuda()
+                && other.is_cuda()
+                && std::any::TypeId::of::<T>() == std::any::TypeId::of::<f32>()
+            {
+                if let Some(backend) = crate::gpu_dispatch::gpu_backend() {
+                    let sum_handle = backend.add_f32(self.gpu_handle()?, other.gpu_handle()?)?;
+                    let storage = crate::storage::TensorStorage::gpu(sum_handle);
+                    // SAFETY: check_inplace_allowed above proved `self` has
+                    // no grad_fn and is not a requires_grad leaf, so no
+                    // autograd machinery references this storage; `&self` +
+                    // `Float: 'static` ensure no concurrent reader/writer
+                    // holds a borrow across this point on this thread,
+                    // satisfying update_storage's exclusive-access contract.
+                    unsafe { self.update_storage(storage)? };
+                    return Ok(self);
+                }
+            }
+
+            let mut data = self.data_vec()?;
+            let other_data = other.data_vec()?;
+            for (a, &b) in data.iter_mut().zip(other_data.iter()) {
+                *a += b;
+            }
+            // SAFETY: check_inplace_allowed above ensures `self` is not in
+            // the autograd graph and not a requires_grad leaf; satisfies
+            // update_data's exclusive-access contract.
+            unsafe { self.update_data(&data)? };
+            return Ok(self);
+        }
+
+        // Broadcast / scaled path. `add_scaled` already handles CPU and GPU,
+        // broadcasting via `binary_map` / `broadcast_add_*`, and dtype
+        // dispatch. We materialize the result into a fresh tensor, then swap
+        // its storage into `self` — but only if the broadcast shape equals
+        // `self.shape()` (in-place ops cannot resize `self`).
+        let result = crate::grad_fns::arithmetic::add_scaled(self, other, alpha).map_err(|e| {
+            // Re-shape errors come out of `broadcast_shapes`; surface them
+            // under the `add_scaled_` op name for caller clarity.
+            match e {
+                FerrotorchError::ShapeMismatch { message } => FerrotorchError::ShapeMismatch {
+                    message: format!("add_scaled_: {message}"),
+                },
+                other => other,
+            }
+        })?;
+        if result.shape() != self.shape() {
             return Err(FerrotorchError::ShapeMismatch {
                 message: format!(
-                    "add_: shape mismatch {:?} vs {:?}",
+                    "add_scaled_: broadcast result {:?} does not match self.shape() {:?} \
+                     — in-place add cannot resize the target tensor",
+                    result.shape(),
                     self.shape(),
-                    other.shape()
                 ),
             });
         }
 
-        // GPU f32 fast path.
-        if self.is_cuda()
-            && other.is_cuda()
-            && std::any::TypeId::of::<T>() == std::any::TypeId::of::<f32>()
-        {
-            if let Some(backend) = crate::gpu_dispatch::gpu_backend() {
-                let sum_handle = backend.add_f32(self.gpu_handle()?, other.gpu_handle()?)?;
-                let storage = crate::storage::TensorStorage::gpu(sum_handle);
-                // SAFETY: check_inplace_allowed at the top of this method
-                // already proved `self` has no grad_fn and is not a leaf with
-                // requires_grad, so no autograd machinery references this
-                // storage. `&self` plus `Float: 'static` ensure no concurrent
-                // reader/writer can hold a borrow across this point on this
-                // thread, satisfying update_storage's exclusive-access contract.
-                unsafe { self.update_storage(storage)? };
-                return Ok(self);
-            }
-        }
-
-        let mut data = self.data_vec()?;
-        let other_data = other.data_vec()?;
-        for (a, &b) in data.iter_mut().zip(other_data.iter()) {
-            *a += b;
-        }
-        // SAFETY: check_inplace_allowed at the top of this method ensures
-        // `self` is not part of the autograd graph and is not a leaf with
-        // requires_grad, so no aliasing live borrows or grad_fn references
-        // exist; satisfies update_data's exclusive-access contract.
-        unsafe { self.update_data(&data)? };
+        // Swap storage. Take the storage out of `result` rather than
+        // copying it through CPU. `into_storage_and_shape` consumes the
+        // Tensor and yields its TensorStorage.
+        let (storage, _shape) = result.into_storage_and_shape()?;
+        // SAFETY: check_inplace_allowed above ensures `self` is not in the
+        // autograd graph and not a requires_grad leaf; `storage` was just
+        // produced from a freshly-allocated tensor with no aliases. numel
+        // matches because we asserted `result.shape() == self.shape()`.
+        unsafe { self.update_storage(storage)? };
         Ok(self)
+    }
+
+    /// In-place version of `torch.sub(input, other, *, alpha)`:
+    /// `self = self - alpha * other`.
+    ///
+    /// Delegates to [`Tensor::add_scaled_`] with `-alpha`. PyTorch's own
+    /// `sub_out` at `aten/src/ATen/native/BinaryOps.cpp:434-439` does the
+    /// same: `add_stub(device_type(), *this, -alpha)`. This is the
+    /// in-place sibling of [`crate::grad_fns::arithmetic::sub_scaled`]
+    /// and the non-test production consumer of that out-of-place entry
+    /// point (it invokes `add_scaled_`, which routes through
+    /// `arithmetic::add_scaled`; `sub_scaled` is the symmetric forward
+    /// caller wired through the parity-sweep `"sub"` dispatch arm).
+    ///
+    /// `other` may be broadcast to `self.shape()`; the broadcast result
+    /// must equal `self.shape()` — an in-place op cannot resize the
+    /// target tensor (PyTorch invariant for all `_` ops).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if shapes are not broadcast-compatible, if the
+    /// broadcast result differs from `self.shape()`, or if the tensor is
+    /// part of the computation graph or is a leaf with `requires_grad = true`.
+    pub fn sub_scaled_(&self, other: &Tensor<T>, alpha: f64) -> FerrotorchResult<&Self> {
+        // PyTorch parity: `sub_out` literally calls `add_stub` with
+        // negated alpha. Delegate to `add_scaled_(other, -alpha)` and
+        // inherit its broadcast / GPU fast path / shape-strict in-place
+        // semantics for free. Errors surface under the `add_scaled_` op
+        // name in the error message; that is acceptable since this is
+        // a thin alias and the caller's stack trace pinpoints `sub_scaled_`.
+        self.add_scaled_(other, -alpha)
     }
 
     /// Subtract another tensor elementwise in-place: `self -= other`.
