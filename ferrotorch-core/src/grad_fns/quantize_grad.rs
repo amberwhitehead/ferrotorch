@@ -231,27 +231,44 @@ fn fake_quantize_per_tensor_affine_impl<T: Float>(
     }
 
     let data = input.data_vec()?;
-    // Upstream uses `inv_scale = 1.0f / sc` at `QuantizedOpKernels.cpp:2665`.
-    let inv_scale: f64 = 1.0 / scale;
+    // Upstream uses `float inv_scale = 1.0f / sc` at
+    // `QuantizedOpKernels.cpp:2665` and the rounding chain
+    // `z_point + std::nearbyint(*input_val * inv_scale)` at `:2683/:2703`
+    // evaluates entirely at f32 precision (the stub at
+    // `FakeQuantAffine.h:13-20` takes `float sc`). R-DEV-1 numerical
+    // contract: ferrotorch must match byte-for-byte, so the rounding
+    // stage runs at f32. The dequant tail `(qval - z_point) * sc`
+    // promotes through scalar_t in upstream; we keep it at the source
+    // `scale: f64` to preserve the API's f64 scale precision.
+    let scale_f32 = scale as f32;
+    let inv_scale_f32 = 1.0_f32 / scale_f32;
+    let zp_f32 = zero_point as f32;
+    let qmin_f32 = quant_min as f32;
+    let qmax_f32 = quant_max as f32;
     let zp_f64 = zero_point as f64;
-    let qmin_f64 = quant_min as f64;
-    let qmax_f64 = quant_max as f64;
 
     let mut out: Vec<T> = Vec::with_capacity(data.len());
     for &x in &data {
-        let x_f64 = x.to_f64().unwrap_or(f64::NAN);
+        let x_f32 = x.to_f32().unwrap_or(f32::NAN);
         // Upstream:
         //   qval_f = z_point + std::nearbyint(*input_val * inv_scale);
         //   qval = static_cast<int64_t>(std::fmin(std::fmax(qval_f, quant_min), quant_max));
         //   output_val = (qval - z_point) * sc;
         //
-        // `f64::round_ties_even` matches `std::nearbyint` under FE_TONEAREST
-        // (round-half-to-even / banker's rounding). `f64::max` / `f64::min`
+        // `f32::round_ties_even` matches `std::nearbyint` under FE_TONEAREST
+        // (round-half-to-even / banker's rounding). `f32::max` / `f32::min`
         // follow IEEE-754-2019 minimum/maximum and propagate the non-NaN
         // operand the same way `std::fmin / std::fmax` do (NaN-safe clamp).
-        let qval_f = zp_f64 + (x_f64 * inv_scale).round_ties_even();
-        let qval_clamped = qmax_f64.min(qmin_f64.max(qval_f));
-        let dq_f64 = (qval_clamped - zp_f64) * scale;
+        let qval_f32 = zp_f32 + (x_f32 * inv_scale_f32).round_ties_even();
+        let qval_clamped_f32 = qmax_f32.min(qmin_f32.max(qval_f32));
+        // Promote the integer-valued clamped qval back to f64 for the
+        // dequant multiply, then multiply by `scale: f64` (preserves the
+        // API's f64 scale precision). Upstream computes `(qval - z_point)
+        // * sc` where `qval` is an int64 and `sc` is the source scalar
+        // (float here); using f64 scale on ferrotorch's side is a tighter
+        // contract for callers passing f64 scales programmatically.
+        let qval_clamped_f64 = qval_clamped_f32 as f64;
+        let dq_f64 = (qval_clamped_f64 - zp_f64) * scale;
         // Convert back via T::from(...); on dtype-mismatch fall back to zero
         // (defensive — for f32/f64/bf16/f16 the conversion always succeeds).
         let dq = T::from(dq_f64).unwrap_or_else(<T as num_traits::Zero>::zero);
@@ -312,15 +329,22 @@ fn per_channel_dequantize_f64(
     quant_min: i64,
     quant_max: i64,
 ) -> f64 {
-    let zp_f64 = zero_point as f64;
-    let inv_scale = 1.0 / scale_f64;
-    let qval_f = zp_f64 + (x_f64 * inv_scale).round_ties_even();
+    // Upstream per-channel kernel at `QuantizedOpKernels.cpp:2838-2848`:
+    //   `float inv_scale = 1.0f / scale; ... zero_point +
+    //   std::nearbyint(self * inv_scale) ...` — the rounding chain runs
+    //   at f32 precision. R-DEV-1 numerical contract: ferrotorch must
+    //   match byte-for-byte, so the rounding stage casts down to f32.
+    let scale_f32 = scale_f64 as f32;
+    let x_f32 = x_f64 as f32;
+    let zp_f32 = zero_point as f32;
+    let inv_scale_f32 = 1.0_f32 / scale_f32;
+    let qval_f32 = zp_f32 + (x_f32 * inv_scale_f32).round_ties_even();
     // Replicate upstream's `static_cast<int64_t>(qval_f)` x86-64
     // invalid-operation saturation: non-finite values resolve to
     // INT64_MIN, finite values use Rust's saturating cast (matches the
     // x86 `cvttsd2si` finite path within `[i64::MIN, i64::MAX]`).
-    let qval_i64: i64 = if qval_f.is_finite() {
-        qval_f as i64
+    let qval_i64: i64 = if qval_f32.is_finite() {
+        qval_f32 as i64
     } else {
         i64::MIN
     };

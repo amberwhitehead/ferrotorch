@@ -104,7 +104,6 @@ fn t(data: Vec<f32>, shape: Vec<usize>) -> Tensor<f32> {
 }
 
 #[test]
-#[ignore = "divergence: f64 arithmetic vs upstream f32 stub at half-boundaries; tracking #1259"]
 fn fake_quantize_matches_torch_at_f32_half_boundary_x025_scale005() {
     // Live torch reference (torch 2.11.0+cu130, 2026-05-25):
     //   >>> torch.fake_quantize_per_tensor_affine(
@@ -134,7 +133,6 @@ fn fake_quantize_matches_torch_at_f32_half_boundary_x025_scale005() {
 }
 
 #[test]
-#[ignore = "divergence: f64 arithmetic vs upstream f32 stub at half-boundaries; tracking #1259"]
 fn fake_quantize_matches_torch_at_f32_half_boundary_x175_scale005() {
     // Live torch reference (torch 2.11.0+cu130, 2026-05-25):
     //   >>> torch.fake_quantize_per_tensor_affine(
@@ -160,7 +158,6 @@ fn fake_quantize_matches_torch_at_f32_half_boundary_x175_scale005() {
 }
 
 #[test]
-#[ignore = "divergence: f64 arithmetic vs upstream f32 stub at half-boundaries; tracking #1259"]
 fn fake_quantize_batched_f32_half_boundary_matches_torch() {
     // Live torch reference (torch 2.11.0+cu130, 2026-05-25):
     //   >>> torch.fake_quantize_per_tensor_affine(

@@ -182,7 +182,6 @@ fn divergence_per_channel_f32_vs_f64_banker_rounding_control_passes() {
 ///
 /// Tracking: #1260
 #[test]
-#[ignore = "divergence: per-channel uses f64 inv_scale; upstream uses f32; tracking #1260"]
 fn divergence_per_channel_f32_vs_f64_banker_rounding() {
     // R-CHAR-3: expected value 0.4 sourced from the LIVE torch oracle
     // 2026-05-25 (`tensor([[0.4]])`), NOT from ferrotorch's output. Also
