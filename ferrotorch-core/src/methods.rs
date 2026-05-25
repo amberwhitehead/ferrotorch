@@ -107,6 +107,24 @@ impl<T: Float> Tensor<T> {
         crate::grad_fns::arithmetic::remainder(self, other)
     }
 
+    /// `torch.fmod(input, other, *, out=None)` — elementwise remainder
+    /// with the sign of the **dividend** (C99 `std::fmod` semantics).
+    ///
+    /// Mirrors `torch.Tensor.fmod` via the same upstream registration
+    /// `torch/overrides.py:666 torch.fmod: lambda input, other, out=None: -1`.
+    ///
+    /// Distinct from `remainder_t` (divisor-sign, REQ-13 SHIPPED): for
+    /// `fmod(-5, 3)` ferrotorch returns `-2` (sign matches dividend
+    /// `-5`); `remainder(-5, 3)` returns `1` (sign matches divisor
+    /// `+3`). See `arithmetic::fmod` docs for the per-quadrant table.
+    ///
+    /// The non-test production consumer wiring for `arithmetic::fmod`
+    /// per R-DEFER-1: this method is the public, chainable surface that
+    /// closes the consumer requirement.
+    pub fn fmod_t(&self, other: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
+        crate::grad_fns::arithmetic::fmod(self, other)
+    }
+
     // --- Transcendental ---
 
     pub fn exp_t(&self) -> FerrotorchResult<Tensor<T>> {

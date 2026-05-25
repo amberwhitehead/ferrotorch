@@ -168,8 +168,27 @@ alpha=1, out=None)` signature gap.
 - REQ-14: `fmod(a, b)` — `torch.fmod(input, other)` returns the remainder
   with the SIGN OF THE DIVIDEND (C99 `fmod` semantics). Per
   BinaryOps.cpp:1540 `Tensor fmod(const Tensor& self, const Scalar& other)`
-  and overrides.py:666 `torch.fmod: lambda input, other, out=None: -1`. NOT
-  IMPLEMENTED in ferrotorch.
+  and overrides.py:666 `torch.fmod: lambda input, other, out=None: -1`.
+  SHIPPED via `arithmetic::fmod` at `grad_fns/arithmetic.rs:2286` (CPU
+  kernel matching `aten/src/ATen/native/cpu/BinaryOpsKernel.cpp:1052-1054`'s
+  `AT_DISPATCH_FLOATING_TYPES_AND2(kBFloat16, kHalf, ...)` branch
+  byte-for-byte: `[](scalar_t x, scalar_t d) -> scalar_t { return
+  std::fmod(x, d); }` — Rust's `T::%` on f32/f64 *is* C99 `std::fmod`
+  verbatim, so the elementwise kernel is literally `av % bv` with NO
+  sign-correction, distinct from `remainder_inner`'s `fmod`-then-correct
+  flow) + dedicated `FmodBackward` struct at `:2168` saving `a` / `b`
+  and computing `da = grad`, `db = -grad * trunc(a / b)` per
+  `tools/autograd/derivatives.yaml:717-720
+  - name: fmod.Tensor(Tensor self, Tensor other) -> Tensor
+    self: grad
+    other: -grad * self.div(other, /*rounding_mode=*/"trunc")`. The
+  `trunc` (round-toward-zero) vs `floor` (round-toward-`-inf`)
+  distinction is the chain-rule manifestation of the same
+  dividend-sign vs divisor-sign forward divergence. Non-test production
+  consumer `Tensor::fmod_t` at `methods.rs:124`. Parity-sweep
+  `[fmod] 72/72 passed (0 skipped, 0 failed)` at seeds=8 (closes
+  #1199). Runner arm at `tools/parity-sweep/runner/src/main.rs:311`
+  (binary, no kwargs — `fmod` does not take alpha).
 
 - REQ-15: `addcmul(input, tensor1, tensor2, *, value=1)` — fused
   `out = input + value * tensor1 * tensor2`. Per
@@ -249,11 +268,19 @@ alpha=1, out=None)` signature gap.
   `tools/autograd/derivatives.yaml:1455-1457` + non-test production
   consumer `Tensor::remainder_t` (`methods.rs:106`) + parity-sweep
   runner arm at `tools/parity-sweep/runner/src/main.rs:297`.
-- [ ] AC-12, AC-14..AC-16: parity-sweep for
-  `floor_divide`, `fmod`, `addcmul`, `addcdiv` each return
+- [x] AC-14: `fmod` parity-sweep at `--seeds 8` returns
+  `[fmod] N/N passed (0 skipped, 0 failed)` with N >= 1. Closed by
+  #1199 via `arithmetic::fmod` (`grad_fns/arithmetic.rs:2286`) +
+  dedicated `FmodBackward` (`:2168`) saving `a` / `b` and computing
+  `da = grad`, `db = -grad * trunc(a/b)` per
+  `tools/autograd/derivatives.yaml:717-720` + non-test production
+  consumer `Tensor::fmod_t` (`methods.rs:124`) + parity-sweep runner
+  arm at `tools/parity-sweep/runner/src/main.rs:311`.
+- [ ] AC-12, AC-15..AC-16: parity-sweep for
+  `floor_divide`, `addcmul`, `addcdiv` each return
   `[<op>] N/N passed (0 skipped, 0 failed)`. None of these ops exist in
   `arithmetic.rs`, so each currently `no_dispatch`-skips. Blockers
-  #1197, #1199–#1201.
+  #1197, #1200–#1201.
 - [x] AC-17: `cargo test -p ferrotorch-core --lib grad_fns::arithmetic`
   passes (the `tests` mod at `arithmetic.rs:1688-2076` covers forward,
   backward, partial-requires-grad, no-grad, and chain-rule cases for
@@ -492,9 +519,36 @@ kernel can land under a separate blocker when a routed GPU consumer
 surfaces — no `.cpu()`-then-`.cuda()` round-trip is introduced
 (R-CODE-4 unaffected).
 
-### NOT-STARTED ops (REQ-12, REQ-14..REQ-16)
+### REQ-14 `fmod` (lines 2168-2374)
 
-`floor_divide` / `fmod` / `addcmul` / `addcdiv` have no `pub fn`
+`FmodBackward` (`arithmetic.rs:2168-2210`) saves `a`/`b`; backward
+returns `(reduce(grad, a.shape()), reduce(-grad * trunc(a/b),
+b.shape()))` per `tools/autograd/derivatives.yaml:717-720`. The
+`trunc(a/b)` step runs under `no_grad` (treating `trunc`'s gradient
+as zero, matching upstream's `rounding_mode="trunc"` autograd
+contract — the chain-rule sibling of `RemainderBackward`'s `floor`
+treatment). Forward `pub fn fmod` (`arithmetic.rs:2286`) emits a
+profiler scope, checks device match, lets
+`meta_propagate::binary_broadcast` short-circuit for meta tensors,
+then calls `fmod_inner`. The inner walks the broadcast iteration
+space directly (mirroring `remainder_inner`'s loop pattern) and
+applies the upstream `aten/src/ATen/native/cpu/BinaryOpsKernel
+.cpp:1052-1054` kernel elementwise: `return std::fmod(x, d);`.
+Rust's `T::%` IS C99 `fmod` (dividend-sign), so the kernel is
+literally `av % bv` — NO sign-correction step (the structural
+distinction from `remainder_inner`'s `fmod`-then-correct flow that
+recovers Python `%` / NumPy divisor-sign semantics). **Non-test
+consumer**: `methods.rs:124` (`Tensor::fmod_t`). CPU-only in this
+commit; CUDA inputs flow through host-memory fallback (the same
+way `remainder_inner` and `pow_inner` fall through bf16/f16). A
+dedicated `fmod_*` GPU kernel can land under a separate blocker
+when a routed GPU consumer surfaces — no
+`.cpu()`-then-`.cuda()` round-trip is introduced (R-CODE-4
+unaffected).
+
+### NOT-STARTED ops (REQ-12, REQ-15..REQ-16)
+
+`floor_divide` / `addcmul` / `addcdiv` have no `pub fn`
 declaration in `arithmetic.rs` and no backward struct. Each is gated by
 an open prereq blocker (#1197, #1199–#1201) that needs the impl + a
 non-test consumer (the natural target is `methods.rs` per the existing
@@ -525,7 +579,7 @@ The route's `parity_ops` list declares 16 ops. The current state per op:
 | `reciprocal` | UnaryOps.cpp:345 `CREATE_UNARY_TORCH_IMPL_FUNC(reciprocal_out, reciprocal_stub)` + `tools/autograd/derivatives.yaml:1447-1449 - name: reciprocal(Tensor self) -> Tensor / self: -grad * (result * result).conj()` | verified (24/24 at seeds=8) — `arithmetic::reciprocal` at `arithmetic.rs:1779` (CPU `unary_map(a, \|x\| 1/x)` matching `cpu/UnaryOpsKernel.cpp:279`; CUDA composes `div(ones, a)` since no dedicated `reciprocal_*` GPU kernel exists); dedicated `ReciprocalBackward` at `arithmetic.rs:1702` saves the output `c` (per upstream derivatives.yaml arithmetic rewrite `-1/a^2 = -c^2`); runner arm at `tools/parity-sweep/runner/src/main.rs:284` | `1/input`; reciprocal(+0.0)=+Inf; reciprocal(-0.0)=-Inf; reciprocal(+Inf)=+0.0; reciprocal(-Inf)=-0.0; reciprocal(NaN)=NaN; backward `da = -grad * c^2` saves output not input (single div amortized) |
 | `floor_divide` | BinaryOps.cpp:979 `Tensor floor_divide(...)` | NOT IMPLEMENTED for Float | floors toward -Inf (NOT C truncation); sign-of-divisor remainder semantics; integer overload exists at `int_tensor.rs:588` |
 | `remainder` | BinaryOps.cpp:1184 `Tensor remainder(const Tensor& self, const Scalar& other)` + `aten/src/ATen/native/cpu/BinaryOpsKernel.cpp:398-401` (CPU float kernel: `fmod`-then-correct) + `tools/autograd/derivatives.yaml:1455-1457` (backward: `self: grad; other: -grad * self.div(other, /*rounding_mode=*/"floor")`) | verified (72/72 at seeds=8) — `arithmetic::remainder` at `arithmetic.rs:1979`, `RemainderBackward` at `:1865`; runner arm at `tools/parity-sweep/runner/src/main.rs:297` (binary, no kwargs) | sign of divisor (Python `%` / NumPy semantics); `a - floor(a/b)*b` mathematically, computed as `fmod(a,b)`-then-sign-correct to match upstream's exact ULPs; div-by-zero returns NaN for floats; NaN propagation: `remainder(NaN, x) = NaN`, `remainder(x, NaN) = NaN`, `remainder(x, 0) = NaN`; backward `db = -grad * floor(a/b)` with `floor`'s gradient treated as zero (matching upstream's `rounding_mode="floor"` autograd contract) |
-| `fmod` | BinaryOps.cpp:1540 `Tensor fmod(const Tensor& self, const Scalar& other)` | NOT IMPLEMENTED | sign of dividend (C99 `fmod` semantics); distinct from `remainder` — `fmod(-7, 3) = -1` but `remainder(-7, 3) = 2` |
+| `fmod` | BinaryOps.cpp:1540 `Tensor fmod(const Tensor& self, const Scalar& other)` + `aten/src/ATen/native/cpu/BinaryOpsKernel.cpp:1052-1054` (CPU float kernel: pure `std::fmod(x, d)`, no sign correction) + `tools/autograd/derivatives.yaml:717-720` (backward: `self: grad; other: -grad * self.div(other, /*rounding_mode=*/"trunc")`) | verified (72/72 at seeds=8) — `arithmetic::fmod` at `arithmetic.rs:2286`, `FmodBackward` at `:2168`; runner arm at `tools/parity-sweep/runner/src/main.rs:311` (binary, no kwargs) | sign of dividend (C99 `std::fmod` semantics); `a - trunc(a/b)*b` mathematically, computed as the language-level `T::%` operator (Rust's `f32::%`/`f64::%` IS C99 fmod verbatim — verified empirically `(5_f32)%(-3_f32)=2`, `(-5_f32)%(3_f32)=-2`, `(5_f32)%(0_f32)=NaN` on 2026-05-25); div-by-zero returns NaN for floats; NaN propagation: `fmod(NaN, x) = NaN`, `fmod(x, NaN) = NaN`, `fmod(x, 0) = NaN`; backward `db = -grad * trunc(a/b)` with `trunc`'s gradient treated as zero (matching upstream's `rounding_mode="trunc"` autograd contract); distinct from `remainder` — `fmod(-7, 3) = -1` (sign of dividend) but `remainder(-7, 3) = 2` (sign of divisor) |
 | `addcmul` | PointwiseOps.cpp:57 `TORCH_IMPL_FUNC(addcmul_out)` (route's upstream list missing this file) | NOT IMPLEMENTED | `out = input + value * tensor1 * tensor2`; fused single-pass kernel; integer-dtype int-division deprecated upstream |
 | `addcdiv` | PointwiseOps.cpp:66 `TORCH_IMPL_FUNC(addcdiv_out)` (route's upstream list missing this file) | NOT IMPLEMENTED | `out = input + value * tensor1 / tensor2`; integer-dtype version errors out per upstream deprecation |
 
@@ -578,12 +632,13 @@ Vector backward:
 ./target/release/parity-sweep sweep --op rsub --seeds 8   # → N/N passed (0 skipped, 0 failed), N >= 1 — #1194 closed via arithmetic::rsub delegating to sub_scaled(b, a, alpha)
 ./target/release/parity-sweep sweep --op reciprocal --seeds 8   # → 24/24 passed (0 skipped, 0 failed) — #1196 closed via arithmetic::reciprocal + ReciprocalBackward
 ./target/release/parity-sweep sweep --op remainder --seeds 8   # → 72/72 passed (0 skipped, 0 failed) — #1198 closed via arithmetic::remainder + RemainderBackward (fmod-then-correct, divisor-sign / Python `%`)
-# floor_divide, fmod, addcmul, addcdiv
-# → each no_dispatch, BLOCKERS #1197, #1199..#1201
+./target/release/parity-sweep sweep --op fmod --seeds 8   # → 72/72 passed (0 skipped, 0 failed) — #1199 closed via arithmetic::fmod + FmodBackward (bare `av % bv`, dividend-sign / C99 std::fmod)
+# floor_divide, addcmul, addcdiv
+# → each no_dispatch, BLOCKERS #1197, #1200..#1201
 ```
 
 The integer grep-count for `passed (0 skipped, 0 failed)` is **>= 1** for
-add/sub/mul/div/neg/abs/sqrt/rsub/rsqrt/reciprocal/remainder and **== 0** for pow/floor_divide/fmod/addcmul/addcdiv.
+add/sub/mul/div/neg/abs/sqrt/rsub/rsqrt/reciprocal/remainder/fmod and **== 0** for pow/floor_divide/addcmul/addcdiv.
 The `pow == 0` case is a non-zero-skip pass (`24/72 passed (48 skipped, 0 failed)`):
 scalar-exp samples dispatch and pass; tensor-exp samples (out of scope for
 `arithmetic::pow<T>(a, exp: f64)`) cleanly skip with `Ok(None)`. AC-8 admits
@@ -606,6 +661,6 @@ this skip pattern as a pass since N=24>0 and failures=0.
 | REQ-11 (reciprocal) | SHIPPED | impl: `reciprocal` at `ferrotorch-core/src/grad_fns/arithmetic.rs:1779` + dedicated `ReciprocalBackward` struct at `:1702` mirroring `aten/src/ATen/native/UnaryOps.cpp:345 CREATE_UNARY_TORCH_IMPL_FUNC(reciprocal_out, reciprocal_stub)` for the forward and `tools/autograd/derivatives.yaml:1447-1449 - name: reciprocal(Tensor self) -> Tensor / self: -grad * (result * result).conj()` for the backward (saves the output `c` so `da = -grad * c^2` avoids recomputing `1/(a*a)`). CPU kernel matches `aten/src/ATen/native/cpu/UnaryOpsKernel.cpp:275-282 reciprocal_kernel` scalar fallback `static_cast<scalar_t>(1.0) / a`. User-facing signature at `torch/_torch_docs.py:2584 reciprocal(input, *, out=None) -> Tensor` and registration at `torch/overrides.py:1098 torch.reciprocal: lambda input, out=None: -1`. Non-test production consumer: `ferrotorch-core/src/methods.rs:78` (`Tensor::reciprocal_t`) delegates to `arithmetic::reciprocal`, satisfying R-DEFER-1 (the chainable method-style surface). Parity-sweep runner arm at `tools/parity-sweep/runner/src/main.rs:284`. Parity-sweep `[reciprocal] 24/24 passed (0 skipped, 0 failed)` at seeds=8 (closes #1196). |
 | REQ-12 (floor_divide float) | NOT-STARTED | open prereq blocker #1197. No `pub fn floor_divide` for `Tensor<T: Float>` in `arithmetic.rs`; upstream contract at `aten/src/ATen/native/BinaryOps.cpp:979 Tensor floor_divide(const Tensor& self, const Tensor& other)` and `torch/overrides.py:664 torch.floor_divide: lambda input, other: -1`. An integer-only `IntTensor::floor_div` sibling exists at `ferrotorch-core/src/int_tensor.rs:588` but does not satisfy the float-typed REQ. |
 | REQ-13 (remainder float) | SHIPPED | impl: `remainder` at `ferrotorch-core/src/grad_fns/arithmetic.rs:1979` + dedicated `RemainderBackward` struct at `:1865` mirroring `aten/src/ATen/native/BinaryOps.cpp:1184 Tensor remainder(const Tensor& self, const Scalar& other)` for the user-facing entry and the CPU kernel at `aten/src/ATen/native/cpu/BinaryOpsKernel.cpp:398-401` (`scalar_t mod = std::fmod(a, b); if ((mod != 0) && ((b < 0) != (mod < 0))) mod += b;`) for the forward math byte-for-byte (R-DEV-1 — the alternative `a - floor(a/b)*b` compose form had ~3.6e-7 ULP drift vs torch on small inputs; the `fmod`-then-correct form recovers upstream's exact ULPs via the hardware `fmod` primitive). Backward per `tools/autograd/derivatives.yaml:1455-1457 - name: remainder.Tensor(Tensor self, Tensor other) -> Tensor / self: grad / other: -grad * self.div(other, /*rounding_mode=*/"floor")` — saves `a`/`b`, computes `da = grad` and `db = -grad * floor(a/b)` (`floor`'s gradient treated as zero matching upstream's `rounding_mode="floor"` autograd contract). User-facing signature at `torch/_torch_docs.py:9453 remainder(input, other, *, out=None) -> Tensor` and registration at `torch/overrides.py:1100 torch.remainder: lambda input, other, out=None: -1`. Non-test production consumer: `ferrotorch-core/src/methods.rs:106` (`Tensor::remainder_t`) delegates to `arithmetic::remainder`, satisfying R-DEFER-1 (the chainable method-style surface). Parity-sweep runner arm at `tools/parity-sweep/runner/src/main.rs:297`. Parity-sweep `[remainder] 72/72 passed (0 skipped, 0 failed)` at seeds=8 (closes #1198). Integer-only sibling at `ferrotorch-core/src/int_tensor.rs:599` is unaffected; the float and int variants operate on disjoint type families (`Tensor<T: Float>` vs `IntTensor<I>`). |
-| REQ-14 (fmod) | NOT-STARTED | open prereq blocker #1199. No `pub fn fmod` in `arithmetic.rs`; upstream contract at `aten/src/ATen/native/BinaryOps.cpp:1540 Tensor fmod(const Tensor& self, const Scalar& other)` and `torch/overrides.py:666 torch.fmod: lambda input, other, out=None: -1`. |
+| REQ-14 (fmod) | SHIPPED | impl: `fmod` at `ferrotorch-core/src/grad_fns/arithmetic.rs:2286` + dedicated `FmodBackward` struct at `:2168` mirroring `aten/src/ATen/native/BinaryOps.cpp:1540 Tensor fmod(const Tensor& self, const Scalar& other)` for the user-facing entry and the CPU kernel at `aten/src/ATen/native/cpu/BinaryOpsKernel.cpp:1052-1054` (`[](scalar_t x, scalar_t d) -> scalar_t { return std::fmod(x, d); }`) for the forward math byte-for-byte (R-DEV-1 — Rust's `T::%` on `f32`/`f64` IS C99 `std::fmod`, dividend-sign, so the elementwise kernel is literally `av % bv` with no sign-correction step, distinct from `remainder_inner`'s `fmod`-then-correct flow). Backward per `tools/autograd/derivatives.yaml:717-720 - name: fmod.Tensor(Tensor self, Tensor other) -> Tensor / self: grad / other: -grad * self.div(other, /*rounding_mode=*/"trunc")` — saves `a`/`b`, computes `da = grad` and `db = -grad * trunc(a/b)` (`trunc`'s gradient treated as zero matching upstream's `rounding_mode="trunc"` autograd contract; the chain-rule sibling of `RemainderBackward`'s `floor` treatment). User-facing signature at `torch/_torch_docs.py:4305 fmod(input, other, *, out=None) -> Tensor` ("The result has the same sign as the dividend `input`") and registration at `torch/overrides.py:666 torch.fmod: lambda input, other, out=None: -1`. Non-test production consumer: `ferrotorch-core/src/methods.rs:124` (`Tensor::fmod_t`) delegates to `arithmetic::fmod`, satisfying R-DEFER-1 (the chainable method-style surface). Parity-sweep runner arm at `tools/parity-sweep/runner/src/main.rs:311`. Parity-sweep `[fmod] 72/72 passed (0 skipped, 0 failed)` at seeds=8 (closes #1199). |
 | REQ-15 (addcmul) | NOT-STARTED | open prereq blocker #1200. No `pub fn addcmul` in `arithmetic.rs`; upstream contract at `aten/src/ATen/native/PointwiseOps.cpp:57 TORCH_IMPL_FUNC(addcmul_out)` and `torch/_torch_docs.py:510 addcmul(input, tensor1, tensor2, *, value=1, out=None)`. NB: PointwiseOps.cpp is not in the route's `upstream` list; the route's upstream-paths declaration is incomplete for this op. |
 | REQ-16 (addcdiv) | NOT-STARTED | open prereq blocker #1201. No `pub fn addcdiv` in `arithmetic.rs`; upstream contract at `aten/src/ATen/native/PointwiseOps.cpp:66 TORCH_IMPL_FUNC(addcdiv_out)` and `torch/_torch_docs.py:461 addcdiv(input, tensor1, tensor2, *, value=1, out=None)`. Same route-upstream incompleteness as REQ-15. |

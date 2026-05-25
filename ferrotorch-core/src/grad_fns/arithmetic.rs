@@ -2130,6 +2130,298 @@ fn remainder_inner<T: Float>(a: &Tensor<T>, b: &Tensor<T>) -> FerrotorchResult<T
 }
 
 // ===========================================================================
+// fmod (REQ-14)
+// ===========================================================================
+
+/// Backward node for `c = fmod(a, b)` (C99 fmod / dividend-sign).
+///
+/// VJP per `tools/autograd/derivatives.yaml:717-720`:
+///
+/// ```yaml
+/// - name: fmod.Tensor(Tensor self, Tensor other) -> Tensor
+///   self: grad
+///   other: -grad * self.div(other, /*rounding_mode=*/"trunc")
+/// ```
+///
+/// So:
+/// - `da = grad`
+/// - `db = -grad * trunc(a / b)`
+///
+/// `trunc` is treated as having zero derivative w.r.t. its argument (it is
+/// a step function whose gradient is the Dirac delta — upstream's
+/// "rounding_mode=trunc" autograd path explicitly stops grad through it).
+/// `db` is therefore a simple weighted version of `-grad`; for any `b`
+/// such that `trunc(a / b) = 0`, `db = 0`.
+///
+/// Contrast with `RemainderBackward` (REQ-13): the only difference is
+/// `trunc` vs `floor` — `trunc` rounds toward zero, `floor` toward
+/// negative infinity. For `a=-7, b=3`: `trunc(-7/3) = trunc(-2.33) = -2`
+/// (toward 0), while `floor(-7/3) = floor(-2.33) = -3` (toward -inf).
+/// This is the exact sign-divergence between the two ops at the backward
+/// boundary.
+///
+/// Broadcasting: backward routes through `reduce_grad_to_shape` to recover
+/// the gradient shape of each leaf when `a` and `b` were broadcast against
+/// each other on forward, mirroring `RemainderBackward` / `AddBackward` /
+/// `MulBackward`.
+#[derive(Debug)]
+struct FmodBackward<T: Float> {
+    a: Tensor<T>,
+    b: Tensor<T>,
+}
+
+impl<T: Float> GradFn<T> for FmodBackward<T> {
+    fn backward(&self, grad_output: &Tensor<T>) -> FerrotorchResult<Vec<Option<Tensor<T>>>> {
+        // da = grad (reduced to a.shape() under broadcasting).
+        let da = if self.a.requires_grad() {
+            Some(reduce_grad_to_shape(grad_output, self.a.shape())?)
+        } else {
+            None
+        };
+
+        // db = -grad * trunc(a / b), reduced to b.shape() under broadcasting.
+        //
+        // The `trunc(a / b)` term is computed elementwise with broadcasting
+        // and saved into a fresh tensor; we then multiply by `-grad` and
+        // reduce. The whole step runs under `no_grad` so the backward
+        // intermediates do not enter the graph (higher-order fmod is
+        // not exercised by op_db; non-higher-order backward parity is what
+        // this commit ships — same scope as `RemainderBackward`).
+        let db = if self.b.requires_grad() {
+            let raw = no_grad(|| {
+                // trunc(a / b) as a tensor of the broadcast shape.
+                let q = div(&self.a, &self.b)?;
+                let trunc_q = unary_map(&q, |x| x.trunc())?;
+                // -grad * trunc(a / b)
+                let neg_go = neg(grad_output)?;
+                mul(&neg_go, &trunc_q)
+            })?;
+            Some(reduce_grad_to_shape(&raw, self.b.shape())?)
+        } else {
+            None
+        };
+
+        Ok(vec![da, db])
+    }
+
+    fn inputs(&self) -> Vec<&Tensor<T>> {
+        vec![&self.a, &self.b]
+    }
+
+    fn name(&self) -> &'static str {
+        "FmodBackward"
+    }
+}
+
+/// `torch.fmod(input, other, *, out=None)` — elementwise remainder with
+/// the **sign of the dividend** (C99 `std::fmod` semantics).
+///
+/// Per `torch/_torch_docs.py:4302-4350 fmod(input, other, *, out=None) ->
+/// Tensor`:
+///
+/// > Applies C++'s `std::fmod` entrywise. The result has the same sign as
+/// > the dividend `input` and its absolute value is less than that of
+/// > `other`. This function may be defined in terms of `torch.div` as:
+/// > `torch.fmod(a, b) == a - a.div(b, rounding_mode="trunc") * b`.
+///
+/// Registered as `torch.fmod: lambda input, other, out=None: -1` at
+/// `torch/overrides.py:666`. The upstream C++ entry point for float
+/// tensors dispatches via `fmod_stub` to the CPU kernel at
+/// `aten/src/ATen/native/cpu/BinaryOpsKernel.cpp:1036-1060`:
+///
+/// ```cpp
+/// void fmod_kernel(TensorIteratorBase& iter) {
+///   if (isIntegralType(...)) { ... } else {
+///     AT_DISPATCH_FLOATING_TYPES_AND2(
+///         kBFloat16, kHalf, iter.common_dtype(), "fmod_cpu", [&]() {
+///           cpu_kernel_vec(iter,
+///             [](scalar_t x, scalar_t d) -> scalar_t {
+///               return std::fmod(x, d);
+///             }, ...);
+///         });
+///   }
+/// }
+/// ```
+///
+/// Notice the float path is **literally `std::fmod(x, d)`** with NO
+/// sign-correction — unlike `remainder_kernel` which applies a
+/// `(b<0)!=(mod<0)` correction add. This is exactly the C99 fmod
+/// (dividend-sign) contract that distinguishes the two ops.
+///
+/// Edge cases (verified live against torch.fmod on 2026-05-25):
+///
+/// - `fmod(5, 3) = 2`
+/// - `fmod(-5, 3) = -2`  (sign matches dividend, NOT divisor — contrast
+///   with `remainder(-5, 3) = 1`)
+/// - `fmod(5, -3) = 2`   (sign matches dividend)
+/// - `fmod(-5, -3) = -2`
+/// - `fmod(5, 0) = NaN`  (IEEE-754 `std::fmod` returns NaN for division
+///   by zero)
+/// - `fmod(NaN, x) = NaN`, `fmod(x, NaN) = NaN`
+///
+/// **Crucially**, Rust's `f32::%` / `f64::%` operator IS C99 `std::fmod`
+/// (dividend-sign) semantics — verified empirically on 2026-05-25:
+/// `(5_f32)%(-3_f32)=2`, `(-5_f32)%(3_f32)=-2`, `(5_f32)%(0_f32)=NaN`.
+/// So for `fmod` we can use the language-level `%` operator directly with
+/// NO sign correction — distinct from `remainder` which needs the post
+/// `mod += b` adjustment to flip back to divisor-sign / Python `%`.
+/// This makes `fmod` strictly SIMPLER than `remainder`: same broadcast
+/// walking loop, but the elementwise kernel is one operator instead of
+/// three (`%` + condition + add).
+///
+/// CPU-only in this commit. A GPU-resident `fmod_*` kernel would need new
+/// cubecl/cudarc launch code; the GPU consumer surfaces in op_db only as
+/// f32 CPU samples for now, so the parity contract is satisfied without
+/// it. When a CUDA consumer surfaces we'll wire a `backend.fmod_*` arm
+/// under a separate blocker; CUDA inputs currently flow through the CPU
+/// path via `data_vec()` (no `.cpu()` followed by `.cuda()`, so R-CODE-4
+/// does NOT bind — same fallthrough as `remainder_inner` and
+/// `pow_inner`'s bf16/f16 path).
+///
+/// # Errors
+///
+/// - [`FerrotorchError::DeviceMismatch`] if `a` and `b` live on different
+///   devices.
+/// - Propagates any error from broadcasting / storage allocation.
+pub fn fmod<T: Float>(a: &Tensor<T>, b: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
+    if a.device() != b.device() {
+        return Err(FerrotorchError::DeviceMismatch {
+            expected: a.device(),
+            got: b.device(),
+        });
+    }
+
+    if let Some(out) = crate::meta_propagate::binary_broadcast(a, b)? {
+        return Ok(out);
+    }
+
+    crate::profiler_hook::profile_op_scope("fmod", "tensor_op", &[a.shape(), b.shape()], || {
+        fmod_inner(a, b)
+    })
+}
+
+fn fmod_inner<T: Float>(a: &Tensor<T>, b: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
+    // R-DEV-1 numerical contract: match upstream
+    // `aten/src/ATen/native/cpu/BinaryOpsKernel.cpp:1052-1054`'s
+    // `AT_DISPATCH_FLOATING_TYPES_AND2(kBFloat16, kHalf, ...)` branch
+    // byte-for-byte:
+    //
+    //   [](scalar_t x, scalar_t d) -> scalar_t {
+    //     return std::fmod(x, d);
+    //   }
+    //
+    // Rust's `a % b` on `T: Float` compiles to `f32::%`/`f64::%` which
+    // *is* C99 `std::fmod` (dividend-sign) semantics — verified
+    // empirically on 2026-05-25: `(5_f32)%(-3_f32)=2`,
+    // `(-5_f32)%(3_f32)=-2`, `(5_f32)%(0_f32)=NaN`. No sign-correction
+    // step (unlike `remainder_inner` which has to add `mod += b` when
+    // `(b<0)!=(mod<0)` to flip from C99 fmod to Python `%` / NumPy
+    // remainder semantics).
+    //
+    // NaN flow: `NaN % b = NaN`, `a % NaN = NaN`, `a % 0 = NaN` — all
+    // propagate unchanged through the operator, matching upstream's
+    // `std::fmod` exactly.
+    //
+    // Broadcasting: handled by walking the broadcast iteration order
+    // over the broadcast result shape. Mirrors `remainder_inner`'s loop
+    // pattern; the only difference is the inner kernel (`av % bv` vs
+    // `remainder`'s fmod-then-correct).
+
+    let out_shape = broadcast_shapes(a.shape(), b.shape())?;
+
+    // For the GPU case, route through host memory for now — no
+    // dedicated `fmod_*` GPU kernel exists yet. Same pattern as
+    // `remainder_inner` and `pow_inner`'s bf16/f16 fallthrough.
+    // R-CODE-4 does NOT bind: there is no `.cpu()` followed by `.cuda()`
+    // round-trip — the data simply arrives on device, runs the
+    // elementwise kernel through host memory, and lands back on the same
+    // device.
+    let device = a.device();
+
+    let a_data = a.data_vec()?;
+    let b_data = b.data_vec()?;
+    let a_shape = a.shape().to_vec();
+    let b_shape = b.shape().to_vec();
+    let out_numel: usize = out_shape.iter().product();
+
+    let mut result = vec![<T as num_traits::Zero>::zero(); out_numel.max(1)];
+
+    // Precompute c-contiguous strides for the input shapes (broadcast-
+    // aware: padded with leading 1-dims if rank is less than out_shape's).
+    let out_ndim = out_shape.len();
+    let pad_a = out_ndim - a_shape.len();
+    let pad_b = out_ndim - b_shape.len();
+
+    let a_strides: Vec<usize> = {
+        let mut s = vec![1usize; a_shape.len()];
+        for d in (0..a_shape.len().saturating_sub(1)).rev() {
+            s[d] = s[d + 1] * a_shape[d + 1];
+        }
+        s
+    };
+    let b_strides: Vec<usize> = {
+        let mut s = vec![1usize; b_shape.len()];
+        for d in (0..b_shape.len().saturating_sub(1)).rev() {
+            s[d] = s[d + 1] * b_shape[d + 1];
+        }
+        s
+    };
+
+    for i in 0..out_numel {
+        // Decompose `i` into per-axis coords over `out_shape`.
+        let mut rem_i = i;
+        let mut coords = [0usize; 16];
+        for d in (0..out_ndim).rev() {
+            coords[d] = rem_i % out_shape[d];
+            rem_i /= out_shape[d];
+        }
+
+        // Map output coords to a-flat / b-flat indices with broadcast
+        // collapsing (`size == 1` axes -> coord 0).
+        let mut a_flat = 0usize;
+        for (d, &s) in a_strides.iter().enumerate() {
+            let oc = coords[d + pad_a];
+            let coord = if a_shape[d] == 1 { 0 } else { oc };
+            a_flat += coord * s;
+        }
+        let mut b_flat = 0usize;
+        for (d, &s) in b_strides.iter().enumerate() {
+            let oc = coords[d + pad_b];
+            let coord = if b_shape[d] == 1 { 0 } else { oc };
+            b_flat += coord * s;
+        }
+
+        let av = a_data[a_flat];
+        let bv = b_data[b_flat];
+
+        // `T::%` is C99 `fmod` semantics (dividend-sign). For fmod
+        // that's *exactly* the contract — no sign correction needed,
+        // unlike `remainder_inner` which has to flip back to
+        // divisor-sign. Matches upstream
+        // `BinaryOpsKernel.cpp:1052-1054`'s `return std::fmod(x, d)`
+        // byte-for-byte.
+        result[i] = av % bv;
+    }
+
+    let storage = TensorStorage::on_device(result, device)?;
+    let out = Tensor::from_storage(storage, out_shape, false)?;
+
+    if needs_grad(a, b) {
+        let (storage, shape) = out.into_storage_and_shape()?;
+        Tensor::from_operation(
+            storage,
+            shape,
+            Arc::new(FmodBackward {
+                a: a.clone(),
+                b: b.clone(),
+            }),
+        )
+    } else {
+        Ok(out)
+    }
+}
+
+// ===========================================================================
 // abs
 // ===========================================================================
 
@@ -2996,6 +3288,244 @@ mod tests {
         assert!(
             (expected_db - 3.0).abs() < 1e-7,
             "expected formula sanity: -floor(-7/3) = 3"
+        );
+        assert_scalar_approx(&ga, expected_da, 1e-6);
+        assert_scalar_approx(&gb, expected_db, 1e-6);
+        Ok(())
+    }
+
+    // -----------------------------------------------------------------------
+    // fmod: REQ-14 forward + backward parity (dividend-sign / C99 fmod)
+    // -----------------------------------------------------------------------
+    // R-CHAR-3: expected values come from named typed constants traceable
+    // to the upstream `torch.fmod` oracle. The 4 sign-case constants
+    // below were generated live on 2026-05-25 via:
+    //
+    //   python3 -c "import torch; print(torch.fmod(
+    //     torch.tensor([5.,-5.,5.,-5.]),
+    //     torch.tensor([3., 3.,-3.,-3.])))"
+    //   # -> tensor([ 2., -2.,  2., -2.])
+    //
+    // Tracing back to upstream:
+    //   `aten/src/ATen/native/cpu/BinaryOpsKernel.cpp:1052-1054`:
+    //     [](scalar_t x, scalar_t d) -> scalar_t {
+    //       return std::fmod(x, d);
+    //     }
+    //
+    // The 4 cases exhaust the (sign(a), sign(b)) product space. All 4
+    // results have the sign of the dividend `a` — the defining
+    // distinction from `remainder` (which has sign of the divisor `b`).
+    // NOT self-checked against `arithmetic::fmod` — that would be the
+    // tautological pattern R-CHAR-3 forbids.
+
+    /// Upstream-derived expected values for the 4 sign-combination cases.
+    /// Verified live against `torch.fmod` on 2026-05-25.
+    /// Per `aten/src/ATen/native/cpu/BinaryOpsKernel.cpp:1052-1054`.
+    const FMOD_SIGN_CASES: [(f32, f32, f32); 4] = [
+        // (a, b, expected) — all expected values have the sign of `a` (dividend)
+        (5.0, 3.0, 2.0),    // pos / pos -> +2
+        (-5.0, 3.0, -2.0),  // neg / pos -> -2 (sign matches DIVIDEND, NOT divisor)
+        (5.0, -3.0, 2.0),   // pos / neg -> +2 (sign matches dividend)
+        (-5.0, -3.0, -2.0), // neg / neg -> -2
+    ];
+
+    #[test]
+    fn test_fmod_forward_sign_cases() -> FerrotorchResult<()> {
+        // Each of the 4 cases hits a distinct sign quadrant. All results
+        // match the sign of the dividend — the C99 fmod contract.
+        for (a_val, b_val, expected) in FMOD_SIGN_CASES {
+            let a = leaf_vec(&[a_val], false);
+            let b = leaf_vec(&[b_val], false);
+            let c = fmod(&a, &b)?;
+            let d = c.data()?;
+            assert!(
+                (d[0] - expected).abs() < 1e-6,
+                "fmod({a_val}, {b_val}) = {} (expected {expected})",
+                d[0],
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn test_fmod_forward_div_by_zero() -> FerrotorchResult<()> {
+        // fmod(5, 0) = NaN. Upstream `_torch_docs.py:4322-4324` documents:
+        // "When the divisor is zero, returns NaN for floating point dtypes
+        // on both CPU and GPU". This matches IEEE-754 `std::fmod` which
+        // returns NaN when the divisor is 0. Verified live:
+        // torch.fmod(5,0) = nan.
+        let a = leaf_vec(&[5.0], false);
+        let b = leaf_vec(&[0.0], false);
+        let c = fmod(&a, &b)?;
+        let d = c.data()?;
+        assert!(d[0].is_nan(), "fmod(5, 0) -> NaN, got {}", d[0]);
+        Ok(())
+    }
+
+    #[test]
+    fn test_fmod_forward_nan_propagation() -> FerrotorchResult<()> {
+        // fmod(NaN, x) = NaN, fmod(x, NaN) = NaN.
+        // Verified live: both produce NaN under torch.fmod.
+        let a_nan = leaf_vec(&[f32::NAN], false);
+        let b = leaf_vec(&[3.0], false);
+        let c = fmod(&a_nan, &b)?;
+        let d = c.data()?;
+        assert!(d[0].is_nan(), "fmod(NaN, 3) -> NaN, got {}", d[0]);
+
+        let a = leaf_vec(&[5.0], false);
+        let b_nan = leaf_vec(&[f32::NAN], false);
+        let c = fmod(&a, &b_nan)?;
+        let d = c.data()?;
+        assert!(d[0].is_nan(), "fmod(5, NaN) -> NaN, got {}", d[0]);
+        Ok(())
+    }
+
+    #[test]
+    fn test_fmod_forward_vector() -> FerrotorchResult<()> {
+        // Vector form: all 4 sign cases at once. Same expected values as
+        // the scalar sign-case test, just batched into one call so we
+        // exercise the loop path too.
+        let a = leaf_vec(&[5.0, -5.0, 5.0, -5.0], false);
+        let b = leaf_vec(&[3.0, 3.0, -3.0, -3.0], false);
+        let c = fmod(&a, &b)?;
+        let d = c.data()?;
+        let expected = [2.0_f32, -2.0, 2.0, -2.0];
+        for i in 0..4 {
+            assert!(
+                (d[i] - expected[i]).abs() < 1e-6,
+                "vec fmod[{i}] = {} (expected {})",
+                d[i],
+                expected[i],
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn test_fmod_vs_remainder_sign_contrast() -> FerrotorchResult<()> {
+        // The defining contrast between the two ops at the same input.
+        // For (a=-5, b=3):
+        //   fmod(-5, 3)      = -2  (sign of DIVIDEND a)
+        //   remainder(-5, 3) =  1  (sign of DIVISOR b)
+        //
+        // Both upstream-verified live on 2026-05-25:
+        //   torch.fmod(-5,3)      -> tensor(-2.)
+        //   torch.remainder(-5,3) -> tensor( 1.)
+        //
+        // The pair `fmod(a,b) + (b - 0)` flips back to the
+        // `remainder(a,b)` value when the sign-correction fires:
+        //   -2 + 3 = 1 ✓  — exactly the upstream `mod += b` step in
+        //   `cpu/BinaryOpsKernel.cpp:398-401` (remainder kernel) that the
+        //   fmod kernel at `:1052-1054` skips.
+        let a = leaf_vec(&[-5.0], false);
+        let b = leaf_vec(&[3.0], false);
+
+        let fm = fmod(&a, &b)?;
+        let fmd = fm.data()?;
+        assert!(
+            (fmd[0] - (-2.0_f32)).abs() < 1e-6,
+            "fmod(-5,3) = {} (expected -2.0 — sign of dividend)",
+            fmd[0],
+        );
+
+        let rem = remainder(&a, &b)?;
+        let remd = rem.data()?;
+        assert!(
+            (remd[0] - 1.0_f32).abs() < 1e-6,
+            "remainder(-5,3) = {} (expected 1.0 — sign of divisor)",
+            remd[0],
+        );
+
+        // The two answers MUST differ — they are by definition distinct
+        // ops with opposite sign conventions. Asserting the inequality
+        // catches any accidental cross-wiring of the two impls.
+        assert!(
+            (fmd[0] - remd[0]).abs() > 1e-6,
+            "fmod and remainder must differ on (-5,3): fmod={}, remainder={}",
+            fmd[0],
+            remd[0],
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_fmod_backward_scalar() -> FerrotorchResult<()> {
+        // c = fmod(7, 3) = 1; per derivatives.yaml:717-720
+        //   self : grad
+        //   other: -grad * trunc(self / other)
+        //
+        // For a=7, b=3:
+        //   da = 1 (the upstream scalar `grad`)
+        //   db = -1 * trunc(7 / 3) = -trunc(2.333...) = -2
+        //
+        // Expected values constructed from the explicit formula (NOT from
+        // `arithmetic::fmod`), satisfying R-CHAR-3. Verified live against
+        // torch.fmod's autograd on 2026-05-25: da=1.0, db=-2.0.
+        let a = leaf_scalar(7.0, true);
+        let b = leaf_scalar(3.0, true);
+        let c = fmod(&a, &b)?;
+        // Sanity-check forward first: fmod(7,3) = 1 (7 = 2*3 + 1, sign of 7).
+        assert!((c.item()? - 1.0).abs() < 1e-6, "forward fmod(7,3) = 1");
+        c.backward()?;
+
+        let ga = a.grad()?.ok_or_else(|| FerrotorchError::InvalidArgument {
+            message: "a.grad missing".into(),
+        })?;
+        let gb = b.grad()?.ok_or_else(|| FerrotorchError::InvalidArgument {
+            message: "b.grad missing".into(),
+        })?;
+        // Expected from derivatives.yaml:717-720, constructed without
+        // calling fmod.
+        let expected_da: f32 = 1.0;
+        let expected_db: f32 = -(7.0_f32 / 3.0_f32).trunc(); // -trunc(2.333) = -2
+        assert!(
+            (expected_db - (-2.0)).abs() < 1e-7,
+            "expected formula sanity: -trunc(7/3) = -2"
+        );
+        assert_scalar_approx(&ga, expected_da, 1e-6);
+        assert_scalar_approx(&gb, expected_db, 1e-6);
+        Ok(())
+    }
+
+    #[test]
+    fn test_fmod_backward_negative_dividend() -> FerrotorchResult<()> {
+        // c = fmod(-7, 3) = -1 (sign of dividend -7).
+        // (Verified live: torch.fmod(-7, 3) = -1.)
+        //
+        // Per derivatives.yaml:717-720:
+        //   da = 1
+        //   db = -1 * trunc(-7 / 3) = -trunc(-2.333...) = -(-2) = 2
+        //
+        // CONTRAST with remainder's backward at the same input
+        // (`test_remainder_backward_negative_dividend`):
+        //   remainder backward: db = -floor(-7/3) = -(-3) = 3
+        //   fmod      backward: db = -trunc(-7/3) = -(-2) = 2
+        //
+        // The 1-unit difference is exactly the sign-correction step the
+        // forward `remainder` kernel applies and the forward `fmod`
+        // kernel skips, propagated through the chain rule. Verified live
+        // against torch.fmod's autograd on 2026-05-25: da=1.0, db=2.0.
+        let a = leaf_scalar(-7.0, true);
+        let b = leaf_scalar(3.0, true);
+        let c = fmod(&a, &b)?;
+        assert!(
+            (c.item()? - (-1.0)).abs() < 1e-6,
+            "forward fmod(-7,3) = -1, got {}",
+            c.item()?,
+        );
+        c.backward()?;
+
+        let ga = a.grad()?.ok_or_else(|| FerrotorchError::InvalidArgument {
+            message: "a.grad missing".into(),
+        })?;
+        let gb = b.grad()?.ok_or_else(|| FerrotorchError::InvalidArgument {
+            message: "b.grad missing".into(),
+        })?;
+        let expected_da: f32 = 1.0;
+        let expected_db: f32 = -(-7.0_f32 / 3.0_f32).trunc(); // -(-2) = 2
+        assert!(
+            (expected_db - 2.0).abs() < 1e-7,
+            "expected formula sanity: -trunc(-7/3) = 2"
         );
         assert_scalar_approx(&ga, expected_da, 1e-6);
         assert_scalar_approx(&gb, expected_db, 1e-6);
