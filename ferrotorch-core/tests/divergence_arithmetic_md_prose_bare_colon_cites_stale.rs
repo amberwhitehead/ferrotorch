@@ -68,23 +68,29 @@ fn line_at(file: &PathBuf, line_no: usize) -> Option<String> {
 
 /// Each (doc_line_no, struct_name, cited_rs_line) the doc claims.
 fn stale_backward_cites() -> Vec<(usize, &'static str, usize)> {
+    // Refreshed HEAD line numbers after the #1267 fix (was: 1540/1702/...
+    // pre-shift values pinned by commit 405aa962c). The tuple shape remains
+    // `(doc_line_no, struct_name, cited_rs_line)` — both the .md cite and
+    // this fixture now point at HEAD, so the test is permanent regression
+    // coverage that detects future drift between arithmetic.md prose cites
+    // and the actual `struct *Backward` line in arithmetic.rs.
     vec![
         // REQ-N prose body cites (lines 100-280 of arithmetic.md).
-        (115, "RsqrtBackward", 1540),
-        (128, "ReciprocalBackward", 1702),
-        (152, "FloorDivideBackward", 2459),
-        (178, "RemainderBackward", 1865),
-        (204, "FmodBackward", 2168),
-        (229, "AddcmulBackward", 2820),
-        (253, "AddcdivBackward", 3116),
+        (115, "RsqrtBackward", 1565),
+        (128, "ReciprocalBackward", 1727),
+        (152, "FloorDivideBackward", 2484),
+        (178, "RemainderBackward", 1890),
+        (204, "FmodBackward", 2193),
+        (229, "AddcmulBackward", 2845),
+        (253, "AddcdivBackward", 3141),
         // AC-N prose cites (lines 316-370 of arithmetic.md).
-        (319, "RsqrtBackward", 1540),
-        (327, "ReciprocalBackward", 1702),
-        (335, "RemainderBackward", 1865),
-        (343, "FmodBackward", 2168),
-        (351, "FloorDivideBackward", 2459),
-        (359, "AddcmulBackward", 2820),
-        (369, "AddcdivBackward", 3116),
+        (319, "RsqrtBackward", 1565),
+        (327, "ReciprocalBackward", 1727),
+        (335, "RemainderBackward", 1890),
+        (343, "FmodBackward", 2193),
+        (351, "FloorDivideBackward", 2484),
+        (359, "AddcmulBackward", 2845),
+        (369, "AddcdivBackward", 3141),
     ]
 }
 

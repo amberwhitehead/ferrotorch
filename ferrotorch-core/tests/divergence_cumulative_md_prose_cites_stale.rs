@@ -44,13 +44,17 @@ fn divergence_cumulative_md_prose_pub_fn_cites_resolve_at_head() {
 
     // Architecture-section / AC-row cites of the form
     //   `pub fn <op>` at `cumulative.rs:NNN(-MMM)` (or `:NNN(-MMM)` continuation).
+    // Refreshed to HEAD line numbers post-#1267 (was: 322/524/72/202 pre-shift).
+    // The tuple shape remains `(doc_line_no, cited_rs_line, op_name)` — both
+    // the .md cite and this fixture now point at HEAD, so the test is
+    // permanent regression coverage against future drift.
     let pub_fn_cites = vec![
         // (doc-line, cited rs line, op_name)
-        (154, 322, "logcumsumexp"), // "ferrotorch implements forward via `logcumsumexp` at `cumulative.rs:322-337`"
-        (226, 524, "logcumsumexp"), // AC-5: "`cumulative.rs:524-532 pub fn logcumsumexp`"
-        (287, 72, "cumsum"),        // "`pub fn cumsum` at `:72-86`"
-        (298, 202, "cumprod"),      // "`pub fn cumprod` at `:202-217`"
-        (327, 322, "logcumsumexp"), // "`pub fn logcumsumexp` at `:322-337`"
+        (154, 712, "logcumsumexp"), // "ferrotorch implements forward via `logcumsumexp` at `cumulative.rs:712-720`"
+        (226, 712, "logcumsumexp"), // AC-5: "`cumulative.rs:712-720 pub fn logcumsumexp`"
+        (288, 104, "cumsum"),       // "`pub fn cumsum` at `:104-121`"
+        (299, 354, "cumprod"),      // "`pub fn cumprod` at `:354-372`"
+        (327, 712, "logcumsumexp"), // "`pub fn logcumsumexp` at `:712-720`"
     ];
 
     let mut errors: Vec<String> = Vec::new();
@@ -76,12 +80,13 @@ fn divergence_cumulative_md_prose_struct_backward_cites_resolve_at_head() {
     let root = workspace_root();
     let rs = root.join("ferrotorch-core/src/grad_fns/cumulative.rs");
 
+    // Refreshed to HEAD line numbers post-#1267 (was: 103/264 pre-shift).
     let struct_cites = vec![
         // (doc-line, cited rs line, struct)
-        (72, 103, "CumprodBackward"), // "ferrotorch implements this as `CumprodBackward` at `cumulative.rs:103-194`"
-        (158, 264, "LogcumsumexpBackward"), // "Backward is `LogcumsumexpBackward` at `cumulative.rs:264-312`"
-        (295, 103, "CumprodBackward"),      // "`CumprodBackward<T>` at `:103-107` saves"
-        (317, 264, "LogcumsumexpBackward"), // "`LogcumsumexpBackward<T>` at `:264-268` saves"
+        (72, 242, "CumprodBackward"), // "ferrotorch implements this as `CumprodBackward` at `cumulative.rs:242-342`"
+        (158, 641, "LogcumsumexpBackward"), // "Backward is `LogcumsumexpBackward` at `cumulative.rs:641-697`"
+        (295, 242, "CumprodBackward"),      // "`CumprodBackward<T>` at `:242-246` saves"
+        (317, 641, "LogcumsumexpBackward"), // "`LogcumsumexpBackward<T>` at `:641-645` saves"
     ];
 
     let mut errors: Vec<String> = Vec::new();
@@ -162,6 +167,10 @@ fn divergence_cumulative_md_req6_normalize_axis_tuple_cite_stale() {
 }
 
 #[test]
+#[allow(
+    clippy::nonminimal_bool,
+    reason = "the three-clause OR expresses three independent failure conditions (cite presence, stale-line miss, actual-line hit) that are easier to diagnose separately than after a clippy-style merge that would lose one of the clauses"
+)]
 fn divergence_cumulative_md_req7_reverse_cumsum_consumer_cite_stale() {
     // REQ-7 status table row at cumulative.md:443 (and architecture-section
     // sentence at :189-190 + :342) cites reverse_cumsum consumers at
@@ -190,7 +199,9 @@ fn divergence_cumulative_md_req7_reverse_cumsum_consumer_cite_stale() {
     let actual_676_ok = line676.contains("reverse_cumsum(");
 
     assert!(
-        !(cite_50 && cite_291) || !(stale_50_ok && stale_291_ok) || !(actual_76_ok && actual_676_ok),
+        !(cite_50 && cite_291)
+            || !(stale_50_ok && stale_291_ok)
+            || !(actual_76_ok && actual_676_ok),
         // De-Morgan: this is the negation of the failure condition.
         // Equivalently: assert that NOT all three conditions hold.
         // The TRUE failure case is: cite present + stale lines don't have the call + actual lines do.

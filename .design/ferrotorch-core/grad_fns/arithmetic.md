@@ -112,7 +112,7 @@ alpha=1, out=None)` signature gap.
   UnaryOps.cpp:346 `CREATE_UNARY_TORCH_IMPL_FUNC(rsqrt_out, rsqrt_stub)` and
   overrides.py:1115 `torch.rsqrt: lambda input, out=None: -1`. SHIPPED via
   `arithmetic::rsqrt` at `grad_fns/arithmetic.rs:1656` (dedicated forward +
-  `RsqrtBackward` struct at `:1540` saving the output `c` and computing
+  `RsqrtBackward` struct at `:1565` saving the output `c` and computing
   `da = -0.5 * grad * c^3` per `tools/autograd/derivatives.yaml:1504-1506
   - name: rsqrt(Tensor self) -> Tensor / self: -0.5 * grad * result.pow(3).conj()`)
   + non-test production consumer `Tensor::rsqrt_t` at `methods.rs:65`.
@@ -125,7 +125,7 @@ alpha=1, out=None)` signature gap.
   reciprocal_stub)` and overrides.py:1098
   `torch.reciprocal: lambda input, out=None: -1`. SHIPPED via
   `arithmetic::reciprocal` at `grad_fns/arithmetic.rs:1804` (dedicated
-  forward + `ReciprocalBackward` struct at `:1702` saving the output `c`
+  forward + `ReciprocalBackward` struct at `:1727` saving the output `c`
   and computing `da = -grad * c^2` per
   `tools/autograd/derivatives.yaml:1447-1449
   - name: reciprocal(Tensor self) -> Tensor / self: -grad * (result * result).conj()`)
@@ -149,7 +149,7 @@ alpha=1, out=None)` signature gap.
   Python `__floordiv__` form with the `(b<0)!=(mod<0)` sign-correction
   `div-=1`, plus the `(div-floor(div))>0.5` round-up guard, plus the
   `copysign(0, a/b)` ±0-preserving branch when `div` rounds to zero) +
-  `FloorDivideBackward` struct at `:2459` (errors on `.backward()` with
+  `FloorDivideBackward` struct at `:2484` (errors on `.backward()` with
   `FerrotorchError::InvalidArgument` to mirror upstream's
   `grad_fn=<NotImplemented object>` and `RuntimeError: derivative for
   aten::floor_divide is not implemented` — `floor_divide` has NO entry
@@ -175,7 +175,7 @@ alpha=1, out=None)` signature gap.
   b); if ((mod != 0) && ((b < 0) != (mod < 0))) mod += b;` — equivalent
   to `a - floor(a/b)*b` but produces upstream's exact ULPs via the
   hardware `fmod` primitive instead of accumulating 4-op rounding error)
-  + dedicated `RemainderBackward` struct at `:1865` saving `a` / `b` and
+  + dedicated `RemainderBackward` struct at `:1890` saving `a` / `b` and
   computing `da = grad`, `db = -grad * floor(a / b)` per
   `tools/autograd/derivatives.yaml:1455-1457
   - name: remainder.Tensor(Tensor self, Tensor other) -> Tensor
@@ -201,7 +201,7 @@ alpha=1, out=None)` signature gap.
   std::fmod(x, d); }` — Rust's `T::%` on f32/f64 *is* C99 `std::fmod`
   verbatim, so the elementwise kernel is literally `av % bv` with NO
   sign-correction, distinct from `remainder_inner`'s `fmod`-then-correct
-  flow) + dedicated `FmodBackward` struct at `:2168` saving `a` / `b`
+  flow) + dedicated `FmodBackward` struct at `:2193` saving `a` / `b`
   and computing `da = grad`, `db = -grad * trunc(a / b)` per
   `tools/autograd/derivatives.yaml:717-720
   - name: fmod.Tensor(Tensor self, Tensor other) -> Tensor
@@ -226,7 +226,7 @@ alpha=1, out=None)` signature gap.
   flat index, maps each output coord into per-operand flat indices with
   size-1 broadcast collapsing, applies the fused `out_i = input_i +
   value * tensor1_i * tensor2_i` per upstream byte-for-byte / R-DEV-1) +
-  dedicated `AddcmulBackward` struct at `:2820` saving `input` / `tensor1`
+  dedicated `AddcmulBackward` struct at `:2845` saving `input` / `tensor1`
   / `tensor2` / `value: f64`. Backward per `tools/autograd/derivatives.yaml
   - name: addcmul(Tensor self, Tensor tensor1, Tensor tensor2, *, Scalar
   value=1) -> Tensor / self: handle_r_to_c(...); tensor1: handle_r_to_c(
@@ -250,7 +250,7 @@ alpha=1, out=None)` signature gap.
   and `_torch_docs.py:461`
   `addcdiv(input, tensor1, tensor2, *, value=1, out=None) -> Tensor`.
   SHIPPED via `arithmetic::addcdiv` at `grad_fns/arithmetic.rs:3303`
-  with dedicated `AddcdivBackward` at `:3116` saving `input`/`tensor1`/
+  with dedicated `AddcdivBackward` at `:3141` saving `input`/`tensor1`/
   `tensor2`/`value: f64`. Backward per
   `tools/autograd/derivatives.yaml`:
 
@@ -316,7 +316,7 @@ alpha=1, out=None)` signature gap.
 - [x] AC-10: `rsqrt` parity-sweep at `--seeds 8` returns
   `[rsqrt] 24/24 passed (0 skipped, 0 failed)`. Closed by #1195 via
   `arithmetic::rsqrt` (`grad_fns/arithmetic.rs:1656`) + dedicated
-  `RsqrtBackward` (`:1540`) saving the output `c` for the
+  `RsqrtBackward` (`:1565`) saving the output `c` for the
   `-0.5 * grad * c^3` formula per `tools/autograd/derivatives.yaml:1504-1506`
   + non-test production consumer `Tensor::rsqrt_t` (`methods.rs:65`) +
   parity-sweep runner arm at
@@ -324,7 +324,7 @@ alpha=1, out=None)` signature gap.
 - [x] AC-11: `reciprocal` parity-sweep at `--seeds 8` returns
   `[reciprocal] 24/24 passed (0 skipped, 0 failed)`. Closed by #1196 via
   `arithmetic::reciprocal` (`grad_fns/arithmetic.rs:1804`) + dedicated
-  `ReciprocalBackward` (`:1702`) saving the output `c` for the
+  `ReciprocalBackward` (`:1727`) saving the output `c` for the
   `-grad * c^2` formula per `tools/autograd/derivatives.yaml:1447-1449`
   + non-test production consumer `Tensor::reciprocal_t` (`methods.rs:78`) +
   parity-sweep runner arm at
@@ -332,7 +332,7 @@ alpha=1, out=None)` signature gap.
 - [x] AC-13: `remainder` parity-sweep at `--seeds 8` returns
   `[remainder] 72/72 passed (0 skipped, 0 failed)`. Closed by #1198 via
   `arithmetic::remainder` (`grad_fns/arithmetic.rs:2004`) + dedicated
-  `RemainderBackward` (`:1865`) saving `a` / `b` and computing
+  `RemainderBackward` (`:1890`) saving `a` / `b` and computing
   `da = grad`, `db = -grad * floor(a/b)` per
   `tools/autograd/derivatives.yaml:1455-1457` + non-test production
   consumer `Tensor::remainder_t` (`methods.rs:106`) + parity-sweep
@@ -340,7 +340,7 @@ alpha=1, out=None)` signature gap.
 - [x] AC-14: `fmod` parity-sweep at `--seeds 8` returns
   `[fmod] N/N passed (0 skipped, 0 failed)` with N >= 1. Closed by
   #1199 via `arithmetic::fmod` (`grad_fns/arithmetic.rs:2311`) +
-  dedicated `FmodBackward` (`:2168`) saving `a` / `b` and computing
+  dedicated `FmodBackward` (`:2193`) saving `a` / `b` and computing
   `da = grad`, `db = -grad * trunc(a/b)` per
   `tools/autograd/derivatives.yaml:717-720` + non-test production
   consumer `Tensor::fmod_t` (`methods.rs:124`) + parity-sweep runner
@@ -348,7 +348,7 @@ alpha=1, out=None)` signature gap.
 - [x] AC-12: `floor_divide` parity-sweep at `--seeds 8` returns
   `[floor_divide] 72/72 passed (0 skipped, 0 failed)`. Closed by #1197
   via `arithmetic::floor_divide` (`grad_fns/arithmetic.rs:2641`) +
-  `FloorDivideBackward` (`:2459`) erroring on `.backward()` to mirror
+  `FloorDivideBackward` (`:2484`) erroring on `.backward()` to mirror
   upstream's `<NotImplemented>` grad_fn (no entry in
   `tools/autograd/derivatives.yaml`) + non-test production consumer
   `Tensor::floor_divide_t` (`methods.rs:176`) + parity-sweep runner
@@ -356,7 +356,7 @@ alpha=1, out=None)` signature gap.
 - [x] AC-15: `addcmul` parity-sweep at `--seeds 8` returns
   `[addcmul] 96/96 passed (0 skipped, 0 failed)`. Closed by #1200 via
   `arithmetic::addcmul` (`grad_fns/arithmetic.rs:2988`) + dedicated
-  `AddcmulBackward` (`:2820`) saving `input` / `tensor1` / `tensor2` /
+  `AddcmulBackward` (`:2845`) saving `input` / `tensor1` / `tensor2` /
   `value: f64` and computing `d_input = grad`, `d_tensor1 = grad * value
   * tensor2`, `d_tensor2 = grad * value * tensor1` per
   `tools/autograd/derivatives.yaml` + non-test production consumer
@@ -366,7 +366,7 @@ alpha=1, out=None)` signature gap.
 - [x] AC-16: `addcdiv` parity-sweep at `--seeds 8` returns
   `[addcdiv] N/N passed (0 skipped, 0 failed)` with N >= 1. Closed by
   #1201 via `arithmetic::addcdiv` (`grad_fns/arithmetic.rs:3303`) +
-  dedicated `AddcdivBackward` (`:3116`) saving `input` / `tensor1` /
+  dedicated `AddcdivBackward` (`:3141`) saving `input` / `tensor1` /
   `tensor2` / `value: f64` and computing `d_input = grad`,
   `d_tensor1 = grad * value / tensor2`,
   `d_tensor2 = -grad * value * tensor1 / (tensor2 * tensor2)` per
