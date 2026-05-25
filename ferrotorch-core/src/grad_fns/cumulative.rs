@@ -16,13 +16,13 @@
 //!
 //! | REQ | Status | Evidence |
 //! |---|---|---|
-//! | REQ-1 (cumsum) | SHIPPED | `cumsum` at `cumulative.rs:88` + `CumsumBackward` at `:35` (0-D fast path mirrors `ReduceOps.cpp:501-504`); consumer `Tensor::cumsum_t` at `methods.rs:282`; parity `[cumsum] 32/32` (grep=1) |
-//! | REQ-2 (cumprod) | SHIPPED | `cumprod` at `cumulative.rs:338` + `CumprodBackward` at `:227` (O(n^3) zeros-path); consumer `Tensor::cumprod_t` at `methods.rs:311`; parity `[cumprod] 80/80` (grep=1) |
-//! | REQ-3 (cummax) | SHIPPED | `cummax` at `cumulative.rs:467` + `CummaxBackward` at `:351` via `cummaxmin_backward_impl` at `:417` (scatter_add VJP per `derivatives.yaml:533-535`); consumer `einops.rs:796` (`EinopsReduction::Max`); parity `[cummax] 24/24` (grep=1) |
-//! | REQ-4 (cummin) | SHIPPED | `cummin` at `cumulative.rs:499` + `CumminBackward` at `:385` shares `cummaxmin_backward_impl` at `:417`; consumer `einops.rs:802` (`EinopsReduction::Min`); parity `[cummin] 24/24` (grep=1) |
-//! | REQ-5 (logcumsumexp) | SHIPPED | `logcumsumexp` at `cumulative.rs:531` + `LogcumsumexpBackward` at `:459` (`exp(input) * reverse_cumsum(grad * exp(-output))` per `derivatives.yaml:521-523`); consumer `Tensor::logcumsumexp_t` at `methods.rs:342`; parity `[logcumsumexp] 48/48` (grep=1) |
-//! | REQ-6 (dim normalization) | SHIPPED | `normalize_axis(dim as isize, ndim)` calls at `cumulative.rs:73, :203, :231, :241, :323` mirroring `maybe_wrap_dim` at `ReduceOps.cpp:506, :622, :851, :890`; consumers are the five `pub fn` bodies themselves (reached through `einops.rs:796 / :802` and the `methods.rs` `*_t` surfaces) |
-//! | REQ-7 (reverse_cumsum helper) | SHIPPED | impl `ops/cumulative.rs:109` mirroring `static Tensor reversed_cumsum(...)` at `ReduceOps.cpp:527-529`; non-test consumers `CumsumBackward::backward` at `cumulative.rs:50` and `LogcumsumexpBackward::backward` at `:291` |
+//! | REQ-1 (cumsum) | SHIPPED | `cumsum` at `cumulative.rs:104` + `CumsumBackward` at `:51` (0-D fast path mirrors `ReduceOps.cpp:501-504`); consumer `Tensor::cumsum_t` at `methods.rs:282`; parity `[cumsum] 32/32` (grep=1) |
+//! | REQ-2 (cumprod) | SHIPPED | `cumprod` at `cumulative.rs:354` + `CumprodBackward` at `:242` (O(n^3) zeros-path); consumer `Tensor::cumprod_t` at `methods.rs:311`; parity `[cumprod] 80/80` (grep=1) |
+//! | REQ-3 (cummax) | SHIPPED | `cummax` at `cumulative.rs:524` + `CummaxBackward` at `:413` via private helper `cummaxmin_backward_impl` (scatter_add VJP per `derivatives.yaml:533-535`); consumer `einops.rs:796` (`EinopsReduction::Max`); parity `[cummax] 24/24` (grep=1) |
+//! | REQ-4 (cummin) | SHIPPED | `cummin` at `cumulative.rs:556` + `CumminBackward` at `:447` shares the private `cummaxmin_backward_impl` helper; consumer `einops.rs:802` (`EinopsReduction::Min`); parity `[cummin] 24/24` (grep=1) |
+//! | REQ-5 (logcumsumexp) | SHIPPED | `logcumsumexp` at `cumulative.rs:712` + `LogcumsumexpBackward` at `:641` (`exp(input) * reverse_cumsum(grad * exp(-output))` per `derivatives.yaml:521-523`); consumer `Tensor::logcumsumexp_t` at `methods.rs:342`; parity `[logcumsumexp] 48/48` (grep=1) |
+//! | REQ-6 (dim normalization) | SHIPPED | `normalize_axis(dim as isize, ndim)` calls at `cumulative.rs:108, :358, :528, :560, :721` mirroring `maybe_wrap_dim` at `ReduceOps.cpp:506, :622, :851, :890`; consumers are the five `pub fn` bodies themselves (reached through `einops.rs:796 / :802` and the `methods.rs` `*_t` surfaces) |
+//! | REQ-7 (reverse_cumsum helper) | SHIPPED | impl `ops/cumulative.rs:109` mirroring `static Tensor reversed_cumsum(...)` at `ReduceOps.cpp:527-529`; non-test consumers `CumsumBackward::backward` at `cumulative.rs:57` and `LogcumsumexpBackward::backward` at `:648` |
 
 use std::sync::Arc;
 
