@@ -512,7 +512,7 @@ also `einsum.rs:818,824,840,848` (the batch-matmul broadcast paths),
 (`arithmetic.rs:1126-1284`) — `dispatch_floating_dtype!` over
 `div_{f32,f64,bf16_bf16,f16}` and `broadcast_div_{...}`, CPU `fast_div`
 fallthrough. IEEE-754 div-by-zero behavior is delegated to the underlying
-kernel / `fast_div`. **Non-test consumer**: `methods.rs:26-28`
+kernel / `fast_div`. **Non-test consumer**: `methods.rs:40`
 `Tensor::div_t`; also `autograd::forward_ad:114,120` (dual-number division
 quotient rule), `nn::loss.rs:136` (mean reduction), `transcendental.rs:175`
 (log-backward `grad / x`).
@@ -834,33 +834,33 @@ but have not yet been recorrected through the discriminator pass.
 
 ## Verification
 
-### Unit tests (in-file `#[cfg(test)] mod tests` at `arithmetic.rs:3549-3892`)
+### Unit tests (in-file `#[cfg(test)] mod tests` at `arithmetic.rs:3549-5320`)
 
 Forward correctness:
-- `test_add_forward` (1720), `test_sub_forward` (1728), `test_mul_forward`
-  (1736), `test_div_forward` (1744), `test_neg_forward` (1752),
-  `test_pow_forward` (1759), `test_sqrt_forward` (1769), `test_abs_forward`
-  (1779).
+- `test_add_forward` (3582), `test_sub_forward` (3590), `test_mul_forward`
+  (3598), `test_div_forward` (3606), `test_neg_forward` (3614),
+  `test_pow_forward` (3621), `test_sqrt_forward` (3631), `test_abs_forward`
+  (3641).
 
 Backward (scalar):
-- `test_add_backward` (1790), `test_sub_backward` (1802),
-  `test_mul_backward` (1814), `test_div_backward` (1826),
-  `test_div_backward_tensor_by_scalar` (1838 — reproducer for GitHub #7),
-  `test_neg_backward` (1864), `test_pow_backward` (1874),
-  `test_sqrt_backward` (1884), `test_abs_backward_positive` (1895),
-  `test_abs_backward_negative` (1905).
+- `test_add_backward` (3749), `test_sub_backward` (3761),
+  `test_mul_backward` (3773), `test_div_backward` (3785),
+  `test_div_backward_tensor_by_scalar` (3797 — reproducer for GitHub #7),
+  `test_neg_backward` (3823), `test_pow_backward` (3833),
+  `test_sqrt_backward` (3843), `test_abs_backward_positive` (5140),
+  `test_abs_backward_negative` (5150).
 
 No-grad / partial-grad:
-- `test_add_no_grad_fn_when_inputs_detached` (1919),
-  `test_mul_partial_requires_grad` (1927),
-  `test_no_grad_context_skips_backward` (1941).
+- `test_add_no_grad_fn_when_inputs_detached` (5164),
+  `test_mul_partial_requires_grad` (5172),
+  `test_no_grad_context_skips_backward` (5186).
 
 Chain-rule:
-- `test_chain_mul_add` (1956), `test_chain_div_sub` (1971),
-  `test_chain_sqrt_pow` (1986), `test_neg_double` (2001).
+- `test_chain_mul_add` (5201), `test_chain_div_sub` (5216),
+  `test_chain_sqrt_pow` (5231), `test_neg_double` (5246).
 
 Vector backward:
-- `test_mul_vector_backward` (2016).
+- `test_mul_vector_backward` (5261).
 
 ### Parity-sweep commands (verbatim — orchestrator re-runs)
 
