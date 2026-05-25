@@ -128,14 +128,15 @@ qmax)` + a private `FakeQuantizeBackward<T>` grad-fn struct.
 - [ ] AC-1: `fake_quantize_per_tensor_affine` parity-sweep at `--seeds 8`
   returns `[fake_quantize_per_tensor_affine] N/N passed (0 skipped, 0
   failed)` with `N >= 1` and `grep -c "passed (0 skipped, 0 failed)" == 1`.
-  Currently fails with `oracle: unknown op:
-  fake_quantize_per_tensor_affine` — the parity-sweep PyTorch oracle does
-  not expose this op via `torch.testing._internal.opinfo.op_db`. Tracked
-  by blocker #1240.
+  Post-#1240 close, the oracle exposes the op via the `_CUSTOM_OPS`
+  registry at `tools/parity-sweep/oracle.py` and the sweep runs cleanly
+  (no `unknown op` error), reporting `0/72 passed (72 skipped, 0 failed)`
+  pending #1238 (REQ-1 impl + runner-side dispatch arm).
 - [ ] AC-2: `fake_quantize_per_channel_affine` parity-sweep at `--seeds 8`
   returns `[fake_quantize_per_channel_affine] N/N passed (0 skipped, 0
-  failed)` with `N >= 1`. Same oracle-availability blocker #1240 plus
-  REQ-2 impl blocker #1239.
+  failed)` with `N >= 1`. Post-#1240 close, oracle exposes the op (9
+  hand-crafted samples × 8 seeds = 72 samples); sweep reports `0/72
+  passed (72 skipped, 0 failed)` pending #1239 (REQ-2 impl).
 - [x] AC-3: `cargo test -p ferrotorch-core --lib grad_fns::quantize_grad`
   passes all 10 tests at `quantize_grad.rs:153-348`:
   `fake_quantize_round_trips_representable_values`,
@@ -319,15 +320,29 @@ when `scale.is_nan() || scale <= 0.0` (`:59-63`) and when `qmin >= qmax`
 | `fake_quantize_per_channel_affine` | `aten/src/ATen/native/quantized/FakeQuantPerChannelAffine.cpp:32-42 Tensor fake_quantize_per_channel_affine(const Tensor& self, const Tensor& scale, const Tensor& zero_point, int64_t axis, int64_t quant_min, int64_t quant_max)` | `tools/autograd/derivatives.yaml:682-683` (`fake_quantize_per_channel_affine_cachemask_backward = dY * mask`, mask broadcast along `axis`) | Same elementwise NaN / Inf / denormal / empty cases as per-tensor, plus: `scale.dim() == 1` enforced at `FakeQuantPerChannelAffine.cpp:55`, `zero_point.dim() == 1` at `:56`, `scale.numel() == self.size(axis)` at `:61`. Axis out-of-bounds: `axis >= 0 && axis <= self.dim()` at `:76` — note the `<=` is upstream's actual contract (axis-on-the-trailing-dim is permitted for a degenerate broadcast); ferrotorch should match. Zero-point dtype: upstream accepts `kInt`, `kFloat`, `kHalf` for zero_point with the float types triggering a `_get_rounded_zero_point` round-then-clamp at `:133-139`; ferrotorch's int-only zero_point sidesteps this. **Status: NOT-STARTED (impl missing per #1239; oracle missing per #1240).** |
 
 Parity-sweep audit reference: BOTH ops are **MISSING** from
-`tools/parity-sweep/parity_audit.json`. The PyTorch oracle
-(`tools/parity-sweep/oracle/`) does not currently expose
-`fake_quantize_per_tensor_affine` or `fake_quantize_per_channel_affine`
-via `torch.testing._internal.opinfo.op_db` — these are not standard
-op_db entries (op_db is the unit-test op set; quantization ops live
-under a separate `torch.testing._internal.quantization` harness).
-Adding parity-sweep oracle coverage is a strict prerequisite to AC-1
-and AC-2 and is tracked by #1240 (analogous to the cumulative
-#1230 oracle gap).
+`tools/parity-sweep/parity_audit.json`. The PyTorch oracle previously
+did not expose `fake_quantize_per_tensor_affine` or
+`fake_quantize_per_channel_affine` via
+`torch.testing._internal.opinfo.op_db` — these are not standard op_db
+entries (op_db is the unit-test op set; quantization ops live under a
+separate `torch.testing._internal.quantization` harness).
+
+**As of #1240's close, the oracle gap is closed.** A custom-op registry
+in `tools/parity-sweep/oracle.py` (the `_CUSTOM_OPS` dict and
+`_fake_quantize_per_tensor_affine_samples` /
+`_fake_quantize_per_channel_affine_samples` generators) hand-crafts 9
+samples per op covering 1-D / 2-D / 3-D / 4-D shapes, various scales
+(0.001, 0.01, 0.05, 0.1, 1.0, 10.0, 100.0), zero_points across the
+representable int8/uint8 range, both int8 (-128/127) and uint8 (0/255)
+quant ranges, and edge inputs (zeros, exact-multiple-of-scale fixed
+points, out-of-range clamps, +Inf/-Inf). The oracle's `sample`,
+`execute`, and `list_ops` commands now route through `_CUSTOM_OPS` for
+these op names; the runner-side `dispatch_f32` still returns
+`Ok(None)` for these ops (handled as skips), so until #1238 (per-tensor
+REQ-1 impl) and #1239 (per-channel REQ-2 impl) land, the sweeps report
+`0/72 passed (72 skipped, 0 failed)` — no more `unknown op` errors.
+Closing AC-1 / AC-2 requires the REQ-1 / REQ-2 implementations to add
+runner-side dispatch arms.
 
 ## Verification
 
@@ -373,23 +388,22 @@ production consumer + parity-sweep coverage.
 
 ### Parity-sweep status
 
-Both ops return `oracle: unknown op` at the current build:
+Post-#1240 close, the oracle no longer errors — sweeps run through 72
+samples (9 hand-crafted samples × 8 seeds) per op and report them as
+skipped because runner-side dispatch is missing:
 
 ```
 $ ./target/release/parity-sweep sweep --op fake_quantize_per_tensor_affine --seeds 8
-  FAIL: seed=0 i=0 oracle: oracle: unknown op: fake_quantize_per_tensor_affine
-  ... (all 8 seeds fail with same oracle error)
+  [fake_quantize_per_tensor_affine] 0/72 passed (72 skipped, 0 failed)
 
 $ ./target/release/parity-sweep sweep --op fake_quantize_per_channel_affine --seeds 8
-  FAIL: seed=0 i=0 oracle: oracle: unknown op: fake_quantize_per_channel_affine
-  ... (all 8 seeds fail with same oracle error)
+  [fake_quantize_per_channel_affine] 0/72 passed (72 skipped, 0 failed)
 ```
 
 Smoke grep count (`grep -c "passed (0 skipped, 0 failed)"`) is `0` for
-both ops. Closing AC-1 / AC-2 requires landing oracle coverage in the
-PyTorch oracle layer of the parity-sweep (issue #1240) plus the
-upstream-byte-faithful Rust implementations of REQ-1 (#1238) and REQ-2
-(#1239).
+both ops (because there are still skips). Closing AC-1 / AC-2 now
+requires only the upstream-byte-faithful Rust implementations of REQ-1
+(#1238) and REQ-2 (#1239) — the oracle dependency #1240 is resolved.
 
 Note on the kernel layer: there is no `ops/quantize_grad.rs` analogous
 to `ops/cumulative.rs`. The forward and backward both live entirely
@@ -401,6 +415,6 @@ warrants a separate kernel-layer split.
 
 | REQ | Status | Evidence |
 |---|---|---|
-| REQ-1 (per-tensor) | NOT-STARTED | The current `fake_quantize_differentiable` at `ferrotorch-core/src/grad_fns/quantize_grad.rs:51-110` is a near-analog with divergent name (`fake_quantize_differentiable` vs upstream `fake_quantize_per_tensor_affine` per `torch/overrides.py:622`), divergent arg widths (i32 vs upstream i64 for `zero_point` / `quant_min` / `quant_max`), and no tensor-qparams overload (missing `fake_quantize_per_tensor_affine(input, scale: Tensor, zero_point: Tensor, ...)` from `FakeQuantPerTensorAffine.cpp:42-51`). Non-test production consumer is absent: only `pub use grad_fns::quantize_grad::fake_quantize_differentiable;` at `ferrotorch-core/src/lib.rs:163` references it outside `#[cfg(test)]` blocks, and a `pub use` is vocabulary-only per R-DEFER-1. `QatModel::fake_quantize_weights` at `ferrotorch-core/src/quantize.rs:1012` is a separate `&[f32]`-slice surface using a different `FakeQuantize::forward` struct in `quantize.rs`, not this file's `fake_quantize_differentiable`. Parity-sweep oracle does not expose the op (`oracle: unknown op`). Open prereq blocker: #1238 (rename + signature match + non-test consumer). Oracle dependency: #1240. |
-| REQ-2 (per-channel) | NOT-STARTED | No `fake_quantize_per_channel_affine` function exists in `ferrotorch-core/src/grad_fns/quantize_grad.rs` (`grep -n 'per_channel' quantize_grad.rs` returns empty). The upstream contract at `aten/src/ATen/native/quantized/FakeQuantPerChannelAffine.cpp:32-42` requires a per-axis broadcast of 1-D `scale` / `zero_point` tensors, which has no analog in the current file. Open prereq blocker: #1239 (implement the per-channel forward + backward). Oracle dependency: #1240. |
+| REQ-1 (per-tensor) | NOT-STARTED | The current `fake_quantize_differentiable` at `ferrotorch-core/src/grad_fns/quantize_grad.rs:51-110` is a near-analog with divergent name (`fake_quantize_differentiable` vs upstream `fake_quantize_per_tensor_affine` per `torch/overrides.py:622`), divergent arg widths (i32 vs upstream i64 for `zero_point` / `quant_min` / `quant_max`), and no tensor-qparams overload (missing `fake_quantize_per_tensor_affine(input, scale: Tensor, zero_point: Tensor, ...)` from `FakeQuantPerTensorAffine.cpp:42-51`). Non-test production consumer is absent: only `pub use grad_fns::quantize_grad::fake_quantize_differentiable;` at `ferrotorch-core/src/lib.rs:163` references it outside `#[cfg(test)]` blocks, and a `pub use` is vocabulary-only per R-DEFER-1. `QatModel::fake_quantize_weights` at `ferrotorch-core/src/quantize.rs:1012` is a separate `&[f32]`-slice surface using a different `FakeQuantize::forward` struct in `quantize.rs`, not this file's `fake_quantize_differentiable`. Parity-sweep oracle now exposes the op via the `_CUSTOM_OPS` registry at `tools/parity-sweep/oracle.py` (9 hand-crafted samples; #1240 closed) — sweeps run cleanly and report `0/72 passed (72 skipped, 0 failed)`. Open prereq blocker: #1238 (rename + signature match + non-test consumer + runner-side dispatch). |
+| REQ-2 (per-channel) | NOT-STARTED | No `fake_quantize_per_channel_affine` function exists in `ferrotorch-core/src/grad_fns/quantize_grad.rs` (`grep -n 'per_channel' quantize_grad.rs` returns empty). The upstream contract at `aten/src/ATen/native/quantized/FakeQuantPerChannelAffine.cpp:32-42` requires a per-axis broadcast of 1-D `scale` / `zero_point` tensors, which has no analog in the current file. Parity-sweep oracle now exposes the op via the `_CUSTOM_OPS` registry at `tools/parity-sweep/oracle.py` (9 hand-crafted samples covering 2-D/3-D/4-D shapes, axis on first/middle/last dim, int8 / uint8 ranges; #1240 closed). Open prereq blocker: #1239 (implement the per-channel forward + backward + runner-side dispatch). |
 | REQ-3 (STE backward) | NOT-STARTED | The `FakeQuantizeBackward<T>` grad-fn struct at `ferrotorch-core/src/grad_fns/quantize_grad.rs:113-151` mechanically implements the upstream `dY * mask` STE per `FakeQuantPerTensorAffine.cpp:121-134` (verified by `fake_quantize_ste_passes_grad_for_in_range_values` at `:248-269` and `fake_quantize_ste_zeros_grad_for_out_of_range_values` at `:271-297`), but the only attach site is `fake_quantize_differentiable` (REQ-1), which itself has no non-test production consumer. Per R-DEFER-1, a grad-fn struct without a production-callable forward surface is vocabulary-only. Tracked under the REQ-1 consumer-wiring blocker #1238 — when REQ-1's consumer lands, REQ-3 moves to SHIPPED simultaneously because the backward struct's correctness is already covered by AC-6. |
