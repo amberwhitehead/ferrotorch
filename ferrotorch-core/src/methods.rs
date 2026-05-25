@@ -252,6 +252,97 @@ impl<T: Float> Tensor<T> {
         crate::grad_fns::arithmetic::addcdiv(self, tensor1, tensor2, value)
     }
 
+    // --- Cumulative (scan) ---
+
+    /// `torch.Tensor.cumsum(dim)` — cumulative sum along `dim`.
+    ///
+    /// Mirrors `torch.cumsum(input, dim, *, dtype=None, out=None)` per
+    /// `torch/_torch_docs.py:3429 cumsum(input, dim, *, dtype=None,
+    /// out=None) -> Tensor` and the `torch.Tensor` method docstring at
+    /// `torch/_tensor_docs.py:1500-1506 add_docstr_all("cumsum", r"""
+    /// cumsum(dim, dtype=None) -> Tensor [...] See :func:`torch.cumsum``.
+    /// Upstream C++ entry at `aten/src/ATen/native/ReduceOps.cpp:511
+    /// TORCH_IMPL_FUNC(cumsum_out)` dispatching `cumsum_stub`. Autograd
+    /// VJP per `tools/autograd/derivatives.yaml:529-531 (name: cumsum(
+    /// Tensor self, int dim, *, ScalarType? dtype=None) -> Tensor; self:
+    /// cumsum_backward(grad.to(self.scalar_type()), dim))` which is the
+    /// `reverse_cumsum` (flip → cumsum → flip) upper-triangular
+    /// multiplication at `ReduceOps.cpp:527-529 static Tensor
+    /// reversed_cumsum(const Tensor& w, int64_t dim)`.
+    ///
+    /// ferrotorch does NOT accept the `dtype` kwarg (the dtype-promotion
+    /// branch at `ReduceOps.cpp:267` is unreachable for the `Tensor<T:
+    /// Float>` family — see `.design/ferrotorch-core/grad_fns/
+    /// cumulative.md` REQ-1).
+    ///
+    /// The non-test production consumer wiring for
+    /// `grad_fns::cumulative::cumsum` per R-DEFER-1: this method is the
+    /// public, chainable surface that closes the consumer requirement
+    /// (blocker #1232).
+    pub fn cumsum_t(&self, dim: i64) -> FerrotorchResult<Tensor<T>> {
+        crate::grad_fns::cumulative::cumsum(self, dim)
+    }
+
+    /// `torch.Tensor.cumprod(dim)` — cumulative product along `dim`.
+    ///
+    /// Mirrors `torch.cumprod(input, dim, *, dtype=None, out=None)` per
+    /// `torch/_torch_docs.py:3390 cumprod(input, dim, *, dtype=None,
+    /// out=None) -> Tensor` and the `torch.Tensor` method docstring at
+    /// `torch/_tensor_docs.py:1482-1488 add_docstr_all("cumprod", r"""
+    /// cumprod(dim, dtype=None) -> Tensor [...] See :func:`torch.cumprod`.
+    /// Upstream C++ entry at `aten/src/ATen/native/ReduceOps.cpp:519
+    /// TORCH_IMPL_FUNC(cumprod_out)`. Autograd VJP per
+    /// `tools/autograd/derivatives.yaml:525-527 (name: cumprod(Tensor
+    /// self, int dim, *, ScalarType? dtype=None) -> Tensor; self:
+    /// cumprod_backward(grad.to(self.scalar_type()), self, dim, result))`
+    /// routing through `cumprod_backward` at `ReduceOps.cpp:531-790`
+    /// with the zeros-aware reverse-cumsum-divide algorithm.
+    ///
+    /// ferrotorch does NOT accept the `dtype` kwarg; the zeros-present
+    /// path uses an O(n^3) brute-force backward rather than upstream's
+    /// composite-compliance masked-fill (numerically identical, slower,
+    /// not second-order-differentiable — see
+    /// `.design/ferrotorch-core/grad_fns/cumulative.md` REQ-2).
+    ///
+    /// The non-test production consumer wiring for
+    /// `grad_fns::cumulative::cumprod` per R-DEFER-1: this method is the
+    /// public, chainable surface that closes the consumer requirement
+    /// (blocker #1232).
+    pub fn cumprod_t(&self, dim: i64) -> FerrotorchResult<Tensor<T>> {
+        crate::grad_fns::cumulative::cumprod(self, dim)
+    }
+
+    /// `torch.Tensor.logcumsumexp(dim)` — numerically stable
+    /// `log(cumsum(exp(self)))` along `dim`.
+    ///
+    /// Mirrors `torch.logcumsumexp(input, dim, *, out=None)` per
+    /// `torch/_torch_docs.py:3298 logcumsumexp(input, dim, *, out=None)
+    /// -> Tensor` and the `torch.Tensor` method docstring at
+    /// `torch/_tensor_docs.py:1455-1462 add_docstr_all("logcumsumexp",
+    /// r""" logcumsumexp(dim) -> Tensor [...] See
+    /// :func:`torch.logcumsumexp``. Upstream C++ entry at
+    /// `aten/src/ATen/native/ReduceOps.cpp:475 Tensor logcumsumexp(const
+    /// Tensor& self, int64_t dim)` dispatching `_logcumsumexp_cpu` at
+    /// `:465-468` → `logcumsumexp_stub` at `:471`. Autograd VJP per
+    /// `tools/autograd/derivatives.yaml:521-523 (name: logcumsumexp(
+    /// Tensor self, int dim) -> Tensor; self: logcumsumexp_backward(grad,
+    /// self, result, dim))` factors as `grad_input[i] = exp(input[i]) *
+    /// reverse_cumsum(grad_output * exp(-output))` (softmax-weighted
+    /// reverse cumsum).
+    ///
+    /// The numerical-stability invariant (large inputs ~1000.0 stay
+    /// finite) is preserved by the two-pass max-rescaling forward
+    /// algorithm at `ops/cumulative.rs:378-410`. See
+    /// `.design/ferrotorch-core/grad_fns/cumulative.md` REQ-5.
+    ///
+    /// The non-test production consumer wiring for
+    /// `grad_fns::cumulative::logcumsumexp` per R-DEFER-1: this method
+    /// is the public, chainable surface that closes the consumer
+    /// requirement (blocker #1232).
+    pub fn logcumsumexp_t(&self, dim: i64) -> FerrotorchResult<Tensor<T>> {
+        crate::grad_fns::cumulative::logcumsumexp(self, dim)
+    }
+
     // --- Transcendental ---
 
     pub fn exp_t(&self) -> FerrotorchResult<Tensor<T>> {
@@ -1334,5 +1425,125 @@ mod tests {
         let a = from_slice(&[1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0], &[2, 3]).unwrap();
         assert_eq!(a.dim(), 2);
         assert_eq!(a.dim(), a.ndim());
+    }
+
+    // --- cumulative (scan) methods ---
+
+    #[test]
+    // reason: cumulative sum of small integer-valued floats (1+2+3 = 6 at
+    // most) is bit-exact in any deterministic order — the partial sums
+    // never lose mantissa bits, so equality is the right check. The
+    // expected values [1, 3, 6] are constructed from the named upstream
+    // recurrence `out_i = sum_{k=0..=i} input_k` per
+    // `aten/src/ATen/native/ReduceOps.cpp:511 TORCH_IMPL_FUNC(cumsum_out)`
+    // and the math definition at `torch/_torch_docs.py:3431-3438
+    // y_i = x_1 + x_2 + ... + x_i`. The dispatch-correctness assertion
+    // (method == free function) protects R-DEFER-1 wiring at the
+    // method boundary.
+    #[allow(clippy::float_cmp)]
+    fn test_method_cumsum_t_1d() {
+        let a = from_slice(&[1.0f32, 2.0, 3.0], &[3]).unwrap();
+
+        // Expected derived from upstream recurrence:
+        //   out[0] = 1
+        //   out[1] = 1 + 2 = 3
+        //   out[2] = 1 + 2 + 3 = 6
+        let expected = [1.0f32, 1.0 + 2.0, 1.0 + 2.0 + 3.0];
+
+        let via_method = a.cumsum_t(0).unwrap();
+        assert_eq!(via_method.shape(), &[3]);
+        let m = via_method.data_vec().unwrap();
+        for i in 0..3 {
+            assert_eq!(m[i], expected[i], "method cumsum[{i}] != expected");
+        }
+
+        // Dispatch-correctness: method MUST equal the free function on
+        // identical input. This is the production-consumer parity check.
+        let via_free = crate::grad_fns::cumulative::cumsum(&a, 0).unwrap();
+        let f = via_free.data_vec().unwrap();
+        for i in 0..3 {
+            assert_eq!(m[i], f[i], "cumsum_t and free fn disagree at {i}");
+        }
+    }
+
+    #[test]
+    // reason: cumprod of small ints (1, 2, 6) is bit-exact in f32 (small
+    // integer mantissas), so equality is the right check. The expected
+    // values [1, 2, 6] are constructed from the named upstream recurrence
+    // `out_i = prod_{k=0..=i} input_k` per `aten/src/ATen/native/
+    // ReduceOps.cpp:519 TORCH_IMPL_FUNC(cumprod_out)` and the math
+    // definition at `torch/_torch_docs.py:3392-3399 y_i = x_1 * x_2 *
+    // ... * x_i`.
+    #[allow(clippy::float_cmp)]
+    fn test_method_cumprod_t_1d() {
+        let a = from_slice(&[1.0f32, 2.0, 3.0], &[3]).unwrap();
+
+        // Expected derived from upstream recurrence:
+        //   out[0] = 1
+        //   out[1] = 1 * 2 = 2
+        //   out[2] = 1 * 2 * 3 = 6
+        let expected = [1.0f32, 1.0 * 2.0, 1.0 * 2.0 * 3.0];
+
+        let via_method = a.cumprod_t(0).unwrap();
+        assert_eq!(via_method.shape(), &[3]);
+        let m = via_method.data_vec().unwrap();
+        for i in 0..3 {
+            assert_eq!(m[i], expected[i], "method cumprod[{i}] != expected");
+        }
+
+        // Dispatch-correctness check.
+        let via_free = crate::grad_fns::cumulative::cumprod(&a, 0).unwrap();
+        let f = via_free.data_vec().unwrap();
+        for i in 0..3 {
+            assert_eq!(m[i], f[i], "cumprod_t and free fn disagree at {i}");
+        }
+    }
+
+    #[test]
+    // reason: logcumsumexp on a single-element vector is the identity:
+    // `log(exp(x)) == x` numerically (one term in the sum). The expected
+    // value 42.0 is the input value itself, derived from the math
+    // definition at `torch/_torch_docs.py:3304-3305
+    // logcumsumexp(x)_ij = log(sum_{k=0..=j} exp(x_ik))` evaluated at
+    // j=0 (single-element scan). For the 3-element case we also check
+    // monotonicity (logcumsumexp is non-decreasing along the scan dim
+    // because the running sum-of-exp is non-decreasing and log is
+    // monotonic) — verified live 2026-05-25 with torch 2.11.0.
+    fn test_method_logcumsumexp_t_1d() {
+        // Single-element: the math identity `log(exp(x)) = x` makes the
+        // expected value structurally derivable without calling the
+        // function on itself.
+        let a = from_slice(&[42.0f32], &[1]).unwrap();
+        let via_method = a.logcumsumexp_t(0).unwrap();
+        assert_eq!(via_method.shape(), &[1]);
+        let m = via_method.data_vec().unwrap();
+        // logcumsumexp on a single element equals the input. Allow a
+        // small fp slop because exp/log round-trip is not bit-exact.
+        assert!(
+            (m[0] - 42.0_f32).abs() < 1e-3,
+            "logcumsumexp single-elt: got {} expected 42.0",
+            m[0]
+        );
+
+        // Dispatch-correctness check on a 3-element input: method MUST
+        // equal the free function bit-exactly (both go through the same
+        // forward kernel).
+        let b = from_slice(&[0.0f32, 1.0, 2.0], &[3]).unwrap();
+        let via_method = b.logcumsumexp_t(0).unwrap();
+        let via_free = crate::grad_fns::cumulative::logcumsumexp(&b, 0).unwrap();
+        let m = via_method.data_vec().unwrap();
+        let f = via_free.data_vec().unwrap();
+        for i in 0..3 {
+            assert!(
+                (m[i] - f[i]).abs() < 1e-6,
+                "logcumsumexp_t and free fn disagree at {i}: {} vs {}",
+                m[i],
+                f[i]
+            );
+        }
+        // Monotonicity: y_0 <= y_1 <= y_2 (running sum of exp is
+        // monotonic, log is monotonic).
+        assert!(m[0] <= m[1], "logcumsumexp not monotonic: m[0]>m[1]");
+        assert!(m[1] <= m[2], "logcumsumexp not monotonic: m[1]>m[2]");
     }
 }

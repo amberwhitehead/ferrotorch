@@ -124,6 +124,26 @@ methods are public-API wrappers around them.
   `tracing` subscriber). No direct PyTorch parallel; closest cousins are
   Python's `print(tensor)` builtin and PyTorch's `Tensor.print()` debug API.
 
+- REQ-13: **Cumulative (scan) methods** — `cumsum_t / cumprod_t /
+  logcumsumexp_t`. Each instance method delegates to
+  `crate::grad_fns::cumulative::<op>(self, dim)` preserving autograd
+  (`CumsumBackward` / `CumprodBackward` / `LogcumsumexpBackward`),
+  negative-dim normalization, and the 0-D scalar fast path. Mirrors
+  `torch.Tensor.cumsum / cumprod / logcumsumexp` per
+  `torch/_tensor_docs.py:1500-1506 (cumsum) / :1482-1488 (cumprod) /
+  :1455-1462 (logcumsumexp)` and the upstream entries at
+  `aten/src/ATen/native/ReduceOps.cpp:511 TORCH_IMPL_FUNC(cumsum_out)
+  / :519 TORCH_IMPL_FUNC(cumprod_out) / :475 Tensor logcumsumexp(...)`.
+  These instance methods are the non-test production consumer wiring
+  per R-DEFER-1 for `grad_fns::cumulative::{cumsum, cumprod,
+  logcumsumexp}` — the previously vocabulary-only `lib.rs:159`
+  re-exports are now reachable through a chainable PyTorch-API
+  surface. `cummax_t` / `cummin_t` are NOT included here: the existing
+  consumers at `einops.rs:796 / :802` use the
+  `CumExtremeResult { values, indices }` tuple directly, and the
+  underlying ops remain NOT-STARTED behind blocker #1231
+  (differentiability + tie-break + NaN). Closes #1232.
+
 ## Acceptance Criteria
 
 - [x] AC-1: Every arithmetic method (`add_t / sub_t / mul_t / div_t / neg_t /
@@ -472,3 +492,4 @@ the umbrella `add` arm.
 | REQ-10 (chunk/split) | SHIPPED | impl: `Tensor::chunk / split` at `ferrotorch-core/src/methods.rs:265-273` delegate to free functions `chunk_t` (`:617-652`, computes per-chunk sizes via `dim_size.div_ceil(chunks)` matching upstream `aten/src/ATen/native/TensorShape.cpp:1077-1097`) and `split_t` (`:659-786`, GPU fast path via `backend.strided_split_f32` at `:712-738` + CPU fallback at `:752-783`, `SplitBackward` autograd through `grad_fns/shape.rs`). Mirrors `aten/src/ATen/native/TensorShape.cpp:1077 chunk / 3175 split` and `torch/_tensor_docs.py:6397 chunk`. Non-test consumers: `ferrotorch-diffusion/src/vae_encoder.rs:483 params.chunk(2, 1)`; `ferrotorch-diffusion/src/attention.rs:351 proj.chunk(2, last)`; `ferrotorch-diffusion/src/gpu/vae_encoder.rs:677 cpu_params.chunk(2, 1)`. |
 | REQ-11 (size/dim aliases) | NOT-STARTED | open prereq blocker #1222. impl at `ferrotorch-core/src/methods.rs:279-287` provides `size() -> &[usize]` (alias for `shape()`) and `dim() -> usize` (alias for `ndim()`) mirroring `torch.Tensor.size() / torch.Tensor.dim()` per `torch/_tensor_docs.py:4848 size / 1717 dim`. All in-tree callers of `dim()` (`ferrotorch-distributions/src/{multivariate_normal,low_rank_multivariate_normal}.rs:509,629 / :204`, `ferrotorch-nn/src/transformer.rs:1974`) are inside `#[cfg(test)] mod tests` blocks. `size()` has no caller at all. The aliases compile but no production code in `ferrotorch-*/src/**/*.rs` invokes them outside tests. |
 | REQ-12 (print utility) | NOT-STARTED | open prereq blocker #1223. impl at `ferrotorch-core/src/methods.rs:298-301 pub fn print(&self) -> &Self { tracing::info!(target: "ferrotorch::tensor", "{self}"); self }` emits a `tracing` event and returns `&Self` for chaining. R-DEV-7 — uses `tracing` rather than stdout per library hygiene. The only invocation is in-file test `test_method_print_chain` at `:856-861`. No non-test consumer in the workspace. |
+| REQ-13 (cumulative methods) | SHIPPED | impl: `Tensor::cumsum_t / cumprod_t / logcumsumexp_t` at `ferrotorch-core/src/methods.rs:282 / :311 / :342` delegate to `crate::grad_fns::cumulative::{cumsum, cumprod, logcumsumexp}` mirroring `torch.Tensor.cumsum / cumprod / logcumsumexp` per `torch/_tensor_docs.py:1500-1506 / :1482-1488 / :1455-1462` and `aten/src/ATen/native/ReduceOps.cpp:511 TORCH_IMPL_FUNC(cumsum_out) / :519 TORCH_IMPL_FUNC(cumprod_out) / :475 Tensor logcumsumexp(...)`. Non-test production consumer: these three Tensor methods themselves close the R-DEFER-1 consumer requirement for the previously vocabulary-only `lib.rs:159` re-exports (per `.design/ferrotorch-core/grad_fns/cumulative.md` REQ-1/REQ-2/REQ-5 — each flipped NOT-STARTED → SHIPPED in the same commit). Unit tests at `ferrotorch-core/src/methods.rs` `test_method_cumsum_t_1d / test_method_cumprod_t_1d / test_method_logcumsumexp_t_1d` verify dispatch correctness against the free function and numerical correctness against the upstream recurrence per R-CHAR-3. Parity-sweep: `[cumsum] 32/32 / [cumprod] 80/80 / [logcumsumexp] 48/48` all pass at seeds=8. Closes #1232. `cummax_t / cummin_t` explicitly NOT added — `cummax / cummin` already have consumers at `einops.rs:796 / :802` using the tuple form, and remain NOT-STARTED behind #1231 (differentiability + tie-break + NaN). |

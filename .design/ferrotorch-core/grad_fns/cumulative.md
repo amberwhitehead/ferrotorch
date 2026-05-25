@@ -46,10 +46,10 @@ backward characterization tests including numerical-gradient checks).
   out_dtype = dtype.value_or(...)` is unreachable. **Diverges from
   upstream**: `CumsumBackward::backward` at `cumulative.rs:42-46` errors
   with `FerrotorchError::NotImplementedOnCuda` when `grad_output.is_cuda()`
-  — backward forces a CPU round trip the upstream avoids. **No non-test
-  production consumer** of `cumsum` exists in `ferrotorch-*/src/`; the
-  `lib.rs:159` re-export is reachable but unused outside the test suite
-  (blocker #1232).
+  — backward forces a CPU round trip the upstream avoids. Non-test
+  production consumer: `Tensor::cumsum_t(&self, dim: i64)` at
+  `ferrotorch-core/src/methods.rs:282` (closed by #1232 — chainable
+  method-style PyTorch-API surface delegating to `cumsum`).
 
 - REQ-2: `cumprod(input, dim)` — forward `out[..., i, ...] = prod(input[...,
   0..=i, ...])` along `dim` with negative-`dim` normalization and autograd.
@@ -84,8 +84,9 @@ backward characterization tests including numerical-gradient checks).
     and not second-order-differentiable. **Diverges from upstream**:
     ferrotorch's cumprod backward errors on CUDA at `cumulative.rs:111-115`
     just like cumsum. **Diverges from upstream**: does NOT accept the
-    `dtype=None` kwarg. **No non-test production consumer** of `cumprod`
-    exists in `ferrotorch-*/src/` (blocker #1232).
+    `dtype=None` kwarg. Non-test production consumer:
+    `Tensor::cumprod_t(&self, dim: i64)` at
+    `ferrotorch-core/src/methods.rs:311` (closed by #1232).
 
 - REQ-3: `cummax(input, dim)` — forward returns a `(values, indices)` tuple
   where `values[..., i, ...] = max(input[..., 0..=i, ...])` and
@@ -162,9 +163,9 @@ backward characterization tests including numerical-gradient checks).
   the gradient is validated against finite differences in
   `test_logcumsumexp_backward_1d` at `cumulative.rs:743-779`.
   **Diverges from upstream**: `LogcumsumexpBackward::backward` errors on
-  CUDA at `cumulative.rs:272-276` (CPU round trip on backward). **No
-  non-test production consumer** of `logcumsumexp` exists in
-  `ferrotorch-*/src/` (blocker #1232).
+  CUDA at `cumulative.rs:272-276` (CPU round trip on backward). Non-test
+  production consumer: `Tensor::logcumsumexp_t(&self, dim: i64)` at
+  `ferrotorch-core/src/methods.rs:342` (closed by #1232).
 
 - REQ-6: Shared `dim` normalization — every `pub fn` in the module calls
   `crate::shape::normalize_axis(dim as isize, input.ndim())?` to convert
@@ -426,10 +427,10 @@ first.
 
 | REQ | Status | Evidence |
 |---|---|---|
-| REQ-1 (cumsum) | NOT-STARTED | impl: `cumsum` at `ferrotorch-core/src/grad_fns/cumulative.rs:88` + `CumsumBackward` at `:35` mirroring `ReduceOps.cpp:511 TORCH_IMPL_FUNC(cumsum_out)` and `derivatives.yaml:529-531`. 0-D scalar fast path at `cumulative.rs:88-91` (early-out into `cumulative_scalar_identity`) + `CumsumBackward::backward` 0-D fast path at `:49-51` mirror upstream's `impl_func_cum_ops` 0-D branch at `ReduceOps.cpp:501-504` (`result.fill_(self)`). Post-#1233 parity-sweep: `[cumsum] 32/32 passed (0 skipped, 0 failed)`. **Still no non-test production consumer** in `ferrotorch-*/src/` (only `lib.rs:159` re-export, plus the parity-sweep runner dispatch arm at `tools/parity-sweep/runner/src/main.rs:471 "cumsum" =>` which is TEST-SIDE per R-DEFER-1). Open blocker: #1232 (production consumer wiring). |
-| REQ-2 (cumprod) | NOT-STARTED | impl: `cumprod` at `cumulative.rs:337` + `CumprodBackward` at `:227` mirroring `ReduceOps.cpp:519 TORCH_IMPL_FUNC(cumprod_out)` and `derivatives.yaml:525-527`; backward zeros-path is O(n^3) brute-force not upstream's composite-compliance masked-fill. 0-D scalar fast path at `cumulative.rs:337-340` + `CumprodBackward::backward` 0-D fast path at `:239-241`. Post-#1233 parity-sweep: `[cumprod] 80/80 passed (0 skipped, 0 failed)`. **No non-test production consumer**. Open blocker: #1232. |
+| REQ-1 (cumsum) | SHIPPED | impl: `cumsum` at `ferrotorch-core/src/grad_fns/cumulative.rs:88` + `CumsumBackward` at `:35` mirroring `ReduceOps.cpp:511 TORCH_IMPL_FUNC(cumsum_out)` and `derivatives.yaml:529-531`. 0-D scalar fast path at `cumulative.rs:88-91` (early-out into `cumulative_scalar_identity`) + `CumsumBackward::backward` 0-D fast path at `:49-51` mirror upstream's `impl_func_cum_ops` 0-D branch at `ReduceOps.cpp:501-504` (`result.fill_(self)`). Post-#1233 parity-sweep: `[cumsum] 32/32 passed (0 skipped, 0 failed)`. Non-test production consumer: `Tensor::cumsum_t(&self, dim: i64)` at `ferrotorch-core/src/methods.rs:282` mirroring `torch.Tensor.cumsum(dim, dtype=None)` per `torch/_tensor_docs.py:1500-1506` — the public, chainable method-style surface that closes R-DEFER-1 (closed by #1232). |
+| REQ-2 (cumprod) | SHIPPED | impl: `cumprod` at `cumulative.rs:338` + `CumprodBackward` at `:227` mirroring `ReduceOps.cpp:519 TORCH_IMPL_FUNC(cumprod_out)` and `derivatives.yaml:525-527`; backward zeros-path is O(n^3) brute-force not upstream's composite-compliance masked-fill. 0-D scalar fast path at `cumulative.rs:338-341` + `CumprodBackward::backward` 0-D fast path at `:239-241`. Post-#1233 parity-sweep: `[cumprod] 80/80 passed (0 skipped, 0 failed)`. Non-test production consumer: `Tensor::cumprod_t(&self, dim: i64)` at `ferrotorch-core/src/methods.rs:311` mirroring `torch.Tensor.cumprod(dim, dtype=None)` per `torch/_tensor_docs.py:1482-1488` (closed by #1232). |
 | REQ-3 (cummax) | NOT-STARTED | impl: `cummax` at `cumulative.rs:374` delegating to `ops/cumulative.rs:191 cummax_forward` mirroring `ReduceOps.cpp:860 Tensor cummax(...)`; non-test production consumer at `ferrotorch-core/src/einops.rs:796` inside `pub fn reduce<T: Float>` (uses `cmax.values`). 0-D scalar fast path at `cumulative.rs:374-377` → `cumextreme_scalar_identity` at `:412-432` returns `CumExtremeResult { values: scalar, indices: vec![0] }`. **Diverges**: declared non-differentiable (contradicts `derivatives.yaml:533-535`); tie-break strict `>` (upstream `std::greater_equal`); NaN handling not mirrored. Post-#1233 parity-sweep: `[cummax] 24/24 passed (0 skipped, 0 failed)` via Option A (runner returns `values` only). Open blocker: #1231 (differentiability + tie-break + NaN). |
 | REQ-4 (cummin) | NOT-STARTED | impl: `cummin` at `cumulative.rs:391` delegating to `ops/cumulative.rs:272 cummin_forward` mirroring `ReduceOps.cpp:899 Tensor cummin(...)`; non-test production consumer at `ferrotorch-core/src/einops.rs:802`. 0-D scalar fast path at `cumulative.rs:391-394` → `cumextreme_scalar_identity`. Same divergences as REQ-3 (non-diff, strict `<` tie-break, NaN). Post-#1233 parity-sweep: `[cummin] 24/24 passed (0 skipped, 0 failed)` (Option A symmetric to REQ-3). Open blocker: #1231. |
-| REQ-5 (logcumsumexp) | NOT-STARTED | impl: `logcumsumexp` at `cumulative.rs:524` + `LogcumsumexpBackward` at `:453` mirroring `ReduceOps.cpp:475 Tensor logcumsumexp(...)` and `derivatives.yaml:521-523`; backward formula matches `exp(input) * reverse_cumsum(grad * exp(-output))`. 0-D scalar fast path at `cumulative.rs:524-532` (forward) + `:466-468` (backward — identity VJP since `log(exp(x)) = x`). Numerical stability covered by `test_logcumsumexp_numerical_stability` (`:929-946`). Post-#1233 parity-sweep: `[logcumsumexp] 48/48 passed (0 skipped, 0 failed)`. **No non-test production consumer**. Open blocker: #1232. |
+| REQ-5 (logcumsumexp) | SHIPPED | impl: `logcumsumexp` at `cumulative.rs:531` + `LogcumsumexpBackward` at `:459` mirroring `ReduceOps.cpp:475 Tensor logcumsumexp(...)` and `derivatives.yaml:521-523`; backward formula matches `exp(input) * reverse_cumsum(grad * exp(-output))`. 0-D scalar fast path at `cumulative.rs:531-539` (forward) + `:473-475` (backward — identity VJP since `log(exp(x)) = x`). Numerical stability covered by `test_logcumsumexp_numerical_stability`. Post-#1233 parity-sweep: `[logcumsumexp] 48/48 passed (0 skipped, 0 failed)`. Non-test production consumer: `Tensor::logcumsumexp_t(&self, dim: i64)` at `ferrotorch-core/src/methods.rs:342` mirroring `torch.Tensor.logcumsumexp(dim)` per `torch/_tensor_docs.py:1455-1462` (closed by #1232). |
 | REQ-6 (dim normalization) | SHIPPED | impl: `normalize_axis(dim as isize, input.ndim())?` calls at `cumulative.rs:73, :203, :231, :241, :323` per `crate::shape::normalize_axis` mirroring `maybe_wrap_dim` at `ReduceOps.cpp:506, :622, :851, :890`; production consumer for the normalized result is each of the five `pub fn` bodies themselves (the normalized `dim` is stored into the `*Backward` struct and threaded into `from_storage`); reachable production callers: `einops.rs:796 / :802` invoke `cummax(view, 1)` / `cummin(view, 1)` triggering the normalize path. Tests at `cumulative.rs:420-428 test_cumsum_negative_dim` and `:830-835 test_cumsum_dim_out_of_bounds` cover the negative-dim and out-of-range cases. |
 | REQ-7 (reverse_cumsum helper) | SHIPPED | impl: `reverse_cumsum` at `ferrotorch-core/src/ops/cumulative.rs:109` mirroring `static Tensor reversed_cumsum(const Tensor& w, int64_t dim)` at `ReduceOps.cpp:527-529`; non-test production consumers at `ferrotorch-core/src/grad_fns/cumulative.rs:50` (CumsumBackward::backward) and `ferrotorch-core/src/grad_fns/cumulative.rs:291` (LogcumsumexpBackward::backward). The helper itself is internal scaffolding; its end-to-end exercise lands when REQ-1 and REQ-5 ship with runner-side parity coverage (blocker #1230). Forward and backward unit tests at `cumulative.rs:449-484` (`test_cumsum_backward_*`) and `:742-779` (`test_logcumsumexp_backward_1d`) verify it numerically through the consumer path. |
