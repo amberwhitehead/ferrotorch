@@ -55,6 +55,12 @@ struct Cite {
     line_start: usize,
     line_end: usize,
     symbol_hint: Option<String>,
+    /// Byte offset in the doc line just AFTER the cite's closing
+    /// backtick (or 0 if not tracked, e.g. bare-parens cites). Used by
+    /// the post-cite hint promoter to find a trailing identifier-shaped
+    /// backtick span like `` `cumulative.rs:449-484` (`test_cumsum_backward_*`) ``
+    /// where the symbol hint appears AFTER the cite.
+    end_pos_in_line: usize,
 }
 
 /// Scanner state that walks the doc and tracks the most-recent `.rs`
@@ -92,6 +98,17 @@ impl<'a> CiteContext<'a> {
     }
 
     fn emit(&mut self, file_as_written: String, lo: usize, hi: usize, cite_start_in_line: usize) {
+        self.emit_with_end(file_as_written, lo, hi, cite_start_in_line, 0)
+    }
+
+    fn emit_with_end(
+        &mut self,
+        file_as_written: String,
+        lo: usize,
+        hi: usize,
+        cite_start_in_line: usize,
+        end_pos_in_line: usize,
+    ) {
         let cite_start_in_hint_line = cite_start_in_line + self.prefix_len;
         let symbol_hint = extract_symbol_hint(self.line_for_hints, cite_start_in_hint_line);
         self.out.push(Cite {
@@ -99,6 +116,7 @@ impl<'a> CiteContext<'a> {
             line_start: lo,
             line_end: hi,
             symbol_hint,
+            end_pos_in_line,
         });
     }
 }
@@ -126,12 +144,20 @@ fn scan_line_inner<'a>(line: &'a str, ctx: &mut CiteContext<'a>) {
             backtick_ranges.push((start, end));
             // Process this span's cites BEFORE looking for bare-parens.
             let span = &line[start..end];
-            scan_span_inner(span, ctx, start);
+            scan_span_inner(span, ctx, start, end);
             i = end + 1;
         } else {
             i += 1;
         }
     }
+    // Cross-span post-cite hint promotion (#1270 — pattern
+    // `` `cumulative.rs:449-484` (`test_cumsum_backward_*`) ``):
+    // For each cite emitted on this line, if a following backtick span
+    // appears within ~10 chars of the cite-end and contains an
+    // identifier-shaped token (test_*, *Backward, *_t, PascalCase), promote
+    // it to the cite's symbol_hint. We preserve any existing more-specific
+    // hint per the same priority rules as the in-span promoter.
+    promote_cross_span_hints(line, &backtick_ranges, ctx.out);
     // Pass 2: scan for bare-parens cites OUTSIDE any backtick span. The
     // content inside `(...)` must NOT overlap a backtick range — that way a
     // prose `(...)` wrapping a real `.rs` cite (e.g. `(in-file ...
@@ -180,6 +206,93 @@ fn in_backtick_range(pos: usize, ranges: &[(usize, usize)]) -> bool {
     ranges.iter().any(|&(s, e)| pos >= s && pos < e)
 }
 
+/// For each cite emitted on this line, see if a backtick span starts
+/// within ~20 chars after the cite's closing backtick and contains an
+/// identifier-shaped token; if so, promote it to the cite's symbol_hint.
+///
+/// Catches the cumulative.md REQ-7 row pattern where the cite is in one
+/// backtick span and the qualifying test name is in the next:
+///
+/// ```text
+/// unit tests at `cumulative.rs:449-484` (`test_cumsum_backward_*`)
+/// ```
+///
+/// The intervening `(`, `,`, ` ` etc. are skipped over (max 20 chars
+/// distance to keep the cross-span heuristic tight — we don't want to
+/// pick up the test name from an unrelated sentence further down).
+fn promote_cross_span_hints(line: &str, backtick_ranges: &[(usize, usize)], cites: &mut [Cite]) {
+    // The cites emitted on THIS line all carry end_pos_in_line > 0 (set
+    // by emit_with_end). Cites carried over from prior lines have
+    // end_pos_in_line == 0; skip those (we'd need their own line context).
+    for cite in cites.iter_mut() {
+        if cite.end_pos_in_line == 0 {
+            continue;
+        }
+        let cite_end = cite.end_pos_in_line;
+        // Find the first backtick span starting after cite_end + within 20
+        // chars of cite_end.
+        let mut chosen: Option<(usize, usize)> = None;
+        for &(bs, be) in backtick_ranges {
+            // The span at bs..be — its OPEN backtick is at bs-1; OPEN must
+            // be after cite_end and within 20 chars.
+            if bs == 0 {
+                continue;
+            }
+            let open_pos = bs - 1;
+            if open_pos <= cite_end {
+                continue;
+            }
+            if open_pos - cite_end > 20 {
+                continue;
+            }
+            chosen = Some((bs, be));
+            break;
+        }
+        let Some((bs, be)) = chosen else {
+            continue;
+        };
+        let candidate_span = &line[bs..be];
+        // The span itself should NOT contain a cite-shape (`:` or `.`).
+        if candidate_span.contains(':') || candidate_span.contains('.') {
+            continue;
+        }
+        // Take the FIRST identifier-shaped token (whitespace or `,`
+        // separated). Allow trailing `*` (e.g. `test_cumsum_backward_*`)
+        // since that's how globbed test-family hints are written.
+        let first = candidate_span
+            .split([',', ' '])
+            .map(str::trim)
+            .find(|s| !s.is_empty())
+            .unwrap_or("");
+        let cleaned: String = first
+            .trim_matches(|c: char| c == '*' || c == '(' || c == ')' || c == ';' || c == '.')
+            .to_string();
+        if cleaned.is_empty()
+            || !cleaned
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '_')
+        {
+            continue;
+        }
+        // STRICTLY restrict to test_* identifiers — see in-span promoter
+        // above for the rationale (generic prose lists `(cite, symbol)`
+        // pairs that would otherwise clobber pre-cite hints).
+        if !cleaned.starts_with("test_") {
+            continue;
+        }
+        if STOPWORD_HINTS.contains(&cleaned.as_str()) {
+            continue;
+        }
+        let promote = match cite.symbol_hint.as_deref() {
+            None => true,
+            Some(prev) => !prev.starts_with("test_"),
+        };
+        if promote {
+            cite.symbol_hint = Some(cleaned);
+        }
+    }
+}
+
 /// Find the position of the matching `)` for an opening `(` (paren depth
 /// tracked). Returns None if unmatched.
 fn find_matching_close_paren(line: &str, start_after_open: usize) -> Option<usize> {
@@ -220,21 +333,36 @@ fn parse_paren_cite(s: &str) -> (Option<(usize, usize)>, bool) {
 
 /// Extract cites from a backtick-quoted span. Updates the line-level
 /// context for continuation cites.
-fn scan_span_inner<'a>(span: &'a str, ctx: &mut CiteContext<'a>, span_offset: usize) {
+///
+/// In addition to the pre-cite symbol hint extraction handled by
+/// [`extract_symbol_hint`] (which looks at prose preceding the backtick
+/// span), this function ALSO recognizes a post-cite hint: when a cite
+/// token is immediately followed within the same span by an
+/// identifier-shaped token, that token is treated as the cite's symbol
+/// hint. This closes #1270's root cause: in `cumulative.md` the REQ-6/7
+/// table rows write things like
+/// `` `cumulative.rs:420-428 test_cumsum_negative_dim` `` where the test
+/// name lives AFTER the cite, so the prose-preceding extractor cannot
+/// see it.
+fn scan_span_inner<'a>(span: &'a str, ctx: &mut CiteContext<'a>, span_offset: usize, span_end: usize) {
     // Span-local filename context (for `:N` continuations inside this span).
     let mut span_local_file: Option<String> = ctx.last_rs_file.clone();
-    for tok_raw in span.split([',', ' ']) {
-        let tok = tok_raw.trim();
-        if tok.is_empty() {
-            continue;
-        }
+    // Collect tokens so we can peek ahead for post-cite symbol hints.
+    let tokens: Vec<&str> = span
+        .split([',', ' '])
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .collect();
+    let mut emitted_indices: Vec<usize> = Vec::new();
+    for (idx, tok) in tokens.iter().enumerate() {
         // Try a named cite (`<dir/>?<name>.rs:<N>(-<M>)?` or non-`.rs`).
         if let Some((file_or_none, lo, hi)) = parse_any_named_cite(tok) {
             match file_or_none {
                 Some(file_as_written) => {
                     span_local_file = Some(file_as_written.clone());
                     ctx.last_rs_file = Some(file_as_written.clone());
-                    ctx.emit(file_as_written, lo, hi, span_offset);
+                    ctx.emit_with_end(file_as_written, lo, hi, span_offset, span_end);
+                    emitted_indices.push(idx);
                 }
                 None => {
                     // Non-`.rs` cite — invalidate context so subsequent
@@ -248,7 +376,60 @@ fn scan_span_inner<'a>(span: &'a str, ctx: &mut CiteContext<'a>, span_offset: us
         // Bare-colon continuation.
         if let Some((lo, hi)) = parse_bare_colon_cite(tok) {
             if let Some(file_as_written) = span_local_file.clone() {
-                ctx.emit(file_as_written, lo, hi, span_offset);
+                ctx.emit_with_end(file_as_written, lo, hi, span_offset, span_end);
+                emitted_indices.push(idx);
+            }
+        }
+    }
+    // Post-cite hint pass (#1270): for each emitted cite, if the next token
+    // in the span is a `test_*` identifier, promote it to the cite's
+    // symbol_hint UNLESS the cite already has a `test_*` hint. This is
+    // intentionally NARROW — restricted to `test_*` candidates — because
+    // generic prose like `arithmetic::floor_divide at arithmetic.rs:2641,
+    // FloorDivideBackward at :2484` would otherwise promote
+    // `FloorDivideBackward` over the correct pre-cite hint `floor_divide`.
+    // The actual #1270 pattern (`cumulative.rs:420-428
+    // test_cumsum_negative_dim`) has a `test_*` token following the cite;
+    // only that narrow shape is promoted here.
+    if !emitted_indices.is_empty() {
+        let cite_count = emitted_indices.len();
+        let start_slot = ctx.out.len() - cite_count;
+        for (slot_off, &tok_idx) in emitted_indices.iter().enumerate() {
+            let next_idx = tok_idx + 1;
+            if next_idx >= tokens.len() {
+                continue;
+            }
+            let next_tok = tokens[next_idx];
+            if next_tok.contains(':') || next_tok.contains('.') {
+                continue;
+            }
+            let cleaned: String = next_tok
+                .trim_matches(|c: char| c == '(' || c == ')' || c == ';' || c == '.')
+                .to_string();
+            if cleaned.is_empty()
+                || !cleaned
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == '_')
+            {
+                continue;
+            }
+            // STRICTLY restrict to test_* identifiers to avoid clobbering
+            // the correct pre-cite hint on lines that simply list multiple
+            // (cite, symbol) pairs separated by `,` or `+`.
+            if !cleaned.starts_with("test_") {
+                continue;
+            }
+            if STOPWORD_HINTS.contains(&cleaned.as_str()) {
+                continue;
+            }
+            let slot = start_slot + slot_off;
+            let existing = ctx.out[slot].symbol_hint.clone();
+            let promote = match existing.as_deref() {
+                None => true,
+                Some(prev) => !prev.starts_with("test_"),
+            };
+            if promote {
+                ctx.out[slot].symbol_hint = Some(cleaned);
             }
         }
     }
@@ -553,18 +734,40 @@ fn extract_symbol_hint(line: &str, cite_start_in_line: usize) -> Option<String> 
     last_accepted
 }
 
-/// Resolve a cite's `file_as_written` to an absolute path under one of the
-/// known source roots. Returns `None` if no candidate exists — those cites
-/// are silently skipped (they likely point to files outside the audit's
-/// scope, e.g. `tools/parity-sweep/runner/src/main.rs` covered by a
-/// different test).
-fn resolve_cite_path(root: &Path, file_as_written: &str) -> Option<PathBuf> {
+/// Result of resolving a cite path:
+/// - `Resolved(PathBuf)`: file exists under a known crate root; audit it.
+/// - `AllowedExternal`: path is in the documented external-cite allow-list
+///   (upstream `/home/doll/pytorch/*`); do NOT audit, treat as a pass.
+/// - `Unresolved`: path is neither in a known crate root nor in the allow-
+///   list — this is a stale or typo'd cite and MUST fail the audit
+///   (closes #1269 Gap C).
+enum CitePath {
+    Resolved(PathBuf),
+    AllowedExternal,
+    Unresolved,
+}
+
+/// Resolve a cite's `file_as_written` against the workspace.
+///
+/// Resolution order for paths containing `/`:
+///   1. verbatim from workspace root
+///   2. with `ferrotorch-core/src/` prepended (handles bare `ops/foo.rs`)
+///   3. with `ferrotorch-core/` prepended (handles `src/...`)
+///
+/// Resolution order for plain basenames (priority high → low):
+///   ferrotorch-core/src/grad_fns/, src/ops/, src/, src/autograd/,
+///   ferrotorch-nn/src/, ferrotorch-vision/src/,
+///   tools/parity-sweep/runner/src/
+///
+/// Allow-list (treated as `AllowedExternal`, not audited):
+///   - any path starting with `/home/doll/pytorch/`
+fn resolve_cite_path(root: &Path, file_as_written: &str) -> CitePath {
+    // Upstream PyTorch cites — we don't audit those (would require pinning
+    // the user's local clone). Treat as a pass.
+    if file_as_written.starts_with("/home/doll/pytorch/") {
+        return CitePath::AllowedExternal;
+    }
     if file_as_written.contains('/') {
-        // Doc wrote a path with one or more directory components. Try the
-        // path verbatim from workspace root first (handles
-        // `ferrotorch-core/src/grad_fns/cumulative.rs`), then with the
-        // `ferrotorch-core/src/` prefix prepended (handles `ops/foo.rs`,
-        // `grad_fns/foo.rs`).
         let candidates = [
             file_as_written.to_string(),
             format!("ferrotorch-core/src/{file_as_written}"),
@@ -573,25 +776,28 @@ fn resolve_cite_path(root: &Path, file_as_written: &str) -> Option<PathBuf> {
         for c in &candidates {
             let p = root.join(c);
             if p.exists() {
-                return Some(p);
+                return CitePath::Resolved(p);
             }
         }
-        return None;
+        return CitePath::Unresolved;
     }
-    // Plain basename — try the known directories in priority order.
     let basename = file_as_written;
     let candidates = [
         format!("ferrotorch-core/src/grad_fns/{basename}"),
         format!("ferrotorch-core/src/ops/{basename}"),
         format!("ferrotorch-core/src/{basename}"),
+        format!("ferrotorch-core/src/autograd/{basename}"),
+        format!("ferrotorch-nn/src/{basename}"),
+        format!("ferrotorch-vision/src/{basename}"),
+        format!("tools/parity-sweep/runner/src/{basename}"),
     ];
     for c in &candidates {
         let p = root.join(c);
         if p.exists() {
-            return Some(p);
+            return CitePath::Resolved(p);
         }
     }
-    None
+    CitePath::Unresolved
 }
 
 /// Is `trimmed` a line we consider "non-substantive" — i.e. a cite landing
@@ -634,9 +840,33 @@ fn is_substantive(line: &str) -> bool {
 }
 
 /// Validate a single cite against the file at HEAD. Returns Some(error_msg)
-/// on failure or None on success / skip-because-unresolvable.
+/// on failure or None on success.
+///
+/// Failure modes:
+///   1. Unresolvable cite path (Gap C / #1269) — not under a known crate
+///      root AND not in the upstream allow-list. Catches typos like
+///      `arithmatic.rs` and `gradfns/arithmetic.rs`.
+///   2. Out-of-file line range.
+///   3. No substantive content at the cited line(s).
+///   4. Symbol-hint mismatch — the cite carries a named symbol hint
+///      (`pub fn <name>`, `struct <Name>Backward`, `test_<name>`, a
+///      method like `Tensor::<sym>_t`, etc.) but the named symbol is not
+///      declared at the cited line(s). For POINT cites the window is ±0
+///      (the cited line MUST exactly declare the symbol — closes #1269
+///      Gap B); for RANGE cites the window is ±3 around the range.
 fn validate_cite(cite: &Cite, root: &Path, doc_label: &str, doc_line_no: usize) -> Option<String> {
-    let target = resolve_cite_path(root, &cite.file_as_written)?;
+    let target = match resolve_cite_path(root, &cite.file_as_written) {
+        CitePath::Resolved(p) => p,
+        CitePath::AllowedExternal => return None,
+        CitePath::Unresolved => {
+            return Some(format!(
+                "{doc_label}:{doc_line_no} cites unresolvable path `{file}:{lo}-{hi}` (not under any known crate root: ferrotorch-core/src/, ferrotorch-core/src/grad_fns/, ferrotorch-core/src/ops/, ferrotorch-core/src/autograd/, ferrotorch-nn/src/, ferrotorch-vision/src/, tools/parity-sweep/runner/src/; not on the `/home/doll/pytorch/` upstream allow-list). Either fix the typo or add the file to the resolver's candidate list.",
+                file = cite.file_as_written,
+                lo = cite.line_start,
+                hi = cite.line_end,
+            ));
+        }
+    };
     let src = match fs::read_to_string(&target) {
         Ok(s) => s,
         Err(_) => return None,
@@ -690,21 +920,29 @@ fn validate_cite(cite: &Cite, root: &Path, doc_label: &str, doc_line_no: usize) 
         ));
     }
 
-    // Symbol-hint validation: only run for `test_*` symbols, where the cite
-    // is expected to point AT the fn declaration. For `*Backward` /
-    // helper / `*_t` symbols, the cite often points inside the symbol's
-    // BODY (e.g. ``CumsumBackward` (`:76`)` means "the reverse_cumsum call
-    // inside CumsumBackward::backward at line :76", not "the declaration of
-    // CumsumBackward at :76") — these can't be cleanly resolved by
-    // window-around-declaration logic, so skip.
-    let validate_hint = cite
-        .symbol_hint
-        .as_deref()
-        .is_some_and(|s| s.starts_with("test_"));
-    if let (true, Some(symbol)) = (validate_hint, &cite.symbol_hint) {
+    // Symbol-hint validation. Closes #1269 Gap A: the prior implementation
+    // only validated `test_*` hints, so a `*Backward` cite drifting to a
+    // wrong line silently passed. Now every recognizable symbol hint is
+    // validated.
+    //
+    // Window strategy (closes #1269 Gap B):
+    //   - POINT cite (lo == hi): window is ±0 — the cited line MUST
+    //     literally contain the symbol declaration. A +1 line shift in
+    //     the source surfaces as a failure.
+    //   - RANGE cite (lo < hi): window is ±3 around the range — ranges
+    //     are inherently approximate (a doc author may write `:733-806`
+    //     for a fn whose decl starts at :733 even after small edits
+    //     inside the body), so some tolerance is preserved.
+    if let Some(symbol) = &cite.symbol_hint {
         let needles = build_symbol_needles(symbol);
-        let window_lo = cite.line_start.saturating_sub(3).max(1);
-        let window_hi = (cite.line_end + 3).min(total);
+        let (window_lo, window_hi) = if is_range {
+            (
+                cite.line_start.saturating_sub(3).max(1),
+                (cite.line_end + 3).min(total),
+            )
+        } else {
+            (cite.line_start, cite.line_start)
+        };
         let mut found = false;
         for line_num in window_lo..=window_hi {
             let line = src_lines[line_num - 1];
@@ -715,10 +953,16 @@ fn validate_cite(cite: &Cite, root: &Path, doc_label: &str, doc_line_no: usize) 
         }
         if !found {
             let actual = src_lines[cite.line_start - 1];
+            let window_desc = if is_range {
+                format!("any line within :{window_lo}-{window_hi}")
+            } else {
+                format!(":{} exactly", cite.line_start)
+            };
             return Some(format!(
-                "{doc_label}:{doc_line_no} cites `{file}:{lo}` (with symbol hint `{symbol}`) but neither :{lo} nor any line within +/-3 declares it; actual :{lo} is: `{actual}`",
+                "{doc_label}:{doc_line_no} cites `{file}:{lo}{hi_disp}` (with symbol hint `{symbol}`) but {window_desc} does not declare it (needles: {needles:?}); actual :{lo} is: `{actual}`",
                 file = cite.file_as_written,
                 lo = cite.line_start,
+                hi_disp = if is_range { format!("-{}", cite.line_end) } else { String::new() },
             ));
         }
     }
