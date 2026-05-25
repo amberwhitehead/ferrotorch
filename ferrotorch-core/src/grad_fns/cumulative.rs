@@ -2,8 +2,8 @@
 //!
 //! - `cumsum`       — backward is reverse cumsum of the gradient
 //! - `cumprod`      — backward uses the forward output and prefix/suffix products
-//! - `cummax`       — non-differentiable (returns indices); no backward
-//! - `cummin`       — non-differentiable (returns indices); no backward
+//! - `cummax`       — backward routes through saved `indices` via `scatter_add`
+//! - `cummin`       — backward routes through saved `indices` via `scatter_add`
 //! - `logcumsumexp` — backward via softmax-weighted reverse cumsum
 //!
 //! [CL-306]
@@ -356,44 +356,209 @@ pub fn cumprod<T: Float>(input: &Tensor<T>, dim: i64) -> FerrotorchResult<Tensor
 }
 
 // ---------------------------------------------------------------------------
-// cummax / cummin (non-differentiable)
+// CummaxBackward / CumminBackward
 // ---------------------------------------------------------------------------
+
+/// Backward node for `cummax(input, dim)` (and symmetrically `cummin`).
+///
+/// VJP: `grad_input = zeros_like(input).scatter_add_(dim, indices, grad_output)`.
+///
+/// Mirrors upstream `cummaxmin_backward` at
+/// `aten/src/ATen/native/ReduceOps.cpp:906-918`:
+///
+/// ```text
+/// Tensor cummaxmin_backward(const Tensor& grad, const Tensor& input,
+///                            const Tensor& indices, int64_t dim) {
+///   if (input.sym_numel() == 0) { return input; }
+///   auto result = at::zeros_symint(input.sym_sizes(), input.options());
+///   return result.scatter_add_(dim, indices, grad);
+/// }
+/// ```
+///
+/// Per `tools/autograd/derivatives.yaml:533-535`:
+///
+/// ```text
+/// - name: cummax(Tensor self, int dim) -> (Tensor values, Tensor indices)
+///   self: cummaxmin_backward(grad, self, indices, dim)
+/// ```
+///
+/// The saved `indices` carries the position-along-dim at which each running
+/// max was attained; scatter_add accumulates grad_output at those positions
+/// so each input position receives gradient proportional to the number of
+/// output positions whose running max it "won".
+///
+/// Tie-break correctness: when two positions in the prefix carry equal
+/// values, upstream's `std::greater_equal` picks the LATER index. The
+/// `cummax_forward` kernel at `ops/cumulative.rs` mirrors this. Without the
+/// matching tie-break, `scatter_add` would deposit gradient at the wrong
+/// input position on ties — that's why the kernel fix and the autograd
+/// backward MUST land together (this commit, closing #1231).
+#[derive(Debug)]
+pub struct CummaxBackward<T: Float> {
+    input: Tensor<T>,
+    indices: Vec<usize>,
+    input_shape: Vec<usize>,
+    dim: usize,
+}
+
+impl<T: Float> GradFn<T> for CummaxBackward<T> {
+    fn backward(&self, grad_output: &Tensor<T>) -> FerrotorchResult<Vec<Option<Tensor<T>>>> {
+        // 0-D fast path: cummax on a scalar is the identity in both values
+        // and indices, so the VJP is also identity. Mirrors PyTorch's
+        // `impl_func_cum_ops` 0-D branch at `ReduceOps.cpp:501-504`.
+        if self.input.ndim() == 0 {
+            return Ok(vec![Some(grad_output.clone())]);
+        }
+        cummaxmin_backward_impl(grad_output, &self.input_shape, &self.indices, self.dim)
+    }
+
+    fn inputs(&self) -> Vec<&Tensor<T>> {
+        vec![&self.input]
+    }
+
+    fn name(&self) -> &'static str {
+        "CummaxBackward"
+    }
+}
+
+/// Backward node for `cummin(input, dim)` — symmetric to [`CummaxBackward`].
+///
+/// Upstream uses the SAME `cummaxmin_backward` C++ function for both ops
+/// (`ReduceOps.cpp:906-918`); the only difference is which `indices`
+/// tensor the forward saved. We mirror this by sharing
+/// `cummaxmin_backward_impl` and only differing in the grad-fn name.
+#[derive(Debug)]
+pub struct CumminBackward<T: Float> {
+    input: Tensor<T>,
+    indices: Vec<usize>,
+    input_shape: Vec<usize>,
+    dim: usize,
+}
+
+impl<T: Float> GradFn<T> for CumminBackward<T> {
+    fn backward(&self, grad_output: &Tensor<T>) -> FerrotorchResult<Vec<Option<Tensor<T>>>> {
+        if self.input.ndim() == 0 {
+            return Ok(vec![Some(grad_output.clone())]);
+        }
+        cummaxmin_backward_impl(grad_output, &self.input_shape, &self.indices, self.dim)
+    }
+
+    fn inputs(&self) -> Vec<&Tensor<T>> {
+        vec![&self.input]
+    }
+
+    fn name(&self) -> &'static str {
+        "CumminBackward"
+    }
+}
+
+/// Shared backward kernel for cummax / cummin.
+///
+/// Computes `grad_input = zeros_like(input).scatter_add_(dim, indices, grad_output)`
+/// per upstream `cummaxmin_backward` at
+/// `aten/src/ATen/native/ReduceOps.cpp:906-918`. We materialise it as a
+/// fresh tensor (out-of-place — ferrotorch lacks in-place scatter_add as a
+/// production primitive yet) which matches the
+/// `areAnyTensorSubclassLike(...)` composite-compliance branch at `:914-916`.
+fn cummaxmin_backward_impl<T: Float>(
+    grad_output: &Tensor<T>,
+    input_shape: &[usize],
+    indices: &[usize],
+    dim: usize,
+) -> FerrotorchResult<Vec<Option<Tensor<T>>>> {
+    if grad_output.is_cuda() {
+        return Err(crate::error::FerrotorchError::NotImplementedOnCuda {
+            op: "CummaxBackward",
+        });
+    }
+    // Empty-input fast path mirrors upstream
+    // `ReduceOps.cpp:907-908 if (input.sym_numel() == 0) { return input; }`
+    let numel: usize = input_shape.iter().product();
+    if numel == 0 {
+        let empty = Tensor::from_storage(
+            TensorStorage::cpu(Vec::<T>::new()),
+            input_shape.to_vec(),
+            false,
+        )?;
+        return Ok(vec![Some(empty)]);
+    }
+    let zeros = crate::creation::zeros::<T>(input_shape)?;
+    let grad_input =
+        crate::ops::indexing::scatter_add(&zeros, dim as isize, indices, input_shape, grad_output)?;
+    Ok(vec![Some(grad_input)])
+}
 
 /// Cumulative maximum along `dim`.
 ///
 /// Returns `(values, indices)` where `values` has the running maximum and
 /// `indices` has the position (along `dim`) where each maximum was attained.
 ///
-/// This operation is **not differentiable** — the returned values tensor does
-/// not carry a gradient function.
+/// When gradient tracking is enabled, the returned `values` tensor carries
+/// a [`CummaxBackward`] node implementing the
+/// `scatter_add(grad, dim, indices)` VJP per
+/// `tools/autograd/derivatives.yaml:533-535
+/// - name: cummax(Tensor self, int dim) -> (Tensor values, Tensor indices)
+///   self: cummaxmin_backward(grad, self, indices, dim)`.
+/// The `indices` field is `Vec<usize>` (Rust-side; not part of the autograd
+/// graph since upstream's `indices` output is `at::kLong` non-differentiable).
 ///
 /// 0-D (scalar) inputs return `CumExtremeResult { values: scalar copy,
 /// indices: vec![0] }`, matching PyTorch's `impl_func_cum_ops` 0-D branch
-/// at `aten/src/ATen/native/ReduceOps.cpp:501-504` (and live-verified
-/// 2026-05-25 with torch 2.11.0: `torch.cummax(torch.tensor(5.0), 0) ==
-/// (tensor(5.), tensor(0))`).
+/// at `aten/src/ATen/native/ReduceOps.cpp:501-504`.
 pub fn cummax<T: Float>(input: &Tensor<T>, dim: i64) -> FerrotorchResult<CumExtremeResult<T>> {
     if input.ndim() == 0 {
         return cumextreme_scalar_identity(input, dim, "cummax");
     }
-    cummax_forward(input, dim)
+    let norm_dim = normalize_axis(dim as isize, input.ndim())?;
+    let result = cummax_forward(input, dim)?;
+
+    if !(is_grad_enabled() && input.requires_grad()) {
+        return Ok(result);
+    }
+
+    let CumExtremeResult { values, indices } = result;
+    let input_shape = values.shape().to_vec();
+    let grad_fn = Arc::new(CummaxBackward {
+        input: input.clone(),
+        indices: indices.clone(),
+        input_shape: input_shape.clone(),
+        dim: norm_dim,
+    });
+    let (storage, shape) = values.into_storage_and_shape()?;
+    let values = Tensor::from_operation(storage, shape, grad_fn)?;
+    Ok(CumExtremeResult { values, indices })
 }
 
 /// Cumulative minimum along `dim`.
 ///
 /// Returns `(values, indices)` analogous to [`cummax`] but tracking the
-/// running minimum.
-///
-/// This operation is **not differentiable**.
+/// running minimum. Differentiable through the same scatter-add VJP per
+/// `tools/autograd/derivatives.yaml:537-539`.
 ///
 /// 0-D (scalar) inputs return `CumExtremeResult { values: scalar copy,
-/// indices: vec![0] }`, matching PyTorch's `impl_func_cum_ops` 0-D branch
-/// at `aten/src/ATen/native/ReduceOps.cpp:501-504`.
+/// indices: vec![0] }`.
 pub fn cummin<T: Float>(input: &Tensor<T>, dim: i64) -> FerrotorchResult<CumExtremeResult<T>> {
     if input.ndim() == 0 {
         return cumextreme_scalar_identity(input, dim, "cummin");
     }
-    cummin_forward(input, dim)
+    let norm_dim = normalize_axis(dim as isize, input.ndim())?;
+    let result = cummin_forward(input, dim)?;
+
+    if !(is_grad_enabled() && input.requires_grad()) {
+        return Ok(result);
+    }
+
+    let CumExtremeResult { values, indices } = result;
+    let input_shape = values.shape().to_vec();
+    let grad_fn = Arc::new(CumminBackward {
+        input: input.clone(),
+        indices: indices.clone(),
+        input_shape: input_shape.clone(),
+        dim: norm_dim,
+    });
+    let (storage, shape) = values.into_storage_and_shape()?;
+    let values = Tensor::from_operation(storage, shape, grad_fn)?;
+    Ok(CumExtremeResult { values, indices })
 }
 
 /// 0-D scalar fast path for `cummax` / `cummin`.
@@ -876,7 +1041,12 @@ mod tests {
         assert!((d[2] - 1.0).abs() < 1e-12);
         assert!((d[3] - 1.0).abs() < 1e-12);
         assert!((d[4] - 1.0).abs() < 1e-12);
-        assert_eq!(r.indices, vec![0, 1, 1, 1, 1]);
+        // Upstream tie-break: later index wins on ties (`std::less_equal`
+        // at `ReduceOps.cpp:871`). Ties between input[1]=1.0 and
+        // input[3]=1.0 resolve at index 3. Live-verified 2026-05-25 torch
+        // 2.11.0: torch.cummin(torch.tensor([3.,1.,4.,1.,5.]), 0).indices
+        //   == tensor([0, 1, 1, 3, 3])
+        assert_eq!(r.indices, vec![0, 1, 1, 3, 3]);
     }
 
     #[test]
@@ -1224,5 +1394,160 @@ mod tests {
                 numerical,
             );
         }
+    }
+
+    // =======================================================================
+    // cummax / cummin backward — closes blocker #1231.
+    //
+    // The expected gradients are constructed from SYMBOLIC CONSTANTS
+    // traceable to upstream's `cummaxmin_backward` formula at
+    // `aten/src/ATen/native/ReduceOps.cpp:906-918`:
+    //
+    //   grad_input = zeros_like(input).scatter_add_(dim, indices, grad_output)
+    //
+    // For a 1D scan with `loss = sum(values)`, grad_output = ones, so
+    // grad_input[k] counts the number of output positions whose running
+    // max/min pointed at input index k. That count equals the number of
+    // entries == k in the indices vector.
+    //
+    // Tie-break per upstream `std::greater_equal` / `std::less_equal`
+    // (`ReduceOps.cpp:832, :871`): on equal values the LATER index wins.
+    //
+    // Live-verified 2026-05-25 with torch 2.11.0 — the named CONST blocks
+    // below cite the verbatim live-torch reproductions, satisfying
+    // R-CHAR-3 (no tautological tests; expected values traced to
+    // upstream).
+    // =======================================================================
+
+    /// `cummax([1,2,3,4]).sum().backward()` — monotonic input, no ties.
+    ///
+    /// Live torch (verified 2026-05-25):
+    /// ```text
+    /// x = torch.tensor([1.,2.,3.,4.], requires_grad=True)
+    /// torch.cummax(x, 0).values.sum().backward()
+    /// x.grad == tensor([1., 1., 1., 1.])
+    /// ```
+    /// Because the running max is strictly increasing, each input
+    /// position is the argmax exactly once — indices = [0,1,2,3], so
+    /// scatter_add of ones at those positions gives ones.
+    #[test]
+    fn test_cummax_backward_monotonic() {
+        const EXPECTED: [f64; 4] = [1.0, 1.0, 1.0, 1.0];
+        let x = leaf(&[1.0, 2.0, 3.0, 4.0], &[4], true);
+        let r = cummax(&x, 0).unwrap();
+        // Verify saved indices match upstream's tie-break for a monotonic
+        // input (no ties — every position is a fresh argmax).
+        assert_eq!(r.indices, vec![0, 1, 2, 3]);
+        let loss = sum(&r.values).unwrap();
+        loss.backward().unwrap();
+        let g = x.grad().unwrap().unwrap();
+        let gd = g.data().unwrap();
+        for (i, expected) in EXPECTED.iter().enumerate() {
+            assert!(
+                (gd[i] - expected).abs() < 1e-12,
+                "cummax_backward_monotonic: idx={i} got={} expected={}",
+                gd[i],
+                expected,
+            );
+        }
+        // grad-fn name introspection — proves the autograd node attached.
+        assert_eq!(r.values.grad_fn().unwrap().name(), "CummaxBackward");
+    }
+
+    /// `cummax([1,2,2,3]).sum().backward()` — tied input at indices 1,2.
+    ///
+    /// Live torch (verified 2026-05-25):
+    /// ```text
+    /// x = torch.tensor([1.,2.,2.,3.], requires_grad=True)
+    /// vals, idx = torch.cummax(x, 0)
+    /// idx  == tensor([0, 1, 2, 3])    # later wins on ties: idx 2 chosen
+    /// vals.sum().backward()
+    /// x.grad == tensor([1., 1., 1., 1.])
+    /// ```
+    /// Without the upstream-aligned `>=` tie-break, the saved indices
+    /// would be `[0, 1, 1, 3]` (earlier wins) and the resulting gradient
+    /// would be `[1, 2, 0, 1]` — the wrong gradient on a tied input.
+    /// That mismatch is the precise reason the kernel fix and the
+    /// backward landed together.
+    #[test]
+    fn test_cummax_backward_tie() {
+        const EXPECTED_INDICES: [usize; 4] = [0, 1, 2, 3];
+        const EXPECTED_GRAD: [f64; 4] = [1.0, 1.0, 1.0, 1.0];
+        let x = leaf(&[1.0, 2.0, 2.0, 3.0], &[4], true);
+        let r = cummax(&x, 0).unwrap();
+        assert_eq!(r.indices, EXPECTED_INDICES.to_vec());
+        let loss = sum(&r.values).unwrap();
+        loss.backward().unwrap();
+        let g = x.grad().unwrap().unwrap();
+        let gd = g.data().unwrap();
+        for (i, expected) in EXPECTED_GRAD.iter().enumerate() {
+            assert!(
+                (gd[i] - expected).abs() < 1e-12,
+                "cummax_backward_tie: idx={i} got={} expected={}",
+                gd[i],
+                expected,
+            );
+        }
+    }
+
+    /// `cummin([5,2,2,1]).sum().backward()` — tied input at indices 1,2
+    /// for the running minimum.
+    ///
+    /// Live torch (verified 2026-05-25):
+    /// ```text
+    /// x = torch.tensor([5.,2.,2.,1.], requires_grad=True)
+    /// vals, idx = torch.cummin(x, 0)
+    /// idx  == tensor([0, 1, 2, 3])    # later wins on ties: idx 2 chosen
+    /// vals.sum().backward()
+    /// x.grad == tensor([1., 1., 1., 1.])
+    /// ```
+    #[test]
+    fn test_cummin_backward_tie() {
+        const EXPECTED_INDICES: [usize; 4] = [0, 1, 2, 3];
+        const EXPECTED_GRAD: [f64; 4] = [1.0, 1.0, 1.0, 1.0];
+        let x = leaf(&[5.0, 2.0, 2.0, 1.0], &[4], true);
+        let r = cummin(&x, 0).unwrap();
+        assert_eq!(r.indices, EXPECTED_INDICES.to_vec());
+        let loss = sum(&r.values).unwrap();
+        loss.backward().unwrap();
+        let g = x.grad().unwrap().unwrap();
+        let gd = g.data().unwrap();
+        for (i, expected) in EXPECTED_GRAD.iter().enumerate() {
+            assert!(
+                (gd[i] - expected).abs() < 1e-12,
+                "cummin_backward_tie: idx={i} got={} expected={}",
+                gd[i],
+                expected,
+            );
+        }
+        assert_eq!(r.values.grad_fn().unwrap().name(), "CumminBackward");
+    }
+
+    /// `cummax([1.0, NaN, 3.0, 4.0])` — NaN poisons subsequent positions.
+    ///
+    /// Live torch (verified 2026-05-25):
+    /// ```text
+    /// x = torch.tensor([1.0, float('nan'), 3.0, 4.0])
+    /// torch.cummax(x, 0)
+    ///   values  == tensor([1., nan, nan, nan])
+    ///   indices == tensor([0, 1, 1, 1])
+    /// ```
+    /// Once `cur` becomes NaN at position 1, the update predicate
+    /// `isnan(curr) || (!isnan(cur) && curr >= cur)` becomes
+    /// `isnan(curr) || false` — only a fresh NaN curr can trigger an
+    /// update, and 3.0/4.0 are not NaN. So `cur` and `cur_idx` stay
+    /// frozen at (NaN, 1) for all subsequent positions, exactly matching
+    /// upstream `cummax_cummin_helper` at `ReduceOps.cpp:819`.
+    #[test]
+    fn test_cummax_forward_nan_propagates() {
+        const EXPECTED_INDICES: [usize; 4] = [0, 1, 1, 1];
+        let x = leaf(&[1.0, f64::NAN, 3.0, 4.0], &[4], false);
+        let r = cummax(&x, 0).unwrap();
+        let d = r.values.data().unwrap();
+        assert!((d[0] - 1.0).abs() < 1e-12, "values[0] should be 1.0");
+        assert!(d[1].is_nan(), "values[1] should be NaN (input is NaN)");
+        assert!(d[2].is_nan(), "values[2] should propagate NaN");
+        assert!(d[3].is_nan(), "values[3] should propagate NaN");
+        assert_eq!(r.indices, EXPECTED_INDICES.to_vec());
     }
 }

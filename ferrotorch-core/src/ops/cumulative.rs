@@ -188,6 +188,14 @@ pub struct CumExtremeResult<T: Float> {
 /// Returns `(values, indices)` where `values[..., i, ...]` is the running
 /// maximum of `input[..., 0..=i, ...]` and `indices` holds the flat-along-dim
 /// index at which each running maximum was attained.
+///
+/// Tie-breaking matches upstream `std::greater_equal<scalar_t>` at
+/// `aten/src/ATen/native/ReduceOps.cpp:832` — on equal values, the LATER
+/// index wins. NaN propagation also matches upstream `cummax_cummin_helper`
+/// at `:811-826`: once a NaN appears in the prefix, every subsequent
+/// `values[..., j, ...]` is NaN and the running `indices[..., j, ...]`
+/// pin to the first-NaN position. The update predicate is
+/// `isnan(curr) || (!isnan(out) && curr >= out)` (mirrors `:819`).
 pub fn cummax_forward<T: Float>(
     input: &Tensor<T>,
     dim: i64,
@@ -237,19 +245,43 @@ pub fn cummax_forward<T: Float>(
     let mut out_vals = vec![<T as num_traits::Zero>::zero(); numel];
     let mut out_idxs = vec![0usize; numel];
 
-    for o in 0..outer {
-        for k in 0..inner {
-            let base = o * dim_size * inner + k;
-            let mut cur_max = <T as num_traits::Float>::neg_infinity();
-            let mut cur_idx = 0usize;
-            for i in 0..dim_size {
-                let idx = base + i * inner;
-                if in_data[idx] > cur_max {
-                    cur_max = in_data[idx];
-                    cur_idx = i;
+    // Seed and update rule mirror upstream `cummax_cummin_helper` at
+    // `aten/src/ATen/native/ReduceOps.cpp:811-826`:
+    //   T1 out = c10::load(self_data);          // seed = first element
+    //   int idx = 0;
+    //   for i in irange(dim_size):
+    //     curr = self_data[i*stride];
+    //     if (isnan_(curr) || (!isnan_(out) && op(curr, out))) {  // op = std::greater_equal
+    //       out = curr; idx = i;
+    //     }
+    //     values_data[i*stride] = out;
+    //     indices_data[i*stride] = idx;
+    if dim_size > 0 {
+        for o in 0..outer {
+            for k in 0..inner {
+                let base = o * dim_size * inner + k;
+                // Seed with the first element along this scan line (i == 0)
+                // exactly as upstream's `T1 out = c10::load(self_data)`.
+                let mut cur = in_data[base];
+                let mut cur_idx = 0usize;
+                for i in 0..dim_size {
+                    let idx = base + i * inner;
+                    let curr = in_data[idx];
+                    // Tie-break: `>=` so later index wins on ties (mirrors
+                    // `std::greater_equal<scalar_t>` at `ReduceOps.cpp:832`).
+                    // NaN: once `cur` is NaN it poisons every subsequent
+                    // position because `!isnan(cur)` short-circuits both
+                    // branches of the OR; a fresh `curr == NaN` still wins
+                    // via `isnan_(curr_elem)`.
+                    let curr_is_nan = <T as num_traits::Float>::is_nan(curr);
+                    let cur_is_nan = <T as num_traits::Float>::is_nan(cur);
+                    if curr_is_nan || (!cur_is_nan && curr >= cur) {
+                        cur = curr;
+                        cur_idx = i;
+                    }
+                    out_vals[idx] = cur;
+                    out_idxs[idx] = cur_idx;
                 }
-                out_vals[idx] = cur_max;
-                out_idxs[idx] = cur_idx;
             }
         }
     }
@@ -269,6 +301,11 @@ pub fn cummax_forward<T: Float>(
 ///
 /// Returns `(values, indices)` analogous to [`cummax_forward`] but tracking
 /// the running minimum.
+///
+/// Tie-breaking matches upstream `std::less_equal<scalar_t>` at
+/// `aten/src/ATen/native/ReduceOps.cpp:871` — on equal values, the LATER
+/// index wins. NaN propagation matches the same templated helper at
+/// `:811-826`: any NaN in the prefix poisons all subsequent positions.
 pub fn cummin_forward<T: Float>(
     input: &Tensor<T>,
     dim: i64,
@@ -316,19 +353,29 @@ pub fn cummin_forward<T: Float>(
     let mut out_vals = vec![<T as num_traits::Zero>::zero(); numel];
     let mut out_idxs = vec![0usize; numel];
 
-    for o in 0..outer {
-        for k in 0..inner {
-            let base = o * dim_size * inner + k;
-            let mut cur_min = <T as num_traits::Float>::infinity();
-            let mut cur_idx = 0usize;
-            for i in 0..dim_size {
-                let idx = base + i * inner;
-                if in_data[idx] < cur_min {
-                    cur_min = in_data[idx];
-                    cur_idx = i;
+    // Mirrors upstream `cummax_cummin_helper` at
+    // `aten/src/ATen/native/ReduceOps.cpp:811-826` with
+    // `op = std::less_equal<scalar_t>`.
+    if dim_size > 0 {
+        for o in 0..outer {
+            for k in 0..inner {
+                let base = o * dim_size * inner + k;
+                let mut cur = in_data[base];
+                let mut cur_idx = 0usize;
+                for i in 0..dim_size {
+                    let idx = base + i * inner;
+                    let curr = in_data[idx];
+                    let curr_is_nan = <T as num_traits::Float>::is_nan(curr);
+                    let cur_is_nan = <T as num_traits::Float>::is_nan(cur);
+                    // Tie-break: `<=` so later index wins on ties (mirrors
+                    // `std::less_equal<scalar_t>` at `ReduceOps.cpp:871`).
+                    if curr_is_nan || (!cur_is_nan && curr <= cur) {
+                        cur = curr;
+                        cur_idx = i;
+                    }
+                    out_vals[idx] = cur;
+                    out_idxs[idx] = cur_idx;
                 }
-                out_vals[idx] = cur_min;
-                out_idxs[idx] = cur_idx;
             }
         }
     }
