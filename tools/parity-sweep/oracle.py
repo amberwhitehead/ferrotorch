@@ -222,9 +222,14 @@ def _fake_quantize_per_tensor_affine_samples() -> list[tuple[tuple, dict]]:
 
     # Sample 6: includes +Inf and -Inf — torch's behavior is to clamp Inf to
     # the (dequantized) quant_max / quant_min boundary via the round-then-
-    # clamp path. NaN is intentionally NOT included because Rust f32::clamp
-    # debug-asserts on NaN per the ferrotorch design doc and the parity
-    # contract is undefined for NaN inputs in the current REQ-1 spec.
+    # clamp path. NaN coverage moved to samples 9/10 below — the prior
+    # "NaN excluded because f32::clamp debug-asserts" rationale went stale
+    # with commits 77781d844 (#1238: f64 min/max NaN-safe semantics) and
+    # 0258ffb0c (#1259: kept the NaN-safe property when reverting f64 ->
+    # f32 arithmetic to match upstream byte-for-byte). The unit test
+    # `fake_quantize_nan_input_does_not_panic` at
+    # `ferrotorch-core/src/grad_fns/quantize_grad.rs:850-862` locks the
+    # NaN contract as "no panic, finite output (clamps to quant_min)".
     s6 = torch.tensor(
         [float("inf"), -float("inf"), 0.0, 1.0],
         dtype=torch.float32,
@@ -240,6 +245,33 @@ def _fake_quantize_per_tensor_affine_samples() -> list[tuple[tuple, dict]]:
     # at FakeQuantPerTensorAffine.cpp:79-81.
     s8 = torch.randn(6, generator=g, dtype=torch.float32) * 0.5
     samples.append(((s8, 0.1, 127, -128, 127), {}))
+
+    # Sample 9: NaN propagation through the per-tensor kernel.
+    # Live torch returns `tensor([-128., 1., 2.])` because NaN propagates
+    # through `inv_scale * x` then `nearbyint(NaN) == NaN`, then upstream's
+    # `std::fmin(std::fmax(NaN, quant_min), quant_max)` collapses NaN to
+    # `quant_min` (IEEE-754-2019 minimum/maximum semantics: NaN argument
+    # is dropped, the finite operand wins; per upstream
+    # `aten/src/ATen/native/quantized/cpu/kernels/QuantizedOpKernels.cpp:
+    # 2683-2684`). ferrotorch's NaN-safe `f32::min` / `f32::max` chain at
+    # `grad_fns/quantize_grad.rs:262-263` reproduces this. The unit test
+    # `fake_quantize_nan_input_does_not_panic` only checks "no panic +
+    # finite output" — the parity sweep now also checks the value
+    # equals torch's `-128.0` byte-for-byte.
+    s9 = torch.tensor([float("nan"), 1.0, 2.0], dtype=torch.float32)
+    samples.append(((s9, 1.0, 0, -128, 127), {}))
+
+    # Sample 10: combined non-finite coverage — NaN alongside +Inf / -Inf.
+    # Expected per live torch:
+    #   `tensor([-128., 127., -128.])` (NaN -> quant_min, +Inf -> quant_max,
+    #   -Inf -> quant_min). Mirrors the audit probe at
+    #   `tools/parity-sweep/runs/fake_quantize_per_tensor_affine/
+    #   discriminator_audit_probes_post_1259.jsonl` id
+    #   `nan_input_now_safe_per_1259`.
+    s10 = torch.tensor(
+        [float("nan"), float("inf"), -float("inf")], dtype=torch.float32
+    )
+    samples.append(((s10, 1.0, 0, -128, 127), {}))
 
     return samples
 
@@ -327,6 +359,27 @@ def _fake_quantize_per_channel_affine_samples() -> list[tuple[tuple, dict]]:
     scale8 = torch.tensor([0.1, 0.2, 0.05], dtype=torch.float32)
     zp8 = torch.tensor([-128, 0, 127], dtype=torch.int32)
     samples.append(((s8, scale8, zp8, 1, -128, 127), {}))
+
+    # Sample 9: NaN propagation through the per-channel kernel.
+    # The per-channel kernel uses the cast-to-int64-first ordering from
+    # upstream `aten/src/ATen/native/quantized/cpu/kernels/
+    # QuantizedOpKernels.cpp:2836-2848`, where `static_cast<int64_t>(NaN)`
+    # on x86-64 via `cvttsd2si` snaps to INT64_MIN (invalid-op result)
+    # which then `std::fmax(INT64_MIN, quant_min)` clamps to `quant_min`.
+    # ferrotorch replicates this with an explicit non-finite check at
+    # `grad_fns/quantize_grad.rs:319,346-350` (NaN, +Inf, -Inf all
+    # resolve to INT64_MIN before clamping). Live torch: input
+    # `[[NaN, 1.0, -1.0]]`, scale=[0.1], zp=[0], axis=0, qmin=-128,
+    # qmax=127 yields `[[-12.8, 1.0, -1.0]]` — the NaN slot clamps to
+    # `quant_min * scale = -128 * 0.1 = -12.8` (per-channel dequant
+    # multiplies by the per-channel scale; per-tensor's NaN-> -128 was
+    # scale=1.0). Mirrors audit probe `per_channel_nan_input` at
+    # `tools/parity-sweep/runs/fake_quantize_per_tensor_affine/
+    # discriminator_audit_probes_post_1259.jsonl`.
+    s9 = torch.tensor([[float("nan"), 1.0, -1.0]], dtype=torch.float32)
+    scale9 = torch.tensor([0.1], dtype=torch.float32)
+    zp9 = torch.tensor([0], dtype=torch.int32)
+    samples.append(((s9, scale9, zp9, 0, -128, 127), {}))
 
     return samples
 
