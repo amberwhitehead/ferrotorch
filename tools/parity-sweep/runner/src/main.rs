@@ -19,7 +19,7 @@ use std::io::{BufRead, BufReader, Write};
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 
 use base64::{Engine, engine::general_purpose::STANDARD as B64};
-use ferrotorch_core::{IntTensor, Tensor, from_vec, grad_fns};
+use ferrotorch_core::{BoolTensor, IntTensor, Tensor, from_vec, grad_fns};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
@@ -106,6 +106,34 @@ impl WireTensor {
             }
         };
         Ok(IntTensor::<i64>::from_vec(data, self.shape.clone())?)
+    }
+
+    /// Decode the wire envelope to a [`BoolTensor`]. Oracle bool wire is
+    /// one byte per element (each byte is 0 or 1) per `oracle.py:54-86`,
+    /// byte-identical to a host `&[bool]` (Rust's `bool` is also 1 byte with
+    /// the same {0, 1} bit pattern). Used by the `masked_select` / `masked_fill`
+    /// / `where` runner dispatch arms (closes #1250 #1251 #1255).
+    fn to_bool_tensor(&self) -> Result<BoolTensor, Box<dyn std::error::Error>> {
+        if self.dtype != "bool" {
+            return Err(format!("to_bool_tensor: expected bool dtype, got {}", self.dtype).into());
+        }
+        let bytes = B64.decode(&self.data_b64)?;
+        let numel: usize = if self.shape.is_empty() {
+            1
+        } else {
+            self.shape.iter().product()
+        };
+        if bytes.len() != numel {
+            return Err(format!(
+                "bool byte length {} does not match shape {:?} (expected {})",
+                bytes.len(),
+                self.shape,
+                numel
+            )
+            .into());
+        }
+        let data: Vec<bool> = bytes.into_iter().map(|b| b != 0).collect();
+        Ok(BoolTensor::from_vec(data, self.shape.clone())?)
     }
 }
 
@@ -630,6 +658,101 @@ fn dispatch_f32(
         // FakeQuantPerChannelAffine.cpp:32-42` byte-for-byte (per-channel
         // banker's rounding + NaN-safe clamp using `scale[c]` / `zp[c]`).
         // Closes blocker #1239.
+        // `torch.masked_select(input, mask)` — return a 1-D compaction of
+        // input elements where mask is true. Upstream broadcasts input and
+        // mask via `expand_outplace(mask, self)` at
+        // `aten/src/ATen/native/TensorAdvancedIndexing.cpp:2545` (called from
+        // `masked_select_cpu` at `:2621-2624`). Routes through the
+        // broadcasting wrapper `grad_fns::indexing::masked_select_bcast`
+        // which infers the common shape, expands both operands via the
+        // autograd-aware `grad_fns::shape::expand`, then delegates to the
+        // existing shape-strict `ops::indexing::masked_select`. Closes #1250.
+        "masked_select" => Ok(Some({
+            if args.len() < 2 {
+                return Err(format!("masked_select expects 2 args, got {}", args.len()).into());
+            }
+            let input = unwrap_tensor_arg(&args[0])
+                .ok_or("masked_select: arg 0 not a tensor")?
+                .to_f32()?;
+            let mask = unwrap_tensor_arg(&args[1])
+                .ok_or("masked_select: arg 1 not a tensor")?
+                .to_bool_tensor()?;
+            grad_fns::indexing::masked_select_bcast(&input, &mask)?
+        })),
+        // `torch.masked_fill(input, mask, value)` — fill elements of input
+        // with `value` where mask is true, mask is broadcast to input shape.
+        // Upstream broadcasts via `expand_outplace(mask, self)` at
+        // `TensorAdvancedIndexing.cpp:2503` (called from
+        // `Tensor masked_fill(...)` at `:2494-2509`). Oracle wire emits
+        // `args = [input, mask, value]` where `value` is either a JSON number
+        // or a 0-d tensor envelope (sample_inputs_masked_fill at
+        // `torch/testing/_internal/common_methods_invocations.py:6989-7010`).
+        // Closes #1251.
+        "masked_fill" => Ok(Some({
+            if args.len() < 3 {
+                return Err(format!("masked_fill expects 3 args, got {}", args.len()).into());
+            }
+            let input = unwrap_tensor_arg(&args[0])
+                .ok_or("masked_fill: arg 0 not a tensor")?
+                .to_f32()?;
+            let mask = unwrap_tensor_arg(&args[1])
+                .ok_or("masked_fill: arg 1 not a tensor")?
+                .to_bool_tensor()?;
+            // `value` is a JSON scalar (number or string-quoted "10") or a
+            // 0-d tensor envelope. Decode either form to f32.
+            let value: f32 = if let Some(v) = args[2].as_f64() {
+                v as f32
+            } else if let Some(s) = args[2].as_str() {
+                // op_db sometimes emits the value as a Python int → JSON
+                // string ("10"). Parse the string.
+                s.parse::<f32>()
+                    .map_err(|e| format!("masked_fill: arg 2 string parse failed: {e}"))?
+            } else if let Some(wt) = unwrap_tensor_arg(&args[2]) {
+                if !wt.shape.is_empty() {
+                    // Tensor-valued fill must be 0-d per upstream contract at
+                    // `TensorAdvancedIndexing.cpp:2482-2487
+                    // TORCH_CHECK(value.dim() == 0, "masked_fill_ only
+                    // supports a 0-dimensional value tensor, ...");`. Non-0-d
+                    // is a legitimate skip (oracle never emits it, but
+                    // belt-and-braces).
+                    return Ok(None);
+                }
+                let t = wt.to_f32()?;
+                let d = t.data_vec()?;
+                d.first().copied().unwrap_or(0.0)
+            } else {
+                return Err(
+                    format!("masked_fill: arg 2 not a number/string/tensor: {}", args[2]).into(),
+                );
+            };
+            grad_fns::indexing::masked_fill_bcast(&input, &mask, value)?
+        })),
+        // `torch.where(condition, self, other)` — ternary selection with
+        // 3-way broadcasting. Upstream builds a TensorIterator over
+        // (condition, self, other) at
+        // `aten/src/ATen/native/TensorCompare.cpp:629-637 where_self_out`
+        // (called from `Tensor where(...)` at `:642-648`). Op_db's `where`
+        // entry registers `op=lambda self, condition, other: torch.where(
+        // condition, self, other)` per
+        // `common_methods_invocations.py:21742-21746`, so oracle wire emits
+        // `args = [self, condition, other]` (self / x first, then mask, then
+        // other / y). Routes through `grad_fns::indexing::where_cond_bcast`.
+        // Closes #1255.
+        "where" => Ok(Some({
+            if args.len() < 3 {
+                return Err(format!("where expects 3 args, got {}", args.len()).into());
+            }
+            let x = unwrap_tensor_arg(&args[0])
+                .ok_or("where: arg 0 (self) not a tensor")?
+                .to_f32()?;
+            let cond = unwrap_tensor_arg(&args[1])
+                .ok_or("where: arg 1 (condition) not a tensor")?
+                .to_bool_tensor()?;
+            let y = unwrap_tensor_arg(&args[2])
+                .ok_or("where: arg 2 (other) not a tensor")?
+                .to_f32()?;
+            grad_fns::indexing::where_cond_bcast(&cond, &x, &y)?
+        })),
         "fake_quantize_per_channel_affine" => Ok(Some({
             if args.len() < 6 {
                 return Err(format!(
@@ -700,6 +823,14 @@ fn dispatch_ops() -> &'static [&'static str] {
         "fake_quantize_per_tensor_affine",
         // Quantization: per-channel affine fake quantize w/ STE backward. (#1239)
         "fake_quantize_per_channel_affine",
+        // Indexing: masked / where ops. The runner dispatch routes through
+        // the broadcasting wrappers `masked_select_bcast`, `masked_fill_bcast`,
+        // and `where_cond_bcast` added 2026-05-25 to close #1250 / #1251 /
+        // #1255 — the existing shape-strict entry points reject the
+        // broadcast-required samples op_db emits.
+        "masked_select",
+        "masked_fill",
+        "where",
     ]
 }
 

@@ -40,15 +40,16 @@ The file holds:
 The PyTorch route declares 14 parity_ops: `gather`, `scatter`, `scatter_add`,
 `scatter_reduce`, `index_select`, `index_add`, `index_copy`, `index_fill`,
 `masked_select`, `masked_fill`, `masked_scatter`, `take`, `put`, `where`. As of
-this writeup (2026-05-25), **all 14 op_db entries return 0 passes (everything
-skipped)** because the parity-sweep runner at
-`tools/parity-sweep/runner/src/main.rs` has no dispatch arms for any indexing
-op. The implementation gap is therefore in two layers: (a) the parity-runner
-dispatch wiring (closes the SHIPPED gate even for ops that DO have an impl
-behind them), and (b) the ops that have no impl at all (`scatter_reduce`,
-`index_add`, `index_copy`, `index_fill`, `masked_scatter` forward, `take`,
-`put`). Each gap is filed as a NOT-STARTED REQ with a concrete prereq blocker
-(#1242–#1255).
+2026-05-25 the masked / where family (`masked_select`, `masked_fill`, `where`)
+has SHIPPED with broadcasting wrappers and runner dispatch; the remaining 11
+op_db entries return 0 passes (everything skipped) because the parity-sweep
+runner at `tools/parity-sweep/runner/src/main.rs` has no dispatch arms for
+those ops. The implementation gap is therefore in two layers: (a) the
+parity-runner dispatch wiring (closes the SHIPPED gate even for ops that DO
+have an impl behind them), and (b) the ops that have no impl at all
+(`scatter_reduce`, `index_add`, `index_copy`, `index_fill`, `masked_scatter`
+forward, `take`, `put`). Each gap is filed as a NOT-STARTED REQ with a concrete
+prereq blocker (#1242–#1255).
 
 ## Requirements
 
@@ -666,9 +667,9 @@ for the indexing family is part of each per-REQ blocker.
 ./target/release/parity-sweep sweep --op index_fill     --seeds 8
   => [index_fill]     0/48  passed (48  skipped, 0 failed)
 ./target/release/parity-sweep sweep --op masked_select  --seeds 8
-  => [masked_select]  0/56  passed (56  skipped, 0 failed)
+  => [masked_select]  56/56 passed (0   skipped, 0 failed)  # SHIPPED 2026-05-25
 ./target/release/parity-sweep sweep --op masked_fill    --seeds 8
-  => [masked_fill]    0/64  passed (64  skipped, 0 failed)
+  => [masked_fill]    64/64 passed (0   skipped, 0 failed)  # SHIPPED 2026-05-25
 ./target/release/parity-sweep sweep --op masked_scatter --seeds 8
   => [masked_scatter] 0/32  passed (32  skipped, 0 failed)
 ./target/release/parity-sweep sweep --op take           --seeds 8
@@ -676,15 +677,16 @@ for the indexing family is part of each per-REQ blocker.
 ./target/release/parity-sweep sweep --op put            --seeds 8
   => [put]            0/224 passed (224 skipped, 0 failed)
 ./target/release/parity-sweep sweep --op where          --seeds 8
-  => [where]          0/48  passed (48  skipped, 0 failed)
+  => [where]          48/48 passed (0   skipped, 0 failed)  # SHIPPED 2026-05-25
 ```
 
-Smoke grep count (`grep -c "passed (0 skipped, 0 failed)"`) is `0` for
-every op — the parity-sweep runner at `tools/parity-sweep/runner/src/main.rs`
-does not yet have dispatch arms for any indexing op, so every op_db sample
-exits dispatch with `Ok(None)` and is recorded as skipped (not as a
-divergence). Closing any REQ to SHIPPED requires landing the runner arm
-first.
+Smoke grep count (`grep -c "passed (0 skipped, 0 failed)"`) is `1` for
+`masked_select`, `masked_fill`, and `where` (broadcasting wrappers + runner
+arms landed 2026-05-25), and `0` for the other 11 ops — the parity-sweep
+runner at `tools/parity-sweep/runner/src/main.rs` does not yet have dispatch
+arms for those, so every op_db sample exits dispatch with `Ok(None)` and is
+recorded as skipped (not as a divergence). Closing any remaining REQ to
+SHIPPED requires landing the runner arm first.
 
 ## REQ status table
 
@@ -698,10 +700,10 @@ first.
 | REQ-6 (index_add) | NOT-STARTED | no impl. `[index_add] 0/72 passed`. Blocker #1247. |
 | REQ-7 (index_copy) | NOT-STARTED | no impl; coupled to REQ-8 via VJP. `[index_copy] 0/24 passed`. Blocker #1248. |
 | REQ-8 (index_fill) | NOT-STARTED | no impl; VJP target of REQ-7. `[index_fill] 0/48 passed`. Blocker #1249. |
-| REQ-9 (masked_select) | NOT-STARTED | impl exists: forward at `ops/indexing.rs:478 pub fn masked_select` attaching `MaskedSelectBackward` at `:509`; backward at `grad_fns/indexing.rs:923-987` mirroring `TensorAdvancedIndexing.cpp:2621 masked_select_cpu` and `derivatives.yaml:1116-1119`. Non-test production consumer: `Tensor::masked_select` at `ferrotorch-core/src/tensor.rs:1142-1147`. **NOT-STARTED on parity gate**: `[masked_select] 0/56 passed`. Blocker #1250. |
-| REQ-10 (masked_fill) | NOT-STARTED | impl exists: forward at `grad_fns/indexing.rs:367 pub fn masked_fill` (host `&[bool]`) + `:997 pub fn masked_fill_bt` (BoolTensor) attaching `MaskedFillBackward` at `:295`. Forward + backward mirror `TensorAdvancedIndexing.cpp:2494 Tensor masked_fill(...)` and `derivatives.yaml:1094-1097`. Non-test production consumer: `Tensor::masked_fill` at `tensor.rs:1126-1132`. **NOT-STARTED on parity gate**: `[masked_fill] 0/64 passed`. Blocker #1251. |
+| REQ-9 (masked_select) | SHIPPED | shape-strict forward at `ops/indexing.rs:478 pub fn masked_select` attaching `MaskedSelectBackward` at `:509`; backward at `grad_fns/indexing.rs:923-987` mirroring `TensorAdvancedIndexing.cpp:2621 masked_select_cpu` and `derivatives.yaml:1116-1119`. **Broadcasting wrapper landed 2026-05-25**: `grad_fns/indexing.rs:1526 pub fn masked_select_bcast` infers the common broadcast shape via `shape::broadcast_shapes`, expands both operands via the autograd-aware `grad_fns::shape::expand` (whose `ExpandBackward` reduces gradients back to original shape), then delegates to the shape-strict forward. Mirrors upstream `expand_outplace(mask, self)` at `TensorAdvancedIndexing.cpp:2545`. **Non-test production consumer**: `tools/parity-sweep/runner/src/main.rs:670 "masked_select" => masked_select_bcast(...)` — the runner dispatch routes op_db samples through the wrapper. Parity gate: **`[masked_select] 56/56 passed (0 skipped, 0 failed)` at seeds 0..8**. Closes #1250. |
+| REQ-10 (masked_fill) | SHIPPED | shape-strict forwards at `grad_fns/indexing.rs:367 pub fn masked_fill` (host `&[bool]`) + `:997 pub fn masked_fill_bt` (BoolTensor) attaching `MaskedFillBackward` at `:295`. Forward + backward mirror `TensorAdvancedIndexing.cpp:2494 Tensor masked_fill(...)` and `derivatives.yaml:1094-1097`. **Broadcasting wrapper landed 2026-05-25**: `grad_fns/indexing.rs:1503 pub fn masked_fill_bcast` expands input + mask to common shape via autograd-aware expand + a CPU-side bool broadcast (`broadcast_bool_tensor` at `:1463`), then delegates to `masked_fill_bt`. Mirrors upstream `expand_outplace(mask, self)` at `TensorAdvancedIndexing.cpp:2503`. **Non-test production consumer**: `tools/parity-sweep/runner/src/main.rs:691 "masked_fill" => masked_fill_bcast(...)`. Parity gate: **`[masked_fill] 64/64 passed (0 skipped, 0 failed)` at seeds 0..8**. Closes #1251. |
 | REQ-11 (masked_scatter) | NOT-STARTED | no forward impl. The `backend.masked_scatter` GPU kernel exists at `ferrotorch-gpu/src/masked_kernels.rs:933` but is consumed only inside `MaskedSelectBackward` (the VJP of masked_select). No `pub fn masked_scatter` and no `MaskedScatterBackward` struct. Upstream forward at `TensorAdvancedIndexing.cpp:2402` and VJP at `derivatives.yaml:1105-1108`. `[masked_scatter] 0/32 passed`. Blocker #1252. |
 | REQ-12 (take) | NOT-STARTED | no impl; VJP requires REQ-13 (`put`). `[take] 0/80 passed`. Blocker #1253. |
 | REQ-13 (put) | NOT-STARTED | no impl; VJP requires REQ-12 (`take`). `[put] 0/224 passed`. Blocker #1254. |
-| REQ-14 (where) | NOT-STARTED | impl exists: forward at `ops/indexing.rs:334 pub fn where_cond` + `:397 pub fn where_cond_bt` attaching `WhereCondBackward` at `:378` / `:445`; backward at `grad_fns/indexing.rs:800-904` mirroring `aten/src/ATen/native/TensorCompare.cpp:642 Tensor where(...)` and `derivatives.yaml:1955-1959`. **API divergence (R-DEV-2)**: ferrotorch name is `where_cond` to avoid the Rust `where` keyword; PyTorch uses `torch.where`. No `Tensor::where` method in `tensor.rs`. **NOT-STARTED on parity gate AND consumer gate**: `[where] 0/48 passed` and no non-test production consumer. Blocker #1255. |
+| REQ-14 (where) | SHIPPED | shape-strict forward at `ops/indexing.rs:334 pub fn where_cond` + `:397 pub fn where_cond_bt` attaching `WhereCondBackward` at `:378` / `:445`; backward at `grad_fns/indexing.rs:800-904` mirroring `aten/src/ATen/native/TensorCompare.cpp:642 Tensor where(...)` and `derivatives.yaml:1955-1959`. **Broadcasting wrapper landed 2026-05-25**: `grad_fns/indexing.rs:1547 pub fn where_cond_bcast` performs 3-way broadcast (`shape::broadcast_shapes` applied pairwise: x⨯y then cond⨯(x⨯y)), expands x and y via autograd-aware `grad_fns::shape::expand` (so `ExpandBackward` shrinks gradients to original shapes), broadcasts cond via `broadcast_bool_tensor`, then delegates to `where_cond_bt`. Mirrors upstream 3-way TensorIterator at `TensorCompare.cpp:629-637 where_self_out`. **API divergence (R-DEV-2)**: ferrotorch name remains `where_cond` / `where_cond_bcast` to avoid the Rust `where` keyword; PyTorch uses `torch.where`. **Non-test production consumer**: `tools/parity-sweep/runner/src/main.rs:741 "where" => where_cond_bcast(...)` — the runner routes op_db's `torch.where(cond, x, y)` samples through this wrapper. Parity gate: **`[where] 48/48 passed (0 skipped, 0 failed)` at seeds 0..8**. Closes #1255. |
 | REQ-15 (shared helpers) | SHIPPED | impl: `upload_f32_to_gpu` at `grad_fns/indexing.rs:25-38`, `scatter_write_mask` at `:42-64`, `gather_dst_flat_indices` at `:69-91`, `scatter_src_flat_indices` at `:96-106`, `flat_index` at `:114-122`, `increment_coords` at `:127-136`. Non-test production consumers: `GatherBackward::backward` (`:474`), `ScatterBackward::backward` (`:572, :587`), `ScatterAddBackward::backward` (`:720`), `IndexSelectBackward::backward` (`:173`), `IndexSelectDimBackward::backward` (`:1159`), `MaskedFillBackward::backward` (`:394`, via the f32 path's mask upload). The helpers themselves have no public API surface — they are file-local utility scaffolding shared across every N-D autograd VJP in this file. Verified by the 27-test pass run at AC-15. |
