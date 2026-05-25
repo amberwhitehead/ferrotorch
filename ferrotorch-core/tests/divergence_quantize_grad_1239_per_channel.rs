@@ -241,7 +241,6 @@ fn divergence_per_channel_f32_vs_f64_banker_rounding() {
 ///
 /// Tracking: #1261
 #[test]
-#[ignore = "divergence: rejects scale=0; upstream silently proceeds; tracking #1261"]
 fn divergence_per_channel_scale_zero_silently_proceeds() {
     // Expected (live torch oracle 2026-05-25): tensor([[-0., -0.], [3., 4.]]).
     // R-CHAR-3 honored: derived from running torch directly, NOT from
@@ -307,7 +306,6 @@ fn divergence_per_channel_scale_zero_silently_proceeds() {
 ///
 /// Tracking: #1261
 #[test]
-#[ignore = "divergence: rejects scale<0; upstream silently proceeds; tracking #1261"]
 fn divergence_per_channel_scale_negative_silently_proceeds() {
     // Expected from LIVE torch oracle 2026-05-25.
     let expected: [f32; 4] = [1.0, 2.0, 3.0, 4.0];

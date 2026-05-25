@@ -455,8 +455,16 @@ fn per_channel_mask_in_range(
 /// - `FerrotorchError::InvalidArgument` if any `zero_point[i]` lies outside
 ///   `[quant_min, quant_max]` (upstream `:69-74`).
 /// - `FerrotorchError::InvalidArgument` if `axis` is out of bounds.
-/// - `FerrotorchError::InvalidArgument` if any `scale[i] <= 0` or NaN
-///   (ferrotorch superset of upstream's silent inf/NaN propagation).
+///
+/// Note: `scale[i] <= 0` and `scale[i] == NaN` are NOT rejected — they
+/// propagate through the upstream cast-first formula per
+/// `FakeQuantPerChannelAffine.cpp:32-77` (which has no `scale > 0`
+/// check). `scale==0` yields `inv_scale = +Inf`, `int64_t(±Inf) =
+/// INT64_MIN` clamped to `quant_min`, dequant `(quant_min - zp) * 0.0
+/// = ±0.0`; `scale<0` is consistent under the double-negation
+/// cancellation; `scale==NaN` poisons the output to NaN. Pinned by
+/// R-DEV-1 numerical-contract match (divergence tests at
+/// `tests/divergence_quantize_grad_1239_per_channel.rs`, closes #1261).
 pub fn fake_quantize_per_channel_affine<T: Float>(
     input: &Tensor<T>,
     scale: &Tensor<T>,
@@ -574,19 +582,18 @@ pub fn fake_quantize_per_channel_affine<T: Float>(
             });
         }
     }
-    // 8. scale > 0 per channel (ferrotorch superset; upstream would
-    //    silently produce inf/NaN per channel).
-    for (i, s) in scale_data.iter().enumerate() {
-        let sf = s.to_f64().unwrap_or(f64::NAN);
-        if sf.is_nan() || sf <= 0.0 {
-            return Err(FerrotorchError::InvalidArgument {
-                message: format!(
-                    "fake_quantize_per_channel_affine: `scale` must be > 0 per channel; \
-                     scale[{i}]={sf}"
-                ),
-            });
-        }
-    }
+    // 8. NO `scale > 0` check — upstream `FakeQuantPerChannelAffine.cpp:32-77`
+    //    has none. R-DEV-1 numerical-contract match: `scale==0` yields
+    //    `inv_scale = +Inf`, `int64_t(±Inf) = INT64_MIN` clamped to
+    //    `quant_min`, dequant `(quant_min - zp) * 0.0 = ±0.0`; `scale<0`
+    //    works via double-negation cancellation; `scale==NaN` poisons the
+    //    output to NaN (live torch 2026-05-25 returns `tensor([[nan]])`
+    //    for NaN scale, confirming no check). Pinned by
+    //    `tests/divergence_quantize_grad_1239_per_channel.rs::
+    //    divergence_per_channel_scale_{zero,negative}_silently_proceeds`
+    //    (closes #1261). The `per_channel_dequantize_f64` helper at `:325`
+    //    already implements the cast-first IEEE-754 / x86 invalid-op
+    //    saturation that produces the correct upstream values.
 
     // outer / inner strides around `axis` so that the channel index for
     // flat index `i` is `(i / inner) % channel_dim`.
@@ -1316,15 +1323,14 @@ mod tests {
         assert!(format!("{}", result.unwrap_err()).contains("`quant_min`"));
     }
 
-    #[test]
-    fn fake_quantize_per_channel_rejects_non_positive_scale() {
-        let input = t(vec![1.0, 2.0], vec![2], false);
-        let scale = t(vec![1.0, -0.5], vec![2], false);
-        let zp = ti64(vec![0, 0], vec![2]);
-        let result = fake_quantize_per_channel_affine(&input, &scale, &zp, 0, -128, 127);
-        assert!(result.is_err());
-        assert!(format!("{}", result.unwrap_err()).contains("`scale`"));
-    }
+    // NOTE: previously a `fake_quantize_per_channel_rejects_non_positive_scale`
+    // test verified rejection of `scale[i] <= 0`. Upstream
+    // `FakeQuantPerChannelAffine.cpp:32-77` has no such check; ferrotorch
+    // now silently proceeds with the cast-first formula to match upstream
+    // byte-for-byte (R-DEV-1 numerical contract; closes #1261). The
+    // upstream behavior is now pinned by the divergence tests at
+    // `tests/divergence_quantize_grad_1239_per_channel.rs::
+    // divergence_per_channel_scale_{zero,negative}_silently_proceeds`.
 
     #[test]
     fn fake_quantize_per_channel_preserves_grad_fn_when_input_requires_grad() {
