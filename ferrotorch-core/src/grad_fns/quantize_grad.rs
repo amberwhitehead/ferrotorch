@@ -367,11 +367,26 @@ fn per_channel_mask_in_range(
     quant_min: i64,
     quant_max: i64,
 ) -> bool {
-    let zp_f64 = zero_point as f64;
-    let inv_scale = 1.0 / scale_f64;
-    let qval_f = zp_f64 + (x_f64 * inv_scale).round_ties_even();
-    let qval_i64: i64 = if qval_f.is_finite() {
-        qval_f as i64
+    // Upstream per-channel mask at `QuantizedOpKernels.cpp:2830-2834` reads
+    // `float inv_scale = 1.0f / scale;` (line :2831) — the SAME f32 chain the
+    // forward dequantize uses at :2838. R-DEV-1 numerical contract: the mask
+    // must recompute at f32 so it agrees byte-for-byte with the forward's
+    // i64-cast at f32/f64 split boundaries. Previously this used f64 and
+    // disagreed with the forward when `self * inv_scale` was a banker-rounding
+    // tie that resolved differently between precisions (#1263, divergence
+    // pinned by
+    // `tests/divergence_fake_quantize_per_channel_backward_mask_f32_vs_f64.rs`).
+    let scale_f32 = scale_f64 as f32;
+    let x_f32 = x_f64 as f32;
+    let zp_f32 = zero_point as f32;
+    let inv_scale_f32 = 1.0_f32 / scale_f32;
+    let qval_f32 = zp_f32 + (x_f32 * inv_scale_f32).round_ties_even();
+    // Replicate upstream's `static_cast<int64_t>(qval_f)` cast-first ordering
+    // exactly as the forward helper `per_channel_dequantize_f64` does — see
+    // its rationale comment above re: x86-64 `cvttsd2si` invalid-op saturation
+    // for non-finite qval_f.
+    let qval_i64: i64 = if qval_f32.is_finite() {
+        qval_f32 as i64
     } else {
         i64::MIN
     };
@@ -689,21 +704,34 @@ impl<T: Float> GradFn<T> for FakeQuantizeBackward<T> {
         }
         let grad_data = grad_output.data_vec()?;
         let input_data = self.input.data_vec()?;
-        let inv_scale = 1.0_f64 / self.scale;
-        let zp_f64 = self.zero_point as f64;
-        let qmin_f64 = self.quant_min as f64;
-        let qmax_f64 = self.quant_max as f64;
+        // Upstream computes the mask using the SAME f32 `qval_f` produced by
+        // the forward's `float inv_scale = 1.0f / sc` chain — see
+        // `QuantizedOpKernels.cpp:2665` (`float inv_scale = 1.0f / sc;`),
+        // `:2683` (`qval_f = z_point + std::nearbyint(*input_val * inv_scale);`),
+        // `:2686` (`*mask_val = ((quant_min <= qval_f) && (qval_f <= quant_max));`).
+        // R-DEV-1 numerical contract: the backward MUST recompute the mask at
+        // f32 precision so it agrees byte-for-byte with the forward (and with
+        // upstream's mask) at f32/f64 split boundaries. Previously this was
+        // computed at f64 and disagreed with the forward when `x * inv_scale`
+        // landed on a banker-rounding tie that differed between precisions
+        // (#1263, divergence pinned by
+        // `tests/divergence_fake_quantize_backward_mask_f32_vs_f64.rs`).
+        let scale_f32 = self.scale as f32;
+        let inv_scale_f32 = 1.0_f32 / scale_f32;
+        let zp_f32 = self.zero_point as f32;
+        let qmin_f32 = self.quant_min as f32;
+        let qmax_f32 = self.quant_max as f32;
         let zero = <T as num_traits::Zero>::zero();
         let grad: Vec<T> = input_data
             .iter()
             .zip(grad_data.iter())
             .map(|(&x, &g)| {
-                let x_f64 = x.to_f64().unwrap_or(f64::NAN);
-                let qval_f = zp_f64 + (x_f64 * inv_scale).round_ties_even();
+                let x_f32 = x.to_f32().unwrap_or(f32::NAN);
+                let qval_f32 = zp_f32 + (x_f32 * inv_scale_f32).round_ties_even();
                 // Upstream mask: `(quant_min <= qval_f) && (qval_f <= quant_max)`
-                // per `QuantizedOpKernels.cpp:2706`. NaN propagates as `false`
+                // per `QuantizedOpKernels.cpp:2686`. NaN propagates as `false`
                 // through both comparisons (R-DEV-1 numerical contract).
-                if qval_f >= qmin_f64 && qval_f <= qmax_f64 {
+                if qval_f32 >= qmin_f32 && qval_f32 <= qmax_f32 {
                     g
                 } else {
                     zero
