@@ -274,6 +274,16 @@ fn dispatch_f32(
         // backward `-0.5 * grad * c^3` per `tools/autograd/derivatives.yaml:1505`.
         // Closes blocker #1195.
         "rsqrt" => Ok(Some(grad_fns::arithmetic::rsqrt(&unary("rsqrt")?)?)),
+        // `torch.reciprocal(input, *, out=None)` — `_torch_docs.py:2584`.
+        // ferrotorch's `arithmetic::reciprocal<T: Float>(a)` mirrors the
+        // upstream unary at `aten/src/ATen/native/UnaryOps.cpp:345
+        // CREATE_UNARY_TORCH_IMPL_FUNC(reciprocal_out, reciprocal_stub)`
+        // with backward `-grad * c^2` per
+        // `tools/autograd/derivatives.yaml:1447-1449
+        // self: -grad * (result * result).conj()`. Closes blocker #1196.
+        "reciprocal" => Ok(Some(grad_fns::arithmetic::reciprocal(&unary(
+            "reciprocal",
+        )?)?)),
         // `torch.pow(input, exponent, *, out=None)` — `_torch_docs.py:8672`.
         // ferrotorch's `arithmetic::pow<T: Float>(a, exp: f64)` mirrors the
         // scalar-exponent overload at `aten/src/ATen/native/Pow.cpp:51
@@ -319,7 +329,17 @@ fn dispatch_f32(
 
 fn dispatch_ops() -> &'static [&'static str] {
     &[
-        "add", "sub", "mul", "div", "neg", "abs", "sqrt", "pow", "rsub", "rsqrt",
+        "add",
+        "sub",
+        "mul",
+        "div",
+        "neg",
+        "abs",
+        "sqrt",
+        "pow",
+        "rsub",
+        "rsqrt",
+        "reciprocal",
     ]
 }
 

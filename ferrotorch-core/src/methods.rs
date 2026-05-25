@@ -66,6 +66,19 @@ impl<T: Float> Tensor<T> {
         crate::grad_fns::arithmetic::rsqrt(self)
     }
 
+    /// `torch.Tensor.reciprocal()` — elementwise reciprocal: `1 / self`.
+    ///
+    /// Mirrors `torch.reciprocal(input, *, out=None)` per
+    /// `torch/_torch_docs.py:2584` and the upstream impl macro at
+    /// `aten/src/ATen/native/UnaryOps.cpp:345
+    /// CREATE_UNARY_TORCH_IMPL_FUNC(reciprocal_out, reciprocal_stub)`. The
+    /// non-test production consumer wiring for `arithmetic::reciprocal` per
+    /// R-DEFER-1: this method is the public, chainable surface that closes
+    /// the consumer requirement.
+    pub fn reciprocal_t(&self) -> FerrotorchResult<Tensor<T>> {
+        crate::grad_fns::arithmetic::reciprocal(self)
+    }
+
     pub fn abs_t(&self) -> FerrotorchResult<Tensor<T>> {
         crate::grad_fns::arithmetic::abs(self)
     }
