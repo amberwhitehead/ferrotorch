@@ -53,6 +53,19 @@ impl<T: Float> Tensor<T> {
         crate::grad_fns::arithmetic::sqrt(self)
     }
 
+    /// `torch.Tensor.rsqrt()` — reciprocal square root: `1 / sqrt(self)`.
+    ///
+    /// Mirrors `torch.rsqrt(input, *, out=None)` per `torch/_torch_docs.py:9656`
+    /// and the upstream impl macro at
+    /// `aten/src/ATen/native/UnaryOps.cpp:346
+    /// CREATE_UNARY_TORCH_IMPL_FUNC(rsqrt_out, rsqrt_stub)`. The non-test
+    /// production consumer wiring for `arithmetic::rsqrt` per R-DEFER-1:
+    /// this method is the public, chainable surface that closes the
+    /// consumer requirement.
+    pub fn rsqrt_t(&self) -> FerrotorchResult<Tensor<T>> {
+        crate::grad_fns::arithmetic::rsqrt(self)
+    }
+
     pub fn abs_t(&self) -> FerrotorchResult<Tensor<T>> {
         crate::grad_fns::arithmetic::abs(self)
     }

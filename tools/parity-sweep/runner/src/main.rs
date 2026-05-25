@@ -93,7 +93,11 @@ impl Oracle {
             .spawn()?;
         let stdin = child.stdin.take().ok_or("oracle stdin missing")?;
         let stdout = BufReader::new(child.stdout.take().ok_or("oracle stdout missing")?);
-        Ok(Self { child, stdin, stdout })
+        Ok(Self {
+            child,
+            stdin,
+            stdout,
+        })
     }
 
     fn call(&mut self, req: Value) -> Result<Value, Box<dyn std::error::Error>> {
@@ -107,7 +111,10 @@ impl Oracle {
         }
         let resp: Value = serde_json::from_str(&line)?;
         if resp.get("ok").and_then(Value::as_bool) != Some(true) {
-            let err = resp.get("err").and_then(Value::as_str).unwrap_or("(no err)");
+            let err = resp
+                .get("err")
+                .and_then(Value::as_str)
+                .unwrap_or("(no err)");
             return Err(format!("oracle: {err}").into());
         }
         Ok(resp)
@@ -115,7 +122,11 @@ impl Oracle {
 
     fn ready(&mut self) -> Result<(String, usize), Box<dyn std::error::Error>> {
         let r = self.call(json!({"cmd": "ready"}))?;
-        let ver = r.get("torch").and_then(Value::as_str).unwrap_or("?").to_string();
+        let ver = r
+            .get("torch")
+            .and_then(Value::as_str)
+            .unwrap_or("?")
+            .to_string();
         let n = r.get("ops").and_then(Value::as_u64).unwrap_or(0) as usize;
         Ok((ver, n))
     }
@@ -146,8 +157,11 @@ impl Oracle {
     fn probe(&mut self, op: &str, spec: &Value) -> Result<Value, Box<dyn std::error::Error>> {
         // Bypass `Self::call`'s err-throwing wrapper so we can also report
         // expected-error probes (e.g. dtype mismatches that torch rejects).
-        self.stdin
-            .write_all(json!({"cmd": "probe", "op": op, "spec": spec}).to_string().as_bytes())?;
+        self.stdin.write_all(
+            json!({"cmd": "probe", "op": op, "spec": spec})
+                .to_string()
+                .as_bytes(),
+        )?;
         self.stdin.write_all(b"\n")?;
         self.stdin.flush()?;
         let mut line = String::new();
@@ -205,9 +219,9 @@ fn dispatch_f32(
     let alpha_kwarg = |name: &str| -> Result<f64, Box<dyn std::error::Error>> {
         match kwargs.get("alpha") {
             None => Ok(1.0),
-            Some(v) => v.as_f64().ok_or_else(|| {
-                format!("{name}: alpha kwarg is not a JSON number: {v}").into()
-            }),
+            Some(v) => v
+                .as_f64()
+                .ok_or_else(|| format!("{name}: alpha kwarg is not a JSON number: {v}").into()),
         }
     };
 
@@ -241,12 +255,25 @@ fn dispatch_f32(
             let alpha = alpha_kwarg("rsub")?;
             grad_fns::arithmetic::rsub(&a, &b, alpha)?
         })),
-        "mul" => Ok(Some({ let (a, b) = binary("mul")?; grad_fns::arithmetic::mul(&a, &b)? })),
-        "div" => Ok(Some({ let (a, b) = binary("div")?; grad_fns::arithmetic::div(&a, &b)? })),
+        "mul" => Ok(Some({
+            let (a, b) = binary("mul")?;
+            grad_fns::arithmetic::mul(&a, &b)?
+        })),
+        "div" => Ok(Some({
+            let (a, b) = binary("div")?;
+            grad_fns::arithmetic::div(&a, &b)?
+        })),
         // Unary
-        "neg"  => Ok(Some(grad_fns::arithmetic::neg(&unary("neg")?)?)),
-        "abs"  => Ok(Some(grad_fns::arithmetic::abs(&unary("abs")?)?)),
+        "neg" => Ok(Some(grad_fns::arithmetic::neg(&unary("neg")?)?)),
+        "abs" => Ok(Some(grad_fns::arithmetic::abs(&unary("abs")?)?)),
         "sqrt" => Ok(Some(grad_fns::arithmetic::sqrt(&unary("sqrt")?)?)),
+        // `torch.rsqrt(input, *, out=None)` — `_torch_docs.py:9656`.
+        // ferrotorch's `arithmetic::rsqrt<T: Float>(a)` mirrors the upstream
+        // unary at `aten/src/ATen/native/UnaryOps.cpp:346
+        // CREATE_UNARY_TORCH_IMPL_FUNC(rsqrt_out, rsqrt_stub)` with
+        // backward `-0.5 * grad * c^3` per `tools/autograd/derivatives.yaml:1505`.
+        // Closes blocker #1195.
+        "rsqrt" => Ok(Some(grad_fns::arithmetic::rsqrt(&unary("rsqrt")?)?)),
         // `torch.pow(input, exponent, *, out=None)` — `_torch_docs.py:8672`.
         // ferrotorch's `arithmetic::pow<T: Float>(a, exp: f64)` mirrors the
         // scalar-exponent overload at `aten/src/ATen/native/Pow.cpp:51
@@ -291,7 +318,9 @@ fn dispatch_f32(
 }
 
 fn dispatch_ops() -> &'static [&'static str] {
-    &["add", "sub", "mul", "div", "neg", "abs", "sqrt", "pow", "rsub"]
+    &[
+        "add", "sub", "mul", "div", "neg", "abs", "sqrt", "pow", "rsub", "rsqrt",
+    ]
 }
 
 // ---------------------------------------------------------------------------
@@ -532,15 +561,13 @@ fn run_probe_ferrotorch(spec: &Value) -> Result<Option<Tensor<f32>>, String> {
         return Ok(Some(out_tensor));
     }
 
-    let result = grad_fns::arithmetic::add_scaled(&a, &b, alpha)
-        .map_err(|e| format!("add_scaled: {e}"))?;
+    let result =
+        grad_fns::arithmetic::add_scaled(&a, &b, alpha).map_err(|e| format!("add_scaled: {e}"))?;
     Ok(Some(result))
 }
 
 /// Run the backward pass for an autograd probe and return the gradients.
-fn run_probe_ferrotorch_grads(
-    spec: &Value,
-) -> Result<Vec<Option<Tensor<f32>>>, String> {
+fn run_probe_ferrotorch_grads(spec: &Value) -> Result<Vec<Option<Tensor<f32>>>, String> {
     let args_spec = spec
         .get("args_spec")
         .and_then(Value::as_array)
@@ -570,10 +597,7 @@ fn run_probe_ferrotorch_grads(
     let a = if want_a { a.requires_grad_(true) } else { a };
     let b = if want_b { b.requires_grad_(true) } else { b };
 
-    let alpha = kwargs
-        .get("alpha")
-        .and_then(Value::as_f64)
-        .unwrap_or(1.0);
+    let alpha = kwargs.get("alpha").and_then(Value::as_f64).unwrap_or(1.0);
 
     let out = grad_fns::arithmetic::add_scaled(&a, &b, alpha)
         .map_err(|e| format!("add_scaled fwd: {e}"))?;
@@ -659,10 +683,7 @@ fn tol_f32() -> (f32, f32) {
     (1e-5, 1e-7)
 }
 
-fn assert_close_f32(
-    actual: &Tensor<f32>,
-    expected_wire: &WireTensor,
-) -> Result<(), String> {
+fn assert_close_f32(actual: &Tensor<f32>, expected_wire: &WireTensor) -> Result<(), String> {
     let expected = expected_wire
         .to_f32()
         .map_err(|e| format!("decode expected: {e}"))?;
@@ -766,7 +787,9 @@ fn sweep_with_cap(
                     if s.contains(">= ") && s.contains("samples for") {
                         break; // exhausted this seed
                     }
-                    report.failures.push(format!("seed={seed} i={i} oracle: {s}"));
+                    report
+                        .failures
+                        .push(format!("seed={seed} i={i} oracle: {s}"));
                     break;
                 }
             };
@@ -798,14 +821,13 @@ fn sweep_with_cap(
                 }
                 Ok(Some(actual)) => match assert_close_f32(&actual, &expected) {
                     Ok(()) => report.samples_passed += 1,
-                    Err(e) => report.failures.push(format!(
-                        "seed={seed} i={i} shape={:?}: {e}",
-                        expected.shape
-                    )),
+                    Err(e) => report
+                        .failures
+                        .push(format!("seed={seed} i={i} shape={:?}: {e}", expected.shape)),
                 },
-                Err(e) => report.failures.push(format!(
-                    "seed={seed} i={i} ferrotorch raised: {e}"
-                )),
+                Err(e) => report
+                    .failures
+                    .push(format!("seed={seed} i={i} ferrotorch raised: {e}")),
             }
         }
     }
@@ -864,7 +886,10 @@ fn sweep_all(
                 results.push(OpCoverage {
                     op: op.clone(),
                     status: "oracle_error",
-                    attempted: 0, passed: 0, failed: 0, skipped: 0,
+                    attempted: 0,
+                    passed: 0,
+                    failed: 0,
+                    skipped: 0,
                     first_failure: Some(e.to_string()),
                 });
                 continue;
@@ -920,18 +945,38 @@ fn print_coverage_summary(results: &[OpCoverage]) {
     for r in results {
         *by_status.entry(r.status).or_insert(0) += 1;
     }
-    println!("\n=== coverage summary ({} ops in op_db) ===", results.len());
+    println!(
+        "\n=== coverage summary ({} ops in op_db) ===",
+        results.len()
+    );
     println!("  status               count   meaning");
-    println!("  passes_quick         {:>5}   ferrotorch matched torch on every executed sample at this sweep depth", by_status.get("passes_quick").unwrap_or(&0));
-    println!("  diverges             {:>5}   at least one sample disagreed", by_status.get("diverges").unwrap_or(&0));
-    println!("  no_dispatch          {:>5}   exists in op_db; ferrotorch Rust dispatch returns None", by_status.get("no_dispatch").unwrap_or(&0));
-    println!("  torch_no_samples     {:>5}   op_db produced 0 samples (op needs special invocation)", by_status.get("torch_no_samples").unwrap_or(&0));
-    println!("  oracle_error         {:>5}   oracle couldn't encode args (e.g. torch.memory_format)", by_status.get("oracle_error").unwrap_or(&0));
+    println!(
+        "  passes_quick         {:>5}   ferrotorch matched torch on every executed sample at this sweep depth",
+        by_status.get("passes_quick").unwrap_or(&0)
+    );
+    println!(
+        "  diverges             {:>5}   at least one sample disagreed",
+        by_status.get("diverges").unwrap_or(&0)
+    );
+    println!(
+        "  no_dispatch          {:>5}   exists in op_db; ferrotorch Rust dispatch returns None",
+        by_status.get("no_dispatch").unwrap_or(&0)
+    );
+    println!(
+        "  torch_no_samples     {:>5}   op_db produced 0 samples (op needs special invocation)",
+        by_status.get("torch_no_samples").unwrap_or(&0)
+    );
+    println!(
+        "  oracle_error         {:>5}   oracle couldn't encode args (e.g. torch.memory_format)",
+        by_status.get("oracle_error").unwrap_or(&0)
+    );
     println!("\n=== ops with divergences ===");
     for r in results.iter().filter(|r| r.status == "diverges") {
         println!(
             "  {:30} {:>4}/{:<4} passed   first: {}",
-            r.op, r.passed, r.attempted,
+            r.op,
+            r.passed,
+            r.attempted,
             r.first_failure.as_deref().unwrap_or("?")
         );
     }
@@ -977,7 +1022,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         i += 2;
                     }
                     "--max-samples" => {
-                        max_samples = args.get(i + 1).ok_or("--max-samples needs a value")?.parse()?;
+                        max_samples = args
+                            .get(i + 1)
+                            .ok_or("--max-samples needs a value")?
+                            .parse()?;
                         i += 2;
                     }
                     other => return Err(format!("unknown arg: {other}").into()),
@@ -1021,7 +1069,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         i += 2;
                     }
                     "--probes" => {
-                        probes_path = Some(args.get(i + 1).cloned().ok_or("--probes needs a value")?);
+                        probes_path =
+                            Some(args.get(i + 1).cloned().ok_or("--probes needs a value")?);
                         i += 2;
                     }
                     "--out" => {
@@ -1045,9 +1094,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
             let mut oracle = Oracle::spawn()?;
             let (ver, n) = oracle.ready()?;
-            eprintln!(
-                "torch {ver} ({n} ops) — probe op={op} ({total} probes from {probes_path})"
-            );
+            eprintln!("torch {ver} ({n} ops) — probe op={op} ({total} probes from {probes_path})");
 
             let mut findings: Vec<Value> = Vec::new();
             let mut by_cat_total: std::collections::BTreeMap<String, usize> = Default::default();
@@ -1142,9 +1189,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         torch_repr = resp.get("output").cloned().unwrap_or(Value::Null);
                         ferr_repr = json!({"ERROR": ferr_msg});
                         if let Some(tracking_ref) = deferred_categories.get(category.as_str()) {
-                            *by_cat_deferred
-                                .entry(category.clone())
-                                .or_insert(0) += 1;
+                            *by_cat_deferred.entry(category.clone()).or_insert(0) += 1;
                             ferr_repr = json!({
                                 "DEFERRED": format!(
                                     "tracked in {tracking_ref}: {ferr_msg}"
@@ -1165,8 +1210,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                     // both ok -> diff the outputs.
                     (resp, Ok(Some(ferr_tensor))) => {
-                        let torch_output_v =
-                            resp.get("output").cloned().unwrap_or(Value::Null);
+                        let torch_output_v = resp.get("output").cloned().unwrap_or(Value::Null);
                         let torch_wire: Option<WireTensor> = unwrap_tensor_arg(&torch_output_v);
                         let ferr_data = match ferr_tensor.data_vec() {
                             Ok(d) => d,
@@ -1209,8 +1253,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         }
                                     }
                                     Err(e) => {
-                                        divergence =
-                                            Some(format!("decode torch f32 output: {e}"));
+                                        divergence = Some(format!("decode torch f32 output: {e}"));
                                     }
                                 }
                             } else {
@@ -1220,8 +1263,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 ));
                             }
                         } else {
-                            divergence =
-                                Some("torch output is not a tensor envelope".to_string());
+                            divergence = Some("torch output is not a tensor envelope".to_string());
                             torch_repr = torch_output_v;
                         }
 
@@ -1237,26 +1279,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 Ok(ferr_grads) => {
                                     if let Some(arr) = torch_grads_v.as_array() {
                                         for (i_grad, t_g) in arr.iter().enumerate() {
-                                            let torch_wire =
-                                                unwrap_tensor_arg(t_g);
+                                            let torch_wire = unwrap_tensor_arg(t_g);
                                             let ferr_g = ferr_grads.get(i_grad);
                                             match (torch_wire, ferr_g) {
                                                 (None, Some(None)) => {} // both None, ok
                                                 (Some(tw), Some(Some(fg))) => {
-                                                    let t_data =
-                                                        tw.to_f32().and_then(|t| Ok(t.data_vec()?))
-                                                            .unwrap_or_default();
-                                                    let f_data =
-                                                        fg.data_vec().unwrap_or_default();
+                                                    let t_data = tw
+                                                        .to_f32()
+                                                        .and_then(|t| Ok(t.data_vec()?))
+                                                        .unwrap_or_default();
+                                                    let f_data = fg.data_vec().unwrap_or_default();
                                                     if let Some(msg) = compare_probe_outputs(
                                                         &f_data,
                                                         &t_data,
                                                         fg.shape(),
                                                         &tw.shape,
                                                     ) {
-                                                        divergence = Some(format!(
-                                                            "grad[{i_grad}]: {msg}"
-                                                        ));
+                                                        divergence =
+                                                            Some(format!("grad[{i_grad}]: {msg}"));
                                                         break;
                                                     }
                                                 }
@@ -1278,8 +1318,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     }
                                 }
                                 Err(e) => {
-                                    divergence =
-                                        Some(format!("ferrotorch backward raised: {e}"));
+                                    divergence = Some(format!("ferrotorch backward raised: {e}"));
                                 }
                             }
                         }
@@ -1366,10 +1405,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         i += 2;
                     }
                     "--seeds" => {
-                        seeds = args
-                            .get(i + 1)
-                            .ok_or("--seeds needs a value")?
-                            .parse()?;
+                        seeds = args.get(i + 1).ok_or("--seeds needs a value")?.parse()?;
                         i += 2;
                     }
                     other => return Err(format!("unknown arg: {other}").into()),
