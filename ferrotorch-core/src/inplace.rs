@@ -275,46 +275,25 @@ impl<T: Float> Tensor<T> {
 
     /// Subtract another tensor elementwise in-place: `self -= other`.
     ///
-    /// Both tensors must have the same shape.
+    /// Equivalent to PyTorch's `Tensor.sub_(other)` — i.e. `sub_scaled_`
+    /// with `alpha = 1.0`. Mirrors upstream's
+    /// `aten/src/ATen/native/BinaryOps.cpp:434-439`
+    /// `TORCH_IMPL_FUNC(sub_out) { add_stub(device_type(), *this, -alpha); }`
+    /// with `alpha = 1.0`, i.e. `self += -1.0 * other == self -= other`.
+    /// Delegating here gives `sub_scaled_` a non-test production consumer
+    /// transitively for free (every caller of `sub_` becomes a caller of
+    /// `sub_scaled_`), and brings `sub_` to PyTorch parity with the
+    /// `sub_(other, *, alpha=1)` docstring at `torch/_tensor_docs.py:5113`
+    /// (broadcasting from `add_scaled_` is inherited; in-place ops cannot
+    /// resize `self`).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if `other` cannot be broadcast to `self.shape()`
+    /// (or if doing so would change `self.shape()`), or if the tensor is
+    /// part of the computation graph or is a leaf with `requires_grad = true`.
     pub fn sub_(&self, other: &Tensor<T>) -> FerrotorchResult<&Self> {
-        check_inplace_allowed(self, "sub_")?;
-        if self.shape() != other.shape() {
-            return Err(FerrotorchError::ShapeMismatch {
-                message: format!(
-                    "sub_: shape mismatch {:?} vs {:?}",
-                    self.shape(),
-                    other.shape()
-                ),
-            });
-        }
-
-        if self.is_cuda()
-            && other.is_cuda()
-            && std::any::TypeId::of::<T>() == std::any::TypeId::of::<f32>()
-        {
-            if let Some(backend) = crate::gpu_dispatch::gpu_backend() {
-                let handle = backend.sub_f32(self.gpu_handle()?, other.gpu_handle()?)?;
-                let storage = crate::storage::TensorStorage::gpu(handle);
-                // SAFETY: check_inplace_allowed at the top of `sub_` already
-                // proved `self` has no grad_fn and is not a requires_grad leaf,
-                // so no autograd reference holds the storage. Single-threaded
-                // `&self` access satisfies update_storage's exclusive-access
-                // contract.
-                unsafe { self.update_storage(storage)? };
-                return Ok(self);
-            }
-        }
-
-        let mut data = self.data_vec()?;
-        let other_data = other.data_vec()?;
-        for (a, &b) in data.iter_mut().zip(other_data.iter()) {
-            *a = *a - b;
-        }
-        // SAFETY: check_inplace_allowed at the top of `sub_` ensures `self`
-        // is not part of the autograd graph; satisfies update_data's
-        // exclusive-access contract.
-        unsafe { self.update_data(&data)? };
-        Ok(self)
+        self.sub_scaled_(other, 1.0)
     }
 
     /// Multiply another tensor elementwise in-place: `self *= other`.
