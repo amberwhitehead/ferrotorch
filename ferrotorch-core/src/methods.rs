@@ -605,6 +605,39 @@ impl<T: Float> Tensor<T> {
         )
     }
 
+    /// `torch.Tensor.fake_quantize_per_channel_affine(scale, zero_point, axis,
+    /// quant_min, quant_max)` — per-channel affine fake quantization with
+    /// autograd-tracked clipped STE backward.
+    ///
+    /// Mirrors `torch.fake_quantize_per_channel_affine` per
+    /// `torch/overrides.py:621 torch.fake_quantize_per_channel_affine: lambda
+    /// input, scale, zero_point, axis, quant_min, quant_max: -1` and the
+    /// upstream implementation at `aten/src/ATen/native/quantized/
+    /// FakeQuantPerChannelAffine.cpp:32-42 Tensor fake_quantize_per_channel_affine(
+    /// const Tensor& self, const Tensor& scale, const Tensor& zero_point,
+    /// int64_t axis, int64_t quant_min, int64_t quant_max)`. Backward per
+    /// `tools/autograd/derivatives.yaml fake_quantize_per_channel_affine_cachemask_backward(
+    /// grad, mask)` returning `dY * mask` where the per-channel mask is `1`
+    /// iff `quant_min <= round_ties_even(input/scale[c]) + zero_point[c]
+    /// <= quant_max` for the channel `c` along `axis`.
+    ///
+    /// The non-test production consumer wiring for
+    /// `grad_fns::quantize_grad::fake_quantize_per_channel_affine` per
+    /// R-DEFER-1: this method is the public, chainable surface that closes
+    /// the consumer requirement for the per-channel variant (blocker #1239).
+    pub fn fake_quantize_per_channel_affine_t(
+        &self,
+        scale: &Tensor<T>,
+        zero_point: &crate::int_tensor::IntTensor<i64>,
+        axis: i64,
+        quant_min: i64,
+        quant_max: i64,
+    ) -> FerrotorchResult<Tensor<T>> {
+        crate::grad_fns::quantize_grad::fake_quantize_per_channel_affine(
+            self, scale, zero_point, axis, quant_min, quant_max,
+        )
+    }
+
     // --- PyTorch compatibility aliases ---
 
     /// Alias for `shape()`. Returns the tensor dimensions like PyTorch's `Tensor.size()`.

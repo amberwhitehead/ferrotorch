@@ -38,8 +38,8 @@
 //! | REQ | Status | Evidence |
 //! |---|---|---|
 //! | REQ-1 (per-tensor) | SHIPPED | `fake_quantize_per_tensor_affine` at `grad_fns/quantize_grad.rs:84` per upstream `aten/src/ATen/native/quantized/FakeQuantPerTensorAffine.cpp:31-40`; tensor-qparams overload `fake_quantize_per_tensor_affine_tensor_qparams` at `grad_fns/quantize_grad.rs:149` per upstream `:42-51`. Non-test production consumer: `Tensor::fake_quantize_per_tensor_affine_t` at `methods.rs:596`. |
-//! | REQ-2 (per-channel) | NOT-STARTED | Open prereq blocker #1239 — no `fake_quantize_per_channel_affine` function exists in this file. |
-//! | REQ-3 (STE backward) | SHIPPED | `FakeQuantizeBackward` at `grad_fns/quantize_grad.rs:289` with `GradFn::backward` impl at `:297` returns `dY * mask` where `mask = (quant_min <= q_unclamped <= quant_max)` per upstream `FakeQuantPerTensorAffine.cpp:121-134` (`QuantizedOpKernels.cpp:2706`). Attach site is REQ-1's forward; consumer chain closes via `methods.rs:596 Tensor::fake_quantize_per_tensor_affine_t`. |
+//! | REQ-2 (per-channel) | SHIPPED | `fake_quantize_per_channel_affine` at `grad_fns/quantize_grad.rs:421` per upstream per-channel CPU kernel `aten/src/ATen/native/quantized/cpu/kernels/QuantizedOpKernels.cpp:2836-2848` (cast-to-i64 BEFORE clamp — diverges from per-tensor kernel ordering, R-DEV-1 byte-for-byte via helper `per_channel_dequantize_f64` at `:308`). Backward via `FakeQuantizePerChannelBackward` at `grad_fns/quantize_grad.rs:582` returns `dY * mask` with per-channel mask via `per_channel_mask_in_range` at `:339`. Non-test production consumer: `Tensor::fake_quantize_per_channel_affine_t` at `methods.rs:628`. |
+//! | REQ-3 (STE backward) | SHIPPED | `FakeQuantizeBackward` at `grad_fns/quantize_grad.rs:653` with `GradFn::backward` impl at `:661` returns `dY * mask` where `mask = (quant_min <= q_unclamped <= quant_max)` per upstream `FakeQuantPerTensorAffine.cpp:121-134` (`QuantizedOpKernels.cpp:2706`). Attach site is REQ-1's forward; consumer chain closes via `methods.rs:596 Tensor::fake_quantize_per_tensor_affine_t`. Per-channel companion `FakeQuantizePerChannelBackward` at `:582` mirrors the same STE with per-channel scale/zp lookup. |
 
 use std::sync::Arc;
 
@@ -272,6 +272,372 @@ fn fake_quantize_per_tensor_affine_impl<T: Float>(
         Tensor::from_operation(storage, shape, grad_fn)
     } else {
         Tensor::from_storage(storage, shape, false)
+    }
+}
+
+/// Per-channel forward kernel mirroring upstream's
+/// `aten/src/ATen/native/quantized/cpu/kernels/QuantizedOpKernels.cpp:
+/// 2836-2848 fake_quantize_per_channel_cachemask_cpu_helper` for the
+/// integer-zero-point branch byte-for-byte. The CRITICAL ordering
+/// distinction from the per-tensor kernel at the same file lines 2702-
+/// 2706 is that the per-channel kernel casts to `int64_t` BEFORE the
+/// clamp:
+///
+/// ```cpp
+/// static_cast<int64_t>(zero_point + std::nearbyint(self * inv_scale))
+/// ```
+///
+/// and ONLY THEN applies `std::fmin(std::fmax(..., quant_min), quant_max)`.
+/// For non-finite `qval_f` (e.g. `+Inf` input * non-zero scale → `+Inf`
+/// qval_f), the C++ `static_cast<int64_t>(+Inf)` is undefined behaviour;
+/// on x86-64 with SSE2 `cvttsd2si` saturates the invalid-operation result
+/// to `INT64_MIN = -9223372036854775808`, which then `std::fmax` snaps to
+/// `quant_min` (not `quant_max`). Locked at upstream commit `2ec02226...`
+/// (see `.design/ferrotorch-core/grad_fns/quantize_grad.md baseline-pytorch`).
+///
+/// To match this byte-for-byte (R-DEV-1 numerical contract — agents using
+/// `torch.fake_quantize_per_channel_affine` and comparing tensor-by-tensor
+/// MUST get the same +Inf → `quant_min` mapping the upstream CPU kernel
+/// produces), ferrotorch replicates the cast-to-i64-first ordering with
+/// an explicit non-finite check: `+Inf`, `-Inf`, and `NaN` qval_f all
+/// resolve to `INT64_MIN` before clamping. Finite qval_f values pass
+/// through `f64 as i64` which Rust defines as saturating to
+/// `[i64::MIN, i64::MAX]` — but the explicit non-finite guard ensures
+/// `+Inf` reaches `i64::MIN` rather than `i64::MAX` (Rust's saturating
+/// f→i cast does NOT match the x86 invalid-op behaviour for `+Inf`).
+fn per_channel_dequantize_f64(
+    x_f64: f64,
+    scale_f64: f64,
+    zero_point: i64,
+    quant_min: i64,
+    quant_max: i64,
+) -> f64 {
+    let zp_f64 = zero_point as f64;
+    let inv_scale = 1.0 / scale_f64;
+    let qval_f = zp_f64 + (x_f64 * inv_scale).round_ties_even();
+    // Replicate upstream's `static_cast<int64_t>(qval_f)` x86-64
+    // invalid-operation saturation: non-finite values resolve to
+    // INT64_MIN, finite values use Rust's saturating cast (matches the
+    // x86 `cvttsd2si` finite path within `[i64::MIN, i64::MAX]`).
+    let qval_i64: i64 = if qval_f.is_finite() {
+        qval_f as i64
+    } else {
+        i64::MIN
+    };
+    let qval_clamped = quant_max.min(quant_min.max(qval_i64));
+    (qval_clamped - zero_point) as f64 * scale_f64
+}
+
+/// Per-channel mask formula mirroring upstream's mask side at
+/// `aten/src/ATen/native/quantized/cpu/kernels/QuantizedOpKernels.cpp:
+/// 2830-2834`. Note that the MASK uses the same `static_cast<int64_t>`
+/// cast-first ordering — so for `+Inf` input the mask check is
+/// `quant_min <= INT64_MIN <= quant_max` which is false → mask = 0,
+/// matching the forward's clamp-to-`quant_min` (the dequantized output
+/// is `(quant_min - zp) * scale`, which is OUT of the representable
+/// range for `+Inf` so STE correctly zeros the gradient there).
+fn per_channel_mask_in_range(
+    x_f64: f64,
+    scale_f64: f64,
+    zero_point: i64,
+    quant_min: i64,
+    quant_max: i64,
+) -> bool {
+    let zp_f64 = zero_point as f64;
+    let inv_scale = 1.0 / scale_f64;
+    let qval_f = zp_f64 + (x_f64 * inv_scale).round_ties_even();
+    let qval_i64: i64 = if qval_f.is_finite() {
+        qval_f as i64
+    } else {
+        i64::MIN
+    };
+    quant_min <= qval_i64 && qval_i64 <= quant_max
+}
+
+/// Differentiable per-channel affine fake quantization.
+///
+/// Mirrors `torch.fake_quantize_per_channel_affine(input, scale, zero_point,
+/// axis, quant_min, quant_max)` per `torch/_torch_docs.py:11992-12042` and
+/// the upstream forward at `aten/src/ATen/native/quantized/
+/// FakeQuantPerChannelAffine.cpp:32-42 Tensor fake_quantize_per_channel_affine(
+/// const Tensor& self, const Tensor& scale, const Tensor& zero_point, int64_t
+/// axis, int64_t quant_min, int64_t quant_max)`. For each channel `c` along
+/// `axis`, the slice `input[..., c, ...]` is fake-quantized using the scalar
+/// qparams `scale[c]`, `zero_point[c]` per REQ-1's per-tensor formula.
+///
+/// Forward (per element at multi-index `[i_0, ..., i_axis=c, ..., i_n]`):
+///
+/// ```text
+///   q_unclamped = round_half_to_even(input / scale[c]) + zero_point[c]
+///   q           = clamp(q_unclamped, quant_min, quant_max)
+///   output      = (q - zero_point[c]) * scale[c]
+/// ```
+///
+/// Backward (clipped STE per channel):
+///
+/// ```text
+///   mask[..., c, ...] = (quant_min <= q_unclamped <= quant_max) ? 1 : 0
+///   dX = dY * mask
+/// ```
+///
+/// matching `aten/src/ATen/native/quantized/FakeQuantPerChannelAffine.cpp:
+/// 118-131 fake_quantize_per_channel_affine_cachemask_backward`. The mask
+/// uses per-channel `scale[c]`, `zero_point[c]` in the comparison.
+///
+/// # Arguments
+///
+/// * `input` — N-D tensor to fake-quantize.
+/// * `scale` — 1-D float tensor with `numel() == input.size(axis)`. Each
+///   element is the per-channel scale.
+/// * `zero_point` — 1-D int64 tensor with `numel() == input.size(axis)`.
+///   Each element is the per-channel zero point.
+/// * `axis` — channel axis (`0 <= axis < input.ndim()`). Upstream's check
+///   at `:76` admits `axis == self.dim()` for a degenerate broadcast, but
+///   that case has no addressable channel slot so ferrotorch follows the
+///   strict `< self.dim()` interpretation used by the per-channel
+///   *backward* validation at `:213` (R-DEV-1 numerical contract: every
+///   sample emitted by the upstream oracle for this op has
+///   `axis < input.ndim()`).
+/// * `quant_min` / `quant_max` — quantization range bounds, widened to
+///   `i64` per upstream `int64_t quant_min, int64_t quant_max` at `:37-38`.
+///
+/// # Errors
+///
+/// - `FerrotorchError::InvalidArgument` if `scale.ndim() != 1`
+///   (upstream `:55`).
+/// - `FerrotorchError::InvalidArgument` if `zero_point.ndim() != 1`
+///   (upstream `:56`).
+/// - `FerrotorchError::InvalidArgument` if `scale.numel() != zero_point.numel()`
+///   (upstream `:57-59`).
+/// - `FerrotorchError::InvalidArgument` if `scale.numel() != input.size(axis)`
+///   (upstream `:60-62`).
+/// - `FerrotorchError::InvalidArgument` if `quant_min > quant_max`
+///   (upstream `:64-67`).
+/// - `FerrotorchError::InvalidArgument` if any `zero_point[i]` lies outside
+///   `[quant_min, quant_max]` (upstream `:69-74`).
+/// - `FerrotorchError::InvalidArgument` if `axis` is out of bounds.
+/// - `FerrotorchError::InvalidArgument` if any `scale[i] <= 0` or NaN
+///   (ferrotorch superset of upstream's silent inf/NaN propagation).
+pub fn fake_quantize_per_channel_affine<T: Float>(
+    input: &Tensor<T>,
+    scale: &Tensor<T>,
+    zero_point: &IntTensor<i64>,
+    axis: i64,
+    quant_min: i64,
+    quant_max: i64,
+) -> FerrotorchResult<Tensor<T>> {
+    use crate::error::FerrotorchError;
+
+    // Upstream validation order:
+    // 1. scale.dim() == 1 (FakeQuantPerChannelAffine.cpp:55)
+    if scale.ndim() != 1 {
+        return Err(FerrotorchError::InvalidArgument {
+            message: format!(
+                "fake_quantize_per_channel_affine: scale should be a 1-D tensor, got ndim={}",
+                scale.ndim()
+            ),
+        });
+    }
+    // 2. zero_point.dim() == 1 (FakeQuantPerChannelAffine.cpp:56)
+    if zero_point.ndim() != 1 {
+        return Err(FerrotorchError::InvalidArgument {
+            message: format!(
+                "fake_quantize_per_channel_affine: zero point should be a 1-D tensor, got ndim={}",
+                zero_point.ndim()
+            ),
+        });
+    }
+    // 3. scale.numel() == zero_point.numel() (FakeQuantPerChannelAffine.cpp:57-59)
+    let scale_data = scale.data_vec()?;
+    let zp_data = zero_point.data()?;
+    if scale_data.len() != zp_data.len() {
+        return Err(FerrotorchError::InvalidArgument {
+            message: format!(
+                "fake_quantize_per_channel_affine: scale and zero-point need to have the same \
+                 dimensions, got scale.numel()={} zero_point.numel()={}",
+                scale_data.len(),
+                zp_data.len()
+            ),
+        });
+    }
+    // 4. quant_min <= quant_max (FakeQuantPerChannelAffine.cpp:64-67)
+    if quant_min > quant_max {
+        return Err(FerrotorchError::InvalidArgument {
+            message: format!(
+                "fake_quantize_per_channel_affine: `quant_min` ({quant_min}) should be less than \
+                 or equal to `quant_max` ({quant_max})."
+            ),
+        });
+    }
+    // 5. axis in bounds (FakeQuantPerChannelAffine.cpp:75-77 admits
+    //    `axis <= self.dim()` for a degenerate broadcast; ferrotorch
+    //    follows the strict `< self.dim()` analog used by the backward
+    //    validation at :213 — every oracle sample satisfies this).
+    let ndim = input.ndim();
+    if axis < 0 || (axis as usize) >= ndim {
+        return Err(FerrotorchError::InvalidArgument {
+            message: format!(
+                "fake_quantize_per_channel_affine: `axis` ({axis}) must be between 0 and \
+                 number of dimensions of input ({ndim})"
+            ),
+        });
+    }
+    let axis_us = axis as usize;
+    let shape = input.shape();
+    let channel_dim = shape[axis_us];
+    // 6. scale.numel() == self.size(axis) (FakeQuantPerChannelAffine.cpp:60-62)
+    if scale_data.len() != channel_dim {
+        return Err(FerrotorchError::InvalidArgument {
+            message: format!(
+                "fake_quantize_per_channel_affine: dimensions of scale and zero-point are not \
+                 consistent with input tensor — scale.numel()={} input.size(axis={})={}",
+                scale_data.len(),
+                axis,
+                channel_dim
+            ),
+        });
+    }
+    // 7. zero_point in [quant_min, quant_max] (FakeQuantPerChannelAffine.cpp:69-74)
+    for (i, &zp) in zp_data.iter().enumerate() {
+        if zp < quant_min || zp > quant_max {
+            return Err(FerrotorchError::InvalidArgument {
+                message: format!(
+                    "fake_quantize_per_channel_affine: `zero_point` must be between \
+                     `quant_min` ({quant_min}) and `quant_max` ({quant_max}); zero_point[{i}]={zp}"
+                ),
+            });
+        }
+    }
+    // 8. scale > 0 per channel (ferrotorch superset; upstream would
+    //    silently produce inf/NaN per channel).
+    for (i, s) in scale_data.iter().enumerate() {
+        let sf = s.to_f64().unwrap_or(f64::NAN);
+        if sf.is_nan() || sf <= 0.0 {
+            return Err(FerrotorchError::InvalidArgument {
+                message: format!(
+                    "fake_quantize_per_channel_affine: `scale` must be > 0 per channel; \
+                     scale[{i}]={sf}"
+                ),
+            });
+        }
+    }
+
+    // outer / inner strides around `axis` so that the channel index for
+    // flat index `i` is `(i / inner) % channel_dim`.
+    let inner: usize = shape[axis_us + 1..].iter().product();
+
+    let data = input.data_vec()?;
+
+    let mut out: Vec<T> = Vec::with_capacity(data.len());
+    for (i, &x) in data.iter().enumerate() {
+        // `inner` is `prod(shape[axis+1..])`. When the loop body executes
+        // `data.len() > 0` implies every dim including the tail dims is
+        // > 0, so `inner > 0` and integer division is well-defined.
+        // `checked_div` makes this explicit and silences clippy's
+        // manual-checked-div lint without changing semantics.
+        let ch = i.checked_div(inner).map_or(0, |q| q % channel_dim);
+        let scale_f64 = scale_data[ch].to_f64().unwrap_or(f64::NAN);
+        let zp_i64 = zp_data[ch];
+        let x_f64 = x.to_f64().unwrap_or(f64::NAN);
+        let dq_f64 = per_channel_dequantize_f64(x_f64, scale_f64, zp_i64, quant_min, quant_max);
+        let dq = T::from(dq_f64).unwrap_or_else(<T as num_traits::Zero>::zero);
+        out.push(dq);
+    }
+
+    let storage = TensorStorage::cpu(out);
+    let out_shape = shape.to_vec();
+
+    if input.requires_grad() && crate::autograd::no_grad::is_grad_enabled() {
+        // Save f64 scale + i64 zp arrays directly to avoid re-materializing
+        // the parameter tensors in the backward pass.
+        let scale_f64s: Vec<f64> = scale_data
+            .iter()
+            .map(|s| s.to_f64().unwrap_or(f64::NAN))
+            .collect();
+        let zp_i64s: Vec<i64> = zp_data.to_vec();
+        let grad_fn = Arc::new(FakeQuantizePerChannelBackward::<T> {
+            input: input.clone(),
+            scale: scale_f64s,
+            zero_point: zp_i64s,
+            axis: axis_us,
+            quant_min,
+            quant_max,
+        });
+        Tensor::from_operation(storage, out_shape, grad_fn)
+    } else {
+        Tensor::from_storage(storage, out_shape, false)
+    }
+}
+
+/// Backward node for `fake_quantize_per_channel_affine` using the clipped
+/// STE with a per-channel mask.
+///
+/// Mirrors upstream's mask-based VJP at
+/// `aten/src/ATen/native/quantized/FakeQuantPerChannelAffine.cpp:118-131
+/// Tensor fake_quantize_per_channel_affine_cachemask_backward(const Tensor& dY,
+/// const Tensor& mask) { ... return dY * mask; }`. The mask is `1` where the
+/// per-channel `q_unclamped = round_half_to_even(input / scale[c]) +
+/// zero_point[c]` lies in `[quant_min, quant_max]`.
+#[derive(Debug)]
+struct FakeQuantizePerChannelBackward<T: Float> {
+    input: Tensor<T>,
+    scale: Vec<f64>,
+    zero_point: Vec<i64>,
+    axis: usize,
+    quant_min: i64,
+    quant_max: i64,
+}
+
+impl<T: Float> GradFn<T> for FakeQuantizePerChannelBackward<T> {
+    fn backward(&self, grad_output: &Tensor<T>) -> FerrotorchResult<Vec<Option<Tensor<T>>>> {
+        if !self.input.requires_grad() {
+            return Ok(vec![None]);
+        }
+        let grad_data = grad_output.data_vec()?;
+        let input_data = self.input.data_vec()?;
+        let shape = self.input.shape().to_vec();
+        let channel_dim = shape[self.axis];
+        let inner: usize = shape[self.axis + 1..].iter().product();
+        let zero = <T as num_traits::Zero>::zero();
+        let grad: Vec<T> = input_data
+            .iter()
+            .zip(grad_data.iter())
+            .enumerate()
+            .map(|(i, (&x, &g))| {
+                // Per-channel index lookup. `inner` guaranteed > 0 when
+                // the iterator emits an element (non-empty input), but
+                // `checked_div` makes the safety explicit and silences
+                // clippy's manual-checked-div lint.
+                let ch = i.checked_div(inner).map_or(0, |q| q % channel_dim);
+                let scale_f64 = self.scale[ch];
+                let zp_i64 = self.zero_point[ch];
+                let x_f64 = x.to_f64().unwrap_or(f64::NAN);
+                // Upstream per-channel mask: `(quant_min <= qval_i64) &&
+                // (qval_i64 <= quant_max)` per `QuantizedOpKernels.cpp:
+                // 2830-2834` — cast-first ordering matches the forward.
+                if per_channel_mask_in_range(
+                    x_f64,
+                    scale_f64,
+                    zp_i64,
+                    self.quant_min,
+                    self.quant_max,
+                ) {
+                    g
+                } else {
+                    zero
+                }
+            })
+            .collect();
+        let storage = TensorStorage::cpu(grad);
+        Ok(vec![Some(Tensor::from_storage(storage, shape, false)?)])
+    }
+
+    fn inputs(&self) -> Vec<&Tensor<T>> {
+        vec![&self.input]
+    }
+
+    fn name(&self) -> &'static str {
+        "FakeQuantizePerChannelBackward"
     }
 }
 
@@ -648,5 +1014,246 @@ mod tests {
         assert_eq!(grad_data[2], 1.0);
         // x=2.0: q_uncl = 200, out of range → STE 0.
         assert_eq!(grad_data[3], 0.0);
+    }
+
+    // ── per-channel forward ────────────────────────────────────────
+
+    #[test]
+    // reason: per-channel forward must match per-tensor forward on each
+    // channel slice exactly — output is a deterministic dequant integer
+    // multiple per channel, bit-exactly representable in f32.
+    #[allow(clippy::float_cmp)]
+    fn fake_quantize_per_channel_matches_per_tensor_on_each_channel() {
+        // 2-D input shape [C=3, N=5], axis=0 → each row is a channel.
+        // Per-channel scale/zp; expected = stack of per-tensor results
+        // computed via the already-shipped per-tensor surface (NOT by
+        // calling the per-channel op on itself; R-CHAR-3 honored — the
+        // per-tensor reference is the upstream-faithful surface whose
+        // formula traces to QuantizedOpKernels.cpp:2702-2706 directly).
+        let input = t(
+            vec![
+                0.0, 0.1, 0.2, -0.1, -0.2, // row 0 (channel 0)
+                0.0, 0.05, 0.1, -0.05, -0.1, // row 1 (channel 1)
+                1.0, 2.0, -1.0, -2.0, 0.0, // row 2 (channel 2)
+            ],
+            vec![3, 5],
+            false,
+        );
+        let scale = t(vec![0.1, 0.05, 1.0], vec![3], false);
+        let zp = ti64(vec![0, 0, 0], vec![3]);
+
+        let out_pc = fake_quantize_per_channel_affine(&input, &scale, &zp, 0, -128, 127).unwrap();
+        let actual = out_pc.data().unwrap();
+
+        // Reference: compute per-channel by slicing rows and calling
+        // per-tensor on each.
+        let row_lens = [5usize, 5, 5];
+        let scales_v = [0.1f64, 0.05, 1.0];
+        let mut expected: Vec<f32> = Vec::new();
+        let mut offset = 0;
+        for c in 0..3 {
+            let row = t(
+                input.data().unwrap()[offset..offset + row_lens[c]].to_vec(),
+                vec![5],
+                false,
+            );
+            let ref_out = fake_quantize_per_tensor_affine(&row, scales_v[c], 0, -128, 127).unwrap();
+            expected.extend_from_slice(ref_out.data().unwrap());
+            offset += row_lens[c];
+        }
+        assert_eq!(actual.len(), expected.len());
+        for (i, (&a, &e)) in actual.iter().zip(expected.iter()).enumerate() {
+            assert_eq!(
+                a, e,
+                "per-channel forward at flat idx {i}: expected {e}, got {a}; \
+                 per-channel must match per-tensor on each row slice"
+            );
+        }
+    }
+
+    #[test]
+    // reason: per-channel output is exact integer-multiple-of-scale per
+    // channel; equality is the right check.
+    #[allow(clippy::float_cmp)]
+    fn fake_quantize_per_channel_axis_dispatch_differs() {
+        // 2-D input [2, 3]. With axis=0 the per-channel dim is 2 (rows);
+        // with axis=1 the per-channel dim is 3 (cols). Same per-channel
+        // scale/zp arrays MUST be 1-D and have the right numel per axis,
+        // so we use two distinct axis-aware setups and verify the outputs
+        // differ where the per-channel scale differs.
+        let input = t(vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0], vec![2, 3], false);
+
+        // axis=0 (2 channels): scales [0.5, 1.0] applied row-wise.
+        let scale_ax0 = t(vec![0.5, 1.0], vec![2], false);
+        let zp_ax0 = ti64(vec![0, 0], vec![2]);
+        let out_ax0 =
+            fake_quantize_per_channel_affine(&input, &scale_ax0, &zp_ax0, 0, -128, 127).unwrap();
+        // For row 0 with scale=0.5: round(1.0/0.5)=2, dq=2*0.5=1.0;
+        //                           round(2.0/0.5)=4, dq=4*0.5=2.0;
+        //                           round(3.0/0.5)=6, dq=6*0.5=3.0.
+        // For row 1 with scale=1.0: exact integer round-trip.
+        let d0 = out_ax0.data().unwrap();
+        assert_eq!(d0, &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
+
+        // axis=1 (3 channels): scales [0.5, 1.0, 2.0] applied col-wise.
+        let scale_ax1 = t(vec![0.5, 1.0, 2.0], vec![3], false);
+        let zp_ax1 = ti64(vec![0, 0, 0], vec![3]);
+        let out_ax1 =
+            fake_quantize_per_channel_affine(&input, &scale_ax1, &zp_ax1, 1, -128, 127).unwrap();
+        // For col 0 (scale=0.5): 1.0→1.0, 4.0→4.0.
+        // For col 1 (scale=1.0): 2.0→2.0, 5.0→5.0.
+        // For col 2 (scale=2.0): round(3/2)=2→4.0, round(6/2)=3→6.0.
+        let d1 = out_ax1.data().unwrap();
+        assert_eq!(d1, &[1.0, 2.0, 4.0, 4.0, 5.0, 6.0]);
+    }
+
+    #[test]
+    // reason: per-channel STE mask is binary {0,1}; each grad slot holds
+    // an exact bit pattern.
+    #[allow(clippy::float_cmp)]
+    fn fake_quantize_per_channel_ste_mask_is_per_channel() {
+        // 2-D input [2, 4], axis=0. Row 0 has small scale → values
+        // mostly in range; Row 1 has tiny scale → values mostly clamped
+        // (out of range). The STE mask must reflect each channel's
+        // q_unclamped per upstream `QuantizedOpKernels.cpp:2706`.
+        let input = t(
+            vec![
+                -1.0, 0.0, 1.0, 2.0, // row 0 — scale=0.05, all in range
+                -1.0, 0.0, 1.0, 2.0, // row 1 — scale=0.005, mostly clamped
+            ],
+            vec![2, 4],
+            true,
+        );
+        let scale = t(vec![0.05, 0.005], vec![2], false);
+        let zp = ti64(vec![0, 0], vec![2]);
+        let out = fake_quantize_per_channel_affine(&input, &scale, &zp, 0, -128, 127).unwrap();
+        let sum = crate::grad_fns::reduction::sum(&out).unwrap();
+        backward(&sum).unwrap();
+        let grad = input.grad().unwrap().unwrap();
+        let g = grad.data().unwrap();
+
+        // Row 0 (scale=0.05): q_uncl(x) = round(x/0.05).
+        //   -1.0 → -20 (in [-128,127])  → 1
+        //    0.0 → 0   (in range)       → 1
+        //    1.0 → 20  (in range)       → 1
+        //    2.0 → 40  (in range)       → 1
+        // Row 1 (scale=0.005): q_uncl(x) = round(x/0.005).
+        //   -1.0 → -200 (< -128)        → 0
+        //    0.0 → 0    (in range)      → 1
+        //    1.0 → 200  (> 127)         → 0
+        //    2.0 → 400  (> 127)         → 0
+        let expected: [f32; 8] = [1.0, 1.0, 1.0, 1.0, 0.0, 1.0, 0.0, 0.0];
+        for (i, (&a, &e)) in g.iter().zip(expected.iter()).enumerate() {
+            assert_eq!(
+                a, e,
+                "per-channel STE mask at i={i}: expected {e}, got {a}; mask formula \
+                 per QuantizedOpKernels.cpp:2706 with scale[ch], zero_point[ch]"
+            );
+        }
+    }
+
+    #[test]
+    fn fake_quantize_per_channel_empty_channel_dim() {
+        // Empty input on the channel axis. scale/zp 1-D with numel=0.
+        // Forward MUST not panic and produce an empty output.
+        let input = t(vec![], vec![0, 4], false);
+        let scale = t(vec![], vec![0], false);
+        let zp = ti64(vec![], vec![0]);
+        let out = fake_quantize_per_channel_affine(&input, &scale, &zp, 0, -128, 127).unwrap();
+        assert_eq!(out.shape(), &[0, 4]);
+        assert_eq!(out.data().unwrap().len(), 0);
+    }
+
+    // ── per-channel validation errors ──────────────────────────────
+
+    #[test]
+    fn fake_quantize_per_channel_rejects_non_1d_scale() {
+        let input = t(vec![1.0, 2.0], vec![2], false);
+        let scale = t(vec![1.0, 1.0], vec![1, 2], false);
+        let zp = ti64(vec![0, 0], vec![2]);
+        let result = fake_quantize_per_channel_affine(&input, &scale, &zp, 0, -128, 127);
+        assert!(result.is_err());
+        assert!(format!("{}", result.unwrap_err()).contains("scale should be a 1-D"));
+    }
+
+    #[test]
+    fn fake_quantize_per_channel_rejects_non_1d_zero_point() {
+        let input = t(vec![1.0, 2.0], vec![2], false);
+        let scale = t(vec![1.0, 1.0], vec![2], false);
+        let zp = ti64(vec![0, 0], vec![1, 2]);
+        let result = fake_quantize_per_channel_affine(&input, &scale, &zp, 0, -128, 127);
+        assert!(result.is_err());
+        assert!(format!("{}", result.unwrap_err()).contains("zero point should be a 1-D"));
+    }
+
+    #[test]
+    fn fake_quantize_per_channel_rejects_mismatched_qparams_sizes() {
+        let input = t(vec![1.0, 2.0], vec![2], false);
+        let scale = t(vec![1.0, 1.0], vec![2], false);
+        let zp = ti64(vec![0, 0, 0], vec![3]);
+        let result = fake_quantize_per_channel_affine(&input, &scale, &zp, 0, -128, 127);
+        assert!(result.is_err());
+        assert!(format!("{}", result.unwrap_err()).contains("same dimensions"));
+    }
+
+    #[test]
+    fn fake_quantize_per_channel_rejects_qparam_size_mismatch_with_axis() {
+        let input = t(vec![1.0, 2.0, 3.0, 4.0], vec![2, 2], false);
+        let scale = t(vec![1.0, 1.0, 1.0], vec![3], false);
+        let zp = ti64(vec![0, 0, 0], vec![3]);
+        let result = fake_quantize_per_channel_affine(&input, &scale, &zp, 0, -128, 127);
+        assert!(result.is_err());
+        assert!(format!("{}", result.unwrap_err()).contains("not consistent with input"));
+    }
+
+    #[test]
+    fn fake_quantize_per_channel_rejects_axis_out_of_bounds() {
+        let input = t(vec![1.0, 2.0], vec![2], false);
+        let scale = t(vec![1.0], vec![1], false);
+        let zp = ti64(vec![0], vec![1]);
+        let result = fake_quantize_per_channel_affine(&input, &scale, &zp, 5, -128, 127);
+        assert!(result.is_err());
+        assert!(format!("{}", result.unwrap_err()).contains("`axis`"));
+    }
+
+    #[test]
+    fn fake_quantize_per_channel_rejects_zero_point_outside_range() {
+        let input = t(vec![1.0, 2.0], vec![2], false);
+        let scale = t(vec![1.0, 1.0], vec![2], false);
+        // 500 lies outside [-128, 127] — upstream FakeQuantPerChannelAffine.cpp:69-74.
+        let zp = ti64(vec![0, 500], vec![2]);
+        let result = fake_quantize_per_channel_affine(&input, &scale, &zp, 0, -128, 127);
+        assert!(result.is_err());
+        assert!(format!("{}", result.unwrap_err()).contains("`zero_point`"));
+    }
+
+    #[test]
+    fn fake_quantize_per_channel_rejects_inverted_range() {
+        let input = t(vec![1.0, 2.0], vec![2], false);
+        let scale = t(vec![1.0, 1.0], vec![2], false);
+        let zp = ti64(vec![0, 0], vec![2]);
+        let result = fake_quantize_per_channel_affine(&input, &scale, &zp, 0, 128, -128);
+        assert!(result.is_err());
+        assert!(format!("{}", result.unwrap_err()).contains("`quant_min`"));
+    }
+
+    #[test]
+    fn fake_quantize_per_channel_rejects_non_positive_scale() {
+        let input = t(vec![1.0, 2.0], vec![2], false);
+        let scale = t(vec![1.0, -0.5], vec![2], false);
+        let zp = ti64(vec![0, 0], vec![2]);
+        let result = fake_quantize_per_channel_affine(&input, &scale, &zp, 0, -128, 127);
+        assert!(result.is_err());
+        assert!(format!("{}", result.unwrap_err()).contains("`scale`"));
+    }
+
+    #[test]
+    fn fake_quantize_per_channel_preserves_grad_fn_when_input_requires_grad() {
+        let input = t(vec![1.0, 2.0], vec![2], true);
+        let scale = t(vec![1.0, 1.0], vec![2], false);
+        let zp = ti64(vec![0, 0], vec![2]);
+        let out = fake_quantize_per_channel_affine(&input, &scale, &zp, 0, -128, 127).unwrap();
+        assert!(out.requires_grad());
+        assert!(out.grad_fn().is_some());
     }
 }

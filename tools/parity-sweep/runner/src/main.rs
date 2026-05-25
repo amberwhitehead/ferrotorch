@@ -19,7 +19,7 @@ use std::io::{BufRead, BufReader, Write};
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 
 use base64::{Engine, engine::general_purpose::STANDARD as B64};
-use ferrotorch_core::{Tensor, from_vec, grad_fns};
+use ferrotorch_core::{IntTensor, Tensor, from_vec, grad_fns};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
@@ -55,6 +55,57 @@ impl WireTensor {
             data.push(f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]));
         }
         Ok(from_vec(data, &self.shape)?)
+    }
+
+    /// Decode the wire envelope to an `IntTensor<i64>`. Accepts `int32` and
+    /// `int64` dtypes; int32 is widened to i64 to match ferrotorch's
+    /// `IntTensor<i64>` carrier (the upstream contract for the per-channel
+    /// `zero_point` is `int32 | float | half` per
+    /// `aten/src/ATen/native/quantized/FakeQuantPerChannelAffine.cpp:53`,
+    /// but ferrotorch's typed carrier always widens).
+    fn to_int_tensor_i64(&self) -> Result<IntTensor<i64>, Box<dyn std::error::Error>> {
+        let bytes = B64.decode(&self.data_b64)?;
+        let numel: usize = self.shape.iter().product();
+        let data: Vec<i64> = match self.dtype.as_str() {
+            "int32" => {
+                let expected = numel * 4;
+                if bytes.len() != expected {
+                    return Err(format!(
+                        "int32 byte length {} does not match shape {:?} (expected {})",
+                        bytes.len(),
+                        self.shape,
+                        expected
+                    )
+                    .into());
+                }
+                bytes
+                    .chunks_exact(4)
+                    .map(|c| i64::from(i32::from_le_bytes([c[0], c[1], c[2], c[3]])))
+                    .collect()
+            }
+            "int64" => {
+                let expected = numel * 8;
+                if bytes.len() != expected {
+                    return Err(format!(
+                        "int64 byte length {} does not match shape {:?} (expected {})",
+                        bytes.len(),
+                        self.shape,
+                        expected
+                    )
+                    .into());
+                }
+                bytes
+                    .chunks_exact(8)
+                    .map(|c| i64::from_le_bytes([c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7]]))
+                    .collect()
+            }
+            other => {
+                return Err(
+                    format!("to_int_tensor_i64: only int32/int64 supported, got {other}").into(),
+                );
+            }
+        };
+        Ok(IntTensor::<i64>::from_vec(data, self.shape.clone())?)
     }
 }
 
@@ -568,6 +619,52 @@ fn dispatch_f32(
                 &input, scale, zero_point, quant_min, quant_max,
             )?
         })),
+        // `torch.fake_quantize_per_channel_affine(input, scale, zero_point,
+        // axis, quant_min, quant_max)` — `torch/overrides.py:621`. Oracle
+        // emits `args = [input_tensor (f32), scale_tensor (f32, 1-D),
+        // zero_point_tensor (int32, 1-D), axis: i64, quant_min: i64,
+        // quant_max: i64]` per `tools/parity-sweep/oracle.py:269
+        // ((s0, scale0, zp0, 1, -128, 127), {})`. ferrotorch impl at
+        // `ferrotorch-core/src/grad_fns/quantize_grad.rs::fake_quantize_per_channel_affine`
+        // mirrors the upstream forward at `aten/src/ATen/native/quantized/
+        // FakeQuantPerChannelAffine.cpp:32-42` byte-for-byte (per-channel
+        // banker's rounding + NaN-safe clamp using `scale[c]` / `zp[c]`).
+        // Closes blocker #1239.
+        "fake_quantize_per_channel_affine" => Ok(Some({
+            if args.len() < 6 {
+                return Err(format!(
+                    "fake_quantize_per_channel_affine: expected 6 args, got {}",
+                    args.len()
+                )
+                .into());
+            }
+            let input = unwrap_tensor_arg(&args[0])
+                .ok_or("fake_quantize_per_channel_affine: arg 0 not a tensor")?
+                .to_f32()?;
+            let scale = unwrap_tensor_arg(&args[1])
+                .ok_or("fake_quantize_per_channel_affine: arg 1 (scale) not a tensor")?
+                .to_f32()?;
+            let zero_point = unwrap_tensor_arg(&args[2])
+                .ok_or("fake_quantize_per_channel_affine: arg 2 (zero_point) not a tensor")?
+                .to_int_tensor_i64()?;
+            let axis = args[3]
+                .as_i64()
+                .ok_or("fake_quantize_per_channel_affine: arg 3 (axis) not a JSON integer")?;
+            let quant_min = args[4]
+                .as_i64()
+                .ok_or("fake_quantize_per_channel_affine: arg 4 (quant_min) not a JSON integer")?;
+            let quant_max = args[5]
+                .as_i64()
+                .ok_or("fake_quantize_per_channel_affine: arg 5 (quant_max) not a JSON integer")?;
+            grad_fns::quantize_grad::fake_quantize_per_channel_affine(
+                &input,
+                &scale,
+                &zero_point,
+                axis,
+                quant_min,
+                quant_max,
+            )?
+        })),
         _ => Ok(None),
     }
 }
@@ -601,6 +698,8 @@ fn dispatch_ops() -> &'static [&'static str] {
         "logcumsumexp",
         // Quantization: per-tensor affine fake quantize w/ STE backward. (#1238)
         "fake_quantize_per_tensor_affine",
+        // Quantization: per-channel affine fake quantize w/ STE backward. (#1239)
+        "fake_quantize_per_channel_affine",
     ]
 }
 
