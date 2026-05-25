@@ -265,8 +265,7 @@ fn divergence_cumulative_rs_doc_comment_req_table_impl_cites_resolve() {
                 path.clone()
             };
             // Only audit cites pointing at cumulative.rs itself.
-            if !path_to_use.ends_with("cumulative.rs")
-                || path_to_use.ends_with("ops/cumulative.rs")
+            if !path_to_use.ends_with("cumulative.rs") || path_to_use.ends_with("ops/cumulative.rs")
             {
                 continue;
             }
@@ -296,26 +295,87 @@ fn divergence_cumulative_rs_doc_comment_req_table_impl_cites_resolve() {
     );
 }
 
+/// Parse the `normalize_axis(...)` call-site cite list out of the REQ-6 row
+/// of the cumulative.rs `//!` doc-comment.
+///
+/// The row contains a fragment of the form:
+///
+/// ```text
+/// `normalize_axis(dim as isize, ndim)` calls at `cumulative.rs:108, :358, :528, :560, :721` ...
+/// ```
+///
+/// We locate the literal `` `cumulative.rs: `` prefix (it begins the
+/// backtick-quoted span), then read everything up to the closing backtick.
+/// The body is a comma-separated list whose first token is `LINE` and
+/// whose subsequent tokens are `:LINE` (continuation form, reusing the
+/// path). The parser returns the numeric line list as cited.
+///
+/// Returning a `Vec<usize>` (rather than the hard-coded array the previous
+/// version of this test used) makes the assertion compare doc-comment text
+/// to source-code reality, so the test FAILS while the cites are stale
+/// and PASSES once the doc-comment is refreshed. The previous formulation
+/// (`let cited: [usize; 5] = [73, 203, 231, 241, 323];`) was tautologically
+/// unfixable: no production-code edit could ever satisfy it because the
+/// "expected" side was a frozen literal.
+fn parse_normalize_axis_cited_lines(src: &str) -> Vec<usize> {
+    let rows = extract_doc_comment_req_rows(src);
+    // Find the REQ-6 row.
+    let row = rows
+        .iter()
+        .find(|r| r.starts_with("| REQ-6 "))
+        .expect("REQ-6 row missing from cumulative.rs //! doc-comment");
+
+    // Pattern: ...calls at `cumulative.rs:NNN, :NNN, :NNN, ...`...
+    let prefix = "`cumulative.rs:";
+    let start = row
+        .find(prefix)
+        .unwrap_or_else(|| panic!("REQ-6 row missing `cumulative.rs:` cite prefix: {row}"))
+        + prefix.len();
+    let rest = &row[start..];
+    let end = rest
+        .find('`')
+        .unwrap_or_else(|| panic!("REQ-6 row missing closing backtick after cite prefix: {row}"));
+    let body = &rest[..end];
+
+    // Body is "NNN, :NNN, :NNN, :NNN, :NNN" — split on comma, trim, strip
+    // leading colon, parse.
+    body.split(',')
+        .map(|tok| {
+            let t = tok.trim();
+            let t = t.strip_prefix(':').unwrap_or(t);
+            t.parse::<usize>()
+                .unwrap_or_else(|_| panic!("non-numeric token in REQ-6 cite list: {t:?}"))
+        })
+        .collect()
+}
+
 /// Verify the `normalize_axis(...)` call-site cites in REQ-6 of the
-/// cumulative.rs doc-comment match the actual call lines (the test name
-/// is intentionally long — these five line numbers are an explicit
-/// claim in the doc-comment, not a continuation cite).
+/// cumulative.rs doc-comment match the actual call lines.
+///
+/// PARSER-BASED (not literal-hardcoded): both `cited` and `actual` are
+/// derived from the file content at test time, so this test FAILS while
+/// the doc-comment carries stale line numbers and PASSES once the
+/// doc-comment is refreshed by the fixer.
 #[test]
 fn divergence_cumulative_rs_doc_comment_normalize_axis_call_lines() {
     let root = workspace_root();
     let path = root.join("ferrotorch-core/src/grad_fns/cumulative.rs");
     let src = read_file(&path);
 
-    // Cited lines from the doc-comment REQ-6 row.
-    let cited: [usize; 5] = [73, 203, 231, 241, 323];
+    // Cited lines parsed out of the REQ-6 row of the //! doc-comment.
+    let cited: Vec<usize> = parse_normalize_axis_cited_lines(&src);
 
     // Actual lines where `normalize_axis(` appears as a function-CALL
-    // (not as an import line `use crate::shape::normalize_axis;`).
+    // (not as an import line `use crate::shape::normalize_axis;` and not
+    // as a citation inside the //! doc-comment itself).
     let actual: Vec<usize> = src
         .lines()
         .enumerate()
         .filter_map(|(i, l)| {
-            if l.contains("normalize_axis(") && !l.trim_start().starts_with("use ") && !l.starts_with("//!") {
+            if l.contains("normalize_axis(")
+                && !l.trim_start().starts_with("use ")
+                && !l.starts_with("//!")
+            {
                 Some(i + 1)
             } else {
                 None
