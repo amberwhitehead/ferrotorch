@@ -173,7 +173,9 @@ pub use flex_attention::flex_attention;
 pub use grad_fns::activation::{GeluApproximate, gelu, gelu_with, sigmoid, tanh};
 pub use grad_fns::cumulative::{cummax, cummin, cumprod, cumsum, logcumsumexp};
 pub use grad_fns::fft::{
-    fft_differentiable, ifft_differentiable, irfft_differentiable, rfft_differentiable,
+    fft_differentiable, fftn_differentiable, hfft_differentiable, ifft_differentiable,
+    ifftn_differentiable, ihfft_differentiable, irfft_differentiable, irfftn_differentiable,
+    rfft_differentiable, rfftn_differentiable,
 };
 pub use grad_fns::quantize_grad::fake_quantize_differentiable;
 pub use grad_fns::reduction::{mean_dim, sum_dim};
@@ -191,12 +193,12 @@ pub use ops::scatter::scatter_add_segments;
 pub use ops::search::{bucketize, histc, meshgrid, searchsorted, topk, unique, unique_consecutive};
 pub use ops::tensor_ops::{cdist, diag, diagflat, roll, tril, triu};
 pub use pruning::{apply_2_4_mask, magnitude_prune, sparsity_ratio};
-pub use rng::{Generator, manual_seed};
 pub use quantize::{
     FakeQuantize, HistogramObserver, MinMaxObserver, Observer, PerChannelMinMaxObserver, QParams,
     QatLayer, QatModel, QuantDtype, QuantScheme, QuantizedTensor, cuda_rng, dequantize,
     prepare_qat, quantize, quantize_named_tensors, quantized_matmul,
 };
+pub use rng::{Generator, manual_seed};
 pub use shape::{broadcast_shapes, normalize_axis};
 pub use sparse::{CooTensor, CscTensor, CsrTensor, SparseGrad, SparseTensor};
 pub use sparse::{SemiStructuredSparseTensor, sparse_matmul_24};
