@@ -31,7 +31,7 @@
 //! | REQ-6 | SHIPPED | `hfft`/`ihfft` at `fft.rs:1000,1048`; consumer: re-export at `lib.rs:154` |
 //! | REQ-7 | SHIPPED | `fftfreq`/`rfftfreq` at `fft.rs:1093,1105`; consumer: re-export at `lib.rs:153-155` |
 //! | REQ-8 | SHIPPED | `fftshift`/`ifftshift` at `fft.rs:1122,1141`; consumer: re-export at `lib.rs:153-155` |
-//! | REQ-9 | SHIPPED | cuFFT dispatch at `fft.rs:139-169,229-258`; consumer: `ComplexTensor::fft` at `complex_tensor.rs:329`. bf16/f16 GPU blocker #1536 |
+//! | REQ-9 | SHIPPED | cuFFT dispatch at `fft.rs:139-169,229-258`; consumer: `ComplexTensor::fft` at `complex_tensor.rs:329`. bf16/f16 GPU lowering tracked under umbrella #1545 (ferrotorch-core CPU-only paths roadmap) |
 
 use ferray_core::Array as FerrayArray;
 use ferray_core::IxDyn as FerrayIxDyn;

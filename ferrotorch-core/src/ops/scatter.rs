@@ -37,7 +37,7 @@
 //! | REQ-2 | SHIPPED | shape validation at `ops/scatter.rs:84-99`; consumer: `scatter_add_segments` entry |
 //! | REQ-3 | SHIPPED | per-edge validation at `ops/scatter.rs:107-119`; consumer: `scatter_add_segments` entry |
 //! | REQ-4 | SHIPPED | zero-init `out` at `ops/scatter.rs:101-102`; consumer: `scatter_add_segments` |
-//! | REQ-5 | SHIPPED | `NotImplementedOnCuda` at `ops/scatter.rs:79-83`; consumer: `scatter_add_segments`. GPU blocker #1535 |
+//! | REQ-5 | SHIPPED | `NotImplementedOnCuda` at `ops/scatter.rs:79-83`; consumer: `scatter_add_segments`. GPU lowering tracked under umbrella #1545 (ferrotorch-core CPU-only paths roadmap) |
 //! | REQ-6 | SHIPPED | module `//!` at `ops/scatter.rs:24-30`; consumer: `ferrotorch-graph` inference harness under `no_grad` |
 
 use crate::dtype::Float;

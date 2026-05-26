@@ -51,7 +51,7 @@ polynomial families).
 - REQ-9: Chebyshev polynomial family — `chebyshev_polynomial_{t,u,v,w}`
   via three-term recurrence. Mirrors
   `torch.special.chebyshev_polynomial_{t,u,v,w}`. CPU-only;
-  GPU path NOT-STARTED, blocked on #1533.
+  GPU path NOT-STARTED, blocked on #1545.
 - REQ-10: Hermite polynomial family — `hermite_polynomial_h`
   (physicist's, `H_{n+1} = 2x H_n - 2n H_{n-1}`),
   `hermite_polynomial_he` (probabilist's, `He_{n+1} = x He_n - n
@@ -77,7 +77,7 @@ polynomial families).
   `chebyshev_polynomial_t(x, 1) == x` for all x.
 - [x] AC-6: `hermite_polynomial_h(x, 2)` matches `4*x^2 - 2`.
 - [ ] AC-7: GPU lowering for the polynomial families — NOT-STARTED,
-  blocked on #1533 (CubeCL kernel for on-device three-term
+  blocked on #1545 (CubeCL kernel for on-device three-term
   recurrence).
 
 ## Architecture
@@ -148,7 +148,7 @@ recurrence-identity checks (`H_n(x) - 2x*H_{n-1}(x) + 2(n-1)*H_{n-2}(x) =
 | REQ-6 | SHIPPED | impl: `log1p`/`expm1` at `special.rs:714,721`; non-test consumer: re-exported as `ferrotorch_core::log1p`/`expm1` at `lib.rs:187` |
 | REQ-7 | SHIPPED | impl: `sinc` at `special.rs:726`; non-test consumer: re-exported as `ferrotorch_core::sinc` at `lib.rs:187` |
 | REQ-8 | SHIPPED | impl: `xlogy` at `special.rs:733`; non-test consumer: re-exported as `ferrotorch_core::xlogy` at `lib.rs:187` |
-| REQ-9 | SHIPPED | impl: `chebyshev_polynomial_{t,u,v,w}` at `special.rs:794-832`; non-test consumer: accessible via `ferrotorch_core::special::chebyshev_polynomial_*`. GPU lowering NOT-STARTED, blocked on #1533 — does NOT block CPU SHIPPED |
+| REQ-9 | SHIPPED | impl: `chebyshev_polynomial_{t,u,v,w}` at `special.rs:794-832`; non-test consumer: accessible via `ferrotorch_core::special::chebyshev_polynomial_*`. GPU lowering NOT-STARTED, blocked on #1545 — does NOT block CPU SHIPPED |
 | REQ-10 | SHIPPED | impl: `hermite_polynomial_h` / `hermite_polynomial_he` at `special.rs:841,849`; non-test consumer: accessible via `ferrotorch_core::special::hermite_polynomial_*` |
 | REQ-11 | SHIPPED | impl: `laguerre_polynomial_l` / `legendre_polynomial_p` at `special.rs:859,867`; non-test consumer: accessible via `ferrotorch_core::special::laguerre_polynomial_l` / `legendre_polynomial_p` |
 | REQ-12 | SHIPPED | impl: `shifted_chebyshev_polynomial_{t,u,v,w}` at `special.rs:875-908`; non-test consumer: accessible via `ferrotorch_core::special::shifted_chebyshev_polynomial_*` |

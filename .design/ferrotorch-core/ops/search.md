@@ -18,7 +18,7 @@ discretization primitives: `searchsorted`, `bucketize`, `unique`,
 `unique_consecutive`, `histc`, `meshgrid`, and `topk`. Each mirrors
 the same-named `torch.*` function. All paths are CPU-only — CUDA
 inputs error with `NotImplementedOnCuda` (GPU lowerings tracked
-under #1535).
+under #1545).
 
 ## Requirements
 
@@ -60,7 +60,7 @@ under #1535).
 - [x] AC-6: `histc` clamps out-of-range to boundary bins
   (`test_histc_clamps`).
 - [x] AC-7: `topk(input, k>last_dim)` errors with `InvalidArgument`.
-- [ ] AC-8: GPU paths — NOT-STARTED, blocked on #1535.
+- [ ] AC-8: GPU paths — NOT-STARTED, blocked on #1545.
 
 ## Architecture
 

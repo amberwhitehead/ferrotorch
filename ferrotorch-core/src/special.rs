@@ -16,7 +16,7 @@
 //! | REQ-6 | SHIPPED | `log1p`/`expm1` at `special.rs:714,721`; consumer: re-export at `lib.rs:187` |
 //! | REQ-7 | SHIPPED | `sinc` at `special.rs:726`; consumer: re-export at `lib.rs:187` |
 //! | REQ-8 | SHIPPED | `xlogy` at `special.rs:733`; consumer: re-export at `lib.rs:187` |
-//! | REQ-9 | SHIPPED | `chebyshev_polynomial_{t,u,v,w}` at `special.rs:794-832`; consumer: `ferrotorch_core::special::*`. GPU blocker #1533 |
+//! | REQ-9 | SHIPPED | `chebyshev_polynomial_{t,u,v,w}` at `special.rs:794-832`; consumer: `ferrotorch_core::special::*`. GPU lowering tracked under umbrella #1545 (ferrotorch-core CPU-only paths roadmap) |
 //! | REQ-10 | SHIPPED | `hermite_polynomial_h`/`hermite_polynomial_he` at `special.rs:841,849`; consumer: `ferrotorch_core::special::*` |
 //! | REQ-11 | SHIPPED | `laguerre_polynomial_l`/`legendre_polynomial_p` at `special.rs:859,867`; consumer: `ferrotorch_core::special::*` |
 //! | REQ-12 | SHIPPED | `shifted_chebyshev_polynomial_{t,u,v,w}` at `special.rs:875-908`; consumer: `ferrotorch_core::special::*` |

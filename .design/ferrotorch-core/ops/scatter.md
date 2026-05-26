@@ -40,7 +40,7 @@ version takes a 1-D `index` over E edges mapping into a pre-decided
   `torch_scatter.scatter_add` default behaviour.
 - REQ-5: CPU-only forward — CUDA `src` errors with
   `NotImplementedOnCuda`. GPU lowering NOT-STARTED (blocked on
-  #1535).
+  #1545).
 - REQ-6: Forward only — no autograd. Documented in the module
   doc-comment at `:24-30`: GCN inference runs under `no_grad`; if
   autograd is needed later, the grad is a simple `gather`
@@ -61,7 +61,7 @@ version takes a 1-D `index` over E edges mapping into a pre-decided
   (`segments_rejects_negative_index`).
 - [x] AC-7: Out-of-bounds index errors
   (`segments_rejects_oob_index`).
-- [ ] AC-8: GPU lowering — NOT-STARTED, blocked on #1535.
+- [ ] AC-8: GPU lowering — NOT-STARTED, blocked on #1545.
 
 ## Architecture
 
@@ -115,5 +115,5 @@ in `ferrotorch-graph/tests/`.
 | REQ-2 | SHIPPED | impl: shape validation at `ops/scatter.rs:84-99`; non-test consumer: `scatter_add_segments` entry — every public call runs through this validator |
 | REQ-3 | SHIPPED | impl: per-edge validation at `ops/scatter.rs:107-119`; non-test consumer: `scatter_add_segments` entry |
 | REQ-4 | SHIPPED | impl: zero-initialised `out` at `ops/scatter.rs:101-102`; non-test consumer: `scatter_add_segments` entry; tested by `segments_empty_rows_are_zero` |
-| REQ-5 | SHIPPED | impl: `NotImplementedOnCuda` at `ops/scatter.rs:79-83`; non-test consumer: `scatter_add_segments` entry. GPU lowering NOT-STARTED, blocked on #1535 — does NOT block CPU SHIPPED |
+| REQ-5 | SHIPPED | impl: `NotImplementedOnCuda` at `ops/scatter.rs:79-83`; non-test consumer: `scatter_add_segments` entry. GPU lowering NOT-STARTED, blocked on #1545 — does NOT block CPU SHIPPED |
 | REQ-6 | SHIPPED | impl: documented in module-level `//!` comment at `ops/scatter.rs:24-30`; non-test consumer: explicit `no_grad` invocation by the `ferrotorch-graph` inference harness |

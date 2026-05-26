@@ -46,7 +46,7 @@ constructors + a `to_ferray` bridge.
 - REQ-6: `masked_where(data, condition)` / `masked_invalid(data)` /
   `masked_equal(data, value)` — numpy-style constructors;
   `masked_where` inverts the condition to match torch convention.
-  CPU-only (blocked on #1534 for GPU). Mirrors
+  CPU-only (blocked on #1545 for GPU). Mirrors
   `numpy.ma.{masked_where, masked_invalid, masked_equal}`.
 - REQ-7: `to_ferray::<U>(op)` — bridge to `ferray_ma::MaskedArray<U,
   IxDyn>`. Inverts the mask at the boundary (ferrotorch `true`=valid
@@ -71,7 +71,7 @@ constructors + a `to_ferray` bridge.
 - [x] AC-7: `masked_min` / `masked_max` return NaN when fully masked
   (`masked_min_max_all_masked_returns_nan`).
 - [ ] AC-8: GPU paths for `masked_where` / `masked_invalid` /
-  `masked_equal` constructors — NOT-STARTED, blocked on #1534.
+  `masked_equal` constructors — NOT-STARTED, blocked on #1545.
 
 ## Architecture
 
@@ -110,7 +110,7 @@ with an `Option<T>` accumulator.
 match the torch convention. `masked_invalid` at `:453` and
 `masked_equal` at `:472` walk the data in host memory and build the
 mask. All three constructors reject CUDA inputs with
-`NotImplementedOnCuda`, tracked by #1534.
+`NotImplementedOnCuda`, tracked by #1545.
 
 The `to_ferray` bridge at `:165-186` inverts the mask
 (`!v` per element) so the resulting `ferray_ma::MaskedArray` uses
@@ -150,5 +150,5 @@ unit file).
 | REQ-3 | SHIPPED | impl: `with_fill_value` at `masked.rs:84`; non-test consumer: re-exported via `MaskedTensor` builder at `lib.rs:167` |
 | REQ-4 | SHIPPED | impl: `filled` / `to_tensor` at `masked.rs:131,143`; non-test consumer: re-exported method on `MaskedTensor` at `lib.rs:167` |
 | REQ-5 | SHIPPED | impl: `masked_sum`/`masked_mean`/`masked_min`/`masked_max`/`masked_count` at `masked.rs:200,275,322,330,419`; non-test consumer: re-exported at `lib.rs:167-170` |
-| REQ-6 | SHIPPED | impl: `masked_where`/`masked_invalid`/`masked_equal` at `masked.rs:435,453,472`; non-test consumer: re-exported at `lib.rs:167-170`. GPU paths NOT-STARTED, blocked on #1534 — does NOT block CPU-path SHIPPED for the constructor itself |
+| REQ-6 | SHIPPED | impl: `masked_where`/`masked_invalid`/`masked_equal` at `masked.rs:435,453,472`; non-test consumer: re-exported at `lib.rs:167-170`. GPU paths NOT-STARTED, blocked on #1545 — does NOT block CPU-path SHIPPED for the constructor itself |
 | REQ-7 | SHIPPED | impl: `to_ferray` at `masked.rs:165`; non-test consumer: the bridge enables ferray-ma's wider op surface; `to_ferray_round_trip_mean_matches_inhouse` test pins the cross-check |

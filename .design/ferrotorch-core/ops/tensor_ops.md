@@ -20,7 +20,7 @@ manipulation primitives: `triu` / `tril` (triangular masks),
 mirrors the same-named `torch.*` function. `roll` has a GPU f32 fast
 path (cumulative-scan-style dispatch). `triu`/`tril`/`diag`/`diagflat`/
 `cdist` are CPU-only — CUDA inputs error with
-`NotImplementedOnCuda` (GPU lowerings tracked under #1535).
+`NotImplementedOnCuda` (GPU lowerings tracked under #1545).
 
 ## Requirements
 
@@ -66,7 +66,7 @@ path (cumulative-scan-style dispatch). `triu`/`tril`/`diag`/`diagflat`/
 - [x] AC-8: `roll` autograd — gradient flows back through
   `RollBackward` (the test in `grad_fns/shape.rs:1545+` pins this).
 - [ ] AC-9: GPU paths for `triu`/`tril`/`diag`/`diagflat`/`cdist` —
-  NOT-STARTED, blocked on #1535.
+  NOT-STARTED, blocked on #1545.
 
 ## Architecture
 

@@ -13,10 +13,10 @@
 //! | REQ-3 | SHIPPED | `pub fn uniform`, `pub fn normal` with `xorshift64` PRNG seeded from `SystemTime::now()` + thread id mirror `torch/nn/init.py:247-300`; consumed by `ferrotorch-nn/src/rnn.rs:127-128` (`init::uniform(&mut weight_ih, -k, k)?`) and `ferrotorch-nn/src/embedding.rs:249` (`init::normal(&mut weight, 0.0, 1.0)?`). |
 //! | REQ-4 | SHIPPED | `pub fn xavier_uniform`, `pub fn xavier_normal` use `fan_in + fan_out` mirroring `torch/nn/init.py:479-540`; consumed through the public `init` namespace re-exported at `lib.rs:207`; tests `test_xavier_normal_stats` pin the stats. |
 //! | REQ-5 | SHIPPED | `pub fn kaiming_uniform`, `pub fn kaiming_normal` use `gain / sqrt(fan_in)` mirroring `torch/nn/init.py:554-672` (fan_in mode only; `fan_out` mode tracked separately by #1453 AC); consumed via the `init` module + `lib.rs:207` re-export. Tests `test_kaiming_uniform_relu`, `test_kaiming_normal_relu` pin. |
-//! | REQ-6 | SHIPPED | `pub fn trunc_normal_` rejection-sampled truncated normal on `[a, b]` mirrors `torch/nn/init.py:301-336`; consumed via the `init` module path; downstream ViT / position-embedding code in the model crates uses it. Tests `test_trunc_normal_bounds`, `test_trunc_normal_stats` pin. |
-//! | REQ-7 | SHIPPED | `pub fn orthogonal_` modified Gram-Schmidt with sign correction mirrors `torch/nn/init.py:672-722`; consumed via the `init` module path. Tests `test_orthogonal_columns_orthonormal`, `test_orthogonal_gain`, `test_orthogonal_tall_matrix`, `test_orthogonal_wide_matrix` pin `Q^T Q ≈ gain^2 I`. |
-//! | REQ-8 | SHIPPED | `pub fn sparse_` 2-D column-wise partial Fisher-Yates mirrors `torch/nn/init.py:723-764`; consumed via the `init` module path. Tests `test_sparse_sparsity_ratio`, `test_sparse_nonzero_drawn_from_normal` pin. |
-//! | REQ-9 | SHIPPED | `pub fn dirac_` channel-diagonal center placement with `groups` support mirrors `torch/nn/init.py:402-455`; consumed via the `init` module path. Tests `test_dirac_3d_identity`, `test_dirac_4d_identity`, `test_dirac_groups` pin. |
+//! | REQ-6 | SHIPPED | `pub fn trunc_normal_` + `pub fn trunc_normal_with_generator` rejection-sampled truncated normal on `[a, b]` mirrors `torch/nn/init.py:301-336` (incl. `generator` kwarg); consumed via the `init` module path; downstream ViT / position-embedding code in the model crates uses it. Tests `test_trunc_normal_bounds`, `test_trunc_normal_stats` pin; `trunc_normal_with_generator_uses_explicit_stream` in `divergence_manual_seed_init_threading_extended.rs` pins explicit-generator threading. |
+//! | REQ-7 | SHIPPED | `pub fn orthogonal_` + `pub fn orthogonal_with_generator` modified Gram-Schmidt with sign correction mirrors `torch/nn/init.py:672-722` (incl. `generator` kwarg); consumed via the `init` module path. Tests `test_orthogonal_columns_orthonormal`, `test_orthogonal_gain`, `test_orthogonal_tall_matrix`, `test_orthogonal_wide_matrix` pin `Q^T Q ≈ gain^2 I`; `orthogonal_with_generator_uses_explicit_stream` pins generator threading. |
+//! | REQ-8 | SHIPPED | `pub fn sparse_` + `pub fn sparse_with_generator` 2-D column-wise partial Fisher-Yates mirrors `torch/nn/init.py:723-764` (incl. `generator` kwarg); consumed via the `init` module path. Tests `test_sparse_sparsity_ratio`, `test_sparse_nonzero_drawn_from_normal` pin; `sparse_with_generator_uses_explicit_stream` pins generator threading. |
+//! | REQ-9 | SHIPPED | `pub fn dirac_` channel-diagonal center placement with `groups` support mirrors `torch/nn/init.py:402-455` (no `generator` kwarg upstream — `dirac_` is deterministic, consumes 0 random bits); consumed via the `init` module path. Tests `test_dirac_3d_identity`, `test_dirac_4d_identity`, `test_dirac_groups` pin. |
 //! | REQ-10 | SHIPPED | `pub fn eye_` 2-D identity (top-left for non-square) mirrors `torch/nn/init.py:381-401`; consumed via the `init` module path. Tests `test_eye_square`, `test_eye_tall`, `test_eye_wide`, `test_eye_preserves_requires_grad` pin. |
 //! | REQ-11 | SHIPPED | Every initializer rebuilds the parameter via `Parameter::new(Tensor::from_storage(.., true))?` mirroring upstream's `with torch.no_grad():` discipline at `torch/nn/init.py:69-160`; consumed by `ferrotorch-nn/src/rnn.rs:127-128` calling `init::uniform` and continuing to use the parameter as a leaf with grad. Test `test_init_preserves_requires_grad` pins. |
 
@@ -228,6 +228,9 @@ pub fn kaiming_normal_with_generator<T: Float>(
 /// the standard initialization for Vision Transformer position embeddings
 /// and similar.
 ///
+/// Uses the thread-local generator. See [`trunc_normal_with_generator`] for
+/// the explicit-`Generator` variant.
+///
 /// # Arguments
 ///
 /// * `param` -- Parameter to initialize in-place.
@@ -241,6 +244,20 @@ pub fn trunc_normal_<T: Float>(
     std: f64,
     a: f64,
     b: f64,
+) -> FerrotorchResult<()> {
+    with_thread_rng(|g| trunc_normal_with_generator(param, mean, std, a, b, g))
+}
+
+/// Same as [`trunc_normal_`] but uses the caller-supplied [`Generator`] —
+/// mirrors the `generator` kwarg of `torch.nn.init.trunc_normal_` at
+/// `torch/nn/init.py:301-336`.
+pub fn trunc_normal_with_generator<T: Float>(
+    param: &mut Parameter<T>,
+    mean: f64,
+    std: f64,
+    a: f64,
+    b: f64,
+    generator: &mut Generator,
 ) -> FerrotorchResult<()> {
     if a >= b {
         return Err(FerrotorchError::InvalidArgument {
@@ -261,7 +278,7 @@ pub fn trunc_normal_<T: Float>(
     let mut remaining = numel;
     while remaining > 0 {
         let batch_size = remaining * 2 + 64;
-        let candidates: Vec<T> = simple_normal(batch_size, mean, std);
+        let candidates: Vec<T> = sample_normal_with(generator, batch_size, mean, std);
         for v in candidates {
             let f = v.to_f64().unwrap();
             if f >= a && f <= b {
@@ -290,8 +307,20 @@ pub fn trunc_normal_<T: Float>(
 /// `Q * diag(sign(diag(R))) * gain`. For higher-dimensional parameters
 /// the weight is reshaped to 2D first, initialized, then reshaped back.
 ///
-/// Matches `torch.nn.init.orthogonal_`.
+/// Matches `torch.nn.init.orthogonal_`. Uses the thread-local generator;
+/// see [`orthogonal_with_generator`] for the explicit-`Generator` variant.
 pub fn orthogonal_<T: Float>(param: &mut Parameter<T>, gain: f64) -> FerrotorchResult<()> {
+    with_thread_rng(|g| orthogonal_with_generator(param, gain, g))
+}
+
+/// Same as [`orthogonal_`] but uses the caller-supplied [`Generator`] —
+/// mirrors the `generator` kwarg of `torch.nn.init.orthogonal_` at
+/// `torch/nn/init.py:672-722`.
+pub fn orthogonal_with_generator<T: Float>(
+    param: &mut Parameter<T>,
+    gain: f64,
+    generator: &mut Generator,
+) -> FerrotorchResult<()> {
     let shape = param.shape().to_vec();
     if shape.len() < 2 {
         return Err(FerrotorchError::InvalidArgument {
@@ -303,8 +332,8 @@ pub fn orthogonal_<T: Float>(param: &mut Parameter<T>, gain: f64) -> FerrotorchR
     let cols: usize = shape[1..].iter().product();
     let (n, m) = (rows, cols);
 
-    // Generate random matrix N(0,1).
-    let flat: Vec<f64> = simple_normal::<f64>(n * m, 0.0, 1.0);
+    // Generate random matrix N(0,1) using the explicit generator.
+    let flat: Vec<f64> = sample_normal_with::<f64>(generator, n * m, 0.0, 1.0);
 
     // We want to orthogonalize either rows or columns depending on shape.
     // PyTorch orthogonalizes along the larger dimension. If n < m, we
@@ -408,11 +437,25 @@ pub fn orthogonal_<T: Float>(param: &mut Parameter<T>, gain: f64) -> FerrotorchR
 /// `sparsity` (e.g. 0.9 means 90% of elements per column are zero).
 /// Non-zero entries are drawn from N(0, `std`).
 ///
-/// The parameter must be 2D.
+/// The parameter must be 2D. Uses the thread-local generator; see
+/// [`sparse_with_generator`] for the explicit-`Generator` variant.
 pub fn sparse_<T: Float>(
     param: &mut Parameter<T>,
     sparsity: f64,
     std: f64,
+) -> FerrotorchResult<()> {
+    with_thread_rng(|g| sparse_with_generator(param, sparsity, std, g))
+}
+
+/// Same as [`sparse_`] but uses the caller-supplied [`Generator`] — mirrors
+/// the `generator` kwarg of `torch.nn.init.sparse_` at
+/// `torch/nn/init.py:723-764`. Both the N(0, std) sampling AND the
+/// Fisher-Yates zero-index selection draw from the explicit generator.
+pub fn sparse_with_generator<T: Float>(
+    param: &mut Parameter<T>,
+    sparsity: f64,
+    std: f64,
+    generator: &mut Generator,
 ) -> FerrotorchResult<()> {
     let shape = param.shape().to_vec();
     if shape.len() != 2 {
@@ -429,18 +472,16 @@ pub fn sparse_<T: Float>(
     let (rows, cols) = (shape[0], shape[1]);
     let num_zeros_per_col = ((rows as f64) * sparsity).ceil() as usize;
 
-    // Generate the dense normal values.
-    let values: Vec<f64> = simple_normal::<f64>(rows * cols, 0.0, std);
+    // Generate the dense normal values using the explicit generator.
+    let values: Vec<f64> = sample_normal_with::<f64>(generator, rows * cols, 0.0, std);
 
     let mut data = vec![T::from(0.0).unwrap(); rows * cols];
 
     // For each column, pick which rows to zero out using a Fisher-Yates
-    // partial shuffle, drawing index choices from the thread-local generator.
-    let rand_indices: Vec<u32> = with_thread_rng(|g| {
-        (0..(cols * num_zeros_per_col.min(rows)))
-            .map(|_| g.random_u32())
-            .collect()
-    });
+    // partial shuffle, drawing index choices from the explicit generator.
+    let rand_indices: Vec<u32> = (0..(cols * num_zeros_per_col.min(rows)))
+        .map(|_| generator.random_u32())
+        .collect();
     let mut rand_idx_pos = 0usize;
 
     for j in 0..cols {
@@ -597,12 +638,6 @@ fn sample_normal_with<T: Float>(
         data.push(T::from(mean + std * z).unwrap());
     }
     data
-}
-
-/// Convenience: thread-local-generator wrapper for in-crate use by
-/// `trunc_normal_`, `orthogonal_`, `sparse_`.
-fn simple_normal<T: Float>(n: usize, mean: f64, std: f64) -> Vec<T> {
-    with_thread_rng(|g| sample_normal_with(g, n, mean, std))
 }
 
 #[cfg(test)]

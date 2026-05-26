@@ -72,7 +72,7 @@ returns.
   on-device count, then the compaction kernel writes the kept
   elements (no host bounce except for the single integer count).
 - [ ] AC-6: GPU paths for `gather` / `scatter` / `scatter_add` —
-  NOT-STARTED, blocked on #1535 (these CPU-only paths need
+  NOT-STARTED, blocked on #1545 (these CPU-only paths need
   GPU lowering through `crate::grad_fns::indexing::GatherBackward`'s
   resident path).
 

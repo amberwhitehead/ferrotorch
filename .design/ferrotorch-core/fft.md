@@ -55,7 +55,7 @@ representation. GPU paths exist for f32/f64 via cuFFT (#579 / #605).
 - REQ-9: GPU dispatch — `fft`/`ifft` route to cuFFT for f32/f64 on
   CUDA (`backend.fft_c2c_*` and `pad_truncate_complex_*` from #579 /
   #605). bf16/f16 take the CPU path via f64 round-trip (open prereq
-  blocker #1536). N-D / Hermitian / shift helpers are CPU-only;
+  blocker #1545). N-D / Hermitian / shift helpers are CPU-only;
   CUDA inputs receive `Err(NotImplementedOnCuda)` from the underlying
   `ferray_fft` calls.
 
@@ -70,7 +70,7 @@ representation. GPU paths exist for f32/f64 via cuFFT (#579 / #605).
   `[..., n/2+1, 2]`.
 - [x] AC-4: CUDA f32/f64 `fft` paths route through `backend.fft_c2c_*`
   per the dispatch at `fft.rs:139-169` (cuFFT, no host bounce).
-- [ ] AC-5: bf16/f16 GPU fft path — NOT-STARTED, blocked on #1536
+- [ ] AC-5: bf16/f16 GPU fft path — NOT-STARTED, blocked on #1545
   (cuFFT only supports f32/f64; the implementation currently
   upcasts via `data_vec()` → CPU round-trip).
 
@@ -155,4 +155,4 @@ correctness.
 | REQ-6 | SHIPPED | impl: `hfft`/`ihfft` at `fft.rs:1000,1048`; non-test consumer: re-exported as `ferrotorch_core::hfft`/`ihfft` at `lib.rs:154` |
 | REQ-7 | SHIPPED | impl: `fftfreq`/`rfftfreq` at `fft.rs:1093,1105`; non-test consumer: re-exported as `ferrotorch_core::fftfreq`/`rfftfreq` at `lib.rs:153-155` |
 | REQ-8 | SHIPPED | impl: `fftshift`/`ifftshift` at `fft.rs:1122,1141`; non-test consumer: re-exported as `ferrotorch_core::fftshift`/`ifftshift` at `lib.rs:153-155` |
-| REQ-9 | SHIPPED | impl: cuFFT dispatch at `fft.rs:139-169` (`fft`) and `fft.rs:229-258` (`ifft`); non-test consumer: `ComplexTensor::fft` at `complex_tensor.rs:329`. NB: bf16/f16 GPU path is blocked on #1536 — the f32/f64 SHIPPED claim does NOT cover those dtypes |
+| REQ-9 | SHIPPED | impl: cuFFT dispatch at `fft.rs:139-169` (`fft`) and `fft.rs:229-258` (`ifft`); non-test consumer: `ComplexTensor::fft` at `complex_tensor.rs:329`. NB: bf16/f16 GPU path is blocked on #1545 — the f32/f64 SHIPPED claim does NOT cover those dtypes |
