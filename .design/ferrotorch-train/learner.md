@@ -35,10 +35,16 @@ patterns.
   `scheduler`, `grad_scaler`, `train_metrics`, `val_metrics`,
   `callbacks`, `checkpoint_dir`, `epoch`, `step`, `skipped_steps`).
 - REQ-3: `Learner::new(model, optimizer, loss_fn)` is the canonical
-  constructor; `with_scheduler`, `with_grad_scaler`,
+  constructor; `with_scheduler`, `with_grad_scaler`, `with_amp_context`,
   `with_train_metric`, `with_val_metric`, `with_callback`,
+  `with_ema_callback`, `with_tensorboard_callback`, `with_grad_clip_norm`,
   `with_checkpointing` are builder-style consume-and-return-self
   mutators that match `Trainer.compile(...).fit(...)`-style chaining.
+  The `with_tensorboard_callback` dedicated builder (closes #1504) is
+  the analogue of `with_ema_callback` — it accepts a
+  `TensorBoardCallback` by value and appends `Box::new(tb)` to the
+  generic callback chain so `fit`'s standard `on_*` dispatch reaches
+  it, giving the callback a non-vocab-only production attachment site.
 - REQ-4: `Learner::fit(train_data, val_data, num_epochs) ->
   FerrotorchResult<TrainingHistory>` runs the documented training
   loop:
@@ -51,7 +57,10 @@ patterns.
       counter, update metrics, dispatch `on_batch_end`;
     - scheduler step (per-epoch);
     - validation pass if `val_data` is `Some`;
-    - construct `EpochResult`, save checkpoint if `checkpoint_dir` is
+    - construct `EpochResult` via `EpochResult::new_with_defaults(epoch,
+      train_loss, val_loss, lr)` then assign `metrics` and
+      `duration_secs` (closes #1498 — gives the helper a non-test
+      production caller); save checkpoint if `checkpoint_dir` is
       `Some`, dispatch `on_epoch_end`, push to history, increment
       epoch counter;
     - break if any callback returns `should_stop() == true`;
