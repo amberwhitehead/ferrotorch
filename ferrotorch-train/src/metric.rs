@@ -12,6 +12,17 @@
 //! | [`AccuracyMetric`] | Fraction of correct predictions |
 //! | [`TopKAccuracy`] | Fraction of correct within top-k predictions |
 //! | [`RunningAverage`] | Windowed average of arbitrary f64 values |
+//!
+//! ## REQ status (per `.design/ferrotorch-train/metric.md`)
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 | SHIPPED | impl: `pub trait Metric: Send + Sync` at `ferrotorch-train/src/metric.rs:25-40`; consumer: `ferrotorch-train/src/learner.rs:67-68` (`train_metrics` / `val_metrics: Vec<Box<dyn Metric<Input = f64>>>`) + fit-loop calls at `learner.rs:250-251, 295-297, 332-337`. |
+//! | REQ-2 | SHIPPED | impl: `pub struct LossMetric` at `ferrotorch-train/src/metric.rs:59-101`; consumer: `Learner::with_train_metric` / `with_val_metric` at `ferrotorch-train/src/learner.rs:137, 143` accept any `Metric<Input = f64>` of which `LossMetric` is the canonical impl — the trait-dispatch path at `learner.rs:295-297, 332-334` is the production-consumer site. |
+//! | REQ-3 | NOT-STARTED | open prereq blocker #1494 — `Learner` only accepts `Box<dyn Metric<Input = f64>>` which structurally rejects `AccuracyMetric` (input = `(usize, usize)`); no production caller wires it end-to-end. |
+//! | REQ-4 | NOT-STARTED | open prereq blocker #1495 — same input-type mismatch as REQ-3 for `TopKAccuracy`. |
+//! | REQ-5 | NOT-STARTED | open prereq blocker #1496 — `RunningAverage` is `Metric<Input = f64>` and structurally compatible with `Learner`, but no production caller attaches it. |
+//! | REQ-6 | SHIPPED | impl: `Default` + `new()` on all 4 implementors at `ferrotorch-train/src/metric.rs:71-75, 139-143, 198-217, 281-287`; `Send + Sync` enforced by the trait bound at `:25`; consumer: `ferrotorch-train/src/learner.rs:67-68` field types require `Send + Sync` on the dyn trait object. |
 
 // ---------------------------------------------------------------------------
 // Metric trait

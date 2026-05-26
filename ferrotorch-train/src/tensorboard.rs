@@ -24,6 +24,18 @@
 //! writer.add_scalar("loss/train", 0.3, 1)?;
 //! writer.flush()?;
 //! ```
+//!
+//! ## REQ status (per `.design/ferrotorch-train/tensorboard.md`)
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 | SHIPPED | impl: `pub struct TensorBoardWriter` at `ferrotorch-train/src/tensorboard.rs:302-306`, `new` at `:321-346`; consumer: `ferrotorch-train/src/tensorboard.rs:451` (`TensorBoardCallback::new` constructs `TensorBoardWriter::new(log_dir)`). |
+//! | REQ-2 | SHIPPED | impl: `write_record` at `:248-276`; consumer: every `add_scalar` / `add_scalars` / `new` call invokes `write_record` at `:358, :386, :339`. |
+//! | REQ-3 | SHIPPED | impl: `crc32c` at `:67-74`, `masked_crc32c` at `:78-81`; consumer: `write_record` at `:251-252` invokes both on every record. |
+//! | REQ-4 | SHIPPED | impl: `add_scalar` at `:354-361`, `add_scalars` at `:371-389`; consumer: `TensorBoardCallback::on_epoch_end` at `:471, :482, :493, :505` and `on_batch_end` at `:533` invoke `add_scalar`. |
+//! | REQ-5 | SHIPPED | impl: `flush` at `:397-403`, `log_dir` at `:406-408`; consumer: `TensorBoardCallback::on_epoch_end` at `:517` calls `writer.flush()` after every epoch. |
+//! | REQ-6 | NOT-STARTED | open prereq blocker #1504 — `pub struct TensorBoardCallback` at `:437-439`, `Callback<T>` impl at `:458-543` are shipped on the public surface, but no production caller attaches a `TensorBoardCallback` to a real `Learner` today. |
+//! | REQ-7 | SHIPPED | impl: same `crc32c` at `:67-74`; consumer: every `write_record` call consumes the verified CRC32C; the RFC 3720 vectors at `:562-581` are the verification pin. |
 
 use std::collections::HashMap;
 use std::fs::{self, File};

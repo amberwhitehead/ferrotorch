@@ -13,6 +13,17 @@
 //! | [`EmaCallback`] | Maintain exponential moving average of model parameters |
 //!
 //! [CL-334] Add gradient checkpointing, autocast context, gradient clipping, and EMA callback
+//!
+//! ## REQ status (per `.design/ferrotorch-train/callback.md`)
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 | SHIPPED | impl: `pub trait Callback<T: Float>: Send + Sync` at `ferrotorch-train/src/callback.rs:30-53`; consumer: `ferrotorch-train/src/learner.rs:69` `callbacks: Vec<Box<dyn Callback<T>>>` + hook dispatch sites at `learner.rs:245-247, 262-265, 299-302, 362-364, 370, 376-378`. |
+//! | REQ-2 | SHIPPED | impl: `pub struct EarlyStopping` at `ferrotorch-train/src/callback.rs:74-113`, `Callback<T> for EarlyStopping` at `:115-139`; consumer: `Learner::with_callback` attachment surface + the dispatch path at `learner.rs:69, :362-370`. |
+//! | REQ-3 | SHIPPED | impl: `pub struct ProgressLogger` at `ferrotorch-train/src/callback.rs:152-174`, `Callback<T>` impl at `:176-220` emits `tracing::info!` events; consumer: same `Learner::with_callback` attachment + dispatch path. |
+//! | REQ-4 | NOT-STARTED | open prereq blocker #1497 — `init_from_params` / `update_from_params` at `ferrotorch-train/src/callback.rs:328, :350` take `&[Vec<T>]` but `Callback::on_batch_end` does not surface parameter tensors, so no production caller drives the EMA update end-to-end. |
+//! | REQ-5 | SHIPPED | impl: `Callback<T>::on_batch_end` no-op at `ferrotorch-train/src/callback.rs:366-378`; consumer: trait dispatch path through `ferrotorch-train/src/learner.rs:69` invokes the documented no-op on any attached `EmaCallback`. |
+//! | REQ-6 | SHIPPED | impl: `Send + Sync` trait bound at `ferrotorch-train/src/callback.rs:30` + per-impl test at `:618`; consumer: `learner.rs:69` `callbacks: Vec<Box<dyn Callback<T>>>` field type requires `Send + Sync` on the dyn trait object. |
 
 use ferrotorch_core::numeric_cast::cast;
 use ferrotorch_core::{FerrotorchResult, Float};

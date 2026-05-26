@@ -4032,7 +4032,9 @@ parity_ops = []
 [[route]]
 crate_pattern = "ferrotorch-train/src/amp.rs"
 upstream = [
-  "/home/doll/pytorch/torch/",
+  "/home/doll/pytorch/torch/amp/__init__.py",
+  "/home/doll/pytorch/torch/amp/autocast_mode.py",
+  "/home/doll/pytorch/torch/amp/grad_scaler.py",
 ]
 design = ".design/ferrotorch-train/amp.md"
 parity_ops = []
@@ -4041,7 +4043,7 @@ parity_ops = []
 [[route]]
 crate_pattern = "ferrotorch-train/src/callback.rs"
 upstream = [
-  "/home/doll/pytorch/torch/",
+  "/home/doll/pytorch/torch/optim/optimizer.py",
 ]
 design = ".design/ferrotorch-train/callback.md"
 parity_ops = []
@@ -4050,7 +4052,7 @@ parity_ops = []
 [[route]]
 crate_pattern = "ferrotorch-train/src/checkpoint.rs"
 upstream = [
-  "/home/doll/pytorch/torch/",
+  "/home/doll/pytorch/torch/utils/checkpoint.py",
 ]
 design = ".design/ferrotorch-train/checkpoint.md"
 parity_ops = []
@@ -4059,7 +4061,7 @@ parity_ops = []
 [[route]]
 crate_pattern = "ferrotorch-train/src/grad_utils.rs"
 upstream = [
-  "/home/doll/pytorch/torch/",
+  "/home/doll/pytorch/torch/nn/utils/clip_grad.py",
 ]
 design = ".design/ferrotorch-train/grad_utils.md"
 parity_ops = []
@@ -4068,7 +4070,7 @@ parity_ops = []
 [[route]]
 crate_pattern = "ferrotorch-train/src/history.rs"
 upstream = [
-  "/home/doll/pytorch/torch/",
+  "/home/doll/pytorch/torch/optim/optimizer.py",
 ]
 design = ".design/ferrotorch-train/history.md"
 parity_ops = []
@@ -4077,7 +4079,9 @@ parity_ops = []
 [[route]]
 crate_pattern = "ferrotorch-train/src/learner.rs"
 upstream = [
-  "/home/doll/pytorch/torch/",
+  "/home/doll/pytorch/torch/optim/optimizer.py",
+  "/home/doll/pytorch/torch/amp/__init__.py",
+  "/home/doll/pytorch/torch/utils/data/dataloader.py",
 ]
 design = ".design/ferrotorch-train/learner.md"
 parity_ops = []
@@ -4086,7 +4090,9 @@ parity_ops = []
 [[route]]
 crate_pattern = "ferrotorch-train/src/lib.rs"
 upstream = [
-  "/home/doll/pytorch/torch/",
+  "/home/doll/pytorch/torch/utils/data/dataloader.py",
+  "/home/doll/pytorch/torch/optim/optimizer.py",
+  "/home/doll/pytorch/torch/amp/__init__.py",
 ]
 design = ".design/ferrotorch-train/lib.md"
 parity_ops = []
@@ -4095,7 +4101,7 @@ parity_ops = []
 [[route]]
 crate_pattern = "ferrotorch-train/src/metric.rs"
 upstream = [
-  "/home/doll/pytorch/torch/",
+  "/home/doll/pytorch/torch/optim/optimizer.py",
 ]
 design = ".design/ferrotorch-train/metric.md"
 parity_ops = []
@@ -4104,7 +4110,8 @@ parity_ops = []
 [[route]]
 crate_pattern = "ferrotorch-train/src/tensorboard.rs"
 upstream = [
-  "/home/doll/pytorch/torch/",
+  "/home/doll/pytorch/torch/utils/tensorboard/writer.py",
+  "/home/doll/pytorch/torch/utils/tensorboard/summary.py",
 ]
 design = ".design/ferrotorch-train/tensorboard.md"
 parity_ops = []

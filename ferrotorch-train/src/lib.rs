@@ -56,6 +56,16 @@
 //! shape (marked `ignore` because the test environment has no model).
 //!
 //! [CL-334] Add gradient checkpointing, autocast context, gradient clipping, and EMA callback
+//!
+//!
+//! ## REQ status (per `.design/ferrotorch-train/lib.md`)
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 | SHIPPED | impl: 8 `pub mod` decls at `ferrotorch-train/src/lib.rs:168-175`; consumer: `ferrotorch-train/src/learner.rs:33-35` (`use crate::callback::Callback;` etc.), `ferrotorch-train/src/tensorboard.rs:38-39`, `ferrotorch-train/src/callback.rs:20`. |
+//! | REQ-2 | SHIPPED | impl: `pub use` ladder at `ferrotorch-train/src/lib.rs:177-183`; consumer: `ferrotorch-train/examples/multi_epoch_train_dump.rs` uses `Learner` / `LossFn` end-to-end. |
+//! | REQ-3 | SHIPPED | impl: `#![warn(clippy::all, clippy::pedantic)]` + `#![deny(rust_2018_idioms)]` at `ferrotorch-train/src/lib.rs:62-63` plus per-lint `#![allow]` rationale block at `:77-166`; consumer: every submodule inherits the baseline. |
+//! | REQ-4 | SHIPPED | impl: crate-root doctest at `ferrotorch-train/src/lib.rs:26-51` (no model/dataset dependency); consumer: `cargo test -p ferrotorch-train --doc` runs the doctest as the production caller. |
 
 // Lint baseline mirrors the workspace-standard pattern from
 // `ferrotorch-core`/`-distributed`/`-jit`/`-cubecl`/`-xpu`/`-nn` lib.rs.

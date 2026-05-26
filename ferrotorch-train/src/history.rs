@@ -3,6 +3,17 @@
 //! [`TrainingHistory`] accumulates per-epoch results ([`EpochResult`]) produced
 //! by the [`Learner`](crate::Learner) during a call to
 //! [`fit`](crate::Learner::fit).
+//!
+//! ## REQ status (per `.design/ferrotorch-train/history.md`)
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 | SHIPPED | impl: `pub struct EpochResult` with `#[non_exhaustive]` + 6 fields at `ferrotorch-train/src/history.rs:23-36`; consumer: `ferrotorch-train/src/learner.rs:352-359` constructs an `EpochResult` literal per epoch in `Learner::fit`. |
+//! | REQ-2 | NOT-STARTED | open prereq blocker #1498 — `Default` impl (`:38`) and `new_with_defaults` (`:55`) exist on the public surface but no production caller invokes them; `Learner::fit` uses the struct literal path. |
+//! | REQ-3 | SHIPPED | impl: `Display` for `EpochResult` at `ferrotorch-train/src/history.rs:72-83`; consumer: `ferrotorch-train/src/callback.rs:182` `tracing::info!(..., "{result}")`. |
+//! | REQ-4 | SHIPPED | impl: `pub struct EvalResult` at `ferrotorch-train/src/history.rs:97-102`, `Display` at `:117-125`; consumer: `ferrotorch-train/src/learner.rs:444` returns `Ok(EvalResult { loss, metrics })`. |
+//! | REQ-5 | SHIPPED | impl: `pub struct TrainingHistory` at `ferrotorch-train/src/history.rs:140-143` with 8 accessor methods at `:147-194`; consumer: `ferrotorch-train/src/learner.rs:237` (`TrainingHistory::new`) and `:366` (`history.push`); `ferrotorch-train/src/callback.rs:201-218` reads `best_*` accessors. |
+//! | REQ-6 | SHIPPED | impl: `partial_cmp(...).unwrap_or(Ordering::Equal)` NaN-safety at `ferrotorch-train/src/history.rs:173, :183`; consumer: `ferrotorch-train/src/callback.rs:203, :211` invokes `best_*` from `ProgressLogger::on_train_end`. |
 
 use std::collections::HashMap;
 use std::fmt;

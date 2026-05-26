@@ -55,6 +55,17 @@
 //!
 //! [CL-334] Add gradient checkpointing, autocast context, gradient clipping, and EMA callback
 //! [CL-1108] Pass 5.C.1: route `checkpoint_sequential` through the core checkpoint primitive
+//!
+//! ## REQ status (per `.design/ferrotorch-train/checkpoint.md`)
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 | SHIPPED | impl: `pub use ferrotorch_core::autograd::checkpoint::checkpoint;` at `ferrotorch-train/src/checkpoint.rs:61`; consumer: `ferrotorch-train/src/checkpoint.rs:140` invokes `checkpoint(move |x| { ... }, &current)` — same-file production consumer. |
+//! | REQ-2 | NOT-STARTED | open prereq blocker #1502 — `pub fn checkpoint_sequential` at `:102-153` is shipped but no in-tree caller invokes it outside the unit-test module. |
+//! | REQ-3 | NOT-STARTED | open prereq blocker #1502 — no-grad shortcut at `:126-134` is shipped but only exercised by `test_checkpoint_sequential_no_grad_skips_checkpoint`. |
+//! | REQ-4 | NOT-STARTED | open prereq blocker #1502 — `checkpoint(move |x| { ... }, &current)` at `:140-149` is the production-side wiring for the segment wrap, reachable only through `checkpoint_sequential` which has no production caller. |
+//! | REQ-5 | NOT-STARTED | open prereq blocker #1502 — the `move` closure at `:141-147` captures `Vec<Arc<dyn Module<T>>>` satisfying `'static + Send + Sync`, but the only caller of the surrounding `checkpoint_sequential` is the unit test. |
+//! | REQ-6 | NOT-STARTED | open prereq blocker #1502 — recomputation-on-backward behavior is pinned by `test_checkpoint_sequential_real_checkpoint_grad_fn` at `:336-407`, but no production training loop drives the recomputation. |
 
 use std::sync::Arc;
 

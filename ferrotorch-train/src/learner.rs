@@ -18,6 +18,19 @@
 //!
 //! let history = learner.fit(&train_loader, Some(&val_loader), 100)?;
 //! ```
+//!
+//! ## REQ status (per `.design/ferrotorch-train/learner.md`)
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 | SHIPPED | impl: `pub type LossFn<T>` at `ferrotorch-train/src/learner.rs:45-46`; consumer: `Learner::new(..., loss_fn: LossFn<T>)` at `:87`, field invocation `(self.loss_fn)(&output, &target)?` at `:269, :420`. |
+//! | REQ-2 | SHIPPED | impl: `pub struct Learner<M, T: Float>` at `ferrotorch-train/src/learner.rs:57-77` with 11 fields; consumer: every method in `impl<M: Module<T>, T: Float> Learner<M, T>` at `:79-446` reads/writes these fields. |
+//! | REQ-3 | SHIPPED | impl: `Learner::new` at `:87`, `with_scheduler` at `:105`, `with_grad_scaler` at `:122`, `with_train_metric` at `:137`, `with_val_metric` at `:143`, `with_callback` at `:149`, `with_checkpointing` at `:158`; consumer: `ferrotorch-train/examples/multi_epoch_train_dump.rs` uses the builder chain end-to-end. |
+//! | REQ-4 | SHIPPED | impl: `fit` at `ferrotorch-train/src/learner.rs:227-381`; consumer: `ferrotorch-train/examples/multi_epoch_train_dump.rs` invokes `Learner::fit` on a 3-layer MLP + Adam for the real-artifact trajectory dump. |
+//! | REQ-5 | SHIPPED | impl: `evaluate` at `:394-404`, `evaluate_iter` at `:407-445` (eval mode + `no_grad` wrap); consumer: `Learner::fit` calls `self.evaluate_iter(val_fn)?` at `:323`. |
+//! | REQ-6 | NOT-STARTED | open prereq blocker #1499 — `load_checkpoint` impl at `:195-202` exists but the only call site is unit tests; no out-of-tree resume-from-disk caller. |
+//! | REQ-7 | NOT-STARTED | open prereq blocker #1500 — AMP fit-loop branch at `:272-281` is implemented but no production caller attaches a `GradScaler` to a real fit; needs a CUDA-resident-model example. |
+//! | REQ-8 | SHIPPED | impl: `model()` at `:164`, `model_mut()` at `:169`, `epoch()` at `:174`, `step()` at `:179`, `skipped_steps()` at `:129`; consumer: `ferrotorch-train/examples/multi_epoch_train_dump.rs` reads `learner.model()` to snapshot parameter state per epoch. |
 
 use std::path::PathBuf;
 use std::time::Instant;

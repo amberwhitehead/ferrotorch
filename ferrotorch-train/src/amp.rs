@@ -44,6 +44,17 @@
 //! ```
 //!
 //! [CL-334] Add gradient checkpointing, autocast context, gradient clipping, and EMA callback
+//!
+//! ## REQ status (per `.design/ferrotorch-train/amp.md`)
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 | SHIPPED | impl: `pub use ferrotorch_core::autograd::autocast::{AutocastDtype, autocast};` etc. at `ferrotorch-train/src/amp.rs:49-54`; consumer: `ferrotorch-train/src/amp.rs:89, 105` constructs `AmpContext` and invokes `autocast(self.dtype, f)` — same-file production consumer. |
+//! | REQ-2 | SHIPPED | impl: `pub use ferrotorch_optim::{GradScaler, GradScalerConfig, GradScalerState};` at `:55`; consumer: `ferrotorch-train/src/amp.rs:79, 92, 162, 167` uses the names as struct field type, constructor arg, return type, and parameter type; independently consumed by `ferrotorch-train/src/learner.rs:29, :122`. |
+//! | REQ-3 | NOT-STARTED | open prereq blocker #1501 — `pub struct AmpContext<T: Float>` at `ferrotorch-train/src/amp.rs:75-80` and `new` at `:89-94` are shipped on the public surface but no production caller constructs an `AmpContext`; `Learner` accepts `GradScaler` directly via `with_grad_scaler`. |
+//! | REQ-4 | NOT-STARTED | open prereq blocker #1501 — `autocast_forward` at `ferrotorch-train/src/amp.rs:101-106` is shipped but unused outside unit tests. |
+//! | REQ-5 | NOT-STARTED | open prereq blocker #1501 — `backward_step` at `ferrotorch-train/src/amp.rs:119-134` is shipped but unconsumed by production code; the parallel implementation at `ferrotorch-train/src/learner.rs:272-281` does not invoke `AmpContext::backward_step`. |
+//! | REQ-6 | NOT-STARTED | open prereq blocker #1501 — all 7 accessors at `ferrotorch-train/src/amp.rs:137-169` are shipped but unconsumed by production code (same root cause as REQ-3..5). |
 
 // Re-export the core autocast primitives.
 pub use ferrotorch_core::autograd::autocast::{AutocastDtype, autocast};

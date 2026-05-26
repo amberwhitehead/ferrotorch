@@ -19,6 +19,17 @@
 //!
 //! [CL-334] Add gradient checkpointing, autocast context, gradient clipping, and EMA callback
 //! [CL-1104] Deduplicate train's clip_grad_* with ferrotorch-nn's device-dispatching versions
+//!
+//! ## REQ status (per `.design/ferrotorch-train/grad_utils.md`)
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 | SHIPPED | impl: `pub use ferrotorch_nn::utils::{clip_grad_norm_, clip_grad_value_};` at `ferrotorch-train/src/grad_utils.rs:23`; consumer: `ferrotorch-train/src/lib.rs:179` `pub use grad_utils::{clip_grad_norm_, clip_grad_value_};` re-exports at the crate root. |
+//! | REQ-2 | SHIPPED | impl: structural — `pub use` IS the deduplication; consumer: `ferrotorch-train/src/grad_utils.rs:277, :295` use `std::ptr::fn_addr_eq` to assert the symbol identity matches `ferrotorch_nn::clip_grad_norm_` / `clip_grad_value_`; production usage at `lib.rs:179` consumes the deduplicated re-export. |
+//! | REQ-3 | SHIPPED | impl: behavioral contract owned by `ferrotorch_nn::utils::clip_grad_norm_`; consumer: `ferrotorch-train/src/lib.rs:179` re-export ladder. |
+//! | REQ-4 | SHIPPED | impl: `clip_grad_value_` re-exported from `ferrotorch_nn::utils`; consumer: same `lib.rs:179` ladder. |
+//! | REQ-5 | SHIPPED | impl: no-grad handling owned by `ferrotorch_nn::utils`; consumer: same `lib.rs:179` ladder; behavior pinned by `ferrotorch-train/src/grad_utils.rs:166`. |
+//! | REQ-6 | SHIPPED | impl: device dispatch owned by `ferrotorch_nn::utils`; consumer: same `lib.rs:179` ladder. |
 
 pub use ferrotorch_nn::utils::{clip_grad_norm_, clip_grad_value_};
 
