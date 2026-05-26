@@ -51,11 +51,12 @@ and bilinear resampling. Mirrors
      `(row + dy_field[row, col], col + dx_field[row, col])` via
      `bilinear_sample`.
 
-- REQ-6: NOT-STARTED — upstream's `interpolation` (NEAREST/BILINEAR),
-  `fill` (out-of-bounds fill value), and tuple-valued
-  `alpha`/`sigma` (per-axis displacement) parameters are not
-  implemented. ferrotorch's version is BILINEAR-only with
-  clamp-to-edge OOB and scalar alpha/sigma. Blocker #1521.
+- REQ-6: SHIPPED — `with_interpolation(InterpolationMode)` adds a
+  nearest-neighbor sampler alongside the existing bilinear path;
+  `with_fill(f64)` swaps clamp-to-edge for constant-fill on out-of-bounds
+  samples; `new_range((alpha_lo, alpha_hi), (sigma_lo, sigma_hi))` adds
+  tuple-form sampling per call (the scalar `new(alpha, sigma)` still
+  works, mapped to the degenerate `(α, α)` / `(σ, σ)` range).
 
 ## Acceptance Criteria
 
@@ -80,7 +81,11 @@ and bilinear resampling. Mirrors
   (verified at `elastic_transform.rs:281`).
 - [x] AC-11: `bilinear_sample` out-of-bounds clamps to nearest corner
   (verified at `elastic_transform.rs:289`).
-- [ ] AC-12: NOT-STARTED — interpolation/fill/tuple params.
+- [x] AC-12: interpolation/fill/tuple `alpha`/`sigma` params (verified
+  by `test_elastic_new_range_samples_within_band`,
+  `test_elastic_with_nearest_yields_only_input_values`,
+  `test_elastic_with_fill_replaces_oob_samples`, and
+  `test_elastic_new_range_validates_alpha` in `elastic_transform.rs`).
   Blocker #1521.
 
 ## Architecture
@@ -213,4 +218,4 @@ Expected: `10 passed`.
 | REQ-3 | SHIPPED | impl: `fn gaussian_kernel_1d` at `elastic_transform.rs:58-72` and `fn gaussian_filter_2d` at `elastic_transform.rs:76-112`; non-test consumer: `fn apply` in this same file calls `gaussian_filter_2d(&dy_field, h, w, self.sigma)` and `(&dx_field, ...)` at `elastic_transform.rs:169-170`. |
 | REQ-4 | SHIPPED | impl: `fn bilinear_sample(data, h, w, y, x) -> f64` with clamp-to-edge at `elastic_transform.rs:117-137`; non-test consumer: `fn apply` in this same file calls `bilinear_sample(&ch_data, h, w, src_y, src_x)` at `elastic_transform.rs:187`. |
 | REQ-5 | SHIPPED | impl: `impl<T: Float> Transform<T> for ElasticTransform<T>` with shape/dim checks, random-field gen, Gaussian smooth, per-channel bilinear sample at `elastic_transform.rs:139-195`; non-test consumer: any `Box<dyn Transform<T>>` slot — composes into augmentation `Compose` pipelines via the `mod.rs:22` re-export. |
-| REQ-6 | NOT-STARTED | open prereq blocker #1521 — `interpolation` (NEAREST/BILINEAR), `fill` (OOB fill), and tuple `alpha`/`sigma` parameters from `torchvision/transforms/v2/_geometry.py:999-1090` not implemented; ferrotorch is BILINEAR-only, clamp-to-edge OOB, scalar alpha/sigma. |
+| REQ-6 | SHIPPED | impl: `with_interpolation` / `with_fill` builders + `new_range` tuple constructor + nearest/bilinear+fill dispatch at `ferrotorch-vision/src/transforms/elastic_transform.rs:37-100,200-260`; non-test consumer: `pub use elastic_transform::ElasticTransform;` at `mod.rs:30` — augmentation pipelines call `ElasticTransform::new_range((0.0, 60.0), (3.0, 7.0))?.with_interpolation(InterpolationMode::Nearest).with_fill(0.0)` per upstream `_geometry.py:999-1090`. |

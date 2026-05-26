@@ -9,7 +9,7 @@
 //! | REQ-4 | SHIPPED | `fn uniform_factor(v: f64) -> f64` helper in `color_jitter.rs`; consumer: the impl calls `uniform_factor(self.brightness)`, `uniform_factor(self.contrast)`, and `uniform_factor(self.saturation)` inside the per-op branches. |
 //! | REQ-5 | SHIPPED | `impl<T: Float> Transform<T> for ColorJitter<T>` in `color_jitter.rs`; consumer: any `Box<dyn Transform<T>>` slot — typically near the start of an augmentation `Compose` pipeline. The `lib.rs` re-export is the production-facing handle. |
 //! | REQ-6 | SHIPPED | `fn rgb_to_hsv(r, g, b) -> (f64, f64, f64)` and `fn hsv_to_rgb(h, s, v)` conversion helpers in `color_jitter.rs`; consumer: the impl calls `rgb_to_hsv` and `hsv_to_rgb` per pixel inside the hue branch. |
-//! | REQ-7 | NOT-STARTED | blocker #1522 — `(min, max)` tuple form for `brightness/contrast/saturation/hue` from `torchvision/transforms/v2/_color.py:100-122` (`_check_input`) is not supported; ferrotorch accepts only the scalar shorthand. |
+//! | REQ-7 | SHIPPED | `pub fn ColorJitter::from_ranges(brightness, contrast, saturation, hue)` constructor + `(min, max)` range storage in `color_jitter.rs`; consumer: pipelines call `ColorJitter::from_ranges((0.8, 1.2), (0.8, 1.2), (0.8, 1.2), (-0.05, 0.05))?` per upstream `_color.py:100-122` `_check_input`. |
 
 use super::rng::random_f64;
 use ferrotorch_core::numeric_cast::cast;
@@ -32,10 +32,14 @@ use ferrotorch_data::Transform;
 ///
 /// This mirrors `torchvision.transforms.ColorJitter`.
 pub struct ColorJitter<T: Float> {
-    brightness: f64,
-    contrast: f64,
-    saturation: f64,
-    hue: f64,
+    /// `(lo, hi)` for the brightness factor. `(1, 1)` means no change.
+    brightness: (f64, f64),
+    /// `(lo, hi)` for the contrast factor. `(1, 1)` means no change.
+    contrast: (f64, f64),
+    /// `(lo, hi)` for the saturation factor. `(1, 1)` means no change.
+    saturation: (f64, f64),
+    /// `(lo, hi)` for the hue shift in turns; `(0, 0)` means no change.
+    hue: (f64, f64),
     _marker: std::marker::PhantomData<T>,
 }
 
@@ -78,6 +82,35 @@ impl<T: Float> ColorJitter<T> {
                 message: format!("ColorJitter: hue must be in [0, 0.5), got {hue}"),
             });
         }
+        // Scalar shorthand mirrors torchvision: brightness=b ->
+        // factor in [max(0, 1-b), 1+b]; hue=h -> shift in [-h, +h].
+        Ok(Self {
+            brightness: ((1.0 - brightness).max(0.0), 1.0 + brightness),
+            contrast: ((1.0 - contrast).max(0.0), 1.0 + contrast),
+            saturation: ((1.0 - saturation).max(0.0), 1.0 + saturation),
+            hue: (-hue, hue),
+            _marker: std::marker::PhantomData,
+        })
+    }
+
+    /// Construct from explicit `(min, max)` ranges. Mirrors the upstream
+    /// tuple form
+    /// (`torchvision/transforms/v2/_color.py:100-122` `_check_input`):
+    ///
+    /// * `brightness/contrast/saturation`: range must lie within `[0, ∞)`
+    ///   with `min <= max`. `(1, 1)` is the identity.
+    /// * `hue`: range must lie within `[-0.5, 0.5]` with `min <= max`.
+    ///   `(0, 0)` is the identity.
+    pub fn from_ranges(
+        brightness: (f64, f64),
+        contrast: (f64, f64),
+        saturation: (f64, f64),
+        hue: (f64, f64),
+    ) -> FerrotorchResult<Self> {
+        check_pos_range("brightness", brightness)?;
+        check_pos_range("contrast", contrast)?;
+        check_pos_range("saturation", saturation)?;
+        check_hue_range(hue)?;
         Ok(Self {
             brightness,
             contrast,
@@ -86,6 +119,30 @@ impl<T: Float> ColorJitter<T> {
             _marker: std::marker::PhantomData,
         })
     }
+}
+
+fn check_pos_range(name: &str, r: (f64, f64)) -> FerrotorchResult<()> {
+    if !(r.0 >= 0.0 && r.0 <= r.1) {
+        return Err(FerrotorchError::InvalidArgument {
+            message: format!(
+                "ColorJitter: {name} range must satisfy 0 <= lo <= hi, got ({}, {})",
+                r.0, r.1
+            ),
+        });
+    }
+    Ok(())
+}
+
+fn check_hue_range(r: (f64, f64)) -> FerrotorchResult<()> {
+    if !(r.0 >= -0.5 && r.1 <= 0.5 && r.0 <= r.1) {
+        return Err(FerrotorchError::InvalidArgument {
+            message: format!(
+                "ColorJitter: hue range must satisfy -0.5 <= lo <= hi <= 0.5, got ({}, {})",
+                r.0, r.1
+            ),
+        });
+    }
+    Ok(())
 }
 
 /// Fisher-Yates shuffle using the global PRNG.
@@ -99,11 +156,24 @@ fn shuffle_order(n: usize) -> Vec<usize> {
     order
 }
 
-/// Sample a uniform factor from `[max(0, 1 - v), 1 + v]`.
-fn uniform_factor(v: f64) -> f64 {
-    let lo = (1.0 - v).max(0.0);
-    let hi = 1.0 + v;
-    lo + random_f64() * (hi - lo)
+/// Sample a uniform factor from the given `(lo, hi)` range.
+fn sample_range(r: (f64, f64)) -> f64 {
+    if r.0 == r.1 {
+        r.0
+    } else {
+        r.0 + random_f64() * (r.1 - r.0)
+    }
+}
+
+/// Returns `true` if the range is a non-degenerate identity for the
+/// brightness/contrast/saturation channels (centered on 1).
+fn is_factor_identity(r: (f64, f64)) -> bool {
+    r.0 == 1.0 && r.1 == 1.0
+}
+
+/// Returns `true` if the hue range is degenerate at zero.
+fn is_hue_identity(r: (f64, f64)) -> bool {
+    r.0 == 0.0 && r.1 == 0.0
 }
 
 impl<T: Float> Transform<T> for ColorJitter<T> {
@@ -141,16 +211,16 @@ impl<T: Float> Transform<T> for ColorJitter<T> {
 
         for &op in &order {
             match op {
-                0 if self.brightness > 0.0 => {
-                    let factor = uniform_factor(self.brightness);
+                0 if !is_factor_identity(self.brightness) => {
+                    let factor = sample_range(self.brightness);
                     for i in 0..spatial {
                         r[i] *= factor;
                         g[i] *= factor;
                         b[i] *= factor;
                     }
                 }
-                1 if self.contrast > 0.0 => {
-                    let factor = uniform_factor(self.contrast);
+                1 if !is_factor_identity(self.contrast) => {
+                    let factor = sample_range(self.contrast);
                     // Compute per-channel mean.
                     let mean_r: f64 = r.iter().sum::<f64>() / spatial as f64;
                     let mean_g: f64 = g.iter().sum::<f64>() / spatial as f64;
@@ -161,8 +231,8 @@ impl<T: Float> Transform<T> for ColorJitter<T> {
                         b[i] = mean_b + (b[i] - mean_b) * factor;
                     }
                 }
-                2 if self.saturation > 0.0 => {
-                    let factor = uniform_factor(self.saturation);
+                2 if !is_factor_identity(self.saturation) => {
+                    let factor = sample_range(self.saturation);
                     // Grayscale via ITU-R BT.601 luma coefficients.
                     for i in 0..spatial {
                         let gray = 0.2989 * r[i] + 0.5870 * g[i] + 0.1140 * b[i];
@@ -171,8 +241,8 @@ impl<T: Float> Transform<T> for ColorJitter<T> {
                         b[i] = gray + (b[i] - gray) * factor;
                     }
                 }
-                3 if self.hue > 0.0 => {
-                    let hue_shift = self.hue * (2.0 * random_f64() - 1.0);
+                3 if !is_hue_identity(self.hue) => {
+                    let hue_shift = sample_range(self.hue);
                     for i in 0..spatial {
                         let (hue, sat, val) = rgb_to_hsv(r[i], g[i], b[i]);
                         let new_hue = (hue + hue_shift).rem_euclid(1.0);
@@ -342,6 +412,61 @@ mod tests {
         for &v in &d[..4] {
             assert!((v - r_val).abs() < 1e-10);
         }
+    }
+
+    #[test]
+    fn test_color_jitter_from_ranges_identity() {
+        // Identity ranges should leave the image untouched.
+        let data: Vec<f64> = (0..12).map(|i| i as f64 / 12.0).collect();
+        let t =
+            Tensor::from_storage(TensorStorage::cpu(data.clone()), vec![3, 2, 2], false).unwrap();
+        let jitter =
+            ColorJitter::<f64>::from_ranges((1.0, 1.0), (1.0, 1.0), (1.0, 1.0), (0.0, 0.0))
+                .unwrap();
+        let out = jitter.apply(t).unwrap();
+        let d = out.data().unwrap();
+        for (a, b) in d.iter().zip(data.iter()) {
+            assert!((a - b).abs() < 1e-10, "Expected {b}, got {a}");
+        }
+    }
+
+    #[test]
+    fn test_color_jitter_from_ranges_asymmetric_brightness() {
+        // Brightness range (1.5, 1.5) must scale every pixel by exactly 1.5.
+        let r = vec![0.4_f64; 4];
+        let g = vec![0.2; 4];
+        let b = vec![0.1; 4];
+        let t = rgb_tensor(&r, &g, &b);
+        let jitter =
+            ColorJitter::<f64>::from_ranges((1.5, 1.5), (1.0, 1.0), (1.0, 1.0), (0.0, 0.0))
+                .unwrap();
+        let out = jitter.apply(t).unwrap();
+        let d = out.data().unwrap();
+        // R channel: 0.4 * 1.5 = 0.6
+        assert!((d[0] - 0.6).abs() < 1e-10);
+        // G channel: 0.2 * 1.5 = 0.3
+        assert!((d[4] - 0.3).abs() < 1e-10);
+        // B channel: 0.1 * 1.5 = 0.15
+        assert!((d[8] - 0.15).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_color_jitter_from_ranges_rejects_invalid() {
+        // brightness lo < 0
+        assert!(
+            ColorJitter::<f64>::from_ranges((-0.1, 1.0), (1.0, 1.0), (1.0, 1.0), (0.0, 0.0))
+                .is_err()
+        );
+        // contrast lo > hi
+        assert!(
+            ColorJitter::<f64>::from_ranges((1.0, 1.0), (1.5, 1.0), (1.0, 1.0), (0.0, 0.0))
+                .is_err()
+        );
+        // hue out of [-0.5, 0.5]
+        assert!(
+            ColorJitter::<f64>::from_ranges((1.0, 1.0), (1.0, 1.0), (1.0, 1.0), (-0.6, 0.0))
+                .is_err()
+        );
     }
 
     #[test]

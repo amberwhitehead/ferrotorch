@@ -44,10 +44,12 @@ NOT-STARTED here).
   `RandomCrop.get_params` returns `(top, left, height, width)` exactly
   this way).
 
-- REQ-5: NOT-STARTED — the upstream `padding`, `pad_if_needed`,
-  `fill`, `padding_mode` parameters are not implemented. Cropping a
-  smaller-than-target input returns `Err` here; upstream would pad and
-  then crop. Blocker #1513.
+- REQ-5: SHIPPED — `with_padding(usize)`, `with_padding_hw(pad_h, pad_w)`,
+  `with_fill(f64)`, and `with_pad_if_needed(bool)` builders in
+  `random_crop.rs` configure constant-fill padding before the random
+  crop is taken. Mirrors upstream `padding`, `pad_if_needed`, `fill`
+  (with the constant-fill `padding_mode='constant'` arm). Reflect/edge
+  padding modes are still a follow-up.
 
 ## Acceptance Criteria
 
@@ -61,8 +63,11 @@ NOT-STARTED here).
   `random_crop.rs:106`).
 - [x] AC-5: When input is smaller than crop, `apply` returns `Err`
   (verified by `test_random_crop_too_small` at `random_crop.rs:118`).
-- [ ] AC-6: NOT-STARTED — `padding`, `pad_if_needed`, `fill`,
-  `padding_mode` support. Blocker #1513.
+- [x] AC-6: `padding`, `pad_if_needed`, and constant-`fill` support
+  (verified by `test_random_crop_with_padding_shape`,
+  `test_random_crop_pad_if_needed_handles_small_input`, and
+  `test_random_crop_with_fill_value_appears_in_border` in
+  `random_crop.rs`). `padding_mode` reflect/edge still NOT-STARTED.
 
 ## Architecture
 
@@ -162,4 +167,4 @@ Expected: `3 passed`.
 | REQ-2 | SHIPPED | impl: `pub fn RandomCrop::new(crop_h: usize, crop_w: usize) -> Self` at `random_crop.rs:20-26`; non-test consumer: reachable via `mod.rs:25` re-export. |
 | REQ-3 | SHIPPED | impl: `pub fn RandomCrop::square(size: usize) -> Self` at `random_crop.rs:29-31`; non-test consumer: reachable via `mod.rs:25` re-export; called by user code wanting the canonical `RandomCrop(224)` square-crop ergonomics. |
 | REQ-4 | SHIPPED | impl: `impl<T: Float> Transform<T> for RandomCrop<T>` with shape + bounds + random-corner + region-copy at `random_crop.rs:34-87`; non-test consumer: any `Box<dyn Transform<T>>` slot accepts this type — the `mod.rs:25` re-export makes it composable into `Compose<T>` pipelines. |
-| REQ-5 | NOT-STARTED | open prereq blocker #1513 — `padding` / `pad_if_needed` / `fill` / `padding_mode` parameters from `torchvision/transforms/v2/_geometry.py:759-913` are not implemented. ferrotorch returns `Err` when input is smaller than crop; upstream would pad. |
+| REQ-5 | SHIPPED | impl: `with_padding / with_padding_hw / with_fill / with_pad_if_needed` builders and pad-then-crop dispatch at `ferrotorch-vision/src/transforms/random_crop.rs:42-95,98-201`; non-test production consumer: `pub use random_crop::RandomCrop;` at `ferrotorch-vision/src/transforms/mod.rs:33` — augmentation pipelines compose `RandomCrop::new(h, w).with_padding(4).with_fill(0.0)` into `Compose<T>` for the canonical CIFAR-10 preset. |

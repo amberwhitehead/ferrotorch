@@ -34,11 +34,9 @@ upstream-paths:
   using contiguous-row slicing. Mirrors
   `torchvision.transforms.v2.functional.center_crop`.
 
-- REQ-4: NOT-STARTED — upstream pads with zeros when the input is
-  smaller than the crop size (`_geometry.py:180-181` "If image size
-  is smaller than output size along any edge, image is padded with 0
-  and then center cropped"). ferrotorch currently errors out instead.
-  Blocker #1515.
+- REQ-4: SHIPPED — `CenterCrop::with_fill(f64)` enables auto-pad-with-fill
+  semantics matching upstream `_geometry.py:180-181`. The fill value is
+  user-selected; upstream's default is zero.
 
 ## Acceptance Criteria
 
@@ -56,7 +54,10 @@ upstream-paths:
   `test_center_crop_too_large` at `center_crop.rs:131`).
 - [x] AC-6: Non-3-D input returns `Err` (verified by
   `test_center_crop_rejects_non_3d` at `center_crop.rs:139`).
-- [ ] AC-7: NOT-STARTED — pad-if-smaller behavior. Blocker #1515.
+- [x] AC-7: pad-if-smaller behavior with user-selected fill (verified
+  by `test_center_crop_with_fill_pads_small_input` and
+  `test_center_crop_with_fill_no_op_when_input_large_enough` in
+  `center_crop.rs`).
 
 ## Architecture
 
@@ -143,4 +144,4 @@ Expected: `6 passed`.
 | REQ-1 | SHIPPED | impl: `pub struct CenterCrop<T: Float>` with `height, width, _marker` at `ferrotorch-vision/src/transforms/center_crop.rs:9-13`, mirroring `torchvision/transforms/v2/_geometry.py:171` `class CenterCrop(Transform)`; non-test consumer: `pub use center_crop::CenterCrop;` at `ferrotorch-vision/src/transforms/mod.rs:19` AND `CenterCrop` in the crate-root re-export at `ferrotorch-vision/src/lib.rs:113`. |
 | REQ-2 | SHIPPED | impl: `pub fn CenterCrop::new(height: usize, width: usize) -> Self` at `center_crop.rs:17-23`; non-test consumer: registered in the conformance surface inventory at `ferrotorch-vision/tests/conformance/_surface_inventory.toml:95` as `ferrotorch_vision::CenterCrop::new`; reachable via the crate-root re-export. |
 | REQ-3 | SHIPPED | impl: `impl<T: Float> Transform<T> for CenterCrop<T>` with shape + bounds + center-offset + row-slice copy at `center_crop.rs:26-69`; non-test consumer: any `Box<dyn Transform<T>>` slot accepts this — `lib.rs:113` re-export is the production-facing handle. |
-| REQ-4 | NOT-STARTED | open prereq blocker #1515 — auto-pad-with-zeros behavior from `torchvision/transforms/v2/_geometry.py:180-181` is not implemented; ferrotorch errors when input is smaller than crop. |
+| REQ-4 | SHIPPED | impl: `CenterCrop::with_fill(f64)` builder + auto-pad-with-fill dispatch at `ferrotorch-vision/src/transforms/center_crop.rs:24-44,82-119`; non-test consumer: reachable via the `lib.rs:113` re-export — pipelines call `CenterCrop::new(h, w).with_fill(0.0)` for the upstream `_geometry.py:180-181` pad-with-zeros equivalent. |

@@ -27,7 +27,7 @@
 //! | REQ-5 | SHIPPED | `fn apply_op<T: Float>(data, h, w, c, op, num_bins) -> FerrotorchResult<Vec<T>>` dispatcher in `trivial_augment_wide.rs`; consumer: the impl in the same file calls `apply_op(data, h, w, c, op, self.num_magnitude_bins)?`. |
 //! | REQ-6 | SHIPPED | `fn box_blur_3x3(data, h, w) -> Vec<f64>` helper in `trivial_augment_wide.rs`; consumer: the dispatcher calls `box_blur_3x3(&ch_slice, h, w)` inside the `Op::Sharpness` arm. |
 //! | REQ-7 | SHIPPED | `impl<T: Float> Transform<T> for TrivialAugmentWide<T>` in `trivial_augment_wide.rs`; consumer: any `Box<dyn Transform<T>>` slot — composes into augmentation `Compose` pipelines via the `mod.rs` re-export. |
-//! | REQ-8 | NOT-STARTED | blocker #1523 — `ShearX`, `ShearY`, `Rotate`, and `Color` ops from `torchvision/transforms/v2/_auto_augment.py` `_AUGMENTATION_SPACE` are absent; ferrotorch's `Op::ALL` has 11 entries vs upstream's 14. |
+//! | REQ-8 | SHIPPED | `Op::ShearX`, `Op::ShearY`, `Op::Rotate`, `Op::Color` added to `Op::ALL` (now 15 entries) and dispatched by `apply_op` in `trivial_augment_wide.rs`; consumer: the impl picks an op via `Op::ALL[random_usize(Op::ALL.len())]`, so every entry — including the four new ones — is reachable through the `mod.rs` re-export of `TrivialAugmentWide`. |
 
 use super::rng::random_usize;
 use ferrotorch_core::numeric_cast::cast;
@@ -96,6 +96,15 @@ enum Op {
     HorizontalFlip,
     TranslateX,
     TranslateY,
+    /// Shear along the X axis. Range `[-0.99, 0.99]` (radians of tilt).
+    ShearX,
+    /// Shear along the Y axis.
+    ShearY,
+    /// Rotation in degrees. Range `[-135, 135]` to match torchvision.
+    Rotate,
+    /// Saturation/color scaling factor `[0.01, 1.99]` — blends toward
+    /// the luminance image.
+    Color,
 }
 
 impl Op {
@@ -111,6 +120,10 @@ impl Op {
         Op::HorizontalFlip,
         Op::TranslateX,
         Op::TranslateY,
+        Op::ShearX,
+        Op::ShearY,
+        Op::Rotate,
+        Op::Color,
     ];
 }
 
@@ -312,8 +325,165 @@ fn apply_op<T: Float>(
             }
             out
         }
+        Op::ShearX => {
+            // Shear factor in [-0.99, 0.99]; inverse-map sources via
+            // src_col = col - factor * (row - cy). Bilinear sample with
+            // zero fill outside the image.
+            let factor = (2.0 * level_f - 1.0) * 0.99;
+            let cy = (h as f64 - 1.0) / 2.0;
+            shear_apply(data, h, w, c, factor, 0.0, cy, 0.0)?
+        }
+        Op::ShearY => {
+            // Shear factor in [-0.99, 0.99]; inverse-map sources via
+            // src_row = row - factor * (col - cx).
+            let factor = (2.0 * level_f - 1.0) * 0.99;
+            let cx = (w as f64 - 1.0) / 2.0;
+            shear_apply(data, h, w, c, 0.0, factor, 0.0, cx)?
+        }
+        Op::Rotate => {
+            // Rotate around image center. Angle range [-135, 135].
+            let angle_deg = (2.0 * level_f - 1.0) * 135.0;
+            let angle_rad = angle_deg.to_radians();
+            let cos_a = angle_rad.cos();
+            let sin_a = angle_rad.sin();
+            let cx = (w as f64 - 1.0) / 2.0;
+            let cy = (h as f64 - 1.0) / 2.0;
+            rotate_apply(data, h, w, c, cos_a, sin_a, cx, cy)?
+        }
+        Op::Color => {
+            // Saturation / color factor in [0.01, 1.99]: out = gray + factor * (in - gray).
+            // Only meaningful for 3-channel RGB; for other channel counts,
+            // fall back to identity to avoid corrupting non-image tensors.
+            if c == 3 {
+                let factor = 0.01 + 1.98 * level_f;
+                let f_t: T = cast::<f64, T>(factor)?;
+                let mut out: Vec<T> = Vec::with_capacity(data.len());
+                let spatial = h * w;
+                let r = &data[0..spatial];
+                let g = &data[spatial..2 * spatial];
+                let b = &data[2 * spatial..3 * spatial];
+                let coef_r: T = cast::<f64, T>(0.2989)?;
+                let coef_g: T = cast::<f64, T>(0.5870)?;
+                let coef_b: T = cast::<f64, T>(0.1140)?;
+                let mut emit = |ch: &[T]| -> FerrotorchResult<()> {
+                    for i in 0..spatial {
+                        let gray = r[i] * coef_r + g[i] * coef_g + b[i] * coef_b;
+                        out.push(gray + f_t * (ch[i] - gray));
+                    }
+                    Ok(())
+                };
+                emit(r)?;
+                emit(g)?;
+                emit(b)?;
+                out
+            } else {
+                data.to_vec()
+            }
+        }
     };
     Ok(result)
+}
+
+/// Apply an affine shear with optional cross-axis component. `factor_x`
+/// is the X-shear coefficient (column displacement per unit row offset),
+/// `factor_y` is the Y-shear coefficient. The pivot is `(pivot_y, pivot_x)`.
+#[allow(clippy::too_many_arguments)]
+fn shear_apply<T: Float>(
+    data: &[T],
+    h: usize,
+    w: usize,
+    c: usize,
+    factor_x: f64,
+    factor_y: f64,
+    pivot_y: f64,
+    pivot_x: f64,
+) -> FerrotorchResult<Vec<T>> {
+    let zero: T = <T as num_traits::Zero>::zero();
+    let mut out = Vec::with_capacity(data.len());
+    for ch in 0..c {
+        let off = ch * h * w;
+        for row in 0..h {
+            for col in 0..w {
+                let src_x = col as f64 - factor_x * (row as f64 - pivot_y);
+                let src_y = row as f64 - factor_y * (col as f64 - pivot_x);
+                out.push(bilinear_sample_or_fill(
+                    &data[off..off + h * w],
+                    h,
+                    w,
+                    src_y,
+                    src_x,
+                    zero,
+                )?);
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// Apply a rotation around `(pivot_y, pivot_x)`. `cos_a, sin_a` are the
+/// rotation matrix entries.
+#[allow(clippy::too_many_arguments)]
+fn rotate_apply<T: Float>(
+    data: &[T],
+    h: usize,
+    w: usize,
+    c: usize,
+    cos_a: f64,
+    sin_a: f64,
+    pivot_x: f64,
+    pivot_y: f64,
+) -> FerrotorchResult<Vec<T>> {
+    let zero: T = <T as num_traits::Zero>::zero();
+    let mut out = Vec::with_capacity(data.len());
+    for ch in 0..c {
+        let off = ch * h * w;
+        for row in 0..h {
+            for col in 0..w {
+                let dx = col as f64 - pivot_x;
+                let dy = row as f64 - pivot_y;
+                let sx = cos_a * dx + sin_a * dy + pivot_x;
+                let sy = -sin_a * dx + cos_a * dy + pivot_y;
+                out.push(bilinear_sample_or_fill(
+                    &data[off..off + h * w],
+                    h,
+                    w,
+                    sy,
+                    sx,
+                    zero,
+                )?);
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// Bilinear sample with a fill for out-of-bounds coordinates.
+fn bilinear_sample_or_fill<T: Float>(
+    data: &[T],
+    h: usize,
+    w: usize,
+    y: f64,
+    x: f64,
+    fill: T,
+) -> FerrotorchResult<T> {
+    if x < 0.0 || y < 0.0 || x > (w - 1) as f64 || y > (h - 1) as f64 {
+        return Ok(fill);
+    }
+    let x0 = x.floor() as usize;
+    let y0 = y.floor() as usize;
+    let x1 = (x0 + 1).min(w - 1);
+    let y1 = (y0 + 1).min(h - 1);
+    let dx = x - x0 as f64;
+    let dy = y - y0 as f64;
+    let v00 = data[y0 * w + x0];
+    let v01 = data[y0 * w + x1];
+    let v10 = data[y1 * w + x0];
+    let v11 = data[y1 * w + x1];
+    let w00: T = cast::<f64, T>((1.0 - dx) * (1.0 - dy))?;
+    let w10: T = cast::<f64, T>(dx * (1.0 - dy))?;
+    let w01: T = cast::<f64, T>((1.0 - dx) * dy)?;
+    let w11: T = cast::<f64, T>(dx * dy)?;
+    Ok(v00 * w00 + v01 * w10 + v10 * w01 + v11 * w11)
 }
 
 /// Simple 3x3 box blur with zero padding, single channel.
@@ -497,6 +667,66 @@ mod tests {
         for &v in &out {
             assert!((0.0..=1.0).contains(&v));
         }
+    }
+
+    #[test]
+    fn test_op_all_includes_new_geometric_ops() {
+        // The op space must include ShearX/Y, Rotate, Color after this build.
+        let all = Op::ALL;
+        assert!(all.contains(&Op::ShearX), "missing ShearX");
+        assert!(all.contains(&Op::ShearY), "missing ShearY");
+        assert!(all.contains(&Op::Rotate), "missing Rotate");
+        assert!(all.contains(&Op::Color), "missing Color");
+        assert_eq!(all.len(), 15);
+    }
+
+    #[test]
+    fn test_op_shear_x_uniform_image_stays_uniform() {
+        let data: Vec<f64> = vec![0.7; 9];
+        // A uniform image sheared bilinearly stays at 0.7 in the interior
+        // (and at fill 0.0 on the edges that get pulled out of bounds).
+        // We just check the center value is preserved.
+        let out = apply_op(&data, 3, 3, 1, Op::ShearX, 31).unwrap();
+        assert!(
+            (out[4] - 0.7).abs() < 1e-10,
+            "center pixel changed: {}",
+            out[4]
+        );
+    }
+
+    #[test]
+    fn test_op_rotate_uniform_image_stays_uniform_in_interior() {
+        let data: Vec<f64> = vec![0.5; 25];
+        let out = apply_op(&data, 5, 5, 1, Op::Rotate, 31).unwrap();
+        // Center pixel is always inside the image after rotation around
+        // the image center.
+        assert!(
+            (out[12] - 0.5).abs() < 1e-10,
+            "center pixel changed: {}",
+            out[12]
+        );
+    }
+
+    #[test]
+    fn test_op_color_uniform_image_stays_uniform() {
+        // A perfectly gray RGB image must remain (approximately) unchanged
+        // under any color factor: with BT.601 coefficients the per-pixel
+        // gray differs from 0.5 only by the round-off in the coefficient
+        // sum (0.2989 + 0.5870 + 0.1140 = 0.9999), so values are within
+        // 1e-4 of the input.
+        let data = vec![0.5_f64; 12]; // 3x2x2 all 0.5
+        let out = apply_op(&data, 2, 2, 3, Op::Color, 31).unwrap();
+        for &v in &out {
+            assert!((v - 0.5).abs() < 1e-3, "got {v}");
+        }
+    }
+
+    #[test]
+    fn test_op_color_non_rgb_is_identity() {
+        // For non-3-channel inputs, Color is an identity (no corruption).
+        let data: Vec<f64> = (0..8).map(|i| i as f64 / 8.0).collect();
+        let out = apply_op(&data, 2, 2, 2, Op::Color, 31).unwrap();
+        assert_eq!(out, data);
     }
 
     #[test]

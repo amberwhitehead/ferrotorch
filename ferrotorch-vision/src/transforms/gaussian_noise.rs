@@ -12,7 +12,7 @@
 //! | REQ-2 | SHIPPED | `pub fn GaussianNoise::new(mean: f64, std: f64) -> FerrotorchResult<Self>` constructor with `std >= 0` validation in `gaussian_noise.rs`; consumer: reachable through the `mod.rs` re-export. |
 //! | REQ-3 | SHIPPED | `impl<T: Float> Transform<T> for GaussianNoise<T>` with shape check, degenerate-std shortcut, and per-element noise loop in `gaussian_noise.rs`; consumer: any `Box<dyn Transform<T>>` slot — typically inserted into a robustness-training `Compose` pipeline. |
 //! | REQ-4 | SHIPPED | `fn standard_normal_sample() -> f64` Box-Muller helper in `gaussian_noise.rs`; consumer: the impl in the same file calls `self.std * standard_normal_sample()` inside the per-element noise loop. |
-//! | REQ-5 | NOT-STARTED | blocker #1516 — the `clip: bool = True` parameter from `torchvision/transforms/v2/_misc.py:241-243` is not implemented; noisy outputs may exit the `[0, 1]` range. |
+//! | REQ-5 | SHIPPED | `with_clip(bool)` builder + per-element `[0, 1]` clamp in `apply` in `gaussian_noise.rs`; consumer: reachable through the `mod.rs` re-export — robustness pipelines call `GaussianNoise::new(0.0, 0.1)?.with_clip(true)` to bound noisy outputs into `[0, 1]` per upstream `_misc.py:241-243`. |
 
 use super::rng::random_f64;
 use ferrotorch_core::numeric_cast::cast;
@@ -27,6 +27,7 @@ use ferrotorch_data::Transform;
 pub struct GaussianNoise<T: Float> {
     mean: f64,
     std: f64,
+    clip: bool,
     _marker: std::marker::PhantomData<T>,
 }
 
@@ -47,8 +48,18 @@ impl<T: Float> GaussianNoise<T> {
         Ok(Self {
             mean,
             std,
+            clip: false,
             _marker: std::marker::PhantomData,
         })
+    }
+
+    /// When `true`, clamps every output element into `[0, 1]` after the
+    /// noise sample is added. Mirrors upstream
+    /// `torchvision.transforms.v2.GaussianNoise(clip=True)`
+    /// (`_misc.py:241-243`).
+    pub fn with_clip(mut self, clip: bool) -> Self {
+        self.clip = clip;
+        self
     }
 }
 
@@ -72,12 +83,26 @@ impl<T: Float> Transform<T> for GaussianNoise<T> {
                 ),
             });
         }
+        let zero_t: T = cast::<f64, T>(0.0)?;
+        let one_t: T = cast::<f64, T>(1.0)?;
+        let clip_val = |v: T| -> T {
+            if !self.clip {
+                v
+            } else if v < zero_t {
+                zero_t
+            } else if v > one_t {
+                one_t
+            } else {
+                v
+            }
+        };
+
         if self.std == 0.0 {
             // Degenerate: adding N(mean, 0) is just a constant shift.
             // Return a new tensor with the shift baked in.
             let data = input.data()?;
             let mean_t: T = cast::<f64, T>(self.mean)?;
-            let out: Vec<T> = data.iter().map(|&v| v + mean_t).collect();
+            let out: Vec<T> = data.iter().map(|&v| clip_val(v + mean_t)).collect();
             return Tensor::from_storage(TensorStorage::cpu(out), shape, false);
         }
 
@@ -86,7 +111,7 @@ impl<T: Float> Transform<T> for GaussianNoise<T> {
         for &v in data {
             let noise = self.mean + self.std * standard_normal_sample();
             let noise_t: T = cast::<f64, T>(noise)?;
-            out.push(v + noise_t);
+            out.push(clip_val(v + noise_t));
         }
         Tensor::from_storage(TensorStorage::cpu(out), shape, false)
     }
@@ -161,6 +186,38 @@ mod tests {
             Tensor::from_storage(TensorStorage::cpu(vec![1.0, 2.0]), vec![2], false).unwrap();
         let noise = GaussianNoise::<f32>::new(0.0, 0.1).unwrap();
         assert!(noise.apply(t).is_err());
+    }
+
+    #[test]
+    fn test_gaussian_noise_clip_bounds_output_to_unit_interval() {
+        // With large std (relative to the input range) and clip enabled,
+        // every output must fall inside [0, 1].
+        vision_manual_seed(7);
+        let t: Tensor<f64> =
+            Tensor::from_storage(TensorStorage::cpu(vec![0.5; 1024]), vec![1, 32, 32], false)
+                .unwrap();
+        let noise = GaussianNoise::<f64>::new(0.0, 1.0).unwrap().with_clip(true);
+        let out = noise.apply(t).unwrap();
+        for &v in out.data().unwrap() {
+            assert!((0.0..=1.0).contains(&v), "expected v in [0, 1], got {v}");
+        }
+    }
+
+    #[test]
+    fn test_gaussian_noise_clip_off_by_default_can_exceed_range() {
+        // Without `with_clip(true)`, outputs may exit [0, 1].
+        vision_manual_seed(7);
+        let t: Tensor<f64> =
+            Tensor::from_storage(TensorStorage::cpu(vec![0.5; 1024]), vec![1, 32, 32], false)
+                .unwrap();
+        let noise = GaussianNoise::<f64>::new(0.0, 1.0).unwrap();
+        let out = noise.apply(t).unwrap();
+        let exceeds = out
+            .data()
+            .unwrap()
+            .iter()
+            .any(|&v| !(0.0..=1.0).contains(&v));
+        assert!(exceeds, "expected some out-of-range values without clip");
     }
 
     #[test]

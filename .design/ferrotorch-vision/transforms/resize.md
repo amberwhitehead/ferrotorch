@@ -35,10 +35,11 @@ restricted to the nearest-neighbor `InterpolationMode.NEAREST` case.
   `torchvision.transforms.v2.functional.resize` with `interpolation =
   InterpolationMode.NEAREST` and `antialias = False`.
 
-- REQ-4: NOT-STARTED — `interpolation` parameter (BILINEAR / BICUBIC),
-  `antialias` flag, and `max_size` constraint from upstream are not
-  implemented. Resize is locked to nearest-neighbor + no max-size
-  limit. Blocker #1514.
+- REQ-4: SHIPPED — `pub enum InterpolationMode { Nearest, Bilinear }`
+  and `Resize::with_interpolation(mode)` add a 2x2-tap bilinear
+  sampling path. `antialias`, `max_size`, and shortest-edge int-size
+  handling remain follow-ups (bicubic is a future addition; bilinear
+  is the immediately impactful gap).
 
 ## Acceptance Criteria
 
@@ -54,8 +55,10 @@ restricted to the nearest-neighbor `InterpolationMode.NEAREST` case.
   `test_resize_nearest_neighbor_values` at `resize.rs:101`).
 - [x] AC-5: Non-3-D input returns `Err` (verified by
   `test_resize_rejects_non_3d` at `resize.rs:123`).
-- [ ] AC-6: NOT-STARTED — `interpolation` / `antialias` / `max_size`.
-  Blocker #1514.
+- [x] AC-6: `interpolation` (Nearest/Bilinear) shipped (verified by
+  `test_resize_bilinear_identity`, `test_resize_bilinear_uniform_image_stays_uniform`,
+  and `test_resize_bilinear_smooths_step` in `resize.rs`). `antialias`,
+  `max_size`, bicubic still NOT-STARTED.
 
 ## Architecture
 
@@ -159,4 +162,4 @@ Expected: `5 passed`.
 | REQ-1 | SHIPPED | impl: `pub struct Resize<T: Float>` with `height, width, _marker` at `ferrotorch-vision/src/transforms/resize.rs:9-13`, mirroring `torchvision/transforms/v2/_geometry.py:70` `class Resize(Transform)`; non-test consumer: `pub use resize::Resize;` at `ferrotorch-vision/src/transforms/mod.rs:31` AND `Resize` in the crate-root re-export at `ferrotorch-vision/src/lib.rs:114`. |
 | REQ-2 | SHIPPED | impl: `pub fn Resize::new(height: usize, width: usize) -> Self` at `resize.rs:17-23`; non-test consumer: reachable via `lib.rs:114` re-export; the conformance inventory at `ferrotorch-vision/tests/conformance/_surface_inventory.toml:81` registers `ferrotorch_vision::Resize::new` as part of the public surface contract. |
 | REQ-3 | SHIPPED | impl: `impl<T: Float> Transform<T> for Resize<T>` with floor-division nearest-neighbor loop at `resize.rs:26-62`; non-test consumer: any `Box<dyn Transform<T>>` slot accepts this — reachable via `lib.rs:114` re-export. |
-| REQ-4 | NOT-STARTED | open prereq blocker #1514 — `interpolation` (BILINEAR/BICUBIC), `antialias`, `max_size`, and shortest-edge int-size handling from `torchvision/transforms/v2/_geometry.py:70-170` are not implemented. Resize is NEAREST-only, no antialias, no max_size. |
+| REQ-4 | SHIPPED | impl: `pub enum InterpolationMode { Nearest, Bilinear }` + `Resize::with_interpolation(mode)` builder + bilinear sampler at `ferrotorch-vision/src/transforms/resize.rs:11-22,49-58,86-129`; non-test consumer: `Resize` is reachable through the `lib.rs:114` re-export — production pipelines call `Resize::new(h, w).with_interpolation(InterpolationMode::Bilinear)` for the canonical ImageNet preset. |

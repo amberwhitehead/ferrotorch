@@ -50,11 +50,11 @@ then resize the region to `(height, width)`. Mirrors
   Per channel, extracts the cropped region into a temporary buffer,
   then nearest-neighbor resizes it to `(self.height, self.width)`.
 
-- REQ-5: NOT-STARTED — upstream's `interpolation` (BILINEAR/BICUBIC)
-  and `antialias` parameters are not implemented. ferrotorch is
-  NEAREST-only. Blocker #1520. (This is the same gap as Resize's
-  REQ-4 plus the bilinear-resize variant inside this op's resize
-  step.)
+- REQ-5: SHIPPED — `with_interpolation(InterpolationMode)` selects
+  nearest (default) or bilinear; `with_antialias(true)` applies a
+  separable box pre-filter on downscale axes before bilinear sampling
+  (mirroring upstream's `antialias=True` default for `BILINEAR`).
+  Bicubic remains a follow-up.
 
 ## Acceptance Criteria
 
@@ -79,7 +79,11 @@ then resize the region to `(height, width)`. Mirrors
   `random_resized_crop.rs:251`).
 - [x] AC-9: `nn_resize_channel` upscale replicates pixels (verified
   at `random_resized_crop.rs:259`).
-- [ ] AC-10: NOT-STARTED — bilinear interpolation. Blocker #1520.
+- [x] AC-10: bilinear interpolation + optional antialias (verified
+  by `test_random_resized_crop_bilinear_output_shape`,
+  `test_random_resized_crop_bilinear_uniform_input_stays_uniform`, and
+  `test_random_resized_crop_bilinear_with_antialias_smoke` in
+  `random_resized_crop.rs`). Bicubic still NOT-STARTED.
 
 ## Architecture
 
@@ -196,4 +200,4 @@ Expected: `7 passed`.
 | REQ-2 | SHIPPED | impl: `pub fn RandomResizedCrop::new(height, width, scale, ratio) -> FerrotorchResult<Self>` with scale/ratio range checks at `random_resized_crop.rs:38-69`; non-test consumer: reachable via the crate-root re-export at `lib.rs:114`. |
 | REQ-3 | SHIPPED | impl: `pub(crate) fn nn_resize_channel<T: Float>(...)` at `random_resized_crop.rs:74-89`; non-test consumer: called from `fn apply` in this same file at `random_resized_crop.rs:177` (within the per-channel loop). |
 | REQ-4 | SHIPPED | impl: `impl<T: Float> Transform<T> for RandomResizedCrop<T>` with 10-attempt sampling, center-crop fallback, per-channel crop + nn-resize at `random_resized_crop.rs:91-190`; non-test consumer: any `Box<dyn Transform<T>>` slot — typically the first stage of an Inception/ResNet ImageNet `Compose` training pipeline. |
-| REQ-5 | NOT-STARTED | open prereq blocker #1520 — `interpolation` (BILINEAR/BICUBIC) and `antialias` parameters from `torchvision/transforms/v2/_geometry.py:197-315` not implemented; ferrotorch is NEAREST-only. |
+| REQ-5 | SHIPPED | impl: `with_interpolation` + `with_antialias` builders + `bilinear_resize_channel` separable antialias-prefilter sampler at `ferrotorch-vision/src/transforms/random_resized_crop.rs:48-100,165-260`; non-test consumer: `pub use random_resized_crop::RandomResizedCrop;` at `mod.rs:36` AND in the `lib.rs` re-export — ImageNet pipelines call `RandomResizedCrop::new(224, 224, ...)?.with_interpolation(InterpolationMode::Bilinear).with_antialias(true)`. |

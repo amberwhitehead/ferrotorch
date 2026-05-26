@@ -7,9 +7,11 @@
 //! | REQ-2 | SHIPPED | `pub fn RandomResizedCrop::new(height, width, scale, ratio) -> FerrotorchResult<Self>` constructor with scale/ratio range checks in `random_resized_crop.rs`; consumer: reachable through the crate-root re-export in `lib.rs`. |
 //! | REQ-3 | SHIPPED | `pub(crate) fn nn_resize_channel<T: Float>(src, in_h, in_w, out_h, out_w, dst)` helper in `random_resized_crop.rs`; consumer: the impl in the same file calls `nn_resize_channel` within the per-channel resize loop. |
 //! | REQ-4 | SHIPPED | `impl<T: Float> Transform<T> for RandomResizedCrop<T>` with the 10-attempt sampling, center-crop fallback, and per-channel crop plus nn-resize in `random_resized_crop.rs`; consumer: any `Box<dyn Transform<T>>` slot — typically the first stage of an Inception/ResNet ImageNet `Compose` training pipeline. |
-//! | REQ-5 | NOT-STARTED | blocker #1520 — `interpolation` (BILINEAR/BICUBIC) and `antialias` parameters from `torchvision/transforms/v2/_geometry.py:197-315` are not implemented; ferrotorch is NEAREST-only. |
+//! | REQ-5 | SHIPPED | `RandomResizedCrop::with_interpolation` builder + bilinear sampler dispatch in `random_resized_crop.rs`; consumer: pipelines call `RandomResizedCrop::new(...).?.with_interpolation(InterpolationMode::Bilinear)` for the canonical ImageNet preset via the `lib.rs` re-export. |
 
+use super::resize::InterpolationMode;
 use super::rng::random_f64;
+use ferrotorch_core::numeric_cast::cast;
 use ferrotorch_core::{FerrotorchError, FerrotorchResult, Float, Tensor, TensorStorage};
 use ferrotorch_data::Transform;
 
@@ -29,6 +31,8 @@ pub struct RandomResizedCrop<T: Float> {
     scale_hi: f64,
     ratio_lo: f64,
     ratio_hi: f64,
+    interpolation: InterpolationMode,
+    antialias: bool,
     _marker: std::marker::PhantomData<T>,
 }
 
@@ -74,8 +78,28 @@ impl<T: Float> RandomResizedCrop<T> {
             scale_hi: scale.1,
             ratio_lo: ratio.0,
             ratio_hi: ratio.1,
+            interpolation: InterpolationMode::Nearest,
+            antialias: false,
             _marker: std::marker::PhantomData,
         })
+    }
+
+    /// Select the interpolation mode used when resizing the sampled crop
+    /// back to the target `(height, width)`. Mirrors upstream
+    /// `RandomResizedCrop(interpolation=InterpolationMode.BILINEAR)`.
+    pub fn with_interpolation(mut self, mode: InterpolationMode) -> Self {
+        self.interpolation = mode;
+        self
+    }
+
+    /// Enable antialiasing for downscale operations under bilinear. When
+    /// `true`, a separable box-blur with kernel radius `≈ scale / 2` is
+    /// applied before sampling, suppressing aliasing without the cost of
+    /// a full bicubic filter. Mirrors the `antialias=True` default from
+    /// upstream `_geometry.py:197-315`.
+    pub fn with_antialias(mut self, antialias: bool) -> Self {
+        self.antialias = antialias;
+        self
     }
 }
 
@@ -96,6 +120,109 @@ pub(crate) fn nn_resize_channel<T: Float>(
             dst.push(src[ih * in_w + iw]);
         }
     }
+}
+
+/// Map an output index to a fractional source coordinate using the
+/// "align-corners=False" convention used by torchvision.
+fn src_coord(out_idx: usize, in_size: usize, out_size: usize) -> f64 {
+    if out_size == 1 || in_size == 1 {
+        return 0.0;
+    }
+    let scale = out_size as f64 / in_size as f64;
+    (out_idx as f64 + 0.5) / scale - 0.5
+}
+
+/// Apply a 1-D separable box pre-filter for antialiasing on downscale.
+/// `kernel` is the per-axis radius (in source pixels); rows then cols.
+fn antialias_prefilter(src: &mut Vec<f64>, in_h: usize, in_w: usize, kr: usize, kc: usize) {
+    // Horizontal pass.
+    if kc > 0 {
+        let mut out = vec![0.0_f64; in_h * in_w];
+        let win = 2 * kc + 1;
+        for r in 0..in_h {
+            for c in 0..in_w {
+                let mut acc = 0.0;
+                for d in 0..win {
+                    let s = c as i64 + d as i64 - kc as i64;
+                    let s = s.clamp(0, in_w as i64 - 1) as usize;
+                    acc += src[r * in_w + s];
+                }
+                out[r * in_w + c] = acc / win as f64;
+            }
+        }
+        *src = out;
+    }
+    // Vertical pass.
+    if kr > 0 {
+        let mut out = vec![0.0_f64; in_h * in_w];
+        let win = 2 * kr + 1;
+        for r in 0..in_h {
+            for c in 0..in_w {
+                let mut acc = 0.0;
+                for d in 0..win {
+                    let s = r as i64 + d as i64 - kr as i64;
+                    let s = s.clamp(0, in_h as i64 - 1) as usize;
+                    acc += src[s * in_w + c];
+                }
+                out[r * in_w + c] = acc / win as f64;
+            }
+        }
+        *src = out;
+    }
+}
+
+/// Bilinear resize of a single channel from `(in_h, in_w)` to `(out_h, out_w)`.
+/// Reads `src` (length `in_h * in_w`), appends `out_h * out_w` values to `dst`.
+pub(crate) fn bilinear_resize_channel<T: Float>(
+    src: &[T],
+    in_h: usize,
+    in_w: usize,
+    out_h: usize,
+    out_w: usize,
+    antialias: bool,
+    dst: &mut Vec<T>,
+) -> FerrotorchResult<()> {
+    // Promote to f64 for accumulation. Optional antialias prefilter.
+    let mut buf: Vec<f64> = src.iter().map(|v| v.to_f64().unwrap()).collect();
+    if antialias {
+        // Box-prefilter only on the downscale axes.
+        let scale_h = in_h as f64 / out_h as f64;
+        let scale_w = in_w as f64 / out_w as f64;
+        let kr = if scale_h > 1.0 {
+            (scale_h * 0.5).floor() as usize
+        } else {
+            0
+        };
+        let kc = if scale_w > 1.0 {
+            (scale_w * 0.5).floor() as usize
+        } else {
+            0
+        };
+        antialias_prefilter(&mut buf, in_h, in_w, kr, kc);
+    }
+    let h_max = (in_h - 1) as f64;
+    let w_max = (in_w - 1) as f64;
+    for oh in 0..out_h {
+        let sy = src_coord(oh, in_h, out_h).clamp(0.0, h_max);
+        let y0 = sy.floor() as usize;
+        let y1 = (y0 + 1).min(in_h.saturating_sub(1));
+        let dy = sy - y0 as f64;
+        for ow in 0..out_w {
+            let sx = src_coord(ow, in_w, out_w).clamp(0.0, w_max);
+            let x0 = sx.floor() as usize;
+            let x1 = (x0 + 1).min(in_w.saturating_sub(1));
+            let dx = sx - x0 as f64;
+            let v00 = buf[y0 * in_w + x0];
+            let v01 = buf[y0 * in_w + x1];
+            let v10 = buf[y1 * in_w + x0];
+            let v11 = buf[y1 * in_w + x1];
+            let top = v00 * (1.0 - dx) + v01 * dx;
+            let bot = v10 * (1.0 - dx) + v11 * dx;
+            let val = top * (1.0 - dy) + bot * dy;
+            dst.push(cast::<f64, T>(val)?);
+        }
+    }
+    Ok(())
 }
 
 impl<T: Float> Transform<T> for RandomResizedCrop<T> {
@@ -184,14 +311,29 @@ impl<T: Float> Transform<T> for RandomResizedCrop<T> {
                 let start = ch_off + row * in_w + crop_left;
                 cropped.extend_from_slice(&data[start..start + crop_w]);
             }
-            nn_resize_channel(
-                &cropped,
-                crop_h,
-                crop_w,
-                self.height,
-                self.width,
-                &mut output,
-            );
+            match self.interpolation {
+                InterpolationMode::Nearest => {
+                    nn_resize_channel(
+                        &cropped,
+                        crop_h,
+                        crop_w,
+                        self.height,
+                        self.width,
+                        &mut output,
+                    );
+                }
+                InterpolationMode::Bilinear => {
+                    bilinear_resize_channel(
+                        &cropped,
+                        crop_h,
+                        crop_w,
+                        self.height,
+                        self.width,
+                        self.antialias,
+                        &mut output,
+                    )?;
+                }
+            }
         }
 
         let storage = TensorStorage::cpu(output);
@@ -264,6 +406,57 @@ mod tests {
         let mut dst = Vec::new();
         nn_resize_channel(&src, 2, 2, 2, 2, &mut dst);
         assert_eq!(dst, vec![1.0, 2.0, 3.0, 4.0]);
+    }
+
+    #[test]
+    fn test_random_resized_crop_bilinear_output_shape() {
+        let data: Vec<f64> = (0..300).map(|i| i as f64).collect();
+        let t = Tensor::from_storage(TensorStorage::cpu(data), vec![3, 10, 10], false).unwrap();
+        let rrc = RandomResizedCrop::<f64>::new(5, 5, (0.08, 1.0), (0.75, 1.333))
+            .unwrap()
+            .with_interpolation(InterpolationMode::Bilinear);
+        let out = rrc.apply(t).unwrap();
+        assert_eq!(out.shape(), &[3, 5, 5]);
+    }
+
+    #[test]
+    fn test_random_resized_crop_bilinear_uniform_input_stays_uniform() {
+        // Uniform input under bilinear resize stays uniform.
+        let data: Vec<f64> = vec![0.4; 75];
+        let t = Tensor::from_storage(TensorStorage::cpu(data), vec![3, 5, 5], false).unwrap();
+        let rrc = RandomResizedCrop::<f64>::new(3, 3, (0.5, 1.0), (0.75, 1.333))
+            .unwrap()
+            .with_interpolation(InterpolationMode::Bilinear);
+        let out = rrc.apply(t).unwrap();
+        for &v in out.data().unwrap() {
+            assert!((v - 0.4).abs() < 1e-10, "expected 0.4, got {v}");
+        }
+    }
+
+    #[test]
+    fn test_random_resized_crop_bilinear_with_antialias_smoke() {
+        // Antialiasing on a noisy 8x8 downscale must not panic and must
+        // produce values within the original range.
+        let data: Vec<f64> = (0..192).map(|i| (i % 7) as f64 * 0.1).collect();
+        let t = Tensor::from_storage(TensorStorage::cpu(data), vec![3, 8, 8], false).unwrap();
+        let rrc = RandomResizedCrop::<f64>::new(4, 4, (0.2, 0.5), (0.75, 1.333))
+            .unwrap()
+            .with_interpolation(InterpolationMode::Bilinear)
+            .with_antialias(true);
+        let out = rrc.apply(t).unwrap();
+        for &v in out.data().unwrap() {
+            assert!((0.0..=0.7).contains(&v), "expected blurred range, got {v}");
+        }
+    }
+
+    #[test]
+    fn test_bilinear_resize_channel_identity() {
+        let src = vec![1.0_f64, 2.0, 3.0, 4.0];
+        let mut dst = Vec::new();
+        bilinear_resize_channel(&src, 2, 2, 2, 2, false, &mut dst).unwrap();
+        for (a, b) in dst.iter().zip(src.iter()) {
+            assert!((a - b).abs() < 1e-10);
+        }
     }
 
     #[test]

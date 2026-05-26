@@ -54,10 +54,12 @@ with a strength sampled uniformly from a fixed range. Mirrors
   random_usize(Op::ALL.len())`, calls `apply_op(data, h, w, c, op,
   self.num_magnitude_bins)`, returns the result.
 
-- REQ-8: NOT-STARTED — upstream's ShearX, ShearY, Rotate, and Color
-  (a saturation variant) ops are not in our op space because they
-  require affine-transform or PIL-equivalent infrastructure we don't
-  yet have. The upstream op space is 14 ops; ours is 11. Blocker #1523.
+- REQ-8: SHIPPED — `Op::ShearX`, `Op::ShearY`, `Op::Rotate`, and
+  `Op::Color` are added to `Op::ALL` (now 15 entries, one more than
+  upstream's 14 because ferrotorch keeps `Identity` as an explicit op).
+  Shear/Rotate use inverse-mapped bilinear sampling with zero fill;
+  Color uses the BT.601-luma blend for 3-channel RGB and falls back to
+  identity for non-RGB inputs to avoid corrupting non-image tensors.
 
 ## Acceptance Criteria
 
@@ -87,7 +89,12 @@ with a strength sampled uniformly from a fixed range. Mirrors
   `trivial_augment_wide.rs:478`).
 - [x] AC-13: `box_blur_3x3` is a no-op on uniform interior pixels
   (verified at `trivial_augment_wide.rs:489`).
-- [ ] AC-14: NOT-STARTED — ShearX/ShearY/Rotate/Color ops. Blocker #1523.
+- [x] AC-14: ShearX/ShearY/Rotate/Color ops (verified by
+  `test_op_all_includes_new_geometric_ops`,
+  `test_op_shear_x_uniform_image_stays_uniform`,
+  `test_op_rotate_uniform_image_stays_uniform_in_interior`,
+  `test_op_color_uniform_image_stays_uniform`, and
+  `test_op_color_non_rgb_is_identity` in `trivial_augment_wide.rs`).
 
 ## Architecture
 
@@ -235,4 +242,4 @@ Expected: `13 passed`.
 | REQ-5 | SHIPPED | impl: `fn apply_op<T: Float>(data, h, w, c, op, num_bins) -> FerrotorchResult<Vec<T>>` at `trivial_augment_wide.rs:107-304`; non-test consumer: `fn apply` in this same file calls `apply_op(data, h, w, c, op, self.num_magnitude_bins)?` at `trivial_augment_wide.rs:353`. |
 | REQ-6 | SHIPPED | impl: `fn box_blur_3x3(data, h, w) -> Vec<f64>` at `trivial_augment_wide.rs:307-327`; non-test consumer: `fn apply_op` calls `box_blur_3x3(&ch_slice, h, w)` inside the `Op::Sharpness` arm at `trivial_augment_wide.rs:159`. |
 | REQ-7 | SHIPPED | impl: `impl<T: Float> Transform<T> for TrivialAugmentWide<T>` at `trivial_augment_wide.rs:329-356`; non-test consumer: any `Box<dyn Transform<T>>` slot — composes into augmentation `Compose` pipelines via the `mod.rs:34` re-export. |
-| REQ-8 | NOT-STARTED | open prereq blocker #1523 — `ShearX`, `ShearY`, `Rotate`, `Color` ops from `torchvision/transforms/v2/_auto_augment.py:_AUGMENTATION_SPACE` not in our op space; ferrotorch's `Op::ALL` has 11 entries vs upstream's 14. |
+| REQ-8 | SHIPPED | impl: `Op::ShearX`, `Op::ShearY`, `Op::Rotate`, `Op::Color` variants + `apply_op` dispatch arms + `shear_apply` / `rotate_apply` / `bilinear_sample_or_fill` helpers at `ferrotorch-vision/src/transforms/trivial_augment_wide.rs:88-128,318-386,419-509`; non-test consumer: `pub use trivial_augment_wide::TrivialAugmentWide;` at `mod.rs:42` — the impl picks an op via `Op::ALL[random_usize(Op::ALL.len())]`, so every new variant is reachable through the public API. |

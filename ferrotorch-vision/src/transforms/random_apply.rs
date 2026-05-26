@@ -9,7 +9,7 @@
 //! | REQ-4 | SHIPPED | `pub struct RandomChoice<T: Float>` with `transforms: Vec<Box<dyn Transform<T>>>` in `random_apply.rs`, mirroring `torchvision/transforms/v2/_container.py:119` `class RandomChoice`; consumer: same `pub use` in `mod.rs` and `RandomChoice` in the crate-root re-export in `lib.rs`. |
 //! | REQ-5 | SHIPPED | `pub fn RandomChoice::new(transforms) -> FerrotorchResult<Self>` constructor with non-empty check in `random_apply.rs`; consumer: registered in `tests/conformance/_surface_inventory.toml` as `ferrotorch_vision::RandomChoice::new`; reachable through the crate-root re-export. |
 //! | REQ-6 | SHIPPED | `impl<T: Float> Transform<T> for RandomChoice<T>` with uniform index sampling and `.min(n - 1)` clamp in `random_apply.rs`; consumer: any `Box<dyn Transform<T>>` slot via the crate-root re-export. |
-//! | REQ-7 | NOT-STARTED | blocker #1517 — optional `p: list[float]` weight vector for `RandomChoice` from `torchvision/transforms/v2/_container.py:138-141` is not implemented; ferrotorch's `RandomChoice` is uniform-only. |
+//! | REQ-7 | SHIPPED | `RandomChoice::with_p(Vec<f64>)` builder + cumulative-weight sampling in `apply` in `random_apply.rs`; consumer: reachable through the crate-root re-export — augmentation pipelines call `RandomChoice::new(ts)?.with_p(vec![0.5, 0.25, 0.25])?` to express a weighted choice per upstream `_container.py:138-141`. |
 
 use super::rng::random_f64;
 use ferrotorch_core::{FerrotorchError, FerrotorchResult, Float, Tensor};
@@ -66,6 +66,13 @@ impl<T: Float> Transform<T> for RandomApply<T> {
 /// This mirrors `torchvision.transforms.RandomChoice`.
 pub struct RandomChoice<T: Float> {
     transforms: Vec<Box<dyn Transform<T>>>,
+    /// Optional per-transform weights, parallel to `transforms`. When `None`,
+    /// selection is uniform. When `Some(ws)`, each `ws[i]` is the
+    /// (non-normalized) weight of the corresponding transform; cumulative
+    /// sampling picks the first index whose cumulative weight exceeds the
+    /// scaled uniform draw. Mirrors upstream
+    /// `torchvision.transforms.v2.RandomChoice(transforms, p=...)`.
+    weights: Option<Vec<f64>>,
 }
 
 impl<T: Float> RandomChoice<T> {
@@ -80,15 +87,74 @@ impl<T: Float> RandomChoice<T> {
                 message: "RandomChoice: transforms list must not be empty".into(),
             });
         }
-        Ok(Self { transforms })
+        Ok(Self {
+            transforms,
+            weights: None,
+        })
+    }
+
+    /// Attach a non-uniform weight vector. `p.len()` must equal the number
+    /// of transforms; weights must be finite, non-negative, and not all
+    /// zero. Mirrors upstream's `p: list[float]` arg
+    /// (`torchvision/transforms/v2/_container.py:138-141`).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FerrotorchError::InvalidArgument`] if the length mismatches
+    /// or weights are invalid.
+    pub fn with_p(mut self, p: Vec<f64>) -> FerrotorchResult<Self> {
+        if p.len() != self.transforms.len() {
+            return Err(FerrotorchError::InvalidArgument {
+                message: format!(
+                    "RandomChoice::with_p: expected {} weights, got {}",
+                    self.transforms.len(),
+                    p.len()
+                ),
+            });
+        }
+        let mut sum = 0.0;
+        for &w in &p {
+            if !w.is_finite() || w < 0.0 {
+                return Err(FerrotorchError::InvalidArgument {
+                    message: format!(
+                        "RandomChoice::with_p: weight must be finite and >= 0, got {w}"
+                    ),
+                });
+            }
+            sum += w;
+        }
+        if sum <= 0.0 {
+            return Err(FerrotorchError::InvalidArgument {
+                message: "RandomChoice::with_p: weights must not all be zero".into(),
+            });
+        }
+        self.weights = Some(p);
+        Ok(self)
     }
 }
 
 impl<T: Float> Transform<T> for RandomChoice<T> {
     fn apply(&self, input: Tensor<T>) -> FerrotorchResult<Tensor<T>> {
         let n = self.transforms.len();
-        let idx = (random_f64() * n as f64) as usize;
-        let idx = idx.min(n - 1); // Clamp in case random_f64() yields exactly 1.0.
+        let idx = match &self.weights {
+            None => {
+                let i = (random_f64() * n as f64) as usize;
+                i.min(n - 1) // Clamp in case random_f64() yields exactly 1.0.
+            }
+            Some(weights) => {
+                let total: f64 = weights.iter().sum();
+                let mut draw = random_f64() * total;
+                let mut chosen = n - 1;
+                for (i, &w) in weights.iter().enumerate() {
+                    if draw < w {
+                        chosen = i;
+                        break;
+                    }
+                    draw -= w;
+                }
+                chosen
+            }
+        };
         self.transforms[idx].apply(input)
     }
 }
@@ -191,5 +257,69 @@ mod tests {
         fn assert_send_sync<U: Send + Sync>() {}
         assert_send_sync::<RandomApply<f32>>();
         assert_send_sync::<RandomChoice<f32>>();
+    }
+
+    #[test]
+    fn test_random_choice_weighted_skews_distribution() {
+        // Heavily-weighted second transform should dominate the empirical
+        // selection counts across many trials.
+        let mut saw_small = 0;
+        let mut saw_large = 0;
+        for _ in 0..1000 {
+            let data = vec![500.0_f64];
+            let t = Tensor::from_storage(TensorStorage::cpu(data), vec![1, 1], false).unwrap();
+            let rc = RandomChoice::<f64>::new(vec![
+                Box::new(Normalize::<f64>::new(vec![1.0], vec![1.0]).unwrap()),
+                Box::new(Normalize::<f64>::new(vec![100.0], vec![1.0]).unwrap()),
+            ])
+            .unwrap()
+            .with_p(vec![0.1, 0.9])
+            .unwrap();
+            let out = rc.apply(t).unwrap();
+            let d = out.data().unwrap();
+            if (d[0] - 499.0).abs() < 1e-10 {
+                saw_small += 1;
+            } else if (d[0] - 400.0).abs() < 1e-10 {
+                saw_large += 1;
+            }
+        }
+        // With p=[0.1, 0.9], the second transform should be selected much
+        // more often than the first.
+        assert!(
+            saw_large > saw_small * 3,
+            "expected weighted skew (small={saw_small}, large={saw_large})"
+        );
+    }
+
+    #[test]
+    fn test_random_choice_with_p_length_mismatch_errors() {
+        let rc = RandomChoice::<f64>::new(vec![Box::new(
+            Normalize::<f64>::new(vec![5.0], vec![1.0]).unwrap(),
+        )])
+        .unwrap()
+        .with_p(vec![0.5, 0.5]);
+        assert!(rc.is_err());
+    }
+
+    #[test]
+    fn test_random_choice_with_p_all_zero_errors() {
+        let rc = RandomChoice::<f64>::new(vec![
+            Box::new(Normalize::<f64>::new(vec![1.0], vec![1.0]).unwrap()),
+            Box::new(Normalize::<f64>::new(vec![2.0], vec![1.0]).unwrap()),
+        ])
+        .unwrap()
+        .with_p(vec![0.0, 0.0]);
+        assert!(rc.is_err());
+    }
+
+    #[test]
+    fn test_random_choice_with_p_negative_weight_errors() {
+        let rc = RandomChoice::<f64>::new(vec![
+            Box::new(Normalize::<f64>::new(vec![1.0], vec![1.0]).unwrap()),
+            Box::new(Normalize::<f64>::new(vec![2.0], vec![1.0]).unwrap()),
+        ])
+        .unwrap()
+        .with_p(vec![-0.1, 0.5]);
+        assert!(rc.is_err());
     }
 }

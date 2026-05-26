@@ -18,8 +18,9 @@
 //! | REQ-3 | SHIPPED | `fn gaussian_kernel_1d` and `fn gaussian_filter_2d` helpers in `elastic_transform.rs`; consumer: the impl in the same file calls `gaussian_filter_2d(&dy_field, h, w, self.sigma)` and the dx-field counterpart inside the displacement-smoothing path. |
 //! | REQ-4 | SHIPPED | `fn bilinear_sample(data, h, w, y, x) -> f64` with clamp-to-edge in `elastic_transform.rs`; consumer: the impl calls `bilinear_sample(&ch_data, h, w, src_y, src_x)` inside the per-output-pixel resampling loop. |
 //! | REQ-5 | SHIPPED | `impl<T: Float> Transform<T> for ElasticTransform<T>` with shape/dim checks, random-field generation, Gaussian smoothing, and per-channel bilinear sampling in `elastic_transform.rs`; consumer: any `Box<dyn Transform<T>>` slot — composes into augmentation `Compose` pipelines via the `mod.rs` re-export. |
-//! | REQ-6 | NOT-STARTED | blocker #1521 — `interpolation` (NEAREST/BILINEAR), `fill`, and tuple `alpha`/`sigma` parameters from `torchvision/transforms/v2/_geometry.py:999-1090` are not implemented; ferrotorch is BILINEAR-only, clamp-to-edge OOB, scalar alpha/sigma. |
+//! | REQ-6 | SHIPPED | `with_interpolation / with_fill / new_range` builders + nearest/bilinear+fill sampler dispatch in `elastic_transform.rs`; consumer: pipelines call `ElasticTransform::new_range((0.0, 60.0), (3.0, 7.0))?.with_interpolation(InterpolationMode::Nearest).with_fill(0.0)` per upstream `_geometry.py:999-1090`. |
 
+use super::resize::InterpolationMode;
 use super::rng::random_f64;
 use ferrotorch_core::numeric_cast::cast;
 use ferrotorch_core::{FerrotorchError, FerrotorchResult, Float, Tensor, TensorStorage};
@@ -34,34 +35,74 @@ use ferrotorch_data::Transform;
 /// more global distortions. A typical starting point is
 /// `alpha=50, sigma=5`.
 pub struct ElasticTransform<T: Float> {
-    alpha: f64,
-    sigma: f64,
+    alpha_lo: f64,
+    alpha_hi: f64,
+    sigma_lo: f64,
+    sigma_hi: f64,
+    interpolation: InterpolationMode,
+    fill: Option<f64>,
     _marker: std::marker::PhantomData<T>,
 }
 
 impl<T: Float> ElasticTransform<T> {
-    /// Create a new `ElasticTransform`.
+    /// Create a new `ElasticTransform` with scalar `alpha` and `sigma`.
     ///
     /// # Errors
     ///
     /// Returns [`FerrotorchError::InvalidArgument`] if `alpha < 0` or
     /// `sigma <= 0`.
     pub fn new(alpha: f64, sigma: f64) -> FerrotorchResult<Self> {
-        if alpha < 0.0 {
+        Self::new_range((alpha, alpha), (sigma, sigma))
+    }
+
+    /// Create a new `ElasticTransform` where each application samples
+    /// `alpha` uniformly from `[alpha.0, alpha.1]` and `sigma` from
+    /// `[sigma.0, sigma.1]`. Mirrors upstream
+    /// `ElasticTransform(alpha=(lo, hi), sigma=(lo, hi))`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FerrotorchError::InvalidArgument`] if either range is
+    /// invalid.
+    pub fn new_range(alpha: (f64, f64), sigma: (f64, f64)) -> FerrotorchResult<Self> {
+        if !(alpha.0 >= 0.0 && alpha.0 <= alpha.1) {
             return Err(FerrotorchError::InvalidArgument {
-                message: format!("ElasticTransform: alpha must be >= 0, got {alpha}"),
+                message: format!(
+                    "ElasticTransform: alpha must satisfy 0 <= lo <= hi, got ({}, {})",
+                    alpha.0, alpha.1
+                ),
             });
         }
-        if sigma <= 0.0 {
+        if !(sigma.0 > 0.0 && sigma.0 <= sigma.1) {
             return Err(FerrotorchError::InvalidArgument {
-                message: format!("ElasticTransform: sigma must be > 0, got {sigma}"),
+                message: format!(
+                    "ElasticTransform: sigma must satisfy 0 < lo <= hi, got ({}, {})",
+                    sigma.0, sigma.1
+                ),
             });
         }
         Ok(Self {
-            alpha,
-            sigma,
+            alpha_lo: alpha.0,
+            alpha_hi: alpha.1,
+            sigma_lo: sigma.0,
+            sigma_hi: sigma.1,
+            interpolation: InterpolationMode::Bilinear,
+            fill: None,
             _marker: std::marker::PhantomData,
         })
+    }
+
+    /// Select interpolation mode. Default is bilinear.
+    pub fn with_interpolation(mut self, mode: InterpolationMode) -> Self {
+        self.interpolation = mode;
+        self
+    }
+
+    /// Use the given constant fill value for out-of-bounds samples.
+    /// Default behaviour (when not set) is clamp-to-edge.
+    pub fn with_fill(mut self, fill: f64) -> Self {
+        self.fill = Some(fill);
+        self
     }
 }
 
@@ -147,6 +188,29 @@ fn bilinear_sample(data: &[f64], h: usize, w: usize, y: f64, x: f64) -> f64 {
     top * (1.0 - dy) + bot * dy
 }
 
+/// Bilinear sample with an out-of-bounds `fill` value.
+fn bilinear_sample_with_fill(data: &[f64], h: usize, w: usize, y: f64, x: f64, fill: f64) -> f64 {
+    if x < 0.0 || y < 0.0 || x > (w - 1) as f64 || y > (h - 1) as f64 {
+        return fill;
+    }
+    bilinear_sample(data, h, w, y, x)
+}
+
+/// Nearest-neighbor sample. Uses `fill` for out-of-bounds when `fill` is
+/// `Some`, else clamp-to-edge.
+fn nearest_sample(data: &[f64], h: usize, w: usize, y: f64, x: f64, fill: Option<f64>) -> f64 {
+    let xr = x.round();
+    let yr = y.round();
+    if let Some(f) = fill {
+        if xr < 0.0 || yr < 0.0 || xr > (w - 1) as f64 || yr > (h - 1) as f64 {
+            return f;
+        }
+    }
+    let xi = xr.clamp(0.0, (w - 1) as f64) as usize;
+    let yi = yr.clamp(0.0, (h - 1) as f64) as usize;
+    data[yi * w + xi]
+}
+
 impl<T: Float> Transform<T> for ElasticTransform<T> {
     fn apply(&self, input: Tensor<T>) -> FerrotorchResult<Tensor<T>> {
         let shape = input.shape().to_vec();
@@ -163,7 +227,20 @@ impl<T: Float> Transform<T> for ElasticTransform<T> {
                 message: "ElasticTransform: image dimensions must be > 0".into(),
             });
         }
-        if self.alpha == 0.0 {
+        // Sample per-call alpha and sigma from their (possibly degenerate)
+        // ranges.
+        let alpha = if self.alpha_lo == self.alpha_hi {
+            self.alpha_lo
+        } else {
+            self.alpha_lo + random_f64() * (self.alpha_hi - self.alpha_lo)
+        };
+        let sigma = if self.sigma_lo == self.sigma_hi {
+            self.sigma_lo
+        } else {
+            self.sigma_lo + random_f64() * (self.sigma_hi - self.sigma_lo)
+        };
+
+        if alpha == 0.0 {
             // Zero alpha means no displacement — identity transform.
             return Ok(input);
         }
@@ -177,11 +254,11 @@ impl<T: Float> Transform<T> for ElasticTransform<T> {
             dy_field.push(2.0 * random_f64() - 1.0);
             dx_field.push(2.0 * random_f64() - 1.0);
         }
-        let dy_field = gaussian_filter_2d(&dy_field, h, w, self.sigma);
-        let dx_field = gaussian_filter_2d(&dx_field, h, w, self.sigma);
+        let dy_field = gaussian_filter_2d(&dy_field, h, w, sigma);
+        let dx_field = gaussian_filter_2d(&dx_field, h, w, sigma);
         // Scale by alpha.
-        let dy_field: Vec<f64> = dy_field.iter().map(|v| v * self.alpha).collect();
-        let dx_field: Vec<f64> = dx_field.iter().map(|v| v * self.alpha).collect();
+        let dy_field: Vec<f64> = dy_field.iter().map(|v| v * alpha).collect();
+        let dx_field: Vec<f64> = dx_field.iter().map(|v| v * alpha).collect();
 
         // Apply per channel.
         let data = input.data()?;
@@ -195,7 +272,15 @@ impl<T: Float> Transform<T> for ElasticTransform<T> {
                 for col in 0..w {
                     let src_y = row as f64 + dy_field[row * w + col];
                     let src_x = col as f64 + dx_field[row * w + col];
-                    let val = bilinear_sample(&ch_data, h, w, src_y, src_x);
+                    let val = match self.interpolation {
+                        InterpolationMode::Nearest => {
+                            nearest_sample(&ch_data, h, w, src_y, src_x, self.fill)
+                        }
+                        InterpolationMode::Bilinear => match self.fill {
+                            None => bilinear_sample(&ch_data, h, w, src_y, src_x),
+                            Some(f) => bilinear_sample_with_fill(&ch_data, h, w, src_y, src_x, f),
+                        },
+                    };
                     output.push(cast::<f64, T>(val)?);
                 }
             }
@@ -268,7 +353,7 @@ mod tests {
             Ok(_) => panic!("expected error for negative alpha"),
         };
         let msg = format!("{err}");
-        assert!(msg.contains("alpha must be >= 0"), "got: {msg}");
+        assert!(msg.contains("alpha must"), "got: {msg}");
     }
 
     #[test]
@@ -278,7 +363,7 @@ mod tests {
             Ok(_) => panic!("expected error for zero sigma"),
         };
         let msg = format!("{err}");
-        assert!(msg.contains("sigma must be > 0"), "got: {msg}");
+        assert!(msg.contains("sigma must"), "got: {msg}");
     }
 
     #[test]
@@ -296,6 +381,60 @@ mod tests {
         // At (0.5, 0.5) = average of all four = 2.5
         let v = bilinear_sample(&data, 2, 2, 0.5, 0.5);
         assert!((v - 2.5).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_elastic_new_range_samples_within_band() {
+        // A (0, 0) alpha range is a no-op.
+        let data: Vec<f64> = (0..12).map(|i| i as f64).collect();
+        let t: Tensor<f64> =
+            Tensor::from_storage(TensorStorage::cpu(data.clone()), vec![3, 2, 2], false).unwrap();
+        let et = ElasticTransform::<f64>::new_range((0.0, 0.0), (1.0, 2.0)).unwrap();
+        let out = et.apply(t).unwrap();
+        assert_eq!(out.data().unwrap(), data.as_slice());
+    }
+
+    #[test]
+    fn test_elastic_with_nearest_yields_only_input_values() {
+        // Nearest interpolation must return one of the original input
+        // values (no in-between blending).
+        let data = vec![0.0_f64, 1.0, 2.0, 3.0]; // 1x2x2
+        let t: Tensor<f64> =
+            Tensor::from_storage(TensorStorage::cpu(data.clone()), vec![1, 2, 2], false).unwrap();
+        let et = ElasticTransform::<f64>::new(5.0, 1.5)
+            .unwrap()
+            .with_interpolation(InterpolationMode::Nearest);
+        let out = et.apply(t).unwrap();
+        for &v in out.data().unwrap() {
+            assert!(
+                data.contains(&v),
+                "Nearest must yield input values, got {v}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_elastic_with_fill_replaces_oob_samples() {
+        // With a large alpha relative to image size, many displacement
+        // samples push outside the image. Fill must appear in the output.
+        let data = vec![1.0_f64; 25]; // 1x5x5 all ones
+        let t: Tensor<f64> =
+            Tensor::from_storage(TensorStorage::cpu(data), vec![1, 5, 5], false).unwrap();
+        let et = ElasticTransform::<f64>::new(100.0, 1.0)
+            .unwrap()
+            .with_fill(-7.0);
+        let out = et.apply(t).unwrap();
+        let saw_fill = out.data().unwrap().iter().any(|&v| v < 0.0);
+        assert!(
+            saw_fill,
+            "expected fill -7.0 to appear after large displacement"
+        );
+    }
+
+    #[test]
+    fn test_elastic_new_range_validates_alpha() {
+        assert!(ElasticTransform::<f64>::new_range((-1.0, 1.0), (1.0, 1.0)).is_err());
+        assert!(ElasticTransform::<f64>::new_range((2.0, 1.0), (1.0, 1.0)).is_err());
     }
 
     #[test]

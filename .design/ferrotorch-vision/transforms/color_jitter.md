@@ -61,10 +61,11 @@ at `_color.py:72`.
   colors red/green/blue/gray/black/white/arbitrary (verified by
   `test_rgb_hsv_roundtrip`).
 
-- REQ-7: NOT-STARTED — upstream accepts `brightness/contrast/saturation/hue`
-  as either a single non-negative number (current ferrotorch shape)
-  OR a `(min, max)` tuple specifying the sample range directly. The
-  tuple form is not supported here. Blocker #1522.
+- REQ-7: SHIPPED — `pub fn ColorJitter::from_ranges(brightness, contrast,
+  saturation, hue)` accepts explicit `(min, max)` tuples per upstream
+  `_check_input` (`_color.py:100-122`). The existing scalar `new` API
+  still works and is layered on top of the same internal tuple
+  representation.
 
 ## Acceptance Criteria
 
@@ -84,7 +85,10 @@ at `_color.py:72`.
 - [x] AC-9: Brightness-only mode scales all pixels uniformly (verified
   by `test_color_jitter_brightness_only` at `color_jitter.rs:318`).
 - [x] AC-10: f32 works (verified at `color_jitter.rs:334`).
-- [ ] AC-11: NOT-STARTED — `(min, max)` tuple input form. Blocker #1522.
+- [x] AC-11: `(min, max)` tuple input form (verified by
+  `test_color_jitter_from_ranges_identity`,
+  `test_color_jitter_from_ranges_asymmetric_brightness`, and
+  `test_color_jitter_from_ranges_rejects_invalid` in `color_jitter.rs`).
 
 ## Architecture
 
@@ -211,4 +215,4 @@ Expected: `7 passed`.
 | REQ-4 | SHIPPED | impl: `fn uniform_factor(v: f64) -> f64` at `color_jitter.rs:91-95`; non-test consumer: `fn apply` calls `uniform_factor(self.brightness)`, `uniform_factor(self.contrast)`, `uniform_factor(self.saturation)` at `color_jitter.rs:133, 141, 153`. |
 | REQ-5 | SHIPPED | impl: `impl<T: Float> Transform<T> for ColorJitter<T>` at `color_jitter.rs:97-187`; non-test consumer: any `Box<dyn Transform<T>>` slot — typically near the start of an augmentation `Compose` pipeline. The `lib.rs:113` re-export is the production-facing handle. |
 | REQ-6 | SHIPPED | impl: `fn rgb_to_hsv(r, g, b) -> (f64, f64, f64)` at `color_jitter.rs:193-212` and `fn hsv_to_rgb(h, s, v)` at `color_jitter.rs:214-234`; non-test consumer: `fn apply` calls `rgb_to_hsv` and `hsv_to_rgb` per-pixel inside the hue branch at `color_jitter.rs:165-167`. |
-| REQ-7 | NOT-STARTED | open prereq blocker #1522 — `(min, max)` tuple form for `brightness/contrast/saturation/hue` from `torchvision/transforms/v2/_color.py:100-122` (`_check_input`) is not supported; ferrotorch accepts only the scalar-shorthand form. |
+| REQ-7 | SHIPPED | impl: `pub fn ColorJitter::from_ranges(brightness, contrast, saturation, hue)` + tuple field storage at `ferrotorch-vision/src/transforms/color_jitter.rs:34-46,104-146`; non-test consumer: `pub use color_jitter::ColorJitter;` at `mod.rs:28` AND in the `lib.rs` re-export — pipelines call `ColorJitter::from_ranges((0.8, 1.2), (0.8, 1.2), (0.8, 1.2), (-0.05, 0.05))?` per upstream `_color.py:100-122`. |

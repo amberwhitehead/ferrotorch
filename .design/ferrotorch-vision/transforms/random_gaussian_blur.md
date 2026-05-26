@@ -50,9 +50,10 @@ sampling — upstream's class is also random in sigma when given a
   promoted to `f64` for the convolution math (numerical headroom for
   the kernel-weighted sums), then cast back to `T` per element.
 
-- REQ-6: NOT-STARTED — upstream's reflection padding (default
-  `padding_mode='reflect'` via `torch.nn.functional.pad`) is not
-  implemented; ferrotorch uses zero-padding. Blocker #1519.
+- REQ-6: SHIPPED — `fn reflect_index` reflects integer convolution
+  indices against `[0, size)` matching PyTorch's `padding_mode='reflect'`
+  semantics; `blur_rows` and `blur_cols` use it so border pixels are
+  no longer dimmed.
 
 ## Acceptance Criteria
 
@@ -74,7 +75,10 @@ sampling — upstream's class is also random in sigma when given a
 - [x] AC-9: Non-3-D input returns `Err` (verified at
   `random_gaussian_blur.rs:242`).
 - [x] AC-10: f32 works (verified at `random_gaussian_blur.rs:250`).
-- [ ] AC-11: NOT-STARTED — reflection padding. Blocker #1519.
+- [x] AC-11: reflection padding (verified by
+  `test_reflect_index_canonical_cases` and
+  `test_gaussian_blur_border_pixels_not_dimmed` in
+  `random_gaussian_blur.rs`).
 
 ## Architecture
 
@@ -194,4 +198,4 @@ Expected: `7 passed`.
 | REQ-3 | SHIPPED | impl: `fn gaussian_kernel_1d(size: usize, sigma: f64) -> Vec<f64>` at `random_gaussian_blur.rs:59-75`; non-test consumer: `fn apply` in this same file calls `gaussian_kernel_1d(self.kernel_size, sigma)` at `random_gaussian_blur.rs:136`. |
 | REQ-4 | SHIPPED | impl: `fn blur_rows(data, h, w, kernel) -> Vec<f64>` at `random_gaussian_blur.rs:78-96` and `fn blur_cols(...)` at `random_gaussian_blur.rs:99-116`; non-test consumer: `fn apply` chains `blur_cols(blur_rows(...))` at `random_gaussian_blur.rs:148-149`. |
 | REQ-5 | SHIPPED | impl: `impl<T: Float> Transform<T> for RandomGaussianBlur<T>` at `random_gaussian_blur.rs:118-159`; non-test consumer: any `Box<dyn Transform<T>>` slot accepts this — composes into augmentation `Compose` pipelines. The crate-root re-export at `lib.rs:114` is the production-facing handle. |
-| REQ-6 | NOT-STARTED | open prereq blocker #1519 — reflection-padding (upstream default `padding_mode='reflect'`) is not implemented; ferrotorch uses zero-padding which causes dimmer border pixels. |
+| REQ-6 | SHIPPED | impl: `fn reflect_index` + reflection-padded `blur_rows` / `blur_cols` in `ferrotorch-vision/src/transforms/random_gaussian_blur.rs:88-127`; non-test consumer: `pub use random_gaussian_blur::RandomGaussianBlur;` at `mod.rs:34` — the `impl<T: Float> Transform<T>` body in the same file calls `blur_cols(blur_rows(...))` per channel. |

@@ -8,7 +8,7 @@
 //! | REQ-3 | SHIPPED | `fn gaussian_kernel_1d(size: usize, sigma: f64) -> Vec<f64>` helper in `random_gaussian_blur.rs`; consumer: the impl in the same file calls `gaussian_kernel_1d(self.kernel_size, sigma)` inside the per-channel blur path. |
 //! | REQ-4 | SHIPPED | `fn blur_rows(data, h, w, kernel) -> Vec<f64>` and `fn blur_cols(...)` separable-convolution helpers in `random_gaussian_blur.rs`; consumer: the impl chains `blur_cols(blur_rows(...))` per channel. |
 //! | REQ-5 | SHIPPED | `impl<T: Float> Transform<T> for RandomGaussianBlur<T>` in `random_gaussian_blur.rs`; consumer: any `Box<dyn Transform<T>>` slot — composes into augmentation `Compose` pipelines via the `lib.rs` re-export. |
-//! | REQ-6 | NOT-STARTED | blocker #1519 — reflection-padding (upstream default `padding_mode='reflect'`) is not implemented; ferrotorch uses zero-padding, dimming border pixels. |
+//! | REQ-6 | SHIPPED | `fn reflect_index` + `blur_rows` / `blur_cols` reflection-padded convolution in `random_gaussian_blur.rs`; consumer: the `impl Transform` in the same file calls `blur_cols(blur_rows(...))` per channel inside the apply path. Matches upstream default `padding_mode='reflect'` from `torchvision/transforms/v2/functional/_misc.py:gaussian_blur`. |
 
 use super::rng::random_f64;
 use ferrotorch_core::numeric_cast::cast;
@@ -85,7 +85,26 @@ fn gaussian_kernel_1d(size: usize, sigma: f64) -> Vec<f64> {
     kernel
 }
 
-/// Apply a 1-D convolution along rows (horizontal blur) with zero-padding.
+/// Reflect-pad an integer index against a `[0, size)` range. Mirrors
+/// PyTorch's `padding_mode='reflect'` semantics: indices outside the range
+/// bounce off the edges without repeating them, e.g. for size=5:
+/// `-1 -> 1`, `-2 -> 2`, `5 -> 3`, `6 -> 2`.
+fn reflect_index(i: i64, size: usize) -> usize {
+    if size == 1 {
+        return 0;
+    }
+    let n = size as i64;
+    let period = 2 * (n - 1);
+    let mut m = i.rem_euclid(period);
+    if m >= n {
+        m = period - m;
+    }
+    m as usize
+}
+
+/// Apply a 1-D convolution along rows (horizontal blur) with reflection
+/// padding. Mirrors upstream torchvision `gaussian_blur` default
+/// `padding_mode='reflect'`.
 fn blur_rows(data: &[f64], h: usize, w: usize, kernel: &[f64]) -> Vec<f64> {
     let half = kernel.len() / 2;
     let mut out = vec![0.0; h * w];
@@ -96,9 +115,8 @@ fn blur_rows(data: &[f64], h: usize, w: usize, kernel: &[f64]) -> Vec<f64> {
             let mut acc = 0.0;
             for (ki, &kv) in kernel.iter().enumerate() {
                 let src_col = col as i64 + ki as i64 - half as i64;
-                if src_col >= 0 && (src_col as usize) < w {
-                    acc += data[row_off + src_col as usize] * kv;
-                }
+                let idx = reflect_index(src_col, w);
+                acc += data[row_off + idx] * kv;
             }
             out[row_off + col] = acc;
         }
@@ -106,7 +124,8 @@ fn blur_rows(data: &[f64], h: usize, w: usize, kernel: &[f64]) -> Vec<f64> {
     out
 }
 
-/// Apply a 1-D convolution along columns (vertical blur) with zero-padding.
+/// Apply a 1-D convolution along columns (vertical blur) with reflection
+/// padding.
 fn blur_cols(data: &[f64], h: usize, w: usize, kernel: &[f64]) -> Vec<f64> {
     let half = kernel.len() / 2;
     let mut out = vec![0.0; h * w];
@@ -116,9 +135,8 @@ fn blur_cols(data: &[f64], h: usize, w: usize, kernel: &[f64]) -> Vec<f64> {
             let mut acc = 0.0;
             for (ki, &kv) in kernel.iter().enumerate() {
                 let src_row = row as i64 + ki as i64 - half as i64;
-                if src_row >= 0 && (src_row as usize) < h {
-                    acc += data[src_row as usize * w + col] * kv;
-                }
+                let idx = reflect_index(src_row, h);
+                acc += data[idx * w + col] * kv;
             }
             out[row * w + col] = acc;
         }
@@ -184,26 +202,52 @@ mod tests {
 
     #[test]
     fn test_gaussian_blur_uniform_image() {
-        // A uniform image should remain unchanged after blur in the interior.
-        // Border pixels see zero-padding, so we only check interior pixels
-        // that have full kernel support (kernel_size=3 => 1-pixel border).
+        // With reflection padding, a uniform image stays uniform EVERYWHERE
+        // (kernel weights sum to 1; reflected samples are still 0.7).
         let data: Vec<f64> = vec![0.7; 75]; // 3x5x5
         let t = Tensor::from_storage(TensorStorage::cpu(data), vec![3, 5, 5], false).unwrap();
         let blur = RandomGaussianBlur::<f64>::new(3, (1.0, 1.0)).unwrap();
         let out = blur.apply(t).unwrap();
         let d = out.data().unwrap();
-        let (h, w) = (5, 5);
-        for c in 0..3 {
-            for row in 1..h - 1 {
-                for col in 1..w - 1 {
-                    let val = d[c * h * w + row * w + col];
-                    assert!(
-                        (val - 0.7).abs() < 1e-10,
-                        "Expected ~0.7 at interior pixel ({row}, {col}), got {val}"
-                    );
-                }
-            }
+        for (i, &val) in d.iter().enumerate() {
+            assert!(
+                (val - 0.7).abs() < 1e-10,
+                "Expected ~0.7 at pixel {i}, got {val}"
+            );
         }
+    }
+
+    #[test]
+    fn test_reflect_index_canonical_cases() {
+        // size=5: indices 0..4 inclusive. Reflection: -1->1, -2->2, 5->3, 6->2.
+        assert_eq!(reflect_index(0, 5), 0);
+        assert_eq!(reflect_index(4, 5), 4);
+        assert_eq!(reflect_index(-1, 5), 1);
+        assert_eq!(reflect_index(-2, 5), 2);
+        assert_eq!(reflect_index(5, 5), 3);
+        assert_eq!(reflect_index(6, 5), 2);
+        // size=1: always 0.
+        assert_eq!(reflect_index(-3, 1), 0);
+        assert_eq!(reflect_index(7, 1), 0);
+    }
+
+    #[test]
+    fn test_gaussian_blur_border_pixels_not_dimmed() {
+        // With reflection padding, border pixels in a constant image stay
+        // at the input value — they don't get dimmed toward zero like with
+        // zero-padding. Use a larger kernel to make the effect more obvious
+        // if zero-padding were re-introduced.
+        let data: Vec<f64> = vec![1.0; 25]; // 1x5x5 all ones
+        let t = Tensor::from_storage(TensorStorage::cpu(data), vec![1, 5, 5], false).unwrap();
+        let blur = RandomGaussianBlur::<f64>::new(5, (1.5, 1.5)).unwrap();
+        let out = blur.apply(t).unwrap();
+        // Top-left corner pixel — with zero padding this would be ~0.6;
+        // with reflection padding it stays at 1.0.
+        let val = out.data().unwrap()[0];
+        assert!(
+            (val - 1.0).abs() < 1e-10,
+            "Expected corner value 1.0 with reflection padding, got {val}"
+        );
     }
 
     #[test]

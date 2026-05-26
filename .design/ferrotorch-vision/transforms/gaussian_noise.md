@@ -44,10 +44,9 @@ augmentation. Mirrors `torchvision.transforms.v2.GaussianNoise` at
   more than throughput; upstream uses `torch.randn` (Wichmann-Hill /
   MT19937 backend) for the same role.
 
-- REQ-5: NOT-STARTED — upstream's `clip: bool = True` parameter (clamp
-  output back into `[0, 1]` for floats / `[0, 255]` for uint8) is not
-  implemented. ferrotorch lets the noisy values exit the original
-  range. Blocker #1516.
+- REQ-5: SHIPPED — `GaussianNoise::with_clip(bool)` clamps every output
+  element into `[0, 1]` when enabled. Mirrors upstream
+  `clip: bool = True` (`_misc.py:241-243`).
 
 ## Acceptance Criteria
 
@@ -67,7 +66,10 @@ augmentation. Mirrors `torchvision.transforms.v2.GaussianNoise` at
   `test_gaussian_noise_has_approximate_mean_and_std` at
   `gaussian_noise.rs:128`).
 - [x] AC-7: Non-3-D input returns `Err` (verified at `gaussian_noise.rs:149`).
-- [ ] AC-8: NOT-STARTED — `clip` parameter. Blocker #1516.
+- [x] AC-8: `clip` parameter (verified by
+  `test_gaussian_noise_clip_bounds_output_to_unit_interval` and
+  `test_gaussian_noise_clip_off_by_default_can_exceed_range` in
+  `gaussian_noise.rs`).
 
 ## Architecture
 
@@ -171,4 +173,4 @@ Expected: `6 passed`.
 | REQ-2 | SHIPPED | impl: `pub fn GaussianNoise::new(mean: f64, std: f64) -> FerrotorchResult<Self>` with `std >= 0` validation at `gaussian_noise.rs:31-43`; non-test consumer: reachable via `mod.rs:23` re-export. |
 | REQ-3 | SHIPPED | impl: `impl<T: Float> Transform<T> for GaussianNoise<T>` with shape check + degenerate-std shortcut + per-element noise loop at `gaussian_noise.rs:55-83`; non-test consumer: any `Box<dyn Transform<T>>` slot — typically inserted into a robustness-training `Compose` pipeline. |
 | REQ-4 | SHIPPED | impl: `fn standard_normal_sample() -> f64` Box-Muller helper at `gaussian_noise.rs:46-53`; non-test consumer: `fn apply` in this same file calls `self.std * standard_normal_sample()` at `gaussian_noise.rs:77`. |
-| REQ-5 | NOT-STARTED | open prereq blocker #1516 — the `clip: bool = True` parameter from `torchvision/transforms/v2/_misc.py:241-243` is not implemented; noisy outputs may exit the `[0, 1]` range. |
+| REQ-5 | SHIPPED | impl: `GaussianNoise::with_clip(bool)` builder + per-element `[0, 1]` clamp in `apply` at `ferrotorch-vision/src/transforms/gaussian_noise.rs:42-66,80-120`; non-test consumer: `pub use gaussian_noise::GaussianNoise;` at `mod.rs:31` — robustness pipelines call `GaussianNoise::new(0.0, 0.1)?.with_clip(true)`. |

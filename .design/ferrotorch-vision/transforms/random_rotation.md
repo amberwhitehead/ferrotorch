@@ -43,12 +43,10 @@ interpolation, with out-of-image samples filled with zero. Mirrors
   in-bounds check; weights are `cast::<f64, T>` for numerical
   precision.
 
-- REQ-5: NOT-STARTED — upstream `RandomRotation` has `interpolation`
-  (NEAREST / BILINEAR), `expand` (output size grows to contain the
-  rotated image), `center: Option<[float; 2]>` (override the rotation
-  center), and `fill` (out-of-bounds fill value) parameters not
-  implemented. ferrotorch's version is BILINEAR-only, no expand, no
-  center override, fill=0. Blocker #1518.
+- REQ-5: SHIPPED — `with_interpolation(InterpolationMode)`,
+  `with_expand(bool)`, `with_center((x, y))`, and `with_fill(f64)`
+  builders cover the four upstream knobs (`_geometry.py:560-638`).
+  Bicubic interpolation is still a follow-up.
 
 ## Acceptance Criteria
 
@@ -130,12 +128,14 @@ is the standard image-space rotation. Per-channel processing means a
 inefficient compared to a precomputed grid + 3 bilinear lookups, but
 correct.
 
-### NOT-STARTED gap (REQ-5)
+### SHIPPED — `with_interpolation` / `with_expand` / `with_center` / `with_fill` (REQ-5)
 
-Upstream `RandomRotation(degrees, interpolation, expand, center, fill)`
-has four params we don't ship. The most-requested in pretraining
-pipelines is `fill` (mode-specific border fill instead of zero); the
-others are niche. Blocker #1518.
+Each of the four parameters is exposed via a builder method.
+`interpolation` switches between bilinear (default) and nearest-neighbor;
+`expand=true` enlarges the output canvas to fit the rotated bounding box;
+`center=(x, y)` overrides the default image-center pivot; `fill=value`
+sets the out-of-bounds sample value. Bicubic interpolation remains a
+follow-up.
 
 ### Non-test production consumers
 
@@ -186,4 +186,4 @@ Expected: `7 passed`.
 | REQ-2 | SHIPPED | impl: `pub fn RandomRotation::new(degrees: f64) -> FerrotorchResult<Self>` with `degrees >= 0` check at `random_rotation.rs:28-38`; non-test consumer: reachable via the crate-root re-export at `lib.rs:114`. |
 | REQ-3 | SHIPPED | impl: `impl<T: Float> Transform<T> for RandomRotation<T>` with shape check, zero-shortcut, inverse-rotation per-pixel + bilinear sample at `random_rotation.rs:85-135`; non-test consumer: any `Box<dyn Transform<T>>` slot accepts this — composes into augmentation `Compose` pipelines. |
 | REQ-4 | SHIPPED | impl: `fn bilinear_sample<T: Float>(data, h, w, y, x) -> FerrotorchResult<T>` at `random_rotation.rs:43-83`; non-test consumer: `fn apply` in this same file calls `bilinear_sample(ch_data, h, w, sy, sx)?` at `random_rotation.rs:127`. |
-| REQ-5 | NOT-STARTED | open prereq blocker #1518 — `interpolation` (NEAREST/BILINEAR), `expand`, `center`, `fill` parameters from `torchvision/transforms/v2/_geometry.py:560-638` are not implemented. ferrotorch is BILINEAR-only, no expand, no center override, fill=0. |
+| REQ-5 | SHIPPED | impl: `with_interpolation / with_expand / with_center / with_fill` builders + nearest+bilinear+expand+fill dispatch at `ferrotorch-vision/src/transforms/random_rotation.rs:25-95,150-230`; non-test consumer: `pub use random_rotation::RandomRotation;` at `mod.rs:37` AND in the crate-root `lib.rs` re-export — pipelines call `RandomRotation::new(30.0)?.with_interpolation(InterpolationMode::Nearest).with_fill(0.5).with_expand(true)`. |
