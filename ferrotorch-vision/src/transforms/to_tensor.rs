@@ -1,3 +1,12 @@
+//! ## REQ status (per `.design/ferrotorch-vision/transforms/to_tensor.md`)
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 | SHIPPED | `pub struct VisionToTensor<T: Float>` at `to_tensor.rs:14-16`; consumer: `pub use` at `mod.rs:33` and crate-root re-export at `lib.rs:115`. |
+//! | REQ-2 | SHIPPED | `VisionToTensor::new` at `to_tensor.rs:20-24` and `impl Default` at `to_tensor.rs:27-31`; consumer: `lib.rs:115` re-export. |
+//! | REQ-3 | SHIPPED | `impl Transform<T>` at `to_tensor.rs:33-67`; consumer: any `Box<dyn Transform<T>>` slot. |
+//! | REQ-4 | SHIPPED | `cast::<f64, T>(255.0)?` + divide at `to_tensor.rs:49-59`; consumer: REQ-3 invokes it on every `apply` call. |
+
 use ferrotorch_core::numeric_cast::cast;
 use ferrotorch_core::{FerrotorchError, FerrotorchResult, Float, Tensor, TensorStorage};
 use ferrotorch_data::Transform;

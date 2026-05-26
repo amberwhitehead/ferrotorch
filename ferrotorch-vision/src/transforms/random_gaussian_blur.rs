@@ -1,4 +1,15 @@
 // CL-332: Vision Transforms & Augmentation — RandomGaussianBlur
+//! ## REQ status (per `.design/ferrotorch-vision/transforms/random_gaussian_blur.md`)
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 | SHIPPED | `pub struct RandomGaussianBlur<T: Float>` at `random_gaussian_blur.rs:15-20`; consumer: `pub use` at `mod.rs:26` and crate-root re-export at `lib.rs:114`. |
+//! | REQ-2 | SHIPPED | `RandomGaussianBlur::new` at `random_gaussian_blur.rs:31-55`; consumer: `lib.rs:114` re-export. |
+//! | REQ-3 | SHIPPED | `gaussian_kernel_1d` at `random_gaussian_blur.rs:59-75`; consumer: `apply` calls it at `random_gaussian_blur.rs:136`. |
+//! | REQ-4 | SHIPPED | `blur_rows` at `random_gaussian_blur.rs:78-96` and `blur_cols` at `random_gaussian_blur.rs:99-116`; consumer: `apply` chains them at `random_gaussian_blur.rs:148-149`. |
+//! | REQ-5 | SHIPPED | `impl Transform<T>` at `random_gaussian_blur.rs:118-159`; consumer: any `Box<dyn Transform<T>>` slot. |
+//! | REQ-6 | NOT-STARTED | blocker #1519 — reflection padding (instead of zero-padding) not implemented. |
+
 use super::rng::random_f64;
 use ferrotorch_core::numeric_cast::cast;
 use ferrotorch_core::{FerrotorchError, FerrotorchResult, Float, Tensor, TensorStorage};

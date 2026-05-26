@@ -3,6 +3,16 @@
 //! Adds i.i.d. Gaussian noise `N(mean, std^2)` to every element of a
 //! `[C, H, W]` tensor. Mirrors `torchvision.transforms.v2.GaussianNoise`.
 //! CL-458.
+//!
+//! ## REQ status (per `.design/ferrotorch-vision/transforms/gaussian_noise.md`)
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 | SHIPPED | `pub struct GaussianNoise<T: Float>` at `gaussian_noise.rs:17-21`; consumer: `pub use` at `mod.rs:23`. |
+//! | REQ-2 | SHIPPED | `GaussianNoise::new` at `gaussian_noise.rs:31-43`; consumer: `mod.rs:23` re-export. |
+//! | REQ-3 | SHIPPED | `impl Transform<T>` at `gaussian_noise.rs:55-83`; consumer: any `Box<dyn Transform<T>>` slot. |
+//! | REQ-4 | SHIPPED | `standard_normal_sample` at `gaussian_noise.rs:46-53`; consumer: `apply` calls it at `gaussian_noise.rs:77`. |
+//! | REQ-5 | NOT-STARTED | blocker #1516 — `clip` parameter not implemented. |
 
 use super::rng::random_f64;
 use ferrotorch_core::numeric_cast::cast;

@@ -1,3 +1,12 @@
+//! ## REQ status (per `.design/ferrotorch-vision/transforms/vision_normalize.md`)
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 | SHIPPED | `pub struct VisionNormalize<T: Float>` at `vision_normalize.rs:18-20`; consumer: `pub use` at `mod.rs:35` and crate-root re-export at `lib.rs:115`. |
+//! | REQ-2 | SHIPPED | `VisionNormalize::new` at `vision_normalize.rs:30-34`; consumer: `lib.rs:115` re-export. |
+//! | REQ-3 | SHIPPED | `VisionNormalize::imagenet` at `vision_normalize.rs:46-49`; consumer: `lib.rs:115` re-export; this is the canonical ImageNet entry point. |
+//! | REQ-4 | SHIPPED | `impl Transform<T>` at `vision_normalize.rs:52-56`; consumer: any `Box<dyn Transform<T>>` slot. |
+
 use ferrotorch_core::{FerrotorchResult, Float, Tensor};
 use ferrotorch_data::{Normalize, Transform};
 

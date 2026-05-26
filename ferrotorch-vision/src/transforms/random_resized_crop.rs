@@ -1,4 +1,14 @@
 // CL-332: Vision Transforms & Augmentation — RandomResizedCrop
+//! ## REQ status (per `.design/ferrotorch-vision/transforms/random_resized_crop.md`)
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 | SHIPPED | `pub struct RandomResizedCrop<T: Float>` at `random_resized_crop.rs:15-23`; consumer: `pub use` at `mod.rs:28` and crate-root re-export at `lib.rs:114`. |
+//! | REQ-2 | SHIPPED | `RandomResizedCrop::new` at `random_resized_crop.rs:38-69`; consumer: `lib.rs:114` re-export. |
+//! | REQ-3 | SHIPPED | `nn_resize_channel` at `random_resized_crop.rs:74-89`; consumer: `apply` calls it at `random_resized_crop.rs:177`. |
+//! | REQ-4 | SHIPPED | `impl Transform<T>` at `random_resized_crop.rs:91-190`; consumer: any `Box<dyn Transform<T>>` slot. |
+//! | REQ-5 | NOT-STARTED | blocker #1520 — bilinear/bicubic interpolation + antialias not implemented. |
+
 use super::rng::random_f64;
 use ferrotorch_core::{FerrotorchError, FerrotorchResult, Float, Tensor, TensorStorage};
 use ferrotorch_data::Transform;

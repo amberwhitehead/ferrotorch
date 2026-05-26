@@ -1,4 +1,16 @@
 // CL-332: Vision Transforms & Augmentation — RandomApply / RandomChoice
+//! ## REQ status (per `.design/ferrotorch-vision/transforms/random_apply.md`)
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 | SHIPPED | `pub struct RandomApply<T: Float>` at `random_apply.rs:13-16`; consumer: `pub use` at `mod.rs:24` and crate-root re-export at `lib.rs:113`. |
+//! | REQ-2 | SHIPPED | `RandomApply::new` at `random_apply.rs:27-34`; consumer: `lib.rs:113` re-export. |
+//! | REQ-3 | SHIPPED | `impl Transform<T> for RandomApply<T>` at `random_apply.rs:37-48`; consumer: any `Box<dyn Transform<T>>` slot. |
+//! | REQ-4 | SHIPPED | `pub struct RandomChoice<T: Float>` at `random_apply.rs:55-57`; consumer: `pub use` at `mod.rs:24` and `lib.rs:113`. |
+//! | REQ-5 | SHIPPED | `RandomChoice::new` at `random_apply.rs:65-72`; consumer: `lib.rs:113` re-export. |
+//! | REQ-6 | SHIPPED | `impl Transform<T> for RandomChoice<T>` at `random_apply.rs:75-82`; consumer: any `Box<dyn Transform<T>>` slot. |
+//! | REQ-7 | NOT-STARTED | blocker #1517 — weighted `RandomChoice` via optional `p` vector not implemented. |
+
 use super::rng::random_f64;
 use ferrotorch_core::{FerrotorchError, FerrotorchResult, Float, Tensor};
 use ferrotorch_data::Transform;

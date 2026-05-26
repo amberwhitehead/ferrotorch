@@ -8,6 +8,17 @@
 //! and used to sample the source image via bilinear interpolation.
 //!
 //! Mirrors `torchvision.transforms.v2.ElasticTransform`. CL-458.
+//!
+//! ## REQ status (per `.design/ferrotorch-vision/transforms/elastic_transform.md`)
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 | SHIPPED | `pub struct ElasticTransform<T: Float>` at `elastic_transform.rs:25-29`; consumer: `pub use` at `mod.rs:22`. |
+//! | REQ-2 | SHIPPED | `ElasticTransform::new` at `elastic_transform.rs:38-54`; consumer: `mod.rs:22` re-export. |
+//! | REQ-3 | SHIPPED | `gaussian_kernel_1d` at `elastic_transform.rs:58-72` and `gaussian_filter_2d` at `elastic_transform.rs:76-112`; consumer: `apply` calls `gaussian_filter_2d` at `elastic_transform.rs:169-170`. |
+//! | REQ-4 | SHIPPED | `bilinear_sample` clamp-to-edge at `elastic_transform.rs:117-137`; consumer: `apply` calls it at `elastic_transform.rs:187`. |
+//! | REQ-5 | SHIPPED | `impl Transform<T>` at `elastic_transform.rs:139-195`; consumer: any `Box<dyn Transform<T>>` slot. |
+//! | REQ-6 | NOT-STARTED | blocker #1521 — interpolation/fill/tuple alpha-sigma not implemented. |
 
 use super::rng::random_f64;
 use ferrotorch_core::numeric_cast::cast;

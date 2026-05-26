@@ -1,4 +1,14 @@
 // CL-332: Vision Transforms & Augmentation — RandomRotation
+//! ## REQ status (per `.design/ferrotorch-vision/transforms/random_rotation.md`)
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 | SHIPPED | `pub struct RandomRotation<T: Float>` at `random_rotation.rs:14-17`; consumer: `pub use` at `mod.rs:29` and crate-root re-export at `lib.rs:114`. |
+//! | REQ-2 | SHIPPED | `RandomRotation::new` at `random_rotation.rs:28-38`; consumer: `lib.rs:114` re-export. |
+//! | REQ-3 | SHIPPED | `impl Transform<T>` at `random_rotation.rs:85-135`; consumer: any `Box<dyn Transform<T>>` slot. |
+//! | REQ-4 | SHIPPED | `bilinear_sample` at `random_rotation.rs:43-83`; consumer: `apply` calls it at `random_rotation.rs:127`. |
+//! | REQ-5 | NOT-STARTED | blocker #1518 — interpolation/expand/center/fill not implemented. |
+
 use super::rng::random_f64;
 use ferrotorch_core::numeric_cast::cast;
 use ferrotorch_core::{FerrotorchError, FerrotorchResult, Float, Tensor, TensorStorage};

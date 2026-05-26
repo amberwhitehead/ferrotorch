@@ -1,3 +1,12 @@
+//! ## REQ status (per `.design/ferrotorch-vision/transforms/resize.md`)
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 | SHIPPED | `pub struct Resize<T: Float>` at `resize.rs:9-13`; consumer: `pub use` at `mod.rs:31` and crate-root re-export at `lib.rs:114`. |
+//! | REQ-2 | SHIPPED | `Resize::new` at `resize.rs:17-23`; consumer: `lib.rs:114` re-export. |
+//! | REQ-3 | SHIPPED | `impl Transform<T>` at `resize.rs:26-62`; consumer: any `Box<dyn Transform<T>>` slot. |
+//! | REQ-4 | NOT-STARTED | blocker #1514 — interpolation/antialias/max_size/shortest-edge sizing not implemented. |
+
 use ferrotorch_core::{FerrotorchError, FerrotorchResult, Float, Tensor, TensorStorage};
 use ferrotorch_data::Transform;
 

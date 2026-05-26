@@ -15,6 +15,19 @@
 //! are included with the standard 0–1 scaling assumption.
 //!
 //! Mirrors `torchvision.transforms.v2.TrivialAugmentWide`. CL-458.
+//!
+//! ## REQ status (per `.design/ferrotorch-vision/transforms/trivial_augment_wide.md`)
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 | SHIPPED | `pub struct TrivialAugmentWide<T: Float>` at `trivial_augment_wide.rs:31-36`; consumer: `pub use` at `mod.rs:34`. |
+//! | REQ-2 | SHIPPED | `TrivialAugmentWide::new` at `trivial_augment_wide.rs:54-64`; consumer: `mod.rs:34` re-export. |
+//! | REQ-3 | SHIPPED | `impl Default` at `trivial_augment_wide.rs:38-44`; consumer: `mod.rs:34` re-export. |
+//! | REQ-4 | SHIPPED | `enum Op` at `trivial_augment_wide.rs:74-86` and `Op::ALL` at `trivial_augment_wide.rs:88-102`; consumer: `apply` reads `Op::ALL[random_usize(Op::ALL.len())]` at `trivial_augment_wide.rs:349-350`. |
+//! | REQ-5 | SHIPPED | `apply_op` at `trivial_augment_wide.rs:107-304`; consumer: `apply` calls it at `trivial_augment_wide.rs:353`. |
+//! | REQ-6 | SHIPPED | `box_blur_3x3` at `trivial_augment_wide.rs:307-327`; consumer: `apply_op` Sharpness arm at `trivial_augment_wide.rs:159`. |
+//! | REQ-7 | SHIPPED | `impl Transform<T>` at `trivial_augment_wide.rs:329-356`; consumer: any `Box<dyn Transform<T>>` slot. |
+//! | REQ-8 | NOT-STARTED | blocker #1523 — ShearX/ShearY/Rotate/Color ops not implemented. |
 
 use super::rng::random_usize;
 use ferrotorch_core::numeric_cast::cast;

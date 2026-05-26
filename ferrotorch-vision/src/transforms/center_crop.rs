@@ -1,3 +1,12 @@
+//! ## REQ status (per `.design/ferrotorch-vision/transforms/center_crop.md`)
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 | SHIPPED | `pub struct CenterCrop<T: Float>` at `center_crop.rs:9-13`; consumer: `pub use` at `mod.rs:19` and crate-root re-export at `lib.rs:113`. |
+//! | REQ-2 | SHIPPED | `CenterCrop::new` at `center_crop.rs:17-23`; consumer: `lib.rs:113` re-export. |
+//! | REQ-3 | SHIPPED | `impl Transform<T>` at `center_crop.rs:26-69`; consumer: any `Box<dyn Transform<T>>` slot. |
+//! | REQ-4 | NOT-STARTED | blocker #1515 — pad-with-zeros when input smaller than crop not implemented. |
+
 use ferrotorch_core::{FerrotorchError, FerrotorchResult, Float, Tensor, TensorStorage};
 use ferrotorch_data::Transform;
 

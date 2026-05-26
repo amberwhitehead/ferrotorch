@@ -1,4 +1,14 @@
 //! RandomCrop — randomly crop a [C, H, W] tensor to a target size.
+//!
+//! ## REQ status (per `.design/ferrotorch-vision/transforms/random_crop.md`)
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 | SHIPPED | `pub struct RandomCrop<T: Float>` at `random_crop.rs:13-17`; consumer: `pub use` at `mod.rs:25`. |
+//! | REQ-2 | SHIPPED | `RandomCrop::new` at `random_crop.rs:20-26`; consumer: `mod.rs:25` re-export. |
+//! | REQ-3 | SHIPPED | `RandomCrop::square` at `random_crop.rs:29-31`; consumer: `mod.rs:25` re-export. |
+//! | REQ-4 | SHIPPED | `impl Transform<T>` at `random_crop.rs:34-87`; consumer: any `Box<dyn Transform<T>>` slot. |
+//! | REQ-5 | NOT-STARTED | blocker #1513 — padding/pad_if_needed/fill/padding_mode not implemented. |
 
 use super::rng::random_usize;
 use ferrotorch_core::{FerrotorchError, FerrotorchResult, Float, Tensor, TensorStorage};

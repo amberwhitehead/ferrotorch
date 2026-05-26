@@ -1,4 +1,13 @@
 //! Compose — chain multiple transforms into a sequential pipeline.
+//!
+//! ## REQ status (per `.design/ferrotorch-vision/transforms/compose.md`)
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 | SHIPPED | `pub struct Compose<T: Float>` at `compose.rs:9-11`; consumer: `pub use compose::Compose;` at `mod.rs:21`. |
+//! | REQ-2 | SHIPPED | `Compose::new` at `compose.rs:14-16`; consumer: user training drivers construct via `mod.rs:21` re-export. |
+//! | REQ-3 | SHIPPED | `Compose::len` / `Compose::is_empty` at `compose.rs:20-27`; consumer: `mod.rs:21` re-export. |
+//! | REQ-4 | SHIPPED | `impl Transform<T> for Compose<T>` at `compose.rs:30-38`; consumer: any `Box<dyn Transform<T>>` slot via `mod.rs:21`. |
 
 use ferrotorch_core::{FerrotorchResult, Float, Tensor};
 use ferrotorch_data::Transform;

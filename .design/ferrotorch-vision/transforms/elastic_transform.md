@@ -1,0 +1,216 @@
+# ferrotorch-vision — `ElasticTransform` transform
+
+<!--
+tier: 3-component
+status: draft
+baseline-pytorch: 6710f8ebc (torchvision v0.26.0 site-packages)
+upstream-paths:
+  - torchvision/transforms/v2/_geometry.py
+  - torchvision/transforms/v2/functional/_geometry.py
+-->
+
+## Summary
+
+`ferrotorch-vision/src/transforms/elastic_transform.rs` provides
+`ElasticTransform<T: Float>`, which applies elastic deformation
+(Simard et al. 2003) via a Gaussian-smoothed random displacement field
+and bilinear resampling. Mirrors
+`torchvision.transforms.v2.ElasticTransform` at `_geometry.py:999-1090`.
+
+## Requirements
+
+- REQ-1: `pub struct ElasticTransform<T: Float>` storing `alpha: f64`
+  (displacement scale), `sigma: f64` (smoother std), and
+  `PhantomData<T>`. Mirrors `_geometry.py:999` `class ElasticTransform`.
+
+- REQ-2: `pub fn ElasticTransform::new(alpha: f64, sigma: f64) ->
+  FerrotorchResult<Self>` constructor validating `alpha >= 0` and
+  `sigma > 0`. Mirrors upstream's implicit non-negativity.
+
+- REQ-3: `fn gaussian_kernel_1d(size, sigma)` and
+  `fn gaussian_filter_2d(data, h, w, sigma)` — local helpers for the
+  separable Gaussian-smoothing pass on the displacement fields.
+  `gaussian_filter_2d` computes a `radius = ceil(3 * sigma)` kernel,
+  then applies horizontal-then-vertical 1-D convolutions with
+  zero-padding.
+
+- REQ-4: `fn bilinear_sample(data, h, w, y, x) -> f64` — clamped-to-
+  edge bilinear sampler for a single-channel `[H, W]` buffer.
+  Out-of-bounds `(y, x)` are clamped to `[0, h-1] × [0, w-1]` — the
+  upstream default ("border" mode in `torch.nn.functional.grid_sample`).
+  Note this clamping behavior DIFFERS from
+  `random_rotation.rs::bilinear_sample` which returns zero for OOB.
+
+- REQ-5: `impl<T: Float> Transform<T> for ElasticTransform<T>` —
+  `apply` rejects non-3-D input and zero-dim inputs. If `alpha == 0`
+  returns identity (no displacement). Otherwise:
+  1. Sample `dy_field`, `dx_field` per pixel from `Uniform[-1, 1]`.
+  2. Smooth each field with `gaussian_filter_2d(_, _, _, sigma)`.
+  3. Scale by `alpha`.
+  4. Per channel, per output pixel `(row, col)`, sample from
+     `(row + dy_field[row, col], col + dx_field[row, col])` via
+     `bilinear_sample`.
+
+- REQ-6: NOT-STARTED — upstream's `interpolation` (NEAREST/BILINEAR),
+  `fill` (out-of-bounds fill value), and tuple-valued
+  `alpha`/`sigma` (per-axis displacement) parameters are not
+  implemented. ferrotorch's version is BILINEAR-only with
+  clamp-to-edge OOB and scalar alpha/sigma. Blocker #1521.
+
+## Acceptance Criteria
+
+- [x] AC-1: `ElasticTransform::new(5.0, 1.5)` constructs.
+- [x] AC-2: `new(-1.0, 1.0)` returns `Err` (verified at
+  `elastic_transform.rs:253`).
+- [x] AC-3: `new(1.0, 0.0)` returns `Err` (verified at
+  `elastic_transform.rs:263`).
+- [x] AC-4: Output shape equals input shape (verified by
+  `test_elastic_output_shape_preserved` at `elastic_transform.rs:202`).
+- [x] AC-5: `alpha == 0` is identity (verified at `elastic_transform.rs:211`).
+- [x] AC-6: Uniform-value image is uniform-preserving (verified by
+  `test_elastic_constant_image_unchanged_interior` at
+  `elastic_transform.rs:221`).
+- [x] AC-7: Non-3-D input returns `Err` (verified at
+  `elastic_transform.rs:237`).
+- [x] AC-8: Zero-dim input returns `Err` (verified at
+  `elastic_transform.rs:245`).
+- [x] AC-9: `bilinear_sample` corners are exact (verified at
+  `elastic_transform.rs:272`).
+- [x] AC-10: `bilinear_sample` midpoint averages 4 corners
+  (verified at `elastic_transform.rs:281`).
+- [x] AC-11: `bilinear_sample` out-of-bounds clamps to nearest corner
+  (verified at `elastic_transform.rs:289`).
+- [ ] AC-12: NOT-STARTED — interpolation/fill/tuple params.
+  Blocker #1521.
+
+## Architecture
+
+### Struct + constructor (REQ-1, REQ-2)
+
+```rust
+pub struct ElasticTransform<T: Float> {
+    alpha: f64,
+    sigma: f64,
+    _marker: std::marker::PhantomData<T>,
+}
+```
+
+at `elastic_transform.rs:25-29`. Constructor at
+`elastic_transform.rs:38-54` validates both bounds.
+
+### Gaussian helpers (REQ-3)
+
+`fn gaussian_kernel_1d` at `elastic_transform.rs:58-72` is identical
+to `random_gaussian_blur::gaussian_kernel_1d`; deliberate code
+duplication to keep the file self-contained.
+
+`fn gaussian_filter_2d(data, h, w, sigma)` at
+`elastic_transform.rs:76-112` computes `radius = ceil(3 * sigma)` to
+cover ~99.7% of the Gaussian mass, then applies separable horizontal-
+then-vertical 1-D convolutions with zero-padding.
+
+### Bilinear sampler with clamp (REQ-4)
+
+```rust
+fn bilinear_sample(data: &[f64], h, w, y, x) -> f64 {
+    let y = y.clamp(0.0, (h - 1) as f64);
+    let x = x.clamp(0.0, (w - 1) as f64);
+    // ... standard 4-corner interpolation
+}
+```
+
+at `elastic_transform.rs:117-137`. The `.clamp` is the
+"border-mode" sampler — out-of-bounds coordinates fall back to the
+nearest edge pixel.
+
+### Transform impl (REQ-5)
+
+`fn apply` at `elastic_transform.rs:139-195`:
+
+```rust
+// Generate random displacement fields, smooth, scale by alpha.
+for _ in 0..numel {
+    dy_field.push(2.0 * random_f64() - 1.0);
+    dx_field.push(2.0 * random_f64() - 1.0);
+}
+let dy_field = gaussian_filter_2d(&dy_field, h, w, self.sigma);
+let dx_field = gaussian_filter_2d(&dx_field, h, w, self.sigma);
+let dy_field: Vec<f64> = dy_field.iter().map(|v| v * self.alpha).collect();
+let dx_field: Vec<f64> = dx_field.iter().map(|v| v * self.alpha).collect();
+// Per channel, sample each output pixel from displaced source.
+for row in 0..h {
+    for col in 0..w {
+        let src_y = row as f64 + dy_field[row * w + col];
+        let src_x = col as f64 + dx_field[row * w + col];
+        let val = bilinear_sample(&ch_data, h, w, src_y, src_x);
+        output.push(cast::<f64, T>(val)?);
+    }
+}
+```
+
+This is the Simard "best practices" elastic transform: a single
+random-then-smooth displacement field shared across all channels (so
+the per-channel deformation is coherent), with alpha scaling the
+displacement magnitude in pixels.
+
+### NOT-STARTED gap (REQ-6)
+
+Upstream has `interpolation` (NEAREST/BILINEAR), `fill` (OOB fill
+value), and tuple `alpha`/`sigma` (per-axis displacement) parameters.
+Blocker #1521 covers all three.
+
+### Non-test production consumers
+
+- `pub use elastic_transform::ElasticTransform;` at
+  `ferrotorch-vision/src/transforms/mod.rs:22`.
+- (Note: `ElasticTransform` is NOT re-exported at the crate root in
+  `lib.rs:113-115`. Callers reach it via
+  `ferrotorch_vision::transforms::ElasticTransform`.)
+
+## Parity contract
+
+`parity_ops = []`.
+
+- **`alpha == 0`**: identity (no draw, no smoothing).
+- **Uniform-value input**: stays uniform — bilinear interpolation of
+  a constant field is that constant.
+- **Border samples**: clamp to edge (NOT zero like
+  `random_rotation`). This matches upstream's
+  `grid_sample(padding_mode='border')` default.
+- **Cross-channel coherence**: all channels share the same
+  displacement field, so RGB images deform coherently (no chromatic
+  drift).
+
+## Verification
+
+Tests in `mod tests in elastic_transform.rs` (10 tests):
+
+- `test_elastic_output_shape_preserved` at `elastic_transform.rs:202`
+- `test_elastic_zero_alpha_is_identity` at `elastic_transform.rs:211`
+- `test_elastic_constant_image_unchanged_interior` at `elastic_transform.rs:221`
+- `test_elastic_rejects_non_3d` at `elastic_transform.rs:237`
+- `test_elastic_rejects_zero_dim` at `elastic_transform.rs:245`
+- `test_elastic_negative_alpha_errors` at `elastic_transform.rs:253`
+- `test_elastic_zero_sigma_errors` at `elastic_transform.rs:263`
+- `test_bilinear_sample_corner` at `elastic_transform.rs:272`
+- `test_bilinear_sample_midpoint` at `elastic_transform.rs:281`
+- `test_bilinear_sample_out_of_bounds_clamps` at `elastic_transform.rs:289`
+
+Smoke:
+
+```bash
+cargo test -p ferrotorch-vision --lib transforms::elastic_transform:: 2>&1 | tail -3
+```
+
+Expected: `10 passed`.
+
+## REQ status table
+
+| REQ | Status | Evidence |
+|---|---|---|
+| REQ-1 | SHIPPED | impl: `pub struct ElasticTransform<T: Float>` with `alpha, sigma, _marker` at `ferrotorch-vision/src/transforms/elastic_transform.rs:25-29`, mirroring `torchvision/transforms/v2/_geometry.py:999` `class ElasticTransform`; non-test consumer: `pub use elastic_transform::ElasticTransform;` at `mod.rs:22` exposes it through the public transforms namespace. |
+| REQ-2 | SHIPPED | impl: `pub fn ElasticTransform::new(alpha: f64, sigma: f64) -> FerrotorchResult<Self>` with `alpha >= 0` and `sigma > 0` validation at `elastic_transform.rs:38-54`; non-test consumer: reachable via the `mod.rs:22` re-export. |
+| REQ-3 | SHIPPED | impl: `fn gaussian_kernel_1d` at `elastic_transform.rs:58-72` and `fn gaussian_filter_2d` at `elastic_transform.rs:76-112`; non-test consumer: `fn apply` in this same file calls `gaussian_filter_2d(&dy_field, h, w, self.sigma)` and `(&dx_field, ...)` at `elastic_transform.rs:169-170`. |
+| REQ-4 | SHIPPED | impl: `fn bilinear_sample(data, h, w, y, x) -> f64` with clamp-to-edge at `elastic_transform.rs:117-137`; non-test consumer: `fn apply` in this same file calls `bilinear_sample(&ch_data, h, w, src_y, src_x)` at `elastic_transform.rs:187`. |
+| REQ-5 | SHIPPED | impl: `impl<T: Float> Transform<T> for ElasticTransform<T>` with shape/dim checks, random-field gen, Gaussian smooth, per-channel bilinear sample at `elastic_transform.rs:139-195`; non-test consumer: any `Box<dyn Transform<T>>` slot — composes into augmentation `Compose` pipelines via the `mod.rs:22` re-export. |
+| REQ-6 | NOT-STARTED | open prereq blocker #1521 — `interpolation` (NEAREST/BILINEAR), `fill` (OOB fill), and tuple `alpha`/`sigma` parameters from `torchvision/transforms/v2/_geometry.py:999-1090` not implemented; ferrotorch is BILINEAR-only, clamp-to-edge OOB, scalar alpha/sigma. |

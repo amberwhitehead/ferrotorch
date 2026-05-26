@@ -1,4 +1,13 @@
 //! RandomHorizontalFlip — flip a [C, H, W] tensor along the W axis.
+//!
+//! ## REQ status (per `.design/ferrotorch-vision/transforms/random_horizontal_flip.md`)
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 | SHIPPED | `pub struct RandomHorizontalFlip<T: Float>` at `random_horizontal_flip.rs:11-14`; consumer: `pub use` at `mod.rs:27`. |
+//! | REQ-2 | SHIPPED | `RandomHorizontalFlip::new` at `random_horizontal_flip.rs:22-32`; consumer: reachable via `mod.rs:27` re-export. |
+//! | REQ-3 | SHIPPED | `impl Default` at `random_horizontal_flip.rs:35-40`; consumer: `mod.rs:27` re-export. |
+//! | REQ-4 | SHIPPED | `impl Transform<T>` at `random_horizontal_flip.rs:42-73`; consumer: any `Box<dyn Transform<T>>` slot. |
 
 use super::rng::random_f64;
 use ferrotorch_core::{FerrotorchError, FerrotorchResult, Float, Tensor, TensorStorage};

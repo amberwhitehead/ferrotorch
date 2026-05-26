@@ -1,4 +1,13 @@
 // CL-332: Vision Transforms & Augmentation — RandomVerticalFlip
+//! ## REQ status (per `.design/ferrotorch-vision/transforms/random_vertical_flip.md`)
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 | SHIPPED | `pub struct RandomVerticalFlip<T: Float>` at `random_vertical_flip.rs:11-14`; consumer: `pub use` at `mod.rs:30` and crate-root re-export at `lib.rs:114`. |
+//! | REQ-2 | SHIPPED | `RandomVerticalFlip::new` at `random_vertical_flip.rs:25-35`; consumer: `lib.rs:114` re-export. |
+//! | REQ-3 | SHIPPED | `impl Default` at `random_vertical_flip.rs:38-44`; consumer: `lib.rs:114` re-export. |
+//! | REQ-4 | SHIPPED | `impl Transform<T>` at `random_vertical_flip.rs:46-85`; consumer: any `Box<dyn Transform<T>>` slot. |
+
 use super::rng::random_f64;
 use ferrotorch_core::{FerrotorchError, FerrotorchResult, Float, Tensor, TensorStorage};
 use ferrotorch_data::Transform;

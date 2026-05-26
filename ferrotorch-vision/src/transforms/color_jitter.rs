@@ -1,4 +1,16 @@
 // CL-332: Vision Transforms & Augmentation — ColorJitter
+//! ## REQ status (per `.design/ferrotorch-vision/transforms/color_jitter.md`)
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 | SHIPPED | `pub struct ColorJitter<T: Float>` at `color_jitter.rs:22-28`; consumer: `pub use` at `mod.rs:20` and crate-root re-export at `lib.rs:113`. |
+//! | REQ-2 | SHIPPED | `ColorJitter::new` at `color_jitter.rs:43-76`; consumer: `lib.rs:113` re-export. |
+//! | REQ-3 | SHIPPED | `shuffle_order` at `color_jitter.rs:80-88`; consumer: `apply` calls `shuffle_order(4)` at `color_jitter.rs:128`. |
+//! | REQ-4 | SHIPPED | `uniform_factor` at `color_jitter.rs:91-95`; consumer: `apply` calls it for each non-zero param at `color_jitter.rs:133, 141, 153`. |
+//! | REQ-5 | SHIPPED | `impl Transform<T>` at `color_jitter.rs:97-187`; consumer: any `Box<dyn Transform<T>>` slot. |
+//! | REQ-6 | SHIPPED | `rgb_to_hsv` at `color_jitter.rs:193-212` and `hsv_to_rgb` at `color_jitter.rs:214-234`; consumer: `apply` hue branch at `color_jitter.rs:165-167`. |
+//! | REQ-7 | NOT-STARTED | blocker #1522 — `(min, max)` tuple form not implemented. |
+
 use super::rng::random_f64;
 use ferrotorch_core::numeric_cast::cast;
 use ferrotorch_core::{FerrotorchError, FerrotorchResult, Float, Tensor, TensorStorage};

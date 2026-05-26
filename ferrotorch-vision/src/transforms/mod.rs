@@ -1,3 +1,11 @@
+//! ## REQ status (per `.design/ferrotorch-vision/transforms/mod.md`)
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 | SHIPPED | 18 `pub mod` declarations at `mod.rs:1-17`; consumer: `pub mod transforms;` at `ferrotorch-vision/src/lib.rs:97`. |
+//! | REQ-2 | SHIPPED | Flat `pub use` re-exports at `mod.rs:19-35`; consumer: crate-root re-exports at `ferrotorch-vision/src/lib.rs:112-116`. |
+//! | REQ-3 | SHIPPED | `pub const IMAGENET_MEAN` at `mod.rs:38` and `IMAGENET_STD` at `mod.rs:41`; consumer: `VisionNormalize::imagenet` at `vision_normalize.rs:46-49` AND crate-root re-export at `lib.rs:113`. |
+
 pub mod center_crop;
 pub mod color_jitter;
 pub mod compose;
