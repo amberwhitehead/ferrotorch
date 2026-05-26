@@ -40,7 +40,7 @@ use ferrotorch_core::{FerrotorchResult, Float, Tensor};
 use ferrotorch_nn::Module;
 use ferrotorch_optim::Optimizer;
 use ferrotorch_optim::grad_scaler::GradScaler;
-use ferrotorch_optim::scheduler::LrScheduler;
+use ferrotorch_optim::scheduler::{LrScheduler, MetricScheduler};
 use ferrotorch_serialize::{TrainingCheckpoint, load_checkpoint, save_checkpoint};
 
 use crate::amp::AmpContext;
@@ -73,6 +73,11 @@ pub struct Learner<M, T: Float> {
     optimizer: Box<dyn Optimizer<T>>,
     loss_fn: LossFn<T>,
     scheduler: Option<Box<dyn LrScheduler<T>>>,
+    /// Optional metric-aware scheduler driven per-epoch with the
+    /// validation loss (or training loss when validation is absent).
+    /// Mirrors PyTorch's `ReduceLROnPlateau` integration where the
+    /// user calls `scheduler.step(metric)` after each epoch. (#1475)
+    metric_scheduler: Option<Box<dyn MetricScheduler<T>>>,
     /// Optional automatic-mixed-precision gradient scaler. When set, the
     /// training loop scales the loss before backward, unscales gradients
     /// inside `scaler.step`, skips the optimizer step on inf/NaN, and
@@ -124,6 +129,7 @@ impl<M: Module<T>, T: Float> Learner<M, T> {
             optimizer,
             loss_fn,
             scheduler: None,
+            metric_scheduler: None,
             grad_scaler: None,
             amp_context: None,
             train_metrics: Vec::new(),
@@ -141,6 +147,22 @@ impl<M: Module<T>, T: Float> Learner<M, T> {
     /// Attach a learning rate scheduler.
     pub fn with_scheduler(mut self, scheduler: Box<dyn LrScheduler<T>>) -> Self {
         self.scheduler = Some(scheduler);
+        self
+    }
+
+    /// Attach a metric-aware scheduler (e.g. `ReduceLROnPlateau`) that
+    /// is driven once per epoch with the validation loss (or the
+    /// training loss when validation data is absent). (#1475)
+    ///
+    /// Independent from [`Self::with_scheduler`]: both kinds can be
+    /// attached simultaneously and both are stepped per epoch — the
+    /// step-based one runs first (LR-vs-step schedule), then the
+    /// metric-based one observes the resulting LR and can override
+    /// when a plateau is detected. Mirrors PyTorch's common pattern
+    /// where a user attaches a `CosineAnnealingLR` AND a
+    /// `ReduceLROnPlateau` to the same optimizer.
+    pub fn with_metric_scheduler(mut self, metric_scheduler: Box<dyn MetricScheduler<T>>) -> Self {
+        self.metric_scheduler = Some(metric_scheduler);
         self
     }
 
@@ -533,6 +555,17 @@ impl<M: Module<T>, T: Float> Learner<M, T> {
             } else {
                 None
             };
+
+            // Metric-scheduler step (per-epoch, after validation so the
+            // plateau detector sees the up-to-date validation loss).
+            // Falls back to training loss when validation data isn't
+            // supplied. Mirrors PyTorch's standard
+            // `scheduler.step(val_loss)` recipe at end of each epoch.
+            // (#1475)
+            if let Some(ref mut metric_sched) = self.metric_scheduler {
+                let metric = val_loss.unwrap_or(train_loss);
+                metric_sched.step(self.optimizer.as_mut(), metric);
+            }
 
             // ── Epoch result ────────────────────────────────────────────
             let mut metrics = std::collections::HashMap::new();
@@ -1250,6 +1283,86 @@ mod tests {
     // -----------------------------------------------------------------------
     // checkpoint_sequential helper (#1502)
     // -----------------------------------------------------------------------
+
+    // -----------------------------------------------------------------------
+    // with_metric_scheduler wiring (#1475)
+    // -----------------------------------------------------------------------
+
+    /// `Learner::fit` drives the metric-scheduler once per epoch with
+    /// the validation loss (or training loss when val is absent).
+    ///
+    /// Uses `DummyOptimizer` + a constant-loss DummyModule fixture so
+    /// the metric is flat across epochs — `ReduceLROnPlateau(patience=0,
+    /// factor=0.5, threshold=0.0)` then guarantees a reduction every
+    /// epoch. A Learner that ignored the metric scheduler would leave
+    /// `optimizer.lr()` at the initial value.
+    #[test]
+    fn test_learner_fit_drives_metric_scheduler_per_epoch() {
+        use ferrotorch_optim::scheduler::{PlateauMode, ReduceLROnPlateau};
+
+        let model = DummyModule::<f32>::new().unwrap();
+        let optimizer: Box<dyn Optimizer<f32>> = Box::new(DummyOptimizer { lr: 0.1 });
+        // Returns the input as "prediction" so loss == pred elementwise;
+        // with constant inputs the loss stays flat across batches/epochs.
+        let loss_fn: LossFn<f32> = Box::new(|pred, _target| Ok(pred.clone()));
+
+        let plateau = ReduceLROnPlateau::new(PlateauMode::Min)
+            .patience(0)
+            .factor(0.5)
+            .threshold(0.0);
+
+        let mut learner =
+            Learner::new(model, optimizer, loss_fn).with_metric_scheduler(Box::new(plateau));
+
+        // Synthetic flat-loss batches: scalar tensors with value 1.0.
+        let flat_data = || {
+            let mut batches: Vec<FerrotorchResult<(Tensor<f32>, Tensor<f32>)>> = Vec::new();
+            for _ in 0..2 {
+                let x = ferrotorch_core::scalar(1.0_f32).unwrap();
+                let y = ferrotorch_core::scalar(1.0_f32).unwrap();
+                batches.push(Ok((x, y)));
+            }
+            batches.into_iter()
+        };
+
+        learner
+            .fit(
+                &flat_data,
+                None::<&dyn Fn() -> std::vec::IntoIter<FerrotorchResult<(Tensor<f32>, Tensor<f32>)>>>,
+                3,
+            )
+            .expect("fit");
+
+        // With a flat loss = 1.0 every epoch, `is_better` is false on
+        // the SECOND epoch (snapshot epoch sets `best = 1.0`; the
+        // second epoch's loss == 1.0 fails the strict-less-than
+        // improvement check). patience=0 means the very next bad
+        // epoch triggers a reduction. Across 3 epochs we expect 2
+        // reductions (0.1 → 0.05 → 0.025).
+        let final_lr = learner.optimizer.lr();
+        assert!(
+            final_lr < 0.1,
+            "metric_scheduler must lower LR with flat loss + patience=0; got {final_lr}"
+        );
+    }
+
+    /// `with_metric_scheduler` is a no-op on the LR scheduler slot —
+    /// the two are independent.
+    #[test]
+    fn test_learner_metric_scheduler_independent_of_lr_scheduler() {
+        use ferrotorch_optim::scheduler::{PlateauMode, ReduceLROnPlateau};
+
+        let model = DummyModule::<f32>::new().unwrap();
+        let optimizer: Box<dyn Optimizer<f32>> = Box::new(DummyOptimizer { lr: 0.01 });
+        let loss_fn: LossFn<f32> = Box::new(|pred, _target| Ok(pred.clone()));
+        let plateau = ReduceLROnPlateau::new(PlateauMode::Min);
+
+        let learner =
+            Learner::new(model, optimizer, loss_fn).with_metric_scheduler(Box::new(plateau));
+
+        assert!(learner.scheduler.is_none());
+        assert!(learner.metric_scheduler.is_some());
+    }
 
     #[test]
     fn test_learner_checkpoint_sequential_routes_through_core() {

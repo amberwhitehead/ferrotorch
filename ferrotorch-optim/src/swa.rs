@@ -42,7 +42,7 @@
 
 use ferrotorch_core::numeric_cast::cast;
 use ferrotorch_core::{FerrotorchResult, Float, Tensor, no_grad};
-use ferrotorch_nn::Parameter;
+use ferrotorch_nn::{Module, Parameter};
 
 use crate::foreach_utils::f64_scalar_on;
 use crate::optimizer::Optimizer;
@@ -109,6 +109,63 @@ pub struct AveragedModel<T: Float> {
 }
 
 impl<T: Float> AveragedModel<T> {
+    /// Create a new `AveragedModel` from a [`Module`] reference (#1470).
+    ///
+    /// Mirrors upstream `AveragedModel(model)` at
+    /// `torch/optim/swa_utils.py:165-240` — the canonical entry point
+    /// is "give me a module and I'll track its parameters". We walk
+    /// `module.parameters()` once at construction and snapshot the
+    /// initial values; subsequent calls to
+    /// [`Self::update_parameters_from_module`] / [`Self::apply_to_module`]
+    /// re-walk the module so the user doesn't have to keep a
+    /// `Vec<Parameter<T>>` slice around.
+    ///
+    /// # Arguments
+    ///
+    /// * `module` — Any `&dyn Module<T>` whose parameters should be
+    ///   averaged.
+    /// * `strategy` — [`AveragingStrategy::Swa`] or
+    ///   [`AveragingStrategy::Ema`].
+    ///
+    /// # Panics
+    ///
+    /// Panics if `Ema(decay)` has `decay` outside `[0, 1]`.
+    pub fn from_module(module: &dyn Module<T>, strategy: AveragingStrategy) -> Self {
+        let params_owned: Vec<Parameter<T>> = module
+            .parameters()
+            .into_iter()
+            .map(|p| (*p).clone())
+            .collect();
+        Self::new(&params_owned, strategy)
+    }
+
+    /// Drive an averaging update from the live parameter values of a
+    /// [`Module`] (#1470). Convenience over the
+    /// [`Self::update_parameters`] slice form.
+    pub fn update_parameters_from_module(
+        &mut self,
+        module: &dyn Module<T>,
+    ) -> FerrotorchResult<()> {
+        let params_owned: Vec<Parameter<T>> = module
+            .parameters()
+            .into_iter()
+            .map(|p| (*p).clone())
+            .collect();
+        self.update_parameters(&params_owned)
+    }
+
+    /// Copy the averaged parameter values into the module's parameter
+    /// tensors (#1470). Convenience over the [`Self::apply_to`] slice
+    /// form.
+    pub fn apply_to_module(&mut self, module: &dyn Module<T>) -> FerrotorchResult<()> {
+        let params_owned: Vec<Parameter<T>> = module
+            .parameters()
+            .into_iter()
+            .map(|p| (*p).clone())
+            .collect();
+        self.apply_to(&params_owned)
+    }
+
     /// Create a new `AveragedModel` by cloning the current parameter values.
     ///
     /// # Arguments
@@ -919,6 +976,78 @@ mod tests {
                 "avg-ema foreach parity: legacy={a}, foreach={b}"
             );
         }
+    }
+
+    // =======================================================================
+    // from_module constructor (#1470)
+    // =======================================================================
+
+    /// `from_module` walks `module.parameters()` and snapshots the
+    /// initial values. `update_parameters_from_module` and
+    /// `apply_to_module` mirror the slice-form variants.
+    #[test]
+    fn test_averaged_model_from_module_swa_running_mean() {
+        // A minimal Module impl with a single learnable parameter.
+        struct TinyModule {
+            w: Parameter<f32>,
+            training: bool,
+        }
+        impl Module<f32> for TinyModule {
+            fn forward(
+                &self,
+                input: &ferrotorch_core::Tensor<f32>,
+            ) -> FerrotorchResult<ferrotorch_core::Tensor<f32>> {
+                Ok(input.clone())
+            }
+            fn parameters(&self) -> Vec<&Parameter<f32>> {
+                vec![&self.w]
+            }
+            fn parameters_mut(&mut self) -> Vec<&mut Parameter<f32>> {
+                vec![&mut self.w]
+            }
+            fn named_parameters(&self) -> Vec<(String, &Parameter<f32>)> {
+                vec![("w".to_string(), &self.w)]
+            }
+            fn train(&mut self) {
+                self.training = true;
+            }
+            fn eval(&mut self) {
+                self.training = false;
+            }
+            fn is_training(&self) -> bool {
+                self.training
+            }
+        }
+
+        let module = TinyModule {
+            w: Parameter::from_slice(&[0.0_f32], &[1]).unwrap(),
+            training: true,
+        };
+
+        let mut avg = AveragedModel::from_module(&module, AveragingStrategy::Swa);
+
+        // Mutate the underlying weight through update_data and drive
+        // the SWA tracker. Mirrors `test_averaged_model_swa_running_mean`
+        // but goes through the module-aware entry points.
+        // SAFETY: see test-module note above; `module.w` is local.
+        no_grad(|| unsafe { module.w.tensor().update_data(&[1.0f32]) }).unwrap();
+        avg.update_parameters_from_module(&module).unwrap();
+        assert!((avg.averaged_params()[0][0] - 1.0).abs() < 1e-6);
+
+        // SAFETY: see test-module note above; `module.w` is local.
+        no_grad(|| unsafe { module.w.tensor().update_data(&[3.0f32]) }).unwrap();
+        avg.update_parameters_from_module(&module).unwrap();
+        // avg = 1 + (3 - 1) / 2 = 2.
+        assert!(
+            (avg.averaged_params()[0][0] - 2.0).abs() < 1e-6,
+            "expected 2.0, got {}",
+            avg.averaged_params()[0][0]
+        );
+
+        // apply_to_module writes the averaged value into the module.
+        avg.apply_to_module(&module).unwrap();
+        let data = module.w.data().unwrap();
+        assert!((data[0] - 2.0).abs() < 1e-6, "got {}", data[0]);
     }
 
     #[test]

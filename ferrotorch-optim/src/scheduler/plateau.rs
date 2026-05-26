@@ -8,12 +8,12 @@
 //! | REQ | Status | Evidence |
 //! |---|---|---|
 //! | REQ-1 | SHIPPED | `pub enum PlateauMode { Min, Max }` in `scheduler/plateau.rs` mirrors `torch/optim/lr_scheduler.py:1650`; consumer: re-exported at `ferrotorch-optim/src/lib.rs:47-52`. |
-//! | REQ-2 | SHIPPED | `pub struct ReduceLROnPlateau` schedule state in `scheduler/plateau.rs` mirrors `torch/optim/lr_scheduler.py:1647-1687`; consumer: re-exported via `lib.rs:47-52`. NOTE: REQ-6 (training-driver wiring) is the open work. |
-//! | REQ-3 | SHIPPED | `pub fn ReduceLROnPlateau::new(mode)` + builder methods in `scheduler/plateau.rs` mirror `torch/optim/lr_scheduler.py:1647-1687` (R-DEV-7 builder); consumer: re-exported via `lib.rs:47-52`. |
-//! | REQ-4 | SHIPPED | `pub trait MetricScheduler<T: Float>` in `scheduler/plateau.rs` mirrors the `step(metrics)` signature at `torch/optim/lr_scheduler.py:1695`; consumer: re-exported at `ferrotorch-optim/src/lib.rs:47-52`. NOTE: trait has no non-test production consumer; REQ-6 tracks it. |
-//! | REQ-5 | SHIPPED | `impl<T: Float> MetricScheduler<T> for ReduceLROnPlateau` first-call snapshot + best-tracking + reduction in `scheduler/plateau.rs` mirrors `torch/optim/lr_scheduler.py:1695-1742`; consumer: as REQ-4/REQ-6, no production caller yet (vocabulary-only). |
-//! | REQ-6 | NOT-STARTED | blocker #1475 — `Learner::with_scheduler` only accepts `Box<dyn LrScheduler<T>>`; a `with_metric_scheduler` builder + `metric_sched.step(opt, val_loss)` per-epoch invocation is needed in `ferrotorch-train/src/learner.rs`. |
-//! | REQ-7 | NOT-STARTED | blocker #1476 — `cooldown`/`eps`/`threshold_mode='abs'`/per-group `min_lr` (upstream `torch/optim/lr_scheduler.py:1625-1632, 1684`) not exposed in builder. |
+//! | REQ-2 | SHIPPED | `pub struct ReduceLROnPlateau` schedule state in `scheduler/plateau.rs` mirrors `torch/optim/lr_scheduler.py:1647-1687`; consumer: re-exported via `lib.rs:47-52`; non-test consumer: `Learner::with_metric_scheduler` at `ferrotorch-train/src/learner.rs` boxes a `ReduceLROnPlateau` and drives its `step(metric)` per epoch (closes #1475). |
+//! | REQ-3 | SHIPPED | `pub fn ReduceLROnPlateau::new(mode)` + builder methods (`factor`/`patience`/`min_lr`/`threshold`/`with_cooldown`/`with_eps`/`with_threshold_mode`/`with_per_group_min_lr`) in `scheduler/plateau.rs` mirror `torch/optim/lr_scheduler.py:1583-1786` (R-DEV-7 builder); consumer: re-exported via `lib.rs:47-52`. |
+//! | REQ-4 | SHIPPED | `pub trait MetricScheduler<T: Float>` in `scheduler/plateau.rs` mirrors the `step(metrics)` signature at `torch/optim/lr_scheduler.py:1695`; consumer: re-exported at `ferrotorch-optim/src/lib.rs:47-52`; non-test consumer: `Learner` boxes `dyn MetricScheduler<T>` via `with_metric_scheduler` and dispatches `step(opt, metric)` per epoch (closes #1475). |
+//! | REQ-5 | SHIPPED | `impl<T: Float> MetricScheduler<T> for ReduceLROnPlateau` first-call snapshot + best-tracking + cooldown + reduction in `scheduler/plateau.rs` mirrors `torch/optim/lr_scheduler.py:1695-1742`; non-test consumer: `Learner::fit` invokes `metric_sched.step(self.optimizer.as_mut(), val_loss)` after each epoch (closes #1475). |
+//! | REQ-6 | SHIPPED | `Learner::with_metric_scheduler` at `ferrotorch-train/src/learner.rs` accepts `Box<dyn MetricScheduler<T>>`, and `Learner::fit` invokes `metric_sched.step(opt, metric)` per epoch with the validation loss (falling back to training loss when validation is absent); closes #1475. |
+//! | REQ-7 | SHIPPED | `with_cooldown(usize)` + `with_eps(f64)` + `with_threshold_mode(ThresholdMode)` + `with_per_group_min_lr(Vec<f64>)` builders on `ReduceLROnPlateau` mirror `torch/optim/lr_scheduler.py:1625-1632, 1684`; consumer: re-exported at `lib.rs:47-52`; the `MetricScheduler` step impl uses these fields per-group; closes #1476. |
 
 use ferrotorch_core::Float;
 
@@ -26,6 +26,25 @@ pub enum PlateauMode {
     Min,
     /// Reduce LR when the metric stops increasing.
     Max,
+}
+
+/// Threshold mode for plateau improvement detection.
+///
+/// Mirrors `threshold_mode: Literal["rel", "abs"]` at
+/// `torch/optim/lr_scheduler.py:1626-1632`.
+///
+/// * `Rel` — relative threshold: improvement requires
+///   `metric < best * (1 - threshold)` in Min mode or
+///   `metric > best * (1 + threshold)` in Max mode.
+/// * `Abs` — absolute threshold: improvement requires
+///   `metric < best - threshold` in Min mode or
+///   `metric > best + threshold` in Max mode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ThresholdMode {
+    /// Relative threshold (default; matches `"rel"` upstream).
+    Rel,
+    /// Absolute threshold (matches `"abs"` upstream).
+    Abs,
 }
 
 /// A metric-aware scheduler that reduces the learning rate when a metric
@@ -63,15 +82,40 @@ pub struct ReduceLROnPlateau {
     factor: f64,
     /// Number of steps with no improvement before reducing LR.
     patience: usize,
-    /// Minimum learning rate. LR will not be reduced below this value.
+    /// Minimum learning rate when no per-group floor is set. LR will not
+    /// be reduced below this value.
     min_lr: f64,
-    /// Threshold for measuring improvement (relative).
+    /// Optional per-parameter-group minimum learning rate (#1476).
+    /// When `Some`, must have `len() == optimizer.param_groups().len()`
+    /// at step time; each group's floor is `per_group_min_lr[i]`. When
+    /// `None`, the scalar `min_lr` is the floor for every group.
+    /// Mirrors `min_lr: Union[List[float], float]` at
+    /// `torch/optim/lr_scheduler.py:1684`.
+    per_group_min_lr: Option<Vec<f64>>,
+    /// Threshold for measuring improvement.
     threshold: f64,
+    /// Threshold mode (`Rel` or `Abs`). Mirrors upstream
+    /// `threshold_mode` at `torch/optim/lr_scheduler.py:1626-1632`.
+    threshold_mode: ThresholdMode,
+    /// Number of epochs to wait after a reduction before resuming
+    /// plateau detection. Mirrors `cooldown` at
+    /// `torch/optim/lr_scheduler.py:1625`.
+    cooldown: usize,
+    /// Minimum decay applied to LR — if the would-be `new_lr` is
+    /// within `eps` of the current LR (i.e. the relative change is
+    /// less than `eps`), the reduction is skipped. Mirrors `eps` at
+    /// `torch/optim/lr_scheduler.py:1632`.
+    eps: f64,
     /// Best metric value seen so far.
     best: f64,
     /// Number of steps since the last improvement.
     num_bad_steps: usize,
-    /// Current learning rate (tracked for `get_lr()`).
+    /// Remaining cooldown steps (decremented each `step` until 0).
+    cooldown_counter: usize,
+    /// Current learning rate (tracked for `get_lr()`). When
+    /// `per_group_min_lr` is in use this still tracks group 0's LR for
+    /// `get_lr` reporting; the per-group writebacks happen via
+    /// `param_groups_mut()` directly.
     current_lr: f64,
     /// Whether we have received at least one metric value.
     initialized: bool,
@@ -95,9 +139,14 @@ impl ReduceLROnPlateau {
             factor: 0.1,
             patience: 10,
             min_lr: 0.0,
+            per_group_min_lr: None,
             threshold: 1e-4,
+            threshold_mode: ThresholdMode::Rel,
+            cooldown: 0,
+            eps: 1e-8,
             best,
             num_bad_steps: 0,
+            cooldown_counter: 0,
             current_lr: 0.0,
             initialized: false,
         }
@@ -127,6 +176,54 @@ impl ReduceLROnPlateau {
         self
     }
 
+    /// Set the cooldown period (number of post-reduction steps to wait
+    /// before resuming plateau detection).
+    ///
+    /// Mirrors `cooldown` at `torch/optim/lr_scheduler.py:1625`.
+    #[must_use]
+    pub fn with_cooldown(mut self, cooldown: usize) -> Self {
+        self.cooldown = cooldown;
+        self
+    }
+
+    /// Set the minimum-decay threshold `eps`. A reduction is skipped
+    /// when the relative change `(current_lr - new_lr) / current_lr`
+    /// is less than `eps`.
+    ///
+    /// Mirrors `eps` at `torch/optim/lr_scheduler.py:1632`.
+    #[must_use]
+    pub fn with_eps(mut self, eps: f64) -> Self {
+        self.eps = eps;
+        self
+    }
+
+    /// Switch between relative (`ThresholdMode::Rel`, default) and
+    /// absolute (`ThresholdMode::Abs`) improvement detection.
+    ///
+    /// Mirrors `threshold_mode` at
+    /// `torch/optim/lr_scheduler.py:1626-1632`.
+    #[must_use]
+    pub fn with_threshold_mode(mut self, mode: ThresholdMode) -> Self {
+        self.threshold_mode = mode;
+        self
+    }
+
+    /// Configure per-parameter-group LR floors.
+    ///
+    /// When set, the `min_lr` floor used during reduction is taken
+    /// from `per_group_min_lr[group_idx]` for each optimizer parameter
+    /// group. The number of entries must match the optimizer's group
+    /// count at step time; mismatch falls back to the scalar
+    /// `min_lr` for that group.
+    ///
+    /// Mirrors `min_lr: List[float]` at
+    /// `torch/optim/lr_scheduler.py:1684`.
+    #[must_use]
+    pub fn with_per_group_min_lr(mut self, per_group_min_lr: Vec<f64>) -> Self {
+        self.per_group_min_lr = Some(per_group_min_lr);
+        self
+    }
+
     /// Return the current learning rate.
     pub fn get_lr(&self) -> f64 {
         self.current_lr
@@ -134,10 +231,20 @@ impl ReduceLROnPlateau {
 
     /// Check whether the metric has improved relative to the best.
     fn is_better(&self, metric: f64) -> bool {
-        match self.mode {
-            PlateauMode::Min => metric < self.best * (1.0 - self.threshold),
-            PlateauMode::Max => metric > self.best * (1.0 + self.threshold),
+        match (self.mode, self.threshold_mode) {
+            (PlateauMode::Min, ThresholdMode::Rel) => metric < self.best * (1.0 - self.threshold),
+            (PlateauMode::Min, ThresholdMode::Abs) => metric < self.best - self.threshold,
+            (PlateauMode::Max, ThresholdMode::Rel) => metric > self.best * (1.0 + self.threshold),
+            (PlateauMode::Max, ThresholdMode::Abs) => metric > self.best + self.threshold,
         }
+    }
+
+    /// Resolve the LR floor for the given parameter group index.
+    fn floor_for_group(&self, group_idx: usize) -> f64 {
+        self.per_group_min_lr
+            .as_ref()
+            .and_then(|v| v.get(group_idx).copied())
+            .unwrap_or(self.min_lr)
     }
 }
 
@@ -165,15 +272,65 @@ impl<T: Float> MetricScheduler<T> for ReduceLROnPlateau {
         if self.is_better(metric) {
             self.best = metric;
             self.num_bad_steps = 0;
+        } else if self.cooldown_counter > 0 {
+            // In cooldown: the metric counts as "improved" for the
+            // purposes of patience even when it would otherwise be a
+            // bad step. Mirrors upstream's `in_cooldown` short-circuit
+            // at `torch/optim/lr_scheduler.py:1718-1735` where the
+            // bad-step counter is held at zero during cooldown.
+            self.num_bad_steps = 0;
+            self.cooldown_counter -= 1;
         } else {
             self.num_bad_steps += 1;
         }
 
         if self.num_bad_steps > self.patience {
-            let new_lr = (self.current_lr * self.factor).max(self.min_lr);
-            if new_lr < self.current_lr {
-                self.current_lr = new_lr;
-                optimizer.set_lr(new_lr);
+            // Per-group reduction (#1476): walk each parameter group and
+            // apply the per-group floor when set. Falls back to the
+            // scalar `min_lr` floor for any group whose index is out of
+            // range in `per_group_min_lr`.
+            let num_groups = optimizer.param_groups().len();
+            if num_groups > 1 || self.per_group_min_lr.is_some() {
+                let mut any_lowered = false;
+                let mut new_lrs: Vec<f64> = Vec::with_capacity(num_groups);
+                for gi in 0..num_groups {
+                    let cur = optimizer.param_groups()[gi].lr;
+                    let floor = self.floor_for_group(gi);
+                    let candidate = (cur * self.factor).max(floor);
+                    // `eps` gate (#1476): skip the reduction when the
+                    // relative change is smaller than `eps`, mirroring
+                    // upstream's `if old_lr - new_lr > self.eps`
+                    // check at `torch/optim/lr_scheduler.py:1748`.
+                    if cur - candidate > self.eps {
+                        new_lrs.push(candidate);
+                        any_lowered = true;
+                    } else {
+                        new_lrs.push(cur);
+                    }
+                }
+                if any_lowered {
+                    // Apply per-group writeback.
+                    let groups = optimizer.param_groups_mut();
+                    for (gi, lr) in new_lrs.iter().enumerate() {
+                        if let Some(group) = groups.get_mut(gi) {
+                            group.lr = *lr;
+                        }
+                    }
+                    // Track group 0's LR for `get_lr` reporting; the
+                    // other groups are observable via
+                    // `optimizer.param_groups()[gi].lr`.
+                    self.current_lr = new_lrs[0];
+                    self.cooldown_counter = self.cooldown;
+                }
+            } else {
+                // Single-group fast path (preserves legacy behaviour).
+                let floor = self.floor_for_group(0);
+                let new_lr = (self.current_lr * self.factor).max(floor);
+                if self.current_lr - new_lr > self.eps {
+                    self.current_lr = new_lr;
+                    optimizer.set_lr(new_lr);
+                    self.cooldown_counter = self.cooldown;
+                }
             }
             self.num_bad_steps = 0;
         }
@@ -319,6 +476,149 @@ mod tests {
             (opt.lr - 0.05).abs() < 1e-12,
             "expected 0.05 after plateau in max mode, got {}",
             opt.lr
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // #1476 — cooldown / eps / threshold_mode / per_group_min_lr
+    // -----------------------------------------------------------------------
+
+    /// `with_cooldown(N)` suppresses further reductions for N steps
+    /// after each reduction.
+    #[test]
+    fn test_plateau_cooldown_suppresses_reduction() {
+        let mut sched = ReduceLROnPlateau::new(PlateauMode::Min)
+            .patience(0)
+            .factor(0.5)
+            .threshold(0.0)
+            .with_cooldown(3);
+        let mut opt = MockOptimizer::new(1.0);
+
+        // First bad step triggers a reduction: 1.0 → 0.5.
+        <ReduceLROnPlateau as MetricScheduler<f32>>::step(&mut sched, &mut opt, 1.0);
+        <ReduceLROnPlateau as MetricScheduler<f32>>::step(&mut sched, &mut opt, 1.0);
+        assert!(
+            (opt.lr - 0.5).abs() < 1e-12,
+            "first reduction; got {}",
+            opt.lr
+        );
+
+        // Three cooldown steps: even with "bad" metrics, no reduction.
+        for _ in 0..3 {
+            <ReduceLROnPlateau as MetricScheduler<f32>>::step(&mut sched, &mut opt, 1.0);
+        }
+        assert!(
+            (opt.lr - 0.5).abs() < 1e-12,
+            "during cooldown LR must stay at 0.5; got {}",
+            opt.lr
+        );
+
+        // After cooldown, the next patience+1 bad steps trigger the
+        // next reduction.
+        <ReduceLROnPlateau as MetricScheduler<f32>>::step(&mut sched, &mut opt, 1.0);
+        assert!(
+            (opt.lr - 0.25).abs() < 1e-12,
+            "post-cooldown reduction; got {}",
+            opt.lr
+        );
+    }
+
+    /// `with_eps(eps)` skips the reduction when the relative change is
+    /// below `eps`.
+    #[test]
+    fn test_plateau_eps_skips_tiny_reductions() {
+        // current=1.0, factor=0.999 → candidate=0.999. With eps=0.01
+        // the change 1e-3 is below eps, so the reduction is skipped.
+        let mut sched = ReduceLROnPlateau::new(PlateauMode::Min)
+            .patience(0)
+            .factor(0.999)
+            .threshold(0.0)
+            .with_eps(0.01);
+        let mut opt = MockOptimizer::new(1.0);
+
+        <ReduceLROnPlateau as MetricScheduler<f32>>::step(&mut sched, &mut opt, 1.0);
+        <ReduceLROnPlateau as MetricScheduler<f32>>::step(&mut sched, &mut opt, 1.0);
+        assert!(
+            (opt.lr - 1.0).abs() < 1e-12,
+            "eps must suppress reduction below threshold; got {}",
+            opt.lr
+        );
+    }
+
+    /// `with_threshold_mode(Abs)` switches to absolute improvement
+    /// detection.
+    #[test]
+    fn test_plateau_threshold_mode_abs_min() {
+        // Min mode + Abs threshold=0.1: improvement requires
+        // metric < best - 0.1.
+        let mut sched = ReduceLROnPlateau::new(PlateauMode::Min)
+            .patience(2)
+            .factor(0.5)
+            .threshold(0.1)
+            .with_threshold_mode(ThresholdMode::Abs);
+        let mut opt = MockOptimizer::new(0.1);
+
+        // Step 1: snapshot.
+        <ReduceLROnPlateau as MetricScheduler<f32>>::step(&mut sched, &mut opt, 1.0);
+        // 0.95 < 1.0 - 0.1 = 0.9? No (0.95 > 0.9): bad.
+        <ReduceLROnPlateau as MetricScheduler<f32>>::step(&mut sched, &mut opt, 0.95);
+        // Another small "improvement" that doesn't pass abs(0.1).
+        <ReduceLROnPlateau as MetricScheduler<f32>>::step(&mut sched, &mut opt, 0.93);
+        // Third bad step crosses patience+1 → reduction.
+        <ReduceLROnPlateau as MetricScheduler<f32>>::step(&mut sched, &mut opt, 0.92);
+        assert!(
+            (opt.lr - 0.05).abs() < 1e-12,
+            "Abs threshold must NOT treat 0.05-step deltas as improvement; got {}",
+            opt.lr
+        );
+
+        // A real Abs-passing improvement (drop of 0.5) resets the
+        // counter without reducing further.
+        <ReduceLROnPlateau as MetricScheduler<f32>>::step(&mut sched, &mut opt, 0.4);
+        assert!(
+            (opt.lr - 0.05).abs() < 1e-12,
+            "Abs improvement must NOT reduce; got {}",
+            opt.lr
+        );
+    }
+
+    /// `with_per_group_min_lr` honors per-group floors.
+    #[test]
+    fn test_plateau_per_group_min_lr_uses_per_group_floor() {
+        // Build a fake two-group optimizer via SGD with add_param_group.
+        use crate::{Sgd, SgdConfig};
+        use ferrotorch_nn::Parameter;
+
+        let p1 = Parameter::<f32>::from_slice(&[1.0_f32], &[1]).unwrap();
+        let p2 = Parameter::<f32>::from_slice(&[1.0_f32], &[1]).unwrap();
+        let mut sgd = Sgd::new(vec![p1], SgdConfig::new(0.1));
+        let g2 = crate::optimizer::ParamGroup::new(vec![p2], 0.1);
+        sgd.add_param_group(g2);
+
+        // Per-group floors: group 0 floored at 0.05; group 1 at 0.01.
+        let mut sched = ReduceLROnPlateau::new(PlateauMode::Min)
+            .patience(0)
+            .factor(0.1)
+            .threshold(0.0)
+            .with_per_group_min_lr(vec![0.05, 0.01]);
+
+        // First step seeds best with 1.0.
+        sched.step(&mut sgd, 1.0);
+        // patience+1 bad steps trigger reduction.
+        sched.step(&mut sgd, 1.0);
+
+        // candidate = max(0.1 * 0.1, floor) = max(0.01, floor).
+        // Group 0 floor=0.05 ⇒ result 0.05.
+        // Group 1 floor=0.01 ⇒ result 0.01.
+        let g0_lr = sgd.param_groups()[0].lr;
+        let g1_lr = sgd.param_groups()[1].lr;
+        assert!(
+            (g0_lr - 0.05).abs() < 1e-12,
+            "group 0 LR should hit floor 0.05; got {g0_lr}"
+        );
+        assert!(
+            (g1_lr - 0.01).abs() < 1e-12,
+            "group 1 LR should hit floor 0.01; got {g1_lr}"
         );
     }
 

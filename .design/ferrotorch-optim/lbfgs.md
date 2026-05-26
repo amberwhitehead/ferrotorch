@@ -52,8 +52,17 @@ keeps every step on the parameter's device.
 - REQ-8: `step()` (the trait method, NO closure) — works only when
   `config.line_search_fn.is_none()`; if line search is configured, it
   returns `FerrotorchError::InvalidArgument` instructing the caller to
-  use `step_with_closure`. Divergence from upstream `step(closure=None)`
-  uniform API tracked by #1469.
+  use `step_with_closure`. Documented divergence: Rust trait method
+  signatures cannot accept a conditional `closure` arg, so the upstream
+  `step(closure=None)` uniform API is intentionally split into
+  `step` / `step_with_closure`. (closes #1469)
+
+- REQ-11: Per-group LR — `step` / `step_with_closure` build a
+  per-element LR vector aligned to the flat parameter layout when
+  `param_groups.len() > 1`, and scale the descent direction
+  element-wise by that vector before adding to the params. Mirrors
+  upstream `for group in self.param_groups: lr = group["lr"]; ...`
+  pattern at `torch/optim/lbfgs.py:288-310`. (closes #1469)
 - REQ-9: `state_dict`/`load_state_dict` round-trip the full state:
   meta `n_iter` and `history_len`; per-curvature-pair `s`/`y`/`rho`;
   `prev_flat_params`/`prev_flat_grad` if present. All tensors are

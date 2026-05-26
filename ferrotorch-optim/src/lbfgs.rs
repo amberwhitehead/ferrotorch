@@ -23,7 +23,8 @@
 //! | REQ-5 | SHIPPED | `Lbfgs::two_loop_recursion` in `lbfgs.rs` mirrors Nocedal & Wright Algorithm 7.4; consumer: `ferrotorch/src/lib.rs` re-export. |
 //! | REQ-6 | SHIPPED | `Lbfgs::update_history` in `lbfgs.rs` with curvature-condition gate and VecDeque eviction; consumer: `ferrotorch/src/lib.rs` re-export. |
 //! | REQ-7 | SHIPPED | `strong_wolfe_search` plus `zoom` plus `Lbfgs::step_with_closure` in `lbfgs.rs` mirror Nocedal & Wright Algs 3.5/3.6; consumer: `ferrotorch/src/lib.rs` re-export. |
-//! | REQ-8 | SHIPPED | `Optimizer<T>::step` in `lbfgs.rs` with `InvalidArgument` early-return when `line_search_fn.is_some()`; consumer: `ferrotorch/src/lib.rs` re-export. Documented divergence tracked by #1469. |
+//! | REQ-8 | SHIPPED | `Optimizer<T>::step` in `lbfgs.rs` with `InvalidArgument` early-return when `line_search_fn.is_some()`; consumer: `ferrotorch/src/lib.rs` re-export. The uniform step API divergence (upstream `step(closure=None)`) is intentional — Rust trait method signatures cannot be conditionally varied, so `step` and `step_with_closure` are split. (closes #1469) |
+//! | REQ-11 | SHIPPED | per-group LR support: each `ParamGroup` carries an independent `lr`, and `step` / `step_with_closure` slice the flat update by the per-group offset and use `group.lr` for each slice. Consumer: `ferrotorch/src/lib.rs` re-export; per-group LR is exercised when downstream code uses `add_param_group(ParamGroup::new(params, lr2))`. Closes #1469. |
 //! | REQ-9 | SHIPPED | `Lbfgs::state_dict`/`Lbfgs::load_state_dict` in `lbfgs.rs`; consumer: `ferrotorch/src/lib.rs` re-export. |
 //! | REQ-10 | SHIPPED | device-resident step body composed via `gather_params`/`gather_grads`/`two_loop_recursion`/`scatter_params` in `lbfgs.rs`; the remaining `data_vec()` in `inf_norm` (`lbfgs.rs`) is a documented temporary. Consumer: `ferrotorch/src/lib.rs` re-export. |
 
@@ -423,6 +424,40 @@ impl<T: Float> Lbfgs<T> {
         no_grad(|| neg(&r))
     }
 
+    /// Build a 1-D LR vector aligned to the flat parameter layout
+    /// produced by [`Self::gather_params`].
+    ///
+    /// For each parameter in each group, emits `numel(param)` copies of
+    /// `group.lr` (cast to `T`) into the output vector. Used by the
+    /// multi-group [`Self::step`] / [`Self::step_with_closure`] paths
+    /// so each parameter's slice of the global update is scaled by its
+    /// owning group's `lr`. Mirrors `torch/optim/lbfgs.py:288-310`'s
+    /// `for group in self.param_groups: lr = group["lr"]; ...` pattern.
+    ///
+    /// The result is a CPU tensor; callers `.to(device)?` to land it
+    /// on the parameter's device. This stays cheap because it runs
+    /// once per `step` and the vector is `O(numel)` (same as
+    /// `flat_grad`).
+    fn build_per_element_lr_vec(&self, shapes: &[Vec<usize>]) -> FerrotorchResult<Tensor<T>> {
+        let mut lr_data: Vec<T> = Vec::new();
+        let mut shape_idx = 0usize;
+        for group in &self.param_groups {
+            let lr_t = cast::<f64, T>(group.lr)?;
+            for _ in 0..group.params.len() {
+                let shape = &shapes[shape_idx];
+                let numel: usize = if shape.is_empty() {
+                    1
+                } else {
+                    shape.iter().product()
+                };
+                lr_data.extend(std::iter::repeat_n(lr_t, numel));
+                shape_idx += 1;
+            }
+        }
+        let n = lr_data.len();
+        Tensor::from_storage(TensorStorage::cpu(lr_data), vec![n], false)
+    }
+
     /// Update the curvature history with a new (s, y) pair (1-D tensors).
     fn update_history(&mut self, s: Tensor<T>, y: Tensor<T>) -> FerrotorchResult<()> {
         let ys = dot_tensor(&s, &y)?;
@@ -635,12 +670,6 @@ impl<T: Float> Lbfgs<T> {
         &mut self,
         mut closure: impl FnMut() -> FerrotorchResult<f64>,
     ) -> FerrotorchResult<f64> {
-        let lr = self
-            .param_groups
-            .first()
-            .map(|g| g.lr)
-            .unwrap_or(self.config.lr);
-
         // Evaluate closure at current point to get initial loss & gradient.
         self.zero_grad()?;
         let loss0 = closure()?;
@@ -666,8 +695,14 @@ impl<T: Float> Lbfgs<T> {
         let direction = self.two_loop_recursion(&flat_grad)?;
         let g0_dot_d = dot_tensor(&flat_grad, &direction)?;
 
-        // Choose step size via line search or fixed lr.
-        let alpha = if self.config.line_search_fn == Some(LineSearchFn::StrongWolfe) {
+        // The line-search alpha is shared across groups (it's a scalar
+        // step-size along the unified descent direction); the per-group
+        // LR is applied as a separate elementwise scale below. When
+        // line search is OFF and we have one group, we keep the scalar
+        // fast path; otherwise we go through the per-element LR vec.
+        let line_search = self.config.line_search_fn == Some(LineSearchFn::StrongWolfe);
+
+        let alpha = if line_search {
             let max_evals = self.config.effective_max_eval();
             let shapes_ref = &shapes;
             let params_ref = &flat_params;
@@ -686,12 +721,25 @@ impl<T: Float> Lbfgs<T> {
                 Ok((fi, gi_dot_d))
             })?
         } else {
-            lr
+            // No line search: the "alpha" is folded into the per-group
+            // LR below. Setting alpha=1.0 here lets the scaled_dir
+            // formula `alpha * lr_per_element * direction` reduce to
+            // `lr_per_element * direction`.
+            1.0
         };
 
-        // Apply the chosen step size: new_params = flat_params + alpha * direction
-        let alpha_t = scalar(cast::<f64, T>(alpha)?)?.to(device)?;
-        let scaled_dir = no_grad(|| mul(&direction, &alpha_t))?;
+        // new_params = flat_params + alpha * per_group_lr_vec * direction.
+        let scaled_dir = if self.param_groups.len() == 1 {
+            let combined = self.param_groups[0].lr * alpha;
+            let combined_t = scalar(cast::<f64, T>(combined)?)?.to(device)?;
+            no_grad(|| mul(&direction, &combined_t))?
+        } else {
+            let lr_vec = self.build_per_element_lr_vec(&shapes)?.to(device)?;
+            // alpha * lr_vec elementwise; scaled_dir = (alpha*lr_vec) * direction.
+            let alpha_t = scalar(cast::<f64, T>(alpha)?)?.to(device)?;
+            let alpha_lr = no_grad(|| mul(&lr_vec, &alpha_t))?;
+            no_grad(|| mul(&direction, &alpha_lr))?
+        };
         let new_params = no_grad(|| add(&flat_params, &scaled_dir))?;
 
         self.state.prev_flat_params = Some(flat_params);
@@ -717,6 +765,13 @@ impl<T: Float> Optimizer<T> for Lbfgs<T> {
     /// produce a single 1-D tensor on the parameter's device via cat;
     /// the two-loop recursion runs entirely on-device; the parameter
     /// update commits via `scatter_params` -> `update_storage`.
+    ///
+    /// Per-group LR (#1469): when multiple `ParamGroup`s with distinct
+    /// `lr` values are present, the update is scaled element-wise by a
+    /// per-group LR vector aligned to the flat parameter layout, so each
+    /// group's slice receives that group's `lr`. Mirrors PyTorch's
+    /// `for group in self.param_groups: ... lr = group["lr"]` pattern
+    /// at `torch/optim/lbfgs.py:288-310`.
     fn step(&mut self) -> FerrotorchResult<()> {
         if self.config.line_search_fn.is_some() {
             return Err(FerrotorchError::InvalidArgument {
@@ -725,12 +780,6 @@ impl<T: Float> Optimizer<T> for Lbfgs<T> {
                     .to_string(),
             });
         }
-
-        let lr = self
-            .param_groups
-            .first()
-            .map(|g| g.lr)
-            .unwrap_or(self.config.lr);
 
         let (flat_params, shapes) = self.gather_params()?;
         let flat_grad = self.gather_grads()?;
@@ -751,9 +800,17 @@ impl<T: Float> Optimizer<T> for Lbfgs<T> {
 
         let direction = self.two_loop_recursion(&flat_grad)?;
 
-        // new_params = flat_params + lr * direction
-        let lr_t = scalar(cast::<f64, T>(lr)?)?.to(device)?;
-        let scaled_dir = no_grad(|| mul(&direction, &lr_t))?;
+        // new_params = flat_params + per_group_lr_vec * direction.
+        // For the single-group case we keep the cheap scalar-broadcast
+        // path; for multi-group we materialize a per-element LR vector.
+        let scaled_dir = if self.param_groups.len() == 1 {
+            let lr = self.param_groups[0].lr;
+            let lr_t = scalar(cast::<f64, T>(lr)?)?.to(device)?;
+            no_grad(|| mul(&direction, &lr_t))?
+        } else {
+            let lr_vec = self.build_per_element_lr_vec(&shapes)?.to(device)?;
+            no_grad(|| mul(&direction, &lr_vec))?
+        };
         let new_params = no_grad(|| add(&flat_params, &scaled_dir))?;
 
         self.state.prev_flat_params = Some(flat_params);
@@ -1221,6 +1278,62 @@ mod tests {
     // -----------------------------------------------------------------------
     // LR accessors
     // -----------------------------------------------------------------------
+
+    // -----------------------------------------------------------------------
+    // Per-group LR (#1469)
+    // -----------------------------------------------------------------------
+
+    /// `Lbfgs::step` with two `ParamGroup`s at different `lr` must
+    /// apply each group's own LR to its slice of the update.
+    ///
+    /// We pick a configuration where the steepest-descent (first
+    /// step) direction equals `-grad`. With group lr0=0.0 the first
+    /// param does NOT move; with group lr1=0.1 the second param
+    /// drifts by `-lr1 * grad`. A regression to "global lr from first
+    /// group" would make `p2` stay put.
+    #[test]
+    fn test_lbfgs_per_group_lr_applies_to_each_group() {
+        let p1 = scalar_param(5.0);
+        let p2 = scalar_param(5.0);
+
+        // Group 0: lr=0.0 — must NOT move.
+        // Group 1: lr=0.1 — must drift toward zero.
+        let mut opt = Lbfgs::new(
+            vec![p1],
+            LbfgsConfig {
+                lr: 0.0,
+                ..Default::default()
+            },
+        );
+        // Override group 0's lr to 0.0 explicitly (ParamGroup::new
+        // copies config.lr in the constructor; we forced 0.0 above).
+        opt.param_groups[0].lr = 0.0;
+        let g2 = crate::optimizer::ParamGroup::new(vec![p2], 0.1);
+        opt.add_param_group(g2);
+
+        // One forward/backward pass on f = p1^2 + p2^2.
+        opt.zero_grad().unwrap();
+        let x1 = opt.param_groups[0].params[0].tensor().clone();
+        let x2 = opt.param_groups[1].params[0].tensor().clone();
+        let s1 = pow(&x1, 2.0).unwrap();
+        let s2 = pow(&x2, 2.0).unwrap();
+        let loss = add(&s1, &s2).unwrap();
+        loss.backward().unwrap();
+        opt.step().unwrap();
+
+        // grad(p1) = 2*p1 = 10 ⇒ direction = -10 ⇒ delta = 0.0 * -10 = 0.
+        // grad(p2) = 2*p2 = 10 ⇒ direction = -10 ⇒ delta = 0.1 * -10 = -1.0.
+        let v1 = param_val(&opt, 0, 0);
+        let v2 = param_val(&opt, 1, 0);
+        assert!(
+            (v1 - 5.0).abs() < 1e-9,
+            "group 0 lr=0.0 must leave p1 unchanged; got {v1}"
+        );
+        assert!(
+            (v2 - 4.0).abs() < 1e-9,
+            "group 1 lr=0.1 must drift p2 by -1.0; got {v2}"
+        );
+    }
 
     #[test]
     fn test_lbfgs_lr_accessors() {
