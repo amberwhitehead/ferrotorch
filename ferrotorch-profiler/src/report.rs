@@ -1,3 +1,27 @@
+//! `ProfileReport` value, `OpSummary` per-op rollup, ASCII table renderer,
+//! Chrome trace JSON encoder, and `TensorBoard` log-directory layout
+//! exporter.
+//!
+//! Mirrors `PyTorch`'s `profile.table()` at `torch/autograd/profiler.py:494`,
+//! `profile.export_chrome_trace()` at `torch/autograd/profiler.py:519`, and
+//! the `TensorBoard` plugin file layout from `tensorboard_trace_handler`
+//! at `torch/profiler/profiler.py:621`. See
+//! `.design/ferrotorch-profiler/report.md` for the design contract.
+//!
+//! ## REQ status (per `.design/ferrotorch-profiler/report.md`)
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 | SHIPPED | `pub struct ProfileReport` in `report.rs` with `pub(crate) fn new` + accessors (`events`, `total_time_us`, `has_gpu_events`, `has_stack_traces`); consumer: `ferrotorch-profiler/src/profiler.rs:358` `into_report` builds one via `ProfileReport::new(events)`, returned by `with_profiler` at line 462 — every caller of the lifecycle entry point consumes one. |
+//! | REQ-2 | SHIPPED | `pub struct OpSummary` in `report.rs` with 13 public fields (4 CPU rollup, 4 GPU rollup, total + legacy avg/max), mirroring `torch/autograd/profiler_util.py` `FunctionEventAvg`; consumer: `ferrotorch-profiler/src/lib.rs:42` re-exports it; `top_ops` returns `Vec<OpSummary>`; `tests/conformance_surface_coverage.rs:87` pins it in the surface contract. |
+//! | REQ-3 | SHIPPED | `pub fn top_ops` in `report.rs` with the `HashMap<&str, OpAccum>` rollup loop, mirroring `key_averages().table(sort_by=...)`; consumer: `table` calls `self.top_ops(top_n)` directly — every user-rendered table flows through it. |
+//! | REQ-4 | SHIPPED | `pub fn table` in `report.rs` dispatching to `table_cpu_only` and `table_with_gpu` based on `has_gpu_events`; consumer: the crate-root doctest at `lib.rs:24` calls `report.table(10)`, so `cargo test --doc` consumes it as production code. |
+//! | REQ-5 | SHIPPED | `pub fn chrome_trace_json` in `report.rs` building the `traceEvents` array manually (no serde dep), mirroring `torch/autograd/profiler.py:519`; consumer: `save_chrome_trace` and `save_tensorboard_trace` both call it; the surface-coverage test pins it. |
+//! | REQ-6 | SHIPPED | `pub fn save_chrome_trace` in `report.rs` wrapping `std::fs::write` with `FerrotorchError::InvalidArgument`; consumer: re-exported via `ProfileReport` at `lib.rs:42` and meta-crate prelude; surface contract pins it. |
+//! | REQ-7 | SHIPPED | `pub fn save_tensorboard_trace` in `report.rs` building `{logdir}/plugins/profile/{run_id}/{hostname}.pt.trace.json`, mirroring `torch/profiler/profiler.py:621` `tensorboard_trace_handler`; consumer: re-exported via `ProfileReport`; `detect_hostname` is the private helper consumed only by this method. |
+//! | REQ-8 | SHIPPED | `pub fn total_flops` + `pub fn flops_per_second` in `report.rs`; consumer: re-exported via `ProfileReport`; surface contract pins both. |
+//! | REQ-9 | SHIPPED | `pub fn memory_by_category` in `report.rs` building `HashMap<MemoryCategory, i64>` and sorting by `Reverse(abs)`, mirroring `torch/profiler/_memory_profiler.py:37-44` Category aggregation; consumer: re-exported via `ProfileReport`; surface contract pins it. |
+
 use std::collections::HashMap;
 use std::fmt::Write as _;
 use std::path::Path;

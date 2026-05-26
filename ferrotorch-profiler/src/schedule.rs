@@ -1,3 +1,24 @@
+//! `ProfileSchedule` wait/warmup/active/repeat state machine. CL-333.
+//!
+//! Mirrors `PyTorch`'s `torch.profiler.schedule(wait, warmup, active, repeat)`
+//! factory function at `torch/profiler/profiler.py:551`, with the runtime
+//! state explicitly held inside the schedule (Rust prefers a struct over
+//! upstream's closure capturing `step` from the outer `profile` context
+//! manager). See `.design/ferrotorch-profiler/schedule.md` for the design
+//! contract.
+//!
+//! ## REQ status (per `.design/ferrotorch-profiler/schedule.md`)
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 | SHIPPED | `pub enum SchedulePhase` in `schedule.rs` with `Display` impl mirroring `torch.profiler.profiler.ProfilerAction` at `torch/profiler/profiler.py:540`; consumer: `ProfileSchedule::phase` field carries it; re-exported at `ferrotorch-profiler/src/lib.rs:43`; the surface-coverage test consumes the variant set. |
+//! | REQ-2 | SHIPPED | `pub struct ProfileSchedule` in `schedule.rs` with the 8 fields (config + runtime + callback) and manual `Debug` impl; consumer: re-exported at `lib.rs:43` and propagated via `ferrotorch/src/lib.rs:107`; `tests/conformance_surface_coverage.rs:83-84` pins it in the surface contract. |
+//! | REQ-3 | SHIPPED | `pub fn new(wait, warmup, active, repeat)` in `schedule.rs` with `assert!(active > 0)` + `assert!(repeat > 0)` mirroring `torch/profiler/profiler.py:600-604`; consumer: the constructor is the only entry point — every `ProfileSchedule` instance flows through it; reachable via the meta-crate prelude. |
+//! | REQ-4 | SHIPPED | `pub fn step` in `schedule.rs` advancing position + phase + firing end-of-cycle callback, mirroring `torch/profiler/profiler.py:575-598`; consumer: surface-coverage test at `ferrotorch-profiler/tests/conformance_surface_coverage.rs:85` pins `ProfileSchedule::step`. |
+//! | REQ-5 | SHIPPED | `pub fn set_on_trace_ready` in `schedule.rs` taking `impl FnMut(u64) + Send + 'static`; consumer: re-exported via `ProfileSchedule` and meta-crate prelude; surface contract pins it. |
+//! | REQ-6 | SHIPPED | manual `impl Clone for ProfileSchedule` in `schedule.rs` with explicit `on_trace_ready: None` on the clone and rationale comment; consumer: the `Clone` derive is part of the `pub use` propagation chain — any caller cloning a schedule transitively consumes this impl; behavior verified by `clone_preserves_config_and_position_drops_callback` lib test. |
+//! | REQ-7 | SHIPPED | `phase` / `is_active` / `current_step` / `current_cycle` accessors in `schedule.rs`, all `#[must_use]`; consumer: surface contract at `tests/conformance_surface_coverage.rs:85-` pins them; user code driving a schedule outside `Profiler` flows through these getters via the meta-crate prelude. |
+
 // CL-333: ProfileSchedule — wait/warmup/active/repeat cycle
 
 /// State machine phase for the profiler schedule.

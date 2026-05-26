@@ -1,3 +1,25 @@
+//! Central `Profiler` struct, `ProfileConfig` knob set, `with_profiler`
+//! lifecycle, and the `OpProfiler` bridge to `ferrotorch-core`.
+//!
+//! Mirrors the union of `torch.autograd.profiler.profile` at
+//! `torch/autograd/profiler.py:112` and `torch.profiler.profile` at
+//! `torch/profiler/profiler.py:651`, narrowed to the no-Kineto / no-CUPTI
+//! Rust implementation. See `.design/ferrotorch-profiler/profiler.md` for
+//! the design contract.
+//!
+//! ## REQ status (per `.design/ferrotorch-profiler/profiler.md`)
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 | SHIPPED | `pub struct ProfileConfig` in `profiler.rs` with `Default` impl mirroring `torch/autograd/profiler.py:218-222` kwargs; consumer: `ferrotorch-profiler/src/lib.rs:41` re-exports it; `with_profiler(config, ...)` consumes it by value; `ferrotorch/src/lib.rs:107` propagates to the meta-crate prelude. |
+//! | REQ-2 | SHIPPED | `pub struct Profiler` in `profiler.rs` with the documented lock-ordering doc; consumer: the `Arc<Profiler>` -> `Arc<dyn profiler_hook::OpProfiler>` cast inside `with_profiler` (line 443) requires `Send + Sync` — the cast itself is the proof that the trait bounds hold. |
+//! | REQ-3 | SHIPPED | `pub fn record` / `pub fn record_with_duration` / `pub fn record_memory` / `pub fn record_memory_categorized` / `pub fn push_gpu_event` in `profiler.rs`, all gating on `self.active.load(Relaxed)`; consumer: `ferrotorch-profiler/src/lib.rs:41` re-exports `Profiler`; `tests/conformance_surface_coverage.rs:72-77` pins each method in the production-API surface. |
+//! | REQ-4 | SHIPPED | `pub fn with_profiler` in `profiler.rs` with the RAII `ProfilerHookGuard`, mirroring `torch.profiler.profile.__enter__/__exit__` at `torch/profiler/profiler.py:651`; consumer: `ferrotorch-profiler/src/lib.rs:41` re-exports `with_profiler`; `ferrotorch/src/lib.rs:107` propagates it; the crate-root doctest at `lib.rs:14-25` exercises it via `cargo test --doc`. |
+//! | REQ-5 | SHIPPED | `impl profiler_hook::OpProfiler for Profiler` in `profiler.rs` with `record_op` populating a `ProfileEvent` from the cross-crate hook signature; consumer: `ferrotorch-core/src/grad_fns/arithmetic.rs:388` (`crate::profiler_hook::profile_op_scope("add", "tensor_op", &[a.shape(), b.shape()], || { ... })`) plus 35 other call sites across `ferrotorch-core/src/grad_fns/{arithmetic,transcendental}.rs`. |
+//! | REQ-6 | SHIPPED | `is_active` / `stop` / `pending_cuda_count` / `flush_cuda_kernels` (cuda + no-cuda no-op variants) in `profiler.rs`; consumer: `with_profiler` calls `profiler.stop()` (line 447) inside its own lifecycle — this crate is the production consumer of the lifecycle path; `flush_cuda_kernels` is consumed by user code via the meta-crate prelude. |
+//! | REQ-7 | SHIPPED | `maybe_capture_stack` in `profiler.rs` calling `std::backtrace::Backtrace::capture()` gated on `self.config.with_stack`; consumer: every event-producing method calls `self.maybe_capture_stack()` to populate `ProfileEvent::stack_trace` (lines 127, 149, 179, 217, 397). |
+//! | REQ-8 | SHIPPED | `push_event` (silent drop on poison) / `push_event_returning_index` (returns `None` on poison) / `into_report` (`unwrap_or_default`) / single `unreachable!` documenting impossible Arc-count branch in `profiler.rs`; consumer: every event method funnels through the push helpers; `with_profiler` consumes the `unreachable!`-bearing branch at line 456 — the API surface mathematically proves the strong count is 1 after the RAII guard drops. |
+
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;

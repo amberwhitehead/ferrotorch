@@ -8,6 +8,18 @@
 //!
 //! When in doubt, the estimator returns `None`. Callers can sum the
 //! defined estimates to get a lower bound on total FLOPs. CL-333.
+//!
+//! ## REQ status (per `.design/ferrotorch-profiler/flops.md`)
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 | SHIPPED | `pub fn estimate` in `flops.rs` mirroring `torch/autograd/profiler.py:219` `with_flops=True` contract; consumer: `ferrotorch-profiler/src/profiler.rs:113` (`flops::estimate(name, &input_shapes_vec)` inside `Profiler::record`) and `profiler.rs:381` inside `OpProfiler::record_op` (called from `ferrotorch-core/src/grad_fns/arithmetic.rs:388` and 35 other op call sites). |
+//! | REQ-2 | SHIPPED | `elementwise_binary` / `elementwise_unary` helpers in `flops.rs` and match arms for the 4 binary + 5 unary + 6 activation ops; consumer: same path as REQ-1 — `Profiler::record("add", ...)` populates `flops: Some(numel)` on every recorded `add` event. |
+//! | REQ-3 | SHIPPED | softmax / log_softmax arm + reduction arm (`sum`, `mean`, `prod`) in `flops.rs`; consumer: same `Profiler::record` path; softmax recorded via `ferrotorch-core/src/grad_fns/transcendental.rs` populates the FLOP estimate. |
+//! | REQ-4 | SHIPPED | `matmul_flops` helper in `flops.rs` handling 1D/2D/N-D + batch broadcasting, match arm for `matmul` / `mm` / `bmm` / `linear`; consumer: `Profiler::record("matmul", &[a_shape, b_shape])` flows through `flops::estimate` to this helper. |
+//! | REQ-5 | SHIPPED | `conv_nd_flops` helper in `flops.rs` with rank-strict checks, arms for `conv1d` / `conv2d` / `conv3d`; consumer: `Profiler::record("conv2d", ...)` populates `flops` via the same hook path. |
+//! | REQ-6 | SHIPPED | norm-family arm (`layer_norm` / `rms_norm` / `batch_norm` / `group_norm`) with 8 FLOPs/element approx + pow arm in `flops.rs`; consumer: `Profiler::record("layer_norm", ...)` and `Profiler::record("pow", ...)` route through `flops::estimate`. |
+//! | REQ-7 | SHIPPED | every arm uses `?` on `shapes.first()` or length checks — no panics, `None` on bad shapes; consumer: `ferrotorch-profiler/src/profiler.rs:113` consumes `Option<u64>` and stores it directly in `ProfileEvent::flops`, so the `None` return surfaces without crashing the recording path. |
 
 /// Estimate the number of floating-point operations for an op given
 /// its name and input shapes.

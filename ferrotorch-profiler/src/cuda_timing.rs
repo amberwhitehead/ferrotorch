@@ -35,6 +35,18 @@
 //! and add only ~1 µs of overhead per record. They give the same
 //! per-kernel GPU timing accuracy that CUPTI's activity API does,
 //! at the cost of having to wrap each timed region explicitly.
+//!
+//! ## REQ status (per `.design/ferrotorch-profiler/cuda_timing.md`)
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 | SHIPPED | `pub struct CudaKernelScope` in `cuda_timing.rs` carrying name/category/start/stream, mirroring PyTorch's CUDA-event timing in `torch/autograd/profiler.py:126-131`; consumer: `ferrotorch-profiler/src/lib.rs:39` re-exports it under the cuda feature; `ferrotorch/src/lib.rs:107` propagates to the meta-crate prelude. |
+//! | REQ-2 | SHIPPED | `pub fn new(ctx, stream, name, category)` in `cuda_timing.rs` calling `ctx.new_event(Some(CU_EVENT_DEFAULT))` + `start.record(stream)`; consumer: re-exported via `CudaKernelScope`; surface-coverage contract pins it under the cuda feature. |
+//! | REQ-3 | SHIPPED | `pub fn stop(self, profiler)` in `cuda_timing.rs` consuming `self`, recording the end event, and calling `profiler.push_pending_cuda_scope(...)`; consumer: `ferrotorch-profiler/src/profiler.rs:259` `pub(crate) fn push_pending_cuda_scope` is the matching profiler entry point — `CudaKernelScope::stop` is the only production caller. |
+//! | REQ-4 | SHIPPED | `pub(crate) struct PendingCudaScope` in `cuda_timing.rs` intentionally absent from the `lib.rs:38-43` re-export block; consumer: `ferrotorch-profiler/src/profiler.rs:61` `pending_cuda: Mutex<Vec<PendingCudaScope>>` stores them; `profiler.rs:259` accepts them via `push_pending_cuda_scope`; `profiler.rs:293` calls `scope.finalize(epoch_us)` to drain. |
+//! | REQ-5 | SHIPPED | `pub(crate) fn finalize(profiler_epoch_us)` in `cuda_timing.rs` with the synchronise + `elapsed_ms` + `" [timing_error]"` failure path; consumer: `ferrotorch-profiler/src/profiler.rs:293` `let event = scope.finalize(epoch_us);` inside `flush_cuda_kernels` — the only call site. |
+//! | REQ-6 | SHIPPED | `ferrotorch-profiler/src/lib.rs:3` `#![deny(unsafe_code)]` enforces no-unsafe; `cuda_timing.rs` contains zero `unsafe` blocks; the `cudarc` calls (`new_event`, `record`, `synchronize`, `elapsed_ms`) encapsulate the FFI; consumer: deny-attribute is workspace-enforced via `cargo clippy --lib -- -D warnings`. |
+//! | REQ-7 | SHIPPED | `#![cfg(feature = "cuda")]` in `cuda_timing.rs` skipping the module when the feature is off; consumer: `ferrotorch-profiler/src/lib.rs:27-28` also gates `pub mod cuda_timing` on the same feature, so the no-cuda dependency graph compiles without `cudarc`. |
 
 #![cfg(feature = "cuda")]
 

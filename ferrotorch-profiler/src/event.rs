@@ -1,3 +1,21 @@
+//! Value types for the profiler: `DeviceType`, `MemoryCategory`,
+//! `ProfileEvent`, `GpuTimingPair`.
+//!
+//! Mirrors the per-event payload that `torch.autograd.profiler.FunctionEvent`
+//! and `torch.profiler.profile` emit in upstream `PyTorch`, narrowed to the
+//! shape-driven, dependency-free subset `ferrotorch` needs. See
+//! `.design/ferrotorch-profiler/event.md` for the design contract.
+//!
+//! ## REQ status (per `.design/ferrotorch-profiler/event.md`)
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 | SHIPPED | `pub enum DeviceType` in `event.rs` with `Display` impl; consumer: `ferrotorch-profiler/src/profiler.rs:125` (`device_type: DeviceType::Cpu`) + `profiler.rs:215` (`DeviceType::Cuda`) + `report.rs:150-159` per-device aggregation. |
+//! | REQ-2 | SHIPPED | `pub enum MemoryCategory` in `event.rs` with `Display` impl mirroring `torch/profiler/_memory_profiler.py:37-44`; consumer: `profiler.rs:164` (`record_memory_categorized`) + `report.rs:122` (`memory_by_category`). |
+//! | REQ-3 | SHIPPED | `pub struct ProfileEvent` in `event.rs` (11 public fields); consumer: every event-producing path in `profiler.rs` (`record` at 116, `record_with_duration` at 138, `record_memory_categorized` at 168, `push_gpu_event` at 205, `OpProfiler::record_op` at 386) plus `cuda_timing.rs:179` `PendingCudaScope` finalize. |
+//! | REQ-4 | SHIPPED | `pub struct GpuTimingPair` in `event.rs`; consumer: `profiler.rs:200` `push_gpu_event` accepting `GpuTimingPair` by value and computing `duration_us = end_us.saturating_sub(start_us)` at line 209. |
+//! | REQ-5 | SHIPPED | derives on `DeviceType` / `MemoryCategory` / `ProfileEvent` / `GpuTimingPair` in `event.rs`; consumer: `Hash + Eq` on `MemoryCategory` keys the `HashMap` in `report.rs:123`; `Clone` on `ProfileEvent` enables `ProfileReport::new(events)` at `report.rs:64`. |
+
 /// The device type that executed an operation.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
 pub enum DeviceType {
