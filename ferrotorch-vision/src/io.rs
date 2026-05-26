@@ -3,6 +3,19 @@
 //! Provides functions to load images from disk into tensors (and vice versa),
 //! using the [`image`] crate for format support (PNG, JPEG, BMP, GIF, etc.).
 
+//! ## REQ status (per `.design/ferrotorch-vision/io.md`)
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 | SHIPPED | `#[non_exhaustive] pub struct RawImage` per upstream `torchvision/datasets/folder.py:260-264` (`PIL.Image.Image` as intermediate); consumer: `tensor_to_raw_image` constructs it and `write_image` consumes its fields. |
+//! | REQ-2 | SHIPPED | `pub fn read_image` calling `image::open(path)?.to_rgb8()` per upstream `torchvision/io/image.py:154-187`; consumer: `read_image_as_tensor` chains it; `ImageFolder::get` at `ferrotorch-vision/src/datasets/folder.rs:145` ultimately consumes it. |
+//! | REQ-3 | SHIPPED | `pub fn read_image_rgba` calling `image::open(path)?.to_rgba8()` per upstream `ImageReadMode.RGB_ALPHA`; consumer: re-exported at `ferrotorch-vision/src/lib.rs:101`. |
+//! | REQ-4 | SHIPPED | `pub fn read_image_as_tensor<T: Float>` per upstream `torchvision.transforms.functional.to_tensor`; consumer: `ImageFolder::get` at `ferrotorch-vision/src/datasets/folder.rs:145`, plus binary-target consumers at `ferrotorch-vision/examples/inference_dump.rs:34,610` and `ferrotorch-vision/examples/probe_rpn_stages_1141.rs:38,182`. |
+//! | REQ-5 | SHIPPED | `pub fn raw_image_to_tensor<T: Float>` performing HWC->CHW with `1/255` scaling per upstream `to_tensor`; consumer: `read_image_as_tensor` calls it; re-exported at `ferrotorch-vision/src/lib.rs:101`. |
+//! | REQ-6 | SHIPPED | `pub fn write_image` with the 3/4-channel dispatch per upstream `torchvision/io/image.py:213-296`; consumer: `write_tensor_as_image`. |
+//! | REQ-7 | SHIPPED | `pub fn write_tensor_as_image<T: Float>` chaining `tensor_to_raw_image` + `write_image` per upstream `torchvision.utils.save_image`; consumer: re-exported at `ferrotorch-vision/src/lib.rs:102`. |
+//! | REQ-8 | SHIPPED | `pub fn tensor_to_raw_image<T: Float>` with shape/channel validation + clamp-and-round per upstream `make_grid`/`save_image` clamping; consumer: `write_tensor_as_image`.
+
 use std::path::Path;
 
 use ferrotorch_core::numeric_cast::cast;

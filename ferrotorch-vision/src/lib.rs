@@ -90,6 +90,16 @@
 #![warn(missing_docs)]
 #![allow(missing_docs)]
 
+//! ## REQ status (per `.design/ferrotorch-vision/lib.md`)
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 | SHIPPED | `pub mod datasets; pub mod io; pub mod models; pub mod ops; pub mod transforms;` per upstream `torchvision/__init__.py:8`; consumer: `pub use ferrotorch_vision::*;` at `ferrotorch/src/lib.rs:71` re-exports the surface; `use ferrotorch_vision::io::read_image_as_tensor;` at `ferrotorch-vision/examples/inference_dump.rs:34` exercises the `pub mod io` path. |
+//! | REQ-2 | SHIPPED | `pub use datasets::{Cifar10, Cifar100, CifarSample, Mnist, MnistSample, Split};` and `pub use io::{...};` re-exports flatten the dataset+io surface to crate root; consumer: `use ferrotorch_vision::{Mnist, Split};` at `ferrotorch/examples/train_mnist.rs:22`. |
+//! | REQ-3 | SHIPPED | `#![warn(clippy::all, clippy::pedantic)]` and `#![deny(unsafe_code, rust_2018_idioms)]`; consumer: the `cargo clippy -p ferrotorch-vision --lib -- -D warnings` gauntlet enforces R-CODE-1 across the crate. |
+//! | REQ-4 | SHIPPED | `#![allow(...)]` block with inline per-lint rationale (e.g. `clippy::module_name_repetitions` documented as mirroring torchvision naming); consumer: cargo clippy gauntlet validates the lint set on every workspace run. |
+//! | REQ-5 | SHIPPED | `#![allow(missing_debug_implementations)]` with documented follow-up rationale; consumer: every pub sample/dataset type derives `Debug` (e.g. `Cifar10`, `Mnist`, `RawImage`) so the end-user inspection surface is intact through the re-exports.
+
 pub mod datasets;
 pub mod io;
 pub mod models;

@@ -19,6 +19,19 @@
 //! assert!(sample.label < 10);
 //! ```
 
+//! ## REQ status (per `.design/ferrotorch-vision/datasets/mnist.md`)
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 | SHIPPED | `#[non_exhaustive] pub struct MnistSample<T: Float>` per upstream `torchvision/datasets/mnist.py:131-151` `__getitem__`; consumer: `Mnist::get` constructs it; re-exported at `ferrotorch-vision/src/datasets/mod.rs:12`. |
+//! | REQ-2 | SHIPPED | `pub enum Split { Train, Test }` per upstream `train: bool = True` kwarg at `torchvision/datasets/mnist.py:87` (R-DEV-5 typestate replacing the bool); consumer: matched in `synthetic`/`from_dir`, and `use ferrotorch_vision::{Mnist, Split};` at `ferrotorch/examples/train_mnist.rs:22`. |
+//! | REQ-3 | SHIPPED | `#[derive(Debug)] pub struct Mnist<T: Float>` per upstream `class MNIST(VisionDataset)` at `torchvision/datasets/mnist.py:20`; consumer: `Mnist::<f32>::synthetic(...)` at `ferrotorch/examples/train_mnist.rs:60`. |
+//! | REQ-4 | SHIPPED | `pub fn synthetic(split, num_samples)` using xorshift64 + per-split seeds; consumer: `Mnist::<f32>::synthetic(Split::Train, num_samples)?` at `ferrotorch/examples/train_mnist.rs:60`. |
+//! | REQ-5 | SHIPPED | `pub fn from_dir(root, split)` reading the four canonical IDX files per upstream `MNIST._load_data` at `torchvision/datasets/mnist.py:122-129`; consumer: re-exported through `datasets/mod.rs:12` + `ferrotorch-vision/src/lib.rs:99`. |
+//! | REQ-6 | SHIPPED | IDX header validation (magic `2051`/`2049`, length, count-match) per upstream `read_sn3_pascalvincent_tensor` at `torchvision/datasets/mnist.py:508-560`; consumer: `Mnist::from_dir`. |
+//! | REQ-7 | SHIPPED | Pixel normalization `cast::<f64, T>(b as f64 * inv_255)` per `torchvision.transforms.functional.to_tensor`; consumer: `Mnist::from_dir`. |
+//! | REQ-8 | SHIPPED | `impl<T: Float + 'static> Dataset for Mnist<T>` per `ferrotorch_data::Dataset`; consumer: `let train_dataset = Mnist::<f32>::synthetic(...)?;` at `ferrotorch/examples/train_mnist.rs:60` followed by trait-driven iteration.
+
 use std::path::Path;
 
 use ferrotorch_core::numeric_cast::cast;

@@ -35,6 +35,20 @@
 //! assert!(s.label < 100);
 //! ```
 
+//! ## REQ status (per `.design/ferrotorch-vision/datasets/cifar.md`)
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 | SHIPPED | `#[non_exhaustive] pub struct CifarSample<T: Float>` per upstream `torchvision/datasets/cifar.py:104-124` `__getitem__`; consumer: `Cifar10::get` / `Cifar100::get` construct it. |
+//! | REQ-2 | SHIPPED | `pub struct Cifar10<T: Float>` with `pub const NUM_CLASSES = 10` per upstream `class CIFAR10(VisionDataset)` at `torchvision/datasets/cifar.py:13`; consumer: re-export chain `datasets/mod.rs:10` -> `ferrotorch-vision/src/lib.rs:99` -> `ferrotorch/src/lib.rs:71`. |
+//! | REQ-3 | SHIPPED | `pub struct Cifar100<T: Float>` with `NUM_CLASSES = 100` and the fine-label extraction `bytes[sample_start + 1]` per upstream `entry["fine_labels"]` at `torchvision/datasets/cifar.py:88`; consumer: re-export chain via `datasets/mod.rs:10`. |
+//! | REQ-4 | SHIPPED | `Cifar10::synthetic` / `Cifar100::synthetic` call the shared `generate_synthetic`; distinct seeds per family/split; consumer: re-exported through `datasets/mod.rs:10`. |
+//! | REQ-5 | SHIPPED | `Cifar10::from_dir` (5 train batches + `test_batch.bin`) and `Cifar100::from_dir` (`train.bin` + `test.bin`) per upstream `train_list`/`test_list` at `torchvision/datasets/cifar.py:35-45`; consumer: re-export chain. |
+//! | REQ-6 | SHIPPED | `load_cifar_batches` parses the CIFAR binary batch format with the `CifarFormat` enum selecting 1-byte vs 2-byte header per the official CIFAR binary specification; consumer: invoked from both `from_dir` paths. |
+//! | REQ-7 | SHIPPED | Pixel normalization `cast::<f64, T>(b as f64 * inv_255)` with `inv_255 = 1.0 / 255.0` per `torchvision.transforms.functional.to_tensor`; consumer: `load_cifar_batches`. |
+//! | REQ-8 | SHIPPED | `impl<T: Float + 'static> Dataset for Cifar10<T>` / `Cifar100<T>` per `ferrotorch_data::Dataset` trait; consumer: re-export chain exposes the types implementing the trait. |
+//! | REQ-9 | SHIPPED | Label-range validation `if label as usize >= num_classes { return Err(...) }`; consumer: `load_cifar_batches`.
+
 use std::path::Path;
 
 use ferrotorch_core::numeric_cast::cast;

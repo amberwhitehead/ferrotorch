@@ -18,6 +18,21 @@
 //! Within a class, files are sorted alphabetically too — load order is
 //! deterministic across runs.
 
+//! ## REQ status (per `.design/ferrotorch-vision/datasets/folder.md`)
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 | SHIPPED | `#[non_exhaustive] pub struct ImageSample<T: Float>` per upstream `torchvision/datasets/folder.py:236-251`; consumer: `ImageFolder::get` constructs it; re-exported at `ferrotorch-vision/src/datasets/mod.rs:11`. |
+//! | REQ-2 | SHIPPED | `pub const IMG_EXTENSIONS: &[&str]` (9 extensions, no leading dot) per upstream `IMG_EXTENSIONS` tuple at `torchvision/datasets/folder.py:257`; consumer: `ImageFolder::from_dir` uses it as the default. |
+//! | REQ-3 | SHIPPED | `pub struct ImageFolder<T: Float>` per upstream `class ImageFolder(DatasetFolder)` at `torchvision/datasets/folder.py:287`; consumer: re-exported via `datasets/mod.rs:11`, and `ImageFolder::get` is the cross-module production caller of `crate::io::read_image_as_tensor`. |
+//! | REQ-4 | SHIPPED | Three constructors: `from_dir`, `from_dir_with_extensions`, `from_dir_with_filter` per upstream `extensions`/`is_valid_file` kwargs at `torchvision/datasets/folder.py:138-156`; consumer: re-export. |
+//! | REQ-5 | SHIPPED | `impl<T: Float + 'static> Dataset for ImageFolder<T>` with lazy decode via `crate::io::read_image_as_tensor::<T>(path)?` per upstream's `loader(path)` pattern at `torchvision/datasets/folder.py:245`; consumer: the `read_image_as_tensor` call IS the cross-module production consumer of `ferrotorch-vision/src/io.rs`. |
+//! | REQ-6 | SHIPPED | `pub struct DatasetFolder<S, F: Fn(&Path) -> FerrotorchResult<S>>` per upstream `class DatasetFolder(VisionDataset)` at `torchvision/datasets/folder.py:109`; consumer: re-exported at `datasets/mod.rs:11`. |
+//! | REQ-7 | SHIPPED | `#[derive(Debug, Clone)] pub struct FolderSample<S>` per upstream's `(sample, target)` tuple; consumer: `DatasetFolder::get` constructs it. |
+//! | REQ-8 | SHIPPED | Dotfile / dot-dir skip in `scan_class_dirs`; consumer: every `from_dir*` constructor invokes the walker. |
+//! | REQ-9 | SHIPPED | `class_to_idx` returning `HashMap<&str, u32>` and `classes` returning the sorted name list per upstream `class_to_idx` dict at `torchvision/datasets/folder.py:46,162`; consumer: `ImageFolder` boundary methods reachable via the re-export. |
+//! | REQ-10 | SHIPPED | Non-directory rejection `if !root.is_dir() { return Err(InvalidArgument {...}) }`; consumer: `scan_class_dirs` is the in-crate caller invoked by every `from_dir*` constructor.
+
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
