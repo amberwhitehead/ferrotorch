@@ -44,6 +44,19 @@
 //! only divergence comes from accumulation order — small enough to fit
 //! a `cosine_sim >= 0.999` / `max_abs <= 0.5` envelope on the 2708-node
 //! Cora full-batch logits.
+//!
+//! ## REQ status (per `.design/ferrotorch-graph/gcn.md`)
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 | SHIPPED | impl: `pub struct GcnConv` below with the `Linear<f32>` (`bias = false`) + separate `Parameter<f32>` bias split, mirroring PyG's bias-after-aggregation contract; non-test consumer: `ferrotorch-graph/src/safetensors_loader.rs` constructs a `GcnNet` (each layer is a `GcnConv`) and `ferrotorch-graph/examples/gcn_inference_dump.rs` reaches this struct via `load_gcn_net`. |
+//! | REQ-2 | SHIPPED | impl: `pub GcnConv::new(in_features, out_features) -> FerrotorchResult<Self>`; non-test consumer: `GcnNet::new` below invokes `GcnConv::new` twice (once per layer), and `ferrotorch-graph/src/safetensors_loader.rs` invokes `GcnNet::new` which transitively calls `GcnConv::new`. |
+//! | REQ-3 | SHIPPED | impl: `pub GcnConv::forward` below runs the five-step PyG recipe (self-loop concat → symmetric-normalized weights → linear projection → `scatter_add_segments` aggregation → bias add); non-test consumer: `GcnNet::forward` calls `self.conv1.forward(x, edge_index)?` and `self.conv2.forward(&h_relu, edge_index)`; the example binary at `ferrotorch-graph/examples/gcn_inference_dump.rs` invokes `net.forward(&x, &edge_index)` which transitively reaches this. |
+//! | REQ-4 | SHIPPED | impl: `impl Module<f32> for GcnConv` below exposes `parameters` / `parameters_mut` / `named_parameters` / `train` / `eval` / `is_training` and explicitly refuses the `Module::forward(_input)` arm with `FerrotorchError::InvalidArgument`; non-test consumer: `ferrotorch-graph/src/safetensors_loader.rs` `net.load_state_dict(&filtered, true)?` drives the `Module` machinery on every `GcnConv` instance inside the loaded `GcnNet`. |
+//! | REQ-5 | SHIPPED | impl: `GcnConv::named_parameters` prefixes the linear's `weight` with `"lin."` and appends `"bias"`, matching PyG `GCNConv.state_dict()` keys verbatim; non-test consumer: `ferrotorch-graph/src/safetensors_loader.rs` walks `net.named_parameters().into_iter().map(|(n, _)| n).collect()` to compute the expected key set against the safetensors header. |
+//! | REQ-6 | SHIPPED | impl: `pub struct GcnNet` below holds two `GcnConv` layers + training flag; non-test consumer: `ferrotorch-graph/src/safetensors_loader.rs` returns `(GcnNet, DropReport)` and `ferrotorch-graph/examples/gcn_inference_dump.rs` destructures it. |
+//! | REQ-7 | SHIPPED | impl: `GcnNet::forward` below runs `conv1 -> ReLU -> conv2`; non-test consumer: `ferrotorch-graph/examples/gcn_inference_dump.rs` `let logits = net.forward(&x, &edge_index)?;` is the end-to-end inference entry point used by the harness binary. |
+//! | REQ-8 | SHIPPED | impl: `impl Module<f32> for GcnNet`'s `named_parameters` produces the four PyG-canonical prefixed keys (`conv1.bias`, `conv1.lin.weight`, `conv2.bias`, `conv2.lin.weight`); non-test consumer: `ferrotorch-graph/src/safetensors_loader.rs` consumes those keys to compute the expected-key set against the safetensors header, and calls `net.load_state_dict(&filtered, true)?` which mutates parameters indexed by those keys. |
 
 use ferrotorch_core::{
     FerrotorchError, FerrotorchResult, Tensor, TensorStorage, scatter_add_segments,

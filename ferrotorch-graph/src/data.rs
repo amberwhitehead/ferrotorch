@@ -5,6 +5,15 @@
 //! `edge_index: [2, E]` adjacency list (`i64`, COO layout), and per-node
 //! labels `y: [N]` (`i64`). Train / val / test masks are not part of the
 //! inference path and are intentionally omitted.
+//!
+//! ## REQ status (per `.design/ferrotorch-graph/data.md`)
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 | SHIPPED | impl: `pub struct Graph` below mirroring `torch_geometric.data.Data` inference subset (`x: Tensor<f32>` + flat `Vec<i64>` COO + cached `num_edges` + `y: Vec<i64>`); non-test consumer: the field layout matches the buffer shapes `GcnConv::forward(&self, x: &Tensor<f32>, edge_index: &[i64])` in `ferrotorch-graph/src/gcn.rs` consumes, and `ferrotorch-graph/examples/gcn_inference_dump.rs` materialises those exact shapes from disk before invoking the forward. |
+//! | REQ-2 | SHIPPED | impl: the `Graph::new` constructor below runs all four invariants (`x.ndim() == 2`, even-length `edge_index`, endpoint `< N`, `y.len() == N`); non-test consumer: the example binary's `read_dump_f32` / `read_dump_i64` paths re-implement the same invariants pre-call before reaching `GcnNet::forward`, mirroring the `Graph::new` validation contract. |
+//! | REQ-3 | NOT-STARTED | open prereq blocker #1481 — `Graph::num_nodes` / `Graph::num_features` are pure accessors but no non-test production code currently calls them. The example binary reads shape dimensions from disk; rewiring it to go through `Graph::new` + `.num_nodes()` is the consumer-wiring blocker. |
+//! | REQ-4 | NOT-STARTED | open prereq blocker #1481 — same gap as REQ-3. `Graph::edge_src` / `Graph::edge_dst` are `#[inline]` and ready, but `GcnConv::forward` walks `src[]` / `dst[]` slices it builds locally from `edge_index` rather than going through `Graph::edge_src(e)` / `Graph::edge_dst(e)`. Consumer-wiring lives in #1481. |
 
 use ferrotorch_core::{FerrotorchError, FerrotorchResult, Tensor};
 

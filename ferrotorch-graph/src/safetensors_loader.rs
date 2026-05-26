@@ -17,6 +17,16 @@
 //! return a [`DropReport`] documenting upstream keys that were
 //! intentionally not consumed (per the #1141 audit rail: every key
 //! must either land in a parameter or appear in the report).
+//!
+//! ## REQ status (per `.design/ferrotorch-graph/safetensors_loader.md`)
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 | SHIPPED | impl: `pub struct DropReport` below deriving `Debug, Default, Clone` with `unmapped: Vec<String>`; non-test consumer: `ferrotorch-graph/examples/gcn_inference_dump.rs` reads `report.unmapped` for the harness diagnostic and surfaces `report.unmapped.len()` in the stdout JSON verdict. |
+//! | REQ-2 | SHIPPED | impl: `pub load_gcn_net` below (decode safetensors via `ferrotorch_serialize::load_safetensors` → construct fresh `GcnNet` → compute expected-key set from `net.named_parameters()` → filter loaded state → drive `Module::load_state_dict(filtered, strict=true)` → return `(net, DropReport)`); non-test consumer: `ferrotorch-graph/examples/gcn_inference_dump.rs` `let (net, report) = load_gcn_net(&weights_path, args.in_features, args.hidden, args.num_classes, /* strict = */ true)?;` is the end-to-end harness call. |
+//! | REQ-3 | SHIPPED | impl: the `if strict && !unmapped.is_empty()` branch below returns `FerrotorchError::InvalidArgument` carrying the unmapped key list; non-test consumer: `ferrotorch-graph/examples/gcn_inference_dump.rs` calls with `strict=true`, so the harness commits to the strict-error path on every invocation — any drift in the pinned mirror surfaces as a hard error during inference. |
+//! | REQ-4 | SHIPPED | impl: the `.map_err` adapter below rewrites the `safetensors` error into `FerrotorchError::InvalidArgument` with the file path embedded; non-test consumer: `ferrotorch-graph/examples/gcn_inference_dump.rs` consumes this error path on misconfigured `--model` flags; the path-in-message contract is what the harness's stderr diagnostic prints. |
+//! | REQ-5 | SHIPPED | impl: the inner `net.load_state_dict(&filtered, /* strict = */ true)?` below hard-codes the inner strict mode regardless of the outer `strict` flag, because the inner strict catches the missing-parameter class of bug (always fatal); non-test consumer: the round-trip behaviour is what every safetensors-driven invocation of `load_gcn_net` from the example binary relies on — a partial parameter load would silently leave a zero-initialised `conv2.bias` in place and skew every Cora prediction. |
 
 use std::path::Path;
 
