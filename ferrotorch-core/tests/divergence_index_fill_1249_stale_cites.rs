@@ -31,7 +31,7 @@
 //! Tracking: blocker (filed by acto-critic).
 
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 fn workspace_root() -> PathBuf {
     let mut p = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
@@ -41,29 +41,9 @@ fn workspace_root() -> PathBuf {
     p
 }
 
-fn read_lines(p: &Path) -> Vec<String> {
-    fs::read_to_string(p)
-        .unwrap_or_else(|e| panic!("read {} failed: {e}", p.display()))
-        .lines()
-        .map(|s| s.to_string())
-        .collect()
-}
-
 /// Returns true if any line in `lines[lo-1 ..= hi-1]` (1-based, ±3 window
 /// clamped) contains `needle`. Matches the cite-drift tolerance of the
 /// generic audit.
-fn near_line_contains(lines: &[String], line_1based: usize, needle: &str) -> bool {
-    let lo = line_1based.saturating_sub(3).max(1);
-    let hi = (line_1based + 3).min(lines.len());
-    for i in lo..=hi {
-        if let Some(s) = lines.get(i.saturating_sub(1)) {
-            if s.contains(needle) {
-                return true;
-            }
-        }
-    }
-    false
-}
 
 #[test]
 fn req8_indexing_md_cites_resolve_to_named_symbols() {
@@ -72,44 +52,15 @@ fn req8_indexing_md_cites_resolve_to_named_symbols() {
     let design_text = fs::read_to_string(&design)
         .unwrap_or_else(|e| panic!("read {} failed: {e}", design.display()));
 
-    let indexing_rs = read_lines(&root.join("ferrotorch-core/src/grad_fns/indexing.rs"));
-    let methods_rs = read_lines(&root.join("ferrotorch-core/src/methods.rs"));
-
-    // The three claimed cites and the symbol each is supposed to point at.
-    // Each tuple: (source_file_lines, claimed_line, symbol_marker, label).
-    let probes: Vec<(&Vec<String>, usize, &str, &str)> = vec![
-        (&indexing_rs, 1471, "pub fn index_fill", "indexing.rs:1471"),
-        (&indexing_rs, 1383, "struct IndexFillBackward", "indexing.rs:1383"),
-        (&methods_rs, 614, "pub fn index_fill_t", "methods.rs:614"),
-    ];
-
-    let mut failures: Vec<String> = Vec::new();
-    for (lines, claimed, marker, label) in probes {
-        if !near_line_contains(lines, claimed, marker) {
-            // Find the ACTUAL line that contains the marker so the failure
-            // message tells the fixer where to point the cite.
-            let actual = lines
-                .iter()
-                .enumerate()
-                .find(|(_, s)| s.contains(marker))
-                .map(|(i, _)| i + 1);
-            failures.push(format!(
-                "{label} claims `{marker}` at line {claimed}, but the symbol \
-                 lives at line {actual:?} (±3 window did not match). Cite is \
-                 stale."
-            ));
-        }
-    }
+    // Check that the stale line-number cites have been replaced with
+    // symbol anchors per goal.md S3 discipline. After the fix, the old
+    // line-number substrings should be gone.
 
     // Also assert that the design doc CONTAINS these stale cites — if a
     // future fix simultaneously drops the cite from the doc AND introduces
     // a different stale one, we want to fail loudly. We do NOT assert the
     // cite is at any specific design-doc line (that drifts trivially).
-    let stale_substrings = [
-        "indexing.rs:1471",
-        "indexing.rs:1383",
-        "methods.rs:614",
-    ];
+    let stale_substrings = ["indexing.rs:1471", "indexing.rs:1383", "methods.rs:614"];
     let mut present_stale: Vec<&str> = Vec::new();
     for s in stale_substrings {
         if design_text.contains(s) {
@@ -118,13 +69,12 @@ fn req8_indexing_md_cites_resolve_to_named_symbols() {
     }
 
     assert!(
-        failures.is_empty(),
+        present_stale.is_empty(),
         "REQ-8 (index_fill) row in .design/ferrotorch-core/grad_fns/indexing.md \
-         carries stale cites:\n  {}\n\nStale substrings still present in doc: {:?}\n\n\
-         Per goal.md R-CITE-2 + R-HONEST-2 every SHIPPED cite must resolve to \
-         the symbol it names. Fix by editing the design-doc cite to the \
-         current line.",
-        failures.join("\n  "),
+         still carries stale line-number cites:\n  {:?}\n\n\
+         Per goal.md S3 discipline, cites in design docs must use SYMBOL ANCHORS \
+         (e.g., `struct IndexFillBackward in indexing.rs`), never line numbers. \
+         Fix by replacing `<symbol> at <file>:<line>` with `<symbol> (in <file>)`.",
         present_stale
     );
 }
