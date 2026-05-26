@@ -98,6 +98,216 @@ unsafe extern "C" {
     );
 }
 
+/// MKL runtime alignment for byte-exact parity with torch (#1541, #1538).
+///
+/// Mirrors three pieces of torch's MKL initialization so the same
+/// `sgemm_(T,T,...)` thin-matmul dispatch produces byte-identical
+/// output between ferrotorch and torch on the same host:
+///
+/// 1. **Threading layer = GNU** (`MKL_THREADING_LAYER=GNU`). MKL ships
+///    two K-parallel kernel variants: `intel_thread` (libiomp5 OpenMP)
+///    and `gnu_thread` (libgomp OpenMP). They use DIFFERENT
+///    K-reduction summation orders. PyTorch's CPU wheel is built with
+///    libgomp (verified via `MKL_VERBOSE=1` showing `gnu_thread` in
+///    torch's banner). Without this env, MKL defaults to `intel_thread`
+///    on Linux when libiomp5 is present, producing 2-ULP drift vs
+///    torch on the (1,16384)@(16384,1) thin probe at the same thread
+///    count.
+///
+/// 2. **Dynamic disabled** (`MKL_DYNAMIC=FALSE`). PyTorch sets
+///    `MKL_DYNAMIC=FALSE` so the dispatcher uses the exact thread
+///    count requested rather than letting MKL trim threads per call.
+///    The dynamic adjustment can change the K partition between calls
+///    even at the same `MKL_NUM_THREADS`, producing run-to-run drift.
+///    Verified via `MKL_VERBOSE` output `Dyn:0` (torch) vs `Dyn:1`
+///    (ferrotorch default).
+///
+/// 3. **Thread count = physical cores**. Torch's
+///    `intraop_default_num_threads()`
+///    (`aten/src/ATen/ParallelCommon.cpp:103-133`) resolves to the
+///    cpuinfo physical-core count (14 on this host's 14C/28T CPU)
+///    when neither `OMP_NUM_THREADS` nor `MKL_NUM_THREADS` is set.
+///    libgomp's default would be `sysconf(_SC_NPROCESSORS_ONLN) = 28`
+///    (logical cores) — the wrong K partition. We count distinct
+///    `(physical id, core id)` tuples in `/proc/cpuinfo` (mirrors
+///    cpuinfo's `cores_count` semantics that
+///    `c10/core/thread_pool.cpp::defaultNumThreads` consumes) and
+///    set both `OMP_NUM_THREADS` and `MKL_NUM_THREADS`.
+///
+/// All three settings are skipped when the user has explicitly set the
+/// corresponding env var (matches torch's resolution chain at
+/// ParallelCommon.cpp:110-111, which respects pre-existing
+/// `OMP_NUM_THREADS` / `MKL_NUM_THREADS`).
+///
+/// This `.init_array` constructor runs before MKL's own static ctors
+/// read these env vars, so the settings are honored on the first BLAS
+/// dispatch in the process.
+///
+/// Gated `target_os = "linux"` only — Linux ships `/proc/cpuinfo` and
+/// is the only OS where the `.init_array` ELF section is honored.
+/// macOS / Windows are handled by torch via different `defaultNumThreads`
+/// branches (see ParallelCommon.cpp:116-127 for Apple Silicon) and are
+/// not part of the #1538 byte-exact host set.
+#[cfg(all(feature = "mkl", target_os = "linux"))]
+mod mkl_thread_align {
+    unsafe extern "C" {
+        fn setenv(
+            name: *const std::ffi::c_char,
+            value: *const std::ffi::c_char,
+            overwrite: i32,
+        ) -> i32;
+        fn getenv(name: *const std::ffi::c_char) -> *const std::ffi::c_char;
+        fn sysconf(name: i32) -> isize;
+    }
+
+    /// Linux glibc value for `_SC_NPROCESSORS_ONLN` (number of
+    /// online logical processors). Used only as a fallback when
+    /// `/proc/cpuinfo` lacks `physical id`/`core id` lines (e.g. some
+    /// container / VM shapes); under that fallback we assume 2-way SMT
+    /// and divide by 2.
+    const SC_NPROCESSORS_ONLN: i32 = 84;
+
+    /// Count distinct `(physical id, core id)` tuples in `/proc/cpuinfo`.
+    /// Mirrors cpuinfo's `cores_count` semantics, which is what
+    /// `c10/core/thread_pool.cpp::defaultNumThreads` consumes via the
+    /// `cpuinfo_get_cores_count()` call.
+    fn physical_cores() -> usize {
+        let Ok(content) = std::fs::read_to_string("/proc/cpuinfo") else {
+            return logical_fallback();
+        };
+        let mut tuples: std::collections::HashSet<(String, String)> =
+            std::collections::HashSet::new();
+        let mut current_phys: Option<String> = None;
+        for line in content.lines() {
+            let line = line.trim();
+            if let Some(v) = line.strip_prefix("physical id") {
+                current_phys = v
+                    .split(':')
+                    .nth(1)
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty());
+            } else if let Some(v) = line.strip_prefix("core id") {
+                let core = v.split(':').nth(1).map(|s| s.trim().to_string());
+                if let (Some(p), Some(c)) = (current_phys.as_ref(), core)
+                    && !c.is_empty()
+                {
+                    tuples.insert((p.clone(), c));
+                }
+            } else if line.is_empty() {
+                // Blank line terminates a processor block in /proc/cpuinfo.
+                current_phys = None;
+            }
+        }
+        if tuples.is_empty() {
+            logical_fallback()
+        } else {
+            tuples.len()
+        }
+    }
+
+    fn logical_fallback() -> usize {
+        // SAFETY: leaf FFI to libc `sysconf` with a static const arg.
+        let n = unsafe { sysconf(SC_NPROCESSORS_ONLN) };
+        if n > 1 {
+            // Assume 2-way SMT when /proc/cpuinfo doesn't expose
+            // physical topology (matches torch's behavior on shapes
+            // where cpuinfo reports only logical processors).
+            ((n as usize) / 2).max(1)
+        } else {
+            1
+        }
+    }
+
+    /// SAFETY: helper that calls libc `setenv` with the given static
+    /// NUL-terminated name and value byte arrays. setenv copies the
+    /// value internally, so the caller-provided byte buffer need only
+    /// be live for the duration of the call.
+    fn set_env_if_unset(name: &'static [u8], value: &[u8]) {
+        // SAFETY: leaf FFI to libc `getenv` with a static NUL-terminated
+        // name. Return pointer is read-only; we only null-check.
+        let already_set = unsafe { !getenv(name.as_ptr().cast()).is_null() };
+        if already_set {
+            return;
+        }
+        // SAFETY: leaf FFI to libc `setenv` with a NUL-terminated name
+        // (static) and NUL-terminated value (caller invariant). setenv
+        // copies into its own storage; no aliasing concerns.
+        unsafe {
+            setenv(name.as_ptr().cast(), value.as_ptr().cast(), 1);
+        }
+    }
+
+    /// Match torch's CPU MKL initialization: set the threading layer
+    /// to GNU OpenMP, disable MKL's dynamic thread adjustment, and set
+    /// the thread count to the physical-core count (mirrors torch's
+    /// `intraop_default_num_threads()` resolution). All three settings
+    /// are skipped if the user has already set the corresponding env
+    /// var.
+    extern "C" fn ferrotorch_mkl_align_threads() {
+        // Threading layer must be GNU OpenMP (libgomp) — torch's CPU
+        // build links libgomp, and `intel_thread` vs `gnu_thread`
+        // produces 2-ULP K-reduction drift at k=16384.
+        set_env_if_unset(b"MKL_THREADING_LAYER\0", b"GNU\0");
+        // Disable dynamic thread adjustment — torch sets this to FALSE
+        // so the dispatcher uses the exact requested thread count
+        // (Dyn:0 in MKL_VERBOSE output).
+        set_env_if_unset(b"MKL_DYNAMIC\0", b"FALSE\0");
+
+        let omp_name = b"OMP_NUM_THREADS\0";
+        let mkl_name = b"MKL_NUM_THREADS\0";
+        // SAFETY: leaf FFI to libc `getenv` with static null-terminated
+        // strings. Returned pointer is read-only and we only check for
+        // null — we never dereference it.
+        unsafe {
+            if !getenv(omp_name.as_ptr().cast()).is_null()
+                || !getenv(mkl_name.as_ptr().cast()).is_null()
+            {
+                // User already set thread count; respect it (matches
+                // torch's resolution chain at ParallelCommon.cpp:110-111).
+                return;
+            }
+        }
+        let physical = physical_cores();
+        // Manual itoa for the small physical-core counts we expect
+        // (1..=4096 covers any plausible host). Avoids pulling in the
+        // `itoa` crate per goal.md R-FIX-4 (no new workspace deps).
+        let mut digits = [0u8; 5]; // up to 4 decimal digits + NUL
+        let mut n = physical.min(9999);
+        let mut len = 0usize;
+        if n == 0 {
+            digits[0] = b'1';
+            len = 1;
+        } else {
+            while n > 0 {
+                digits[len] = b'0' + (n % 10) as u8;
+                len += 1;
+                n /= 10;
+            }
+            digits[..len].reverse();
+        }
+        let mut buf = [0u8; 6];
+        buf[..len].copy_from_slice(&digits[..len]);
+        buf[len] = 0; // NUL terminator
+
+        // SAFETY: leaf FFI to libc `setenv` with static null-terminated
+        // name + a stack-resident NUL-terminated value buffer. setenv
+        // copies the value internally, so the stack lifetime is sound.
+        unsafe {
+            setenv(omp_name.as_ptr().cast(), buf.as_ptr().cast(), 1);
+            setenv(mkl_name.as_ptr().cast(), buf.as_ptr().cast(), 1);
+        }
+    }
+
+    /// `.init_array` ELF section: function pointers placed here are
+    /// invoked by the dynamic loader before `main()` and before any
+    /// `__attribute__((constructor))` from a downstream shared library
+    /// runs. This guarantees our thread-count alignment lands before
+    /// MKL's own static ctors read `OMP_NUM_THREADS` / `MKL_NUM_THREADS`.
+    #[used]
+    #[unsafe(link_section = ".init_array")]
+    static FERROTORCH_MKL_THREAD_INIT: extern "C" fn() = ferrotorch_mkl_align_threads;
+}
+
 /// Row-major-to-col-major-dispatch helper for the `sgemm_` call. The
 /// arguments encode the **column-major Fortran view** of the GEMM, with
 /// operands already swapped so that the row-major problem is presented
@@ -540,6 +750,50 @@ fn mm_raw_mkl_f32<T: 'static + num_traits::Zero + Clone>(
     let b_f32 = unsafe { &*(std::ptr::from_ref::<[T]>(b_data) as *const [f32]) };
     // SAFETY: T == f32 by TypeId guard; `result` is fresh and unaliased.
     let c_f32 = unsafe { &mut *(std::ptr::from_mut::<[T]>(result.as_mut_slice()) as *mut [f32]) };
+    // Thin-matmul dispatch-shape conditional (#1541, #1538).
+    //
+    // For `m == 1 || n == 1` the row-major result has strides that make
+    // torch's `addmm_impl_cpu_` (aten/src/ATen/native/LinearAlgebra.cpp:1450-1557)
+    // take the `transpose_c=false` first arm and emit
+    // `sgemm_('T','T', m, n, k, alpha, A, lda=k, B, ldb=n, beta, C, ldc=m)`
+    // (no operand swap). MKL's kernel dispatcher keys on (transa, transb,
+    // m, n, k, lda, ldb, ldc); the (T,T)+no-swap form lands on the
+    // K-parallel threaded dot kernel, while the (N,N)+operand-swap form
+    // used for dense GEMM lands on a SERIAL small-matrix kernel that
+    // ignores the thread pool. The two compute the same dot product in
+    // different summation orders, producing 5-11 ULP drift at k=O(10^4).
+    // For thin shapes we mirror torch's dispatch exactly; for dense
+    // shapes the (N,N)+swap form is byte-exact vs torch (#1538 audit
+    // confirmed on 64x64, 127x127, k=257 probes).
+    //
+    // For `m == 1 || n == 1` the memory layout of the result coincides
+    // between row-major (M,N) and col-major (M,N): both store M*N
+    // contiguous floats with no leading-dim stride dependency, so
+    // writing into `c_f32` with ldc=m is bit-identical to row-major.
+    if m == 1 || n == 1 {
+        // SAFETY: leaf FFI to MKL's `sgemm_`. (T,T)+no-swap mirrors
+        // torch's `addmm_impl_cpu_` derivation at LinearAlgebra.cpp:1450-1557
+        // → CPUBlas.cpp:238 for thin matmul. m/n/k cast to i32 is sound
+        // for any host-memory-bounded tensor shape.
+        unsafe {
+            call_sgemm(
+                b'T',
+                b'T',
+                m as i32,
+                n as i32,
+                k as i32,
+                1.0,
+                a_f32.as_ptr(),
+                k as i32,
+                b_f32.as_ptr(),
+                n as i32,
+                0.0,
+                c_f32.as_mut_ptr(),
+                m as i32,
+            );
+        }
+        return result;
+    }
     // SAFETY: leaf FFI shim to MKL's Fortran `sgemm_`. Dispatch is the
     // operand-swap + dim-swap pattern documented in this function's
     // doc-comment. m/n/k cast to i32 is sound for any host-memory-
@@ -585,6 +839,31 @@ fn mm_raw_mkl_f64<T: 'static + num_traits::Zero + Clone>(
     let b_f64 = unsafe { &*(std::ptr::from_ref::<[T]>(b_data) as *const [f64]) };
     // SAFETY: T == f64; result is fresh and unaliased.
     let c_f64 = unsafe { &mut *(std::ptr::from_mut::<[T]>(result.as_mut_slice()) as *mut [f64]) };
+    // Thin-matmul dispatch-shape conditional — see `mm_raw_mkl_f32`'s
+    // body for the full derivation (#1541, #1538). `dgemm_` has the
+    // same kernel-dispatch structure as `sgemm_`, so the same
+    // (T,T)+no-swap mirror of torch's dispatch applies.
+    if m == 1 || n == 1 {
+        // SAFETY: leaf FFI to MKL's `dgemm_`; mirror of the f32 path.
+        unsafe {
+            call_dgemm(
+                b'T',
+                b'T',
+                m as i32,
+                n as i32,
+                k as i32,
+                1.0,
+                a_f64.as_ptr(),
+                k as i32,
+                b_f64.as_ptr(),
+                n as i32,
+                0.0,
+                c_f64.as_mut_ptr(),
+                m as i32,
+            );
+        }
+        return result;
+    }
     // SAFETY: leaf FFI shim to MKL's `dgemm_`; same invariants as
     // `mm_raw_mkl_f32` but f64.
     unsafe {
