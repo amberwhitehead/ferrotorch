@@ -36,11 +36,14 @@ allocation-free meta-device tensors for shape inference (CL-395). The
 - REQ-5: `linspace(start, end, num)` — `num` evenly-spaced values
   INCLUSIVE on both ends. Mirrors `torch.linspace`.
 - REQ-6: `rand(shape)` / `randn(shape)` — uniform-`[0,1)` and standard
-  normal random fills via internal xorshift64 PRNG. f32 path is
-  parallelised with rayon for `numel >= 32_768`; the unsafe
-  reinterpret-cast at `creation.rs:198-201` is documented in-line.
-  No `torch.manual_seed`-compatible reproducible state (open prereq
-  blocker #1537).
+  normal random fills sourced from the thread-local
+  `ferrotorch_core::rng::Generator` (MT19937 + Box-Muller). Calling
+  `ferrotorch_core::manual_seed(s)` makes both functions deterministic
+  and produces byte-exact agreement with `torch.manual_seed(s);
+  torch.rand(...)` for f32 (uniform). `randn` deterministic
+  reproducibility is guaranteed; byte-exact randn parity is documented
+  as a separate divergence (torch uses different algorithms for `size <
+  16` cpu_serial vs `>= 16` `normal_fill` SIMD blocks). #1537 closed.
 - REQ-7: `*_like(other, ...)` — `zeros_like`, `ones_like`, `full_like`,
   `rand_like`, `randn_like`, `meta_like` — shape derived from the
   witness tensor. Mirrors `torch.zeros_like` etc.
@@ -65,8 +68,10 @@ allocation-free meta-device tensors for shape inference (CL-395). The
   from `full_meta(shape, 0.0)` and `zeros_meta(shape)` via
   `meta_fill_value()` (`test_full_meta_records_value_and_discriminates_by_fill`
   at `creation.rs:607`).
-- [ ] AC-6: `rand`/`randn` honour `torch.manual_seed` — NOT-STARTED,
-  blocked on #1537 (no thread-local seeded RNG state).
+- [x] AC-6: `rand`/`randn` honour `torch.manual_seed` — SHIPPED via
+  `ferrotorch_core::manual_seed` (#1537 closed). `rand` is byte-exact
+  vs torch for f32; `randn` is deterministic under seed (pinned by
+  `ferrotorch-core/tests/divergence_manual_seed_parity.rs`).
 
 ## Architecture
 
@@ -150,6 +155,6 @@ zeros` (no torch op_db entry exists for the pure factories).
 | REQ-3 | SHIPPED | impl: `eye` at `creation.rs:49`; non-test consumer: re-exported as `ferrotorch_core::eye` at `lib.rs:138`; used in `ferrotorch-nn` linear-init paths via the top-level prelude |
 | REQ-4 | SHIPPED | impl: `arange` at `creation.rs:58`; non-test consumer: re-exported at `lib.rs:138`; used by `ferrotorch_core` prelude consumers and PyTorch parity tests |
 | REQ-5 | SHIPPED | impl: `linspace` at `creation.rs:81`; non-test consumer: re-exported at `lib.rs:138`; used in spectral-op test paths |
-| REQ-6 | SHIPPED | impl: `rand` at `creation.rs:112`, `randn` at `creation.rs:145`; non-test consumer: `crate::autograd::grad_penalty::grad_penalty` at `grad_penalty.rs:81` invokes `creation::rand(real.shape())`. Open prereq blocker #1537 tracks the `torch.manual_seed`-compatible thread-local RNG state — does NOT block SHIPPED for the basic random fill |
+| REQ-6 | SHIPPED | impl: `rand` at `creation.rs:127`, `randn` at `creation.rs:165` source from `crate::rng::with_thread_rng`; non-test consumer: `crate::autograd::grad_penalty::grad_penalty` at `autograd/grad_penalty.rs:94` invokes `creation::rand(real.shape())`. Thread-local MT19937 + `manual_seed` ship at `rng.rs` (#1537 closed); byte-exact vs `torch.manual_seed(42); torch.rand(10)` for f32 (`divergence_manual_seed_parity.rs:manual_seed_42_rand_byte_exact_vs_torch_f32`). |
 | REQ-7 | SHIPPED | impl: `*_like` family at `creation.rs:288-314`; non-test consumer: `crate::grad_fns::cumulative` at `cumulative.rs:501` invokes `creation::zeros::<T>(input_shape)` (effectively `zeros_like` shape pattern) |
 | REQ-8 | SHIPPED | impl: `zeros_meta`/`ones_meta`/`full_meta`/`meta_like` at `creation.rs:253-289`; non-test consumer: `crate::tensor::Tensor::meta_fill_value` at `tensor.rs:1078` documents and exposes `creation::full_meta`'s recorded fill; CL-395 |

@@ -20,7 +20,8 @@
 //! | REQ-10 | SHIPPED | `pub fn eye_` 2-D identity (top-left for non-square) mirrors `torch/nn/init.py:381-401`; consumed via the `init` module path. Tests `test_eye_square`, `test_eye_tall`, `test_eye_wide`, `test_eye_preserves_requires_grad` pin. |
 //! | REQ-11 | SHIPPED | Every initializer rebuilds the parameter via `Parameter::new(Tensor::from_storage(.., true))?` mirroring upstream's `with torch.no_grad():` discipline at `torch/nn/init.py:69-160`; consumed by `ferrotorch-nn/src/rnn.rs:127-128` calling `init::uniform` and continuing to use the parameter as a leaf with grad. Test `test_init_preserves_requires_grad` pins. |
 
-use ferrotorch_core::{FerrotorchError, FerrotorchResult, Float, Tensor, TensorStorage};
+use ferrotorch_core::rng::with_thread_rng;
+use ferrotorch_core::{FerrotorchError, FerrotorchResult, Float, Generator, Tensor, TensorStorage};
 
 use crate::parameter::Parameter;
 
@@ -87,9 +88,24 @@ pub fn ones<T: Float>(param: &mut Parameter<T>) -> FerrotorchResult<()> {
 }
 
 /// Fill parameter with values from U(low, high).
+///
+/// Uses the thread-local generator. To get reproducible output, call
+/// [`ferrotorch_core::manual_seed`] before this function, or use
+/// [`uniform_with_generator`] to pass an explicit [`Generator`].
 pub fn uniform<T: Float>(param: &mut Parameter<T>, low: f64, high: f64) -> FerrotorchResult<()> {
+    with_thread_rng(|g| uniform_with_generator(param, low, high, g))
+}
+
+/// Same as [`uniform`] but uses the caller-supplied [`Generator`] — mirrors
+/// the `generator` kwarg of `torch.nn.init.uniform_`.
+pub fn uniform_with_generator<T: Float>(
+    param: &mut Parameter<T>,
+    low: f64,
+    high: f64,
+    generator: &mut Generator,
+) -> FerrotorchResult<()> {
     let numel = param.numel();
-    let data: Vec<T> = simple_uniform(numel, low, high);
+    let data: Vec<T> = sample_uniform_with(generator, numel, low, high);
     *param = Parameter::new(Tensor::from_storage(
         TensorStorage::cpu(data),
         param.shape().to_vec(),
@@ -99,9 +115,23 @@ pub fn uniform<T: Float>(param: &mut Parameter<T>, low: f64, high: f64) -> Ferro
 }
 
 /// Fill parameter with values from N(mean, std).
+///
+/// Uses the thread-local generator. See [`normal_with_generator`] for the
+/// explicit-`Generator` variant.
 pub fn normal<T: Float>(param: &mut Parameter<T>, mean: f64, std: f64) -> FerrotorchResult<()> {
+    with_thread_rng(|g| normal_with_generator(param, mean, std, g))
+}
+
+/// Same as [`normal`] but uses the caller-supplied [`Generator`] — mirrors
+/// the `generator` kwarg of `torch.nn.init.normal_`.
+pub fn normal_with_generator<T: Float>(
+    param: &mut Parameter<T>,
+    mean: f64,
+    std: f64,
+    generator: &mut Generator,
+) -> FerrotorchResult<()> {
     let numel = param.numel();
-    let data: Vec<T> = simple_normal(numel, mean, std);
+    let data: Vec<T> = sample_normal_with(generator, numel, mean, std);
     *param = Parameter::new(Tensor::from_storage(
         TensorStorage::cpu(data),
         param.shape().to_vec(),
@@ -114,18 +144,34 @@ pub fn normal<T: Float>(param: &mut Parameter<T>, mean: f64, std: f64) -> Ferrot
 ///
 /// Fills with values from U(-limit, limit) where limit = sqrt(6 / (fan_in + fan_out)).
 pub fn xavier_uniform<T: Float>(param: &mut Parameter<T>) -> FerrotorchResult<()> {
+    with_thread_rng(|g| xavier_uniform_with_generator(param, g))
+}
+
+/// Same as [`xavier_uniform`] but uses the caller-supplied [`Generator`].
+pub fn xavier_uniform_with_generator<T: Float>(
+    param: &mut Parameter<T>,
+    generator: &mut Generator,
+) -> FerrotorchResult<()> {
     let (fan_in, fan_out) = compute_fans(param.shape())?;
     let limit = (6.0 / (fan_in + fan_out) as f64).sqrt();
-    uniform(param, -limit, limit)
+    uniform_with_generator(param, -limit, limit, generator)
 }
 
 /// Xavier normal initialization (Glorot).
 ///
 /// Fills with values from N(0, std) where std = sqrt(2 / (fan_in + fan_out)).
 pub fn xavier_normal<T: Float>(param: &mut Parameter<T>) -> FerrotorchResult<()> {
+    with_thread_rng(|g| xavier_normal_with_generator(param, g))
+}
+
+/// Same as [`xavier_normal`] but uses the caller-supplied [`Generator`].
+pub fn xavier_normal_with_generator<T: Float>(
+    param: &mut Parameter<T>,
+    generator: &mut Generator,
+) -> FerrotorchResult<()> {
     let (fan_in, fan_out) = compute_fans(param.shape())?;
     let std = (2.0 / (fan_in + fan_out) as f64).sqrt();
-    normal(param, 0.0, std)
+    normal_with_generator(param, 0.0, std, generator)
 }
 
 /// Kaiming uniform initialization (He).
@@ -135,11 +181,20 @@ pub fn kaiming_uniform<T: Float>(
     param: &mut Parameter<T>,
     nonlinearity: NonLinearity,
 ) -> FerrotorchResult<()> {
+    with_thread_rng(|g| kaiming_uniform_with_generator(param, nonlinearity, g))
+}
+
+/// Same as [`kaiming_uniform`] but uses the caller-supplied [`Generator`].
+pub fn kaiming_uniform_with_generator<T: Float>(
+    param: &mut Parameter<T>,
+    nonlinearity: NonLinearity,
+    generator: &mut Generator,
+) -> FerrotorchResult<()> {
     let (fan_in, _) = compute_fans(param.shape())?;
     let gain = nonlinearity.gain();
     let std = gain / (fan_in as f64).sqrt();
     let limit = (3.0f64).sqrt() * std;
-    uniform(param, -limit, limit)
+    uniform_with_generator(param, -limit, limit, generator)
 }
 
 /// Kaiming normal initialization (He).
@@ -149,10 +204,19 @@ pub fn kaiming_normal<T: Float>(
     param: &mut Parameter<T>,
     nonlinearity: NonLinearity,
 ) -> FerrotorchResult<()> {
+    with_thread_rng(|g| kaiming_normal_with_generator(param, nonlinearity, g))
+}
+
+/// Same as [`kaiming_normal`] but uses the caller-supplied [`Generator`].
+pub fn kaiming_normal_with_generator<T: Float>(
+    param: &mut Parameter<T>,
+    nonlinearity: NonLinearity,
+    generator: &mut Generator,
+) -> FerrotorchResult<()> {
     let (fan_in, _) = compute_fans(param.shape())?;
     let gain = nonlinearity.gain();
     let std = gain / (fan_in as f64).sqrt();
-    normal(param, 0.0, std)
+    normal_with_generator(param, 0.0, std, generator)
 }
 
 // CL-318: trunc_normal, orthogonal, sparse, dirac, eye init functions
@@ -371,8 +435,13 @@ pub fn sparse_<T: Float>(
     let mut data = vec![T::from(0.0).unwrap(); rows * cols];
 
     // For each column, pick which rows to zero out using a Fisher-Yates
-    // partial shuffle to select `num_zeros_per_col` indices.
-    let mut rng_state = xorshift_seed();
+    // partial shuffle, drawing index choices from the thread-local generator.
+    let rand_indices: Vec<u32> = with_thread_rng(|g| {
+        (0..(cols * num_zeros_per_col.min(rows)))
+            .map(|_| g.random_u32())
+            .collect()
+    });
+    let mut rand_idx_pos = 0usize;
 
     for j in 0..cols {
         // Create index array for this column's rows.
@@ -381,8 +450,9 @@ pub fn sparse_<T: Float>(
         // Partial Fisher-Yates to select `num_zeros_per_col` indices to zero.
         let num_to_pick = num_zeros_per_col.min(rows);
         for k in 0..num_to_pick {
-            rng_state = xorshift_step(rng_state);
-            let swap_idx = k + (rng_state as usize) % (rows - k);
+            let r = rand_indices[rand_idx_pos] as usize;
+            rand_idx_pos += 1;
+            let swap_idx = k + r % (rows - k);
             indices.swap(k, swap_idx);
         }
 
@@ -491,88 +561,48 @@ pub fn eye_<T: Float>(param: &mut Parameter<T>) -> FerrotorchResult<()> {
 }
 
 // --- Internal PRNG helpers ---
+//
+// All sampling routes through `ferrotorch_core::rng::Generator` (MT19937 +
+// Box-Muller) so that calling `ferrotorch_core::manual_seed(s)` makes every
+// initialiser deterministic. Backward-compatible default: when no
+// `Generator` is supplied, the thread-local generator is used (seeded from
+// `SystemTime` + thread id on first use).
 
-/// Seed a xorshift64 PRNG from system time + thread id.
-fn xorshift_seed() -> u64 {
-    use std::collections::hash_map::DefaultHasher;
-    use std::hash::{Hash, Hasher};
-    use std::time::SystemTime;
-
-    let mut hasher = DefaultHasher::new();
-    SystemTime::now().hash(&mut hasher);
-    std::thread::current().id().hash(&mut hasher);
-    let state = hasher.finish();
-    if state == 0 { 0xdeadbeefcafe } else { state }
-}
-
-/// Single step of xorshift64.
-fn xorshift_step(mut state: u64) -> u64 {
-    state ^= state << 13;
-    state ^= state >> 7;
-    state ^= state << 17;
-    state
-}
-
-pub(crate) fn simple_uniform<T: Float>(n: usize, low: f64, high: f64) -> Vec<T> {
-    use std::collections::hash_map::DefaultHasher;
-    use std::hash::{Hash, Hasher};
-    use std::time::SystemTime;
-
-    let mut hasher = DefaultHasher::new();
-    SystemTime::now().hash(&mut hasher);
-    std::thread::current().id().hash(&mut hasher);
-    let mut state = hasher.finish();
-    if state == 0 {
-        state = 0xdeadbeefcafe;
-    }
-
+/// Draw `n` uniform samples in `[low, high)` from `generator`.
+fn sample_uniform_with<T: Float>(
+    generator: &mut Generator,
+    n: usize,
+    low: f64,
+    high: f64,
+) -> Vec<T> {
     let range = high - low;
     (0..n)
         .map(|_| {
-            state ^= state << 13;
-            state ^= state >> 7;
-            state ^= state << 17;
-            let u = (state as f64) / (u64::MAX as f64);
+            let u = generator.next_uniform_f64();
             T::from(low + u * range).unwrap()
         })
         .collect()
 }
 
-pub(crate) fn simple_normal<T: Float>(n: usize, mean: f64, std: f64) -> Vec<T> {
-    use std::collections::hash_map::DefaultHasher;
-    use std::hash::{Hash, Hasher};
-    use std::time::SystemTime;
-
-    let mut hasher = DefaultHasher::new();
-    SystemTime::now().hash(&mut hasher);
-    std::thread::current().id().hash(&mut hasher);
-    let mut state = hasher.finish();
-    if state == 0 {
-        state = 0xdeadbeefcafe;
-    }
-
-    let mut next_uniform = || -> f64 {
-        state ^= state << 13;
-        state ^= state >> 7;
-        state ^= state << 17;
-        ((state as f64) / (u64::MAX as f64)).max(1e-300)
-    };
-
+/// Draw `n` samples from N(mean, std) using `generator`'s Box-Muller stream.
+fn sample_normal_with<T: Float>(
+    generator: &mut Generator,
+    n: usize,
+    mean: f64,
+    std: f64,
+) -> Vec<T> {
     let mut data = Vec::with_capacity(n);
-    let mut i = 0;
-    while i < n {
-        let u1 = next_uniform();
-        let u2 = next_uniform();
-        let r = (-2.0 * u1.ln()).sqrt();
-        let theta = 2.0 * std::f64::consts::PI * u2;
-        data.push(T::from(mean + std * r * theta.cos()).unwrap());
-        if i + 1 < n {
-            data.push(T::from(mean + std * r * theta.sin()).unwrap());
-        }
-        i += 2;
+    for _ in 0..n {
+        let z = generator.next_normal_f64();
+        data.push(T::from(mean + std * z).unwrap());
     }
-    data.truncate(n);
     data
+}
+
+/// Convenience: thread-local-generator wrapper for in-crate use by
+/// `trunc_normal_`, `orthogonal_`, `sparse_`.
+fn simple_normal<T: Float>(n: usize, mean: f64, std: f64) -> Vec<T> {
+    with_thread_rng(|g| sample_normal_with(g, n, mean, std))
 }
 
 #[cfg(test)]

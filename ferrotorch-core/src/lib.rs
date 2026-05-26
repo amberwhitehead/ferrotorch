@@ -91,7 +91,6 @@
 //! | REQ-4 (missing_docs allow) | SHIPPED | `#![allow(missing_docs)]` at `lib.rs:74` with the rustdoc-sweep follow-up cite; permitted at crate root by R-CODE-3 (which forbids module-root allows) |
 //! | REQ-5 (unsafe permitted) | SHIPPED | no `#![forbid(unsafe_code)]` at the crate root; per-site `// SAFETY:` blocks at `int_tensor.rs:296-313`, `storage.rs` and other files satisfy R-CODE-1 |
 
-
 pub mod autograd;
 pub mod bool_tensor;
 pub mod complex_tensor;
@@ -123,6 +122,7 @@ mod ops_trait;
 pub mod profiler_hook;
 pub mod pruning;
 pub mod quantize;
+pub mod rng;
 pub mod shape;
 pub mod signal;
 pub mod sparse;
@@ -191,6 +191,7 @@ pub use ops::scatter::scatter_add_segments;
 pub use ops::search::{bucketize, histc, meshgrid, searchsorted, topk, unique, unique_consecutive};
 pub use ops::tensor_ops::{cdist, diag, diagflat, roll, tril, triu};
 pub use pruning::{apply_2_4_mask, magnitude_prune, sparsity_ratio};
+pub use rng::{Generator, manual_seed};
 pub use quantize::{
     FakeQuantize, HistogramObserver, MinMaxObserver, Observer, PerChannelMinMaxObserver, QParams,
     QatLayer, QatModel, QuantDtype, QuantScheme, QuantizedTensor, cuda_rng, dequantize,

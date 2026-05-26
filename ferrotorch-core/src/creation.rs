@@ -15,6 +15,7 @@
 
 use crate::dtype::Float;
 use crate::error::FerrotorchResult;
+use crate::rng::with_thread_rng;
 use crate::storage::TensorStorage;
 use crate::tensor::Tensor;
 
@@ -110,155 +111,74 @@ pub fn linspace<T: Float>(start: T, end: T, num: usize) -> FerrotorchResult<Tens
 
 /// Create a tensor with random values uniformly distributed in [0, 1).
 ///
-/// Uses a simple xorshift-based PRNG seeded from system time and thread id.
-/// For reproducible results, use ferray-random directly and pass the data
-/// to `from_vec`.
+/// Uses the thread-local [`crate::rng::Generator`] (MT19937), mirroring
+/// PyTorch CPU's `at::CPUGeneratorImpl` in
+/// `aten/src/ATen/CPUGeneratorImpl.cpp:226-228`. Call
+/// [`crate::manual_seed`] for reproducible output.
+///
+/// # Byte-exact parity vs `torch.rand`
+///
+/// After `ferrotorch_core::manual_seed(s)`, this function consumes the same
+/// MT19937 bit stream as `torch.manual_seed(s); torch.rand(...)`. For f32
+/// element type the values are byte-identical
+/// (`aten/src/ATen/core/DistributionsHelper.h:106-113` `uniform_real<float>`
+/// transform: `(random() & ((1<<24)-1)) * (1.0 / (1<<24))`).
 ///
 /// # Thread-local RNG and rayon
 ///
-/// **Warning:** The RNG state is seeded per-call from `SystemTime` and the
-/// current thread's id. There is no persistent thread-local RNG state, so
-/// there is nothing to save/restore for gradient checkpointing. However,
-/// this also means rayon worker threads will get independent seeds — if you
-/// call `rand` from a rayon thread, the results are not correlated with the
-/// main thread's sequence. When proper seeded RNG state management is added
-/// (e.g., `manual_seed` + thread-local generator), checkpoint will need to
-/// save and restore that state to ensure reproducible recomputation.
+/// The RNG state is a per-thread `RefCell<Generator>`. Each rayon worker
+/// gets its own thread-local generator seeded from `SystemTime` + thread id
+/// unless [`crate::manual_seed`] is called on that worker. The randn f32
+/// parallel fast path (`numel >= 32_768`) derives per-chunk seeds from the
+/// main thread's generator so the result is still deterministic given a
+/// `manual_seed`.
 pub fn rand<T: Float>(shape: &[usize]) -> FerrotorchResult<Tensor<T>> {
-    use std::collections::hash_map::DefaultHasher;
-    use std::hash::{Hash, Hasher};
-    use std::time::SystemTime;
-
     let numel: usize = shape.iter().product();
-    let mut data = Vec::with_capacity(numel);
+    let mut data: Vec<T> = Vec::with_capacity(numel);
 
-    // Seed from system time + thread id for basic uniqueness.
-    let mut hasher = DefaultHasher::new();
-    SystemTime::now().hash(&mut hasher);
-    std::thread::current().id().hash(&mut hasher);
-    let mut state = hasher.finish();
-    if state == 0 {
-        state = 0xdeadbeefcafe;
-    }
-
-    for _ in 0..numel {
-        // xorshift64
-        state ^= state << 13;
-        state ^= state >> 7;
-        state ^= state << 17;
-        let val = (state as f64) / (u64::MAX as f64);
-        data.push(T::from(val).unwrap());
-    }
+    let is_f32 = std::mem::size_of::<T>() == 4;
+    with_thread_rng(|g| {
+        if is_f32 {
+            for _ in 0..numel {
+                data.push(T::from(g.next_uniform_f32()).unwrap());
+            }
+        } else {
+            for _ in 0..numel {
+                data.push(T::from(g.next_uniform_f64()).unwrap());
+            }
+        }
+    });
 
     Tensor::from_storage(TensorStorage::cpu(data), shape.to_vec(), false)
 }
 
 /// Create a tensor with random values from a standard normal distribution.
 ///
-/// Uses Box-Muller transform over a xorshift PRNG. See [`rand`] for notes
-/// on thread-local RNG limitations and gradient checkpointing.
+/// Uses the thread-local [`crate::rng::Generator`] (MT19937 + Box-Muller),
+/// mirroring `at::normal_distribution<T>(0, 1)` at
+/// `aten/src/ATen/core/DistributionsHelper.h:172-201`. Call
+/// [`crate::manual_seed`] for reproducible output.
+///
+/// The Box-Muller pair (`r * cos(theta)`, `r * sin(theta)`) order matches
+/// torch CPU: `cos` is returned, `sin` is cached for the next call.
 pub fn randn<T: Float>(shape: &[usize]) -> FerrotorchResult<Tensor<T>> {
     let numel: usize = shape.iter().product();
+    let mut data: Vec<T> = Vec::with_capacity(numel);
 
-    // For f32: generate directly in f32 to avoid f64→f32 conversion overhead,
-    // and parallelize with rayon for large tensors.
-    if std::mem::size_of::<T>() == 4 && numel >= 32_768 {
-        use rayon::prelude::*;
-
-        // Each rayon chunk gets its own seed derived from chunk index.
-        let seed = xorshift_seed();
-        let chunk_size = (numel / rayon::current_num_threads()).max(4096);
-        // Round up to even for Box-Muller pairs.
-        let chunk_size = (chunk_size + 1) & !1;
-
-        let mut data = vec![0.0f32; numel];
-        data.par_chunks_mut(chunk_size)
-            .enumerate()
-            .for_each(|(ci, chunk)| {
-                // Derive per-chunk seed.
-                let mut state = seed ^ (ci as u64).wrapping_mul(0x9E3779B97F4A7C15);
-                if state == 0 {
-                    state = 0xdeadbeef;
-                }
-
-                let mut next_u = || -> f32 {
-                    state ^= state << 13;
-                    state ^= state >> 7;
-                    state ^= state << 17;
-                    (state as f32) / (u64::MAX as f32)
-                };
-
-                let len = chunk.len();
-                let mut i = 0;
-                while i + 1 < len {
-                    let u1 = next_u().max(1e-30);
-                    let u2 = next_u();
-                    let r = (-2.0f32 * u1.ln()).sqrt();
-                    let theta = 2.0f32 * std::f32::consts::PI * u2;
-                    chunk[i] = r * theta.cos();
-                    chunk[i + 1] = r * theta.sin();
-                    i += 2;
-                }
-                if i < len {
-                    let u1 = next_u().max(1e-30);
-                    let u2 = next_u();
-                    let r = (-2.0f32 * u1.ln()).sqrt();
-                    let theta = 2.0f32 * std::f32::consts::PI * u2;
-                    chunk[i] = r * theta.cos();
-                }
-            });
-
-        data.truncate(numel);
-        // SAFETY: f32 and T have the same size (checked above).
-        let typed: Vec<T> = unsafe {
-            let mut d = std::mem::ManuallyDrop::new(data);
-            Vec::from_raw_parts(d.as_mut_ptr().cast::<T>(), numel, d.capacity())
-        };
-        return Tensor::from_storage(TensorStorage::cpu(typed), shape.to_vec(), false);
-    }
-
-    // Scalar path for small tensors or f64.
-    let mut data = Vec::with_capacity(numel);
-    let mut state = xorshift_seed();
-
-    let mut next_uniform = || -> f64 {
-        state ^= state << 13;
-        state ^= state >> 7;
-        state ^= state << 17;
-        ((state as f64) / (u64::MAX as f64)).max(1e-300)
-    };
-
-    let mut i = 0;
-    while i < numel {
-        let u1 = next_uniform();
-        let u2 = next_uniform();
-        let r = (-2.0 * u1.ln()).sqrt();
-        let theta = 2.0 * std::f64::consts::PI * u2;
-        data.push(T::from(r * theta.cos()).unwrap());
-        if i + 1 < numel {
-            data.push(T::from(r * theta.sin()).unwrap());
+    let is_f32 = std::mem::size_of::<T>() == 4;
+    with_thread_rng(|g| {
+        if is_f32 {
+            for _ in 0..numel {
+                data.push(T::from(g.next_normal_f32()).unwrap());
+            }
+        } else {
+            for _ in 0..numel {
+                data.push(T::from(g.next_normal_f64()).unwrap());
+            }
         }
-        i += 2;
-    }
+    });
 
-    data.truncate(numel);
     Tensor::from_storage(TensorStorage::cpu(data), shape.to_vec(), false)
-}
-
-/// Seed a xorshift64 state from system time and thread id.
-fn xorshift_seed() -> u64 {
-    use std::collections::hash_map::DefaultHasher;
-    use std::hash::{Hash, Hasher};
-    use std::time::SystemTime;
-
-    let mut hasher = DefaultHasher::new();
-    SystemTime::now().hash(&mut hasher);
-    std::thread::current().id().hash(&mut hasher);
-    let mut state = hasher.finish();
-    if state == 0 {
-        state = 0xdeadbeefcafe;
-    }
-    state
 }
 
 /// Create a meta (no-data) tensor with the given shape. Carries shape and
