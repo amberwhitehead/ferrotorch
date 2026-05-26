@@ -35,6 +35,24 @@
 //! [`ferrotorch_cubecl::ops::portable_*`] surface is itself
 //! `Tensor<f32>`-only — generification of the xpu wrappers requires a
 //! cubecl-level refactor first (tracked separately). Issue #719.
+//!
+//! ## REQ status (per `.design/ferrotorch-xpu/lib.md`)
+//!
+//! Full evidence rows (impl + non-test production consumer + upstream
+//! cites) live in the design doc; this synopsis is a one-line summary per
+//! REQ.
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 (lint baseline) | SHIPPED | `#![warn(clippy::all, clippy::pedantic)] + #![deny(rust_2018_idioms, missing_debug_implementations)]` at top of `lib.rs` with per-item `#![allow(..)]` justifications; consumer: every public symbol in `lib.rs` compiles under this baseline, verified by `cargo clippy -p ferrotorch-xpu --no-default-features -- -D warnings` clean |
+//! | REQ-2 (`XpuDevice` lifecycle) | SHIPPED | `pub struct XpuDevice in lib.rs` + `pub fn XpuDevice::new/ordinal/device/runtime` mirroring `c10::xpu::device_count` from `c10/xpu/XPUFunctions.cpp:243`; consumer `ferrotorch/src/lib.rs:143` re-exports the type via `pub use ferrotorch_xpu::*;` as `ferrotorch::xpu::XpuDevice` |
+//! | REQ-3 (`is_available` probe) | SHIPPED | `pub fn XpuDevice::is_available in lib.rs` with `catch_unwind`-guarded `CubeRuntime::new(CubeDevice::Wgpu(0)).is_ok()` mirroring `torch.xpu.is_available` from `torch/xpu/__init__.py:271-274` ("never throws"); consumer `ferrotorch_cubecl/src/runtime.rs` REQ-6 row records `ferrotorch-xpu/src/lib.rs::XpuDevice::is_available` as the production caller |
+//! | REQ-4 (device-resident upload) | SHIPPED | `pub fn make_xpu_tensor in lib.rs` calling `ferrotorch_cubecl::upload_f32` + `TensorStorage::xpu_from_handle`; consumer `ferrotorch_cubecl/src/storage.rs` REQ-7 row records `ferrotorch-xpu/src/lib.rs::make_xpu_tensor`, and `ferrotorch-core/src/tensor.rs:920-927` directs CPU→XPU users at it |
+//! | REQ-5 (binary kernel surface) | SHIPPED | macro `xpu_binary! in lib.rs` expanded into `pub fn xpu_add/xpu_sub/xpu_mul/xpu_div/xpu_matmul` dispatching to `ferrotorch_cubecl::ops::portable_*`; consumer `ferrotorch/src/lib.rs:143` `pub use ferrotorch_xpu::*;` propagates the binary ops, and `ferrotorch_cubecl/src/kernels.rs` REQ-4 cites `ferrotorch-xpu::xpu_matmul` as the terminal matmul consumer |
+//! | REQ-6 (unary kernel surface) | SHIPPED | macro `xpu_unary! in lib.rs` expanded into `pub fn xpu_neg/xpu_abs/xpu_relu/xpu_exp/xpu_ln/xpu_sqrt/xpu_sin/xpu_cos/xpu_tanh/xpu_sigmoid`; consumer `ferrotorch/src/lib.rs:143` `pub use ferrotorch_xpu::*;` re-exports all 10 unary ops |
+//! | REQ-7 (orthogonal polynomials) | SHIPPED | macro `xpu_polynomial! in lib.rs` expanded into `pub fn xpu_chebyshev_polynomial_{t,u,v,w}/xpu_hermite_polynomial_{h,he}/xpu_laguerre_polynomial_l/xpu_legendre_polynomial_p` dispatching to `ferrotorch_cubecl::ops::portable_*_polynomial_*`; consumer `ferrotorch/src/lib.rs:143` `pub use ferrotorch_xpu::*;` re-exports all 8 polynomial ops |
+//! | REQ-8 (no-`wgpu` stub family) | SHIPPED | `#[cfg(not(feature = "wgpu"))]` arms for `XpuDevice::new`, `XpuDevice::is_available`, `make_xpu_tensor` + macros `xpu_binary_stub!/xpu_unary_stub!/xpu_polynomial_stub!` emitting 23 `Err(DeviceUnavailable)` bodies in `lib.rs`; consumer: `cargo check -p ferrotorch-xpu --no-default-features` compiles clean and `ferrotorch/src/lib.rs:143` re-exports the stub surface to downstream crates on Linux/WSL |
+//! | REQ-9 (Display `xpu:N`) | SHIPPED | `impl core::fmt::Display for XpuDevice in lib.rs` writing `"xpu:{ordinal}"`; consumer `ferrotorch-core/src/device.rs:71` (`Device::Xpu(id) => write!(f, "xpu:{id}")`) prints the matching string, so app code formatting either type observes the same `"xpu:0"` matching `torch.device('xpu:0').__str__()` |
 
 #![warn(clippy::all, clippy::pedantic)]
 #![deny(rust_2018_idioms, missing_debug_implementations)]
