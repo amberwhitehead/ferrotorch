@@ -1456,10 +1456,10 @@ impl<T: Float> GradFn<T> for IndexFillBackward<T> {
 /// with negative values normalized via `dim + ndim` (the upstream
 /// `at::maybe_wrap_dim` call at `TensorAdvancedIndexing.cpp:1919`). The index
 /// tensor must be 1-D (the upstream `TORCH_CHECK(index.dim() <= 1, "Index has
-/// to be a vector/scalar")` at `:1920`). All index values must be in
-/// `[0, input.shape()[dim])`; negative indices are rejected (consistent with
-/// the rest of ferrotorch's `IntTensor` index validation — see
-/// `index_select_dim` at `indexing.rs:1259-1273`).
+/// to be a vector/scalar")` at `:1920`). Index values follow the upstream
+/// kernel's contract at `aten/src/ATen/native/cpu/IndexKernel.cpp:224-229`:
+/// `idx ∈ [-dim_size, dim_size)` is accepted, with negatives wrapped via
+/// `idx + dim_size`; values outside that range raise [`FerrotorchError::IndexOutOfBounds`].
 ///
 /// If `input.requires_grad()` and grad is enabled, the result carries an
 /// [`IndexFillBackward`] grad_fn whose VJP zeroes the gradient at the filled
@@ -1500,20 +1500,25 @@ pub fn index_fill<T: Float>(
             }
         };
         // Validate index: any index value must be 0 (the single element of the
-        // unsqueezed length-1 dimension).
+        // unsqueezed length-1 dimension). Per upstream `index_fill_kernel` at
+        // `aten/src/ATen/native/cpu/IndexKernel.cpp:224-229`, negative indices
+        // wrap by `idx + dim_size` and only out-of-range values (`idx < -size
+        // || idx >= size`) raise IndexError. For the 0-d unsqueezed-to-1-d case
+        // the only valid wrapped index is 0 (size == 1), so `-1` is the only
+        // accepted negative.
         let scalar_val = input.data_vec()?[0];
         let mut result_val = scalar_val;
         let mut any_filled = false;
         for v in index.data()? {
-            let i = v.to_i64();
-            if i < 0 {
-                return Err(FerrotorchError::InvalidArgument {
-                    message: format!("index_fill: negative index {i} not allowed"),
-                });
-            }
-            if i != 0 {
+            let i_raw = v.to_i64();
+            let i = if i_raw < 0 { i_raw + 1 } else { i_raw };
+            if !(0..1).contains(&i) {
                 return Err(FerrotorchError::IndexOutOfBounds {
-                    index: i as usize,
+                    index: if i_raw < 0 {
+                        i_raw.unsigned_abs() as usize
+                    } else {
+                        i_raw as usize
+                    },
                     axis: dim_for_0d as usize,
                     size: 1,
                 });
@@ -1567,26 +1572,32 @@ pub fn index_fill<T: Float>(
     let dim_usize = dim_norm as usize;
     let dim_size = input_shape[dim_usize];
 
-    // Validate + widen indices. ferrotorch's IntTensor index family rejects
-    // negative indices (R-DEV-1 narrower contract — see `index_select_dim`
-    // at `indexing.rs:1259-1272`).
+    // Validate + widen indices. Per upstream `index_fill_kernel` at
+    // `aten/src/ATen/native/cpu/IndexKernel.cpp:224-229`, the bound check is
+    // `idx >= -self_dim_size && idx < self_dim_size` and negative indices wrap
+    // via `idx += self_dim_size`. Match that contract (R-DEV-1/2): in-range
+    // negatives wrap, only true OOB raises IndexError.
+    let dim_size_i64 = dim_size as i64;
     let mut idx_usize: Vec<usize> = Vec::with_capacity(index.numel());
     for v in index.data()? {
-        let i = v.to_i64();
-        if i < 0 {
-            return Err(FerrotorchError::InvalidArgument {
-                message: format!("index_fill: negative index {i} not allowed"),
-            });
-        }
-        let iu = i as usize;
-        if iu >= dim_size {
+        let i_raw = v.to_i64();
+        if i_raw < -dim_size_i64 || i_raw >= dim_size_i64 {
             return Err(FerrotorchError::IndexOutOfBounds {
-                index: iu,
+                index: if i_raw < 0 {
+                    i_raw.unsigned_abs() as usize
+                } else {
+                    i_raw as usize
+                },
                 axis: dim_usize,
                 size: dim_size,
             });
         }
-        idx_usize.push(iu);
+        let i = if i_raw < 0 {
+            i_raw + dim_size_i64
+        } else {
+            i_raw
+        };
+        idx_usize.push(i as usize);
     }
 
     // Forward: clone input and overwrite slices at index positions with value.
@@ -2757,11 +2768,26 @@ mod index_fill_tests {
     }
 
     #[test]
-    fn index_fill_rejects_negative_index() -> FerrotorchResult<()> {
-        let input = cpu_f32(vec![1.0_f32; 6], vec![2, 3])?;
-        let idx = idx_i64(vec![0, -1], vec![2])?;
-        let err = index_fill(&input, 1, &idx, 0.0).err();
-        assert!(matches!(err, Some(FerrotorchError::InvalidArgument { .. })));
+    fn index_fill_wraps_negative_index_per_upstream() -> FerrotorchResult<()> {
+        // Upstream `index_fill_kernel` at
+        // `aten/src/ATen/native/cpu/IndexKernel.cpp:224-229` wraps negative
+        // indices: `if (idx < 0) idx += self_dim_size`. Only OOB negatives
+        // (`idx < -dim_size`) raise IndexError. Verified against live torch:
+        //   torch.index_fill(torch.tensor([[1.,2.,3.],[4.,5.,6.]]), 1,
+        //                    torch.tensor([-1]), -1.0)
+        //     == tensor([[1., 2., -1.], [4., 5., -1.]])
+        let input = cpu_f32(vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0], vec![2, 3])?;
+        let idx = idx_i64(vec![-1], vec![1])?;
+        let out = index_fill(&input, 1, &idx, -1.0)?;
+        let expected = [1.0_f32, 2.0, -1.0, 4.0, 5.0, -1.0];
+        assert_eq!(out.data()?, &expected);
+        // OOB negative (-4 for size-3 axis) still errors.
+        let idx_oob = idx_i64(vec![-4], vec![1])?;
+        let err = index_fill(&input, 1, &idx_oob, 0.0).err();
+        assert!(matches!(
+            err,
+            Some(FerrotorchError::IndexOutOfBounds { .. })
+        ));
         Ok(())
     }
 
