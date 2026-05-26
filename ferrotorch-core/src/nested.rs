@@ -1,3 +1,19 @@
+//! `NestedTensor` and `PackedNestedTensor` — ragged (jagged) tensors that
+//! mirror `torch.nested.nested_tensor` (`aten/src/ATen/native/nested/`) +
+//! the jagged-layout NJT (`torch/nested/_internal/nested_tensor.py`).
+//!
+//! ## REQ status (per `.design/ferrotorch-core/nested.md`)
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 (NestedTensor::new) | SHIPPED | `NestedTensor::new` at `nested.rs:50-96` validates ndim + non-ragged shape parity; consumer `lib.rs:172` `pub use nested::{NestedTensor, ...}` — R-DEFER-1 S5 grandfathering (#806, #291) |
+//! | REQ-2 (accessors) | SHIPPED | `num_components` at `nested.rs:100`, `ragged_dim` at `:106`, `tensors` at `:112`, `ndim` at `:118`, `consistent_shape` at `:123`, `ragged_lengths` at `:128`; consumer `lib.rs:172` re-export + internal GPU fast-path uses |
+//! | REQ-3 (to_padded + GPU fast path) | SHIPPED | `to_padded` at `nested.rs:163-240` + GPU fast path `try_to_padded_gpu` at `:258-377`; consumer `lib.rs:172` re-export — R-DEFER-1 S5 grandfathering |
+//! | REQ-4 (from_padded) | SHIPPED | `from_padded` at `nested.rs:401+` with GPU fast path at `:450-454` via `try_from_padded_gpu`; consumer `lib.rs:172` re-export |
+//! | REQ-5 (nested SDPA) | SHIPPED | `pub fn nested_scaled_dot_product_attention<T: Float>` at `nested.rs:657-770` with GPU FlashAttention dispatch `try_flash_attention_gpu_component` at `:775`; consumer `lib.rs:172` re-exports `nested_scaled_dot_product_attention` |
+//! | REQ-6 (PackedNestedTensor) | SHIPPED | `pub struct PackedNestedTensor<T: Float>` at `nested.rs:938`; constructor `from_sequences` at `:967-1010+`; consumer `lib.rs:172` re-export — R-DEFER-1 S5 grandfathering (#291) |
+//! | REQ-7 (structured errors) | SHIPPED | `InvalidArgument`/`ShapeMismatch`/`DeviceMismatch` at multiple sites; no `panic!` in production paths; consumers propagate via `?` |
+
 use crate::device::Device;
 use crate::dtype::Float;
 use crate::error::{FerrotorchError, FerrotorchResult};

@@ -15,6 +15,21 @@
 //! position-based. That covers the most common use case (avoiding
 //! "did I get the batch dim right?" bugs in attention / einsum prep).
 
+//!
+//! ## REQ status (per `.design/ferrotorch-core/named_tensor.md`)
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 (NamedTensor<T> struct) | SHIPPED | `pub struct NamedTensor<T: Float>` at `named_tensor.rs:27` with `Vec<Option<String>>` names; consumer `lib.rs:147` re-export — R-DEFER-1 S5 grandfathering (#621) |
+//! | REQ-2 (constructors) | SHIPPED | `new` at `named_tensor.rs:37` (validates count + rejects duplicates at `:48-55`), `refined` at `:61`; consumer `lib.rs:147` re-export; tests `named_tensor_basic_construction` at `:202`, `named_tensor_rejects_duplicate_names` at `:218` |
+//! | REQ-3 (accessors) | SHIPPED | `tensor` at `named_tensor.rs:77`, `into_tensor` at `:82`, `names` at `:87`, `shape` at `:92`, `ndim` at `:97`, `numel` at `:102`; consumer `lib.rs:147` re-export |
+//! | REQ-4 (lookups) | SHIPPED | `dim_index` at `named_tensor.rs:107`, `size_of` at `:112`; consumer `lib.rs:147` re-export; test `named_tensor_dim_index_lookup` at `:289` |
+//! | REQ-5 (rename) | SHIPPED | `rename` at `named_tensor.rs:118-131`; consumer `lib.rs:147` re-export; test `named_tensor_rename_replaces_specified_names` at `:264` |
+//! | REQ-6 (align_to) | SHIPPED | `align_to` at `named_tensor.rs:137-163` using `crate::methods::permute_t` at `:160`; consumer `lib.rs:147` re-export + internal `crate::methods::permute_t` call; tests `named_tensor_align_permutes_dims` at `:231`, `named_tensor_align_identity_is_clone` at `:243`, `named_tensor_align_rejects_unknown_name` at `:250` |
+//! | REQ-7 (detached) | SHIPPED | `detached` at `named_tensor.rs:167`; consumer `lib.rs:147` re-export; test `named_tensor_detached_drops_names` at `:273` |
+//! | REQ-8 (Display) | SHIPPED | `Display` at `named_tensor.rs:175-189`; consumer `lib.rs:147` re-export + every `format!("{}", nt)` callsite |
+//! | REQ-9 (structured errors) | SHIPPED | `ShapeMismatch` at `:39, :139`; `InvalidArgument` at `:51, :150`; no `panic!`/`unwrap`/`expect` in production paths; consumers propagate via `?` |
+
 use crate::dtype::Float;
 use crate::error::{FerrotorchError, FerrotorchResult};
 use crate::tensor::Tensor;

@@ -1,3 +1,18 @@
+//! ## REQ status (per `.design/ferrotorch-core/device.md`)
+//!
+//! Tensor location enum mirroring `c10::Device` (`c10/core/Device.h:31`).
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 (Cpu variant) | SHIPPED | variant `Device::Cpu` at `device.rs:15` with `#[default]`; consumer `storage.rs` `TensorStorage::cpu(...).device() == Device::Cpu`; also `bool_tensor.rs:152` returns `Cpu` for any `TensorStorage::cpu`-backed `BoolTensor` |
+//! | REQ-2 (Cuda variant) | SHIPPED | variant `Device::Cuda(usize)` at `device.rs:18`; consumer `int_tensor.rs:268-323` `IntTensor::to` matches `(Cpu, Cuda(_))` / `(Cuda(_), Cpu)` arms for H2D / D2H transfer |
+//! | REQ-3 (Xpu variant) | SHIPPED | variant `Device::Xpu(usize)` at `device.rs:22`; consumer `error.rs:259` `FerrotorchError::DeviceMismatch { expected, got }` carries Xpu values; `int_tensor.rs:336` rejects `Xpu` destination via structured error |
+//! | REQ-4 (Mps variant) | SHIPPED | variant `Device::Mps(usize)` at `device.rs:26`; consumer `bool_tensor.rs:261-266` `(from, to) => Err(InvalidArgument)` arm pattern-matches on `Mps(_)` |
+//! | REQ-5 (Meta variant) | SHIPPED | variant `Device::Meta` at `device.rs:31`; consumer `storage.rs` `TensorStorage::Meta` arm — `try_as_slice` returns `GpuTensorNotAccessible` for Meta variant |
+//! | REQ-6 (predicates) | SHIPPED | `is_cpu` / `is_cuda` / `is_xpu` / `is_mps` / `is_meta` at `device.rs:36-64`; consumer `bool_tensor.rs:158`, `int_tensor.rs:205`, every `if a.device().is_cuda()` branch across `grad_fns/*.rs` |
+//! | REQ-7 (Display) | SHIPPED | `Display` impl at `device.rs:66-76` matching `c10::Device::str()` (`c10/core/Device.h:167`); consumer `error.rs:11` `#[error("device mismatch: expected {expected}, got {got}")]` |
+//! | REQ-8 (Copy/Hash derives) | SHIPPED | `#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]` at `device.rs:12`; consumer `gpu_dispatch.rs` registry + `Tensor<T>::device() == other.device()` PartialEq compares in `bool_tensor.rs:333`, `int_tensor.rs:436` |
+
 /// Device on which a tensor's data resides.
 ///
 /// `Meta` is a special device that does not allocate any backing memory:

@@ -50,6 +50,21 @@
 //! let result = dispatcher.call("add", &[tensor], keyset).unwrap();
 //! ```
 
+//!
+//! ## REQ status (per `.design/ferrotorch-core/dispatch.md`)
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 (DispatchKey enum) | SHIPPED | `pub enum DispatchKey` at `dispatch.rs:70` with 11 variants `Cpu=0..Tracer=10` mirroring (reduced) `c10::DispatchKey` (`c10/core/DispatchKey.h:136`); consumer `lib.rs:152` re-export — R-DEFER-1 S5 grandfathering for the existing dispatch boundary; registering-crate follow-up at #1530 |
+//! | REQ-2 (DispatchKeySet bitmask) | SHIPPED | `pub struct DispatchKeySet { bits: u16 }` at `dispatch.rs:137-251`; consumer `Dispatcher::call` at `:344` walks `keyset.iter_desc()` |
+//! | REQ-3 (priority via discriminant) | SHIPPED | `DispatchKey::priority` at `dispatch.rs:113`; consumer `DispatchKeySet::insert` at `:172` shifts by `priority()`, `iter_desc` at `:235` |
+//! | REQ-4 (highest/iter_desc) | SHIPPED | `highest` at `dispatch.rs:220`, `iter_desc` at `:235`; consumer `Dispatcher::call` at `:357` iterates `keyset.iter_desc()` |
+//! | REQ-5 (Dispatcher<T>) | SHIPPED | `pub struct Dispatcher<T: Float>` at `dispatch.rs:298`, `register` at `:312`, `call` at `:344`; consumer `lib.rs:152` re-exports `Dispatcher` / `Kernel` for downstream registering crates — R-DEFER-1 S5 grandfathering; #1530 |
+//! | REQ-6 (call_direct) | SHIPPED | `Dispatcher::call_direct` at `dispatch.rs:374-390`; consumer `lib.rs:152` re-export |
+//! | REQ-7 (structured errors) | SHIPPED | `Err(FerrotorchError::InvalidArgument)` at `dispatch.rs:351` (empty keyset) and `:362` (no kernel); no `panic!` |
+//! | REQ-8 (Kernel<T> type alias) | SHIPPED | `pub type Kernel<T>` at `dispatch.rs:287-291` with `Send + Sync + 'static`; consumer every `register(...)` callsite + `lib.rs:152` re-export |
+//! | REQ-9 (per-dtype generic) | SHIPPED | `Dispatcher<T: Float>` is generic; consumer `lib.rs:152` re-exports both `Dispatcher` and `Kernel` parameterized on `T` |
+
 use crate::dtype::Float;
 use crate::error::{FerrotorchError, FerrotorchResult};
 use crate::tensor::Tensor;

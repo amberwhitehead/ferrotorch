@@ -18,6 +18,24 @@
 //! `IntTensor` / `BoolTensor` additions in #596: callers who need
 //! complex math get the right surface; existing float ops keep working.
 
+//!
+//! ## REQ status (per `.design/ferrotorch-core/complex_tensor.md`)
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 (ComplexTensor<T> SoA layout) | SHIPPED | `pub struct ComplexTensor<T: Float>` at `complex_tensor.rs:32` with `Arc<Vec<T>>` re + im buffers; consumer `lib.rs:136` re-export — R-DEFER-1 S5 grandfathering (#618) |
+//! | REQ-2 (constructors) | SHIPPED | `from_re_im` at `complex_tensor.rs:40`, `from_real` at `:71`, `zeros` at `:78`, `scalar` at `:94`; consumer `lib.rs:136` re-export; test `complex_construction_from_re_im` at `:428` |
+//! | REQ-3 (interleaved bridge) | SHIPPED | `from_interleaved` at `complex_tensor.rs:105`, `to_interleaved` at `:136`; consumer the FFT methods at `:327, :334, :341, :348` (call `to_interleaved` then `crate::fft::*` then `from_interleaved`) |
+//! | REQ-4 (real/imag extraction) | SHIPPED | `real` at `complex_tensor.rs:149`, `imag` at `:158`; consumer `lib.rs:136` re-export; test `complex_real_imag_extraction` at `:489` |
+//! | REQ-5 (pointwise arithmetic) | SHIPPED | `add` at `complex_tensor.rs:192`, `sub` at `:201`, `mul` at `:210` (Karatsuba-shaped (a+bi)(c+di)); consumer the `matmul` method at `:302-305` composes 4× `crate::ops::linalg::mm` calls — `mm` outputs feed into elementwise add/sub on `Vec<T>` reals |
+//! | REQ-6 (conj) | SHIPPED | `conj` at `complex_tensor.rs:219`; consumer `lib.rs:136` re-export; test `complex_conj_negates_imag` at `:537` |
+//! | REQ-7 (abs/angle) | SHIPPED | `abs` at `complex_tensor.rs:230`, `angle` at `:241`; consumer `lib.rs:136` re-export; tests `complex_abs_pythagorean` at `:546`, `complex_angle_quadrants` at `:553` |
+//! | REQ-8 (matmul) | SHIPPED | `matmul` at `complex_tensor.rs:259-321` via 4× `crate::ops::linalg::mm`; consumer `lib.rs:136` re-export; tests `complex_matmul_2x2_known_value` at `:612` + real-equivalence regression at `:642` |
+//! | REQ-9 (FFT bridge) | SHIPPED | `fft`/`ifft`/`fft2`/`ifft2` at `complex_tensor.rs:327-351`; consumer `lib.rs:136` re-export; test `complex_fft_ifft_roundtrip` at `:657`, `complex_fft2_ifft2_roundtrip` at `:678` |
+//! | REQ-10 (reshape) | SHIPPED | `reshape` at `complex_tensor.rs:355` via `Arc::clone`; consumer `lib.rs:136` re-export; test `complex_reshape_preserves_data` at `:571` |
+//! | REQ-11 (0-D vs zero-axis) | SHIPPED | `shape.is_empty() { 1 } else { product }` at `complex_tensor.rs:42, :81, :117, :357`; consumer `scalar(re, im)` at `:94` returns 0-D tensor — #805 |
+//! | REQ-12 (structured errors) | SHIPPED | `ShapeMismatch` at multiple sites + `InvalidArgument` at `:108`; no `panic!` in production paths; consumers propagate via `?` |
+
 use std::sync::Arc;
 
 use crate::dtype::Float;

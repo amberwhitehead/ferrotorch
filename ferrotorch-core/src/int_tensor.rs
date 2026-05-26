@@ -29,6 +29,24 @@
 //! sizes differ. (These cross-type conversions are not yet implemented as
 //! methods — see the Phase 2c follow-up note on cross-dtype GPU casts below.)
 
+//!
+//! ## REQ status (per `.design/ferrotorch-core/int_tensor.md`)
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 (IntElement trait, IntTensor<I>) | SHIPPED | trait `IntElement` at `int_tensor.rs:44`; `impl IntElement for i32 / i64` at `:57 / :74`; `pub struct IntTensor<I: IntElement>` at `:93`; consumer `grad_fns/quantize_grad.rs:139` `zero_point: &IntTensor<i64>`; `ops/phase2c.rs:115` `input: &IntTensor<I>` |
+//! | REQ-2 (constructors) | SHIPPED | `from_vec` at `int_tensor.rs:113`, `from_slice` at `:139`, `zeros` at `:144`, `arange` at `:159`, `scalar` at `:175`; consumer `grad_fns/reduction.rs:1463` `IntTensor::<i64>::scalar(best_idx)` for argmax; `ops/phase2c.rs:101, :109` `from_gpu_handle` / `from_vec` |
+//! | REQ-3 (device transfer) | SHIPPED | `device` at `int_tensor.rs:199`, `is_cuda` at `:205`, `to` at `:260`; consumer `ops/phase2c.rs` reads `input.device()` + `input.gpu_handle()` before argmax kernel launches; `// SAFETY:` D2H reinterpret at `:296-318` |
+//! | REQ-4 (cross-width cast) | SHIPPED | `cast<J>` at `int_tensor.rs:355` with `cast_gpu` fast path; consumer `ops/phase2c.rs` i32↔i64 cast kernel; test `cast_i64_to_i32_out_of_range_errors` at `:836` |
+//! | REQ-5 (reshape) | SHIPPED | `reshape` at `int_tensor.rs:384`; consumer `grad_fns/reduction.rs` argmax materialization; test `reshape_preserves_data` at `:843` |
+//! | REQ-6 (arithmetic ops) | SHIPPED | `add` at `int_tensor.rs:551`, `sub` at `:561`, `mul` at `:571`, `neg` at `:581`; CPU references at `:696`; consumer `lib.rs:146` re-export — boundary public API; `bool_tensor.rs:524-569` integer comparison constructors route through `IntTensor` compute path. R-DEFER-1 S5 grandfathering; runner arms at #1530 |
+//! | REQ-7 (floor_div/remainder) | SHIPPED | `floor_div` at `int_tensor.rs:589`, `remainder` at `:599`; CPU references `int_floor_div_ref` at `:709`, `int_remainder_ref` at `:728`; consumer `lib.rs:146` re-export |
+//! | REQ-8 (bitwise ops) | SHIPPED | `bitand`/`bitor`/`bitxor`/`bitnot` at `int_tensor.rs:609-639`; `shl`/`shr` at `:644-649`; CPU references at `:744-765`; consumer `lib.rs:146` re-export |
+//! | REQ-9 (reductions) | SHIPPED | `sum`/`prod`/`min`/`max` at `int_tensor.rs:654-684`; empty-tensor handling at `reduce_op` `:502-548`; consumer `lib.rs:146` re-export |
+//! | REQ-10 (gpu_handle) | SHIPPED | `gpu_handle` at `int_tensor.rs:236`, `from_gpu_handle` at `:421` with `debug_assert_eq!(handle.dtype(), I::dtype())`; consumer `ops/phase2c.rs:101` invokes `from_gpu_handle`; `bool_tensor.rs:596` reads `a.gpu_handle()` for int comparison GPU path |
+//! | REQ-11 (0-D vs zero-axis) | SHIPPED | `shape.is_empty() { 1 } else { product }` at `int_tensor.rs:117, :146, :386`; consumer `grad_fns/reduction.rs:1463` returns 0-D scalar `IntTensor` for argmax — #805 regression pin |
+//! | REQ-12 (structured errors) | SHIPPED | `ShapeMismatch` / `DeviceMismatch` / `InvalidArgument` at multiple sites; no `panic!` / `unwrap()` / `expect()` in production paths; consumers propagate via `?` |
+
 use crate::device::Device;
 use crate::dtype::Element;
 use crate::error::{FerrotorchError, FerrotorchResult};

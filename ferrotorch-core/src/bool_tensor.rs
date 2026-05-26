@@ -31,6 +31,23 @@
 //! caller asked for (PyTorch parity: `Tensor.any() -> bool`), the same as
 //! `has_inf_nan`'s one-flag readback.
 
+//!
+//! ## REQ status (per `.design/ferrotorch-core/bool_tensor.md`)
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 (constructors) | SHIPPED | `BoolTensor` at `bool_tensor.rs:47`; `from_vec` at `:66`, `from_slice` at `:92`, `zeros` at `:97`, `ones` at `:111`, `from_predicate` at `:126`; consumer `grad_fns/comparison.rs:165` `BoolTensor::from_vec(...)` for `where_cond` mask; `grad_fns/indexing.rs:407` `BoolTensor::from_slice(...)` for masked-fill mask |
+//! | REQ-2 (device methods) | SHIPPED | `device` at `bool_tensor.rs:152`, `is_cuda` at `:158`, `to` at `:224`; consumer `ops/indexing.rs:398` `where_cond` reads `cond.device()` to dispatch GPU vs CPU |
+//! | REQ-3 (logical ops) | SHIPPED | `not` at `bool_tensor.rs:271`, `and` / `or` / `xor` at `:293-303`; consumer `grad_fns/indexing.rs` consumes mask buffers — `binary_op` helper at `:322` dispatches GPU PTX kernels (`bool_and` / `bool_or` / `bool_xor` / `bool_not`) |
+//! | REQ-4 (reductions) | SHIPPED | `count_true` at `bool_tensor.rs:396`, `any` at `:405`, `all` at `:416`; consumer `grad_fns/indexing.rs` uses `BoolTensor::any` to detect empty-mask before dependent kernel launches |
+//! | REQ-5 (float comparisons) | SHIPPED | `gt` / `lt` / `ge` / `le` / `eq_t` / `ne` at `bool_tensor.rs:450-477` + `compare_float` at `:479`; consumer `grad_fns/comparison.rs` invokes `BoolTensor::eq_t` etc. mirroring `torch.gt(a, b)` (`aten/src/ATen/native/Compare.cpp`) |
+//! | REQ-6 (integer comparisons) | SHIPPED | `gt_int` / `lt_int` / `ge_int` / `le_int` / `eq_int` / `ne_int` at `bool_tensor.rs:524-569` + `compare_int` at `:571`; consumer `lib.rs:135` re-export; downstream integer-tensor predicate code |
+//! | REQ-7 (to_float) | SHIPPED | `to_float<T: Float>` at `bool_tensor.rs:612`; consumer `grad_fns/indexing.rs` `masked_select` materializes float tensors from `BoolTensor` masks; test `to_float_emits_zeros_and_ones` at `:730` |
+//! | REQ-8 (reshape) | SHIPPED | `reshape` at `bool_tensor.rs:367`; consumer `grad_fns/indexing.rs` reshapes mask buffers to match broadcast shape; test `reshape_preserves_data` at `:722` |
+//! | REQ-9 (gpu_handle) | SHIPPED | `from_gpu_handle` at `bool_tensor.rs:195`, `gpu_handle` at `:182`; consumer every GPU comparison-op return path (`compare_float` at `:501-505`, `binary_op` at `:347-351`, `unary_gpu` at `:317-319`) |
+//! | REQ-10 (0-D vs zero-axis) | SHIPPED | `shape.is_empty() { 1 } else { product }` at `bool_tensor.rs:70, :99, :113, :369`; consumer `grad_fns/indexing.rs` 0-D mask handling — #805 regression pin |
+//! | REQ-11 (structured errors) | SHIPPED | `ShapeMismatch` / `DeviceMismatch` / `InvalidArgument` at multiple sites; no `panic!` in production paths; consumer `grad_fns/comparison.rs` and `grad_fns/indexing.rs` propagate via `?` |
+
 use crate::device::Device;
 use crate::dtype::Float;
 use crate::error::{FerrotorchError, FerrotorchResult};

@@ -70,6 +70,18 @@
 //! `needs_grad` fork) **out** of the arms into a generic helper so the
 //! macro doesn't hide complexity inside per-dtype blocks.
 
+//!
+//! ## REQ status (per `.design/ferrotorch-core/dtype_dispatch.md`)
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 (macro) | SHIPPED | macro `dispatch_floating_dtype!` at `dtype_dispatch.rs:95-119` mirroring `AT_DISPATCH_FLOATING_TYPES_AND_HALF` (`aten/src/ATen/Dispatch.h`); consumer `grad_fns/arithmetic.rs:413` invokes the macro for the GPU `add` arm |
+//! | REQ-2 (unified Result return) | SHIPPED | all four arms + the `else` arm return `FerrotorchResult<U>`; consumer `grad_fns/arithmetic.rs:413` binds the macro result to `FerrotorchResult<GpuBufferHandle>` |
+//! | REQ-3 (NotImplementedOnCuda fallback) | SHIPPED | trailing `else` arm at `dtype_dispatch.rs:113-117` returning `Err(FerrotorchError::NotImplementedOnCuda)`; test `dispatch_unsupported_dtype_returns_not_implemented` at `:191` |
+//! | REQ-4 (is_* predicates) | SHIPPED | `is_f32` / `is_f64` / `is_bf16` / `is_f16` at `dtype_dispatch.rs:126/:133/:140/:149`; consumer `fft.rs:139` `if input.is_cuda() && (is_f32::<T>() || is_f64::<T>())` |
+//! | REQ-5 (`#[macro_export]`) | SHIPPED | attribute at `dtype_dispatch.rs:95`; consumer `grad_fns/arithmetic.rs:413` invokes `crate::dispatch_floating_dtype!` (cross-module within crate) |
+//! | REQ-6 (4 dtypes lockstep with `Float` impls) | SHIPPED | macro arms `f32 / f64 / bf16 / f16` at `dtype_dispatch.rs:101-103` mirror `Float` impls at `dtype.rs:28-35`; consumer `grad_fns/arithmetic.rs:413` — structural defense against issue #23 pattern A |
+
 /// Dispatch to one of three closures based on the static type `T`,
 /// returning `Err(FerrotorchError::NotImplementedOnCuda { op })` for
 /// any dtype other than `f32`, `f64`, or `half::bf16`.

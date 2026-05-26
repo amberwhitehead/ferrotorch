@@ -77,6 +77,21 @@
 // optimizer mutates under documented exclusive-access invariants. Each block
 // has a per-site `// SAFETY:` justification.
 
+//! ## REQ status (per `.design/ferrotorch-core/lib.md`)
+//!
+//! Crate-root lint baseline, module declarations, and `pub use` re-exports
+//! mirroring `torch/__init__.py` and `aten/src/ATen/ATen.h`. All REQs
+//! cite `ferrotorch-core/src/lib.rs` directly.
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 (lint baseline) | SHIPPED | `#![warn(clippy::all, clippy::pedantic)]`, `#![deny(rust_2018_idioms)]`, documented `#![allow(clippy::*)]` set at `lib.rs:1-78`; every `cargo clippy -p ferrotorch-core` run validates the baseline |
+//! | REQ-2 (module decls) | SHIPPED | 39 module declarations at `lib.rs:80-118` (36 `pub mod` + 3 internal `mod`); consumed by every downstream `use ferrotorch_core::...` resolver |
+//! | REQ-3 (`pub use` re-exports) | SHIPPED | ~150-symbol re-export block at `lib.rs:120-191`; every downstream crate (`ferrotorch-nn`, `ferrotorch-llama`, …) imports `Tensor`, `Device`, `DType`, `FerrotorchError` etc. via these |
+//! | REQ-4 (missing_docs allow) | SHIPPED | `#![allow(missing_docs)]` at `lib.rs:74` with the rustdoc-sweep follow-up cite; permitted at crate root by R-CODE-3 (which forbids module-root allows) |
+//! | REQ-5 (unsafe permitted) | SHIPPED | no `#![forbid(unsafe_code)]` at the crate root; per-site `// SAFETY:` blocks at `int_tensor.rs:296-313`, `storage.rs` and other files satisfy R-CODE-1 |
+
+
 pub mod autograd;
 pub mod bool_tensor;
 pub mod complex_tensor;

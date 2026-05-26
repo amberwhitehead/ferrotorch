@@ -25,6 +25,17 @@
 //! and `NaN` sources pass through untouched, because they were already
 //! non-finite in the source domain.
 
+//!
+//! ## REQ status (per `.design/ferrotorch-core/numeric_cast.md`)
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 (fallible cast<T,U>) | SHIPPED | `pub fn cast<T, U>` at `numeric_cast.rs:71-114` with structured `FerrotorchError::InvalidArgument` on failure (`:77` and `:100`); consumer `fft.rs:30` `use crate::numeric_cast::cast` + downstream FFT scale-factor callsites |
+//! | REQ-2 (saturation guard) | SHIPPED | guard block at `numeric_cast.rs:96-110` comparing finite-source vs non-finite-result; tests 4 saturation regressions at `:166-220` + 5 passthrough tests at `:188-235`; consumer `fft.rs:30` |
+//! | REQ-3 (integer-target no-op cost) | SHIPPED | guard at `:96-110` is no-op for integer targets (integers always project to finite f64); test `cast_f64_inf_to_i32_fails` at `:126`; consumer any `cast::<f64, i32>(...)` callsite — dtype-agnostic by construction |
+//! | REQ-4 (structured message) | SHIPPED | error messages include `type_name::<T>()`, `type_name::<U>()`, `{:?}` of source at `numeric_cast.rs:78-83` and `:101-108`; test `cast_huge_f64_to_bf16_returns_err` at `:172` asserts substring; consumer error propagation via `?` |
+//! | REQ-5 (`#[inline]`) | SHIPPED | attribute at `numeric_cast.rs:70`; consumer `fft.rs` callsites — `#[inline]` ensures the cast collapses into the FFT pipeline |
+
 use crate::error::{FerrotorchError, FerrotorchResult};
 
 /// Fallible numeric cast from `T` to `U` via `num_traits::NumCast`.

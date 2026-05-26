@@ -1,3 +1,18 @@
+//! ## REQ status (per `.design/ferrotorch-core/error.md`)
+//!
+//! Workspace-wide error enum mirroring `c10::Error` (`c10/util/Exception.h:31`)
+//! under R-DEV-4 (Rust `Result` deviation from C++ exceptions).
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 (FerrotorchError enum) | SHIPPED | enum `FerrotorchError` at `error.rs:6` with 13 variants; non-test consumer `tensor.rs:1146` (`masked_select` returns `FerrotorchResult`); 1336+ uses across `ferrotorch-core/src/**/*.rs` |
+//! | REQ-2 (stable Display) | SHIPPED | `#[error("...")]` attrs at `error.rs:7-89`; test `gpu_variant_display` at `error.rs:117`; consumer `tensor.rs` propagation |
+//! | REQ-3 (Send + Sync + 'static) | SHIPPED | `Box<dyn Error + Send + Sync + 'static>` source bound at `error.rs:82`; consumer `cpu_pool.rs` cross-thread `JoinHandle<FerrotorchResult<T>>` |
+//! | REQ-4 (Gpu source-chain) | SHIPPED | `Gpu { source }` variant at `error.rs:75-83` with `#[source]`; test `gpu_variant_preserves_source_chain` at `:104`; consumer `gpu_dispatch.rs` wraps `GpuBackend::*` errors |
+//! | REQ-5 (FerrotorchResult alias) | SHIPPED | `pub type FerrotorchResult<T>` at `error.rs:93`, re-exported at `lib.rs:145`; consumer `tensor.rs:1144` `pub fn masked_fill -> FerrotorchResult<Tensor<T>>` |
+//! | REQ-6 (NotImplementedOnCuda) | SHIPPED | variant at `error.rs:44`; consumer `dtype_dispatch.rs:114` (`dispatch_floating_dtype!` else arm) + `int_tensor.rs:355` (`cast` errors cross-width casts on CUDA) |
+//! | REQ-7 (Ferray From) | SHIPPED | `Ferray(#[from] FerrayError)` at `error.rs:88`; consumer: every `?`-propagated ferray error through `storage.rs` / `tensor.rs` |
+
 use crate::device::Device;
 
 /// Errors produced by ferrotorch operations.

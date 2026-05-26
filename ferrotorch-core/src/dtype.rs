@@ -1,3 +1,17 @@
+//! ## REQ status (per `.design/ferrotorch-core/dtype.md`)
+//!
+//! Dtype gateway re-exporting `ferray_core::{DType, Element}` and defining the
+//! `Float` marker trait. Mirrors `c10::ScalarType` (`c10/core/ScalarType.h`).
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 (DType/Element re-export) | SHIPPED | `pub use ferray_core::{DType, Element}` at `dtype.rs:6`; consumer `lib.rs:142` re-export + `storage.rs` `<T as Element>::dtype()` GPU buffer tagging |
+//! | REQ-2 (Float marker trait) | SHIPPED | trait `Float` at `dtype.rs:26` with `Element + num_traits::Float + AddAssign` bound; consumer `tensor.rs` `pub struct Tensor<T: Float>` + every `<T: Float>` op |
+//! | REQ-3 (bf16 Float impl) | SHIPPED | `impl Float for half::bf16` at `dtype.rs:30`; consumer `grad_fns/arithmetic.rs:413` `bf16 =>` arm invokes `backend.add_bf16_bf16(...)`; test `bf16_tensor_addition` at `dtype.rs:124` |
+//! | REQ-4 (f16 Float impl) | SHIPPED | `impl Float for half::f16` at `dtype.rs:35`; consumer `dtype_dispatch.rs:111` `f16 =>` arm in `dispatch_floating_dtype!`; disambiguation test `f16_element_dtype` at `:63` pins `DType::F16 != DType::BF16` |
+//! | REQ-5 (no Float for int/bool) | SHIPPED | absence at `dtype.rs:26-35`; consumer `int_tensor.rs:44` `IntElement` is the integer-specific bound without `num_traits::Float` — `IntTensor<I>` cannot be passed to `<T: Float>` ops (compile error) |
+//! | REQ-6 (Element::dtype tag) | SHIPPED | `<T as Element>::dtype()` returns `BF16`/`F16`/`F32`/`F64`; consumer `storage.rs` `TensorStorage::on_device` tags every GPU buffer; `int_tensor.rs:421` `from_gpu_handle` debug-asserts the tag matches |
+
 /// Re-export ferray's type system for tensor element types.
 ///
 /// ferray's `Element` trait is sealed — only types ferray knows about can be
