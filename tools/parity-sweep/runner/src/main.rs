@@ -513,17 +513,19 @@ fn dispatch_f32(
     // (argmax / argmin / count_nonzero) into a `Tensor<f32>` so the existing
     // `assert_close_f32` value-equality gate can consume it. Pairs with
     // `WireTensor::to_f32`'s int-widening branch on the expected side.
-    let int_to_f32 = |it: &ferrotorch_core::IntTensor<i64>| -> Result<Tensor<f32>, Box<dyn std::error::Error>> {
-        let d = it.data()?;
-        let f: Vec<f32> = d.iter().map(|&v| v as f32).collect();
-        Ok(ferrotorch_core::from_vec(f, it.shape())?)
-    };
+    let int_to_f32 =
+        |it: &ferrotorch_core::IntTensor<i64>| -> Result<Tensor<f32>, Box<dyn std::error::Error>> {
+            let d = it.data()?;
+            let f: Vec<f32> = d.iter().map(|&v| v as f32).collect();
+            Ok(ferrotorch_core::from_vec(f, it.shape())?)
+        };
     // Same for BoolTensor (any/all).
-    let bool_to_f32 = |b: &ferrotorch_core::BoolTensor| -> Result<Tensor<f32>, Box<dyn std::error::Error>> {
-        let d = b.data()?;
-        let f: Vec<f32> = d.iter().map(|&v| if v { 1.0 } else { 0.0 }).collect();
-        Ok(ferrotorch_core::from_vec(f, b.shape())?)
-    };
+    let bool_to_f32 =
+        |b: &ferrotorch_core::BoolTensor| -> Result<Tensor<f32>, Box<dyn std::error::Error>> {
+            let d = b.data()?;
+            let f: Vec<f32> = d.iter().map(|&v| if v { 1.0 } else { 0.0 }).collect();
+            Ok(ferrotorch_core::from_vec(f, b.shape())?)
+        };
 
     match op {
         // Binary arithmetic. `torch.add(input, other, *, alpha=1)` is routed
@@ -1616,25 +1618,53 @@ fn dispatch_f32(
         // multi-dim list reduced by sequential `sum_dim` calls in
         // descending-order so axis indices stay valid after each squeeze.
         // VJP per `tools/autograd/derivatives.yaml:1702-1719 sum_backward`.
+        //
+        // Edge cases:
+        // - 0-D input + dim kwarg: ferrotorch's `sum_dim` rejects 0-D
+        //   (deliberate divergence — see `.design/ferrotorch-core/grad_fns/
+        //   reduction.md` AC-16). Treat as full reduction, then reshape to
+        //   torch's keepdim shape when keepdim=true.
+        // - Full reduction with keepdim=true on N-D input: torch returns
+        //   `[1, 1, ..., 1]` (ndim ones); ferrotorch's `sum` returns `[]`.
+        //   Reshape after the fact.
         "sum" => Ok(Some({
             let a = unary("sum")?;
-            match dim_kwarg("sum")? {
-                None => grad_fns::reduction::sum(&a)?,
-                Some(dims) => {
-                    let keepdim = keepdim_kwarg();
-                    let mut sorted: Vec<i64> = dims
-                        .iter()
-                        .map(|&d| if d < 0 { a.ndim() as i64 + d } else { d })
-                        .collect();
-                    sorted.sort_unstable();
-                    let mut cur = a.clone();
-                    // Reduce highest dim first so lower-dim indices stay
-                    // valid through the squeeze chain.
-                    for &d in sorted.iter().rev() {
-                        cur = grad_fns::reduction::sum_dim(&cur, d, keepdim)?;
-                    }
-                    cur
+            let keepdim = keepdim_kwarg();
+            let dims_opt = dim_kwarg("sum")?;
+            let in_ndim = a.ndim();
+            // Decide: full-reduction path vs dim-chain. The full path covers
+            // (a) no dim kwarg, (b) dim==[] empty list, (c) 0-D input
+            // (sum_dim would reject — full reduction is identity on scalars
+            // and matches torch's `sum(scalar)` returning the scalar).
+            let do_full = match &dims_opt {
+                None => true,
+                Some(_) if in_ndim == 0 => true,
+                _ => false,
+            };
+            if do_full {
+                let r = grad_fns::reduction::sum(&a)?;
+                if keepdim && in_ndim > 0 {
+                    // Torch emits `[1, 1, ..., 1]` for keepdim+all-dim reduce.
+                    let ones = vec![1usize; in_ndim];
+                    let d = r.data()?.to_vec();
+                    ferrotorch_core::from_vec(d, &ones)?
+                } else {
+                    r
                 }
+            } else {
+                let dims = dims_opt.unwrap();
+                let mut sorted: Vec<i64> = dims
+                    .iter()
+                    .map(|&d| if d < 0 { in_ndim as i64 + d } else { d })
+                    .collect();
+                sorted.sort_unstable();
+                let mut cur = a.clone();
+                // Reduce highest dim first so lower-dim indices stay
+                // valid through the squeeze chain.
+                for &d in sorted.iter().rev() {
+                    cur = grad_fns::reduction::sum_dim(&cur, d, keepdim)?;
+                }
+                cur
             }
         })),
 
@@ -1647,41 +1677,48 @@ fn dispatch_f32(
         // VJP per `derivatives.yaml:1143-1155`.
         "mean" => Ok(Some({
             let a = unary("mean")?;
-            match dim_kwarg("mean")? {
-                None => grad_fns::reduction::mean(&a)?,
-                Some(dims) => {
-                    let keepdim = keepdim_kwarg();
-                    // Single-dim short path uses native `mean_dim`.
-                    if dims.len() == 1 {
-                        grad_fns::reduction::mean_dim(&a, dims[0], keepdim)?
-                    } else {
-                        // Multi-dim: sum over dims then divide by the
-                        // product of their sizes. This composes the
-                        // existing autograd-aware `sum_dim` chain with
-                        // a `scale` factor handled at the value level —
-                        // matches upstream's `at::sum_out(...).div_(dim_prod)`
-                        // recipe at `ReduceOps.cpp:1452-1454`.
-                        let in_shape = a.shape().to_vec();
-                        let mut sorted: Vec<i64> = dims
-                            .iter()
-                            .map(|&d| if d < 0 { a.ndim() as i64 + d } else { d })
-                            .collect();
-                        sorted.sort_unstable();
-                        let dim_prod: usize = sorted
-                            .iter()
-                            .map(|&d| in_shape[d as usize])
-                            .product();
-                        let mut cur = a.clone();
-                        for &d in sorted.iter().rev() {
-                            cur = grad_fns::reduction::sum_dim(&cur, d, keepdim)?;
-                        }
-                        // Scale by 1/dim_prod via in-place buffer divide
-                        // (CPU only — the runner sweep is CPU-side).
-                        let data = cur.data()?.to_vec();
-                        let inv = 1.0f32 / (dim_prod as f32);
-                        let scaled: Vec<f32> = data.iter().map(|&v| v * inv).collect();
-                        ferrotorch_core::from_vec(scaled, cur.shape())?
+            let keepdim = keepdim_kwarg();
+            let dims_opt = dim_kwarg("mean")?;
+            let in_ndim = a.ndim();
+            let do_full = match &dims_opt {
+                None => true,
+                Some(_) if in_ndim == 0 => true,
+                _ => false,
+            };
+            if do_full {
+                let r = grad_fns::reduction::mean(&a)?;
+                if keepdim && in_ndim > 0 {
+                    let ones = vec![1usize; in_ndim];
+                    let d = r.data()?.to_vec();
+                    ferrotorch_core::from_vec(d, &ones)?
+                } else {
+                    r
+                }
+            } else {
+                let dims = dims_opt.unwrap();
+                // Single-dim short path uses native `mean_dim`.
+                if dims.len() == 1 {
+                    grad_fns::reduction::mean_dim(&a, dims[0], keepdim)?
+                } else {
+                    // Multi-dim: sum over dims then divide by the product
+                    // of their sizes. Matches upstream's
+                    // `at::sum_out(...).div_(dim_prod)` recipe at
+                    // `ReduceOps.cpp:1452-1454`.
+                    let in_shape = a.shape().to_vec();
+                    let mut sorted: Vec<i64> = dims
+                        .iter()
+                        .map(|&d| if d < 0 { in_ndim as i64 + d } else { d })
+                        .collect();
+                    sorted.sort_unstable();
+                    let dim_prod: usize = sorted.iter().map(|&d| in_shape[d as usize]).product();
+                    let mut cur = a.clone();
+                    for &d in sorted.iter().rev() {
+                        cur = grad_fns::reduction::sum_dim(&cur, d, keepdim)?;
                     }
+                    let data = cur.data()?.to_vec();
+                    let inv = 1.0f32 / (dim_prod as f32);
+                    let scaled: Vec<f32> = data.iter().map(|&v| v * inv).collect();
+                    ferrotorch_core::from_vec(scaled, cur.shape())?
                 }
             }
         })),
@@ -1694,36 +1731,108 @@ fn dispatch_f32(
         // dim-supplied samples are a legitimate skip. Full-reduction
         // routes through `grad_fns::reduction::prod` with `ProdBackward`
         // per `derivatives.yaml:1413-1415` (prefix-suffix VJP).
-        "prod" => {
+        "prod" => Ok(Some({
+            // op_db emits `prod` as either `args=[input]` (full reduction)
+            // or `args=[input, dim]` (single-dim reduction). `keepdim`
+            // arrives as kwarg per the `prod.dim_int` overload.
             let a = unary("prod")?;
+            let keepdim = keepdim_kwarg();
             if args.len() < 2 {
-                Ok(Some(grad_fns::reduction::prod(&a)?))
+                let r = grad_fns::reduction::prod(&a)?;
+                let in_ndim = a.ndim();
+                if keepdim && in_ndim > 0 {
+                    let ones = vec![1usize; in_ndim];
+                    let d = r.data()?.to_vec();
+                    ferrotorch_core::from_vec(d, &ones)?
+                } else {
+                    r
+                }
             } else {
-                // Dim-keyed prod not implemented in ferrotorch — skip.
-                Ok(None)
+                let dim = args[1]
+                    .as_i64()
+                    .ok_or("prod: arg 1 (dim) is not a JSON integer")?;
+                grad_fns::reduction::prod_dim(&a, dim, keepdim)?
             }
-        }
+        })),
 
         // `torch.amin(input, dim=[], keepdim=False)` /
         // `torch.amax(...)` — `ReduceOps.cpp:1758` / `:1766`. ferrotorch's
         // `pub fn amin` / `amax` are full-reduction only (NaN handling
         // diverges — skips NaN vs upstream NaN-propagation; tracked under
         // #1314). Dim-keyed amin/amax variant is NOT-STARTED (blocker
-        // #1302 alongside max/min-with-dim). Dim-supplied samples skip.
-        "amin" => {
+        // #1302 alongside max/min-with-dim). Dim-supplied samples skip,
+        // EXCEPT 0-D inputs (amin/amax over a scalar is the scalar). For
+        // full-reduction + keepdim=true on N-D input we reshape to
+        // `[1, 1, ..., 1]` per upstream's keepdim semantics.
+        // amin / amax — full-reduction via `pub fn amin/amax`, single-dim
+        // via `amin_dim/amax_dim`, multi-dim list reduced by sequential
+        // dim-keyed calls in descending-order.
+        "amin" => Ok(Some({
             let a = unary("amin")?;
-            match dim_kwarg("amin")? {
-                None => Ok(Some(grad_fns::reduction::amin(&a)?)),
-                Some(_) => Ok(None),
+            let keepdim = keepdim_kwarg();
+            let in_ndim = a.ndim();
+            let dims_opt = dim_kwarg("amin")?;
+            let do_full = match &dims_opt {
+                None => true,
+                Some(_) if in_ndim == 0 => true,
+                _ => false,
+            };
+            if do_full {
+                let r = grad_fns::reduction::amin(&a)?;
+                if keepdim && in_ndim > 0 {
+                    let ones = vec![1usize; in_ndim];
+                    let d = r.data()?.to_vec();
+                    ferrotorch_core::from_vec(d, &ones)?
+                } else {
+                    r
+                }
+            } else {
+                let dims = dims_opt.unwrap();
+                let mut sorted: Vec<i64> = dims
+                    .iter()
+                    .map(|&d| if d < 0 { in_ndim as i64 + d } else { d })
+                    .collect();
+                sorted.sort_unstable();
+                let mut cur = a.clone();
+                for &d in sorted.iter().rev() {
+                    cur = grad_fns::reduction::amin_dim(&cur, d, keepdim)?;
+                }
+                cur
             }
-        }
-        "amax" => {
+        })),
+        "amax" => Ok(Some({
             let a = unary("amax")?;
-            match dim_kwarg("amax")? {
-                None => Ok(Some(grad_fns::reduction::amax(&a)?)),
-                Some(_) => Ok(None),
+            let keepdim = keepdim_kwarg();
+            let in_ndim = a.ndim();
+            let dims_opt = dim_kwarg("amax")?;
+            let do_full = match &dims_opt {
+                None => true,
+                Some(_) if in_ndim == 0 => true,
+                _ => false,
+            };
+            if do_full {
+                let r = grad_fns::reduction::amax(&a)?;
+                if keepdim && in_ndim > 0 {
+                    let ones = vec![1usize; in_ndim];
+                    let d = r.data()?.to_vec();
+                    ferrotorch_core::from_vec(d, &ones)?
+                } else {
+                    r
+                }
+            } else {
+                let dims = dims_opt.unwrap();
+                let mut sorted: Vec<i64> = dims
+                    .iter()
+                    .map(|&d| if d < 0 { in_ndim as i64 + d } else { d })
+                    .collect();
+                sorted.sort_unstable();
+                let mut cur = a.clone();
+                for &d in sorted.iter().rev() {
+                    cur = grad_fns::reduction::amax_dim(&cur, d, keepdim)?;
+                }
+                cur
             }
-        }
+        })),
 
         // `torch.logsumexp(input, dim, keepdim=False)` —
         // `aten/src/ATen/native/ReduceOps.cpp:1548-1559`. op_db emits
@@ -1732,15 +1841,26 @@ fn dispatch_f32(
         // sequential `logsumexp_dim` calls in descending-order. Closes #1310.
         "logsumexp" => Ok(Some({
             let a = unary("logsumexp")?;
-            let dims = arg_dim_list_at(1)
-                .ok_or("logsumexp: missing dim list at args[1]")?;
+            let dims = arg_dim_list_at(1).ok_or("logsumexp: missing dim list at args[1]")?;
             let keepdim = arg_bool_at(2).unwrap_or(false);
-            if dims.is_empty() {
-                grad_fns::reduction::logsumexp(&a)?
+            let in_ndim = a.ndim();
+            // 0-D input + dim=[0]: torch returns the same scalar (logsumexp
+            // of a single element is the element itself); ferrotorch's
+            // logsumexp_dim rejects 0-D. Treat as full reduction.
+            let do_full = dims.is_empty() || in_ndim == 0;
+            if do_full {
+                let r = grad_fns::reduction::logsumexp(&a)?;
+                if keepdim && in_ndim > 0 {
+                    let ones = vec![1usize; in_ndim];
+                    let d = r.data()?.to_vec();
+                    ferrotorch_core::from_vec(d, &ones)?
+                } else {
+                    r
+                }
             } else {
                 let mut sorted: Vec<i64> = dims
                     .iter()
-                    .map(|&d| if d < 0 { a.ndim() as i64 + d } else { d })
+                    .map(|&d| if d < 0 { in_ndim as i64 + d } else { d })
                     .collect();
                 sorted.sort_unstable();
                 let mut cur = a.clone();
@@ -1764,9 +1884,7 @@ fn dispatch_f32(
             let keepdim = keepdim_kwarg();
             let it = match dims {
                 None => grad_fns::reduction::argmax(&a)?,
-                Some(ds) if ds.len() == 1 => {
-                    grad_fns::reduction::argmax_dim(&a, ds[0], keepdim)?
-                }
+                Some(ds) if ds.len() == 1 => grad_fns::reduction::argmax_dim(&a, ds[0], keepdim)?,
                 Some(_) => return Ok(None),
             };
             int_to_f32(&it)?
@@ -1777,9 +1895,7 @@ fn dispatch_f32(
             let keepdim = keepdim_kwarg();
             let it = match dims {
                 None => grad_fns::reduction::argmin(&a)?,
-                Some(ds) if ds.len() == 1 => {
-                    grad_fns::reduction::argmin_dim(&a, ds[0], keepdim)?
-                }
+                Some(ds) if ds.len() == 1 => grad_fns::reduction::argmin_dim(&a, ds[0], keepdim)?,
                 Some(_) => return Ok(None),
             };
             int_to_f32(&it)?
@@ -1793,59 +1909,270 @@ fn dispatch_f32(
         // future builder). op_db's std/var samples emit `dim` as kwarg OR
         // `unbiased` as `args[0]` (Python positional bool); skip dim-
         // supplied samples. Closes #1301.
-        "std" => {
+        // std / var — full-reduction via `pub fn std/var(unbiased)`,
+        // dim-keyed via `std_dim/var_dim(correction, keepdim)`. Multi-dim
+        // list chains `var_dim` in descending-order; for std, multi-dim
+        // chains `var_dim` then takes sqrt (var is associative across
+        // disjoint axes; std is not because sqrt breaks associativity).
+        // `correction` is the upstream `n - correction` denominator
+        // (default 1.0 = unbiased / Bessel); `unbiased=False` ↔
+        // `correction=0`.
+        "std" => Ok(Some({
             let a = unary("std")?;
-            let dims = dim_kwarg("std")?;
-            if dims.is_some() {
-                Ok(None) // dim-keyed std NOT-STARTED
-            } else {
-                let unbiased = arg_bool_at(0).unwrap_or(true);
-                Ok(Some(grad_fns::reduction::std(&a, unbiased)?))
+            let dims_opt = dim_kwarg("std")?;
+            let keepdim = keepdim_kwarg();
+            let in_ndim = a.ndim();
+            // Decode correction. Priority: `correction` kwarg > `unbiased`
+            // kwarg > `unbiased` positional > default unbiased=true.
+            let correction: f64 = match kwargs.get("correction") {
+                Some(Value::Number(n)) => n.as_f64().unwrap_or(1.0),
+                Some(Value::Null) | None => {
+                    let unbiased = kwargs
+                        .get("unbiased")
+                        .and_then(Value::as_bool)
+                        .unwrap_or_else(|| arg_bool_at(0).unwrap_or(true));
+                    if unbiased { 1.0 } else { 0.0 }
+                }
+                Some(_) => return Ok(None),
+            };
+            match &dims_opt {
+                None => {
+                    let unbiased = correction == 1.0;
+                    if correction != 0.0 && correction != 1.0 {
+                        // Full-reduction `std(unbiased)` only supports
+                        // correction in {0, 1}; non-{0,1} is NOT-STARTED.
+                        return Ok(None);
+                    }
+                    let r = grad_fns::reduction::std(&a, unbiased)?;
+                    if keepdim && in_ndim > 0 {
+                        let ones = vec![1usize; in_ndim];
+                        let d = r.data()?.to_vec();
+                        ferrotorch_core::from_vec(d, &ones)?
+                    } else {
+                        r
+                    }
+                }
+                Some(dims) if dims.len() == 1 => {
+                    grad_fns::reduction::std_dim(&a, dims[0], correction, keepdim)?
+                }
+                Some(dims) => {
+                    // Multi-dim std: var_dim chain then sqrt.
+                    let mut sorted: Vec<i64> = dims
+                        .iter()
+                        .map(|&d| if d < 0 { in_ndim as i64 + d } else { d })
+                        .collect();
+                    sorted.sort_unstable();
+                    let mut cur = a.clone();
+                    let last = sorted.len() - 1;
+                    for (k, &d) in sorted.iter().rev().enumerate() {
+                        // Apply correction only on the FIRST reduction
+                        // (outermost dim); subsequent reductions in the
+                        // chain are plain `sum / n` (no correction) so the
+                        // total denominator matches upstream's
+                        // `prod(reduced_sizes) - correction`. The chain
+                        // form is exact for var since variance is
+                        // associative across disjoint axes; not for std,
+                        // hence the sqrt-once-at-end pattern.
+                        let c = if k == 0 { correction } else { 0.0 };
+                        let _ = last;
+                        cur = grad_fns::reduction::var_dim(&cur, d, c, keepdim)?;
+                    }
+                    // Now apply sqrt to the accumulated variance.
+                    let cd = cur.data()?.to_vec();
+                    let sq: Vec<f32> = cd.iter().map(|&v| v.sqrt()).collect();
+                    ferrotorch_core::from_vec(sq, cur.shape())?
+                }
             }
-        }
-        "var" => {
+        })),
+        "var" => Ok(Some({
             let a = unary("var")?;
-            let dims = dim_kwarg("var")?;
-            if dims.is_some() {
-                Ok(None) // dim-keyed var NOT-STARTED
-            } else {
-                let unbiased = arg_bool_at(0).unwrap_or(true);
-                Ok(Some(grad_fns::reduction::var(&a, unbiased)?))
+            let dims_opt = dim_kwarg("var")?;
+            let keepdim = keepdim_kwarg();
+            let in_ndim = a.ndim();
+            let correction: f64 = match kwargs.get("correction") {
+                Some(Value::Number(n)) => n.as_f64().unwrap_or(1.0),
+                Some(Value::Null) | None => {
+                    let unbiased = kwargs
+                        .get("unbiased")
+                        .and_then(Value::as_bool)
+                        .unwrap_or_else(|| arg_bool_at(0).unwrap_or(true));
+                    if unbiased { 1.0 } else { 0.0 }
+                }
+                Some(_) => return Ok(None),
+            };
+            match &dims_opt {
+                None => {
+                    let unbiased = correction == 1.0;
+                    if correction != 0.0 && correction != 1.0 {
+                        return Ok(None);
+                    }
+                    let r = grad_fns::reduction::var(&a, unbiased)?;
+                    if keepdim && in_ndim > 0 {
+                        let ones = vec![1usize; in_ndim];
+                        let d = r.data()?.to_vec();
+                        ferrotorch_core::from_vec(d, &ones)?
+                    } else {
+                        r
+                    }
+                }
+                Some(dims) if dims.len() == 1 => {
+                    grad_fns::reduction::var_dim(&a, dims[0], correction, keepdim)?
+                }
+                Some(dims) => {
+                    let mut sorted: Vec<i64> = dims
+                        .iter()
+                        .map(|&d| if d < 0 { in_ndim as i64 + d } else { d })
+                        .collect();
+                    sorted.sort_unstable();
+                    let mut cur = a.clone();
+                    for (k, &d) in sorted.iter().rev().enumerate() {
+                        let c = if k == 0 { correction } else { 0.0 };
+                        cur = grad_fns::reduction::var_dim(&cur, d, c, keepdim)?;
+                    }
+                    cur
+                }
             }
-        }
+        })),
 
         // `torch.any(input)` / `torch.all(input)` —
         // `aten/src/ATen/native/ReduceOps.cpp:1681` / `:1667`. Bool-output,
         // non-differentiable. ferrotorch full-reduction only; dim-keyed
-        // variant skips. `count_nonzero` from `SummaryOps.cpp` returns
-        // int64-output; treated the same. Closes #1312.
-        "any" => {
+        // variant NOT-STARTED (would need dim-keyed any/all on the
+        // BoolTensor surface — a separate builder dispatch). Multi-dim
+        // and single-dim with keepdim full-reduction is reshaped to
+        // upstream's `[1, 1, ..., 1]` shape per `ReduceOps.cpp:1672` /
+        // `:1686` (any/all multi-dim collapse with keepdim). Closes #1312
+        // for the full-reduction surface.
+        // any / all — full reduction via `pub fn any/all`, single-dim via
+        // `any_dim/all_dim`, multi-dim list chained in descending-order.
+        // Bool-output coerced to f32 for the value-equality gate.
+        "any" => Ok(Some({
             let a = unary("any")?;
-            if dim_kwarg("any")?.is_some() {
-                Ok(None)
-            } else {
+            let keepdim = keepdim_kwarg();
+            let in_ndim = a.ndim();
+            let dims_opt = dim_kwarg("any")?;
+            let do_full = match &dims_opt {
+                None => true,
+                Some(_) if in_ndim == 0 => true,
+                _ => false,
+            };
+            if do_full {
                 let bt = grad_fns::reduction::any(&a)?;
-                Ok(Some(bool_to_f32(&bt)?))
+                let r = bool_to_f32(&bt)?;
+                if keepdim && in_ndim > 0 {
+                    let ones = vec![1usize; in_ndim];
+                    let d = r.data()?.to_vec();
+                    ferrotorch_core::from_vec(d, &ones)?
+                } else {
+                    r
+                }
+            } else {
+                let dims = dims_opt.unwrap();
+                let mut sorted: Vec<i64> = dims
+                    .iter()
+                    .map(|&d| if d < 0 { in_ndim as i64 + d } else { d })
+                    .collect();
+                sorted.sort_unstable();
+                let mut cur_b: Option<ferrotorch_core::BoolTensor> = None;
+                let mut cur = a.clone();
+                for &d in sorted.iter().rev() {
+                    let bt = grad_fns::reduction::any_dim(&cur, d, keepdim)?;
+                    // Need a Tensor<f32> for the next any_dim call IF we
+                    // had >1 dim. Since BoolTensor isn't a Float carrier,
+                    // cast back to f32 between steps. {0,1} bool maps
+                    // cleanly to {0.0, 1.0} f32 and `any` is monotone in
+                    // truthiness (chaining the predicate stays correct).
+                    let f = bool_to_f32(&bt)?;
+                    cur = f;
+                    cur_b = Some(bt);
+                }
+                bool_to_f32(&cur_b.unwrap())?
             }
-        }
-        "all" => {
+        })),
+        "all" => Ok(Some({
             let a = unary("all")?;
-            if dim_kwarg("all")?.is_some() {
-                Ok(None)
-            } else {
+            let keepdim = keepdim_kwarg();
+            let in_ndim = a.ndim();
+            let dims_opt = dim_kwarg("all")?;
+            let do_full = match &dims_opt {
+                None => true,
+                Some(_) if in_ndim == 0 => true,
+                _ => false,
+            };
+            if do_full {
                 let bt = grad_fns::reduction::all(&a)?;
-                Ok(Some(bool_to_f32(&bt)?))
-            }
-        }
-        "count_nonzero" => {
-            let a = unary("count_nonzero")?;
-            if dim_kwarg("count_nonzero")?.is_some() {
-                Ok(None)
+                let r = bool_to_f32(&bt)?;
+                if keepdim && in_ndim > 0 {
+                    let ones = vec![1usize; in_ndim];
+                    let d = r.data()?.to_vec();
+                    ferrotorch_core::from_vec(d, &ones)?
+                } else {
+                    r
+                }
             } else {
-                let it = grad_fns::reduction::count_nonzero(&a)?;
-                Ok(Some(int_to_f32(&it)?))
+                let dims = dims_opt.unwrap();
+                let mut sorted: Vec<i64> = dims
+                    .iter()
+                    .map(|&d| if d < 0 { in_ndim as i64 + d } else { d })
+                    .collect();
+                sorted.sort_unstable();
+                let mut cur_b: Option<ferrotorch_core::BoolTensor> = None;
+                let mut cur = a.clone();
+                for &d in sorted.iter().rev() {
+                    let bt = grad_fns::reduction::all_dim(&cur, d, keepdim)?;
+                    let f = bool_to_f32(&bt)?;
+                    cur = f;
+                    cur_b = Some(bt);
+                }
+                bool_to_f32(&cur_b.unwrap())?
             }
-        }
+        })),
+        "count_nonzero" => Ok(Some({
+            let a = unary("count_nonzero")?;
+            let in_ndim = a.ndim();
+            let dims_opt = dim_kwarg("count_nonzero")?;
+            // `count_nonzero(dim=int)` is the dim-keyed overload from
+            // `aten/src/ATen/native/SummaryOps.cpp::count_nonzero_dim`.
+            // Multi-dim list is the `count_nonzero.dim_IntList` overload —
+            // realized as `sum_dim` chain over a 0/1 indicator view of
+            // `a` (each element is `1.0 if nonzero else 0.0`), then cast
+            // to int. This is correct because counting non-zeros along
+            // a multi-axis subset equals summing the indicator along the
+            // same subset.
+            let do_full = match &dims_opt {
+                None => true,
+                Some(_) if in_ndim == 0 => true,
+                _ => false,
+            };
+            if do_full {
+                let it = grad_fns::reduction::count_nonzero(&a)?;
+                int_to_f32(&it)?
+            } else {
+                let dims = dims_opt.unwrap();
+                // Indicator view: 1.0 if nonzero (NaN counts per IEEE-754
+                // `NaN != 0.0`), else 0.0. Matches the predicate in
+                // `is_nonzero_float`.
+                let in_data = a.data()?.to_vec();
+                let indicator: Vec<f32> = in_data
+                    .iter()
+                    .map(|&v| if v != 0.0 { 1.0 } else { 0.0 })
+                    .collect();
+                let ind_t = ferrotorch_core::from_vec(indicator, a.shape())?;
+                let mut sorted: Vec<i64> = dims
+                    .iter()
+                    .map(|&d| if d < 0 { in_ndim as i64 + d } else { d })
+                    .collect();
+                sorted.sort_unstable();
+                let mut cur = ind_t;
+                for &d in sorted.iter().rev() {
+                    cur = grad_fns::reduction::sum_dim(&cur, d, false)?;
+                }
+                // Cast to integer-valued f32 (round in case of fp drift).
+                let cd = cur.data()?.to_vec();
+                let rounded: Vec<f32> = cd.iter().map(|&v| v.round()).collect();
+                ferrotorch_core::from_vec(rounded, cur.shape())?
+            }
+        })),
 
         _ => Ok(None),
     }
