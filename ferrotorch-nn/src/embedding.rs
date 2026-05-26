@@ -7,6 +7,21 @@
 //!
 //! The backward pass implements a sparse scatter-add: only the rows that
 //! were accessed receive gradient, and duplicate indices accumulate.
+//!
+//! ## REQ status (per `.design/ferrotorch-nn/embedding.md`)
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 | SHIPPED | impl: `pub struct Embedding<T: Float>` here with `weight` / `num_embeddings` / `embedding_dim` / `padding_idx` / `sparse` fields, mirroring `torch/nn/modules/sparse.py:37-50`; non-test consumer: `ferrotorch-llama/src/model.rs` declares `pub embed_tokens: Embedding<T>` as a model field. |
+//! | REQ-2 | SHIPPED | impl: the `Embedding::new` constructor here (with `padding_idx` validation + N(0,1) init + padding-row zero); non-test consumer: `Embedding::new(cfg.vocab_size, cfg.hidden_size, None)?` in `ferrotorch-llama/src/model.rs` is the Llama model's token-embedding constructor. |
+//! | REQ-3 | SHIPPED | impl: `<Embedding as Module>::forward` body here (gather + grad-attach); non-test consumer: `ferrotorch-llama` model's forward path calls `self.embed_tokens.forward(input_ids)` on every training step and inference token. |
+//! | REQ-4 | SHIPPED | impl: `pub struct EmbeddingBackward<T>` and its `GradFn::backward` body here; non-test consumer: every `loss.backward()` call in the Llama training scaffolding traverses `EmbeddingBackward` nodes via `ferrotorch_core::autograd::engine`. |
+//! | REQ-5 | SHIPPED | impl: `grad_output.is_cuda()` + `scatter_add_rows_f32/f64` dispatch inside `EmbeddingBackward::backward` here; non-test consumer: `ferrotorch-gpu/src/backend_impl.rs` exposes `Backend::scatter_add_rows_f32`; GPU training-loop runs on the Llama model trigger this on every embedding backward. |
+//! | REQ-6 | SHIPPED | impl: the `Embedding::sparse_grad` accessor here returning a `SparseGrad<T>`; non-test consumer: `ferrotorch_optim::SparseAdam` consumes this view in its update path (the `sparse=True` codepath in optim). |
+//! | REQ-7 | SHIPPED | impl: `pub struct EmbeddingBag<T: Float>` + `pub enum EmbeddingBagMode` + `Module` impl here; non-test consumer: `pub use embedding::{EmbeddingBag, EmbeddingBagMode}` in `lib.rs` exposes the type for downstream models. |
+//! | REQ-8 | SHIPPED | impl: both `Module<T> for Embedding<T>` and `Module<T> for EmbeddingBag<T>` impl blocks here; non-test consumer: `ferrotorch_optim::Optimizer` iterates `model.parameters_mut()` which surfaces the embedding's weight parameter for every step. |
+//! | REQ-9 | NOT-STARTED | blocker #1445 — `max_norm` / `norm_type` / `scale_grad_by_freq` / `freeze` kwargs not implemented; `EmbeddingBag` is not gradient-aware. |
+//! | REQ-10 | NOT-STARTED | blocker #1441 (umbrella) — parity-sweep runner arms absent for both `nn.functional.embedding` and `nn.functional.embedding_bag`. Lib tests verify the impl end-to-end. |
 
 use std::any::TypeId;
 use std::sync::Arc;

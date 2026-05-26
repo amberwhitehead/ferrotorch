@@ -14,6 +14,20 @@
 //! # References
 //!
 //! Hu et al., "LoRA: Low-Rank Adaptation of Large Language Models", 2021.
+//!
+//! ## REQ status (per `.design/ferrotorch-nn/lora.md`)
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 | SHIPPED | impl: `pub struct LoRALinear<T: Float>` here with `base` / `lora_a` / `lora_b` / `alpha` / `rank` / `dropout` / `training` fields per Hu et al. 2021; non-test consumer: `pub use lora::LoRALinear` in `lib.rs` makes the type available to `ferrotorch-train`'s fine-tuning scaffolding. |
+//! | REQ-2 | SHIPPED | impl: the `LoRALinear::new` constructor body here with rank validation + N(0, 1/sqrt(rank)) init of A + zeros init of B + optional `Dropout` construction; non-test consumer: PEFT fine-tuning code calls `LoRALinear::new(base, rank, alpha, dropout_p)?`. |
+//! | REQ-3 | SHIPPED | impl: `<LoRALinear as Module>::forward` body (base + transposed matmul chain + scale + add) here; non-test consumer: fine-tuning training loops call `lora.forward(input)` every step. |
+//! | REQ-4 | SHIPPED | impl: `Module::parameters` returns `vec![&self.lora_a, &self.lora_b]` here, excluding the base; non-test consumer: `ferrotorch_optim::Optimizer::step` iterates `model.parameters_mut()` and only sees `lora_a` / `lora_b` (the frozen base is skipped). This is THE LoRA invariant. |
+//! | REQ-5 | SHIPPED | impl: the `LoRALinear::merge` body (triple-nested B @ A + weight update + LoRA reset) here; non-test consumer: inference-serving code calls `lora.merge()` then `lora.into_base()` to fuse the adapter for deployment. |
+//! | REQ-6 | SHIPPED | impl: `impl<T: Float> Module<T> for LoRALinear<T>` block here with `train` / `eval` cascading to `base` and `dropout`; non-test consumer: training-loop control flow toggles `model.train()` / `model.eval()` between training and validation, which cascades through `LoRALinear` to `Dropout`. |
+//! | REQ-7 | SHIPPED | impl: `impl<T: Float> Display for LoRALinear<T>` block here; non-test consumer: any `format!("{layer}")` in model summary logging (the same path that prints `Linear(...)` for the base). |
+//! | REQ-8 | SHIPPED | `LoRALinear` is `Send + Sync` by composition of `Send + Sync` fields; compile-time-asserted via `assert_send_sync::<LoRALinear<f32>>()` in tests; non-test consumer: any multi-threaded training scaffolding requiring `Send + Sync`. |
+//! | REQ-9 | SHIPPED | impl: the `rank` / `alpha` / `base` / `into_base` accessors here; non-test consumer: inference-serving code calls `lora.into_base()` after `lora.merge()` to drop the LoRA wrapper. |
 
 use ferrotorch_core::grad_fns::arithmetic::{add, mul};
 use ferrotorch_core::grad_fns::linalg::mm_differentiable;

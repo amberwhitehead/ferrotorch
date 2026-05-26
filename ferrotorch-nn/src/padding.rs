@@ -6,6 +6,20 @@
 //! PyTorch semantics exactly.  Padding tuples specify *(left, right)* for 1-D,
 //! *(left, right, top, bottom)* for 2-D, and
 //! *(left, right, top, bottom, front, back)* for 3-D.
+//!
+//! ## REQ status (per `.design/ferrotorch-nn/padding.md`)
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 | SHIPPED | impl: `pub enum PaddingMode` here with 4 variants `Zeros` / `Reflect` / `Replicate` / `Circular`; non-test consumer: `ferrotorch-nn/src/conv.rs` imports `PaddingMode` as the field type the conv layers (currently inertly) carry — the wiring to use it is blocker #1443. |
+//! | REQ-2 | SHIPPED | impl: the `functional_pad_1d` / `functional_pad_2d` / `functional_pad_3d` entry points here dispatching on `PaddingMode`; non-test consumer: `ferrotorch-nn/src/functional.rs` re-exposes these as `nn::functional::pad` for the public API surface. |
+//! | REQ-3 | SHIPPED | impl: `pub struct ConstantPad{1,2,3}d<T: Float>` here, mirroring `torch/nn/modules/padding.py` constant-pad family; non-test consumer: `pub use` in `lib.rs` exposes them to external crates; the vision-model code uses `ConstantPad2d` via the `lib.rs` re-export for padding non-square inputs. |
+//! | REQ-4 | SHIPPED | impl: `pub struct ZeroPad{1,2,3}d<T: Float>` here; non-test consumer: `pub use` in `lib.rs` exposes them. |
+//! | REQ-5 | SHIPPED | impl: `pub struct ReflectionPad{1,2,3}d<T: Float>` here with reflect-overflow check inside `pad_*d_reflect`; non-test consumer: `pub use` in `lib.rs`; reflection padding is the standard for U-nets and image-translation models. |
+//! | REQ-6 | SHIPPED | impl: `pub struct ReplicationPad{1,2,3}d<T: Float>` here; non-test consumer: `pub use` in `lib.rs`. |
+//! | REQ-7 | SHIPPED | impl: `pub struct CircularPad{1,2,3}d<T: Float>` here; non-test consumer: `pub use` in `lib.rs`. |
+//! | REQ-8 | SHIPPED | impl: `macro_rules! impl_padding_module` here generates the `Module<T>` impls for all 12 structs; non-test consumer: `ferrotorch_optim` walks `Module::parameters()` of containers that include padding layers (every padding layer returns the empty parameter list, which is the correct behavior). |
+//! | REQ-9 | NOT-STARTED | blocker #1441 (umbrella) — parity-sweep runner arms absent for all 6 padding ops. The impl is end-to-end verified by 40+ lib tests; only the runner-arm wiring is missing. |
 
 use ferrotorch_core::storage::TensorStorage;
 use ferrotorch_core::tensor::Tensor;

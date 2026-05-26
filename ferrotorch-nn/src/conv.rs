@@ -4,6 +4,22 @@
 //! `ConvTranspose2d<T>`, and `ConvTranspose3d<T>`.
 //! Forward passes use the im2col + matmul approach; backward follows the
 //! same structure in reverse.
+//!
+//! ## REQ status (per `.design/ferrotorch-nn/conv.md`)
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 | SHIPPED | impl: `pub struct Conv2d<T: Float>` here, mirroring `aten/src/ATen/native/Convolution.cpp:520-600`; non-test consumer: `ferrotorch-vision/src/models/resnet.rs` constructs `Conv2d::new(...)` for every residual block conv. |
+//! | REQ-2 | SHIPPED | impl: the `Conv2d::new` / `Conv2d::new_full` constructors here with `groups` / `dilation` validation; non-test consumer: `ferrotorch-vision/src/models/vit.rs` and `convnext.rs` construct grouped or dilated `Conv2d` via `new_full`. |
+//! | REQ-3 | SHIPPED | impl: `<Conv2d as Module>::forward` body here (im2col + matmul) mirroring `aten::convolution`; non-test consumer: every vision model forward invokes `Conv2d::forward` through its `Module` impl. |
+//! | REQ-4 | SHIPPED | impl: `is_f32 && input.is_cuda()` dispatch to `backend.conv2d_f32` inside `<Conv2d as Module>::forward`; non-test consumer: `ferrotorch-gpu/src/backend_impl.rs` exposes `Backend::conv2d_f32`; vision-model training runs on CUDA trigger this dispatch end-to-end. |
+//! | REQ-5 | SHIPPED | impl: `Conv2dBackward<T>: GradFn<T>` impl block here; non-test consumer: every gradient step on a vision model's `loss.backward()` traverses these `Conv2dBackward` nodes through `ferrotorch_core::autograd::engine`. |
+//! | REQ-6 | SHIPPED | impl: `pub struct Conv1d` / `Conv3d` / `ConvTranspose{1,2,3}d` here; non-test consumer: `ferrotorch-vision/src/models/inception.rs` uses `Conv2d` + `ConvTranspose2d`; `ferrotorch-nn/src/lazy_conv.rs` instantiates `Conv{1,2,3}d` via the materialize path. |
+//! | REQ-7 | SHIPPED | impl: `impl<T: Float> Module<T> for Conv2d<T>` block (and analogues for the other 5) here; non-test consumer: `ferrotorch_optim` walks `Module::parameters_mut()` across every conv in a training loop. |
+//! | REQ-8 | SHIPPED | impl: the `Conv2d::set_weight` and `Conv2d::from_parts` methods here; non-test consumer: `ferrotorch-nn/src/functional.rs` (the stateless `nn::functional::conv2d` entry point) uses `Conv2d::from_parts` to drive the existing forward path with user-supplied parameters. |
+//! | REQ-9 | SHIPPED | impl: `kaiming_uniform(&mut weight, NonLinearity::ReLU)` + `zeros_init(&mut b)` inside `Conv2d::new_full` here; non-test consumer: `Conv2d::new` is the path used by every vision-model constructor. NOTE: gain divergence + bias-init divergence per blocker #1450. |
+//! | REQ-10 | NOT-STARTED | blocker #1443 — `padding_mode` kwarg not threaded through `Conv*d::new`; only zero padding works. Upstream `_ConvNd.__init__` (`conv.py`) routes non-zero modes through `F.pad(...)`. |
+//! | REQ-11 | NOT-STARTED | blocker #1441 (umbrella) — parity-sweep runner arms for all 6 conv ops are absent; sweep reports `0/N passed, N skipped` for each. The forward paths themselves are end-to-end verified by 60+ lib tests; only the runner-arm wiring is missing. |
 
 use std::sync::Arc;
 

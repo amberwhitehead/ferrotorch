@@ -8,6 +8,25 @@
 //! with SELU activations.
 //!
 //! All modules are identity in eval mode and have zero learnable parameters.
+//!
+//! ## REQ status (per `.design/ferrotorch-nn/dropout.md`)
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 | SHIPPED | impl: `pub struct Dropout<T: Float>` here with `p` / `training` fields + ctor rejecting `p` outside `[0,1)`; non-test consumer: `Dropout::<T>::new(0.5)?` invoked in `ferrotorch-vision/src/models/vgg.rs` (the VGG classifier head dropout). |
+//! | REQ-2 | SHIPPED | impl: `<Dropout as Module>::forward` body with eval / `p==0` short-circuit + Bernoulli + scale here; non-test consumer: `Dropout::forward` is called on every forward pass through the VGG / Inception classifier (constructed in `vgg.rs` and `inception.rs`). |
+//! | REQ-3 | SHIPPED | impl: `input.is_cuda() && backend = ferrotorch_core::gpu_dispatch::gpu_backend()` GPU branch inside `<Dropout as Module>::forward` here; non-test consumer: any vision model run on CUDA (e.g. VGG / Inception fine-tuning with parameters on GPU) triggers this on every forward step. |
+//! | REQ-4 | SHIPPED | impl: `struct DropoutBackward<T>` + `GradFn` impl here; non-test consumer: every `loss.backward()` over a model containing `Dropout` traverses these nodes via the autograd engine. |
+//! | REQ-5 | SHIPPED | impl: `pub struct Dropout2d<T: Float>` + `Module` impl here; non-test consumer: `pub use dropout::Dropout2d` in `lib.rs` exposes for downstream vision / segmentation code. |
+//! | REQ-6 | SHIPPED | impl: `pub struct Dropout1d<T: Float>` + `Module` impl here; non-test consumer: `pub use dropout::Dropout1d` in `lib.rs`. |
+//! | REQ-7 | SHIPPED | impl: `pub struct Dropout3d<T: Float>` + `Module` impl here; non-test consumer: `pub use dropout::Dropout3d` in `lib.rs`. |
+//! | REQ-8 | SHIPPED | impl: `struct Dropout2dBackward<T>` + `GradFn` impl here; non-test consumer: autograd engine traversal on any model using `Dropout2d` in training. |
+//! | REQ-9 | SHIPPED | impl: `pub struct AlphaDropout<T: Float>` + SELU affine correction body inside `<AlphaDropout as Module>::forward` here; non-test consumer: `pub use dropout::AlphaDropout` in `lib.rs`. |
+//! | REQ-10 | SHIPPED | impl: `struct AlphaDropoutBackward<T>` + `GradFn` impl here; non-test consumer: autograd engine traversal on models using `AlphaDropout`. |
+//! | REQ-11 | SHIPPED | impl: 5 `Module<T> for <DropoutKind><T>` impl blocks here, each returning `vec![]` for parameters; non-test consumer: `ferrotorch_optim::Optimizer` walks `Module::parameters_mut()` of containers; dropout returns an empty list (correct: dropout has no trainable parameters). |
+//! | REQ-12 | NOT-STARTED | blocker #1446 — `inplace` kwarg not threaded through `Dropout*::new`. Functional behavior matches upstream; only memory-allocation parity diverges. |
+//! | REQ-13 | NOT-STARTED | blocker #1448 — `FeatureAlphaDropout` not implemented. |
+//! | REQ-14 | NOT-STARTED | blocker #1441 (umbrella) — `Dropout2d` / `Dropout1d` / `Dropout3d` GPU forward absent (CUDA inputs return `NotImplementedOnCuda`). Parity-sweep runner arms also absent. |
 
 use std::sync::Arc;
 

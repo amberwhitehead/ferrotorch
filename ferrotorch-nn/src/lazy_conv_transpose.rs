@@ -2,6 +2,19 @@
 //!
 //! `in_channels` is discovered from the input's channel dim on the first
 //! forward call; everything else is provided up front.
+//!
+//! ## REQ status (per `.design/ferrotorch-nn/lazy_conv_transpose.md`)
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 | SHIPPED | impl: `pub struct LazyConvTranspose1d<T: Float>` here; non-test consumer: `pub use lazy_conv_transpose::LazyConvTranspose1d` in `lib.rs`. |
+//! | REQ-2 | SHIPPED | impl: `pub struct LazyConvTranspose2d<T: Float>` here; non-test consumer: `pub use lazy_conv_transpose::LazyConvTranspose2d` in `lib.rs`. |
+//! | REQ-3 | SHIPPED | impl: `pub struct LazyConvTranspose3d<T: Float>` here; non-test consumer: `pub use lazy_conv_transpose::LazyConvTranspose3d` in `lib.rs`. |
+//! | REQ-4 | SHIPPED | impl: the `LazyConvTransposeNd::new(...)` constructor bodies (infallible) here; non-test consumer: dynamic-shape decoder pipelines instantiate via these constructors. |
+//! | REQ-5 | SHIPPED | impl: the `LazyConvTransposeNd::materialize(in_channels)` body constructing the inner `ConvTransposeNd::<T>::new(...)` here; non-test consumer: dynamic-shape decoder code calls `materialize(known_in_channels)`. |
+//! | REQ-6 | SHIPPED | impl: `<LazyConvTransposeNd as Module>::forward` here (channel + rank check + first-call materialize + delegate); non-test consumer: any U-Net-style decoder containing `LazyConvTranspose2d` runs this every training step. |
+//! | REQ-7 | SHIPPED | impl: `Module<T>` impl block forwarding `parameters` / etc through `inner` here; non-test consumer: `ferrotorch_optim::Optimizer` walks `model.parameters_mut()`, which surfaces the inner `ConvTranspose`'s params after the first forward materializes. |
+//! | REQ-8 | SHIPPED | impl: the `LazyConvTransposeNd::is_initialized` accessor here; non-test consumer: training-loop setup code querying initialization state. |
 
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, Ordering};

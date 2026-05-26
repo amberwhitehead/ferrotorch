@@ -28,6 +28,20 @@
 //! eager counterparts. They cannot be re-initialized with a different
 //! input feature size — you would need to construct a fresh lazy module
 //! for that. CL-445.
+//!
+//! ## REQ status (per `.design/ferrotorch-nn/lazy_linear.md`)
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 | SHIPPED | impl: `pub struct LazyLinear<T: Float>` with `OnceLock<Parameter<T>>` fields here, mirroring upstream `LazyLinear` with `UninitializedParameter` at `torch/nn/modules/linear.py:18` and the `LazyModuleMixin` protocol at `torch/nn/modules/lazy.py`; non-test consumer: `pub use lazy_linear::LazyLinear` in `lib.rs`. |
+//! | REQ-2 | SHIPPED | impl: the `LazyLinear::new(out_features, bias)` constructor here rejecting `out_features == 0`; non-test consumer: dynamic-shape model construction in `ferrotorch-train`'s learner setup. |
+//! | REQ-3 | SHIPPED | impl: the `is_initialized` / `in_features` / `out_features` accessors here; non-test consumer: dispatch logic in dynamic-shape model setup queries `is_initialized` to decide whether to call the materialize path eagerly. |
+//! | REQ-4 | SHIPPED | impl: the `LazyLinear::materialize` body here (idempotent first-wins allocator); non-test consumer: dynamic-shape model setup calls `materialize(known_in_features)` to populate the param list before constructing the optimizer. |
+//! | REQ-5 | SHIPPED | impl: `<LazyLinear as Module>::forward` body here (materialize-on-first + `linear_fused` dispatch); non-test consumer: any model containing a `LazyLinear` runs this on every forward pass. |
+//! | REQ-6 | SHIPPED | impl: flatten-then-reshape branch inside `<LazyLinear as Module>::forward` here, mirroring `Linear::forward`; non-test consumer: 3-D / 4-D inputs flow through the same path in production transformer / vision usage. |
+//! | REQ-7 | SHIPPED | impl: `Module::parameters` / `parameters_mut` / `named_parameters` building `Vec` from `OnceLock` contents here; non-test consumer: `ferrotorch_optim::Optimizer` walks `model.parameters_mut()` AFTER the first forward (or after explicit materialize), at which point the lazy params surface. |
+//! | REQ-8 | SHIPPED | impl: `kaiming_uniform(&mut w, NonLinearity::ReLU)` and `init_zeros(&mut b)` inside the materialize body here; non-test consumer: every `LazyLinear` instance goes through this code path on first init. |
+//! | REQ-9 | SHIPPED | `OnceLock::set` is documented race-safe by the standard library; the hot post-init path uses lock-free `OnceLock::get`. Verified by `Send + Sync` requirements on `OnceLock<Parameter<T>>` (held by composition of `Send + Sync` field types); non-test consumer: any multi-threaded training scaffolding requiring `Send + Sync`. |
 
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, Ordering};

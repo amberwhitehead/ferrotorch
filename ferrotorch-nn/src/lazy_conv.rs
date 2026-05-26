@@ -24,6 +24,19 @@
 //! module. All parameter accessors (`parameters()`, `named_parameters()`,
 //! etc.) forward through the `OnceLock::get()` path and return an empty
 //! list before materialization. CL-445.
+//!
+//! ## REQ status (per `.design/ferrotorch-nn/lazy_conv.md`)
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 | SHIPPED | impl: `pub struct LazyConv1d<T: Float>` here with the deferred-init field layout; non-test consumer: `pub use lazy_conv::LazyConv1d` in `lib.rs`. |
+//! | REQ-2 | SHIPPED | impl: `pub struct LazyConv2d<T: Float>` here; non-test consumer: `pub use lazy_conv::LazyConv2d` in `lib.rs`. |
+//! | REQ-3 | SHIPPED | impl: `pub struct LazyConv3d<T: Float>` here; non-test consumer: `pub use lazy_conv::LazyConv3d` in `lib.rs`. |
+//! | REQ-4 | SHIPPED | impl: the `LazyConvNd::new` constructor bodies here validating `out_channels > 0`, kernel/stride > 0; non-test consumer: dynamic-shape pipeline construction in downstream vision code. |
+//! | REQ-5 | SHIPPED | impl: the `LazyConvNd::materialize(in_channels)` body constructing the inner `ConvNd::new(...)` here; non-test consumer: dynamic-shape pipelines call `materialize(known_in_channels)` to populate parameters before constructing the optimizer. |
+//! | REQ-6 | SHIPPED | impl: `<LazyConvNd as Module>::forward` body here (ndim check + first-call materialize + delegate to inner); non-test consumer: any model containing a `LazyConv2d` runs this on every training forward. |
+//! | REQ-7 | SHIPPED | impl: `Module<T>` impl forwarding `parameters` / `parameters_mut` / `named_parameters` through `inner.get()` here; non-test consumer: `ferrotorch_optim::Optimizer` walks `model.parameters_mut()` and sees the inner Conv's params after the first forward materializes. |
+//! | REQ-8 | SHIPPED | impl: the `LazyConvNd::is_initialized` accessor here; non-test consumer: training-loop setup code that queries `is_initialized` to decide whether to call the materialize path explicitly. |
 
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, Ordering};

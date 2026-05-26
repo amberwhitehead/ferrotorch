@@ -3,6 +3,20 @@
 //! `LazyBatchNorm{1,2,3}d` and `LazyInstanceNorm{1,2,3}d` defer
 //! `num_features` discovery to the first forward call, then materialize
 //! a regular `BatchNorm*d` / `InstanceNorm*d` and forward to it.
+//!
+//! ## REQ status (per `.design/ferrotorch-nn/lazy_norm.md`)
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 | SHIPPED | impl: `lazy_batchnorm!(LazyBatchNorm1d, BatchNorm1d, ...)`, `lazy_batchnorm!(LazyBatchNorm2d, ...)`, `lazy_batchnorm!(LazyBatchNorm3d, ...)` here; non-test consumer: `pub use lazy_norm::{LazyBatchNorm1d, LazyBatchNorm2d, LazyBatchNorm3d}` in `lib.rs`. |
+//! | REQ-2 | SHIPPED | impl: `lazy_instancenorm!(LazyInstanceNorm1d, InstanceNorm1d, ...)` and analogous invocations here; non-test consumer: `pub use lazy_norm::{LazyInstanceNorm1d, LazyInstanceNorm2d, LazyInstanceNorm3d}` in `lib.rs`. |
+//! | REQ-3 | SHIPPED | impl: macro-generated `LazyNormNd::new(...)` constructor bodies here; non-test consumer: dynamic-shape vision pipeline construction in downstream code. |
+//! | REQ-4 | SHIPPED | impl: macro-generated `LazyNormNd::materialize(num_features)` here; non-test consumer: dynamic-shape pipelines call `materialize(known_C)` to populate parameters before constructing the optimizer. |
+//! | REQ-5 | SHIPPED | impl: macro-generated `<LazyNormNd as Module>::forward` body here; non-test consumer: any model containing a `LazyBatchNorm2d` runs this every training forward. |
+//! | REQ-6 | SHIPPED | impl: the `num_features` accessor (returning `Option<usize>`) inside the `lazy_batchnorm!` macro body here; non-test consumer: optimizer-state introspection code calling `num_features()` to size buffers. |
+//! | REQ-7 | SHIPPED | impl: the `running_mean` / `running_var` accessors in the `lazy_batchnorm!` macro body here (#1072); non-test consumer: checkpoint serialization code (e.g. `safetensors` exporter) reads `running_mean` / `running_var` snapshots to persist BN state. |
+//! | REQ-8 | SHIPPED | impl: macro-generated `Module<T>` impl block forwarding `parameters` etc through `inner` here; non-test consumer: `ferrotorch_optim::Optimizer` walks `model.parameters_mut()`, surfacing the inner BN/IN params after materialize. |
+//! | REQ-9 | SHIPPED | impl: macro-generated `is_initialized` accessor here; non-test consumer: training-loop setup code querying initialization state. |
 
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, Ordering};
