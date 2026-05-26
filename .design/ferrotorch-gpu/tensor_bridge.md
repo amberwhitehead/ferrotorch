@@ -70,10 +70,10 @@ surface and the underlying `at::native::copy` machinery in
   f64 ops fall back to a CPU round-trip path (documented at lines
   11-16 of the module).
 - [x] AC-7: Non-test consumers exist in
-  `ferrotorch-distributed/src/gpu_collective.rs:54`
+  `ferrotorch-distributed/src/gpu_collective.rs`
   (`use ferrotorch_gpu::{GpuFloat, GpuTensor, tensor_to_cpu, tensor_to_gpu}`)
-  and `ferrotorch-distributed/src/ucc_backend.rs:304, 347`
-  (function signatures over `GpuTensor<T>`).
+  and `ferrotorch-distributed/src/ucc_backend.rs` (UCC backend GPU collective methods,
+  function signatures over `GpuTensor<T>`).
 
 ## Architecture
 
@@ -177,11 +177,11 @@ external consumer:
   on the no-NCCL fallback path and routes through NCCL on the fast
   path (when the `nccl` feature is enabled).
 
-`ferrotorch-distributed/src/ucc_backend.rs:304, 347` — UCC backend
+`ferrotorch-distributed/src/ucc_backend.rs` (UCC backend GPU collective methods) — UCC backend
 methods take `&ferrotorch_gpu::GpuTensor<T>` arguments and return
 `FerrotorchResult<GpuTensor<T>>`.
 
-`ferrotorch-distributed/src/ucc_backend.rs:649, 728` — UCC test
+UCC test scaffolding in `ferrotorch-distributed/src/ucc_backend.rs` test
 paths use `tensor_to_gpu` for fixture setup (test consumers; not
 counted for REQ-7 SHIPPED but illustrate the surface).
 
@@ -251,10 +251,10 @@ cargo test -p ferrotorch-distributed --features cuda gpu_collective:: 2>&1 | tai
 
 | REQ | Status | Evidence |
 |---|---|---|
-| REQ-1 | SHIPPED | impl: `pub trait GpuFloat in ferrotorch-gpu/src/tensor_bridge.rs` (line 44 cuda / line 52 non-cuda) with `f32` + `f64` impls; non-test consumer: `ferrotorch-distributed/src/gpu_collective.rs:54` imports it, and `ferrotorch-distributed/src/ucc_backend.rs:304` uses it as a trait bound on collective-op method signatures. |
-| REQ-2 | SHIPPED | impl: `pub struct GpuTensor<T: GpuFloat> in tensor_bridge.rs` (line 71); non-test consumer: `ferrotorch-distributed/src/gpu_collective.rs::gpu_allreduce`/`gpu_broadcast` take `&GpuTensor<T>` arguments; `ferrotorch-distributed/src/ucc_backend.rs:304, 347` use it as the method parameter type. |
-| REQ-3 | SHIPPED | impl: `pub fn tensor_to_gpu in tensor_bridge.rs` (line 1065); non-test consumer: `ferrotorch-distributed/src/gpu_collective.rs:54` imports + uses it in the no-NCCL fallback. |
-| REQ-4 | SHIPPED | impl: `pub fn tensor_to_cpu in tensor_bridge.rs` (line 1099); non-test consumer: `ferrotorch-distributed/src/gpu_collective.rs:54` imports + uses it for downloading collective results in the fallback path. |
+| REQ-1 | SHIPPED | impl: `pub trait GpuFloat in ferrotorch-gpu/src/tensor_bridge.rs` (line 44 cuda / line 52 non-cuda) with `f32` + `f64` impls; non-test consumer: `pub fn gpu_allreduce in ferrotorch-distributed/src/gpu_collective.rs` imports it, and `ferrotorch-distributed/src/ucc_backend.rs:304` uses it as a trait bound on collective-op method signatures. |
+| REQ-2 | SHIPPED | impl: `pub struct GpuTensor<T: GpuFloat> in tensor_bridge.rs` (line 71); non-test consumer: `ferrotorch-distributed/src/gpu_collective.rs::gpu_allreduce`/`gpu_broadcast` take `&GpuTensor<T>` arguments; `ferrotorch-distributed/src/ucc_backend.rs` (UCC backend GPU collective methods) use it as the method parameter type. |
+| REQ-3 | SHIPPED | impl: `pub fn tensor_to_gpu in tensor_bridge.rs` (line 1065); non-test consumer: `pub fn gpu_allreduce in ferrotorch-distributed/src/gpu_collective.rs` imports + uses it in the no-NCCL fallback. |
+| REQ-4 | SHIPPED | impl: `pub fn tensor_to_cpu in tensor_bridge.rs` (line 1099); non-test consumer: `pub fn gpu_allreduce in ferrotorch-distributed/src/gpu_collective.rs` imports + uses it for downloading collective results in the fallback path. |
 | REQ-5 | SHIPPED | impl: `pub fn cuda` (line 1122), `pub fn cuda_default` (line 1130) in `tensor_bridge.rs`; non-test consumer: re-exported at `ferrotorch-gpu/src/lib.rs:245` for downstream crates. (ferrotorch-core's `Tensor::cuda()` is a separate method that uses ferrotorch-gpu through the `GpuBackend` trait — the convenience helpers here serve direct `GpuTensor`-construction call sites.) |
 | REQ-6 | SHIPPED | impl: kernel imports at `tensor_bridge.rs:20-28` (gpu_add, gpu_sub, gpu_mul, gpu_neg, gpu_relu f32 + f64 variants; gpu_matmul_f32/f64; gpu_conv2d_f32). The f32-only fast-path policy is documented at lines 11-16 of the module. |
-| REQ-7 | SHIPPED | impl: non-test consumer at `ferrotorch-distributed/src/gpu_collective.rs:54` (uses `GpuFloat, GpuTensor, tensor_to_cpu, tensor_to_gpu`) and `ferrotorch-distributed/src/ucc_backend.rs:304, 347` (function signatures over `GpuTensor<T>`). |
+| REQ-7 | SHIPPED | impl: non-test consumer at `pub fn gpu_allreduce in ferrotorch-distributed/src/gpu_collective.rs` (uses `GpuFloat, GpuTensor, tensor_to_cpu, tensor_to_gpu`) and `ferrotorch-distributed/src/ucc_backend.rs` (UCC backend GPU collective methods) (function signatures over `GpuTensor<T>`). |

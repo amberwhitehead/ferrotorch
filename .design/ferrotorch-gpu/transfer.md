@@ -153,11 +153,11 @@ this module:
   GPU buffer routes its allocation through `alloc_zeros*`.
 
 ferrotorch-core's `Tensor::cuda()` and the dispatch through
-`GpuBackend::cpu_to_gpu` / `gpu_to_cpu` trait methods
-(`backend_impl.rs:666, 877, 987`) ultimately call into these
-free functions. Cross-crate consumers:
-`ferrotorch-distributed/src/ucc_backend.rs:680, 755` use
-`tensor_to_gpu` which internally uses `transfer::cpu_to_gpu`.
+`GpuBackend::cpu_to_gpu` / `gpu_to_cpu` trait methods (see
+`impl GpuBackend for CudaBackend` in `backend_impl.rs`) ultimately
+call into these free functions. Cross-crate consumers:
+`pub fn tensor_to_gpu` in `ferrotorch-distributed/src/ucc_backend.rs`
+uses `tensor_to_gpu` which internally uses `transfer::cpu_to_gpu`.
 
 Total non-test call sites: 200+ across the workspace (counted via
 `grep -rn "transfer::cpu_to_gpu|transfer::gpu_to_cpu|transfer::alloc_zeros" ferrotorch-gpu/src ferrotorch-core/src`).
@@ -214,11 +214,11 @@ Expected: ≥ 1 `test result: ok` line.
 
 | REQ | Status | Evidence |
 |---|---|---|
-| REQ-1 | SHIPPED | impl: `pub fn cpu_to_gpu in ferrotorch-gpu/src/transfer.rs` (line 19); non-test consumer: `tensor_bridge.rs::tensor_to_gpu` (line 1065) calls it; `backend_impl.rs::cpu_to_gpu` trait method (line 666) wraps it. |
-| REQ-2 | SHIPPED | impl: `pub fn gpu_to_cpu in transfer.rs` (line 40); non-test consumer: `tensor_bridge.rs::tensor_to_cpu` (line 1099) calls it; `backend_impl.rs::gpu_to_cpu` trait method (line 987) wraps it. |
-| REQ-3 | SHIPPED | impl: `pub fn alloc_zeros_f32 in transfer.rs` (line 69); non-test consumer: every f32 kernel-launcher in the crate calls it (`roll.rs:247`, `group_norm.rs:353`, `kernels.rs` hundreds of sites). |
-| REQ-4 | SHIPPED | impl: `pub fn alloc_zeros_f64` at `transfer.rs:141` and `pub fn alloc_zeros_bf16` at line 124; non-test consumer: f64 / bf16 kernel-launchers in `kernels.rs` and `bf16.rs`. |
-| REQ-5 | SHIPPED | impl: `pub fn alloc_zeros<T> in transfer.rs` (line 169); non-test consumer: `backend_impl.rs::alloc_zeros` trait method (line 1254) dispatches to it for dtype-generic allocations; re-exported at `lib.rs:248`. |
-| REQ-6 | SHIPPED | impl: `pub fn cpu_to_gpu_pinned in transfer.rs` (line 196); non-test consumer: `backend_impl.rs::cpu_to_gpu_pinned` trait method (line 877) wraps it; ferrotorch-data's DataLoader pinned-memory path uses it through that trait method. |
-| REQ-7 | SHIPPED | impl: 6 non-CUDA stubs at `transfer.rs:245-279` (`cpu_to_gpu_pinned`, `cpu_to_gpu`, `gpu_to_cpu`, `alloc_zeros`, `alloc_zeros_f32`, `alloc_zeros_f64`); non-test consumer: workspace `--no-default-features` CI lane compiles cleanly. |
+| REQ-1 | SHIPPED | impl: `pub fn cpu_to_gpu` in `transfer.rs`; non-test consumer: `pub fn tensor_to_gpu` in `tensor_bridge.rs` calls it; `impl GpuBackend::cpu_to_gpu for CudaBackend` in `backend_impl.rs` wraps it. |
+| REQ-2 | SHIPPED | impl: `pub fn gpu_to_cpu` in `transfer.rs`; non-test consumer: `pub fn tensor_to_cpu` in `tensor_bridge.rs` calls it; `impl GpuBackend::gpu_to_cpu for CudaBackend` in `backend_impl.rs` wraps it. |
+| REQ-3 | SHIPPED | impl: `pub fn alloc_zeros_f32` in `transfer.rs`; non-test consumer: every f32 kernel-launcher in the crate calls it (e.g. `pub fn gpu_roll_f32` in `roll.rs`, `pub fn gpu_group_norm_f32` in `group_norm.rs`, kernel launchers in `kernels.rs`). |
+| REQ-4 | SHIPPED | impl: `pub fn alloc_zeros_f64` and `pub fn alloc_zeros_bf16` in `transfer.rs`; non-test consumer: f64 / bf16 kernel-launchers in `kernels.rs` and `bf16.rs`. |
+| REQ-5 | SHIPPED | impl: `pub fn alloc_zeros<T>` in `transfer.rs`; non-test consumer: `impl GpuBackend::alloc_zeros for CudaBackend` in `backend_impl.rs` dispatches to it for dtype-generic allocations; re-exported via `pub use transfer::*` in `lib.rs`. |
+| REQ-6 | SHIPPED | impl: `pub fn cpu_to_gpu_pinned` in `transfer.rs`; non-test consumer: `impl GpuBackend::cpu_to_gpu_pinned for CudaBackend` in `backend_impl.rs` wraps it; ferrotorch-data's DataLoader pinned-memory path uses it through that trait method. |
+| REQ-7 | SHIPPED | impl: 6 non-CUDA stubs in `transfer.rs` (`cpu_to_gpu_pinned`, `cpu_to_gpu`, `gpu_to_cpu`, `alloc_zeros`, `alloc_zeros_f32`, `alloc_zeros_f64`); non-test consumer: workspace `--no-default-features` CI lane compiles cleanly. |
 | REQ-8 | SHIPPED | impl: 200+ non-test call sites across the workspace (verified via grep of `transfer::cpu_to_gpu|transfer::gpu_to_cpu|transfer::alloc_zeros` in ferrotorch-gpu/src + ferrotorch-core/src); representative production consumers cited in REQs 1-6 evidence rows. |
