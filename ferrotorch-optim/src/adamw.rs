@@ -8,6 +8,19 @@
 //!
 //! Reference: Loshchilov & Hutter, "Decoupled Weight Decay Regularization"
 //! (ICLR 2019).
+//!
+//! ## REQ status (per `.design/ferrotorch-optim/adamw.md`)
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 | SHIPPED | `AdamWConfig` + `impl Default { weight_decay: 0.01, ... }` here mirrors `torch/optim/adamw.py:21-128`; consumer at `ferrotorch-optim/src/lib.rs:32` re-export and `ferrotorch/src/lib.rs:51` prelude re-export. |
+//! | REQ-2 | SHIPPED | `impl Optimizer<T> for AdamW<T>` here; consumer at `ferrotorch-train/src/learner.rs:28` Optimizer trait. |
+//! | REQ-3 | SHIPPED | legacy CPU `step` computes `decayed = param * (1 - lr*wd)` then `updated = decayed - lr * m_hat / (sqrt(v_hat) + eps)` here mirroring `torch/optim/adamw.py:130-180`; consumer at `ferrotorch/src/lib.rs:51` `pub use ferrotorch_optim::{AdamW, ...};`. |
+//! | REQ-4 | SHIPPED | `AdamW::step_foreach` method here applies `mul(param, scalar(decay_factor))` decay; consumer at `ferrotorch/src/lib.rs:61` re-exports `AdamWConfig::with_foreach(true)`. |
+//! | REQ-5 | SHIPPED | `state_dict` / `load_state_dict` methods here keyed by `ParamKey::Display`; consumer at `ferrotorch-serialize/src/checkpoint.rs:48`. |
+//! | REQ-6 | SHIPPED | grad-`None` skip in both `step` and `step_foreach`; consumer at `ferrotorch-train/src/learner.rs:28` exercises for frozen layers. |
+//! | REQ-7 | SHIPPED | `let group_wd = self.param_groups[gi].weight_decay;` inside `step` uses per-group value; consumer at `ferrotorch/src/lib.rs:61` re-exports `ParamGroup`. |
+//! | REQ-8 | SHIPPED | both `AdamW::new` and `AdamW::new_with_groups` constructors here; consumer at `ferrotorch/src/lib.rs:51` `pub use ferrotorch_optim::AdamW;` makes both reachable. |
 
 use std::collections::HashMap;
 use std::collections::hash_map::Entry;

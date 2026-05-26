@@ -11,6 +11,18 @@
 //! deltas) to RMS(accumulated gradients) as the effective learning rate.
 //!
 //! CL-319
+//!
+//! ## REQ status (per `.design/ferrotorch-optim/adadelta.md`)
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 | SHIPPED | `AdadeltaConfig` + `impl Default { lr: 1.0, rho: 0.9, eps: 1e-6, ... }` here mirror `torch/optim/adadelta.py:29-126`; consumer at `ferrotorch-optim/src/lib.rs:27` re-export and `ferrotorch/src/lib.rs:61` umbrella re-export. |
+//! | REQ-2 | SHIPPED | `impl Optimizer<T> for Adadelta<T>` here; consumer at `ferrotorch-train/src/learner.rs:28` Optimizer trait. |
+//! | REQ-3 | SHIPPED | legacy CPU `step` (else branch after `any_cuda` check) mirrors `_single_tensor_adadelta` at `torch/optim/adadelta.py:245-303`; consumer at `ferrotorch/src/lib.rs:61` re-exports `Adadelta`. |
+//! | REQ-4 | SHIPPED | `Adadelta::step_foreach` method here mirrors `_multi_tensor_adadelta` at `torch/optim/adadelta.py:305-410`; consumer at `ferrotorch/src/lib.rs:61` re-exports `AdadeltaConfig::with_foreach(true)`. |
+//! | REQ-5 | SHIPPED | `let any_cuda = ...; if self.config.foreach || any_cuda { return self.step_foreach(); }` top of `step` (CL-1105); consumer at `ferrotorch-train/src/learner.rs:28` Optimizer trait. |
+//! | REQ-6 | SHIPPED | `state_dict` / `load_state_dict` methods keyed by `ParamKey::Display`; consumer at `ferrotorch-serialize/src/checkpoint.rs:48`. |
+//! | REQ-7 | SHIPPED | grad-`None` skip in both `step` and `step_foreach`; consumer at `ferrotorch-train/src/learner.rs:28` exercises for frozen layers. |
 
 use std::collections::HashMap;
 use std::collections::hash_map::Entry;

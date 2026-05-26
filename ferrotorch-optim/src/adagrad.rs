@@ -1,3 +1,18 @@
+//! Adagrad optimizer — adaptive per-parameter learning rates (Duchi et al., JMLR 2011).
+//!
+//! ## REQ status (per `.design/ferrotorch-optim/adagrad.md`)
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 | SHIPPED | `AdagradConfig` + `impl Default` here mirror `torch/optim/adagrad.py:29-187`; consumer at `ferrotorch-optim/src/lib.rs:29` re-export and `ferrotorch/src/lib.rs:61` umbrella re-export. |
+//! | REQ-2 | SHIPPED | `impl Optimizer<T> for Adagrad<T>` here; consumer at `ferrotorch-train/src/learner.rs:28` Optimizer trait. |
+//! | REQ-3 | SHIPPED | legacy CPU `step` (else branch after `any_cuda` check) mirrors `_single_tensor_adagrad` at `torch/optim/adagrad.py:364-431`; consumer at `ferrotorch/src/lib.rs:61` re-exports `Adagrad`. |
+//! | REQ-4 | SHIPPED | `struct AdagradParamState<T> { sum: Tensor<T>, step_count: u64 }` here; consumer at `ferrotorch-serialize/src/checkpoint.rs:48` reads/writes `OptimizerState`. |
+//! | REQ-5 | SHIPPED | `Adagrad::step_foreach` method here mirrors `_multi_tensor_adagrad` at `torch/optim/adagrad.py:432-555`; consumer at `ferrotorch/src/lib.rs:61` re-exports `AdagradConfig::with_foreach(true)`. |
+//! | REQ-6 | SHIPPED | `let any_cuda = ...; if self.config.foreach || any_cuda { return self.step_foreach(); }` top of `step` (CL-1105); consumer at `ferrotorch-train/src/learner.rs:28` Optimizer trait drives the auto-routed path. |
+//! | REQ-7 | SHIPPED | `state_dict` / `load_state_dict` methods keyed by `"group{gi}_param{pi}"`; consumer at `ferrotorch-serialize/src/checkpoint.rs:48`. |
+//! | REQ-8 | SHIPPED | grad-`None` skip in both `step` and `step_foreach`; consumer at `ferrotorch-train/src/learner.rs:28` exercises for frozen layers. |
+
 use std::collections::HashMap;
 
 use ferrotorch_core::numeric_cast::cast;

@@ -11,6 +11,19 @@
 //!
 //! Weight decay is applied as L2 regularization before the momentum step:
 //! `grad = grad + weight_decay * param`.
+//!
+//! ## REQ status (per `.design/ferrotorch-optim/sgd.md`)
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 | SHIPPED | `SgdConfig` mirroring `torch/optim/sgd.py:29-104`; consumer at `ferrotorch-optim/src/lib.rs:53` re-export and `ferrotorch/src/lib.rs:61` umbrella re-export. |
+//! | REQ-2 | SHIPPED | `impl Optimizer<T> for Sgd<T>` block here; consumer at `ferrotorch-train/src/learner.rs:28` via `use ferrotorch_optim::Optimizer;`. |
+//! | REQ-3 | SHIPPED | legacy CPU `step` method here mirrors `_single_tensor_sgd` at `torch/optim/sgd.py:322-380`; consumer at `ferrotorch-train/src/learner.rs:28` drives the training loop. |
+//! | REQ-4 | SHIPPED | first-step `momentum_buffers.insert(key, grad_data.clone())` branch here matches `torch/optim/sgd.py:349-359`; consumer at `ferrotorch-train/src/learner.rs:28` exercises first-step path. |
+//! | REQ-5 | SHIPPED | `Sgd::step_foreach` method here mirrors `_multi_tensor_sgd` at `torch/optim/sgd.py:382-481`; consumer at `ferrotorch/src/lib.rs:61` re-exports `SgdConfig::with_foreach(true)`. |
+//! | REQ-6 | SHIPPED | `state_dict` / `load_state_dict` methods here; consumer at `ferrotorch-serialize/src/checkpoint.rs:48` `use ferrotorch_optim::OptimizerState;`. |
+//! | REQ-7 | SHIPPED | `zero_grad` method here clears all params; consumer at `ferrotorch-train/src/learner.rs:28` calls it before each step. |
+//! | REQ-8 | SHIPPED | `match param.grad()? { Some(g) => g, None => continue }` skip in both `step` and `step_foreach` mirrors `torch/optim/sgd.py:325-330`; consumer at `ferrotorch-train/src/learner.rs:28` relies on this for frozen layers. |
 
 use std::collections::HashMap;
 

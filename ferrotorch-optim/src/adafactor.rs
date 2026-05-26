@@ -9,6 +9,20 @@
 //!   from O(mn) to O(m+n).
 //! - Optional relative step sizing (no explicit learning rate needed).
 //! - First-moment (beta1) is optional — when disabled, saves more memory.
+//!
+//! ## REQ status (per `.design/ferrotorch-optim/adafactor.md`)
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 | SHIPPED | `AdafactorConfig` + `impl Default` here mirror `torch/optim/_adafactor.py:24-120`; consumer at `ferrotorch-optim/src/lib.rs:28` re-export and `ferrotorch/src/lib.rs:61` umbrella re-export. |
+//! | REQ-2 | SHIPPED | `impl Optimizer<T> for Adafactor<T>` here; consumer at `ferrotorch-train/src/learner.rs:28` Optimizer trait. |
+//! | REQ-3 | SHIPPED | `use_factored` branch in `step` updating `row_factor` / `col_factor` here mirrors `_single_tensor_adafactor` at `torch/optim/_adafactor.py:330-450`; consumer at `ferrotorch/src/lib.rs:61` re-exports `Adafactor`. |
+//! | REQ-4 | SHIPPED | else-branch of `use_factored` updating `full_sq = rho * full_sq + (1 - rho) * grad_sq` here; consumer at `ferrotorch/src/lib.rs:61` re-exports `Adafactor`. |
+//! | REQ-5 | SHIPPED | optional first-moment branch `if let Some(beta1) = config.beta1 { state.exp_avg[i] = ... }` here; consumer at `ferrotorch/src/lib.rs:61` re-exports `AdafactorConfig::with_beta1(Some(0.9))`. |
+//! | REQ-6 | SHIPPED | `if config.relative_step { let rel = step.powf(-0.5)... lr = rel * rms_val; }` branch in `step` here mirrors `torch/optim/_adafactor.py:200-220`; consumer at `ferrotorch/src/lib.rs:61` re-exports `AdafactorConfig::with_relative_step(true)`. |
+//! | REQ-7 | SHIPPED | `*slot = cast::<f64, T>(p * (1.0 - lr * config.weight_decay))?;` decoupled-decay branch here mirrors `torch/optim/_adafactor.py:411-414`; consumer at `ferrotorch/src/lib.rs:61` re-exports `AdafactorConfig::with_weight_decay`. |
+//! | REQ-8 | SHIPPED | `if tensor.is_cuda() { return Err(FerrotorchError::NotImplementedOnCuda { op: "Adafactor" }); }` in `step` here; consumer at `ferrotorch-train/src/learner.rs:28` Optimizer trait propagates the `Err`. |
+//! | REQ-9 | SHIPPED | grad-`None` skip in `step`; consumer at `ferrotorch-train/src/learner.rs:28` exercises for frozen layers. |
 
 use std::collections::HashMap;
 

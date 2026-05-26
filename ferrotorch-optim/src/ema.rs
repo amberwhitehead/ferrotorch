@@ -11,6 +11,18 @@
 //! part of the autograd graph.
 //!
 //! # CL-321
+//!
+//! ## REQ status (per `.design/ferrotorch-optim/ema.md`)
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 | SHIPPED | `pub struct ExponentialMovingAverage<T: Float>` with seven fields here; consumer at `ferrotorch-optim/src/lib.rs:35` re-export and `ferrotorch/src/lib.rs:61` umbrella re-export. |
+//! | REQ-2 | SHIPPED | `pub fn new(params, decay)` constructor with `assert!((0.0..=1.0).contains(&decay), ...)` here; consumer at `ferrotorch/src/lib.rs:61` re-exports the type. |
+//! | REQ-3 | SHIPPED | `pub fn update` method on `ExponentialMovingAverage` here mirrors EMA recurrence used by `torch/optim/swa_utils.py:267-310` `avg_fn = ema`; consumer at `ferrotorch/src/lib.rs:61` re-exports the type for downstream training code. |
+//! | REQ-4 | SHIPPED | `apply_shadow` / `restore` methods here; consumer at `ferrotorch/src/lib.rs:61` re-exports the type for inference-eval workflows. |
+//! | REQ-5 | SHIPPED | `pub fn with_foreach(mut self, params)` builder here performs deep-copy via `data_vec` + `Tensor::from_storage` + `to(device)`; consumer at `ferrotorch/src/lib.rs:61` re-exports the type for GPU-training code. |
+//! | REQ-6 | SHIPPED | `pub fn with_decay_warmup(mut self, use_warmup: bool)` builder + `effective_decay` impl here; consumer at `ferrotorch/src/lib.rs:61` re-exports the type. |
+//! | REQ-7 | SHIPPED | `pub fn shadow_values(&self, index: usize) -> FerrotorchResult<Vec<T>>` accessor here; consumer at `ferrotorch/src/lib.rs:61` re-exports the type for read-side workflows (logging, checkpoint export). |
 
 use ferrotorch_core::numeric_cast::cast;
 use ferrotorch_core::{FerrotorchResult, Float, Tensor, no_grad};

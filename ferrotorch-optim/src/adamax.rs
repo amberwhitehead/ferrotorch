@@ -6,6 +6,18 @@
 //! makes it more robust to sparse gradients and gradient outliers.
 //!
 //! CL-319
+//!
+//! ## REQ status (per `.design/ferrotorch-optim/adamax.md`)
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 | SHIPPED | `AdamaxConfig` + `impl Default { lr: 2e-3, betas: (0.9, 0.999), ... }` here mirror `torch/optim/adamax.py:29-121`; consumer at `ferrotorch-optim/src/lib.rs:31` re-export and `ferrotorch/src/lib.rs:61` umbrella re-export. |
+//! | REQ-2 | SHIPPED | `impl Optimizer<T> for Adamax<T>` here; consumer at `ferrotorch-train/src/learner.rs:28` Optimizer trait. |
+//! | REQ-3 | SHIPPED | legacy CPU `step` (else branch after `any_cuda`) mirrors `_single_tensor_adamax` at `torch/optim/adamax.py:226-304`; consumer at `ferrotorch/src/lib.rs:61` re-exports `Adamax`. |
+//! | REQ-4 | SHIPPED | `Adamax::step_foreach` method here mirrors `_multi_tensor_adamax` at `torch/optim/adamax.py:306-423`; consumer at `ferrotorch/src/lib.rs:61` re-exports `AdamaxConfig::with_foreach(true)`. |
+//! | REQ-5 | SHIPPED | `let any_cuda = ...; if self.config.foreach || any_cuda { return self.step_foreach(); }` top of `step` (CL-1105); consumer at `ferrotorch-train/src/learner.rs:28` Optimizer trait. |
+//! | REQ-6 | SHIPPED | `state_dict` / `load_state_dict` methods keyed by `ParamKey::Display`; consumer at `ferrotorch-serialize/src/checkpoint.rs:48`. |
+//! | REQ-7 | SHIPPED | grad-`None` skip in both `step` and `step_foreach`; consumer at `ferrotorch-train/src/learner.rs:28` exercises for frozen layers. |
 
 use std::collections::HashMap;
 use std::collections::hash_map::Entry;

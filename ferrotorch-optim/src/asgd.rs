@@ -8,6 +8,19 @@
 //! and parameter averaging begins after step t0.
 //!
 //! CL-319
+//!
+//! ## REQ status (per `.design/ferrotorch-optim/asgd.md`)
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 | SHIPPED | `AsgdConfig` + `impl Default { lr: 1e-2, lambd: 1e-4, alpha: 0.75, t0: 1e6, ... }` here mirror `torch/optim/asgd.py:30-124`; consumer at `ferrotorch-optim/src/lib.rs:33` re-export and `ferrotorch/src/lib.rs:61` umbrella re-export. |
+//! | REQ-2 | SHIPPED | `impl Optimizer<T> for Asgd<T>` here; consumer at `ferrotorch-train/src/learner.rs:28` Optimizer trait. |
+//! | REQ-3 | SHIPPED | legacy CPU `step` (else branch after `any_cuda`) mirrors `_single_tensor_asgd` at `torch/optim/asgd.py:197-275`; consumer at `ferrotorch/src/lib.rs:61` re-exports `Asgd`. |
+//! | REQ-4 | SHIPPED | `Asgd::step_foreach` method here mirrors `_multi_tensor_asgd` at `torch/optim/asgd.py:277-422`; consumer at `ferrotorch/src/lib.rs:61` re-exports `AsgdConfig::with_foreach(true)`. |
+//! | REQ-5 | SHIPPED | `let any_cuda = ...; if self.config.foreach || any_cuda { return self.step_foreach(); }` top of `step` (CL-1105); consumer at `ferrotorch-train/src/learner.rs:28` Optimizer trait. |
+//! | REQ-6 | SHIPPED | `state_dict` / `load_state_dict` methods keyed by `ParamKey::Display`; consumer at `ferrotorch-serialize/src/checkpoint.rs:48`. |
+//! | REQ-7 | SHIPPED | `pub fn averaged_param(&self, group_idx: usize, param_idx: usize) -> Option<&[f64]>` accessor here; consumer at `ferrotorch/src/lib.rs:61` re-exports `Asgd`. |
+//! | REQ-8 | SHIPPED | grad-`None` skip in both `step` and `step_foreach`; consumer at `ferrotorch-train/src/learner.rs:28` exercises for frozen layers. |
 
 use std::collections::HashMap;
 use std::collections::hash_map::Entry;

@@ -5,6 +5,20 @@
 //!
 //! All parameter updates execute inside `no_grad()` so the optimizer step is
 //! never recorded in the autograd graph.
+//!
+//! ## REQ status (per `.design/ferrotorch-optim/adam.md`)
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 | SHIPPED | `AdamConfig` + `impl Default` here mirror `torch/optim/adam.py:35-200`; consumer at `ferrotorch/examples/train_mnist.rs:78` `Adam::new(.., AdamConfig::default())`. |
+//! | REQ-2 | SHIPPED | `impl Optimizer<T> for Adam<T>` here; consumer at `ferrotorch-train/src/learner.rs:28` Optimizer trait. |
+//! | REQ-3 | SHIPPED | legacy CPU `step` (else branch after GPU fast-path) mirrors `_single_tensor_adam` at `torch/optim/adam.py:347-552`; consumer at `ferrotorch/examples/train_mnist.rs:76` drives MNIST CPU training. |
+//! | REQ-4 | SHIPPED | AMSGrad branch `if config.amsgrad { ... max_sq[i] = ea; ... }` here mirrors `torch/optim/adam.py:445-470`; consumer at `ferrotorch-optim/src/lib.rs:30` re-exports `AdamConfig::with_amsgrad`. |
+//! | REQ-5 | SHIPPED | GPU fused-kernel branch `if use_gpu { backend.fused_adam_f32(...) }` here; consumer at `ferrotorch/examples/train_mnist.rs:78` activates the fused kernel when params are CUDA-resident. |
+//! | REQ-6 | SHIPPED | `Adam::step_foreach` method here mirrors `_multi_tensor_adam` at `torch/optim/adam.py:553-901`; consumer at `ferrotorch/src/lib.rs:61` re-exports `AdamConfig::with_foreach(true)`. |
+//! | REQ-7 | SHIPPED | `state_dict` / `load_state_dict` methods here key by `ParamKey::Display`; consumer at `ferrotorch-serialize/src/checkpoint.rs:48` `use ferrotorch_optim::OptimizerState;`. |
+//! | REQ-8 | SHIPPED | grad-`None` skip in both `step` and `step_foreach` mirrors `torch/optim/adam.py:362-365`; consumer at `ferrotorch-train/src/learner.rs:28` exercises this for frozen layers. |
+//! | REQ-9 | SHIPPED | `FERROTORCH_ENABLE_GPU_FALLBACK` env-gated CPU fallback branch in the GPU fast-path here; consumer at `ferrotorch-train/src/learner.rs:28` propagates the resulting `FerrotorchResult` to the training script. |
 
 use std::any::TypeId;
 use std::collections::HashMap;
