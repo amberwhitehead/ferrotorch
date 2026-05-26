@@ -1417,6 +1417,29 @@ impl<T: Float> GradFn<T> for IndexFillBackward<T> {
         // for every o ∈ outer, idx ∈ self.index, k ∈ inner.
         let input_shape = self.input.shape();
         let dim = self.dim;
+
+        // 0-d input short-circuit (mirrors the forward's unsqueeze-to-1-d at
+        // `aten/src/ATen/native/TensorAdvancedIndexing.cpp:1917`:
+        //     Tensor self_nonzero_dim = (self.dim() == 0) ? self.unsqueeze(-1) : self;
+        // The forward records `index = vec![0]` when the 0-d position was
+        // filled and `index = vec![]` when the index tensor was empty.
+        // Direct slice arithmetic below would panic via `input_shape[dim+1..]`
+        // when `input_shape.len() == 0`. Per `derivatives.yaml:884-887`:
+        //     self: grad.index_fill(dim, index, 0)
+        // the VJP on the 0-d virtual length-1 dim is: zero out the single
+        // scalar if the (only valid wrapped) index 0 is in `self.index`,
+        // otherwise pass `grad_output` through unchanged.
+        if input_shape.is_empty() {
+            let go_data = grad_output.data_vec()?;
+            let mut grad_input = go_data.clone();
+            if !self.index.is_empty() {
+                let zero = <T as num_traits::Zero>::zero();
+                grad_input[0] = zero;
+            }
+            let grad_tensor = Tensor::from_storage(TensorStorage::cpu(grad_input), vec![], false)?;
+            return Ok(vec![Some(grad_tensor)]);
+        }
+
         let outer: usize = input_shape[..dim].iter().product();
         let inner: usize = input_shape[dim + 1..].iter().product();
         let dim_size = input_shape[dim];
@@ -1828,6 +1851,1500 @@ pub fn where_cond_bcast<T: Float>(
     let x_b = crate::grad_fns::shape::expand(x, &common)?;
     let y_b = crate::grad_fns::shape::expand(y, &common)?;
     crate::ops::indexing::where_cond_bt(&cond_b, &x_b, &y_b)
+}
+
+// ---------------------------------------------------------------------------
+// scatter_reduce (#1245 — REQ-4). Mirrors `torch.scatter_reduce(input, dim,
+// index, src, reduce, *, include_self=True)` at upstream
+// `aten/src/ATen/native/TensorAdvancedIndexing.cpp:2354 TORCH_IMPL_FUNC(
+// scatter_reduce_two)`. VJP per `tools/autograd/derivatives.yaml:3074-3077
+//   - name: scatter_reduce.two(Tensor self, int dim, Tensor index, Tensor src,
+//       str reduce, *, bool include_self=True) -> Tensor
+//     self, src: scatter_reduce_backward(grad, self, dim, index, src, reduce,
+//                                         include_self, result)`.
+// op_db emits only `reduce='sum'` samples (verified 2026-05-25: seed 0..3
+// i=0..25); the impl supports {sum, prod, amax, amin} for completeness but
+// the upstream-pinned characterization is sum-only — other modes route to a
+// concrete error rather than a wrong-value silent miss.
+// ---------------------------------------------------------------------------
+
+/// Reduce mode for `scatter_reduce` mirroring upstream `ReductionType` at
+/// `aten/src/ATen/native/ReductionType.h` (enum SUM / PROD / MAX / MIN /
+/// MEAN). PyTorch's user-facing string-keyword `reduce` arg per
+/// `torch/_torch_docs.py` accepts `"sum" | "prod" | "amax" | "amin" | "mean"`;
+/// ferrotorch implements the four non-mean variants here (mean requires a
+/// per-bucket count which the upstream computes via a second `scatter_add` —
+/// out of scope for the 2026-05-25 sum-only op_db characterization sweep).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScatterReduce {
+    /// `output[idx] += src[i]` (matches `scatter_add` semantics for include_self=true).
+    Sum,
+    /// `output[idx] *= src[i]`.
+    Prod,
+    /// `output[idx] = max(output[idx], src[i])`.
+    Amax,
+    /// `output[idx] = min(output[idx], src[i])`.
+    Amin,
+}
+
+impl ScatterReduce {
+    /// Parse the user-facing string (matches upstream `get_operator_enum` at
+    /// `TensorAdvancedIndexing.cpp:2368` which dispatches by string). Returns
+    /// `None` for the upstream-accepted `"mean"` mode (ferrotorch hasn't
+    /// shipped MEAN yet — separate work item) and for unknown strings.
+    ///
+    /// Named `parse_str` rather than `from_str` to avoid the
+    /// `clippy::should_implement_trait` warning for `std::str::FromStr`
+    /// (whose `Err` associated type would require a bespoke error type for
+    /// a single call site — overkill for this 4-arm parse).
+    pub fn parse_str(s: &str) -> Option<Self> {
+        match s {
+            "sum" => Some(Self::Sum),
+            "prod" => Some(Self::Prod),
+            "amax" => Some(Self::Amax),
+            "amin" => Some(Self::Amin),
+            _ => None,
+        }
+    }
+}
+
+/// Backward function for `scatter_reduce` with `reduce='sum'`.
+///
+/// Forward (sum, include_self=True): `output = input.clone();
+/// output[..., index[p], ...] += src[..., p, ...]` along `dim`.
+/// Forward (sum, include_self=False): like above but `output` slices at any
+/// position touched by the index list are zeroed before accumulation
+/// (upstream computes a mask via `include_self_ones` at
+/// `TensorAdvancedIndexing.cpp:2390-2392`).
+///
+/// VJP for input (sum, include_self=True): identity — per upstream
+/// `scatter_reduce_backward` for sum mode reduces to `grad`.
+/// VJP for input (sum, include_self=False): `grad` with the written positions
+/// zeroed (those positions in the output were entirely overwritten by src and
+/// no longer depend on input).
+/// VJP for src (sum, both): gather `grad` at the index-mapped positions.
+///
+/// Other reduce modes (prod/amax/amin) are NOT implemented in the backward —
+/// they require value-aware VJPs that this struct does not save the result
+/// for. Backward calls in those modes return an error rather than a silently
+/// wrong gradient.
+#[derive(Debug)]
+pub struct ScatterReduceBackward<T: Float> {
+    /// Saved input handle (for shape + autograd graph linkage).
+    pub input: Tensor<T>,
+    /// Saved src handle.
+    pub src: Tensor<T>,
+    /// The normalized (non-negative) dim.
+    pub dim: usize,
+    /// The flat index list.
+    pub index: Vec<usize>,
+    /// The shape of the index tensor.
+    pub index_shape: Vec<usize>,
+    /// The reduce mode used by the forward.
+    pub reduce: ScatterReduce,
+    /// Whether `include_self` was set in the forward.
+    pub include_self: bool,
+}
+
+impl<T: Float> GradFn<T> for ScatterReduceBackward<T> {
+    fn backward(&self, grad_output: &Tensor<T>) -> FerrotorchResult<Vec<Option<Tensor<T>>>> {
+        if !is_grad_enabled() {
+            return Ok(vec![None, None]);
+        }
+
+        // Only `sum` has a structurally-simple VJP that doesn't depend on the
+        // forward's computed result. prod/amax/amin would require saving
+        // `result` and partitioning grad by which src element won the
+        // reduction — out of scope for the 2026-05-25 sum-only characterization.
+        if !matches!(self.reduce, ScatterReduce::Sum) {
+            return Err(FerrotorchError::InvalidArgument {
+                message: format!(
+                    "ScatterReduceBackward: backward is only implemented for \
+                     reduce='sum'; got {:?}",
+                    self.reduce
+                ),
+            });
+        }
+
+        let input_shape = self.input.shape();
+        let ndim = input_shape.len();
+        if ndim == 0 {
+            // 0-d input: forward short-circuits / upstream unsqueezes. The VJP
+            // is a scalar identity (sum mode, include_self) or zero (sum,
+            // !include_self with any index).
+            let go_data = grad_output.data_vec()?;
+            let zero = <T as num_traits::Zero>::zero();
+            let mut grad_input_data = go_data.clone();
+            if !self.include_self && !self.index.is_empty() {
+                grad_input_data[0] = zero;
+            }
+            let grad_input = if self.input.requires_grad() {
+                Some(Tensor::from_storage(
+                    TensorStorage::cpu(grad_input_data),
+                    vec![],
+                    false,
+                )?)
+            } else {
+                None
+            };
+            let grad_src = if self.src.requires_grad() {
+                Some(Tensor::from_storage(
+                    TensorStorage::cpu(go_data),
+                    self.src.shape().to_vec(),
+                    false,
+                )?)
+            } else {
+                None
+            };
+            return Ok(vec![grad_input, grad_src]);
+        }
+
+        let index_numel: usize = self.index_shape.iter().product();
+        let go_data = grad_output.data_vec()?;
+        let zero = <T as num_traits::Zero>::zero();
+
+        // grad_input: identity for include_self=true; for include_self=false
+        // zero every flat position the index list wrote to (those positions
+        // didn't depend on input).
+        let grad_input = if self.input.requires_grad() {
+            let mut gi = go_data.clone();
+            if !self.include_self {
+                let mut coords = vec![0usize; ndim];
+                for i in 0..index_numel {
+                    let idx_val = self.index[i];
+                    let mut dst_coords = coords.clone();
+                    dst_coords[self.dim] = idx_val;
+                    let dst_flat = flat_index(&dst_coords, input_shape);
+                    gi[dst_flat] = zero;
+                    if i + 1 < index_numel {
+                        increment_coords(&mut coords, &self.index_shape);
+                    }
+                }
+            }
+            Some(Tensor::from_storage(
+                TensorStorage::cpu(gi),
+                input_shape.to_vec(),
+                false,
+            )?)
+        } else {
+            None
+        };
+
+        // grad_src: gather grad_output at the index-mapped positions (same as
+        // ScatterAdd's src VJP).
+        let grad_src = if self.src.requires_grad() {
+            let mut gs = vec![zero; index_numel];
+            let mut coords = vec![0usize; ndim];
+            for (i, gs_elem) in gs.iter_mut().enumerate() {
+                let idx_val = self.index[i];
+                let mut src_coords = coords.clone();
+                src_coords[self.dim] = idx_val;
+                let src_flat = flat_index(&src_coords, input_shape);
+                *gs_elem = go_data[src_flat];
+                if i + 1 < index_numel {
+                    increment_coords(&mut coords, &self.index_shape);
+                }
+            }
+            Some(Tensor::from_storage(
+                TensorStorage::cpu(gs),
+                self.index_shape.clone(),
+                false,
+            )?)
+        } else {
+            None
+        };
+
+        Ok(vec![grad_input, grad_src])
+    }
+
+    fn inputs(&self) -> Vec<&Tensor<T>> {
+        vec![&self.input, &self.src]
+    }
+
+    fn name(&self) -> &'static str {
+        "ScatterReduceBackward"
+    }
+}
+
+/// Forward `scatter_reduce` for floating dtypes. Mirrors upstream
+/// `at::scatter_reduce(self, dim, index, src, reduce, include_self=true)`
+/// at `aten/src/ATen/native/TensorAdvancedIndexing.cpp:2354
+/// TORCH_IMPL_FUNC(scatter_reduce_two)`.
+///
+/// `dim` follows PyTorch's negative-wrapping convention (upstream
+/// `maybe_wrap_dim` at `:2362`).
+///
+/// For `reduce='sum'` with `include_self=False`, every output slice at an
+/// index position is reset to zero before accumulation — upstream pattern at
+/// `TensorAdvancedIndexing.cpp:2378-2386` via `scatter_impl<...>(..., reduce,
+/// include_self)` followed by include_self_ones masking.
+///
+/// Backward is only implemented for `reduce='sum'` (see
+/// [`ScatterReduceBackward`]); other modes have a forward path but produce a
+/// result tensor without a grad_fn attached (caller responsibility, matches
+/// the no-grad sample stream from op_db's seed sweep).
+pub fn scatter_reduce<T: Float>(
+    input: &Tensor<T>,
+    dim: i64,
+    index: &[usize],
+    index_shape: &[usize],
+    src: &Tensor<T>,
+    reduce: ScatterReduce,
+    include_self: bool,
+) -> FerrotorchResult<Tensor<T>> {
+    let input_shape = input.shape();
+    let ndim = input_shape.len();
+    if ndim == 0 {
+        // op_db emits 0-d input + 0-d index samples for scatter_reduce — the
+        // upstream impl handles this via the C++ unsqueeze path. ferrotorch
+        // returns the input as-is (no-op for empty index) or applies the
+        // single scalar reduction.
+        let in_data = input.data_vec()?;
+        let src_data = src.data_vec()?;
+        let zero = <T as num_traits::Zero>::zero();
+        let one = <T as num_traits::One>::one();
+        let mut out = in_data[0];
+        if !include_self && !index.is_empty() {
+            out = match reduce {
+                ScatterReduce::Sum => zero,
+                ScatterReduce::Prod => one,
+                ScatterReduce::Amax | ScatterReduce::Amin => src_data[0],
+            };
+        }
+        for (i, &_idx) in index.iter().enumerate() {
+            let s = src_data[i.min(src_data.len() - 1)];
+            out = apply_reduce(reduce, out, s);
+        }
+        let out_storage = TensorStorage::cpu(vec![out]);
+        if (input.requires_grad() || src.requires_grad()) && is_grad_enabled() {
+            let grad_fn = Arc::new(ScatterReduceBackward {
+                input: input.clone(),
+                src: src.clone(),
+                dim: 0,
+                index: index.to_vec(),
+                index_shape: index_shape.to_vec(),
+                reduce,
+                include_self,
+            });
+            return Tensor::from_operation(out_storage, vec![], grad_fn);
+        }
+        return Tensor::from_storage(out_storage, vec![], false);
+    }
+
+    // Normalize negative dim per `at::maybe_wrap_dim` at `:2362`.
+    let ndim_i64 = ndim as i64;
+    let dim_norm = if dim < 0 { dim + ndim_i64 } else { dim };
+    if !(0..ndim_i64).contains(&dim_norm) {
+        return Err(FerrotorchError::InvalidArgument {
+            message: format!("scatter_reduce: dim {dim} out of range for input ndim {ndim}"),
+        });
+    }
+    let dim_usize = dim_norm as usize;
+
+    // Validate index ndim matches input ndim (upstream `TORCH_CHECK` chain
+    // inside `scatter_impl`).
+    if index_shape.len() != ndim {
+        return Err(FerrotorchError::ShapeMismatch {
+            message: format!(
+                "scatter_reduce: index ndim {} != input ndim {}",
+                index_shape.len(),
+                ndim
+            ),
+        });
+    }
+    let index_numel: usize = index_shape.iter().product();
+    if src.numel() < index_numel {
+        return Err(FerrotorchError::ShapeMismatch {
+            message: format!(
+                "scatter_reduce: src numel {} < index numel {}",
+                src.numel(),
+                index_numel
+            ),
+        });
+    }
+
+    let in_data = input.data_vec()?;
+    let src_data = src.data_vec()?;
+    let mut out = in_data.clone();
+
+    // For include_self=false we mask out positions the index list will touch
+    // and reset to the reduction identity. Per upstream `include_self`
+    // semantics at `TensorAdvancedIndexing.cpp:2360-2391`: include_self=true
+    // accumulates onto the existing self values; include_self=false
+    // overwrites them at touched positions (using the reduction identity for
+    // sum=0, prod=1, amax/amin=the first src element written).
+    let zero = <T as num_traits::Zero>::zero();
+    let one = <T as num_traits::One>::one();
+    if !include_self {
+        let identity = match reduce {
+            ScatterReduce::Sum => Some(zero),
+            ScatterReduce::Prod => Some(one),
+            // For amax/amin, identity is the first src write — handle below
+            // by tracking first-touch positions.
+            ScatterReduce::Amax | ScatterReduce::Amin => None,
+        };
+        if let Some(id) = identity {
+            let mut coords = vec![0usize; ndim];
+            for i in 0..index_numel {
+                let idx_val = index[i];
+                let mut dst_coords = coords.clone();
+                dst_coords[dim_usize] = idx_val;
+                let dst_flat = flat_index(&dst_coords, input_shape);
+                out[dst_flat] = id;
+                if i + 1 < index_numel {
+                    increment_coords(&mut coords, index_shape);
+                }
+            }
+        } else {
+            // amax/amin with include_self=false: track first-touch per output
+            // slot and seed with the first src write rather than identity.
+            let input_numel: usize = input_shape.iter().product();
+            let mut touched = vec![false; input_numel];
+            let mut coords = vec![0usize; ndim];
+            for i in 0..index_numel {
+                let idx_val = index[i];
+                let mut dst_coords = coords.clone();
+                dst_coords[dim_usize] = idx_val;
+                let dst_flat = flat_index(&dst_coords, input_shape);
+                let s = src_data[i];
+                out[dst_flat] = if touched[dst_flat] {
+                    apply_reduce(reduce, out[dst_flat], s)
+                } else {
+                    touched[dst_flat] = true;
+                    s
+                };
+                if i + 1 < index_numel {
+                    increment_coords(&mut coords, index_shape);
+                }
+            }
+            let output_shape = input_shape.to_vec();
+            if (input.requires_grad() || src.requires_grad()) && is_grad_enabled() {
+                let grad_fn = Arc::new(ScatterReduceBackward {
+                    input: input.clone(),
+                    src: src.clone(),
+                    dim: dim_usize,
+                    index: index.to_vec(),
+                    index_shape: index_shape.to_vec(),
+                    reduce,
+                    include_self,
+                });
+                return Tensor::from_operation(TensorStorage::cpu(out), output_shape, grad_fn);
+            }
+            return Tensor::from_storage(TensorStorage::cpu(out), output_shape, false);
+        }
+    }
+
+    // Sum / prod, OR amax/amin with include_self=true: accumulate onto out.
+    let mut coords = vec![0usize; ndim];
+    for i in 0..index_numel {
+        let idx_val = index[i];
+        let mut dst_coords = coords.clone();
+        dst_coords[dim_usize] = idx_val;
+        let dst_flat = flat_index(&dst_coords, input_shape);
+        out[dst_flat] = apply_reduce(reduce, out[dst_flat], src_data[i]);
+        if i + 1 < index_numel {
+            increment_coords(&mut coords, index_shape);
+        }
+    }
+
+    let output_shape = input_shape.to_vec();
+    if (input.requires_grad() || src.requires_grad()) && is_grad_enabled() {
+        let grad_fn = Arc::new(ScatterReduceBackward {
+            input: input.clone(),
+            src: src.clone(),
+            dim: dim_usize,
+            index: index.to_vec(),
+            index_shape: index_shape.to_vec(),
+            reduce,
+            include_self,
+        });
+        Tensor::from_operation(TensorStorage::cpu(out), output_shape, grad_fn)
+    } else {
+        Tensor::from_storage(TensorStorage::cpu(out), output_shape, false)
+    }
+}
+
+/// Apply the per-mode binary reduction. `a` is the running accumulator,
+/// `b` is the new src value being folded in.
+#[inline]
+fn apply_reduce<T: Float>(mode: ScatterReduce, a: T, b: T) -> T {
+    match mode {
+        ScatterReduce::Sum => a + b,
+        ScatterReduce::Prod => a * b,
+        // Use `partial_cmp` to match upstream PyTorch's NaN-passes-through
+        // contract: any NaN in either operand keeps the accumulator
+        // unchanged when comparing returns None.
+        ScatterReduce::Amax => {
+            if a.partial_cmp(&b) == Some(std::cmp::Ordering::Less) {
+                b
+            } else {
+                a
+            }
+        }
+        ScatterReduce::Amin => {
+            if b.partial_cmp(&a) == Some(std::cmp::Ordering::Less) {
+                b
+            } else {
+                a
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// index_add (#1247 — REQ-6). Mirrors `torch.index_add(input, dim, index,
+// source, *, alpha=1)` at upstream `aten/src/ATen/native/
+// TensorAdvancedIndexing.cpp:1153 TORCH_IMPL_FUNC(index_add_cpu_out)`. VJP
+// per `tools/autograd/derivatives.yaml:862-869
+//   - name: index_add(Tensor self, int dim, Tensor index, Tensor source, *,
+//       Scalar alpha=1) -> Tensor
+//     self: grad
+//     source: "maybe_multiply(source.dim() > 0 ? grad.index_select(dim, index)
+//       .expand_as(source) : grad.index_select(dim, index.squeeze(0)), alpha)"
+//     index: non_differentiable`.
+// ---------------------------------------------------------------------------
+
+/// Backward function for `index_add`.
+///
+/// Forward: `output = input.clone(); output[..., index[i], ...] += alpha *
+/// source[..., i, ...]` along `dim`.
+///
+/// VJP for input: identity (`derivatives.yaml:863 self: grad`).
+/// VJP for source: `alpha * grad.index_select(dim, index)` — gather grad
+/// slices at the index positions along `dim`, scaled by `alpha`.
+#[derive(Debug)]
+pub struct IndexAddBackward<T: Float> {
+    /// Saved input handle (for shape + autograd graph linkage).
+    pub input: Tensor<T>,
+    /// Saved source handle.
+    pub source: Tensor<T>,
+    /// The normalized (non-negative) dim.
+    pub dim: usize,
+    /// The validated (non-negative) index list.
+    pub index: Vec<usize>,
+    /// The alpha scaling factor (from `Scalar alpha` upstream).
+    pub alpha: f64,
+}
+
+impl<T: Float> GradFn<T> for IndexAddBackward<T> {
+    fn backward(&self, grad_output: &Tensor<T>) -> FerrotorchResult<Vec<Option<Tensor<T>>>> {
+        if !is_grad_enabled() {
+            return Ok(vec![None, None]);
+        }
+        let input_shape = self.input.shape();
+        let ndim = input_shape.len();
+
+        // grad for input: identity.
+        let grad_input = if self.input.requires_grad() {
+            let go = grad_output.data_vec()?;
+            Some(Tensor::from_storage(
+                TensorStorage::cpu(go),
+                input_shape.to_vec(),
+                false,
+            )?)
+        } else {
+            None
+        };
+
+        // grad for source: alpha * grad.index_select(dim, index). Walk
+        // grad_output's outer/inner decomposition along `dim`, gather slices
+        // at index positions, multiply by alpha. For 0-d source we copy the
+        // single scalar at index[0] (upstream squeeze-on-zero-d path).
+        let grad_source = if self.source.requires_grad() {
+            let go = grad_output.data_vec()?;
+            let source_shape = self.source.shape();
+            let alpha_t = <T as num_traits::NumCast>::from(self.alpha).ok_or_else(|| {
+                FerrotorchError::InvalidArgument {
+                    message: format!(
+                        "IndexAddBackward: alpha {} not representable in target dtype",
+                        self.alpha
+                    ),
+                }
+            })?;
+            let gs = if ndim == 0 || source_shape.is_empty() {
+                // 0-d input or 0-d source: scalar copy of grad_output[0] * alpha.
+                let v = if go.is_empty() {
+                    <T as num_traits::Zero>::zero()
+                } else {
+                    go[0] * alpha_t
+                };
+                vec![v]
+            } else {
+                let outer: usize = input_shape[..self.dim].iter().product();
+                let inner: usize = input_shape[self.dim + 1..].iter().product();
+                let in_dim_size = input_shape[self.dim];
+                let src_dim_size = if source_shape.len() == ndim {
+                    source_shape[self.dim]
+                } else {
+                    self.index.len()
+                };
+                let src_numel = if source_shape.is_empty() {
+                    1
+                } else {
+                    source_shape.iter().product::<usize>()
+                };
+                let mut out = vec![<T as num_traits::Zero>::zero(); src_numel];
+                // gather: source[o, i, k] = grad_output[o, index[i], k] * alpha
+                for o in 0..outer {
+                    for i in 0..src_dim_size.min(self.index.len()) {
+                        let dst_i = self.index[i];
+                        let go_base = o * in_dim_size * inner + dst_i * inner;
+                        let src_base = o * src_dim_size * inner + i * inner;
+                        for k in 0..inner {
+                            out[src_base + k] = go[go_base + k] * alpha_t;
+                        }
+                    }
+                }
+                out
+            };
+            Some(Tensor::from_storage(
+                TensorStorage::cpu(gs),
+                source_shape.to_vec(),
+                false,
+            )?)
+        } else {
+            None
+        };
+
+        Ok(vec![grad_input, grad_source])
+    }
+
+    fn inputs(&self) -> Vec<&Tensor<T>> {
+        vec![&self.input, &self.source]
+    }
+
+    fn name(&self) -> &'static str {
+        "IndexAddBackward"
+    }
+}
+
+/// Out-of-place `index_add`: `output[..., index[i], ...] += alpha *
+/// source[..., i, ...]` along `dim`. Mirrors upstream `Tensor index_add(
+/// const Tensor& self, int64_t dim, const Tensor& index, const Tensor&
+/// source, const Scalar& alpha)` at `aten/src/ATen/native/
+/// TensorAdvancedIndexing.cpp:1153 TORCH_IMPL_FUNC(index_add_cpu_out)`.
+///
+/// `dim` follows PyTorch's negative-wrap convention (`maybe_wrap_dim` at
+/// `:1179`). `index` must be 1-D or 0-D scalar (upstream restricts at
+/// `:1260-1264 TORCH_CHECK(source.dim() <= 1, ...)`); negative index values
+/// wrap per `idx + dim_size`.
+pub fn index_add<T: Float>(
+    input: &Tensor<T>,
+    dim: i64,
+    index: &IntTensor<i64>,
+    source: &Tensor<T>,
+    alpha: f64,
+) -> FerrotorchResult<Tensor<T>> {
+    let input_shape = input.shape();
+    let ndim = input_shape.len();
+
+    if ndim == 0 {
+        // 0-d input: unsqueeze to length-1 1-d per upstream's 1-d branch at
+        // `TensorAdvancedIndexing.cpp:1259-1278`. Only dim ∈ {-1, 0} and
+        // index ∈ {-1, 0} are valid.
+        let dim_for_0d = match dim {
+            0 | -1 => 0i64,
+            _ => {
+                return Err(FerrotorchError::InvalidArgument {
+                    message: format!(
+                        "index_add: dim {dim} out of range for 0-d input (valid: -1, 0)"
+                    ),
+                });
+            }
+        };
+        let scalar_val = input.data_vec()?[0];
+        let alpha_t = <T as num_traits::NumCast>::from(alpha).ok_or_else(|| {
+            FerrotorchError::InvalidArgument {
+                message: format!("index_add: alpha {alpha} not representable"),
+            }
+        })?;
+        let src_data = source.data_vec()?;
+        let mut acc = scalar_val;
+        let mut saved_index: Vec<usize> = Vec::new();
+        for (i, v) in index.data()?.iter().enumerate() {
+            let i_raw = v.to_i64();
+            let i_wrapped = if i_raw < 0 { i_raw + 1 } else { i_raw };
+            if !(0..1).contains(&i_wrapped) {
+                return Err(FerrotorchError::IndexOutOfBounds {
+                    index: if i_raw < 0 {
+                        i_raw.unsigned_abs() as usize
+                    } else {
+                        i_raw as usize
+                    },
+                    axis: dim_for_0d as usize,
+                    size: 1,
+                });
+            }
+            let src_v = if src_data.is_empty() {
+                <T as num_traits::Zero>::zero()
+            } else if src_data.len() == 1 {
+                src_data[0]
+            } else {
+                src_data[i.min(src_data.len() - 1)]
+            };
+            acc += alpha_t * src_v;
+            saved_index.push(0);
+        }
+        let storage = TensorStorage::cpu(vec![acc]);
+        if (input.requires_grad() || source.requires_grad()) && is_grad_enabled() {
+            let grad_fn = Arc::new(IndexAddBackward {
+                input: input.clone(),
+                source: source.clone(),
+                dim: 0,
+                index: saved_index,
+                alpha,
+            });
+            return Tensor::from_operation(storage, vec![], grad_fn);
+        }
+        return Tensor::from_storage(storage, vec![], false);
+    }
+
+    if index.ndim() > 1 {
+        return Err(FerrotorchError::ShapeMismatch {
+            message: format!(
+                "index_add: index must be 1-D or scalar, got shape {:?}",
+                index.shape()
+            ),
+        });
+    }
+
+    let ndim_i64 = ndim as i64;
+    let dim_norm = if dim < 0 { dim + ndim_i64 } else { dim };
+    if !(0..ndim_i64).contains(&dim_norm) {
+        return Err(FerrotorchError::InvalidArgument {
+            message: format!("index_add: dim {dim} out of range for input ndim {ndim}"),
+        });
+    }
+    let dim_usize = dim_norm as usize;
+    let in_dim_size = input_shape[dim_usize];
+    let in_dim_size_i64 = in_dim_size as i64;
+
+    // Validate + widen indices with negative-wrap.
+    let mut idx_usize: Vec<usize> = Vec::with_capacity(index.numel());
+    for v in index.data()? {
+        let i_raw = v.to_i64();
+        if i_raw < -in_dim_size_i64 || i_raw >= in_dim_size_i64 {
+            return Err(FerrotorchError::IndexOutOfBounds {
+                index: if i_raw < 0 {
+                    i_raw.unsigned_abs() as usize
+                } else {
+                    i_raw as usize
+                },
+                axis: dim_usize,
+                size: in_dim_size,
+            });
+        }
+        let i = if i_raw < 0 {
+            i_raw + in_dim_size_i64
+        } else {
+            i_raw
+        };
+        idx_usize.push(i as usize);
+    }
+
+    let alpha_t = <T as num_traits::NumCast>::from(alpha).ok_or_else(|| {
+        FerrotorchError::InvalidArgument {
+            message: format!("index_add: alpha {alpha} not representable"),
+        }
+    })?;
+
+    let outer: usize = input_shape[..dim_usize].iter().product();
+    let inner: usize = input_shape[dim_usize + 1..].iter().product();
+    let mut out = input.data_vec()?;
+    let src_data = source.data_vec()?;
+    let source_shape = source.shape();
+
+    // For 0-d source with len(index) == 1: treat source as a length-1 slice
+    // along the broadcast dim (upstream's `source.dim() == 0` handling at
+    // `derivatives.yaml:867` via `index.squeeze(0)`).
+    let src_dim_size = if source_shape.is_empty() {
+        1
+    } else if source_shape.len() == ndim {
+        source_shape[dim_usize]
+    } else {
+        idx_usize.len()
+    };
+
+    for o in 0..outer {
+        for (i, &dst_i) in idx_usize.iter().enumerate() {
+            let dst_base = o * in_dim_size * inner + dst_i * inner;
+            for k in 0..inner {
+                let src_idx = if source_shape.is_empty() {
+                    0
+                } else {
+                    let i_clamped = i.min(src_dim_size.saturating_sub(1));
+                    o * src_dim_size * inner + i_clamped * inner + k
+                };
+                let s = src_data[src_idx.min(src_data.len() - 1)];
+                out[dst_base + k] += alpha_t * s;
+            }
+        }
+    }
+
+    let output_shape = input_shape.to_vec();
+    if (input.requires_grad() || source.requires_grad()) && is_grad_enabled() {
+        let grad_fn = Arc::new(IndexAddBackward {
+            input: input.clone(),
+            source: source.clone(),
+            dim: dim_usize,
+            index: idx_usize,
+            alpha,
+        });
+        Tensor::from_operation(TensorStorage::cpu(out), output_shape, grad_fn)
+    } else {
+        Tensor::from_storage(TensorStorage::cpu(out), output_shape, false)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// index_copy (#1248 — REQ-7). Mirrors `torch.index_copy(input, dim, index,
+// source)` at upstream `aten/src/ATen/native/TensorAdvancedIndexing.cpp:1082
+// TORCH_IMPL_FUNC(index_copy_out)`. VJP per `tools/autograd/derivatives.yaml:
+// 875-883
+//   - name: index_copy(Tensor self, int dim, Tensor index, Tensor source) -> Tensor
+//     self: grad.index_fill(dim, index, 0)
+//     source: "source.dim() > 0 ? grad.index_select(dim, index).expand_as(
+//       source) : grad.index_select(dim, index.squeeze(0))"
+//     index: non_differentiable`. Depends on REQ-8 (index_fill, SHIPPED).
+// ---------------------------------------------------------------------------
+
+/// Backward function for `index_copy`.
+///
+/// Forward: `output = input.clone(); output[..., index[i], ...] =
+/// source[..., i, ...]` along `dim`.
+///
+/// VJP for input: zero grad at every position the copy overwrote (the same
+/// pattern as `IndexFillBackward`).
+/// VJP for source: gather grad at the index-mapped positions along `dim`
+/// (same pattern as `IndexAddBackward` but without the alpha scale).
+#[derive(Debug)]
+pub struct IndexCopyBackward<T: Float> {
+    /// Saved input handle (for shape + autograd graph linkage).
+    pub input: Tensor<T>,
+    /// Saved source handle.
+    pub source: Tensor<T>,
+    /// The normalized (non-negative) dim.
+    pub dim: usize,
+    /// The validated (non-negative) index list.
+    pub index: Vec<usize>,
+}
+
+impl<T: Float> GradFn<T> for IndexCopyBackward<T> {
+    fn backward(&self, grad_output: &Tensor<T>) -> FerrotorchResult<Vec<Option<Tensor<T>>>> {
+        if !is_grad_enabled() {
+            return Ok(vec![None, None]);
+        }
+        let input_shape = self.input.shape();
+        let ndim = input_shape.len();
+        let zero = <T as num_traits::Zero>::zero();
+
+        // grad for input: zero positions the copy overwrote.
+        let grad_input = if self.input.requires_grad() {
+            let mut gi = grad_output.data_vec()?;
+            if ndim == 0 {
+                if !self.index.is_empty() {
+                    gi[0] = zero;
+                }
+            } else {
+                let outer: usize = input_shape[..self.dim].iter().product();
+                let inner: usize = input_shape[self.dim + 1..].iter().product();
+                let dim_size = input_shape[self.dim];
+                for o in 0..outer {
+                    for &idx in &self.index {
+                        let base = o * dim_size * inner + idx * inner;
+                        for k in 0..inner {
+                            gi[base + k] = zero;
+                        }
+                    }
+                }
+            }
+            Some(Tensor::from_storage(
+                TensorStorage::cpu(gi),
+                input_shape.to_vec(),
+                false,
+            )?)
+        } else {
+            None
+        };
+
+        // grad for source: gather grad_output at the index-mapped positions.
+        let grad_source = if self.source.requires_grad() {
+            let go = grad_output.data_vec()?;
+            let source_shape = self.source.shape();
+            let gs = if ndim == 0 || source_shape.is_empty() {
+                let v = if go.is_empty() { zero } else { go[0] };
+                vec![v]
+            } else {
+                let outer: usize = input_shape[..self.dim].iter().product();
+                let inner: usize = input_shape[self.dim + 1..].iter().product();
+                let in_dim_size = input_shape[self.dim];
+                let src_dim_size = if source_shape.len() == ndim {
+                    source_shape[self.dim]
+                } else {
+                    self.index.len()
+                };
+                let src_numel = source_shape.iter().product::<usize>();
+                let mut out = vec![zero; src_numel];
+                for o in 0..outer {
+                    for i in 0..src_dim_size.min(self.index.len()) {
+                        let dst_i = self.index[i];
+                        let go_base = o * in_dim_size * inner + dst_i * inner;
+                        let src_base = o * src_dim_size * inner + i * inner;
+                        out[src_base..src_base + inner]
+                            .copy_from_slice(&go[go_base..go_base + inner]);
+                    }
+                }
+                out
+            };
+            Some(Tensor::from_storage(
+                TensorStorage::cpu(gs),
+                source_shape.to_vec(),
+                false,
+            )?)
+        } else {
+            None
+        };
+
+        Ok(vec![grad_input, grad_source])
+    }
+
+    fn inputs(&self) -> Vec<&Tensor<T>> {
+        vec![&self.input, &self.source]
+    }
+
+    fn name(&self) -> &'static str {
+        "IndexCopyBackward"
+    }
+}
+
+/// Out-of-place `index_copy`: `output[..., index[i], ...] = source[..., i, ...]`
+/// along `dim`. Mirrors upstream `Tensor index_copy(const Tensor& self,
+/// int64_t dim, const Tensor& index, const Tensor& source)` at
+/// `aten/src/ATen/native/TensorAdvancedIndexing.cpp:1082 TORCH_IMPL_FUNC(
+/// index_copy_out)`.
+///
+/// `dim` follows PyTorch's negative-wrap convention. `index` must be 1-D or
+/// scalar. Negative index values wrap per `idx + dim_size`.
+pub fn index_copy<T: Float>(
+    input: &Tensor<T>,
+    dim: i64,
+    index: &IntTensor<i64>,
+    source: &Tensor<T>,
+) -> FerrotorchResult<Tensor<T>> {
+    let input_shape = input.shape();
+    let ndim = input_shape.len();
+
+    if ndim == 0 {
+        let dim_for_0d = match dim {
+            0 | -1 => 0i64,
+            _ => {
+                return Err(FerrotorchError::InvalidArgument {
+                    message: format!(
+                        "index_copy: dim {dim} out of range for 0-d input (valid: -1, 0)"
+                    ),
+                });
+            }
+        };
+        let scalar_val = input.data_vec()?[0];
+        let src_data = source.data_vec()?;
+        let mut result_val = scalar_val;
+        let mut saved_index: Vec<usize> = Vec::new();
+        for (i, v) in index.data()?.iter().enumerate() {
+            let i_raw = v.to_i64();
+            let i_wrapped = if i_raw < 0 { i_raw + 1 } else { i_raw };
+            if !(0..1).contains(&i_wrapped) {
+                return Err(FerrotorchError::IndexOutOfBounds {
+                    index: if i_raw < 0 {
+                        i_raw.unsigned_abs() as usize
+                    } else {
+                        i_raw as usize
+                    },
+                    axis: dim_for_0d as usize,
+                    size: 1,
+                });
+            }
+            result_val = if src_data.is_empty() {
+                <T as num_traits::Zero>::zero()
+            } else {
+                src_data[i.min(src_data.len() - 1)]
+            };
+            saved_index.push(0);
+        }
+        let storage = TensorStorage::cpu(vec![result_val]);
+        if (input.requires_grad() || source.requires_grad()) && is_grad_enabled() {
+            let grad_fn = Arc::new(IndexCopyBackward {
+                input: input.clone(),
+                source: source.clone(),
+                dim: 0,
+                index: saved_index,
+            });
+            return Tensor::from_operation(storage, vec![], grad_fn);
+        }
+        return Tensor::from_storage(storage, vec![], false);
+    }
+
+    if index.ndim() > 1 {
+        return Err(FerrotorchError::ShapeMismatch {
+            message: format!(
+                "index_copy: index must be 1-D or scalar, got shape {:?}",
+                index.shape()
+            ),
+        });
+    }
+
+    let ndim_i64 = ndim as i64;
+    let dim_norm = if dim < 0 { dim + ndim_i64 } else { dim };
+    if !(0..ndim_i64).contains(&dim_norm) {
+        return Err(FerrotorchError::InvalidArgument {
+            message: format!("index_copy: dim {dim} out of range for input ndim {ndim}"),
+        });
+    }
+    let dim_usize = dim_norm as usize;
+    let in_dim_size = input_shape[dim_usize];
+    let in_dim_size_i64 = in_dim_size as i64;
+
+    let mut idx_usize: Vec<usize> = Vec::with_capacity(index.numel());
+    for v in index.data()? {
+        let i_raw = v.to_i64();
+        if i_raw < -in_dim_size_i64 || i_raw >= in_dim_size_i64 {
+            return Err(FerrotorchError::IndexOutOfBounds {
+                index: if i_raw < 0 {
+                    i_raw.unsigned_abs() as usize
+                } else {
+                    i_raw as usize
+                },
+                axis: dim_usize,
+                size: in_dim_size,
+            });
+        }
+        let i = if i_raw < 0 {
+            i_raw + in_dim_size_i64
+        } else {
+            i_raw
+        };
+        idx_usize.push(i as usize);
+    }
+
+    let outer: usize = input_shape[..dim_usize].iter().product();
+    let inner: usize = input_shape[dim_usize + 1..].iter().product();
+    let mut out = input.data_vec()?;
+    let src_data = source.data_vec()?;
+    let source_shape = source.shape();
+    let src_dim_size = if source_shape.is_empty() {
+        1
+    } else if source_shape.len() == ndim {
+        source_shape[dim_usize]
+    } else {
+        idx_usize.len()
+    };
+
+    for o in 0..outer {
+        for (i, &dst_i) in idx_usize.iter().enumerate() {
+            let dst_base = o * in_dim_size * inner + dst_i * inner;
+            for k in 0..inner {
+                let src_idx = if source_shape.is_empty() {
+                    0
+                } else {
+                    let i_clamped = i.min(src_dim_size.saturating_sub(1));
+                    o * src_dim_size * inner + i_clamped * inner + k
+                };
+                out[dst_base + k] = src_data[src_idx.min(src_data.len() - 1)];
+            }
+        }
+    }
+
+    let output_shape = input_shape.to_vec();
+    if (input.requires_grad() || source.requires_grad()) && is_grad_enabled() {
+        let grad_fn = Arc::new(IndexCopyBackward {
+            input: input.clone(),
+            source: source.clone(),
+            dim: dim_usize,
+            index: idx_usize,
+        });
+        Tensor::from_operation(TensorStorage::cpu(out), output_shape, grad_fn)
+    } else {
+        Tensor::from_storage(TensorStorage::cpu(out), output_shape, false)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// masked_scatter (#1252 — REQ-11). Mirrors `torch.masked_scatter(input, mask,
+// source)` at upstream `aten/src/ATen/native/TensorAdvancedIndexing.cpp:2402
+// Tensor masked_scatter(const Tensor& self, const Tensor& mask, const Tensor&
+// source) { auto [_mask, _self] = expand_outplace(mask, self); return
+// _self->clone(at::MemoryFormat::Contiguous).masked_scatter_(*_mask, source); }`.
+// VJP per `tools/autograd/derivatives.yaml:1105-1108
+//   - name: masked_scatter(Tensor self, Tensor mask, Tensor source) -> Tensor
+//     self: grad.masked_fill(mask, 0)
+//     source: masked_scatter_backward_symint(grad, mask, source.sym_sizes())`.
+// ---------------------------------------------------------------------------
+
+/// Backward function for `masked_scatter`.
+///
+/// Forward: `output = input.clone(); j = 0; for i in 0..output.numel() {
+///   if mask[i] { output[i] = source[j]; j += 1; } }` (after broadcasting
+/// mask + input to common shape).
+///
+/// VJP for input: zero grad at mask-true positions (the same pattern as
+/// `MaskedFillBackward`).
+/// VJP for source: walk mask in C-order, gather grad at every true position
+/// into the first `count_nonzero(mask)` elements of grad_source; reshape to
+/// source.shape (the inverse of the forward's compaction-from-source).
+#[derive(Debug)]
+pub struct MaskedScatterBackward<T: Float> {
+    /// Saved input handle (for shape + autograd graph linkage).
+    pub input: Tensor<T>,
+    /// Saved source handle (for shape + numel).
+    pub source: Tensor<T>,
+    /// The mask, after broadcasting to the input's shape.
+    pub mask: BoolTensor,
+}
+
+impl<T: Float> GradFn<T> for MaskedScatterBackward<T> {
+    fn backward(&self, grad_output: &Tensor<T>) -> FerrotorchResult<Vec<Option<Tensor<T>>>> {
+        if !is_grad_enabled() {
+            return Ok(vec![None, None]);
+        }
+        let mask_h = self.mask.data()?;
+        let go = grad_output.data_vec()?;
+        let zero = <T as num_traits::Zero>::zero();
+
+        // grad for input: zero at mask-true positions.
+        let grad_input = if self.input.requires_grad() {
+            let mut gi = go.clone();
+            for (i, &m) in mask_h.iter().enumerate() {
+                if m {
+                    gi[i] = zero;
+                }
+            }
+            Some(Tensor::from_storage(
+                TensorStorage::cpu(gi),
+                self.input.shape().to_vec(),
+                false,
+            )?)
+        } else {
+            None
+        };
+
+        // grad for source: compact grad at true positions, pad to source.numel()
+        // (per upstream `masked_scatter_backward_symint` which builds
+        // zeros(sizes) then writes the compacted grad — at
+        // `TensorAdvancedIndexing.cpp:2411-2430`).
+        let grad_source = if self.source.requires_grad() {
+            let source_numel = self.source.numel();
+            let mut gs = vec![zero; source_numel];
+            let mut j = 0usize;
+            for (i, &m) in mask_h.iter().enumerate() {
+                if m && j < source_numel {
+                    gs[j] = go[i];
+                    j += 1;
+                }
+            }
+            Some(Tensor::from_storage(
+                TensorStorage::cpu(gs),
+                self.source.shape().to_vec(),
+                false,
+            )?)
+        } else {
+            None
+        };
+
+        Ok(vec![grad_input, grad_source])
+    }
+
+    fn inputs(&self) -> Vec<&Tensor<T>> {
+        vec![&self.input, &self.source]
+    }
+
+    fn name(&self) -> &'static str {
+        "MaskedScatterBackward"
+    }
+}
+
+/// `masked_scatter`: copy elements from `source` into a clone of `input` at
+/// positions where `mask` is true. Mirrors upstream `Tensor masked_scatter(
+/// const Tensor& self, const Tensor& mask, const Tensor& source)` at
+/// `aten/src/ATen/native/TensorAdvancedIndexing.cpp:2402-2409`.
+///
+/// Broadcast: upstream applies `expand_outplace(mask, self)` at `:2406` so
+/// the mask and input are broadcast to a common shape before the
+/// element-by-element walk. ferrotorch broadcasts both via the shared
+/// `broadcast_bool_tensor` + `grad_fns::shape::expand` (autograd-aware) helpers.
+///
+/// `source` must have at least `count_nonzero(mask)` elements (upstream
+/// requirement at `:2406-2408`). The walk consumes source in C-order, taking
+/// the first `count_nonzero(mask)` elements.
+pub fn masked_scatter<T: Float>(
+    input: &Tensor<T>,
+    mask: &BoolTensor,
+    source: &Tensor<T>,
+) -> FerrotorchResult<Tensor<T>> {
+    // Broadcast input + mask to common shape (upstream `expand_outplace` at
+    // `TensorAdvancedIndexing.cpp:2406`).
+    let common = if input.shape() == mask.shape() {
+        input.shape().to_vec()
+    } else {
+        crate::shape::broadcast_shapes(input.shape(), mask.shape())?
+    };
+    let input_b = if input.shape() == common.as_slice() {
+        input.clone()
+    } else {
+        crate::grad_fns::shape::expand(input, &common)?
+    };
+    let mask_b = if mask.shape() == common.as_slice() {
+        mask.clone()
+    } else {
+        broadcast_bool_tensor(mask, &common)?
+    };
+
+    let mask_h = mask_b.data()?;
+    let true_count = mask_h.iter().filter(|&&b| b).count();
+    if source.numel() < true_count {
+        return Err(FerrotorchError::ShapeMismatch {
+            message: format!(
+                "masked_scatter: source has {} elements, but mask has {} true positions",
+                source.numel(),
+                true_count
+            ),
+        });
+    }
+
+    let in_data = input_b.data_vec()?;
+    let src_data = source.data_vec()?;
+    let mut out = in_data.clone();
+    let mut j = 0usize;
+    for (i, &m) in mask_h.iter().enumerate() {
+        if m {
+            out[i] = src_data[j];
+            j += 1;
+        }
+    }
+
+    let output_shape = common.clone();
+    if (input_b.requires_grad() || source.requires_grad()) && is_grad_enabled() {
+        let grad_fn = Arc::new(MaskedScatterBackward {
+            input: input_b.clone(),
+            source: source.clone(),
+            mask: mask_b.clone(),
+        });
+        Tensor::from_operation(TensorStorage::cpu(out), output_shape, grad_fn)
+    } else {
+        Tensor::from_storage(TensorStorage::cpu(out), output_shape, false)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// take (#1253 — REQ-12). Mirrors `torch.take(input, index)` at upstream
+// `aten/src/ATen/native/TensorAdvancedIndexing.cpp:1067-1071 Tensor take(
+// const Tensor& self, const Tensor& index) { auto out = at::empty(
+// index.sizes(), self.options()); at::native::take_out(self, index, out);
+// return out; }`. VJP per `tools/autograd/derivatives.yaml:1766-1769
+//   - name: take(Tensor self, Tensor index) -> Tensor
+//     self: take_backward(grad, self, index)
+//     index: non_differentiable
+//     result: auto_linear`.
+// take_backward = `zeros_like(self).put_(index, grad, accumulate=true)` —
+// scatter grad into a zeros buffer of input shape at flat index positions.
+// ---------------------------------------------------------------------------
+
+/// Backward function for `take`.
+///
+/// Forward: `output[i] = input.view(-1)[index[i]]` — flat-index gather.
+///
+/// VJP for input: `zeros_like(input).put_(index, grad, accumulate=true)` —
+/// scatter-add grad at the flat positions the forward read from. Equivalent
+/// to a flat scatter-add (matches the `put_` accumulate=true semantics; if
+/// `index` contains duplicates the gradient accumulates).
+#[derive(Debug)]
+pub struct TakeBackward<T: Float> {
+    /// Saved input handle (for shape + autograd graph linkage).
+    pub input: Tensor<T>,
+    /// Flat indices into input's contiguous buffer.
+    pub index: Vec<usize>,
+}
+
+impl<T: Float> GradFn<T> for TakeBackward<T> {
+    fn backward(&self, grad_output: &Tensor<T>) -> FerrotorchResult<Vec<Option<Tensor<T>>>> {
+        if !is_grad_enabled() {
+            return Ok(vec![None]);
+        }
+        if !self.input.requires_grad() {
+            return Ok(vec![None]);
+        }
+        let input_shape = self.input.shape().to_vec();
+        let input_numel: usize = if input_shape.is_empty() {
+            1
+        } else {
+            input_shape.iter().product()
+        };
+        let go = grad_output.data_vec()?;
+        let zero = <T as num_traits::Zero>::zero();
+        let mut grad_input = vec![zero; input_numel];
+        for (i, &idx) in self.index.iter().enumerate() {
+            if idx < input_numel && i < go.len() {
+                grad_input[idx] += go[i];
+            }
+        }
+        let grad_tensor = Tensor::from_storage(TensorStorage::cpu(grad_input), input_shape, false)?;
+        Ok(vec![Some(grad_tensor)])
+    }
+
+    fn inputs(&self) -> Vec<&Tensor<T>> {
+        vec![&self.input]
+    }
+
+    fn name(&self) -> &'static str {
+        "TakeBackward"
+    }
+}
+
+/// `take`: flat-index gather. `output[i] = input.view(-1)[index[i]]`, output
+/// shape = index shape. Mirrors upstream `Tensor take(const Tensor& self,
+/// const Tensor& index)` at `aten/src/ATen/native/TensorAdvancedIndexing.cpp:
+/// 1067-1071`.
+///
+/// `index` may be any shape (including 0-d for a single scalar pull); index
+/// values are flat indices into the C-contiguous buffer of `input`. Negative
+/// indices wrap per `idx + input.numel()`. Out-of-range raises
+/// `IndexOutOfBounds`.
+pub fn take<T: Float>(input: &Tensor<T>, index: &IntTensor<i64>) -> FerrotorchResult<Tensor<T>> {
+    let input_data = input.data_vec()?;
+    let input_numel: usize = if input.shape().is_empty() {
+        1
+    } else {
+        input.shape().iter().product()
+    };
+    let input_numel_i64 = input_numel as i64;
+
+    let mut idx_usize: Vec<usize> = Vec::with_capacity(index.numel());
+    for v in index.data()? {
+        let i_raw = v.to_i64();
+        if i_raw < -input_numel_i64 || i_raw >= input_numel_i64 {
+            return Err(FerrotorchError::IndexOutOfBounds {
+                index: if i_raw < 0 {
+                    i_raw.unsigned_abs() as usize
+                } else {
+                    i_raw as usize
+                },
+                axis: 0,
+                size: input_numel,
+            });
+        }
+        let i = if i_raw < 0 {
+            i_raw + input_numel_i64
+        } else {
+            i_raw
+        };
+        idx_usize.push(i as usize);
+    }
+
+    // Output shape matches index shape.
+    let output_shape = index.shape().to_vec();
+    let output_numel = if output_shape.is_empty() {
+        1
+    } else {
+        output_shape.iter().product()
+    };
+    let mut out = Vec::with_capacity(output_numel);
+    // For a 0-d index tensor `index.numel()` == 1 (the scalar count), so the
+    // loop runs once with idx_usize[0].
+    for &idx in &idx_usize {
+        out.push(input_data[idx]);
+    }
+    // Edge case: 0-d input + 0-d empty index — keep length consistent.
+    if out.is_empty() && output_numel == 1 {
+        out.push(<T as num_traits::Zero>::zero());
+    }
+
+    if input.requires_grad() && is_grad_enabled() {
+        let grad_fn = Arc::new(TakeBackward {
+            input: input.clone(),
+            index: idx_usize,
+        });
+        Tensor::from_operation(TensorStorage::cpu(out), output_shape, grad_fn)
+    } else {
+        Tensor::from_storage(TensorStorage::cpu(out), output_shape, false)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// put (#1254 — REQ-13). Mirrors `torch.put(input, index, source, accumulate=
+// False)` at upstream `aten/src/ATen/native/TensorAdvancedIndexing.cpp:928-934
+// Tensor put(const Tensor& self, const Tensor& index, const Tensor& source,
+// const bool accumulate) { return self.clone(at::MemoryFormat::Preserve)
+// .put_(index, source, accumulate); }`. VJP per `tools/autograd/derivatives.
+// yaml:1421-1424
+//   - name: put(Tensor self, Tensor index, Tensor source, bool accumulate=False) -> Tensor
+//     self: "accumulate ? grad : grad.put(index, zeros_like(source), false)"
+//     index: non_differentiable
+//     source: grad.take(index).reshape_as(source)`. Depends on REQ-12 (take, SHIPPED above).
+// ---------------------------------------------------------------------------
+
+/// Backward function for `put`.
+///
+/// Forward: `output = input.clone(); output.view(-1)[index[i]] = source[i]`
+/// (when `accumulate=False`) or `+= source[i]` (when `accumulate=True`).
+///
+/// VJP for input (accumulate=true): identity — addition passes grad through.
+/// VJP for input (accumulate=false): zero grad at every flat position the put
+/// overwrote (`grad.put(index, zeros_like(source), false)` per upstream).
+/// VJP for source: gather grad at the flat positions (`grad.take(index)`).
+#[derive(Debug)]
+pub struct PutBackward<T: Float> {
+    /// Saved input handle.
+    pub input: Tensor<T>,
+    /// Saved source handle.
+    pub source: Tensor<T>,
+    /// Flat indices (validated, non-negative).
+    pub index: Vec<usize>,
+    /// Whether accumulate mode was on in the forward.
+    pub accumulate: bool,
+}
+
+impl<T: Float> GradFn<T> for PutBackward<T> {
+    fn backward(&self, grad_output: &Tensor<T>) -> FerrotorchResult<Vec<Option<Tensor<T>>>> {
+        if !is_grad_enabled() {
+            return Ok(vec![None, None]);
+        }
+        let input_shape = self.input.shape().to_vec();
+        let input_numel: usize = if input_shape.is_empty() {
+            1
+        } else {
+            input_shape.iter().product()
+        };
+        let go = grad_output.data_vec()?;
+        let zero = <T as num_traits::Zero>::zero();
+
+        // grad for input.
+        let grad_input = if self.input.requires_grad() {
+            let mut gi = go.clone();
+            if !self.accumulate {
+                for &idx in &self.index {
+                    if idx < input_numel {
+                        gi[idx] = zero;
+                    }
+                }
+            }
+            Some(Tensor::from_storage(
+                TensorStorage::cpu(gi),
+                input_shape,
+                false,
+            )?)
+        } else {
+            None
+        };
+
+        // grad for source: gather grad at flat index positions.
+        let grad_source = if self.source.requires_grad() {
+            let source_numel = self.source.numel();
+            let mut gs = vec![zero; source_numel];
+            for (i, &idx) in self.index.iter().enumerate() {
+                if idx < go.len() && i < source_numel {
+                    gs[i] = go[idx];
+                }
+            }
+            Some(Tensor::from_storage(
+                TensorStorage::cpu(gs),
+                self.source.shape().to_vec(),
+                false,
+            )?)
+        } else {
+            None
+        };
+
+        Ok(vec![grad_input, grad_source])
+    }
+
+    fn inputs(&self) -> Vec<&Tensor<T>> {
+        vec![&self.input, &self.source]
+    }
+
+    fn name(&self) -> &'static str {
+        "PutBackward"
+    }
+}
+
+/// `put`: flat-index scatter. `output = input.clone();
+/// output.view(-1)[index[i]] = source[i]` (or `+= source[i]` when
+/// `accumulate=True`). Mirrors upstream `Tensor put(const Tensor& self, const
+/// Tensor& index, const Tensor& source, const bool accumulate)` at
+/// `aten/src/ATen/native/TensorAdvancedIndexing.cpp:928-934`.
+///
+/// `index` may be any shape; values are flat indices into input's
+/// C-contiguous buffer (negative-wrap per `idx + input.numel()`,
+/// out-of-range raises `IndexOutOfBounds`). `source` must have at least as
+/// many elements as `index`.
+pub fn put<T: Float>(
+    input: &Tensor<T>,
+    index: &IntTensor<i64>,
+    source: &Tensor<T>,
+    accumulate: bool,
+) -> FerrotorchResult<Tensor<T>> {
+    let input_shape = input.shape().to_vec();
+    let input_numel: usize = if input_shape.is_empty() {
+        1
+    } else {
+        input_shape.iter().product()
+    };
+    let input_numel_i64 = input_numel as i64;
+
+    let mut idx_usize: Vec<usize> = Vec::with_capacity(index.numel());
+    for v in index.data()? {
+        let i_raw = v.to_i64();
+        if i_raw < -input_numel_i64 || i_raw >= input_numel_i64 {
+            return Err(FerrotorchError::IndexOutOfBounds {
+                index: if i_raw < 0 {
+                    i_raw.unsigned_abs() as usize
+                } else {
+                    i_raw as usize
+                },
+                axis: 0,
+                size: input_numel,
+            });
+        }
+        let i = if i_raw < 0 {
+            i_raw + input_numel_i64
+        } else {
+            i_raw
+        };
+        idx_usize.push(i as usize);
+    }
+
+    if source.numel() < idx_usize.len() {
+        return Err(FerrotorchError::ShapeMismatch {
+            message: format!(
+                "put: source numel {} < index numel {}",
+                source.numel(),
+                idx_usize.len()
+            ),
+        });
+    }
+
+    let mut out = input.data_vec()?;
+    if out.is_empty() && input_numel == 1 {
+        out.push(<T as num_traits::Zero>::zero());
+    }
+    let src_data = source.data_vec()?;
+    for (i, &idx) in idx_usize.iter().enumerate() {
+        let s = src_data[i];
+        if accumulate {
+            out[idx] += s;
+        } else {
+            out[idx] = s;
+        }
+    }
+
+    if (input.requires_grad() || source.requires_grad()) && is_grad_enabled() {
+        let grad_fn = Arc::new(PutBackward {
+            input: input.clone(),
+            source: source.clone(),
+            index: idx_usize,
+            accumulate,
+        });
+        Tensor::from_operation(TensorStorage::cpu(out), input_shape, grad_fn)
+    } else {
+        Tensor::from_storage(TensorStorage::cpu(out), input_shape, false)
+    }
 }
 
 #[cfg(test)]

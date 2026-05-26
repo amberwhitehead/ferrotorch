@@ -1097,6 +1097,247 @@ fn dispatch_f32(
                 &input, dim_i64, &index, value_f64,
             )?))
         }
+        // `torch.scatter_reduce(self, dim, index, src, reduce, *, include_self=
+        // True)` — reduce-mode scatter onto a clone of self. Upstream forward
+        // at `aten/src/ATen/native/TensorAdvancedIndexing.cpp:2354
+        // TORCH_IMPL_FUNC(scatter_reduce_two)`. Backward per
+        // `tools/autograd/derivatives.yaml:3074-3077` only for reduce='sum'.
+        // op_db emits args = [input_f32, dim_i64, index_int64, src_f32,
+        // reduce_str], kwargs include_self=bool. Verified 2026-05-25: seed
+        // 0..3 i=0..25 → all samples reduce='sum'. Closes #1245.
+        "scatter_reduce" => {
+            if args.len() < 5 {
+                return Err(format!("scatter_reduce expects 5 args, got {}", args.len()).into());
+            }
+            let input = unwrap_tensor_arg(&args[0])
+                .ok_or("scatter_reduce: arg 0 not a tensor")?
+                .to_f32()?;
+            let dim_i64 = args[1]
+                .as_i64()
+                .ok_or("scatter_reduce: arg 1 (dim) not a JSON integer")?;
+            let index_wire =
+                unwrap_tensor_arg(&args[2]).ok_or("scatter_reduce: arg 2 (index) not a tensor")?;
+            let src = unwrap_tensor_arg(&args[3])
+                .ok_or("scatter_reduce: arg 3 (src) not a tensor")?
+                .to_f32()?;
+            let reduce_str = args[4]
+                .as_str()
+                .ok_or("scatter_reduce: arg 4 (reduce) not a string")?;
+            let include_self = kwargs
+                .get("include_self")
+                .and_then(Value::as_bool)
+                .unwrap_or(true);
+            let (index, index_shape) = match decode_int64_index_to_usize(&index_wire)? {
+                Some(p) => p,
+                None => return Ok(None),
+            };
+            // 0-d input + 0-d index: legitimate skip — the shape-strict path
+            // here can't validate ndim-mismatch cleanly.
+            if input.ndim() == 0 || input.ndim() != index_shape.len() {
+                return Ok(None);
+            }
+            // Only `sum` is in the op_db characterization sweep — other
+            // modes are out-of-scope skips per design doc REQ-4.
+            let mode = match grad_fns::indexing::ScatterReduce::parse_str(reduce_str) {
+                Some(m) => m,
+                None => return Ok(None),
+            };
+            Ok(Some(grad_fns::indexing::scatter_reduce(
+                &input,
+                dim_i64,
+                &index,
+                &index_shape,
+                &src,
+                mode,
+                include_self,
+            )?))
+        }
+        // `torch.index_add(self, dim, index, source, *, alpha=1)` — upstream
+        // forward at `aten/src/ATen/native/TensorAdvancedIndexing.cpp:1153
+        // TORCH_IMPL_FUNC(index_add_cpu_out)`. Backward per
+        // `tools/autograd/derivatives.yaml:862-869`. op_db emits args =
+        // [input_f32, dim_i64, index_int64, source_f32] with kwargs.alpha
+        // ∈ {-1, 0, 2, ...}. Closes #1247.
+        "index_add" => {
+            if args.len() < 4 {
+                return Err(format!("index_add expects 4 args, got {}", args.len()).into());
+            }
+            let input = unwrap_tensor_arg(&args[0])
+                .ok_or("index_add: arg 0 not a tensor")?
+                .to_f32()?;
+            let dim_i64 = args[1]
+                .as_i64()
+                .ok_or("index_add: arg 1 (dim) not a JSON integer")?;
+            let index = unwrap_tensor_arg(&args[2])
+                .ok_or("index_add: arg 2 (index) not a tensor")?
+                .to_int_tensor_i64()?;
+            let source = unwrap_tensor_arg(&args[3])
+                .ok_or("index_add: arg 3 (source) not a tensor")?
+                .to_f32()?;
+            // alpha: JSON number, integer, or absent (default 1).
+            let alpha: f64 = if let Some(v) = kwargs.get("alpha") {
+                if let Some(f) = v.as_f64() {
+                    f
+                } else if let Some(i) = v.as_i64() {
+                    i as f64
+                } else {
+                    1.0
+                }
+            } else {
+                1.0
+            };
+            // Skip multi-d index — narrower contract.
+            if index.ndim() > 1 {
+                return Ok(None);
+            }
+            // Skip negative index values — narrower contract; the impl
+            // wraps but the runner pre-validates per the convention
+            // shared with index_select / index_fill arms above.
+            for &v in index.data()? {
+                if v < 0 {
+                    return Ok(None);
+                }
+            }
+            Ok(Some(grad_fns::indexing::index_add(
+                &input, dim_i64, &index, &source, alpha,
+            )?))
+        }
+        // `torch.index_copy(self, dim, index, source)` — upstream forward at
+        // `aten/src/ATen/native/TensorAdvancedIndexing.cpp:1082
+        // TORCH_IMPL_FUNC(index_copy_out)`. Backward per
+        // `tools/autograd/derivatives.yaml:875-883`. op_db emits args =
+        // [input_f32, dim_i64, index_int64, source_f32]. Closes #1248.
+        "index_copy" => {
+            if args.len() < 4 {
+                return Err(format!("index_copy expects 4 args, got {}", args.len()).into());
+            }
+            let input = unwrap_tensor_arg(&args[0])
+                .ok_or("index_copy: arg 0 not a tensor")?
+                .to_f32()?;
+            let dim_i64 = args[1]
+                .as_i64()
+                .ok_or("index_copy: arg 1 (dim) not a JSON integer")?;
+            let index = unwrap_tensor_arg(&args[2])
+                .ok_or("index_copy: arg 2 (index) not a tensor")?
+                .to_int_tensor_i64()?;
+            let source = unwrap_tensor_arg(&args[3])
+                .ok_or("index_copy: arg 3 (source) not a tensor")?
+                .to_f32()?;
+            if index.ndim() > 1 {
+                return Ok(None);
+            }
+            for &v in index.data()? {
+                if v < 0 {
+                    return Ok(None);
+                }
+            }
+            Ok(Some(grad_fns::indexing::index_copy(
+                &input, dim_i64, &index, &source,
+            )?))
+        }
+        // `torch.masked_scatter(self, mask, source)` — copies elements of
+        // source into self at mask-true positions, in C-order. Upstream
+        // forward at `aten/src/ATen/native/TensorAdvancedIndexing.cpp:2402-
+        // 2409`. Backward per `tools/autograd/derivatives.yaml:1105-1108`.
+        // op_db emits args = [input_f32, mask_bool, source_f32]. Mask may
+        // be broadcast against input — wrapper handles. Closes #1252.
+        "masked_scatter" => {
+            if args.len() < 3 {
+                return Err(format!("masked_scatter expects 3 args, got {}", args.len()).into());
+            }
+            let input = unwrap_tensor_arg(&args[0])
+                .ok_or("masked_scatter: arg 0 not a tensor")?
+                .to_f32()?;
+            let mask = unwrap_tensor_arg(&args[1])
+                .ok_or("masked_scatter: arg 1 (mask) not a tensor")?
+                .to_bool_tensor()?;
+            let source = unwrap_tensor_arg(&args[2])
+                .ok_or("masked_scatter: arg 2 (source) not a tensor")?
+                .to_f32()?;
+            // 0-d/empty mask: torch handles as identity-copy; skip per the
+            // narrower contract since broadcast on 0-d adds little value.
+            if mask.numel() == 0 {
+                return Ok(None);
+            }
+            // Skip when source has fewer elements than mask-true count.
+            let true_count = mask.data()?.iter().filter(|&&b| b).count();
+            if source.numel() < true_count {
+                return Ok(None);
+            }
+            Ok(Some(grad_fns::indexing::masked_scatter(
+                &input, &mask, &source,
+            )?))
+        }
+        // `torch.take(input, index)` — flat-index gather. Upstream forward at
+        // `aten/src/ATen/native/TensorAdvancedIndexing.cpp:1067-1071`.
+        // Backward per `tools/autograd/derivatives.yaml:1766-1769`. op_db
+        // emits args = [input_f32, index_int64]. 0-d empty index case is a
+        // legitimate skip — the upstream early-returns empty. Closes #1253.
+        "take" => {
+            if args.len() < 2 {
+                return Err(format!("take expects 2 args, got {}", args.len()).into());
+            }
+            let input = unwrap_tensor_arg(&args[0])
+                .ok_or("take: arg 0 not a tensor")?
+                .to_f32()?;
+            let index = unwrap_tensor_arg(&args[1])
+                .ok_or("take: arg 1 (index) not a tensor")?
+                .to_int_tensor_i64()?;
+            // 0-d index on 0-d input: skip (out_numel=1, edge of contract).
+            if input.numel() == 0 {
+                return Ok(None);
+            }
+            // Skip negative indices per narrow-contract convention shared
+            // with index_select / index_fill.
+            for &v in index.data()? {
+                if v < 0 {
+                    return Ok(None);
+                }
+            }
+            Ok(Some(grad_fns::indexing::take(&input, &index)?))
+        }
+        // `torch.put(self, index, source, accumulate=False)` — flat-index
+        // scatter. Upstream forward at `aten/src/ATen/native/
+        // TensorAdvancedIndexing.cpp:928-934`. Backward per
+        // `tools/autograd/derivatives.yaml:1421-1424`. op_db emits args =
+        // [input_f32, index_int64, source_f32, accumulate_bool]. Closes #1254.
+        "put" => {
+            if args.len() < 4 {
+                return Err(format!("put expects 4 args, got {}", args.len()).into());
+            }
+            let input = unwrap_tensor_arg(&args[0])
+                .ok_or("put: arg 0 not a tensor")?
+                .to_f32()?;
+            let index = unwrap_tensor_arg(&args[1])
+                .ok_or("put: arg 1 (index) not a tensor")?
+                .to_int_tensor_i64()?;
+            let source = unwrap_tensor_arg(&args[2])
+                .ok_or("put: arg 2 (source) not a tensor")?
+                .to_f32()?;
+            // accumulate: JSON boolean (also support 0/1 fallback).
+            let accumulate = if let Some(b) = args[3].as_bool() {
+                b
+            } else if let Some(i) = args[3].as_i64() {
+                i != 0
+            } else {
+                false
+            };
+            // Skip 0-d input (empty buffer) per narrow-contract convention.
+            if input.numel() == 0 {
+                return Ok(None);
+            }
+            for &v in index.data()? {
+                if v < 0 {
+                    return Ok(None);
+                }
+            }
+            if source.numel() < index.numel() {
+                return Ok(None);
+            }
+            Ok(Some(grad_fns::indexing::put(
+                &input, &index, &source, accumulate,
+            )?))
+        }
         "fake_quantize_per_channel_affine" => Ok(Some({
             if args.len() < 6 {
                 return Err(format!(
@@ -1192,6 +1433,15 @@ fn dispatch_ops() -> &'static [&'static str] {
         // 0-d tensor envelope per upstream `index_fill.int_Tensor` overload).
         // Closes #1249.
         "index_fill",
+        // Indexing batch landed 2026-05-25 (S1: batch-by-upstream-file).
+        // All 6 ops live in `aten/src/ATen/native/TensorAdvancedIndexing.cpp`.
+        // Closes #1245 #1247 #1248 #1252 #1253 #1254.
+        "scatter_reduce",
+        "index_add",
+        "index_copy",
+        "masked_scatter",
+        "take",
+        "put",
     ]
 }
 

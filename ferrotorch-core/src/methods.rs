@@ -700,6 +700,143 @@ impl<T: Float> Tensor<T> {
         crate::grad_fns::indexing::index_fill(self, dim, index, value)
     }
 
+    /// `torch.Tensor.scatter_reduce(dim, index, src, reduce, *, include_self=True)`
+    /// — reduce-mode scatter onto a clone of `self`. Mirrors upstream
+    /// `Tensor scatter_reduce(...)` at `aten/src/ATen/native/
+    /// TensorAdvancedIndexing.cpp:2354 TORCH_IMPL_FUNC(scatter_reduce_two)`.
+    /// `reduce` ∈ {`"sum"` SHIPPED, `"prod"`, `"amax"`, `"amin"`}; backward
+    /// is implemented only for `"sum"` per `tools/autograd/derivatives.yaml:
+    /// 3074-3077` (other modes return a no-grad tensor — the
+    /// op_db characterization sweep emits only `"sum"`).
+    ///
+    /// Non-test production consumer wiring for `grad_fns::indexing::
+    /// scatter_reduce` per R-DEFER-1: this method is the chainable surface.
+    /// Closes blocker #1245.
+    pub fn scatter_reduce_t(
+        &self,
+        dim: i64,
+        index: &[usize],
+        index_shape: &[usize],
+        src: &Tensor<T>,
+        reduce: &str,
+        include_self: bool,
+    ) -> FerrotorchResult<Tensor<T>> {
+        let mode =
+            crate::grad_fns::indexing::ScatterReduce::parse_str(reduce).ok_or_else(|| {
+                crate::error::FerrotorchError::InvalidArgument {
+                    message: format!(
+                        "scatter_reduce_t: unknown reduce mode '{reduce}' \
+                     (expected sum|prod|amax|amin)"
+                    ),
+                }
+            })?;
+        crate::grad_fns::indexing::scatter_reduce(
+            self,
+            dim,
+            index,
+            index_shape,
+            src,
+            mode,
+            include_self,
+        )
+    }
+
+    /// `torch.Tensor.index_add(dim, index, source, *, alpha=1)` —
+    /// `out = self.clone(); out[..., index[i], ...] += alpha * source[..., i, ...]`
+    /// along `dim`. Mirrors upstream `Tensor index_add(const Tensor& self,
+    /// int64_t dim, const Tensor& index, const Tensor& source, const Scalar&
+    /// alpha)` at `aten/src/ATen/native/TensorAdvancedIndexing.cpp:1153
+    /// TORCH_IMPL_FUNC(index_add_cpu_out)`. Backward per
+    /// `tools/autograd/derivatives.yaml:862-869 self: grad / source:
+    /// maybe_multiply(grad.index_select(dim, index).expand_as(source), alpha)`.
+    ///
+    /// Non-test production consumer wiring for `grad_fns::indexing::
+    /// index_add` per R-DEFER-1: this method is the chainable surface.
+    /// Closes blocker #1247.
+    pub fn index_add_t(
+        &self,
+        dim: i64,
+        index: &crate::int_tensor::IntTensor<i64>,
+        source: &Tensor<T>,
+        alpha: f64,
+    ) -> FerrotorchResult<Tensor<T>> {
+        crate::grad_fns::indexing::index_add(self, dim, index, source, alpha)
+    }
+
+    /// `torch.Tensor.index_copy(dim, index, source)` — `out = self.clone();
+    /// out[..., index[i], ...] = source[..., i, ...]` along `dim`. Mirrors
+    /// upstream `Tensor index_copy(...)` at `aten/src/ATen/native/
+    /// TensorAdvancedIndexing.cpp:1082 TORCH_IMPL_FUNC(index_copy_out)`.
+    /// Backward per `tools/autograd/derivatives.yaml:875-883
+    /// self: grad.index_fill(dim, index, 0) / source:
+    /// grad.index_select(dim, index).expand_as(source)`.
+    ///
+    /// Non-test production consumer wiring for `grad_fns::indexing::
+    /// index_copy` per R-DEFER-1: this method is the chainable surface.
+    /// Closes blocker #1248.
+    pub fn index_copy_t(
+        &self,
+        dim: i64,
+        index: &crate::int_tensor::IntTensor<i64>,
+        source: &Tensor<T>,
+    ) -> FerrotorchResult<Tensor<T>> {
+        crate::grad_fns::indexing::index_copy(self, dim, index, source)
+    }
+
+    /// `torch.Tensor.masked_scatter(mask, source)` — copy elements from
+    /// `source` into a clone of `self` at positions where `mask` is true,
+    /// in C-order. Mirrors upstream `Tensor masked_scatter(const Tensor&
+    /// self, const Tensor& mask, const Tensor& source)` at
+    /// `aten/src/ATen/native/TensorAdvancedIndexing.cpp:2402-2409`.
+    /// Backward per `tools/autograd/derivatives.yaml:1105-1108
+    /// self: grad.masked_fill(mask, 0) / source: masked_scatter_backward(...)`.
+    ///
+    /// Non-test production consumer wiring for `grad_fns::indexing::
+    /// masked_scatter` per R-DEFER-1: this method is the chainable surface.
+    /// Closes blocker #1252.
+    pub fn masked_scatter_t(
+        &self,
+        mask: &crate::bool_tensor::BoolTensor,
+        source: &Tensor<T>,
+    ) -> FerrotorchResult<Tensor<T>> {
+        crate::grad_fns::indexing::masked_scatter(self, mask, source)
+    }
+
+    /// `torch.Tensor.take(index)` — `out[i] = self.view(-1)[index[i]]`, a
+    /// flat-index gather producing a tensor of shape `index.shape()`.
+    /// Mirrors upstream `Tensor take(const Tensor& self, const Tensor& index)`
+    /// at `aten/src/ATen/native/TensorAdvancedIndexing.cpp:1067-1071`.
+    /// Backward per `tools/autograd/derivatives.yaml:1766-1769
+    /// self: take_backward(grad, self, index)` — scatter-add grad into a
+    /// zeros buffer at the flat index positions.
+    ///
+    /// Non-test production consumer wiring for `grad_fns::indexing::take`
+    /// per R-DEFER-1: this method is the chainable surface.
+    /// Closes blocker #1253.
+    pub fn take_t(&self, index: &crate::int_tensor::IntTensor<i64>) -> FerrotorchResult<Tensor<T>> {
+        crate::grad_fns::indexing::take(self, index)
+    }
+
+    /// `torch.Tensor.put(index, source, accumulate=False)` — flat-index
+    /// scatter into a clone of `self`: `out.view(-1)[index[i]] = source[i]`
+    /// (or `+= source[i]` when `accumulate=true`). Mirrors upstream
+    /// `Tensor put(const Tensor& self, const Tensor& index, const Tensor&
+    /// source, const bool accumulate)` at `aten/src/ATen/native/
+    /// TensorAdvancedIndexing.cpp:928-934`. Backward per
+    /// `tools/autograd/derivatives.yaml:1421-1424`.
+    ///
+    /// Non-test production consumer wiring for `grad_fns::indexing::put`
+    /// per R-DEFER-1: this method is the chainable surface.
+    /// Closes blocker #1254.
+    pub fn put_t(
+        &self,
+        index: &crate::int_tensor::IntTensor<i64>,
+        source: &Tensor<T>,
+        accumulate: bool,
+    ) -> FerrotorchResult<Tensor<T>> {
+        crate::grad_fns::indexing::put(self, index, source, accumulate)
+    }
+
     // --- PyTorch compatibility aliases ---
 
     /// Alias for `shape()`. Returns the tensor dimensions like PyTorch's `Tensor.size()`.

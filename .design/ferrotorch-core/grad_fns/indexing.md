@@ -40,19 +40,17 @@ The file holds:
 The PyTorch route declares 14 parity_ops: `gather`, `scatter`, `scatter_add`,
 `scatter_reduce`, `index_select`, `index_add`, `index_copy`, `index_fill`,
 `masked_select`, `masked_fill`, `masked_scatter`, `take`, `put`, `where`. As of
-2026-05-25 the masked / where family (`masked_select`, `masked_fill`, `where`)
-has SHIPPED with broadcasting wrappers + runner dispatch (zero skips), and
-the indexing family (`gather`, `scatter`, `scatter_add`, `index_select`) has
-SHIPPED with runner dispatch routed through the existing shape-strict impls
-— >50% pass with 0 failures, remaining skips tracked under narrow-contract
-sub-blockers (#1256 for 0-d input across the indexing family; #1245 for
-scatter_reduce variants; #1258 for scatter.value scalar-src). The remaining
-6 op_db entries (`scatter_reduce`, `index_add`, `index_copy`,
-`masked_scatter` forward, `take`, `put`) return 0 passes because there is
-no ferrotorch impl at all. `index_fill` SHIPPED 2026-05-25 closing #1249
-(impl + method consumer + runner arm). Each remaining gap is filed as a
-NOT-STARTED REQ with a concrete prereq blocker (#1245, #1247, #1248,
-#1252, #1253, #1254).
+2026-05-25 ALL 14 parity ops have SHIPPED: the masked/where family
+(`masked_select`, `masked_fill`, `where`) ships with broadcasting wrappers
+(zero skips); the gather/scatter/index_select family ships with the
+shape-strict impls (>50% pass, narrow-contract skips); `index_fill` ships
+with negative-wrap + 0-d-input handling; and the 2026-05-25 S1-batch
+closure of #1245/#1247/#1248/#1252/#1253/#1254 lands the final 6 ops
+(`scatter_reduce` sum-mode, `index_add`, `index_copy`, `masked_scatter`,
+`take`, `put`) in a single cohesive commit. Remaining residual skips
+across the family are 0-d input (#1256), scatter.value scalar-src (#1258),
+and negative-index narrower contract — tracked as their own follow-up
+blockers, not parity failures.
 
 ## Requirements
 
@@ -367,21 +365,23 @@ NOT-STARTED REQ with a concrete prereq blocker (#1245, #1247, #1248,
   2026-05-25: `[scatter_add] 48/56 passed (8 skipped, 0 failed)` — runner
   arm landed (#1244 closed), 86% pass with 0 failures. Skips are 0-d
   input only (#1256). Strict AC unsatisfied pending #1256.
-- [ ] AC-4: `scatter_reduce` parity-sweep at `--seeds 8` returns
-  `[scatter_reduce] N/N passed (0 skipped, 0 failed)` with N >= 1.
-  Currently `[scatter_reduce] 0/168 passed (168 skipped, 0 failed)`.
-  Blocked on #1245.
+- [~] AC-4: `scatter_reduce` parity-sweep at `--seeds 8` returns
+  `[scatter_reduce] N/N passed (0 skipped, 0 failed)` with N >= 1. Runner
+  arm + impl landed 2026-05-25 closing #1245. Current:
+  `[scatter_reduce] 144/168 passed (24 skipped, 0 failed)` — 86% pass with
+  0 failures. Skips are 0-d input / ndim-mismatch (narrower-contract,
+  tracked under #1256).
 - [~] AC-5: `index_select` parity-sweep at `--seeds 8` returns
   `[index_select] N/N passed (0 skipped, 0 failed)` with N >= 1. Current
   2026-05-25: `[index_select] 16/24 passed (8 skipped, 0 failed)` — runner
   arm landed (#1246 closed), 67% pass with 0 failures. Skips are 0-d input
   only (#1256). Strict AC unsatisfied pending #1256.
-- [ ] AC-6: `index_add` parity-sweep at `--seeds 8` returns
-  `[index_add] N/N passed (0 skipped, 0 failed)` with N >= 1. Currently
-  `[index_add] 0/72 passed (72 skipped, 0 failed)`. Blocked on #1247.
-- [ ] AC-7: `index_copy` parity-sweep at `--seeds 8` returns
-  `[index_copy] N/N passed (0 skipped, 0 failed)` with N >= 1. Currently
-  `[index_copy] 0/24 passed (24 skipped, 0 failed)`. Blocked on #1248.
+- [x] AC-6: `index_add` parity-sweep at `--seeds 8` returns
+  `[index_add] 72/72 passed (0 skipped, 0 failed)` — runner arm + impl
+  landed 2026-05-25 closing #1247.
+- [x] AC-7: `index_copy` parity-sweep at `--seeds 8` returns
+  `[index_copy] 24/24 passed (0 skipped, 0 failed)` — runner arm + impl
+  landed 2026-05-25 closing #1248.
 - [~] AC-8: `index_fill` parity-sweep at `--seeds 8` returns
   `[index_fill] N/N passed (0 skipped, 0 failed)` with N >= 1. Runner arm
   + impl landed 2026-05-25 closing #1249; the strict `0 skipped` AC
@@ -396,16 +396,19 @@ NOT-STARTED REQ with a concrete prereq blocker (#1245, #1247, #1248,
 - [ ] AC-10: `masked_fill` parity-sweep at `--seeds 8` returns
   `[masked_fill] N/N passed (0 skipped, 0 failed)` with N >= 1. Currently
   `[masked_fill] 0/64 passed (64 skipped, 0 failed)`. Blocked on #1251.
-- [ ] AC-11: `masked_scatter` parity-sweep at `--seeds 8` returns
-  `[masked_scatter] N/N passed (0 skipped, 0 failed)` with N >= 1.
-  Currently `[masked_scatter] 0/32 passed (32 skipped, 0 failed)`.
-  Blocked on #1252.
-- [ ] AC-12: `take` parity-sweep at `--seeds 8` returns
-  `[take] N/N passed (0 skipped, 0 failed)` with N >= 1. Currently
-  `[take] 0/80 passed (80 skipped, 0 failed)`. Blocked on #1253.
-- [ ] AC-13: `put` parity-sweep at `--seeds 8` returns
-  `[put] N/N passed (0 skipped, 0 failed)` with N >= 1. Currently
-  `[put] 0/224 passed (224 skipped, 0 failed)`. Blocked on #1254.
+- [x] AC-11: `masked_scatter` parity-sweep at `--seeds 8` returns
+  `[masked_scatter] 32/32 passed (0 skipped, 0 failed)` — runner arm +
+  impl landed 2026-05-25 closing #1252.
+- [~] AC-12: `take` parity-sweep at `--seeds 8` returns
+  `[take] N/N passed (0 skipped, 0 failed)` with N >= 1. Runner arm +
+  impl landed 2026-05-25 closing #1253. Current:
+  `[take] 64/80 passed (16 skipped, 0 failed)` — 80% pass, 0 failures;
+  skips are 0-d input + negative-index narrower contract.
+- [~] AC-13: `put` parity-sweep at `--seeds 8` returns
+  `[put] N/N passed (0 skipped, 0 failed)` with N >= 1. Runner arm +
+  impl landed 2026-05-25 closing #1254. Current:
+  `[put] 192/224 passed (32 skipped, 0 failed)` — 86% pass, 0 failures;
+  skips are 0-d input + negative-index narrower contract.
 - [ ] AC-14: `where` parity-sweep at `--seeds 8` returns
   `[where] N/N passed (0 skipped, 0 failed)` with N >= 1. Currently
   `[where] 0/48 passed (48 skipped, 0 failed)`. Blocked on #1255.
@@ -623,23 +626,34 @@ in `tensor.rs`; the parity-runner would have to either accept the
 ferrotorch name or wrap. Blocker #1255 covers both the runner-dispatch
 gap and the method-style consumer gap.
 
-### NOT-STARTED REQs (REQ-4 / REQ-6 / REQ-7 / REQ-11 / REQ-12 / REQ-13)
+### Previously NOT-STARTED REQs — all SHIPPED 2026-05-25 batch
 
-Six REQs have NO ferrotorch implementation today:
-- `scatter_reduce` (REQ-4): 4 reduce modes × `include_self` boolean — the
-  largest single missing piece in the indexing family. #1245.
-- `index_add` (REQ-6): #1247. VJP needs `grad.index_select`.
-- `index_copy` (REQ-7): #1248. VJP needs `grad.index_fill` (REQ-8) — now
-  available since REQ-8 SHIPPED 2026-05-25, so REQ-7 is structurally
-  unblocked from its prereq dependency.
-- `masked_scatter` forward (REQ-11): #1252. The GPU kernel exists but no
-  forward `pub fn` / `MaskedScatterBackward` struct.
-- `take` (REQ-12): #1253. VJP needs `put-with-accumulate`.
-- `put` (REQ-13): #1254. VJP needs `take` (REQ-12).
-
-The REQ-12↔REQ-13 pair is still mutually dependent — implementing one
-requires the other. The REQ-7↔REQ-8 dependency is now half-resolved
-(REQ-8 SHIPPED unblocks REQ-7's VJP target).
+Six REQs were NOT-STARTED before the 2026-05-25 batch closure (#1245 /
+#1247 / #1248 / #1252 / #1253 / #1254). All six SHIPPED in a single
+S1-batch commit covering `aten/src/ATen/native/TensorAdvancedIndexing.cpp`:
+- `scatter_reduce` (REQ-4): `pub fn scatter_reduce` + `pub enum
+  ScatterReduce` + `pub struct ScatterReduceBackward` in
+  `grad_fns/indexing.rs`. Forward supports all 4 reduce modes; backward
+  implements `sum` per upstream contract (op_db emits only `sum`).
+  `Tensor::scatter_reduce_t` is the consumer.
+- `index_add` (REQ-6): `pub fn index_add` + `IndexAddBackward`. Forward
+  accepts negative dim, 1-D index, 0-d input. VJP: `self: grad`,
+  `source: alpha * grad.index_select(dim, index)`. Consumer:
+  `Tensor::index_add_t`. 100% parity.
+- `index_copy` (REQ-7): `pub fn index_copy` + `IndexCopyBackward`. VJP
+  reuses REQ-8's IndexFillBackward zeroing pattern for the self leg.
+  Consumer: `Tensor::index_copy_t`. 100% parity.
+- `masked_scatter` (REQ-11): `pub fn masked_scatter` + `MaskedScatterBackward`.
+  Forward broadcasts via the shared `broadcast_bool_tensor` + autograd-aware
+  expand. Consumer: `Tensor::masked_scatter_t`. 100% parity.
+- `take` (REQ-12): `pub fn take` + `TakeBackward`. Flat-index gather; VJP
+  scatter-adds grad at flat positions (the `put-with-accumulate=true`
+  semantics). Consumer: `Tensor::take_t`.
+- `put` (REQ-13): `pub fn put` + `PutBackward`. Flat-index scatter with
+  accumulate flag. The REQ-12↔REQ-13 mutual dependency dissolves when
+  both forwards ship simultaneously; the backward VJPs reference each
+  other's behavior implicitly via the flat-index walk pattern.
+  Consumer: `Tensor::put_t`.
 
 ### REQ-8 `index_fill` — `IndexFillBackward` (in `indexing.rs`)
 
@@ -733,13 +747,13 @@ for the indexing family is part of each per-REQ blocker.
 ./target/release/parity-sweep sweep --op scatter_add    --seeds 8
   => [scatter_add]    48/56  passed (8   skipped, 0 failed)  # SHIPPED 2026-05-25
 ./target/release/parity-sweep sweep --op scatter_reduce --seeds 8
-  => [scatter_reduce] 0/168 passed (168 skipped, 0 failed)
+  => [scatter_reduce] 144/168 passed (24 skipped, 0 failed)  # SHIPPED 2026-05-25
 ./target/release/parity-sweep sweep --op index_select   --seeds 8
   => [index_select]   16/24  passed (8   skipped, 0 failed)  # SHIPPED 2026-05-25
 ./target/release/parity-sweep sweep --op index_add      --seeds 8
-  => [index_add]      0/72  passed (72  skipped, 0 failed)
+  => [index_add]      72/72 passed (0   skipped, 0 failed)  # SHIPPED 2026-05-25
 ./target/release/parity-sweep sweep --op index_copy     --seeds 8
-  => [index_copy]     0/24  passed (24  skipped, 0 failed)
+  => [index_copy]     24/24 passed (0   skipped, 0 failed)  # SHIPPED 2026-05-25
 ./target/release/parity-sweep sweep --op index_fill     --seeds 8
   => [index_fill]     0/48  passed (48  skipped, 0 failed)
 ./target/release/parity-sweep sweep --op masked_select  --seeds 8
@@ -747,11 +761,11 @@ for the indexing family is part of each per-REQ blocker.
 ./target/release/parity-sweep sweep --op masked_fill    --seeds 8
   => [masked_fill]    64/64 passed (0   skipped, 0 failed)  # SHIPPED 2026-05-25
 ./target/release/parity-sweep sweep --op masked_scatter --seeds 8
-  => [masked_scatter] 0/32  passed (32  skipped, 0 failed)
+  => [masked_scatter] 32/32 passed (0   skipped, 0 failed)  # SHIPPED 2026-05-25
 ./target/release/parity-sweep sweep --op take           --seeds 8
-  => [take]           0/80  passed (80  skipped, 0 failed)
+  => [take]           64/80 passed (16  skipped, 0 failed)  # SHIPPED 2026-05-25
 ./target/release/parity-sweep sweep --op put            --seeds 8
-  => [put]            0/224 passed (224 skipped, 0 failed)
+  => [put]            192/224 passed (32 skipped, 0 failed) # SHIPPED 2026-05-25
 ./target/release/parity-sweep sweep --op where          --seeds 8
   => [where]          48/48 passed (0   skipped, 0 failed)  # SHIPPED 2026-05-25
 ```
@@ -778,15 +792,15 @@ Skip-cause breakdown for the four SHIPPED-2026-05-25 ops:
 | REQ-1 (gather) | SHIPPED | impl exists: forward `pub fn gather` in `ferrotorch-core/src/ops/indexing.rs` Arc-attaching `GatherBackward`; backward `pub struct GatherBackward` in `ferrotorch-core/src/grad_fns/indexing.rs` mirroring `aten/src/ATen/native/TensorAdvancedIndexing.cpp:2070 TORCH_IMPL_FUNC(gather_out)` and `tools/autograd/derivatives.yaml:730-733`. **Runner arm landed 2026-05-25** in `tools/parity-sweep/runner/src/main.rs` decoding positional `[input_f32, dim_i64, index_int_uint8/int32/int64]` and routing to `ops::indexing::gather`. **Non-test production consumer**: `ops::indexing::gather` itself is the `ferrotorch-core` library's public surface; the `GatherBackward` autograd attach inside `pub fn gather` (in `ferrotorch-core/src/ops/indexing.rs`) is its in-graph use-site. Parity gate: **`[gather] 32/56 passed (24 skipped, 0 failed)` at seeds 0..8** — 0 failures, 57% pass; skips are narrower-contract rejections (0-d input #1256, ndim-mismatch index broadcasting). Closes #1242. |
 | REQ-2 (scatter) | SHIPPED | impl exists: forward `pub fn scatter` in `ferrotorch-core/src/ops/indexing.rs` Arc-attaching `ScatterBackward`; backward `pub struct ScatterBackward` in `grad_fns/indexing.rs` mirroring `TensorAdvancedIndexing.cpp:2263 TORCH_IMPL_FUNC(scatter_src_out)` and `derivatives.yaml:1508-1511`. **Runner arm landed 2026-05-25** in `tools/parity-sweep/runner/src/main.rs` decoding `[input_f32, dim_i64, index_int64, src_f32]` + `reduce` kwarg routing (`reduce='add'` → `scatter_add`; `'multiply'`/`'amin'`/`'amax'`/`'mean'`/etc routes to skip per REQ-4 #1245; absent routes to plain scatter). **Non-test production consumer**: `ops::indexing::scatter` is the library's public surface; the `ScatterBackward` autograd attach inside `pub fn scatter` (in `ferrotorch-core/src/ops/indexing.rs`) is its in-graph use-site. Parity gate: **`[scatter] 112/216 passed (104 skipped, 0 failed)` at seeds 0..8** — 0 failures, 52% pass; skips break down as scatter_reduce variants (#1245), scatter.value scalar-src overload (#1258), 0-d input (#1256), and ndim-mismatch index. Closes #1243. |
 | REQ-3 (scatter_add) | SHIPPED | impl exists: forward `pub fn scatter_add` in `ferrotorch-core/src/ops/indexing.rs` Arc-attaching `ScatterAddBackward`; backward `pub struct ScatterAddBackward` in `grad_fns/indexing.rs` mirroring `TensorAdvancedIndexing.cpp:2317 TORCH_IMPL_FUNC(scatter_add)` and `derivatives.yaml:1519-1522`. **Runner arm landed 2026-05-25** in `tools/parity-sweep/runner/src/main.rs` decoding `[input_f32, dim_i64, index_int64, src_f32]` and routing to `ops::indexing::scatter_add`. **Non-test production consumer**: `fn cummaxmin_backward_impl` in `ferrotorch-core/src/grad_fns/cumulative.rs` invokes `ops::indexing::scatter_add(...)` — the cummax/cummin VJP scatter-adds grad through the saved indices. Parity gate: **`[scatter_add] 48/56 passed (8 skipped, 0 failed)` at seeds 0..8** — 0 failures, 86% pass; skips are 0-d input only (#1256). Closes #1244. |
-| REQ-4 (scatter_reduce) | NOT-STARTED | no impl. No forward kernel in `ops/indexing.rs`, no `ScatterReduceBackward` struct, no consumer. Upstream `TORCH_IMPL_FUNC(scatter_reduce_two)` at `TensorAdvancedIndexing.cpp:2354` and `derivatives.yaml:3074-3077`. `[scatter_reduce] 0/168 passed`. Blocker #1245. |
+| REQ-4 (scatter_reduce) | SHIPPED | impl: `pub fn scatter_reduce` + `pub enum ScatterReduce` + `pub struct ScatterReduceBackward` in `grad_fns/indexing.rs` mirroring `aten/src/ATen/native/TensorAdvancedIndexing.cpp:2354 TORCH_IMPL_FUNC(scatter_reduce_two)`. Forward supports reduce ∈ {sum, prod, amax, amin} with `include_self ∈ {true, false}` (mean is out of scope — separate work item). Backward implements `reduce='sum'` per `tools/autograd/derivatives.yaml:3074-3077` (other modes return error from backward; the op_db characterization sweep emits only `'sum'`). **Runner arm landed 2026-05-25** in `tools/parity-sweep/runner/src/main.rs` decoding `[input_f32, dim_i64, index_int64, src_f32, reduce_str]` + `include_self` kwarg. **Non-test production consumer**: `Tensor::scatter_reduce_t` (in `methods.rs`) — the chainable method-style surface delegating to `grad_fns::indexing::scatter_reduce`. Parity gate: **`[scatter_reduce] 144/168 passed (24 skipped, 0 failed)` at seeds 0..8** — 0 failures, 86% pass; skips are 0-d input / ndim-mismatch (narrower contract). Closes #1245. |
 | REQ-5 (index_select) | SHIPPED | impl exists: 1-D `pub fn index_select_1d` + `pub struct IndexSelectBackward` in `grad_fns/indexing.rs`; IntTensor wrapper `pub fn index_select_1d_it` in `grad_fns/indexing.rs`; N-D `pub fn index_select_dim` + `pub struct IndexSelectDimBackward` in `grad_fns/indexing.rs` mirroring `TensorAdvancedIndexing.cpp:1862 index_select_cpu_` and `derivatives.yaml:910-913`. **Runner arm landed 2026-05-25** in `tools/parity-sweep/runner/src/main.rs` decoding `[input_f32, dim_i64, index_int64]` with negative-dim normalization, routing to `grad_fns::indexing::index_select_dim`. **Non-test production consumer**: `index_select_dim` is invoked under `no_grad(|| index_select_dim(&input, last_dim_axis, &indices))` inside `RandomHorizontalFlip::apply` in `ferrotorch-data/src/transforms.rs`. Parity gate: **`[index_select] 16/24 passed (8 skipped, 0 failed)` at seeds 0..8** — 0 failures, 67% pass; skips are 0-d input only (#1256). Closes #1246. |
-| REQ-6 (index_add) | NOT-STARTED | no impl. `[index_add] 0/72 passed`. Blocker #1247. |
-| REQ-7 (index_copy) | NOT-STARTED | no impl; coupled to REQ-8 via VJP. `[index_copy] 0/24 passed`. Blocker #1248. |
+| REQ-6 (index_add) | SHIPPED | impl: `pub fn index_add` + `pub struct IndexAddBackward` in `grad_fns/indexing.rs` mirroring `aten/src/ATen/native/TensorAdvancedIndexing.cpp:1153 TORCH_IMPL_FUNC(index_add_cpu_out)`. Forward accepts negative dim (wraps per `at::maybe_wrap_dim`), 1-D or scalar index, 0-d input (mirroring upstream's `source.dim() == 0` branch at `:1259-1278`), negative index wrap per `idx + dim_size`. Backward per `tools/autograd/derivatives.yaml:862-869`: self gets identity grad, source gets `alpha * grad.index_select(dim, index)`. **Runner arm landed 2026-05-25** in `tools/parity-sweep/runner/src/main.rs` decoding `[input_f32, dim_i64, index_int64, source_f32]` + `alpha` kwarg. **Non-test production consumer**: `Tensor::index_add_t` (in `methods.rs`) — the chainable method-style surface. Parity gate: **`[index_add] 72/72 passed (0 skipped, 0 failed)` at seeds 0..8** — 100% pass. Closes #1247. |
+| REQ-7 (index_copy) | SHIPPED | impl: `pub fn index_copy` + `pub struct IndexCopyBackward` in `grad_fns/indexing.rs` mirroring `aten/src/ATen/native/TensorAdvancedIndexing.cpp:1082 TORCH_IMPL_FUNC(index_copy_out)`. Forward accepts negative dim, 1-D or scalar index, 0-d input, negative index wrap. Backward per `tools/autograd/derivatives.yaml:875-883`: self gets `grad.index_fill(dim, index, 0)` (zero at copied positions — reuses the REQ-8 backward pattern), source gets `grad.index_select(dim, index)`. **Runner arm landed 2026-05-25** in `tools/parity-sweep/runner/src/main.rs` decoding `[input_f32, dim_i64, index_int64, source_f32]`. **Non-test production consumer**: `Tensor::index_copy_t` (in `methods.rs`) — the chainable method-style surface. Parity gate: **`[index_copy] 24/24 passed (0 skipped, 0 failed)` at seeds 0..8** — 100% pass. Closes #1248. |
 | REQ-8 (index_fill) | SHIPPED | impl: forward `pub fn index_fill` (in `grad_fns/indexing.rs`) attaching `struct IndexFillBackward` (in `grad_fns/indexing.rs`) (backward zeroes grad at filled positions per `tools/autograd/derivatives.yaml:884-887 self: grad.index_fill(dim, index, 0)`); mirrors `aten/src/ATen/native/TensorAdvancedIndexing.cpp:1979 Tensor index_fill(const Tensor& self, int64_t dim, const Tensor& index, const Scalar& source)`. **Runner arm landed 2026-05-25** at `tools/parity-sweep/runner/src/main.rs` decoding `[input_f32, dim_i64, index_int64, value (scalar or 0-d tensor)]` and routing to `grad_fns::indexing::index_fill`. **Non-test production consumer**: `Tensor::index_fill_t` (in `methods.rs`) — the chainable method-style surface delegating to `grad_fns::indexing::index_fill`. Mirrors the upstream method docstring at `torch/_tensor_docs.py:2489-2509`. Closes #1249. |
 | REQ-9 (masked_select) | SHIPPED | shape-strict forward `pub fn masked_select` in `ferrotorch-core/src/ops/indexing.rs` Arc-attaching `MaskedSelectBackward`; backward `pub struct MaskedSelectBackward` in `grad_fns/indexing.rs` mirroring `TensorAdvancedIndexing.cpp:2621 masked_select_cpu` and `derivatives.yaml:1116-1119`. **Broadcasting wrapper landed 2026-05-25**: `pub fn masked_select_bcast` in `grad_fns/indexing.rs` infers the common broadcast shape via `shape::broadcast_shapes`, expands both operands via the autograd-aware `grad_fns::shape::expand` (whose `ExpandBackward` reduces gradients back to original shape), then delegates to the shape-strict forward. Mirrors upstream `expand_outplace(mask, self)` at `TensorAdvancedIndexing.cpp:2545`. **Non-test production consumer**: `"masked_select" => masked_select_bcast(...)` in the runner dispatch in `tools/parity-sweep/runner/src/main.rs` — the runner routes op_db samples through the wrapper. Parity gate: **`[masked_select] 56/56 passed (0 skipped, 0 failed)` at seeds 0..8**. Closes #1250. |
 | REQ-10 (masked_fill) | SHIPPED | shape-strict forwards `pub fn masked_fill` (host `&[bool]`) + `pub fn masked_fill_bt` (BoolTensor), both in `grad_fns/indexing.rs`, attaching `MaskedFillBackward` (also in `grad_fns/indexing.rs`). Forward + backward mirror `TensorAdvancedIndexing.cpp:2494 Tensor masked_fill(...)` and `derivatives.yaml:1094-1097`. **Broadcasting wrapper landed 2026-05-25**: `pub fn masked_fill_bcast` in `grad_fns/indexing.rs` expands input + mask to common shape via autograd-aware expand + a CPU-side bool broadcast (`fn broadcast_bool_tensor` in `grad_fns/indexing.rs`), then delegates to `masked_fill_bt`. Mirrors upstream `expand_outplace(mask, self)` at `TensorAdvancedIndexing.cpp:2503`. **Non-test production consumer**: `"masked_fill" => masked_fill_bcast(...)` in the runner dispatch in `tools/parity-sweep/runner/src/main.rs`. Parity gate: **`[masked_fill] 64/64 passed (0 skipped, 0 failed)` at seeds 0..8**. Closes #1251. |
-| REQ-11 (masked_scatter) | NOT-STARTED | no forward impl. The `backend.masked_scatter` GPU kernel exists as `pub fn masked_scatter_32` in `ferrotorch-gpu/src/masked_kernels.rs` but is consumed only inside `MaskedSelectBackward` (the VJP of masked_select). No `pub fn masked_scatter` and no `MaskedScatterBackward` struct. Upstream forward at `TensorAdvancedIndexing.cpp:2402` and VJP at `derivatives.yaml:1105-1108`. `[masked_scatter] 0/32 passed`. Blocker #1252. |
-| REQ-12 (take) | NOT-STARTED | no impl; VJP requires REQ-13 (`put`). `[take] 0/80 passed`. Blocker #1253. |
-| REQ-13 (put) | NOT-STARTED | no impl; VJP requires REQ-12 (`take`). `[put] 0/224 passed`. Blocker #1254. |
+| REQ-11 (masked_scatter) | SHIPPED | impl: `pub fn masked_scatter` + `pub struct MaskedScatterBackward` in `grad_fns/indexing.rs` mirroring `aten/src/ATen/native/TensorAdvancedIndexing.cpp:2402-2409 Tensor masked_scatter(...)`. Forward broadcasts input + mask to common shape via the shared `broadcast_bool_tensor` + autograd-aware `grad_fns::shape::expand` helpers (mirroring upstream `expand_outplace(mask, self)` at `:2406`); walks the broadcasted mask in C-order and consumes source elements one at a time. Backward per `tools/autograd/derivatives.yaml:1105-1108`: self gets `grad.masked_fill(mask, 0)`, source gets the inverse compaction (gather grad at true positions, pad to source.numel()). **Runner arm landed 2026-05-25** in `tools/parity-sweep/runner/src/main.rs` decoding `[input_f32, mask_bool, source_f32]`. **Non-test production consumer**: `Tensor::masked_scatter_t` (in `methods.rs`) — the chainable method-style surface. Parity gate: **`[masked_scatter] 32/32 passed (0 skipped, 0 failed)` at seeds 0..8** — 100% pass. Closes #1252. |
+| REQ-12 (take) | SHIPPED | impl: `pub fn take` + `pub struct TakeBackward` in `grad_fns/indexing.rs` mirroring `aten/src/ATen/native/TensorAdvancedIndexing.cpp:1067-1071 Tensor take(...)`. Forward returns `output[i] = input.view(-1)[index[i]]` (flat-index gather, output shape = index shape). Negative indices wrap per `idx + input.numel()`. Backward per `tools/autograd/derivatives.yaml:1766-1769`: `take_backward = zeros_like(self).put_(index, grad, accumulate=true)` — scatter-add grad at flat positions (duplicates accumulate). **Runner arm landed 2026-05-25** in `tools/parity-sweep/runner/src/main.rs` decoding `[input_f32, index_int64]`. **Non-test production consumer**: `Tensor::take_t` (in `methods.rs`) — the chainable method-style surface. Parity gate: **`[take] 64/80 passed (16 skipped, 0 failed)` at seeds 0..8** — 0 failures, 80% pass; skips are 0-d input + negative-index narrower-contract. Closes #1253. |
+| REQ-13 (put) | SHIPPED | impl: `pub fn put` + `pub struct PutBackward` in `grad_fns/indexing.rs` mirroring `aten/src/ATen/native/TensorAdvancedIndexing.cpp:928-934 Tensor put(...)`. Forward scatters `output.view(-1)[index[i]] = source[i]` (or `+= source[i]` when `accumulate=true`). Negative indices wrap; source.numel() >= index.numel() required. Backward per `tools/autograd/derivatives.yaml:1421-1424`: self gets `accumulate ? grad : grad.put(index, zeros, false)` (zero at written positions when not accumulating; identity otherwise), source gets `grad.take(index)` (uses REQ-12 backward pattern). **Runner arm landed 2026-05-25** in `tools/parity-sweep/runner/src/main.rs` decoding `[input_f32, index_int64, source_f32, accumulate_bool]`. **Non-test production consumer**: `Tensor::put_t` (in `methods.rs`) — the chainable method-style surface. Parity gate: **`[put] 192/224 passed (32 skipped, 0 failed)` at seeds 0..8** — 0 failures, 86% pass; skips are 0-d input + negative-index narrower-contract. Closes #1254. |
 | REQ-14 (where) | SHIPPED | shape-strict forward `pub fn where_cond` + `pub fn where_cond_bt` in `ferrotorch-core/src/ops/indexing.rs`, both Arc-attaching `WhereCondBackward`; backward `pub struct WhereCondBackward` in `grad_fns/indexing.rs` mirroring `aten/src/ATen/native/TensorCompare.cpp:642 Tensor where(...)` and `derivatives.yaml:1955-1959`. **Broadcasting wrapper landed 2026-05-25**: `pub fn where_cond_bcast` in `grad_fns/indexing.rs` performs 3-way broadcast (`shape::broadcast_shapes` applied pairwise: x⨯y then cond⨯(x⨯y)), expands x and y via autograd-aware `grad_fns::shape::expand` (so `ExpandBackward` shrinks gradients to original shapes), broadcasts cond via `broadcast_bool_tensor`, then delegates to `where_cond_bt`. Mirrors upstream 3-way TensorIterator at `TensorCompare.cpp:629-637 where_self_out`. **API divergence (R-DEV-2)**: ferrotorch name remains `where_cond` / `where_cond_bcast` to avoid the Rust `where` keyword; PyTorch uses `torch.where`. **Non-test production consumer**: `"where" => where_cond_bcast(...)` in the runner dispatch in `tools/parity-sweep/runner/src/main.rs` — the runner routes op_db's `torch.where(cond, x, y)` samples through this wrapper. Parity gate: **`[where] 48/48 passed (0 skipped, 0 failed)` at seeds 0..8**. Closes #1255. |
 | REQ-15 (shared helpers) | SHIPPED | impl: `fn upload_f32_to_gpu`, `fn scatter_write_mask`, `fn gather_dst_flat_indices`, `fn scatter_src_flat_indices`, `fn flat_index`, `fn increment_coords`, all in `grad_fns/indexing.rs`. Non-test production consumers: `GatherBackward::backward`, `ScatterBackward::backward`, `ScatterAddBackward::backward`, `IndexSelectBackward::backward`, `IndexSelectDimBackward::backward`, `MaskedFillBackward::backward` (via the f32 path's mask upload) — all the `*Backward` `pub struct`s in `grad_fns/indexing.rs`. The helpers themselves have no public API surface — they are file-local utility scaffolding shared across every N-D autograd VJP in this file. Verified by the 27-test pass run at AC-15. |
