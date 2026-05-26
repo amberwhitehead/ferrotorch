@@ -12,6 +12,25 @@
 //! `client.read_one(handle)` themselves. This mirrors the idiom established
 //! by `quant.rs` and `grammar.rs`: keep data device-resident and let the
 //! boundary crate decide when to read back. ADR #663 item 4.
+//!
+//! ## REQ status (per `.design/ferrotorch-cubecl/kernels.md`)
+//!
+//! Full evidence rows (impl + non-test production consumer + upstream
+//! cites) live in the design doc; this synopsis is a one-line summary per
+//! REQ.
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 (binary kernels) | SHIPPED | `pub fn kernel_add/sub/mul/div<F: Float> in kernels.rs`; consumer `ferrotorch-cubecl/src/ops.rs` `portable_add/sub/mul/div` dispatch via `kernels::run_add/sub/mul/div` |
+//! | REQ-2 (unary kernels) | SHIPPED | ten `pub fn kernel_relu/neg/abs/exp/ln/sqrt/sin/cos/tanh/sigmoid<F: Float> in kernels.rs`; consumer `ops.rs::portable_*` → downstream `ferrotorch-xpu/src/lib.rs` `xpu_*` |
+//! | REQ-3 (polynomial kernels) | SHIPPED | eight `pub fn kernel_chebyshev_{t,u,v,w}/hermite_{h,he}/laguerre_l/legendre_p<F: Float> in kernels.rs`; consumer `ops.rs::portable_*_polynomial_*` via `dispatch_unary_with_n!` → `ferrotorch-xpu` `xpu_polynomial!` |
+//! | REQ-4 (naive matmul) | SHIPPED | `pub fn kernel_matmul_naive<F: Float> in kernels.rs`; consumer `pub fn run_matmul/run_matmul_handle in kernels.rs` → `ops.rs::portable_matmul` → `ferrotorch-xpu::xpu_matmul` |
+//! | REQ-5 (slice-upload runners) | SHIPPED | `fn run_unary/run_binary<R, L> in kernels.rs`; consumer every macro-generated `pub fn run_<op>` in this file → `ops.rs` dispatch macros |
+//! | REQ-6 (handle-direct runners) | SHIPPED | `fn run_unary_handle/run_binary_handle<R, L> in kernels.rs` calling `debug_assert_handle_capacity`; consumer macro-generated `pub fn run_<op>_handle` → `ops.rs::dispatch_*` handle-direct arms |
+//! | REQ-7 (macro-stamped runners) | SHIPPED | `define_unary_runner!`/`define_binary_runner!` invoked 10 + 4 times in `kernels.rs`; consumer `ferrotorch-cubecl/src/ops.rs` via generated `kernels::run_*`/`run_*_handle` |
+//! | REQ-8 (polynomial runners) | SHIPPED | `define_unary_with_n_runner!`/`define_unary_with_n_runner_handle!` invoked 8 times each in `kernels.rs`; consumer `ops.rs::portable_*_polynomial_*` |
+//! | REQ-9 (matmul runners) | SHIPPED | `pub fn run_matmul/run_matmul_handle<R: Runtime> in kernels.rs`; consumer `ops.rs::portable_matmul` via `dispatch_matmul!` |
+//! | REQ-10 (SAFETY discipline) | SHIPPED | every `unsafe { ArrayArg::from_raw_parts(...) }` / `unsafe { kernel_*::launch_unchecked(...) }` in `kernels.rs` preceded by multi-line SAFETY comment; consumer same chain as REQ-7/8/9 inheriting the documented safety contract |
 
 use cubecl::prelude::*;
 

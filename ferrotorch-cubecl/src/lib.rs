@@ -27,6 +27,20 @@
 //!     println!("Using device: {:?}", rt.device());
 //! }
 //! ```
+//!
+//! ## REQ status (per `.design/ferrotorch-cubecl/lib.md`)
+//!
+//! Full evidence rows (impl + non-test production consumer + upstream
+//! cites) live in the design doc; this synopsis is a one-line summary per
+//! REQ.
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 (public module surface) | SHIPPED | `pub mod grammar/kernels/ops/quant/runtime/storage` in `lib.rs`; consumer `ferrotorch-xpu/src/lib.rs` imports `ferrotorch_cubecl::{CubeDevice, CubeRuntime, upload_f32, wrap_kernel_output}` |
+//! | REQ-2 (feature-flag wiring) | SHIPPED | `cuda`/`wgpu`/`rocm` feature gates in `Cargo.toml` + `make_client` cfg arms in `runtime.rs`; no-backend path pinned by `runtime_construction_errors_without_backend` in `ops.rs` |
+//! | REQ-3 (boundary re-exports) | SHIPPED | `pub use runtime::*` / `storage::*` / `quant::*` / `grammar::*` in `lib.rs`; consumers `ferrotorch-xpu/src/lib.rs` + `ferrotorch-grammar/src/gpu_dispatch.rs` reach names via `ferrotorch_cubecl::Foo` |
+//! | REQ-4 (crate-internal launch helpers) | SHIPPED | `pub(crate) fn elementwise_launch_dims` + `pub(crate) fn debug_assert_handle_capacity` in `lib.rs`; consumers `kernels::run_unary`/`run_binary_handle`, `quant::dequantize_q4_0_to_gpu`, `grammar::compute_token_mask_dfa_to_gpu` |
+//! | REQ-5 (lint baseline) | SHIPPED | `#![warn(clippy::all, clippy::pedantic)]` + `#![deny(rust_2018_idioms, missing_debug_implementations)]` at top of `lib.rs`; verified by `cargo clippy -p ferrotorch-cubecl --no-default-features -- -D warnings` |
 
 #![warn(clippy::all, clippy::pedantic)]
 #![deny(rust_2018_idioms, missing_debug_implementations)]

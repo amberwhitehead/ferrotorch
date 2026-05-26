@@ -21,6 +21,23 @@
 //!
 //! Only `f32` is supported today — CubeCL's `Float` trait requires
 //! `CubeElement`, which `f32` implements on every backend.
+//!
+//! ## REQ status (per `.design/ferrotorch-cubecl/ops.md`)
+//!
+//! Full evidence rows (impl + non-test production consumer + upstream
+//! cites) live in the design doc; this synopsis is a one-line summary per
+//! REQ.
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 (per-op `portable_*` entry shape) | SHIPPED | every `pub fn portable_<op> in ops.rs` returns `FerrotorchResult<(cubecl::server::Handle, Vec<usize>)>`; consumer `ferrotorch-xpu/src/lib.rs` invokes `$cubecl(args, xpu.runtime())?` and destructures `(handle, shape)` |
+//! | REQ-2 (handle-direct vs slice-upload dispatch) | SHIPPED | `macro_rules! dispatch_binary/dispatch_unary/dispatch_matmul/dispatch_unary_with_n in ops.rs` route via `match cubecl_handle_of(...)`; consumer every `portable_<op>` in this file → `ferrotorch-xpu` ops |
+//! | REQ-3 (per-backend client-arm dispatch) | SHIPPED | each dispatch macro inner match on `CubeClient::{Wgpu,Cuda,Rocm}` with `Stub => unreachable!()` arm (#1083); consumer same as REQ-2 |
+//! | REQ-4 (shape validation before dispatch) | SHIPPED | `fn check_same_shape in ops.rs` + `fn check_matmul_shapes in ops.rs`; consumer every `portable_<binary>`/`portable_matmul` invokes one before dispatch |
+//! | REQ-5 (no-backend stubs) | SHIPPED | per-op `#[cfg(not(any(feature = "wgpu", feature = "cuda", feature = "rocm")))]` arms returning `Err(FerrotorchError::DeviceUnavailable)` after shape validation; pinned by `no_backend_tests::runtime_construction_errors_without_backend` in `ops.rs` |
+//! | REQ-6 (macro-generated elementwise ops) | SHIPPED | `macro_rules! define_portable_unary/define_portable_binary in ops.rs` invoked for div + 9 unary ops; consumer each generated `portable_<op>` called from `ferrotorch-xpu/src/lib.rs::xpu_*` macro expansions |
+//! | REQ-7 (macro-generated polynomial ops) | SHIPPED | `macro_rules! define_portable_polynomial in ops.rs` invoked 8 times with `u32::try_from(n)` overflow check; consumer `ferrotorch-xpu/src/lib.rs::xpu_polynomial!` expansions |
+//! | REQ-8 (readback is caller's responsibility) | SHIPPED | `portable_*` returns raw `Handle` + shape; in-file `tests::readback` helper is `cfg(test)` only; consumer `ferrotorch-xpu/src/lib.rs` calls `wrap_kernel_output(handle, &shape, ..., xpu.ordinal())` — handle stays device-resident |
 
 use ferrotorch_core::{FerrotorchError, FerrotorchResult, Tensor};
 // Needed so `.len()` and `.raw_handle()` resolve on `&CubeclStorageHandle`

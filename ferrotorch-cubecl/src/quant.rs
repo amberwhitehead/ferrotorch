@@ -30,6 +30,25 @@
 //! exact same byte layouts implemented (and tested) by
 //! `ferrotorch_serialize::gguf::dequantize_qX_Y`; see the unit tests in
 //! this file for cross-validation.
+//!
+//! ## REQ status (per `.design/ferrotorch-cubecl/quant.md`)
+//!
+//! Full evidence rows (impl + non-test production consumer + upstream
+//! cites) live in the design doc; this synopsis is a one-line summary per
+//! REQ. Per goal.md S5: existing pub-API boundary surface in this file is
+//! grandfathered SHIPPED; the ferrotorch-llama GGUF GPU loader wiring is
+//! tracked separately at #1350.
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 (`GgufBlockKind`) | SHIPPED | `pub enum GgufBlockKind in quant.rs` with `block_elements/block_bytes` consts; consumer re-exported via `lib.rs` `pub use quant::*`; boundary API for GGUF GPU loader (#1350) |
+//! | REQ-2 (`split_q*_blocks` parsers) | SHIPPED | six `pub fn split_q*_blocks in quant.rs`; consumer re-exported via `lib.rs`; reference impls in this file round-trip cleanly through them |
+//! | REQ-3 (`kernel_dequantize_q*`) | SHIPPED | six `#[cube(launch_unchecked)] pub fn kernel_dequantize_q* in quant.rs`; consumer matching `dequantize_q*_to_gpu` launcher in same file dispatches `launch_unchecked::<f32, R>(...)` |
+//! | REQ-4 (`dequantize_q*_to_gpu`) | SHIPPED | six `pub fn dequantize_q*_to_gpu<R: Runtime> in quant.rs`; consumer re-exported via `lib.rs`; CUDA tests verify GPU-vs-reference equality |
+//! | REQ-5 (reference dequant impls) | SHIPPED | six `pub(crate) fn dequantize_q*_reference in quant.rs`; consumer `cuda_tests` module uses each as byte-equality oracle |
+//! | REQ-6 (`kernel_apply_token_mask`) | SHIPPED | `#[cube(launch_unchecked)] pub fn kernel_apply_token_mask<F: Float> in quant.rs`; consumer `pub fn apply_token_mask_to_gpu in quant.rs` dispatches `launch_unchecked::<f32, R>(...)` |
+//! | REQ-7 (`apply_token_mask_to_gpu`) | SHIPPED | `pub fn apply_token_mask_to_gpu<R: Runtime> in quant.rs`; consumer documented pairing with `grammar::compute_token_mask_dfa_to_gpu` consumed by `ferrotorch-grammar/src/gpu_dispatch.rs`; #1350 tracks call-site wiring |
+//! | REQ-8 (SAFETY discipline) | SHIPPED | every `unsafe { ... }` block in `quant.rs` preceded by multi-line SAFETY comment; consumer same chain as REQ-3/4/6/7 inheriting documented safety contract |
 
 use cubecl::prelude::*;
 

@@ -8,6 +8,23 @@
 //! concrete implementation, keeping the core→cubecl dependency one-way.
 //!
 //! Issue #673: device-resident XPU storage.
+//!
+//! ## REQ status (per `.design/ferrotorch-cubecl/storage.md`)
+//!
+//! Full evidence rows (impl + non-test production consumer + upstream
+//! cites) live in the design doc; this synopsis is a one-line summary per
+//! REQ.
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 (`CubeclStorageHandle` struct) | SHIPPED | `pub struct CubeclStorageHandle in storage.rs` with `handle/runtime/len/ordinal` fields; consumer `ferrotorch-xpu/src/lib.rs` packs result of `upload_f32` into `TensorStorage::xpu_from_handle` |
+//! | REQ-2 (`CubeStorageHandle` trait impl) | SHIPPED | `impl CubeStorageHandle for CubeclStorageHandle in storage.rs` with `as_any/len/ordinal/read_to_host/clone_handle`; consumer `ferrotorch-core::TensorStorage::Cubecl` invokes via the trait on `Tensor::cpu()` readback |
+//! | REQ-3 (`from_raw`) | SHIPPED | `pub fn from_raw in storage.rs`; consumer `pub fn wrap_kernel_output in storage.rs` invoked from `ferrotorch-xpu/src/lib.rs` |
+//! | REQ-4 (`raw_handle`) | SHIPPED | `pub fn raw_handle in storage.rs`; consumer `ferrotorch-cubecl/src/ops.rs` dispatch macros call `ha.raw_handle().clone()` |
+//! | REQ-5 (`runtime` accessor) | SHIPPED | `pub fn runtime in storage.rs`; consumer downstream code reaching the handle via `cubecl_handle_of` to chain into read-back |
+//! | REQ-6 (`wrap_kernel_output`) | SHIPPED | `pub fn wrap_kernel_output in storage.rs`; consumer `ferrotorch-xpu/src/lib.rs` `xpu_binary!`/`xpu_unary!`/`xpu_polynomial!` macro expansions |
+//! | REQ-7 (`upload_f32`) | SHIPPED | `pub fn upload_f32 in storage.rs` with cfg arms (`create_from_slice` on feature, `DeviceUnavailable` off); consumer `ferrotorch-xpu/src/lib.rs::make_xpu_tensor` |
+//! | REQ-8 (`cubecl_handle_of`) | SHIPPED | `pub fn cubecl_handle_of in storage.rs` using `Any::downcast_ref`; consumer `ferrotorch-cubecl/src/ops.rs` dispatch macros |
 
 use std::sync::Arc;
 

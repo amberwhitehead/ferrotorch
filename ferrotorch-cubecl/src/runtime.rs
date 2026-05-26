@@ -4,6 +4,23 @@
 //! each parameterised by a device ordinal. [`CubeRuntime`] resolves that
 //! selection into a real CubeCL [`ComputeClient`] — one per backend — which
 //! owns the on-device memory and the compiled-kernel cache for that device.
+//!
+//! ## REQ status (per `.design/ferrotorch-cubecl/runtime.md`)
+//!
+//! Full evidence rows (impl + non-test production consumer + upstream
+//! cites) live in the design doc; this synopsis is a one-line summary per
+//! REQ.
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 (`CubeDevice` enum) | SHIPPED | `pub enum CubeDevice in runtime.rs` with `Cuda(usize)/Wgpu(usize)/Rocm(usize)` + derived `Debug, Clone, Copy, PartialEq, Eq, Hash`; consumer `ferrotorch-xpu/src/lib.rs` constructs `CubeDevice::Wgpu(ordinal)` inside `XpuDevice::new` |
+//! | REQ-2 (`ordinal/backend_name/Display`) | SHIPPED | `impl CubeDevice in runtime.rs` + `impl fmt::Display for CubeDevice in runtime.rs`; pinned by `cube_device_display` test |
+//! | REQ-3 (`CubeClient` enum) | SHIPPED | `pub enum CubeClient in runtime.rs` with cfg-gated `Cuda/Wgpu/Rocm(ComputeClient<R>)` + always-present `Stub` (#1083); consumer `ferrotorch-cubecl/src/ops.rs` dispatch macros match on `CubeClient` |
+//! | REQ-4 (`CubeRuntime::new`) | SHIPPED | `pub fn new in runtime.rs` + `fn make_client in runtime.rs` with cfg-arm fallback to `DeviceUnavailable`; consumer `ferrotorch-xpu/src/lib.rs` calls `CubeRuntime::new(CubeDevice::Wgpu(ordinal))?` |
+//! | REQ-5 (`CubeRuntime::auto`) | SHIPPED | `pub fn auto in runtime.rs` with cfg-gated CUDA > ROCm > WGPU priority chain; consumer `lib.rs` rustdoc demo + meta-crate `ferrotorch::cubecl` on-ramp |
+//! | REQ-6 (`is_available`) | SHIPPED | `pub fn is_available in runtime.rs` returning `cfg!(any(feature = "cuda", feature = "rocm", feature = "wgpu"))`; consumer `ferrotorch-xpu/src/lib.rs::XpuDevice::is_available` |
+//! | REQ-7 (`read_f32s`) | SHIPPED | `pub fn read_f32s in runtime.rs` (cfg `any(wgpu,cuda,rocm)`) dispatching `c.read_one(handle)`; consumer `ferrotorch-cubecl/src/storage.rs::CubeclStorageHandle::read_to_host` |
+//! | REQ-8 (`new_for_testing`) | SHIPPED | `#[doc(hidden)] pub fn new_for_testing in runtime.rs` returning `CubeClient::Stub` (#1083); test-infrastructure boundary API grandfathered per goal.md S5 |
 
 use std::fmt;
 

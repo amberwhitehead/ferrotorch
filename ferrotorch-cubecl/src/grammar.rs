@@ -31,6 +31,22 @@
 //! enum-value matching across an unbounded vocabulary — are out of scope
 //! for this kernel and stay on the CPU loop in
 //! `JsonSchemaProcessor::compute_mask`.
+//!
+//! ## REQ status (per `.design/ferrotorch-cubecl/grammar.md`)
+//!
+//! Full evidence rows (impl + non-test production consumer + upstream
+//! cites) live in the design doc; this synopsis is a one-line summary per
+//! REQ.
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 (DFA kernel) | SHIPPED | `#[cube(launch_unchecked)] pub fn kernel_compute_token_mask_dfa in grammar.rs`; consumer `pub fn compute_token_mask_dfa_to_gpu in grammar.rs` → called from `ferrotorch-grammar/src/gpu_dispatch.rs` |
+//! | REQ-2 (empty-token policy) | SHIPPED | `if start == end { rejected = 1u32; }` in `kernel_compute_token_mask_dfa`; same consumer chain as REQ-1 |
+//! | REQ-3 (bounded loop) | SHIPPED | `for i in 0..max_token_len_u { if pos < end && rejected == 0u32 { ... } }` in `kernel_compute_token_mask_dfa`; same consumer chain as REQ-1 |
+//! | REQ-4 (`DfaMaskInputs<'a>`) | SHIPPED | `#[non_exhaustive] pub struct DfaMaskInputs<'a> in grammar.rs`; consumer `ferrotorch-grammar/src/gpu_dispatch.rs` constructs via `DfaMaskInputs::new` |
+//! | REQ-5 (`DfaMaskInputs::new`) | SHIPPED | `pub fn new in grammar.rs` returning `Option<Self>` after `vocab_offsets.len() != vocab_size + 1` check; consumer `ferrotorch-grammar/src/gpu_dispatch.rs` uses `?` on the `Option<DfaMaskInputs>` |
+//! | REQ-6 (`compute_token_mask_dfa_to_gpu`) | SHIPPED | `pub fn compute_token_mask_dfa_to_gpu<R: Runtime> in grammar.rs`; consumer `ferrotorch-grammar/src/gpu_dispatch.rs` `run_dfa_on_gpu` |
+//! | REQ-7 (`Debug` for `DfaMaskInputs<'_>`) | SHIPPED | `impl std::fmt::Debug for DfaMaskInputs<'_> in grammar.rs` showing lengths + scalars; consumer downstream diagnostic `eprintln!("{:?}", inputs)` in error paths |
 
 use cubecl::prelude::*;
 
