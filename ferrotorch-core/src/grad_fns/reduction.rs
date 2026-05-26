@@ -10,6 +10,26 @@
 //! argmax/argmin/any/all/count_nonzero are integer- or bool-output and
 //! NON-differentiable (no `derivatives.yaml` entry); they carry no
 //! `*Backward` node.
+//!
+//! ## REQ status (per `.design/ferrotorch-core/grad_fns/reduction.md`)
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 (`sum`) | NOT-STARTED | `sum` + `SumBackward` ship with non-test production consumer `Tensor::sum_all` plus invocations across `autograd/grad_penalty.rs`, `einsum.rs`, `vmap.rs`, `flex_attention.rs`, and `ferrotorch-nn`; parity-sweep runner arm gated by #1314 (currently `0/80 passed (80 skipped)`). |
+//! | REQ-2 (`mean`) | NOT-STARTED | `mean` + `MeanBackward` ship with non-test consumer `Tensor::mean_all`; parity runner arm gated by #1314. |
+//! | REQ-3 (`prod`) | NOT-STARTED | `prod` + `ProdBackward` (prefix-suffix product, zero-aware) ship with consumer `Tensor::prod_all`; parity runner arm gated by #1314. |
+//! | REQ-4 (`amin` / `amax`) | NOT-STARTED | `amin` / `amax` + `AminBackward` / `AmaxBackward` (subgradient at ties) ship with consumers `Tensor::amin` / `Tensor::amax`; parity runner arm gated by #1314 + #1302. |
+//! | REQ-5 (`sum_dim`) | NOT-STARTED | `sum_dim` + `SumDimBackward` ship; consumed by `einsum.rs`, `einops.rs`, `grad_fns/linalg.rs`, `meta_propagate.rs`, `ferrotorch-distributions`; parity runner arm gated by #1314. |
+//! | REQ-6 (`mean_dim`) | NOT-STARTED | `mean_dim` + `MeanDimBackward` ship; consumed by `meta_propagate.rs`; parity runner arm gated by #1314. |
+//! | REQ-7 (backward VJP wiring) | NOT-STARTED | every `*Backward` struct implements the `GradFn` trait with `backward` / `inputs` / `name`; the no-grad / `requires_grad=false` short-circuit is exercised by the `test_*_no_grad*` family; gated by #1314 closing the parity runner arms. |
+//! | REQ-8 (`std` / `var`) | NOT-STARTED | no `WelfordBackward` in this file. Blocker #1301. |
+//! | REQ-9 (`max(dim)` / `min(dim)` with `(values, indices)`) | NOT-STARTED | no dim-keyed value-selecting reduction backward. Blocker #1302. |
+//! | REQ-10 (`argmax` / `argmin`) | NOT-STARTED | integer-output, non-differentiable; no integer-output reduction scaffold. Blocker #1304. |
+//! | REQ-11 (`median` / `nanmedian`) | NOT-STARTED | no median reduction. Blocker #1306. |
+//! | REQ-12 (`norm`) | NOT-STARTED | no `NormBackward`. Blocker #1308. |
+//! | REQ-13 (`logsumexp`) | NOT-STARTED | kernel-layer forward exists in `ops::elementwise`; no autograd wrapper here. Blocker #1310. |
+//! | REQ-14 (`any` / `all` / `count_nonzero`) | NOT-STARTED | bool/integer-output, non-differentiable; no scaffold. Blocker #1312. |
+//! | REQ-15 (parity-sweep runner arms) | NOT-STARTED | the runner has arms only for the five cumulative ops (owned by `grad_fns/cumulative.rs`); no arms for `sum`, `mean`, `prod`, `amin`, `amax` or any NOT-STARTED op above. Umbrella blocker #1314. |
 
 use std::sync::Arc;
 

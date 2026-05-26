@@ -2,6 +2,24 @@
 //!
 //! Enables `a.matmul(&b)`, `a.relu()`, `a.sum()`, `a.reshape(&[2, 3])` etc.
 //! All methods delegate to the corresponding grad_fns or ops functions.
+//!
+//! ## REQ status (per `.design/ferrotorch-core/methods.md`)
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 (arithmetic methods) | SHIPPED | `add_t / sub_t / rsub_t / mul_t / div_t / neg_t / pow_t / sqrt_t / abs_t` each delegate to `crate::grad_fns::arithmetic::<op>`; non-test consumer `ferrotorch-nn/src/hooks.rs` (`add_t`); `rsub_t` itself is the production-consumer surface that closes R-DEFER-1 for `arithmetic::rsub`; parity-sweep `add` `88/88 passed`. |
+//! | REQ-2 (transcendental methods) | SHIPPED | `exp_t / log_t / sin_t / cos_t / clamp_t` delegate to `crate::grad_fns::transcendental::*`; non-test consumer `ferrotorch-diffusion/src/vae_encoder.rs` (`clamp_t`). |
+//! | REQ-3 (activation methods) | SHIPPED | `relu / sigmoid / tanh_t / gelu / gelu_with / silu / softmax / log_softmax` delegate to `crate::grad_fns::activation::*`; non-test consumers in `ferrotorch-vision`, `ferrotorch-diffusion`. |
+//! | REQ-4 (global reductions) | SHIPPED | `sum_all / mean_all / prod_all / amin / amax` delegate to `crate::grad_fns::reduction::*`; consumers in `ferrotorch-distributions`, `stride_tricks.rs`, and `grad_fns::activation`. |
+//! | REQ-5 (dim reductions) | NOT-STARTED | `sum_dim / mean_dim` methods exist; all production callers use the free `grad_fns::reduction::{sum_dim, mean_dim}` form directly. Blocker #1221. |
+//! | REQ-6 (linalg methods) | SHIPPED | `matmul / mm / mm_bt / bmm / mv_t / dot_t / t / einsum` delegate to `crate::grad_fns::linalg::*_differentiable` and `crate::einsum::einsum_differentiable`; consumers across `ferrotorch-distributions`, `ferrotorch-optim`, `ferrotorch-diffusion`. |
+//! | REQ-7 (`lu_factor`) | NOT-STARTED | delegation exists; no non-test caller. Blocker #1220. |
+//! | REQ-8 (reshape / shape methods) | SHIPPED | `reshape_t / flatten_t / squeeze_t / unsqueeze_t / permute / transpose` delegate to `crate::grad_fns::shape::*`; consumers pervasively across `ferrotorch-nn`, `ferrotorch-diffusion`, `ferrotorch-vision`, `flex_attention.rs`, `einops.rs`. |
+//! | REQ-9 (view / contiguous / narrow) | SHIPPED | `view / contiguous / narrow` delegate to free functions `view_t / contiguous_t / narrow_t` with `ContiguousBackward` / `NarrowBackward`; consumers pervasive (attention, blocks, distributions, vision, nn). |
+//! | REQ-10 (chunk / split) | SHIPPED | `chunk / split` delegate to `chunk_t / split_t` (GPU `strided_split_f32` + CPU fallback, `SplitBackward` autograd); consumers in `ferrotorch-diffusion` (`vae_encoder.rs`, `attention.rs`). |
+//! | REQ-11 (`size` / `dim` aliases) | NOT-STARTED | aliases compile; all in-tree callers are inside `#[cfg(test)]` modules. Blocker #1222. |
+//! | REQ-12 (`print` utility) | NOT-STARTED | emits a `tracing::info!` event; the only invocation is the in-file test. Blocker #1223. |
+//! | REQ-13 (cumulative methods) | SHIPPED | `cumsum_t / cumprod_t / logcumsumexp_t` delegate to `crate::grad_fns::cumulative::*`; these methods themselves close the R-DEFER-1 consumer requirement for the previously vocabulary-only `lib.rs` re-exports of the three ops; parity `[cumsum] 32/32 / [cumprod] 80/80 / [logcumsumexp] 48/48 passed`; closes #1232. `cummax_t / cummin_t` intentionally excluded (the tuple-form callers in `einops.rs` are the existing consumer, and the underlying ops remain NOT-STARTED behind #1231). |
 
 use crate::dtype::Float;
 use crate::error::FerrotorchResult;

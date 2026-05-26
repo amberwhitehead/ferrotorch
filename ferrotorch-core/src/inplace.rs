@@ -8,6 +8,22 @@
 //! optimizer updates: the caller must ensure no concurrent reads or
 //! writes to the same storage.
 //!
+//! ## REQ status (per `.design/ferrotorch-core/inplace.md`)
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 (`add_scalar_`) | NOT-STARTED | impl + in-file tests pass, but no non-test production consumer in `ferrotorch-{core,nn,optim,...}/src/**/*.rs`. Blocker #1205. |
+//! | REQ-2 (`mul_scalar_`) | NOT-STARTED | impl + tests pass; no non-test consumer. Blocker #1206. |
+//! | REQ-3 (`fill_`) | NOT-STARTED | impl + tests pass; natural caller is `ferrotorch-nn::init::constant_` which builds storage directly. Blocker #1207. |
+//! | REQ-4 (`zero_`) | NOT-STARTED | delegates to `self.fill_(T::zero())`; no non-test consumer. Blocker #1208. |
+//! | REQ-5 (`add_`) | NOT-STARTED | single-line wrapper over `add_scaled_(other, 1.0)`; no non-test consumer (natural caller is `optim::sgd`). Blocker #1209. |
+//! | REQ-6 (`add_scaled_`) | NOT-STARTED | load-bearing impl with GPU + CPU + broadcast paths; the only non-test invocation is the parity-sweep runner's dispatch table (test-side per R-DEFER-1). Blocker #1210. |
+//! | REQ-7 (`sub_`) | NOT-STARTED | shape-strict, no `alpha` kwarg, no broadcasting. Blocker #1211. |
+//! | REQ-8 (`mul_`) | NOT-STARTED | shape-strict; no broadcasting; no non-test consumer. Blocker #1212. |
+//! | REQ-9 (`div_`) | NOT-STARTED | shape-strict; missing `rounding_mode` kwarg; no non-test consumer. Blocker #1213. |
+//! | REQ-10 (`clamp_`) | NOT-STARTED | both-bounds-required; missing Optional/None handling + NaN-bound special case; no non-test consumer. Blocker #1214. |
+//! | REQ-11 (`sub_scaled_`) | SHIPPED | `Tensor::sub_scaled_` delegates to `self.add_scaled_(other, -alpha)` mirroring upstream's `TORCH_IMPL_FUNC(sub_out) { add_stub(device_type(), *this, -alpha); }`; the out-of-place sibling `arithmetic::sub_scaled` is the symmetric production consumer that establishes torch's `sub(alpha=k)` parity across both surfaces; parity-sweep `[sub] 88/88 passed (0 skipped, 0 failed)` (closes #1192). |
+//!
 //! # Autograd safety
 //!
 //! In-place operations are **not** tracked by the autograd engine. To prevent

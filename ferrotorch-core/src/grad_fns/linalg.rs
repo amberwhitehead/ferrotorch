@@ -2,6 +2,46 @@
 //!
 //! Each struct captures the forward inputs and implements `GradFn` to
 //! compute VJPs (vector-Jacobian products) for reverse-mode autodiff.
+//!
+//! ## REQ status (per `.design/ferrotorch-core/grad_fns/linalg.md`)
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 (`mm`) | SHIPPED | `mm_differentiable` + `MmBackward` consumed by `Tensor::mm` in `methods.rs` and pervasively across `ferrotorch-nn` (attention, lora, rnn, functional); parity `24/24 passed`. |
+//! | REQ-2 (`bmm`) | SHIPPED | `bmm_differentiable` + `BmmBackward` consumed by `Tensor::bmm`, by `flex_attention.rs`, and by `ferrotorch-nn/src/attention.rs`; parity `8/8 passed`. |
+//! | REQ-3 (`matmul`) | SHIPPED | `matmul_differentiable` + `MatmulBackward` consumed by `Tensor::matmul`, `ferrotorch-vision/src/models/swin.rs`, `einsum.rs`, and the forward-AD primal; parity `120/120 passed` under matmul-family `rtol=1e-4` (closes #1347). |
+//! | REQ-4 (`linalg.matmul`) | SHIPPED | aliased to REQ-3 by upstream design; `Tensor::matmul` covers both since the Python API surface is identical; parity `120/120 passed`. |
+//! | REQ-5 (`addmm`) | NOT-STARTED | no `AddmmBackward` or `addmm_differentiable` in this file; the `linear_fused` shape covers only the `A @ W^T + bias` slice. Blocker #1345. |
+//! | REQ-6 (`addbmm`) | NOT-STARTED | not present. Blocker #1345. |
+//! | REQ-7 (`baddbmm`) | NOT-STARTED | not present. Blocker #1345. |
+//! | REQ-8 (`addmv`) | NOT-STARTED | not present. Blocker #1345. |
+//! | REQ-9 (`addr`) | NOT-STARTED | not present. Blocker #1345. |
+//! | REQ-10 (`linalg.solve`) | NOT-STARTED | forward exists in `crate::linalg`; no `LinalgSolveBackward` in this file. Blocker #1345. |
+//! | REQ-11 (`linalg.svd`) | NOT-STARTED | forward exists; no `LinalgSvdBackward`. Blocker #1345. |
+//! | REQ-12 (`linalg.eig`) | NOT-STARTED | forward exists; no backward. Blocker #1345. |
+//! | REQ-13 (`linalg.eigh`) | NOT-STARTED | forward exists; no backward. Blocker #1345. |
+//! | REQ-14 (`linalg.eigvals`) | NOT-STARTED | forward exists; no backward. Blocker #1345. |
+//! | REQ-15 (`linalg.eigvalsh`) | NOT-STARTED | forward exists; no backward. Blocker #1345. |
+//! | REQ-16 (`linalg.qr`) | NOT-STARTED | forward exists; no backward. Blocker #1345. |
+//! | REQ-17 (`linalg.cholesky`) | NOT-STARTED | forward exists; no backward. Blocker #1345. |
+//! | REQ-18 (`linalg.inv`) | NOT-STARTED | forward exists; no backward. Blocker #1345. |
+//! | REQ-19 (`linalg.pinv`) | NOT-STARTED | forward exists; no backward. Blocker #1345. |
+//! | REQ-20 (`linalg.det`) | NOT-STARTED | forward exists; no backward. Blocker #1345. |
+//! | REQ-21 (`linalg.slogdet`) | NOT-STARTED | forward exists; no backward. Blocker #1345. |
+//! | REQ-22 (`linalg.lstsq`) | NOT-STARTED | forward exists; no backward. Blocker #1345. |
+//! | REQ-23 (`linalg.norm`) | NOT-STARTED | forward exists; no backward. Blocker #1345. |
+//! | REQ-24 (`linalg.matrix_rank`) | NOT-STARTED | forward exists; no backward. Blocker #1345. |
+//! | REQ-25 (`linalg.cross`) | NOT-STARTED | forward exists; no backward. Blocker #1345. |
+//! | REQ-26 (`linalg.householder_product`) | NOT-STARTED | forward exists; no backward. Blocker #1345. |
+//! | REQ-27 (`linalg.lu`) | NOT-STARTED | forward exists; no backward. Blocker #1345. |
+//! | REQ-28 (`linalg.lu_factor`) | NOT-STARTED | forward exists; no backward. Blocker #1345. |
+//! | REQ-29 (`trace`) | NOT-STARTED | no public `trace` op exists; the `autograd::anomaly::trace` is unrelated. Blocker #1345. |
+//! | REQ-30 (`diagonal`) | NOT-STARTED | forward-only `diagonal` exists in `crate::linalg`; no autograd. Blocker #1345. |
+//! | REQ-31 (`diag`) | NOT-STARTED | forward-only `diag` exists in `ops::tensor_ops`; no autograd. Blocker #1345. |
+//! | REQ-32 (`tril`) | NOT-STARTED | forward-only `tril` exists in `ops::tensor_ops`; no autograd. Blocker #1345. |
+//! | REQ-33 (`triu`) | NOT-STARTED | forward-only `triu` exists in `ops::tensor_ops`; no autograd. Blocker #1345. |
+//! | REQ-34 (`kron`) | NOT-STARTED | no `kron` anywhere. Blocker #1345. |
+//! | REQ-35 (`outer`) | NOT-STARTED | no public `outer` op; the pattern is used internally inside `MvBackward` and the vm branch of `MatmulBackward`. Blocker #1345. |
 
 use std::any::TypeId;
 use std::sync::Arc;

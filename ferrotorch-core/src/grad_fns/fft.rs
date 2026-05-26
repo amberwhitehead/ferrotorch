@@ -9,6 +9,29 @@
 //!
 //! For `y = ifft(x)`:
 //!   `grad_input = fft(grad_output) / n`
+//!
+//! ## REQ status (per `.design/ferrotorch-core/grad_fns/fft.md`)
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 (`fft.fft`) | NOT-STARTED | `fft_differentiable` + `FftBackward` ship and are re-exported at `lib.rs`; parity-sweep gated on oracle complex-dtype support (#1294). |
+//! | REQ-2 (`fft.ifft`) | NOT-STARTED | `ifft_differentiable` + `IfftBackward` ship and are re-exported at `lib.rs`; blocked on #1294. |
+//! | REQ-3 (`fft.rfft`) | NOT-STARTED | `rfft_differentiable` + `RfftBackward` (post-#807-#809 fix) ship and are re-exported at `lib.rs`; blocked on #1294 runner arm. |
+//! | REQ-4 (`fft.irfft`) | NOT-STARTED | `irfft_differentiable` + `IrfftBackward` ship and are re-exported at `lib.rs`; blocked on #1294. |
+//! | REQ-5 (`fft.fftn`) | NOT-STARTED | `fftn_differentiable` + `FftnBackward` ship but are NOT re-exported in `lib.rs`; blocked on #1294 + #1296 (consumer wiring). |
+//! | REQ-6 (`fft.ifftn`) | NOT-STARTED | `ifftn_differentiable` + `IfftnBackward` ship but are NOT re-exported in `lib.rs`; blocked on #1294 + #1296. |
+//! | REQ-7 (`fft.rfftn`) | NOT-STARTED | `rfftn_differentiable` + `RfftnBackward` ship but are NOT re-exported in `lib.rs`; blocked on #1294 + #1296. |
+//! | REQ-8 (`fft.irfftn`) | NOT-STARTED | `irfftn_differentiable` + `IrfftnBackward` ship but are NOT re-exported in `lib.rs`; blocked on #1294 + #1296. |
+//! | REQ-9 (`fft.hfft`) | NOT-STARTED | `hfft_differentiable` + `HfftBackward` (post-#807-#809 fix) ship but are NOT re-exported in `lib.rs`; blocked on #1294 + #1296. |
+//! | REQ-10 (`fft.ihfft`) | NOT-STARTED | `ihfft_differentiable` + `IhfftBackward` ship but are NOT re-exported in `lib.rs`; blocked on #1294 + #1296. |
+//! | REQ-11 (`fft.fft2`) | NOT-STARTED | the autograd wrapper `fft2_differentiable` does not exist (forward `fft::fft2` exists in `fft.rs`); blocked on #1294 + #1300. |
+//! | REQ-12 (`fft.ifft2`) | NOT-STARTED | the autograd wrapper `ifft2_differentiable` does not exist (forward `fft::ifft2` exists); blocked on #1294 + #1300. |
+//! | REQ-13 (`fft.rfft2`) | NOT-STARTED | no forward kernel, no autograd wrapper; blocked on #1294 + #1299. |
+//! | REQ-14 (`fft.irfft2`) | NOT-STARTED | no forward kernel, no autograd wrapper; blocked on #1294 + #1299. |
+//! | REQ-15 (`fft.hfft2`) | NOT-STARTED | no forward kernel, no autograd wrapper; blocked on #1294 + #1299. |
+//! | REQ-16 (`fft.ihfft2`) | NOT-STARTED | no forward kernel, no autograd wrapper; blocked on #1294 + #1299. |
+//! | REQ-17 (`fft.hfftn`) | NOT-STARTED | no forward kernel, no autograd wrapper; blocked on #1294 + #1299. |
+//! | REQ-18 (`fft.ihfftn`) | NOT-STARTED | no forward kernel, no autograd wrapper; blocked on #1294 + #1299. |
 
 use std::sync::Arc;
 

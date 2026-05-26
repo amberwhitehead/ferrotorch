@@ -2,6 +2,23 @@
 //!
 //! Constructs ferray `Array` views from tensor data slices, calls
 //! ferray-linalg operations, and wraps the results back into tensors.
+//!
+//! ## REQ status (per `.design/ferrotorch-core/ops/linalg.md`)
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 (`matmul` shape dispatcher) | SHIPPED | mirrors `Tensor matmul` and the six-arm dispatch in `_matmul_impl`; non-test consumer is the CPU fallback `linalg::matmul` invocation inside `grad_fns::linalg::matmul_differentiable` after the GPU branches are exhausted; in-file tests cover AC-1..AC-10. |
+//! | REQ-2 (`broadcast_matmul`) | SHIPPED-with-known-drift | mirrors the `expand_batch_product` + `bmm` path; reached from `matmul` for the `_ => broadcast_matmul(a, b)` (>=3D) arm; known drift vs PyTorch BLAS (~1.5e-5 on f32 k=10) tracked under blocker #1347; the plan routes per-batch slices through `mm_raw`. |
+//! | REQ-3 (`bmm`) | SHIPPED-with-known-drift | mirrors `TORCH_IMPL_FUNC(bmm_out_cpu)`; carries the same accumulation-drift property as REQ-2; reached from `matmul`'s `broadcast_matmul` path; the autograd wrapper `bmm_differentiable` reimplements the CPU triple loop inline today — the planned #1347 fix routes BOTH `broadcast_matmul` and that fallback through `mm_raw`; indirect parity `[bmm] 8/8 passed`. |
+//! | REQ-4 (`mm`) | SHIPPED | mirrors `TORCH_IMPL_FUNC(mm_out_cpu)`; non-test consumers `complex_tensor::matmul` and the `matmul` dispatcher's `(2, 2) => mm(a, b)` arm; indirect parity via the `grad_fns` runner arm. |
+//! | REQ-5 (`mm_raw`) | SHIPPED | the BLAS-routed workhorse; non-test consumers `mm` itself, `grad_fns::linalg::mm_differentiable`, and `MmBackward`; mirrors upstream's gemm-via-cpublas size-gated dispatch. |
+//! | REQ-6 (`mm_raw_bt`) | SHIPPED | fused `A @ B^T`; non-test consumer `MmBackward::backward` for `dA = grad_C @ B^T` plus two other grad-fns sites; mirrors upstream `gemm_transb_` family. |
+//! | REQ-7 (`mm_raw_at`) | SHIPPED | fused `A^T @ B`; non-test consumer `MmBackward::backward` for `dB = A^T @ grad_C` plus two other grad-fns sites; mirrors upstream `gemm_transa_` family. |
+//! | REQ-8 (`mv`) | SHIPPED | mirrors `Tensor mv`; non-test consumers `MvBackward::backward`, `MmBackward` (mat @ vec case), and `matmul`'s `(2, 1) => mv(a, b)` arm. |
+//! | REQ-9 (`dot`) | SHIPPED | mirrors `Tensor dot`; non-test consumer is `matmul`'s `(1, 1) => dot(a, b)` arm; in-file `test_dot`. |
+//! | REQ-10 (`transpose`) | SHIPPED | materialises a row-major 2-D transpose (R-DEV-7 deviation from upstream's view); non-test consumer `MmBackward::backward` for `A^T @ grad_C` setup. |
+//! | REQ-11 (private broadcast helpers) | SHIPPED | `broadcast_batch_shapes`, `broadcast_strides`, `batch_linear_index`; consumed only by `broadcast_matmul`; exercised indirectly through `test_matmul_*_broadcast` and `test_matmul_4d`. |
+//! | REQ-12 (bf16 precision helpers) | SHIPPED | `is_bf16::<T>()`, `as_bf16_slice`, `write_f32_as_bf16` — all `#[inline(always)]`; consumed by all three small-matrix paths in `mm_raw` / `mm_raw_bt` / `mm_raw_at`; per-block `// SAFETY:` comments name the `TypeId`-guard invariant. |
 
 use crate::dtype::Float;
 use crate::error::{FerrotorchError, FerrotorchResult};

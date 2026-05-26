@@ -2,6 +2,34 @@
 //!
 //! Each struct stores the tensors needed for the VJP (vector-Jacobian product)
 //! and implements [`GradFn`] to participate in reverse-mode autodiff.
+//!
+//! ## REQ status (per `.design/ferrotorch-core/grad_fns/activation.md`)
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 (`relu`) | SHIPPED | `relu` + `ReluBackward` consumed by `Tensor::relu` in `methods.rs` and by the forward-AD primal in `autograd/forward_ad.rs`. |
+//! | REQ-2 (`sigmoid`) | SHIPPED | `sigmoid` + `SigmoidBackward` consumed by `Tensor::sigmoid`, `ferrotorch-nn/src/rnn.rs` (gate computation), and `ferrotorch-nn/src/loss.rs` (BCE-with-logits). |
+//! | REQ-3 (`tanh`) | SHIPPED | `tanh` + `TanhBackward` consumed by `Tensor::tanh_t` and `ferrotorch-nn/src/rnn.rs`. |
+//! | REQ-4 (`gelu`) | SHIPPED | `gelu` / `gelu_with` + `GeluBackward` (None / Tanh / Sigmoid modes) consumed by `Tensor::gelu` / `Tensor::gelu_with`. |
+//! | REQ-5 (`silu`) | SHIPPED | `silu` + `SiluBackward` consumed by `Tensor::silu` and by `ferrotorch-nn/src/transformer.rs` (SwiGLU). |
+//! | REQ-6 (`softmax` last-axis) | SHIPPED | `softmax` + `SoftmaxBackward` (bf16 promotes accumulator to f32) consumed by `Tensor::softmax`, by `ferrotorch-nn/src/attention.rs`, and by `flex_attention.rs`. |
+//! | REQ-7 (`log_softmax` last-axis) | SHIPPED | `log_softmax` + `LogSoftmaxBackward` consumed by `Tensor::log_softmax`. |
+//! | REQ-8 (`softplus`) | SHIPPED | `softplus` + `SoftplusBackward` (threshold-branch identity, GPU backward built from primitives per #796) consumed by `ferrotorch-nn/src/functional.rs`. |
+//! | REQ-9 (`elu`) | SHIPPED | `elu` + `EluBackward` consumed by `ferrotorch-nn/src/functional.rs` and the `ELU` Module. |
+//! | REQ-10 (`mish`) | SHIPPED | `mish` + `MishBackward` consumed by `ferrotorch-nn/src/functional.rs`. |
+//! | REQ-11 (`leaky_relu`) | SHIPPED | `leaky_relu` + `LeakyReluBackward` (CUDA backward built via `unary_map` + `arithmetic::mul`) consumed by `ferrotorch-nn/src/functional.rs`. |
+//! | REQ-12 (`hardtanh` / `relu6`) | SHIPPED | `hardtanh` + `HardtanhBackward` consumed by `ferrotorch-nn/src/functional.rs` (`hardtanh` + `relu6`). |
+//! | REQ-13 (`hardsigmoid`) | SHIPPED | `hardsigmoid` + `HardsigmoidBackward` consumed by `ferrotorch-nn/src/functional.rs`. |
+//! | REQ-14 (`hardswish`) | SHIPPED | `hardswish` + `HardswishBackward` consumed by `ferrotorch-nn/src/functional.rs`. |
+//! | REQ-15 (`selu`) | SHIPPED | `selu` + `SeluBackward` (Klambauer constants) consumed by `ferrotorch-nn/src/functional.rs`. |
+//! | REQ-16 (`softsign`) | SHIPPED | `softsign` + `SoftsignBackward` consumed by `ferrotorch-nn/src/functional.rs`. |
+//! | REQ-17 (`prelu`, scalar alpha) | SHIPPED | `prelu` + `PReluBackward` (fused dual VJP routing to input + alpha) consumed by `ferrotorch-nn/src/functional.rs` and the `PReLU` Module; full per-channel alpha is a follow-up. |
+//! | REQ-18 (`glu`) | SHIPPED | `glu` + `GluBackward` consumed by `ferrotorch-nn/src/functional.rs`. |
+//! | REQ-19 (`threshold`) | SHIPPED | `threshold` + `ThresholdBackward` consumed by `Tensor::threshold_t` in `methods.rs` (closes #1341 REQ-19). |
+//! | REQ-20 (`rrelu` inference) | SHIPPED | `rrelu` + `RReluBackward` (deterministic mean-slope path) consumed by `Tensor::rrelu_t` in `methods.rs`; training-mode RNG variant is a separate follow-up. |
+//! | REQ-21 (`celu`) | SHIPPED | `celu` + `CeluBackward` consumed by `Tensor::celu_t` in `methods.rs`. |
+//! | REQ-22 (`softmin` fused) | SHIPPED | `softmin` + `SoftminBackward` (fused single-`GradFn`) consumed by `Tensor::softmin_t` in `methods.rs`; the explicit-composition `neg -> softmax` route still ships in `ferrotorch-nn`. |
+//! | REQ-23 (autograd gating) | SHIPPED | every public forward checks `is_grad_enabled() && input.requires_grad()` before attaching a `*Backward` node; verified by the `test_*_no_grad` family. |
 
 use std::any::TypeId;
 use std::sync::Arc;

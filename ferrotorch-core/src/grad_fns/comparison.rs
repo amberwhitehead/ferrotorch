@@ -3,6 +3,15 @@
 //! `where_(condition, x, y)` selects from `x` where `condition` is true, and
 //! from `y` where `condition` is false. The VJP routes the upstream gradient
 //! to `x` at true positions and to `y` at false positions.
+//!
+//! ## REQ status (per `.design/ferrotorch-core/grad_fns/comparison.md`)
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 (`where_` forward + backward) | NOT-STARTED | `where_` + `WhereBackward` exist and tests pass, but no non-test production consumer of `grad_fns::comparison::where_` exists; the workspace's `where` paths re-export `where_cond` / `where_cond_bt` from `grad_fns::indexing`, not from this file. Blocker #1295. |
+//! | REQ-2 (`where_bt` `BoolTensor` variant) | NOT-STARTED | `where_bt` exists with shape validation; no non-test production consumer outside this module's test mod. Blocker #1297. |
+//! | REQ-3 (device handling + NaN/Inf passthrough) | NOT-STARTED | CPU and GPU forward both work, but the impl materializes inputs on CPU before selecting — a silent round trip. Gated by REQ-1 consumer wiring (#1295). |
+//! | REQ-4 (17 comparison parity ops the route declares) | NOT-STARTED | the 17 ops (`eq`, `ne`, `lt`, `le`, `gt`, `ge`, `logical_and`, `logical_or`, `logical_xor`, `logical_not`, `max`, `min`, `maximum`, `minimum`, `isnan`, `isinf`, `isfinite`) are not implemented in this file; they live in `bool_tensor.rs` or elsewhere. Route retarget tracked under #1293. |
 
 use std::sync::Arc;
 

@@ -7,6 +7,26 @@
 //! - `scatter` — scatters src values into input along an axis
 //! - `scatter_add` — scatter with addition
 //! - `where_cond` — ternary selection
+//!
+//! ## REQ status (per `.design/ferrotorch-core/grad_fns/indexing.md`)
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 (`gather`) | SHIPPED | `GatherBackward` Arc-attached by `ops::indexing::gather` (kernel-layer forward); CPU walk + GPU `scatter_add_1d_f32` path. |
+//! | REQ-2 (`scatter`) | SHIPPED | `ScatterBackward` returns `[grad_input zeroed at written positions, grad_src gathered from those positions]`; Arc-attached by `ops::indexing::scatter`. |
+//! | REQ-3 (`scatter_add`) | SHIPPED | `ScatterAddBackward` returns `[grad, grad.gather(dim, index)]`; Arc-attached by `ops::indexing::scatter_add` and consumed transitively by `grad_fns::cumulative::cummax/cummin` VJPs. |
+//! | REQ-4 (`scatter_reduce`) | SHIPPED | runner arm + impl landed 2026-05-25 closing #1245; 144/168 passed (24 narrower-contract skips). |
+//! | REQ-5 (`index_select`) | SHIPPED | three forward variants (`index_select_1d`, `index_select_1d_it`, `index_select_dim`) + `IndexSelectBackward` / `IndexSelectDimBackward`; non-test consumer is `RandomHorizontalFlip::apply` in `ferrotorch-data/src/transforms.rs`. |
+//! | REQ-6 (`index_add`) | SHIPPED | runner arm + impl landed closing #1247; 72/72 passed. |
+//! | REQ-7 (`index_copy`) | SHIPPED | runner arm + impl landed closing #1248; 24/24 passed. |
+//! | REQ-8 (`index_fill`) | SHIPPED | `index_fill` + `IndexFillBackward` consumed by `Tensor::index_fill_t` in `methods.rs`; closes #1249. |
+//! | REQ-9 (`masked_select`) | SHIPPED | `MaskedSelectBackward` Arc-attached by `ops::indexing::masked_select`; consumer is `Tensor::masked_select`. |
+//! | REQ-10 (`masked_fill`) | SHIPPED | `MaskedFillBackward` consumed by `Tensor::masked_fill` (which routes through `masked_fill_bt`); GPU-resident path via `masked_fill_dt` kernel (#1187). |
+//! | REQ-11 (`masked_scatter`) | SHIPPED | runner arm + impl landed closing #1252; 32/32 passed. |
+//! | REQ-12 (`take`) | SHIPPED | runner arm + impl landed closing #1253; 64/80 passed (0-d / negative-index skips). |
+//! | REQ-13 (`put`) | SHIPPED | runner arm + impl landed closing #1254; 192/224 passed (0-d / negative-index skips). |
+//! | REQ-14 (`where`) | SHIPPED | `WhereCondBackward` Arc-attached by `ops::indexing::where_cond` / `where_cond_bt`; GPU-resident path via `masked_fill_dt` + `bool_not` (#1187). |
+//! | REQ-15 (shared scatter-add helpers: `gather_dst_flat_indices`, `scatter_src_flat_indices`, `scatter_write_mask`, `flat_index`, `increment_coords`) | SHIPPED | internal scaffolding consumed by REQ-1 / REQ-2 / REQ-3 implementations above. |
 
 use std::sync::Arc;
 

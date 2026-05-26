@@ -4,6 +4,47 @@
 //! are essentially bookkeeping — the data moves around but is never scaled.
 //! Their VJPs either reinterpret the gradient buffer under the original
 //! shape, transpose it, or split/sum along axes.
+//!
+//! ## REQ status (per `.design/ferrotorch-core/grad_fns/shape.md`)
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 (`view`) | SHIPPED | `Tensor::view_t` in `methods.rs` delegates to `grad_fns::shape::reshape`; parity-sweep `view` reports `56/56 passed`. |
+//! | REQ-2 (`reshape`) | SHIPPED | `reshape` + `ReshapeBackward` consumed by `Tensor::reshape_t`, `flex_attention.rs`, `einsum.rs`; parity `56/56 passed`. |
+//! | REQ-3 (`flatten`) | SHIPPED | `flatten` + `FlattenBackward` consumed by `Tensor::flatten_t` and `Tensor::flatten` (method body in `tensor.rs`); parity `48/48 passed`. |
+//! | REQ-4 (`unflatten`) | NOT-STARTED | only `nn::Unflatten` Module exists; no free-function op. Blocker #1342. |
+//! | REQ-5 (`squeeze`) | SHIPPED | `squeeze` + `SqueezeBackward` consumed by `Tensor::squeeze_t` and `einsum.rs`; runner-arm gap tracked under #1340. |
+//! | REQ-6 (`unsqueeze`) | SHIPPED | `unsqueeze` + `UnsqueezeBackward` consumed by `Tensor::unsqueeze_t`, `einsum.rs`, and `grad_fns::indexing` broadcast prep; runner-arm gap #1340. |
+//! | REQ-7 (`permute`) | SHIPPED | `permute_t` + `PermuteBackward` live in `methods.rs`; `TransposeBackward` and `transpose_2d` here delegate through it; consumers include `Tensor::permute` + pervasive einsum/vmap callers; runner-arm gap #1340. |
+//! | REQ-8 (`transpose` / 2-D `t`) | SHIPPED | `transpose_2d` + `TransposeBackward` here, plus `Tensor::transpose` in `methods.rs` building a swap perm; consumer is `Tensor::t`; runner-arm gap #1340. |
+//! | REQ-9 (`swapaxes`) | NOT-STARTED | pure alias of transpose; not implemented. Blocker #1342. |
+//! | REQ-10 (`swapdims`) | NOT-STARTED | pure alias of transpose; not implemented. Blocker #1342. |
+//! | REQ-11 (`expand`) | SHIPPED | `expand` + `ExpandBackward` consume the shared `arithmetic::reduce_grad_to_shape`; GPU fast path via `broadcast_add_{f32,f64}`; consumed by `grad_fns::indexing` broadcast prep and `einsum.rs`; runner-arm gap #1340. |
+//! | REQ-12 (`expand_as`) | NOT-STARTED | pure alias of expand; not implemented as a named pub fn. Blocker #1342. |
+//! | REQ-13 (`repeat`) | NOT-STARTED | tile-style `Tensor.repeat` not implemented; the `einops::repeat` is unrelated. Blocker #1342. |
+//! | REQ-14 (`repeat_interleave`) | NOT-STARTED | not implemented. Blocker #1342. |
+//! | REQ-15 (`cat`) | SHIPPED | `cat` + `CatBackward` with byte-width-dispatched `strided_cat` GPU fast path; consumers in `flex_attention.rs` and `lib.rs` re-export; runner-arm gap #1340. |
+//! | REQ-16 (`stack`) | SHIPPED | `vmap::stack` is the pub-API surface (grandfathered per S5); autograd inherited from `unsqueeze + cat`; runner-arm gap #1340. |
+//! | REQ-17 (`vstack`) | NOT-STARTED | not implemented. Blocker #1342. |
+//! | REQ-18 (`hstack`) | NOT-STARTED | not implemented. Blocker #1342. |
+//! | REQ-19 (`dstack`) | NOT-STARTED | not implemented. Blocker #1342. |
+//! | REQ-20 (`column_stack`) | NOT-STARTED | not implemented. Blocker #1342. |
+//! | REQ-21 (`split`) | SHIPPED | `SplitBackward` here is consumed by `methods::split_t` per the explicit `use crate::grad_fns::shape::SplitBackward`; runner-arm gap #1340. |
+//! | REQ-22 (`chunk`) | SHIPPED | `methods::chunk_t` shares the `SplitBackward` machinery from this file; runner-arm gap #1340. |
+//! | REQ-23 (`tensor_split`) | NOT-STARTED | not implemented. Blocker #1342. |
+//! | REQ-24 (`narrow`) | SHIPPED | `narrow_t` + `NarrowBackward` live in `methods.rs`; consumer is `Tensor::narrow`; runner-arm gap #1340. |
+//! | REQ-25 (`unbind`) | NOT-STARTED | not implemented. Blocker #1342. |
+//! | REQ-26 (`broadcast_tensors`) | NOT-STARTED | ingredients exist but the named bundled op does not. Blocker #1342. |
+//! | REQ-27 (`broadcast_to`) | NOT-STARTED | pure alias of expand; not implemented as a named pub fn. Blocker #1342. |
+//! | REQ-28 (`broadcast_shapes`) | SHIPPED | `broadcast_shapes` lives in `crate::shape` (sister utility module); consumed across `meta_propagate.rs`, `ops/elementwise.rs`, `grad_fns/indexing.rs`, `grad_fns/arithmetic.rs`; runner-arm gap #1340. |
+//! | REQ-29 (`movedim`) | NOT-STARTED | not implemented. Blocker #1342. |
+//! | REQ-30 (`moveaxis`) | NOT-STARTED | pure alias of movedim; not implemented. Blocker #1342. |
+//! | REQ-31 (`tile`) | NOT-STARTED | not implemented. Blocker #1342. |
+//! | REQ-32 (`roll`) | SHIPPED | `RollBackward` here is consumed by `ops::tensor_ops::roll` (CUDA + CPU forward arms both attach the backward fn); upstream is `TensorTransformations.cpp:110` (route's upstream list is incomplete for this op); runner-arm gap #1340. |
+//! | REQ-33 (`rot90`) | NOT-STARTED | not implemented. Blocker #1342. |
+//! | REQ-34 (`flip`) | NOT-STARTED | only a private `flip_kernel` in `ferrotorch-nn::conv` for conv-transpose backward. Blocker #1342. |
+//! | REQ-35 (`fliplr`) | NOT-STARTED | pure alias of `flip({1})`; not implemented. Blocker #1342. |
+//! | REQ-36 (`flipud`) | NOT-STARTED | pure alias of `flip({0})`; not implemented. Blocker #1342. |
 
 use std::any::TypeId;
 use std::sync::Arc;

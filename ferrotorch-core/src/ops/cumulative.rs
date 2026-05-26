@@ -5,6 +5,19 @@
 //! nodes live in `grad_fns::cumulative`.
 //!
 //! [CL-306]
+//!
+//! ## REQ status (per `.design/ferrotorch-core/ops/cumulative.md`)
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 (`cumsum_forward`) | SHIPPED | mirrors `cumsum_cpu_kernel` (registered as `cumsum_stub`, dispatched by `TORCH_IMPL_FUNC(cumsum_out)`); non-test consumer is the `cumsum_forward` invocation inside `grad_fns::cumulative::cumsum`; indirect parity `[cumsum] 32/32 passed`. |
+//! | REQ-2 (`cumprod_forward`) | SHIPPED | mirrors `cumprod_cpu_kernel` (registered as `cumprod_stub`); non-test consumer is the `cumprod_forward` invocation inside `grad_fns::cumulative::cumprod`; indirect parity `[cumprod] 80/80 passed`. |
+//! | REQ-3 (`cummax_forward`) | SHIPPED | mirrors `cummax_helper_cpu` dispatching `cummax_cummin_helper<..., std::greater_equal>`; `>=` tie-break + NaN-poison predicate match upstream; non-test consumer is the `cummax_forward` invocation inside `grad_fns::cumulative::cummax` (reached by the `EinopsReduction::Max` arm in `einops.rs`); indirect parity `[cummax] 24/24 passed`; closes #1231. |
+//! | REQ-4 (`cummin_forward`) | SHIPPED | mirrors `cummin_helper_cpu` dispatching `cummax_cummin_helper<..., std::less_equal>`; `<=` tie-break + same NaN-poison; non-test consumer is the `cummin_forward` invocation inside `grad_fns::cumulative::cummin` (reached by `EinopsReduction::Min` in `einops.rs`); indirect parity `[cummin] 24/24 passed`; closes #1231. |
+//! | REQ-5 (`logcumsumexp_forward`) | SHIPPED | mirrors `logcumsumexp_cpu_kernel` (uses `_log_add_exp_helper` for stability); non-test consumer is the `logcumsumexp_forward` invocation inside `grad_fns::cumulative::logcumsumexp`; indirect parity `[logcumsumexp] 48/48 passed`. |
+//! | REQ-6 (`reverse_cumsum` helper) | SHIPPED | mirrors upstream's `w.flip(dim).cumsum(dim).flip(dim)` pattern unrolled into a single reverse triple-loop; non-test consumers are `CumsumBackward::backward` and `LogcumsumexpBackward::backward` in `grad_fns/cumulative.rs`. |
+//! | REQ-7 (`validate_dim`) | SHIPPED | wraps `crate::shape::normalize_axis` mirroring `maybe_wrap_dim` (with deliberate 0-D rejection as defense-in-depth — the autograd-layer fast paths short-circuit 0-D before reaching the kernel); consumed by all five `*_forward` entry points in this file. |
+//! | REQ-8 (`CumExtremeResult` struct) | SHIPPED | mirrors upstream's `std::tuple<Tensor, Tensor>` return; `Vec<usize>` indices (R-DEV-7 deviation since ferrotorch lacks an i64 tensor); re-exported as `pub use ops::cumulative::CumExtremeResult` at the crate root; non-test consumers `grad_fns::cumulative::cummax` / `cummin` / `cumextreme_scalar_identity`. |
 
 use std::any::TypeId;
 

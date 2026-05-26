@@ -4,6 +4,44 @@
 //! Each operation has a backward struct implementing `GradFn<T>` and a public
 //! function that performs the forward pass and attaches the grad_fn to the
 //! result tensor when gradient tracking is enabled.
+//!
+//! ## REQ status (per `.design/ferrotorch-core/grad_fns/transcendental.md`)
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 (`exp`) | SHIPPED | `exp` + `ExpBackward` consumed by `Tensor::exp_t`, forward-AD primal, JIT interpreter, `ExpTransform`, VAE reparameterization, `PoissonNLLBackward`. |
+//! | REQ-2 (`log`) | SHIPPED | `log` + `LogBackward` consumed by `Tensor::log_t`, forward-AD primal, JIT interpreter, `MultivariateNormal`, `ExpTransform` inverse, Dirichlet log-prob. |
+//! | REQ-3 (`sin`) | SHIPPED | `sin` + `SinBackward` consumed by `Tensor::sin_t`, forward-AD primal, and `CosBackward`'s GPU path. |
+//! | REQ-4 (`cos`) | SHIPPED | `cos` + `CosBackward` consumed by `Tensor::cos_t`, forward-AD primal, and `SinBackward`'s GPU path. |
+//! | REQ-5 (`clamp`) | SHIPPED | `clamp` + `ClampBackward` (GPU fast path per #524) consumed by `Tensor::clamp_t`, `SigmoidTransform`, `BCEWithLogitsLoss`, `ReLU6`, and `Hardtanh`. |
+//! | REQ-6 (`exp2`) | SHIPPED | `exp2` + `Exp2Backward` consumed by `Tensor::exp2_t`; closes #1303. |
+//! | REQ-7 (`expm1`) | SHIPPED | `expm1` + `Expm1Backward` consumed by `Tensor::expm1_t`; closes #1305. |
+//! | REQ-8 (`log2`) | SHIPPED | `log2` + `Log2Backward` consumed by `Tensor::log2_t`; closes #1307. |
+//! | REQ-9 (`log10`) | SHIPPED | `log10` + `Log10Backward` consumed by `Tensor::log10_t`; closes #1309. |
+//! | REQ-10 (`log1p`) | SHIPPED | `log1p` + `Log1pBackward` consumed by `Tensor::log1p_t`; closes #1311. |
+//! | REQ-11 (`tan`) | SHIPPED | `tan` + `TanBackward` (saves output for `1 + tan^2`) consumed by `Tensor::tan_t`; closes #1313. |
+//! | REQ-12 (`asin`) | SHIPPED | `asin` + `AsinBackward` consumed by `Tensor::asin_t`; closes #1315. |
+//! | REQ-13 (`acos`) | SHIPPED | `acos` + `AcosBackward` consumed by `Tensor::acos_t`; closes #1316. |
+//! | REQ-14 (`atan`) | SHIPPED | `atan` + `AtanBackward` consumed by `Tensor::atan_t`; closes #1317. |
+//! | REQ-15 (`atan2`) | NOT-STARTED | binary op, no `Atan2Backward`. Blocker #1318. |
+//! | REQ-16 (`sinh`) | SHIPPED | `sinh` + `SinhBackward` consumed by `Tensor::sinh_t`; closes #1319. |
+//! | REQ-17 (`cosh`) | SHIPPED | `cosh` + `CoshBackward` consumed by `Tensor::cosh_t`; closes #1320. |
+//! | REQ-18 (`tanh` attribution) | NOT-STARTED | impl lives in `grad_fns::activation`, not this file. Route attribution drift tracked under #1321. |
+//! | REQ-19 (`asinh`) | SHIPPED | `asinh` + `AsinhBackward` consumed by `Tensor::asinh_t`; closes #1322. |
+//! | REQ-20 (`acosh`) | SHIPPED | `acosh` + `AcoshBackward` (real-only branch) consumed by `Tensor::acosh_t`; closes #1323. |
+//! | REQ-21 (`atanh`) | SHIPPED | `atanh` + `AtanhBackward` consumed by `Tensor::atanh_t`; closes #1324. |
+//! | REQ-22 (`sinc`) | SHIPPED | `sinc` + `SincBackward` (continuous extension `sinc(0) = 1`, `sinc'(0) = 0`) consumed by `Tensor::sinc_t`; closes #1325. |
+//! | REQ-23 (`ceil`) | SHIPPED | `ceil` + shared `ZerosLikeBackward { name: "CeilBackward" }` consumed by `Tensor::ceil_t`; closes #1326. |
+//! | REQ-24 (`floor`) | SHIPPED | `floor` + shared `ZerosLikeBackward` consumed by `Tensor::floor_t`; closes #1327. |
+//! | REQ-25 (`round`) | SHIPPED | `round` + `round_half_to_even` RNE helper consumed by `Tensor::round_t`; `round.decimals` overload is a follow-up; closes #1328. |
+//! | REQ-26 (`trunc`) | SHIPPED | `trunc` + shared `ZerosLikeBackward` consumed by `Tensor::trunc_t`; closes #1329. |
+//! | REQ-27 (`frac`) | SHIPPED | `frac` + `FracBackward` (pass-through gradient) consumed by `Tensor::frac_t`; closes #1330. |
+//! | REQ-28 (`sign`) | SHIPPED | `sign` (NaN-propagating, `sign(0) = 0`) + shared `ZerosLikeBackward` consumed by `Tensor::sign_t`; closes #1331. |
+//! | REQ-29 (`signbit`) | NOT-STARTED | requires a Bool-output tensor variant. Blocker #1332. |
+//! | REQ-30 (`clip`) | SHIPPED | `Tensor::clip_t` delegates to `clamp` per upstream's literal pass-through; closes #1333. |
+//! | REQ-31 (`copysign`) | NOT-STARTED | binary op, no `CopysignBackward`. Blocker #1334. |
+//! | REQ-32 (`nextafter`) | NOT-STARTED | binary op, no `NextafterBackward`. Blocker #1335. |
+//! | REQ-33 (`hypot`) | NOT-STARTED | binary op, no `HypotBackward`. Blocker #1336. |
 
 use std::any::TypeId;
 use std::sync::Arc;
