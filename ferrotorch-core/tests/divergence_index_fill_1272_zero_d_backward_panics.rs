@@ -38,7 +38,7 @@
 use ferrotorch_core::grad_fns::indexing::index_fill;
 use ferrotorch_core::int_tensor::IntTensor;
 use ferrotorch_core::storage::TensorStorage;
-use ferrotorch_core::tensor::{GradFn, Tensor};
+use ferrotorch_core::tensor::Tensor;
 
 fn idx_i64(d: Vec<i64>, s: Vec<usize>) -> IntTensor<i64> {
     IntTensor::from_vec(d, s).unwrap()
@@ -52,7 +52,7 @@ fn index_fill_zero_d_backward_filled_must_return_zero_grad() {
     let y = index_fill(&x, 0, &idx_i64(vec![0], vec![1]), -1.0)
         .expect("0-d forward must succeed per #1272");
     let gf = y.grad_fn().expect("grad_fn present");
-    assert_eq!(GradFn::name(&*gf), "IndexFillBackward");
+    assert_eq!(gf.name(), "IndexFillBackward");
     let go = Tensor::from_storage(TensorStorage::cpu(vec![1.0_f32]), vec![], false).unwrap();
     let grads = gf
         .backward(&go)
