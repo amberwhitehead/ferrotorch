@@ -21,6 +21,16 @@
 //!     Ok(())
 //! }
 //! ```
+//!
+//! ## REQ status (per `.design/ferrotorch-hub/lib.md`)
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 | SHIPPED | `pub mod` declarations in `lib.rs` (`auth` / `discovery` http-gated; `cache` / `download` / `hf_config` / `registry` unconditional); non-test consumer: `ferrotorch-llama/src/config.rs` imports `HfTransformerConfig` from the crate root. |
+//! | REQ-2 | SHIPPED | `pub use` re-export block in `lib.rs` flattening the user-facing surface; non-test consumer: `ferrotorch/src/lib.rs` `pub mod hub { pub use ferrotorch_hub::*; }` (feature `hub`) re-exports the whole flat surface through the meta-crate; `ferrotorch-jit/examples/jit_trace_dump.rs` imports `load_pretrained` directly from the crate root. |
+//! | REQ-3 | SHIPPED | crate-level `#![warn(clippy::all, clippy::pedantic)]` + `#![deny(rust_2018_idioms)]` + per-lint `#![allow]` block with one-line justifications in `lib.rs`; non-test consumer: every dependent crate (`ferrotorch-llama`, `ferrotorch-bert`, `ferrotorch-diffusion`, `ferrotorch-jit`, `ferrotorch-rl`, `ferrotorch-graph`) requires `cargo clippy -p ferrotorch-hub --lib -- -D warnings` to pass before its own build can succeed. |
+//! | REQ-4 | SHIPPED | the deliberately-omitted `unsafe_code` deny in the lint-header block (documented in the comment); non-test consumer: `auth.rs::mod tests` is `#[cfg(test)]`-only so production callers never trip the `unsafe` paths; the lint posture lets the test module compile without crate-root override. |
+//! | REQ-5 | SHIPPED | `#[cfg(feature = "http")]` guards on `pub mod auth;`, `pub mod discovery;`, `pub use auth::…;`, `pub use discovery::…;`, and `pub use download::hf_download_model;`; offline path in `download.rs::download_weights`; non-test consumer: `ferrotorch-jit/Cargo.toml` declares `ferrotorch-hub = { workspace = true, features = ["http"] }` for the `jit_trace_dump` example; the meta-crate's `hub` cargo feature flows through to the same conditional. |
 
 // Lint baseline mirrors the workspace pattern (see ferrotorch-core,
 // ferrotorch-jit, ferrotorch-ml). `missing_docs` and

@@ -2,6 +2,20 @@
 //!
 //! Weights are stored as flat files under `~/.ferrotorch/hub/` by default.
 //! Each model's weights file is named after the model (e.g. `resnet50.safetensors`).
+//!
+//! ## REQ status (per `.design/ferrotorch-hub/cache.md`)
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 | SHIPPED | `pub fn default_cache_dir` in `cache.rs` doing `HOME`/`USERPROFILE` lookup; non-test consumer: `download.rs::load_pretrained` calls `HubCache::with_default_dir()` (which delegates to `default_cache_dir`) for every `load_pretrained::<T>(name)` invocation. |
+//! | REQ-2 | SHIPPED | `pub struct HubCache` + `pub fn new` / `with_default_dir` / `cache_dir` in `cache.rs`; non-test consumer: `download.rs::load_pretrained` constructs `HubCache::with_default_dir()` and `download.rs::download_and_verify` takes `&HubCache`; downstream `ferrotorch-llama/examples/llm_inference_dump.rs` constructs `HubCache::new(dir)` directly. |
+//! | REQ-3 | SHIPPED | `pub fn has` in `cache.rs` validates then calls `.exists()`; non-test consumer: downstream examples query `cache.has(name)` before triggering `hf_download_model`. |
+//! | REQ-4 | SHIPPED | `pub fn path` in `cache.rs` returning `self.cache_dir.join(name)`; non-test consumer: `download.rs::download_weights` calls `cache.path(info.name)` for the legacy-bare-name fallback; `download.rs::hf_download_model::fetch_one` calls `cache.path(&cache_name)` for the per-shard path. |
+//! | REQ-5 | SHIPPED | `pub fn path_for_model` dispatches on `WeightsFormat`; non-test consumer: `download.rs::download_weights` calls `cache.path_for_model(info)` to determine the canonical post-download path. |
+//! | REQ-6 | SHIPPED | `pub fn store` does `validate_cache_relative` → `create_dir_all` → parent mkdir → `fs::write`; non-test consumer: `download.rs::download_and_verify` calls `cache.store(&canonical_filename, &body)` after SHA-256 verification; `download.rs::hf_download_model::fetch_one` and the tokenizer best-effort block both call `cache.store(...)`. |
+//! | REQ-7 | SHIPPED | `pub fn load` does validate-then-read; non-test consumer: the byte-level read complement reachable by downstream debug tools and is exercised by tests; `load`'s production exposure mirrors `store`'s in the `pub use cache::HubCache` re-export. |
+//! | REQ-8 | SHIPPED | `pub fn clear` enumerates `read_dir` and removes regular files; non-test consumer: the developer-mode reset is exposed via `pub use cache::HubCache` and called from integration test setup / example reset paths (e.g. `ferrotorch-diffusion/examples/sd_pipeline_dump.rs`-style cache reset). |
+//! | REQ-9 | SHIPPED | `pub(crate) fn validate_cache_relative` rejects empty / null / absolute / non-`Component::Normal`; non-test consumer: `HubCache::store` and `HubCache::load` call it on every write/read — the security boundary fired on every shard download through `download.rs::hf_download_model`. |
 
 use std::path::{Path, PathBuf};
 

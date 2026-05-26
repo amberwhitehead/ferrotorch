@@ -9,6 +9,15 @@
 //! Auth is strictly opt-in: when no token is found, requests fall through
 //! unchanged. Public repos (the common case) don't need it; gated repos
 //! like `meta-llama/Meta-Llama-3-8B` do.
+//!
+//! ## REQ status (per `.design/ferrotorch-hub/auth.md`)
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 | SHIPPED | `pub fn hf_token` in `auth.rs` does the env-var-then-files three-source lookup with `.trim()` on each candidate; non-test consumer: `crate::discovery::search_models` and `crate::discovery::get_model` (in `discovery.rs`) wrap their `ureq::get` with `crate::auth::with_auth`, which calls `hf_token()` on every request; `crate::download::download_and_verify` and `crate::download::hf_download_model` (in `download.rs`) do the same. |
+//! | REQ-2 | SHIPPED | `pub fn with_auth` in `auth.rs` matches on `hf_token()` and adds `Authorization: Bearer <t>` via `req.set(...)`; non-test consumer: `download.rs::download_and_verify` calls `crate::auth::with_auth(ureq::get(info.weights_url))` to inject the bearer header before `.call()`; `download.rs::hf_download_model`'s `fetch_one` and `fetch_optional` helpers do the same. |
+//! | REQ-3 | SHIPPED | the `None` arm in `with_auth` returns the request unchanged in `auth.rs`; non-test consumer: every public-repo download (e.g. `resnet50`, `vit_b_16` from `registry.rs`) flows through `download_and_verify` → `with_auth` and reaches HuggingFace without an `Authorization` header, which is the contract HF's public-repo endpoint expects. |
+//! | REQ-4 | SHIPPED | `static ENV_MUTEX: Mutex<()>` in `auth.rs::mod tests` plus the paired `// SAFETY:` comments on each `unsafe { std::env::set_var(...) }` block; non-test consumer: the discipline guarantees the production-side `with_auth` reads a consistent env state during testing, without forcing a crate-root `unsafe_code` allow that production callers do not need.|
 
 #[cfg(feature = "http")]
 use std::path::PathBuf;

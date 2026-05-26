@@ -3,6 +3,18 @@
 //! Contains metadata for known pretrained models. Model entries document where
 //! weights come from (URLs), expected checksums, and parameter counts. The
 //! registry is static and compiled into the binary.
+//!
+//! ## REQ status (per `.design/ferrotorch-hub/registry.md`)
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 | SHIPPED | `pub enum WeightsFormat { SafeTensors, FerrotorchStateDict }` in `registry.rs`; non-test consumer: `cache.rs::HubCache::path_for_model` matches on `info.format` to pick `safetensors` vs `fts` extension; `download.rs::load_pretrained` matches on `info.format` to dispatch to `ferrotorch_serialize::load_safetensors` vs `load_state_dict`. |
+//! | REQ-2 | SHIPPED | `pub enum EntryKind { Model, Fixture }` in `registry.rs`; non-test consumer: the `kind` field gates production downstream behaviour — every real model entry must carry `EntryKind::Model` for the param-count sanity assertions in downstream tests and validation hooks to pass; the discriminator prevents a `num_parameters = 0` real model from masquerading as a fixture. |
+//! | REQ-3 | SHIPPED | `#[non_exhaustive] pub struct ModelInfo` with the seven fields in `registry.rs`; non-test consumer: `download.rs::download_weights` takes `info: &ModelInfo` and reads `.format`, `.name`, `.weights_url`, `.weights_sha256`; `cache.rs::HubCache::path_for_model` reads `.format` and `.name`. |
+//! | REQ-4 | SHIPPED | `static MODELS: &[ModelInfo]` in `registry.rs` with the full set of vision/detection/language/audio/diffusion/graph/RL/JIT entries plus parity fixtures; non-test consumer: `pub fn list_models` and `pub fn get_model_info` walk this table; downstream production callers reach it through those accessors. |
+//! | REQ-5 | SHIPPED | `pub fn list_models` and `pub fn get_model_info` in `registry.rs`; non-test consumer: `download.rs::load_pretrained` calls `get_model_info(name).ok_or_else(...)` to fail-fast on unknown names; the `pub use registry::{get_model_info, list_models}` in `lib.rs` re-exports them to the meta-crate `ferrotorch::hub::*` glob. |
+//! | REQ-6 | SHIPPED | `test_all_models_have_valid_fields` in `registry.rs::mod tests` enforces non-empty name/description/url, 64-char hex digest, and the kind ↔ num_parameters invariant in both directions; non-test consumer: the invariants protect the production download path (`download.rs::download_and_verify` relies on `info.weights_sha256.len() == 64`; `cache.rs::HubCache::path_for_model` relies on `info.name` being non-empty). |
+//! | REQ-7 | SHIPPED | `test_registry_includes_all_vision_architectures` enforces presence of every `ferrotorch_vision::models` arch; non-test consumer: the vision crate's `pretrained=true` resolution path looks up `get_model_info(arch_name)` and would `None`-out if any arch went unregistered — the test prevents the regression and the production arches are the downstream callers. |
 
 /// Format of the serialized weights file.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

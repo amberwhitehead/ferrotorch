@@ -38,6 +38,17 @@
 //! ```
 //!
 //! CL-383.
+//!
+//! ## REQ status (per `.design/ferrotorch-hub/discovery.md`)
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 | SHIPPED | `pub struct HfModelSummary` with serde `rename`/`alias`/`default` in `discovery.rs`; non-test consumer: `pub use discovery::HfModelSummary` in `lib.rs` and it is the return-element type of `pub fn search_models`, the production discovery entry point. |
+//! | REQ-2 | SHIPPED | `pub struct HfModelInfo` + `pub struct HfRepoFile` in `discovery.rs`; non-test consumer: `pub use discovery::{HfModelInfo, HfRepoFile}` in `lib.rs`; returned by `pub fn get_model`, the per-repo lookup entry point. |
+//! | REQ-3 | SHIPPED | `pub struct SearchQuery` + `pub fn new` + builder methods + `pub(crate) fn to_query_string` in `discovery.rs`; non-test consumer: `discovery.rs::search_models` calls `query.to_query_string()` on every search request; `pub use discovery::SearchQuery` in `lib.rs` exposes the struct so downstream callers build instances. |
+//! | REQ-4 | SHIPPED | `pub fn search_models` in `discovery.rs` doing URL build → auth-decorated GET → `into_json` → `populate_authors`; non-test consumer: `pub use discovery::search_models` in `lib.rs`; the URL/auth/json plumbing is exercised by every search call made through the meta-crate `ferrotorch::hub::search_models` chain. |
+//! | REQ-5 | SHIPPED | `pub fn get_model` in `discovery.rs` with empty-id guard + auth-decorated GET + json + author populate; non-test consumer: `pub use discovery::get_model` in `lib.rs`; per-repo lookups for `repo_id → HfModelInfo` flow through this fn. |
+//! | REQ-6 | SHIPPED | private `fn url_encode` in `discovery.rs` doing RFC 3986 unreserved-subset percent-encoding; non-test consumer: `SearchQuery::to_query_string` calls it for every string-valued parameter, and `to_query_string` is called by `search_models` on every search. |
 
 #[cfg(feature = "http")]
 use ferrotorch_core::{FerrotorchError, FerrotorchResult};

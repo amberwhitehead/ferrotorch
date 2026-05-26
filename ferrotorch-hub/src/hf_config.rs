@@ -22,6 +22,18 @@
 //! assert_eq!(cfg.num_attention_heads, 32);
 //! assert_eq!(cfg.num_key_value_heads(), 8); // GQA
 //! ```
+//!
+//! ## REQ status (per `.design/ferrotorch-hub/hf_config.md`)
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 | SHIPPED | `#[non_exhaustive] pub struct HfTransformerConfig` + `#[derive(Debug, Clone, Deserialize)]` in `hf_config.rs`; non-test consumer: `ferrotorch-llama/src/config.rs` imports `HfTransformerConfig` (line 8) and `LlamaConfig::from_hf(hf: &HfTransformerConfig)` (line 126) takes a reference and dispatches its fields. |
+//! | REQ-2 | SHIPPED | required fields (`hidden_size`, `num_hidden_layers`, `num_attention_heads`, `intermediate_size`, `max_position_embeddings`, `vocab_size`) declared without `#[serde(default)]` in `hf_config.rs`; non-test consumer: `ferrotorch-llama/src/config.rs::LlamaConfig::from_hf` reads each of those fields directly (lines 142-147). |
+//! | REQ-3 | SHIPPED | every optional field marked `#[serde(default)]` or `#[serde(default = "default_<name>")]` plus the three default fns in `hf_config.rs`; non-test consumer: `LlamaConfig::from_hf` reads `hf.rms_norm_eps`, `hf.rope_theta`, `hf.tie_word_embeddings`, `hf.hidden_act`, `hf.hidden_act_param` — every accessor depends on the default surface. |
+//! | REQ-4 | SHIPPED | `pub fn from_json_str` + `pub fn from_file` (`impl HfTransformerConfig`) with I/O / UTF-8 / parse error arms; non-test consumer: `ferrotorch-llama/examples/llama3_8b.rs`, `llama3_8b_gpu.rs`, `llama3_70b_gpu.rs`, `prosparse_7b_gpu.rs`, `llm_inference_dump.rs` all call `HfTransformerConfig::from_file(cache.path("config.json"))` after `hf_download_model` returns. |
+//! | REQ-5 | SHIPPED | serde's default `deny_unknown_fields = false` (no annotation overriding) on `HfTransformerConfig` in `hf_config.rs`; non-test consumer: every real-world HF config (e.g. Llama 3 8B with `attention_bias`, `bos_token_id`, `pretraining_tp`, `transformers_version`, `use_cache`) parses cleanly into the struct downstream `LlamaConfig::from_hf` consumes. |
+//! | REQ-6 | SHIPPED | `pub fn num_key_value_heads`, `pub fn head_dim`, `pub fn is_gqa` (`impl HfTransformerConfig`); non-test consumer: `ferrotorch-llama/src/config.rs::LlamaConfig::from_hf` calls `hf.num_key_value_heads()` (line 147); downstream Llama code uses `hf.head_dim()` and `hf.is_gqa()` to pick attention kernels. |
+//! | REQ-7 | SHIPPED | `pub fn validate` (`impl HfTransformerConfig`) with the five guard arms (positive counts, divisibility, supported activation); non-test consumer: `ferrotorch-llama/src/config.rs::LlamaConfig::from_hf` calls `hf.validate()?` as its first step (line 127) before reading any field. |
 
 use std::path::Path;
 

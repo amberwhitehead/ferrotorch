@@ -5,6 +5,20 @@
 //! client and verified against `ModelInfo::weights_sha256` before being
 //! cached and returned. When the `http` feature is disabled, the user
 //! must place weights manually in the cache directory.
+//!
+//! ## REQ status (per `.design/ferrotorch-hub/download.md`)
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 | SHIPPED | `pub fn download_weights` in `download.rs` doing cache-hit → legacy-bare → http-fallback → http-off-error; non-test consumer: `download.rs::load_pretrained` calls `download_weights(info, &cache)` on every `load_pretrained::<T>(name)`; `ferrotorch-jit/examples/jit_trace_dump.rs` exercises the chain via `use ferrotorch_hub::load_pretrained;`. |
+//! | REQ-2 | SHIPPED | `pub fn load_pretrained<T: Float>` in `download.rs` does registry lookup → cache construction → `download_weights` → format-dispatch to `ferrotorch_serialize::load_*`; non-test consumer: `pub use download::load_pretrained` in `lib.rs`; `ferrotorch-jit/examples/jit_trace_dump.rs` imports and calls `load_pretrained`. |
+//! | REQ-3 | SHIPPED | `fn download_and_verify` (http-gated, private) doing auth-GET → cap-read → SHA-256 → compare → `cache.store` flow; non-test consumer: `download.rs::download_weights` calls `download_and_verify(info, cache)` on every cache-miss under `#[cfg(feature = "http")]`. |
+//! | REQ-4 | SHIPPED | `fn is_placeholder_sha256` + the early-return guard in `download_and_verify`; non-test consumer: the same `download_weights` chain fires this guard before every download; calling `load_pretrained("unet")` (still on the all-zero placeholder per `registry.rs`'s inline doc) returns the fail-fast `InvalidArgument`. |
+//! | REQ-5 | SHIPPED | `pub fn hf_download_model` in `download.rs` (http-gated); non-test consumer: `pub use download::hf_download_model` in `lib.rs`; called from `ferrotorch-llama/examples/llm_inference_dump.rs`, `ferrotorch-bert/examples/text_embedding_dump.rs`, `ferrotorch-diffusion/examples/{clip_text_encode_dump, vae_decode_dump, unet_predict_dump, unet_probe_dump, sd_pipeline_dump}.rs`, `ferrotorch-graph/examples/gcn_inference_dump.rs`, `ferrotorch-rl/examples/ppo_policy_dump.rs`. |
+//! | REQ-6 | SHIPPED | the `repo.split('/')` + per-segment `sanitize_path_component(part, "repo component")` block at the top of `hf_download_model`; non-test consumer: every shard download triggered by the example binaries fires this validation on the user-supplied `repo` and `revision`. |
+//! | REQ-7 | SHIPPED | the `sanitize_path_component(s, "shard filename")` call inside the `weight_map` loop in `hf_download_model`; non-test consumer: every parsed `model.safetensors.index.json` from a real HF download flows through this guard; example binaries are the production callers. |
+//! | REQ-8 | SHIPPED | `fn assert_within_cache` + `fn lexical_normalize` in `download.rs`; non-test consumer: `hf_download_model::fetch_one` calls `assert_within_cache(cache.cache_dir(), &final_path)` before every `cache.store`; the tokenizer best-effort block does the same. |
+//! | REQ-9 | SHIPPED | the tokenizer best-effort loop persisting bytes via `assert_within_cache` + `cache.store` (the #1147 fix); non-test consumer: `ferrotorch-llama/examples/llm_inference_dump.rs` and `ferrotorch-bert/examples/text_embedding_dump.rs` load `tokenizer.json` from the cache after `hf_download_model` returns. |
 
 use std::path::PathBuf;
 
