@@ -1937,13 +1937,11 @@ fn dispatch_f32(
             };
             match &dims_opt {
                 None => {
-                    let unbiased = correction == 1.0;
-                    if correction != 0.0 && correction != 1.0 {
-                        // Full-reduction `std(unbiased)` only supports
-                        // correction in {0, 1}; non-{0,1} is NOT-STARTED.
-                        return Ok(None);
-                    }
-                    let r = grad_fns::reduction::std(&a, unbiased)?;
+                    // Full-reduction std with arbitrary correction —
+                    // mirrors upstream `std_var_all_cpu` correction-scalar
+                    // path at `ReduceOps.cpp:1858-1864`. Closes #1346
+                    // audit REQ-8 correction-API gap.
+                    let r = grad_fns::reduction::std_with_correction(&a, correction)?;
                     if keepdim && in_ndim > 0 {
                         let ones = vec![1usize; in_ndim];
                         let d = r.data()?.to_vec();
@@ -2002,11 +2000,11 @@ fn dispatch_f32(
             };
             match &dims_opt {
                 None => {
-                    let unbiased = correction == 1.0;
-                    if correction != 0.0 && correction != 1.0 {
-                        return Ok(None);
-                    }
-                    let r = grad_fns::reduction::var(&a, unbiased)?;
+                    // Full-reduction var with arbitrary correction —
+                    // mirrors upstream `std_var_all_cpu` correction-scalar
+                    // path at `ReduceOps.cpp:1858-1864`. Closes #1346
+                    // audit REQ-8 correction-API gap.
+                    let r = grad_fns::reduction::var_with_correction(&a, correction)?;
                     if keepdim && in_ndim > 0 {
                         let ones = vec![1usize; in_ndim];
                         let d = r.data()?.to_vec();
@@ -2444,6 +2442,606 @@ fn dispatch_f32(
             grad_fns::activation::glu(&a, dim)?
         })),
 
+        // ------------------------------------------------------------------
+        // Shape op cluster — wired 2026-05-25 to close umbrella #1340
+        // (runner arms for the shape ops in
+        // `.design/ferrotorch-core/grad_fns/shape.md`'s SHIPPED REQ set:
+        // view, reshape, flatten, squeeze, unsqueeze, permute, transpose,
+        // expand, cat, stack, split, chunk, narrow, roll). The prior
+        // dispatch's claim of "runner arm: view|reshape in dispatch_f32"
+        // was false — only `transpose`/`expand` branches existed inside
+        // the *probe* materializer (`run_probe_ferrotorch` at :2749/:2755),
+        // not in `dispatch_f32`. These arms decode op_db's
+        // shape-list / dim-int / list-of-tensors envelopes and route to
+        // the matching ferrotorch entry points (`grad_fns::shape::*`,
+        // `methods::{view_t, permute_t, narrow_t, split_t, chunk_t}`,
+        // `vmap::stack`, `ops::tensor_ops::roll`). For Vec-returning ops
+        // (split / chunk) the runner's `sweep_with_cap` selects
+        // `expected_v = output[0]` when the wire output is a JSON array
+        // (`main.rs:3147`) — so each arm returns the first chunk's
+        // tensor to gate value-equality. `broadcast_shapes` is
+        // intentionally excluded: it takes shape lists, not tensors,
+        // so the f32-tensor dispatch_f32 envelope is the wrong fit
+        // (the op_db sample's args are `[List[int], List[int]]` and
+        // its output is `List[int]`, not a tensor).
+        // ------------------------------------------------------------------
+
+        // `torch.view(input, *shape)` — op_db emits
+        // `args = [tensor, [d0, d1, ...]]`. ferrotorch's
+        // `view_t(input, &[i64])` mirrors upstream
+        // `aten/src/ATen/native/TensorShape.cpp:4563 Tensor view`. Rejects
+        // non-contiguous inputs (`methods.rs:1296`); samples with non-
+        // contiguous inputs are skipped via the upstream error path.
+        "view" => {
+            let input = unary("view")?;
+            let shape =
+                arg_dim_list_at(1).ok_or("view: arg 1 must be a shape list [d0, d1, ...]")?;
+            // ferrotorch's view_t errors on non-contiguous input — that's the
+            // upstream contract too (`computeStride` returning nullopt). Skip
+            // such samples defensively.
+            if !input.is_contiguous() {
+                return Ok(None);
+            }
+            Ok(Some(ferrotorch_core::view_t(&input, &shape)?))
+        }
+
+        // `torch.reshape(input, shape)` — op_db emits
+        // `args = [tensor, [d0, d1, ...]]`. ferrotorch's
+        // `grad_fns::shape::reshape(input, &[isize])` mirrors upstream
+        // `TensorShape.cpp:2129 Tensor reshape`; handles the single `-1`
+        // infer slot via `resolve_shape` (`shape.rs:1029`).
+        "reshape" => {
+            let input = unary("reshape")?;
+            let raw = arg_dim_list_at(1).ok_or("reshape: arg 1 must be a shape list")?;
+            let isize_shape: Vec<isize> = raw.iter().map(|&d| d as isize).collect();
+            Ok(Some(grad_fns::shape::reshape(&input, &isize_shape)?))
+        }
+
+        // `torch.flatten(input, start_dim=0, end_dim=-1)` — op_db emits the
+        // no-arg form (full flatten to 1-D) AND the kwarg-driven partial
+        // form `kwargs={'start_dim': 1, 'end_dim': -1}`. ferrotorch's
+        // `grad_fns::shape::flatten` only implements the full-flatten case;
+        // we compute the partial-flatten shape locally then dispatch through
+        // `grad_fns::shape::reshape` so the existing `ReshapeBackward`
+        // covers the partial case (upstream `TensorShape.cpp:4178` itself
+        // reduces partial flatten to a reshape).
+        "flatten" => {
+            let input = unary("flatten")?;
+            let ndim = input.ndim() as i64;
+            let start_dim = kwargs
+                .get("start_dim")
+                .and_then(Value::as_i64)
+                .or_else(|| args.get(1).and_then(Value::as_i64))
+                .unwrap_or(0);
+            let end_dim = kwargs
+                .get("end_dim")
+                .and_then(Value::as_i64)
+                .or_else(|| args.get(2).and_then(Value::as_i64))
+                .unwrap_or(-1);
+            // 0-d input: torch.flatten returns a 1-element 1-D tensor.
+            if ndim == 0 {
+                return Ok(Some(grad_fns::shape::reshape(&input, &[1isize])?));
+            }
+            let normalize = |d: i64| -> Result<usize, Box<dyn std::error::Error>> {
+                let r = if d < 0 { d + ndim } else { d };
+                if !(0..ndim).contains(&r) {
+                    return Err(format!("flatten: dim {d} out of range for ndim {ndim}").into());
+                }
+                Ok(r as usize)
+            };
+            let s = normalize(start_dim)?;
+            let e = normalize(end_dim)?;
+            if s > e {
+                return Err(format!("flatten: start_dim {s} > end_dim {e}").into());
+            }
+            let in_shape = input.shape();
+            // Build target shape: keep dims [0, s), then collapsed dim, then [e+1, ndim).
+            let mut new_shape: Vec<isize> = Vec::with_capacity(in_shape.len() - (e - s));
+            for d in &in_shape[..s] {
+                new_shape.push(*d as isize);
+            }
+            let collapsed: usize = in_shape[s..=e].iter().product();
+            new_shape.push(collapsed as isize);
+            for d in &in_shape[e + 1..] {
+                new_shape.push(*d as isize);
+            }
+            Ok(Some(grad_fns::shape::reshape(&input, &new_shape)?))
+        }
+
+        // `torch.squeeze(input)` / `torch.squeeze(input, dim)` /
+        // `torch.squeeze(input, dims)` — op_db emits TWO variants:
+        // (a) bare `squeeze` (no-arg removes ALL size-1 dims) and
+        // (b) `squeeze.multiple` (tuple-of-dims). ferrotorch's
+        // `grad_fns::shape::squeeze(input, axis: isize)` is single-dim.
+        // Full-squeeze and multi-dim squeeze are unfolded via sequential
+        // single-dim squeeze calls in *descending* order so axis indices
+        // stay valid after each drop. Non-1 named dims skip — ferrotorch's
+        // documented departure (AC-17) errors there while upstream is a no-op,
+        // so the value would diverge; honest skip is the right gate.
+        "squeeze" => {
+            let input = unary("squeeze")?;
+            let dims_to_drop: Vec<usize> = match args.get(1) {
+                None => {
+                    // Full squeeze — collect all size-1 axes.
+                    let mut out: Vec<usize> = Vec::new();
+                    for (i, &s) in input.shape().iter().enumerate() {
+                        if s == 1 {
+                            out.push(i);
+                        }
+                    }
+                    out
+                }
+                Some(Value::Number(n)) => {
+                    let d = n.as_i64().ok_or("squeeze: dim not int")?;
+                    let ndim = input.ndim() as i64;
+                    if ndim == 0 {
+                        return Ok(None);
+                    }
+                    let r = if d < 0 { d + ndim } else { d };
+                    if !(0..ndim).contains(&r) {
+                        return Err(
+                            format!("squeeze: dim {d} out of range for ndim {ndim}").into()
+                        );
+                    }
+                    let r = r as usize;
+                    if input.shape()[r] != 1 {
+                        return Ok(None);
+                    }
+                    vec![r]
+                }
+                Some(Value::Array(arr)) => {
+                    let ndim = input.ndim() as i64;
+                    if ndim == 0 {
+                        return Ok(None);
+                    }
+                    let mut out: Vec<usize> = Vec::with_capacity(arr.len());
+                    for v in arr {
+                        let d = v.as_i64().ok_or("squeeze: dim list element not int")?;
+                        let r = if d < 0 { d + ndim } else { d };
+                        if !(0..ndim).contains(&r) {
+                            return Err(format!(
+                                "squeeze: dim {d} out of range for ndim {ndim}"
+                            )
+                            .into());
+                        }
+                        let r = r as usize;
+                        if input.shape()[r] == 1 {
+                            out.push(r);
+                        }
+                    }
+                    out.sort_unstable();
+                    out.dedup();
+                    out
+                }
+                Some(other) => {
+                    return Err(format!("squeeze: arg 1 unexpected: {other}").into());
+                }
+            };
+            let mut t = input;
+            let mut sorted = dims_to_drop;
+            sorted.sort_unstable();
+            for &d in sorted.iter().rev() {
+                t = grad_fns::shape::squeeze(&t, d as isize)?;
+            }
+            Ok(Some(t))
+        }
+
+        // `torch.unsqueeze(input, dim)` — op_db emits `args = [tensor, dim]`.
+        // ferrotorch's `grad_fns::shape::unsqueeze(input, axis: isize)`
+        // mirrors upstream `TensorShape.cpp:4109` with range `[-(ndim+1), ndim]`.
+        "unsqueeze" => {
+            let input = unary("unsqueeze")?;
+            let dim = args
+                .get(1)
+                .and_then(Value::as_i64)
+                .ok_or("unsqueeze: arg 1 (dim) must be an int")?;
+            Ok(Some(grad_fns::shape::unsqueeze(&input, dim as isize)?))
+        }
+
+        // `torch.permute(input, dims)` — op_db emits `args = [tensor, [perm]]`.
+        // ferrotorch's `permute_t(input, &[usize])` mirrors upstream
+        // `TensorShape.cpp:1829`. We resolve negative indices here (op_db
+        // emits e.g. `[0, -2, -1, 1]`) before delegating.
+        "permute" => {
+            let input = unary("permute")?;
+            let perm_raw = arg_dim_list_at(1).ok_or("permute: arg 1 must be a perm list")?;
+            let ndim = input.ndim() as i64;
+            // 0-d input + empty perm: identity (torch returns input).
+            if ndim == 0 && perm_raw.is_empty() {
+                return Ok(Some(input));
+            }
+            let mut perm: Vec<usize> = Vec::with_capacity(perm_raw.len());
+            for d in &perm_raw {
+                let r = if *d < 0 { *d + ndim } else { *d };
+                if !(0..ndim).contains(&r) {
+                    return Err(
+                        format!("permute: dim {d} out of range for ndim {ndim}").into()
+                    );
+                }
+                perm.push(r as usize);
+            }
+            // permute_t returns a strided view; the value-equality gate
+            // `assert_close_f32` consumes the result via `.data_vec()` which
+            // gathers elements in C-order, so we no longer need to call
+            // `.contiguous()` here — the stride-view passes through
+            // unchanged and `data_vec()` does the gather. Matches upstream
+            // `aten/src/ATen/native/TensorShape.cpp:1829 Tensor permute`
+            // returning a zero-copy stride view.
+            Ok(Some(ferrotorch_core::permute_t(&input, &perm)?))
+        }
+
+        // `torch.transpose(input, dim0, dim1)` — op_db emits
+        // `args = [tensor, dim0, dim1]`. The n-D form builds a permutation
+        // swapping dim0 ↔ dim1 then delegates to `permute_t`; upstream
+        // `TensorShape.cpp:3816`. Negative dims allowed (`maybe_wrap_dim`).
+        "transpose" => {
+            let input = unary("transpose")?;
+            let d0 = args
+                .get(1)
+                .and_then(Value::as_i64)
+                .ok_or("transpose: arg 1 (dim0) must be an int")?;
+            let d1 = args
+                .get(2)
+                .and_then(Value::as_i64)
+                .ok_or("transpose: arg 2 (dim1) must be an int")?;
+            let ndim = input.ndim() as i64;
+            if ndim == 0 {
+                return Ok(Some(input));
+            }
+            let wrap = |d: i64| -> Result<usize, Box<dyn std::error::Error>> {
+                let r = if d < 0 { d + ndim } else { d };
+                if !(0..ndim).contains(&r) {
+                    return Err(format!("transpose: dim {d} out of range for ndim {ndim}").into());
+                }
+                Ok(r as usize)
+            };
+            let a = wrap(d0)?;
+            let b = wrap(d1)?;
+            let mut perm: Vec<usize> = (0..input.ndim()).collect();
+            perm.swap(a, b);
+            Ok(Some(ferrotorch_core::permute_t(&input, &perm)?))
+        }
+
+        // `torch.Tensor.expand(*sizes)` — op_db emits `args = [tensor, [sizes]]`,
+        // sizes may contain -1 (meaning "keep input dim unchanged"). ferrotorch's
+        // `grad_fns::shape::expand(input, &[usize])` mirrors upstream
+        // `TensorShape.cpp:1344`. We resolve any -1 entries to the input's
+        // dim size before delegating (the resolution must right-align: when
+        // the target adds prepend dims, those new dims cannot be -1 per upstream).
+        "expand" => {
+            let input = unary("expand")?;
+            let target =
+                arg_dim_list_at(1).ok_or("expand: arg 1 must be a shape list")?;
+            let in_shape = input.shape();
+            let in_ndim = in_shape.len();
+            let target_ndim = target.len();
+            if target_ndim < in_ndim {
+                return Err(format!(
+                    "expand: target ndim {target_ndim} < input ndim {in_ndim}"
+                )
+                .into());
+            }
+            let pad = target_ndim - in_ndim;
+            let mut resolved: Vec<usize> = Vec::with_capacity(target_ndim);
+            for (i, &d) in target.iter().enumerate() {
+                if d == -1 {
+                    if i < pad {
+                        return Err(
+                            "expand: -1 not allowed on prepended dim".into()
+                        );
+                    }
+                    resolved.push(in_shape[i - pad]);
+                } else if d < 0 {
+                    return Err(
+                        format!("expand: negative size {d} (other than -1) not allowed").into(),
+                    );
+                } else {
+                    resolved.push(d as usize);
+                }
+            }
+            Ok(Some(grad_fns::shape::expand(&input, &resolved)?))
+        }
+
+        // `torch.cat(tensors, dim=0)` — op_db emits
+        // `args = [List[Tensor]]`, `kwargs = {dim: int}` (sometimes dim is
+        // positional). ferrotorch's `grad_fns::shape::cat(tensors, axis: isize)`
+        // mirrors upstream `TensorShape.cpp:676 cat_out_cpu` / `:772 cat`.
+        "cat" => {
+            let list_v = args.first().ok_or("cat: missing tensor list arg")?;
+            let arr = list_v
+                .as_array()
+                .ok_or("cat: arg 0 must be a list of tensors")?;
+            let mut tensors: Vec<Tensor<f32>> = Vec::with_capacity(arr.len());
+            for (i, v) in arr.iter().enumerate() {
+                let wt = unwrap_tensor_arg(v)
+                    .ok_or_else(|| format!("cat: list element {i} is not a tensor"))?;
+                tensors.push(wt.to_f32()?);
+            }
+            if tensors.is_empty() {
+                return Err("cat: empty tensor list".into());
+            }
+            let dim = kwargs
+                .get("dim")
+                .and_then(Value::as_i64)
+                .or_else(|| args.get(1).and_then(Value::as_i64))
+                .unwrap_or(0);
+            Ok(Some(grad_fns::shape::cat(&tensors, dim as isize)?))
+        }
+
+        // `torch.stack(tensors, dim=0)` — op_db emits
+        // `args = [List[Tensor], dim]` (dim positional, may be negative).
+        // ferrotorch's `vmap::stack(&[Tensor], usize)` is non-negative-dim
+        // only; we normalize here before dispatch.
+        "stack" => {
+            let list_v = args.first().ok_or("stack: missing tensor list arg")?;
+            let arr = list_v
+                .as_array()
+                .ok_or("stack: arg 0 must be a list of tensors")?;
+            let mut tensors: Vec<Tensor<f32>> = Vec::with_capacity(arr.len());
+            for (i, v) in arr.iter().enumerate() {
+                let wt = unwrap_tensor_arg(v)
+                    .ok_or_else(|| format!("stack: list element {i} is not a tensor"))?;
+                tensors.push(wt.to_f32()?);
+            }
+            if tensors.is_empty() {
+                return Err("stack: empty tensor list".into());
+            }
+            let dim_raw = args
+                .get(1)
+                .and_then(Value::as_i64)
+                .or_else(|| kwargs.get("dim").and_then(Value::as_i64))
+                .unwrap_or(0);
+            let nd = tensors[0].ndim() as i64;
+            // stack inserts a new dim, so valid range is [-(nd+1), nd].
+            let normalized = if dim_raw < 0 { dim_raw + nd + 1 } else { dim_raw };
+            if normalized < 0 || normalized > nd {
+                return Err(format!(
+                    "stack: dim {dim_raw} out of range for inputs with ndim {nd}"
+                )
+                .into());
+            }
+            Ok(Some(ferrotorch_core::vmap::stack(
+                &tensors,
+                normalized as usize,
+            )?))
+        }
+
+        // `torch.split(input, split_size, dim=0)` — op_db emits
+        // `args = [tensor, split_size_or_sizes, dim?]`. Returns a tuple of
+        // tensors; the runner gates against `output[0]` (first chunk) per
+        // `main.rs:3147`. ferrotorch's `methods::split_t(input, &[usize], dim)`
+        // mirrors upstream `TensorShape.cpp:3175 split` / `:3265 split_with_sizes`.
+        "split" => {
+            let input = unary("split")?;
+            let split_arg = args.get(1).ok_or("split: missing split_size arg")?;
+            let dim_i = args
+                .get(2)
+                .and_then(Value::as_i64)
+                .or_else(|| kwargs.get("dim").and_then(Value::as_i64))
+                .unwrap_or(0);
+            let nd = input.ndim() as i64;
+            let dim = if dim_i < 0 { dim_i + nd } else { dim_i };
+            if !(0..nd).contains(&dim) {
+                return Err(format!("split: dim {dim_i} out of range for ndim {nd}").into());
+            }
+            let dim = dim as usize;
+            let dim_size = input.shape()[dim];
+            let sizes: Vec<usize> = match split_arg {
+                Value::Number(n) => {
+                    let s = n.as_i64().ok_or("split: split_size not int")? as usize;
+                    if s == 0 {
+                        return Ok(None);
+                    }
+                    let mut out = Vec::new();
+                    let mut remaining = dim_size;
+                    while remaining > 0 {
+                        let chunk = s.min(remaining);
+                        out.push(chunk);
+                        remaining -= chunk;
+                    }
+                    if out.is_empty() {
+                        return Ok(None);
+                    }
+                    out
+                }
+                Value::Array(arr) => {
+                    let mut out = Vec::with_capacity(arr.len());
+                    for x in arr {
+                        out.push(x.as_i64().ok_or("split: size list element not int")? as usize);
+                    }
+                    out
+                }
+                other => {
+                    return Err(format!("split: unexpected split arg {other}").into());
+                }
+            };
+            let pieces = ferrotorch_core::split_t(&input, &sizes, dim)?;
+            // Return the first chunk — the wrapper's tuple-vs-tensor gate
+            // selects `output[0]` for value-equality (see main.rs:3147).
+            Ok(Some(pieces.into_iter().next().ok_or("split: empty result")?))
+        }
+
+        // `torch.chunk(input, chunks, dim=0)` — op_db emits
+        // `args = [tensor, chunks, dim?]`. ferrotorch's
+        // `methods::chunk_t(input, chunks, dim)` mirrors upstream
+        // `TensorShape.cpp:1077` (per-chunk size = ceil(dim_size / chunks)).
+        // Returns first chunk for value-equality (same tuple convention).
+        "chunk" => {
+            let input = unary("chunk")?;
+            let chunks = args
+                .get(1)
+                .and_then(Value::as_i64)
+                .ok_or("chunk: arg 1 (chunks) must be int")? as usize;
+            let dim_i = args
+                .get(2)
+                .and_then(Value::as_i64)
+                .or_else(|| kwargs.get("dim").and_then(Value::as_i64))
+                .unwrap_or(0);
+            let nd = input.ndim() as i64;
+            let dim = if dim_i < 0 { dim_i + nd } else { dim_i };
+            if !(0..nd).contains(&dim) {
+                return Err(format!("chunk: dim {dim_i} out of range for ndim {nd}").into());
+            }
+            if chunks == 0 {
+                return Err("chunk: chunks must be > 0".into());
+            }
+            let pieces = ferrotorch_core::chunk_t(&input, chunks, dim as usize)?;
+            Ok(Some(pieces.into_iter().next().ok_or("chunk: empty result")?))
+        }
+
+        // `torch.narrow(input, dim, start, length)` — op_db emits
+        // `args = [tensor, dim, start, length]`; `start` MAY be a 0-d tensor
+        // (the `narrow.Tensor` overload at `TensorShape.cpp:1669`), which
+        // we extract to a scalar before delegating.
+        "narrow" => {
+            let input = unary("narrow")?;
+            let dim_i = args
+                .get(1)
+                .and_then(Value::as_i64)
+                .ok_or("narrow: arg 1 (dim) must be int")?;
+            let nd = input.ndim() as i64;
+            let dim = if dim_i < 0 { dim_i + nd } else { dim_i };
+            if !(0..nd).contains(&dim) {
+                return Err(format!("narrow: dim {dim_i} out of range for ndim {nd}").into());
+            }
+            let dim = dim as usize;
+            // start: may be int OR 0-d tensor.
+            let start: usize = match args.get(2) {
+                Some(Value::Number(n)) => {
+                    let raw = n.as_i64().ok_or("narrow: start not int")?;
+                    let dim_size = input.shape()[dim] as i64;
+                    let resolved = if raw < 0 { raw + dim_size } else { raw };
+                    if resolved < 0 || resolved > dim_size {
+                        return Err(format!(
+                            "narrow: start {raw} out of range for dim size {dim_size}"
+                        )
+                        .into());
+                    }
+                    resolved as usize
+                }
+                Some(other) => {
+                    if let Some(wt) = unwrap_tensor_arg(other) {
+                        if !wt.shape.is_empty() {
+                            // Non-0-d tensor start — unsupported in ferrotorch's
+                            // narrow_t (the `narrow.Tensor` 0-d overload only).
+                            return Ok(None);
+                        }
+                        // 0-d tensor: extract its single scalar. Use the int
+                        // path when dtype is integer, float-then-truncate
+                        // otherwise (op_db's narrow samples emit int64 0-d
+                        // tensors).
+                        let raw: i64 = match wt.dtype.as_str() {
+                            "int64" | "int32" | "uint8" => {
+                                let t = wt.to_int_tensor_i64()?;
+                                *t.data()?.first().unwrap_or(&0)
+                            }
+                            _ => {
+                                let t = wt.to_f32()?;
+                                let d = t.data_vec()?;
+                                *d.first().unwrap_or(&0.0) as i64
+                            }
+                        };
+                        let dim_size = input.shape()[dim] as i64;
+                        let resolved = if raw < 0 { raw + dim_size } else { raw };
+                        if resolved < 0 || resolved > dim_size {
+                            return Err(format!(
+                                "narrow: start tensor {raw} out of range for dim size {dim_size}"
+                            )
+                            .into());
+                        }
+                        resolved as usize
+                    } else {
+                        return Err(format!("narrow: arg 2 (start) unexpected: {other}").into());
+                    }
+                }
+                None => return Err("narrow: missing start arg".into()),
+            };
+            let length = args
+                .get(3)
+                .and_then(Value::as_i64)
+                .ok_or("narrow: arg 3 (length) must be int")? as usize;
+            Ok(Some(input.narrow(dim, start, length)?))
+        }
+
+        // `torch.roll(input, shifts, dims=None)` — op_db emits
+        // `args = [tensor, shifts, dims]` where each of `shifts`/`dims` may be
+        // an int or a list of ints (the `roll(Tensor, IntArrayRef shifts,
+        // IntArrayRef dims)` overload at `TensorTransformations.cpp:110`).
+        // ferrotorch's `ops::tensor_ops::roll(input, shifts: i64, dim: usize)`
+        // is single-shift / single-dim only; for the multi-shift form we
+        // apply roll sequentially (upstream implements the multi-dim case as
+        // a sequence of single-dim rolls, per
+        // `TensorTransformations.cpp:154-176`). When dims is None, torch
+        // flattens then rolls — we emulate via reshape + 1-D roll.
+        "roll" => {
+            let input = unary("roll")?;
+            let shifts: Vec<i64> = match args.get(1) {
+                Some(Value::Number(n)) => vec![n.as_i64().ok_or("roll: shifts not int")?],
+                Some(Value::Array(arr)) => {
+                    let mut out = Vec::with_capacity(arr.len());
+                    for x in arr {
+                        out.push(x.as_i64().ok_or("roll: shifts list element not int")?);
+                    }
+                    out
+                }
+                other => return Err(format!("roll: unexpected shifts arg {other:?}").into()),
+            };
+            let dims_v = args.get(2);
+            let dims: Vec<i64> = match dims_v {
+                None | Some(Value::Null) => {
+                    // Flatten-then-roll-then-unflatten path.
+                    if input.ndim() == 0 {
+                        return Ok(Some(input));
+                    }
+                    let numel = input.numel();
+                    if numel == 0 {
+                        return Ok(Some(input));
+                    }
+                    let in_shape: Vec<isize> =
+                        input.shape().iter().map(|&d| d as isize).collect();
+                    let flat = grad_fns::shape::reshape(&input, &[-1isize])?;
+                    let total: i64 = shifts.iter().sum();
+                    let rolled = ferrotorch_core::ops::tensor_ops::roll(&flat, total, 0)?;
+                    return Ok(Some(grad_fns::shape::reshape(&rolled, &in_shape)?));
+                }
+                Some(Value::Number(n)) => vec![n.as_i64().ok_or("roll: dims not int")?],
+                Some(Value::Array(arr)) => {
+                    let mut out = Vec::with_capacity(arr.len());
+                    for x in arr {
+                        out.push(x.as_i64().ok_or("roll: dims list element not int")?);
+                    }
+                    out
+                }
+                Some(other) => return Err(format!("roll: unexpected dims arg {other}").into()),
+            };
+            if shifts.len() != dims.len() {
+                return Err(format!(
+                    "roll: shifts.len() {} != dims.len() {}",
+                    shifts.len(),
+                    dims.len()
+                )
+                .into());
+            }
+            let nd = input.ndim() as i64;
+            if nd == 0 {
+                return Ok(Some(input));
+            }
+            let mut t = input;
+            for (s, d) in shifts.into_iter().zip(dims) {
+                let dim_norm = if d < 0 { d + nd } else { d };
+                if !(0..nd).contains(&dim_norm) {
+                    return Err(format!("roll: dim {d} out of range for ndim {nd}").into());
+                }
+                // Empty-axis: torch's roll is identity; ferrotorch's roll
+                // returns clone for shift_norm==0; passing through is safe.
+                if t.shape()[dim_norm as usize] == 0 {
+                    continue;
+                }
+                t = ferrotorch_core::ops::tensor_ops::roll(&t, s, dim_norm as usize)?;
+            }
+            Ok(Some(t))
+        }
+
         _ => Ok(None),
     }
 }
@@ -2598,6 +3196,27 @@ fn dispatch_ops() -> &'static [&'static str] {
         "hardswish",
         "threshold",
         "glu",
+        // Shape op cluster — wired 2026-05-25 to close umbrella #1340
+        // (parity-sweep runner arms for the shape ops in
+        // `.design/ferrotorch-core/grad_fns/shape.md`'s SHIPPED REQ set).
+        // The dispatch_f32 arms above decode op_db's shape-list / dim-int /
+        // list-of-tensors envelopes and route to the matching ferrotorch
+        // entry points. `broadcast_shapes` is intentionally excluded — it
+        // takes shape lists, not tensors (wrong envelope for dispatch_f32).
+        "view",
+        "reshape",
+        "flatten",
+        "squeeze",
+        "unsqueeze",
+        "permute",
+        "transpose",
+        "expand",
+        "cat",
+        "stack",
+        "split",
+        "chunk",
+        "narrow",
+        "roll",
     ]
 }
 
@@ -3016,9 +3635,19 @@ fn assert_close_f32(actual: &Tensor<f32>, expected_wire: &WireTensor) -> Result<
             expected.shape()
         ));
     }
+    // Use `.data_vec()` on the actual side: shape-view ops like `permute`,
+    // `transpose`, `narrow`, `expand`, `squeeze`, `unsqueeze` legitimately
+    // produce stride-view (non-contiguous) tensors per upstream
+    // `aten/src/ATen/native/TensorShape.cpp:1829 Tensor permute` (zero-copy
+    // stride reorder) and `:1344 Tensor expand` (size-1 → stride-0 broadcast).
+    // `.data()` is contiguity-strict and would reject these views even though
+    // the values are correct; `.data_vec()` gathers elements in C-order so
+    // the value-equality gate compares against torch's contiguous output
+    // byte-for-byte. The `expected` side stays on `.data()` because the
+    // wire decode emits C-order contiguous storage.
     let actual_data = actual
-        .data()
-        .map_err(|e| format!("ferrotorch tensor.data() failed: {e}"))?;
+        .data_vec()
+        .map_err(|e| format!("ferrotorch tensor.data_vec() failed: {e}"))?;
     let expected_data = expected
         .data()
         .map_err(|e| format!("expected tensor.data() failed: {e}"))?;
