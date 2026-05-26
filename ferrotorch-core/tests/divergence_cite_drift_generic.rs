@@ -1,11 +1,20 @@
-//! Generic cite-drift audit (closes #1268).
+//! Generic cite-drift audit (closes #1268, scope-broadened by #1279).
 //!
 //! Parses every backtick-quoted `<filename>.rs:<N>` or
 //! `<filename>.rs:<N>-<M>` substring (and the bare-colon continuation form
 //! `:<N>` / `:<N>-<M>` that reuses the most-recently-mentioned file WITHIN
-//! THE SAME backtick-quoted span) from each design doc in scope, plus the
-//! `//!` doc-comment of each covered `.rs` source file, and asserts that
-//! every cite resolves to substantive content in the target file at HEAD.
+//! THE SAME backtick-quoted span) from EVERY `.md` file under `.design/`
+//! (walked recursively via `std::fs::read_dir`), plus the `//!` doc-comment
+//! of each covered `.rs` source file, and asserts that every cite resolves
+//! to substantive content in the target file at HEAD.
+//!
+//! The walker-based primary test `all_design_docs_cites_resolve_at_head`
+//! superseded the previous per-doc (`arithmetic_md`, `cumulative_md`) tests
+//! — those were structurally blind to drift in any doc the test author
+//! hadn't hand-listed, which is exactly how the indexing.md drift loop
+//! (#1274) survived to ship. With the walker test in place, every NEW
+//! `.design/**/*.md` file is automatically under audit the moment it's
+//! committed.
 //!
 //! When the prose adjacent to the cite names a recognizable symbol (e.g.
 //! `pub fn <name>`, `struct <Name>Backward`, `fn <test_name>`,
@@ -344,7 +353,12 @@ fn parse_paren_cite(s: &str) -> (Option<(usize, usize)>, bool) {
 /// `` `cumulative.rs:420-428 test_cumsum_negative_dim` `` where the test
 /// name lives AFTER the cite, so the prose-preceding extractor cannot
 /// see it.
-fn scan_span_inner<'a>(span: &'a str, ctx: &mut CiteContext<'a>, span_offset: usize, span_end: usize) {
+fn scan_span_inner<'a>(
+    span: &'a str,
+    ctx: &mut CiteContext<'a>,
+    span_offset: usize,
+    span_end: usize,
+) {
     // Span-local filename context (for `:N` continuations inside this span).
     let mut span_local_file: Option<String> = ctx.last_rs_file.clone();
     // Collect tokens so we can peek ahead for post-cite symbol hints.
@@ -962,7 +976,11 @@ fn validate_cite(cite: &Cite, root: &Path, doc_label: &str, doc_line_no: usize) 
                 "{doc_label}:{doc_line_no} cites `{file}:{lo}{hi_disp}` (with symbol hint `{symbol}`) but {window_desc} does not declare it (needles: {needles:?}); actual :{lo} is: `{actual}`",
                 file = cite.file_as_written,
                 lo = cite.line_start,
-                hi_disp = if is_range { format!("-{}", cite.line_end) } else { String::new() },
+                hi_disp = if is_range {
+                    format!("-{}", cite.line_end)
+                } else {
+                    String::new()
+                },
             ));
         }
     }
@@ -1050,12 +1068,54 @@ fn audit_doc(doc_label: &str, doc_text: &str, root: &Path) -> Vec<String> {
 }
 
 /// Audit one design doc file.
+#[allow(
+    dead_code,
+    reason = "retained for backwards compatibility — the walker-based `all_design_docs_cites_resolve_at_head` test is now the primary audit surface, but this helper remains for any future per-doc invocation"
+)]
 fn audit_design_doc(rel_path: &str) -> Vec<String> {
     let root = workspace_root();
     let doc_path = root.join(rel_path);
     let text = fs::read_to_string(&doc_path)
         .unwrap_or_else(|e| panic!("read {}: {}", doc_path.display(), e));
     audit_doc(rel_path, &text, &root)
+}
+
+/// Walk `.design/` recursively and collect every `.md` file's path
+/// relative to the workspace root. Skips non-`.md` files. Uses
+/// `std::fs::read_dir` (no external crate) per dispatch constraints.
+fn collect_design_docs(root: &Path) -> Vec<String> {
+    let mut out = Vec::new();
+    let design_dir = root.join(".design");
+    if !design_dir.exists() {
+        return out;
+    }
+    let mut stack: Vec<PathBuf> = vec![design_dir];
+    while let Some(dir) = stack.pop() {
+        let entries = match fs::read_dir(&dir) {
+            Ok(it) => it,
+            Err(_) => continue,
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let file_type = match entry.file_type() {
+                Ok(ft) => ft,
+                Err(_) => continue,
+            };
+            if file_type.is_dir() {
+                stack.push(path);
+            } else if file_type.is_file() && path.extension().and_then(|e| e.to_str()) == Some("md")
+            {
+                // Store path relative to workspace root for stable labels.
+                if let Ok(rel) = path.strip_prefix(root) {
+                    if let Some(s) = rel.to_str() {
+                        out.push(s.to_string());
+                    }
+                }
+            }
+        }
+    }
+    out.sort();
+    out
 }
 
 /// Audit the `//!`-prefixed top-of-file doc-comment block of one source file.
@@ -1077,25 +1137,61 @@ fn audit_source_doc_comment(rel_path: &str) -> Vec<String> {
     audit_doc(rel_path, &header, &root)
 }
 
+/// Workspace-wide cite-drift audit (closes #1279).
+///
+/// Walks every `.md` file under `.design/` (recursively), runs the
+/// shared cite-extraction + cite-resolution logic on each, and emits a
+/// per-file failure summary. This replaces the prior per-doc tests
+/// (`arithmetic_md_cites_resolve_at_head`, `cumulative_md_cites_resolve_at_head`)
+/// which were structurally blind to drift in `indexing.md`, `methods.md`,
+/// `inplace.md`, `quantize_grad.md`, `ops/cumulative.md`, and any future
+/// design doc the workspace grows. Per goal.md S3, the durable contract
+/// is that NO `.design/**/*.md` cite drifts silently — that contract has
+/// to cover every doc, not a hand-picked subset.
+///
+/// Also subsumes `divergence_indexing_md_uncovered_by_generic_cite_drift_audit.rs`
+/// (which existed to pin the scope-gap that this walker closes).
 #[test]
-fn arithmetic_md_cites_resolve_at_head() {
-    let failures = audit_design_doc(".design/ferrotorch-core/grad_fns/arithmetic.md");
+fn all_design_docs_cites_resolve_at_head() {
+    let root = workspace_root();
+    let docs = collect_design_docs(&root);
     assert!(
-        failures.is_empty(),
-        "arithmetic.md has {} stale cite(s) (R-CITE-2):\n\n{}",
-        failures.len(),
-        failures.join("\n\n")
+        !docs.is_empty(),
+        "expected at least one .md file under .design/, found none"
     );
-}
-
-#[test]
-fn cumulative_md_cites_resolve_at_head() {
-    let failures = audit_design_doc(".design/ferrotorch-core/grad_fns/cumulative.md");
+    let mut per_doc_failures: Vec<(String, Vec<String>)> = Vec::new();
+    let mut total_failures = 0usize;
+    for doc in &docs {
+        let doc_path = root.join(doc);
+        let text = match fs::read_to_string(&doc_path) {
+            Ok(t) => t,
+            Err(e) => {
+                per_doc_failures.push((doc.clone(), vec![format!("read error: {e}")]));
+                total_failures += 1;
+                continue;
+            }
+        };
+        let failures = audit_doc(doc, &text, &root);
+        if !failures.is_empty() {
+            total_failures += failures.len();
+            per_doc_failures.push((doc.clone(), failures));
+        }
+    }
     assert!(
-        failures.is_empty(),
-        "cumulative.md has {} stale cite(s) (R-CITE-2):\n\n{}",
-        failures.len(),
-        failures.join("\n\n")
+        per_doc_failures.is_empty(),
+        "{n_docs_scanned} design doc(s) scanned, {n_failed_docs} doc(s) have stale cite(s) ({total_failures} total stale cite(s)) (R-CITE-2 + goal.md S3):\n\n{summary}",
+        n_docs_scanned = docs.len(),
+        n_failed_docs = per_doc_failures.len(),
+        total_failures = total_failures,
+        summary = per_doc_failures
+            .iter()
+            .map(|(doc, fails)| format!(
+                "=== {doc} ({n} stale cite(s)) ===\n{body}",
+                n = fails.len(),
+                body = fails.join("\n\n")
+            ))
+            .collect::<Vec<_>>()
+            .join("\n\n"),
     );
 }
 
