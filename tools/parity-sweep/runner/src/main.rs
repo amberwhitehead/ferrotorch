@@ -1190,41 +1190,16 @@ fn dispatch_f32(
             if index.ndim() > 1 {
                 return Ok(None);
             }
-            // Skip negative index values — `grad_fns::indexing::index_add`
-            // now STRICTLY rejects negatives per upstream contract
-            // (`aten/src/ATen/native/TensorAdvancedIndexing.cpp:1245-1247`
-            // `TORCH_CHECK_INDEX((self_i >= 0) && (self_i < self_dim_size),
-            // "index out of range in self")`); upstream also rejects. The
-            // parity harness currently compares output values only, so the
-            // both-error case manifests as a runner-side error rather than
-            // a "both errored" pass — track as a parity-infra follow-up
-            // (closes #1286-D3 in the impl; harness gap is its own work).
-            for &v in index.data()? {
-                if v < 0 {
-                    return Ok(None);
-                }
-            }
-            // Skip source-size mismatch — `grad_fns::indexing::index_add`
-            // now STRICTLY rejects per upstream `:394-402
-            // TORCH_CHECK(numel == source.size(dim), ...)`. Same parity-
-            // harness gap as the negative-index filter above; closes
-            // #1286-D4 in the impl.
-            let source_shape = source.shape();
-            let dim_norm = if dim_i64 < 0 {
-                dim_i64 + source_shape.len() as i64
-            } else {
-                dim_i64
-            };
-            if dim_norm >= 0 && (dim_norm as usize) < source_shape.len() {
-                let src_dim_size = source_shape[dim_norm as usize];
-                if index.numel() != src_dim_size {
-                    return Ok(None);
-                }
-            }
-            // Skip 0-d source on N-D self — ferrotorch now rejects (D5).
-            if source.shape().is_empty() && !input.shape().is_empty() {
-                return Ok(None);
-            }
+            // No pre-filtering on negative indices, source-size mismatch,
+            // or 0-d source on N-D self. The parity harness's `both errored`
+            // matcher at `:2342-2351` correctly accounts for the case where
+            // upstream rejects with one message and ferrotorch rejects with
+            // its mirrored message. Filtering these inputs out of the runner
+            // (the previous behavior introduced in pin #1286) HIDES the
+            // strict-validation contract from the sweep — any future
+            // regression that silently accepts a negative index or a 0-d
+            // source on N-D self would slip through the parity gate
+            // unnoticed. Closes #1288-D (parity-pre-filter masking).
             Ok(Some(grad_fns::indexing::index_add(
                 &input, dim_i64, &index, &source, alpha,
             )?))
@@ -1253,36 +1228,15 @@ fn dispatch_f32(
             if index.ndim() > 1 {
                 return Ok(None);
             }
-            // Skip negative index values — `grad_fns::indexing::index_copy`
-            // now STRICTLY rejects negatives per upstream contract (at
-            // `aten/src/ATen/native/TensorAdvancedIndexing.cpp:1082
-            // TORCH_IMPL_FUNC(index_copy_out)` the kernel `index_copy_stub`
-            // does NOT wrap, unlike `index_fill_kernel`). Parity-harness
-            // gap as for index_add above. Closes #1286-D6 in the impl.
-            for &v in index.data()? {
-                if v < 0 {
-                    return Ok(None);
-                }
-            }
-            // Skip source-size mismatch — ferrotorch now strictly rejects
-            // per upstream meta `:343-349 numIndices == source.size(dim)`.
-            // Closes #1286-D6b in the impl.
-            let source_shape = source.shape();
-            let dim_norm = if dim_i64 < 0 {
-                dim_i64 + source_shape.len() as i64
-            } else {
-                dim_i64
-            };
-            if dim_norm >= 0 && (dim_norm as usize) < source_shape.len() {
-                let src_dim_size = source_shape[dim_norm as usize];
-                if index.numel() != src_dim_size {
-                    return Ok(None);
-                }
-            }
-            // Skip 0-d source on N-D self — ferrotorch now rejects.
-            if source.shape().is_empty() && !input.shape().is_empty() {
-                return Ok(None);
-            }
+            // No pre-filtering on negative indices, source-size mismatch,
+            // or shape mismatch. The parity harness's `both errored` matcher
+            // accounts for symmetric rejection. Filtering these out (the
+            // previous behavior introduced in pin #1286) HID the strict-
+            // validation contract from the sweep. NB: for index_copy
+            // SPECIFICALLY, 0-d source on N-D self is NOT a divergence —
+            // upstream meta `:285-300` accepts it (broadcasts scalar src
+            // per index slot) and ferrotorch now matches per #1288-B. Both
+            // succeed; the harness compares output values. Closes #1288-D.
             Ok(Some(grad_fns::indexing::index_copy(
                 &input, dim_i64, &index, &source,
             )?))

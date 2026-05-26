@@ -1908,7 +1908,7 @@ impl ScatterReduce {
     }
 }
 
-/// Backward function for `scatter_reduce` with `reduce='sum'`.
+/// Backward function for `scatter_reduce` (all reduce modes).
 ///
 /// Forward (sum, include_self=True): `output = input.clone();
 /// output[..., index[p], ...] += src[..., p, ...]` along `dim`.
@@ -1917,17 +1917,20 @@ impl ScatterReduce {
 /// (upstream computes a mask via `include_self_ones` at
 /// `TensorAdvancedIndexing.cpp:2390-2392`).
 ///
-/// VJP for input (sum, include_self=True): identity — per upstream
-/// `scatter_reduce_backward` for sum mode reduces to `grad`.
-/// VJP for input (sum, include_self=False): `grad` with the written positions
-/// zeroed (those positions in the output were entirely overwritten by src and
-/// no longer depend on input).
-/// VJP for src (sum, both): gather `grad` at the index-mapped positions.
+/// VJPs mirror upstream `scatter_reduce_backward` at
+/// `torch/csrc/autograd/FunctionsManual.cpp:7194-7279`, per
+/// `tools/autograd/derivatives.yaml:3074-3077`:
 ///
-/// Other reduce modes (prod/amax/amin) are NOT implemented in the backward —
-/// they require value-aware VJPs that this struct does not save the result
-/// for. Backward calls in those modes return an error rather than a silently
-/// wrong gradient.
+/// - `sum`: grad_self = grad; grad_src = grad.gather(dim, index).
+/// - `prod`: grad_self = grad * (masked_self_result / masked_self);
+///   grad_src uses the result-over-src chain rule with masking for zeros
+///   (`:7216-7248`).
+/// - `amax`/`amin`: evenly distribute grad among positions whose value
+///   matched the max/min (`:7256-7265`).
+///
+/// For `include_self=False`, the upstream post-processing at `:7274-7275`
+/// scatters zeros into grad_self at the index-mapped positions (those
+/// positions are entirely overwritten by src and no longer depend on self).
 #[derive(Debug)]
 pub struct ScatterReduceBackward<T: Float> {
     /// Saved input handle (for shape + autograd graph linkage).
@@ -1944,6 +1947,11 @@ pub struct ScatterReduceBackward<T: Float> {
     pub reduce: ScatterReduce,
     /// Whether `include_self` was set in the forward.
     pub include_self: bool,
+    /// Saved forward result (host-side flat buffer). Required by the
+    /// value-aware VJPs for `prod`/`amax`/`amin` per upstream
+    /// `FunctionsManual.cpp:7216-7265` (which read `result` to identify
+    /// max/min positions and compute the prod chain rule).
+    pub result: Vec<T>,
 }
 
 impl<T: Float> GradFn<T> for ScatterReduceBackward<T> {
@@ -1952,74 +1960,102 @@ impl<T: Float> GradFn<T> for ScatterReduceBackward<T> {
             return Ok(vec![None, None]);
         }
 
-        // Only `sum` has a structurally-simple VJP that doesn't depend on the
-        // forward's computed result. prod/amax/amin would require saving
-        // `result` and partitioning grad by which src element won the
-        // reduction — out of scope for the 2026-05-25 sum-only characterization.
-        if !matches!(self.reduce, ScatterReduce::Sum) {
-            return Err(FerrotorchError::InvalidArgument {
-                message: format!(
-                    "ScatterReduceBackward: backward is only implemented for \
-                     reduce='sum'; got {:?}",
-                    self.reduce
-                ),
-            });
-        }
-
         let input_shape = self.input.shape();
         let ndim = input_shape.len();
+
         if ndim == 0 {
-            // 0-d input: forward short-circuits / upstream unsqueezes. The VJP
-            // is a scalar identity (sum mode, include_self) or zero (sum,
-            // !include_self with any index).
-            let go_data = grad_output.data_vec()?;
-            let zero = <T as num_traits::Zero>::zero();
-            let mut grad_input_data = go_data.clone();
-            if !self.include_self && !self.index.is_empty() {
-                grad_input_data[0] = zero;
-            }
-            let grad_input = if self.input.requires_grad() {
-                Some(Tensor::from_storage(
-                    TensorStorage::cpu(grad_input_data),
-                    vec![],
-                    false,
-                )?)
-            } else {
-                None
-            };
-            let grad_src = if self.src.requires_grad() {
-                Some(Tensor::from_storage(
-                    TensorStorage::cpu(go_data),
-                    self.src.shape().to_vec(),
-                    false,
-                )?)
-            } else {
-                None
-            };
-            return Ok(vec![grad_input, grad_src]);
+            // 0-d input: forward short-circuits / upstream unsqueezes. The
+            // backward is similarly degenerate for every mode — distribute
+            // the scalar grad to input (sum/prod/amax/amin handle the
+            // identity case identically in the 0-d limit).
+            return self.backward_0d(grad_output);
         }
 
+        match self.reduce {
+            ScatterReduce::Sum => self.backward_sum(grad_output),
+            ScatterReduce::Prod => self.backward_prod(grad_output),
+            ScatterReduce::Amax | ScatterReduce::Amin => self.backward_amax_amin(grad_output),
+        }
+    }
+
+    fn inputs(&self) -> Vec<&Tensor<T>> {
+        vec![&self.input, &self.src]
+    }
+
+    fn name(&self) -> &'static str {
+        "ScatterReduceBackward"
+    }
+}
+
+impl<T: Float> ScatterReduceBackward<T> {
+    /// Helper: iterate (i, idx_val, src_coords, dst_flat) over every index
+    /// element, where `dst_flat` is the input/output flat slot the index
+    /// targets along `self.dim`.
+    fn for_each_index<F: FnMut(usize, usize, &[usize], usize)>(&self, mut f: F) {
+        let input_shape = self.input.shape();
+        let ndim = input_shape.len();
         let index_numel: usize = self.index_shape.iter().product();
+        let mut coords = vec![0usize; ndim];
+        for i in 0..index_numel {
+            let idx_val = self.index[i];
+            let mut dst_coords = coords.clone();
+            dst_coords[self.dim] = idx_val;
+            let dst_flat = flat_index(&dst_coords, input_shape);
+            f(i, idx_val, &coords, dst_flat);
+            if i + 1 < index_numel {
+                increment_coords(&mut coords, &self.index_shape);
+            }
+        }
+    }
+
+    /// VJP for the 0-d input degenerate case (input is a single scalar). All
+    /// reduce modes collapse to: grad_self = grad (or 0 for !include_self
+    /// with non-empty index), grad_src = grad broadcast to src shape.
+    fn backward_0d(&self, grad_output: &Tensor<T>) -> FerrotorchResult<Vec<Option<Tensor<T>>>> {
         let go_data = grad_output.data_vec()?;
         let zero = <T as num_traits::Zero>::zero();
+        let mut grad_input_data = go_data.clone();
+        if !self.include_self && !self.index.is_empty() {
+            grad_input_data[0] = zero;
+        }
+        let grad_input = if self.input.requires_grad() {
+            Some(Tensor::from_storage(
+                TensorStorage::cpu(grad_input_data),
+                vec![],
+                false,
+            )?)
+        } else {
+            None
+        };
+        let grad_src = if self.src.requires_grad() {
+            Some(Tensor::from_storage(
+                TensorStorage::cpu(go_data),
+                self.src.shape().to_vec(),
+                false,
+            )?)
+        } else {
+            None
+        };
+        Ok(vec![grad_input, grad_src])
+    }
 
-        // grad_input: identity for include_self=true; for include_self=false
-        // zero every flat position the index list wrote to (those positions
-        // didn't depend on input).
+    /// VJP for `reduce='sum'` per upstream
+    /// `FunctionsManual.cpp:7213-7215`:
+    ///   grad_self = grad; grad_src = grad.gather(dim, index);
+    /// then `:7274-7275`: if !include_self, scatter zeros into grad_self at
+    /// the index-mapped positions.
+    fn backward_sum(&self, grad_output: &Tensor<T>) -> FerrotorchResult<Vec<Option<Tensor<T>>>> {
+        let input_shape = self.input.shape();
+        let go_data = grad_output.data_vec()?;
+        let zero = <T as num_traits::Zero>::zero();
+        let index_numel: usize = self.index_shape.iter().product();
+
         let grad_input = if self.input.requires_grad() {
             let mut gi = go_data.clone();
             if !self.include_self {
-                let mut coords = vec![0usize; ndim];
-                for i in 0..index_numel {
-                    let idx_val = self.index[i];
-                    let mut dst_coords = coords.clone();
-                    dst_coords[self.dim] = idx_val;
-                    let dst_flat = flat_index(&dst_coords, input_shape);
+                self.for_each_index(|_, _, _, dst_flat| {
                     gi[dst_flat] = zero;
-                    if i + 1 < index_numel {
-                        increment_coords(&mut coords, &self.index_shape);
-                    }
-                }
+                });
             }
             Some(Tensor::from_storage(
                 TensorStorage::cpu(gi),
@@ -2030,21 +2066,11 @@ impl<T: Float> GradFn<T> for ScatterReduceBackward<T> {
             None
         };
 
-        // grad_src: gather grad_output at the index-mapped positions (same as
-        // ScatterAdd's src VJP).
         let grad_src = if self.src.requires_grad() {
             let mut gs = vec![zero; index_numel];
-            let mut coords = vec![0usize; ndim];
-            for (i, gs_elem) in gs.iter_mut().enumerate() {
-                let idx_val = self.index[i];
-                let mut src_coords = coords.clone();
-                src_coords[self.dim] = idx_val;
-                let src_flat = flat_index(&src_coords, input_shape);
-                *gs_elem = go_data[src_flat];
-                if i + 1 < index_numel {
-                    increment_coords(&mut coords, &self.index_shape);
-                }
-            }
+            self.for_each_index(|i, _, _, dst_flat| {
+                gs[i] = go_data[dst_flat];
+            });
             Some(Tensor::from_storage(
                 TensorStorage::cpu(gs),
                 self.index_shape.clone(),
@@ -2057,12 +2083,282 @@ impl<T: Float> GradFn<T> for ScatterReduceBackward<T> {
         Ok(vec![grad_input, grad_src])
     }
 
-    fn inputs(&self) -> Vec<&Tensor<T>> {
-        vec![&self.input, &self.src]
+    /// VJP for `reduce='amax'` / `reduce='amin'` per upstream
+    /// `FunctionsManual.cpp:7256-7265`:
+    ///   value = result.gather(dim, index);
+    ///   self_is_result = (self == result);  src_is_result = (src == value);
+    ///   N = self_is_result.scatter_add(dim, index, src_is_result);
+    ///   grad_distributed = grad / N;
+    ///   grad_self = (self == result) * grad_distributed;
+    ///   grad_src  = (src == value) * grad_distributed.gather(dim, index);
+    /// then `:7274-7275`: if !include_self, scatter zeros into grad_self.
+    ///
+    /// The intuition: gradient flows to every input position whose value
+    /// equals the output maximum (resp. minimum) at the index-mapped slot,
+    /// shared evenly among all the tied positions (across both self and the
+    /// src elements that scattered into that slot).
+    fn backward_amax_amin(
+        &self,
+        grad_output: &Tensor<T>,
+    ) -> FerrotorchResult<Vec<Option<Tensor<T>>>> {
+        let input_shape = self.input.shape();
+        let go_data = grad_output.data_vec()?;
+        let in_data = self.input.data_vec()?;
+        let src_data = self.src.data_vec()?;
+        let src_shape = self.src.shape();
+        let zero = <T as num_traits::Zero>::zero();
+        let one = <T as num_traits::One>::one();
+        let input_numel: usize = input_shape.iter().product();
+        let index_numel: usize = self.index_shape.iter().product();
+
+        // self_is_result[p] = 1 iff input[p] == result[p].
+        let mut self_is_result = vec![zero; input_numel];
+        for p in 0..input_numel {
+            if in_data[p] == self.result[p] {
+                self_is_result[p] = one;
+            }
+        }
+
+        // For each (i, dst_flat): value = result[dst_flat]; src_is_result[i] =
+        // 1 iff src_at_coords(i) == value. Read src at index-shape coords via
+        // the src_shape stride walk (same as forward).
+        let read_src_at = |coords: &[usize]| -> T { src_data[flat_index(coords, src_shape)] };
+        let mut src_is_result = vec![zero; index_numel];
+        let mut value = vec![zero; index_numel];
+        self.for_each_index(|i, _, coords, dst_flat| {
+            let v = self.result[dst_flat];
+            value[i] = v;
+            if read_src_at(coords) == v {
+                src_is_result[i] = one;
+            }
+        });
+
+        // N[p] = self_is_result[p] + sum over (i: dst_flat==p) of src_is_result[i].
+        let mut n_to_distribute = self_is_result.clone();
+        self.for_each_index(|i, _, _, dst_flat| {
+            n_to_distribute[dst_flat] += src_is_result[i];
+        });
+
+        // grad_distributed[p] = grad[p] / N[p] (guarded — N can never be 0 at
+        // touched positions because the forward wrote `result[p]` from
+        // exactly one of those positions, so at least one of self_is_result
+        // or one of the src_is_result entries is 1).
+        let mut grad_distributed = vec![zero; input_numel];
+        for p in 0..input_numel {
+            if n_to_distribute[p] != zero {
+                grad_distributed[p] = go_data[p] / n_to_distribute[p];
+            }
+        }
+
+        let grad_input = if self.input.requires_grad() {
+            let mut gi = vec![zero; input_numel];
+            for p in 0..input_numel {
+                if self_is_result[p] != zero {
+                    gi[p] = grad_distributed[p];
+                }
+            }
+            // !include_self: zero positions the index touched (post-processing
+            // step at upstream `:7274-7275`).
+            if !self.include_self {
+                self.for_each_index(|_, _, _, dst_flat| {
+                    gi[dst_flat] = zero;
+                });
+            }
+            Some(Tensor::from_storage(
+                TensorStorage::cpu(gi),
+                input_shape.to_vec(),
+                false,
+            )?)
+        } else {
+            None
+        };
+
+        let grad_src = if self.src.requires_grad() {
+            let mut gs = vec![zero; index_numel];
+            self.for_each_index(|i, _, _, dst_flat| {
+                if src_is_result[i] != zero {
+                    gs[i] = grad_distributed[dst_flat];
+                }
+            });
+            Some(Tensor::from_storage(
+                TensorStorage::cpu(gs),
+                self.index_shape.clone(),
+                false,
+            )?)
+        } else {
+            None
+        };
+
+        let _ = value; // value buffer used inline above; silence unused-binding.
+        Ok(vec![grad_input, grad_src])
     }
 
-    fn name(&self) -> &'static str {
-        "ScatterReduceBackward"
+    /// VJP for `reduce='prod'` per upstream `FunctionsManual.cpp:7216-7248`:
+    ///
+    ///   masked_self = self.masked_fill(self == 0, 1)
+    ///   masked_self_result = masked_self.scatter_reduce(dim, index, src,
+    ///                                                    'prod', include_self)
+    ///   grad_self = grad * masked_self_result / masked_self
+    ///   src_zero = (src == 0)
+    ///   src_num_zeros = zeros_like(self).scatter_add(dim, index, src_zero)
+    ///                                    .gather(dim, index)
+    ///   src_single_zero = src_zero & (src_num_zeros == 1)
+    ///   masked_src = src.masked_fill(src_single_zero, 1)
+    ///   masked_src_result = self.scatter_reduce(dim, index, masked_src,
+    ///                                            'prod', include_self)
+    ///   grad_src = where(src_single_zero,
+    ///                    (grad * masked_src_result).gather(dim, index),
+    ///                    (grad * result).gather(dim, index)
+    ///                       / src.masked_fill(src_zero, 1))
+    ///   if !include_self: grad_self = grad_self.scatter(dim, index, 0)
+    ///
+    /// The chain rule for a product `r = a*b*c*...`: `dr/da = r/a = b*c*...`,
+    /// guarded so a single zero in the product still produces the right
+    /// gradient (the exclusive-product over the non-zero entries).
+    fn backward_prod(&self, grad_output: &Tensor<T>) -> FerrotorchResult<Vec<Option<Tensor<T>>>> {
+        let input_shape = self.input.shape();
+        let go_data = grad_output.data_vec()?;
+        let in_data = self.input.data_vec()?;
+        let src_data = self.src.data_vec()?;
+        let src_shape = self.src.shape();
+        let zero = <T as num_traits::Zero>::zero();
+        let one = <T as num_traits::One>::one();
+        let input_numel: usize = input_shape.iter().product();
+        let index_numel: usize = self.index_shape.iter().product();
+
+        // masked_self[p] = self[p] == 0 ? 1 : self[p]
+        let mut masked_self = in_data.clone();
+        for v in &mut masked_self {
+            if *v == zero {
+                *v = one;
+            }
+        }
+
+        // masked_self_result: recompute `scatter_reduce(masked_self, dim,
+        // index, src, prod, include_self)` — the prod-fold uses `masked_self`
+        // as the starting buffer (or identity 1 when include_self=false).
+        let read_src_at = |coords: &[usize]| -> T { src_data[flat_index(coords, src_shape)] };
+        let mut masked_self_result = if self.include_self {
+            masked_self.clone()
+        } else {
+            // For include_self=false: identity is 1 for prod; only positions
+            // the index touched start at 1 and accumulate src*src*... ; other
+            // positions keep masked_self.
+            let mut buf = masked_self.clone();
+            self.for_each_index(|_, _, _, dst_flat| {
+                buf[dst_flat] = one;
+            });
+            buf
+        };
+        self.for_each_index(|_, _, coords, dst_flat| {
+            masked_self_result[dst_flat] = masked_self_result[dst_flat] * read_src_at(coords);
+        });
+
+        // src_zero[i] = src_at_coords(i) == 0 (per index slot — read src at
+        // index-shape coords like the forward).
+        let mut src_zero = vec![zero; index_numel];
+        self.for_each_index(|i, _, coords, _| {
+            if read_src_at(coords) == zero {
+                src_zero[i] = one;
+            }
+        });
+
+        // src_num_zeros[i] = sum of src_zero[j] for j that scatter into the
+        // same dst_flat as index slot i. Build a per-dst count first, then
+        // gather it at the index positions.
+        let mut zero_count_per_dst = vec![zero; input_numel];
+        self.for_each_index(|i, _, _, dst_flat| {
+            zero_count_per_dst[dst_flat] += src_zero[i];
+        });
+        let mut src_num_zeros = vec![zero; index_numel];
+        self.for_each_index(|i, _, _, dst_flat| {
+            src_num_zeros[i] = zero_count_per_dst[dst_flat];
+        });
+
+        // src_single_zero[i] = src_zero[i] && src_num_zeros[i] == 1.
+        let mut src_single_zero = vec![zero; index_numel];
+        for i in 0..index_numel {
+            if src_zero[i] != zero && src_num_zeros[i] == one {
+                src_single_zero[i] = one;
+            }
+        }
+
+        // masked_src[i] = src_single_zero[i] ? 1 : src_at(coords). When we
+        // need this we'll read it as the value at index slot i.
+        // masked_src_result: scatter_reduce(self, dim, index, masked_src,
+        // prod, include_self) — fold `masked_src` over the start buffer in
+        // the same way as above.
+        let mut masked_src_result = if self.include_self {
+            in_data.clone()
+        } else {
+            let mut buf = in_data.clone();
+            self.for_each_index(|_, _, _, dst_flat| {
+                buf[dst_flat] = one;
+            });
+            buf
+        };
+        let mut masked_src_values = vec![zero; index_numel];
+        self.for_each_index(|i, _, coords, _| {
+            let s = read_src_at(coords);
+            let m = if src_single_zero[i] == zero { s } else { one };
+            masked_src_values[i] = m;
+        });
+        self.for_each_index(|i, _, _, dst_flat| {
+            masked_src_result[dst_flat] = masked_src_result[dst_flat] * masked_src_values[i];
+        });
+
+        // grad_self[p] = grad[p] * masked_self_result[p] / masked_self[p]
+        let grad_input = if self.input.requires_grad() {
+            let mut gi = vec![zero; input_numel];
+            for p in 0..input_numel {
+                if masked_self[p] != zero {
+                    gi[p] = go_data[p] * masked_self_result[p] / masked_self[p];
+                }
+            }
+            // !include_self post-processing: zero grad at index-touched
+            // positions (`:7274-7275`).
+            if !self.include_self {
+                self.for_each_index(|_, _, _, dst_flat| {
+                    gi[dst_flat] = zero;
+                });
+            }
+            Some(Tensor::from_storage(
+                TensorStorage::cpu(gi),
+                input_shape.to_vec(),
+                false,
+            )?)
+        } else {
+            None
+        };
+
+        // grad_src[i] = where(
+        //   src_single_zero[i],
+        //   (grad * masked_src_result)[dst_flat],
+        //   (grad * result)[dst_flat] / (src_at(i) if !src_zero[i] else 1)
+        // )
+        let grad_src = if self.src.requires_grad() {
+            let mut gs = vec![zero; index_numel];
+            self.for_each_index(|i, _, coords, dst_flat| {
+                let s_raw = read_src_at(coords);
+                let denom = if s_raw == zero { one } else { s_raw };
+                let primary = (go_data[dst_flat] * self.result[dst_flat]) / denom;
+                let single_zero_branch = go_data[dst_flat] * masked_src_result[dst_flat];
+                gs[i] = if src_single_zero[i] == zero {
+                    primary
+                } else {
+                    single_zero_branch
+                };
+            });
+            Some(Tensor::from_storage(
+                TensorStorage::cpu(gs),
+                self.index_shape.clone(),
+                false,
+            )?)
+        } else {
+            None
+        };
+
+        Ok(vec![grad_input, grad_src])
     }
 }
 
@@ -2079,14 +2375,21 @@ impl<T: Float> GradFn<T> for ScatterReduceBackward<T> {
 /// `TensorAdvancedIndexing.cpp:2378-2386` via `scatter_impl<...>(..., reduce,
 /// include_self)` followed by include_self_ones masking.
 ///
-/// Backward is only implemented for `reduce='sum'` (see
-/// [`ScatterReduceBackward`]); for non-sum modes the forward returns a
-/// result tensor with NO `grad_fn` attached (so `.backward()` on a chain
-/// involving non-sum scatter_reduce is a clean no-op rather than an error
-/// deep inside the autograd graph). This matches the no-grad sample stream
-/// from op_db's seed sweep and honors the prior docstring's promise (which
-/// the implementation now actually obeys — pin #1286 D2). For `reduce='sum'`
-/// the result tensor carries [`ScatterReduceBackward`] when grad is enabled.
+/// Backward is implemented for ALL reduce modes — `sum`, `prod`, `amax`,
+/// `amin` — per upstream `scatter_reduce_backward` at
+/// `torch/csrc/autograd/FunctionsManual.cpp:7194-7279`, registered in
+/// `tools/autograd/derivatives.yaml:3074-3077`. Live oracle confirms torch
+/// attaches `ScatterReduceBackward0` for every reduce mode:
+///   ```python
+///   r = inp.scatter_reduce(0, idx, src, reduce='amax', include_self=True)
+///   r.grad_fn   # <ScatterReduceBackward0 ...>
+///   r.requires_grad   # True
+///   r.sum().backward()   # succeeds, src.grad = [1., 1.]
+///   ```
+/// The `ScatterReduceBackward` GradFn saves the forward `result` buffer so
+/// the value-aware VJPs (which need to read the per-slot max/min and the
+/// prod chain-rule) can compute the right gradient. For all modes the
+/// result tensor carries [`ScatterReduceBackward`] when grad is enabled.
 pub fn scatter_reduce<T: Float>(
     input: &Tensor<T>,
     dim: i64,
@@ -2129,6 +2432,7 @@ pub fn scatter_reduce<T: Float>(
                 index_shape: index_shape.to_vec(),
                 reduce,
                 include_self,
+                result: vec![out],
             });
             return Tensor::from_operation(out_storage, vec![], grad_fn);
         }
@@ -2238,17 +2542,14 @@ pub fn scatter_reduce<T: Float>(
                 }
             }
             let output_shape = input_shape.to_vec();
-            // D2 fix: only attach a grad_fn for reduce='sum' — the backward
-            // is sum-only (see `ScatterReduceBackward::backward`'s early-return
-            // for non-sum modes at `:1959-1967`). Attaching a grad_fn whose
-            // backward then errors makes the user's whole `.backward()` chain
-            // die; the upstream-faithful behavior is to not attach a grad_fn
-            // for modes whose VJP is not implemented (the docstring at
-            // `:2082-2085` already claimed this — we now make it true).
-            if matches!(reduce, ScatterReduce::Sum)
-                && (input.requires_grad() || src.requires_grad())
-                && is_grad_enabled()
-            {
+            // Attach a grad_fn for ALL reduce modes per upstream
+            // `derivatives.yaml:3074-3077` — the live oracle confirms torch
+            // sets `r.grad_fn = <ScatterReduceBackward0 ...>` for amax/amin
+            // as well as sum/prod. The backward implements every mode via
+            // the per-mode branches in `ScatterReduceBackward::backward`
+            // (sum/prod/amax/amin) mirroring
+            // `FunctionsManual.cpp:7194-7279`.
+            if (input.requires_grad() || src.requires_grad()) && is_grad_enabled() {
                 let grad_fn = Arc::new(ScatterReduceBackward {
                     input: input.clone(),
                     src: src.clone(),
@@ -2257,6 +2558,7 @@ pub fn scatter_reduce<T: Float>(
                     index_shape: index_shape.to_vec(),
                     reduce,
                     include_self,
+                    result: out.clone(),
                 });
                 return Tensor::from_operation(TensorStorage::cpu(out), output_shape, grad_fn);
             }
@@ -2278,15 +2580,11 @@ pub fn scatter_reduce<T: Float>(
     }
 
     let output_shape = input_shape.to_vec();
-    // D2 fix: only attach a grad_fn for reduce='sum' — see comment above at
-    // the amax/amin branch. The docstring at `:2082-2085` promises non-sum
-    // modes produce a tensor without a grad_fn; we now honor that promise so
-    // the user's `.backward()` is a clean no-op on these modes rather than
-    // erroring deep inside the autograd graph.
-    if matches!(reduce, ScatterReduce::Sum)
-        && (input.requires_grad() || src.requires_grad())
-        && is_grad_enabled()
-    {
+    // Attach a grad_fn for ALL reduce modes per upstream
+    // `derivatives.yaml:3074-3077` — torch's `ScatterReduceBackward0`
+    // attaches unconditionally and `FunctionsManual.cpp:7194-7279`
+    // implements per-mode VJPs for sum/prod/amax/amin/mean.
+    if (input.requires_grad() || src.requires_grad()) && is_grad_enabled() {
         let grad_fn = Arc::new(ScatterReduceBackward {
             input: input.clone(),
             src: src.clone(),
@@ -2295,6 +2593,7 @@ pub fn scatter_reduce<T: Float>(
             index_shape: index_shape.to_vec(),
             reduce,
             include_self,
+            result: out.clone(),
         });
         Tensor::from_operation(TensorStorage::cpu(out), output_shape, grad_fn)
     } else {
@@ -2361,6 +2660,25 @@ fn apply_reduce<T: Float>(mode: ScatterReduce, a: T, b: T) -> T {
 /// TensorAdvancedIndexing.cpp:354-435 index_func_meta_impl` (index_add) and
 /// `:278-352 TORCH_PRECOMPUTE_META_FUNC(index_copy)` (index_copy).
 ///
+/// The two ops share most of the contract — strict-no-wrap negatives,
+/// strict source-size match along `dim`, strict non-dim shape match — but
+/// differ on the 0-d source case:
+///
+/// - **`index_add`** REJECTS 0-d source on N-D self. The upstream meta at
+///   `:404-415` does `self_sizes == source_sizes` after a CONDITIONAL erase
+///   (only when both are non-0-d); for `self.dim() != 0 && source.dim() ==
+///   0` the erase is skipped, so the equality check `self_sizes == []`
+///   fails immediately. Caller passes `accept_0d_source: false`.
+///
+/// - **`index_copy`** ACCEPTS 0-d source on N-D self — the upstream meta at
+///   `:285-300` only errors when `source.dim() == 0 && numIndices != 1`;
+///   the dimensionality-mismatch check at `:291-300` explicitly excludes
+///   the `source.dim() == 0` case. Live oracle:
+///   `torch.tensor([1.,2.,3.,4.]).index_copy(0, t([1]), t(99.))` ->
+///   `tensor([1., 99., 3., 4.])` (broadcasts the scalar). Caller passes
+///   `accept_0d_source: true`; index_copy's main loop reads the scalar
+///   source element once per index slot.
+///
 /// Validates:
 /// 1. `dim` ∈ `[-input.ndim, input.ndim)` and normalizes to non-negative.
 /// 2. `index.ndim <= 1` (scalar or 1-D only).
@@ -2368,11 +2686,14 @@ fn apply_reduce<T: Float>(mode: ScatterReduce, a: T, b: T) -> T {
 ///    (no wrap), matching upstream's `TORCH_CHECK_INDEX((self_i >= 0) &&
 ///    (self_i < self_dim_size))` at `:1245-1247`.
 /// 4. `source.dim() <= 1 || source.size(dim) == index.numel()` — strict
-///    size match along the index dim (no silent clamp).
+///    size match along the index dim (no silent clamp). For 0-d source
+///    when `accept_0d_source = true`, requires `n_indices == 1` per
+///    upstream `:285-290 index_copy`.
 /// 5. `source.dim() == 0 || self.dim() == 0 || self_sizes-dim ==
 ///    source_sizes-dim` — strict shape match on the non-dim axes.
-/// 6. 0-d `source` on N-D `self` with N >= 1 is REJECTED unless N == 0
-///    (the lone 0-d/0-d case is handled by the caller's 0-d branch).
+/// 6. 0-d `source` on N-D `self` with N >= 1: REJECTED when
+///    `accept_0d_source = false` (index_add); ACCEPTED with `n_indices ==
+///    1` when `accept_0d_source = true` (index_copy).
 ///
 /// Returns `(dim_usize, idx_usize)` where `idx_usize` is the validated
 /// non-negative index vector (length == `index.numel()`).
@@ -2382,6 +2703,7 @@ fn strict_index_add_copy_validate<T: Float>(
     dim: i64,
     index: &IntTensor<i64>,
     source: &Tensor<T>,
+    accept_0d_source: bool,
 ) -> FerrotorchResult<(usize, Vec<usize>)> {
     let input_shape = input.shape();
     let ndim = input_shape.len();
@@ -2461,21 +2783,40 @@ fn strict_index_add_copy_validate<T: Float>(
     }
 
     // (5)+(6) Non-dim shape match. Upstream `:404-415` for index_add and
-    // `:321-342` for index_copy: if both source and self are non-0-d, their
-    // sizes must match outside of `dim`. The `source.dim() == 0 && self.dim()
-    // != 0` case is rejected here (self.dim() != 0 means N-D input where the
-    // 0-d source would not broadcast).
+    // `:321-342` for index_copy diverge on the `source.dim() == 0 &&
+    // self.dim() != 0` case:
+    //   - index_add: rejected (the conditional erase at `:406` is skipped,
+    //     so self_sizes stays non-empty and the `self_sizes == source_sizes`
+    //     equality at `:410-415` fails).
+    //   - index_copy: ACCEPTED — upstream meta at `:285-300` only errors when
+    //     `source.dim() == 0 && numIndices != 1`; the dimensionality-match
+    //     check at `:291-300` explicitly excludes the `source.dim() == 0`
+    //     case (`source.dim() != 0 && self.dim() != 0`). The forward then
+    //     broadcasts the scalar source per index slot.
     if source_ndim == 0 && ndim > 0 && n_indices > 0 {
-        // Upstream specifically: when self.dim() != 0 and source.dim() == 0,
-        // self_sizes (with dim erased) is non-empty while source_sizes is
-        // empty — the `self_sizes == source_sizes` TORCH_CHECK fails.
-        return Err(FerrotorchError::ShapeMismatch {
-            message: format!(
-                "{op_name}: source tensor shape must match self tensor shape, \
-                 excluding the specified dimension. Got self.shape = {input_shape:?} \
-                 source.shape = {source_shape:?}"
-            ),
-        });
+        if !accept_0d_source {
+            return Err(FerrotorchError::ShapeMismatch {
+                message: format!(
+                    "{op_name}: source tensor shape must match self tensor shape, \
+                     excluding the specified dimension. Got self.shape = {input_shape:?} \
+                     source.shape = {source_shape:?}"
+                ),
+            });
+        }
+        // accept_0d_source (index_copy): the 0-d source contract only allows
+        // `numIndices == 1` per upstream `:285-290`:
+        //   if (source.dim() == 0 && numIndices != 1) error
+        if n_indices != 1 {
+            return Err(FerrotorchError::ShapeMismatch {
+                message: format!(
+                    "{op_name}: When source is scalar, index should have one element \
+                     (got {n_indices})"
+                ),
+            });
+        }
+        // 0-d source on N-D self, n_indices == 1: validated. Skip the
+        // remaining non-dim shape walk below (source has no non-dim axes).
+        return Ok((dim_usize, idx_usize));
     }
     if source_ndim != 0 && ndim != 0 {
         for d in 0..ndim {
@@ -2693,14 +3034,19 @@ pub fn index_add<T: Float>(
                 });
             }
         };
-        // Source must be 0-d (matching self) — the only shape compatible
-        // with a 0-d self via the upstream meta's `source.dim() == 0` branch.
-        // Also accept a length-1 1-D source (upstream's `source.dim() == 1
-        // && source.size(0) == 1` permissive case at `:1280-1287`).
+        // Source must be 0-d (matching self) — upstream meta function at
+        // `aten/src/ATen/native/TensorAdvancedIndexing.cpp:404-415` enforces
+        // `self_sizes == source_sizes` (the size-erase at :407 is conditional
+        // on BOTH self.dim() != 0 AND source.dim() != 0). For 0-d self the
+        // erase is skipped, so self_sizes stays `[]` and source_sizes stays
+        // whatever source had — a 1-D length-1 source ends up as `[1]` and
+        // the equality check `[] == [1]` REJECTS it. Live oracle:
+        //   `torch.index_add(t(5.), 0, t([0]), t([99.]))` -> RuntimeError
+        //   "source tensor shape must match self tensor shape, excluding the
+        //    specified dimension. Got self.shape = [] source.shape = [1]"
+        // Only an actually-0-d source is compatible.
         let source_shape = source.shape();
-        let source_is_0d_compatible =
-            source_shape.is_empty() || (source_shape.len() == 1 && source_shape[0] <= 1);
-        if !source_is_0d_compatible {
+        if !source_shape.is_empty() {
             return Err(FerrotorchError::ShapeMismatch {
                 message: format!(
                     "index_add: source tensor shape must match self tensor shape, \
@@ -2766,9 +3112,12 @@ pub fn index_add<T: Float>(
         return Tensor::from_storage(storage, vec![], false);
     }
 
-    // N-D input: route through the shared strict validator.
+    // N-D input: route through the shared strict validator. index_add
+    // REJECTS 0-d source on N-D self per upstream `:404-415` (the
+    // `self_sizes == source_sizes` check after the conditional erase) —
+    // pass `accept_0d_source = false`.
     let (dim_usize, idx_usize) =
-        strict_index_add_copy_validate("index_add", input, dim, index, source)?;
+        strict_index_add_copy_validate("index_add", input, dim, index, source, false)?;
 
     let in_dim_size = input_shape[dim_usize];
     let alpha_t = <T as num_traits::NumCast>::from(alpha).ok_or_else(|| {
@@ -3042,9 +3391,12 @@ pub fn index_copy<T: Float>(
         return Tensor::from_storage(storage, vec![], false);
     }
 
-    // N-D input: route through the shared strict validator.
+    // N-D input: route through the shared strict validator. index_copy
+    // ACCEPTS 0-d source on N-D self per upstream `:285-300` (broadcasts the
+    // scalar source per index slot, requires n_indices == 1) — pass
+    // `accept_0d_source = true`.
     let (dim_usize, idx_usize) =
-        strict_index_add_copy_validate("index_copy", input, dim, index, source)?;
+        strict_index_add_copy_validate("index_copy", input, dim, index, source, true)?;
 
     let in_dim_size = input_shape[dim_usize];
     let outer: usize = input_shape[..dim_usize].iter().product();
@@ -3053,20 +3405,36 @@ pub fn index_copy<T: Float>(
     let src_data = source.data_vec()?;
     let source_shape = source.shape();
 
-    let src_dim_size = if source_shape.is_empty() {
-        // Strict validator guarantees source non-0-d when self is N-D.
-        return Err(FerrotorchError::Internal {
-            message: "index_copy: unexpected 0-d source after strict validation".into(),
-        });
-    } else {
-        source_shape[dim_usize]
-    };
-
-    for o in 0..outer {
-        for (i, &dst_i) in idx_usize.iter().enumerate() {
+    if source_shape.is_empty() {
+        // 0-d source on N-D self: broadcast the single scalar to each
+        // (outer × inner) slice at the chosen index slot. The strict
+        // validator guarantees `idx_usize.len() == 1` in this branch.
+        // Live oracle:
+        //   `torch.tensor([1.,2.,3.,4.]).index_copy(0, t([1]), t(99.))`
+        //   -> `tensor([1., 99., 3., 4.])` — every element of the
+        //   target slice along `dim` at `idx_usize[0]` is set to the
+        //   scalar src value (here a length-1 slice for 1-D self).
+        let scalar = if src_data.is_empty() {
+            <T as num_traits::Zero>::zero()
+        } else {
+            src_data[0]
+        };
+        let dst_i = idx_usize[0];
+        for o in 0..outer {
             let dst_base = o * in_dim_size * inner + dst_i * inner;
-            let src_base = o * src_dim_size * inner + i * inner;
-            out[dst_base..dst_base + inner].copy_from_slice(&src_data[src_base..src_base + inner]);
+            for k in 0..inner {
+                out[dst_base + k] = scalar;
+            }
+        }
+    } else {
+        let src_dim_size = source_shape[dim_usize];
+        for o in 0..outer {
+            for (i, &dst_i) in idx_usize.iter().enumerate() {
+                let dst_base = o * in_dim_size * inner + dst_i * inner;
+                let src_base = o * src_dim_size * inner + i * inner;
+                out[dst_base..dst_base + inner]
+                    .copy_from_slice(&src_data[src_base..src_base + inner]);
+            }
         }
     }
 
