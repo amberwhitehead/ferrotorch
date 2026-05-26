@@ -2080,9 +2080,13 @@ impl<T: Float> GradFn<T> for ScatterReduceBackward<T> {
 /// include_self)` followed by include_self_ones masking.
 ///
 /// Backward is only implemented for `reduce='sum'` (see
-/// [`ScatterReduceBackward`]); other modes have a forward path but produce a
-/// result tensor without a grad_fn attached (caller responsibility, matches
-/// the no-grad sample stream from op_db's seed sweep).
+/// [`ScatterReduceBackward`]); for non-sum modes the forward returns a
+/// result tensor with NO `grad_fn` attached (so `.backward()` on a chain
+/// involving non-sum scatter_reduce is a clean no-op rather than an error
+/// deep inside the autograd graph). This matches the no-grad sample stream
+/// from op_db's seed sweep and honors the prior docstring's promise (which
+/// the implementation now actually obeys — pin #1286 D2). For `reduce='sum'`
+/// the result tensor carries [`ScatterReduceBackward`] when grad is enabled.
 pub fn scatter_reduce<T: Float>(
     input: &Tensor<T>,
     dim: i64,
@@ -2165,7 +2169,23 @@ pub fn scatter_reduce<T: Float>(
 
     let in_data = input.data_vec()?;
     let src_data = src.data_vec()?;
+    let src_shape = src.shape();
     let mut out = in_data.clone();
+
+    // Read a src element at the index-shape coordinate `coords`, using src's
+    // own shape for stride arithmetic (NOT a flat-i src_data[i] walk). This
+    // mirrors upstream `_cpu_scatter_gather_dim_loop` at
+    // `aten/src/ATen/native/cpu/ScatterGatherKernel.cpp:112-126`:
+    //   for i in 0..index_dim_size:
+    //     f(self + idx_dim * self_dim_stride, src + i * src_dim_stride)
+    // where the outer TensorIterator iterates over index.sizes() and reads
+    // src at the same coordinates with src.strides() — so when src is BIGGER
+    // than index along any non-`dim` axis (allowed per `scatter_shape_check`
+    // at `aten/src/ATen/native/ScatterGatherChecks.h:90-100`: `index.size(d) <=
+    // src.size(d)`), the trailing src elements past index.size(d) are
+    // ignored, but the accessed elements are at the index-shape coords —
+    // NOT flat-i positions, which would read past row boundaries in src.
+    let read_src_at = |coords: &[usize]| -> T { src_data[flat_index(coords, src_shape)] };
 
     // For include_self=false we mask out positions the index list will touch
     // and reset to the reduction identity. Per upstream `include_self`
@@ -2206,7 +2226,7 @@ pub fn scatter_reduce<T: Float>(
                 let mut dst_coords = coords.clone();
                 dst_coords[dim_usize] = idx_val;
                 let dst_flat = flat_index(&dst_coords, input_shape);
-                let s = src_data[i];
+                let s = read_src_at(&coords);
                 out[dst_flat] = if touched[dst_flat] {
                     apply_reduce(reduce, out[dst_flat], s)
                 } else {
@@ -2218,7 +2238,17 @@ pub fn scatter_reduce<T: Float>(
                 }
             }
             let output_shape = input_shape.to_vec();
-            if (input.requires_grad() || src.requires_grad()) && is_grad_enabled() {
+            // D2 fix: only attach a grad_fn for reduce='sum' — the backward
+            // is sum-only (see `ScatterReduceBackward::backward`'s early-return
+            // for non-sum modes at `:1959-1967`). Attaching a grad_fn whose
+            // backward then errors makes the user's whole `.backward()` chain
+            // die; the upstream-faithful behavior is to not attach a grad_fn
+            // for modes whose VJP is not implemented (the docstring at
+            // `:2082-2085` already claimed this — we now make it true).
+            if matches!(reduce, ScatterReduce::Sum)
+                && (input.requires_grad() || src.requires_grad())
+                && is_grad_enabled()
+            {
                 let grad_fn = Arc::new(ScatterReduceBackward {
                     input: input.clone(),
                     src: src.clone(),
@@ -2241,14 +2271,22 @@ pub fn scatter_reduce<T: Float>(
         let mut dst_coords = coords.clone();
         dst_coords[dim_usize] = idx_val;
         let dst_flat = flat_index(&dst_coords, input_shape);
-        out[dst_flat] = apply_reduce(reduce, out[dst_flat], src_data[i]);
+        out[dst_flat] = apply_reduce(reduce, out[dst_flat], read_src_at(&coords));
         if i + 1 < index_numel {
             increment_coords(&mut coords, index_shape);
         }
     }
 
     let output_shape = input_shape.to_vec();
-    if (input.requires_grad() || src.requires_grad()) && is_grad_enabled() {
+    // D2 fix: only attach a grad_fn for reduce='sum' — see comment above at
+    // the amax/amin branch. The docstring at `:2082-2085` promises non-sum
+    // modes produce a tensor without a grad_fn; we now honor that promise so
+    // the user's `.backward()` is a clean no-op on these modes rather than
+    // erroring deep inside the autograd graph.
+    if matches!(reduce, ScatterReduce::Sum)
+        && (input.requires_grad() || src.requires_grad())
+        && is_grad_enabled()
+    {
         let grad_fn = Arc::new(ScatterReduceBackward {
             input: input.clone(),
             src: src.clone(),
@@ -2289,6 +2327,200 @@ fn apply_reduce<T: Float>(mode: ScatterReduce, a: T, b: T) -> T {
             }
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// Shared strict-validation helper for index_add / index_copy.
+//
+// Both upstream ops use the same meta-function-driven strict contract:
+//   - negative index values are REJECTED with `IndexError: index out of range
+//     in self` (upstream kernels at `aten/src/ATen/native/
+//     TensorAdvancedIndexing.cpp:1245-1247` index_add and `:1300-1301` 1-d
+//     index_add, plus `cpu/IndexKernel.cpp` for index_copy_stub — none of
+//     these wrap negatives, unlike `index_fill_kernel` at `cpu/
+//     IndexKernel.cpp:224-229` which DOES wrap).
+//   - source size mismatch is REJECTED with
+//     `Number of indices (N) should be equal to source.size(dim): (M), for
+//     dim: D` (upstream meta at `:394-402 for index_add`, `:343-349 for
+//     index_copy`).
+//   - source shape mismatch on non-dim axes is REJECTED with
+//     `source tensor shape must match self tensor shape, excluding the
+//     specified dimension. Got self.shape = ... source.shape = ...`
+//     (upstream `:410-415` for index_add, `:330-342` for index_copy).
+//
+// The prior implementations of index_add / index_copy (#1247/#1248, commit
+// 8e98ee0d2) extended the wrap-then-clamp pattern from index_fill (#1272/
+// #1273) — but index_fill's wrap-negative pattern is specific to its
+// upstream kernel (`cpu/IndexKernel.cpp:224-229`'s `if (idx < 0) idx +=
+// size`); index_add and index_copy upstream do NOT wrap negatives. Pin
+// #1286 D3-D6b. This helper now enforces strict validation for both.
+// ---------------------------------------------------------------------------
+
+/// Strict validation shared by `index_add` and `index_copy`. Mirrors the
+/// meta-function checks at `aten/src/ATen/native/
+/// TensorAdvancedIndexing.cpp:354-435 index_func_meta_impl` (index_add) and
+/// `:278-352 TORCH_PRECOMPUTE_META_FUNC(index_copy)` (index_copy).
+///
+/// Validates:
+/// 1. `dim` ∈ `[-input.ndim, input.ndim)` and normalizes to non-negative.
+/// 2. `index.ndim <= 1` (scalar or 1-D only).
+/// 3. Every index value is in `[0, input.size(dim))` — NEGATIVES REJECTED
+///    (no wrap), matching upstream's `TORCH_CHECK_INDEX((self_i >= 0) &&
+///    (self_i < self_dim_size))` at `:1245-1247`.
+/// 4. `source.dim() <= 1 || source.size(dim) == index.numel()` — strict
+///    size match along the index dim (no silent clamp).
+/// 5. `source.dim() == 0 || self.dim() == 0 || self_sizes-dim ==
+///    source_sizes-dim` — strict shape match on the non-dim axes.
+/// 6. 0-d `source` on N-D `self` with N >= 1 is REJECTED unless N == 0
+///    (the lone 0-d/0-d case is handled by the caller's 0-d branch).
+///
+/// Returns `(dim_usize, idx_usize)` where `idx_usize` is the validated
+/// non-negative index vector (length == `index.numel()`).
+fn strict_index_add_copy_validate<T: Float>(
+    op_name: &'static str,
+    input: &Tensor<T>,
+    dim: i64,
+    index: &IntTensor<i64>,
+    source: &Tensor<T>,
+) -> FerrotorchResult<(usize, Vec<usize>)> {
+    let input_shape = input.shape();
+    let ndim = input_shape.len();
+    let ndim_i64 = ndim as i64;
+
+    // (2) index.ndim <= 1
+    if index.ndim() > 1 {
+        return Err(FerrotorchError::ShapeMismatch {
+            message: format!(
+                "{op_name}: index must be 1-D or scalar, got shape {:?}",
+                index.shape()
+            ),
+        });
+    }
+
+    // (1) dim ∈ [-ndim, ndim), normalize.
+    let dim_norm = if dim < 0 { dim + ndim_i64 } else { dim };
+    if !(0..ndim_i64).contains(&dim_norm) {
+        return Err(FerrotorchError::InvalidArgument {
+            message: format!("{op_name}: dim {dim} out of range for input ndim {ndim}"),
+        });
+    }
+    let dim_usize = dim_norm as usize;
+    let in_dim_size = input_shape[dim_usize];
+
+    // (3) Validate every index value is in [0, in_dim_size). Negatives
+    // REJECTED — upstream contract per `:1245-1247` (no wrap).
+    let mut idx_usize: Vec<usize> = Vec::with_capacity(index.numel());
+    for v in index.data()? {
+        let i_raw = v.to_i64();
+        if i_raw < 0 || i_raw >= in_dim_size as i64 {
+            return Err(FerrotorchError::IndexOutOfBounds {
+                index: if i_raw < 0 {
+                    i_raw.unsigned_abs() as usize
+                } else {
+                    i_raw as usize
+                },
+                axis: dim_usize,
+                size: in_dim_size,
+            });
+        }
+        idx_usize.push(i_raw as usize);
+    }
+
+    // (4) source size match along `dim`. Upstream meta check at
+    // `:394-402 for index_add`:
+    //   TORCH_CHECK(numel == (source.dim() == 0 ? 1 : source.size(dim)),
+    //     "Number of indices (", numel, ") should be equal to
+    //      source.size(dim): (", source.size(dim), "), for dim: ", dim);
+    // For index_copy the equivalent check is at `:343-349`:
+    //   TORCH_CHECK_INDEX(source.dim() == 0 || numIndices == source.size(dim),
+    //     ...);
+    let source_shape = source.shape();
+    let source_ndim = source_shape.len();
+    let n_indices = index.numel();
+    let expected_src_at_dim = if source_ndim == 0 {
+        1
+    } else if dim_usize < source_ndim {
+        source_shape[dim_usize]
+    } else {
+        // dim out of bounds of source rank: only valid for source 0-d, which
+        // is the `source_ndim == 0` branch above. Reaching here means
+        // source.ndim > 0 but dim >= source.ndim — strict shape mismatch.
+        return Err(FerrotorchError::ShapeMismatch {
+            message: format!(
+                "{op_name}: source.dim() ({source_ndim}) does not contain dim {dim_usize}"
+            ),
+        });
+    };
+    if n_indices != expected_src_at_dim {
+        return Err(FerrotorchError::ShapeMismatch {
+            message: format!(
+                "{op_name}: Number of indices ({n_indices}) should be equal to \
+                 source.size(dim): ({expected_src_at_dim}), for dim: {dim_usize}"
+            ),
+        });
+    }
+
+    // (5)+(6) Non-dim shape match. Upstream `:404-415` for index_add and
+    // `:321-342` for index_copy: if both source and self are non-0-d, their
+    // sizes must match outside of `dim`. The `source.dim() == 0 && self.dim()
+    // != 0` case is rejected here (self.dim() != 0 means N-D input where the
+    // 0-d source would not broadcast).
+    if source_ndim == 0 && ndim > 0 && n_indices > 0 {
+        // Upstream specifically: when self.dim() != 0 and source.dim() == 0,
+        // self_sizes (with dim erased) is non-empty while source_sizes is
+        // empty — the `self_sizes == source_sizes` TORCH_CHECK fails.
+        return Err(FerrotorchError::ShapeMismatch {
+            message: format!(
+                "{op_name}: source tensor shape must match self tensor shape, \
+                 excluding the specified dimension. Got self.shape = {input_shape:?} \
+                 source.shape = {source_shape:?}"
+            ),
+        });
+    }
+    if source_ndim != 0 && ndim != 0 {
+        for d in 0..ndim {
+            if d == dim_usize {
+                continue;
+            }
+            let self_d = input_shape[d];
+            let src_d = if d < source_ndim {
+                source_shape[d]
+            } else {
+                // source rank differs from self rank: shape mismatch.
+                return Err(FerrotorchError::ShapeMismatch {
+                    message: format!(
+                        "{op_name}: source tensor shape must match self tensor shape, \
+                         excluding the specified dimension. Got self.shape = \
+                         {input_shape:?} source.shape = {source_shape:?}"
+                    ),
+                });
+            };
+            if self_d != src_d {
+                return Err(FerrotorchError::ShapeMismatch {
+                    message: format!(
+                        "{op_name}: source tensor shape must match self tensor shape, \
+                         excluding the specified dimension. Got self.shape = \
+                         {input_shape:?} source.shape = {source_shape:?}"
+                    ),
+                });
+            }
+        }
+        // Also: source rank must equal self rank when both are non-0-d, or
+        // source must be 1-D when self.dim() > 1 (the upstream `1-D source`
+        // branch at `:1259-1308` accepts source.dim() <= 1 only when the
+        // result is 1-D too; multi-D self with 1-D source is rejected by the
+        // meta `self_sizes == source_sizes` check unless ndim==1).
+        if source_ndim != ndim {
+            return Err(FerrotorchError::ShapeMismatch {
+                message: format!(
+                    "{op_name}: source.dim() ({source_ndim}) must match self.dim() \
+                     ({ndim}) (excluding 0-d source on 0-d self)"
+                ),
+            });
+        }
+    }
+
+    Ok((dim_usize, idx_usize))
 }
 
 // ---------------------------------------------------------------------------
@@ -2426,8 +2658,15 @@ impl<T: Float> GradFn<T> for IndexAddBackward<T> {
 ///
 /// `dim` follows PyTorch's negative-wrap convention (`maybe_wrap_dim` at
 /// `:1179`). `index` must be 1-D or 0-D scalar (upstream restricts at
-/// `:1260-1264 TORCH_CHECK(source.dim() <= 1, ...)`); negative index values
-/// wrap per `idx + dim_size`.
+/// `:1260-1264 TORCH_CHECK(source.dim() <= 1, ...)`).
+///
+/// **Strict validation** per upstream meta function at `:438-446
+/// TORCH_PRECOMPUTE_META_FUNC(index_add)` → `:354-435 index_func_meta_impl`:
+/// negative index values are REJECTED (no wrap, unlike `index_fill`);
+/// `source.size(dim) != index.numel()` is REJECTED (no silent clamp);
+/// 0-d source on N-D self is REJECTED (shape mismatch). See
+/// [`strict_index_add_copy_validate`] for the shared helper. Closes #1286
+/// divergences D3/D4/D5.
 pub fn index_add<T: Float>(
     input: &Tensor<T>,
     dim: i64,
@@ -2439,9 +2678,11 @@ pub fn index_add<T: Float>(
     let ndim = input_shape.len();
 
     if ndim == 0 {
-        // 0-d input: unsqueeze to length-1 1-d per upstream's 1-d branch at
+        // 0-d input: only valid when source is also 0-d (or 1-d length-1)
+        // AND index has a single entry. Upstream unsqueezes to 1-d at
         // `TensorAdvancedIndexing.cpp:1259-1278`. Only dim ∈ {-1, 0} and
-        // index ∈ {-1, 0} are valid.
+        // index ∈ {0} are valid (upstream rejects negative indices —
+        // unwrapped here too).
         let dim_for_0d = match dim {
             0 | -1 => 0i64,
             _ => {
@@ -2452,6 +2693,22 @@ pub fn index_add<T: Float>(
                 });
             }
         };
+        // Source must be 0-d (matching self) — the only shape compatible
+        // with a 0-d self via the upstream meta's `source.dim() == 0` branch.
+        // Also accept a length-1 1-D source (upstream's `source.dim() == 1
+        // && source.size(0) == 1` permissive case at `:1280-1287`).
+        let source_shape = source.shape();
+        let source_is_0d_compatible =
+            source_shape.is_empty() || (source_shape.len() == 1 && source_shape[0] <= 1);
+        if !source_is_0d_compatible {
+            return Err(FerrotorchError::ShapeMismatch {
+                message: format!(
+                    "index_add: source tensor shape must match self tensor shape, \
+                     excluding the specified dimension. Got self.shape = [] \
+                     source.shape = {source_shape:?}"
+                ),
+            });
+        }
         let scalar_val = input.data_vec()?[0];
         let alpha_t = <T as num_traits::NumCast>::from(alpha).ok_or_else(|| {
             FerrotorchError::InvalidArgument {
@@ -2459,12 +2716,24 @@ pub fn index_add<T: Float>(
             }
         })?;
         let src_data = source.data_vec()?;
+        // Upstream requires `numel == 1` for source.dim() == 0. For 0-d
+        // self + 0-d source: index must be 1-element.
+        let n_indices = index.numel();
+        if n_indices != 1 && n_indices != 0 {
+            return Err(FerrotorchError::ShapeMismatch {
+                message: format!(
+                    "index_add: Number of indices ({n_indices}) should be equal to \
+                     source.size(dim): (1), for dim: 0"
+                ),
+            });
+        }
         let mut acc = scalar_val;
         let mut saved_index: Vec<usize> = Vec::new();
-        for (i, v) in index.data()?.iter().enumerate() {
+        for v in index.data()? {
             let i_raw = v.to_i64();
-            let i_wrapped = if i_raw < 0 { i_raw + 1 } else { i_raw };
-            if !(0..1).contains(&i_wrapped) {
+            // 0-d input has dim_size = 1 — only the literal 0 is valid;
+            // upstream rejects negatives.
+            if i_raw != 0 {
                 return Err(FerrotorchError::IndexOutOfBounds {
                     index: if i_raw < 0 {
                         i_raw.unsigned_abs() as usize
@@ -2477,10 +2746,8 @@ pub fn index_add<T: Float>(
             }
             let src_v = if src_data.is_empty() {
                 <T as num_traits::Zero>::zero()
-            } else if src_data.len() == 1 {
-                src_data[0]
             } else {
-                src_data[i.min(src_data.len() - 1)]
+                src_data[0]
             };
             acc += alpha_t * src_v;
             saved_index.push(0);
@@ -2499,49 +2766,11 @@ pub fn index_add<T: Float>(
         return Tensor::from_storage(storage, vec![], false);
     }
 
-    if index.ndim() > 1 {
-        return Err(FerrotorchError::ShapeMismatch {
-            message: format!(
-                "index_add: index must be 1-D or scalar, got shape {:?}",
-                index.shape()
-            ),
-        });
-    }
+    // N-D input: route through the shared strict validator.
+    let (dim_usize, idx_usize) =
+        strict_index_add_copy_validate("index_add", input, dim, index, source)?;
 
-    let ndim_i64 = ndim as i64;
-    let dim_norm = if dim < 0 { dim + ndim_i64 } else { dim };
-    if !(0..ndim_i64).contains(&dim_norm) {
-        return Err(FerrotorchError::InvalidArgument {
-            message: format!("index_add: dim {dim} out of range for input ndim {ndim}"),
-        });
-    }
-    let dim_usize = dim_norm as usize;
     let in_dim_size = input_shape[dim_usize];
-    let in_dim_size_i64 = in_dim_size as i64;
-
-    // Validate + widen indices with negative-wrap.
-    let mut idx_usize: Vec<usize> = Vec::with_capacity(index.numel());
-    for v in index.data()? {
-        let i_raw = v.to_i64();
-        if i_raw < -in_dim_size_i64 || i_raw >= in_dim_size_i64 {
-            return Err(FerrotorchError::IndexOutOfBounds {
-                index: if i_raw < 0 {
-                    i_raw.unsigned_abs() as usize
-                } else {
-                    i_raw as usize
-                },
-                axis: dim_usize,
-                size: in_dim_size,
-            });
-        }
-        let i = if i_raw < 0 {
-            i_raw + in_dim_size_i64
-        } else {
-            i_raw
-        };
-        idx_usize.push(i as usize);
-    }
-
     let alpha_t = <T as num_traits::NumCast>::from(alpha).ok_or_else(|| {
         FerrotorchError::InvalidArgument {
             message: format!("index_add: alpha {alpha} not representable"),
@@ -2554,28 +2783,24 @@ pub fn index_add<T: Float>(
     let src_data = source.data_vec()?;
     let source_shape = source.shape();
 
-    // For 0-d source with len(index) == 1: treat source as a length-1 slice
-    // along the broadcast dim (upstream's `source.dim() == 0` handling at
-    // `derivatives.yaml:867` via `index.squeeze(0)`).
+    // Post-validate: src_dim_size == idx_usize.len() (strict check ensured
+    // by the validator).
     let src_dim_size = if source_shape.is_empty() {
-        1
-    } else if source_shape.len() == ndim {
-        source_shape[dim_usize]
+        // Strict validator guarantees: source 0-d only allowed when self also
+        // 0-d (handled above) — reaching here is impossible.
+        return Err(FerrotorchError::Internal {
+            message: "index_add: unexpected 0-d source after strict validation".into(),
+        });
     } else {
-        idx_usize.len()
+        source_shape[dim_usize]
     };
 
     for o in 0..outer {
         for (i, &dst_i) in idx_usize.iter().enumerate() {
             let dst_base = o * in_dim_size * inner + dst_i * inner;
+            let src_base = o * src_dim_size * inner + i * inner;
             for k in 0..inner {
-                let src_idx = if source_shape.is_empty() {
-                    0
-                } else {
-                    let i_clamped = i.min(src_dim_size.saturating_sub(1));
-                    o * src_dim_size * inner + i_clamped * inner + k
-                };
-                let s = src_data[src_idx.min(src_data.len() - 1)];
+                let s = src_data[src_base + k];
                 out[dst_base + k] += alpha_t * s;
             }
         }
@@ -2724,7 +2949,14 @@ impl<T: Float> GradFn<T> for IndexCopyBackward<T> {
 /// index_copy_out)`.
 ///
 /// `dim` follows PyTorch's negative-wrap convention. `index` must be 1-D or
-/// scalar. Negative index values wrap per `idx + dim_size`.
+/// scalar.
+///
+/// **Strict validation** per upstream meta function at `:258-352
+/// TORCH_PRECOMPUTE_META_FUNC(index_copy)`: negative index values are
+/// REJECTED (no wrap, unlike `index_fill`); `source.size(dim) !=
+/// index.numel()` is REJECTED (no silent clamp); non-dim shape mismatch
+/// rejected. See [`strict_index_add_copy_validate`] for the shared helper.
+/// Closes #1286 divergences D6/D6b.
 pub fn index_copy<T: Float>(
     input: &Tensor<T>,
     dim: i64,
@@ -2745,14 +2977,41 @@ pub fn index_copy<T: Float>(
                 });
             }
         };
+        // Source must be 0-d (or length-1 1-d). Upstream meta at `:285-290`:
+        //   if (source.dim() == 0 && numIndices != 1) error
+        // and `:291-300`:
+        //   if (source.dim() != self.dim() && source.dim() != 0 && self.dim() != 0) error
+        // For 0-d self: source must be 0-d (else shape mismatch).
+        let source_shape = source.shape();
+        let source_is_0d_compatible =
+            source_shape.is_empty() || (source_shape.len() == 1 && source_shape[0] <= 1);
+        if !source_is_0d_compatible {
+            return Err(FerrotorchError::ShapeMismatch {
+                message: format!(
+                    "index_copy: When source and destination are not scalars, \
+                     their dimensionality must match. Source dimensionality \
+                     ({}), destination dimensionality (0)",
+                    source_shape.len()
+                ),
+            });
+        }
+        let n_indices = index.numel();
+        if source_shape.is_empty() && n_indices != 1 && n_indices != 0 {
+            return Err(FerrotorchError::ShapeMismatch {
+                message: format!(
+                    "index_copy: When source is scalar, index should have one element \
+                     (got {n_indices})"
+                ),
+            });
+        }
         let scalar_val = input.data_vec()?[0];
         let src_data = source.data_vec()?;
         let mut result_val = scalar_val;
         let mut saved_index: Vec<usize> = Vec::new();
-        for (i, v) in index.data()?.iter().enumerate() {
+        for v in index.data()? {
             let i_raw = v.to_i64();
-            let i_wrapped = if i_raw < 0 { i_raw + 1 } else { i_raw };
-            if !(0..1).contains(&i_wrapped) {
+            // 0-d input has dim_size = 1; upstream rejects negatives.
+            if i_raw != 0 {
                 return Err(FerrotorchError::IndexOutOfBounds {
                     index: if i_raw < 0 {
                         i_raw.unsigned_abs() as usize
@@ -2766,7 +3025,7 @@ pub fn index_copy<T: Float>(
             result_val = if src_data.is_empty() {
                 <T as num_traits::Zero>::zero()
             } else {
-                src_data[i.min(src_data.len() - 1)]
+                src_data[0]
             };
             saved_index.push(0);
         }
@@ -2783,73 +3042,31 @@ pub fn index_copy<T: Float>(
         return Tensor::from_storage(storage, vec![], false);
     }
 
-    if index.ndim() > 1 {
-        return Err(FerrotorchError::ShapeMismatch {
-            message: format!(
-                "index_copy: index must be 1-D or scalar, got shape {:?}",
-                index.shape()
-            ),
-        });
-    }
+    // N-D input: route through the shared strict validator.
+    let (dim_usize, idx_usize) =
+        strict_index_add_copy_validate("index_copy", input, dim, index, source)?;
 
-    let ndim_i64 = ndim as i64;
-    let dim_norm = if dim < 0 { dim + ndim_i64 } else { dim };
-    if !(0..ndim_i64).contains(&dim_norm) {
-        return Err(FerrotorchError::InvalidArgument {
-            message: format!("index_copy: dim {dim} out of range for input ndim {ndim}"),
-        });
-    }
-    let dim_usize = dim_norm as usize;
     let in_dim_size = input_shape[dim_usize];
-    let in_dim_size_i64 = in_dim_size as i64;
-
-    let mut idx_usize: Vec<usize> = Vec::with_capacity(index.numel());
-    for v in index.data()? {
-        let i_raw = v.to_i64();
-        if i_raw < -in_dim_size_i64 || i_raw >= in_dim_size_i64 {
-            return Err(FerrotorchError::IndexOutOfBounds {
-                index: if i_raw < 0 {
-                    i_raw.unsigned_abs() as usize
-                } else {
-                    i_raw as usize
-                },
-                axis: dim_usize,
-                size: in_dim_size,
-            });
-        }
-        let i = if i_raw < 0 {
-            i_raw + in_dim_size_i64
-        } else {
-            i_raw
-        };
-        idx_usize.push(i as usize);
-    }
-
     let outer: usize = input_shape[..dim_usize].iter().product();
     let inner: usize = input_shape[dim_usize + 1..].iter().product();
     let mut out = input.data_vec()?;
     let src_data = source.data_vec()?;
     let source_shape = source.shape();
+
     let src_dim_size = if source_shape.is_empty() {
-        1
-    } else if source_shape.len() == ndim {
-        source_shape[dim_usize]
+        // Strict validator guarantees source non-0-d when self is N-D.
+        return Err(FerrotorchError::Internal {
+            message: "index_copy: unexpected 0-d source after strict validation".into(),
+        });
     } else {
-        idx_usize.len()
+        source_shape[dim_usize]
     };
 
     for o in 0..outer {
         for (i, &dst_i) in idx_usize.iter().enumerate() {
             let dst_base = o * in_dim_size * inner + dst_i * inner;
-            for k in 0..inner {
-                let src_idx = if source_shape.is_empty() {
-                    0
-                } else {
-                    let i_clamped = i.min(src_dim_size.saturating_sub(1));
-                    o * src_dim_size * inner + i_clamped * inner + k
-                };
-                out[dst_base + k] = src_data[src_idx.min(src_data.len() - 1)];
-            }
+            let src_base = o * src_dim_size * inner + i * inner;
+            out[dst_base..dst_base + inner].copy_from_slice(&src_data[src_base..src_base + inner]);
         }
     }
 
