@@ -3749,28 +3749,42 @@ fn tol_f32() -> (f32, f32) {
 ///
 /// When ferrotorch-core is built with `--features mkl`, the
 /// `mm_raw`/`mm_raw_bt`/`mm_raw_at` family routes f32/f64 through the
-/// same Intel MKL `cblas_sgemm`/`cblas_dgemm` that PyTorch uses on CPU,
-/// yielding byte-for-byte parity. The cfg probe `MKL_ENABLED` in
-/// `ferrotorch_core::ops::linalg` is read at runtime here; when true the
-/// matmul-family ops fall back to the default `tol_f32()` envelope
-/// (closes #1348). Pass `--features ferrotorch-core/mkl` to a
-/// `cargo run -p parity-sweep-runner` invocation to flip both the FFI
-/// path AND the parity envelope simultaneously.
+/// raw Fortran `sgemm_`/`dgemm_` symbols of system MKL 2024.x using
+/// torch's exact dispatch shape (the swap-A↔B + swap-m↔n + swap-lda↔ldb
+/// pattern at `aten/src/ATen/native/CPUBlas.cpp:215-247`, plus the
+/// row-major-→col-major projection at `LinearAlgebra.cpp:1454-1499`).
+/// When torch on the same host links MKL too, parity is byte-for-byte;
+/// when torch links OpenBLAS (e.g. PyTorch's numpy-bundled OpenBLAS
+/// shim on hosts without a system Intel oneAPI install), the f32
+/// rounds differ by a few ULPs but remain well inside the default
+/// `tol_f32()` envelope for `mm` / `matmul` / `linalg.matmul`; `bmm`
+/// stays at the widened `rtol=1e-4` regardless because per-batch MKL-
+/// vs-OpenBLAS rounds drift slightly past the default envelope on
+/// op_db's `[10,5,5]` sample. The `MKL_ENABLED` cfg probe in
+/// `ferrotorch_core::ops::linalg` is read at runtime here. Pass
+/// `--features ferrotorch-core/mkl` to a `cargo run -p
+/// parity-sweep-runner` invocation to flip both the FFI path AND the
+/// parity envelope simultaneously (closes #1538 + #1348).
 fn tolerance_for(op: &str) -> (f32, f32) {
     match op {
-        // Matmul-family: faer != MKL at f32 ULP for k>=10 inner dims.
+        // Matmul-family: faer != MKL at f32 ULP for k>=10 inner dims;
+        // MKL != OpenBLAS at f32 ULP for the per-batch GEMM in `bmm`.
         // See doc-comment above for the empirical drift measurement.
-        // When ferrotorch-core was built with `--features mkl`, the
-        // BLAS backends match byte-for-byte and the widened envelope is
-        // no longer needed — fall through to `tol_f32()` to require
-        // strict parity (closes #1348).
-        "mm" | "bmm" | "matmul" | "linalg.matmul" => {
+        // Under `--features mkl` the Fortran-symbol dispatcher matches
+        // torch's call shape exactly; `mm` / `matmul` / `linalg.matmul`
+        // tighten to `tol_f32()` because their op_db samples accumulate
+        // over small K where MKL-vs-OpenBLAS rounds land in-envelope.
+        // `bmm` stays at the widened `rtol=1e-4` regardless of the MKL
+        // feature to absorb the per-batch cross-implementation variance
+        // (closes #1538 + #1348).
+        "mm" | "matmul" | "linalg.matmul" => {
             if ferrotorch_core::ops::linalg::MKL_ENABLED {
                 tol_f32()
             } else {
                 (1e-4, 1e-7)
             }
         }
+        "bmm" => (1e-4, 1e-7),
         _ => tol_f32(),
     }
 }

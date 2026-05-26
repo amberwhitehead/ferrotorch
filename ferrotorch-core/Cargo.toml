@@ -34,9 +34,9 @@ gpu = []
 # pointing at a dev-dep — `ferrotorch-gpu` is dev-only here.
 cusparselt = []
 
-# Opt-in Intel MKL FFI path for the `mm_raw` family (closes #1348).
-# When enabled, the large-matrix f32/f64 branches in `ops::linalg::mm_raw`,
-# `mm_raw_bt`, and `mm_raw_at` call `cblas_sgemm`/`cblas_dgemm` directly
+# Opt-in Intel MKL FFI path for the `mm_raw` family (closes #1538 + #1348).
+# When enabled, the f32/f64 branches in `ops::linalg::mm_raw`,
+# `mm_raw_bt`, and `mm_raw_at` call Fortran `sgemm_`/`dgemm_` directly
 # instead of routing through faer's pure-Rust BLAS. This yields byte-for-
 # byte parity with PyTorch's MKL-built CPU matmul; without this feature,
 # faer remains the BLAS backend and the matmul-family parity tolerance
@@ -46,11 +46,22 @@ cusparselt = []
 # at runtime). Activate via `--features mkl` on this crate or
 # `--features ferrotorch-core/mkl` from any downstream consumer.
 #
-# intel-mkl-src vendors MKL 2020.1 statically via ocipkg (~150MB once-off
-# download to `~/.local/share/ocipkg`); cblas-sys provides the FFI shim.
-# Both are leaf primitives per goal.md R-CODE-1 (FFI shim to MKL is a
-# permitted `unsafe` boundary).
-mkl = ["dep:intel-mkl-src", "dep:cblas-sys"]
+# Linkage strategy (system MKL 2024.x dynamic). The crate's `build.rs`
+# emits `cargo:rustc-link-search=$HOME/.local/lib` and
+# `cargo:rustc-link-lib=mkl_rt`, plus an `OUT_DIR/libmkl_rt.so` →
+# `$HOME/.local/lib/libmkl_rt.so.2` symlink so the bare `-lmkl_rt` flag
+# resolves at link-time. The prior `intel-mkl-src` + `cblas-sys` deps
+# were dropped: (a) intel-mkl-src links MKL 2020.1 whereas torch's
+# MKL link (when present) is 2024.x — the dispatch tables differ and
+# 1-5 ULP drift survived even with `MKL_CBWR=COMPATIBLE`, and (b) the
+# `cblas_sgemm` row-major wrapper picked different MKL micro-kernels
+# than torch's raw `sgemm_` Fortran calls on the same column-major-
+# equivalent shapes (root cause of #1538's 1-ULP `mm_raw_at` drift).
+# Calling the Fortran symbol directly with torch's exact dispatch
+# (operand-swap + dim-swap + lda/ldb-swap pattern) eliminates both
+# drift sources. FFI to MKL's Fortran symbols is a leaf primitive
+# per goal.md R-CODE-1.
+mkl = []
 
 [dependencies]
 ferray-core = { workspace = true }
@@ -69,18 +80,6 @@ rustfft = { workspace = true }
 faer = "0.24"
 rustc-hash = "2"
 tracing = { workspace = true }
-
-# Optional Intel MKL FFI dependencies (enabled by the `mkl` feature above).
-# `intel-mkl-src` is a `*-src` crate that fetches the MKL static libraries
-# (via ocipkg from ghcr.io/rust-math/rust-mkl) and emits the
-# `cargo:rustc-link-lib=static=mkl_*` directives during its build script.
-# The consuming Rust source MUST contain an `extern crate intel_mkl_src`
-# declaration so the linker keeps the static archives alive — without it,
-# `--gc-sections` discards them and `cblas_sgemm` resolves to undefined
-# symbol. See `extern crate intel_mkl_src as _;` in `src/ops/linalg.rs`.
-# `cblas-sys` provides the FFI signatures for the CBLAS C API.
-intel-mkl-src = { version = "0.8", optional = true, default-features = false, features = ["mkl-static-lp64-seq"] }
-cblas-sys = { version = "0.3", optional = true }
 
 # Conformance suite scaffolding (Phase 2.0 — issue #759):
 #   * `syn`/`quote` parse the public surface of `src/lib.rs` (and every module

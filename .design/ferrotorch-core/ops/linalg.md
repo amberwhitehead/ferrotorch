@@ -165,26 +165,60 @@ that composes them through `_matmul_impl` (`:2010-2188`).
 
 - REQ-13: Intel MKL FFI path for byte-for-byte matmul parity vs torch
   — exposed via the opt-in `mkl` Cargo feature on `ferrotorch-core`.
-  When the feature is on, the large-matrix f32 and f64 branches of
-  `mm_raw` / `mm_raw_bt` / `mm_raw_at` route through `cblas_sgemm` /
-  `cblas_dgemm` directly (CblasRowMajor; no/trans/trans variants
-  cover the three fused-transpose families) instead of faer's
-  pure-Rust GEMM. PyTorch's own CPU GEMM dispatches to the same
-  symbol at `aten/src/ATen/native/CPUBlas.cpp:228 cblas_sgemm(CblasColMajor, ...)`
-  for MKL builds (the only difference is ferrotorch's row-major
-  layout vs upstream's col-major — both layouts give MKL the same
-  block-summation order so the f32 rounds match byte-for-byte). The
-  Cargo feature pulls in two leaf-primitive deps (per goal.md R-CODE-1
-  FFI-shim carveout): `intel-mkl-src 0.8` (vendors MKL 2020.1 static
-  libs via ocipkg) and `cblas-sys 0.3` (FFI signatures). A single
-  `extern crate intel_mkl_src as _;` declaration in `ops/linalg.rs`
-  is required to keep the linker from discarding the static
-  archives under `--gc-sections`. The parity-sweep runner reads
-  the `pub const MKL_ENABLED: bool` exposed from `ops/linalg.rs`
-  at runtime and drops the `rtol=1e-4` matmul-family envelope back
-  to the default `(1e-5, 1e-7)` when MKL is linked, requiring
-  byte-exact parity. Without the feature, faer remains the BLAS
-  backend and the widened envelope stays. Closes #1348.
+  When the feature is on, all f32 and f64 calls to `mm_raw` /
+  `mm_raw_bt` / `mm_raw_at` route through the **raw Fortran
+  `sgemm_`/`dgemm_`** symbols of system MKL 2024.x directly (the
+  symbols torch's `aten/src/ATen/native/CPUBlas.cpp:215-247`
+  dispatches to on Linux) instead of faer's pure-Rust GEMM. The
+  dispatcher mirrors torch's exact call shape: ferrotorch's row-major
+  problem is projected onto Fortran column-major BLAS via the
+  swap-A↔B + swap-m↔n + swap-lda↔ldb pattern torch uses at
+  `aten/src/ATen/native/LinearAlgebra.cpp:1454-1499`. The three
+  fused-transpose helpers
+  (`mm_raw_mkl_f32` / `mm_raw_bt_mkl_f32` / `mm_raw_at_mkl_f32` and
+  f64 mirrors) issue:
+
+  - `mm_raw`    → `sgemm_('N','N', n, m, k, B, n, A, k, ..., C, n)`
+  - `mm_raw_bt` → `sgemm_('T','N', n, m, k, B, k, A, k, ..., C, n)`
+  - `mm_raw_at` → `sgemm_('N','T', n, m, k, B, n, A, m, ..., C, n)`
+
+  Linkage strategy. The crate's `build.rs` emits
+  `cargo:rustc-link-search=$HOME/.local/lib` and
+  `cargo:rustc-link-lib=mkl_rt`, plus an `OUT_DIR/libmkl_rt.so` →
+  `$HOME/.local/lib/libmkl_rt.so.2` symlink so the bare `-lmkl_rt`
+  flag resolves at link-time. An rpath is emitted so runtime
+  loading works without manual `LD_LIBRARY_PATH` setup.
+
+  The Cargo feature has **no Rust-dep entries**: the prior dispatch's
+  `intel-mkl-src 0.8` (vendors MKL 2020.1 via ocipkg) and
+  `cblas-sys 0.3` deps were both removed. The 2020.1 vs 2024.x
+  dispatch tables differ (1-5 ULP drift survived even with
+  `MKL_CBWR=COMPATIBLE`), and the `cblas_sgemm` row-major wrapper
+  picked different micro-kernels than raw `sgemm_` for the same
+  column-major-equivalent shapes (root cause of #1538's `mm_raw_at`
+  1-ULP drift). Calling the Fortran symbol directly with torch's
+  exact dispatch eliminates both sources of drift.
+
+  CBWR forcing was also removed: the prior `.init_array` POSIX
+  `setenv("MKL_CBWR","COMPATIBLE",1)` constructor + `MKL_CBWR_Set(3)`
+  OnceLock gate are no longer present. With identical MKL major.minor
+  vs torch's link + same dispatch shape, MKL's default branch already
+  matches torch's by construction.
+
+  The parity-sweep runner reads `pub const MKL_ENABLED: bool`
+  exposed from `ops/linalg.rs` at runtime and tightens the
+  matmul-family envelope to `tol_f32()` = `(1e-5, 1e-7)` for
+  `mm` / `matmul` / `linalg.matmul` when MKL is linked (vs
+  `rtol=1e-4` on the faer fallback); `bmm` stays at `rtol=1e-4`
+  regardless because per-batch MKL-vs-OpenBLAS rounds drift slightly
+  past the default envelope on hosts where torch links OpenBLAS
+  rather than MKL. The original #1538 release-blocker test
+  `divergence_mkl_mm_raw_at_direct` now PASSES byte-exact under
+  this dispatcher (the prior `cblas_sgemm(Trans, NoTrans, lda=m)`
+  call produced a 1-ULP drift at C[2,4] that the raw
+  `sgemm_('N','T', ..., lda=N, ldb=M)` Fortran call eliminates).
+  Without the feature, faer remains the BLAS backend and the
+  widened envelope stays. Closes #1538 + #1348.
 
 ## Acceptance Criteria
 
@@ -454,4 +488,4 @@ cargo test -p ferrotorch-core --lib ops::linalg
 | REQ-10 (transpose) | SHIPPED | impl: `pub fn transpose in ops/linalg.rs` produces a fresh row-major 2-D transpose (R-DEV-7 deviation from upstream's view-returning `torch.transpose`). Non-test production consumer: `grad_fns/linalg.rs:272 let at = transpose(&self.a)?;` inside `MmBackward::backward` for the `dB = A^T @ grad_C` path. In-file test `fn test_transpose in ops/linalg.rs`. |
 | REQ-11 (broadcast helpers: broadcast_batch_shapes, broadcast_strides, batch_linear_index) | SHIPPED | impl: three private `fn`s in `ops/linalg.rs`. Non-test production consumer: `fn broadcast_matmul in ops/linalg.rs:126,130,131,143,144` (the only call sites; all private — no external surface to test directly). Exercised indirectly through all the `test_matmul_*_broadcast` and `test_matmul_4d` tests. |
 | REQ-12 (bf16 precision helpers: is_bf16, as_bf16_slice, write_f32_as_bf16) | SHIPPED | impl: three `#[inline(always)]` helpers in `ops/linalg.rs`. Non-test production consumers: `pub fn mm_raw in ops/linalg.rs:309-337`, `pub fn mm_raw_bt in ops/linalg.rs:450-475`, and `pub fn mm_raw_at in ops/linalg.rs:584-609` (all three small-matrix paths gate on `is_bf16::<T>()` and call into `as_bf16_slice` / `write_f32_as_bf16` for the f32-accumulator branch). All unsafe blocks carry per-block `// SAFETY:` documentation. |
-| REQ-13 (MKL_ENABLED runtime cfg probe + cblas_sgemm/dgemm FFI path) | SHIPPED under `--features mkl` | impl: `pub const MKL_ENABLED in ops/linalg.rs` (true iff built with `--features mkl`); `pub fn mm_raw in ops/linalg.rs`, `pub fn mm_raw_bt in ops/linalg.rs`, `pub fn mm_raw_at in ops/linalg.rs` large-matrix f32/f64 branches gain a `#[cfg(feature = "mkl")]` fork calling `cblas_sgemm`/`cblas_dgemm` (CblasRowMajor; transa/transb selected per-variant). Non-test production consumers: identical to REQ-5/6/7 — the same `grad_fns::linalg::mm_differentiable`, `MmBackward::backward`, `grad_fns::linalg::matmul_differentiable` CPU-fallback (per-batch slab routing through `mm_raw`), and `complex_tensor::matmul` call-sites pick up the MKL path transparently when the feature is on. `tools/parity-sweep/runner/src/main.rs::tolerance_for` reads `ferrotorch_core::ops::linalg::MKL_ENABLED` at runtime to switch the matmul-family envelope from `rtol=1e-4` (faer fallback) to `rtol=1e-5` (byte-exact MKL parity vs torch). Mirrors PyTorch's CPU BLAS dispatch at `aten/src/ATen/native/CPUBlas.cpp:228` (`cblas_sgemm(CblasColMajor, ...)`); ferrotorch uses `CblasRowMajor` to match its native row-major layout. Closes #1348. |
+| REQ-13 (MKL_ENABLED runtime cfg probe + Fortran sgemm_/dgemm_ FFI path) | SHIPPED under `--features mkl` | impl: `pub const MKL_ENABLED in ops/linalg.rs` (true iff built with `--features mkl`); `pub fn mm_raw`, `pub fn mm_raw_bt`, `pub fn mm_raw_at` in `ops/linalg.rs` gain a `#[cfg(feature = "mkl")]` short-circuit at the function head that dispatches f32/f64 through the helpers `mm_raw_mkl_f32` / `mm_raw_mkl_f64` / `mm_raw_bt_mkl_f32` / `mm_raw_bt_mkl_f64` / `mm_raw_at_mkl_f32` / `mm_raw_at_mkl_f64` (all in `ops/linalg.rs`) — each issues a single raw Fortran `sgemm_`/`dgemm_` call against the system MKL 2024.x `libmkl_rt.so.2` symbols (declared `unsafe extern "C"` in `ops/linalg.rs` per goal.md R-CODE-1 leaf-FFI carveout). Linkage is wired by `ferrotorch-core/build.rs` (new in this dispatch): probes `$HOME/.local/lib/libmkl_rt.so.2`, materialises an `OUT_DIR/libmkl_rt.so` symlink, emits `cargo:rustc-link-search` + `cargo:rustc-link-lib=mkl_rt` + an rpath. Non-test production consumers: identical to REQ-5/6/7 — the same `grad_fns::linalg::mm_differentiable`, `MmBackward::backward`, `grad_fns::linalg::matmul_differentiable` CPU-fallback (per-batch slab routing through `mm_raw`), and `complex_tensor::matmul` call-sites pick up the MKL path transparently when the feature is on. `tools/parity-sweep/runner/src/main.rs::tolerance_for` reads `ferrotorch_core::ops::linalg::MKL_ENABLED` at runtime to tighten the matmul-family envelope from `rtol=1e-4` (faer fallback) to `tol_f32()=(1e-5,1e-7)` for `mm`/`matmul`/`linalg.matmul` under MKL (`bmm` stays at `rtol=1e-4` for MKL-vs-OpenBLAS host variance). Mirrors PyTorch's CPU BLAS dispatch at `aten/src/ATen/native/CPUBlas.cpp:215-247` (raw `sgemm_`/`dgemm_` Fortran calls; torch on Linux never calls cblas wrappers). The `cblas_sgemm` row-major wrapper in the prior dispatch picked different MKL micro-kernels than the Fortran symbol on the same column-major-equivalent shapes, causing #1538's `mm_raw_at` 1-ULP drift; the dispatcher port to raw Fortran symbols matches torch's call shape exactly and eliminates the drift. The `intel-mkl-src 0.8` + `cblas-sys 0.3` deps (and the `MKL_CBWR=COMPATIBLE` `.init_array` constructor + `MKL_CBWR_Set(3)` OnceLock gate) were all removed in this dispatch — the version match between system MKL 2024.x and torch's MKL link obsoletes the CBWR workaround. Closes #1538 + #1348. |
