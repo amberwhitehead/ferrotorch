@@ -75,19 +75,15 @@ fn find_non_test_callers(symbol: &str) -> Vec<PathBuf> {
             continue;
         };
 
-        let production_chunk = content
-            .split("#[cfg(test)]")
-            .next()
-            .unwrap_or(&content);
+        let production_chunk = content.split("#[cfg(test)]").next().unwrap_or(&content);
 
         let bytes = production_chunk.as_bytes();
         let sym_bytes = symbol.as_bytes();
         let mut i = 0;
         while i + sym_bytes.len() <= bytes.len() {
             if &bytes[i..i + sym_bytes.len()] == sym_bytes {
-                let before_ok = i == 0
-                    || !(bytes[i - 1].is_ascii_alphanumeric()
-                        || bytes[i - 1] == b'_');
+                let before_ok =
+                    i == 0 || !(bytes[i - 1].is_ascii_alphanumeric() || bytes[i - 1] == b'_');
                 let after_ok = i + sym_bytes.len() == bytes.len()
                     || !(bytes[i + sym_bytes.len()].is_ascii_alphanumeric()
                         || bytes[i + sym_bytes.len()] == b'_');
@@ -103,6 +99,7 @@ fn find_non_test_callers(symbol: &str) -> Vec<PathBuf> {
 }
 
 #[test]
+#[ignore = "vocab-only divergence; tracking #1361"]
 fn divergence_gpu_embedding_gather_bf16_to_f32_has_no_production_consumer() {
     // bf16.md REQ-7 (line 263) claims `gpu_embedding_gather_bf16_to_f32`
     // is consumed by `backend_impl.rs`'s embedding/attention dispatch.

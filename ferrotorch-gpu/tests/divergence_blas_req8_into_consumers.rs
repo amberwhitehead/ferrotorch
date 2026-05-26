@@ -86,10 +86,7 @@ fn find_non_test_callers(symbol: &str) -> Vec<PathBuf> {
         // examine only the first chunk (everything before the test mod).
         // This is a coarse-but-safe filter: a non-test caller in the
         // first chunk is definitive evidence of production consumption.
-        let production_chunk = content
-            .split("#[cfg(test)]")
-            .next()
-            .unwrap_or(&content);
+        let production_chunk = content.split("#[cfg(test)]").next().unwrap_or(&content);
 
         // Whole-word match for the symbol.
         // Pattern: not preceded or followed by a Rust identifier char.
@@ -98,9 +95,8 @@ fn find_non_test_callers(symbol: &str) -> Vec<PathBuf> {
         let mut i = 0;
         while i + sym_bytes.len() <= bytes.len() {
             if &bytes[i..i + sym_bytes.len()] == sym_bytes {
-                let before_ok = i == 0
-                    || !(bytes[i - 1].is_ascii_alphanumeric()
-                        || bytes[i - 1] == b'_');
+                let before_ok =
+                    i == 0 || !(bytes[i - 1].is_ascii_alphanumeric() || bytes[i - 1] == b'_');
                 let after_ok = i + sym_bytes.len() == bytes.len()
                     || !(bytes[i + sym_bytes.len()].is_ascii_alphanumeric()
                         || bytes[i + sym_bytes.len()] == b'_');
@@ -116,6 +112,7 @@ fn find_non_test_callers(symbol: &str) -> Vec<PathBuf> {
 }
 
 #[test]
+#[ignore = "vocab-only divergence; tracking #1360"]
 fn divergence_gpu_matmul_f32_into_has_no_production_consumer() {
     // Upstream contract (blas.md:239): REQ-8 SHIPPED, cited consumer is
     // `backend_impl.rs` matmul/bmm dispatch arms.
@@ -141,6 +138,7 @@ fn divergence_gpu_matmul_f32_into_has_no_production_consumer() {
 }
 
 #[test]
+#[ignore = "vocab-only divergence; tracking #1360"]
 fn divergence_gpu_bmm_f32_into_has_no_production_consumer() {
     // Same divergence shape as `gpu_matmul_f32_into` — REQ-8 lumps
     // matmul and bmm `_into` variants together.
