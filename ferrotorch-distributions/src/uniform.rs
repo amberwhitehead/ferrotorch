@@ -19,7 +19,7 @@
 //! | REQ-10 (`Distribution::mean`) | SHIPPED | `impl Distribution::mean` returns midpoint; mirrors `uniform.py:42-44`. |
 //! | REQ-11 (`Distribution::variance`) | SHIPPED | `impl Distribution::variance` returns `(high-low)^2 / 12`; mirrors `uniform.py:53-55`. |
 //! | REQ-12 (`Distribution::stddev`) | SHIPPED | `impl Distribution::stddev` returns `(high-low) / sqrt(12)`; mirrors `uniform.py:49-51`. |
-//! | REQ-13 (`Distribution::mode` returns midpoint) | SHIPPED | R-DEV-6 deviation from `uniform.py:46-48` which returns NaN*high; ferrotorch returns the midpoint as a finite representative value. Blocker #1429 tracks strict-NaN conformance question. |
+//! | REQ-13 (`Distribution::mode` returns NaN) | SHIPPED | R-DEV-1 strict match of `torch/distributions/uniform.py:45-47` (`return nan * self.high`); the flat density has no unique mode, so upstream returns NaN. Pinned by `test_uniform_mode_is_nan`. Closes #1429. |
 //! | REQ-14 (`expand`/`support`/`arg_constraints`/`has_rsample`) | SHIPPED | trait overrides at the tail of `impl Distribution for Uniform` in `uniform.rs` mirror `torch/distributions/uniform.py:14-65`; `support` returns a `HalfOpenInterval<f64>` materialised from `low`/`high` bounds (PyTorch's dependent property); consumer: `tests/divergence_distribution_trait_surface.rs::uniform_*` pins every override (closes #1430). |
 
 use std::sync::Arc;
@@ -279,10 +279,15 @@ impl<T: Float> Distribution<T> for Uniform<T> {
     }
 
     fn mode(&self) -> FerrotorchResult<Tensor<T>> {
-        // The Uniform PDF is constant — every point in [low, high] is a
-        // mode. We return the midpoint as a representative value (matches
-        // the convention in `torch.distributions.Uniform.mode`).
-        self.mean()
+        // `torch/distributions/uniform.py:45-47`: `return nan * self.high`.
+        // Every point in [low, high] is equally modal for a flat density,
+        // so upstream returns NaN to communicate "no unique mode". We mirror
+        // upstream byte-for-byte (R-DEV-1 — match numerical contract; closes #1429).
+        crate::fallback::check_gpu_fallback_opt_in(&[&self.high], "Uniform::mode")?;
+        let hi = self.high.data_vec()?;
+        let nan = T::from(f64::NAN).unwrap();
+        let result: Vec<T> = hi.iter().map(|&h| nan * h).collect();
+        Tensor::from_storage(TensorStorage::cpu(result), self.high.shape().to_vec(), false)
     }
 
     fn stddev(&self) -> FerrotorchResult<Tensor<T>> {
@@ -743,10 +748,12 @@ mod tests {
     // ---- properties (#608) ----
 
     #[test]
-    fn test_uniform_mode_is_midpoint() {
+    fn test_uniform_mode_is_nan() {
+        // R-DEV-1: mirror upstream `uniform.py:45-47` exactly — every point
+        // is equally modal so upstream returns `nan * high`. Closes #1429.
         let dist = Uniform::new(scalar(0.0f64).unwrap(), scalar(4.0f64).unwrap()).unwrap();
         let m = dist.mode().unwrap();
-        assert!((m.item().unwrap() - 2.0).abs() < 1e-12);
+        assert!(m.item().unwrap().is_nan(), "Uniform.mode must be NaN");
     }
 
     #[test]

@@ -15,16 +15,19 @@
 //! | REQ-7 (`Distribution::entropy` approximation) | SHIPPED | `impl Distribution::entropy` uses I_1/I_0 ratio approximation; R-DEV-7 enhancement (upstream lacks closed-form entropy). |
 //! | REQ-8 (`Distribution::mean`) | SHIPPED | `impl Distribution::mean` returns `loc.clone()`; mirrors `von_mises.py:199-204` (circular mean). |
 //! | REQ-9 (`Distribution::rsample` errors) | SHIPPED | `impl Distribution::rsample` returns `InvalidArgument`; mirrors upstream's `has_rsample = False` at `von_mises.py:131`. |
-//! | REQ-10 (`mode`/`variance`/`expand`/`support`/`_log_modified_bessel_fn(order=1)`) | NOT-STARTED | blocker #1431 — cross-cutting with `lib.md` REQ-5 (blocker #1376). |
+//! | REQ-10 (`mode`/`variance`/`expand`/`support`/`_log_modified_bessel_fn(order=1)`) | SHIPPED | `fn mode` returns `loc.clone()` mirroring `torch/distributions/von_mises.py:206-208`; `fn variance` invokes `log_bessel_i1` - `log_bessel_i0` ratio mirroring `von_mises.py:210-221`; `fn log_bessel_i1` mirrors `_log_modified_bessel_fn(order=1)` at `von_mises.py:43-89` using `_I1_COEF_SMALL`/`_I1_COEF_LARGE`; `fn support` returns `Real`; `fn expand` broadcasts both parameter tensors mirroring `von_mises.py:190-197`. Consumer: trait dispatch via `pub use VonMises` re-export. Closes #1431. |
 //! | REQ-11 (RNG: `creation::rand` instead of xorshift) | NOT-STARTED | blocker #1432 — sampler uses hand-rolled xorshift seeded from `SystemTime + ThreadId.hash()`; breaks seed reproducibility. |
 //! | REQ-12 (small-kappa Taylor fallback) | NOT-STARTED | blocker #1433 — upstream `_proposal_r_taylor = 1/kappa + kappa` for `kappa < 1e-5` (`von_mises.py:170-171`) not implemented; loop may hang for very small `kappa`. |
+
+use std::collections::HashMap;
 
 use ferrotorch_core::dtype::Float;
 use ferrotorch_core::error::{FerrotorchError, FerrotorchResult};
 use ferrotorch_core::storage::TensorStorage;
 use ferrotorch_core::tensor::Tensor;
 
-use crate::Distribution;
+use crate::constraints;
+use crate::{DistConstraint, Distribution};
 
 /// Von Mises distribution parameterized by `loc` (mean direction) and
 /// `concentration` (kappa, analogous to inverse variance).
@@ -61,7 +64,10 @@ impl<T: Float> VonMises<T> {
 }
 
 /// Approximate log of modified Bessel function I_0(x).
-/// Uses the polynomial approximation from Abramowitz & Stegun.
+/// Mirrors `_log_modified_bessel_fn(x, order=0)` at
+/// `torch/distributions/von_mises.py:68-89` using the
+/// Abramowitz-Stegun polynomial coefficients (`_I0_COEF_SMALL` at
+/// `von_mises.py:23-31` + `_I0_COEF_LARGE` at `von_mises.py:32-42`).
 fn log_bessel_i0<T: Float>(x: T) -> T {
     let xf = num_traits::ToPrimitive::to_f64(&x).unwrap();
     let result = if xf < 3.75 {
@@ -82,6 +88,36 @@ fn log_bessel_i0<T: Float>(x: T) -> T {
                         + t * (0.00916281
                             + t * (-0.02057706
                                 + t * (0.02635537 + t * (-0.01647633 + t * 0.00392377)))))));
+        xf - 0.5 * xf.ln() + factor.ln()
+    };
+    T::from(result).unwrap()
+}
+
+/// Approximate log of modified Bessel function I_1(x), for x > 0.
+/// Mirrors `_log_modified_bessel_fn(x, order=1)` at
+/// `torch/distributions/von_mises.py:68-89` using the Abramowitz-Stegun
+/// coefficients (`_I1_COEF_SMALL` at `von_mises.py:43-51` and
+/// `_I1_COEF_LARGE` at `von_mises.py:52-62`).
+fn log_bessel_i1<T: Float>(x: T) -> T {
+    let xf = num_traits::ToPrimitive::to_f64(&x).unwrap();
+    let result = if xf < 3.75 {
+        // Small argument: small = |x| * poly(t); log(small) = log|x| + log(poly)
+        let t = (xf / 3.75).powi(2);
+        let poly = 0.5
+            + t * (0.87890594
+                + t * (0.51498869
+                    + t * (0.15084934 + t * (0.02658733 + t * (0.00301532 + t * 0.00032411)))));
+        xf.abs().ln() + poly.ln()
+    } else {
+        // Large argument: x - 0.5 * log(x) + log(poly(3.75/x))
+        let t = 3.75 / xf;
+        let factor = 0.39894228
+            + t * (-0.03988024
+                + t * (-0.00362018
+                    + t * (0.00163801
+                        + t * (-0.01031555
+                            + t * (0.02282967
+                                + t * (-0.02895312 + t * (0.01787654 + t * (-0.00420059))))))));
         xf - 0.5 * xf.ln() + factor.ln()
     };
     T::from(result).unwrap()
@@ -170,6 +206,75 @@ impl<T: Float> Distribution<T> for VonMises<T> {
         // Reference: torch.distributions.VonMises.mean — returns self.loc (the mean direction).
         // The mean of a VonMises distribution is loc (modulo 2π, but torch returns loc directly).
         Ok(self.loc.clone())
+    }
+
+    fn mode(&self) -> FerrotorchResult<Tensor<T>> {
+        // `torch/distributions/von_mises.py:206-208`: `mode = self.loc`.
+        // The density is peaked at the mean direction loc.
+        Ok(self.loc.clone())
+    }
+
+    fn variance(&self) -> FerrotorchResult<Tensor<T>> {
+        // `torch/distributions/von_mises.py:210-221`:
+        //   variance = 1 - exp(log I_1(kappa) - log I_0(kappa))
+        // which is the circular variance.
+        crate::fallback::check_gpu_fallback_opt_in(&[&self.concentration], "VonMises::variance")?;
+        let k = self.concentration.data()?;
+        let one = <T as num_traits::One>::one();
+        let mut out = Vec::with_capacity(k.len());
+        for &ki in k.iter() {
+            let log_ratio = log_bessel_i1(ki) - log_bessel_i0(ki);
+            out.push(one - log_ratio.exp());
+        }
+        Tensor::from_storage(
+            TensorStorage::cpu(out),
+            self.concentration.shape().to_vec(),
+            false,
+        )
+    }
+
+    // -----------------------------------------------------------------------
+    // Full PyTorch surface — `von_mises.py:128-131` declares
+    //   arg_constraints = {"loc": real, "concentration": positive}
+    //   support = constraints.real
+    //   has_rsample = False
+    // -----------------------------------------------------------------------
+
+    fn has_rsample(&self) -> bool {
+        // `torch/distributions/von_mises.py:131`: `has_rsample = False`.
+        false
+    }
+
+    fn batch_shape(&self) -> Vec<usize> {
+        self.loc.shape().to_vec()
+    }
+
+    fn support(&self) -> Option<Box<dyn DistConstraint>> {
+        // `torch/distributions/von_mises.py:130`: `support = constraints.real`.
+        Some(Box::new(constraints::Real))
+    }
+
+    fn arg_constraints(&self) -> HashMap<&'static str, Box<dyn DistConstraint>> {
+        // `torch/distributions/von_mises.py:129`:
+        //   arg_constraints = {"loc": real, "concentration": positive}
+        let mut m: HashMap<&'static str, Box<dyn DistConstraint>> = HashMap::new();
+        m.insert("loc", Box::new(constraints::Real));
+        m.insert("concentration", Box::new(constraints::Positive));
+        m
+    }
+
+    fn expand(&self, batch_shape: &[usize]) -> FerrotorchResult<Box<dyn Distribution<T>>> {
+        // Mirrors `von_mises.py:190-197`.
+        let l_data = self.loc.data_vec()?;
+        let k_data = self.concentration.data_vec()?;
+        let n: usize = batch_shape.iter().product::<usize>().max(1);
+        let l_out: Vec<T> = (0..n).map(|i| l_data[i % l_data.len()]).collect();
+        let k_out: Vec<T> = (0..n).map(|i| k_data[i % k_data.len()]).collect();
+        let new_loc =
+            Tensor::from_storage(TensorStorage::cpu(l_out), batch_shape.to_vec(), false)?;
+        let new_conc =
+            Tensor::from_storage(TensorStorage::cpu(k_out), batch_shape.to_vec(), false)?;
+        Ok(Box::new(VonMises::new(new_loc, new_conc)?))
     }
 
     fn rsample(&self, _shape: &[usize]) -> FerrotorchResult<Tensor<T>> {

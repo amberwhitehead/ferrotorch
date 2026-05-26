@@ -71,7 +71,7 @@ pub use linear_lr::LinearLR;
 pub use multi_step_lr::MultiStepLR;
 pub use multiplicative_lr::MultiplicativeLR;
 pub use one_cycle_lr::{AnnealStrategy, OneCycleLR};
-pub use plateau::{MetricScheduler, PlateauMode, ReduceLROnPlateau};
+pub use plateau::{MetricScheduler, PlateauMode, ReduceLROnPlateau, ThresholdMode};
 pub use polynomial_lr::PolynomialLR;
 pub use step::StepLR;
 pub use warmup::LinearWarmup;

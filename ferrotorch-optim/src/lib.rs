@@ -70,7 +70,7 @@ pub use scheduler::{
     AnnealStrategy, ChainedScheduler, ConstantLR, CosineAnnealingLR, CosineAnnealingWarmRestarts,
     CyclicLR, CyclicMode, ExponentialLR, LambdaLR, LinearLR, LinearWarmup, LrScheduler,
     MetricScheduler, MultiStepLR, MultiplicativeLR, OneCycleLR, PlateauMode, PolynomialLR,
-    ReduceLROnPlateau, SequentialLr, StepLR, cosine_warmup_scheduler,
+    ReduceLROnPlateau, SequentialLr, StepLR, ThresholdMode, cosine_warmup_scheduler,
 };
 pub use sgd::{Sgd, SgdConfig};
 pub use sparse_adam::{SparseAdam, SparseAdamConfig};

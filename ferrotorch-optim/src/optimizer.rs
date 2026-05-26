@@ -153,8 +153,7 @@ pub trait Optimizer<T: Float> {
     /// coefficient or when `group_idx` is out of range.
     fn momentum(&self, _group_idx: usize) -> FerrotorchResult<f64> {
         Err(FerrotorchError::InvalidArgument {
-            message: "this optimizer does not own a momentum coefficient"
-                .to_string(),
+            message: "this optimizer does not own a momentum coefficient".to_string(),
         })
     }
 

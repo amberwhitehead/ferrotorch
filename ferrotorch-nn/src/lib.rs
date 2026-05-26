@@ -221,7 +221,7 @@ pub use hooks::{BackwardHook, ForwardHook, ForwardPreHook, HookHandle, HookedMod
 pub use identity::{
     ChannelShuffle, CosineSimilarity, Flatten, Identity, PairwiseDistance, Unflatten,
 };
-pub use init::NonLinearity;
+pub use init::{FanMode, NonLinearity};
 pub use lazy_conv::{LazyConv1d, LazyConv2d, LazyConv3d};
 pub use lazy_linear::LazyLinear;
 pub use linear::Linear;

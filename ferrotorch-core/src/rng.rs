@@ -61,11 +61,7 @@ impl Mt19937 {
 
     fn twist(u: u32, v: u32) -> u32 {
         let mixed = Self::mix_bits(u, v) >> 1;
-        if v & 1 != 0 {
-            mixed ^ MATRIX_A
-        } else {
-            mixed
-        }
+        if v & 1 != 0 { mixed ^ MATRIX_A } else { mixed }
     }
 
     /// Reload — mirrors `next_state` at `MT19937RNGEngine.h:174-188`.
