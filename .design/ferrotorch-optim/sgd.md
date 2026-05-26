@@ -53,6 +53,11 @@ CUDA parameters (the Rust analog of PyTorch's `foreach=True` /
 - REQ-8: Parameters whose `.grad()` is `None` are skipped (not
   treated as zero), mirroring PyTorch's `if p.grad is None: continue`
   in `_single_tensor_sgd` (`torch/optim/sgd.py:325-330`).
+- REQ-9: `Sgd::set_momentum(group_idx, value)` + `Sgd::momentum(group_idx)`
+  override the `Optimizer<T>` trait defaults and write through to /
+  read from `config.momentum`, enabling `CyclicLR` / `OneCycleLR` to
+  cycle momentum inversely with the learning rate
+  (`torch/optim/lr_scheduler.py:1840-1862`, `:2342-2350`).
 
 ## Acceptance Criteria
 
@@ -224,3 +229,4 @@ Expected: `14 passed; 1 ignored` (XOR convergence is `#[ignore]`'d).
 | REQ-6 | SHIPPED | impl: `state_dict` / `load_state_dict` methods on `Sgd<T>` (`sgd.rs`); non-test consumer: `ferrotorch-serialize/src/checkpoint.rs:48` `use ferrotorch_optim::OptimizerState;` is the on-disk checkpoint writer consuming this map. |
 | REQ-7 | SHIPPED | impl: `Sgd::zero_grad` method clearing all parameter grads in `sgd.rs`; non-test consumer: `ferrotorch-train/src/learner.rs:28` invokes `Optimizer::zero_grad` at the start of every step. |
 | REQ-8 | SHIPPED | impl: `let grad_tensor = match param.grad()? { Some(g) => g, None => continue };` inside both `step` and `step_foreach` in `sgd.rs` mirroring `torch/optim/sgd.py:325-330`; non-test consumer: `ferrotorch-train/src/learner.rs` training step relies on this skip when frozen layers are present. |
+| REQ-9 | SHIPPED | impl: `fn set_momentum(&mut self, group_idx, value)` + `fn momentum(&self, group_idx)` overrides on `impl<T: Float> Optimizer<T> for Sgd<T>` in `sgd.rs` mirror `torch/optim/lr_scheduler.py:1840-1862, 2342-2350`; non-test consumer: `CyclicLR::step` in `scheduler/cyclic_lr.rs` and `OneCycleLR::step` in `scheduler/one_cycle_lr.rs` invoke `optimizer.set_momentum` when `cycle_momentum` is enabled. |

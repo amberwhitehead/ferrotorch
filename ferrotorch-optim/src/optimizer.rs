@@ -21,11 +21,12 @@
 //! | REQ-4 | SHIPPED | `no_grad` contract documented inline at the `step` method; consumed by every concrete `step` impl wrapping the update in autograd-detached mutators |
 //! | REQ-5 | SHIPPED | `pub type OptimizerState = HashMap<String, HashMap<String, Vec<f64>>>`; consumed by every concrete optimizer's `state_dict` / `load_state_dict` impl |
 //! | REQ-6 | SHIPPED | six `pub(crate)` workspace helpers below with the `CL-1125` rationale; consumed by `ferrotorch-optim/src/adam.rs`, `adamw.rs`, `sgd.rs` per-step paths |
+//! | REQ-7 | SHIPPED | `fn set_momentum` + `fn momentum` default trait methods below mirror PyTorch's `group["momentum"] = value` writeback (`torch/optim/lr_scheduler.py:1840-1862, 2342-2350`); consumer: SGD overrides both methods in `sgd.rs`; `CyclicLR::step` + `OneCycleLR::step` invoke `optimizer.set_momentum` when `cycle_momentum` is enabled |
 
 use std::collections::HashMap;
 
 use ferrotorch_core::numeric_cast::cast;
-use ferrotorch_core::{FerrotorchResult, Float, Tensor};
+use ferrotorch_core::{FerrotorchError, FerrotorchResult, Float, Tensor};
 use ferrotorch_nn::Parameter;
 
 /// Serializable optimizer state for checkpointing.
@@ -112,6 +113,50 @@ pub trait Optimizer<T: Float> {
 
     /// Add a new parameter group.
     fn add_param_group(&mut self, group: ParamGroup<T>);
+
+    /// Set the momentum coefficient on a specific parameter group.
+    ///
+    /// Mirrors PyTorch's pattern of writing `group["momentum"] = value` in
+    /// schedulers like `CyclicLR` / `OneCycleLR` that cycle momentum inversely
+    /// with the learning rate (`torch/optim/lr_scheduler.py:1840-1862,
+    /// 2342-2350`).
+    ///
+    /// The default implementation returns `FerrotorchError::InvalidArgument`
+    /// because most optimizer flavours (Adam family, RMSprop, ...) do not
+    /// expose a directly settable momentum coefficient and instead derive
+    /// their momentum-like behaviour from `beta1`. Concrete impls that DO own
+    /// a momentum coefficient (`Sgd`) override this to write through to their
+    /// config.
+    ///
+    /// # Errors
+    ///
+    /// Returns `InvalidArgument` when the optimizer does not support runtime
+    /// momentum updates or when `group_idx` is out of range.
+    fn set_momentum(&mut self, _group_idx: usize, _value: f64) -> FerrotorchResult<()> {
+        Err(FerrotorchError::InvalidArgument {
+            message: "this optimizer does not support set_momentum; only \
+                      SGD-family optimizers with a `momentum` field can have \
+                      their momentum cycled by schedulers"
+                .to_string(),
+        })
+    }
+
+    /// Read the current momentum coefficient on a specific parameter group.
+    ///
+    /// Symmetric to [`Optimizer::set_momentum`]. Returns
+    /// `FerrotorchError::InvalidArgument` for optimizers that do not own a
+    /// momentum coefficient. SGD overrides this to return `config.momentum`.
+    ///
+    /// # Errors
+    ///
+    /// Returns `InvalidArgument` when the optimizer does not own a momentum
+    /// coefficient or when `group_idx` is out of range.
+    fn momentum(&self, _group_idx: usize) -> FerrotorchResult<f64> {
+        Err(FerrotorchError::InvalidArgument {
+            message: "this optimizer does not own a momentum coefficient"
+                .to_string(),
+        })
+    }
 
     /// Export optimizer state for checkpointing.
     ///

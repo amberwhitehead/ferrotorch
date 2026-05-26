@@ -24,11 +24,12 @@
 //! | REQ-6 | SHIPPED | `state_dict` / `load_state_dict` methods here; consumer at `ferrotorch-serialize/src/checkpoint.rs:48` `use ferrotorch_optim::OptimizerState;`. |
 //! | REQ-7 | SHIPPED | `zero_grad` method here clears all params; consumer at `ferrotorch-train/src/learner.rs:28` calls it before each step. |
 //! | REQ-8 | SHIPPED | `match param.grad()? { Some(g) => g, None => continue }` skip in both `step` and `step_foreach` mirrors `torch/optim/sgd.py:325-330`; consumer at `ferrotorch-train/src/learner.rs:28` relies on this for frozen layers. |
+//! | REQ-9 | SHIPPED | `fn set_momentum` + `fn momentum` overrides on `impl Optimizer<T> for Sgd<T>` mirror `torch/optim/lr_scheduler.py:1840-1862, 2342-2350`; consumer: `CyclicLR::step` + `OneCycleLR::step` invoke them when `cycle_momentum` is enabled. |
 
 use std::collections::HashMap;
 
 use ferrotorch_core::numeric_cast::cast;
-use ferrotorch_core::{FerrotorchResult, Float, Tensor, no_grad};
+use ferrotorch_core::{FerrotorchError, FerrotorchResult, Float, Tensor, no_grad};
 use ferrotorch_nn::Parameter;
 
 use crate::optimizer::{Optimizer, OptimizerState, ParamGroup};
@@ -486,6 +487,47 @@ impl<T: Float> Optimizer<T> for Sgd<T> {
 
     fn add_param_group(&mut self, group: ParamGroup<T>) {
         self.param_groups.push(group);
+    }
+
+    /// Set the momentum coefficient (overrides the trait default).
+    ///
+    /// SGD owns a single global `config.momentum` field shared by every
+    /// parameter group, so the `group_idx` only validates that the group
+    /// exists. The mutation writes through to `self.config.momentum`, which
+    /// every subsequent `step` / `step_foreach` reads.
+    ///
+    /// Mirrors PyTorch's `group["momentum"] = value` writeback that
+    /// `CyclicLR` / `OneCycleLR` perform with `cycle_momentum=True`
+    /// (`torch/optim/lr_scheduler.py:1840-1862`, `:2342-2350`).
+    fn set_momentum(&mut self, group_idx: usize, value: f64) -> FerrotorchResult<()> {
+        if group_idx >= self.param_groups.len() {
+            return Err(FerrotorchError::InvalidArgument {
+                message: format!(
+                    "set_momentum: group_idx {} out of range (have {} groups)",
+                    group_idx,
+                    self.param_groups.len()
+                ),
+            });
+        }
+        self.config.momentum = value;
+        Ok(())
+    }
+
+    /// Read the momentum coefficient (overrides the trait default).
+    ///
+    /// Returns `self.config.momentum` (shared across groups in this impl;
+    /// see [`Sgd::set_momentum`] for the rationale).
+    fn momentum(&self, group_idx: usize) -> FerrotorchResult<f64> {
+        if group_idx >= self.param_groups.len() {
+            return Err(FerrotorchError::InvalidArgument {
+                message: format!(
+                    "momentum: group_idx {} out of range (have {} groups)",
+                    group_idx,
+                    self.param_groups.len()
+                ),
+            });
+        }
+        Ok(self.config.momentum)
     }
 
     fn state_dict(&self) -> FerrotorchResult<OptimizerState> {

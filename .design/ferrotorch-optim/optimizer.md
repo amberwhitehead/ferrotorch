@@ -83,6 +83,17 @@ optimisers use to amortise per-step allocation.
   `collect` per step costs ~28 GB of transient allocation per
   optimizer step.
 
+- REQ-7: `fn set_momentum(&mut self, group_idx: usize, value: f64)
+  -> FerrotorchResult<()>` and `fn momentum(&self, group_idx: usize)
+  -> FerrotorchResult<f64>` on the `Optimizer<T>` trait expose the
+  per-group momentum coefficient so schedulers (`CyclicLR`,
+  `OneCycleLR`) can cycle momentum inversely with the learning rate
+  (mirrors PyTorch's `group["momentum"] = value` writeback at
+  `torch/optim/lr_scheduler.py:1840-1862, 2342-2350`). The default
+  impl returns `FerrotorchError::InvalidArgument` because the Adam
+  family does not own a directly settable momentum coefficient; SGD
+  overrides both methods to expose `config.momentum`.
+
 ## Acceptance Criteria
 
 - [x] AC-1: `pub struct ParamGroup<T: Float>` with `pub(crate) params`,
@@ -244,3 +255,4 @@ for the full lib-test sweep.
 | REQ-4 | SHIPPED | impl: contract documented at `ferrotorch-optim/src/optimizer.rs:72` ("All parameter updates execute inside `no_grad()`."); non-test consumer: every concrete `step` impl (`ferrotorch-optim/src/sgd.rs`, `adam.rs`, ...) wraps the parameter update in the in-place mutators that do not record autograd — matches `torch.optim.optimizer._use_grad_for_differentiable` at `torch/optim/optimizer.py:59-87`. |
 | REQ-5 | SHIPPED | impl: `pub type OptimizerState = HashMap<String, HashMap<String, Vec<f64>>>` at `ferrotorch-optim/src/optimizer.rs:8` mirroring `torch.optim.Optimizer.state_dict()` shape; non-test consumer: every concrete optimizer's `state_dict` / `load_state_dict` impl returns / consumes `OptimizerState`; `ferrotorch-train/src/learner.rs:523` `fn state_dict(&self) -> FerrotorchResult<ferrotorch_optim::OptimizerState>` is the trait method override on the learner's mock optimizer plumbing. |
 | REQ-6 | SHIPPED | impl: `tensor_to_f64_vec` at line 108, `fill_f64_workspace` at line 129, `fill_t_workspace` at line 159, `resize_typed_workspace` at line 185, `resize_f64_workspace` at line 193, `f64_vec_to_tensor` at line 199 of `ferrotorch-optim/src/optimizer.rs`, all annotated with the `CL-1125` rationale; non-test consumer: the workspace helpers are `pub(crate)` and consumed by `ferrotorch-optim/src/adam.rs`, `adamw.rs`, `sgd.rs`'s per-step paths. |
+| REQ-7 | SHIPPED | impl: `fn set_momentum` + `fn momentum` default methods on `pub trait Optimizer<T>` in `ferrotorch-optim/src/optimizer.rs` mirror PyTorch's `group["momentum"] = value` writeback (`torch/optim/lr_scheduler.py:1840-1862, 2342-2350`); non-test consumer: SGD overrides both in `ferrotorch-optim/src/sgd.rs`; `CyclicLR::step` and `OneCycleLR::step` in `ferrotorch-optim/src/scheduler/cyclic_lr.rs` and `scheduler/one_cycle_lr.rs` call `optimizer.set_momentum` when `cycle_momentum` is enabled. |
