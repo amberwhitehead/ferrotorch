@@ -151,8 +151,8 @@ qmax)` + a private `FakeQuantizeBackward<T>` grad-fn struct.
     `zero_point[i] in [quant_min, quant_max]`. Each rule has a dedicated
     rejection unit test.
   * Backward node `FakeQuantizePerChannelBackward<T>` at
-    `ferrotorch-core/src/grad_fns/quantize_grad.rs:513` with
-    `GradFn::backward` impl at `:522` returns `dY * mask` where the mask
+    `ferrotorch-core/src/grad_fns/quantize_grad.rs:656` with
+    `GradFn::backward` impl at `:665` returns `dY * mask` where the mask
     is per-channel: `mask[i] = (quant_min <= round_ties_even(input[i]/
     scale[ch(i)]) + zero_point[ch(i)] <= quant_max)`, matching upstream
     `FakeQuantPerChannelAffine.cpp:118-131 fake_quantize_per_channel_affine_
@@ -163,7 +163,7 @@ qmax)` + a private `FakeQuantizeBackward<T>` grad-fn struct.
 
   Non-test production consumer:
   `Tensor::fake_quantize_per_channel_affine_t(&self, scale, zero_point,
-  axis, quant_min, quant_max)` at `ferrotorch-core/src/methods.rs:608` is
+  axis, quant_min, quant_max)` at `ferrotorch-core/src/methods.rs:628` is
   the chainable method-style surface (analogous to
   `Tensor::fake_quantize_per_tensor_affine_t` at `methods.rs:596`)
   delegating to `grad_fns::quantize_grad::fake_quantize_per_channel_affine`.
@@ -202,7 +202,7 @@ qmax)` + a private `FakeQuantizeBackward<T>` grad-fn struct.
   Tensor fake_quantize_per_tensor_affine_cachemask_backward(const Tensor& dY,
   const Tensor& mask) { ...; return dY * mask; }` and is the consumer that
   `derivatives.yaml:673-674` wires into autograd. The current
-  `FakeQuantizeBackward` at `ferrotorch-core/src/grad_fns/quantize_grad.rs:113-151`
+  `FakeQuantizeBackward` at `ferrotorch-core/src/grad_fns/quantize_grad.rs:727-788`
   implements an equivalent STE — it computes the range boundary
   `[dequantize(qmin), dequantize(qmax)] = [(qmin - zp) * scale, (qmax - zp) *
   scale]` and zeros gradient outside it — but the consumer chain ends at
@@ -210,9 +210,9 @@ qmax)` + a private `FakeQuantizeBackward<T>` grad-fn struct.
   `FakeQuantizeBackward` is `fake_quantize_differentiable`, which itself
   has no non-test production consumer per REQ-1's analysis).
 
-  SHIPPED (#1238 closed). The `FakeQuantizeBackward<T>` grad-fn struct at
-  `ferrotorch-core/src/grad_fns/quantize_grad.rs:289` with the
-  `GradFn::backward` impl at `:297-326` mechanically implements the
+  SHIPPED (#1238 closed). The `FakeQuantizeBackward<T>` grad-function struct at
+  `ferrotorch-core/src/grad_fns/quantize_grad.rs:727` with the
+  `GradFn::backward` impl at `:735-788` mechanically implements the
   upstream `dY * mask` STE per `FakeQuantPerTensorAffine.cpp:121-134`,
   computing the mask via
   `mask = (quant_min <= round_ties_even(input/scale) + zero_point <= quant_max)`
@@ -306,7 +306,7 @@ qmax)` + a private `FakeQuantizeBackward<T>` grad-fn struct.
   outside any `#[cfg(test)]` block. Closes the R-DEFER-1 vocabulary-only
   loophole that REQ-1 was previously stuck behind.
 - [x] AC-6: STE backward node correctness — `FakeQuantizeBackward` at
-  `quantize_grad.rs:289` with `backward` impl at `:297-326` returns
+  `quantize_grad.rs:727` with `backward` impl at `:735-788` returns
   `grad_output * 1` for in-range values and `grad_output * 0` otherwise,
   matching upstream's `dY * mask` at `FakeQuantPerTensorAffine.cpp:133`.
   Verified by `fake_quantize_ste_passes_grad_for_in_range_values` at
@@ -330,7 +330,7 @@ There are two distinct quantization layers in `ferrotorch-core`:
    per-tensor / per-channel utilities that operate on raw f32 slices. This
    is consumed by `ferrotorch-nn` (`QatModel.fake_quantize_weights` is the
    ferrotorch-nn-facing call surface; tested in
-   `ferrotorch-nn/tests/conformance_nn_structural.rs:1651-1690`).
+   `ferrotorch-nn/tests/conformance_nn_structural.rs:1651-1677`).
 2. `ferrotorch-core/src/grad_fns/quantize_grad.rs` (349 LOC, the file
    under design): the autograd-tracking `Tensor<T>` surface that wraps a
    `FakeQuantizeBackward` grad-fn. **This file's surface has no in-tree
@@ -527,7 +527,8 @@ multi-element-qparams rejection, and an explicit-formula STE backward
 check (R-CHAR-3 compliant). The pre-#1238 private surface
 `fake_quantize_differentiable` is retained as a thin back-compat
 delegator and exercised by the unchanged
-`conformance_quantize_prune.rs:735` fixture test.
+`fn fake_quantize_differentiable_forward_and_ste_backward` fixture
+test in `ferrotorch-core/tests/conformance_quantize_prune.rs`.
 
 ### Parity-sweep status
 
@@ -560,6 +561,6 @@ warrants a separate kernel-layer split.
 
 | REQ | Status | Evidence |
 |---|---|---|
-| REQ-1 (per-tensor) | SHIPPED | Canonical `fake_quantize_per_tensor_affine<T: Float>(input, scale: f64, zero_point: i64, quant_min: i64, quant_max: i64)` at `ferrotorch-core/src/grad_fns/quantize_grad.rs:84` matches `torch/overrides.py:622 torch.fake_quantize_per_tensor_affine: lambda input, scale, zero_point, quant_min, quant_max: -1` and the upstream forward at `aten/src/ATen/native/quantized/FakeQuantPerTensorAffine.cpp:31-40` byte-for-byte (banker's rounding via `f64::round_ties_even` matching `std::nearbyint` at `QuantizedOpKernels.cpp:2703`; NaN-safe clamp via `f64::min` / `f64::max` matching `std::fmin` / `std::fmax` at `:2704`; `zero_point` in `[quant_min, quant_max]` check matching `FakeQuantPerTensorAffine.cpp:79-81`). Tensor-qparams overload `fake_quantize_per_tensor_affine_tensor_qparams<T: Float>(input, scale: &Tensor<T>, zero_point: &IntTensor<i64>, quant_min: i64, quant_max: i64)` at `ferrotorch-core/src/grad_fns/quantize_grad.rs:149` mirrors `FakeQuantPerTensorAffine.cpp:42-51`. Non-test production consumer: `Tensor::fake_quantize_per_tensor_affine_t(&self, scale, zero_point, quant_min, quant_max)` at `ferrotorch-core/src/methods.rs:596` — chainable method-style surface, analogous to `Tensor::cumsum_t` at `methods.rs:282`. The pre-#1238 private surface `fake_quantize_differentiable` at `ferrotorch-core/src/grad_fns/quantize_grad.rs:104` is preserved as a thin back-compat delegator (casts i32 args to i64 and forwards to the canonical impl); it exists solely so the pre-existing `conformance_quantize_prune.rs:735` fixture test continues to pass without a downstream churn cascade. Parity-sweep: `[fake_quantize_per_tensor_affine] 72/72 passed (0 skipped, 0 failed)` at `--seeds 8`. Runner dispatch arm: `tools/parity-sweep/runner/src/main.rs:540-572`. |
-| REQ-2 (per-channel) | SHIPPED | `fake_quantize_per_channel_affine<T: Float>(input, scale: &Tensor<T>, zero_point: &IntTensor<i64>, axis: i64, quant_min: i64, quant_max: i64)` at `ferrotorch-core/src/grad_fns/quantize_grad.rs:342` matches the upstream forward at `aten/src/ATen/native/quantized/FakeQuantPerChannelAffine.cpp:32-42`. Per-element kernel mirrors upstream's per-channel CPU kernel at `QuantizedOpKernels.cpp:2836-2848` — note this DIVERGES from the per-tensor kernel at `:2702-2706` in cast ordering: per-channel casts to `int64_t` BEFORE the clamp (`static_cast<int64_t>(zp + std::nearbyint(self * inv_scale))` then `std::fmin(std::fmax(qval_i64, quant_min), quant_max)`). For non-finite qval_f the C `static_cast<int64_t>(+Inf)` is undefined behaviour but on x86-64 SSE2 saturates to `INT64_MIN`, snapping the output to `(quant_min - zp) * scale`. ferrotorch replicates this R-DEV-1 byte-for-byte via the `per_channel_dequantize_f64` helper at `grad_fns/quantize_grad.rs:300` which explicitly maps non-finite qval_f to `i64::MIN` before clamping. Validation order mirrors upstream `:55-77`. Backward node `FakeQuantizePerChannelBackward<T>` at `grad_fns/quantize_grad.rs:592` returns `dY * mask` per `FakeQuantPerChannelAffine.cpp:118-131` with the per-channel mask sharing the cast-first ordering via `per_channel_mask_in_range` at `grad_fns/quantize_grad.rs:354`. Non-test production consumer: `Tensor::fake_quantize_per_channel_affine_t(&self, scale, zero_point, axis, quant_min, quant_max)` at `ferrotorch-core/src/methods.rs:608` — chainable method-style surface analogous to `Tensor::fake_quantize_per_tensor_affine_t` at `methods.rs:596`. Parity-sweep: `[fake_quantize_per_channel_affine] 72/72 passed (0 skipped, 0 failed)` at `--seeds 8` (sample 6 `[+Inf, -Inf, 0.0, 1.0]` locks the cast-first ordering: per-channel maps +Inf to `quant_min`, not `quant_max`). Runner dispatch arm at `tools/parity-sweep/runner/src/main.rs::dispatch_f32` widens the oracle-emitted int32 zero_point to `IntTensor<i64>` via a new `WireTensor::to_int_tensor_i64` helper (matching upstream's `int32 | float | half` zero_point at `FakeQuantPerChannelAffine.cpp:53`; ferrotorch's typed carrier widens to i64). Twelve new R-CHAR-3-compliant unit tests cover forward parity-vs-per-tensor on each channel, axis dispatch, per-channel STE mask, empty channel dim, and 8 validation rejections. |
-| REQ-3 (STE backward) | SHIPPED | The `FakeQuantizeBackward<T>` grad-fn struct at `ferrotorch-core/src/grad_fns/quantize_grad.rs:289` with `GradFn::backward` impl at `:297-326` returns `dY * mask` where `mask = (quant_min <= round_ties_even(input/scale) + zero_point <= quant_max)` matching upstream `QuantizedOpKernels.cpp:2706` and `FakeQuantPerTensorAffine.cpp:121-134` byte-for-byte. Verified by `fake_quantize_ste_passes_grad_for_in_range_values` at `quantize_grad.rs:464-481`, `fake_quantize_ste_zeros_grad_for_out_of_range_values` at `:483-510`, and `fake_quantize_ste_backward_matches_explicit_formula` at `:512-549` (R-CHAR-3-compliant: expected grad constructed bit-for-bit from the upstream mask formula at `QuantizedOpKernels.cpp:2706`, never from calling the op on itself). Non-test production consumer: REQ-1's consumer chain — `Tensor::fake_quantize_per_tensor_affine_t` at `ferrotorch-core/src/methods.rs:596` attaches `FakeQuantizeBackward` whenever its input requires grad, driving the STE through real autograd backward. |
+| REQ-1 (per-tensor) | SHIPPED | Canonical `fake_quantize_per_tensor_affine<T: Float>(input, scale: f64, zero_point: i64, quant_min: i64, quant_max: i64)` at `ferrotorch-core/src/grad_fns/quantize_grad.rs:84` matches `torch/overrides.py:622 torch.fake_quantize_per_tensor_affine: lambda input, scale, zero_point, quant_min, quant_max: -1` and the upstream forward at `aten/src/ATen/native/quantized/FakeQuantPerTensorAffine.cpp:31-40` byte-for-byte (banker's rounding via `f64::round_ties_even` matching `std::nearbyint` at `QuantizedOpKernels.cpp:2703`; NaN-safe clamp via `f64::min` / `f64::max` matching `std::fmin` / `std::fmax` at `:2704`; `zero_point` in `[quant_min, quant_max]` check matching `FakeQuantPerTensorAffine.cpp:79-81`). Tensor-qparams overload `fake_quantize_per_tensor_affine_tensor_qparams<T: Float>(input, scale: &Tensor<T>, zero_point: &IntTensor<i64>, quant_min: i64, quant_max: i64)` at `ferrotorch-core/src/grad_fns/quantize_grad.rs:149` mirrors `FakeQuantPerTensorAffine.cpp:42-51`. Non-test production consumer: `Tensor::fake_quantize_per_tensor_affine_t(&self, scale, zero_point, quant_min, quant_max)` at `ferrotorch-core/src/methods.rs:596` — chainable method-style surface, analogous to `Tensor::cumsum_t` at `methods.rs:282`. The pre-#1238 private surface `fake_quantize_differentiable` at `ferrotorch-core/src/grad_fns/quantize_grad.rs:104` is preserved as a thin back-compat delegator (casts i32 args to i64 and forwards to the canonical impl); it exists solely so the pre-existing `fn fake_quantize_differentiable_forward_and_ste_backward` fixture test in `ferrotorch-core/tests/conformance_quantize_prune.rs` continues to pass without a downstream churn cascade. Parity-sweep: `[fake_quantize_per_tensor_affine] 72/72 passed (0 skipped, 0 failed)` at `--seeds 8`. Runner dispatch arm: `tools/parity-sweep/runner/src/main.rs:540-572`. |
+| REQ-2 (per-channel) | SHIPPED | `fake_quantize_per_channel_affine<T: Float>(input, scale: &Tensor<T>, zero_point: &IntTensor<i64>, axis: i64, quant_min: i64, quant_max: i64)` at `ferrotorch-core/src/grad_fns/quantize_grad.rs:469` matches the upstream forward at `aten/src/ATen/native/quantized/FakeQuantPerChannelAffine.cpp:32-42`. Per-element kernel mirrors upstream's per-channel CPU kernel at `QuantizedOpKernels.cpp:2836-2848` — note this DIVERGES from the per-tensor kernel at `:2702-2706` in cast ordering: per-channel casts to `int64_t` BEFORE the clamp (`static_cast<int64_t>(zp + std::nearbyint(self * inv_scale))` then `std::fmin(std::fmax(qval_i64, quant_min), quant_max)`). For non-finite qval_f the C `static_cast<int64_t>(+Inf)` is undefined behaviour but on x86-64 SSE2 saturates to `INT64_MIN`, snapping the output to `(quant_min - zp) * scale`. ferrotorch replicates this R-DEV-1 byte-for-byte via the `per_channel_dequantize_f64` helper at `grad_fns/quantize_grad.rs:326` which explicitly maps non-finite qval_f to `i64::MIN` before clamping. Validation order mirrors upstream `:55-77`. Backward node `FakeQuantizePerChannelBackward<T>` at `grad_fns/quantize_grad.rs:656` returns `dY * mask` per `FakeQuantPerChannelAffine.cpp:118-131` with the per-channel mask sharing the cast-first ordering via `per_channel_mask_in_range` at `grad_fns/quantize_grad.rs:364`. Non-test production consumer: `Tensor::fake_quantize_per_channel_affine_t(&self, scale, zero_point, axis, quant_min, quant_max)` at `ferrotorch-core/src/methods.rs:628` — chainable method-style surface analogous to `Tensor::fake_quantize_per_tensor_affine_t` at `methods.rs:596`. Parity-sweep: `[fake_quantize_per_channel_affine] 72/72 passed (0 skipped, 0 failed)` at `--seeds 8` (sample 6 `[+Inf, -Inf, 0.0, 1.0]` locks the cast-first ordering: per-channel maps +Inf to `quant_min`, not `quant_max`). Runner dispatch arm at `tools/parity-sweep/runner/src/main.rs::dispatch_f32` widens the oracle-emitted int32 zero_point to `IntTensor<i64>` via a new `WireTensor::to_int_tensor_i64` helper (matching upstream's `int32 | float | half` zero_point at `FakeQuantPerChannelAffine.cpp:53`; ferrotorch's typed carrier widens to i64). Twelve new R-CHAR-3-compliant unit tests cover forward parity-vs-per-tensor on each channel, axis dispatch, per-channel STE mask, empty channel dim, and 8 validation rejections. |
+| REQ-3 (STE backward) | SHIPPED | The `FakeQuantizeBackward<T>` grad-function struct at `ferrotorch-core/src/grad_fns/quantize_grad.rs:727` with `GradFn::backward` impl at `:735-788` returns `dY * mask` where `mask = (quant_min <= round_ties_even(input/scale) + zero_point <= quant_max)` matching upstream `QuantizedOpKernels.cpp:2706` and `FakeQuantPerTensorAffine.cpp:121-134` byte-for-byte. Verified by `fake_quantize_ste_passes_grad_for_in_range_values` at `quantize_grad.rs:464-481`, `fake_quantize_ste_zeros_grad_for_out_of_range_values` at `:483-510`, and `fake_quantize_ste_backward_matches_explicit_formula` at `:512-549` (R-CHAR-3-compliant: expected grad constructed bit-for-bit from the upstream mask formula at `QuantizedOpKernels.cpp:2706`, never from calling the op on itself). Non-test production consumer: REQ-1's consumer chain — `Tensor::fake_quantize_per_tensor_affine_t` at `ferrotorch-core/src/methods.rs:596` attaches `FakeQuantizeBackward` whenever its input requires grad, driving the STE through real autograd backward. |
