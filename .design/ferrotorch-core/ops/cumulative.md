@@ -57,17 +57,18 @@ functions.
   the LATER index wins. NaN propagation: upstream's update predicate
   `isnan_(curr_elem) || (!isnan_(out) && op(curr_elem, out))` at `:819`
   means once a NaN appears in the prefix, every subsequent position is
-  NaN with `cur_idx` pinned to the first-NaN position. Implemented at
-  `ops/cumulative.rs:251-282` with `>=` tie-break and the matching NaN
-  predicate; seed is `cur = in_data[base]` (the first element) mirroring
-  upstream's `T1 out = c10::load(self_data)` at `:815`.
+  NaN with `cur_idx` pinned to the first-NaN position. Implemented in
+  `pub fn cummax_forward in ops/cumulative.rs` with `>=` tie-break and
+  the matching NaN predicate; seed is `cur = in_data[base]` (the first
+  element) mirroring upstream's `T1 out = c10::load(self_data)` at
+  `aten/src/ATen/native/ReduceOps.cpp:815`.
 
 - REQ-4: `cummin_forward(input, dim)` — returns `CumExtremeResult { values,
   indices }` symmetric to cummax. Mirrors `cummin_helper_cpu` at
   `aten/src/ATen/native/ReduceOps.cpp:867-873` dispatching
   `cummax_cummin_helper<..., std::less_equal<scalar_t>>`. Same NaN-poison
-  predicate as REQ-3. Implemented at `ops/cumulative.rs:315-345` with
-  `<=` tie-break and the matching NaN predicate.
+  predicate as REQ-3. Implemented in `pub fn cummin_forward in
+  ops/cumulative.rs` with `<=` tie-break and the matching NaN predicate.
 
 - REQ-5: `logcumsumexp_forward(input, dim)` — numerically stable
   `out[..., i, ...] = log(sum(exp(input[..., 0..=i, ...])))` along `dim`.
@@ -102,13 +103,15 @@ functions.
   `maybe_wrap_dim`**: ferrotorch rejects `ndim == 0` with an explicit
   `InvalidArgument` error rather than upstream's `wrap_scalar = true` path
   that maps any dim to 0. This is **defense in depth** — the autograd
-  layer at `grad_fns/cumulative.rs:89, :339, :376, :393, :534`
-  short-circuits 0-D inputs into `cumulative_scalar_identity` /
-  `cumextreme_scalar_identity` *before* reaching the kernel, mirroring
-  the upstream `if (self.dim() == 0) { result.fill_(self); }` branch at
-  `ReduceOps.cpp:501-504, 847-849, 886-888`. Direct callers of the kernel
-  layer (none today outside `grad_fns/cumulative.rs`) would see the
-  rejection.
+  layer's 0-D fast paths in `pub fn cumsum`, `pub fn cumprod`, `pub fn
+  cummax`, `pub fn cummin`, and `pub fn logcumsumexp` (all in
+  `grad_fns/cumulative.rs`) short-circuit 0-D inputs into
+  `cumulative_scalar_identity` / `cumextreme_scalar_identity` *before*
+  reaching the kernel, mirroring the upstream `if (self.dim() == 0) {
+  result.fill_(self); }` branch at
+  `aten/src/ATen/native/ReduceOps.cpp:501-504, 847-849, 886-888`. Direct
+  callers of the kernel layer (none today outside `grad_fns/cumulative.rs`)
+  would see the rejection.
 
 - REQ-8: `CumExtremeResult<T: Float> { values: Tensor<T>, indices:
   Vec<usize> }` public struct — Rust analog of upstream's
@@ -117,45 +120,49 @@ functions.
   return std::make_tuple(std::move(values), std::move(indices))`). The
   `indices` field uses `Vec<usize>` rather than a second `Tensor<T>`
   because ferrotorch does not yet have an `i64`-dtype tensor class; the
-  upstream indices tensor is `at::kLong` per `:838 self.options().dtype(at::kLong)`.
-  Re-exported from the crate root as `ferrotorch_core::CumExtremeResult`
-  at `ferrotorch-core/src/lib.rs:173`.
+  upstream indices tensor is `at::kLong` per
+  `aten/src/ATen/native/ReduceOps.cpp:838 self.options().dtype(at::kLong)`.
+  Re-exported from the crate root as `pub use
+  ops::cumulative::CumExtremeResult in lib.rs`.
 
 ## Acceptance Criteria
 
 - [x] AC-1: `cumsum_forward` produces the correct prefix-sum for a 1D
-  tensor — exercised indirectly through `grad_fns::cumulative::cumsum`'s
-  forward tests at `ferrotorch-core/src/grad_fns/cumulative.rs:376-443`
-  (`test_cumsum_1d`, `test_cumsum_2d_dim0`, `test_cumsum_2d_dim1`,
+  tensor — exercised indirectly through `pub fn cumsum in
+  grad_fns/cumulative.rs`'s forward tests (`fn test_cumsum_1d in
+  grad_fns/cumulative.rs`, `test_cumsum_2d_dim0`, `test_cumsum_2d_dim1`,
   `test_cumsum_negative_dim`, `test_cumsum_3d`) and the
   `[cumsum] 32/32 passed (0 skipped, 0 failed)` parity-sweep at
   `--seeds 8`.
 - [x] AC-2: `cumprod_forward` produces the correct prefix-product for a
-  2D tensor — exercised through `grad_fns::cumulative::cumprod`'s forward
-  tests at `:512-551` and `[cumprod] 80/80 passed (0 skipped, 0 failed)`.
+  2D tensor — exercised through `pub fn cumprod in
+  grad_fns/cumulative.rs`'s forward tests (`fn test_cumprod_1d in
+  grad_fns/cumulative.rs`, `test_cumprod_2d_dim0`, `test_cumprod_2d_dim1`)
+  and `[cumprod] 80/80 passed (0 skipped, 0 failed)`.
 - [x] AC-3: `cummax_forward` returns the correct running-max values for a
-  monotonic sequence — exercised through `grad_fns::cumulative::cummax`'s
-  forward tests at `:618-646` (`test_cummax_1d`, `test_cummax_2d_dim1`)
-  and the `[cummax] 24/24 passed (0 skipped, 0 failed)` parity-sweep
-  (Option A — values-only return per `runner/src/main.rs:500 "cummax" =>`,
-  per blocker #1230).
+  monotonic sequence — exercised through `pub fn cummax in
+  grad_fns/cumulative.rs`'s forward tests (`fn test_cummax_1d in
+  grad_fns/cumulative.rs`, `test_cummax_2d_dim1`) and the
+  `[cummax] 24/24 passed (0 skipped, 0 failed)` parity-sweep (Option A —
+  values-only return per the `"cummax" =>` arm in
+  `tools/parity-sweep/runner/src/main.rs`, per blocker #1230).
 - [x] AC-4: `cummin_forward` returns the correct running-min values —
-  exercised through `:652-678` (`test_cummin_1d`, `test_cummin_2d_dim0`)
-  and `[cummin] 24/24 passed (0 skipped, 0 failed)`.
+  exercised through `pub fn cummin in grad_fns/cumulative.rs`'s forward
+  tests (`fn test_cummin_1d in grad_fns/cumulative.rs`,
+  `test_cummin_2d_dim0`) and `[cummin] 24/24 passed (0 skipped, 0 failed)`.
 - [x] AC-5: `logcumsumexp_forward` is numerically stable for large
-  inputs — exercised by `test_logcumsumexp_numerical_stability` at
-  `grad_fns/cumulative.rs:719-736` (inputs at scale ~1000 stay finite)
-  and `[logcumsumexp] 48/48 passed (0 skipped, 0 failed)`.
+  inputs — exercised by `fn test_logcumsumexp_numerical_stability in
+  grad_fns/cumulative.rs` (inputs at scale ~1000 stay finite) and
+  `[logcumsumexp] 48/48 passed (0 skipped, 0 failed)`.
 - [x] AC-6: `reverse_cumsum` produces the upper-triangular reverse-cumsum
-  expected by the cumsum backward — exercised by
-  `test_cumsum_backward_1d`, `test_cumsum_backward_2d_dim0`,
-  `test_cumsum_backward_numerical` at
-  `grad_fns/cumulative.rs:449-484, 880-913`.
+  expected by the cumsum backward — exercised by `fn test_cumsum_backward_1d
+  in grad_fns/cumulative.rs`, `test_cumsum_backward_2d_dim0`, and
+  `test_cumsum_backward_numerical`.
 - [x] AC-7: `validate_dim` rejects out-of-range dim with
-  `InvalidArgument` — exercised by `test_cumsum_dim_out_of_bounds` at
-  `grad_fns/cumulative.rs:830-835` (reaches the kernel because the
-  autograd 0-D fast path only short-circuits on `ndim == 0`, not on
-  out-of-range `dim`).
+  `InvalidArgument` — exercised by `fn test_cumsum_dim_out_of_bounds in
+  grad_fns/cumulative.rs` (reaches the kernel because the autograd 0-D
+  fast path only short-circuits on `ndim == 0`, not on out-of-range
+  `dim`).
 - [x] AC-8: `validate_dim` rejects scalar (0-D) input — direct kernel
   callers see the error; the autograd layer short-circuits before
   reaching this branch per the
@@ -274,8 +281,8 @@ expected to have already normalised dim via `normalize_axis`). Mirrors
 the upstream three-step `w.flip(dim).cumsum(dim).flip(dim)` at
 `ReduceOps.cpp:527-529` but unrolled into a single reverse triple-loop
 that accumulates from `i = dim_size-1` down to `0`. Used by
-`grad_fns/cumulative.rs:60` (`CumsumBackward::backward`) and `:495`
-(`LogcumsumexpBackward::backward`).
+`CumsumBackward::backward` and `LogcumsumexpBackward::backward` in
+`grad_fns/cumulative.rs`.
 
 ### REQ-7: `validate_dim` (`:49-56`)
 
@@ -297,7 +304,7 @@ the `ndim == 0` rejection is unreachable through the user-facing
 `grad_fns::cumulative::cumsum` etc. surface. A direct external caller
 (none exist today) would still see the rejection.
 
-### REQ-8: `CumExtremeResult<T>` (`:181-184`)
+### REQ-8: `pub struct CumExtremeResult in ops/cumulative.rs`
 
 ```rust
 #[derive(Debug)]
@@ -307,13 +314,14 @@ pub struct CumExtremeResult<T: Float> {
 }
 ```
 
-Public struct re-exported at `lib.rs:173`. The `indices: Vec<usize>`
-rather than a second `Tensor<T>` is the Rust-ecosystem-better-fit
-deviation (R-DEV-7) — ferrotorch does not yet expose an integer-dtype
-tensor and the consumer (`grad_fns::cumulative::cummax` / `einops.rs`)
-only needs a flat usize vector along the scan axis. When CummaxBackward
-ships (blocker #1231) the indices will be saved into the grad-fn struct
-as `Vec<usize>` to drive a scatter_add VJP.
+Public struct re-exported as `pub use ops::cumulative::CumExtremeResult
+in lib.rs`. The `indices: Vec<usize>` rather than a second `Tensor<T>` is
+the Rust-ecosystem-better-fit deviation (R-DEV-7) — ferrotorch does not
+yet expose an integer-dtype tensor and the consumer
+(`grad_fns::cumulative::cummax` / `einops.rs`) only needs a flat usize
+vector along the scan axis. When CummaxBackward ships (blocker #1231)
+the indices will be saved into the grad-fn struct as `Vec<usize>` to
+drive a scatter_add VJP.
 
 ### `is_f32` / `is_f64` type-id helpers (`:17-25`)
 
@@ -336,8 +344,8 @@ is therefore validated through the autograd layer's parity-sweep runs.
 |---|---|---|---|
 | `cumsum` | `cumsum_cpu_kernel` at `cpu/ReduceOpsKernel.cpp:79-96` (registered as `cumsum_stub`, dispatched by `TORCH_IMPL_FUNC(cumsum_out)` at `ReduceOps.cpp:511-517`) | `cumsum_forward` at `ops/cumulative.rs:66-104` | NaN propagates (float arithmetic); ±Inf preserved; non-contiguous: CPU iterates by computed flat indices so stride doesn't matter; GPU path requires contiguous storage. |
 | `cumprod` | `cumprod_cpu_kernel` at `cpu/ReduceOpsKernel.cpp:98-115` | `cumprod_forward` at `ops/cumulative.rs:135-173` | Zeros propagate (`0 * x = 0` once seen); NaN propagates; non-contiguous: same as cumsum. |
-| `cummax` | `cummax_helper_cpu` at `ReduceOps.cpp:828-834` dispatching `cummax_cummin_helper<..., std::greater_equal>` at `:811-826` | `cummax_forward` at `ops/cumulative.rs:191-262` | **Tie-break DIVERGES** — upstream `std::greater_equal` picks LATER index; ferrotorch strict `>` picks EARLIER. **NaN DIVERGES** — upstream's `isnan_(curr_elem)` branch at `:819` propagates NaN forever; ferrotorch's strict `>` returns false on NaN so prior non-NaN max is retained. Both folded into #1231. |
-| `cummin` | `cummin_helper_cpu` at `ReduceOps.cpp:867-873` dispatching `cummax_cummin_helper<..., std::less_equal>` | `cummin_forward` at `ops/cumulative.rs:272-341` | Symmetric divergences to cummax (strict `<` vs `<=`, NaN). #1231. |
+| `cummax` | `cummax_helper_cpu` at `aten/src/ATen/native/ReduceOps.cpp:828-834` dispatching `cummax_cummin_helper<..., std::greater_equal>` at `aten/src/ATen/native/ReduceOps.cpp:811-826` | `pub fn cummax_forward in ops/cumulative.rs` | Tie-break and NaN behavior mirror upstream's `isnan_(curr_elem)` branch at `aten/src/ATen/native/ReduceOps.cpp:819` (NaN propagates forever; later index wins on ties via `std::greater_equal`). |
+| `cummin` | `cummin_helper_cpu` at `aten/src/ATen/native/ReduceOps.cpp:867-873` dispatching `cummax_cummin_helper<..., std::less_equal>` | `pub fn cummin_forward in ops/cumulative.rs` | Symmetric to cummax (`std::less_equal` later-index ties; NaN propagation). |
 | `logcumsumexp` | `logcumsumexp_cpu_kernel` at `cpu/ReduceOpsKernel.cpp:117-136` (uses `_log_add_exp_helper`) | `logcumsumexp_forward` at `ops/cumulative.rs:352-414` | Numerical stability via two-pass running-max trick (`maxes[i] = max(input[0..=i])` then `exp(in - m)` accumulator); `(-inf).exp() == 0`, `0.ln() == -inf` so `logcumsumexp([-inf, x]) == [-inf, x]` matches upstream. |
 
 End-to-end verification flows through the autograd layer's parity-sweep
@@ -379,8 +387,8 @@ correctness is exercised entirely through `grad_fns/cumulative.rs:355-913`
 
 The integer smoke grep count (`grep -c "passed (0 skipped, 0 failed)"`)
 is `1` per op. The cummax/cummin runs are the runner's Option A
-(`runner/src/main.rs:500 "cummax" =>` returns `result.values` only);
-indices-parity remains tracked under blocker #1231.
+(the `"cummax" =>` arm in `tools/parity-sweep/runner/src/main.rs` returns
+`result.values` only); indices-parity remains tracked under blocker #1231.
 
 ### Per-crate test command
 
@@ -400,9 +408,9 @@ a kernel-direct characterization test would land in the same fixer iter.
 |---|---|---|
 | REQ-1 (cumsum_forward) | SHIPPED | impl: `cumsum_forward` at `ferrotorch-core/src/ops/cumulative.rs:66-104` mirrors `cumsum_cpu_kernel` at `aten/src/ATen/native/cpu/ReduceOpsKernel.cpp:79-96` (registered as `cumsum_stub` per `:564 REGISTER_DISPATCH(cumsum_stub, &cumsum_cpu_kernel)`, dispatched by `TORCH_IMPL_FUNC(cumsum_out)` at `aten/src/ATen/native/ReduceOps.cpp:511-517`). Non-test production consumer: `ferrotorch-core/src/grad_fns/cumulative.rs:93 let result = cumsum_forward(input, dim)?;` inside `pub fn cumsum` (which itself is reached by `Tensor::cumsum_t` at `methods.rs:282` per the sibling doc REQ-1). Indirect parity: `[cumsum] 32/32 passed (0 skipped, 0 failed)`. |
 | REQ-2 (cumprod_forward) | SHIPPED | impl: `cumprod_forward` at `ferrotorch-core/src/ops/cumulative.rs:135-173` mirrors `cumprod_cpu_kernel` at `aten/src/ATen/native/cpu/ReduceOpsKernel.cpp:98-115` (registered as `cumprod_stub` per `:563`). Non-test production consumer: `ferrotorch-core/src/grad_fns/cumulative.rs:343 let result = cumprod_forward(input, dim)?;` inside `pub fn cumprod`. Indirect parity: `[cumprod] 80/80 passed (0 skipped, 0 failed)`. |
-| REQ-3 (cummax_forward) | SHIPPED | impl: `cummax_forward` at `ferrotorch-core/src/ops/cumulative.rs:201-291` mirrors `cummax_helper_cpu` at `aten/src/ATen/native/ReduceOps.cpp:828-834` dispatching `cummax_cummin_helper<scalar_t, int64_t, std::greater_equal<scalar_t>>` at `:811-826`. CPU kernel at `ops/cumulative.rs:251-282` uses `>=` tie-break (mirrors `:832 std::greater_equal<scalar_t>` — later index wins on ties) with NaN-poison predicate `isnan(curr) || (!isnan(cur) && curr >= cur)` mirroring `:819`. Seed `cur = in_data[base]` mirrors upstream's `T1 out = c10::load(self_data)` at `:815`. **Non-test production consumer**: `ferrotorch-core/src/grad_fns/cumulative.rs:476 let result = cummax_forward(input, dim)?;` inside `pub fn cummax`, ultimately reached by `ferrotorch-core/src/einops.rs:796` (`EinopsReduction::Max` arm). Indirect parity: `[cummax] 24/24 passed (0 skipped, 0 failed)` (Option A — values-only return per runner). Tie-break + NaN verified by `test_cummax_backward_tie` and `test_cummax_forward_nan_propagates` at `grad_fns/cumulative.rs` (live-traced torch 2.11.0 indices). Closes #1231. |
-| REQ-4 (cummin_forward) | SHIPPED | impl: `cummin_forward` at `ferrotorch-core/src/ops/cumulative.rs:301-371` mirrors `cummin_helper_cpu` at `aten/src/ATen/native/ReduceOps.cpp:867-873` dispatching `cummax_cummin_helper<..., std::less_equal>`. CPU kernel at `ops/cumulative.rs:315-345` uses `<=` tie-break (mirrors `:871 std::less_equal<scalar_t>`) with the same NaN-poison predicate. **Non-test production consumer**: `ferrotorch-core/src/grad_fns/cumulative.rs:508 let result = cummin_forward(input, dim)?;` inside `pub fn cummin`, reached by `ferrotorch-core/src/einops.rs:802` (`EinopsReduction::Min` arm). Indirect parity: `[cummin] 24/24 passed (0 skipped, 0 failed)`. Tie-break verified by updated `test_cummin_1d` (input `[3, 1, 4, 1, 5]` → indices `[0, 1, 1, 3, 3]`) and `test_cummin_backward_tie`. Closes #1231. |
-| REQ-5 (logcumsumexp_forward) | SHIPPED | impl: `logcumsumexp_forward` at `ferrotorch-core/src/ops/cumulative.rs:352-414` mirrors `logcumsumexp_cpu_kernel` at `aten/src/ATen/native/cpu/ReduceOpsKernel.cpp:117-136` (registered as `logcumsumexp_stub` per `:565`, dispatched via `_logcumsumexp_out_cpu` at `aten/src/ATen/native/ReduceOps.cpp:470-473`). Two-pass running-max numerical-stability trick matches the `_log_add_exp_helper` contract. Non-test production consumer: `ferrotorch-core/src/grad_fns/cumulative.rs:541 let result = logcumsumexp_forward(input, dim)?;` inside `pub fn logcumsumexp`. Indirect parity: `[logcumsumexp] 48/48 passed (0 skipped, 0 failed)`. Numerical stability verified by `test_logcumsumexp_numerical_stability` at `grad_fns/cumulative.rs:719-736`. |
-| REQ-6 (reverse_cumsum helper) | SHIPPED | impl: `reverse_cumsum` at `ferrotorch-core/src/ops/cumulative.rs:109-125` mirrors `static Tensor reversed_cumsum(const Tensor& w, int64_t dim) { return w.flip(dim).cumsum(dim).flip(dim); }` at `aten/src/ATen/native/ReduceOps.cpp:527-529`. Two non-test production consumers: `ferrotorch-core/src/grad_fns/cumulative.rs:60 let grad_data = reverse_cumsum(go_data, shape, self.dim);` (CumsumBackward::backward) and `ferrotorch-core/src/grad_fns/cumulative.rs:495 let rev = reverse_cumsum(&product, shape, self.dim);` (LogcumsumexpBackward::backward). End-to-end exercised by `test_cumsum_backward_numerical` at `grad_fns/cumulative.rs:880-913` and `test_logcumsumexp_backward_1d` at `:742-779`. |
-| REQ-7 (validate_dim) | SHIPPED | impl: `validate_dim` at `ferrotorch-core/src/ops/cumulative.rs:49-56` wraps `crate::shape::normalize_axis` mirroring `maybe_wrap_dim` at `c10/core/WrapDimMinimal.h:34-39` (used by upstream's `impl_func_cum_ops` at `aten/src/ATen/native/ReduceOps.cpp:506`, `cummax_out` at `:851`, `cummin_out` at `:890`, and `_logcumsumexp_out_cpu` implicitly via the kernel). Five non-test production consumers (one per `*_forward`): `ops/cumulative.rs:67, :136, :195, :276, :353`. Defense-in-depth 0-D rejection is the intentional deviation from upstream's `wrap_scalar=true` — the autograd layer's 0-D fast paths at `grad_fns/cumulative.rs:89, 339, 376, 393, 534` short-circuit before reaching the kernel. Exercised through `test_cumsum_dim_out_of_bounds` at `grad_fns/cumulative.rs:830-835`. |
-| REQ-8 (CumExtremeResult struct) | SHIPPED | impl: `pub struct CumExtremeResult<T: Float> { pub values: Tensor<T>, pub indices: Vec<usize> }` at `ferrotorch-core/src/ops/cumulative.rs:181-184` mirrors the `std::tuple<Tensor, Tensor>` return of `Tensor cummax(...)` at `aten/src/ATen/native/ReduceOps.cpp:860-865` (per R-DEV-7, using `Vec<usize>` rather than an integer tensor since ferrotorch lacks i64-dtype tensors). Re-exported at `ferrotorch-core/src/lib.rs:173 pub use ops::cumulative::CumExtremeResult;`. Non-test production consumer: `ferrotorch-core/src/grad_fns/cumulative.rs:375, 392, 417, 434` all construct or return this type inside `pub fn cummax` / `pub fn cummin` / `cumextreme_scalar_identity`. |
+| REQ-3 (cummax_forward) | SHIPPED | impl: `pub fn cummax_forward in ops/cumulative.rs` mirrors `cummax_helper_cpu` at `aten/src/ATen/native/ReduceOps.cpp:828-834` dispatching `cummax_cummin_helper<scalar_t, int64_t, std::greater_equal<scalar_t>>` at `aten/src/ATen/native/ReduceOps.cpp:811-826`. CPU kernel uses `>=` tie-break (mirrors `std::greater_equal<scalar_t>` at `aten/src/ATen/native/ReduceOps.cpp:832` — later index wins on ties) with NaN-poison predicate `isnan(curr) || (!isnan(cur) && curr >= cur)` mirroring `aten/src/ATen/native/ReduceOps.cpp:819`. Seed `cur = in_data[base]` mirrors upstream's `T1 out = c10::load(self_data)` at `aten/src/ATen/native/ReduceOps.cpp:815`. **Non-test production consumer**: the `let result = cummax_forward(input, dim)?;` call inside `pub fn cummax in grad_fns/cumulative.rs`, ultimately reached by the `EinopsReduction::Max` arm in `einops.rs`. Indirect parity: `[cummax] 24/24 passed (0 skipped, 0 failed)` (Option A — values-only return per runner). Tie-break + NaN verified by `fn test_cummax_backward_tie in grad_fns/cumulative.rs` and `fn test_cummax_forward_nan_propagates in grad_fns/cumulative.rs` (live-traced torch 2.11.0 indices). Closes #1231. |
+| REQ-4 (cummin_forward) | SHIPPED | impl: `pub fn cummin_forward in ops/cumulative.rs` mirrors `cummin_helper_cpu` at `aten/src/ATen/native/ReduceOps.cpp:867-873` dispatching `cummax_cummin_helper<..., std::less_equal>`. CPU kernel uses `<=` tie-break (mirrors `std::less_equal<scalar_t>` at `aten/src/ATen/native/ReduceOps.cpp:871`) with the same NaN-poison predicate. **Non-test production consumer**: the `let result = cummin_forward(input, dim)?;` call inside `pub fn cummin in grad_fns/cumulative.rs`, reached by the `EinopsReduction::Min` arm in `einops.rs`. Indirect parity: `[cummin] 24/24 passed (0 skipped, 0 failed)`. Tie-break verified by updated `fn test_cummin_1d in grad_fns/cumulative.rs` (input `[3, 1, 4, 1, 5]` → indices `[0, 1, 1, 3, 3]`) and `fn test_cummin_backward_tie in grad_fns/cumulative.rs`. Closes #1231. |
+| REQ-5 (logcumsumexp_forward) | SHIPPED | impl: `pub fn logcumsumexp_forward in ops/cumulative.rs` mirrors `logcumsumexp_cpu_kernel` at `aten/src/ATen/native/cpu/ReduceOpsKernel.cpp:117-136` (registered as `logcumsumexp_stub` per `aten/src/ATen/native/cpu/ReduceOpsKernel.cpp:565`, dispatched via `_logcumsumexp_out_cpu` at `aten/src/ATen/native/ReduceOps.cpp:470-473`). Two-pass running-max numerical-stability trick matches the `_log_add_exp_helper` contract. Non-test production consumer: the `let result = logcumsumexp_forward(input, dim)?;` call inside `pub fn logcumsumexp in grad_fns/cumulative.rs`. Indirect parity: `[logcumsumexp] 48/48 passed (0 skipped, 0 failed)`. Numerical stability verified by `fn test_logcumsumexp_numerical_stability in grad_fns/cumulative.rs`. |
+| REQ-6 (reverse_cumsum helper) | SHIPPED | impl: `pub fn reverse_cumsum in ops/cumulative.rs` mirrors `static Tensor reversed_cumsum(const Tensor& w, int64_t dim) { return w.flip(dim).cumsum(dim).flip(dim); }` at `aten/src/ATen/native/ReduceOps.cpp:527-529`. Two non-test production consumers: the `let grad_data = reverse_cumsum(go_data, shape, self.dim);` call inside `impl GradFn for CumsumBackward in grad_fns/cumulative.rs`, and the `let rev = reverse_cumsum(&product, shape, self.dim);` call inside `impl GradFn for LogcumsumexpBackward in grad_fns/cumulative.rs`. End-to-end exercised by `fn test_cumsum_backward_numerical in grad_fns/cumulative.rs` and `fn test_logcumsumexp_backward_1d in grad_fns/cumulative.rs`. |
+| REQ-7 (validate_dim) | SHIPPED | impl: `fn validate_dim in ops/cumulative.rs` wraps `crate::shape::normalize_axis` mirroring `maybe_wrap_dim` at `c10/core/WrapDimMinimal.h:34-39` (used by upstream's `impl_func_cum_ops` at `aten/src/ATen/native/ReduceOps.cpp:506`, `cummax_out` at `aten/src/ATen/native/ReduceOps.cpp:851`, `cummin_out` at `aten/src/ATen/native/ReduceOps.cpp:890`, and `_logcumsumexp_out_cpu` implicitly via the kernel). Five non-test production consumers (one per `*_forward`): `pub fn cumsum_forward`, `pub fn cumprod_forward`, `pub fn cummax_forward`, `pub fn cummin_forward`, and `pub fn logcumsumexp_forward` (all in `ops/cumulative.rs`). Defense-in-depth 0-D rejection is the intentional deviation from upstream's `wrap_scalar=true` — the autograd layer's 0-D fast paths in `pub fn cumsum`, `pub fn cumprod`, `pub fn cummax`, `pub fn cummin`, and `pub fn logcumsumexp` (all in `grad_fns/cumulative.rs`) short-circuit before reaching the kernel. Exercised through `fn test_cumsum_dim_out_of_bounds in grad_fns/cumulative.rs`. |
+| REQ-8 (CumExtremeResult struct) | SHIPPED | impl: `pub struct CumExtremeResult in ops/cumulative.rs` (with fields `values: Tensor<T>` and `indices: Vec<usize>`) mirrors the `std::tuple<Tensor, Tensor>` return of `Tensor cummax(...)` at `aten/src/ATen/native/ReduceOps.cpp:860-865` (per R-DEV-7, using `Vec<usize>` rather than an integer tensor since ferrotorch lacks i64-dtype tensors). Re-exported as `pub use ops::cumulative::CumExtremeResult in lib.rs`. Non-test production consumers: `pub fn cummax in grad_fns/cumulative.rs`, `pub fn cummin in grad_fns/cumulative.rs`, and `fn cumextreme_scalar_identity in grad_fns/cumulative.rs` all construct or return this type. |
