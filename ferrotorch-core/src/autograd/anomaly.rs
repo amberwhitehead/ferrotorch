@@ -8,6 +8,18 @@
 //
 // Follows PyTorch's `torch.autograd.set_detect_anomaly(True)` semantics.
 
+//! ## REQ status (per `.design/ferrotorch-core/autograd/anomaly.md`)
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 | SHIPPED | `pub struct `AnomalyMode`` at `anomaly.rs:29` with static methods at `:31-46`; consumer: `ferrotorch-core/src/lib.rs:121-123` re-export. Existing pub API — boundary-API grandfathering. |
+//! | REQ-2 | SHIPPED | `pub fn `detect_anomaly`<F, R>` at `anomaly.rs:62-79`; consumer: `lib.rs:122 detect_anomaly`. Existing pub API — boundary-API grandfathering. |
+//! | REQ-3 | SHIPPED | `pub struct `ForwardBacktrace`` at `anomaly.rs:86-88`; consumer: `lib.rs:122 ForwardBacktrace`. Existing pub API — boundary-API grandfathering. |
+//! | REQ-4 | SHIPPED | `pub fn `check_gradient_anomaly`<T: Float>` at `anomaly.rs:131-174`; consumer: `lib.rs:122 check_gradient_anomaly`. Existing pub API — boundary-API grandfathering. |
+//! | REQ-5 | SHIPPED | `thread_local!` `ANOMALY_ENABLED: Cell<bool>` at `anomaly.rs:14-16` — per-thread by construct; consumer: every callsite of REQ-1's methods. |
+//! | REQ-6 | SHIPPED | `impl fmt::Debug for ForwardBacktrace` at `anomaly.rs:111-117` and `impl fmt::Display` at `:119-123`; consumer: `format!("{bt}")` inside `check_gradient_anomaly` at `:161-166`. |
+//!
+
 use std::cell::Cell;
 use std::fmt;
 

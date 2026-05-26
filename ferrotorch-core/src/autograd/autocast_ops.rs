@@ -11,6 +11,19 @@
 //! let individual ops query whether they should cast their inputs. The primary
 //! entry point for op implementations is [`autocast_guard`], which returns the
 //! [`AutocastCategory`] for an op and optionally records debug events.
+//! ## REQ status (per `.design/ferrotorch-core/autograd/autocast_ops.md`)
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 | SHIPPED | `pub enum `AutocastCategory` { ReducedPrecision, FullPrecision, Passthrough }` at `autocast_ops.rs:19-26`; consumer: `ferrotorch-core/src/grad_fns/linalg.rs:9` and `einsum.rs:53`. |
+//! | REQ-2 | SHIPPED | `pub fn `autocast_category`(op_name: &str)` at `autocast_ops.rs:29-45`; consumer: invoked inside REQ-5 at `:77`; re-exported at `lib.rs:125-127`. |
+//! | REQ-3 | SHIPPED | `pub fn `should_cast_to_reduced`(op_name: &str)` at `autocast_ops.rs:48-50`; consumer: re-exported at `lib.rs:125-129`. Existing pub API — boundary-API grandfathering. |
+//! | REQ-4 | SHIPPED | `pub fn `should_keep_full_precision`(op_name: &str)` at `autocast_ops.rs:57-59`; consumer: re-exported at `lib.rs:125-129`. Existing pub API — boundary-API grandfathering. |
+//! | REQ-5 | SHIPPED | `pub fn `autocast_guard`(op_name: &str)` at `autocast_ops.rs:73-87`; consumer: `ferrotorch-core/src/grad_fns/linalg.rs:9` and `einsum.rs:53`. |
+//! | REQ-6 | SHIPPED | `pub fn `autocast_log`(op_name: &str)` at `autocast_ops.rs:95-97`; consumer: re-exported on the autocast surface. Existing pub API — boundary-API grandfathering. |
+//! | REQ-7 | SHIPPED | `pub struct `AutocastEvent`` at `autocast_ops.rs:105-108`; consumer: pushed into `AUTOCAST_EVENTS` inside `autocast_guard` at `:79-84`. |
+//! | REQ-8 | SHIPPED | `pub fn `drain_autocast_events`` at `autocast_ops.rs:119-121`; consumer: re-exported at `lib.rs:125-127` and `ferrotorch-core/src/einsum.rs:2217`. |
+//!
 
 use super::autocast::{is_autocast_debug, is_autocast_enabled};
 

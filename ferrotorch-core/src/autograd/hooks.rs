@@ -5,6 +5,20 @@
 // on leaf tensors). Each registration returns a `HookHandle` that can be used
 // to remove the hook later.
 
+//! ## REQ status (per `.design/ferrotorch-core/autograd/hooks.md`)
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 | SHIPPED | `pub struct `HookHandle`(u64)` at `hooks.rs:30` with `static `NEXT_HOOK_ID`: AtomicU64` at `:23`; consumer: `pub fn `register_hook`` at `ferrotorch-core/src/tensor.rs:460` and `lib.rs:124`. |
+//! | REQ-2 | SHIPPED | `pub(crate) struct `HookStorage`<T: Float>` at `hooks.rs:62-65`; consumer: `TensorInner.hooks` at `ferrotorch-core/src/tensor.rs:87` and 7 `HookStorage::new()` callsites in tensor.rs. |
+//! | REQ-3 | SHIPPED | `pub(crate) struct `GradHook`<T>` at `hooks.rs:43-46`; consumer: stored in `HookStorage.grad_hooks` per REQ-2; populated by `Tensor::register_hook` at `tensor.rs:460-475`. |
+//! | REQ-4 | SHIPPED | `pub(crate) struct `PostAccumulateGradHook`<T>` at `hooks.rs:52-55`; consumer: stored in `HookStorage.post_accumulate_hooks`; populated by `Tensor::register_post_accumulate_grad_hook` at `tensor.rs:483`. |
+//! | REQ-5 | SHIPPED | `HookStorage::add_grad_hook<F>` at `hooks.rs:76-86` and `add_post_accumulate_hook<F>` at `:89-99`; consumer: invoked from `Tensor::register_hook` and `Tensor::register_post_accumulate_grad_hook` in `tensor.rs`. |
+//! | REQ-6 | SHIPPED | `HookStorage::remove(handle)` at `hooks.rs:101-108`; consumer: `Tensor::remove_hook(handle)` at `tensor.rs:502+`. |
+//! | REQ-7 | SHIPPED | `pub(crate) fn `run_grad_hooks`` at `hooks.rs:126-140`; consumer: `ferrotorch-core/src/autograd/graph.rs:183` (sequential) and `:398` (parallel). |
+//! | REQ-8 | SHIPPED | `pub(crate) fn `run_post_accumulate_hooks`` at `hooks.rs:145-156`; consumer: `graph.rs:193` (sequential) and `:406` (parallel). |
+//!
+
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 

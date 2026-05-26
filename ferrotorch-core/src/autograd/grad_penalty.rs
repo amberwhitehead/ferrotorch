@@ -8,6 +8,19 @@
 //! [`super::higher_order::grad`], with `create_graph=true` where needed so the
 //! resulting penalty tensors can be differentiated again (enabling outer-loop
 //! optimization in GAN training).
+//! ## REQ status (per `.design/ferrotorch-core/autograd/grad_penalty.md`)
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 | SHIPPED | `pub fn `gradient_penalty`<T: Float, F>` at `grad_penalty.rs:58-125`; consumer: re-exported at `ferrotorch-core/src/autograd/mod.rs:32` and `lib.rs:127`. Existing pub API — boundary-API grandfathering. |
+//! | REQ-2 | SHIPPED | Alpha-uniform interpolation at `grad_penalty.rs:81-90`; consumer: inside REQ-1. |
+//! | REQ-3 | SHIPPED | `grad(&d_interp, &[&x_interp], false, true)?` at `grad_penalty.rs:100`; consumer: inside REQ-1. |
+//! | REQ-4 | SHIPPED | Penalty composition at `grad_penalty.rs:111-122`; consumer: inside REQ-1. |
+//! | REQ-5 | SHIPPED | `pub fn `grad_norm`<T: Float>` at `grad_penalty.rs:146-165`; consumer: re-exported at `mod.rs:32` and `lib.rs:127`. Existing pub API — boundary-API grandfathering. |
+//! | REQ-6 | SHIPPED | `pub fn `jvp`<T: Float, F>` at `grad_penalty.rs:188-241`; consumer: re-exported at `mod.rs:32` and `lib.rs:128`. Existing pub API — boundary-API grandfathering. |
+//! | REQ-7 | SHIPPED | `pub fn `vjp`<T: Float, F>` at `grad_penalty.rs:264-308`; consumer: re-exported at `mod.rs:32` and `lib.rs:129`. Existing pub API — boundary-API grandfathering. |
+//! | REQ-8 | SHIPPED | Shape-validation branches at `grad_penalty.rs:67-76, :192-200, :283-291`; consumer: inside REQ-1/REQ-6/REQ-7 bodies. |
+//!
 
 use crate::dtype::Float;
 use crate::error::FerrotorchResult;

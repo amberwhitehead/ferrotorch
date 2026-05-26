@@ -8,6 +8,20 @@
 //!
 //! Also provides convenience functions [`jacobian`] and [`hessian`] built on
 //! top of `grad`.
+//! ## REQ status (per `.design/ferrotorch-core/autograd/higher_order.md`)
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 | SHIPPED | `pub fn `grad`<T: Float>` at `higher_order.rs:56-240`; consumer: `ferrotorch-core/src/autograd/grad_penalty.rs:17, :100, :150, :299` plus `ferrotorch-core/src/autograd/fixed_point.rs:30, :224, :297`. |
+//! | REQ-2 | SHIPPED | Scalar-output check at `higher_order.rs:62-67`; consumer: inside REQ-1. |
+//! | REQ-3 | SHIPPED | `create_graph=true` path with `differentiable_add` accumulation at `higher_order.rs:196-216`; consumer: `grad_penalty.rs:100` (WGAN-GP). |
+//! | REQ-4 | SHIPPED | Three-phase BFS + Kahn at `higher_order.rs:93-224`; consumer: inside REQ-1. |
+//! | REQ-5 | SHIPPED | `pub fn `jacobian`<T: Float, F>` at `higher_order.rs:273-327`; consumer: re-exported at `mod.rs:35` and `lib.rs:128`. Existing pub API — boundary-API grandfathering. |
+//! | REQ-6 | SHIPPED | `pub fn `hessian`<T: Float, F>` at `higher_order.rs:344-395`; consumer: re-exported at `mod.rs:35` and `lib.rs:127`. Existing pub API — boundary-API grandfathering. |
+//! | REQ-7 | SHIPPED | `struct `IndexSelectBackward`<T>` at `higher_order.rs:432-435` + `impl GradFn` at `:437-493`; consumer: instantiated inside `extract_element` at `:403-426` called by `jacobian` at `:306` and `hessian` at `:378`. |
+//! | REQ-8 | SHIPPED | `struct `BroadcastScalarBackward`<T>` at `higher_order.rs:500-502` + `impl GradFn` at `:504-523`; consumer: instantiated inside `IndexSelectBackward::backward` at `:463-466`. |
+//! | REQ-9 | SHIPPED | `impl<T: Float> Tensor<T> pub fn `grad_wrt`` at `higher_order.rs:534-541`. Existing pub API — boundary-API grandfathering. |
+//!
 
 use std::collections::{HashMap, VecDeque};
 

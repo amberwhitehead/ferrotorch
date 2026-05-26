@@ -23,6 +23,18 @@
 //!
 //! which converges when the spectral radius of `J_x` is less than 1 (guaranteed
 //! when `f` is contractive).
+//! ## REQ status (per `.design/ferrotorch-core/autograd/fixed_point.md`)
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 | SHIPPED | `pub fn `fixed_point`<T, F>` at `fixed_point.rs:79-135`; consumer: re-exported at `ferrotorch-core/src/autograd/mod.rs:27 pub use fixed_point::fixed_point` and `lib.rs:127`. Existing pub API — boundary-API grandfathering. |
+//! | REQ-2 | SHIPPED | Forward-iteration loop at `fixed_point.rs:91-109`; consumer: inside REQ-1. |
+//! | REQ-3 | SHIPPED | `if params.iter().any(\|p\| p.requires_grad())` at `fixed_point.rs:113`; consumer: inside REQ-1. |
+//! | REQ-4 | SHIPPED | `struct `FixedPointBackward`<T: Float>` at `fixed_point.rs:147-158` + `impl GradFn` at `:172-322`; consumer: instantiated inside REQ-1 at `:124-130`. |
+//! | REQ-5 | SHIPPED | Neumann series solve at `fixed_point.rs:177-245`; consumer: inside REQ-4's `backward` impl. |
+//! | REQ-6 | SHIPPED | Per-parameter gradient distribution at `fixed_point.rs:247-313`; consumer: inside REQ-4's `backward` impl. |
+//! | REQ-7 | SHIPPED | `fn `elementwise_mul_sum`<T: Float>` at `fixed_point.rs:328-331`; consumer: called twice inside REQ-5 at `:222` and REQ-6 at `:282`. |
+//!
 
 use std::fmt;
 use std::sync::Arc;

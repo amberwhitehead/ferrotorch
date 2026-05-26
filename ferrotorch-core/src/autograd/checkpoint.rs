@@ -1,3 +1,17 @@
+//! ## REQ status (per `.design/ferrotorch-core/autograd/checkpoint.md`)
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 | SHIPPED | `pub fn `checkpoint`<T, F>` at `checkpoint.rs:64-102` + `struct `CheckpointBackward`<T>` at `:190-201` + `impl GradFn` at `:216-269`. Existing pub API — boundary-API grandfathering. |
+//! | REQ-2 | SHIPPED | `pub fn `checkpoint_multi`<T, F>` at `checkpoint.rs:110-145` + `struct `CheckpointMultiBackward`<T>` at `:275-281` + `impl GradFn` at `:296-358`. Existing pub API — boundary-API grandfathering. |
+//! | REQ-3 | SHIPPED | `saved_autocast: AutocastSnapshot` at `checkpoint.rs:200, :280`; `current_autocast_snapshot()` at `:81, :125`; `with_autocast_state` recompute wraps at `:240, :312`; consumer: every checkpoint call. |
+//! | REQ-4 | SHIPPED | `fn `save_gpu_rng_state`` at `checkpoint.rs:150-163`; consumer: every CUDA-resident checkpoint. |
+//! | REQ-5 | SHIPPED | `struct `GpuRngGuard`` at `checkpoint.rs:167-177` with `Drop` impl; consumer: `let _rng_guard = ...` at `:231, :305`. |
+//! | REQ-6 | SHIPPED | `CheckpointBackward.input` field at `checkpoint.rs:192` populated by `input.clone()` at `:93`; consumer: `input_with_grad.grad()` read at `:257`. |
+//! | REQ-7 | SHIPPED | Weighted-sum recompute trick at `checkpoint.rs:248-256`; consumer: every backward of a checkpointed output. |
+//! | REQ-8 | SHIPPED | Skip-attach at `checkpoint.rs:86-88, :129-132`; consumer: every inference-time checkpoint call. |
+//!
+
 use std::sync::Arc;
 
 use crate::autograd::autocast::{AutocastSnapshot, current_autocast_snapshot, with_autocast_state};

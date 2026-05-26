@@ -1,3 +1,20 @@
+//! ## REQ status (per `.design/ferrotorch-core/autograd/graph.md`)
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 | SHIPPED | `pub fn `backward`<T: Float>` at `graph.rs:20-22`; consumer: `Tensor::backward` convenience method at `:637-639` and `ferrotorch-core/src/stride_tricks.rs:671 backward(&loss)?`. |
+//! | REQ-2 | SHIPPED | `pub fn `backward_with_grad`<T: Float>` at `graph.rs:30-206`; consumer: `Tensor::backward_with_gradient` at `:647-649` and `ferrotorch-core/src/grad_fns/shape.rs:1112`. |
+//! | REQ-3 | SHIPPED | Kahn three-phase topo-sort at `graph.rs:67-205`; consumer: same as REQ-1 (engine inside `backward`). |
+//! | REQ-4 | SHIPPED | `accumulate_non_leaf_grad` at `graph.rs:530-629` and `accumulate_non_leaf_grad_locked` at `:460-514`; consumer: invoked from REQ-1/REQ-2 dispatch. |
+//! | REQ-5 | SHIPPED | `run_grad_hooks` and `run_post_accumulate_hooks` calls at `graph.rs:175-193` (sequential) and `:385-407` (parallel); consumer: every `Tensor::register_hook` user flowing through backward. |
+//! | REQ-6 | SHIPPED | Materialize-contiguous gradient at `graph.rs:148-152` (sequential) and `:363-367` (parallel); consumer: every non-contiguous gradient in backward. |
+//! | REQ-7 | SHIPPED | GPU-native add at `graph.rs:551-569` (sequential) and `:480-496` (parallel) via `backend.add_f32`/`add_f64`; consumer: any model with same-device gradient-merge points. |
+//! | REQ-8 | SHIPPED | Gradient-count sanity check at `graph.rs:160-168` and `:372-380`; consumer: defensive guard inside REQ-3 dispatch. |
+//! | REQ-9 | SHIPPED | `pub fn `backward_parallel`<T: Float>` at `graph.rs:220-457`; consumer: existing pub API across multiple prior commits — boundary-API grandfathering. |
+//! | REQ-10 | SHIPPED | Shape-preserving seed at `graph.rs:50-65`; consumer: every `Tensor::backward()` on a `[1]`-shape loss (regression test at `:854-867`). |
+//! | REQ-11 | SHIPPED | `impl<T: Float> Tensor<T>` with `pub fn `backward`` at `graph.rs:637-639` and `pub fn `backward_with_gradient`` at `:647-649`; consumer: `stride_tricks.rs:672`, `grad_fns/quantize_grad.rs:793`. |
+//!
+
 use rustc_hash::FxHashMap as HashMap;
 use std::collections::VecDeque;
 

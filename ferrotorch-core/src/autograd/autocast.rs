@@ -1,3 +1,17 @@
+//! ## REQ status (per `.design/ferrotorch-core/autograd/autocast.md`)
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 | SHIPPED | `pub enum `AutocastDtype` { F16, BF16 }` at `autocast.rs:28-34`; consumer: `ferrotorch-core/src/autograd/checkpoint.rs:3` and `einsum.rs:2216`, `ferrotorch-nn/src/loss.rs:4374, :4404, :4433`. |
+//! | REQ-2 | SHIPPED | `pub fn `is_autocast_enabled`` at `autocast.rs:37-39`; consumer: `ferrotorch-core/src/autograd/autocast_ops.rs:48` inside `should_cast_to_reduced`. |
+//! | REQ-3 | SHIPPED | `pub fn `autocast_dtype`` at `autocast.rs:44-46`; consumer: inside `with_autocast_state` at `:104-110` and `current_autocast_snapshot` at `:71-76`. |
+//! | REQ-4 | SHIPPED | `pub fn `autocast`<F, R>` at `autocast.rs:137-161` with `AutocastGuard` RAII at `:142-152`; consumer: `ferrotorch-nn/src/loss.rs:4374, :4404, :4433` and `ferrotorch-core/src/einsum.rs:2229`. |
+//! | REQ-5 | SHIPPED | `pub struct `AutocastSnapshot`` at `autocast.rs:54-63`; consumer: `ferrotorch-core/src/autograd/checkpoint.rs:200, :280` (`saved_autocast` field). |
+//! | REQ-6 | SHIPPED | `pub fn `current_autocast_snapshot`` at `autocast.rs:71-76`; consumer: `ferrotorch-core/src/autograd/checkpoint.rs:81, :125`. |
+//! | REQ-7 | SHIPPED | `pub fn `with_autocast_state`<F, R>` at `autocast.rs:88-111`; consumer: `ferrotorch-core/src/autograd/checkpoint.rs:240, :312`. |
+//! | REQ-8 | SHIPPED | `pub fn `set_autocast_debug`` at `autocast.rs:18-20` and `pub fn `is_autocast_debug`` at `:23-25`; consumer: `ferrotorch-core/src/autograd/autocast_ops.rs:78` inside `autocast_guard`. |
+//!
+
 use std::cell::Cell;
 
 thread_local! {

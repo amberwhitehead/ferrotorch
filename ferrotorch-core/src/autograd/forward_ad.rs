@@ -17,6 +17,20 @@
 //! Transcendentals: exp, log, sin, cos
 //!
 //! CL-310
+//! ## REQ status (per `.design/ferrotorch-core/autograd/forward_ad.md`)
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 | SHIPPED | `pub struct `DualTensor`<T: Float>` at `forward_ad.rs:37-42`; consumer: re-exported at `ferrotorch-core/src/autograd/mod.rs:28-31` and `lib.rs:131-133`. Existing pub API — boundary-API grandfathering. |
+//! | REQ-2 | SHIPPED | `pub fn `DualTensor::new`` at `forward_ad.rs:48-59`; consumer: invoked inside `jvp_exact` at `:370`. |
+//! | REQ-3 | SHIPPED | `pub fn `DualTensor::constant`` at `forward_ad.rs:62-70`. Existing pub API — boundary-API grandfathering. |
+//! | REQ-4 | SHIPPED | `dual_add` at `forward_ad.rs:88-93`, `dual_sub` at `:96-100`, `dual_mul` at `:103-110`, `dual_div` at `:113-122`, `dual_neg` at `:125-129`; consumer: re-exported at `mod.rs:28-31` and `lib.rs:131-133`. Existing pub API — boundary-API grandfathering. |
+//! | REQ-5 | SHIPPED | `pub fn `dual_matmul`<T: Float>` at `forward_ad.rs:138-148`; consumer: re-exported at `mod.rs:28-31` and `lib.rs:131-133`. Existing pub API — boundary-API grandfathering. |
+//! | REQ-6 | SHIPPED | `pub fn `dual_relu`` at `forward_ad.rs:155-176`, `pub fn `dual_sigmoid`` at `:179-199`, `pub fn `dual_tanh`` at `:202-222`; consumer: re-exported at `mod.rs:28-31` and `lib.rs:131-133`. Existing pub API — boundary-API grandfathering. |
+//! | REQ-7 | SHIPPED | `pub fn `dual_exp`` at `forward_ad.rs:229-248`, `pub fn `dual_log`` at `:251-270`, `pub fn `dual_sin`` at `:273-292`, `pub fn `dual_cos`` at `:295-314`; consumer: re-exported at `mod.rs:28-31` and `lib.rs:131-133`. Existing pub API — boundary-API grandfathering. |
+//! | REQ-8 | SHIPPED | `pub fn `jvp_exact`<T: Float, F>` at `forward_ad.rs:351-376`; consumer: invoked inside `jacfwd` at `:431` and re-exported at `mod.rs:31` and `lib.rs:133`. |
+//! | REQ-9 | SHIPPED | `pub fn `jacfwd`<T: Float, F>` at `forward_ad.rs:407-449`; consumer: re-exported at `mod.rs:31` and `lib.rs:131-133`. Existing pub API — boundary-API grandfathering. |
+//!
 
 use crate::dtype::Float;
 use crate::error::{FerrotorchError, FerrotorchResult};

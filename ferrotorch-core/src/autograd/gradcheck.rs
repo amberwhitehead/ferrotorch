@@ -5,6 +5,17 @@
 //! custom backward implementations.
 //!
 //! Matches PyTorch's `torch.autograd.gradcheck` API.
+//! ## REQ status (per `.design/ferrotorch-core/autograd/gradcheck.md`)
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 | SHIPPED | `pub fn `gradcheck`<T, F>` at `gradcheck.rs:43-184`; consumer: re-exported at `ferrotorch-core/src/autograd/mod.rs:33 pub use gradcheck::gradcheck`. Existing pub API — boundary-API grandfathering. |
+//! | REQ-2 | SHIPPED | Adaptive default selection at `gradcheck.rs:54-69`; consumer: inside REQ-1. |
+//! | REQ-3 | SHIPPED | Scalar-output validation at `gradcheck.rs:78-85`; consumer: inside REQ-1; covered by `test_gradcheck_non_scalar_fails` at `:247-252`. |
+//! | REQ-4 | SHIPPED | Central finite difference at `gradcheck.rs:88-181`; consumer: inside REQ-1. |
+//! | REQ-5 | SHIPPED | Per-element mismatch error at `gradcheck.rs:159-180`; consumer: inside REQ-1. |
+//! | REQ-6 | SHIPPED | Multi-input outer-loop at `gradcheck.rs:89-181` with per-input substitution at `:128-145`; consumer: `test_gradcheck_linear_combination` and `test_gradcheck_add`. |
+//!
 
 use crate::dtype::Float;
 use crate::error::{FerrotorchError, FerrotorchResult};

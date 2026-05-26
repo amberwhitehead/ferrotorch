@@ -1,3 +1,12 @@
+//! ## REQ status (per `.design/ferrotorch-core/autograd/mod.md`)
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 | SHIPPED | `pub mod` declarations at `mod.rs:1-13`; consumer: `ferrotorch-core/src/lib.rs:121-133` re-exports the surface. |
+//! | REQ-2 | SHIPPED | `pub use` chain at `mod.rs:15-38` re-exports `backward`, `grad`, `no_grad`, `autocast`, `gradcheck`, `fixed_point`, `grad_norm`, `gradient_penalty`, `jvp`, `vjp`, `DualTensor`, `jacfwd`, `jvp_exact`, `hessian`, `jacobian`, `enable_grad`, `inference_mode`, `set_grad_enabled`, `is_grad_enabled`, `is_inference_mode`; consumer: `ferrotorch-core/src/lib.rs:125-133` re-exports to crate root. |
+//! | REQ-3 | SHIPPED | `pub use crate::ops::higher_order::{cond, scan, validate_cond_branches}` at `mod.rs:26`; consumer: `ferrotorch-core/src/lib.rs:127` re-exports `cond`, `scan`, `validate_cond_branches`. |
+//!
+
 pub mod anomaly;
 pub mod autocast;
 pub mod autocast_ops;

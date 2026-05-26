@@ -23,6 +23,19 @@
 //! ```
 //!
 //! Hooks are thread-local and nestable (inner scopes override outer ones).
+//! ## REQ status (per `.design/ferrotorch-core/autograd/saved_tensors.md`)
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 | SHIPPED | `pub type `PackHook`<T>` at `saved_tensors.rs:35`; consumer: stored in `HOOKS_F32` / `HOOKS_F64` at `:42-50`. Existing pub API — boundary-API grandfathering. |
+//! | REQ-2 | SHIPPED | `pub type `UnpackHook`<T>` at `saved_tensors.rs:38`; consumer: stored in `HOOKS_F32` / `HOOKS_F64` at `:42-50`. Existing pub API — boundary-API grandfathering. |
+//! | REQ-3 | SHIPPED | `pub fn `saved_tensors_hooks`<T, F, R>` at `saved_tensors.rs:59-104`. Existing pub API — boundary-API grandfathering. |
+//! | REQ-4 | SHIPPED | `pub fn `pack_saved_tensor`<T: Float>` at `saved_tensors.rs:110-148`. Existing pub API — boundary-API grandfathering. |
+//! | REQ-5 | SHIPPED | `pub fn `unpack_saved_tensor`<T: Float>` at `saved_tensors.rs:154-190`. Existing pub API — boundary-API grandfathering. |
+//! | REQ-6 | SHIPPED | `pub fn `has_saved_tensor_hooks`` at `saved_tensors.rs:193-195`; consumer: short-circuits at `:114, :129, :155, :172`. |
+//! | REQ-7 | SHIPPED | No-hooks identity passthrough at `saved_tensors.rs:125, :142, :167, :184`; consumer: every GradFn save/load cycle without registered hooks. |
+//! | REQ-8 | SHIPPED | Restore-prior-on-exit at `saved_tensors.rs:84, :98`; consumer: every nested `saved_tensors_hooks(...)` call. |
+//!
 
 use std::cell::RefCell;
 use std::sync::Arc;

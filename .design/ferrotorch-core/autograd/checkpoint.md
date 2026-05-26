@@ -1,0 +1,232 @@
+# Gradient checkpointing (`checkpoint`, `checkpoint_multi`)
+
+<!--
+tier: 3-component
+status: draft
+baseline-pytorch: 6710f8ebc (Revert "feat(gpu): route bf16 buffers through f32 elementwise dispatchers (#23) (#24)")
+upstream-paths:
+  - torch/utils/checkpoint.py
+-->
+
+## Summary
+
+`ferrotorch-core/src/autograd/checkpoint.rs` is the activation-recompute
+memory-vs-compute trade-off layer for deep networks. The forward pass
+runs inside `no_grad` (NO activations saved on the graph), and a
+`CheckpointBackward` / `CheckpointMultiBackward` node attaches to the
+output instead. During backward, the function is re-executed WITH
+gradient tracking — but the re-execution is wrapped in
+`with_autocast_state(saved_autocast, ...)` (REQ-7 of `autocast.md`)
+and (when applicable) a saved-GPU-RNG-state restoration, so the
+recomputed activations are numerically identical to the originals.
+Mirrors PyTorch's `torch.utils.checkpoint.checkpoint` at
+`torch/utils/checkpoint.py:25-540`.
+
+## Requirements
+
+- REQ-1: `pub fn checkpoint<T, F>(f: F, input: &Tensor<T>) ->
+  FerrotorchResult<Tensor<T>>` — single-input gradient checkpoint.
+  Forward runs in `no_grad`; if `input.requires_grad()`, attach a
+  `CheckpointBackward` node that re-runs `f` during backward. Mirrors
+  `torch.utils.checkpoint.checkpoint(f, *args)` at
+  `torch/utils/checkpoint.py:339-540`.
+- REQ-2: `pub fn checkpoint_multi<T, F>(f: F, inputs: &[Tensor<T>])
+  -> FerrotorchResult<Tensor<T>>` — multi-input variant. Same
+  semantic as REQ-1 but `f` receives a slice of tensors; gradients
+  are computed for every input with `requires_grad=true`.
+- REQ-3: Save the autocast `(enabled, dtype)` snapshot at forward
+  time (via `current_autocast_snapshot()`) and restore it during
+  backward recomputation (via `with_autocast_state`). Without this,
+  a checkpoint inside `autocast(F16, ...)` would recompute under f32
+  and produce numerically inconsistent gradients.
+- REQ-4: Save GPU RNG state at forward time (when GPU backend is
+  registered and the input is on a CUDA device) and restore it
+  during backward recomputation, so stochastic ops (dropout) produce
+  identical masks across forward and recompute. Without this, the
+  dropout mask used in the recompute would be different from the
+  forward, and the gradients would be inconsistent. Mirrors upstream
+  `_get_device_states` / `_set_device_states` in
+  `torch/utils/checkpoint.py:225-285`.
+- REQ-5: RAII guard on RNG state — the recompute path must NOT
+  permanently rewind the global RNG to the saved-forward state; it
+  must restore the caller's pre-backward RNG state on completion.
+  Implemented via `GpuRngGuard { previous: GpuRngState }` `Drop`
+  impl.
+- REQ-6: `TensorId` aliasing invariant — `CheckpointBackward.input`
+  stores a clone of the user's input. `Tensor::clone()` is an `Arc`
+  clone, so the stored `Tensor` shares its `TensorId` with the
+  user's. This is required so autograd's gradient-accumulation path
+  writes back to the right leaf identity during recompute backward.
+- REQ-7: Recompute backward uses the "weighted sum" trick: build
+  `weighted = recomputed * detach(grad_output)`, then `scalar =
+  sum(weighted)`, then `scalar.backward()`. This delivers the
+  upstream gradient through chain rule onto the recomputed graph,
+  yielding the input gradients via the cached graph's accumulation.
+- REQ-8: Skip-attach fast path — when `!input.requires_grad()` (or
+  no input requires grad in the multi-input case), return the
+  forward output directly with NO `grad_fn` attached. This is the
+  inference-time fast path matching upstream's
+  `checkpoint(...).requires_grad` propagation.
+
+## Acceptance Criteria
+
+- [x] AC-1: Single-input checkpoint `f(x) = (x * x) + x` produces
+  the correct forward AND correct backward partial `df/dx = 2x + 1`
+  — `test_checkpoint_single_input_basic` at `checkpoint.rs:381-403`.
+- [x] AC-2: When input does not require grad, no `grad_fn` is
+  attached — `test_checkpoint_no_grad_input_returns_output_only` at
+  `checkpoint.rs:406-423`.
+- [x] AC-3: Multi-input checkpoint with both inputs requiring grad
+  produces correct partials for `f(a, b) = a*b + a`:
+  `df/da = b + 1`, `df/db = a` —
+  `test_checkpoint_multi_two_inputs_both_grad` at
+  `checkpoint.rs:430-459`.
+- [x] AC-4: Multi-input partial-grad case (only second input
+  requires grad) produces correct grad for that input —
+  `test_checkpoint_multi_partial_grad` at `checkpoint.rs:461-486`.
+
+## Architecture
+
+### REQ-1 single-input `checkpoint`
+
+`pub fn checkpoint<T, F>` at `checkpoint.rs:64-102`:
+
+1. Capture `saved_gpu_rng` via `save_gpu_rng_state(input)` at `:74`.
+2. Capture `saved_autocast` via `current_autocast_snapshot()` at `:81`.
+3. Forward pass in `no_grad`: `let output = no_grad(|| f(input))?;`
+   at `:84`.
+4. Fast path: if `!input.requires_grad()`, return `output` directly
+   at `:86-88`.
+5. Build `CheckpointBackward { func, input.clone(), output_shape,
+   saved_gpu_rng, saved_autocast }` at `:91-97`.
+6. Wrap output's data in a fresh storage and attach the backward via
+   `Tensor::from_operation` at `:99-101`.
+
+### REQ-2 multi-input `checkpoint_multi`
+
+`pub fn checkpoint_multi<T, F>` at `checkpoint.rs:110-145` is the
+symmetric multi-input variant. Validates at `:118-122` that at least
+one input is provided. RNG state is saved using
+`save_gpu_rng_state(&inputs[0])` at `:124`. Skip-attach if no input
+requires grad at `:129-132`.
+
+### REQ-3 autocast state preservation
+
+`saved_autocast: AutocastSnapshot` field on both `CheckpointBackward`
+(`:200`) and `CheckpointMultiBackward` (`:280`). The backward
+implementations at `:240` and `:312` wrap the recompute closure in
+`with_autocast_state(self.saved_autocast, || ...)`. The
+`with_autocast_state` RAII drop guard restores the caller's autocast
+state on completion (success or panic).
+
+### REQ-4 GPU RNG preservation
+
+`fn save_gpu_rng_state<T: Float>(tensor: &Tensor<T>) ->
+Option<GpuRngState>` at `checkpoint.rs:150-163`:
+
+- Returns `None` for CPU / Xpu / Mps / Meta tensors.
+- Returns `None` if no GPU backend is registered.
+- Otherwise calls `backend.save_rng_state(device_ordinal).ok()`.
+
+Each backward impl at `:224-234` (single-input) and `:299-307`
+(multi-input) restores the saved state via
+`backend.restore_rng_state(saved_state)` before re-running `f`.
+
+### REQ-5 RNG guard
+
+`struct GpuRngGuard { previous: GpuRngState }` at `checkpoint.rs:167-177`
+with `impl Drop` that restores `previous` on scope exit. The
+`current_state` (the caller's pre-backward state) is saved at
+`:226` (single) / `:300` (multi), used as the `previous` field of
+the guard. The guard is `let _rng_guard = ...;` so its `Drop` fires
+at the end of the backward function.
+
+### REQ-6 `TensorId` aliasing
+
+`CheckpointBackward.input: Tensor<T>` at `checkpoint.rs:192` is
+populated by `input.clone()` at `:93`. The doc comment at
+`:182-188` documents the invariant: `Tensor::clone()` is an `Arc`
+clone, so `TensorId` is preserved. Autograd's gradient accumulation
+keys by `TensorId`, so the cloned `input` and the user's original
+input share identity — the gradient written to `input_with_grad.grad()`
+inside the backward recompute is visible at the user's input tensor
+via the same `TensorId`.
+
+### REQ-7 weighted-sum recompute trick
+
+Inside `CheckpointBackward::backward` at `checkpoint.rs:217-260`:
+
+```rust
+let input_with_grad = self.input.clone().requires_grad_(true);
+let recomputed = (self.func)(&input_with_grad)?;
+let weighted = mul(&recomputed, &grad_output.clone().requires_grad_(false).detach())?;
+let scalar = sum(&weighted)?;
+scalar.backward()?;
+let input_grad = input_with_grad.grad()?;
+Ok(vec![input_grad])
+```
+
+The `detach()` on `grad_output` (at `:252`) is essential — without
+it, the autograd engine would walk back through the grad_output's
+own grad_fn and double-process the chain rule. The `requires_grad_(true)`
+on the cloned input enables the freshly-recomputed graph to record
+its own backward edges.
+
+### REQ-8 skip-attach fast path
+
+Implemented at `checkpoint.rs:86-88` (single-input) and `:129-132`
+(multi-input). Required because attaching a `CheckpointBackward`
+without a downstream consumer would still allocate the
+`func: CheckpointFn<T>` Arc (a non-trivial allocation), and the
+recompute would never fire anyway.
+
+## Parity contract
+
+`parity_ops = []` — checkpoint is graph-transformation plumbing.
+Behavioral parity:
+
+- Forward output is bit-identical to non-checkpointed forward (the
+  same `f` runs in both cases).
+- Backward gradients are bit-identical (modulo floating-point
+  determinism) to non-checkpointed backward, ASSUMING:
+  - GPU RNG state was successfully saved + restored (REQ-4), and
+  - autocast snapshot was successfully captured + restored (REQ-3).
+- Caller's autocast and RNG state outside the backward call are
+  unchanged (RAII restoration).
+- Memory: peak GPU memory drops by the size of the activations
+  inside `f`'s body, paid back by re-executing `f` once during
+  backward (a 2x compute cost for `f`).
+
+R-DEV-2 API parity: `checkpoint(f, *args)` in PyTorch maps to
+`checkpoint(f, &input)` / `checkpoint_multi(f, &inputs)` in
+ferrotorch (Rust closure signatures + slice rather than variadic
+args).
+
+## Verification
+
+Tests in `checkpoint.rs:362-754` (~390 LOC of test code). Key tests:
+
+- `test_checkpoint_single_input_basic` (`:381`)
+- `test_checkpoint_no_grad_input_returns_output_only` (`:406`)
+- `test_checkpoint_multi_two_inputs_both_grad` (`:430`)
+- `test_checkpoint_multi_partial_grad` (`:461`)
+- Autocast preservation tests verify the snapshot round-trip across
+  the forward/backward boundary using `is_autocast_enabled()`
+  / `autocast_dtype()` assertions inside the closure (see test mod's
+  use of `AutocastDtype, autocast, is_autocast_enabled` at
+  `:367`).
+
+All tests pass in the workspace gauntlet.
+
+## REQ status table
+
+| REQ | Status | Evidence |
+|---|---|---|
+| REQ-1 | SHIPPED | impl: `pub fn checkpoint<T, F>` at `ferrotorch-core/src/autograd/checkpoint.rs:64-102` + `struct CheckpointBackward<T: Float>` at `:190-201` + `impl<T: Float> crate::tensor::GradFn<T> for CheckpointBackward<T>` at `:216-269`; mirrors `torch.utils.checkpoint.checkpoint` at `torch/utils/checkpoint.py:339-540`; non-test production consumer: `pub mod checkpoint` is the public sub-module of `autograd` (via `ferrotorch-core/src/autograd/mod.rs:4`); callers reach it as `crate::autograd::checkpoint::checkpoint` from any user code that wants to memory-trade. Existing pub API across multiple prior commits — boundary-API grandfathering under goal.md S5. |
+| REQ-2 | SHIPPED | impl: `pub fn checkpoint_multi<T, F>` at `checkpoint.rs:110-145` + `struct CheckpointMultiBackward<T: Float>` at `:275-281` + `impl GradFn` at `:296-358`; non-test production consumer: same as REQ-1 — exposed via `crate::autograd::checkpoint` sub-module. Existing pub API — boundary-API grandfathering. |
+| REQ-3 | SHIPPED | impl: `saved_autocast: AutocastSnapshot` fields at `checkpoint.rs:200, :280`; `current_autocast_snapshot()` calls at `:81, :125`; `with_autocast_state(self.saved_autocast, || ...)` recompute wraps at `:240, :312`; non-test production consumer: every `checkpoint` / `checkpoint_multi` call (the autocast preservation is unconditional, not opt-in). |
+| REQ-4 | SHIPPED | impl: `fn save_gpu_rng_state` at `checkpoint.rs:150-163`; `saved_gpu_rng: Option<GpuRngState>` fields at `:196, :279`; RNG-restore calls at `:228, :302`; non-test production consumer: every checkpoint of a CUDA-resident tensor when a GPU backend is registered. |
+| REQ-5 | SHIPPED | impl: `struct GpuRngGuard { previous: GpuRngState }` at `checkpoint.rs:167-177` with `Drop` impl restoring `previous`; non-test production consumer: instantiated inside both backward impls at `:231, :305` (the `let _rng_guard = ...` pattern); production callers are every backward of a checkpointed CUDA op. |
+| REQ-6 | SHIPPED | impl: `CheckpointBackward.input: Tensor<T>` field at `checkpoint.rs:192` populated by `input.clone()` at `:93` — Arc-clone preserves `TensorId`; the doc-comment at `:182-188` documents the invariant; non-test production consumer: every `checkpoint(f, &input)` call where the input requires grad — the `input_with_grad.grad()` read at `:257` relies on the `TensorId` aliasing to project the recompute's gradient back to the user's input tensor. |
+| REQ-7 | SHIPPED | impl: weighted-sum trick at `checkpoint.rs:248-256` (`mul(&recomputed, &grad_output.detach())` + `sum(&weighted)` + `scalar.backward()` + `input_with_grad.grad()`); non-test production consumer: every backward call on a checkpointed output — invoked from `Tensor::backward` (REQ-1 of graph.md) → `CheckpointBackward::backward`. |
+| REQ-8 | SHIPPED | impl: `if !input.requires_grad() { return Ok(output); }` at `checkpoint.rs:86-88` (single-input) and `if !any_requires_grad { return Ok(output); }` at `:129-132` (multi-input); non-test production consumer: any inference-time checkpoint call (a model whose forward path uses `checkpoint` for memory but whose inputs do not require grad). |

@@ -1,3 +1,15 @@
+//! ## REQ status (per `.design/ferrotorch-core/autograd/no_grad.md`)
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 | SHIPPED | `pub fn `is_grad_enabled`` at `no_grad.rs:9-11`; consumer: `ferrotorch-core/src/tensor.rs:793, :1030` and `grad_fns/{shape,linalg,transcendental,activation,comparison,fft}.rs` op gates. |
+//! | REQ-2 | SHIPPED | `pub fn `no_grad`<F, R>` at `no_grad.rs:37-54` with `NoGradGuard` RAII at `:44-48`; consumer: `ferrotorch-core/src/grad_fns/linalg.rs:445, :452` and 20+ backward callsites. |
+//! | REQ-3 | SHIPPED | `pub fn `enable_grad`<F, R>` at `no_grad.rs:79-96`; consumer: re-exported through `mod.rs:36` and `lib.rs:125-127`. Existing pub API — boundary-API grandfathering. |
+//! | REQ-4 | SHIPPED | `pub fn `set_grad_enabled`` at `no_grad.rs:162-164`; consumer: re-exported through `mod.rs:36` and `lib.rs:127`. Existing pub API — boundary-API grandfathering. |
+//! | REQ-5 | SHIPPED | `pub fn `inference_mode`<F, R>` at `no_grad.rs:134-155`; consumer: `ferrotorch-core/src/tensor.rs:307` short-circuits autograd-metadata allocation. |
+//! | REQ-6 | SHIPPED | `pub fn `is_inference_mode`` at `no_grad.rs:106-108`; consumer: `tensor.rs:307` (the inference-mode fast-path predicate). |
+//!
+
 use std::cell::Cell;
 
 thread_local! {
