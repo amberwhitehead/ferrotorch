@@ -24,6 +24,18 @@
 //! relies on it.
 //!
 //! CL-373.
+//!
+//! ## REQ status (per `.design/ferrotorch-distributed/async_collective.md`)
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 (PendingCollective struct) | SHIPPED | `pub struct PendingCollective<T: Float>` in `async_collective.rs`; consumer `fsdp.rs` stores `pending_prefetch: Option<Vec<PendingCollective<T>>>` field. |
+//! | REQ-2 (wait method) | SHIPPED | `pub fn wait(mut self) -> FerrotorchResult<Tensor<T>>` in `async_collective.rs` with thread-panic propagation; consumer FSDP's prefetch drain via re-export at `lib.rs`. |
+//! | REQ-3 (op_name accessor) | SHIPPED | `pub fn op_name(&self) -> &'static str` in `async_collective.rs`; consumer re-export via `PendingCollective` at `lib.rs`. |
+//! | REQ-4 (async_all_gather) | SHIPPED | `pub fn async_all_gather` in `async_collective.rs`; consumer `fsdp.rs` invokes `async_all_gather(shard, Arc::clone(&self.backend))` in the forward-prefetch path. |
+//! | REQ-5 (async_reduce_scatter) | SHIPPED | `pub fn async_reduce_scatter` in `async_collective.rs`; consumer re-exported at `lib.rs`, reached via `ferrotorch/src/lib.rs`. |
+//! | REQ-6 (drop-without-wait semantics) | SHIPPED | `let _ = tx.send(result);` in `async_collective.rs` is the silent-on-drop pattern; consumer re-export via `PendingCollective`. |
+//! | REQ-7 (single-outstanding-op invariant) | SHIPPED | module docstring documents the invariant; consumer `fsdp.rs` tracks `pending_prefetch` and drains before queueing — respects the contract. |
 
 use std::sync::Arc;
 use std::sync::mpsc::{self, Receiver};

@@ -10,6 +10,16 @@
 //! # Feature gate
 //!
 //! Requires the `nccl` feature.
+//!
+//! ## REQ status (per `.design/ferrotorch-distributed/hybrid_backend.md`)
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 (HybridBackend struct) | SHIPPED | `pub struct HybridBackend { tcp: TcpBackend, nccl: NcclBackend }` in `hybrid_backend.rs`; consumer `pub use hybrid_backend::HybridBackend` at `lib.rs` under `#[cfg(feature = "nccl")]`. |
+//! | REQ-2 (constructor order TCP→NCCL) | SHIPPED | `pub fn new` builds `TcpBackend::new(...)` first then `NcclBackend::new(...)` in `hybrid_backend.rs`; consumer via crate-root re-export reachable from `ferrotorch/src/lib.rs`. |
+//! | REQ-3 (nccl() / tcp() accessors) | SHIPPED | `pub fn nccl(&self) -> &NcclBackend` and `pub fn tcp(&self) -> &TcpBackend` in `hybrid_backend.rs`; documented production call shape `nccl_allreduce(&mut buf, hybrid.nccl(), ...)`. |
+//! | REQ-4 (synchronize_nccl) | SHIPPED | `pub fn synchronize_nccl(&self)` in `hybrid_backend.rs` forwards to `NcclBackend::synchronize`; consumer via crate-root re-export. |
+//! | REQ-5 (Backend trait delegation to tcp) | SHIPPED | `impl Backend for HybridBackend` in `hybrid_backend.rs` delegates all six methods to `self.tcp`; consumer is every `&dyn Backend`-accepting fn in `crate::collective::*` and `crate::p2p::*`. |
 
 use std::time::Duration;
 

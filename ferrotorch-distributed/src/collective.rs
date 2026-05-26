@@ -5,6 +5,22 @@
 //! (gather at rank 0, reduce, scatter) which is correct but not optimal.
 //! Ring-allreduce and tree-reduce can be layered in later without changing
 //! the public API.
+//!
+//! ## REQ status (per `.design/ferrotorch-distributed/collective.md`)
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 (ReduceOp enum) | SHIPPED | `pub enum ReduceOp { Sum, Mean }` in `collective.rs`; consumers `ddp.rs`, `fsdp.rs`, `sync_batch_norm.rs`, `dtensor.rs` (in `Placement::Partial`). |
+//! | REQ-2 (DEFAULT_COLLECTIVE_TIMEOUT) | SHIPPED | `pub const DEFAULT_COLLECTIVE_TIMEOUT` in `collective.rs`; consumer `p2p.rs` imports and uses inline. |
+//! | REQ-3 (allreduce) | SHIPPED | `pub fn allreduce` / `allreduce_with_timeout` in `collective.rs`; consumer `ddp.rs` invokes `allreduce` in the DDP backward hook. |
+//! | REQ-4 (broadcast) | SHIPPED | `pub fn broadcast` in `collective.rs`; consumer `gpu_collective.rs` imports `broadcast` and invokes it on the host fallback path. |
+//! | REQ-5 (all_gather) | SHIPPED | `pub fn all_gather` / `all_gather_with_timeout` in `collective.rs`; consumers `fsdp.rs` (forward all-gather), `async_collective.rs` (`async_all_gather` wraps it). |
+//! | REQ-6 (reduce_scatter) | SHIPPED | `pub fn reduce_scatter` / `reduce_scatter_with_timeout` in `collective.rs`; consumers `fsdp.rs` (backward reduce-scatter), `async_collective.rs` (`async_reduce_scatter` wraps it). |
+//! | REQ-7 (reduce_scatter_tensor) | SHIPPED | `pub fn reduce_scatter_tensor` alias in `collective.rs`; consumer crate-root re-export at `lib.rs` for user code. |
+//! | REQ-8 (all_to_all) | SHIPPED | `pub fn all_to_all` / `all_to_all_with_timeout` in `collective.rs`; consumer crate-root re-export at `lib.rs` (CL-460). |
+//! | REQ-9 (all_to_all_single_uneven) | SHIPPED | `pub fn all_to_all_single_uneven` in `collective.rs`; consumer crate-root re-export at `lib.rs`. |
+//! | REQ-10 (barrier) | SHIPPED | `pub fn barrier` in `collective.rs`; consumer crate-root re-export at `lib.rs` reached via `ferrotorch/src/lib.rs`. |
+//! | REQ-11 (byte helpers) | SHIPPED | `pub(crate) fn floats_to_bytes` / `pub(crate) fn bytes_to_floats` in `collective.rs`; consumer `p2p.rs` imports and calls both in `send` / `recv_*`. |
 
 use std::time::Duration;
 

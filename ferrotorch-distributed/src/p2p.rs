@@ -3,6 +3,17 @@
 //! [`Backend::send`] / [`Backend::recv`] operate on raw byte buffers; this
 //! module wraps them so the shape, dtype, and float semantics stay typed
 //! at the call site. Mirrors `torch.distributed.send` / `torch.distributed.recv`.
+//!
+//! ## REQ status (per `.design/ferrotorch-distributed/p2p.md`)
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 (send) | SHIPPED | `pub fn send<T: Float>` in `p2p.rs`; consumer `pub fn sendrecv` in same file invokes `send::<T>` (production use). |
+//! | REQ-2 (recv allocating) | SHIPPED | `pub fn recv<T: Float>` in `p2p.rs` delegating to `recv_with_timeout`; consumer `pub fn sendrecv` in same file invokes `recv::<T>` (production use). |
+//! | REQ-3 (recv_with_timeout) | SHIPPED | `pub fn recv_with_timeout<T: Float>` in `p2p.rs`; consumer `pub fn recv` in same file delegates to it. |
+//! | REQ-4 (recv_into) | SHIPPED | `pub fn recv_into<T: Float>` in `p2p.rs` delegating to `recv_into_with_timeout`; consumer crate-root re-export at `lib.rs`. |
+//! | REQ-5 (recv_into_with_timeout) | SHIPPED | `pub fn recv_into_with_timeout<T: Float>` in `p2p.rs`; consumer `pub fn recv_into` in same file delegates to it. |
+//! | REQ-6 (sendrecv) | SHIPPED | `pub fn sendrecv<T: Float>` in `p2p.rs` with deadlock-free rank ordering; consumer crate-root re-export at `lib.rs` reached via `ferrotorch/src/lib.rs`. |
 
 use std::time::Duration;
 

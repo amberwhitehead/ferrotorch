@@ -27,6 +27,18 @@
 //! to land in a compatible layout first. Most users invoke `redistribute`
 //! explicitly because there's no autograd-aware operator overload yet —
 //! that's a separate follow-up tied into the autograd graph rewrite.
+//!
+//! ## REQ status (per `.design/ferrotorch-distributed/dtensor.md`)
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 (Placement enum) | SHIPPED | `pub enum Placement { Replicate, Shard(usize), Partial(ReduceOp) }` in `dtensor.rs`; consumer `DTensor.placements: Vec<Placement>` field in same file. |
+//! | REQ-2 (placement predicates) | SHIPPED | `is_replicate` / `is_shard` / `is_partial` / `shard_dim` methods in `dtensor.rs`; consumer crate-root re-export via `Placement` at `lib.rs`. |
+//! | REQ-3 (DTensor struct) | SHIPPED | `pub struct DTensor<T: Float>` in `dtensor.rs`; consumer crate-root re-export at `lib.rs`, reached via `ferrotorch/src/lib.rs`. |
+//! | REQ-4 (from_local) | SHIPPED | `pub fn from_local` in `dtensor.rs` with placement-count / shard-dim validation; consumer `pub fn from_local_replicated` in same file invokes it. |
+//! | REQ-5 (from_local_replicated) | SHIPPED | `pub fn from_local_replicated` in `dtensor.rs`; consumer crate-root re-export via `DTensor` at `lib.rs`. |
+//! | REQ-6 (accessors) | SHIPPED | `pub fn to_local` / `pub fn shape` / `pub fn placements` / `pub fn mesh` / `pub fn numel` in `dtensor.rs`; consumer `numel` is called from `dtensor.rs` itself. |
+//! | REQ-7 (redistribute) | SHIPPED | `pub fn redistribute` in `dtensor.rs` with target-count / shard-dim validation; consumer crate-root re-export via `DTensor` at `lib.rs`. |
 
 use ferrotorch_core::dtype::Float;
 use ferrotorch_core::error::{FerrotorchError, FerrotorchResult};

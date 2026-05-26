@@ -14,6 +14,19 @@
 //! Sub-group / sub-backend creation is a separate concern handled by
 //! [`SubBackend`](crate::backend::SubBackend); this module is
 //! infrastructure-agnostic and just maintains the index math.
+//!
+//! ## REQ status (per `.design/ferrotorch-distributed/device_mesh.md`)
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 (DeviceMesh struct) | SHIPPED | `pub struct DeviceMesh { shape, dim_names }` in `device_mesh.rs`; consumer `dtensor.rs` stores `mesh: DeviceMesh` field on `DTensor`. |
+//! | REQ-2 (validating constructor) | SHIPPED | `pub fn new` in `device_mesh.rs` with three validation gates; consumer crate-root re-export at `lib.rs`. |
+//! | REQ-3 (new_with_names) | SHIPPED | `pub fn new_with_names` in `device_mesh.rs`; consumer crate-root re-export at `lib.rs`. |
+//! | REQ-4 (coords / rank_of) | SHIPPED | `pub fn coords` / `pub fn rank_of` in `device_mesh.rs`; consumer `pub fn ranks_along_dim` in same file calls both (production use). |
+//! | REQ-5 (ranks_along_dim) | SHIPPED | `pub fn ranks_along_dim` in `device_mesh.rs`; consumer `pub fn groups_along_dim` in same file invokes it. |
+//! | REQ-6 (groups_along_dim) | SHIPPED | `pub fn groups_along_dim` in `device_mesh.rs`; consumer crate-root re-export at `lib.rs` — boundary API for production training scripts building per-axis `SubBackend`s. |
+//! | REQ-7 (dim_index) | SHIPPED | `pub fn dim_index` in `device_mesh.rs`; consumer crate-root re-export at `lib.rs`. |
+//! | REQ-8 (accessors) | SHIPPED | `pub fn shape` / `pub fn dim_names` / `pub fn ndim` / `pub fn size` in `device_mesh.rs`; consumer `dtensor.rs` calls `mesh.ndim()` for placement-count validation. |
 
 use ferrotorch_core::{FerrotorchError, FerrotorchResult};
 

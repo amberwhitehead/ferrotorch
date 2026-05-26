@@ -7,6 +7,19 @@
 //! - [`TcpBackend`] — real multi-process backend over TCP sockets.
 //! - [`SimulatedBackend`] — in-process backend using channels, suitable
 //!   for unit tests without spawning multiple processes.
+//!
+//! ## REQ status (per `.design/ferrotorch-distributed/backend.md`)
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 (Backend trait) | SHIPPED | `pub trait Backend: Send + Sync` in `backend.rs`; consumers `collective.rs`, `p2p.rs`, `ddp.rs`, `fsdp.rs` all take `&dyn Backend`. |
+//! | REQ-2 (TcpBackend rendezvous) | SHIPPED | `pub struct TcpBackend` + `pub fn new` in `backend.rs`; consumer `hybrid_backend.rs` invokes `TcpBackend::new(rank, world_size, addr)`. |
+//! | REQ-3 (TcpBackend wire protocol) | SHIPPED | `impl Backend for TcpBackend` in `backend.rs` with length-prefix protocol; consumer `hybrid_backend.rs` delegates all P2P methods to inner TcpBackend. |
+//! | REQ-4 (SimulatedBackend channel matrix) | SHIPPED | `pub struct SimulatedBackend` + `create_group` in `backend.rs`; consumer crate-root re-export at `lib.rs`. |
+//! | REQ-5 (SimulatedBackend Backend impl) | SHIPPED | `impl Backend for SimulatedBackend` in `backend.rs`; consumer re-export at `lib.rs`. |
+//! | REQ-6 (SubBackend struct) | SHIPPED | `pub struct SubBackend` + `pub fn new` in `backend.rs`; consumer re-export at `lib.rs`. |
+//! | REQ-7 (SubBackend Backend impl) | SHIPPED | `impl Backend for SubBackend` in `backend.rs`; consumer re-export at `lib.rs` reached via `ferrotorch/src/lib.rs`. |
+//! | REQ-8 (barrier across all three backends) | SHIPPED | barrier methods in `backend.rs` for TcpBackend / SimulatedBackend / SubBackend; consumer `pub fn barrier` in `collective.rs`. |
 
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};

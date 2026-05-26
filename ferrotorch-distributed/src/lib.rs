@@ -168,6 +168,15 @@
 //! use ferrotorch_distributed::rpc::{RpcContext, SimulatedRpcBackend};
 //! use ferrotorch_distributed::pipeline::{Pipeline, PipelineStage, PipelineSchedule};
 //! ```
+//!
+//! ## REQ status (per `.design/ferrotorch-distributed/lib.md`)
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 (lint baseline) | SHIPPED | `#![warn(clippy::all, clippy::pedantic)]` / `#![deny(rust_2018_idioms)]` at top of `lib.rs`; consumers: every other `.rs` file in the crate inherits the policy and `cargo clippy -- -D warnings` is green. |
+//! | REQ-2 (module surface) | SHIPPED | `pub mod` block in `lib.rs` declares 16 unconditional + 5 feature-gated modules; consumers: every sibling `crate::<mod>::` path. |
+//! | REQ-3 (re-exports) | SHIPPED | `pub use` block in `lib.rs` re-exports 35 symbols from 10 submodules; consumer `ferrotorch/src/lib.rs` (`pub use ferrotorch_distributed::*;`). |
+//! | REQ-4 (crate-level docs) | SHIPPED | `//!` block in `lib.rs` enumerates every subsystem with rustdoc links; consumer `cargo doc -p ferrotorch-distributed` landing page. |
 
 pub mod async_collective;
 pub mod backend;
