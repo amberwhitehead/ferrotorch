@@ -5,6 +5,20 @@
 //! input/output value list. Optimisation passes ([`mod@crate::optimize`],
 //! [`mod@crate::fusion`]) and the lowering path to
 //! [`mod@crate::codegen_ir`] consume this representation.
+//!
+//! ## REQ status (per `.design/ferrotorch-jit/graph.md`)
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 | SHIPPED | `pub struct IrValueId(pub usize)` and `pub struct IrNodeId(pub usize)` in `graph.rs`; consumer: `optimize.rs:10` + 7 modules import these ids |
+//! | REQ-2 | SHIPPED | `pub enum IrOpKind` in `graph.rs`; consumer: `trace.rs:15`, `optimize.rs:10`, `aot_autograd.rs:18` import it; `graph_break.rs`, `interpreter.rs` match on variants |
+//! | REQ-3 | SHIPPED | `pub enum Dtype` + `name` + `from_type_name` in `graph.rs`; consumer: `trace.rs:237-245` resolves trace dtype from `std::any::type_name::<T>()` |
+//! | REQ-4 | SHIPPED | `#[non_exhaustive] pub struct IrValue { id, shape, producer, dtype }` in `graph.rs`; consumer: `optimize.rs`, `interpreter.rs`, `codegen_*.rs` read `.shape` and `.dtype` |
+//! | REQ-5 | SHIPPED | `#[non_exhaustive] pub struct IrNode { id, op, inputs, outputs }` in `graph.rs`; consumer: `optimize.rs`, `interpreter.rs`, `codegen.rs` traverse `IrGraph::nodes` |
+//! | REQ-6 | SHIPPED | `pub struct IrGraph` + builder methods in `graph.rs`; consumer: production code in `trace.rs`, `graph_break.rs`, `aot_autograd.rs` builds graphs through these |
+//! | REQ-7 | SHIPPED | `pub fn topological_order` in `graph.rs`; consumer: `interpreter.rs` walks nodes in topo order; `optimize.rs` + `fusion.rs` schedule by it |
+//! | REQ-8 | SHIPPED | `pub fn fingerprint` with `cached_fingerprint: OnceLock<u64>` in `graph.rs`; consumer: `autotune.rs:57` imports `IrGraph` and keys cache by `fingerprint()` (audit #1128) |
+//! | REQ-9 | SHIPPED | `pub fn add_input` / `add_input_with_dtype` / `add_constant` / `add_constant_with_dtype` / `add_node` / `add_node_with_dtype` in `graph.rs`; consumer: `trace.rs` builds graphs through the dtype-aware constructors |
 
 use std::hash::{Hash, Hasher};
 use std::sync::OnceLock;

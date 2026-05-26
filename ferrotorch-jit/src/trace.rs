@@ -5,6 +5,15 @@
 //! The user-provided function executes normally, building an autograd graph.
 //! We then traverse that graph from the output tensor back to the leaf inputs
 //! and emit one [`crate::graph::IrNode`] per operation.
+//!
+//! ## REQ status (per `.design/ferrotorch-jit/trace.md`)
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 | SHIPPED | `pub fn trace<T, F>` in `trace.rs`; consumer: `module.rs:276` `compile` calls `trace(f, example_inputs)?`; `symbolic.rs:66`, `aot_autograd.rs:466`, `export.rs:21` |
+//! | REQ-2 | SHIPPED | `Dtype::from_type_name(std::any::type_name::<T>())` check in `trace.rs` (~L237); consumer: every call site monomorphises `T` and the check fails fast on non-f32/f64 |
+//! | REQ-3 | SHIPPED | `output.grad_fn().ok_or_else(...)` guard in `trace.rs`; consumer: `module.rs:276` and `symbolic.rs:404` rely on this error surface |
+//! | REQ-4 | SHIPPED | `map_name_to_op` table in `trace.rs`; consumer: comment at `graph_break.rs:35` and `:600` pins this as the canonical source kept in sync with `KNOWN_OP_NAMES` |
 
 use std::collections::{HashMap, VecDeque};
 

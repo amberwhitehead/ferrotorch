@@ -14,6 +14,16 @@
 //! Both callers previously inlined an `nvrtc::compile_ptx_with_opts`
 //! invocation with the same `#include <math.h>`-strip + `extern "C"`-rewrite
 //! preprocessing; this module is the single shared implementation.
+//!
+//! ## REQ status (per `.design/ferrotorch-jit/nvrtc.md`)
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 | SHIPPED | `pub fn compile_cuda_source_to_ptx` in `nvrtc.rs` (both cuda and stub); consumer: `codegen_gpu.rs:1237` and `fusion_gpu.rs:197` |
+//! | REQ-2 | SHIPPED | `.lines().filter(|l| !l.trim().starts_with("#include <math.h>"))` in `nvrtc.rs`; consumer: every NVRTC invocation from the two call sites |
+//! | REQ-3 | SHIPPED | `if l.starts_with("__global__ void ")` rewrite in `nvrtc.rs`; consumer: same call sites — cudarc's `cuModuleGetFunction` keys on unmangled name |
+//! | REQ-4 | SHIPPED | `CompileOptions { arch: Some("compute_75"), ..Default::default() }` in `nvrtc.rs`; consumer: every PTX produced for `codegen_gpu` and `fusion_gpu` |
+//! | REQ-5 | SHIPPED | `#[cfg(not(feature = "cuda"))] pub fn compile_cuda_source_to_ptx -> Err(JitError::CodegenError)` stub in `nvrtc.rs`; consumer: `codegen_gpu.rs:1237` compiles under both configs |
 
 use crate::error::JitError;
 

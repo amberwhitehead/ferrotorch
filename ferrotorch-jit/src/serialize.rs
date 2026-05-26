@@ -25,6 +25,17 @@
 //! - **v2** — adds a single dtype tag byte after each value's `producer`
 //!   field (`0` = `F32`, `1` = `F64`). All other fields are unchanged
 //!   relative to v1.
+//!
+//! ## REQ status (per `.design/ferrotorch-jit/serialize.md`)
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 | SHIPPED | `impl IrGraph { pub fn serialize, pub fn deserialize }` in `serialize.rs`; consumer: `module.rs:146` `to_bytes` calls `self.graph.serialize()`; `module.rs:152` `from_bytes` calls `IrGraph::deserialize(data)?` |
+//! | REQ-2 | SHIPPED | `b"FTIR"` magic + version `u32` LE write/check in `serialize.rs`; consumer: every `TracedModule::to_bytes`/`from_bytes` round-trip |
+//! | REQ-3 | SHIPPED | Writer/Reader helper sequence in `serialize.rs::serialize`+`deserialize`; consumer: `module.rs:146` and `export.rs:260-407` production callers |
+//! | REQ-4 | SHIPPED | v2 dtype tag byte after each value's `producer` field; v1-compat default-to-F32 path in `deserialize`; consumer: every `IrGraph::deserialize` call in `module.rs` and `export.rs` |
+//! | REQ-5 | SHIPPED | little-endian writes throughout `serialize.rs`; deterministic walk over `self.values` / `self.nodes`; consumer: `module.rs:146` |
+//! | REQ-6 | SHIPPED | private `Writer` and `Reader<'a>` structs in `serialize.rs:120-180`; consumer: `serialize` and `deserialize` use them |
 
 use ferrotorch_core::error::{FerrotorchError, FerrotorchResult};
 

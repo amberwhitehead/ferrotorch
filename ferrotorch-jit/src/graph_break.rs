@@ -11,6 +11,17 @@
 //!
 //! When [`CompileConfig::fullgraph`] is `true`, graph breaks are rejected
 //! with [`JitError::GraphBreak`] rather than producing a segmented module.
+//!
+//! ## REQ status (per `.design/ferrotorch-jit/graph_break.md`)
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 | SHIPPED | `pub enum GraphSegment<T: Float>` in `graph_break.rs`; consumer: `SegmentedModule<T>` holds `Vec<GraphSegment<T>>`; `forward` dispatches on the variant |
+//! | REQ-2 | SHIPPED | `pub struct SegmentedModule<T: Float>` + `new` + `forward` in `graph_break.rs`; consumer: `pub fn trace_with_breaks` returns it inside `TraceResult::Segmented` |
+//! | REQ-3 | SHIPPED | `pub fn segment_count` + `segments` + `is_fully_compiled` in `graph_break.rs`; consumer: re-export at `lib.rs:108` |
+//! | REQ-4 | SHIPPED | `pub enum TraceResult<T: Float>` in `graph_break.rs`; consumer: `pub fn trace_with_breaks` return type |
+//! | REQ-5 | SHIPPED | `pub fn trace_with_breaks<T, F>` in `graph_break.rs`; consumer: re-export at `lib.rs:108` |
+//! | REQ-6 | SHIPPED | `KNOWN_OP_NAMES` / `map_name_to_op_kind` in `graph_break.rs` (mirrors `trace::map_name_to_op` per `:35` and `:600`); consumer: `trace_with_breaks` consults it during autograd walk |
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;

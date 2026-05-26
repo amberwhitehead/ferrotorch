@@ -54,6 +54,18 @@
 //! the shape conflict.
 //!
 //! CL-367.
+//!
+//! ## REQ status (per `.design/ferrotorch-jit/symbolic.md`)
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 | SHIPPED | `pub struct ShapeSignature` + `symbolic_dim` / `symbolic_dim_with_range` in `symbolic.rs`; consumer: `pub fn compile_symbolic` accepts it |
+//! | REQ-2 | SHIPPED | `pub struct SymbolicDim` in `symbolic.rs`; consumer: held inside `ShapeSignature` and `Guard` |
+//! | REQ-3 | SHIPPED | `pub struct Guard` + `new` + `check` in `symbolic.rs`; consumer: `SymbolicTracedModule::forward_symbolic` calls `self.guard.check(...)` at `symbolic.rs:312` |
+//! | REQ-4 | SHIPPED | the four-clause match in `Guard::check` (input count, rank, static match, range); consumer: `SymbolicTracedModule::forward_symbolic` |
+//! | REQ-5 | SHIPPED | `pub struct SymbolicTracedModule<T>` + `new` + `forward_symbolic` in `symbolic.rs`; consumer: re-export at `lib.rs:113` |
+//! | REQ-6 | SHIPPED | `pub fn patch_reshape_for_symbolic_dims` in `symbolic.rs`; consumer: `compile_symbolic` invokes it |
+//! | REQ-7 | SHIPPED | `pub fn compile_symbolic<T, F>` in `symbolic.rs`; consumer: re-export at `lib.rs:113` |
 
 use ferrotorch_core::dtype::Float;
 use ferrotorch_core::error::{FerrotorchError, FerrotorchResult};

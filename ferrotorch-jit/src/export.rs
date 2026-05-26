@@ -9,6 +9,21 @@
 //!   receives `inputs[0]` as its sole argument. If `example_inputs` contains
 //!   more than one tensor, an error is returned. Multi-input support requires
 //!   a different module forward signature (future work).
+//!
+//! ## REQ status (per `.design/ferrotorch-jit/export.md`)
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 | SHIPPED | `pub enum DimSpec` + `dynamic` / `dynamic_range` / `is_dynamic` in `export.rs`; consumer: `ferrotorch-serialize/src/onnx_export.rs:805` matches on `DimSpec::Dynamic` |
+//! | REQ-2 | SHIPPED | `pub struct InputSpec` + `new` / `all_static` / `has_dynamic_dims` / `rank` in `export.rs`; consumer: `ExportedProgram::input_specs` field consumed by `run_with_guards` and `ferrotorch-serialize` |
+//! | REQ-3 | SHIPPED | `pub struct ExportedProgram { graph, state_dict, input_shapes, input_specs, output_shape }` in `export.rs`; consumer: `ferrotorch-serialize/src/onnx_export.rs:1150` |
+//! | REQ-4 | SHIPPED | `pub fn run` + `pub fn run_with_guards` on `ExportedProgram` in `export.rs`; consumer: re-export at `lib.rs:100`; ONNX export round-trips through `.run` |
+//! | REQ-5 | SHIPPED | `pub fn check_inputs` in `export.rs`; consumer: `run_with_guards` invokes it |
+//! | REQ-6 | SHIPPED | `pub fn serialize` + `pub fn deserialize` on `ExportedProgram` in `export.rs`; consumer: `save` / `load` invoke them |
+//! | REQ-7 | SHIPPED | `pub fn save` + `pub fn load` in `export.rs`; consumer: re-export at `lib.rs:100` |
+//! | REQ-8 | SHIPPED | `pub fn to_json` + `pub fn parse_json_metadata` in `export.rs`; consumer: re-export at `lib.rs:100` |
+//! | REQ-9 | SHIPPED | `pub fn export<T, M: Module<T>>` in `export.rs`; consumer: re-export at `lib.rs:100`; `ferrotorch-serialize::export_from_program` consumes the path |
+//! | REQ-10 | SHIPPED | `pub fn export_with_dynamic_shapes<T, M>` in `export.rs`; consumer: re-export at `lib.rs:100`; `ferrotorch-serialize/src/onnx_export.rs:800-807` builds `OnnxDimSpec::Dynamic` from the resulting `input_specs` |
 
 use std::collections::HashMap;
 

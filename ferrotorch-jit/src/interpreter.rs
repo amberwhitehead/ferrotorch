@@ -6,6 +6,16 @@
 //! (or non-differentiable) operation in ferrotorch-core. The interpreter is
 //! useful for correctness testing, debugging, and as a baseline before a
 //! compiled backend is available.
+//!
+//! ## REQ status (per `.design/ferrotorch-jit/interpreter.md`)
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 | SHIPPED | `pub fn interpret<T: Float>` in `interpreter.rs`; consumer: `module.rs:125, 198, 397`; `symbolic.rs:315`; `export.rs:162` |
+//! | REQ-2 | SHIPPED | `pub fn interpret_multi<T: Float>` in `interpreter.rs`; consumer: re-export at `lib.rs:109` |
+//! | REQ-3 | SHIPPED | `pub fn interpret_multi_with_captures<T: Float>` in `interpreter.rs`; consumer: `module.rs:363` `AotCompiledModule::forward_with_ctx` (audit #1110 finding-A fix) |
+//! | REQ-4 | SHIPPED | `match node.op` dispatch arm-set in `interpreter.rs` covers every `IrOpKind` variant; consumer: every interpreter call site |
+//! | REQ-5 | SHIPPED | trace -> interpret round-trip is `module::compile`'s strategy; consumer: `module.rs:276-280` traces then optimises then wraps; tests in `module.rs` verify within 1e-5 |
 
 use std::collections::HashMap;
 

@@ -4,6 +4,20 @@
 //! standard [`Module`] trait so that it can be used interchangeably with eager
 //! modules. The [`compile`] function provides a one-call trace-and-optimize
 //! pipeline analogous to `torch.compile(model)`.
+//!
+//! ## REQ status (per `.design/ferrotorch-jit/module.md`)
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 | SHIPPED | `pub struct CompileConfig` in `module.rs`; consumer: re-export at `lib.rs:111` |
+//! | REQ-2 | SHIPPED | `pub struct TracedModule<T>` + `impl<T: Float> Module<T>` in `module.rs`; consumer: `graph_break.rs:472, 507` constructs `TracedModule::new(optimized)`; `symbolic.rs:64` wraps it |
+//! | REQ-3 | SHIPPED | `pub fn forward_multi` + `Module<T>::forward` in `module.rs`; consumer: `symbolic.rs:315` `forward_symbolic` invokes `interpret(self.inner.graph(), inputs)` |
+//! | REQ-4 | SHIPPED | `pub struct AotCompiledModule<T>` + `pub fn new` in `module.rs`; consumer: re-export at `lib.rs:111` — public return of `aot_autograd::compile_aot` |
+//! | REQ-5 | SHIPPED | `pub fn forward_with_ctx` in `module.rs` (calls `interpret_multi_with_captures`); consumer: re-export at `lib.rs:111` |
+//! | REQ-6 | SHIPPED | `pub fn backward` in `module.rs`; consumer: re-export at `lib.rs:111` |
+//! | REQ-7 | SHIPPED | `pub fn compile<T, F>` in `module.rs`; consumer: re-export at `lib.rs:111` |
+//! | REQ-8 | SHIPPED | `pub fn compile_with_config<T, F>` in `module.rs`; consumer: re-export at `lib.rs:111` |
+//! | REQ-9 | SHIPPED | `pub fn to_bytes` / `from_bytes` / `save` / `load` in `module.rs`; consumer: re-export at `lib.rs:111`; uses `IrGraph::serialize` / `deserialize` from `serialize.rs:431-491` |
 
 use ferrotorch_core::dtype::Float;
 use ferrotorch_core::error::{FerrotorchError, FerrotorchResult};

@@ -11,6 +11,16 @@
 //!
 //! Together these enable ahead-of-time compilation of both the forward and
 //! backward passes, avoiding the overhead of tracing the backward at runtime.
+//!
+//! ## REQ status (per `.design/ferrotorch-jit/aot_autograd.md`)
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 | SHIPPED | `pub struct AotGraphPair { forward, backward, saved_tensor_indices }` in `aot_autograd.rs`; consumer: `pub fn compile_aot` returns it internally and `module.rs:998-1014` constructs `AotCompiledModule::new` from its fields |
+//! | REQ-2 | SHIPPED | `pub fn decompose_forward_backward` in `aot_autograd.rs`; consumer: `pub fn compile_aot` invokes it |
+//! | REQ-3 | SHIPPED | per-op-rule match body in `decompose_forward_backward` augments forward outputs aligned to `saved_tensor_indices`; consumer: `module.rs:355-380` calls `interpret_multi_with_captures(&self.forward_graph, inputs, &self.saved_tensor_indices)` |
+//! | REQ-4 | SHIPPED | input-binding logic in `decompose_forward_backward` (saved -> grad_output); consumer: `module.rs:392-398` `AotCompiledModule::backward` builds `[saved..., grad_output]` |
+//! | REQ-5 | SHIPPED | `pub fn compile_aot<T, F>` in `aot_autograd.rs`; consumer: re-export at `lib.rs:87` |
 
 use std::collections::BTreeSet;
 

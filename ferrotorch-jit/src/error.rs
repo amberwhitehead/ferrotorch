@@ -4,6 +4,16 @@
 //! specific to the JIT compilation pipeline. [`JitError`] converts into
 //! [`FerrotorchError`] via the `From` impl so it integrates seamlessly with
 //! the rest of the crate's error handling.
+//!
+//! ## REQ status (per `.design/ferrotorch-jit/error.md`)
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 | SHIPPED | `#[derive(Debug, thiserror::Error)] #[non_exhaustive] pub enum JitError` in `error.rs`; consumer: 42 `JitError::...` constructor sites across the crate |
+//! | REQ-2 | SHIPPED | all 12 variants (`TracingError` / `DataDependentControlFlow` / `UnsupportedOp` / `ShapeMismatch` / `CodegenError` / `SerializationError` / `GraphBreak` / `ExportError` / `ParameterError` / `RecompilationError` / `GpuBackendUnavailable` / `Unsupported`) in `error.rs`; consumer: each is constructed at one or more sites in `codegen_*.rs`, `fusion*.rs`, `interpreter.rs`, `nvrtc.rs`, `graph_break.rs`, `export.rs` |
+//! | REQ-3 | SHIPPED | per-variant struct payload (`DataDependentControlFlow { op }`, `ShapeMismatch { traced, actual }`, `Unsupported { op, dtype }`, ...) in `error.rs`; consumer: matching field-init at each construction site |
+//! | REQ-4 | SHIPPED | `impl From<JitError> for FerrotorchError` in `error.rs`; consumer: every `?` in `module.rs`/`trace.rs`/`export.rs` that converts a JitError |
+//! | REQ-5 | SHIPPED | per-variant rustdoc verified by `#![deny(missing_docs)]`; consumer: `cargo doc -p ferrotorch-jit --no-deps` renders the variants |
 
 use ferrotorch_core::error::FerrotorchError;
 
