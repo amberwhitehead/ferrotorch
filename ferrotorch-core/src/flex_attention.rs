@@ -21,6 +21,17 @@
 //! a fresh tensor without requires_grad), gradients will not flow back into
 //! its inputs — but Q/K/V gradients will still be correct relative to the
 //! modified scores.
+//!
+//! ## REQ status (per `.design/ferrotorch-core/flex_attention.md`)
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 | SHIPPED | `flex_attention` at `flex_attention.rs:81`; consumer: re-export `ferrotorch_core::flex_attention` at `lib.rs:157` |
+//! | REQ-2 | SHIPPED | `score_mod: Option<F>` param at `flex_attention.rs:85`; consumer: re-export at `lib.rs:157` |
+//! | REQ-3 | SHIPPED | shape + device validation at `flex_attention.rs:91-141`; consumer: `flex_attention` entry |
+//! | REQ-4 | SHIPPED | GPU-aware composition at `flex_attention.rs:167-259`; consumer: re-export. Parity-sweep runner gap #1532 |
+//! | REQ-5 | SHIPPED | no custom backward — autograd composition; consumer: re-export. Grad-propagation test at `flex_attention.rs:440` |
+//! | REQ-6 | SHIPPED | `d == 0` check at `flex_attention.rs:113-117`; consumer: `flex_attention` entry |
 
 use crate::dtype::Float;
 use crate::error::{FerrotorchError, FerrotorchResult};

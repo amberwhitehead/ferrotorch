@@ -1,4 +1,16 @@
 //! Display formatting for Tensor, matching PyTorch's output style.
+//!
+//! ## REQ status (per `.design/ferrotorch-core/display.md`)
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 | SHIPPED | 0-D branch at `display.rs:18-30`; consumer: every `format!("{t}")` call site |
+//! | REQ-2 | SHIPPED | 1-D branch at `display.rs:33-60`; consumer: production `format!` machinery |
+//! | REQ-3 | SHIPPED | 2-D branch at `display.rs:62-116`; consumer: production `format!` machinery |
+//! | REQ-4 | SHIPPED | 3-D+ summary branch at `display.rs:118-128`; consumer: production `format!` (R-DEV-7 deviation: torch recursively renders all dims) |
+//! | REQ-5 | SHIPPED | suffix logic at `display.rs:24-28,131-135`; consumer: every autograd-graph debug print |
+//! | REQ-6 | SHIPPED | `self.data_vec()` at `display.rs:12`; consumer: every CUDA / non-contiguous tensor printed |
+//! | REQ-7 | SHIPPED | `Err` arm at `display.rs:14`; consumer: every meta-tensor printed in shape-inference |
 
 use std::fmt;
 

@@ -16,6 +16,17 @@
 //! Axes present on the left but absent on the right are reduced (for `reduce`)
 //! or must be size-1 (for `rearrange`). Axes present on the right but absent
 //! on the left are new axes (for `repeat`).
+//!
+//! ## REQ status (per `.design/ferrotorch-core/einops.md`)
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 | SHIPPED | `rearrange` at `einops.rs:458`; consumer: re-export at `lib.rs:143` |
+//! | REQ-2 | SHIPPED | `rearrange_with` at `einops.rs:482`; consumer: re-export at `lib.rs:143` |
+//! | REQ-3 | SHIPPED | `repeat` at `einops.rs:589`; consumer: re-export at `lib.rs:143` |
+//! | REQ-4 | SHIPPED | `reduce` + `EinopsReduction` at `einops.rs:665,33`; consumer: re-export at `lib.rs:143` |
+//! | REQ-5 | SHIPPED | `parse_pattern`/`parse_side`/`read_axis_name` at `einops.rs:79-195`; consumer: every public API invokes `parse_pattern` first |
+//! | REQ-6 | SHIPPED | `resolve_sizes` at `einops.rs:211`; consumer: every public API after `parse_pattern` |
 
 use std::collections::HashMap;
 

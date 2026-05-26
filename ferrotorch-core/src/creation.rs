@@ -1,3 +1,18 @@
+//! Module doc — REQ status table follows.
+//!
+//! ## REQ status (per `.design/ferrotorch-core/creation.md`)
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 | SHIPPED | `zeros`/`ones`/`full` at `creation.rs:7,14,21`; consumer: `stride_tricks::AsStridedBackward::backward` at `stride_tricks.rs:366` |
+//! | REQ-2 | SHIPPED | `from_slice`/`from_vec`/`tensor`/`scalar` at `creation.rs:28-46`; consumer: `flex_attention` at `flex_attention.rs:183`, `einops::reduce` at `einops.rs:790` |
+//! | REQ-3 | SHIPPED | `eye` at `creation.rs:49`; consumer: re-export at `lib.rs:138` |
+//! | REQ-4 | SHIPPED | `arange` at `creation.rs:58`; consumer: re-export at `lib.rs:138` |
+//! | REQ-5 | SHIPPED | `linspace` at `creation.rs:81`; consumer: re-export at `lib.rs:138` |
+//! | REQ-6 | SHIPPED | `rand`/`randn` at `creation.rs:112,145`; consumer: `autograd::grad_penalty::grad_penalty` at `grad_penalty.rs:81`. Prereq blocker #1537 tracks `torch.manual_seed` |
+//! | REQ-7 | SHIPPED | `*_like` family at `creation.rs:288-314`; consumer: `grad_fns::cumulative` at `cumulative.rs:501` |
+//! | REQ-8 | SHIPPED | `zeros_meta`/`ones_meta`/`full_meta`/`meta_like` at `creation.rs:253-289`; consumer: `tensor::Tensor::meta_fill_value` at `tensor.rs:1078` (CL-395) |
+
 use crate::dtype::Float;
 use crate::error::FerrotorchResult;
 use crate::storage::TensorStorage;

@@ -20,6 +20,18 @@
 //! download data through host. A future GPU `MaskedTensor` would lower
 //! reductions to existing kernels (`gpu_softmax_into` + `where_cond`,
 //! `masked_select`, etc.) and stays a separate concern (#569 follow-up).
+//!
+//! ## REQ status (per `.design/ferrotorch-core/masked.md`)
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 | SHIPPED | `MaskedTensor::new` at `masked.rs:60`; consumer: re-export `ferrotorch_core::MaskedTensor` at `lib.rs:167` |
+//! | REQ-2 | SHIPPED | `MaskedTensor::from_data` at `masked.rs:78`; consumer: re-export at `lib.rs:167` |
+//! | REQ-3 | SHIPPED | `with_fill_value` at `masked.rs:84`; consumer: re-export at `lib.rs:167` |
+//! | REQ-4 | SHIPPED | `filled`/`to_tensor` at `masked.rs:131,143`; consumer: re-export at `lib.rs:167` |
+//! | REQ-5 | SHIPPED | `masked_sum`/`masked_mean`/`masked_min`/`masked_max`/`masked_count` at `masked.rs:200,275,322,330,419`; consumer: re-export at `lib.rs:167-170` |
+//! | REQ-6 | SHIPPED | `masked_where`/`masked_invalid`/`masked_equal` at `masked.rs:435,453,472`; consumer: re-export at `lib.rs:167-170`. GPU blocker #1534 |
+//! | REQ-7 | SHIPPED | `to_ferray` at `masked.rs:165`; consumer: `to_ferray_round_trip_mean_matches_inhouse` pins the bridge |
 
 use ferray_core::{Array as FerrayArray, IxDyn as FerrayIxDyn};
 use ferray_ma::masked_array::MaskedArray;

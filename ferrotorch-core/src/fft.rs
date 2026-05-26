@@ -18,6 +18,20 @@
 //! No cuFFT path exists yet. Functions in this module reject GPU tensors
 //! with [`FerrotorchError::NotImplementedOnCuda`]. They never silently
 //! move a CUDA tensor through host memory.
+//!
+//! ## REQ status (per `.design/ferrotorch-core/fft.md`)
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 | SHIPPED | `fft` at `fft.rs:108`; consumer: `ComplexTensor::fft` at `complex_tensor.rs:329` |
+//! | REQ-2 | SHIPPED | `ifft` at `fft.rs:200`; consumer: `ComplexTensor::ifft` at `complex_tensor.rs:336` |
+//! | REQ-3 | SHIPPED | `rfft`/`irfft` at `fft.rs:289,370`; consumer: `grad_fns::fft::rfft_differentiable` |
+//! | REQ-4 | SHIPPED | `fft2`/`ifft2` at `fft.rs:472,516`; consumer: `ComplexTensor::fft2`/`ifft2` at `complex_tensor.rs:343,350` |
+//! | REQ-5 | SHIPPED | `fftn`/`ifftn`/`rfftn`/`irfftn` at `fft.rs:735,848,948,967`; consumer: re-export at `lib.rs:153-155` |
+//! | REQ-6 | SHIPPED | `hfft`/`ihfft` at `fft.rs:1000,1048`; consumer: re-export at `lib.rs:154` |
+//! | REQ-7 | SHIPPED | `fftfreq`/`rfftfreq` at `fft.rs:1093,1105`; consumer: re-export at `lib.rs:153-155` |
+//! | REQ-8 | SHIPPED | `fftshift`/`ifftshift` at `fft.rs:1122,1141`; consumer: re-export at `lib.rs:153-155` |
+//! | REQ-9 | SHIPPED | cuFFT dispatch at `fft.rs:139-169,229-258`; consumer: `ComplexTensor::fft` at `complex_tensor.rs:329`. bf16/f16 GPU blocker #1536 |
 
 use ferray_core::Array as FerrayArray;
 use ferray_core::IxDyn as FerrayIxDyn;

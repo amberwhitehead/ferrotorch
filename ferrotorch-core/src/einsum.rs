@@ -46,6 +46,18 @@
 //! whose decomposition cannot be expressed through this route (e.g.
 //! diagonal+contract combos with repeated input indices on a 2-input
 //! equation) still return `Err(NotImplementedOnCuda)`.
+//!
+//! ## REQ status (per `.design/ferrotorch-core/einsum.md`)
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 | SHIPPED | `einsum` at `einsum.rs:1517`; consumer: `Tensor::einsum` at `methods.rs:638` invokes `einsum_differentiable` |
+//! | REQ-2 | SHIPPED | `parse_equation` at `einsum.rs:72`; consumer: every `einsum` call |
+//! | REQ-3 | SHIPPED | `einsum_single` referenced at `einsum.rs:1531`; consumer: `Tensor::einsum` at `methods.rs:638` |
+//! | REQ-4 | SHIPPED | `einsum_two` referenced at `einsum.rs:1532`; consumer: `Tensor::einsum` at `methods.rs:638` |
+//! | REQ-5 | SHIPPED | `einsum_differentiable` at `einsum.rs:1543`; consumer: `Tensor::einsum` at `methods.rs:641` |
+//! | REQ-6 | SHIPPED | `build_dim_map` at `einsum.rs:149`; consumer: every `einsum` call |
+//! | REQ-7 | SHIPPED | documented in `//!` at `einsum.rs:8-24`; parity-sweep runner gap tracked by #1532 |
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
