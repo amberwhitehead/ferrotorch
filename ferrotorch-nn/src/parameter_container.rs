@@ -3,6 +3,21 @@
 //! These hold parameters that should be registered with a module's
 //! `parameters()` method, similar to PyTorch's `nn.ParameterList` and
 //! `nn.ParameterDict`.
+//!
+//! ## REQ status (per `.design/ferrotorch-nn/parameter_container.md`)
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 | SHIPPED | `pub struct ParameterList<T: Float>` with `params: Vec<Parameter<T>>` mirrors `torch.nn.ParameterList` from `torch/nn/modules/container.py`; consumed by `pub use parameter_container::{ParameterDict, ParameterList}` at `lib.rs:236` (grandfathered public API per S5; downstream MoE / variable-length-head model authors use it). |
+//! | REQ-2 | SHIPPED | `::new`, `::from_vec`, `append`, `extend`, `len`, `is_empty`, `get`, `get_mut`, `iter`, `iter_mut` inherent methods; consumed by builder-pattern downstream model construction via the re-export. |
+//! | REQ-3 | SHIPPED | `parameters` / `parameters_mut` / `named_parameters` (keys `"0"`, `"1"`, …); consumed by parent `Module<T>` impls in downstream crates flat-mapping `param_list.parameters()`. |
+//! | REQ-4 | SHIPPED | `Index<usize>` + `IndexMut<usize>` for `list[i]` syntax mirroring upstream `ParameterList[i]`; consumed by downstream model construction. |
+//! | REQ-5 | SHIPPED | `impl Default for ParameterList`; consumed by parent modules that derive `Default` over a ParameterList field. |
+//! | REQ-6 | SHIPPED | `pub struct ParameterDict<T: Float>` with `BTreeMap<String, Parameter<T>>` (R-DEV-7 deviation for deterministic ordering); consumed by `lib.rs:236` re-export and downstream named-parameter-group code. |
+//! | REQ-7 | SHIPPED | `new`, `insert`, `get`, `get_mut`, `remove`, `contains_key`, `len`, `is_empty`, `keys` methods; consumed by downstream per-layer named parameter group construction. |
+//! | REQ-8 | SHIPPED | `parameters` / `parameters_mut` / `named_parameters` (sorted-key order); consumed by parent `Module<T>` impls in downstream crates. |
+//! | REQ-9 | SHIPPED | `impl Default for ParameterDict`; consumed by parent modules deriving `Default` over a ParameterDict field. |
+//! | REQ-10 | SHIPPED | `#[derive(Debug)]` on both containers; consumed by parent modules deriving `Debug` over either container. |
 
 use std::collections::BTreeMap;
 

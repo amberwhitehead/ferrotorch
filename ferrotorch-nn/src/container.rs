@@ -3,6 +3,23 @@
 //! These mirror PyTorch's `nn.Sequential`, `nn.ModuleList`, and
 //! `nn.ModuleDict`. They hold sub-modules and propagate `parameters()`,
 //! `train()`/`eval()`, and `state_dict()` to all children.
+//!
+//! ## REQ status (per `.design/ferrotorch-nn/container.md`)
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 | SHIPPED | `pub struct Sequential<T: Float>` with `layers: Vec<Box<dyn Module<T>>>` mirrors `torch/nn/modules/container.py:59-333`; consumed by `pub use container::{ModuleDict, ModuleList, Sequential}` at `lib.rs:195` and downstream MLP/CNN composition code. |
+//! | REQ-2 | SHIPPED | `Sequential::new(layers)` constructor mirrors `torch/nn/modules/container.py:108-122`; consumed by every downstream model composition site. |
+//! | REQ-3 | SHIPPED | `push`, `len`, `is_empty` inherent methods mirror `nn.Sequential.append` (`container.py:256-275`); consumed by builder-pattern model construction in downstream crates. |
+//! | REQ-4 | SHIPPED | `impl Module<T> for Sequential<T>` with chained forward, flat-mapped parameter iteration, indexed `named_parameters` mirrors `container.py:117-122, 248-254`; consumed by `optimizer.parameters()` flow and `ferrotorch-nn/src/transformer.rs` composing layers through `Box<dyn Module<T>>`. |
+//! | REQ-5 | SHIPPED | `pub struct ModuleList<T: Float>` with `Vec<Box<dyn Module<T>>>` mirrors `container.py:335-502`; consumed via the `lib.rs:195` re-export; downstream MoE-style heads use it. |
+//! | REQ-6 | SHIPPED | `::new`, `::empty`, `::get`, `::get_mut`, `::push`, `::len`, `::is_empty` mirror `container.py:361-500`; consumed by downstream multi-branch model code that iterates over a list of modules. |
+//! | REQ-7 | SHIPPED | `impl Module<T> for ModuleList<T>` with `forward → InvalidArgument` (matches upstream's `_forward_unimplemented` fallback at `container.py:502`); consumed by `optimizer.parameters()` reading the container's parameter iteration. |
+//! | REQ-8 | SHIPPED | `pub struct ModuleDict<T: Float>` with insertion-ordered `Vec<(String, Box<dyn Module<T>>)>` mirrors `container.py:505-700`'s documented order guarantee; consumed via `lib.rs:195` re-export by downstream encoder/decoder architectures. |
+//! | REQ-9 | SHIPPED | `::new`, `::insert` (in-place replace), `::get`, `::get_mut`, `::keys`, `::len`, `::is_empty` mirror `container.py:548-700`; consumed by dynamic-dispatch model heads in downstream code. |
+//! | REQ-10 | SHIPPED | `impl Module<T> for ModuleDict<T>` with `forward → InvalidArgument`, key-prefixed `named_parameters`, train/eval propagation; consumed by `optimizer.parameters()` and state-dict round-trips. |
+//! | REQ-11 | SHIPPED | `impl Default for ModuleDict<T>` returning empty dict; consumed by parent modules that derive `Default` over an embedded `ModuleDict` field. |
+//! | REQ-12 | SHIPPED | `Display` impls for all three containers render `(i): <module>` lines mirroring `container.py:34-44` `_addindent`; consumed by training driver logging that prints `{model}`. |
 
 use ferrotorch_core::{FerrotorchError, FerrotorchResult, Float, Tensor};
 

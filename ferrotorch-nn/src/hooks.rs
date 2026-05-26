@@ -18,6 +18,19 @@
 //!     println!("in: {:?}  out: {:?}", input.shape(), output.shape());
 //! }));
 //! ```
+//!
+//! ## REQ status (per `.design/ferrotorch-nn/hooks.md`)
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 | SHIPPED | `pub type ForwardHook<T>` / `ForwardPreHook<T>` / `BackwardHook<T>` with `Send + Sync` bounds mirror PyTorch's hook closure signatures from `torch/nn/modules/module.py:1340-1660`; consumed by `ferrotorch-nn/src/module.rs:6` `use crate::hooks::{BackwardHook, ForwardHook, ForwardPreHook, HookHandle, HookedModule}`. |
+//! | REQ-2 | SHIPPED | `pub struct HookHandle` with `remove(self)` mirrors `torch.utils.hooks.RemovableHandle`; consumed by `module.rs` `with_*_hook` methods returning it as half of the tuple. |
+//! | REQ-3 | SHIPPED | `pub struct HookedModule<M, T: Float>` with three `Mutex<Vec<...>>` hook stores + `AtomicUsize` id counter; consumed by `module.rs` `with_forward_hook` constructing `HookedModule::new(self)`. |
+//! | REQ-4 | SHIPPED | `::new`, `inner`, `inner_mut`, `into_inner` accessors; consumed by `module.rs` `with_*_hook` methods (construction) and downstream code unwrapping via `into_inner` after removing all hooks. |
+//! | REQ-5 | SHIPPED | `register_forward_hook` / `register_forward_pre_hook` / `register_backward_hook` taking `&self`; consumed by `module.rs` `with_*_hook` calling each on the freshly-wrapped HookedModule. |
+//! | REQ-6 | SHIPPED | `impl Module<T> for HookedModule<M, T>` with chained pre-hooks + post-hooks + delegation; consumed by every `.forward(input)` call on a HookedModule — the production path through the `Module<T>` trait. |
+//! | REQ-7 | SHIPPED | `gc_hooks<H>` private helper invoked at the start of each hook-list traversal; consumed transitively by every `HookedModule::forward` call. Pinned by `test_hook_handle_remove` — second forward after `handle.remove()` does NOT fire the hook. |
+//! | REQ-8 | SHIPPED | `HookHandle::id(&self) -> usize` accessor mirrors upstream `RemovableHandle.id`; consumed by downstream observability code maintaining `hook_id → metadata` maps and load-bearing for the lazy-GC mechanism. |
 
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};

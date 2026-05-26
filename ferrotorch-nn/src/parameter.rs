@@ -1,3 +1,25 @@
+//! `Parameter<T>` — a trainable tensor wrapper, the Rust analog of
+//! `torch.nn.Parameter`.
+//!
+//! Thin newtype around `Tensor<T>` that enforces `requires_grad = true` on
+//! construction, derefs to `Tensor<T>` for all tensor operations, and
+//! supports the optimizer-facing API (`set_data`, `set_requires_grad`,
+//! `to(device)`).
+//!
+//! ## REQ status (per `.design/ferrotorch-nn/parameter.md`)
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 | SHIPPED | `pub struct Parameter<T: Float> { data: Tensor<T> }` with `#[derive(Debug, Clone)]` mirrors `torch/nn/parameter.py:30-70` via R-DEV-7 (newtype replacing Tensor subclass); consumed by `ferrotorch-nn/src/linear.rs:46` `pub weight: Parameter<T>` and every other weight-bearing layer field. |
+//! | REQ-2 | SHIPPED | `Parameter::new(tensor)` enforces `requires_grad = true` mirroring `torch/nn/parameter.py:51-70`; consumed by `ferrotorch-nn/src/linear.rs:83` `Parameter::zeros(...)` (which calls `Parameter::new`) and every layer constructor. |
+//! | REQ-3 | SHIPPED | `Parameter::zeros`, `::ones`, `::from_slice` factories; consumed by `ferrotorch-nn/src/linear.rs:83, 88` (weight + bias initialization) and `conv.rs` / `embedding.rs` / `norm.rs`. |
+//! | REQ-4 | SHIPPED | `tensor(&self) -> &Tensor<T>` and `into_tensor(self)` accessors; consumed by `ferrotorch-nn/src/module.rs:74` `param.tensor().clone()` inside the default `state_dict`. |
+//! | REQ-5 | SHIPPED | `set_data` re-enforces `requires_grad = true`; consumed by every optimizer step (`ferrotorch-optim/src/adam.rs`, …) writing updated weights. |
+//! | REQ-6 | SHIPPED | `set_requires_grad(bool)` mirrors `torch/nn/parameter.py`'s `requires_grad_` (Tensor-inherited); consumed by `ferrotorch-nn/src/module.rs` `Module::requires_grad_` default impl. |
+//! | REQ-7 | SHIPPED | `to(device) -> FerrotorchResult<Self>`; consumed by `ferrotorch-nn/src/module.rs` `Module::to_device` default impl calling `param.to(device)?` for each parameter. |
+//! | REQ-8 | SHIPPED | `impl Deref<Target = Tensor<T>>` (R-DEV-7 — Rust analog of Python class-subclass inheritance); consumed by every callsite invoking a Tensor method on a Parameter (`param.shape()`, `param.device()`, `param.zero_grad()` in `Module::zero_grad`). |
+//! | REQ-9 | SHIPPED | `#[derive(Debug, Clone)]` with shallow Arc-backed clone semantics; consumed by `Module::state_dict` calling `param.tensor().clone()` for serialization. |
+
 use ferrotorch_core::{Device, FerrotorchResult, Float, Tensor};
 
 /// A tensor registered for gradient descent.

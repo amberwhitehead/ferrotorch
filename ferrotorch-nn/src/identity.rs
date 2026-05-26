@@ -1,4 +1,4 @@
-//! Identity and Flatten modules.
+//! Identity and Flatten modules + small shape/distance modules.
 //!
 //! [`Identity`] passes input through unchanged — useful for model composition,
 //! conditional layers, and debugging.
@@ -6,6 +6,23 @@
 //! [`Flatten`] reshapes input by flattening contiguous dimensions from
 //! `start_dim` to `end_dim` into a single dimension. The default
 //! (`start_dim=1, end_dim=-1`) flattens everything except the batch dimension.
+//!
+//! [`Unflatten`] is Flatten's inverse; [`ChannelShuffle`] implements the
+//! ShuffleNet channel permutation; [`CosineSimilarity`] and
+//! [`PairwiseDistance`] are paired distance helpers.
+//!
+//! ## REQ status (per `.design/ferrotorch-nn/identity.md`)
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 | SHIPPED | `pub struct Identity` (`Default`, `Clone`, `Copy`) + `impl Module<T> for Identity` mirror `torch/nn/modules/linear.py:18-42`; consumed by `pub use identity::Identity` at `lib.rs:204` and downstream conditional-no-op CNN composition patterns. |
+//! | REQ-2 | SHIPPED | `pub struct Flatten` with `start_dim: usize`, `end_dim: isize`, `Default::default() == Flatten::new(1, -1)` mirror `torch/nn/modules/flatten.py:8-60`; consumed by `lib.rs:204` re-export and canonical CNN→FC transition patterns. |
+//! | REQ-3 | SHIPPED | `Flatten::forward` full edge-case ladder (0-D error, 1-D clone, negative-`end_dim` resolution, start>end check, no-op, final `grad_fns::shape::reshape` dispatch); consumed by every downstream model that flattens after pooling; `grad_fns::shape::reshape` is the autograd-aware production path. |
+//! | REQ-4 | SHIPPED | `pub struct Unflatten` with inherent typed forward + `impl Module<T> for Unflatten` delegating to it mirror `torch/nn/modules/flatten.py:62-167`; consumed by `lib.rs:204` re-export and downstream reshape-after-flatten decoder construction. |
+//! | REQ-5 | SHIPPED | `pub struct ChannelShuffle` with `[N, g, cpg, *] → [N, cpg, g, *]` permutation + CUDA `NotImplementedOnCuda` error mirrors `torch/nn/modules/channelshuffle.py`; consumed by `lib.rs:204` re-export and ShuffleNet-family vision architectures. |
+//! | REQ-6 | SHIPPED | `pub struct CosineSimilarity` with `dim`, `eps`, `Default::default() == (1, 1e-8)`, CPU forward, CUDA error mirrors `torch/nn/modules/distance.py:72-100`; consumed by `lib.rs:204` re-export and contrastive-learning / embedding-similarity code. |
+//! | REQ-7 | SHIPPED | `pub struct PairwiseDistance` with `p`, `eps`, `keepdim`, `Default::default() == (2.0, 1e-6, false)`, CPU forward, CUDA error mirrors `torch/nn/modules/distance.py:8-70`; consumed by `lib.rs:204` re-export and embedding-distance training drivers. |
+//! | REQ-8 | SHIPPED | Explicit `is_cuda()` guards returning `Err(FerrotorchError::NotImplementedOnCuda)` in `ChannelShuffle::forward`, `CosineSimilarity::forward`, `PairwiseDistance::forward` (R-CODE-4 — no silent CPU↔GPU round-trips); consumed by every CUDA-tensor invocation surfacing the error to the caller. |
 
 use ferrotorch_core::grad_fns::shape::reshape;
 use ferrotorch_core::{FerrotorchError, FerrotorchResult, Float, Tensor};

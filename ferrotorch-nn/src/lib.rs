@@ -1,3 +1,20 @@
+//! # `ferrotorch-nn` — crate root
+//!
+//! Declares every per-module file, re-exports the canonical public surface
+//! (layer types, `Module` trait, `Parameter`, `Buffer`, container types,
+//! gradient-clipping helpers, the `Module` derive macro), and provides the
+//! `prelude` module that mirrors `from torch import nn` ergonomics.
+//!
+//! ## REQ status (per `.design/ferrotorch-nn/lib.md`)
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 | SHIPPED | Crate-wide `#![warn(clippy::all, clippy::pedantic)]` + `#![deny(rust_2018_idioms)]` baseline at the top of `lib.rs`; `cargo clippy -p ferrotorch-nn --lib -- -D warnings` enforces on every build. |
+//! | REQ-2 | SHIPPED | 31 `pub mod` declarations cover every per-layer file; `cargo check -p ferrotorch-nn` fails if any module file is missing. |
+//! | REQ-3 | SHIPPED | Flat `pub use` re-exports surface every layer + utility name at crate root, mirroring `torch/nn/__init__.py:11-50`; consumed by `ferrotorch-optim/src/optimizer.rs` (line 5) `use ferrotorch_nn::Parameter` and every model crate. |
+//! | REQ-4 | SHIPPED | `pub use ferrotorch_nn_derive::Module` republishes the derive macro under the trait's name (separate namespaces); consumed by every `#[derive(Module)]` site in downstream layer code. |
+//! | REQ-5 | SHIPPED | `pub mod prelude` collects core abstractions + standard layers + canonical losses + gradient-clipping helpers; consumed by downstream training scripts writing `use ferrotorch_nn::prelude::*`. |
+//! | REQ-6 | SHIPPED | `#[allow(unused_extern_crates)] extern crate self as ferrotorch_nn;` enables the derive macro's `::ferrotorch_nn::Module` hygienic path; consumed implicitly by every `#[derive(Module)]` macro expansion inside this crate. |
 // Lint baseline mirrors the workspace-standard pattern from
 // `ferrotorch-core`/`-distributed`/`-jit`/`-cubecl`/`-xpu` lib.rs.
 #![warn(clippy::all, clippy::pedantic)]

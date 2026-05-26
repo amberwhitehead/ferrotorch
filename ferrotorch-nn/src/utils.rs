@@ -30,6 +30,20 @@
 //!
 //! For `Device::Mps`, `Device::Xpu`, or other unrecognised backends, the
 //! function returns `Err(FerrotorchError::DeviceUnavailable)`.
+//!
+//! ## REQ status (per `.design/ferrotorch-nn/utils.md`)
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 | SHIPPED | `pub fn clip_grad_norm_<T: Float>(params, max_norm, norm_type) -> FerrotorchResult<f64>` mirrors `torch/nn/utils/clip_grad.py:184-232`; consumed by `ferrotorch-train/src/grad_utils.rs:23` `pub use ferrotorch_nn::utils::{clip_grad_norm_, clip_grad_value_}` — the canonical production re-export used by every training driver. |
+//! | REQ-2 | SHIPPED | Device-classification preamble (collect grads, check empty, common-device verification, mismatch error); consumed by every external invocation hitting this preamble first — the production training-driver path. |
+//! | REQ-3 | SHIPPED | CPU path `clip_grad_norm_cpu` with INFINITY branch + general accumulator + post-clip scaling, using the workspace `cast::<T, f64>` helper; consumed by every CPU-resident-gradient training loop in downstream code. |
+//! | REQ-4 | SHIPPED | CUDA path `clip_grad_norm_cuda` with `backend.mul_f32`/`mul_f64` + `sum_f32`/`sum_f64` + per-tensor scalar readback + `scale_f32`/`scale_f64`; consumed by every CUDA-resident-gradient training loop via the same public `clip_grad_norm_` entry. Per-tensor scalar boundary matches PyTorch's `_get_total_norm` from `torch/nn/utils/clip_grad.py:48-117`. |
+//! | REQ-5 | SHIPPED | `pub fn clip_grad_value_<T: Float>(params, clip_value) -> FerrotorchResult<()>` mirrors `torch/nn/utils/clip_grad.py:256-298`; consumed by `ferrotorch-train/src/grad_utils.rs:23` re-export and downstream training drivers. |
+//! | REQ-6 | SHIPPED | CPU path `clip_grad_value_cpu` with element-wise clamp via Vec map + `cast::<f64, T>` for bounds; consumed by every CPU-resident-gradient clamp call. |
+//! | REQ-7 | SHIPPED | CUDA path `clip_grad_value_cuda` invoking `backend.clamp_f32` / `clamp_f64` and replacing the gradient with the clamped GPU handle; consumed by every CUDA-resident-gradient clamp call via the same public entry. |
+//! | REQ-8 | SHIPPED | Layered error returns: `DeviceMismatch` on heterogeneous grads, `DeviceUnavailable` on unsupported single backends (MPS, XPU), `NotImplementedOnCuda` for non-f32/f64 dtypes and for non-L2 norms on CUDA; consumed by every external invocation hitting an error condition — matches R-CODE-4 and R-DEV-1 numerical-contract match with upstream. |
+//! | REQ-9 | SHIPPED | `readback_scalar_f32` / `readback_scalar_f64` private helpers with byte-length validation; consumed inside `clip_grad_norm_cuda`'s per-tensor reduction loop — the production CUDA fast-path for every CUDA-resident gradient. |
 
 use std::any::TypeId;
 

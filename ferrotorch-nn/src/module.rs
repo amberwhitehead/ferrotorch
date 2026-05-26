@@ -1,3 +1,32 @@
+//! `Module<T>` trait, `Reduction`, and `StateDict<T>` — the Rust analog of
+//! PyTorch's `torch.nn.Module` base class.
+//!
+//! Every neural-network layer in `ferrotorch-nn` implements `Module<T>`. The
+//! trait composes parameter iteration, buffer iteration, train/eval mode,
+//! device transfer, sub-module walks, hook registration, gradient zeroing,
+//! and state-dict load/save.
+//!
+//! ## REQ status (per `.design/ferrotorch-nn/module.md`)
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 | SHIPPED | `pub type StateDict<T> = HashMap<String, Tensor<T>>` mirrors `torch/nn/modules/module.py:1980-2060`; consumed by `pub use module::{Module, Reduction, StateDict}` at `lib.rs:218` and every layer's `state_dict()` return. |
+//! | REQ-2 | SHIPPED | `pub enum Reduction { Mean, Sum, None }` mirrors PyTorch's loss `reduction` kwarg; consumed by `ferrotorch-nn/src/loss.rs:19` `use crate::module::Reduction` and `ferrotorch-nn/src/functional.rs:1798`. |
+//! | REQ-3 | SHIPPED | `pub trait Module<T: Float>: Send + Sync` mirrors `torch/nn/modules/module.py:407-441`; consumed by every layer file (`linear.rs`, `conv.rs`, `norm.rs`, `embedding.rs`, etc.) via `impl Module<T> for ...`. |
+//! | REQ-4 | SHIPPED | `forward`, `parameters`, `parameters_mut`, `named_parameters` required methods; consumed by `ferrotorch-optim/src/optimizer.rs:5` and every optimizer (`adam.rs:17`, `adadelta.rs:20`, …) reading `.parameters()`. |
+//! | REQ-5 | SHIPPED | `train`, `eval`, `is_training` required methods; consumed by `ferrotorch-nn/src/container.rs` `Sequential::train` / `::eval` propagation. |
+//! | REQ-6 | SHIPPED | Default `to_device` iterates parameters and buffers, mirroring `torch/nn/modules/module.py:1180-1260`; consumed by downstream `model.to_device(Device::Cuda(0))` calls in model composition code. |
+//! | REQ-7 | SHIPPED | Default `state_dict` unions parameters with buffers, mirroring `module.py:1980-2060`; consumed by `ferrotorch-nn/src/hooks.rs` `HookedModule::state_dict` delegation and SafeTensors export. |
+//! | REQ-8 | SHIPPED | `load_state_dict(strict)` two-pass strict + shape-validate, mirroring `module.py:2150-2310`; consumed by SafeTensors / GGUF loaders in downstream crates. |
+//! | REQ-9 | SHIPPED | `buffers` / `buffers_mut` / `named_buffers` default-empty methods mirror `module.py:2430-2490`; consumed by `ferrotorch-nn/src/norm.rs` `BatchNorm*` overrides and `module.rs` default `load_state_dict` (the `*buf = Buffer::new(...)` site). |
+//! | REQ-10 | SHIPPED | `as_any` default returns `None` for the #984 downcast hook; consumed by `ferrotorch-nn/src/norm.rs` `BatchNorm*` overriding it so `ferrotorch-vision`'s state-dict loader can route to BN running stats. |
+//! | REQ-11 | SHIPPED | `children`, `named_children`, `modules` (`Self: Sized`), `descendants_dyn` (object-safe), `named_modules`, `named_descendants_dyn` mirror `module.py:2510-2640`; consumed by `ferrotorch-nn/src/container.rs` containers and downstream state-dict walkers. |
+//! | REQ-12 | SHIPPED | Empty-parent path branch in `named_descendants_dyn` fixes #1142 (DeepLabV3 BN-buffer routing); consumed by `ferrotorch-vision`'s DeepLabV3 backbone load path; pinned by `module_named_descendants_dyn_empty_parent_no_leading_dot`. |
+//! | REQ-13 | SHIPPED | `with_forward_hook` / `with_forward_pre_hook` / `with_backward_hook` `Self: Sized` methods return `(HookedModule<Self, T>, HookHandle)`; consumed by `ferrotorch-nn/src/hooks.rs` (`HookedModule` is instantiated by these) and downstream observability code. |
+//! | REQ-14 | SHIPPED | Default `zero_grad` walks `parameters()` mirroring `module.py:2700-2740`; consumed by `ferrotorch-optim` and `ferrotorch-train/src/grad_utils.rs` calling `model.zero_grad()` per step. |
+//! | REQ-15 | SHIPPED | Default `requires_grad_(bool)` toggles all parameters mirroring `module.py:2680-2700`; consumed by transfer-learning callsites that freeze the backbone via `backbone.requires_grad_(false)`. |
+//! | REQ-16 | SHIPPED | Default `apply_to_parameters(&mut dyn FnMut(...))` mirrors `torch.nn.Module.apply` for the parameter case; consumed by lazy-init paths in downstream lazy layers (`lazy_linear.rs`, `lazy_conv.rs`). |
+
 use std::collections::HashMap;
 
 use ferrotorch_core::{Device, FerrotorchError, FerrotorchResult, Float, Tensor};

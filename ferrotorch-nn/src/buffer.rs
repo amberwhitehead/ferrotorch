@@ -14,6 +14,19 @@
 //! Buffers are exposed via the `Module` trait through `buffers()`,
 //! `buffers_mut()`, and `named_buffers()`. Concrete modules opt in by
 //! storing `Buffer<T>` fields and overriding the relevant trait methods.
+//!
+//! ## REQ status (per `.design/ferrotorch-nn/buffer.md`)
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 | SHIPPED | `pub struct Buffer<T: Float> { data: Tensor<T> }` with `#[derive(Debug, Clone)]` mirrors `torch/nn/parameter.py:249-279` via R-DEV-7 newtype; consumed by `pub use buffer::Buffer` at `lib.rs:223` + `lib.rs:273` prelude; `ferrotorch-nn/src/module.rs:5` `use crate::buffer::Buffer`; `module.rs:374` `*buf = Buffer::new(tensor.clone())` inside the default `load_state_dict`. |
+//! | REQ-2 | SHIPPED | `Buffer::new(tensor)` enforces `requires_grad = false` mirroring `torch/nn/parameter.py:266-275`; consumed by `module.rs:374` during state-dict load. |
+//! | REQ-3 | SHIPPED | `Buffer::zeros` / `::ones` / `::from_slice` factories; consumed by `module.rs:543` `running_mean: Buffer::zeros(&[2])?` (BN canonical init pattern) and `norm.rs` BatchNorm layers. |
+//! | REQ-4 | SHIPPED | `tensor(&self) -> &Tensor<T>` and `into_tensor(self)` accessors; consumed by `module.rs:75` `buffer.tensor().clone()` inside the default `state_dict`. |
+//! | REQ-5 | SHIPPED | `set_data` re-enforces `requires_grad = false`; consumed by BN layers in `ferrotorch-nn/src/norm.rs` updating running mean / variance across forward passes. |
+//! | REQ-6 | SHIPPED | `to(device) -> FerrotorchResult<Self>`; consumed by `module.rs` `Module::to_device` default impl calling `buffer.to(device)?` for each buffer. |
+//! | REQ-7 | SHIPPED | `impl Deref<Target = Tensor<T>>` (R-DEV-7 Rust analog of Python inheritance); consumed by every callsite invoking a Tensor method on a Buffer (`buf.shape()` in `module.rs:365` shape check). |
+//! | REQ-8 | SHIPPED | `#[derive(Debug, Clone)]` with shallow Arc-backed clone; consumed by `Module::state_dict` calling `buffer.tensor().clone()`. |
 
 use ferrotorch_core::{Device, FerrotorchResult, Float, Tensor};
 
