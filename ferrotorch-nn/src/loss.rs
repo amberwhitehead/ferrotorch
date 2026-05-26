@@ -4,6 +4,30 @@
 //! structs with a `forward(&self, pred, target) -> FerrotorchResult<Tensor<T>>`
 //! method. Each loss attaches a backward node to the returned tensor when
 //! gradient tracking is enabled.
+//!
+//! ## REQ status (per `.design/ferrotorch-nn/loss.md`)
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 | SHIPPED | `pub struct MSELoss { pub reduction: Reduction }` + `MSEBackward<T>` mirrors `torch/nn/modules/loss.py:566-630`; consumed by `ferrotorch-optim/src/sgd.rs:524,831` MSE training-loop harness. Runner-arm gap tracked by #1444. |
+//! | REQ-2 | SHIPPED | `pub struct CrossEntropyLoss { pub reduction, pub label_smoothing }` + numerically stable log-softmax + `CrossEntropyBackward<T>` mirrors `torch/nn/modules/loss.py:1197-1406`; consumed via `ferrotorch-nn/src/lib.rs:213` re-export and `ferrotorch_nn::prelude::CrossEntropyLoss` at `lib.rs:289`. Runner-arm: #1444. |
+//! | REQ-3 | SHIPPED | `pub struct BCEWithLogitsLoss { pub reduction, pub pos_weight }` using the `softplus`-stable form + `BCEWithLogitsBackward<T>` mirrors `torch/nn/modules/loss.py:718-845`; consumed via `lib.rs:213,289` re-exports. Runner-arm: #1444. |
+//! | REQ-4 | SHIPPED | `pub struct BCELoss { pub reduction }` + `BCEBackward<T>` mirrors `torch/nn/modules/loss.py:632-717`; consumed via `lib.rs:213,289` re-exports. Runner-arm: #1444. |
+//! | REQ-5 | SHIPPED | `pub struct L1Loss { pub reduction }` + `L1Backward<T>` mirrors `torch/nn/modules/loss.py:65-134`; consumed via `lib.rs:213,289` re-exports. Runner-arm: #1444. |
+//! | REQ-6 | SHIPPED | `pub struct NLLLoss { pub reduction, pub ignore_index, pub weight }` + `NLLBackward<T>` mirrors `torch/nn/modules/loss.py:135-273`; consumed via `lib.rs:213,289` re-exports. Runner-arm: #1444. |
+//! | REQ-7 | SHIPPED | `pub struct KLDivLoss { pub reduction, pub log_target }` + `KLDivBackward<T>` mirrors `torch/nn/modules/loss.py:463-565`; consumed via `lib.rs:214` re-export. Runner-arm: #1444. |
+//! | REQ-8 | SHIPPED | `pub struct SmoothL1Loss { pub reduction, pub beta }` mirrors `torch/nn/modules/loss.py:987-1079`; consumed via `lib.rs:215` re-export. Runner-arm: #1444. |
+//! | REQ-9 | SHIPPED | `pub struct HuberLoss { pub reduction, pub delta }` + `HuberBackward<T>` mirrors `torch/nn/modules/loss.py:1080-1149`; consumed via `lib.rs:213` re-export. Runner-arm: #1444. |
+//! | REQ-10 | SHIPPED | `pub struct PoissonNLLLoss { pub reduction, pub log_input, pub full, pub eps }` + `PoissonNLLBackward<T>` mirrors `torch/nn/modules/loss.py:286-375`; consumed via `lib.rs:214` re-export. Runner-arm: #1444. |
+//! | REQ-11 | SHIPPED | `pub struct GaussianNLLLoss { pub reduction, pub full, pub eps }` with eps-clamp on `var` + `GaussianNLLBackward<T>` mirrors `torch/nn/modules/loss.py:376-462`; consumed via `lib.rs:213` re-export. Runner-arm: #1444. |
+//! | REQ-12 | SHIPPED | `pub struct HingeEmbeddingLoss { pub reduction, pub margin }` + `HingeEmbeddingBackward<T>` mirrors `torch/nn/modules/loss.py:846-923`; consumed via `lib.rs:214` re-export. Runner-arm: #1444. |
+//! | REQ-13 | SHIPPED | `pub struct MarginRankingLoss { pub reduction, pub margin }` + `MarginRankingBackward<T>` with `forward_pair(x1, x2, y)` mirrors `torch/nn/modules/loss.py:1694-1760`; consumed via `lib.rs:214` re-export. Runner-arm: #1444. |
+//! | REQ-14 | SHIPPED | `pub struct TripletMarginLoss { pub reduction, pub margin, pub p, pub swap, pub eps }` + `TripletMarginBackward<T>` with `forward_triplet(anchor, positive, negative)` mirrors `torch/nn/modules/loss.py:1857-1966`; consumed via `lib.rs:216` re-export. Runner-arm: #1444. |
+//! | REQ-15 | SHIPPED | `pub struct CosineEmbeddingLoss { pub reduction, pub margin }` + `CosineEmbeddingBackward<T>` with `forward_pair(x1, x2, y)` mirrors `torch/nn/modules/loss.py:1622-1693`; consumed via `lib.rs:213` re-export. Runner-arm: #1444. |
+//! | REQ-16 | SHIPPED | `pub struct CTCLoss { pub blank, pub reduction, pub zero_infinity }` + `CTCBackward<T>` (forward + backward DP) mirrors `torch/nn/modules/loss.py:2102-2245`; consumed via `lib.rs:213` re-export. Runner-arm: #1444. |
+//! | REQ-17 | SHIPPED | `pub struct MultiMarginLoss` + `MultiMarginBackward<T>` and `pub struct MultiLabelSoftMarginLoss` + `MultiLabelSoftMarginBackward<T>` mirror `torch/nn/modules/loss.py:1566-1622, 1761-1857`; consumed via `lib.rs:215` re-export. |
+//! | REQ-18 | SHIPPED | Every loss returns `Tensor::from_operation(..., grad_fn)` when `is_grad_enabled() && pred.requires_grad()`; the hand-written backward nodes (`MSEBackward`, `CrossEntropyBackward`, `BCEWithLogitsBackward`, `BCEBackward`, `L1Backward`, `NLLBackward`, `KLDivBackward`, `HuberBackward`, `PoissonNLLBackward`, `GaussianNLLBackward`, `HingeEmbeddingBackward`, `MarginRankingBackward`, `TripletMarginBackward`, `CosineEmbeddingBackward`, `CTCBackward`, `MultiMarginBackward`, `MultiLabelSoftMarginBackward`) divide by N for `Reduction::Mean`; consumed by `ferrotorch-optim/src/sgd.rs:524,831` MSE production training loop. |
+//! | REQ-19 | SHIPPED | Every `forward` opens with `autocast_guard("<op_name>")` from `ferrotorch_core::autograd::autocast_ops` (`"mse_loss"`, `"cross_entropy"`, `"bce_with_logits"`, `"bce"`, `"l1_loss"`, `"nll_loss"`, `"kl_div"`, `"smooth_l1"`, `"huber"`, `"poisson_nll"`, `"gaussian_nll"`, `"hinge_embedding"`, `"margin_ranking"`, `"triplet_margin"`, `"cosine_embedding"`, `"ctc"`); consumed by the autocast policy table classifying every loss as `FullPrecision`. |
 
 use std::sync::Arc;
 

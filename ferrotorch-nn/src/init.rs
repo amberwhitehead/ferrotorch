@@ -3,6 +3,22 @@
 //! All functions operate on `Parameter<T>` in-place, matching PyTorch's
 //! `nn.init` module. Each layer's constructor applies the appropriate
 //! default initialization.
+//!
+//! ## REQ status (per `.design/ferrotorch-nn/init.md`)
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 | SHIPPED | `pub enum NonLinearity` + `fn gain` mirrors `torch/nn/init.py:173-244` (`linear` / `sigmoid` / `tanh` / `relu` / `leaky_relu(slope)` gain table); consumed by `ferrotorch-nn/src/lib.rs:207` re-exporting `init::NonLinearity` as part of the `ferrotorch_nn` public surface. |
+//! | REQ-2 | SHIPPED | `pub fn constant`, `pub fn zeros`, `pub fn ones` bulk-fill mirror `torch/nn/init.py:337-378`; consumed by parameter-fill discipline across the workspace via the `init` module path re-exported at `lib.rs`. |
+//! | REQ-3 | SHIPPED | `pub fn uniform`, `pub fn normal` with `xorshift64` PRNG seeded from `SystemTime::now()` + thread id mirror `torch/nn/init.py:247-300`; consumed by `ferrotorch-nn/src/rnn.rs:127-128` (`init::uniform(&mut weight_ih, -k, k)?`) and `ferrotorch-nn/src/embedding.rs:249` (`init::normal(&mut weight, 0.0, 1.0)?`). |
+//! | REQ-4 | SHIPPED | `pub fn xavier_uniform`, `pub fn xavier_normal` use `fan_in + fan_out` mirroring `torch/nn/init.py:479-540`; consumed through the public `init` namespace re-exported at `lib.rs:207`; tests `test_xavier_normal_stats` pin the stats. |
+//! | REQ-5 | SHIPPED | `pub fn kaiming_uniform`, `pub fn kaiming_normal` use `gain / sqrt(fan_in)` mirroring `torch/nn/init.py:554-672` (fan_in mode only; `fan_out` mode tracked separately by #1453 AC); consumed via the `init` module + `lib.rs:207` re-export. Tests `test_kaiming_uniform_relu`, `test_kaiming_normal_relu` pin. |
+//! | REQ-6 | SHIPPED | `pub fn trunc_normal_` rejection-sampled truncated normal on `[a, b]` mirrors `torch/nn/init.py:301-336`; consumed via the `init` module path; downstream ViT / position-embedding code in the model crates uses it. Tests `test_trunc_normal_bounds`, `test_trunc_normal_stats` pin. |
+//! | REQ-7 | SHIPPED | `pub fn orthogonal_` modified Gram-Schmidt with sign correction mirrors `torch/nn/init.py:672-722`; consumed via the `init` module path. Tests `test_orthogonal_columns_orthonormal`, `test_orthogonal_gain`, `test_orthogonal_tall_matrix`, `test_orthogonal_wide_matrix` pin `Q^T Q ≈ gain^2 I`. |
+//! | REQ-8 | SHIPPED | `pub fn sparse_` 2-D column-wise partial Fisher-Yates mirrors `torch/nn/init.py:723-764`; consumed via the `init` module path. Tests `test_sparse_sparsity_ratio`, `test_sparse_nonzero_drawn_from_normal` pin. |
+//! | REQ-9 | SHIPPED | `pub fn dirac_` channel-diagonal center placement with `groups` support mirrors `torch/nn/init.py:402-455`; consumed via the `init` module path. Tests `test_dirac_3d_identity`, `test_dirac_4d_identity`, `test_dirac_groups` pin. |
+//! | REQ-10 | SHIPPED | `pub fn eye_` 2-D identity (top-left for non-square) mirrors `torch/nn/init.py:381-401`; consumed via the `init` module path. Tests `test_eye_square`, `test_eye_tall`, `test_eye_wide`, `test_eye_preserves_requires_grad` pin. |
+//! | REQ-11 | SHIPPED | Every initializer rebuilds the parameter via `Parameter::new(Tensor::from_storage(.., true))?` mirroring upstream's `with torch.no_grad():` discipline at `torch/nn/init.py:69-160`; consumed by `ferrotorch-nn/src/rnn.rs:127-128` calling `init::uniform` and continuing to use the parameter as a leaf with grad. Test `test_init_preserves_requires_grad` pins. |
 
 use ferrotorch_core::{FerrotorchError, FerrotorchResult, Float, Tensor, TensorStorage};
 

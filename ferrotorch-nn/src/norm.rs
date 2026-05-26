@@ -4,6 +4,23 @@
 //! Each layer normalizes its input along specified dimensions and optionally
 //! applies a learnable affine transform (weight/bias). Backward functions
 //! implement `GradFn<T>` to propagate gradients through the normalization.
+//!
+//! ## REQ status (per `.design/ferrotorch-nn/norm.md`)
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 | SHIPPED | `pub struct LayerNorm<T: Float>` + `impl<T: Float> Module<T> for LayerNorm<T>` mirrors `torch/nn/modules/normalization.py:105-238`; consumed by `ferrotorch-bert/src/attention.rs:18,194,209` (`pub layer_norm: LayerNorm<T>`) and `ferrotorch-whisper/src/layer.rs:12`. Runner-arm: #1447. |
+//! | REQ-2 | SHIPPED | GPU fast path inside `LayerNorm::forward` dispatches to `backend.layernorm_f32(input, weight, bias, batch, norm_size, eps)` when `input.is_cuda() && self.elementwise_affine` mirroring `aten/src/ATen/native/Normalization.cpp` `native_layer_norm_cuda`; consumed by `ferrotorch-bert/src/attention.rs:209` and `ferrotorch-whisper/src/encoder.rs:27` pushing GPU-resident inputs through this path during inference. |
+//! | REQ-3 | SHIPPED | `pub struct GroupNorm<T: Float>` + `GroupNormBackward<T>` mirrors `torch/nn/modules/normalization.py:239-342`; consumed by `ferrotorch-diffusion/src/vae.rs:39,99` (`pub conv_norm_out: GroupNorm<T>`). Runner-arm: #1447. |
+//! | REQ-4 | SHIPPED | `pub struct RMSNorm<T: Float>` + `RMSNormBackward<T>` with `mean(x^2)` denominator (no centering, no bias) mirrors `torch/nn/modules/normalization.py:343-435`; consumed via `ferrotorch-nn/src/lib.rs:227` re-export (Llama / T5 stacks). |
+//! | REQ-5 | SHIPPED | `pub struct BatchNorm2d<T: Float>` + `BatchNorm2dBackward<T>` with per-channel running stats and train/eval branching mirrors `torch/nn/modules/batchnorm.py:420-498`; consumed by `ferrotorch-distributed/src/sync_batch_norm.rs:3,595` and `ferrotorch-vision/src/models/segmentation/fcn.rs:34`. CPU-only — blocker #1449 for GPU. Runner-arm: #1447. |
+//! | REQ-6 | SHIPPED | `pub struct BatchNorm1d<T: Float>` + `BatchNorm1dBackward<T>` mirrors `torch/nn/modules/batchnorm.py:306-383`; consumed by `ferrotorch-nn/src/lazy_norm.rs:154` (`lazy_batchnorm!(LazyBatchNorm1d, BatchNorm1d, ...)`) and `ferrotorch-nn/src/lib.rs:225-228` re-exports. CPU-only; blocker #1449. |
+//! | REQ-7 | SHIPPED | `pub struct BatchNorm3d<T: Float>` + `BatchNorm3dBackward<T>` mirrors `torch/nn/modules/batchnorm.py:535-613`; consumed by `ferrotorch-nn/src/lazy_norm.rs:155` and `lib.rs:225-228` re-exports. CPU-only; blocker #1449. |
+//! | REQ-8 | SHIPPED | `pub fn set_running_mean / set_running_var / set_num_batches_tracked` plus matching read accessors on every `BatchNorm{1,2,3}d<T>` with finite + non-negative validation; consumed by `ferrotorch-distributed/src/sync_batch_norm.rs` all-reducing `running_mean()` / `running_var()` and by vision state-dict loaders downcasting via `as_any`. Pinned by `bn{1,2,3}d_set_running_*_round_trip` and `bn{1,2,3}d_set_running_stats_flow_through_eval_forward`. |
+//! | REQ-9 | SHIPPED | `pub struct InstanceNorm1d<T>`, `pub struct InstanceNorm2d<T>`, `pub struct InstanceNorm3d<T>` newtypes around `InstanceNormInner<T>` + `InstanceNormBackward<T>` mirror `torch/nn/modules/instancenorm.py`; consumed by `ferrotorch-nn/src/lazy_norm.rs:14` and `lib.rs:225-228` re-exports. CPU-only; blocker #1449. |
+//! | REQ-10 | SHIPPED | `pub struct LocalResponseNorm` + `LocalResponseNormBackward<T>` mirrors `torch/nn/modules/normalization.py:16-73`; consumed via `ferrotorch-nn/src/lib.rs:227` re-export. CPU-only — CUDA input returns `NotImplementedOnCuda`; blocker #1449. |
+//! | REQ-11 | SHIPPED | Every norm layer has `impl<T: Float> Module<T>` with the seven required methods; BatchNorm additionally implements `as_any() -> Option<&dyn Any>` returning `Some(self)`; consumed by `ferrotorch-bert/src/attention.rs` invoking `self.layer_norm.forward(...)` through the trait and by vision state-dict loaders downcasting via `as_any`. Pinned by `bn{1,2,3}d_as_any_downcasts_to_concrete_type`. |
+//! | REQ-12 | SHIPPED | Every forward returns `Tensor::from_operation(storage, shape, grad_fn)` when `is_grad_enabled() && input.requires_grad()`; backward nodes `LayerNormBackward`, `GroupNormBackward`, `RMSNormBackward`, `BatchNorm{1,2,3}dBackward`, `InstanceNormBackward`, `LocalResponseNormBackward` all live in this file; consumed by `ferrotorch-optim` training loops driving `backward()` through these nodes when models composed from `ferrotorch-bert` / `ferrotorch-diffusion` / `ferrotorch-vision` are trained. |
 
 use std::any::TypeId;
 use std::sync::{Arc, Mutex};

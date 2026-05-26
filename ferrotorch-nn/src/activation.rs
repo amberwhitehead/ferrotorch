@@ -4,6 +4,22 @@
 //! elementwise non-linearity in its [`forward`](Module::forward) method.
 //! They carry a `training` flag for API consistency but their behaviour is
 //! identical in train and eval modes.
+//!
+//! ## REQ status (per `.design/ferrotorch-nn/activation.md`)
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 | SHIPPED | `pub struct ReLU` zero-param module delegating `forward` to `act::relu` mirrors `torch/nn/modules/activation.py:104-152`; consumed by `ferrotorch-vision/src/models/vgg.rs:21` (`use ferrotorch_nn::activation::ReLU;`) and `ferrotorch-optim/src/sgd.rs:818` SGD module-flow harness. |
+//! | REQ-2 | SHIPPED | `pub struct Sigmoid`, `pub struct Tanh` zero-param wrappers mirror `torch/nn/modules/activation.py:337-434`; consumed by `ferrotorch-rl/src/mlp_policy.rs:53` (`use ferrotorch_nn::activation::Tanh;`). |
+//! | REQ-3 | SHIPPED | `pub struct GELU` plus `pub use act::GeluApproximate` re-export covers `None`/`Tanh`/`Sigmoid` modes mirroring `torch/nn/modules/activation.py:777-824`; consumed by `ferrotorch-bert/src/layer.rs:13` and `ferrotorch-whisper/src/encoder.rs:27`. |
+//! | REQ-4 | SHIPPED | `pub struct SiLU` (`x * sigmoid(x)`) mirrors `torch/nn/modules/activation.py:435-484`; consumed by `ferrotorch-diffusion/src/vae.rs:24` ResnetBlock chain. |
+//! | REQ-5 | SHIPPED | `pub struct Softmax`, `pub struct LogSoftmax`, `pub struct Softmin`, `pub struct Softmax2d` (CPU-only — see REQ-11) mirror `torch/nn/modules/activation.py:1709-1929`; consumed by `ferrotorch-nn/src/lib.rs:189-193` re-exports and downstream classifier heads. |
+//! | REQ-6 | SHIPPED | `pub struct LeakyReLU`, `pub struct PReLU<T>`, `pub struct ELU`, `pub struct CELU`, `pub struct SELU`, `pub struct RReLU` parameterised activations mirror `torch/nn/modules/activation.py:153-218, 575-735, 874-931, 1575-1656`; consumed via `ferrotorch-nn/src/lib.rs:189-193` re-exports. |
+//! | REQ-7 | SHIPPED | `pub struct Hardtanh`, `pub struct ReLU6`, `pub struct HardSigmoid`, `pub struct HardSwish`, `pub struct Hardshrink`, `pub struct Softshrink`, `pub struct Tanhshrink`, `pub struct Softsign`, `pub struct LogSigmoid`, `pub struct Threshold`, `pub struct Softplus`, `pub struct Mish`, `pub struct GLU` mirror their counterparts at `torch/nn/modules/activation.py:219-336, 364-406, 485-574, 530-574, 680-735, 736-776, 825-873, 958-1056`; consumed by `ferrotorch-vision/src/models/mobilenet.rs:51` (`HardSigmoid, HardSwish, ReLU, ReLU6`). |
+//! | REQ-8 | SHIPPED | `pub struct PReLU<T: Float>` owns `pub alpha: Parameter<T>` and the hand-written `Module<T>` impl returns `("alpha", ..)` via `named_parameters` mirroring `torch/nn/modules/activation.py:1575-1656`; consumed via `ferrotorch-nn/src/lib.rs:189-193` re-export; pinned by `test_prelu_has_parameter`. |
+//! | REQ-9 | SHIPPED | The `impl_activation_module!` declarative macro synthesises `Module<T>::{forward, parameters, parameters_mut, named_parameters, train, eval, is_training}` for every zero-param activation (`PReLU` has a hand-written impl) mirroring `torch/nn/modules/module.py`; consumed by `ferrotorch-vision/src/models/vgg.rs` building `Module<f32>` chains. |
+//! | REQ-10 | SHIPPED | Every `forward` delegates to `act::*` in `ferrotorch_core::grad_fns::activation`, which attaches `ReluBackward`/`SigmoidBackward`/`TanhBackward`/`GeluBackward`/`SiluBackward`/`SoftmaxBackward`/`LogSoftmaxBackward`/`LeakyReluBackward`/`EluBackward`/`MishBackward`/`SoftplusBackward`/`GLUBackward`/`PReluBackward` when grad is enabled mirroring `aten/src/ATen/native/Activation.cpp`; consumed by `ferrotorch-optim/src/sgd.rs:818` end-to-end backward in the SGD harness. |
+//! | REQ-11 | NOT-STARTED | `Softmax2d` forward rejects CUDA input with `NotImplementedOnCuda`; GPU-resident forward + backward is open blocker #1451. |
 
 use ferrotorch_core::grad_fns::activation as act;
 use ferrotorch_core::grad_fns::arithmetic;

@@ -10,6 +10,25 @@
 //! All operations delegate to the differentiable primitives in
 //! `ferrotorch_core::grad_fns`, so the backward graph is built automatically
 //! when gradient tracking is enabled.
+//!
+//! ## REQ status (per `.design/ferrotorch-nn/functional.md`)
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 | SHIPPED | `pub fn linear<T>` composes `transpose_2d` + `mm_differentiable` + bias broadcast mirroring `torch.nn.functional.linear`; consumed by `ferrotorch-train/examples/multi_epoch_train_dump.rs:61` (via the `use ferrotorch_nn::functional::{...}` import) and the public namespace re-export at `ferrotorch-nn/src/lib.rs:163`. |
+//! | REQ-2 | SHIPPED | `pub fn relu / sigmoid / tanh / gelu / gelu_with / silu / softmax / log_softmax / leaky_relu / hardtanh / hardtanh_with / relu6 / hardsigmoid / hardswish / log_sigmoid / softmin / softsign / tanhshrink / selu / softplus / softplus_with / elu / elu_with / mish / glu / prelu` each delegating to `ferrotorch_core::grad_fns::activation::*` (or composed from `arithmetic`/`trans`) mirror the matching `torch.nn.functional.*`; consumed by `ferrotorch-train/examples/multi_epoch_train_dump.rs:61` (`use ferrotorch_nn::functional::{mse_loss, relu};`). |
+//! | REQ-3 | SHIPPED | `pub fn dropout` + `struct DropoutBackward<T>` (stateless inverted dropout with per-element xorshift mask) mirrors `torch.nn.functional.dropout`; consumed via the `ferrotorch-nn/src/lib.rs:163` `pub mod functional;` re-export. Deterministic-RNG plumbing gap tracked by #1452. |
+//! | REQ-4 | SHIPPED | `pub fn sum`, `pub fn mean` delegating to `ferrotorch_core::grad_fns::reduction::{sum, mean}` mirror `torch.sum` / `torch.mean`; consumed via `ferrotorch-nn/src/lib.rs:163` namespace re-export. |
+//! | REQ-5 | SHIPPED | `pub fn mse_loss`, `pub fn cross_entropy`, `pub fn l1_loss`, `pub fn binary_cross_entropy`, `pub fn binary_cross_entropy_with_logits`, `pub fn kl_div` mirror `torch.nn.functional.*`; consumed by `ferrotorch-train/examples/multi_epoch_train_dump.rs:61` (`use ferrotorch_nn::functional::{mse_loss, relu};`) driving a multi-epoch training loop. |
+//! | REQ-6 | SHIPPED | `pub fn normalize`, `pub fn cosine_similarity`, `pub fn pairwise_distance` mirror `torch.nn.functional.{normalize, cosine_similarity, pairwise_distance}`; consumed via `lib.rs:163` namespace re-export (Llama positional embeddings and triplet-loss training callsites). |
+//! | REQ-7 | SHIPPED | `pub fn one_hot(input, num_classes)` with NaN / negative / out-of-range rejection mirrors `torch.nn.functional.one_hot`; consumed via `lib.rs:163` namespace re-export. |
+//! | REQ-8 | SHIPPED | `pub fn interpolate`, `pub fn grid_sample`, `pub fn affine_grid`, `pub fn pixel_shuffle`, `pub fn pixel_unshuffle`, `pub fn unfold`, `pub fn fold` thin-wrap `crate::upsample::*` mirroring `torch.nn.functional.*`; consumed via `lib.rs:163` namespace re-export. |
+//! | REQ-9 | SHIPPED | `pub fn conv1d / conv2d / conv3d / conv_transpose1d / conv_transpose2d / conv_transpose3d` build a transient `Conv*::from_parts(...)` and forward mirroring `torch.nn.functional.conv*`; consumed via `lib.rs:163` namespace re-export. |
+//! | REQ-10 | SHIPPED | `pub use crate::pooling::{adaptive_avg_pool1d/2d/3d, adaptive_max_pool1d/2d/3d, avg_pool1d/2d/3d, lp_pool1d/2d, max_pool1d/2d/3d}` mirrors `torch.nn.functional.*_pool*`; consumed by `ferrotorch-vision/src/models/vgg.rs:24` (`use ferrotorch_nn::pooling::{AdaptiveAvgPool2d, MaxPool2d};`) and the `lib.rs:163` namespace re-export. |
+//! | REQ-11 | SHIPPED | `pub use crate::padding::{PaddingMode, functional_pad_1d as pad1d, functional_pad_2d as pad2d, functional_pad_3d as pad3d}` mirrors `torch.nn.functional.pad`; consumed via `lib.rs:163` namespace re-export. |
+//! | REQ-12 | SHIPPED | `pub fn embedding(input, weight, padding_idx)` builds a transient `Embedding::from_pretrained(...)` mirroring `torch.nn.functional.embedding`; consumed via `lib.rs:163` namespace re-export. |
+//! | REQ-13 | SHIPPED | `pub fn scaled_dot_product_attention(query, key, value, is_causal)` delegates to `crate::flash_attention::flash_attention(..., 64)` mirroring `torch.nn.functional.scaled_dot_product_attention`; consumed via `lib.rs:163` namespace re-export. |
+//! | REQ-14 | SHIPPED | Every entry point calls a `ferrotorch_core::grad_fns::*` primitive that attaches its own backward, or attaches a hand-written `DropoutBackward` / `MSEBackward` / `CrossEntropyBackward` node when grad is enabled; consumed by `ferrotorch-train/examples/multi_epoch_train_dump.rs:61` (`functional::{mse_loss, relu}`) exercising the end-to-end backward path. |
 
 use std::sync::Arc;
 
