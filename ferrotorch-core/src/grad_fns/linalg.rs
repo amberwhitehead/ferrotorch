@@ -70,6 +70,19 @@ fn is_f64<T: Float>() -> bool {
     TypeId::of::<T>() == TypeId::of::<f64>()
 }
 
+/// Returns `true` if `T` is `bf16` (`half::bf16`).
+///
+/// Used by the broadcast-bmm dispatcher (#1543 / GH forecast-bio/ferrotorch#25)
+/// to route 3D × 2D / 2D × 3D / ND × ND bf16 matmul through the cuBLAS
+/// `gpu_matmul_bf16_bf16_strided_batched` kernel (bf16 in/out, FP32
+/// accumulator — standard ~1.5e-3 floor) instead of the CPU `broadcast_matmul`
+/// round-trip that was forcing a 50× precision regression on the ViT-shape
+/// `(1, 200, 4096) @ (4096, 768)` matmul.
+#[inline]
+fn is_bf16<T: Float>() -> bool {
+    TypeId::of::<T>() == TypeId::of::<half::bf16>()
+}
+
 /// GPU-native matmul backward for f32 tensors.
 /// dA = grad_C @ B^T, dB = A^T @ grad_C — all on GPU, no CPU roundtrip.
 fn mm_backward_gpu<T: Float>(grad_output: &Tensor<T>, a: &Tensor<T>, b: &Tensor<T>) -> GradPair<T> {
@@ -1619,11 +1632,26 @@ pub fn matmul_differentiable<T: Float>(
             _ => {}
         }
 
-        // GPU broadcast-bmm path (#819). Routes 4D bmm, 3D x 2D, 2D x 3D,
-        // and leading-dim broadcasts to cuBLAS gemmStridedBatched. PyTorch
-        // supports all of these on CUDA; pre-fix they fell through to the
-        // CPU `linalg::matmul` and surfaced as `GpuTensorNotAccessible`.
-        if a.is_cuda() && a.ndim() >= 2 && b.ndim() >= 2 && (is_f32::<T>() || is_f64::<T>()) {
+        // GPU broadcast-bmm path (#819, #1543). Routes 4D bmm, 3D x 2D,
+        // 2D x 3D, and leading-dim broadcasts to cuBLAS gemmStridedBatched.
+        // PyTorch supports all of these on CUDA; pre-fix the f32/f64 case
+        // surfaced as `GpuTensorNotAccessible`, and the bf16 case fell
+        // through to the CPU `broadcast_matmul` round-trip (50× precision
+        // regression on the ViT shape — see
+        // `tests/divergence_gh25_gpu_bf16_matmul_precision.rs`).
+        //
+        // bf16 lands here for the "single-run" broadcast patterns only —
+        // those where each lead is either empty (fully broadcast) or matches
+        // `out_lead` exactly. That covers every shape the dispatcher routes
+        // here today (3D × 2D, 2D × 3D, ND × ND with matching leads). For
+        // less-uniform broadcasts the bf16 backend returns
+        // `InvalidArgument`; we detect that and fall through to the CPU
+        // path (same behaviour as today — no regression).
+        if a.is_cuda()
+            && a.ndim() >= 2
+            && b.ndim() >= 2
+            && (is_f32::<T>() || is_f64::<T>() || is_bf16::<T>())
+        {
             let backend = gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
             let a_nd = a.ndim();
             let b_nd = b.ndim();
@@ -1665,39 +1693,63 @@ pub fn matmul_differentiable<T: Float>(
                     });
                 }
             }
-            let handle = if is_f32::<T>() {
-                backend.broadcast_bmm_f32(
-                    a.gpu_handle()?,
-                    b.gpu_handle()?,
-                    &a_lead,
-                    &b_lead,
-                    &out_lead,
-                    m,
-                    k_a,
-                    n,
-                )?
-            } else {
-                backend.broadcast_bmm_f64(
-                    a.gpu_handle()?,
-                    b.gpu_handle()?,
-                    &a_lead,
-                    &b_lead,
-                    &out_lead,
-                    m,
-                    k_a,
-                    n,
-                )?
-            };
-            let mut shape = out_lead;
-            shape.push(m);
-            shape.push(n);
-            let storage = TensorStorage::gpu(handle);
-            return if is_grad_enabled() && (a.requires_grad() || b.requires_grad()) {
-                let grad_fn = Arc::new(MatmulBackward::new(a.clone(), b.clone()));
-                Tensor::from_operation(storage, shape, grad_fn)
-            } else {
-                Tensor::from_storage(storage, shape, false)
-            };
+            // bf16 single-run guard: the bf16 backend only encodes broadcasts
+            // where each lead is empty or matches `out_lead` exactly. For
+            // anything else, skip the GPU path and let the CPU fallback
+            // handle it — no regression vs. pre-fix behaviour.
+            let bf16_skip = is_bf16::<T>() && !(a_lead.is_empty() || a_lead == out_lead)
+                || is_bf16::<T>() && !(b_lead.is_empty() || b_lead == out_lead);
+            if !bf16_skip {
+                let handle = if is_f32::<T>() {
+                    backend.broadcast_bmm_f32(
+                        a.gpu_handle()?,
+                        b.gpu_handle()?,
+                        &a_lead,
+                        &b_lead,
+                        &out_lead,
+                        m,
+                        k_a,
+                        n,
+                    )?
+                } else if is_f64::<T>() {
+                    backend.broadcast_bmm_f64(
+                        a.gpu_handle()?,
+                        b.gpu_handle()?,
+                        &a_lead,
+                        &b_lead,
+                        &out_lead,
+                        m,
+                        k_a,
+                        n,
+                    )?
+                } else {
+                    // bf16 path (#1543 / GH#25 fix). Routes through cuBLAS
+                    // `gemm_strided_batched_ex` with CUDA_R_16BF in/out and
+                    // CUBLAS_COMPUTE_32F accumulator — the standard
+                    // ~1.5e-3 cuBLAS bf16+f32-accum floor that the
+                    // upstream issue expects.
+                    backend.broadcast_bmm_bf16(
+                        a.gpu_handle()?,
+                        b.gpu_handle()?,
+                        &a_lead,
+                        &b_lead,
+                        &out_lead,
+                        m,
+                        k_a,
+                        n,
+                    )?
+                };
+                let mut shape = out_lead;
+                shape.push(m);
+                shape.push(n);
+                let storage = TensorStorage::gpu(handle);
+                return if is_grad_enabled() && (a.requires_grad() || b.requires_grad()) {
+                    let grad_fn = Arc::new(MatmulBackward::new(a.clone(), b.clone()));
+                    Tensor::from_operation(storage, shape, grad_fn)
+                } else {
+                    Tensor::from_storage(storage, shape, false)
+                };
+            }
         }
 
         // Fallback for other shapes — still goes through linalg::matmul.

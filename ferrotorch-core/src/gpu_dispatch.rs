@@ -606,6 +606,65 @@ pub trait GpuBackend: Send + Sync {
         })
     }
 
+    /// Broadcast / batched matmul on GPU (bf16 dtype, bf16 in/out, f32 accum).
+    ///
+    /// Same calling convention as [`Self::broadcast_bmm_f32`]: handles the 4D
+    /// bmm, 3D × 2D, 2D × 3D, and arbitrary leading-dim broadcasts that
+    /// `matmul_differentiable` routes here for `Tensor<bf16>` on CUDA.
+    /// Pre-fix (GH forecast-bio/ferrotorch#25 / local #1543) bf16 fell through
+    /// to the CPU `broadcast_matmul` round-trip; downstream of that path the
+    /// ViT 3D × 2D `(1, 200, 4096) @ (4096, 768)` matmul reported a 50× worse
+    /// `max|Δ|` than CPU bf16, because the GPU→CPU→GPU code-path is what the
+    /// reporter actually measured (the CPU bf16 path uses an f64 accumulator;
+    /// the device round-trip silently changes which kernel runs). Routing
+    /// bf16 directly through `gpu_matmul_bf16_bf16_strided_batched`
+    /// (`CUDA_R_16BF` in/out, `CUBLAS_COMPUTE_32F` accumulator) restores the
+    /// standard ~1.5e-3 cuBLAS bf16+f32-accum floor that the upstream issue
+    /// expects.
+    fn broadcast_bmm_bf16(
+        &self,
+        _a: &GpuBufferHandle,
+        _b: &GpuBufferHandle,
+        _a_lead: &[usize],
+        _b_lead: &[usize],
+        _out_lead: &[usize],
+        _m: usize,
+        _k: usize,
+        _n: usize,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::InvalidArgument {
+            message: "broadcast_bmm_bf16 GPU op not implemented for this backend".into(),
+        })
+    }
+
+    /// Broadcast / batched matmul on GPU (IEEE f16 dtype, f16 in/out, f32 accum).
+    ///
+    /// Symmetric trait surface to [`Self::broadcast_bmm_bf16`] for `Tensor<f16>`
+    /// on CUDA. The default impl returns `InvalidArgument`; the CUDA backend
+    /// has no `gpu_matmul_f16_f16_strided_batched` kernel today, so f16 GPU
+    /// 3D × 2D matmul continues to fall back to the CPU `broadcast_matmul`
+    /// round-trip until that kernel lands (see `.design/ferrotorch-gpu/blas.md`
+    /// REQ-11 status row). This trait surface is preserved so the
+    /// `matmul_differentiable` dispatcher in
+    /// `ferrotorch-core/src/grad_fns/linalg.rs` can branch uniformly on
+    /// `is_bf16` / `is_f16` and an opt-in backend can override later without
+    /// further dispatcher churn.
+    fn broadcast_bmm_f16(
+        &self,
+        _a: &GpuBufferHandle,
+        _b: &GpuBufferHandle,
+        _a_lead: &[usize],
+        _b_lead: &[usize],
+        _out_lead: &[usize],
+        _m: usize,
+        _k: usize,
+        _n: usize,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::InvalidArgument {
+            message: "broadcast_bmm_f16 GPU op not implemented for this backend".into(),
+        })
+    }
+
     // Reduction f64
     fn sum_f64(&self, _a: &GpuBufferHandle, _numel: usize) -> FerrotorchResult<GpuBufferHandle> {
         Err(FerrotorchError::InvalidArgument {

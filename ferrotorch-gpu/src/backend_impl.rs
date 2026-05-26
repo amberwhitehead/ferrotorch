@@ -3046,6 +3046,132 @@ impl GpuBackend for CudaBackendImpl {
         Ok(Self::wrap_buffer(result, a.device_ordinal()))
     }
 
+    /// Broadcast-bmm for `Tensor<bf16>` on CUDA — closes the GH#25 / local
+    /// #1543 regression where 3D × 2D bf16 matmul fell through to the CPU
+    /// `broadcast_matmul` round-trip and reported a 50× worse error than CPU
+    /// bf16 against the f32 oracle.
+    ///
+    /// The strided-batched bf16 kernel
+    /// (`gpu_matmul_bf16_bf16_strided_batched`) takes one
+    /// `(stride_a, stride_b, batch_count)` triple per call. The trait method
+    /// here supports the "single-run" broadcast patterns — those where one
+    /// operand is either fully broadcast (its leading dims are empty) or
+    /// exactly aligned to `out_lead`. That set covers all the cases the
+    /// dispatcher in `ferrotorch-core/src/grad_fns/linalg.rs` routes through
+    /// today (3D × 2D, 2D × 3D, ND × ND with matching leads) which were
+    /// pre-fix going through the CPU bf16 round-trip. Less-uniform broadcast
+    /// patterns (broadcast mid-axes, ragged leads) return `InvalidArgument`;
+    /// the dispatcher detects this and skips the GPU path for that call,
+    /// leaving the existing CPU fallback in place — no regression.
+    #[cfg(feature = "cuda")]
+    fn broadcast_bmm_bf16(
+        &self,
+        a: &GpuBufferHandle,
+        b: &GpuBufferHandle,
+        a_lead: &[usize],
+        b_lead: &[usize],
+        out_lead: &[usize],
+        m: usize,
+        k: usize,
+        n: usize,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        let a_buf = Self::unwrap_buffer_bf16(a)?;
+        let b_buf = Self::unwrap_buffer_bf16(b)?;
+        let dev = self.device(a.device_ordinal())?;
+
+        // Per-batch matrix element counts.
+        let a_mat = m * k;
+        let b_mat = k * n;
+        let batch: usize = out_lead.iter().product();
+
+        // Shape contracts: `a_buf.len() == product(a_lead) * a_mat` (1 when
+        // `a_lead` is empty), similarly for `b_buf`. These mirror the f32
+        // path's `validate_broadcast_shapes` invariants enforced by the
+        // upstream `gpu_broadcast_bmm_f32` in `blas.rs`.
+        let a_batch_count: usize = if a_lead.is_empty() {
+            1
+        } else {
+            a_lead.iter().product()
+        };
+        let b_batch_count: usize = if b_lead.is_empty() {
+            1
+        } else {
+            b_lead.iter().product()
+        };
+        let expected_a = a_batch_count * a_mat;
+        let expected_b = b_batch_count * b_mat;
+        if a_buf.len() != expected_a {
+            return Err(FerrotorchError::ShapeMismatch {
+                message: format!(
+                    "broadcast_bmm_bf16: a buffer len {} != expected {} (a_lead={:?}, m={}, k={})",
+                    a_buf.len(),
+                    expected_a,
+                    a_lead,
+                    m,
+                    k,
+                ),
+            });
+        }
+        if b_buf.len() != expected_b {
+            return Err(FerrotorchError::ShapeMismatch {
+                message: format!(
+                    "broadcast_bmm_bf16: b buffer len {} != expected {} (b_lead={:?}, k={}, n={})",
+                    b_buf.len(),
+                    expected_b,
+                    b_lead,
+                    k,
+                    n,
+                ),
+            });
+        }
+
+        // Zero-numel fast path.
+        if batch == 0 || m == 0 || k == 0 || n == 0 {
+            let zeros = dev
+                .stream()
+                .alloc_zeros::<u16>(batch * m * n)
+                .map_err(|e| FerrotorchError::InvalidArgument {
+                    message: format!("broadcast_bmm_bf16: alloc_zeros failed: {e}"),
+                })?;
+            return Ok(Self::wrap_buffer_bf16(zeros, a.device_ordinal()));
+        }
+
+        // Decide single-run stride encoding. `a` is single-run iff its lead is
+        // empty (fully broadcast across all out_lead — stride 0) OR exactly
+        // equals out_lead (per-batch contiguous — stride a_mat). Same for `b`.
+        // These two cases cover every shape the dispatcher routes here today.
+        let stride_a: usize = if a_lead.is_empty() {
+            0
+        } else if a_lead == out_lead {
+            a_mat
+        } else {
+            return Err(FerrotorchError::InvalidArgument {
+                message: format!(
+                    "broadcast_bmm_bf16: non-uniform broadcast pattern for a_lead={:?} out_lead={:?} not single-run-encodable",
+                    a_lead, out_lead,
+                ),
+            });
+        };
+        let stride_b: usize = if b_lead.is_empty() {
+            0
+        } else if b_lead == out_lead {
+            b_mat
+        } else {
+            return Err(FerrotorchError::InvalidArgument {
+                message: format!(
+                    "broadcast_bmm_bf16: non-uniform broadcast pattern for b_lead={:?} out_lead={:?} not single-run-encodable",
+                    b_lead, out_lead,
+                ),
+            });
+        };
+
+        let result = crate::blas::gpu_matmul_bf16_bf16_strided_batched(
+            a_buf, b_buf, m, k, n, batch, stride_a, stride_b, 1.0, dev,
+        )
+        .map_err(Self::map_gpu_err)?;
+        Ok(Self::wrap_buffer_bf16(result, a.device_ordinal()))
+    }
+
     fn bmm_f16_f32(
         &self,
         a: &GpuBufferHandle,

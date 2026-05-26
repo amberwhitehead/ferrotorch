@@ -70,6 +70,25 @@ device-return variants). The module honours rust-gpu-discipline §3:
 - REQ-10: Error policy parity — every cuBLAS error path returns
   `GpuError::Blas(...)` or `GpuError::Driver(...)`. No `.unwrap()` /
   `.expect()` in production code. No silent CPU fallback.
+- REQ-11: bf16 / f16 broadcast bmm trait surface — the cross-crate
+  dispatch surface for ND-broadcast bf16 / f16 matmul is exposed on the
+  `GpuBackend` trait in `ferrotorch-core/src/gpu_dispatch.rs`
+  (`broadcast_bmm_bf16` / `broadcast_bmm_f16`). For bf16, the CUDA
+  backend impl in `backend_impl.rs` wraps the existing
+  `gpu_matmul_bf16_bf16_strided_batched` kernel for the single-run
+  broadcast patterns (each lead is empty or matches `out_lead` exactly)
+  — covering 3D × 2D, 2D × 3D, and ND × ND with matching leads. This
+  closes GH forecast-bio/ferrotorch#25 / local #1543: bf16 3D × 2D ViT
+  matmul on `(1, 200, 4096) @ (4096, 768)` was previously falling
+  through to the CPU `broadcast_matmul` round-trip and reporting a 50×
+  worse `max|Δ|` vs the f32 oracle than CPU bf16. Routing through
+  cuBLAS `gemm_strided_batched_ex` with `CUDA_R_16BF` in/out and
+  `CUBLAS_COMPUTE_32F` accumulator restores the standard ~1.5e-3
+  cuBLAS bf16+f32-accum floor the upstream issue expects. f16 ships
+  trait surface only — no `gpu_matmul_f16_f16_strided_batched` kernel
+  exists yet, so `broadcast_bmm_f16` uses the trait's default-error
+  impl and f16 GPU ND-broadcast matmul continues to use the CPU
+  fallback until that kernel lands.
 
 ## Acceptance Criteria
 
