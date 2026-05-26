@@ -12,6 +12,19 @@
 //!    to the existing CPU loop in `JsonSchemaProcessor::compute_mask`.
 //!
 //! Compiled only when the `cuda` feature is enabled.
+//!
+//! ## REQ status (per `.design/ferrotorch-grammar/gpu_dispatch.md`)
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 | SHIPPED | impl: private `struct CompiledDfa { transitions, char_classes, num_classes, start_state, reject_state, complete_states }` in `gpu_dispatch.rs`; non-test consumer: `fn run_dfa_on_gpu` reads every field to build `DfaMaskInputs::new(...)` in `gpu_dispatch.rs`, dispatched by `pub fn compute_mask_gpu`. |
+//! | REQ-2 | SHIPPED | impl: 7 `fn compile_dfa_for_*` constructors (`boolean`, `null`, `integer`, `number`, `string`, `string_enum`, `object_key`, `nullable`) + `compile_linear_literal` + `compile_boolean_full` in `gpu_dispatch.rs`; non-test consumer: `pub fn compute_mask_gpu` invokes each via the emission-stage match chain. |
+//! | REQ-3 | SHIPPED | impl: `fn add_terminators_to_states(dfa, terminators)` + `fn split_class_for_char(dfa, c)` in `gpu_dispatch.rs`; non-test consumer: `pub fn compute_mask_gpu` wraps every scalar DFA in `add_terminators_to_states` using `grammar.top_frame_parent_terminators()` in production. |
+//! | REQ-4 | SHIPPED | impl: `fn merge_null_branch(inner)` + `fn compile_dfa_for_nullable(inner)` in `gpu_dispatch.rs`; non-test consumer: `pub fn compute_mask_gpu`'s `NullableEmissionStage::Start { inner }` arm dispatches to `compile_dfa_for_nullable(inner)?`. |
+//! | REQ-5 | SHIPPED | impl: `pub struct PackedVocab { pub offsets, pub chars, pub max_token_len }` with `pub fn PackedVocab::pack(vocab: &[String]) -> Self` + manual `Debug` impl in `gpu_dispatch.rs`; non-test consumer: `pub fn compute_mask_gpu` takes `packed: &PackedVocab` and reads `packed.offsets`, `packed.chars`, `packed.max_token_len` to build `DfaMaskInputs`; the `pub use` in `lib.rs` makes it reachable as `ferrotorch_grammar::PackedVocab`. |
+//! | REQ-6 | SHIPPED | impl: `pub fn compute_mask_gpu<R: Runtime>(processor, client, packed) -> Option<TokenMask>` in `gpu_dispatch.rs` with the emission-stage match chain; non-test consumer: the `pub use` in `lib.rs` makes it reachable as `ferrotorch_grammar::compute_mask_gpu`; grandfathered boundary public API per goal.md S5 via `ferrotorch-llama/src/lib.rs:156`. |
+//! | REQ-7 | NOT-STARTED | Object/Array structural phases fall through to `None` in `compute_mask_gpu` (the final `else { return None }` arm) — pinned by test `unsupported_schema_returns_none` in `gpu_dispatch.rs`. Open prereq blocker #1492 — needs DFA shapes for `ObjectFreshOpen`, `ObjectExpectKey`, `ObjectAfterValue`, `ObjectColon`, `ArrayFreshOpen`, `ArrayAfterValue`. |
+//! | REQ-8 | NOT-STARTED | `add_terminators_to_states` routes complete_state x terminator -> popped sink, which then rejects any further char — under-allowing cross-boundary BPE tokens like `,"`. Documented in the doc-comment around the `popped` allocation in `gpu_dispatch.rs`. Open prereq blocker #1493 — needs cross-stack DFA composition or kernel-side parent-state walking. |
 
 use cubecl::prelude::{ComputeClient, Runtime};
 use ferrotorch_cubecl::{DfaMaskInputs, compute_token_mask_dfa_to_gpu};

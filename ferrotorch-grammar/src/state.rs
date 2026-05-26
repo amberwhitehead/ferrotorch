@@ -27,6 +27,19 @@
 //!
 //! Each limitation is captured by a test that asserts the grammar rejects
 //! the disallowed input — so the limitations cannot silently regress.
+//!
+//! ## REQ status (per `.design/ferrotorch-grammar/state.md`)
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 | SHIPPED | impl: `pub struct JsonGrammar` with private `frames: Vec<Frame>` + `done: bool`, `pub fn new(schema)`, `is_complete` in `state.rs`; non-test consumer: `JsonSchemaProcessor::new` in `json_schema.rs` calls `JsonGrammar::new(schema)` and stores it as `grammar: JsonGrammar`. |
+//! | REQ-2 | SHIPPED | impl: `pub fn JsonGrammar::valid_next_chars` walking the top frame via `valid_next_chars_for` + parent terminators in `state.rs`; non-test consumer: `JsonSchemaProcessor::compute_mask` in `json_schema.rs` indirectly drives it through `step_char`'s pre-validation; `gpu_dispatch::compute_mask_gpu` calls `grammar.top_frame_parent_terminators()` in `gpu_dispatch.rs`. |
+//! | REQ-3 | SHIPPED | impl: `pub fn JsonGrammar::step_char` validates against `valid_next_chars` then dispatches to private `apply_step` in `state.rs`; `pub fn step_str` is the convenience wrapper; non-test consumer: `JsonSchemaProcessor::compute_mask` calls `probe.step_char(c)` in a per-token loop (`json_schema.rs`) and `JsonSchemaProcessor::step_token` calls it per token-char to commit. |
+//! | REQ-4 | SHIPPED | impl: `apply_step` covers every `(Schema, Phase)` pair in `state.rs`; `valid_next_chars_for` mirrors with the legal-chars side; non-test consumer: every production `compute_mask` / `step_token` call in `json_schema.rs` walks these arms. |
+//! | REQ-5 | NOT-STARTED | string-body filter excludes `\\` in `valid_next_chars_for` `(Schema::String, Phase::StringChars)` arm in `state.rs`. Open prereq blocker #1488 — needs `\\`-handling sub-phase and `\\uXXXX` codepoint accumulator. |
+//! | REQ-6 | NOT-STARTED | `valid_next_chars_for` `(Schema::Number, Phase::NumberDigits)` arm in `state.rs` does not emit `e` / `E`; the parser would pop the number frame on emit. Open prereq blocker #1489 — needs `had_exponent_marker` + `had_exponent_sign` + `had_exponent_digit` flags. |
+//! | REQ-7 | NOT-STARTED | no whitespace permitted at structural boundaries; tests in `json_schema.rs` walk the explicit compact form. Open prereq blocker #1490 — needs a `permissive_whitespace: bool` flag on `JsonGrammar::new` that injects `[' ', '\t', '\n']` into structural-boundary `valid_next_chars` outputs. |
+//! | REQ-8 | SHIPPED | impl: 8 `pub enum *EmissionStage` types + 14 `pub fn JsonGrammar::*_emission_stage{,_top}` accessors + `pub fn top_frame_parent_terminators` in `state.rs`; non-test consumer: `compute_mask_gpu` in `gpu_dispatch.rs` calls `grammar.boolean_emission_stage_top()`, `null_emission_stage_top()`, `integer_emission_stage_top()`, `number_emission_stage_top()`, `string_emission_stage_top()`, `string_enum_emission_stage_top()`, `nullable_emission_stage()`, `object_key_emission_stage()`, `top_frame_parent_terminators()` in production. |
 
 use std::collections::BTreeSet;
 

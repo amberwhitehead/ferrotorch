@@ -22,6 +22,18 @@
 //! - `additionalProperties` (always treated as `false`).
 //!
 //! These are the right next chunks but live outside this turn.
+//!
+//! ## REQ status (per `.design/ferrotorch-grammar/schema.md`)
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 | SHIPPED | impl: `pub enum Schema` with 9 variants (`Object`, `Array`, `String`, `StringEnum`, `Number`, `Integer`, `Boolean`, `Null`, `Nullable(Box<Schema>)`) in `schema.rs`; non-test consumer: `JsonGrammar::new(schema: Schema)` in `state.rs` accepts and pattern-matches the variant in production (`apply_step` + `valid_next_chars_for` cover every variant). |
+//! | REQ-2 | SHIPPED | impl: `pub enum SchemaError` with `UnsupportedType`, `Unsupported`, `MalformedProperty`, `MalformedEnum`, `NotASchema` variants, `#[non_exhaustive]`, `thiserror::Error`-derived in `schema.rs`; non-test consumer: `GrammarError::Schema(#[from] SchemaError)` in `json_schema.rs` wraps it for the public processor API. |
+//! | REQ-3 | SHIPPED | impl: `pub fn Schema::from_json_schema` in `schema.rs` with `parse_object`, `parse_array`, `parse_enum` helpers; non-test consumer: `JsonSchemaProcessor::new` in `json_schema.rs` invokes `Schema::from_json_schema(schema)?` on every construction. |
+//! | REQ-4 | SHIPPED | impl: `type`-array handling in `from_json_schema` matches `Vec` with single concrete type + `null` flag, wraps in `Schema::Nullable(Box::new(_))`; rejects multi-non-null with `SchemaError::Unsupported`; non-test consumer: `JsonGrammar::apply_step` `(Schema::Nullable(inner), Phase::Start)` arm in `state.rs` dispatches into either the null branch or the inner schema based on the first char. |
+//! | REQ-5 | NOT-STARTED | composition keywords (`oneOf` / `anyOf` / `allOf` / `$ref`) rejected explicitly in `schema.rs` but no typed parse path. Open prereq blocker #1486 — requires a union/intersection state in `JsonGrammar` and a `$ref` resolution context. |
+//! | REQ-6 | NOT-STARTED | numeric/length constraints (`minLength`/`maxLength`/`minimum`/`maximum`), `pattern`, `format` silently dropped — over-allows along those dimensions. Open prereq blocker #1487 — requires bounded counters in `Phase::StringChars` and `Phase::NumberDigits` plus a regex sub-grammar for `pattern`. |
+//! | REQ-7 | SHIPPED | impl: `parse_object` does not consult `additionalProperties` and `JsonGrammar`'s `ObjectKey` candidates list is built from `properties.keys().filter(|k| !keys_seen.contains(*k))` in `state.rs` — unknown keys are masked out. Documented in the module header comment. Non-test consumer: every production `compute_mask` / `step_token` call in `json_schema.rs` walks the same `valid_next_chars_for` path. |
 
 use std::collections::{BTreeMap, BTreeSet};
 

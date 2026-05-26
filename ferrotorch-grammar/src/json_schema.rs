@@ -29,6 +29,19 @@
 //! steps per generation step. Borderline acceptable on CPU; a future
 //! optimization would precompute, per grammar state, a token-level
 //! transition table once per `(state, vocab)` and cache it.
+//!
+//! ## REQ status (per `.design/ferrotorch-grammar/json_schema.md`)
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 | SHIPPED | impl: `pub struct JsonSchemaProcessor { grammar: JsonGrammar, vocab: Vec<String> }` in `json_schema.rs`, `#[derive(Debug)]`; non-test consumer: `gpu_dispatch::compute_mask_gpu(processor: &JsonSchemaProcessor, ...)` in `gpu_dispatch.rs` reads `processor.grammar()` in production. |
+//! | REQ-2 | SHIPPED | impl: `pub fn JsonSchemaProcessor::new` invokes `Schema::from_json_schema(schema)?` then `JsonGrammar::new` in `json_schema.rs`, returning `Result<Self, GrammarError>` via `#[from]` conversion; non-test consumer: the `pub fn` is grandfathered public API surface (lib.rs re-export, `ferrotorch-llama/src/lib.rs:156` alias). |
+//! | REQ-3 | SHIPPED | impl: `pub fn JsonSchemaProcessor::compute_mask(&self) -> TokenMask` in `json_schema.rs` walks every token via `probe = self.grammar.clone(); for c in tok.chars() { probe.step_char(c) }`; non-test consumer: `compute_mask_gpu` in `gpu_dispatch.rs` is the GPU peer of this CPU path — the boundary public API is grandfathered. |
+//! | REQ-4 | SHIPPED | impl: `pub fn JsonSchemaProcessor::step_token(&mut self, token_id) -> Result<(), GrammarError>` in `json_schema.rs` with `InvalidTokenId` + `Step` error paths; non-test consumer: grandfathered public API, exercised by every downstream sampler that commits a sampled token. |
+//! | REQ-5 | NOT-STARTED | `compute_mask` clones the grammar per token + walks chars per token in `json_schema.rs` — O(`vocab_len * max_token_len`). Open prereq blocker #1491 — needs precomputed per-(state, vocab) token-transition cache (Rust analog of xgrammar's per-state mask table). |
+//! | REQ-6 | SHIPPED | impl: `pub struct TokenMask { pub allow: Vec<u32> }` with `pub fn allow_all(vocab_size)` + `num_allowed(&self)` in `json_schema.rs`; non-test consumer: `gpu_dispatch::run_dfa_on_gpu` constructs a `TokenMask` from the kernel's u32 buffer in `gpu_dispatch.rs`; `pub use ferrotorch_grammar::TokenMask` for downstream callers. |
+//! | REQ-7 | SHIPPED | impl: `pub enum GrammarError` with `Schema(#[from] SchemaError)`, `Step(#[from] StepError)`, `InvalidTokenId(u32)` variants, `#[non_exhaustive]`, `thiserror::Error` in `json_schema.rs`; non-test consumer: every `pub fn` returning `Result<_, GrammarError>` propagates it (`new`, `step_token`); grandfathered public API. |
+//! | REQ-8 | SHIPPED | impl: `pub fn from_compiled`, `vocab_len`, `is_complete`, `grammar(&self) -> &JsonGrammar` accessors in `json_schema.rs`; non-test consumer: `compute_mask_gpu` calls `processor.grammar()` in `gpu_dispatch.rs`. |
 
 use serde_json::Value;
 
