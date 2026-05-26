@@ -3,6 +3,18 @@
 //! Sums three lookups (word + position + token_type) and applies a
 //! final LayerNorm. Mirrors `transformers.models.bert.modeling_bert.BertEmbeddings`,
 //! minus the inference-time-noop Dropout.
+//!
+//! ## REQ status (per `.design/<area>/<file>.md`)
+//!
+//! | REQ | Status | Evidence |
+//! | --- | --- | --- |
+//! | REQ-1 | SHIPPED | impl: `pub struct BertEmbeddings<T: Float>` in `embeddings.rs`; non-test consumer: field of `pub struct BertModel` at `ferrotorch-bert/src/model.rs:144`. |
+//! | REQ-2 | SHIPPED | impl: `BertEmbeddings::new` in `embeddings.rs`; non-test consumer: `BertModel::new` at `ferrotorch-bert/src/model.rs:161` calls it. |
+//! | REQ-3 | SHIPPED | impl: `BertEmbeddings::forward_from_ids` in `embeddings.rs`; non-test consumer: `BertModel::forward_from_ids` at `ferrotorch-bert/src/model.rs:185` calls it. |
+//! | REQ-4 | SHIPPED | impl: input-validation branches at the top of `forward_from_ids` in `embeddings.rs`; non-test consumer: `BertModel::forward_from_ids` at `ferrotorch-bert/src/model.rs:185` propagates the error. |
+//! | REQ-5 | SHIPPED | impl: `impl<T: Float> Module<T> for BertEmbeddings<T>` in `embeddings.rs`; non-test consumer: `Module` blanket calls from `BertModel`'s `Module` impl at `ferrotorch-bert/src/model.rs:262`. |
+//! | REQ-6 | SHIPPED | impl: `Module::forward` for `BertEmbeddings` in `embeddings.rs`; non-test consumer: `BertModel::forward` at `ferrotorch-bert/src/model.rs:263` invokes `self.embeddings.forward(input)`. |
+//! | REQ-7 | SHIPPED | impl: `reshape_to_3d` call inside `forward_from_ids` in `embeddings.rs`; non-test consumer: `BertModel::forward_from_ids` at `ferrotorch-bert/src/model.rs:185` feeds the resulting `[1, S, hidden]` into `BertEncoder::forward`. |
 
 use ferrotorch_core::grad_fns::arithmetic::add;
 use ferrotorch_core::{FerrotorchError, FerrotorchResult, Float, Tensor, TensorStorage};

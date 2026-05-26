@@ -5,6 +5,17 @@
 //! ffn_out  = GELU(Linear_inter(attn_out))                  // intermediate
 //! layer_out= LayerNorm(attn_out + Linear_out(ffn_out))    // POST-NORM
 //! ```
+//!
+//! ## REQ status (per `.design/<area>/<file>.md`)
+//!
+//! | REQ | Status | Evidence |
+//! | --- | --- | --- |
+//! | REQ-1 | SHIPPED | impl: `pub struct BertIntermediate<T: Float>` + its `Module<T>` impl in `layer.rs`; non-test consumer: field `intermediate` of `pub struct BertLayer` in `layer.rs`; `BertLayer::Module::forward` in `layer.rs` invokes `self.intermediate.forward(&attn_out)`. |
+//! | REQ-2 | SHIPPED | impl: `BertOutput::forward_residual` in `layer.rs`; non-test consumer: `BertLayer::Module::forward` in `layer.rs` invokes `self.output.forward_residual(&inter, &attn_out)`. |
+//! | REQ-3 | SHIPPED | impl: `pub struct BertLayer<T: Float>` + its `Module<T>` impl in `layer.rs`; non-test consumer: element of `pub layer: Vec<BertLayer<T>>` at `ferrotorch-bert/src/model.rs:22`; `BertEncoder::new` at `ferrotorch-bert/src/model.rs:35` constructs them; `BertEncoder::Module::forward` at `ferrotorch-bert/src/model.rs:46` iterates them. |
+//! | REQ-4 | SHIPPED | impl: `BertOutput::Module::forward` (dense-only) in `layer.rs`; non-test consumer: re-export at `ferrotorch-bert/src/lib.rs:89`. |
+//! | REQ-5 | SHIPPED | impl: `named_parameters` / `load_state_dict` for `BertLayer` in `layer.rs`; non-test consumer: `BertEncoder::load_state_dict` at `ferrotorch-bert/src/model.rs:105` recurses through `layer.{i}.*`. |
+//! | REQ-6 | SHIPPED | impl: `BertIntermediate::new` constructs `GELU::new()` (exact-erf) in `layer.rs`; non-test consumer: the `gelu` activation choice is enforced upstream by `HfBertConfig::validate` in `ferrotorch-bert/src/config.rs` which rejects any other activation name on load. |
 
 use ferrotorch_core::grad_fns::arithmetic::add;
 use ferrotorch_core::{FerrotorchError, FerrotorchResult, Float, Tensor};

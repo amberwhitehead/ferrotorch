@@ -3,6 +3,19 @@
 //! [`BertConfig`] is the flat, self-contained struct the model layer
 //! works against. Construct it directly for synthetic tests, or via
 //! [`BertConfig::from_hf`] from a HuggingFace BERT `config.json`.
+//!
+//! ## REQ status (per `.design/<area>/<file>.md`)
+//!
+//! | REQ | Status | Evidence |
+//! | --- | --- | --- |
+//! | REQ-1 | SHIPPED | impl: `pub struct BertConfig` in `config.rs`; non-test consumer: `pub use` at `ferrotorch-bert/src/lib.rs:87` plus `BertEmbeddings::new` at `ferrotorch-bert/src/embeddings.rs:49`. |
+//! | REQ-2 | SHIPPED | impl: `pub struct HfBertConfig` in `config.rs`; non-test consumer: `pub use` at `ferrotorch-bert/src/lib.rs:87`. |
+//! | REQ-3 | SHIPPED | impl: `BertConfig::validate` in `config.rs`; non-test consumer: invoked by `BertEmbeddings::new` at `ferrotorch-bert/src/embeddings.rs:49` and `BertSelfAttention::new` at `ferrotorch-bert/src/attention.rs:46`. |
+//! | REQ-4 | SHIPPED | impl: `HfBertConfig::validate` in `config.rs`; non-test consumer: invoked by `BertConfig::from_hf` in `config.rs`. |
+//! | REQ-5 | SHIPPED | impl: `BertConfig::from_hf` in `config.rs`; non-test consumer: `pub use` at `ferrotorch-bert/src/lib.rs:87` (called by Hub-load helpers). |
+//! | REQ-6 | SHIPPED | impl: `BertConfig::all_minilm_l6_v2` in `config.rs`; non-test consumer: `pub use` at `ferrotorch-bert/src/lib.rs:87`. |
+//! | REQ-7 | SHIPPED | impl: `HfBertConfig::from_file` / `from_json_str` in `config.rs`; non-test consumer: `pub use` at `ferrotorch-bert/src/lib.rs:87`. |
+//! | REQ-8 | SHIPPED | impl: `BertConfig::head_dim` in `config.rs`; non-test consumer: `BertSelfAttention::new` at `ferrotorch-bert/src/attention.rs:53` reads `cfg.head_dim()`. |
 
 use std::path::Path;
 

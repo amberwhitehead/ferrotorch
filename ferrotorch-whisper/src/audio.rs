@@ -27,6 +27,19 @@
 //!
 //! All math is done in `f64` accumulation and downcast at the end to
 //! match the reference's `np.float64` STFT path.
+//!
+//! ## REQ status (per `.design/<area>/<file>.md`)
+//!
+//! | REQ | Status | Evidence |
+//! | --- | --- | --- |
+//! | REQ-1 | SHIPPED | impl: `pub const SAMPLE_RATE: u32 = 16_000;` (and siblings) at the top of `audio.rs`; non-test consumer: `pub use` at `ferrotorch-whisper/src/lib.rs:106` re-exports `N_FRAMES`, `N_MELS`, `SAMPLE_RATE`. |
+//! | REQ-2 | SHIPPED | impl: `pub fn log_mel_spectrogram` in `audio.rs`; non-test consumer: `pub use` at `ferrotorch-whisper/src/lib.rs:106`. |
+//! | REQ-3 | SHIPPED | impl: `MEL_FILTERS_BYTES` `include_bytes!` + `mel_filters` decoder in `audio.rs`; non-test consumer: `log_mel_spectrogram` in `audio.rs` invokes `mel_filters()`. |
+//! | REQ-4 | SHIPPED | impl: `hann_window` in `audio.rs`; non-test consumer: `log_mel_spectrogram` in `audio.rs` invokes `hann_window()`. |
+//! | REQ-5 | SHIPPED | impl: `reflect_pad` in `audio.rs`; non-test consumer: `log_mel_spectrogram` in `audio.rs` invokes `reflect_pad(&padded, N_FFT / 2)`. |
+//! | REQ-6 | SHIPPED | impl: `stft_one_frame` in `audio.rs`; non-test consumer: `log_mel_spectrogram` in `audio.rs` invokes it once per frame. |
+//! | REQ-7 | SHIPPED | impl: magnitude-squared + transpose + mel-bank loops inside `log_mel_spectrogram` in `audio.rs`; non-test consumer: same call path as REQ-2 via the `pub use`. |
+//! | REQ-8 | SHIPPED | impl: `log10` -> clip-to-max-minus-8 -> `(x + 4) / 4` normalisation block inside `log_mel_spectrogram` in `audio.rs`; non-test consumer: same call path as REQ-7. |
 
 use ferrotorch_core::{FerrotorchError, FerrotorchResult, Tensor, TensorStorage};
 

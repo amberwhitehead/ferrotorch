@@ -8,6 +8,17 @@
 //! keeps the indirection so any future name drift (e.g. dropping the
 //! `encoder.` prefix, or absorbing the pooler) stays localised to one
 //! function.
+//!
+//! ## REQ status (per `.design/<area>/<file>.md`)
+//!
+//! | REQ | Status | Evidence |
+//! | --- | --- | --- |
+//! | REQ-1 | SHIPPED | impl: `pub fn load_bert_model` in `safetensors_loader.rs`; non-test consumer: `pub use` at `ferrotorch-bert/src/lib.rs:91`. |
+//! | REQ-2 | SHIPPED | impl: `pub fn load_sentence_transformer` in `safetensors_loader.rs`; non-test consumer: `pub use` at `ferrotorch-bert/src/lib.rs:91`. |
+//! | REQ-3 | SHIPPED | impl: `load_safetensors_filtered` in `safetensors_loader.rs`; non-test consumer: invoked by `load_bert_model` in `safetensors_loader.rs`. |
+//! | REQ-4 | SHIPPED | impl: placeholder re-insert block inside `load_bert_model` in `safetensors_loader.rs`; non-test consumer: same call path — `load_bert_model` is the only entry into the helper. |
+//! | REQ-5 | SHIPPED | impl: `key_is_skippable_at_decode` in `safetensors_loader.rs`; non-test consumer: invoked by `load_safetensors_filtered` in `safetensors_loader.rs`. |
+//! | REQ-6 | SHIPPED | impl: `.map_err(\|e\| FerrotorchError::InvalidArgument { ... })` patterns in `safetensors_loader.rs`; non-test consumer: error type surfaces through the `pub use` at `ferrotorch-bert/src/lib.rs:91`. |
 
 use std::path::Path;
 

@@ -24,6 +24,16 @@
 //! The returned tensor is the raw attention output `[1, S, hidden]` —
 //! the residual add is the caller's responsibility (matches HF's
 //! `WhisperEncoderLayer.forward`).
+//!
+//! ## REQ status (per `.design/<area>/<file>.md`)
+//!
+//! | REQ | Status | Evidence |
+//! | --- | --- | --- |
+//! | REQ-1 | SHIPPED | impl: `pub struct WhisperEncoderSelfAttention<T: Float>` + `WhisperEncoderSelfAttention::new` (with `k_proj` constructed with `bias=false`) in `attention.rs`; non-test consumer: field `self_attn` of `pub struct WhisperEncoderLayer` at `ferrotorch-whisper/src/layer.rs:23`. |
+//! | REQ-2 | SHIPPED | impl: `Module::forward` for `WhisperEncoderSelfAttention` in `attention.rs`; non-test consumer: `WhisperEncoderLayer::Module::forward` at `ferrotorch-whisper/src/layer.rs:62` invokes `self.self_attn.forward(&normed)`. |
+//! | REQ-3 | SHIPPED | impl: `named_parameters` / `load_state_dict` for `WhisperEncoderSelfAttention` in `attention.rs`; non-test consumer: `WhisperEncoderLayer::load_state_dict` at `ferrotorch-whisper/src/layer.rs:163` recurses through `self_attn.*`. |
+//! | REQ-4 | SHIPPED | impl: rank/shape check at the top of `Module::forward` for `WhisperEncoderSelfAttention` in `attention.rs`; non-test consumer: propagated through `WhisperEncoderLayer::Module::forward` at `ferrotorch-whisper/src/layer.rs:62`. |
+//! | REQ-5 | SHIPPED | impl: `impl<T: Float> Module<T> for WhisperEncoderSelfAttention<T>` in `attention.rs`; non-test consumer: `Module` blanket calls from `WhisperEncoderLayer`'s `Module` impl at `ferrotorch-whisper/src/layer.rs:58`. |
 
 use ferrotorch_core::{FerrotorchError, FerrotorchResult, Float, Tensor, TensorStorage};
 use ferrotorch_nn::module::{Module, StateDict};

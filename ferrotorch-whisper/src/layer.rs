@@ -4,6 +4,15 @@
 //! attn_out  = input + self_attn(self_attn_layer_norm(input))   // PRE-NORM residual
 //! layer_out = attn_out + fc2(GELU(fc1(final_layer_norm(attn_out))))
 //! ```
+//!
+//! ## REQ status (per `.design/<area>/<file>.md`)
+//!
+//! | REQ | Status | Evidence |
+//! | --- | --- | --- |
+//! | REQ-1 | SHIPPED | impl: `pub struct WhisperEncoderLayer<T: Float>` + `WhisperEncoderLayer::new` in `layer.rs`; non-test consumer: element of `pub layers: Vec<WhisperEncoderLayer<T>>` at `ferrotorch-whisper/src/encoder.rs:150`. |
+//! | REQ-2 | SHIPPED | impl: `Module::forward` for `WhisperEncoderLayer` in `layer.rs`; non-test consumer: `WhisperEncoder::forward_from_mel` at `ferrotorch-whisper/src/encoder.rs:232` invokes `l.forward(&x)` for each layer. |
+//! | REQ-3 | SHIPPED | impl: `let eps = 1e-5_f64;` + documenting comment at the top of `WhisperEncoderLayer::new` in `layer.rs`; non-test consumer: same call path as REQ-1 (eps is baked into the LayerNorms). |
+//! | REQ-4 | SHIPPED | impl: `named_parameters` / `load_state_dict` for `WhisperEncoderLayer` in `layer.rs`; non-test consumer: `WhisperEncoder::load_state_dict` at `ferrotorch-whisper/src/encoder.rs:421` recurses through `layers.{i}.*`. |
 
 use ferrotorch_core::grad_fns::arithmetic::add;
 use ferrotorch_core::{FerrotorchError, FerrotorchResult, Float, Tensor};

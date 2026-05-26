@@ -17,6 +17,20 @@
 //! to the standard sinusoidal pattern. We store it as a parameter so it
 //! takes the `embed_positions.weight` slot when loading state — there
 //! is no training-loop concern here (encoder-only, no autograd).
+//!
+//! ## REQ status (per `.design/<area>/<file>.md`)
+//!
+//! | REQ | Status | Evidence |
+//! | --- | --- | --- |
+//! | REQ-1 | SHIPPED | impl: `pub struct WhisperConvStem<T: Float>` + its `Module<T>` impl in `encoder.rs`; non-test consumer: field `conv_stem` of `pub struct WhisperEncoder` in `encoder.rs`; `WhisperEncoder::forward_from_mel` in `encoder.rs` invokes `self.conv_stem.forward(mel)`. |
+//! | REQ-2 | SHIPPED | impl: `pub struct WhisperEncoder<T: Float>` + `WhisperEncoder::new` in `encoder.rs`; non-test consumer: `load_whisper_encoder` at `ferrotorch-whisper/src/safetensors_loader.rs:31` constructs and returns it. |
+//! | REQ-3 | SHIPPED | impl: `WhisperEncoder::forward_from_mel` in `encoder.rs`; non-test consumer: `Module::forward` for `WhisperEncoder` in `encoder.rs` delegates to `self.forward_from_mel(input)`. |
+//! | REQ-4 | SHIPPED | impl: shape checks at the top of `forward_from_mel` and after the conv stem in `encoder.rs`; non-test consumer: same call path as REQ-3. |
+//! | REQ-5 | SHIPPED | impl: `embed_positions: Parameter<T>` field + the `self.embed_positions = Parameter::new(pos.clone())` replacement in `WhisperEncoder::load_state_dict` in `encoder.rs`; non-test consumer: `load_whisper_encoder` at `ferrotorch-whisper/src/safetensors_loader.rs:31` drives the load. |
+//! | REQ-6 | SHIPPED | impl: `WhisperEncoder::load_hf_state_dict` in `encoder.rs`; non-test consumer: `load_whisper_encoder` at `ferrotorch-whisper/src/safetensors_loader.rs:31` invokes it. |
+//! | REQ-7 | SHIPPED | impl: `pub struct DropReport` in `encoder.rs`; non-test consumer: returned by `load_whisper_encoder` at `ferrotorch-whisper/src/safetensors_loader.rs:35`. |
+//! | REQ-8 | SHIPPED | impl: `named_parameters` + recursive `load_state_dict` for `WhisperEncoder` in `encoder.rs`; non-test consumer: `WhisperEncoder::load_hf_state_dict` in `encoder.rs` invokes `self.load_state_dict(&remapped, strict)` after stripping the HF prefix. |
+//! | REQ-9 | SHIPPED | impl: round-trip exercised by `round_trip_state_dict` in the file's `mod tests`; non-test consumer: `load_whisper_encoder` at `ferrotorch-whisper/src/safetensors_loader.rs:31` is the production path against real safetensors. |
 
 use std::collections::HashMap;
 

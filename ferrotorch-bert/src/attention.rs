@@ -9,6 +9,18 @@
 //! out     = Linear(ctx)             // [hidden -> hidden], with bias
 //! return    LayerNorm(input + out)  // POST-NORM residual
 //! ```
+//!
+//! ## REQ status (per `.design/<area>/<file>.md`)
+//!
+//! | REQ | Status | Evidence |
+//! | --- | --- | --- |
+//! | REQ-1 | SHIPPED | impl: `pub struct BertSelfAttention<T: Float>` in `attention.rs`; non-test consumer: field `self_attn` of `pub struct BertAttention` in `attention.rs`; re-export at `ferrotorch-bert/src/lib.rs:86`. |
+//! | REQ-2 | SHIPPED | impl: `Module::forward` for `BertSelfAttention` in `attention.rs`; non-test consumer: `BertAttention::Module::forward` in `attention.rs` invokes `self.self_attn.forward(input)`. |
+//! | REQ-3 | SHIPPED | impl: `BertSelfOutput::forward_residual` in `attention.rs`; non-test consumer: `BertAttention::Module::forward` in `attention.rs` invokes `self.output.forward_residual(&ctx, input)`. |
+//! | REQ-4 | SHIPPED | impl: `pub struct BertAttention<T: Float>` + its `Module<T>` impl in `attention.rs`; non-test consumer: field `attention` of `pub struct BertLayer` at `ferrotorch-bert/src/layer.rs:243`; `BertLayer::Module::forward` at `ferrotorch-bert/src/layer.rs:269` invokes `self.attention.forward(input)`. |
+//! | REQ-5 | SHIPPED | impl: `named_parameters` / `load_state_dict` for `BertSelfAttention` / `BertSelfOutput` / `BertAttention` in `attention.rs`; non-test consumer: `BertLayer::load_state_dict` at `ferrotorch-bert/src/layer.rs:344` recurses through `attention.{self,output}.*`. |
+//! | REQ-6 | SHIPPED | impl: rank/shape checks at the top of `BertSelfAttention::Module::forward` in `attention.rs`; non-test consumer: error propagated through `BertAttention::Module::forward` then `BertLayer::Module::forward` at `ferrotorch-bert/src/layer.rs:269`. |
+//! | REQ-7 | SHIPPED | impl: `BertSelfOutput::Module::forward` (dense-only) in `attention.rs`; non-test consumer: reachable through the `pub use` at `ferrotorch-bert/src/lib.rs:86`. |
 
 use ferrotorch_core::grad_fns::arithmetic::add;
 use ferrotorch_core::{FerrotorchError, FerrotorchResult, Float, Tensor, TensorStorage};

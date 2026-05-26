@@ -5,6 +5,14 @@
 //! [`load_whisper_encoder`] filters in only the `encoder.*` keys (the
 //! drop report records the rest so the pin script can audit no encoder
 //! key was silently lost).
+//!
+//! ## REQ status (per `.design/<area>/<file>.md`)
+//!
+//! | REQ | Status | Evidence |
+//! | --- | --- | --- |
+//! | REQ-1 | SHIPPED | impl: `pub fn load_whisper_encoder` in `safetensors_loader.rs`; non-test consumer: `pub use` at `ferrotorch-whisper/src/lib.rs:110`. |
+//! | REQ-2 | SHIPPED | impl: `strict: bool` parameter forwarded to `encoder.load_hf_state_dict(&state, strict)` in `safetensors_loader.rs`; non-test consumer: same `pub use` at `ferrotorch-whisper/src/lib.rs:110`. |
+//! | REQ-3 | SHIPPED | impl: `.map_err(\|e\| FerrotorchError::InvalidArgument { ... })` in `safetensors_loader.rs`; non-test consumer: error type surfaces through the `pub use` at `ferrotorch-whisper/src/lib.rs:110`. |
 
 use std::path::Path;
 

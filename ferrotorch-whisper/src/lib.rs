@@ -94,6 +94,15 @@
 //! The decoder (cross-attention, kv-cache, beam search) is intentionally
 //! not implemented in this crate. Phase B.2 of real-artifact-driven
 //! development is encoder-only.
+//!
+//! ## REQ status (per `.design/<area>/<file>.md`)
+//!
+//! | REQ | Status | Evidence |
+//! | --- | --- | --- |
+//! | REQ-1 | SHIPPED | impl: `#![deny(...)]` / `#![allow(...)]` block at `lib.rs:5-44`; non-test consumer: enforced by every other file in the crate. |
+//! | REQ-2 | SHIPPED | impl: `pub mod` declarations in `lib.rs`; non-test consumer: every other `.rs` file in the crate uses `crate::<mod>::...` paths. |
+//! | REQ-3 | SHIPPED | impl: `pub use` block at `lib.rs:105-110`; non-test consumer: downstream binaries import these names directly. |
+//! | REQ-4 | SHIPPED | impl: `//!` doc-comment block at `lib.rs:46-96`; non-test consumer: published via `cargo doc -p ferrotorch-whisper`. |
 
 pub mod attention;
 pub mod audio;

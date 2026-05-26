@@ -9,6 +9,20 @@
 //! preserved (so [`WhisperConfig`] round-trips a real upstream config)
 //! but the decoder forward pass is intentionally not implemented in
 //! this crate (Phase B.2 of real-artifact-driven development).
+//!
+//! ## REQ status (per `.design/<area>/<file>.md`)
+//!
+//! | REQ | Status | Evidence |
+//! | --- | --- | --- |
+//! | REQ-1 | SHIPPED | impl: `pub struct WhisperConfig` in `config.rs`; non-test consumer: `pub use` at `ferrotorch-whisper/src/lib.rs:107` plus `WhisperEncoder::new` at `ferrotorch-whisper/src/encoder.rs:165`. |
+//! | REQ-2 | SHIPPED | impl: `pub struct HfWhisperConfig` in `config.rs`; non-test consumer: `pub use` at `ferrotorch-whisper/src/lib.rs:107`. |
+//! | REQ-3 | SHIPPED | impl: `WhisperConfig::validate` in `config.rs`; non-test consumer: invoked by `WhisperConvStem::new` at `ferrotorch-whisper/src/encoder.rs:50` and `WhisperEncoderSelfAttention::new` at `ferrotorch-whisper/src/attention.rs:59`. |
+//! | REQ-4 | SHIPPED | impl: `HfWhisperConfig::validate` in `config.rs`; non-test consumer: invoked by `WhisperConfig::from_hf` in `config.rs`. |
+//! | REQ-5 | SHIPPED | impl: `WhisperConfig::from_hf` in `config.rs`; non-test consumer: `pub use` at `ferrotorch-whisper/src/lib.rs:107`. |
+//! | REQ-6 | SHIPPED | impl: `WhisperConfig::whisper_tiny` in `config.rs`; non-test consumer: `pub use` at `ferrotorch-whisper/src/lib.rs:107`. |
+//! | REQ-7 | SHIPPED | impl: `HfWhisperConfig::from_file` / `from_json_str` in `config.rs`; non-test consumer: `pub use` at `ferrotorch-whisper/src/lib.rs:107`. |
+//! | REQ-8 | SHIPPED | impl: `WhisperConfig::encoder_head_dim` in `config.rs`; non-test consumer: `WhisperEncoderSelfAttention::new` at `ferrotorch-whisper/src/attention.rs:66` reads `cfg.encoder_head_dim()`. |
+//! | REQ-9 | SHIPPED | impl: decoder fields on `WhisperConfig` + `HfWhisperConfig` in `config.rs`; non-test consumer: `pub use` at `ferrotorch-whisper/src/lib.rs:107` (callers round-trip the full config). |
 
 use std::path::Path;
 

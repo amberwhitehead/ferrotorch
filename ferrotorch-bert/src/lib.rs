@@ -75,6 +75,15 @@
 //! [`load_sentence_transformer`] helper this gives a direct path from
 //! a downloaded `sentence-transformers/all-MiniLM-L6-v2` checkpoint
 //! to a loaded model ready to compute sentence embeddings.
+//!
+//! ## REQ status (per `.design/<area>/<file>.md`)
+//!
+//! | REQ | Status | Evidence |
+//! | --- | --- | --- |
+//! | REQ-1 | SHIPPED | impl: `#![deny(...)]` / `#![allow(...)]` block at `lib.rs:5-40`; non-test consumer: enforced by every other file in the crate. |
+//! | REQ-2 | SHIPPED | impl: `pub mod` declarations in `lib.rs`; non-test consumer: every other `.rs` file in the crate uses `crate::<mod>::...` paths. |
+//! | REQ-3 | SHIPPED | impl: `pub use` block at `lib.rs:86-91`; non-test consumer: downstream binaries import these names directly. |
+//! | REQ-4 | SHIPPED | impl: `//!` doc-comment block at `lib.rs:42-77`; non-test consumer: published via `cargo doc -p ferrotorch-bert`. |
 
 pub mod attention;
 pub mod config;

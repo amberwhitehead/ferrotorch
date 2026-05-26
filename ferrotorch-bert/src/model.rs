@@ -4,6 +4,20 @@
 //! [`SentenceTransformer`] adds mean-pooling over the attention mask
 //! followed by optional L2 normalization, matching the inference path
 //! of `sentence_transformers.SentenceTransformer.encode(...)`.
+//!
+//! ## REQ status (per `.design/<area>/<file>.md`)
+//!
+//! | REQ | Status | Evidence |
+//! | --- | --- | --- |
+//! | REQ-1 | SHIPPED | impl: `pub struct BertEncoder<T: Float>` + its `Module<T>` impl in `model.rs`; non-test consumer: field `encoder` of `pub struct BertModel` in `model.rs`; `BertModel::forward_from_ids` in `model.rs` invokes `self.encoder.forward(&h)`. |
+//! | REQ-2 | SHIPPED | impl: `pub struct BertModel<T: Float>` + `BertModel::new` + `BertModel::forward_from_ids` in `model.rs`; non-test consumer: `load_bert_model` at `ferrotorch-bert/src/safetensors_loader.rs:103` constructs and returns it. |
+//! | REQ-3 | SHIPPED | impl: `BertModel::load_hf_state_dict` in `model.rs`; non-test consumer: `load_bert_model` at `ferrotorch-bert/src/safetensors_loader.rs:103` invokes it. |
+//! | REQ-4 | SHIPPED | impl: `pub struct DropReport` in `model.rs`; non-test consumer: returned by `load_bert_model` at `ferrotorch-bert/src/safetensors_loader.rs:107` and propagated up through `load_sentence_transformer` at `ferrotorch-bert/src/safetensors_loader.rs:176`. |
+//! | REQ-5 | SHIPPED | impl: `pub struct SentenceTransformer<T: Float>` + `SentenceTransformer::encode` in `model.rs`; non-test consumer: `load_sentence_transformer` at `ferrotorch-bert/src/safetensors_loader.rs:171` constructs and returns it. |
+//! | REQ-6 | SHIPPED | impl: input-validation branches at the top of `SentenceTransformer::encode` in `model.rs`; non-test consumer: same call path as REQ-5. |
+//! | REQ-7 | SHIPPED | impl: L2-normalize block in `SentenceTransformer::encode` in `model.rs` (`sq_sum_f64.sqrt().max(1e-12)`); non-test consumer: same call path as REQ-5. |
+//! | REQ-8 | SHIPPED | impl: `named_parameters` + `load_state_dict` for `BertModel` in `model.rs`; non-test consumer: `BertModel::load_hf_state_dict` in `model.rs` invokes `self.load_state_dict(&remapped, strict)` after remapping. |
+//! | REQ-9 | SHIPPED | impl: round-trip exercised by `round_trip_state_dict` in the file's `mod tests`; non-test consumer: `load_bert_model` at `ferrotorch-bert/src/safetensors_loader.rs:103` is the production path that exercises the same logic against a real safetensors file. |
 
 use std::collections::HashMap;
 
