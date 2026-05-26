@@ -19,8 +19,9 @@
 //! | REQ-9 (`cdf`/`icdf`) | SHIPPED | `exp(-exp(-z))` / `-ln(-ln(p))` overrides; consumer: trait surface |
 //! | REQ-10 (`mean`/`mode`/`variance`) | SHIPPED | overrides mirroring `gumbel.py:74-88`; consumer: trait surface |
 //! | REQ-11 (`GumbelRsampleBackward`) | SHIPPED | sum-of-grad + `-ln(-ln(u))`-weighted-sum backward; consumer: invoked by the rsample method when grad enabled |
-//! | REQ-12 (full PyTorch surface) | NOT-STARTED | blocker #1419 — `expand`, `arg_constraints`, `support`, `validate_args`, `TransformedDistribution` base hooks (cross-cutting with `lib.md` REQ-5 / blocker #1376) |
+//! | REQ-12 (full PyTorch surface — `has_rsample`/`support`/`arg_constraints`/`expand`) | SHIPPED | the trait overrides at the tail of `impl Distribution for Gumbel` in `gumbel.rs` mirror `torch/distributions/gumbel.py:33-35`; consumer: trait dispatch via `pub use Gumbel` re-export. |
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use ferrotorch_core::creation;
@@ -29,7 +30,8 @@ use ferrotorch_core::error::{FerrotorchError, FerrotorchResult};
 use ferrotorch_core::storage::TensorStorage;
 use ferrotorch_core::tensor::{GradFn, Tensor};
 
-use crate::Distribution;
+use crate::constraints;
+use crate::{DistConstraint, Distribution};
 
 /// Gumbel (Type-I extreme value) distribution parameterized by `loc` and
 /// `scale`.
@@ -271,6 +273,51 @@ impl<T: Float> Distribution<T> for Gumbel<T> {
         crate::fallback::check_gpu_fallback_opt_in(&[&self.scale], "Gumbel::variance")?;
         let data = self.variance_value()?;
         Tensor::from_storage(TensorStorage::cpu(data), self.loc.shape().to_vec(), false)
+    }
+
+    // -----------------------------------------------------------------------
+    // Full PyTorch surface — `gumbel.py:33-35` declares
+    //   arg_constraints = {"loc": real, "scale": positive}
+    //   support = real
+    // Inherits `has_rsample = True` from TransformedDistribution.
+    // -----------------------------------------------------------------------
+
+    fn has_rsample(&self) -> bool {
+        // Inherited from TransformedDistribution (`gumbel.py` ctor at
+        // line 53-58 chains ExpTransform/AffineTransform around Uniform,
+        // all rsample-capable).
+        true
+    }
+
+    fn batch_shape(&self) -> Vec<usize> {
+        self.loc.shape().to_vec()
+    }
+
+    fn support(&self) -> Option<Box<dyn DistConstraint>> {
+        // `torch/distributions/gumbel.py:35`: `support = constraints.real`.
+        Some(Box::new(constraints::Real))
+    }
+
+    fn arg_constraints(&self) -> HashMap<&'static str, Box<dyn DistConstraint>> {
+        // `torch/distributions/gumbel.py:33`:
+        //   arg_constraints = {"loc": real, "scale": positive}
+        let mut m: HashMap<&'static str, Box<dyn DistConstraint>> = HashMap::new();
+        m.insert("loc", Box::new(constraints::Real));
+        m.insert("scale", Box::new(constraints::Positive));
+        m
+    }
+
+    fn expand(&self, batch_shape: &[usize]) -> FerrotorchResult<Box<dyn Distribution<T>>> {
+        let loc_data = self.loc.data_vec()?;
+        let scale_data = self.scale.data_vec()?;
+        let n: usize = batch_shape.iter().product::<usize>().max(1);
+        let loc_out: Vec<T> = (0..n).map(|i| loc_data[i % loc_data.len()]).collect();
+        let scale_out: Vec<T> = (0..n).map(|i| scale_data[i % scale_data.len()]).collect();
+        let new_loc =
+            Tensor::from_storage(TensorStorage::cpu(loc_out), batch_shape.to_vec(), false)?;
+        let new_scale =
+            Tensor::from_storage(TensorStorage::cpu(scale_out), batch_shape.to_vec(), false)?;
+        Ok(Box::new(Gumbel::new(new_loc, new_scale)?))
     }
 }
 
@@ -539,5 +586,26 @@ mod tests {
         assert!(dist.mode().unwrap().item().unwrap().abs() < 1e-12);
         let pi2_over_6 = std::f64::consts::PI * std::f64::consts::PI / 6.0;
         assert!((dist.variance().unwrap().item().unwrap() - pi2_over_6).abs() < 1e-10);
+    }
+
+    // -----------------------------------------------------------------------
+    // Full PyTorch surface (#1419)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_gumbel_surface_overrides() {
+        let dist = Gumbel::new(scalar(0.0f64).unwrap(), scalar(1.0f64).unwrap()).unwrap();
+        assert!(dist.has_rsample());
+        assert_eq!(dist.support().unwrap().name(), "Real");
+        let args = dist.arg_constraints();
+        assert_eq!(args["loc"].name(), "Real");
+        assert_eq!(args["scale"].name(), "Positive");
+    }
+
+    #[test]
+    fn test_gumbel_expand() {
+        let dist = Gumbel::new(scalar(0.0f64).unwrap(), scalar(1.0f64).unwrap()).unwrap();
+        let exp = dist.expand(&[3]).unwrap();
+        assert_eq!(exp.batch_shape(), vec![3]);
     }
 }

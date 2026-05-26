@@ -18,7 +18,10 @@
 //! | REQ-8 (`Distribution::mean`) | SHIPPED | `impl Distribution::mean` returns `rate.clone()`; mirrors `poisson.py:38-40`. |
 //! | REQ-9 (`Distribution::mode`) | SHIPPED | `impl Distribution::mode` returns `floor(rate)`; mirrors `poisson.py:42-44`. |
 //! | REQ-10 (`Distribution::variance`) | SHIPPED | `impl Distribution::variance` returns `rate.clone()`; mirrors `poisson.py:46-48`. |
-//! | REQ-11 (`ExponentialFamily` machinery) | NOT-STARTED | blocker #1407 — `_natural_params`/`_log_normalizer`/`expand`/`support` not implemented; cross-cutting with `lib.md` REQ-5 (blocker #1376). |
+//! | REQ-11 (`ExponentialFamily` machinery — natural-params) | NOT-STARTED | blocker #1407 — `_natural_params`/`_log_normalizer` not implemented. |
+//! | REQ-12 (full PyTorch surface — `support`/`arg_constraints`/`expand`) | SHIPPED | the trait overrides at the tail of `impl Distribution for Poisson` in `poisson.rs` mirror `torch/distributions/poisson.py:35-36`; consumer: trait dispatch via `pub use Poisson` re-export. |
+
+use std::collections::HashMap;
 
 use ferrotorch_core::creation;
 use ferrotorch_core::dtype::Float;
@@ -26,8 +29,9 @@ use ferrotorch_core::error::{FerrotorchError, FerrotorchResult};
 use ferrotorch_core::storage::TensorStorage;
 use ferrotorch_core::tensor::Tensor;
 
-use crate::Distribution;
+use crate::constraints;
 use crate::special_fns::lgamma_scalar;
+use crate::{DistConstraint, Distribution};
 
 /// Poisson distribution parameterized by `rate` (lambda).
 ///
@@ -226,6 +230,49 @@ impl<T: Float> Distribution<T> for Poisson<T> {
     fn variance(&self) -> FerrotorchResult<Tensor<T>> {
         Ok(self.rate.clone())
     }
+
+    // -----------------------------------------------------------------------
+    // Full PyTorch surface — `poisson.py:35-36` declares
+    //   arg_constraints = {"rate": nonnegative}
+    //   support = nonnegative_integer
+    // `nonnegative_integer` isn't yet ported (under blocker #1372 — 17
+    // missing upstream constraint variants); ferrotorch advertises the
+    // continuous superset `NonNegative` with `is_discrete()` flagged via
+    // `BooleanConstraint`-style override below.
+    // -----------------------------------------------------------------------
+
+    fn has_rsample(&self) -> bool {
+        // Poisson is discrete; `poisson.py` does not set `has_rsample = True`.
+        false
+    }
+
+    fn batch_shape(&self) -> Vec<usize> {
+        self.rate.shape().to_vec()
+    }
+
+    fn support(&self) -> Option<Box<dyn DistConstraint>> {
+        // `torch/distributions/poisson.py:36`: `support = nonnegative_integer`.
+        // Ferrotorch ships the continuous `NonNegative` as the closest port
+        // until `IntegerInterval` lands under #1372.
+        Some(Box::new(constraints::NonNegative))
+    }
+
+    fn arg_constraints(&self) -> HashMap<&'static str, Box<dyn DistConstraint>> {
+        // `torch/distributions/poisson.py:35`:
+        //   arg_constraints = {"rate": constraints.nonnegative}
+        let mut m: HashMap<&'static str, Box<dyn DistConstraint>> = HashMap::new();
+        m.insert("rate", Box::new(constraints::NonNegative));
+        m
+    }
+
+    fn expand(&self, batch_shape: &[usize]) -> FerrotorchResult<Box<dyn Distribution<T>>> {
+        let rate_data = self.rate.data_vec()?;
+        let n: usize = batch_shape.iter().product::<usize>().max(1);
+        let rate_out: Vec<T> = (0..n).map(|i| rate_data[i % rate_data.len()]).collect();
+        let new_rate =
+            Tensor::from_storage(TensorStorage::cpu(rate_out), batch_shape.to_vec(), false)?;
+        Ok(Box::new(Poisson::new(new_rate)?))
+    }
 }
 
 #[cfg(test)]
@@ -365,5 +412,28 @@ mod tests {
         assert!((Distribution::variance(&dist).unwrap().item().unwrap() - 4.7).abs() < 1e-12);
         // mode = floor(4.7) = 4
         assert!((dist.mode().unwrap().item().unwrap() - 4.0).abs() < 1e-12);
+    }
+
+    // -----------------------------------------------------------------------
+    // Full PyTorch surface (#1407)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_poisson_surface_overrides() {
+        let dist = Poisson::new(scalar(2.0f64).unwrap()).unwrap();
+        assert!(!dist.has_rsample());
+        let s = dist.support().unwrap();
+        assert_eq!(s.name(), "NonNegative");
+        let args = dist.arg_constraints();
+        assert_eq!(args["rate"].name(), "NonNegative");
+    }
+
+    #[test]
+    fn test_poisson_expand() {
+        let dist = Poisson::new(scalar(3.0f64).unwrap()).unwrap();
+        let exp = dist.expand(&[5]).unwrap();
+        let m = Distribution::mean(&*exp).unwrap();
+        assert_eq!(m.shape(), &[5]);
+        assert!((m.data().unwrap()[0] - 3.0).abs() < 1e-12);
     }
 }

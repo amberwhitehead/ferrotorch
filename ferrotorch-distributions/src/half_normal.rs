@@ -17,8 +17,9 @@
 //! | REQ-7 (`entropy`) | SHIPPED | `0.5*ln(π/2) + ln(scale) + 0.5` mirroring `half_normal.py:83-84`; consumer: trait surface |
 //! | REQ-8 (`mean`/`mode`/`variance`) | SHIPPED | overrides mirroring `half_normal.py:56-66`; consumer: trait surface |
 //! | REQ-9 (`HalfNormalRsampleBackward`) | SHIPPED | `sum(grad_output * |eps|)` backward; consumer: invoked by the rsample method when scale requires grad |
-//! | REQ-10 (full PyTorch surface) | NOT-STARTED | blocker #1421 — `expand`, `arg_constraints`, `support`, `validate_args`, `cdf` (requires erf), `icdf` (requires inverse erf), `TransformedDistribution` base hooks (cross-cutting with `lib.md` REQ-5 / blocker #1376) |
+//! | REQ-10 (full PyTorch surface — `has_rsample`/`support`/`arg_constraints`/`expand`/`cdf`/`icdf`) | SHIPPED | the trait overrides at the tail of `impl Distribution for HalfNormal` in `half_normal.rs` mirror `torch/distributions/half_normal.py:33-36`; `cdf`/`icdf` dispatch to `ferrotorch_core::special::erf`/`erfinv`; consumer: trait dispatch via `pub use HalfNormal` re-export. |
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use ferrotorch_core::creation;
@@ -27,7 +28,8 @@ use ferrotorch_core::error::FerrotorchResult;
 use ferrotorch_core::storage::TensorStorage;
 use ferrotorch_core::tensor::{GradFn, Tensor};
 
-use crate::Distribution;
+use crate::constraints;
+use crate::{DistConstraint, Distribution};
 
 /// Half-Normal distribution parameterized by `scale`.
 ///
@@ -211,6 +213,83 @@ impl<T: Float> Distribution<T> for HalfNormal<T> {
         crate::fallback::check_gpu_fallback_opt_in(&[&self.scale], "HalfNormal::variance")?;
         let data = self.variance_value()?;
         Tensor::from_storage(TensorStorage::cpu(data), self.scale.shape().to_vec(), false)
+    }
+
+    fn cdf(&self, value: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
+        crate::fallback::check_gpu_fallback_opt_in(&[&self.scale, value], "HalfNormal::cdf")?;
+        // F(x) = erf(x / (scale * sqrt(2)))  for x >= 0, else 0.
+        // (Equivalently 2 * Phi(x/scale) - 1.)
+        let val_data = value.data_vec()?;
+        let scale_data = self.scale.data_vec()?;
+        let sqrt2 = T::from(std::f64::consts::SQRT_2).unwrap();
+        let zero = <T as num_traits::Zero>::zero();
+
+        let z: Vec<T> = val_data
+            .iter()
+            .zip(scale_data.iter().cycle())
+            .map(|(&x, &s)| if x < zero { zero } else { x / (s * sqrt2) })
+            .collect();
+        let z_tensor = Tensor::from_storage(TensorStorage::cpu(z), value.shape().to_vec(), false)?;
+        let erf_z = ferrotorch_core::special::erf(&z_tensor)?;
+        // For x < 0 the z is 0 → erf(0) = 0, which matches the support floor.
+        let erf_data = erf_z.data_vec()?;
+        Tensor::from_storage(TensorStorage::cpu(erf_data), value.shape().to_vec(), false)
+    }
+
+    fn icdf(&self, q: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
+        crate::fallback::check_gpu_fallback_opt_in(&[&self.scale, q], "HalfNormal::icdf")?;
+        // F^{-1}(p) = scale * sqrt(2) * erfinv(p)  for p in [0, 1).
+        let q_data = q.data_vec()?;
+        let arg_tensor =
+            Tensor::from_storage(TensorStorage::cpu(q_data), q.shape().to_vec(), false)?;
+        let erfinv_arg = ferrotorch_core::special::erfinv(&arg_tensor)?;
+        let erfinv_data = erfinv_arg.data_vec()?;
+        let scale_data = self.scale.data_vec()?;
+        let sqrt2 = T::from(std::f64::consts::SQRT_2).unwrap();
+        let result: Vec<T> = erfinv_data
+            .iter()
+            .zip(scale_data.iter().cycle())
+            .map(|(&e, &s)| s * sqrt2 * e)
+            .collect();
+        Tensor::from_storage(TensorStorage::cpu(result), q.shape().to_vec(), false)
+    }
+
+    // -----------------------------------------------------------------------
+    // Full PyTorch surface — `half_normal.py:33-36` declares
+    //   arg_constraints = {"scale": positive}
+    //   support = constraints.nonnegative
+    //   has_rsample = True
+    // -----------------------------------------------------------------------
+
+    fn has_rsample(&self) -> bool {
+        // `torch/distributions/half_normal.py:36`: `has_rsample = True`.
+        true
+    }
+
+    fn batch_shape(&self) -> Vec<usize> {
+        self.scale.shape().to_vec()
+    }
+
+    fn support(&self) -> Option<Box<dyn DistConstraint>> {
+        // `torch/distributions/half_normal.py:35`: `support = nonnegative`.
+        Some(Box::new(constraints::NonNegative))
+    }
+
+    fn arg_constraints(&self) -> HashMap<&'static str, Box<dyn DistConstraint>> {
+        // `torch/distributions/half_normal.py:33`:
+        //   arg_constraints = {"scale": positive}
+        let mut m: HashMap<&'static str, Box<dyn DistConstraint>> = HashMap::new();
+        m.insert("scale", Box::new(constraints::Positive));
+        m
+    }
+
+    fn expand(&self, batch_shape: &[usize]) -> FerrotorchResult<Box<dyn Distribution<T>>> {
+        let scale_data = self.scale.data_vec()?;
+        let n: usize = batch_shape.iter().product::<usize>().max(1);
+        let scale_out: Vec<T> = (0..n).map(|i| scale_data[i % scale_data.len()]).collect();
+        let new_scale =
+            Tensor::from_storage(TensorStorage::cpu(scale_out), batch_shape.to_vec(), false)?;
+        Ok(Box::new(HalfNormal::new(new_scale)?))
     }
 }
 
@@ -466,5 +545,49 @@ mod tests {
             (dist.variance().unwrap().item().unwrap() - (1.0 - 2.0 / std::f64::consts::PI)).abs()
                 < 1e-10
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // Full PyTorch surface (#1421)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_half_normal_cdf_at_zero_is_zero() {
+        let dist = HalfNormal::new(scalar(1.0f64).unwrap()).unwrap();
+        let x = scalar(0.0f64).unwrap();
+        let c = dist.cdf(&x).unwrap();
+        assert!(c.item().unwrap().abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_half_normal_cdf_icdf_roundtrip() {
+        let dist = HalfNormal::new(scalar(1.0f64).unwrap()).unwrap();
+        for p in [0.1, 0.3, 0.5, 0.7, 0.9] {
+            let q = scalar(p).unwrap();
+            let x = dist.icdf(&q).unwrap();
+            let p2 = dist.cdf(&x).unwrap();
+            assert!(
+                (p2.item().unwrap() - p).abs() < 5e-3,
+                "p={p}, recovered={}",
+                p2.item().unwrap()
+            );
+        }
+    }
+
+    #[test]
+    fn test_half_normal_surface_overrides() {
+        let dist = HalfNormal::new(scalar(1.0f64).unwrap()).unwrap();
+        assert!(dist.has_rsample());
+        assert_eq!(dist.support().unwrap().name(), "NonNegative");
+        let args = dist.arg_constraints();
+        assert_eq!(args["scale"].name(), "Positive");
+    }
+
+    #[test]
+    fn test_half_normal_expand() {
+        let dist = HalfNormal::new(scalar(2.0f64).unwrap()).unwrap();
+        let exp = dist.expand(&[3]).unwrap();
+        let m = exp.mean().unwrap();
+        assert_eq!(m.shape(), &[3]);
     }
 }

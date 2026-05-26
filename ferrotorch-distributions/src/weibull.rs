@@ -19,7 +19,9 @@
 //! | REQ-10 (`Distribution::mode` with `k <= 1` clamp) | SHIPPED | `impl Distribution::mode` returns `lambda * ((k-1)/k)^(1/k)` for `k > 1` else `0`; R-DEV-6 deviation from upstream NaN (`weibull.py:76-82`). |
 //! | REQ-11 (`Distribution::variance`) | SHIPPED | `impl Distribution::variance` algebraically equivalent to `weibull.py:85-89`. |
 //! | REQ-12 (`rsample` reparameterization) | NOT-STARTED | blocker #1435 — direct inverse-CDF path does not build autograd graph. |
-//! | REQ-13 (`expand`/`support`/`concentration_reciprocal`) | NOT-STARTED | blocker #1436 — cross-cutting with `lib.md` REQ-5 (blocker #1376). |
+//! | REQ-13 (`expand`/`support`/`arg_constraints`) | SHIPPED | the trait overrides at the tail of `impl Distribution for Weibull` in `weibull.rs` mirror `torch/distributions/weibull.py:33-38`; consumer: trait dispatch via `pub use Weibull` re-export (closes #1436 — `concentration_reciprocal` remains a Python-only convenience). |
+
+use std::collections::HashMap;
 
 use ferrotorch_core::creation;
 use ferrotorch_core::dtype::Float;
@@ -27,8 +29,9 @@ use ferrotorch_core::error::{FerrotorchError, FerrotorchResult};
 use ferrotorch_core::storage::TensorStorage;
 use ferrotorch_core::tensor::Tensor;
 
-use crate::Distribution;
+use crate::constraints;
 use crate::special_fns::lgamma_scalar;
+use crate::{DistConstraint, Distribution};
 
 /// Weibull distribution parameterized by `scale` (lambda) and
 /// `concentration` (k, also called shape parameter).
@@ -262,6 +265,50 @@ impl<T: Float> Distribution<T> for Weibull<T> {
         }
         Tensor::from_storage(TensorStorage::cpu(out), self.scale.shape().to_vec(), false)
     }
+
+    // -----------------------------------------------------------------------
+    // Full PyTorch surface — `weibull.py:33-38` declares
+    //   arg_constraints = {"scale": positive, "concentration": positive}
+    //   support = constraints.positive
+    // Inherited has_rsample = True from TransformedDistribution; ferrotorch's
+    // direct path does NOT build the autograd graph (blocker #1435).
+    // -----------------------------------------------------------------------
+
+    fn has_rsample(&self) -> bool {
+        // Tracked under blocker #1435.
+        false
+    }
+
+    fn batch_shape(&self) -> Vec<usize> {
+        self.scale.shape().to_vec()
+    }
+
+    fn support(&self) -> Option<Box<dyn DistConstraint>> {
+        // `torch/distributions/weibull.py:38`: `support = constraints.positive`.
+        Some(Box::new(constraints::Positive))
+    }
+
+    fn arg_constraints(&self) -> HashMap<&'static str, Box<dyn DistConstraint>> {
+        // `torch/distributions/weibull.py:33-37`:
+        //   arg_constraints = {"scale": positive, "concentration": positive}
+        let mut m: HashMap<&'static str, Box<dyn DistConstraint>> = HashMap::new();
+        m.insert("scale", Box::new(constraints::Positive));
+        m.insert("concentration", Box::new(constraints::Positive));
+        m
+    }
+
+    fn expand(&self, batch_shape: &[usize]) -> FerrotorchResult<Box<dyn Distribution<T>>> {
+        let s_data = self.scale.data_vec()?;
+        let k_data = self.concentration.data_vec()?;
+        let n: usize = batch_shape.iter().product::<usize>().max(1);
+        let s_out: Vec<T> = (0..n).map(|i| s_data[i % s_data.len()]).collect();
+        let k_out: Vec<T> = (0..n).map(|i| k_data[i % k_data.len()]).collect();
+        let new_scale =
+            Tensor::from_storage(TensorStorage::cpu(s_out), batch_shape.to_vec(), false)?;
+        let new_conc =
+            Tensor::from_storage(TensorStorage::cpu(k_out), batch_shape.to_vec(), false)?;
+        Ok(Box::new(Weibull::new(new_scale, new_conc)?))
+    }
 }
 
 #[cfg(test)]
@@ -344,5 +391,27 @@ mod tests {
         let d = Weibull::new(scalar(2.0), scalar(1.0)).unwrap();
         let v = d.variance().unwrap();
         assert!((v.data().unwrap()[0] - 4.0).abs() < 1e-9);
+    }
+
+    // -----------------------------------------------------------------------
+    // Full PyTorch surface (#1436)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_weibull_surface_overrides() {
+        let d = Weibull::new(scalar(1.0), scalar(2.0)).unwrap();
+        assert!(!d.has_rsample()); // tracked under #1435
+        assert_eq!(d.support().unwrap().name(), "Positive");
+        let args = d.arg_constraints();
+        assert_eq!(args["scale"].name(), "Positive");
+        assert_eq!(args["concentration"].name(), "Positive");
+    }
+
+    #[test]
+    fn test_weibull_expand() {
+        let d = Weibull::new(scalar(1.0), scalar(2.0)).unwrap();
+        let exp = d.expand(&[3]).unwrap();
+        let m = exp.mean().unwrap();
+        assert_eq!(m.shape(), &[3]);
     }
 }

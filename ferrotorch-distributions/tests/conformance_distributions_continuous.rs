@@ -20,13 +20,13 @@ use std::path::PathBuf;
 
 use ferrotorch_core::creation::{from_slice, scalar};
 use ferrotorch_distributions::{
-    Beta, Cauchy, Dirichlet, Distribution, Exponential, Gamma, Gumbel, HalfNormal, Independent,
-    Kumaraswamy, Laplace, LogNormal, LowRankMultivariateNormal, MixtureSameFamily,
-    MultivariateNormal, Normal, Pareto, StudentT, Uniform, VonMises, Weibull,
     transforms::{
         AffineTransform, ComposeTransform, ExpTransform, SigmoidTransform, SoftplusTransform,
         TanhTransform, Transform,
     },
+    Beta, Cauchy, Dirichlet, Distribution, Exponential, Gamma, Gumbel, HalfNormal, Independent,
+    Kumaraswamy, Laplace, LogNormal, LowRankMultivariateNormal, MixtureSameFamily,
+    MultivariateNormal, Normal, Pareto, StudentT, Uniform, VonMises, Weibull,
 };
 use serde_json::Value;
 
@@ -125,9 +125,10 @@ fn distribution_trait_stddev_default_impl() {
 
 #[test]
 fn distribution_trait_cdf_default_returns_error() {
-    // Pareto does not implement icdf — the default trait impl returns InvalidArgument.
-    // (Kumaraswamy has an actual icdf; use Pareto as the representative no-icdf dist.)
-    let d = Pareto::new(scalar(1.0f64).unwrap(), scalar(2.0f64).unwrap()).unwrap();
+    // VonMises does not implement icdf — the default trait impl returns InvalidArgument.
+    // (Pareto / Kumaraswamy / many others now have icdf overrides; VonMises is the
+    // representative no-icdf continuous dist after #1376 / #1400 / #1405 trait fill-out.)
+    let d = VonMises::new(scalar(0.0f64).unwrap(), scalar(1.0f64).unwrap()).unwrap();
     assert!(
         d.icdf(&scalar(0.5f64).unwrap()).is_err(),
         "icdf should error"

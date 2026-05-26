@@ -19,7 +19,9 @@
 //! | REQ-9 (entropy = `mu + 0.5 + ln(sigma) + 0.5*ln(2*pi)`) | SHIPPED | the entropy body in `lognormal.rs`. |
 //! | REQ-10 (device-resident outputs) | SHIPPED | `out.to(device)` at the tail of every method in `lognormal.rs`. |
 //! | REQ-11 (`mean_value` / `variance_value` Vec<T> helpers) | SHIPPED | the helpers in `lognormal.rs` invoked by `mean()` / `variance()` in the same file. |
+//! | REQ-12 (full PyTorch surface — `has_rsample`/`support`/`arg_constraints`/`expand`) | SHIPPED | the trait overrides at the tail of `impl Distribution for LogNormal` in `lognormal.rs` mirror `torch/distributions/log_normal.py:33-36`; consumer: trait dispatch via `pub use LogNormal` re-export. |
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use ferrotorch_core::creation;
@@ -28,7 +30,8 @@ use ferrotorch_core::error::{FerrotorchError, FerrotorchResult};
 use ferrotorch_core::storage::TensorStorage;
 use ferrotorch_core::tensor::{GradFn, Tensor};
 
-use crate::Distribution;
+use crate::constraints;
+use crate::{DistConstraint, Distribution};
 
 /// Log-Normal distribution parameterized by `loc` (mu) and `scale` (sigma)
 /// of the underlying normal distribution.
@@ -263,6 +266,49 @@ impl<T: Float> Distribution<T> for LogNormal<T> {
             .map(|(&mu, &sigma)| (mu - sigma * sigma).exp())
             .collect();
         Tensor::from_storage(TensorStorage::cpu(result), self.loc.shape().to_vec(), false)
+    }
+
+    // -----------------------------------------------------------------------
+    // Full PyTorch surface — `log_normal.py:33-36` declares
+    //   arg_constraints = {"loc": real, "scale": positive}
+    //   support = constraints.positive
+    //   has_rsample = True
+    // -----------------------------------------------------------------------
+
+    fn has_rsample(&self) -> bool {
+        // `torch/distributions/log_normal.py:36`: `has_rsample = True`.
+        true
+    }
+
+    fn batch_shape(&self) -> Vec<usize> {
+        self.loc.shape().to_vec()
+    }
+
+    fn support(&self) -> Option<Box<dyn DistConstraint>> {
+        // `torch/distributions/log_normal.py:35`: `support = constraints.positive`.
+        Some(Box::new(constraints::Positive))
+    }
+
+    fn arg_constraints(&self) -> HashMap<&'static str, Box<dyn DistConstraint>> {
+        // `torch/distributions/log_normal.py:33`:
+        //   arg_constraints = {"loc": real, "scale": positive}
+        let mut m: HashMap<&'static str, Box<dyn DistConstraint>> = HashMap::new();
+        m.insert("loc", Box::new(constraints::Real));
+        m.insert("scale", Box::new(constraints::Positive));
+        m
+    }
+
+    fn expand(&self, batch_shape: &[usize]) -> FerrotorchResult<Box<dyn Distribution<T>>> {
+        let loc_data = self.loc.data_vec()?;
+        let scale_data = self.scale.data_vec()?;
+        let n: usize = batch_shape.iter().product::<usize>().max(1);
+        let loc_out: Vec<T> = (0..n).map(|i| loc_data[i % loc_data.len()]).collect();
+        let scale_out: Vec<T> = (0..n).map(|i| scale_data[i % scale_data.len()]).collect();
+        let new_loc =
+            Tensor::from_storage(TensorStorage::cpu(loc_out), batch_shape.to_vec(), false)?;
+        let new_scale =
+            Tensor::from_storage(TensorStorage::cpu(scale_out), batch_shape.to_vec(), false)?;
+        Ok(Box::new(LogNormal::new(new_loc, new_scale)?))
     }
 }
 
@@ -510,5 +556,27 @@ mod tests {
         let v = dist.variance().unwrap().item().unwrap();
         let expected = (1.0_f64.exp() - 1.0) * 1.0_f64.exp();
         assert!((v - expected).abs() < 1e-10);
+    }
+
+    // -----------------------------------------------------------------------
+    // Full PyTorch surface
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_lognormal_surface_overrides() {
+        let dist = LogNormal::new(scalar(0.0f64).unwrap(), scalar(1.0f64).unwrap()).unwrap();
+        assert!(dist.has_rsample());
+        assert_eq!(dist.support().unwrap().name(), "Positive");
+        let args = dist.arg_constraints();
+        assert_eq!(args["loc"].name(), "Real");
+        assert_eq!(args["scale"].name(), "Positive");
+    }
+
+    #[test]
+    fn test_lognormal_expand() {
+        let dist = LogNormal::new(scalar(0.0f64).unwrap(), scalar(1.0f64).unwrap()).unwrap();
+        let exp = dist.expand(&[3]).unwrap();
+        let m = exp.mode().unwrap();
+        assert_eq!(m.shape(), &[3]);
     }
 }

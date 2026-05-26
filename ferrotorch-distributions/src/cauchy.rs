@@ -17,8 +17,9 @@
 //! | REQ-8 (`cdf`/`icdf`) | SHIPPED | overrides mirroring `cauchy.py:90-96`; consumer: trait surface |
 //! | REQ-9 (`mean`/`mode`/`variance`) | SHIPPED | NaN/loc/∞ overrides mirroring `cauchy.py:61-74`; consumer: trait surface |
 //! | REQ-10 (`CauchyRsampleBackward`) | SHIPPED | sum-of-grad + tan-weighted-sum backward; consumer: invoked by the rsample method when grad enabled |
-//! | REQ-11 (full PyTorch surface) | NOT-STARTED | blocker #1400 — `expand`, `arg_constraints`, `support`, `validate_args`, scalar-broadcast ctor (cross-cutting with `lib.md` REQ-5 / blocker #1376) |
+//! | REQ-11 (full PyTorch surface — `has_rsample`/`support`/`arg_constraints`/`expand`) | SHIPPED | the trait overrides at the tail of `impl Distribution for Cauchy` in `cauchy.rs` mirror `torch/distributions/cauchy.py:34-36`; consumer: trait dispatch via `pub use Cauchy` re-export (closes #1400 partial — `validate_args` and scalar-broadcast ctor remain cross-cutting under #1376) |
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use ferrotorch_core::creation;
@@ -27,7 +28,8 @@ use ferrotorch_core::error::{FerrotorchError, FerrotorchResult};
 use ferrotorch_core::storage::TensorStorage;
 use ferrotorch_core::tensor::{GradFn, Tensor};
 
-use crate::Distribution;
+use crate::constraints;
+use crate::{DistConstraint, Distribution};
 
 /// Cauchy distribution parameterized by `loc` (location / median) and `scale`
 /// (half-width at half-maximum).
@@ -273,6 +275,50 @@ impl<T: Float> Distribution<T> for Cauchy<T> {
             self.loc.shape().to_vec(),
             false,
         )
+    }
+
+    // -----------------------------------------------------------------------
+    // Full PyTorch surface (#1400) — `cauchy.py:34-36` declares
+    // `arg_constraints = {"loc": real, "scale": positive}`,
+    // `support = constraints.real`, `has_rsample = True`.
+    // -----------------------------------------------------------------------
+
+    fn has_rsample(&self) -> bool {
+        // `torch/distributions/cauchy.py:36`: `has_rsample = True`.
+        true
+    }
+
+    fn batch_shape(&self) -> Vec<usize> {
+        self.loc.shape().to_vec()
+    }
+
+    fn support(&self) -> Option<Box<dyn DistConstraint>> {
+        // `torch/distributions/cauchy.py:35`: `support = constraints.real`.
+        Some(Box::new(constraints::Real))
+    }
+
+    fn arg_constraints(&self) -> HashMap<&'static str, Box<dyn DistConstraint>> {
+        // `torch/distributions/cauchy.py:34`:
+        //   arg_constraints = {"loc": constraints.real, "scale": constraints.positive}
+        let mut m: HashMap<&'static str, Box<dyn DistConstraint>> = HashMap::new();
+        m.insert("loc", Box::new(constraints::Real));
+        m.insert("scale", Box::new(constraints::Positive));
+        m
+    }
+
+    fn expand(&self, batch_shape: &[usize]) -> FerrotorchResult<Box<dyn Distribution<T>>> {
+        // `torch/distributions/cauchy.py:51-58`: `expand` broadcasts loc/scale
+        // to the target batch_shape. ferrotorch CPU path materialises.
+        let loc_data = self.loc.data_vec()?;
+        let scale_data = self.scale.data_vec()?;
+        let n: usize = batch_shape.iter().product::<usize>().max(1);
+        let loc_out: Vec<T> = (0..n).map(|i| loc_data[i % loc_data.len()]).collect();
+        let scale_out: Vec<T> = (0..n).map(|i| scale_data[i % scale_data.len()]).collect();
+        let new_loc =
+            Tensor::from_storage(TensorStorage::cpu(loc_out), batch_shape.to_vec(), false)?;
+        let new_scale =
+            Tensor::from_storage(TensorStorage::cpu(scale_out), batch_shape.to_vec(), false)?;
+        Ok(Box::new(Cauchy::new(new_loc, new_scale)?))
     }
 }
 
@@ -554,5 +600,29 @@ mod tests {
             let p2 = dist.cdf(&x).unwrap();
             assert!((p2.item().unwrap() - p).abs() < 1e-9);
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // Full PyTorch surface (#1400)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_cauchy_surface_overrides() {
+        let dist = Cauchy::new(scalar(0.0f64).unwrap(), scalar(1.0f64).unwrap()).unwrap();
+        assert!(dist.has_rsample());
+        assert_eq!(dist.support().unwrap().name(), "Real");
+        let args = dist.arg_constraints();
+        assert!(args.contains_key("loc"));
+        assert!(args.contains_key("scale"));
+        assert_eq!(args["loc"].name(), "Real");
+        assert_eq!(args["scale"].name(), "Positive");
+    }
+
+    #[test]
+    fn test_cauchy_expand() {
+        let dist = Cauchy::new(scalar(0.0f64).unwrap(), scalar(1.0f64).unwrap()).unwrap();
+        let expanded = dist.expand(&[3]).unwrap();
+        let samples = expanded.sample(&[3]).unwrap();
+        assert_eq!(samples.shape(), &[3]);
     }
 }

@@ -18,7 +18,9 @@
 //! | REQ-6 (`rsample` backward via `LaplaceRsampleBackward`) | SHIPPED | the `LaplaceRsampleBackward` GradFn in `laplace.rs`. |
 //! | REQ-7 (device-resident outputs) | SHIPPED | `out.to(device)` at the tail of every method in `laplace.rs`. |
 //! | REQ-8 (numerical-stability clamp on `1 - |u|`) | SHIPPED | the `u_abs.min(one - eps)` clamp in `laplace.rs`. |
+//! | REQ-9 (full PyTorch surface — `has_rsample`/`support`/`arg_constraints`/`expand`) | SHIPPED | the trait overrides at the tail of `impl Distribution for Laplace` in `laplace.rs` mirror `torch/distributions/laplace.py:31-33`; consumer: trait dispatch via `pub use Laplace` re-export. |
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use ferrotorch_core::creation;
@@ -27,7 +29,8 @@ use ferrotorch_core::error::{FerrotorchError, FerrotorchResult};
 use ferrotorch_core::storage::TensorStorage;
 use ferrotorch_core::tensor::{GradFn, Tensor};
 
-use crate::Distribution;
+use crate::constraints;
+use crate::{DistConstraint, Distribution};
 
 /// Laplace distribution parameterized by `loc` (mean) and `scale`.
 ///
@@ -282,6 +285,49 @@ impl<T: Float> Distribution<T> for Laplace<T> {
             self.scale.shape().to_vec(),
             false,
         )
+    }
+
+    // -----------------------------------------------------------------------
+    // Full PyTorch surface — `laplace.py:31-33` declares
+    //   arg_constraints = {"loc": real, "scale": positive}
+    //   support = constraints.real
+    //   has_rsample = True
+    // -----------------------------------------------------------------------
+
+    fn has_rsample(&self) -> bool {
+        // `torch/distributions/laplace.py:33`: `has_rsample = True`.
+        true
+    }
+
+    fn batch_shape(&self) -> Vec<usize> {
+        self.loc.shape().to_vec()
+    }
+
+    fn support(&self) -> Option<Box<dyn DistConstraint>> {
+        // `torch/distributions/laplace.py:32`: `support = constraints.real`.
+        Some(Box::new(constraints::Real))
+    }
+
+    fn arg_constraints(&self) -> HashMap<&'static str, Box<dyn DistConstraint>> {
+        // `torch/distributions/laplace.py:31`:
+        //   arg_constraints = {"loc": real, "scale": positive}
+        let mut m: HashMap<&'static str, Box<dyn DistConstraint>> = HashMap::new();
+        m.insert("loc", Box::new(constraints::Real));
+        m.insert("scale", Box::new(constraints::Positive));
+        m
+    }
+
+    fn expand(&self, batch_shape: &[usize]) -> FerrotorchResult<Box<dyn Distribution<T>>> {
+        let loc_data = self.loc.data_vec()?;
+        let scale_data = self.scale.data_vec()?;
+        let n: usize = batch_shape.iter().product::<usize>().max(1);
+        let loc_out: Vec<T> = (0..n).map(|i| loc_data[i % loc_data.len()]).collect();
+        let scale_out: Vec<T> = (0..n).map(|i| scale_data[i % scale_data.len()]).collect();
+        let new_loc =
+            Tensor::from_storage(TensorStorage::cpu(loc_out), batch_shape.to_vec(), false)?;
+        let new_scale =
+            Tensor::from_storage(TensorStorage::cpu(scale_out), batch_shape.to_vec(), false)?;
+        Ok(Box::new(Laplace::new(new_loc, new_scale)?))
     }
 }
 
@@ -544,5 +590,28 @@ mod tests {
             let p2 = dist.cdf(&x).unwrap();
             assert!((p2.item().unwrap() - p).abs() < 1e-10);
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // Full PyTorch surface
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_laplace_surface_overrides() {
+        let dist = Laplace::new(scalar(0.0f64).unwrap(), scalar(1.0f64).unwrap()).unwrap();
+        assert!(dist.has_rsample());
+        assert_eq!(dist.support().unwrap().name(), "Real");
+        let args = dist.arg_constraints();
+        assert_eq!(args["loc"].name(), "Real");
+        assert_eq!(args["scale"].name(), "Positive");
+    }
+
+    #[test]
+    fn test_laplace_expand() {
+        let dist = Laplace::new(scalar(1.0f64).unwrap(), scalar(2.0f64).unwrap()).unwrap();
+        let expanded = dist.expand(&[4]).unwrap();
+        let m = expanded.mean().unwrap();
+        assert_eq!(m.shape(), &[4]);
+        assert!((m.data().unwrap()[0] - 1.0).abs() < 1e-12);
     }
 }

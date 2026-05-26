@@ -17,8 +17,9 @@
 //! | REQ-7 (`Distribution::log_prob` closed-form) | SHIPPED | `impl Distribution::log_prob` returns the closed-form Student's-t log density; pinned by `test_student_t_log_prob_at_loc` (Cauchy edge), `test_student_t_log_prob_high_df_approaches_normal`. |
 //! | REQ-8 (`Distribution::entropy` closed-form) | SHIPPED | `impl Distribution::entropy` uses `lgamma_scalar` + `digamma_scalar` from `special_fns.rs`; mirrors `studentT.py:114-127`. |
 //! | REQ-9 (`df` gradient in backward node) | NOT-STARTED | blocker #1427 — `StudentTRsampleBackward` returns `None` for the `df` gradient slot; Marsaglia-Tsang Chi2 sampler is not autograd-aware. |
-//! | REQ-10 (`expand`/`support`/`mode`/`cdf`/`icdf`) | NOT-STARTED | blocker #1428 — cross-cutting with `lib.md` REQ-5 (blocker #1376). |
+//! | REQ-10 (`expand`/`support`/`mode`/`mean`/`variance`/`arg_constraints`/`has_rsample`) | SHIPPED | the trait overrides at the tail of `impl Distribution for StudentT` in `student_t.rs` mirror `torch/distributions/studentT.py:34-50`; consumer: trait dispatch via `pub use StudentT` re-export (closes #1428; `cdf`/`icdf` require the regularized incomplete-beta function which is part of #1372 / not yet ported). |
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use ferrotorch_core::creation;
@@ -27,8 +28,9 @@ use ferrotorch_core::error::{FerrotorchError, FerrotorchResult};
 use ferrotorch_core::storage::TensorStorage;
 use ferrotorch_core::tensor::{GradFn, Tensor};
 
-use crate::Distribution;
+use crate::constraints;
 use crate::special_fns::{digamma_scalar, lgamma_scalar};
+use crate::{DistConstraint, Distribution};
 
 /// Student's t-distribution parameterized by `df` (degrees of freedom),
 /// `loc` (location), and `scale`.
@@ -365,6 +367,72 @@ impl<T: Float> Distribution<T> for StudentT<T> {
             Ok(out)
         }
     }
+
+    fn mean(&self) -> FerrotorchResult<Tensor<T>> {
+        // `torch/distributions/studentT.py:42-46`: mean = loc if df > 1 else nan.
+        crate::fallback::check_gpu_fallback_opt_in(&[&self.df, &self.loc], "StudentT::mean")?;
+        let data = self.mean_value()?;
+        Tensor::from_storage(TensorStorage::cpu(data), self.loc.shape().to_vec(), false)
+    }
+
+    fn mode(&self) -> FerrotorchResult<Tensor<T>> {
+        // `torch/distributions/studentT.py:48-50`: mode = loc.
+        Ok(self.loc.clone())
+    }
+
+    fn variance(&self) -> FerrotorchResult<Tensor<T>> {
+        // `torch/distributions/studentT.py:52-62`: scale^2 * df / (df - 2) if df > 2 else inf.
+        crate::fallback::check_gpu_fallback_opt_in(&[&self.df, &self.scale], "StudentT::variance")?;
+        let data = self.variance_value()?;
+        Tensor::from_storage(TensorStorage::cpu(data), self.df.shape().to_vec(), false)
+    }
+
+    // -----------------------------------------------------------------------
+    // Full PyTorch surface — `studentT.py:34-40` declares
+    //   arg_constraints = {"df": positive, "loc": real, "scale": positive}
+    //   support = constraints.real
+    //   has_rsample = True
+    // -----------------------------------------------------------------------
+
+    fn has_rsample(&self) -> bool {
+        // `torch/distributions/studentT.py:40`: `has_rsample = True`.
+        true
+    }
+
+    fn batch_shape(&self) -> Vec<usize> {
+        self.loc.shape().to_vec()
+    }
+
+    fn support(&self) -> Option<Box<dyn DistConstraint>> {
+        // `torch/distributions/studentT.py:39`: `support = constraints.real`.
+        Some(Box::new(constraints::Real))
+    }
+
+    fn arg_constraints(&self) -> HashMap<&'static str, Box<dyn DistConstraint>> {
+        // `torch/distributions/studentT.py:34-38`:
+        //   arg_constraints = {"df": positive, "loc": real, "scale": positive}
+        let mut m: HashMap<&'static str, Box<dyn DistConstraint>> = HashMap::new();
+        m.insert("df", Box::new(constraints::Positive));
+        m.insert("loc", Box::new(constraints::Real));
+        m.insert("scale", Box::new(constraints::Positive));
+        m
+    }
+
+    fn expand(&self, batch_shape: &[usize]) -> FerrotorchResult<Box<dyn Distribution<T>>> {
+        let df_data = self.df.data_vec()?;
+        let loc_data = self.loc.data_vec()?;
+        let scale_data = self.scale.data_vec()?;
+        let n: usize = batch_shape.iter().product::<usize>().max(1);
+        let df_out: Vec<T> = (0..n).map(|i| df_data[i % df_data.len()]).collect();
+        let loc_out: Vec<T> = (0..n).map(|i| loc_data[i % loc_data.len()]).collect();
+        let scale_out: Vec<T> = (0..n).map(|i| scale_data[i % scale_data.len()]).collect();
+        let new_df = Tensor::from_storage(TensorStorage::cpu(df_out), batch_shape.to_vec(), false)?;
+        let new_loc =
+            Tensor::from_storage(TensorStorage::cpu(loc_out), batch_shape.to_vec(), false)?;
+        let new_scale =
+            Tensor::from_storage(TensorStorage::cpu(scale_out), batch_shape.to_vec(), false)?;
+        Ok(Box::new(StudentT::new(new_df, new_loc, new_scale)?))
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -605,5 +673,76 @@ mod tests {
 
         let samples = dist.sample(&[50]).unwrap();
         assert_eq!(samples.shape(), &[50]);
+    }
+
+    // -----------------------------------------------------------------------
+    // Full PyTorch surface (#1428)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_student_t_mean_mode_variance_df_gt_2() {
+        // df=5 > 2 → mean=loc, mode=loc, var=scale^2 * df/(df-2)
+        let dist = StudentT::new(
+            scalar(5.0f64).unwrap(),
+            scalar(2.5f64).unwrap(),
+            scalar(1.0f64).unwrap(),
+        )
+        .unwrap();
+        assert!((dist.mean().unwrap().item().unwrap() - 2.5).abs() < 1e-10);
+        assert!((dist.mode().unwrap().item().unwrap() - 2.5).abs() < 1e-10);
+        assert!((dist.variance().unwrap().item().unwrap() - 5.0 / 3.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_student_t_mean_df_le_1_is_nan() {
+        // df=1 (Cauchy) → mean is undefined (NaN)
+        let dist = StudentT::new(
+            scalar(1.0f64).unwrap(),
+            scalar(2.5f64).unwrap(),
+            scalar(1.0f64).unwrap(),
+        )
+        .unwrap();
+        assert!(dist.mean().unwrap().item().unwrap().is_nan());
+    }
+
+    #[test]
+    fn test_student_t_variance_df_le_2_is_inf() {
+        // df=2 → variance = inf
+        let dist = StudentT::new(
+            scalar(2.0f64).unwrap(),
+            scalar(0.0f64).unwrap(),
+            scalar(1.0f64).unwrap(),
+        )
+        .unwrap();
+        assert!(dist.variance().unwrap().item().unwrap().is_infinite());
+    }
+
+    #[test]
+    fn test_student_t_surface_overrides() {
+        let dist = StudentT::new(
+            scalar(5.0f64).unwrap(),
+            scalar(0.0f64).unwrap(),
+            scalar(1.0f64).unwrap(),
+        )
+        .unwrap();
+        assert!(dist.has_rsample());
+        assert_eq!(dist.support().unwrap().name(), "Real");
+        let args = dist.arg_constraints();
+        assert_eq!(args["df"].name(), "Positive");
+        assert_eq!(args["loc"].name(), "Real");
+        assert_eq!(args["scale"].name(), "Positive");
+    }
+
+    #[test]
+    fn test_student_t_expand() {
+        let dist = StudentT::new(
+            scalar(5.0f64).unwrap(),
+            scalar(0.0f64).unwrap(),
+            scalar(1.0f64).unwrap(),
+        )
+        .unwrap();
+        let exp = dist.expand(&[3]).unwrap();
+        let m = exp.mode().unwrap();
+        assert_eq!(m.shape(), &[3]);
     }
 }
