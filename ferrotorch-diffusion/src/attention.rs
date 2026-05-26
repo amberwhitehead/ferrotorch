@@ -36,6 +36,17 @@
 //! GroupNorm(32) -> proj_in (Conv2d k=1) -> flatten [B, HW, C]
 //!   -> N × BasicTransformerBlock -> reshape back -> proj_out + residual
 //! ```
+//!
+//! ## REQ status (per `.design/ferrotorch-diffusion/attention.md`)
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 | SHIPPED | `Attention::new` at `ferrotorch-diffusion/src/attention.rs:94..121`; consumer: `BasicTransformerBlock::new` at `attention.rs:475..477` calls `Attention::<T>::new` for both self-attn and cross-attn |
+//! | REQ-2 | SHIPPED | `Attention::forward_xattn` at `ferrotorch-diffusion/src/attention.rs:133..209`; consumer: `BasicTransformerBlock::forward_xattn` at `attention.rs:515` and `attention.rs:519` invokes it |
+//! | REQ-3 | SHIPPED | `FeedForward::new` at `ferrotorch-diffusion/src/attention.rs:331..342`; consumer: `BasicTransformerBlock::new` at `attention.rs:479` calls `FeedForward::<T>::new(dim, 4)` |
+//! | REQ-4 | SHIPPED | `BasicTransformerBlock::new` at `ferrotorch-diffusion/src/attention.rs:465..490` and `forward_xattn` at `attention.rs:499..525`; consumer: `Transformer2DModel::new` at `attention.rs:683..688` and forward at `attention.rs:740` |
+//! | REQ-5 | SHIPPED | `Transformer2DModel::new` at `ferrotorch-diffusion/src/attention.rs:669..699` and `forward_xattn` at `attention.rs:709..751`; consumer: `ferrotorch-diffusion/src/unet.rs:116`, `unet.rs:469`, `unet.rs:664` build cross-attn levels |
+//! | REQ-6 | SHIPPED | error guards at `ferrotorch-diffusion/src/attention.rs:529..535` and `attention.rs:755..761`; consumer: every cross-attn caller in `ferrotorch-diffusion/src/unet.rs` uses `forward_xattn` explicitly |
 
 use ferrotorch_core::{FerrotorchError, FerrotorchResult, Float, Tensor};
 use ferrotorch_nn::module::{Module, StateDict};

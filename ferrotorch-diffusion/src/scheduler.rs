@@ -16,6 +16,17 @@
 //! `init_noise_sigma=1.0` — i.e. η=0 deterministic sampling). Values
 //! mirrored byte-for-byte from the upstream defaults in
 //! `diffusers/schedulers/scheduling_ddim.py` as of `diffusers==0.38.0`.
+//!
+//! ## REQ status (per `.design/ferrotorch-diffusion/scheduler.md`)
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 | SHIPPED | `DDIMScheduler::new` at `ferrotorch-diffusion/src/scheduler.rs:131..167`; consumer: `ferrotorch-diffusion/examples/sd_pipeline_dump.rs` builds the scheduler with `DDIMConfig::sd_v1_5()` |
+//! | REQ-2 | SHIPPED | `set_timesteps` at `ferrotorch-diffusion/src/scheduler.rs:191..248`; consumer: `ferrotorch-diffusion/src/pipeline.rs:194` calls it |
+//! | REQ-3 | SHIPPED | `step` at `ferrotorch-diffusion/src/scheduler.rs:295..361`; consumer: `ferrotorch-diffusion/src/pipeline.rs:212` calls it |
+//! | REQ-4 | SHIPPED | `init_noise_sigma` at `ferrotorch-diffusion/src/scheduler.rs:177..179` and `scale_model_input` at `scheduler.rs:265..271`; consumer: `ferrotorch-diffusion/src/pipeline.rs:199` and `pipeline.rs:132` |
+//! | REQ-5 | SHIPPED | `compute_betas` ScaledLinear arm at `ferrotorch-diffusion/src/scheduler.rs:383..392`; consumer: `DDIMScheduler::new` at `scheduler.rs:146` invokes it |
+//! | REQ-6 | SHIPPED | prediction-type guard at `ferrotorch-diffusion/src/scheduler.rs:206..212`; consumer: `ferrotorch-diffusion/src/pipeline.rs:194` surfaces this error |
 
 use ferrotorch_core::grad_fns::arithmetic::{add, mul, sub};
 use ferrotorch_core::{FerrotorchError, FerrotorchResult, Float, Tensor};

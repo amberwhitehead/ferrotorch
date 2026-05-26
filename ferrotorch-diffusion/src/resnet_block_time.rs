@@ -24,6 +24,15 @@
 //! conv2.{weight,bias}
 //! conv_shortcut.{weight,bias}    (iff in_channels != out_channels)
 //! ```
+//!
+//! ## REQ status (per `.design/ferrotorch-diffusion/resnet_block_time.md`)
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 | SHIPPED | `ResnetBlock2DTime::new` at `ferrotorch-diffusion/src/resnet_block_time.rs:61..97`; consumer: `ferrotorch-diffusion/src/unet.rs:109`, `unet.rs:302`, `unet.rs:468`, `unet.rs:478`, `unet.rs:657`, `unet.rs:865` all build resnets |
+//! | REQ-2 | SHIPPED | `forward_t` at `ferrotorch-diffusion/src/resnet_block_time.rs:107..146`; consumer: every UNet block in `ferrotorch-diffusion/src/unet.rs` calls `resnet.forward_t(&h, temb)?` |
+//! | REQ-3 | SHIPPED | `named_parameters` at `ferrotorch-diffusion/src/resnet_block_time.rs:182..205` and `load_state_dict` at `resnet_block_time.rs:215..248`; consumer: `ferrotorch-diffusion/src/safetensors_loader.rs:151..175` routes HF UNet keys through this layout |
+//! | REQ-4 | SHIPPED | `Module::forward` error guard at `ferrotorch-diffusion/src/resnet_block_time.rs:150..156`; consumer: every UNet caller uses `forward_t` explicitly so the guard surfaces clearly |
 
 use ferrotorch_core::{FerrotorchError, FerrotorchResult, Float, Tensor};
 use ferrotorch_nn::module::{Module, StateDict};

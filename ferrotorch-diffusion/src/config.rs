@@ -4,6 +4,15 @@
 //! fields the decoder actually consumes. Encoder-side fields (e.g.
 //! `down_block_types`) are not stored — the decoder mirror is
 //! decoder-only.
+//!
+//! ## REQ status (per `.design/ferrotorch-diffusion/config.md`)
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 | SHIPPED | `Default::default` at `ferrotorch-diffusion/src/config.rs:42..55`; consumer: `ferrotorch-diffusion/src/vae.rs:271` calls `VaeDecoder::<T>::new(cfg)` |
+//! | REQ-2 | SHIPPED | `validate` at `ferrotorch-diffusion/src/config.rs:70..121`; consumer: `from_json_str` at `ferrotorch-diffusion/src/config.rs:191` and `VaeDecoder::new` at `vae.rs:62` invoke it |
+//! | REQ-3 | SHIPPED | `from_json_str` at `ferrotorch-diffusion/src/config.rs:148..193`; consumer: `from_file` at `ferrotorch-diffusion/src/config.rs:201..209` and the dump examples |
+//! | REQ-4 | SHIPPED | `resnets_per_up_block` at `ferrotorch-diffusion/src/config.rs:125..127`; consumer: `ferrotorch-diffusion/src/vae.rs:88` uses it to size `UpDecoderBlock2D` |
 
 use ferrotorch_core::{FerrotorchError, FerrotorchResult};
 

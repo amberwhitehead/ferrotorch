@@ -80,6 +80,19 @@
 //!    UNet `Attention` which has `bias=False` on q/k/v).
 //! 5. **SD uses `last_hidden_state` directly**, not the EOS-pooled
 //!    output. We return `[B, S, hidden_size]`.
+//!
+//! ## REQ status (per `.design/ferrotorch-diffusion/clip_text_encoder.md`)
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 | SHIPPED | `ClipTextConfig` at `ferrotorch-diffusion/src/clip_text_encoder.rs:104..184`; consumer: `ferrotorch-diffusion/src/safetensors_loader.rs:17` imports it and `load_clip_text_encoder` at `safetensors_loader.rs:272` constructs the encoder |
+//! | REQ-2 | SHIPPED | `ClipTextEmbeddings` at `ferrotorch-diffusion/src/clip_text_encoder.rs:298..453`; consumer: `ClipTextEncoder::forward_from_ids` at `clip_text_encoder.rs:1064` calls `self.embeddings.forward_from_ids` |
+//! | REQ-3 | SHIPPED | `ClipSelfAttention` at `ferrotorch-diffusion/src/clip_text_encoder.rs:470..636` with causal `standard_attention(..., causal=true)`; consumer: `ClipEncoderLayer` at `clip_text_encoder.rs:759..887` and `pipeline.rs:101..103` |
+//! | REQ-4 | SHIPPED | `ClipMlp` at `ferrotorch-diffusion/src/clip_text_encoder.rs:645..748` using `GELU::with_approximate(GeluApproximate::Sigmoid)`; consumer: `ClipEncoderLayer` and the encode path from `pipeline.rs:101..103` |
+//! | REQ-5 | SHIPPED | `ClipEncoderLayer` at `ferrotorch-diffusion/src/clip_text_encoder.rs:759..887`; consumer: `ClipEncoder` at `clip_text_encoder.rs:891..998` chains them; reached from `pipeline.rs:101..103` |
+//! | REQ-6 | SHIPPED | `ClipEncoder::new` at `ferrotorch-diffusion/src/clip_text_encoder.rs:897..914` and forward at `clip_text_encoder.rs:916..998`; consumer: `ClipTextEncoder::forward_from_ids` at `clip_text_encoder.rs:1065` calls `self.encoder.forward(&h)` |
+//! | REQ-7 | SHIPPED | `ClipTextEncoder::forward_from_ids` at `ferrotorch-diffusion/src/clip_text_encoder.rs:1063..1067`; consumer: `ferrotorch-diffusion/src/pipeline.rs:102` calls it inside `encode_prompt` |
+//! | REQ-8 | SHIPPED | `load_hf_state_dict` at `ferrotorch-diffusion/src/clip_text_encoder.rs:1138..1181`; consumer: `ferrotorch-diffusion/src/safetensors_loader.rs:272..` `load_clip_text_encoder` invokes it on the HF checkpoint |
 
 use std::collections::HashMap;
 

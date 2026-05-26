@@ -96,6 +96,15 @@
 //!
 //! Each `BasicTransformerBlock` is the canonical pre-LN
 //! (self-attn → cross-attn → GEGLU FF) stack.
+//!
+//! ## REQ status (per `.design/ferrotorch-diffusion/lib.md`)
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 | SHIPPED | `pub mod` block at `ferrotorch-diffusion/src/lib.rs:100..114` declares every sub-module; consumer: `ferrotorch-diffusion/src/safetensors_loader.rs:17..21` imports six of them |
+//! | REQ-2 | SHIPPED | `pub use` block at `ferrotorch-diffusion/src/lib.rs:116..139` re-exports the top-level types; consumer: `ferrotorch-hub/src/registry.rs` references `ClipTextEncoder` through the re-export |
+//! | REQ-3 | SHIPPED | crate-level lint attributes at `ferrotorch-diffusion/src/lib.rs:6..59`; consumer: `cargo clippy -p ferrotorch-diffusion --lib -- -D warnings` enforces it |
+//! | REQ-4 | SHIPPED | crate `//!` doc-comment at `ferrotorch-diffusion/src/lib.rs:61..98`; consumer: `cargo doc -p ferrotorch-diffusion` renders this as the crate landing page |
 
 pub mod attention;
 pub mod blocks;

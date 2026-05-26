@@ -4,6 +4,15 @@
 //! `diffusers.models.unets.unet_2d_condition.UNet2DConditionModel.config`
 //! for the fields the UNet's forward pass consumes. Encoder-side and
 //! training-only fields are not stored.
+//!
+//! ## REQ status (per `.design/ferrotorch-diffusion/unet_config.md`)
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 | SHIPPED | `Default::default` at `ferrotorch-diffusion/src/unet_config.rs:51..69` and `sd_v1_5()` at `unet_config.rs:72..75`; consumer: `ferrotorch-diffusion/src/safetensors_loader.rs:165` `load_unet` takes `cfg: UNet2DConditionConfig` and `safetensors_loader.rs:175` builds the UNet |
+//! | REQ-2 | SHIPPED | `validate` at `ferrotorch-diffusion/src/unet_config.rs:83..139`; consumer: `from_json_str` at `unet_config.rs:280` calls `cfg.validate()?` before returning |
+//! | REQ-3 | SHIPPED | `from_json_str` at `ferrotorch-diffusion/src/unet_config.rs:158..282`; consumer: `from_file` at `unet_config.rs:290..298` and `ferrotorch-diffusion/examples/unet_predict_dump.rs` read `unet/config.json` |
+//! | REQ-4 | SHIPPED | `time_embed_dim` at `ferrotorch-diffusion/src/unet_config.rs:143..145`; consumer: `ferrotorch-diffusion/src/unet.rs` uses it to size the `TimestepEmbedding` MLP and every `ResnetBlock2DTime` |
 
 use ferrotorch_core::{FerrotorchError, FerrotorchResult};
 

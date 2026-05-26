@@ -5,6 +5,18 @@
 //! layout 1:1 in parameter naming and forward semantics so the upstream
 //! state dict (`runwayml/stable-diffusion-v1-5/vae/diffusion_pytorch_model.safetensors`)
 //! loads byte-for-byte.
+//!
+//! ## REQ status (per `.design/ferrotorch-diffusion/blocks.md`)
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 | SHIPPED | `ResnetBlock2D` at `ferrotorch-diffusion/src/blocks.rs:35..215`; consumer: `ferrotorch-diffusion/src/vae.rs` and `vae_encoder.rs` consume it transitively via `UpDecoderBlock2D`/`DownEncoderBlock2D`/`UNetMidBlock2D` |
+//! | REQ-2 | SHIPPED | `AttnBlock2D` at `ferrotorch-diffusion/src/blocks.rs:242..434`; consumer: `UNetMidBlock2D::new` at `blocks.rs:1010` calls `AttnBlock2D::<T>::new` and `ferrotorch-diffusion/src/vae.rs:83` builds it |
+//! | REQ-3 | SHIPPED | `Upsample2D` at `ferrotorch-diffusion/src/blocks.rs:446..525`; consumer: `ferrotorch-diffusion/src/unet.rs:48` imports it for UNet up blocks |
+//! | REQ-4 | SHIPPED | `Downsample2D` at `ferrotorch-diffusion/src/blocks.rs:536..611`; consumer: `ferrotorch-diffusion/src/unet.rs:48` imports it for UNet down blocks |
+//! | REQ-5 | SHIPPED | `UpDecoderBlock2D` at `ferrotorch-diffusion/src/blocks.rs:626..786`; consumer: `ferrotorch-diffusion/src/vae.rs:92` constructs each decoder up-block |
+//! | REQ-6 | SHIPPED | `DownEncoderBlock2D` at `ferrotorch-diffusion/src/blocks.rs:806..972`; consumer: `ferrotorch-diffusion/src/vae_encoder.rs:123` constructs each encoder down-block |
+//! | REQ-7 | SHIPPED | `UNetMidBlock2D` at `ferrotorch-diffusion/src/blocks.rs:988..1127`; consumer: `ferrotorch-diffusion/src/vae.rs:83` and `vae_encoder.rs:130` both invoke `UNetMidBlock2D::<T>::new` |
 
 use std::collections::HashMap;
 

@@ -18,6 +18,16 @@
 //! Diffusers' `Timesteps` is parameter-free — it's just an arithmetic
 //! recipe. We keep it as a `Module<T>` for ergonomic composition but
 //! `parameters()` is empty.
+//!
+//! ## REQ status (per `.design/ferrotorch-diffusion/time_embedding.md`)
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 | SHIPPED | `Timesteps::new` at `ferrotorch-diffusion/src/time_embedding.rs:57..75`; consumer: `ferrotorch-diffusion/src/unet.rs:50` imports `Timesteps` for `UNet2DConditionModel::new` |
+//! | REQ-2 | SHIPPED | `Timesteps::forward_t` at `ferrotorch-diffusion/src/time_embedding.rs:87..152`; consumer: `ferrotorch-diffusion/src/unet.rs` invokes the time-projection forward path |
+//! | REQ-3 | SHIPPED | `TimestepEmbedding::new` at `ferrotorch-diffusion/src/time_embedding.rs:217..226`; consumer: `ferrotorch-diffusion/src/unet.rs:50` builds the MLP inside `UNet2DConditionModel::new` |
+//! | REQ-4 | SHIPPED | `named_parameters` at `ferrotorch-diffusion/src/time_embedding.rs:248..257`; consumer: `ferrotorch-diffusion/src/safetensors_loader.rs:151..175` routes HF UNet keys through the layout |
+//! | REQ-5 | SHIPPED | `Module<T> for Timesteps` empty-parameter impl at `ferrotorch-diffusion/src/time_embedding.rs:156..186`; consumer: `ferrotorch-diffusion/src/unet.rs` enumerates parameters without `Timesteps` contributing |
 
 use ferrotorch_core::{FerrotorchError, FerrotorchResult, Float, Tensor, TensorStorage};
 use ferrotorch_nn::module::{Module, StateDict};

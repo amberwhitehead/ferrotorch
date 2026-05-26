@@ -22,6 +22,16 @@
 //! therefore takes the `init_latent` from the caller (which the dump
 //! example pulls from the pinned mirror), not from a rust-side seeded
 //! Gaussian.
+//!
+//! ## REQ status (per `.design/ferrotorch-diffusion/pipeline.md`)
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 | SHIPPED | `StableDiffusionPipeline::new` at `ferrotorch-diffusion/src/pipeline.rs:80..92`; consumer: `ferrotorch-diffusion/src/gpu/pipeline.rs:49` reuses `PipelineStepDump` |
+//! | REQ-2 | SHIPPED | `encode_prompt` at `ferrotorch-diffusion/src/pipeline.rs:101..103`; consumer: `ferrotorch-diffusion/examples/sd_pipeline_dump.rs` calls it |
+//! | REQ-3 | SHIPPED | `generate` at `ferrotorch-diffusion/src/pipeline.rs:167..229`; consumer: `examples/sd_pipeline_dump.rs` runs `pipeline.generate(...)` |
+//! | REQ-4 | SHIPPED | `PipelineStepDump` at `ferrotorch-diffusion/src/pipeline.rs:37..52`; consumer: `ferrotorch-diffusion/src/gpu/pipeline.rs:210` constructs it |
+//! | REQ-5 | SHIPPED | shape checks at `ferrotorch-diffusion/src/pipeline.rs:175..191`; consumer: `ferrotorch-diffusion/src/gpu/pipeline.rs:181..193` mirrors the same contract |
 
 use ferrotorch_core::grad_fns::arithmetic::{add, mul, sub};
 use ferrotorch_core::{FerrotorchError, FerrotorchResult, Float, Tensor, TensorStorage};
