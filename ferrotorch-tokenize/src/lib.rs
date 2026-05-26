@@ -1,5 +1,16 @@
 //! Text tokenization for ferrotorch models.
 //!
+//! ## REQ status (per `.design/ferrotorch-tokenize/lib.md`)
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 (lint baseline) | SHIPPED | `#![warn]`/`#![deny]`/`#![allow]` block at top of `lib.rs`; verified by `cargo clippy -p ferrotorch-tokenize -- -D warnings`. |
+//! | REQ-2 (I/O vs parse error split) | SHIPPED | `pub fn load_tokenizer` + `pub fn load_chat_template` in `lib.rs` separate `Internal` (I/O) from `InvalidArgument` (parse) per #734. |
+//! | REQ-3 (encode/decode/vocab surface) | SHIPPED | the `load_tokenizer`/`encode`/`encode_batch`/`decode`/`vocab_size`/`token_to_id`/`id_to_token` entries in `lib.rs` mirror the upstream `tokenizers::Tokenizer` API; consumers: `ferrotorch-llama/examples/{llama3_8b,llama3_8b_gpu,llama3_70b_gpu,llm_inference_dump}.rs`. |
+//! | REQ-4 (`apply_chat_template` via minijinja) | SHIPPED | the `apply_chat_template` + `_to_ids` entries in `lib.rs` mirror `transformers/tokenization_utils_base.py:1547`; meta-crate `pub use` boundary per S5. |
+//! | REQ-5 (`ChatMessage` with flattened extras) | SHIPPED | `#[non_exhaustive] pub struct ChatMessage` in `lib.rs` with `#[serde(flatten)] extra: BTreeMap<...>`. |
+//! | REQ-6 (`load_chat_template` from `tokenizer_config.json`) | SHIPPED | the `load_chat_template` entry in `lib.rs` handles String / Array / None shapes. |
+//!
 //! This crate is a thin wrapper around the `HuggingFace`
 //! [`tokenizers`] crate — the same library powering Python's
 //! `transformers.AutoTokenizer` — with an API shaped for ferrotorch
@@ -27,6 +38,17 @@
 //! More advanced features (chat templates, truncation strategies,
 //! added-token manipulation) are available by calling the re-exported
 //! [`tokenizers`] API directly on the returned [`Tokenizer`].
+//!
+//! # REQ status (per `.design/ferrotorch-tokenize/lib.md`)
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 | SHIPPED | impl: lint baseline at top of `lib.rs` — `#![warn(clippy::all, clippy::pedantic)]` + `#![deny(rust_2018_idioms, missing_debug_implementations)]` + documented `#![allow(missing_docs)]`; non-test consumer: the meta-crate `pub use ferrotorch_tokenize::*` re-export in `ferrotorch/src/lib.rs` `pub use ferrotorch_tokenize::*;` |
+//! | REQ-2 | SHIPPED | impl: `pub fn load_tokenizer in lib.rs` splits `std::fs::read_to_string` (`Internal`) from `Tokenizer::from_str` (`InvalidArgument`); `pub fn load_chat_template in lib.rs` splits `std::fs::read` from `serde_json::from_slice` identically; non-test consumer: `ferrotorch-llama/examples/llama3_8b.rs` (greedy-decode `load_tokenizer` call site) calls `load_tokenizer(&tok_path).expect("failed to load tokenizer.json")`; verified by `loader_rejects_missing_file` + `loader_rejects_malformed_json` + `load_chat_template_categorizes_missing_file_as_internal` + `load_chat_template_categorizes_malformed_json_as_invalid_argument` (issue #734) |
+//! | REQ-3 | SHIPPED | impl: `pub fn load_tokenizer / encode / encode_batch / decode / vocab_size / token_to_id / id_to_token in lib.rs` mirror the identically-named methods on `tokenizers::Tokenizer` (upstream crate registry `tokenizers-0.22.2/src/tokenizer/mod.rs`, methods `from_file` / `get_vocab_size` / `token_to_id` / `id_to_token` / `encode` / `decode` / `encode_batch`); non-test consumers: `ferrotorch-llama/examples/llama3_8b.rs`, `llama3_8b_gpu.rs`, `llama3_70b_gpu.rs`, `llm_inference_dump.rs` (each `use ferrotorch_tokenize::{decode, encode, load_tokenizer};` plus the load/encode/decode call sites in their greedy-decode loops) (all `[[example]]` Cargo binary targets, non-test); meta-crate boundary at the meta-crate `pub use ferrotorch_tokenize::*` re-export in `ferrotorch/src/lib.rs` |
+//! | REQ-4 | SHIPPED | impl: `pub fn apply_chat_template in lib.rs` registers `raise_exception` + `strftime_now` Jinja helpers and renders via `minijinja::Environment`, mirroring `transformers/tokenization_utils_base.py:1547`; `pub fn apply_chat_template_to_ids in lib.rs` chains it through `encode`; non-test consumer: the meta-crate `pub use ferrotorch_tokenize::*` re-export in `ferrotorch/src/lib.rs` re-exports to `ferrotorch::tokenize::apply_chat_template` (existing pub API across #588 + #734, grandfathered per goal.md S5 R-DEFER-1); verified by `chat_template_renders_simple_two_turn`, `chat_template_appends_generation_prompt_when_requested`, `chat_template_trims_whitespace_in_content`, `chat_template_passes_bos_token`, `chat_template_rejects_invalid_template`, `chat_template_strftime_now_renders_wall_clock_date`, `chat_template_strftime_now_rejects_malformed_format_string`, `chat_template_raise_exception_function_propagates_error` |
+//! | REQ-5 | SHIPPED | impl: `#[non_exhaustive] pub struct ChatMessage in lib.rs` with `#[serde(flatten)] extra: BTreeMap<String, serde_json::Value>` and `impl ChatMessage::new in lib.rs`; non-test consumer: the meta-crate `pub use ferrotorch_tokenize::*` re-export in `ferrotorch/src/lib.rs` re-export propagates `ChatMessage` to `ferrotorch::tokenize::ChatMessage` (existing pub API #588, grandfathered); verified by `chat_template_propagates_extra_fields` + `chat_message_roundtrip_through_serde` |
+//! | REQ-6 | SHIPPED | impl: `pub fn load_chat_template in lib.rs` reads bytes (Internal on io error), parses JSON (InvalidArgument on parse error), dispatches on `chat_template` field shape (None / String / Array of `{template: string}` / other → InvalidArgument); non-test consumer: the meta-crate `pub use ferrotorch_tokenize::*` re-export in `ferrotorch/src/lib.rs` re-exports to `ferrotorch::tokenize::load_chat_template` (existing pub API #588 + #734, grandfathered); verified by `load_chat_template_extracts_string_field` + `load_chat_template_handles_array_form` + `load_chat_template_returns_none_when_missing` + `conformance_encode_decode::load_chat_template_round_trips_through_disk` |
 
 #![warn(clippy::all, clippy::pedantic)]
 #![deny(rust_2018_idioms, missing_debug_implementations)]
@@ -204,7 +226,7 @@ impl ChatMessage {
 /// Apply a HuggingFace-style Jinja2 chat template to a list of messages.
 ///
 /// Renders to the same string that Python's `tokenizer.apply_chat_template`
-/// would produce. The template usually lives in `tokenizer_config.json`
+/// would produce. The template usually lives in ``tokenizer_config.json``
 /// under the key `chat_template` and references:
 /// - `messages` — the list of `ChatMessage` records (passed through here)
 /// - `add_generation_prompt` — bool, whether to append the assistant turn header
@@ -330,7 +352,7 @@ pub fn apply_chat_template_to_ids(
     Ok((prompt, ids))
 }
 
-/// Read the `chat_template` field out of a `tokenizer_config.json` file.
+/// Read the `chat_template` field out of a ``tokenizer_config.json`` file.
 ///
 /// Returns `None` if the file exists but doesn't define `chat_template`,
 /// or an error if the file can't be read or parsed. Some configs ship the
@@ -431,7 +453,7 @@ mod tests {
     fn load_chat_template_categorizes_missing_file_as_internal() {
         // Audit issue #734: same I/O-vs-parse split for the chat-template
         // loader.
-        let r = load_chat_template("/nonexistent/tokenizer_config.json");
+        let r = load_chat_template("/nonexistent/`tokenizer_config.json`");
         match r {
             Err(FerrotorchError::Internal { .. }) => {}
             other => panic!("expected Internal for missing file, got {other:?}"),
