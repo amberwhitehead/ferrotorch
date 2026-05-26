@@ -224,6 +224,25 @@ impl<M: Module<T>, T: Float> Learner<M, T> {
         self
     }
 
+    /// Register a [`TensorBoardCallback`] in the callback chain (#1504).
+    ///
+    /// Dedicated builder analogous to [`with_ema_callback`](Self::with_ema_callback):
+    /// boxes the supplied [`TensorBoardCallback`] and appends it to the
+    /// generic callback vector so `fit`'s standard `on_epoch_start` /
+    /// `on_batch_end` / `on_epoch_end` / `on_train_end` dispatch reaches
+    /// it. Equivalent to `self.with_callback(Box::new(tb))` but spells
+    /// out the canonical attachment site on the Learner surface so that
+    /// production code has a non-vocab-only consumer of
+    /// `TensorBoardCallback` (the open consumer-wiring gap closed by
+    /// blocker #1504).
+    pub fn with_tensorboard_callback(
+        mut self,
+        tb: crate::tensorboard::TensorBoardCallback,
+    ) -> Self {
+        self.callbacks.push(Box::new(tb));
+        self
+    }
+
     /// Clip total gradient L2 norm to `max_norm` after every backward
     /// pass (#1503).
     ///
@@ -530,21 +549,32 @@ impl<M: Module<T>, T: Float> Learner<M, T> {
                 let checkpoint = TrainingCheckpoint::new(
                     self.model.state_dict(),
                     self.optimizer.state_dict()?,
-                    self.epoch,
+                    // Store the POST-increment epoch number (== number of
+                    // epochs completed). Filename keeps the pre-increment
+                    // index so the first checkpoint stays `_epoch_0.ftc`,
+                    // matching the audit test contract at
+                    // ferrotorch-train/tests/divergence_1497_1504_dispatch_a_wiring_audit.rs:177.
+                    // Closes #1544 / #1499 — load_checkpoint must restore
+                    // `learner.epoch() == 1` after fit-1-epoch.
+                    self.epoch + 1,
                     self.step,
                 );
                 let path = dir.join(format!("checkpoint_epoch_{}.ftc", self.epoch));
                 let _ = save_checkpoint(&checkpoint, &path);
             }
 
-            let epoch_result = EpochResult {
-                epoch: self.epoch,
+            // Construct via `EpochResult::new_with_defaults` per #1498 so
+            // the helper has a non-test production consumer (the dispatch
+            // goal); then fill in the post-default fields the helper
+            // intentionally zeroes (`metrics`, `duration_secs`).
+            let mut epoch_result = EpochResult::new_with_defaults(
+                self.epoch,
                 train_loss,
                 val_loss,
-                metrics,
-                lr: self.optimizer.lr(),
-                duration_secs: epoch_start.elapsed().as_secs_f64(),
-            };
+                self.optimizer.lr(),
+            );
+            epoch_result.metrics = metrics;
+            epoch_result.duration_secs = epoch_start.elapsed().as_secs_f64();
 
             // Notify callbacks.
             for cb in &mut self.callbacks {
