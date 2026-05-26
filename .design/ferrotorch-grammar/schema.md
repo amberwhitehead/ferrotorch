@@ -50,15 +50,18 @@ sibling `state` module.
   produced exactly when the `type` array contains exactly one
   non-`null` entry alongside `"null"`.
 
-- REQ-5: NOT-STARTED — composition keywords (`oneOf` / `anyOf` /
-  `allOf` / `$ref`) are explicitly rejected with `SchemaError::Unsupported`,
-  but not yet implemented. Tracked by blocker #1486.
+- REQ-5: PARTIAL — `$ref` intra-document resolution shipped (#1486
+  partial close). `oneOf` / `anyOf` / `allOf` still rejected with
+  `SchemaError::Unsupported`; #1486 stays OPEN for the
+  union/intersection state machine in `JsonGrammar`.
 
-- REQ-6: NOT-STARTED — numeric / length constraints (`minLength`,
-  `maxLength`, `minimum`, `maximum`), regex `pattern`, and annotation
-  `format` (date-time, email, etc.) are silently dropped by the
-  current parser. The grammar therefore over-allows in these
-  dimensions. Tracked by blocker #1487.
+- REQ-6: PARTIAL — numeric / length constraints (`minLength`,
+  `maxLength`, `minimum`, `maximum`, `multipleOf`) parsed into
+  `Schema::StringConstrained` / `Schema::NumberConstrained` /
+  `Schema::IntegerConstrained` variants. The grammar enforces string
+  length bounds at emission time. `pattern` (regex) and `format`
+  annotations are still silently dropped. Blocker #1487 closes for
+  the min/max/length subset.
 
 - REQ-7: `additionalProperties` is silently treated as `false` (only
   declared `properties` keys are accepted at sample time). This is a

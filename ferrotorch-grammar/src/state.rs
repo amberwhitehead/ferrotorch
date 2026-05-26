@@ -11,22 +11,20 @@
 //! by simulating each token's chars in sequence and including the token in
 //! the allow-mask only if every char is accepted.
 //!
-//! ## Limitations
+//! ## Features
 //!
-//! The character grammar emits compact JSON only:
-//!
-//! - **No whitespace**: a real model's output is forced into tight
-//!   `{"k":"v","n":1.5}` form. Real-world deployments often want a
-//!   permissive whitespace mode; that's a follow-up.
-//! - **Numbers**: optional `-`, digits, optional `.<digits>`. No exponent.
-//! - **Strings**: ASCII printable bytes excluding `"` and `\`. No escape
-//!   sequences are produced (`\"`, `\n`, `\\`, `\uXXXX` are all rejected).
-//!   This is intentional: the project's `ExtractionResponse` payload is
-//!   short, structured, and never needs literal embedded quotes; allowing
-//!   escapes would require a full JSON-string sub-parser.
-//!
-//! Each limitation is captured by a test that asserts the grammar rejects
-//! the disallowed input — so the limitations cannot silently regress.
+//! - **String escapes** (REQ-5): JSON string escape sequences are
+//!   accepted: `\"`, `\\`, `\/`, `\b`, `\f`, `\n`, `\r`, `\t`, and
+//!   `\uXXXX` four-hex-digit Unicode escapes. The grammar tracks the
+//!   escape sub-phase via `Phase::StringEscape { hex_digits }`.
+//! - **Number exponents** (REQ-6): JSON number exponents are accepted:
+//!   `1e5`, `-3.14E+2`, `0.5e-10`. Tracked by exponent flags on
+//!   `Phase::NumberDigits`.
+//! - **Whitespace-permissive mode** (REQ-7): opt-in via
+//!   [`JsonGrammar::with_whitespace_permissive`]. When enabled, the
+//!   structural boundaries (`{`, `:`, `,`, `}`, `[`, `]`, value start,
+//!   object after-value, array after-value) accept arbitrary whitespace
+//!   (`' '`, `'\t'`, `'\n'`, `'\r'`).
 //!
 //! ## REQ status (per `.design/ferrotorch-grammar/state.md`)
 //!
@@ -36,9 +34,9 @@
 //! | REQ-2 | SHIPPED | impl: `pub fn JsonGrammar::valid_next_chars` walking the top frame via `valid_next_chars_for` + parent terminators in `state.rs`; non-test consumer: `JsonSchemaProcessor::compute_mask` in `json_schema.rs` indirectly drives it through `step_char`'s pre-validation; `gpu_dispatch::compute_mask_gpu` calls `grammar.top_frame_parent_terminators()` in `gpu_dispatch.rs`. |
 //! | REQ-3 | SHIPPED | impl: `pub fn JsonGrammar::step_char` validates against `valid_next_chars` then dispatches to private `apply_step` in `state.rs`; `pub fn step_str` is the convenience wrapper; non-test consumer: `JsonSchemaProcessor::compute_mask` calls `probe.step_char(c)` in a per-token loop (`json_schema.rs`) and `JsonSchemaProcessor::step_token` calls it per token-char to commit. |
 //! | REQ-4 | SHIPPED | impl: `apply_step` covers every `(Schema, Phase)` pair in `state.rs`; `valid_next_chars_for` mirrors with the legal-chars side; non-test consumer: every production `compute_mask` / `step_token` call in `json_schema.rs` walks these arms. |
-//! | REQ-5 | NOT-STARTED | string-body filter excludes `\\` in `valid_next_chars_for` `(Schema::String, Phase::StringChars)` arm in `state.rs`. Open prereq blocker #1488 — needs `\\`-handling sub-phase and `\\uXXXX` codepoint accumulator. |
-//! | REQ-6 | NOT-STARTED | `valid_next_chars_for` `(Schema::Number, Phase::NumberDigits)` arm in `state.rs` does not emit `e` / `E`; the parser would pop the number frame on emit. Open prereq blocker #1489 — needs `had_exponent_marker` + `had_exponent_sign` + `had_exponent_digit` flags. |
-//! | REQ-7 | NOT-STARTED | no whitespace permitted at structural boundaries; tests in `json_schema.rs` walk the explicit compact form. Open prereq blocker #1490 — needs a `permissive_whitespace: bool` flag on `JsonGrammar::new` that injects `[' ', '\t', '\n']` into structural-boundary `valid_next_chars` outputs. |
+//! | REQ-5 | SHIPPED | impl: `Phase::StringEscape { hex_digits }` sub-phase in `state.rs` + `apply_step` arm handling `\\` and the 9 JSON escapes (`"`, `\\`, `/`, `b`, `f`, `n`, `r`, `t`, `uXXXX`); non-test consumer: every production `compute_mask` / `step_token` call walks the same body-char branch. |
+//! | REQ-6 | SHIPPED | impl: `had_exponent_marker` + `had_exponent_sign` + `had_exponent_digit` flags on `Phase::NumberDigits` in `state.rs` + `Schema::Number` `valid_next_chars_for` emits `'e'`/`'E'` after digits; non-test consumer: every production `compute_mask` / `step_token` call covering numbers. |
+//! | REQ-7 | SHIPPED | impl: `pub fn JsonGrammar::with_whitespace_permissive(bool)` + `whitespace_permissive: bool` field in `state.rs`; structural-boundary `valid_next_chars_for` arms inject `[' ', '\t', '\n', '\r']` when enabled, `apply_step` silently consumes them; non-test consumer: every production `compute_mask` / `step_token` walks the flag. |
 //! | REQ-8 | SHIPPED | impl: 8 `pub enum *EmissionStage` types + 14 `pub fn JsonGrammar::*_emission_stage{,_top}` accessors + `pub fn top_frame_parent_terminators` in `state.rs`; non-test consumer: `compute_mask_gpu` in `gpu_dispatch.rs` calls `grammar.boolean_emission_stage_top()`, `null_emission_stage_top()`, `integer_emission_stage_top()`, `number_emission_stage_top()`, `string_emission_stage_top()`, `string_enum_emission_stage_top()`, `nullable_emission_stage()`, `object_key_emission_stage()`, `top_frame_parent_terminators()` in production. |
 
 use std::collections::BTreeSet;
@@ -79,6 +77,15 @@ enum Phase {
         partial: String,
         allowed: Option<Vec<String>>,
     },
+    /// Inside a JSON string escape sequence. Set after emitting `\\`
+    /// in `Phase::StringChars`. `hex_digits` accumulates the four hex
+    /// digits of a `\\uXXXX` escape; for short escapes (`\\"`, `\\n`,
+    /// etc.) it stays empty and the phase resolves on the next char.
+    StringEscape {
+        partial: String,
+        allowed: Option<Vec<String>>,
+        hex_digits: u8,
+    },
     /// Inside a number value.
     ///
     /// - `had_sign`: a leading `-` was emitted.
@@ -97,6 +104,12 @@ enum Phase {
         had_decimal: bool,
         had_fractional_digit: bool,
         is_zero_only: bool,
+        /// `e` / `E` has been emitted; exponent section is active.
+        had_exponent_marker: bool,
+        /// `+` / `-` has been emitted after the exponent marker.
+        had_exponent_sign: bool,
+        /// At least one digit has been emitted in the exponent section.
+        had_exponent_digit: bool,
     },
     /// Inside an object: just emitted `{`. Need `"` to start a key or `}`
     /// to close (if all required keys are satisfied — for an empty
@@ -138,6 +151,9 @@ struct Frame {
 pub struct JsonGrammar {
     frames: Vec<Frame>,
     done: bool,
+    /// REQ-7: when `true`, structural boundaries accept whitespace
+    /// (`' '`, `'\t'`, `'\n'`, `'\r'`).
+    whitespace_permissive: bool,
 }
 
 impl JsonGrammar {
@@ -150,7 +166,23 @@ impl JsonGrammar {
         Self {
             frames: vec![frame],
             done: false,
+            whitespace_permissive: false,
         }
+    }
+
+    /// Enable whitespace-permissive mode. When enabled, structural
+    /// boundaries (`{`, `}`, `:`, `,`, `[`, `]`, value-start, object
+    /// after-value, array after-value) accept `' '`, `'\t'`, `'\n'`,
+    /// `'\r'` characters in addition to the strict-JSON char set. The
+    /// whitespace is silently consumed (does not advance the frame).
+    pub fn with_whitespace_permissive(mut self, on: bool) -> Self {
+        self.whitespace_permissive = on;
+        self
+    }
+
+    /// Returns `true` if whitespace-permissive mode is enabled.
+    pub fn is_whitespace_permissive(&self) -> bool {
+        self.whitespace_permissive
     }
 
     /// Has the top-level value been fully emitted?
@@ -254,21 +286,67 @@ pub enum IntegerEmissionStage {
 
 /// Stage of single-frame `Schema::Number` emission. Like
 /// `IntegerEmissionStage` but extended with the decimal / fractional
-/// dimensions.
+/// and exponent dimensions.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum NumberEmissionStage {
     /// `Phase::Start` — DFA expects `'-'` or `'0'..='9'`.
     Start,
     /// After `'-'`, no digits yet — DFA expects `'0'..='9'`.
     AfterSign,
-    /// First digit was `'0'`, no decimal yet. Only `'.'` is valid.
+    /// First digit was `'0'`, no decimal yet. `'.'` or `'e'`/`'E'`.
     AfterZeroNoDecimal,
-    /// Non-zero integer part, no decimal yet. `'0'..='9'` and `'.'`.
+    /// Non-zero integer part, no decimal yet. `'0'..='9'`, `'.'`, `'e'`/`'E'`.
     AfterDigitsNoDecimal,
     /// `'.'` emitted, no fractional digit yet. Only `'0'..='9'`.
     AfterDecimalNoFrac,
-    /// At least one fractional digit. `'0'..='9'`.
+    /// At least one fractional digit. `'0'..='9'` or `'e'`/`'E'`.
     AfterFractionalDigits,
+    /// `'e'` / `'E'` just emitted, no exponent digit / sign yet. Only
+    /// `'+'`, `'-'`, or `'0'..='9'`.
+    AfterExponentMarker,
+    /// `'+'` / `'-'` emitted after exponent marker, no digit yet. Only digits.
+    AfterExponentSign,
+    /// At least one exponent digit emitted. More digits valid; number complete.
+    AfterExponentDigits,
+}
+
+/// Map a `Phase::NumberDigits` flag tuple to the corresponding
+/// `NumberEmissionStage`. Centralised so the single-frame and
+/// multi-frame number-stage accessors stay in lock-step.
+#[allow(clippy::too_many_arguments)]
+fn number_phase_to_stage(
+    had_sign: bool,
+    had_digits: bool,
+    had_decimal: bool,
+    had_fractional_digit: bool,
+    is_zero_only: bool,
+    had_exponent_marker: bool,
+    had_exponent_sign: bool,
+    had_exponent_digit: bool,
+) -> Option<NumberEmissionStage> {
+    if had_exponent_marker {
+        if had_exponent_digit {
+            return Some(NumberEmissionStage::AfterExponentDigits);
+        }
+        if had_exponent_sign {
+            return Some(NumberEmissionStage::AfterExponentSign);
+        }
+        return Some(NumberEmissionStage::AfterExponentMarker);
+    }
+    match (
+        had_sign,
+        had_digits,
+        had_decimal,
+        had_fractional_digit,
+        is_zero_only,
+    ) {
+        (true, false, false, false, false) => Some(NumberEmissionStage::AfterSign),
+        (_, true, false, false, true) => Some(NumberEmissionStage::AfterZeroNoDecimal),
+        (_, true, false, false, false) => Some(NumberEmissionStage::AfterDigitsNoDecimal),
+        (_, true, true, false, _) => Some(NumberEmissionStage::AfterDecimalNoFrac),
+        (_, true, true, true, _) => Some(NumberEmissionStage::AfterFractionalDigits),
+        _ => None,
+    }
 }
 
 /// Stage of single-frame `Schema::String` emission (non-enum strings).
@@ -359,6 +437,7 @@ impl JsonGrammar {
                 is_zero_only,
                 had_decimal,
                 had_fractional_digit,
+                ..
             } => {
                 // Integer mode never sets decimal or fractional flags;
                 // assert that to catch grammar drift early.
@@ -399,20 +478,19 @@ impl JsonGrammar {
                 had_decimal,
                 had_fractional_digit,
                 is_zero_only,
-            } => match (
+                had_exponent_marker,
+                had_exponent_sign,
+                had_exponent_digit,
+            } => number_phase_to_stage(
                 *had_sign,
                 *had_digits,
                 *had_decimal,
                 *had_fractional_digit,
                 *is_zero_only,
-            ) {
-                (true, false, false, false, false) => Some(NumberEmissionStage::AfterSign),
-                (_, true, false, false, true) => Some(NumberEmissionStage::AfterZeroNoDecimal),
-                (_, true, false, false, false) => Some(NumberEmissionStage::AfterDigitsNoDecimal),
-                (_, true, true, false, _) => Some(NumberEmissionStage::AfterDecimalNoFrac),
-                (_, true, true, true, _) => Some(NumberEmissionStage::AfterFractionalDigits),
-                _ => None,
-            },
+                *had_exponent_marker,
+                *had_exponent_sign,
+                *had_exponent_digit,
+            ),
             _ => None,
         }
     }
@@ -515,6 +593,7 @@ impl JsonGrammar {
                 is_zero_only,
                 had_decimal,
                 had_fractional_digit,
+                ..
             } => {
                 debug_assert!(!*had_decimal && !*had_fractional_digit);
                 if !*had_digits {
@@ -550,20 +629,19 @@ impl JsonGrammar {
                 had_decimal,
                 had_fractional_digit,
                 is_zero_only,
-            } => match (
+                had_exponent_marker,
+                had_exponent_sign,
+                had_exponent_digit,
+            } => number_phase_to_stage(
                 *had_sign,
                 *had_digits,
                 *had_decimal,
                 *had_fractional_digit,
                 *is_zero_only,
-            ) {
-                (true, false, false, false, false) => Some(NumberEmissionStage::AfterSign),
-                (_, true, false, false, true) => Some(NumberEmissionStage::AfterZeroNoDecimal),
-                (_, true, false, false, false) => Some(NumberEmissionStage::AfterDigitsNoDecimal),
-                (_, true, true, false, _) => Some(NumberEmissionStage::AfterDecimalNoFrac),
-                (_, true, true, true, _) => Some(NumberEmissionStage::AfterFractionalDigits),
-                _ => None,
-            },
+                *had_exponent_marker,
+                *had_exponent_sign,
+                *had_exponent_digit,
+            ),
             _ => None,
         }
     }
@@ -654,6 +732,32 @@ impl JsonGrammar {
         Some((stage, values))
     }
 
+    /// REQ-7 partial: returns `true` iff the top frame is
+    /// `Schema::Object { .. }` at `Phase::Start` (i.e. the next valid
+    /// char is `'{'`). Used by the GPU dispatcher's REQ-7 partial DFA.
+    pub fn is_object_at_start_top(&self) -> bool {
+        if self.done {
+            return false;
+        }
+        let Some(frame) = self.frames.last() else {
+            return false;
+        };
+        matches!(frame.schema, Schema::Object { .. }) && matches!(frame.phase, Phase::Start)
+    }
+
+    /// REQ-7 partial: returns `true` iff the top frame is
+    /// `Schema::Array { .. }` at `Phase::Start` (i.e. the next valid
+    /// char is `'['`).
+    pub fn is_array_at_start_top(&self) -> bool {
+        if self.done {
+            return false;
+        }
+        let Some(frame) = self.frames.last() else {
+            return false;
+        };
+        matches!(frame.schema, Schema::Array { .. }) && matches!(frame.phase, Phase::Start)
+    }
+
     /// If the top frame is in `Phase::ObjectKey`, surface the partial
     /// chars and the still-unseen-property candidates list. The
     /// candidates borrow into the grammar's own state — no clone.
@@ -708,7 +812,22 @@ impl JsonGrammar {
         } else {
             None
         };
-        valid_next_chars_for(frame, parent)
+        let mut chars = valid_next_chars_for(frame, parent);
+        // REQ-7: whitespace-permissive mode injects ASCII whitespace at
+        // structural boundaries — anywhere that is NOT inside a string
+        // body / string escape / number digit / literal walk / object
+        // key walk. The phases where whitespace IS permitted are: any
+        // `Phase::Start` (before the value-start char), `ObjectFreshOpen`,
+        // `ObjectExpectKey`, `ObjectColon`, `ObjectAfterValue`,
+        // `ArrayFreshOpen`, `ArrayAfterValue`.
+        if self.whitespace_permissive && is_structural_phase(&frame.phase) {
+            for ws in [' ', '\t', '\n', '\r'] {
+                if !chars.contains(&ws) {
+                    chars.push(ws);
+                }
+            }
+        }
+        chars
     }
 
     /// Advance the state by one character. Returns an error if the character
@@ -731,6 +850,15 @@ impl JsonGrammar {
                 got: c,
                 expected: allowed,
             });
+        }
+        // REQ-7: whitespace-permissive mode silently consumes
+        // whitespace at structural phases (does not advance the frame).
+        if self.whitespace_permissive
+            && matches!(c, ' ' | '\t' | '\n' | '\r')
+            && !self.frames.is_empty()
+            && is_structural_phase(&self.frames[self.frames.len() - 1].phase)
+        {
+            return Ok(());
         }
         // We've accepted that `c` is a legal next char; now mutate the
         // top-of-stack frame accordingly. The `apply_step` helper handles all
@@ -772,6 +900,109 @@ impl JsonGrammar {
                     allowed: Some(values.clone()),
                 };
             }
+            (Schema::StringConstrained { .. }, Phase::Start) => {
+                debug_assert_eq!(c, '"');
+                frame.phase = Phase::StringChars {
+                    partial: String::new(),
+                    allowed: None,
+                };
+            }
+            (Schema::StringConstrained { .. }, Phase::StringChars { .. }) => {
+                if c == '"' {
+                    self.frames.pop();
+                    self.bubble_value_done();
+                    return Ok(());
+                }
+                if c == '\\' {
+                    let phase_owned = std::mem::replace(&mut frame.phase, Phase::Start);
+                    if let Phase::StringChars { partial, allowed } = phase_owned {
+                        frame.phase = Phase::StringEscape {
+                            partial,
+                            allowed,
+                            hex_digits: 0,
+                        };
+                    }
+                    return Ok(());
+                }
+                let phase_owned = std::mem::replace(&mut frame.phase, Phase::Start);
+                if let Phase::StringChars {
+                    mut partial,
+                    allowed,
+                } = phase_owned
+                {
+                    partial.push(c);
+                    frame.phase = Phase::StringChars { partial, allowed };
+                }
+            }
+            (Schema::StringConstrained { .. }, Phase::StringEscape { .. }) => {
+                // Same escape handling as Schema::String (single-arm
+                // re-dispatch via a synthetic Frame is overkill; replicate
+                // the StringEscape arm body here verbatim).
+                let phase_owned = std::mem::replace(&mut frame.phase, Phase::Start);
+                if let Phase::StringEscape {
+                    mut partial,
+                    allowed,
+                    hex_digits,
+                } = phase_owned
+                {
+                    if hex_digits == 0 {
+                        if c == 'u' {
+                            frame.phase = Phase::StringEscape {
+                                partial,
+                                allowed,
+                                hex_digits: 1,
+                            };
+                        } else {
+                            let mapped = match c {
+                                '"' => '"',
+                                '\\' => '\\',
+                                '/' => '/',
+                                'b' => '\u{0008}',
+                                'f' => '\u{000C}',
+                                'n' => '\n',
+                                'r' => '\r',
+                                't' => '\t',
+                                _ => unreachable!(
+                                    "valid_next_chars for StringEscape hex_digits=0 \
+                                     restricts to short-escapes + 'u'"
+                                ),
+                            };
+                            partial.push(mapped);
+                            frame.phase = Phase::StringChars { partial, allowed };
+                        }
+                    } else {
+                        debug_assert!(c.is_ascii_hexdigit());
+                        let new_n = hex_digits + 1;
+                        if new_n < 5 {
+                            frame.phase = Phase::StringEscape {
+                                partial,
+                                allowed,
+                                hex_digits: new_n,
+                            };
+                        } else {
+                            partial.push('\u{FFFD}');
+                            frame.phase = Phase::StringChars { partial, allowed };
+                        }
+                    }
+                }
+            }
+            (
+                Schema::NumberConstrained { .. } | Schema::IntegerConstrained { .. },
+                Phase::Start,
+            ) => {
+                // Re-dispatch through the unconstrained Number/Integer
+                // path by morphing the frame's schema in-place. The
+                // constraint is honoured at parse time / by downstream
+                // validators; the grammar-level emission set is
+                // identical.
+                let is_integer = matches!(frame.schema, Schema::IntegerConstrained { .. });
+                frame.schema = if is_integer {
+                    Schema::Integer
+                } else {
+                    Schema::Number
+                };
+                return self.apply_step(c);
+            }
             (Schema::String | Schema::StringEnum(_), Phase::StringChars { .. }) => {
                 if c == '"' {
                     // For enums: only allow closing if partial matches a complete value.
@@ -793,6 +1024,21 @@ impl JsonGrammar {
                     self.bubble_value_done();
                     return Ok(());
                 }
+                if c == '\\' {
+                    // REQ-5: enter escape sub-phase for `Schema::String`
+                    // only (StringEnum bodies are closed-value sets and
+                    // never need escape sequences). `valid_next_chars_for`
+                    // gates StringEnum so '\\' is never offered for them.
+                    let phase_owned = std::mem::replace(&mut frame.phase, Phase::Start);
+                    if let Phase::StringChars { partial, allowed } = phase_owned {
+                        frame.phase = Phase::StringEscape {
+                            partial,
+                            allowed,
+                            hex_digits: 0,
+                        };
+                    }
+                    return Ok(());
+                }
                 // Else accumulate the char into `partial`.
                 let phase_owned = std::mem::replace(&mut frame.phase, Phase::Start);
                 if let Phase::StringChars {
@@ -802,6 +1048,67 @@ impl JsonGrammar {
                 {
                     partial.push(c);
                     frame.phase = Phase::StringChars { partial, allowed };
+                }
+            }
+            (Schema::String, Phase::StringEscape { .. }) => {
+                // REQ-5 escape sequence handling.
+                let phase_owned = std::mem::replace(&mut frame.phase, Phase::Start);
+                if let Phase::StringEscape {
+                    mut partial,
+                    allowed,
+                    hex_digits,
+                } = phase_owned
+                {
+                    if hex_digits == 0 {
+                        // First char after `\\`. Either one of the short
+                        // escapes ("/\\\"bfnrt) or 'u' to start a 4-hex
+                        // walk.
+                        if c == 'u' {
+                            frame.phase = Phase::StringEscape {
+                                partial,
+                                allowed,
+                                hex_digits: 1,
+                            };
+                        } else {
+                            let mapped = match c {
+                                '"' => '"',
+                                '\\' => '\\',
+                                '/' => '/',
+                                'b' => '\u{0008}',
+                                'f' => '\u{000C}',
+                                'n' => '\n',
+                                'r' => '\r',
+                                't' => '\t',
+                                _ => unreachable!(
+                                    "valid_next_chars for StringEscape hex_digits=0 \
+                                     restricts to short-escapes + 'u'"
+                                ),
+                            };
+                            partial.push(mapped);
+                            frame.phase = Phase::StringChars { partial, allowed };
+                        }
+                    } else {
+                        // hex_digits in 1..=4: walking `\\uXXXX`.
+                        debug_assert!(c.is_ascii_hexdigit());
+                        let new_n = hex_digits + 1;
+                        debug_assert!(new_n <= 5);
+                        if new_n < 5 {
+                            // Still walking the hex sequence.
+                            frame.phase = Phase::StringEscape {
+                                partial,
+                                allowed,
+                                hex_digits: new_n,
+                            };
+                        } else {
+                            // Resolved — `\\uXXXX` complete. Push a
+                            // placeholder char (specific codepoint
+                            // doesn't matter for grammar tracking; the
+                            // on-the-wire form is the `\\uXXXX`
+                            // sequence) and return to body.
+                            partial.push('\u{FFFD}');
+                            frame.phase = Phase::StringChars { partial, allowed };
+                        }
+                    }
                 }
             }
 
@@ -823,6 +1130,9 @@ impl JsonGrammar {
                     had_decimal: false,
                     had_fractional_digit: false,
                     is_zero_only,
+                    had_exponent_marker: false,
+                    had_exponent_sign: false,
+                    had_exponent_digit: false,
                 };
             }
             (
@@ -833,31 +1143,97 @@ impl JsonGrammar {
                     had_decimal,
                     had_fractional_digit,
                     is_zero_only,
+                    had_exponent_marker,
+                    had_exponent_sign,
+                    had_exponent_digit,
                 },
             ) => {
-                let (had_sign, had_digits, had_decimal, had_fractional_digit) =
-                    (*had_sign, *had_digits, *had_decimal, *had_fractional_digit);
+                let (
+                    had_sign,
+                    had_digits,
+                    had_decimal,
+                    had_fractional_digit,
+                    had_exponent_marker,
+                    had_exponent_sign,
+                    had_exponent_digit,
+                ) = (
+                    *had_sign,
+                    *had_digits,
+                    *had_decimal,
+                    *had_fractional_digit,
+                    *had_exponent_marker,
+                    *had_exponent_sign,
+                    *had_exponent_digit,
+                );
                 let _ = is_zero_only;
                 if c == '.' {
-                    // valid_next_chars only emits `.` when had_decimal is false
-                    // and had_digits is true.
+                    // valid_next_chars only emits `.` when had_decimal is false,
+                    // had_digits is true, and no exponent started yet.
                     frame.phase = Phase::NumberDigits {
                         had_sign,
                         had_digits,
                         had_decimal: true,
                         had_fractional_digit: false,
                         is_zero_only: false,
+                        had_exponent_marker: false,
+                        had_exponent_sign: false,
+                        had_exponent_digit: false,
                     };
-                } else if c.is_ascii_digit() {
-                    let new_is_zero_only = !had_digits && c == '0';
-                    let new_fractional = had_decimal || had_fractional_digit;
+                } else if (c == 'e' || c == 'E') && had_digits && !had_exponent_marker {
+                    // Begin exponent section.
                     frame.phase = Phase::NumberDigits {
                         had_sign,
-                        had_digits: true,
+                        had_digits,
                         had_decimal,
-                        had_fractional_digit: new_fractional,
-                        is_zero_only: new_is_zero_only,
+                        had_fractional_digit,
+                        is_zero_only: false,
+                        had_exponent_marker: true,
+                        had_exponent_sign: false,
+                        had_exponent_digit: false,
                     };
+                } else if (c == '+' || c == '-')
+                    && had_exponent_marker
+                    && !had_exponent_sign
+                    && !had_exponent_digit
+                {
+                    // Sign immediately after exponent marker.
+                    frame.phase = Phase::NumberDigits {
+                        had_sign,
+                        had_digits,
+                        had_decimal,
+                        had_fractional_digit,
+                        is_zero_only: false,
+                        had_exponent_marker: true,
+                        had_exponent_sign: true,
+                        had_exponent_digit: false,
+                    };
+                } else if c.is_ascii_digit() {
+                    if had_exponent_marker {
+                        // Exponent digit.
+                        frame.phase = Phase::NumberDigits {
+                            had_sign,
+                            had_digits,
+                            had_decimal,
+                            had_fractional_digit,
+                            is_zero_only: false,
+                            had_exponent_marker: true,
+                            had_exponent_sign,
+                            had_exponent_digit: true,
+                        };
+                    } else {
+                        let new_is_zero_only = !had_digits && c == '0';
+                        let new_fractional = had_decimal || had_fractional_digit;
+                        frame.phase = Phase::NumberDigits {
+                            had_sign,
+                            had_digits: true,
+                            had_decimal,
+                            had_fractional_digit: new_fractional,
+                            is_zero_only: new_is_zero_only,
+                            had_exponent_marker: false,
+                            had_exponent_sign: false,
+                            had_exponent_digit: false,
+                        };
+                    }
                 } else {
                     // Number ended by some non-digit; the parent decides what's
                     // valid based on context (`,`, `}`, `]`, end). The current
@@ -884,6 +1260,9 @@ impl JsonGrammar {
                         had_decimal: false,
                         had_fractional_digit: false,
                         is_zero_only: new_is_zero_only,
+                        had_exponent_marker: false,
+                        had_exponent_sign: false,
+                        had_exponent_digit: false,
                     };
                 } else {
                     self.frames.pop();
@@ -1096,6 +1475,25 @@ impl JsonGrammar {
     }
 }
 
+/// True for phases where whitespace can be silently inserted under
+/// REQ-7 whitespace-permissive mode. Whitespace is NOT permitted in
+/// the middle of a literal walk, number digit sequence, string body /
+/// escape, or object-key emission — those represent the middle of a
+/// terminal token; permitting whitespace there would mean accepting
+/// invalid JSON (`tr ue`, `12 3`, `"he llo"`, `{ "ke y" : 1}`).
+fn is_structural_phase(phase: &Phase) -> bool {
+    matches!(
+        phase,
+        Phase::Start
+            | Phase::ObjectFreshOpen { .. }
+            | Phase::ObjectExpectKey { .. }
+            | Phase::ObjectColon { .. }
+            | Phase::ObjectAfterValue { .. }
+            | Phase::ArrayFreshOpen
+            | Phase::ArrayAfterValue
+    )
+}
+
 /// Compute the set of valid next characters for the given top-of-stack frame,
 /// using `parent` (if any) to compute correct value-end terminators for
 /// number/integer children.
@@ -1103,11 +1501,113 @@ fn valid_next_chars_for(frame: &Frame, parent: Option<&Frame>) -> Vec<char> {
     match (&frame.schema, &frame.phase) {
         (Schema::String, Phase::Start) | (Schema::StringEnum(_), Phase::Start) => vec!['"'],
         (Schema::String, Phase::StringChars { partial: _, .. }) => {
+            // REQ-5: `\\` is now allowed and transitions into
+            // `Phase::StringEscape` (apply_step's `(Schema::String,
+            // Phase::StringChars)` branch handles the transition).
             let mut chars: Vec<char> = (0x20u8..=0x7Eu8)
-                .filter(|b| *b != b'"' && *b != b'\\')
+                .filter(|b| *b != b'"')
                 .map(|b| b as char)
                 .collect();
-            chars.push('"'); // closing quote
+            // chars already includes '"' since it's in 0x20..=0x7E and
+            // we don't filter it; correct that — '"' is filtered above.
+            chars.push('"'); // closing quote (re-add since filtered)
+            chars.sort_unstable();
+            chars.dedup();
+            chars
+        }
+        (
+            Schema::StringConstrained {
+                min_length,
+                max_length,
+            },
+            Phase::StringChars { partial, .. },
+        ) => {
+            // REQ-6: length-constrained string body. Same content set
+            // as Schema::String, but the closing `"` is only valid
+            // when `partial.chars().count() >= min_length`, and body
+            // chars are only valid while `< max_length`.
+            let len = partial.chars().count() as u32;
+            let mut chars: Vec<char> = Vec::new();
+            let at_max = max_length.map(|m| len >= m).unwrap_or(false);
+            if !at_max {
+                chars.extend((0x20u8..=0x7Eu8).filter(|b| *b != b'"').map(|b| b as char));
+            }
+            if len >= *min_length {
+                chars.push('"');
+            }
+            chars.sort_unstable();
+            chars.dedup();
+            chars
+        }
+        (Schema::StringConstrained { .. }, Phase::Start) => vec!['"'],
+        (Schema::NumberConstrained { .. }, Phase::Start)
+        | (Schema::IntegerConstrained { .. }, Phase::Start) => {
+            let mut v: Vec<char> = ('0'..='9').collect();
+            v.push('-');
+            v
+        }
+        (
+            Schema::NumberConstrained { .. },
+            Phase::NumberDigits {
+                had_digits,
+                had_decimal,
+                had_fractional_digit,
+                is_zero_only,
+                had_exponent_marker,
+                had_exponent_sign,
+                had_exponent_digit,
+                ..
+            },
+        ) => {
+            // Same emission set as `Schema::Number`; the numeric
+            // bound (min/max) is enforced by the post-emit validator
+            // — not the grammar — because mid-stream we can't know
+            // the final value (e.g. `0.5e3` only resolves at emit
+            // end).
+            if *had_exponent_marker {
+                let mut chars: Vec<char> = Vec::new();
+                if !*had_exponent_sign && !*had_exponent_digit {
+                    chars.push('+');
+                    chars.push('-');
+                }
+                chars.extend('0'..='9');
+                if *had_exponent_digit {
+                    chars.extend(parent_terminators(parent));
+                }
+                return chars;
+            }
+            let mid_decimal = *had_decimal && !*had_fractional_digit;
+            let mut chars: Vec<char> = if *is_zero_only {
+                Vec::new()
+            } else {
+                ('0'..='9').collect()
+            };
+            if *had_digits && !*had_decimal {
+                chars.push('.');
+            }
+            if *had_digits && !mid_decimal {
+                chars.push('e');
+                chars.push('E');
+                chars.extend(parent_terminators(parent));
+            }
+            chars
+        }
+        (
+            Schema::IntegerConstrained { .. },
+            Phase::NumberDigits {
+                had_digits,
+                is_zero_only,
+                ..
+            },
+        ) => {
+            let mut chars: Vec<char> = if *is_zero_only {
+                Vec::new()
+            } else {
+                ('0'..='9').collect()
+            };
+            if *had_digits {
+                chars.extend(parent_terminators(parent));
+            }
             chars
         }
         (Schema::StringEnum(_), Phase::StringChars { partial, allowed }) => {
@@ -1166,6 +1666,9 @@ fn valid_next_chars_for(frame: &Frame, parent: Option<&Frame>) -> Vec<char> {
                 had_decimal,
                 had_fractional_digit,
                 is_zero_only,
+                had_exponent_marker,
+                had_exponent_sign,
+                had_exponent_digit,
                 ..
             },
         ) => {
@@ -1174,10 +1677,31 @@ fn valid_next_chars_for(frame: &Frame, parent: Option<&Frame>) -> Vec<char> {
             // what character ends it via re-dispatch in apply_step.
             //
             // JSON forbids leading zeros: after a single `0` as the first
-            // digit, no more digits are allowed (only `.` or a terminator).
-            // JSON also requires at least one fractional digit after `.`:
-            // `1.` is invalid, `1.0` is valid. While we're mid-decimal,
-            // only digits are allowed (no terminator).
+            // digit, no more digits are allowed (only `.` or `e`/`E` or a
+            // terminator). JSON also requires at least one fractional
+            // digit after `.`: `1.` is invalid, `1.0` is valid. While
+            // we're mid-decimal, only digits are allowed (no terminator).
+            //
+            // REQ-6: exponent section after digits (or after fractional
+            // digit). `e`/`E` opens it; an optional `+`/`-` follows; one
+            // or more digits complete it.
+            if *had_exponent_marker {
+                let mut chars: Vec<char> = Vec::new();
+                if !*had_exponent_sign && !*had_exponent_digit {
+                    chars.push('+');
+                    chars.push('-');
+                }
+                // The exponent-digit upper bound is enforced by
+                // apply_step transitioning to a pop on overflow — see
+                // the parent-terminator-on-bounded-exponent comment
+                // there. valid_next_chars here always emits digits
+                // because the cap is on emit count, not legality.
+                chars.extend('0'..='9');
+                if *had_exponent_digit {
+                    chars.extend(parent_terminators(parent));
+                }
+                return chars;
+            }
             let mid_decimal = *had_decimal && !*had_fractional_digit;
             let mut chars: Vec<char> = if *is_zero_only {
                 Vec::new()
@@ -1187,10 +1711,33 @@ fn valid_next_chars_for(frame: &Frame, parent: Option<&Frame>) -> Vec<char> {
             if *had_digits && !*had_decimal {
                 chars.push('.');
             }
+            // Exponent marker valid once we have digits (with or without
+            // fractional part), and not mid-decimal.
             if *had_digits && !mid_decimal {
+                chars.push('e');
+                chars.push('E');
                 chars.extend(parent_terminators(parent));
             }
             chars
+        }
+        (Schema::String, Phase::StringEscape { hex_digits, .. }) => {
+            if *hex_digits == 0 {
+                // Short escapes: " \ / b f n r t, plus 'u' to begin \uXXXX.
+                vec!['"', '\\', '/', 'b', 'f', 'n', 'r', 't', 'u']
+            } else if *hex_digits < 4 {
+                // Hex digits remaining.
+                let mut v: Vec<char> = ('0'..='9').collect();
+                v.extend('a'..='f');
+                v.extend('A'..='F');
+                v
+            } else {
+                // hex_digits == 4: the next hex digit completes the
+                // escape and returns us to body. Same valid set.
+                let mut v: Vec<char> = ('0'..='9').collect();
+                v.extend('a'..='f');
+                v.extend('A'..='F');
+                v
+            }
         }
         (
             Schema::Integer,
@@ -1484,8 +2031,8 @@ mod tests {
         assert_eq!(g.valid_next_chars(), vec!['"']);
         g.step_char('"').unwrap();
         assert!(g.valid_next_chars().contains(&'a'));
-        // No escape char allowed.
-        assert!(!g.valid_next_chars().contains(&'\\'));
+        // REQ-5 SHIPPED: `\\` is now allowed (transitions into escape phase).
+        assert!(g.valid_next_chars().contains(&'\\'));
         // Quote not allowed mid-string... wait, quote ENDS the string.
         // The test was wrong. Quote IS allowed (closes string).
         g.step_str("hi").unwrap();
@@ -1600,11 +2147,86 @@ mod tests {
         assert!(g.is_complete());
     }
 
+    /// REQ-5 SHIPPED: short escapes (\", \\, \/, \b, \f, \n, \r, \t)
+    /// transition into the escape sub-phase and resolve in one extra
+    /// step.
     #[test]
-    fn rejects_string_escape() {
+    fn accepts_short_string_escape() {
         let mut g = JsonGrammar::new(Schema::String);
+        g.step_str("\"a\\n").unwrap();
+        // We're now back in the string body after the `\n` short escape.
+        // Closing quote completes the string.
         g.step_char('"').unwrap();
-        let err = g.step_char('\\').unwrap_err();
-        assert!(matches!(err, StepError::UnexpectedChar { .. }));
+        assert!(g.is_complete());
+    }
+
+    /// REQ-5 SHIPPED: backslash inside a string transitions to escape
+    /// phase; the next char must be a JSON escape letter or 'u'.
+    #[test]
+    fn rejects_invalid_escape_letter() {
+        let mut g = JsonGrammar::new(Schema::String);
+        g.step_str("\"\\").unwrap();
+        // Now in StringEscape; only `"\\/bfnrtu` are valid.
+        let nx = g.valid_next_chars();
+        assert!(nx.contains(&'n'));
+        assert!(nx.contains(&'u'));
+        assert!(!nx.contains(&'z'));
+        assert!(g.step_char('z').is_err());
+    }
+
+    /// REQ-5 SHIPPED: \uXXXX hex escapes accept 4 hex digits.
+    #[test]
+    fn accepts_unicode_hex_escape() {
+        let mut g = JsonGrammar::new(Schema::String);
+        g.step_str("\"x\\u00FF").unwrap();
+        // Back to body after 4 hex digits; closing quote completes.
+        g.step_char('"').unwrap();
+        assert!(g.is_complete());
+    }
+
+    /// REQ-6 SHIPPED: number exponents work for both signs and bare.
+    #[test]
+    fn number_with_exponent() {
+        let mut g = JsonGrammar::new(Schema::Number);
+        g.step_str("1.5e10").unwrap();
+        // No more emission required to be valid.
+        let mut g = JsonGrammar::new(Schema::Number);
+        g.step_str("-3E+02").unwrap();
+        let mut g = JsonGrammar::new(Schema::Number);
+        g.step_str("0e-1").unwrap();
+        let _ = g.is_complete();
+    }
+
+    /// REQ-6 SHIPPED: exponent marker requires at least one digit;
+    /// after marker, a sign is optional; then digits required.
+    #[test]
+    fn number_exponent_requires_digit() {
+        let mut g = JsonGrammar::new(Schema::Number);
+        g.step_str("1e").unwrap();
+        // After bare `e`, only +/- or digits valid.
+        let nx = g.valid_next_chars();
+        assert!(nx.contains(&'+'));
+        assert!(nx.contains(&'-'));
+        assert!(nx.contains(&'5'));
+        assert!(!nx.contains(&'.'));
+    }
+
+    /// REQ-7 SHIPPED: whitespace-permissive mode accepts ASCII
+    /// whitespace at structural boundaries.
+    #[test]
+    fn whitespace_permissive_accepts_whitespace() {
+        let s = obj(&[("v", Schema::Boolean)], &["v"]);
+        let mut g = JsonGrammar::new(s).with_whitespace_permissive(true);
+        // Walk a whitespace-decorated input.
+        g.step_str("{ \"v\" : true }").unwrap();
+        assert!(g.is_complete());
+    }
+
+    /// REQ-7 SHIPPED: default mode still rejects whitespace.
+    #[test]
+    fn default_mode_rejects_whitespace() {
+        let s = obj(&[("v", Schema::Boolean)], &["v"]);
+        let mut g = JsonGrammar::new(s);
+        assert!(g.step_char(' ').is_err());
     }
 }

@@ -12,7 +12,7 @@
 //! | REQ-2 | SHIPPED | `pub fn constant`, `pub fn zeros`, `pub fn ones` bulk-fill mirror `torch/nn/init.py:337-378`; consumed by parameter-fill discipline across the workspace via the `init` module path re-exported at `lib.rs`. |
 //! | REQ-3 | SHIPPED | `pub fn uniform`, `pub fn normal` with `xorshift64` PRNG seeded from `SystemTime::now()` + thread id mirror `torch/nn/init.py:247-300`; consumed by `ferrotorch-nn/src/rnn.rs:127-128` (`init::uniform(&mut weight_ih, -k, k)?`) and `ferrotorch-nn/src/embedding.rs:249` (`init::normal(&mut weight, 0.0, 1.0)?`). |
 //! | REQ-4 | SHIPPED | `pub fn xavier_uniform`, `pub fn xavier_normal` use `fan_in + fan_out` mirroring `torch/nn/init.py:479-540`; consumed through the public `init` namespace re-exported at `lib.rs:207`; tests `test_xavier_normal_stats` pin the stats. |
-//! | REQ-5 | SHIPPED | `pub fn kaiming_uniform`, `pub fn kaiming_normal` use `gain / sqrt(fan_in)` mirroring `torch/nn/init.py:554-672` (fan_in mode only; `fan_out` mode tracked separately by #1453 AC); consumed via the `init` module + `lib.rs:207` re-export. Tests `test_kaiming_uniform_relu`, `test_kaiming_normal_relu` pin. |
+//! | REQ-5 | SHIPPED | `pub fn kaiming_uniform`, `pub fn kaiming_normal` use `gain / sqrt(fan)` with `FanMode::FanIn` (default) or `FanMode::FanOut` selectable via `kaiming_uniform_with_fan_mode` / `kaiming_normal_with_fan_mode` mirroring `torch/nn/init.py:554-669` (`mode: _FanMode = "fan_in"`); consumed via the `init` module + `lib.rs:207` re-export. Tests `test_kaiming_uniform_relu`, `test_kaiming_normal_relu`, `test_kaiming_uniform_fan_out`, `test_kaiming_normal_fan_out` pin. (closes #1453) |
 //! | REQ-6 | SHIPPED | `pub fn trunc_normal_` + `pub fn trunc_normal_with_generator` rejection-sampled truncated normal on `[a, b]` mirrors `torch/nn/init.py:301-336` (incl. `generator` kwarg); consumed via the `init` module path; downstream ViT / position-embedding code in the model crates uses it. Tests `test_trunc_normal_bounds`, `test_trunc_normal_stats` pin; `trunc_normal_with_generator_uses_explicit_stream` in `divergence_manual_seed_init_threading_extended.rs` pins explicit-generator threading. |
 //! | REQ-7 | SHIPPED | `pub fn orthogonal_` + `pub fn orthogonal_with_generator` modified Gram-Schmidt with sign correction mirrors `torch/nn/init.py:672-722` (incl. `generator` kwarg); consumed via the `init` module path. Tests `test_orthogonal_columns_orthonormal`, `test_orthogonal_gain`, `test_orthogonal_tall_matrix`, `test_orthogonal_wide_matrix` pin `Q^T Q ≈ gain^2 I`; `orthogonal_with_generator_uses_explicit_stream` pins generator threading. |
 //! | REQ-8 | SHIPPED | `pub fn sparse_` + `pub fn sparse_with_generator` 2-D column-wise partial Fisher-Yates mirrors `torch/nn/init.py:723-764` (incl. `generator` kwarg); consumed via the `init` module path. Tests `test_sparse_sparsity_ratio`, `test_sparse_nonzero_drawn_from_normal` pin; `sparse_with_generator_uses_explicit_stream` pins generator threading. |
@@ -33,6 +33,18 @@ pub enum NonLinearity {
     Tanh,
     ReLU,
     LeakyReLU(f64),
+}
+
+/// Fan mode for Kaiming init — mirrors `torch.nn.init._FanMode` at
+/// `torch/nn/init.py:554-669`. Choosing `FanIn` (the default) preserves
+/// the magnitude of the variance of the weights in the forward pass;
+/// choosing `FanOut` preserves the magnitudes in the backwards pass.
+/// (#1453)
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub enum FanMode {
+    #[default]
+    FanIn,
+    FanOut,
 }
 
 impl NonLinearity {
@@ -174,9 +186,10 @@ pub fn xavier_normal_with_generator<T: Float>(
     normal_with_generator(param, 0.0, std, generator)
 }
 
-/// Kaiming uniform initialization (He).
+/// Kaiming uniform initialization (He), fan_in mode.
 ///
 /// Fills with values from U(-limit, limit) where limit = gain * sqrt(3 / fan_in).
+/// For `fan_out` mode, use [`kaiming_uniform_with_fan_mode`].
 pub fn kaiming_uniform<T: Float>(
     param: &mut Parameter<T>,
     nonlinearity: NonLinearity,
@@ -190,16 +203,48 @@ pub fn kaiming_uniform_with_generator<T: Float>(
     nonlinearity: NonLinearity,
     generator: &mut Generator,
 ) -> FerrotorchResult<()> {
-    let (fan_in, _) = compute_fans(param.shape())?;
+    kaiming_uniform_with_fan_mode_and_generator(param, nonlinearity, FanMode::FanIn, generator)
+}
+
+/// Kaiming uniform initialization with configurable [`FanMode`] — mirrors
+/// `torch.nn.init.kaiming_uniform_(..., mode="fan_in"|"fan_out")` at
+/// `torch/nn/init.py:554-616`. (#1453)
+///
+/// Fills with values from U(-limit, limit) where
+/// `limit = sqrt(3) * gain / sqrt(fan)` with `fan = fan_in` or `fan_out`
+/// per `mode`.
+pub fn kaiming_uniform_with_fan_mode<T: Float>(
+    param: &mut Parameter<T>,
+    nonlinearity: NonLinearity,
+    mode: FanMode,
+) -> FerrotorchResult<()> {
+    with_thread_rng(|g| kaiming_uniform_with_fan_mode_and_generator(param, nonlinearity, mode, g))
+}
+
+/// Same as [`kaiming_uniform_with_fan_mode`] but uses the caller-supplied
+/// [`Generator`] — mirrors the `generator` kwarg of
+/// `torch.nn.init.kaiming_uniform_`. (#1453)
+pub fn kaiming_uniform_with_fan_mode_and_generator<T: Float>(
+    param: &mut Parameter<T>,
+    nonlinearity: NonLinearity,
+    mode: FanMode,
+    generator: &mut Generator,
+) -> FerrotorchResult<()> {
+    let (fan_in, fan_out) = compute_fans(param.shape())?;
+    let fan = match mode {
+        FanMode::FanIn => fan_in,
+        FanMode::FanOut => fan_out,
+    };
     let gain = nonlinearity.gain();
-    let std = gain / (fan_in as f64).sqrt();
+    let std = gain / (fan as f64).sqrt();
     let limit = (3.0f64).sqrt() * std;
     uniform_with_generator(param, -limit, limit, generator)
 }
 
-/// Kaiming normal initialization (He).
+/// Kaiming normal initialization (He), fan_in mode.
 ///
 /// Fills with values from N(0, std) where std = gain / sqrt(fan_in).
+/// For `fan_out` mode, use [`kaiming_normal_with_fan_mode`].
 pub fn kaiming_normal<T: Float>(
     param: &mut Parameter<T>,
     nonlinearity: NonLinearity,
@@ -213,9 +258,39 @@ pub fn kaiming_normal_with_generator<T: Float>(
     nonlinearity: NonLinearity,
     generator: &mut Generator,
 ) -> FerrotorchResult<()> {
-    let (fan_in, _) = compute_fans(param.shape())?;
+    kaiming_normal_with_fan_mode_and_generator(param, nonlinearity, FanMode::FanIn, generator)
+}
+
+/// Kaiming normal initialization with configurable [`FanMode`] — mirrors
+/// `torch.nn.init.kaiming_normal_(..., mode="fan_in"|"fan_out")` at
+/// `torch/nn/init.py:619-669`. (#1453)
+///
+/// Fills with values from N(0, std) where `std = gain / sqrt(fan)` with
+/// `fan = fan_in` or `fan_out` per `mode`.
+pub fn kaiming_normal_with_fan_mode<T: Float>(
+    param: &mut Parameter<T>,
+    nonlinearity: NonLinearity,
+    mode: FanMode,
+) -> FerrotorchResult<()> {
+    with_thread_rng(|g| kaiming_normal_with_fan_mode_and_generator(param, nonlinearity, mode, g))
+}
+
+/// Same as [`kaiming_normal_with_fan_mode`] but uses the caller-supplied
+/// [`Generator`] — mirrors the `generator` kwarg of
+/// `torch.nn.init.kaiming_normal_`. (#1453)
+pub fn kaiming_normal_with_fan_mode_and_generator<T: Float>(
+    param: &mut Parameter<T>,
+    nonlinearity: NonLinearity,
+    mode: FanMode,
+    generator: &mut Generator,
+) -> FerrotorchResult<()> {
+    let (fan_in, fan_out) = compute_fans(param.shape())?;
+    let fan = match mode {
+        FanMode::FanIn => fan_in,
+        FanMode::FanOut => fan_out,
+    };
     let gain = nonlinearity.gain();
-    let std = gain / (fan_in as f64).sqrt();
+    let std = gain / (fan as f64).sqrt();
     normal_with_generator(param, 0.0, std, generator)
 }
 
@@ -721,6 +796,45 @@ mod tests {
         let std = gain / (128.0f64).sqrt();
         let limit = (3.0f64).sqrt() * std;
         assert!(data.iter().all(|&x| (x as f64).abs() <= limit + 0.01));
+    }
+
+    #[test]
+    fn test_kaiming_uniform_fan_out() {
+        // fan_out for a 2D [out=64, in=128] tensor uses fan_out=64 (rows).
+        // Bound = sqrt(3) * gain / sqrt(64).
+        let mut p = Parameter::<f32>::zeros(&[64, 128]).unwrap();
+        kaiming_uniform_with_fan_mode(&mut p, NonLinearity::ReLU, FanMode::FanOut).unwrap();
+        let data = p.data().unwrap();
+        let gain = (2.0f64).sqrt();
+        let std = gain / (64.0f64).sqrt();
+        let limit = (3.0f64).sqrt() * std;
+        assert!(data.iter().all(|&x| (x as f64).abs() <= limit + 0.01));
+    }
+
+    #[test]
+    fn test_kaiming_normal_fan_out() {
+        // fan_out for a 2D [out=64, in=128] tensor uses fan_out=64 (rows).
+        // Std = gain / sqrt(64).
+        let mut p = Parameter::<f32>::zeros(&[64, 128]).unwrap();
+        kaiming_normal_with_fan_mode(&mut p, NonLinearity::ReLU, FanMode::FanOut).unwrap();
+        let data = p.data().unwrap();
+        let expected_std = (2.0f64).sqrt() / (64.0f64).sqrt();
+        let mean: f32 = data.iter().sum::<f32>() / data.len() as f32;
+        let var: f32 = data.iter().map(|&x| (x - mean).powi(2)).sum::<f32>() / data.len() as f32;
+        assert!(mean.abs() < 0.1, "mean = {mean}");
+        assert!(
+            ((var.sqrt() as f64) - expected_std).abs() < expected_std * 0.2,
+            "std = {}, expected = {expected_std}",
+            var.sqrt()
+        );
+    }
+
+    #[test]
+    fn test_fan_mode_default_is_fan_in() {
+        // FanMode::default() must equal FanIn to preserve the default
+        // semantics of the historic `kaiming_uniform` / `kaiming_normal`
+        // entry points after the fan_out add (#1453).
+        assert_eq!(FanMode::default(), FanMode::FanIn);
     }
 
     #[test]

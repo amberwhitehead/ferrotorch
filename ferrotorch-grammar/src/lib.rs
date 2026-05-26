@@ -24,7 +24,7 @@ pub mod state;
 #[cfg(feature = "cuda")]
 pub mod gpu_dispatch;
 
-pub use json_schema::{GrammarError, JsonSchemaProcessor, TokenMask};
+pub use json_schema::{GrammarError, JsonSchemaProcessor, TokenMask, TokenTransitionCache};
 pub use schema::Schema;
 pub use state::{BooleanEmissionStage, JsonGrammar};
 
