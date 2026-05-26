@@ -3042,6 +3042,46 @@ fn dispatch_f32(
             Ok(Some(t))
         }
 
+        // Linalg matmul-family runner arms — wired 2026-05-25 to close
+        // umbrella runner-arm blocker #1344 for the strict-rank ops `mm`
+        // (2D x 2D) and `bmm` (3D x 3D). `matmul` and `linalg.matmul` ARMS
+        // ARE INTENTIONALLY NOT WIRED here — their broadcast / multi-rank
+        // CPU paths (`ops::linalg::broadcast_matmul` + the 3D x 2D fallback)
+        // use naive triple-loop accumulation that diverges from PyTorch's
+        // MKL/OpenBLAS block-summation on f32 inputs with k>=10 (verified
+        // 2026-05-25: `[matmul] 52/60 passed, 8 failed; FAIL seed=0 i=11
+        // shape=[5,5,10,5] ferrotorch=-0.21874619 vs torch=-0.21873063
+        // diff=1.56e-5 vs runner bound 2.19e-6`). Per R-HONEST-3, the
+        // matmul REQ is NOT-STARTED until that impl drift is fixed — see
+        // follow-up blocker for the broadcast_matmul accumulation-order
+        // gap (file outside this dispatch's manifest:
+        // `ferrotorch-core/src/ops/linalg.rs` +
+        // `ferrotorch-core/src/grad_fns/linalg.rs`). The remaining 31
+        // NOT-STARTED linalg ops are tracked under prereq blocker #1345.
+        //
+        // `torch.mm(input, mat2)` — strict 2D x 2D. Upstream
+        // `TORCH_IMPL_FUNC(mm_out_cpu)` at
+        // `aten/src/ATen/native/LinearAlgebra.cpp:1641`. Routes through
+        // ferrotorch's `grad_fns::linalg::mm_differentiable` which attaches
+        // `MmBackward` when grad is enabled. Op_db's `mm` samples
+        // (shape=(5,10)@(10,5) and zero-axis edges) all pass within the
+        // runner's f32 tolerance.
+        "mm" => Ok(Some({
+            let (a, b) = binary("mm")?;
+            grad_fns::linalg::mm_differentiable(&a, &b)?
+        })),
+        // `torch.bmm(input, mat2)` — strict 3D x 3D batched matmul. Upstream
+        // `TORCH_IMPL_FUNC(bmm_out_cpu)` at
+        // `aten/src/ATen/native/LinearAlgebra.cpp:1894`. Routes through
+        // ferrotorch's `grad_fns::linalg::bmm_differentiable` which attaches
+        // `BmmBackward` (per-batch VJP composed via `batch_transpose`). The
+        // single op_db `bmm` sample (shape=(10,5,10)@(10,10,5)) passes
+        // within the runner's f32 tolerance.
+        "bmm" => Ok(Some({
+            let (a, b) = binary("bmm")?;
+            grad_fns::linalg::bmm_differentiable(&a, &b)?
+        })),
+
         _ => Ok(None),
     }
 }
@@ -3217,6 +3257,20 @@ fn dispatch_ops() -> &'static [&'static str] {
         "chunk",
         "narrow",
         "roll",
+        // Linalg matmul-family — wired 2026-05-25 to close umbrella runner-
+        // arm blocker #1344 for the strict-rank ops `mm` (2D x 2D) and
+        // `bmm` (3D x 3D). `matmul` / `linalg.matmul` arms are NOT listed
+        // here — their broadcast / 3D-x-2D / 4D paths diverge from PyTorch's
+        // BLAS-block-summation on f32 by ~1.5e-5 (well above the runner's
+        // 2.2e-6 bound at |e|=0.22), a pre-existing impl-drift gap in
+        // `ops::linalg::broadcast_matmul` that must close before those
+        // arms can ship under R-DEFER-6. The drift is filed as a separate
+        // follow-up blocker (touches files outside this dispatch's manifest:
+        // `ferrotorch-core/src/ops/linalg.rs` +
+        // `ferrotorch-core/src/grad_fns/linalg.rs`). The remaining 31
+        // NOT-STARTED linalg ops are tracked under blocker #1345.
+        "mm",
+        "bmm",
     ]
 }
 
