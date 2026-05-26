@@ -23,6 +23,21 @@
 //! 2. Sigmoid.
 //! 3. Select the mask channel matching each detection's predicted label.
 //! 4. Bilinear paste each 28×28 mask back into a `[H_img, W_img]` canvas, cropped by the box.
+//!
+//! ## REQ status (per `.design/ferrotorch-vision/models/detection/roi_heads_postprocess.md`)
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 | SHIPPED | impl: `pub const ROI_SCORE_THRESH: f64 = 0.05;` in `roi_heads_postprocess.rs`; consumer: `postprocess_detections` body uses it as the score gate, invoked by `FasterRcnn::forward` in `ferrotorch-vision/src/models/detection/faster_rcnn.rs`. |
+//! | REQ-2 | SHIPPED | impl: `pub const ROI_NMS_THRESH: f64 = 0.5;` in `roi_heads_postprocess.rs`; consumer: same `postprocess_detections` body, invoked by `FasterRcnn::forward`. |
+//! | REQ-3 | SHIPPED | impl: `pub const ROI_DETECTIONS_PER_IMG: usize = 100;` in `roi_heads_postprocess.rs`; consumer: `postprocess_detections` cross-class top-K truncation, invoked by `FasterRcnn::forward`. |
+//! | REQ-4 | SHIPPED | impl: `pub const ROI_MIN_BOX_SIDE: f64 = 1e-2;` in `roi_heads_postprocess.rs`; consumer: `postprocess_detections` small-box filter, invoked by `FasterRcnn::forward`. |
+//! | REQ-5 | SHIPPED | impl: `pub const ROI_BOX_CODER_WEIGHTS: (f64, f64, f64, f64) = (10.0, 10.0, 5.0, 5.0);` in `roi_heads_postprocess.rs`; consumer: `postprocess_detections` passes it to `decode_per_class`, invoked by `FasterRcnn::forward`. |
+//! | REQ-6 | SHIPPED | impl: `pub const ROI_BBOX_XFORM_CLIP` (≈ `log(1000/16)`) in `roi_heads_postprocess.rs`; consumer: passed by `postprocess_detections` to `decode_per_class`, invoked by `FasterRcnn::forward`. |
+//! | REQ-7 | SHIPPED | impl: `pub fn decode_per_class` in `roi_heads_postprocess.rs` (per-class `(dx, dy, dw, dh)` decode with one-sided `dw`/`dh` clamp); consumer: `postprocess_detections` calls it; that function is called by `FasterRcnn::forward` in `ferrotorch-vision/src/models/detection/faster_rcnn.rs`. |
+//! | REQ-8 | SHIPPED | impl: `pub fn postprocess_detections` in `roi_heads_postprocess.rs` (softmax → decode → clip → drop bg → score-thresh → small-box filter → per-class `batched_nms` → cross-class top-K); consumer: `FasterRcnn::forward` in `ferrotorch-vision/src/models/detection/faster_rcnn.rs` calls it once per image. |
+//! | REQ-9 | SHIPPED | impl: `pub fn postprocess_masks` in `roi_heads_postprocess.rs` (sigmoid → class-select → optional `expand_masks` + `paste_masks_in_image`); consumer: `use crate::models::detection::roi_heads_postprocess::postprocess_masks` at the top of `ferrotorch-vision/src/models/detection/mask_rcnn.rs` exposes it to `MaskRcnn::forward`. |
+//! | REQ-10 | SHIPPED | impl: `paste=false` short-circuit branch inside `postprocess_masks` in `roi_heads_postprocess.rs` (returns `[N_det, 1, mask_h, mask_w]`); consumer: same import path — `MaskRcnn::forward` in `ferrotorch-vision/src/models/detection/mask_rcnn.rs` and the #1139 verification harness call `postprocess_masks(..., paste=false)`. |
 
 use ferrotorch_core::numeric_cast::cast;
 use ferrotorch_core::{FerrotorchError, FerrotorchResult, Float, Tensor, TensorStorage};

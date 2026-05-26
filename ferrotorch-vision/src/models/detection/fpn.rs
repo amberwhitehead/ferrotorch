@@ -25,6 +25,19 @@
 //! `bias=True`).  The P6 path is torchvision's `LastLevelMaxPool`, which
 //! is a *pure stride-2 sub-sample* (`kernel=1, stride=2, padding=0`),
 //! NOT a true 3×3 maxpool — see #1141 for the parity probe.
+//!
+//! ## REQ status (per `.design/ferrotorch-vision/models/detection/fpn.md`)
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 | SHIPPED | impl: `pub struct FeaturePyramidNetwork<T>` + `Self::new` in `fpn.rs` (four `lateral{2..5}` + four `output{2..5}` + `pool_p6`); consumer: `FasterRcnn::new` in `ferrotorch-vision/src/models/detection/faster_rcnn.rs` calls `FeaturePyramidNetwork::new()?` and stores the result as the `fpn` field. |
+//! | REQ-2 | SHIPPED | impl: every `Conv2d::new(..., true)` (`bias=true`) call inside `Self::new` in `fpn.rs` (the #1141 regression contract); consumer: `FasterRcnn::new` in `ferrotorch-vision/src/models/detection/faster_rcnn.rs`; pretrained bias params are consumed by `ferrotorch-hub/tests/pretrained_loading.rs::test_pretrained_fasterrcnn_resnet50_fpn`. |
+//! | REQ-3 | SHIPPED | impl: `pub const FPN_OUT_CHANNELS: usize = 256;` in `fpn.rs`; consumer: `RetinaNet::new` in `ferrotorch-vision/src/models/detection/retinanet.rs` passes it as the head trunk input channels. |
+//! | REQ-4 | SHIPPED | impl: `Self::new` body in `fpn.rs` wires `in_channels = [256, 512, 1024, 2048]`; consumer: `FasterRcnn::new` in `ferrotorch-vision/src/models/detection/faster_rcnn.rs`. |
+//! | REQ-5 | SHIPPED | impl: `pub fn forward` in `fpn.rs` reads `"layer1".."layer4"` keys and writes `"p2".."p6"`; consumer: `FasterRcnn::forward` in `ferrotorch-vision/src/models/detection/faster_rcnn.rs` calls `self.fpn.forward(&backbone_features)`. |
+//! | REQ-6 | SHIPPED | impl: top-down body in `Self::forward` in `fpn.rs` (lateral5 → upsample → add lateral4 → output4, then P3_inner / P2_inner mirrored); consumer: `FasterRcnn::forward_fpn` in `ferrotorch-vision/src/models/detection/faster_rcnn.rs` delegates to `self.fpn.forward(backbone_features)`. |
+//! | REQ-7 | SHIPPED | impl: `MaxPool2d::new([1, 1], [2, 2], [0, 0])` field `pool_p6` in `fpn.rs` (pure stride-2 sub-sample, NOT a 3×3 max-pool — #1141 contract); consumer: `Self::forward` invokes `Module::<T>::forward(&self.pool_p6, &p5)` to materialise P6, then `FasterRcnn::forward` in `ferrotorch-vision/src/models/detection/faster_rcnn.rs` consumes the result via `self.fpn.forward(...)`. |
+//! | REQ-8 | SHIPPED | impl: `pub fn named_parameters` in `fpn.rs` emits `lateral{i}` and `output{i}` keyed entries; consumer: `FasterRcnn::named_parameters` in `ferrotorch-vision/src/models/detection/faster_rcnn.rs` prefixes the FPN keys with `fpn.` for state-dict ingest. |
 
 use std::collections::HashMap;
 

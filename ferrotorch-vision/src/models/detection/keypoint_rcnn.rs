@@ -23,6 +23,23 @@
 //! ## Reference
 //! He et al., "Mask R-CNN", ICCV 2017 (the keypoint variant).
 //! torchvision 0.21.x `keypointrcnn_resnet50_fpn(weights=None)`.
+//!
+//! ## REQ status (per `.design/ferrotorch-vision/models/detection/keypoint_rcnn.md`)
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 | SHIPPED | impl: `pub const KEYPOINT_RCNN_NUM_KEYPOINTS: usize = 17;` in `keypoint_rcnn.rs`; consumer: `pub fn keypointrcnn_resnet50_fpn` in same file passes it to `KeypointRcnn::new`. |
+//! | REQ-2 | SHIPPED | impl: `pub const KEYPOINT_RCNN_NUM_CLASSES: usize = 2;` in `keypoint_rcnn.rs`; consumer: same `keypointrcnn_resnet50_fpn` factory. |
+//! | REQ-3 | SHIPPED | impl: `pub struct KeypointHead<T>` + `Self::new` + `Self::named_parameters` (Sequential-style `conv{0,2,4,6,8,10,12,14}` keys) in `keypoint_rcnn.rs`; consumer: `KeypointRcnn::new` in same file calls `KeypointHead::new(256)?` and stores it as the `keypoint_head` field. |
+//! | REQ-4 | SHIPPED | impl: `pub struct KeypointPredictor<T>` + `Self::new` + `Self::forward` in `keypoint_rcnn.rs` (`ConvTranspose2d(in, num_keypoints, k=4, s=2, p=1)` + bilinear 2× post-upsample); consumer: `KeypointRcnn::new` in same file calls `KeypointPredictor::new(512, num_keypoints)?`. |
+//! | REQ-5 | SHIPPED | impl: `pub struct KeypointDetections<T>` in `keypoint_rcnn.rs` (extends `Detections` with `keypoints: [N_det, 17, 3]` + `keypoint_scores: [N_det, 17]`); consumer: `KeypointRcnn::forward` returns `Vec<KeypointDetections<T>>` — `register_model("keypointrcnn_resnet50_fpn", ...)` in `ferrotorch-vision/src/models/registry.rs` calls into it via `Module::forward`. |
+//! | REQ-6 | SHIPPED | impl: `pub struct KeypointRcnn<T>` (fields `faster_rcnn`, `keypoint_head`, `keypoint_predictor`) + `Self::new` in `keypoint_rcnn.rs`; consumer: `register_model("keypointrcnn_resnet50_fpn", ...)` in `ferrotorch-vision/src/models/registry.rs`. |
+//! | REQ-7 | SHIPPED | impl: `pub fn KeypointRcnn::forward` in `keypoint_rcnn.rs` (re-uses `forward_backbone` / `forward_fpn`, ROI Align at 14×14 on p2..p5, keypoint head → predictor → `heatmaps_to_keypoints`); consumer: `impl<T> Module<T> for KeypointRcnn<T>::forward` invokes it; the registry closure in `ferrotorch-vision/src/models/registry.rs` calls into it via `Module::forward`. |
+//! | REQ-8 | SHIPPED | impl: `fn assign_fpn_levels_keypoint` in `keypoint_rcnn.rs` (clamped to `[k_min=2, k_max=5]`); consumer: `KeypointRcnn::forward` in same file at the call site `let roi_levels = assign_fpn_levels_keypoint(&det.boxes, 4.0, 224.0, 2, 5)?`. |
+//! | REQ-9 | SHIPPED | impl: `pub fn heatmaps_to_keypoints` in `keypoint_rcnn.rs` (Heckbert `c = d + 0.5` continuous-coord convention + `width / ceil(width)` correction); consumer: `KeypointRcnn::forward` in same file at the call site `let (keypoints, keypoint_scores) = heatmaps_to_keypoints(&kp_heatmaps, &det.boxes, self.num_keypoints)?`. |
+//! | REQ-10 | SHIPPED | impl: `roi_align_with_aligned(..., false)` call in `KeypointRcnn::forward` in `keypoint_rcnn.rs` (legacy mode, #1145); consumer: same `Self::forward` reachable via `Module::forward` from `ferrotorch-vision/src/models/registry.rs`. |
+//! | REQ-11 | SHIPPED | impl: `impl<T> Module<T> for KeypointRcnn<T>::forward` in `keypoint_rcnn.rs` returns 1-D `[N_det]` scores; consumer: same registry closure. |
+//! | REQ-12 | SHIPPED | impl: `pub fn keypointrcnn_resnet50_fpn` in `keypoint_rcnn.rs`; consumer: `register_model("keypointrcnn_resnet50_fpn", ...)` in `ferrotorch-vision/src/models/registry.rs` calls it inside the closure. |
 
 use ferrotorch_core::grad_fns::activation::relu;
 use ferrotorch_core::numeric_cast::cast;

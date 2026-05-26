@@ -41,6 +41,24 @@
 //! ## Reference
 //! Tian et al., "FCOS: Fully Convolutional One-Stage Object Detection",
 //! ICCV 2019. torchvision 0.21.x `fcos_resnet50_fpn(weights="COCO_V1")`.
+//!
+//! ## REQ status (per `.design/ferrotorch-vision/models/detection/fcos.md`)
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 | SHIPPED | impl: `pub const FCOS_NUM_ANCHORS_PER_LOC: usize = 1;` in `fcos.rs`; consumer: `Fcos::new` in same file passes it to both head constructors. |
+//! | REQ-2 | SHIPPED | impl: `pub const FCOS_NUM_CONVS: usize = 4;` in `fcos.rs`; consumer: `FcosConvGnTrunk::new` in same file uses the constant to size the conv and GroupNorm arrays — invoked via `Fcos::new` through the head constructors. |
+//! | REQ-3 | SHIPPED | impl: `pub const FCOS_GN_GROUPS: usize = 32;` in `fcos.rs`; consumer: `FcosConvGnTrunk::new` reads it inside `Fcos::new`. |
+//! | REQ-4 | SHIPPED | impl: `pub const FCOS_BASE_SIZES: [f64; 5] = [8, 16, 32, 64, 128];` in `fcos.rs`; consumer: `fcos_anchors_per_level` reads it inside `Fcos::forward`. |
+//! | REQ-5 | SHIPPED | impl: `pub const FCOS_SCORE_THRESH` / `_NMS_THRESH` / `_TOPK_CANDIDATES` / `_DETECTIONS_PER_IMG` in `fcos.rs`; consumer: `Fcos::forward` reads each — registered as a constructor via `register_model("fcos_resnet50_fpn", ...)` in `ferrotorch-vision/src/models/registry.rs`. |
+//! | REQ-6 | SHIPPED | impl: `FcosConvGnTrunk<T>` (module-private) + `Self::named_parameters` mapping in `fcos.rs` (Sequential-style `conv.{0,3,6,9}` for `Conv2d` and `conv.{1,4,7,10}` for `GroupNorm`); consumer: both head structs in same file own one; named parameters surface through `FcosClassificationHead::named_parameters` (public method) consumed by `Fcos::named_parameters` and reachable from the registry. |
+//! | REQ-7 | SHIPPED | impl: `pub struct FcosClassificationHead<T>` + `Self::new` + `Self::forward_level` in `fcos.rs` (trunk + final `cls_logits` conv, no ReLU on logits); consumer: `Fcos::new` in same file calls `FcosClassificationHead::new(FPN_OUT_CHANNELS, FCOS_NUM_ANCHORS_PER_LOC, num_classes)?`. |
+//! | REQ-8 | SHIPPED | impl: `pub struct FcosRegressionHead<T>` + `Self::new` + `Self::forward_level` in `fcos.rs` (parallel `bbox_reg` ReLU-gated + `bbox_ctrness` raw); consumer: `Fcos::new` in same file calls `FcosRegressionHead::new(FPN_OUT_CHANNELS, FCOS_NUM_ANCHORS_PER_LOC)?`. |
+//! | REQ-9 | SHIPPED | impl: `fn fcos_anchors_per_level` in `fcos.rs` (one anchor per cell at `[-S/2, -S/2, +S/2, +S/2]` rounded, shifted by `(col*stride_w, row*stride_h)`); consumer: `Fcos::forward` calls `fcos_anchors_per_level::<T>(&fm_sizes, (img_h, img_w))?`. |
+//! | REQ-10 | SHIPPED | impl: `pub struct Fcos<T>` + `Self::new` in `fcos.rs` (composes `ResNet`, `RetinaFpn`, classification head, regression head); consumer: `register_model("fcos_resnet50_fpn", ...)` in `ferrotorch-vision/src/models/registry.rs`. |
+//! | REQ-11 | SHIPPED | impl: `pub fn Fcos::forward` body in `fcos.rs` (`sqrt(sigmoid(cls) * sigmoid(centerness))` → score-thresh → per-level top-K → `BoxLinearCoder(normalize_by_size=True)` decode → clip → cross-class `batched_nms` (IoU 0.6) → top-K 100); consumer: `impl<T> Module<T> for Fcos<T>::forward` invokes it; the registry closure in `ferrotorch-vision/src/models/registry.rs` reaches it via `Module::forward`. |
+//! | REQ-12 | SHIPPED | impl: `impl<T> Module<T> for Fcos<T>::forward` in `fcos.rs` returns first-image scores as a 1-D `[N_det]` tensor; consumer: registered as `ModelConstructor<f32>` via `register_model("fcos_resnet50_fpn", ...)` in `ferrotorch-vision/src/models/registry.rs`. |
+//! | REQ-13 | SHIPPED | impl: `pub fn fcos_resnet50_fpn` in `fcos.rs`; consumer: `register_model("fcos_resnet50_fpn", ...)` in `ferrotorch-vision/src/models/registry.rs` calls it inside the closure. |
 
 use std::collections::HashMap;
 

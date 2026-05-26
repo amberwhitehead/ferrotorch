@@ -31,6 +31,22 @@
 //! ## Reference
 //! Liu et al., "SSD: Single Shot MultiBox Detector", ECCV 2016.
 //! torchvision 0.21.x `ssd300_vgg16(weights=None, progress=False)`.
+//!
+//! ## REQ status (per `.design/ferrotorch-vision/models/detection/ssd.md`)
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 | SHIPPED | impl: `pub const SSD_ANCHORS_PER_SCALE: [usize; 6] = [4, 6, 6, 6, 4, 4];` in `ssd.rs`; consumer: `Ssd300::new` in same file uses it to size each per-scale (cls, reg) head. |
+//! | REQ-2 | SHIPPED | impl: `pub const SSD_FM_SIZES: [usize; 6] = [38, 19, 10, 5, 3, 1];` in `ssd.rs`; consumer: `Ssd300::forward` reads it to slice the per-scale head outputs into the anchor-aligned layout. |
+//! | REQ-3 | SHIPPED | impl: `pub const SSD_TOTAL_ANCHORS: usize = 8732;` in `ssd.rs`; consumer: `Ssd300::forward` uses it to validate the per-scale concat shape. |
+//! | REQ-4 | SHIPPED | impl: `pub const SSD_SCORE_THRESH` / `_NMS_THRESH` / `_TOPK_CANDIDATES` / `_DETECTIONS_PER_IMG` in `ssd.rs`; consumer: `Ssd300::forward` reads each — registered via `register_model("ssd300_vgg16", ...)` in `ferrotorch-vision/src/models/registry.rs`. |
+//! | REQ-5 | SHIPPED | impl: `struct L2Norm<T>` (module-private) + its `Module<T>::forward` in `ssd.rs` (per-channel scale init = 20.0, `f64` accumulator); consumer: `Ssd300::new` in same file owns one (applied to `conv4_3` features), and `Ssd300::forward` calls into its `Module::forward`. |
+//! | REQ-6 | SHIPPED | impl: `struct ConvBnRelu<T>` (module-private) + `Self::new` routing through `Conv2d::new_full` in `ssd.rs` (the #1142 atrous-conv6 dilation fix); consumer: `Ssd300::new` builds the VGG features + extras out of `ConvBnRelu` blocks; the forward path runs through them. |
+//! | REQ-7 | SHIPPED | impl: `pub struct Ssd300<T>` in `ssd.rs` (owns VGG features, `L2Norm`, extra layers, six cls heads, six reg heads); consumer: `register_model("ssd300_vgg16", ...)` in `ferrotorch-vision/src/models/registry.rs`. |
+//! | REQ-8 | SHIPPED | impl: `fn generate_ssd_anchors` in `ssd.rs` (`SsdScaleConfig.step` field carries the verbatim torchvision `[8, 16, 32, 64, 100, 300]` steps, centre divisor `300 / step` — the #1142 fix); consumer: `Ssd300::forward` calls it to build the prior box tensor; the #1142 step-vs-fm_size regression test exercises the same code path. |
+//! | REQ-9 | SHIPPED | impl: `pub struct SsdDetections<T>` in `ssd.rs`; consumer: `Ssd300::forward` returns `Vec<SsdDetections<T>>`, consumed by the registry closure `register_model("ssd300_vgg16", ...)` in `ferrotorch-vision/src/models/registry.rs` via `Module::forward`. |
+//! | REQ-10 | SHIPPED | impl: `pub fn Ssd300::forward` body in `ssd.rs` (VGG features → `L2Norm(conv4_3)` + extras → per-scale heads → decode against priors → softmax → per-class score gate `>= 0.01` → per-class `nms` → cross-class top-K 200); consumer: `impl<T> Module<T> for Ssd300<T>::forward` invokes it; the registry closure reaches it via `Module::forward`. |
+//! | REQ-11 | SHIPPED | impl: `pub fn ssd300_vgg16<T>` in `ssd.rs`; consumer: `register_model("ssd300_vgg16", ...)` in `ferrotorch-vision/src/models/registry.rs` calls it inside the closure. |
 
 use ferrotorch_core::grad_fns::activation::relu;
 use ferrotorch_core::grad_fns::shape::cat;

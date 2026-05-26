@@ -6,6 +6,18 @@
 //! (one per (size × aspect_ratio) combination) across every spatial cell.
 //! The returned boxes are in `[x1, y1, x2, y2]` pixel coords relative to
 //! the **original image** — scaled by the level's stride.
+//!
+//! ## REQ status (per `.design/ferrotorch-vision/models/detection/anchor_utils.md`)
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 | SHIPPED | impl: `pub struct AnchorGenerator` + `Self::cell_anchors` in `anchor_utils.rs` (aspect-ratio outer / sizes inner with `.round()` half-extents); consumer: `Rpn::new` in `ferrotorch-vision/src/models/detection/rpn.rs` calls `AnchorGenerator::default_fasterrcnn()` and stores it as the `anchor_gen` field. |
+//! | REQ-2 | SHIPPED | impl: `pub fn AnchorGenerator::default_fasterrcnn` in `anchor_utils.rs` (sizes `(32, 64, 128, 256, 512)`, ratios `(0.5, 1.0, 2.0)`, strides `(4, 8, 16, 32, 64)`); consumer: `Rpn::new` in `ferrotorch-vision/src/models/detection/rpn.rs`. |
+//! | REQ-3 | SHIPPED | impl: `pub fn AnchorGenerator::generate_anchors_for_image` in `anchor_utils.rs` (per-dim strides `image_h / fh`, `image_w / fw`); consumer: `Rpn::forward` in `ferrotorch-vision/src/models/detection/rpn.rs` calls `self.anchor_gen.generate_anchors_for_image(&fm_sizes, (img_h, img_w))`. |
+//! | REQ-4 | SHIPPED | impl: `pub fn AnchorGenerator::generate_anchors` in `anchor_utils.rs` (canonical per-level square stride from `LevelConfig`); consumer: re-exported via `pub use anchor_utils::AnchorGenerator` in `ferrotorch-vision/src/models/detection/mod.rs` (the shared `Self::generate_anchors_with_strides` core is the production path invoked by REQ-3). |
+//! | REQ-5 | SHIPPED | impl: nested `for fy / for fx` row-major loops in `Self::generate_anchors_with_strides` in `anchor_utils.rs` (cell-corner centres, no `+0.5` offset, matching `arange(grid_w) * stride_w`); consumer: `Rpn::forward` in `ferrotorch-vision/src/models/detection/rpn.rs` consumes the resulting `[N_total, 4]` tensor. |
+//! | REQ-6 | SHIPPED | impl: `pub fn AnchorGenerator::num_anchors_per_location` in `anchor_utils.rs` returning `sizes.len() * aspect_ratios.len()`; consumer: re-exported via `pub use anchor_utils::AnchorGenerator` in `ferrotorch-vision/src/models/detection/mod.rs` (exposed to downstream RPN/head sizing through the crate's public API). |
+//! | REQ-7 | SHIPPED | impl: `pub fn decode_boxes` in `anchor_utils.rs` (one-sided `bbox_xform_clip ≈ 4.135` `max=` clamp on `dw`/`dh`, default unit weights); consumer: `Rpn::forward` in `ferrotorch-vision/src/models/detection/rpn.rs` calls `decode_boxes::<f64>(&anc_t, &del_t, (1.0, 1.0, 1.0, 1.0))`; `use crate::models::detection::anchor_utils::decode_boxes` at the top of `ferrotorch-vision/src/models/detection/retinanet.rs` exposes the same helper to RetinaNet. |
 
 use ferrotorch_core::numeric_cast::cast;
 use ferrotorch_core::{FerrotorchResult, Float, Tensor, TensorStorage};

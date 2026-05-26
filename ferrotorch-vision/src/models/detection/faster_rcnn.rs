@@ -19,6 +19,22 @@
 //! Ren et al., "Faster R-CNN: Towards Real-Time Object Detection with
 //! Region Proposal Networks", NeurIPS 2015.
 //! torchvision 0.21.x `fasterrcnn_resnet50_fpn(weights=None)`.
+//!
+//! ## REQ status (per `.design/ferrotorch-vision/models/detection/faster_rcnn.md`)
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 | SHIPPED | impl: `pub struct FasterRcnn<T>` in `faster_rcnn.rs` (owns `ResNet`, `FeaturePyramidNetwork`, `Rpn`, `TwoMlpHead`, ROI sizing fields, training flag); consumer: `register_model("fasterrcnn_resnet50_fpn", ...)` in `ferrotorch-vision/src/models/registry.rs` invokes the factory. |
+//! | REQ-2 | SHIPPED | impl: `pub struct TwoMlpHead<T>` + `Self::new` + `Self::forward` in `faster_rcnn.rs` (`fc6: in*P*P → 1024`, `fc7: 1024 → 1024`, `cls_score`, `bbox_pred`); consumer: `FasterRcnn::new` in same file calls `TwoMlpHead::new(7, 256, 1024, num_classes)?`. |
+//! | REQ-3 | SHIPPED | impl: `pub struct Detections<T>` in `faster_rcnn.rs` (`boxes`, `scores`, `labels`); consumer: `MaskRcnn::forward` in `ferrotorch-vision/src/models/detection/mask_rcnn.rs` consumes `Vec<Detections<T>>` returned by `self.faster_rcnn.forward(images)?`. |
+//! | REQ-4 | SHIPPED | impl: `pub fn FasterRcnn::new` in `faster_rcnn.rs` (default torchvision sizes — representation=1024, roi=7, spatial scales `[1/4..1/64]`); consumer: `pub fn fasterrcnn_resnet50_fpn` in same file delegates to it, then `register_model("fasterrcnn_resnet50_fpn", ...)` in `ferrotorch-vision/src/models/registry.rs`. |
+//! | REQ-5 | SHIPPED | impl: `pub fn FasterRcnn::forward` in `faster_rcnn.rs` (returns `Vec<Detections<T>>`); consumer: `MaskRcnn::forward` in `ferrotorch-vision/src/models/detection/mask_rcnn.rs` calls `self.faster_rcnn.forward(images)?`. |
+//! | REQ-6 | SHIPPED | impl: `fn assign_fpn_levels` in `faster_rcnn.rs` (`LEVEL_MAPPER_EPS = 1e-6`, clamped to `[min_level, max_level]`); consumer: `FasterRcnn::forward` in same file calls `assign_fpn_levels(&proposals, 4.0, 224.0, 2, 6)?`. |
+//! | REQ-7 | SHIPPED | impl: `pub fn FasterRcnn::forward_backbone` + `pub fn FasterRcnn::forward_fpn` in `faster_rcnn.rs`; consumer: `KeypointRcnn::forward` in `ferrotorch-vision/src/models/detection/keypoint_rcnn.rs` calls both methods to reuse backbone/FPN features. |
+//! | REQ-8 | SHIPPED | impl: `impl<T> Module<T> for FasterRcnn<T>::forward` in `faster_rcnn.rs` returns `dets[0].scores` as a 1-D `[N_det]` tensor; consumer: `register_model("fasterrcnn_resnet50_fpn", ...)` in `ferrotorch-vision/src/models/registry.rs` registers it as the `ModelConstructor<f32>` `Module::forward` shim. |
+//! | REQ-9 | SHIPPED | impl: `roi_align_with_aligned(..., false)` call site in `FasterRcnn::forward` in `faster_rcnn.rs` (legacy mode, #1145); consumer: same `Self::forward` path consumed by `MaskRcnn::forward` and the registry factory. |
+//! | REQ-10 | SHIPPED | impl: `pub fn fasterrcnn_resnet50_fpn` in `faster_rcnn.rs` (default COCO 91 classes); consumer: `register_model("fasterrcnn_resnet50_fpn", ...)` in `ferrotorch-vision/src/models/registry.rs` calls it inside the closure. |
+//! | REQ-11 | SHIPPED | impl: `children` / `named_children` overrides in `impl<T> Module<T> for FasterRcnn<T>` in `faster_rcnn.rs` (returns the ResNet backbone); consumer: the BN-buffer loader in `ferrotorch-vision/src/bn_buffer_loader.rs` walks `Module::children()` and is called via `ferrotorch-hub` pretrained-loading paths. |
 
 use std::collections::HashMap;
 

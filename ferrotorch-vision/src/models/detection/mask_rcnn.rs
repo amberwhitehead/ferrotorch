@@ -19,6 +19,19 @@
 //! ## Reference
 //! He et al., "Mask R-CNN", ICCV 2017.
 //! torchvision 0.21.x `maskrcnn_resnet50_fpn(weights=None)`.
+//!
+//! ## REQ status (per `.design/ferrotorch-vision/models/detection/mask_rcnn.md`)
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 | SHIPPED | impl: `pub struct MaskHead<T>` + `Self::new` + `Self::forward` in `mask_rcnn.rs` (four `Conv2d(C, 256, k=3, p=1, bias=true)` + ReLU between); consumer: `MaskRcnn::new` in same file calls `MaskHead::new(256)?` and stores it as the `mask_head` field. |
+//! | REQ-2 | SHIPPED | impl: `pub struct MaskPredictor<T>` + `Self::new` + `Self::forward` in `mask_rcnn.rs` (`ConvTranspose2d` upsample + ReLU + `Conv2d(256, num_classes, k=1)` projection); consumer: `MaskRcnn::new` in same file calls `MaskPredictor::new(256, num_classes)?`. |
+//! | REQ-3 | SHIPPED | impl: `pub struct MaskDetections<T>` in `mask_rcnn.rs` (extends `Detections` with `masks: Tensor<T>`); consumer: `MaskRcnn::forward` returns `Vec<MaskDetections<T>>`, consumed by the registry-registered closure `register_model("maskrcnn_resnet50_fpn", ...)` in `ferrotorch-vision/src/models/registry.rs` via `Module::forward`. |
+//! | REQ-4 | SHIPPED | impl: `pub struct MaskRcnn<T>` (fields `faster_rcnn`, `mask_head`, `mask_predictor`) + `Self::new` in `mask_rcnn.rs`; consumer: `register_model("maskrcnn_resnet50_fpn", ...)` in `ferrotorch-vision/src/models/registry.rs`. |
+//! | REQ-5 | SHIPPED | impl: `pub fn MaskRcnn::forward` in `mask_rcnn.rs` (delegates to `FasterRcnn::forward`, then ROI Align 14×14 on FPN features, mask head → predictor → `postprocess_masks(paste=true)`); consumer: `impl<T> Module<T> for MaskRcnn<T>::forward` invokes it; the registry closure in `ferrotorch-vision/src/models/registry.rs` calls into it. |
+//! | REQ-6 | SHIPPED | impl: `impl<T> Module<T> for MaskRcnn<T>::forward` in `mask_rcnn.rs` returns first-image post-NMS scores as a 1-D `[N_det]` tensor; consumer: registered as `ModelConstructor<f32>` via `register_model("maskrcnn_resnet50_fpn", ...)` in `ferrotorch-vision/src/models/registry.rs`. |
+//! | REQ-7 | SHIPPED | impl: `pub fn maskrcnn_resnet50_fpn` in `mask_rcnn.rs`; consumer: `register_model("maskrcnn_resnet50_fpn", ...)` in `ferrotorch-vision/src/models/registry.rs` calls it inside the closure. |
+//! | REQ-8 | SHIPPED | impl: `pub fn MaskHead::named_parameters` + `pub fn MaskPredictor::named_parameters` in `mask_rcnn.rs`; consumer: `MaskRcnn::named_parameters` (the `Module` impl in `mask_rcnn.rs`) prefixes them with `mask_head.` / `mask_predictor.` and exposes them to state-dict ingest. The pretrained loader at `ferrotorch-hub/tests/pretrained_loading.rs::test_pretrained_maskrcnn_resnet50_fpn` is the end-to-end production consumer. |
 
 use ferrotorch_core::grad_fns::activation::relu;
 use ferrotorch_core::numeric_cast::cast;

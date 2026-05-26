@@ -17,6 +17,19 @@
 //! selected (by objectness score), box-decoding + NMS are applied, and
 //! the surviving proposals are returned as a flat `[N_proposals, 4]` tensor
 //! in xyxy pixel coords.
+//!
+//! ## REQ status (per `.design/ferrotorch-vision/models/detection/rpn.md`)
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 | SHIPPED | impl: `pub struct RpnHead` + `Self::new` in `rpn.rs` (3×3 same-pad conv + 1×1 objectness + 1×1 bbox-delta, all biased); consumer: `Rpn::new` in same file calls `RpnHead::new(in_channels, 3)?` and stores the result as the `head` field, exercised by `FasterRcnn::forward` via `self.rpn.forward(...)` in `ferrotorch-vision/src/models/detection/faster_rcnn.rs`. |
+//! | REQ-2 | SHIPPED | impl: `pub fn RpnHead::forward_level` in `rpn.rs` (conv → relu → cls + bbox); consumer: `Rpn::forward` in same file invokes `self.head.forward_level(feat)` per FPN level. |
+//! | REQ-3 | SHIPPED | impl: `pub struct RpnConfig` + `pub fn RpnConfig::default_eval` in `rpn.rs` (torchvision eval defaults `(1000, 1000, 0.7, 1e-3, 0.0, image_size)`); consumer: `FasterRcnn::forward` in `ferrotorch-vision/src/models/detection/faster_rcnn.rs` calls `RpnConfig::default_eval([img_h, img_w])`. |
+//! | REQ-4 | SHIPPED | impl: `pub struct Rpn<T>` + `Self::new` in `rpn.rs` (owns one `RpnHead` + the default-FasterRCNN `AnchorGenerator`); consumer: `FasterRcnn::new` in `ferrotorch-vision/src/models/detection/faster_rcnn.rs` calls `Rpn::new(256)?`. |
+//! | REQ-5 | SHIPPED | impl: `pub fn Rpn::forward` body in `rpn.rs` (per-level head → sigmoid → per-level pre-NMS top-K → decode → clip → small-box filter → score threshold → per-level batched NMS → post-NMS top-K); consumer: `FasterRcnn::forward` in `ferrotorch-vision/src/models/detection/faster_rcnn.rs` calls `self.rpn.forward(&single_refs, &rpn_cfg)`. |
+//! | REQ-6 | SHIPPED | impl: `self.anchor_gen.generate_anchors_for_image(&fm_sizes, (img_h, img_w))` call inside `Rpn::forward` in `rpn.rs` (per-dim strides from `cfg.image_size`, #1141 fix); consumer: same `FasterRcnn::forward` path. |
+//! | REQ-7 | SHIPPED | impl: `batched_nms::<f64>(&nms_boxes_t, &nms_scores_t, &nms_levels, cfg.nms_thresh)?` call inside `Rpn::forward` in `rpn.rs` (per-level keys prevent cross-level suppression); consumer: same `FasterRcnn::forward` path. |
+//! | REQ-8 | SHIPPED | impl: `pub fn RpnHead::named_parameters` in `rpn.rs` emits `conv.{weight,bias}`, `cls_logits.{weight,bias}`, `bbox_pred.{weight,bias}`; consumer: `Rpn::named_parameters` in same file prefixes with `head.`, then `FasterRcnn::named_parameters` in `ferrotorch-vision/src/models/detection/faster_rcnn.rs` further prefixes with `rpn.` for state-dict ingest. |
 
 use ferrotorch_core::grad_fns::activation::relu;
 use ferrotorch_core::numeric_cast::cast;

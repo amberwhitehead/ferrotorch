@@ -12,6 +12,21 @@
 //!   — mirrors `torchvision.models.detection.retinanet_resnet50_fpn` (#1143).
 //! - **Keypoint R-CNN** with ResNet-50 FPN backbone (`keypoint_rcnn.rs`)
 //!   — mirrors `torchvision.models.detection.keypointrcnn_resnet50_fpn` (#1145).
+//!
+//! ## REQ status (per `.design/ferrotorch-vision/models/detection/mod.md`)
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 | SHIPPED | impl: `pub mod` declarations (`anchor_utils`, `faster_rcnn`, `fcos`, `fpn`, `keypoint_rcnn`, `mask_rcnn`, `retinanet`, `roi_heads_postprocess`, `rpn`, `ssd`) in `mod.rs`; consumer: `pub use detection::{...}` re-exports in `ferrotorch-vision/src/models/mod.rs`. |
+//! | REQ-2 | SHIPPED | impl: `pub use anchor_utils::AnchorGenerator;` in `mod.rs`; consumer: `pub use ...AnchorGenerator` re-export in `ferrotorch-vision/src/lib.rs`. |
+//! | REQ-3 | SHIPPED | impl: `pub use faster_rcnn::{Detections, FasterRcnn, TwoMlpHead, fasterrcnn_resnet50_fpn};` in `mod.rs`; consumer: `register_model("fasterrcnn_resnet50_fpn", ...)` in `ferrotorch-vision/src/models/registry.rs` invokes the factory. |
+//! | REQ-4 | SHIPPED | impl: `pub use fcos::{Fcos, FcosClassificationHead, FcosRegressionHead, fcos_resnet50_fpn};` in `mod.rs` (the `fcos::Detections` name is deliberately not re-exported to avoid colliding with `faster_rcnn::Detections`); consumer: `register_model("fcos_resnet50_fpn", ...)` in `ferrotorch-vision/src/models/registry.rs`. |
+//! | REQ-5 | SHIPPED | impl: `pub use fpn::{FPN_OUT_CHANNELS, FeaturePyramidNetwork};` in `mod.rs`; consumer: `use crate::models::detection::fpn::FPN_OUT_CHANNELS` in `ferrotorch-vision/src/models/detection/retinanet.rs` and `ferrotorch-vision/src/models/detection/fcos.rs`. |
+//! | REQ-6 | SHIPPED | impl: `pub use keypoint_rcnn::{KEYPOINT_RCNN_NUM_CLASSES, KEYPOINT_RCNN_NUM_KEYPOINTS, KeypointDetections, KeypointHead, KeypointPredictor, KeypointRcnn, keypointrcnn_resnet50_fpn};` in `mod.rs`; consumer: `register_model("keypointrcnn_resnet50_fpn", ...)` in `ferrotorch-vision/src/models/registry.rs`. |
+//! | REQ-7 | SHIPPED | impl: `pub use mask_rcnn::{MaskDetections, MaskHead, MaskPredictor, MaskRcnn, maskrcnn_resnet50_fpn};` in `mod.rs`; consumer: `register_model("maskrcnn_resnet50_fpn", ...)` in `ferrotorch-vision/src/models/registry.rs`. |
+//! | REQ-8 | SHIPPED | impl: `pub use retinanet::{RETINANET_NUM_ANCHORS_PER_LOC, RetinaFpn, RetinaNet, RetinaNetClassificationHead, RetinaNetRegressionHead, retinanet_resnet50_fpn};` in `mod.rs` (the `retinanet::Detections` name is deliberately not re-exported to avoid colliding with `faster_rcnn::Detections`); consumer: `register_model("retinanet_resnet50_fpn", ...)` in `ferrotorch-vision/src/models/registry.rs`. |
+//! | REQ-9 | SHIPPED | impl: `pub use rpn::{Rpn, RpnConfig, RpnHead};` in `mod.rs`; consumer: `use crate::models::detection::rpn::{Rpn, RpnConfig}` in `ferrotorch-vision/src/models/detection/faster_rcnn.rs`. |
+//! | REQ-10 | SHIPPED | impl: `pub use ssd::{SSD_ANCHORS_PER_SCALE, SSD_FM_SIZES, SSD_TOTAL_ANCHORS, Ssd300, SsdDetections, ssd300_vgg16};` in `mod.rs`; consumer: `register_model("ssd300_vgg16", ...)` in `ferrotorch-vision/src/models/registry.rs`. |
 
 pub mod anchor_utils;
 pub mod faster_rcnn;

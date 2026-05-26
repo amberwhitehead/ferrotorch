@@ -26,6 +26,23 @@
 //! ## Reference
 //! Lin et al., "Focal Loss for Dense Object Detection", ICCV 2017.
 //! torchvision 0.21.x `retinanet_resnet50_fpn(weights="COCO_V1")`.
+//!
+//! ## REQ status (per `.design/ferrotorch-vision/models/detection/retinanet.md`)
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 | SHIPPED | impl: `pub const RETINANET_NUM_ANCHORS_PER_LOC: usize = 9;` in `retinanet.rs`; consumer: `RetinaNet::new` in same file passes it to both head constructors. |
+//! | REQ-2 | SHIPPED | impl: `pub const RETINANET_ASPECT_RATIOS` + `pub const RETINANET_BASE_SIZES` in `retinanet.rs`; consumer: `retinanet_cell_anchors` in same file reads them inside `RetinaNet::forward` via `retinanet_anchors_per_level`. |
+//! | REQ-3 | SHIPPED | impl: `pub const RETINANET_SCORE_THRESH` / `_NMS_THRESH` / `_TOPK_CANDIDATES` / `_DETECTIONS_PER_IMG` in `retinanet.rs`; consumer: `RetinaNet::forward` body uses each — registered via `register_model("retinanet_resnet50_fpn", ...)` in `ferrotorch-vision/src/models/registry.rs`. |
+//! | REQ-4 | SHIPPED | impl: `pub struct RetinaFpn<T>` + `Self::new` + `Self::forward` in `retinanet.rs` (3 laterals + 3 output convs + `p6`/`p7` `Conv2d` extras, P7 input is `ReLU(P6)`); consumer: `RetinaNet::new` in same file calls `RetinaFpn::new()?`; `Fcos::new` in `ferrotorch-vision/src/models/detection/fcos.rs` also instantiates `RetinaFpn::new()?` and reuses it. |
+//! | REQ-5 | SHIPPED | impl: `pub struct RetinaNetClassificationHead<T>` + `Self::new` + `Self::forward_level` in `retinanet.rs` (4-conv trunk + `cls_logits` `Conv2d(256, num_anchors * num_classes)`); consumer: `RetinaNet::new` in same file calls `RetinaNetClassificationHead::new(FPN_OUT_CHANNELS, RETINANET_NUM_ANCHORS_PER_LOC, num_classes)?`. |
+//! | REQ-6 | SHIPPED | impl: `pub struct RetinaNetRegressionHead<T>` + `Self::new` + `Self::forward_level` in `retinanet.rs` (4-conv trunk + `bbox_reg` `Conv2d(256, num_anchors * 4)`, no ReLU gate); consumer: `RetinaNet::new` in same file calls `RetinaNetRegressionHead::new(FPN_OUT_CHANNELS, RETINANET_NUM_ANCHORS_PER_LOC)?`. |
+//! | REQ-7 | SHIPPED | impl: `fn retinanet_cell_anchors` + `fn retinanet_anchors_per_level` in `retinanet.rs` (`int(x * 2^(1/3))` truncation triplets, rounded half-extents, per-dim strides from padded image size); consumer: `RetinaNet::forward` calls `retinanet_anchors_per_level::<T>(&fm_sizes, (img_h, img_w))?`. |
+//! | REQ-8 | SHIPPED | impl: `pub struct RetinaNet<T>` + `Self::new` in `retinanet.rs` (composes `ResNet`, `RetinaFpn`, classification head, regression head); consumer: `register_model("retinanet_resnet50_fpn", ...)` in `ferrotorch-vision/src/models/registry.rs`. |
+//! | REQ-9 | SHIPPED | impl: `pub fn RetinaNet::forward` body in `retinanet.rs` (sigmoid → score-thresh → per-level top-K 1000 → decode → clip → cross-class `batched_nms` (IoU 0.5) → top-K 300); consumer: `impl<T> Module<T> for RetinaNet<T>::forward` calls it; the registry closure in `ferrotorch-vision/src/models/registry.rs` reaches it via `Module::forward`. |
+//! | REQ-10 | SHIPPED | impl: anchor-decode block inside `RetinaNet::forward` in `retinanet.rs` (effectively the `decode_boxes` semantics with unit weights `(1.0, 1.0, 1.0, 1.0)` — the import `use crate::models::detection::anchor_utils::decode_boxes` makes the helper available for cross-module use); consumer: same `Self::forward` path consumed by the registry closure. |
+//! | REQ-11 | SHIPPED | impl: `impl<T> Module<T> for RetinaNet<T>::forward` in `retinanet.rs` returns first-image scores as a 1-D `[N_det]` tensor; consumer: registered as `ModelConstructor<f32>` via `register_model("retinanet_resnet50_fpn", ...)` in `ferrotorch-vision/src/models/registry.rs`. |
+//! | REQ-12 | SHIPPED | impl: `pub fn retinanet_resnet50_fpn` in `retinanet.rs`; consumer: `register_model("retinanet_resnet50_fpn", ...)` in `ferrotorch-vision/src/models/registry.rs` calls it inside the closure. |
 
 use std::collections::HashMap;
 
