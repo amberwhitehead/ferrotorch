@@ -17,6 +17,22 @@
 //!   granularity, which is planned for a future release. The current
 //!   implementation provides scheduling structure but not the full memory
 //!   benefit.
+//!
+//! ## REQ status (per `.design/ferrotorch-distributed/pipeline.md`)
+//!
+//! Full evidence rows (impl + non-test production consumer + upstream
+//! cites) live in the design doc; this synopsis is a one-line summary per
+//! REQ.
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 (`PipelineSchedule` enum) | SHIPPED | `pub enum PipelineSchedule` in `pipeline.rs` mirrors `ScheduleGPipe` / `Schedule1F1B` re-exports in `torch/distributed/pipelining/__init__.py`; consumer `pub use pipeline::{Pipeline, PipelineSchedule}` in `lib.rs` |
+//! | REQ-2 (`Pipeline<M, T>` struct) | SHIPPED | `pub struct Pipeline` in `pipeline.rs`; consumer `pub use pipeline::Pipeline` in `lib.rs` |
+//! | REQ-3 (`new` constructor + invariants) | SHIPPED | `pub fn new` in `pipeline.rs` validates `num_microbatches > 0` and `world_size >= 2`; consumer `lib.rs` re-export — `new` is the only constructor |
+//! | REQ-4 (`forward` over micro-batches + send/recv) | SHIPPED | `pub fn forward` in `pipeline.rs`; consumer of `Backend::send` / `Backend::recv` and `module.forward`; surfaced via `lib.rs` re-export |
+//! | REQ-5 (`backward` over micro-batches) | SHIPPED | `pub fn backward` in `pipeline.rs` mirrors PyTorch backward stage flow; consumer of `ferrotorch_core::backward` (autograd entry); grad-back limitation documented inline per R-HONEST-3 |
+//! | REQ-6 (`get_microbatch` / `send_activation` / `recv_activation`) | SHIPPED | `fn get_microbatch`, `fn send_activation`, `fn recv_activation` in `pipeline.rs`; consumer `pub fn forward` and `pub fn backward` (same file) |
+//! | REQ-7 (accessors) | SHIPPED | `pub fn schedule` / `num_microbatches` / `module` / `module_mut` in `pipeline.rs`; consumer via `lib.rs` re-export of `Pipeline` |
 
 use std::sync::Arc;
 

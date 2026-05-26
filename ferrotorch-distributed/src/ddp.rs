@@ -5,6 +5,23 @@
 //! standard data-parallel training strategy: each rank processes a
 //! different mini-batch, then gradients are averaged so that all replicas
 //! stay in sync.
+//!
+//! ## REQ status (per `.design/ferrotorch-distributed/ddp.md`)
+//!
+//! Full evidence rows (impl + non-test production consumer + upstream
+//! cites) live in the design doc; this synopsis is a one-line summary per
+//! REQ.
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 (`DDP<M, T>` struct) | SHIPPED | `pub struct DDP` in `ddp.rs` mirrors `class DistributedDataParallel` in `torch/nn/parallel/distributed.py`; consumer `pub use ddp::DDP` in `lib.rs` |
+//! | REQ-2 (`new` + 25 MB default bucket) | SHIPPED | `pub fn new` + `const DEFAULT_BUCKET_SIZE_BYTES` in `ddp.rs` mirror `_DEFAULT_BUCKET_CAP_MB = 25` in `torch/nn/parallel/distributed.py`; consumer `with_bucket_size` (same file) plus `lib.rs` re-export |
+//! | REQ-3 (`with_bucket_size`) | SHIPPED | `pub fn with_bucket_size` in `ddp.rs` mirrors `bucket_cap_mb` kwarg upstream; consumer `pub fn new` calls it with the default |
+//! | REQ-4 (`sync_gradients` + overlapped variant) | SHIPPED | `pub fn sync_gradients` and `pub fn overlapped_sync_gradients` in `ddp.rs`; consumer of `crate::collective::allreduce` via `fn sync_one_bucket` |
+//! | REQ-5 (`broadcast_parameters`) | SHIPPED | `pub fn broadcast_parameters` in `ddp.rs`; consumer of `crate::collective::broadcast` |
+//! | REQ-6 (`impl Module` forwarding) | SHIPPED | `impl Module<T> for DDP<M, T>` in `ddp.rs`; consumer `lib.rs` re-export makes `DDP` drop-in wherever `impl Module<T>` is accepted |
+//! | REQ-7 (reverse-order bucket assignment) | SHIPPED | `fn compute_buckets` in `ddp.rs` iterates `(0..params.len()).rev()` per `torch/csrc/distributed/c10d/reducer.cpp` reducer comment; consumer `pub fn with_bucket_size` (same file) |
+//! | REQ-8 (`sync_one_bucket` helper) | SHIPPED | `fn sync_one_bucket` in `ddp.rs`; consumer `pub fn sync_gradients` and `pub fn overlapped_sync_gradients` (same file) |
 
 use std::sync::Arc;
 

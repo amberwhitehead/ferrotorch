@@ -18,6 +18,25 @@
 //!   case (infrequent coordination calls), but is not suitable for
 //!   high-frequency fire-and-forget patterns. A future version may use a
 //!   thread pool or async runtime.
+//!
+//! ## REQ status (per `.design/ferrotorch-distributed/rpc.md`)
+//!
+//! Full evidence rows (impl + non-test production consumer + upstream
+//! cites) live in the design doc; this synopsis is a one-line summary per
+//! REQ.
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 (`RpcError` enum + `From<RpcError> for FerrotorchError`) | SHIPPED | `pub enum RpcError` + `impl From<RpcError> for FerrotorchError` in `rpc.rs` mirror RpcError-family exceptions in `torch/distributed/rpc/api.py`; consumer `pub use rpc::{RpcAgent, RpcError, TcpRpcBackend}` in `lib.rs` |
+//! | REQ-2 (`MAX_RPC_MSG_SIZE` 1 GiB cap) | SHIPPED | `const MAX_RPC_MSG_SIZE: usize = 1 << 30` in `rpc.rs`; consumer `TcpRpcBackend::recv` and `RpcAgent::recv_response` (both same file, both production paths) |
+//! | REQ-3 (`RpcRequest` / `RpcResponse` framing) | SHIPPED | `struct RpcRequest` / `struct RpcResponse` + `serialize` / `deserialize` in `rpc.rs`; consumer `pub fn rpc_sync` and `pub fn handle_request` (same file) |
+//! | REQ-4 (`TcpRpcBackend` star-topology wrapper) | SHIPPED | `pub struct TcpRpcBackend` in `rpc.rs` translates `NoConnection` strings into typed `RpcError`; consumer `pub use rpc::TcpRpcBackend` in `lib.rs` |
+//! | REQ-5 (`RpcAgent` struct with registry / id / buffer mutexes) | SHIPPED | `pub struct RpcAgent` + `pub fn new` in `rpc.rs` mirror `rpc.api.RpcAgent`; consumer `pub use rpc::RpcAgent` in `lib.rs` |
+//! | REQ-6 (`register` for typed handlers) | SHIPPED | `pub fn register<F>` in `rpc.rs`; consumer `pub fn handle_request` (same file) via `self.lookup`, plus `lib.rs` re-export |
+//! | REQ-7 (`rpc_sync` with out-of-order buffering) | SHIPPED | `pub fn rpc_sync` + `fn recv_response` + `fn process_response` in `rpc.rs` mirror `torch.distributed.rpc.rpc_sync` in `torch/distributed/rpc/api.py`; consumer `pub fn rpc_async` (same file) AND `lib.rs` re-export of `RpcAgent` |
+//! | REQ-8 (`rpc_async` thread-spawn) | SHIPPED | `pub fn rpc_async` in `rpc.rs` mirrors `torch.distributed.rpc.rpc_async` in `torch/distributed/rpc/api.py`; consumer via `lib.rs` re-export of `RpcAgent` |
+//! | REQ-9 (`handle_request` server-side dispatch) | SHIPPED | `pub fn handle_request` in `rpc.rs`; consumer invokes `self.lookup` + `Backend::send` directly; reachable via `lib.rs` re-export of `RpcAgent` |
+//! | REQ-10 (accessors `rank` / `world_size`) | SHIPPED | `pub fn rank` and `pub fn world_size` on `TcpRpcBackend` and on `RpcAgent` in `rpc.rs`; consumer via `lib.rs` re-exports of both types |
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};

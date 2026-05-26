@@ -7,6 +7,28 @@
 //!
 //! This reduces per-rank memory from O(params) to O(params / world_size)
 //! at the cost of additional communication during forward and backward.
+//!
+//! ## REQ status (per `.design/ferrotorch-distributed/fsdp.md`)
+//!
+//! Full evidence rows (impl + non-test production consumer + upstream
+//! cites) live in the design doc; this synopsis is a one-line summary per
+//! REQ.
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 (`ShardingStrategy` enum) | SHIPPED | `pub enum ShardingStrategy` in `fsdp.rs` mirrors `ShardingStrategy(Enum)` in `torch/distributed/fsdp/api.py`; consumer `pub fn new_with_strategy` (same file) and `lib.rs` re-export |
+//! | REQ-2 (`FSDP<M, T>` struct) | SHIPPED | `pub struct FSDP` in `fsdp.rs` mirrors `class FullyShardedDataParallel` in `torch/distributed/fsdp/fully_sharded_data_parallel.py`; consumer `pub use fsdp::FSDP` in `lib.rs` |
+//! | REQ-3 (`new` + `new_with_strategy` constructors) | SHIPPED | `pub fn new` + `pub fn new_with_strategy` in `fsdp.rs`; consumer `new` invokes `new_with_strategy` (same file) plus `lib.rs` re-export |
+//! | REQ-4 (`FullShard` ZeRO-3 strategy) | SHIPPED | `ShardingStrategy::FullShard` arm of `new_with_strategy` in `fsdp.rs`; consumer `pub fn new` default path (same file) |
+//! | REQ-5 (`ShardGradOp` ZeRO-2 strategy + `broadcast_updated_params`) | SHIPPED | `ShardingStrategy::ShardGradOp` arms + `pub fn broadcast_updated_params` in `fsdp.rs`; consumer of `crate::collective::all_gather` for param re-sync |
+//! | REQ-6 (`NoShard` DDP-equivalent strategy) | SHIPPED | `ShardingStrategy::NoShard` arms across `new_with_strategy` / `forward` / `sync_gradients` in `fsdp.rs`; consumer of `crate::collective::allreduce` on the NoShard path |
+//! | REQ-7 (`HybridShard` intra-/inter-node strategy) | SHIPPED | `ShardingStrategy::HybridShard` arms in `fsdp.rs` build `Arc<SubBackend>` pair; consumer of `crate::backend::SubBackend::new` and `crate::collective::{reduce_scatter, allreduce}` |
+//! | REQ-8 (`forward` all-gather + run inner) | SHIPPED | `pub fn forward` in `fsdp.rs`; consumer of `crate::collective::all_gather` (FullShard / HybridShard); surfaced via `lib.rs` re-export |
+//! | REQ-9 (`prefetch_forward_params` + `has_pending_prefetch`) | SHIPPED | `pub fn prefetch_forward_params` + `pub fn has_pending_prefetch` in `fsdp.rs`; consumer of `crate::async_collective::async_all_gather`; `forward` joins via `handle.wait()?` (same file) |
+//! | REQ-10 (`sync_gradients` reduce-scatter / allreduce) | SHIPPED | `pub fn sync_gradients` in `fsdp.rs`; consumer of `crate::collective::{reduce_scatter, allreduce}`; surfaced via `lib.rs` re-export |
+//! | REQ-11 (`broadcast_updated_params` for ZeRO-2) | SHIPPED | `pub fn broadcast_updated_params` in `fsdp.rs`; consumer of `crate::collective::all_gather`; surfaced via `lib.rs` re-export |
+//! | REQ-12 (`update_shards` flat-buffer optimizer hook) | SHIPPED | `pub fn update_shards` in `fsdp.rs`; consumer via `lib.rs` re-export for downstream optimizers that produce flat parameter buffers |
+//! | REQ-13 (accessors) | SHIPPED | `pub fn strategy` / `module` / `module_mut` / `into_inner` / `backend` in `fsdp.rs`; consumer via `lib.rs` re-export — the user-facing accessor surface |
 
 use std::sync::Arc;
 

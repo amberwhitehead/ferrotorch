@@ -40,6 +40,25 @@
 //!      here, matching PyTorch SyncBatchNorm semantics.)
 //!
 //! Mirrors `torch.nn.SyncBatchNorm`. CL-392.
+//!
+//! ## REQ status (per `.design/ferrotorch-distributed/sync_batch_norm.md`)
+//!
+//! Full evidence rows (impl + non-test production consumer + upstream
+//! cites) live in the design doc; this synopsis is a one-line summary per
+//! REQ.
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 (`SyncBatchNorm2d<T>` struct) | SHIPPED | `pub struct SyncBatchNorm2d` (with `#[non_exhaustive]`) in `sync_batch_norm.rs` mirrors `class SyncBatchNorm(_BatchNorm)` in `torch/nn/modules/batchnorm.py`; consumer `pub use sync_batch_norm::SyncBatchNorm2d` in `lib.rs` |
+//! | REQ-2 (`new` constructor) | SHIPPED | `pub fn new` in `sync_batch_norm.rs` mirrors `SyncBatchNorm(num_features, eps, momentum, affine, ...)` in `torch/nn/modules/batchnorm.py`; consumer `lib.rs` re-export — `new` is the constructor |
+//! | REQ-3 (`with_backend` builder) | SHIPPED | `pub fn with_backend` in `sync_batch_norm.rs`; consumer `lib.rs` re-export of `SyncBatchNorm2d` |
+//! | REQ-4 (running-stat accessors) | SHIPPED | `pub fn running_mean` / `running_var` / `num_batches_tracked` in `sync_batch_norm.rs`; consumer via `lib.rs` re-export — the user-facing read path for checkpointing |
+//! | REQ-5 (`impl Module<T>`) | SHIPPED | `impl Module<T> for SyncBatchNorm2d<T>` in `sync_batch_norm.rs`; consumer via `lib.rs` re-export — the trait impl makes `SyncBatchNorm2d` drop-in wherever `impl Module<T>` is accepted |
+//! | REQ-6 (forward training with packed allreduce) | SHIPPED | training arm of `forward` in `sync_batch_norm.rs` mirrors `batch_norm_stats` in `torch/nn/modules/_functions.py`; consumer of `crate::collective::allreduce`; surfaced via `lib.rs` re-export |
+//! | REQ-7 (forward eval using running stats) | SHIPPED | eval arm of `forward` in `sync_batch_norm.rs`; consumer via `lib.rs` re-export of `SyncBatchNorm2d` |
+//! | REQ-8 (normalize + autograd hookup) | SHIPPED | normalize / affine / `Tensor::from_operation` arms of `forward` in `sync_batch_norm.rs`; consumer registers `SyncBatchNorm2dBackward` on the autograd graph; surfaced via `lib.rs` re-export |
+//! | REQ-9 (`SyncBatchNorm2dBackward` `GradFn`) | SHIPPED | `struct SyncBatchNorm2dBackward<T>` + `impl GradFn<T>` in `sync_batch_norm.rs` mirror `class SyncBatchNorm(Function)` in `torch/nn/modules/_functions.py`; consumer `forward` (same file) registers it; `ferrotorch_core` autograd engine is the runtime consumer |
+//! | REQ-10 (shape / channel / CUDA validation) | SHIPPED | top-of-`forward` and top-of-`SyncBatchNorm2dBackward::backward` validation arms in `sync_batch_norm.rs`; consumer via `lib.rs` re-export of `SyncBatchNorm2d` |
 
 use std::sync::{Arc, Mutex};
 

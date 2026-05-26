@@ -12,6 +12,27 @@
 //! and writes to disk without blocking the training loop. Call
 //! [`save_async`](AsyncCheckpointer::save_async) to start a checkpoint, and
 //! [`CheckpointFuture::wait`] when you need to ensure the write completed.
+//!
+//! ## REQ status (per `.design/ferrotorch-distributed/checkpoint.md`)
+//!
+//! Full evidence rows (impl + non-test production consumer + upstream
+//! cites) live in the design doc; this synopsis is a one-line summary per
+//! REQ.
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 (`DistCheckpointError` + `From` bridges) | SHIPPED | `pub enum DistCheckpointError` + `impl From<DistCheckpointError> for FerrotorchError` + `impl From<std::io::Error> for DistCheckpointError` in `checkpoint.rs` mirror `class CheckpointException` in `torch/distributed/checkpoint/api.py`; consumer `pub use checkpoint::{...DistCheckpointError...}` in `lib.rs` |
+//! | REQ-2 (`TensorShardSpec`) | SHIPPED | `pub struct TensorShardSpec` in `checkpoint.rs`; consumer field of `ShardMetadata::tensor_specs` plus `lib.rs` re-export |
+//! | REQ-3 (`ShardMetadata`) | SHIPPED | `pub struct ShardMetadata` in `checkpoint.rs`; consumer of `save_distributed` / `load_distributed` / `reshard` / `flat_shard_metadata` / `AsyncCheckpointer` plus `lib.rs` re-export |
+//! | REQ-4 (`DistributedCheckpoint` handle) | SHIPPED | `pub struct DistributedCheckpoint` in `checkpoint.rs`; consumer `pub use checkpoint::DistributedCheckpoint` in `lib.rs` |
+//! | REQ-5 (`save_distributed`) | SHIPPED | `pub fn save_distributed<T>` in `checkpoint.rs` mirrors `torch.distributed.checkpoint.save` in `torch/distributed/checkpoint/__init__.py`; consumer of `fn save_tensors_to_file` (same file) plus `lib.rs` re-export |
+//! | REQ-6 (`load_distributed`) | SHIPPED | `pub fn load_distributed<T>` in `checkpoint.rs` mirrors `torch.distributed.checkpoint.load` in `torch/distributed/checkpoint/__init__.py`; consumer of `pub fn reshard` on world-size mismatch (same file) plus `lib.rs` re-export |
+//! | REQ-7 (`reshard`) | SHIPPED | `pub fn reshard<T>` in `checkpoint.rs`; consumer `pub fn load_distributed` (same file) on world-size mismatch plus `lib.rs` re-export |
+//! | REQ-8 (SafeTensors interop helpers) | SHIPPED | `fn st_dtype` / `fn as_le_bytes` / `fn save_tensors_to_file` / `fn load_tensors_from_file` in `checkpoint.rs`; consumer `pub fn save_distributed` / `pub fn reshard` / `AsyncCheckpointer::save_async` (same file) |
+//! | REQ-9 (`concat_along_dim`) | SHIPPED | `fn concat_along_dim` in `checkpoint.rs`; consumer `pub fn reshard` (same file) |
+//! | REQ-10 (`slice_along_dim`) | SHIPPED | `fn slice_along_dim` in `checkpoint.rs`; consumer `pub fn reshard` (same file) |
+//! | REQ-11 (`AsyncCheckpointer` + `CheckpointFuture`) | SHIPPED | `pub struct CheckpointFuture` + `pub struct AsyncCheckpointer` + `pub fn save_async` / `wait` / `is_done` in `checkpoint.rs` mirror `torch.distributed.checkpoint.async_save` in `torch/distributed/checkpoint/__init__.py`; consumer `lib.rs` re-export of `AsyncCheckpointer` and `CheckpointFuture` |
+//! | REQ-12 (`flat_shard_metadata` convenience) | SHIPPED | `pub fn flat_shard_metadata` in `checkpoint.rs`; consumer `pub use checkpoint::flat_shard_metadata` in `lib.rs` |
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
