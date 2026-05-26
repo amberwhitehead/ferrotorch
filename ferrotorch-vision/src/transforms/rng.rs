@@ -17,10 +17,10 @@
 //!
 //! | REQ | Status | Evidence |
 //! |---|---|---|
-//! | REQ-1 | SHIPPED | `vision_manual_seed` at `rng.rs:31-37`; consumer: `pub use rng::vision_manual_seed;` at `mod.rs:32` and crate-root re-export at `lib.rs:115`. |
-//! | REQ-2 | SHIPPED | `random_f64` at `rng.rs:46-58`; consumer: imported by `random_horizontal_flip.rs:54`, `random_vertical_flip.rs:58`, `gaussian_noise.rs:49`, `random_rotation.rs:106`, `color_jitter.rs:83`, others. |
-//! | REQ-3 | SHIPPED | `random_usize` at `rng.rs:61-63`; consumer: `random_crop.rs:62,67`, `trivial_augment_wide.rs:117,349`. |
-//! | REQ-4 | SHIPPED | Three `AtomicU64` statics at `rng.rs:18-23`; consumer: every load/store in `vision_manual_seed` and `random_f64`. |
+//! | REQ-1 | SHIPPED | `pub fn vision_manual_seed` in `rng.rs` records seed plus epoch baseline; consumer: `pub use rng::vision_manual_seed;` in `mod.rs` and the crate-root re-export in `lib.rs`. |
+//! | REQ-2 | SHIPPED | `pub(crate) fn random_f64` in `rng.rs` with the splitmix64 mixing constants; consumer: imported as `super::rng::random_f64` in `random_horizontal_flip.rs`, `random_vertical_flip.rs`, `random_apply.rs`, `gaussian_noise.rs`, `random_resized_crop.rs`, `random_rotation.rs`, `random_gaussian_blur.rs`, `color_jitter.rs`, `elastic_transform.rs`. |
+//! | REQ-3 | SHIPPED | `pub(crate) fn random_usize` in `rng.rs`; consumer: imported as `super::rng::random_usize` in `random_crop.rs` (top-left corner sampling) and `trivial_augment_wide.rs` (magnitude-bin and op-index sampling). |
+//! | REQ-4 | SHIPPED | Three `static AtomicU64` declarations (`VISION_SEED`, `VISION_COUNTER`, `VISION_EPOCH_BASE`) in `rng.rs`; consumer: every load/store inside `vision_manual_seed` and `random_f64`. |
 
 use std::sync::atomic::{AtomicU64, Ordering};
 

@@ -2,10 +2,10 @@
 //!
 //! | REQ | Status | Evidence |
 //! |---|---|---|
-//! | REQ-1 | SHIPPED | `pub struct VisionNormalize<T: Float>` at `vision_normalize.rs:18-20`; consumer: `pub use` at `mod.rs:35` and crate-root re-export at `lib.rs:115`. |
-//! | REQ-2 | SHIPPED | `VisionNormalize::new` at `vision_normalize.rs:30-34`; consumer: `lib.rs:115` re-export. |
-//! | REQ-3 | SHIPPED | `VisionNormalize::imagenet` at `vision_normalize.rs:46-49`; consumer: `lib.rs:115` re-export; this is the canonical ImageNet entry point. |
-//! | REQ-4 | SHIPPED | `impl Transform<T>` at `vision_normalize.rs:52-56`; consumer: any `Box<dyn Transform<T>>` slot. |
+//! | REQ-1 | SHIPPED | `pub struct VisionNormalize<T: Float>` wrapping `inner: Normalize<T>` in `vision_normalize.rs`, mirroring `torchvision/transforms/v2/_misc.py:142` `class Normalize(Transform)`; consumer: `pub use vision_normalize::VisionNormalize;` in `mod.rs` and `VisionNormalize` in the crate-root re-export in `lib.rs`. |
+//! | REQ-2 | SHIPPED | `pub fn VisionNormalize::new(mean: [f64; 3], std: [f64; 3]) -> FerrotorchResult<Self>` constructor in `vision_normalize.rs`; consumer: registered in `tests/conformance/_surface_inventory.toml` as `ferrotorch_vision::VisionNormalize::new`; reachable through the crate-root re-export. |
+//! | REQ-3 | SHIPPED | `pub fn VisionNormalize::imagenet() -> Self` convenience constructor reading `IMAGENET_MEAN` and `IMAGENET_STD` in `vision_normalize.rs`; consumer: registered in `tests/conformance/_surface_inventory.toml` as `ferrotorch_vision::VisionNormalize::imagenet`; the canonical entry point downstream pretrained-classifier preprocessing pipelines invoke. |
+//! | REQ-4 | SHIPPED | `impl<T: Float> Transform<T> for VisionNormalize<T>` delegating to `self.inner.apply(input)` in `vision_normalize.rs`; consumer: any `Box<dyn Transform<T>>` slot — typically the final stage of an ImageNet `Compose` pipeline. |
 
 use ferrotorch_core::{FerrotorchResult, Float, Tensor};
 use ferrotorch_data::{Normalize, Transform};

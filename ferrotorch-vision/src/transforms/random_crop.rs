@@ -4,11 +4,11 @@
 //!
 //! | REQ | Status | Evidence |
 //! |---|---|---|
-//! | REQ-1 | SHIPPED | `pub struct RandomCrop<T: Float>` at `random_crop.rs:13-17`; consumer: `pub use` at `mod.rs:25`. |
-//! | REQ-2 | SHIPPED | `RandomCrop::new` at `random_crop.rs:20-26`; consumer: `mod.rs:25` re-export. |
-//! | REQ-3 | SHIPPED | `RandomCrop::square` at `random_crop.rs:29-31`; consumer: `mod.rs:25` re-export. |
-//! | REQ-4 | SHIPPED | `impl Transform<T>` at `random_crop.rs:34-87`; consumer: any `Box<dyn Transform<T>>` slot. |
-//! | REQ-5 | NOT-STARTED | blocker #1513 — padding/pad_if_needed/fill/padding_mode not implemented. |
+//! | REQ-1 | SHIPPED | `pub struct RandomCrop<T: Float>` with `crop_h: usize`, `crop_w: usize`, and `_marker: PhantomData<T>` in `random_crop.rs`, mirroring `torchvision/transforms/v2/_geometry.py:759` `class RandomCrop(Transform)`; consumer: `pub use random_crop::RandomCrop;` in `mod.rs`. |
+//! | REQ-2 | SHIPPED | `pub fn RandomCrop::new(crop_h: usize, crop_w: usize) -> Self` constructor in `random_crop.rs`; consumer: reachable through the `mod.rs` re-export. |
+//! | REQ-3 | SHIPPED | `pub fn RandomCrop::square(size: usize) -> Self` convenience constructor in `random_crop.rs`; consumer: reachable through the `mod.rs` re-export — user code calls `RandomCrop::square(224)` for the canonical square-crop ergonomics. |
+//! | REQ-4 | SHIPPED | `impl<T: Float> Transform<T> for RandomCrop<T>` with shape, bounds, `random_usize`-sampled top-left corner, and region-copy in `random_crop.rs`; consumer: any `Box<dyn Transform<T>>` slot composes the type into `Compose<T>` pipelines via the `mod.rs` re-export. |
+//! | REQ-5 | NOT-STARTED | blocker #1513 — `padding`, `pad_if_needed`, `fill`, `padding_mode` parameters from `torchvision/transforms/v2/_geometry.py:759-913` are not implemented; ferrotorch returns `Err` when input is smaller than crop. |
 
 use super::rng::random_usize;
 use ferrotorch_core::{FerrotorchError, FerrotorchResult, Float, Tensor, TensorStorage};

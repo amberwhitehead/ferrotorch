@@ -4,10 +4,10 @@
 //!
 //! | REQ | Status | Evidence |
 //! |---|---|---|
-//! | REQ-1 | SHIPPED | `pub struct RandomHorizontalFlip<T: Float>` at `random_horizontal_flip.rs:11-14`; consumer: `pub use` at `mod.rs:27`. |
-//! | REQ-2 | SHIPPED | `RandomHorizontalFlip::new` at `random_horizontal_flip.rs:22-32`; consumer: reachable via `mod.rs:27` re-export. |
-//! | REQ-3 | SHIPPED | `impl Default` at `random_horizontal_flip.rs:35-40`; consumer: `mod.rs:27` re-export. |
-//! | REQ-4 | SHIPPED | `impl Transform<T>` at `random_horizontal_flip.rs:42-73`; consumer: any `Box<dyn Transform<T>>` slot. |
+//! | REQ-1 | SHIPPED | `pub struct RandomHorizontalFlip<T: Float>` with `p: f64` and `_marker: PhantomData<T>` in `random_horizontal_flip.rs`, mirroring `torchvision/transforms/v2/_geometry.py:34` `class RandomHorizontalFlip(_RandomApplyTransform)`; consumer: `pub use random_horizontal_flip::RandomHorizontalFlip;` in `mod.rs`. |
+//! | REQ-2 | SHIPPED | `pub fn RandomHorizontalFlip::new(p: f64) -> FerrotorchResult<Self>` with `(0.0..=1.0).contains(&p)` validation in `random_horizontal_flip.rs`; consumer: reachable via the `mod.rs` re-export — user code calls `RandomHorizontalFlip::new(0.5)?`. |
+//! | REQ-3 | SHIPPED | `impl<T: Float> Default for RandomHorizontalFlip<T>` returning `Self::new(0.5).expect(...)` in `random_horizontal_flip.rs`; consumer: reachable via the `mod.rs` re-export; downstream code calls `RandomHorizontalFlip::default()` when no custom probability is needed. |
+//! | REQ-4 | SHIPPED | `impl<T: Float> Transform<T> for RandomHorizontalFlip<T>` with shape check, random gate, and column-reverse loop in `random_horizontal_flip.rs`; consumer: any `Box<dyn Transform<T>>` slot (composes into `Compose<T>` or `RandomApply<T>` pipelines) via the `mod.rs` re-export. |
 
 use super::rng::random_f64;
 use ferrotorch_core::{FerrotorchError, FerrotorchResult, Float, Tensor, TensorStorage};

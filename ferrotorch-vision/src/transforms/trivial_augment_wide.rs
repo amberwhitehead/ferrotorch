@@ -20,14 +20,14 @@
 //!
 //! | REQ | Status | Evidence |
 //! |---|---|---|
-//! | REQ-1 | SHIPPED | `pub struct TrivialAugmentWide<T: Float>` at `trivial_augment_wide.rs:31-36`; consumer: `pub use` at `mod.rs:34`. |
-//! | REQ-2 | SHIPPED | `TrivialAugmentWide::new` at `trivial_augment_wide.rs:54-64`; consumer: `mod.rs:34` re-export. |
-//! | REQ-3 | SHIPPED | `impl Default` at `trivial_augment_wide.rs:38-44`; consumer: `mod.rs:34` re-export. |
-//! | REQ-4 | SHIPPED | `enum Op` at `trivial_augment_wide.rs:74-86` and `Op::ALL` at `trivial_augment_wide.rs:88-102`; consumer: `apply` reads `Op::ALL[random_usize(Op::ALL.len())]` at `trivial_augment_wide.rs:349-350`. |
-//! | REQ-5 | SHIPPED | `apply_op` at `trivial_augment_wide.rs:107-304`; consumer: `apply` calls it at `trivial_augment_wide.rs:353`. |
-//! | REQ-6 | SHIPPED | `box_blur_3x3` at `trivial_augment_wide.rs:307-327`; consumer: `apply_op` Sharpness arm at `trivial_augment_wide.rs:159`. |
-//! | REQ-7 | SHIPPED | `impl Transform<T>` at `trivial_augment_wide.rs:329-356`; consumer: any `Box<dyn Transform<T>>` slot. |
-//! | REQ-8 | NOT-STARTED | blocker #1523 — ShearX/ShearY/Rotate/Color ops not implemented. |
+//! | REQ-1 | SHIPPED | `pub struct TrivialAugmentWide<T: Float>` with `num_magnitude_bins: usize` and `_marker: PhantomData<T>` in `trivial_augment_wide.rs`, mirroring `torchvision/transforms/v2/_auto_augment.py:438` `class TrivialAugmentWide`; consumer: `pub use trivial_augment_wide::TrivialAugmentWide;` in `mod.rs`. |
+//! | REQ-2 | SHIPPED | `pub fn TrivialAugmentWide::new(num_magnitude_bins: usize) -> FerrotorchResult<Self>` constructor in `trivial_augment_wide.rs`; consumer: reachable through the `mod.rs` re-export. |
+//! | REQ-3 | SHIPPED | `impl<T: Float> Default for TrivialAugmentWide<T>` returning `Self::new(31)` in `trivial_augment_wide.rs`; consumer: reachable through the `pub use` re-export; called as `TrivialAugmentWide::default()` in config-driven augmentation pipelines. |
+//! | REQ-4 | SHIPPED | `enum Op { Identity, ..., TranslateY }` and `Op::ALL: &'static [Op]` in `trivial_augment_wide.rs`; consumer: the dispatcher matches every `Op` variant, and the impl reads `Op::ALL[random_usize(Op::ALL.len())]` to pick the active op. |
+//! | REQ-5 | SHIPPED | `fn apply_op<T: Float>(data, h, w, c, op, num_bins) -> FerrotorchResult<Vec<T>>` dispatcher in `trivial_augment_wide.rs`; consumer: the impl in the same file calls `apply_op(data, h, w, c, op, self.num_magnitude_bins)?`. |
+//! | REQ-6 | SHIPPED | `fn box_blur_3x3(data, h, w) -> Vec<f64>` helper in `trivial_augment_wide.rs`; consumer: the dispatcher calls `box_blur_3x3(&ch_slice, h, w)` inside the `Op::Sharpness` arm. |
+//! | REQ-7 | SHIPPED | `impl<T: Float> Transform<T> for TrivialAugmentWide<T>` in `trivial_augment_wide.rs`; consumer: any `Box<dyn Transform<T>>` slot — composes into augmentation `Compose` pipelines via the `mod.rs` re-export. |
+//! | REQ-8 | NOT-STARTED | blocker #1523 — `ShearX`, `ShearY`, `Rotate`, and `Color` ops from `torchvision/transforms/v2/_auto_augment.py` `_AUGMENTATION_SPACE` are absent; ferrotorch's `Op::ALL` has 11 entries vs upstream's 14. |
 
 use super::rng::random_usize;
 use ferrotorch_core::numeric_cast::cast;

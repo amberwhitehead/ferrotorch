@@ -3,11 +3,11 @@
 //!
 //! | REQ | Status | Evidence |
 //! |---|---|---|
-//! | REQ-1 | SHIPPED | `pub struct RandomResizedCrop<T: Float>` at `random_resized_crop.rs:15-23`; consumer: `pub use` at `mod.rs:28` and crate-root re-export at `lib.rs:114`. |
-//! | REQ-2 | SHIPPED | `RandomResizedCrop::new` at `random_resized_crop.rs:38-69`; consumer: `lib.rs:114` re-export. |
-//! | REQ-3 | SHIPPED | `nn_resize_channel` at `random_resized_crop.rs:74-89`; consumer: `apply` calls it at `random_resized_crop.rs:177`. |
-//! | REQ-4 | SHIPPED | `impl Transform<T>` at `random_resized_crop.rs:91-190`; consumer: any `Box<dyn Transform<T>>` slot. |
-//! | REQ-5 | NOT-STARTED | blocker #1520 — bilinear/bicubic interpolation + antialias not implemented. |
+//! | REQ-1 | SHIPPED | `pub struct RandomResizedCrop<T: Float>` with `height`, `width`, `scale_lo`, `scale_hi`, `ratio_lo`, `ratio_hi`, and `_marker: PhantomData<T>` in `random_resized_crop.rs`, mirroring `torchvision/transforms/v2/_geometry.py:197` `class RandomResizedCrop`; consumer: `pub use random_resized_crop::RandomResizedCrop;` in `mod.rs` and `RandomResizedCrop` in the crate-root re-export in `lib.rs`. |
+//! | REQ-2 | SHIPPED | `pub fn RandomResizedCrop::new(height, width, scale, ratio) -> FerrotorchResult<Self>` constructor with scale/ratio range checks in `random_resized_crop.rs`; consumer: reachable through the crate-root re-export in `lib.rs`. |
+//! | REQ-3 | SHIPPED | `pub(crate) fn nn_resize_channel<T: Float>(src, in_h, in_w, out_h, out_w, dst)` helper in `random_resized_crop.rs`; consumer: the impl in the same file calls `nn_resize_channel` within the per-channel resize loop. |
+//! | REQ-4 | SHIPPED | `impl<T: Float> Transform<T> for RandomResizedCrop<T>` with the 10-attempt sampling, center-crop fallback, and per-channel crop plus nn-resize in `random_resized_crop.rs`; consumer: any `Box<dyn Transform<T>>` slot — typically the first stage of an Inception/ResNet ImageNet `Compose` training pipeline. |
+//! | REQ-5 | NOT-STARTED | blocker #1520 — `interpolation` (BILINEAR/BICUBIC) and `antialias` parameters from `torchvision/transforms/v2/_geometry.py:197-315` are not implemented; ferrotorch is NEAREST-only. |
 
 use super::rng::random_f64;
 use ferrotorch_core::{FerrotorchError, FerrotorchResult, Float, Tensor, TensorStorage};

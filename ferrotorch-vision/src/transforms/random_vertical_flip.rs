@@ -3,10 +3,10 @@
 //!
 //! | REQ | Status | Evidence |
 //! |---|---|---|
-//! | REQ-1 | SHIPPED | `pub struct RandomVerticalFlip<T: Float>` at `random_vertical_flip.rs:11-14`; consumer: `pub use` at `mod.rs:30` and crate-root re-export at `lib.rs:114`. |
-//! | REQ-2 | SHIPPED | `RandomVerticalFlip::new` at `random_vertical_flip.rs:25-35`; consumer: `lib.rs:114` re-export. |
-//! | REQ-3 | SHIPPED | `impl Default` at `random_vertical_flip.rs:38-44`; consumer: `lib.rs:114` re-export. |
-//! | REQ-4 | SHIPPED | `impl Transform<T>` at `random_vertical_flip.rs:46-85`; consumer: any `Box<dyn Transform<T>>` slot. |
+//! | REQ-1 | SHIPPED | `pub struct RandomVerticalFlip<T: Float>` with `p: f64` and `_marker: PhantomData<T>` in `random_vertical_flip.rs`, mirroring `torchvision/transforms/v2/_geometry.py:52` `class RandomVerticalFlip`; consumer: `pub use random_vertical_flip::RandomVerticalFlip;` in `mod.rs` and `RandomVerticalFlip` in the crate-root re-export in `lib.rs`. |
+//! | REQ-2 | SHIPPED | `pub fn RandomVerticalFlip::new(p: f64) -> FerrotorchResult<Self>` with range check in `random_vertical_flip.rs`; consumer: reachable through the crate-root re-export in `lib.rs`. |
+//! | REQ-3 | SHIPPED | `impl<T: Float> Default for RandomVerticalFlip<T>` in `random_vertical_flip.rs`; consumer: called as `RandomVerticalFlip::default()` via the crate-root re-export in `lib.rs`. |
+//! | REQ-4 | SHIPPED | `impl<T: Float> Transform<T> for RandomVerticalFlip<T>` with shape check, h-equals-1 fast path, and per-channel row-reverse copy in `random_vertical_flip.rs`; consumer: any `Box<dyn Transform<T>>` slot (e.g. inside `Compose<T>`) accepts the type — reachable through the `lib.rs` re-export. |
 
 use super::rng::random_f64;
 use ferrotorch_core::{FerrotorchError, FerrotorchResult, Float, Tensor, TensorStorage};

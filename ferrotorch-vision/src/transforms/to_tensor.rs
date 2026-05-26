@@ -2,10 +2,10 @@
 //!
 //! | REQ | Status | Evidence |
 //! |---|---|---|
-//! | REQ-1 | SHIPPED | `pub struct VisionToTensor<T: Float>` at `to_tensor.rs:14-16`; consumer: `pub use` at `mod.rs:33` and crate-root re-export at `lib.rs:115`. |
-//! | REQ-2 | SHIPPED | `VisionToTensor::new` at `to_tensor.rs:20-24` and `impl Default` at `to_tensor.rs:27-31`; consumer: `lib.rs:115` re-export. |
-//! | REQ-3 | SHIPPED | `impl Transform<T>` at `to_tensor.rs:33-67`; consumer: any `Box<dyn Transform<T>>` slot. |
-//! | REQ-4 | SHIPPED | `cast::<f64, T>(255.0)?` + divide at `to_tensor.rs:49-59`; consumer: REQ-3 invokes it on every `apply` call. |
+//! | REQ-1 | SHIPPED | `pub struct VisionToTensor<T: Float>` carrying only `_marker: PhantomData<T>` in `to_tensor.rs`, mirroring the v1 `torchvision.transforms.ToTensor` parameterless class; consumer: `pub use to_tensor::VisionToTensor;` in `mod.rs` and `VisionToTensor` in the crate-root re-export in `lib.rs`. |
+//! | REQ-2 | SHIPPED | `pub fn VisionToTensor::new() -> Self` constructor and `impl<T: Float> Default for VisionToTensor<T>` in `to_tensor.rs`; consumer: registered in the conformance surface inventory at `tests/conformance/_surface_inventory.toml` as `ferrotorch_vision::VisionToTensor::new`; reachable via the crate-root re-export. |
+//! | REQ-3 | SHIPPED | `impl<T: Float> Transform<T> for VisionToTensor<T>` with shape check, HWC-to-CHW index transpose, and divide-by-255 in `to_tensor.rs`; consumer: any `Box<dyn Transform<T>>` slot — typically inserted at the start of a `Compose` pipeline right after image decoding. |
+//! | REQ-4 | SHIPPED | `let scale: T = cast::<f64, T>(255.0)?;` followed by `data[src_idx] / scale` inside the impl in `to_tensor.rs`; consumer: same as REQ-3 — the divide runs unconditionally on every `apply` invocation through the crate-root `VisionToTensor` re-export. |
 
 use ferrotorch_core::numeric_cast::cast;
 use ferrotorch_core::{FerrotorchError, FerrotorchResult, Float, Tensor, TensorStorage};

@@ -3,13 +3,13 @@
 //!
 //! | REQ | Status | Evidence |
 //! |---|---|---|
-//! | REQ-1 | SHIPPED | `pub struct RandomApply<T: Float>` at `random_apply.rs:13-16`; consumer: `pub use` at `mod.rs:24` and crate-root re-export at `lib.rs:113`. |
-//! | REQ-2 | SHIPPED | `RandomApply::new` at `random_apply.rs:27-34`; consumer: `lib.rs:113` re-export. |
-//! | REQ-3 | SHIPPED | `impl Transform<T> for RandomApply<T>` at `random_apply.rs:37-48`; consumer: any `Box<dyn Transform<T>>` slot. |
-//! | REQ-4 | SHIPPED | `pub struct RandomChoice<T: Float>` at `random_apply.rs:55-57`; consumer: `pub use` at `mod.rs:24` and `lib.rs:113`. |
-//! | REQ-5 | SHIPPED | `RandomChoice::new` at `random_apply.rs:65-72`; consumer: `lib.rs:113` re-export. |
-//! | REQ-6 | SHIPPED | `impl Transform<T> for RandomChoice<T>` at `random_apply.rs:75-82`; consumer: any `Box<dyn Transform<T>>` slot. |
-//! | REQ-7 | NOT-STARTED | blocker #1517 — weighted `RandomChoice` via optional `p` vector not implemented. |
+//! | REQ-1 | SHIPPED | `pub struct RandomApply<T: Float>` with `transforms: Vec<Box<dyn Transform<T>>>` and `p: f64` in `random_apply.rs`, mirroring `torchvision/transforms/v2/_container.py:63` `class RandomApply`; consumer: `pub use random_apply::{RandomApply, RandomChoice};` in `mod.rs` and `RandomApply` in the crate-root re-export in `lib.rs`. |
+//! | REQ-2 | SHIPPED | `pub fn RandomApply::new(transforms, p) -> FerrotorchResult<Self>` constructor with range check in `random_apply.rs`; consumer: registered in `tests/conformance/_surface_inventory.toml` as `ferrotorch_vision::RandomApply::new`; reachable through the crate-root re-export. |
+//! | REQ-3 | SHIPPED | `impl<T: Float> Transform<T> for RandomApply<T>` with random gate and chained-apply loop in `random_apply.rs`; consumer: any `Box<dyn Transform<T>>` slot — composes into nested `Compose` / `RandomApply` pipelines. |
+//! | REQ-4 | SHIPPED | `pub struct RandomChoice<T: Float>` with `transforms: Vec<Box<dyn Transform<T>>>` in `random_apply.rs`, mirroring `torchvision/transforms/v2/_container.py:119` `class RandomChoice`; consumer: same `pub use` in `mod.rs` and `RandomChoice` in the crate-root re-export in `lib.rs`. |
+//! | REQ-5 | SHIPPED | `pub fn RandomChoice::new(transforms) -> FerrotorchResult<Self>` constructor with non-empty check in `random_apply.rs`; consumer: registered in `tests/conformance/_surface_inventory.toml` as `ferrotorch_vision::RandomChoice::new`; reachable through the crate-root re-export. |
+//! | REQ-6 | SHIPPED | `impl<T: Float> Transform<T> for RandomChoice<T>` with uniform index sampling and `.min(n - 1)` clamp in `random_apply.rs`; consumer: any `Box<dyn Transform<T>>` slot via the crate-root re-export. |
+//! | REQ-7 | NOT-STARTED | blocker #1517 — optional `p: list[float]` weight vector for `RandomChoice` from `torchvision/transforms/v2/_container.py:138-141` is not implemented; ferrotorch's `RandomChoice` is uniform-only. |
 
 use super::rng::random_f64;
 use ferrotorch_core::{FerrotorchError, FerrotorchResult, Float, Tensor};

@@ -2,10 +2,10 @@
 //!
 //! | REQ | Status | Evidence |
 //! |---|---|---|
-//! | REQ-1 | SHIPPED | `pub struct CenterCrop<T: Float>` at `center_crop.rs:9-13`; consumer: `pub use` at `mod.rs:19` and crate-root re-export at `lib.rs:113`. |
-//! | REQ-2 | SHIPPED | `CenterCrop::new` at `center_crop.rs:17-23`; consumer: `lib.rs:113` re-export. |
-//! | REQ-3 | SHIPPED | `impl Transform<T>` at `center_crop.rs:26-69`; consumer: any `Box<dyn Transform<T>>` slot. |
-//! | REQ-4 | NOT-STARTED | blocker #1515 — pad-with-zeros when input smaller than crop not implemented. |
+//! | REQ-1 | SHIPPED | `pub struct CenterCrop<T: Float>` with `height: usize`, `width: usize`, and `_marker: PhantomData<T>` in `center_crop.rs`, mirroring `torchvision/transforms/v2/_geometry.py:171` `class CenterCrop(Transform)`; consumer: `pub use center_crop::CenterCrop;` in `mod.rs` and `CenterCrop` in the crate-root re-export in `lib.rs`. |
+//! | REQ-2 | SHIPPED | `pub fn CenterCrop::new(height: usize, width: usize) -> Self` constructor in `center_crop.rs`; consumer: registered in the conformance surface inventory at `tests/conformance/_surface_inventory.toml` as `ferrotorch_vision::CenterCrop::new`; reachable via the crate-root re-export. |
+//! | REQ-3 | SHIPPED | `impl<T: Float> Transform<T> for CenterCrop<T>` with shape, bounds, center-offset, and row-slice copy in `center_crop.rs`; consumer: any `Box<dyn Transform<T>>` slot accepts the type — the `lib.rs` re-export is the production-facing handle. |
+//! | REQ-4 | NOT-STARTED | blocker #1515 — auto-pad-with-zeros behavior from `torchvision/transforms/v2/_geometry.py:180-181` is not implemented; ferrotorch errors when input is smaller than crop. |
 
 use ferrotorch_core::{FerrotorchError, FerrotorchResult, Float, Tensor, TensorStorage};
 use ferrotorch_data::Transform;

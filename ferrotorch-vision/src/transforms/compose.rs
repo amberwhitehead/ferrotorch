@@ -4,10 +4,10 @@
 //!
 //! | REQ | Status | Evidence |
 //! |---|---|---|
-//! | REQ-1 | SHIPPED | `pub struct Compose<T: Float>` at `compose.rs:9-11`; consumer: `pub use compose::Compose;` at `mod.rs:21`. |
-//! | REQ-2 | SHIPPED | `Compose::new` at `compose.rs:14-16`; consumer: user training drivers construct via `mod.rs:21` re-export. |
-//! | REQ-3 | SHIPPED | `Compose::len` / `Compose::is_empty` at `compose.rs:20-27`; consumer: `mod.rs:21` re-export. |
-//! | REQ-4 | SHIPPED | `impl Transform<T> for Compose<T>` at `compose.rs:30-38`; consumer: any `Box<dyn Transform<T>>` slot via `mod.rs:21`. |
+//! | REQ-1 | SHIPPED | `pub struct Compose<T: Float>` with `transforms: Vec<Box<dyn Transform<T>>>` in `compose.rs`, mirroring `torchvision/transforms/v2/_container.py:11` `class Compose`; consumer: `pub use compose::Compose;` in `mod.rs`. |
+//! | REQ-2 | SHIPPED | `pub fn Compose::new(transforms: Vec<Box<dyn Transform<T>>>) -> Self` constructor in `compose.rs`; consumer: end-user training-driver code constructs `Compose::new(vec![Box::new(Resize::new(...)), Box::new(VisionNormalize::imagenet())])` via the `mod.rs` re-export. |
+//! | REQ-3 | SHIPPED | `pub fn Compose::len` and `pub fn Compose::is_empty` accessors in `compose.rs`; consumer: reachable through the `pub use Compose` re-export in `mod.rs` for downstream pipeline-introspection code. |
+//! | REQ-4 | SHIPPED | `impl<T: Float> Transform<T> for Compose<T>` with the `t.apply(x)?` for-loop in `compose.rs`; consumer: any `Box<dyn Transform<T>>` slot (nested `Compose`, `RandomApply::new`, data-loader transform fields) accepts the type via the `mod.rs` re-export. |
 
 use ferrotorch_core::{FerrotorchResult, Float, Tensor};
 use ferrotorch_data::Transform;

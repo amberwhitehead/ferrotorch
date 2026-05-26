@@ -3,11 +3,11 @@
 //!
 //! | REQ | Status | Evidence |
 //! |---|---|---|
-//! | REQ-1 | SHIPPED | `pub struct RandomRotation<T: Float>` at `random_rotation.rs:14-17`; consumer: `pub use` at `mod.rs:29` and crate-root re-export at `lib.rs:114`. |
-//! | REQ-2 | SHIPPED | `RandomRotation::new` at `random_rotation.rs:28-38`; consumer: `lib.rs:114` re-export. |
-//! | REQ-3 | SHIPPED | `impl Transform<T>` at `random_rotation.rs:85-135`; consumer: any `Box<dyn Transform<T>>` slot. |
-//! | REQ-4 | SHIPPED | `bilinear_sample` at `random_rotation.rs:43-83`; consumer: `apply` calls it at `random_rotation.rs:127`. |
-//! | REQ-5 | NOT-STARTED | blocker #1518 — interpolation/expand/center/fill not implemented. |
+//! | REQ-1 | SHIPPED | `pub struct RandomRotation<T: Float>` with `degrees: f64` and `_marker: PhantomData<T>` in `random_rotation.rs`, mirroring `torchvision/transforms/v2/_geometry.py:560` `class RandomRotation`; consumer: `pub use random_rotation::RandomRotation;` in `mod.rs` and `RandomRotation` in the crate-root re-export in `lib.rs`. |
+//! | REQ-2 | SHIPPED | `pub fn RandomRotation::new(degrees: f64) -> FerrotorchResult<Self>` with `degrees >= 0` check in `random_rotation.rs`; consumer: reachable through the crate-root re-export in `lib.rs`. |
+//! | REQ-3 | SHIPPED | `impl<T: Float> Transform<T> for RandomRotation<T>` with shape check, zero-shortcut, and per-pixel inverse-rotation plus bilinear sample in `random_rotation.rs`; consumer: any `Box<dyn Transform<T>>` slot — composes into augmentation `Compose` pipelines. |
+//! | REQ-4 | SHIPPED | `fn bilinear_sample<T: Float>(data, h, w, y, x) -> FerrotorchResult<T>` helper in `random_rotation.rs`; consumer: the impl in the same file calls `bilinear_sample(ch_data, h, w, sy, sx)?` inside the per-output-pixel loop. |
+//! | REQ-5 | NOT-STARTED | blocker #1518 — `interpolation` (NEAREST/BILINEAR), `expand`, `center`, and `fill` parameters from `torchvision/transforms/v2/_geometry.py:560-638` are not implemented; ferrotorch is BILINEAR-only with no expand, no center override, and fill=0. |
 
 use super::rng::random_f64;
 use ferrotorch_core::numeric_cast::cast;

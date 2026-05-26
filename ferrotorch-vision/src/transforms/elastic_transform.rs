@@ -13,12 +13,12 @@
 //!
 //! | REQ | Status | Evidence |
 //! |---|---|---|
-//! | REQ-1 | SHIPPED | `pub struct ElasticTransform<T: Float>` at `elastic_transform.rs:25-29`; consumer: `pub use` at `mod.rs:22`. |
-//! | REQ-2 | SHIPPED | `ElasticTransform::new` at `elastic_transform.rs:38-54`; consumer: `mod.rs:22` re-export. |
-//! | REQ-3 | SHIPPED | `gaussian_kernel_1d` at `elastic_transform.rs:58-72` and `gaussian_filter_2d` at `elastic_transform.rs:76-112`; consumer: `apply` calls `gaussian_filter_2d` at `elastic_transform.rs:169-170`. |
-//! | REQ-4 | SHIPPED | `bilinear_sample` clamp-to-edge at `elastic_transform.rs:117-137`; consumer: `apply` calls it at `elastic_transform.rs:187`. |
-//! | REQ-5 | SHIPPED | `impl Transform<T>` at `elastic_transform.rs:139-195`; consumer: any `Box<dyn Transform<T>>` slot. |
-//! | REQ-6 | NOT-STARTED | blocker #1521 — interpolation/fill/tuple alpha-sigma not implemented. |
+//! | REQ-1 | SHIPPED | `pub struct ElasticTransform<T: Float>` with `alpha: f64`, `sigma: f64`, and `_marker: PhantomData<T>` in `elastic_transform.rs`, mirroring `torchvision/transforms/v2/_geometry.py:999` `class ElasticTransform`; consumer: `pub use elastic_transform::ElasticTransform;` in `mod.rs`. |
+//! | REQ-2 | SHIPPED | `pub fn ElasticTransform::new(alpha: f64, sigma: f64) -> FerrotorchResult<Self>` with `alpha >= 0` and `sigma > 0` validation in `elastic_transform.rs`; consumer: reachable through the `mod.rs` re-export. |
+//! | REQ-3 | SHIPPED | `fn gaussian_kernel_1d` and `fn gaussian_filter_2d` helpers in `elastic_transform.rs`; consumer: the impl in the same file calls `gaussian_filter_2d(&dy_field, h, w, self.sigma)` and the dx-field counterpart inside the displacement-smoothing path. |
+//! | REQ-4 | SHIPPED | `fn bilinear_sample(data, h, w, y, x) -> f64` with clamp-to-edge in `elastic_transform.rs`; consumer: the impl calls `bilinear_sample(&ch_data, h, w, src_y, src_x)` inside the per-output-pixel resampling loop. |
+//! | REQ-5 | SHIPPED | `impl<T: Float> Transform<T> for ElasticTransform<T>` with shape/dim checks, random-field generation, Gaussian smoothing, and per-channel bilinear sampling in `elastic_transform.rs`; consumer: any `Box<dyn Transform<T>>` slot — composes into augmentation `Compose` pipelines via the `mod.rs` re-export. |
+//! | REQ-6 | NOT-STARTED | blocker #1521 — `interpolation` (NEAREST/BILINEAR), `fill`, and tuple `alpha`/`sigma` parameters from `torchvision/transforms/v2/_geometry.py:999-1090` are not implemented; ferrotorch is BILINEAR-only, clamp-to-edge OOB, scalar alpha/sigma. |
 
 use super::rng::random_f64;
 use ferrotorch_core::numeric_cast::cast;

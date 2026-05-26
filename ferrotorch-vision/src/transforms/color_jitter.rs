@@ -3,13 +3,13 @@
 //!
 //! | REQ | Status | Evidence |
 //! |---|---|---|
-//! | REQ-1 | SHIPPED | `pub struct ColorJitter<T: Float>` at `color_jitter.rs:22-28`; consumer: `pub use` at `mod.rs:20` and crate-root re-export at `lib.rs:113`. |
-//! | REQ-2 | SHIPPED | `ColorJitter::new` at `color_jitter.rs:43-76`; consumer: `lib.rs:113` re-export. |
-//! | REQ-3 | SHIPPED | `shuffle_order` at `color_jitter.rs:80-88`; consumer: `apply` calls `shuffle_order(4)` at `color_jitter.rs:128`. |
-//! | REQ-4 | SHIPPED | `uniform_factor` at `color_jitter.rs:91-95`; consumer: `apply` calls it for each non-zero param at `color_jitter.rs:133, 141, 153`. |
-//! | REQ-5 | SHIPPED | `impl Transform<T>` at `color_jitter.rs:97-187`; consumer: any `Box<dyn Transform<T>>` slot. |
-//! | REQ-6 | SHIPPED | `rgb_to_hsv` at `color_jitter.rs:193-212` and `hsv_to_rgb` at `color_jitter.rs:214-234`; consumer: `apply` hue branch at `color_jitter.rs:165-167`. |
-//! | REQ-7 | NOT-STARTED | blocker #1522 — `(min, max)` tuple form not implemented. |
+//! | REQ-1 | SHIPPED | `pub struct ColorJitter<T: Float>` with `brightness: f64`, `contrast: f64`, `saturation: f64`, `hue: f64`, and `_marker: PhantomData<T>` in `color_jitter.rs`, mirroring `torchvision/transforms/v2/_color.py:72` `class ColorJitter`; consumer: `pub use color_jitter::ColorJitter;` in `mod.rs` and `ColorJitter` in the crate-root re-export in `lib.rs`. |
+//! | REQ-2 | SHIPPED | `pub fn ColorJitter::new(brightness, contrast, saturation, hue) -> FerrotorchResult<Self>` constructor with four range checks in `color_jitter.rs`; consumer: registered in `tests/conformance/_surface_inventory.toml` as `ferrotorch_vision::ColorJitter::new`; reachable through the crate-root re-export. |
+//! | REQ-3 | SHIPPED | `fn shuffle_order(n: usize) -> Vec<usize>` Fisher-Yates helper in `color_jitter.rs`; consumer: the impl calls `let order = shuffle_order(4);` before iterating the four jitter ops. |
+//! | REQ-4 | SHIPPED | `fn uniform_factor(v: f64) -> f64` helper in `color_jitter.rs`; consumer: the impl calls `uniform_factor(self.brightness)`, `uniform_factor(self.contrast)`, and `uniform_factor(self.saturation)` inside the per-op branches. |
+//! | REQ-5 | SHIPPED | `impl<T: Float> Transform<T> for ColorJitter<T>` in `color_jitter.rs`; consumer: any `Box<dyn Transform<T>>` slot — typically near the start of an augmentation `Compose` pipeline. The `lib.rs` re-export is the production-facing handle. |
+//! | REQ-6 | SHIPPED | `fn rgb_to_hsv(r, g, b) -> (f64, f64, f64)` and `fn hsv_to_rgb(h, s, v)` conversion helpers in `color_jitter.rs`; consumer: the impl calls `rgb_to_hsv` and `hsv_to_rgb` per pixel inside the hue branch. |
+//! | REQ-7 | NOT-STARTED | blocker #1522 — `(min, max)` tuple form for `brightness/contrast/saturation/hue` from `torchvision/transforms/v2/_color.py:100-122` (`_check_input`) is not supported; ferrotorch accepts only the scalar shorthand. |
 
 use super::rng::random_f64;
 use ferrotorch_core::numeric_cast::cast;

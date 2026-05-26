@@ -3,12 +3,12 @@
 //!
 //! | REQ | Status | Evidence |
 //! |---|---|---|
-//! | REQ-1 | SHIPPED | `pub struct RandomGaussianBlur<T: Float>` at `random_gaussian_blur.rs:15-20`; consumer: `pub use` at `mod.rs:26` and crate-root re-export at `lib.rs:114`. |
-//! | REQ-2 | SHIPPED | `RandomGaussianBlur::new` at `random_gaussian_blur.rs:31-55`; consumer: `lib.rs:114` re-export. |
-//! | REQ-3 | SHIPPED | `gaussian_kernel_1d` at `random_gaussian_blur.rs:59-75`; consumer: `apply` calls it at `random_gaussian_blur.rs:136`. |
-//! | REQ-4 | SHIPPED | `blur_rows` at `random_gaussian_blur.rs:78-96` and `blur_cols` at `random_gaussian_blur.rs:99-116`; consumer: `apply` chains them at `random_gaussian_blur.rs:148-149`. |
-//! | REQ-5 | SHIPPED | `impl Transform<T>` at `random_gaussian_blur.rs:118-159`; consumer: any `Box<dyn Transform<T>>` slot. |
-//! | REQ-6 | NOT-STARTED | blocker #1519 — reflection padding (instead of zero-padding) not implemented. |
+//! | REQ-1 | SHIPPED | `pub struct RandomGaussianBlur<T: Float>` with `kernel_size: usize`, `sigma_lo: f64`, `sigma_hi: f64`, and `_marker: PhantomData<T>` in `random_gaussian_blur.rs`, mirroring `torchvision/transforms/v2/_misc.py:177` `class GaussianBlur`; consumer: `pub use random_gaussian_blur::RandomGaussianBlur;` in `mod.rs` and `RandomGaussianBlur` in the crate-root re-export in `lib.rs`. |
+//! | REQ-2 | SHIPPED | `pub fn RandomGaussianBlur::new(kernel_size: usize, sigma: (f64, f64)) -> FerrotorchResult<Self>` constructor with odd-positive kernel and sigma-ordering checks in `random_gaussian_blur.rs`; consumer: registered in the conformance surface inventory at `tests/conformance/_surface_inventory.toml`; reachable through the crate-root re-export. |
+//! | REQ-3 | SHIPPED | `fn gaussian_kernel_1d(size: usize, sigma: f64) -> Vec<f64>` helper in `random_gaussian_blur.rs`; consumer: the impl in the same file calls `gaussian_kernel_1d(self.kernel_size, sigma)` inside the per-channel blur path. |
+//! | REQ-4 | SHIPPED | `fn blur_rows(data, h, w, kernel) -> Vec<f64>` and `fn blur_cols(...)` separable-convolution helpers in `random_gaussian_blur.rs`; consumer: the impl chains `blur_cols(blur_rows(...))` per channel. |
+//! | REQ-5 | SHIPPED | `impl<T: Float> Transform<T> for RandomGaussianBlur<T>` in `random_gaussian_blur.rs`; consumer: any `Box<dyn Transform<T>>` slot — composes into augmentation `Compose` pipelines via the `lib.rs` re-export. |
+//! | REQ-6 | NOT-STARTED | blocker #1519 — reflection-padding (upstream default `padding_mode='reflect'`) is not implemented; ferrotorch uses zero-padding, dimming border pixels. |
 
 use super::rng::random_f64;
 use ferrotorch_core::numeric_cast::cast;

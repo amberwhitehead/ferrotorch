@@ -8,11 +8,11 @@
 //!
 //! | REQ | Status | Evidence |
 //! |---|---|---|
-//! | REQ-1 | SHIPPED | `pub struct GaussianNoise<T: Float>` at `gaussian_noise.rs:17-21`; consumer: `pub use` at `mod.rs:23`. |
-//! | REQ-2 | SHIPPED | `GaussianNoise::new` at `gaussian_noise.rs:31-43`; consumer: `mod.rs:23` re-export. |
-//! | REQ-3 | SHIPPED | `impl Transform<T>` at `gaussian_noise.rs:55-83`; consumer: any `Box<dyn Transform<T>>` slot. |
-//! | REQ-4 | SHIPPED | `standard_normal_sample` at `gaussian_noise.rs:46-53`; consumer: `apply` calls it at `gaussian_noise.rs:77`. |
-//! | REQ-5 | NOT-STARTED | blocker #1516 — `clip` parameter not implemented. |
+//! | REQ-1 | SHIPPED | `pub struct GaussianNoise<T: Float>` with `mean: f64`, `std: f64`, and `_marker: PhantomData<T>` in `gaussian_noise.rs`, mirroring `torchvision/transforms/v2/_misc.py:217` `class GaussianNoise(Transform)`; consumer: `pub use gaussian_noise::GaussianNoise;` in `mod.rs`. |
+//! | REQ-2 | SHIPPED | `pub fn GaussianNoise::new(mean: f64, std: f64) -> FerrotorchResult<Self>` constructor with `std >= 0` validation in `gaussian_noise.rs`; consumer: reachable through the `mod.rs` re-export. |
+//! | REQ-3 | SHIPPED | `impl<T: Float> Transform<T> for GaussianNoise<T>` with shape check, degenerate-std shortcut, and per-element noise loop in `gaussian_noise.rs`; consumer: any `Box<dyn Transform<T>>` slot — typically inserted into a robustness-training `Compose` pipeline. |
+//! | REQ-4 | SHIPPED | `fn standard_normal_sample() -> f64` Box-Muller helper in `gaussian_noise.rs`; consumer: the impl in the same file calls `self.std * standard_normal_sample()` inside the per-element noise loop. |
+//! | REQ-5 | NOT-STARTED | blocker #1516 — the `clip: bool = True` parameter from `torchvision/transforms/v2/_misc.py:241-243` is not implemented; noisy outputs may exit the `[0, 1]` range. |
 
 use super::rng::random_f64;
 use ferrotorch_core::numeric_cast::cast;

@@ -2,9 +2,9 @@
 //!
 //! | REQ | Status | Evidence |
 //! |---|---|---|
-//! | REQ-1 | SHIPPED | 18 `pub mod` declarations at `mod.rs:1-17`; consumer: `pub mod transforms;` at `ferrotorch-vision/src/lib.rs:97`. |
-//! | REQ-2 | SHIPPED | Flat `pub use` re-exports at `mod.rs:19-35`; consumer: crate-root re-exports at `ferrotorch-vision/src/lib.rs:112-116`. |
-//! | REQ-3 | SHIPPED | `pub const IMAGENET_MEAN` at `mod.rs:38` and `IMAGENET_STD` at `mod.rs:41`; consumer: `VisionNormalize::imagenet` at `vision_normalize.rs:46-49` AND crate-root re-export at `lib.rs:113`. |
+//! | REQ-1 | SHIPPED | 17 `pub mod` declarations in `mod.rs` mirror the `torchvision.transforms.v2` flat namespace; consumer: `pub mod transforms;` in `lib.rs`. |
+//! | REQ-2 | SHIPPED | Flat `pub use` block in `mod.rs` re-exports `CenterCrop`, `ColorJitter`, `Compose`, `ElasticTransform`, `GaussianNoise`, `RandomApply`, `RandomChoice`, `RandomCrop`, `RandomGaussianBlur`, `RandomHorizontalFlip`, `RandomResizedCrop`, `RandomRotation`, `RandomVerticalFlip`, `Resize`, `VisionToTensor`, `TrivialAugmentWide`, `VisionNormalize`, and `vision_manual_seed`; consumer: crate-root `pub use transforms::{...}` block in `lib.rs`. |
+//! | REQ-3 | SHIPPED | `pub const IMAGENET_MEAN: [f64; 3]` and `pub const IMAGENET_STD: [f64; 3]` in `mod.rs`; consumer: `VisionNormalize::imagenet` in `vision_normalize.rs` reads both via `Self::new(IMAGENET_MEAN, IMAGENET_STD)`, and the crate-root re-export in `lib.rs` exposes both constants. |
 
 pub mod center_crop;
 pub mod color_jitter;

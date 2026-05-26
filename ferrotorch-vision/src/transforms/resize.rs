@@ -2,10 +2,10 @@
 //!
 //! | REQ | Status | Evidence |
 //! |---|---|---|
-//! | REQ-1 | SHIPPED | `pub struct Resize<T: Float>` at `resize.rs:9-13`; consumer: `pub use` at `mod.rs:31` and crate-root re-export at `lib.rs:114`. |
-//! | REQ-2 | SHIPPED | `Resize::new` at `resize.rs:17-23`; consumer: `lib.rs:114` re-export. |
-//! | REQ-3 | SHIPPED | `impl Transform<T>` at `resize.rs:26-62`; consumer: any `Box<dyn Transform<T>>` slot. |
-//! | REQ-4 | NOT-STARTED | blocker #1514 — interpolation/antialias/max_size/shortest-edge sizing not implemented. |
+//! | REQ-1 | SHIPPED | `pub struct Resize<T: Float>` with `height: usize`, `width: usize`, and `_marker: PhantomData<T>` in `resize.rs`, mirroring `torchvision/transforms/v2/_geometry.py:70` `class Resize(Transform)`; consumer: `pub use resize::Resize;` in `mod.rs` and `Resize` in the crate-root re-export in `lib.rs`. |
+//! | REQ-2 | SHIPPED | `pub fn Resize::new(height: usize, width: usize) -> Self` constructor in `resize.rs`; consumer: reachable through the crate-root re-export in `lib.rs`; the conformance surface inventory in `tests/conformance/_surface_inventory.toml` registers `ferrotorch_vision::Resize::new`. |
+//! | REQ-3 | SHIPPED | `impl<T: Float> Transform<T> for Resize<T>` with the floor-division nearest-neighbor loop in `resize.rs`; consumer: any `Box<dyn Transform<T>>` slot accepts the type via the `lib.rs` re-export. |
+//! | REQ-4 | NOT-STARTED | blocker #1514 — `interpolation` (BILINEAR/BICUBIC), `antialias`, `max_size`, and shortest-edge int-size handling from `torchvision/transforms/v2/_geometry.py:70-170` are not implemented; the impl is NEAREST-only with no antialias and no `max_size`. |
 
 use ferrotorch_core::{FerrotorchError, FerrotorchResult, Float, Tensor, TensorStorage};
 use ferrotorch_data::Transform;
