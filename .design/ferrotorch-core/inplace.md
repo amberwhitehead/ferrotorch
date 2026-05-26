@@ -116,7 +116,7 @@ REQ in the table below is therefore NOT-STARTED.
   divide with broadcasting. Per torch's `Tensor.div_(value, *,
   rounding_mode=None) -> Tensor` at `torch/_tensor_docs.py:1746` and
   `aten/src/ATen/native/BinaryOps.cpp:447 TORCH_IMPL_FUNC(div_out)`.
-  ferrotorch's `div_` at `inplace.rs:335` is shape-strict and carries no
+  ferrotorch's `pub fn div_ in inplace.rs` is shape-strict and carries no
   `rounding_mode` kwarg; the `"floor"` and `"trunc"` modes correspond to
   `floor_divide_` and `trunc_divide_` (themselves NOT-STARTED in
   `grad_fns/arithmetic.rs` per the arithmetic design doc's REQ-12 / #1197).
@@ -156,29 +156,26 @@ REQ in the table below is therefore NOT-STARTED.
 - [x] AC-1: Every in-place method enforces the two PyTorch-parity autograd
   invariants: (a) reject when `self.grad_fn().is_some()` (non-leaf graph
   node), and (b) reject when `self.requires_grad() && self.is_leaf()`
-  (requires-grad leaf). Covered by
-  `check_inplace_allowed(tensor, op_name)` at
-  `ferrotorch-core/src/inplace.rs:35-57` and exercised by tests
-  `test_add_scalar_rejects_requires_grad_leaf`,
-  `test_mul_scalar_rejects_requires_grad_leaf`,
-  `test_fill_rejects_requires_grad_leaf`,
-  `test_zero_rejects_requires_grad_leaf`,
-  `test_clamp_rejects_requires_grad_leaf` at
-  `ferrotorch-core/src/inplace.rs:454-631`.
+  (requires-grad leaf). Covered by `fn check_inplace_allowed in inplace.rs`
+  and exercised by tests
+  `fn test_add_scalar_rejects_requires_grad_leaf in inplace.rs`,
+  `fn test_mul_scalar_rejects_requires_grad_leaf in inplace.rs`,
+  `fn test_fill_rejects_requires_grad_leaf in inplace.rs`,
+  `fn test_zero_rejects_requires_grad_leaf in inplace.rs`,
+  `fn test_clamp_rejects_requires_grad_leaf in inplace.rs`.
 - [x] AC-2: `tensor.detach()` followed by an in-place op succeeds (detached
-  tensors are mutable). Covered by `test_detached_tensor_allows_inplace` at
-  `ferrotorch-core/src/inplace.rs:639-650`.
+  tensors are mutable). Covered by
+  `fn test_detached_tensor_allows_inplace in inplace.rs`.
 - [x] AC-3: In-place ops can be chained via the returned `&Self` (matching
-  torch's `Tensor&` chaining). Covered by `test_add_scalar_chaining` and
-  `test_mixed_inplace_chaining` at `ferrotorch-core/src/inplace.rs:443-450`
-  and `:657-678`.
+  torch's `Tensor&` chaining). Covered by
+  `fn test_add_scalar_chaining in inplace.rs` and
+  `fn test_mixed_inplace_chaining in inplace.rs`.
 - [x] AC-4: `add_scalar_` and `mul_scalar_` work on both `f32` and `f64`.
-  Covered by `test_inplace_ops_f64` at `ferrotorch-core/src/inplace.rs:685
-  -696`.
+  Covered by `fn test_inplace_ops_f64 in inplace.rs`.
 - [x] AC-5: `fill_` accepts scalar-shape (0-d) tensors. Covered by
-  `test_fill_scalar_tensor` at `ferrotorch-core/src/inplace.rs:523-529`.
+  `fn test_fill_scalar_tensor in inplace.rs`.
 - [x] AC-6: `zero_` accepts empty tensors. Covered by
-  `test_zero_empty_tensor` at `ferrotorch-core/src/inplace.rs:555-562`.
+  `fn test_zero_empty_tensor in inplace.rs`.
 - [x] AC-7: `clamp_(min, max)` returns an error when `min > max`. Covered
   by `test_clamp_invalid_range` at `ferrotorch-core/src/inplace.rs:617-624`.
 - [x] AC-8: `add_scaled_` same-shape `alpha != 1.0` path mutates `self` to
@@ -249,19 +246,19 @@ torch's `at::AutogradMeta`-driven check in
   1.0)`. PyTorch parity for `Tensor.add_(other, *, alpha=1)`. REQ-5
   NOT-STARTED — no non-test caller. Blocker #1209.
 
-- `add_scaled_(other, alpha)` (`:167`) — the load-bearing op. Three paths:
+- `pub fn add_scaled_ in inplace.rs` — the load-bearing op. Three paths:
   (1) same-shape, `alpha == 1.0`, both `is_cuda()`, `T == f32` → calls
   `gpu_backend().add_f32(self.gpu_handle()?, other.gpu_handle()?)` directly
-  and swaps the resulting GPU storage in via `unsafe update_storage`
-  (`:187`). This is the only GPU-resident fast path in the file. (2) same-
-  shape, `alpha == 1.0`, CPU or non-f32 → iterates `*a += b` on the
-  CPU-side data_vec (`:197-199`) and swaps via `unsafe update_data`. (3)
-  Anything else (broadcasting OR `alpha != 1`) → routes through
+  and swaps the resulting GPU storage in via `unsafe update_storage`. This
+  is the only GPU-resident fast path in the file. (2) same-shape,
+  `alpha == 1.0`, CPU or non-f32 → iterates `*a += b` on the CPU-side
+  data_vec and swaps via `unsafe update_data`. (3) Anything else
+  (broadcasting OR `alpha != 1`) → routes through
   `crate::grad_fns::arithmetic::add_scaled(self, other, alpha)` and swaps
   the resulting tensor's storage in via `into_storage_and_shape() +
-  unsafe update_storage` (`:236-241`). The third path explicitly validates
-  `result.shape() == self.shape()` (`:222-231`) — broadcasting may shape-
-  expand `other` to match `self`, but in-place ops cannot resize `self`.
+  unsafe update_storage`. The third path explicitly validates
+  `result.shape() == self.shape()` — broadcasting may shape-expand `other`
+  to match `self`, but in-place ops cannot resize `self`.
   REQ-6 NOT-STARTED — `tools/parity-sweep/runner/src/main.rs:495` is the
   only non-test caller, and the parity-sweep runner's dispatch table is
   structurally a test-side consumer per goal.md R-DEFER-1. Blocker #1210.
@@ -308,11 +305,11 @@ torch's `at::AutogradMeta`-driven check in
   caller (natural caller is gradient-clipping in `optim/utils.rs`).
   Blocker #1214.
 
-### Storage-mutation safety (`inplace.rs:1-25`)
+### Storage-mutation safety (see module `//!` doc-comment in `inplace.rs`)
 
 All in-place ops mutate storage through `unsafe { self.update_data(...) }`
 or `unsafe { self.update_storage(...) }`. Every `unsafe` block carries a
-`// SAFETY:` comment tying soundness back to the `check_inplace_allowed`
+`// SAFETY:` comment tying soundness back to the `fn check_inplace_allowed in inplace.rs`
 proof: the tensor is not part of the autograd graph (so no cached value is
 invalidated) and is not a `requires_grad` leaf (so no gradient tracking is
 silently corrupted). Single-threaded `&self` access satisfies the
@@ -344,22 +341,27 @@ None-bound gaps above. The audit JSON at
 20 tests covering forward correctness and autograd-guard rejection across
 the ten public ops:
 
-- `add_scalar_`: `test_add_scalar_basic` (`:420`), `test_add_scalar_negative`
-  (`:431`), `test_add_scalar_chaining` (`:443`),
-  `test_add_scalar_rejects_requires_grad_leaf` (`:454`).
-- `mul_scalar_`: `test_mul_scalar_basic` (`:468`), `test_mul_scalar_zero`
-  (`:479`), `test_mul_scalar_rejects_requires_grad_leaf` (`:494`).
-- `fill_`: `test_fill_basic` (`:505`), `test_fill_scalar_tensor` (`:523`),
-  `test_fill_rejects_requires_grad_leaf` (`:532`).
-- `zero_`: `test_zero_basic` (`:544`), `test_zero_empty_tensor` (`:555`),
-  `test_zero_rejects_requires_grad_leaf` (`:565`).
-- `clamp_`: `test_clamp_basic` (`:576`), `test_clamp_all_within_range`
-  (`:591`), `test_clamp_single_value_range` (`:602`),
-  `test_clamp_invalid_range` (`:617`),
-  `test_clamp_rejects_requires_grad_leaf` (`:627`).
-- Cross-op integration: `test_detached_tensor_allows_inplace` (`:639`) —
-  detached tensors are mutable; `test_mixed_inplace_chaining` (`:657`) —
-  add_scalar_ → mul_scalar_ → clamp_ chain; `test_inplace_ops_f64` (`:685`)
+- `add_scalar_`: `fn test_add_scalar_basic in inplace.rs`,
+  `fn test_add_scalar_negative in inplace.rs`,
+  `fn test_add_scalar_chaining in inplace.rs`,
+  `fn test_add_scalar_rejects_requires_grad_leaf in inplace.rs`.
+- `mul_scalar_`: `fn test_mul_scalar_basic in inplace.rs`,
+  `fn test_mul_scalar_zero in inplace.rs`,
+  `fn test_mul_scalar_rejects_requires_grad_leaf in inplace.rs`.
+- `fill_`: `fn test_fill_basic in inplace.rs`,
+  `fn test_fill_scalar_tensor in inplace.rs`,
+  `fn test_fill_rejects_requires_grad_leaf in inplace.rs`.
+- `zero_`: `fn test_zero_basic in inplace.rs`,
+  `fn test_zero_empty_tensor in inplace.rs`,
+  `fn test_zero_rejects_requires_grad_leaf in inplace.rs`.
+- `clamp_`: `fn test_clamp_basic in inplace.rs`,
+  `fn test_clamp_all_within_range in inplace.rs`,
+  `fn test_clamp_single_value_range in inplace.rs`,
+  `fn test_clamp_invalid_range in inplace.rs`,
+  `fn test_clamp_rejects_requires_grad_leaf in inplace.rs`.
+- Cross-op integration: `fn test_detached_tensor_allows_inplace in inplace.rs`
+  — detached tensors are mutable; `fn test_mixed_inplace_chaining in inplace.rs`
+  — add_scalar_ → mul_scalar_ → clamp_ chain; `fn test_inplace_ops_f64 in inplace.rs`
   — f64 dtype coverage.
 
 Note: there are NO unit tests in this file for `add_` / `add_scaled_` /
@@ -414,6 +416,6 @@ cargo test -p ferrotorch-core --lib inplace   # → 20 passed, 0 failed
 | REQ-6 (add_scaled_) | NOT-STARTED | open prereq blocker #1210. impl at `ferrotorch-core/src/inplace.rs:167` mirroring `aten/src/ATen/native/BinaryOps.cpp:437 add_stub(device_type(), *this, -alpha)` (with alpha-positive direction) and docstring `torch/_tensor_docs.py:379 add_(other, *, alpha=1) -> Tensor`; conformance sweep at `ferrotorch-core/tests/conformance_elementwise.rs` and parity-sweep `add` arm cover its behavior end-to-end (88/88 passed at seeds=8); the parity-sweep dispatch table at `tools/parity-sweep/runner/src/main.rs:495 a.add_scaled_(&b, alpha)` IS a non-test invocation but the parity-sweep runner is explicitly disqualified as a test-side consumer per the role spec; no other non-test consumer exists. |
 | REQ-7 (sub_) | NOT-STARTED | open prereq blocker #1211 + cross-references open #1192. impl at `ferrotorch-core/src/inplace.rs:248` mirrors only the `alpha=1, same-shape` slice of `aten/src/ATen/native/BinaryOps.cpp:1157 Tensor& sub_(Tensor& self, const Tensor& other, const Scalar& alpha)` and docstring `torch/_tensor_docs.py:5113 sub_(other, *, alpha=1) -> Tensor` — missing `alpha` kwarg, missing broadcasting, no `sub_scaled_` sibling. Parity-sweep `sub` arm fails 16/88 on `alpha != 1` samples (same root-cause as #1192). |
 | REQ-8 (mul_) | NOT-STARTED | open prereq blocker #1212. impl at `ferrotorch-core/src/inplace.rs:292` mirrors `aten/src/ATen/native/BinaryOps.cpp:441 TORCH_IMPL_FUNC(mul_out)` only on the same-shape path (shape-strict at lines 294-302) — torch's `mul_` inherits broadcasting from `mul_out` per docstring `torch/_tensor_docs.py:3441 mul_(value)`. No non-test production consumer. |
-| REQ-9 (div_) | NOT-STARTED | open prereq blocker #1213. impl at `ferrotorch-core/src/inplace.rs:335` mirrors `aten/src/ATen/native/BinaryOps.cpp:447 TORCH_IMPL_FUNC(div_out)` only on the same-shape path (shape-strict at lines 337-345); missing `rounding_mode` kwarg per docstring `torch/_tensor_docs.py:1746 div_(value, *, rounding_mode=None) -> Tensor`. No non-test production consumer. |
+| REQ-9 (div_) | NOT-STARTED | open prereq blocker #1213. impl: `pub fn div_ in inplace.rs` mirrors `aten/src/ATen/native/BinaryOps.cpp:447 TORCH_IMPL_FUNC(div_out)` only on the same-shape path (shape-strict early return); missing `rounding_mode` kwarg per docstring `torch/_tensor_docs.py:1746 div_(value, *, rounding_mode=None) -> Tensor`. No non-test production consumer. |
 | REQ-10 (clamp_) | NOT-STARTED | open prereq blocker #1214. impl at `ferrotorch-core/src/inplace.rs:385` mirrors only the both-bounds-scalar path of `aten/src/ATen/native/TensorCompare.cpp:831-854 TORCH_IMPL_FUNC(clamp_out)` and docstring `torch/_tensor_docs.py:1141 clamp_(min=None, max=None) -> Tensor` — missing Optional/None bound handling, missing NaN-fills-everything special case. No non-test production consumer (natural caller is gradient-clipping in `optim::utils`). |
 | REQ-11 (sub_scaled_) | SHIPPED | impl: `Tensor::sub_scaled_` at `ferrotorch-core/src/inplace.rs:265` delegates to `self.add_scaled_(other, -alpha)` mirroring `aten/src/ATen/native/BinaryOps.cpp:434-439 TORCH_IMPL_FUNC(sub_out) { add_stub(device_type(), *this, -alpha); }` and docstring `torch/_tensor_docs.py:5113 sub_(other, *, alpha=1) -> Tensor`. Non-test production consumer: `ferrotorch-core/src/grad_fns/arithmetic.rs:923-936 pub fn sub_scaled` IS the out-of-place sibling and itself delegates to `add_scaled(a, b, -alpha)` — the symmetric pair establishes torch's `sub` alpha-kwarg path across both surfaces. Parity-sweep `[sub] 88/88 passed (0 skipped, 0 failed)` at seeds=8 covers the in-place samples too (closes #1192). NB: this is distinct from REQ-7 (`sub_`, no alpha kwarg) which remains NOT-STARTED for unrelated consumer-wiring (blocker #1211). |
