@@ -2,6 +2,15 @@
 //!
 //! Decays the learning rate following a cosine curve from `base_lr` down to
 //! `eta_min` over `t_max` steps.
+//!
+//! ## REQ status (per `.design/ferrotorch-optim/scheduler/cosine.md`)
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 | SHIPPED | `pub struct CosineAnnealingLR` in `scheduler/cosine.rs` mirrors `torch/optim/lr_scheduler.py:1387-1396`; consumer: re-exported at `ferrotorch-optim/src/lib.rs:47-52`; in-crate construction in `cosine_warmup_scheduler` at `scheduler/mod.rs`. |
+//! | REQ-2 | SHIPPED | `pub fn CosineAnnealingLR::new` in `scheduler/cosine.rs` mirrors `torch/optim/lr_scheduler.py:1387-1396`; consumer: `cosine_warmup_scheduler` (same crate). |
+//! | REQ-3 | SHIPPED | `impl<T: Float> LrScheduler<T> for CosineAnnealingLR` in `scheduler/cosine.rs` uses closed-form mirroring `torch/optim/lr_scheduler.py:1455-1474`; consumer: `Learner` per-epoch `sched.step` at `ferrotorch-train/src/learner.rs:306-308`. |
+//! | REQ-4 | SHIPPED | `compute_lr` in `scheduler/cosine.rs` clamps to `eta_min` for `step >= t_max`; consumer: `Learner` running past `t_max` observes via `sched.step` at `ferrotorch-train/src/learner.rs:306-308`. |
 
 use ferrotorch_core::Float;
 

@@ -33,6 +33,19 @@
 //! ```
 //!
 //! CL-389.
+//!
+//! ## REQ status (per `.design/ferrotorch-optim/differentiable.md`)
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 | SHIPPED | `pub fn diff_sgd_step` below using autograd-aware `mul`/`sub` from `ferrotorch_core::grad_fns::arithmetic`; consumed via `pub use differentiable::diff_sgd_step` at `ferrotorch-optim/src/lib.rs:34` — boundary-method public API per goal.md S5 |
+//! | REQ-2 | SHIPPED | length check returning `InvalidArgument`; per-element shape check returning `ShapeMismatch`; consumed via `pub use` at `lib.rs:34` |
+//! | REQ-3 | SHIPPED | `T::from(lr)` cast with `InvalidArgument` on failure; consumed via `pub use` at `lib.rs:34` |
+//! | REQ-4 | SHIPPED | `creation::scalar(lr_t)?.to(p.device())?` inside the per-parameter loop; consumed via `pub use` at `lib.rs:34` |
+//! | REQ-5 | SHIPPED | `pub fn diff_sgd_momentum_step` returning both `(new_params, new_velocities)` for chained inner loops; consumed via `pub use differentiable::diff_sgd_momentum_step` at `lib.rs:34` |
+//! | REQ-6 | SHIPPED | empty-`prev_velocities` first-step branch + length-mismatch check; consumed via `pub use` at `lib.rs:34` |
+//! | REQ-7 | SHIPPED | `pub type DiffSgdMomentumOutput<T> = (Vec<Tensor<T>>, Vec<Tensor<T>>)` type alias; consumed by `diff_sgd_momentum_step`'s return type (re-exported via `lib.rs:34`) |
+//! | REQ-8 | SHIPPED | every arithmetic call routes through `ferrotorch_core::grad_fns::arithmetic`; pinned by the in-file `test_diff_sgd_step_autograd_edge_to_param` + `test_diff_sgd_momentum_maintains_autograd_chain`, plus the fixture-driven conformance tests at `ferrotorch-optim/tests/conformance_optim_advanced.rs:1264, 1321` |
 
 use ferrotorch_core::creation;
 use ferrotorch_core::grad_fns::arithmetic::{add, mul, sub};

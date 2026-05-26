@@ -9,6 +9,17 @@
 //! three-phase variant.
 //!
 //! [CL-320]
+//!
+//! ## REQ status (per `.design/ferrotorch-optim/scheduler/one_cycle_lr.md`)
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 | SHIPPED | `pub enum AnnealStrategy { Cos, Linear }` in `scheduler/one_cycle_lr.rs` mirrors `torch/optim/lr_scheduler.py:2329`; consumer: re-exported at `ferrotorch-optim/src/lib.rs:47-52`. |
+//! | REQ-2 | SHIPPED | `pub struct OneCycleLR` + private `SchedulePhase` in `scheduler/one_cycle_lr.rs` mirror `torch/optim/lr_scheduler.py:2454-2520`; consumer: re-exported at `ferrotorch-optim/src/lib.rs:47-52`; user code boxes for `Learner::with_scheduler` at `ferrotorch-train/src/learner.rs:105`. |
+//! | REQ-3 | SHIPPED | `pub fn OneCycleLR::new(max_lr, total_steps, pct_start, ..., three_phase)` with `assert!`s in `scheduler/one_cycle_lr.rs` mirrors `torch/optim/lr_scheduler.py:2358-2520`; consumer: re-exported via `lib.rs:47-52`. |
+//! | REQ-4 | SHIPPED | `impl<T: Float> LrScheduler<T> for OneCycleLR` with phase-aware compute in `scheduler/one_cycle_lr.rs` mirrors `torch/optim/lr_scheduler.py:2538-2602`; consumer: `Learner` per-epoch `sched.step` at `ferrotorch-train/src/learner.rs:306-308`. |
+//! | REQ-5 | SHIPPED | Two-phase vs three-phase phase-table branching in the constructor (`scheduler/one_cycle_lr.rs`) mirrors `torch/optim/lr_scheduler.py:2454-2520`; consumer: `Learner` per-epoch `sched.step` at `ferrotorch-train/src/learner.rs:306-308` dispatches into the chosen phase table. |
+//! | REQ-6 | NOT-STARTED | blocker #1474 — `cycle_momentum`/`base_momentum`/`max_momentum` (upstream `torch/optim/lr_scheduler.py:2342-2350, 2391-2453`) need `Optimizer<T>` trait extension exposing `set_momentum`. |
 
 use ferrotorch_core::Float;
 

@@ -2,6 +2,15 @@
 //!
 //! Decays the learning rate by `gamma` every `step_size` epochs.
 //! At step `n`, the learning rate is `base_lr * gamma^(n / step_size)`.
+//!
+//! ## REQ status (per `.design/ferrotorch-optim/scheduler/step.md`)
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 | SHIPPED | `pub struct StepLR` in `scheduler/step.rs` mirrors `torch/optim/lr_scheduler.py:592-630`; consumer: re-exported at `ferrotorch-optim/src/lib.rs:47-52`; user code boxes for `Learner::with_scheduler` at `ferrotorch-train/src/learner.rs:105`. |
+//! | REQ-2 | SHIPPED | `pub fn StepLR::new` in `scheduler/step.rs` mirrors `torch/optim/lr_scheduler.py:621-630`; consumer: documented in `scheduler/mod.rs:99-112` example; re-exported via `lib.rs:47-52`. |
+//! | REQ-3 | SHIPPED | `impl<T: Float> LrScheduler<T> for StepLR` in `scheduler/step.rs` uses closed-form `base_lr * gamma^(step/step_size)` mirroring `torch/optim/lr_scheduler.py:660-676`; consumer: `Learner` per-epoch `sched.step` at `ferrotorch-train/src/learner.rs:306-308`. |
+//! | REQ-4 | SHIPPED | `pub fn StepLR::get_lr` inherent + trait method in `scheduler/step.rs`; consumer: invoked via dynamic dispatch in `SequentialLr::get_lr` at `scheduler/mod.rs:155-161`. |
 
 use ferrotorch_core::Float;
 

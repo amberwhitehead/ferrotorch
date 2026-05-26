@@ -2,6 +2,15 @@
 //!
 //! Linearly ramps the learning rate from 0 to `base_lr` over
 //! `warmup_steps` steps. After the warmup phase, the LR stays at `base_lr`.
+//!
+//! ## REQ status (per `.design/ferrotorch-optim/scheduler/warmup.md`)
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 | SHIPPED | `pub struct LinearWarmup` in `scheduler/warmup.rs` mirrors a specialization of `class LinearLR(LRScheduler)` at `torch/optim/lr_scheduler.py:877-1005` with `start_factor=0`, `end_factor=1`; consumer: re-exported at `ferrotorch-optim/src/lib.rs:47-52`; in-crate construction in `cosine_warmup_scheduler` at `scheduler/mod.rs`. |
+//! | REQ-2 | SHIPPED | `pub fn LinearWarmup::new` with `current_lr: 0.0` initialization in `scheduler/warmup.rs`; consumer: `cosine_warmup_scheduler` (same crate). |
+//! | REQ-3 | SHIPPED | `impl<T: Float> LrScheduler<T> for LinearWarmup` with `min(ratio, 1.0) * base_lr` closed-form in `scheduler/warmup.rs`; consumer: `Learner` per-epoch `sched.step` at `ferrotorch-train/src/learner.rs:306-308`. |
+//! | REQ-4 | SHIPPED | Composed via `SequentialLr::new(vec![(Box::new(warmup), warmup_steps), (Box::new(cosine), usize::MAX)])` inside `cosine_warmup_scheduler` at `scheduler/mod.rs`; consumer: resulting `SequentialLr<T>` handed to `Learner::with_scheduler` at `ferrotorch-train/src/learner.rs:105`. |
 
 use ferrotorch_core::Float;
 

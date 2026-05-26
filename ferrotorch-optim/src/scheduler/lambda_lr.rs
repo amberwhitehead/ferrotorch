@@ -4,6 +4,14 @@
 //! where `lr_lambda` is a user-provided function.
 //!
 //! [CL-320]
+//!
+//! ## REQ status (per `.design/ferrotorch-optim/scheduler/lambda_lr.md`)
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 | SHIPPED | `pub struct LambdaLR` with `Box<dyn Fn(usize) -> f64>` field in `scheduler/lambda_lr.rs` mirrors `torch/optim/lr_scheduler.py:386-394` (R-DEV-4 single closure); consumer: re-exported at `ferrotorch-optim/src/lib.rs:47-52`; user code boxes for `Learner::with_scheduler` at `ferrotorch-train/src/learner.rs:105`. |
+//! | REQ-2 | SHIPPED | `pub fn LambdaLR::new` taking `impl Fn(usize) -> f64 + 'static` in `scheduler/lambda_lr.rs` mirrors `torch/optim/lr_scheduler.py:378-395`; consumer: re-exported via `lib.rs:47-52`. |
+//! | REQ-3 | SHIPPED | `impl<T: Float> LrScheduler<T> for LambdaLR` in `scheduler/lambda_lr.rs` mirrors `torch/optim/lr_scheduler.py:441-466`; consumer: `Learner` per-epoch `sched.step` at `ferrotorch-train/src/learner.rs:306-308`. |
 
 use ferrotorch_core::Float;
 

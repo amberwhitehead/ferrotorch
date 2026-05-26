@@ -33,6 +33,16 @@
 //! [`LinearWarmup`] followed by [`CosineAnnealingLR`].
 //!
 //! [CL-320]
+//!
+//! ## REQ status (per `.design/ferrotorch-optim/scheduler/mod.md`)
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 | SHIPPED | `pub trait LrScheduler<T>` in `scheduler/mod.rs` mirrors `torch/optim/lr_scheduler.py:95-303`; consumer: `Learner.scheduler: Option<Box<dyn LrScheduler<T>>>` at `ferrotorch-train/src/learner.rs:61` + per-epoch `sched.step` at `ferrotorch-train/src/learner.rs:306-308`; `Swalr` consumer impl at `ferrotorch-optim/src/swa.rs:460`. |
+//! | REQ-2 | SHIPPED | `pub struct SequentialLr<T>` in `scheduler/mod.rs` mirrors `torch/optim/lr_scheduler.py:1082-1170`; consumer: re-exported at `ferrotorch-optim/src/lib.rs:47-52`; in-crate construction site `cosine_warmup_scheduler` (same module). |
+//! | REQ-3 | SHIPPED | `pub fn SequentialLr::new` in `scheduler/mod.rs` mirrors `torch/optim/lr_scheduler.py:1119-1170`; consumer: invoked from `cosine_warmup_scheduler` (same module). |
+//! | REQ-4 | SHIPPED | `impl<T> LrScheduler<T> for SequentialLr<T>` in `scheduler/mod.rs` mirrors `torch/optim/lr_scheduler.py:1185-1195`; consumer: `Learner` per-epoch `sched.step` at `ferrotorch-train/src/learner.rs:306-308`. |
+//! | REQ-5 | SHIPPED | `pub fn cosine_warmup_scheduler` in `scheduler/mod.rs`; consumer: re-exported at `ferrotorch-optim/src/lib.rs:47-52`; user code passes `Box::new(cosine_warmup_scheduler(...))` to `Learner::with_scheduler` at `ferrotorch-train/src/learner.rs:105`. |
 
 pub mod chained_scheduler;
 pub mod constant_lr;

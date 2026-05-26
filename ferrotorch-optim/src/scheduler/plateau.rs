@@ -2,6 +2,18 @@
 //!
 //! Monitors a metric and reduces the learning rate when the metric has
 //! stopped improving for `patience` steps.
+//!
+//! ## REQ status (per `.design/ferrotorch-optim/scheduler/plateau.md`)
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 | SHIPPED | `pub enum PlateauMode { Min, Max }` in `scheduler/plateau.rs` mirrors `torch/optim/lr_scheduler.py:1650`; consumer: re-exported at `ferrotorch-optim/src/lib.rs:47-52`. |
+//! | REQ-2 | SHIPPED | `pub struct ReduceLROnPlateau` schedule state in `scheduler/plateau.rs` mirrors `torch/optim/lr_scheduler.py:1647-1687`; consumer: re-exported via `lib.rs:47-52`. NOTE: REQ-6 (training-driver wiring) is the open work. |
+//! | REQ-3 | SHIPPED | `pub fn ReduceLROnPlateau::new(mode)` + builder methods in `scheduler/plateau.rs` mirror `torch/optim/lr_scheduler.py:1647-1687` (R-DEV-7 builder); consumer: re-exported via `lib.rs:47-52`. |
+//! | REQ-4 | SHIPPED | `pub trait MetricScheduler<T: Float>` in `scheduler/plateau.rs` mirrors the `step(metrics)` signature at `torch/optim/lr_scheduler.py:1695`; consumer: re-exported at `ferrotorch-optim/src/lib.rs:47-52`. NOTE: trait has no non-test production consumer; REQ-6 tracks it. |
+//! | REQ-5 | SHIPPED | `impl<T: Float> MetricScheduler<T> for ReduceLROnPlateau` first-call snapshot + best-tracking + reduction in `scheduler/plateau.rs` mirrors `torch/optim/lr_scheduler.py:1695-1742`; consumer: as REQ-4/REQ-6, no production caller yet (vocabulary-only). |
+//! | REQ-6 | NOT-STARTED | blocker #1475 — `Learner::with_scheduler` only accepts `Box<dyn LrScheduler<T>>`; a `with_metric_scheduler` builder + `metric_sched.step(opt, val_loss)` per-epoch invocation is needed in `ferrotorch-train/src/learner.rs`. |
+//! | REQ-7 | NOT-STARTED | blocker #1476 — `cooldown`/`eps`/`threshold_mode='abs'`/per-group `min_lr` (upstream `torch/optim/lr_scheduler.py:1625-1632, 1684`) not exposed in builder. |
 
 use ferrotorch_core::Float;
 

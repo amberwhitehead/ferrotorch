@@ -5,6 +5,15 @@
 //! computed value).
 //!
 //! [CL-320]
+//!
+//! ## REQ status (per `.design/ferrotorch-optim/scheduler/polynomial_lr.md`)
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 | SHIPPED | `pub struct PolynomialLR` in `scheduler/polynomial_lr.rs` mirrors `torch/optim/lr_scheduler.py:1263-1272`; consumer: re-exported at `ferrotorch-optim/src/lib.rs:47-52`; user code boxes for `Learner::with_scheduler` at `ferrotorch-train/src/learner.rs:105`. |
+//! | REQ-2 | SHIPPED | `pub fn PolynomialLR::new` in `scheduler/polynomial_lr.rs` mirrors `torch/optim/lr_scheduler.py:1263-1272`; consumer: re-exported via `lib.rs:47-52`. |
+//! | REQ-3 | SHIPPED | `impl<T: Float> LrScheduler<T> for PolynomialLR` using `f64::powf` closed-form in `scheduler/polynomial_lr.rs` mirrors `torch/optim/lr_scheduler.py:1300-1335`; consumer: `Learner` per-epoch `sched.step` at `ferrotorch-train/src/learner.rs:306-308`. |
+//! | REQ-4 | SHIPPED | `compute_lr` short-circuits to `0.0` for `total_iters == 0` in `scheduler/polynomial_lr.rs` (R-DEV-7 deviation); consumer: `Learner` would observe `lr == 0` via `sched.step` at `ferrotorch-train/src/learner.rs:306-308`. |
 
 use ferrotorch_core::Float;
 

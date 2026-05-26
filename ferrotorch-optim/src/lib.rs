@@ -1,3 +1,25 @@
+//! `ferrotorch-optim` — crate root.
+//!
+//! Declares every leaf submodule (optimizer family, LR-scheduler tree,
+//! AMP / `GradScaler`, `GradientAccumulator`, differentiable-step helpers,
+//! `foreach_utils`, `ParamKey`) and re-exports their public surface so
+//! downstream crates (`ferrotorch-train`, `ferrotorch`, example /
+//! benchmark binaries) consume the optimizer family through
+//! `ferrotorch_optim::*` without spelunking into submodule paths.
+//! Mirrors `torch/optim/__init__.py`'s flat re-export pattern.
+//!
+//! ## REQ status (per `.design/ferrotorch-optim/lib.md`)
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 | SHIPPED | the 25 `pub mod` lines below; consumed by `ferrotorch-train/src/learner.rs:28` `use ferrotorch_optim::Optimizer;` |
+//! | REQ-2 | SHIPPED | `pub use adam::{Adam, AdamConfig}` etc.; consumed by `ferrotorch-train/examples/multi_epoch_train_dump.rs:63` `use ferrotorch_optim::{Adam, AdamConfig, Optimizer};` |
+//! | REQ-3 | SHIPPED | `pub use optimizer::{Optimizer, OptimizerState, ParamGroup}`; consumed by `ferrotorch-train/src/learner.rs:59` `optimizer: Box<dyn Optimizer<T>>` |
+//! | REQ-4 | SHIPPED | `pub use scheduler::{...}` re-exports the `LrScheduler` family; consumed by `ferrotorch-train/src/learner.rs:30` `use ferrotorch_optim::scheduler::LrScheduler;` |
+//! | REQ-5 | SHIPPED | `pub use grad_scaler::{GradScaler, GradScalerConfig, GradScalerState}`; consumed by `ferrotorch-train/src/amp.rs:55` `pub use ferrotorch_optim::{GradScaler, GradScalerConfig, GradScalerState};` |
+//! | REQ-6 | SHIPPED | `pub use grad_accumulator::GradientAccumulator` + `pub use differentiable::{diff_sgd_momentum_step, diff_sgd_step}`; boundary-method public API per goal.md S5 |
+//! | REQ-7 | SHIPPED | `pub use param_key::ParamKey`; consumed by `ferrotorch-optim/src/adamw.rs:22` `use crate::param_key::ParamKey;` and 5 other optimizer files |
+
 pub mod adadelta;
 pub mod adafactor;
 pub mod adagrad;

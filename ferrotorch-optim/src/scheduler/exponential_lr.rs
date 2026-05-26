@@ -4,6 +4,14 @@
 //! At step `n`, `lr = base_lr * gamma^n`.
 //!
 //! [CL-320]
+//!
+//! ## REQ status (per `.design/ferrotorch-optim/scheduler/exponential_lr.md`)
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 | SHIPPED | `pub struct ExponentialLR` in `scheduler/exponential_lr.rs` mirrors `torch/optim/lr_scheduler.py:1028-1035`; consumer: re-exported at `ferrotorch-optim/src/lib.rs:47-52`; user code boxes for `Learner::with_scheduler` at `ferrotorch-train/src/learner.rs:105`. |
+//! | REQ-2 | SHIPPED | `pub fn ExponentialLR::new` in `scheduler/exponential_lr.rs` mirrors `torch/optim/lr_scheduler.py:1028-1035`; consumer: re-exported via `lib.rs:47-52`. |
+//! | REQ-3 | SHIPPED | `impl<T: Float> LrScheduler<T> for ExponentialLR` in `scheduler/exponential_lr.rs` uses `f64::powi` closed-form mirroring `torch/optim/lr_scheduler.py:1066-1079`; consumer: `Learner` per-epoch `sched.step` at `ferrotorch-train/src/learner.rs:306-308`. |
 
 use ferrotorch_core::Float;
 

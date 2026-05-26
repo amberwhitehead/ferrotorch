@@ -1,3 +1,27 @@
+//! `Optimizer<T>` trait, `ParamGroup<T>`, and `OptimizerState`.
+//!
+//! Defines the trait every concrete optimizer (`Sgd`, `Adam`, `AdamW`, ...)
+//! implements, the parameter-group struct holding the shared `lr` /
+//! `weight_decay` hyperparameters, and the `HashMap<String, HashMap<String,
+//! Vec<f64>>>` checkpoint type. Also exports six `pub(crate)` workspace
+//! helpers (`fill_f64_workspace`, `fill_t_workspace`, ...) that the
+//! concrete optimizers use to amortise per-step heap allocation
+//! (`CL-1125`).
+//!
+//! Mirrors `torch.optim.Optimizer` / `torch.optim.optimizer.Optimizer`
+//! (upstream `torch/optim/optimizer.py:339`).
+//!
+//! ## REQ status (per `.design/ferrotorch-optim/optimizer.md`)
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 | SHIPPED | `pub struct ParamGroup<T: Float>` below; consumed by `ferrotorch-train/src/learner.rs:516` `fn param_groups(&self) -> &[ferrotorch_optim::ParamGroup<f32>]` |
+//! | REQ-2 | SHIPPED | `ParamGroup::new` + `with_weight_decay` + `params` + `add_param`; consumed in every concrete optimizer's constructor |
+//! | REQ-3 | SHIPPED | `pub trait Optimizer<T: Float>` with 9 methods; consumed by `ferrotorch-train/src/learner.rs:59` `optimizer: Box<dyn Optimizer<T>>` |
+//! | REQ-4 | SHIPPED | `no_grad` contract documented inline at the `step` method; consumed by every concrete `step` impl wrapping the update in autograd-detached mutators |
+//! | REQ-5 | SHIPPED | `pub type OptimizerState = HashMap<String, HashMap<String, Vec<f64>>>`; consumed by every concrete optimizer's `state_dict` / `load_state_dict` impl |
+//! | REQ-6 | SHIPPED | six `pub(crate)` workspace helpers below with the `CL-1125` rationale; consumed by `ferrotorch-optim/src/adam.rs`, `adamw.rs`, `sgd.rs` per-step paths |
+
 use std::collections::HashMap;
 
 use ferrotorch_core::numeric_cast::cast;

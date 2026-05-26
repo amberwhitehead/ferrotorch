@@ -9,6 +9,16 @@
 //! scheduler on *every* step.
 //!
 //! [CL-320]
+//!
+//! ## REQ status (per `.design/ferrotorch-optim/scheduler/chained_scheduler.md`)
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 | SHIPPED | `pub struct ChainedScheduler<T: Float>` with `Vec<Box<dyn LrScheduler<T>>>` field in `scheduler/chained_scheduler.rs` mirrors `torch/optim/lr_scheduler.py:1534`; consumer: re-exported at `ferrotorch-optim/src/lib.rs:47-52`; user code boxes for `Learner::with_scheduler` at `ferrotorch-train/src/learner.rs:105`. |
+//! | REQ-2 | SHIPPED | `pub fn ChainedScheduler::new` with `assert!(!schedulers.is_empty())` in `scheduler/chained_scheduler.rs` mirrors `torch/optim/lr_scheduler.py:1511-1514`; consumer: re-exported via `lib.rs:47-52`. |
+//! | REQ-3 | SHIPPED | `pub fn ChainedScheduler::len` + `is_empty` in `scheduler/chained_scheduler.rs`; consumer: public via `pub use` at `lib.rs:47-52` for user-code diagnostics. |
+//! | REQ-4 | SHIPPED | `impl<T: Float> LrScheduler<T> for ChainedScheduler<T>` calling each inner `step` in order in `scheduler/chained_scheduler.rs` mirrors `torch/optim/lr_scheduler.py:1538-1542`; consumer: `Learner` per-epoch `sched.step` at `ferrotorch-train/src/learner.rs:306-308`. |
+//! | REQ-5 | SHIPPED | Module-level `//!` doc-comment in `scheduler/chained_scheduler.rs` documents the every-step-vs-milestone distinction from `SequentialLr`. |
 
 use ferrotorch_core::Float;
 

@@ -8,6 +8,17 @@
 //! (Smith, 2017).
 //!
 //! [CL-320]
+//!
+//! ## REQ status (per `.design/ferrotorch-optim/scheduler/cyclic_lr.md`)
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 | SHIPPED | `pub enum CyclicMode { Triangular, Triangular2, ExpRange }` in `scheduler/cyclic_lr.rs` mirrors `torch/optim/lr_scheduler.py:1893`; consumer: re-exported at `ferrotorch-optim/src/lib.rs:47-52`. |
+//! | REQ-2 | SHIPPED | `pub struct CyclicLR` in `scheduler/cyclic_lr.rs` mirrors `torch/optim/lr_scheduler.py:1886-1965`; consumer: re-exported at `ferrotorch-optim/src/lib.rs:47-52`; user code boxes for `Learner::with_scheduler` at `ferrotorch-train/src/learner.rs:105`. |
+//! | REQ-3 | SHIPPED | `pub fn CyclicLR::new(... step_size_down: Option<usize>, mode, gamma)` in `scheduler/cyclic_lr.rs` mirrors `torch/optim/lr_scheduler.py:1886-1965`; consumer: re-exported via `lib.rs:47-52`. |
+//! | REQ-4 | SHIPPED | `impl<T: Float> LrScheduler<T> for CyclicLR` triangular-wave + amplitude scaling in `scheduler/cyclic_lr.rs` mirrors `torch/optim/lr_scheduler.py:1999-2098`; consumer: `Learner` per-epoch `sched.step` at `ferrotorch-train/src/learner.rs:306-308`. |
+//! | REQ-5 | NOT-STARTED | blocker #1472 — `cycle_momentum`/`base_momentum`/`max_momentum` (upstream `torch/optim/lr_scheduler.py:1840-1862, 1935-1963`) need `Optimizer<T>` trait extension exposing `set_momentum`. |
+//! | REQ-6 | NOT-STARTED | blocker #1473 — user-provided `scale_fn` closure (upstream `torch/optim/lr_scheduler.py:1830-1834`) not exposed in `CyclicLR::new`. |
 
 use ferrotorch_core::Float;
 

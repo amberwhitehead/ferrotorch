@@ -4,6 +4,14 @@
 //! At step `n`, `lr = base_lr * gamma^(number of milestones <= n)`.
 //!
 //! [CL-320]
+//!
+//! ## REQ status (per `.design/ferrotorch-optim/scheduler/multi_step_lr.md`)
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 | SHIPPED | `pub struct MultiStepLR` in `scheduler/multi_step_lr.rs` mirrors `torch/optim/lr_scheduler.py:707-716`; consumer: re-exported at `ferrotorch-optim/src/lib.rs:47-52`; user code boxes for `Learner::with_scheduler` at `ferrotorch-train/src/learner.rs:105`. |
+//! | REQ-2 | SHIPPED | `pub fn MultiStepLR::new` with internal `sort_unstable` in `scheduler/multi_step_lr.rs`; consumer: re-exported via `lib.rs:47-52`. |
+//! | REQ-3 | SHIPPED | `impl<T: Float> LrScheduler<T> for MultiStepLR` using `partition_point` closed-form in `scheduler/multi_step_lr.rs` mirrors `torch/optim/lr_scheduler.py:753-770`; consumer: `Learner` per-epoch `sched.step` at `ferrotorch-train/src/learner.rs:306-308`. |
 
 use ferrotorch_core::Float;
 

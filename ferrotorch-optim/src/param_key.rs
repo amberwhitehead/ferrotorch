@@ -17,6 +17,16 @@
 //! [`std::str::FromStr`].
 //!
 //! Issue: #1122.
+//!
+//! ## REQ status (per `.design/ferrotorch-optim/param_key.md`)
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 | SHIPPED | `pub struct ParamKey { pub group: u32, pub param: u32 }` with the full derive list below; consumed by `ferrotorch-optim/src/adamw.rs:163` `state: HashMap<ParamKey, AdamWParamState>` + 5 other optimizer state maps |
+//! | REQ-2 | SHIPPED | `pub const fn new` with `debug_assert!` bounds; consumed by `ferrotorch-optim/src/adamw.rs:220` `ParamKey::new(group_idx, param_idx)` plus `radam.rs:161`, `asgd.rs:181`, `adamax.rs:156`, `sparse_adam.rs:114` |
+//! | REQ-3 | SHIPPED | `impl fmt::Display` writing `"g{g}_p{p}"`; consumed by `ferrotorch-optim/src/adamw.rs:556` (used in `state_dict` serialization) + `radam.rs:489`, `asgd.rs:441`, `adamax.rs:415` |
+//! | REQ-4 | SHIPPED | `impl FromStr` returning `FerrotorchError::InvalidArgument` on malformed input; consumed by `ferrotorch-optim/src/adamw.rs:571` `let key: ParamKey = key.parse()?;` + `radam.rs:503`, `asgd.rs:456`, `adamax.rs:429` |
+//! | REQ-5 | SHIPPED | `impl From<ParamKey> for String` + `impl TryFrom<&str> for ParamKey`; consumed transitively through `to_string()` inside every `state_dict` serializer |
 
 use std::fmt;
 use std::str::FromStr;

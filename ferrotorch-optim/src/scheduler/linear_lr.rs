@@ -5,6 +5,15 @@
 //! stays at `base_lr * end_factor`.
 //!
 //! [CL-320]
+//!
+//! ## REQ status (per `.design/ferrotorch-optim/scheduler/linear_lr.md`)
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 | SHIPPED | `pub struct LinearLR` in `scheduler/linear_lr.rs` mirrors `torch/optim/lr_scheduler.py:917-940`; consumer: re-exported at `ferrotorch-optim/src/lib.rs:47-52`; user code boxes for `Learner::with_scheduler` at `ferrotorch-train/src/learner.rs:105`. |
+//! | REQ-2 | SHIPPED | `pub fn LinearLR::new` with `assert!` preconditions in `scheduler/linear_lr.rs` mirrors `torch/optim/lr_scheduler.py:917-934`; consumer: re-exported via `lib.rs:47-52`. |
+//! | REQ-3 | SHIPPED | `impl<T: Float> LrScheduler<T> for LinearLR` closed-form in `scheduler/linear_lr.rs` mirrors `torch/optim/lr_scheduler.py:982-1005`; consumer: `Learner` per-epoch `sched.step` at `ferrotorch-train/src/learner.rs:306-308`. |
+//! | REQ-4 | SHIPPED | `step.min(total_iters)` clamp in `compute_lr` (`scheduler/linear_lr.rs`); consumer: `Learner` running past `total_iters` observes via `sched.step` at `ferrotorch-train/src/learner.rs:306-308`. |
 
 use ferrotorch_core::Float;
 

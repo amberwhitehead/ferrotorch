@@ -6,6 +6,15 @@
 //! a new cycle. Each successive cycle can be longer by a factor of `t_mult`.
 //!
 //! [CL-320]
+//!
+//! ## REQ status (per `.design/ferrotorch-optim/scheduler/cosine_warm_restarts.md`)
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 | SHIPPED | `pub struct CosineAnnealingWarmRestarts` in `scheduler/cosine_warm_restarts.rs` mirrors `torch/optim/lr_scheduler.py:2145-2166`; consumer: re-exported at `ferrotorch-optim/src/lib.rs:47-52`; user code boxes for `Learner::with_scheduler` at `ferrotorch-train/src/learner.rs:105`. |
+//! | REQ-2 | SHIPPED | `pub fn CosineAnnealingWarmRestarts::new` with `assert!` preconditions in `scheduler/cosine_warm_restarts.rs` mirrors `torch/optim/lr_scheduler.py:2153-2160`; consumer: re-exported via `lib.rs:47-52`. |
+//! | REQ-3 | SHIPPED | `impl<T: Float> LrScheduler<T> for CosineAnnealingWarmRestarts` with snap-restart state machine in `scheduler/cosine_warm_restarts.rs` mirrors `torch/optim/lr_scheduler.py:2237-2245` + cosine formula at `lr_scheduler.py:2199-2207`; consumer: `Learner` per-epoch `sched.step` at `ferrotorch-train/src/learner.rs:306-308`. |
+//! | REQ-4 | SHIPPED | Restart logic `if t_cur >= t_i { t_cur = 0; t_i *= t_mult; }` in `step` body of `scheduler/cosine_warm_restarts.rs`; consumer: `Learner` running past one `t_0` cycle observes the restart via `sched.step` at `ferrotorch-train/src/learner.rs:306-308`. |
 
 use ferrotorch_core::Float;
 

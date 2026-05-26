@@ -6,6 +6,15 @@
 //! cumulatively to whatever the current LR is.
 //!
 //! [CL-320]
+//!
+//! ## REQ status (per `.design/ferrotorch-optim/scheduler/multiplicative_lr.md`)
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 | SHIPPED | `pub struct MultiplicativeLR` with `Box<dyn Fn(usize) -> f64>` field in `scheduler/multiplicative_lr.rs` mirrors `torch/optim/lr_scheduler.py:501-509` (R-DEV-4 single closure); consumer: re-exported at `ferrotorch-optim/src/lib.rs:47-52`; user code boxes for `Learner::with_scheduler` at `ferrotorch-train/src/learner.rs:105`. |
+//! | REQ-2 | SHIPPED | `pub fn MultiplicativeLR::new` in `scheduler/multiplicative_lr.rs` mirrors `torch/optim/lr_scheduler.py:493-520`; consumer: re-exported via `lib.rs:47-52`. |
+//! | REQ-3 | SHIPPED | `impl<T: Float> LrScheduler<T> for MultiplicativeLR` per-step compound multiply in `scheduler/multiplicative_lr.rs` mirrors `torch/optim/lr_scheduler.py:541-590`; consumer: `Learner` per-epoch `sched.step` at `ferrotorch-train/src/learner.rs:306-308`. |
+//! | REQ-4 | SHIPPED | Module-level `//!` doc-comment at top of `scheduler/multiplicative_lr.rs` documents the relative-compound vs absolute (`LambdaLR`) distinction. |
 
 use ferrotorch_core::Float;
 

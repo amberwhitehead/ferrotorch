@@ -1,5 +1,18 @@
 //! Gradient scaler for mixed-precision training.
 //!
+//! ## REQ status (per `.design/ferrotorch-optim/grad_scaler.md`)
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 (`GradScalerConfig`) | SHIPPED | `pub struct GradScalerConfig` in `grad_scaler.rs`; consumer: `ferrotorch-train/src/amp.rs` `AmpContext::new` takes the config. |
+//! | REQ-2 (`with_*` builders) | SHIPPED | five `with_*` builder methods in `grad_scaler.rs`; consumer: `ferrotorch-train/src/amp.rs` uses the builder pattern. |
+//! | REQ-3 (`GradScalerState`) | SHIPPED | `pub struct GradScalerState` in `grad_scaler.rs`; consumer: `ferrotorch-train/src/amp.rs::scaler_state_dict`. |
+//! | REQ-4 (`GradScaler<T>` struct) | SHIPPED | `pub struct GradScaler<T: Float>` in `grad_scaler.rs`; consumer: `AmpContext<T>::scaler` field + `Learner<M, T>::grad_scaler`. |
+//! | REQ-5 (`new` constructor) | SHIPPED | `pub fn new` in `grad_scaler.rs`; consumer: `AmpContext::new` invokes it. |
+//! | REQ-6 (`scale`) | SHIPPED | `pub fn scale` in `grad_scaler.rs`; consumer: `AmpContext::scaler()`/`scaler_mut()` exposed to the `Learner` for `scale(loss)` before `backward()`. |
+//! | REQ-7 (`unscale_` with GPU-f32 fast path) | SHIPPED | `pub fn unscale_` in `grad_scaler.rs`; consumer: the learner step path invokes it before grad-clipping. |
+//! | REQ-8 (`step` returning `bool`) | SHIPPED | `pub fn step` in `grad_scaler.rs`; consumer: `ferrotorch-train/src/learner.rs` invokes `scaler.step(&mut *optimizer)` via the `grad_scaler` field. |
+//!
 //! Implements the standard loss-scaling approach used with float16 / bfloat16
 //! training. The scaler multiplies the loss by a large factor before
 //! `backward()` so that small gradients survive quantization to half

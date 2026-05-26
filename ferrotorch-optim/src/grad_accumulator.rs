@@ -1,6 +1,16 @@
 //! Gradient accumulation for training with effective batch sizes larger than
 //! physical memory allows.
 //!
+//! ## REQ status (per `.design/ferrotorch-optim/grad_accumulator.md`)
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 (`GradientAccumulator` struct) | SHIPPED | `pub struct GradientAccumulator` in `grad_accumulator.rs`; `pub use` re-export in `lib.rs`. |
+//! | REQ-2 (`new` constructor with zero-step rejection) | SHIPPED | `pub fn new` in `grad_accumulator.rs`; pinned by `test_zero_steps_panics`. |
+//! | REQ-3 (`should_step` cycle check) | SHIPPED | `pub fn should_step` in `grad_accumulator.rs`; pinned by `test_should_step_cycles` + `test_should_step_one`. |
+//! | REQ-4 (`scale_loss` divider) | SHIPPED | `pub fn scale_loss` in `grad_accumulator.rs`; pinned by `test_scale_loss_divides_by_steps` + `test_scale_loss_vector`. |
+//! | REQ-5 (`accumulation_steps`/`current_step`/`reset` accessors) | SHIPPED | three accessors in `grad_accumulator.rs`; pinned by `test_reset`. |
+//!
 //! Usage:
 //! ```text
 //! let mut accum = GradientAccumulator::new(4); // accumulate over 4 micro-batches
