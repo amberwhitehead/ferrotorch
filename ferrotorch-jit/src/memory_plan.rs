@@ -4,6 +4,17 @@
 //! over a topological execution order, so non-overlapping values share the
 //! same slot. The resulting [`MemoryPlan`] feeds backend allocators that
 //! preallocate one buffer per slot instead of one per IR value.
+//!
+//! ## REQ status (per `.design/ferrotorch-jit/memory_plan.md`)
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 | SHIPPED | `pub struct MemoryPlan`; consumer: re-export at `ferrotorch-jit/src/lib.rs:110` + `ferrotorch-jit/src/optimize.rs:60` `Some(memory_plan::plan_memory(graph))` returns `Option<MemoryPlan>` from `pub fn optimize`, downstream consumed by `module.rs:17`, `aot_autograd.rs:19`, `symbolic.rs:65`, `graph_break.rs:27`. |
+//! | REQ-2 | SHIPPED | `pub fn savings_percent` on `impl MemoryPlan`; consumer: re-export at `lib.rs:110`. |
+//! | REQ-3 | SHIPPED | `pub fn plan_memory`; consumer: `optimize.rs:60` invokes it inside `pub fn optimize`, which is called from `module.rs`, `aot_autograd.rs`, `symbolic.rs`, `graph_break.rs`. |
+//! | REQ-4 | SHIPPED | graph-output `last_use = max_topo` pin inside `pub fn plan_memory`; consumer: transitive via `optimize.rs:60`. |
+//! | REQ-5 | SHIPPED | empty-graph early return inside `pub fn plan_memory`; consumer: same as REQ-3. |
+//! | REQ-6 | SHIPPED | sort by `(born, value_id)` inside `pub fn plan_memory`; consumer: same as REQ-3. |
 
 use std::collections::HashMap;
 

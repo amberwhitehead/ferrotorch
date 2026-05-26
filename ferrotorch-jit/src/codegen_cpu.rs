@@ -8,6 +8,18 @@
 //! Generated functions take `&[&[f64]]` inputs and a `&mut [f64]` output
 //! buffer. The trampoline that bridges this signature to the FFI-friendly
 //! `extern "C" fn(*const *const f64, *mut f64, i32)` lives in `codegen_jit`.
+//!
+//! ## REQ status (per `.design/ferrotorch-jit/codegen_cpu.md`)
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 | SHIPPED | `pub struct CpuCodegen`; consumer: `ferrotorch-jit/src/codegen.rs:851` `crate::codegen_cpu::CpuCodegen::generate_rust_source(loops, &fn_name)` from `InductorBackend::generate` CpuRust arm. |
+//! | REQ-2 | SHIPPED | `pub fn generate_rust_source` on `impl CpuCodegen`; consumer: `codegen.rs:851` + `codegen.rs:884` identity-graph fallback. |
+//! | REQ-3 | SHIPPED | SIMD comment + parallel-hint emission in `fn emit_rust_stmt`; consumer: transitively via `codegen.rs:851`. |
+//! | REQ-4 | SHIPPED | `fn rust_buffer_access`; consumer: invoked by `emit_rust_stmt` + `emit_rust_expr` for every lowered `IrOpKind` going through `InductorBackend::generate`. |
+//! | REQ-5 | SHIPPED | `fn format_f64_rust`; consumer: invoked inside `emit_rust_expr` for every `Expr::Const`. |
+//! | REQ-6 | SHIPPED | `fn emit_rust_expr` UnaryOp arm with one match per `UnaryOpKind` variant; consumer: transitively via `codegen.rs:851`. |
+//! | REQ-7 | SHIPPED | `fn emit_rust_stmt` with one arm per `LoopIR` variant; consumer: transitively via `codegen.rs:851`. |
 
 use crate::codegen_ir::{Expr, LoopIR, UnaryOpKind};
 

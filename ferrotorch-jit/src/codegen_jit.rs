@@ -56,6 +56,18 @@
 //! kernel. The cache key is the FNV-1a hash of the `LoopIR`'s `Debug`
 //! representation plus the `(num_inputs, output_len)` shape pair, so it is
 //! deterministic across processes and Rust releases.
+//!
+//! ## REQ status (per `.design/ferrotorch-jit/codegen_jit.md`)
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 | SHIPPED | `pub struct JitCompiledKernel` + `unsafe impl Send/Sync`; consumer: re-export at `ferrotorch-jit/src/lib.rs:96` + `ferrotorch-jit/src/codegen.rs:1306` receives it from `compile_loop_ir_kernel`. |
+//! | REQ-2 | SHIPPED | `pub fn execute` on `impl JitCompiledKernel`; consumer: `codegen.rs:1355` `kernel.execute(&kernel_inputs, &mut output)?` inside the closure body of every JIT-compiled CpuRust `CompiledGraph::execute`. |
+//! | REQ-3 | SHIPPED | `pub fn compile_loop_ir_kernel`; consumer: `codegen.rs:1306` `let kernel = crate::codegen_jit::compile_loop_ir_kernel(kernel_loops, num_inputs, output_len)?`. |
+//! | REQ-4 | SHIPPED | `pub fn jit_supports`; consumer: `codegen.rs:1302` `if !crate::codegen_jit::jit_supports(kernel_loops) { return Ok(None); }` gate before the JIT compile call. |
+//! | REQ-5 | SHIPPED | cranelift `JITBuilder::symbol(...)` math-intrinsic bindings inside the build path of `compile_loop_ir_kernel`; consumer: transitively invoked on every `codegen.rs:1306` call. |
+//! | REQ-6 | SHIPPED | `KERNEL_CACHE: OnceLock<Mutex<HashMap<u64, Arc<JitCompiledKernel>>>>` + FNV-1a hash + cache lookup inside `pub fn compile_loop_ir_kernel`; consumer: services every `codegen.rs:1306` call (second compile of an identical `LoopIR` hits the cache). |
+//! | REQ-7 | SHIPPED | `_module: Mutex<JITModule>` field on `pub struct JitCompiledKernel` (`JITModule`'s own `Drop` unmaps the executable pages); consumer: every `JitCompiledKernel` returned from `codegen.rs:1306`. |
 
 use std::collections::HashMap;
 use std::fmt::Write as _;

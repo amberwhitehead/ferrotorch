@@ -21,6 +21,19 @@
 //! Gated entirely on `cfg(feature = "cuda")` — this module is omitted from
 //! the default workspace build, so CPU-only builds never pull cudarc or
 //! ferrotorch-gpu through this path.
+//!
+//! ## REQ status (per `.design/ferrotorch-jit/fusion_gpu.md`)
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 | SHIPPED | `pub fn apply_fused_gpu`; consumer: `ferrotorch-jit/src/fusion.rs:1253` `return crate::fusion_gpu::apply_fused_gpu(input, chain);` inside `pub fn apply_fused` (gated `#[cfg(feature = "cuda")]`). |
+//! | REQ-2 | SHIPPED | `fn apply_fused_gpu_f32_internal` + `const FUSED_F32_KERNEL_NAME`; consumer: invoked by `apply_fused_gpu` when `TypeId::of::<T>() == TypeId::of::<f32>()`; that public fn is called from `fusion.rs:1253`. |
+//! | REQ-3 | SHIPPED | `fn apply_fused_gpu_f64_internal` + `const FUSED_F64_KERNEL_NAME` + `n <= i32::MAX` check; consumer: invoked by `apply_fused_gpu` for f64; called from `fusion.rs:1253`. |
+//! | REQ-4 | SHIPPED | `module_cache::get_or_compile_owned(...)` calls in both internal dispatchers; consumer: every `apply_fused_gpu` call (via `fusion.rs:1253`) routes through this cache (keyed on PTX hash and device ordinal). |
+//! | REQ-5 | SHIPPED | `#![allow(unsafe_code)]` at module top + per-block `// SAFETY:` comments; consumer: every launch flows through one of the two SAFETY-documented `unsafe { ... }` blocks. |
+//! | REQ-6 | SHIPPED | `fn wrap_output_f32` + `fn wrap_output_f64` building `GpuBufferHandle::new(..., device_ordinal, ..., DType::F32 or DType::F64)`; consumer: invoked at the end of each internal dispatcher; the result is what `fusion.rs:1253` returns. |
+//! | REQ-7 | SHIPPED | binary-op rejection inside `generate_ptx_named` / `generate_cuda_source_f64_named` propagated through both internal dispatchers; consumer: callers receive via `fusion.rs:1253`. |
+//! | REQ-8 | SHIPPED | `fn launch_cfg` with `BLOCK = 256` + `n > u32::MAX` check; consumer: invoked by both internal dispatchers. |
 
 use std::any::TypeId;
 

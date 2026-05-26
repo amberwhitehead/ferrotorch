@@ -9,6 +9,19 @@
 //! - [`NativeBackend`] — for simple elementwise chains, composes Rust
 //!   closures directly, skipping interpreter dispatch overhead. Falls back
 //!   to the interpreter for graphs it cannot natively compile.
+//!
+//! ## REQ status (per `.design/ferrotorch-jit/codegen.md`)
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 | SHIPPED | `pub trait Codegen`; consumer: `ferrotorch-jit/src/autotune.rs:56` `use crate::codegen::{Codegen, CompiledGraph};` + `AutotuneCandidate::backend: Box<dyn Codegen>`. |
+//! | REQ-2 | SHIPPED | `pub struct CompiledGraph`; consumer: re-export at `lib.rs:89-92` + `autotune.rs` returns it for the winning candidate. |
+//! | REQ-3 | SHIPPED | `pub struct InterpreterBackend` + `impl Codegen for InterpreterBackend`; consumer: re-export at `lib.rs:89-92` + internal fallback target for `NativeBackend::compile` and `InductorBackend::compile_with_status`. |
+//! | REQ-4 | SHIPPED | `pub struct NativeBackend` + `impl Codegen for NativeBackend` + `fn try_compile_native`; consumer: re-export at `lib.rs:89-92`. |
+//! | REQ-5 | SHIPPED | `pub enum InductorTarget`; consumer: re-export at `lib.rs:89-92`. |
+//! | REQ-6 | SHIPPED | `pub struct InductorBackend` + `impl Codegen` + `generate`; consumer: re-export at `lib.rs:89-92`; calls `codegen_cpu::CpuCodegen::generate_rust_source`, `codegen_gpu::GpuCodegen::generate_{cuda,ptx}_source`, `codegen_jit::compile_loop_ir_kernel` internally. |
+//! | REQ-7 | SHIPPED | `pub enum InductorCompileStatus` + `compile_with_status`; consumer: re-export at `lib.rs:89-92`. |
+//! | REQ-8 | SHIPPED | `fn resolve_group_dtype` returning `Err(JitError::CodegenError)`; consumer: every GPU group's `InductorBackend::generate` call invokes it before lowering. |
 
 use std::collections::HashMap;
 use std::sync::Arc;

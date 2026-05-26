@@ -4,6 +4,19 @@
 //! operator fusion, memory planning) over an [`IrGraph`] before codegen.
 //! Each pass is gated by a flag on [`OptimizationConfig`] so callers can
 //! mirror `PyTorch`'s `inductor.config.*` toggles.
+//!
+//! ## REQ status (per `.design/ferrotorch-jit/optimize.md`)
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 | SHIPPED | `pub struct OptimizationConfig` + `impl Default`; consumer: re-export at `ferrotorch-jit/src/lib.rs:112` + `ferrotorch-jit/src/module.rs:17` `use crate::optimize::{OptimizationConfig, optimize};` + `aot_autograd.rs:19` + `symbolic.rs:65`. |
+//! | REQ-2 | SHIPPED | `pub fn optimize`; consumer: `module.rs::compile_with_config` calls `optimize(&mut graph, &config.optimization)?` + `aot_autograd.rs` + `symbolic.rs::compile_symbolic` + `graph_break.rs:27`. |
+//! | REQ-3 | SHIPPED | `pub fn constant_fold`; consumer: invoked by `pub fn optimize` when `config.constant_folding` is true; that public fn flows through all four downstream modules. |
+//! | REQ-4 | SHIPPED | `pub fn dead_code_eliminate`; consumer: invoked by `pub fn optimize` when `config.dead_code_elimination` is true + auto-chained at the tail of `constant_fold` per #885. |
+//! | REQ-5 | SHIPPED | `pub fn pattern_fuse` delegating to `fn fuse_linear_activation` + `fn fuse_attention_pattern`; consumer: invoked by `pub fn optimize` when `config.operator_fusion` is true. |
+//! | REQ-6 | SHIPPED | `pub fn fuse_elementwise` + `fn try_fuse_one_chain` + `fn fuse_chain`; consumer: invoked by `pub fn optimize` when `config.operator_fusion` is true. |
+//! | REQ-7 | SHIPPED | `preserved_dtype` capture + restore inside `pub fn constant_fold`; consumer: transitive via `pub fn optimize` (REQ-3 chain). |
+//! | REQ-8 | SHIPPED | `is_graph_output` check + post-replacement restore inside `pub fn constant_fold`; consumer: transitive via `pub fn optimize`. |
 
 use std::collections::{HashMap, HashSet};
 

@@ -46,6 +46,20 @@
 //! ```
 //!
 //! CL-369.
+//!
+//! ## REQ status (per `.design/ferrotorch-jit/autotune.md`)
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 | SHIPPED | `pub struct AutotuneKey`; consumer: re-export at `ferrotorch-jit/src/lib.rs:88` (the public boundary for kernel-tuning workflows). |
+//! | REQ-2 | SHIPPED | `pub fn from_graph` on `impl AutotuneKey`; consumer: invoked on every `Autotuner::tune` call via `let key = AutotuneKey::from_graph(graph, &input_shapes);`. |
+//! | REQ-3 | SHIPPED | `pub struct AutotuneCandidate` + `pub fn new`; consumer: `Autotuner::with_candidate` constructs candidates via this type. |
+//! | REQ-4 | SHIPPED | `pub struct AutotuneResult` + accessors; consumer: re-export at `lib.rs:88` — the public return type of `Autotuner::tune`. |
+//! | REQ-5 | SHIPPED | `pub struct Autotuner` with builder + accessor methods; consumer: re-export at `lib.rs:88`. |
+//! | REQ-6 | SHIPPED | `pub fn tune` on `impl Autotuner`; consumer: re-export at `lib.rs:88`. |
+//! | REQ-7 | SHIPPED | median timing inside `pub fn tune`; consumer: every cache-miss `tune` invocation. |
+//! | REQ-8 | SHIPPED | empty-candidate `Err(InvalidArgument)` guard at the top of `pub fn tune`; consumer: same as REQ-6. |
+//! | REQ-9 | SHIPPED | cached-name lookup `ok_or_else(...)` inside the cache-hit branch of `pub fn tune`; consumer: triggered on stale-cache `tune` calls. |
 
 use std::collections::HashMap;
 use std::sync::Mutex;

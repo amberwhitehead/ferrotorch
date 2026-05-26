@@ -39,6 +39,19 @@
 //!
 //! See `nvrtc_libdevice` below for the integration; closes #748 follow-up
 //! to #729.
+//!
+//! ## REQ status (per `.design/ferrotorch-jit/codegen_gpu.md`)
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 | SHIPPED | `pub struct GpuCodegen`; consumer: re-export at `ferrotorch-jit/src/lib.rs:94` + `ferrotorch-jit/src/codegen.rs:853` `crate::codegen_gpu::GpuCodegen::generate_cuda_source(...)`. |
+//! | REQ-2 | SHIPPED | `pub fn generate_cuda_source`; consumer: `codegen.rs:853` (GpuCuda arm) + `codegen.rs:886` (identity-graph fallback). |
+//! | REQ-3 | SHIPPED | `pub fn generate_ptx_source`; consumer: `codegen.rs:857` (GpuPtx arm) + `codegen.rs:893` (identity-graph fallback). |
+//! | REQ-4 | SHIPPED | per-dtype emission helpers switched on `Dtype`; consumer: every emission via `codegen.rs:853` / `codegen.rs:857` passes the resolved group dtype. |
+//! | REQ-5 | SHIPPED | f64-transcendental rejection inside `pub fn generate_ptx_source`; consumer: `codegen.rs:857` propagates via `.map_err(FerrotorchError::from)`. |
+//! | REQ-6 | SHIPPED | `fn emit_cuda_reduction` + PTX shared-memory tree reduction; consumer: transitively via `codegen.rs:853` / `codegen.rs:857`. |
+//! | REQ-7 | SHIPPED | `tid` mapping + sequential `output[tid]` write pattern in `fn emit_cuda_elementwise`; consumer: transitively via `codegen.rs:853`. |
+//! | REQ-8 | SHIPPED | `pub fn generate_ptx_source(..., block_size, ...)` parameter; consumer: `codegen.rs:857` passes `self.block_size` from `InductorBackend::with_block_size`. |
 
 use crate::codegen_ir::{BinOpKind, Expr, LoopIR, UnaryOpKind};
 use crate::error::JitError;

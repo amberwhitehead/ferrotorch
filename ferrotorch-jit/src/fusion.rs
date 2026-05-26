@@ -32,6 +32,22 @@
 //! ```
 //!
 //! Use [`is_fusion_enabled`] to query the current state.
+//!
+//! ## REQ status (per `.design/ferrotorch-jit/fusion.md`)
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 | SHIPPED | `pub enum FusedOp`; consumer: re-export at `ferrotorch-jit/src/lib.rs:103-107` + `ferrotorch-jit/src/fusion_gpu.rs:38` `use crate::fusion::FusedChain;` (which is `Vec<FusedOp>`). |
+//! | REQ-2 | SHIPPED | `pub struct FusedChain`; consumer: re-export at `lib.rs:103-107` + `fusion_gpu.rs:38` (every `apply_fused_gpu` takes `&FusedChain`). |
+//! | REQ-3 | SHIPPED | `pub fn execute_cpu` on `impl FusedChain`; consumer: `pub fn apply_fused` in this file calls `chain.execute_cpu(data)?` in the CPU arm. |
+//! | REQ-4 | SHIPPED | `pub fn generate_ptx` + `pub fn generate_ptx_named`; consumer: `fusion_gpu.rs:117` `let ptx = chain.generate_ptx_named(FUSED_F32_KERNEL_NAME)?;` in the f32 GPU path. |
+//! | REQ-5 | SHIPPED | `pub fn generate_cuda_source_f64_named`; consumer: `fusion_gpu.rs:196` `let cuda_source = chain.generate_cuda_source_f64_named(FUSED_F64_KERNEL_NAME)?;` in the f64 GPU path. |
+//! | REQ-6 | SHIPPED | `pub fn generate_c`; consumer: re-export at `lib.rs:103-107` (grandfathered boundary public API per goal.md S5). |
+//! | REQ-7 | SHIPPED | `pub fn apply_fused`; consumer: re-export at `lib.rs:103-107` — canonical tensor-level entry point. |
+//! | REQ-8 | SHIPPED | `pub fn with_fusion` + `pub fn is_fusion_enabled` + thread-local `FUSION_ENABLED`; consumer: re-export at `lib.rs:103-107`. |
+//! | REQ-9 | SHIPPED | `pub enum ReductionKind` + `pub fn generate_reduction_c` + `pub fn generate_reduction_ptx`; consumer: re-export at `lib.rs:103-107`. |
+//! | REQ-10 | SHIPPED | `fn validate_identifier`; consumer: invoked by every public emitter in this file (`generate_ptx_named`, `generate_cuda_source_f64_named`, `generate_c`, `generate_reduction_c`, `generate_reduction_ptx`). |
+//! | REQ-11 | SHIPPED | `pub fn estimate_numel_for_inputs` + `pub fn estimate_matmul_dims`; consumer: re-export at `lib.rs:103-107`. |
 
 use std::cell::Cell;
 use std::fmt;

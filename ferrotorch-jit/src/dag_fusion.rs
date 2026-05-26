@@ -26,6 +26,19 @@
 //! b = relu(a)     # group 0 (fuses with add)
 //! c = sum(b)      # group 1 (reduction, standalone)
 //! ```
+//!
+//! ## REQ status (per `.design/ferrotorch-jit/dag_fusion.md`)
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 | SHIPPED | `pub struct FusionGroup`; consumer: re-export at `ferrotorch-jit/src/lib.rs:97` + `ferrotorch-jit/src/codegen.rs:834` iterates `for (i, (group, loops)) in groups.iter().zip(loops_per_group.iter()).enumerate()`. |
+//! | REQ-2 | SHIPPED | `pub enum FusionGroupKind`; consumer: re-export at `lib.rs:97` + `codegen.rs:1209` `if group.kind != FusionGroupKind::Elementwise { return Ok(None); }` in `try_jit_compile_cpu_rust`. |
+//! | REQ-3 | SHIPPED | `pub fn find_fusion_groups`; consumer: `codegen.rs:823` `let groups = crate::dag_fusion::find_fusion_groups(graph);` + `codegen.rs:1204` (JIT path). |
+//! | REQ-4 | SHIPPED | `pub fn fuse_dag`; consumer: `codegen.rs:824` `let loops_per_group = crate::dag_fusion::fuse_dag(&groups, graph);` + `codegen.rs:1294` (JIT path). |
+//! | REQ-5 | SHIPPED | `fn classify_op`; consumer: invoked by `find_fusion_groups` for every non-Input/Constant/Output node. |
+//! | REQ-6 | SHIPPED | `fn find_mergeable_group`; consumer: invoked by `find_fusion_groups` for every elementwise candidate. |
+//! | REQ-7 | SHIPPED | external-I/O scan loop at the bottom of `pub fn find_fusion_groups`; consumer: `codegen.rs:836` + `codegen.rs:1247` read `group.external_inputs`. |
+//! | REQ-8 | SHIPPED | `fn estimate_numel_for_inputs` + `fn estimate_matmul_dims`; consumer: called from the `lower_group` helper (transitively via `fuse_dag` from `codegen.rs:824`). |
 
 use std::collections::{HashMap, HashSet};
 

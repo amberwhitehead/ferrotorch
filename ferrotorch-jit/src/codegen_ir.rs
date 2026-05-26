@@ -11,6 +11,20 @@
 //! ```text
 //! IrGraph  -->  FusionGroup[]  -->  LoopIR[]  -->  {Rust, C, CUDA, PTX} source
 //! ```
+//!
+//! ## REQ status (per `.design/ferrotorch-jit/codegen_ir.md`)
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 | SHIPPED | `pub enum Expr`; consumer: re-export at `ferrotorch-jit/src/lib.rs:95` + `codegen_gpu.rs:43`, `codegen_cpu.rs:12`, `codegen_jit.rs:73`. |
+//! | REQ-2 | SHIPPED | `pub enum BinOpKind`; consumer: re-export at `lib.rs:95` + `codegen_gpu.rs:43` + `codegen_jit.rs:73`. |
+//! | REQ-3 | SHIPPED | `pub enum UnaryOpKind`; consumer: re-export at `lib.rs:95` + `codegen_cpu.rs:12` + `codegen_gpu.rs:43` + `codegen_jit.rs:73`. |
+//! | REQ-4 | SHIPPED | `pub enum LoopIR`; consumer: re-export at `lib.rs:95` + every codegen backend imports it. |
+//! | REQ-5 | SHIPPED | builder methods on `impl Expr`; consumer: every `lower_*` helper uses them and the result flows through `dag_fusion::fuse_dag` from `codegen.rs:824`. |
+//! | REQ-6 | SHIPPED | `pub fn ir_op_to_unary` / `ir_op_to_binary` / `is_*_elementwise` / `is_reduction`; consumer: `lower_to_loops` uses them on every fusion-group lowering. |
+//! | REQ-7 | SHIPPED | `pub fn lower_to_loops`; consumer: `ferrotorch-jit/src/dag_fusion.rs:405` `codegen_ir::lower_to_loops(&group.ops, &in_refs, "out", numel)` from the `lower_group` helper. |
+//! | REQ-8 | SHIPPED | per-op `lower_*` helpers including `pub fn lower_matmul`; consumer: `dag_fusion.rs:416` calls `codegen_ir::lower_matmul("in0", "in1", "out", m, k, n)`. |
+//! | REQ-9 | SHIPPED | `fn emit_chunked_reduction_prelude` + `REDUCTION_CHUNK_WIDTH/THRESHOLD` constants; consumer: `lower_sum_reduction` / `lower_mean_reduction` / `lower_prod_reduction` invoke it for every reduction lowered via `dag_fusion::fuse_dag` from `codegen.rs:824`. |
 
 use std::fmt;
 
