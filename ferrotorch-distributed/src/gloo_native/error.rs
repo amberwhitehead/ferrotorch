@@ -9,6 +9,13 @@
 //! introduced here, and exists solely so the rest of `gloo_native::` reads
 //! `-> GlooResult<T>` instead of the longer
 //! `Result<T, DistributedError>`.
+//!
+//! ## REQ status (per `.design/ferrotorch-distributed/gloo_native/error.md`)
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 (GlooResult type alias) | SHIPPED | `pub(super) type GlooResult<T>` in `gloo_native/error.rs`; consumers: every sibling sub-module — `gloo_native/mod.rs` (`use self::error::GlooResult;` and every internal helper returns the alias), `gloo_native/transport.rs`, `gloo_native/connect.rs`, `gloo_native/collectives.rs`. |
+//! | REQ-2 (re-uses DistributedError, no GlooError enum) | SHIPPED | this module's doc comment documents the re-use decision; consumer: every `gloo_native::*` error site produces a `DistributedError` variant directly (e.g., `DistributedError::Io`, `DistributedError::SizeMismatch`, `DistributedError::LockPoisoned`) in `transport.rs`, `connect.rs`, and `mod.rs`. No `enum GlooError` exists in the crate. |
 
 use crate::error::DistributedError;
 

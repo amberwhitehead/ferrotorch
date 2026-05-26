@@ -29,6 +29,18 @@
 //! than `gloo-native`) to avoid a breaking rename of #459's published
 //! surface — see the `_surface_inventory.toml` entries and the
 //! `is_gloo_available_matches_fixture` conformance test.
+//!
+//! ## REQ status (per `.design/ferrotorch-distributed/gloo_backend.md`)
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 (is_gloo_available) | SHIPPED | `pub fn is_gloo_available` in `gloo_backend.rs`; consumer: re-export in `lib.rs` mirroring upstream `torch.distributed.is_gloo_available` in `torch/distributed/distributed_c10d.py`. |
+//! | REQ-2 (GlooBackend struct) | SHIPPED | `pub struct GlooBackend` in `gloo_backend.rs`; consumer: `pub use gloo_backend::{GlooBackend, is_gloo_available}` in `lib.rs`. |
+//! | REQ-3 (new constructor) | SHIPPED | `pub fn GlooBackend::new` in `gloo_backend.rs`; consumer: re-export in `lib.rs` plus feature-on rendezvous reuse from `mpi_backend.rs` / `ucc_backend.rs` via shared `GlooBackendInner::new`. |
+//! | REQ-4 (from_env constructor) | SHIPPED | `pub fn GlooBackend::from_env` in `gloo_backend.rs`; consumer: re-export in `lib.rs`. |
+//! | REQ-5 (Backend trait impl) | SHIPPED | `impl Backend for GlooBackend` in `gloo_backend.rs`; consumer: every `&dyn Backend`-accepting function in `collective.rs` and `p2p.rs`. |
+//! | REQ-6 (ring/tree direct entry points) | SHIPPED | feature-gated `pub fn ring_allreduce_sum_f32` / `pub fn tree_broadcast_f32` in `gloo_backend.rs`; consumer: feature-on builds reach the inherent methods through the `lib.rs` re-export. |
+//! | REQ-7 (BackendUnavailable discrimination) | SHIPPED | `BackendUnavailable { backend: "gloo" }` raised in `new` / `from_env` / `send` / `recv` / `recv_timeout` / `barrier` in `gloo_backend.rs`; consumer: `_surface.json` conformance fixture in `ferrotorch-core/tests/conformance/`. |
 
 use std::time::Duration;
 

@@ -57,6 +57,20 @@
 //! compiled with the `gpu` feature), which take a [`GpuTensor`] and
 //! dispatch through `gpu_collective` so the device pointer never round-
 //! trips through the host.
+//!
+//! ## REQ status (per `.design/ferrotorch-distributed/ucc_backend.md`)
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 (is_ucc_available) | SHIPPED | `pub fn is_ucc_available` in `ucc_backend.rs`; consumer: `pub use ucc_backend::{UccBackend, is_ucc_available};` in `lib.rs`. |
+//! | REQ-2 (UccBackend struct + hand-rolled Debug) | SHIPPED | `pub struct UccBackend` + `impl Debug` in `ucc_backend.rs`; consumer: re-export at `lib.rs`. |
+//! | REQ-3 (new constructor) | SHIPPED | `pub fn UccBackend::new` in `ucc_backend.rs`; consumer: re-export at `lib.rs`. |
+//! | REQ-4 (from_env constructor) | SHIPPED | `pub fn UccBackend::from_env` in `ucc_backend.rs`; consumer: re-export at `lib.rs`. |
+//! | REQ-5 (with_nccl GPU attachment) | SHIPPED | `pub fn UccBackend::with_nccl` (under `#[cfg(feature = "nccl")]`) in `ucc_backend.rs`; consumer: inherent `gpu_allreduce` / `gpu_broadcast` methods (same file) read the slot it populates; reachable through the `lib.rs` re-export for `ucc-native-gpu` builds. |
+//! | REQ-6 (CPU allreduce/broadcast inherent methods) | SHIPPED | `pub fn UccBackend::allreduce_sum_f32` / `pub fn UccBackend::broadcast_f32` in `ucc_backend.rs`; consumer: feature-on builds reach them through the `lib.rs` re-export. |
+//! | REQ-7 (gpu_allreduce / gpu_broadcast routing) | SHIPPED | `pub fn UccBackend::gpu_allreduce` / `pub fn UccBackend::gpu_broadcast` in `ucc_backend.rs`; consumer: feature-on builds reach them through the `lib.rs` re-export; the methods invoke `gpu_collective::gpu_allreduce` / `gpu_broadcast` from `gpu_collective.rs`. |
+//! | REQ-8 (Backend trait impl) | SHIPPED | `impl Backend for UccBackend` in `ucc_backend.rs`; consumer: every `&dyn Backend`-accepting function in `collective.rs` / `p2p.rs` can accept `UccBackend`. |
+//! | REQ-9 (BackendUnavailable discrimination) | SHIPPED | `BackendUnavailable { backend: "ucc" }` raised in every feature-off branch in `ucc_backend.rs`; consumer: `_surface.json` conformance fixture plus `ucc_unavailable_without_feature` (in-file) test. |
 
 use std::time::Duration;
 

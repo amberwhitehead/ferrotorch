@@ -22,6 +22,19 @@
 //! by the trait-level [`Backend`](crate::backend::Backend)
 //! collectives in [`crate::collective`] without paying a typed-tensor
 //! dependency at this layer.
+//!
+//! ## REQ status (per `.design/ferrotorch-distributed/gloo_native/collectives.md`)
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 (RingTransport trait) | SHIPPED | `pub(super) trait RingTransport: Sync` in `gloo_native/collectives.rs`; consumer: `impl RingTransport for GlooBackendInner` in `gloo_native/mod.rs`. |
+//! | REQ-2 (ring_allreduce_sum_f32_bytes) | SHIPPED | `pub(super) fn ring_allreduce_sum_f32_bytes` in `gloo_native/collectives.rs`; consumer: `gloo_native/mod.rs` `pub fn ring_allreduce_sum_f32_with_timeout` invokes it; that is consumed by `GlooBackend::ring_allreduce_sum_f32`, `MpiBackend::allreduce_sum_f32`, `UccBackend::allreduce_sum_f32`. |
+//! | REQ-3 (chunk_ranges cover-once) | SHIPPED | `fn chunk_ranges` and `const fn bytes_of` in `gloo_native/collectives.rs`; consumer: `pub(super) fn ring_allreduce_sum_f32_bytes` (same file) calls `chunk_ranges` and `bytes_of` at every step. |
+//! | REQ-4 (scoped-thread send/recv) | SHIPPED | `fn send_recv` (scoped-thread shape) in `gloo_native/collectives.rs`; consumer: `pub(super) fn ring_allreduce_sum_f32_bytes` calls `send_recv` at every ring step. Disjoint-locks safety relies on `PeerConn`'s split halves in `gloo_native/connect.rs`. |
+//! | REQ-5 (tree_broadcast_f32_bytes) | SHIPPED | `pub(super) fn tree_broadcast_f32_bytes` in `gloo_native/collectives.rs`; consumer: `gloo_native/mod.rs` `pub fn tree_broadcast_f32_with_timeout` invokes it; that is consumed by `gloo_backend.rs`, `mpi_backend.rs`, `ucc_backend.rs` broadcast methods. |
+//! | REQ-6 (ring_barrier two-wave) | SHIPPED | `pub(super) fn ring_barrier` in `gloo_native/collectives.rs`; consumer: `gloo_native/mod.rs` `impl Backend for GlooBackendInner::barrier` invokes `ring_barrier(self, DEFAULT_GLOO_TIMEOUT)`. |
+//! | REQ-7 (edge cases: world=1, empty, %4) | SHIPPED | early-return guards at the top of `ring_allreduce_sum_f32_bytes` in `gloo_native/collectives.rs`; consumer: every collective invocation through `GlooBackendInner` traverses these guards. |
+//! | REQ-8 (accumulate_f32_inplace) | SHIPPED | `fn accumulate_f32_inplace` in `gloo_native/collectives.rs`; consumer: `pub(super) fn ring_allreduce_sum_f32_bytes` (same file) calls `accumulate_f32_inplace` at every scatter-reduce step. |
 
 use std::time::Duration;
 

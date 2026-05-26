@@ -50,6 +50,18 @@
 //! the same `cfg!(any(feature = "mpi-native", feature = "mpi-backend"))`
 //! predicate — they collapse to the same `cfg` because the feature graph
 //! forces both flags on together.
+//!
+//! ## REQ status (per `.design/ferrotorch-distributed/mpi_backend.md`)
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 (is_mpi_available) | SHIPPED | `pub fn is_mpi_available` in `mpi_backend.rs`; consumer: `pub use mpi_backend::{MpiBackend, is_mpi_available};` in `lib.rs`. |
+//! | REQ-2 (MpiBackend struct) | SHIPPED | `pub struct MpiBackend` in `mpi_backend.rs`; consumer: re-export in `lib.rs` reaches `ferrotorch/src/lib.rs`. |
+//! | REQ-3 (new constructor) | SHIPPED | `pub fn MpiBackend::new` in `mpi_backend.rs`; consumer: re-export in `lib.rs`; feature-on builds reach `gloo_native::GlooBackendInner::new` through it. |
+//! | REQ-4 (from_env env-var priority) | SHIPPED | `pub fn MpiBackend::from_env` and `mod native::mpi_rendezvous_from_env` in `mpi_backend.rs`; consumer: re-export in `lib.rs`. |
+//! | REQ-5 (Backend trait impl) | SHIPPED | `impl Backend for MpiBackend` in `mpi_backend.rs`; consumer: every `&dyn Backend`-accepting function in `collective.rs` / `p2p.rs`. |
+//! | REQ-6 (MPI-style allreduce/broadcast inherent methods) | SHIPPED | feature-gated `pub fn MpiBackend::allreduce_sum_f32` / `pub fn MpiBackend::broadcast_f32` in `mpi_backend.rs`; consumer: feature-on builds reach the inherent methods through the `lib.rs` re-export. |
+//! | REQ-7 (BackendUnavailable discrimination) | SHIPPED | `BackendUnavailable { backend: "mpi" }` raised in every feature-off branch in `mpi_backend.rs`; consumer: `_surface.json` conformance fixture plus `mpi_unavailable_without_feature` (in-file) test. |
 
 use std::time::Duration;
 

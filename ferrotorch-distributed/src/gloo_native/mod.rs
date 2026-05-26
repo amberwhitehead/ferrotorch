@@ -11,6 +11,20 @@
 //! enabled, [`super::GlooBackend::new`] returns
 //! [`DistributedError::BackendUnavailable`](crate::error::DistributedError::BackendUnavailable)
 //! to keep the public API contract from #459 intact.
+//!
+//! ## REQ status (per `.design/ferrotorch-distributed/gloo_native/mod.md`)
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 (GlooBackendInner struct) | SHIPPED | `pub struct GlooBackendInner` in `gloo_native/mod.rs`; consumers: `gloo_backend.rs` (`GlooBackend.inner`), `mpi_backend.rs` (`MpiBackend.inner`), `ucc_backend.rs` (`UccBackend.cpu_inner`). |
+//! | REQ-2 (new constructor) | SHIPPED | `pub fn GlooBackendInner::new` in `gloo_native/mod.rs`; consumers: `GlooBackend::new` / `from_env` in `gloo_backend.rs`, `MpiBackend::new` in `mpi_backend.rs`, `UccBackend::new` in `ucc_backend.rs`. |
+//! | REQ-3 (DEFAULT_GLOO_TIMEOUT) | SHIPPED | `pub const DEFAULT_GLOO_TIMEOUT` in `gloo_native/mod.rs`; consumer: `impl Backend for GlooBackendInner::recv` / `::barrier` (same file). |
+//! | REQ-4 (ring_allreduce_sum_f32 entry points) | SHIPPED | `pub fn ring_allreduce_sum_f32` and `pub fn ring_allreduce_sum_f32_with_timeout` in `gloo_native/mod.rs`; consumers: `GlooBackend::ring_allreduce_sum_f32` in `gloo_backend.rs`, `MpiBackend::allreduce_sum_f32` in `mpi_backend.rs`, `UccBackend::allreduce_sum_f32` in `ucc_backend.rs`. |
+//! | REQ-5 (tree_broadcast_f32 entry points) | SHIPPED | `pub fn tree_broadcast_f32` and `pub fn tree_broadcast_f32_with_timeout` in `gloo_native/mod.rs`; consumers: `gloo_backend.rs`, `mpi_backend.rs`, `ucc_backend.rs` broadcast methods. |
+//! | REQ-6 (RingTransport trait impl) | SHIPPED | `impl RingTransport for GlooBackendInner` in `gloo_native/mod.rs`; consumer: the `_with_timeout` entry points (same file) pass `self` as `&dyn RingTransport` into `collectives::ring_allreduce_sum_f32_bytes` / `tree_broadcast_f32_bytes` / `ring_barrier`. |
+//! | REQ-7 (Backend trait impl) | SHIPPED | `impl Backend for GlooBackendInner` in `gloo_native/mod.rs`; consumer: `impl Backend for GlooBackend` in `gloo_backend.rs` forwards every method to the inner; same for `mpi_backend.rs` and `ucc_backend.rs`. |
+//! | REQ-8 (GlooRendezvousConfig re-export) | SHIPPED | `pub use self::connect::RendezvousConfig as GlooRendezvousConfig` in `gloo_native/mod.rs`; consumers: `mpi_backend.rs` and `ucc_backend.rs` import `crate::gloo_native::GlooRendezvousConfig`. |
+//! | REQ-9 (cfg-gated submodule visibility) | SHIPPED | `pub(crate) mod gloo_native` under `#[cfg(feature = "gloo-backend")]` in `lib.rs`; consumers: `mpi_backend.rs` / `ucc_backend.rs` import via `crate::gloo_native::...` paths that resolve under the feature. |
 
 use std::time::Duration;
 

@@ -8,6 +8,18 @@
 //! # Feature gate
 //!
 //! Requires the `nccl` feature (which implies `gpu`).
+//!
+//! ## REQ status (per `.design/ferrotorch-distributed/nccl_collective.md`)
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 (nccl_allreduce auto-detect) | SHIPPED | `pub fn nccl_allreduce` in `nccl_collective.rs`; consumer: `pub use nccl_collective::{nccl_allreduce, ...}` in `lib.rs` reaches `ferrotorch/src/lib.rs`. |
+//! | REQ-2 (nccl_allreduce_dtype) | SHIPPED | `pub fn nccl_allreduce_dtype` in `nccl_collective.rs`; consumer: `lib.rs` re-export; `nccl_allreduce` itself dispatches to `nccl_allreduce_dtype`. |
+//! | REQ-3 (nccl_broadcast + _dtype) | SHIPPED | `pub fn nccl_broadcast` / `pub fn nccl_broadcast_dtype` in `nccl_collective.rs`; consumer: `lib.rs` re-export. |
+//! | REQ-4 (nccl_all_gather + _dtype) | SHIPPED | `pub fn nccl_all_gather` / `pub fn nccl_all_gather_dtype` in `nccl_collective.rs`; consumer: `lib.rs` re-export. |
+//! | REQ-5 (nccl_reduce_scatter + _dtype) | SHIPPED | `pub fn nccl_reduce_scatter` / `pub fn nccl_reduce_scatter_dtype` in `nccl_collective.rs`; consumer: `lib.rs` re-export. |
+//! | REQ-6 (infer_dtype helper) | SHIPPED | `fn infer_dtype` in `nccl_collective.rs`; consumer: every auto-detect entry point (`nccl_allreduce`, `nccl_broadcast`, `nccl_all_gather`, `nccl_reduce_scatter`) in the same file invokes it. |
+//! | REQ-7 (get_ptr / get_ptr_mut helpers) | SHIPPED | `fn get_ptr` / `fn get_ptr_mut` in `nccl_collective.rs`; consumer: every `*_dtype` helper in the same file uses them to extract device pointers before the FFI call. |
 
 use std::ffi::c_void;
 

@@ -49,6 +49,18 @@
 //! ```toml
 //! ferrotorch-distributed = { version = "0.1", features = ["gpu"] }
 //! ```
+//!
+//! ## REQ status (per `.design/ferrotorch-distributed/gpu_collective.md`)
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 (gpu_allreduce dispatch) | SHIPPED | `pub fn gpu_allreduce` in `gpu_collective.rs`; consumer: `#[cfg(feature = "gpu")] pub use gpu_collective::{gpu_allreduce, gpu_broadcast};` in `lib.rs`; `ucc_backend.rs` `UccBackend::gpu_allreduce` invokes `crate::gpu_collective::gpu_allreduce`. |
+//! | REQ-2 (gpu_broadcast dispatch) | SHIPPED | `pub fn gpu_broadcast` in `gpu_collective.rs`; consumer: `lib.rs` re-export; `ucc_backend.rs` `UccBackend::gpu_broadcast` invokes it. |
+//! | REQ-3 (NCCL fast path) | SHIPPED | `fn nccl_path_allreduce` / `fn nccl_path_broadcast` (both `#[cfg(feature = "nccl")]`) in `gpu_collective.rs`; consumer: `pub fn gpu_allreduce` / `pub fn gpu_broadcast` (same file) invoke them when `backend.as_nccl_backend()` returns `Some`. |
+//! | REQ-4 (CPU fallback path) | SHIPPED | `fn cpu_path_allreduce` / `fn cpu_path_broadcast` in `gpu_collective.rs`; consumer: `pub fn gpu_allreduce` / `pub fn gpu_broadcast` (same file) invoke them when the env-var fallback is enabled. |
+//! | REQ-5 (tracing::warn on fallback) | SHIPPED | `tracing::warn!(target: "ferrotorch::gpu_fallback", ...)` inside `pub fn gpu_allreduce` and `pub fn gpu_broadcast` in `gpu_collective.rs`; consumer: implicit — every host-round-trip dispatch through these public fns emits the warn. |
+//! | REQ-6 (default UnsupportedOp matches PyTorch) | SHIPPED | `Err(DistributedError::UnsupportedOp { message: "...nccl feature...FERROTORCH_ENABLE_GPU_FALLBACK..." })` in `pub fn gpu_allreduce` / `pub fn gpu_broadcast` in `gpu_collective.rs`; consumer: matches PyTorch parity behaviour; user-observable through the public dispatch. |
+//! | REQ-7 (gpu feature gate) | SHIPPED | `#[cfg(feature = "gpu")] pub mod gpu_collective;` in `lib.rs`; consumer: the gate prevents the module from compiling on default builds where `GpuTensor` is not available; feature-on builds wire it through the `lib.rs` re-export. |
 
 use ferrotorch_core::FerrotorchResult;
 use ferrotorch_gpu::{GpuFloat, GpuTensor, tensor_to_cpu, tensor_to_gpu};

@@ -18,6 +18,23 @@
 //! ```toml
 //! ferrotorch-distributed = { version = "0.2", features = ["nccl"] }
 //! ```
+//!
+//! ## REQ status (per `.design/ferrotorch-distributed/nccl_backend.md`)
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 (NcclBackend struct + Send/Sync) | SHIPPED | `pub struct NcclBackend` + `unsafe impl Send/Sync` in `nccl_backend.rs`; consumer: `hybrid_backend.rs` `HybridBackend.nccl: NcclBackend` field. |
+//! | REQ-2 (new constructor) | SHIPPED | `pub fn NcclBackend::new` in `nccl_backend.rs`; consumer: `hybrid_backend.rs` `HybridBackend::new` invokes `NcclBackend::new(rank, world_size, unique_id)?`. |
+//! | REQ-3 (with_stream constructor) | SHIPPED | `pub fn NcclBackend::with_stream` in `nccl_backend.rs`; consumer: re-export at `lib.rs` (`pub use nccl_backend::{NcclBackend, is_nccl_available};`) reaches `ferrotorch/src/lib.rs`. |
+//! | REQ-4 (synchronize) | SHIPPED | `pub fn NcclBackend::synchronize` in `nccl_backend.rs`; consumer: `gpu_collective.rs` `fn nccl_path_allreduce` / `fn nccl_path_broadcast` call `nccl.synchronize()?`; `hybrid_backend.rs` `pub fn synchronize_nccl` forwards. |
+//! | REQ-5 (allreduce_raw) | SHIPPED | `pub unsafe fn allreduce_raw` in `nccl_backend.rs`; consumer: `nccl_collective.rs` `pub fn nccl_allreduce_dtype` and `gpu_collective.rs` `fn nccl_path_allreduce` both invoke it. |
+//! | REQ-6 (broadcast_raw) | SHIPPED | `pub unsafe fn broadcast_raw` in `nccl_backend.rs`; consumer: `nccl_collective.rs` `pub fn nccl_broadcast_dtype` and `gpu_collective.rs` `fn nccl_path_broadcast`. |
+//! | REQ-7 (all_gather_raw) | SHIPPED | `pub unsafe fn all_gather_raw` in `nccl_backend.rs`; consumer: `nccl_collective.rs` `pub fn nccl_all_gather_dtype` invokes it. |
+//! | REQ-8 (reduce_scatter_raw) | SHIPPED | `pub unsafe fn reduce_scatter_raw` in `nccl_backend.rs`; consumer: `nccl_collective.rs` `pub fn nccl_reduce_scatter_dtype` invokes it. |
+//! | REQ-9 (Backend trait impl + as_nccl_backend downcast) | SHIPPED | `impl Backend for NcclBackend` in `nccl_backend.rs`; consumer: `gpu_collective.rs` `pub fn gpu_allreduce` / `pub fn gpu_broadcast` invoke `backend.as_nccl_backend()` to detect and route through the NCCL fast path. |
+//! | REQ-10 (Drop) | SHIPPED | `impl Drop for NcclBackend` in `nccl_backend.rs`; consumer: implicit — every drop site for an `NcclBackend` (e.g., `HybridBackend` drop in `hybrid_backend.rs`) runs the destroy path. |
+//! | REQ-11 (reduce_op_to_nccl) | SHIPPED | `pub fn reduce_op_to_nccl` in `nccl_backend.rs`; consumer: `nccl_collective.rs` `pub fn nccl_allreduce_dtype` / `nccl_reduce_scatter_dtype` and `gpu_collective.rs` `fn nccl_path_allreduce` all call `reduce_op_to_nccl(op)`. |
+//! | REQ-12 (is_nccl_available) | SHIPPED | `pub fn is_nccl_available` in `nccl_backend.rs`; consumer: re-export at `lib.rs` (`pub use nccl_backend::{NcclBackend, is_nccl_available};`) reaches `ferrotorch/src/lib.rs`. |
 
 use std::ffi::c_void;
 use std::sync::Mutex;

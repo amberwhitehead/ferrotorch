@@ -8,6 +8,23 @@
 //!
 //! All functions in this module are inherently unsafe (raw C FFI). The safe
 //! wrappers live in [`crate::nccl_backend`].
+//!
+//! ## REQ status (per `.design/ferrotorch-distributed/nccl_sys.md`)
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 (NcclComm + NcclUniqueId types) | SHIPPED | `pub type NcclComm` and `pub struct NcclUniqueId` in `nccl_sys.rs`; consumer: `nccl_backend.rs` `pub struct NcclBackend.comm: Mutex<NcclComm>` and `pub fn NcclBackend::new(...)` takes `unique_id: NcclUniqueId`. |
+//! | REQ-2 (NcclDataType + NcclRedOp enums) | SHIPPED | `pub enum NcclDataType` / `pub enum NcclRedOp` in `nccl_sys.rs`; consumer: `nccl_backend.rs` `pub unsafe fn allreduce_raw` takes `datatype: NcclDataType` and `op: NcclRedOp`; `nccl_collective.rs` `fn infer_dtype` returns `NcclDataType`. |
+//! | REQ-3 (NcclResult + ok conversion) | SHIPPED | `pub enum NcclResult` and `impl NcclResult::ok` in `nccl_sys.rs`; consumer: every `pub unsafe fn` in the same file routes the FFI return through `NcclResult::ok`. |
+//! | REQ-4 (NcclError taxonomy) | SHIPPED | `pub enum NcclError` in `nccl_sys.rs`; consumer: `nccl_backend.rs` `pub fn NcclBackend::new` maps `NcclError` to `DistributedError::Io { message: format!("NCCL comm_init_rank failed: {e}") }`. |
+//! | REQ-5 (NcclFunctions fn-pointer table) | SHIPPED | `struct NcclFunctions` (11 fn-pointer fields) in `nccl_sys.rs`; consumer: `fn nccl()` (same file) returns `&'static NcclFunctions`; every public `unsafe fn` dispatches through the table. |
+//! | REQ-6 (NCCL_LIB OnceLock + dlopen) | SHIPPED | `static NCCL_LIB: OnceLock<...>` and `fn load_nccl` in `nccl_sys.rs`; consumer: `fn nccl()` (same file) is the only access path; every public wrapper goes through it. |
+//! | REQ-7 (get_unique_id) | SHIPPED | `pub fn get_unique_id` in `nccl_sys.rs`; consumer: production callers (rank 0 of any `NcclBackend::new` setup) call `nccl_sys::get_unique_id` and TCP-distribute the result; reachable via `lib.rs` (`pub use nccl_sys::NcclUniqueId;`). |
+//! | REQ-8 (comm_init_rank) | SHIPPED | `pub fn comm_init_rank` in `nccl_sys.rs`; consumer: `nccl_backend.rs` `pub fn NcclBackend::new` and `pub fn with_stream` both invoke `nccl_sys::comm_init_rank(world_size as i32, rank as i32, unique_id)?`. |
+//! | REQ-9 (comm_destroy) | SHIPPED | `pub unsafe fn comm_destroy` in `nccl_sys.rs`; consumer: `nccl_backend.rs` `impl Drop for NcclBackend` calls `nccl_sys::comm_destroy(*comm)` under the mutex guard. |
+//! | REQ-10 (collective FFI wrappers) | SHIPPED | `pub unsafe fn all_reduce / broadcast / all_gather / reduce_scatter / send / recv` in `nccl_sys.rs`; consumer: every `NcclBackend::*_raw` method in `nccl_backend.rs` invokes the corresponding `nccl_sys::*` wrapper; `impl Backend for NcclBackend::barrier` invokes `nccl_sys::all_reduce` with count=0. |
+//! | REQ-11 (group_start / group_end) | SHIPPED | `pub fn group_start` / `pub fn group_end` in `nccl_sys.rs`; consumer: loaded into `NcclFunctions` (REQ-5) so the public wrappers dispatch through the table; reachable from any consumer building with the `nccl` feature. |
+//! | REQ-12 (is_available dlopen probe) | SHIPPED | `pub fn is_available` in `nccl_sys.rs`; consumer: `nccl_backend.rs` `pub fn is_nccl_available` invokes `nccl_sys::is_available()`. |
 
 use std::ffi::c_void;
 use std::sync::OnceLock;

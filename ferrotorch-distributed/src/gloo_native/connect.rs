@@ -25,6 +25,19 @@
 //! frames). It is **not** a replacement for production rendezvous services
 //! (etcd / `c10d::TCPStore`) — the goal is parity with PyTorch's env-var
 //! convention so users can drop ferrotorch into the same launch scripts.
+//!
+//! ## REQ status (per `.design/ferrotorch-distributed/gloo_native/connect.md`)
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 (RendezvousConfig struct) | SHIPPED | `pub struct RendezvousConfig` in `gloo_native/connect.rs`; consumer: `gloo_native/mod.rs` re-exports as `GlooRendezvousConfig`; constructed in `gloo_backend.rs` `GlooBackend::new`, `mpi_backend.rs` `MpiBackend::new`, `ucc_backend.rs` `UccBackend::new`. |
+//! | REQ-2 (from_env reads PyTorch env vars) | SHIPPED | `pub fn RendezvousConfig::from_env` in `gloo_native/connect.rs`; consumer: `gloo_backend.rs` `GlooBackend::from_env` invokes `GlooRendezvousConfig::from_env()`. |
+//! | REQ-3 (PeerConn split halves) | SHIPPED | `pub(super) struct PeerConn` in `gloo_native/connect.rs`; consumer: `gloo_native/mod.rs` `fn conn` returns `&PeerConn`, used by `send_inner` / `recv_inner` to acquire the writer/reader halves. |
+//! | REQ-4 (PeerStreams slot vector) | SHIPPED | `pub(super) type PeerStreams` in `gloo_native/connect.rs`; consumer: `gloo_native/mod.rs` `GlooBackendInner.connections: PeerStreams`. |
+//! | REQ-5 (rendezvous entry point) | SHIPPED | `pub(super) fn rendezvous` in `gloo_native/connect.rs`; consumer: `gloo_native/mod.rs` `GlooBackendInner::new` calls `rendezvous(cfg)?`. |
+//! | REQ-6 (3-step master/worker/full-mesh) | SHIPPED | `fn run_master` / `fn run_worker` / `fn form_full_mesh` in `gloo_native/connect.rs`; consumer: `pub(super) fn rendezvous` (same file) dispatches to them; tests `rendezvous_full_mesh_n2` and `_n4_all_slots_filled` exercise both protocol ends. |
+//! | REQ-7 (bounded retry on connect-to-master) | SHIPPED | `RENDEZVOUS_RETRY_TIMEOUT` / `RENDEZVOUS_RETRY_INTERVAL` constants and retry loop in `fn run_worker` in `gloo_native/connect.rs`; consumer: every multi-rank `GlooBackendInner::new` path exercises it (race-tolerant by design). |
+//! | REQ-8 (IPv4-only peer ad) | SHIPPED | `fn encode_peer_ad` matches `SocketAddr::V4` / rejects `V6` with `Io` error in `gloo_native/connect.rs`; consumer: `pub(super) fn rendezvous` invokes it; verified by `peer_ad_round_trip` test. |
 
 use std::io::{Read, Write};
 use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4, TcpListener, TcpStream};

@@ -8,6 +8,17 @@
 //! This module is intentionally tiny: it does *not* know about ranks,
 //! topology, or collective ops. Each public helper takes a single
 //! [`TcpStream`] (or a mutable reference to one) and a byte buffer.
+//!
+//! ## REQ status (per `.design/ferrotorch-distributed/gloo_native/transport.md`)
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 (LEN_PREFIX_BYTES const) | SHIPPED | `pub(crate) const LEN_PREFIX_BYTES` in `gloo_native/transport.rs`; consumer: `send_msg` / `recv_msg_into` (same file) document the wire-protocol shape via the const. |
+//! | REQ-2 (send_msg) | SHIPPED | `pub(crate) fn send_msg` in `gloo_native/transport.rs`; consumer: `gloo_native/mod.rs` `fn send_inner` invokes `send_msg(&mut stream, data)`. |
+//! | REQ-3 (recv_msg_into) | SHIPPED | `pub(crate) fn recv_msg_into` in `gloo_native/transport.rs`; consumer: `gloo_native/mod.rs` `fn recv_inner` invokes it inside the `with_read_timeout` closure. |
+//! | REQ-4 (with_read_timeout) | SHIPPED | `pub(crate) fn with_read_timeout` in `gloo_native/transport.rs`; consumer: `gloo_native/mod.rs` `fn recv_inner` wraps every recv in `with_read_timeout(&mut stream, timeout, |s| recv_msg_into(s, dst))`. |
+//! | REQ-5 (zero-length frames) | SHIPPED | `if len > 0` guard around the payload read in `send_msg` / `recv_msg_into` in `gloo_native/transport.rs`; consumer: implicit — the framing primitive's invariant is exercised by `zero_length_frame_round_trips` and is required by collective protocols using the byte-level API. |
+//! | REQ-6 (test-only recv_msg helper) | SHIPPED | `#[cfg(test)] pub(crate) fn recv_msg` in `gloo_native/transport.rs`; consumer: not applicable — REQ-6 is a NEGATIVE requirement (production code uses `recv_msg_into`). `#[cfg(test)]` gating itself is the evidence; no production caller exists. |
 
 use std::io::{Read, Write};
 use std::net::TcpStream;
