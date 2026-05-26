@@ -26,6 +26,21 @@
 //! (`ferrotorch-core`, `ferrotorch-jit`, `ferrotorch-cubecl`, etc.). Workspace
 //! `[lints]` is intentionally not used — every crate carries its own
 //! `#![warn/deny(...)]` so the policy lives next to the code it governs.
+//!
+//! ## REQ status (per `.design/ferrotorch/lib.md`)
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 | SHIPPED | impl: crate `//!` doc-comment at top of `ferrotorch/src/lib.rs` mirrors `torch/__init__.py:1-9` module docstring; consumer: rustdoc `no_run` example block in the same docstring (run by `cargo test -p ferrotorch --doc`). |
+//! | REQ-2 | SHIPPED | impl: `pub use ferrotorch_core::*;` at `ferrotorch/src/lib.rs` mirrors `torch/__init__.py:68-141` flat `__all__`; consumer: doctest at the top of this file imports `ferrotorch::{FerrotorchResult, zeros}` directly. |
+//! | REQ-3 | SHIPPED | impl: `pub mod prelude { ... }` in `ferrotorch/src/lib.rs` mirrors `from torch import nn, optim` convention; consumer: the `//!` doc-comment promises `use ferrotorch::prelude::*;` as the canonical one-import entry point — published-crate API contract. |
+//! | REQ-4 | SHIPPED | impl: always-on `pub mod nn` / `pub mod optim` / `pub mod data` / `pub mod vision` in `ferrotorch/src/lib.rs` mirror `torch.nn` / `torch.optim` / `torch.utils.data` / `torchvision`; consumer: `ferrotorch/tests/public_surface.rs:22-25` compile-time pins each path (test harness for the public-API contract is the contract auditor); downstream-of-workspace: `crates.io/ferrotorch` users. |
+//! | REQ-5 | SHIPPED | impl: 11 `#[cfg(feature = "<flag>")] pub mod <name>` blocks in `ferrotorch/src/lib.rs` mirror upstream optional namespaces; consumer: `ferrotorch/Cargo.toml:15-43` enumerates each matching feature flag; the published-crate contract is the boundary consumer per goal.md S5. |
+//! | REQ-6 | SHIPPED | impl: `#[cfg(not(target_env = "msvc"))] #[global_allocator] static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;` in `ferrotorch/src/lib.rs`; consumer: every binary linking the `ferrotorch` crate (e.g. `cargo run --example train_mnist -p ferrotorch` via `ferrotorch/examples/train_mnist.rs`) picks up the allocator via the rustc `#[global_allocator]` mechanism. |
+//! | REQ-7 | SHIPPED | impl: lint baseline block `#![warn(clippy::all, clippy::pedantic)] #![deny(rust_2018_idioms, missing_debug_implementations)] #![allow(missing_docs)]` in `ferrotorch/src/lib.rs`; consumer: `cargo clippy -p ferrotorch --lib -- -D warnings` gates every commit per goal.md Step 7. |
+//! | REQ-8 | SHIPPED | impl: `llama-cuda = ["llama", "gpu", "ferrotorch-llama/cuda"]` at `ferrotorch/Cargo.toml:42`; consumer: the `//!` doc-comment in this file references `llama-cuda` as a documented feature combination; published-crate users are the boundary consumer. |
+//!
+//! Closes #1346.
 
 #![warn(clippy::all, clippy::pedantic)]
 #![deny(rust_2018_idioms, missing_debug_implementations)]

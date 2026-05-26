@@ -4706,3 +4706,14 @@ upstream = [
 design = ".design/ferrotorch-xpu/lib.md"
 parity_ops = []
 
+# ─────────────────────────────────────────────────────────────────────────
+# ferrotorch (1 files) — umbrella re-export meta-crate
+# ─────────────────────────────────────────────────────────────────────────
+
+[[route]]
+crate_pattern = "ferrotorch/src/lib.rs"
+upstream = [
+  "/home/doll/pytorch/torch/__init__.py",
+]
+design = ".design/ferrotorch/lib.md"
+parity_ops = []
