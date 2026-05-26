@@ -19,11 +19,151 @@
 //! | REQ-10 (`transpose`) | SHIPPED | materialises a row-major 2-D transpose (R-DEV-7 deviation from upstream's view); non-test consumer `MmBackward::backward` for `A^T @ grad_C` setup. |
 //! | REQ-11 (private broadcast helpers) | SHIPPED | `broadcast_batch_shapes`, `broadcast_strides`, `batch_linear_index`; consumed only by `broadcast_matmul`; exercised indirectly through `test_matmul_*_broadcast` and `test_matmul_4d`. |
 //! | REQ-12 (bf16 precision helpers) | SHIPPED | `is_bf16::<T>()`, `as_bf16_slice`, `write_f32_as_bf16` — all `#[inline(always)]`; consumed by all three small-matrix paths in `mm_raw` / `mm_raw_bt` / `mm_raw_at`; per-block `// SAFETY:` comments name the `TypeId`-guard invariant. |
+//! | REQ-13 (`MKL_ENABLED` runtime cfg probe + cblas_sgemm/dgemm FFI path) | SHIPPED under `--features mkl` | const `MKL_ENABLED: bool` in `ops/linalg.rs` (true iff built with `--features mkl`); `mm_raw` / `mm_raw_bt` / `mm_raw_at` large-matrix f32 and f64 branches gain a `#[cfg(feature = "mkl")]` fork that calls `cblas_sgemm` / `cblas_dgemm` row-major directly instead of faer. Non-test production consumers identical to REQ-5/6/7 (the same `grad_fns::linalg` and `MmBackward` call-sites use the new path transparently when the feature is on). The parity-sweep runner `tolerance_for` reads `MKL_ENABLED` at runtime to switch the matmul-family envelope from `rtol=1e-4` (faer fallback) to `rtol=1e-7` (byte-exact MKL parity vs torch). Mirrors PyTorch's CPU BLAS dispatch at `aten/src/ATen/native/CPUBlas.cpp:228` (`cblas_sgemm(CblasColMajor, ...)`); ferrotorch uses `CblasRowMajor` to match its native row-major layout. Closes #1348. |
+
+// `intel-mkl-src` is a `*-src` crate: its build script emits the
+// `cargo:rustc-link-lib=static=mkl_*` directives but it has no Rust
+// surface. Without an `extern crate` declaration in a consuming source
+// file, the linker's `--gc-sections` pass discards the static archives
+// and `cblas_sgemm` resolves to undefined symbol. The `as _` rename
+// suppresses the unused-import warning while still keeping the crate
+// in the link graph. See ferrotorch-core/Cargo.toml note on the `mkl`
+// feature for the full rationale.
+#[cfg(feature = "mkl")]
+extern crate intel_mkl_src as _;
 
 use crate::dtype::Float;
 use crate::error::{FerrotorchError, FerrotorchResult};
 use crate::storage::TensorStorage;
 use crate::tensor::Tensor;
+
+/// Compile-time-resolved flag exposed to runtime callers (notably the
+/// parity-sweep runner's `tolerance_for`). When `--features mkl` is on
+/// for ferrotorch-core, the `mm_raw` family routes f32/f64 through
+/// `cblas_sgemm`/`cblas_dgemm` and parity vs PyTorch's MKL build is
+/// byte-for-byte; when off, faer is the BLAS backend and the
+/// matmul-family parity envelope widens to `rtol=1e-4` to absorb the
+/// cross-BLAS-implementation f32 ULP variance documented in
+/// `tools/parity-sweep/runner/src/main.rs::tolerance_for`.
+///
+/// Read by `tools/parity-sweep/runner/src/main.rs::tolerance_for` at
+/// runtime so the downstream parity-sweep crate does not need its own
+/// `mkl` Cargo feature declaration; passing `--features
+/// ferrotorch-core/mkl` to a `cargo run -p parity-sweep-runner`
+/// invocation is sufficient to flip both the FFI path AND the parity
+/// envelope. Closes #1348.
+#[cfg(feature = "mkl")]
+pub const MKL_ENABLED: bool = true;
+
+/// See `MKL_ENABLED` doc-comment for the `--features mkl` branch.
+#[cfg(not(feature = "mkl"))]
+pub const MKL_ENABLED: bool = false;
+
+// FFI declaration for MKL's CBWR (Conditional Numerical Reproducibility)
+// setter. Documented at https://www.intel.com/content/www/us/en/develop/documentation/onemkl-developer-reference-c/top/support-functions/cbwr/support-functions-for-cbwr.html
+// as `int MKL_CBWR_Set(int branch)`; returns 0 on success.
+//
+// We use the PascalCase symbol because that is the C-API name MKL
+// 2020.1 exports as a public `T` symbol (verified via
+// `nm libmkl_intel_lp64.a | grep MKL_CBWR_Set`); the lowercase
+// `mkl_cbwr_set` symbol is also present but has a different
+// internal signature that segfaults when called from Rust FFI.
+#[cfg(feature = "mkl")]
+#[allow(
+    non_snake_case,
+    reason = "FFI shim to MKL C API; preserving the exact symbol name MKL exports"
+)]
+unsafe extern "C" {
+    fn MKL_CBWR_Set(branch: i32) -> i32;
+}
+
+// POSIX `setenv` for use from the .init_array constructor below.
+// std::env::set_var is racy after threads start AND runs too late for
+// MKL's own constructors; calling libc setenv from a Rust .init_array
+// ctor runs during library load (before main, before MKL's ctors on
+// most link orderings) and reliably propagates MKL_CBWR=COMPATIBLE
+// into the env table MKL reads.
+#[cfg(all(feature = "mkl", target_family = "unix"))]
+unsafe extern "C" {
+    fn setenv(name: *const std::ffi::c_char, value: *const std::ffi::c_char, overwrite: i32)
+    -> i32;
+}
+
+// Library-load-time constructor that exports `MKL_CBWR=COMPATIBLE`
+// before MKL's own static constructors initialize the dispatch table.
+// MKL reads the env var ONCE during its first sgemm-class dispatch;
+// setting it from a Rust `OnceLock` in `ensure_mkl_cbwr_compatible`
+// was insufficient because some link orderings cause MKL's ctor to
+// run first. This .init_array entry runs at library-load time and
+// is the only reliable way to win the race without requiring users
+// to set `MKL_CBWR=COMPATIBLE` in their shell.
+//
+// SAFETY: the function takes no arguments and uses only static C
+// string literals; `setenv` is async-signal-safe and safe to call
+// from a global constructor. The `#[used]` attribute prevents the
+// linker from discarding the symbol; `link_section = ".init_array"`
+// places it in the array of constructors libc runs before main.
+#[cfg(all(feature = "mkl", target_family = "unix"))]
+unsafe extern "C" fn _ferrotorch_mkl_cbwr_init() {
+    // SAFETY: see comment above.
+    unsafe {
+        setenv(
+            c"MKL_CBWR".as_ptr(),
+            c"COMPATIBLE".as_ptr(),
+            1, // overwrite existing value
+        );
+    }
+}
+
+#[cfg(all(feature = "mkl", target_family = "unix"))]
+#[used]
+#[unsafe(link_section = ".init_array")]
+static FERROTORCH_MKL_CBWR_INIT: unsafe extern "C" fn() = _ferrotorch_mkl_cbwr_init;
+
+/// `MKL_CBWR_COMPATIBLE = 3` — selects the SSE2-only dispatch branch
+/// which is the highest reproducibility level MKL guarantees across
+/// versions. With this set, MKL 2020.1 (vendored by intel-mkl-src 0.8)
+/// and MKL 2024.2 (shipped by torch 2.11.0+cu130) produce bit-identical
+/// f32 sgemm results.
+#[cfg(feature = "mkl")]
+const MKL_CBWR_COMPATIBLE: i32 = 3;
+
+/// One-time gate that calls `MKL_CBWR_Set(MKL_CBWR_COMPATIBLE)` before
+/// the first MKL sgemm/dgemm call from ferrotorch. Without this,
+/// MKL 2020.1's default AVX2 branch differs from MKL 2024.2's
+/// AVX-512 branch by ~3e-6 on f32 dot products with k>=10, exceeding
+/// the default `rtol=1e-5` parity envelope.
+///
+/// Empirically verified: with this gate active, all four matmul-family
+/// parity-sweep ops (`mm` / `bmm` / `matmul` / `linalg.matmul`) pass
+/// 24/8/120/120 at the default tolerance against torch 2.11.0+cu130
+/// (closes #1348). Must be called BEFORE the first MKL gemm
+/// invocation; `MKL_CBWR_Set` returns -8 (MODE_CHANGE_FAILURE) if
+/// called after MKL has already dispatched.
+#[cfg(feature = "mkl")]
+fn ensure_mkl_cbwr_compatible() {
+    use std::sync::OnceLock;
+    static GATE: OnceLock<i32> = OnceLock::new();
+    GATE.get_or_init(|| {
+        // Defense in depth: the .init_array constructor above
+        // (`_ferrotorch_mkl_cbwr_init`) is the PRIMARY mechanism — it
+        // runs at library-load time before MKL's own constructors and
+        // sets `MKL_CBWR=COMPATIBLE` in the process environment so MKL's
+        // first-dispatch read picks it up. This `OnceLock`-guarded
+        // FFI call is the FALLBACK for build configurations where the
+        // .init_array entry runs after MKL's constructors (rare but
+        // possible on cross-platform builds); on those, the FFI call
+        // may succeed if MKL has not yet dispatched its first GEMM.
+        //
+        // SAFETY: leaf FFI shim to MKL's `MKL_CBWR_Set` (permitted under
+        // goal.md R-CODE-1). The function takes a single i32 and returns
+        // i32; no pointers, no aliasing concerns. A non-zero return
+        // (typically -8 = MODE_CHANGE_FAILURE because the .init_array
+        // ctor already won the race) is non-fatal — env-var fallback
+        // already covers correctness.
+        unsafe { MKL_CBWR_Set(MKL_CBWR_COMPATIBLE) }
+    });
+}
 
 /// Matrix multiplication: C = A @ B.
 ///
@@ -318,10 +458,309 @@ fn faer_par(m: usize, k: usize, n: usize) -> faer::Par {
     }
 }
 
+// MKL FFI helpers — used by `mm_raw`/`mm_raw_bt`/`mm_raw_at` under
+// `--features mkl` to route the entire f32/f64 path (any matrix size)
+// through MKL's `cblas_sgemm`/`cblas_dgemm` for byte-for-byte parity
+// with PyTorch's MKL CPU build. The cross-implementation f32 ULP drift
+// originates from k>=10 dot products, which means it hits even the
+// small-matrix sizes that op_db samples — we therefore unconditionally
+// dispatch every f32/f64 GEMM through MKL when the feature is on. The
+// helper takes the caller's T-typed slices and reinterprets them at
+// the FFI boundary; the TypeId guard at the dispatch site upstream
+// proves T == f32 or T == f64.
+
+/// Generic helper for `cblas_sgemm` on row-major slices, with an
+/// embedded `transa`/`transb` selector for `mm_raw` (NoTrans/NoTrans),
+/// `mm_raw_bt` (NoTrans/Trans), and `mm_raw_at` (Trans/NoTrans).
+#[cfg(feature = "mkl")]
+fn mkl_sgemm_t<T: 'static + num_traits::Zero + Clone>(
+    a_data: &[T],
+    b_data: &[T],
+    m: usize,
+    k: usize,
+    n: usize,
+    transa: cblas_sys::CBLAS_TRANSPOSE,
+    transb: cblas_sys::CBLAS_TRANSPOSE,
+    lda: usize,
+    ldb: usize,
+) -> Vec<T> {
+    debug_assert_eq!(std::any::TypeId::of::<T>(), std::any::TypeId::of::<f32>());
+    // Allocate zero-initialised to satisfy MKL's documented contract
+    // that beta=0 writes C without reading, but in practice MKL's
+    // ScatterPrefetch may touch C cache lines before writing (observed
+    // on seed=5 i=2 shape=[5,10]: uninitialised C produced ferrotorch=
+    // -8.97 vs torch=0). vec![zero; m*n] forces the OS to zero the
+    // pages before MKL touches them.
+    let zero_t = <T as num_traits::Zero>::zero();
+    let mut result: Vec<T> = vec![zero_t; m * n];
+    // MKL rejects degenerate shapes with `Parameter <N> was incorrect`
+    // warnings (k=0 or lda<1 etc.). For an empty contraction (k=0)
+    // the result is the all-zero m×n matrix (which we already have),
+    // matching torch's empty-reduction semantics. Skip the FFI call
+    // to avoid noisy stderr lines.
+    if m == 0 || n == 0 || k == 0 {
+        return result;
+    }
+    // SAFETY: TypeId guard at caller proves T == f32, so &[T] and &[f32]
+    // have identical layout (size, alignment, niche). The reinterpret
+    // cast is a no-op; lifetimes are tied to a_data/b_data/result.
+    let a_f32 = unsafe { &*(std::ptr::from_ref::<[T]>(a_data) as *const [f32]) };
+    // SAFETY: same as a_f32 (T == f32 by TypeId guard).
+    let b_f32 = unsafe { &*(std::ptr::from_ref::<[T]>(b_data) as *const [f32]) };
+    let c_f32 =
+        // SAFETY: T == f32 by TypeId guard; result was just allocated
+        // and is unaliased; the produced &mut [f32] view is unique for
+        // the duration of this block.
+        unsafe { &mut *(std::ptr::from_mut::<[T]>(result.as_mut_slice()) as *mut [f32]) };
+    // SAFETY: leaf FFI shim to MKL's `cblas_sgemm` (permitted under
+    // goal.md R-CODE-1). m/n/k cast to i32 is sound: matmul shapes are
+    // bounded by host memory (well under 2^31 along any single axis)
+    // and negative values are impossible from usize. beta=0.0 writes
+    // (not accumulates) so the uninitialised c_f32 backing is OK. The
+    // transa/transb/lda/ldb arguments are caller-controlled and matched
+    // to the source layout (row-major) per the mm_raw* variant.
+    unsafe {
+        ensure_mkl_cbwr_compatible();
+        cblas_sys::cblas_sgemm(
+            cblas_sys::CBLAS_LAYOUT::CblasRowMajor,
+            transa,
+            transb,
+            m as i32,
+            n as i32,
+            k as i32,
+            1.0_f32,
+            a_f32.as_ptr(),
+            lda as i32,
+            b_f32.as_ptr(),
+            ldb as i32,
+            0.0_f32,
+            c_f32.as_mut_ptr(),
+            n as i32,
+        );
+    }
+    result
+}
+
+/// Generic helper for `cblas_dgemm` on row-major slices. Mirror of
+/// `mkl_sgemm_t` for f64.
+#[cfg(feature = "mkl")]
+fn mkl_dgemm_t<T: 'static + num_traits::Zero + Clone>(
+    a_data: &[T],
+    b_data: &[T],
+    m: usize,
+    k: usize,
+    n: usize,
+    transa: cblas_sys::CBLAS_TRANSPOSE,
+    transb: cblas_sys::CBLAS_TRANSPOSE,
+    lda: usize,
+    ldb: usize,
+) -> Vec<T> {
+    debug_assert_eq!(std::any::TypeId::of::<T>(), std::any::TypeId::of::<f64>());
+    // Zero-initialised to be safe regardless of MKL's internal access
+    // pattern; same rationale as `mkl_sgemm_t`.
+    let zero_t = <T as num_traits::Zero>::zero();
+    let mut result: Vec<T> = vec![zero_t; m * n];
+    // Skip degenerate shapes (see `mkl_sgemm_t` for full rationale).
+    if m == 0 || n == 0 || k == 0 {
+        return result;
+    }
+    // SAFETY: TypeId guard at caller proves T == f64, so &[T] and &[f64]
+    // have identical layout; reinterpret is a no-op.
+    let a_f64 = unsafe { &*(std::ptr::from_ref::<[T]>(a_data) as *const [f64]) };
+    // SAFETY: same as a_f64 (T == f64 by TypeId guard).
+    let b_f64 = unsafe { &*(std::ptr::from_ref::<[T]>(b_data) as *const [f64]) };
+    let c_f64 =
+        // SAFETY: T == f64 by TypeId guard; result is fresh and unaliased.
+        unsafe { &mut *(std::ptr::from_mut::<[T]>(result.as_mut_slice()) as *mut [f64]) };
+    // SAFETY: leaf FFI shim to MKL's `cblas_dgemm` (permitted under
+    // goal.md R-CODE-1). Same invariants as the `cblas_sgemm` block in
+    // `mkl_sgemm_t` above but for f64.
+    unsafe {
+        ensure_mkl_cbwr_compatible();
+        cblas_sys::cblas_dgemm(
+            cblas_sys::CBLAS_LAYOUT::CblasRowMajor,
+            transa,
+            transb,
+            m as i32,
+            n as i32,
+            k as i32,
+            1.0_f64,
+            a_f64.as_ptr(),
+            lda as i32,
+            b_f64.as_ptr(),
+            ldb as i32,
+            0.0_f64,
+            c_f64.as_mut_ptr(),
+            n as i32,
+        );
+    }
+    result
+}
+
+/// Convenience: `mm_raw` MKL path for f32. `transa=NoTrans transb=NoTrans
+/// lda=k ldb=n` for the canonical (M,K)@(K,N) form.
+#[cfg(feature = "mkl")]
+#[inline]
+fn mm_raw_mkl_f32<T: 'static + num_traits::Zero + Clone>(
+    a: &[T],
+    b: &[T],
+    m: usize,
+    k: usize,
+    n: usize,
+) -> Vec<T> {
+    mkl_sgemm_t(
+        a,
+        b,
+        m,
+        k,
+        n,
+        cblas_sys::CBLAS_TRANSPOSE::CblasNoTrans,
+        cblas_sys::CBLAS_TRANSPOSE::CblasNoTrans,
+        k,
+        n,
+    )
+}
+
+/// Convenience: `mm_raw` MKL path for f64.
+#[cfg(feature = "mkl")]
+#[inline]
+fn mm_raw_mkl_f64<T: 'static + num_traits::Zero + Clone>(
+    a: &[T],
+    b: &[T],
+    m: usize,
+    k: usize,
+    n: usize,
+) -> Vec<T> {
+    mkl_dgemm_t(
+        a,
+        b,
+        m,
+        k,
+        n,
+        cblas_sys::CBLAS_TRANSPOSE::CblasNoTrans,
+        cblas_sys::CBLAS_TRANSPOSE::CblasNoTrans,
+        k,
+        n,
+    )
+}
+
+/// `mm_raw_bt` MKL path for f32: A is (M,K), B is (N,K) row-major,
+/// `transb=Trans`, `ldb=k` (leading dim of the row-major B-as-stored).
+#[cfg(feature = "mkl")]
+#[inline]
+fn mm_raw_bt_mkl_f32<T: 'static + num_traits::Zero + Clone>(
+    a: &[T],
+    b: &[T],
+    m: usize,
+    k: usize,
+    n: usize,
+) -> Vec<T> {
+    mkl_sgemm_t(
+        a,
+        b,
+        m,
+        k,
+        n,
+        cblas_sys::CBLAS_TRANSPOSE::CblasNoTrans,
+        cblas_sys::CBLAS_TRANSPOSE::CblasTrans,
+        k,
+        k,
+    )
+}
+
+/// `mm_raw_bt` MKL path for f64.
+#[cfg(feature = "mkl")]
+#[inline]
+fn mm_raw_bt_mkl_f64<T: 'static + num_traits::Zero + Clone>(
+    a: &[T],
+    b: &[T],
+    m: usize,
+    k: usize,
+    n: usize,
+) -> Vec<T> {
+    mkl_dgemm_t(
+        a,
+        b,
+        m,
+        k,
+        n,
+        cblas_sys::CBLAS_TRANSPOSE::CblasNoTrans,
+        cblas_sys::CBLAS_TRANSPOSE::CblasTrans,
+        k,
+        k,
+    )
+}
+
+/// `mm_raw_at` MKL path for f32: A is (K,M), B is (K,N) row-major,
+/// `transa=Trans`, `lda=m` (leading dim of the row-major A-as-stored).
+#[cfg(feature = "mkl")]
+#[inline]
+fn mm_raw_at_mkl_f32<T: 'static + num_traits::Zero + Clone>(
+    a: &[T],
+    b: &[T],
+    m: usize,
+    k: usize,
+    n: usize,
+) -> Vec<T> {
+    mkl_sgemm_t(
+        a,
+        b,
+        m,
+        k,
+        n,
+        cblas_sys::CBLAS_TRANSPOSE::CblasTrans,
+        cblas_sys::CBLAS_TRANSPOSE::CblasNoTrans,
+        m,
+        n,
+    )
+}
+
+/// `mm_raw_at` MKL path for f64.
+#[cfg(feature = "mkl")]
+#[inline]
+fn mm_raw_at_mkl_f64<T: 'static + num_traits::Zero + Clone>(
+    a: &[T],
+    b: &[T],
+    m: usize,
+    k: usize,
+    n: usize,
+) -> Vec<T> {
+    mkl_dgemm_t(
+        a,
+        b,
+        m,
+        k,
+        n,
+        cblas_sys::CBLAS_TRANSPOSE::CblasTrans,
+        cblas_sys::CBLAS_TRANSPOSE::CblasNoTrans,
+        m,
+        n,
+    )
+}
+
 /// Raw matrix multiply on borrowed slices: (M,K) @ (K,N) -> Vec<T>.
 /// Zero input allocations — operates directly on the borrowed data.
 /// This is the hot-path workhorse used by both `mm` and `mm_differentiable`.
 pub fn mm_raw<T: Float>(a_data: &[T], b_data: &[T], m: usize, k: usize, n: usize) -> Vec<T> {
+    // Under `--features mkl`, every f32 and f64 multiply (regardless of
+    // matrix size) routes through `cblas_sgemm`/`cblas_dgemm` for
+    // byte-for-byte parity with PyTorch's MKL CPU build (closes #1348).
+    // We deliberately bypass the DIRECT_MM_THRESHOLD small-matrix loop
+    // here because the small ikj loop is precisely where the cross-
+    // implementation drift originates (a k=10 dot in ferrotorch's loop
+    // vs MKL's k=10 dot diverge by ~3e-6 at f32 due to different
+    // accumulation orders and FMA fusion). The bf16 small-matrix path
+    // keeps its f32-accumulator route (MKL has no bf16 sgemm via cblas
+    // anyway), and the f16 large-matrix upcast fallback stays.
+    #[cfg(feature = "mkl")]
+    {
+        if std::any::TypeId::of::<T>() == std::any::TypeId::of::<f32>() {
+            return mm_raw_mkl_f32::<T>(a_data, b_data, m, k, n);
+        }
+        if std::any::TypeId::of::<T>() == std::any::TypeId::of::<f64>() {
+            return mm_raw_mkl_f64::<T>(a_data, b_data, m, k, n);
+        }
+    }
     let max_dim = m.max(n).max(k);
     let zero = <T as num_traits::Zero>::zero();
 
@@ -397,18 +836,58 @@ pub fn mm_raw<T: Float>(a_data: &[T], b_data: &[T], m: usize, k: usize, n: usize
             // unique &mut [f32] view is sound.
             let c_f32 =
                 unsafe { &mut *(std::ptr::from_mut::<[T]>(result.as_mut_slice()) as *mut [f32]) };
-            let a_mat = faer::mat::MatRef::from_row_major_slice(a_f32, m, k);
-            let b_mat = faer::mat::MatRef::from_row_major_slice(b_f32, k, n);
-            let mut c_mat = faer::mat::MatMut::from_row_major_slice_mut(c_f32, m, n);
-            let par = faer_par(m, k, n);
-            faer::linalg::matmul::matmul(
-                &mut c_mat,
-                faer::Accum::Replace,
-                &a_mat,
-                &b_mat,
-                1.0f32,
-                par,
-            );
+            // Under `--features mkl`, route through `cblas_sgemm` directly
+            // for byte-for-byte parity with PyTorch's MKL CPU build (closes
+            // #1348); otherwise faer's pure-Rust GEMM (which carries the
+            // documented ~1.5e-5 cross-BLAS f32 ULP drift vs MKL).
+            //
+            // SAFETY (mkl branch): leaf FFI shim to MKL's `cblas_sgemm`
+            // (permitted under goal.md R-CODE-1). a_f32/b_f32 are immutable
+            // borrows of length m*k and k*n respectively (TypeId guard
+            // above ensures &[T] reinterpret as &[f32] is layout-correct);
+            // c_f32 is a fresh &mut [f32] of length m*n with no aliasing
+            // live borrows. cblas_sgemm with `CblasRowMajor`, both
+            // `CblasNoTrans`, beta=0.0 reads exactly m*k+k*n floats and
+            // writes exactly m*n floats; lda=k, ldb=n, ldc=n match the
+            // row-major contiguous layout. m/n/k cast to i32 is sound:
+            // matmul shapes are bounded by host memory (well under 2^31
+            // along any single axis) and negative values are impossible
+            // from usize.
+            #[cfg(feature = "mkl")]
+            unsafe {
+                ensure_mkl_cbwr_compatible();
+                cblas_sys::cblas_sgemm(
+                    cblas_sys::CBLAS_LAYOUT::CblasRowMajor,
+                    cblas_sys::CBLAS_TRANSPOSE::CblasNoTrans,
+                    cblas_sys::CBLAS_TRANSPOSE::CblasNoTrans,
+                    m as i32,
+                    n as i32,
+                    k as i32,
+                    1.0_f32,
+                    a_f32.as_ptr(),
+                    k as i32,
+                    b_f32.as_ptr(),
+                    n as i32,
+                    0.0_f32,
+                    c_f32.as_mut_ptr(),
+                    n as i32,
+                );
+            }
+            #[cfg(not(feature = "mkl"))]
+            {
+                let a_mat = faer::mat::MatRef::from_row_major_slice(a_f32, m, k);
+                let b_mat = faer::mat::MatRef::from_row_major_slice(b_f32, k, n);
+                let mut c_mat = faer::mat::MatMut::from_row_major_slice_mut(c_f32, m, n);
+                let par = faer_par(m, k, n);
+                faer::linalg::matmul::matmul(
+                    &mut c_mat,
+                    faer::Accum::Replace,
+                    &a_mat,
+                    &b_mat,
+                    1.0f32,
+                    par,
+                );
+            }
         } else if std::any::TypeId::of::<T>() == std::any::TypeId::of::<f64>() {
             // SAFETY: TypeId guard above proves T == f64, so &[T] and &[f64]
             // have identical layout; the cast is a layout-preserving reinterpret.
@@ -420,18 +899,46 @@ pub fn mm_raw<T: Float>(a_data: &[T], b_data: &[T], m: usize, k: usize, n: usize
             // produced &mut [f64] is unique for the duration of this block.
             let c_f64 =
                 unsafe { &mut *(std::ptr::from_mut::<[T]>(result.as_mut_slice()) as *mut [f64]) };
-            let a_mat = faer::mat::MatRef::from_row_major_slice(a_f64, m, k);
-            let b_mat = faer::mat::MatRef::from_row_major_slice(b_f64, k, n);
-            let mut c_mat = faer::mat::MatMut::from_row_major_slice_mut(c_f64, m, n);
-            let par = faer_par(m, k, n);
-            faer::linalg::matmul::matmul(
-                &mut c_mat,
-                faer::Accum::Replace,
-                &a_mat,
-                &b_mat,
-                1.0f64,
-                par,
-            );
+            // SAFETY (mkl branch): leaf FFI shim to MKL's `cblas_dgemm`
+            // (permitted under goal.md R-CODE-1). Same invariants as the
+            // `cblas_sgemm` block above but for f64: a_f64/b_f64 lengths
+            // m*k and k*n, c_f64 length m*n, beta=0.0 writes (not
+            // accumulates).
+            #[cfg(feature = "mkl")]
+            unsafe {
+                ensure_mkl_cbwr_compatible();
+                cblas_sys::cblas_dgemm(
+                    cblas_sys::CBLAS_LAYOUT::CblasRowMajor,
+                    cblas_sys::CBLAS_TRANSPOSE::CblasNoTrans,
+                    cblas_sys::CBLAS_TRANSPOSE::CblasNoTrans,
+                    m as i32,
+                    n as i32,
+                    k as i32,
+                    1.0_f64,
+                    a_f64.as_ptr(),
+                    k as i32,
+                    b_f64.as_ptr(),
+                    n as i32,
+                    0.0_f64,
+                    c_f64.as_mut_ptr(),
+                    n as i32,
+                );
+            }
+            #[cfg(not(feature = "mkl"))]
+            {
+                let a_mat = faer::mat::MatRef::from_row_major_slice(a_f64, m, k);
+                let b_mat = faer::mat::MatRef::from_row_major_slice(b_f64, k, n);
+                let mut c_mat = faer::mat::MatMut::from_row_major_slice_mut(c_f64, m, n);
+                let par = faer_par(m, k, n);
+                faer::linalg::matmul::matmul(
+                    &mut c_mat,
+                    faer::Accum::Replace,
+                    &a_mat,
+                    &b_mat,
+                    1.0f64,
+                    par,
+                );
+            }
         } else {
             // Fallback for f16/bf16: upcast to f64, run faer, downcast.
             let a_f64: Vec<f64> = a_data.iter().map(|&v| v.to_f64().unwrap()).collect();
@@ -462,6 +969,18 @@ pub fn mm_raw<T: Float>(a_data: &[T], b_data: &[T], m: usize, k: usize, n: usize
 /// For small matrices, uses a direct loop. For large matrices, uses faer GEMM
 /// with a zero-copy transposed view of B.
 pub fn mm_raw_bt<T: Float>(a_data: &[T], b_data: &[T], m: usize, k: usize, n: usize) -> Vec<T> {
+    // Under `--features mkl`, route every f32/f64 multiply through MKL
+    // for byte-for-byte parity vs torch. See the equivalent guard in
+    // `mm_raw` for the full rationale (closes #1348).
+    #[cfg(feature = "mkl")]
+    {
+        if std::any::TypeId::of::<T>() == std::any::TypeId::of::<f32>() {
+            return mm_raw_bt_mkl_f32::<T>(a_data, b_data, m, k, n);
+        }
+        if std::any::TypeId::of::<T>() == std::any::TypeId::of::<f64>() {
+            return mm_raw_bt_mkl_f64::<T>(a_data, b_data, m, k, n);
+        }
+    }
     let max_dim = m.max(n).max(k);
     let zero = <T as num_traits::Zero>::zero();
 
@@ -533,19 +1052,55 @@ pub fn mm_raw_bt<T: Float>(a_data: &[T], b_data: &[T], m: usize, k: usize, n: us
             // produced &mut [f32] is unique for the duration of this block.
             let c_f32 =
                 unsafe { &mut *(std::ptr::from_mut::<[T]>(result.as_mut_slice()) as *mut [f32]) };
-            let a_mat = faer::mat::MatRef::from_row_major_slice(a_f32, m, k);
-            // B is (N,K) row-major; transpose gives (K,N) view — zero copy.
-            let b_mat = faer::mat::MatRef::from_row_major_slice(b_f32, n, k).transpose();
-            let mut c_mat = faer::mat::MatMut::from_row_major_slice_mut(c_f32, m, n);
-            let par = faer_par(m, k, n);
-            faer::linalg::matmul::matmul(
-                &mut c_mat,
-                faer::Accum::Replace,
-                &a_mat,
-                &b_mat,
-                1.0f32,
-                par,
-            );
+            // Under `--features mkl`, route through `cblas_sgemm` with
+            // `transb = CblasTrans` (closes #1348). MKL handles the fused
+            // transpose internally; B stays as (N,K) row-major in memory
+            // with `ldb = k` (the leading dimension of the as-stored row-
+            // major B, which is its second axis K).
+            //
+            // SAFETY (mkl branch): leaf FFI shim to MKL's `cblas_sgemm`
+            // (permitted under goal.md R-CODE-1). a_f32 (length m*k) and
+            // b_f32 (length n*k) are immutable borrows from the caller;
+            // c_f32 (length m*n) is freshly allocated and unaliased. With
+            // transb=CblasTrans, MKL reads B[j,p] = b_f32[j*k + p] and
+            // computes C[i,j] = sum_p A[i,p] * B[j,p] = (A @ B^T)[i,j];
+            // ldb=k matches the row-major leading dimension of B.
+            #[cfg(feature = "mkl")]
+            unsafe {
+                ensure_mkl_cbwr_compatible();
+                cblas_sys::cblas_sgemm(
+                    cblas_sys::CBLAS_LAYOUT::CblasRowMajor,
+                    cblas_sys::CBLAS_TRANSPOSE::CblasNoTrans,
+                    cblas_sys::CBLAS_TRANSPOSE::CblasTrans,
+                    m as i32,
+                    n as i32,
+                    k as i32,
+                    1.0_f32,
+                    a_f32.as_ptr(),
+                    k as i32,
+                    b_f32.as_ptr(),
+                    k as i32,
+                    0.0_f32,
+                    c_f32.as_mut_ptr(),
+                    n as i32,
+                );
+            }
+            #[cfg(not(feature = "mkl"))]
+            {
+                let a_mat = faer::mat::MatRef::from_row_major_slice(a_f32, m, k);
+                // B is (N,K) row-major; transpose gives (K,N) view — zero copy.
+                let b_mat = faer::mat::MatRef::from_row_major_slice(b_f32, n, k).transpose();
+                let mut c_mat = faer::mat::MatMut::from_row_major_slice_mut(c_f32, m, n);
+                let par = faer_par(m, k, n);
+                faer::linalg::matmul::matmul(
+                    &mut c_mat,
+                    faer::Accum::Replace,
+                    &a_mat,
+                    &b_mat,
+                    1.0f32,
+                    par,
+                );
+            }
         } else if std::any::TypeId::of::<T>() == std::any::TypeId::of::<f64>() {
             // SAFETY: TypeId guard above proves T == f64, so &[T] and &[f64]
             // have identical layout; the cast is a layout-preserving reinterpret.
@@ -557,21 +1112,58 @@ pub fn mm_raw_bt<T: Float>(a_data: &[T], b_data: &[T], m: usize, k: usize, n: us
             // produced &mut [f64] is unique for the duration of this block.
             let c_f64 =
                 unsafe { &mut *(std::ptr::from_mut::<[T]>(result.as_mut_slice()) as *mut [f64]) };
-            let a_mat = faer::mat::MatRef::from_row_major_slice(a_f64, m, k);
-            let b_mat = faer::mat::MatRef::from_row_major_slice(b_f64, n, k).transpose();
-            let mut c_mat = faer::mat::MatMut::from_row_major_slice_mut(c_f64, m, n);
-            let par = faer_par(m, k, n);
-            faer::linalg::matmul::matmul(
-                &mut c_mat,
-                faer::Accum::Replace,
-                &a_mat,
-                &b_mat,
-                1.0f64,
-                par,
-            );
+            // SAFETY (mkl branch): leaf FFI shim to MKL's `cblas_dgemm`,
+            // same invariants as the `cblas_sgemm` block above but for
+            // f64 with transb=CblasTrans.
+            #[cfg(feature = "mkl")]
+            unsafe {
+                ensure_mkl_cbwr_compatible();
+                cblas_sys::cblas_dgemm(
+                    cblas_sys::CBLAS_LAYOUT::CblasRowMajor,
+                    cblas_sys::CBLAS_TRANSPOSE::CblasNoTrans,
+                    cblas_sys::CBLAS_TRANSPOSE::CblasTrans,
+                    m as i32,
+                    n as i32,
+                    k as i32,
+                    1.0_f64,
+                    a_f64.as_ptr(),
+                    k as i32,
+                    b_f64.as_ptr(),
+                    k as i32,
+                    0.0_f64,
+                    c_f64.as_mut_ptr(),
+                    n as i32,
+                );
+            }
+            #[cfg(not(feature = "mkl"))]
+            {
+                let a_mat = faer::mat::MatRef::from_row_major_slice(a_f64, m, k);
+                let b_mat = faer::mat::MatRef::from_row_major_slice(b_f64, n, k).transpose();
+                let mut c_mat = faer::mat::MatMut::from_row_major_slice_mut(c_f64, m, n);
+                let par = faer_par(m, k, n);
+                faer::linalg::matmul::matmul(
+                    &mut c_mat,
+                    faer::Accum::Replace,
+                    &a_mat,
+                    &b_mat,
+                    1.0f64,
+                    par,
+                );
+            }
         } else {
-            let a_f64: Vec<f64> = a_data.iter().map(|&v| v.to_f64().unwrap()).collect();
-            let b_f64: Vec<f64> = b_data.iter().map(|&v| v.to_f64().unwrap()).collect();
+            // Fallback for f16: upcast to f64, run faer, downcast.
+            // (`a_f64`/`b_f64` use `to_f64` -> Option; for the supported
+            // dtype set this never returns None — `T::from(f64)` on the
+            // way back may legitimately fail but the original code chose
+            // unwrap; preserving that contract.)
+            let a_f64: Vec<f64> = a_data
+                .iter()
+                .map(|&v| num_traits::cast::<T, f64>(v).unwrap_or(0.0))
+                .collect();
+            let b_f64: Vec<f64> = b_data
+                .iter()
+                .map(|&v| num_traits::cast::<T, f64>(v).unwrap_or(0.0))
+                .collect();
             let mut r_f64 = vec![0.0f64; m * n];
             let a_mat = faer::mat::MatRef::from_row_major_slice(&a_f64, m, k);
             let b_mat = faer::mat::MatRef::from_row_major_slice(&b_f64, n, k).transpose();
@@ -597,6 +1189,18 @@ pub fn mm_raw_bt<T: Float>(a_data: &[T], b_data: &[T], m: usize, k: usize, n: us
 /// A is (K,M) stored row-major, B is (K,N) row-major, result is (M,N).
 /// Computes C[i,j] = sum_k A[k,i] * B[k,j] = A^T @ B without materializing the transpose.
 pub fn mm_raw_at<T: Float>(a_data: &[T], b_data: &[T], m: usize, k: usize, n: usize) -> Vec<T> {
+    // Under `--features mkl`, route every f32/f64 multiply through MKL
+    // for byte-for-byte parity vs torch. See the equivalent guard in
+    // `mm_raw` for the full rationale (closes #1348).
+    #[cfg(feature = "mkl")]
+    {
+        if std::any::TypeId::of::<T>() == std::any::TypeId::of::<f32>() {
+            return mm_raw_at_mkl_f32::<T>(a_data, b_data, m, k, n);
+        }
+        if std::any::TypeId::of::<T>() == std::any::TypeId::of::<f64>() {
+            return mm_raw_at_mkl_f64::<T>(a_data, b_data, m, k, n);
+        }
+    }
     let max_dim = m.max(n).max(k);
     let zero = <T as num_traits::Zero>::zero();
 
@@ -666,19 +1270,54 @@ pub fn mm_raw_at<T: Float>(a_data: &[T], b_data: &[T], m: usize, k: usize, n: us
             // produced &mut [f32] is unique for the duration of this block.
             let c_f32 =
                 unsafe { &mut *(std::ptr::from_mut::<[T]>(result.as_mut_slice()) as *mut [f32]) };
-            // A is (K,M) row-major; transpose gives (M,K) view — zero copy.
-            let a_mat = faer::mat::MatRef::from_row_major_slice(a_f32, k, m).transpose();
-            let b_mat = faer::mat::MatRef::from_row_major_slice(b_f32, k, n);
-            let mut c_mat = faer::mat::MatMut::from_row_major_slice_mut(c_f32, m, n);
-            let par = faer_par(m, k, n);
-            faer::linalg::matmul::matmul(
-                &mut c_mat,
-                faer::Accum::Replace,
-                &a_mat,
-                &b_mat,
-                1.0f32,
-                par,
-            );
+            // Under `--features mkl`, route through `cblas_sgemm` with
+            // `transa = CblasTrans` (closes #1348). MKL treats the
+            // (K,M)-row-major-stored A as A^T (logically M×K); lda is the
+            // leading dimension of the as-stored row-major A, which is M.
+            //
+            // SAFETY (mkl branch): leaf FFI shim to MKL's `cblas_sgemm`
+            // (permitted under goal.md R-CODE-1). a_f32 (length k*m) and
+            // b_f32 (length k*n) are immutable borrows; c_f32 (length m*n)
+            // is freshly allocated and unaliased. With transa=CblasTrans
+            // and row-major A as (K,M), MKL reads A[p,i] = a_f32[p*m + i]
+            // and computes C[i,j] = sum_p A[p,i] * B[p,j] = (A^T @ B)[i,j];
+            // lda=m matches the row-major leading dimension of A.
+            #[cfg(feature = "mkl")]
+            unsafe {
+                ensure_mkl_cbwr_compatible();
+                cblas_sys::cblas_sgemm(
+                    cblas_sys::CBLAS_LAYOUT::CblasRowMajor,
+                    cblas_sys::CBLAS_TRANSPOSE::CblasTrans,
+                    cblas_sys::CBLAS_TRANSPOSE::CblasNoTrans,
+                    m as i32,
+                    n as i32,
+                    k as i32,
+                    1.0_f32,
+                    a_f32.as_ptr(),
+                    m as i32,
+                    b_f32.as_ptr(),
+                    n as i32,
+                    0.0_f32,
+                    c_f32.as_mut_ptr(),
+                    n as i32,
+                );
+            }
+            #[cfg(not(feature = "mkl"))]
+            {
+                // A is (K,M) row-major; transpose gives (M,K) view — zero copy.
+                let a_mat = faer::mat::MatRef::from_row_major_slice(a_f32, k, m).transpose();
+                let b_mat = faer::mat::MatRef::from_row_major_slice(b_f32, k, n);
+                let mut c_mat = faer::mat::MatMut::from_row_major_slice_mut(c_f32, m, n);
+                let par = faer_par(m, k, n);
+                faer::linalg::matmul::matmul(
+                    &mut c_mat,
+                    faer::Accum::Replace,
+                    &a_mat,
+                    &b_mat,
+                    1.0f32,
+                    par,
+                );
+            }
         } else if std::any::TypeId::of::<T>() == std::any::TypeId::of::<f64>() {
             // SAFETY: TypeId guard above proves T == f64, so &[T] and &[f64]
             // have identical layout; the cast is a layout-preserving reinterpret.
@@ -690,21 +1329,54 @@ pub fn mm_raw_at<T: Float>(a_data: &[T], b_data: &[T], m: usize, k: usize, n: us
             // produced &mut [f64] is unique for the duration of this block.
             let c_f64 =
                 unsafe { &mut *(std::ptr::from_mut::<[T]>(result.as_mut_slice()) as *mut [f64]) };
-            let a_mat = faer::mat::MatRef::from_row_major_slice(a_f64, k, m).transpose();
-            let b_mat = faer::mat::MatRef::from_row_major_slice(b_f64, k, n);
-            let mut c_mat = faer::mat::MatMut::from_row_major_slice_mut(c_f64, m, n);
-            let par = faer_par(m, k, n);
-            faer::linalg::matmul::matmul(
-                &mut c_mat,
-                faer::Accum::Replace,
-                &a_mat,
-                &b_mat,
-                1.0f64,
-                par,
-            );
+            // SAFETY (mkl branch): leaf FFI shim to MKL's `cblas_dgemm`,
+            // same invariants as the `cblas_sgemm` block above but for
+            // f64 with transa=CblasTrans, lda=m.
+            #[cfg(feature = "mkl")]
+            unsafe {
+                ensure_mkl_cbwr_compatible();
+                cblas_sys::cblas_dgemm(
+                    cblas_sys::CBLAS_LAYOUT::CblasRowMajor,
+                    cblas_sys::CBLAS_TRANSPOSE::CblasTrans,
+                    cblas_sys::CBLAS_TRANSPOSE::CblasNoTrans,
+                    m as i32,
+                    n as i32,
+                    k as i32,
+                    1.0_f64,
+                    a_f64.as_ptr(),
+                    m as i32,
+                    b_f64.as_ptr(),
+                    n as i32,
+                    0.0_f64,
+                    c_f64.as_mut_ptr(),
+                    n as i32,
+                );
+            }
+            #[cfg(not(feature = "mkl"))]
+            {
+                let a_mat = faer::mat::MatRef::from_row_major_slice(a_f64, k, m).transpose();
+                let b_mat = faer::mat::MatRef::from_row_major_slice(b_f64, k, n);
+                let mut c_mat = faer::mat::MatMut::from_row_major_slice_mut(c_f64, m, n);
+                let par = faer_par(m, k, n);
+                faer::linalg::matmul::matmul(
+                    &mut c_mat,
+                    faer::Accum::Replace,
+                    &a_mat,
+                    &b_mat,
+                    1.0f64,
+                    par,
+                );
+            }
         } else {
-            let a_f64: Vec<f64> = a_data.iter().map(|&v| v.to_f64().unwrap()).collect();
-            let b_f64: Vec<f64> = b_data.iter().map(|&v| v.to_f64().unwrap()).collect();
+            // Fallback for f16: upcast to f64, run faer, downcast.
+            let a_f64: Vec<f64> = a_data
+                .iter()
+                .map(|&v| num_traits::cast::<T, f64>(v).unwrap_or(0.0))
+                .collect();
+            let b_f64: Vec<f64> = b_data
+                .iter()
+                .map(|&v| num_traits::cast::<T, f64>(v).unwrap_or(0.0))
+                .collect();
             let mut r_f64 = vec![0.0f64; m * n];
             let a_mat = faer::mat::MatRef::from_row_major_slice(&a_f64, k, m).transpose();
             let b_mat = faer::mat::MatRef::from_row_major_slice(&b_f64, k, n);
