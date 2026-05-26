@@ -21,6 +21,18 @@
 //! The bare [`Module::forward`] returns the raw `[B, 2*L, h, w]` parameters
 //! tensor (no split, no sample, no scaling) so callers can swap in their
 //! own sampling strategy (e.g. `.mode()` for deterministic decoding).
+//!
+//! ## REQ status (per `.design/ferrotorch-diffusion/vae_encoder.md`)
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 | SHIPPED | `Encoder<T>` at `vae_encoder.rs:51..79` and `Encoder::new` at `vae_encoder.rs:81..153`; consumer: `VaeEncoder::new` at `vae_encoder.rs:307` builds it; itself consumed by `safetensors_loader.rs:425` `load_vae_encoder` |
+//! | REQ-2 | SHIPPED | `VaeEncoder<T>` at `vae_encoder.rs:288..297` and `VaeEncoder::new` at `vae_encoder.rs:299..316`; consumer: `safetensors_loader.rs:425` `load_vae_encoder`; `gpu/vae_encoder.rs:317` `GpuVaeEncoder::from_module` consumes its `state_dict()` |
+//! | REQ-3 | SHIPPED | `VaeEncoder::encode` at `vae_encoder.rs:325..328` and `DiagonalGaussianDistribution::from_parameters` at `vae_encoder.rs:471..501`; consumer: `vae_encoder.rs:349` `encode_with_scaling` invokes it |
+//! | REQ-4 | SHIPPED | `DiagonalGaussianDistribution::sample_with_seed` at `vae_encoder.rs:527..539`, `mode` at `vae_encoder.rs:506..508`, `randn_with_seed` at `vae_encoder.rs:548..587`; consumer: `vae_encoder.rs:350` `encode_with_scaling` calls `dist.sample_with_seed(seed)` |
+//! | REQ-5 | SHIPPED | `encode_with_scaling` at `vae_encoder.rs:348..361`; consumer: re-exported via `lib.rs:148` `pub use vae_encoder::VaeEncoder` (boundary method IS the public API per goal.md S5 grandfathering) |
+//! | REQ-6 | SHIPPED | `Module<T>::forward` at `vae_encoder.rs:369..382`; consumer: `vae_encoder.rs:326` `encode` calls `self.forward(image)?` to produce the `[B, 2L, h, w]` parameters |
+//! | REQ-7 | SHIPPED | `Module<T>::load_state_dict` at `vae_encoder.rs:421..444`; consumer: `safetensors_loader.rs:394` `VaeEncoder::load_hf_state_dict` calls `self.load_state_dict(&remapped, strict)` after stripping the `vae.` prefix |
 
 use std::collections::HashMap;
 

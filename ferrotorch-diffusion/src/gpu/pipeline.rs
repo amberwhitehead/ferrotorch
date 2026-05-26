@@ -38,6 +38,16 @@
 //! CFG-blend + DDIM-step arithmetic in this module — and the dump
 //! example can persist them with the same `Tensor<f32>` machinery the
 //! CPU path uses.
+//!
+//! ## REQ status (per `.design/ferrotorch-diffusion/gpu/pipeline.md`)
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 | SHIPPED | `GpuStableDiffusionPipeline::new` at `gpu/pipeline.rs:86..100`; consumer: `examples/sd_pipeline_dump.rs` constructs the pipeline via this constructor |
+//! | REQ-2 | SHIPPED | `encode_prompt` at `gpu/pipeline.rs:107..109`; consumer: `examples/sd_pipeline_dump.rs` calls `pipeline.encode_prompt(...)` before invoking `generate` |
+//! | REQ-3 | SHIPPED | `generate` at `gpu/pipeline.rs:170..232` (full loop) and `cfg_eval` at `gpu/pipeline.rs:128..150`; consumer: `examples/sd_pipeline_dump.rs` invokes `generate(...)` to produce the dump artifact |
+//! | REQ-4 | SHIPPED | shape checks at `gpu/pipeline.rs:178..196`; consumer: `generate` exercises them on every dump call; contract mirrors CPU `pipeline.rs:175..191` |
+//! | REQ-5 | SHIPPED | `PipelineStepDump` constructed at `gpu/pipeline.rs:215..222`; consumer: `examples/sd_pipeline_dump.rs` writes each `PipelineStepDump` to disk for diffusion-trajectory audit |
 
 use ferrotorch_core::grad_fns::arithmetic::{add, mul, sub};
 use ferrotorch_core::{FerrotorchError, FerrotorchResult, Tensor, TensorStorage};

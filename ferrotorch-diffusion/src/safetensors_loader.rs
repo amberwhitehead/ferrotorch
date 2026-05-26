@@ -6,6 +6,17 @@
 //! only the decoder slice (`post_quant_conv.*` + `decoder.*`). This
 //! loader drops everything else and returns a [`DropReport`] so the pin
 //! script can audit the drop set.
+//!
+//! ## REQ status (per `.design/ferrotorch-diffusion/safetensors_loader.md`)
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 | SHIPPED | `DropReport` at `safetensors_loader.rs:31..36`; consumer: `safetensors_loader.rs:88..90` populates and returns it; `lib.rs:138` re-exports for pin-script auditing |
+//! | REQ-2 | SHIPPED | `VaeDecoder::load_hf_state_dict` at `safetensors_loader.rs:58..91`; consumer: `load_vae_decoder` at `safetensors_loader.rs:331` invokes it |
+//! | REQ-3 | SHIPPED | `VaeEncoder::load_hf_state_dict` at `safetensors_loader.rs:363..396`; consumer: `load_vae_encoder` at `safetensors_loader.rs:426` invokes it |
+//! | REQ-4 | SHIPPED | `UNet2DConditionModel::load_hf_state_dict` at `safetensors_loader.rs:113..148`; consumer: `load_unet` at `safetensors_loader.rs:176` invokes it |
+//! | REQ-5 | SHIPPED | `load_safetensors_clip_filtered` at `safetensors_loader.rs:191..246` and `load_clip_text_encoder` at `safetensors_loader.rs:270..302`; consumer: `examples/clip_text_encode_dump.rs:265` invokes `load_clip_text_encoder` on the SD-1.5 mirror |
+//! | REQ-6 | SHIPPED | `load_unet` at `safetensors_loader.rs:163..178`, `load_vae_decoder` at `safetensors_loader.rs:318..333`, `load_vae_encoder` at `safetensors_loader.rs:413..428`, `load_clip_text_encoder` at `safetensors_loader.rs:270..302`; consumer: all four examples (`unet_predict_dump.rs`, `vae_decode_dump.rs`, `clip_text_encode_dump.rs`, `sd_pipeline_dump.rs`) import and call them |
 
 use std::collections::HashMap;
 use std::path::Path;

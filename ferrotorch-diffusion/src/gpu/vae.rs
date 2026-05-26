@@ -23,6 +23,16 @@
 //! the input latent (matching `AutoencoderKL.decode(z).sample`) and
 //! returns the decoded image as a ferrotorch CPU `Tensor`
 //! `[B, 3, 512, 512]`.
+//!
+//! ## REQ status (per `.design/ferrotorch-diffusion/gpu/vae.md`)
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 | SHIPPED | `GpuVaeDecoder::new` at `gpu/vae.rs:182..`; consumer: `gpu/vae.rs:350` `from_module` calls `Self::new(cpu.config.clone(), state, device_clone)`; `examples/vae_decode_dump.rs:315` builds via `from_module` |
+//! | REQ-2 | SHIPPED | `from_module` at `gpu/vae.rs:344..351`; consumer: `examples/vae_decode_dump.rs:315` `GpuVaeDecoder::from_module(decoder, &device)?`; `examples/sd_pipeline_dump.rs:501` `GpuVaeDecoder::from_module(vae, &device)?` |
+//! | REQ-3 | SHIPPED | `decode` at `gpu/vae.rs:367..423`; consumer: `gpu/pipeline.rs:230` `self.vae.decode(&latent)?` is the canonical final decode call |
+//! | REQ-4 | SHIPPED | shape check at `gpu/vae.rs:369..376`; consumer: pipeline's `generate` exercises the contract on every dump call (`gpu/pipeline.rs:230`) |
+//! | REQ-5 | SHIPPED | `GpuAttn` struct at `gpu/vae.rs:99..106` (single-head GroupNorm + four `GpuLinear` for q/k/v/out) and `attn_forward` invoked from `decode` at `gpu/vae.rs:402`; consumer: `decode` runs the mid-block attention once per inference |
 
 use ferrotorch_core::{FerrotorchError, FerrotorchResult, Tensor, TensorStorage};
 use ferrotorch_gpu::{

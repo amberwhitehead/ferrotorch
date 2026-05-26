@@ -24,6 +24,14 @@
 //!   sub-models above with the host-side
 //!   [`crate::scheduler::DDIMScheduler`]. Mirrors
 //!   [`crate::pipeline::StableDiffusionPipeline`] op-for-op on CUDA.
+//!
+//! ## REQ status (per `.design/ferrotorch-diffusion/gpu/mod.md`)
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 | SHIPPED | `pub mod` block at `gpu/mod.rs:28..32`; consumer: `gpu/pipeline.rs:46..48` resolves `crate::gpu::clip::GpuClipTextEncoder` / `unet::GpuUNet2DConditional` / `vae::GpuVaeDecoder` |
+//! | REQ-2 | SHIPPED | `pub use` block at `gpu/mod.rs:34..38`; consumer: `examples/sd_pipeline_dump.rs:482` uses the re-exports to construct the full GPU pipeline |
+//! | REQ-3 | SHIPPED | module rustdoc at `gpu/mod.rs:3..27`; consumer: `cargo doc -p ferrotorch-diffusion --features cuda` renders the module landing page |
 
 pub mod clip;
 pub mod pipeline;

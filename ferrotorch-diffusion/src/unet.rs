@@ -38,6 +38,19 @@
 //! Note: the time embedding has NO sinusoidal parameters (it's the
 //! arithmetic-only `Timesteps` module followed by the trainable
 //! `TimestepEmbedding` MLP).
+//!
+//! ## REQ status (per `.design/ferrotorch-diffusion/unet.md`)
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 | SHIPPED | `CrossAttnDownBlock2D<T>` at `unet.rs:67..76` and `forward_t` at `unet.rs:147..165`; consumer: `AnyDownBlock::CrossAttn` at `unet.rs:1162` built by `UNet2DConditionModel::new` |
+//! | REQ-2 | SHIPPED | `DownBlock2D<T>` at `unet.rs:277..285` and `forward_t` at `unet.rs:327..343`; consumer: `AnyDownBlock::Plain` at `unet.rs:1174` built by `UNet2DConditionModel::new` |
+//! | REQ-3 | SHIPPED | `UNetMidBlock2DCrossAttn<T>` at `unet.rs:442..450` and `forward_t` at `unet.rs:491..504`; consumer: `UNet2DConditionModel::forward_t` at `unet.rs:1330` invokes the mid block |
+//! | REQ-4 | SHIPPED | `CrossAttnUpBlock2D<T>` at `unet.rs:600..610` and `forward_t` at `unet.rs:691..722`; consumer: `AnyUpBlock::CrossAttn` at `unet.rs:1217` built by `UNet2DConditionModel::new` |
+//! | REQ-5 | SHIPPED | `UpBlock2D<T>` at `unet.rs:829..836` and `forward_t` at `unet.rs:890..914`; consumer: `AnyUpBlock::Plain` at `unet.rs:1230` |
+//! | REQ-6 | SHIPPED | `AnyDownBlock<T>` at `unet.rs:1000..1046` and `AnyUpBlock<T>` at `unet.rs:1048..1099`; consumer: `UNet2DConditionModel::new` dispatches by `cfg.down_block_has_attn[i]` / `cfg.up_block_has_attn[i]` |
+//! | REQ-7 | SHIPPED | `UNet2DConditionModel::forward_t` at `unet.rs:1274..1362`; consumer: `pipeline.rs:142..143` in `cfg_eval` calls `self.unet.forward_t(...)` twice per diffusion step |
+//! | REQ-8 | SHIPPED | `Module<T>::load_state_dict` at `unet.rs:1444..1486`; consumer: `safetensors_loader.rs:146` `UNet2DConditionModel::load_hf_state_dict` calls `self.load_state_dict(&remapped, strict)` |
 
 use ferrotorch_core::{FerrotorchError, FerrotorchResult, Float, Tensor};
 use ferrotorch_nn::module::{Module, StateDict};

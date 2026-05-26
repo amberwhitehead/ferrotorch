@@ -39,6 +39,17 @@
 //! - SiLU for resnets and the time-embedding MLP.
 //! - GELU (exact erf, not the tanh approx, not QuickGELU) for the
 //!   GEGLU `FeedForward` inside each `BasicTransformerBlock`.
+//!
+//! ## REQ status (per `.design/ferrotorch-diffusion/gpu/unet.md`)
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 | SHIPPED | `GpuUNet2DConditional::new` at `gpu/unet.rs:296..`; consumer: `gpu/unet.rs:630` `from_module` calls `Self::new(cpu.config.clone(), state, device.clone())`; `examples/unet_predict_dump.rs:393` builds via `from_module` |
+//! | REQ-2 | SHIPPED | `from_module` at `gpu/unet.rs:625..631`; consumer: `examples/unet_predict_dump.rs:393` `GpuUNet2DConditional::from_module(unet, &device)?`; `examples/sd_pipeline_dump.rs` uses the same call |
+//! | REQ-3 | SHIPPED | `forward` at `gpu/unet.rs:647..` (full six-stage topology); consumer: `gpu/pipeline.rs:142..143` in `cfg_eval` calls `self.unet.forward(...)` twice per diffusion step |
+//! | REQ-4 | SHIPPED | footgun-aware constructor at `gpu/unet.rs:307` `let heads = config.attention_head_dim;`; rustdoc at `gpu/unet.rs:32..36`; consumer: `from_module` invokes `new` on every production build (e.g. `examples/unet_predict_dump.rs:393`) |
+//! | REQ-5 | SHIPPED | `gpu_silu` and `gpu_gelu_erf` imports at `gpu/unet.rs:47..48`; rustdoc at `gpu/unet.rs:39..42`; consumer: per-layer forward at `gpu/unet.rs:695..` applies SiLU and the FeedForward GEGLU dispatches `gpu_gelu_erf` on every forward |
+//! | REQ-6 | SHIPPED | shape checks at `gpu/unet.rs:653..680`; consumer: `gpu/pipeline.rs:142..143` invokes `forward` on the pipeline's typed `Tensor<f32>` per step |
 
 use ferrotorch_core::{FerrotorchError, FerrotorchResult, Tensor, TensorStorage};
 use ferrotorch_gpu::{

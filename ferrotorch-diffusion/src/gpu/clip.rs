@@ -56,6 +56,16 @@
 //!    per upload and store the transposed copy in VRAM, so every forward
 //!    is a pure `matmul(x, W_t)` + broadcast-add. Avoids per-call
 //!    transposes on the hot path.
+//!
+//! ## REQ status (per `.design/ferrotorch-diffusion/gpu/clip.md`)
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 | SHIPPED | `GpuClipTextEncoder::new` at `gpu/clip.rs:193..`; consumer: `gpu/clip.rs:348` `from_module` calls `Self::new(cpu.config.clone(), state, device.clone())`; `examples/clip_text_encode_dump.rs:370` builds via `from_module` |
+//! | REQ-2 | SHIPPED | `from_module` at `gpu/clip.rs:343..349`; consumer: `examples/clip_text_encode_dump.rs:370` `GpuClipTextEncoder::from_module(encoder, &device)?`; `examples/sd_pipeline_dump.rs` similarly invokes it |
+//! | REQ-3 | SHIPPED | `encode` at `gpu/clip.rs:363..`; consumer: `gpu/pipeline.rs:108` `self.text_encoder.encode(input_ids)` is the canonical text-tower call in the SD-1.5 GPU pipeline |
+//! | REQ-4 | SHIPPED | pre-LN layer body at `gpu/clip.rs:447..505` (LN1, Q/K/V, heads, bmm, scale, causal-mask add, softmax, weighted bmm, out-proj, residual; LN2 + MLP + residual; final `final_layer_norm`); consumer: `encode` at `gpu/clip.rs:447` iterates over `self.layers` for every forward |
+//! | REQ-5 | SHIPPED | q/k/v/out bias fields in `GpuClipAttn` at `gpu/clip.rs:108..113` (each `GpuLinearT.bias: CudaBuffer<f32>` per `gpu/clip.rs:93..96`); QuickGELU via `gpu_gelu` import at `gpu/clip.rs:63`; consumer: per-layer forward uses both surfaces (`linear_forward` at `gpu/clip.rs:453..455` and `gpu_gelu` at `gpu/clip.rs:497..`) |
 
 use ferrotorch_core::{FerrotorchError, FerrotorchResult, Tensor, TensorStorage};
 use ferrotorch_gpu::{

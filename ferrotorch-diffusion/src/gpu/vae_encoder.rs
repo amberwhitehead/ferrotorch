@@ -49,6 +49,17 @@
 //! follow-on, not a silent fallback (the encoder returns
 //! `FerrotorchError::InvalidArgument` for B > 1 rather than degrading
 //! to CPU or producing incorrect output).
+//!
+//! ## REQ status (per `.design/ferrotorch-diffusion/gpu/vae_encoder.md`)
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 | SHIPPED | `GpuVaeEncoder::new` at `gpu/vae_encoder.rs:145..`; consumer: `gpu/vae_encoder.rs:317` `from_module` calls `Self::new(cpu.config.clone(), state, device_clone)` (canonical production-side constructor) |
+//! | REQ-2 | SHIPPED | `from_module` at `gpu/vae_encoder.rs:317..`; consumer: re-exported via `gpu/mod.rs:38` `pub use vae_encoder::GpuVaeEncoder` (boundary method is the public API per goal.md S5 grandfathering) |
+//! | REQ-3 | SHIPPED | `encode` at `gpu/vae_encoder.rs:392..396` calling `encode_to_gpu_buf(image, /*deterministic=*/ false)`; consumer: re-exported via `gpu/mod.rs:38` (boundary method is the public API) |
+//! | REQ-4 | SHIPPED | `encode_mode` at `gpu/vae_encoder.rs:407..411`; consumer: re-exported via `gpu/mod.rs:38` (boundary method per S5 grandfathering) |
+//! | REQ-5 | SHIPPED | `encode_with_gpu_params_probe` at `gpu/vae_encoder.rs:429..465`; consumer: re-exported via `gpu/mod.rs:38`; the trip-wire surface is itself the production-side audit hook for rust-gpu-discipline forbidden-pattern #7 |
+//! | REQ-6 | SHIPPED | shape checks at `gpu/vae_encoder.rs:437..445` and `gpu/vae_encoder.rs:476..482`; consumer: all three entry points (`encode`, `encode_mode`, `encode_with_gpu_params_probe`) flow through one of these checks on every call |
 
 use ferrotorch_core::{FerrotorchError, FerrotorchResult, Tensor, TensorStorage};
 use ferrotorch_gpu::{

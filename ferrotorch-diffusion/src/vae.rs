@@ -15,6 +15,16 @@
 //! The `decode_with_scaling` helper applies `z / scaling_factor` first,
 //! matching `AutoencoderKL.decode(z).sample`. `forward(z)` is the
 //! post-scaling path and accepts an already-divided latent.
+//!
+//! ## REQ status (per `.design/ferrotorch-diffusion/vae.md`)
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 | SHIPPED | `Decoder<T>` at `vae.rs:30..50` and `Decoder::new` at `vae.rs:51..120`; consumer: `VaeDecoder::new` at `vae.rs:281` builds it; itself consumed by `safetensors_loader.rs:330` `load_vae_decoder` |
+//! | REQ-2 | SHIPPED | `VaeDecoder<T>` at `vae.rs:254..263` and `VaeDecoder::new` at `vae.rs:265..288`; consumer: `safetensors_loader.rs:330` `load_vae_decoder` instantiates it; `pipeline.rs:75` carries it as a pipeline field |
+//! | REQ-3 | SHIPPED | `Module<T>::forward` at `vae.rs:314..327`; consumer: `pipeline.rs:227` `vae.decode_with_scaling(...)` (which calls `forward` internally) |
+//! | REQ-4 | SHIPPED | `decode_with_scaling` at `vae.rs:297..308`; consumer: `pipeline.rs:227` and `examples/vae_decode_dump.rs` invoke it for SD-1.5 decoding |
+//! | REQ-5 | SHIPPED | `Module<T>::load_state_dict` at `vae.rs:366..389`; consumer: `safetensors_loader.rs:89` `VaeDecoder::load_hf_state_dict` calls `self.load_state_dict(&remapped, strict)` after stripping the `vae.` prefix |
 
 use std::collections::HashMap;
 
