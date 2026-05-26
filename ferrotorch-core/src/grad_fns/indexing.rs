@@ -1475,15 +1475,74 @@ pub fn index_fill<T: Float>(
     let input_shape = input.shape();
     let ndim = input_shape.len();
     if ndim == 0 {
-        // Upstream unsqueezes 0-d input to 1-d at `TensorAdvancedIndexing.cpp:
-        // 1917 Tensor self_nonzero_dim = (self.dim() == 0) ? self.unsqueeze(-1)
-        // : self;` then re-views the result. ferrotorch follows the same
-        // narrower-contract rejection as the other indexing forwards (gather,
-        // scatter, index_select_dim) — 0-d inputs are tracked under blocker
-        // #1256 as a cross-cutting indexing-family gap.
-        return Err(FerrotorchError::InvalidArgument {
-            message: "index_fill: input must have at least 1 dimension".into(),
-        });
+        // Upstream mirrors 0-d input by unsqueezing to 1-d at
+        // `TensorAdvancedIndexing.cpp:1917`:
+        //   Tensor self_nonzero_dim = (self.dim() == 0)
+        //       ? self.unsqueeze(-1) : self;
+        // then performs the fill on the 1-d view. The result shares storage
+        // with `self` in C++ (a view), so the write is visible in the original
+        // 0-d tensor. ferrotorch copies the scalar value, runs index_fill on a
+        // length-1 1-d tensor, and returns a 0-d scalar — matching the
+        // upstream contract.
+        //
+        // dim must be 0 or -1 (only valid dim for a 0-d tensor treated as 1-d).
+        // Upstream applies `at::maybe_wrap_dim(dim, self_nonzero_dim)` on the
+        // unsqueezed (1-d) view, so dim ∈ {-1, 0} for 0-d input.
+        let dim_for_0d = match dim {
+            0 | -1 => 0i64,
+            _ => {
+                return Err(FerrotorchError::InvalidArgument {
+                    message: format!(
+                        "index_fill: dim {dim} out of range for 0-d input \
+                         (valid range: [-1, 0])"
+                    ),
+                });
+            }
+        };
+        // Validate index: any index value must be 0 (the single element of the
+        // unsqueezed length-1 dimension).
+        let scalar_val = input.data_vec()?[0];
+        let mut result_val = scalar_val;
+        let mut any_filled = false;
+        for v in index.data()? {
+            let i = v.to_i64();
+            if i < 0 {
+                return Err(FerrotorchError::InvalidArgument {
+                    message: format!("index_fill: negative index {i} not allowed"),
+                });
+            }
+            if i != 0 {
+                return Err(FerrotorchError::IndexOutOfBounds {
+                    index: i as usize,
+                    axis: dim_for_0d as usize,
+                    size: 1,
+                });
+            }
+            result_val = <T as num_traits::NumCast>::from(value).ok_or_else(|| {
+                FerrotorchError::InvalidArgument {
+                    message: format!("index_fill: value {value} not representable in target dtype"),
+                }
+            })?;
+            any_filled = true;
+        }
+        // Return a 0-d scalar tensor. If any index was 0 (the only valid index),
+        // result_val was overwritten with `value`; otherwise (empty index tensor)
+        // result_val remains the original scalar. Autograd: a filled 0-d input
+        // has grad = 0 at that position; the backward mirrors the 1-d case.
+        let out_storage = TensorStorage::cpu(vec![result_val]);
+        if input.requires_grad() && is_grad_enabled() {
+            // Build a 1-element index list mirroring what the 1-d path would save.
+            // If index tensor was non-empty (position 0 was filled), record it;
+            // otherwise record empty (no positions filled).
+            let saved_index: Vec<usize> = if any_filled { vec![0] } else { vec![] };
+            let grad_fn = Arc::new(IndexFillBackward {
+                input: input.clone(),
+                dim: 0,
+                index: saved_index,
+            });
+            return Tensor::from_operation(out_storage, vec![], grad_fn);
+        }
+        return Tensor::from_storage(out_storage, vec![], false);
     }
     if index.ndim() > 1 {
         // Upstream `TORCH_CHECK(index.dim() <= 1, "Index has to be a
@@ -2716,11 +2775,15 @@ mod index_fill_tests {
     }
 
     #[test]
-    fn index_fill_rejects_zero_dim_input() -> FerrotorchResult<()> {
+    fn index_fill_zero_dim_input_succeeds_per_upstream() -> FerrotorchResult<()> {
+        // Upstream unsqueezes 0-d input at TensorAdvancedIndexing.cpp:1917:
+        //   Tensor self_nonzero_dim = (self.dim() == 0) ? self.unsqueeze(-1) : self;
+        // torch.index_fill(torch.tensor(1.0), 0, torch.tensor([0]), 0.0) == tensor(0.)
         let input = cpu_f32(vec![1.0_f32], vec![])?;
         let idx = idx_i64(vec![0], vec![1])?;
-        let err = index_fill(&input, 0, &idx, 0.0).err();
-        assert!(matches!(err, Some(FerrotorchError::InvalidArgument { .. })));
+        let out = index_fill(&input, 0, &idx, 0.0)?;
+        assert_eq!(out.shape(), &[] as &[usize], "0-d output must remain 0-d");
+        assert_eq!(out.data()?, &[0.0_f32], "filled value must be 0.0");
         Ok(())
     }
 
