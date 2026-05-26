@@ -32,6 +32,20 @@
 //! `named_parameters()` keys that match torchvision exactly so the
 //! strict value-parity loader can adopt `densenet121(weights=...)` state
 //! dicts without remap.
+//!
+//! ## REQ status (per `.design/ferrotorch-vision/models/densenet.md`)
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 | SHIPPED | impl: `pub struct DenseLayer<T: Float>` + `Module<T>` impl in `densenet.rs` mirrors torchvision `_DenseLayer`; consumer: `DenseBlock::new` constructs them. |
+//! | REQ-2 | SHIPPED | impl: `pub struct DenseBlock<T: Float>` + `Module<T>` impl in `densenet.rs`; consumer: `DenseNet::new` constructs 4 dense blocks. |
+//! | REQ-3 | SHIPPED | impl: `pub struct TransitionLayer<T: Float>` + `Module<T>` impl in `densenet.rs`; consumer: `DenseNet::new` constructs 3 transitions. |
+//! | REQ-4 | SHIPPED | impl: `pub struct DenseNet<T: Float>` + `DenseNet::new` in `densenet.rs`; consumer: `registry::default_registry` registers `densenet121`. |
+//! | REQ-5 | SHIPPED | impl: `Module::forward` for `DenseNet<T>` in `densenet.rs`; consumer: trait method on `Box<dyn Module<T>>` returned by `registry::get_model`. |
+//! | REQ-6 | SHIPPED | impl: `Module::named_parameters` for `DenseNet<T>` (with `features.` prefix); consumer: `load_state_dict(.., strict=false)` in `registry::maybe_load_pretrained`. |
+//! | REQ-7 | SHIPPED | impl: `children` / `named_children` on every sub-type; consumer: `apply_bn_buffers_from_state_dict` walks `named_descendants_dyn` for BN running stats. |
+//! | REQ-8 | SHIPPED | impl: `impl IntermediateFeatures<T> for DenseNet<T>` in `densenet.rs`; consumer: re-exported via `feature_extractor` at `mod.rs`. |
+//! | REQ-9 | SHIPPED | impl: `pub fn densenet121` in `densenet.rs`; consumer: `registry::default_registry` invokes it. |
 
 use ferrotorch_core::grad_fns::activation::relu;
 use ferrotorch_core::grad_fns::shape::{cat, reshape};

@@ -9,6 +9,20 @@
 //! the same parameter count as torchvision. The residual `add` uses
 //! `ferrotorch_core::grad_fns::arithmetic::add` so gradients flow through
 //! skip connections automatically.
+//!
+//! ## REQ status (per `.design/ferrotorch-vision/models/resnet.md`)
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 | SHIPPED | impl: `pub struct BasicBlock<T: Float>` + `Module<T>` impl in `resnet.rs` mirrors torchvision `BasicBlock`; consumer: re-exported at `mod.rs` + invoked by `ResNet::make_basic_layer`. |
+//! | REQ-2 | SHIPPED | impl: `pub struct Bottleneck<T: Float>` + `Module<T>` impl in `resnet.rs`; consumer: invoked by `ResNet::make_bottleneck_layer`. |
+//! | REQ-3 | SHIPPED | impl: `pub struct ResNet<T: Float>` + `Module<T>` impl in `resnet.rs`; consumer: `registry::default_registry` constructs `resnet{18,34,50}` via `maybe_load_pretrained`. |
+//! | REQ-4 | SHIPPED | impl: `pub fn resnet18`, `pub fn resnet34`, `pub fn resnet50` in `resnet.rs`; consumer: bound in `registry::default_registry`. |
+//! | REQ-5 | SHIPPED | impl: `pub fn resnet50_dilated` + dilation-threading helpers in `resnet.rs`; consumer: `use crate::models::resnet::{ResNet, resnet50_dilated}` at `segmentation/fcn.rs` and `segmentation/deeplabv3.rs`. |
+//! | REQ-6 | SHIPPED | impl: `Module::named_parameters` for `BasicBlock`/`Bottleneck`/`ResNet`; consumer: `load_state_dict(.., strict=false)` in `registry::maybe_load_pretrained`. |
+//! | REQ-7 | SHIPPED | impl: `children` / `named_children` overrides; consumer: `apply_bn_buffers_from_state_dict` in `registry::maybe_load_pretrained` walks `named_descendants_dyn`. |
+//! | REQ-8 | SHIPPED | impl: `impl IntermediateFeatures<T> for ResNet<T>` in `resnet.rs`; consumer: re-exported via `feature_extractor` at `mod.rs`. |
+//! | REQ-9 | SHIPPED | impl: `Module::train` / `Module::eval` walking every BN child; consumer: trait method on `Box<dyn Module<T>>` returned by `registry::get_model`. |
 
 use ferrotorch_core::grad_fns::activation::relu;
 use ferrotorch_core::grad_fns::arithmetic::add;

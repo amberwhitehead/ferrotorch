@@ -49,6 +49,21 @@
 //!   torchvision's parallel-branch-with-fan-out shape (failure mode #34).
 //! * `aux_logits = False`: no AuxLogits submodule, no auxiliary head
 //!   (matches `inception_v3(aux_logits=False)` reference).
+//!
+//! ## REQ status (per `.design/ferrotorch-vision/models/inception.md`)
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 | SHIPPED | impl: `pub struct BasicConv2d<T: Float>` + `Module<T>` impl in `inception.rs` mirrors torchvision `BasicConv2d`; consumer: every Mixed module's `new` constructs `BasicConv2d`s. |
+//! | REQ-2 | SHIPPED | impl: `pub struct InceptionA<T: Float>` + `Module<T>` impl in `inception.rs`; consumer: `InceptionV3::new` constructs `Mixed_5b/5c/5d`. |
+//! | REQ-3 | SHIPPED | impl: `pub struct InceptionB<T: Float>` + `Module<T>` impl in `inception.rs`; consumer: `InceptionV3::new` constructs `Mixed_6a`. |
+//! | REQ-4 | SHIPPED | impl: `pub struct InceptionC<T: Float>` + `Module<T>` impl in `inception.rs`; consumer: `InceptionV3::new` constructs `Mixed_6b/6c/6d/6e`. |
+//! | REQ-5 | SHIPPED | impl: `pub struct InceptionD<T: Float>` + `Module<T>` impl in `inception.rs`; consumer: `InceptionV3::new` constructs `Mixed_7a`. |
+//! | REQ-6 | SHIPPED | impl: `pub struct InceptionE<T: Float>` + `Module<T>` impl in `inception.rs`; consumer: `InceptionV3::new` constructs `Mixed_7b/7c`. |
+//! | REQ-7 | SHIPPED | impl: `pub struct InceptionV3<T: Float>` + `InceptionV3::new` in `inception.rs`; consumer: `registry::default_registry` registers `inception_v3`. |
+//! | REQ-8 | SHIPPED | impl: `Module::forward` for `InceptionV3<T>` in `inception.rs`; consumer: trait method on `Box<dyn Module<T>>` returned by `registry::get_model`. |
+//! | REQ-9 | SHIPPED | impl: `named_parameters` for every Mixed type + `InceptionV3` in `inception.rs`; consumer: `load_state_dict(.., strict=false)` in `registry::maybe_load_pretrained`. |
+//! | REQ-10 | SHIPPED | impl: `pub fn inception_v3` in `inception.rs`; consumer: `registry::default_registry` invokes it. |
 
 use ferrotorch_core::grad_fns::activation::relu;
 use ferrotorch_core::grad_fns::shape::{cat, reshape};

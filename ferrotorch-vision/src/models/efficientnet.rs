@@ -25,6 +25,21 @@
 //! entirely. The training-mode backward (Bernoulli-gated residual scaling)
 //! is **out of scope** for Phase 7's value-parity-on-eval push and is
 //! filed separately (see `Phase 7` finding §15).
+//!
+//! ## REQ status (per `.design/ferrotorch-vision/models/efficientnet.md`)
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 | SHIPPED | impl: `struct ConvBnSiLU<T: Float>` + `Module<T>` impl in `efficientnet.rs`; consumer: every `MBConv::new` constructs `ConvBnSiLU::new(...)`; `EfficientNet::new` uses it for stem and head. |
+//! | REQ-2 | SHIPPED | impl: `struct MBConv<T: Float>` + `Module<T>` impl in `efficientnet.rs` mirrors torchvision `MBConv`; consumer: `EfficientNet::new` builds the seven stages. |
+//! | REQ-3 | SHIPPED | impl: `const EFFICIENTNET_B0_STAGES: [Stage; 7]` in `efficientnet.rs`; consumer: `EfficientNet::new` iterates the table. |
+//! | REQ-4 | SHIPPED | impl: `pub struct EfficientNet<T: Float>` + `EfficientNet::new` in `efficientnet.rs`; consumer: `registry::default_registry` registers `efficientnet_b0`. |
+//! | REQ-5 | SHIPPED | impl: `Module::forward` for `EfficientNet<T>` in `efficientnet.rs`; consumer: trait method on `Box<dyn Module<T>>` returned by `registry::get_model`. |
+//! | REQ-6 | SHIPPED | impl: `Module::named_parameters` for `EfficientNet<T>` (dynamic head index); consumer: `load_state_dict(.., strict=false)` in `registry::maybe_load_pretrained`. |
+//! | REQ-7 | SHIPPED | impl: `children` / `named_children` on every sub-type; consumer: `apply_bn_buffers_from_state_dict` walks the tree for BN running stats. |
+//! | REQ-8 | SHIPPED | impl: `impl IntermediateFeatures<T> for EfficientNet<T>` in `efficientnet.rs`; consumer: re-exported via `feature_extractor` at `mod.rs`. |
+//! | REQ-9 | SHIPPED | impl: `pub fn efficientnet_b0` in `efficientnet.rs`; consumer: `registry::default_registry` invokes it. |
+//! | REQ-10 | SHIPPED | impl: `MBConv::forward` applies plain `add` for the residual (no stochastic depth in eval); consumer: `Box<dyn Module<T>>::forward` invoked under `.eval()` by `registry::maybe_load_pretrained`. |
 
 use ferrotorch_core::grad_fns::activation::silu as silu_fn;
 use ferrotorch_core::grad_fns::arithmetic::add;

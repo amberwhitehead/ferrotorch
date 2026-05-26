@@ -43,6 +43,20 @@
 //!
 //! See `tests/conformance_vision_models.rs::value_parity_pipeline` for
 //! the strict torchvision adoption test.
+//!
+//! ## REQ status (per `.design/ferrotorch-vision/models/mobilenet.md`)
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 | SHIPPED | impl: `struct ConvBnAct<T: Float>` + `Module<T>` impl + `new_with_dilation` in `mobilenet.rs`; consumer: every `V2InvertedResidual::new` / `V3InvertedResidual::new` / each `MobileNet*::new` builds them. |
+//! | REQ-2 | SHIPPED | impl: `struct V2InvertedResidual<T: Float>` + `Module<T>` impl in `mobilenet.rs`; consumer: `MobileNetV2::new` builds the 17 inverted-residual blocks. |
+//! | REQ-3 | SHIPPED | impl: `pub struct MobileNetV2<T: Float>` + `Module<T>` impl in `mobilenet.rs`; consumer: `registry::default_registry` registers `mobilenet_v2`. |
+//! | REQ-4 | SHIPPED | impl: `struct V3InvertedResidual<T: Float>` + `Module<T>` impl in `mobilenet.rs`; consumer: `MobileNetV3Small::new` / `MobileNetV3Large::new` build them. |
+//! | REQ-5 | SHIPPED | impl: `pub struct MobileNetV3Small<T: Float>` and `pub struct MobileNetV3Large<T: Float>` in `mobilenet.rs`; consumer: `registry::default_registry` registers `mobilenet_v3_small`; V3-Large flows through `lraspp_mobilenet_v3_large`. |
+//! | REQ-6 | SHIPPED | impl: `pub fn mobilenet_v2`, `pub fn mobilenet_v3_small`, `pub fn mobilenet_v3_large` in `mobilenet.rs`; consumer: `registry::default_registry` invokes V2/V3-small; V3-Large flows through `segmentation/lraspp.rs`. |
+//! | REQ-7 | SHIPPED | impl: `pub fn mobilenet_v3_large_dilated` + `pub struct MobileNetV3LargeStaged<T: Float>` in `mobilenet.rs`; consumer: `segmentation/lraspp.rs` imports `MobileNetV3LargeStaged` for the LRASPP backbone (registered as `lraspp_mobilenet_v3_large` in `registry::default_registry`). |
+//! | REQ-8 | SHIPPED | impl: `named_parameters` / `named_children` for every sub-type in `mobilenet.rs`; consumer: `load_state_dict(.., strict=false)` + `apply_bn_buffers_from_state_dict` in `registry::maybe_load_pretrained`. |
+//! | REQ-9 | SHIPPED | impl: `impl IntermediateFeatures<T>` for `MobileNetV2<T>` and `MobileNetV3Small<T>` in `mobilenet.rs`; consumer: `feature_extractor.rs` imports `mobilenet_v2` for the production helper. |
 
 use ferrotorch_core::grad_fns::arithmetic::add;
 use ferrotorch_core::grad_fns::shape::reshape;

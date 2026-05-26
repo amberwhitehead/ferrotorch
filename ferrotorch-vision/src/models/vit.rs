@@ -11,6 +11,19 @@
 //!
 //! All operations use differentiable primitives from `ferrotorch_core`, so
 //! autograd handles the backward pass automatically.
+//!
+//! ## REQ status (per `.design/ferrotorch-vision/models/vit.md`)
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 | SHIPPED | impl: `pub struct PatchEmbed<T: Float>` + `Module<T>` impl in `vit.rs`; consumer: field of `pub struct VisionTransformer` and called by `VisionTransformer::forward`. |
+//! | REQ-2 | SHIPPED | impl: `pub struct TransformerBlock<T: Float>` + `Module<T>` impl in `vit.rs`; consumer: `VisionTransformer::new` builds `Vec<TransformerBlock<T>>`. |
+//! | REQ-3 | SHIPPED | impl: `pub struct VisionTransformer<T: Float>` + `VisionTransformer::new` in `vit.rs`; consumer: `registry::default_registry` registers `vit_b_16`. |
+//! | REQ-4 | SHIPPED | impl: `Module::forward` for `VisionTransformer<T>` in `vit.rs`; consumer: trait method on `Box<dyn Module<T>>` returned by `registry::get_model`. |
+//! | REQ-5 | SHIPPED | impl: `Module::named_parameters` for `VisionTransformer<T>` in `vit.rs`; consumer: `load_state_dict(.., strict=false)` in `registry::maybe_load_pretrained`. |
+//! | REQ-6 | SHIPPED | impl: `children` / `named_children` on every sub-type in `vit.rs`; consumer: `apply_bn_buffers_from_state_dict` walks `named_descendants_dyn` (no BN buffers for ViT, but real consumer). |
+//! | REQ-7 | SHIPPED | impl: `impl IntermediateFeatures<T> for VisionTransformer<T>` in `vit.rs`; consumer: re-exported via `feature_extractor` at `mod.rs`. |
+//! | REQ-8 | SHIPPED | impl: `pub fn vit_b_16` in `vit.rs`; consumer: `registry::default_registry` invokes it. |
 
 use ferrotorch_core::grad_fns::arithmetic::add;
 use ferrotorch_core::grad_fns::shape::{cat, expand};

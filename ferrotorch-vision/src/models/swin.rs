@@ -56,6 +56,21 @@
 //! Swin-T model on real data. That backward is tracked separately
 //! (#1014); see `ShiftedWindowAttention::forward` for the load-bearing
 //! call site.
+//!
+//! ## REQ status (per `.design/ferrotorch-vision/models/swin.md`)
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 | SHIPPED | impl: `struct PatchEmbed<T: Float>` + `Module<T>` impl in `swin.rs`; consumer: `SwinTransformer::new` constructs it as `features.0`. |
+//! | REQ-2 | SHIPPED | impl: `struct ShiftedWindowAttention<T: Float>` + `Module<T>` impl in `swin.rs`; consumer: every `SwinBlock::new` constructs one. |
+//! | REQ-3 | SHIPPED | impl: `struct Mlp<T: Float>` + `Module<T>` impl in `swin.rs`; consumer: every `SwinBlock::new` constructs one. |
+//! | REQ-4 | SHIPPED | impl: `pub struct SwinBlock<T: Float>` + `Module<T>` impl in `swin.rs`; consumer: `SwinTransformer::new` builds 4 stages of SwinBlocks. |
+//! | REQ-5 | SHIPPED | impl: `struct PatchMerging<T: Float>` + `Module<T>` impl in `swin.rs`; consumer: `SwinTransformer::new` constructs 3 PatchMergings as `features.{2,4,6}`. |
+//! | REQ-6 | SHIPPED | impl: `pub struct SwinTransformer<T: Float>` + `SwinTransformer::new` in `swin.rs`; consumer: `registry::default_registry` registers `swin_tiny`. |
+//! | REQ-7 | SHIPPED | impl: `Module::forward` for `SwinTransformer<T>` in `swin.rs`; consumer: trait method on `Box<dyn Module<T>>` returned by `registry::get_model`. |
+//! | REQ-8 | SHIPPED | impl: the shift-size runtime guard inside `ShiftedWindowAttention::forward` in `swin.rs`; consumer: the final 7x7 stage of `swin_tiny` constructed by `registry::default_registry`. |
+//! | REQ-9 | SHIPPED | impl: `named_parameters` for every sub-type + `SwinTransformer` in `swin.rs`; consumer: `load_state_dict(.., strict=false)` in `registry::maybe_load_pretrained`. |
+//! | REQ-10 | SHIPPED | impl: `pub fn swin_tiny` in `swin.rs`; consumer: `registry::default_registry` invokes it. |
 
 use ferrotorch_core::creation::zeros;
 use ferrotorch_core::grad_fns::activation::softmax;

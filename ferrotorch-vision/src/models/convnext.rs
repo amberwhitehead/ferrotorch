@@ -21,6 +21,21 @@
 //! The `LayerNorm` layers operate on the channel dimension. Since `LayerNorm`
 //! normalizes over the last dimension, the forward pass permutes the data to
 //! `[B, H, W, C]`, applies LayerNorm, and permutes back to `[B, C, H, W]`.
+//!
+//! ## REQ status (per `.design/ferrotorch-vision/models/convnext.md`)
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 | SHIPPED | impl: `pub struct ConvNeXtBlock<T: Float>` + `Module<T>` impl in `convnext.rs` mirrors torchvision `CNBlock`; consumer: `ConvNeXt::new` builds 4 stages of ConvNeXtBlocks. |
+//! | REQ-2 | SHIPPED | impl: `channel_layer_norm` + `nhwc_from_nchw` / `nchw_from_nhwc` in `convnext.rs`; consumer: `ConvNeXtBlock::forward`, `Downsample::forward`, `ConvNeXt::forward` all call it. |
+//! | REQ-3 | SHIPPED | impl: `struct Downsample<T: Float>` + `Module<T>` impl in `convnext.rs`; consumer: `ConvNeXt::new` constructs 3 inter-stage downsamples. |
+//! | REQ-4 | SHIPPED | impl: `pub struct ConvNeXt<T: Float>` + `ConvNeXt::new` in `convnext.rs`; consumer: `registry::default_registry` registers `convnext_tiny`. |
+//! | REQ-5 | SHIPPED | impl: `Module::forward` for `ConvNeXt<T>` in `convnext.rs`; consumer: trait method on `Box<dyn Module<T>>` returned by `registry::get_model`. |
+//! | REQ-6 | SHIPPED | impl: argument validation in `ConvNeXt::new` returns `FerrotorchError::InvalidArgument`; consumer: `convnext_tiny` passes the validated dims to `ConvNeXt::new`. |
+//! | REQ-7 | SHIPPED | impl: `Module::named_parameters` for `ConvNeXt<T>` in `convnext.rs`; consumer: `load_state_dict(.., strict=false)` in `registry::maybe_load_pretrained`. |
+//! | REQ-8 | SHIPPED | impl: `children` / `named_children` overrides on every sub-type in `convnext.rs`; consumer: `apply_bn_buffers_from_state_dict` walks the tree (no BN for ConvNeXt, but real consumer site). |
+//! | REQ-9 | SHIPPED | impl: `impl IntermediateFeatures<T> for ConvNeXt<T>` in `convnext.rs`; consumer: re-exported via `feature_extractor` at `mod.rs`. |
+//! | REQ-10 | SHIPPED | impl: `pub fn convnext_tiny` in `convnext.rs`; consumer: `registry::default_registry` invokes it. |
 
 use ferrotorch_core::grad_fns::arithmetic::{add, mul};
 use ferrotorch_core::grad_fns::shape::reshape;

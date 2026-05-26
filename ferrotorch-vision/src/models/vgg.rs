@@ -14,6 +14,19 @@
 //! classifier.3.weight, classifier.6.weight` exactly matching
 //! `torchvision.models.vgg{11,16}` (BN-free variant) so the strict
 //! value-parity loader can adopt a torchvision state dict without remap.
+//!
+//! ## REQ status (per `.design/ferrotorch-vision/models/vgg.md`)
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 | SHIPPED | impl: `pub struct VGG<T: Float>` + `Module<T>` impl in `vgg.rs`; consumer: `registry::default_registry` registers `vgg11` and `vgg16`. |
+//! | REQ-2 | SHIPPED | impl: `vgg11_cfg` / `vgg16_cfg` in `vgg.rs`; consumer: `VGG::from_cfg` invoked by `pub fn vgg{11,16}`. |
+//! | REQ-3 | SHIPPED | impl: `make_features` in `vgg.rs` (flat Conv/ReLU/Pool entries); consumer: `VGG::from_cfg`. |
+//! | REQ-4 | SHIPPED | impl: `make_classifier` in `vgg.rs` (flat 7-entry head); consumer: `VGG::from_cfg`. |
+//! | REQ-5 | SHIPPED | impl: `pub fn vgg11` / `pub fn vgg16` in `vgg.rs`; consumer: `registry::default_registry` invokes both. |
+//! | REQ-6 | SHIPPED | impl: `Module::named_parameters` for `VGG<T>`; consumer: `load_state_dict(.., strict=false)` in `registry::maybe_load_pretrained`. |
+//! | REQ-7 | SHIPPED | impl: `children` / `named_children` overrides on `VGG<T>`; consumer: `apply_bn_buffers_from_state_dict` (no-op for VGG, but real consumer). |
+//! | REQ-8 | SHIPPED | impl: `impl IntermediateFeatures<T> for VGG<T>` in `vgg.rs`; consumer: re-exported via `feature_extractor` at `mod.rs`. |
 
 use ferrotorch_core::grad_fns::shape::reshape;
 use ferrotorch_core::{FerrotorchResult, Float, Tensor};

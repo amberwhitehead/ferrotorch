@@ -1,3 +1,17 @@
+//! Vision model registry — torchvision-shaped `get_model(name, pretrained,
+//! num_classes)` API for every canonical ferrotorch-vision architecture.
+//!
+//! ## REQ status (per `.design/ferrotorch-vision/models/registry.md`)
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 | SHIPPED | impl: `pub type ModelConstructor<T>` in `registry.rs`; consumer: every `register_model` call in `default_registry` passes a closure of this type. |
+//! | REQ-2 | SHIPPED | impl: `pub struct ModelRegistry<T: Float>` + `list_models` / `get_model` / `register_model` methods in `registry.rs`; consumer: the public free functions at the bottom of `registry.rs` lock `REGISTRY` and call them. |
+//! | REQ-3 | SHIPPED | impl: `default_registry` in `registry.rs`; consumer: `pub static REGISTRY` initializes lazily via `LazyLock::new(|| RwLock::new(default_registry()))`. |
+//! | REQ-4 | SHIPPED | impl: `maybe_load_pretrained` in `registry.rs` (download via `ferrotorch_hub`, load via `ferrotorch_serialize`, call `model.load_state_dict(.., strict=false)`, then `bn_buffer_loader::apply_bn_buffers_from_state_dict`); consumer: every registry-entry closure in `default_registry` invokes it. |
+//! | REQ-5 | SHIPPED | impl: `pub static REGISTRY` + `pub fn list_models` / `get_model` / `register_model` (poison-handling) in `registry.rs`; consumer: `examples/inference_dump.rs` calls `ferrotorch_vision::models::get_model(...)`. |
+//! | REQ-6 | SHIPPED | impl: hard-coded canonical name list + every `register_model(name, ...)` in `default_registry` passing matching hub-name strings; consumer: `scripts/pin_pretrained_weights.py` generates `use ferrotorch_vision::models::registry::get_model;` and calls `get_model(name, /*pretrained=*/true, ...)` for each canonical name in CI. |
+
 use std::collections::HashMap;
 use std::sync::{LazyLock, RwLock};
 
