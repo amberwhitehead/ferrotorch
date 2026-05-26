@@ -2,6 +2,24 @@
 //!
 //! `Normal(loc, scale)` defines a univariate normal distribution with mean
 //! `loc` and standard deviation `scale`. Supports reparameterized sampling.
+//!
+//! ## REQ status (per `.design/ferrotorch-distributions/normal.md`)
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 (`Normal<T>` struct) | SHIPPED | `pub struct Normal` in `normal.rs`; re-exported via `lib.rs`; mirrors `torch/distributions/normal.py:15-66`. |
+//! | REQ-2 (`new` constructor with shape-mismatch rejection) | SHIPPED | the constructor in `normal.rs`. |
+//! | REQ-3 (loc + scale accessors) | SHIPPED | the accessors in `normal.rs`. |
+//! | REQ-4 (`Distribution<T>` impl with 10 methods) | SHIPPED | the impl block in `normal.rs`; mirrors `normal.py:39-114`. |
+//! | REQ-5 (`batch_shape` override returns `loc.shape()`) | SHIPPED | the `batch_shape` override in `normal.rs`; consumed by `Independent::batch_shape` forwarding. |
+//! | REQ-6 (rsample via `loc + scale * eps`) | SHIPPED | the rsample body in `normal.rs`. |
+//! | REQ-7 (rsample backward via `NormalRsampleBackward`) | SHIPPED | the `NormalRsampleBackward` GradFn in `normal.rs`. |
+//! | REQ-8 (log_prob backward via `NormalLogProbBackward`) | SHIPPED | the `NormalLogProbBackward` GradFn in `normal.rs`. |
+//! | REQ-9 (cdf via `erf`) | SHIPPED | the cdf body in `normal.rs` dispatches to `ferrotorch_core::special::erf`. |
+//! | REQ-10 (icdf via `erfinv`) | SHIPPED | the icdf body in `normal.rs` dispatches to `ferrotorch_core::special::erfinv`. |
+//! | REQ-11 (mean/mode/variance/stddev/entropy closed forms) | SHIPPED | the property bodies in `normal.rs`. |
+//! | REQ-12 (device-resident outputs) | SHIPPED | `out.to(device)` at the tail of every method in `normal.rs`. |
+//! | REQ-13 (`ExponentialFamily` interface) | NOT-STARTED | blocker #1404 — `_natural_params` / `_log_normalizer` / `_mean_carrier_measure` not implemented. |
 
 use std::sync::Arc;
 

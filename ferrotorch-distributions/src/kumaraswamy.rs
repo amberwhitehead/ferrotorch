@@ -2,6 +2,19 @@
 //!
 //! `Kumaraswamy(a, b)` — a two-parameter distribution on [0, 1], similar to
 //! Beta but with a closed-form CDF and simpler sampling.
+//!
+//! ## REQ status (per `.design/ferrotorch-distributions/kumaraswamy.md`)
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 (`Kumaraswamy<T>` struct) | SHIPPED | `pub struct Kumaraswamy` in `kumaraswamy.rs`; re-exported via `lib.rs`; mirrors `torch/distributions/kumaraswamy.py:24-70`. |
+//! | REQ-2 (`new` constructor with shape-mismatch rejection) | SHIPPED | the constructor in `kumaraswamy.rs`. |
+//! | REQ-3 (`a` + `b` accessors) | SHIPPED | the accessors in `kumaraswamy.rs`. |
+//! | REQ-4 (`Distribution<T>` impl with closed-form methods) | SHIPPED | the impl block in `kumaraswamy.rs`; mirrors `kumaraswamy.py:78-107`. |
+//! | REQ-5 (inverse-CDF sampling) | SHIPPED | the sample body in `kumaraswamy.rs` invoking `(1 - (1-u)^(1/b))^(1/a)`. |
+//! | REQ-6 (rsample) | NOT-STARTED | blocker #1383 — `rsample` returns `InvalidArgument`. |
+//! | REQ-7 (mode boundary returns NaN) | NOT-STARTED | blocker #1384 — ferrotorch returns 0, upstream returns NaN. |
+//! | REQ-8 (`digamma` via shifted-asymptotic expansion) | SHIPPED | the entropy body invokes `digamma_scalar(b + 1)` from `special_fns`. |
 
 use ferrotorch_core::creation;
 use ferrotorch_core::dtype::Float;

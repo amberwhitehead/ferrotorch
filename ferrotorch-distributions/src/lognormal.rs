@@ -3,6 +3,22 @@
 //! `LogNormal(loc, scale)` defines a log-normal distribution whose logarithm
 //! is normally distributed with mean `loc` and standard deviation `scale`.
 //! Supports reparameterized sampling via the underlying Normal distribution.
+//!
+//! ## REQ status (per `.design/ferrotorch-distributions/lognormal.md`)
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 (`LogNormal<T>` struct) | SHIPPED | `pub struct LogNormal` in `lognormal.rs`; re-exported via `lib.rs`; mirrors `torch/distributions/log_normal.py:13-59`. |
+//! | REQ-2 (`new` constructor with shape-mismatch rejection) | SHIPPED | the constructor in `lognormal.rs`. |
+//! | REQ-3 (`loc` + `scale` accessors) | SHIPPED | the accessors in `lognormal.rs`. |
+//! | REQ-4 (`Distribution<T>` impl) | SHIPPED | the impl block in `lognormal.rs`; mirrors `log_normal.py:46-75`. |
+//! | REQ-5 (sampling via underlying normal) | SHIPPED | `(loc + scale * eps).exp()` body in `lognormal.rs`. |
+//! | REQ-6 (`rsample` backward via `LogNormalRsampleBackward`) | SHIPPED | the `LogNormalRsampleBackward` GradFn in `lognormal.rs`. |
+//! | REQ-7 (log_prob change-of-variables `-ln(x)` term) | SHIPPED | the `-(half * z * z) - scale.ln() - half * log_2pi - ln_x` body in `lognormal.rs`. |
+//! | REQ-8 (closed-form mean/mode/variance) | SHIPPED | `mean`/`mode`/`variance` overrides in `lognormal.rs`. |
+//! | REQ-9 (entropy = `mu + 0.5 + ln(sigma) + 0.5*ln(2*pi)`) | SHIPPED | the entropy body in `lognormal.rs`. |
+//! | REQ-10 (device-resident outputs) | SHIPPED | `out.to(device)` at the tail of every method in `lognormal.rs`. |
+//! | REQ-11 (`mean_value` / `variance_value` Vec<T> helpers) | SHIPPED | the helpers in `lognormal.rs` invoked by `mean()` / `variance()` in the same file. |
 
 use std::sync::Arc;
 

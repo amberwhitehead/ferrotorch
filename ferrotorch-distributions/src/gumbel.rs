@@ -3,6 +3,23 @@
 //! `Gumbel(loc, scale)` defines a Gumbel (Type-I extreme value) distribution
 //! with location `loc` and scale `scale`. Used in the Gumbel-Softmax trick.
 //! Supports reparameterized sampling via inverse CDF.
+//!
+//! ## REQ status (per `.design/ferrotorch-distributions/gumbel.md`)
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 (`Gumbel<T>` struct) | SHIPPED | `pub struct Gumbel<T: Float>` with `loc`/`scale` mirroring `torch/distributions/gumbel.py:17-59`; consumer: `pub use gumbel::Gumbel` in `lib.rs` |
+//! | REQ-2 (constructor) | SHIPPED | `pub fn Gumbel::new` with shape-equality check; consumer: re-export |
+//! | REQ-3 (accessors + utilities) | SHIPPED | `pub fn Gumbel::loc`/`scale`/`mean_value`/`variance_value`; consumer: `Gumbel::mean`/`variance` (trait impl) invoke `self.mean_value()?` and `self.variance_value()?` |
+//! | REQ-4 (`Distribution` trait impl) | SHIPPED | `impl<T: Float> Distribution<T> for Gumbel<T>`; consumer: trait dispatch |
+//! | REQ-5 (`gumbel_icdf` private helper) | SHIPPED | `loc - scale*ln(-ln(u_safe))` with `1e-20` clamp; consumer: invoked by both `sample` and `rsample` methods |
+//! | REQ-6 (`sample`/`rsample`) | SHIPPED | per-element `gumbel_icdf` + backward attachment; consumer: trait surface |
+//! | REQ-7 (`log_prob`) | SHIPPED | `-(z + exp(-z)) - ln(scale)` mirroring `gumbel.py:67-72`; consumer: trait surface |
+//! | REQ-8 (`entropy`) | SHIPPED | `1 + ln(scale) + γ` mirroring `gumbel.py:90-91`; consumer: trait surface |
+//! | REQ-9 (`cdf`/`icdf`) | SHIPPED | `exp(-exp(-z))` / `-ln(-ln(p))` overrides; consumer: trait surface |
+//! | REQ-10 (`mean`/`mode`/`variance`) | SHIPPED | overrides mirroring `gumbel.py:74-88`; consumer: trait surface |
+//! | REQ-11 (`GumbelRsampleBackward`) | SHIPPED | sum-of-grad + `-ln(-ln(u))`-weighted-sum backward; consumer: invoked by the rsample method when grad enabled |
+//! | REQ-12 (full PyTorch surface) | NOT-STARTED | blocker #1419 — `expand`, `arg_constraints`, `support`, `validate_args`, `TransformedDistribution` base hooks (cross-cutting with `lib.md` REQ-5 / blocker #1376) |
 
 use std::sync::Arc;
 

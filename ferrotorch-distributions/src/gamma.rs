@@ -5,6 +5,23 @@
 //! Supports reparameterized sampling via Marsaglia & Tsang's method.
 //!
 //! [CL-329]
+//!
+//! ## REQ status (per `.design/ferrotorch-distributions/gamma.md`)
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 (`Gamma<T>` struct) | SHIPPED | `pub struct Gamma<T: Float>` with `concentration`/`rate` mirroring `torch/distributions/gamma.py:18-68`; consumer: `pub use gamma::Gamma` in `lib.rs` + `crate::Gamma::new(...)` invoked 4 times by the `Beta` sampling paths in `beta.rs` |
+//! | REQ-2 (constructor) | SHIPPED | `pub fn Gamma::new` with shape-equality check; consumer: `crate::Gamma::new` callsites in `beta.rs` for `Beta::sample`/`rsample` |
+//! | REQ-3 (accessors) | SHIPPED | `pub fn Gamma::concentration`/`rate`; consumer: `kl_gamma_gamma`/`kl_gamma_exponential`/`kl_exponential_gamma` in `kl.rs` read both accessors |
+//! | REQ-4 (`Distribution` trait impl) | SHIPPED | `impl<T: Float> Distribution<T> for Gamma<T>`; consumer: `Beta::sample` and `Beta::rsample` in `beta.rs` invoke `gamma_a.sample(shape)?` and `gamma_a.rsample(shape)?` |
+//! | REQ-5 (`sample_standard_gamma` private helper) | SHIPPED | Marsaglia-Tsang + α<1 boost + lazy RNG buffers; consumer: invoked by both `Gamma::sample` and `Gamma::rsample` |
+//! | REQ-6 (`sample`) | SHIPPED | standard-Gamma / rate; consumer: `Beta::sample` invokes it |
+//! | REQ-7 (`rsample` with backward) | SHIPPED | tiny-guard + `GammaRsampleBackward` attachment per `gamma.py:84-86`; consumer: `Beta::rsample` invokes it |
+//! | REQ-8 (`log_prob`) | SHIPPED | `α*ln(β) + (α-1)*ln(x) - β*x - lgamma(α)` mirroring `gamma.py:89-98`; consumer: trait surface |
+//! | REQ-9 (`entropy`) | SHIPPED | closed form mirroring `gamma.py:100-106`; consumer: trait surface |
+//! | REQ-10 (`mean`/`mode`/`variance`) | SHIPPED | overrides mirroring `gamma.py:45-55` (mode NaN for α<1, R-DEV-6 vs PyTorch's clamp); consumer: trait surface |
+//! | REQ-11 (`GammaRsampleBackward`) | SHIPPED | implicit-reparam through standard-Gamma; consumer: invoked by the rsample method when grad enabled |
+//! | REQ-12 (full PyTorch surface) | NOT-STARTED | blocker #1416 — `expand`, `arg_constraints`, `support`, `validate_args`, `cdf` (requires incomplete gamma), exp-family hooks (cross-cutting with `lib.md` REQ-5 / blocker #1376) |
 
 use std::sync::Arc;
 

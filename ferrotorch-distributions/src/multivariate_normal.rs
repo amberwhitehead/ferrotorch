@@ -15,6 +15,22 @@
 //!
 //! [CL-331] ferrotorch#331 — multivariate distributions
 //! Pass 5.B.1 follow-up: closes #1137 by migrating to Pattern B (device-resident).
+//!
+//! ## REQ status (per `.design/ferrotorch-distributions/multivariate_normal.md`)
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 (`MultivariateNormal<T>` struct) | SHIPPED | `pub struct MultivariateNormal` in `multivariate_normal.rs`; re-exported via `lib.rs`; mirrors `torch/distributions/multivariate_normal.py:88-196`. |
+//! | REQ-2 (3 constructors: from_scale_tril/from_covariance/from_precision) | SHIPPED | the 3 constructors in `multivariate_normal.rs`; `low_rank_multivariate_normal.rs` consumes `from_covariance`. |
+//! | REQ-3 (loc/scale_tril/dim accessors) | SHIPPED | the accessors in `multivariate_normal.rs`. |
+//! | REQ-4 (`Distribution<T>` impl) | SHIPPED | the impl block in `multivariate_normal.rs`; mirrors `multivariate_normal.py:251-274`. |
+//! | REQ-5 (rsample via `loc + eps @ L^T` device-resident) | SHIPPED | the rsample body in `multivariate_normal.rs` uses `matmul + add` without no_grad. |
+//! | REQ-6 (log_prob via precision-matrix reformulation) | SHIPPED | the log_prob body in `multivariate_normal.rs` uses `solve(Sigma, I)` for the inverse. |
+//! | REQ-7 (`half_log_det_of_tril` device-resident helper) | SHIPPED | the helper in `multivariate_normal.rs`; invoked by log_prob + entropy. |
+//! | REQ-8 (entropy via `0.5 * d * (1 + ln(2*pi)) + half_log_det`) | SHIPPED | the entropy body in `multivariate_normal.rs`. |
+//! | REQ-9 (autograd-traced rsample, no hand-rolled backward) | SHIPPED | rsample composes grad-aware `matmul` + `add` in `multivariate_normal.rs`. |
+//! | REQ-10 (covariance_matrix/precision_matrix accessors) | NOT-STARTED | blocker #1393 — only `scale_tril` accessor present. |
+//! | REQ-11 (mode/variance properties) | NOT-STARTED | blocker #1394 — default trait impls error. |
 
 use std::sync::Arc;
 

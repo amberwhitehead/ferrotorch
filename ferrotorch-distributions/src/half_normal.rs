@@ -3,6 +3,21 @@
 //! `HalfNormal(scale)` defines a half-normal distribution — the absolute value
 //! of a `Normal(0, scale)` random variable. Supported on `[0, inf)`.
 //! Supports reparameterized sampling.
+//!
+//! ## REQ status (per `.design/ferrotorch-distributions/half_normal.md`)
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 (`HalfNormal<T>` struct) | SHIPPED | `pub struct HalfNormal<T: Float>` with `scale` field mirroring `torch/distributions/half_normal.py:15-46`; consumer: `pub use half_normal::HalfNormal` in `lib.rs` |
+//! | REQ-2 (constructor) | SHIPPED | `pub fn HalfNormal::new(scale)`; consumer: re-export |
+//! | REQ-3 (accessors + utilities) | SHIPPED | `pub fn HalfNormal::scale`/`mean_value`/`variance_value`; consumer: `HalfNormal::mean`/`variance` (trait impl) invoke `self.mean_value()?` and `self.variance_value()?` |
+//! | REQ-4 (`Distribution` trait impl) | SHIPPED | `impl<T: Float> Distribution<T> for HalfNormal<T>`; consumer: trait dispatch |
+//! | REQ-5 (`sample`/`rsample`) | SHIPPED | `scale * |randn|` per `half_normal.py:15-27`; consumer: trait surface |
+//! | REQ-6 (`log_prob` with support mask) | SHIPPED | closed-form with `x<0 → -inf` mirroring `half_normal.py:68-73`; consumer: trait surface |
+//! | REQ-7 (`entropy`) | SHIPPED | `0.5*ln(π/2) + ln(scale) + 0.5` mirroring `half_normal.py:83-84`; consumer: trait surface |
+//! | REQ-8 (`mean`/`mode`/`variance`) | SHIPPED | overrides mirroring `half_normal.py:56-66`; consumer: trait surface |
+//! | REQ-9 (`HalfNormalRsampleBackward`) | SHIPPED | `sum(grad_output * |eps|)` backward; consumer: invoked by the rsample method when scale requires grad |
+//! | REQ-10 (full PyTorch surface) | NOT-STARTED | blocker #1421 — `expand`, `arg_constraints`, `support`, `validate_args`, `cdf` (requires erf), `icdf` (requires inverse erf), `TransformedDistribution` base hooks (cross-cutting with `lib.md` REQ-5 / blocker #1376) |
 
 use std::sync::Arc;
 

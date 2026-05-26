@@ -10,6 +10,22 @@
 //! corresponding `log probs[k]`.
 //!
 //! Mirrors `torch.distributions.OneHotCategorical`.
+//!
+//! ## REQ status (per `.design/ferrotorch-distributions/one_hot_categorical.md`)
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 (`OneHotCategorical<T>` struct) | SHIPPED | `pub struct OneHotCategorical` in `one_hot_categorical.rs`; re-exported via `lib.rs`; mirrors `torch/distributions/one_hot_categorical.py:14-72`. |
+//! | REQ-2 (`new` constructor with 3 preconditions + normalisation) | SHIPPED | the constructor in `one_hot_categorical.rs`. |
+//! | REQ-3 (probs + num_categories accessors) | SHIPPED | the accessors in `one_hot_categorical.rs`. |
+//! | REQ-4 (`Distribution<T>` impl) | SHIPPED | the impl block in `one_hot_categorical.rs`; mirrors `one_hot_categorical.py:104-118`. |
+//! | REQ-5 (sampling via inverse-CDF + one-hot scatter) | SHIPPED | the sample body in `one_hot_categorical.rs`. |
+//! | REQ-6 (log_prob via `sum_k value[k] * log_p[k]`) | SHIPPED | the log_prob body in `one_hot_categorical.rs`. |
+//! | REQ-7 (entropy via `-sum p_k * log(p_k)`) | SHIPPED | the entropy body in `one_hot_categorical.rs`. |
+//! | REQ-8 (`rsample` errors — discrete) | SHIPPED | the `rsample` body returns `InvalidArgument` in `one_hot_categorical.rs`. |
+//! | REQ-9 (mean/mode/variance overrides) | NOT-STARTED | blocker #1413 — default trait impls error. |
+//! | REQ-10 (enumerate_support) | NOT-STARTED | blocker #1417 — trait has no `enumerate_support`. |
+//! | REQ-11 (`OneHotCategoricalStraightThrough` variant) | NOT-STARTED | blocker #1418 — straight-through variant absent. |
 
 use ferrotorch_core::creation;
 use ferrotorch_core::dtype::Float;

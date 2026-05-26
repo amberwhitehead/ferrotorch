@@ -22,6 +22,19 @@
 //! once we need them; correctness lands first.
 //!
 //! Mirrors `torch.distributions.LowRankMultivariateNormal`.
+//!
+//! ## REQ status (per `.design/ferrotorch-distributions/low_rank_multivariate_normal.md`)
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 (`LowRankMultivariateNormal<T>` struct) | SHIPPED | `pub struct LowRankMultivariateNormal` in `low_rank_multivariate_normal.rs`; re-exported via `lib.rs`; mirrors `torch/distributions/lowrank_multivariate_normal.py:54-139`. |
+//! | REQ-2 (`new` constructor with shape + positive-diag validation) | SHIPPED | the constructor in `low_rank_multivariate_normal.rs`. |
+//! | REQ-3 (5 accessors: loc/cov_factor/cov_diag/dim/rank) | SHIPPED | the accessors in `low_rank_multivariate_normal.rs`. |
+//! | REQ-4 (`Distribution<T>` impl delegating to inner MVN) | SHIPPED | the impl block in `low_rank_multivariate_normal.rs`. |
+//! | REQ-5 (mean override returns loc directly) | SHIPPED | the `mean()` body in `low_rank_multivariate_normal.rs`. |
+//! | REQ-6 (Woodbury/capacitance-tril fast paths) | NOT-STARTED | blocker #1385 — current impl is dense `O(d^3)` not `O(d * r^2)`. |
+//! | REQ-7 (variance override) | NOT-STARTED | blocker #1386 — default trait `variance()` returns `InvalidArgument`. |
+//! | REQ-8 (scale_tril/covariance_matrix/precision_matrix accessors) | NOT-STARTED | blocker #1387 — matrix-form accessors absent. |
 
 use ferrotorch_core::dtype::Float;
 use ferrotorch_core::error::{FerrotorchError, FerrotorchResult};

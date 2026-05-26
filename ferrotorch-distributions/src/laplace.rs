@@ -5,6 +5,19 @@
 //! Supports reparameterized sampling via inverse CDF.
 //!
 //! [CL-329]
+//!
+//! ## REQ status (per `.design/ferrotorch-distributions/laplace.md`)
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 (`Laplace<T>` struct) | SHIPPED | `pub struct Laplace` in `laplace.rs`; re-exported via `lib.rs`; mirrors `torch/distributions/laplace.py:14-62`. |
+//! | REQ-2 (`new` constructor with shape-mismatch rejection) | SHIPPED | the constructor in `laplace.rs`. |
+//! | REQ-3 (`loc` + `scale` accessors) | SHIPPED | the accessors in `laplace.rs`. |
+//! | REQ-4 (`Distribution<T>` impl with 9 methods) | SHIPPED | the impl block in `laplace.rs`; mirrors `laplace.py:35-104`. |
+//! | REQ-5 (inverse-CDF sampling) | SHIPPED | the `laplace_icdf_sample` private helper in `laplace.rs` invoked by sample/rsample. |
+//! | REQ-6 (`rsample` backward via `LaplaceRsampleBackward`) | SHIPPED | the `LaplaceRsampleBackward` GradFn in `laplace.rs`. |
+//! | REQ-7 (device-resident outputs) | SHIPPED | `out.to(device)` at the tail of every method in `laplace.rs`. |
+//! | REQ-8 (numerical-stability clamp on `1 - |u|`) | SHIPPED | the `u_abs.min(one - eps)` clamp in `laplace.rs`. |
 
 use std::sync::Arc;
 

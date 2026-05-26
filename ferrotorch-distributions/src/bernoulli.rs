@@ -3,6 +3,20 @@
 //! `Bernoulli(probs)` defines a distribution over `{0, 1}` where the
 //! probability of drawing `1` is `probs`. This is a discrete distribution
 //! and does not support reparameterized sampling.
+//!
+//! ## REQ status (per `.design/ferrotorch-distributions/bernoulli.md`)
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 (`Bernoulli<T>` struct) | SHIPPED | `pub struct Bernoulli<T: Float>` with `probs` field mirroring `torch/distributions/bernoulli.py:20-45`; consumer: `pub use bernoulli::Bernoulli` in `lib.rs` re-export (grandfathered) |
+//! | REQ-2 (constructor) | SHIPPED | `pub fn Bernoulli::new` mirroring `bernoulli.py:47-72`; consumer: re-export plus external callers |
+//! | REQ-3 (`probs` accessor) | SHIPPED | `pub fn Bernoulli::probs(&self) -> &Tensor<T>`; consumer: `kl_bernoulli_bernoulli` in `kl.rs` reads `p.probs().data_vec()?` |
+//! | REQ-4 (`Distribution` trait impl) | SHIPPED | `impl<T: Float> Distribution<T> for Bernoulli<T>` mirroring `bernoulli.py:116-130`; consumer: trait dispatch via `pub use Bernoulli` |
+//! | REQ-5 (`rsample` rejection) | SHIPPED | the `rsample` method returns `InvalidArgument` (no reparam for discrete) per `bernoulli.py:42-45` (no `has_rsample`); consumer: trait surface |
+//! | REQ-6 (`log_prob` clamped) | SHIPPED | `log_prob(value) = x*ln(p) + (1-x)*ln(1-p)` with eps=1e-7 clamp mirroring `bernoulli.py:121-125`; consumer: trait surface |
+//! | REQ-7 (`entropy`) | SHIPPED | `-p*ln(p) - (1-p)*ln(1-p)` formula mirroring `bernoulli.py:127-130`; consumer: trait surface |
+//! | REQ-8 (`cdf`/`icdf`/`mean`/`mode`/`variance`) | SHIPPED | property overrides mirroring `bernoulli.py:91-102`; consumer: trait-default overrides via `pub use Bernoulli` |
+//! | REQ-9 (full PyTorch surface) | NOT-STARTED | blocker #1406 — `logits` ctor, `expand`, `enumerate_support`, `arg_constraints` (cross-cutting with `lib.md` REQ-5 / blocker #1376) |
 
 use ferrotorch_core::creation;
 use ferrotorch_core::dtype::Float;

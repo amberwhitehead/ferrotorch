@@ -21,6 +21,23 @@
 //!
 //! [CL-331] ferrotorch#331 — multivariate distributions
 //! Pass 5.B.1 follow-up: closes #1136 by migrating to Pattern B (device-resident).
+//!
+//! ## REQ status (per `.design/ferrotorch-distributions/dirichlet.md`)
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 (`Dirichlet<T>` struct) | SHIPPED | `pub struct Dirichlet<T: Float>` with `concentration`/`k` mirroring `torch/distributions/dirichlet.py:38-86`; consumer: `pub use dirichlet::Dirichlet` in `lib.rs` |
+//! | REQ-2 (constructor + validation) | SHIPPED | `pub fn Dirichlet::new` with ndim/empty checks mirroring `dirichlet.py:61-74`; consumer: re-export |
+//! | REQ-3 (accessors) | SHIPPED | `pub fn Dirichlet::concentration`/`num_categories`; consumer: re-export |
+//! | REQ-4 (`Distribution` trait impl) | SHIPPED | `impl<T: Float> Distribution<T> for Dirichlet<T>`; consumer: trait dispatch |
+//! | REQ-5 (`sample` via Marsaglia-Tsang) | SHIPPED | the `sample` method invokes `sample_gamma` per element with α<1 boost + device-resident upload; consumer: trait surface |
+//! | REQ-6 (`rsample` with backward) | SHIPPED | `DirichletRsampleBackward` attachment + device-resident sample tensor; consumer: trait surface |
+//! | REQ-7 (`log_prob` device-resident) | SHIPPED | composes `sub`/`mul`/`sum_dim`/`add` + `lgamma` mirroring `dirichlet.py:90-97`; consumer: trait surface |
+//! | REQ-8 (`mean` device-resident) | SHIPPED | `sum_dim(α, -1, true)` + `div` mirroring `dirichlet.py:99-101`; consumer: trait surface |
+//! | REQ-9 (`variance` device-resident) | SHIPPED | closed-form via scalar broadcasts mirroring `dirichlet.py:113-120`; consumer: trait surface |
+//! | REQ-10 (`entropy` device-resident) | SHIPPED | composed `lgamma`/`digamma` formula mirroring `dirichlet.py:122-130`; consumer: trait surface |
+//! | REQ-11 (`DirichletRsampleBackward`) | SHIPPED | implicit-reparam + simplex projection; consumer: invoked by the rsample method when concentration requires grad |
+//! | REQ-12 (full PyTorch surface) | NOT-STARTED | blocker #1412 — N-D batched concentration, `expand`, `arg_constraints`, `support`, `mode` (cross-cutting with `lib.md` REQ-5 / blocker #1376) |
 
 use std::sync::Arc;
 

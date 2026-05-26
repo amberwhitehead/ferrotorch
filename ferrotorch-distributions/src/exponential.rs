@@ -4,6 +4,22 @@
 //! `rate` (lambda). Supports reparameterized sampling via inverse CDF.
 //!
 //! [CL-329]
+//!
+//! ## REQ status (per `.design/ferrotorch-distributions/exponential.md`)
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 (`Exponential<T>` struct) | SHIPPED | `pub struct Exponential<T: Float>` with `rate` field mirroring `torch/distributions/exponential.py:14-58`; consumer: `pub use exponential::Exponential` in `lib.rs` |
+//! | REQ-2 (constructor) | SHIPPED | `pub fn Exponential::new(rate)`; consumer: re-export |
+//! | REQ-3 (`rate` accessor) | SHIPPED | `pub fn Exponential::rate(&self) -> &Tensor<T>`; consumer: `kl_exponential_exponential` / `kl_gamma_exponential` / `kl_exponential_gamma` in `kl.rs` read `.rate().data_vec()?` |
+//! | REQ-4 (`Distribution` trait impl) | SHIPPED | `impl<T: Float> Distribution<T> for Exponential<T>`; consumer: trait dispatch + `kl.rs` arms |
+//! | REQ-5 (`sample`/`rsample` inverse CDF) | SHIPPED | `-ln(u_safe)/rate` with `1e-30` guard mirroring `exponential.py:68-70`; consumer: trait surface |
+//! | REQ-6 (`log_prob`) | SHIPPED | `ln(rate) - rate*x` mirroring `exponential.py:72-75`; consumer: trait surface |
+//! | REQ-7 (`entropy`) | SHIPPED | `1 - ln(rate)` mirroring `exponential.py:85-86`; consumer: trait surface |
+//! | REQ-8 (`cdf`/`icdf`) | SHIPPED | overrides mirroring `exponential.py:77-83`; consumer: trait surface |
+//! | REQ-9 (`mean`/`mode`/`variance`) | SHIPPED | overrides mirroring `exponential.py:35-49`; consumer: trait surface |
+//! | REQ-10 (`ExponentialRsampleBackward`) | SHIPPED | `d(z)/d(rate) = ln(u_safe)/rate²` backward; consumer: invoked by the rsample method |
+//! | REQ-11 (full PyTorch surface) | NOT-STARTED | blocker #1414 — `expand`, `arg_constraints`, `support`, `validate_args`, exp-family hooks (cross-cutting with `lib.md` REQ-5 / blocker #1376) |
 
 use std::sync::Arc;
 

@@ -6,6 +6,22 @@
 //! Beta(a, b) = Gamma(a, 1) / (Gamma(a, 1) + Gamma(b, 1)).
 //!
 //! [CL-329]
+//!
+//! ## REQ status (per `.design/ferrotorch-distributions/beta.md`)
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 (`Beta<T>` struct) | SHIPPED | `pub struct Beta<T: Float>` with `concentration1`/`concentration0` mirroring `torch/distributions/beta.py:15-61`; consumer: `pub use beta::Beta` in `lib.rs` |
+//! | REQ-2 (constructor) | SHIPPED | `pub fn Beta::new` with shape-equality check mirroring `beta.py:41-61`; consumer: re-export |
+//! | REQ-3 (accessors) | SHIPPED | `pub fn Beta::concentration1`/`concentration0` mirroring `beta.py:96-110`; consumer: re-export |
+//! | REQ-4 (`Distribution` trait impl) | SHIPPED | `impl<T: Float> Distribution<T> for Beta<T>`; consumer: trait dispatch |
+//! | REQ-5 (`sample` via Gamma ratio) | SHIPPED | the `sample` method constructs `crate::Gamma::new(...)` instances and forms `xa/(xa+xb)` per `beta.py:84-85`; consumer: trait surface |
+//! | REQ-6 (`rsample` with backward) | SHIPPED | the `rsample` method invokes `Gamma::rsample` for grad flow + attaches `BetaRsampleBackward`; consumer: trait surface |
+//! | REQ-7 (`log_prob`) | SHIPPED | `(α-1)*ln(x) + (β-1)*ln(1-x) - lbeta(α,β)` via `lgamma_scalar` mirroring `beta.py:87-91`; consumer: trait surface |
+//! | REQ-8 (`entropy`) | SHIPPED | closed form via `digamma_scalar` mirroring `beta.py:93-94`; consumer: trait surface |
+//! | REQ-9 (`mean`/`mode`/`variance`) | SHIPPED | overrides mirroring `beta.py:71-82`; consumer: trait surface |
+//! | REQ-10 (`BetaRsampleBackward` `GradFn`) | SHIPPED | implicit-reparam chain rule through Gamma ratio; consumer: invoked by the rsample method when grad enabled |
+//! | REQ-11 (full PyTorch surface) | NOT-STARTED | blocker #1408 — `expand`, `arg_constraints`, `support`, `validate_args`, scalar-broadcast ctor, exp-family hooks (cross-cutting with `lib.md` REQ-5 / blocker #1376) |
 
 use std::sync::Arc;
 

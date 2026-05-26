@@ -2,6 +2,22 @@
 //!
 //! `Cauchy(loc, scale)` defines a Cauchy (Lorentz) distribution with location
 //! `loc` and scale `scale`. Supports reparameterized sampling via inverse CDF.
+//!
+//! ## REQ status (per `.design/ferrotorch-distributions/cauchy.md`)
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 (`Cauchy<T>` struct) | SHIPPED | `pub struct Cauchy<T: Float>` with `loc`/`scale` mirroring `torch/distributions/cauchy.py:15-49`; consumer: `pub use cauchy::Cauchy` in `lib.rs` |
+//! | REQ-2 (constructor) | SHIPPED | `pub fn Cauchy::new` with shape-equality check mirroring `cauchy.py:38-49`; consumer: re-export |
+//! | REQ-3 (accessors) | SHIPPED | `pub fn Cauchy::loc`/`scale`/`median`; consumer: re-export |
+//! | REQ-4 (`Distribution` trait impl) | SHIPPED | `impl<T: Float> Distribution<T> for Cauchy<T>`; consumer: trait dispatch |
+//! | REQ-5 (`sample`/`rsample` via inverse CDF) | SHIPPED | clamped `loc + scale*tan(π*(u-0.5))` formula; consumer: trait surface |
+//! | REQ-6 (`log_prob`) | SHIPPED | `-ln(π) - ln(scale) - ln(1+z²)` mirroring `cauchy.py:81-88`; consumer: trait surface |
+//! | REQ-7 (`entropy`) | SHIPPED | `ln(4π*scale)` mirroring `cauchy.py:98-99`; consumer: trait surface |
+//! | REQ-8 (`cdf`/`icdf`) | SHIPPED | overrides mirroring `cauchy.py:90-96`; consumer: trait surface |
+//! | REQ-9 (`mean`/`mode`/`variance`) | SHIPPED | NaN/loc/∞ overrides mirroring `cauchy.py:61-74`; consumer: trait surface |
+//! | REQ-10 (`CauchyRsampleBackward`) | SHIPPED | sum-of-grad + tan-weighted-sum backward; consumer: invoked by the rsample method when grad enabled |
+//! | REQ-11 (full PyTorch surface) | NOT-STARTED | blocker #1400 — `expand`, `arg_constraints`, `support`, `validate_args`, scalar-broadcast ctor (cross-cutting with `lib.md` REQ-5 / blocker #1376) |
 
 use std::sync::Arc;
 

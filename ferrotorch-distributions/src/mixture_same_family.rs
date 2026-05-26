@@ -23,6 +23,22 @@
 //!
 //! `rsample` is not supported (mixture sampling is non-reparameterizable
 //! without Gumbel-softmax tricks).
+//!
+//! ## REQ status (per `.design/ferrotorch-distributions/mixture_same_family.md`)
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 (`MixtureSameFamily<T, D>` struct) | SHIPPED | `pub struct MixtureSameFamily` in `mixture_same_family.rs`; re-exported via `lib.rs`; mirrors `torch/distributions/mixture_same_family.py:13-109`. |
+//! | REQ-2 (`new` constructor with zero-K rejection) | SHIPPED | the constructor in `mixture_same_family.rs`. |
+//! | REQ-3 (3 accessors: mixing/components/num_components) | SHIPPED | the accessors in `mixture_same_family.rs`. |
+//! | REQ-4 (`Distribution<T>` impl with 4 methods) | SHIPPED | the impl block in `mixture_same_family.rs`. |
+//! | REQ-5 (two-step ancestor sampling) | SHIPPED | the sample body in `mixture_same_family.rs` does mixing.sample then gather. |
+//! | REQ-6 (log_prob via logsumexp) | SHIPPED | the manual logsumexp body in `mixture_same_family.rs`. |
+//! | REQ-7 (`rsample` errors — not reparameterizable) | SHIPPED | the `rsample` body returns `InvalidArgument` in `mixture_same_family.rs`. |
+//! | REQ-8 (`entropy` errors — no closed form) | SHIPPED | the `entropy` body returns `InvalidArgument` in `mixture_same_family.rs`. |
+//! | REQ-9 (mean/variance via law-of-total-variance) | NOT-STARTED | blocker #1388 — default trait impls error. |
+//! | REQ-10 (cdf via sum cdf_x * mix_probs) | NOT-STARTED | blocker #1389 — default trait cdf errors. |
+//! | REQ-11 (multi-event-dim component support) | NOT-STARTED | blocker #1390 — current impl assumes scalar event_shape. |
 
 use ferrotorch_core::dtype::Float;
 use ferrotorch_core::error::{FerrotorchError, FerrotorchResult};

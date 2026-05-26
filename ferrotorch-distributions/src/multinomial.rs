@@ -8,6 +8,21 @@
 //! This is a discrete distribution and does not support reparameterized sampling.
 //!
 //! [CL-331] ferrotorch#331 — multivariate distributions
+//!
+//! ## REQ status (per `.design/ferrotorch-distributions/multinomial.md`)
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 (`Multinomial<T>` struct) | SHIPPED | `pub struct Multinomial` in `multinomial.rs`; re-exported via `lib.rs`; mirrors `torch/distributions/multinomial.py:14-79`. |
+//! | REQ-2 (`new` constructor with 3 preconditions + normalisation) | SHIPPED | the constructor in `multinomial.rs`. |
+//! | REQ-3 (3 accessors: total_count/probs/num_categories) | SHIPPED | the accessors in `multinomial.rs`. |
+//! | REQ-4 (`Distribution<T>` impl with 6 methods) | SHIPPED | the impl block in `multinomial.rs`; mirrors `multinomial.py:112-148`. |
+//! | REQ-5 (sampling via per-trial inverse-CDF + bucket count) | SHIPPED | the sample body in `multinomial.rs` does `total_count` per-output draws via binary search. |
+//! | REQ-6 (log_prob via multinomial PMF + `lgamma`) | SHIPPED | the log_prob body in `multinomial.rs` invokes `lgamma_scalar`. |
+//! | REQ-7 (closed-form mean/variance) | SHIPPED | the `mean`/`variance` overrides in `multinomial.rs`. |
+//! | REQ-8 (`rsample` errors — discrete) | SHIPPED | the `rsample` body returns `InvalidArgument` in `multinomial.rs`. |
+//! | REQ-9 (exact entropy via Binomial enumerate_support) | NOT-STARTED | blocker #1391 — current entropy is Stirling approximation. |
+//! | REQ-10 (logits parameterisation) | NOT-STARTED | blocker #1392 — only `probs` accepted. |
 
 use ferrotorch_core::creation;
 use ferrotorch_core::dtype::Float;

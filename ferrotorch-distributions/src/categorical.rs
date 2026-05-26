@@ -3,6 +3,21 @@
 //! `Categorical(probs)` defines a distribution over `{0, 1, ..., K-1}` where
 //! `K` is the number of categories. This is a discrete distribution and does
 //! not support reparameterized sampling.
+//!
+//! ## REQ status (per `.design/ferrotorch-distributions/categorical.md`)
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 (`Categorical<T>` struct) | SHIPPED | `pub struct Categorical<T: Float>` with `probs`/`cdf`/`num_categories` mirroring `torch/distributions/categorical.py:13-85`; consumer: `pub use categorical::Categorical` in `lib.rs` + `MixtureSameFamily` holds `mixing: Categorical<T>` field |
+//! | REQ-2 (constructor + validation) | SHIPPED | `pub fn Categorical::new` with ndim/empty/positive-sum checks + CDF precomputation mirroring `categorical.py:56-85`; consumer: `MixtureSameFamily::new` accepts a Categorical |
+//! | REQ-3 (accessors) | SHIPPED | `pub fn Categorical::probs`/`num_categories`; consumer: `MixtureSameFamily::mixing` returns `&Categorical<T>` |
+//! | REQ-4 (`Distribution` trait impl) | SHIPPED | `impl<T: Float> Distribution<T> for Categorical<T>`; consumer: `MixtureSameFamily` invokes the mixing categorical's trait methods |
+//! | REQ-5 (`sample` via inverse-CDF) | SHIPPED | binary-search lookup on precomputed CDF; consumer: `MixtureSameFamily::sample` picks component indices |
+//! | REQ-6 (`rsample` rejection) | SHIPPED | the `rsample` method returns `InvalidArgument`; consumer: `MixtureSameFamily::rsample` propagates the error |
+//! | REQ-7 (`log_prob`) | SHIPPED | normalized-prob index lookup with `-inf` for OOR + eps clamp mirroring `categorical.py:151-157`; consumer: `MixtureSameFamily::log_prob` |
+//! | REQ-8 (`entropy`) | SHIPPED | `-sum(p*ln(p))` scalar mirroring `categorical.py:159-163`; consumer: trait surface |
+//! | REQ-9 (numerical guards) | SHIPPED | CDF-last forced to 1 + eps clamp on log_prob; consumer: the `sample` method's binary search relies on this |
+//! | REQ-10 (full PyTorch surface) | NOT-STARTED | blocker #1410 — `logits` ctor, N-D batched probs, `expand`, `enumerate_support`, `mean`/`mode`/`variance` (cross-cutting with `lib.md` REQ-5 / blocker #1376) |
 
 use ferrotorch_core::creation;
 use ferrotorch_core::dtype::Float;
