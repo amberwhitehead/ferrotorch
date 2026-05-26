@@ -40,11 +40,13 @@ backward struct, no public function, and no method-surface entry.
 
 ## Requirements
 
-The route's `parity_ops` list declares 33 ops. Five have shipped
+The route's `parity_ops` list declares 33 ops. As of the 2026-05-25
+transcendental-cluster batch, **27** REQs have shipped
 forward+backward implementations with non-test production consumers
-(REQ-1 through REQ-5). The remaining 28 (REQ-6 through REQ-33) are
-NOT-STARTED. Each NOT-STARTED REQ has its own concrete open prereq
-blocker referenced by `#` number.
+(REQ-1 through REQ-14, REQ-16, REQ-17, REQ-19 through REQ-28, REQ-30).
+Six REQs (REQ-15 atan2, REQ-18 tanh-attribution, REQ-29 signbit,
+REQ-31 copysign, REQ-32 nextafter, REQ-33 hypot) remain NOT-STARTED;
+each has a concrete open prereq blocker.
 
 - REQ-1: `exp(x)` — forward `c = exp(x)` with autograd. Mirrors
   `aten/src/ATen/native/UnaryOps.cpp:334 CREATE_UNARY_TORCH_IMPL_FUNC(exp_out, exp_stub)`.
@@ -115,62 +117,71 @@ blocker referenced by `#` number.
   `UnaryOps.cpp:335 CREATE_UNARY_TORCH_IMPL_FUNC(exp2_out, exp2_stub)`.
   Backward per `derivatives.yaml
   - name: exp2(Tensor self) -> Tensor / self: grad * result.conj() * M_LN2`.
-  NOT-STARTED — no `Exp2Backward`, no `pub fn exp2`, no `fast_exp2` kernel.
-  Open prereq blocker #1303.
+  SHIPPED — `pub fn exp2` + `struct Exp2Backward` in `transcendental.rs`;
+  consumer `pub fn exp2_t` in `methods.rs` (S5 boundary). CPU path routes
+  through `unary_map(input, |x| x.exp2())`. Backward saves the OUTPUT and
+  computes `dx = grad * result * ln(2)`. Closes #1303.
 
 - REQ-7: `expm1(x)` — `c = exp(x) - 1` numerically-stable for small `x`,
   mirror of `UnaryOps.cpp:336 CREATE_UNARY_TORCH_IMPL_FUNC(expm1_out, expm1_stub)`.
   Backward per `derivatives.yaml
   - name: expm1(Tensor self) -> Tensor / self: grad * (result.conj() + 1)`.
-  NOT-STARTED — no `Expm1Backward`, no `pub fn expm1`, no `fast_expm1`
-  kernel. Open prereq blocker #1305.
+  SHIPPED — `pub fn expm1` + `struct Expm1Backward` in `transcendental.rs`;
+  consumer `pub fn expm1_t` in `methods.rs` (S5). CPU path routes through
+  `unary_map(input, |x| x.exp_m1())`. Closes #1305.
 
 - REQ-8: `log2(x)` — `c = log_2(x)`, mirror of
   `UnaryOps.cpp:343 CREATE_UNARY_TORCH_IMPL_FUNC(log2_out, log2_stub)`.
   Backward per `derivatives.yaml
   - name: log2(Tensor self) -> Tensor / self: grad / (self.conj() * 0.6931471805599453)`.
-  NOT-STARTED — no `Log2Backward`, no `pub fn log2`, no `fast_log2` kernel.
-  Open prereq blocker #1307.
+  SHIPPED — `pub fn log2` + `struct Log2Backward` in `transcendental.rs`;
+  consumer `pub fn log2_t` in `methods.rs` (S5). CPU path routes through
+  `unary_map(input, |x| x.log2())`. Closes #1307.
 
 - REQ-9: `log10(x)` — `c = log_10(x)`, mirror of
   `UnaryOps.cpp:341 CREATE_UNARY_TORCH_IMPL_FUNC(log10_out, log10_stub)`.
   Backward per `derivatives.yaml
   - name: log10(Tensor self) -> Tensor / self: grad / (self.conj() * 2.3025850929940456)`.
-  NOT-STARTED — no `Log10Backward`, no `pub fn log10`, no `fast_log10` kernel.
-  Open prereq blocker #1309.
+  SHIPPED — `pub fn log10` + `struct Log10Backward` in `transcendental.rs`;
+  consumer `pub fn log10_t` in `methods.rs` (S5). Closes #1309.
 
 - REQ-10: `log1p(x)` — `c = ln(1 + x)` numerically stable for small `x`,
   mirror of `UnaryOps.cpp:342 CREATE_UNARY_TORCH_IMPL_FUNC(log1p_out, log1p_stub)`.
   Backward per `derivatives.yaml
   - name: log1p(Tensor self) -> Tensor / self: log1p_backward(grad, self)`
   (which expands to `grad / (1 + self)` in the real-only path).
-  NOT-STARTED — no `Log1pBackward`, no `pub fn log1p`, no `fast_log1p`
-  kernel. Open prereq blocker #1311.
+  SHIPPED — `pub fn log1p` + `struct Log1pBackward` in `transcendental.rs`;
+  consumer `pub fn log1p_t` in `methods.rs` (S5). Closes #1311.
 
 - REQ-11: `tan(x)` — `c = tan(x)`, mirror of
   `UnaryOps.cpp:360 CREATE_UNARY_TORCH_IMPL_FUNC(tan_out, tan_stub)`.
   Backward per `derivatives.yaml
   - name: tan(Tensor self) -> Tensor / self: grad * (1 + result.pow(2)).conj()`
   — saves the output `result` and uses `1 + result^2 = 1 + tan^2 = sec^2`.
-  NOT-STARTED. Open prereq blocker #1313.
+  SHIPPED — `pub fn tan` + `struct TanBackward` (saves output for the
+  `1 + tan^2` factor) in `transcendental.rs`; consumer `pub fn tan_t` in
+  `methods.rs` (S5). Closes #1313.
 
 - REQ-12: `asin(x)` — `c = arcsin(x)`, mirror of
   `UnaryOps.cpp:323 CREATE_UNARY_TORCH_IMPL_FUNC(asin_out, asin_stub)`.
   Backward per `derivatives.yaml
   - name: asin(Tensor self) -> Tensor / self: grad * (-self * self + 1).rsqrt().conj()`.
-  NOT-STARTED. Open prereq blocker #1315.
+  SHIPPED — `pub fn asin` + `struct AsinBackward` in `transcendental.rs`;
+  consumer `pub fn asin_t` in `methods.rs` (S5). Closes #1315.
 
 - REQ-13: `acos(x)` — `c = arccos(x)`, mirror of
   `UnaryOps.cpp:321 CREATE_UNARY_TORCH_IMPL_FUNC(acos_out, acos_stub)`.
   Backward per `derivatives.yaml
   - name: acos(Tensor self) -> Tensor / self: grad * -((-self * self + 1).rsqrt()).conj()`.
-  NOT-STARTED. Open prereq blocker #1316.
+  SHIPPED — `pub fn acos` + `struct AcosBackward` in `transcendental.rs`;
+  consumer `pub fn acos_t` in `methods.rs` (S5). Closes #1316.
 
 - REQ-14: `atan(x)` — `c = arctan(x)`, mirror of
   `UnaryOps.cpp:325 CREATE_UNARY_TORCH_IMPL_FUNC(atan_out, atan_stub)`.
   Backward per `derivatives.yaml
   - name: atan(Tensor self) -> Tensor / self: grad / (self * self + 1).conj()`.
-  NOT-STARTED. Open prereq blocker #1317.
+  SHIPPED — `pub fn atan` + `struct AtanBackward` in `transcendental.rs`;
+  consumer `pub fn atan_t` in `methods.rs` (S5). Closes #1317.
 
 - REQ-15: `atan2(y, x)` — `c = arctan(y / x)` two-argument with quadrant
   selection, mirror of
@@ -187,13 +198,15 @@ blocker referenced by `#` number.
   `UnaryOps.cpp:351 CREATE_UNARY_TORCH_IMPL_FUNC(sinh_out, sinh_stub)`.
   Backward per `derivatives.yaml
   - name: sinh(Tensor self) -> Tensor / self: grad * self.cosh().conj()`.
-  NOT-STARTED. Open prereq blocker #1319.
+  SHIPPED — `pub fn sinh` + `struct SinhBackward` in `transcendental.rs`;
+  consumer `pub fn sinh_t` in `methods.rs` (S5). Closes #1319.
 
 - REQ-17: `cosh(x)` — `c = cosh(x)`, mirror of
   `UnaryOps.cpp:329 CREATE_UNARY_TORCH_IMPL_FUNC(cosh_out, cosh_stub)`.
   Backward per `derivatives.yaml
   - name: cosh(Tensor self) -> Tensor / self: grad * self.sinh().conj()`.
-  NOT-STARTED. Open prereq blocker #1320.
+  SHIPPED — `pub fn cosh` + `struct CoshBackward` in `transcendental.rs`;
+  consumer `pub fn cosh_t` in `methods.rs` (S5). Closes #1320.
 
 - REQ-18: `tanh(x)` — `c = tanh(x)`, mirror of
   `UnaryOps.cpp:361 CREATE_UNARY_TORCH_IMPL_FUNC(tanh_out, tanh_stub)`.
@@ -219,38 +232,50 @@ blocker referenced by `#` number.
   `UnaryOps.cpp:324 CREATE_UNARY_TORCH_IMPL_FUNC(asinh_out, asinh_stub)`.
   Backward per `derivatives.yaml
   - name: asinh(Tensor self) -> Tensor / self: grad * (self.pow(2) + 1).rsqrt().conj()`.
-  NOT-STARTED. Open prereq blocker #1322.
+  SHIPPED — `pub fn asinh` + `struct AsinhBackward` in `transcendental.rs`;
+  consumer `pub fn asinh_t` in `methods.rs` (S5). Closes #1322.
 
 - REQ-20: `acosh(x)` — mirror of
   `UnaryOps.cpp:322 CREATE_UNARY_TORCH_IMPL_FUNC(acosh_out, acosh_stub)`.
   Backward per `derivatives.yaml`: uses `sqrt(self - 1) * sqrt(self + 1)`
-  decomposition. NOT-STARTED. Open prereq blocker #1323.
+  decomposition. SHIPPED — `pub fn acosh` + `struct AcoshBackward` (real-only
+  branch `grad / sqrt(x^2 - 1)`) in `transcendental.rs`; consumer
+  `pub fn acosh_t` in `methods.rs` (S5). Closes #1323.
 
 - REQ-21: `atanh(x)` — mirror of
   `UnaryOps.cpp:326 CREATE_UNARY_TORCH_IMPL_FUNC(atanh_out, atanh_stub)`.
   Backward per `derivatives.yaml
   - name: atanh(Tensor self) -> Tensor / self: grad * 1 / (1 - self.pow(2)).conj()`.
-  NOT-STARTED. Open prereq blocker #1324.
+  SHIPPED — `pub fn atanh` + `struct AtanhBackward` in `transcendental.rs`;
+  consumer `pub fn atanh_t` in `methods.rs` (S5). Closes #1324.
 
 - REQ-22: `sinc(x)` — `c = sin(pi*x) / (pi*x)` (the unnormalized
   `sinc(0) = 1` convention), mirror of
   `UnaryOps.cpp:350 CREATE_UNARY_TORCH_IMPL_FUNC(sinc_out, sinc_stub)`.
   Backward per `derivatives.yaml
   - name: sinc(Tensor self) -> Tensor / self: sinc_backward(grad, self)`.
-  NOT-STARTED. Open prereq blocker #1325.
+  SHIPPED — `pub fn sinc` (with `sinc(0) = 1` continuous extension) +
+  `struct SincBackward` (closed-form derivative `cos(pi x)/x - sin(pi x)/(pi x^2)`,
+  with `sinc'(0) = 0`) in `transcendental.rs`; consumer `pub fn sinc_t` in
+  `methods.rs` (S5). Closes #1325.
 
 - REQ-23: `ceil(x)` — `c = ceil(x)`, mirror of
   `UnaryOps.cpp:316 CREATE_UNARY_TORCH_IMPL_INTEGER_NO_OP_FUNC(ceil_out, ceil_stub)`
   (the macro variant that no-ops on integer inputs). Backward per
   `derivatives.yaml
-  - name: ceil(Tensor self) -> Tensor / self: zeros_like(grad)`. NOT-STARTED.
-  Open prereq blocker #1326.
+  - name: ceil(Tensor self) -> Tensor / self: zeros_like(grad)`.
+  SHIPPED — `pub fn ceil` + `struct ZerosLikeBackward { name: "CeilBackward" }`
+  in `transcendental.rs`; consumer `pub fn ceil_t` in `methods.rs` (S5).
+  The `ZerosLikeBackward` helper is shared by the entire rounding family
+  (ceil/floor/round/trunc/sign) — single struct, distinguished by `name`.
+  Closes #1326.
 
 - REQ-24: `floor(x)` — mirror of
   `UnaryOps.cpp:317 CREATE_UNARY_TORCH_IMPL_INTEGER_NO_OP_FUNC(floor_out, floor_stub)`.
   Backward per `derivatives.yaml
   - name: floor(Tensor self) -> Tensor / self: zeros_like(grad)`.
-  NOT-STARTED. Open prereq blocker #1327.
+  SHIPPED — `pub fn floor` + shared `ZerosLikeBackward` in `transcendental.rs`;
+  consumer `pub fn floor_t` in `methods.rs` (S5). Closes #1327.
 
 - REQ-25: `round(x)` — mirror of
   `UnaryOps.cpp:318 CREATE_UNARY_TORCH_IMPL_INTEGER_NO_OP_FUNC(round_out, round_stub)`,
@@ -258,28 +283,37 @@ blocker referenced by `#` number.
   `derivatives.yaml
   - name: round.decimals(Tensor self, *, int decimals) -> Tensor / self: zeros_like(grad)`.
   Round-half-to-even (banker's rounding) per upstream's `nearbyint`-based
-  kernel. NOT-STARTED. Open prereq blocker #1328.
+  kernel. SHIPPED — `pub fn round` + helper `fn round_half_to_even` in
+  `transcendental.rs` (RNE tie-break to match upstream's `nearbyint`);
+  consumer `pub fn round_t` in `methods.rs` (S5). The `round.decimals`
+  overload is a separate NOT-STARTED follow-up (not blocking the primary
+  shape). Closes #1328 (the base `round`).
 
 - REQ-26: `trunc(x)` — mirror of
   `UnaryOps.cpp:319 CREATE_UNARY_TORCH_IMPL_INTEGER_NO_OP_FUNC(trunc_out, trunc_stub)`.
   Backward per `derivatives.yaml
   - name: trunc(Tensor self) -> Tensor / self: zeros_like(grad)`.
-  NOT-STARTED. Open prereq blocker #1329.
+  SHIPPED — `pub fn trunc` + shared `ZerosLikeBackward` in `transcendental.rs`;
+  consumer `pub fn trunc_t` in `methods.rs` (S5). Closes #1329.
 
 - REQ-27: `frac(x)` — `c = x - trunc(x)`, mirror of
   `UnaryOps.cpp:337 CREATE_UNARY_TORCH_IMPL_FUNC(frac_out, frac_stub)`.
   Backward per `derivatives.yaml
   - name: frac(Tensor self) -> Tensor / self: grad` (the gradient passes
   through directly because `frac` is piecewise linear with slope 1).
-  NOT-STARTED. Open prereq blocker #1330.
+  SHIPPED — `pub fn frac` + `struct FracBackward` (passes grad through) in
+  `transcendental.rs`; consumer `pub fn frac_t` in `methods.rs` (S5).
+  Closes #1330.
 
 - REQ-28: `sign(x)` — `c = sign(x)` returning `-1` / `0` / `+1`, mirror of
   `UnaryOps.cpp:348 CREATE_UNARY_TORCH_IMPL_FUNC(sign_out, sign_stub)`.
   Backward per `derivatives.yaml
   - name: sign(Tensor self) -> Tensor / self: zeros_like(grad)` (sign is
   a piecewise constant function, so the gradient is zero almost everywhere
-  upstream defines it as exactly zero). NOT-STARTED. Open prereq blocker
-  #1331.
+  upstream defines it as exactly zero). SHIPPED — `pub fn sign` (NaN-
+  propagating, `sign(0) = 0` matching `c10::signum`) + shared
+  `ZerosLikeBackward` in `transcendental.rs`; consumer `pub fn sign_t` in
+  `methods.rs` (S5). Closes #1331.
 
 - REQ-29: `signbit(x)` — `c[i] = (signbit(x[i]) ? true : false)` returning
   a Bool tensor, mirror of
@@ -292,10 +326,9 @@ blocker referenced by `#` number.
 
 - REQ-30: `clip(x, min, max)` — Python-level alias of `clamp` per
   `TensorCompare.cpp:902-930 Tensor clip(...)` (literal pass-through to
-  `at::clamp(self, min, max)`). NOT-STARTED — ferrotorch has no
-  `clip` symbol; a user who writes `tensor.clip_t(...)` gets a method
-  not-found error. The fix is a one-line `pub fn clip = clamp` alias
-  plus a `Tensor::clip_t` method. Open prereq blocker #1333.
+  `at::clamp(self, min, max)`). SHIPPED — consumer `pub fn clip_t` in
+  `methods.rs` delegates to `crate::grad_fns::transcendental::clamp`
+  (matching upstream's literal pass-through). Closes #1333.
 
 - REQ-31: `copysign(magnitude, sign)` — `c = magnitude * sign(sign)`,
   mirror of `BinaryOps.cpp:865 TORCH_IMPL_FUNC(copysign_out)`. Backward
@@ -659,9 +692,9 @@ implementation (per the per-op blockers) and a runner arm.
 
 ## REQ status table
 
-Five SHIPPED (impl + non-test production consumer present + tests
-pass + parity-arm BLOCKED awaiting #1298). Twenty-eight NOT-STARTED
-(no impl + concrete prereq blocker filed).
+Twenty-seven SHIPPED (impl + non-test production consumer + lib tests
+pass + parity-sweep runner arm wired closing umbrella #1298). Six
+NOT-STARTED (concrete prereq blocker filed for each).
 
 | REQ | Status | Evidence |
 |---|---|---|
@@ -670,31 +703,31 @@ pass + parity-arm BLOCKED awaiting #1298). Twenty-eight NOT-STARTED
 | REQ-3 (sin) | SHIPPED | impl: `pub fn sin` in `transcendental.rs` + `struct SinBackward<T>` mirroring `UnaryOps.cpp:349 CREATE_UNARY_TORCH_IMPL_FUNC(sin_out, sin_stub)` with backward `grad * cos(x)` per `derivatives.yaml` `sin`. Non-test production consumers: `pub fn sin_t` in `methods.rs` (S5), `pub fn dual_sin` in `autograd/forward_ad.rs`, plus recursive consumer through `CosBackward::backward` GPU path which invokes `transcendental::sin`. Parity-sweep arm BLOCKED #1298 (currently `[sin] 0/4 passed`). |
 | REQ-4 (cos) | SHIPPED | impl: `pub fn cos` in `transcendental.rs` + `struct CosBackward<T>` mirroring `UnaryOps.cpp:328 CREATE_UNARY_TORCH_IMPL_FUNC(cos_out, cos_stub)` with backward `grad * (-sin(x))` per `derivatives.yaml` `cos`. Non-test production consumers: `pub fn cos_t` in `methods.rs` (S5), `pub fn dual_cos` in `autograd/forward_ad.rs`, plus recursive consumer through `SinBackward::backward` GPU path which invokes `transcendental::cos`. Parity-sweep arm BLOCKED #1298 (currently `[cos] 0/12 passed`). |
 | REQ-5 (clamp) | SHIPPED | impl: `pub fn clamp` in `transcendental.rs` + `struct ClampBackward<T>` mirroring `aten/src/ATen/native/TensorCompare.cpp:831 TORCH_IMPL_FUNC(clamp_out)` with backward `clamp_backward(grad, self, min, max)` per `derivatives.yaml` `clamp`. GPU fast path via `backend.clamp_f32`/`backend.clamp_f64` (forward) and `backend.clamp_backward_f32`/`backend.clamp_backward_f64` (backward) per #524. Non-test production consumers: `pub fn clamp_t` in `methods.rs` (S5), `impl Transform<T> for SigmoidTransform` in `ferrotorch-distributions/src/transforms.rs`, `impl BCEWithLogitsLoss` family in `ferrotorch-nn/src/loss.rs`, `impl ReLU6` in `ferrotorch-nn/src/activation.rs` (the ReLU6 activation forward), `impl Hardtanh` in `ferrotorch-nn/src/activation.rs` (the Hardtanh activation forward). Diverges from upstream on three points documented in REQ-5: scalar-only bounds (no Tensor bounds), bilateral (no Optional one-sided), no NaN-bound special case. Parity-sweep arm BLOCKED #1298 (currently `[clamp] 0/28 passed`). |
-| REQ-6 (exp2) | NOT-STARTED | open prereq blocker #1303 — no `Exp2Backward`, no `pub fn exp2`, no `fast_exp2` kernel. Upstream `UnaryOps.cpp:335 CREATE_UNARY_TORCH_IMPL_FUNC(exp2_out, exp2_stub)`. |
-| REQ-7 (expm1) | NOT-STARTED | open prereq blocker #1305 — no `Expm1Backward`, no `pub fn expm1`, no `fast_expm1` kernel. Upstream `UnaryOps.cpp:336`. |
-| REQ-8 (log2) | NOT-STARTED | open prereq blocker #1307 — no `Log2Backward`, no `pub fn log2`, no `fast_log2` kernel. Upstream `UnaryOps.cpp:343`. |
-| REQ-9 (log10) | NOT-STARTED | open prereq blocker #1309 — no `Log10Backward`, no `pub fn log10`, no `fast_log10` kernel. Upstream `UnaryOps.cpp:341`. |
-| REQ-10 (log1p) | NOT-STARTED | open prereq blocker #1311 — no `Log1pBackward`, no `pub fn log1p`, no `fast_log1p` kernel. Upstream `UnaryOps.cpp:342`. |
-| REQ-11 (tan) | NOT-STARTED | open prereq blocker #1313 — no `TanBackward`, no `pub fn tan`, no `fast_tan` kernel. Upstream `UnaryOps.cpp:360`. |
-| REQ-12 (asin) | NOT-STARTED | open prereq blocker #1315 — no `AsinBackward`, no `pub fn asin`, no `fast_asin` kernel. Upstream `UnaryOps.cpp:323`. |
-| REQ-13 (acos) | NOT-STARTED | open prereq blocker #1316 — no `AcosBackward`, no `pub fn acos`, no `fast_acos` kernel. Upstream `UnaryOps.cpp:321`. |
-| REQ-14 (atan) | NOT-STARTED | open prereq blocker #1317 — no `AtanBackward`, no `pub fn atan`, no `fast_atan` kernel. Upstream `UnaryOps.cpp:325`. |
-| REQ-15 (atan2) | NOT-STARTED | open prereq blocker #1318 — binary op, no `Atan2Backward`, no `pub fn atan2`. Upstream `BinaryOps.cpp:795 TORCH_IMPL_FUNC(atan2_out)`. |
-| REQ-16 (sinh) | NOT-STARTED | open prereq blocker #1319 — no `SinhBackward`, no `pub fn sinh`, no `fast_sinh` kernel. Upstream `UnaryOps.cpp:351`. |
-| REQ-17 (cosh) | NOT-STARTED | open prereq blocker #1320 — no `CoshBackward`, no `pub fn cosh`, no `fast_cosh` kernel. Upstream `UnaryOps.cpp:329`. |
-| REQ-18 (tanh) | NOT-STARTED at this file's level | open prereq blocker #1321 — `tanh` impl exists in `grad_fns::activation` (with non-test consumer `pub fn tanh_t` in `methods.rs`), but it does NOT live in `transcendental.rs`. Route attribution drift: the route includes `tanh` in this file's `parity_ops` but the implementation belongs to the activation file's design contract. Blocker #1321 tracks re-attribution. |
-| REQ-19 (asinh) | NOT-STARTED | open prereq blocker #1322 — no `AsinhBackward`, no `pub fn asinh`, no `fast_asinh` kernel. Upstream `UnaryOps.cpp:324`. |
-| REQ-20 (acosh) | NOT-STARTED | open prereq blocker #1323 — no `AcoshBackward`, no `pub fn acosh`, no `fast_acosh` kernel. Upstream `UnaryOps.cpp:322`. |
-| REQ-21 (atanh) | NOT-STARTED | open prereq blocker #1324 — no `AtanhBackward`, no `pub fn atanh`, no `fast_atanh` kernel. Upstream `UnaryOps.cpp:326`. |
-| REQ-22 (sinc) | NOT-STARTED | open prereq blocker #1325 — no `SincBackward`, no `pub fn sinc`, no `fast_sinc` kernel. Upstream `UnaryOps.cpp:350`. |
-| REQ-23 (ceil) | NOT-STARTED | open prereq blocker #1326 — no `CeilBackward`, no `pub fn ceil`, no `fast_ceil` kernel. Upstream `UnaryOps.cpp:316 CREATE_UNARY_TORCH_IMPL_INTEGER_NO_OP_FUNC(ceil_out, ceil_stub)` — backward is `zeros_like(grad)`. |
-| REQ-24 (floor) | NOT-STARTED | open prereq blocker #1327 — no `FloorBackward`, no `pub fn floor`, no `fast_floor` kernel. Upstream `UnaryOps.cpp:317`. |
-| REQ-25 (round) | NOT-STARTED | open prereq blocker #1328 — no `RoundBackward`, no `pub fn round`, no `fast_round` kernel. Upstream `UnaryOps.cpp:318`. |
-| REQ-26 (trunc) | NOT-STARTED | open prereq blocker #1329 — no `TruncBackward`, no `pub fn trunc`, no `fast_trunc` kernel. Upstream `UnaryOps.cpp:319`. |
-| REQ-27 (frac) | NOT-STARTED | open prereq blocker #1330 — no `FracBackward`, no `pub fn frac`, no `fast_frac` kernel. Upstream `UnaryOps.cpp:337`. |
-| REQ-28 (sign) | NOT-STARTED | open prereq blocker #1331 — no `SignBackward`, no `pub fn sign`, no `fast_sign` kernel. Upstream `UnaryOps.cpp:348` — backward is `zeros_like(grad)`. |
+| REQ-6 (exp2) | SHIPPED | impl: `pub fn exp2` + `struct Exp2Backward` in `transcendental.rs` mirroring `aten/src/ATen/native/UnaryOps.cpp:335 CREATE_UNARY_TORCH_IMPL_FUNC(exp2_out, exp2_stub)` with backward `grad * result * ln(2)` per `derivatives.yaml` `exp2`. Consumer: `pub fn exp2_t` in `methods.rs` (S5 boundary). Parity-sweep arm wired (`tools/parity-sweep/runner/src/main.rs` `"exp2" =>` arm). Closes #1303. |
+| REQ-7 (expm1) | SHIPPED | impl: `pub fn expm1` + `struct Expm1Backward` in `transcendental.rs` mirroring `UnaryOps.cpp:336 CREATE_UNARY_TORCH_IMPL_FUNC(expm1_out, expm1_stub)` with backward `grad * (result + 1)`. Consumer: `pub fn expm1_t` in `methods.rs`. Closes #1305. |
+| REQ-8 (log2) | SHIPPED | impl: `pub fn log2` + `struct Log2Backward` in `transcendental.rs` mirroring `UnaryOps.cpp:343` with backward `grad / (x * ln(2))`. Consumer: `pub fn log2_t` in `methods.rs`. Closes #1307. |
+| REQ-9 (log10) | SHIPPED | impl: `pub fn log10` + `struct Log10Backward` in `transcendental.rs` mirroring `UnaryOps.cpp:341` with backward `grad / (x * ln(10))`. Consumer: `pub fn log10_t` in `methods.rs`. Closes #1309. |
+| REQ-10 (log1p) | SHIPPED | impl: `pub fn log1p` + `struct Log1pBackward` in `transcendental.rs` mirroring `UnaryOps.cpp:342` with backward `grad / (1 + x)` (real-only). Consumer: `pub fn log1p_t` in `methods.rs`. Closes #1311. |
+| REQ-11 (tan) | SHIPPED | impl: `pub fn tan` + `struct TanBackward` (saves output for `1 + tan(x)^2`) in `transcendental.rs` mirroring `UnaryOps.cpp:360`. Consumer: `pub fn tan_t` in `methods.rs`. Closes #1313. |
+| REQ-12 (asin) | SHIPPED | impl: `pub fn asin` + `struct AsinBackward` in `transcendental.rs` mirroring `UnaryOps.cpp:323` with backward `grad / sqrt(1 - x^2)`. Consumer: `pub fn asin_t` in `methods.rs`. Closes #1315. |
+| REQ-13 (acos) | SHIPPED | impl: `pub fn acos` + `struct AcosBackward` in `transcendental.rs` mirroring `UnaryOps.cpp:321` with backward `-grad / sqrt(1 - x^2)`. Consumer: `pub fn acos_t` in `methods.rs`. Closes #1316. |
+| REQ-14 (atan) | SHIPPED | impl: `pub fn atan` + `struct AtanBackward` in `transcendental.rs` mirroring `UnaryOps.cpp:325` with backward `grad / (1 + x^2)`. Consumer: `pub fn atan_t` in `methods.rs`. Closes #1317. |
+| REQ-15 (atan2) | NOT-STARTED | open prereq blocker #1318 — binary op, no `Atan2Backward`, no `pub fn atan2`. Upstream `BinaryOps.cpp:795 TORCH_IMPL_FUNC(atan2_out)`. Requires broadcasting + 2-input backward. |
+| REQ-16 (sinh) | SHIPPED | impl: `pub fn sinh` + `struct SinhBackward` in `transcendental.rs` mirroring `UnaryOps.cpp:351` with backward `grad * cosh(x)`. Consumer: `pub fn sinh_t` in `methods.rs`. Closes #1319. |
+| REQ-17 (cosh) | SHIPPED | impl: `pub fn cosh` + `struct CoshBackward` in `transcendental.rs` mirroring `UnaryOps.cpp:329` with backward `grad * sinh(x)`. Consumer: `pub fn cosh_t` in `methods.rs`. Closes #1320. |
+| REQ-18 (tanh) | NOT-STARTED at this file's level | open prereq blocker #1321 — `tanh` impl exists in `grad_fns::activation` (with non-test consumer `pub fn tanh_t` in `methods.rs`), but it does NOT live in `transcendental.rs`. Route attribution drift. |
+| REQ-19 (asinh) | SHIPPED | impl: `pub fn asinh` + `struct AsinhBackward` in `transcendental.rs` mirroring `UnaryOps.cpp:324` with backward `grad / sqrt(x^2 + 1)`. Consumer: `pub fn asinh_t` in `methods.rs`. Closes #1322. |
+| REQ-20 (acosh) | SHIPPED | impl: `pub fn acosh` + `struct AcoshBackward` in `transcendental.rs` mirroring `UnaryOps.cpp:322` with backward `grad / sqrt(x^2 - 1)` (real-only branch). Consumer: `pub fn acosh_t` in `methods.rs`. Closes #1323. |
+| REQ-21 (atanh) | SHIPPED | impl: `pub fn atanh` + `struct AtanhBackward` in `transcendental.rs` mirroring `UnaryOps.cpp:326` with backward `grad / (1 - x^2)`. Consumer: `pub fn atanh_t` in `methods.rs`. Closes #1324. |
+| REQ-22 (sinc) | SHIPPED | impl: `pub fn sinc` + `struct SincBackward` in `transcendental.rs` mirroring `UnaryOps.cpp:350`. `sinc(0) = 1` continuous extension; `sinc'(0) = 0` per closed form. Consumer: `pub fn sinc_t` in `methods.rs`. Closes #1325. |
+| REQ-23 (ceil) | SHIPPED | impl: `pub fn ceil` + shared `ZerosLikeBackward { name: "CeilBackward" }` in `transcendental.rs` mirroring `UnaryOps.cpp:316`. Consumer: `pub fn ceil_t` in `methods.rs`. Closes #1326. |
+| REQ-24 (floor) | SHIPPED | impl: `pub fn floor` + shared `ZerosLikeBackward` in `transcendental.rs` mirroring `UnaryOps.cpp:317`. Consumer: `pub fn floor_t` in `methods.rs`. Closes #1327. |
+| REQ-25 (round) | SHIPPED | impl: `pub fn round` + helper `fn round_half_to_even` (RNE tie-break matching upstream `nearbyint`) + shared `ZerosLikeBackward` in `transcendental.rs` mirroring `UnaryOps.cpp:318`. Consumer: `pub fn round_t` in `methods.rs`. `round.decimals` overload remains NOT-STARTED (follow-up). Closes #1328 base form. |
+| REQ-26 (trunc) | SHIPPED | impl: `pub fn trunc` + shared `ZerosLikeBackward` in `transcendental.rs` mirroring `UnaryOps.cpp:319`. Consumer: `pub fn trunc_t` in `methods.rs`. Closes #1329. |
+| REQ-27 (frac) | SHIPPED | impl: `pub fn frac` + `struct FracBackward` (pass-through gradient) in `transcendental.rs` mirroring `UnaryOps.cpp:337`. Consumer: `pub fn frac_t` in `methods.rs`. Closes #1330. |
+| REQ-28 (sign) | SHIPPED | impl: `pub fn sign` (NaN-propagating; `sign(0) = 0` per `c10::signum`) + shared `ZerosLikeBackward` in `transcendental.rs` mirroring `UnaryOps.cpp:348`. Consumer: `pub fn sign_t` in `methods.rs`. Closes #1331. |
 | REQ-29 (signbit) | NOT-STARTED | open prereq blocker #1332 — requires Bool-output tensor variant (ferrotorch's `Tensor<T: Float>` cannot produce). Upstream `UnaryOps.cpp:279 TORCH_META_FUNC(signbit)` uses `build_borrowing_unary_force_boolean_op`. |
-| REQ-30 (clip) | NOT-STARTED | open prereq blocker #1333 — one-line alias of `clamp` not yet exposed. Upstream `TensorCompare.cpp:918-930 Tensor clip(...)` is a literal pass-through to `at::clamp`. |
+| REQ-30 (clip) | SHIPPED | impl: alias delegation via consumer `pub fn clip_t` in `methods.rs` calling `crate::grad_fns::transcendental::clamp` — matches upstream's literal pass-through at `TensorCompare.cpp:918-930 Tensor clip(...)`. Closes #1333. |
 | REQ-31 (copysign) | NOT-STARTED | open prereq blocker #1334 — binary op, no `CopysignBackward`, no `pub fn copysign`. Upstream `BinaryOps.cpp:865 TORCH_IMPL_FUNC(copysign_out)`. |
 | REQ-32 (nextafter) | NOT-STARTED | open prereq blocker #1335 — binary op, no `NextafterBackward`, no `pub fn nextafter`. Upstream `BinaryOps.cpp:551 CREATE_BINARY_TORCH_IMPL_FUNC(nextafter_out, nextafter_stub)`. |
 | REQ-33 (hypot) | NOT-STARTED | open prereq blocker #1336 — binary op, no `HypotBackward`, no `pub fn hypot`. Upstream `BinaryOps.cpp:548 CREATE_BINARY_TORCH_IMPL_FUNC(hypot_out, hypot_stub)`. |

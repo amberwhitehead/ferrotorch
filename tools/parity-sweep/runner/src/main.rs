@@ -36,8 +36,60 @@ struct WireTensor {
 
 impl WireTensor {
     fn to_f32(&self) -> Result<Tensor<f32>, Box<dyn std::error::Error>> {
-        if self.dtype != "float32" {
-            return Err(format!("dispatch supports float32 only, got {}", self.dtype).into());
+        // Reduction ops emit integer (argmax/argmin/count_nonzero -> int64)
+        // and bool (any/all) outputs. The parity-sweep's value-equality
+        // gate compares against ferrotorch's Tensor<f32>; we widen those
+        // expected envelopes to f32 here so the existing
+        // `assert_close_f32` continues to work. Widening direction is
+        // lossless for the value ranges op_db emits (int64 indices fit
+        // in f32 mantissa for tensor shapes the suite uses; bool is {0,1}).
+        match self.dtype.as_str() {
+            "float32" => {}
+            "int64" | "int32" | "uint8" | "bool" => {
+                let numel: usize = if self.shape.is_empty() {
+                    1
+                } else {
+                    self.shape.iter().product()
+                };
+                let data: Vec<f32> = match self.dtype.as_str() {
+                    "int64" => self
+                        .to_int_tensor_i64()?
+                        .data()?
+                        .iter()
+                        .map(|&v| v as f32)
+                        .collect(),
+                    "int32" => self
+                        .to_int_tensor_i64()?
+                        .data()?
+                        .iter()
+                        .map(|&v| v as f32)
+                        .collect(),
+                    "uint8" => self
+                        .to_int_tensor_i64()?
+                        .data()?
+                        .iter()
+                        .map(|&v| v as f32)
+                        .collect(),
+                    "bool" => self
+                        .to_bool_tensor()?
+                        .data()?
+                        .iter()
+                        .map(|&b| if b { 1.0 } else { 0.0 })
+                        .collect(),
+                    _ => unreachable!(),
+                };
+                if data.len() != numel {
+                    return Err(format!(
+                        "widened {} length {} does not match shape {:?}",
+                        self.dtype,
+                        data.len(),
+                        self.shape
+                    )
+                    .into());
+                }
+                return Ok(from_vec(data, &self.shape)?);
+            }
+            other => return Err(format!("dispatch supports float32/int/bool, got {other}").into()),
         }
         let bytes = B64.decode(&self.data_b64)?;
         let expected = self.shape.iter().product::<usize>() * 4;
@@ -404,6 +456,73 @@ fn dispatch_f32(
                 .as_f64()
                 .ok_or_else(|| format!("{name}: value kwarg is not a JSON number: {v}").into()),
         }
+    };
+
+    // Reduction-op kwarg helpers. op_db emits `dim` as int OR list-of-ints
+    // OR empty list `[]` (the "no-op full-reduction" form mirroring
+    // `torch.sum(x, dim=())`). `keepdim` is always a bool with default
+    // false. Returns `None` for full reduction (no `dim` kwarg OR `dim==[]`).
+    let dim_kwarg = |_name: &str| -> Result<Option<Vec<i64>>, Box<dyn std::error::Error>> {
+        match kwargs.get("dim") {
+            None => Ok(None),
+            Some(Value::Number(n)) => {
+                let v = n.as_i64().ok_or("dim kwarg: non-integer JSON number")?;
+                Ok(Some(vec![v]))
+            }
+            Some(Value::Array(arr)) => {
+                if arr.is_empty() {
+                    Ok(None)
+                } else {
+                    let mut out = Vec::with_capacity(arr.len());
+                    for x in arr {
+                        out.push(x.as_i64().ok_or("dim kwarg list: non-int element")?);
+                    }
+                    Ok(Some(out))
+                }
+            }
+            Some(Value::Null) => Ok(None),
+            Some(other) => Err(format!("dim kwarg: unexpected JSON value {other}").into()),
+        }
+    };
+    let keepdim_kwarg = || -> bool {
+        kwargs
+            .get("keepdim")
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+    };
+    // For ops where the second positional is a bool (`std`/`var`'s
+    // `unbiased`) or `keepdim` (`logsumexp`'s third positional).
+    let arg_bool_at = |idx: usize| -> Option<bool> { args.get(idx).and_then(Value::as_bool) };
+    // Multi-dim list at positional `args[idx]` (logsumexp emits
+    // `args = [tensor, [dim0, dim1, ...], keepdim]`).
+    let arg_dim_list_at = |idx: usize| -> Option<Vec<i64>> {
+        match args.get(idx)? {
+            Value::Number(n) => n.as_i64().map(|v| vec![v]),
+            Value::Array(arr) => {
+                let mut out = Vec::with_capacity(arr.len());
+                for x in arr {
+                    out.push(x.as_i64()?);
+                }
+                Some(out)
+            }
+            _ => None,
+        }
+    };
+
+    // Coerce an `IntTensor<i64>` produced by a non-differentiable reduction
+    // (argmax / argmin / count_nonzero) into a `Tensor<f32>` so the existing
+    // `assert_close_f32` value-equality gate can consume it. Pairs with
+    // `WireTensor::to_f32`'s int-widening branch on the expected side.
+    let int_to_f32 = |it: &ferrotorch_core::IntTensor<i64>| -> Result<Tensor<f32>, Box<dyn std::error::Error>> {
+        let d = it.data()?;
+        let f: Vec<f32> = d.iter().map(|&v| v as f32).collect();
+        Ok(ferrotorch_core::from_vec(f, it.shape())?)
+    };
+    // Same for BoolTensor (any/all).
+    let bool_to_f32 = |b: &ferrotorch_core::BoolTensor| -> Result<Tensor<f32>, Box<dyn std::error::Error>> {
+        let d = b.data()?;
+        let f: Vec<f32> = d.iter().map(|&v| if v { 1.0 } else { 0.0 }).collect();
+        Ok(ferrotorch_core::from_vec(f, b.shape())?)
     };
 
     match op {
@@ -1344,6 +1463,107 @@ fn dispatch_f32(
                 &input, &index, &source, accumulate,
             )?))
         }
+        // ---- Transcendental unary family (closes #1298 and per-op blockers
+        // #1303 #1305 #1307 #1309 #1311 #1313 #1315 #1316 #1317 #1319 #1320
+        // #1322 #1323 #1324 #1325 #1326 #1327 #1328 #1329 #1330 #1331 #1333) ----
+        //
+        // Each arm decodes `args=[input_f32]` (matching op_db's unary samples,
+        // verified 2026-05-25 via oracle inspection) and dispatches through
+        // the ferrotorch impl at `ferrotorch-core/src/grad_fns/transcendental.rs`.
+        // Each impl mirrors a `CREATE_UNARY_TORCH_IMPL_FUNC(<op>_out, <op>_stub)`
+        // in `aten/src/ATen/native/UnaryOps.cpp:316-363` per the design doc
+        // `.design/ferrotorch-core/grad_fns/transcendental.md` REQ table.
+        "exp" => Ok(Some(grad_fns::transcendental::exp(&unary("exp")?)?)),
+        "log" => Ok(Some(grad_fns::transcendental::log(&unary("log")?)?)),
+        "sin" => Ok(Some(grad_fns::transcendental::sin(&unary("sin")?)?)),
+        "cos" => Ok(Some(grad_fns::transcendental::cos(&unary("cos")?)?)),
+        "tan" => Ok(Some(grad_fns::transcendental::tan(&unary("tan")?)?)),
+        "asin" => Ok(Some(grad_fns::transcendental::asin(&unary("asin")?)?)),
+        "acos" => Ok(Some(grad_fns::transcendental::acos(&unary("acos")?)?)),
+        "atan" => Ok(Some(grad_fns::transcendental::atan(&unary("atan")?)?)),
+        "sinh" => Ok(Some(grad_fns::transcendental::sinh(&unary("sinh")?)?)),
+        "cosh" => Ok(Some(grad_fns::transcendental::cosh(&unary("cosh")?)?)),
+        "asinh" => Ok(Some(grad_fns::transcendental::asinh(&unary("asinh")?)?)),
+        "acosh" => Ok(Some(grad_fns::transcendental::acosh(&unary("acosh")?)?)),
+        "atanh" => Ok(Some(grad_fns::transcendental::atanh(&unary("atanh")?)?)),
+        "exp2" => Ok(Some(grad_fns::transcendental::exp2(&unary("exp2")?)?)),
+        "expm1" => Ok(Some(grad_fns::transcendental::expm1(&unary("expm1")?)?)),
+        "log2" => Ok(Some(grad_fns::transcendental::log2(&unary("log2")?)?)),
+        "log10" => Ok(Some(grad_fns::transcendental::log10(&unary("log10")?)?)),
+        "log1p" => Ok(Some(grad_fns::transcendental::log1p(&unary("log1p")?)?)),
+        "ceil" => Ok(Some(grad_fns::transcendental::ceil(&unary("ceil")?)?)),
+        "floor" => Ok(Some(grad_fns::transcendental::floor(&unary("floor")?)?)),
+        "round" => Ok(Some(grad_fns::transcendental::round(&unary("round")?)?)),
+        "trunc" => Ok(Some(grad_fns::transcendental::trunc(&unary("trunc")?)?)),
+        "frac" => Ok(Some(grad_fns::transcendental::frac(&unary("frac")?)?)),
+        "sign" => Ok(Some(grad_fns::transcendental::sign(&unary("sign")?)?)),
+        "sinc" => Ok(Some(grad_fns::transcendental::sinc(&unary("sinc")?)?)),
+        // `torch.clamp(input, min, max)` — op_db's unary `clamp` samples
+        // ship min/max as TENSOR-valued bounds (broadcastable to input).
+        // ferrotorch's `pub fn clamp` accepts scalar `T` bounds only — the
+        // tensor-bound `clamp.Tensor` overload at
+        // `aten/src/ATen/native/TensorCompare.cpp:856 TORCH_IMPL_FUNC(clamp_Tensor_out)`
+        // is documented as NOT-STARTED in REQ-5's divergence section of
+        // `.design/ferrotorch-core/grad_fns/transcendental.md`. Until that
+        // ships, any non-0-d bound is a legitimate skip; 0-d bounds (the
+        // `clamp.Scalar` shape) extract via `.item()` and dispatch.
+        // The `clamp.Scalar` overload also accepts `Optional` bounds —
+        // ferrotorch requires both, so single-bound samples (min=None or
+        // max=None) skip too. Closes runner-arm half of #1298 for clamp.
+        "clamp" => {
+            if args.len() < 2 {
+                return Err(format!("clamp expects >=2 args, got {}", args.len()).into());
+            }
+            let input = unwrap_tensor_arg(&args[0])
+                .ok_or("clamp: arg 0 not a tensor")?
+                .to_f32()?;
+            // Helper to coerce arg[i] to an Optional scalar bound.
+            // Returns Ok(Some(v)) for 0-d tensor / number, Ok(None) for
+            // None / non-0-d tensor (skip-the-sample signal upstream).
+            let extract_scalar_bound =
+                |v: &Value| -> Result<Option<Option<f32>>, Box<dyn std::error::Error>> {
+                    if v.is_null() {
+                        return Ok(Some(None));
+                    }
+                    if let Some(f) = v.as_f64() {
+                        return Ok(Some(Some(f as f32)));
+                    }
+                    if let Some(i) = v.as_i64() {
+                        return Ok(Some(Some(i as f32)));
+                    }
+                    if let Some(wt) = unwrap_tensor_arg(v) {
+                        if !wt.shape.is_empty() {
+                            // Tensor bound with shape != [] — clamp.Tensor
+                            // overload, not implementable via scalar clamp.
+                            return Ok(None);
+                        }
+                        let t = wt.to_f32()?;
+                        let d = t.data_vec()?;
+                        return Ok(Some(Some(d.first().copied().unwrap_or(0.0))));
+                    }
+                    Err(format!("clamp: unsupported bound arg: {v}").into())
+                };
+            let min_opt = match extract_scalar_bound(&args[1])? {
+                Some(o) => o,
+                None => return Ok(None),
+            };
+            let max_opt = if let Some(a2) = args.get(2) {
+                match extract_scalar_bound(a2)? {
+                    Some(o) => o,
+                    None => return Ok(None),
+                }
+            } else {
+                None
+            };
+            // ferrotorch's `clamp(input, min: T, max: T)` requires both.
+            // One-sided clamps (clamp_min/clamp_max) are documented
+            // NOT-STARTED in REQ-5; treat as legitimate skip.
+            let (min_v, max_v) = match (min_opt, max_opt) {
+                (Some(lo), Some(hi)) => (lo, hi),
+                _ => return Ok(None),
+            };
+            Ok(Some(grad_fns::transcendental::clamp(&input, min_v, max_v)?))
+        }
         "fake_quantize_per_channel_affine" => Ok(Some({
             if args.len() < 6 {
                 return Err(format!(
@@ -1379,6 +1599,254 @@ fn dispatch_f32(
                 quant_max,
             )?
         })),
+
+        // ------------------------------------------------------------------
+        // Reduction cluster — closes umbrella #1314 + per-op #1301/#1304/
+        // #1310/#1312. Maps op_db `dim` / `keepdim` envelopes onto
+        // ferrotorch's single-dim reduction surface, chaining `sum_dim` /
+        // `mean_dim` / `logsumexp_dim` for multi-dim list inputs (matches
+        // upstream `at::sum(x, [d0, d1, ...], keepdim)` semantics: reduce
+        // outer dim first so the inner dim indices stay valid; chain in
+        // descending order to avoid shifting).
+        // ------------------------------------------------------------------
+
+        // `torch.sum(input, dim=None, keepdim=False)` —
+        // `aten/src/ATen/native/ReduceOps.cpp:1245 TORCH_IMPL_FUNC(sum_out)`.
+        // Full reduction when `dim` absent/`[]`; single-dim via `sum_dim`;
+        // multi-dim list reduced by sequential `sum_dim` calls in
+        // descending-order so axis indices stay valid after each squeeze.
+        // VJP per `tools/autograd/derivatives.yaml:1702-1719 sum_backward`.
+        "sum" => Ok(Some({
+            let a = unary("sum")?;
+            match dim_kwarg("sum")? {
+                None => grad_fns::reduction::sum(&a)?,
+                Some(dims) => {
+                    let keepdim = keepdim_kwarg();
+                    let mut sorted: Vec<i64> = dims
+                        .iter()
+                        .map(|&d| if d < 0 { a.ndim() as i64 + d } else { d })
+                        .collect();
+                    sorted.sort_unstable();
+                    let mut cur = a.clone();
+                    // Reduce highest dim first so lower-dim indices stay
+                    // valid through the squeeze chain.
+                    for &d in sorted.iter().rev() {
+                        cur = grad_fns::reduction::sum_dim(&cur, d, keepdim)?;
+                    }
+                    cur
+                }
+            }
+        })),
+
+        // `torch.mean(input, dim=None, keepdim=False)` —
+        // `aten/src/ATen/native/ReduceOps.cpp:1396 TORCH_IMPL_FUNC(mean_out)`.
+        // Multi-dim mean factors as `mean(mean(mean(...)))` only if all
+        // dims have the SAME size; in the general case we use the
+        // equivalent `sum_over_dims / prod(dim_sizes)`. Implemented as
+        // sum-chain then divide by the product of reduced dim sizes.
+        // VJP per `derivatives.yaml:1143-1155`.
+        "mean" => Ok(Some({
+            let a = unary("mean")?;
+            match dim_kwarg("mean")? {
+                None => grad_fns::reduction::mean(&a)?,
+                Some(dims) => {
+                    let keepdim = keepdim_kwarg();
+                    // Single-dim short path uses native `mean_dim`.
+                    if dims.len() == 1 {
+                        grad_fns::reduction::mean_dim(&a, dims[0], keepdim)?
+                    } else {
+                        // Multi-dim: sum over dims then divide by the
+                        // product of their sizes. This composes the
+                        // existing autograd-aware `sum_dim` chain with
+                        // a `scale` factor handled at the value level —
+                        // matches upstream's `at::sum_out(...).div_(dim_prod)`
+                        // recipe at `ReduceOps.cpp:1452-1454`.
+                        let in_shape = a.shape().to_vec();
+                        let mut sorted: Vec<i64> = dims
+                            .iter()
+                            .map(|&d| if d < 0 { a.ndim() as i64 + d } else { d })
+                            .collect();
+                        sorted.sort_unstable();
+                        let dim_prod: usize = sorted
+                            .iter()
+                            .map(|&d| in_shape[d as usize])
+                            .product();
+                        let mut cur = a.clone();
+                        for &d in sorted.iter().rev() {
+                            cur = grad_fns::reduction::sum_dim(&cur, d, keepdim)?;
+                        }
+                        // Scale by 1/dim_prod via in-place buffer divide
+                        // (CPU only — the runner sweep is CPU-side).
+                        let data = cur.data()?.to_vec();
+                        let inv = 1.0f32 / (dim_prod as f32);
+                        let scaled: Vec<f32> = data.iter().map(|&v| v * inv).collect();
+                        ferrotorch_core::from_vec(scaled, cur.shape())?
+                    }
+                }
+            }
+        })),
+
+        // `torch.prod(input, dim=None)` —
+        // `aten/src/ATen/native/ReduceOps.cpp:1379 Tensor prod(...)`.
+        // op_db emits `dim` POSITIONALLY at `args[1]` (no kwargs). The
+        // dim-keyed variant `prod(self, int dim)` is NOT-STARTED in
+        // ferrotorch (single-dim only would need its own `ProdDimBackward`);
+        // dim-supplied samples are a legitimate skip. Full-reduction
+        // routes through `grad_fns::reduction::prod` with `ProdBackward`
+        // per `derivatives.yaml:1413-1415` (prefix-suffix VJP).
+        "prod" => {
+            let a = unary("prod")?;
+            if args.len() < 2 {
+                Ok(Some(grad_fns::reduction::prod(&a)?))
+            } else {
+                // Dim-keyed prod not implemented in ferrotorch — skip.
+                Ok(None)
+            }
+        }
+
+        // `torch.amin(input, dim=[], keepdim=False)` /
+        // `torch.amax(...)` — `ReduceOps.cpp:1758` / `:1766`. ferrotorch's
+        // `pub fn amin` / `amax` are full-reduction only (NaN handling
+        // diverges — skips NaN vs upstream NaN-propagation; tracked under
+        // #1314). Dim-keyed amin/amax variant is NOT-STARTED (blocker
+        // #1302 alongside max/min-with-dim). Dim-supplied samples skip.
+        "amin" => {
+            let a = unary("amin")?;
+            match dim_kwarg("amin")? {
+                None => Ok(Some(grad_fns::reduction::amin(&a)?)),
+                Some(_) => Ok(None),
+            }
+        }
+        "amax" => {
+            let a = unary("amax")?;
+            match dim_kwarg("amax")? {
+                None => Ok(Some(grad_fns::reduction::amax(&a)?)),
+                Some(_) => Ok(None),
+            }
+        }
+
+        // `torch.logsumexp(input, dim, keepdim=False)` —
+        // `aten/src/ATen/native/ReduceOps.cpp:1548-1559`. op_db emits
+        // `args = [input, dim_list, keepdim]` (dim ALWAYS positional, never
+        // a kwarg in the logsumexp sample iterator). Multi-dim reduces via
+        // sequential `logsumexp_dim` calls in descending-order. Closes #1310.
+        "logsumexp" => Ok(Some({
+            let a = unary("logsumexp")?;
+            let dims = arg_dim_list_at(1)
+                .ok_or("logsumexp: missing dim list at args[1]")?;
+            let keepdim = arg_bool_at(2).unwrap_or(false);
+            if dims.is_empty() {
+                grad_fns::reduction::logsumexp(&a)?
+            } else {
+                let mut sorted: Vec<i64> = dims
+                    .iter()
+                    .map(|&d| if d < 0 { a.ndim() as i64 + d } else { d })
+                    .collect();
+                sorted.sort_unstable();
+                let mut cur = a.clone();
+                for &d in sorted.iter().rev() {
+                    cur = grad_fns::reduction::logsumexp_dim(&cur, d, keepdim)?;
+                }
+                cur
+            }
+        })),
+
+        // `torch.argmax(input, dim=None, keepdim=False)` /
+        // `torch.argmin(...)` — `ReduceOps.cpp:1809` / `:1817`. Integer-
+        // output, non-differentiable. Single-dim only (matches ferrotorch's
+        // `argmax_dim` / `argmin_dim`); multi-dim is not a valid op_db
+        // sample for argmax/argmin (upstream's signature is
+        // `argmax(self, std::optional<int64_t> dim, bool keepdim)`).
+        // Closes #1304.
+        "argmax" => Ok(Some({
+            let a = unary("argmax")?;
+            let dims = dim_kwarg("argmax")?;
+            let keepdim = keepdim_kwarg();
+            let it = match dims {
+                None => grad_fns::reduction::argmax(&a)?,
+                Some(ds) if ds.len() == 1 => {
+                    grad_fns::reduction::argmax_dim(&a, ds[0], keepdim)?
+                }
+                Some(_) => return Ok(None),
+            };
+            int_to_f32(&it)?
+        })),
+        "argmin" => Ok(Some({
+            let a = unary("argmin")?;
+            let dims = dim_kwarg("argmin")?;
+            let keepdim = keepdim_kwarg();
+            let it = match dims {
+                None => grad_fns::reduction::argmin(&a)?,
+                Some(ds) if ds.len() == 1 => {
+                    grad_fns::reduction::argmin_dim(&a, ds[0], keepdim)?
+                }
+                Some(_) => return Ok(None),
+            };
+            int_to_f32(&it)?
+        })),
+
+        // `torch.std(input, *, unbiased=True)` / `torch.var(...)` —
+        // `aten/src/ATen/native/ReduceOps.cpp:2085` (var) / `:2105` (std).
+        // ferrotorch's std/var are full-reduction only — dim-keyed
+        // variants are NOT-STARTED (the `*.correction` overloads in
+        // upstream require multi-dim list support that defers to a
+        // future builder). op_db's std/var samples emit `dim` as kwarg OR
+        // `unbiased` as `args[0]` (Python positional bool); skip dim-
+        // supplied samples. Closes #1301.
+        "std" => {
+            let a = unary("std")?;
+            let dims = dim_kwarg("std")?;
+            if dims.is_some() {
+                Ok(None) // dim-keyed std NOT-STARTED
+            } else {
+                let unbiased = arg_bool_at(0).unwrap_or(true);
+                Ok(Some(grad_fns::reduction::std(&a, unbiased)?))
+            }
+        }
+        "var" => {
+            let a = unary("var")?;
+            let dims = dim_kwarg("var")?;
+            if dims.is_some() {
+                Ok(None) // dim-keyed var NOT-STARTED
+            } else {
+                let unbiased = arg_bool_at(0).unwrap_or(true);
+                Ok(Some(grad_fns::reduction::var(&a, unbiased)?))
+            }
+        }
+
+        // `torch.any(input)` / `torch.all(input)` —
+        // `aten/src/ATen/native/ReduceOps.cpp:1681` / `:1667`. Bool-output,
+        // non-differentiable. ferrotorch full-reduction only; dim-keyed
+        // variant skips. `count_nonzero` from `SummaryOps.cpp` returns
+        // int64-output; treated the same. Closes #1312.
+        "any" => {
+            let a = unary("any")?;
+            if dim_kwarg("any")?.is_some() {
+                Ok(None)
+            } else {
+                let bt = grad_fns::reduction::any(&a)?;
+                Ok(Some(bool_to_f32(&bt)?))
+            }
+        }
+        "all" => {
+            let a = unary("all")?;
+            if dim_kwarg("all")?.is_some() {
+                Ok(None)
+            } else {
+                let bt = grad_fns::reduction::all(&a)?;
+                Ok(Some(bool_to_f32(&bt)?))
+            }
+        }
+        "count_nonzero" => {
+            let a = unary("count_nonzero")?;
+            if dim_kwarg("count_nonzero")?.is_some() {
+                Ok(None)
+            } else {
+                let it = grad_fns::reduction::count_nonzero(&a)?;
+                Ok(Some(int_to_f32(&it)?))
+            }
+        }
+
         _ => Ok(None),
     }
 }
@@ -1448,6 +1916,60 @@ fn dispatch_ops() -> &'static [&'static str] {
         "masked_scatter",
         "take",
         "put",
+        // Transcendental unary family — wired 2026-05-25 to close umbrella
+        // #1298 plus per-op blockers #1303 #1305 #1307 #1309 #1311 #1313
+        // #1315 #1316 #1317 #1319 #1320 #1322 #1323 #1324 #1325 #1326 #1327
+        // #1328 #1329 #1330 #1331. Each arm in `dispatch_f32` above
+        // dispatches `args=[input_f32]` through the matching
+        // `grad_fns::transcendental::<op>` per the design doc REQ table.
+        // `clamp` keeps the legitimate-skip pathway for tensor-bound samples
+        // (REQ-5's documented divergence); 0-d-bound samples extract scalars
+        // and dispatch through `pub fn clamp`.
+        "exp",
+        "log",
+        "sin",
+        "cos",
+        "tan",
+        "asin",
+        "acos",
+        "atan",
+        "sinh",
+        "cosh",
+        "asinh",
+        "acosh",
+        "atanh",
+        "exp2",
+        "expm1",
+        "log2",
+        "log10",
+        "log1p",
+        "ceil",
+        "floor",
+        "round",
+        "trunc",
+        "frac",
+        "sign",
+        "sinc",
+        "clamp",
+        // Reduction cluster — closes umbrella #1314 + per-op blockers
+        // #1301 (std/var) #1304 (argmax/argmin) #1310 (logsumexp autograd)
+        // #1312 (any/all/count_nonzero). Owned by `grad_fns::reduction`.
+        // `prod` / `amin` / `amax` skip on `dim` kwarg (single-dim
+        // variants NOT-STARTED — covered by #1302 alongside max/min-
+        // with-dim). `std`/`var` skip on `dim` kwarg (NOT-STARTED).
+        "sum",
+        "mean",
+        "prod",
+        "amin",
+        "amax",
+        "logsumexp",
+        "argmax",
+        "argmin",
+        "std",
+        "var",
+        "any",
+        "all",
+        "count_nonzero",
     ]
 }
 

@@ -365,6 +365,102 @@ impl<T: Float> Tensor<T> {
         crate::grad_fns::transcendental::clamp(self, min, max)
     }
 
+    /// `clip` is a literal alias of `clamp` per upstream
+    /// `aten/src/ATen/native/TensorCompare.cpp:918-930 Tensor clip(...)`
+    /// (pass-through to `at::clamp(self, min, max)`).
+    pub fn clip_t(&self, min: T, max: T) -> FerrotorchResult<Tensor<T>> {
+        crate::grad_fns::transcendental::clamp(self, min, max)
+    }
+
+    // --- Transcendental: extended unary family
+    // (closes #1303 #1305 #1307 #1309 #1311 #1313 #1315 #1316 #1317 #1319
+    //  #1320 #1322 #1323 #1324 #1325 #1326 #1327 #1328 #1329 #1330 #1331
+    //  #1333 — impl + non-test consumer in same commit per S5 / R-DEFER-1)
+
+    pub fn tan_t(&self) -> FerrotorchResult<Tensor<T>> {
+        crate::grad_fns::transcendental::tan(self)
+    }
+
+    pub fn asin_t(&self) -> FerrotorchResult<Tensor<T>> {
+        crate::grad_fns::transcendental::asin(self)
+    }
+
+    pub fn acos_t(&self) -> FerrotorchResult<Tensor<T>> {
+        crate::grad_fns::transcendental::acos(self)
+    }
+
+    pub fn atan_t(&self) -> FerrotorchResult<Tensor<T>> {
+        crate::grad_fns::transcendental::atan(self)
+    }
+
+    pub fn sinh_t(&self) -> FerrotorchResult<Tensor<T>> {
+        crate::grad_fns::transcendental::sinh(self)
+    }
+
+    pub fn cosh_t(&self) -> FerrotorchResult<Tensor<T>> {
+        crate::grad_fns::transcendental::cosh(self)
+    }
+
+    pub fn asinh_t(&self) -> FerrotorchResult<Tensor<T>> {
+        crate::grad_fns::transcendental::asinh(self)
+    }
+
+    pub fn acosh_t(&self) -> FerrotorchResult<Tensor<T>> {
+        crate::grad_fns::transcendental::acosh(self)
+    }
+
+    pub fn atanh_t(&self) -> FerrotorchResult<Tensor<T>> {
+        crate::grad_fns::transcendental::atanh(self)
+    }
+
+    pub fn exp2_t(&self) -> FerrotorchResult<Tensor<T>> {
+        crate::grad_fns::transcendental::exp2(self)
+    }
+
+    pub fn expm1_t(&self) -> FerrotorchResult<Tensor<T>> {
+        crate::grad_fns::transcendental::expm1(self)
+    }
+
+    pub fn log2_t(&self) -> FerrotorchResult<Tensor<T>> {
+        crate::grad_fns::transcendental::log2(self)
+    }
+
+    pub fn log10_t(&self) -> FerrotorchResult<Tensor<T>> {
+        crate::grad_fns::transcendental::log10(self)
+    }
+
+    pub fn log1p_t(&self) -> FerrotorchResult<Tensor<T>> {
+        crate::grad_fns::transcendental::log1p(self)
+    }
+
+    pub fn ceil_t(&self) -> FerrotorchResult<Tensor<T>> {
+        crate::grad_fns::transcendental::ceil(self)
+    }
+
+    pub fn floor_t(&self) -> FerrotorchResult<Tensor<T>> {
+        crate::grad_fns::transcendental::floor(self)
+    }
+
+    pub fn round_t(&self) -> FerrotorchResult<Tensor<T>> {
+        crate::grad_fns::transcendental::round(self)
+    }
+
+    pub fn trunc_t(&self) -> FerrotorchResult<Tensor<T>> {
+        crate::grad_fns::transcendental::trunc(self)
+    }
+
+    pub fn frac_t(&self) -> FerrotorchResult<Tensor<T>> {
+        crate::grad_fns::transcendental::frac(self)
+    }
+
+    pub fn sign_t(&self) -> FerrotorchResult<Tensor<T>> {
+        crate::grad_fns::transcendental::sign(self)
+    }
+
+    pub fn sinc_t(&self) -> FerrotorchResult<Tensor<T>> {
+        crate::grad_fns::transcendental::sinc(self)
+    }
+
     // --- Activation ---
 
     pub fn relu(&self) -> FerrotorchResult<Tensor<T>> {
@@ -494,6 +590,80 @@ impl<T: Float> Tensor<T> {
 
     pub fn mean_dim(&self, dim: i64, keepdim: bool) -> FerrotorchResult<Tensor<T>> {
         crate::grad_fns::reduction::mean_dim(self, dim, keepdim)
+    }
+
+    /// Differentiable full-reduction logsumexp. Mirrors
+    /// `torch.logsumexp(self)` — numerically stable `log(sum(exp(self)))`
+    /// to a 0-D scalar. Backward `grad * exp(self - result)`. Closes #1310.
+    pub fn logsumexp_t(&self) -> FerrotorchResult<Tensor<T>> {
+        crate::grad_fns::reduction::logsumexp(self)
+    }
+
+    /// Differentiable dim-keyed logsumexp. Mirrors
+    /// `torch.logsumexp(self, dim, keepdim)`.
+    pub fn logsumexp_dim_t(&self, dim: i64, keepdim: bool) -> FerrotorchResult<Tensor<T>> {
+        crate::grad_fns::reduction::logsumexp_dim(self, dim, keepdim)
+    }
+
+    /// Non-differentiable global argmax. Mirrors `torch.argmax(self)`.
+    /// Returns a 0-D IntTensor<i64> with the flat index of the largest
+    /// element. Closes #1304 (argmax).
+    pub fn argmax_t(&self) -> FerrotorchResult<crate::int_tensor::IntTensor<i64>> {
+        crate::grad_fns::reduction::argmax(self)
+    }
+
+    /// Non-differentiable dim-keyed argmax.
+    pub fn argmax_dim_t(
+        &self,
+        dim: i64,
+        keepdim: bool,
+    ) -> FerrotorchResult<crate::int_tensor::IntTensor<i64>> {
+        crate::grad_fns::reduction::argmax_dim(self, dim, keepdim)
+    }
+
+    /// Non-differentiable global argmin. Mirrors `torch.argmin(self)`.
+    pub fn argmin_t(&self) -> FerrotorchResult<crate::int_tensor::IntTensor<i64>> {
+        crate::grad_fns::reduction::argmin(self)
+    }
+
+    /// Non-differentiable dim-keyed argmin.
+    pub fn argmin_dim_t(
+        &self,
+        dim: i64,
+        keepdim: bool,
+    ) -> FerrotorchResult<crate::int_tensor::IntTensor<i64>> {
+        crate::grad_fns::reduction::argmin_dim(self, dim, keepdim)
+    }
+
+    /// Differentiable full-reduction variance with optional Bessel
+    /// correction. `unbiased=true` divides by `n-1`; false divides by
+    /// `n`. Closes #1301 (var).
+    pub fn var_t(&self, unbiased: bool) -> FerrotorchResult<Tensor<T>> {
+        crate::grad_fns::reduction::var(self, unbiased)
+    }
+
+    /// Differentiable full-reduction standard deviation. Closes #1301
+    /// (std).
+    pub fn std_t(&self, unbiased: bool) -> FerrotorchResult<Tensor<T>> {
+        crate::grad_fns::reduction::std(self, unbiased)
+    }
+
+    /// Non-differentiable full-reduction `any`. Returns a 0-D BoolTensor
+    /// holding `true` iff any element is non-zero. Closes #1312 (any).
+    pub fn any_t(&self) -> FerrotorchResult<crate::bool_tensor::BoolTensor> {
+        crate::grad_fns::reduction::any(self)
+    }
+
+    /// Non-differentiable full-reduction `all`. Closes #1312 (all).
+    pub fn all_t(&self) -> FerrotorchResult<crate::bool_tensor::BoolTensor> {
+        crate::grad_fns::reduction::all(self)
+    }
+
+    /// Non-differentiable full-reduction `count_nonzero`. Returns a 0-D
+    /// IntTensor<i64> with the count of non-zero elements. Closes #1312
+    /// (count_nonzero).
+    pub fn count_nonzero_t(&self) -> FerrotorchResult<crate::int_tensor::IntTensor<i64>> {
+        crate::grad_fns::reduction::count_nonzero(self)
     }
 
     // --- Shape ---

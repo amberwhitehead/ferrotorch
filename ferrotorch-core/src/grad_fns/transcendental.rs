@@ -564,6 +564,974 @@ pub fn clamp<T: Float>(input: &Tensor<T>, min: T, max: T) -> FerrotorchResult<Te
 }
 
 // ===========================================================================
+// Helpers for new unary ops
+// ===========================================================================
+
+/// Build a tensor of zeros with the same shape as `like`. Used by the
+/// backward of piecewise-constant ops (ceil/floor/round/trunc/sign per
+/// `tools/autograd/derivatives.yaml` `... self: zeros_like(grad)` entries).
+fn zeros_like_tensor<T: Float>(like: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
+    let zero = <T as num_traits::Zero>::zero();
+    let n: usize = like.shape().iter().product::<usize>().max(1);
+    Tensor::from_storage(
+        TensorStorage::cpu(vec![zero; n]),
+        like.shape().to_vec(),
+        false,
+    )
+}
+
+/// Helper to attach a grad_fn to a forward result when grad-tracking is
+/// enabled. Mirrors the pattern in `sin_inner` / `cos_inner` for the trivial
+/// path (no GPU-layer kernel; the forward routes through `unary_map`).
+#[inline]
+fn finish_unary<T: Float, G: GradFn<T> + 'static>(
+    output: Tensor<T>,
+    input: &Tensor<T>,
+    make_grad: impl FnOnce() -> G,
+) -> FerrotorchResult<Tensor<T>> {
+    if needs_grad_unary(input) {
+        let (storage, shape) = output.into_storage_and_shape()?;
+        Tensor::from_operation(storage, shape, Arc::new(make_grad()))
+    } else {
+        Ok(output)
+    }
+}
+
+// ===========================================================================
+// tan
+// ===========================================================================
+
+/// Backward node for `c = tan(x)`.
+///
+/// VJP: `dx = grad * (1 + tan(x)^2)` per `tools/autograd/derivatives.yaml`
+/// `tan: grad * (1 + result.pow(2)).conj()`. We save the OUTPUT (`tan(x)`)
+/// to avoid recomputing the transcendental on backward.
+#[derive(Debug)]
+struct TanBackward<T: Float> {
+    input: Tensor<T>,
+    output: Tensor<T>,
+}
+
+impl<T: Float> GradFn<T> for TanBackward<T> {
+    fn backward(&self, grad_output: &Tensor<T>) -> FerrotorchResult<Vec<Option<Tensor<T>>>> {
+        let da = if self.input.requires_grad() {
+            let go = grad_output.data()?;
+            let o = self.output.data()?;
+            let one = <T as num_traits::One>::one();
+            let g: Vec<T> = go
+                .iter()
+                .zip(o.iter())
+                .map(|(&g, &t)| g * (one + t * t))
+                .collect();
+            Some(Tensor::from_storage(
+                TensorStorage::cpu(g),
+                self.input.shape().to_vec(),
+                false,
+            )?)
+        } else {
+            None
+        };
+        Ok(vec![da])
+    }
+    fn inputs(&self) -> Vec<&Tensor<T>> {
+        vec![&self.input]
+    }
+    fn name(&self) -> &'static str {
+        "TanBackward"
+    }
+}
+
+/// Differentiable elementwise tangent: `c[i] = tan(x[i])`. Mirrors
+/// `aten/src/ATen/native/UnaryOps.cpp:360 CREATE_UNARY_TORCH_IMPL_FUNC(tan_out, tan_stub)`.
+pub fn tan<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
+    let output = unary_map(input, |x| x.tan())?;
+    if needs_grad_unary(input) {
+        let (storage, shape) = output.into_storage_and_shape()?;
+        let out_tensor = Tensor::from_storage(storage, shape, false)?;
+        let grad_fn = Arc::new(TanBackward {
+            input: input.clone(),
+            output: out_tensor.clone(),
+        });
+        let (s, sh) = out_tensor.into_storage_and_shape()?;
+        Tensor::from_operation(s, sh, grad_fn)
+    } else {
+        Ok(output)
+    }
+}
+
+// ===========================================================================
+// asin / acos / atan
+// ===========================================================================
+
+/// Backward node for `c = asin(x)`. VJP: `dx = grad / sqrt(1 - x^2)`
+/// per `derivatives.yaml` `asin: grad * (-self * self + 1).rsqrt().conj()`.
+#[derive(Debug)]
+struct AsinBackward<T: Float> {
+    input: Tensor<T>,
+}
+
+impl<T: Float> GradFn<T> for AsinBackward<T> {
+    fn backward(&self, grad_output: &Tensor<T>) -> FerrotorchResult<Vec<Option<Tensor<T>>>> {
+        let da = if self.input.requires_grad() {
+            let go = grad_output.data()?;
+            let x = self.input.data()?;
+            let one = <T as num_traits::One>::one();
+            let g: Vec<T> = go
+                .iter()
+                .zip(x.iter())
+                .map(|(&g, &x)| g / (one - x * x).sqrt())
+                .collect();
+            Some(Tensor::from_storage(
+                TensorStorage::cpu(g),
+                self.input.shape().to_vec(),
+                false,
+            )?)
+        } else {
+            None
+        };
+        Ok(vec![da])
+    }
+    fn inputs(&self) -> Vec<&Tensor<T>> {
+        vec![&self.input]
+    }
+    fn name(&self) -> &'static str {
+        "AsinBackward"
+    }
+}
+
+/// Differentiable elementwise arcsine. Mirrors
+/// `UnaryOps.cpp:323 CREATE_UNARY_TORCH_IMPL_FUNC(asin_out, asin_stub)`.
+pub fn asin<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
+    let output = unary_map(input, |x| x.asin())?;
+    finish_unary(output, input, || AsinBackward {
+        input: input.clone(),
+    })
+}
+
+/// Backward node for `c = acos(x)`. VJP: `dx = -grad / sqrt(1 - x^2)`
+/// per `derivatives.yaml` `acos: grad * -((-self * self + 1).rsqrt()).conj()`.
+#[derive(Debug)]
+struct AcosBackward<T: Float> {
+    input: Tensor<T>,
+}
+
+impl<T: Float> GradFn<T> for AcosBackward<T> {
+    fn backward(&self, grad_output: &Tensor<T>) -> FerrotorchResult<Vec<Option<Tensor<T>>>> {
+        let da = if self.input.requires_grad() {
+            let go = grad_output.data()?;
+            let x = self.input.data()?;
+            let one = <T as num_traits::One>::one();
+            let g: Vec<T> = go
+                .iter()
+                .zip(x.iter())
+                .map(|(&g, &x)| -(g / (one - x * x).sqrt()))
+                .collect();
+            Some(Tensor::from_storage(
+                TensorStorage::cpu(g),
+                self.input.shape().to_vec(),
+                false,
+            )?)
+        } else {
+            None
+        };
+        Ok(vec![da])
+    }
+    fn inputs(&self) -> Vec<&Tensor<T>> {
+        vec![&self.input]
+    }
+    fn name(&self) -> &'static str {
+        "AcosBackward"
+    }
+}
+
+/// Differentiable elementwise arccosine. Mirrors
+/// `UnaryOps.cpp:321 CREATE_UNARY_TORCH_IMPL_FUNC(acos_out, acos_stub)`.
+pub fn acos<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
+    let output = unary_map(input, |x| x.acos())?;
+    finish_unary(output, input, || AcosBackward {
+        input: input.clone(),
+    })
+}
+
+/// Backward node for `c = atan(x)`. VJP: `dx = grad / (1 + x^2)`
+/// per `derivatives.yaml` `atan: grad / (self * self + 1).conj()`.
+#[derive(Debug)]
+struct AtanBackward<T: Float> {
+    input: Tensor<T>,
+}
+
+impl<T: Float> GradFn<T> for AtanBackward<T> {
+    fn backward(&self, grad_output: &Tensor<T>) -> FerrotorchResult<Vec<Option<Tensor<T>>>> {
+        let da = if self.input.requires_grad() {
+            let go = grad_output.data()?;
+            let x = self.input.data()?;
+            let one = <T as num_traits::One>::one();
+            let g: Vec<T> = go
+                .iter()
+                .zip(x.iter())
+                .map(|(&g, &x)| g / (one + x * x))
+                .collect();
+            Some(Tensor::from_storage(
+                TensorStorage::cpu(g),
+                self.input.shape().to_vec(),
+                false,
+            )?)
+        } else {
+            None
+        };
+        Ok(vec![da])
+    }
+    fn inputs(&self) -> Vec<&Tensor<T>> {
+        vec![&self.input]
+    }
+    fn name(&self) -> &'static str {
+        "AtanBackward"
+    }
+}
+
+/// Differentiable elementwise arctangent. Mirrors
+/// `UnaryOps.cpp:325 CREATE_UNARY_TORCH_IMPL_FUNC(atan_out, atan_stub)`.
+pub fn atan<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
+    let output = unary_map(input, |x| x.atan())?;
+    finish_unary(output, input, || AtanBackward {
+        input: input.clone(),
+    })
+}
+
+// ===========================================================================
+// sinh / cosh
+// ===========================================================================
+
+/// Backward node for `c = sinh(x)`. VJP: `dx = grad * cosh(x)` per
+/// `derivatives.yaml` `sinh: grad * self.cosh().conj()`.
+#[derive(Debug)]
+struct SinhBackward<T: Float> {
+    input: Tensor<T>,
+}
+
+impl<T: Float> GradFn<T> for SinhBackward<T> {
+    fn backward(&self, grad_output: &Tensor<T>) -> FerrotorchResult<Vec<Option<Tensor<T>>>> {
+        let da = if self.input.requires_grad() {
+            let go = grad_output.data()?;
+            let x = self.input.data()?;
+            let g: Vec<T> = go
+                .iter()
+                .zip(x.iter())
+                .map(|(&g, &x)| g * x.cosh())
+                .collect();
+            Some(Tensor::from_storage(
+                TensorStorage::cpu(g),
+                self.input.shape().to_vec(),
+                false,
+            )?)
+        } else {
+            None
+        };
+        Ok(vec![da])
+    }
+    fn inputs(&self) -> Vec<&Tensor<T>> {
+        vec![&self.input]
+    }
+    fn name(&self) -> &'static str {
+        "SinhBackward"
+    }
+}
+
+/// Differentiable elementwise hyperbolic sine. Mirrors
+/// `UnaryOps.cpp:351 CREATE_UNARY_TORCH_IMPL_FUNC(sinh_out, sinh_stub)`.
+pub fn sinh<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
+    let output = unary_map(input, |x| x.sinh())?;
+    finish_unary(output, input, || SinhBackward {
+        input: input.clone(),
+    })
+}
+
+/// Backward node for `c = cosh(x)`. VJP: `dx = grad * sinh(x)` per
+/// `derivatives.yaml` `cosh: grad * self.sinh().conj()`.
+#[derive(Debug)]
+struct CoshBackward<T: Float> {
+    input: Tensor<T>,
+}
+
+impl<T: Float> GradFn<T> for CoshBackward<T> {
+    fn backward(&self, grad_output: &Tensor<T>) -> FerrotorchResult<Vec<Option<Tensor<T>>>> {
+        let da = if self.input.requires_grad() {
+            let go = grad_output.data()?;
+            let x = self.input.data()?;
+            let g: Vec<T> = go
+                .iter()
+                .zip(x.iter())
+                .map(|(&g, &x)| g * x.sinh())
+                .collect();
+            Some(Tensor::from_storage(
+                TensorStorage::cpu(g),
+                self.input.shape().to_vec(),
+                false,
+            )?)
+        } else {
+            None
+        };
+        Ok(vec![da])
+    }
+    fn inputs(&self) -> Vec<&Tensor<T>> {
+        vec![&self.input]
+    }
+    fn name(&self) -> &'static str {
+        "CoshBackward"
+    }
+}
+
+/// Differentiable elementwise hyperbolic cosine. Mirrors
+/// `UnaryOps.cpp:329 CREATE_UNARY_TORCH_IMPL_FUNC(cosh_out, cosh_stub)`.
+pub fn cosh<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
+    let output = unary_map(input, |x| x.cosh())?;
+    finish_unary(output, input, || CoshBackward {
+        input: input.clone(),
+    })
+}
+
+// ===========================================================================
+// asinh / acosh / atanh
+// ===========================================================================
+
+/// Backward node for `c = asinh(x)`. VJP: `dx = grad / sqrt(x^2 + 1)` per
+/// `derivatives.yaml` `asinh: grad * (self.pow(2) + 1).rsqrt().conj()`.
+#[derive(Debug)]
+struct AsinhBackward<T: Float> {
+    input: Tensor<T>,
+}
+
+impl<T: Float> GradFn<T> for AsinhBackward<T> {
+    fn backward(&self, grad_output: &Tensor<T>) -> FerrotorchResult<Vec<Option<Tensor<T>>>> {
+        let da = if self.input.requires_grad() {
+            let go = grad_output.data()?;
+            let x = self.input.data()?;
+            let one = <T as num_traits::One>::one();
+            let g: Vec<T> = go
+                .iter()
+                .zip(x.iter())
+                .map(|(&g, &x)| g / (x * x + one).sqrt())
+                .collect();
+            Some(Tensor::from_storage(
+                TensorStorage::cpu(g),
+                self.input.shape().to_vec(),
+                false,
+            )?)
+        } else {
+            None
+        };
+        Ok(vec![da])
+    }
+    fn inputs(&self) -> Vec<&Tensor<T>> {
+        vec![&self.input]
+    }
+    fn name(&self) -> &'static str {
+        "AsinhBackward"
+    }
+}
+
+/// Differentiable elementwise inverse hyperbolic sine. Mirrors
+/// `UnaryOps.cpp:324 CREATE_UNARY_TORCH_IMPL_FUNC(asinh_out, asinh_stub)`.
+pub fn asinh<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
+    let output = unary_map(input, |x| x.asinh())?;
+    finish_unary(output, input, || AsinhBackward {
+        input: input.clone(),
+    })
+}
+
+/// Backward node for `c = acosh(x)`. VJP: `dx = grad / sqrt(x^2 - 1)` per
+/// `derivatives.yaml` `acosh: grad * (self * self - 1).rsqrt()` (real-only).
+#[derive(Debug)]
+struct AcoshBackward<T: Float> {
+    input: Tensor<T>,
+}
+
+impl<T: Float> GradFn<T> for AcoshBackward<T> {
+    fn backward(&self, grad_output: &Tensor<T>) -> FerrotorchResult<Vec<Option<Tensor<T>>>> {
+        let da = if self.input.requires_grad() {
+            let go = grad_output.data()?;
+            let x = self.input.data()?;
+            let one = <T as num_traits::One>::one();
+            let g: Vec<T> = go
+                .iter()
+                .zip(x.iter())
+                .map(|(&g, &x)| g / (x * x - one).sqrt())
+                .collect();
+            Some(Tensor::from_storage(
+                TensorStorage::cpu(g),
+                self.input.shape().to_vec(),
+                false,
+            )?)
+        } else {
+            None
+        };
+        Ok(vec![da])
+    }
+    fn inputs(&self) -> Vec<&Tensor<T>> {
+        vec![&self.input]
+    }
+    fn name(&self) -> &'static str {
+        "AcoshBackward"
+    }
+}
+
+/// Differentiable elementwise inverse hyperbolic cosine. Mirrors
+/// `UnaryOps.cpp:322 CREATE_UNARY_TORCH_IMPL_FUNC(acosh_out, acosh_stub)`.
+pub fn acosh<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
+    let output = unary_map(input, |x| x.acosh())?;
+    finish_unary(output, input, || AcoshBackward {
+        input: input.clone(),
+    })
+}
+
+/// Backward node for `c = atanh(x)`. VJP: `dx = grad / (1 - x^2)` per
+/// `derivatives.yaml` `atanh: grad * 1 / (1 - self.pow(2)).conj()`.
+#[derive(Debug)]
+struct AtanhBackward<T: Float> {
+    input: Tensor<T>,
+}
+
+impl<T: Float> GradFn<T> for AtanhBackward<T> {
+    fn backward(&self, grad_output: &Tensor<T>) -> FerrotorchResult<Vec<Option<Tensor<T>>>> {
+        let da = if self.input.requires_grad() {
+            let go = grad_output.data()?;
+            let x = self.input.data()?;
+            let one = <T as num_traits::One>::one();
+            let g: Vec<T> = go
+                .iter()
+                .zip(x.iter())
+                .map(|(&g, &x)| g / (one - x * x))
+                .collect();
+            Some(Tensor::from_storage(
+                TensorStorage::cpu(g),
+                self.input.shape().to_vec(),
+                false,
+            )?)
+        } else {
+            None
+        };
+        Ok(vec![da])
+    }
+    fn inputs(&self) -> Vec<&Tensor<T>> {
+        vec![&self.input]
+    }
+    fn name(&self) -> &'static str {
+        "AtanhBackward"
+    }
+}
+
+/// Differentiable elementwise inverse hyperbolic tangent. Mirrors
+/// `UnaryOps.cpp:326 CREATE_UNARY_TORCH_IMPL_FUNC(atanh_out, atanh_stub)`.
+pub fn atanh<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
+    let output = unary_map(input, |x| x.atanh())?;
+    finish_unary(output, input, || AtanhBackward {
+        input: input.clone(),
+    })
+}
+
+// ===========================================================================
+// exp2 / expm1
+// ===========================================================================
+
+/// Backward node for `c = 2^x`. VJP: `dx = grad * result * ln(2)` per
+/// `derivatives.yaml` `exp2: grad * result.conj() * M_LN2`. Saves the
+/// output to avoid recomputing the exponential.
+#[derive(Debug)]
+struct Exp2Backward<T: Float> {
+    input: Tensor<T>,
+    output: Tensor<T>,
+}
+
+impl<T: Float> GradFn<T> for Exp2Backward<T> {
+    fn backward(&self, grad_output: &Tensor<T>) -> FerrotorchResult<Vec<Option<Tensor<T>>>> {
+        let da = if self.input.requires_grad() {
+            let go = grad_output.data()?;
+            let o = self.output.data()?;
+            // M_LN2 = ln(2). Convert at runtime so we honor the generic T.
+            let ln2 = T::from(std::f64::consts::LN_2).unwrap_or_else(<T as num_traits::Zero>::zero);
+            let g: Vec<T> = go
+                .iter()
+                .zip(o.iter())
+                .map(|(&g, &r)| g * r * ln2)
+                .collect();
+            Some(Tensor::from_storage(
+                TensorStorage::cpu(g),
+                self.input.shape().to_vec(),
+                false,
+            )?)
+        } else {
+            None
+        };
+        Ok(vec![da])
+    }
+    fn inputs(&self) -> Vec<&Tensor<T>> {
+        vec![&self.input]
+    }
+    fn name(&self) -> &'static str {
+        "Exp2Backward"
+    }
+}
+
+/// Differentiable elementwise base-2 exponential: `c[i] = 2^x[i]`. Mirrors
+/// `UnaryOps.cpp:335 CREATE_UNARY_TORCH_IMPL_FUNC(exp2_out, exp2_stub)`.
+pub fn exp2<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
+    let output = unary_map(input, |x| x.exp2())?;
+    if needs_grad_unary(input) {
+        let (storage, shape) = output.into_storage_and_shape()?;
+        let out_tensor = Tensor::from_storage(storage, shape, false)?;
+        let grad_fn = Arc::new(Exp2Backward {
+            input: input.clone(),
+            output: out_tensor.clone(),
+        });
+        let (s, sh) = out_tensor.into_storage_and_shape()?;
+        Tensor::from_operation(s, sh, grad_fn)
+    } else {
+        Ok(output)
+    }
+}
+
+/// Backward node for `c = exp(x) - 1`. VJP: `dx = grad * (result + 1)` per
+/// `derivatives.yaml` `expm1: grad * (result.conj() + 1)`.
+#[derive(Debug)]
+struct Expm1Backward<T: Float> {
+    input: Tensor<T>,
+    output: Tensor<T>,
+}
+
+impl<T: Float> GradFn<T> for Expm1Backward<T> {
+    fn backward(&self, grad_output: &Tensor<T>) -> FerrotorchResult<Vec<Option<Tensor<T>>>> {
+        let da = if self.input.requires_grad() {
+            let go = grad_output.data()?;
+            let o = self.output.data()?;
+            let one = <T as num_traits::One>::one();
+            let g: Vec<T> = go
+                .iter()
+                .zip(o.iter())
+                .map(|(&g, &r)| g * (r + one))
+                .collect();
+            Some(Tensor::from_storage(
+                TensorStorage::cpu(g),
+                self.input.shape().to_vec(),
+                false,
+            )?)
+        } else {
+            None
+        };
+        Ok(vec![da])
+    }
+    fn inputs(&self) -> Vec<&Tensor<T>> {
+        vec![&self.input]
+    }
+    fn name(&self) -> &'static str {
+        "Expm1Backward"
+    }
+}
+
+/// Differentiable elementwise `exp(x) - 1` numerically stable for small `x`.
+/// Mirrors `UnaryOps.cpp:336 CREATE_UNARY_TORCH_IMPL_FUNC(expm1_out, expm1_stub)`.
+pub fn expm1<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
+    let output = unary_map(input, |x| x.exp_m1())?;
+    if needs_grad_unary(input) {
+        let (storage, shape) = output.into_storage_and_shape()?;
+        let out_tensor = Tensor::from_storage(storage, shape, false)?;
+        let grad_fn = Arc::new(Expm1Backward {
+            input: input.clone(),
+            output: out_tensor.clone(),
+        });
+        let (s, sh) = out_tensor.into_storage_and_shape()?;
+        Tensor::from_operation(s, sh, grad_fn)
+    } else {
+        Ok(output)
+    }
+}
+
+// ===========================================================================
+// log2 / log10 / log1p
+// ===========================================================================
+
+/// Backward node for `c = log_2(x)`. VJP: `dx = grad / (x * ln(2))` per
+/// `derivatives.yaml` `log2: grad / (self.conj() * 0.6931471805599453)`.
+#[derive(Debug)]
+struct Log2Backward<T: Float> {
+    input: Tensor<T>,
+}
+
+impl<T: Float> GradFn<T> for Log2Backward<T> {
+    fn backward(&self, grad_output: &Tensor<T>) -> FerrotorchResult<Vec<Option<Tensor<T>>>> {
+        let da = if self.input.requires_grad() {
+            let go = grad_output.data()?;
+            let x = self.input.data()?;
+            let ln2 = T::from(std::f64::consts::LN_2).unwrap_or_else(<T as num_traits::Zero>::zero);
+            let g: Vec<T> = go
+                .iter()
+                .zip(x.iter())
+                .map(|(&g, &x)| g / (x * ln2))
+                .collect();
+            Some(Tensor::from_storage(
+                TensorStorage::cpu(g),
+                self.input.shape().to_vec(),
+                false,
+            )?)
+        } else {
+            None
+        };
+        Ok(vec![da])
+    }
+    fn inputs(&self) -> Vec<&Tensor<T>> {
+        vec![&self.input]
+    }
+    fn name(&self) -> &'static str {
+        "Log2Backward"
+    }
+}
+
+/// Differentiable elementwise base-2 logarithm. Mirrors
+/// `UnaryOps.cpp:343 CREATE_UNARY_TORCH_IMPL_FUNC(log2_out, log2_stub)`.
+pub fn log2<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
+    let output = unary_map(input, |x| x.log2())?;
+    finish_unary(output, input, || Log2Backward {
+        input: input.clone(),
+    })
+}
+
+/// Backward node for `c = log_10(x)`. VJP: `dx = grad / (x * ln(10))` per
+/// `derivatives.yaml` `log10: grad / (self.conj() * 2.3025850929940456)`.
+#[derive(Debug)]
+struct Log10Backward<T: Float> {
+    input: Tensor<T>,
+}
+
+impl<T: Float> GradFn<T> for Log10Backward<T> {
+    fn backward(&self, grad_output: &Tensor<T>) -> FerrotorchResult<Vec<Option<Tensor<T>>>> {
+        let da = if self.input.requires_grad() {
+            let go = grad_output.data()?;
+            let x = self.input.data()?;
+            let ln10 =
+                T::from(std::f64::consts::LN_10).unwrap_or_else(<T as num_traits::Zero>::zero);
+            let g: Vec<T> = go
+                .iter()
+                .zip(x.iter())
+                .map(|(&g, &x)| g / (x * ln10))
+                .collect();
+            Some(Tensor::from_storage(
+                TensorStorage::cpu(g),
+                self.input.shape().to_vec(),
+                false,
+            )?)
+        } else {
+            None
+        };
+        Ok(vec![da])
+    }
+    fn inputs(&self) -> Vec<&Tensor<T>> {
+        vec![&self.input]
+    }
+    fn name(&self) -> &'static str {
+        "Log10Backward"
+    }
+}
+
+/// Differentiable elementwise base-10 logarithm. Mirrors
+/// `UnaryOps.cpp:341 CREATE_UNARY_TORCH_IMPL_FUNC(log10_out, log10_stub)`.
+pub fn log10<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
+    let output = unary_map(input, |x| x.log10())?;
+    finish_unary(output, input, || Log10Backward {
+        input: input.clone(),
+    })
+}
+
+/// Backward node for `c = ln(1 + x)`. VJP: `dx = grad / (1 + x)` per
+/// `derivatives.yaml` `log1p: log1p_backward(grad, self)`.
+#[derive(Debug)]
+struct Log1pBackward<T: Float> {
+    input: Tensor<T>,
+}
+
+impl<T: Float> GradFn<T> for Log1pBackward<T> {
+    fn backward(&self, grad_output: &Tensor<T>) -> FerrotorchResult<Vec<Option<Tensor<T>>>> {
+        let da = if self.input.requires_grad() {
+            let go = grad_output.data()?;
+            let x = self.input.data()?;
+            let one = <T as num_traits::One>::one();
+            let g: Vec<T> = go
+                .iter()
+                .zip(x.iter())
+                .map(|(&g, &x)| g / (one + x))
+                .collect();
+            Some(Tensor::from_storage(
+                TensorStorage::cpu(g),
+                self.input.shape().to_vec(),
+                false,
+            )?)
+        } else {
+            None
+        };
+        Ok(vec![da])
+    }
+    fn inputs(&self) -> Vec<&Tensor<T>> {
+        vec![&self.input]
+    }
+    fn name(&self) -> &'static str {
+        "Log1pBackward"
+    }
+}
+
+/// Differentiable elementwise `ln(1 + x)` numerically stable for small `x`.
+/// Mirrors `UnaryOps.cpp:342 CREATE_UNARY_TORCH_IMPL_FUNC(log1p_out, log1p_stub)`.
+pub fn log1p<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
+    let output = unary_map(input, |x| x.ln_1p())?;
+    finish_unary(output, input, || Log1pBackward {
+        input: input.clone(),
+    })
+}
+
+// ===========================================================================
+// Rounding family (ceil / floor / round / trunc) — zero-gradient backward
+// ===========================================================================
+
+/// Generic backward producing `zeros_like(grad)`. Used for piecewise-constant
+/// ops (`ceil`/`floor`/`round`/`trunc`/`sign`) per `derivatives.yaml`
+/// `... self: zeros_like(grad)`. Carries `input` so `inputs()` reports the
+/// correct topological dependency on the autograd graph.
+#[derive(Debug)]
+struct ZerosLikeBackward<T: Float> {
+    input: Tensor<T>,
+    name: &'static str,
+}
+
+impl<T: Float> GradFn<T> for ZerosLikeBackward<T> {
+    fn backward(&self, _grad_output: &Tensor<T>) -> FerrotorchResult<Vec<Option<Tensor<T>>>> {
+        let da = if self.input.requires_grad() {
+            Some(zeros_like_tensor(&self.input)?)
+        } else {
+            None
+        };
+        Ok(vec![da])
+    }
+    fn inputs(&self) -> Vec<&Tensor<T>> {
+        vec![&self.input]
+    }
+    fn name(&self) -> &'static str {
+        self.name
+    }
+}
+
+/// Differentiable elementwise ceiling. Mirrors
+/// `UnaryOps.cpp:316 CREATE_UNARY_TORCH_IMPL_INTEGER_NO_OP_FUNC(ceil_out, ceil_stub)`.
+/// Backward: `zeros_like(grad)` (gradient is zero a.e.).
+pub fn ceil<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
+    let output = unary_map(input, |x| x.ceil())?;
+    finish_unary(output, input, || ZerosLikeBackward {
+        input: input.clone(),
+        name: "CeilBackward",
+    })
+}
+
+/// Differentiable elementwise floor. Mirrors
+/// `UnaryOps.cpp:317 CREATE_UNARY_TORCH_IMPL_INTEGER_NO_OP_FUNC(floor_out, floor_stub)`.
+pub fn floor<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
+    let output = unary_map(input, |x| x.floor())?;
+    finish_unary(output, input, || ZerosLikeBackward {
+        input: input.clone(),
+        name: "FloorBackward",
+    })
+}
+
+/// Differentiable elementwise round (round-half-to-even / banker's rounding,
+/// matching PyTorch's `nearbyint`-based kernel). Mirrors
+/// `UnaryOps.cpp:318 CREATE_UNARY_TORCH_IMPL_INTEGER_NO_OP_FUNC(round_out, round_stub)`.
+///
+/// `num_traits::Float::round` does round-half-away-from-zero. To match
+/// upstream's round-half-to-even (RNE) we manually inspect the half-case
+/// and break ties toward even.
+pub fn round<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
+    let output = unary_map(input, round_half_to_even)?;
+    finish_unary(output, input, || ZerosLikeBackward {
+        input: input.clone(),
+        name: "RoundBackward",
+    })
+}
+
+/// Round-half-to-even (banker's rounding). Matches the IEEE-754
+/// `roundToIntegralTiesToEven` mode that PyTorch's `round_kernel` invokes
+/// via `nearbyint` (rounding mode set to FE_TONEAREST, the C default).
+#[inline]
+fn round_half_to_even<T: Float>(x: T) -> T {
+    let two = T::from(2.0).unwrap_or_else(<T as num_traits::One>::one);
+    let half = T::from(0.5).unwrap_or_else(<T as num_traits::Zero>::zero);
+    let one = <T as num_traits::One>::one();
+    let f = x.floor();
+    let diff = x - f;
+    if diff < half {
+        f
+    } else if diff > half {
+        f + one
+    } else {
+        // Tie: prefer the even neighbor. f even -> stay; odd -> +1.
+        // We test parity via `f - 2 * floor(f/2)`.
+        let half_f = (f / two).floor();
+        if f - half_f * two == <T as num_traits::Zero>::zero() {
+            f
+        } else {
+            f + one
+        }
+    }
+}
+
+/// Differentiable elementwise truncation (round toward zero). Mirrors
+/// `UnaryOps.cpp:319 CREATE_UNARY_TORCH_IMPL_INTEGER_NO_OP_FUNC(trunc_out, trunc_stub)`.
+pub fn trunc<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
+    let output = unary_map(input, |x| x.trunc())?;
+    finish_unary(output, input, || ZerosLikeBackward {
+        input: input.clone(),
+        name: "TruncBackward",
+    })
+}
+
+// ===========================================================================
+// frac — VJP: gradient passes through (slope 1 a.e.)
+// ===========================================================================
+
+/// Backward node for `c = x - trunc(x)`. Slope is 1 a.e., so the gradient
+/// passes through per `derivatives.yaml` `frac: grad`.
+#[derive(Debug)]
+struct FracBackward<T: Float> {
+    input: Tensor<T>,
+}
+
+impl<T: Float> GradFn<T> for FracBackward<T> {
+    fn backward(&self, grad_output: &Tensor<T>) -> FerrotorchResult<Vec<Option<Tensor<T>>>> {
+        let da = if self.input.requires_grad() {
+            // Clone the grad: same shape & values as upstream.
+            let go = grad_output.data()?;
+            Some(Tensor::from_storage(
+                TensorStorage::cpu(go.to_vec()),
+                self.input.shape().to_vec(),
+                false,
+            )?)
+        } else {
+            None
+        };
+        Ok(vec![da])
+    }
+    fn inputs(&self) -> Vec<&Tensor<T>> {
+        vec![&self.input]
+    }
+    fn name(&self) -> &'static str {
+        "FracBackward"
+    }
+}
+
+/// Differentiable elementwise fractional part: `c[i] = x[i] - trunc(x[i])`.
+/// Mirrors `UnaryOps.cpp:337 CREATE_UNARY_TORCH_IMPL_FUNC(frac_out, frac_stub)`.
+pub fn frac<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
+    let output = unary_map(input, |x| x - x.trunc())?;
+    finish_unary(output, input, || FracBackward {
+        input: input.clone(),
+    })
+}
+
+// ===========================================================================
+// sign — zero-gradient backward
+// ===========================================================================
+
+/// Differentiable elementwise sign: `c = -1 / 0 / +1` per
+/// `UnaryOps.cpp:348 CREATE_UNARY_TORCH_IMPL_FUNC(sign_out, sign_stub)`.
+/// Backward: `zeros_like(grad)` (piecewise constant).
+///
+/// Special: `sign(NaN) = NaN`, matching `num_traits::Float::signum`'s
+/// NaN propagation (which matches PyTorch's `c10::signum(NaN) = NaN`).
+pub fn sign<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
+    let zero = <T as num_traits::Zero>::zero();
+    let output = unary_map(input, |x| {
+        if x.is_nan() {
+            x
+        } else if x == zero {
+            zero
+        } else {
+            x.signum()
+        }
+    })?;
+    finish_unary(output, input, || ZerosLikeBackward {
+        input: input.clone(),
+        name: "SignBackward",
+    })
+}
+
+// ===========================================================================
+// sinc — c[i] = sin(pi*x[i]) / (pi*x[i]) with sinc(0) = 1
+// ===========================================================================
+
+/// Backward node for `c = sinc(x)`. The closed-form derivative is
+/// `sinc'(x) = (pi*x*cos(pi*x) - sin(pi*x)) / (pi*x^2)` for `x != 0`, and
+/// `sinc'(0) = 0` (the function has a local maximum at the origin). Matches
+/// upstream `tools/autograd/derivatives.yaml` `sinc: sinc_backward(grad, self)`
+/// whose C++ implementation in `torch/csrc/autograd/FunctionsManual.cpp`
+/// uses the same closed form.
+#[derive(Debug)]
+struct SincBackward<T: Float> {
+    input: Tensor<T>,
+}
+
+impl<T: Float> GradFn<T> for SincBackward<T> {
+    fn backward(&self, grad_output: &Tensor<T>) -> FerrotorchResult<Vec<Option<Tensor<T>>>> {
+        let da = if self.input.requires_grad() {
+            let go = grad_output.data()?;
+            let x = self.input.data()?;
+            let pi = T::from(std::f64::consts::PI).unwrap_or_else(<T as num_traits::Zero>::zero);
+            let zero = <T as num_traits::Zero>::zero();
+            let g: Vec<T> = go
+                .iter()
+                .zip(x.iter())
+                .map(|(&g, &x)| {
+                    if x == zero {
+                        zero
+                    } else {
+                        let px = pi * x;
+                        g * (px.cos() / x - px.sin() / (px * x))
+                    }
+                })
+                .collect();
+            Some(Tensor::from_storage(
+                TensorStorage::cpu(g),
+                self.input.shape().to_vec(),
+                false,
+            )?)
+        } else {
+            None
+        };
+        Ok(vec![da])
+    }
+    fn inputs(&self) -> Vec<&Tensor<T>> {
+        vec![&self.input]
+    }
+    fn name(&self) -> &'static str {
+        "SincBackward"
+    }
+}
+
+/// Differentiable elementwise normalized sinc: `c[i] = sin(pi*x[i]) /
+/// (pi*x[i])`, with `sinc(0) = 1` by continuous extension. Mirrors
+/// `UnaryOps.cpp:350 CREATE_UNARY_TORCH_IMPL_FUNC(sinc_out, sinc_stub)`
+/// (kernel at `aten/src/ATen/native/cpu/UnaryOpsKernel.cpp` `sinc_kernel`).
+pub fn sinc<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
+    let pi = T::from(std::f64::consts::PI).unwrap_or_else(<T as num_traits::Zero>::zero);
+    let zero = <T as num_traits::Zero>::zero();
+    let one = <T as num_traits::One>::one();
+    let output = unary_map(input, |x| {
+        if x == zero {
+            one
+        } else {
+            let px = pi * x;
+            px.sin() / px
+        }
+    })?;
+    finish_unary(output, input, || SincBackward {
+        input: input.clone(),
+    })
+}
+
+// ===========================================================================
 // Tests
 // ===========================================================================
 
@@ -878,5 +1846,302 @@ mod tests {
         c.backward().unwrap();
         let g = a.grad().unwrap().unwrap().item().unwrap();
         numerical_grad_check(|v| v.clamp(0.0, 1.0), x, g, 1e-3);
+    }
+
+    // -----------------------------------------------------------------------
+    // New unary ops (tan, asin, acos, atan, sinh, cosh, asinh, acosh, atanh,
+    // exp2, expm1, log2, log10, log1p, ceil, floor, round, trunc, frac, sign,
+    // sinc) — forward + backward + numerical-gradient parity.
+    // -----------------------------------------------------------------------
+
+    // tan
+    #[test]
+    fn test_tan_forward_and_backward() {
+        let a = leaf_scalar(0.5_f32, true);
+        let c = tan(&a).unwrap();
+        let v = c.item().unwrap();
+        assert!((v - 0.5_f32.tan()).abs() < 1e-6, "tan(0.5) = {v}");
+        c.backward().unwrap();
+        let g = a.grad().unwrap().unwrap().item().unwrap();
+        numerical_grad_check(|v| v.tan(), 0.5, g, 1e-3);
+    }
+
+    // asin
+    #[test]
+    fn test_asin_forward_and_backward() {
+        let a = leaf_scalar(0.5_f32, true);
+        let c = asin(&a).unwrap();
+        let v = c.item().unwrap();
+        assert!((v - 0.5_f32.asin()).abs() < 1e-6);
+        c.backward().unwrap();
+        let g = a.grad().unwrap().unwrap().item().unwrap();
+        numerical_grad_check(|v| v.asin(), 0.5, g, 1e-3);
+    }
+
+    // acos
+    #[test]
+    fn test_acos_forward_and_backward() {
+        let a = leaf_scalar(0.5_f32, true);
+        let c = acos(&a).unwrap();
+        let v = c.item().unwrap();
+        assert!((v - 0.5_f32.acos()).abs() < 1e-6);
+        c.backward().unwrap();
+        let g = a.grad().unwrap().unwrap().item().unwrap();
+        numerical_grad_check(|v| v.acos(), 0.5, g, 1e-3);
+    }
+
+    // atan
+    #[test]
+    fn test_atan_forward_and_backward() {
+        let a = leaf_scalar(1.0_f32, true);
+        let c = atan(&a).unwrap();
+        let v = c.item().unwrap();
+        assert!((v - 1.0_f32.atan()).abs() < 1e-6);
+        c.backward().unwrap();
+        let g = a.grad().unwrap().unwrap().item().unwrap();
+        numerical_grad_check(|v| v.atan(), 1.0, g, 1e-3);
+    }
+
+    // sinh
+    #[test]
+    fn test_sinh_forward_and_backward() {
+        let a = leaf_scalar(0.5_f32, true);
+        let c = sinh(&a).unwrap();
+        let v = c.item().unwrap();
+        assert!((v - 0.5_f32.sinh()).abs() < 1e-6);
+        c.backward().unwrap();
+        let g = a.grad().unwrap().unwrap().item().unwrap();
+        numerical_grad_check(|v| v.sinh(), 0.5, g, 1e-3);
+    }
+
+    // cosh
+    #[test]
+    fn test_cosh_forward_and_backward() {
+        let a = leaf_scalar(0.5_f32, true);
+        let c = cosh(&a).unwrap();
+        let v = c.item().unwrap();
+        assert!((v - 0.5_f32.cosh()).abs() < 1e-6);
+        c.backward().unwrap();
+        let g = a.grad().unwrap().unwrap().item().unwrap();
+        numerical_grad_check(|v| v.cosh(), 0.5, g, 1e-3);
+    }
+
+    // asinh
+    #[test]
+    fn test_asinh_forward_and_backward() {
+        let a = leaf_scalar(0.7_f32, true);
+        let c = asinh(&a).unwrap();
+        let v = c.item().unwrap();
+        assert!((v - 0.7_f32.asinh()).abs() < 1e-6);
+        c.backward().unwrap();
+        let g = a.grad().unwrap().unwrap().item().unwrap();
+        numerical_grad_check(|v| v.asinh(), 0.7, g, 1e-3);
+    }
+
+    // acosh
+    #[test]
+    fn test_acosh_forward_and_backward() {
+        let a = leaf_scalar(1.5_f32, true);
+        let c = acosh(&a).unwrap();
+        let v = c.item().unwrap();
+        assert!((v - 1.5_f32.acosh()).abs() < 1e-6);
+        c.backward().unwrap();
+        let g = a.grad().unwrap().unwrap().item().unwrap();
+        numerical_grad_check(|v| v.acosh(), 1.5, g, 1e-3);
+    }
+
+    // atanh
+    #[test]
+    fn test_atanh_forward_and_backward() {
+        let a = leaf_scalar(0.5_f32, true);
+        let c = atanh(&a).unwrap();
+        let v = c.item().unwrap();
+        assert!((v - 0.5_f32.atanh()).abs() < 1e-6);
+        c.backward().unwrap();
+        let g = a.grad().unwrap().unwrap().item().unwrap();
+        numerical_grad_check(|v| v.atanh(), 0.5, g, 1e-3);
+    }
+
+    // exp2
+    #[test]
+    fn test_exp2_forward_and_backward() {
+        let a = leaf_scalar(2.0_f32, true);
+        let c = exp2(&a).unwrap();
+        let v = c.item().unwrap();
+        assert!((v - 4.0).abs() < 1e-5, "exp2(2) = {v}");
+        c.backward().unwrap();
+        let g = a.grad().unwrap().unwrap().item().unwrap();
+        numerical_grad_check(|v| v.exp2(), 2.0, g, 1e-3);
+    }
+
+    // expm1
+    #[test]
+    fn test_expm1_forward_and_backward() {
+        let a = leaf_scalar(0.5_f32, true);
+        let c = expm1(&a).unwrap();
+        let v = c.item().unwrap();
+        assert!((v - 0.5_f32.exp_m1()).abs() < 1e-6);
+        c.backward().unwrap();
+        let g = a.grad().unwrap().unwrap().item().unwrap();
+        numerical_grad_check(|v| v.exp_m1(), 0.5, g, 1e-3);
+    }
+
+    // log2
+    #[test]
+    fn test_log2_forward_and_backward() {
+        let a = leaf_scalar(8.0_f32, true);
+        let c = log2(&a).unwrap();
+        let v = c.item().unwrap();
+        assert!((v - 3.0).abs() < 1e-5);
+        c.backward().unwrap();
+        let g = a.grad().unwrap().unwrap().item().unwrap();
+        numerical_grad_check(|v| v.log2(), 8.0, g, 1e-3);
+    }
+
+    // log10
+    #[test]
+    fn test_log10_forward_and_backward() {
+        let a = leaf_scalar(100.0_f32, true);
+        let c = log10(&a).unwrap();
+        let v = c.item().unwrap();
+        assert!((v - 2.0).abs() < 1e-5);
+        c.backward().unwrap();
+        let g = a.grad().unwrap().unwrap().item().unwrap();
+        numerical_grad_check(|v| v.log10(), 100.0, g, 1e-1);
+    }
+
+    // log1p
+    #[test]
+    fn test_log1p_forward_and_backward() {
+        let a = leaf_scalar(0.5_f32, true);
+        let c = log1p(&a).unwrap();
+        let v = c.item().unwrap();
+        assert!((v - 0.5_f32.ln_1p()).abs() < 1e-6);
+        c.backward().unwrap();
+        let g = a.grad().unwrap().unwrap().item().unwrap();
+        numerical_grad_check(|v| v.ln_1p(), 0.5, g, 1e-3);
+    }
+
+    // ceil
+    #[test]
+    fn test_ceil_forward_and_zero_backward() {
+        let a = leaf_vec(&[-1.4, 0.5, 2.0], false);
+        let c = ceil(&a).unwrap();
+        assert_eq!(c.data().unwrap(), &[-1.0, 1.0, 2.0]);
+        // backward returns zeros
+        let a2 = leaf_scalar(0.3, true);
+        let c2 = ceil(&a2).unwrap();
+        c2.backward().unwrap();
+        assert_scalar_approx(&a2.grad().unwrap().unwrap(), 0.0, 1e-6);
+    }
+
+    // floor
+    #[test]
+    fn test_floor_forward_and_zero_backward() {
+        let a = leaf_vec(&[-1.4, 0.5, 2.9], false);
+        let c = floor(&a).unwrap();
+        assert_eq!(c.data().unwrap(), &[-2.0, 0.0, 2.0]);
+        let a2 = leaf_scalar(0.3, true);
+        let c2 = floor(&a2).unwrap();
+        c2.backward().unwrap();
+        assert_scalar_approx(&a2.grad().unwrap().unwrap(), 0.0, 1e-6);
+    }
+
+    // round (banker's)
+    #[test]
+    fn test_round_banker_rounding() {
+        // Half-cases go to nearest even, matching torch's nearbyint default.
+        let a = leaf_vec(&[0.5, 1.5, 2.5, 3.5, -0.5, -1.5], false);
+        let c = round(&a).unwrap();
+        assert_eq!(c.data().unwrap(), &[0.0, 2.0, 2.0, 4.0, 0.0, -2.0]);
+    }
+
+    // trunc
+    #[test]
+    fn test_trunc_forward_and_zero_backward() {
+        let a = leaf_vec(&[-1.7, 0.4, 2.9], false);
+        let c = trunc(&a).unwrap();
+        assert_eq!(c.data().unwrap(), &[-1.0, 0.0, 2.0]);
+        let a2 = leaf_scalar(0.3, true);
+        let c2 = trunc(&a2).unwrap();
+        c2.backward().unwrap();
+        assert_scalar_approx(&a2.grad().unwrap().unwrap(), 0.0, 1e-6);
+    }
+
+    // frac
+    #[test]
+    fn test_frac_forward_and_pass_through_backward() {
+        let a = leaf_vec(&[-1.5, 0.4, 2.75], false);
+        let c = frac(&a).unwrap();
+        let d = c.data().unwrap();
+        // frac(-1.5) = -1.5 - trunc(-1.5) = -1.5 - (-1.0) = -0.5
+        assert!((d[0] - (-0.5)).abs() < 1e-6);
+        assert!((d[1] - 0.4).abs() < 1e-6);
+        assert!((d[2] - 0.75).abs() < 1e-6);
+        // backward passes grad through (slope=1).
+        let a2 = leaf_scalar(0.3, true);
+        let c2 = frac(&a2).unwrap();
+        c2.backward().unwrap();
+        assert_scalar_approx(&a2.grad().unwrap().unwrap(), 1.0, 1e-6);
+    }
+
+    // sign
+    #[test]
+    fn test_sign_forward_and_zero_backward() {
+        let a = leaf_vec(&[-3.0, 0.0, 5.0], false);
+        let c = sign(&a).unwrap();
+        assert_eq!(c.data().unwrap(), &[-1.0, 0.0, 1.0]);
+        // backward zero
+        let a2 = leaf_scalar(5.0, true);
+        let c2 = sign(&a2).unwrap();
+        c2.backward().unwrap();
+        assert_scalar_approx(&a2.grad().unwrap().unwrap(), 0.0, 1e-6);
+    }
+
+    // sinc
+    #[test]
+    fn test_sinc_zero_and_nonzero() {
+        let a = leaf_vec(&[0.0, 0.5, 1.0], false);
+        let c = sinc(&a).unwrap();
+        let d = c.data().unwrap();
+        // sinc(0) = 1
+        assert!((d[0] - 1.0).abs() < 1e-6);
+        // sinc(0.5) = sin(pi/2)/(pi/2) = 1/(pi/2) = 2/pi ≈ 0.6366
+        let expected = (std::f32::consts::PI * 0.5).sin() / (std::f32::consts::PI * 0.5);
+        assert!(
+            (d[1] - expected).abs() < 1e-6,
+            "sinc(0.5) = {} vs expected {}",
+            d[1],
+            expected
+        );
+        // sinc(1) = sin(pi)/(pi) ≈ 0
+        assert!(d[2].abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_sinc_numerical_grad_interior() {
+        let x = 0.5_f32;
+        let a = leaf_scalar(x, true);
+        let c = sinc(&a).unwrap();
+        c.backward().unwrap();
+        let g = a.grad().unwrap().unwrap().item().unwrap();
+        let sinc_fn = |v: f32| {
+            if v == 0.0 {
+                1.0
+            } else {
+                let p = std::f32::consts::PI * v;
+                p.sin() / p
+            }
+        };
+        numerical_grad_check(sinc_fn, x, g, 1e-3);
+    }
+
+    #[test]
+    fn test_sinc_zero_backward_is_zero() {
+        let a = leaf_scalar(0.0, true);
+        let c = sinc(&a).unwrap();
+        c.backward().unwrap();
+        // The closed-form sinc'(0) = 0.
+        assert_scalar_approx(&a.grad().unwrap().unwrap(), 0.0, 1e-6);
     }
 }
