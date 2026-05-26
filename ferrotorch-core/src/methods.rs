@@ -498,6 +498,65 @@ impl<T: Float> Tensor<T> {
         crate::grad_fns::activation::log_softmax(self)
     }
 
+    /// `torch.Tensor.threshold(threshold, value)` — replace each element below
+    /// (or equal to) `threshold` with `value`, leave the rest unchanged.
+    ///
+    /// Mirrors `torch.nn.functional.threshold(input, threshold, value)` per
+    /// `torch/nn/functional.py:1682-1700` and
+    /// `TORCH_IMPL_FUNC(threshold_out)` at
+    /// `aten/src/ATen/native/Activation.cpp:688-690`. The non-test production
+    /// consumer wiring for `grad_fns::activation::threshold` per R-DEFER-1:
+    /// this method is the public, chainable surface that closes the
+    /// consumer requirement (closes #1341 REQ-19).
+    pub fn threshold_t(&self, threshold: f64, value: f64) -> FerrotorchResult<Tensor<T>> {
+        crate::grad_fns::activation::threshold(self, threshold, value)
+    }
+
+    /// `torch.Tensor.rrelu(lower, upper, training)` — randomized leaky ReLU.
+    ///
+    /// Mirrors `torch.nn.functional.rrelu(input, lower, upper, training,
+    /// inplace)` per `torch/nn/functional.py:1962-1989` and
+    /// `Tensor& rrelu_with_noise_out_cpu(...)` at
+    /// `aten/src/ATen/native/Activation.cpp:611-654`. The non-test production
+    /// consumer wiring for `grad_fns::activation::rrelu` per R-DEFER-1:
+    /// this method is the public, chainable surface that closes the
+    /// consumer requirement (closes #1341 REQ-20).
+    ///
+    /// Note: `training=true` falls back to the deterministic mean-slope
+    /// inference path (per the GradFn docs at `activation.rs`). The
+    /// RNG-stateful training-mode VJP is a separately-tracked follow-up.
+    pub fn rrelu_t(&self, lower: f64, upper: f64, training: bool) -> FerrotorchResult<Tensor<T>> {
+        crate::grad_fns::activation::rrelu(self, lower, upper, training)
+    }
+
+    /// `torch.Tensor.celu(alpha)` —
+    /// `celu(x) = max(0, x) + min(0, alpha * (exp(x / alpha) - 1))`.
+    ///
+    /// Mirrors `torch.nn.functional.celu(input, alpha=1.0)` per
+    /// `torch/nn/functional.py:1874-1894` and
+    /// `Tensor celu(const Tensor& self, const Scalar& alpha)` at
+    /// `aten/src/ATen/native/Activation.cpp:540-545`. The non-test production
+    /// consumer wiring for `grad_fns::activation::celu` per R-DEFER-1:
+    /// this method is the public, chainable surface that closes the
+    /// consumer requirement (closes #1341 REQ-21).
+    pub fn celu_t(&self, alpha: f64) -> FerrotorchResult<Tensor<T>> {
+        crate::grad_fns::activation::celu(self, alpha)
+    }
+
+    /// `torch.Tensor.softmin()` — `softmin(x) = softmax(-x)` along the last
+    /// axis (fused single-`GradFn` variant).
+    ///
+    /// Mirrors `torch.nn.functional.softmin(input, dim=None, dtype=None)` per
+    /// `torch/nn/functional.py:2095-2125`. The non-test production consumer
+    /// wiring for `grad_fns::activation::softmin` per R-DEFER-1: this method
+    /// is the public, chainable surface that closes the consumer requirement
+    /// (closes #1341 REQ-22). The composition-route variant
+    /// (`ferrotorch_nn::functional::softmin` = neg -> softmax, two GradFn
+    /// nodes) remains available; this method routes through the fused VJP.
+    pub fn softmin_t(&self) -> FerrotorchResult<Tensor<T>> {
+        crate::grad_fns::activation::softmin(self)
+    }
+
     // --- Reduction ---
 
     pub fn sum_all(&self) -> FerrotorchResult<Tensor<T>> {

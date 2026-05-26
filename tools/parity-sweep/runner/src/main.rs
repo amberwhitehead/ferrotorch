@@ -2174,6 +2174,276 @@ fn dispatch_f32(
             }
         })),
 
+        // ------------------------------------------------------------------
+        // Activation op cluster — closes umbrella #1338 (runner arms) +
+        // #1341 (the 4 fused-GradFn additions: threshold/rrelu/celu/softmin).
+        //
+        // All 22 ops in `.design/ferrotorch-core/grad_fns/activation.md`'s
+        // `parity_ops` route field dispatch here. Upstream entry points are
+        // in `aten/src/ATen/native/Activation.cpp` (CPU + autograd defs) +
+        // `torch/nn/functional.py` (Python user surface). The oracle exposes
+        // most of these as `nn.functional.<name>` (some — sigmoid / tanh /
+        // softmax / log_softmax — also live at top level); the alias map in
+        // `oracle_name()` handles the rename before each `oracle.sample`
+        // call so the bare names from the route's `parity_ops` field flow
+        // through to the right op_db entry.
+        //
+        // All ops are unary (single tensor positional). The handful with
+        // kwargs / extra positional scalars are handled inline below.
+        //
+        // ReLU family ----------------------------------------------------
+        "relu" => Ok(Some(grad_fns::activation::relu(&unary("relu")?)?)),
+        // `torch.nn.functional.relu6(input)` — clamp to `[0, 6]`. Upstream
+        // `Tensor relu6(...)` at `aten/src/ATen/native/Activation.cpp:528-530`
+        // delegates to `at::hardtanh(self, 0, 6)`. ferrotorch's `relu6`
+        // mirrors via `hardtanh_with(input, 0.0, 6.0)`.
+        "relu6" => Ok(Some(grad_fns::activation::relu6(&unary("relu6")?)?)),
+        // `torch.nn.functional.leaky_relu(input, negative_slope=0.01)` —
+        // upstream `TORCH_IMPL_FUNC(leaky_relu_out)` at
+        // `aten/src/ATen/native/Activation.cpp:324-328`. op_db emits
+        // `negative_slope` as kwarg (default 0.01).
+        "leaky_relu" => Ok(Some({
+            let a = unary("leaky_relu")?;
+            let ns = kwargs
+                .get("negative_slope")
+                .and_then(Value::as_f64)
+                .unwrap_or(0.01);
+            grad_fns::activation::leaky_relu(&a, ns)?
+        })),
+        // PReLU. op_db's `nn.functional.prelu` emits
+        // `args = [input, weight]` where weight is a 1-D tensor (per-channel)
+        // or scalar (the only variant ferrotorch's fused `prelu` supports —
+        // upstream allows per-channel via the `weight.reshape_symint(dim_w)`
+        // branch at `Activation.cpp:716-723`, NOT yet shipped). For per-
+        // channel samples we skip (return Ok(None)) so the sweep classifies
+        // them as "infrastructure gap, not a value mismatch".
+        "prelu" => {
+            // op_db's `nn.functional.prelu` samples can ship weight either as
+            // positional `args[1]` or via the `weight=` kwarg. Some samples
+            // (the per-channel variants from `sample_inputs_nn_functional_prelu`)
+            // emit `args=[input]` with no explicit weight at all — those
+            // exercise the upstream default. We support the scalar-weight
+            // path only (REQ-17 prelu scalar restriction); per-channel
+            // weight + missing-weight samples are legitimate skips.
+            let input = match args.first().and_then(unwrap_tensor_arg) {
+                Some(t) => t.to_f32()?,
+                None => return Ok(None),
+            };
+            let weight_wire = args
+                .get(1)
+                .and_then(unwrap_tensor_arg)
+                .or_else(|| kwargs.get("weight").and_then(unwrap_tensor_arg));
+            let weight = match weight_wire {
+                Some(w) => w.to_f32()?,
+                None => return Ok(None),
+            };
+            if weight.numel() != 1 {
+                return Ok(None);
+            }
+            Ok(Some(grad_fns::activation::prelu(&input, &weight)?))
+        }
+        // RReLU. op_db's `nn.functional.rrelu` default `training=False` —
+        // inference mode delegates to leaky_relu with mean slope per
+        // `aten/src/ATen/native/Activation.cpp:624-630`. Kwargs: `lower`
+        // (default 1/8), `upper` (default 1/3), `training` (default False).
+        "rrelu" => {
+            let a = unary("rrelu")?;
+            let lower = kwargs.get("lower").and_then(Value::as_f64).unwrap_or(0.125);
+            let upper = kwargs
+                .get("upper")
+                .and_then(Value::as_f64)
+                .unwrap_or(1.0 / 3.0);
+            let training = kwargs
+                .get("training")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            // Stochastic training-mode samples emit per-element slopes drawn
+            // from `Uniform[lower, upper]` — see `_rrelu_with_noise_train` at
+            // `aten/src/ATen/native/Activation.cpp:578-608`. ferrotorch's
+            // deterministic mean-slope inference path cannot match a single
+            // stochastic oracle output by construction (each invocation draws
+            // different slopes). Skip those samples as legitimate
+            // "differentiability infrastructure not yet shipped" rather than
+            // reporting a numerical divergence. The non-training samples
+            // (which are the public-API contract worth pinning) all pass.
+            if training {
+                return Ok(None);
+            }
+            Ok(Some(grad_fns::activation::rrelu(
+                &a, lower, upper, training,
+            )?))
+        }
+        // ELU / SELU / CELU ----------------------------------------------
+        // `torch.nn.functional.elu(input, alpha=1.0)` — upstream
+        // `TORCH_IMPL_FUNC(elu_out)` at `aten/src/ATen/native/Activation.cpp:272-277`.
+        "elu" => Ok(Some({
+            let a = unary("elu")?;
+            let alpha = kwargs.get("alpha").and_then(Value::as_f64).unwrap_or(1.0);
+            grad_fns::activation::elu(&a, alpha)?
+        })),
+        // `torch.nn.functional.selu(input)` — no kwargs. Upstream
+        // `Tensor selu(const Tensor& self)` at
+        // `aten/src/ATen/native/Activation.cpp:524-526` delegates to
+        // `at::elu(self, SELU_ALPHA, SELU_SCALE)`; ferrotorch's `selu`
+        // fuses the same closed-form.
+        "selu" => Ok(Some(grad_fns::activation::selu(&unary("selu")?)?)),
+        // `torch.nn.functional.celu(input, alpha=1.0)` — upstream
+        // `Tensor celu(const Tensor& self, const Scalar& alpha)` at
+        // `aten/src/ATen/native/Activation.cpp:540-545` delegates to
+        // `at::elu(self, alpha, 1.0, 1/alpha)`. ferrotorch's `celu` ships
+        // the fused single-`CeluBackward` in `grad_fns::activation` (closes
+        // #1341 REQ-21).
+        "celu" => Ok(Some({
+            let a = unary("celu")?;
+            let alpha = kwargs.get("alpha").and_then(Value::as_f64).unwrap_or(1.0);
+            grad_fns::activation::celu(&a, alpha)?
+        })),
+        // Sigmoid / Tanh / GELU / SiLU / Mish ----------------------------
+        "sigmoid" => Ok(Some(grad_fns::activation::sigmoid(&unary("sigmoid")?)?)),
+        "tanh" => Ok(Some(grad_fns::activation::tanh(&unary("tanh")?)?)),
+        // `torch.nn.functional.gelu(input, approximate='none')` — op_db
+        // kwargs default `approximate='none'` (the erf-based exact path).
+        // The two upstream-supported approximations map to
+        // `GeluApproximate::None` and `GeluApproximate::Tanh`; the
+        // `Sigmoid` variant is a ferrotorch extension not exercised by
+        // op_db.
+        "gelu" => Ok(Some({
+            let a = unary("gelu")?;
+            let approx_s = kwargs
+                .get("approximate")
+                .and_then(Value::as_str)
+                .unwrap_or("none");
+            let approx = match approx_s {
+                "tanh" => grad_fns::activation::GeluApproximate::Tanh,
+                _ => grad_fns::activation::GeluApproximate::None,
+            };
+            grad_fns::activation::gelu_with(&a, approx)?
+        })),
+        "silu" => Ok(Some(grad_fns::activation::silu(&unary("silu")?)?)),
+        "mish" => Ok(Some(grad_fns::activation::mish(&unary("mish")?)?)),
+        // Softmax / LogSoftmax / Softmin ---------------------------------
+        // op_db's `softmax` / `log_softmax` samples ship `dim` either as
+        // positional `args[1]` (an int) or kwarg. ferrotorch's
+        // `grad_fns::activation::softmax` / `log_softmax` are last-axis-only
+        // — skip non-last-axis samples (the per-dim softmax routing is its
+        // own REQ tracked separately).
+        "softmax" => {
+            let a = unary("softmax")?;
+            // Resolve dim from args[1] or kwargs.dim.
+            let dim_opt = args
+                .get(1)
+                .and_then(Value::as_i64)
+                .or_else(|| kwargs.get("dim").and_then(Value::as_i64));
+            if let Some(d) = dim_opt {
+                let nd = a.ndim() as i64;
+                let dn = if d < 0 { nd + d } else { d };
+                if dn != nd - 1 {
+                    return Ok(None);
+                }
+            }
+            Ok(Some(grad_fns::activation::softmax(&a)?))
+        }
+        "log_softmax" => {
+            let a = unary("log_softmax")?;
+            let dim_opt = args
+                .get(1)
+                .and_then(Value::as_i64)
+                .or_else(|| kwargs.get("dim").and_then(Value::as_i64));
+            if let Some(d) = dim_opt {
+                let nd = a.ndim() as i64;
+                let dn = if d < 0 { nd + d } else { d };
+                if dn != nd - 1 {
+                    return Ok(None);
+                }
+            }
+            Ok(Some(grad_fns::activation::log_softmax(&a)?))
+        }
+        // `torch.nn.functional.softmin(input, dim=None)` — same last-axis
+        // restriction as `softmax`. Fused `SoftminBackward` (closes #1341
+        // REQ-22).
+        "softmin" => {
+            let a = unary("softmin")?;
+            let dim_opt = args
+                .get(1)
+                .and_then(Value::as_i64)
+                .or_else(|| kwargs.get("dim").and_then(Value::as_i64));
+            if let Some(d) = dim_opt {
+                let nd = a.ndim() as i64;
+                let dn = if d < 0 { nd + d } else { d };
+                if dn != nd - 1 {
+                    return Ok(None);
+                }
+            }
+            Ok(Some(grad_fns::activation::softmin(&a)?))
+        }
+        // Softplus / Softsign --------------------------------------------
+        // `torch.nn.functional.softplus(input, beta=1, threshold=20)` —
+        // upstream `TORCH_IMPL_FUNC(softplus_out)` at
+        // `aten/src/ATen/native/Activation.cpp:308-312`.
+        "softplus" => Ok(Some({
+            let a = unary("softplus")?;
+            let beta = kwargs.get("beta").and_then(Value::as_f64).unwrap_or(1.0);
+            let thr = kwargs
+                .get("threshold")
+                .and_then(Value::as_f64)
+                .unwrap_or(20.0);
+            grad_fns::activation::softplus(&a, beta, thr)?
+        })),
+        "softsign" => Ok(Some(grad_fns::activation::softsign(&unary("softsign")?)?)),
+        // Hardtanh / Hardsigmoid / Hardswish -----------------------------
+        // `torch.nn.functional.hardtanh(input, min_val=-1, max_val=1)` —
+        // upstream `Tensor hardtanh(...)` at
+        // `aten/src/ATen/native/Activation.cpp:436-468`.
+        "hardtanh" => Ok(Some({
+            let a = unary("hardtanh")?;
+            let mn = kwargs
+                .get("min_val")
+                .and_then(Value::as_f64)
+                .unwrap_or(-1.0);
+            let mx = kwargs.get("max_val").and_then(Value::as_f64).unwrap_or(1.0);
+            grad_fns::activation::hardtanh_with(&a, mn, mx)?
+        })),
+        "hardsigmoid" => Ok(Some(grad_fns::activation::hardsigmoid(&unary(
+            "hardsigmoid",
+        )?)?)),
+        "hardswish" => Ok(Some(grad_fns::activation::hardswish(&unary("hardswish")?)?)),
+        // Threshold ------------------------------------------------------
+        // `torch.nn.functional.threshold(input, threshold, value)` —
+        // op_db emits `args = [input, threshold: f64, value: f64]`. Upstream
+        // `TORCH_IMPL_FUNC(threshold_out)` at
+        // `aten/src/ATen/native/Activation.cpp:688-690`. ferrotorch ships
+        // the fused single-`ThresholdBackward` (closes #1341 REQ-19).
+        "threshold" => Ok(Some({
+            let a = unary("threshold")?;
+            // Both scalars can be either positional (args[1]/args[2]) or
+            // kwargs (`threshold`/`value`).
+            let thr = args
+                .get(1)
+                .and_then(Value::as_f64)
+                .or_else(|| kwargs.get("threshold").and_then(Value::as_f64))
+                .ok_or("threshold: missing threshold scalar")?;
+            let val = args
+                .get(2)
+                .and_then(Value::as_f64)
+                .or_else(|| kwargs.get("value").and_then(Value::as_f64))
+                .ok_or("threshold: missing value scalar")?;
+            grad_fns::activation::threshold(&a, thr, val)?
+        })),
+        // GLU ------------------------------------------------------------
+        // `torch.nn.functional.glu(input, dim=-1)` — fused GLU activation,
+        // splits `input` along `dim` and computes `a * sigmoid(b)`.
+        // Upstream surface at `torch/nn/functional.py:1743`. ferrotorch's
+        // `pub fn glu` lives in `grad_fns::activation`.
+        "glu" => Ok(Some({
+            let a = unary("glu")?;
+            let dim = args
+                .get(1)
+                .and_then(Value::as_i64)
+                .or_else(|| kwargs.get("dim").and_then(Value::as_i64))
+                .unwrap_or(-1);
+            grad_fns::activation::glu(&a, dim)?
+        })),
+
         _ => Ok(None),
     }
 }
@@ -2297,7 +2567,82 @@ fn dispatch_ops() -> &'static [&'static str] {
         "any",
         "all",
         "count_nonzero",
+        // Activation op cluster — wired 2026-05-26 to close umbrella #1338
+        // (runner arms for the 22 ops in `.design/ferrotorch-core/grad_fns/
+        // activation.md`'s `parity_ops` route field) + #1341 (the 4 fused-
+        // GradFn additions threshold/rrelu/celu/softmin). The bare names
+        // below are what the route's `parity_ops` field declares; the
+        // oracle alias map in `oracle_name()` translates them to the
+        // `nn.functional.<name>` form op_db uses for the non-top-level
+        // entries before each `oracle.sample` call.
+        "relu",
+        "relu6",
+        "leaky_relu",
+        "prelu",
+        "rrelu",
+        "elu",
+        "selu",
+        "celu",
+        "sigmoid",
+        "tanh",
+        "gelu",
+        "silu",
+        "mish",
+        "softmax",
+        "log_softmax",
+        "softmin",
+        "softplus",
+        "softsign",
+        "hardtanh",
+        "hardsigmoid",
+        "hardswish",
+        "threshold",
+        "glu",
     ]
+}
+
+/// Translate a bare op name (the form the route's `parity_ops` field uses
+/// and that flows through ferrotorch's `dispatch_f32` match arms) to the
+/// name the torch oracle exposes for `op_info.sample_inputs`.
+///
+/// Most activation ops live in `op_db` under `nn.functional.<name>` (e.g.
+/// `nn.functional.relu`, `nn.functional.gelu`); a handful (sigmoid / tanh /
+/// softmax / log_softmax) are registered at top level. Top-level
+/// `relu`-style names are NOT in op_db, so the alias must be applied before
+/// each `oracle.sample` call (closes the test-infrastructure half of
+/// umbrella blocker #1338).
+///
+/// Returns the input name unchanged for any op that's already at the
+/// oracle's canonical name.
+fn oracle_name(op: &str) -> &str {
+    match op {
+        // `nn.functional.*` aliased activations — see
+        // `.design/ferrotorch-core/grad_fns/activation.md` REQ table for
+        // the upstream entry points.
+        "relu" => "nn.functional.relu",
+        "relu6" => "nn.functional.relu6",
+        "leaky_relu" => "nn.functional.leaky_relu",
+        "prelu" => "nn.functional.prelu",
+        "rrelu" => "nn.functional.rrelu",
+        "elu" => "nn.functional.elu",
+        "selu" => "nn.functional.selu",
+        "celu" => "nn.functional.celu",
+        "gelu" => "nn.functional.gelu",
+        "silu" => "nn.functional.silu",
+        "mish" => "nn.functional.mish",
+        "softmin" => "nn.functional.softmin",
+        "softplus" => "nn.functional.softplus",
+        "softsign" => "nn.functional.softsign",
+        "hardtanh" => "nn.functional.hardtanh",
+        "hardsigmoid" => "nn.functional.hardsigmoid",
+        "hardswish" => "nn.functional.hardswish",
+        "threshold" => "nn.functional.threshold",
+        "glu" => "nn.functional.glu",
+        // Top-level oracle entries — pass through.
+        // `sigmoid` / `tanh` / `softmax` / `log_softmax` live in op_db at
+        // the top level (verified 2026-05-26 via `parity-sweep list-ops`).
+        other => other,
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -2751,12 +3096,19 @@ fn sweep_with_cap(
         op: op.to_string(),
         ..Default::default()
     };
+    // Translate bare ferrotorch op names (e.g. `relu`) to the oracle's
+    // canonical name (e.g. `nn.functional.relu`). See `oracle_name` for the
+    // alias map. The local `dispatch_f32` arms continue to match against
+    // `op` (bare) — the dispatch side is keyed by what the route's
+    // `parity_ops` field declares, the oracle side is keyed by what op_db
+    // registers. Closes the test-infrastructure half of umbrella #1338.
+    let oracle_op = oracle_name(op);
     for seed in 0..seeds {
         // op_db's sample_inputs yields a fixed list per (op, seed, dtype). We
         // walk it index-by-index until the oracle reports we've exhausted it
         // or we hit max_samples_per_seed (so sweep-all stays bounded).
         for i in 0..max_samples_per_seed {
-            let resp = oracle.sample(op, seed, i);
+            let resp = oracle.sample(oracle_op, seed, i);
             let resp = match resp {
                 Ok(r) => r,
                 Err(e) => {

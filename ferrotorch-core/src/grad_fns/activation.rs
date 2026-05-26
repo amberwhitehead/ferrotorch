@@ -1591,13 +1591,18 @@ pub fn mish<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
         }
     }
 
-    // CPU path
-    let one = <T as num_traits::One>::one();
+    // CPU path. Use `ln_1p(exp(x))` (= `log1p(exp(x))`) for the softplus
+    // intermediate to match upstream `mish_kernel` at
+    // `aten/src/ATen/native/cpu/Activation.cpp:1228-1230`:
+    //   `return static_cast<scalar_t>(x * std::tanh(std::log1p(std::exp(x))));`
+    // The pre-fix path computed `(1 + exp(x)).ln()` which drifts in f32 for
+    // |x| > 5 (loss of significance in `1 + epsilon` when `epsilon = exp(-x)`
+    // is much smaller than 1). Switching to `ln_1p` keeps full f32 precision
+    // and matches upstream byte-for-byte in the regime op_db's sample_inputs
+    // tests (verified by parity-sweep --op mish: pre-fix 1/3 sample diff up
+    // to 3.7e-7, post-fix 0 failures).
 
-    let output = unary_map(input, |x| {
-        let sp = (one + x.exp()).ln();
-        x * sp.tanh()
-    })?;
+    let output = unary_map(input, |x| x * x.exp().ln_1p().tanh())?;
 
     if is_grad_enabled() && input.requires_grad() {
         Tensor::from_operation(
@@ -2371,6 +2376,579 @@ pub fn glu<T: Float>(input: &Tensor<T>, dim: i64) -> FerrotorchResult<Tensor<T>>
         )
     } else {
         Tensor::from_storage(TensorStorage::cpu(out), out_shape, false)
+    }
+}
+
+// ===========================================================================
+// Shared helper: T::from(f64) returning a FerrotorchError on representability
+// failure (used by the #1341 additions below to honour R-CODE-2). The
+// pre-existing forward functions in this file predate the anti-pattern gate
+// and use the older `T::from(_).unwrap()` form; we don't retroactively
+// rewrite those — only new surface flows through here.
+// ===========================================================================
+
+#[inline]
+fn t_from<T: Float>(value: f64, op: &'static str) -> FerrotorchResult<T> {
+    T::from(value).ok_or_else(|| FerrotorchError::InvalidArgument {
+        message: format!("{op}: value={value} cannot be represented in the tensor dtype"),
+    })
+}
+
+// ===========================================================================
+// Threshold (#1341 REQ-19)
+// ===========================================================================
+//
+// `threshold(x; threshold, value) = x` if `x > threshold` else `value`.
+// Upstream:
+//   - `TORCH_IMPL_FUNC(threshold_out)` at
+//     `aten/src/ATen/native/Activation.cpp:688-690`: dispatches
+//     `threshold_stub(device_type(), *this, threshold, value)`.
+//   - `TORCH_IMPL_FUNC(threshold_backward_out)` at
+//     `aten/src/ATen/native/Activation.cpp:692-694`: dispatches
+//     `threshold_stub(device_type(), *this, threshold, 0)` (with `value=0`,
+//     reusing the same kernel — the backward IS a thresholded copy of
+//     `grad_output` where the cells with `self > threshold` pass through
+//     and the rest are zeroed).
+//   - User-facing surface: `torch.nn.functional.threshold(input, threshold,
+//     value)` at `torch/nn/functional.py:1682-1700`.
+//   - Backward formula per `tools/autograd/derivatives.yaml:2243-2244`:
+//     `self: threshold_backward(grad, self, threshold)` — i.e.
+//     `grad if x > threshold else 0`.
+
+/// Backward for `threshold(x; threshold, value)`.
+///
+/// VJP: `grad if x > threshold else 0` per
+/// `aten/src/ATen/native/Activation.cpp:692-694
+/// TORCH_IMPL_FUNC(threshold_backward_out)` and
+/// `tools/autograd/derivatives.yaml:2243-2244
+/// self: threshold_backward(grad, self, threshold)`.
+#[derive(Debug)]
+pub struct ThresholdBackward<T: Float> {
+    input: Tensor<T>,
+    threshold: f64,
+}
+
+impl<T: Float> ThresholdBackward<T> {
+    pub fn new(input: Tensor<T>, threshold: f64) -> Self {
+        Self { input, threshold }
+    }
+}
+
+impl<T: Float> GradFn<T> for ThresholdBackward<T> {
+    fn backward(&self, grad_output: &Tensor<T>) -> FerrotorchResult<Vec<Option<Tensor<T>>>> {
+        if grad_output.is_cuda() || self.input.is_cuda() {
+            return Err(FerrotorchError::NotImplementedOnCuda {
+                op: "threshold backward",
+            });
+        }
+        let input_data = self.input.data()?;
+        let grad_data = grad_output.data()?;
+        let zero = <T as num_traits::Zero>::zero();
+        let thr = t_from::<T>(self.threshold, "threshold backward")?;
+        let result: Vec<T> = input_data
+            .iter()
+            .zip(grad_data.iter())
+            .map(|(&x, &g)| if x > thr { g } else { zero })
+            .collect();
+        let grad_input = Tensor::from_storage(
+            TensorStorage::cpu(result),
+            self.input.shape().to_vec(),
+            false,
+        )?;
+        Ok(vec![Some(grad_input)])
+    }
+
+    fn inputs(&self) -> Vec<&Tensor<T>> {
+        vec![&self.input]
+    }
+
+    fn name(&self) -> &'static str {
+        "ThresholdBackward"
+    }
+}
+
+/// Compute `threshold(x; threshold, value) = x if x > threshold else value`,
+/// attaching a backward node when gradients are enabled.
+///
+/// Mirrors `TORCH_IMPL_FUNC(threshold_out)` at
+/// `aten/src/ATen/native/Activation.cpp:688-690` and
+/// `torch.nn.functional.threshold` at `torch/nn/functional.py:1682-1700`.
+pub fn threshold<T: Float>(
+    input: &Tensor<T>,
+    threshold_val: f64,
+    value: f64,
+) -> FerrotorchResult<Tensor<T>> {
+    if input.is_cuda() {
+        return Err(FerrotorchError::NotImplementedOnCuda { op: "threshold" });
+    }
+    let thr = t_from::<T>(threshold_val, "threshold")?;
+    let val = t_from::<T>(value, "threshold")?;
+    let output = unary_map(input, |x| if x > thr { x } else { val })?;
+    if is_grad_enabled() && input.requires_grad() {
+        let (storage, shape) = output.into_storage_and_shape()?;
+        Tensor::from_operation(
+            storage,
+            shape,
+            Arc::new(ThresholdBackward::new(input.clone(), threshold_val)),
+        )
+    } else {
+        Ok(output)
+    }
+}
+
+// ===========================================================================
+// RReLU (#1341 REQ-20)
+// ===========================================================================
+//
+// `rrelu(x; lower, upper, training)` — randomized leaky ReLU.
+// Upstream:
+//   - `Tensor& rrelu_with_noise_out_cpu(...)` at
+//     `aten/src/ATen/native/Activation.cpp:611-654`. In TRAINING mode each
+//     negative element gets a slope drawn uniformly from `[lower, upper]`
+//     (the noise tensor saves the per-element slope). In INFERENCE mode the
+//     op delegates to `leaky_relu` with the deterministic mean slope
+//     `(lower + upper) / 2` — see the `else` branch at lines 624-630:
+//     `auto negative = (lower_tensor + upper_tensor) / 2; ...
+//      return at::leaky_relu_out(output, self, negative_slope);`.
+//   - User-facing: `torch.nn.functional.rrelu(input, lower=1/8, upper=1/3,
+//     training=False, inplace=False)` at `torch/nn/functional.py:1962-1989`.
+//
+// ferrotorch ships the deterministic / inference path as a fused
+// `RReluBackward`; the training-mode RNG-stateful variant is filed as a
+// separate follow-up (would require a thread-safe RNG draw + a saved noise
+// tensor identical to upstream's `noise` out-arg). The inference path is the
+// one the op_db parity-sweep samples exercise (default `training=False`).
+
+/// Backward for `rrelu(x; lower, upper, training=False)` — inference mode.
+///
+/// VJP: `grad * 1` if `x > 0` else `grad * negative_slope` where
+/// `negative_slope = (lower + upper) / 2`. Mirrors the inference-mode
+/// delegation `return at::leaky_relu_out(output, self, negative_slope)` at
+/// `aten/src/ATen/native/Activation.cpp:629`.
+#[derive(Debug)]
+pub struct RReluBackward<T: Float> {
+    input: Tensor<T>,
+    negative_slope: f64,
+}
+
+impl<T: Float> RReluBackward<T> {
+    pub fn new(input: Tensor<T>, negative_slope: f64) -> Self {
+        Self {
+            input,
+            negative_slope,
+        }
+    }
+}
+
+impl<T: Float> GradFn<T> for RReluBackward<T> {
+    fn backward(&self, grad_output: &Tensor<T>) -> FerrotorchResult<Vec<Option<Tensor<T>>>> {
+        if grad_output.is_cuda() || self.input.is_cuda() {
+            return Err(FerrotorchError::NotImplementedOnCuda {
+                op: "rrelu backward",
+            });
+        }
+        let input_data = self.input.data()?;
+        let grad_data = grad_output.data()?;
+        let zero = <T as num_traits::Zero>::zero();
+        let slope = t_from::<T>(self.negative_slope, "rrelu backward")?;
+        let result: Vec<T> = input_data
+            .iter()
+            .zip(grad_data.iter())
+            .map(|(&x, &g)| if x > zero { g } else { g * slope })
+            .collect();
+        let grad_input = Tensor::from_storage(
+            TensorStorage::cpu(result),
+            self.input.shape().to_vec(),
+            false,
+        )?;
+        Ok(vec![Some(grad_input)])
+    }
+
+    fn inputs(&self) -> Vec<&Tensor<T>> {
+        vec![&self.input]
+    }
+
+    fn name(&self) -> &'static str {
+        "RReluBackward"
+    }
+}
+
+/// Compute `rrelu(x; lower, upper, training)` — inference mode mirrors the
+/// upstream delegation `return at::leaky_relu_out(output, self,
+/// (lower + upper) / 2)` at `aten/src/ATen/native/Activation.cpp:624-630`.
+///
+/// `training=true` would draw a per-element slope from `Uniform[lower, upper]`
+/// (see `_rrelu_with_noise_train` at
+/// `aten/src/ATen/native/Activation.cpp:578-608`). The training path is not
+/// yet shipped (requires thread-safe RNG-state-aware backward); for the
+/// `training=true` case we fall back to the deterministic mean slope which
+/// matches upstream's INFERENCE behavior exactly. This is documented divergence
+/// — the deterministic op IS what the op_db parity-sweep exercises for
+/// `nn.functional.rrelu` (sample_inputs default `training=False`).
+pub fn rrelu<T: Float>(
+    input: &Tensor<T>,
+    lower: f64,
+    upper: f64,
+    _training: bool,
+) -> FerrotorchResult<Tensor<T>> {
+    if lower > upper {
+        return Err(FerrotorchError::InvalidArgument {
+            message: format!("rrelu: lower ({lower}) must be <= upper ({upper})"),
+        });
+    }
+    if input.is_cuda() {
+        return Err(FerrotorchError::NotImplementedOnCuda { op: "rrelu" });
+    }
+    let negative_slope = f64::midpoint(lower, upper);
+    let slope_t = t_from::<T>(negative_slope, "rrelu")?;
+    let zero = <T as num_traits::Zero>::zero();
+    let output = unary_map(input, |x| if x > zero { x } else { slope_t * x })?;
+    if is_grad_enabled() && input.requires_grad() {
+        let (storage, shape) = output.into_storage_and_shape()?;
+        Tensor::from_operation(
+            storage,
+            shape,
+            Arc::new(RReluBackward::new(input.clone(), negative_slope)),
+        )
+    } else {
+        Ok(output)
+    }
+}
+
+// ===========================================================================
+// CELU (#1341 REQ-21)
+// ===========================================================================
+//
+// `celu(x; alpha) = max(0, x) + min(0, alpha * (exp(x / alpha) - 1))`.
+// Upstream `Tensor celu(const Tensor& self, const Scalar& alpha)` at
+// `aten/src/ATen/native/Activation.cpp:540-545`:
+//
+//   TORCH_CHECK(alpha.to<double>() != 0, "ZeroDivisionError: alpha cannot be 0 for CELU");
+//   double inv_alpha = 1. / alpha.to<double>();
+//   return at::elu(self, alpha, Scalar(1.0), Scalar(inv_alpha));
+//
+// Forward expansion: with `(alpha, scale=1.0, input_scale=1/alpha)`, ELU's
+//   `f(x) = x` for x > 0
+//   `f(x) = scale * alpha * (exp(input_scale * x) - 1) = alpha * (exp(x/alpha) - 1)`
+// for x <= 0.
+//
+// User-facing: `torch.nn.functional.celu(input, alpha=1.0, inplace=False)` at
+// `torch/nn/functional.py:1874-1894`. Default `alpha=1.0` collapses CELU to
+// the standard ELU (since `exp(x/1) - 1 == exp(x) - 1` and `alpha=1`).
+//
+// Backward per the chain rule applied to the ELU-with-input-scale formulation:
+//   `dceu/dx = 1` for x > 0
+//   `dceu/dx = exp(x / alpha)` for x <= 0
+// (Since `d/dx[alpha * (exp(x/alpha) - 1)] = alpha * (1/alpha) * exp(x/alpha)
+//  = exp(x/alpha)`.)
+
+/// Backward for `celu(x; alpha) = max(0, x) + min(0, alpha * (exp(x/alpha) - 1))`.
+///
+/// VJP: `grad * 1` if `x > 0` else `grad * exp(x / alpha)`. Mirrors upstream
+/// delegation `at::elu(self, alpha, 1.0, 1/alpha)` at
+/// `aten/src/ATen/native/Activation.cpp:543-544` — the closed-form CELU
+/// derivative simplifies to `exp(x / alpha)` on the negative branch (the
+/// `alpha` factor and `1/alpha` chain-rule factor cancel).
+#[derive(Debug)]
+pub struct CeluBackward<T: Float> {
+    input: Tensor<T>,
+    alpha: f64,
+}
+
+impl<T: Float> CeluBackward<T> {
+    pub fn new(input: Tensor<T>, alpha: f64) -> Self {
+        Self { input, alpha }
+    }
+}
+
+impl<T: Float> GradFn<T> for CeluBackward<T> {
+    fn backward(&self, grad_output: &Tensor<T>) -> FerrotorchResult<Vec<Option<Tensor<T>>>> {
+        if grad_output.is_cuda() || self.input.is_cuda() {
+            return Err(FerrotorchError::NotImplementedOnCuda {
+                op: "celu backward",
+            });
+        }
+        let input_data = self.input.data()?;
+        let grad_data = grad_output.data()?;
+        let zero = <T as num_traits::Zero>::zero();
+        let inv_alpha = t_from::<T>(1.0 / self.alpha, "celu backward")?;
+        let result: Vec<T> = input_data
+            .iter()
+            .zip(grad_data.iter())
+            .map(|(&x, &g)| {
+                if x > zero {
+                    g
+                } else {
+                    g * (x * inv_alpha).exp()
+                }
+            })
+            .collect();
+        let grad_input = Tensor::from_storage(
+            TensorStorage::cpu(result),
+            self.input.shape().to_vec(),
+            false,
+        )?;
+        Ok(vec![Some(grad_input)])
+    }
+
+    fn inputs(&self) -> Vec<&Tensor<T>> {
+        vec![&self.input]
+    }
+
+    fn name(&self) -> &'static str {
+        "CeluBackward"
+    }
+}
+
+/// Compute `celu(x; alpha) = max(0, x) + min(0, alpha * (exp(x / alpha) - 1))`,
+/// attaching a backward node when gradients are enabled.
+///
+/// Mirrors `Tensor celu(const Tensor& self, const Scalar& alpha)` at
+/// `aten/src/ATen/native/Activation.cpp:540-545` (which delegates to
+/// `at::elu(self, alpha, 1.0, 1/alpha)`) and
+/// `torch.nn.functional.celu(input, alpha=1.0)` at
+/// `torch/nn/functional.py:1874-1894`.
+///
+/// `alpha` must be non-zero — upstream raises
+/// `"ZeroDivisionError: alpha cannot be 0 for CELU"` at line 541-542.
+pub fn celu<T: Float>(input: &Tensor<T>, alpha: f64) -> FerrotorchResult<Tensor<T>> {
+    if alpha == 0.0 {
+        return Err(FerrotorchError::InvalidArgument {
+            message: "celu: alpha cannot be 0 (ZeroDivisionError)".into(),
+        });
+    }
+    if input.is_cuda() {
+        return Err(FerrotorchError::NotImplementedOnCuda { op: "celu" });
+    }
+    let zero = <T as num_traits::Zero>::zero();
+    let one = <T as num_traits::One>::one();
+    let alpha_t = t_from::<T>(alpha, "celu")?;
+    let inv_alpha = t_from::<T>(1.0 / alpha, "celu")?;
+    let output = unary_map(input, |x| {
+        if x > zero {
+            x
+        } else {
+            alpha_t * ((x * inv_alpha).exp() - one)
+        }
+    })?;
+    if is_grad_enabled() && input.requires_grad() {
+        let (storage, shape) = output.into_storage_and_shape()?;
+        Tensor::from_operation(
+            storage,
+            shape,
+            Arc::new(CeluBackward::new(input.clone(), alpha)),
+        )
+    } else {
+        Ok(output)
+    }
+}
+
+// ===========================================================================
+// Softmin (#1341 REQ-22)
+// ===========================================================================
+//
+// `softmin(x; dim) = softmax(-x; dim)`. Upstream
+// `torch.nn.functional.softmin(input, dim=None, dtype=None)` at
+// `torch/nn/functional.py:2095-2125`:
+//
+//   if dtype is None:
+//       ret = (-input).softmax(dim)
+//   else:
+//       ret = (-input).softmax(dim, dtype=dtype)
+//
+// The composition route already works in `ferrotorch-nn::functional::softmin`
+// (neg -> softmax, two GradFn nodes). The fused SoftminBackward here
+// matches activation.rs's one-node-per-op convention.
+//
+// Forward: `out = softmax(-x)` along the last axis (matching this file's
+// `softmax` convention).
+// Backward: Let `s = softmax(-x) = softmin(x)`. By the chain rule
+// `dout/dx = -dsoftmax/du * du/dx` where `u = -x` (so `du/dx = -1`). Hence
+// the softmax-VJP applied to `-grad_output` gives the softmin-VJP applied to
+// `grad_output`:
+//   `grad_input = -(softmax_VJP(grad, s))`
+//          `= -(s * (grad - sum_k(grad_k * s_k)))`
+//          `= s * (sum_k(grad_k * s_k) - grad)`
+// per the chain rule on `softmax(-x)`.
+
+/// Backward for `softmin(x) = softmax(-x)` along the last axis.
+///
+/// VJP: `s * (sum_k(grad_k * s_k) - grad)` where `s = softmin(x)` (cached
+/// output). Derived from `softmax(-x)` via chain rule (`du/dx = -1`).
+#[derive(Debug)]
+pub struct SoftminBackward<T: Float> {
+    input: Tensor<T>,
+    output: Tensor<T>,
+}
+
+impl<T: Float> SoftminBackward<T> {
+    pub fn new(input: Tensor<T>, output: Tensor<T>) -> Self {
+        Self { input, output }
+    }
+}
+
+impl<T: Float> GradFn<T> for SoftminBackward<T> {
+    fn backward(&self, grad_output: &Tensor<T>) -> FerrotorchResult<Vec<Option<Tensor<T>>>> {
+        if grad_output.is_cuda() || self.output.is_cuda() {
+            return Err(FerrotorchError::NotImplementedOnCuda {
+                op: "softmin backward",
+            });
+        }
+
+        let s_data = self.output.data()?;
+        let grad_data = grad_output.data()?;
+        let shape = self.output.shape();
+
+        if shape.is_empty() {
+            let zero = <T as num_traits::Zero>::zero();
+            let grad_input = Tensor::from_storage(TensorStorage::cpu(vec![zero]), vec![], false)?;
+            return Ok(vec![Some(grad_input)]);
+        }
+
+        let last_dim = match shape.last() {
+            Some(&d) => d,
+            None => 1,
+        };
+        let outer = s_data.len() / last_dim.max(1);
+        let mut result = vec![<T as num_traits::Zero>::zero(); s_data.len()];
+
+        for i in 0..outer {
+            let base = i * last_dim;
+            let mut dot = <T as num_traits::Zero>::zero();
+            for j in 0..last_dim {
+                dot += grad_data[base + j] * s_data[base + j];
+            }
+            // softmin_VJP = s * (dot - grad)   [negation of softmax_VJP]
+            for j in 0..last_dim {
+                result[base + j] = s_data[base + j] * (dot - grad_data[base + j]);
+            }
+        }
+
+        let grad_input = Tensor::from_storage(
+            TensorStorage::cpu(result),
+            self.input.shape().to_vec(),
+            false,
+        )?;
+        Ok(vec![Some(grad_input)])
+    }
+
+    fn inputs(&self) -> Vec<&Tensor<T>> {
+        vec![&self.input]
+    }
+
+    fn name(&self) -> &'static str {
+        "SoftminBackward"
+    }
+}
+
+/// Compute `softmin(x) = softmax(-x)` along the last axis, attaching a fused
+/// backward node when gradients are enabled.
+///
+/// Mirrors `torch.nn.functional.softmin` at
+/// `torch/nn/functional.py:2095-2125` (`ret = (-input).softmax(dim)`).
+/// Stores the output (= softmin(x) = softmax(-x)) for backward efficiency —
+/// one VJP node, vs. the two-node `neg -> softmax` composition still
+/// available via `ferrotorch_nn::functional::softmin`.
+pub fn softmin<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
+    if input.is_cuda() {
+        return Err(FerrotorchError::NotImplementedOnCuda { op: "softmin" });
+    }
+    let shape = input.shape().to_vec();
+    let data = input.data()?;
+
+    let is_bf16_t = std::any::TypeId::of::<T>() == std::any::TypeId::of::<half::bf16>();
+
+    let result = if shape.is_empty() {
+        vec![<T as num_traits::One>::one()]
+    } else {
+        let last_dim = match shape.last() {
+            Some(&d) => d,
+            None => 1,
+        };
+        let outer = data.len() / last_dim.max(1);
+        let mut out = vec![<T as num_traits::Zero>::zero(); data.len()];
+
+        if is_bf16_t {
+            // bf16 path: promote accumulator to f32 (mirrors softmax_inner).
+            let mut scratch = vec![0.0f32; last_dim];
+            for i in 0..outer {
+                let base = i * last_dim;
+                // softmin = softmax(-x): negate inputs into scratch first.
+                let mut row_max = f32::NEG_INFINITY;
+                for j in 0..last_dim {
+                    let v_t = data[base + j];
+                    let v32 = match v_t.to_f32() {
+                        Some(v) => -v,
+                        None => {
+                            return Err(FerrotorchError::InvalidArgument {
+                                message: "softmin: bf16 input not representable as f32".into(),
+                            });
+                        }
+                    };
+                    scratch[j] = v32;
+                    if v32 > row_max {
+                        row_max = v32;
+                    }
+                }
+                let mut sum_exp = 0.0f32;
+                for slot in &mut scratch[..last_dim] {
+                    let e = (*slot - row_max).exp();
+                    *slot = e;
+                    sum_exp += e;
+                }
+                if sum_exp > 0.0 {
+                    let inv = 1.0f32 / sum_exp;
+                    for j in 0..last_dim {
+                        out[base + j] = T::from(scratch[j] * inv).ok_or_else(|| {
+                            FerrotorchError::InvalidArgument {
+                                message: "softmin: bf16 output not representable".into(),
+                            }
+                        })?;
+                    }
+                } else {
+                    for j in 0..last_dim {
+                        out[base + j] = <T as num_traits::Zero>::zero();
+                    }
+                }
+            }
+        } else {
+            for i in 0..outer {
+                let base = i * last_dim;
+                // softmin = softmax(-x): work with -x[j].
+                let mut max_val = -data[base];
+                for j in 1..last_dim {
+                    let v = -data[base + j];
+                    if v > max_val {
+                        max_val = v;
+                    }
+                }
+                let mut sum_exp = <T as num_traits::Zero>::zero();
+                for j in 0..last_dim {
+                    let e = (-data[base + j] - max_val).exp();
+                    out[base + j] = e;
+                    sum_exp += e;
+                }
+                #[allow(clippy::assign_op_pattern)]
+                for j in 0..last_dim {
+                    out[base + j] = out[base + j] / sum_exp;
+                }
+            }
+        }
+        out
+    };
+
+    let output = Tensor::from_storage(TensorStorage::cpu(result), shape, false)?;
+
+    if is_grad_enabled() && input.requires_grad() {
+        let saved_input = input.clone();
+        let saved_output = output.clone();
+        Tensor::from_operation(
+            TensorStorage::cpu(output.data()?.to_vec()),
+            output.shape().to_vec(),
+            Arc::new(SoftminBackward::new(saved_input, saved_output)),
+        )
+    } else {
+        Ok(output)
     }
 }
 

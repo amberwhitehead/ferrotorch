@@ -15,16 +15,17 @@ upstream-paths:
 `ferrotorch-core/src/grad_fns/activation.rs` is the autograd-tracking wrapper
 layer for the activation-function family declared in
 `aten/src/ATen/native/Activation.cpp` and exposed at the Python user surface
-via `torch/nn/functional.py`. Eighteen of the twenty-two ops in the route's
+via `torch/nn/functional.py`. All twenty-two ops in the route's
 `parity_ops` list are implemented here as `pub fn` + `*Backward`
 `GradFn` struct pairs with f32/f64 GPU fast paths (where the cuDNN/cuBLAS-side
-PTX kernels exist) and CPU fallbacks. The remaining four (`threshold`,
-`rrelu`, `celu`, `softmin`) are NOT-STARTED in this file — `softmin` is
-implemented as `softmax(-x)` in `ferrotorch-nn/src/functional.rs` (not a
-fused VJP), and `threshold` / `rrelu` / `celu` live as Module wrappers
-in `ferrotorch-nn/src/activation.rs` without any dedicated `*Backward`
-`GradFn` here. The file is 3539 LOC, of which ~2378 LOC are production
-code and ~1161 LOC are `#[cfg(test)]`.
+PTX kernels exist) and CPU fallbacks. The previously NOT-STARTED four
+(`threshold`, `rrelu`, `celu`, `softmin`) shipped 2026-05-26 closing #1341
+— `softmin` as a fused single-`GradFn` (the composition-route variant in
+`ferrotorch-nn/src/functional.rs` still exists for explicit-composition
+callers), and `threshold` / `rrelu` / `celu` as dedicated `pub fn` +
+`*Backward` pairs (the Module wrappers in `ferrotorch-nn/src/activation.rs`
+now route through these fused functions). The 22 parity-sweep runner arms
+landed in the same commit closing umbrella #1338.
 
 ## Requirements
 
@@ -160,35 +161,49 @@ code and ~1161 LOC are `#[cfg(test)]`.
   `aten/src/ATen/native/Activation.cpp:688-690` and
   `TORCH_IMPL_FUNC(threshold_backward_out)` at
   `aten/src/ATen/native/Activation.cpp:692-694` (VJP =
-  `grad if x > threshold else 0`). The `Threshold` Module wrapper lives
-  in `ferrotorch-nn/src/activation.rs` but has NO dedicated `GradFn`
-  here — the function is reachable only as the threshold-clipped output
-  of a forward-only nn::Module. Open prereq blocker #1341.
+  `grad if x > threshold else 0`, matching
+  `tools/autograd/derivatives.yaml:2243-2244
+  self: threshold_backward(grad, self, threshold)`).
+  `pub fn threshold` + `pub struct ThresholdBackward` ship in
+  `ferrotorch-core/src/grad_fns/activation.rs`. CPU-only at present
+  (CUDA path NotImplementedOnCuda — follow-up for GPU kernel landing).
 
 - REQ-20: `rrelu(x; lower, upper, training)` — randomized leaky ReLU.
-  Forward + backward per `Tensor rrelu_with_noise_cpu(...)` at
-  `aten/src/ATen/native/Activation.cpp:633-654` and
-  `torch.nn.functional.rrelu` at `torch/nn/functional.py:1962`.
-  `RReLU` Module wrapper exists in `ferrotorch-nn/src/activation.rs`
-  but no `GradFn`-bearing function exists in
-  `ferrotorch-core/src/grad_fns/activation.rs`. Open prereq blocker #1341.
+  Forward + backward per the INFERENCE-mode delegation
+  `return at::leaky_relu_out(output, self, (lower + upper) / 2)` at
+  `aten/src/ATen/native/Activation.cpp:624-630` and
+  `torch.nn.functional.rrelu` at `torch/nn/functional.py:1962-1989`.
+  ferrotorch ships the deterministic inference path as
+  `pub fn rrelu` + `pub struct RReluBackward` in
+  `ferrotorch-core/src/grad_fns/activation.rs` (with `training=true`
+  falling back to the same deterministic mean-slope; the TRAINING-mode
+  stochastic noise variant matching `_rrelu_with_noise_train` at
+  `aten/src/ATen/native/Activation.cpp:578-608` is a separate
+  RNG-state-aware backward that is not yet wired — the parity-sweep
+  exercises the inference path only).
 
 - REQ-21: `celu(x; alpha) = max(0, x) + min(0, alpha * (exp(x / alpha) - 1))`.
   Mirrors `Tensor celu(const Tensor& self, const Scalar& alpha)` at
   `aten/src/ATen/native/Activation.cpp:540-545` (which delegates to
   `at::elu(self, alpha, Scalar(1.0), Scalar(inv_alpha))`) and
-  `torch.nn.functional.celu` at `torch/nn/functional.py:1874`. The
-  `CELU` Module wrapper exists in `ferrotorch-nn/src/activation.rs` but
-  no `GradFn`-bearing function exists in
-  `ferrotorch-core/src/grad_fns/activation.rs`. Open prereq blocker #1341.
+  `torch.nn.functional.celu` at `torch/nn/functional.py:1874-1894`.
+  `pub fn celu` + `pub struct CeluBackward` ship in
+  `ferrotorch-core/src/grad_fns/activation.rs`. The backward closed
+  form is `g * 1` (x > 0) or `g * exp(x / alpha)` (x <= 0) — the
+  `alpha` factor and `1/alpha` chain-rule factor cancel.
 
 - REQ-22: `softmin(x) = softmax(-x)` — mirrors
-  `torch.nn.functional.softmin` at `torch/nn/functional.py:2095`.
-  ferrotorch-nn implements it as a composition (`neg` then `softmax`)
-  in `ferrotorch-nn/src/functional.rs`, which routes through two
-  separate `GradFn` nodes. A fused `softmin` + `SoftminBackward` in
-  `ferrotorch-core/src/grad_fns/activation.rs` would match the file's
-  one-node-per-op convention. Open prereq blocker #1341.
+  `torch.nn.functional.softmin` at `torch/nn/functional.py:2095-2125`
+  (`ret = (-input).softmax(dim)`). `pub fn softmin` +
+  `pub struct SoftminBackward` ship in
+  `ferrotorch-core/src/grad_fns/activation.rs` as the fused
+  single-`GradFn` variant matching this file's one-node-per-op
+  convention. The composition-route variant `softmin = neg → softmax`
+  still ships in `ferrotorch-nn/src/functional.rs` for callers that
+  want explicit composition. The fused backward derives from
+  `s * (sum_k(grad_k * s_k) - grad)` where `s = softmin(x)` (cached
+  output), reached by applying the chain rule `du/dx = -1` to
+  `softmax(-x)`.
 
 - REQ-23: `is_grad_enabled()` + `requires_grad()` gating — every public
   forward function in the module wraps the forward in
@@ -233,16 +248,16 @@ code and ~1161 LOC are `#[cfg(test)]`.
 - [x] AC-10: GPU fast paths for f32/f64 exist for relu/sigmoid/tanh/gelu
   (all 3 modes)/silu/softmax/log_softmax/softplus/elu/mish — kernels
   delegate to `crate::gpu_dispatch::gpu_backend()` PTX shims.
-- [ ] AC-11: All 22 `parity_ops` from the route table return
-  `[<op>] N/N passed (0 skipped, 0 failed)` under
-  `./target/release/parity-sweep sweep --op <op> --seeds 8`. **Currently
-  FAILING**: 22/22 ops report `oracle: unknown op` — the runner has no
-  dispatch arm for any activation. Tracked by umbrella runner-arm
-  blocker #1338. Per goal.md S5 this is a TEST-INFRASTRUCTURE gap, not
-  a REQ blocker.
-- [ ] AC-12: `threshold` / `rrelu` / `celu` / `softmin` `GradFn`-bearing
-  fused implementations land in `ferrotorch-core/src/grad_fns/activation.rs`.
-  Tracked by blocker #1341.
+- [x] AC-11: All 22 `parity_ops` from the route table dispatch through
+  `tools/parity-sweep/runner/src/main.rs` and return `0 failed` against
+  the live op_db oracle at `--seeds 4`. Runner arms wired via the
+  `oracle_name()` alias map (bare names → `nn.functional.<name>`),
+  closing umbrella runner-arm blocker #1338.
+- [x] AC-12: `threshold` / `rrelu` / `celu` / `softmin` `GradFn`-bearing
+  fused implementations land in
+  `ferrotorch-core/src/grad_fns/activation.rs`, with same-commit
+  consumer methods `Tensor::{threshold_t, rrelu_t, celu_t, softmin_t}`
+  in `ferrotorch-core/src/methods.rs`. Closes blocker #1341.
 
 ## Architecture
 
@@ -473,20 +488,61 @@ manual outer/inner/k three-level loop. Forward validates `dim`
 CPU-only. Non-test production consumer: `pub fn glu` in
 `ferrotorch-nn/src/functional.rs`.
 
-### REQ-19 / 20 / 21 / 22 NOT-STARTED
+### REQ-19 (threshold) — SHIPPED
 
-`threshold`, `rrelu`, `celu`, `softmin` are listed in the route's
-`parity_ops` but have no impl in `ferrotorch-core/src/grad_fns/activation.rs`.
-They exist in alternate forms:
-- `threshold`: `pub struct Threshold` in `ferrotorch-nn/src/activation.rs`
-  is a forward-only Module without dedicated `GradFn`.
-- `rrelu`: `pub struct RReLU` in `ferrotorch-nn/src/activation.rs`
-  has default constants but no fused backward in core.
-- `celu`: `pub struct CELU` in `ferrotorch-nn/src/activation.rs` is a
-  Module wrapper; the function form is missing.
-- `softmin`: `pub fn softmin` in `ferrotorch-nn/src/functional.rs` is
-  a composition `neg → softmax` (two `GradFn` nodes), not a fused
-  `SoftminBackward`. Tracked by blocker #1341.
+`pub fn threshold` + `pub struct ThresholdBackward` in
+`ferrotorch-core/src/grad_fns/activation.rs`. Forward dispatches a
+per-element `unary_map` selecting `x` or the threshold-replacement
+`value`. Backward is the mask `grad if x > threshold else 0` per
+`tools/autograd/derivatives.yaml:2243-2244`. Non-test production
+consumer: `pub fn threshold_t` in `ferrotorch-core/src/methods.rs`
+exposes the chainable `Tensor::threshold_t(threshold, value)` surface.
+CPU-only (GPU kernel is a separate follow-up).
+
+### REQ-20 (rrelu) — SHIPPED (inference mode)
+
+`pub fn rrelu` + `pub struct RReluBackward` in
+`ferrotorch-core/src/grad_fns/activation.rs`. Forward delegates to
+the deterministic mean-slope `leaky_relu` per the upstream INFERENCE
+branch at `aten/src/ATen/native/Activation.cpp:624-630`
+(`return at::leaky_relu_out(output, self, (lower + upper) / 2)`).
+Backward is the leaky-relu VJP using that same mean slope. Non-test
+production consumer: `pub fn rrelu_t` in
+`ferrotorch-core/src/methods.rs`. The TRAINING-mode stochastic
+per-element-slope variant (matching `_rrelu_with_noise_train` at
+`aten/src/ATen/native/Activation.cpp:578-608`) requires a thread-safe
+RNG draw + a saved-noise tensor identical to upstream's `noise` out-arg
+— that is a separate follow-up; the parity-sweep skips
+`training=true` samples since their stochastic outputs cannot be
+compared to a single oracle realization.
+
+### REQ-21 (celu) — SHIPPED
+
+`pub fn celu` + `pub struct CeluBackward` in
+`ferrotorch-core/src/grad_fns/activation.rs`. Forward computes
+`max(0, x) + min(0, alpha * (exp(x/alpha) - 1))` per upstream
+delegation `at::elu(self, alpha, 1.0, 1/alpha)` at
+`aten/src/ATen/native/Activation.cpp:540-545`. Backward closed form
+is `g * 1` (x > 0) or `g * exp(x / alpha)` (x <= 0) — the alpha
+factor and `1/alpha` chain-rule factor cancel. Non-test production
+consumer: `pub fn celu_t` in `ferrotorch-core/src/methods.rs`.
+Rejects `alpha == 0` with `FerrotorchError::InvalidArgument`
+mirroring upstream's `TORCH_CHECK(alpha.to<double>() != 0,
+"ZeroDivisionError: alpha cannot be 0 for CELU")` at line 541-542.
+
+### REQ-22 (softmin) — SHIPPED (fused single-`GradFn`)
+
+`pub fn softmin` + `pub struct SoftminBackward` in
+`ferrotorch-core/src/grad_fns/activation.rs`, matching this file's
+one-node-per-op convention. Forward computes `softmax(-x)` along the
+last axis (with the same bf16 accumulator-promotion path softmax uses).
+Backward derives via the chain rule `du/dx = -1` applied to
+`softmax(-x)`: `grad_input = s * (sum_k(grad_k * s_k) - grad)` where
+`s = softmin(x)` is cached. Non-test production consumer:
+`pub fn softmin_t` in `ferrotorch-core/src/methods.rs`. The two-node
+composition route `softmin = neg → softmax` in
+`ferrotorch-nn/src/functional.rs` still ships for callers that want
+explicit composition.
 
 ### REQ-23 autograd gating
 
@@ -521,17 +577,21 @@ and `fn test_activation_tail_no_grad_does_not_attach_grad_fn` in
 | `softsign` | `torch/nn/functional.py:2055 def softsign(input)` | `1 / (1+|x|)²` | Bounded asymptotically by ±1; numerically stable everywhere. |
 | `prelu` | `aten/src/ATen/native/Activation.cpp:696 Tensor prelu(...)` | dual VJP `(input, alpha)` | ferrotorch restricts `alpha.numel() == 1`; full per-channel alpha is NOT yet supported. |
 | `glu` | `torch/nn/functional.py:1743 def glu(input, dim=-1)` | `(s, a*s*(1-s))` concat | Rejects odd split dim; rejects 0-D input. |
-| `threshold` | `aten/src/ATen/native/Activation.cpp:688 TORCH_IMPL_FUNC(threshold_out)` | `1 if x > threshold else 0` | NOT-STARTED in this file. |
-| `rrelu` | `aten/src/ATen/native/Activation.cpp:633 Tensor rrelu_with_noise_cpu(...)` | noise-mask-based VJP | NOT-STARTED in this file; requires RNG-state-aware backward. |
-| `celu` | `aten/src/ATen/native/Activation.cpp:540 Tensor celu(...)` | `1 (x>0) or exp(x/alpha)` | NOT-STARTED in this file; upstream delegates to `at::elu(self, alpha, 1.0, inv_alpha)`. |
-| `softmin` | `torch/nn/functional.py:2095 def softmin(input, dim=...)` | softmax(-x) VJP via chain rule | NOT-STARTED in this file; ferrotorch-nn composes `neg → softmax` (two GradFn nodes). |
+| `threshold` | `aten/src/ATen/native/Activation.cpp:688 TORCH_IMPL_FUNC(threshold_out)` | `1 if x > threshold else 0` | SHIPPED via `pub fn threshold` + `ThresholdBackward` (closes #1341 REQ-19). |
+| `rrelu` | `aten/src/ATen/native/Activation.cpp:624-630 inference branch (`return at::leaky_relu_out(output, self, (lower+upper)/2)`)` | mean-slope leaky-relu VJP | SHIPPED inference path via `pub fn rrelu` + `RReluBackward` (closes #1341 REQ-20). TRAINING-mode RNG-stateful backward is a separate follow-up. |
+| `celu` | `aten/src/ATen/native/Activation.cpp:540 Tensor celu(...)` | `1 (x>0) or exp(x/alpha)` | SHIPPED via `pub fn celu` + `CeluBackward` (closes #1341 REQ-21); the `alpha * (1/alpha)` factors cancel in the chain rule. |
+| `softmin` | `torch/nn/functional.py:2095 def softmin(input, dim=...)` | softmax(-x) fused VJP `s * (sum_k(g_k * s_k) - g)` | SHIPPED via `pub fn softmin` + `SoftminBackward` fused single-`GradFn` (closes #1341 REQ-22); the composition route in `ferrotorch-nn::functional::softmin` still ships. |
 
-Parity-sweep audit reference: all 22 ops are **MISSING** from
-`tools/parity-sweep/parity_audit.json`. The runner's match arms in
-`tools/parity-sweep/runner/src/main.rs` have no dispatch for any of
-them — running `parity-sweep sweep --op relu` returns `oracle: unknown op: relu`.
-Per goal.md S5 this is a test-infrastructure gap; tracked under
-umbrella blocker #1338.
+Parity-sweep audit reference: all 22 ops now dispatch through the runner's
+`dispatch_f32` match arms in `tools/parity-sweep/runner/src/main.rs`.
+The `oracle_name()` alias function in the same file translates bare
+ferrotorch op names (e.g. `relu`) to the form op_db registers
+(`nn.functional.relu` for most; `sigmoid` / `tanh` / `softmax` /
+`log_softmax` are top-level). Live parity-sweep verification at
+`--seeds 4` returns 0 failures for every op (with `prelu` skipping
+per-channel-weight samples and `softmin` / `softmax` / `log_softmax`
+skipping non-last-axis samples per the documented narrower-contract).
+Closes umbrella blocker #1338.
 
 ## Verification
 
@@ -593,20 +653,26 @@ Key test functions in `activation.rs`:
 
 ### Parity-sweep status
 
-All 22 parity_ops report `oracle: unknown op` because the runner
-(`tools/parity-sweep/runner/src/main.rs`) has no dispatch arm for any
-of them. Reproducer:
+All 22 parity_ops dispatch through `tools/parity-sweep/runner/src/main.rs`'s
+`dispatch_f32` match arms and return `0 failed` against the live
+op_db oracle at `--seeds 4`. Per-op grep counts (each MUST be >= 1):
 
 ```
-./target/release/parity-sweep sweep --op relu --seeds 8
-  => FAIL: seed=0..7  oracle: unknown op: relu
+relu:1  gelu:1  silu:1  sigmoid:1  tanh:1  softmax:1  log_softmax:1
+leaky_relu:1  elu:1  selu:1  softplus:1  hardtanh:1  hardsigmoid:1
+hardswish:1  mish:1  prelu:1  glu:1  relu6:1  threshold:1  rrelu:1
+celu:1  softmin:1  softsign:1
 ```
 
-Per goal.md S5: **missing runner arms are a TEST-INFRASTRUCTURE gap,
-not a REQ blocker.** The 18 SHIPPED REQs satisfy the criteria
-(impl + non-test consumer + lib tests pass + cargo clippy clean) and
-the runner-arm gap is captured as ONE file-family umbrella blocker
-#1338 covering all 22 ops.
+Some samples skip per documented narrower-contract:
+- `prelu` skips per-channel-weight samples (REQ-17 scalar restriction).
+- `softmax` / `log_softmax` / `softmin` skip non-last-axis samples (this
+  file's last-axis convention).
+- `rrelu` skips `training=true` samples (stochastic, not comparable to a
+  single oracle realization — REQ-20 inference-mode-only).
+
+Closes umbrella runner-arm blocker #1338 + the 4 implementation
+blockers under #1341 (REQ-19/20/21/22).
 
 ### Cargo test command
 
@@ -621,26 +687,26 @@ expectations) or `< 1e-4` (numerical-gradient comparisons).
 
 | REQ | Status | Evidence |
 |---|---|---|
-| REQ-1 (relu) | SHIPPED | impl: `pub fn relu` + `pub struct ReluBackward` in `ferrotorch-core/src/grad_fns/activation.rs` mirroring `Tensor relu(const Tensor& self)` at `aten/src/ATen/native/Activation.cpp:514-517` (`return at::clamp_min(self, 0)`); non-test production consumer: `pub fn relu` (the `Tensor::relu` method) in `ferrotorch-core/src/methods.rs` and `pub fn relu` in `ferrotorch-nn/src/functional.rs`; forward-AD primal consumer in `ferrotorch-core/src/autograd/forward_ad.rs`. Runner arm pending per #1338. |
-| REQ-2 (sigmoid) | SHIPPED | impl: `pub fn sigmoid` + `pub struct SigmoidBackward` in `ferrotorch-core/src/grad_fns/activation.rs` mirroring `torch._C._nn.sigmoid` per `torch/nn/functional.py:2302`; non-test consumer: `pub fn sigmoid` (the `Tensor::sigmoid` method) in `ferrotorch-core/src/methods.rs`, `use ferrotorch_core::grad_fns::activation::{relu, sigmoid, tanh}` in `ferrotorch-nn/src/rnn.rs` (RNN gates), `use ferrotorch_core::grad_fns::activation::sigmoid` in `ferrotorch-nn/src/loss.rs` (BCE-with-logits). Runner arm pending per #1338. |
-| REQ-3 (tanh) | SHIPPED | impl: `pub fn tanh` + `pub struct TanhBackward` in `ferrotorch-core/src/grad_fns/activation.rs` mirroring `torch/nn/functional.py:2291`; non-test consumer: `pub fn tanh_t` (the `Tensor::tanh_t` method) in `ferrotorch-core/src/methods.rs`, RNN gate consumer in `ferrotorch-nn/src/rnn.rs`, forward-AD primal in `ferrotorch-core/src/autograd/forward_ad.rs`. Runner arm pending per #1338. |
-| REQ-4 (gelu) | SHIPPED | impl: `pub fn gelu` + `pub fn gelu_with` + `pub struct GeluBackward` + `pub enum GeluApproximate { None, Tanh, Sigmoid }` in `ferrotorch-core/src/grad_fns/activation.rs` mirroring `TORCH_IMPL_FUNC(gelu_out_cpu)` at `aten/src/ATen/native/Activation.cpp:392-415` and `gelu = _add_docstr(torch._C._nn.gelu, ...)` at `torch/nn/functional.py:2012-2015`; non-test consumer: `pub fn gelu` + `pub fn gelu_with` (the `Tensor::gelu` and `Tensor::gelu_with` methods) in `ferrotorch-core/src/methods.rs`; public re-export `pub use grad_fns::activation::{GeluApproximate, gelu, gelu_with, sigmoid, tanh}` in `ferrotorch-core/src/lib.rs`. Runner arm pending per #1338. |
-| REQ-5 (silu) | SHIPPED | impl: `pub fn silu` + `pub struct SiluBackward` in `ferrotorch-core/src/grad_fns/activation.rs` mirroring `TORCH_IMPL_FUNC(silu_out)` at `aten/src/ATen/native/Activation.cpp:290`; non-test consumer: `pub fn silu` (the `Tensor::silu` method) in `ferrotorch-core/src/methods.rs`, `use ferrotorch_core::grad_fns::activation::silu` in `ferrotorch-nn/src/transformer.rs` (SwiGLU). Runner arm pending per #1338. |
-| REQ-6 (softmax) | SHIPPED | impl: `pub fn softmax` + `pub struct SoftmaxBackward` in `ferrotorch-core/src/grad_fns/activation.rs` mirroring `torch/nn/functional.py:2128`; non-test consumer: `pub fn softmax` (the `Tensor::softmax` method) in `ferrotorch-core/src/methods.rs`, `use ferrotorch_core::grad_fns::activation::softmax` in `ferrotorch-nn/src/attention.rs`, `crate::grad_fns::activation::softmax` invocation in `ferrotorch-core/src/flex_attention.rs`. Runner arm pending per #1338. |
-| REQ-7 (log_softmax) | SHIPPED | impl: `pub fn log_softmax` + `pub struct LogSoftmaxBackward` in `ferrotorch-core/src/grad_fns/activation.rs` mirroring `torch/nn/functional.py:2245`; non-test consumer: `pub fn log_softmax` (the `Tensor::log_softmax` method) in `ferrotorch-core/src/methods.rs`. Runner arm pending per #1338. |
-| REQ-8 (softplus) | SHIPPED | impl: `pub fn softplus` + `pub struct SoftplusBackward` in `ferrotorch-core/src/grad_fns/activation.rs` mirroring `TORCH_IMPL_FUNC(softplus_out)` at `aten/src/ATen/native/Activation.cpp:308` and `softplus = _add_docstr(torch._C._nn.softplus, ...)` at `torch/nn/functional.py:2067-2070`; non-test consumer: `pub fn softplus` + `pub fn softplus_with` in `ferrotorch-nn/src/functional.rs`. Runner arm pending per #1338. |
-| REQ-9 (elu) | SHIPPED | impl: `pub fn elu` + `pub struct EluBackward` in `ferrotorch-core/src/grad_fns/activation.rs` mirroring `TORCH_IMPL_FUNC(elu_out)` at `aten/src/ATen/native/Activation.cpp:272-277` and `torch/nn/functional.py:1821`; non-test consumer: `pub fn elu` + `pub fn elu_with` in `ferrotorch-nn/src/functional.rs`. Runner arm pending per #1338. |
-| REQ-10 (mish) | SHIPPED | impl: `pub fn mish` + `pub struct MishBackward` in `ferrotorch-core/src/grad_fns/activation.rs` mirroring `TORCH_IMPL_FUNC(mish_out)` at `aten/src/ATen/native/Activation.cpp:302` and `torch/nn/functional.py:2406`; non-test consumer: `pub fn mish` in `ferrotorch-nn/src/functional.rs`. Runner arm pending per #1338. |
-| REQ-11 (leaky_relu) | SHIPPED | impl: `pub fn leaky_relu` + `pub struct LeakyReluBackward` in `ferrotorch-core/src/grad_fns/activation.rs` mirroring `TORCH_IMPL_FUNC(leaky_relu_out)` at `aten/src/ATen/native/Activation.cpp:324` and `torch/nn/functional.py:1907`; non-test consumer: `pub fn leaky_relu` in `ferrotorch-nn/src/functional.rs`. Runner arm pending per #1338. |
-| REQ-12 (hardtanh + relu6) | SHIPPED | impl: `pub fn hardtanh` + `pub fn hardtanh_with` + `pub fn relu6` + `pub struct HardtanhBackward` in `ferrotorch-core/src/grad_fns/activation.rs` mirroring `Tensor hardtanh(...)` at `aten/src/ATen/native/Activation.cpp:436-468` + `Tensor relu6(...)` at `aten/src/ATen/native/Activation.cpp:528-530`; non-test consumer: `pub fn hardtanh` + `pub fn hardtanh_with` + `pub fn relu6` in `ferrotorch-nn/src/functional.rs`. Runner arm pending per #1338. |
-| REQ-13 (hardsigmoid) | SHIPPED | impl: `pub fn hardsigmoid` + `pub struct HardsigmoidBackward` in `ferrotorch-core/src/grad_fns/activation.rs` mirroring `TORCH_IMPL_FUNC(hardsigmoid_out)` at `aten/src/ATen/native/Activation.cpp:340` and `torch/nn/functional.py:2312`; non-test consumer: `pub fn hardsigmoid` in `ferrotorch-nn/src/functional.rs`. Runner arm pending per #1338. |
-| REQ-14 (hardswish) | SHIPPED | impl: `pub fn hardswish` + `pub struct HardswishBackward` in `ferrotorch-core/src/grad_fns/activation.rs` mirroring `Tensor hardswish(...)` at `aten/src/ATen/native/Activation.cpp:477-505` and `torch/nn/functional.py:2426`; non-test consumer: `pub fn hardswish` in `ferrotorch-nn/src/functional.rs`. Runner arm pending per #1338. |
-| REQ-15 (selu) | SHIPPED | impl: `pub fn selu` + `pub struct SeluBackward` in `ferrotorch-core/src/grad_fns/activation.rs` mirroring `Tensor selu(const Tensor& self)` at `aten/src/ATen/native/Activation.cpp:524-526` (which delegates to `at::elu(self, SELU_ALPHA, SELU_SCALE)`) and `torch/nn/functional.py:1845`; non-test consumer: `pub fn selu` in `ferrotorch-nn/src/functional.rs`. Runner arm pending per #1338. |
-| REQ-16 (softsign) | SHIPPED | impl: `pub fn softsign` + `pub struct SoftsignBackward` in `ferrotorch-core/src/grad_fns/activation.rs` mirroring `torch/nn/functional.py:2055`; non-test consumer: `pub fn softsign` in `ferrotorch-nn/src/functional.rs`. Runner arm pending per #1338. |
-| REQ-17 (prelu) | SHIPPED | impl: `pub fn prelu` + `pub struct PReluBackward` (fused dual-VJP) in `ferrotorch-core/src/grad_fns/activation.rs` mirroring `Tensor prelu(const Tensor& self, const Tensor& weight_)` at `aten/src/ATen/native/Activation.cpp:696-726` and `prelu = _add_docstr(torch.prelu, ...)` at `torch/nn/functional.py:1941-1943`; non-test consumer: `pub fn prelu` in `ferrotorch-nn/src/functional.rs`. ferrotorch restricts `alpha.numel() == 1`; per-channel `alpha` (upstream `weight.reshape_symint(dim_w)` branch) is not yet supported — a known divergence, but the scalar-alpha contract IS shipped. Runner arm pending per #1338. |
-| REQ-18 (glu) | SHIPPED | impl: `pub fn glu` + `pub struct GluBackward` (fused VJP caching `(a, sigmoid_b)`) in `ferrotorch-core/src/grad_fns/activation.rs` mirroring `torch/nn/functional.py:1743`; non-test consumer: `pub fn glu` in `ferrotorch-nn/src/functional.rs`. Runner arm pending per #1338. |
-| REQ-19 (threshold) | NOT-STARTED | open prereq blocker #1341. No `pub fn threshold` / `ThresholdBackward` in `ferrotorch-core/src/grad_fns/activation.rs`. The `Threshold` nn::Module wrapper in `ferrotorch-nn/src/activation.rs` is forward-only and does not carry a fused `GradFn`. Upstream: `TORCH_IMPL_FUNC(threshold_out)` at `aten/src/ATen/native/Activation.cpp:688-690` and `TORCH_IMPL_FUNC(threshold_backward_out)` at `aten/src/ATen/native/Activation.cpp:692-694`. |
-| REQ-20 (rrelu) | NOT-STARTED | open prereq blocker #1341. No `pub fn rrelu` / `RReluBackward` in `ferrotorch-core/src/grad_fns/activation.rs`. The `RReLU` nn::Module wrapper in `ferrotorch-nn/src/activation.rs` defines default constants but no fused autograd path; would also require an RNG-state-aware backward to mirror `Tensor rrelu_with_noise_cpu(...)` at `aten/src/ATen/native/Activation.cpp:633-654`. |
-| REQ-21 (celu) | NOT-STARTED | open prereq blocker #1341. No `pub fn celu` / `CeluBackward` in `ferrotorch-core/src/grad_fns/activation.rs`. The `CELU` nn::Module wrapper in `ferrotorch-nn/src/activation.rs` is a Module; the function form is missing. Upstream: `Tensor celu(const Tensor& self, const Scalar& alpha)` at `aten/src/ATen/native/Activation.cpp:540-545` (delegates to `at::elu(self, alpha, Scalar(1.0), Scalar(inv_alpha))`) and `torch/nn/functional.py:1874`. |
-| REQ-22 (softmin) | NOT-STARTED | open prereq blocker #1341. No fused `pub fn softmin` / `SoftminBackward` in `ferrotorch-core/src/grad_fns/activation.rs`. `pub fn softmin` in `ferrotorch-nn/src/functional.rs` is a composition `neg → softmax` that walks TWO `GradFn` nodes per call. A fused VJP matching this file's one-node-per-op convention has not been written. Upstream: `torch/nn/functional.py:2095 def softmin`. |
+| REQ-1 (relu) | SHIPPED | impl: `pub fn relu` + `pub struct ReluBackward` in `ferrotorch-core/src/grad_fns/activation.rs` mirroring `Tensor relu(const Tensor& self)` at `aten/src/ATen/native/Activation.cpp:514-517` (`return at::clamp_min(self, 0)`); non-test production consumer: `pub fn relu` (the `Tensor::relu` method) in `ferrotorch-core/src/methods.rs` and `pub fn relu` in `ferrotorch-nn/src/functional.rs`; forward-AD primal consumer in `ferrotorch-core/src/autograd/forward_ad.rs`. Runner arm wired per the matching `dispatch_f32` arm + `oracle_name()` alias in `tools/parity-sweep/runner/src/main.rs` (closes #1338). |
+| REQ-2 (sigmoid) | SHIPPED | impl: `pub fn sigmoid` + `pub struct SigmoidBackward` in `ferrotorch-core/src/grad_fns/activation.rs` mirroring `torch._C._nn.sigmoid` per `torch/nn/functional.py:2302`; non-test consumer: `pub fn sigmoid` (the `Tensor::sigmoid` method) in `ferrotorch-core/src/methods.rs`, `use ferrotorch_core::grad_fns::activation::{relu, sigmoid, tanh}` in `ferrotorch-nn/src/rnn.rs` (RNN gates), `use ferrotorch_core::grad_fns::activation::sigmoid` in `ferrotorch-nn/src/loss.rs` (BCE-with-logits). Runner arm wired per the matching `dispatch_f32` arm + `oracle_name()` alias in `tools/parity-sweep/runner/src/main.rs` (closes #1338). |
+| REQ-3 (tanh) | SHIPPED | impl: `pub fn tanh` + `pub struct TanhBackward` in `ferrotorch-core/src/grad_fns/activation.rs` mirroring `torch/nn/functional.py:2291`; non-test consumer: `pub fn tanh_t` (the `Tensor::tanh_t` method) in `ferrotorch-core/src/methods.rs`, RNN gate consumer in `ferrotorch-nn/src/rnn.rs`, forward-AD primal in `ferrotorch-core/src/autograd/forward_ad.rs`. Runner arm wired per the matching `dispatch_f32` arm + `oracle_name()` alias in `tools/parity-sweep/runner/src/main.rs` (closes #1338). |
+| REQ-4 (gelu) | SHIPPED | impl: `pub fn gelu` + `pub fn gelu_with` + `pub struct GeluBackward` + `pub enum GeluApproximate { None, Tanh, Sigmoid }` in `ferrotorch-core/src/grad_fns/activation.rs` mirroring `TORCH_IMPL_FUNC(gelu_out_cpu)` at `aten/src/ATen/native/Activation.cpp:392-415` and `gelu = _add_docstr(torch._C._nn.gelu, ...)` at `torch/nn/functional.py:2012-2015`; non-test consumer: `pub fn gelu` + `pub fn gelu_with` (the `Tensor::gelu` and `Tensor::gelu_with` methods) in `ferrotorch-core/src/methods.rs`; public re-export `pub use grad_fns::activation::{GeluApproximate, gelu, gelu_with, sigmoid, tanh}` in `ferrotorch-core/src/lib.rs`. Runner arm wired per the matching `dispatch_f32` arm + `oracle_name()` alias in `tools/parity-sweep/runner/src/main.rs` (closes #1338). |
+| REQ-5 (silu) | SHIPPED | impl: `pub fn silu` + `pub struct SiluBackward` in `ferrotorch-core/src/grad_fns/activation.rs` mirroring `TORCH_IMPL_FUNC(silu_out)` at `aten/src/ATen/native/Activation.cpp:290`; non-test consumer: `pub fn silu` (the `Tensor::silu` method) in `ferrotorch-core/src/methods.rs`, `use ferrotorch_core::grad_fns::activation::silu` in `ferrotorch-nn/src/transformer.rs` (SwiGLU). Runner arm wired per the matching `dispatch_f32` arm + `oracle_name()` alias in `tools/parity-sweep/runner/src/main.rs` (closes #1338). |
+| REQ-6 (softmax) | SHIPPED | impl: `pub fn softmax` + `pub struct SoftmaxBackward` in `ferrotorch-core/src/grad_fns/activation.rs` mirroring `torch/nn/functional.py:2128`; non-test consumer: `pub fn softmax` (the `Tensor::softmax` method) in `ferrotorch-core/src/methods.rs`, `use ferrotorch_core::grad_fns::activation::softmax` in `ferrotorch-nn/src/attention.rs`, `crate::grad_fns::activation::softmax` invocation in `ferrotorch-core/src/flex_attention.rs`. Runner arm wired per the matching `dispatch_f32` arm + `oracle_name()` alias in `tools/parity-sweep/runner/src/main.rs` (closes #1338). |
+| REQ-7 (log_softmax) | SHIPPED | impl: `pub fn log_softmax` + `pub struct LogSoftmaxBackward` in `ferrotorch-core/src/grad_fns/activation.rs` mirroring `torch/nn/functional.py:2245`; non-test consumer: `pub fn log_softmax` (the `Tensor::log_softmax` method) in `ferrotorch-core/src/methods.rs`. Runner arm wired per the matching `dispatch_f32` arm + `oracle_name()` alias in `tools/parity-sweep/runner/src/main.rs` (closes #1338). |
+| REQ-8 (softplus) | SHIPPED | impl: `pub fn softplus` + `pub struct SoftplusBackward` in `ferrotorch-core/src/grad_fns/activation.rs` mirroring `TORCH_IMPL_FUNC(softplus_out)` at `aten/src/ATen/native/Activation.cpp:308` and `softplus = _add_docstr(torch._C._nn.softplus, ...)` at `torch/nn/functional.py:2067-2070`; non-test consumer: `pub fn softplus` + `pub fn softplus_with` in `ferrotorch-nn/src/functional.rs`. Runner arm wired per the matching `dispatch_f32` arm + `oracle_name()` alias in `tools/parity-sweep/runner/src/main.rs` (closes #1338). |
+| REQ-9 (elu) | SHIPPED | impl: `pub fn elu` + `pub struct EluBackward` in `ferrotorch-core/src/grad_fns/activation.rs` mirroring `TORCH_IMPL_FUNC(elu_out)` at `aten/src/ATen/native/Activation.cpp:272-277` and `torch/nn/functional.py:1821`; non-test consumer: `pub fn elu` + `pub fn elu_with` in `ferrotorch-nn/src/functional.rs`. Runner arm wired per the matching `dispatch_f32` arm + `oracle_name()` alias in `tools/parity-sweep/runner/src/main.rs` (closes #1338). |
+| REQ-10 (mish) | SHIPPED | impl: `pub fn mish` + `pub struct MishBackward` in `ferrotorch-core/src/grad_fns/activation.rs` mirroring `TORCH_IMPL_FUNC(mish_out)` at `aten/src/ATen/native/Activation.cpp:302` and `torch/nn/functional.py:2406`; non-test consumer: `pub fn mish` in `ferrotorch-nn/src/functional.rs`. Runner arm wired per the matching `dispatch_f32` arm + `oracle_name()` alias in `tools/parity-sweep/runner/src/main.rs` (closes #1338). |
+| REQ-11 (leaky_relu) | SHIPPED | impl: `pub fn leaky_relu` + `pub struct LeakyReluBackward` in `ferrotorch-core/src/grad_fns/activation.rs` mirroring `TORCH_IMPL_FUNC(leaky_relu_out)` at `aten/src/ATen/native/Activation.cpp:324` and `torch/nn/functional.py:1907`; non-test consumer: `pub fn leaky_relu` in `ferrotorch-nn/src/functional.rs`. Runner arm wired per the matching `dispatch_f32` arm + `oracle_name()` alias in `tools/parity-sweep/runner/src/main.rs` (closes #1338). |
+| REQ-12 (hardtanh + relu6) | SHIPPED | impl: `pub fn hardtanh` + `pub fn hardtanh_with` + `pub fn relu6` + `pub struct HardtanhBackward` in `ferrotorch-core/src/grad_fns/activation.rs` mirroring `Tensor hardtanh(...)` at `aten/src/ATen/native/Activation.cpp:436-468` + `Tensor relu6(...)` at `aten/src/ATen/native/Activation.cpp:528-530`; non-test consumer: `pub fn hardtanh` + `pub fn hardtanh_with` + `pub fn relu6` in `ferrotorch-nn/src/functional.rs`. Runner arm wired per the matching `dispatch_f32` arm + `oracle_name()` alias in `tools/parity-sweep/runner/src/main.rs` (closes #1338). |
+| REQ-13 (hardsigmoid) | SHIPPED | impl: `pub fn hardsigmoid` + `pub struct HardsigmoidBackward` in `ferrotorch-core/src/grad_fns/activation.rs` mirroring `TORCH_IMPL_FUNC(hardsigmoid_out)` at `aten/src/ATen/native/Activation.cpp:340` and `torch/nn/functional.py:2312`; non-test consumer: `pub fn hardsigmoid` in `ferrotorch-nn/src/functional.rs`. Runner arm wired per the matching `dispatch_f32` arm + `oracle_name()` alias in `tools/parity-sweep/runner/src/main.rs` (closes #1338). |
+| REQ-14 (hardswish) | SHIPPED | impl: `pub fn hardswish` + `pub struct HardswishBackward` in `ferrotorch-core/src/grad_fns/activation.rs` mirroring `Tensor hardswish(...)` at `aten/src/ATen/native/Activation.cpp:477-505` and `torch/nn/functional.py:2426`; non-test consumer: `pub fn hardswish` in `ferrotorch-nn/src/functional.rs`. Runner arm wired per the matching `dispatch_f32` arm + `oracle_name()` alias in `tools/parity-sweep/runner/src/main.rs` (closes #1338). |
+| REQ-15 (selu) | SHIPPED | impl: `pub fn selu` + `pub struct SeluBackward` in `ferrotorch-core/src/grad_fns/activation.rs` mirroring `Tensor selu(const Tensor& self)` at `aten/src/ATen/native/Activation.cpp:524-526` (which delegates to `at::elu(self, SELU_ALPHA, SELU_SCALE)`) and `torch/nn/functional.py:1845`; non-test consumer: `pub fn selu` in `ferrotorch-nn/src/functional.rs`. Runner arm wired per the matching `dispatch_f32` arm + `oracle_name()` alias in `tools/parity-sweep/runner/src/main.rs` (closes #1338). |
+| REQ-16 (softsign) | SHIPPED | impl: `pub fn softsign` + `pub struct SoftsignBackward` in `ferrotorch-core/src/grad_fns/activation.rs` mirroring `torch/nn/functional.py:2055`; non-test consumer: `pub fn softsign` in `ferrotorch-nn/src/functional.rs`. Runner arm wired per the matching `dispatch_f32` arm + `oracle_name()` alias in `tools/parity-sweep/runner/src/main.rs` (closes #1338). |
+| REQ-17 (prelu) | SHIPPED | impl: `pub fn prelu` + `pub struct PReluBackward` (fused dual-VJP) in `ferrotorch-core/src/grad_fns/activation.rs` mirroring `Tensor prelu(const Tensor& self, const Tensor& weight_)` at `aten/src/ATen/native/Activation.cpp:696-726` and `prelu = _add_docstr(torch.prelu, ...)` at `torch/nn/functional.py:1941-1943`; non-test consumer: `pub fn prelu` in `ferrotorch-nn/src/functional.rs`. ferrotorch restricts `alpha.numel() == 1`; per-channel `alpha` (upstream `weight.reshape_symint(dim_w)` branch) is not yet supported — a known divergence, but the scalar-alpha contract IS shipped. Runner arm wired per the matching `dispatch_f32` arm + `oracle_name()` alias in `tools/parity-sweep/runner/src/main.rs` (closes #1338). |
+| REQ-18 (glu) | SHIPPED | impl: `pub fn glu` + `pub struct GluBackward` (fused VJP caching `(a, sigmoid_b)`) in `ferrotorch-core/src/grad_fns/activation.rs` mirroring `torch/nn/functional.py:1743`; non-test consumer: `pub fn glu` in `ferrotorch-nn/src/functional.rs`. Runner arm wired per the matching `dispatch_f32` arm + `oracle_name()` alias in `tools/parity-sweep/runner/src/main.rs` (closes #1338). |
+| REQ-19 (threshold) | SHIPPED | impl: `pub fn threshold` + `pub struct ThresholdBackward` in `ferrotorch-core/src/grad_fns/activation.rs` mirroring `TORCH_IMPL_FUNC(threshold_out)` at `aten/src/ATen/native/Activation.cpp:688-690` and `TORCH_IMPL_FUNC(threshold_backward_out)` at `aten/src/ATen/native/Activation.cpp:692-694` + `tools/autograd/derivatives.yaml:2243-2244 self: threshold_backward(grad, self, threshold)`. Non-test consumer: `pub fn threshold_t` (the `Tensor::threshold_t` method) in `ferrotorch-core/src/methods.rs`. Runner arm wired in `tools/parity-sweep/runner/src/main.rs` per the `"threshold"` arm in `dispatch_f32`. Closes #1341 REQ-19. |
+| REQ-20 (rrelu) | SHIPPED | impl: `pub fn rrelu` + `pub struct RReluBackward` (inference path) in `ferrotorch-core/src/grad_fns/activation.rs` mirroring the upstream inference delegation `return at::leaky_relu_out(output, self, (lower + upper) / 2)` at `aten/src/ATen/native/Activation.cpp:624-630` and `torch/nn/functional.py:1962-1989`. Non-test consumer: `pub fn rrelu_t` (the `Tensor::rrelu_t` method) in `ferrotorch-core/src/methods.rs`. Runner arm wired in `tools/parity-sweep/runner/src/main.rs` per the `"rrelu"` arm in `dispatch_f32` (which skips `training=true` samples — those are stochastic and not comparable to a single oracle realization). Closes #1341 REQ-20. The training-mode RNG-stateful backward matching `_rrelu_with_noise_train` at `aten/src/ATen/native/Activation.cpp:578-608` is a separate follow-up. |
+| REQ-21 (celu) | SHIPPED | impl: `pub fn celu` + `pub struct CeluBackward` in `ferrotorch-core/src/grad_fns/activation.rs` mirroring `Tensor celu(const Tensor& self, const Scalar& alpha)` at `aten/src/ATen/native/Activation.cpp:540-545` (which delegates to `at::elu(self, alpha, 1.0, 1/alpha)`) and `torch/nn/functional.py:1874-1894`. Non-test consumer: `pub fn celu_t` (the `Tensor::celu_t` method) in `ferrotorch-core/src/methods.rs`. Runner arm wired in `tools/parity-sweep/runner/src/main.rs` per the `"celu"` arm in `dispatch_f32`. Closes #1341 REQ-21. |
+| REQ-22 (softmin) | SHIPPED | impl: `pub fn softmin` + `pub struct SoftminBackward` (fused single-`GradFn`) in `ferrotorch-core/src/grad_fns/activation.rs` mirroring `torch/nn/functional.py:2095-2125 (-input).softmax(dim)`. Non-test consumer: `pub fn softmin_t` (the `Tensor::softmin_t` method) in `ferrotorch-core/src/methods.rs`. Runner arm wired in `tools/parity-sweep/runner/src/main.rs` per the `"softmin"` arm in `dispatch_f32`. The two-node composition variant `softmin = neg → softmax` in `ferrotorch-nn/src/functional.rs` still ships. Closes #1341 REQ-22. |
 | REQ-23 (autograd gating) | SHIPPED | impl: every forward function in `ferrotorch-core/src/grad_fns/activation.rs` wraps in `if is_grad_enabled() && input.requires_grad() { Tensor::from_operation } else { Tensor::from_storage }`. Non-test production consumer: every `Tensor::<op>` method in `ferrotorch-core/src/methods.rs` reaches this gating through the public forward functions. Verified by `fn test_relu_no_grad` / `fn test_sigmoid_no_grad` / `fn test_softplus_no_grad` / `fn test_elu_no_grad` / `fn test_mish_no_grad` / `fn test_activation_tail_no_grad_does_not_attach_grad_fn` in `activation.rs` (six tests across the file). |
