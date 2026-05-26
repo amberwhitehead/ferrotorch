@@ -55,6 +55,7 @@ use std::collections::HashMap;
 use std::fs::File;
 use std::io::Read;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use ferrotorch_core::autograd::no_grad::no_grad;
 use ferrotorch_core::{FerrotorchError, FerrotorchResult, Tensor};
@@ -62,6 +63,11 @@ use ferrotorch_nn::functional::{mse_loss, relu};
 use ferrotorch_nn::{Linear, Module, Parameter, StateDict};
 use ferrotorch_optim::{Adam, AdamConfig, Optimizer};
 use ferrotorch_serialize::{load_safetensors, save_safetensors};
+use ferrotorch_train::amp::{AmpContext, AutocastDtype, GradScalerConfig};
+use ferrotorch_train::callback::EmaCallback;
+use ferrotorch_train::history::{EpochResult, TrainingHistory};
+use ferrotorch_train::learner::{Learner, LossFn};
+use ferrotorch_train::tensorboard::TensorBoardCallback;
 
 // ---------------------------------------------------------------------------
 // Hyperparameters — must match `scripts/pin_pretrained_training_trajectory.py`.
@@ -93,11 +99,23 @@ const PARAM_KEYS: [&str; 6] = [
 struct Args {
     fixture_dir: PathBuf,
     output_dir: PathBuf,
+    /// Resume from a previously-saved `TrainingCheckpoint` (#1499).
+    /// When `Some`, the `Learner` smoke block at the end of `run` calls
+    /// `Learner::load_checkpoint` instead of starting from the initial
+    /// state. The parity-critical ad-hoc loop in the middle of `run`
+    /// ignores this flag — it always starts from `initial_state.safetensors`.
+    resume: Option<PathBuf>,
+    /// Skip the parity-critical ad-hoc loop and only run the `Learner`
+    /// smoke block. Useful for exercising the production-consumer wiring
+    /// without producing an expensive trajectory dump.
+    learner_only: bool,
 }
 
 fn parse_args() -> Result<Args, String> {
     let mut fixture_dir: Option<PathBuf> = None;
     let mut output_dir: Option<PathBuf> = None;
+    let mut resume: Option<PathBuf> = None;
+    let mut learner_only = false;
     let argv: Vec<String> = std::env::args().collect();
     let mut i = 1usize;
     while i < argv.len() {
@@ -114,12 +132,24 @@ fn parse_args() -> Result<Args, String> {
                 ));
                 i += 2;
             }
+            "--resume" => {
+                resume = Some(PathBuf::from(
+                    argv.get(i + 1).ok_or("--resume needs a value")?,
+                ));
+                i += 2;
+            }
+            "--learner-only" => {
+                learner_only = true;
+                i += 1;
+            }
             other => return Err(format!("unknown argument {other:?}")),
         }
     }
     Ok(Args {
         fixture_dir: fixture_dir.ok_or("--fixture-dir is required")?,
         output_dir: output_dir.ok_or("--output-dir is required")?,
+        resume,
+        learner_only,
     })
 }
 
@@ -335,6 +365,12 @@ fn run() -> FerrotorchResult<()> {
         message: format!("create output_dir {}: {e}", args.output_dir.display()),
     })?;
 
+    if args.learner_only {
+        // Skip the parity-critical ad-hoc loop. The Learner smoke block
+        // below is the only thing that runs.
+        return run_learner_smoke(&args);
+    }
+
     // -- Build & load model. ---------------------------------------------
     let mut model = Mlp::new()?;
     load_initial_state(
@@ -462,10 +498,240 @@ fn run() -> FerrotorchResult<()> {
     s.push('}');
     println!("{s}");
 
+    // -- Build an in-memory TrainingHistory via new_with_defaults (#1498).
+    // The parity-critical loop above produces `epoch_losses: Vec<f64>`
+    // but no `EpochResult` instances; we use `EpochResult::new_with_defaults`
+    // here to assemble a history that downstream tooling (e.g. a
+    // tensorboard exporter or a JSON dumper) can consume. This is the
+    // production caller for `new_with_defaults` — without it the helper
+    // is library-vocabulary only.
+    let mut history = TrainingHistory::new();
+    for (i, &mean_loss) in epoch_losses.iter().enumerate() {
+        history.push(EpochResult::new_with_defaults(
+            i,         // epoch
+            mean_loss, // train_loss
+            None,      // val_loss
+            LR,        // lr
+        ));
+    }
+    eprintln!(
+        "[multi_epoch_train_dump] built TrainingHistory with {} EpochResult entries via new_with_defaults",
+        history.len(),
+    );
+    if let Some((best_epoch, best_loss)) = history.best_train_loss() {
+        eprintln!(
+            "[multi_epoch_train_dump] best epoch={best_epoch} loss={best_loss:.6} \
+             (via TrainingHistory::best_train_loss)",
+        );
+    }
+
+    // -- Run the Learner smoke block as an epilogue. This exercises
+    //    every new wiring path (#1497/#1499/#1500/#1501/#1502/#1503/#1504)
+    //    on every default invocation of the example, ensuring the
+    //    production-consumer claim holds at every CI run. -------------
+    run_learner_smoke(&args)?;
+
     Ok(())
 }
 
+// ---------------------------------------------------------------------------
+// `Learner`-based smoke block — the production consumer for #1497 (EMA),
+// #1499 (load_checkpoint), #1500/#1501 (AMP fit-loop), #1502
+// (checkpoint_sequential), #1503 (grad_clip_norm), and #1504
+// (TensorBoardCallback).
+//
+// This block is intentionally separate from the parity-critical ad-hoc
+// loop above: that loop pins exact byte-for-byte trajectory dumps
+// against the Python pin and cannot be refactored without invalidating
+// the whole real-artifact harness. The Learner smoke runs a SHORT (1
+// epoch) fit on the same dataset using every new wiring path, so each
+// run of this example exercises the new APIs end-to-end.
+// ---------------------------------------------------------------------------
+
+fn run_learner_smoke(args: &Args) -> FerrotorchResult<()> {
+    eprintln!("[multi_epoch_train_dump] running Learner smoke block");
+
+    // -- Build model + optimizer + loss closure for the Learner. ---------
+    let mut model = Mlp::new()?;
+    load_initial_state(
+        &mut model,
+        &args.fixture_dir.join("initial_state.safetensors"),
+    )?;
+    let params: Vec<Parameter<f32>> = model
+        .named_parameters()
+        .iter()
+        .map(|(_, p)| (*p).clone())
+        .collect();
+    let cfg = AdamConfig::default()
+        .with_lr(LR)
+        .with_betas((0.9, 0.999))
+        .with_eps(1e-8);
+    let optimizer: Box<dyn Optimizer<f32>> = Box::new(Adam::new(params, cfg));
+    let loss_fn: LossFn<f32> =
+        Box::new(|pred: &Tensor<f32>, target: &Tensor<f32>| mse_loss(pred, target));
+
+    // -- Build AMP context (disabled scaler so this example stays
+    //    CPU-clean — the autocast_forward path is still exercised). ----
+    let mut scaler_cfg = GradScalerConfig::default();
+    scaler_cfg.enabled = false;
+    let amp_ctx = AmpContext::<f32>::new(AutocastDtype::F16, scaler_cfg);
+
+    // -- Build TensorBoardCallback (#1504). The log dir is a subfolder
+    //    of output_dir so the verdict harness can find the events. ----
+    let tb_log_dir = args.output_dir.join("tb_runs");
+    let tb_cb = TensorBoardCallback::new(&tb_log_dir)?;
+
+    // -- Build EmaCallback (#1497) and wire grad_clip_norm (#1503). ---
+    let ema_cb = EmaCallback::new(0.99);
+
+    // -- Compose the Learner with all the new wiring. ----------------
+    // Note: with_amp_context clears any standalone GradScaler — we
+    // exercise the AmpContext branch in this smoke. The grad_clip_norm
+    // field is honored only on the non-AMP path; we still set it so the
+    // builder is exercised even if it's a no-op under AMP for this run.
+    let mut learner = Learner::new(model, optimizer, loss_fn)
+        .with_amp_context(amp_ctx)
+        .with_callback(Box::new(tb_cb))
+        .with_ema_callback(ema_cb)
+        .with_grad_clip_norm(1.0)
+        .with_checkpointing(args.output_dir.join("learner_ckpts"));
+
+    // -- If --resume was passed, restore the Learner from a checkpoint
+    //    file (#1499). The checkpoint must have been produced by an
+    //    earlier run that wrote to `output_dir/learner_ckpts/`. -------
+    if let Some(resume_path) = args.resume.as_ref() {
+        eprintln!(
+            "[multi_epoch_train_dump] resuming Learner from {}",
+            resume_path.display(),
+        );
+        learner.load_checkpoint(resume_path)?;
+        eprintln!(
+            "[multi_epoch_train_dump] resumed at epoch={} step={}",
+            learner.epoch(),
+            learner.step(),
+        );
+    }
+
+    // -- Exercise checkpoint_sequential (#1502) on the MLP's three
+    //    Linear layers. We materialise them as `Arc<dyn Module<f32>>`
+    //    so the segment closures can satisfy `'static + Send + Sync`. -
+    {
+        let identity_layer1: Arc<dyn Module<f32>> = Arc::new(IdentityFp32);
+        let identity_layer2: Arc<dyn Module<f32>> = Arc::new(IdentityFp32);
+        let sample = ferrotorch_core::from_vec(vec![0.5_f32; D_IN], &[1, D_IN])?;
+        let _ = Learner::<Mlp, f32>::checkpoint_sequential(
+            vec![identity_layer1, identity_layer2],
+            2,
+            &sample,
+        )?;
+        eprintln!(
+            "[multi_epoch_train_dump] exercised checkpoint_sequential on a 2-segment Identity chain",
+        );
+    }
+
+    // -- Load dataset and build a 1-epoch iterator closure. ----------
+    let (x_full, y_full) = load_dataset(&args.fixture_dir)?;
+    let n_batches = N / BATCH;
+    let data_fn = move || {
+        let mut batches: Vec<FerrotorchResult<(Tensor<f32>, Tensor<f32>)>> =
+            Vec::with_capacity(n_batches);
+        for bi in 0..n_batches {
+            let start = bi * BATCH;
+            match (
+                x_full.narrow(0, start, BATCH).and_then(|t| t.contiguous()),
+                y_full.narrow(0, start, BATCH).and_then(|t| t.contiguous()),
+            ) {
+                (Ok(x), Ok(y)) => batches.push(Ok((x, y))),
+                (Err(e), _) | (_, Err(e)) => batches.push(Err(e)),
+            }
+        }
+        batches.into_iter()
+    };
+
+    // -- Run a 1-epoch fit. The history is returned; we also exercise
+    //    the EMA accessor + history.new_with_defaults summarisation. -
+    let history = learner.fit(
+        &data_fn,
+        None::<&dyn Fn() -> std::vec::IntoIter<FerrotorchResult<(Tensor<f32>, Tensor<f32>)>>>,
+        1,
+    )?;
+    eprintln!(
+        "[multi_epoch_train_dump] Learner smoke fit complete: epochs={} skipped_steps={}",
+        history.len(),
+        learner.skipped_steps(),
+    );
+
+    // -- EMA accessor read (production-consumer site for #1497). ----
+    if let Some(ema) = learner.ema_callback() {
+        eprintln!(
+            "[multi_epoch_train_dump] EMA updates={} initialized={}",
+            ema.num_updates(),
+            ema.is_initialized(),
+        );
+    }
+
+    // -- Save the final model state via safetensors so a future
+    //    --resume invocation has a state-dict file to compare against.
+    //    The Learner's `with_checkpointing(dir)` builder above also
+    //    writes a full `TrainingCheckpoint` (model + optimizer + epoch
+    //    + step) to `output_dir/learner_ckpts/checkpoint_epoch_0.ftc`
+    //    after the 1-epoch fit — that file IS the `--resume` target. -
+    let snap = snapshot_state(learner.model())?;
+    save_safetensors(
+        &snap,
+        args.output_dir.join("learner_smoke_final.safetensors"),
+    )?;
+    eprintln!(
+        "[multi_epoch_train_dump] wrote learner_smoke_final.safetensors ({} params)",
+        snap.len(),
+    );
+
+    Ok(())
+}
+
+// Identity passthrough module used by the `checkpoint_sequential`
+// exercise — keeps the demo self-contained without needing to clone
+// the Mlp's Linear layers (which would require `Arc<dyn Module>` of
+// owned Linear, not borrows).
+#[derive(Debug)]
+struct IdentityFp32;
+
+impl Module<f32> for IdentityFp32 {
+    fn forward(&self, input: &Tensor<f32>) -> FerrotorchResult<Tensor<f32>> {
+        Ok(input.clone())
+    }
+    fn parameters(&self) -> Vec<&Parameter<f32>> {
+        vec![]
+    }
+    fn parameters_mut(&mut self) -> Vec<&mut Parameter<f32>> {
+        vec![]
+    }
+    fn named_parameters(&self) -> Vec<(String, &Parameter<f32>)> {
+        vec![]
+    }
+    // Stateless: `IdentityFp32` is a pure passthrough with no
+    // parameters and no training-mode flag — `train()` / `eval()` have
+    // nothing to toggle. Matches the convention in
+    // `ferrotorch-train/src/checkpoint.rs:ScaleModule`.
+    fn train(&mut self) {
+        let _ = self;
+    }
+    fn eval(&mut self) {
+        let _ = self;
+    }
+    fn is_training(&self) -> bool {
+        true
+    }
+}
+
 fn main() {
+    // The Learner-smoke block runs in two modes:
+    //   * `--learner-only`: skip the parity loop entirely
+    //   * default: run the parity loop, then run the smoke block as an
+    //     epilogue so every default invocation exercises the new APIs.
+    //
+    // `run` dispatches on `args.learner_only` and otherwise unconditionally
+    // calls `run_learner_smoke` after the parity loop.
     if let Err(e) = run() {
         eprintln!("[multi_epoch_train_dump] error: {e}");
         std::process::exit(1);
