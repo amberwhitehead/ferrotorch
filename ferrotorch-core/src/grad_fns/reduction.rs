@@ -1443,7 +1443,18 @@ fn argmax_argmin_full<T: Float>(
     let mut best_idx = 0i64;
     let mut best_val = data[0];
     for (i, &v) in data.iter().enumerate().skip(1) {
-        let take = if find_max { v > best_val } else { v < best_val };
+        // NaN-poisoning per upstream `aten/src/ATen/native/SharedReduceOps.h:26-34
+        // `max_propagate_nan` / `min_propagate_nan`: when `v` is NaN, take it
+        // unconditionally; once `best_val` is NaN, no later finite value can
+        // displace it (every `v > NaN` / `v < NaN` is false, AND we skip them
+        // here via the `!best_val.is_nan()` guard so we don't accidentally
+        // overwrite NaN with a finite). Matches torch live oracle:
+        //   torch.argmax(torch.tensor([1, nan, 3])).item() == 1
+        let take = if find_max {
+            v.is_nan() || (!best_val.is_nan() && v > best_val)
+        } else {
+            v.is_nan() || (!best_val.is_nan() && v < best_val)
+        };
         if take {
             best_idx = i as i64;
             best_val = v;
@@ -1501,7 +1512,13 @@ fn argmax_argmin_dim<T: Float>(
             let mut best_val = in_data[base];
             for d in 1..dim_size {
                 let v = in_data[base + d * inner];
-                let take = if find_max { v > best_val } else { v < best_val };
+                // NaN-poison per-slice — same predicate as `argmax_argmin_full`
+                // mirroring upstream `SharedReduceOps.h:26-34`.
+                let take = if find_max {
+                    v.is_nan() || (!best_val.is_nan() && v > best_val)
+                } else {
+                    v.is_nan() || (!best_val.is_nan() && v < best_val)
+                };
                 if take {
                     best_idx = d as i64;
                     best_val = v;
@@ -1661,27 +1678,41 @@ impl<T: Float> GradFn<T> for StdBackward<T> {
     }
 }
 
-/// Full-reduction variance. Mirrors `Tensor var(const Tensor& self, bool
-/// unbiased)` at `aten/src/ATen/native/ReduceOps.cpp:2085`. When
-/// `unbiased=true`, divides by `n-1` (Bessel-corrected sample variance);
-/// when false, divides by `n` (population variance).
+/// Full-reduction variance with arbitrary Bessel correction. Mirrors
+/// `Tensor& std_var_out(... correction_opt ...)` and `std_var_all_cpu`
+/// at `aten/src/ATen/native/ReduceOps.cpp:1858-1864` /
+/// `:1938-1941`. The denominator is `max(0, n - correction)`; on empty
+/// input the upstream `iter.numel() == 0` branch at `:1938-1941` returns
+/// `result.fill_(NaN)` (matched here by skipping the sum loop and
+/// emitting NaN via IEEE-754 `0.0 / 0.0`).
 ///
-/// Closes blocker #1301 (var).
-pub fn var<T: Float>(input: &Tensor<T>, unbiased: bool) -> FerrotorchResult<Tensor<T>> {
+/// `correction` is a real-valued scalar — fractional / negative
+/// corrections are valid per torch (`torch.var(x, correction=0.5)`,
+/// `torch.var(x, correction=-1)` are documented and live-oracle-tested).
+fn var_inner<T: Float>(
+    input: &Tensor<T>,
+    correction: f64,
+    take_sqrt: bool,
+) -> FerrotorchResult<Tensor<T>> {
     if let Some(out) = crate::meta_propagate::reduce_all(input)? {
         return Ok(out);
     }
+    let op_name = if take_sqrt { "std" } else { "var" };
     if input.is_cuda() {
-        return Err(FerrotorchError::NotImplementedOnCuda { op: "var" });
+        return Err(FerrotorchError::NotImplementedOnCuda { op: op_name });
     }
     let data = input.data()?;
     let n = data.len();
     if n == 0 {
-        return Err(FerrotorchError::InvalidArgument {
-            message: "var: cannot reduce empty tensor".into(),
-        });
+        // Upstream `ReduceOps.cpp:1938-1941`:
+        //   if (iter.numel() == 0) {
+        //     result.fill_(std::numeric_limits<double>::quiet_NaN());
+        //     return result;
+        //   }
+        // Live torch oracle: `torch.var(torch.tensor([])).item() is nan`.
+        let nan_val = <T as num_traits::Float>::nan();
+        return Tensor::from_storage(TensorStorage::cpu(vec![nan_val]), vec![], false);
     }
-    let correction: f64 = if unbiased { 1.0 } else { 0.0 };
     // Upstream div-by-zero protection at `ReduceOps.cpp:1862-1864
     // `std::max(0.0, self.numel() - correction)``. We mirror the
     // `max(0, ...)` clamp so `var([single_element], unbiased=true)`
@@ -1699,70 +1730,76 @@ pub fn var<T: Float>(input: &Tensor<T>, unbiased: bool) -> FerrotorchResult<Tens
         sum_sq += d * d;
     }
     let var_f = sum_sq / denom_f;
-    let result_val = float_from_f64::<T>(var_f)?;
+    let final_f = if take_sqrt { var_f.sqrt() } else { var_f };
+    let result_val = float_from_f64::<T>(final_f)?;
     let result = Tensor::from_storage(TensorStorage::cpu(vec![result_val]), vec![], false)?;
     if is_grad_enabled() && input.requires_grad() {
         let mean_t = float_from_f64::<T>(mean_f)?;
-        let grad_fn = Arc::new(VarBackward {
-            input: input.clone(),
-            mean: mean_t,
-            denom: denom_f,
-        });
-        let (storage, shape) = result.into_storage_and_shape()?;
-        Tensor::from_operation(storage, shape, grad_fn)
+        if take_sqrt {
+            let grad_fn = Arc::new(StdBackward {
+                input: input.clone(),
+                mean: mean_t,
+                denom: denom_f,
+                result: result_val,
+            });
+            let (storage, shape) = result.into_storage_and_shape()?;
+            Tensor::from_operation(storage, shape, grad_fn)
+        } else {
+            let grad_fn = Arc::new(VarBackward {
+                input: input.clone(),
+                mean: mean_t,
+                denom: denom_f,
+            });
+            let (storage, shape) = result.into_storage_and_shape()?;
+            Tensor::from_operation(storage, shape, grad_fn)
+        }
     } else {
         Ok(result)
     }
 }
 
+/// Full-reduction variance. Mirrors `Tensor var(const Tensor& self, bool
+/// unbiased)` at `aten/src/ATen/native/ReduceOps.cpp:2085`. When
+/// `unbiased=true`, divides by `n-1` (Bessel-corrected sample variance);
+/// when false, divides by `n` (population variance). Empty input returns
+/// a NaN scalar to match upstream's `:1938-1941` trivial-reduction path.
+///
+/// Closes blocker #1301 (var).
+pub fn var<T: Float>(input: &Tensor<T>, unbiased: bool) -> FerrotorchResult<Tensor<T>> {
+    var_inner(input, if unbiased { 1.0 } else { 0.0 }, false)
+}
+
+/// Full-reduction variance with arbitrary `correction`. Mirrors the
+/// `*.correction` overload at `aten/src/ATen/native/ReduceOps.cpp:1858-1864`
+/// — `denom = max(0, n - correction)`, so `correction=2` over 5 elements
+/// yields `sum_sq / 3` (live oracle:
+/// `torch.var(torch.tensor([1,2,3,4,5]), correction=2).item() == 10/3`).
+/// Empty input returns NaN per `:1938-1941`.
+pub fn var_with_correction<T: Float>(
+    input: &Tensor<T>,
+    correction: f64,
+) -> FerrotorchResult<Tensor<T>> {
+    var_inner(input, correction, false)
+}
+
 /// Full-reduction standard deviation. Mirrors `Tensor std(const Tensor&
 /// self, bool unbiased)` at `aten/src/ATen/native/ReduceOps.cpp:2105`.
-/// Computes `sqrt(var(input, unbiased))`.
+/// Computes `sqrt(var(input, unbiased))`. Empty input returns NaN.
 ///
 /// Closes blocker #1301 (std).
 pub fn std<T: Float>(input: &Tensor<T>, unbiased: bool) -> FerrotorchResult<Tensor<T>> {
-    if let Some(out) = crate::meta_propagate::reduce_all(input)? {
-        return Ok(out);
-    }
-    if input.is_cuda() {
-        return Err(FerrotorchError::NotImplementedOnCuda { op: "std" });
-    }
-    let data = input.data()?;
-    let n = data.len();
-    if n == 0 {
-        return Err(FerrotorchError::InvalidArgument {
-            message: "std: cannot reduce empty tensor".into(),
-        });
-    }
-    let correction: f64 = if unbiased { 1.0 } else { 0.0 };
-    let denom_f = (n as f64 - correction).max(0.0);
-    let mut sum_f: f64 = 0.0;
-    for &v in data {
-        sum_f += to_f64::<T>(v)?;
-    }
-    let mean_f = sum_f / n as f64;
-    let mut sum_sq: f64 = 0.0;
-    for &v in data {
-        let d = to_f64::<T>(v)? - mean_f;
-        sum_sq += d * d;
-    }
-    let var_f = sum_sq / denom_f;
-    let std_f = var_f.sqrt();
-    let result_val = float_from_f64::<T>(std_f)?;
-    let result = Tensor::from_storage(TensorStorage::cpu(vec![result_val]), vec![], false)?;
-    if is_grad_enabled() && input.requires_grad() {
-        let mean_t = float_from_f64::<T>(mean_f)?;
-        let grad_fn = Arc::new(StdBackward {
-            input: input.clone(),
-            mean: mean_t,
-            denom: denom_f,
-            result: result_val,
-        });
-        let (storage, shape) = result.into_storage_and_shape()?;
-        Tensor::from_operation(storage, shape, grad_fn)
-    } else {
-        Ok(result)
-    }
+    var_inner(input, if unbiased { 1.0 } else { 0.0 }, true)
+}
+
+/// Full-reduction standard deviation with arbitrary `correction`. Mirrors
+/// the `*.correction` overload at `aten/src/ATen/native/ReduceOps.cpp:1858-1864`
+/// — `sqrt(sum_sq / max(0, n - correction))` (live oracle:
+/// `torch.std(torch.tensor([1,2,3,4,5]), correction=2).item() == sqrt(10/3)`).
+pub fn std_with_correction<T: Float>(
+    input: &Tensor<T>,
+    correction: f64,
+) -> FerrotorchResult<Tensor<T>> {
+    var_inner(input, correction, true)
 }
 
 // ---------------------------------------------------------------------------
@@ -2276,13 +2313,21 @@ fn amin_amax_dim_forward<T: Float>(
 
     let mut result = Vec::with_capacity(outer * inner);
     let mut expanded = Vec::with_capacity(in_shape.iter().product());
-    // First pass: compute per-slice extremum.
+    // First pass: compute per-slice extremum, NaN-poisoning per upstream
+    // `aten/src/ATen/native/SharedReduceOps.h:26-34
+    // `max_propagate_nan` / `min_propagate_nan`. Live torch:
+    //   torch.amin(torch.tensor([[1, nan, 3], [4, 5, 6]]), dim=1) == [nan, 4]
+    //   torch.amax(...) == [nan, 6]
     for o in 0..outer {
         for i in 0..inner {
             let mut best = in_data[o * dim_size * inner + i];
             for d in 1..dim_size {
                 let v = in_data[o * dim_size * inner + d * inner + i];
-                let take = if find_max { v > best } else { v < best };
+                let take = if find_max {
+                    v.is_nan() || (!best.is_nan() && v > best)
+                } else {
+                    v.is_nan() || (!best.is_nan() && v < best)
+                };
                 if take {
                     best = v;
                 }

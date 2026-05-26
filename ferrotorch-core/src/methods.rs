@@ -707,6 +707,21 @@ impl<T: Float> Tensor<T> {
         crate::grad_fns::reduction::std(self, unbiased)
     }
 
+    /// Differentiable full-reduction variance with arbitrary Bessel
+    /// correction. Mirrors `torch.var(input, correction=...)` —
+    /// `denom = max(0, n - correction)`. Closes #1346 (audit 7cef63f88
+    /// REQ-8 full-reduction correction-API gap).
+    pub fn var_with_correction_t(&self, correction: f64) -> FerrotorchResult<Tensor<T>> {
+        crate::grad_fns::reduction::var_with_correction(self, correction)
+    }
+
+    /// Differentiable full-reduction standard deviation with arbitrary
+    /// `correction`. Mirrors `torch.std(input, correction=...)`. Closes
+    /// #1346 (audit 7cef63f88 REQ-8 full-reduction correction-API gap).
+    pub fn std_with_correction_t(&self, correction: f64) -> FerrotorchResult<Tensor<T>> {
+        crate::grad_fns::reduction::std_with_correction(self, correction)
+    }
+
     /// Non-differentiable full-reduction `any`. Returns a 0-D BoolTensor
     /// holding `true` iff any element is non-zero. Closes #1312 (any).
     pub fn any_t(&self) -> FerrotorchResult<crate::bool_tensor::BoolTensor> {

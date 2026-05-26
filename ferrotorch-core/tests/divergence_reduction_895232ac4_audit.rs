@@ -21,7 +21,8 @@
 
 use ferrotorch_core::Tensor;
 use ferrotorch_core::grad_fns::reduction::{
-    amax_dim, amin_dim, argmax, argmax_dim, argmin, argmin_dim, std as red_std, var as red_var,
+    amax_dim, amin_dim, argmax, argmax_dim, argmin, argmin_dim, std as red_std,
+    std_with_correction, var as red_var, var_with_correction,
 };
 use ferrotorch_core::storage::TensorStorage;
 
@@ -190,55 +191,54 @@ fn divergence_var_full_correction_2_no_api() {
     //   torch.var(torch.tensor([1.,2.,3.,4.,5.]), correction=2).item()
     //      == 3.3333333333333335
     //
-    // ferrotorch's `var` signature is `fn var(input, unbiased: bool)` —
-    // there is NO way to express `correction=2` via the public API. The
-    // SHIPPED claim on REQ-8 overclaims; the full-reduction subset is
-    // NOT-STARTED.
-    //
-    // We attempt the computation with the existing API. There is no
-    // way to construct the upstream's correction=2 answer, so we use
-    // `unbiased=true` (correction=1) and ASSERT the missing API gap by
-    // showing the result is NOT 3.3333... but 2.5 (the corr=1 form).
+    // Closed by audit #1346: `var_with_correction(input, correction)` is
+    // now in the public API. Asserts upstream value byte-for-byte.
     let x = leaf(&[1.0, 2.0, 3.0, 4.0, 5.0], &[5], false);
-    let r = red_var(&x, true).expect("var");
+    let r = var_with_correction(&x, 2.0).expect("var corr=2");
     let v = r.item().expect("item");
-    // Documenting the gap: the closest API call returns var(unbiased=true)
-    // = sum-of-sq-dev / (n-1) = 10/4 = 2.5, NOT the torch correction=2
-    // value of 10/3 = 3.3333... .
-    // This assertion will PASS today (showing the gap), but the test
-    // doc-comment is the audit artifact — when a corrected API
-    // `var_with_correction(input, correction)` lands and the runner
-    // arms stop skipping, this test should be updated to call the new
-    // API and assert the 3.3333... value.
     let upstream_corr2 = 10.0_f64 / 3.0;
     assert!(
-        (v - upstream_corr2).abs() > 0.5,
-        "ferrotorch's var(x, unbiased=true) returned {v}; the test pins \
-         that this is NOT the torch correction=2 value {upstream_corr2}. \
-         When a `var_with_correction` full-reduction API lands, update \
-         this test to call it and assert == {upstream_corr2}."
+        (v - upstream_corr2).abs() < 1e-10,
+        "torch.var([1..5], correction=2) == 10/3 = {upstream_corr2}; got {v}"
     );
+    // Sanity: the legacy `unbiased=true` (correction=1) path still
+    // returns 10/4 = 2.5 — regression guard for the dichotomy API.
+    let r1 = red_var(&x, true).expect("var unbiased");
+    let v1 = r1.item().expect("item");
     assert!(
-        (v - 2.5).abs() < 1e-10,
-        "ferrotorch's var(x, unbiased=true) should be 10/(n-1)=2.5; got {v}"
+        (v1 - 2.5).abs() < 1e-10,
+        "ferrotorch's var(x, unbiased=true) should be 10/(n-1)=2.5; got {v1}"
     );
 }
 
 #[test]
-#[ignore = "divergence: var full-reduction has no `correction` kwarg; tracking #1314 follow-up"]
 fn divergence_var_full_correction_2_pinned() {
-    // When a `var_with_correction(input, correction)` API lands, replace
-    // this test body with a direct call and assert the upstream value.
-    // For now this is #[ignore]'d — the divergence test_var_full_correction_2_no_api
-    // above pins the API-gap divergence in non-ignored form.
-    //
-    // Expected behavior when fixed:
-    //   let r = var_with_correction(&x, 2.0).expect("var corr=2");
-    //   assert!((r.item().unwrap() - 10.0/3.0).abs() < 1e-10);
+    // Closed by audit #1346: `var_with_correction` API landed.
     //
     // From live oracle 2026-05-25:
     //   torch.var(torch.tensor([1.,2.,3.,4.,5.]), correction=2) == 3.3333333333333335
-    panic!("placeholder until var_with_correction API lands");
+    let x = leaf(&[1.0, 2.0, 3.0, 4.0, 5.0], &[5], false);
+    let r = var_with_correction(&x, 2.0).expect("var corr=2");
+    assert!((r.item().expect("item") - 10.0_f64 / 3.0).abs() < 1e-10);
+    // And `std_with_correction`:
+    //   torch.std(..., correction=2).item() == sqrt(10/3) == 1.8257418583505538
+    //   torch.std(..., correction=0.5).item() == 1.4907119849998598
+    let s2 = std_with_correction(&x, 2.0).expect("std corr=2");
+    let s2v = s2.item().expect("item");
+    let expected_s2 = (10.0_f64 / 3.0).sqrt();
+    assert!(
+        (s2v - expected_s2).abs() < 1e-10,
+        "torch.std([1..5], correction=2) == sqrt(10/3) = {expected_s2}; got {s2v}"
+    );
+    let s05 = std_with_correction(&x, 0.5).expect("std corr=0.5");
+    let s05v = s05.item().expect("item");
+    // sum_sq = 10.0, denom = max(0, 5 - 0.5) = 4.5, var = 10/4.5,
+    // std = sqrt(10/4.5) = 1.4907119849998598
+    let expected_s05 = (10.0_f64 / 4.5).sqrt();
+    assert!(
+        (s05v - expected_s05).abs() < 1e-10,
+        "torch.std([1..5], correction=0.5) == sqrt(10/4.5) = {expected_s05}; got {s05v}"
+    );
 }
 
 // ============================================================================
