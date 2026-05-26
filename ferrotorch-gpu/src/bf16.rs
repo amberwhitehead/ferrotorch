@@ -25,6 +25,25 @@
 //! All arithmetic happens in `.f32` registers per thread; storage is
 //! always `u16` (`.b16`) in global memory.  No whole-tensor f32
 //! intermediate materialisation.
+//!
+//! ## REQ status (per `.design/ferrotorch-gpu/bf16.md`)
+//!
+//! Full evidence rows (impl + non-test production consumer + upstream
+//! cites) live in the design doc; this synopsis is a one-line summary per
+//! REQ.
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 (elementwise binary) | SHIPPED | `pub fn gpu_mul_bf16 / gpu_add_bf16 / gpu_sub_bf16 / gpu_div_bf16 in bf16.rs`; consumer `CudaBackendImpl::add_bf16 / mul_bf16 / sub_bf16 / div_bf16 in backend_impl.rs` |
+//! | REQ-2 (unary activations) | SHIPPED | `pub fn gpu_silu_bf16 / gpu_relu_bf16 / gpu_fatrelu_bf16 / gpu_gelu_bf16 / gpu_exp_bf16 / gpu_log_bf16 / gpu_tanh_bf16 / gpu_sigmoid_bf16 / gpu_neg_bf16 in bf16.rs`; consumer the bf16 arm of activation dispatchers in `backend_impl.rs` |
+//! | REQ-3 (`gpu_scale_bf16`) | SHIPPED | `pub fn gpu_scale_bf16 in bf16.rs`; consumer `CudaBackendImpl::scale_bf16 in backend_impl.rs` |
+//! | REQ-4 (broadcast binary) | SHIPPED | `pub fn gpu_broadcast_add_bf16 / gpu_broadcast_sub_bf16 / gpu_broadcast_mul_bf16 / gpu_broadcast_div_bf16 in bf16.rs`; consumer the bf16 broadcast arms in `backend_impl.rs` |
+//! | REQ-5 (reductions) | SHIPPED | `pub fn gpu_sum_bf16 / gpu_mean_bf16 / gpu_sum_axis_bf16_bf16 / gpu_mean_axis_bf16_bf16 in bf16.rs`; consumer bf16 reduction arms in `backend_impl.rs` |
+//! | REQ-6 (norm/softmax) | SHIPPED | `pub fn gpu_layernorm_bf16 / gpu_rmsnorm_bf16 / gpu_softmax_bf16 in bf16.rs`; consumer bf16 softmax/layernorm dispatchers in `backend_impl.rs` (rmsnorm via the bf16-dtype rmsnorm arm) |
+//! | REQ-7 (attention building blocks) | SHIPPED | `pub fn gpu_embedding_gather_bf16 / gpu_embedding_gather_bf16_to_f32 / gpu_rope_half_bf16 / gpu_transpose_to_heads_bf16 / gpu_transpose_from_heads_bf16 / gpu_repeat_kv_bf16 / gpu_causal_mask_bf16 in bf16.rs`; consumer bf16 arms of embedding/attention dispatchers in `backend_impl.rs` |
+//! | REQ-8 (`gpu_block_reduce_max_abs_bf16`) | SHIPPED | `pub fn gpu_block_reduce_max_abs_bf16 in bf16.rs`; consumer bf16 quantisation-calibration block-reduction primitive invoked from `backend_impl.rs` |
+//! | REQ-9 (SAFETY annotations) | SHIPPED | every `unsafe { ... launch(cfg)? }` in `bf16.rs` carries a multi-line `SAFETY:` comment naming compile site, entry signature, buffer alloc, bound check, `n as u32` non-truncation; consumer SAFETY contract inherited via each public wrapper |
+//! | REQ-10 (empty-input short-circuit) | SHIPPED | every `pub fn gpu_*_bf16 in bf16.rs` opens with `if n == 0 { return Ok(stream.alloc_zeros::<u16>(0)?); }`; consumer backend dispatch path relies on the no-launch short circuit |
 
 #![cfg(feature = "cuda")]
 

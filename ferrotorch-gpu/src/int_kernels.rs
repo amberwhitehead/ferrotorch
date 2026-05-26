@@ -39,6 +39,24 @@
 //! all `n` elements with an integer accumulator — no f32 detour). This keeps
 //! the result exactly equal to a left-fold over the buffer, matching the CPU
 //! reference bit-for-bit.
+//!
+//! ## REQ status (per `.design/ferrotorch-gpu/int_kernels.md`)
+//!
+//! Full evidence rows (impl + non-test production consumer + upstream
+//! cites) live in the design doc; this synopsis is a one-line summary per
+//! REQ.
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 (add/sub/mul) | SHIPPED | `pub fn gpu_add_i32 / gpu_add_i64 / gpu_sub_i32 / gpu_sub_i64 / gpu_mul_i32 / gpu_mul_i64 in int_kernels.rs` wrap `launch_binary` with PTX `add.s* / sub.s* / mul.lo.s*`; consumer six int arms of arithmetic dispatchers in `backend_impl.rs` |
+//! | REQ-2 (floor_div/remainder) | SHIPPED | `pub fn gpu_floor_div_i32 / gpu_floor_div_i64 / gpu_remainder_i32 / gpu_remainder_i64 in int_kernels.rs` (PTX trunc-then-floor-correct / rem-then-sign-adjust); consumer floor_div/remainder arms in `backend_impl.rs` |
+//! | REQ-3 (bitand/bitor/bitxor) | SHIPPED | `pub fn gpu_bitand_i32 / gpu_bitand_i64 / gpu_bitor_i32 / gpu_bitor_i64 / gpu_bitxor_i32 / gpu_bitxor_i64 in int_kernels.rs`; consumer six bitwise arms in `backend_impl.rs` |
+//! | REQ-4 (shl/shr) | SHIPPED | `pub fn gpu_shl_i32 / gpu_shl_i64` (PTX `shl.b{32,64}`) + `pub fn gpu_shr_i32 / gpu_shr_i64` (PTX `shr.s{32,64}`, arithmetic) in `int_kernels.rs`; consumer shl/shr arms in `backend_impl.rs` |
+//! | REQ-5 (neg/bitnot) | SHIPPED | `pub fn gpu_neg_i32 / gpu_neg_i64` (PTX `sub.s* 0, %va`) + `pub fn gpu_bitnot_i32 / gpu_bitnot_i64` (PTX `not.b{32,64}`) in `int_kernels.rs`; consumer neg/bitnot arms in `backend_impl.rs` |
+//! | REQ-6 (sum/prod/min/max) | SHIPPED | `pub fn gpu_sum_i32 / gpu_sum_i64 / gpu_prod_i32 / gpu_prod_i64 / gpu_min_i32 / gpu_min_i64 / gpu_max_i32 / gpu_max_i64 in int_kernels.rs` wrap `launch_reduce` with `REDUCE_SUM/PROD/MIN/MAX` op codes; consumer eight integer reduction arms in `backend_impl.rs` |
+//! | REQ-7 (div-by-zero no-trap) | SHIPPED | module `//!` doc-comment in `int_kernels.rs` states no zero-check; the `FLOORDIV_*_PTX / REMAINDER_*_PTX` kernels include no zero-check branch; consumer backend integer arm relies on the documented no-trap contract |
+//! | REQ-8 (SAFETY annotations) | SHIPPED | three `unsafe { stream.launch_builder(&f)...launch(cfg)? }` blocks in `fn launch_binary / launch_unary / launch_reduce in int_kernels.rs` each carry a multi-line `SAFETY:` comment; consumer SAFETY contract inherited via every `pub fn gpu_*_i{32,64}` wrapper |
+//! | REQ-9 (empty-input short-circuit) | SHIPPED | `fn launch_binary / launch_unary in int_kernels.rs` open with `if n == 0 { return Ok(stream.alloc_zeros::<T>(0)?); }`; `fn launch_reduce` short-circuits with empty-identity clone_htod (`0/1/T::MAX/T::MIN` for sum/prod/min/max); consumer backend empty-int handling |
 
 #![cfg(feature = "cuda")]
 

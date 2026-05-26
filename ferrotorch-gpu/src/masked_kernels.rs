@@ -34,6 +34,22 @@
 //! unsupported (op, dtype) returns a structured error upstream
 //! (`FerrotorchError::NotImplementedOnCuda` / `InvalidArgument`) — never a
 //! silent CPU detour.
+//!
+//! ## REQ status (per `.design/ferrotorch-gpu/masked_kernels.md`)
+//!
+//! Full evidence rows (impl + non-test production consumer + upstream
+//! cites) live in the design doc; this synopsis is a one-line summary per
+//! REQ.
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 (`masked_fill` per-dtype) | SHIPPED | six `pub fn masked_fill_*` symbols in `masked_kernels.rs`; consumer `use crate::masked_kernels as mk` site in `backend_impl.rs` dispatches per-dtype calls |
+//! | REQ-2 (`where`) | SHIPPED | `pub fn where_32 / where_64 / where_16 in masked_kernels.rs`; consumer `CudaBackendImpl::where_cond_* in backend_impl.rs` |
+//! | REQ-3 (`masked_select`) | SHIPPED | `pub fn count_true in masked_kernels.rs` + `masked_select_32 / masked_select_64 / masked_select_16`; consumer `CudaBackendImpl::masked_select_* in backend_impl.rs` |
+//! | REQ-4 (`masked_scatter`) | SHIPPED | `pub fn masked_scatter_32 / masked_scatter_64 / masked_scatter_16 in masked_kernels.rs`; consumer `CudaBackendImpl::masked_scatter_* in backend_impl.rs` |
+//! | REQ-5 (single PTX load path) | SHIPPED | `use crate::module_cache::get_or_compile` in `masked_kernels.rs` binds the single PTX load path; no `cudarc::nvrtc` import — every launch routes through `module_cache` |
+//! | REQ-6 ((op, dtype) coverage matrix) | SHIPPED | per-dtype `pub fn` entries in `masked_kernels.rs` mean (op, dtype) coverage is structurally surfaced — a missing combination is a missing function symbol that the `backend_impl` dispatcher converts to `FerrotorchError::NotImplementedOnCuda` |
+//! | REQ-7 (workspace consumer wiring) | SHIPPED | four `use crate::masked_kernels as mk` sites in `backend_impl.rs` (each is the body of a `CudaBackendImpl` trait method); ferrotorch-core dispatches `Tensor::masked_fill / etc.` through the `GpuBackend` trait when input is CUDA-resident |
 
 #![cfg(feature = "cuda")]
 

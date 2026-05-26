@@ -25,6 +25,24 @@
 //! handle is bound to the device's default stream via `cusparseSetStream`
 //! before each call so that subsequent `cusparseSpMM` enqueues on the
 //! same stream as cuBLAS / kernel launches.
+//!
+//! ## REQ status (per `.design/ferrotorch-gpu/sparse.md`)
+//!
+//! Full evidence rows (impl + non-test production consumer + upstream
+//! cites) live in the design doc; this synopsis is a one-line summary per
+//! REQ.
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 (`CusparseHandle` RAII) | SHIPPED | `pub struct CusparseHandle in sparse.rs` + `impl CusparseHandle` + `impl Drop`; consumer every SpMM/conversion entry point in this file takes `handle: &CusparseHandle`; cuda backend `CudaBackendImpl::spmm_csr_* in backend_impl.rs` passes the cached device-level handle through |
+//! | REQ-2 (CSR SpMM) | SHIPPED | `pub fn gpu_spmm_csr_f32 / gpu_spmm_csr_f64 in sparse.rs` per upstream `aten/src/ATen/native/sparse/cuda/SparseBlasImpl.cpp:528::spmm`; consumer `CudaBackendImpl::spmm_csr_f32 / spmm_csr_f64 in backend_impl.rs` |
+//! | REQ-3 (sparse→dense CSR) | SHIPPED | `pub fn gpu_sparse_to_dense_csr_f32 / gpu_sparse_to_dense_csr_f64 in sparse.rs`; consumer `CudaBackendImpl::sparse_to_dense_csr_f32 / sparse_to_dense_csr_f64 in backend_impl.rs` (the `SparseTensor::to_dense_on` GPU arm) |
+//! | REQ-4 (dense→sparse CSR) | SHIPPED | `pub fn gpu_dense_to_sparse_csr_f32 / gpu_dense_to_sparse_csr_f64 in sparse.rs`; consumer `CudaBackendImpl::dense_to_sparse_csr_f32 / dense_to_sparse_csr_f64 in backend_impl.rs` (the `SparseTensor::from_dense` GPU arm) |
+//! | REQ-5 (CSC→dense) | SHIPPED | `pub fn gpu_csc_to_dense_f32 / gpu_csc_to_dense_f64 in sparse.rs`; consumer `CudaBackendImpl::csc_to_dense_f32 / csc_to_dense_f64 in backend_impl.rs` |
+//! | REQ-6 (CSR↔CSC) | SHIPPED | `pub fn gpu_csr_to_csc_f32 / gpu_csr_to_csc_f64 in sparse.rs`; consumer `CudaBackendImpl::csr_to_csc_f32 / csr_to_csc_f64 in backend_impl.rs` |
+//! | REQ-7 (COO↔CSR) | SHIPPED | `pub fn gpu_coo_to_csr_f32 / gpu_coo_to_csr_f64 / gpu_csr_to_coo_f32 / gpu_csr_to_coo_f64 in sparse.rs`; consumer `CudaBackendImpl::coo_to_csr_* / csr_to_coo_* in backend_impl.rs` |
+//! | REQ-8 (structured errors) | SHIPPED | every cuSPARSE call in `sparse.rs` wrapped to return `Err(GpuError::Sparse(...))`; consumer every caller in `backend_impl.rs` uses `.map_err(Self::map_gpu_err)?` |
+//! | REQ-9 (host-only stubs) | SHIPPED | `#[cfg(not(feature = "cuda"))]` stubs for every cuda function in `sparse.rs` return `Err(GpuError::NoCudaFeature)`; consumer same `backend_impl.rs` arms under no-cuda compile path |
 
 #![cfg(feature = "cuda")]
 

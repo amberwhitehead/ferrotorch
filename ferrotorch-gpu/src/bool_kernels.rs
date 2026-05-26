@@ -28,6 +28,23 @@
 //! `eq/lt/le/gt/ge` involving NaN are false, `ne` involving NaN is true. PTX
 //! `setp.{eq,lt,le,gt,ge}.f32` are unordered-false / `setp.ne.f32` is
 //! unordered-true, which is exactly the IEEE / PyTorch behaviour.
+//!
+//! ## REQ status (per `.design/ferrotorch-gpu/bool_kernels.md`)
+//!
+//! Full evidence rows (impl + non-test production consumer + upstream
+//! cites) live in the design doc; this synopsis is a one-line summary per
+//! REQ.
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 (comparison ops) | SHIPPED | `pub fn gpu_cmp_f32 / gpu_cmp_f64 / gpu_cmp_i32 / gpu_cmp_i64 / gpu_cmp_bf16 / gpu_cmp_f16 in bool_kernels.rs` thin-wrap `launch_cmp` / `launch_cmp_half` templated per (dtype, op); consumer bool-result arms of `eq/ne/lt/le/gt/ge` op handlers in `backend_impl.rs` |
+//! | REQ-2 (logical binary) | SHIPPED | `pub fn gpu_and_bool / gpu_or_bool / gpu_xor_bool in bool_kernels.rs` thin-wrap `launch_logic_bin`; consumer `CudaBackendImpl::and_bool / or_bool / xor_bool in backend_impl.rs` |
+//! | REQ-3 (`gpu_not_bool`) | SHIPPED | `pub fn gpu_not_bool in bool_kernels.rs`; consumer `CudaBackendImpl::not_bool in backend_impl.rs` |
+//! | REQ-4 (`gpu_any_bool`/`gpu_all_bool`) | SHIPPED | `pub fn gpu_any_bool / gpu_all_bool in bool_kernels.rs`; consumer `CudaBackendImpl::any_bool / all_bool in backend_impl.rs` |
+//! | REQ-5 (NaN comparison semantics) | SHIPPED | PTX `setp.{eq,lt,le,gt,ge}.f32` (unordered-false) and `setp.ne.f32` (unordered-true) inside the comparison kernels in `bool_kernels.rs`; consumer bool-comparison ops in `backend_impl.rs` rely on this for IEEE-NaN parity |
+//! | REQ-6 (half-precision compare) | SHIPPED | `fn cmp_half_ptx in bool_kernels.rs` decodes bf16 via `mov.b32 %ua, {%zero16, %ha}` and f16 via `cvt.f32.f16 %fa, %ha` then `setp.{op}.f32`; consumer `pub fn gpu_cmp_bf16 / gpu_cmp_f16` invoke `launch_cmp_half` from bool-comparison arms of `backend_impl.rs` |
+//! | REQ-7 (SAFETY annotations) | SHIPPED | every `unsafe { stream.launch_builder(&f)... }` in `bool_kernels.rs` (`launch_cmp`, `launch_not`, `launch_reduce_bool`) carries a multi-line `SAFETY:` comment; consumer SAFETY contract inherited via each public wrapper |
+//! | REQ-8 (empty-input short-circuit) | SHIPPED | `launch_cmp` and `launch_not` short-circuit `n == 0` via `if n == 0 { return Ok(stream.alloc_zeros::<u8>(0)?); }`; `launch_reduce_bool` short-circuits with empty-identity clone_htod; consumer backend dispatch path (`torch.any(empty)`) |
 
 #![cfg(feature = "cuda")]
 

@@ -4,6 +4,22 @@
 //! and tracks its length and originating device ordinal. When dropped, pooled
 //! buffers are returned to the global GPU memory pool for reuse instead of
 //! being freed back to the CUDA driver.
+//!
+//! ## REQ status (per `.design/ferrotorch-gpu/buffer.md`)
+//!
+//! Full evidence rows (impl + non-test production consumer + upstream
+//! cites) live in the design doc; this synopsis is a one-line summary per
+//! REQ.
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 (`CudaBuffer<T>` shape) | SHIPPED | `pub struct CudaBuffer<T> in buffer.rs` with `Option<CudaSlice<T>> + len + alloc_len + device_ordinal + pool_fn`; consumer `ferrotorch-jit/src/fusion_gpu.rs` downcasts `GpuBufferHandle` to `&CudaBuffer<f32>` |
+//! | REQ-2 (pool-return fns) | SHIPPED | `type PoolReturnFn<T>` + `fn return_f32 / return_f64 in buffer.rs`; consumer `crate::pool::pool_return::<CudaSlice<f32>>` wiring fires from buffer Drop |
+//! | REQ-3 (`new_pooled`) | SHIPPED | `impl CudaBuffer<f32>::new_pooled / impl CudaBuffer<f64>::new_pooled in buffer.rs`; consumer `crate::transfer::alloc_zeros_f32` builds pooled buffers via this path |
+//! | REQ-4 (`Drop`) | SHIPPED | `impl<T> Drop for CudaBuffer<T> in buffer.rs`; consumer every dropped buffer in `ferrotorch-llama/src/gpu.rs` flows through this Drop (KV cache, attention outputs) |
+//! | REQ-5 (accessors) | SHIPPED | `pub fn len / alloc_len / is_empty / device_ordinal / inner / inner_mut in buffer.rs`; consumer `ferrotorch-diffusion/src/gpu/vae_encoder.rs` consumes `&CudaBuffer<f32>` via `x.inner()` for kernel launches |
+//! | REQ-6 (`Debug` impl) | SHIPPED | `impl<T> std::fmt::Debug for CudaBuffer<T> in buffer.rs`; consumer structured logging via `format!("{buf:?}")` across the workspace |
+//! | REQ-7 (host-only stub) | SHIPPED | `#[cfg(not(feature = "cuda"))] pub struct CudaBuffer<T> in buffer.rs`; consumer host-only build path keeps `use ferrotorch_gpu::CudaBuffer` valid at `ferrotorch-jit/src/fusion_gpu.rs` |
 
 #[cfg(feature = "cuda")]
 use cudarc::driver::CudaSlice;

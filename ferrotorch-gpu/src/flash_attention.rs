@@ -32,6 +32,23 @@
 //!
 //! When the `cuda` feature is disabled, [`gpu_flash_attention_f32`] returns
 //! `GpuError::NoCudaFeature`.
+//!
+//! ## REQ status (per `.design/ferrotorch-gpu/flash_attention.md`)
+//!
+//! Full evidence rows (impl + non-test production consumer + upstream
+//! cites) live in the design doc; this synopsis is a one-line summary per
+//! REQ.
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 (f32 forward) | SHIPPED | `pub fn gpu_flash_attention_f32 in flash_attention.rs`; consumer `CudaBackendImpl::scaled_dot_product_attention_f32 in backend_impl.rs` (cuda backend SDPA f32 arm); re-exported at `lib.rs` |
+//! | REQ-2 (f64 forward) | SHIPPED | `pub fn gpu_flash_attention_f64 in flash_attention.rs`; consumer `CudaBackendImpl::scaled_dot_product_attention_f64 in backend_impl.rs` (cuda backend SDPA f64 arm); re-exported at `lib.rs` |
+//! | REQ-3 (shared-memory tile layout) | SHIPPED | PTX kernel string in `flash_attention.rs` documents `TILE_K = 32`, `d_max = 128`, 32 KiB shared-mem budget; module `//!` block pins the layout; consumer both `gpu_flash_attention_f32` and `_f64` launch this kernel, downstream `backend_impl.rs` SDPA arms |
+//! | REQ-4 (online-softmax) | SHIPPED | online-softmax `m`/`l` accumulator + rescale logic in the PTX kernel string in `flash_attention.rs`; documented in module `//!` block; consumer every call through `gpu_flash_attention_f32/f64` exercises the path; production at `backend_impl.rs` |
+//! | REQ-5 (causal-mask) | SHIPPED | causal-mask predicate inside the PTX kernel in `flash_attention.rs`, activated by `causal: bool` parameter on `gpu_flash_attention_f32/f64`; consumer `backend_impl.rs` SDPA arm passes `causal` flag from `ferrotorch-nn::scaled_dot_product_attention` |
+//! | REQ-6 (optional attn-mask) | SHIPPED | optional `attn_mask: Option<&CudaBuffer<f32/f64>>` parameter on `gpu_flash_attention_f32/f64 in flash_attention.rs`; PTX branches on mask-pointer-not-null; consumer `backend_impl.rs` SDPA arm passes optional mask through from `ferrotorch-nn` |
+//! | REQ-7 (on-device output) | SHIPPED | both `gpu_flash_attention_f32/f64 in flash_attention.rs` allocate output via `CudaBuffer::empty` and return without host pull; consumer `backend_impl.rs` keeps buffer on-device for downstream GPU consumers |
+//! | REQ-8 (host-only stubs) | SHIPPED | `#[cfg(not(feature = "cuda"))] pub fn gpu_flash_attention_f32 / _f64 in flash_attention.rs` return `Err(GpuError::NoCudaFeature)`; consumer same `backend_impl.rs` SDPA arm under no-cuda compile path |
 
 use crate::buffer::CudaBuffer;
 use crate::device::GpuDevice;

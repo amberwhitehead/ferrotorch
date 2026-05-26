@@ -2,6 +2,21 @@
 //!
 //! [`GpuDevice`] wraps a `cudarc::driver::CudaContext` and its default stream,
 //! providing a safe, ergonomic entry point for all GPU operations.
+//!
+//! ## REQ status (per `.design/ferrotorch-gpu/device.md`)
+//!
+//! Full evidence rows (impl + non-test production consumer + upstream
+//! cites) live in the design doc; this synopsis is a one-line summary per
+//! REQ.
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 (struct shape) | SHIPPED | `pub struct GpuDevice in device.rs` holds `(Arc<CudaContext>, Arc<CudaStream>, CudaBlas, usize)`; consumer `CudaBackendImpl::new in backend_impl.rs` constructs the struct |
+//! | REQ-2 (`GpuDevice::new`) | SHIPPED | `pub fn GpuDevice::new in device.rs` calls `CudaContext::new(ordinal)? + default_stream() + CudaBlas::new(stream)?`; consumer `ferrotorch-jit/src/fusion_gpu.rs` invokes `GpuDevice::new(handle.device_ordinal())` |
+//! | REQ-3 (`fork_for_capture`) | SHIPPED | `pub fn fork_for_capture in device.rs` forks the parent stream and rebinds cuBLAS; consumer `crate::graph` capture suite consumes the forked stream |
+//! | REQ-4 (accessors) | SHIPPED | `pub fn context / default_stream / stream / blas / ordinal in device.rs`; consumer `crate::conv::gpu_conv2d_f32 in conv.rs` calls `dev.context()` for `module_cache::get_or_compile` and every kernel call site uses `dev.stream()` |
+//! | REQ-5 (`impl Clone`) | SHIPPED | `impl Clone for GpuDevice in device.rs` constructs a fresh `CudaBlas` bound to the same shared stream; consumer meta-crate `ferrotorch/src/lib.rs` re-exports `GpuDevice` and tensor-bridge users clone per-thread |
+//! | REQ-6 (host-only stub) | SHIPPED | `#[cfg(not(feature = "cuda"))] pub struct GpuDevice in device.rs` with stub `::new` returning `GpuError::NoCudaFeature`; consumer `ferrotorch-data/src/transforms.rs` threads the stub error through cleanly under `--no-default-features` |
 
 #[cfg(feature = "cuda")]
 use std::sync::Arc;

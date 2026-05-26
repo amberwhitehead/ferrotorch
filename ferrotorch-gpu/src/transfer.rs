@@ -2,6 +2,23 @@
 //!
 //! These functions copy data between CPU (`&[T]` / `Vec<T>`) and GPU
 //! ([`CudaBuffer`]) memory via the device's default CUDA stream.
+//!
+//! ## REQ status (per `.design/ferrotorch-gpu/transfer.md`)
+//!
+//! Full evidence rows (impl + non-test production consumer + upstream
+//! cites) live in the design doc; this synopsis is a one-line summary per
+//! REQ.
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 (`cpu_to_gpu`) | SHIPPED | `pub fn cpu_to_gpu in transfer.rs`; consumer `pub fn tensor_to_gpu in tensor_bridge.rs` calls it; `impl GpuBackend::cpu_to_gpu for CudaBackendImpl in backend_impl.rs` wraps it |
+//! | REQ-2 (`gpu_to_cpu`) | SHIPPED | `pub fn gpu_to_cpu in transfer.rs`; consumer `pub fn tensor_to_cpu in tensor_bridge.rs` calls it; `impl GpuBackend::gpu_to_cpu for CudaBackendImpl in backend_impl.rs` wraps it |
+//! | REQ-3 (`alloc_zeros_f32`) | SHIPPED | `pub fn alloc_zeros_f32 in transfer.rs`; consumer every f32 kernel-launcher in the crate calls it (`pub fn gpu_roll_f32 in roll.rs`, `pub fn gpu_group_norm_f32 in group_norm.rs`, kernel launchers in `kernels.rs`) |
+//! | REQ-4 (`alloc_zeros_f64`/`alloc_zeros_bf16`) | SHIPPED | `pub fn alloc_zeros_f64 / pub fn alloc_zeros_bf16 in transfer.rs`; consumer f64/bf16 kernel-launchers in `kernels.rs` and `bf16.rs` |
+//! | REQ-5 (generic `alloc_zeros<T>`) | SHIPPED | `pub fn alloc_zeros<T> in transfer.rs`; consumer `impl GpuBackend::alloc_zeros for CudaBackendImpl in backend_impl.rs` for dtype-generic allocations; re-exported via `pub use transfer::*` in `lib.rs` |
+//! | REQ-6 (`cpu_to_gpu_pinned`) | SHIPPED | `pub fn cpu_to_gpu_pinned in transfer.rs`; consumer `impl GpuBackend::cpu_to_gpu_pinned for CudaBackendImpl in backend_impl.rs` wraps it; ferrotorch-data's DataLoader pinned-memory path uses it through that trait method |
+//! | REQ-7 (host-only stubs) | SHIPPED | 6 non-CUDA stubs in `transfer.rs` (`cpu_to_gpu_pinned`, `cpu_to_gpu`, `gpu_to_cpu`, `alloc_zeros`, `alloc_zeros_f32`, `alloc_zeros_f64`); consumer workspace `--no-default-features` CI lane compiles cleanly |
+//! | REQ-8 (workspace consumer breadth) | SHIPPED | 200+ non-test call sites across the workspace; representative production consumers cited in REQs 1-6 |
 
 use crate::buffer::CudaBuffer;
 use crate::device::GpuDevice;

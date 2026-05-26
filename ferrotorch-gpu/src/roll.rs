@@ -30,6 +30,20 @@
 //! `RollBackward` is also a roll (with `-shifts` in place of `shifts`); the
 //! grad path in `ferrotorch_core::grad_fns::shape::RollBackward` dispatches
 //! back through this same kernel via the `GpuBackend::roll_f32` trait method.
+//!
+//! ## REQ status (per `.design/ferrotorch-gpu/roll.md`)
+//!
+//! Full evidence rows (impl + non-test production consumer + upstream
+//! cites) live in the design doc; this synopsis is a one-line summary per
+//! REQ.
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 (`gpu_roll_f32`) | SHIPPED | `pub fn gpu_roll_f32 in roll.rs` mirrors upstream `roll_cuda_kernel` at `aten/src/ATen/native/cuda/TensorTransformations.cu:84`; consumer `CudaBackendImpl::roll_f32 in backend_impl.rs` invokes `crate::roll::gpu_roll_f32` |
+//! | REQ-2 (PTX template + ABI) | SHIPPED | `pub(crate) const ROLL_F32_PTX in roll.rs` carries the documented ABI; launch site binds args in the matching order |
+//! | REQ-3 (precondition / normalisation contract) | SHIPPED | precondition checks in `roll.rs` (`dim_size == 0` rejection, `shift_norm >= dim_size` rejection); negative-shift normalisation contract documented in module `//!` block and exercised by `roll_negative_shift_via_normalization_matches_cpu` |
+//! | REQ-4 (input validation) | SHIPPED | device-ordinal check, length check, u32-overflow check inside `pub fn gpu_roll_f32 in roll.rs` |
+//! | REQ-5 (re-export + consumer wiring) | SHIPPED | `pub use roll::gpu_roll_f32 in lib.rs`; consumer `CudaBackendImpl::roll_f32 in backend_impl.rs` (the trait method ferrotorch-core dispatches GPU rolls through, registered via `init_cuda_backend`) |
 
 #[cfg(feature = "cuda")]
 use cudarc::driver::{LaunchConfig, PushKernelArg};

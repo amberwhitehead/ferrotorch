@@ -10,6 +10,23 @@
 //! Call [`init_cuda_backend`] once at startup (typically via `ferrotorch::init()`).
 //! This creates a [`CudaBackendImpl`], initializes CUDA device 0, and registers
 //! it with [`ferrotorch_core::gpu_dispatch::register_gpu_backend`].
+//!
+//! ## REQ status (per `.design/ferrotorch-gpu/backend_impl.md`)
+//!
+//! Full evidence rows (impl + non-test production consumer + upstream
+//! cites) live in the design doc; this synopsis is a one-line summary per
+//! REQ.
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 (`CudaBackendImpl` + `new`) | SHIPPED | `pub struct CudaBackendImpl in backend_impl.rs` + `pub fn new`; consumer `pub fn init_cuda_backend in backend_impl.rs` constructs it; `ferrotorch/examples/ferrotorch_bench.rs` calls `ferrotorch_gpu::init_cuda_backend()` |
+//! | REQ-2 (wrap/unwrap helpers) | SHIPPED | 12 `wrap_* / unwrap_*` helpers on `impl CudaBackendImpl in backend_impl.rs`; consumer 348+ call sites across the `impl GpuBackend` block (every trait method body) |
+//! | REQ-3 (cached cuSPARSE/cuSPARSELt handles) | SHIPPED | `cusparse_handle: OnceLock<CusparseHandle>` + `cusparselt_handle: OnceLock<CusparseLtHandle>` fields in `backend_impl.rs` with lazy accessor methods; consumer SpMM / 2:4-sparse matmul trait method bodies in `impl GpuBackend` block |
+//! | REQ-4 (`init_cuda_backend`) | SHIPPED | `pub fn init_cuda_backend in backend_impl.rs`; consumer `ferrotorch/examples/ferrotorch_bench.rs`; re-exported at `lib.rs` |
+//! | REQ-5 (`get_cuda_device`) | SHIPPED | `pub fn get_cuda_device in backend_impl.rs`; consumer re-exported at `lib.rs`; the downcast-via-`as_any` pattern is the canonical accessor for shared `GpuDevice` from any registered-backend caller |
+//! | REQ-6 (`impl GpuBackend`) | SHIPPED | `impl GpuBackend for CudaBackendImpl in backend_impl.rs` with 348+ method bodies forwarding to `crate::kernels::*` / siblings; consumer ferrotorch-core's `gpu_dispatch::gpu_backend()` returns the registered global `&dyn GpuBackend`, every CUDA-aware tensor op dispatches through it |
+//! | REQ-7 (`map_gpu_err`) | SHIPPED | `fn map_gpu_err in backend_impl.rs`; consumer every `.map_err(Self::map_gpu_err)?` site in trait-method bodies (hundreds) |
+//! | REQ-8 (`gather_or_select`) | SHIPPED | `fn gather_or_select in backend_impl.rs` IS the `GpuBackend::gather_or_select` trait method body; consumer ferrotorch-core's `Tensor::index_select / Tensor::gather` dispatch through it via the trait when source is CUDA-resident |
 
 use std::sync::{Arc, OnceLock};
 

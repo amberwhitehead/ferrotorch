@@ -17,6 +17,23 @@
 //! lookup + `Vec::pop` (microseconds), so contention is negligible.
 //!
 //! # CL-323
+//!
+//! ## REQ status (per `.design/ferrotorch-gpu/pool.md`)
+//!
+//! Full evidence rows (impl + non-test production consumer + upstream
+//! cites) live in the design doc; this synopsis is a one-line summary per
+//! REQ.
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 (global `POOL` state) | SHIPPED | `static POOL: LazyLock<Mutex<PoolState>>` + `PoolState { free: HashMap<PoolKey, Vec<CachedEntry>>, cached_bytes }` in `pool.rs`; consumer `crate::buffer::return_f32` (and `return_f64`) calls `crate::pool::pool_return::<CudaSlice<f32>>` from buffer Drop |
+//! | REQ-2 (`round_len`) | SHIPPED | `pub fn round_len in pool.rs` with `ROUND_ELEMENTS = 256`; consumer `crate::lib.rs` re-exports `round_len` for downstream pre-allocation sizing |
+//! | REQ-3 (`pool_take<T>`) | SHIPPED | `pub fn pool_take<T> in pool.rs`; consumer `crate::transfer::alloc_zeros_f32 in transfer.rs` pooled-allocation fast path |
+//! | REQ-4 (`pool_take_stream<T>`) | SHIPPED | `pub fn pool_take_stream<T> in pool.rs`; consumer API surface for stream-aware paths, pinned by `pool::tests::stream_aware_take` |
+//! | REQ-5 (`pool_return`/`pool_return_with_stream`) | SHIPPED | `pub fn pool_return<T> in pool.rs` + `pool_return_with_stream`; consumer `crate::buffer::return_f32 in buffer.rs` invokes pool-return on every pooled-buffer drop |
+//! | REQ-6 (`record_stream`) | SHIPPED | `pub fn record_stream<T> / record_stream_on_buffer in pool.rs`; consumer paired with `crate::allocator::CudaAllocator::record_stream_on_block` for PyTorch `recordStream` parity |
+//! | REQ-7 (`empty_cache` family) | SHIPPED | `pub fn empty_cache / empty_cache_all / cached_bytes in pool.rs`; consumer `crate::transfer in transfer.rs` calls `crate::pool::empty_cache(0)`; `crate::lib.rs` re-exports for `torch.cuda.empty_cache()`-style usage |
+//! | REQ-8 (`pool_stats`/`reset_pool_stats`) | SHIPPED | `pub fn pool_stats / reset_pool_stats in pool.rs`; consumer pool-hit-rate logging consumes `pool_stats()`, pinned by `pool::tests::pool_stats_tracking` |
 
 use std::any::{Any, TypeId};
 use std::collections::HashMap;

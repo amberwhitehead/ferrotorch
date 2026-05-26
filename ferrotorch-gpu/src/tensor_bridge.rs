@@ -14,6 +14,22 @@
 //! back to a CPU round-trip (copy to host, compute, copy back). The type
 //! parameter is kept for API consistency — once f64 PTX kernels are added,
 //! the fallback disappears transparently.
+//!
+//! ## REQ status (per `.design/ferrotorch-gpu/tensor_bridge.md`)
+//!
+//! Full evidence rows (impl + non-test production consumer + upstream
+//! cites) live in the design doc; this synopsis is a one-line summary per
+//! REQ.
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 (`GpuFloat` trait) | SHIPPED | `pub trait GpuFloat in tensor_bridge.rs` (cuda + non-cuda variants) with `f32 + f64` impls; consumer `pub fn gpu_allreduce in ferrotorch-distributed/src/gpu_collective.rs` imports it; `ferrotorch-distributed/src/ucc_backend.rs` uses it as a trait bound on collective-op method signatures |
+//! | REQ-2 (`GpuTensor<T>`) | SHIPPED | `pub struct GpuTensor<T: GpuFloat> in tensor_bridge.rs`; consumer `ferrotorch-distributed/src/gpu_collective.rs::gpu_allreduce / gpu_broadcast` take `&GpuTensor<T>` arguments; `ferrotorch-distributed/src/ucc_backend.rs` uses it as method parameter type |
+//! | REQ-3 (`tensor_to_gpu`) | SHIPPED | `pub fn tensor_to_gpu in tensor_bridge.rs`; consumer `pub fn gpu_allreduce in ferrotorch-distributed/src/gpu_collective.rs` imports + uses it in no-NCCL fallback |
+//! | REQ-4 (`tensor_to_cpu`) | SHIPPED | `pub fn tensor_to_cpu in tensor_bridge.rs`; consumer `pub fn gpu_allreduce in ferrotorch-distributed/src/gpu_collective.rs` for downloading collective results in fallback path |
+//! | REQ-5 (`Tensor::cuda` convenience helpers) | SHIPPED | `pub fn cuda / pub fn cuda_default in tensor_bridge.rs`; consumer re-exported at `ferrotorch-gpu/src/lib.rs` for downstream crates (ferrotorch-core's `Tensor::cuda()` uses ferrotorch-gpu through `GpuBackend` trait — these helpers serve direct `GpuTensor`-construction callers) |
+//! | REQ-6 (kernel imports / f32-fast-path policy) | SHIPPED | kernel imports at the top of `tensor_bridge.rs` (gpu_add/sub/mul/neg/relu f32+f64; gpu_matmul_f32/f64; gpu_conv2d_f32); f32-only fast-path policy documented in module `//!` block |
+//! | REQ-7 (collective consumers) | SHIPPED | non-test consumer `pub fn gpu_allreduce in ferrotorch-distributed/src/gpu_collective.rs` (uses `GpuFloat, GpuTensor, tensor_to_cpu, tensor_to_gpu`) and `ferrotorch-distributed/src/ucc_backend.rs` (function signatures over `GpuTensor<T>`) |
 
 use ferrotorch_core::{FerrotorchError, FerrotorchResult, Float, Tensor, TensorStorage};
 

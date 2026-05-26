@@ -45,6 +45,20 @@
 //! PyTorch's CUDA argmax returns the index of a NaN if present. This is a known
 //! minor divergence; ferrotorch's float reductions elsewhere take the same
 //! pragmatic strict-compare stance. Documented, not silently hidden.
+//!
+//! ## REQ status (per `.design/ferrotorch-gpu/reduce_arg.md`)
+//!
+//! Full evidence rows (impl + non-test production consumer + upstream
+//! cites) live in the design doc; this synopsis is a one-line summary per
+//! REQ.
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 (12 dtype × {argmax,argmin}) | SHIPPED | 12 `pub fn gpu_argmax_* / gpu_argmin_*` symbols in `reduce_arg.rs` (macro-stamped + hand-written); consumer `CudaBackendImpl::argmax_* / argmin_* in backend_impl.rs` dispatches all 12 dtype × {max,min} combinations through `match dtype` arms |
+//! | REQ-2 (PTX template ABI) | SHIPPED | six `ARGREDUCE_*_PTX` constants in `reduce_arg.rs` carry the documented 7-arg ABI; loaded via `module_cache::get_or_compile` in `fn launch_argreduce` |
+//! | REQ-3 (strict compare → first-tie) | SHIPPED | `setp.gt.f32 / setp.lt.f32` (and dtype counterparts) in PTX templates in `reduce_arg.rs`; verified by `argmax_f32_tie_first_index` unit test constructing `[5.0, 1.0, 2.0, 5.0]` and asserting index 0 |
+//! | REQ-4 (NaN handling) | SHIPPED | NaN divergence documented in `reduce_arg.rs` module `//!` block; strict-compare semantics in PTX naturally produce this behaviour |
+//! | REQ-5 (dispatch wiring) | SHIPPED | `CudaBackendImpl::argmax_f32 / argmin_f32 in backend_impl.rs` dispatch `match dtype { F32 => gpu_argmax_f32, F64 => gpu_argmax_f64, F16 => gpu_argmax_f16, BF16 => gpu_argmax_bf16, I32 => gpu_argmax_i32, I64 => gpu_argmax_i64 }`; mirror block for argmin; ferrotorch-core dispatches through `GpuBackend` trait |
 
 #![cfg(feature = "cuda")]
 

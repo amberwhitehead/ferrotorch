@@ -14,6 +14,35 @@
 //! | [`gpu_mul`] | `out[i] = a[i] * b[i]` |
 //! | [`gpu_neg`] | `out[i] = -a[i]` |
 //! | [`gpu_relu`] | `out[i] = max(a[i], 0.0)` |
+//!
+//! ## REQ status (per `.design/ferrotorch-gpu/kernels.md`)
+//!
+//! Full evidence rows (impl + non-test production consumer + upstream
+//! cites) live in the design doc; this synopsis is a one-line summary per
+//! REQ.
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 (f32→f64 PTX auto-converter) | SHIPPED | `pub(crate) fn ptx_f32_to_f64 in kernels.rs` + `pub(crate) fn get_f64_ptx`; consumer every f64 op in this file that delegates to an f32 template (layernorm_backward / rmsnorm_backward / broadcast_add f64) |
+//! | REQ-2 (elementwise add/sub/mul/div) | SHIPPED | `pub fn gpu_add / gpu_sub / gpu_mul in kernels.rs`; consumer `CudaBackendImpl::add_f32 / sub_f32 / mul_f32 / div_f32 in backend_impl.rs` |
+//! | REQ-3 (broadcast add/sub/mul/div) | SHIPPED | `pub fn gpu_broadcast_add / gpu_broadcast_sub / gpu_broadcast_mul / gpu_broadcast_div in kernels.rs`; consumer `CudaBackendImpl` trait methods for broadcast inputs in `backend_impl.rs` |
+//! | REQ-4 (unary primitives) | SHIPPED | 10 unary `pub fn gpu_*` in `kernels.rs` (neg, relu, abs, exp, log, sqrt, pow, sigmoid, tanh) + transcendental section; consumer `CudaBackendImpl::{relu/neg/exp/log/sqrt/pow/abs/sigmoid/tanh}_{f32,f64} in backend_impl.rs` |
+//! | REQ-5 (activations + backward) | SHIPPED | GELU / SiLU / ELU / Mish + backward sections in `kernels.rs`; consumer `CudaBackendImpl::{gelu/gelu_tanh/gelu_erf/silu/elu/mish/clamp}_* in backend_impl.rs` |
+//! | REQ-6 (reductions) | SHIPPED | reductions + cumulative-scan in `kernels.rs`; consumer `CudaBackendImpl` reduce/sum/prod/min/max trait methods |
+//! | REQ-7 (cumulative scans) | SHIPPED | `pub fn gpu_cumsum / gpu_cumprod / gpu_cummax / gpu_cummin / gpu_logcumsumexp in kernels.rs`; consumer `CudaBackendImpl::cumsum_f32 / cumprod_f32 / etc. in backend_impl.rs` |
+//! | REQ-8 (softmax + log_softmax + backward) | SHIPPED | `pub fn gpu_softmax / gpu_log_softmax in kernels.rs` + backwards; consumer `CudaBackendImpl::softmax_f32 / softmax_f64 / softmax_backward_f32 / softmax_bf16_f32 in backend_impl.rs` |
+//! | REQ-9 (LayerNorm/RMSNorm + backward) | SHIPPED | LayerNorm/RMSNorm + backwards in `kernels.rs`; consumer `CudaBackendImpl::layernorm_f32 / layernorm_backward_f32 / rmsnorm_f32 / rmsnorm_backward_f32 in backend_impl.rs` + f64 variants |
+//! | REQ-10 (index_select / scatter_add legacy f32 path) | SHIPPED | `pub fn gpu_index_select_1d / gpu_scatter_add_1d / gpu_index_select_dim / gpu_index_select_dim_f64 in kernels.rs`; consumer `CudaBackendImpl` legacy f32-encoded `index_select_* / scatter_add_*` arms; modern integer-index path in `gather_int.rs` |
+//! | REQ-11 (masked_fill / masked_zero legacy f32) | SHIPPED | `pub fn gpu_masked_fill / gpu_masked_zero in kernels.rs`; consumer `CudaBackendImpl::masked_fill_f32 / masked_zero_f32` legacy f32-mask path; modern u8-mask path in `masked_kernels.rs` |
+//! | REQ-12 (strided ops) | SHIPPED | strided ops section in `kernels.rs`; consumer `CudaBackendImpl::strided_split / strided_cat / transpose_2d / permute_0213` in `backend_impl.rs` |
+//! | REQ-13 (embedding / KV cache) | SHIPPED | embedding / KV-cache section in `kernels.rs`; consumer `CudaBackendImpl::embed_lookup_* / slice_write_* / slice_read_*` f32+f64 in `backend_impl.rs` |
+//! | REQ-14 (matmul / pool / batchnorm small) | SHIPPED | `pub fn gpu_small_matmul + MaxPool2d/AvgPool2d + BatchNorm2d in kernels.rs`; consumer `CudaBackendImpl::matmul_f32 / conv2d_f32 / pooling / batchnorm` trait methods |
+//! | REQ-15 (dropout) | SHIPPED | `pub fn gpu_dropout in kernels.rs` (dropout section); consumer `CudaBackendImpl::dropout_f32 / dropout_philox_f32 in backend_impl.rs` |
+//! | REQ-16 (bf16 dispatch wrappers) | SHIPPED | bf16 binary / axis-reduction / activation PTX + dispatch functions in `kernels.rs`; consumer `CudaBackendImpl::add_bf16_f32` + broader bf16 trait method block in `backend_impl.rs` |
+//! | REQ-17 (fused Adam / GRU cell) | SHIPPED | `pub fn gpu_fused_adam_step` + fused GRU cell in `kernels.rs`; consumer `ferrotorch-optim` Adam optimizer routes via fused Adam trait method on `GpuBackend` for CUDA |
+//! | REQ-18 (`_into` zero-alloc helpers) | SHIPPED | `_into` helpers section in `kernels.rs` covering 10+ ops; consumer `ferrotorch-core/src/inplace.rs` op dispatch + graph-capture-safe variants in `backend_impl.rs` |
+//! | REQ-19 (f32↔f16 dtype-cast support) | SHIPPED | f32-to-f16 conversion section in `kernels.rs`; consumer `CudaBackendImpl` dtype-cast paths in `backend_impl.rs` |
+//! | REQ-20 (host-only stubs) | SHIPPED | non-CUDA stubs throughout `kernels.rs`; consumer workspace `--no-default-features` CI lane verifies the crate compiles without cuda |
 
 #[cfg(feature = "cuda")]
 use cudarc::driver::LaunchConfig;

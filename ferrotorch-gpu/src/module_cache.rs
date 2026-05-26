@@ -19,6 +19,20 @@
 //! [`gpu_add`]: crate::kernels::gpu_add
 //! [`gpu_conv2d_f32`]: crate::conv::gpu_conv2d_f32
 //! [`gpu_flash_attention_f32`]: crate::flash_attention::gpu_flash_attention_f32
+//!
+//! ## REQ status (per `.design/ferrotorch-gpu/module_cache.md`)
+//!
+//! Full evidence rows (impl + non-test production consumer + upstream
+//! cites) live in the design doc; this synopsis is a one-line summary per
+//! REQ.
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 (`get_or_compile`) | SHIPPED | `pub fn get_or_compile in module_cache.rs` mirrors PyTorch JIT-module-cache role; consumer 100+ sites in `crate::kernels in kernels.rs` plus every PTX-loading sibling (`roll.rs`, `group_norm.rs`, `reduce_arg.rs::launch_argreduce`, etc.) |
+//! | REQ-2 (`get_or_compile_owned`) | SHIPPED | `pub fn get_or_compile_owned in module_cache.rs` with hash-keyed `OWNED_MODULE_CACHE`; consumer FusedChain runtime PTX executor (the workspace's fused-chain JIT path) |
+//! | REQ-3 (composite cache keys) | SHIPPED | `(name, ordinal)` static cache + `(hash, ordinal)` owned cache in `module_cache.rs`; consumer unit tests verify cross-device keys are distinct |
+//! | REQ-4 (`LazyLock<Mutex<HashMap>>`) | SHIPPED | both caches use `LazyLock<Mutex<HashMap<...>>>` in `module_cache.rs`; consumer body of both `get_or_compile` and `get_or_compile_owned` is the lock-lookup-compile-insert pattern |
+//! | REQ-5 (workspace consumer coverage) | SHIPPED | every kernel-loading site in `ferrotorch-gpu/src/` calls into this cache; consumers `kernels.rs`, `bf16.rs`, `f16.rs`, `int_kernels.rs`, `bool_kernels.rs`, `cast_kernels.rs`, `masked_kernels.rs`, `reduce_arg.rs`, `gather_int.rs`, `roll.rs`, `group_norm.rs`, `flash_attention.rs`, `conv.rs`, `upsample.rs`, `rng.rs` (160+ `module_cache::` references) |
 
 #[cfg(feature = "cuda")]
 use std::collections::HashMap;

@@ -23,6 +23,21 @@
 //!
 //! When the `cuda` feature is disabled, all functions return
 //! `GpuError::NoCudaFeature`.
+//!
+//! ## REQ status (per `.design/ferrotorch-gpu/conv.md`)
+//!
+//! Full evidence rows (impl + non-test production consumer + upstream
+//! cites) live in the design doc; this synopsis is a one-line summary per
+//! REQ.
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 (`gpu_conv2d_f32`) | SHIPPED | `pub fn gpu_conv2d_f32 in conv.rs` mirrors `cudnn_convolution` user-API per upstream `aten/src/ATen/native/cudnn/ConvShared.cpp:243`; consumer `CudaBackendImpl::conv2d_f32 in backend_impl.rs` (cuda backend's conv2d dispatch arm) |
+//! | REQ-2 (output-shape compute) | SHIPPED | in-line output-shape computation in `gpu_conv2d_f32 in conv.rs` mirroring `aten/src/ATen/native/Convolution.cpp::conv_output_size`; consumer same call site in `backend_impl.rs` |
+//! | REQ-3 (groups partitioning) | SHIPPED | groups partitioning loop in `gpu_conv2d_f32 in conv.rs` matching upstream groups semantics; consumer `backend_impl.rs` passes user-supplied groups through |
+//! | REQ-4 (bias broadcast) | SHIPPED | bias broadcast kernel launch in `gpu_conv2d_f32 in conv.rs` (`Option<&CudaBuffer<f32>>` branch); consumer `backend_impl.rs` passes `bias` through unwrapped |
+//! | REQ-5 (on-device throughout) | SHIPPED | all three phases (im2col, GEMM, bias) launch on-device in `conv.rs`; result `CudaBuffer<f32>` never touches host; consumer `backend_impl.rs` keeps the resulting buffer on-device |
+//! | REQ-6 (host-only stub) | SHIPPED | `#[cfg(not(feature = "cuda"))] pub fn gpu_conv2d_f32 in conv.rs` returns `Err(GpuError::NoCudaFeature)`; consumer same `backend_impl.rs` arm under no-cuda compile path |
 
 use crate::blas::gpu_matmul_f32;
 use crate::buffer::CudaBuffer;

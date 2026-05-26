@@ -36,6 +36,27 @@
 //! let stats = guard.stats();
 //! println!("free: {} / total: {}", stats.free_device_bytes, stats.total_device_bytes);
 //! ```
+//!
+//! ## REQ status (per `.design/ferrotorch-gpu/memory_guard.md`)
+//!
+//! Full evidence rows (impl + non-test production consumer + upstream
+//! cites) live in the design doc; this synopsis is a one-line summary per
+//! REQ.
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 (`OomPolicy`) | SHIPPED | `pub enum OomPolicy in memory_guard.rs`; consumer `fn handle_oom in memory_guard.rs` match-arms the variants, pinned by `oom_policy_default_is_fail` |
+//! | REQ-2 (`MemoryHook`) | SHIPPED | `pub struct MemoryHook in memory_guard.rs` + `MemoryHook::new`; consumer `fn run_hooks in memory_guard.rs` consumes `priority / estimated_free_bytes / execution_overhead_bytes / callback`, pinned by `memory_hook_debug` |
+//! | REQ-3 (`PressureLevel`) | SHIPPED | `pub enum PressureLevel in memory_guard.rs` + `impl Display`; consumer `MemoryGuard::pressure_level in memory_guard.rs` returns the enum, `notify_pressure_change` consumes it |
+//! | REQ-4 (`MemoryPressureListener`) | SHIPPED | `pub trait MemoryPressureListener in memory_guard.rs`; consumer `MemoryGuard::add_pressure_listener in memory_guard.rs` accepts trait objects, `notify_pressure_change` invokes `on_pressure_change(old, new)` |
+//! | REQ-5 (`MemoryReservation`) | SHIPPED | `pub struct MemoryReservation in memory_guard.rs`; consumer `MemoryGuardBuilder::build in memory_guard.rs` constructs the reservation, `MemoryGuard::release_reservation` releases it |
+//! | REQ-6 (`MemoryStats`) | SHIPPED | `#[non_exhaustive] pub struct MemoryStats in memory_guard.rs`; consumer `MemoryGuard::stats in memory_guard.rs` produces a snapshot, pinned by `memory_stats_clone_eq` |
+//! | REQ-7 (`MemoryGuard`) | SHIPPED | `pub struct MemoryGuard in memory_guard.rs` + method surface; consumer `crate::lib.rs` re-exports as boundary API (grandfathered per goal.md S5) |
+//! | REQ-8 (`MemoryGuardBuilder`) | SHIPPED | `pub struct MemoryGuardBuilder in memory_guard.rs` + `impl`; consumer `crate::lib.rs` re-exports, pinned by `guard_construction_and_stats` |
+//! | REQ-9 (`MemoryWatchdog`) | SHIPPED | `pub struct MemoryWatchdog in memory_guard.rs` + `impl`; consumer `crate::lib.rs` re-exports, pinned by `gpu_tests::watchdog_*` GPU-gated tests |
+//! | REQ-10 (`memory_info` accessor) | SHIPPED | `impl GpuDevice::memory_info in memory_guard.rs`; consumer `MemoryGuard::query_device_memory in memory_guard.rs` calls `cudarc::driver::result::mem_get_info` |
+//! | REQ-11 (`MemoryGuardedDevice`) | SHIPPED | `pub struct MemoryGuardedDevice in memory_guard.rs` + `impl`; consumer `crate::lib.rs` re-exports as boundary API (grandfathered per goal.md S5) |
+//! | REQ-12 (host-only stubs) | SHIPPED | `#[cfg(not(feature = "cuda"))] impl MemoryGuard / MemoryGuardBuilder::build in memory_guard.rs`; consumer `cargo build -p ferrotorch-gpu --no-default-features` succeeds against stubs |
 
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};

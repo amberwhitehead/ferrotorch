@@ -14,6 +14,24 @@
 //! Inverse transforms apply `1/n` normalization in a follow-up kernel
 //! launch, matching torch / numpy convention. cuFFT itself does not
 //! normalize.
+//!
+//! ## REQ status (per `.design/ferrotorch-gpu/cufft.md`)
+//!
+//! Full evidence rows (impl + non-test production consumer + upstream
+//! cites) live in the design doc; this synopsis is a one-line summary per
+//! REQ.
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 (1-D C2C) | SHIPPED | `pub fn gpu_fft_c2c_f32 / gpu_fft_c2c_f64 in cufft.rs` per upstream `aten/src/ATen/native/cuda/SpectralOps.cpp:445`; consumer `CudaBackendImpl::fft_c2c_f32 / fft_c2c_f64 in backend_impl.rs` |
+//! | REQ-2 (2-D C2C) | SHIPPED | `pub fn gpu_fft2_c2c_f32 / gpu_fft2_c2c_f64 in cufft.rs`; consumer `CudaBackendImpl::fft2_c2c_f32 / fft2_c2c_f64 in backend_impl.rs` |
+//! | REQ-3 (3-D C2C) | SHIPPED | `pub fn gpu_fftn3d_c2c_f32 / gpu_fftn3d_c2c_f64 in cufft.rs`; consumer `CudaBackendImpl::fftn3d_c2c_f32 / fftn3d_c2c_f64 in backend_impl.rs` |
+//! | REQ-4 (N-D / axes-selected C2C) | SHIPPED | `pub fn gpu_fftn2d_c2c_f32 / gpu_fftn_axes_c2c_f32 / gpu_fftn_axes_c2c_f64 in cufft.rs`; consumer `CudaBackendImpl::fftn2d_c2c_f32 in backend_impl.rs` and the axes-selected dispatch from `ferrotorch-core/src/fft.rs` |
+//! | REQ-5 (real→complex) | SHIPPED | `pub fn gpu_rfft_r2c_f32 / gpu_rfft_r2c_f64 in cufft.rs` per upstream `aten/src/ATen/native/cuda/SpectralOps.cpp:318`; consumer `CudaBackendImpl::rfft_r2c_f32 / rfft_r2c_f64 in backend_impl.rs` |
+//! | REQ-6 (complex→real) | SHIPPED | `pub fn gpu_irfft_c2r_f32 / gpu_irfft_c2r_f64 in cufft.rs` per upstream `aten/src/ATen/native/cuda/SpectralOps.cpp:405`; consumer `CudaBackendImpl::irfft_c2r_f32 / irfft_c2r_f64 in backend_impl.rs` |
+//! | REQ-7 (hermitian variants) | SHIPPED | `pub fn gpu_hfft_f32 / gpu_hfft_f64 / gpu_ihfft_f32 / gpu_ihfft_f64 in cufft.rs`; consumer `CudaBackendImpl::hfft_* / ihfft_* in backend_impl.rs` (dispatch path in `ferrotorch-core/src/fft.rs`) |
+//! | REQ-8 (1/n normalization on inverse) | SHIPPED | every inverse path in `cufft.rs` issues a follow-up `1/n` normalisation kernel matching `aten/src/ATen/native/cuda/SpectralOps.cpp:298::_fft_apply_normalization_out`; consumer every inverse-direction consumer in `backend_impl.rs` |
+//! | REQ-9 (host-only stubs) | SHIPPED | every cuda function in `cufft.rs` has a matching `#[cfg(not(feature = "cuda"))]` stub returning `Err(GpuError::NoCudaFeature)`; consumer `backend_impl.rs` no-cuda compile path |
 
 #![cfg(feature = "cuda")]
 

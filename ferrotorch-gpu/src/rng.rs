@@ -24,6 +24,22 @@
 //!
 //! [`fork_rng`] and [`join_rng`] snapshot and restore RNG states across
 //! multiple devices, ensuring each DDP rank gets independent RNG streams.
+//!
+//! ## REQ status (per `.design/ferrotorch-gpu/rng.md`)
+//!
+//! Full evidence rows (impl + non-test production consumer + upstream
+//! cites) live in the design doc; this synopsis is a one-line summary per
+//! REQ.
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 (`PhiloxState`) | SHIPPED | `pub struct PhiloxState in rng.rs` with documented constructors; consumer `CudaRngManager::state / restore in rng.rs` for save/restore; re-exported at `lib.rs` |
+//! | REQ-2 (`PhiloxGenerator`) | SHIPPED | `pub struct PhiloxGenerator in rng.rs` with Philox 4x32-10 constants; consumer `CudaRngManager.generators in rng.rs` map stores instances; production callers via `backend_impl.rs` |
+//! | REQ-3 (`CudaRngManager` + global accessor) | SHIPPED | `pub struct CudaRngManager in rng.rs` + `pub fn cuda_rng_manager` singleton; consumer four `crate::rng::cuda_rng_manager().lock()` sites in `backend_impl.rs` |
+//! | REQ-4 (`fork_rng` / `join_rng`) | SHIPPED | `pub fn fork_rng / pub fn join_rng in rng.rs`; consumer re-exported at `lib.rs`; `ferrotorch-core/src/quantize.rs` defines parallel `cuda_rng::fork_rng / join_rng` Python-API surface wrapping these |
+//! | REQ-5 (`gpu_philox_uniform`) | SHIPPED | `pub(crate) const PHILOX_UNIFORM_PTX in rng.rs` + `pub fn gpu_philox_uniform`; consumer dropout-philox path in `CudaBackendImpl::dropout_philox_f32 in backend_impl.rs` derives a seed from the manager and launches the dropout kernel |
+//! | REQ-6 (`gpu_philox_normal`) | SHIPPED | `pub(crate) const PHILOX_NORMAL_PTX in rng.rs` + `pub fn gpu_philox_normal`; consumer re-exported through `lib.rs`, consumed by `ferrotorch-distributions` Normal sampling path on GPU |
+//! | REQ-7 (Manager↔backend wiring) | SHIPPED | `use crate::rng` import sites in `backend_impl.rs` inside dropout-philox / stochastic-rounding `CudaBackendImpl` methods; ferrotorch-core dispatches `Tensor::dropout` through `GpuBackend::dropout_philox_f32` |
 
 use std::collections::HashMap;
 use std::sync::{LazyLock, Mutex};

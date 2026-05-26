@@ -22,6 +22,20 @@
 //!   output element.
 //! - Block: `(256, 1, 1)`.
 //! - No shared memory.
+//!
+//! ## REQ status (per `.design/ferrotorch-gpu/upsample.md`)
+//!
+//! Full evidence rows (impl + non-test production consumer + upstream
+//! cites) live in the design doc; this synopsis is a one-line summary per
+//! REQ.
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 (`gpu_nearest_upsample2x_f32`) | SHIPPED | `pub fn gpu_nearest_upsample2x_f32 in upsample.rs`; consumer `ferrotorch-diffusion/src/gpu/unet.rs` and `ferrotorch-diffusion/src/gpu/vae.rs` both call it |
+//! | REQ-2 (PTX template + ABI) | SHIPPED | `pub(crate) const NEAREST_UPSAMPLE2X_PTX in upsample.rs` with the documented 7-arg ABI; loaded via `module_cache::get_or_compile` in the function body |
+//! | REQ-3 (shape + device validation) | SHIPPED | shape + device validation in `pub fn gpu_nearest_upsample2x_f32 in upsample.rs` after the launch boundary (the standard `ShapeMismatch / DeviceMismatch` pattern) |
+//! | REQ-4 (degenerate short-circuit) | SHIPPED | empty / degenerate short-circuit in `gpu_nearest_upsample2x_f32 in upsample.rs` returns `alloc_zeros_f32(0, device)` before launching when `total == 0` |
+//! | REQ-5 (re-export + consumer wiring) | SHIPPED | `pub use upsample::gpu_nearest_upsample2x_f32 in lib.rs`; consumer `ferrotorch-diffusion/src/gpu/unet.rs` (SD UNet up-block) and `ferrotorch-diffusion/src/gpu/vae.rs` (SD VAE decoder up-block) |
 
 #[cfg(feature = "cuda")]
 use cudarc::driver::{LaunchConfig, PushKernelArg};

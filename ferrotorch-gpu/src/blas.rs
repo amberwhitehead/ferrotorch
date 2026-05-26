@@ -35,6 +35,25 @@
 //! created once in [`GpuDevice::new`] and reused for the lifetime of the
 //! device. If it were ever to fail, the structured `Err` is the correct
 //! response — the caller can decide whether to fall back.
+//!
+//! ## REQ status (per `.design/ferrotorch-gpu/blas.md`)
+//!
+//! Full evidence rows (impl + non-test production consumer + upstream
+//! cites) live in the design doc; this synopsis is a one-line summary per
+//! REQ.
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 (`gpu_matmul_f32/f64`) | SHIPPED | `pub fn gpu_matmul_f32 / gpu_matmul_f64 in blas.rs` mirror cuBLAS SGEMM/DGEMM per upstream `aten/src/ATen/cuda/CUDABlas.cpp:798,780`; consumer `CudaBackendImpl::matmul_f32 / matmul_f64 in backend_impl.rs` (matmul dispatch arm reached from `ferrotorch-core::gpu_dispatch` for `Tensor::matmul`) |
+//! | REQ-2 (`gpu_bmm_f32/f64`) | SHIPPED | `pub fn gpu_bmm_f32 / gpu_bmm_f64 in blas.rs` per upstream `aten/src/ATen/cuda/CUDABlas.cpp:975,964`; consumer `CudaBackendImpl::bmm_f32 / bmm_f64 in backend_impl.rs` |
+//! | REQ-3 (broadcast bmm) | SHIPPED | `pub fn gpu_broadcast_bmm_f32 / gpu_broadcast_bmm_f64 in blas.rs`; consumer `CudaBackendImpl::broadcast_bmm_f32 / broadcast_bmm_f64 in backend_impl.rs` |
+//! | REQ-4 (`gpu_dot`) | SHIPPED | `pub fn gpu_dot_f32 / gpu_dot_f64 in blas.rs` wrap `cublasSdot / cublasDdot`; consumer `CudaBackendImpl::dot_f32 in backend_impl.rs` |
+//! | REQ-5 (matvec) | SHIPPED | `pub fn gpu_mv_f32 / gpu_mv_f64 / gpu_vm_f32 / gpu_vm_f64 in blas.rs` wrap `cublasSgemv/Dgemv`; consumer `CudaBackendImpl::mv_f32 / vm_f32 in backend_impl.rs` |
+//! | REQ-6 (f16 matmul) | SHIPPED | `pub fn gpu_matmul_f16 / gpu_matmul_f16_f16 / gpu_bmm_f16 in blas.rs` per upstream `aten/src/ATen/cuda/CUDABlas.cpp:758`; consumer `CudaBackendImpl::matmul_f16 in backend_impl.rs` |
+//! | REQ-7 (bf16 matmul family) | SHIPPED | `pub fn gpu_matmul_bf16 / gpu_matmul_bf16_bf16 / gpu_matmul_bf16_bf16_nt / gpu_bmm_bf16 / gpu_matmul_bf16_bf16_strided_batched / gpu_matmul_bf16_bf16_strided_batched_nt in blas.rs` per upstream `aten/src/ATen/cuda/CUDABlas.cpp:768`; consumer `CudaBackendImpl::matmul_bf16 / matmul_bf16_bf16 / matmul_bf16_bf16_strided_batched in backend_impl.rs` |
+//! | REQ-8 (`_into` zero-alloc variants) | SHIPPED | `pub fn gpu_matmul_f32_into / gpu_bmm_f32_into in blas.rs`; consumer the zero-host-allocation arms in `backend_impl.rs` when matmul result stays on GPU |
+//! | REQ-9 (host-only stubs) | SHIPPED | every `cfg(feature = "cuda")` entry point has a `cfg(not(feature = "cuda"))` stub in `blas.rs`; consumer no-cuda compile path of the same backend_impl arms (`cargo build -p ferrotorch-gpu --no-default-features` succeeds) |
+//! | REQ-10 (structured errors / no silent CPU fallback) | SHIPPED | every cuBLAS call in `blas.rs` is wrapped to surface `GpuError::Blas(...)` / `GpuError::Driver(...)`; consumer every caller in `backend_impl.rs` uses `.map_err(Self::map_gpu_err)?` |
 
 #[cfg(feature = "cuda")]
 use cudarc::cublas::{Gemm, GemmConfig, Gemv, GemvConfig, StridedBatchedConfig, sys};

@@ -24,6 +24,22 @@
 //! bf16: a bf16 is the high 16 bits of an f32. Decode = splat into the high
 //! half of a b32 register (`shl 16`) + reinterpret (`mov.b32`). Encode uses the
 //! hardware `cvt.rn.bf16.f32` (sm_80+; the host RTX 3090 is sm_86).
+//!
+//! ## REQ status (per `.design/ferrotorch-gpu/cast_kernels.md`)
+//!
+//! Full evidence rows (impl + non-test production consumer + upstream
+//! cites) live in the design doc; this synopsis is a one-line summary per
+//! REQ.
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 (float→int truncate) | SHIPPED | `pub fn cast_f32_to_i32 / cast_f32_to_i64 / cast_f64_to_i32 / cast_f64_to_i64 / cast_f16_to_i32 / cast_f16_to_i64 / cast_bf16_to_i32 / cast_bf16_to_i64 in cast_kernels.rs` use PTX `cvt.rzi`; consumer eight float→int dispatch arms of `CudaBackendImpl::to_dtype in backend_impl.rs` (e.g. `ck::cast_f32_to_i32`) |
+//! | REQ-2 (int→float round-nearest) | SHIPPED | `pub fn cast_i32_to_f32 / cast_i32_to_f64 / cast_i32_to_f16 / cast_i32_to_bf16 / cast_i64_to_f32 / cast_i64_to_f64 / cast_i64_to_f16 / cast_i64_to_bf16 in cast_kernels.rs` use PTX `cvt.rn`; consumer eight int→float dispatch arms in `backend_impl.rs` |
+//! | REQ-3 (int↔int widen/narrow) | SHIPPED | `pub fn cast_i32_to_i64` (sign-extend `cvt.s64.s32`) + `pub fn cast_i64_to_i32` (truncate `cvt.s32.s64`, wrapping) in `cast_kernels.rs`; consumer `ck::cast_i32_to_i64 / ck::cast_i64_to_i32` arms in `backend_impl.rs` |
+//! | REQ-4 (int self-copy) | SHIPPED | `pub fn cast_i32_copy / cast_i64_copy in cast_kernels.rs` (plain `ld.global.b{32,64} / st.global.b{32,64}` element copies); consumer `ck::cast_i32_copy` arm in `backend_impl.rs` + the i64-copy sibling |
+//! | REQ-5 (bool→float) | SHIPPED | `pub fn cast_bool_to_f32 / cast_bool_to_f64 / cast_bool_to_f16 / cast_bool_to_bf16 in cast_kernels.rs` (each normalises via `setp.ne %nz, %bv, 0; selp 1, 0, %nz` then `cvt.rn.f*.u32`); consumer four bool→float arms of the `to_dtype` handler in `backend_impl.rs` |
+//! | REQ-6 (SAFETY annotation) | SHIPPED | the single `unsafe { stream.launch_builder(&f)...launch(cfg)? }` block in `fn launch_cast in cast_kernels.rs` carries a multi-line `SAFETY:` comment; consumer SAFETY contract inherited via every `pub fn cast_*` wrapper called from `backend_impl.rs` |
+//! | REQ-7 (empty-input short-circuit) | SHIPPED | `fn launch_cast in cast_kernels.rs` opens with `if n == 0 { return Ok(stream.alloc_zeros::<OUT>(0)?); }` plus `debug_assert!(input.len() >= n)`; consumer backend dispatch path relies on this for empty dtype casts |
 
 #![cfg(feature = "cuda")]
 

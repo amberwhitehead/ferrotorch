@@ -5,6 +5,20 @@
 //! correspond 1:1 with the failure modes the rest of the crate produces. The
 //! cudarc-error wrappers are gated behind the `cuda` feature so the crate can
 //! still build (with stubs) when the feature is disabled.
+//!
+//! ## REQ status (per `.design/ferrotorch-gpu/error.md`)
+//!
+//! Full evidence rows (impl + non-test production consumer + upstream
+//! cites) live in the design doc; this synopsis is a one-line summary per
+//! REQ.
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 (`GpuError` enum) | SHIPPED | `#[derive(Debug, thiserror::Error)] #[non_exhaustive] pub enum GpuError in error.rs`; consumer `ferrotorch-llama/src/gpu.rs` match-arms on the variant set |
+//! | REQ-2 (cudarc `From` lifts) | SHIPPED | `Driver(#[from] DriverError) / Blas(#[from] CublasError) / Solver(#[from] CusolverError) / Fft(#[from] CufftError)` in `error.rs`; consumer every kernel module uses `?` against cudarc calls |
+//! | REQ-3 (semantic variants) | SHIPPED | nine structured variants in `error.rs`; consumers `crate::stream` produces `InvalidDevice`, `crate::memory_guard` produces `BudgetExceeded`/`OutOfMemory`, `crate::graph` produces `InvalidState` |
+//! | REQ-4 (`NoCudaFeature` stub) | SHIPPED | `#[cfg(not(feature = "cuda"))] NoCudaFeature` in `error.rs`; consumer `ferrotorch-data/src/transforms.rs` receives error from `init_cuda_backend()` and falls back to CPU |
+//! | REQ-5 (`GpuResult` alias) | SHIPPED | `pub type GpuResult<T> = Result<T, GpuError>` in `error.rs`; consumer every public fn in `device.rs / allocator.rs / memory_guard.rs / transfer.rs` returns `GpuResult<T>` |
 
 /// Errors produced by GPU operations.
 #[derive(Debug, thiserror::Error)]

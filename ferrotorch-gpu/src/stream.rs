@@ -16,6 +16,25 @@
 //! The thread-local current stream allows callers to override which stream a
 //! device operation targets without threading a stream parameter through every
 //! function. [`StreamGuard`] makes this ergonomic and exception-safe.
+//!
+//! ## REQ status (per `.design/ferrotorch-gpu/stream.md`)
+//!
+//! Full evidence rows (impl + non-test production consumer + upstream
+//! cites) live in the design doc; this synopsis is a one-line summary per
+//! REQ.
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 (`StreamPriority`) | SHIPPED | `pub enum StreamPriority in stream.rs` + `impl StreamPriority::to_cuda_priority`; consumer `StreamPool::get_priority_stream in stream.rs` consumes the enum |
+//! | REQ-2 (`get_stream_priority_range`) | SHIPPED | `pub fn get_stream_priority_range in stream.rs`; consumer `new_stream_with_priority in stream.rs` calls it to bracket the integer |
+//! | REQ-3 (layout guard for transmute) | SHIPPED | `struct CudaStreamMirror in stream.rs` + `const _CUDA_STREAM_LAYOUT_GUARD`; consumer `new_stream_with_priority in stream.rs` performs the transmute under the guard |
+//! | REQ-4 (`new_stream_with_priority`) | SHIPPED | `pub fn new_stream_with_priority in stream.rs`; consumer `StreamPool::get_priority_stream in stream.rs` lazy-init path |
+//! | REQ-5 (`CudaEventWrapper`) | SHIPPED | `pub struct CudaEventWrapper in stream.rs` + methods; consumer `crate::graph in graph.rs` event-recording semantics, pinned by `event_record_sync` |
+//! | REQ-6 (`StreamPool`/`get_stream`) | SHIPPED | `pub struct StreamPool in stream.rs` + `pub fn get_stream` + `pub fn pool_size`; consumer `crate::backend_impl::CudaBackendImpl in backend_impl.rs` calls `crate::stream::StreamPool::pool_size(device)` |
+//! | REQ-7 (`get_priority_stream`) | SHIPPED | `pub fn StreamPool::get_priority_stream in stream.rs` + `priority_pool_size`; consumer API surface pinned by `priority_pool_caches_streams_per_device_and_priority` test |
+//! | REQ-8 (thread-local current stream) | SHIPPED | `thread_local! CURRENT_STREAMS in stream.rs` + `pub fn get_current_stream / set_current_stream / clear_current_stream / current_stream_or_default`; consumer `crate::device::GpuDevice::stream in device.rs` calls `crate::stream::current_stream_or_default(self)` |
+//! | REQ-9 (`StreamGuard` RAII) | SHIPPED | `pub struct StreamGuard in stream.rs` + `impl StreamGuard::new + impl Drop`; consumer API surface (grandfathered per goal.md S5) pinned by `stream_guard_restores_previous` |
+//! | REQ-10 (host-only stubs) | SHIPPED | `#[cfg(not(feature = "cuda"))]` stubs in `stream.rs`; consumer `cargo build -p ferrotorch-gpu --no-default-features` succeeds against stubs |
 
 #[cfg(feature = "cuda")]
 use std::cell::RefCell;

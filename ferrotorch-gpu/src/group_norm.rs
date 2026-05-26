@@ -30,6 +30,20 @@
 //! - 256 threads per block; one block per group; per-block reductions
 //!   for the mean and variance use 256 f32 of shared memory.
 //! - Affine application uses the per-channel `γ[c]`, `β[c]`.
+//!
+//! ## REQ status (per `.design/ferrotorch-gpu/group_norm.md`)
+//!
+//! Full evidence rows (impl + non-test production consumer + upstream
+//! cites) live in the design doc; this synopsis is a one-line summary per
+//! REQ.
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 (`gpu_group_norm_f32`) | NOT-STARTED | blocker #1356 — impl: `pub fn gpu_group_norm_f32 in group_norm.rs` mirrors upstream `GroupNormKernelImpl` at `aten/src/ATen/native/cuda/group_norm_kernel.cu:649`, BUT no non-test production consumer invokes it (only `#[cfg(test)] mod tests` callers + `pub use` re-export at `lib.rs`). Prereq: needs a `group_norm_f32` trait method on `GpuBackend` + `CudaBackendImpl` consumer wiring |
+//! | REQ-2 (PTX template + ABI) | SHIPPED | `pub(crate) const GROUP_NORM_PTX in group_norm.rs` carries the three-pass mean / variance / affine PTX; ABI matches the launch site; verified by unit tests being numerically correct |
+//! | REQ-3 (input validation) | SHIPPED | validation checks in `pub fn gpu_group_norm_f32 in group_norm.rs` (groups divisibility, input length, weight length, bias length, device ordinal) |
+//! | REQ-4 (degenerate short-circuit) | SHIPPED | degenerate short-circuit in `gpu_group_norm_f32 in group_norm.rs` returns `alloc_zeros_f32(n, device)` for `n == 0 || channels == 0 || hw == 0` |
+//! | REQ-5 (backend trait wiring) | NOT-STARTED | blocker #1357 — no `group_norm_*` trait method exists on `GpuBackend` in `ferrotorch-core/src/gpu_dispatch.rs`, and no `fn group_norm_*` exists in `backend_impl.rs`. Prereq: add `group_norm_f32` to the `GpuBackend` trait + wire `CudaBackendImpl` to call `crate::group_norm::gpu_group_norm_f32`; ferrotorch-nn's `GroupNorm` currently falls back to a CPU path or per-element kernels |
 
 #[cfg(feature = "cuda")]
 use cudarc::driver::{LaunchConfig, PushKernelArg};

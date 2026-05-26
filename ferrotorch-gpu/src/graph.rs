@@ -27,6 +27,24 @@
 //!     graph.launch()?;         // replay all captured ops
 //! }
 //! ```
+//!
+//! ## REQ status (per `.design/ferrotorch-gpu/graph.md`)
+//!
+//! Full evidence rows (impl + non-test production consumer + upstream
+//! cites) live in the design doc; this synopsis is a one-line summary per
+//! REQ.
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 (`CaptureMode`) | SHIPPED | `pub enum CaptureMode in graph.rs` with `to_cuda`; consumer `pub use graph::CaptureMode in lib.rs` exposes it; `backend_impl.rs` lifecycle paths use the type |
+//! | REQ-2 (`CaptureStatus`) | SHIPPED | `pub enum CaptureStatus in graph.rs` with `is_capturing`; consumer `pub use graph::CaptureStatus in lib.rs` |
+//! | REQ-3 (capture lifecycle) | NOT-STARTED | blocker #1355 — impl: seven lifecycle entry points exist in `graph.rs`; no non-test production consumer invokes them. Prereq: wire CUDA graph capture into Llama/SD inference loops or expose via `CudaBackendImpl::capture_*` trait method |
+//! | REQ-4 (`CapturedGraph`/`GraphCaptureGuard`) | NOT-STARTED | blocker #1355 — impl: `pub struct CapturedGraph in graph.rs` + `pub struct GraphCaptureGuard` exist; no non-test consumer constructs either |
+//! | REQ-5 (`DeviceScalar<T>`) | NOT-STARTED | blocker #1355 — impl: `pub struct DeviceScalar<T> in graph.rs` with `update`; no non-test consumer instantiates it. Prereq: production callsite for per-replay parameter pipes |
+//! | REQ-6 (`CapturePool`/`GraphPoolHandle`) | NOT-STARTED | blocker #1355 — impl: `pub struct CapturePool in graph.rs`, `pub struct GraphPoolHandle`, `pub fn graph_pool_handle`; no non-test consumer uses the mempool reuse API |
+//! | REQ-7 (`make_graphed_callable<F>`) | NOT-STARTED | blocker #1355 — impl: `pub fn make_graphed_callable<F> in graph.rs`; no non-test consumer. Prereq: a model decode loop adopting `make_graphed_callable` |
+//! | REQ-8 (host-only stub) | SHIPPED | non-CUDA stub block in `graph.rs` re-defines every public symbol with matching signatures returning `GpuError`; consumer ferrotorch-gpu compiles cleanly without `cuda` feature (workspace `--no-default-features` CI lane) |
+//! | REQ-9 (production graph consumer) | NOT-STARTED | blocker #1355 — no non-test production consumer of the graph API exists. Prereq: pick one downstream use site (Llama per-token decode is the canonical PyTorch reference) and wire `make_graphed_callable` into it |
 
 #[cfg(feature = "cuda")]
 use std::sync::Arc;

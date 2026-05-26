@@ -37,6 +37,20 @@
 //! contract). The kernels compute the address from `index[..]` without a bound
 //! check, exactly as PyTorch's CUDA `index_select` / `gather` do. Documented;
 //! not silently clamped.
+//!
+//! ## REQ status (per `.design/ferrotorch-gpu/gather_int.md`)
+//!
+//! Full evidence rows (impl + non-test production consumer + upstream
+//! cites) live in the design doc; this synopsis is a one-line summary per
+//! REQ.
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 (20 isel/gather entries) | SHIPPED | 20 `pub fn isel_* / gather_*` entries in `gather_int.rs` (via `select_entry!` macro invocations); consumer `CudaBackendImpl::gather_or_select in backend_impl.rs` dispatches all 20 cells through the `run!` macro |
+//! | REQ-2 (12 PTX macro-expansions) | SHIPPED | `index_select_ptx!` and `gather_ptx!` macros in `gather_int.rs` expand 12 PTX entries (6 select × {W2,W4,W8} × {I32,I64} + 6 gather × ditto), resolved by `isel_ptx / gathr_ptx` in the same file |
+//! | REQ-3 (C-order layout contract) | SHIPPED | layout contract documented in `gather_int.rs` module `//!` block and reflected in the PTX address math; verified by unit tests' expected-output construction |
+//! | REQ-4 (out-of-range UB contract) | SHIPPED | out-of-range UB contract documented in `gather_int.rs` module `//!` block; PTX templates omit any bounds check on the loaded index, matching upstream `at::native::index_select_cuda` in `aten/src/ATen/native/cuda/Indexing.cu` |
+//! | REQ-5 (consumer wiring) | SHIPPED | `CudaBackendImpl::gather_or_select in backend_impl.rs` is the production consumer; ferrotorch-core's `Tensor::index_select / Tensor::gather` dispatch through it via the `GpuBackend::gather_or_select` trait method when source is CUDA-resident |
 
 #![cfg(feature = "cuda")]
 

@@ -36,6 +36,26 @@
 //! The critical section is short (BTreeSet lookup + pointer bookkeeping).
 //!
 //! # CL-323
+//!
+//! ## REQ status (per `.design/ferrotorch-gpu/allocator.md`)
+//!
+//! Full evidence rows (impl + non-test production consumer + upstream
+//! cites) live in the design doc; this synopsis is a one-line summary per
+//! REQ.
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 (PyTorch constants) | SHIPPED | `MIN_BLOCK_SIZE / SMALL_SIZE / SMALL_BUFFER / MIN_LARGE_ALLOC / ROUND_LARGE` in `allocator.rs` matching PyTorch `c10/cuda/CUDACachingAllocator.cpp`; consumer `pub use` via `crate::lib.rs` is the surface |
+//! | REQ-2 (`StreamId`) | SHIPPED | `pub struct StreamId(pub usize) in allocator.rs`; consumer `crate::pool::pool_take_stream / pool_return_with_stream in pool.rs` uses it as the pool-key segment |
+//! | REQ-3 (`Block`) | SHIPPED | `pub struct Block in allocator.rs` + `NEXT_BLOCK_ID`; consumer `AllocatorState::blocks: Vec<Block>` consumes the type internally |
+//! | REQ-4 (`BlockPool`/`BlockKey`/`find_free_block`) | SHIPPED | `pub(crate) struct BlockPool in allocator.rs`; consumer `AllocatorState::small_pool` and `large_pool` fields consume the type |
+//! | REQ-5 (`AllocatorState`) | SHIPPED | `pub(crate) struct AllocatorState in allocator.rs`; consumer `pub(crate) state: Mutex<AllocatorState>` field of `CudaAllocator` |
+//! | REQ-6 (`should_split`) | SHIPPED | `pub(crate) fn should_split in allocator.rs`; consumer `cache_find / cache_insert in allocator.rs` consult it before `split_block` |
+//! | REQ-7 (`try_merge`/`free_block`) | SHIPPED | `pub(crate) fn try_merge in allocator.rs` + `free_block`; consumer `cache_free` calls `free_block` to coalesce on every release |
+//! | REQ-8 (`round_size`/`get_allocation_size`) | SHIPPED | `pub fn round_size in allocator.rs` + `pub fn get_allocation_size`; consumers `cache_find / cache_insert / driver_alloc_size in allocator.rs` |
+//! | REQ-9 (`CudaAllocator`) | SHIPPED | `pub struct CudaAllocator in allocator.rs` + method surface; consumer `crate::lib.rs` re-exports `CudaAllocator` as boundary API (grandfathered per goal.md S5) |
+//! | REQ-10 (atomic stats) | SHIPPED | `allocated_bytes_atomic` + `peak_bytes_atomic: AtomicUsize` in `allocator.rs`; consumer `pub fn memory_allocated / max_memory_allocated in allocator.rs` expose the surface |
+//! | REQ-11 (host-only stub) | SHIPPED | `#[cfg(not(feature = "cuda"))] impl CudaAllocator in allocator.rs`; consumer `cargo build -p ferrotorch-gpu --no-default-features` compiles; `crate::lib.rs pub use allocator::CudaAllocator` resolves in host builds |
 
 use std::collections::{BTreeSet, HashSet};
 use std::sync::atomic::{AtomicUsize, Ordering};

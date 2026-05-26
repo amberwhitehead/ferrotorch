@@ -9,6 +9,26 @@
 //! All functions operate on column-major data because cuSOLVER (LAPACK-style)
 //! uses column-major layout. The caller is responsible for transposing
 //! row-major tensors before calling and transposing outputs back.
+//!
+//! ## REQ status (per `.design/ferrotorch-gpu/cusolver.md`)
+//!
+//! Full evidence rows (impl + non-test production consumer + upstream
+//! cites) live in the design doc; this synopsis is a one-line summary per
+//! REQ.
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 (SVD) | SHIPPED | `pub fn gpu_svd_f32 / gpu_svd_f64 / gpu_svd_f32_dev / gpu_svd_f64_dev in cusolver.rs` per upstream `aten/src/ATen/native/cuda/linalg/BatchLinearAlgebraLib.cpp:643::svd_cusolver`; consumer `CudaBackendImpl::svd_f32_dev / svd_f64_dev in backend_impl.rs` |
+//! | REQ-2 (Cholesky) | SHIPPED | `pub fn gpu_cholesky_f32 / gpu_cholesky_f64 / gpu_cholesky_f32_dev / gpu_cholesky_f64_dev in cusolver.rs` per upstream `aten/src/ATen/native/cuda/linalg/BatchLinearAlgebraLib.cpp:800::cholesky_helper_cusolver`; consumer `CudaBackendImpl::cholesky_f32_dev / cholesky_f64_dev in backend_impl.rs` |
+//! | REQ-3 (QR) | SHIPPED | `pub fn gpu_qr_f32 / gpu_qr_f64 / gpu_qr_f32_dev / gpu_qr_f64_dev in cusolver.rs` per upstream `aten/src/ATen/native/cuda/linalg/BatchLinearAlgebraLib.cpp:1025::geqrf_cusolver`; consumer `CudaBackendImpl::qr_f32_dev / qr_f64_dev in backend_impl.rs` |
+//! | REQ-4 (linear solve) | SHIPPED | `pub fn gpu_solve_f32 / gpu_solve_f64 / gpu_solve_f32_dev / gpu_solve_f64_dev in cusolver.rs`; consumer `CudaBackendImpl::solve_f32_dev / solve_f64_dev in backend_impl.rs` |
+//! | REQ-5 (LU factor) | SHIPPED | `pub fn gpu_lu_factor_f32 / gpu_lu_factor_f64 in cusolver.rs` per upstream `aten/src/ATen/native/cuda/linalg/BatchLinearAlgebraLib.cpp:1647::lu_factor_looped_cusolver`; consumer `CudaBackendImpl::lu_factor_f32 / lu_factor_f64 in backend_impl.rs` (dispatch via `ferrotorch-core/src/linalg.rs`) |
+//! | REQ-6 (least squares) | SHIPPED | `pub fn gpu_lstsq_f32 / gpu_lstsq_f64 in cusolver.rs`; consumer `CudaBackendImpl::lstsq_f32 / lstsq_f64 in backend_impl.rs` |
+//! | REQ-7 (general eig) | SHIPPED | `pub fn gpu_eig_f32 / gpu_eig_f64 / gpu_eig_f32_dev / gpu_eig_f64_dev in cusolver.rs` per upstream `aten/src/ATen/native/cuda/linalg/BatchLinearAlgebraLib.cpp:1636::linalg_eig_cusolver_xgeev`; consumer `CudaBackendImpl::eig_f32 / eig_f64 in backend_impl.rs` |
+//! | REQ-8 (symmetric eig + eigvals) | SHIPPED | `pub fn gpu_eigh_f32 / gpu_eigh_f64 / gpu_eigvalsh_f32 / gpu_eigvalsh_f64 in cusolver.rs` per upstream `aten/src/ATen/native/cuda/linalg/BatchLinearAlgebraLib.cpp:1509::linalg_eigh_cusolver`; consumer `CudaBackendImpl::eigh_f32 / eigh_f64 / eigvalsh_f32 / eigvalsh_f64 in backend_impl.rs` |
+//! | REQ-9 (`DnParamsHandle` RAII) | SHIPPED | `impl DnParamsHandle in cusolver.rs` + `impl Drop for DnParamsHandle`; consumer every eig/SVD path in `cusolver.rs` taking a `cusolverDnParams_t` opaque allocates a `DnParamsHandle` and lets RAII drop it |
+//! | REQ-10 (devInfo error propagation) | SHIPPED | every cuSOLVER call in `cusolver.rs` checks `devInfo` and returns `Err(GpuError::Solver(...))` on non-zero; consumer every caller in `backend_impl.rs` uses `.map_err(Self::map_gpu_err)?` |
+//! | REQ-11 (host-only stubs) | SHIPPED | `#[cfg(not(feature = "cuda"))]` stubs in `cusolver.rs` return `Err(GpuError::NoCudaFeature)`; consumer same `backend_impl.rs` dispatch arms under no-cuda compile path |
 
 #[cfg(feature = "cuda")]
 use cudarc::cusolver as cusolver_safe;

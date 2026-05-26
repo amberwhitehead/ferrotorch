@@ -28,6 +28,23 @@
 //! always `u16` (`.b16`) in global memory. No whole-tensor f32
 //! intermediate materialisation. Reductions accumulate in f32 (PyTorch
 //! parity for half-precision reductions).
+//!
+//! ## REQ status (per `.design/ferrotorch-gpu/f16.md`)
+//!
+//! Full evidence rows (impl + non-test production consumer + upstream
+//! cites) live in the design doc; this synopsis is a one-line summary per
+//! REQ.
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 (elementwise binary) | SHIPPED | `pub fn gpu_mul_f16 / gpu_add_f16 / gpu_sub_f16 / gpu_div_f16 in f16.rs`; consumer `CudaBackendImpl::add_f16 / sub_f16 / mul_f16 / div_f16 in backend_impl.rs` |
+//! | REQ-2 (unary activations) | SHIPPED | `pub fn gpu_silu_f16 / gpu_relu_f16 / gpu_gelu_f16 / gpu_exp_f16 / gpu_log_f16 / gpu_tanh_f16 / gpu_sigmoid_f16 / gpu_sqrt_f16 / gpu_neg_f16 in f16.rs`; consumer the f16 arm of activation dispatchers in `backend_impl.rs` |
+//! | REQ-3 (`gpu_scale_f16`) | SHIPPED | `pub fn gpu_scale_f16 in f16.rs`; consumer `CudaBackendImpl::scale_f16 in backend_impl.rs` |
+//! | REQ-4 (broadcast binary) | SHIPPED | `pub fn gpu_broadcast_add_f16 / gpu_broadcast_sub_f16 / gpu_broadcast_mul_f16 / gpu_broadcast_div_f16 in f16.rs`; consumer the f16 broadcast arms in `backend_impl.rs` |
+//! | REQ-5 (reductions) | SHIPPED | `pub fn gpu_sum_f16 / gpu_mean_f16 / gpu_sum_axis_f16 / gpu_mean_axis_f16 in f16.rs`; consumer f16 reduction arms in `backend_impl.rs` |
+//! | REQ-6 (norm/softmax) | SHIPPED | `pub fn gpu_layernorm_f16 / gpu_rmsnorm_f16 / gpu_softmax_f16 in f16.rs`; consumer f16 softmax/layernorm/rmsnorm dispatchers in `backend_impl.rs` |
+//! | REQ-7 (SAFETY annotations) | SHIPPED | every `unsafe { ... launch(cfg)? }` in `f16.rs` carries a multi-line `SAFETY:` comment naming compile site, entry signature, buffer alloc, bound check, `n as u32` non-truncation; consumer SAFETY contract inherited via each public wrapper called from `backend_impl.rs` |
+//! | REQ-8 (empty-input short-circuit) | SHIPPED | every `pub fn gpu_*_f16 in f16.rs` opens with `if n == 0 { return Ok(stream.alloc_zeros::<u16>(0)?); }`; consumer backend dispatch path relies on the no-launch short circuit |
 
 #![cfg(feature = "cuda")]
 
