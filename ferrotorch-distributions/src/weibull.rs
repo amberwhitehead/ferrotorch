@@ -2,6 +2,24 @@
 //!
 //! `Weibull(scale, concentration)` — a two-parameter continuous distribution
 //! commonly used in reliability engineering and survival analysis.
+//!
+//! ## REQ status (per `.design/ferrotorch-distributions/weibull.md`)
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 (`Weibull` struct) | SHIPPED | `pub struct Weibull` in `weibull.rs`; re-exported as `pub use weibull::Weibull` in `lib.rs:124`; mirrors `torch/distributions/weibull.py:40-56`. |
+//! | REQ-2 (`new` constructor, shape match) | SHIPPED | `Weibull::new` rejecting shape mismatch; registered in `tests/conformance/_surface_inventory.toml:511`. |
+//! | REQ-3 (`scale` + `concentration` accessors) | SHIPPED | accessors in `weibull.rs`. |
+//! | REQ-4 (`Distribution::sample` via inverse-CDF) | SHIPPED | `impl Distribution::sample` returns `scale * (-log(1-u))^(1/k)`; mirrors `TransformedDistribution(Exponential, [Power(1/k), Affine(scale)])` chain at `weibull.py:48-56`. |
+//! | REQ-5 (`Distribution::log_prob`) | SHIPPED | `impl Distribution::log_prob` returns the closed-form Weibull log density (`-inf` for `x < 0`). |
+//! | REQ-6 (`Distribution::entropy`) | SHIPPED | `impl Distribution::entropy` returns `euler*(1-1/k) + log(lambda/k) + 1`; mirrors `weibull.py:91-96`. |
+//! | REQ-7 (`Distribution::cdf` closed-form) | SHIPPED | `impl Distribution::cdf` returns `1 - exp(-(x/lambda)^k)`; R-DEV-7 enhancement (upstream lacks direct `cdf` override). |
+//! | REQ-8 (`Distribution::icdf` closed-form) | SHIPPED | `impl Distribution::icdf` returns `lambda * (-log(1-p))^(1/k)`; R-DEV-7 enhancement. |
+//! | REQ-9 (`Distribution::mean`) | SHIPPED | `impl Distribution::mean` returns `lambda * exp(lgamma(1 + 1/k))`; mirrors `weibull.py:72-74`. Uses `lgamma_scalar` from `special_fns.rs`. |
+//! | REQ-10 (`Distribution::mode` with `k <= 1` clamp) | SHIPPED | `impl Distribution::mode` returns `lambda * ((k-1)/k)^(1/k)` for `k > 1` else `0`; R-DEV-6 deviation from upstream NaN (`weibull.py:76-82`). |
+//! | REQ-11 (`Distribution::variance`) | SHIPPED | `impl Distribution::variance` algebraically equivalent to `weibull.py:85-89`. |
+//! | REQ-12 (`rsample` reparameterization) | NOT-STARTED | blocker #1435 — direct inverse-CDF path does not build autograd graph. |
+//! | REQ-13 (`expand`/`support`/`concentration_reciprocal`) | NOT-STARTED | blocker #1436 — cross-cutting with `lib.md` REQ-5 (blocker #1376). |
 
 use ferrotorch_core::creation;
 use ferrotorch_core::dtype::Float;

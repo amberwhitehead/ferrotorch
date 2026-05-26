@@ -1,6 +1,23 @@
 //! Von Mises distribution (circular normal).
 //!
 //! `VonMises(loc, concentration)` — distribution on the circle [-pi, pi].
+//!
+//! ## REQ status (per `.design/ferrotorch-distributions/von_mises.md`)
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 (`VonMises` struct) | SHIPPED | `pub struct VonMises` in `von_mises.rs`; re-exported as `pub use von_mises::VonMises` in `lib.rs:123`; mirrors `torch/distributions/von_mises.py:133-142`. |
+//! | REQ-2 (`new` constructor, shape match) | SHIPPED | `VonMises::new` rejecting shape mismatch; registered in `tests/conformance/_surface_inventory.toml:497`. |
+//! | REQ-3 (`loc` + `concentration` accessors) | SHIPPED | accessors in `von_mises.rs`. |
+//! | REQ-4 (`log_bessel_i0` private helper) | SHIPPED | private `log_bessel_i0` two-branch Abramowitz-Stegun approximation in `von_mises.rs`; coefficients match upstream `_I0_COEF_SMALL`/`_I0_COEF_LARGE` at `von_mises.py:23-42`; 2 production call sites in this module. |
+//! | REQ-5 (`Distribution::sample` via Best's rejection) | SHIPPED | `impl Distribution::sample` in `von_mises.rs` via Best & Fisher 1979 rejection algorithm; mirrors `_rejection_sample` at `von_mises.py:92-107`. Known divergences in REQ-11/REQ-12. |
+//! | REQ-6 (`Distribution::log_prob`) | SHIPPED | `impl Distribution::log_prob` returns `kappa*cos(value-loc) - log(2*pi) - log_bessel_i0(kappa)`; mirrors `von_mises.py:144-153` exactly. |
+//! | REQ-7 (`Distribution::entropy` approximation) | SHIPPED | `impl Distribution::entropy` uses I_1/I_0 ratio approximation; R-DEV-7 enhancement (upstream lacks closed-form entropy). |
+//! | REQ-8 (`Distribution::mean`) | SHIPPED | `impl Distribution::mean` returns `loc.clone()`; mirrors `von_mises.py:199-204` (circular mean). |
+//! | REQ-9 (`Distribution::rsample` errors) | SHIPPED | `impl Distribution::rsample` returns `InvalidArgument`; mirrors upstream's `has_rsample = False` at `von_mises.py:131`. |
+//! | REQ-10 (`mode`/`variance`/`expand`/`support`/`_log_modified_bessel_fn(order=1)`) | NOT-STARTED | blocker #1431 — cross-cutting with `lib.md` REQ-5 (blocker #1376). |
+//! | REQ-11 (RNG: `creation::rand` instead of xorshift) | NOT-STARTED | blocker #1432 — sampler uses hand-rolled xorshift seeded from `SystemTime + ThreadId.hash()`; breaks seed reproducibility. |
+//! | REQ-12 (small-kappa Taylor fallback) | NOT-STARTED | blocker #1433 — upstream `_proposal_r_taylor = 1/kappa + kappa` for `kappa < 1e-5` (`von_mises.py:170-171`) not implemented; loop may hang for very small `kappa`. |
 
 use ferrotorch_core::dtype::Float;
 use ferrotorch_core::error::{FerrotorchError, FerrotorchResult};

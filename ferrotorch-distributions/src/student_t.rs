@@ -3,6 +3,21 @@
 //! `StudentT(df, loc, scale)` defines a Student's t-distribution with `df`
 //! degrees of freedom, location `loc`, and scale `scale`.
 //! Supports reparameterized sampling.
+//!
+//! ## REQ status (per `.design/ferrotorch-distributions/student_t.md`)
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 (`StudentT` struct) | SHIPPED | `pub struct StudentT` in `student_t.rs`; re-exported as `pub use student_t::StudentT` in `lib.rs:120`; mirrors `torch/distributions/studentT.py:64-74`. |
+//! | REQ-2 (`new` constructor, shape match) | SHIPPED | `StudentT::new` rejecting shape mismatch; registered in `tests/conformance/_surface_inventory.toml:315`. |
+//! | REQ-3 (accessors `df`/`loc`/`scale`) | SHIPPED | accessors in `student_t.rs`. |
+//! | REQ-4 (inherent `mean_value`/`variance_value`) | SHIPPED | inherent moment helpers in `student_t.rs` mirroring `studentT.py:42-62` with `df`-dependent branching. |
+//! | REQ-5 (`Distribution::sample` via Normal/Chi2) | SHIPPED | `impl Distribution::sample` builds `loc + scale * Z * sqrt(df/Chi2)` with `sample_chi2` Marsaglia-Tsang Gamma sampler; mirrors `studentT.py:87-99`. |
+//! | REQ-6 (`Distribution::rsample` differentiable through loc/scale) | SHIPPED | `impl Distribution::rsample` builds `Tensor::from_operation` with `StudentTRsampleBackward` autograd node capturing `df`/`loc`/`scale`/`z`/`chi2`; pinned by `test_student_t_rsample_{has_grad, backward}`. |
+//! | REQ-7 (`Distribution::log_prob` closed-form) | SHIPPED | `impl Distribution::log_prob` returns the closed-form Student's-t log density; pinned by `test_student_t_log_prob_at_loc` (Cauchy edge), `test_student_t_log_prob_high_df_approaches_normal`. |
+//! | REQ-8 (`Distribution::entropy` closed-form) | SHIPPED | `impl Distribution::entropy` uses `lgamma_scalar` + `digamma_scalar` from `special_fns.rs`; mirrors `studentT.py:114-127`. |
+//! | REQ-9 (`df` gradient in backward node) | NOT-STARTED | blocker #1427 — `StudentTRsampleBackward` returns `None` for the `df` gradient slot; Marsaglia-Tsang Chi2 sampler is not autograd-aware. |
+//! | REQ-10 (`expand`/`support`/`mode`/`cdf`/`icdf`) | NOT-STARTED | blocker #1428 — cross-cutting with `lib.md` REQ-5 (blocker #1376). |
 
 use std::sync::Arc;
 

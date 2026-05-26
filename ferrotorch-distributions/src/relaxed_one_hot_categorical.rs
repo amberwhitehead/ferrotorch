@@ -19,6 +19,21 @@
 //! z = z / sum_j z_j             (softmax over the K dimensions)
 //! ```
 //! Mirrors `torch.distributions.RelaxedOneHotCategorical`.
+//!
+//! ## REQ status (per `.design/ferrotorch-distributions/relaxed_one_hot_categorical.md`)
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 (`RelaxedOneHotCategorical` struct) | SHIPPED | `pub struct RelaxedOneHotCategorical` in `relaxed_one_hot_categorical.rs`; re-exported as `pub use relaxed_one_hot_categorical::RelaxedOneHotCategorical` in `lib.rs:119`; mirrors `torch/distributions/relaxed_categorical.py:109-135`. |
+//! | REQ-2 (`new` constructor with simplex normalization) | SHIPPED | `RelaxedOneHotCategorical::new` validating + caching normalized probs in `relaxed_one_hot_categorical.rs`; registered in `tests/conformance/_surface_inventory.toml:455`. |
+//! | REQ-3 (accessors `temperature`/`probs`/`num_categories`) | SHIPPED | accessors in `relaxed_one_hot_categorical.rs`; mirror `relaxed_categorical.py:153-163` @property delegations. |
+//! | REQ-4 (`Distribution::sample` / `rsample` via Gumbel-softmax) | SHIPPED | `impl Distribution::sample` / `rsample` invoke `relaxed_one_hot_sample` (Gumbel-softmax forward) in `relaxed_one_hot_categorical.rs`; mirrors `ExpRelaxedCategorical.rsample` + `ExpTransform` composition at `relaxed_categorical.py:87-94`. |
+//! | REQ-5 (`Distribution::log_prob` via Maddison eqn 26 + logsumexp) | SHIPPED | `impl Distribution::log_prob` in `relaxed_one_hot_categorical.rs` with logsumexp + last-K-dim collapse; rejects wrong-shape value. |
+//! | REQ-6 (`Distribution::entropy` errors) | SHIPPED | `impl Distribution::entropy` returns `InvalidArgument` (Concrete has no closed-form entropy). |
+//! | REQ-7 (`logits`/`mean`/`mode`/`variance`/`support`/`expand`) | NOT-STARTED | blocker #1422 — cross-cutting with `lib.md` REQ-5 (blocker #1376). |
+//! | REQ-8 (`ExpRelaxedCategorical` as standalone) | NOT-STARTED | blocker #1424 — `relaxed_categorical.py:17-106` log-simplex base not exposed as a separate ferrotorch distribution. |
+//! | REQ-9 (differentiable `rsample`) | NOT-STARTED | blocker #1425 — scalar-CPU path produces detached output. |
+//! | REQ-10 (batched `probs` with leading dims) | NOT-STARTED | blocker #1426 — current impl requires 1-D `probs`. |
 
 use ferrotorch_core::creation;
 use ferrotorch_core::dtype::Float;

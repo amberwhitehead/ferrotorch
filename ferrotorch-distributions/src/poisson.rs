@@ -3,6 +3,22 @@
 //! `Poisson(rate)` defines a Poisson distribution with rate parameter `rate`
 //! (lambda). This is a discrete distribution and does not support
 //! reparameterized sampling.
+//!
+//! ## REQ status (per `.design/ferrotorch-distributions/poisson.md`)
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 (`Poisson` struct) | SHIPPED | `pub struct Poisson` in `poisson.rs`; re-exported as `pub use poisson::Poisson` in `lib.rs:117`; also consumed by `kl_poisson_poisson` in `kl.rs:528`. Mirrors `torch/distributions/poisson.py:50-60`. |
+//! | REQ-2 (`new` constructor) | SHIPPED | `Poisson::new` in `poisson.rs`; registered in `tests/conformance/_surface_inventory.toml:301`. |
+//! | REQ-3 (`rate` + inherent `mean`/`variance` accessors) | SHIPPED | `Poisson::rate`, inherent `Poisson::mean`, `Poisson::variance` borrow-returners in `poisson.rs`. Mirror `poisson.py:38-48` @property's. |
+//! | REQ-4 (`Distribution::sample` via Knuth) | SHIPPED | `impl Distribution::sample` in `poisson.rs` via Knuth's algorithm with pre-allocated uniform batch buffer; equivalent to the small-lambda branch of `aten::poisson` dispatched by `torch.poisson(rate)` at `poisson.py:70-73`. |
+//! | REQ-5 (`Distribution::rsample` errors) | SHIPPED | `impl Distribution::rsample` in `poisson.rs` returns `InvalidArgument` (Poisson is discrete). |
+//! | REQ-6 (`Distribution::log_prob`) | SHIPPED | `impl Distribution::log_prob` in `poisson.rs` returns `k * ln(lambda) - lambda - lgamma(k+1)`; mirrors `poisson.py:75-79`. Known divergence on `xlogy` boundary at `k=0,lambda=0` — blocker #1409. |
+//! | REQ-7 (`Distribution::entropy`) | SHIPPED | `impl Distribution::entropy` in `poisson.rs` with dual-branch (enumeration for `lambda<1`, Stirling series otherwise); R-DEV-7 enhancement (upstream does not ship a closed-form entropy). |
+//! | REQ-8 (`Distribution::mean`) | SHIPPED | `impl Distribution::mean` returns `rate.clone()`; mirrors `poisson.py:38-40`. |
+//! | REQ-9 (`Distribution::mode`) | SHIPPED | `impl Distribution::mode` returns `floor(rate)`; mirrors `poisson.py:42-44`. |
+//! | REQ-10 (`Distribution::variance`) | SHIPPED | `impl Distribution::variance` returns `rate.clone()`; mirrors `poisson.py:46-48`. |
+//! | REQ-11 (`ExponentialFamily` machinery) | NOT-STARTED | blocker #1407 — `_natural_params`/`_log_normalizer`/`expand`/`support` not implemented; cross-cutting with `lib.md` REQ-5 (blocker #1376). |
 
 use ferrotorch_core::creation;
 use ferrotorch_core::dtype::Float;

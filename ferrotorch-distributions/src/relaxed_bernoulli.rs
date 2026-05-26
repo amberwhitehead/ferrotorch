@@ -21,6 +21,20 @@
 //! `temperature` via the autograd graph (when those tensors require grad).
 //!
 //! Mirrors `torch.distributions.RelaxedBernoulli`.
+//!
+//! ## REQ status (per `.design/ferrotorch-distributions/relaxed_bernoulli.md`)
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 (`RelaxedBernoulli` struct) | SHIPPED | `pub struct RelaxedBernoulli` in `relaxed_bernoulli.rs`; re-exported as `pub use relaxed_bernoulli::RelaxedBernoulli` in `lib.rs:118`; mirrors `torch/distributions/relaxed_bernoulli.py:122-148`. R-DEV-7: scalar `temperature: T` (vs upstream `Tensor`). |
+//! | REQ-2 (`new` constructor with temp/probs validation) | SHIPPED | `RelaxedBernoulli::new` rejecting `temperature <= 0` and `probs` outside `(0, 1)` in `relaxed_bernoulli.rs`; registered in `tests/conformance/_surface_inventory.toml:441`. |
+//! | REQ-3 (`temperature` + `probs` accessors) | SHIPPED | `RelaxedBernoulli::temperature` (by value) and `RelaxedBernoulli::probs` (by reference) in `relaxed_bernoulli.rs`. |
+//! | REQ-4 (`Distribution::sample` / `rsample` via Concrete forward) | SHIPPED | `impl Distribution::sample` / `rsample` in `relaxed_bernoulli.rs` invoke `relaxed_bernoulli_sample` (the Concrete forward `z = sigmoid((L + logits) / temperature)`); mirrors `LogitRelaxedBernoulli.rsample` + `SigmoidTransform` composition at `relaxed_bernoulli.py:104-112`. |
+//! | REQ-5 (`Distribution::log_prob` via Concrete density) | SHIPPED | `impl Distribution::log_prob` in `relaxed_bernoulli.rs` with numerically stable softplus + sigmoid Jacobian; mirrors `LogitRelaxedBernoulli.log_prob` at `relaxed_bernoulli.py:114-119`. Probe at `z=0.7,logits=0.5,temp=2.0` matches PyTorch's `-0.7893`. |
+//! | REQ-6 (`Distribution::entropy` errors) | SHIPPED | `impl Distribution::entropy` returns `InvalidArgument` (Concrete has no closed-form entropy). |
+//! | REQ-7 (`logits`/`mean`/`mode`/`variance`/`cdf`/`icdf`/`support`) | NOT-STARTED | blocker #1411 — cross-cutting with `lib.md` REQ-5 (blocker #1376). |
+//! | REQ-8 (`LogitRelaxedBernoulli` as standalone) | NOT-STARTED | blocker #1415 — `relaxed_bernoulli.py:22-119` unconstrained-logit-space base not exposed as a separate ferrotorch distribution. |
+//! | REQ-9 (differentiable `rsample` with autograd graph) | NOT-STARTED | blocker #1420 — scalar-CPU path produces detached output. |
 
 use ferrotorch_core::creation;
 use ferrotorch_core::dtype::Float;

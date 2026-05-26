@@ -1,6 +1,21 @@
 //! Pareto (Type I) distribution.
 //!
 //! `Pareto(scale, alpha)` — a heavy-tailed power-law distribution.
+//!
+//! ## REQ status (per `.design/ferrotorch-distributions/pareto.md`)
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 (`Pareto` struct) | SHIPPED | `pub struct Pareto` in `pareto.rs`; re-exported as `pub use pareto::Pareto` in `lib.rs:116`; mirrors `torch/distributions/pareto.py:33-43`. |
+//! | REQ-2 (`new` constructor, shape match) | SHIPPED | `Pareto::new` rejecting shape mismatch in `pareto.rs`; registered in `tests/conformance/_surface_inventory.toml:483`. |
+//! | REQ-3 (`scale` + `alpha` accessors) | SHIPPED | `Pareto::scale` + `Pareto::alpha` in `pareto.rs`. |
+//! | REQ-4 (`Distribution::sample` via inverse-CDF) | SHIPPED | `impl Distribution::sample` in `pareto.rs` uses `scale / u^(1/alpha)`; mirrors `pareto.py:39-43` `TransformedDistribution` composition. |
+//! | REQ-5 (`Distribution::log_prob`) | SHIPPED | `impl Distribution::log_prob` in `pareto.rs` returns the closed-form Pareto log density; pinned by `test_pareto_log_prob_below_scale` + `test_pareto_log_prob_at_scale`. |
+//! | REQ-6 (`Distribution::mean`) | SHIPPED | `impl Distribution::mean` in `pareto.rs` returns `alpha*scale/(alpha-1)` if `alpha>1` else `inf`; mirrors `pareto.py:53-57`. |
+//! | REQ-7 (`Distribution::variance`) | SHIPPED | `impl Distribution::variance` in `pareto.rs` branches on `alpha>2`; mirrors `pareto.py:63-67`. |
+//! | REQ-8 (`Distribution::entropy`) | SHIPPED | `impl Distribution::entropy` in `pareto.rs` returns `log(scale/alpha)+1+1/alpha`; mirrors `pareto.py:73-74`. |
+//! | REQ-9 (`rsample` reparameterization) | NOT-STARTED | blocker #1395 — direct scalar-CPU path does not build autograd graph through inverse-CDF. |
+//! | REQ-10 (`mode`/`support`/`expand`/`cdf`/`icdf`) | NOT-STARTED | blocker #1405 — cross-cutting with `lib.md` REQ-5 trait-surface blocker #1376. |
 
 use ferrotorch_core::creation;
 use ferrotorch_core::dtype::Float;

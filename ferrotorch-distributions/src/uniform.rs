@@ -2,6 +2,25 @@
 //!
 //! `Uniform(low, high)` defines a continuous uniform distribution on the
 //! interval `[low, high)`. Supports reparameterized sampling.
+//!
+//! ## REQ status (per `.design/ferrotorch-distributions/uniform.md`)
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 (`Uniform` struct) | SHIPPED | `pub struct Uniform` in `uniform.rs`; re-exported as `pub use uniform::Uniform` in `lib.rs:122`; consumed by `kl_uniform_uniform`/`kl_normal_uniform`/`kl_uniform_normal` at `kl.rs:{271, 350, 383}` — three non-test KL-divergence production consumers. |
+//! | REQ-2 (`new` constructor, shape match) | SHIPPED | `Uniform::new` rejecting shape mismatch; registered in `tests/conformance/_surface_inventory.toml:329`. |
+//! | REQ-3 (`low` + `high` accessors) | SHIPPED | accessors in `uniform.rs`; consumed by `kl_uniform_uniform` at `kl.rs:271` reading both sides. |
+//! | REQ-4 (`Distribution::sample`) | SHIPPED | `impl Distribution::sample` via `low + (high - low) * U`; mirrors `uniform.py:85-88`. |
+//! | REQ-5 (`Distribution::rsample` differentiable) | SHIPPED | `impl Distribution::rsample` builds `Tensor::from_operation` with `UniformRsampleBackward` autograd node; backward computes `grad_low = sum(go * (1 - u))`, `grad_high = sum(go * u)`. |
+//! | REQ-6 (`Distribution::log_prob` with autograd) | SHIPPED | `impl Distribution::log_prob` returns `-log(high - low)` in-range else `-inf`, with `UniformLogProbBackward` autograd path. |
+//! | REQ-7 (`Distribution::entropy`) | SHIPPED | `impl Distribution::entropy` returns `log(high - low)`; mirrors `uniform.py:107-108`. |
+//! | REQ-8 (`Distribution::cdf` clamped) | SHIPPED | `impl Distribution::cdf` returns `clamp((x-low)/(high-low), 0, 1)`; mirrors `uniform.py:97-101`. |
+//! | REQ-9 (`Distribution::icdf` linear) | SHIPPED | `impl Distribution::icdf` returns `low + (high-low)*p`; mirrors `uniform.py:103-105`. |
+//! | REQ-10 (`Distribution::mean`) | SHIPPED | `impl Distribution::mean` returns midpoint; mirrors `uniform.py:42-44`. |
+//! | REQ-11 (`Distribution::variance`) | SHIPPED | `impl Distribution::variance` returns `(high-low)^2 / 12`; mirrors `uniform.py:53-55`. |
+//! | REQ-12 (`Distribution::stddev`) | SHIPPED | `impl Distribution::stddev` returns `(high-low) / sqrt(12)`; mirrors `uniform.py:49-51`. |
+//! | REQ-13 (`Distribution::mode` returns midpoint) | SHIPPED | R-DEV-6 deviation from `uniform.py:46-48` which returns NaN*high; ferrotorch returns the midpoint as a finite representative value. Blocker #1429 tracks strict-NaN conformance question. |
+//! | REQ-14 (`expand`/`support`/`arg_constraints`) | NOT-STARTED | blocker #1430 — cross-cutting with `lib.md` REQ-5 (blocker #1376). |
 
 use std::sync::Arc;
 
