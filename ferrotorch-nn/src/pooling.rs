@@ -4,6 +4,23 @@
 //! All are zero-parameter modules operating on `[B, C, *spatial]` tensors.
 //! Each forward pass attaches a `GradFn<T>` for reverse-mode autodiff
 //! when gradient tracking is enabled.
+//!
+//! ## REQ status (per `.design/ferrotorch-nn/pooling.md`)
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 | SHIPPED | the `MaxPool2d` struct + `impl<T: Float> Module<T> for MaxPool2d` here; non-test consumer: re-export at `ferrotorch-nn/src/lib.rs:237` + `ferrotorch-vision/src/models/resnet.rs:23` + many other vision models |
+//! | REQ-2 | SHIPPED | the `AvgPool2d` struct + `impl<T: Float> Module<T> for AvgPool2d` here; non-test consumer: `ferrotorch-vision/src/models/densenet.rs:43` + `inception.rs:61` + re-export at `lib.rs:237` |
+//! | REQ-3 | SHIPPED | the `AdaptiveAvgPool2d` struct + `impl<T: Float> Module<T> for AdaptiveAvgPool2d` here; non-test consumer: `ferrotorch-vision/src/models/resnet.rs:23` + `convnext.rs:35` + `efficientnet.rs:38` + `mobilenet.rs:55` + `segmentation/aspp.rs:38` + re-export at `lib.rs:237` + the prelude re-export at `lib.rs:286` + `ferrotorch-nn/src/se.rs` (SqueezeExcitation squeeze stage) |
+//! | REQ-4 | SHIPPED | the `MaxPool1d` / `MaxPool3d` / `AvgPool1d` / `AvgPool3d` structs + their `impl<T: Float> Module<T>` blocks here; non-test consumer: re-export at `lib.rs:237` |
+//! | REQ-5 | SHIPPED | the `AdaptiveAvgPool1d` / `AdaptiveAvgPool3d` / `AdaptiveMaxPool1d` / `AdaptiveMaxPool2d` / `AdaptiveMaxPool3d` structs + their Module impls here; non-test consumer: re-export at `lib.rs:237` |
+//! | REQ-6 | SHIPPED | the `FractionalMaxPool2d` struct + `impl<T: Float> Module<T>` here; non-test consumer: re-export at `lib.rs:237` |
+//! | REQ-7 | SHIPPED | the `LPPool1d` / `LPPool2d` structs + their `impl Module<T>` blocks here; non-test consumer: re-export at `lib.rs:237` |
+//! | REQ-8 | SHIPPED | the `MaxUnpool2d` struct + `max_unpool2d` functional entry here; non-test consumer: re-export at `lib.rs:237` |
+//! | REQ-9 | SHIPPED | the 14 free `*_pool*<T: Float>` functional entries here; non-test consumer: re-export at `lib.rs:237` |
+//! | REQ-10 | SHIPPED | the `validate_4d`, `validate_pool_params` helpers here; non-test consumer: invoked from every pool forward (re-exported at `lib.rs:237`) |
+//! | REQ-11 | SHIPPED | per-pool `GradFn<T>` types + `Tensor::from_operation` calls here; non-test consumer: re-export at `lib.rs:237` |
+//! | REQ-12 | NOT-STARTED | parity-sweep runner arms for the 10 declared pooling ops not wired — blocker #1458 |
 
 use std::sync::Arc;
 

@@ -14,6 +14,20 @@
 //!
 //! Where `score_mod` is an optional user-provided function that transforms
 //! the raw attention scores before softmax.
+//!
+//! ## REQ status (per `.design/ferrotorch-nn/flex_attention.md`)
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 | SHIPPED | the `flex_attention` entry here mirroring upstream `torch/nn/attention/flex_attention.py:1867-1980`; non-test consumer: re-export at `ferrotorch-nn/src/lib.rs:200` |
+//! | REQ-2 | SHIPPED | the `BlockMask` struct plus the four constructors (`new`, `full_mask`, `causal_mask`, `sliding_window_mask`) here; non-test consumer: re-export at `lib.rs:200` |
+//! | REQ-3 | SHIPPED | the `is_active`, `allows_position`, `num_q_blocks`, `num_k_blocks` accessors here; non-test consumer: re-export at `lib.rs:200` |
+//! | REQ-4 | SHIPPED | the `ScoreModFn<T>` type alias and per-element evaluation inside `flex_attention`; non-test consumer: re-export at `lib.rs:200` |
+//! | REQ-5 | SHIPPED | the `causal_score_mod`, `alibi_score_mod`, `relative_position_bias_score_mod` constructors here; non-test consumer: re-export at `lib.rs:200-202` |
+//! | REQ-6 | SHIPPED | block-mask skip logic inside `flex_attention` using `block_mask.allows_position`; non-test consumer: re-export at `lib.rs:200` |
+//! | REQ-7 | SHIPPED | the `FlexAttentionBackward<T>` struct + `impl GradFn<T>` here (full-matrix recompute backward); non-test consumer: re-export at `lib.rs:200` |
+//! | REQ-8 | SHIPPED | shape-validation guards at the head of `flex_attention`; non-test consumer: re-export at `lib.rs:200` |
+//! | REQ-9 | NOT-STARTED | `scale` and `enable_gqa` kwargs from upstream not yet exposed; tracked under blocker #1455 (no separate blocker — no production caller is currently blocked) |
 
 use std::sync::Arc;
 

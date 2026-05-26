@@ -2,6 +2,18 @@
 //!
 //! This module re-exports the core QAT types from `ferrotorch_core::quantize`
 //! and provides nn-module-level integration for preparing models.
+//!
+//! ## REQ status (per `.design/ferrotorch-nn/qat.md`)
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 | SHIPPED | the `ObserverType` enum here; non-test consumer: re-export at `ferrotorch-nn/src/lib.rs:244` |
+//! | REQ-2 | SHIPPED | the `QatConfig` struct with six fields here; non-test consumer: re-export at `lib.rs:244` |
+//! | REQ-3 | SHIPPED | the `default_symmetric_int8`, `per_channel_int8`, `int4_weight_int8_activation` associated constructors on `QatConfig` here; non-test consumer: re-export at `lib.rs:244` |
+//! | REQ-4 | SHIPPED | the `QuantizedModel` struct here; non-test consumer: re-export at `lib.rs:244` |
+//! | REQ-5 | SHIPPED | the `weight`, `weight_qparams`, `weight_names`, `num_weights`, `dequantize_weight`, `quantized_size_bytes`, `compression_ratio`, `config` accessors on `QuantizedModel` here; non-test consumer: re-export at `lib.rs:244` |
+//! | REQ-6 | SHIPPED | the `prepare_qat` entry here (calls `module.named_parameters()` then `core_prepare_qat`); non-test consumer: re-export at `lib.rs:244` |
+//! | REQ-7 | SHIPPED | the `pub use ferrotorch_core::quantize::{QatLayer, QatModel, prepare_qat as core_prepare_qat}` near the top here; non-test consumer: re-export at `lib.rs:244` |
 
 use std::collections::HashMap;
 

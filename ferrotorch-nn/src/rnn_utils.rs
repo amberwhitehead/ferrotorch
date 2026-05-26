@@ -6,6 +6,21 @@
 //!
 //! These mirror `torch.nn.utils.rnn.pack_padded_sequence` and
 //! `torch.nn.utils.rnn.pad_packed_sequence`.
+//!
+//! ## REQ status (per `.design/ferrotorch-nn/rnn_utils.md`)
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 | SHIPPED | the `PackedSequence<T>` struct with `data` / `batch_sizes` / `sorted_indices` / `unsorted_indices` here; non-test consumer: re-export at `ferrotorch-nn/src/lib.rs:246` |
+//! | REQ-2 | SHIPPED | the `pack_padded_sequence<T>` entry here; non-test consumer: re-export at `lib.rs:246` |
+//! | REQ-3 | SHIPPED | the `pad_packed_sequence<T>` entry here; non-test consumer: re-export at `lib.rs:246` |
+//! | REQ-4 | SHIPPED | validation guards at the head of `pack_padded_sequence` here; non-test consumer: re-export at `lib.rs:246` |
+//! | REQ-5 | SHIPPED | `batch_first` axis-swap logic inside `pack_padded_sequence` here; non-test consumer: re-export at `lib.rs:246` |
+//! | REQ-6 | SHIPPED | stable sort + `sorted_indices` / `unsorted_indices` capture inside `pack_padded_sequence` here; non-test consumer: re-export at `lib.rs:246` |
+//! | REQ-7 | SHIPPED | per-timestep batch-size accumulation inside `pack_padded_sequence` here; non-test consumer: re-export at `lib.rs:246` |
+//! | REQ-8 | NOT-STARTED | parity-sweep runner arm for `pack_padded_sequence` not wired — blocker #1457 |
+//! | REQ-9 | NOT-STARTED | parity-sweep runner arm for `pad_packed_sequence` not wired — blocker #1457 |
+//! | REQ-10 | NOT-STARTED | `pad_sequence` implementation not present in `rnn_utils.rs`; blocker #1457 tracks both impl and runner arm |
 
 use ferrotorch_core::{FerrotorchError, FerrotorchResult, Float, Tensor, TensorStorage};
 

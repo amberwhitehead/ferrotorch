@@ -43,6 +43,20 @@
 //!
 //! Kwon et al., "Efficient Memory Management for Large Language Model Serving
 //! with PagedAttention" (SOSP 2023).
+//!
+//! ## REQ status (per `.design/ferrotorch-nn/paged_attention.md`)
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 | SHIPPED | the `KVPage<T>` struct here; non-test consumer: re-export at `ferrotorch-nn/src/lib.rs:234` |
+//! | REQ-2 | SHIPPED | the `PagePool<T>` struct with `alloc_page` / `free_page` / `num_free` / `num_used` / `num_total` here; non-test consumer: re-export at `lib.rs:234` |
+//! | REQ-3 | SHIPPED | the `PagedKVCache<T>` struct here; non-test consumer: re-export at `lib.rs:234` |
+//! | REQ-4 | SHIPPED | the `append` method on `PagedKVCache` here (length validation + iterative page-fill loop); non-test consumer: re-export at `lib.rs:234` |
+//! | REQ-5 | SHIPPED | the `get_keys` / `get_values` methods on `PagedKVCache` here (using the private `gather_data`); non-test consumer: re-export at `lib.rs:234` |
+//! | REQ-6 | SHIPPED | the `free_all` method on `PagedKVCache` here; non-test consumer: re-export at `lib.rs:234` |
+//! | REQ-7 | SHIPPED | the `PagedAttentionManager<T>` struct with `add_sequence` / `append_kv` / `get_kv` / `remove_sequence` here; non-test consumer: re-export at `lib.rs:234` |
+//! | REQ-8 | SHIPPED | O(1) `Vec::pop` / `Vec::push` for `alloc_page` / `free_page` here; non-test consumer: re-export at `lib.rs:234` |
+//! | REQ-9 | SHIPPED | `#[derive(Debug, Clone)]` on `KVPage`, `PagedKVCache` and `#[derive(Debug)]` on `PagePool`, `PagedAttentionManager` here; non-test consumer: re-export at `lib.rs:234` |
 
 use ferrotorch_core::{FerrotorchError, FerrotorchResult, Float, Tensor, TensorStorage};
 

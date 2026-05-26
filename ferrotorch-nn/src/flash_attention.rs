@@ -8,6 +8,20 @@
 //! The forward pass is fully tiled. The backward pass (MVP) recomputes
 //! the standard (non-tiled) attention to obtain gradients — a future
 //! optimization would tile the backward as well.
+//!
+//! ## REQ status (per `.design/ferrotorch-nn/flash_attention.md`)
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 | SHIPPED | the `flash_attention` entry here; non-test consumer: re-export at `ferrotorch-nn/src/lib.rs:199` |
+//! | REQ-2 | SHIPPED | the `validate_inputs` helper here checks 3-D rank, batch alignment, K/V seq match, `d` match, `block_size > 0`, causal `N_q == N_k`; non-test consumer: invoked from `flash_attention` (re-exported at `lib.rs:199`) |
+//! | REQ-3 | SHIPPED | the `flash_attention_single` core here with online-softmax rescaling; non-test consumer: re-export at `lib.rs:199` |
+//! | REQ-4 | SHIPPED | causal-skip + intra-tile clamp logic inside `flash_attention_single`; non-test consumer: re-export at `lib.rs:199` |
+//! | REQ-5 | SHIPPED | `N_q == 0 || N_k == 0` early-return inside `flash_attention`; non-test consumer: re-export at `lib.rs:199` |
+//! | REQ-6 | SHIPPED | the `FlashAttentionBackward<T>` struct + `impl GradFn<T>` here; non-test consumer: re-export at `lib.rs:199` — caller-side grad-requiring inputs trigger the backward via the autograd engine |
+//! | REQ-7 | SHIPPED | `result.to(device)` branch at the tail of `flash_attention` when `device.is_cuda()`; non-test consumer: re-export at `lib.rs:199` |
+//! | REQ-8 | SHIPPED | the `standard_attention` reference here; non-test consumer: re-export at `lib.rs:199` |
+//! | REQ-9 | SHIPPED | `block_size` runtime arg in `flash_attention`; tail-block logic `bk = k_end - k_start`; non-test consumer: re-export at `lib.rs:199` |
 
 use std::sync::Arc;
 

@@ -13,6 +13,23 @@
 //! is enabled so reverse-mode differentiation works out of the box.
 //!
 //! CL-317: Upsample, Interpolation & Vision Ops
+//!
+//! ## REQ status (per `.design/ferrotorch-nn/upsample.md`)
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 | SHIPPED | the `InterpolateMode` enum here; non-test consumer: re-export at `ferrotorch-nn/src/lib.rs:252` + `ferrotorch-vision/src/models/segmentation/deeplabv3.rs:52` + `aspp.rs:39` + `lraspp.rs:50` + `fcn.rs:36` |
+//! | REQ-2 | SHIPPED | the `GridSamplePaddingMode` and `GridSampleMode` enums here; non-test consumer: re-export at `lib.rs:252` |
+//! | REQ-3 | SHIPPED | the `interpolate<T>` entry here; non-test consumer: re-export at `lib.rs:252` + every segmentation model in `ferrotorch-vision` |
+//! | REQ-4 | SHIPPED | the `Upsample` struct + `impl<T: Float> Module<T> for Upsample` here; non-test consumer: re-export at `lib.rs:252` |
+//! | REQ-5 | SHIPPED | the `grid_sample<T>` entry here; non-test consumer: re-export at `lib.rs:252` |
+//! | REQ-6 | SHIPPED | the `affine_grid<T>` entry here; non-test consumer: re-export at `lib.rs:252` |
+//! | REQ-7 | SHIPPED | the `PixelShuffle` + `PixelUnshuffle` structs + their `impl<T: Float> Module<T>` blocks here; non-test consumer: re-export at `lib.rs:252` |
+//! | REQ-8 | SHIPPED | the `pixel_shuffle<T>` + `pixel_unshuffle<T>` functional entries here; non-test consumer: re-export at `lib.rs:252` |
+//! | REQ-9 | SHIPPED | the `Unfold` + `Fold` structs + their `impl<T: Float> Module<T>` blocks and `unfold` + `fold` functional entries here; non-test consumer: re-export at `lib.rs:252` |
+//! | REQ-10 | SHIPPED | the `cubic_weight` helper here; non-test consumer: invoked from the bicubic branch of `interpolate` (re-exported at `lib.rs:252`) |
+//! | REQ-11 | SHIPPED | `align_corners`-aware source-coordinate formulas inside the interpolate / grid_sample bodies here; non-test consumer: re-export at `lib.rs:252` |
+//! | REQ-12 | SHIPPED | per-op `GradFn<T>` types + `Tensor::from_operation` calls here; non-test consumer: re-export at `lib.rs:252` |
 
 use std::sync::Arc;
 

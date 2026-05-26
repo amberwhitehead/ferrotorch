@@ -18,6 +18,23 @@
 //!
 //! - [`TransformerDecoderLayer`] — A pre-norm decoder block with
 //!   self-attention, cross-attention, and feedforward sub-layers.
+//!
+//! ## REQ status (per `.design/ferrotorch-nn/transformer.md`)
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 | SHIPPED | the `RoPEConvention` enum here; non-test consumer: re-export at `ferrotorch-nn/src/lib.rs:248` + `ferrotorch-llama/src/attention.rs:23` |
+//! | REQ-2 | SHIPPED | the `RotaryPositionEmbedding<T>` struct with `apply_rope` here; non-test consumer: re-export at `lib.rs:248` + `ferrotorch-llama/src/attention.rs:23` |
+//! | REQ-3 | SHIPPED | the `RoPEScaling` enum here; non-test consumer: re-export at `lib.rs:248` + `ferrotorch-llama/src/attention.rs:23` (Llama-3 long-context scaling) |
+//! | REQ-4 | SHIPPED | the `SwiGLU<T>` struct + `impl Module<T> for SwiGLU<T>` here; non-test consumer: re-export at `lib.rs:248` |
+//! | REQ-5 | SHIPPED | the `KVCache<T>` struct with `append_kv` / `clear` here; non-test consumer: re-export at `lib.rs:248` |
+//! | REQ-6 | SHIPPED | the `TransformerEncoderLayer<T>` struct here mirroring upstream `transformer.py:659-980`; non-test consumer: re-export at `lib.rs:248` |
+//! | REQ-7 | SHIPPED | the `TransformerDecoderLayer<T>` struct here mirroring upstream `transformer.py:981-1100`; non-test consumer: re-export at `lib.rs:248` |
+//! | REQ-8 | SHIPPED | the `TransformerEncoder<T>` struct here mirroring upstream `transformer.py:318-553`; non-test consumer: re-export at `lib.rs:248` |
+//! | REQ-9 | SHIPPED | the `TransformerDecoder<T>` struct here mirroring upstream `transformer.py:554-658`; non-test consumer: re-export at `lib.rs:248` |
+//! | REQ-10 | SHIPPED | the `Transformer<T>` struct here mirroring upstream `transformer.py:58-317`; non-test consumer: re-export at `lib.rs:248` |
+//! | REQ-11 | SHIPPED | the `impl<T: Float> Module<T>` blocks for every transformer struct here; non-test consumer: re-export at `lib.rs:248` |
+//! | REQ-12 | SHIPPED | the `RoPEBackward<T>` struct + `impl GradFn<T>` here; non-test consumer: re-export at `lib.rs:248` |
 
 use std::sync::Arc;
 

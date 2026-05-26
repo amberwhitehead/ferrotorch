@@ -43,6 +43,21 @@
 //! Forward composes only [`Module::forward`]-shaped primitives that
 //! already track gradients (`Conv2d`, `AdaptiveAvgPool2d`, `ReLU`,
 //! `Sigmoid`, `HardSigmoid`, `mul`), so backward flows end-to-end.
+//!
+//! ## REQ status (per `.design/ferrotorch-nn/se.md`)
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 | SHIPPED | the `SqueezeExcitation<T>` struct here; non-test consumer: re-export at `ferrotorch-nn/src/lib.rs:247` + `ferrotorch-vision/src/models/mobilenet.rs:56` + `efficientnet.rs:39` |
+//! | REQ-2 | SHIPPED | the `SqueezeExcitation::new` constructor here (delegates to `new_with_activations`); non-test consumer: re-export at `lib.rs:247` + the two vision consumers |
+//! | REQ-3 | SHIPPED | the `new_with_activations` constructor on `SqueezeExcitation` here; non-test consumer: `mobilenet.rs:56` uses `HardSigmoid` scale; `efficientnet.rs:39` uses `Sigmoid` |
+//! | REQ-4 | SHIPPED | the `forward` method on `SqueezeExcitation` here; non-test consumer: re-export at `lib.rs:247` + MobileNetV3 and EfficientNet forwards |
+//! | REQ-5 | SHIPPED | the `impl<T: Float> Module<T> for SqueezeExcitation<T>` with `parameters` / `parameters_mut` / `named_parameters` here; non-test consumer: re-export at `lib.rs:247` |
+//! | REQ-6 | SHIPPED | the `children` + `named_children` methods inside the Module impl here; non-test consumer: re-export at `lib.rs:247` |
+//! | REQ-7 | SHIPPED | the `train` / `eval` methods inside the Module impl here (forwards to both boxed activations); non-test consumer: re-export at `lib.rs:247` |
+//! | REQ-8 | SHIPPED | the `impl<T: Float> std::fmt::Debug for SqueezeExcitation<T>` here; non-test consumer: re-export at `lib.rs:247` |
+//! | REQ-9 | SHIPPED | forward body composes only differentiable primitives (Conv2d, AdaptiveAvgPool2d, dyn Module activations, mul) here; non-test consumer: re-export at `lib.rs:247` |
+//! | REQ-10 | SHIPPED | `Send + Sync` bound automatic from Conv2d + boxed activation bounds; pinned by `se_is_send_sync` in `mod tests`; non-test consumer: re-export at `lib.rs:247` |
 
 use ferrotorch_core::grad_fns::arithmetic::mul;
 use ferrotorch_core::{FerrotorchError, FerrotorchResult, Float, Tensor};

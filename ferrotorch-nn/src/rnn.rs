@@ -8,6 +8,25 @@
 //! operations (`mm`, `add`, `mul`, `sigmoid`, `tanh`, `relu` from
 //! `ferrotorch_core::grad_fns`), autograd builds the backward graph
 //! automatically — no custom backward functions are required.
+//!
+//! ## REQ status (per `.design/ferrotorch-nn/rnn.md`)
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 | SHIPPED | the `LSTM<T>` struct + private `LSTMLayerParams<T>` here; non-test consumer: re-export at `ferrotorch-nn/src/lib.rs:245` + `ferrotorch/src/lib.rs:50` |
+//! | REQ-2 | SHIPPED | the `LSTM::forward` body here with the four-gate update; non-test consumer: re-export at `lib.rs:245` + meta-crate prelude `ferrotorch/src/lib.rs:50` + `benchmarks/ferrotorch_bench.rs:178` |
+//! | REQ-3 | SHIPPED | the `GRU<T>` struct here; non-test consumer: re-export at `lib.rs:245` + `ferrotorch/src/lib.rs:50` + `benchmarks/ferrotorch_bench.rs:178` |
+//! | REQ-4 | SHIPPED | the `GRU::forward` body here with the three-gate update; non-test consumer: as REQ-3 |
+//! | REQ-5 | SHIPPED | the `RNNNonlinearity` enum here; non-test consumer: re-export at `lib.rs:245` |
+//! | REQ-6 | SHIPPED | the `RNN<T>` struct here; non-test consumer: re-export at `lib.rs:245` |
+//! | REQ-7 | SHIPPED | the `RNN::forward` body dispatching on `RNNNonlinearity`; non-test consumer: re-export at `lib.rs:245` |
+//! | REQ-8 | SHIPPED | the `LSTMCell<T>`, `GRUCell<T>`, `RNNCell<T>` structs here; non-test consumer: re-export at `lib.rs:245` |
+//! | REQ-9 | SHIPPED | `init::uniform_` and `init::zeros_` calls in the constructors here; non-test consumer: re-export at `lib.rs:245` |
+//! | REQ-10 | SHIPPED | the `impl<T: Float> Module<T>` blocks for every public struct here; non-test consumer: re-export at `lib.rs:245` |
+//! | REQ-11 | SHIPPED | the `use ferrotorch_core::grad_fns::linalg::mm_differentiable as mm` import here and its use in every forward path; non-test consumer: re-export at `lib.rs:245` |
+//! | REQ-12 | NOT-STARTED | parity-sweep runner arm for `nn.functional.lstm_cell` not wired — blocker #1456 |
+//! | REQ-13 | NOT-STARTED | parity-sweep runner arm for `nn.functional.gru_cell` not wired — blocker #1456 |
+//! | REQ-14 | NOT-STARTED | parity-sweep runner arm for `nn.functional.rnn_relu_cell` not wired — blocker #1456 |
 
 use ferrotorch_core::grad_fns::activation::{relu, sigmoid, tanh};
 use ferrotorch_core::grad_fns::arithmetic::{add, mul, sub};
