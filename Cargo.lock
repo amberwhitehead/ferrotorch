@@ -4832,6 +4832,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "parity-sweep-runner"
+version = "0.5.9"
+dependencies = [
+ "base64 0.22.1",
+ "ferrotorch-core",
+ "ferrotorch-distributions",
+ "ferrotorch-nn",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "parking"
 version = "2.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"

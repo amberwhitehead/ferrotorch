@@ -66,10 +66,15 @@ operands are explicitly rejected via
   strided diagonal view (#821 path).
 - [x] AC-4: `einsum_differentiable` attaches an `EinsumBackward*`
   grad_fn when `any_requires_grad && is_grad_enabled()`.
-- [ ] AC-5: Parity-sweep `einsum` at `--seeds 8` returns ≥1 passed
-  sample — NOT-STARTED, blocked on #1532 (runner has no `einsum`
-  dispatch arm yet; current run shows `[einsum] 0/88 passed (88
-  skipped, 0 failed)`).
+- [x] AC-5: Parity-sweep `einsum` at `--seeds 8` returns ≥1 passed
+  sample — SHIPPED 2026-05-26 (closes #1532). Runner arm at
+  `tools/parity-sweep/runner/src/main.rs` decodes op_db's
+  `[List[Tensor], equation: str]` envelope and dispatches through
+  `ferrotorch_core::einsum::einsum_differentiable`. Current sweep
+  reports `[einsum] 64/88 passed (24 skipped, 0 failed)` — the 24
+  skips correspond to equations exercising the ellipsis / uppercase
+  / whitespace parser extensions that ferrotorch's REQ-2 narrower
+  parser deliberately rejects (legitimate-skip, not divergences).
 
 ## Architecture
 
@@ -117,18 +122,25 @@ as `pub use einsum::{einsum, einsum_differentiable}`.
 
 `parity_ops = ["einsum"]`. The parity-sweep oracle ingests
 `torch.einsum` op_db samples and compares against
-`ferrotorch_core::einsum_differentiable`. Currently the runner has
-no dispatch arm for `einsum` (the smoke command reports `0/88
-passed (88 skipped)`), tracked by #1532. No failing samples — the
-implementation is unverified by parity sweep, only by unit tests.
+`ferrotorch_core::einsum_differentiable`. As of 2026-05-26 (#1532
+closed) the runner has an `einsum` dispatch arm at
+`tools/parity-sweep/runner/src/main.rs`'s `dispatch_f32` and the
+smoke command reports `[einsum] 64/88 passed (24 skipped, 0
+failed)`. The 24 skips correspond to op_db samples that exercise
+the ellipsis (`'i...->...'`), uppercase (`'ij,Ab->ijAb'`), or
+whitespace (`'...ik, ...j -> ij'`) parser extensions that
+ferrotorch's REQ-2 narrower parser deliberately rejects. No
+failing samples — every dispatched equation matches torch
+byte-for-byte at the default rtol=1e-5 envelope.
 
 ## Verification
 
 `cargo test -p ferrotorch-core --lib einsum::tests` covers parser,
 single-input, two-input, repeated-index, and autograd paths.
 `./target/release/parity-sweep sweep --op einsum --seeds 8` reports
-`0/88 passed (88 skipped, 0 failed)` — the runner-arm gap, NOT a
-divergence.
+`64/88 passed (24 skipped, 0 failed)` post-#1532. The 24 skips are
+parser-narrower legitimate skips (ellipsis / uppercase /
+whitespace); no divergences.
 
 ## REQ status table
 

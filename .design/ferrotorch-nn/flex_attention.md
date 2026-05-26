@@ -179,9 +179,13 @@ gated on the corresponding `requires_grad`).
 ## Parity contract
 
 `parity_ops = []`. The flex API piggybacks on the
-`scaled_dot_product_attention` parity oracle (blocker #1455 on
-`attention.md`) when called with no score_mod / no block_mask.
-Distinct numerical contract:
+`scaled_dot_product_attention` parity oracle, which landed
+2026-05-26 (closes #1532) at
+`tools/parity-sweep/runner/src/main.rs` `dispatch_f32`. When
+called with no `score_mod` / no `block_mask`, `flex_attention`
+reduces to the same `(Q, K, V, is_causal)` math the SDPA runner
+arm verifies (`16/200 passed (184 skipped, 0 failed)`). Distinct
+numerical contract beyond the shared SDPA math:
 
 - **`-inf` score handling** — when `score_mod` outputs `-inf` (or
   `block_mask` masks an entire row), the softmax row reduces to

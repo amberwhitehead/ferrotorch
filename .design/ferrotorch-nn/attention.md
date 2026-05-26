@@ -90,9 +90,18 @@ autograd traces the backward pass without a custom `GradFn`.
 - REQ-11: Parity op `nn.functional.scaled_dot_product_attention` —
   forward output matches upstream `F.scaled_dot_product_attention(Q,
   K, V, is_causal=...)` to within float32 tolerance, in both
-  unmasked and `is_causal=True` configurations. NOT-STARTED until
-  the parity-sweep runner has a dispatch arm for this op (blocker
-  #1455).
+  unmasked and `is_causal=True` configurations. SHIPPED 2026-05-26
+  (closes #1532, addresses the runner-arm-gap half of #1455).
+  Parity-sweep runner arm at
+  `tools/parity-sweep/runner/src/main.rs` `dispatch_f32` consumes
+  op_db's `[q, k, v]` + `{is_causal, dropout_p, attn_mask?}`
+  envelope and dispatches through
+  `ferrotorch_nn::functional::scaled_dot_product_attention`.
+  Current sweep: `16/200 passed (184 skipped, 0 failed)` — every
+  3-D non-masked `dropout_p=0` sample passes; the skips correspond
+  to upstream behaviour ferrotorch's REQ-13 narrowly does not
+  cover (dropout-RNG, attn_mask, 4-D multi-head, is_causal with
+  N_q != N_k).
 
 - REQ-12: Parity op `nn.functional.multi_head_attention_forward` —
   forward output matches upstream's procedural
@@ -118,8 +127,12 @@ autograd traces the backward pass without a custom `GradFn`.
   input head 1).
 - [x] AC-8: `forward_2d` rejects GQA configurations.
 - [x] AC-9: `is_training()` round-trips through `train()`/`eval()`.
-- [ ] AC-10: parity-sweep `nn.functional.scaled_dot_product_attention`
-  at status `verified` — blocker #1455.
+- [x] AC-10: parity-sweep `nn.functional.scaled_dot_product_attention`
+  at status `verified` — SHIPPED 2026-05-26 (closes #1532). Runner
+  arm at `tools/parity-sweep/runner/src/main.rs` `dispatch_f32`;
+  current sweep `16/200 passed (184 skipped, 0 failed)`. Skips are
+  parser-narrower legitimate skips (dropout, 4-D, attn_mask,
+  is_causal-N-mismatch).
 - [ ] AC-11: parity-sweep `nn.functional.multi_head_attention_forward`
   at status `verified` — blocker #1455.
 

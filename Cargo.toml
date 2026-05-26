@@ -29,6 +29,7 @@ members = [
     "ferrotorch-diffusion",
     "ferrotorch-graph",
     "ferrotorch-rl",
+    "tools/parity-sweep/runner",
 ]
 
 [workspace.package]

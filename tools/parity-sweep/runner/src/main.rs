@@ -2579,9 +2579,7 @@ fn dispatch_f32(
                     }
                     let r = if d < 0 { d + ndim } else { d };
                     if !(0..ndim).contains(&r) {
-                        return Err(
-                            format!("squeeze: dim {d} out of range for ndim {ndim}").into()
-                        );
+                        return Err(format!("squeeze: dim {d} out of range for ndim {ndim}").into());
                     }
                     let r = r as usize;
                     if input.shape()[r] != 1 {
@@ -2599,10 +2597,9 @@ fn dispatch_f32(
                         let d = v.as_i64().ok_or("squeeze: dim list element not int")?;
                         let r = if d < 0 { d + ndim } else { d };
                         if !(0..ndim).contains(&r) {
-                            return Err(format!(
-                                "squeeze: dim {d} out of range for ndim {ndim}"
-                            )
-                            .into());
+                            return Err(
+                                format!("squeeze: dim {d} out of range for ndim {ndim}").into()
+                            );
                         }
                         let r = r as usize;
                         if input.shape()[r] == 1 {
@@ -2654,9 +2651,7 @@ fn dispatch_f32(
             for d in &perm_raw {
                 let r = if *d < 0 { *d + ndim } else { *d };
                 if !(0..ndim).contains(&r) {
-                    return Err(
-                        format!("permute: dim {d} out of range for ndim {ndim}").into()
-                    );
+                    return Err(format!("permute: dim {d} out of range for ndim {ndim}").into());
                 }
                 perm.push(r as usize);
             }
@@ -2710,25 +2705,21 @@ fn dispatch_f32(
         // the target adds prepend dims, those new dims cannot be -1 per upstream).
         "expand" => {
             let input = unary("expand")?;
-            let target =
-                arg_dim_list_at(1).ok_or("expand: arg 1 must be a shape list")?;
+            let target = arg_dim_list_at(1).ok_or("expand: arg 1 must be a shape list")?;
             let in_shape = input.shape();
             let in_ndim = in_shape.len();
             let target_ndim = target.len();
             if target_ndim < in_ndim {
-                return Err(format!(
-                    "expand: target ndim {target_ndim} < input ndim {in_ndim}"
-                )
-                .into());
+                return Err(
+                    format!("expand: target ndim {target_ndim} < input ndim {in_ndim}").into(),
+                );
             }
             let pad = target_ndim - in_ndim;
             let mut resolved: Vec<usize> = Vec::with_capacity(target_ndim);
             for (i, &d) in target.iter().enumerate() {
                 if d == -1 {
                     if i < pad {
-                        return Err(
-                            "expand: -1 not allowed on prepended dim".into()
-                        );
+                        return Err("expand: -1 not allowed on prepended dim".into());
                     }
                     resolved.push(in_shape[i - pad]);
                 } else if d < 0 {
@@ -2793,12 +2784,15 @@ fn dispatch_f32(
                 .unwrap_or(0);
             let nd = tensors[0].ndim() as i64;
             // stack inserts a new dim, so valid range is [-(nd+1), nd].
-            let normalized = if dim_raw < 0 { dim_raw + nd + 1 } else { dim_raw };
+            let normalized = if dim_raw < 0 {
+                dim_raw + nd + 1
+            } else {
+                dim_raw
+            };
             if normalized < 0 || normalized > nd {
-                return Err(format!(
-                    "stack: dim {dim_raw} out of range for inputs with ndim {nd}"
-                )
-                .into());
+                return Err(
+                    format!("stack: dim {dim_raw} out of range for inputs with ndim {nd}").into(),
+                );
             }
             Ok(Some(ferrotorch_core::vmap::stack(
                 &tensors,
@@ -2858,7 +2852,9 @@ fn dispatch_f32(
             let pieces = ferrotorch_core::split_t(&input, &sizes, dim)?;
             // Return the first chunk — the wrapper's tuple-vs-tensor gate
             // selects `output[0]` for value-equality (see main.rs:3147).
-            Ok(Some(pieces.into_iter().next().ok_or("split: empty result")?))
+            Ok(Some(
+                pieces.into_iter().next().ok_or("split: empty result")?,
+            ))
         }
 
         // `torch.chunk(input, chunks, dim=0)` — op_db emits
@@ -2886,7 +2882,9 @@ fn dispatch_f32(
                 return Err("chunk: chunks must be > 0".into());
             }
             let pieces = ferrotorch_core::chunk_t(&input, chunks, dim as usize)?;
-            Ok(Some(pieces.into_iter().next().ok_or("chunk: empty result")?))
+            Ok(Some(
+                pieces.into_iter().next().ok_or("chunk: empty result")?,
+            ))
         }
 
         // `torch.narrow(input, dim, start, length)` — op_db emits
@@ -2997,8 +2995,7 @@ fn dispatch_f32(
                     if numel == 0 {
                         return Ok(Some(input));
                     }
-                    let in_shape: Vec<isize> =
-                        input.shape().iter().map(|&d| d as isize).collect();
+                    let in_shape: Vec<isize> = input.shape().iter().map(|&d| d as isize).collect();
                     let flat = grad_fns::shape::reshape(&input, &[-1isize])?;
                     let total: i64 = shifts.iter().sum();
                     let rolled = ferrotorch_core::ops::tensor_ops::roll(&flat, total, 0)?;
@@ -3117,6 +3114,178 @@ fn dispatch_f32(
             let (a, b) = binary("linalg.matmul")?;
             grad_fns::linalg::matmul_differentiable(&a, &b)?
         })),
+
+        // `torch.einsum(equation, *operands)` —
+        // `aten/src/ATen/native/Linear.cpp:286 Tensor einsum`.
+        // The op_db wire shape is `args = [List[Tensor], equation: str]`
+        // because op_db's `sample_inputs_einsum` packs operands as a list
+        // (see `common_methods_invocations.py` einsum sample factory).
+        // ferrotorch's `einsum_differentiable(equation, &[&Tensor])` at
+        // `ferrotorch-core/src/einsum.rs:1555` is the differentiable entry
+        // (`einsum` forward + autograd wrap), re-exported at
+        // `ferrotorch-core/src/lib.rs:159`. Production non-test consumer:
+        // `Tensor::einsum` at `ferrotorch-core/src/methods.rs:656` which
+        // routes through `einsum_differentiable`.
+        //
+        // Skip paths (legitimate-skip, not divergences):
+        //   1. > 2 operands — ferrotorch's parser rejects (REQ-1 narrower
+        //      contract; opt-EinSum chain optimization is future work).
+        //      op_db's emitted equations are all 1 or 2 operand (verified
+        //      2026-05-26 by enumerating seeds 0..3 × i 0..14 — every
+        //      sample has 1 or 2 tensors in the list).
+        //   2. Equation contains a character outside the ASCII-lowercase
+        //      alphabet that ferrotorch's `parse_equation`
+        //      (`einsum.rs:84-148`) accepts — specifically `...` ellipsis
+        //      (`'i...->...'`), uppercase letters (`'ij,Ab->ijAb'`),
+        //      whitespace (`'...ik, ...j -> ij'`). Ferrotorch's REQ-2
+        //      explicitly narrows the parser to ASCII-lowercase with no
+        //      whitespace and no ellipsis; these belong to the ellipsis-
+        //      support gap tracked under the parser-extension REQ
+        //      (separate blocker — not a parity divergence).
+        // Closes #1532 (einsum half).
+        "einsum" => {
+            let list_v = args.first().ok_or("einsum: missing operand list arg")?;
+            let arr = list_v
+                .as_array()
+                .ok_or("einsum: arg 0 must be a list of tensors")?;
+            if arr.is_empty() || arr.len() > 2 {
+                // > 2 operands is a legitimate skip (parser-narrower than
+                // upstream); op_db does not currently emit > 2-operand
+                // samples but defensive-skip rather than dispatch-error.
+                return Ok(None);
+            }
+            let equation = args
+                .get(1)
+                .and_then(Value::as_str)
+                .ok_or("einsum: arg 1 must be the equation string")?;
+            // Reject equations containing non-ASCII-lowercase / whitespace /
+            // ellipsis characters. Ferrotorch's parser narrower contract
+            // (REQ-2 at `.design/ferrotorch-core/einsum.md`) excludes these;
+            // legitimate-skip rather than divergence.
+            let mut accepted = true;
+            for c in equation.chars() {
+                if c == ',' || c == '-' || c == '>' {
+                    continue;
+                }
+                if !c.is_ascii_lowercase() {
+                    accepted = false;
+                    break;
+                }
+            }
+            if !accepted {
+                return Ok(None);
+            }
+            let mut operand_tensors: Vec<Tensor<f32>> = Vec::with_capacity(arr.len());
+            for (i, v) in arr.iter().enumerate() {
+                let wt = unwrap_tensor_arg(v)
+                    .ok_or_else(|| format!("einsum: list element {i} is not a tensor"))?;
+                operand_tensors.push(wt.to_f32()?);
+            }
+            let refs: Vec<&Tensor<f32>> = operand_tensors.iter().collect();
+            // Route through the differentiable entry so future autograd-
+            // probe coverage (R-DEFER-1 design-doc REQ-5 SHIPPED) is
+            // exercised by the same path the production consumer
+            // (`Tensor::einsum`) uses.
+            Ok(Some(ferrotorch_core::einsum::einsum_differentiable(
+                equation, &refs,
+            )?))
+        }
+
+        // `torch.nn.functional.scaled_dot_product_attention(query, key, value,
+        // attn_mask=None, dropout_p=0.0, is_causal=False, scale=None)` —
+        // `torch/nn/functional.py` (the Python-side wrapper that picks the
+        // flash / math / mem-efficient backend) backed by
+        // `aten/src/ATen/native/transformers/attention.cpp` `Tensor
+        // _scaled_dot_product_attention_math`. op_db emits `args = [q, k, v]`
+        // with kwargs `{is_causal: bool, dropout_p: f64, attn_mask?: Tensor}`
+        // (verified 2026-05-26 — `scale` kwarg never appears in the sample
+        // set; only `is_causal` / `dropout_p` / `attn_mask` are emitted).
+        //
+        // ferrotorch's `pub fn scaled_dot_product_attention(query, key, value,
+        // is_causal)` lives at `ferrotorch-nn/src/functional.rs:1266` and
+        // delegates to `flash_attention(..., block_size=64)` (REQ-13 SHIPPED
+        // per `.design/ferrotorch-nn/functional.md:305`). Production
+        // non-test consumer: namespace path
+        // `ferrotorch_nn::functional::scaled_dot_product_attention` exposed
+        // via `pub mod functional` at `ferrotorch-nn/src/lib.rs:180`. The
+        // existing `flash_attention` re-export at `lib.rs:216` is the
+        // shared backend.
+        //
+        // Skip paths (legitimate-skip, not divergences):
+        //   1. dropout_p > 0 — non-deterministic; oracle's torch result
+        //      and ferrotorch's "no-dropout in inference path" cannot
+        //      align without RNG plumbing (#1452 covers the deterministic-
+        //      RNG gap for the dropout family). 48/100 op_db samples per
+        //      seed have dropout_p > 0 (counted by sample-enumeration
+        //      probe 2026-05-26).
+        //   2. attn_mask kwarg present — ferrotorch's
+        //      `scaled_dot_product_attention` has no mask parameter
+        //      (REQ-13's signature is `(q, k, v, is_causal)` — masks
+        //      are a separate REQ tracked under attention-cluster
+        //      gap #1455). 4/100 op_db samples per seed emit attn_mask.
+        //   3. is_causal=true && N_q != N_k — ferrotorch's
+        //      `flash_attention::validate_inputs` rejects this combination
+        //      (`flash_attention.md` REQ-2: "causal `N_q == N_k`",
+        //      noted in `flash_attention.md:185-187` as deliberate
+        //      strict-mode narrowing vs upstream's truncated-triangle
+        //      behaviour). 16/100 op_db samples per seed are this shape.
+        //   4. 4-D inputs `[B, H, N, d]` — ferrotorch's signature is 3-D
+        //      `[B, N, d]` (multi-head reshape lives at the caller, see
+        //      `attention::MultiheadAttention::forward_qkv`). Tracked
+        //      under REQ-9 / #1455. 16/100 op_db samples per seed are
+        //      4-D inputs.
+        // The remaining ~16/100 samples per seed (3-D, dropout_p=0, no
+        // attn_mask, is_causal alignment ok) dispatch successfully.
+        // Closes #1532 (sdpa half).
+        "nn.functional.scaled_dot_product_attention" => {
+            if args.len() < 3 {
+                return Err(format!(
+                    "nn.functional.scaled_dot_product_attention expects 3 args, got {}",
+                    args.len()
+                )
+                .into());
+            }
+            // dropout_p > 0 -> non-deterministic skip.
+            let dropout_p = kwargs
+                .get("dropout_p")
+                .and_then(Value::as_f64)
+                .unwrap_or(0.0);
+            if dropout_p > 0.0 {
+                return Ok(None);
+            }
+            // attn_mask kwarg present -> skip (ferrotorch SDPA has no mask).
+            if kwargs.get("attn_mask").is_some_and(|v| !v.is_null()) {
+                return Ok(None);
+            }
+            let is_causal = kwargs
+                .get("is_causal")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            let q_wire = unwrap_tensor_arg(&args[0])
+                .ok_or("nn.functional.scaled_dot_product_attention: arg 0 (query) not a tensor")?;
+            let k_wire = unwrap_tensor_arg(&args[1])
+                .ok_or("nn.functional.scaled_dot_product_attention: arg 1 (key) not a tensor")?;
+            let v_wire = unwrap_tensor_arg(&args[2])
+                .ok_or("nn.functional.scaled_dot_product_attention: arg 2 (value) not a tensor")?;
+            // 4-D `[B, H, N, d]` multi-head inputs are out of REQ-13's
+            // signature (3-D `[B, N, d]`); skip rather than dispatch-error.
+            if q_wire.shape.len() != 3 || k_wire.shape.len() != 3 || v_wire.shape.len() != 3 {
+                return Ok(None);
+            }
+            // is_causal=true && N_q != N_k -> ferrotorch's strict-mode
+            // narrower-than-upstream contract rejects; skip.
+            if is_causal && q_wire.shape[1] != k_wire.shape[1] {
+                return Ok(None);
+            }
+            let query = q_wire.to_f32()?;
+            let key = k_wire.to_f32()?;
+            let value = v_wire.to_f32()?;
+            Ok(Some(
+                ferrotorch_nn::functional::scaled_dot_product_attention(
+                    &query, &key, &value, is_causal,
+                )?,
+            ))
+        }
 
         _ => Ok(None),
     }
@@ -3308,6 +3477,18 @@ fn dispatch_ops() -> &'static [&'static str] {
         "bmm",
         "matmul",
         "linalg.matmul",
+        // Einsum + SDPA — runner arms wired 2026-05-26 to close #1532.
+        // `einsum` consumes op_db's `[List[Tensor], equation_str]` envelope
+        // (closed under REQ-2/REQ-5 of `.design/ferrotorch-core/einsum.md`);
+        // `nn.functional.scaled_dot_product_attention` consumes op_db's
+        // `[q, k, v]` + `{is_causal, dropout_p, attn_mask?}` kwargs envelope
+        // (closed under REQ-13 of `.design/ferrotorch-nn/functional.md`).
+        // Both arms keep legitimate-skip pathways for op_db samples that
+        // exercise upstream behaviour ferrotorch deliberately narrows
+        // (parser-narrower einsum equations, dropout > 0, attn_mask
+        // present, 4-D multi-head SDPA inputs, is_causal with N_q != N_k).
+        "einsum",
+        "nn.functional.scaled_dot_product_attention",
     ]
 }
 

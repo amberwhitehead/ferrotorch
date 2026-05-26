@@ -171,10 +171,14 @@ footprint.
 ## Parity contract
 
 `parity_ops = []`. The flash kernel mirrors the math of
-`scaled_dot_product_attention` (with the flash backend); since
-`scaled_dot_product_attention` has no parity-sweep runner arm yet
-(blocker #1455 on the `attention.rs` doc), the flash variant
-piggybacks on the eventual SDPA oracle.
+`scaled_dot_product_attention` (with the flash backend). The SDPA
+runner arm landed 2026-05-26 (closes #1532); the flash variant
+piggybacks on the SDPA oracle since
+`nn::functional::scaled_dot_product_attention` (parity-verified at
+`16/200 passed (184 skipped, 0 failed)`) delegates to
+`flash_attention(..., 64)` — every passing SDPA sample is also a
+passing flash_attention sample at the same (Q, K, V, is_causal)
+shape.
 
 Edge cases preserved:
 
