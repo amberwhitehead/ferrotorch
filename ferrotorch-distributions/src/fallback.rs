@@ -24,6 +24,17 @@
 //! no CUDA kernel. The single documented escape hatch is
 //! `PYTORCH_ENABLE_MPS_FALLBACK=1` for Apple MPS, which logs a
 //! `UserWarning` per call. We mirror that shape.
+//!
+//! ## REQ status (per `.design/ferrotorch-distributions/fallback.md`)
+//!
+//! Full evidence rows (impl + non-test production consumer + upstream cites)
+//! live in the design doc; this synopsis is a one-line summary per REQ.
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 (`FALLBACK_ENV_VAR` const) | SHIPPED | `pub(crate) const FALLBACK_ENV_VAR: &str = "FERROTORCH_ENABLE_GPU_FALLBACK"` in `fallback.rs` mirroring PyTorch's `PYTORCH_ENABLE_MPS_FALLBACK` env-var contract (R-DEV-2); consumer: read by every `check_gpu_fallback_opt_in` call across 20+ distribution methods; surfaced to end users in the `tracing` warning field |
+//! | REQ-2 (`check_gpu_fallback_opt_in` three-arm guard) | SHIPPED | `pub(crate) fn check_gpu_fallback_opt_in<T: Float>` in `fallback.rs` with Ok / Ok+`tracing::warn!` / `Err(NotImplementedOnCuda)` arms mirroring PyTorch's MPS fallback shape; consumers: `fn Normal::log_prob` in `normal.rs`, `fn kl_normal_normal` in `kl.rs`, `fn LogNormal::sample` in `lognormal.rs`, `fn Cauchy::cdf` in `cauchy.rs` — 20+ production call sites |
+//! | REQ-3 (`pub(crate)` visibility) | SHIPPED | `pub(crate) mod fallback;` in `lib.rs` + `pub(crate) fn check_gpu_fallback_opt_in` visibility together make the function callable only from within `ferrotorch-distributions`; consumer: the crate's own distribution modules call the function; `cargo doc -p ferrotorch-distributions` omits it from public docs |
 
 use ferrotorch_core::dtype::Float;
 use ferrotorch_core::error::{FerrotorchError, FerrotorchResult};

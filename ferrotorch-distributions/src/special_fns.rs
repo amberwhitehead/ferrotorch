@@ -5,6 +5,18 @@
 //! for per-element map operations.
 //!
 //! [CL-329]
+//!
+//! ## REQ status (per `.design/ferrotorch-distributions/special_fns.md`)
+//!
+//! Full evidence rows (impl + non-test production consumer + upstream cites)
+//! live in the design doc; this synopsis is a one-line summary per REQ.
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 (`lgamma_scalar<T>` Lanczos + reflection) | SHIPPED | `pub(crate) fn lgamma_scalar<T: Float>(x: T) -> T` with 9-coefficient Lanczos + reflection branch in `special_fns.rs` matching scipy reference to 1e-11 f64; consumers: `fn kl_gamma_scalar` in `kl.rs`; `fn Gamma::log_prob` in `gamma.rs`; `fn Beta::log_prob` in `beta.rs` (3 calls for `lnB(α,β)`); 9 production callers total |
+//! | REQ-2 (`digamma_scalar<T>` recurrence + asymptotic) | SHIPPED | `pub(crate) fn digamma_scalar<T: Float>(x: T) -> T` with recurrence + Abramowitz-Stegun asymptotic + reflection branch in `special_fns.rs` matching scipy reference to 1e-9 f64; consumers: `fn kl_gamma_scalar` in `kl.rs`; `fn Beta::entropy` in `beta.rs`; `fn Dirichlet::entropy` in `dirichlet.rs`; 5 production callers |
+//! | REQ-3 (`<T: Float>` dual-precision pattern) | SHIPPED | both fns are `<T: Float>` generic with f64 `LANCZOS_COEFFICIENTS: [f64; 9]` const promoted via `T::from(<f64>).unwrap()` in `special_fns.rs`; consumer: `fn Beta::log_prob` operates on `T = f32` AND `T = f64` (both tested by `_f64` variants) routing through the same generic body |
+//! | REQ-4 (`pub(crate)` visibility) | SHIPPED | `pub(crate) fn lgamma_scalar`, `pub(crate) fn digamma_scalar` + `pub(crate) mod special_fns;` in `lib.rs` together make the module crate-internal; consumers: 9 production sites within `ferrotorch-distributions/src/` (`gamma.rs`, `beta.rs`, `dirichlet.rs`, `kumaraswamy.rs`, `multinomial.rs`, `poisson.rs`, `student_t.rs`, `weibull.rs`, `kl.rs`); `cargo doc` omits these from public docs |
 
 use ferrotorch_core::dtype::Float;
 

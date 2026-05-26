@@ -13,6 +13,26 @@
 //! [`load_safetensors_sharded`] loads all shards into a single
 //! [`StateDict`]; [`load_safetensors_auto`] detects whether the given
 //! path is a single file or an index and dispatches accordingly.
+//!
+//! ## REQ status (per `.design/ferrotorch-serialize/safetensors_io.md`)
+//!
+//! Full evidence rows (impl + non-test production consumer + upstream cites)
+//! live in the design doc; this synopsis is a one-line summary per REQ.
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 (`save_safetensors` sorted-key write) | SHIPPED | `pub fn save_safetensors<T: Float>` in `safetensors_io.rs` building the `Vec<(String, TensorView)>` and delegating to `safetensors::serialize_to_file`; consumer: `pub use safetensors_io::save_safetensors` in `lib.rs`; training checkpoint export paths call this entry. Wire format is HuggingFace's spec per R-DEV-3. |
+//! | REQ-2 (`load_safetensors` single-file decode + bf16/f16 upcast) | SHIPPED | `pub fn load_safetensors<T: Float>` in `safetensors_io.rs` + `fn decode_tensor_list` + `fn decode_view`; consumer: `pub use safetensors_io::load_safetensors` in `lib.rs`; downstream model loaders call this for single-file HuggingFace checkpoints. |
+//! | REQ-3 (`load_safetensors_mmap` zero-copy load) | SHIPPED | `pub fn load_safetensors_mmap<T: Float>` in `safetensors_io.rs` using `memmap2::Mmap::map`; consumer: `pub use safetensors_io::load_safetensors_mmap` in `lib.rs`; production inference servers prefer this on large checkpoints. |
+//! | REQ-4 (`SafeTensorsIndex` HuggingFace sharded index) | SHIPPED | `#[non_exhaustive] pub struct SafeTensorsIndex` + `SafeTensorsIndexMetadata` + `impl SafeTensorsIndex::{from_file, shard_files, group_by_shard}` in `safetensors_io.rs`; consumer: `load_safetensors_sharded` / `_mmap` / `_with_progress` / `_filtered` all construct an index via `SafeTensorsIndex::from_file`. |
+//! | REQ-5 (`load_safetensors_sharded` rayon parallel) | SHIPPED | `pub fn load_safetensors_sharded<T: Float>` in `safetensors_io.rs` with `par_iter` over sorted shard files + serial merge + missing-key check; consumer: `pub use safetensors_io::load_safetensors_sharded` in `lib.rs`; `load_safetensors_auto` dispatches here for `*.index.json`. |
+//! | REQ-6 (`load_safetensors_sharded_mmap` rayon + mmap) | SHIPPED | `pub fn load_safetensors_sharded_mmap<T: Float>` + `fn load_one_shard_owned_mmap` in `safetensors_io.rs`; consumer: `pub use safetensors_io::load_safetensors_sharded_mmap` in `lib.rs`; production loaders prefer this on disk-bound multi-shard checkpoints. |
+//! | REQ-7 (`load_safetensors_auto` suffix dispatch) | SHIPPED | `pub fn load_safetensors_auto<T: Float>` in `safetensors_io.rs` dispatching on `.index.json` suffix; consumer: `pub use safetensors_io::load_safetensors_auto` in `lib.rs`; the meta-crate glob makes `ferrotorch::load_safetensors_auto` the primary user-facing entry. |
+//! | REQ-8 (`ShardProgress` + `_with_progress` callback) | SHIPPED | `#[non_exhaustive] pub struct ShardProgress<'a>` + `pub fn load_safetensors_sharded_with_progress<T, F>` in `safetensors_io.rs`; consumer: `pub use safetensors_io::{ShardProgress, load_safetensors_sharded_with_progress}` in `lib.rs`; CLI / TUI tools loading 70B+ checkpoints wire progress bars through this entry. |
+//! | REQ-9 (`load_safetensors_sharded_filtered` predicate-based load) | SHIPPED | `pub fn load_safetensors_sharded_filtered<T, F>` in `safetensors_io.rs` filtering per-shard expected keys before opening; consumer: `pub use safetensors_io::load_safetensors_sharded_filtered` in `lib.rs`; LoRA / adapter training loops use this to skip base-model weights. |
+//! | REQ-10 (vectorized f16/bf16 → f32 upcast) | SHIPPED | `fn half_to_f32` / `fn bf16_to_f32` + `bytemuck::cast_slice` half-buffer reinterpret + `T == f32` fast-path specialization in `decode_view` in `safetensors_io.rs`; consumer: every bf16/f16 safetensors load (production HuggingFace transformer paths) hits this code path. |
+//! | REQ-11 (serial-vs-parallel decode dispatch + env override) | SHIPPED | `fn decode_tensor_list` in `safetensors_io.rs` with the bf16/f16 → rayon, f32/f64 → serial dispatch + `FERROTORCH_FORCE_SERIAL_LOAD` env override; consumer: both `load_safetensors` and `load_safetensors_mmap` route through `decode_tensor_list`. |
+//! | REQ-12 (LE endianness contract) | SHIPPED | `fn as_le_bytes` in `safetensors_io.rs` with SAFETY block citing the LE invariant; consumer: `save_safetensors` calls `as_le_bytes` for every tensor; the crate-root LE invariant (mirrored from `state_dict.rs`'s `compile_error!`) governs platform support. |
 
 use std::collections::{HashMap, HashSet};
 use std::fs::File;

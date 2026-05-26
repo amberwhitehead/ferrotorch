@@ -14,6 +14,23 @@
 //! [8 bytes: state dict binary length]
 //! [state dict binary bytes (same format as state_dict::save)]
 //! ```
+//!
+//! ## REQ status (per `.design/ferrotorch-serialize/checkpoint.md`)
+//!
+//! Full evidence rows (impl + non-test production consumer + upstream cites)
+//! live in the design doc; this synopsis is a one-line summary per REQ.
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 (`TrainingCheckpoint` non-exhaustive bundle) | SHIPPED | `#[non_exhaustive] pub struct TrainingCheckpoint<T: Float>` + `impl TrainingCheckpoint::new` in `checkpoint.rs`; consumer: `pub use checkpoint::TrainingCheckpoint` in `lib.rs`; training loops bundle epoch/step + model + optimizer state via this type. Mirrors upstream `torch/serialization.py:945` `torch.save({'model_state':..., 'optimizer_state':..., 'epoch':N})` pattern (Rust-side struct per R-DEV-4 vs pickle). |
+//! | REQ-2 (`save_checkpoint` three-section writer) | SHIPPED | `pub fn save_checkpoint<T: Float>` in `checkpoint.rs` calling `write_section` three times (metadata JSON, optimizer JSON, state-dict bytes); consumer: `pub use checkpoint::save_checkpoint` in `lib.rs`; training loops persist via this entry. |
+//! | REQ-3 (`load_checkpoint` three-section reader) | SHIPPED | `pub fn load_checkpoint<T: Float>` in `checkpoint.rs` calling `read_section` three times and rebuilding each section; consumer: `pub use checkpoint::load_checkpoint` in `lib.rs`; training-resume code rehydrates via this entry. |
+//! | REQ-4 (optimizer-state JSON sorted-key emit + depth-aware split parser) | SHIPPED | `fn serialize_optimizer_state` + `fn deserialize_optimizer_state` + `fn split_top_level` + `fn parse_inner_opt_state` in `checkpoint.rs`; consumer: called by `save_checkpoint` / `load_checkpoint`, pub-re-exported through `lib.rs`. |
+//! | REQ-5 (length-prefixed binary framing) | SHIPPED | `fn write_section` / `fn read_section` in `checkpoint.rs` using `u64::to_le_bytes` length prefix + `read_exact` body; consumer: every call to `save_checkpoint` / `load_checkpoint` hits the helpers three times. |
+//! | REQ-6 (embedded state-dict section reuse) | SHIPPED | `fn serialize_state_dict_to_bytes` / `fn deserialize_state_dict_from_bytes` in `checkpoint.rs` calling `crate::state_dict::dtype_tag` and `crate::state_dict::parse_meta_line`; consumer: `save_checkpoint` / `load_checkpoint` use these for the third section, ensuring wire-byte equality with the standalone state-dict format. |
+//! | REQ-7 (`AsyncCheckpointer` background-thread saver) | SHIPPED | `pub struct AsyncCheckpointer` + `impl AsyncCheckpointer::{new, save, wait, is_saving}` + manual `Debug` + `impl Default` in `checkpoint.rs`; consumer: `pub use checkpoint::AsyncCheckpointer` in `lib.rs`; production training loops construct `AsyncCheckpointer::default()` once and call `save(...)` per epoch to overlap disk I/O with the next forward pass. |
+//! | REQ-8 (panic safety + in-flight reset) | SHIPPED | `catch_unwind(AssertUnwindSafe(...))` in `AsyncCheckpointer::save`'s spawn closure + unconditional `in_flight.store(false)` + panic-payload downcast + `wait()`'s join-error handling in `checkpoint.rs`; consumer: every `AsyncCheckpointer::save` routes through this path. |
+//! | REQ-9 (LE endianness contract) | SHIPPED | `compile_error!` at `checkpoint.rs` top-of-file + `u64::to_le_bytes`/`u64::from_le_bytes` in `write_section`/`read_section`; consumer: every checkpoint write/read uses the same length-prefix encoding, and the embedded state-dict inherits the same LE assumption from `state_dict.rs`. |
 
 #[cfg(not(target_endian = "little"))]
 compile_error!(

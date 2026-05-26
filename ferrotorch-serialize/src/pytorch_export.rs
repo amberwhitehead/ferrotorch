@@ -1,5 +1,18 @@
 //! Export a `StateDict<T>` as a PyTorch-compatible `.pt` / `.pth` file.
 //!
+//! ## REQ status (per `.design/ferrotorch-serialize/pytorch_export.md`)
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 (`save_pytorch` entry) | SHIPPED | `pub fn save_pytorch<T: Float>` in `pytorch_export.rs`; re-exported via `lib.rs` (`ferrotorch::save_pytorch`). |
+//! | REQ-2 (`PickleWriter` + emitters) | SHIPPED | `struct PickleWriter` + ~30 `emit_*` methods in `pytorch_export.rs`; consumer: `build_state_dict_pickle`. |
+//! | REQ-3 (state-dict pickle builder) | SHIPPED | `fn build_state_dict_pickle<T>` in `pytorch_export.rs`; consumer: `save_pytorch`. |
+//! | REQ-4 (storage class + dtype string) | SHIPPED | `fn pytorch_storage_type<T>` + `fn pytorch_dtype_str<T>` in `pytorch_export.rs`; bf16->f32 fallback. |
+//! | REQ-5 (shape tuple + contiguous strides) | SHIPPED | `fn emit_shape_tuple` + `fn compute_contiguous_strides` in `pytorch_export.rs`. |
+//! | REQ-6 (zip archive write loop) | SHIPPED | `save_pytorch` zip write with `CompressionMethod::Stored` + SAFETY-justified byte-slice reinterpret. |
+//! | REQ-7 (checkpoint CRC32 validator) | SHIPPED | `pub fn validate_checkpoint` + `fn crc32_hash` in `pytorch_export.rs`; re-exported via `lib.rs`. |
+//! | REQ-8 (little-endian invariant) | SHIPPED | top-of-file `compile_error!` rejects big-endian targets; raw-byte reinterpret relies on LE contract. |
+//!
 //! [CL-328] Serialization Expansion: `PyTorch` export writer.
 //!
 //! A `.pt` file is a ZIP archive containing:

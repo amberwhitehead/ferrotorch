@@ -6,6 +6,17 @@
 //!
 //! The format is intentionally simple and can be swapped to real `SafeTensors`
 //! when a stable Rust crate is available.
+//!
+//! ## REQ status (per `.design/ferrotorch-serialize/lib.md`)
+//!
+//! Full evidence rows (impl + non-test production consumer + upstream cites)
+//! live in the design doc; this synopsis is a one-line summary per REQ.
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 (`pub mod` declarations for 7 format submodules) | SHIPPED | `pub mod {checkpoint,gguf,onnx_export,pytorch_export,pytorch_import,safetensors_io,state_dict};` block in `lib.rs`; consumer: the immediately-following `pub use` block references every submodule, and `ferrotorch/src/lib.rs` glob-re-exports the crate as `ferrotorch::*` so model crates reach the modules through `ferrotorch::<symbol>` per upstream `torch/serialization.py:945` `torch.save` / `torch.load` flat import surface. |
+//! | REQ-2 (flat re-export surface) | SHIPPED | `pub use {checkpoint,gguf,onnx_export,pytorch_export,pytorch_import,safetensors_io,state_dict}::{...}` block in `lib.rs` flattening every documented format API + data type + helper; consumer: `ferrotorch/src/lib.rs` glob re-export + `ferrotorch-core/tests/conformance/_surface.json` pins every name against the resolved crate-root symbols (downstream model crates call `ferrotorch::save_safetensors` etc.) mirroring upstream `torch/serialization.py:2110` user-API flatness. |
+//! | REQ-3 (justified crate-level lint policy) | SHIPPED | 30-line comment block in `lib.rs` (preceding the `#![allow]`) naming each silenced lint with the wire-format spec reason; consumer: every parser submodule (`gguf.rs`, `pytorch_import.rs`, `onnx_export.rs`, `safetensors_io.rs`) depends on the crate-root allows to keep cast-heavy parser code readable without ~200 per-call `#[allow]` annotations — alternative documented in the comment block. |
 
 #![warn(clippy::all, clippy::pedantic)]
 #![deny(rust_2018_idioms, missing_debug_implementations)]

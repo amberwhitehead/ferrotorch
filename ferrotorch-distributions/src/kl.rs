@@ -6,6 +6,22 @@
 //! This mirrors PyTorch's `torch.distributions.kl` module.
 //!
 //! CL-330
+//!
+//! ## REQ status (per `.design/ferrotorch-distributions/kl.md`)
+//!
+//! Full evidence rows (impl + non-test production consumer + upstream cites)
+//! live in the design doc; this synopsis is a one-line summary per REQ.
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 (`kl_divergence<T, P, Q>` public entry point) | SHIPPED | `pub fn kl_divergence<T: Float, P, Q>` with `P: Distribution<T> + 'static`, `Q: Distribution<T> + 'static` bounds in `kl.rs` mirroring `torch/distributions/kl.py:kl_divergence`; consumer: `pub mod kl` in `lib.rs` exposes it as grandfathered public API; `test_kl_*` (~25 sites) exercise the dispatch path |
+//! | REQ-2 (`kl_supported_pair_count` introspection) | SHIPPED | `pub const fn kl_supported_pair_count() -> usize` + `KL_SUPPORTED_PAIR_COUNT: usize = 12` in `kl.rs`; consumer: const fn is grandfathered public API; drift-prevention test `kl_doc_table_matches_dispatcher` reads `include_str!("kl.rs")` and asserts three-way invariant against the public accessor |
+//! | REQ-3 (`kl_dispatch` `Any::downcast_ref` chain) | SHIPPED | the dispatcher in `kl.rs` is a 12-arm chain mirroring PyTorch's `_dispatch_kl` in `torch/distributions/kl.py:113-138`; consumer: `pub fn kl_divergence` invokes the dispatcher on every call |
+//! | REQ-4 (8 same-family closed-form formulas) | SHIPPED | 8 closed-form helpers in `kl.rs` (`kl_normal_normal`, `kl_bernoulli_bernoulli`, `kl_uniform_uniform`, `kl_categorical_categorical`, `kl_laplace_laplace`, `kl_exponential_exponential`, `kl_gamma_gamma`, `kl_poisson_poisson`) mirroring `@register_kl` bodies in `torch/distributions/kl.py`; consumer: the dispatcher invokes each formula |
+//! | REQ-5 (4 cross-family formulas) | SHIPPED | `kl_normal_uniform`, `kl_uniform_normal`, `kl_gamma_exponential`, `kl_exponential_gamma` in `kl.rs`; last two use `kl_gamma_scalar` via `Exp(λ) ≡ Gamma(1, λ)`; consumer: the dispatcher calls each; `kl_gamma_scalar` is consumed by 3 production sites internally |
+//! | REQ-6 (fallback guard on every formula) | SHIPPED | every formula's first statement is `crate::fallback::check_gpu_fallback_opt_in(&[...], "kl_divergence(P, Q)")?` in `kl.rs` — 12 production call sites of the fallback gate; consumer: this IS the production consumer of `fn check_gpu_fallback_opt_in` per `fallback.md` REQ-2 |
+//! | REQ-7 (full ~75-pair PyTorch coverage) | NOT-STARTED | blocker #1374 — PyTorch ships ~75 (P, Q) KL pairs; ferrotorch has 12; missing pairs include Beta-Beta, Dirichlet-Dirichlet, Gumbel-Gumbel, HalfNormal-HalfNormal, MVN-MVN, Pareto-Pareto, StudentT-Normal + many cross-family (Gamma-Normal, Poisson-Bernoulli, etc.) |
+//! | REQ-8 (`register_kl` extension API) | NOT-STARTED | blocker #1375 — `register_kl` decorator pattern + `_dispatch_kl` most-specific-subclass match (mirroring `torch/distributions/kl.py:51-138`) not implemented; the hand-coded `Any::downcast_ref` chain is closed to downstream extension |
 
 use ferrotorch_core::dtype::Float;
 use ferrotorch_core::error::{FerrotorchError, FerrotorchResult};

@@ -47,6 +47,19 @@
 //! - [`kl`] — analytical KL divergence for same-family distribution pairs
 //! - [`TransformedDistribution`](transforms::TransformedDistribution) — apply
 //!   bijective transforms to a base distribution
+//!
+//! ## REQ status (per `.design/ferrotorch-distributions/lib.md`)
+//!
+//! Full evidence rows (impl + non-test production consumer + upstream cites)
+//! live in the design doc; this synopsis is a one-line summary per REQ.
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 (`Distribution<T>` trait: 4 required methods) | SHIPPED | `pub trait Distribution<T: Float>: Send + Sync` with `sample`/`rsample`/`log_prob`/`entropy` in `lib.rs` mirroring `torch/distributions/distribution.py:167-255`; consumers: `impl Distribution<T> for Normal<T>` in `normal.rs`, plus 25 other concrete `impl Distribution` sites across the crate |
+//! | REQ-2 (default-implemented property methods) | SHIPPED | `batch_shape`/`cdf`/`icdf`/`mean`/`mode`/`variance`/`stddev` defaults in `pub trait Distribution` mirroring `torch/distributions/distribution.py:108-165`; consumers: `fn Independent::batch_shape` in `independent.rs` overrides the default; `fn TransformedDistribution::entropy` in `transforms.rs` invokes `self.base.mean()?` |
+//! | REQ-3 (module tree + `pub use` re-exports) | SHIPPED | mod declarations + `pub use bernoulli::Bernoulli` through `pub use weibull::Weibull` block in `lib.rs` mirroring `torch/distributions/__init__.py:74-119`; consumers: `tests/conformance_distributions_*` use the re-exports; downstream crates import via `ferrotorch_distributions::{Normal, Bernoulli, ...}` |
+//! | REQ-4 (`<T: Float>` generic parametrisation) | SHIPPED | `pub trait Distribution<T: Float>` with explicit `T: Float` on every method (R-DEV-7: monomorphise per-dtype); consumers: every concrete `pub struct Normal<T: Float>` / `Gamma<T: Float>` etc. with `impl<T: Float> Distribution<T>` — f32 and f64 both exercised by `*_f64` tests per family |
+//! | REQ-5 (full PyTorch `Distribution` surface) | NOT-STARTED | blocker #1376 — `arg_constraints` / `support` / `expand` / `enumerate_support` / `perplexity` / `validate_args` / `_validate_sample` / `has_rsample` / `event_shape` accessor not on the trait; closing the gap requires touching every concrete distribution to declare `arg_constraints` and `support` (cross-cutting with `constraints.md` REQ-9) |
 
 mod bernoulli;
 mod beta;

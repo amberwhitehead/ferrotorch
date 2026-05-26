@@ -1,5 +1,18 @@
 //! Import `PyTorch` `.pt` / `.pth` checkpoint files in pure Rust.
 //!
+//! ## REQ status (per `.design/ferrotorch-serialize/pytorch_import.md`)
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 (`PickleValue` enum) | SHIPPED | `pub enum PickleValue` in `pytorch_import.rs`; re-exported via `lib.rs` `pub use`; consumed by `parse_pickle` + `extract_state_dict`. |
+//! | REQ-2 (pickle bytecode parser) | SHIPPED | `pub fn parse_pickle` in `pytorch_import.rs`; consumer: `load_pytorch_state_dict_inner` drives extraction. |
+//! | REQ-3 (`BINUNICODE`/`BINBYTES`/`SHORT_BINBYTES` opcode constants) | SHIPPED | `const BINUNICODE/BINBYTES/SHORT_BINBYTES` in `pytorch_import.rs`; #1169 regression-pin. |
+//! | REQ-4 (zip layout probes) | SHIPPED | `fn find_pkl_name` + `fn find_data_prefix` in `pytorch_import.rs`; consumer: `load_pytorch_state_dict_inner`. |
+//! | REQ-5 (state-dict tree extractor) | SHIPPED | `fn extract_state_dict` in `pytorch_import.rs`; consumer: `load_pytorch_state_dict_inner`. |
+//! | REQ-6 (dtype-aware byte conversion) | SHIPPED | `fn convert_bytes_to_float<T>` in `pytorch_import.rs`. |
+//! | REQ-7 (eager full-read entry) | SHIPPED | `pub fn load_pytorch_state_dict` in `pytorch_import.rs`; re-exported via `lib.rs`. |
+//! | REQ-8 (mmap entry) | SHIPPED | `pub fn load_pytorch_state_dict_mmap` in `pytorch_import.rs`; re-exported via `lib.rs`. |
+//!
 //! A `.pt` file is a ZIP archive containing:
 //! - `archive/data.pkl` (or `data.pkl`) -- pickle bytecodes describing the
 //!   state dict structure (an `OrderedDict` of tensor rebuild instructions).

@@ -7,6 +7,23 @@
 //! This mirrors PyTorch's `torch.distributions.transforms` module.
 //!
 //! CL-330
+//!
+//! ## REQ status (per `.design/ferrotorch-distributions/transforms.md`)
+//!
+//! Full evidence rows (impl + non-test production consumer + upstream cites)
+//! live in the design doc; this synopsis is a one-line summary per REQ.
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 (`Transform` trait) | SHIPPED | `pub trait Transform<T: Float>: Send + Sync` with `forward`/`inverse`/`log_abs_det_jacobian`/`name` + `constant_entropy_contribution`/`is_exp_transform` defaults in `transforms.rs` mirroring `torch/distributions/transforms.py:48-200`; consumer: `fn TransformedDistribution::entropy` in `transforms.rs` invokes `t.constant_entropy_contribution()` and `t.is_exp_transform()` on the trait in production |
+//! | REQ-2 (`ExpTransform`) | SHIPPED | `pub struct ExpTransform` with `is_exp_transform() -> true` and `log_abs_det_jacobian == x.clone()` in `transforms.rs` mirroring `torch/distributions/transforms.py:ExpTransform`; consumer: `fn TransformedDistribution::entropy` inspects `is_exp_transform()` for closed-form case 3; grandfathered public API |
+//! | REQ-3 (`AffineTransform<T>`) | SHIPPED | `pub struct AffineTransform<T: Float> { loc, scale }` with `constant_entropy_contribution() -> Some(abs_scale.ln())` in `transforms.rs` mirroring `torch/distributions/transforms.py:AffineTransform`; consumer: `fn TransformedDistribution::entropy` consumes `constant_entropy_contribution` for closed-form case 2 |
+//! | REQ-4 (Sigmoid/Tanh/Softplus transforms) | SHIPPED | `pub struct SigmoidTransform`, `TanhTransform`, `SoftplusTransform` with numerically-stable device-resident formulas in `transforms.rs` mirroring `torch/distributions/transforms.py:{SigmoidTransform,TanhTransform,SoftplusTransform}`; consumer: `*_transform_preserves_device_and_value` tests verify the chain; grandfathered public API |
+//! | REQ-5 (`ComposeTransform<T>`) | SHIPPED | `pub struct ComposeTransform<T: Float>` + L→R forward + R→L inverse + sum-of-LDJs + empty-chain identity branch in `transforms.rs` mirroring `torch/distributions/transforms.py:ComposeTransform`; consumer: `fn TransformedDistribution::entropy` reads `constant_entropy_contribution()` override on chained instances |
+//! | REQ-6 (`TransformedDistribution<T>`) | SHIPPED | `pub struct TransformedDistribution<T: Float>` with `Box<dyn Distribution<T>>` base + `Vec<Box<dyn Transform<T>>>` chain + full `Distribution` impl in `transforms.rs` mirroring `torch/distributions/transformed_distribution.py:TransformedDistribution`; consumer: `pub use transforms::TransformedDistribution` in `lib.rs` — grandfathered public API |
+//! | REQ-7 (`TransformedDistribution::entropy` three-case dispatcher) | SHIPPED | `fn TransformedDistribution::entropy` three-case dispatch (empty, all-constant-Jacobian, single-Exp) with named-transform error on fall-through in `transforms.rs`; consumer: the `impl Distribution::entropy` IS the dispatcher; `test_transformed_distribution_entropy_*` tests pin all four branches |
+//! | REQ-8 (11 missing upstream transforms + domain/codomain) | NOT-STARTED | blocker #1373 — 11 of 16 upstream transforms not ported (`AbsTransform`, `PowerTransform`, `SoftmaxTransform`, `StickBreakingTransform`, `CatTransform`, `StackTransform`, `CorrCholeskyTransform`, `LowerCholeskyTransform`, `PositiveDefiniteTransform`, `ReshapeTransform`, `IndependentTransform`, `CumulativeDistributionTransform`); also Constraint domain/codomain linkage missing |
+//! | REQ-9 (Monte-Carlo entropy fallback) | NOT-STARTED | blocker #1378 — MC entropy fallback for non-closed-form chains (Sigmoid/Tanh/Softplus/multi-Exp/Exp-then-Affine) not implemented; PyTorch uses MC fallback, ferrotorch surfaces `InvalidArgument` |
 
 use ferrotorch_core::autograd::no_grad;
 use ferrotorch_core::creation;

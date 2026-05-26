@@ -1,5 +1,22 @@
 //! GGUF (GGML Universal Format) parser for loading llama.cpp quantized models.
 //!
+//! ## REQ status (per `.design/ferrotorch-serialize/gguf.md`)
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 (`GgmlType` enum) | SHIPPED | `pub enum GgmlType` with 8 variants + `block_size` + `block_bytes` + `from_u32` in `gguf.rs`. |
+//! | REQ-2 (`GgufValue` enum) | SHIPPED | `pub enum GgufValue` (13 variants) in `gguf.rs`; consumer: `GgufMetadata.entries`. |
+//! | REQ-3 (`GgufMetadata`) | SHIPPED | `pub struct GgufMetadata` in `gguf.rs`; consumer: `GgufFile.metadata`. |
+//! | REQ-4 (`GgufTensorInfo`) | SHIPPED | `#[non_exhaustive] pub struct GgufTensorInfo` in `gguf.rs`. |
+//! | REQ-5 (`GgufFile`) | SHIPPED | `#[non_exhaustive] pub struct GgufFile` in `gguf.rs`. |
+//! | REQ-6 (`load_gguf` / `parse_gguf_bytes`) | SHIPPED | both in `gguf.rs` with bounded-reader + OOM-defense; consumer: `load_gguf_state_dict`. |
+//! | REQ-7 (`load_gguf_mmap`) | SHIPPED | `pub fn load_gguf_mmap` in `gguf.rs`; consumer: `load_gguf_state_dict_mmap`. |
+//! | REQ-8 (per-format dequantizers) | SHIPPED | 7 `dequantize_*` functions + `fn dequantize_data` dispatcher + `fn f16_to_f32` in `gguf.rs`. |
+//! | REQ-9 (`dequantize_gguf_tensor`) | SHIPPED | `pub fn dequantize_gguf_tensor` in `gguf.rs`; consumer: `load_gguf_state_dict[_mmap]`. |
+//! | REQ-10 (state-dict entries) | SHIPPED | `pub fn load_gguf_state_dict` + `_mmap` in `gguf.rs`; consumed by `ferrotorch-llama`. |
+//! | REQ-11 (alignment handling) | SHIPPED | `Reader::align_to` + `general.alignment` lookup in `parse_gguf_bytes`. |
+//! | REQ-12 (bounded reader + OOM defense) | SHIPPED | `struct Reader<'a>` with bounds-checked methods in `gguf.rs`. |
+//!
 //! GGUF is the standard binary format used by llama.cpp for quantized LLM
 //! weights. This module implements:
 //!

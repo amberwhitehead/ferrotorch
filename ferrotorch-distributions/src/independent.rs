@@ -1,5 +1,17 @@
 //! Independent distribution wrapper.
 //!
+//! ## REQ status (per `.design/ferrotorch-distributions/independent.md`)
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 (`Independent<T, D>` struct) | SHIPPED | `pub struct Independent` in `independent.rs`; re-exported via `lib.rs`; mirrors `torch/distributions/independent.py:18-69`. |
+//! | REQ-2 (`new` constructor with zero-ndims rejection) | SHIPPED | `pub fn Independent::new` in `independent.rs`; pinned by `test_independent_zero_ndims_errors`. |
+//! | REQ-3 (`base` + `reinterpreted_batch_ndims` accessors) | SHIPPED | `pub fn base` + `pub fn reinterpreted_batch_ndims` in `independent.rs`. |
+//! | REQ-4 (`Distribution<T>` impl) | SHIPPED | `impl<T, D> Distribution<T> for Independent` in `independent.rs`; mirrors `torch/distributions/independent.py:84-126`. |
+//! | REQ-5 (`sum_rightmost` helper) | SHIPPED | `fn sum_rightmost<T>` in `independent.rs`; consumed by `log_prob` + `entropy`. |
+//! | REQ-6 (`sample` shape-forwarding) | SHIPPED | `Independent::sample` builds `full_shape = shape ++ event_dims` in `independent.rs`. |
+//! | REQ-7 (expand/enumerate_support/support/mean/mode/variance/has_rsample) | NOT-STARTED | blocker #1377 — cross-cutting with `lib.md` REQ-5 trait-surface blocker #1376. |
+//!
 //! Reinterprets the rightmost `reinterpreted_batch_ndims` of a base
 //! distribution's batch dimensions as event dimensions. The semantics:
 //!

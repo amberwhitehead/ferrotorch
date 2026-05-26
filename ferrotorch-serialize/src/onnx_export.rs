@@ -1,5 +1,22 @@
 //! Export an [`IrGraph`] as an ONNX model file.
 //!
+//! ## REQ status (per `.design/ferrotorch-serialize/onnx_export.md`)
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 (`OnnxExportConfig`) | SHIPPED | `#[non_exhaustive] pub struct OnnxExportConfig` + `impl Default` in `onnx_export.rs`; re-exported via `lib.rs`. |
+//! | REQ-2 (`ProtobufWriter`) | SHIPPED | `struct ProtobufWriter` + writers in `onnx_export.rs`; consumed by every `encode_*` builder. |
+//! | REQ-3 (dtype constants) | SHIPPED | `const ONNX_FLOAT = 1`, `ONNX_DOUBLE = 11`, `fn onnx_dtype<T>` in `onnx_export.rs`. |
+//! | REQ-4 (13 `encode_*` primitives) | SHIPPED | 13 functions in `onnx_export.rs`; consumer: `ir_graph_to_onnx`. |
+//! | REQ-5 (dynamic axes) | SHIPPED | `pub enum OnnxDimSpec` + `encode_dim_param`/`encode_value_info_dynamic` in `onnx_export.rs`. |
+//! | REQ-6 (`map_ir_op`) | SHIPPED | `fn map_ir_op` in `onnx_export.rs`; consumer: `ir_graph_to_onnx`. |
+//! | REQ-7 (Silu/Gelu opset-17 decomposition) | SHIPPED | inline `IrOpKind::Silu`/`Gelu` arms in `ir_graph_to_onnx` (CL-375). |
+//! | REQ-8 (`ir_graph_to_onnx`) | SHIPPED | `pub fn ir_graph_to_onnx` in `onnx_export.rs`; re-exported via `lib.rs`. |
+//! | REQ-9 (`export_onnx`) | SHIPPED | `pub fn export_onnx<T>` in `onnx_export.rs`; re-exported via `lib.rs`. |
+//! | REQ-10 (`export_ir_graph_to_onnx`) | SHIPPED | `pub fn export_ir_graph_to_onnx` in `onnx_export.rs`. |
+//! | REQ-11 (`export_from_program`) | SHIPPED | `pub fn export_from_program` in `onnx_export.rs` (CL-396 dynamic-axes merge). |
+//! | REQ-12 (file I/O error surface) | SHIPPED | `std::fs::write` in 3 entry points; errors surfaced as `InvalidArgument` with path. |
+//!
 //! [ONNX](https://onnx.ai/) (Open Neural Network Exchange) is a standard
 //! protobuf-based format for representing ML models. Models exported as `.onnx`
 //! files can be loaded by ONNX Runtime (C++/Python), `TensorRT` (NVIDIA),

@@ -7,6 +7,23 @@
 //! This mirrors PyTorch's `torch.distributions.constraints` module.
 //!
 //! CL-330
+//!
+//! ## REQ status (per `.design/ferrotorch-distributions/constraints.md`)
+//!
+//! Full evidence rows (impl + non-test production consumer + upstream cites)
+//! live in the design doc; this synopsis is a one-line summary per REQ.
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 (`Constraint` trait surface) | SHIPPED | `pub trait Constraint: Send + Sync` with `check<T: Float>`, default `is_discrete`/`event_dim`, required `name` in `constraints.rs` mirroring `torch/distributions/constraints.py:80-106`; consumer: `pub trait Constraint` is grandfathered public API (goal.md S5) + `pub use constraints` re-export in `lib.rs` |
+//! | REQ-2 (`Real` + `real()` constructor) | SHIPPED | `pub struct Real` + `impl Constraint for Real` (rejects NaN) + `pub fn real()` in `constraints.rs` mirroring `torch/distributions/constraints.py:_Real`; consumer: `pub use constraints` re-export in `lib.rs` |
+//! | REQ-3 (half-line `Positive`/`NonNegative`/`LessThan<T>`) | SHIPPED | `pub struct Positive`, `NonNegative`, `LessThan<T>` + constructors in `constraints.rs` mirroring upstream `_GreaterThan(0.)`/`_GreaterThanEq(0.)`/`_LessThan(...)`; consumer: `pub use constraints` re-export in `lib.rs` |
+//! | REQ-4 (parametric `GreaterThan<T>` / `GreaterThanEq<T>`) | SHIPPED | `pub struct GreaterThan<T: Float>` + `GreaterThanEq<T: Float>` with `T::from(self.lower_bound).unwrap()` cross-dtype promotion in `constraints.rs` mirroring `_GreaterThan`/`_GreaterThanEq`; consumer: `pub use constraints` re-export in `lib.rs` |
+//! | REQ-5 (interval constraints) | SHIPPED | `pub struct OpenInterval<T>`, `ClosedInterval<T>`, `HalfOpenInterval<T>` + constructors in `constraints.rs` mirroring `_Interval`/`_HalfOpenInterval`; consumer: `pub use constraints` re-export in `lib.rs` |
+//! | REQ-6 (`UnitInterval`/`BooleanConstraint`) | SHIPPED | `pub struct UnitInterval`, `BooleanConstraint` + `unit_interval()`/`boolean()` constructors with `BooleanConstraint::is_discrete() -> true` in `constraints.rs` mirroring `unit_interval = _Interval(0., 1.)` / `boolean = _Boolean()`; consumer: `pub use constraints` re-export in `lib.rs` |
+//! | REQ-7 (`Simplex` w/ `event_dim() -> 1`) | SHIPPED | `pub struct Simplex` with `event_dim() -> 1` override + `simplex()` constructor in `constraints.rs` mirroring `_Simplex`; consumer: `pub use constraints` re-export in `lib.rs`; scalar-only `check` is doc-commented limitation tracked under #1371 |
+//! | REQ-8 (17 missing upstream constraint variants) | NOT-STARTED | blocker #1372 — `IntegerInterval`, `NonNegativeInteger`, `PositiveDefinite`, `PositiveSemiDefinite`, `Multinomial`, `OneHot`, `Symmetric`, `LowerCholesky`, `LowerTriangular`, `CorrCholesky`, `RealVector`, `Cat`, `Stack`, `Independent` composite, `_Dependent`/`is_dependent`, `MixtureSameFamilyConstraint` not ported (ferrotorch ships 11 of 28 upstream variants) |
+//! | REQ-9 (concrete `arg_constraints` wiring) | NOT-STARTED | blocker #1371 — no concrete distribution declares `arg_constraints` or `support`; the Constraint trait + 11 impls have zero in-crate production consumers (only `tests/conformance_distributions_discrete.rs` exercises them, which is test-only per R-DOC-3); resolution requires `lib.md` REQ-5 / blocker #1376 to land first |
 
 use ferrotorch_core::dtype::Float;
 

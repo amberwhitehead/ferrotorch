@@ -13,6 +13,21 @@
 //! Each JSON line describes one tensor. The binary section contains the raw
 //! little-endian bytes for each tensor, concatenated in the order of the header
 //! lines. The separator `\n---\n` divides header from body.
+//!
+//! ## REQ status (per `.design/ferrotorch-serialize/state_dict.md`)
+//!
+//! Full evidence rows (impl + non-test production consumer + upstream cites)
+//! live in the design doc; this synopsis is a one-line summary per REQ.
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 (`save_state_dict` sorted-key writer) | SHIPPED | `pub fn save_state_dict<T: Float>` in `state_dict.rs` writes sorted header lines + `\n---\n` + raw LE body bytes; consumer: `pub use state_dict::save_state_dict` in `lib.rs`; `crate::checkpoint::serialize_state_dict_to_bytes` reuses the same byte layout via `crate::state_dict::dtype_tag`. Mirrors upstream `torch/serialization.py:945` `torch.save(state_dict, path)` use case (Rust-side hand-written header per R-DEV-4). |
+//! | REQ-2 (`load_state_dict` line-parser + LE body decode) | SHIPPED | `pub fn load_state_dict<T: Float>` in `state_dict.rs` parses header line-by-line + validates dtype/shape + decodes via `f{32,64}::from_le_bytes` + `numeric_cast::cast`; consumer: `pub use state_dict::load_state_dict` in `lib.rs`; downstream training-resume code reads through this entry. |
+//! | REQ-3 (`dtype_tag` size-of dispatch) | SHIPPED | `pub(crate) fn dtype_tag<T: Float>` in `state_dict.rs` returning `"f32"`/`"f64"`/`"unknown"`; consumer: `checkpoint.rs::serialize_state_dict_to_bytes` and `checkpoint.rs::deserialize_state_dict_from_bytes` call `crate::state_dict::dtype_tag::<T>()` for the embedded section. |
+//! | REQ-4 (serde-free `parse_meta_line`) | SHIPPED | `pub(crate) fn parse_meta_line` in `state_dict.rs` extracting `name`/`shape`/`dtype`/`byte_offset`/`byte_length` without serde + `FerrotorchError::InvalidArgument` on malformed input; consumer: `checkpoint.rs::deserialize_state_dict_from_bytes` calls `crate::state_dict::parse_meta_line` on every header line inside the embedded section. |
+//! | REQ-5 (LE endianness contract) | SHIPPED | `compile_error!` at `state_dict.rs` top-of-file rejecting big-endian + `slice::from_raw_parts(data.as_ptr().cast::<u8>(), ...)` in `save_state_dict` with SAFETY block; consumer: `load_state_dict` and `checkpoint.rs::deserialize_state_dict_from_bytes` both depend on the same LE invariant. |
+//! | REQ-6 (shape + dtype validation guards) | SHIPPED | three guard arms in `load_state_dict` returning `InvalidArgument`/`ShapeMismatch`/`DtypeMismatch`; consumer: `checkpoint.rs::deserialize_state_dict_from_bytes` performs the same checks on the embedded section. |
+//! | REQ-7 (scalar / empty / high-rank edge cases) | SHIPPED | `shape.iter().product()` returns 1 for empty shape, zero-line header is legal, hierarchical keys stored verbatim in `state_dict.rs`; consumer: production callers that write scalars (loss values), empty optimizer-only checkpoints, and 4D conv weights hit this code path via `save_state_dict` / `load_state_dict`. |
 
 #[cfg(not(target_endian = "little"))]
 compile_error!(
