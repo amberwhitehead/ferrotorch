@@ -677,8 +677,16 @@ impl<T: Float> Tensor<T> {
     /// `dim` follows PyTorch's negative-wrapping convention (`at::maybe_wrap_dim`
     /// at `TensorAdvancedIndexing.cpp:1919`). The `index` tensor must be 1-D
     /// or scalar (upstream `TORCH_CHECK(index.dim() <= 1)` at `:1920`).
-    /// Negative index values are rejected (R-DEV-1 narrower contract,
-    /// matching the rest of ferrotorch's `IntTensor` index validation).
+    /// Negative index values are accepted and wrapped per upstream's
+    /// `index_fill_kernel` at `aten/src/ATen/native/cpu/IndexKernel.cpp:
+    /// 224-229` (`TORCH_CHECK_INDEX(idx >= -self_dim_size && idx <
+    /// self_dim_size, ...); if (idx < 0) { idx += self_dim_size; }`). Indices
+    /// strictly outside `[-dim_size, dim_size)` raise `IndexOutOfBounds`
+    /// matching upstream's `TORCH_CHECK_INDEX`. A 0-d input is accepted: the
+    /// implementation mirrors upstream's `self.unsqueeze(-1)` at
+    /// `TensorAdvancedIndexing.cpp:1917` by treating the scalar as a length-1
+    /// 1-d tensor for the fill (only `dim ∈ {-1, 0}` and `index ∈ {-1, 0}`
+    /// are in range for that case).
     ///
     /// The non-test production consumer wiring for `grad_fns::indexing::
     /// index_fill` per R-DEFER-1: this method is the public, chainable

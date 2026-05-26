@@ -198,9 +198,18 @@ NOT-STARTED REQ with a concrete prereq blocker (#1245, #1247, #1248,
   `grad_output` with the same fill positions zeroed (`backward` impl at
   `:1391-1430`). Negative dim wraps per `at::maybe_wrap_dim` (upstream
   `:1919`). Index must be 1-D or scalar (upstream `TORCH_CHECK` at
-  `:1920`). Negative index values rejected (ferrotorch narrower contract
-  shared with the rest of the `IntTensor` index family). **Non-test
-  production consumer**: `Tensor::index_fill_t` (in `methods.rs`) — the chainable method-style
+  `:1920`). Negative index values are accepted and wrapped via
+  `idx += dim_size` per upstream's `index_fill_kernel` at
+  `aten/src/ATen/native/cpu/IndexKernel.cpp:224-229` (the same
+  `TORCH_CHECK_INDEX(idx >= -dim_size && idx < dim_size)` bound that
+  ferrotorch's `pub fn index_fill` in `grad_fns/indexing.rs` enforces
+  before applying the wrap); strictly out-of-range indices raise
+  `IndexOutOfBounds`. 0-d input is accepted by mirroring upstream's
+  `self_nonzero_dim = self.unsqueeze(-1)` at
+  `TensorAdvancedIndexing.cpp:1917` — ferrotorch treats the scalar as a
+  length-1 1-d tensor for the duration of the fill and returns a 0-d
+  scalar (only `dim ∈ {-1, 0}` and `index ∈ {-1, 0}` are in range there).
+  **Non-test production consumer**: `Tensor::index_fill_t` (in `methods.rs`) — the chainable method-style
   surface delegating to `grad_fns::indexing::index_fill`. Mirrors the
   upstream method docstring at `torch/_tensor_docs.py:2489-2509`. Runner
   arm at `tools/parity-sweep/runner/src/main.rs` decoding
@@ -650,7 +659,7 @@ method docstring at `torch/_tensor_docs.py:2489-2509`.
 | `index_select` | `TensorAdvancedIndexing.cpp:1862 index_select_cpu_` | `derivatives.yaml:910-913` (index_select_backward = zeros.index_add_(dim, index, grad)) | Empty index: forward returns shape-replacing-axis-with-0 tensor. Out-of-bounds: returns `IndexOutOfBounds`. Negative index: rejected with `InvalidArgument` (upstream wraps negative to positive — divergence per `IntTensor` validation at `indexing.rs:1067-1072`). |
 | `index_add` | `TensorAdvancedIndexing.cpp:1153 TORCH_IMPL_FUNC(index_add_cpu_out)` | `derivatives.yaml:862-868` | NOT-STARTED. |
 | `index_copy` | `TensorAdvancedIndexing.cpp:1082 TORCH_IMPL_FUNC(index_copy_out)` | `derivatives.yaml:875-883` | NOT-STARTED. |
-| `index_fill` | `TensorAdvancedIndexing.cpp:1979 Tensor index_fill(...)` | `derivatives.yaml:884-887` (grad.index_fill(dim, index, 0) — zero grad at filled positions) | Negative dim wraps per `at::maybe_wrap_dim` (upstream `:1919`). Index must be 1-D or scalar (upstream `:1920`). Negative index values: ferrotorch rejects (narrower contract shared with the rest of the IntTensor index family); upstream accepts via wrap. 0-d input: upstream unsqueezes to 1-d at `:1917`; ferrotorch rejects (#1256 narrower-contract gap). Tensor-valued fill (`index_fill.int_Tensor` overload at `:1987-1992`) is handled in the runner arm by extracting `.item()` from a 0-d tensor — matches upstream's own `.item()` delegation at `:1976`. SHIPPED 2026-05-25 (#1249). |
+| `index_fill` | `TensorAdvancedIndexing.cpp:1979 Tensor index_fill(...)` | `derivatives.yaml:884-887` (grad.index_fill(dim, index, 0) — zero grad at filled positions) | Negative dim wraps per `at::maybe_wrap_dim` (upstream `:1919`). Index must be 1-D or scalar (upstream `:1920`). Negative index values: ferrotorch wraps via `idx += dim_size` per upstream's `index_fill_kernel` at `aten/src/ATen/native/cpu/IndexKernel.cpp:224-229` (`TORCH_CHECK_INDEX(idx >= -size && idx < size); if (idx < 0) { idx += size; }`); strictly out-of-range indices raise `IndexOutOfBounds` matching upstream's `TORCH_CHECK_INDEX`. 0-d input: ferrotorch accepts via an inline unsqueeze-to-1-d mirroring upstream's `self_nonzero_dim = self.unsqueeze(-1)` at `:1917`, runs the fill on the length-1 1-d view, and returns a 0-d scalar (only `dim ∈ {-1, 0}` and `index ∈ {-1, 0}` are in range). Tensor-valued fill (`index_fill.int_Tensor` overload at `:1987-1992`) is handled in the runner arm by extracting `.item()` from a 0-d tensor — matches upstream's own `.item()` delegation at `:1976`. SHIPPED 2026-05-25 (#1249, negative-wrap #1273, 0-d accept #1272). |
 | `masked_select` | `TensorAdvancedIndexing.cpp:2621 masked_select_cpu` | `derivatives.yaml:1116-1119` (masked_select_backward = scatter compaction inverse) | Output is data-dependent length (= #true). GPU path computes the length scalar on-device via prefix-sum, the integer crosses to host once to size the output — upstream's matching pattern at `:2548 int64_t numel = _mask->sum().item().toLong()`. Mask must be Bool dtype: `BoolTensor` enforces this in Rust. Broadcast-mask: upstream uses `expand_outplace` at `:2545`; ferrotorch's `ops::indexing::masked_select` requires `mask.numel() == input.numel()` (no broadcast yet — narrower contract). |
 | `masked_fill` | `TensorAdvancedIndexing.cpp:2494 Tensor masked_fill(...)` | `derivatives.yaml:1094-1097` (grad.masked_fill(mask, 0)) | Scalar value only (the `masked_fill.Tensor` variant for tensor-valued fill is NOT in ferrotorch; only scalar `value: T`). Broadcast-mask: upstream uses `expand_outplace` at `:2503`; ferrotorch requires same-numel. NaN value: passes through (no special handling). |
 | `masked_scatter` | `TensorAdvancedIndexing.cpp:2402 Tensor masked_scatter(...)` | `derivatives.yaml:1105-1108` | NOT-STARTED (forward). The kernel `backend.masked_scatter` exists at `ferrotorch-gpu/src/masked_kernels.rs:933` but only as a VJP primitive for masked_select; no forward `pub fn`. |
