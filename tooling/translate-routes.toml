@@ -3010,7 +3010,7 @@ upstream = [
   "/home/doll/pytorch/aten/src/ATen/native/mps/",
   "/home/doll/pytorch/torch/mps/",
 ]
-design = ".design/ferrotorch-mps/kernels/mod.md"
+design = ".design/ferrotorch-mps/kernels.md"
 parity_ops = []
 
 

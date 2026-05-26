@@ -31,6 +31,25 @@
 //! GPU buffers are `Arc<MtlBuffer>` (a newtype around `Retained<ProtocolObject<dyn MTLBuffer>>`)
 //! stored in `GpuBufferHandle::inner` via type-erasure. Downcast via
 //! `handle.downcast_ref::<Arc<MtlBuffer>>()`.
+//!
+//! ## REQ status (per `.design/ferrotorch-mps/backend.md`)
+//!
+//! Full evidence rows (impl + non-test production consumer + upstream
+//! cites) live in the design doc; this synopsis is a one-line summary per
+//! REQ.
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 (`MtlBackend` struct + `impl GpuBackend`) | SHIPPED | `pub struct MtlBackend { device, queue, pipelines }` + `impl GpuBackend for MtlBackend` in `backend.rs`; consumer `pub use backend::MtlBackend` in `lib.rs` re-exports it, and `ferrotorch/src/lib.rs:137` `pub use ferrotorch_mps::*;` propagates on macOS |
+//! | REQ-2 (`MtlBackend::new` fail-fast pipeline compile) | SHIPPED | `pub fn MtlBackend::new` resolves `MTLCreateSystemDefaultDevice` then eagerly compiles all 10 MSL pipelines via `fn compile_pipeline` in `backend.rs`; consumer `pub fn init_mps_backend_metal` invokes `MtlBackend::new()?` |
+//! | REQ-3 (`Arc<MtlBuffer>` type-erasure bridge) | SHIPPED | `pub struct MtlBuffer` + `unsafe impl Send/Sync` (SAFETY: Metal ObjC ARC + command-queue serialisation) + `fn wrap_buffer`/`fn downcast_buf` in `backend.rs`; consumer every `impl GpuBackend` method body calls `Self::downcast_buf(handle)?` |
+//! | REQ-4 (memory mgmt via shared-mode buffers) | SHIPPED | `fn cpu_to_gpu / gpu_to_cpu / clone_buffer / alloc_zeros / buffer_elem_size` in `impl GpuBackend for MtlBackend` using `MTLResourceOptions::StorageModeShared` per `aten/src/ATen/mps/MPSAllocator.h:36`; consumer every kernel launcher calls `Self::alloc_buffer` for the output |
+//! | REQ-5 (elementwise + activation kernels) | SHIPPED | `fn add_f32 / sub_f32 / mul_f32 / div_f32 / relu_f32 / sigmoid_f32` delegating to `fn launch_binary_f32` / `fn launch_unary_f32` in `backend.rs`; consumer `ferrotorch_core::gpu_dispatch::gpu_backend()` returns this `&dyn GpuBackend` on macOS post-`init_mps_backend()` |
+//! | REQ-6 (matmul / bmm kernels) | SHIPPED | `fn matmul_f32` + `fn bmm_f32` in `backend.rs` build command-buffer + encoder + setBuffer + setBytes + 16x16 threadgroup dispatch; consumer trait dispatch via `gpu_backend()` for `Tensor::matmul` / `Tensor::bmm` on macOS |
+//! | REQ-7 (softmax + sum_axis reductions) | SHIPPED | `fn softmax_f32 / sum_f32 / sum_axis_f32` using `dispatchThreadgroups_threadsPerThreadgroup` (one tg per output row/element) and `pow2_tg_width(cols)` / `pow2_tg_width(axis_len)`; consumer trait dispatch via `gpu_backend()` for `Tensor::softmax` / `Tensor::sum` |
+//! | REQ-8 (`pow2_tg_width` helper) | SHIPPED | `fn pow2_tg_width(n) = n.min(1024).next_power_of_two()` in `backend.rs` with documented #1101 contract; consumer `fn softmax_f32` and `fn sum_axis_f32` invoke it before threadgroup dispatch |
+//! | REQ-9 (unimplemented-op error contract) | SHIPPED | every non-Sprint-C.7 trait method (neg/gelu/dropout/broadcast_*/transpose/permute/layernorm/slice_*/embed_*/scale/relu_backward/gelu_backward/index_select/masked_*/has_inf_nan) returns `Err(InvalidArgument { message: "MSL kernel needed: <op> — follow-up #626" })`; consumer trait impl compiles so `register_gpu_backend(Box::new(MtlBackend))` succeeds, invoking an unimplemented op surfaces the structured error |
+//! | REQ-10 (`init_mps_backend_metal` global registration) | SHIPPED | `pub fn init_mps_backend_metal` constructs `MtlBackend::new()` and calls `ferrotorch_core::gpu_dispatch::register_gpu_backend(Box::new(backend))`; consumer `pub fn init_mps_backend` in `lib.rs` delegates here on macOS, and `ferrotorch/src/lib.rs:137` re-exports it |
 
 #![cfg(target_os = "macos")]
 

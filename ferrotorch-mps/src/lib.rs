@@ -58,6 +58,20 @@
 //! Issue #626 is the parent. Each of the remaining ~70 unimplemented
 //! `GpuBackend` methods has its own crosslink follow-up issue filed as part
 //! of Sprint C.7 completion.
+//!
+//! ## REQ status (per `.design/ferrotorch-mps/lib.md`)
+//!
+//! Full evidence rows (impl + non-test production consumer + upstream
+//! cites) live in the design doc; this synopsis is a one-line summary per
+//! REQ.
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 (lint baseline) | SHIPPED | `#![warn(clippy::all, clippy::pedantic)] + #![deny(rust_2018_idioms, missing_debug_implementations, missing_docs)] + #![cfg_attr(not(target_os = "macos"), deny(unsafe_code))]` at top of `lib.rs` with per-item `#![allow(..)]` justifications; consumer: every `ferrotorch-mps/src/*.rs` file compiles under this baseline |
+//! | REQ-2 (platform gating) | SHIPPED | `#[cfg(target_os = "macos")] pub mod backend` + matching `pub use backend::MtlBackend` in `lib.rs`; consumer `ferrotorch/src/lib.rs:137` `pub use ferrotorch_mps::*;` propagates the macOS-only symbol, and `cargo check -p ferrotorch-mps --no-default-features` on Linux/WSL compiles clean |
+//! | REQ-3 (lifecycle surface) | SHIPPED | `pub fn is_mps_available / mps_device_count / init_mps_backend` in `lib.rs` mirroring `torch/mps/__init__.py:25-27` and `aten/src/ATen/mps/MPSDevice.h:79`; consumer `ferrotorch/src/lib.rs:137` re-exports them as `ferrotorch::init_mps_backend()` / `ferrotorch::is_mps_available()` |
+//! | REQ-4 (`MpsDevice` semantics) | SHIPPED | `pub struct MpsDevice { ordinal: usize }` + `MpsDevice::new` rejecting non-zero ordinals on macOS with `Err(InvalidArgument)` per `aten/src/ATen/mps/MPSDevice.mm:18-21` singleton; consumer re-exported through `ferrotorch::MpsDevice` via meta-crate glob |
+//! | REQ-5 (`mps:N` Display) | SHIPPED | `impl fmt::Display for MpsDevice` prints `"mps:{ordinal}"`; consumer `ferrotorch_core::Device::Mps(_)` Display uses the same format, asserted by `device_mps_marker_round_trips` and `conformance_mps::mps_device_display_matches_fixture` |
 
 #![warn(clippy::all, clippy::pedantic)]
 #![deny(rust_2018_idioms, missing_debug_implementations)]
