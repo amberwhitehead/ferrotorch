@@ -24,6 +24,21 @@
 //!   Generalization" (UAI 2018)
 //!
 //! # CL-321
+//!
+//! ## REQ status (per `.design/ferrotorch-optim/swa.md`)
+//!
+//! | REQ | Status | Evidence |
+//! | --- | --- | --- |
+//! | REQ-1 | SHIPPED | `AveragingStrategy { Swa, Ema(f64) }` and decay-range panic in `swa.rs` mirror `torch/optim/swa_utils.py:42-153`; consumer: `ferrotorch/src/lib.rs` `pub use ferrotorch_optim::*;` re-export. |
+//! | REQ-2 | SHIPPED | `AveragedModel<T>` and `AveragedModel::new` in `swa.rs`; consumer: `ferrotorch/src/lib.rs` re-export. |
+//! | REQ-3 | SHIPPED | SWA running mean in `AveragedModel::update_parameters` and `AveragedModel::update_parameters_foreach` (`swa.rs`) mirror `torch/optim/swa_utils.py:153-164`; consumer: `ferrotorch/src/lib.rs` re-export. |
+//! | REQ-4 | SHIPPED | EMA update in `AveragedModel::update_parameters` and `AveragedModel::update_parameters_foreach` (`swa.rs`); consumer: `ferrotorch/src/lib.rs` re-export. |
+//! | REQ-5 | SHIPPED | `n_averaged == 0` snapshot branches in both update paths (`swa.rs`); consumer: `ferrotorch/src/lib.rs` re-export. |
+//! | REQ-6 | SHIPPED | `AveragedModel::apply_to` in `swa.rs` with documented sole-writer SAFETY block; consumer: `ferrotorch/src/lib.rs` re-export. |
+//! | REQ-7 | SHIPPED | `AveragedModel::with_foreach` and `update_parameters_foreach` in `swa.rs`; consumer: `ferrotorch/src/lib.rs` re-export. |
+//! | REQ-8 | SHIPPED | `AnnealStrategy { Cosine, Linear }` and `Swalr::anneal_factor` in `swa.rs` mirror `torch/optim/swa_utils.py:430`; consumer: `ferrotorch/src/lib.rs` re-export. |
+//! | REQ-9 | SHIPPED | `Swalr` and its interpolation step in `swa.rs`; consumer: `ferrotorch/src/lib.rs` re-export. |
+//! | REQ-10 | SHIPPED | `impl<T: Float> LrScheduler<T> for Swalr` in `swa.rs`; consumer: `ferrotorch/src/lib.rs` re-export and the `LrScheduler` trait in `crate::scheduler`. |
 
 use ferrotorch_core::numeric_cast::cast;
 use ferrotorch_core::{FerrotorchResult, Float, Tensor, no_grad};

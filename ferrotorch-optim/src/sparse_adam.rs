@@ -5,6 +5,18 @@
 //! rows are accessed per batch.
 //!
 //! Matches PyTorch's `torch.optim.SparseAdam`.
+//!
+//! ## REQ status (per `.design/ferrotorch-optim/sparse_adam.md`)
+//!
+//! | REQ | Status | Evidence |
+//! | --- | --- | --- |
+//! | REQ-1 | SHIPPED | `SparseAdamConfig` at `sparse_adam.rs` mirrors `torch/optim/sparse_adam.py:14`; consumer: `ferrotorch/src/lib.rs:61` re-export. |
+//! | REQ-2 | SHIPPED | `SparseAdam<T>` plus `impl Optimizer<T>` at `sparse_adam.rs` mirrors `torch.optim.SparseAdam` (`torch/optim/sparse_adam.py:13`); consumer: `ferrotorch/src/lib.rs:61` re-export plus `ferrotorch-nn/src/embedding.rs:20` documented chain. |
+//! | REQ-3 | NOT-STARTED | sparse-COO gradient contract missing; blocked on #1463. |
+//! | REQ-4 | SHIPPED | per-`ParamKey` state map at `sparse_adam.rs:88` mirrors `torch/optim/sparse_adam.py:98`; consumer: `ferrotorch/src/lib.rs:61` re-export. |
+//! | REQ-5 | SHIPPED | bias-corrected Adam update at `sparse_adam.rs:164-186`; consumer: `ferrotorch/src/lib.rs:61` re-export. |
+//! | REQ-6 | NOT-STARTED | `state_dict`/`load_state_dict` are no-op stubs at `sparse_adam.rs:243-249`; blocked on #1463 (state-dict needs sparse-COO type). |
+//! | REQ-7 | SHIPPED | `FerrotorchError::NotImplementedOnCuda` early-return at `sparse_adam.rs:136` (intentional divergence tracked by #1468); consumer: `ferrotorch/src/lib.rs:61` re-export. |
 
 use std::collections::HashMap;
 

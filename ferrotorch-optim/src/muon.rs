@@ -5,6 +5,21 @@
 //! it falls back to standard momentum SGD.
 //!
 //! Reference: <https://arxiv.org/abs/2502.16982>
+//!
+//! ## REQ status (per `.design/ferrotorch-optim/muon.md`)
+//!
+//! | REQ | Status | Evidence |
+//! | --- | --- | --- |
+//! | REQ-1 | SHIPPED | `MuonConfig` in `muon.rs` mirrors `torch/optim/_muon.py:87` (defaults differ; documented divergence); consumer: `ferrotorch/src/lib.rs` `pub use ferrotorch_optim::*;` re-export. |
+//! | REQ-2 | SHIPPED | `Muon<T>` plus `impl Optimizer<T>` in `muon.rs`; consumer: `ferrotorch/src/lib.rs` re-export. |
+//! | REQ-3 | SHIPPED | `newton_schulz_orthogonalize_tensor` in `muon.rs` mirrors upstream `_zeropower_via_newtonschulz` (`torch/optim/_muon.py:31`) structurally; **cubic** vs upstream **quintic** divergence tracked by #1465. Consumer: `ferrotorch/src/lib.rs` re-export. |
+//! | REQ-4 | NOT-STARTED | ferrotorch falls back to momentum-SGD for non-2D; upstream rejects with `ValueError`. Blocked by #1464. |
+//! | REQ-5 | SHIPPED | device-resident momentum buffer plus per-step update in `Muon::step` (`muon.rs`); consumer: `ferrotorch/src/lib.rs` re-export. |
+//! | REQ-6 | SHIPPED | nesterov branch in `Muon::step` (`muon.rs`); consumer: `ferrotorch/src/lib.rs` re-export. |
+//! | REQ-7 | NOT-STARTED | ferrotorch uses L2 weight decay; upstream uses decoupled weight decay. Blocked by #1466. |
+//! | REQ-8 | SHIPPED | `maximize` negation in `Muon::step` (`muon.rs`); consumer: `ferrotorch/src/lib.rs` re-export. |
+//! | REQ-9 | SHIPPED | device-resident step body in `Muon::step` (`muon.rs`); consumer: `ferrotorch/src/lib.rs` re-export. CUDA tests in `muon.rs` (under `#[cfg(feature = "cuda")]`) verify residence and CPU/GPU agreement. |
+//! | REQ-10 | SHIPPED | `Muon::state_dict`/`Muon::load_state_dict` in `muon.rs`; consumer: `ferrotorch/src/lib.rs` re-export. |
 
 use std::collections::HashMap;
 

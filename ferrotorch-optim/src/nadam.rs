@@ -9,6 +9,20 @@
 //! next-step momentum, weighted by a schedule-aware mu_t.
 //!
 //! CL-319
+//!
+//! ## REQ status (per `.design/ferrotorch-optim/nadam.md`)
+//!
+//! | REQ | Status | Evidence |
+//! | --- | --- | --- |
+//! | REQ-1 | SHIPPED | `NAdamConfig` in `nadam.rs` mirrors `torch/optim/nadam.py:32`; consumer: `ferrotorch/src/lib.rs` `pub use ferrotorch_optim::*;` re-export. |
+//! | REQ-2 | SHIPPED | `NAdam<T>` plus `impl Optimizer<T>` in `nadam.rs` with per-`ParamKey` state mirror `torch/optim/nadam.py:281`; consumer: `ferrotorch/src/lib.rs` re-export. |
+//! | REQ-3 | SHIPPED | mu schedule in `NAdam::step` and `NAdam::step_foreach` (`nadam.rs`) mirror `torch/optim/nadam.py:281-380`; consumer: `ferrotorch/src/lib.rs` re-export. |
+//! | REQ-4 | SHIPPED | lookahead update in `NAdam::step` and `NAdam::step_foreach` (`nadam.rs`); consumer: `ferrotorch/src/lib.rs` re-export. |
+//! | REQ-5 | SHIPPED | decoupled vs L2 branches in `NAdam::step` and `NAdam::step_foreach` (`nadam.rs`); consumer: `ferrotorch/src/lib.rs` re-export. |
+//! | REQ-6 | SHIPPED | `NAdam::step_foreach` in `nadam.rs`; consumer: `ferrotorch/src/lib.rs` re-export. |
+//! | REQ-7 | SHIPPED | `any_cuda` auto-route in `NAdam::step` (`nadam.rs`); consumer: `ferrotorch/src/lib.rs` re-export. Partial-parity divergence tracked by #1471. |
+//! | REQ-8 | SHIPPED | `NAdam::state_dict`/`NAdam::load_state_dict` in `nadam.rs`; consumer: `ferrotorch/src/lib.rs` re-export. |
+//! | REQ-9 | SHIPPED | `NAdamConfig::with_*` setters in `nadam.rs`; consumer: `ferrotorch/src/lib.rs` re-export. |
 
 use std::collections::HashMap;
 use std::collections::hash_map::Entry;

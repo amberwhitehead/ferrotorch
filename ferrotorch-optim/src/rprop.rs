@@ -12,6 +12,19 @@
 //! where gradient noise is minimal.
 //!
 //! CL-319
+//!
+//! ## REQ status (per `.design/ferrotorch-optim/rprop.md`)
+//!
+//! | REQ | Status | Evidence |
+//! | --- | --- | --- |
+//! | REQ-1 | SHIPPED | `RpropConfig` at `rprop.rs:50` mirrors `torch/optim/rprop.py:31`; consumer: `ferrotorch/src/lib.rs:61` re-export. |
+//! | REQ-2 | SHIPPED | `Rprop<T>` at `rprop.rs:123` plus `impl Optimizer<T>` at `rprop.rs:159` mirror `_single_tensor_rprop` at `torch/optim/rprop.py:223`; consumer: `ferrotorch/src/lib.rs:61` re-export. |
+//! | REQ-3 | SHIPPED | sign-product adaptation at `rprop.rs:208-248` mirrors `torch/optim/rprop.py:223-292`; consumer: `ferrotorch/src/lib.rs:61` re-export. |
+//! | REQ-4 | SHIPPED | `prev_grad[i] = effective_grad` at `rprop.rs:244` mirrors `torch/optim/rprop.py:279`; consumer: `ferrotorch/src/lib.rs:61` re-export. |
+//! | REQ-5 | SHIPPED | `state_dict` at `rprop.rs:303-315` plus `load_state_dict` at `rprop.rs:317-349`; consumer: `ferrotorch/src/lib.rs:61` re-export. |
+//! | REQ-6 | SHIPPED | builder setters at `rprop.rs:71-90`; consumer: `ferrotorch/src/lib.rs:61` re-export. |
+//! | REQ-7 | SHIPPED | full `Optimizer<T>` impl at `rprop.rs:159-350`; consumer: `ferrotorch/src/lib.rs:61` re-export. |
+//! | REQ-8 | SHIPPED | `FerrotorchError::NotImplementedOnCuda` at `rprop.rs:182` (intentional divergence tracked by #1468); consumer: `ferrotorch/src/lib.rs:61` re-export. |
 
 use std::collections::HashMap;
 

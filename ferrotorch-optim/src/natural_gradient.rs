@@ -26,6 +26,20 @@
 //!
 //! All parameter updates execute inside `no_grad()` so the optimizer step is
 //! never recorded in the autograd graph.
+//!
+//! ## REQ status (per `.design/ferrotorch-optim/natural_gradient.md`)
+//!
+//! | REQ | Status | Evidence |
+//! | --- | --- | --- |
+//! | REQ-1 | SHIPPED | `KfacConfig` plus its `with_*` setters in `natural_gradient.rs`; consumer: `ferrotorch/src/lib.rs` `pub use ferrotorch_optim::*;` re-export. |
+//! | REQ-2 | SHIPPED | `Kfac<T>` plus `impl Optimizer<T>` in `natural_gradient.rs`; consumer: `ferrotorch/src/lib.rs` re-export. |
+//! | REQ-3 | SHIPPED | `Kfac::update_factors` in `natural_gradient.rs`; consumer: `ferrotorch/src/lib.rs` re-export. |
+//! | REQ-4 | SHIPPED | `factors: HashMap<String, KroneckerFactors<T>>` field plus lazy-init branch in `Kfac::update_factors` (`natural_gradient.rs`); consumer: `ferrotorch/src/lib.rs` re-export. |
+//! | REQ-5 | SHIPPED | `invert_damped_tensor` in `natural_gradient.rs` dispatches to `ferrotorch_core::linalg::solve` (cuSOLVER on CUDA); consumer: `ferrotorch/src/lib.rs` re-export. |
+//! | REQ-6 | SHIPPED | `Kfac::step` in `natural_gradient.rs` with the inverse-cache gate; consumer: `ferrotorch/src/lib.rs` re-export. |
+//! | REQ-7 | SHIPPED | `Kfac::state_dict`/`Kfac::load_state_dict` in `natural_gradient.rs`; consumer: `ferrotorch/src/lib.rs` re-export. |
+//! | REQ-8 | SHIPPED | `maximize` branch inside `Kfac::step`'s gradient pre-processing (`natural_gradient.rs`); consumer: `ferrotorch/src/lib.rs` re-export. |
+//! | REQ-9 | SHIPPED | device migration in `Kfac::update_factors` (`natural_gradient.rs`); consumer: `ferrotorch/src/lib.rs` re-export. |
 
 use std::collections::HashMap;
 use std::fmt::Write as _;

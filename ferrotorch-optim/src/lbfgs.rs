@@ -11,6 +11,21 @@
 //!
 //! All parameter updates execute inside `no_grad()` so the optimizer step is
 //! never recorded in the autograd graph.
+//!
+//! ## REQ status (per `.design/ferrotorch-optim/lbfgs.md`)
+//!
+//! | REQ | Status | Evidence |
+//! | --- | --- | --- |
+//! | REQ-1 | SHIPPED | `LbfgsConfig` in `lbfgs.rs` mirrors `torch/optim/lbfgs.py:240-280`; consumer: `ferrotorch/src/lib.rs` `pub use ferrotorch_optim::*;` re-export. |
+//! | REQ-2 | SHIPPED | `LineSearchFn { StrongWolfe }` in `lbfgs.rs` mirrors upstream's `line_search_fn="strong_wolfe"` kwarg; consumer: `ferrotorch/src/lib.rs` re-export. |
+//! | REQ-3 | SHIPPED | `Lbfgs<T>` plus `LbfgsState<T>` plus `impl Optimizer<T>` in `lbfgs.rs`; consumer: `ferrotorch/src/lib.rs` re-export. |
+//! | REQ-4 | SHIPPED | `Lbfgs::gather_params`/`Lbfgs::gather_grads`/`Lbfgs::scatter_params` in `lbfgs.rs`; consumer: `ferrotorch/src/lib.rs` re-export. |
+//! | REQ-5 | SHIPPED | `Lbfgs::two_loop_recursion` in `lbfgs.rs` mirrors Nocedal & Wright Algorithm 7.4; consumer: `ferrotorch/src/lib.rs` re-export. |
+//! | REQ-6 | SHIPPED | `Lbfgs::update_history` in `lbfgs.rs` with curvature-condition gate and VecDeque eviction; consumer: `ferrotorch/src/lib.rs` re-export. |
+//! | REQ-7 | SHIPPED | `strong_wolfe_search` plus `zoom` plus `Lbfgs::step_with_closure` in `lbfgs.rs` mirror Nocedal & Wright Algs 3.5/3.6; consumer: `ferrotorch/src/lib.rs` re-export. |
+//! | REQ-8 | SHIPPED | `Optimizer<T>::step` in `lbfgs.rs` with `InvalidArgument` early-return when `line_search_fn.is_some()`; consumer: `ferrotorch/src/lib.rs` re-export. Documented divergence tracked by #1469. |
+//! | REQ-9 | SHIPPED | `Lbfgs::state_dict`/`Lbfgs::load_state_dict` in `lbfgs.rs`; consumer: `ferrotorch/src/lib.rs` re-export. |
+//! | REQ-10 | SHIPPED | device-resident step body composed via `gather_params`/`gather_grads`/`two_loop_recursion`/`scatter_params` in `lbfgs.rs`; the remaining `data_vec()` in `inf_norm` (`lbfgs.rs`) is a documented temporary. Consumer: `ferrotorch/src/lib.rs` re-export. |
 
 use std::collections::{HashMap, VecDeque};
 

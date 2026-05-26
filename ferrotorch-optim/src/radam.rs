@@ -10,6 +10,20 @@
 //! to a simple bias-corrected first-moment update.
 //!
 //! CL-319
+//!
+//! ## REQ status (per `.design/ferrotorch-optim/radam.md`)
+//!
+//! | REQ | Status | Evidence |
+//! | --- | --- | --- |
+//! | REQ-1 | SHIPPED | `RAdamConfig` in `radam.rs` mirrors `torch/optim/radam.py:31`; consumer: `ferrotorch/src/lib.rs` `pub use ferrotorch_optim::*;` re-export. |
+//! | REQ-2 | SHIPPED | `RAdam<T>` plus `impl Optimizer<T>` in `radam.rs` mirror `torch/optim/radam.py:31`; consumer: `ferrotorch/src/lib.rs` re-export. |
+//! | REQ-3 | SHIPPED | `rho_inf` and per-step `rho_t` in `RAdam::step` (`radam.rs`) mirror `_single_tensor_radam` (`torch/optim/radam.py:256-360`); consumer: `ferrotorch/src/lib.rs` re-export. |
+//! | REQ-4 | SHIPPED | `rho_t > 5.0` branch and SGD fallback in `RAdam::step` (`radam.rs`) mirror `torch/optim/radam.py:300-340`; consumer: `ferrotorch/src/lib.rs` re-export. |
+//! | REQ-5 | SHIPPED | decoupled vs L2 branches in `RAdam::step` (`radam.rs`); consumer: `ferrotorch/src/lib.rs` re-export. |
+//! | REQ-6 | SHIPPED | `RAdam::step_foreach` in `radam.rs`; consumer: `ferrotorch/src/lib.rs` re-export. |
+//! | REQ-7 | SHIPPED | auto-route on `any_cuda` in `RAdam::step` (`radam.rs`); consumer: `ferrotorch/src/lib.rs` re-export. Partial-parity divergence tracked by #1471. |
+//! | REQ-8 | SHIPPED | `RAdam::state_dict`/`RAdam::load_state_dict` in `radam.rs`; consumer: `ferrotorch/src/lib.rs` re-export. |
+//! | REQ-9 | SHIPPED | `RAdamConfig::with_*` setters in `radam.rs`; consumer: `ferrotorch/src/lib.rs` re-export. |
 
 use std::collections::HashMap;
 use std::collections::hash_map::Entry;

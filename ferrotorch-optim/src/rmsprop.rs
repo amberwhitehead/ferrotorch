@@ -3,6 +3,21 @@
 //! Implements the RMSprop algorithm as described by Hinton in his Coursera
 //! lecture 6e. Supports optional momentum, centered gradient normalization,
 //! and L2 weight decay.
+//!
+//! ## REQ status (per `.design/ferrotorch-optim/rmsprop.md`)
+//!
+//! | REQ | Status | Evidence |
+//! | --- | --- | --- |
+//! | REQ-1 | SHIPPED | `RmspropConfig` at `rmsprop.rs:22` mirrors `torch/optim/rmsprop.py:31`; consumer: `ferrotorch/src/lib.rs:61` re-export and `ferrotorch-optim/examples/optimizer_trajectory_dump.rs:58,358` constructs `RmspropConfig::default().with_lr(lr)`. |
+//! | REQ-2 | SHIPPED | `Rmsprop<T>` at `rmsprop.rs:169` plus `impl Optimizer<T>` at `rmsprop.rs:361`; consumer: `ferrotorch-optim/examples/optimizer_trajectory_dump.rs:371` calls `Rmsprop::new`. |
+//! | REQ-3 | SHIPPED | `ParamState<T>` at `rmsprop.rs:124-131` mirrors `torch/optim/rmsprop.py:122`; consumer: `ferrotorch-optim/examples/optimizer_trajectory_dump.rs:371` end-to-end use. |
+//! | REQ-4 | SHIPPED | `square_avg` update at `rmsprop.rs:427-429` and centered/non-centered `avg` at `rmsprop.rs:442-462` mirror `torch/optim/rmsprop.py:265-340`; consumer: `ferrotorch-optim/examples/optimizer_trajectory_dump.rs`. |
+//! | REQ-5 | SHIPPED | eps-outside-sqrt at `rmsprop.rs:460` plus foreach mirror at `rmsprop.rs:290` mirror `_single_tensor_rmsprop`'s `avg.sqrt_(); avg.add_(eps)` (`torch/optim/rmsprop.py`); consumer: `ferrotorch-optim/examples/optimizer_trajectory_dump.rs:371`. |
+//! | REQ-6 | SHIPPED | momentum-buffered branch at `rmsprop.rs:465-477` mirrors `torch/optim/rmsprop.py:289-318`; consumer: `ferrotorch/src/lib.rs:61` re-export. |
+//! | REQ-7 | SHIPPED | L2 weight decay at `rmsprop.rs:404-412`; consumer: `ferrotorch/src/lib.rs:61` re-export. |
+//! | REQ-8 | SHIPPED | `maximize` negation at `rmsprop.rs:395-401`; consumer: `ferrotorch/src/lib.rs:61` re-export. |
+//! | REQ-9 | SHIPPED | `step_foreach` at `rmsprop.rs:203-355`; consumer: `ferrotorch/src/lib.rs:61` re-export. |
+//! | REQ-10 | SHIPPED | `state_dict` at `rmsprop.rs:534-562` plus `load_state_dict` at `rmsprop.rs:564-617`; consumer: `ferrotorch/src/lib.rs:61` re-export. |
 
 use std::collections::HashMap;
 
