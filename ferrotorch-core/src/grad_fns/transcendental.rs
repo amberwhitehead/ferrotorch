@@ -1439,14 +1439,17 @@ pub fn frac<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
 /// `UnaryOps.cpp:348 CREATE_UNARY_TORCH_IMPL_FUNC(sign_out, sign_stub)`.
 /// Backward: `zeros_like(grad)` (piecewise constant).
 ///
-/// Special: `sign(NaN) = NaN`, matching `num_traits::Float::signum`'s
-/// NaN propagation (which matches PyTorch's `c10::signum(NaN) = NaN`).
+/// Special: `sign(NaN) = 0`, matching the upstream CPU kernel at
+/// `aten/src/ATen/native/cpu/UnaryOpsKernel.cpp:304`:
+///   `[=](scalar_t a) -> scalar_t { return (0 < a) - c10::is_negative(a); }`
+/// which evaluates to `0` for `a = NaN` because both `0 < NaN` and
+/// `c10::is_negative(NaN)` (sign-bit of a quieted NaN) are false. This is
+/// `torch.sign`, not `torch.sgn`; `sgn` (a complex-aware variant) DOES
+/// propagate NaN, but the two ops are deliberately distinct upstream.
 pub fn sign<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
     let zero = <T as num_traits::Zero>::zero();
     let output = unary_map(input, |x| {
-        if x.is_nan() {
-            x
-        } else if x == zero {
+        if x.is_nan() || x == zero {
             zero
         } else {
             x.signum()
