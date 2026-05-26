@@ -384,6 +384,91 @@ def _fake_quantize_per_channel_affine_samples() -> list[tuple[tuple, dict]]:
     return samples
 
 
+def _rnn_cell_samples(gate_mul: int) -> list[tuple[tuple, dict]]:
+    """Hand-crafted samples for the single-step RNN cell family.
+
+    `gate_mul` is the gate-count multiplier: 1 for RNN (`relu`/`tanh`),
+    3 for GRU, 4 for LSTM. Wire shape (matches ferrotorch's runner
+    dispatch arms `dispatch_rnn_cell` / `dispatch_gru_cell` /
+    `dispatch_lstm_cell`):
+
+      args = [input, hidden, weight_ih, weight_hh, bias_ih, bias_hh]
+
+    where:
+      - input:   `[batch, input_size]`
+      - hidden:  `[batch, hidden_size]` (single tensor; LSTM packages
+                 `[h, c]` as a 2-element list — emitted as a JSON array
+                 on the wire and unpacked by `dispatch_lstm_cell`).
+      - weight_ih: `[gate_mul * hidden_size, input_size]`
+      - weight_hh: `[gate_mul * hidden_size, hidden_size]`
+      - bias_ih:   `[gate_mul * hidden_size]`
+      - bias_hh:   `[gate_mul * hidden_size]`
+
+    Closes the test-infrastructure gap for #1456 (cells are NOT in
+    `op_db` — verified 2026-05-26 by enumerating op_db names).
+    """
+    g = torch.Generator().manual_seed(0)
+    samples: list[tuple[tuple, dict]] = []
+    # 6 shape combinations covering small/large batch and feature widths.
+    shapes = [
+        (1, 1, 1),   # smallest
+        (2, 3, 4),   # asymmetric
+        (4, 8, 8),   # square hidden
+        (1, 16, 4),  # narrow hidden
+        (3, 5, 7),   # odd-prime
+        (2, 4, 6),   # mid-range
+    ]
+    for (batch, input_size, hidden_size) in shapes:
+        gate_size = gate_mul * hidden_size
+        x = torch.randn(batch, input_size, generator=g, dtype=torch.float32)
+        h = torch.randn(batch, hidden_size, generator=g, dtype=torch.float32)
+        w_ih = torch.randn(gate_size, input_size, generator=g, dtype=torch.float32) * 0.3
+        w_hh = torch.randn(gate_size, hidden_size, generator=g, dtype=torch.float32) * 0.3
+        b_ih = torch.randn(gate_size, generator=g, dtype=torch.float32) * 0.1
+        b_hh = torch.randn(gate_size, generator=g, dtype=torch.float32) * 0.1
+        samples.append(((x, h, w_ih, w_hh, b_ih, b_hh), {}))
+    return samples
+
+
+def _lstm_cell_samples() -> list[tuple[tuple, dict]]:
+    """LSTM-cell samples. `hidden` is a `[h, c]` list."""
+    g = torch.Generator().manual_seed(0)
+    samples: list[tuple[tuple, dict]] = []
+    shapes = [
+        (1, 1, 1),
+        (2, 3, 4),
+        (4, 8, 8),
+        (1, 16, 4),
+        (3, 5, 7),
+        (2, 4, 6),
+    ]
+    for (batch, input_size, hidden_size) in shapes:
+        gate_size = 4 * hidden_size
+        x = torch.randn(batch, input_size, generator=g, dtype=torch.float32)
+        h = torch.randn(batch, hidden_size, generator=g, dtype=torch.float32)
+        c = torch.randn(batch, hidden_size, generator=g, dtype=torch.float32)
+        w_ih = torch.randn(gate_size, input_size, generator=g, dtype=torch.float32) * 0.3
+        w_hh = torch.randn(gate_size, hidden_size, generator=g, dtype=torch.float32) * 0.3
+        b_ih = torch.randn(gate_size, generator=g, dtype=torch.float32) * 0.1
+        b_hh = torch.randn(gate_size, generator=g, dtype=torch.float32) * 0.1
+        # Pass `[h, c]` as a list — the encoder maps that to a JSON array
+        # of two tensor envelopes; `dispatch_lstm_cell` unpacks it.
+        samples.append(((x, [h, c], w_ih, w_hh, b_ih, b_hh), {}))
+    return samples
+
+
+def _lstm_cell_torch_call(input_, hc_list, w_ih, w_hh, b_ih, b_hh):
+    """Adapter: `torch.lstm_cell(input, (h, c), ...)` takes a tuple but the
+    custom-sample list packs `[h, c]` as a list (the wire format encodes
+    a list of two tensors uniformly as a JSON array). Convert list ->
+    tuple before invoking. The return is `(h', c')`; `encode_arg()` will
+    pack it as a JSON array, and the runner's sweep loop already selects
+    `output[0]` for the value-equality gate (see the comment near
+    `expected_v`).
+    """
+    return torch.lstm_cell(input_, (hc_list[0], hc_list[1]), w_ih, w_hh, b_ih, b_hh)
+
+
 _CUSTOM_OPS: dict[str, dict[str, Any]] = {
     "fake_quantize_per_tensor_affine": {
         "callable": torch.fake_quantize_per_tensor_affine,
@@ -392,6 +477,28 @@ _CUSTOM_OPS: dict[str, dict[str, Any]] = {
     "fake_quantize_per_channel_affine": {
         "callable": torch.fake_quantize_per_channel_affine,
         "samples": _fake_quantize_per_channel_affine_samples(),
+    },
+    # RNN cells (#1456). Not in op_db — see `_rnn_cell_samples` /
+    # `_lstm_cell_samples` for the hand-crafted sample matrix. We dispatch
+    # via the top-level `torch.{rnn_relu_cell, rnn_tanh_cell, gru_cell,
+    # lstm_cell}` entries (verified 2026-05-26: `hasattr(torch,
+    # 'gru_cell') == True`); `torch.nn.functional` does not expose these
+    # cells (it only exposes the layer-level `*Cell` modules).
+    "nn.functional.rnn_relu_cell": {
+        "callable": torch.rnn_relu_cell,
+        "samples": _rnn_cell_samples(1),
+    },
+    "nn.functional.rnn_tanh_cell": {
+        "callable": torch.rnn_tanh_cell,
+        "samples": _rnn_cell_samples(1),
+    },
+    "nn.functional.gru_cell": {
+        "callable": torch.gru_cell,
+        "samples": _rnn_cell_samples(3),
+    },
+    "nn.functional.lstm_cell": {
+        "callable": _lstm_cell_torch_call,
+        "samples": _lstm_cell_samples(),
     },
 }
 

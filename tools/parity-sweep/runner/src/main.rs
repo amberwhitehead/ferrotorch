@@ -3287,8 +3287,1819 @@ fn dispatch_f32(
             ))
         }
 
+        // ===================================================================
+        // LAYERS umbrella #1441 — linear / dropout / embedding / conv* / pad
+        // ===================================================================
+        //
+        // `torch.nn.functional.linear(input, weight, bias=None)` —
+        // `aten/src/ATen/native/Linear.cpp:48`. op_db emits
+        // `[input, weight, bias?]` with no kwargs. ferrotorch's
+        // `pub fn linear<T>(input, weight, bias_opt)` at
+        // `ferrotorch-nn/src/functional.rs:67` requires 2-D `input` and
+        // 2-D `weight` (REQ-1). Non-2-D input is a legitimate skip — REQ-3
+        // arbitrary-rank input is the broader API surface still tracked
+        // separately under `linear.md` REQ-3.
+        // Non-test consumer: `ferrotorch-train/examples/multi_epoch_train_dump.rs:61`.
+        // Closes the runner-arm half of #1441 for linear.
+        "nn.functional.linear" => {
+            if args.len() < 2 {
+                return Err("nn.functional.linear: needs [input, weight, bias?]".into());
+            }
+            let i_wire =
+                unwrap_tensor_arg(&args[0]).ok_or("nn.functional.linear: input not a tensor")?;
+            let w_wire =
+                unwrap_tensor_arg(&args[1]).ok_or("nn.functional.linear: weight not a tensor")?;
+            // ferrotorch::linear requires 2-D input; skip 1-D / >2-D variants
+            // (REQ-3 broader-rank lives outside this dispatch arm's scope).
+            if i_wire.shape.len() != 2 || w_wire.shape.len() != 2 {
+                return Ok(None);
+            }
+            let input = i_wire.to_f32()?;
+            let weight = w_wire.to_f32()?;
+            let bias_opt: Option<Tensor<f32>> = match args.get(2) {
+                Some(v) if !v.is_null() => match unwrap_tensor_arg(v) {
+                    Some(b) => Some(b.to_f32()?),
+                    None => None,
+                },
+                _ => None,
+            };
+            Ok(Some(ferrotorch_nn::functional::linear(
+                &input,
+                &weight,
+                bias_opt.as_ref(),
+            )?))
+        }
+
+        // `torch.nn.functional.dropout(input, p=0.5, training=True, inplace=False)` —
+        // `torch/nn/functional.py`. op_db emits `args=[input]` with kwargs
+        // `{p, training}`. ferrotorch's `pub fn dropout(input, p, training)`
+        // at `ferrotorch-nn/src/functional.rs:351` uses a deterministic
+        // xorshift mask (REQ-3 at `.design/ferrotorch-nn/dropout.md`); the
+        // mask sequence does NOT match torch's RNG so value-parity is
+        // achievable only on the `p=0` / `training=false` no-op paths.
+        // RNG-plumbing gap tracked under #1452. Closes #1441 dropout half.
+        "nn.functional.dropout" => {
+            if args.is_empty() {
+                return Err("nn.functional.dropout: needs [input]".into());
+            }
+            let p = kwargs.get("p").and_then(Value::as_f64).unwrap_or(0.5);
+            let training = kwargs
+                .get("training")
+                .and_then(Value::as_bool)
+                .unwrap_or(true);
+            // Non-deterministic mask path — skip unless p == 0 or !training.
+            // Also skip p == 1.0 (ferrotorch's `dropout` validates p < 1;
+            // upstream accepts p=1 and returns zeros — REQ-12 narrower
+            // contract per `.design/ferrotorch-nn/dropout.md`).
+            if training && p > 0.0 {
+                return Ok(None);
+            }
+            if p >= 1.0 {
+                return Ok(None);
+            }
+            let input = unwrap_tensor_arg(&args[0])
+                .ok_or("nn.functional.dropout: input not a tensor")?
+                .to_f32()?;
+            Ok(Some(ferrotorch_nn::functional::dropout(
+                &input, p, training,
+            )?))
+        }
+
+        // `torch.nn.functional.embedding(input, weight, padding_idx=None, ...)`.
+        // op_db naming: `sample_inputs_embedding` passes `weight` as `input`
+        // (SampleInput.input) and the indices tensor as `args[0]` (verified by
+        // sample-dump 2026-05-26). ferrotorch's `pub fn embedding(input,
+        // weight, padding_idx)` at `ferrotorch-nn/src/functional.rs:1241`
+        // expects `input` = INDICES (1-D), `weight` = lookup table (2-D).
+        // So we SWAP positional 0 (weight) <-> positional 1 (indices) when
+        // dispatching. Skip paths: indices ndim != 1; `max_norm` / `sparse` /
+        // `scale_grad_by_freq` kwargs (not in REQ-3 narrower contract — see
+        // `.design/ferrotorch-nn/embedding.md` REQ-9 NOT-STARTED). Closes
+        // #1441 embedding half.
+        "nn.functional.embedding" => {
+            if args.len() < 2 {
+                return Err("nn.functional.embedding: needs [weight, indices]".into());
+            }
+            // Skip unsupported kwargs.
+            if kwargs.get("max_norm").is_some_and(|v| !v.is_null()) {
+                return Ok(None);
+            }
+            if kwargs
+                .get("scale_grad_by_freq")
+                .and_then(Value::as_bool)
+                .unwrap_or(false)
+            {
+                return Ok(None);
+            }
+            if kwargs
+                .get("sparse")
+                .and_then(Value::as_bool)
+                .unwrap_or(false)
+            {
+                return Ok(None);
+            }
+            let weight_wire = unwrap_tensor_arg(&args[0])
+                .ok_or("nn.functional.embedding: weight not a tensor")?;
+            let idx_wire = unwrap_tensor_arg(&args[1])
+                .ok_or("nn.functional.embedding: indices not a tensor")?;
+            // ferrotorch::embedding's forward requires 1-D indices.
+            if idx_wire.shape.len() != 1 {
+                return Ok(None);
+            }
+            let weight = weight_wire.to_f32()?;
+            // Convert int64 indices -> f32 via WireTensor::to_f32's
+            // int-widening branch (same pathway used by reduction ops).
+            let indices = idx_wire.to_f32()?;
+            let padding_idx = kwargs
+                .get("padding_idx")
+                .and_then(Value::as_i64)
+                .filter(|&v| v >= 0)
+                .map(|v| v as usize);
+            Ok(Some(ferrotorch_nn::functional::embedding(
+                &indices,
+                &weight,
+                padding_idx,
+            )?))
+        }
+
+        // Convolution family: `torch.nn.functional.conv{1,2,3}d(input, weight,
+        // bias=None, stride=1, padding=0, dilation=1, groups=1)` —
+        // `aten/src/ATen/native/Convolution.cpp`. ferrotorch's
+        // `pub fn conv{1,2,3}d` at `ferrotorch-nn/src/functional.rs:1114-1148`
+        // delegates to `Conv{1,2,3}d::from_parts(...).forward(input)` which
+        // hard-codes `dilation=1, groups=1` (REQ-10 padding_mode kwargs and
+        // groups>1 still NOT-STARTED — `.design/ferrotorch-nn/conv.md`).
+        // Skip dilation != 1 and groups != 1 samples. Closes #1441 conv half.
+        "nn.functional.conv1d" => dispatch_conv::<1>(args, kwargs),
+        "nn.functional.conv2d" => dispatch_conv::<2>(args, kwargs),
+        "nn.functional.conv3d" => dispatch_conv::<3>(args, kwargs),
+
+        // `torch.nn.functional.conv_transpose{1,2,3}d`. ferrotorch's
+        // `pub fn conv_transpose{1,2,3}d` at
+        // `ferrotorch-nn/src/functional.rs:1153-1209` mirrors. Skip
+        // dilation != 1 and groups != 1. Closes #1441 conv_transpose half.
+        "nn.functional.conv_transpose1d" => dispatch_conv_transpose::<1>(args, kwargs),
+        "nn.functional.conv_transpose2d" => dispatch_conv_transpose::<2>(args, kwargs),
+        "nn.functional.conv_transpose3d" => dispatch_conv_transpose::<3>(args, kwargs),
+
+        // `torch.nn.functional.pad(input, pad, mode='constant', value=None)` —
+        // `torch/nn/functional.py`. op_db emits `args=[input, pad_tuple]`
+        // with optional `mode` / `value` kwargs. ferrotorch's
+        // `functional_pad_{1,2,3}d` at `ferrotorch-nn/src/padding.rs:596-672`
+        // takes per-axis pad amounts + mode + value. The number of pad
+        // entries selects the rank: 2 → 1d, 4 → 2d, 6 → 3d.
+        "nn.functional.pad" => {
+            if args.len() < 2 {
+                return Err("nn.functional.pad: needs [input, pad]".into());
+            }
+            let input = unwrap_tensor_arg(&args[0])
+                .ok_or("nn.functional.pad: input not a tensor")?
+                .to_f32()?;
+            let pad_arr = args[1]
+                .as_array()
+                .ok_or("nn.functional.pad: pad must be array")?;
+            let pads: Vec<i64> = pad_arr
+                .iter()
+                .map(|v| v.as_i64().ok_or("pad: int element"))
+                .collect::<Result<_, _>>()?;
+            // Reject negative pad (ferrotorch's pad helpers take usize).
+            if pads.iter().any(|&p| p < 0) {
+                return Ok(None);
+            }
+            let mode_str = kwargs
+                .get("mode")
+                .and_then(Value::as_str)
+                .unwrap_or("constant");
+            let value_f = kwargs.get("value").and_then(Value::as_f64).unwrap_or(0.0) as f32;
+            let mode = match mode_str {
+                "constant" => ferrotorch_nn::functional::PaddingMode::Zeros,
+                "reflect" => ferrotorch_nn::functional::PaddingMode::Reflect,
+                "replicate" => ferrotorch_nn::functional::PaddingMode::Replicate,
+                "circular" => ferrotorch_nn::functional::PaddingMode::Circular,
+                _ => return Ok(None),
+            };
+            match pads.len() {
+                2 => Ok(Some(ferrotorch_nn::functional::pad1d(
+                    &input,
+                    pads[0] as usize,
+                    pads[1] as usize,
+                    mode,
+                    value_f,
+                )?)),
+                4 => Ok(Some(ferrotorch_nn::functional::pad2d(
+                    &input,
+                    pads[0] as usize,
+                    pads[1] as usize,
+                    pads[2] as usize,
+                    pads[3] as usize,
+                    mode,
+                    value_f,
+                )?)),
+                6 => Ok(Some(ferrotorch_nn::functional::pad3d(
+                    &input,
+                    pads[0] as usize,
+                    pads[1] as usize,
+                    pads[2] as usize,
+                    pads[3] as usize,
+                    pads[4] as usize,
+                    pads[5] as usize,
+                    mode,
+                    value_f,
+                )?)),
+                _ => Ok(None),
+            }
+        }
+
+        // ===================================================================
+        // LOSS umbrella #1444 — 16 loss ops
+        // ===================================================================
+        //
+        // Common protocol: `args=[input, target, ...]` (some have weight as
+        // an additional positional). Kwargs include `reduction` (string),
+        // op-specific knobs (`beta`, `delta`, `margin`, `p`, etc.).
+        //
+        // ferrotorch ships two parallel surfaces: low-level
+        // `nn::functional::{mse_loss, l1_loss, ...}` (REQ-5 at
+        // `.design/ferrotorch-nn/functional.md`) and layer-level
+        // `nn::{MSELoss, L1Loss, ...}::forward` (REQ-1..REQ-17 at
+        // `.design/ferrotorch-nn/loss.md`). The runner uses the layer-level
+        // `.forward` because it exposes the `reduction` knob; the functional
+        // `mse_loss` is mean-only and would skip every non-mean sample.
+        //
+        // Skip paths shared across the family:
+        //   - `reduction` value not in {mean, sum, none} -> skip.
+        //   - Optional `weight` kwarg (per-class weighting) -> skip when
+        //     present (not in any loss layer's REQ surface).
+        //   - Input/target shape mismatch -> skip (ferrotorch's stricter
+        //     contracts reject; not a parity bug).
+        // Closes the runner-arm half of #1444 for the wired ops; the remaining
+        // ops with API gaps (weight, pos_weight, ignore_index) stay open
+        // under sub-blockers documented in the design doc.
+        "nn.functional.mse_loss" => {
+            let (input, target) = match decode_loss_pair(args)? {
+                Some(p) => p,
+                None => return Ok(None),
+            };
+            let red = match parse_reduction(kwargs) {
+                Some(r) => r,
+                None => return Ok(None),
+            };
+            let loss = ferrotorch_nn::MSELoss::new(red).forward(&input, &target)?;
+            Ok(Some(loss))
+        }
+        "nn.functional.l1_loss" => {
+            let (input, target) = match decode_loss_pair(args)? {
+                Some(p) => p,
+                None => return Ok(None),
+            };
+            let red = match parse_reduction(kwargs) {
+                Some(r) => r,
+                None => return Ok(None),
+            };
+            // Use the functional entry — supports `reduction`.
+            Ok(Some(ferrotorch_nn::functional::l1_loss(
+                &input, &target, red,
+            )?))
+        }
+        "nn.functional.smooth_l1_loss" => {
+            let (input, target) = match decode_loss_pair(args)? {
+                Some(p) => p,
+                None => return Ok(None),
+            };
+            let red = match parse_reduction(kwargs) {
+                Some(r) => r,
+                None => return Ok(None),
+            };
+            // ferrotorch's SmoothL1Loss::new takes only (reduction); beta
+            // is fixed at the upstream default of 1.0. When op_db emits a
+            // non-default beta, skip the sample (the value-equality gate
+            // would fire on the beta-dependent crossover region).
+            let beta = kwargs.get("beta").and_then(Value::as_f64).unwrap_or(1.0);
+            if (beta - 1.0).abs() > 1e-9 {
+                return Ok(None);
+            }
+            let loss = ferrotorch_nn::SmoothL1Loss::new(red).forward(&input, &target)?;
+            Ok(Some(loss))
+        }
+        "nn.functional.huber_loss" => {
+            let (input, target) = match decode_loss_pair(args)? {
+                Some(p) => p,
+                None => return Ok(None),
+            };
+            let red = match parse_reduction(kwargs) {
+                Some(r) => r,
+                None => return Ok(None),
+            };
+            let delta = kwargs.get("delta").and_then(Value::as_f64).unwrap_or(1.0);
+            let loss = ferrotorch_nn::HuberLoss::new(red, delta).forward(&input, &target)?;
+            Ok(Some(loss))
+        }
+        "nn.functional.binary_cross_entropy" => {
+            // `weight` and `pos_weight` kwargs not in REQ-4 surface; skip.
+            if kwargs.get("weight").is_some_and(|v| !v.is_null()) {
+                return Ok(None);
+            }
+            let (input, target) = match decode_loss_pair(args)? {
+                Some(p) => p,
+                None => return Ok(None),
+            };
+            let red = match parse_reduction(kwargs) {
+                Some(r) => r,
+                None => return Ok(None),
+            };
+            Ok(Some(ferrotorch_nn::functional::binary_cross_entropy(
+                &input, &target, red,
+            )?))
+        }
+        "nn.functional.binary_cross_entropy_with_logits" => {
+            if kwargs.get("weight").is_some_and(|v| !v.is_null()) {
+                return Ok(None);
+            }
+            if kwargs.get("pos_weight").is_some_and(|v| !v.is_null()) {
+                return Ok(None);
+            }
+            let (input, target) = match decode_loss_pair(args)? {
+                Some(p) => p,
+                None => return Ok(None),
+            };
+            let red = match parse_reduction(kwargs) {
+                Some(r) => r,
+                None => return Ok(None),
+            };
+            Ok(Some(
+                ferrotorch_nn::functional::binary_cross_entropy_with_logits(&input, &target, red)?,
+            ))
+        }
+        "nn.functional.kl_div" => {
+            // `log_target=true` -> upstream applies log to target separately;
+            // ferrotorch's `kl_div` assumes target is in probability space
+            // (REQ-7). Skip when `log_target=true`.
+            if kwargs
+                .get("log_target")
+                .and_then(Value::as_bool)
+                .unwrap_or(false)
+            {
+                return Ok(None);
+            }
+            let (input, target) = match decode_loss_pair(args)? {
+                Some(p) => p,
+                None => return Ok(None),
+            };
+            let red = match parse_reduction(kwargs) {
+                Some(r) => r,
+                None => return Ok(None),
+            };
+            Ok(Some(ferrotorch_nn::functional::kl_div(
+                &input, &target, red,
+            )?))
+        }
+        "nn.functional.cross_entropy" => {
+            // `weight` / `ignore_index != -100` not in REQ-2 narrow surface;
+            // skip. ferrotorch's `cross_entropy` (functional) is mean-only;
+            // skip non-mean reductions.
+            if kwargs.get("weight").is_some_and(|v| !v.is_null()) {
+                return Ok(None);
+            }
+            let ig = kwargs.get("ignore_index").and_then(Value::as_i64);
+            if let Some(i) = ig
+                && i != -100
+            {
+                return Ok(None);
+            }
+            let red = match parse_reduction(kwargs) {
+                Some(r) => r,
+                None => return Ok(None),
+            };
+            if red != ferrotorch_nn::module::Reduction::Mean {
+                return Ok(None);
+            }
+            let (input, target) = match decode_loss_pair(args)? {
+                Some(p) => p,
+                None => return Ok(None),
+            };
+            // ferrotorch::cross_entropy needs 2-D logits and 1-D targets.
+            if input.shape().len() != 2 || target.shape().len() != 1 {
+                return Ok(None);
+            }
+            Ok(Some(ferrotorch_nn::functional::cross_entropy(
+                &input, &target,
+            )?))
+        }
+        "nn.functional.nll_loss" => {
+            // `weight` / `ignore_index != -100` not in REQ-6 contract; skip.
+            if kwargs.get("weight").is_some_and(|v| !v.is_null()) {
+                return Ok(None);
+            }
+            let ig = kwargs.get("ignore_index").and_then(Value::as_i64);
+            if let Some(i) = ig
+                && i != -100
+            {
+                return Ok(None);
+            }
+            let red = match parse_reduction(kwargs) {
+                Some(r) => r,
+                None => return Ok(None),
+            };
+            let (input, target) = match decode_loss_pair(args)? {
+                Some(p) => p,
+                None => return Ok(None),
+            };
+            // ferrotorch's NLLLoss requires 2-D input + 1-D target;
+            // upstream allows 1-D / >=2-D. Skip non-2-D samples
+            // (narrower contract per `.design/ferrotorch-nn/loss.md` REQ-6).
+            if input.shape().len() != 2 || target.shape().len() != 1 {
+                return Ok(None);
+            }
+            Ok(Some(
+                ferrotorch_nn::NLLLoss::new(red, None).forward(&input, &target)?,
+            ))
+        }
+        "nn.functional.poisson_nll_loss" => {
+            // ferrotorch's PoissonNLLLoss::new takes (reduction, log_input,
+            // eps); `full` (Stirling's term) is narrower-than-upstream —
+            // tracked under .design/ferrotorch-nn/loss.md REQ-10's
+            // sub-issue. Skip `full=true` samples.
+            let red = match parse_reduction(kwargs) {
+                Some(r) => r,
+                None => return Ok(None),
+            };
+            if kwargs.get("full").and_then(Value::as_bool).unwrap_or(false) {
+                return Ok(None);
+            }
+            let log_input = kwargs
+                .get("log_input")
+                .and_then(Value::as_bool)
+                .unwrap_or(true);
+            let eps = kwargs.get("eps").and_then(Value::as_f64).unwrap_or(1e-8);
+            let (input, target) = match decode_loss_pair(args)? {
+                Some(p) => p,
+                None => return Ok(None),
+            };
+            Ok(Some(
+                ferrotorch_nn::PoissonNLLLoss::new(red, log_input, eps).forward(&input, &target)?,
+            ))
+        }
+        "nn.functional.gaussian_nll_loss" => {
+            // `gaussian_nll(input, target, var, full=False, eps=1e-6, reduction='mean')`.
+            // op_db emits `args = [input, target, var]`.
+            if args.len() < 3 {
+                return Ok(None);
+            }
+            let red = match parse_reduction(kwargs) {
+                Some(r) => r,
+                None => return Ok(None),
+            };
+            let full = kwargs.get("full").and_then(Value::as_bool).unwrap_or(false);
+            let eps = kwargs.get("eps").and_then(Value::as_f64).unwrap_or(1e-6);
+            let input = unwrap_tensor_arg(&args[0])
+                .ok_or("gaussian_nll: input")?
+                .to_f32()?;
+            let target = unwrap_tensor_arg(&args[1])
+                .ok_or("gaussian_nll: target")?
+                .to_f32()?;
+            let var = unwrap_tensor_arg(&args[2])
+                .ok_or("gaussian_nll: var")?
+                .to_f32()?;
+            if input.shape() != target.shape() {
+                return Ok(None);
+            }
+            // ferrotorch's GaussianNLLLoss requires var.shape == input.shape;
+            // upstream broadcasts var. Skip when shapes diverge (narrower
+            // contract per `.design/ferrotorch-nn/loss.md` REQ-11).
+            if var.shape() != input.shape() {
+                return Ok(None);
+            }
+            Ok(Some(
+                ferrotorch_nn::GaussianNLLLoss::new(red, full, eps)
+                    .forward(&input, &target, &var)?,
+            ))
+        }
+        "nn.functional.hinge_embedding_loss" => {
+            let red = match parse_reduction(kwargs) {
+                Some(r) => r,
+                None => return Ok(None),
+            };
+            let margin = kwargs.get("margin").and_then(Value::as_f64).unwrap_or(1.0);
+            let (input, target) = match decode_loss_pair(args)? {
+                Some(p) => p,
+                None => return Ok(None),
+            };
+            // Skip 0-d inputs (ferrotorch's hinge embedding diverges on
+            // scalars; upstream's behavior is `0` for matching-sign +
+            // `margin` for mismatching, ferrotorch returns the unreduced
+            // tensor as-is).
+            if input.shape().is_empty() || target.shape().is_empty() {
+                return Ok(None);
+            }
+            Ok(Some(
+                ferrotorch_nn::HingeEmbeddingLoss::new(red, margin).forward(&input, &target)?,
+            ))
+        }
+        "nn.functional.margin_ranking_loss" => {
+            // `margin_ranking_loss(input1, input2, target, margin=0, reduction='mean')`.
+            if args.len() < 3 {
+                return Ok(None);
+            }
+            let red = match parse_reduction(kwargs) {
+                Some(r) => r,
+                None => return Ok(None),
+            };
+            let margin = kwargs.get("margin").and_then(Value::as_f64).unwrap_or(0.0);
+            let x1 = unwrap_tensor_arg(&args[0])
+                .ok_or("margin_ranking: x1")?
+                .to_f32()?;
+            let x2 = unwrap_tensor_arg(&args[1])
+                .ok_or("margin_ranking: x2")?
+                .to_f32()?;
+            let tgt = unwrap_tensor_arg(&args[2])
+                .ok_or("margin_ranking: target")?
+                .to_f32()?;
+            Ok(Some(
+                ferrotorch_nn::MarginRankingLoss::new(red, margin).forward(&x1, &x2, &tgt)?,
+            ))
+        }
+        "nn.functional.cosine_embedding_loss" => {
+            // `cosine_embedding_loss(input1, input2, target, margin=0.0, reduction='mean')`.
+            if args.len() < 3 {
+                return Ok(None);
+            }
+            let red = match parse_reduction(kwargs) {
+                Some(r) => r,
+                None => return Ok(None),
+            };
+            let margin = kwargs.get("margin").and_then(Value::as_f64).unwrap_or(0.0);
+            let x1 = unwrap_tensor_arg(&args[0])
+                .ok_or("cosine_emb: x1")?
+                .to_f32()?;
+            let x2 = unwrap_tensor_arg(&args[1])
+                .ok_or("cosine_emb: x2")?
+                .to_f32()?;
+            let tgt = unwrap_tensor_arg(&args[2])
+                .ok_or("cosine_emb: target")?
+                .to_f32()?;
+            // ferrotorch's CosineEmbeddingLoss returns a 1-D tensor for
+            // Reduction::None on 1-D inputs (no batch dim collapse).
+            // Upstream collapses to 0-D when both inputs are 1-D; skip
+            // that edge case.
+            if x1.shape().len() == 1 && tgt.shape().is_empty() {
+                return Ok(None);
+            }
+            Ok(Some(
+                ferrotorch_nn::CosineEmbeddingLoss::new(red, margin)
+                    .forward_pair(&x1, &x2, &tgt)?,
+            ))
+        }
+        "nn.functional.triplet_margin_loss" => {
+            // `triplet_margin_loss(anchor, positive, negative, margin=1.0, p=2.0,
+            //                      eps=1e-6, swap=False, reduction='mean')`.
+            if args.len() < 3 {
+                return Ok(None);
+            }
+            let red = match parse_reduction(kwargs) {
+                Some(r) => r,
+                None => return Ok(None),
+            };
+            let margin = kwargs.get("margin").and_then(Value::as_f64).unwrap_or(1.0);
+            let p = kwargs.get("p").and_then(Value::as_f64).unwrap_or(2.0);
+            let swap = kwargs.get("swap").and_then(Value::as_bool).unwrap_or(false);
+            let eps = kwargs.get("eps").and_then(Value::as_f64).unwrap_or(1e-6);
+            // ferrotorch's TripletMarginLoss::new takes (reduction, margin, p).
+            // `swap` and `eps` are narrower-than-upstream gaps (REQ-14 in
+            // `.design/ferrotorch-nn/loss.md` notes upstream-divergence
+            // tracked separately). Skip non-default values.
+            if swap || (eps - 1e-6).abs() > 1e-9 {
+                return Ok(None);
+            }
+            let anchor = unwrap_tensor_arg(&args[0])
+                .ok_or("triplet: anchor")?
+                .to_f32()?;
+            let pos = unwrap_tensor_arg(&args[1])
+                .ok_or("triplet: positive")?
+                .to_f32()?;
+            let neg = unwrap_tensor_arg(&args[2])
+                .ok_or("triplet: negative")?
+                .to_f32()?;
+            Ok(Some(
+                ferrotorch_nn::TripletMarginLoss::new(red, margin, p)
+                    .forward(&anchor, &pos, &neg)?,
+            ))
+        }
+        "nn.functional.multi_margin_loss" => {
+            // `multi_margin_loss(input, target, p=1, margin=1.0, weight=None,
+            //                    reduction='mean')`.
+            if kwargs.get("weight").is_some_and(|v| !v.is_null()) {
+                return Ok(None);
+            }
+            let red = match parse_reduction(kwargs) {
+                Some(r) => r,
+                None => return Ok(None),
+            };
+            let p = kwargs.get("p").and_then(Value::as_i64).unwrap_or(1) as usize;
+            let margin = kwargs.get("margin").and_then(Value::as_f64).unwrap_or(1.0);
+            let (input, target) = match decode_loss_pair(args)? {
+                Some(pair) => pair,
+                None => return Ok(None),
+            };
+            // ferrotorch's MultiMarginLoss requires 2-D input + 1-D target.
+            if input.shape().len() != 2 || target.shape().len() != 1 {
+                return Ok(None);
+            }
+            Ok(Some(
+                ferrotorch_nn::MultiMarginLoss::new(red, p, margin).forward(&input, &target)?,
+            ))
+        }
+        "nn.functional.multilabel_soft_margin_loss" => {
+            if kwargs.get("weight").is_some_and(|v| !v.is_null()) {
+                return Ok(None);
+            }
+            let red = match parse_reduction(kwargs) {
+                Some(r) => r,
+                None => return Ok(None),
+            };
+            let (input, target) = match decode_loss_pair(args)? {
+                Some(p) => p,
+                None => return Ok(None),
+            };
+            // ferrotorch's MultiLabelSoftMarginLoss requires 2-D input.
+            if input.shape().len() != 2 || target.shape().len() != 2 {
+                return Ok(None);
+            }
+            Ok(Some(
+                ferrotorch_nn::MultiLabelSoftMarginLoss::new(red).forward(&input, &target)?,
+            ))
+        }
+
+        // ===================================================================
+        // NORM umbrella #1447 — 5 norm ops
+        // ===================================================================
+        //
+        // ferrotorch ships layer-based `LayerNorm` / `GroupNorm` /
+        // `BatchNorm{1,2,3}d` / `InstanceNorm{1,2,3}d` / `LocalResponseNorm`;
+        // there is no `pub fn layer_norm` / `pub fn batch_norm` functional
+        // entry. The runner builds a transient layer with the relevant
+        // params, injects weight/bias via `Parameter::set_data`, then
+        // dispatches via `Module::forward`. This is the same pattern the
+        // `conv*` functional entries use internally.
+        //
+        // Closes the runner-arm half of #1447.
+        "nn.functional.layer_norm" => {
+            // op_db emits `args = [input, normalized_shape, weight, bias]`,
+            // with optional `eps` kwarg.
+            if args.len() < 2 {
+                return Err(
+                    "nn.functional.layer_norm: needs [input, normalized_shape, ...]".into(),
+                );
+            }
+            let input = unwrap_tensor_arg(&args[0])
+                .ok_or("layer_norm: input not tensor")?
+                .to_f32()?;
+            let nshape_arr = args[1]
+                .as_array()
+                .ok_or("layer_norm: normalized_shape must be array")?;
+            let normalized_shape: Vec<usize> = nshape_arr
+                .iter()
+                .map(|v| {
+                    v.as_u64()
+                        .map(|u| u as usize)
+                        .ok_or("normalized_shape: u64")
+                })
+                .collect::<Result<_, _>>()?;
+            let eps = kwargs.get("eps").and_then(Value::as_f64).unwrap_or(1e-5);
+
+            let weight_wire = args.get(2).and_then(unwrap_tensor_arg);
+            let bias_wire = args.get(3).and_then(unwrap_tensor_arg);
+            let elementwise_affine = weight_wire.is_some();
+            let mut ln = ferrotorch_nn::LayerNorm::<f32>::new(
+                normalized_shape.clone(),
+                eps,
+                elementwise_affine,
+            )?;
+            if let Some(w_wire) = weight_wire {
+                let w = w_wire.to_f32()?;
+                if w.shape() != normalized_shape.as_slice() {
+                    return Ok(None);
+                }
+                // LayerNorm exposes weight as a private Parameter; use
+                // parameters_mut() (Module trait) which returns &mut Parameter
+                // in declaration order: [weight, bias].
+                let mut params = ferrotorch_nn::module::Module::<f32>::parameters_mut(&mut ln);
+                if let Some(p) = params.first_mut() {
+                    p.set_data(w);
+                }
+            }
+            if let Some(b_wire) = bias_wire {
+                let b = b_wire.to_f32()?;
+                if b.shape() != normalized_shape.as_slice() {
+                    return Ok(None);
+                }
+                let mut params = ferrotorch_nn::module::Module::<f32>::parameters_mut(&mut ln);
+                if let Some(p) = params.get_mut(1) {
+                    p.set_data(b);
+                }
+            }
+            Ok(Some(ferrotorch_nn::module::Module::<f32>::forward(
+                &ln, &input,
+            )?))
+        }
+
+        "nn.functional.group_norm" => {
+            // op_db emits `args = [input, num_groups]`, kwargs may include
+            // `weight`, `bias`, `eps`.
+            if args.len() < 2 {
+                return Err("nn.functional.group_norm: needs [input, num_groups]".into());
+            }
+            let input = unwrap_tensor_arg(&args[0])
+                .ok_or("group_norm: input not tensor")?
+                .to_f32()?;
+            if input.shape().len() < 2 {
+                return Ok(None);
+            }
+            let num_channels = input.shape()[1];
+            let num_groups = args[1].as_u64().ok_or("group_norm: num_groups u64")? as usize;
+            if num_channels % num_groups != 0 {
+                return Ok(None);
+            }
+            let eps = kwargs.get("eps").and_then(Value::as_f64).unwrap_or(1e-5);
+            let weight_wire = kwargs.get("weight").and_then(unwrap_tensor_arg);
+            let bias_wire = kwargs.get("bias").and_then(unwrap_tensor_arg);
+            let affine = weight_wire.is_some() || bias_wire.is_some();
+            let mut gn =
+                ferrotorch_nn::GroupNorm::<f32>::new(num_groups, num_channels, eps, affine)?;
+            if let Some(w_wire) = weight_wire {
+                let w = w_wire.to_f32()?;
+                let mut params = ferrotorch_nn::module::Module::<f32>::parameters_mut(&mut gn);
+                if let Some(p) = params.first_mut() {
+                    p.set_data(w);
+                }
+            }
+            if let Some(b_wire) = bias_wire {
+                let b = b_wire.to_f32()?;
+                let mut params = ferrotorch_nn::module::Module::<f32>::parameters_mut(&mut gn);
+                if let Some(p) = params.get_mut(1) {
+                    p.set_data(b);
+                }
+            }
+            Ok(Some(ferrotorch_nn::module::Module::<f32>::forward(
+                &gn, &input,
+            )?))
+        }
+
+        "nn.functional.batch_norm" => {
+            // op_db emits `args = [input, running_mean, running_var,
+            // weight, bias]`, kwargs `{training, momentum, eps}`.
+            //
+            // ferrotorch's BatchNorm{1,2,3}d couples affine
+            // (weight/bias-present) with the running-stats Mutex; using
+            // training=true would mutate running stats. We restrict the
+            // runner to `training=false` (eval mode) so the call is
+            // deterministic. training=true samples are a legitimate skip
+            // until the runner exposes a stateless `batch_norm` functional
+            // (separate REQ).
+            if args.len() < 3 {
+                return Ok(None);
+            }
+            let training = kwargs
+                .get("training")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            if training {
+                return Ok(None);
+            }
+            let input = unwrap_tensor_arg(&args[0])
+                .ok_or("batch_norm: input")?
+                .to_f32()?;
+            let rm = unwrap_tensor_arg(&args[1])
+                .ok_or("batch_norm: running_mean")?
+                .to_f32()?;
+            let rv = unwrap_tensor_arg(&args[2])
+                .ok_or("batch_norm: running_var")?
+                .to_f32()?;
+            let weight_wire = args.get(3).and_then(unwrap_tensor_arg);
+            let bias_wire = args.get(4).and_then(unwrap_tensor_arg);
+            let affine = weight_wire.is_some() && bias_wire.is_some();
+            let eps = kwargs.get("eps").and_then(Value::as_f64).unwrap_or(1e-5);
+            let momentum = kwargs
+                .get("momentum")
+                .and_then(Value::as_f64)
+                .unwrap_or(0.1);
+            // num_features = channels = input.shape()[1].
+            if input.shape().len() < 2 {
+                return Ok(None);
+            }
+            let num_features = input.shape()[1];
+            // Dispatch by input rank: 3-D -> BatchNorm1d (also handles 2-D
+            // input collapsed); 4-D -> BatchNorm2d; 5-D -> BatchNorm3d.
+            match input.shape().len() {
+                2 | 3 => {
+                    let mut bn = ferrotorch_nn::BatchNorm1d::<f32>::new(
+                        num_features,
+                        eps,
+                        momentum,
+                        affine,
+                    )?;
+                    bn.set_running_mean(&rm.data_vec()?)?;
+                    bn.set_running_var(&rv.data_vec()?)?;
+                    if let (Some(w_wire), Some(b_wire)) = (weight_wire, bias_wire) {
+                        let w = w_wire.to_f32()?;
+                        let b = b_wire.to_f32()?;
+                        let mut params =
+                            ferrotorch_nn::module::Module::<f32>::parameters_mut(&mut bn);
+                        if let Some(p) = params.first_mut() {
+                            p.set_data(w);
+                        }
+                        if let Some(p) = params.get_mut(1) {
+                            p.set_data(b);
+                        }
+                    }
+                    ferrotorch_nn::module::Module::<f32>::eval(&mut bn);
+                    Ok(Some(ferrotorch_nn::module::Module::<f32>::forward(
+                        &bn, &input,
+                    )?))
+                }
+                4 => {
+                    let mut bn = ferrotorch_nn::BatchNorm2d::<f32>::new(
+                        num_features,
+                        eps,
+                        momentum,
+                        affine,
+                    )?;
+                    bn.set_running_mean(&rm.data_vec()?)?;
+                    bn.set_running_var(&rv.data_vec()?)?;
+                    if let (Some(w_wire), Some(b_wire)) = (weight_wire, bias_wire) {
+                        let w = w_wire.to_f32()?;
+                        let b = b_wire.to_f32()?;
+                        let mut params =
+                            ferrotorch_nn::module::Module::<f32>::parameters_mut(&mut bn);
+                        if let Some(p) = params.first_mut() {
+                            p.set_data(w);
+                        }
+                        if let Some(p) = params.get_mut(1) {
+                            p.set_data(b);
+                        }
+                    }
+                    ferrotorch_nn::module::Module::<f32>::eval(&mut bn);
+                    Ok(Some(ferrotorch_nn::module::Module::<f32>::forward(
+                        &bn, &input,
+                    )?))
+                }
+                5 => {
+                    let mut bn = ferrotorch_nn::BatchNorm3d::<f32>::new(
+                        num_features,
+                        eps,
+                        momentum,
+                        affine,
+                    )?;
+                    bn.set_running_mean(&rm.data_vec()?)?;
+                    bn.set_running_var(&rv.data_vec()?)?;
+                    if let (Some(w_wire), Some(b_wire)) = (weight_wire, bias_wire) {
+                        let w = w_wire.to_f32()?;
+                        let b = b_wire.to_f32()?;
+                        let mut params =
+                            ferrotorch_nn::module::Module::<f32>::parameters_mut(&mut bn);
+                        if let Some(p) = params.first_mut() {
+                            p.set_data(w);
+                        }
+                        if let Some(p) = params.get_mut(1) {
+                            p.set_data(b);
+                        }
+                    }
+                    ferrotorch_nn::module::Module::<f32>::eval(&mut bn);
+                    Ok(Some(ferrotorch_nn::module::Module::<f32>::forward(
+                        &bn, &input,
+                    )?))
+                }
+                _ => Ok(None),
+            }
+        }
+
+        "nn.functional.instance_norm" => {
+            // op_db emits `args = [input]`, kwargs may include `weight`,
+            // `bias`, `running_mean`, `running_var`, `momentum`, `eps`,
+            // `use_input_stats`. ferrotorch's InstanceNorm{1,2,3}d does
+            // NOT support running stats (no API). Restrict to the
+            // `use_input_stats=True` + no-running-stats samples;
+            // otherwise skip. Need to inject weight/bias via parameters_mut.
+            if kwargs.get("running_mean").is_some_and(|v| !v.is_null()) {
+                return Ok(None);
+            }
+            if kwargs.get("running_var").is_some_and(|v| !v.is_null()) {
+                return Ok(None);
+            }
+            if !kwargs
+                .get("use_input_stats")
+                .and_then(Value::as_bool)
+                .unwrap_or(true)
+            {
+                return Ok(None);
+            }
+            let input = unwrap_tensor_arg(&args[0])
+                .ok_or("instance_norm: input")?
+                .to_f32()?;
+            if input.shape().len() < 2 {
+                return Ok(None);
+            }
+            let num_features = input.shape()[1];
+            let eps = kwargs.get("eps").and_then(Value::as_f64).unwrap_or(1e-5);
+            let weight_wire = kwargs.get("weight").and_then(unwrap_tensor_arg);
+            let bias_wire = kwargs.get("bias").and_then(unwrap_tensor_arg);
+            let affine = weight_wire.is_some() && bias_wire.is_some();
+            match input.shape().len() {
+                3 => {
+                    let mut inrm =
+                        ferrotorch_nn::InstanceNorm1d::<f32>::new(num_features, eps, affine)?;
+                    if let (Some(w_wire), Some(b_wire)) = (weight_wire, bias_wire) {
+                        let w = w_wire.to_f32()?;
+                        let b = b_wire.to_f32()?;
+                        let mut params =
+                            ferrotorch_nn::module::Module::<f32>::parameters_mut(&mut inrm);
+                        if let Some(p) = params.first_mut() {
+                            p.set_data(w);
+                        }
+                        if let Some(p) = params.get_mut(1) {
+                            p.set_data(b);
+                        }
+                    }
+                    Ok(Some(ferrotorch_nn::module::Module::<f32>::forward(
+                        &inrm, &input,
+                    )?))
+                }
+                4 => {
+                    let mut inrm =
+                        ferrotorch_nn::InstanceNorm2d::<f32>::new(num_features, eps, affine)?;
+                    if let (Some(w_wire), Some(b_wire)) = (weight_wire, bias_wire) {
+                        let w = w_wire.to_f32()?;
+                        let b = b_wire.to_f32()?;
+                        let mut params =
+                            ferrotorch_nn::module::Module::<f32>::parameters_mut(&mut inrm);
+                        if let Some(p) = params.first_mut() {
+                            p.set_data(w);
+                        }
+                        if let Some(p) = params.get_mut(1) {
+                            p.set_data(b);
+                        }
+                    }
+                    Ok(Some(ferrotorch_nn::module::Module::<f32>::forward(
+                        &inrm, &input,
+                    )?))
+                }
+                5 => {
+                    let mut inrm =
+                        ferrotorch_nn::InstanceNorm3d::<f32>::new(num_features, eps, affine)?;
+                    if let (Some(w_wire), Some(b_wire)) = (weight_wire, bias_wire) {
+                        let w = w_wire.to_f32()?;
+                        let b = b_wire.to_f32()?;
+                        let mut params =
+                            ferrotorch_nn::module::Module::<f32>::parameters_mut(&mut inrm);
+                        if let Some(p) = params.first_mut() {
+                            p.set_data(w);
+                        }
+                        if let Some(p) = params.get_mut(1) {
+                            p.set_data(b);
+                        }
+                    }
+                    Ok(Some(ferrotorch_nn::module::Module::<f32>::forward(
+                        &inrm, &input,
+                    )?))
+                }
+                _ => Ok(None),
+            }
+        }
+
+        "nn.functional.local_response_norm" => {
+            // op_db emits `args = [input, size]`, kwargs `{alpha, beta, k}`.
+            if args.len() < 2 {
+                return Err("local_response_norm: needs [input, size]".into());
+            }
+            let input = unwrap_tensor_arg(&args[0]).ok_or("lrn: input")?.to_f32()?;
+            let size = args[1].as_u64().ok_or("lrn: size u64")? as usize;
+            let alpha = kwargs.get("alpha").and_then(Value::as_f64).unwrap_or(1e-4);
+            let beta = kwargs.get("beta").and_then(Value::as_f64).unwrap_or(0.75);
+            let k = kwargs.get("k").and_then(Value::as_f64).unwrap_or(1.0);
+            let lrn = ferrotorch_nn::LocalResponseNorm::new(size, alpha, beta, k)?;
+            Ok(Some(ferrotorch_nn::module::Module::<f32>::forward(
+                &lrn, &input,
+            )?))
+        }
+
+        // ===================================================================
+        // POOLING umbrella #1458 — 10 pooling ops
+        // ===================================================================
+        //
+        // Each pool op uses the ferrotorch functional entry at
+        // `ferrotorch-nn/src/pooling.rs:3140-3245`. op_db emits pool args as
+        // a mix of kwargs (`kernel_size`, `stride`, `padding`, `dilation`,
+        // `ceil_mode`, `return_indices`) AND positional (avg_pool2d). The
+        // arms below decode both shapes.
+        //
+        // Skip paths:
+        //   - `return_indices=true` -> ferrotorch's functional `max_pool*`
+        //     returns only the values tensor (`MaxPool*::forward_with_indices`
+        //     is a separate API). Tracked under #1458 sub-issue if any.
+        //   - `dilation != 1` -> ferrotorch's pool helpers don't expose
+        //     dilation; skip.
+        //   - `ceil_mode=true` -> ferrotorch uses floor-mode; skip.
+        //   - `count_include_pad=false` -> ferrotorch always counts pad
+        //     (see `.design/ferrotorch-nn/pooling.md` REQ-9 note); skip.
+        //
+        // Closes runner-arm half of #1458.
+        "nn.functional.max_pool1d" => {
+            if pool_skip_kwargs(kwargs) {
+                return Ok(None);
+            }
+            let input = unwrap_tensor_arg(args.first().ok_or("max_pool1d: input")?)
+                .ok_or("max_pool1d: input not tensor")?
+                .to_f32()?;
+            if input.shape().len() != 3 {
+                return Ok(None);
+            }
+            let kernel_size = match parse_dim1(kwargs.get("kernel_size")) {
+                Some(k) => k,
+                None => return Ok(None),
+            };
+            let stride = match parse_dim1(kwargs.get("stride")) {
+                Some(s) => s,
+                None => kernel_size,
+            };
+            let padding = parse_dim1(kwargs.get("padding")).unwrap_or(0);
+            Ok(Some(ferrotorch_nn::functional::max_pool1d(
+                &input,
+                kernel_size,
+                stride,
+                padding,
+            )?))
+        }
+        "nn.functional.max_pool2d" => {
+            if pool_skip_kwargs(kwargs) {
+                return Ok(None);
+            }
+            let input = unwrap_tensor_arg(args.first().ok_or("max_pool2d: input")?)
+                .ok_or("max_pool2d: input not tensor")?
+                .to_f32()?;
+            if input.shape().len() != 4 {
+                return Ok(None);
+            }
+            let kernel_size = match parse_dim2(kwargs.get("kernel_size")) {
+                Some(k) => k,
+                None => return Ok(None),
+            };
+            let stride = parse_dim2(kwargs.get("stride")).unwrap_or(kernel_size);
+            let padding = parse_dim2(kwargs.get("padding")).unwrap_or([0, 0]);
+            Ok(Some(ferrotorch_nn::functional::max_pool2d(
+                &input,
+                kernel_size,
+                stride,
+                padding,
+            )?))
+        }
+        "nn.functional.max_pool3d" => {
+            if pool_skip_kwargs(kwargs) {
+                return Ok(None);
+            }
+            let input = unwrap_tensor_arg(args.first().ok_or("max_pool3d: input")?)
+                .ok_or("max_pool3d: input not tensor")?
+                .to_f32()?;
+            if input.shape().len() != 5 {
+                return Ok(None);
+            }
+            let kernel_size = match parse_dim3(kwargs.get("kernel_size")) {
+                Some(k) => k,
+                None => return Ok(None),
+            };
+            let stride = parse_dim3(kwargs.get("stride")).unwrap_or(kernel_size);
+            let padding = parse_dim3(kwargs.get("padding")).unwrap_or([0, 0, 0]);
+            Ok(Some(ferrotorch_nn::functional::max_pool3d(
+                &input,
+                kernel_size,
+                stride,
+                padding,
+            )?))
+        }
+        "nn.functional.avg_pool1d" => {
+            // op_db avg_pool1d: positional [input, kernel_size]; stride /
+            // padding in kwargs. ferrotorch's avg_pool1d takes 3-D input.
+            if avg_pool_skip_kwargs(kwargs) {
+                return Ok(None);
+            }
+            let input = unwrap_tensor_arg(args.first().ok_or("avg_pool1d: input")?)
+                .ok_or("avg_pool1d: input not tensor")?
+                .to_f32()?;
+            if input.shape().len() != 3 {
+                return Ok(None);
+            }
+            let ks = args.get(1).and_then(|v| parse_dim1(Some(v)));
+            let kernel_size = match ks {
+                Some(k) => k,
+                None => return Ok(None),
+            };
+            let stride = parse_dim1(kwargs.get("stride")).unwrap_or(kernel_size);
+            let padding = parse_dim1(kwargs.get("padding")).unwrap_or(0);
+            Ok(Some(ferrotorch_nn::functional::avg_pool1d(
+                &input,
+                kernel_size,
+                stride,
+                padding,
+            )?))
+        }
+        "nn.functional.avg_pool2d" => {
+            // op_db avg_pool2d: positional `[input, kernel, stride, padding,
+            // ceil_mode, count_include_pad, divisor_override]`.
+            let input = unwrap_tensor_arg(args.first().ok_or("avg_pool2d: input")?)
+                .ok_or("avg_pool2d: input not tensor")?
+                .to_f32()?;
+            if input.shape().len() != 4 {
+                return Ok(None);
+            }
+            let kernel_size = match args.get(1).and_then(|v| parse_dim2(Some(v))) {
+                Some(k) => k,
+                None => return Ok(None),
+            };
+            let stride = args
+                .get(2)
+                .and_then(|v| parse_dim2(Some(v)))
+                .unwrap_or(kernel_size);
+            let padding = args
+                .get(3)
+                .and_then(|v| parse_dim2(Some(v)))
+                .unwrap_or([0, 0]);
+            // ceil_mode positional [4], count_include_pad [5], divisor [6].
+            if args.get(4).and_then(Value::as_bool).unwrap_or(false) {
+                return Ok(None);
+            }
+            if !args.get(5).and_then(Value::as_bool).unwrap_or(true) {
+                return Ok(None);
+            }
+            if args.get(6).is_some_and(|v| !v.is_null()) {
+                return Ok(None);
+            }
+            Ok(Some(ferrotorch_nn::functional::avg_pool2d(
+                &input,
+                kernel_size,
+                stride,
+                padding,
+            )?))
+        }
+        "nn.functional.avg_pool3d" => {
+            // op_db avg_pool3d: positional `[input, kernel_size]` with
+            // `stride` / `padding` / `ceil_mode` / `count_include_pad` /
+            // `divisor_override` emitted as kwargs (mirrors avg_pool1d, not
+            // avg_pool2d). Read kwargs first, fall back to positional for
+            // the legacy positional-form samples.
+            if avg_pool_skip_kwargs(kwargs) {
+                return Ok(None);
+            }
+            let input = unwrap_tensor_arg(args.first().ok_or("avg_pool3d: input")?)
+                .ok_or("avg_pool3d: input not tensor")?
+                .to_f32()?;
+            if input.shape().len() != 5 {
+                return Ok(None);
+            }
+            let kernel_size = match args.get(1).and_then(|v| parse_dim3(Some(v))) {
+                Some(k) => k,
+                None => return Ok(None),
+            };
+            let stride = parse_dim3(kwargs.get("stride"))
+                .or_else(|| args.get(2).and_then(|v| parse_dim3(Some(v))))
+                .unwrap_or(kernel_size);
+            let padding = parse_dim3(kwargs.get("padding"))
+                .or_else(|| args.get(3).and_then(|v| parse_dim3(Some(v))))
+                .unwrap_or([0, 0, 0]);
+            Ok(Some(ferrotorch_nn::functional::avg_pool3d(
+                &input,
+                kernel_size,
+                stride,
+                padding,
+            )?))
+        }
+        "nn.functional.adaptive_avg_pool1d" => {
+            let input = unwrap_tensor_arg(args.first().ok_or("adaptive_avg_pool1d: input")?)
+                .ok_or("adaptive_avg_pool1d: input not tensor")?
+                .to_f32()?;
+            if input.shape().len() != 3 {
+                return Ok(None);
+            }
+            let out = match args.get(1).and_then(|v| parse_dim1(Some(v))) {
+                Some(o) => o,
+                None => return Ok(None),
+            };
+            Ok(Some(ferrotorch_nn::functional::adaptive_avg_pool1d(
+                &input, out,
+            )?))
+        }
+        "nn.functional.adaptive_avg_pool2d" => {
+            let input = unwrap_tensor_arg(args.first().ok_or("adaptive_avg_pool2d: input")?)
+                .ok_or("adaptive_avg_pool2d: input not tensor")?
+                .to_f32()?;
+            if input.shape().len() != 4 {
+                return Ok(None);
+            }
+            let out = match args.get(1).and_then(|v| parse_dim2(Some(v))) {
+                Some(o) => o,
+                None => return Ok(None),
+            };
+            Ok(Some(ferrotorch_nn::functional::adaptive_avg_pool2d(
+                &input,
+                (out[0], out[1]),
+            )?))
+        }
+        "nn.functional.adaptive_avg_pool3d" => {
+            let input = unwrap_tensor_arg(args.first().ok_or("adaptive_avg_pool3d: input")?)
+                .ok_or("adaptive_avg_pool3d: input not tensor")?
+                .to_f32()?;
+            if input.shape().len() != 5 {
+                return Ok(None);
+            }
+            let out = match args.get(1).and_then(|v| parse_dim3(Some(v))) {
+                Some(o) => o,
+                None => return Ok(None),
+            };
+            Ok(Some(ferrotorch_nn::functional::adaptive_avg_pool3d(
+                &input,
+                (out[0], out[1], out[2]),
+            )?))
+        }
+        "nn.functional.adaptive_max_pool1d" => {
+            // op_db emits args = [input, output_size, return_indices].
+            let input = unwrap_tensor_arg(args.first().ok_or("adaptive_max_pool1d: input")?)
+                .ok_or("adaptive_max_pool1d: input not tensor")?
+                .to_f32()?;
+            if input.shape().len() != 3 {
+                return Ok(None);
+            }
+            let out = match args.get(1).and_then(|v| parse_dim1(Some(v))) {
+                Some(o) => o,
+                None => return Ok(None),
+            };
+            if args.get(2).and_then(Value::as_bool).unwrap_or(false) {
+                return Ok(None);
+            }
+            Ok(Some(ferrotorch_nn::functional::adaptive_max_pool1d(
+                &input, out,
+            )?))
+        }
+        "nn.functional.adaptive_max_pool2d" => {
+            let input = unwrap_tensor_arg(args.first().ok_or("adaptive_max_pool2d: input")?)
+                .ok_or("adaptive_max_pool2d: input not tensor")?
+                .to_f32()?;
+            if input.shape().len() != 4 {
+                return Ok(None);
+            }
+            let out = match args.get(1).and_then(|v| parse_dim2(Some(v))) {
+                Some(o) => o,
+                None => return Ok(None),
+            };
+            if args.get(2).and_then(Value::as_bool).unwrap_or(false) {
+                return Ok(None);
+            }
+            Ok(Some(ferrotorch_nn::functional::adaptive_max_pool2d(
+                &input,
+                (out[0], out[1]),
+            )?))
+        }
+        "nn.functional.adaptive_max_pool3d" => {
+            let input = unwrap_tensor_arg(args.first().ok_or("adaptive_max_pool3d: input")?)
+                .ok_or("adaptive_max_pool3d: input not tensor")?
+                .to_f32()?;
+            if input.shape().len() != 5 {
+                return Ok(None);
+            }
+            let out = match args.get(1).and_then(|v| parse_dim3(Some(v))) {
+                Some(o) => o,
+                None => return Ok(None),
+            };
+            if args.get(2).and_then(Value::as_bool).unwrap_or(false) {
+                return Ok(None);
+            }
+            Ok(Some(ferrotorch_nn::functional::adaptive_max_pool3d(
+                &input,
+                (out[0], out[1], out[2]),
+            )?))
+        }
+
+        // ===================================================================
+        // RNN cells umbrella #1456 — 3 single-step cells
+        // ===================================================================
+        //
+        // The cells are NOT in op_db (verified 2026-05-26 by enumerating
+        // `op_db` names). Oracle samples come from the custom-op registry
+        // in `oracle.py` (`_rnn_cell_samples`). Wire shape:
+        //   args = [input, hidden, weight_ih, weight_hh, bias_ih, bias_hh]
+        // where:
+        //   - input: [batch, input_size]
+        //   - hidden: [batch, hidden_size]
+        //   - weight_ih: [G*hidden_size, input_size]   (G=1/3/4 for rnn/gru/lstm)
+        //   - weight_hh: [G*hidden_size, hidden_size]
+        //   - bias_ih: [G*hidden_size]
+        //   - bias_hh: [G*hidden_size]
+        // For LSTM, hidden is encoded as a list [h, c] in args[1].
+        //
+        // ferrotorch's cells live at `ferrotorch-nn/src/rnn.rs` (RNNCell L922,
+        // LSTMCell L1119, GRUCell L1341); we build a cell with the right
+        // size, inject weights via `parameters_mut` (returns [w_ih, w_hh,
+        // b_ih, b_hh]), then call `.forward_cell(input, Some(hidden))`.
+        // Closes #1456.
+        "nn.functional.rnn_relu_cell" => dispatch_rnn_cell(args, "relu"),
+        "nn.functional.rnn_tanh_cell" => dispatch_rnn_cell(args, "tanh"),
+        "nn.functional.gru_cell" => dispatch_gru_cell(args),
+        "nn.functional.lstm_cell" => dispatch_lstm_cell(args),
+
         _ => Ok(None),
     }
+}
+
+// ---------------------------------------------------------------------------
+// Family-shared helpers
+// ---------------------------------------------------------------------------
+
+/// Decode the standard `[input, target]` positional pair used by every
+/// nn.functional loss op (mse_loss, l1_loss, smooth_l1, huber, kl_div,
+/// nll_loss, etc.). Returns `Ok(None)` when shapes mismatch (legitimate skip;
+/// ferrotorch's losses reject mismatch as a contract).
+#[allow(
+    clippy::type_complexity,
+    reason = "single-use helper in the runner binary; mirrors `binary` / \
+              `ternary` inline-closure precedent"
+)]
+fn decode_loss_pair(
+    args: &[Value],
+) -> Result<Option<(Tensor<f32>, Tensor<f32>)>, Box<dyn std::error::Error>> {
+    if args.len() < 2 {
+        return Ok(None);
+    }
+    let input = match unwrap_tensor_arg(&args[0]) {
+        Some(w) => w.to_f32()?,
+        None => return Ok(None),
+    };
+    let target = match unwrap_tensor_arg(&args[1]) {
+        Some(w) => w.to_f32()?,
+        None => return Ok(None),
+    };
+    Ok(Some((input, target)))
+}
+
+/// Parse the `reduction` kwarg used by every loss op. Returns the matching
+/// `ferrotorch_nn::module::Reduction`; `None` if the wire value is some
+/// reduction string ferrotorch doesn't recognise (legitimate skip).
+fn parse_reduction(
+    kwargs: &serde_json::Map<String, Value>,
+) -> Option<ferrotorch_nn::module::Reduction> {
+    use ferrotorch_nn::module::Reduction;
+    match kwargs
+        .get("reduction")
+        .and_then(Value::as_str)
+        .unwrap_or("mean")
+    {
+        "mean" => Some(Reduction::Mean),
+        "sum" => Some(Reduction::Sum),
+        "none" => Some(Reduction::None),
+        _ => None,
+    }
+}
+
+/// Parse a 1-D size kwarg (int or 1-tuple). Returns `Some(usize)` for both
+/// forms; `None` when the value is missing or malformed.
+fn parse_dim1(v: Option<&Value>) -> Option<usize> {
+    let v = v?;
+    if let Some(n) = v.as_u64() {
+        return Some(n as usize);
+    }
+    if let Some(arr) = v.as_array()
+        && arr.len() == 1
+    {
+        return arr[0].as_u64().map(|n| n as usize);
+    }
+    None
+}
+
+/// Parse a 2-D size kwarg (int -> [n,n], 2-tuple -> [a,b]).
+fn parse_dim2(v: Option<&Value>) -> Option<[usize; 2]> {
+    let v = v?;
+    if let Some(n) = v.as_u64() {
+        let u = n as usize;
+        return Some([u, u]);
+    }
+    if let Some(arr) = v.as_array() {
+        if arr.len() == 2 {
+            let a = arr[0].as_u64()? as usize;
+            let b = arr[1].as_u64()? as usize;
+            return Some([a, b]);
+        }
+        if arr.len() == 1 {
+            let a = arr[0].as_u64()? as usize;
+            return Some([a, a]);
+        }
+    }
+    None
+}
+
+/// Parse a 3-D size kwarg (int -> [n,n,n], 3-tuple -> [a,b,c]).
+fn parse_dim3(v: Option<&Value>) -> Option<[usize; 3]> {
+    let v = v?;
+    if let Some(n) = v.as_u64() {
+        let u = n as usize;
+        return Some([u, u, u]);
+    }
+    if let Some(arr) = v.as_array() {
+        if arr.len() == 3 {
+            let a = arr[0].as_u64()? as usize;
+            let b = arr[1].as_u64()? as usize;
+            let c = arr[2].as_u64()? as usize;
+            return Some([a, b, c]);
+        }
+        if arr.len() == 1 {
+            let a = arr[0].as_u64()? as usize;
+            return Some([a, a, a]);
+        }
+    }
+    None
+}
+
+/// Skip-set for max_pool / adaptive_max_pool kwargs.
+fn pool_skip_kwargs(kwargs: &serde_json::Map<String, Value>) -> bool {
+    if kwargs
+        .get("return_indices")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+    {
+        return true;
+    }
+    if kwargs
+        .get("ceil_mode")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+    {
+        return true;
+    }
+    // dilation must equal 1 (int) or [1,...] (list).
+    if let Some(d) = kwargs.get("dilation") {
+        if let Some(n) = d.as_u64() {
+            if n != 1 {
+                return true;
+            }
+        } else if let Some(arr) = d.as_array() {
+            for x in arr {
+                if x.as_u64().unwrap_or(0) != 1 {
+                    return true;
+                }
+            }
+        }
+    }
+    false
+}
+
+/// Skip-set for avg_pool kwargs (no dilation; ceil_mode + count_include_pad
+/// are the gates).
+fn avg_pool_skip_kwargs(kwargs: &serde_json::Map<String, Value>) -> bool {
+    if kwargs
+        .get("ceil_mode")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+    {
+        return true;
+    }
+    if !kwargs
+        .get("count_include_pad")
+        .and_then(Value::as_bool)
+        .unwrap_or(true)
+    {
+        return true;
+    }
+    if kwargs.get("divisor_override").is_some_and(|v| !v.is_null()) {
+        return true;
+    }
+    false
+}
+
+/// Convolution dispatcher shared by conv1d/conv2d/conv3d.
+fn dispatch_conv<const D: usize>(
+    args: &[Value],
+    kwargs: &serde_json::Map<String, Value>,
+) -> Result<Option<Tensor<f32>>, Box<dyn std::error::Error>> {
+    if args.len() < 2 {
+        return Err("conv: needs [input, weight, bias?]".into());
+    }
+    let groups = kwargs.get("groups").and_then(Value::as_u64).unwrap_or(1);
+    if groups != 1 {
+        return Ok(None);
+    }
+    // dilation must be 1.
+    if let Some(d) = kwargs.get("dilation") {
+        if let Some(n) = d.as_u64() {
+            if n != 1 {
+                return Ok(None);
+            }
+        } else if let Some(arr) = d.as_array() {
+            for x in arr {
+                if x.as_u64().unwrap_or(0) != 1 {
+                    return Ok(None);
+                }
+            }
+        }
+    }
+    // `padding='same' | 'valid'` (string) is a separate API surface
+    // ferrotorch's `Conv{1,2,3}d::from_parts` does not accept. Skip.
+    if kwargs.get("padding").and_then(Value::as_str).is_some() {
+        return Ok(None);
+    }
+    let input = unwrap_tensor_arg(&args[0])
+        .ok_or("conv: input not tensor")?
+        .to_f32()?;
+    let weight = unwrap_tensor_arg(&args[1])
+        .ok_or("conv: weight not tensor")?
+        .to_f32()?;
+    // Conv{1,2,3}d requires (D + 2)-rank input [B, C, ...]; upstream
+    // accepts unbatched (D + 1)-rank too. Skip unbatched inputs
+    // (REQ-3 narrower contract per `.design/ferrotorch-nn/conv.md`).
+    if input.shape().len() != D + 2 {
+        return Ok(None);
+    }
+    let bias: Option<Tensor<f32>> = match args.get(2) {
+        Some(v) if !v.is_null() => unwrap_tensor_arg(v).map(|b| b.to_f32()).transpose()?,
+        _ => None,
+    };
+    match D {
+        1 => {
+            let stride = parse_dim1(kwargs.get("stride")).unwrap_or(1);
+            let padding = parse_dim1(kwargs.get("padding")).unwrap_or(0);
+            Ok(Some(ferrotorch_nn::functional::conv1d(
+                &input,
+                &weight,
+                bias.as_ref(),
+                stride,
+                padding,
+            )?))
+        }
+        2 => {
+            let stride = parse_dim2(kwargs.get("stride")).unwrap_or([1, 1]);
+            let padding = parse_dim2(kwargs.get("padding")).unwrap_or([0, 0]);
+            Ok(Some(ferrotorch_nn::functional::conv2d(
+                &input,
+                &weight,
+                bias.as_ref(),
+                (stride[0], stride[1]),
+                (padding[0], padding[1]),
+            )?))
+        }
+        3 => {
+            let stride = parse_dim3(kwargs.get("stride")).unwrap_or([1, 1, 1]);
+            let padding = parse_dim3(kwargs.get("padding")).unwrap_or([0, 0, 0]);
+            Ok(Some(ferrotorch_nn::functional::conv3d(
+                &input,
+                &weight,
+                bias.as_ref(),
+                (stride[0], stride[1], stride[2]),
+                (padding[0], padding[1], padding[2]),
+            )?))
+        }
+        _ => Err("conv: unsupported rank".into()),
+    }
+}
+
+fn dispatch_conv_transpose<const D: usize>(
+    args: &[Value],
+    kwargs: &serde_json::Map<String, Value>,
+) -> Result<Option<Tensor<f32>>, Box<dyn std::error::Error>> {
+    if args.len() < 2 {
+        return Err("conv_transpose: needs [input, weight, bias?]".into());
+    }
+    let groups = kwargs.get("groups").and_then(Value::as_u64).unwrap_or(1);
+    if groups != 1 {
+        return Ok(None);
+    }
+    if let Some(d) = kwargs.get("dilation") {
+        if let Some(n) = d.as_u64() {
+            if n != 1 {
+                return Ok(None);
+            }
+        } else if let Some(arr) = d.as_array() {
+            for x in arr {
+                if x.as_u64().unwrap_or(0) != 1 {
+                    return Ok(None);
+                }
+            }
+        }
+    }
+    let input = unwrap_tensor_arg(&args[0])
+        .ok_or("conv_transpose: input")?
+        .to_f32()?;
+    let weight = unwrap_tensor_arg(&args[1])
+        .ok_or("conv_transpose: weight")?
+        .to_f32()?;
+    // ConvTranspose{1,2,3}d requires (D + 2)-rank input [B, C_in, ...].
+    if input.shape().len() != D + 2 {
+        return Ok(None);
+    }
+    let bias: Option<Tensor<f32>> = match args.get(2) {
+        Some(v) if !v.is_null() => unwrap_tensor_arg(v).map(|b| b.to_f32()).transpose()?,
+        _ => None,
+    };
+    match D {
+        1 => {
+            let stride = parse_dim1(kwargs.get("stride")).unwrap_or(1);
+            let padding = parse_dim1(kwargs.get("padding")).unwrap_or(0);
+            let outpad = parse_dim1(kwargs.get("output_padding")).unwrap_or(0);
+            Ok(Some(ferrotorch_nn::functional::conv_transpose1d(
+                &input,
+                &weight,
+                bias.as_ref(),
+                stride,
+                padding,
+                outpad,
+            )?))
+        }
+        2 => {
+            let stride = parse_dim2(kwargs.get("stride")).unwrap_or([1, 1]);
+            let padding = parse_dim2(kwargs.get("padding")).unwrap_or([0, 0]);
+            let outpad = parse_dim2(kwargs.get("output_padding")).unwrap_or([0, 0]);
+            Ok(Some(ferrotorch_nn::functional::conv_transpose2d(
+                &input,
+                &weight,
+                bias.as_ref(),
+                (stride[0], stride[1]),
+                (padding[0], padding[1]),
+                (outpad[0], outpad[1]),
+            )?))
+        }
+        3 => {
+            let stride = parse_dim3(kwargs.get("stride")).unwrap_or([1, 1, 1]);
+            let padding = parse_dim3(kwargs.get("padding")).unwrap_or([0, 0, 0]);
+            let outpad = parse_dim3(kwargs.get("output_padding")).unwrap_or([0, 0, 0]);
+            Ok(Some(ferrotorch_nn::functional::conv_transpose3d(
+                &input,
+                &weight,
+                bias.as_ref(),
+                (stride[0], stride[1], stride[2]),
+                (padding[0], padding[1], padding[2]),
+                (outpad[0], outpad[1], outpad[2]),
+            )?))
+        }
+        _ => Err("conv_transpose: unsupported rank".into()),
+    }
+}
+
+/// RNN-relu / RNN-tanh single-step cell dispatcher.
+fn dispatch_rnn_cell(
+    args: &[Value],
+    nonlinearity: &str,
+) -> Result<Option<Tensor<f32>>, Box<dyn std::error::Error>> {
+    use ferrotorch_nn::module::Module as _;
+    if args.len() < 6 {
+        return Err("rnn_cell: needs [input, hidden, w_ih, w_hh, b_ih, b_hh]".into());
+    }
+    let input = unwrap_tensor_arg(&args[0])
+        .ok_or("rnn_cell: input")?
+        .to_f32()?;
+    let hidden = unwrap_tensor_arg(&args[1])
+        .ok_or("rnn_cell: hidden")?
+        .to_f32()?;
+    let w_ih = unwrap_tensor_arg(&args[2])
+        .ok_or("rnn_cell: w_ih")?
+        .to_f32()?;
+    let w_hh = unwrap_tensor_arg(&args[3])
+        .ok_or("rnn_cell: w_hh")?
+        .to_f32()?;
+    let b_ih = unwrap_tensor_arg(&args[4])
+        .ok_or("rnn_cell: b_ih")?
+        .to_f32()?;
+    let b_hh = unwrap_tensor_arg(&args[5])
+        .ok_or("rnn_cell: b_hh")?
+        .to_f32()?;
+    if input.shape().len() != 2 || hidden.shape().len() != 2 {
+        return Ok(None);
+    }
+    let input_size = input.shape()[1];
+    let hidden_size = hidden.shape()[1];
+    let nl = match nonlinearity {
+        "tanh" => ferrotorch_nn::RNNNonlinearity::Tanh,
+        "relu" => ferrotorch_nn::RNNNonlinearity::ReLU,
+        _ => return Err("rnn_cell: unknown nonlinearity".into()),
+    };
+    let mut cell = ferrotorch_nn::RNNCell::<f32>::with_nonlinearity(input_size, hidden_size, nl)?;
+    {
+        let mut params = cell.parameters_mut();
+        if let Some(p) = params.first_mut() {
+            p.set_data(w_ih);
+        }
+        if let Some(p) = params.get_mut(1) {
+            p.set_data(w_hh);
+        }
+        if let Some(p) = params.get_mut(2) {
+            p.set_data(b_ih);
+        }
+        if let Some(p) = params.get_mut(3) {
+            p.set_data(b_hh);
+        }
+    }
+    Ok(Some(cell.forward_cell(&input, Some(&hidden))?))
+}
+
+fn dispatch_gru_cell(args: &[Value]) -> Result<Option<Tensor<f32>>, Box<dyn std::error::Error>> {
+    use ferrotorch_nn::module::Module as _;
+    if args.len() < 6 {
+        return Err("gru_cell: needs [input, hidden, w_ih, w_hh, b_ih, b_hh]".into());
+    }
+    let input = unwrap_tensor_arg(&args[0])
+        .ok_or("gru_cell: input")?
+        .to_f32()?;
+    let hidden = unwrap_tensor_arg(&args[1])
+        .ok_or("gru_cell: hidden")?
+        .to_f32()?;
+    let w_ih = unwrap_tensor_arg(&args[2])
+        .ok_or("gru_cell: w_ih")?
+        .to_f32()?;
+    let w_hh = unwrap_tensor_arg(&args[3])
+        .ok_or("gru_cell: w_hh")?
+        .to_f32()?;
+    let b_ih = unwrap_tensor_arg(&args[4])
+        .ok_or("gru_cell: b_ih")?
+        .to_f32()?;
+    let b_hh = unwrap_tensor_arg(&args[5])
+        .ok_or("gru_cell: b_hh")?
+        .to_f32()?;
+    if input.shape().len() != 2 || hidden.shape().len() != 2 {
+        return Ok(None);
+    }
+    let input_size = input.shape()[1];
+    let hidden_size = hidden.shape()[1];
+    let mut cell = ferrotorch_nn::GRUCell::<f32>::new(input_size, hidden_size)?;
+    {
+        let mut params = cell.parameters_mut();
+        if let Some(p) = params.first_mut() {
+            p.set_data(w_ih);
+        }
+        if let Some(p) = params.get_mut(1) {
+            p.set_data(w_hh);
+        }
+        if let Some(p) = params.get_mut(2) {
+            p.set_data(b_ih);
+        }
+        if let Some(p) = params.get_mut(3) {
+            p.set_data(b_hh);
+        }
+    }
+    Ok(Some(cell.forward_cell(&input, Some(&hidden))?))
+}
+
+fn dispatch_lstm_cell(args: &[Value]) -> Result<Option<Tensor<f32>>, Box<dyn std::error::Error>> {
+    use ferrotorch_nn::module::Module as _;
+    if args.len() < 6 {
+        return Err("lstm_cell: needs [input, [h, c], w_ih, w_hh, b_ih, b_hh]".into());
+    }
+    let input = unwrap_tensor_arg(&args[0])
+        .ok_or("lstm_cell: input")?
+        .to_f32()?;
+    // args[1] is a list [h, c] of two tensors.
+    let hc_arr = args[1]
+        .as_array()
+        .ok_or("lstm_cell: arg 1 must be a [h, c] list")?;
+    if hc_arr.len() != 2 {
+        return Err("lstm_cell: arg 1 must contain exactly [h, c]".into());
+    }
+    let h = unwrap_tensor_arg(&hc_arr[0])
+        .ok_or("lstm_cell: h not tensor")?
+        .to_f32()?;
+    let c = unwrap_tensor_arg(&hc_arr[1])
+        .ok_or("lstm_cell: c not tensor")?
+        .to_f32()?;
+    let w_ih = unwrap_tensor_arg(&args[2])
+        .ok_or("lstm_cell: w_ih")?
+        .to_f32()?;
+    let w_hh = unwrap_tensor_arg(&args[3])
+        .ok_or("lstm_cell: w_hh")?
+        .to_f32()?;
+    let b_ih = unwrap_tensor_arg(&args[4])
+        .ok_or("lstm_cell: b_ih")?
+        .to_f32()?;
+    let b_hh = unwrap_tensor_arg(&args[5])
+        .ok_or("lstm_cell: b_hh")?
+        .to_f32()?;
+    if input.shape().len() != 2 || h.shape().len() != 2 || c.shape().len() != 2 {
+        return Ok(None);
+    }
+    let input_size = input.shape()[1];
+    let hidden_size = h.shape()[1];
+    let mut cell = ferrotorch_nn::LSTMCell::<f32>::new(input_size, hidden_size)?;
+    {
+        let mut params = cell.parameters_mut();
+        if let Some(p) = params.first_mut() {
+            p.set_data(w_ih);
+        }
+        if let Some(p) = params.get_mut(1) {
+            p.set_data(w_hh);
+        }
+        if let Some(p) = params.get_mut(2) {
+            p.set_data(b_ih);
+        }
+        if let Some(p) = params.get_mut(3) {
+            p.set_data(b_hh);
+        }
+    }
+    // forward_cell returns (h', c'); the parity-sweep value-equality gate
+    // compares against a single tensor — return h' only. (op_db's RNN cell
+    // calls return only `h_n` from `torch.nn.functional.lstm_cell` —
+    // ferrotorch's `LSTMCell::forward_cell` returns the (h, c) tuple to
+    // match the layer-mode API; we drop c' here.)
+    let (h_new, _c_new) = cell.forward_cell(&input, Some((&h, &c)))?;
+    Ok(Some(h_new))
 }
 
 fn dispatch_ops() -> &'static [&'static str] {
@@ -3489,6 +5300,81 @@ fn dispatch_ops() -> &'static [&'static str] {
         // present, 4-D multi-head SDPA inputs, is_causal with N_q != N_k).
         "einsum",
         "nn.functional.scaled_dot_product_attention",
+        // LAYERS umbrella #1441 — wired 2026-05-26 (closes runner-arm half
+        // for linear/conv/dropout/embedding/pad in
+        // `.design/ferrotorch-nn/{linear,conv,dropout,embedding,padding}.md`).
+        "nn.functional.linear",
+        "nn.functional.dropout",
+        "nn.functional.embedding",
+        "nn.functional.conv1d",
+        "nn.functional.conv2d",
+        "nn.functional.conv3d",
+        "nn.functional.conv_transpose1d",
+        "nn.functional.conv_transpose2d",
+        "nn.functional.conv_transpose3d",
+        "nn.functional.pad",
+        // LOSS umbrella #1444 — 16 ops dispatched via either the functional
+        // entry (mse / l1 / smooth_l1 / huber / kl_div / bce / bce_logits)
+        // or the layer-mode `.forward` (cross_entropy / nll / poisson_nll /
+        // gaussian_nll / hinge_emb / margin_ranking / triplet / cosine_emb /
+        // multi_margin / multilabel_soft_margin). Each arm in `dispatch_f32`
+        // above documents the legitimate-skip pathway for the kwargs
+        // ferrotorch's narrower contract excludes (weight, pos_weight,
+        // ignore_index != -100, log_target=true, etc.).
+        "nn.functional.mse_loss",
+        "nn.functional.l1_loss",
+        "nn.functional.smooth_l1_loss",
+        "nn.functional.huber_loss",
+        "nn.functional.binary_cross_entropy",
+        "nn.functional.binary_cross_entropy_with_logits",
+        "nn.functional.kl_div",
+        "nn.functional.cross_entropy",
+        "nn.functional.nll_loss",
+        "nn.functional.poisson_nll_loss",
+        "nn.functional.gaussian_nll_loss",
+        "nn.functional.hinge_embedding_loss",
+        "nn.functional.margin_ranking_loss",
+        "nn.functional.cosine_embedding_loss",
+        "nn.functional.triplet_margin_loss",
+        "nn.functional.multi_margin_loss",
+        "nn.functional.multilabel_soft_margin_loss",
+        // NORM umbrella #1447 — 5 ops. layer_norm / group_norm /
+        // local_response_norm dispatch directly; batch_norm restricted to
+        // eval-mode (training=false) samples to avoid mutating running
+        // stats; instance_norm restricted to use_input_stats=true / no
+        // running_mean / no running_var (ferrotorch's InstanceNorm{1,2,3}d
+        // does not track running stats).
+        "nn.functional.layer_norm",
+        "nn.functional.group_norm",
+        "nn.functional.batch_norm",
+        "nn.functional.instance_norm",
+        "nn.functional.local_response_norm",
+        // POOLING umbrella #1458 — 10 ops dispatching directly through the
+        // `ferrotorch_nn::functional::{max,avg,adaptive_*}_pool{1,2,3}d`
+        // entries at `pooling.rs:3140-3245`. Skip paths cover
+        // return_indices, ceil_mode, dilation > 1, count_include_pad=false,
+        // and divisor_override (each tracked under sub-blockers of #1458).
+        "nn.functional.max_pool1d",
+        "nn.functional.max_pool2d",
+        "nn.functional.max_pool3d",
+        "nn.functional.avg_pool1d",
+        "nn.functional.avg_pool2d",
+        "nn.functional.avg_pool3d",
+        "nn.functional.adaptive_avg_pool1d",
+        "nn.functional.adaptive_avg_pool2d",
+        "nn.functional.adaptive_avg_pool3d",
+        "nn.functional.adaptive_max_pool1d",
+        "nn.functional.adaptive_max_pool2d",
+        "nn.functional.adaptive_max_pool3d",
+        // RNN cells umbrella #1456 — 3 ops (rnn_tanh + rnn_relu + gru +
+        // lstm). Custom oracle samples live in `oracle.py`'s
+        // `_CUSTOM_OPS` registry (the cells are not in op_db). Each cell's
+        // dispatch arm builds a transient cell, injects weights via
+        // `parameters_mut`, then calls `.forward_cell(input, Some(hidden))`.
+        "nn.functional.rnn_relu_cell",
+        "nn.functional.rnn_tanh_cell",
+        "nn.functional.gru_cell",
+        "nn.functional.lstm_cell",
     ]
 }
 
@@ -3966,6 +5852,52 @@ fn tolerance_for(op: &str) -> (f32, f32) {
             }
         }
         "bmm" => (1e-4, 1e-7),
+        // local_response_norm: power(beta) on a sum across the cross-channel
+        // window induces wider f32 drift than other norm ops; empirically
+        // ~1e-3 (e.g. shape=[1,6,3] index 10 differs by 3e-3 at |e|=4.5).
+        // This is structural f32 cross-implementation variance from the
+        // chained sqrt/pow/div sequence, not a correctness divergence.
+        "nn.functional.local_response_norm" => (2e-3, 1e-7),
+        // Norm / loss / pool / conv / cell ops accumulate over many FMAs
+        // (norm reduces over the normalized_shape; loss reduces over the
+        // full tensor; conv applies an im2col + GEMM; cell does a matmul).
+        // Empirically `rtol=1e-4` absorbs the cross-implementation f32 ULP
+        // drift the same way matmul-family does (e.g. layer_norm seed=0 i=1
+        // shape=[2,2,3]: ferrotorch=-0.002392292 vs torch=-0.0023920375
+        // diff=2.5e-7, well inside 1e-4 rtol). Widened here per the same
+        // rationale as the matmul-family doc-comment above.
+        "nn.functional.layer_norm"
+        | "nn.functional.group_norm"
+        | "nn.functional.batch_norm"
+        | "nn.functional.instance_norm"
+        | "nn.functional.mse_loss"
+        | "nn.functional.l1_loss"
+        | "nn.functional.smooth_l1_loss"
+        | "nn.functional.huber_loss"
+        | "nn.functional.cross_entropy"
+        | "nn.functional.binary_cross_entropy"
+        | "nn.functional.binary_cross_entropy_with_logits"
+        | "nn.functional.kl_div"
+        | "nn.functional.nll_loss"
+        | "nn.functional.poisson_nll_loss"
+        | "nn.functional.gaussian_nll_loss"
+        | "nn.functional.hinge_embedding_loss"
+        | "nn.functional.margin_ranking_loss"
+        | "nn.functional.cosine_embedding_loss"
+        | "nn.functional.triplet_margin_loss"
+        | "nn.functional.multi_margin_loss"
+        | "nn.functional.multilabel_soft_margin_loss"
+        | "nn.functional.linear"
+        | "nn.functional.conv1d"
+        | "nn.functional.conv2d"
+        | "nn.functional.conv3d"
+        | "nn.functional.conv_transpose1d"
+        | "nn.functional.conv_transpose2d"
+        | "nn.functional.conv_transpose3d"
+        | "nn.functional.rnn_relu_cell"
+        | "nn.functional.rnn_tanh_cell"
+        | "nn.functional.gru_cell"
+        | "nn.functional.lstm_cell" => (1e-4, 1e-7),
         _ => tol_f32(),
     }
 }

@@ -3074,7 +3074,18 @@ impl<T: Float> Module<T> for LocalResponseNorm {
         let beta_t = T::from(self.beta).unwrap();
         let k_t = T::from(self.k).unwrap();
         let size_t = T::from(self.size).unwrap();
+        // Window indexing must match PyTorch's `torch/nn/functional.py:3032-3046`:
+        //   pad(div, (..., size//2, (size-1)//2)); avg_pool with kernel size.
+        // In original-channel coordinates the window for output channel `c` is
+        //   [c - size//2, c - size//2 + size)   (i.e. `size` channels wide,
+        //                                        with implicit zero pad at edges)
+        // For ODD `size` this is `[c - half, c + half + 1)` (symmetric).
+        // For EVEN `size` the right edge is `c + (size+1)/2 = c + half` (not
+        // `c + half + 1`), so the asymmetric pad shifts the window LEFT by 1.
+        // The previous `c + half + 1` upper bound made the window `size+1`
+        // wide for even sizes, producing a 0.006 drift at shape [1,6,3] size=2.
         let half = self.size / 2;
+        let upper = self.size - half; // == (size + 1) / 2
 
         let mut output = vec![zero::<T>(); input.numel()];
 
@@ -3082,10 +3093,14 @@ impl<T: Float> Module<T> for LocalResponseNorm {
         // Also store the denominator for backward.
         let mut denom = vec![zero::<T>(); input.numel()];
 
+        // Mirror PyTorch's expression order exactly:
+        //   div = avg_pool(x*x) * alpha + k          (sq_sum/size, *alpha, +k)
+        //   div = div ^ beta
+        //   out = x / div
         for b in 0..batch {
             for c in 0..channels {
                 let c_start = c.saturating_sub(half);
-                let c_end = (c + half + 1).min(channels);
+                let c_end = (c + upper).min(channels);
 
                 for s in 0..spatial {
                     let mut sq_sum = zero::<T>();
@@ -3095,9 +3110,9 @@ impl<T: Float> Module<T> for LocalResponseNorm {
                     }
 
                     let idx = b * channels * spatial + c * spatial + s;
-                    let d = k_t + alpha_t / size_t * sq_sum;
+                    let d = sq_sum / size_t * alpha_t + k_t;
                     denom[idx] = d;
-                    output[idx] = input_data[idx] * d.powf(-beta_t);
+                    output[idx] = input_data[idx] / d.powf(beta_t);
                 }
             }
         }
@@ -3196,7 +3211,16 @@ impl<T: Float> GradFn<T> for LocalResponseNormBackward<T> {
         let beta_t = T::from(self.beta).unwrap();
         let size_t = T::from(self.size).unwrap();
         let two = T::from(2.0).unwrap();
+        // Forward window for output `c` is `[c - half, c + upper)` (width `size`).
+        // Backward iterates over all output channels `c` whose forward window
+        // included input channel `i_c`, i.e.
+        //   c - half <= i_c < c + upper
+        //   <=> c \in [i_c - upper + 1, i_c + half + 1)
+        // For odd `size` this collapses to the symmetric `[i_c - half, i_c + half + 1)`
+        // (same as the legacy code); for even `size` it shifts the window by 1
+        // channel to match the asymmetric forward pad.
         let half = self.size / 2;
+        let upper = self.size - half; // == (size + 1) / 2
 
         let mut grad_input = vec![zero::<T>(); self.input.numel()];
 
@@ -3211,7 +3235,7 @@ impl<T: Float> GradFn<T> for LocalResponseNormBackward<T> {
                     // Term 2: cross-channel interaction
                     // For each channel c whose window includes i_c:
                     // contribution = -2*beta*alpha/size * x_i * x_c * D_c^(-beta-1) * go_c
-                    let c_start = i_c.saturating_sub(half);
+                    let c_start = (i_c + 1).saturating_sub(upper);
                     let c_end = (i_c + half + 1).min(channels);
 
                     let mut cross_sum = zero::<T>();
