@@ -20,7 +20,7 @@
 //! | REQ-11 (`Distribution::variance`) | SHIPPED | `impl Distribution::variance` returns `(high-low)^2 / 12`; mirrors `uniform.py:53-55`. |
 //! | REQ-12 (`Distribution::stddev`) | SHIPPED | `impl Distribution::stddev` returns `(high-low) / sqrt(12)`; mirrors `uniform.py:49-51`. |
 //! | REQ-13 (`Distribution::mode` returns midpoint) | SHIPPED | R-DEV-6 deviation from `uniform.py:46-48` which returns NaN*high; ferrotorch returns the midpoint as a finite representative value. Blocker #1429 tracks strict-NaN conformance question. |
-//! | REQ-14 (`expand`/`support`/`arg_constraints`) | NOT-STARTED | blocker #1430 — cross-cutting with `lib.md` REQ-5 (blocker #1376). |
+//! | REQ-14 (`expand`/`support`/`arg_constraints`/`has_rsample`) | SHIPPED | trait overrides at the tail of `impl Distribution for Uniform` in `uniform.rs` mirror `torch/distributions/uniform.py:14-65`; `support` returns a `HalfOpenInterval<f64>` materialised from `low`/`high` bounds (PyTorch's dependent property); consumer: `tests/divergence_distribution_trait_surface.rs::uniform_*` pins every override (closes #1430). |
 
 use std::sync::Arc;
 
@@ -30,7 +30,9 @@ use ferrotorch_core::error::{FerrotorchError, FerrotorchResult};
 use ferrotorch_core::storage::TensorStorage;
 use ferrotorch_core::tensor::{GradFn, Tensor};
 
-use crate::Distribution;
+use crate::constraints;
+use crate::{DistConstraint, Distribution};
+use std::collections::HashMap;
 
 /// Continuous uniform distribution on `[low, high)`.
 ///
@@ -295,6 +297,64 @@ impl<T: Float> Distribution<T> for Uniform<T> {
             .map(|(&l, &h)| (h - l) * inv_sqrt_12)
             .collect();
         Tensor::from_storage(TensorStorage::cpu(result), self.low.shape().to_vec(), false)
+    }
+
+    // -----------------------------------------------------------------------
+    // Full PyTorch surface (#1376, #1430) — Uniform is reparameterizable
+    // with support `[low, high]`. The PyTorch `support` is a dependent
+    // property because the bounds are parameters; ferrotorch's
+    // `DistConstraint` returns a name-only descriptor (the bounds are
+    // queryable via `low()` / `high()` accessors). Mirrors
+    // `torch/distributions/uniform.py:14-39`.
+    // -----------------------------------------------------------------------
+
+    fn has_rsample(&self) -> bool {
+        // `torch/distributions/uniform.py:32`: `has_rsample = True`.
+        true
+    }
+
+    fn support(&self) -> Option<Box<dyn DistConstraint>> {
+        // `torch/distributions/uniform.py:75-83`: `support = constraints.interval(low, high)`.
+        // We materialise the bounds as a half-open interval (PyTorch's
+        // sample range is `[low, high)` per `uniform.py:85-88`).
+        let lo = self.low.data_vec().ok()?;
+        let hi = self.high.data_vec().ok()?;
+        let lo_f = lo.first().copied()?.to_f64()?;
+        let hi_f = hi.first().copied()?.to_f64()?;
+        Some(Box::new(constraints::HalfOpenInterval::<f64> {
+            lower_bound: lo_f,
+            upper_bound: hi_f,
+        }))
+    }
+
+    fn arg_constraints(&self) -> HashMap<&'static str, Box<dyn DistConstraint>> {
+        // `torch/distributions/uniform.py:33-39`:
+        //   arg_constraints = {"low": dependent, "high": dependent}
+        // (the dependency is inter-parameter `low < high`). ferrotorch
+        // exposes `Real` for each individually; the cross-parameter check
+        // is left to the Uniform constructor's shape-match path.
+        let mut m: HashMap<&'static str, Box<dyn DistConstraint>> = HashMap::new();
+        m.insert("low", Box::new(constraints::Real));
+        m.insert("high", Box::new(constraints::Real));
+        m
+    }
+
+    fn event_shape(&self) -> Vec<usize> {
+        vec![]
+    }
+
+    fn expand(&self, batch_shape: &[usize]) -> FerrotorchResult<Box<dyn Distribution<T>>> {
+        // `torch/distributions/uniform.py:55-65`: broadcast both bounds.
+        let lo = self.low.data_vec()?;
+        let hi = self.high.data_vec()?;
+        let n: usize = batch_shape.iter().product::<usize>().max(1);
+        let lo_out: Vec<T> = (0..n).map(|i| lo[i % lo.len()]).collect();
+        let hi_out: Vec<T> = (0..n).map(|i| hi[i % hi.len()]).collect();
+        let new_low =
+            Tensor::from_storage(TensorStorage::cpu(lo_out), batch_shape.to_vec(), false)?;
+        let new_high =
+            Tensor::from_storage(TensorStorage::cpu(hi_out), batch_shape.to_vec(), false)?;
+        Ok(Box::new(Uniform::new(new_low, new_high)?))
     }
 }
 

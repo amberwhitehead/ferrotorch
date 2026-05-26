@@ -17,7 +17,7 @@
 //! | REQ-7 (`log_prob`) | SHIPPED | normalized-prob index lookup with `-inf` for OOR + eps clamp mirroring `categorical.py:151-157`; consumer: `MixtureSameFamily::log_prob` |
 //! | REQ-8 (`entropy`) | SHIPPED | `-sum(p*ln(p))` scalar mirroring `categorical.py:159-163`; consumer: trait surface |
 //! | REQ-9 (numerical guards) | SHIPPED | CDF-last forced to 1 + eps clamp on log_prob; consumer: the `sample` method's binary search relies on this |
-//! | REQ-10 (full PyTorch surface) | NOT-STARTED | blocker #1410 — `logits` ctor, N-D batched probs, `expand`, `enumerate_support`, `mean`/`mode`/`variance` (cross-cutting with `lib.md` REQ-5 / blocker #1376) |
+//! | REQ-10 (full PyTorch surface — `enumerate_support`/`arg_constraints`/`support`/`has_enumerate_support`) | PARTIAL | enumerate_support + arg_constraints (probs:Simplex) + support (NonNegative proxy) + has_enumerate_support overrides landed via `impl Distribution for Categorical` in `categorical.rs` mirroring `torch/distributions/categorical.py:13-60,165-182`; consumer: `tests/divergence_distribution_trait_surface.rs::categorical_*` pins. STILL NOT-STARTED: `logits` constructor, N-D batched probs (limits `expand`), `mean`/`mode`/`variance` scalar errors (categorical has no scalar mean). Blocker #1410 remains open for the residual work. |
 
 use ferrotorch_core::creation;
 use ferrotorch_core::dtype::Float;
@@ -25,7 +25,9 @@ use ferrotorch_core::error::{FerrotorchError, FerrotorchResult};
 use ferrotorch_core::storage::TensorStorage;
 use ferrotorch_core::tensor::Tensor;
 
-use crate::Distribution;
+use crate::constraints;
+use crate::{DistConstraint, Distribution};
+use std::collections::HashMap;
 
 /// Categorical distribution over `K` classes, parameterized by `probs`.
 ///
@@ -210,6 +212,68 @@ impl<T: Float> Distribution<T> for Categorical<T> {
         } else {
             Ok(out)
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // Full PyTorch surface (#1376, #1410) — Categorical is discrete with
+    // enumerable support {0..K-1}, no rsample, and the `probs` argument is
+    // simplex-constrained. PyTorch's `Categorical.mean` returns NaN; here
+    // we keep it as the default `InvalidArgument` because no scalar mean
+    // exists for a categorical. Mirrors
+    // `torch/distributions/categorical.py:13-60`.
+    // -----------------------------------------------------------------------
+
+    fn has_rsample(&self) -> bool {
+        // `torch/distributions/categorical.py:13-54`: no `has_rsample` override.
+        false
+    }
+
+    fn has_enumerate_support(&self) -> bool {
+        // `torch/distributions/categorical.py:46`: `has_enumerate_support = True`.
+        true
+    }
+
+    fn support(&self) -> Option<Box<dyn DistConstraint>> {
+        // `torch/distributions/categorical.py:165-167`:
+        //   support = constraints.integer_interval(0, num_categories - 1)
+        // ferrotorch's discrete-interval constraint is not yet shipped
+        // (tracked under #1372). We return a `NonNegative` descriptor so
+        // callers at least see the discrete-non-negative semantics; the
+        // tight upper bound is queryable via `num_categories()`.
+        Some(Box::new(constraints::NonNegative))
+    }
+
+    fn arg_constraints(&self) -> HashMap<&'static str, Box<dyn DistConstraint>> {
+        // `torch/distributions/categorical.py:44-45`:
+        //   arg_constraints = {"probs": simplex, "logits": real_vector}
+        // ferrotorch's Categorical only carries `probs` — logits ctor is
+        // tracked under #1410.
+        let mut m: HashMap<&'static str, Box<dyn DistConstraint>> = HashMap::new();
+        m.insert("probs", Box::new(constraints::Simplex));
+        m
+    }
+
+    fn event_shape(&self) -> Vec<usize> {
+        vec![]
+    }
+
+    fn enumerate_support(&self, _expand: bool) -> FerrotorchResult<Tensor<T>> {
+        // `torch/distributions/categorical.py:172-182`: returns
+        // `[0, 1, …, num_categories - 1]` along dim 0.
+        let values: Vec<T> = (0..self.num_categories)
+            .map(|i| T::from(i).unwrap())
+            .collect();
+        Tensor::from_storage(TensorStorage::cpu(values), vec![self.num_categories], false)
+    }
+
+    fn expand(&self, _batch_shape: &[usize]) -> FerrotorchResult<Box<dyn Distribution<T>>> {
+        // ferrotorch's Categorical requires 1-D `probs` (the `new`
+        // constructor enforces ndim==1). Batched Categorical is tracked
+        // under #1410. We return an error rather than silently produce
+        // an under-specified batched instance.
+        Err(FerrotorchError::InvalidArgument {
+            message: "Categorical::expand requires N-D batched probs (#1410)".into(),
+        })
     }
 }
 

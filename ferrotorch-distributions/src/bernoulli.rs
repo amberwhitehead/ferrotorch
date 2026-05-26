@@ -16,7 +16,7 @@
 //! | REQ-6 (`log_prob` clamped) | SHIPPED | `log_prob(value) = x*ln(p) + (1-x)*ln(1-p)` with eps=1e-7 clamp mirroring `bernoulli.py:121-125`; consumer: trait surface |
 //! | REQ-7 (`entropy`) | SHIPPED | `-p*ln(p) - (1-p)*ln(1-p)` formula mirroring `bernoulli.py:127-130`; consumer: trait surface |
 //! | REQ-8 (`cdf`/`icdf`/`mean`/`mode`/`variance`) | SHIPPED | property overrides mirroring `bernoulli.py:91-102`; consumer: trait-default overrides via `pub use Bernoulli` |
-//! | REQ-9 (full PyTorch surface) | NOT-STARTED | blocker #1406 — `logits` ctor, `expand`, `enumerate_support`, `arg_constraints` (cross-cutting with `lib.md` REQ-5 / blocker #1376) |
+//! | REQ-9 (full PyTorch surface — `expand`/`enumerate_support`/`arg_constraints`/`support`/`has_*` flags) | SHIPPED | trait overrides at the tail of `impl Distribution for Bernoulli` in `bernoulli.rs` mirror `torch/distributions/bernoulli.py:13-77`; consumer: `tests/divergence_distribution_trait_surface.rs::bernoulli_*` pins every override (closes #1406 — `logits` ctor + `validate_args` remain orthogonal trackers). |
 
 use ferrotorch_core::creation;
 use ferrotorch_core::dtype::Float;
@@ -24,7 +24,9 @@ use ferrotorch_core::error::{FerrotorchError, FerrotorchResult};
 use ferrotorch_core::storage::TensorStorage;
 use ferrotorch_core::tensor::Tensor;
 
-use crate::Distribution;
+use crate::constraints;
+use crate::{DistConstraint, Distribution};
+use std::collections::HashMap;
 
 /// Bernoulli distribution parameterized by `probs` (probability of 1).
 ///
@@ -221,6 +223,64 @@ impl<T: Float> Distribution<T> for Bernoulli<T> {
             })
             .collect();
         Tensor::from_storage(TensorStorage::cpu(result), q.shape().to_vec(), false)
+    }
+
+    // -----------------------------------------------------------------------
+    // Full PyTorch surface (#1376, #1406) — Bernoulli is discrete (no
+    // rsample), has finite enumerable support {0, 1}, and declares
+    // (probs: UnitInterval) arg_constraints. Mirrors
+    // `torch/distributions/bernoulli.py:14-72`.
+    // -----------------------------------------------------------------------
+
+    fn has_rsample(&self) -> bool {
+        // `torch/distributions/bernoulli.py:13-15`: no `has_rsample` class
+        // attr override → inherits default `False`.
+        false
+    }
+
+    fn has_enumerate_support(&self) -> bool {
+        // `torch/distributions/bernoulli.py:15`: `has_enumerate_support = True`.
+        true
+    }
+
+    fn support(&self) -> Option<Box<dyn DistConstraint>> {
+        // `torch/distributions/bernoulli.py:14`: `support = constraints.boolean`.
+        Some(Box::new(constraints::BooleanConstraint))
+    }
+
+    fn arg_constraints(&self) -> HashMap<&'static str, Box<dyn DistConstraint>> {
+        // `torch/distributions/bernoulli.py:13`:
+        //   arg_constraints = {"probs": unit_interval, "logits": real}
+        // ferrotorch's Bernoulli only carries `probs` — logits ctor is
+        // tracked separately under #1406.
+        let mut m: HashMap<&'static str, Box<dyn DistConstraint>> = HashMap::new();
+        m.insert("probs", Box::new(constraints::UnitInterval));
+        m
+    }
+
+    fn event_shape(&self) -> Vec<usize> {
+        // Bernoulli is univariate (each draw is a single 0/1 outcome).
+        vec![]
+    }
+
+    fn enumerate_support(&self, _expand: bool) -> FerrotorchResult<Tensor<T>> {
+        // `torch/distributions/bernoulli.py:138-145`: returns the values
+        // {0, 1} along dim 0. The `expand` arg controls whether the
+        // batch dims are broadcast or kept as singletons — for ferrotorch's
+        // scalar-batch Bernoulli the distinction is moot.
+        let zero = <T as num_traits::Zero>::zero();
+        let one = <T as num_traits::One>::one();
+        Tensor::from_storage(TensorStorage::cpu(vec![zero, one]), vec![2], false)
+    }
+
+    fn expand(&self, batch_shape: &[usize]) -> FerrotorchResult<Box<dyn Distribution<T>>> {
+        // `torch/distributions/bernoulli.py:67-77`: `expand` broadcasts
+        // `probs` to the target batch_shape.
+        let probs_data = self.probs.data_vec()?;
+        let n: usize = batch_shape.iter().product::<usize>().max(1);
+        let out: Vec<T> = (0..n).map(|i| probs_data[i % probs_data.len()]).collect();
+        let new_probs = Tensor::from_storage(TensorStorage::cpu(out), batch_shape.to_vec(), false)?;
+        Ok(Box::new(Bernoulli::new(new_probs)?))
     }
 }
 

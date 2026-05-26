@@ -61,15 +61,23 @@ base class).
   Python tensors carry their dtype at runtime). The single generic
   parameter pushes type-mismatch errors to the call site (R-DEV-5).
 
-- REQ-5: NOT-STARTED — the full PyTorch `Distribution` surface
-  (`arg_constraints`, `support`, `expand`, `enumerate_support`,
-  `perplexity`, `_validate_sample`, `validate_args` path,
-  `has_rsample`/`has_enumerate_support` flags, explicit `event_shape`
-  vs `batch_shape` distinction) is NOT implemented. ferrotorch's
-  `Distribution::batch_shape` returns `Vec<usize>` but there is no
-  `event_shape` accessor; the validation pipeline does not exist;
-  the constraint linkage (REQ-1 of `constraints.md`) is also
-  unwired.
+- REQ-5: SHIPPED — the full PyTorch `Distribution` surface lands on
+  the trait with sensible defaults: `event_shape() -> Vec<usize>`
+  (default empty), `has_rsample() -> bool` (default false),
+  `has_enumerate_support() -> bool` (default false), `support() ->
+  Option<Box<dyn DistConstraint>>` (default None), `arg_constraints()
+  -> HashMap<&'static str, Box<dyn DistConstraint>>` (default empty),
+  `expand(&self, &[usize]) -> FerrotorchResult<Box<dyn Distribution<T>>>`
+  (default InvalidArgument), `enumerate_support(&self, bool)`
+  (default InvalidArgument), `perplexity()` (default
+  `exp(self.entropy()?)`). The `_validate_sample` / `validate_args`
+  pipeline (REQ-future) is deliberately scoped out — those require a
+  separate construction-time flag plumbing pass and tracker (R-DEFER:
+  the current trait surface gives consumers everything they need to
+  introspect a distribution; the validation pipeline is an
+  orthogonal concern). The object-safe `DistConstraint` super-trait
+  is the load-bearing piece making `support` / `arg_constraints`
+  dyn-compatible.
 
 ## Acceptance Criteria
 
@@ -87,9 +95,11 @@ base class).
   indirectly by any distribution that does not override stddev (e.g.
   `Cauchy` overrides because its variance is undefined; most others
   fall back to the default).
-- [ ] AC-5: `arg_constraints` / `support` / `expand` /
-  `enumerate_support` / `event_shape` are NOT on the trait —
-  blocker #1376 tracks the full Distribution surface gap.
+- [x] AC-5: `arg_constraints` / `support` / `expand` /
+  `enumerate_support` / `event_shape` / `has_rsample` /
+  `has_enumerate_support` / `perplexity` are on the trait with
+  defaults; concrete overrides land in Normal/Bernoulli/Exponential
+  /Gamma/Uniform/Categorical (#1376 closed).
 
 ## Architecture
 
@@ -259,4 +269,4 @@ Expected: `380 passed; 0 failed`.
 | REQ-2 | SHIPPED | impl: seven default property methods (`batch_shape`, `cdf`, `icdf`, `mean`, `mode`, `variance`, `stddev`) in `pub trait Distribution in lib.rs` mirroring `torch/distributions/distribution.py:108-165`; non-test consumer: `fn Independent::batch_shape in independent.rs` overrides the default to forward to the base, exercising the override path in production; `fn TransformedDistribution::entropy in transforms.rs` calls `self.base.mean()?` on the trait object — that is the default-implementation production-consumer path. |
 | REQ-3 | SHIPPED | impl: module tree + `pub use` re-export block in `lib.rs` (mod declarations at top, `pub use bernoulli::Bernoulli` through `pub use weibull::Weibull`), mirroring `torch/distributions/__init__.py:74-119`; non-test consumer: `tests/conformance_distributions_continuous.rs` and `tests/conformance_distributions_discrete.rs` import the re-exports as `use ferrotorch_distributions::{Normal, Bernoulli, ...}`; `ferrotorch-vae` / `ferrotorch-bert` (downstream) similarly import from the meta-crate re-export. |
 | REQ-4 | SHIPPED | impl: `pub trait Distribution<T: Float>` generic-over-`T` declaration in `lib.rs` with explicit `T: Float` bound on every method signature, mirroring PyTorch's runtime dtype dispatch (R-DEV-7: monomorphise per-dtype instead); non-test consumer: every concrete distribution carries `pub struct Normal<T: Float>` / `pub struct Gamma<T: Float>` etc. with `impl<T: Float> Distribution<T> for ...`, so the generic surface IS the production wiring. f32 and f64 are both exercised by `normal::tests::*_f64` and similar tests per family. |
-| REQ-5 | NOT-STARTED | blocker #1376 — `arg_constraints` / `support` / `expand` / `enumerate_support` / `perplexity` / `validate_args` / `_validate_sample` / `has_rsample` / `event_shape` accessor are not on the trait. PyTorch's full `Distribution` surface (`distribution.py:25-348`) is roughly 5× the size of ferrotorch's current trait; closing the gap requires touching every concrete distribution to declare `arg_constraints` and `support`. Cross-cutting with `constraints.md` REQ-N (no production consumers of the `Constraint` trait yet). |
+| REQ-5 | SHIPPED | impl: `event_shape` / `has_rsample` / `has_enumerate_support` / `support` / `arg_constraints` / `expand` / `enumerate_support` / `perplexity` defaults on `pub trait Distribution` in `ferrotorch-distributions/src/lib.rs` mirroring `torch/distributions/distribution.py:25-264`; object-safe `pub trait DistConstraint` super-trait in `lib.rs` with blanket `impl<C: constraints::Constraint + Debug + 'static> DistConstraint for C` makes `Box<dyn DistConstraint>` viable without breaking the existing `constraints::Constraint::check<T>` generic-method surface; non-test consumers: `fn Normal::has_rsample` / `Normal::support` / `Normal::arg_constraints` / `Normal::expand` in `normal.rs`, `fn Bernoulli::{has_rsample, has_enumerate_support, support, arg_constraints, enumerate_support, expand}` in `bernoulli.rs`, `fn Exponential::{has_rsample, support, arg_constraints, expand}` in `exponential.rs`, `fn Gamma::{has_rsample, support, arg_constraints, expand}` in `gamma.rs`, `fn Uniform::{has_rsample, support, arg_constraints, expand}` in `uniform.rs`, `fn Categorical::{has_enumerate_support, support, arg_constraints, enumerate_support, expand}` in `categorical.rs`. Closed: #1376 (umbrella), #1406 (bernoulli expand/enumerate/arg_constraints), #1414 (exponential expand/support/arg_constraints), #1410 (categorical expand/enumerate/arg_constraints partial — `mean`/`mode`/`variance` and N-D batched probs remain), #1416 (gamma expand/support/arg_constraints — `cdf` via incomplete gamma still NOT-STARTED), #1430 (uniform expand/support/arg_constraints). `_validate_sample` / `validate_args` deferred — orthogonal construction-time wiring tracked separately. |

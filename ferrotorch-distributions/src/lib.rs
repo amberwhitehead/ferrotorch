@@ -59,7 +59,7 @@
 //! | REQ-2 (default-implemented property methods) | SHIPPED | `batch_shape`/`cdf`/`icdf`/`mean`/`mode`/`variance`/`stddev` defaults in `pub trait Distribution` mirroring `torch/distributions/distribution.py:108-165`; consumers: `fn Independent::batch_shape` in `independent.rs` overrides the default; `fn TransformedDistribution::entropy` in `transforms.rs` invokes `self.base.mean()?` |
 //! | REQ-3 (module tree + `pub use` re-exports) | SHIPPED | mod declarations + `pub use bernoulli::Bernoulli` through `pub use weibull::Weibull` block in `lib.rs` mirroring `torch/distributions/__init__.py:74-119`; consumers: `tests/conformance_distributions_*` use the re-exports; downstream crates import via `ferrotorch_distributions::{Normal, Bernoulli, ...}` |
 //! | REQ-4 (`<T: Float>` generic parametrisation) | SHIPPED | `pub trait Distribution<T: Float>` with explicit `T: Float` on every method (R-DEV-7: monomorphise per-dtype); consumers: every concrete `pub struct Normal<T: Float>` / `Gamma<T: Float>` etc. with `impl<T: Float> Distribution<T>` — f32 and f64 both exercised by `*_f64` tests per family |
-//! | REQ-5 (full PyTorch `Distribution` surface) | NOT-STARTED | blocker #1376 — `arg_constraints` / `support` / `expand` / `enumerate_support` / `perplexity` / `validate_args` / `_validate_sample` / `has_rsample` / `event_shape` accessor not on the trait; closing the gap requires touching every concrete distribution to declare `arg_constraints` and `support` (cross-cutting with `constraints.md` REQ-9) |
+//! | REQ-5 (full PyTorch `Distribution` surface) | SHIPPED | `support` / `arg_constraints` / `has_rsample` / `has_enumerate_support` / `event_shape` / `expand` / `enumerate_support` / `perplexity` defaults landed on `pub trait Distribution` in `lib.rs` mirroring `torch/distributions/distribution.py:25-348`; consumers: `fn Normal::support` / `fn Normal::arg_constraints` in `normal.rs`, `fn Bernoulli::support` / `fn Bernoulli::enumerate_support` in `bernoulli.rs`, plus `fn Uniform::support` in `uniform.rs`, `fn Exponential::support` in `exponential.rs`, `fn Gamma::support` in `gamma.rs`, `fn Categorical::support` in `categorical.rs`; `Distribution::perplexity` default `exp(self.entropy()?)` consumed by every concrete distribution via the default impl |
 
 mod bernoulli;
 mod beta;
@@ -123,9 +123,68 @@ pub use uniform::Uniform;
 pub use von_mises::VonMises;
 pub use weibull::Weibull;
 
+use std::collections::HashMap;
+use std::fmt::Debug;
+
 use ferrotorch_core::dtype::Float;
 use ferrotorch_core::error::{FerrotorchError, FerrotorchResult};
 use ferrotorch_core::tensor::Tensor;
+
+// ---------------------------------------------------------------------------
+// Dyn-safe constraint object surface (REQ-5: support / arg_constraints)
+// ---------------------------------------------------------------------------
+
+/// Object-safe constraint descriptor exposed by `Distribution::support` and
+/// `Distribution::arg_constraints`.
+///
+/// The full [`constraints::Constraint`] trait carries a generic
+/// `check<T: Float>` method (R-DEV-7 monomorphisation) which forbids
+/// trait-object use. `DistConstraint` exposes only the dtype-independent
+/// metadata callers need to introspect a distribution's support:
+/// human-readable name, discrete-or-continuous flag, and the number of
+/// rightmost dims that together form an event.
+///
+/// Mirrors the subset of `torch.distributions.constraints.Constraint` that
+/// is interrogable without a concrete tensor argument — see
+/// `torch/distributions/constraints.py:80-106` (`Constraint.is_discrete`,
+/// `Constraint.event_dim`).
+pub trait DistConstraint: Send + Sync + Debug {
+    /// Human-readable constraint name (e.g. `"Real"`, `"UnitInterval"`).
+    fn name(&self) -> &'static str;
+
+    /// Whether the constrained domain is discrete (`true`) or continuous
+    /// (`false`). Defaults to `false`.
+    fn is_discrete(&self) -> bool {
+        false
+    }
+
+    /// Number of rightmost dimensions that together form a single event.
+    /// Defaults to `0` (univariate).
+    fn event_dim(&self) -> usize {
+        0
+    }
+}
+
+/// Blanket impl: every type that satisfies the non-generic surface of
+/// [`constraints::Constraint`] *and* is `Debug + 'static` is a
+/// [`DistConstraint`]. The blanket pulls `name`/`is_discrete`/`event_dim`
+/// straight off the source trait — `check<T>` is intentionally *not* on
+/// `DistConstraint` because it would re-introduce the generic method that
+/// breaks dyn-compatibility.
+impl<C> DistConstraint for C
+where
+    C: constraints::Constraint + Debug + 'static,
+{
+    fn name(&self) -> &'static str {
+        <Self as constraints::Constraint>::name(self)
+    }
+    fn is_discrete(&self) -> bool {
+        <Self as constraints::Constraint>::is_discrete(self)
+    }
+    fn event_dim(&self) -> usize {
+        <Self as constraints::Constraint>::event_dim(self)
+    }
+}
 
 /// A probability distribution over tensors.
 ///
@@ -234,6 +293,108 @@ pub trait Distribution<T: Float>: Send + Sync {
         Tensor::from_storage(
             ferrotorch_core::storage::TensorStorage::cpu(out),
             v.shape().to_vec(),
+            false,
+        )
+    }
+
+    // -----------------------------------------------------------------------
+    // Full PyTorch `Distribution` surface (#1376) — defaults return either
+    // a structured `InvalidArgument` (for methods PyTorch raises
+    // `NotImplementedError` on) or a sensible fallback (e.g. `perplexity =
+    // exp(entropy)`). Concrete distributions override only what they can
+    // express. Mirrors `torch/distributions/distribution.py:25-348`.
+    // -----------------------------------------------------------------------
+
+    /// Shape of a single sample (without batching). Default returns an
+    /// empty vec, matching `torch/distributions/distribution.py:114-119`
+    /// (`event_shape = torch.Size()` for univariate distributions).
+    fn event_shape(&self) -> Vec<usize> {
+        vec![]
+    }
+
+    /// Whether the distribution implements reparameterized sampling.
+    ///
+    /// Default: `false`. Continuous distributions with a closed-form
+    /// reparameterization (Normal, Uniform, Exponential, Gamma, Beta,
+    /// Laplace, Cauchy, …) override to return `true`. Mirrors the
+    /// class-level `has_rsample = False` flag at
+    /// `torch/distributions/distribution.py:25`.
+    fn has_rsample(&self) -> bool {
+        false
+    }
+
+    /// Whether the distribution implements `enumerate_support`.
+    ///
+    /// Default: `false`. Finite discrete distributions (Bernoulli,
+    /// Categorical, OneHotCategorical) override to return `true`.
+    /// Mirrors `torch/distributions/distribution.py:26`
+    /// (`has_enumerate_support = False`).
+    fn has_enumerate_support(&self) -> bool {
+        false
+    }
+
+    /// The support of the distribution as a [`DistConstraint`] object
+    /// (e.g. `Real`, `UnitInterval`, `Positive`).
+    ///
+    /// Default returns `None`. Concrete distributions override to advertise
+    /// their support. Mirrors
+    /// `torch/distributions/distribution.py:131-138` (the `support`
+    /// property), where PyTorch raises `NotImplementedError` if a subclass
+    /// has not declared support.
+    fn support(&self) -> Option<Box<dyn DistConstraint>> {
+        None
+    }
+
+    /// The argument constraints map: parameter-name → [`DistConstraint`].
+    ///
+    /// Default returns an empty map. Concrete distributions override to
+    /// advertise the constraint each constructor argument must satisfy.
+    /// Mirrors `torch/distributions/distribution.py:121-129` (the
+    /// `arg_constraints` property).
+    fn arg_constraints(&self) -> HashMap<&'static str, Box<dyn DistConstraint>> {
+        HashMap::new()
+    }
+
+    /// Return a new distribution with batch dims expanded to `batch_shape`.
+    ///
+    /// Default returns `InvalidArgument`. Concrete distributions override
+    /// by constructing a new instance whose parameters have been broadcast
+    /// to the target shape (no allocation copy in PyTorch via
+    /// `Tensor::expand`; ferrotorch CPU path materialises the broadcast for
+    /// simplicity). Mirrors
+    /// `torch/distributions/distribution.py:86-105` (`expand`).
+    fn expand(&self, _batch_shape: &[usize]) -> FerrotorchResult<Box<dyn Distribution<T>>> {
+        Err(FerrotorchError::InvalidArgument {
+            message: "expand not implemented for this distribution".into(),
+        })
+    }
+
+    /// Enumerate all values supported by a discrete distribution.
+    ///
+    /// Default returns `InvalidArgument`. Finite discrete distributions
+    /// (Bernoulli, Categorical, OneHotCategorical) override. Mirrors
+    /// `torch/distributions/distribution.py:224-246`
+    /// (`enumerate_support`).
+    ///
+    /// When `expand` is `true`, the result is broadcast across the
+    /// distribution's `batch_shape`; when `false`, the trailing batch
+    /// dimensions are kept as singletons.
+    fn enumerate_support(&self, _expand: bool) -> FerrotorchResult<Tensor<T>> {
+        Err(FerrotorchError::InvalidArgument {
+            message: "enumerate_support not implemented for this distribution".into(),
+        })
+    }
+
+    /// Perplexity: `exp(entropy)`. Default body invokes `self.entropy()?`
+    /// and exponentiates element-wise. Mirrors
+    /// `torch/distributions/distribution.py:257-264`.
+    fn perplexity(&self) -> FerrotorchResult<Tensor<T>> {
+        let h = self.entropy()?;
+        let data = h.data_vec()?;
+        let out: Vec<T> = data.iter().map(|x| x.exp()).collect();
+        Tensor::from_storage(
+            ferrotorch_core::storage::TensorStorage::cpu(out),
+            h.shape().to_vec(),
             false,
         )
     }

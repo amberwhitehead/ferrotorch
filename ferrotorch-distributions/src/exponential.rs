@@ -19,7 +19,7 @@
 //! | REQ-8 (`cdf`/`icdf`) | SHIPPED | overrides mirroring `exponential.py:77-83`; consumer: trait surface |
 //! | REQ-9 (`mean`/`mode`/`variance`) | SHIPPED | overrides mirroring `exponential.py:35-49`; consumer: trait surface |
 //! | REQ-10 (`ExponentialRsampleBackward`) | SHIPPED | `d(z)/d(rate) = ln(u_safe)/rate²` backward; consumer: invoked by the rsample method |
-//! | REQ-11 (full PyTorch surface) | NOT-STARTED | blocker #1414 — `expand`, `arg_constraints`, `support`, `validate_args`, exp-family hooks (cross-cutting with `lib.md` REQ-5 / blocker #1376) |
+//! | REQ-11 (full PyTorch surface — `expand`/`arg_constraints`/`support`/`has_rsample`) | SHIPPED | trait overrides at the tail of `impl Distribution for Exponential` in `exponential.rs` mirror `torch/distributions/exponential.py:14-49`; consumer: `tests/divergence_distribution_trait_surface.rs::exponential_*` pins every override (closes #1414 — `validate_args` + exp-family hooks remain orthogonal trackers). |
 
 use std::sync::Arc;
 
@@ -29,7 +29,9 @@ use ferrotorch_core::error::FerrotorchResult;
 use ferrotorch_core::storage::TensorStorage;
 use ferrotorch_core::tensor::{GradFn, Tensor};
 
-use crate::Distribution;
+use crate::constraints;
+use crate::{DistConstraint, Distribution};
+use std::collections::HashMap;
 
 /// Exponential distribution parameterized by `rate` (lambda).
 ///
@@ -228,6 +230,43 @@ impl<T: Float> Distribution<T> for Exponential<T> {
             self.rate.shape().to_vec(),
             false,
         )
+    }
+
+    // -----------------------------------------------------------------------
+    // Full PyTorch surface (#1376, #1414) — Exponential is continuous,
+    // reparameterizable, with support `[0, inf)` and rate parameter
+    // strictly positive. Mirrors `torch/distributions/exponential.py:14-30`.
+    // -----------------------------------------------------------------------
+
+    fn has_rsample(&self) -> bool {
+        // `torch/distributions/exponential.py:25`: `has_rsample = True`.
+        true
+    }
+
+    fn support(&self) -> Option<Box<dyn DistConstraint>> {
+        // `torch/distributions/exponential.py:24`: `support = constraints.nonnegative`.
+        Some(Box::new(constraints::NonNegative))
+    }
+
+    fn arg_constraints(&self) -> HashMap<&'static str, Box<dyn DistConstraint>> {
+        // `torch/distributions/exponential.py:22`:
+        //   arg_constraints = {"rate": constraints.positive}
+        let mut m: HashMap<&'static str, Box<dyn DistConstraint>> = HashMap::new();
+        m.insert("rate", Box::new(constraints::Positive));
+        m
+    }
+
+    fn event_shape(&self) -> Vec<usize> {
+        vec![]
+    }
+
+    fn expand(&self, batch_shape: &[usize]) -> FerrotorchResult<Box<dyn Distribution<T>>> {
+        // `torch/distributions/exponential.py:43-49`: broadcast `rate`.
+        let rate_data = self.rate.data_vec()?;
+        let n: usize = batch_shape.iter().product::<usize>().max(1);
+        let out: Vec<T> = (0..n).map(|i| rate_data[i % rate_data.len()]).collect();
+        let new_rate = Tensor::from_storage(TensorStorage::cpu(out), batch_shape.to_vec(), false)?;
+        Ok(Box::new(Exponential::new(new_rate)?))
     }
 }
 

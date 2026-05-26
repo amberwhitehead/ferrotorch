@@ -20,6 +20,7 @@
 //! | REQ-11 (mean/mode/variance/stddev/entropy closed forms) | SHIPPED | the property bodies in `normal.rs`. |
 //! | REQ-12 (device-resident outputs) | SHIPPED | `out.to(device)` at the tail of every method in `normal.rs`. |
 //! | REQ-13 (`ExponentialFamily` interface) | NOT-STARTED | blocker #1404 — `_natural_params` / `_log_normalizer` / `_mean_carrier_measure` not implemented. |
+//! | REQ-14 (full PyTorch surface — `has_rsample`/`support`/`arg_constraints`/`expand`) | SHIPPED | the trait overrides at the tail of `impl Distribution for Normal` in `normal.rs` mirror `torch/distributions/normal.py:15-58`; consumer: trait dispatch + `tests/divergence_distribution_trait_surface.rs::normal_*` pin every override (closes #1376 partial). |
 
 use std::sync::Arc;
 
@@ -29,7 +30,9 @@ use ferrotorch_core::error::{FerrotorchError, FerrotorchResult};
 use ferrotorch_core::storage::TensorStorage;
 use ferrotorch_core::tensor::{GradFn, Tensor};
 
-use crate::Distribution;
+use crate::constraints;
+use crate::{DistConstraint, Distribution};
+use std::collections::HashMap;
 
 /// Normal (Gaussian) distribution parameterized by `loc` (mean) and `scale`
 /// (standard deviation).
@@ -275,6 +278,54 @@ impl<T: Float> Distribution<T> for Normal<T> {
 
     fn stddev(&self) -> FerrotorchResult<Tensor<T>> {
         Ok(self.scale.clone())
+    }
+
+    // -----------------------------------------------------------------------
+    // Full PyTorch surface (#1376) — Normal has rsample, real-line support,
+    // (loc: Real, scale: Positive) arg_constraints, and a closed-form
+    // `expand` that broadcasts both parameter tensors. Mirrors
+    // `torch/distributions/normal.py:14-46` (class-level flags + property
+    // declarations).
+    // -----------------------------------------------------------------------
+
+    fn has_rsample(&self) -> bool {
+        // `torch/distributions/normal.py:18`: `has_rsample = True`.
+        true
+    }
+
+    fn support(&self) -> Option<Box<dyn DistConstraint>> {
+        // `torch/distributions/normal.py:17`: `support = constraints.real`.
+        Some(Box::new(constraints::Real))
+    }
+
+    fn arg_constraints(&self) -> HashMap<&'static str, Box<dyn DistConstraint>> {
+        // `torch/distributions/normal.py:15-16`:
+        //   arg_constraints = {"loc": constraints.real, "scale": constraints.positive}
+        let mut m: HashMap<&'static str, Box<dyn DistConstraint>> = HashMap::new();
+        m.insert("loc", Box::new(constraints::Real));
+        m.insert("scale", Box::new(constraints::Positive));
+        m
+    }
+
+    fn event_shape(&self) -> Vec<usize> {
+        // Normal is univariate — event_shape is the empty trailing block.
+        vec![]
+    }
+
+    fn expand(&self, batch_shape: &[usize]) -> FerrotorchResult<Box<dyn Distribution<T>>> {
+        // `torch/distributions/normal.py:48-58`: `expand` broadcasts both
+        // `loc` and `scale` to the target batch_shape. ferrotorch CPU path
+        // materialises the broadcast (no view-only expand on Vec storage).
+        let loc_data = self.loc.data_vec()?;
+        let scale_data = self.scale.data_vec()?;
+        let n: usize = batch_shape.iter().product::<usize>().max(1);
+        let loc_out: Vec<T> = (0..n).map(|i| loc_data[i % loc_data.len()]).collect();
+        let scale_out: Vec<T> = (0..n).map(|i| scale_data[i % scale_data.len()]).collect();
+        let new_loc =
+            Tensor::from_storage(TensorStorage::cpu(loc_out), batch_shape.to_vec(), false)?;
+        let new_scale =
+            Tensor::from_storage(TensorStorage::cpu(scale_out), batch_shape.to_vec(), false)?;
+        Ok(Box::new(Normal::new(new_loc, new_scale)?))
     }
 }
 

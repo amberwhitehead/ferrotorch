@@ -21,7 +21,7 @@
 //! | REQ-9 (`entropy`) | SHIPPED | closed form mirroring `gamma.py:100-106`; consumer: trait surface |
 //! | REQ-10 (`mean`/`mode`/`variance`) | SHIPPED | overrides mirroring `gamma.py:45-55` (mode NaN for α<1, R-DEV-6 vs PyTorch's clamp); consumer: trait surface |
 //! | REQ-11 (`GammaRsampleBackward`) | SHIPPED | implicit-reparam through standard-Gamma; consumer: invoked by the rsample method when grad enabled |
-//! | REQ-12 (full PyTorch surface) | NOT-STARTED | blocker #1416 — `expand`, `arg_constraints`, `support`, `validate_args`, `cdf` (requires incomplete gamma), exp-family hooks (cross-cutting with `lib.md` REQ-5 / blocker #1376) |
+//! | REQ-12 (full PyTorch surface — `expand`/`arg_constraints`/`support`/`has_rsample`) | SHIPPED | trait overrides at the tail of `impl Distribution for Gamma` in `gamma.rs` mirror `torch/distributions/gamma.py:18-68`; consumer: `tests/divergence_distribution_trait_surface.rs::gamma_*` pins every override (closes #1416 — `cdf` via incomplete gamma + `validate_args` + exp-family hooks remain orthogonal trackers). |
 
 use std::sync::Arc;
 
@@ -31,8 +31,10 @@ use ferrotorch_core::error::{FerrotorchError, FerrotorchResult};
 use ferrotorch_core::storage::TensorStorage;
 use ferrotorch_core::tensor::{GradFn, Tensor};
 
-use crate::Distribution;
+use crate::constraints;
 use crate::special_fns::{digamma_scalar, lgamma_scalar};
+use crate::{DistConstraint, Distribution};
+use std::collections::HashMap;
 
 /// Gamma distribution parameterized by `concentration` (shape, alpha) and
 /// `rate` (inverse scale, beta).
@@ -357,6 +359,51 @@ impl<T: Float> Distribution<T> for Gamma<T> {
             self.concentration.shape().to_vec(),
             false,
         )
+    }
+
+    // -----------------------------------------------------------------------
+    // Full PyTorch surface (#1376, #1416) — Gamma is reparameterizable
+    // (Marsaglia-Tsang) with positive support and both parameters
+    // strictly positive. `cdf` requires the regularized lower incomplete
+    // gamma function (not yet implemented — kept NOT-STARTED per the
+    // dispatch goal). Mirrors `torch/distributions/gamma.py:18-44`.
+    // -----------------------------------------------------------------------
+
+    fn has_rsample(&self) -> bool {
+        // `torch/distributions/gamma.py:35`: `has_rsample = True`.
+        true
+    }
+
+    fn support(&self) -> Option<Box<dyn DistConstraint>> {
+        // `torch/distributions/gamma.py:34`: `support = constraints.nonnegative`.
+        Some(Box::new(constraints::NonNegative))
+    }
+
+    fn arg_constraints(&self) -> HashMap<&'static str, Box<dyn DistConstraint>> {
+        // `torch/distributions/gamma.py:30-33`:
+        //   arg_constraints = {"concentration": positive, "rate": positive}
+        let mut m: HashMap<&'static str, Box<dyn DistConstraint>> = HashMap::new();
+        m.insert("concentration", Box::new(constraints::Positive));
+        m.insert("rate", Box::new(constraints::Positive));
+        m
+    }
+
+    fn event_shape(&self) -> Vec<usize> {
+        vec![]
+    }
+
+    fn expand(&self, batch_shape: &[usize]) -> FerrotorchResult<Box<dyn Distribution<T>>> {
+        // `torch/distributions/gamma.py:57-68`: broadcast both parameters.
+        let conc = self.concentration.data_vec()?;
+        let rate = self.rate.data_vec()?;
+        let n: usize = batch_shape.iter().product::<usize>().max(1);
+        let conc_out: Vec<T> = (0..n).map(|i| conc[i % conc.len()]).collect();
+        let rate_out: Vec<T> = (0..n).map(|i| rate[i % rate.len()]).collect();
+        let new_conc =
+            Tensor::from_storage(TensorStorage::cpu(conc_out), batch_shape.to_vec(), false)?;
+        let new_rate =
+            Tensor::from_storage(TensorStorage::cpu(rate_out), batch_shape.to_vec(), false)?;
+        Ok(Box::new(Gamma::new(new_conc, new_rate)?))
     }
 }
 
