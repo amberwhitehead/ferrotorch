@@ -21,6 +21,17 @@
 //! - **Bounded**: each size bucket holds at most `MAX_PER_BUCKET` buffers.
 //!   Total cached memory is bounded by `MAX_CACHED_BYTES`. Excess buffers
 //!   are dropped normally.
+//!
+//! ## REQ status (per `.design/ferrotorch-core/cpu_pool.md`)
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 | SHIPPED | impl `pool_alloc_cpu`; non-test consumer `Drop for TensorStorage` returns Vecs that this pops on next allocation. |
+//! | REQ-2 | SHIPPED | impl `pool_alloc_cpu_uninit_f32` / `pool_alloc_cpu_uninit_f64`; non-test consumer SIMD elementwise kernel outputs (pub-API surface grandfathered per S5). |
+//! | REQ-3 | SHIPPED | impl `pool_return_cpu`; non-test consumer `Drop for TensorStorage<T>` at `storage.rs:517-528`. |
+//! | REQ-4 | SHIPPED | impl `cpu_pool_stats`, `reset_cpu_pool_stats`; non-test consumer pub API surface for diagnostics (grandfathered per S5). |
+//! | REQ-5 | SHIPPED | impl `empty_cpu_pool`; non-test consumer pub API (grandfathered per S5). |
+//! | REQ-6 | SHIPPED | impl `thread_local!` + per-call `with(|pool| ...)`; non-test consumer rayon worker threads transparently isolated. |
 
 use std::any::{Any, TypeId};
 use std::cell::RefCell;

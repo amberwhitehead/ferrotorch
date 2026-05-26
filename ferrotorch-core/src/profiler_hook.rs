@@ -28,6 +28,16 @@
 //! // ... user code that calls into ferrotorch tensor ops ...
 //! profiler_hook::set_current(None);
 //! ```
+//!
+//! ## REQ status (per `.design/ferrotorch-core/profiler_hook.md`)
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 | SHIPPED | impl `trait OpProfiler`; non-test consumer `ferrotorch-profiler` crate implements it (downstream). |
+//! | REQ-2 | SHIPPED | impl `CURRENT` thread-local + `set_current` + `current`; non-test consumer `ferrotorch-profiler::with_profiler`. |
+//! | REQ-3 | SHIPPED | impl `profile_op_scope`; non-test consumer ferrotorch-core op modules wrap forwards with it. |
+//! | REQ-4 | SHIPPED | nested-scope support via `current()` Arc clone; non-test consumer composite ops (matmul = GEMM + bias_add). |
+//! | REQ-5 | SHIPPED | thread-local isolation by construction; non-test consumer rayon workers inherit independent thread-locals. |
 
 use std::cell::RefCell;
 use std::sync::Arc;

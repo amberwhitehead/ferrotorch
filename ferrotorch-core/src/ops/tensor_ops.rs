@@ -4,6 +4,18 @@
 //! - [`diag`] / [`diagflat`] — diagonal extraction/construction
 //! - [`roll`] — circular shift along a dimension
 //! - [`cdist`] — pairwise distance matrix
+//!
+//! ## REQ status (per `.design/ferrotorch-core/ops/tensor_ops.md`)
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 | SHIPPED | `triu` at `ops/tensor_ops.rs:28`; consumer: re-export `ferrotorch_core::triu` at `lib.rs:177` |
+//! | REQ-2 | SHIPPED | `tril` at `ops/tensor_ops.rs:62`; consumer: re-export at `lib.rs:177` |
+//! | REQ-3 | SHIPPED | `diag` at `ops/tensor_ops.rs:98`; consumer: re-export at `lib.rs:177` |
+//! | REQ-4 | SHIPPED | `diagflat` at `ops/tensor_ops.rs:155`; consumer: re-export at `lib.rs:177` |
+//! | REQ-5 | SHIPPED | `roll` at `ops/tensor_ops.rs:181`; consumer: re-export at `lib.rs:177`; `RollBackward` autograd |
+//! | REQ-6 | SHIPPED | `cdist` at `ops/tensor_ops.rs:292`; consumer: re-export at `lib.rs:177` |
+//! | REQ-7 | SHIPPED | `roll_cpu_inner` at `ops/tensor_ops.rs:259`; consumer: `grad_fns::shape::RollBackward::backward` at `grad_fns/shape.rs:1006` invokes `ops::tensor_ops::roll_cpu_inner` |
 
 use std::any::TypeId;
 use std::sync::Arc;

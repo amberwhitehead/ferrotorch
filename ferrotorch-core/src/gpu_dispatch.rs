@@ -3,6 +3,31 @@
 //! ferrotorch-core defines the [`GpuBackend`] trait and [`GpuBufferHandle`].
 //! ferrotorch-gpu (or any other GPU crate) implements and registers a backend.
 //! This avoids circular dependencies: core doesn't depend on gpu.
+//!
+//! ## REQ status (per `.design/ferrotorch-core/gpu_dispatch.md`)
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 | SHIPPED | impl `enum CompareOp` + `suffix`; non-test consumer `GpuBackend::compare` dispatch. |
+//! | REQ-2 | SHIPPED | impl `GpuRngState`; non-test consumer `GpuBackend::save_rng_state`/`restore_rng_state`. |
+//! | REQ-3 | SHIPPED | impl `GpuBufferHandle`; non-test consumer `StorageBuffer::Gpu` variant + every CUDA op. |
+//! | REQ-4 | SHIPPED | impl `trait GpuBackend`; non-test consumer `ferrotorch-gpu::CudaBackendImpl`. |
+//! | REQ-5 | SHIPPED | impl elementwise method slots `add_f32`, `sub_f32`, `mul_f32`, `neg_f32`, `relu_f32`; non-test consumer `Tensor::accumulate_grad` GPU path + `grad_fns::arithmetic` CUDA branches. |
+//! | REQ-6 | SHIPPED | impl broadcast-* trait slots; non-test consumer `grad_fns::arithmetic::add_inner` broadcast branch. |
+//! | REQ-7 | SHIPPED | impl `scale_*` trait slots; non-test consumer `grad_fns::arithmetic::scale_tensor`. |
+//! | REQ-8 | SHIPPED | impl `strided_copy_*`, `strided_scatter_*` trait slots; non-test consumer `stride_tricks` materialise, `Tensor::to(Cpu)` non-contiguous, `Tensor::materialize_format` GPU fast path. |
+//! | REQ-9 | SHIPPED | impl reduction trait slots; non-test consumer `grad_fns::arithmetic::reduce_grad_to_shape`. |
+//! | REQ-10 | SHIPPED | impl linalg trait slots (matmul, gemm, syevd, getrf, geqrf, potrf, gesdd, inverse); non-test consumer `ops::linalg::matmul`, `linalg::eigh`. |
+//! | REQ-11 | SHIPPED | impl conv2d/conv3d/pooling trait slots; non-test consumer `ferrotorch-nn::Conv2d`. |
+//! | REQ-12 | SHIPPED | impl recurrent trait slots; non-test consumer `ferrotorch-nn::LSTM`/`GRU`/`RNN`. |
+//! | REQ-13 | SHIPPED | impl FFT trait slots; non-test consumer `ferrotorch-core::fft`. |
+//! | REQ-14 | SHIPPED | impl dropout/RNG/`save_rng_state`/`restore_rng_state` trait slots; non-test consumer `nn::Dropout`, `creation::randn`. |
+//! | REQ-15 | SHIPPED | impl `masked_fill_dt`, `where_cond`, `masked_select`, `masked_scatter`, `argmax`, `argmin`, `index_select_intidx`, `gather_intidx`; non-test consumer `Tensor::masked_fill`/`masked_select`, `grad_fns::indexing`. |
+//! | REQ-16 | SHIPPED | impl cuSPARSE dispatch slots; non-test consumer `SparseTensor::from_dense` CUDA path. |
+//! | REQ-17 | SHIPPED | impl int_* trait slots; non-test consumer `int_tensor.rs` op forwarders. |
+//! | REQ-18 | SHIPPED | impl `compare`, `bool_*`, cast slots; non-test consumer `bool_tensor.rs` op forwarders. |
+//! | REQ-19 | SHIPPED | impl `synchronize`, `stream_count`, `strided_cat`; non-test consumer `CudaBackendImpl::synchronize` override. |
+//! | REQ-20 | SHIPPED | impl `register_gpu_backend`, `gpu_backend`, `has_gpu_backend`; non-test consumer `ferrotorch-gpu::backend_impl::register` + every CUDA op in core. |
 
 use std::any::Any;
 use std::sync::OnceLock;

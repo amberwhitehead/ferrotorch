@@ -7,6 +7,37 @@
 //! **Backward support**: These operations currently return non-grad tensors.
 //! Gradient functions for SVD, solve, and others will be added in a future
 //! pass (the math is well-known but complex).
+//!
+//! ## REQ status (per `.design/ferrotorch-core/linalg.md`)
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 | SHIPPED | impl `svd` via `ferray_linalg::svd`; non-test consumer `pinv`, `svdvals`, `matrix_rank`, `cond`. |
+//! | REQ-2 | SHIPPED | impl `solve`; non-test consumer `ferrotorch-distributions::multivariate_normal`. |
+//! | REQ-3 | SHIPPED | impl `det`; non-test consumer `slogdet`. |
+//! | REQ-4 | SHIPPED | impl `inv`; non-test consumer `inv_ex`. |
+//! | REQ-5 | SHIPPED | impl `qr`; non-test consumer pub API + linear-regression downstream. |
+//! | REQ-6 | SHIPPED | impl `cholesky`; non-test consumer `ferrotorch-distributions::multivariate_normal`. |
+//! | REQ-7 | SHIPPED | impl `matrix_norm`; non-test consumer pub API. |
+//! | REQ-8 | SHIPPED | impl `pinv`; non-test consumer composes with `svd`. |
+//! | REQ-9 | SHIPPED | impl `eigh`, `eigvalsh` (CUDA via cuSOLVER `syevd`); non-test consumer `matrix_norm`, `cond`. |
+//! | REQ-10 | SHIPPED | impl `eig`, `eigvals`; non-test consumer pub API. |
+//! | REQ-11 | SHIPPED | impl `lu`; non-test consumer pub API. |
+//! | REQ-12 | SHIPPED | impl `lu_factor`; non-test consumer `solve` CUDA path + `tensorsolve`. |
+//! | REQ-13 | SHIPPED | impl `svdvals`; non-test consumer `matrix_rank`, `cond`. |
+//! | REQ-14 | SHIPPED | impl `lstsq_solve`, `lstsq`; non-test consumer pub API. |
+//! | REQ-15 | SHIPPED | impl `matrix_power`, `matrix_exp`; non-test consumer `ferrotorch-distributions` continuous-time models. |
+//! | REQ-16 | SHIPPED | impl `tensorsolve`, `tensorinv`; non-test consumer pub API. |
+//! | REQ-17 | SHIPPED | impl `vector_norm`; non-test consumer pub API. |
+//! | REQ-18 | SHIPPED | impl `slogdet`; non-test consumer log-likelihood computations in `ferrotorch-distributions`. |
+//! | REQ-19 | SHIPPED | impl `matrix_rank`, `cond`; non-test consumer pub API. |
+//! | REQ-20 | SHIPPED | impl `cross`; non-test consumer pub API. |
+//! | REQ-21 | SHIPPED | impl `multi_dot`; non-test consumer pub API. |
+//! | REQ-22 | SHIPPED | impl `diagonal`; non-test consumer pub API. |
+//! | REQ-23 | SHIPPED | impl `solve_triangular`; non-test consumer `cholesky_solve` paths. |
+//! | REQ-24 | SHIPPED | impl `ldl_factor`, `ldl_solve`; non-test consumer pub API. |
+//! | REQ-25 | SHIPPED | impl `householder_product`; non-test consumer `qr` reconstruction. |
+//! | REQ-26 | SHIPPED | impl `cholesky_ex`, `inv_ex`, `solve_ex`; non-test consumer pub API. |
 
 use crate::dtype::Float;
 use crate::error::{FerrotorchError, FerrotorchResult};

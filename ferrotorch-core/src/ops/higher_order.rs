@@ -3,6 +3,17 @@
 //! These operations enable conditional execution and sequential state
 //! accumulation within the autograd graph, critical for architectures
 //! like state-space models (Mamba, S4) and dynamic control flow.
+//!
+//! ## REQ status (per `.design/ferrotorch-core/ops/higher_order.md`)
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 | SHIPPED | `cond` at `ops/higher_order.rs:79`; consumer: re-export `ferrotorch_core::autograd::cond` at `autograd/mod.rs:26` |
+//! | REQ-2 | SHIPPED | `CondBackward` at `ops/higher_order.rs:31` + wrap at `:122-131`; consumer: `cond` re-export |
+//! | REQ-3 | SHIPPED | `validate_cond_branches` at `ops/higher_order.rs:142`; consumer: re-export at `autograd/mod.rs:26` |
+//! | REQ-4 | SHIPPED | `scan` at `ops/higher_order.rs:236`; consumer: re-export `ferrotorch_core::autograd::scan` at `autograd/mod.rs:26` |
+//! | REQ-5 | SHIPPED | `ScanBackward` at `ops/higher_order.rs:191` + wrap at `:282-292`; consumer: `scan` re-export |
+//! | REQ-6 | SHIPPED | `pred.numel() != 1` check at `ops/higher_order.rs:91`; consumer: `cond` entry |
 
 use std::sync::Arc;
 

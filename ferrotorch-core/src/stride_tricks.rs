@@ -45,6 +45,19 @@
 //!   [`FerrotorchError::NotImplementedOnCuda`]; callers must move to CPU
 //!   explicitly. The CUDA kernel will land in a follow-up issue (the
 //!   forbidden pattern would be a silent `to(Cpu)` round-trip).
+//!
+//! ## REQ status (per `.design/ferrotorch-core/stride_tricks.md`)
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 | SHIPPED | impl `Tensor::as_strided`; non-test consumer `crate::einsum`. |
+//! | REQ-2 | SHIPPED | impl `Tensor::as_strided_copy` (CUDA via `strided_copy_*`, CPU walk); non-test consumer `crate::einsum`. |
+//! | REQ-3 | SHIPPED | impl `Tensor::as_strided_scatter`; non-test consumer `AsStridedBackward::backward`. |
+//! | REQ-4 | SHIPPED | impl `validate_bounds` + `stride_extent`; non-test consumer invoked from `as_strided` / `as_strided_scatter`. |
+//! | REQ-5 | SHIPPED | impl `AsStridedBackward` + `GradFn::backward`; non-test consumer `Tensor::as_strided` attach path. |
+//! | REQ-6 | SHIPPED | negative-stride support via `stride_extent`; non-test consumer reverse views. |
+//! | REQ-7 | SHIPPED | zero-stride broadcast support; non-test consumer `Tensor::expand` family. |
+//! | REQ-8 | SHIPPED | free-function wrappers `as_strided`, `as_strided_copy`, `as_strided_scatter`; non-test consumer downstream functional-style call sites. |
 
 use std::sync::Arc;
 

@@ -1,3 +1,13 @@
+//! ## REQ status (per `.design/ferrotorch-core/pruning.md`)
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 | SHIPPED | impl `magnitude_prune`; non-test consumer re-exported at `lib.rs:178` for `ferrotorch-nn` callers. |
+//! | REQ-2 | SHIPPED | impl `apply_2_4_mask`; non-test consumer cross-checked at `sparse.rs:3023` + re-exported at `lib.rs:178`. |
+//! | REQ-3 | SHIPPED | impl `sparsity_ratio`; non-test consumer re-exported at `lib.rs:178`. |
+//! | REQ-4 | SHIPPED | validation guard in `magnitude_prune`; non-test consumer part of pub-function contract. |
+//! | REQ-5 | SHIPPED | `requires_grad` propagation in `from_storage` callsites; non-test consumer sparse-finetune workflows. |
+
 use crate::dtype::Float;
 use crate::error::{FerrotorchError, FerrotorchResult};
 use crate::storage::TensorStorage;

@@ -1,3 +1,28 @@
+//! ## REQ status (per `.design/ferrotorch-core/tensor.md`)
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 | SHIPPED | impl `Tensor<T>` + `TensorInner`; non-test consumer every workspace op. |
+//! | REQ-2 | SHIPPED | impl `from_storage`; non-test consumer `creation::zeros`/`ones`/`tensor`. |
+//! | REQ-3 | SHIPPED | impl `from_operation`; non-test consumer every grad-attaching forward op (e.g. `grad_fns::arithmetic::add_inner`). |
+//! | REQ-4 | SHIPPED | impl `view_reshape` / `view_operation` / `stride_view` / `stride_view_operation`; non-test consumer shape grad_fns + `methods::view_t`. |
+//! | REQ-5 | SHIPPED | impl `to(device)` incl. non-contig CUDA->CPU materialise (#802); non-test consumer `Tensor::cuda`, `Tensor::cpu`, state-dict transfer. |
+//! | REQ-6 | SHIPPED | impl `to_pinned`; non-test consumer `ferrotorch-data::DataLoader` `pin_memory(true)`. |
+//! | REQ-7 | SHIPPED | impl `data`, `data_ref`, `data_vec`; non-test consumer every CPU tensor reader (`pruning`, `signal::windows`). |
+//! | REQ-8 | SHIPPED | impl `grad`, `set_grad`, `zero_grad`, `accumulate_grad` GPU fast path; non-test consumer `autograd::backward`. |
+//! | REQ-9 | SHIPPED | impl `detach`, `requires_grad_`; non-test consumer `autograd::no_grad` + model init. |
+//! | REQ-10 | SHIPPED | impl `is_contiguous`, `is_contiguous_for`, `to_memory_format`, `materialize_format`; non-test consumer `ferrotorch-nn::Conv2d` channels-last. |
+//! | REQ-11 | SHIPPED | impl `as_strided` family in `stride_tricks.rs`; non-test consumer `crate::einsum`. |
+//! | REQ-12 | SHIPPED | impl `gpu_handle`; non-test consumer every CUDA kernel dispatch. |
+//! | REQ-13 | SHIPPED | impl `update_data` / `update_storage` / `update_storage_and_shape` / `with_gpu_handle_mut`; non-test consumer optimizer `step()` plus `add_scaled_out`. |
+//! | REQ-14 | SHIPPED | impl `register_hook`, `register_post_accumulate_grad_hook`, `remove_hook`; non-test consumer `autograd::hooks` integration. |
+//! | REQ-15 | SHIPPED | impl `masked_fill`, `masked_select`; non-test consumer `grad_fns::indexing` + `ops::indexing`. |
+//! | REQ-16 | SHIPPED | impl `item`; non-test consumer scalar-loss readout in training loops. |
+//! | REQ-17 | SHIPPED | impl `into_storage_and_shape`; non-test consumer `accumulate_grad`. |
+//! | REQ-18 | SHIPPED | impl identity / refcount inspection; non-test consumer `autograd::graph` in-place gating. |
+//! | REQ-19 | SHIPPED | impl `trait GradFn<T>`; non-test consumer every grad_fn struct in `grad_fns/*`. |
+//! | REQ-20 | SHIPPED | impl `enum MemoryFormat`; non-test consumer `Tensor::to_memory_format`, `ferrotorch-nn::Conv2d`. |
+
 use std::fmt;
 use std::sync::{Arc, Mutex};
 
@@ -1238,6 +1263,74 @@ impl<T: Float> Tensor<T> {
             let slice = storage.try_as_mut_slice()?;
             let offset = self.inner.offset;
             slice[offset..offset + numel].copy_from_slice(new_data);
+        }
+
+        Ok(())
+    }
+
+    /// Replace this tensor's storage AND shape/strides in-place, matching
+    /// PyTorch's `Tensor.resize_(new_shape)` + storage swap.
+    ///
+    /// This is the rare case where both the underlying buffer and the
+    /// shape metadata in `TensorInner` need to change in lockstep — used
+    /// by the `out=` write path of `torch.add(a, b, *, out=out)` when
+    /// `out.shape() != broadcast_shape` (PyTorch silently resizes `out`,
+    /// with a deprecation warning, in current versions). The new strides
+    /// are computed as C-contiguous for `new_shape`.
+    ///
+    /// # Safety
+    ///
+    /// Same as [`update_storage`]: caller must ensure exclusive access.
+    /// The new storage's numel must equal `new_shape.iter().product()`.
+    /// The new storage must reside on the same device as the tensor.
+    ///
+    /// The caller must also guarantee that no other `Tensor` clone is
+    /// concurrently observing this tensor's shape — `Tensor` is
+    /// `Arc<TensorInner>`-shared, and a resize changes the observable
+    /// shape for every clone. This is the same invariant `update_storage`
+    /// already implicitly relies on for buffer-length changes; the
+    /// `out=`-style call sites this method exists for own a unique
+    /// `&Tensor` for the duration of the write.
+    pub unsafe fn update_storage_and_shape(
+        &self,
+        new_storage: TensorStorage<T>,
+        new_shape: Vec<usize>,
+    ) -> FerrotorchResult<()> {
+        let new_numel: usize = new_shape.iter().product();
+        if new_storage.len() != new_numel {
+            return Err(FerrotorchError::ShapeMismatch {
+                message: format!(
+                    "update_storage_and_shape: new storage has {} elements but \
+                     new shape {:?} requires {}",
+                    new_storage.len(),
+                    new_shape,
+                    new_numel,
+                ),
+            });
+        }
+
+        let new_strides = c_contiguous_strides(&new_shape);
+
+        // Swap storage first (same logic as update_storage — drops the old
+        // storage so we don't leak its GpuBufferHandle).
+        let storage_ptr = Arc::as_ptr(&self.inner.storage).cast_mut();
+        // SAFETY: Caller guarantees exclusive access.
+        let old_storage = unsafe { std::ptr::replace(storage_ptr, new_storage) };
+        drop(old_storage);
+
+        // Now mutate the shape/strides/offset fields through the
+        // Arc<TensorInner>. The `inner_ptr.cast_mut()` here is the same
+        // unsafe pattern documented on `update_storage` (Arc-shared
+        // mutation under a caller-enforced exclusive-access contract).
+        let inner_ptr = Arc::as_ptr(&self.inner).cast_mut();
+        // SAFETY: Caller guarantees exclusive access to `self.inner` for
+        // the duration of this call; no other clone is reading the shape
+        // concurrently. Field assignments below are individual `Vec<_>`
+        // writes that drop the old vectors in place — no leak.
+        unsafe {
+            (*inner_ptr).shape = new_shape;
+            (*inner_ptr).strides = new_strides;
+            (*inner_ptr).offset = 0;
         }
 
         Ok(())

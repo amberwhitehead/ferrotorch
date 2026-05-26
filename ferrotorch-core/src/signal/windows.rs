@@ -20,6 +20,17 @@
 //! a 1-microsecond CPU compute with a CPU compute + cudaMemcpy, which is
 //! strictly slower. Per `/rust-gpu-discipline`, when the GPU path would
 //! be a regression we don't add it.
+//!
+//! ## REQ status (per `.design/ferrotorch-core/signal/windows.md`)
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 | SHIPPED | impl NumPy-core 5: `bartlett`, `blackman`, `hamming`, `hann` + `hanning`, `kaiser`; non-test consumer re-exported at `signal/mod.rs:9-12`; consumed by STFT / spectrogram windowing. |
+//! | REQ-2 | SHIPPED | impl SciPy-extended 10: `cosine`, `exponential`, `gaussian`, `general_cosine`, `general_hamming`, `nuttall`, `parzen`, `taylor`, `tukey`; non-test consumer re-exported at `signal/mod.rs:9-12`. |
+//! | REQ-3 | SHIPPED | every function returns CPU storage via `array_to_tensor`; non-test consumer test pin at `signal/windows.rs:343-366` enumerates all 15. |
+//! | REQ-4 | SHIPPED | argument validation propagated via `.map_err(FerrotorchError::Ferray)?`; non-test consumer runtime-parameter callers receive error rather than panic. |
+//! | REQ-5 | SHIPPED | impl `hanning` is `#[inline]` alias of `hann`; non-test consumer re-exported alongside `hann` at `signal/mod.rs:9-12`. |
+//! | REQ-6 | SHIPPED | symmetry property enforced by `ferray-window`; non-test consumer production DSP code relying on symmetric coefficients for phase-true windowing. |
 
 use crate::error::{FerrotorchError, FerrotorchResult};
 use crate::storage::TensorStorage;

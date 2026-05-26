@@ -24,6 +24,16 @@
 //! ```
 //!
 //! CL-500 builds on the meta device foundation in CL-395.
+//!
+//! ## REQ status (per `.design/ferrotorch-core/meta_propagate.md`)
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 | SHIPPED | impl `unary_same_shape`; non-test consumer `grad_fns::activation::{relu, sigmoid, tanh, gelu, silu, softmax}`. |
+//! | REQ-2 | SHIPPED | impl `binary_broadcast`; non-test consumer `grad_fns::arithmetic::add` + every binary broadcast op. |
+//! | REQ-3 | SHIPPED | impl `reduce_dim`; non-test consumer `grad_fns::reduction::sum_dim` + `mean_dim`. |
+//! | REQ-4 | SHIPPED | impl `reduce_all`; non-test consumer `grad_fns::reduction::sum_all` + `mean_all`, `prod_all`. |
+//! | REQ-5 | SHIPPED | impl `matmul`; non-test consumer `ops::linalg::matmul`. |
 
 use crate::creation;
 use crate::dtype::Float;

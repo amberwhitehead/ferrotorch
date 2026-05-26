@@ -1,3 +1,17 @@
+//! ## REQ status (per `.design/ferrotorch-core/storage.md`)
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 | SHIPPED | impl `enum StorageBuffer` 4 variants; non-test consumer `Tensor::storage` plus every variant-dispatched op. |
+//! | REQ-2 | SHIPPED | impl `trait CubeStorageHandle`; non-test consumer ferrotorch-cubecl concrete impl + `Tensor::cubecl_handle`. |
+//! | REQ-3 | SHIPPED | constructors `cpu`, `gpu`, `xpu_from_handle`, `meta`, `meta_filled`, `on_device`, `on_device_pinned`; non-test consumers across `creation::*` and `Tensor::to`. |
+//! | REQ-4 | SHIPPED | impl `try_as_slice`, `try_as_mut_slice`; non-test consumer `Tensor::data`, `Tensor::data_mut`. |
+//! | REQ-5 | SHIPPED | impl variant predicates + handle accessors; non-test consumer every CUDA-dispatched op via `is_gpu` / `gpu_handle`. |
+//! | REQ-6 | SHIPPED | impl `try_clone` + `Clone`; non-test consumer `Tensor::accumulate_grad`. |
+//! | REQ-7 | SHIPPED | impl `try_clone_subregion`; non-test consumer `Tensor::into_storage_and_shape`. |
+//! | REQ-8 | SHIPPED | impl `Drop`; non-test consumer every CPU temp tensor returning Vec to `cpu_pool::pool_return_cpu`. |
+//! | REQ-9 | SHIPPED | impl `meta_fill_value`; non-test consumer `Tensor::meta_fill_value` for `creation::full_meta` round-trip. |
+
 use crate::device::Device;
 use crate::dtype::Element;
 use crate::gpu_dispatch::GpuBufferHandle;

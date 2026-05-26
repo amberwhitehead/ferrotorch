@@ -1,3 +1,17 @@
+//! ## REQ status (per `.design/ferrotorch-core/sparse.md`)
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 | SHIPPED | impl `SparseTensor`; non-test consumer re-exported at `lib.rs:185`. |
+//! | REQ-2 | SHIPPED | impl `SparseTensor::from_dense` cuSPARSE + host fallback; non-test consumer pub method on re-exported type. |
+//! | REQ-3 | SHIPPED | impl `coalesce`, `to_dense`, sparse-add on `SparseTensor`; non-test consumer pub method surface. |
+//! | REQ-4 | SHIPPED | impl `CooTensor`; non-test consumer re-exported at `lib.rs:185`. |
+//! | REQ-5 | SHIPPED | impl `CsrTensor`; non-test consumer re-exported at `lib.rs:185`; cuSPARSE backend consumes the CSR layout. |
+//! | REQ-6 | SHIPPED | impl `CscTensor`; non-test consumer re-exported at `lib.rs:185`. |
+//! | REQ-7 | SHIPPED | impl `SemiStructuredSparseTensor`; non-test consumer cross-checked against `pruning::apply_2_4_mask` at `sparse.rs:3023`. |
+//! | REQ-8 | SHIPPED | impl `sparse_matmul_24`; non-test consumer re-exported at `lib.rs:186`. |
+//! | REQ-9 | SHIPPED | impl `SparseGrad`; non-test consumer re-exported at `lib.rs:185`; consumed by `Embedding.backward(sparse=true)`. |
+
 use std::collections::{HashMap, HashSet};
 use std::fmt;
 

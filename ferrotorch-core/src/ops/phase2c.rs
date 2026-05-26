@@ -9,6 +9,20 @@
 //!
 //! These unblock the Llama generation loop, which today round-trips to CPU for
 //! argmax sampling and uses raw cudarc slices for token-id embedding gather.
+//!
+//! ## REQ status (per `.design/ferrotorch-core/ops/phase2c.md`)
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 | SHIPPED | `Tensor::argmax` at `ops/phase2c.rs:218`; consumer: `methods::Tensor::argmax_t` at `methods.rs:670`, `grad_fns::reduction::argmax` at `grad_fns/reduction.rs:1541` |
+//! | REQ-2 | SHIPPED | `Tensor::argmin` at `ops/phase2c.rs:223`; consumer: `Tensor::argmin_t` at `methods.rs:684` |
+//! | REQ-3 | SHIPPED | `Tensor::index_select` at `ops/phase2c.rs:232`; consumer: `grad_fns::indexing::index_select_differentiable` at `grad_fns/indexing.rs:1217` |
+//! | REQ-4 | SHIPPED | `Tensor::gather` at `ops/phase2c.rs:283`; consumer: `grad_fns::indexing::GatherBackward::backward` recurses through it |
+//! | REQ-5 | SHIPPED | `Tensor::to_int` at `ops/phase2c.rs:326`; consumer: `int_tensor::Tensor::to_int` re-export path |
+//! | REQ-6 | SHIPPED | `IntTensor::argmax`/`argmin` at `ops/phase2c.rs:369,374`; consumer: downstream logit-arg callers |
+//! | REQ-7 | SHIPPED | `IntTensor::index_select`/`gather` at `ops/phase2c.rs:380,423`; consumer: `IntTensor` method surface re-export |
+//! | REQ-8 | SHIPPED | `IntTensor::to_float` at `ops/phase2c.rs:458`; consumer: `IntTensor` method surface |
+//! | REQ-9 | SHIPPED | `IntTensor::cast_gpu` at `ops/phase2c.rs:481`; consumer: `IntTensor::cast` in `int_tensor.rs` |
 
 use crate::device::Device;
 use crate::dtype::Float;

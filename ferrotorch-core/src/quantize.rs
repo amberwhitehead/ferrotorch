@@ -4,6 +4,21 @@
 //! with per-tensor or per-channel granularity. Designed for inference-time
 //! model compression — quantize once after training, then run forward passes
 //! with reduced memory and (on supported hardware) faster matmul.
+//!
+//! ## REQ status (per `.design/ferrotorch-core/quantize.md`)
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 | SHIPPED | impl `QuantScheme`, `QuantDtype`; non-test consumer re-exported at `lib.rs:179-181`. |
+//! | REQ-2 | SHIPPED | impl `QuantizedTensor`; non-test consumer re-exported at `lib.rs:179-181`; threaded through `quantize_named_tensors`. |
+//! | REQ-3 | SHIPPED | impl `quantize`; non-test consumer `quantize_named_tensors`, `FakeQuantize::forward` chain via `grad_fns::quantize_grad`. |
+//! | REQ-4 | SHIPPED | impl `dequantize`; non-test consumer `quantized_matmul`, `FakeQuantize::forward`. |
+//! | REQ-5 | SHIPPED | impl `quantized_matmul`; non-test consumer re-exported at `lib.rs:179-181`. |
+//! | REQ-6 | SHIPPED | impl `QParams`; non-test consumer threaded through every observer + `QatModel::step`. |
+//! | REQ-7 | SHIPPED | impl `trait Observer` + `MinMaxObserver` + `PerChannelMinMaxObserver` + `HistogramObserver`; non-test consumer `QatLayer`. |
+//! | REQ-8 | SHIPPED | impl `FakeQuantize`; non-test consumer `Tensor::fake_quantize_per_tensor_affine_t` at `methods.rs:596` via `grad_fns::quantize_grad`. |
+//! | REQ-9 | SHIPPED | impl `QatLayer`, `QatModel`, `prepare_qat`; non-test consumer pub-API QAT entry point at `lib.rs:179-181`. |
+//! | REQ-10 | SHIPPED | impl `quantize_named_tensors`; non-test consumer quantized-state-dict save flow. |
 
 use std::collections::HashMap;
 

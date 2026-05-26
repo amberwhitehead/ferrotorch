@@ -8,6 +8,19 @@
 //! All operations are CPU-only; GPU tensors must be transferred with `.cpu()`
 //! before calling these functions.
 //! Backward (gradient) functions live in `grad_fns::indexing`.
+//!
+//! ## REQ status (per `.design/ferrotorch-core/ops/indexing.md`)
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 | SHIPPED | `gather` at `ops/indexing.rs:112`; consumer: re-export `ferrotorch_core::gather` at `lib.rs:174` |
+//! | REQ-2 | SHIPPED | `scatter` at `ops/indexing.rs:183`; consumer: re-export at `lib.rs:174` |
+//! | REQ-3 | SHIPPED | `scatter_add` at `ops/indexing.rs:259`; consumer: `grad_fns::cumulative::cumsum_backward` at `grad_fns/cumulative.rs:503` invokes `ops::indexing::scatter_add` |
+//! | REQ-4 | SHIPPED | `where_cond` at `ops/indexing.rs:334`; consumer: re-export at `lib.rs:174`; `where_cond_bt` CPU fallback at `:458` |
+//! | REQ-5 | SHIPPED | `where_cond_bt` at `ops/indexing.rs:397`; consumer: `grad_fns::indexing::where_differentiable` at `grad_fns/indexing.rs:1845,1853` |
+//! | REQ-6 | SHIPPED | `masked_select` at `ops/indexing.rs:478`; consumer: `tensor::Tensor::masked_select` at `tensor.rs:1146`; `grad_fns::indexing::masked_select_backward` at `grad_fns/indexing.rs:1823,1828` |
+//! | REQ-7 | SHIPPED | grad-fn attachment (e.g. `gather` at `ops/indexing.rs:154-164`); consumer: every autograd-tracking caller |
+//! | REQ-8 | SHIPPED | `validate_gather_shapes` at `ops/indexing.rs:66`; consumer: `gather`/`scatter`/`scatter_add` |
 
 use std::sync::Arc;
 

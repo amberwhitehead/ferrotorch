@@ -1,3 +1,14 @@
+//! ## REQ status (per `.design/ferrotorch-core/shape.md`)
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 | SHIPPED | impl `broadcast_shapes` mirrors `infer_size_impl` (PyTorch `aten/src/ATen/ExpandUtils.h`); non-test consumers `meta_propagate::binary_broadcast`, `ops::elementwise`. |
+//! | REQ-2 | SHIPPED | impl `numel`; non-test consumer `Tensor::numel`. |
+//! | REQ-3 | SHIPPED | impl `c_contiguous_strides`; non-test consumers every `Tensor::from_storage` / `view_reshape` / `materialize_format` call site. |
+//! | REQ-4 | SHIPPED | impl `channels_last_strides`, `channels_last_3d_strides`; non-test consumer `Tensor::materialize_format` channels-last branch. |
+//! | REQ-5 | SHIPPED | impl `normalize_axis`; re-exported at `lib.rs:184`; consumed by reduction grad_fns. |
+//! | REQ-6 | SHIPPED | impl `check_shapes_match`; non-test consumer same-shape inplace op guards. |
+
 use crate::error::{FerrotorchError, FerrotorchResult};
 
 /// Compute the broadcasted shape of two shapes, following NumPy/PyTorch rules.

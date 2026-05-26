@@ -3,6 +3,23 @@
 //! All functions operate elementwise on tensors, returning a new tensor of the
 //! same shape. Implementations use either `num_traits::Float` methods or
 //! well-known numerical approximations (Abramowitz & Stegun, Lanczos, etc.).
+//!
+//! ## REQ status (per `.design/ferrotorch-core/special.md`)
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 | SHIPPED | `erf` at `special.rs:675`; consumer: `grad_fns::activation::erf_for_gelu` at `grad_fns/activation.rs:413` invokes `special::erf_scalar` |
+//! | REQ-2 | SHIPPED | `erfc` at `special.rs:684`; consumer: re-export at `lib.rs:187` |
+//! | REQ-3 | SHIPPED | `erfinv` at `special.rs:692`; consumer: re-export at `lib.rs:187` |
+//! | REQ-4 | SHIPPED | `lgamma` at `special.rs:699`; consumer: re-export at `lib.rs:187` |
+//! | REQ-5 | SHIPPED | `digamma` at `special.rs:707`; consumer: re-export at `lib.rs:187` |
+//! | REQ-6 | SHIPPED | `log1p`/`expm1` at `special.rs:714,721`; consumer: re-export at `lib.rs:187` |
+//! | REQ-7 | SHIPPED | `sinc` at `special.rs:726`; consumer: re-export at `lib.rs:187` |
+//! | REQ-8 | SHIPPED | `xlogy` at `special.rs:733`; consumer: re-export at `lib.rs:187` |
+//! | REQ-9 | SHIPPED | `chebyshev_polynomial_{t,u,v,w}` at `special.rs:794-832`; consumer: `ferrotorch_core::special::*`. GPU blocker #1533 |
+//! | REQ-10 | SHIPPED | `hermite_polynomial_h`/`hermite_polynomial_he` at `special.rs:841,849`; consumer: `ferrotorch_core::special::*` |
+//! | REQ-11 | SHIPPED | `laguerre_polynomial_l`/`legendre_polynomial_p` at `special.rs:859,867`; consumer: `ferrotorch_core::special::*` |
+//! | REQ-12 | SHIPPED | `shifted_chebyshev_polynomial_{t,u,v,w}` at `special.rs:875-908`; consumer: `ferrotorch_core::special::*` |
 
 use std::any::TypeId;
 

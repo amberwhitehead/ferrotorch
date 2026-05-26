@@ -5,6 +5,17 @@
 //!
 //! For tensors above `PARALLEL_THRESHOLD` elements, work is split across
 //! rayon worker threads so each chunk is still processed by the SIMD kernel.
+//!
+//! ## REQ status (per `.design/ferrotorch-core/ops/elementwise.md`)
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 | SHIPPED | `simd_add_f32` etc. at `ops/elementwise.rs:32-95`; consumer: `grad_fns::arithmetic::add_inner` routes to `fast_add` → `simd_add_f32` |
+//! | REQ-2 | SHIPPED | `fast_add`/`fast_mul`/`fast_sub`/`fast_div` at `ops/elementwise.rs:139,239,338,439`, `fast_exp`/`fast_log`/`fast_sigmoid`/`fast_tanh`/`fast_sin`/`fast_cos` at `:610,653,750,789,836,884`; consumer: `grad_fns::arithmetic::add` at `grad_fns/arithmetic.rs:472`, `grad_fns::transcendental::exp` at `grad_fns/transcendental.rs:142`, `grad_fns::activation::sigmoid` at `grad_fns/activation.rs:772` |
+//! | REQ-3 | SHIPPED | `unary_map`/`binary_map`/`scalar_map` at `ops/elementwise.rs:930,951,1038`; consumer: `grad_fns::arithmetic::scale_tensor` at `grad_fns/arithmetic.rs:38`, every `special::*` op |
+//! | REQ-4 | SHIPPED | `sum`/`sum_axis`/`mean`/`nansum`/`nanmean`/`logsumexp`/`logsumexp_dim` at `ops/elementwise.rs:1113-1342`; consumer: `grad_fns::reduction` chains here for CPU fallback |
+//! | REQ-5 | SHIPPED | `logsumexp` stability flow at `ops/elementwise.rs:1233-1262`; consumer: `grad_fns::reduction::logsumexp` |
+//! | REQ-6 | SHIPPED | `nansum`/`nanmean` at `ops/elementwise.rs:1189,1207`; consumer: `ferrotorch_core::ops::elementwise::{nansum, nanmean}` public path |
 
 use crate::cpu_pool::{pool_alloc_cpu_uninit_f32, pool_alloc_cpu_uninit_f64};
 use crate::dtype::Float;

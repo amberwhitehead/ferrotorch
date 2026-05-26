@@ -7,6 +7,19 @@
 //!
 //! Helper utilities [`select`] and [`stack`] are also provided for
 //! extracting slices and reassembling tensors along arbitrary dimensions.
+//!
+//! ## REQ status (per `.design/ferrotorch-core/vmap.md`)
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 | SHIPPED | impl `select`; non-test consumer re-exported at `lib.rs:191` + invoked by `vmap`. |
+//! | REQ-2 | SHIPPED | impl `stack`; non-test consumer re-exported at `lib.rs:191` + invoked by `vmap`. |
+//! | REQ-3 | SHIPPED | impl `vmap`; non-test consumer re-exported at `lib.rs:191`; pattern documented at `autograd/forward_ad.rs:379`. |
+//! | REQ-4 | SHIPPED | impl `vmap2`; non-test consumer re-exported at `lib.rs:191`. |
+//! | REQ-5 | SHIPPED | impl `vmap3`; non-test consumer pub API (grandfathered per S5). |
+//! | REQ-6 | SHIPPED | impl `vmap_many`; non-test consumer pub API (grandfathered per S5). |
+//! | REQ-7 | SHIPPED | impl `vmap_multi_output`; non-test consumer pub API (grandfathered per S5). |
+//! | REQ-8 | SHIPPED | impl `per_sample_grad`; non-test consumer pub API (grandfathered per S5). |
 
 use crate::dtype::Float;
 use crate::error::{FerrotorchError, FerrotorchResult};

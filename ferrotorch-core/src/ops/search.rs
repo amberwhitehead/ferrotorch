@@ -4,6 +4,18 @@
 //! - [`bucketize`] — discretize values into bucket indices
 //! - [`unique`] — return unique elements
 //! - [`unique_consecutive`] — deduplicate consecutive elements
+//!
+//! ## REQ status (per `.design/ferrotorch-core/ops/search.md`)
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 | SHIPPED | `searchsorted` at `ops/search.rs:20`; consumer: re-export `ferrotorch_core::searchsorted` at `lib.rs:176` |
+//! | REQ-2 | SHIPPED | `bucketize` at `ops/search.rs:63`; consumer: re-export at `lib.rs:176` |
+//! | REQ-3 | SHIPPED | `unique` at `ops/search.rs:79`; consumer: re-export at `lib.rs:176` |
+//! | REQ-4 | SHIPPED | `unique_consecutive` at `ops/search.rs:140`; consumer: re-export at `lib.rs:176` |
+//! | REQ-5 | SHIPPED | `histc` at `ops/search.rs:186`; consumer: re-export at `lib.rs:176` |
+//! | REQ-6 | SHIPPED | `meshgrid` at `ops/search.rs:228`; consumer: re-export at `lib.rs:176` |
+//! | REQ-7 | SHIPPED | `topk` at `ops/search.rs:287`; consumer: re-export at `lib.rs:176` |
 
 use crate::dtype::Float;
 use crate::error::{FerrotorchError, FerrotorchResult};
