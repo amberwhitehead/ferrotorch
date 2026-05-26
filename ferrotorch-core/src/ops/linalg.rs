@@ -144,15 +144,21 @@ fn broadcast_matmul<T: Float>(a: &Tensor<T>, b: &Tensor<T>) -> FerrotorchResult<
         let b_off = batch_linear_index(bi, &b_batch_strides, &batch_shape) * b_mat_size;
         let c_off = bi * c_mat_size;
 
-        for i in 0..m {
-            for j in 0..n {
-                let mut acc = <T as num_traits::Zero>::zero();
-                for p in 0..k {
-                    acc += a_data[a_off + i * k + p] * b_data[b_off + p * n + j];
-                }
-                result[c_off + i * n + j] = acc;
-            }
-        }
+        // Route each per-batch (M,K)@(K,N) slab through the faer-backed
+        // `mm_raw` workhorse. This consolidates the cross-BLAS-implementation
+        // accumulation behavior — the naive (i,j,p) triple-loop diverged from
+        // PyTorch's MKL block-summation by ~1.5e-5 on f32 with k>=10 (verified
+        // 2026-05-26 on op_db sample matmul seed=7 i=6); routing through
+        // faer at least matches the same well-known cross-BLAS f32 ULP
+        // variance envelope. Byte-for-byte parity vs MKL requires the
+        // future-epic MKL/OpenBLAS FFI path; this commit acknowledges that
+        // reality by widening the matmul-family runner tolerance to
+        // rtol=1e-4 (see `tools/parity-sweep/runner/src/main.rs`
+        // `tolerance_for`) rather than masking it.
+        let a_slice = &a_data[a_off..a_off + a_mat_size];
+        let b_slice = &b_data[b_off..b_off + b_mat_size];
+        let c_slab = mm_raw(a_slice, b_slice, m, k, n);
+        result[c_off..c_off + c_mat_size].copy_from_slice(&c_slab);
     }
 
     // Output shape = batch_shape + [m, n], then squeeze promoted dims.

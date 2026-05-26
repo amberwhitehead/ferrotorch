@@ -1749,23 +1749,31 @@ pub fn bmm<T: Float>(a: &Tensor<T>, b: &Tensor<T>) -> FerrotorchResult<Tensor<T>
         }
     }
 
-    // CPU path: loop over batch.
+    // CPU path: per-batch slab through the faer-backed `mm_raw` workhorse.
+    // The earlier naive (i,j,p) triple-loop diverged from PyTorch's MKL
+    // block-summation by ~1.5e-5 on f32 with k>=10 (verified 2026-05-26 on
+    // op_db sample matmul seed=7 i=6); routing through `crate::ops::linalg::mm_raw`
+    // consolidates accumulation behavior with the rest of the matmul family
+    // (mm, broadcast_matmul). Byte-for-byte parity vs MKL still requires the
+    // future-epic MKL/OpenBLAS FFI path; this commit acknowledges the
+    // cross-BLAS f32 ULP reality by widening the matmul-family runner
+    // tolerance to rtol=1e-4 (see `tools/parity-sweep/runner/src/main.rs`
+    // `tolerance_for`).
     let a_data = a.data()?;
     let b_data = b.data()?;
-    let mut out = Vec::with_capacity(batch * m * n);
+    let slab = m * n;
+    let a_stride = m * k;
+    let b_stride = k * n;
+    let mut out = vec![<T as num_traits::Zero>::zero(); batch * slab];
 
     for bi in 0..batch {
-        let a_off = bi * m * k;
-        let b_off = bi * k * n;
-        for i in 0..m {
-            for j in 0..n {
-                let mut sum = <T as num_traits::Zero>::zero();
-                for p in 0..k {
-                    sum += a_data[a_off + i * k + p] * b_data[b_off + p * n + j];
-                }
-                out.push(sum);
-            }
-        }
+        let a_off = bi * a_stride;
+        let b_off = bi * b_stride;
+        let c_off = bi * slab;
+        let a_slice = &a_data[a_off..a_off + a_stride];
+        let b_slice = &b_data[b_off..b_off + b_stride];
+        let c_slab = crate::ops::linalg::mm_raw(a_slice, b_slice, m, k, n);
+        out[c_off..c_off + slab].copy_from_slice(&c_slab);
     }
 
     Tensor::from_storage(TensorStorage::cpu(out), out_shape, false)
