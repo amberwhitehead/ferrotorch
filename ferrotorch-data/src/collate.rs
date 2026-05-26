@@ -1,3 +1,14 @@
+//! ## REQ status (per `.design/ferrotorch-data/collate.md`)
+//!
+//! Full evidence rows live in the design doc; this is the one-line synopsis.
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 (`default_collate`) | SHIPPED | `pub fn default_collate<T: Float>` in `collate.rs` calling `stack(&samples, 0)` after empty-input check; consumer: `pub use collate::default_collate in lib.rs` + `DataLoader::with_collate` accepts it as `Arc<dyn Fn>` |
+//! | REQ-2 (`default_collate_pair`) | SHIPPED | `pub fn default_collate_pair<T: Float>` in `collate.rs` unzipping + stacking both halves; consumer: meta-crate re-export + downstream `(input, target)` training-loop usage in the model crates |
+//! | REQ-3 (generic over T: Float) | SHIPPED | both functions are `<T: Float>` so f32 + f64 are first-class; consumer: `test_default_collate_f64` exercises the f64 path; meta-crate re-export |
+//! | REQ-4 (error contract) | SHIPPED | both functions delegate to `stack`, propagating `FerrotorchError::ShapeMismatch` / `DeviceMismatch` verbatim per R-CODE-4; consumer: meta-crate re-export — no silent device migration |
+
 // default_collate: stack tensors into batches.
 
 use ferrotorch_core::{FerrotorchError, FerrotorchResult, Float, Tensor, stack};

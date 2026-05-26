@@ -1,3 +1,27 @@
+//! Data loader, prefetch + multi-worker iterators, ToDevice trait,
+//! and the `WorkerMode` parallelism-strategy enum.
+//!
+//! Mirrors PyTorch's `torch.utils.data.DataLoader` (process-based
+//! workers upstream → thread-based workers here, per R-DEV-7 since
+//! Rust has no GIL).
+//!
+//! ## REQ status (per `.design/ferrotorch-data/dataloader.md`)
+//!
+//! Full evidence rows live in the design doc; this is the one-line synopsis.
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 (`DataLoader` builder) | SHIPPED | `pub struct DataLoader<D: Dataset>` with 13 fields + `DataLoader::new` rejecting `batch_size == 0` + 10 builder methods in `dataloader.rs`, mirroring `torch/utils/data/dataloader.py:142-617`; consumer: meta-crate `ferrotorch::DataLoader`; downstream training-loop code constructs `DataLoader::new(Arc::new(ds), batch_size)?.shuffle(true).num_workers(4)` |
+//! | REQ-2 (`WorkerMode` enum) | SHIPPED | `pub enum WorkerMode { IntraBatch, CrossBatch }` with `#[derive(Default)]` → `IntraBatch`; consumer: `fn DataLoader::iter` matches on `worker_mode == CrossBatch && num_workers > 0` to dispatch to `MultiWorkerIter`; meta-crate re-export |
+//! | REQ-3 (`ToDevice` trait) | SHIPPED | `pub trait ToDevice: Sized` with `to_device + to_device_pinned (default)` + blanket `impl<T: Float> ToDevice for Tensor<T>`; consumer: `fn DataLoader::device` is bounded by `D::Sample: ToDevice + 'static` and constructs a transfer_fn closure calling the trait methods |
+//! | REQ-4 (`BatchIter` enum) | SHIPPED | `pub enum BatchIter<'a, D> { Sync, Prefetch, MultiWorker }` + `impl Iterator + ExactSizeIterator`; consumer: `fn DataLoader::iter` constructs each variant; `CollatedIter::next` calls `self.inner.next()` on the boxed BatchIter |
+//! | REQ-5 (`DataLoaderIter` sync) | SHIPPED | `pub struct DataLoaderIter<'a, D>` with `pos` cursor + optional rayon `par_iter` in `dataloader.rs`; consumer: `BatchIter::Sync(DataLoaderIter { ... })` constructed in `DataLoader::iter` when `prefetch_factor == 0` |
+//! | REQ-6 (`PrefetchIter`) | SHIPPED | `pub struct PrefetchIter<D>` + `PrefetchIter::new` spawning the background thread inside `catch_unwind` + `Drop::drop` releasing the receiver before joining; consumer: `BatchIter::Prefetch(PrefetchIter::new(...))` constructed when `prefetch_factor > 0` |
+//! | REQ-7 (`MultiWorkerIter`) | SHIPPED | `pub struct MultiWorkerIter<D>` + `BinaryHeap<SeqEntry<S>>` reorder buffer + N worker threads running `worker_loop` + bounded crossbeam channels; consumer: `BatchIter::MultiWorker(MultiWorkerIter::new(...))` constructed when `WorkerMode::CrossBatch && num_workers > 0` |
+//! | REQ-8 (panic safety + clean shutdown) | SHIPPED | `fn worker_loop` wraps body in `catch_unwind(AssertUnwindSafe(...))` forwarding `WorkerPanic` on panic; `fn panic_payload_message` does the downcast; both `Drop` impls follow receiver-first ordering; consumer: every cross-batch worker runs through `worker_loop`; the test `worker_panic_surfaces_as_error` asserts the pipeline |
+//! | REQ-9 (`CollatedIter`) | SHIPPED | `pub struct CollatedIter<'a, D>` + `DataLoader::iter_collated(epoch) -> Result<...>` returning `Err(InvalidArgument)` when no collate_fn; consumer: meta-crate re-export; downstream `loader.with_collate(default_collate).iter_collated(epoch)?` |
+//! | REQ-10 (reproducibility) | SHIPPED | `fn DataLoader::build_indices` forwards `epoch` to the sampler's `indices(epoch)` — loader owns no PRNG state; consumer: every iterator path consumes the deterministic indices; `test_reproducible_with_same_seed_and_epoch` pins the contract |
+
 use std::collections::BinaryHeap;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::Arc;

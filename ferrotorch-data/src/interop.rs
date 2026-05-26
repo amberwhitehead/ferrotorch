@@ -30,6 +30,20 @@
 //! materialise the matrix once with these helpers, then wrap it in
 //! [`TensorDataset`]. Keeping the kernels small and explicit avoids
 //! committing to a single-row vs single-column policy in the API.
+//!
+//! ## REQ status (per `.design/ferrotorch-data/interop.md`)
+//!
+//! Full evidence rows live in the design doc; this is the one-line synopsis.
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 (feature gate) | SHIPPED | `#![cfg(feature = "arrow")]` at top of `interop.rs` + `#[cfg(feature = "arrow")] pub mod interop;` in `lib.rs`; consumer: `cargo check -p ferrotorch-data --features arrow,polars` compiles cleanly; meta-crate propagates the feature-gated module |
+//! | REQ-2 (`tensor_to_arrow_array`) | SHIPPED | `pub fn tensor_to_arrow_array<T>(&Tensor<T>) -> Result<PrimitiveArray<T::ArrowType>>` with `is_cuda()` check + `Buffer::from_vec(tensor.data_vec()?)`; consumer: `tensor_to_arrow_arrayref` calls this then wraps in `ArrayRef`; planned external consumer in `ferrotorch-tabular` |
+//! | REQ-3 (`tensor_from_arrow_array`) | SHIPPED | `pub fn tensor_from_arrow_array<T>(&PrimitiveArray<...>, &[usize]) -> Result<Tensor<T>>` with null-count + shape-product validation; consumer: planned `ferrotorch-tabular` Parquet→tensor pipeline |
+//! | REQ-4 (`tensor_to_arrow_arrayref`) | SHIPPED | `pub fn tensor_to_arrow_arrayref<T>(&Tensor<T>) -> Result<ArrayRef>` wrapping `Arc::new(prim) as ArrayRef`; consumer: planned `ferrotorch-tabular` for mixed-dtype RecordBatch emission |
+//! | REQ-5 (`record_batch_to_tensor`) | SHIPPED | `pub fn record_batch_to_tensor<T>(&RecordBatch) -> Result<Tensor<T>>` with per-column downcast + null-check + row-major interleave; consumer: planned `ferrotorch-tabular` (Parquet→tensor) |
+//! | REQ-6 (`dataframe_to_tensor`) | SHIPPED | `pub fn dataframe_to_tensor<T>(&polars::DataFrame) -> Result<Tensor<T>>` under `#[cfg(feature = "polars")]` with Polars-side casting + null rejection + row-major interleave; consumer: planned `ferrotorch-tabular` for LazyFrame→tensor materialisation |
+//! | REQ-7 (GPU discipline) | SHIPPED | GPU-discipline doc-comment + `is_cuda()` check in `tensor_to_arrow_array`; consumer: every Arrow conversion path routes through `tensor_to_arrow_array` (directly or via `tensor_to_arrow_arrayref`); any CUDA tensor surfaces `NotImplementedOnCuda` per R-CODE-4 |
 
 #![cfg(feature = "arrow")]
 

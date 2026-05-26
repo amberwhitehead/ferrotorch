@@ -1,3 +1,18 @@
+//! ## REQ status (per `.design/ferrotorch-data/sampler.md`)
+//!
+//! Full evidence rows live in the design doc; this is the one-line synopsis.
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 (`Sampler` trait) | SHIPPED | `pub trait Sampler: Send + Sync` with `indices(epoch) -> Vec<usize>`, `len`, default `is_empty` in `sampler.rs`, mirroring `torch/utils/data/sampler.py:28-94`; consumer: `DataLoader::with_sampler` accepts `Box<dyn Sampler>`; `DataLoader::build_indices` constructs sampler + calls `.indices(epoch)` |
+//! | REQ-2 (`shuffle_with_seed`) | SHIPPED | `pub fn shuffle_with_seed(&mut [usize], u64)` using Fisher-Yates + Lemire bounded draws + xorshift64; consumer: `RandomSampler` and `DistributedSampler` both call it inside their `indices(epoch)` body; meta-crate re-export |
+//! | REQ-3 (`SequentialSampler`) | SHIPPED | `pub struct SequentialSampler { size }` + `impl Sampler` returning `(0..size).collect()`, mirroring `torch/utils/data/sampler.py:97-113`; consumer: `DataLoader::build_indices` constructs it when shuffle=false |
+//! | REQ-4 (`RandomSampler`) | SHIPPED | `pub struct RandomSampler { size, seed }` + `impl Sampler` shuffling with epoch-mixed seed, mirroring `torch/utils/data/sampler.py:116-188`; consumer: `DataLoader::build_indices` constructs it when shuffle=true |
+//! | REQ-5 (`DistributedSampler`) | SHIPPED | `pub struct DistributedSampler { num_samples, num_replicas, rank, shuffle, seed }` + `impl Sampler` with wrap-padding + interleaved subsampling, mirroring `torch/utils/data/distributed.py:17-138`; consumer: `DataLoader::with_sampler` accepts user-built instances for DDP; meta-crate re-export |
+//! | REQ-6 (`WeightedRandomSampler`) | SHIPPED | `pub struct WeightedRandomSampler` + `impl Sampler` dispatching on `replacement` (Walker's alias / A-Res min-heap), mirroring `torch/utils/data/sampler.py:213-283`; consumer: `DataLoader::with_sampler` accepts it for class-imbalance workflows; meta-crate re-export |
+//! | REQ-7 (`BatchSampler`) | SHIPPED | `pub struct BatchSampler<S: Sampler>` + `batches(epoch) -> Vec<Vec<usize>>` + `num_batches()`, mirroring `torch/utils/data/sampler.py:286-355`; consumer: meta-crate re-export for users that need explicit batch-of-indices control |
+//! | REQ-8 (PRNG primitives) | SHIPPED | `fn bounded_u64` (Lemire) + `fn xorshift64` in `sampler.rs`; consumer: `fn shuffle_with_seed` and `fn AliasTable::draw` and `fn WeightedRandomSampler::unit_uniform` all route through these primitives |
+
 /// A sampler produces a sequence of indices for a `DataLoader` to fetch.
 pub trait Sampler: Send + Sync {
     /// Return indices for one epoch.

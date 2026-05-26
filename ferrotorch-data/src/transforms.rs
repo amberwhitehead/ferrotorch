@@ -1,3 +1,17 @@
+//! ## REQ status (per `.design/ferrotorch-data/transforms.md`)
+//!
+//! Full evidence rows live in the design doc; this is the one-line synopsis.
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 (`Transform` trait) | SHIPPED | `pub trait Transform<T: Float>: Send + Sync` with `apply(input) -> Result<output>` + blanket `impl Transform for Box<dyn Transform<T>>` in `transforms.rs`; consumer: every other concrete struct in this file (`Compose`, `Normalize`, `ToTensor`, `RandomHorizontalFlip`, `RandomCrop`) is a `impl Transform<T>` and meta-crate re-export |
+//! | REQ-2 (`Compose`) | SHIPPED | `pub struct Compose<T: Float>` + `impl Transform` folding through `Vec<Box<dyn Transform<T>>>` in `transforms.rs`; consumer: meta-crate re-export; downstream image-pipeline code wraps `Compose::new(vec![Box::new(...)])` and calls `.apply(input)` |
+//! | REQ-3 (`Normalize`) | SHIPPED | `pub struct Normalize<T>` + `impl Transform` using device-aware `sub`+`div` wrapped in `no_grad`, with `.to(input.device())` ferry per #1107; consumer: meta-crate re-export; `normalize_preserves_device_for_cpu_input` pins the GPU-discipline contract |
+//! | REQ-4 (`ToTensor`) | SHIPPED | `pub struct ToTensor` + inherent `apply(&DynamicImage) -> Tensor<f32>` HWC→CHW + /255 normalization; consumer: meta-crate re-export; downstream vision/diffusion crates use it as first transform in user's Compose chain |
+//! | REQ-5 (`RandomHorizontalFlip`) | SHIPPED | `pub struct RandomHorizontalFlip<T>` + `impl Transform` using `index_select_dim` with reverse-index list per #1107; consumer: meta-crate re-export; `random_horizontal_flip_preserves_device_for_cpu_input` pins the contract |
+//! | REQ-6 (`RandomCrop`) | SHIPPED | `pub struct RandomCrop<T>` + `impl Transform` using `narrow().narrow().contiguous()` chain; consumer: meta-crate re-export; `random_crop_preserves_device_for_cpu_input` pins the contract |
+//! | REQ-7 (`manual_seed` / `random_f64`) | SHIPPED | `pub fn manual_seed(u64)` + static AtomicU64 GLOBAL_SEED/RNG_COUNTER + counter-based splitmix64 `fn random_f64()`; consumer: meta-crate re-export `ferrotorch::manual_seed`; `RandomHorizontalFlip::apply` and `RandomCrop::apply` both call `random_f64()` |
+
 #[cfg(test)]
 use ferrotorch_core::TensorStorage;
 use ferrotorch_core::autograd::no_grad;

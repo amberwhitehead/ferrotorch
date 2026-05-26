@@ -6,6 +6,22 @@
 //! [`Compose`] / [`Normalize`] / [`RandomHorizontalFlip`] / [`RandomCrop`]
 //! suite, and helper [`default_collate`] / [`default_collate_pair`]
 //! collation functions.
+//!
+//! ## REQ status (per `.design/ferrotorch-data/lib.md`)
+//!
+//! Full evidence rows (impl + non-test production consumer + upstream
+//! cites) live in the design doc; this synopsis is a one-line summary per
+//! REQ.
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 (lint baseline) | SHIPPED | `#![warn(clippy::all, clippy::pedantic)] + #![deny(rust_2018_idioms)] + #![allow(missing_docs, missing_debug_implementations, ...)]` block at top of `lib.rs` with per-item justification comments; consumer: every other `ferrotorch-data/src/*.rs` file compiles under this baseline (verified by `cargo clippy -p ferrotorch-data -- -D warnings`) |
+//! | REQ-2 (six-submodule layout) | SHIPPED | `pub mod collate / dataloader / dataset / interop (cfg arrow) / sampler / transforms` in `lib.rs`; consumer: every `pub use <module>::...` below references these modules and `cargo check -p ferrotorch-data` PASSes |
+//! | REQ-3 (collate re-export) | SHIPPED | `pub use collate::{default_collate, default_collate_pair};` in `lib.rs`; consumer: `ferrotorch/src/lib.rs` `pub use ferrotorch_data::*;` propagates to `ferrotorch::default_collate` |
+//! | REQ-4 (dataloader re-export) | SHIPPED | `pub use dataloader::{BatchIter, CollatedIter, DataLoader, MultiWorkerIter, PrefetchIter, ToDevice, WorkerMode};` in `lib.rs`; consumer: meta-crate re-export `ferrotorch::DataLoader`; downstream model crates use the surface for training loops |
+//! | REQ-5 (dataset re-export) | SHIPPED | `pub use dataset::{ChainDataset, ConcatDataset, Dataset, IterableDataset, MappedDataset, TensorDataset, VecDataset, WorkerInfo};` in `lib.rs`; consumer: `DataLoader<D: Dataset>` is generic over the re-exported trait; meta-crate `ferrotorch::Dataset` |
+//! | REQ-6 (sampler re-export) | SHIPPED | `pub use sampler::{BatchSampler, DistributedSampler, RandomSampler, Sampler, SequentialSampler, WeightedRandomSampler, shuffle_with_seed};` in `lib.rs`; consumer: `fn DataLoader::build_indices in dataloader.rs` constructs `RandomSampler::new` / `SequentialSampler::new`; meta-crate re-export |
+//! | REQ-7 (transforms re-export) | SHIPPED | `pub use transforms::{Compose, Normalize, RandomCrop, RandomHorizontalFlip, ToTensor, Transform, manual_seed};` in `lib.rs`; consumer: meta-crate `ferrotorch::Compose` / `ferrotorch::Normalize`; downstream augmentation pipelines compose `Compose::new(vec![Box::new(Normalize::new(...))])` |
 
 // Lint baseline mirrors the workspace-standard pattern from
 // `ferrotorch-core` / `-nn` / `-vision` / `-jit` / `-cubecl` / `-xpu`.

@@ -1,3 +1,18 @@
+//! ## REQ status (per `.design/ferrotorch-data/dataset.md`)
+//!
+//! Full evidence rows live in the design doc; this is the one-line synopsis.
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 (`Dataset` trait) | SHIPPED | `pub trait Dataset: Send + Sync` with `type Sample`, `len`, `is_empty`, `get` in `dataset.rs`, mirroring `torch/utils/data/dataset.py:39-71`; consumer: `DataLoader<D: Dataset>` in `dataloader.rs` is generic over this trait |
+//! | REQ-2 (`IterableDataset` trait) | SHIPPED | `pub trait IterableDataset: Send + Sync` with `iter(worker_info) -> Box<dyn Iterator + Send + '_>`, mirroring `torch/utils/data/dataset.py:73-186`; consumer: `impl IterableDataset for ChainDataset<D>` is the production user |
+//! | REQ-3 (`WorkerInfo`) | SHIPPED | `pub struct WorkerInfo { pub worker_id, pub num_workers }` annotated `#[non_exhaustive]` + `WorkerInfo::new` ctor, mirroring `torch/utils/data/_utils/worker.py:79-99`; consumer: `fn ChainDataset::iter` reads its fields to partition the stream |
+//! | REQ-4 (`VecDataset`) | SHIPPED | `pub struct VecDataset<S>` + `impl Dataset` with cloned-or-OOB `get`; consumer: meta-crate re-export; downstream toy examples construct `VecDataset::new(vec![...])` |
+//! | REQ-5 (`MappedDataset`) | SHIPPED | `pub struct MappedDataset<D, F>` + `impl Dataset` chaining the transform closure; consumer: meta-crate re-export; downstream `MappedDataset::new(ds, |s| ...)` composition |
+//! | REQ-6 (`TensorDataset`) | SHIPPED | `pub struct TensorDataset<T: Float>` + ctor validating dim-0 + `impl Dataset`, mirroring `torch/utils/data/dataset.py:189-209`; consumer: meta-crate re-export; downstream supervised-learning constructs `TensorDataset::new(vec![inputs, targets])` |
+//! | REQ-7 (`ConcatDataset`) | SHIPPED | `pub struct ConcatDataset<D>` with `cumulative: Vec<usize>` + `locate` via `partition_point`, mirroring `torch/utils/data/dataset.py:299-355`; consumer: `ChainDataset<D>` internally wraps a `ConcatDataset<D>`; meta-crate re-export |
+//! | REQ-8 (`ChainDataset`) | SHIPPED | `pub struct ChainDataset<D>` with both `impl Dataset` AND `impl IterableDataset` (worker-partitioned slicing), mirroring `torch/utils/data/dataset.py:356-385`; consumer: the iterable impl is the production user of `WorkerInfo`; meta-crate re-export |
+
 use ferrotorch_core::{FerrotorchError, FerrotorchResult, Float, Tensor, select};
 
 /// A map-style dataset: provides random access to samples by index.
