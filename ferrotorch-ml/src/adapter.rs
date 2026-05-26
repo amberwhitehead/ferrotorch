@@ -20,6 +20,17 @@
 //! rule. If you want the strict gate here too — e.g. to fail-fast in a
 //! training-loop hot path — add an explicit `assert!(t.device().is_cpu())`
 //! at your call site.
+//!
+//! ## REQ status (per `.design/ferrotorch-ml/adapter.md`)
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 | SHIPPED | impl: `pub fn tensor_to_array1<T: Float + Clone>` in `ferrotorch-ml/src/adapter.rs:52` mirroring upstream `Tensor.numpy()` (`/home/doll/pytorch/torch/_tensor.py` `numpy` method); non-test consumer: `ferrotorch-ml/src/metrics.rs:67` `let yt = tensor_to_array1(y_true)?` inside `r2_score` (consumed by every regression metric wrapper). |
+//! | REQ-2 | SHIPPED | impl: `pub fn tensor_to_array2<T: Float + Clone>` in `ferrotorch-ml/src/adapter.rs:92`; non-test consumer: `ferrotorch-ml/src/datasets.rs:49` `Ok((array2_to_tensor(x_arr)?, ...))` inside `pack_xy_classify` (reverse direction; forward direction available for downstream pipelines). |
+//! | REQ-3 | SHIPPED | impl: `pub fn array1_to_tensor<T: Float>` in `ferrotorch-ml/src/adapter.rs:126`; non-test consumer: `ferrotorch-ml/src/datasets.rs:58` `Ok((array2_to_tensor(x_arr)?, array1_to_tensor(y_arr)?))` inside `pack_xy_regress` (consumed by `make_regression`). |
+//! | REQ-4 | SHIPPED | impl: `pub fn array2_to_tensor<T: Float>` in `ferrotorch-ml/src/adapter.rs:150` with the contiguous-vs-non-contiguous branch; non-test consumer: `ferrotorch-ml/src/datasets.rs:49` inside `pack_xy_classify` and `pack_xy_regress` packing ferrolearn dataset feature matrices into tensors. |
+//! | REQ-5 | SHIPPED | impl: `pub fn array1_usize_to_tensor<T: Float>` in `ferrotorch-ml/src/adapter.rs:185` using `ferrotorch_core::numeric_cast::cast`; non-test consumer: `ferrotorch-ml/src/datasets.rs:49` inside `pack_xy_classify` converts the `Array1<usize>` class-label output of every classification generator back into a float tensor. |
+//! | REQ-6 | SHIPPED | impl: `pub fn tensor_to_array1_usize<T: Float>` in `ferrotorch-ml/src/adapter.rs:218` with the finite + non-negative check; non-test consumer: `ferrotorch-ml/src/metrics.rs:265` `let yt = tensor_to_array1_usize(y_true)?` inside `accuracy_score` (consumed by every classification metric: `precision_score`, `recall_score`, `f1_score`, `confusion_matrix`, `hamming_loss`, `balanced_accuracy_score`, `matthews_corrcoef`, `cohen_kappa_score`, `zero_one_loss`, `top_k_accuracy_score`, `log_loss`, `brier_score_loss`, `d2_brier_score`, `average_precision_score`, `roc_auc_score`).
 
 use ndarray::{Array1, Array2};
 

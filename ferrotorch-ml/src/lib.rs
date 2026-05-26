@@ -87,6 +87,15 @@
 //!
 //! If you want fail-fast strictness in a hot path, add an explicit
 //! `assert!(t.device().is_cpu())` before calling the adapter.
+//!
+//! ## REQ status (per `.design/ferrotorch-ml/lib.md`)
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 | SHIPPED | impl: crate-root attribute block (`#![warn(clippy::all, clippy::pedantic)]` + `#![deny(rust_2018_idioms, missing_debug_implementations)]` + per-lint `#![allow]` with documented rationale) at top of `ferrotorch-ml/src/lib.rs`; non-test consumer: the workspace `cargo clippy -p ferrotorch-ml -- -D warnings` gate consumes the baseline; per-lint allows are required by cast-heavy adapter code. |
+//! | REQ-2 | SHIPPED | impl: `pub mod adapter; pub mod datasets; pub mod metrics;` declarations below; non-test consumer: `ferrotorch-ml/src/datasets.rs` `use crate::adapter::{...}` and `ferrotorch-ml/src/metrics.rs` `use crate::adapter::{...}` consume the `adapter` module via these declarations. |
+//! | REQ-3 | SHIPPED | impl: `pub mod preprocess { pub use ferrolearn_preprocess::*; }` and the parallel re-export blocks below; non-test consumer: the conformance surface inventory at `ferrotorch-ml/tests/conformance/_surface_exclusions.toml` lists `ferrotorch_ml::preprocess::*` / `ferrotorch_ml::decomposition::*` / `ferrotorch_ml::model_selection::*` as production-API glob paths. |
+//! | REQ-4 | SHIPPED | impl: crate doc-comment "CPU-only by design, GPU input transparently materialised" section above; non-test consumer: `ferrotorch-ml/src/adapter.rs` module-level doc-comment quotes the same relaxation contract (`"GPU tensors are auto-moved to CPU"` section) and `ferrotorch-ml/src/metrics.rs` module-level doc-comment references it.
 
 pub mod adapter;
 pub mod datasets;

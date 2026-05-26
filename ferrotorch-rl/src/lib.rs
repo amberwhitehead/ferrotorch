@@ -73,6 +73,16 @@
 //! discrete `Categorical` distribution used by CartPole-v1 there is no
 //! `log_std`, so the state dict has exactly 12 keys (4 for the policy
 //! trunk × 2, 2 for action_net, 2 for value_net).
+//!
+//! ## REQ status (per `.design/ferrotorch-rl/lib.md`)
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 | SHIPPED | impl: crate-root attribute block (`#![deny(unsafe_code)]` + per-lint `#![allow]` blocks with documented rationale) at top of `ferrotorch-rl/src/lib.rs:1-29` mirroring `ferrotorch-bert`/`ferrotorch-graph` posture; non-test consumer: the workspace clippy gate (`cargo clippy -p ferrotorch-rl -- -D warnings`) consumes this baseline; the per-lint allows are referenced by every production file in the crate. |
+//! | REQ-2 | SHIPPED | impl: `pub mod mlp_policy; pub mod safetensors_loader;` declarations in `ferrotorch-rl/src/lib.rs`; non-test consumer: `ferrotorch-rl/src/safetensors_loader.rs:36` `use crate::mlp_policy::{MlpPolicy, MlpPolicyConfig};` consumes the `mlp_policy` module via this declaration; the production binary `ferrotorch-rl/examples/ppo_policy_dump.rs:34` consumes both modules transitively via the prelude re-exports. |
+//! | REQ-3 | SHIPPED | impl: `pub use mlp_policy::{ActionNet, MlpExtractor, MlpPolicy, MlpPolicyConfig, ValueHead}` and `pub use safetensors_loader::{DropReport, load_ppo_policy}` below; non-test consumer: `ferrotorch-rl/examples/ppo_policy_dump.rs:34` `use ferrotorch_rl::{MlpPolicyConfig, load_ppo_policy};` invokes the production binary via the canonical user-facing import path. |
+//! | REQ-4 | SHIPPED | impl: crate doc-comment paragraphs at `ferrotorch-rl/src/lib.rs:31-75` including the architectural diagram and CartPole-v1 dimension contract; non-test consumer: `ferrotorch-rl/src/mlp_policy.rs:71-78` `MlpPolicyConfig::cartpole_v1()` returns `(obs_dim: 4, hidden: 64, n_actions: 2)` which is the production realisation of the documented contract; `ferrotorch-rl/examples/ppo_policy_dump.rs:196-200` constructs the same `MlpPolicyConfig` via CLI args. |
+//! | REQ-5 | SHIPPED | impl: crate doc-comment paragraph "On `log_std`" at `ferrotorch-rl/src/lib.rs:69-75` documenting the 12-key state-dict contract; non-test consumer: `ferrotorch-rl/src/mlp_policy.rs:547-559` `Module::named_parameters` for `MlpPolicy` emits exactly those 12 keys (verified by the production safetensors loader's expected-key set construction at `ferrotorch-rl/src/safetensors_loader.rs:80-84`).
 
 pub mod mlp_policy;
 pub mod safetensors_loader;

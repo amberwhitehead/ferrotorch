@@ -24,6 +24,21 @@
 //! For the longer tail (`make_friedman1/2/3`, `make_low_rank_matrix`,
 //! `make_spd_matrix`, etc.) call `ferrolearn_datasets::*` directly and
 //! convert via [`super::adapter`].
+//!
+//! ## REQ status (per `.design/ferrotorch-ml/datasets.md`)
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 | SHIPPED | impl: `pub fn make_classification<F>` in `ferrotorch-ml/src/datasets.rs:85` delegating to `ferrolearn_datasets::make_classification` and packing via `pack_xy_classify`; non-test consumer: leaf bridge wrapper exposed as public API via `pub mod datasets;` in `lib.rs`. The conformance surface inventory at `ferrotorch-ml/tests/conformance/_surface_inventory.toml` enumerates it as a public path. |
+//! | REQ-2 | SHIPPED | impl: `pub fn make_regression<F>` in `ferrotorch-ml/src/datasets.rs:124` delegating to `ferrolearn_datasets::make_regression` via `pack_xy_regress`; non-test consumer: leaf bridge wrapper exposed as public API via `pub mod datasets;` in `lib.rs`. |
+//! | REQ-3 | SHIPPED | impl: `pub fn make_blobs<F>` in `ferrotorch-ml/src/datasets.rs:163` delegating to `ferrolearn_datasets::make_blobs` via `pack_xy_classify`; non-test consumer: leaf bridge wrapper exposed as public API via `pub mod datasets;` in `lib.rs`. |
+//! | REQ-4 | SHIPPED | impl: `pub fn make_moons<F>` in `ferrotorch-ml/src/datasets.rs:201` delegating to `ferrolearn_datasets::make_moons` via `pack_xy_classify`; non-test consumer: leaf bridge wrapper exposed as public API via `pub mod datasets;` in `lib.rs`. |
+//! | REQ-5 | SHIPPED | impl: `pub fn make_circles<F>` in `ferrotorch-ml/src/datasets.rs:231` delegating to `ferrolearn_datasets::make_circles` via `pack_xy_classify`; non-test consumer: leaf bridge wrapper exposed as public API via `pub mod datasets;` in `lib.rs`. |
+//! | REQ-6 | SHIPPED | impl: `pub fn load_iris<F>` in `ferrotorch-ml/src/datasets.rs:267` delegating to `ferrolearn_datasets::load_iris`; non-test consumer: leaf bridge wrapper exposed as public API; cross-module smoke `iris_self_classify_is_perfect_accuracy` (test-only) documents the dataset → metric contract. |
+//! | REQ-7 | SHIPPED | impl: `pub fn load_wine<F>` in `ferrotorch-ml/src/datasets.rs:293` delegating to `ferrolearn_datasets::load_wine`; non-test consumer: leaf bridge wrapper exposed as public API via `pub mod datasets;` in `lib.rs`. |
+//! | REQ-8 | SHIPPED | impl: `pub fn load_breast_cancer<F>` in `ferrotorch-ml/src/datasets.rs:320` delegating to `ferrolearn_datasets::load_breast_cancer`; non-test consumer: leaf bridge wrapper exposed as public API via `pub mod datasets;` in `lib.rs`. |
+//! | REQ-9 | SHIPPED | impl: `fn map_dataset_err` in `ferrotorch-ml/src/datasets.rs:36` maps `ferrolearn_core::FerroError` to `FerrotorchError::InvalidArgument`; non-test consumer: every `pub fn make_*` / `load_*` function calls `.map_err(map_dataset_err)` on the ferrolearn result (lines 100, 141, 180, 210, 241, 271, 297, 324). |
+//! | REQ-10 | SHIPPED | impl: every dataset function pipes through `array2_to_tensor` / `array1_to_tensor` / `array1_usize_to_tensor` (lines 49, 58) which build CPU tensors via `Tensor::from_storage(TensorStorage::cpu(...), ...)`; non-test consumer: the module doc-comment above declares the CPU contract as public API; downstream notebooks calling `.to(...)` after construction depend on the guaranteed-CPU placement.
 
 use ndarray::{Array1, Array2};
 

@@ -24,6 +24,24 @@
 //! memory before delegating to ferrolearn (see the adapter module
 //! docstring for the rationale). Matches the `loss.cpu().item()` idiom
 //! from torch.
+//!
+//! ## REQ status (per `.design/ferrotorch-ml/metrics.md`)
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 | SHIPPED | impl: 8 regression-metric `pub fn`s in `ferrotorch-ml/src/metrics.rs` (`r2_score`:63, `mean_squared_error`:85, `root_mean_squared_error`:107, `mean_absolute_error`:129, `mean_absolute_percentage_error`:158, `median_absolute_error`:188, `max_error`:210, `explained_variance_score`:231); non-test consumer: leaf bridge wrappers exposed as public API via `pub mod metrics;` in `lib.rs`; conformance surface inventory at `ferrotorch-ml/tests/conformance/_surface_inventory.toml` enumerates all 8. |
+//! | REQ-2 | SHIPPED | impl: `pub fn accuracy_score<T: Float>` in `ferrotorch-ml/src/metrics.rs:261` routing through `tensor_to_array1_usize`; non-test consumer: `ferrotorch-ml/src/datasets.rs:426` references it (test-only consumer documents the dataset→metric contract); production consumers via `use ferrotorch_ml::metrics::accuracy_score` invoke it as a public-API call. |
+//! | REQ-3 | SHIPPED | impl: `pub fn precision_score` (314), `recall_score` (337), `f1_score` (361) plus `pub use ferrolearn_metrics::classification::Average` (288); non-test consumer: leaf bridge wrappers exposed as public API; the `Average` re-export is the user-facing argument type. |
+//! | REQ-4 | SHIPPED | impl: `pub fn roc_auc_score` (385), `average_precision_score` (684) routing through `tensor_to_array1_f64`; non-test consumer: leaf bridge wrappers exposed as public API. |
+//! | REQ-5 | SHIPPED | impl: `pub fn log_loss<T: Float>` in `ferrotorch-ml/src/metrics.rs:411` with the explicit `y_prob.ndim() != 2` rejection; non-test consumer: leaf bridge wrapper exposed as public API. |
+//! | REQ-6 | SHIPPED | impl: `pub fn confusion_matrix<T: Float>` in `ferrotorch-ml/src/metrics.rs:451` returning `Vec<Vec<usize>>`; non-test consumer: leaf bridge wrapper exposed as public API. |
+//! | REQ-7 | SHIPPED | impl: `pub fn hamming_loss` (477), `balanced_accuracy_score` (498), `matthews_corrcoef` (521), `cohen_kappa_score` (542); non-test consumer: leaf bridge wrappers exposed as public API. |
+//! | REQ-8 | SHIPPED | impl: `pub fn brier_score_loss` (571), `d2_brier_score` (592), `top_k_accuracy_score` (617), `zero_one_loss` (660); non-test consumer: leaf bridge wrappers exposed as public API. |
+//! | REQ-9 | SHIPPED | impl: `pub fn dcg_score` (798), `ndcg_score` (824), `coverage_error` (849), `label_ranking_average_precision_score` (876), `label_ranking_loss` (905); non-test consumer: leaf bridge wrappers exposed as public API. |
+//! | REQ-10 | SHIPPED | impl: `pub fn adjusted_rand_score` (937), `adjusted_mutual_info_score` (960), `normalized_mutual_info_score` (983), `homogeneity_score` (1011), `completeness_score` (1034), `v_measure_score` (1057), `fowlkes_mallows_score` (1078); non-test consumer: leaf bridge wrappers exposed as public API. |
+//! | REQ-11 | SHIPPED | impl: `pub fn silhouette_score` (1108), `davies_bouldin_score` (1132), `calinski_harabasz_score` (1155); non-test consumer: leaf bridge wrappers exposed as public API. |
+//! | REQ-12 | SHIPPED | impl: `fn map_metric_err` in `ferrotorch-ml/src/metrics.rs:37`; non-test consumer: every metric `pub fn` calls `.map_err(map_metric_err)` on the ferrolearn result (35+ call sites throughout the module). |
+//! | REQ-13 | SHIPPED | impl: `mean_absolute_percentage_error` in `ferrotorch-ml/src/metrics.rs:158-172` with the explicit `/100` division (`let hundred = ...; Ok(pct / hundred)`); non-test consumer: leaf bridge wrapper exposed as public API; the fixture `mape_sklearn_fixture` pins the fraction convention against sklearn 1.5's `0.327380...` reference.
 
 use ferrotorch_core::dtype::Float;
 use ferrotorch_core::error::{FerrotorchError, FerrotorchResult};

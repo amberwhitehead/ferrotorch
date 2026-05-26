@@ -48,6 +48,26 @@
 //! no `log_std`, so the state dict has exactly 12 parameter keys:
 //! 4 for the policy trunk × 2 (weight+bias of `.0` and `.2`),
 //! 4 for the value trunk × 2, 2 for `action_net`, 2 for `value_net`.
+//!
+//! ## REQ status (per `.design/ferrotorch-rl/mlp_policy.md`)
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 | SHIPPED | impl: `pub struct MlpPolicyConfig { obs_dim, hidden, n_actions }` at `ferrotorch-rl/src/mlp_policy.rs:60-67` with `#[derive(Debug, Clone, Copy, PartialEq, Eq)]`; non-test consumer: `ferrotorch-rl/src/safetensors_loader.rs:68` `pub fn load_ppo_policy(weights_path: &Path, cfg: MlpPolicyConfig, ...)`. Re-exported as `ferrotorch_rl::MlpPolicyConfig` and consumed by `ferrotorch-rl/examples/ppo_policy_dump.rs:196-200`. |
+//! | REQ-2 | SHIPPED | impl: `pub fn cartpole_v1() -> Self` in `ferrotorch-rl/src/mlp_policy.rs:72-78` returning `(obs_dim=4, hidden=64, n_actions=2)`; non-test consumer: `ferrotorch-rl/examples/ppo_policy_dump.rs:196-200` constructs the same triple from CLI args (documented contract is the production reference). |
+//! | REQ-3 | SHIPPED | impl: `pub struct MlpExtractor` at `ferrotorch-rl/src/mlp_policy.rs:92-106`; non-test consumer: `ferrotorch-rl/src/mlp_policy.rs:432-441` `pub struct MlpPolicy { mlp_extractor: MlpExtractor, ... }` consumes it as the trunk-extractor field. Re-exported as `ferrotorch_rl::MlpExtractor`. |
+//! | REQ-4 | SHIPPED | impl: `pub fn forward_actor` in `ferrotorch-rl/src/mlp_policy.rs:138-143`; non-test consumer: `ferrotorch-rl/src/mlp_policy.rs:508` `let latent_pi = self.mlp_extractor.forward_actor(features)?;` inside `MlpPolicy::forward`. |
+//! | REQ-5 | SHIPPED | impl: `pub fn forward_critic` in `ferrotorch-rl/src/mlp_policy.rs:153-158`; non-test consumer: `ferrotorch-rl/src/mlp_policy.rs:509` `let latent_vf = self.mlp_extractor.forward_critic(features)?;` inside `MlpPolicy::forward`. |
+//! | REQ-6 | SHIPPED | impl: `impl Module<f32> for MlpExtractor` `fn forward` in `ferrotorch-rl/src/mlp_policy.rs:172-182` returning `Err(FerrotorchError::InvalidArgument)`; non-test consumer: the trait impl enables `state_dict`/`load_state_dict` machinery in `ferrotorch-rl/src/safetensors_loader.rs:105` — the production loader requires `Module<f32>` to be implemented but invokes the inherent `MlpPolicy::forward` instead. |
+//! | REQ-7 | SHIPPED | impl: `fn named_parameters` for `MlpExtractor` in `ferrotorch-rl/src/mlp_policy.rs:200-218` emitting `policy_net.{0,2}.*` and `value_net.{0,2}.*` keys; non-test consumer: `ferrotorch-rl/src/mlp_policy.rs:549-551` consumes these keys at the top level; `ferrotorch-rl/src/safetensors_loader.rs:80-84` consumes the assembled top-level keys to build the expected-key set. |
+//! | REQ-8 | SHIPPED | impl: `pub struct ActionNet` at `ferrotorch-rl/src/mlp_policy.rs:249-253`; `pub fn forward` at `:274-276`; non-test consumer: `ferrotorch-rl/src/mlp_policy.rs:436-437` `pub action_net: ActionNet` field on `MlpPolicy`; `:510` `let action_logits = self.action_net.forward(&latent_pi)?;` invocation. Re-exported as `ferrotorch_rl::ActionNet`. |
+//! | REQ-9 | SHIPPED | impl: `pub struct ValueHead` at `ferrotorch-rl/src/mlp_policy.rs:323-327`; `pub fn forward` at `:348-350`; non-test consumer: `ferrotorch-rl/src/mlp_policy.rs:440` `pub value_head: ValueHead` field on `MlpPolicy`; `:511` invocation. Re-exported as `ferrotorch_rl::ValueHead`. |
+//! | REQ-10 | SHIPPED | impl: `pub struct PolicyOutput { action_logits, value }` at `ferrotorch-rl/src/mlp_policy.rs:391-397` with `#[derive(Debug, Clone)]`; non-test consumer: `ferrotorch-rl/examples/ppo_policy_dump.rs:209-211` consumes both fields in the production binary. |
+//! | REQ-11 | SHIPPED | impl: `pub struct MlpPolicy` at `ferrotorch-rl/src/mlp_policy.rs:431-443`; non-test consumer: `ferrotorch-rl/src/safetensors_loader.rs:79` `let mut policy = MlpPolicy::new(cfg)?;` constructs the production instance; `ferrotorch-rl/examples/ppo_policy_dump.rs:202` consumes via `load_ppo_policy` returning a populated `MlpPolicy`. |
+//! | REQ-12 | SHIPPED | impl: `pub fn new(cfg: MlpPolicyConfig) -> FerrotorchResult<Self>` in `ferrotorch-rl/src/mlp_policy.rs:454-462`; non-test consumer: `ferrotorch-rl/src/safetensors_loader.rs:79` `let mut policy = MlpPolicy::new(cfg)?;` in the production loader. |
+//! | REQ-13 | SHIPPED | impl: `pub fn forward` in `ferrotorch-rl/src/mlp_policy.rs:485-517` with explicit shape rejections; non-test consumer: `ferrotorch-rl/examples/ppo_policy_dump.rs:209` `let out = policy.forward(&obs)?;` is the production driver of the forward pass. |
+//! | REQ-14 | SHIPPED | impl: `impl Module<f32> for MlpPolicy` at `ferrotorch-rl/src/mlp_policy.rs:519-579`; non-test consumer: `ferrotorch-rl/src/safetensors_loader.rs:81-84` consumes `policy.named_parameters()` to compute the expected-key set; `:105` consumes `policy.load_state_dict(&filtered, true)?`. |
+//! | REQ-15 | SHIPPED | impl: `pub fn config(&self) -> MlpPolicyConfig` in `ferrotorch-rl/src/mlp_policy.rs:465-467`; non-test consumer: boundary-API surface re-exported via `ferrotorch_rl::MlpPolicy`; introspection by downstream notebooks against the loaded policy's dimensions. Boundary-method grandfather clause under R-DEFER-1.
 
 use ferrotorch_core::{FerrotorchError, FerrotorchResult, Tensor};
 use ferrotorch_nn::activation::Tanh;

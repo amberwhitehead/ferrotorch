@@ -26,6 +26,18 @@
 //! return a [`DropReport`] documenting upstream keys that were
 //! intentionally not consumed (per the #1141 audit rail: every key
 //! must either land in a parameter or appear in the report).
+//!
+//! ## REQ status (per `.design/ferrotorch-rl/safetensors_loader.md`)
+//!
+//! | REQ | Status | Evidence |
+//! |---|---|---|
+//! | REQ-1 | SHIPPED | impl: `pub struct DropReport { pub unmapped: Vec<String> }` at `ferrotorch-rl/src/safetensors_loader.rs:46-50` with `#[derive(Debug, Default, Clone)]`; non-test consumer: `ferrotorch-rl/examples/ppo_policy_dump.rs:202,261` consumes the report for diagnostic output and final JSON verdict. Re-exported as `ferrotorch_rl::DropReport`. |
+//! | REQ-2 | SHIPPED | impl: `pub fn load_ppo_policy(weights_path: &Path, cfg: MlpPolicyConfig, strict: bool) -> FerrotorchResult<(MlpPolicy, DropReport)>` at `ferrotorch-rl/src/safetensors_loader.rs:66-107`; non-test consumer: `ferrotorch-rl/examples/ppo_policy_dump.rs:202` invokes the loader in the production parity-harness binary. Re-exported as `ferrotorch_rl::load_ppo_policy`. |
+//! | REQ-3 | SHIPPED | impl: `ferrotorch-rl/src/safetensors_loader.rs:71-77` `let state = load_safetensors::<f32>(weights_path).map_err(|e| FerrotorchError::InvalidArgument { message: format!(...) })?;`; non-test consumer: the only call-site of the loader is `ferrotorch-rl/examples/ppo_policy_dump.rs:202`, which depends on the path-embedded error message for the user-facing diagnostic. |
+//! | REQ-4 | SHIPPED | impl: `ferrotorch-rl/src/safetensors_loader.rs:79-91` builds `policy = MlpPolicy::new(cfg)?`, computes `expected: HashSet<String>` from `policy.named_parameters()`, walks `state.keys()` to identify unmapped keys, sorts them; non-test consumer: `ferrotorch-rl/examples/ppo_policy_dump.rs:202` invokes this path. |
+//! | REQ-5 | SHIPPED | impl: `ferrotorch-rl/src/safetensors_loader.rs:92-96` `if strict && !unmapped.is_empty() { return Err(...) }`; non-test consumer: `ferrotorch-rl/examples/ppo_policy_dump.rs:202` invokes with `strict = true` — a non-empty `unmapped` would surface as a loud error preventing partial-load. |
+//! | REQ-6 | SHIPPED | impl: `ferrotorch-rl/src/safetensors_loader.rs:98-106` filter+load+return path; non-test consumer: `ferrotorch-rl/examples/ppo_policy_dump.rs:202` (with `strict=true`) depends on the filter step to ensure the inner `load_state_dict` doesn't choke on an extra key. |
+//! | REQ-7 | SHIPPED | impl: `ferrotorch-rl/src/safetensors_loader.rs:105` `policy.load_state_dict(&filtered, /* strict = */ true)?;` — the inner strict-mode is hardcoded `true`; non-test consumer: `ferrotorch-rl/examples/ppo_policy_dump.rs:202` depends on missing-key detection (a missing parameter would produce a wrong-output policy on first forward, the #1141 class of bug).
 
 use std::path::Path;
 
