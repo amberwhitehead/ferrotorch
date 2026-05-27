@@ -935,7 +935,7 @@ mod tests {
         let out_scalar = fake_quantize_per_tensor_affine(&input, 1.0, 0, -128, 127).unwrap();
         let dt = out_tensor.data().unwrap();
         let ds = out_scalar.data().unwrap();
-        assert_eq!(dt.as_ref(), ds.as_ref());
+        assert_eq!(dt, ds);
     }
 
     #[test]

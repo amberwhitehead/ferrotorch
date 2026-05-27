@@ -7,6 +7,7 @@
 //!   - 0-d input (`input.numel() == 0` — buggy condition; numel of a 0-d
 //!     tensor is 1, not 0, so this filter doesn't actually fire on 0-d!)
 //!   - Any negative-index value
+//!
 //! Without parity coverage for these cases the impl is unverified there.
 //!
 //! D7: `pub fn take` at `indexing.rs:3110-3168` correctly wraps negative

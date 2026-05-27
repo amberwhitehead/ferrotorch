@@ -2141,6 +2141,10 @@ mod tests {
     }
 
     #[test]
+    #[allow(
+        clippy::float_cmp,
+        reason = "gammainc/gammaincc boundary values (a=0 -> 1.0, x=0 -> 0.0, x=inf -> 1.0/0.0) are EXACT mathematical limits torch returns, not floating approximations"
+    )]
     fn gammainc_boundary_cases_match_torch() {
         // Per aten/src/ATen/native/Math.h calc_igamma / calc_igammac, verified
         // against live torch: gammainc(0, 2)=1, gammainc(2, 0)=0,
@@ -2263,6 +2267,10 @@ mod tests {
     }
 
     #[test]
+    #[allow(
+        clippy::float_cmp,
+        reason = "mvlgamma is a literal alias of multigammaln (same code path); bit-exact equality asserts they are identical, not approximately equal"
+    )]
     fn multigammaln_p1_is_lgamma() {
         // Γ_1(a) = Γ(a), so multigammaln(a, 1) == lgamma(a).
         let a = t(&[2.5], &[1]);
@@ -2349,6 +2357,10 @@ mod tests {
     }
 
     #[test]
+    #[allow(
+        clippy::float_cmp,
+        reason = "gammasgn returns the EXACT sign value +1.0 for positive/zero inputs; bit-exact equality is the contract, not an epsilon"
+    )]
     fn gammaln_sign_positive_and_zero() {
         let input = t(&[0.0, 1.0, 100.0], &[3]);
         let r = gammaln_sign(&input).unwrap();

@@ -2818,6 +2818,10 @@ mod tests {
     }
 
     #[test]
+    #[allow(
+        clippy::float_cmp,
+        reason = "nextafter returns the EXACT one-ULP IEEE neighbour; bit-exact equality against f64::next_up/next_down/from_bits is the contract being tested, not an approximation"
+    )]
     fn test_nextafter_matches_std_nextafter_f64() {
         // Oracle: std-library `f64::next_up`/`next_down` give the exact IEEE
         // one-ULP neighbours. We compare ferrotorch's `nextafter` against the
@@ -2837,6 +2841,10 @@ mod tests {
     }
 
     #[test]
+    #[allow(
+        clippy::float_cmp,
+        reason = "asserting the exact tie result (a==b -> b, carrying b's signed-zero) requires bit-exact equality, not an epsilon comparison"
+    )]
     fn test_nextafter_equal_returns_b_and_nan_propagates() {
         // a == b -> result is b (carries b's sign for the signed-zero tie).
         let a = leaf_vec_f64(&[5.0, 0.0], false);
@@ -2855,6 +2863,10 @@ mod tests {
     }
 
     #[test]
+    #[allow(
+        clippy::float_cmp,
+        reason = "the VJP tie mask is exactly 1.0 (pass-through) or 0.0 (masked); bit-exact equality is the contract per derivatives.yaml nextafter"
+    )]
     fn test_nextafter_backward_passthrough_and_tie_mask() {
         // VJP per derivatives.yaml:1322-1324:
         //   self: where(self != other, grad, 0); other: zeros_like(other).

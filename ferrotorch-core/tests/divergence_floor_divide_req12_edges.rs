@@ -18,20 +18,20 @@
 //! 2. `floor_divide(finite, ±Inf)`: NOT MENTIONED in the docstring at
 //!    all, and the audit shape A5 predicted `0` for all such cases.
 //!    Live torch on 2026-05-25 returns a 2x2 sign-pattern:
-//!      floor_divide( 5, +Inf) =  0
-//!      floor_divide(-5, +Inf) = -1   <- sign-correction path triggers!
-//!      floor_divide( 5, -Inf) = -1   <- sign-correction path triggers!
-//!      floor_divide(-5, -Inf) =  0
+//!    floor_divide( 5, +Inf) =  0
+//!    floor_divide(-5, +Inf) = -1   <- sign-correction path triggers!
+//!    floor_divide( 5, -Inf) = -1   <- sign-correction path triggers!
+//!    floor_divide(-5, -Inf) =  0
 //!    These are the algorithm's `(mod != 0) && (b<0) != (mod<0)` adjust-
 //!    `div`-by-1 step. If the impl forgot the Inf-divisor case the result
 //!    would be `0` across the board (a flat zero).
 //! 3. Signed-zero output: builder's algorithm includes the
 //!    `copysign(0, a/b)` step (`arithmetic.rs:2761-2766`) but no unit
 //!    test verifies the sign-bit of the result. Live torch:
-//!      floor_divide( 0, +3) = +0   (0x00000000)
-//!      floor_divide( 0, -3) = -0   (0x80000000)
-//!      floor_divide(-0, +3) = -0   (0x80000000)
-//!      floor_divide(-0, -3) = +0   (0x00000000)
+//!    floor_divide( 0, +3) = +0   (0x00000000)
+//!    floor_divide( 0, -3) = -0   (0x80000000)
+//!    floor_divide(-0, +3) = -0   (0x80000000)
+//!    floor_divide(-0, -3) = +0   (0x00000000)
 //! 4. Clean-division identity: builder asserts the identity
 //!    `a == fd(a,b)*b + rem(a,b)` only at (-7, 3). The rem=0 branch
 //!    (clean division) is a distinct algorithm path (the `m != 0` guard

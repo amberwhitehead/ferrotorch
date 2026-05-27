@@ -7,24 +7,24 @@
 //!
 //!   1. `ferrotorch-core/src/methods.rs:680-681` (Tensor::index_fill_t
 //!      rustdoc):
-//!        "Negative index values are rejected (R-DEV-1 narrower contract,
-//!         matching the rest of ferrotorch's `IntTensor` index validation)."
+//!      "Negative index values are rejected (R-DEV-1 narrower contract,
+//!      matching the rest of ferrotorch's `IntTensor` index validation)."
 //!      This is the PUBLIC API doc. A user reading it would write code
 //!      assuming negative indices error, then be surprised when they
 //!      silently wrap.
 //!
 //!   2. `.design/ferrotorch-core/grad_fns/indexing.md:201` (REQ-8 prose):
-//!        "Negative index values rejected (ferrotorch narrower contract
-//!         shared with the rest of the IntTensor index family)."
+//!      "Negative index values rejected (ferrotorch narrower contract
+//!      shared with the rest of the IntTensor index family)."
 //!
 //!   3. `.design/ferrotorch-core/grad_fns/indexing.md:653` (Parity contract
 //!      table for `index_fill`):
-//!        "Negative index values: ferrotorch rejects (narrower contract
-//!         shared with the rest of the IntTensor index family); upstream
-//!         accepts via wrap."
+//!      "Negative index values: ferrotorch rejects (narrower contract
+//!      shared with the rest of the IntTensor index family); upstream
+//!      accepts via wrap."
 //!      AND on the same line:
-//!        "0-d input: upstream unsqueezes to 1-d at `:1917`; ferrotorch
-//!         rejects (#1256 narrower-contract gap)."
+//!      "0-d input: upstream unsqueezes to 1-d at `:1917`; ferrotorch
+//!      rejects (#1256 narrower-contract gap)."
 //!      Both halves of this sentence are stale post-#1272 and post-#1273.
 //!
 //! Per goal.md R-CITE-2 + R-HONEST-2 every behavioral claim in a SHIPPED

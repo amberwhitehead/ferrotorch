@@ -139,7 +139,7 @@ fn sign_non_nan_branch_matches_torch() {
         2.5f32,
         -3.0f32,
     ];
-    let expected = vec![0.0f32, 0.0f32, 1.0f32, -1.0f32, 1.0f32, -1.0f32];
+    let expected = [0.0f32, 0.0f32, 1.0f32, -1.0f32, 1.0f32, -1.0f32];
 
     let t = Tensor::from_storage(
         TensorStorage::cpu(inputs.clone()),

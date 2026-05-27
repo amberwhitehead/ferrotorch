@@ -162,6 +162,7 @@ fn divergence_1270_cumulative_md_req_table_rows_446_447_stale_test_cites() {
 ///   3. Running the generic test programmatically and confirming it STILL
 ///      PASSES.
 ///   4. Restoring arithmetic.md.
+///
 /// The test FAILS if the generic test catches the contrived divergence
 /// (meaning gap A is closed and this test is obsolete).
 #[test]

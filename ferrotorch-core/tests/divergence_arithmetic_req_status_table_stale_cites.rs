@@ -314,7 +314,7 @@ fn divergence_arithmetic_req_status_table_consumer_cites_resolve() {
             let op = op_raw.strip_prefix("Tensor::").unwrap_or(&op_raw);
             // Skip ops not expected for this REQ (the row may cite many
             // unrelated symbols like `arithmetic::add` which is fine).
-            if !expected_ops.iter().any(|&e| e == op) {
+            if !expected_ops.contains(&op) {
                 continue;
             }
             // Only audit methods.rs / inplace.rs / forward_ad.rs / einsum.rs etc.

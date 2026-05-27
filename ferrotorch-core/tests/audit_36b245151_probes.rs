@@ -7,6 +7,10 @@
 
 use ferrotorch_core::{IntTensor, from_vec, grad_fns};
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "test probe helper mirrors fake_quantize_per_channel_affine's full (input, shape, scale, zero_point, axis, qmin, qmax) parameter surface; bundling into a struct adds no test clarity"
+)]
 fn run(
     name: &str,
     input: Vec<f32>,

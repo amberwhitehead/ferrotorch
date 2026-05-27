@@ -20,13 +20,13 @@
 //!
 //! - A. scale=0 across (zp ∈ {0, 64}) × (qmin/qmax ∈ {int8, uint8-anchored})
 //! - C. scale<0 magnitude variants: scale=-2.0 saturates non-trivially
-//!      (NOT a clean double-negation — torch returns `[-0.0, 2.0, 4.0, 4.0]`
-//!      for input `[1,2,3,4]`, scale=-2.0, zp=0, qmin/qmax=int8).
+//!   (NOT a clean double-negation — torch returns `[-0.0, 2.0, 4.0, 4.0]`
+//!   for input `[1,2,3,4]`, scale=-2.0, zp=0, qmin/qmax=int8).
 //! - E. cross product of (scale ∈ {0, -0.1, NaN}) × (shape ∈ {1-D, 2-D})
-//!      × (zp ∈ {0, 64}) × (range ∈ {int8, uint8-zp-compatible}). The
-//!      NON-TRIVIAL case is `scale=-0.1, zp=0, qmin=0, qmax=255` where torch
-//!      saturates to qmin=0 then dequant yields `-0.0` for all elements
-//!      (input cleared, not double-negated).
+//!   × (zp ∈ {0, 64}) × (range ∈ {int8, uint8-zp-compatible}). The
+//!   NON-TRIVIAL case is `scale=-0.1, zp=0, qmin=0, qmax=255` where torch
+//!   saturates to qmin=0 then dequant yields `-0.0` for all elements
+//!   (input cleared, not double-negated).
 
 use ferrotorch_core::{from_vec, grad_fns};
 

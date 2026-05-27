@@ -31,7 +31,7 @@
 use ferrotorch_core::grad_fns::indexing::index_fill;
 use ferrotorch_core::int_tensor::IntTensor;
 use ferrotorch_core::storage::TensorStorage;
-use ferrotorch_core::tensor::{GradFn, Tensor};
+use ferrotorch_core::tensor::Tensor;
 
 #[test]
 fn index_fill_backward_negative_index_matches_upstream_grad() {

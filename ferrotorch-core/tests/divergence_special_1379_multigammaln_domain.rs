@@ -5,13 +5,15 @@
 //! on this machine (2026-05-27), NOT copied from the ferrotorch side (R-CHAR-3).
 //!
 //! Oracle session (`python3`):
-//!   >>> import torch, scipy.special as sp
-//!   >>> torch.special.multigammaln(torch.tensor([0.3], dtype=torch.float64), 3).item()
-//!   6.026863353182922
-//!   >>> torch.special.multigammaln(torch.tensor([-0.4], dtype=torch.float64), 2).item()
-//!   4.244962700260123
-//!   >>> torch.special.multigammaln(torch.tensor([0.5], dtype=torch.float64), 3).item()
-//!   inf
+//! ```text
+//! >>> import torch, scipy.special as sp
+//! >>> torch.special.multigammaln(torch.tensor([0.3], dtype=torch.float64), 3).item()
+//! 6.026863353182922
+//! >>> torch.special.multigammaln(torch.tensor([-0.4], dtype=torch.float64), 2).item()
+//! 4.244962700260123
+//! >>> torch.special.multigammaln(torch.tensor([0.5], dtype=torch.float64), 3).item()
+//! inf
+//! ```
 //!
 //! torch's `mvlgamma` kernel (aten/src/ATen/native/UnaryOps.cpp:887-905) performs
 //! NO domain check beyond `p >= 1`. It computes

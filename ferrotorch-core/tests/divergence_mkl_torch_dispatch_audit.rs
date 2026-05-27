@@ -43,6 +43,7 @@
 //! dispatches:
 //!   - `T,T,m=n=1,k=16384,lda=16384,ldb=1` (torch): `0xc28e882b` @ 14 threads
 //!   - `N,N,n=m=1,k=16384,ldb=1,lda=16384` (ferrotorch): `0xc28e8836` @ ANY thread count
+//!
 //! The N,N + swapped-operand path lands on MKL's small-matrix serial
 //! kernel which IGNORES the MKL thread count; the T,T path lands on
 //! MKL's threaded dot kernel which splits K across the thread pool.
@@ -66,9 +67,10 @@
 //! is the thing MKL keys its kernel selection on.
 //!
 //! This invalidates the comment at `ferrotorch-core/src/ops/linalg.rs:32`:
-//!   > "directly via the helpers ... which mirrors torch's exact call shape"
-//! It does NOT mirror torch's call shape; it mirrors a mathematically
-//! equivalent re-expression that lands on a different MKL kernel.
+//!
+//! > "directly via the helpers ... which mirrors torch's exact call shape"
+//! > It does NOT mirror torch's call shape; it mirrors a mathematically
+//! > equivalent re-expression that lands on a different MKL kernel.
 //!
 //! Tracking: filed as a blocker against #1538 (which closed prematurely
 //! without forensically pinning torch's dispatch shape).

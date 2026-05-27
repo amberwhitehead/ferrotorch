@@ -42,7 +42,6 @@
 //!    impl. The harness gap is not a divergence per se but it hides
 //!    Divergences A/B/C from the parity sweep.
 
-use ferrotorch_core::GradFn;
 use ferrotorch_core::grad_fns::indexing::{ScatterReduce, index_add, index_copy, scatter_reduce};
 use ferrotorch_core::int_tensor::IntTensor;
 use ferrotorch_core::storage::TensorStorage;
@@ -76,8 +75,10 @@ fn audit_56e81de88_index_add_0d_self_1d_len1_source_should_error() {
 /// Divergence B: index_copy with 0-d source on 1-D self.
 /// Upstream broadcasts scalar; ferrotorch's shared helper rejects.
 /// Live oracle:
-///   >>> torch.tensor([1.,2.,3.,4.]).index_copy(0, torch.tensor([1]), torch.tensor(99.))
-///   tensor([1., 99., 3., 4.])
+/// ```text
+/// >>> torch.tensor([1.,2.,3.,4.]).index_copy(0, torch.tensor([1]), torch.tensor(99.))
+/// tensor([1., 99., 3., 4.])
+/// ```
 #[test]
 fn audit_56e81de88_index_copy_0d_source_on_1d_self_should_accept() {
     let input = Tensor::from_storage(
