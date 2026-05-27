@@ -31,10 +31,10 @@
 //!     logabsdet grad is inv(A)ᵀ regardless of det sign (verified on a
 //!     negative-determinant matrix).
 
+use ferrotorch_core::Tensor;
 use ferrotorch_core::grad_fns::reduction::sum as reduce_sum;
 use ferrotorch_core::linalg as linalg_fwd;
 use ferrotorch_core::storage::TensorStorage;
-use ferrotorch_core::Tensor;
 
 fn leaf(data: &[f64], shape: &[usize]) -> Tensor<f64> {
     Tensor::from_storage(TensorStorage::cpu(data.to_vec()), shape.to_vec(), true).unwrap()
