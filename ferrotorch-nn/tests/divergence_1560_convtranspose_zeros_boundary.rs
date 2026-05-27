@@ -33,8 +33,12 @@ fn tensor(data: &[f32], shape: &[usize]) -> Tensor<f32> {
 /// Divergence: ferrotorch ConvTranspose1d (Zeros padding) with padding=1,
 /// output_padding=1 diverges from torch across the output. The boundary cell
 /// (index 7) is ferrotorch=0 vs torch=19.366032. Tracking: #1560.
+// #1560 FIXED: ConvTranspose forward now appends `output_padding` trailing
+// zeros to the stride-inserted upsampled signal before the internal stride-1
+// convolution, so the boundary cells receive their transposed-conv contribution
+// (index 7 = 19.366) instead of staying at 0. This test is now permanent
+// regression coverage.
 #[test]
-#[ignore = "divergence: ConvTranspose1d Zeros forward (pad=1,outpad=1) wrong; index7 ferro=0 vs torch=19.366; pre-existing, NOT in #1443 scope; tracking #1560"]
 fn divergence_convtranspose1d_zeros_padding_outpad_matches_torch() {
     // op_db conv_transpose1d sample i=6.
     let input = tensor(

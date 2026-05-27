@@ -2088,7 +2088,38 @@ impl<T: Float> Module<T> for ConvTranspose2d<T> {
 
         // Step 1: Insert zeros between input elements (stride insertion).
         let input_data = input.data_vec()?;
-        let (upsampled, h_up, w_up) = stride_insert_zeros(&input_data, batch, c_in, h, w, sh, sw);
+        let (upsampled, h_up_core, w_up_core) =
+            stride_insert_zeros(&input_data, batch, c_in, h, w, sh, sw);
+
+        // `output_padding` extends ONE side (bottom rows / right cols) of the
+        // output. Those cells are NOT zero-padding: per upstream `col2im`
+        // (`aten/src/ATen/native/im2col.h:104-146`) the transposed convolution
+        // scatters into an output of size `(in-1)*stride - 2*pad +
+        // dilation*(k-1) + output_padding + 1`
+        // (`NaiveConvolutionTranspose2d.cpp:109-112`), so the trailing
+        // `output_padding` rows/cols DO receive kernel-tap contributions.
+        // Append `oph` rows / `opw` cols of zeros to the (stride-inserted)
+        // upsampled signal so the internal stride-1 convolution emits all
+        // `h_out * w_out` cells directly, instead of leaving the boundary at 0
+        // (the #1560 divergence). Closes #1560.
+        let h_up = h_up_core + oph;
+        let w_up = w_up_core + opw;
+        let upsampled = if oph > 0 || opw > 0 {
+            let zero = <T as num_traits::Zero>::zero();
+            let mut ext = vec![zero; batch * c_in * h_up * w_up];
+            for b in 0..batch {
+                for c in 0..c_in {
+                    for ih in 0..h_up_core {
+                        let src = ((b * c_in + c) * h_up_core + ih) * w_up_core;
+                        let dst = ((b * c_in + c) * h_up + ih) * w_up;
+                        ext[dst..dst + w_up_core].copy_from_slice(&upsampled[src..src + w_up_core]);
+                    }
+                }
+            }
+            ext
+        } else {
+            upsampled
+        };
 
         // Step 2: Flip the kernel and transpose channel dimensions.
         // Weight: [in_channels, out_channels, kH, kW]
@@ -2117,13 +2148,12 @@ impl<T: Float> Module<T> for ConvTranspose2d<T> {
             internal_pad_w,
         );
 
-        // h_out_base and w_out_base from the internal convolution.
-        let h_out_base = (h_up + 2 * internal_pad_h - kh) + 1;
-        let w_out_base = (w_up + 2 * internal_pad_w - kw) + 1;
-
-        // The final output size includes output_padding.
-        let h_out = h_out_base + oph;
-        let w_out = w_out_base + opw;
+        // The internal stride-1 convolution over the `output_padding`-extended
+        // upsampled signal now emits exactly `h_out * w_out` cells.
+        let h_out = (h_up + 2 * internal_pad_h - kh) + 1;
+        let w_out = (w_up + 2 * internal_pad_w - kw) + 1;
+        debug_assert_eq!(h_out, (h_up_core + 2 * internal_pad_h - kh) + 1 + oph);
+        debug_assert_eq!(w_out, (w_up_core + 2 * internal_pad_w - kw) + 1 + opw);
 
         // Reshape flipped kernel to 2-D: [C_out, C_in * kH * kW]
         let flipped_2d = Tensor::from_storage(
@@ -2148,14 +2178,16 @@ impl<T: Float> Module<T> for ConvTranspose2d<T> {
             let out_b = mm(&flipped_2d, &cols_b)?;
             let out_data = out_b.data()?;
 
-            // Copy the base convolution result; extra output_padding rows/cols
-            // remain zero (which is correct by definition).
+            // Copy the full convolution result. The internal conv now emits all
+            // `h_out * w_out` cells (including the `output_padding` boundary),
+            // so no cell is left at 0 (the #1560 fix). `col_cols == h_out *
+            // w_out` here.
             let out_start = b * self.out_channels * h_out * w_out;
             for c in 0..self.out_channels {
-                for oh in 0..h_out_base {
-                    for ow in 0..w_out_base {
+                for oh in 0..h_out {
+                    for ow in 0..w_out {
                         output[out_start + c * h_out * w_out + oh * w_out + ow] =
-                            out_data[c * h_out_base * w_out_base + oh * w_out_base + ow];
+                            out_data[c * h_out * w_out + oh * w_out + ow];
                     }
                 }
             }
@@ -3460,8 +3492,35 @@ impl<T: Float> Module<T> for ConvTranspose1d<T> {
         // Step 1: Insert zeros between input elements (stride insertion).
         // Treat [B, C, L] as [B, C, 1, L] for the 2-D helper.
         let input_data = input.data_vec()?;
-        let (upsampled, _h_up, w_up) =
+        let (upsampled, _h_up, w_up_core) =
             stride_insert_zeros(&input_data, batch, c_in, 1, length, 1, s);
+
+        // `output_padding` extends ONE side of the output by `op` cells. Those
+        // cells are NOT zero-padding: per upstream `col2im`
+        // (`aten/src/ATen/native/im2col.h:104-146`), the transposed convolution
+        // scatters into an output of size `(L_in-1)*stride - 2*pad +
+        // dilation*(k-1) + output_padding + 1`
+        // (`NaiveConvolutionTranspose2d.cpp:109-112`), so the trailing
+        // `output_padding` positions DO receive kernel-tap contributions. We
+        // realise that by appending `op` trailing zeros to the (stride-inserted)
+        // upsampled signal so the internal stride-1 convolution emits all
+        // `l_out` columns directly, rather than copying `w_out_base` columns and
+        // leaving the boundary at 0 (the #1560 divergence). Closes #1560.
+        let w_up = w_up_core + op;
+        let upsampled = if op > 0 {
+            let zero = <T as num_traits::Zero>::zero();
+            let mut ext = vec![zero; batch * c_in * w_up];
+            for b in 0..batch {
+                for c in 0..c_in {
+                    let src = (b * c_in + c) * w_up_core;
+                    let dst = (b * c_in + c) * w_up;
+                    ext[dst..dst + w_up_core].copy_from_slice(&upsampled[src..src + w_up_core]);
+                }
+            }
+            ext
+        } else {
+            upsampled
+        };
 
         // Step 2: Flip the kernel and transpose channel dimensions.
         // Weight: [in_channels, out_channels, k] -> treat as [in_channels, out_channels, 1, k]
@@ -3487,11 +3546,10 @@ impl<T: Float> Module<T> for ConvTranspose1d<T> {
             internal_pad_w,
         );
 
-        // w_out_base from the internal convolution.
-        let w_out_base = (w_up + 2 * internal_pad_w - k) + 1;
-
-        // The final output size includes output_padding.
-        let l_out = w_out_base + op;
+        // The internal stride-1 convolution over the `op`-extended upsampled
+        // signal now emits exactly `l_out` columns.
+        let l_out = (w_up + 2 * internal_pad_w - k) + 1;
+        debug_assert_eq!(l_out, (w_up_core + 2 * internal_pad_w - k) + 1 + op);
 
         // Reshape flipped kernel to 2-D: [C_out, C_in * 1 * k]
         let flipped_2d = Tensor::from_storage(
@@ -3516,12 +3574,13 @@ impl<T: Float> Module<T> for ConvTranspose1d<T> {
             let out_b = mm(&flipped_2d, &cols_b)?;
             let out_data = out_b.data()?;
 
-            // Copy the base convolution result; extra output_padding positions
-            // remain zero (which is correct by definition).
+            // Copy the full convolution result. The internal conv now emits all
+            // `l_out` columns (including the `output_padding` boundary), so no
+            // cell is left at 0 (the #1560 fix). `col_cols == l_out` here.
             let out_start = b * self.out_channels * l_out;
             for c in 0..self.out_channels {
-                for ow in 0..w_out_base {
-                    output[out_start + c * l_out + ow] = out_data[c * w_out_base + ow];
+                for ow in 0..l_out {
+                    output[out_start + c * l_out + ow] = out_data[c * l_out + ow];
                 }
             }
         }
@@ -4118,8 +4177,43 @@ impl<T: Float> Module<T> for ConvTranspose3d<T> {
 
         // Step 1: Insert zeros between input elements (stride insertion).
         let input_data = input.data_vec()?;
-        let (upsampled, d_up, h_up, w_up) =
+        let (upsampled, d_up_core, h_up_core, w_up_core) =
             stride_insert_zeros_3d(&input_data, batch, c_in, d, h, w, sd, sh, sw);
+
+        // `output_padding` extends ONE side (trailing depth/rows/cols) of the
+        // output. Those cells are NOT zero-padding: per upstream `col2im`
+        // (`aten/src/ATen/native/im2col.h:104-146`) the transposed convolution
+        // scatters into an output of size `(in-1)*stride - 2*pad +
+        // dilation*(k-1) + output_padding + 1`
+        // (`NaiveConvolutionTranspose3d.cpp` output-size formula), so the
+        // trailing `output_padding` planes/rows/cols DO receive kernel-tap
+        // contributions. Append `opd`/`oph`/`opw` zero planes/rows/cols to the
+        // (stride-inserted) upsampled signal so the internal stride-1
+        // convolution emits all output cells directly, rather than leaving the
+        // boundary at 0 (the #1560 divergence). Closes #1560.
+        let d_up = d_up_core + opd;
+        let h_up = h_up_core + oph;
+        let w_up = w_up_core + opw;
+        let upsampled = if opd > 0 || oph > 0 || opw > 0 {
+            let zero = <T as num_traits::Zero>::zero();
+            let mut ext = vec![zero; batch * c_in * d_up * h_up * w_up];
+            for b in 0..batch {
+                for c in 0..c_in {
+                    for id in 0..d_up_core {
+                        for ih in 0..h_up_core {
+                            let src =
+                                (((b * c_in + c) * d_up_core + id) * h_up_core + ih) * w_up_core;
+                            let dst = (((b * c_in + c) * d_up + id) * h_up + ih) * w_up;
+                            ext[dst..dst + w_up_core]
+                                .copy_from_slice(&upsampled[src..src + w_up_core]);
+                        }
+                    }
+                }
+            }
+            ext
+        } else {
+            upsampled
+        };
 
         // Step 2: Flip the kernel and transpose channel dimensions.
         let weight_data = self.weight.data_vec()?;
@@ -4158,15 +4252,14 @@ impl<T: Float> Module<T> for ConvTranspose3d<T> {
             internal_pad_w,
         );
 
-        // Base output sizes from the internal convolution.
-        let d_out_base = (d_up + 2 * internal_pad_d - kd) + 1;
-        let h_out_base = (h_up + 2 * internal_pad_h - kh) + 1;
-        let w_out_base = (w_up + 2 * internal_pad_w - kw) + 1;
-
-        // The final output size includes output_padding.
-        let d_out = d_out_base + opd;
-        let h_out = h_out_base + oph;
-        let w_out = w_out_base + opw;
+        // The internal stride-1 convolution over the `output_padding`-extended
+        // upsampled signal now emits all output cells.
+        let d_out = (d_up + 2 * internal_pad_d - kd) + 1;
+        let h_out = (h_up + 2 * internal_pad_h - kh) + 1;
+        let w_out = (w_up + 2 * internal_pad_w - kw) + 1;
+        debug_assert_eq!(d_out, (d_up_core + 2 * internal_pad_d - kd) + 1 + opd);
+        debug_assert_eq!(h_out, (h_up_core + 2 * internal_pad_h - kh) + 1 + oph);
+        debug_assert_eq!(w_out, (w_up_core + 2 * internal_pad_w - kw) + 1 + opw);
 
         // Reshape flipped kernel to 2-D: [C_out, C_in * kD * kH * kW]
         let flipped_2d = Tensor::from_storage(
@@ -4178,7 +4271,6 @@ impl<T: Float> Module<T> for ConvTranspose3d<T> {
         // Per-batch matmul.
         let zero = <T as num_traits::Zero>::zero();
         let spatial_out = d_out * h_out * w_out;
-        let spatial_base = d_out_base * h_out_base * w_out_base;
         let mut output = vec![zero; batch * self.out_channels * spatial_out];
 
         for b in 0..batch {
@@ -4193,21 +4285,20 @@ impl<T: Float> Module<T> for ConvTranspose3d<T> {
             let out_b = mm(&flipped_2d, &cols_b)?;
             let out_data = out_b.data()?;
 
-            // Copy the base convolution result; extra output_padding positions
-            // remain zero (which is correct by definition).
+            // Copy the full convolution result. The internal conv now emits all
+            // output cells (including the `output_padding` boundary), so no cell
+            // is left at 0 (the #1560 fix). `col_cols == spatial_out` here.
             let out_start = b * self.out_channels * spatial_out;
             for c in 0..self.out_channels {
-                for od in 0..d_out_base {
-                    for oh in 0..h_out_base {
-                        for ow in 0..w_out_base {
+                for od in 0..d_out {
+                    for oh in 0..h_out {
+                        for ow in 0..w_out {
                             output[out_start
                                 + c * spatial_out
                                 + od * h_out * w_out
                                 + oh * w_out
-                                + ow] = out_data[c * spatial_base
-                                + od * h_out_base * w_out_base
-                                + oh * w_out_base
-                                + ow];
+                                + ow] =
+                                out_data[c * spatial_out + od * h_out * w_out + oh * w_out + ow];
                         }
                     }
                 }
