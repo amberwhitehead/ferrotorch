@@ -40,7 +40,7 @@
 //! | REQ-29 (`signbit`) | SHIPPED | `signbit` returns `BoolTensor` via `num_traits::Float::is_sign_negative`; non-diff per upstream; consumed by `lib.rs:186` re-export; closes #1332. |
 //! | REQ-30 (`clip`) | SHIPPED | `Tensor::clip_t` delegates to `clamp` per upstream's literal pass-through; closes #1333. |
 //! | REQ-31 (`copysign`) | SHIPPED | `copysign` + `CopysignBackward` (grad to magnitude only, `magnitude==0 → 0` mask) consumed by `lib.rs:186` re-export; closes #1334. |
-//! | REQ-32 (`nextafter`) | SHIPPED | `nextafter` + `NextafterBackward` (per-dtype IEEE-754 one-ULP step via `f64_one_ulp` bit manipulation — MSRV 1.85 precludes `f64::next_up`/`next_down`); VJP `self: where(self != other, grad, 0)`, `other: zeros_like` per `derivatives.yaml:1322-1324`; consumed by `lib.rs:183` re-export; closes #1335. |
+//! | REQ-32 (`nextafter`) | SHIPPED | `nextafter` + `NextafterBackward` (native-width IEEE-754 one-ULP step: `f32_one_ulp`/`f64_one_ulp`/`u16_one_ulp` per dtype — MSRV 1.85 precludes `f32::next_up`/`next_down`, stable in 1.86); VJP `self: where(self != other, grad, 0)`, `other: zeros_like` per `derivatives.yaml:1322-1324`; consumed by `lib.rs:183` re-export; closes #1335 #1556. |
 //! | REQ-33 (`hypot`) | SHIPPED | `hypot` + `HypotBackward` (joint VJP via saved result, `result==0 → 0` mask) consumed by `lib.rs:186` re-export; closes #1336. |
 
 use std::any::TypeId;
@@ -1981,10 +1981,65 @@ fn f64_one_ulp(x: f64, up: bool) -> f64 {
     f64::from_bits(new_bits)
 }
 
+/// One-ULP step of an `f32` toward `+inf` (`up = true`) or `-inf`
+/// (`up = false`). The f64 routing in the original [`nextafter_scalar`] stepped
+/// one ULP in `f64`, producing a value strictly *between* two adjacent `f32`s
+/// that `T::from::<f32>` then rounded straight back to the original `f32` — so
+/// the op was a no-op for every `f32` input (#1335/#1556). Stepping at the
+/// native `u32` width matches `std::nextafter` at the tensor dtype
+/// (`BinaryOpsKernel.cpp:1257` `std::nextafter(a, b)` under
+/// `AT_DISPATCH_FLOATING_TYPES`).
+#[inline]
+#[allow(
+    clippy::float_cmp,
+    reason = "exact IEEE-754 zero test gates the cross-zero ULP branch; \
+              an epsilon tolerance would corrupt nextafter's bit-exact step."
+)]
+fn f32_one_ulp(x: f32, up: bool) -> f32 {
+    debug_assert!(!x.is_nan());
+    if x == 0.0 {
+        return if up {
+            f32::from_bits(1)
+        } else {
+            -f32::from_bits(1)
+        };
+    }
+    let bits = x.to_bits();
+    let step_up_in_bits = up == (x > 0.0);
+    let new_bits = if step_up_in_bits { bits + 1 } else { bits - 1 };
+    f32::from_bits(new_bits)
+}
+
+/// One-ULP step of a `half` 16-bit float (`f16` or `bf16`) toward `+inf`
+/// (`up = true`) or `-inf` (`up = false`), parameterised by the value's sign
+/// and IEEE-754 bit pattern. Both `half::f16` and `half::bf16` share the same
+/// `[sign:1][exp][mantissa]` monotone layout, so the integer-increment trick
+/// is identical to the `f32`/`f64` cases; only the dtype reconstruction differs
+/// (handled by the caller via `to_bits`/`from_bits`). Returns the stepped
+/// 16-bit pattern.
+#[inline]
+fn u16_one_ulp(bits: u16, is_zero: bool, is_positive: bool, up: bool) -> u16 {
+    if is_zero {
+        // Smallest positive subnormal is 0x0001; its negation sets the sign
+        // bit (0x8001).
+        return if up { 0x0001 } else { 0x8001 };
+    }
+    let step_up_in_bits = up == is_positive;
+    if step_up_in_bits {
+        bits + 1
+    } else {
+        bits - 1
+    }
+}
+
 /// IEEE-754 next-representable value from `a` toward `b`, generic over the
-/// workspace `Float` dtypes. Routes through `f64` (every `Float: ToPrimitive`)
-/// and steps one ULP via [`f64_one_ulp`] bit manipulation, then rebuilds the
-/// target dtype via `T::from`. Matches `std::nextafter` semantics:
+/// workspace `Float` dtypes. The single ULP step is taken at the value's
+/// NATIVE width — `u32` for `f32`, `u64` for `f64`, `u16` for `f16`/`bf16` —
+/// matching `std::nextafter(a, b)` at the tensor dtype
+/// (`aten/src/ATen/native/cpu/BinaryOpsKernel.cpp:1257`). Stepping in `f64` and
+/// casting back (the prior behaviour) rounded straight back to the original
+/// value for every narrower dtype, making the op a no-op (#1335/#1556).
+/// Matches `std::nextafter` semantics:
 ///   - `a == b` (incl. signed-zero compare-equal) -> return `b`,
 ///   - either operand NaN -> NaN,
 ///   - otherwise step one ULP from `a` in the direction of `b`.
@@ -1998,18 +2053,56 @@ fn nextafter_scalar<T: Float>(a: T, b: T) -> T {
     if a.is_nan() || b.is_nan() {
         return T::nan();
     }
-    let af = <T as num_traits::ToPrimitive>::to_f64(&a).unwrap_or(f64::NAN);
-    let bf = <T as num_traits::ToPrimitive>::to_f64(&b).unwrap_or(f64::NAN);
     // `==` treats `-0.0 == 0.0`; `std::nextafter` returns `b` (the toward
     // operand) on equality so the result carries `b`'s sign for the zero tie.
-    if af == bf {
+    if a == b {
         return b;
     }
-    let stepped = f64_one_ulp(af, bf > af);
-    // Round-trip through `T`. For `T == f64` this is exact; for narrower
-    // dtypes the one-ULP-in-f64 step is conservative (still strictly toward
-    // `b`), which is the closest single-ULP target the dtype can express.
-    T::from(stepped).unwrap_or(b)
+    // Direction: step toward `+inf` iff `b > a`.
+    let up = b > a;
+
+    if is_f32::<T>() {
+        let af = <T as num_traits::ToPrimitive>::to_f32(&a).unwrap_or(f32::NAN);
+        let stepped = f32_one_ulp(af, up);
+        return T::from(stepped).unwrap_or(b);
+    }
+    if is_f64::<T>() {
+        let af = <T as num_traits::ToPrimitive>::to_f64(&a).unwrap_or(f64::NAN);
+        let stepped = f64_one_ulp(af, up);
+        return T::from(stepped).unwrap_or(b);
+    }
+    if is_f16::<T>() {
+        // `NumCast::from` is bit-exact here: TypeId has confirmed `T == f16`,
+        // so the cast is the identity that recovers the native `half::f16`.
+        let ah: half::f16 = match <half::f16 as num_traits::NumCast>::from(a) {
+            Some(v) => v,
+            None => return b,
+        };
+        let bits = u16_one_ulp(
+            ah.to_bits(),
+            ah == half::f16::ZERO,
+            ah > half::f16::ZERO,
+            up,
+        );
+        return T::from(half::f16::from_bits(bits)).unwrap_or(b);
+    }
+    if is_bf16::<T>() {
+        let ah: half::bf16 = match <half::bf16 as num_traits::NumCast>::from(a) {
+            Some(v) => v,
+            None => return b,
+        };
+        let bits = u16_one_ulp(
+            ah.to_bits(),
+            ah == half::bf16::ZERO,
+            ah > half::bf16::ZERO,
+            up,
+        );
+        return T::from(half::bf16::from_bits(bits)).unwrap_or(b);
+    }
+    // Unreachable for the four `Float` dtypes; conservative fallback steps in
+    // f64 (still strictly toward `b`).
+    let af = <T as num_traits::ToPrimitive>::to_f64(&a).unwrap_or(f64::NAN);
+    T::from(f64_one_ulp(af, up)).unwrap_or(b)
 }
 
 /// Backward node for `c = nextafter(a, b)`. The VJP routes `grad` straight
