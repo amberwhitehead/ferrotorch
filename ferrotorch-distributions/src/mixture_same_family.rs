@@ -24,6 +24,19 @@
 //! `rsample` is not supported (mixture sampling is non-reparameterizable
 //! without Gumbel-softmax tricks).
 //!
+//! # Multi-event-dim components (#1390)
+//!
+//! When the component distribution has a non-scalar `event_shape` (e.g. a
+//! mixture of `MultivariateNormal`s, or `Independent<Normal>`), each draw is
+//! a vector/tensor rather than a scalar. The component axis `K` sits BETWEEN
+//! the batch dims and the event dims: the component distribution's parameters
+//! have shape `[...batch, K, *event_shape]`, so a value of shape
+//! `[...batch, *event_shape]` is padded to `[...batch, K, *event_shape]`
+//! (inserting K just before the event dims), `component.log_prob` reduces the
+//! event dims yielding `[...batch, K]`, then the mixture takes a logsumexp
+//! over K. Mirrors upstream's `_pad` / `_event_ndims` machinery at
+//! `torch/distributions/mixture_same_family.py:100-109,168-217`.
+//!
 //! ## REQ status (per `.design/ferrotorch-distributions/mixture_same_family.md`)
 //!
 //! | REQ | Status | Evidence |
@@ -38,7 +51,7 @@
 //! | REQ-8 (`entropy` errors — no closed form) | SHIPPED | the `entropy` body returns `InvalidArgument` in `mixture_same_family.rs`. |
 //! | REQ-9 (mean/variance via law-of-total-variance) | SHIPPED | `fn mean` returns `sum_k mix_probs[k] * components.mean()[k]` and `fn variance` uses law of total variance `E[Var(X|K)] + Var(E[X|K])` mirroring `torch/distributions/mixture_same_family.py:155-189`; non-test consumer: `pub use mixture_same_family::MixtureSameFamily` re-export — every external `dist.mean()` / `dist.variance()` call hits these overrides; closes #1388. |
 //! | REQ-10 (cdf via sum cdf_x * mix_probs) | SHIPPED | `fn cdf` returns `sum_k mix_probs[k] * components.cdf(value)[k]` mirroring `torch/distributions/mixture_same_family.py:191-201`; non-test consumer: `pub use MixtureSameFamily` re-export; closes #1389. |
-//! | REQ-11 (multi-event-dim component support) | NOT-STARTED | blocker #1390 — current impl assumes scalar event_shape. |
+//! | REQ-11 (multi-event-dim component support) | SHIPPED | `event_ndims` (= `components.event_shape().len()`) is captured in `new`; `log_prob` pads the value with a K axis BEFORE the event dims (`event_size`-aware tiling), reduces each component's event dims via `components.log_prob`, then logsumexps over K. `event_shape()` forwards the component event_shape; `sample` gathers per-element over the event block. Mirrors `torch/distributions/mixture_same_family.py:100-109,168-217` (`_pad`/`_event_ndims`). Non-test consumer: `pub use mixture_same_family::MixtureSameFamily` re-export — GMM/mixture-density code that pairs a `Categorical` with an `Independent<Normal>` (multi-event) hits this path; test `test_mixture_multivariate_log_prob` (mixture of `Independent<Normal>` event_shape `[2]`) pins it. Closes #1390. |
 
 use ferrotorch_core::dtype::Float;
 use ferrotorch_core::error::{FerrotorchError, FerrotorchResult};
@@ -57,6 +70,13 @@ pub struct MixtureSameFamily<T: Float, D: Distribution<T>> {
     components: D,
     /// Number of mixture components (K). Equal to mixing.num_categories().
     num_components: usize,
+    /// Number of trailing dims that form a single component event (0 for a
+    /// scalar component family like `Normal`, >0 for `MultivariateNormal` /
+    /// `Independent<…>`). Captured from `components.event_shape().len()`.
+    event_ndims: usize,
+    /// Flat size of one component event (product of `event_shape`); 1 for a
+    /// scalar component.
+    event_size: usize,
     _phantom: std::marker::PhantomData<T>,
 }
 
@@ -75,10 +95,18 @@ impl<T: Float, D: Distribution<T>> MixtureSameFamily<T, D> {
                     .into(),
             });
         }
+        // Capture the component event shape (#1390). Mirrors upstream
+        // `self._event_ndims = len(event_shape)` at
+        // `mixture_same_family.py:102-103`.
+        let event_shape = components.event_shape();
+        let event_ndims = event_shape.len();
+        let event_size: usize = event_shape.iter().product::<usize>().max(1);
         Ok(Self {
             mixing,
             components,
             num_components: k,
+            event_ndims,
+            event_size,
             _phantom: std::marker::PhantomData,
         })
     }
@@ -131,29 +159,47 @@ impl<T: Float, D: Distribution<T>> Distribution<T> for MixtureSameFamily<T, D> {
 
         // Step 2: draw component samples. We expand the request shape with
         // a trailing K dim so the components distribution produces all
-        // possible outputs, then we index per-element with comp_idx.
+        // possible outputs of shape [..shape, K, *event_shape], then gather
+        // the chosen component's whole event block per output position.
+        let k = self.num_components;
+        let es = self.event_size;
         let mut comp_shape: Vec<usize> = shape.to_vec();
-        comp_shape.push(self.num_components);
+        comp_shape.push(k);
         let comp_samples = self.components.sample(&comp_shape)?;
         let comp_data = comp_samples.data_vec()?;
 
-        // Build the gathered output: for each output index i,
-        // out[i] = comp_data[i * K + comp_idx[i]].
-        let numel: usize = shape.iter().product();
-        let mut result = Vec::with_capacity(numel);
-        for (i, k_float) in comp_idx_data.iter().enumerate().take(numel) {
-            let k = k_float.to_usize().unwrap_or(0).min(self.num_components - 1);
-            let val = comp_data[i * self.num_components + k];
-            result.push(val);
+        // For each output position i (= sample position), gather the
+        // event_size-block of the chosen component: comp_data layout is
+        // [i, c, e] flattened as ((i*K + c)*es + e).
+        let num_pos: usize = shape.iter().product::<usize>().max(1);
+        let mut result = Vec::with_capacity(num_pos * es);
+        for i in 0..num_pos {
+            let c = comp_idx_data
+                .get(i)
+                .map(|kf| kf.to_usize().unwrap_or(0))
+                .unwrap_or(0)
+                .min(k - 1);
+            let base = (i * k + c) * es;
+            result.extend_from_slice(&comp_data[base..base + es]);
         }
 
+        // Output shape is sample_shape ++ event_shape.
+        let mut out_shape = shape.to_vec();
+        out_shape.extend_from_slice(&self.components.event_shape());
+
         let device = self.mixing.probs().device();
-        let out = Tensor::from_storage(TensorStorage::cpu(result), shape.to_vec(), false)?;
+        let out = Tensor::from_storage(TensorStorage::cpu(result), out_shape, false)?;
         if device.is_cuda() {
             out.to(device)
         } else {
             Ok(out)
         }
+    }
+
+    fn event_shape(&self) -> Vec<usize> {
+        // The mixture's event_shape equals the component event_shape
+        // (`mixture_same_family.py:102-108`).
+        self.components.event_shape()
     }
 
     fn rsample(&self, _shape: &[usize]) -> FerrotorchResult<Tensor<T>> {
@@ -172,33 +218,51 @@ impl<T: Float, D: Distribution<T>> Distribution<T> for MixtureSameFamily<T, D> {
         )?;
         // log_prob(x) = logsumexp_k( log mixing_probs[k] + log p_k(x) )
         //
-        // We compute the per-component log_probs by replicating value K
-        // times along a new last axis (so it broadcasts against the
-        // components distribution's K-shaped batch dim) and asking the
-        // components distribution for the log_prob.
-        //
-        // Concretely: value has shape [...], components' log_prob expects
-        // a tensor whose trailing dim is K. We unsqueeze and tile value to
-        // shape [..., K], then call components.log_prob.
+        // The component axis K is inserted BEFORE the event dims (upstream
+        // `_pad` = `x.unsqueeze(-1 - event_ndims)`). For a scalar component
+        // (event_ndims == 0) this reduces to inserting K as the new last
+        // axis. For a multi-event component (event_ndims > 0, event_size > 1)
+        // we replicate each event block K times so the component distribution
+        // sees parameters of shape [...batch, K, *event_shape] and reduces the
+        // event dims, yielding per-component log-probs of shape [...batch, K].
+        let k = self.num_components;
+        let es = self.event_size;
         let v_shape = value.shape().to_vec();
-        let mut tiled_shape = v_shape.clone();
-        tiled_shape.push(self.num_components);
+
+        // Output shape strips the trailing `event_ndims` dims (the component
+        // log_prob already reduced them), keeping the batch dims.
+        let out_shape: Vec<usize> =
+            v_shape[..v_shape.len().saturating_sub(self.event_ndims)].to_vec();
+
+        // Tiled shape: insert K just before the event dims.
+        let split = v_shape.len().saturating_sub(self.event_ndims);
+        let mut tiled_shape: Vec<usize> = v_shape[..split].to_vec();
+        tiled_shape.push(k);
+        tiled_shape.extend_from_slice(&v_shape[split..]);
 
         let v_data = value.data_vec()?;
         let v_numel = v_data.len();
-        let mut tiled = Vec::with_capacity(v_numel * self.num_components);
-        for &v in v_data.iter() {
-            for _ in 0..self.num_components {
-                tiled.push(v);
+        // Number of outer (batch) positions = numel / event_size.
+        let num_outer = v_numel / es;
+        // Tile: for each outer position, repeat its event block K times.
+        let mut tiled = Vec::with_capacity(v_numel * k);
+        for o in 0..num_outer {
+            let block = &v_data[o * es..(o + 1) * es];
+            for _ in 0..k {
+                tiled.extend_from_slice(block);
             }
         }
         let v_dev = value.device();
         let value_tiled = {
-            let t = Tensor::from_storage(TensorStorage::cpu(tiled), tiled_shape.clone(), false)?;
-            if v_dev.is_cuda() { t.to(v_dev)? } else { t }
+            let t = Tensor::from_storage(TensorStorage::cpu(tiled), tiled_shape, false)?;
+            if v_dev.is_cuda() {
+                t.to(v_dev)?
+            } else {
+                t
+            }
         };
 
-        // Per-component log p_k(x): shape [..., K].
+        // Per-component log p_k(x): shape [...batch, K] (event dims reduced).
         let comp_lp = self.components.log_prob(&value_tiled)?;
         let comp_lp_data = comp_lp.data_vec()?;
 
@@ -206,27 +270,26 @@ impl<T: Float, D: Distribution<T>> Distribution<T> for MixtureSameFamily<T, D> {
         let mix_probs = self.mixing.probs().data_vec()?;
         let mix_log: Vec<T> = mix_probs.iter().map(|&p| p.ln()).collect();
 
-        // logsumexp along the trailing K dim.
-        let mut result = Vec::with_capacity(v_numel);
-        for v_idx in 0..v_numel {
-            let base = v_idx * self.num_components;
-            // Compute log sum exp over k of (mix_log[k] + comp_lp[base+k]).
+        // logsumexp along the K dim, once per outer position.
+        let mut result = Vec::with_capacity(num_outer);
+        for o in 0..num_outer {
+            let base = o * k;
             let mut max_val = T::neg_infinity();
-            for k in 0..self.num_components {
-                let lp = mix_log[k] + comp_lp_data[base + k];
+            for c in 0..k {
+                let lp = mix_log[c] + comp_lp_data[base + c];
                 if lp > max_val {
                     max_val = lp;
                 }
             }
             let mut sum_exp = <T as num_traits::Zero>::zero();
-            for k in 0..self.num_components {
-                let lp = mix_log[k] + comp_lp_data[base + k];
+            for c in 0..k {
+                let lp = mix_log[c] + comp_lp_data[base + c];
                 sum_exp += (lp - max_val).exp();
             }
             result.push(max_val + sum_exp.ln());
         }
 
-        let out = Tensor::from_storage(TensorStorage::cpu(result), v_shape, false)?;
+        let out = Tensor::from_storage(TensorStorage::cpu(result), out_shape, false)?;
         if v_dev.is_cuda() {
             out.to(v_dev)
         } else {
@@ -242,6 +305,7 @@ impl<T: Float, D: Distribution<T>> Distribution<T> for MixtureSameFamily<T, D> {
         })
     }
 
+    #[allow(clippy::needless_range_loop)]
     fn mean(&self) -> FerrotorchResult<Tensor<T>> {
         // Reference: torch.distributions.MixtureSameFamily.mean
         // (`torch/distributions/mixture_same_family.py:155-162`):
@@ -249,34 +313,47 @@ impl<T: Float, D: Distribution<T>> Distribution<T> for MixtureSameFamily<T, D> {
         // Components are stored as a single distribution whose batch shape's
         // rightmost dim is the component index (size K). We weight the
         // per-component means by the mixing probabilities and sum.
+        // The component mean has shape [..outer, K, *event_shape]; the K axis
+        // sits before the `event_ndims` event dims. We weight over K, keeping
+        // the event dims (#1390). For a scalar component (event_size == 1)
+        // this is the original `[.., K]` weighting.
         let comp_mean = self.components.mean()?;
         let comp_data = comp_mean.data_vec()?;
         let mix_probs = self.mixing.probs().data_vec()?;
         let k = self.num_components;
-        if comp_data.len() % k != 0 {
+        let es = self.event_size;
+        if comp_data.len() % (k * es) != 0 {
             return Err(FerrotorchError::ShapeMismatch {
                 message: format!(
-                    "MixtureSameFamily: components.mean() numel {} not divisible by K={}",
+                    "MixtureSameFamily: components.mean() numel {} not divisible by K*event_size={}",
                     comp_data.len(),
-                    k
+                    k * es
                 ),
             });
         }
-        let outer = comp_data.len() / k;
+        let outer = comp_data.len() / (k * es);
         let zero = <T as num_traits::Zero>::zero();
-        let mut out = Vec::with_capacity(outer);
+        let mut out = Vec::with_capacity(outer * es);
         for i in 0..outer {
-            let mut acc = zero;
-            for j in 0..k {
-                acc += mix_probs[j] * comp_data[i * k + j];
+            for e in 0..es {
+                let mut acc = zero;
+                for j in 0..k {
+                    acc += mix_probs[j] * comp_data[(i * k + j) * es + e];
+                }
+                out.push(acc);
             }
-            out.push(acc);
         }
+        // Output shape: component mean shape with the K axis removed.
         let mut out_shape = comp_mean.shape().to_vec();
-        out_shape.pop();
+        if out_shape.len() > self.event_ndims {
+            out_shape.remove(out_shape.len() - 1 - self.event_ndims);
+        } else {
+            out_shape.pop();
+        }
         Tensor::from_storage(TensorStorage::cpu(out), out_shape, false)
     }
 
+    #[allow(clippy::needless_range_loop)]
     fn variance(&self) -> FerrotorchResult<Tensor<T>> {
         // Reference: torch.distributions.MixtureSameFamily.variance
         // (`torch/distributions/mixture_same_family.py:164-189`):
@@ -284,32 +361,44 @@ impl<T: Float, D: Distribution<T>> Distribution<T> for MixtureSameFamily<T, D> {
         //          = sum_k pi_k * Var_k + sum_k pi_k * (mu_k - mu)^2
         // where mu = sum_k pi_k * mu_k. We need both components.mean() and
         // components.variance() to be available.
+        // Component mean/variance have shape [..outer, K, *event_shape]; the
+        // K axis precedes the event dims. We weight over K per event element
+        // (#1390). For a scalar component (event_size == 1) this is the
+        // original `[.., K]` weighting.
         let comp_mean = self.components.mean()?;
         let comp_var = self.components.variance()?;
         let mean_data = comp_mean.data_vec()?;
         let var_data = comp_var.data_vec()?;
         let mix_probs = self.mixing.probs().data_vec()?;
         let k = self.num_components;
-        let outer = mean_data.len() / k;
+        let es = self.event_size;
+        let outer = mean_data.len() / (k * es);
         let zero = <T as num_traits::Zero>::zero();
 
-        let mut out = Vec::with_capacity(outer);
+        let mut out = Vec::with_capacity(outer * es);
         for i in 0..outer {
-            // overall mean for this outer slot
-            let mut mu = zero;
-            for j in 0..k {
-                mu += mix_probs[j] * mean_data[i * k + j];
+            for e in 0..es {
+                // overall mean for this (outer, event) slot
+                let mut mu = zero;
+                for j in 0..k {
+                    mu += mix_probs[j] * mean_data[(i * k + j) * es + e];
+                }
+                // law of total variance over K
+                let mut acc = zero;
+                for j in 0..k {
+                    let idx = (i * k + j) * es + e;
+                    let diff = mean_data[idx] - mu;
+                    acc += mix_probs[j] * (var_data[idx] + diff * diff);
+                }
+                out.push(acc);
             }
-            // law of total variance
-            let mut acc = zero;
-            for j in 0..k {
-                let diff = mean_data[i * k + j] - mu;
-                acc += mix_probs[j] * (var_data[i * k + j] + diff * diff);
-            }
-            out.push(acc);
         }
         let mut out_shape = comp_mean.shape().to_vec();
-        out_shape.pop();
+        if out_shape.len() > self.event_ndims {
+            out_shape.remove(out_shape.len() - 1 - self.event_ndims);
+        } else {
+            out_shape.pop();
+        }
         Tensor::from_storage(TensorStorage::cpu(out), out_shape, false)
     }
 
@@ -333,7 +422,11 @@ impl<T: Float, D: Distribution<T>> Distribution<T> for MixtureSameFamily<T, D> {
         let v_dev = value.device();
         let value_tiled = {
             let t = Tensor::from_storage(TensorStorage::cpu(tiled), tiled_shape, false)?;
-            if v_dev.is_cuda() { t.to(v_dev)? } else { t }
+            if v_dev.is_cuda() {
+                t.to(v_dev)?
+            } else {
+                t
+            }
         };
 
         let comp_cdf = self.components.cdf(&value_tiled)?;
@@ -350,7 +443,11 @@ impl<T: Float, D: Distribution<T>> Distribution<T> for MixtureSameFamily<T, D> {
             out.push(acc);
         }
         let t = Tensor::from_storage(TensorStorage::cpu(out), v_shape, false)?;
-        if v_dev.is_cuda() { t.to(v_dev) } else { Ok(t) }
+        if v_dev.is_cuda() {
+            t.to(v_dev)
+        } else {
+            Ok(t)
+        }
     }
 }
 
@@ -495,5 +592,107 @@ mod tests {
         let m = MixtureSameFamily::new(mixing, components).unwrap();
         let s = m.sample(&[100]).unwrap();
         assert_eq!(s.shape(), &[100]);
+    }
+
+    // --- #1390: multi-event-dim components -----------------------------------
+
+    #[test]
+    fn test_mixture_multivariate_event_shape() {
+        // Mixture of two Independent<Normal> with event_shape [2].
+        // Base Normal batch [K=2, E=2]; Independent(.., 1) → event_shape [2],
+        // batch [2] (= K). The mixture inherits event_shape [2].
+        use crate::Independent;
+        let probs = cpu_tensor(&[0.5, 0.5], &[2]);
+        let mixing = Categorical::new(probs).unwrap();
+        let loc = cpu_tensor(&[0.0, 0.0, 3.0, 3.0], &[2, 2]);
+        let scale = cpu_tensor(&[1.0, 1.0, 1.0, 1.0], &[2, 2]);
+        let base = Normal::new(loc, scale).unwrap();
+        let comp = Independent::new(base, 1).unwrap();
+        let m = MixtureSameFamily::new(mixing, comp).unwrap();
+        assert_eq!(m.event_shape(), vec![2]);
+    }
+
+    #[test]
+    fn test_mixture_multivariate_log_prob() {
+        // Two equal-weight Independent<Normal> components in R^2:
+        //   comp0 ~ N([0,0], I),  comp1 ~ N([3,3], I).
+        // log_prob at x = [0, 0]:
+        //   comp0.log_prob([0,0]) = 2 * (-0.5*log(2pi)) = -log(2pi) ≈ -1.8379
+        //   comp1.log_prob([0,0]) = -log(2pi) - 0.5*(9+9) = -1.8379 - 9 = -10.8379
+        //   mix = logsumexp(log(0.5)+(-1.8379), log(0.5)+(-10.8379))
+        //       ≈ log(0.5) + (-1.8379) + log(1 + exp(-9))
+        //       ≈ -0.6931 - 1.8379 ≈ -2.5310
+        use crate::Independent;
+        let probs = cpu_tensor(&[0.5, 0.5], &[2]);
+        let mixing = Categorical::new(probs).unwrap();
+        let loc = cpu_tensor(&[0.0, 0.0, 3.0, 3.0], &[2, 2]);
+        let scale = cpu_tensor(&[1.0, 1.0, 1.0, 1.0], &[2, 2]);
+        let base = Normal::new(loc, scale).unwrap();
+        let comp = Independent::new(base, 1).unwrap();
+        let m = MixtureSameFamily::new(mixing, comp).unwrap();
+
+        let value = cpu_tensor(&[0.0, 0.0], &[2]);
+        let lp = m.log_prob(&value).unwrap();
+        // event dims reduced → scalar log_prob.
+        assert_eq!(lp.shape(), [] as [usize; 0]);
+        let v = lp.item().unwrap();
+        let log_2pi = (2.0 * std::f32::consts::PI).ln();
+        let expected = (0.5f32).ln() + (-log_2pi) + (1.0 + (-9.0f32).exp()).ln();
+        assert!((v - expected).abs() < 1e-3, "expected {expected}, got {v}");
+    }
+
+    #[test]
+    fn test_mixture_multivariate_sample_shape() {
+        use crate::Independent;
+        let probs = cpu_tensor(&[0.5, 0.5], &[2]);
+        let mixing = Categorical::new(probs).unwrap();
+        let loc = cpu_tensor(&[-2.0, -2.0, 2.0, 2.0], &[2, 2]);
+        let scale = cpu_tensor(&[0.3, 0.3, 0.3, 0.3], &[2, 2]);
+        let base = Normal::new(loc, scale).unwrap();
+        let comp = Independent::new(base, 1).unwrap();
+        let m = MixtureSameFamily::new(mixing, comp).unwrap();
+        // sample(&[50]) → [50, 2] (sample_shape ++ event_shape).
+        let s = m.sample(&[50]).unwrap();
+        assert_eq!(s.shape(), &[50, 2]);
+        // Each row's two coords are correlated (both ~-2 or both ~2) since a
+        // single component is chosen per draw.
+        let data = s.data().unwrap();
+        let mut near_neg2 = 0;
+        let mut near_pos2 = 0;
+        for row in 0..50 {
+            let a = data[row * 2];
+            let b = data[row * 2 + 1];
+            if a < -1.0 && b < -1.0 {
+                near_neg2 += 1;
+            }
+            if a > 1.0 && b > 1.0 {
+                near_pos2 += 1;
+            }
+        }
+        // Almost every draw should land near one of the two well-separated
+        // clusters (scale 0.3 makes cross-cluster leakage negligible).
+        assert!(
+            near_neg2 + near_pos2 >= 48,
+            "expected coherent cluster draws, got {near_neg2}+{near_pos2}"
+        );
+    }
+
+    #[test]
+    fn test_mixture_multivariate_mean() {
+        // Two Independent<Normal> in R^2: N([0,0], I) and N([4,2], I), 0.5/0.5.
+        // mean = 0.5*[0,0] + 0.5*[4,2] = [2, 1].
+        use crate::Independent;
+        let probs = cpu_tensor(&[0.5, 0.5], &[2]);
+        let mixing = Categorical::new(probs).unwrap();
+        let loc = cpu_tensor(&[0.0, 0.0, 4.0, 2.0], &[2, 2]);
+        let scale = cpu_tensor(&[1.0, 1.0, 1.0, 1.0], &[2, 2]);
+        let base = Normal::new(loc, scale).unwrap();
+        let comp = Independent::new(base, 1).unwrap();
+        let m = MixtureSameFamily::new(mixing, comp).unwrap();
+        let mean = m.mean().unwrap();
+        assert_eq!(mean.shape(), &[2]);
+        let md = mean.data_vec().unwrap();
+        assert!((md[0] - 2.0).abs() < 1e-5, "mean[0] = {}", md[0]);
+        assert!((md[1] - 1.0).abs() < 1e-5, "mean[1] = {}", md[1]);
     }
 }

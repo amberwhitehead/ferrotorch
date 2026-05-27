@@ -67,24 +67,22 @@ component index. Mirrors `torch.distributions.MixtureSameFamily`
   NOT implement `entropy` on `MixtureSameFamily` either, so
   ferrotorch's matching error path is contract-aligned.
 
-- REQ-9: NOT-STARTED — `mean`/`variance` properties from
-  `mixture_same_family.py:142-159` (law-of-total-variance
-  computation against `components.mean` / `components.variance`)
-  not implemented. ferrotorch's default trait impls return
-  `InvalidArgument`. Blocker #1388 tracks the
-  mean/variance overrides.
+- REQ-9: SHIPPED — `mean`/`variance` overrides implement the
+  law-of-total-variance computation
+  (`mixture_same_family.py:142-159`) against `components.mean` /
+  `components.variance`, weighting over the K axis. Closes #1388.
 
-- REQ-10: NOT-STARTED — `cdf` from
-  `mixture_same_family.py:161-166` (sum over components of
-  `cdf(x) * mix_probs`) not implemented. Blocker #1389
-  tracks the cdf override.
+- REQ-10: SHIPPED — `cdf` sums `components.cdf(x) * mix_probs` over
+  the component axis (`mixture_same_family.py:161-166`). Closes #1389.
 
-- REQ-11: NOT-STARTED — the upstream `MixtureSameFamily` accepts
-  components whose `batch_shape` has trailing `[K]` and possibly
-  multi-dim event_shape. ferrotorch's impl currently assumes
-  scalar event_shape (the components produce a single value per
-  draw). Multi-event-dim components are not supported. Blocker
-  #1390 tracks event-shape generalisation.
+- REQ-11: SHIPPED — `event_ndims` / `event_size` are captured from
+  `components.event_shape()` in `new`. `log_prob` inserts the K axis
+  BEFORE the event dims (upstream `_pad`), reduces the component event
+  dims via `components.log_prob`, then logsumexps over K. `sample`
+  gathers the whole event block of the chosen component;
+  `event_shape()` forwards the component event_shape; `mean`/`variance`
+  weight over K per event element. Mirrors
+  `mixture_same_family.py:100-109,168-217`. Closes #1390.
 
 ## Acceptance Criteria
 
@@ -101,9 +99,11 @@ component index. Mirrors `torch.distributions.MixtureSameFamily`
 - [x] AC-7: `test_mixture_rsample_errors` confirms rsample errors.
 - [x] AC-8: `test_mixture_entropy_errors` confirms entropy errors.
 - [x] AC-9: `test_mixture_sample_shape` confirms shape `[100]`.
-- [ ] AC-10: `mean` / `variance` — blocker #1388.
-- [ ] AC-11: `cdf` — blocker #1389.
-- [ ] AC-12: multi-event-dim component support — blocker #1390.
+- [x] AC-10: `mean` / `variance` — #1388.
+- [x] AC-11: `cdf` — #1389.
+- [x] AC-12: multi-event-dim component support
+  (`test_mixture_multivariate_log_prob` / `_sample_shape` / `_mean`) —
+  #1390.
 
 ## Architecture
 
@@ -207,4 +207,4 @@ Expected: `5 passed`.
 | REQ-8 | SHIPPED | impl: entropy returns `InvalidArgument("entropy has no closed form for general mixtures")` at `mixture_same_family.rs:221-227`, matching upstream's deliberate omission (no `entropy` method on `MixtureSameFamily`); non-test consumer: re-export at `lib.rs:111`; test `test_mixture_entropy_errors` pins it. |
 | REQ-9 | NOT-STARTED | blocker #1388 — `mean` / `variance` law-of-total-variance overrides at `mixture_same_family.py:142-159` not implemented; default trait impls at `lib.rs:209-227` return `InvalidArgument`. |
 | REQ-10 | NOT-STARTED | blocker #1389 — `cdf` summation at `mixture_same_family.py:161-166` not implemented; default trait `cdf` at `lib.rs:194-198` errors. |
-| REQ-11 | NOT-STARTED | blocker #1390 — multi-event-dim components from `mixture_same_family.py:100-109` (which derives `event_ndims` from `component_distribution.event_shape`) not supported; current ferrotorch impl assumes scalar event_shape. |
+| REQ-11 | SHIPPED | impl: `event_ndims` / `event_size` captured from `components.event_shape()` in `MixtureSameFamily::new`; `log_prob` inserts the K axis before the event dims (event-block tiling), reduces the component event dims via `components.log_prob`, then logsumexps over K; `sample` gathers the chosen component's full event block; `event_shape()` forwards the component event_shape; `mean`/`variance` weight over K per event element — all in `mixture_same_family.rs`, mirroring `mixture_same_family.py:100-109,168-217` (`_pad`/`_event_ndims`). Non-test consumer: `pub use mixture_same_family::MixtureSameFamily` re-export — GMM / mixture-density code pairing a `Categorical` with `Independent<Normal>` (event_shape `[E]`) hits this path. Tests `test_mixture_multivariate_log_prob` (hand-computed bivariate logsumexp), `test_mixture_multivariate_sample_shape`, `test_mixture_multivariate_event_shape`, `test_mixture_multivariate_mean` pin. Closes #1390. |

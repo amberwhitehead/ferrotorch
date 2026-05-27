@@ -95,10 +95,14 @@ closed-form `log_prob` derived from
   `RelaxedBernoulli` directly. Blocker #1415 tracks the
   `LogitRelaxedBernoulli` extraction.
 
-- REQ-9: NOT-STARTED — `rsample` does not build an autograd graph.
-  Upstream's `rsample` is differentiable because all operations are
-  tensor ops; ferrotorch's scalar-CPU implementation produces a
-  detached output. Blocker #1420 tracks differentiable rsample.
+- REQ-9: SHIPPED — `rsample` builds a `RelaxedBernoulliRsampleBackward`
+  autograd node carrying `probs` + the detached Logistic noise, so
+  gradients flow through `probs` (the only `Tensor` parameter;
+  `temperature` is a scalar `T` and receives no gradient). The forward
+  `z = sigmoid((L + logit(p)) / temp)` gives
+  `dz/dp = z(1-z) / (temp * p * (1-p))`. Mirrors upstream's
+  autograd-through-tensor-ops rsample (`relaxed_bernoulli.py:104-112`).
+  Closes #1420.
 
 ## Acceptance Criteria
 
@@ -115,7 +119,8 @@ closed-form `log_prob` derived from
 - [ ] AC-7: `logits`, `mean`, `mode`, `variance`, `cdf`, `icdf`,
   `support` — blocker #1411.
 - [ ] AC-8: `LogitRelaxedBernoulli` as standalone — blocker #1415.
-- [ ] AC-9: Differentiable rsample — blocker #1420.
+- [x] AC-9: Differentiable rsample via `RelaxedBernoulliRsampleBackward`
+  — #1420.
 
 ## Architecture
 
@@ -271,4 +276,4 @@ Expected: `7 passed` (six listed above plus the entropy-errors test).
 | REQ-6 | SHIPPED | impl: `Distribution::entropy` in `relaxed_bernoulli.rs` returns `InvalidArgument` because the Concrete distribution has no closed-form entropy, mirroring upstream's lack of an `entropy` override which falls back to `Distribution.entropy → NotImplementedError`; non-test consumer: any caller invoking `.entropy()` on a `RelaxedBernoulli` hits this error path; test `test_relaxed_bernoulli_entropy_errors` pins. |
 | REQ-7 | NOT-STARTED | blocker #1411 — `logits` accessor, `mean`, `mode`, `variance`, `cdf`, `icdf`, `support` (`constraints.unit_interval`, `relaxed_bernoulli.py:145`) not implemented; cross-cutting with `lib.md` REQ-5 (Distribution-trait-surface blocker #1376). |
 | REQ-8 | NOT-STARTED | blocker #1415 — `LogitRelaxedBernoulli` (the unconstrained-logit-space base distribution, `relaxed_bernoulli.py:22-119`) not exposed as a standalone ferrotorch distribution; the Concrete forward is inlined into `RelaxedBernoulli` directly. |
-| REQ-9 | NOT-STARTED | blocker #1420 — `rsample` produces a detached output (no autograd graph) because the scalar-CPU implementation builds the result via raw `Vec<T>` arithmetic rather than tensor ops; upstream is differentiable because all operations are tensor ops with autograd-aware kernels. |
+| REQ-9 | SHIPPED | impl: `rsample` attaches `RelaxedBernoulliRsampleBackward` (carrying `probs` + detached Logistic noise `u`) via `Tensor::from_operation` when `probs` requires grad; backward computes `dz/dp = z(1-z)/(temp·p·(1-p))` in `relaxed_bernoulli.rs`, mirroring upstream's tensor-op rsample (`relaxed_bernoulli.py:104-112`). `temperature` is a scalar `T` (no gradient). Non-test consumer: `impl Distribution::rsample` for `RelaxedBernoulli` — the production dispatch every external caller reaches via `pub use RelaxedBernoulli` re-export in `lib.rs`. Tests `test_relaxed_bernoulli_rsample_requires_grad_when_probs_grad`, `test_relaxed_bernoulli_rsample_grad_flows_to_probs_finite`, `test_relaxed_bernoulli_sample_detached` pin grad-flow + detachment. Closes #1420. |

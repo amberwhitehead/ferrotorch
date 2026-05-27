@@ -35,6 +35,7 @@
 //! | [`OneHotCategorical`] | `probs` | No (discrete) |
 //! | [`RelaxedBernoulli`] | `temperature`, `probs` | Yes (Concrete relaxation) |
 //! | [`RelaxedOneHotCategorical`] | `temperature`, `probs` | Yes (Concrete relaxation) |
+//! | [`ExpRelaxedCategorical`] | `temperature`, `probs` | Yes (log-simplex Concrete relaxation) |
 //! | [`Pareto`] | `scale`, `alpha` | No (rsample not yet implemented) |
 //! | [`Kumaraswamy`] | `concentration1`, `concentration0` | No (rsample not yet implemented) |
 //! | [`VonMises`] | `loc`, `concentration` | No (rejection sampling) |
@@ -116,7 +117,7 @@ pub use one_hot_categorical::{OneHotCategorical, OneHotCategoricalStraightThroug
 pub use pareto::Pareto;
 pub use poisson::Poisson;
 pub use relaxed_bernoulli::RelaxedBernoulli;
-pub use relaxed_one_hot_categorical::RelaxedOneHotCategorical;
+pub use relaxed_one_hot_categorical::{ExpRelaxedCategorical, RelaxedOneHotCategorical};
 pub use student_t::StudentT;
 pub use transforms::TransformedDistribution;
 pub use uniform::Uniform;

@@ -82,21 +82,27 @@ log_prob from Maddison et al. 2017 equation 26.
   (Distribution-trait-surface blocker #1376); RelaxedOneHotCategorical-
   specific surface fill-out tracked in blocker #1422.
 
-- REQ-8: NOT-STARTED — `ExpRelaxedCategorical` (the unconstrained
-  log-simplex base distribution upstream exposes separately,
-  `relaxed_categorical.py:17-106`) is not a standalone ferrotorch
-  distribution. The Gumbel-softmax forward is inlined into
-  `RelaxedOneHotCategorical` directly. Blocker #1424 tracks the
-  `ExpRelaxedCategorical` extraction.
+- REQ-8: SHIPPED — `pub struct ExpRelaxedCategorical<T>` is the
+  standalone log-simplex base distribution
+  (`relaxed_categorical.py:17-106`). Its `rsample` returns
+  `scores - logsumexp(scores)` (a log-simplex point); its `log_prob`
+  evaluates the upstream `lgamma(K) + (K-1)log(temp) + (score - lse).sum`
+  form. `RelaxedOneHotCategorical::sample` production-consumes it (the
+  `ExpTransform` composition: `exp(ExpRelaxedCategorical::sample)`).
+  Closes #1424.
 
-- REQ-9: NOT-STARTED — `rsample` does not build an autograd graph.
-  Upstream's `rsample` is differentiable end-to-end; ferrotorch's
-  scalar-CPU implementation produces a detached output. Blocker #1425
-  tracks differentiable rsample.
+- REQ-9: SHIPPED — both `ExpRelaxedCategorical::rsample` and
+  `RelaxedOneHotCategorical::rsample` attach autograd nodes
+  (`ExpRelaxedRsampleBackward` / `RelaxedOneHotRsampleBackward`) so
+  gradients flow through `probs` (the only `Tensor` parameter). The
+  Gumbel-softmax gradient is `dz_i/dp_m = z_i(δ_im - z_m)/(temp·p_m)`.
+  Mirrors `relaxed_categorical.py:87-94`. Closes #1425.
 
-- REQ-10: NOT-STARTED — batched `probs` (`probs: [B, K]`) not
-  supported. ferrotorch requires `probs.ndim() == 1`; upstream allows
-  arbitrary leading batch dims. Blocker #1426 tracks batched-probs.
+- REQ-10: SHIPPED — `new` accepts `probs` of shape `[..., K]`;
+  `normalized` is row-normalized per trailing-K block; `sample` /
+  `rsample` emit `[...sample_shape, ...batch, K]` (upstream
+  `_extended_shape`); `log_prob` cycles each value row against its
+  parameter row and collapses the trailing K dim. Closes #1426.
 
 ## Acceptance Criteria
 
@@ -111,9 +117,10 @@ log_prob from Maddison et al. 2017 equation 26.
 - [x] AC-6: `impl Distribution::entropy` returns `InvalidArgument`.
 - [ ] AC-7: `logits`, `mean`, `mode`, `variance`, `support`,
   `expand` — blocker #1422.
-- [ ] AC-8: `ExpRelaxedCategorical` standalone — blocker #1424.
-- [ ] AC-9: Differentiable rsample — blocker #1425.
-- [ ] AC-10: Batched probs — blocker #1426.
+- [x] AC-8: `ExpRelaxedCategorical` standalone — #1424.
+- [x] AC-9: Differentiable rsample (`ExpRelaxedRsampleBackward` /
+  `RelaxedOneHotRsampleBackward`) — #1425.
+- [x] AC-10: Batched probs `[..., K]` — #1426.
 
 ## Architecture
 
@@ -264,6 +271,6 @@ Expected: `8 passed`.
 | REQ-5 | SHIPPED | impl: `Distribution::log_prob` in `relaxed_one_hot_categorical.rs` returns Maddison eqn 26 `log((K-1)!) + (K-1)*log(lambda) + sum(log alpha_k - (lambda+1)*log z_k) - K*lse_k(log alpha_k - lambda*log z_k)` via logsumexp; collapses last K dim of input; rejects wrong-shape value; non-test consumer: `pub use RelaxedOneHotCategorical` re-export + impl dispatch; tests `test_relaxed_one_hot_log_prob_{finite, batch, wrong_shape_errors}` pin all three. |
 | REQ-6 | SHIPPED | impl: `Distribution::entropy` in `relaxed_one_hot_categorical.rs` returns `InvalidArgument`, mirroring upstream's lack of an `entropy` override; non-test consumer: any caller invoking `.entropy()` hits the error; test `test_relaxed_one_hot_entropy_errors` pins. |
 | REQ-7 | NOT-STARTED | blocker #1422 — `logits` accessor (`relaxed_categorical.py:157-159`), `mean`, `mode`, `variance`, `support = constraints.simplex` (`relaxed_categorical.py:132`), `expand` not implemented; cross-cutting with `lib.md` REQ-5. |
-| REQ-8 | NOT-STARTED | blocker #1424 — `ExpRelaxedCategorical` (the log-simplex base distribution, `relaxed_categorical.py:17-106`) not exposed as a standalone ferrotorch distribution; Gumbel-softmax forward inlined into `RelaxedOneHotCategorical` directly. |
-| REQ-9 | NOT-STARTED | blocker #1425 — `rsample` produces detached output (no autograd graph); upstream is differentiable end-to-end. |
-| REQ-10 | NOT-STARTED | blocker #1426 — `probs` must be 1-D; upstream supports arbitrary leading batch dims `[B1, B2, ..., K]`. |
+| REQ-8 | SHIPPED | impl: `pub struct ExpRelaxedCategorical<T>` with `new` / `sample` / `rsample` / `log_prob` in `relaxed_one_hot_categorical.rs`; `rsample` returns `scores - logsumexp(scores)` (log-simplex) and `log_prob` evaluates `lgamma(K) + (K-1)log(temp) + (score - lse).sum` mirroring `relaxed_categorical.py:17-106`. Re-exported via `pub use relaxed_one_hot_categorical::ExpRelaxedCategorical` in `lib.rs`. Non-test consumer: `RelaxedOneHotCategorical::sample` builds an `ExpRelaxedCategorical` and exponentiates its log-space draw (the upstream `ExpTransform` composition). Tests `test_exp_relaxed_sample_is_log_simplex`, `test_exp_relaxed_log_prob_finite_and_shape`, `test_exp_relaxed_rsample_grad_flows_to_probs` pin. Closes #1424. |
+| REQ-9 | SHIPPED | impl: `ExpRelaxedCategorical::rsample` attaches `ExpRelaxedRsampleBackward`; `RelaxedOneHotCategorical::rsample` attaches `RelaxedOneHotRsampleBackward` via `Tensor::from_operation` when `probs` requires grad. Gumbel-softmax backward `dz_i/dp_m = z_i(δ_im - z_m)/(temp·p_m)` in `relaxed_one_hot_categorical.rs`, mirroring `relaxed_categorical.py:87-94`. `temperature` is a scalar `T` (no gradient). Non-test consumer: `impl Distribution::rsample` dispatch via `pub use RelaxedOneHotCategorical` re-export. Tests `test_relaxed_one_hot_rsample_requires_grad_when_probs_grad`, `test_relaxed_one_hot_rsample_grad_flows_to_probs_finite`, `test_relaxed_one_hot_sample_detached` pin grad-flow + detachment. Closes #1425. |
+| REQ-10 | SHIPPED | impl: `new` validates + row-normalizes `probs` of shape `[..., K]` via `validate_and_normalize`; `relaxed_one_hot_sample` / `exp_relaxed_sample` emit `[...sample_shape, ...batch, K]`; `log_prob` cycles each value row against `i % num_param_rows` parameter row and collapses K, in `relaxed_one_hot_categorical.rs`, mirroring upstream batched params (`relaxed_categorical.py:56-57`). Non-test consumer: `impl Distribution` dispatch + `pub use` re-export. Tests `test_relaxed_one_hot_batched_sample_shape`, `test_relaxed_one_hot_batched_log_prob_shape`, `test_relaxed_one_hot_batched_rows_differ` pin. Closes #1426. |

@@ -34,15 +34,16 @@
 //! | REQ-6 (`Distribution::entropy` errors) | SHIPPED | `impl Distribution::entropy` returns `InvalidArgument` (Concrete has no closed-form entropy). |
 //! | REQ-7 (`logits` accessor + `support`/`arg_constraints`/`has_rsample`/`expand`) | SHIPPED | `pub fn logits` returns `log(p/(1-p))` per element; `fn support` returns `UnitInterval`; `fn arg_constraints` declares `probs: UnitInterval`; `fn has_rsample` returns `true`; `fn expand` broadcasts `probs`. Mirrors `torch/distributions/relaxed_bernoulli.py:131-148`. Non-test consumer: `pub use RelaxedBernoulli` re-export — every external `dist.support()` / `dist.logits()` call hits these. `mean`/`mode`/`variance`/`cdf`/`icdf` have no closed form for the Concrete relaxation (upstream raises `NotImplementedError`). Closes #1411. |
 //! | REQ-8 (`LogitRelaxedBernoulli` as standalone) | NOT-STARTED | blocker #1415 — `relaxed_bernoulli.py:22-119` unconstrained-logit-space base not exposed as a separate ferrotorch distribution. |
-//! | REQ-9 (differentiable `rsample` with autograd graph) | NOT-STARTED | blocker #1420 — scalar-CPU path produces detached output. |
+//! | REQ-9 (differentiable `rsample` with autograd graph) | SHIPPED | `rsample` builds a `RelaxedBernoulliRsampleBackward` autograd node carrying `probs` + the detached Logistic noise so gradients flow through `probs` (the only `Tensor` parameter; `temperature` is a scalar `T`). The reparameterized chain `z = sigmoid((L + logit(p)) / temp)` gives `dz/dp = z(1-z) / (temp * p * (1-p))`. Mirrors `LogitRelaxedBernoulli.rsample` autograd-through-tensor-ops at `relaxed_bernoulli.py:104-112`. Consumer: `impl Distribution::rsample` is the production dispatch every external caller hits via the `pub use RelaxedBernoulli` re-export at `lib.rs:118`. Closes #1420. |
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use ferrotorch_core::creation;
 use ferrotorch_core::dtype::Float;
 use ferrotorch_core::error::{FerrotorchError, FerrotorchResult};
 use ferrotorch_core::storage::TensorStorage;
-use ferrotorch_core::tensor::Tensor;
+use ferrotorch_core::tensor::{GradFn, Tensor};
 
 use crate::constraints;
 use crate::{DistConstraint, Distribution};
@@ -106,7 +107,11 @@ impl<T: Float> RelaxedBernoulli<T> {
         let out: Vec<T> = probs_data.iter().map(|&p| (p / (one - p)).ln()).collect();
         let device = self.probs.device();
         let t = Tensor::from_storage(TensorStorage::cpu(out), self.probs.shape().to_vec(), false)?;
-        if device.is_cuda() { t.to(device) } else { Ok(t) }
+        if device.is_cuda() {
+            t.to(device)
+        } else {
+            Ok(t)
+        }
     }
 }
 
@@ -121,14 +126,12 @@ impl<T: Float> Distribution<T> for RelaxedBernoulli<T> {
 
     fn rsample(&self, shape: &[usize]) -> FerrotorchResult<Tensor<T>> {
         crate::fallback::check_gpu_fallback_opt_in(&[&self.probs], "RelaxedBernoulli::rsample")?;
-        // rsample uses the same forward pass; differentiation flows through
-        // the surrounding tensor ops if the user constructs them downstream.
-        // Note: a fully autograd-aware rsample requires the random Logistic
-        // noise to be detached and the rest of the path to be a standard
-        // tensor-op composition. Since this implementation builds the
-        // result via scalar CPU code, callers wanting differentiable
-        // samples should reconstruct the formula using ferrotorch tensor
-        // ops (sigmoid, sub, div) over a detached Logistic noise tensor.
+        // Reparameterized Concrete draw: z = sigmoid((L + logit(p)) / temp)
+        // with L ~ Logistic(0,1) DETACHED. The forward is computed in scalar
+        // CPU code; the autograd path is carried by `RelaxedBernoulliRsampleBackward`
+        // which differentiates z w.r.t. `probs` (the only `Tensor` parameter;
+        // `temperature` is a scalar `T`). Mirrors `relaxed_bernoulli.py:104-112`
+        // where the whole chain is tensor ops with `has_rsample = True`.
         relaxed_bernoulli_sample(self.temperature, &self.probs, shape, true)
     }
 
@@ -245,19 +248,25 @@ impl<T: Float> Distribution<T> for RelaxedBernoulli<T> {
         let p_out: Vec<T> = (0..n).map(|i| p_data[i % p_data.len()]).collect();
         let new_probs =
             Tensor::from_storage(TensorStorage::cpu(p_out), batch_shape.to_vec(), false)?;
-        Ok(Box::new(RelaxedBernoulli::new(self.temperature, new_probs)?))
+        Ok(Box::new(RelaxedBernoulli::new(
+            self.temperature,
+            new_probs,
+        )?))
     }
 }
 
 /// Concrete forward sampling for RelaxedBernoulli (shared by sample and
-/// rsample). The result is computed in CPU scalar code; gradient tracking
-/// requires the caller to recompute via tensor ops over detached Logistic
-/// noise (see the RelaxedBernoulli rsample doc comment).
+/// rsample). The result is computed in CPU scalar code. When `reparam` is
+/// `true`, `probs` requires grad, and grad is globally enabled, the output
+/// carries a `RelaxedBernoulliRsampleBackward` node so gradients flow through
+/// `probs`. The random Logistic noise `u` is detached (the reparameterization
+/// trick), so only the deterministic `sigmoid((L + logit(p)) / temp)` map
+/// participates in autograd.
 fn relaxed_bernoulli_sample<T: Float>(
     temperature: T,
     probs: &Tensor<T>,
     shape: &[usize],
-    _reparam: bool,
+    reparam: bool,
 ) -> FerrotorchResult<Tensor<T>> {
     let device = probs.device();
     let zero = <T as num_traits::Zero>::zero();
@@ -290,11 +299,96 @@ fn relaxed_bernoulli_sample<T: Float>(
             }
         })
         .collect();
-    let out = Tensor::from_storage(TensorStorage::cpu(result), shape.to_vec(), false)?;
+    let storage = TensorStorage::cpu(result);
+
+    let out = if reparam && probs.requires_grad() && ferrotorch_core::is_grad_enabled() {
+        let grad_fn = Arc::new(RelaxedBernoulliRsampleBackward {
+            temperature,
+            probs: probs.clone(),
+            u: u.clone(),
+        });
+        Tensor::from_operation(storage, shape.to_vec(), grad_fn)?
+    } else {
+        Tensor::from_storage(storage, shape.to_vec(), false)?
+    };
     if device.is_cuda() {
         out.to(device)
     } else {
         Ok(out)
+    }
+}
+
+/// Autograd node for the differentiable RelaxedBernoulli `rsample`.
+///
+/// Forward: `z = sigmoid((L + logit(p)) / temp)` with `L = log(u) - log(1-u)`
+/// the detached Logistic noise. Differentiating w.r.t. `p`:
+///
+/// ```text
+/// arg      = (L + log(p/(1-p))) / temp
+/// dz/darg  = z (1 - z)                     (sigmoid derivative)
+/// darg/dp  = (1/temp) d/dp log(p/(1-p)) = 1 / (temp * p * (1-p))
+/// dz/dp    = z (1 - z) / (temp * p * (1-p))
+/// ```
+///
+/// `temperature` is a scalar `T`, not a tensor, so it receives no gradient —
+/// the single input is `probs`. The forward recomputes `z` from `u` + `p`
+/// (cheaper than storing it) to keep the node small.
+#[derive(Debug)]
+struct RelaxedBernoulliRsampleBackward<T: Float> {
+    temperature: T,
+    probs: Tensor<T>,
+    u: Tensor<T>,
+}
+
+impl<T: Float> GradFn<T> for RelaxedBernoulliRsampleBackward<T> {
+    fn backward(&self, grad_output: &Tensor<T>) -> FerrotorchResult<Vec<Option<Tensor<T>>>> {
+        let go = grad_output.data_vec()?;
+        let u_data = self.u.data_vec()?;
+        let probs_data = self.probs.data_vec()?;
+        let one = <T as num_traits::One>::one();
+        let zero = <T as num_traits::Zero>::zero();
+        let eps = T::from(1e-20).unwrap();
+
+        // Accumulate dL/dp per probs element (probs is cycled over outputs).
+        let np = probs_data.len();
+        let mut grad_p = vec![zero; np];
+        for (i, &g) in go.iter().enumerate() {
+            let pi = i % np;
+            let p = probs_data[pi].max(eps).min(one - eps);
+            let u_val = u_data[i % u_data.len()].max(eps).min(one - eps);
+            let l = u_val.ln() - (one - u_val).ln();
+            let logits = (p / (one - p)).ln();
+            let arg = (l + logits) / self.temperature;
+            // sigmoid (stable) to recover z
+            let z = if arg >= zero {
+                one / (one + (zero - arg).exp())
+            } else {
+                let e = arg.exp();
+                e / (one + e)
+            };
+            // dz/dp = z(1-z) / (temp * p * (1-p))
+            let dz_dp = z * (one - z) / (self.temperature * p * (one - p));
+            grad_p[pi] += g * dz_dp;
+        }
+
+        let grad = Tensor::from_storage(
+            TensorStorage::cpu(grad_p),
+            self.probs.shape().to_vec(),
+            false,
+        )?;
+        Ok(vec![if self.probs.requires_grad() {
+            Some(grad)
+        } else {
+            None
+        }])
+    }
+
+    fn inputs(&self) -> Vec<&Tensor<T>> {
+        vec![&self.probs]
+    }
+
+    fn name(&self) -> &'static str {
+        "RelaxedBernoulliRsampleBackward"
     }
 }
 
@@ -426,5 +520,42 @@ mod tests {
         let d = RelaxedBernoulli::new(0.5_f32, probs).unwrap();
         let expanded = d.expand(&[4]).unwrap();
         assert_eq!(expanded.batch_shape(), vec![4]);
+    }
+
+    #[test]
+    fn test_relaxed_bernoulli_rsample_requires_grad_when_probs_grad() {
+        // #1420: rsample builds an autograd graph when probs requires grad.
+        let probs = cpu_tensor(&[0.3, 0.7], &[2]).requires_grad_(true);
+        let d = RelaxedBernoulli::new(0.5_f32, probs).unwrap();
+        let s = d.rsample(&[6]).unwrap();
+        assert!(s.requires_grad());
+        assert!(s.grad_fn().is_some());
+    }
+
+    #[test]
+    fn test_relaxed_bernoulli_sample_detached() {
+        // sample (non-reparameterized) must NOT carry a grad graph even when
+        // probs requires grad.
+        let probs = cpu_tensor(&[0.3, 0.7], &[2]).requires_grad_(true);
+        let d = RelaxedBernoulli::new(0.5_f32, probs).unwrap();
+        let s = d.sample(&[6]).unwrap();
+        assert!(!s.requires_grad());
+    }
+
+    #[test]
+    fn test_relaxed_bernoulli_rsample_grad_flows_to_probs_finite() {
+        // #1420 probe: backward() through rsample populates probs.grad() with
+        // a finite value. dz/dp = z(1-z)/(temp*p*(1-p)) > 0, so summing the
+        // sample and backpropagating yields a strictly positive grad.
+        let probs = cpu_tensor(&[0.4], &[1]).requires_grad_(true);
+        let d = RelaxedBernoulli::new(0.5_f32, probs.clone()).unwrap();
+        let s = d.rsample(&[16]).unwrap();
+        let loss = s.sum_all().unwrap();
+        loss.backward().unwrap();
+        let g = probs.grad().unwrap().unwrap();
+        let gv = g.item().unwrap();
+        assert!(gv.is_finite(), "grad must be finite, got {gv}");
+        // Every per-element dz/dp is positive, so the accumulated grad is > 0.
+        assert!(gv > 0.0, "grad should be positive, got {gv}");
     }
 }
