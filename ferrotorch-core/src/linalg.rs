@@ -377,13 +377,22 @@ pub fn inv<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
 /// Returns `(Q, R)` in reduced form.
 ///
 /// # Backward
-/// Not yet implemented. Returns non-grad tensors.
+/// Autograd-aware (CPU, reduced mode, `m >= n`): when grad tracking is active
+/// for `input`, this routes through `crate::grad_fns::linalg::qr_differentiable`
+/// (the real `linalg_qr_backward` VJP). CUDA forward stays forward-only.
 pub fn qr<T: Float>(input: &Tensor<T>) -> FerrotorchResult<(Tensor<T>, Tensor<T>)> {
     let shape = input.shape();
     if shape.len() != 2 {
         return Err(FerrotorchError::InvalidArgument {
             message: format!("qr requires a 2-D tensor, got {shape:?}"),
         });
+    }
+
+    // Autograd path (CPU): delegate to the differentiable wrapper, which
+    // computes the forward inside `no_grad` (preventing re-entry) and attaches
+    // the split `QrBackwardQ`/`QrBackwardR` nodes. CUDA stays forward-only.
+    if !input.is_cuda() && crate::autograd::no_grad::is_grad_enabled() && input.requires_grad() {
+        return crate::grad_fns::linalg::qr_differentiable(input);
     }
 
     if input.is_cuda() {
@@ -448,7 +457,9 @@ pub fn qr<T: Float>(input: &Tensor<T>) -> FerrotorchResult<(Tensor<T>, Tensor<T>
 /// Returns the lower-triangular factor `L` such that `A = L @ L^T`.
 ///
 /// # Backward
-/// Not yet implemented. Returns non-grad tensors.
+/// Autograd-aware: when grad tracking is active for `input`, this routes
+/// through `crate::grad_fns::linalg::cholesky_differentiable` (the
+/// Phi-symmetrisation VJP). CUDA forward stays forward-only.
 pub fn cholesky<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
     let shape = input.shape();
     if shape.len() != 2 || shape[0] != shape[1] {
@@ -458,6 +469,13 @@ pub fn cholesky<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
     }
 
     let n = shape[0];
+
+    // Autograd path (CPU): delegate to the differentiable wrapper, which
+    // computes the forward inside `no_grad` (preventing re-entry here) and
+    // attaches `CholeskyBackward`. CUDA stays forward-only.
+    if !input.is_cuda() && crate::autograd::no_grad::is_grad_enabled() && input.requires_grad() {
+        return crate::grad_fns::linalg::cholesky_differentiable(input);
+    }
 
     if input.is_cuda() {
         let backend =
@@ -1260,6 +1278,13 @@ pub fn slogdet<T: Float>(a: &Tensor<T>) -> FerrotorchResult<(Tensor<T>, Tensor<T
         return Err(FerrotorchError::InvalidArgument {
             message: format!("slogdet requires a square 2-D tensor, got {shape:?}"),
         });
+    }
+
+    // Autograd path: delegate to the differentiable wrapper, which computes the
+    // forward inside `no_grad` (preventing re-entry) and attaches
+    // `SlogdetBackward` to the `logabsdet` output.
+    if crate::autograd::no_grad::is_grad_enabled() && a.requires_grad() {
+        return crate::grad_fns::linalg::slogdet_differentiable(a);
     }
 
     if is_f32::<T>() {

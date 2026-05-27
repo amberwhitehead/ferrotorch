@@ -22,12 +22,12 @@
 //! | REQ-13 (`linalg.eigh`) | NOT-STARTED | forward exists; no backward. Blocker #1345. |
 //! | REQ-14 (`linalg.eigvals`) | NOT-STARTED | forward exists; no backward. Blocker #1345. |
 //! | REQ-15 (`linalg.eigvalsh`) | NOT-STARTED | forward exists; no backward. Blocker #1345. |
-//! | REQ-16 (`linalg.qr`) | NOT-STARTED | forward exists; no backward. Blocker #1345. |
-//! | REQ-17 (`linalg.cholesky`) | NOT-STARTED | forward exists; no backward. Blocker #1345. |
+//! | REQ-16 (`linalg.qr`) | SHIPPED | `QrBackwardQ`/`QrBackwardR` + `qr_differentiable` (reduced, m≥n; real `linalg_qr_backward` VJP split across the Q/R outputs, accumulated into `A.grad`) per `FunctionsManual.cpp:4166`; FD-verified `grad_fns::linalg::tests::qr_backward_matches_finite_difference_square` and `qr_backward_q_only_and_r_only`; non-test consumer: the grad-aware `crate::linalg::qr` forward delegates here when grad is enabled. Blocker #1345. |
+//! | REQ-17 (`linalg.cholesky`) | SHIPPED | `CholeskyBackward` + `cholesky_differentiable` (Phi-symmetrisation VJP `L^{-T} Φ(tril(L^T gL)) L^{-1}`) per `FunctionsManual.cpp:2048`; FD-verified `grad_fns::linalg::tests::cholesky_backward_matches_finite_difference` (symmetric-FD + symmetry check); non-test consumer: the grad-aware `crate::linalg::cholesky` forward delegates here when grad is enabled. Blocker #1345. |
 //! | REQ-18 (`linalg.inv`) | SHIPPED | `LinalgInvBackward` + `inv_differentiable` (VJP `dA = -Y^T @ grad @ Y^T` per `derivatives.yaml:917`); FD-verified `tests/divergence_linalg_grad_audit.rs:inv_backward_matches_finite_difference`; non-test consumer `tools/parity-sweep/runner/src/main.rs` `"linalg.inv"` arm. Blocker #1345. |
 //! | REQ-19 (`linalg.pinv`) | NOT-STARTED | forward exists; no backward. Blocker #1345. |
 //! | REQ-20 (`linalg.det`) | SHIPPED | `LinalgDetBackward` + `det_differentiable` (VJP `dA = det * grad * inv(A)^T` per `FunctionsManual.cpp:4373` invertible branch); FD-verified `tests/divergence_linalg_grad_audit.rs:det_backward_matches_finite_difference`; non-test consumer `tools/parity-sweep/runner/src/main.rs` `"linalg.det"` arm. Blocker #1345. |
-//! | REQ-21 (`linalg.slogdet`) | NOT-STARTED | forward exists; no backward. Blocker #1345. |
+//! | REQ-21 (`linalg.slogdet`) | SHIPPED | `SlogdetBackward` + `slogdet_differentiable` (real-case VJP `dA = grad_logabsdet * inv(A)^T`, attached to the differentiable `logabsdet` output; `sign` is non-diff) per `FunctionsManual.cpp:4471` + `derivatives.yaml:559`; FD-verified `grad_fns::linalg::tests::slogdet_backward_matches_finite_difference`; non-test consumer: the grad-aware `crate::linalg::slogdet` forward delegates here when grad is enabled. Blocker #1345. |
 //! | REQ-22 (`linalg.lstsq`) | NOT-STARTED | forward exists; no backward. Blocker #1345. |
 //! | REQ-23 (`linalg.norm`) | NOT-STARTED | forward exists; no backward. Blocker #1345. |
 //! | REQ-24 (`linalg.matrix_rank`) | NOT-STARTED | forward exists; no backward. Blocker #1345. |
@@ -2329,6 +2329,470 @@ pub fn solve_differentiable<T: Float>(a: &Tensor<T>, b: &Tensor<T>) -> Ferrotorc
     }
 }
 
+// ---------------------------------------------------------------------------
+// SlogdetBackward — (sign, logabsdet) = slogdet(A)   (2D square)
+// ---------------------------------------------------------------------------
+
+/// Backward for the differentiable output `logabsdet` of `slogdet(A)`.
+///
+/// VJP (`torch/csrc/autograd/FunctionsManual.cpp:4471` `slogdet_backward`,
+/// real case — the formula `(g_abs - g_sign.conj()*sgn) * A^{-H}` collapses to
+/// `g_abs * A^{-H}` because the real sign is locally constant, so
+/// `grad_sign` contributes nothing):
+/// `dA = grad_logabsdet * inv(A)^T`.
+///
+/// Per `tools/autograd/derivatives.yaml:559` `_linalg_slogdet`
+/// (`output_differentiability: [True, True, False, False]`), the `sign`
+/// output carries no real gradient; this node is attached to the `logabsdet`
+/// output only.
+#[derive(Debug)]
+pub struct SlogdetBackward<T: Float> {
+    /// Retained inverse-transpose of `A` (`inv(A)^T`).
+    inv_t: Tensor<T>,
+}
+
+impl<T: Float> GradFn<T> for SlogdetBackward<T> {
+    fn backward(&self, grad_output: &Tensor<T>) -> FerrotorchResult<Vec<Option<Tensor<T>>>> {
+        // grad_output is the upstream gradient on `logabsdet` (a scalar).
+        let g: T = grad_output.item()?;
+        let data = self.inv_t.data()?;
+        let scaled: Vec<T> = data.iter().map(|&v| g * v).collect();
+        let grad_a = Tensor::from_storage(
+            TensorStorage::cpu(scaled),
+            self.inv_t.shape().to_vec(),
+            false,
+        )?;
+        Ok(vec![Some(grad_a)])
+    }
+
+    fn inputs(&self) -> Vec<&Tensor<T>> {
+        // VJP closes over the retained inverse-transpose only; the graph edge
+        // to the leaf `A` is carried by `SlogdetForward`.
+        vec![]
+    }
+
+    fn name(&self) -> &'static str {
+        "SlogdetBackward"
+    }
+}
+
+/// Carries the input edge for `slogdet`'s differentiable `logabsdet` output.
+#[derive(Debug)]
+struct SlogdetForward<T: Float> {
+    input: Tensor<T>,
+    inner: SlogdetBackward<T>,
+}
+
+impl<T: Float> GradFn<T> for SlogdetForward<T> {
+    fn backward(&self, grad_output: &Tensor<T>) -> FerrotorchResult<Vec<Option<Tensor<T>>>> {
+        self.inner.backward(grad_output)
+    }
+    fn inputs(&self) -> Vec<&Tensor<T>> {
+        vec![&self.input]
+    }
+    fn name(&self) -> &'static str {
+        "SlogdetBackward"
+    }
+}
+
+/// Differentiable `slogdet`. Returns `(sign, logabsdet)`; the `sign` output is
+/// non-differentiable in the real case (locally constant), so only the
+/// `logabsdet` output carries `SlogdetBackward`. Attaches it when grad is
+/// needed.
+pub fn slogdet_differentiable<T: Float>(a: &Tensor<T>) -> FerrotorchResult<(Tensor<T>, Tensor<T>)> {
+    // Forward computed under `no_grad`: `linalg_fwd::slogdet` delegates back
+    // here when grad is enabled, so the guard prevents infinite re-entry.
+    let (sign, logabsdet) = crate::autograd::no_grad::no_grad(|| linalg_fwd::slogdet(a))?;
+    if is_grad_enabled() && a.requires_grad() {
+        let inv = crate::autograd::no_grad::no_grad(|| linalg_fwd::inv(a))?;
+        let inv_t = mat_transpose(&inv)?;
+        let grad_fn = Arc::new(SlogdetForward {
+            input: a.clone(),
+            inner: SlogdetBackward { inv_t },
+        });
+        let (storage, shape) = logabsdet.into_storage_and_shape()?;
+        let logabsdet = Tensor::from_operation(storage, shape, grad_fn)?;
+        Ok((sign, logabsdet))
+    } else {
+        Ok((sign, logabsdet))
+    }
+}
+
+// ---------------------------------------------------------------------------
+// CholeskyBackward — L = cholesky(A)   (2D square SPD, lower-triangular L)
+// ---------------------------------------------------------------------------
+
+/// Lower-triangular projection of an `n×n` row-major matrix (keep `c <= r`).
+fn tril_cpu<T: Float>(x: &[T], n: usize) -> Vec<T> {
+    let zero = <T as num_traits::Zero>::zero();
+    let mut out = vec![zero; n * n];
+    for r in 0..n {
+        for c in 0..=r {
+            out[r * n + c] = x[r * n + c];
+        }
+    }
+    out
+}
+
+/// Backward for `L = cholesky(A)` (lower-triangular factor, `A = L @ L^T`).
+///
+/// VJP (`torch/csrc/autograd/FunctionsManual.cpp:2048` `cholesky_backward`,
+/// real lower case):
+/// 1. `P = tril(L^T @ gL)`                       (the `gA = L_.mH().matmul(gL_).tril()` step)
+/// 2. `S = 0.5 * (P + strictly_lower(P)^T)`       (Phi-symmetrisation:
+///    `0.5*(gA + gA.tril(-1).mH())`)
+/// 3. `S = solve_triangular(L^T, S, upper=true, left=true)`   (`L^{-T} @ S`)
+/// 4. `gA = solve_triangular(L,  S, upper=false, left=false)` (`S @ L^{-1}`)
+///
+/// The result is symmetric (not triangular), matching PyTorch.
+#[derive(Debug)]
+pub struct CholeskyBackward<T: Float> {
+    /// Retained lower-triangular factor `L`.
+    l: Tensor<T>,
+}
+
+impl<T: Float> GradFn<T> for CholeskyBackward<T> {
+    fn backward(&self, grad_output: &Tensor<T>) -> FerrotorchResult<Vec<Option<Tensor<T>>>> {
+        let n = self.l.shape()[0];
+        let l = self.l.data()?;
+        let gl = grad_output.data()?;
+        let zero = <T as num_traits::Zero>::zero();
+        let half = T::from(0.5).unwrap();
+
+        // Step 1: P = tril(L^T @ gL). L^T @ gL has entry [i,j] = sum_k L[k,i]*gL[k,j].
+        let mut ltgl = vec![zero; n * n];
+        for i in 0..n {
+            for j in 0..n {
+                let mut acc = zero;
+                for k in 0..n {
+                    acc += l[k * n + i] * gl[k * n + j];
+                }
+                ltgl[i * n + j] = acc;
+            }
+        }
+        let p = tril_cpu(&ltgl, n);
+
+        // Step 2: S = 0.5 * (P + strictly_lower(P)^T). strictly_lower(P)[r,c] is
+        // P[r,c] for c < r; its transpose contributes to the upper triangle.
+        let mut s = vec![zero; n * n];
+        for r in 0..n {
+            for c in 0..n {
+                let mut v = p[r * n + c];
+                if c > r {
+                    // upper triangle: strictly-lower(P)^T at [r,c] = P[c,r].
+                    v += p[c * n + r];
+                }
+                s[r * n + c] = half * v;
+            }
+        }
+        let s_t = Tensor::from_storage(TensorStorage::cpu(s), vec![n, n], false)?;
+
+        // Step 3: S <- L^{-T} @ S  ≡ solve_triangular(L^T, S, upper=true, left=true).
+        // The forward `solve_triangular` solves the LEFT system (A x = b) with
+        // `transpose` folding A^T. With upper=false (L is lower) + transpose=true
+        // we solve L^T x = S, i.e. x = L^{-T} S.
+        let s = crate::autograd::no_grad::no_grad(|| {
+            linalg_fwd::solve_triangular(&self.l, &s_t, false, true, false)
+        })?;
+
+        // Step 4: gA <- S @ L^{-1}  ≡ (L^{-T} @ S^T)^T. Solve_triangular only
+        // does LEFT solves, so right-solve by transposing: S @ L^{-1} =
+        // (L^{-T} @ S^T)^T = ((L^T)^{-1} S^T)^T.
+        let s_tt = mat_transpose(&s)?;
+        let right = crate::autograd::no_grad::no_grad(|| {
+            linalg_fwd::solve_triangular(&self.l, &s_tt, false, true, false)
+        })?;
+        let grad_a = mat_transpose(&right)?;
+
+        Ok(vec![Some(grad_a)])
+    }
+
+    fn inputs(&self) -> Vec<&Tensor<T>> {
+        // VJP closes over the retained `L`; the graph edge to leaf `A` is
+        // carried by `CholeskyForward`.
+        vec![]
+    }
+
+    fn name(&self) -> &'static str {
+        "CholeskyBackward"
+    }
+}
+
+/// Carries the input edge for `cholesky`.
+#[derive(Debug)]
+struct CholeskyForward<T: Float> {
+    input: Tensor<T>,
+    inner: CholeskyBackward<T>,
+}
+
+impl<T: Float> GradFn<T> for CholeskyForward<T> {
+    fn backward(&self, grad_output: &Tensor<T>) -> FerrotorchResult<Vec<Option<Tensor<T>>>> {
+        self.inner.backward(grad_output)
+    }
+    fn inputs(&self) -> Vec<&Tensor<T>> {
+        vec![&self.input]
+    }
+    fn name(&self) -> &'static str {
+        "CholeskyBackward"
+    }
+}
+
+/// Differentiable `cholesky`. Attaches `CholeskyBackward` (Phi-symmetrisation
+/// VJP) when grad is needed. Lower-triangular factor only (`A = L @ L^T`).
+pub fn cholesky_differentiable<T: Float>(a: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
+    // Compute the forward inside `no_grad`: `linalg_fwd::cholesky` itself
+    // delegates back here when grad is enabled, so the guard prevents
+    // infinite re-entry.
+    let l = crate::autograd::no_grad::no_grad(|| linalg_fwd::cholesky(a))?;
+    if is_grad_enabled() && a.requires_grad() {
+        let grad_fn = Arc::new(CholeskyForward {
+            input: a.clone(),
+            inner: CholeskyBackward { l: l.clone() },
+        });
+        let (storage, shape) = l.into_storage_and_shape()?;
+        Tensor::from_operation(storage, shape, grad_fn)
+    } else {
+        Ok(l)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// QrBackward — (Q, R) = qr(A, mode='reduced')   (2D, m >= n)
+// ---------------------------------------------------------------------------
+
+/// `syminvadj(X) = X + X^T` with the diagonal halved (real case of
+/// `linalg_qr_backward`'s `syminvadj`). `x` is row-major `n×n`.
+fn syminvadj_cpu<T: Float>(x: &[T], n: usize) -> Vec<T> {
+    let zero = <T as num_traits::Zero>::zero();
+    let half = T::from(0.5).unwrap();
+    let mut out = vec![zero; n * n];
+    for r in 0..n {
+        for c in 0..n {
+            let v = x[r * n + c] + x[c * n + r];
+            out[r * n + c] = if r == c { half * v } else { v };
+        }
+    }
+    out
+}
+
+/// Strict-upper + diagonal projection (`triu`, keep `c >= r`) of a row-major
+/// `n×n` matrix.
+fn triu_cpu<T: Float>(x: &[T], n: usize) -> Vec<T> {
+    let zero = <T as num_traits::Zero>::zero();
+    let mut out = vec![zero; n * n];
+    for r in 0..n {
+        for c in r..n {
+            out[r * n + c] = x[r * n + c];
+        }
+    }
+    out
+}
+
+/// Shared backward for `(Q, R) = qr(A, 'reduced')`, real case `m >= n`.
+///
+/// VJP (`torch/csrc/autograd/FunctionsManual.cpp:4166` `linalg_qr_backward`,
+/// `m >= n` branch):
+/// `gA = (Q @ syminvadj(triu(M)) + gQ_term) @ R^{-T}`, where
+/// `M = gR @ R^T - Q^T @ gQ` and the trailing `gQ` is added only when `gQ` is
+/// defined. Implemented as a right triangular solve:
+/// `gA = solve_triangular(R^T, rhs, upper=false, left=false)`.
+///
+/// Because ferrotorch's autograd engine drives one `grad_output` per node, the
+/// jointly-linear `(gQ, gR)` VJP is split across two nodes — `QrBackwardQ`
+/// (the `gQ`-only contribution, attached to the `Q` output) and `QrBackwardR`
+/// (the `gR`-only contribution, attached to the `R` output). The engine
+/// accumulates both partials into `A.grad`, reproducing the joint formula
+/// (which is additive in `gQ` and `gR`). If a consumer uses only one output,
+/// the other partial is simply absent — matching PyTorch's undefined-grad
+/// (zero) semantics.
+#[derive(Debug)]
+struct QrBackwardShared<T: Float> {
+    q: Tensor<T>,
+    r: Tensor<T>,
+}
+
+impl<T: Float> QrBackwardShared<T> {
+    /// Compute `gA = solve_triangular(R^T, rhs, upper=false, left=false)` where
+    /// `rhs` is the per-branch right-hand-side matrix shaped `[m, n]`.
+    fn finish_right_solve(
+        &self,
+        rhs: &Tensor<T>,
+        m: usize,
+        n: usize,
+    ) -> FerrotorchResult<Tensor<T>> {
+        // Right solve X @ R^{-T}: solve_triangular only does LEFT solves, so
+        // X @ R^{-T} = (R^{-1} @ X^T)^T. R is upper-triangular [n,n]; we solve
+        // R y = X^T (upper, no transpose) and transpose back.
+        let rhs_t = mat_transpose(rhs)?; // [n, m]
+        let y = crate::autograd::no_grad::no_grad(|| {
+            linalg_fwd::solve_triangular(&self.r, &rhs_t, true, false, false)
+        })?; // [n, m]
+        let ga = mat_transpose(&y)?; // [m, n]
+        debug_assert_eq!(ga.shape(), &[m, n]);
+        Ok(ga)
+    }
+
+    /// `gQ`-only contribution to `gA` (set `gR = 0`):
+    /// `M = -(Q^T @ gQ)`; `rhs = Q @ syminvadj(triu(M)) + gQ`.
+    fn grad_a_from_gq(&self, gq: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
+        let m = self.q.shape()[0];
+        let n = self.r.shape()[1];
+        let q = self.q.data()?;
+        let gqd = gq.data()?;
+        let zero = <T as num_traits::Zero>::zero();
+
+        // M = -(Q^T @ gQ): [n,n], M[i,j] = -sum_k Q[k,i]*gQ[k,j].
+        let mut mmat = vec![zero; n * n];
+        for i in 0..n {
+            for j in 0..n {
+                let mut acc = zero;
+                for k in 0..m {
+                    acc += q[k * n + i] * gqd[k * n + j];
+                }
+                mmat[i * n + j] = -acc;
+            }
+        }
+        let sym = syminvadj_cpu(&triu_cpu(&mmat, n), n); // [n,n]
+
+        // rhs = Q @ sym + gQ: [m,n], (Q[m,n] @ sym[n,n]) + gQ[m,n].
+        let mut rhs = vec![zero; m * n];
+        for r in 0..m {
+            for c in 0..n {
+                let mut acc = zero;
+                for k in 0..n {
+                    acc += q[r * n + k] * sym[k * n + c];
+                }
+                rhs[r * n + c] = acc + gqd[r * n + c];
+            }
+        }
+        let rhs = Tensor::from_storage(TensorStorage::cpu(rhs), vec![m, n], false)?;
+        self.finish_right_solve(&rhs, m, n)
+    }
+
+    /// `gR`-only contribution to `gA` (set `gQ = 0`):
+    /// `M = gR @ R^T`; `rhs = Q @ syminvadj(triu(M))`.
+    fn grad_a_from_gr(&self, gr: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
+        let m = self.q.shape()[0];
+        let n = self.r.shape()[1];
+        let q = self.q.data()?;
+        let r = self.r.data()?;
+        let grd = gr.data()?;
+        let zero = <T as num_traits::Zero>::zero();
+
+        // M = gR @ R^T: [n,n], M[i,j] = sum_k gR[i,k]*R[j,k].
+        let mut mmat = vec![zero; n * n];
+        for i in 0..n {
+            for j in 0..n {
+                let mut acc = zero;
+                for k in 0..n {
+                    acc += grd[i * n + k] * r[j * n + k];
+                }
+                mmat[i * n + j] = acc;
+            }
+        }
+        let sym = syminvadj_cpu(&triu_cpu(&mmat, n), n); // [n,n]
+
+        // rhs = Q @ sym: [m,n].
+        let mut rhs = vec![zero; m * n];
+        for rr in 0..m {
+            for c in 0..n {
+                let mut acc = zero;
+                for k in 0..n {
+                    acc += q[rr * n + k] * sym[k * n + c];
+                }
+                rhs[rr * n + c] = acc;
+            }
+        }
+        let rhs = Tensor::from_storage(TensorStorage::cpu(rhs), vec![m, n], false)?;
+        self.finish_right_solve(&rhs, m, n)
+    }
+}
+
+/// `gQ`-only QR backward node, attached to the `Q` output.
+#[derive(Debug)]
+struct QrBackwardQ<T: Float> {
+    input: Tensor<T>,
+    shared: QrBackwardShared<T>,
+}
+
+impl<T: Float> GradFn<T> for QrBackwardQ<T> {
+    fn backward(&self, grad_output: &Tensor<T>) -> FerrotorchResult<Vec<Option<Tensor<T>>>> {
+        Ok(vec![Some(self.shared.grad_a_from_gq(grad_output)?)])
+    }
+    fn inputs(&self) -> Vec<&Tensor<T>> {
+        vec![&self.input]
+    }
+    fn name(&self) -> &'static str {
+        "QrBackward"
+    }
+}
+
+/// `gR`-only QR backward node, attached to the `R` output.
+#[derive(Debug)]
+struct QrBackwardR<T: Float> {
+    input: Tensor<T>,
+    shared: QrBackwardShared<T>,
+}
+
+impl<T: Float> GradFn<T> for QrBackwardR<T> {
+    fn backward(&self, grad_output: &Tensor<T>) -> FerrotorchResult<Vec<Option<Tensor<T>>>> {
+        Ok(vec![Some(self.shared.grad_a_from_gr(grad_output)?)])
+    }
+    fn inputs(&self) -> Vec<&Tensor<T>> {
+        vec![&self.input]
+    }
+    fn name(&self) -> &'static str {
+        "QrBackward"
+    }
+}
+
+/// Differentiable `qr` (reduced mode, real, `m >= n`). Attaches the split
+/// `QrBackwardQ` / `QrBackwardR` nodes (whose `A.grad` contributions the
+/// autograd engine accumulates) when grad is needed.
+///
+/// Mirrors `torch.linalg.qr(A, mode='reduced')`. The `m < n` case is rejected
+/// here: its VJP (`trilImInvAdjSkew`) is the separate research-grade branch of
+/// `linalg_qr_backward` tracked under the hard-ops sub-blocker.
+pub fn qr_differentiable<T: Float>(a: &Tensor<T>) -> FerrotorchResult<(Tensor<T>, Tensor<T>)> {
+    // Forward under `no_grad`: `linalg_fwd::qr` delegates back here when grad
+    // is enabled, so the guard prevents infinite re-entry.
+    let (q, r) = crate::autograd::no_grad::no_grad(|| linalg_fwd::qr(a))?;
+    let needs_grad = is_grad_enabled() && a.requires_grad();
+    if !needs_grad {
+        return Ok((q, r));
+    }
+    let m = q.shape()[0];
+    let n = r.shape()[1];
+    if m < n {
+        return Err(FerrotorchError::InvalidArgument {
+            message: format!(
+                "qr backward (mode='reduced') is implemented for m >= n only; \
+                 got A shape [{m}, {n}] (the m<n trilImInvAdjSkew branch is \
+                 tracked under the hard-ops sub-blocker)"
+            ),
+        });
+    }
+    let q_node = Arc::new(QrBackwardQ {
+        input: a.clone(),
+        shared: QrBackwardShared {
+            q: q.clone(),
+            r: r.clone(),
+        },
+    });
+    let r_node = Arc::new(QrBackwardR {
+        input: a.clone(),
+        shared: QrBackwardShared {
+            q: q.clone(),
+            r: r.clone(),
+        },
+    });
+    let (q_storage, q_shape) = q.into_storage_and_shape()?;
+    let (r_storage, r_shape) = r.into_storage_and_shape()?;
+    let q = Tensor::from_operation(q_storage, q_shape, q_node)?;
+    let r = Tensor::from_operation(r_storage, r_shape, r_node)?;
+    Ok((q, r))
+}
+
 // ===========================================================================
 // Fused-affine family (#1344 / #1345): addmm / addmv / addr / addbmm /
 // baddbmm + structural autograd: kron / diagonal / diag / tril / triu.
@@ -4309,5 +4773,208 @@ mod tests {
         // Grad shapes must match original shapes, not broadcast shapes.
         assert_eq!(a.grad().unwrap().unwrap().shape(), &[1, 2, 3]);
         assert_eq!(b.grad().unwrap().unwrap().shape(), &[2, 3, 2]);
+    }
+
+    // -----------------------------------------------------------------------
+    // Decomposition backward FD audits (#1345): slogdet / cholesky / qr.
+    //
+    // Each VJP is verified against a CENTRAL finite difference of the op's own
+    // forward (R-CHAR-3: the reference is reconstructed from the forward at
+    // perturbed inputs, not a cached oracle constant). f64 throughout for FD
+    // accuracy.
+    // -----------------------------------------------------------------------
+
+    fn leaf64(data: &[f64], shape: &[usize]) -> Tensor<f64> {
+        Tensor::from_storage(TensorStorage::cpu(data.to_vec()), shape.to_vec(), true).unwrap()
+    }
+
+    fn no_grad_leaf64(data: &[f64], shape: &[usize]) -> Tensor<f64> {
+        Tensor::from_storage(TensorStorage::cpu(data.to_vec()), shape.to_vec(), false).unwrap()
+    }
+
+    /// Central finite-difference gradient of scalar `f(x)` wrt each element.
+    fn fd_grad64<F>(x: &[f64], shape: &[usize], eps: f64, f: F) -> Vec<f64>
+    where
+        F: Fn(&Tensor<f64>) -> f64,
+    {
+        let mut g = vec![0.0; x.len()];
+        for i in 0..x.len() {
+            let mut xp = x.to_vec();
+            xp[i] += eps;
+            let mut xm = x.to_vec();
+            xm[i] -= eps;
+            let lp = f(&no_grad_leaf64(&xp, shape));
+            let lm = f(&no_grad_leaf64(&xm, shape));
+            g[i] = (lp - lm) / (2.0 * eps);
+        }
+        g
+    }
+
+    fn assert_grad_close64(analytic: &[f64], numeric: &[f64], tol: f64, label: &str) {
+        assert_eq!(analytic.len(), numeric.len(), "{label}: length mismatch");
+        for (i, (&a, &n)) in analytic.iter().zip(numeric.iter()).enumerate() {
+            assert!(
+                (a - n).abs() < tol,
+                "{label} grad[{i}]: analytic={a}, numeric={n}, diff={}",
+                (a - n).abs()
+            );
+        }
+    }
+
+    // slogdet — VJP: dA = grad_logabsdet * inv(A)^T
+    //   (FunctionsManual.cpp:4471 slogdet_backward, real case).
+    #[test]
+    fn slogdet_backward_matches_finite_difference() {
+        // Well-conditioned non-symmetric 3x3 with det far from 0.
+        let a_data = vec![2.0, 1.0, 0.0, 0.5, 3.0, 1.0, 0.0, 1.0, 2.5];
+        let shape = [3, 3];
+
+        let a = leaf64(&a_data, &shape);
+        let (sign, logabsdet) = slogdet_differentiable(&a).unwrap();
+        // sign is non-differentiable and should carry no grad_fn.
+        assert!(sign.grad_fn().is_none(), "slogdet sign must be non-grad");
+        assert!(logabsdet.is_scalar());
+        logabsdet.backward().unwrap();
+        let analytic = a.grad().unwrap().unwrap().data().unwrap().to_vec();
+
+        let numeric = fd_grad64(&a_data, &shape, 1e-6, |x| {
+            // Forward `linalg::slogdet` on a no-grad leaf returns the plain
+            // (sign, logabsdet); take logabsdet.
+            let (_s, la) = linalg_fwd::slogdet(x).unwrap();
+            la.item().unwrap()
+        });
+
+        assert_grad_close64(&analytic, &numeric, 1e-4, "slogdet vs FD");
+    }
+
+    // cholesky — Phi-symmetrisation VJP (FunctionsManual.cpp:2048).
+    #[test]
+    fn cholesky_backward_matches_finite_difference() {
+        // SPD 3x3 (symmetric, positive-definite, well-conditioned).
+        let a_data = vec![4.0, 1.0, 0.5, 1.0, 3.0, 0.8, 0.5, 0.8, 2.5];
+        let n = 3usize;
+        let shape = [n, n];
+
+        let a = leaf64(&a_data, &shape);
+        let l = cholesky_differentiable(&a).unwrap();
+        assert_eq!(l.shape(), &[n, n]);
+        // Scalar loss = sum(L); covers every entry of the lower factor.
+        let loss = crate::grad_fns::reduction::sum(&l).unwrap();
+        loss.backward().unwrap();
+        let analytic = a.grad().unwrap().unwrap().data().unwrap().to_vec();
+
+        // PyTorch's `cholesky_backward` returns a SYMMETRIC gradient: the
+        // off-diagonal sensitivity is split 50/50 across `[i,j]` and `[j,i]`
+        // (`gA = 0.5*(gA + gA.tril(-1).mH())`), and the forward reads only the
+        // lower triangle. So an unconstrained entrywise FD reads 0 on the upper
+        // triangle. The honest reference is a SYMMETRIC finite difference:
+        // perturb `A[i,j]` and `A[j,i]` together for `i != j` (and `A[i,i]`
+        // alone for the diagonal). For a symmetric gradient that symmetric FD
+        // equals `analytic[i,j] + analytic[j,i]` off-diagonal and
+        // `analytic[i,i]` on-diagonal.
+        let f = |x: &[f64]| -> f64 {
+            let t = no_grad_leaf64(x, &shape);
+            let l = linalg_fwd::cholesky(&t).unwrap();
+            crate::grad_fns::reduction::sum(&l).unwrap().item().unwrap()
+        };
+        let eps = 1e-6;
+        for i in 0..n {
+            for j in 0..=i {
+                let mut xp = a_data.clone();
+                let mut xm = a_data.clone();
+                xp[i * n + j] += eps;
+                xm[i * n + j] -= eps;
+                if i != j {
+                    xp[j * n + i] += eps;
+                    xm[j * n + i] -= eps;
+                }
+                let sym_fd = (f(&xp) - f(&xm)) / (2.0 * eps);
+                let analytic_sym = if i == j {
+                    analytic[i * n + j]
+                } else {
+                    analytic[i * n + j] + analytic[j * n + i]
+                };
+                assert!(
+                    (analytic_sym - sym_fd).abs() < 1e-4,
+                    "cholesky vs symmetric-FD at ({i},{j}): analytic_sym={analytic_sym}, \
+                     fd={sym_fd}, diff={}",
+                    (analytic_sym - sym_fd).abs()
+                );
+            }
+        }
+        // Also confirm the analytic gradient is itself symmetric (PyTorch
+        // contract), so the split above is well-defined.
+        for i in 0..n {
+            for j in 0..n {
+                assert!(
+                    (analytic[i * n + j] - analytic[j * n + i]).abs() < 1e-9,
+                    "cholesky grad must be symmetric at ({i},{j})"
+                );
+            }
+        }
+    }
+
+    // qr (reduced, m>=n) — both Q and R grad paths combine into A.grad
+    //   (FunctionsManual.cpp:4166 linalg_qr_backward, m>=n branch).
+    #[test]
+    fn qr_backward_matches_finite_difference_square() {
+        // Well-conditioned non-symmetric 3x3.
+        let a_data = vec![1.0, 2.0, 0.5, 0.3, 1.5, 2.0, 1.0, 0.2, 3.0];
+        let shape = [3, 3];
+
+        // Loss = sum(Q) + sum(R) exercises BOTH the gQ node and the gR node,
+        // so A.grad accumulates both partials of the joint VJP.
+        let a = leaf64(&a_data, &shape);
+        let (q, r) = qr_differentiable(&a).unwrap();
+        assert_eq!(q.shape(), &[3, 3]);
+        assert_eq!(r.shape(), &[3, 3]);
+        let loss = crate::grad_fns::reduction::sum(&q)
+            .unwrap()
+            .add_t(&crate::grad_fns::reduction::sum(&r).unwrap())
+            .unwrap();
+        loss.backward().unwrap();
+        let analytic = a.grad().unwrap().unwrap().data().unwrap().to_vec();
+
+        let numeric = fd_grad64(&a_data, &shape, 1e-6, |x| {
+            let (q, r) = linalg_fwd::qr(x).unwrap();
+            let sq: f64 = q.data().unwrap().iter().sum();
+            let sr: f64 = r.data().unwrap().iter().sum();
+            sq + sr
+        });
+
+        // QR sign convention is fixed by the forward (positive-diagonal R), so
+        // the forward is smooth in A; FD and analytic agree.
+        assert_grad_close64(&analytic, &numeric, 1e-4, "qr vs FD");
+    }
+
+    // qr — exercise the Q-only and R-only paths independently.
+    #[test]
+    fn qr_backward_q_only_and_r_only() {
+        let a_data = vec![1.0, 2.0, 0.5, 0.3, 1.5, 2.0, 1.0, 0.2, 3.0];
+        let shape = [3, 3];
+
+        // Q-only: loss = sum(Q); only QrBackwardQ fires.
+        let a = leaf64(&a_data, &shape);
+        let (q, _r) = qr_differentiable(&a).unwrap();
+        let loss = crate::grad_fns::reduction::sum(&q).unwrap();
+        loss.backward().unwrap();
+        let g_q_only = a.grad().unwrap().unwrap().data().unwrap().to_vec();
+        let num_q = fd_grad64(&a_data, &shape, 1e-6, |x| {
+            let (q, _r) = linalg_fwd::qr(x).unwrap();
+            q.data().unwrap().iter().sum()
+        });
+        assert_grad_close64(&g_q_only, &num_q, 1e-4, "qr Q-only vs FD");
+
+        // R-only: loss = sum(R); only QrBackwardR fires.
+        let a2 = leaf64(&a_data, &shape);
+        let (_q, r) = qr_differentiable(&a2).unwrap();
+        let loss2 = crate::grad_fns::reduction::sum(&r).unwrap();
+        loss2.backward().unwrap();
+        let g_r_only = a2.grad().unwrap().unwrap().data().unwrap().to_vec();
+        let num_r = fd_grad64(&a_data, &shape, 1e-6, |x| {
+            let (_q, r) = linalg_fwd::qr(x).unwrap();
+            r.data().unwrap().iter().sum()
+        });
+        assert_grad_close64(&g_r_only, &num_r, 1e-4, "qr R-only vs FD");
     }
 }
