@@ -32,7 +32,7 @@ use ferrotorch_core::storage::TensorStorage;
 use ferrotorch_core::tensor::{GradFn, Tensor};
 
 use crate::constraints;
-use crate::special_fns::{digamma_scalar, lgamma_scalar};
+use crate::special_fns::{digamma_scalar, lgamma_scalar, standard_gamma_grad_one};
 use crate::{DistConstraint, Distribution};
 use std::collections::HashMap;
 
@@ -556,8 +556,12 @@ impl<T: Float> GradFn<T> for GammaRsampleBackward<T> {
             grad_rate
         };
 
-        // grad_concentration: implicit reparameterization gradient
-        // d(sample)/d(alpha) ~= sample * (log(sample) - digamma(alpha))
+        // grad_concentration: PATHWISE (implicit-reparameterization) gradient.
+        // d(standard_gamma)/d(alpha) = standard_gamma_grad_one(alpha, sg)
+        //   = -(d/dalpha cdf(sg; alpha)) / pdf(sg; alpha)
+        // (torch._standard_gamma_grad,
+        // aten/src/ATen/native/Distributions.h:302 standard_gamma_grad_one).
+        // The sample is standard_gamma / rate, so chain through 1/rate.
         let grad_conc_val: T = go
             .iter()
             .zip(sg_data.iter())
@@ -566,7 +570,7 @@ impl<T: Float> GradFn<T> for GammaRsampleBackward<T> {
             .fold(zero, |acc, (((&g, &sg), &alpha), &r)| {
                 let tiny = T::from(1e-30).unwrap();
                 let sg_safe = if sg < tiny { tiny } else { sg };
-                let dsample_dalpha = sg_safe * (sg_safe.ln() - digamma_scalar(alpha));
+                let dsample_dalpha = standard_gamma_grad_one(alpha, sg_safe);
                 acc + g * dsample_dalpha / r
             });
         let grad_conc = Tensor::from_storage(

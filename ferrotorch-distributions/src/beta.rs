@@ -32,7 +32,7 @@ use ferrotorch_core::storage::TensorStorage;
 use ferrotorch_core::tensor::{GradFn, Tensor};
 
 use crate::constraints;
-use crate::special_fns::{digamma_scalar, lgamma_scalar};
+use crate::special_fns::{digamma_scalar, lgamma_scalar, standard_gamma_grad_one};
 use crate::{DistConstraint, Distribution};
 
 /// Beta distribution parameterized by `concentration1` (alpha) and
@@ -344,10 +344,8 @@ impl<T: Float> Distribution<T> for Beta<T> {
         let n: usize = batch_shape.iter().product::<usize>().max(1);
         let c1_out: Vec<T> = (0..n).map(|i| c1[i % c1.len()]).collect();
         let c0_out: Vec<T> = (0..n).map(|i| c0[i % c0.len()]).collect();
-        let new_c1 =
-            Tensor::from_storage(TensorStorage::cpu(c1_out), batch_shape.to_vec(), false)?;
-        let new_c0 =
-            Tensor::from_storage(TensorStorage::cpu(c0_out), batch_shape.to_vec(), false)?;
+        let new_c1 = Tensor::from_storage(TensorStorage::cpu(c1_out), batch_shape.to_vec(), false)?;
+        let new_c0 = Tensor::from_storage(TensorStorage::cpu(c0_out), batch_shape.to_vec(), false)?;
         Ok(Box::new(Beta::new(new_c1, new_c0)?))
     }
 }
@@ -379,11 +377,16 @@ impl<T: Float> GradFn<T> for BetaRsampleBackward<T> {
         let zero = <T as num_traits::Zero>::zero();
         let tiny = T::from(1e-30).unwrap();
 
-        // output = ga / (ga + gb)
+        // output = ga / (ga + gb), where ga ~ Gamma(alpha, 1), gb ~ Gamma(beta, 1).
         // d(output)/d(ga) = gb / (ga + gb)^2
         // d(output)/d(gb) = -ga / (ga + gb)^2
-        // d(ga)/d(alpha) ~= ga * (log(ga) - digamma(alpha))  (implicit reparam)
-        // d(gb)/d(beta) ~= gb * (log(gb) - digamma(beta))
+        // PATHWISE (implicit-reparameterization) gradient of each standard-Gamma
+        // draw, matching torch._standard_gamma_grad
+        // (aten/src/ATen/native/Distributions.h:302 standard_gamma_grad_one):
+        // d(ga)/d(alpha) = standard_gamma_grad_one(alpha, ga)
+        // d(gb)/d(beta)  = standard_gamma_grad_one(beta, gb)
+        // (the prior score-function form ga*(ln ga - psi(alpha)) is unbiased only
+        // in expectation and flips sign per-sample — see #1555.)
 
         let mut grad_conc1 = zero;
         let mut grad_conc0 = zero;
@@ -400,8 +403,8 @@ impl<T: Float> GradFn<T> for BetaRsampleBackward<T> {
             let dout_dga = gb / sum2;
             let dout_dgb = -ga / sum2;
 
-            let dga_dalpha = ga * (ga.ln() - digamma_scalar(alpha));
-            let dgb_dbeta = gb * (gb.ln() - digamma_scalar(beta_p));
+            let dga_dalpha = standard_gamma_grad_one(alpha, ga);
+            let dgb_dbeta = standard_gamma_grad_one(beta_p, gb);
 
             grad_conc1 += g * dout_dga * dga_dalpha;
             grad_conc0 += g * dout_dgb * dgb_dbeta;

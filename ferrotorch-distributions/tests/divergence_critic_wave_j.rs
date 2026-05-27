@@ -112,7 +112,6 @@ fn gamma_cdf_rate_scales_argument_at_boundary() {
 /// value. Spot-checked against torch at the drawn sg below.
 /// Tracking: #1555.
 #[test]
-#[ignore = "divergence: GammaRsampleBackward conc-grad uses score-function not pathwise formula; tracking #1555"]
 fn divergence_gamma_rsample_conc_grad_sign_contradicts_torch_pathwise() {
     let alpha = 2.5_f64;
     // exp(digamma(2.5)) ~ 1.95: below this the score-function formula flips

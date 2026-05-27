@@ -110,6 +110,113 @@ pub(crate) fn digamma_scalar<T: Float>(x: T) -> T {
     result
 }
 
+// ---------------------------------------------------------------------------
+// Pathwise (implicit-reparameterization) gradient of a standard-Gamma sample
+// ---------------------------------------------------------------------------
+
+/// Compute the reparameterized gradient `d sample / d alpha = -(d/dalpha
+/// cdf(x; alpha)) / pdf(x; alpha)` for a sample `x` drawn from a standard
+/// Gamma distribution `Gamma(alpha, 1)`.
+///
+/// This is a direct port of PyTorch's `standard_gamma_grad_one` from
+/// `aten/src/ATen/native/Distributions.h:302-368` (the kernel behind
+/// `torch._standard_gamma_grad`). It is the PATHWISE per-sample gradient — for
+/// `alpha >= 1` it is strictly positive for every `x > 0` — and it replaces the
+/// high-variance score-function closed form `x * (ln x - psi(alpha))`, which is
+/// only unbiased in expectation and routinely flips sign per-sample.
+///
+/// Three branches mirror upstream exactly:
+/// 1. small `x` (`x < 0.8`): Taylor series for the incomplete gamma + its
+///    derivative, divided by the pdf;
+/// 2. large `alpha` (`alpha > 8`): Rice saddle-point expansion (with a near-mean
+///    polynomial sub-branch for `0.9 alpha <= x <= 1.1 alpha`);
+/// 3. otherwise: a bivariate rational approximation in `(ln(x/alpha), ln alpha)`.
+pub(crate) fn standard_gamma_grad_one<T: Float>(alpha: T, x: T) -> T {
+    let zero = <T as num_traits::Zero>::zero();
+    let one = <T as num_traits::One>::one();
+
+    // 1. Taylor series expansion for small x.
+    if x < T::from(0.8).unwrap() {
+        let mut numer = one;
+        let mut denom = alpha;
+        let mut series1 = numer / denom;
+        let mut series2 = numer / (denom * denom);
+        for i in 1..=5 {
+            numer = numer * (-x / T::from(i as f64).unwrap());
+            denom += one;
+            series1 += numer / denom;
+            series2 += numer / (denom * denom);
+        }
+        let pow_x_alpha = x.powf(alpha);
+        let gamma_pdf = x.powf(alpha - one) * (-x).exp();
+        let gamma_cdf = pow_x_alpha * series1;
+        let gamma_cdf_alpha = (x.ln() - digamma_scalar(alpha)) * gamma_cdf - pow_x_alpha * series2;
+        let result = -gamma_cdf_alpha / gamma_pdf;
+        return if result.is_nan() { zero } else { result };
+    }
+
+    // 2. Rice saddle point expansion for large alpha.
+    if alpha > T::from(8.0).unwrap() {
+        let p9 = T::from(0.9).unwrap();
+        let p11 = T::from(1.1).unwrap();
+        if p9 * alpha <= x && x <= p11 * alpha {
+            let c24 = T::from(24.0).unwrap();
+            let c12 = T::from(12.0).unwrap();
+            let numer_1 = one + c24 * alpha * (one + c12 * alpha);
+            let c1440 = T::from(1440.0).unwrap();
+            let c6 = T::from(6.0).unwrap();
+            let c53 = T::from(53.0).unwrap();
+            let c120 = T::from(120.0).unwrap();
+            let c65 = T::from(65.0).unwrap();
+            let c107 = T::from(107.0).unwrap();
+            let c3600 = T::from(3600.0).unwrap();
+            let numer_2 = c1440 * (alpha * alpha) + c6 * x * (c53 - c120 * x) - c65 * x * x / alpha
+                + alpha * (c107 + c3600 * x);
+            let denom = T::from(1_244_160.0).unwrap() * (alpha * alpha) * (alpha * alpha);
+            return numer_1 * numer_2 / denom;
+        }
+        let denom = (T::from(8.0).unwrap() * alpha).sqrt();
+        let term2 = denom / (alpha - x);
+        let term3 = (x - alpha - alpha * (x / alpha).ln()).powf(T::from(-1.5).unwrap());
+        let term23 = if x < alpha {
+            term2 - term3
+        } else {
+            term2 + term3
+        };
+        let two = T::from(2.0).unwrap();
+        let term1 = (x / alpha).ln() * term23
+            - (two / alpha).sqrt() * (alpha + x) / ((alpha - x) * (alpha - x));
+        let c12 = T::from(12.0).unwrap();
+        let c24 = T::from(24.0).unwrap();
+        let stirling = one + one / (c12 * alpha) * (one + one / (c24 * alpha));
+        let numer = x * term1;
+        return -stirling * numer / denom;
+    }
+
+    // 3. Bivariate rational approximation to the reparameterized gradient.
+    let u = (x / alpha).ln();
+    let v = alpha.ln();
+    #[rustfmt::skip]
+    const COEF_UV: [[f64; 8]; 3] = [
+        [0.160_093_98, -0.094_634_809, 0.025_146_376, -0.003_064_834_3,
+         1.0, 0.326_681_15, 0.104_060_89, 0.001_417_908_4],
+        [0.534_878_93, 0.129_807_1, 0.065_735_949, -0.001_564_975_8,
+         0.166_394_65, 0.020_070_113, -0.003_593_891_5, -0.000_583_926_23],
+        [0.040_121_004, -0.006_591_402_2, -0.002_628_604_7, -0.001_344_177_7,
+         0.017_050_642, -0.002_130_932_6, 0.000_850_923_67, -1.524_787_7e-7],
+    ];
+    let mut coef_v = [zero; 8];
+    for (i, cv) in coef_v.iter_mut().enumerate() {
+        let c0 = T::from(COEF_UV[0][i]).unwrap();
+        let c1 = T::from(COEF_UV[1][i]).unwrap();
+        let c2 = T::from(COEF_UV[2][i]).unwrap();
+        *cv = c0 + u * (c1 + u * c2);
+    }
+    let p = coef_v[0] + v * (coef_v[1] + v * (coef_v[2] + v * coef_v[3]));
+    let q = coef_v[4] + v * (coef_v[5] + v * (coef_v[6] + v * coef_v[7]));
+    (p / q).exp()
+}
+
 #[cfg(test)]
 mod tests {
     //! Reference values produced from `scipy.special.gammaln` and
@@ -224,6 +331,124 @@ mod tests {
             assert!(
                 err < tol,
                 "lgamma_f32({x}): got {got_f32}, expected {expected}, err = {err}"
+            );
+        }
+    }
+
+    /// Reference values from live `torch._standard_gamma_grad(alpha, x)`
+    /// (this machine, 2026-05-26). The (alpha, x) pairs deliberately span all
+    /// three branches of `standard_gamma_grad_one`:
+    ///   - small x (x < 0.8): rows with x in {0.5, 0.3, 0.2, 0.7, 0.4, 0.1}
+    ///   - large alpha (alpha > 8): rows with alpha in {10, 12, 8.5, 20}
+    ///   - bivariate rational (else): rows like (2.5, 2.0), (3.0, 1.5), (5.0, 4.0)
+    use super::standard_gamma_grad_one;
+
+    #[test]
+    fn standard_gamma_grad_one_matches_torch() {
+        let cases: [(f64, f64, f64); 14] = [
+            (2.5, 0.5, 0.426_839_502_982),
+            (2.5, 2.0, 0.953_443_966_788),
+            (2.5, 0.3, 0.305_572_785_677),
+            (0.5, 0.2, 0.794_050_566_982),
+            (0.5, 0.7, 1.586_772_237_284),
+            (1.0, 0.4, 0.708_752_718_551),
+            (10.0, 9.5, 0.990_918_561_469),
+            (12.0, 12.0, 1.013_961_394_301),
+            (3.0, 1.5, 0.731_518_719_374),
+            (5.0, 4.0, 0.922_753_048_730),
+            (8.5, 8.5, 1.019_752_489_616),
+            (2.5, 0.5586, 0.457_775_125_088),
+            (0.9, 0.1, 0.314_776_859_958),
+            (20.0, 18.0, 0.956_250_962_552),
+        ];
+        for (alpha, x, expected) in cases {
+            let got = standard_gamma_grad_one(alpha, x);
+            // torch uses the same approximation; the rational/saddle branches
+            // carry the approximation's intrinsic error (~1e-3 rel near edges).
+            let tol = 1e-4 * expected.abs().max(1.0);
+            assert!(
+                (got - expected).abs() < tol,
+                "standard_gamma_grad_one({alpha}, {x}): got {got}, torch {expected}, |err|={}",
+                (got - expected).abs()
+            );
+        }
+    }
+
+    /// The pathwise gradient must equal the implicit-function value
+    /// `-(d/dalpha CDF(x;alpha)) / pdf(x;alpha)`, which we recover by a central
+    /// finite difference of the regularized lower-incomplete-gamma CDF
+    /// `P(alpha, x)` w.r.t. alpha, divided by the Gamma pdf. This is an
+    /// independent oracle (no torch dependency) confirming the port is the
+    /// genuine pathwise gradient and not a different-but-still-wrong formula.
+    #[test]
+    fn standard_gamma_grad_one_matches_finite_difference_implicit() {
+        // Lanczos lgamma is already in this module; build P(a,x) via a simple
+        // series / continued-fraction regularized incomplete gamma.
+        fn gammp(a: f64, x: f64) -> f64 {
+            if x <= 0.0 {
+                return 0.0;
+            }
+            let gln = lgamma_scalar(a);
+            if x < a + 1.0 {
+                // power series
+                let mut ap = a;
+                let mut sum = 1.0 / a;
+                let mut del = sum;
+                for _ in 0..500 {
+                    ap += 1.0;
+                    del *= x / ap;
+                    sum += del;
+                    if del.abs() < sum.abs() * 1e-15 {
+                        break;
+                    }
+                }
+                sum * (-x + a * x.ln() - gln).exp()
+            } else {
+                // Lentz continued fraction for Q, return 1 - Q
+                let tiny = 1e-300;
+                let mut b = x + 1.0 - a;
+                let mut c = 1.0 / tiny;
+                let mut d = 1.0 / b;
+                let mut h = d;
+                for i in 1..500 {
+                    let an = -(i as f64) * (i as f64 - a);
+                    b += 2.0;
+                    d = an * d + b;
+                    if d.abs() < tiny {
+                        d = tiny;
+                    }
+                    c = b + an / c;
+                    if c.abs() < tiny {
+                        c = tiny;
+                    }
+                    d = 1.0 / d;
+                    let del = d * c;
+                    h *= del;
+                    if (del - 1.0).abs() < 1e-15 {
+                        break;
+                    }
+                }
+                let q = (-x + a * x.ln() - gln).exp() * h;
+                1.0 - q
+            }
+        }
+        // pdf of standard Gamma(alpha) at x = x^(a-1) e^-x / Gamma(a).
+        fn gamma_pdf(a: f64, x: f64) -> f64 {
+            ((a - 1.0) * x.ln() - x - lgamma_scalar(a)).exp()
+        }
+        // Pairs in the small-x and rational branches (the FD oracle for the
+        // saddle branch is dominated by approximation error in both, so we pin
+        // the saddle branch against torch above instead).
+        for (alpha, x) in [(2.5, 0.5), (2.5, 2.0), (3.0, 1.5), (5.0, 4.0), (0.9, 0.3)] {
+            let h = 1e-6;
+            let dp_dalpha = (gammp(alpha + h, x) - gammp(alpha - h, x)) / (2.0 * h);
+            let implicit = -dp_dalpha / gamma_pdf(alpha, x);
+            let got = standard_gamma_grad_one(alpha, x);
+            let tol = 2e-3 * implicit.abs().max(1.0);
+            assert!(
+                (got - implicit).abs() < tol,
+                "FD implicit grad at alpha={alpha}, x={x}: port={got}, FD-implicit={implicit}, |err|={}",
+                (got - implicit).abs()
             );
         }
     }
