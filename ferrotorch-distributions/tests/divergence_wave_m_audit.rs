@@ -28,14 +28,14 @@ use ferrotorch_distributions::{Beta, Dirichlet, Distribution, Exponential, Paret
 // ---------------------------------------------------------------------------
 
 #[test]
-fn audit_1374_supported_pair_count_is_37() {
+fn audit_1374_supported_pair_count_is_41() {
     // Pins the public accessor; the in-crate drift test
     // `kl_doc_table_matches_dispatcher` separately asserts the doc table and
     // dispatcher arms agree with this number.
     assert_eq!(
         kl_supported_pair_count(),
-        37,
-        "wave-M added 12 pairs (25 -> 37); update this audit + the doc table together"
+        41,
+        "wave-N added 4 MVN/LowRankMVN pairs (37 -> 41); update this audit + the doc table together"
     );
 }
 

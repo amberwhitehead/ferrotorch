@@ -20,7 +20,7 @@
 //! | REQ-4 (8 same-family closed-form formulas) | SHIPPED | 8 closed-form helpers in `kl.rs` (`kl_normal_normal`, `kl_bernoulli_bernoulli`, `kl_uniform_uniform`, `kl_categorical_categorical`, `kl_laplace_laplace`, `kl_exponential_exponential`, `kl_gamma_gamma`, `kl_poisson_poisson`) mirroring `@register_kl` bodies in `torch/distributions/kl.py`; consumer: the dispatcher invokes each formula |
 //! | REQ-5 (4 cross-family formulas) | SHIPPED | `kl_normal_uniform`, `kl_uniform_normal`, `kl_gamma_exponential`, `kl_exponential_gamma` in `kl.rs`; last two use `kl_gamma_scalar` via `Exp(λ) ≡ Gamma(1, λ)`; consumer: the dispatcher calls each; `kl_gamma_scalar` is consumed by 3 production sites internally |
 //! | REQ-6 (fallback guard on every formula) | SHIPPED | every formula's first statement is `crate::fallback::check_gpu_fallback_opt_in(&[...], "kl_divergence(P, Q)")?` in `kl.rs` — 12 production call sites of the fallback gate; consumer: this IS the production consumer of `fn check_gpu_fallback_opt_in` per `fallback.md` REQ-2 |
-//! | REQ-7 (full ~75-pair PyTorch coverage) | PARTIAL | blocker #1374 — ferrotorch now ships 25 of PyTorch's ~75 pairs (was 19). Added in wave-L: Cauchy-Cauchy (same-family) + Normal-Gumbel, Gumbel-Normal, Gamma-Gumbel, Exponential-Gumbel, Uniform-Gumbel (cross-family), each mirroring its `@register_kl` body in `torch/distributions/kl.py`; consumer: the dispatcher's new downcast arms. Still missing: Dirichlet-Dirichlet, Binomial-Binomial, Geometric-Geometric, MVN-MVN, ContinuousBernoulli pairs, and the many `+inf` boundary cross-pairs — #1374 stays open for the remaining ~50. |
+//! | REQ-7 (full ~75-pair PyTorch coverage) | PARTIAL | blocker #1374 — ferrotorch now ships 41 of PyTorch's ~75 pairs (was 37). Wave-N added the multivariate pairs `kl_multivariatenormal_multivariatenormal` (mirrors `torch/distributions/kl.py:442-464`), `kl_multivariatenormal_lowrank` (`kl.py:375-403`), `kl_lowrank_multivariatenormal` (`kl.py:405-440`), `kl_lowrank_lowrank` (`kl.py:341-373`), all sharing `kl_mvn_dense_scalar` over the dense `scale_tril` (value-identical to torch's Woodbury form, R-DEV-1); consumer: the dispatcher's 4 new downcast arms. Still NOT-STARTED — each blocked on a missing distribution TYPE (no consumer can exist until the type lands): Binomial-Binomial + Poisson-Binomial (need a `Binomial` struct), Geometric-Geometric (need a `Geometric` struct), ContinuousBernoulli-* pairs (need a `ContinuousBernoulli` struct), Bernoulli-Poisson (no `_kl_bernoulli_poisson`; torch only has Poisson-Bernoulli which needs Bernoulli's enumerate path). Also deprioritised: the all-`+inf` degenerate-support cross-pairs (Normal-Exponential/Gamma/Pareto, Gamma-Uniform/Beta, etc. — no new type needed). #1374 stays open for the remaining ~34. |
 //! | REQ-8 (`register_kl` extension API) | SHIPPED (design decision, #1375) | the explicit `Any::downcast_ref` match in `kl_dispatch` is the deliberate Rust-idiomatic equivalent of PyTorch's `@register_kl` + `_dispatch_kl` (a Python-runtime open-extension pattern). Rust's static analog is the closed-crate match, kept maintainable by the `kl_doc_table_matches_dispatcher` drift test that pins the doc table, the const count, and the dispatcher arms in lockstep. A `Lazy<HashMap<(TypeId,TypeId),Fn>>` registry would add indirection without enabling cross-crate extension (formulas need concrete accessors). Documented in `kl.md` REQ-8. Closes #1375. |
 
 use ferrotorch_core::dtype::Float;
@@ -31,7 +31,8 @@ use ferrotorch_core::tensor::Tensor;
 use crate::special_fns::{digamma_scalar, lgamma_scalar};
 use crate::{
     Bernoulli, Beta, Categorical, Cauchy, Dirichlet, Distribution, Exponential, Gamma, Gumbel,
-    HalfNormal, Laplace, Normal, Pareto, Poisson, Uniform,
+    HalfNormal, Laplace, LowRankMultivariateNormal, MultivariateNormal, Normal, Pareto, Poisson,
+    Uniform,
 };
 
 /// Euler-Mascheroni constant `γ`. Mirrors PyTorch's
@@ -94,6 +95,10 @@ const EULER_GAMMA: f64 = 0.577_215_664_901_532_9;
 /// | Uniform | Gamma |
 /// | Uniform | Pareto |
 /// | Uniform | Beta |
+/// | MultivariateNormal | MultivariateNormal |
+/// | MultivariateNormal | LowRankMultivariateNormal |
+/// | LowRankMultivariateNormal | MultivariateNormal |
+/// | LowRankMultivariateNormal | LowRankMultivariateNormal |
 ///
 /// The same set is also reported by [`kl_supported_pair_count`].
 ///
@@ -128,7 +133,7 @@ pub const fn kl_supported_pair_count() -> usize {
 /// Compile-time count of registered `(P, Q)` pairs. Update this when adding
 /// or removing a branch in [`kl_dispatch`] **and** the doc table on
 /// [`kl_divergence`] in lockstep; the drift test enforces the invariant.
-const KL_SUPPORTED_PAIR_COUNT: usize = 37;
+const KL_SUPPORTED_PAIR_COUNT: usize = 41;
 
 fn kl_dispatch<T: Float>(
     p: &dyn std::any::Any,
@@ -342,6 +347,34 @@ fn kl_dispatch<T: Float>(
     if let (Some(pu), Some(qb)) = (p.downcast_ref::<Uniform<T>>(), q.downcast_ref::<Beta<T>>()) {
         return kl_uniform_beta(pu, qb);
     }
+    // MultivariateNormal-MultivariateNormal (multivariate same-family)
+    if let (Some(pm), Some(qm)) = (
+        p.downcast_ref::<MultivariateNormal<T>>(),
+        q.downcast_ref::<MultivariateNormal<T>>(),
+    ) {
+        return kl_multivariatenormal_multivariatenormal(pm, qm);
+    }
+    // MultivariateNormal-LowRankMultivariateNormal (multivariate cross-family)
+    if let (Some(pm), Some(ql)) = (
+        p.downcast_ref::<MultivariateNormal<T>>(),
+        q.downcast_ref::<LowRankMultivariateNormal<T>>(),
+    ) {
+        return kl_multivariatenormal_lowrank(pm, ql);
+    }
+    // LowRankMultivariateNormal-MultivariateNormal (multivariate cross-family)
+    if let (Some(pl), Some(qm)) = (
+        p.downcast_ref::<LowRankMultivariateNormal<T>>(),
+        q.downcast_ref::<MultivariateNormal<T>>(),
+    ) {
+        return kl_lowrank_multivariatenormal(pl, qm);
+    }
+    // LowRankMultivariateNormal-LowRankMultivariateNormal (multivariate same-family)
+    if let (Some(pl), Some(ql)) = (
+        p.downcast_ref::<LowRankMultivariateNormal<T>>(),
+        q.downcast_ref::<LowRankMultivariateNormal<T>>(),
+    ) {
+        return kl_lowrank_lowrank(pl, ql);
+    }
 
     Err(FerrotorchError::InvalidArgument {
         message: "No KL divergence formula registered for this distribution pair. \
@@ -349,14 +382,18 @@ fn kl_dispatch<T: Float>(
                   Uniform-Uniform, Categorical-Categorical, Laplace-Laplace, \
                   Exponential-Exponential, Gamma-Gamma, Poisson-Poisson, \
                   Beta-Beta, Gumbel-Gumbel, Pareto-Pareto, HalfNormal-HalfNormal, \
-                  Cauchy-Cauchy, Dirichlet-Dirichlet. \
+                  Cauchy-Cauchy, Dirichlet-Dirichlet, \
+                  MultivariateNormal-MultivariateNormal, \
+                  LowRankMultivariateNormal-LowRankMultivariateNormal. \
                   Cross-family: Normal-Uniform, Uniform-Normal, \
                   Gamma-Exponential, Exponential-Gamma, Exponential-Normal, \
                   Gamma-Normal, Laplace-Normal, Normal-Gumbel, Gumbel-Normal, \
                   Gamma-Gumbel, Exponential-Gumbel, Uniform-Gumbel, \
                   Beta-Exponential, Beta-Gamma, Beta-Normal, Beta-Uniform, \
                   Pareto-Exponential, Pareto-Gamma, Pareto-Normal, \
-                  Uniform-Exponential, Uniform-Gamma, Uniform-Pareto, Uniform-Beta."
+                  Uniform-Exponential, Uniform-Gamma, Uniform-Pareto, Uniform-Beta, \
+                  MultivariateNormal-LowRankMultivariateNormal, \
+                  LowRankMultivariateNormal-MultivariateNormal."
             .into(),
     })
 }
@@ -1877,6 +1914,190 @@ fn kl_uniform_beta<T: Float>(p: &Uniform<T>, q: &Beta<T>) -> FerrotorchResult<Te
 }
 
 // ---------------------------------------------------------------------------
+// Additional KL formulas (#1374, wave-N): MultivariateNormal &
+// LowRankMultivariateNormal pairs (MVN-MVN, MVN-LowRank, LowRank-MVN,
+// LowRank-LowRank). Each mirrors a `@register_kl` body in
+// `torch/distributions/kl.py`. ferrotorch's MVN/LowRankMVN carry a 1-D `loc`
+// and a dense lower-triangular `scale_tril` (`[n, n]`); the LowRank variant
+// materialises its dense Cholesky on demand via `scale_tril()`. The dense
+// formula is value-identical to PyTorch's Woodbury form (R-DEV-1: match the
+// numeric contract; the Woodbury path is an O(d·r²) optimisation, not a
+// different KL).
+// ---------------------------------------------------------------------------
+
+/// Forward-substitution solve of the lower-triangular system `L · X = B`.
+///
+/// `l` is row-major `[n, n]` lower-triangular (strict upper triangle ignored);
+/// `b` is row-major `[n, m]`. Returns `X` row-major `[n, m]`. Mirrors
+/// `torch.linalg.solve_triangular(L, B, upper=False)` used by
+/// `_batch_trace_XXT` / `_batch_mahalanobis` in
+/// `torch/distributions/kl.py:442-464`.
+fn solve_lower_tri<T: Float>(l: &[T], b: &[T], n: usize, m: usize) -> Vec<T> {
+    let zero = T::from(0.0).unwrap();
+    let mut x = vec![zero; n * m];
+    for col in 0..m {
+        for row in 0..n {
+            // x[row,col] = (b[row,col] - Σ_{k<row} L[row,k]·x[k,col]) / L[row,row]
+            let mut acc = b[row * m + col];
+            for k in 0..row {
+                acc = acc - l[row * n + k] * x[k * m + col];
+            }
+            x[row * m + col] = acc / l[row * n + row];
+        }
+    }
+    x
+}
+
+/// Sum of squares of the forward-substitution solution of `qL · X = b_mat`.
+/// This is `_batch_trace_XXT(solve_triangular(qL, b_mat))` (for a matrix RHS)
+/// or `_batch_mahalanobis(qL, v)` (for a vector RHS) in
+/// `torch/distributions/kl.py:442-464`.
+fn solve_lower_tri_sumsq<T: Float>(ql: &[T], b: &[T], n: usize, m: usize) -> T {
+    let zero = T::from(0.0).unwrap();
+    let x = solve_lower_tri(ql, b, n, m);
+    x.iter().fold(zero, |acc, &v| acc + v * v)
+}
+
+/// Scalar KL(MVN(loc_p, L_p) || MVN(loc_q, L_q)) for a single distribution.
+///
+/// Mirrors `_kl_multivariatenormal_multivariatenormal`
+/// (`torch/distributions/kl.py:442-464`):
+/// ```text
+/// half_term1 = Σ ln diag(L_q) - Σ ln diag(L_p)
+/// term2 = ‖solve_tri(L_q, L_p)‖_F²            (= trace(M Mᵀ))
+/// term3 = ‖solve_tri(L_q, loc_q - loc_p)‖²    (Mahalanobis)
+/// KL = half_term1 + 0.5·(term2 + term3 - n)
+/// ```
+/// `lp`/`lq` are row-major `[n, n]` lower-triangular Cholesky factors;
+/// `loc_p`/`loc_q` are length-`n` mean vectors.
+fn kl_mvn_dense_scalar<T: Float>(loc_p: &[T], lp: &[T], loc_q: &[T], lq: &[T], n: usize) -> T {
+    let zero = T::from(0.0).unwrap();
+    let half = T::from(0.5).unwrap();
+
+    let mut half_term1 = zero;
+    for i in 0..n {
+        half_term1 = half_term1 + lq[i * n + i].ln() - lp[i * n + i].ln();
+    }
+    // term2 = ‖solve_tri(L_q, L_p)‖_F²: solve L_q · X = L_p (n×n RHS).
+    let term2 = solve_lower_tri_sumsq(lq, lp, n, n);
+    // term3 = ‖solve_tri(L_q, loc_q - loc_p)‖²: vector RHS.
+    let diff: Vec<T> = (0..n).map(|i| loc_q[i] - loc_p[i]).collect();
+    let term3 = solve_lower_tri_sumsq(lq, &diff, n, 1);
+
+    let n_t = T::from(n).unwrap();
+    half_term1 + half * (term2 + term3 - n_t)
+}
+
+/// Shared body for the four (Low-Rank)MVN KL pairs. Pulls each operand's 1-D
+/// `loc` and dense lower-triangular `scale_tril` to the host and applies the
+/// dense MVN-MVN formula. Errors if the event dimensions differ, matching the
+/// `ValueError` PyTorch raises for mismatched `event_shape`
+/// (`torch/distributions/kl.py:445-449`).
+fn kl_mvn_pair<T: Float>(
+    loc_p: &Tensor<T>,
+    scale_tril_p: &Tensor<T>,
+    n_p: usize,
+    loc_q: &Tensor<T>,
+    scale_tril_q: &Tensor<T>,
+    n_q: usize,
+) -> FerrotorchResult<Tensor<T>> {
+    crate::fallback::check_gpu_fallback_opt_in(
+        &[loc_p, scale_tril_p, loc_q, scale_tril_q],
+        "kl_divergence(MultivariateNormal, MultivariateNormal)",
+    )?;
+    if n_p != n_q {
+        return Err(FerrotorchError::InvalidArgument {
+            message: format!("kl_divergence(MVN, MVN): event dims must match, got {n_p} and {n_q}"),
+        });
+    }
+    let n = n_p;
+    let loc_p_v = loc_p.data_vec()?;
+    let lp = scale_tril_p.data_vec()?;
+    let loc_q_v = loc_q.data_vec()?;
+    let lq = scale_tril_q.data_vec()?;
+    let kl = kl_mvn_dense_scalar(&loc_p_v, &lp, &loc_q_v, &lq, n);
+    // The KL between two MVNs is a scalar (single distribution, no batch dims).
+    Tensor::from_storage(TensorStorage::cpu(vec![kl]), vec![], false)
+}
+
+/// KL(MultivariateNormal || MultivariateNormal) (multivariate same-family).
+///
+/// Mirrors `torch/distributions/kl.py:442-464`
+/// `_kl_multivariatenormal_multivariatenormal`.
+fn kl_multivariatenormal_multivariatenormal<T: Float>(
+    p: &MultivariateNormal<T>,
+    q: &MultivariateNormal<T>,
+) -> FerrotorchResult<Tensor<T>> {
+    kl_mvn_pair(
+        p.loc(),
+        p.scale_tril(),
+        p.dim(),
+        q.loc(),
+        q.scale_tril(),
+        q.dim(),
+    )
+}
+
+/// KL(MultivariateNormal || LowRankMultivariateNormal) (multivariate
+/// cross-family).
+///
+/// Mirrors `torch/distributions/kl.py:375-403`
+/// `_kl_multivariatenormal_lowrankmultivariatenormal`. PyTorch uses the
+/// Woodbury identity for the q-side precision; the dense `scale_tril` route is
+/// value-identical (R-DEV-1).
+fn kl_multivariatenormal_lowrank<T: Float>(
+    p: &MultivariateNormal<T>,
+    q: &LowRankMultivariateNormal<T>,
+) -> FerrotorchResult<Tensor<T>> {
+    kl_mvn_pair(
+        p.loc(),
+        p.scale_tril(),
+        p.dim(),
+        q.loc(),
+        q.scale_tril(),
+        q.dim(),
+    )
+}
+
+/// KL(LowRankMultivariateNormal || MultivariateNormal) (multivariate
+/// cross-family).
+///
+/// Mirrors `torch/distributions/kl.py:405-440`
+/// `_kl_lowrankmultivariatenormal_multivariatenormal`.
+fn kl_lowrank_multivariatenormal<T: Float>(
+    p: &LowRankMultivariateNormal<T>,
+    q: &MultivariateNormal<T>,
+) -> FerrotorchResult<Tensor<T>> {
+    kl_mvn_pair(
+        p.loc(),
+        p.scale_tril(),
+        p.dim(),
+        q.loc(),
+        q.scale_tril(),
+        q.dim(),
+    )
+}
+
+/// KL(LowRankMultivariateNormal || LowRankMultivariateNormal) (multivariate
+/// same-family).
+///
+/// Mirrors `torch/distributions/kl.py:341-373`
+/// `_kl_lowrankmultivariatenormal_lowrankmultivariatenormal`.
+fn kl_lowrank_lowrank<T: Float>(
+    p: &LowRankMultivariateNormal<T>,
+    q: &LowRankMultivariateNormal<T>,
+) -> FerrotorchResult<Tensor<T>> {
+    kl_mvn_pair(
+        p.loc(),
+        p.scale_tril(),
+        p.dim(),
+        q.loc(),
+        q.scale_tril(),
+        q.dim(),
+    )
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -3006,5 +3227,180 @@ mod tests {
         assert!((lgamma_scalar(3.0f64) - 2.0f64.ln()).abs() < 1e-12);
         assert!((lgamma_scalar(4.0f64) - 6.0f64.ln()).abs() < 1e-12);
         assert!((lgamma_scalar(5.0f64) - 24.0f64.ln()).abs() < 1e-12);
+    }
+
+    // -----------------------------------------------------------------------
+    // #1374 wave-N: MultivariateNormal & LowRankMultivariateNormal pairs.
+    // Reference values from live `torch.distributions.kl_divergence` (f64,
+    // torch 2.11, this machine 2026-05-27); each `expected` traces to a
+    // `@register_kl` body in `torch/distributions/kl.py` (R-CHAR-3
+    // non-tautological).
+    // -----------------------------------------------------------------------
+
+    use crate::{LowRankMultivariateNormal, MultivariateNormal};
+    use ferrotorch_core::creation::from_slice;
+
+    // -- MultivariateNormal-MultivariateNormal -------------------------------
+
+    #[test]
+    fn test_kl_mvn_mvn_same_is_zero() {
+        let loc = tensor(&[0.0f64, 1.0]).unwrap();
+        let l = from_slice(&[1.0f64, 0.0, 0.5, 1.0], &[2, 2]).unwrap();
+        let p = MultivariateNormal::from_scale_tril(loc.clone(), l.clone()).unwrap();
+        let q = MultivariateNormal::from_scale_tril(loc, l).unwrap();
+        let kl = kl_divergence(&p, &q).unwrap();
+        approx(kl.item().unwrap(), 0.0, 1e-12, "MVN-MVN same");
+    }
+
+    #[test]
+    fn test_kl_mvn_mvn_known_value() {
+        // torch.distributions.kl_divergence(
+        //   MVN([0,1], scale_tril=[[1,0],[0.5,1]]),
+        //   MVN([1,-1], scale_tril=[[2,0],[0.3,1.5]])) (kl.py:442-464).
+        let p = MultivariateNormal::from_scale_tril(
+            tensor(&[0.0f64, 1.0]).unwrap(),
+            from_slice(&[1.0f64, 0.0, 0.5, 1.0], &[2, 2]).unwrap(),
+        )
+        .unwrap();
+        let q = MultivariateNormal::from_scale_tril(
+            tensor(&[1.0f64, -1.0]).unwrap(),
+            from_slice(&[2.0f64, 0.0, 0.3, 1.5], &[2, 2]).unwrap(),
+        )
+        .unwrap();
+        let kl = kl_divergence(&p, &q).unwrap();
+        approx(
+            kl.item().unwrap(),
+            1.625_278_955_334_776_2,
+            1e-10,
+            "MVN-MVN",
+        );
+    }
+
+    #[test]
+    fn test_kl_mvn_mvn_known_value_3d() {
+        // torch: KL(MVN([0,1,2], L_p) || MVN([0.5,0.5,0.5], L_q)) with the
+        // lower-triangular factors below (kl.py:442-464).
+        let p = MultivariateNormal::from_scale_tril(
+            tensor(&[0.0f64, 1.0, 2.0]).unwrap(),
+            from_slice(&[1.0f64, 0.0, 0.0, 0.2, 1.1, 0.0, 0.1, 0.3, 0.9], &[3, 3]).unwrap(),
+        )
+        .unwrap();
+        let q = MultivariateNormal::from_scale_tril(
+            tensor(&[0.5f64, 0.5, 0.5]).unwrap(),
+            from_slice(&[1.5f64, 0.0, 0.0, 0.0, 1.2, 0.0, 0.4, 0.1, 1.3], &[3, 3]).unwrap(),
+        )
+        .unwrap();
+        let kl = kl_divergence(&p, &q).unwrap();
+        approx(
+            kl.item().unwrap(),
+            1.170_769_970_022_585_3,
+            1e-10,
+            "MVN-MVN 3d",
+        );
+    }
+
+    #[test]
+    fn test_kl_mvn_mvn_nonnegative() {
+        let p = MultivariateNormal::from_scale_tril(
+            tensor(&[2.0f64, -3.0]).unwrap(),
+            from_slice(&[0.7f64, 0.0, 0.2, 1.3], &[2, 2]).unwrap(),
+        )
+        .unwrap();
+        let q = MultivariateNormal::from_scale_tril(
+            tensor(&[0.0f64, 0.0]).unwrap(),
+            from_slice(&[1.0f64, 0.0, 0.0, 1.0], &[2, 2]).unwrap(),
+        )
+        .unwrap();
+        let kl = kl_divergence(&p, &q).unwrap();
+        assert!(kl.item().unwrap() >= -1e-12, "got {}", kl.item().unwrap());
+    }
+
+    #[test]
+    fn test_kl_mvn_mvn_event_dim_mismatch_errs() {
+        let p = MultivariateNormal::from_scale_tril(
+            tensor(&[0.0f64, 0.0]).unwrap(),
+            from_slice(&[1.0f64, 0.0, 0.0, 1.0], &[2, 2]).unwrap(),
+        )
+        .unwrap();
+        let q = MultivariateNormal::from_scale_tril(
+            tensor(&[0.0f64, 0.0, 0.0]).unwrap(),
+            from_slice(&[1.0f64, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0], &[3, 3]).unwrap(),
+        )
+        .unwrap();
+        assert!(kl_divergence(&p, &q).is_err());
+    }
+
+    // -- LowRankMultivariateNormal pairs -------------------------------------
+
+    #[test]
+    fn test_kl_lowrank_lowrank_known_value() {
+        // torch: KL(LowRankMVN([0,1], W=[[1],[0.5]], D=[1,2]) ||
+        //            LowRankMVN([1,-1], W=[[0.8],[0.2]], D=[1.5,1])) (kl.py:341-373).
+        let p = LowRankMultivariateNormal::new(
+            tensor(&[0.0f64, 1.0]).unwrap(),
+            from_slice(&[1.0f64, 0.5], &[2, 1]).unwrap(),
+            tensor(&[1.0f64, 2.0]).unwrap(),
+        )
+        .unwrap();
+        let q = LowRankMultivariateNormal::new(
+            tensor(&[1.0f64, -1.0]).unwrap(),
+            from_slice(&[0.8f64, 0.2], &[2, 1]).unwrap(),
+            tensor(&[1.5f64, 1.0]).unwrap(),
+        )
+        .unwrap();
+        let kl = kl_divergence(&p, &q).unwrap();
+        approx(kl.item().unwrap(), 2.528_723_734_168_518_3, 1e-9, "LR-LR");
+    }
+
+    #[test]
+    fn test_kl_lowrank_lowrank_same_is_zero() {
+        let mk = || {
+            LowRankMultivariateNormal::new(
+                tensor(&[0.0f64, 1.0]).unwrap(),
+                from_slice(&[1.0f64, 0.5], &[2, 1]).unwrap(),
+                tensor(&[1.0f64, 2.0]).unwrap(),
+            )
+            .unwrap()
+        };
+        let kl = kl_divergence(&mk(), &mk()).unwrap();
+        approx(kl.item().unwrap(), 0.0, 1e-10, "LR-LR same");
+    }
+
+    #[test]
+    fn test_kl_mvn_lowrank_known_value() {
+        // torch: KL(MVN([0,1], scale_tril=[[1.2,0],[0.3,1.0]]) ||
+        //            LowRankMVN([1,-1], W=[[0.8],[0.2]], D=[1.5,1])) (kl.py:375-403).
+        let p = MultivariateNormal::from_scale_tril(
+            tensor(&[0.0f64, 1.0]).unwrap(),
+            from_slice(&[1.2f64, 0.0, 0.3, 1.0], &[2, 2]).unwrap(),
+        )
+        .unwrap();
+        let q = LowRankMultivariateNormal::new(
+            tensor(&[1.0f64, -1.0]).unwrap(),
+            from_slice(&[0.8f64, 0.2], &[2, 1]).unwrap(),
+            tensor(&[1.5f64, 1.0]).unwrap(),
+        )
+        .unwrap();
+        let kl = kl_divergence(&p, &q).unwrap();
+        approx(kl.item().unwrap(), 2.383_498_032_479_09, 1e-9, "MVN-LR");
+    }
+
+    #[test]
+    fn test_kl_lowrank_mvn_known_value() {
+        // torch: KL(LowRankMVN([0,1], W=[[1],[0.5]], D=[1,2]) ||
+        //            MVN([1,-1], scale_tril=[[1.3,0],[0.1,1.1]])) (kl.py:405-440).
+        let p = LowRankMultivariateNormal::new(
+            tensor(&[0.0f64, 1.0]).unwrap(),
+            from_slice(&[1.0f64, 0.5], &[2, 1]).unwrap(),
+            tensor(&[1.0f64, 2.0]).unwrap(),
+        )
+        .unwrap();
+        let q = MultivariateNormal::from_scale_tril(
+            tensor(&[1.0f64, -1.0]).unwrap(),
+            from_slice(&[1.3f64, 0.0, 0.1, 1.1], &[2, 2]).unwrap(),
+        )
+        .unwrap();
+        let kl = kl_divergence(&p, &q).unwrap();
+        approx(kl.item().unwrap(), 2.207_128_053_688_782_3, 1e-9, "LR-MVN");
     }
 }
