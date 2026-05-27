@@ -19,9 +19,19 @@ fn no_grad_leaf(data: &[f64], shape: &[usize]) -> Tensor<f64> {
     Tensor::from_storage(TensorStorage::cpu(data.to_vec()), shape.to_vec(), false).unwrap()
 }
 fn assert_close(actual: &[f64], expected: &[f64], tol: f64, label: &str) {
-    assert_eq!(actual.len(), expected.len(), "{label}: length {} vs {}", actual.len(), expected.len());
+    assert_eq!(
+        actual.len(),
+        expected.len(),
+        "{label}: length {} vs {}",
+        actual.len(),
+        expected.len()
+    );
     for (i, (&a, &e)) in actual.iter().zip(expected.iter()).enumerate() {
-        assert!((a - e).abs() < tol, "{label}[{i}]: ferrotorch={a}, torch={e}, diff={}", (a - e).abs());
+        assert!(
+            (a - e).abs() < tol,
+            "{label}[{i}]: ferrotorch={a}, torch={e}, diff={}",
+            (a - e).abs()
+        );
     }
 }
 fn weighted_backward(out: &Tensor<f64>, weight: &[f64], wshape: &[usize]) {
@@ -37,7 +47,12 @@ fn weighted_backward(out: &Tensor<f64>, weight: &[f64], wshape: &[usize]) {
 fn diagonal_nonsquare_2x4_offset1_matches_torch() {
     let a = leaf(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0], &[2, 4]);
     let d = linalg_fwd::diagonal(&a, 1).unwrap();
-    assert_close(&d.data().unwrap().to_vec(), &[2.0, 7.0], 1e-9, "diagonal([2,4],1) fwd");
+    assert_close(
+        &d.data().unwrap().to_vec(),
+        &[2.0, 7.0],
+        1e-9,
+        "diagonal([2,4],1) fwd",
+    );
     weighted_backward(&d, &[10.0, 100.0], &[2]);
     let g = a.grad().unwrap().unwrap().data().unwrap().to_vec();
     assert_close(
@@ -55,7 +70,12 @@ fn diagonal_nonsquare_2x4_offset1_matches_torch() {
 fn diag_extract_nonsquare_2x4_matches_torch() {
     let a = leaf(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0], &[2, 4]);
     let d = tensor_ops::diag(&a, 0).unwrap();
-    assert_close(&d.data().unwrap().to_vec(), &[1.0, 6.0], 1e-9, "diag([2,4],0) fwd");
+    assert_close(
+        &d.data().unwrap().to_vec(),
+        &[1.0, 6.0],
+        1e-9,
+        "diag([2,4],0) fwd",
+    );
     weighted_backward(&d, &[10.0, 100.0], &[2]);
     let g = a.grad().unwrap().unwrap().data().unwrap().to_vec();
     assert_close(
@@ -84,7 +104,12 @@ fn addmm_scalar_bias_full_broadcast_grad_matches_torch() {
     );
     reduce_sum(&c).unwrap().backward().unwrap();
     let gb = bias.grad().unwrap().unwrap();
-    assert_close(&gb.data().unwrap().to_vec(), &[2.0], 1e-9, "addmm scalar dbias vs torch");
+    assert_close(
+        &gb.data().unwrap().to_vec(),
+        &[2.0],
+        1e-9,
+        "addmm scalar dbias vs torch",
+    );
 }
 
 // torch float64:
@@ -97,5 +122,10 @@ fn addr_beta2_bias_grad_matches_torch() {
     let c = linalg_fwd::addr(&bias, &v1, &v2, 2.0, 1.0).unwrap();
     reduce_sum(&c).unwrap().backward().unwrap();
     let gb = bias.grad().unwrap().unwrap().data().unwrap().to_vec();
-    assert_close(&gb, &[2.0, 2.0, 2.0, 2.0, 2.0, 2.0], 1e-9, "addr beta=2 dbias vs torch");
+    assert_close(
+        &gb,
+        &[2.0, 2.0, 2.0, 2.0, 2.0, 2.0],
+        1e-9,
+        "addr beta=2 dbias vs torch",
+    );
 }

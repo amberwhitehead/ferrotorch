@@ -169,7 +169,9 @@ fn kfac_stat_decay_zero_overwrites_factor_momentum_independent() {
     let p = Parameter::from_slice(&[0.0; 4], &[2, 2]).unwrap();
     // decay 0 (overwrite) but momentum 0.9 (gradient buffer) — they must not
     // cross-contaminate.
-    let config = KfacConfig::default().with_stat_decay(0.0).with_momentum(0.9);
+    let config = KfacConfig::default()
+        .with_stat_decay(0.0)
+        .with_momentum(0.9);
     let mut kfac = Kfac::new(vec![p], config);
 
     // Batch 1 excites channel 0: a1 = [[2,0],[0,0]] -> (a^T a)/2 = diag(2,0).

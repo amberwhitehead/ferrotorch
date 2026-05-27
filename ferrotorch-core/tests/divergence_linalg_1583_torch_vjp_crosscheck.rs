@@ -92,13 +92,15 @@ fn kron_dA_dB_match_torch_weighted() {
 // =====================================================================
 #[test]
 fn diagonal_offset_pos1_scatter_position_matches_torch() {
-    let a = leaf(
-        &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0],
-        &[3, 3],
-    );
+    let a = leaf(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0], &[3, 3]);
     let d = linalg_fwd::diagonal(&a, 1).unwrap();
     // forward value must also match torch diagonal(A,1) = [2,6]
-    assert_close(&d.data().unwrap().to_vec(), &[2.0, 6.0], 1e-9, "diagonal(A,1) fwd");
+    assert_close(
+        &d.data().unwrap().to_vec(),
+        &[2.0, 6.0],
+        1e-9,
+        "diagonal(A,1) fwd",
+    );
     weighted_backward(&d, &[10.0, 100.0], &[2]);
     let g = a.grad().unwrap().unwrap().data().unwrap().to_vec();
     assert_close(
@@ -111,12 +113,14 @@ fn diagonal_offset_pos1_scatter_position_matches_torch() {
 
 #[test]
 fn diagonal_offset_neg1_scatter_position_matches_torch() {
-    let a = leaf(
-        &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0],
-        &[3, 3],
-    );
+    let a = leaf(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0], &[3, 3]);
     let d = linalg_fwd::diagonal(&a, -1).unwrap();
-    assert_close(&d.data().unwrap().to_vec(), &[4.0, 8.0], 1e-9, "diagonal(A,-1) fwd");
+    assert_close(
+        &d.data().unwrap().to_vec(),
+        &[4.0, 8.0],
+        1e-9,
+        "diagonal(A,-1) fwd",
+    );
     weighted_backward(&d, &[10.0, 100.0], &[2]);
     let g = a.grad().unwrap().unwrap().data().unwrap().to_vec();
     assert_close(
@@ -139,10 +143,7 @@ fn diagonal_offset_neg1_scatter_position_matches_torch() {
 // =====================================================================
 #[test]
 fn diag_extract_2d_to_1d_matches_torch_weighted() {
-    let a = leaf(
-        &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0],
-        &[3, 3],
-    );
+    let a = leaf(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0], &[3, 3]);
     let d = tensor_ops::diag(&a, 0).unwrap();
     assert_eq!(d.shape(), &[3]);
     weighted_backward(&d, &[10.0, 100.0, 1000.0], &[3]);
@@ -160,11 +161,7 @@ fn diag_construct_1d_to_2d_matches_torch_weighted() {
     let a = leaf(&[1.0, 2.0, 3.0], &[3]);
     let d = tensor_ops::diag(&a, 0).unwrap();
     assert_eq!(d.shape(), &[3, 3]);
-    weighted_backward(
-        &d,
-        &[1.0, 0.0, 0.0, 0.0, 2.0, 0.0, 0.0, 0.0, 3.0],
-        &[3, 3],
-    );
+    weighted_backward(&d, &[1.0, 0.0, 0.0, 0.0, 2.0, 0.0, 0.0, 0.0, 3.0], &[3, 3]);
     let g = a.grad().unwrap().unwrap().data().unwrap().to_vec();
     assert_close(&g, &[1.0, 2.0, 3.0], 1e-9, "diag construct dA vs torch");
 }
@@ -177,7 +174,12 @@ fn diag_construct_1d_to_2d_offset1_matches_torch_weighted() {
     let w: Vec<f64> = (1..=16).map(|x| x as f64).collect();
     weighted_backward(&d, &w, &[4, 4]);
     let g = a.grad().unwrap().unwrap().data().unwrap().to_vec();
-    assert_close(&g, &[2.0, 7.0, 12.0], 1e-9, "diag construct offset=1 dA vs torch");
+    assert_close(
+        &g,
+        &[2.0, 7.0, 12.0],
+        1e-9,
+        "diag construct offset=1 dA vs torch",
+    );
 }
 
 // =====================================================================
@@ -190,10 +192,7 @@ fn diag_construct_1d_to_2d_offset1_matches_torch_weighted() {
 // =====================================================================
 #[test]
 fn tril_diag1_mask_boundary_matches_torch() {
-    let a = leaf(
-        &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0],
-        &[3, 3],
-    );
+    let a = leaf(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0], &[3, 3]);
     let t = tensor_ops::tril(&a, 1).unwrap();
     let w: Vec<f64> = (1..=9).map(|x| x as f64).collect();
     weighted_backward(&t, &w, &[3, 3]);
@@ -208,10 +207,7 @@ fn tril_diag1_mask_boundary_matches_torch() {
 
 #[test]
 fn triu_diag1_mask_boundary_matches_torch() {
-    let a = leaf(
-        &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0],
-        &[3, 3],
-    );
+    let a = leaf(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0], &[3, 3]);
     let t = tensor_ops::triu(&a, 1).unwrap();
     let w: Vec<f64> = (1..=9).map(|x| x as f64).collect();
     weighted_backward(&t, &w, &[3, 3]);
@@ -252,12 +248,31 @@ fn addmm_vector_bias_broadcast_grad_matches_torch() {
     let loss = reduce_sum(&c).unwrap();
     loss.backward().unwrap();
     let gb = bias.grad().unwrap().unwrap();
-    assert_eq!(gb.shape(), &[2], "addmm dbias must keep the [2] vector shape");
-    assert_close(&gb.data().unwrap().to_vec(), &[1.0, 1.0], 1e-9, "addmm dbias vs torch");
+    assert_eq!(
+        gb.shape(),
+        &[2],
+        "addmm dbias must keep the [2] vector shape"
+    );
+    assert_close(
+        &gb.data().unwrap().to_vec(),
+        &[1.0, 1.0],
+        1e-9,
+        "addmm dbias vs torch",
+    );
     let g1 = m1.grad().unwrap().unwrap().data().unwrap().to_vec();
-    assert_close(&g1, &[2.0, 3.0, 2.0, 2.0, 3.0, 2.0], 1e-9, "addmm dm1 vs torch");
+    assert_close(
+        &g1,
+        &[2.0, 3.0, 2.0, 2.0, 3.0, 2.0],
+        1e-9,
+        "addmm dm1 vs torch",
+    );
     let g2 = m2.grad().unwrap().unwrap().data().unwrap().to_vec();
-    assert_close(&g2, &[3.0, 3.0, 10.0, 10.0, 0.0, 0.0], 1e-9, "addmm dm2 vs torch");
+    assert_close(
+        &g2,
+        &[3.0, 3.0, 10.0, 10.0, 0.0, 0.0],
+        1e-9,
+        "addmm dm2 vs torch",
+    );
 }
 
 // =====================================================================
@@ -280,7 +295,12 @@ fn addmv_grad_matches_torch_nondefault_scaling() {
     let gb = bias.grad().unwrap().unwrap().data().unwrap().to_vec();
     assert_close(&gb, &[0.5, 0.5], 1e-9, "addmv dbias vs torch");
     let gm = mat.grad().unwrap().unwrap().data().unwrap().to_vec();
-    assert_close(&gm, &[4.0, -2.0, 1.0, 4.0, -2.0, 1.0], 1e-9, "addmv dmat vs torch");
+    assert_close(
+        &gm,
+        &[4.0, -2.0, 1.0, 4.0, -2.0, 1.0],
+        1e-9,
+        "addmv dmat vs torch",
+    );
     let gv = v.grad().unwrap().unwrap().data().unwrap().to_vec();
     assert_close(&gv, &[3.0, 10.0, 0.0], 1e-9, "addmv dvec vs torch");
 }
@@ -303,7 +323,12 @@ fn addr_grad_matches_torch_nondefault_alpha() {
     let loss = reduce_sum(&c).unwrap();
     loss.backward().unwrap();
     let gb = bias.grad().unwrap().unwrap().data().unwrap().to_vec();
-    assert_close(&gb, &[1.0, 1.0, 1.0, 1.0, 1.0, 1.0], 1e-9, "addr dbias vs torch");
+    assert_close(
+        &gb,
+        &[1.0, 1.0, 1.0, 1.0, 1.0, 1.0],
+        1e-9,
+        "addr dbias vs torch",
+    );
     let gv1 = v1.grad().unwrap().unwrap().data().unwrap().to_vec();
     assert_close(&gv1, &[0.75, 0.75], 1e-9, "addr dv1 vs torch");
     let gv2 = v2.grad().unwrap().unwrap().data().unwrap().to_vec();
@@ -340,7 +365,12 @@ fn addbmm_vector_bias_broadcast_grad_matches_torch() {
     loss.backward().unwrap();
     let gb = bias.grad().unwrap().unwrap();
     assert_eq!(gb.shape(), &[2], "addbmm dbias must keep [2] vector shape");
-    assert_close(&gb.data().unwrap().to_vec(), &[1.0, 1.0], 1e-9, "addbmm dbias vs torch");
+    assert_close(
+        &gb.data().unwrap().to_vec(),
+        &[1.0, 1.0],
+        1e-9,
+        "addbmm dbias vs torch",
+    );
     let g1 = b1.grad().unwrap().unwrap().data().unwrap().to_vec();
     assert_close(
         &g1,
