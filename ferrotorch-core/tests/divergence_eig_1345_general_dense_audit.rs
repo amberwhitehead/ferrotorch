@@ -136,7 +136,12 @@ fn eigvals_backward_general_dense_3x3_matches_torch() {
         -0.071_731_049_263_934_16,
         0.907_870_532_842_102_7,
     ];
-    assert_close(&g, &torch, 1e-6, "eigvals general dense 3x3 A.grad vs torch");
+    assert_close(
+        &g,
+        &torch,
+        1e-6,
+        "eigvals general dense 3x3 A.grad vs torch",
+    );
 }
 
 #[test]

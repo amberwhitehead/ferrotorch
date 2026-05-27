@@ -76,7 +76,12 @@ fn eigvals_grad(a_data: &[f64], n: usize, cr: &[f64], ci: &[f64]) -> Result<Vec<
 fn eigvals_backward_repeated_2i_matches_torch() {
     let g = eigvals_grad(&[2.0, 0.0, 0.0, 2.0], 2, &[1.3, -0.7], &[0.4, 0.6])
         .expect("eigvals on 2*I (diagonalizable, repeated eig) must not error");
-    assert_close(&g, &[1.3, 0.0, 0.0, -0.7], 1e-6, "eigvals 2I A.grad vs torch");
+    assert_close(
+        &g,
+        &[1.3, 0.0, 0.0, -0.7],
+        1e-6,
+        "eigvals 2I A.grad vs torch",
+    );
 }
 
 /// Diagonalizable with a repeated pair (2,2) + a distinct (5):
@@ -88,5 +93,10 @@ fn eigvals_backward_repeated_pair_3x3_matches_torch() {
         .expect("eigvals on diagonalizable repeated-pair 3x3 must not error");
     // torch A.grad (L.real*[1.3,-0.7,0.9]).sum() only.
     let torch = [1.3, 0.0, 0.0, 0.0, -0.7, 0.0, -0.08, 0.48, 0.9];
-    assert_close(&g, &torch, 1e-6, "eigvals repeated-pair 3x3 A.grad vs torch");
+    assert_close(
+        &g,
+        &torch,
+        1e-6,
+        "eigvals repeated-pair 3x3 A.grad vs torch",
+    );
 }
