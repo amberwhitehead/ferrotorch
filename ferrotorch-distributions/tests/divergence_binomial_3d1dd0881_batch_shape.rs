@@ -5,20 +5,20 @@
 //! (log_prob/mean/variance/mode/entropy/logits conversion, KL Binomial-Binomial
 //! and Poisson-Binomial) matches torch 2.11 — those committed unit tests pass.
 //!
-//! But the implementation collapses every batched/broadcast shape contract that
+//! The implementation had collapsed every batched/broadcast shape contract that
 //! `binomial.py` inherits from `torch.distributions.Distribution`. The four
 //! tests below pin divergences where ferrotorch's OUTPUT SHAPE (and, for
-//! `enumerate_support`, the entire `expand` semantics) disagrees with torch for
-//! a non-scalar `probs` batch.
+//! `enumerate_support`, the entire `expand` semantics) disagreed with torch for
+//! a non-scalar `probs` batch, plus a dtype-independent clamp eps.
 //!
 //! Reference shapes/values from live `torch.distributions.Binomial` at float64
 //! (torch 2.11.0+cu130, this machine, 2026-05-27). Non-tautological per
 //! R-CHAR-3: every expected value is either a live-torch oracle output or a
 //! named closed-form binomial-pmf bit, never copied from the ferrotorch side.
 //!
-//! Tracking: #1569 (blocker). Marked `#[ignore]` because the divergence is now
-//! tracked; these tests stay red until the generator restores the batched shape
-//! contracts and the dtype-aware clamp.
+//! Tracking: #1569 (closed). The fix landed in `binomial.rs` (batch_shape +
+//! broadcast indexing in sample/log_prob/enumerate_support + `T::epsilon()`
+//! clamp); these tests are now un-ignored permanent regression coverage.
 
 use ferrotorch_core::creation::{from_slice, scalar};
 use ferrotorch_distributions::{Binomial, Distribution};
@@ -35,7 +35,6 @@ use ferrotorch_distributions::{Binomial, Distribution};
 ///   sees `probs[1]`.
 /// Tracking: #1569
 #[test]
-#[ignore = "divergence: Binomial::log_prob drops batched probs vs torch binomial.py:140-158; tracking #1569"]
 fn divergence_binomial_log_prob_batched_probs_scalar_value() {
     let dist = Binomial::new(
         scalar(10.0f64).unwrap(),
@@ -75,7 +74,6 @@ fn divergence_binomial_log_prob_batched_probs_scalar_value() {
 ///   p=0.5) are folded into the same flat draw via `i % probs_data.len()`.
 /// Tracking: #1569
 #[test]
-#[ignore = "divergence: Binomial::sample ignores batch shape vs torch binomial.py:133-138; tracking #1569"]
 fn divergence_binomial_sample_extends_batch_shape() {
     let dist = Binomial::new(
         scalar(10.0f64).unwrap(),
@@ -101,7 +99,6 @@ fn divergence_binomial_sample_extends_batch_shape() {
 /// ferrotorch: returns shape `[5]` for *both* expand values.
 /// Tracking: #1569
 #[test]
-#[ignore = "divergence: Binomial::enumerate_support ignores batch+expand vs torch binomial.py:170-182; tracking #1569"]
 fn divergence_binomial_enumerate_support_batch_and_expand() {
     let dist = Binomial::new(
         scalar(4.0f64).unwrap(),
@@ -138,7 +135,6 @@ fn divergence_binomial_enumerate_support_batch_and_expand() {
 ///           log_prob ~ -1.0e-6 (100x off).
 /// Tracking: #1569
 #[test]
-#[ignore = "divergence: Binomial f64 clamp eps=1e-7 vs torch clamp_probs finfo(f64).eps; tracking #1569"]
 fn divergence_binomial_f64_clamp_eps_too_coarse() {
     let p = 1.0f64 - 1e-9;
 
@@ -152,7 +148,11 @@ fn divergence_binomial_f64_clamp_eps_too_coarse() {
 
     // log_prob at k = n (only the ln(p) term survives).
     let d_lp = Binomial::new(scalar(10.0f64).unwrap(), scalar(p).unwrap()).unwrap();
-    let lp = d_lp.log_prob(&scalar(10.0f64).unwrap()).unwrap().item().unwrap();
+    let lp = d_lp
+        .log_prob(&scalar(10.0f64).unwrap())
+        .unwrap()
+        .item()
+        .unwrap();
     // torch oracle: -1.0000007932831068e-08 (~ 10 * ln(1-1e-9)).
     assert!(
         (lp - (-1.000_000_793_283_106_8e-8)).abs() < 1e-12,

@@ -148,11 +148,17 @@ log_prob(k) = lgamma(n+1) - lgamma(k+1) - lgamma(n-k+1)
               + k·ln(p) + (n-k)·ln(1-p)
 ```
 
-`p` is clamped to `[eps, 1-eps]` (`eps = 1e-7`) so the `ln(p)` /
-`ln(1-p)` terms stay finite for degenerate `p ∈ {0, 1}` parameters
-(the same clamp `Bernoulli::log_prob` uses). For `k ∉ {0..n}` the
-`lgamma(n-k+1)` term diverges to `+∞`, giving `log_prob = -∞`, which
-matches the zero-mass-outside-support contract.
+`p` is clamped to `[eps, 1-eps]` where `eps = T::epsilon()`
+(`finfo(dtype).eps`: 1.19e-7 for f32, 2.22e-16 for f64) so the
+`ln(p)` / `ln(1-p)` terms stay finite for degenerate `p ∈ {0, 1}`
+parameters. This matches torch's `clamp_probs`
+(`torch/distributions/utils.py:124` — `eps = torch.finfo(probs.dtype).eps`),
+which both the `logits` accessor (`probs_to_logits`) and `log_prob`
+route through. A hardcoded dtype-independent `1e-7` over-clamps f64 by
+~9 orders of magnitude and was the source of a 100× `log_prob` error
+near `p = 1` (fixed under #1569). For `k ∉ {0..n}` the `lgamma(n-k+1)`
+term diverges to `+∞`, giving `log_prob = -∞`, matching the
+zero-mass-outside-support contract.
 
 ### `entropy` via enumeration (REQ-7)
 
@@ -241,13 +247,13 @@ cargo test -p ferrotorch-distributions --lib binomial:: 2>&1 | tail -3
 
 | REQ | Status | Evidence |
 |---|---|---|
-| REQ-1 | SHIPPED | impl: `pub struct Binomial<T: Float>` with `total_count`/`probs` in `binomial.rs` mirroring `torch/distributions/binomial.py:55-85`; non-test consumer: `pub use binomial::Binomial` in `lib.rs` (boundary public API per goal.md S5) — `kl.rs` dispatcher's Binomial arm binds to this type. |
+| REQ-1 | SHIPPED | impl: `pub struct Binomial<T: Float>` with `total_count`/`probs`/`batch_shape` (the `broadcast_shapes(total_count, probs)` batch shape, `binomial.py:66-85`) in `binomial.rs` mirroring `torch/distributions/binomial.py:55-85`; non-test consumer: `pub use binomial::Binomial` in `lib.rs` (boundary public API per goal.md S5) — `kl.rs` dispatcher's Binomial arm binds to this type. |
 | REQ-2 | SHIPPED | impl: `pub fn Binomial::new` + `pub fn Binomial::from_logits` in `binomial.rs` mirroring `binomial.py:55-85`; non-test consumer: `kl_binomial_binomial` in `kl.rs` reaches `Binomial` instances via the public `kl_divergence` dispatch; `pub use Binomial` re-export. |
 | REQ-3 | SHIPPED | impl: `pub fn Binomial::{total_count, probs, logits}` in `binomial.rs` mirroring `binomial.py:109-127`; non-test consumer: `kl_binomial_binomial` in `kl.rs` reads `p.total_count().data_vec()?`, `p.probs().data_vec()?`, and recomputes per-element logits. |
-| REQ-4 | SHIPPED | impl: `impl<T: Float> Distribution<T> for Binomial<T>` with `sample`/`rsample`/`log_prob`/`entropy` in `binomial.rs` mirroring `binomial.py:133-168`; non-test consumer: `pub use Binomial` re-export — every external `Distribution`-trait call on a `Binomial` hits this impl. |
+| REQ-4 | SHIPPED | impl: `impl<T: Float> Distribution<T> for Binomial<T>` with `sample`/`rsample`/`log_prob`/`entropy` in `binomial.rs` mirroring `binomial.py:133-168`; `sample` returns `_extended_shape = sample_shape ++ batch_shape` (`distribution.py:266-278`) via the `broadcast_flat_index` helper; non-test consumer: `pub use Binomial` re-export — every external `Distribution`-trait call on a `Binomial` hits this impl; `tests/divergence_binomial_3d1dd0881_batch_shape.rs::divergence_binomial_sample_extends_batch_shape` pins the `[4,2]` shape (#1569). |
 | REQ-5 | SHIPPED | impl: `fn Binomial::rsample` returns `InvalidArgument` in `binomial.rs` (Binomial is discrete, no `has_rsample`); non-test consumer: `pub use Binomial` re-export; `test_binomial_rsample_errors` pins it. |
-| REQ-6 | SHIPPED | impl: `fn Binomial::log_prob` in `binomial.rs` with `lgamma(n+1)-lgamma(k+1)-lgamma(n-k+1)+k·ln(p)+(n-k)·ln(1-p)` mirroring `binomial.py:140-158`; non-test consumer: external `dist.log_prob` via the trait dispatch off `pub use Binomial`. |
+| REQ-6 | SHIPPED | impl: `fn Binomial::log_prob` in `binomial.rs` with `lgamma(n+1)-lgamma(k+1)-lgamma(n-k+1)+k·ln(p)+(n-k)·ln(1-p)` mirroring `binomial.py:140-158`; `value` broadcasts against `batch_shape` (output = `broadcast(value.shape, batch_shape)`) and the clamp uses `T::epsilon()` = `clamp_probs`'s `finfo(dtype).eps` (`torch/distributions/utils.py:124`); non-test consumer: external `dist.log_prob` via the trait dispatch off `pub use Binomial`; `tests/divergence_binomial_3d1dd0881_batch_shape.rs::{divergence_binomial_log_prob_batched_probs_scalar_value, divergence_binomial_f64_clamp_eps_too_coarse}` pin batched-probs broadcast and the f64 eps (#1569). |
 | REQ-7 | SHIPPED | impl: `fn Binomial::entropy` in `binomial.rs` enumerating `{0..n}` and folding `-Σ exp(lp)·lp` mirroring `binomial.py:160-168`; non-test consumer: external `dist.entropy()` via the trait dispatch. |
 | REQ-8 | SHIPPED | impl: `fn Binomial::{mean, variance, mode}` overrides in `binomial.rs` mirroring `binomial.py:109-119`; non-test consumer: external `dist.{mean, variance, mode}` invocations through `pub use Binomial` hit these overrides; `test_binomial_{mean_variance, mode}` pin the closed-forms. |
-| REQ-9 | SHIPPED | impl: `has_rsample`/`has_enumerate_support`/`support` (`IntegerInterval`)/`arg_constraints`/`enumerate_support` trait overrides at the tail of `impl Distribution<T> for Binomial<T>` in `binomial.rs` mirroring `binomial.py:48-53,104-107,170-182`; non-test consumer: `pub use binomial::Binomial` at `lib.rs`; `test_binomial_enumerate_support` pins `enumerate_support`. |
+| REQ-9 | SHIPPED | impl: `has_rsample`/`has_enumerate_support`/`support` (`IntegerInterval`)/`arg_constraints`/`enumerate_support` trait overrides at the tail of `impl Distribution<T> for Binomial<T>` in `binomial.rs` mirroring `binomial.py:48-53,104-107,170-182`; `enumerate_support` views values `{0..n}` as `(-1,)+(1,)*ndim(batch)` (no-expand) / `(-1,)+batch_shape` (expand) per `binomial.py:179-182`; non-test consumer: `pub use binomial::Binomial` at `lib.rs`; `test_binomial_enumerate_support` + `tests/divergence_binomial_3d1dd0881_batch_shape.rs::divergence_binomial_enumerate_support_batch_and_expand` pin the `(5,1)`/`(5,2)` shapes (#1569). |
 </content>

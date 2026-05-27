@@ -10,18 +10,19 @@
 //!
 //! | REQ | Status | Evidence |
 //! |---|---|---|
-//! | REQ-1 (`Binomial<T>` struct) | SHIPPED | `pub struct Binomial<T: Float>` with `total_count`/`probs` fields mirroring `torch/distributions/binomial.py:55-85`; consumer: `pub use binomial::Binomial` in `lib.rs` (boundary public API per goal.md S5) + `kl.rs` Binomial arm. |
+//! | REQ-1 (`Binomial<T>` struct) | SHIPPED | `pub struct Binomial<T: Float>` with `total_count`/`probs`/`batch_shape` fields (`batch_shape = broadcast_shapes(total_count, probs)`, `binomial.py:66-85`) mirroring `torch/distributions/binomial.py:55-85`; consumer: `pub use binomial::Binomial` in `lib.rs` (boundary public API per goal.md S5) + `kl.rs` Binomial arm. |
 //! | REQ-2 (constructors) | SHIPPED | `pub fn Binomial::new` (probs) + `pub fn Binomial::from_logits` (sigmoid) mirroring `binomial.py:55-85,121-127`; consumer: `kl_binomial_binomial` in `kl.rs` reaches instances via `kl_divergence`; `pub use Binomial` re-export. |
 //! | REQ-3 (accessors) | SHIPPED | `pub fn Binomial::{total_count, probs, logits}` mirroring `binomial.py:109-127`; consumer: `kl_binomial_binomial` reads `p.total_count()`/`p.probs()` + recomputed logits in `kl.rs`. |
-//! | REQ-4 (`Distribution` impl) | SHIPPED | `impl<T: Float> Distribution<T> for Binomial<T>` (`sample`/`rsample`/`log_prob`/`entropy`) mirroring `binomial.py:133-168`; consumer: `pub use Binomial` re-export. |
+//! | REQ-4 (`Distribution` impl) | SHIPPED | `impl<T: Float> Distribution<T> for Binomial<T>` (`sample`/`rsample`/`log_prob`/`entropy`) mirroring `binomial.py:133-168`; `sample` returns `_extended_shape = sample_shape ++ batch_shape` (`distribution.py:266-278`); consumer: `pub use Binomial` re-export; `divergence_binomial_sample_extends_batch_shape` (#1569). |
 //! | REQ-5 (`rsample` rejection) | SHIPPED | `fn Binomial::rsample` returns `InvalidArgument` (Binomial is discrete); consumer: trait surface; `test_binomial_rsample_errors`. |
-//! | REQ-6 (`log_prob` via lgamma) | SHIPPED | `fn Binomial::log_prob` = `lgamma(n+1)-lgamma(k+1)-lgamma(n-k+1)+k·ln(p)+(n-k)·ln(1-p)` mirroring `binomial.py:140-158`; consumer: trait surface. |
+//! | REQ-6 (`log_prob` via lgamma) | SHIPPED | `fn Binomial::log_prob` = `lgamma(n+1)-lgamma(k+1)-lgamma(n-k+1)+k·ln(p)+(n-k)·ln(1-p)` mirroring `binomial.py:140-158`; `value` broadcasts against `batch_shape`, clamp eps = `T::epsilon()` (= `clamp_probs` `finfo(dtype).eps`, `utils.py:124`); consumer: trait surface; `divergence_binomial_{log_prob_batched_probs_scalar_value, f64_clamp_eps_too_coarse}` (#1569). |
 //! | REQ-7 (`entropy` via enumeration) | SHIPPED | `fn Binomial::entropy` enumerates `{0..n}` and folds `-Σ exp(lp)·lp` mirroring `binomial.py:160-168`; consumer: trait surface. |
 //! | REQ-8 (`mean`/`variance`/`mode`) | SHIPPED | `fn Binomial::{mean, variance, mode}` = `n·p` / `n·p·(1-p)` / `clamp(floor((n+1)·p), max=n)` mirroring `binomial.py:109-119`; consumer: trait overrides via `pub use Binomial`. |
-//! | REQ-9 (full surface) | SHIPPED | `has_rsample`/`has_enumerate_support`/`support` (`IntegerInterval(0,n)`)/`arg_constraints`/`enumerate_support` overrides mirroring `binomial.py:48-53,104-107,170-182`; consumer: `pub use Binomial`; `test_binomial_enumerate_support`. |
+//! | REQ-9 (full surface) | SHIPPED | `has_rsample`/`has_enumerate_support`/`support` (`IntegerInterval(0,n)`)/`arg_constraints`/`enumerate_support` overrides mirroring `binomial.py:48-53,104-107,170-182`; `enumerate_support` views `{0..n}` as `(-1,)+(1,)*ndim(batch)` / expands to `(-1,)+batch_shape` per `binomial.py:179-182`; consumer: `pub use Binomial`; `test_binomial_enumerate_support` + `divergence_binomial_enumerate_support_batch_and_expand` (#1569). |
 
 use std::collections::HashMap;
 
+use ferrotorch_core::broadcast_shapes;
 use ferrotorch_core::creation;
 use ferrotorch_core::dtype::Float;
 use ferrotorch_core::error::{FerrotorchError, FerrotorchResult};
@@ -32,6 +33,49 @@ use crate::constraints;
 use crate::special_fns::lgamma_scalar;
 use crate::{DistConstraint, Distribution};
 
+/// Row-major strides for `shape` (the number of flat elements one step along
+/// each axis advances), used for broadcast index arithmetic.
+fn row_major_strides(shape: &[usize]) -> Vec<usize> {
+    let mut strides = vec![1usize; shape.len()];
+    for i in (0..shape.len().saturating_sub(1)).rev() {
+        strides[i] = strides[i + 1] * shape[i + 1];
+    }
+    strides
+}
+
+/// Map a flat index into `out_shape` to the flat index into a source tensor of
+/// `src_shape` under NumPy/PyTorch right-aligned broadcasting semantics. A
+/// source axis of length 1 (or absent because the source has fewer dims) is
+/// pinned to coordinate 0; otherwise the coordinate is carried through.
+///
+/// Mirrors how `torch.distributions.Binomial` broadcasts `total_count`/`probs`
+/// (sized at `batch_shape`) against a `value`/output sized at the broadcast of
+/// `batch_shape` with `sample_shape` — see `broadcast_all`
+/// (`torch/distributions/utils.py:27`) and `_extended_shape`
+/// (`torch/distributions/distribution.py:266-278`).
+fn broadcast_flat_index(
+    out_flat: usize,
+    out_shape: &[usize],
+    out_strides: &[usize],
+    src_shape: &[usize],
+    src_strides: &[usize],
+) -> usize {
+    let mut src_flat = 0usize;
+    let offset = out_shape.len() - src_shape.len();
+    let mut rem = out_flat;
+    for (axis, &stride) in out_strides.iter().enumerate() {
+        let coord = rem / stride;
+        rem %= stride;
+        if axis >= offset {
+            let src_axis = axis - offset;
+            if src_shape[src_axis] != 1 {
+                src_flat += coord * src_strides[src_axis];
+            }
+        }
+    }
+    src_flat
+}
+
 /// Binomial distribution parameterized by `total_count` (number of Bernoulli
 /// trials) and `probs` (per-trial success probability).
 ///
@@ -40,9 +84,20 @@ use crate::{DistConstraint, Distribution};
 /// This is a discrete distribution. `rsample` returns an error because there
 /// is no continuous reparameterization for Binomial. Use `sample` and
 /// score-function estimators (REINFORCE) for gradient-based optimization.
+///
+/// # Batch shape
+///
+/// `total_count` and `probs` are broadcast together into a single `batch_shape`
+/// at construction (`torch/distributions/binomial.py:66-85` via `broadcast_all`).
+/// `sample`, `log_prob`, and `enumerate_support` all honour this batch shape,
+/// matching PyTorch's `Distribution._extended_shape`
+/// (`torch/distributions/distribution.py:266-278`).
 pub struct Binomial<T: Float> {
     total_count: Tensor<T>,
     probs: Tensor<T>,
+    /// Broadcast of `total_count.shape()` and `probs.shape()`; the distribution's
+    /// `batch_shape` per `torch/distributions/binomial.py:84`.
+    batch_shape: Vec<usize>,
 }
 
 impl<T: Float> Binomial<T> {
@@ -53,7 +108,16 @@ impl<T: Float> Binomial<T> {
     /// Mirrors the `probs`-parameterized branch of
     /// `torch/distributions/binomial.py:55-72`.
     pub fn new(total_count: Tensor<T>, probs: Tensor<T>) -> FerrotorchResult<Self> {
-        Ok(Self { total_count, probs })
+        // `broadcast_all(total_count, probs)` then `batch_shape =
+        // self._param.size()` (`binomial.py:66-85`). ferrotorch keeps the
+        // params at their authored shapes and records the broadcast batch
+        // shape that the sampling/scoring surface expands to.
+        let batch_shape = broadcast_shapes(total_count.shape(), probs.shape())?;
+        Ok(Self {
+            total_count,
+            probs,
+            batch_shape,
+        })
     }
 
     /// Create a new Binomial distribution from `total_count` and `logits`.
@@ -76,7 +140,12 @@ impl<T: Float> Binomial<T> {
             logits.shape().to_vec(),
             false,
         )?;
-        Ok(Self { total_count, probs })
+        let batch_shape = broadcast_shapes(total_count.shape(), probs.shape())?;
+        Ok(Self {
+            total_count,
+            probs,
+            batch_shape,
+        })
     }
 
     /// The number of Bernoulli trials per position.
@@ -89,12 +158,50 @@ impl<T: Float> Binomial<T> {
         &self.probs
     }
 
+    /// Evaluate a per-element closed form `f(n, p)` over the broadcast
+    /// `batch_shape`, broadcasting `total_count`/`probs` per NumPy/PyTorch
+    /// rules. Used by `mean`/`variance`/`mode` (`binomial.py:109-119`), whose
+    /// outputs are sized at `batch_shape`.
+    fn map_batch(&self, f: impl Fn(T, T) -> T) -> FerrotorchResult<Tensor<T>> {
+        let probs_data = self.probs.data_vec()?;
+        let count_data = self.total_count.data_vec()?;
+        let n_out: usize = self.batch_shape.iter().product::<usize>().max(1);
+        let out_strides = row_major_strides(&self.batch_shape);
+        let probs_strides = row_major_strides(self.probs.shape());
+        let count_strides = row_major_strides(self.total_count.shape());
+
+        let result: Vec<T> = (0..n_out)
+            .map(|i| {
+                let pi = broadcast_flat_index(
+                    i,
+                    &self.batch_shape,
+                    &out_strides,
+                    self.probs.shape(),
+                    &probs_strides,
+                );
+                let ci = broadcast_flat_index(
+                    i,
+                    &self.batch_shape,
+                    &out_strides,
+                    self.total_count.shape(),
+                    &count_strides,
+                );
+                f(count_data[ci], probs_data[pi])
+            })
+            .collect();
+        Tensor::from_storage(TensorStorage::cpu(result), self.batch_shape.clone(), false)
+    }
+
     /// The event log-odds, recomputed from `probs` via
     /// `probs_to_logits(probs, is_binary=True) = ln(p) - ln(1 - p)`.
     /// Mirrors the `@lazy_property logits` at `binomial.py:121-123`.
     pub fn logits(&self) -> FerrotorchResult<Tensor<T>> {
         let one = <T as num_traits::One>::one();
-        let eps = T::from(1e-7).unwrap();
+        // `probs_to_logits(probs, is_binary=True)` clamps with `clamp_probs`,
+        // i.e. `eps = torch.finfo(dtype).eps` (`torch/distributions/utils.py:124`),
+        // = `T::epsilon()` (1.19e-7 for f32, 2.22e-16 for f64). The previous
+        // hardcoded 1e-7 over-clamped f64 by ~9 orders of magnitude.
+        let eps = <T as num_traits::Float>::epsilon();
         let probs_data = self.probs.data_vec()?;
         let out: Vec<T> = probs_data
             .iter()
@@ -115,12 +222,24 @@ impl<T: Float> Distribution<T> for Binomial<T> {
         )?;
         // Binomial(n, p) is the sum of n iid Bernoulli(p): for each output
         // element draw n uniforms and count how many fall below p. PyTorch's
-        // `binomial.py:133-138` calls the fused `torch.binomial` kernel;
-        // ferrotorch has no such leaf primitive so it constructs the sum.
+        // `binomial.py:133-138` calls the fused `torch.binomial` kernel on
+        // `total_count.expand(shape)` / `probs.expand(shape)` where
+        // `shape = self._extended_shape(sample_shape) = sample_shape +
+        // batch_shape` (`torch/distributions/distribution.py:266-278`);
+        // ferrotorch has no fused kernel so it constructs the sum and
+        // broadcasts the params into the same `out_shape`.
         let device = self.probs.device();
         let probs_data = self.probs.data_vec()?;
         let count_data = self.total_count.data_vec()?;
-        let n_out: usize = shape.iter().product::<usize>().max(1);
+
+        // out_shape = sample_shape ++ batch_shape (the `_extended_shape`).
+        let mut out_shape: Vec<usize> = shape.to_vec();
+        out_shape.extend_from_slice(&self.batch_shape);
+        let n_out: usize = out_shape.iter().product::<usize>().max(1);
+
+        let out_strides = row_major_strides(&out_shape);
+        let probs_strides = row_major_strides(self.probs.shape());
+        let count_strides = row_major_strides(self.total_count.shape());
 
         let one = <T as num_traits::One>::one();
         let zero = <T as num_traits::Zero>::zero();
@@ -135,12 +254,22 @@ impl<T: Float> Distribution<T> for Binomial<T> {
 
         let mut result: Vec<T> = Vec::with_capacity(n_out);
         for i in 0..n_out {
-            let p = probs_data[i % probs_data.len()];
-            let n = count_data[i % count_data.len()]
-                .max(zero)
-                .round()
-                .to_usize()
-                .unwrap_or(0);
+            let pi = broadcast_flat_index(
+                i,
+                &out_shape,
+                &out_strides,
+                self.probs.shape(),
+                &probs_strides,
+            );
+            let ci = broadcast_flat_index(
+                i,
+                &out_shape,
+                &out_strides,
+                self.total_count.shape(),
+                &count_strides,
+            );
+            let p = probs_data[pi];
+            let n = count_data[ci].max(zero).round().to_usize().unwrap_or(0);
             let base = i * max_trials.max(1);
             let mut successes = zero;
             for t in 0..n {
@@ -151,7 +280,7 @@ impl<T: Float> Distribution<T> for Binomial<T> {
             result.push(successes);
         }
 
-        let out = Tensor::from_storage(TensorStorage::cpu(result), shape.to_vec(), false)?;
+        let out = Tensor::from_storage(TensorStorage::cpu(result), out_shape, false)?;
         if device.is_cuda() {
             out.to(device)
         } else {
@@ -176,19 +305,51 @@ impl<T: Float> Distribution<T> for Binomial<T> {
         //               + k·ln(p) + (n-k)·ln(1-p)
         // Mirrors `binomial.py:140-158` (mathematically equivalent to PyTorch's
         // logit-stable `normalize_term` rearrangement for finite p ∈ (0,1)).
+        // `value` is broadcast against the param `batch_shape` exactly as torch
+        // broadcasts the scalar/tensor `value` against `self.logits`
+        // (`binomial.py:156-158`); the output shape is the broadcast of the two.
         let device = self.probs.device();
         let probs_data = self.probs.data_vec()?;
         let count_data = self.total_count.data_vec()?;
         let val_data = value.data_vec()?;
         let one = <T as num_traits::One>::one();
-        let eps = T::from(1e-7).unwrap();
+        // `clamp_probs` uses `finfo(dtype).eps` (`torch/distributions/utils.py:124`);
+        // = `T::epsilon()`. Hardcoding 1e-7 made f64 log_prob ~100x off near p=1.
+        let eps = <T as num_traits::Float>::epsilon();
 
-        let result: Vec<T> = val_data
-            .iter()
-            .enumerate()
-            .map(|(i, &k)| {
-                let p = probs_data[i % probs_data.len()];
-                let n = count_data[i % count_data.len()];
+        let out_shape = broadcast_shapes(value.shape(), &self.batch_shape)?;
+        let n_out: usize = out_shape.iter().product::<usize>().max(1);
+        let out_strides = row_major_strides(&out_shape);
+        let value_strides = row_major_strides(value.shape());
+        let probs_strides = row_major_strides(self.probs.shape());
+        let count_strides = row_major_strides(self.total_count.shape());
+
+        let result: Vec<T> = (0..n_out)
+            .map(|i| {
+                let ki = broadcast_flat_index(
+                    i,
+                    &out_shape,
+                    &out_strides,
+                    value.shape(),
+                    &value_strides,
+                );
+                let pi = broadcast_flat_index(
+                    i,
+                    &out_shape,
+                    &out_strides,
+                    self.probs.shape(),
+                    &probs_strides,
+                );
+                let ci = broadcast_flat_index(
+                    i,
+                    &out_shape,
+                    &out_strides,
+                    self.total_count.shape(),
+                    &count_strides,
+                );
+                let k = val_data[ki];
+                let p = probs_data[pi];
+                let n = count_data[ci];
                 let pc = p.max(eps).min(one - eps);
                 let log_c =
                     lgamma_scalar(n + one) - lgamma_scalar(k + one) - lgamma_scalar(n - k + one);
@@ -196,7 +357,7 @@ impl<T: Float> Distribution<T> for Binomial<T> {
             })
             .collect();
 
-        let out = Tensor::from_storage(TensorStorage::cpu(result), value.shape().to_vec(), false)?;
+        let out = Tensor::from_storage(TensorStorage::cpu(result), out_shape, false)?;
         if device.is_cuda() {
             out.to(device)
         } else {
@@ -233,17 +394,28 @@ impl<T: Float> Distribution<T> for Binomial<T> {
             }
         }
 
-        // probs batch shape determines the per-batch entropy outputs.
+        // Entropy is computed per batch element: torch sums the enumerated
+        // support along dim 0, leaving `batch_shape` (`binomial.py:167-168`).
+        // We enumerate `{0..n}` against each broadcast batch element.
         let probs_data = self.probs.data_vec()?;
-        let batch = probs_data.len();
+        let n_first_count = count_data.first().copied().unwrap_or(zero);
+        let batch = self.batch_shape.iter().product::<usize>().max(1);
+        let out_strides = row_major_strides(&self.batch_shape);
+        let probs_strides = row_major_strides(self.probs.shape());
+
         let mut out: Vec<T> = Vec::with_capacity(batch);
-        for &p in &probs_data {
+        for b in 0..batch {
+            let pi = broadcast_flat_index(
+                b,
+                &self.batch_shape,
+                &out_strides,
+                self.probs.shape(),
+                &probs_strides,
+            );
+            let p = probs_data[pi];
             let single_probs = Tensor::from_storage(TensorStorage::cpu(vec![p]), vec![1], false)?;
-            let single_count = Tensor::from_storage(
-                TensorStorage::cpu(vec![count_data.first().copied().unwrap_or(zero)]),
-                vec![1],
-                false,
-            )?;
+            let single_count =
+                Tensor::from_storage(TensorStorage::cpu(vec![n_first_count]), vec![1], false)?;
             let dist = Binomial::new(single_count, single_probs)?;
             let mut h = zero;
             for k in 0..=n_first {
@@ -255,11 +427,8 @@ impl<T: Float> Distribution<T> for Binomial<T> {
             out.push(h);
         }
 
-        let out_shape = if batch == 1 {
-            vec![]
-        } else {
-            self.probs.shape().to_vec()
-        };
+        // Scalar batch_shape collapses to `[]` (a 0-D tensor), matching torch.
+        let out_shape = self.batch_shape.clone();
         Tensor::from_storage(TensorStorage::cpu(out), out_shape, false)
     }
 
@@ -268,19 +437,8 @@ impl<T: Float> Distribution<T> for Binomial<T> {
             &[&self.total_count, &self.probs],
             "Binomial::mean",
         )?;
-        // mean = n·p (`binomial.py:109-111`).
-        let probs_data = self.probs.data_vec()?;
-        let count_data = self.total_count.data_vec()?;
-        let result: Vec<T> = probs_data
-            .iter()
-            .enumerate()
-            .map(|(i, &p)| count_data[i % count_data.len()] * p)
-            .collect();
-        Tensor::from_storage(
-            TensorStorage::cpu(result),
-            self.probs.shape().to_vec(),
-            false,
-        )
+        // mean = n·p (`binomial.py:109-111`), sized at the broadcast batch shape.
+        self.map_batch(|n, p| n * p)
     }
 
     fn variance(&self) -> FerrotorchResult<Tensor<T>> {
@@ -288,20 +446,9 @@ impl<T: Float> Distribution<T> for Binomial<T> {
             &[&self.total_count, &self.probs],
             "Binomial::variance",
         )?;
-        // variance = n·p·(1-p) (`binomial.py:117-119`).
-        let probs_data = self.probs.data_vec()?;
-        let count_data = self.total_count.data_vec()?;
+        // variance = n·p·(1-p) (`binomial.py:117-119`), sized at the batch shape.
         let one = <T as num_traits::One>::one();
-        let result: Vec<T> = probs_data
-            .iter()
-            .enumerate()
-            .map(|(i, &p)| count_data[i % count_data.len()] * p * (one - p))
-            .collect();
-        Tensor::from_storage(
-            TensorStorage::cpu(result),
-            self.probs.shape().to_vec(),
-            false,
-        )
+        self.map_batch(move |n, p| n * p * (one - p))
     }
 
     fn mode(&self) -> FerrotorchResult<Tensor<T>> {
@@ -309,23 +456,10 @@ impl<T: Float> Distribution<T> for Binomial<T> {
             &[&self.total_count, &self.probs],
             "Binomial::mode",
         )?;
-        // mode = clamp(floor((n+1)·p), max=n) (`binomial.py:113-115`).
-        let probs_data = self.probs.data_vec()?;
-        let count_data = self.total_count.data_vec()?;
+        // mode = clamp(floor((n+1)·p), max=n) (`binomial.py:113-115`), sized at
+        // the broadcast batch shape.
         let one = <T as num_traits::One>::one();
-        let result: Vec<T> = probs_data
-            .iter()
-            .enumerate()
-            .map(|(i, &p)| {
-                let n = count_data[i % count_data.len()];
-                ((n + one) * p).floor().min(n)
-            })
-            .collect();
-        Tensor::from_storage(
-            TensorStorage::cpu(result),
-            self.probs.shape().to_vec(),
-            false,
-        )
+        self.map_batch(move |n, p| ((n + one) * p).floor().min(n))
     }
 
     // -----------------------------------------------------------------------
@@ -382,8 +516,12 @@ impl<T: Float> Distribution<T> for Binomial<T> {
         vec![]
     }
 
-    fn enumerate_support(&self, _expand: bool) -> FerrotorchResult<Tensor<T>> {
-        // `binomial.py:170-182`: values are {0, 1, ..., n} along dim 0.
+    fn enumerate_support(&self, expand: bool) -> FerrotorchResult<Tensor<T>> {
+        // `binomial.py:170-182`: values are {0, 1, ..., n}, then
+        //   values.view((-1,) + (1,) * len(batch_shape))
+        //   if expand: values.expand((-1,) + batch_shape)
+        // i.e. the leading dim is the support and the batch dims are appended
+        // as singletons (no-expand) or broadcast to the batch shape (expand).
         // Requires a homogeneous total_count (PyTorch raises NotImplementedError).
         let count_data = self.total_count.data_vec()?;
         let zero = <T as num_traits::Zero>::zero();
@@ -403,9 +541,28 @@ impl<T: Float> Distribution<T> for Binomial<T> {
                 });
             }
         }
-        let values: Vec<T> = (0..=n_first).map(|k| T::from(k).unwrap()).collect();
-        let len = values.len();
-        Tensor::from_storage(TensorStorage::cpu(values), vec![len], false)
+        let support_len = n_first + 1;
+
+        // Trailing dims: `(1,)*ndim(batch)` (no-expand) or `batch_shape` (expand).
+        let trailing: Vec<usize> = if expand {
+            self.batch_shape.clone()
+        } else {
+            vec![1; self.batch_shape.len()]
+        };
+        let trailing_numel: usize = trailing.iter().product::<usize>().max(1);
+
+        // Row-major: the support value repeats `trailing_numel` times per index.
+        let mut values: Vec<T> = Vec::with_capacity(support_len * trailing_numel);
+        for k in 0..support_len {
+            let kv = T::from(k).unwrap();
+            for _ in 0..trailing_numel {
+                values.push(kv);
+            }
+        }
+        let mut out_shape: Vec<usize> = Vec::with_capacity(1 + trailing.len());
+        out_shape.push(support_len);
+        out_shape.extend_from_slice(&trailing);
+        Tensor::from_storage(TensorStorage::cpu(values), out_shape, false)
     }
 }
 
