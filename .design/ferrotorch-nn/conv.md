@@ -20,8 +20,10 @@ algorithm on CPU and dispatches to `ferrotorch_gpu::conv2d_f32` for
 f32 CUDA tensors. Supports `stride`, `padding`, `dilation`, and
 `groups` for the forward layers (`Conv*d`); the transposed layers
 support `stride`, `padding`, and `output_padding`. The `padding_mode`
-kwarg from upstream is NOT implemented — the layers default to zero
-padding.
+kwarg from upstream IS implemented (#1443): `Conv{1,2,3}d` honor
+`reflect`/`replicate`/`circular` (forward + backward, autograd-aware
+pre-pad), while `ConvTranspose{1,2,3}d` accept only `zeros` and reject
+other modes with the upstream `ValueError`.
 
 ## Requirements
 
@@ -71,12 +73,20 @@ padding.
   `torch/nn/modules/conv.py:198-201` (fan_in for Conv: `(in_channels/
   groups) * prod(kernel_size)`; for ConvTranspose: `(out_channels/
   groups) * prod(kernel_size)`). Closes #1450.
-- REQ-10: NOT-STARTED — `padding_mode` kwarg
-  (`zeros|reflect|replicate|circular`) is not implemented; all
-  layers default to zero padding. Upstream `_ConvNd.__init__`
-  routes non-zero modes through `F.pad(...)` before the convolution.
-  Blocker #1443 tracks the implementation. Parity ops involving
-  `padding_mode != 'zeros'` will fail until this lands.
+- REQ-10: `padding_mode` kwarg (`zeros|reflect|replicate|circular`)
+  threaded through every conv layer, matching
+  `torch/nn/modules/conv.py`. For the forward layers (`Conv1d`,
+  `Conv2d`, `Conv3d`) a non-`zeros` mode pre-pads the input via the
+  autograd-aware `functional_pad_{1,2,3}d` using
+  `_reversed_padding_repeated_twice` amounts, then convolves with
+  `padding = 0` (`_ConvNd._conv_forward`, `conv.py:367-378` /
+  `716-732`). The pre-pad carries `Pad{1,2,3}dBackward` so input
+  gradients flow through the boundary. For the transposed layers
+  (`ConvTranspose{1,2,3}d`) only `zeros` is valid: `with_padding_mode`
+  rejects any other mode with the upstream
+  `ValueError('Only "zeros" padding mode is supported for ...')`
+  message (`_ConvTransposeNd.__init__`, `conv.py:755-758`). Closes
+  #1443.
 - REQ-11: NOT-STARTED — parity-sweep runner arms for
   `nn.functional.conv1d`/`conv2d`/`conv3d`/`conv_transpose1d`/
   `conv_transpose2d`/`conv_transpose3d` are absent (each reports
@@ -98,7 +108,11 @@ padding.
   `ferrotorch-gpu/tests/`).
 - [x] AC-7: Lazy-conv composition — `LazyConv{1,2,3}d` materializes
   a `Conv{1,2,3}d` on first forward (see `.design/ferrotorch-nn/lazy_conv.md`).
-- [ ] AC-8: `padding_mode != "zeros"` — blocker #1443.
+- [x] AC-8: `padding_mode != "zeros"` — Conv1d/Conv2d/Conv3d honor
+  reflect/replicate/circular forward + backward; ConvTranspose
+  layers reject non-zeros (verified by
+  `test_conv{1,3}d_{reflect,replicate,circular}_*` and
+  `test_conv_transpose{1,2,3}d_*_padding_mode_rejected`). Closes #1443.
 - [ ] AC-9: Bias init matches upstream `U(-sqrt(k), sqrt(k))` —
   blocker #1450.
 - [ ] AC-10: parity-sweep arms wired for all 6 ops — blocker #1441.
@@ -197,8 +211,12 @@ For each:
 - **output_padding** (transposed): PyTorch requires
   `output_padding < max(stride, dilation)`; ferrotorch validates at
   construction.
-- **padding_mode**: NOT-IMPLEMENTED (blocker #1443) — only zero
-  padding is currently honoured.
+- **padding_mode**: SHIPPED (#1443) — forward layers (`Conv{1,2,3}d`)
+  pre-pad via the autograd-aware `functional_pad_{1,2,3}d` for
+  reflect/replicate/circular and convolve with `padding=0`;
+  transposed layers reject non-`zeros` modes with the upstream
+  `ValueError`. The pad amounts follow torch's
+  `_reversed_padding_repeated_twice` (reverse-dim order for `F.pad`).
 - **Stride 0 / kernel 0**: rejected by both upstream and
   ferrotorch.
 - **Empty batch (B=0)**: upstream returns `[0, C_out, H_out,
@@ -250,5 +268,5 @@ Expected grep count after blocker #1441 closes: `>= 1` for each.
 | REQ-7 | SHIPPED | impl: `impl<T: Float> Module<T> for Conv2d<T>` block (and analogues for the other 5) in `conv.rs`; non-test consumer: `ferrotorch_optim` walks `Module::parameters_mut()` across every conv in a training loop. |
 | REQ-8 | SHIPPED | impl: `Conv2d::set_weight` and `Conv2d::from_parts` in `conv.rs`; non-test consumer: `ferrotorch-nn/src/functional.rs` (the stateless `nn::functional::conv2d` entry point) uses `Conv2d::from_parts` to drive the existing forward path with user-supplied parameters. |
 | REQ-9 | SHIPPED | impl: `kaiming_uniform(&mut weight, NonLinearity::ReLU)` + `uniform_init(&mut b, -bound, bound)` (bound = 1/sqrt(fan_in)) in every `Conv*d::new[_full]` in `conv.rs` mirroring `torch/nn/modules/conv.py:198-201`; non-test consumer: `Conv2d::new` is the path used by every vision-model constructor. (Closes #1450 — bias path; Kaiming `a=sqrt(5)` gain divergence remains a separate followup.) |
-| REQ-10 | NOT-STARTED | blocker #1443 — `padding_mode` kwarg not threaded through Conv*d::new; only zero padding works. Upstream `_ConvNd.__init__` (`conv.py`) routes non-zero modes through `F.pad(...)`. |
+| REQ-10 | SHIPPED | impl (forward layers): `padding_mode` field + `with_padding_mode` builder on `Conv1d` / `Conv2d` / `Conv3d`, with the non-`Zeros` pre-pad branch in each `<Conv*d as Module>::forward` calling `crate::padding::functional_pad_1d`/`_2d`/`_3d` then convolving with `padding=0`, mirroring `torch/nn/modules/conv.py:367-378` (Conv1d) / `716-732` (Conv3d). impl (transposed): `ConvTranspose{1,2,3}d::with_padding_mode` routes through `fn reject_non_zeros_transpose` returning the upstream `ValueError('Only "zeros" padding mode is supported for ...')` per `conv.py:755-758`. The 1-D/3-D pre-pads are autograd-aware via `Pad1dBackward` / `Pad3dBackward` in `padding.rs` (the #1550 fix class). Non-test production consumer: `pub use conv::{Conv1d, Conv2d, Conv3d, ConvTranspose1d, ConvTranspose2d, ConvTranspose3d}` re-export in `ferrotorch-nn/src/lib.rs`, and the `<Conv1d as Module>::forward` / `<Conv3d as Module>::forward` bodies consume `functional_pad_1d` / `functional_pad_3d` in production. Closes #1443. |
 | REQ-11 | NOT-STARTED | blocker #1441 (umbrella) — parity-sweep runner arms for all 6 conv ops are absent; sweep reports `0/N passed, N skipped` for each. The forward paths themselves are end-to-end verified by 60+ lib tests; only the runner-arm wiring is missing. |

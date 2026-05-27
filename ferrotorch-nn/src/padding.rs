@@ -11,7 +11,7 @@
 //!
 //! | REQ | Status | Evidence |
 //! |---|---|---|
-//! | REQ-1 | SHIPPED | impl: `pub enum PaddingMode` here with 4 variants `Zeros` / `Reflect` / `Replicate` / `Circular`; non-test consumer: `ferrotorch-nn/src/conv.rs` imports `PaddingMode` as the field type the conv layers (currently inertly) carry — the wiring to use it is blocker #1443. |
+//! | REQ-1 | SHIPPED | impl: `pub enum PaddingMode` here with 4 variants `Zeros` / `Reflect` / `Replicate` / `Circular`; non-test consumer: `ferrotorch-nn/src/conv.rs` uses `PaddingMode` as the `Conv{1,2,3}d` `padding_mode` field — the non-`Zeros` forward branch routes through `functional_pad_{1,2,3}d` (wiring landed in #1443), and `ConvTranspose{1,2,3}d::with_padding_mode` matches on it to reject non-`Zeros`. |
 //! | REQ-2 | SHIPPED | impl: the `functional_pad_1d` / `functional_pad_2d` / `functional_pad_3d` entry points here dispatching on `PaddingMode`; non-test consumer: `ferrotorch-nn/src/functional.rs` re-exposes these as `nn::functional::pad` for the public API surface. |
 //! | REQ-3 | SHIPPED | impl: `pub struct ConstantPad{1,2,3}d<T: Float>` here, mirroring `torch/nn/modules/padding.py` constant-pad family; non-test consumer: `pub use` in `lib.rs` exposes them to external crates; the vision-model code uses `ConstantPad2d` via the `lib.rs` re-export for padding non-square inputs. |
 //! | REQ-4 | SHIPPED | impl: `pub struct ZeroPad{1,2,3}d<T: Float>` here; non-test consumer: `pub use` in `lib.rs` exposes them. |
@@ -608,10 +608,111 @@ fn pad_3d_circular<T: Float>(
 // Public functional API — apply arbitrary padding to a Tensor
 // ===========================================================================
 
+// ---------------------------------------------------------------------------
+// Autograd for the 1-D functional pad path (used by Conv1d's non-zero
+// padding_mode pre-pad). Same gather/scatter-add adjoint as the 2-D case;
+// see the `Pad2dBackward` block below for the full derivation. A pad that
+// returns `requires_grad = false` severs autograd — the #1550 bug class that
+// the 2-D path already fixed; the 1-D path needs the same `Pad1dBackward`
+// node so Conv1d's input gradient flows through the reflect/replicate/circular
+// pre-pad. Mirrors upstream `torch/nn/modules/conv.py:367-371` routing
+// non-zero modes through the differentiable `F.pad`.
+// ---------------------------------------------------------------------------
+
+/// For an output element at `new_idx` in a 1-D pad, return the linear index
+/// into the (single) source row, or `None` if the element comes from the
+/// constant fill (Zeros mode) and has no source.
+fn src_index_1d(mode: PaddingMode, new_idx: usize, inner: usize, pad_left: usize) -> Option<usize> {
+    let s: usize = match mode {
+        PaddingMode::Zeros => {
+            if new_idx < pad_left || new_idx >= pad_left + inner {
+                return None;
+            }
+            new_idx - pad_left
+        }
+        PaddingMode::Reflect => {
+            if new_idx < pad_left {
+                pad_left - new_idx
+            } else if new_idx >= pad_left + inner {
+                inner - 2 - (new_idx - pad_left - inner)
+            } else {
+                new_idx - pad_left
+            }
+        }
+        PaddingMode::Replicate => new_idx.saturating_sub(pad_left).min(inner - 1),
+        PaddingMode::Circular => {
+            ((new_idx as isize - pad_left as isize).rem_euclid(inner as isize)) as usize
+        }
+    };
+    Some(s)
+}
+
+/// Backward node for the 1-D functional pad. Scatter-adds the output gradient
+/// back onto the unpadded input row using the per-output source-index map.
+#[derive(Debug)]
+struct Pad1dBackward<T: Float> {
+    input: Tensor<T>,
+    input_shape: Vec<usize>,
+    mode: PaddingMode,
+    pad_left: usize,
+}
+
+impl<T: Float> GradFn<T> for Pad1dBackward<T> {
+    fn backward(&self, grad_output: &Tensor<T>) -> FerrotorchResult<Vec<Option<Tensor<T>>>> {
+        if !self.input.requires_grad() {
+            return Ok(vec![None]);
+        }
+        let ndim = self.input_shape.len();
+        let inner = self.input_shape[ndim - 1];
+        let rows: usize = self.input_shape[..ndim - 1]
+            .iter()
+            .copied()
+            .product::<usize>()
+            .max(1);
+
+        let go_shape = grad_output.shape();
+        let new_inner = go_shape[ndim - 1];
+
+        // The backward runs on host: scatter-add is data-dependent over the
+        // index map. `data_vec` materialises the (possibly GPU) grad to CPU.
+        let go = grad_output.data_vec()?;
+        let zero = <T as num_traits::Zero>::zero();
+        let mut grad_in = vec![zero; rows * inner];
+
+        for r in 0..rows {
+            let go_base = r * new_inner;
+            let gi_base = r * inner;
+            for ni in 0..new_inner {
+                if let Some(src) = src_index_1d(self.mode, ni, inner, self.pad_left) {
+                    grad_in[gi_base + src] += go[go_base + ni];
+                }
+            }
+        }
+
+        let grad_input =
+            Tensor::from_storage(TensorStorage::cpu(grad_in), self.input_shape.clone(), false)?;
+        Ok(vec![Some(grad_input)])
+    }
+
+    fn inputs(&self) -> Vec<&Tensor<T>> {
+        vec![&self.input]
+    }
+
+    fn name(&self) -> &'static str {
+        "Pad1dBackward"
+    }
+}
+
 /// Apply padding to the last dimension of a tensor using the given mode.
 ///
 /// This is the functional version used internally by conv layers with
 /// `padding_mode`.
+///
+/// When `input` requires grad (and grad tracking is enabled) the returned
+/// tensor carries a [`Pad1dBackward`] node so gradients flow back to `input`,
+/// matching the differentiable `F.pad` that `torch/nn/modules/conv.py`
+/// `_conv_forward` routes non-zero `padding_mode`s through (Conv1d at
+/// `conv.py:367-371`).
 pub fn functional_pad_1d<T: Float>(
     input: &Tensor<T>,
     pad_left: usize,
@@ -621,6 +722,7 @@ pub fn functional_pad_1d<T: Float>(
 ) -> FerrotorchResult<Tensor<T>> {
     let data = input.data_vec()?;
     let shape = input.shape();
+    let input_shape = shape.to_vec();
     let (out_data, new_shape) = match mode {
         // `Zeros` is the runner's mapping for torch `mode="constant"`; the fill
         // is the `value` kwarg, not a hardcoded zero. Upstream
@@ -632,6 +734,21 @@ pub fn functional_pad_1d<T: Float>(
         PaddingMode::Replicate => pad_1d_replicate(&data, shape, pad_left, pad_right),
         PaddingMode::Circular => pad_1d_circular(&data, shape, pad_left, pad_right),
     };
+
+    // Grad path: attach Pad1dBackward so the autograd graph stays connected.
+    // Without this the prior `from_storage(.., false)` severed it (#1550 bug
+    // class), and Conv1d's input gradient would not flow through the non-zero
+    // padding_mode pre-pad.
+    if is_grad_enabled() && input.requires_grad() {
+        let grad_fn = Arc::new(Pad1dBackward {
+            input: input.clone(),
+            input_shape,
+            mode,
+            pad_left,
+        });
+        return Tensor::from_operation(TensorStorage::cpu(out_data), new_shape, grad_fn);
+    }
+
     Tensor::from_storage(TensorStorage::cpu(out_data), new_shape, false)
 }
 
@@ -821,7 +938,151 @@ pub fn functional_pad_2d<T: Float>(
     Tensor::from_storage(TensorStorage::cpu(out_data), new_shape, false)
 }
 
+// ---------------------------------------------------------------------------
+// Autograd for the 3-D functional pad path (used by Conv3d's non-zero
+// padding_mode pre-pad). Same gather/scatter-add adjoint as the 1-D / 2-D
+// cases; see the `Pad2dBackward` block above for the full derivation. Without
+// the backward node, the pad returns `requires_grad = false` and severs
+// autograd — the #1550 bug class. Mirrors upstream `torch/nn/modules/conv.py`
+// `Conv3d._conv_forward` (`conv.py:717-721`) routing non-zero modes through
+// the differentiable `F.pad`.
+// ---------------------------------------------------------------------------
+
+/// For an output element at `(nd, nh, nw)` in a 3-D pad, return the linear
+/// index `sd*H*W + sh*W + sw` into the (single) source volume, or `None` if
+/// the element comes from the constant fill (Zeros mode) and has no source.
+// Internal helper: the 3-axis pad descriptor (d/h/w + per-axis pad) carries
+// proportionally more arguments than the 1-D/2-D variants.
+#[allow(clippy::too_many_arguments)]
+fn src_index_3d(
+    mode: PaddingMode,
+    nd: usize,
+    nh: usize,
+    nw: usize,
+    d: usize,
+    h: usize,
+    w: usize,
+    pad_left: usize,
+    pad_top: usize,
+    pad_front: usize,
+) -> Option<usize> {
+    // Axis-wise source resolver shared across all three spatial axes. Returns
+    // `None` only for the Zeros mode out-of-bounds case (constant fill).
+    fn axis(mode: PaddingMode, new_idx: usize, size: usize, pad_lo: usize) -> Option<usize> {
+        let s = match mode {
+            PaddingMode::Zeros => {
+                if new_idx < pad_lo || new_idx >= pad_lo + size {
+                    return None;
+                }
+                new_idx - pad_lo
+            }
+            PaddingMode::Reflect => {
+                if new_idx < pad_lo {
+                    pad_lo - new_idx
+                } else if new_idx >= pad_lo + size {
+                    size - 2 - (new_idx - pad_lo - size)
+                } else {
+                    new_idx - pad_lo
+                }
+            }
+            PaddingMode::Replicate => new_idx.saturating_sub(pad_lo).min(size - 1),
+            PaddingMode::Circular => {
+                ((new_idx as isize - pad_lo as isize).rem_euclid(size as isize)) as usize
+            }
+        };
+        Some(s)
+    }
+    let sd = axis(mode, nd, d, pad_front)?;
+    let sh = axis(mode, nh, h, pad_top)?;
+    let sw = axis(mode, nw, w, pad_left)?;
+    Some(sd * h * w + sh * w + sw)
+}
+
+/// Backward node for the 3-D functional pad. Scatter-adds the output gradient
+/// back onto the unpadded input volume using the per-output source-index map.
+#[derive(Debug)]
+struct Pad3dBackward<T: Float> {
+    input: Tensor<T>,
+    input_shape: Vec<usize>,
+    mode: PaddingMode,
+    pad_left: usize,
+    pad_top: usize,
+    pad_front: usize,
+}
+
+impl<T: Float> GradFn<T> for Pad3dBackward<T> {
+    fn backward(&self, grad_output: &Tensor<T>) -> FerrotorchResult<Vec<Option<Tensor<T>>>> {
+        if !self.input.requires_grad() {
+            return Ok(vec![None]);
+        }
+        let ndim = self.input_shape.len();
+        let d = self.input_shape[ndim - 3];
+        let h = self.input_shape[ndim - 2];
+        let w = self.input_shape[ndim - 1];
+        let outer: usize = self.input_shape[..ndim - 3]
+            .iter()
+            .copied()
+            .product::<usize>()
+            .max(1);
+
+        let go_shape = grad_output.shape();
+        let new_d = go_shape[ndim - 3];
+        let new_h = go_shape[ndim - 2];
+        let new_w = go_shape[ndim - 1];
+
+        // The backward runs on host: scatter-add is data-dependent over the
+        // index map. `data_vec` materialises the (possibly GPU) grad to CPU.
+        let go = grad_output.data_vec()?;
+        let zero = <T as num_traits::Zero>::zero();
+        let mut grad_in = vec![zero; outer * d * h * w];
+
+        for o in 0..outer {
+            let go_base = o * new_d * new_h * new_w;
+            let gi_base = o * d * h * w;
+            for ndp in 0..new_d {
+                for nhp in 0..new_h {
+                    for nwp in 0..new_w {
+                        if let Some(src) = src_index_3d(
+                            self.mode,
+                            ndp,
+                            nhp,
+                            nwp,
+                            d,
+                            h,
+                            w,
+                            self.pad_left,
+                            self.pad_top,
+                            self.pad_front,
+                        ) {
+                            grad_in[gi_base + src] +=
+                                go[go_base + ndp * new_h * new_w + nhp * new_w + nwp];
+                        }
+                    }
+                }
+            }
+        }
+
+        let grad_input =
+            Tensor::from_storage(TensorStorage::cpu(grad_in), self.input_shape.clone(), false)?;
+        Ok(vec![Some(grad_input)])
+    }
+
+    fn inputs(&self) -> Vec<&Tensor<T>> {
+        vec![&self.input]
+    }
+
+    fn name(&self) -> &'static str {
+        "Pad3dBackward"
+    }
+}
+
 /// Apply padding to the last 3 dimensions of a tensor using the given mode.
+///
+/// When `input` requires grad (and grad tracking is enabled) the returned
+/// tensor carries a [`Pad3dBackward`] node so gradients flow back to `input`,
+/// matching the differentiable `F.pad` that `torch/nn/modules/conv.py`
+/// `Conv3d._conv_forward` routes non-zero `padding_mode`s through
+/// (`conv.py:717-721`).
 // Public API: matches PyTorch's `torch.nn.functional.pad` signature for the
 // 3-axis case (input + 6 pad amounts + mode + value); divergence would
 // break parity with the upstream reference.
@@ -839,6 +1100,7 @@ pub fn functional_pad_3d<T: Float>(
 ) -> FerrotorchResult<Tensor<T>> {
     let data = input.data_vec()?;
     let shape = input.shape();
+    let input_shape = shape.to_vec();
     let (out_data, new_shape) = match mode {
         // `Zeros` carries the torch `mode="constant"` fill `value` (see the
         // PadNd.cpp:94 note on `functional_pad_1d`); #1553.
@@ -855,6 +1117,23 @@ pub fn functional_pad_3d<T: Float>(
             &data, shape, pad_left, pad_right, pad_top, pad_bottom, pad_front, pad_back,
         ),
     };
+
+    // Grad path: attach Pad3dBackward so the autograd graph stays connected.
+    // Without this the prior `from_storage(.., false)` severed it (#1550 bug
+    // class), and Conv3d's input gradient would not flow through the non-zero
+    // padding_mode pre-pad.
+    if is_grad_enabled() && input.requires_grad() {
+        let grad_fn = Arc::new(Pad3dBackward {
+            input: input.clone(),
+            input_shape,
+            mode,
+            pad_left,
+            pad_top,
+            pad_front,
+        });
+        return Tensor::from_operation(TensorStorage::cpu(out_data), new_shape, grad_fn);
+    }
+
     Tensor::from_storage(TensorStorage::cpu(out_data), new_shape, false)
 }
 
@@ -1937,5 +2216,56 @@ mod tests {
         let out = functional_pad_3d(&input, 1, 1, 0, 0, 0, 0, PaddingMode::Zeros, 2.0).unwrap();
         assert_eq!(out.shape(), &[1, 1, 1, 1, 3]);
         assert_close(out.data().unwrap(), &[2.0, 5.0, 2.0], 1e-7);
+    }
+
+    // -----------------------------------------------------------------------
+    // Autograd-aware functional pad (Pad1dBackward / Pad3dBackward) — #1443.
+    //
+    // These are the pre-pad helpers Conv1d/Conv3d route non-zero padding_modes
+    // through; a pad returning requires_grad=false severs autograd (the #1550
+    // bug class the 2-D path already fixed). Expected gradients are from a live
+    // PyTorch 2.11 `F.pad(...).sum().backward()` oracle (R-CHAR-3); the oracle
+    // script is in the #1443 commit body.
+    // -----------------------------------------------------------------------
+
+    /// Helper: leaf tensor that requires grad.
+    fn leaf(data: &[f32], shape: &[usize]) -> Tensor<f32> {
+        Tensor::from_storage(TensorStorage::cpu(data.to_vec()), shape.to_vec(), true).unwrap()
+    }
+
+    /// `functional_pad_1d` Reflect attaches `Pad1dBackward` and scatter-adds the
+    /// grad back onto the source row. torch: F.pad([1,2,3,4], (2,2), 'reflect')
+    /// -> out [3,2,1,2,3,4,3,2]; sum().backward() grad_input = [1,3,3,1].
+    #[test]
+    fn test_functional_pad_1d_reflect_backward_matches_torch() {
+        let x = leaf(&[1.0, 2.0, 3.0, 4.0], &[1, 1, 4]);
+        let y = functional_pad_1d(&x, 2, 2, PaddingMode::Reflect, 0.0).unwrap();
+        assert_eq!(y.shape(), &[1, 1, 8]);
+        assert!(
+            y.grad_fn().is_some(),
+            "functional_pad_1d Reflect lost grad_fn — would sever Conv1d autograd (#1550 class)"
+        );
+        assert_eq!(y.grad_fn().unwrap().name(), "Pad1dBackward");
+        let sum = ferrotorch_core::grad_fns::reduction::sum(&y).unwrap();
+        ferrotorch_core::backward(&sum).unwrap();
+        let g = x.grad().unwrap().expect("grad must be populated");
+        assert_close(g.data().unwrap(), &[1.0, 3.0, 3.0, 1.0], 1e-5);
+    }
+
+    /// `functional_pad_3d` Circular attaches `Pad3dBackward`. torch: a circular
+    /// pad of (1,1,1,1,1,1) on a 2x2x2 volume wraps every cell exactly 8 times,
+    /// so the all-ones grad_output backprops to a uniform grad of 8.
+    #[test]
+    fn test_functional_pad_3d_circular_backward_matches_torch() {
+        let x_data: Vec<f32> = (1..=8).map(|v| v as f32).collect();
+        let x = leaf(&x_data, &[1, 1, 2, 2, 2]);
+        let y = functional_pad_3d(&x, 1, 1, 1, 1, 1, 1, PaddingMode::Circular, 0.0).unwrap();
+        assert_eq!(y.shape(), &[1, 1, 4, 4, 4]);
+        assert!(y.grad_fn().is_some());
+        assert_eq!(y.grad_fn().unwrap().name(), "Pad3dBackward");
+        let sum = ferrotorch_core::grad_fns::reduction::sum(&y).unwrap();
+        ferrotorch_core::backward(&sum).unwrap();
+        let g = x.grad().unwrap().expect("grad must be populated");
+        assert_close(g.data().unwrap(), &[8.0; 8], 1e-5);
     }
 }

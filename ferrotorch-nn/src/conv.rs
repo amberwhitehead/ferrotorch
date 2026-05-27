@@ -18,7 +18,7 @@
 //! | REQ-7 | SHIPPED | impl: `impl<T: Float> Module<T> for Conv2d<T>` block (and analogues for the other 5) here; non-test consumer: `ferrotorch_optim` walks `Module::parameters_mut()` across every conv in a training loop. |
 //! | REQ-8 | SHIPPED | impl: the `Conv2d::set_weight` and `Conv2d::from_parts` methods here; non-test consumer: `ferrotorch-nn/src/functional.rs` (the stateless `nn::functional::conv2d` entry point) uses `Conv2d::from_parts` to drive the existing forward path with user-supplied parameters. |
 //! | REQ-9 | SHIPPED | impl: `kaiming_uniform(&mut weight, NonLinearity::ReLU)` + `uniform_init(&mut b, -bound, bound)` (bound = 1/sqrt(fan_in)) inside every `Conv*d::new[_full]` here, mirroring `torch/nn/modules/conv.py:182-201`; non-test consumer: `Conv2d::new` is the path used by every vision-model constructor. (closes #1450 — bias U(-bound,bound). Kaiming gain divergence (`a=sqrt(5)` upstream vs `ReLU` here) remains as separate followup.) |
-//! | REQ-10 | SHIPPED (Conv2d) | impl: `Conv2d` carries a `padding_mode: crate::padding::PaddingMode` field + `with_padding_mode(...)` builder here; when the mode is non-`Zeros`, `<Conv2d as Module>::forward` calls `crate::padding::functional_pad_2d(input, ...mode...)` and then runs the zero-padding im2col on the already-padded tensor, mirroring `torch/nn/modules/conv.py` 's `_ConvNd._conv_forward` (`if self.padding_mode != 'zeros': F.pad(input, self._reversed_padding_repeated_twice, mode=self.padding_mode)`). Closes #1443 for `Conv2d`; the 1-D / 3-D / transpose variants follow the same pattern in a separate dispatch. Non-test consumer: `pub use conv::{Conv1d, Conv2d, Conv3d, ConvTranspose1d, ConvTranspose2d, ConvTranspose3d}` in `lib.rs` re-export. |
+//! | REQ-10 | SHIPPED | impl: `Conv1d` / `Conv2d` / `Conv3d` each carry a `padding_mode: crate::padding::PaddingMode` field + `with_padding_mode(...)` builder here; when the mode is non-`Zeros`, the layer's `forward` calls `crate::padding::functional_pad_1d`/`_2d`/`_3d` (with `_reversed_padding_repeated_twice` amounts) and then runs the zero-padding im2col on the already-padded tensor, mirroring `torch/nn/modules/conv.py` `_ConvNd._conv_forward` (Conv1d `conv.py:367-378`, Conv3d `conv.py:716-732`). The 1-D/3-D pre-pads are autograd-aware (`Pad1dBackward` / `Pad3dBackward` in `padding.rs`), so input gradients flow through the boundary (the #1550 fix class). `ConvTranspose{1,2,3}d::with_padding_mode` rejects any non-`Zeros` mode via `fn reject_non_zeros_transpose` with the upstream `ValueError('Only "zeros" padding mode is supported for ...')` (`conv.py:755-758`). Closes #1443. Non-test consumer: `pub use conv::{Conv1d, Conv2d, Conv3d, ConvTranspose1d, ConvTranspose2d, ConvTranspose3d}` in `lib.rs` re-export; the `<Conv1d as Module>::forward` / `<Conv3d as Module>::forward` bodies consume `functional_pad_1d` / `functional_pad_3d` in production. |
 //! | REQ-11 | NOT-STARTED | blocker #1441 (umbrella) — parity-sweep runner arms for all 6 conv ops are absent; sweep reports `0/N passed, N skipped` for each. The forward paths themselves are end-to-end verified by 60+ lib tests; only the runner-arm wiring is missing. |
 
 use std::sync::Arc;
@@ -33,6 +33,30 @@ use ferrotorch_core::{FerrotorchError, FerrotorchResult, Float};
 use crate::init::{NonLinearity, kaiming_uniform, uniform as uniform_init};
 use crate::module::Module;
 use crate::parameter::Parameter;
+
+// ---------------------------------------------------------------------------
+// ConvTranspose padding_mode validation
+// ---------------------------------------------------------------------------
+
+/// Reject any non-`Zeros` `padding_mode` for a transposed convolution.
+///
+/// Upstream `_ConvTransposeNd.__init__` (`torch/nn/modules/conv.py:755-758`)
+/// runs `if padding_mode != "zeros": raise ValueError(f'Only "zeros" padding
+/// mode is supported for {self.__class__.__name__}')`. Only `"zeros"` is a
+/// valid `padding_mode` for ConvTranspose layers; matching this exception
+/// behaviour (rather than silently accepting the mode) is the R-DEV-2 contract.
+/// Closes #1443.
+fn reject_non_zeros_transpose(
+    mode: crate::padding::PaddingMode,
+    class_name: &str,
+) -> FerrotorchResult<()> {
+    if mode != crate::padding::PaddingMode::Zeros {
+        return Err(FerrotorchError::InvalidArgument {
+            message: format!("Only \"zeros\" padding mode is supported for {class_name}"),
+        });
+    }
+    Ok(())
+}
 
 // ---------------------------------------------------------------------------
 // im2col / col2im helpers
@@ -1249,6 +1273,14 @@ pub struct Conv1d<T: Float> {
     stride: usize,
     /// Zero-padding applied to both sides.
     padding: usize,
+    /// Boundary handling for the spatial padding. `Zeros` (default) routes
+    /// through the existing im2col zero-pad path; non-`Zeros` modes pre-pad
+    /// the input via `crate::padding::functional_pad_1d` and then run the
+    /// dense im2col over the already-padded tensor (matching the upstream
+    /// `_ConvNd._conv_forward` for Conv1d: `F.pad(input, ..., mode=...)` first,
+    /// then a `padding=0` convolution). See `torch/nn/modules/conv.py:367-378`.
+    /// Closes #1443.
+    padding_mode: crate::padding::PaddingMode,
     /// Whether the module is in training mode.
     training: bool,
 }
@@ -1310,8 +1342,23 @@ impl<T: Float> Conv1d<T> {
             kernel_size,
             stride,
             padding,
+            padding_mode: crate::padding::PaddingMode::Zeros,
             training: true,
         })
+    }
+
+    /// Configure the boundary handling for the spatial padding.
+    ///
+    /// `Zeros` (default) uses the existing im2col zero-pad path.
+    /// `Reflect`, `Replicate`, and `Circular` pre-pad the input via
+    /// `crate::padding::functional_pad_1d(input, ...)` and then convolve
+    /// with `padding = 0`, matching `torch.nn.Conv1d(..., padding_mode=...)`
+    /// (`_ConvNd._conv_forward`'s `F.pad` shape, `conv.py:367-378`). The pad
+    /// is autograd-aware (`Pad1dBackward`), so input gradients flow through
+    /// the boundary. Closes #1443.
+    pub fn with_padding_mode(mut self, mode: crate::padding::PaddingMode) -> Self {
+        self.padding_mode = mode;
+        self
     }
 
     /// The number of learnable scalar parameters.
@@ -1365,6 +1412,7 @@ impl<T: Float> Conv1d<T> {
             kernel_size,
             stride,
             padding,
+            padding_mode: crate::padding::PaddingMode::Zeros,
             training: true,
         })
     }
@@ -1374,6 +1422,45 @@ impl<T: Float> Module<T> for Conv1d<T> {
     fn forward(&self, input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
         // Record autocast decision for conv1d.
         let _autocast_cat = autocast_guard("conv1d");
+
+        // Non-zero padding modes: pre-pad the input with the requested
+        // boundary mode and then convolve with padding = 0. Mirrors
+        // `torch/nn/modules/conv.py` `Conv1d._conv_forward` (`conv.py:367-378`):
+        //   if self.padding_mode != 'zeros':
+        //       F.conv1d(F.pad(input, self._reversed_padding_repeated_twice,
+        //                      mode=self.padding_mode), ..., padding=_single(0), ...)
+        // For an int `padding=p`, `_reversed_padding_repeated_twice` is `[p, p]`
+        // (`conv.py:157` `_reverse_repeat_tuple(self.padding, 2)`), i.e. a
+        // symmetric `(pad_left, pad_right) = (p, p)`. The pre-pad is
+        // autograd-aware (`Pad1dBackward`) so input gradients flow through the
+        // boundary. Closes #1443.
+        if self.padding_mode != crate::padding::PaddingMode::Zeros && self.padding != 0 {
+            let padded = crate::padding::functional_pad_1d(
+                input,
+                self.padding,
+                self.padding,
+                self.padding_mode,
+                <T as num_traits::Zero>::zero(),
+            )?;
+            // Recurse on a zero-padding variant: build a shallow clone with
+            // padding = 0 and padding_mode = Zeros so the existing
+            // im2col-on-zero-pad path runs without re-padding.
+            let zero_padded_layer = Conv1d {
+                weight: Parameter::new(self.weight.tensor().clone()),
+                bias: self
+                    .bias
+                    .as_ref()
+                    .map(|b| Parameter::new(b.tensor().clone())),
+                in_channels: self.in_channels,
+                out_channels: self.out_channels,
+                kernel_size: self.kernel_size,
+                stride: self.stride,
+                padding: 0,
+                padding_mode: crate::padding::PaddingMode::Zeros,
+                training: self.training,
+            };
+            return zero_padded_layer.forward(&padded);
+        }
 
         // Validate input shape: [B, C_in, L].
         if input.ndim() != 3 {
@@ -1824,6 +1911,21 @@ impl<T: Float> ConvTranspose2d<T> {
             output_padding,
             training: true,
         })
+    }
+
+    /// Configure the boundary handling for the spatial padding.
+    ///
+    /// Only [`crate::padding::PaddingMode::Zeros`] is accepted: upstream
+    /// `_ConvTransposeNd.__init__` raises
+    /// `ValueError('Only "zeros" padding mode is supported for ConvTranspose2d')`
+    /// for any non-`zeros` mode (`torch/nn/modules/conv.py:755-758`). This
+    /// matches that behaviour by returning an error rather than silently
+    /// accepting the unsupported mode (R-DEV-2). The returned layer is
+    /// unchanged (the only valid mode is `Zeros`, the constructed default).
+    /// Closes #1443.
+    pub fn with_padding_mode(self, mode: crate::padding::PaddingMode) -> FerrotorchResult<Self> {
+        reject_non_zeros_transpose(mode, "ConvTranspose2d")?;
+        Ok(self)
     }
 
     /// The number of learnable scalar parameters.
@@ -2544,6 +2646,14 @@ pub struct Conv3d<T: Float> {
     stride: (usize, usize, usize),
     /// Zero-padding `(pD, pH, pW)` applied to both sides.
     padding: (usize, usize, usize),
+    /// Boundary handling for the spatial padding. `Zeros` (default) routes
+    /// through the existing im2col zero-pad path; non-`Zeros` modes pre-pad
+    /// the input via `crate::padding::functional_pad_3d` and then run the
+    /// dense im2col over the already-padded tensor (matching the upstream
+    /// `Conv3d._conv_forward`: `F.pad(input, ..., mode=...)` first, then a
+    /// `padding=0` convolution). See `torch/nn/modules/conv.py:716-732`.
+    /// Closes #1443.
+    padding_mode: crate::padding::PaddingMode,
     /// Whether the module is in training mode.
     training: bool,
 }
@@ -2606,8 +2716,23 @@ impl<T: Float> Conv3d<T> {
             kernel_size,
             stride,
             padding,
+            padding_mode: crate::padding::PaddingMode::Zeros,
             training: true,
         })
+    }
+
+    /// Configure the boundary handling for the spatial padding.
+    ///
+    /// `Zeros` (default) uses the existing im2col zero-pad path.
+    /// `Reflect`, `Replicate`, and `Circular` pre-pad the input via
+    /// `crate::padding::functional_pad_3d(input, ...)` and then convolve
+    /// with `padding = 0`, matching `torch.nn.Conv3d(..., padding_mode=...)`
+    /// (`Conv3d._conv_forward`'s `F.pad` shape, `conv.py:716-732`). The pad
+    /// is autograd-aware (`Pad3dBackward`), so input gradients flow through
+    /// the boundary. Closes #1443.
+    pub fn with_padding_mode(mut self, mode: crate::padding::PaddingMode) -> Self {
+        self.padding_mode = mode;
+        self
     }
 
     /// The number of learnable scalar parameters.
@@ -2665,6 +2790,7 @@ impl<T: Float> Conv3d<T> {
             kernel_size,
             stride,
             padding,
+            padding_mode: crate::padding::PaddingMode::Zeros,
             training: true,
         })
     }
@@ -2674,6 +2800,53 @@ impl<T: Float> Module<T> for Conv3d<T> {
     fn forward(&self, input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
         // Record autocast decision for conv3d.
         let _autocast_cat = autocast_guard("conv3d");
+
+        // Non-zero padding modes: pre-pad the input with the requested
+        // boundary mode and then convolve with padding = 0. Mirrors
+        // `torch/nn/modules/conv.py` `Conv3d._conv_forward` (`conv.py:716-732`):
+        //   if self.padding_mode != 'zeros':
+        //       F.conv3d(F.pad(input, self._reversed_padding_repeated_twice,
+        //                      mode=self.padding_mode), ..., padding=_triple(0), ...)
+        // For padding `(pd, ph, pw)`, `_reversed_padding_repeated_twice` is
+        // `[pw, pw, ph, ph, pd, pd]` (`conv.py:157` reverses the per-dim order
+        // because `F.pad` takes paddings in reverse-dim order). The 6-tuple maps
+        // to `functional_pad_3d(left=pw, right=pw, top=ph, bottom=ph,
+        // front=pd, back=pd)`. The pre-pad is autograd-aware (`Pad3dBackward`)
+        // so input gradients flow through the boundary. Closes #1443.
+        if self.padding_mode != crate::padding::PaddingMode::Zeros
+            && (self.padding.0 != 0 || self.padding.1 != 0 || self.padding.2 != 0)
+        {
+            let (pd, ph, pw) = self.padding;
+            let padded = crate::padding::functional_pad_3d(
+                input,
+                pw,
+                pw,
+                ph,
+                ph,
+                pd,
+                pd,
+                self.padding_mode,
+                <T as num_traits::Zero>::zero(),
+            )?;
+            // Recurse on a zero-padding variant: build a shallow clone with
+            // padding = (0,0,0) and padding_mode = Zeros so the existing
+            // im2col-on-zero-pad path runs without re-padding.
+            let zero_padded_layer = Conv3d {
+                weight: Parameter::new(self.weight.tensor().clone()),
+                bias: self
+                    .bias
+                    .as_ref()
+                    .map(|b| Parameter::new(b.tensor().clone())),
+                in_channels: self.in_channels,
+                out_channels: self.out_channels,
+                kernel_size: self.kernel_size,
+                stride: self.stride,
+                padding: (0, 0, 0),
+                padding_mode: crate::padding::PaddingMode::Zeros,
+                training: self.training,
+            };
+            return zero_padded_layer.forward(&padded);
+        }
 
         // Validate input shape: [B, C_in, D, H, W].
         if input.ndim() != 5 {
@@ -3167,6 +3340,21 @@ impl<T: Float> ConvTranspose1d<T> {
             output_padding,
             training: true,
         })
+    }
+
+    /// Configure the boundary handling for the spatial padding.
+    ///
+    /// Only [`crate::padding::PaddingMode::Zeros`] is accepted: upstream
+    /// `_ConvTransposeNd.__init__` raises
+    /// `ValueError('Only "zeros" padding mode is supported for ConvTranspose1d')`
+    /// for any non-`zeros` mode (`torch/nn/modules/conv.py:755-758`). This
+    /// matches that behaviour by returning an error rather than silently
+    /// accepting the unsupported mode (R-DEV-2). The returned layer is
+    /// unchanged (the only valid mode is `Zeros`, the constructed default).
+    /// Closes #1443.
+    pub fn with_padding_mode(self, mode: crate::padding::PaddingMode) -> FerrotorchResult<Self> {
+        reject_non_zeros_transpose(mode, "ConvTranspose1d")?;
+        Ok(self)
     }
 
     /// The number of learnable scalar parameters.
@@ -3712,6 +3900,21 @@ impl<T: Float> ConvTranspose3d<T> {
             output_padding,
             training: true,
         })
+    }
+
+    /// Configure the boundary handling for the spatial padding.
+    ///
+    /// Only [`crate::padding::PaddingMode::Zeros`] is accepted: upstream
+    /// `_ConvTransposeNd.__init__` raises
+    /// `ValueError('Only "zeros" padding mode is supported for ConvTranspose3d')`
+    /// for any non-`zeros` mode (`torch/nn/modules/conv.py:755-758`). This
+    /// matches that behaviour by returning an error rather than silently
+    /// accepting the unsupported mode (R-DEV-2). The returned layer is
+    /// unchanged (the only valid mode is `Zeros`, the constructed default).
+    /// Closes #1443.
+    pub fn with_padding_mode(self, mode: crate::padding::PaddingMode) -> FerrotorchResult<Self> {
+        reject_non_zeros_transpose(mode, "ConvTranspose3d")?;
+        Ok(self)
     }
 
     /// The number of learnable scalar parameters.
@@ -4840,6 +5043,7 @@ mod tests {
             kernel_size: 1,
             stride: 1,
             padding: 0,
+            padding_mode: crate::padding::PaddingMode::Zeros,
             training: false,
         };
 
@@ -4871,6 +5075,7 @@ mod tests {
             kernel_size: 3,
             stride: 1,
             padding: 0,
+            padding_mode: crate::padding::PaddingMode::Zeros,
             training: false,
         };
 
@@ -4894,6 +5099,7 @@ mod tests {
             kernel_size: 1,
             stride: 1,
             padding: 0,
+            padding_mode: crate::padding::PaddingMode::Zeros,
             training: false,
         };
 
@@ -5260,6 +5466,7 @@ mod tests {
             kernel_size: (1, 1, 1),
             stride: (1, 1, 1),
             padding: (0, 0, 0),
+            padding_mode: crate::padding::PaddingMode::Zeros,
             training: false,
         };
 
@@ -5287,6 +5494,7 @@ mod tests {
             kernel_size: (3, 3, 3),
             stride: (1, 1, 1),
             padding: (0, 0, 0),
+            padding_mode: crate::padding::PaddingMode::Zeros,
             training: false,
         };
 
@@ -5310,6 +5518,7 @@ mod tests {
             kernel_size: (1, 1, 1),
             stride: (1, 1, 1),
             padding: (0, 0, 0),
+            padding_mode: crate::padding::PaddingMode::Zeros,
             training: false,
         };
 
@@ -5336,6 +5545,7 @@ mod tests {
             kernel_size: (3, 3, 3),
             stride: (1, 1, 1),
             padding: (0, 0, 0),
+            padding_mode: crate::padding::PaddingMode::Zeros,
             training: false,
         };
 
@@ -5841,5 +6051,352 @@ mod tests {
         // weight: 8 * 16 * 3 * 3 * 3 = 3456, bias: 16, total: 3472
         assert_eq!(conv.num_parameters(), 3472);
         assert_eq!(conv.parameters().len(), 2);
+    }
+
+    // -----------------------------------------------------------------------
+    // padding_mode threading — closes #1443
+    //
+    // Conv1d / Conv3d honor reflect/replicate/circular padding_mode for both
+    // forward AND backward; ConvTranspose{1,2,3}d reject non-zeros modes
+    // (matching `_ConvTransposeNd.__init__` ValueError, conv.py:755-758).
+    //
+    // All expected values are derived from a live PyTorch 2.11 oracle
+    // (R-CHAR-3): the exact `torch.nn.Conv{1,3}d(..., padding_mode=...)` forward
+    // outputs and `x.grad` after `out.sum().backward()`, with the same
+    // deterministic weights/inputs reproduced below. The oracle script is in
+    // the #1443 commit body. No tautological self-reference.
+    // -----------------------------------------------------------------------
+
+    /// Build a Conv1d with explicit weight/bias for deterministic oracle parity.
+    fn conv1d_fixed(
+        weight: &[f32],
+        wshape: &[usize],
+        bias: &[f32],
+        kernel: usize,
+        padding: usize,
+        mode: crate::padding::PaddingMode,
+    ) -> Conv1d<f32> {
+        let w = Parameter::from_slice(weight, wshape).unwrap();
+        let b = Parameter::from_slice(bias, &[wshape[0]]).unwrap();
+        Conv1d {
+            weight: w,
+            bias: Some(b),
+            in_channels: wshape[1],
+            out_channels: wshape[0],
+            kernel_size: kernel,
+            stride: 1,
+            padding,
+            padding_mode: mode,
+            training: false,
+        }
+    }
+
+    /// Conv1d reflect: forward output matches torch oracle.
+    /// torch: Conv1d(1,1,3,padding=1,padding_mode='reflect'), w=[1,2,3], b=0.5,
+    /// x=[1,2,3,4,5] -> out=[10.5, 14.5, 20.5, 26.5, 26.5].
+    #[test]
+    fn test_conv1d_reflect_forward_matches_torch() {
+        let conv = conv1d_fixed(
+            &[1.0, 2.0, 3.0],
+            &[1, 1, 3],
+            &[0.5],
+            3,
+            1,
+            crate::padding::PaddingMode::Reflect,
+        );
+        let x = t(&[1.0, 2.0, 3.0, 4.0, 5.0], &[1, 1, 5]);
+        let y = conv.forward(&x).unwrap();
+        assert_eq!(y.shape(), &[1, 1, 5]);
+        assert_close(y.data().unwrap(), &[10.5, 14.5, 20.5, 26.5, 26.5], 1e-4);
+    }
+
+    /// Conv1d replicate: forward output matches torch oracle.
+    /// torch out=[9.5, 14.5, 20.5, 26.5, 29.5].
+    #[test]
+    fn test_conv1d_replicate_forward_matches_torch() {
+        let conv = conv1d_fixed(
+            &[1.0, 2.0, 3.0],
+            &[1, 1, 3],
+            &[0.5],
+            3,
+            1,
+            crate::padding::PaddingMode::Replicate,
+        );
+        let x = t(&[1.0, 2.0, 3.0, 4.0, 5.0], &[1, 1, 5]);
+        let y = conv.forward(&x).unwrap();
+        assert_close(y.data().unwrap(), &[9.5, 14.5, 20.5, 26.5, 29.5], 1e-4);
+    }
+
+    /// Conv1d circular: forward output matches torch oracle.
+    /// torch out=[13.5, 14.5, 20.5, 26.5, 17.5].
+    #[test]
+    fn test_conv1d_circular_forward_matches_torch() {
+        let conv = conv1d_fixed(
+            &[1.0, 2.0, 3.0],
+            &[1, 1, 3],
+            &[0.5],
+            3,
+            1,
+            crate::padding::PaddingMode::Circular,
+        );
+        let x = t(&[1.0, 2.0, 3.0, 4.0, 5.0], &[1, 1, 5]);
+        let y = conv.forward(&x).unwrap();
+        assert_close(y.data().unwrap(), &[13.5, 14.5, 20.5, 26.5, 17.5], 1e-4);
+    }
+
+    /// Conv1d reflect backward: input gradient flows through the non-zero pad
+    /// (the #1550 regression class — a pad returning requires_grad=false would
+    /// sever autograd and produce a None / zero grad here). torch grad_input
+    /// for out.sum().backward() = [3, 7, 6, 9, 5].
+    #[test]
+    fn test_conv1d_reflect_backward_input_grad_matches_torch() {
+        let conv = conv1d_fixed(
+            &[1.0, 2.0, 3.0],
+            &[1, 1, 3],
+            &[0.5],
+            3,
+            1,
+            crate::padding::PaddingMode::Reflect,
+        );
+        let x = leaf(&[1.0, 2.0, 3.0, 4.0, 5.0], &[1, 1, 5]);
+        let y = conv.forward(&x).unwrap();
+        // grad_fn must be present — the autograd graph survives the pre-pad.
+        assert!(
+            y.grad_fn().is_some(),
+            "Conv1d reflect output lost its grad_fn — pre-pad severed autograd (#1550 class)"
+        );
+        // `out.sum().backward()` — matches the torch oracle (grad_output = ones).
+        let sum = ferrotorch_core::grad_fns::reduction::sum(&y).unwrap();
+        ferrotorch_core::backward(&sum).unwrap();
+        let xg = x
+            .grad()
+            .unwrap()
+            .expect("input grad must be populated — pre-pad must be autograd-aware");
+        assert_close(xg.data().unwrap(), &[3.0, 7.0, 6.0, 9.0, 5.0], 1e-4);
+    }
+
+    /// Conv1d circular backward input grad matches torch: [6, 6, 6, 6, 6].
+    #[test]
+    fn test_conv1d_circular_backward_input_grad_matches_torch() {
+        let conv = conv1d_fixed(
+            &[1.0, 2.0, 3.0],
+            &[1, 1, 3],
+            &[0.5],
+            3,
+            1,
+            crate::padding::PaddingMode::Circular,
+        );
+        let x = leaf(&[1.0, 2.0, 3.0, 4.0, 5.0], &[1, 1, 5]);
+        let y = conv.forward(&x).unwrap();
+        assert!(y.grad_fn().is_some());
+        let sum = ferrotorch_core::grad_fns::reduction::sum(&y).unwrap();
+        ferrotorch_core::backward(&sum).unwrap();
+        let xg = x.grad().unwrap().expect("input grad must be populated");
+        assert_close(xg.data().unwrap(), &[6.0, 6.0, 6.0, 6.0, 6.0], 1e-4);
+    }
+
+    /// Build a Conv3d with explicit weight/bias for deterministic oracle parity.
+    fn conv3d_fixed(
+        weight: &[f32],
+        wshape: &[usize],
+        bias: &[f32],
+        kernel: (usize, usize, usize),
+        padding: (usize, usize, usize),
+        mode: crate::padding::PaddingMode,
+    ) -> Conv3d<f32> {
+        let w = Parameter::from_slice(weight, wshape).unwrap();
+        let b = Parameter::from_slice(bias, &[wshape[0]]).unwrap();
+        Conv3d {
+            weight: w,
+            bias: Some(b),
+            in_channels: wshape[1],
+            out_channels: wshape[0],
+            kernel_size: kernel,
+            stride: (1, 1, 1),
+            padding,
+            padding_mode: mode,
+            training: false,
+        }
+    }
+
+    /// Conv3d replicate forward matches torch oracle.
+    /// torch: Conv3d(1,1,(2,2,2),padding=(1,1,1),padding_mode='replicate'),
+    /// w=arange(1..=8), b=0, x=arange(1..=8) -> 27-element [1,1,3,3,3] output.
+    #[test]
+    fn test_conv3d_replicate_forward_matches_torch() {
+        let w: Vec<f32> = (1..=8).map(|v| v as f32).collect();
+        let x_data: Vec<f32> = (1..=8).map(|v| v as f32).collect();
+        let conv = conv3d_fixed(
+            &w,
+            &[1, 1, 2, 2, 2],
+            &[0.0],
+            (2, 2, 2),
+            (1, 1, 1),
+            crate::padding::PaddingMode::Replicate,
+        );
+        let x = t(&x_data, &[1, 1, 2, 2, 2]);
+        let y = conv.forward(&x).unwrap();
+        assert_eq!(y.shape(), &[1, 1, 3, 3, 3]);
+        let expected = [
+            36.0, 56.0, 72.0, 80.0, 100.0, 116.0, 108.0, 128.0, 144.0, 140.0, 160.0, 176.0, 184.0,
+            204.0, 220.0, 212.0, 232.0, 248.0, 180.0, 200.0, 216.0, 224.0, 244.0, 260.0, 252.0,
+            272.0, 288.0,
+        ];
+        assert_close(y.data().unwrap(), &expected, 1e-3);
+    }
+
+    /// Conv3d reflect forward matches torch oracle (same fixture, reflect mode).
+    #[test]
+    fn test_conv3d_reflect_forward_matches_torch() {
+        let w: Vec<f32> = (1..=8).map(|v| v as f32).collect();
+        let x_data: Vec<f32> = (1..=8).map(|v| v as f32).collect();
+        let conv = conv3d_fixed(
+            &w,
+            &[1, 1, 2, 2, 2],
+            &[0.0],
+            (2, 2, 2),
+            (1, 1, 1),
+            crate::padding::PaddingMode::Reflect,
+        );
+        let x = t(&x_data, &[1, 1, 2, 2, 2]);
+        let y = conv.forward(&x).unwrap();
+        let expected = [
+            120.0, 124.0, 120.0, 136.0, 140.0, 136.0, 120.0, 124.0, 120.0, 184.0, 188.0, 184.0,
+            200.0, 204.0, 200.0, 184.0, 188.0, 184.0, 120.0, 124.0, 120.0, 136.0, 140.0, 136.0,
+            120.0, 124.0, 120.0,
+        ];
+        assert_close(y.data().unwrap(), &expected, 1e-3);
+    }
+
+    /// Conv3d circular forward matches torch oracle (discriminating asymmetric
+    /// fixture: single-tap kernel + non-symmetric input so circular != reflect).
+    /// torch: w[0,0,0,0,0]=1 else 0, x=[[1,2],[3,4]],[[5,6],[7,8]].
+    #[test]
+    fn test_conv3d_circular_forward_matches_torch() {
+        let mut w = vec![0.0f32; 8];
+        w[0] = 1.0;
+        let x_data: Vec<f32> = (1..=8).map(|v| v as f32).collect();
+        let conv = conv3d_fixed(
+            &w,
+            &[1, 1, 2, 2, 2],
+            &[0.0],
+            (2, 2, 2),
+            (1, 1, 1),
+            crate::padding::PaddingMode::Circular,
+        );
+        let x = t(&x_data, &[1, 1, 2, 2, 2]);
+        let y = conv.forward(&x).unwrap();
+        let expected = [
+            8.0, 7.0, 8.0, 6.0, 5.0, 6.0, 8.0, 7.0, 8.0, 4.0, 3.0, 4.0, 2.0, 1.0, 2.0, 4.0, 3.0,
+            4.0, 8.0, 7.0, 8.0, 6.0, 5.0, 6.0, 8.0, 7.0, 8.0,
+        ];
+        assert_close(y.data().unwrap(), &expected, 1e-3);
+    }
+
+    /// Conv3d replicate backward: input gradient flows through the non-zero pad
+    /// (the #1550 regression class). torch grad_input for out.sum().backward()
+    /// = [90, 99, 108, 117, 126, 135, 144, 153].
+    #[test]
+    fn test_conv3d_replicate_backward_input_grad_matches_torch() {
+        let w: Vec<f32> = (1..=8).map(|v| v as f32).collect();
+        let x_data: Vec<f32> = (1..=8).map(|v| v as f32).collect();
+        let conv = conv3d_fixed(
+            &w,
+            &[1, 1, 2, 2, 2],
+            &[0.0],
+            (2, 2, 2),
+            (1, 1, 1),
+            crate::padding::PaddingMode::Replicate,
+        );
+        let x = leaf(&x_data, &[1, 1, 2, 2, 2]);
+        let y = conv.forward(&x).unwrap();
+        assert!(
+            y.grad_fn().is_some(),
+            "Conv3d replicate output lost its grad_fn — pre-pad severed autograd (#1550 class)"
+        );
+        let sum = ferrotorch_core::grad_fns::reduction::sum(&y).unwrap();
+        ferrotorch_core::backward(&sum).unwrap();
+        let xg = x.grad().unwrap().expect("input grad must be populated");
+        assert_close(
+            xg.data().unwrap(),
+            &[90.0, 99.0, 108.0, 117.0, 126.0, 135.0, 144.0, 153.0],
+            1e-3,
+        );
+    }
+
+    /// Conv1d with padding=0 ignores padding_mode (no pre-pad), matching torch
+    /// (the `self.padding != 0` short-circuit in the forward).
+    #[test]
+    fn test_conv1d_reflect_zero_padding_is_noop() {
+        let conv = conv1d_fixed(
+            &[1.0, 2.0, 3.0],
+            &[1, 1, 3],
+            &[0.0],
+            3,
+            0,
+            crate::padding::PaddingMode::Reflect,
+        );
+        let x = t(&[1.0, 2.0, 3.0, 4.0, 5.0], &[1, 1, 5]);
+        let y = conv.forward(&x).unwrap();
+        // padding=0 -> output length 3, plain conv: [1*1+2*2+3*3, ...]
+        assert_eq!(y.shape(), &[1, 1, 3]);
+        assert_close(y.data().unwrap(), &[14.0, 20.0, 26.0], 1e-4);
+    }
+
+    // --- ConvTranspose: non-zeros padding_mode rejected (conv.py:755-758) ---
+
+    #[test]
+    fn test_conv_transpose1d_reflect_padding_mode_rejected() {
+        let conv = ConvTranspose1d::<f32>::new(2, 2, 3, 1, 0, 0, false).unwrap();
+        let err = conv
+            .with_padding_mode(crate::padding::PaddingMode::Reflect)
+            .unwrap_err();
+        // Message matches torch exactly:
+        // 'Only "zeros" padding mode is supported for ConvTranspose1d'.
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("Only \"zeros\" padding mode is supported for ConvTranspose1d"),
+            "got: {msg}"
+        );
+    }
+
+    #[test]
+    fn test_conv_transpose2d_replicate_padding_mode_rejected() {
+        let conv =
+            ConvTranspose2d::<f32>::new(2, 2, (3, 3), (1, 1), (0, 0), (0, 0), false).unwrap();
+        let err = conv
+            .with_padding_mode(crate::padding::PaddingMode::Replicate)
+            .unwrap_err();
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("Only \"zeros\" padding mode is supported for ConvTranspose2d"),
+            "got: {msg}"
+        );
+    }
+
+    #[test]
+    fn test_conv_transpose3d_circular_padding_mode_rejected() {
+        let conv =
+            ConvTranspose3d::<f32>::new(2, 2, (3, 3, 3), (1, 1, 1), (0, 0, 0), (0, 0, 0), false)
+                .unwrap();
+        let err = conv
+            .with_padding_mode(crate::padding::PaddingMode::Circular)
+            .unwrap_err();
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("Only \"zeros\" padding mode is supported for ConvTranspose3d"),
+            "got: {msg}"
+        );
+    }
+
+    /// ConvTranspose accepts the `Zeros` mode (the only valid one) unchanged.
+    #[test]
+    fn test_conv_transpose2d_zeros_padding_mode_accepted() {
+        let conv =
+            ConvTranspose2d::<f32>::new(2, 2, (3, 3), (1, 1), (0, 0), (0, 0), false).unwrap();
+        assert!(
+            conv.with_padding_mode(crate::padding::PaddingMode::Zeros)
+                .is_ok()
+        );
     }
 }
