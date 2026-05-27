@@ -133,30 +133,48 @@ fn compile_dfa_for_integer(stage: &IntegerEmissionStage) -> CompiledDfa {
 
 /// Compile a [`NumberEmissionStage`] into a finite DFA. Top-level
 /// numbers only. Adds the decimal-point + fractional-digit dimensions
-/// over [`compile_dfa_for_integer`].
+/// over [`compile_dfa_for_integer`], plus the exponent section
+/// (`'e'`/`'E'`, optional sign, exponent digits).
+///
+/// The exponent transitions mirror the CPU number grammar in
+/// `state.rs` — specifically the `(Schema::Number, Phase::NumberDigits)`
+/// arm of `apply_step` (begin-exponent on `(c == 'e' || c == 'E') &&
+/// had_digits && !had_exponent_marker`; sign on `(c == '+' || c == '-')
+/// && had_exponent_marker && !had_exponent_sign && !had_exponent_digit`;
+/// exponent digit on any ascii digit while `had_exponent_marker`) and
+/// the matching `valid_next_chars_for` char-set (`'+'`/`'-'`/digits at
+/// the bare marker, digits-only after the sign, parent-terminators only
+/// once `had_exponent_digit`).
 ///
 /// Char classes:
-/// - 0 = `'-'`
+/// - 0 = `'-'` (leading minus OR the exponent's minus sign)
 /// - 1 = `'0'`
 /// - 2 = `'1'..='9'`
 /// - 3 = `'.'`
-/// - 4 = OTHER
+/// - 4 = `'e'`/`'E'` (exponent marker)
+/// - 5 = `'+'` (exponent plus sign; the minus sign reuses class 0)
+/// - 6 = OTHER
 ///
 /// States:
 /// - 0 = start
 /// - 1 = after `'-'`
-/// - 2 = after `'0'`, no decimal — only `'.'` is valid
-/// - 3 = after non-zero integer digits, no decimal — digits or `'.'`
+/// - 2 = after `'0'`, no decimal — `'.'` or `'e'`/`'E'`
+/// - 3 = after non-zero integer digits, no decimal — digits, `'.'`, `'e'`/`'E'`
 /// - 4 = after `'.'` with no fractional digit yet (mid_decimal) — only digits
-/// - 5 = after one or more fractional digits — only digits
-/// - 6 = REJECT
+/// - 5 = after one or more fractional digits — digits or `'e'`/`'E'`
+/// - 6 = after `'e'`/`'E'` (no sign / digit) — `'+'`, `'-'`, or digits
+/// - 7 = after exponent sign (no digit) — only digits
+/// - 8 = after one or more exponent digits — only digits (complete)
+/// - 9 = REJECT
 fn compile_dfa_for_number(stage: &NumberEmissionStage) -> CompiledDfa {
     let class_minus = 0u32;
     let class_zero = 1u32;
     let class_pos_digit = 2u32;
     let class_dot = 3u32;
-    let class_other = 4u32;
-    let num_classes = 5u32;
+    let class_exp = 4u32;
+    let class_plus = 5u32;
+    let class_other = 6u32;
+    let num_classes = 7u32;
 
     let mut char_classes = vec![class_other; 128];
     char_classes[b'-' as usize] = class_minus;
@@ -165,9 +183,12 @@ fn compile_dfa_for_number(stage: &NumberEmissionStage) -> CompiledDfa {
         char_classes[d as usize] = class_pos_digit;
     }
     char_classes[b'.' as usize] = class_dot;
+    char_classes[b'e' as usize] = class_exp;
+    char_classes[b'E' as usize] = class_exp;
+    char_classes[b'+' as usize] = class_plus;
 
-    let num_states = 7usize;
-    let reject = 6u32;
+    let num_states = 10usize;
+    let reject = 9u32;
     let nc = num_classes as usize;
     let mut transitions = vec![reject; num_states * nc];
     let row = |s: usize, c: u32| s * nc + c as usize;
@@ -179,19 +200,33 @@ fn compile_dfa_for_number(stage: &NumberEmissionStage) -> CompiledDfa {
     // state 1 (after '-'): '0' / '1'-'9'
     transitions[row(1, class_zero)] = 2;
     transitions[row(1, class_pos_digit)] = 3;
-    // state 2 (after '0', no decimal): only '.'
+    // state 2 (after '0', no decimal): '.' or exponent marker
     transitions[row(2, class_dot)] = 4;
-    // state 3 (after non-zero integer digits, no decimal): digits or '.'
+    transitions[row(2, class_exp)] = 6;
+    // state 3 (after non-zero integer digits, no decimal): digits, '.', exponent
     transitions[row(3, class_zero)] = 3;
     transitions[row(3, class_pos_digit)] = 3;
     transitions[row(3, class_dot)] = 4;
+    transitions[row(3, class_exp)] = 6;
     // state 4 (mid-decimal, no fractional digit): only digits
     transitions[row(4, class_zero)] = 5;
     transitions[row(4, class_pos_digit)] = 5;
-    // state 5 (after fractional digit): more digits
+    // state 5 (after fractional digit): more digits or exponent marker
     transitions[row(5, class_zero)] = 5;
     transitions[row(5, class_pos_digit)] = 5;
-    // state 6 (REJECT): already set.
+    transitions[row(5, class_exp)] = 6;
+    // state 6 (after 'e'/'E', no sign/digit): '+' / '-' / digits
+    transitions[row(6, class_plus)] = 7;
+    transitions[row(6, class_minus)] = 7;
+    transitions[row(6, class_zero)] = 8;
+    transitions[row(6, class_pos_digit)] = 8;
+    // state 7 (after exponent sign, no digit): only digits
+    transitions[row(7, class_zero)] = 8;
+    transitions[row(7, class_pos_digit)] = 8;
+    // state 8 (after exponent digit): more digits
+    transitions[row(8, class_zero)] = 8;
+    transitions[row(8, class_pos_digit)] = 8;
+    // state 9 (REJECT): already set.
 
     let start_state = match stage {
         NumberEmissionStage::Start => 0,
@@ -200,18 +235,25 @@ fn compile_dfa_for_number(stage: &NumberEmissionStage) -> CompiledDfa {
         NumberEmissionStage::AfterDigitsNoDecimal => 3,
         NumberEmissionStage::AfterDecimalNoFrac => 4,
         NumberEmissionStage::AfterFractionalDigits => 5,
+        NumberEmissionStage::AfterExponentMarker => 6,
+        NumberEmissionStage::AfterExponentSign => 7,
+        NumberEmissionStage::AfterExponentDigits => 8,
     };
 
     // Number is complete at every digit-emitting state EXCEPT
-    // AfterDecimalNoFrac, where the grammar requires at least one
-    // fractional digit before the value can terminate.
+    // AfterDecimalNoFrac (state 4, needs a fractional digit) and the
+    // in-progress exponent states AfterExponentMarker (6) /
+    // AfterExponentSign (7): the CPU grammar only emits parent
+    // terminators once `had_exponent_digit` is true
+    // (`state.rs` `valid_next_chars_for`). So the exponent's sole
+    // completion state is AfterExponentDigits (state 8).
     CompiledDfa {
         transitions,
         char_classes,
         num_classes,
         start_state,
         reject_state: reject,
-        complete_states: vec![2, 3, 5],
+        complete_states: vec![2, 3, 5, 8],
     }
 }
 
@@ -973,6 +1015,13 @@ fn cross_boundary_post_pass(
     // Terminator chars are guaranteed ASCII (`,` / `}` / `]`).
     let term_cps: Vec<u32> = terminators.iter().map(|&c| c as u32).collect();
 
+    // `i` indexes three parallel arrays (`allow`, `packed.offsets[i]` and
+    // `packed.offsets[i + 1]`), so an `enumerate()` over `allow` alone
+    // doesn't express the access pattern; keep the index loop.
+    #[allow(
+        clippy::needless_range_loop,
+        reason = "i indexes allow + packed.offsets[i] + packed.offsets[i+1] in lockstep"
+    )]
     for i in 0..allow.len() {
         if allow[i] != 0 {
             continue; // Already accepted by DFA — nothing to recover.
@@ -1014,7 +1063,6 @@ fn cross_boundary_post_pass(
 #[cfg(all(test, feature = "cuda"))]
 mod cuda_tests {
     use super::*;
-    use crate::schema::Schema;
     use cubecl_cuda::{CudaDevice, CudaRuntime};
     use serde_json::json;
 
@@ -1305,6 +1353,90 @@ mod cuda_tests {
         let gpu_mask = compute_mask_gpu::<CudaRuntime>(&processor, &client, &packed)
             .expect("Number AfterFractionalDigits must be DFA-compilable");
         assert_eq!(cpu_mask.allow, gpu_mask.allow);
+    }
+
+    /// #1594 regression: the exponent stages (`AfterExponentMarker`,
+    /// `AfterExponentSign`, `AfterExponentDigits`) added to the CPU
+    /// `NumberEmissionStage` must now be modeled by the GPU DFA. This
+    /// walks the grammar through every exponent stage of `1.5e10` and
+    /// `2E-3` and asserts the GPU mask equals the CPU oracle mask at
+    /// each step (R-CHAR-3: CPU DFA is the oracle), plus pins the
+    /// per-stage char-set (`'e'`/`'E'` after digits; `'+'`/`'-'`/digits
+    /// at the bare marker; digits-only after the sign; completion only
+    /// after an exponent digit).
+    #[test]
+    fn number_gpu_mask_matches_cpu_through_exponent() {
+        let vocab = ascii_char_vocab();
+        let idx = |s: &str| vocab.iter().position(|t| t == s).unwrap();
+        let e_idx = idx("e");
+        let cap_e_idx = idx("E");
+        let plus_idx = idx("+");
+        let minus_idx = idx("-");
+        let zero_idx = idx("0");
+        let dot_idx = idx(".");
+
+        let client = cuda_client();
+        let packed = PackedVocab::pack(&vocab);
+
+        // Assert GPU==CPU at the current state and return the GPU mask.
+        let check = |processor: &JsonSchemaProcessor| -> TokenMask {
+            let cpu = processor.compute_mask();
+            let gpu = compute_mask_gpu::<CudaRuntime>(processor, &client, &packed)
+                .expect("Number exponent stage must be DFA-compilable");
+            assert_eq!(
+                cpu.allow, gpu.allow,
+                "GPU mask must equal CPU mask byte-for-byte at this exponent stage",
+            );
+            gpu
+        };
+
+        // ---- 1.5e10 ----
+        let mut p = JsonSchemaProcessor::new(&json!({"type": "number"}), vocab.clone()).unwrap();
+        for s in ["1", ".", "5"] {
+            p.step_token(idx(s) as u32).unwrap();
+        }
+        // AfterFractionalDigits: 'e' / 'E' must be allowed (start the exponent).
+        let m = check(&p);
+        assert_eq!(m.allow[e_idx], 1, "'e' allowed after fractional digits");
+        assert_eq!(m.allow[cap_e_idx], 1, "'E' allowed after fractional digits");
+
+        // Step 'e' -> AfterExponentMarker: '+', '-', digits allowed; '.' rejected.
+        p.step_token(e_idx as u32).unwrap();
+        let m = check(&p);
+        assert_eq!(m.allow[plus_idx], 1, "'+' allowed right after 'e'");
+        assert_eq!(m.allow[minus_idx], 1, "'-' allowed right after 'e'");
+        assert_eq!(m.allow[zero_idx], 1, "digit allowed right after 'e'");
+        assert_eq!(m.allow[dot_idx], 0, "'.' rejected inside exponent");
+        assert_eq!(m.allow[e_idx], 0, "second 'e' rejected inside exponent");
+
+        // Step '1' '0' -> AfterExponentDigits: digits allowed, '+'/'-' rejected.
+        p.step_token(idx("1") as u32).unwrap();
+        p.step_token(zero_idx as u32).unwrap();
+        let m = check(&p);
+        assert_eq!(m.allow[zero_idx], 1, "more exponent digits allowed");
+        assert_eq!(m.allow[plus_idx], 0, "'+' rejected after exponent digit");
+        assert_eq!(m.allow[e_idx], 0, "'e' rejected after exponent digit");
+
+        // ---- 2E-3 (capital E, explicit minus sign) ----
+        let mut q = JsonSchemaProcessor::new(&json!({"type": "number"}), vocab.clone()).unwrap();
+        q.step_token(idx("2") as u32).unwrap();
+        // AfterDigitsNoDecimal: 'E' allowed.
+        let m = check(&q);
+        assert_eq!(m.allow[cap_e_idx], 1, "'E' allowed after integer digits");
+
+        q.step_token(cap_e_idx as u32).unwrap();
+        q.step_token(minus_idx as u32).unwrap();
+        // AfterExponentSign: only digits valid; another sign rejected.
+        let m = check(&q);
+        assert_eq!(m.allow[zero_idx], 1, "digit allowed after exponent sign");
+        assert_eq!(
+            m.allow[minus_idx], 0,
+            "second sign rejected after exponent sign"
+        );
+        assert_eq!(m.allow[cap_e_idx], 0, "'E' rejected after exponent sign");
+
+        q.step_token(idx("3") as u32).unwrap();
+        check(&q); // AfterExponentDigits — full "2E-3" accepted, GPU==CPU.
     }
 
     // -----------------------------------------------------------------
