@@ -30,8 +30,8 @@ use ferrotorch_core::tensor::Tensor;
 
 use crate::special_fns::{digamma_scalar, lgamma_scalar};
 use crate::{
-    Bernoulli, Beta, Categorical, Cauchy, Distribution, Exponential, Gamma, Gumbel, HalfNormal,
-    Laplace, Normal, Pareto, Poisson, Uniform,
+    Bernoulli, Beta, Categorical, Cauchy, Dirichlet, Distribution, Exponential, Gamma, Gumbel,
+    HalfNormal, Laplace, Normal, Pareto, Poisson, Uniform,
 };
 
 /// Euler-Mascheroni constant `γ`. Mirrors PyTorch's
@@ -82,6 +82,18 @@ const EULER_GAMMA: f64 = 0.577_215_664_901_532_9;
 /// | Gamma | Gumbel |
 /// | Exponential | Gumbel |
 /// | Uniform | Gumbel |
+/// | Dirichlet | Dirichlet |
+/// | Beta | Exponential |
+/// | Beta | Gamma |
+/// | Beta | Normal |
+/// | Beta | Uniform |
+/// | Pareto | Exponential |
+/// | Pareto | Gamma |
+/// | Pareto | Normal |
+/// | Uniform | Exponential |
+/// | Uniform | Gamma |
+/// | Uniform | Pareto |
+/// | Uniform | Beta |
 ///
 /// The same set is also reported by [`kl_supported_pair_count`].
 ///
@@ -116,7 +128,7 @@ pub const fn kl_supported_pair_count() -> usize {
 /// Compile-time count of registered `(P, Q)` pairs. Update this when adding
 /// or removing a branch in [`kl_dispatch`] **and** the doc table on
 /// [`kl_divergence`] in lockstep; the drift test enforces the invariant.
-const KL_SUPPORTED_PAIR_COUNT: usize = 25;
+const KL_SUPPORTED_PAIR_COUNT: usize = 37;
 
 fn kl_dispatch<T: Float>(
     p: &dyn std::any::Any,
@@ -267,6 +279,69 @@ fn kl_dispatch<T: Float>(
     ) {
         return kl_uniform_gumbel(pu, qg);
     }
+    // Dirichlet-Dirichlet (multivariate same-family)
+    if let (Some(pd), Some(qd)) = (
+        p.downcast_ref::<Dirichlet<T>>(),
+        q.downcast_ref::<Dirichlet<T>>(),
+    ) {
+        return kl_dirichlet_dirichlet(pd, qd);
+    }
+    // Beta-Exponential (cross-family)
+    if let (Some(pb), Some(qe)) = (
+        p.downcast_ref::<Beta<T>>(),
+        q.downcast_ref::<Exponential<T>>(),
+    ) {
+        return kl_beta_exponential(pb, qe);
+    }
+    // Beta-Gamma (cross-family)
+    if let (Some(pb), Some(qg)) = (p.downcast_ref::<Beta<T>>(), q.downcast_ref::<Gamma<T>>()) {
+        return kl_beta_gamma(pb, qg);
+    }
+    // Beta-Normal (cross-family)
+    if let (Some(pb), Some(qn)) = (p.downcast_ref::<Beta<T>>(), q.downcast_ref::<Normal<T>>()) {
+        return kl_beta_normal(pb, qn);
+    }
+    // Beta-Uniform (cross-family, support-conditioned +inf)
+    if let (Some(pb), Some(qu)) = (p.downcast_ref::<Beta<T>>(), q.downcast_ref::<Uniform<T>>()) {
+        return kl_beta_uniform(pb, qu);
+    }
+    // Pareto-Exponential (cross-family, alpha<=1 -> +inf)
+    if let (Some(pp_), Some(qe)) = (
+        p.downcast_ref::<Pareto<T>>(),
+        q.downcast_ref::<Exponential<T>>(),
+    ) {
+        return kl_pareto_exponential(pp_, qe);
+    }
+    // Pareto-Gamma (cross-family, alpha<=1 -> +inf)
+    if let (Some(pp_), Some(qg)) = (p.downcast_ref::<Pareto<T>>(), q.downcast_ref::<Gamma<T>>()) {
+        return kl_pareto_gamma(pp_, qg);
+    }
+    // Pareto-Normal (cross-family, alpha<=2 -> +inf)
+    if let (Some(pp_), Some(qn)) = (p.downcast_ref::<Pareto<T>>(), q.downcast_ref::<Normal<T>>()) {
+        return kl_pareto_normal(pp_, qn);
+    }
+    // Uniform-Exponential (cross-family, low<0 -> +inf)
+    if let (Some(pu), Some(qe)) = (
+        p.downcast_ref::<Uniform<T>>(),
+        q.downcast_ref::<Exponential<T>>(),
+    ) {
+        return kl_uniform_exponential(pu, qe);
+    }
+    // Uniform-Gamma (cross-family, low<0 -> +inf)
+    if let (Some(pu), Some(qg)) = (p.downcast_ref::<Uniform<T>>(), q.downcast_ref::<Gamma<T>>()) {
+        return kl_uniform_gamma(pu, qg);
+    }
+    // Uniform-Pareto (cross-family, low<scale -> +inf)
+    if let (Some(pu), Some(qp_)) = (
+        p.downcast_ref::<Uniform<T>>(),
+        q.downcast_ref::<Pareto<T>>(),
+    ) {
+        return kl_uniform_pareto(pu, qp_);
+    }
+    // Uniform-Beta (cross-family)
+    if let (Some(pu), Some(qb)) = (p.downcast_ref::<Uniform<T>>(), q.downcast_ref::<Beta<T>>()) {
+        return kl_uniform_beta(pu, qb);
+    }
 
     Err(FerrotorchError::InvalidArgument {
         message: "No KL divergence formula registered for this distribution pair. \
@@ -274,11 +349,14 @@ fn kl_dispatch<T: Float>(
                   Uniform-Uniform, Categorical-Categorical, Laplace-Laplace, \
                   Exponential-Exponential, Gamma-Gamma, Poisson-Poisson, \
                   Beta-Beta, Gumbel-Gumbel, Pareto-Pareto, HalfNormal-HalfNormal, \
-                  Cauchy-Cauchy. \
+                  Cauchy-Cauchy, Dirichlet-Dirichlet. \
                   Cross-family: Normal-Uniform, Uniform-Normal, \
                   Gamma-Exponential, Exponential-Gamma, Exponential-Normal, \
                   Gamma-Normal, Laplace-Normal, Normal-Gumbel, Gumbel-Normal, \
-                  Gamma-Gumbel, Exponential-Gumbel, Uniform-Gumbel."
+                  Gamma-Gumbel, Exponential-Gumbel, Uniform-Gumbel, \
+                  Beta-Exponential, Beta-Gamma, Beta-Normal, Beta-Uniform, \
+                  Pareto-Exponential, Pareto-Gamma, Pareto-Normal, \
+                  Uniform-Exponential, Uniform-Gamma, Uniform-Pareto, Uniform-Beta."
             .into(),
     })
 }
@@ -1247,6 +1325,558 @@ fn kl_uniform_gumbel<T: Float>(p: &Uniform<T>, q: &Gumbel<T>) -> FerrotorchResul
 }
 
 // ---------------------------------------------------------------------------
+// Additional KL formulas (#1374, wave-M): Dirichlet-Dirichlet (multivariate
+// same-family) + Beta/Pareto/Uniform cross-family pairs. Each mirrors a
+// `@register_kl` body in `torch/distributions/kl.py`.
+// ---------------------------------------------------------------------------
+
+/// Scalar entropy of `Beta(α, β)`, matching `Beta::entropy` in `beta.rs`
+/// (`H = lnB(α,β) - (α-1)ψ(α) - (β-1)ψ(β) + (α+β-2)ψ(α+β)`). Factored as a
+/// free scalar helper so the Beta cross-family KL bodies can reuse it inside
+/// their per-element map.
+fn beta_entropy_scalar<T: Float>(a: T, b: T) -> T {
+    let one = T::from(1.0).unwrap();
+    let two = T::from(2.0).unwrap();
+    let lbeta = lgamma_scalar(a) + lgamma_scalar(b) - lgamma_scalar(a + b);
+    lbeta - (a - one) * digamma_scalar(a) - (b - one) * digamma_scalar(b)
+        + (a + b - two) * digamma_scalar(a + b)
+}
+
+/// KL(Dirichlet(α) || Dirichlet(β)) (multivariate same-family).
+///
+/// Mirrors `torch/distributions/kl.py:263-273` `_kl_dirichlet_dirichlet`:
+/// ```text
+/// sum_p = Σ_k α_k;  sum_q = Σ_k β_k
+/// t1 = lnΓ(sum_p) - lnΓ(sum_q)
+/// t2 = Σ_k (lnΓ(α_k) - lnΓ(β_k))
+/// t3 = α_k - β_k
+/// t4 = ψ(α_k) - ψ(sum_p)
+/// KL = t1 - t2 + Σ_k t3·t4
+/// ```
+/// One scalar KL per batch row; output shape == `batch_shape`.
+fn kl_dirichlet_dirichlet<T: Float>(
+    p: &Dirichlet<T>,
+    q: &Dirichlet<T>,
+) -> FerrotorchResult<Tensor<T>> {
+    crate::fallback::check_gpu_fallback_opt_in(
+        &[p.concentration(), q.concentration()],
+        "kl_divergence(Dirichlet, Dirichlet)",
+    )?;
+    let pa = p.concentration().data_vec()?;
+    let qa = q.concentration().data_vec()?;
+    let k = p.num_categories();
+    if q.num_categories() != k {
+        return Err(FerrotorchError::InvalidArgument {
+            message: "kl_divergence(Dirichlet, Dirichlet): event dims (K) must match".into(),
+        });
+    }
+    let zero = T::from(0.0).unwrap();
+    let b = pa.len() / k;
+
+    let mut out = Vec::with_capacity(b);
+    for bi in 0..b {
+        let prow = &pa[bi * k..bi * k + k];
+        // q broadcasts over p's batch rows when q has a single row.
+        let qbi = if qa.len() == k { 0 } else { bi };
+        let qrow = &qa[qbi * k..qbi * k + k];
+        let sum_p: T = prow.iter().copied().fold(zero, |acc, x| acc + x);
+        let sum_q: T = qrow.iter().copied().fold(zero, |acc, x| acc + x);
+        let t1 = lgamma_scalar(sum_p) - lgamma_scalar(sum_q);
+        let dig_sum_p = digamma_scalar(sum_p);
+        let mut t2 = zero;
+        let mut t34 = zero;
+        for (&ak, &bk) in prow.iter().zip(qrow.iter()) {
+            t2 += lgamma_scalar(ak) - lgamma_scalar(bk);
+            t34 += (ak - bk) * (digamma_scalar(ak) - dig_sum_p);
+        }
+        out.push(t1 - t2 + t34);
+    }
+    Tensor::from_storage(TensorStorage::cpu(out), p.batch_shape(), false)
+}
+
+/// KL(Beta(α, β) || Exponential(rate)) (cross-family).
+///
+/// Mirrors `torch/distributions/kl.py:533-539` `_kl_beta_exponential`:
+/// ```text
+/// KL = -H(Beta) - ln(rate) + rate·(α / (α+β))
+/// ```
+fn kl_beta_exponential<T: Float>(p: &Beta<T>, q: &Exponential<T>) -> FerrotorchResult<Tensor<T>> {
+    crate::fallback::check_gpu_fallback_opt_in(
+        &[p.concentration1(), p.concentration0(), q.rate()],
+        "kl_divergence(Beta, Exponential)",
+    )?;
+    let a = p.concentration1().data_vec()?;
+    let b = p.concentration0().data_vec()?;
+    let rate = q.rate().data_vec()?;
+
+    let result: Vec<T> = a
+        .iter()
+        .zip(b.iter())
+        .zip(rate.iter().cycle())
+        .map(|((&a, &b), &r)| -beta_entropy_scalar(a, b) - r.ln() + r * (a / (a + b)))
+        .collect();
+
+    Tensor::from_storage(
+        TensorStorage::cpu(result),
+        p.concentration1().shape().to_vec(),
+        false,
+    )
+}
+
+/// KL(Beta(α, β) || Gamma(conc, rate)) (cross-family).
+///
+/// Mirrors `torch/distributions/kl.py:542-552` `_kl_beta_gamma`:
+/// ```text
+/// t1 = -H(Beta)
+/// t2 = lnΓ(c) - c·ln(rate)
+/// t3 = (c-1)·(ψ(α) - ψ(α+β))
+/// t4 = rate·α/(α+β)
+/// KL = t1 + t2 - t3 + t4
+/// ```
+fn kl_beta_gamma<T: Float>(p: &Beta<T>, q: &Gamma<T>) -> FerrotorchResult<Tensor<T>> {
+    crate::fallback::check_gpu_fallback_opt_in(
+        &[
+            p.concentration1(),
+            p.concentration0(),
+            q.concentration(),
+            q.rate(),
+        ],
+        "kl_divergence(Beta, Gamma)",
+    )?;
+    let a = p.concentration1().data_vec()?;
+    let b = p.concentration0().data_vec()?;
+    let conc = q.concentration().data_vec()?;
+    let rate = q.rate().data_vec()?;
+    let one = T::from(1.0).unwrap();
+
+    let result: Vec<T> = a
+        .iter()
+        .zip(b.iter())
+        .zip(conc.iter().cycle())
+        .zip(rate.iter().cycle())
+        .map(|(((&a, &b), &c), &r)| {
+            let t1 = -beta_entropy_scalar(a, b);
+            let t2 = lgamma_scalar(c) - c * r.ln();
+            let t3 = (c - one) * (digamma_scalar(a) - digamma_scalar(a + b));
+            let t4 = r * a / (a + b);
+            t1 + t2 - t3 + t4
+        })
+        .collect();
+
+    Tensor::from_storage(
+        TensorStorage::cpu(result),
+        p.concentration1().shape().to_vec(),
+        false,
+    )
+}
+
+/// KL(Beta(α, β) || Normal(loc, scale)) (cross-family).
+///
+/// Mirrors `torch/distributions/kl.py:556-568` `_kl_beta_normal`:
+/// ```text
+/// E_beta = α/(α+β);  var = scale²
+/// t1 = -H(Beta)
+/// t2 = 0.5·ln(var·2π)
+/// t3 = 0.5·(E_beta(1-E_beta)/(α+β+1) + E_beta²)
+/// t4 = loc·E_beta;  t5 = 0.5·loc²
+/// KL = t1 + t2 + (t3 - t4 + t5)/var
+/// ```
+fn kl_beta_normal<T: Float>(p: &Beta<T>, q: &Normal<T>) -> FerrotorchResult<Tensor<T>> {
+    crate::fallback::check_gpu_fallback_opt_in(
+        &[p.concentration1(), p.concentration0(), q.loc(), q.scale()],
+        "kl_divergence(Beta, Normal)",
+    )?;
+    let a = p.concentration1().data_vec()?;
+    let b = p.concentration0().data_vec()?;
+    let loc = q.loc().data_vec()?;
+    let scale = q.scale().data_vec()?;
+    let half = T::from(0.5).unwrap();
+    let one = T::from(1.0).unwrap();
+    let two_pi = T::from(2.0 * std::f64::consts::PI).unwrap();
+
+    let result: Vec<T> = a
+        .iter()
+        .zip(b.iter())
+        .zip(loc.iter().cycle())
+        .zip(scale.iter().cycle())
+        .map(|(((&a, &b), &loc), &scale)| {
+            let e_beta = a / (a + b);
+            let var = scale * scale;
+            let t1 = -beta_entropy_scalar(a, b);
+            let t2 = half * (var * two_pi).ln();
+            let t3 = half * (e_beta * (one - e_beta) / (a + b + one) + e_beta * e_beta);
+            let t4 = loc * e_beta;
+            let t5 = half * loc * loc;
+            t1 + t2 + (t3 - t4 + t5) / var
+        })
+        .collect();
+
+    Tensor::from_storage(
+        TensorStorage::cpu(result),
+        p.concentration1().shape().to_vec(),
+        false,
+    )
+}
+
+/// KL(Beta(α, β) || Uniform(low, high)) (cross-family).
+///
+/// Mirrors `torch/distributions/kl.py:571-577` `_kl_beta_uniform`:
+/// ```text
+/// KL = -H(Beta) + ln(high - low)
+/// KL = +inf when the Uniform support [low,high] does not cover the Beta
+///      support [0,1] (low > 0 or high < 1).
+/// ```
+fn kl_beta_uniform<T: Float>(p: &Beta<T>, q: &Uniform<T>) -> FerrotorchResult<Tensor<T>> {
+    crate::fallback::check_gpu_fallback_opt_in(
+        &[p.concentration1(), p.concentration0(), q.low(), q.high()],
+        "kl_divergence(Beta, Uniform)",
+    )?;
+    let a = p.concentration1().data_vec()?;
+    let b = p.concentration0().data_vec()?;
+    let low = q.low().data_vec()?;
+    let high = q.high().data_vec()?;
+    let zero = T::from(0.0).unwrap();
+    let one = T::from(1.0).unwrap();
+
+    let result: Vec<T> = a
+        .iter()
+        .zip(b.iter())
+        .zip(low.iter().cycle())
+        .zip(high.iter().cycle())
+        .map(|(((&a, &b), &low), &high)| {
+            if low > zero || high < one {
+                T::infinity()
+            } else {
+                -beta_entropy_scalar(a, b) + (high - low).ln()
+            }
+        })
+        .collect();
+
+    Tensor::from_storage(
+        TensorStorage::cpu(result),
+        p.concentration1().shape().to_vec(),
+        false,
+    )
+}
+
+/// KL(Pareto(scale, α) || Exponential(rate)) (cross-family).
+///
+/// Mirrors `torch/distributions/kl.py:802-810` `_kl_pareto_exponential`:
+/// ```text
+/// scale_rate_prod = scale·rate
+/// t1 = ln(α / scale_rate_prod);  t2 = 1/α
+/// t3 = α·scale_rate_prod/(α-1)
+/// KL = t1 - t2 + t3 - 1;  +inf when α <= 1.
+/// ```
+fn kl_pareto_exponential<T: Float>(
+    p: &Pareto<T>,
+    q: &Exponential<T>,
+) -> FerrotorchResult<Tensor<T>> {
+    crate::fallback::check_gpu_fallback_opt_in(
+        &[p.scale(), p.alpha(), q.rate()],
+        "kl_divergence(Pareto, Exponential)",
+    )?;
+    let scale = p.scale().data_vec()?;
+    let alpha = p.alpha().data_vec()?;
+    let rate = q.rate().data_vec()?;
+    let one = T::from(1.0).unwrap();
+
+    let result: Vec<T> = scale
+        .iter()
+        .zip(alpha.iter())
+        .zip(rate.iter().cycle())
+        .map(|((&s, &a), &r)| {
+            if a <= one {
+                T::infinity()
+            } else {
+                let srp = s * r;
+                (a / srp).ln() - one / a + a * srp / (a - one) - one
+            }
+        })
+        .collect();
+
+    Tensor::from_storage(
+        TensorStorage::cpu(result),
+        p.scale().shape().to_vec(),
+        false,
+    )
+}
+
+/// KL(Pareto(scale, α) || Gamma(conc, rate)) (cross-family).
+///
+/// Mirrors `torch/distributions/kl.py:813-825` `_kl_pareto_gamma`:
+/// ```text
+/// common = ln(scale) + 1/α
+/// t1 = ln(α) - common
+/// t2 = lnΓ(c) - c·ln(rate)
+/// t3 = (1-c)·common
+/// t4 = rate·α·scale/(α-1)
+/// KL = t1 + t2 + t3 + t4 - 1;  +inf when α <= 1.
+/// ```
+fn kl_pareto_gamma<T: Float>(p: &Pareto<T>, q: &Gamma<T>) -> FerrotorchResult<Tensor<T>> {
+    crate::fallback::check_gpu_fallback_opt_in(
+        &[p.scale(), p.alpha(), q.concentration(), q.rate()],
+        "kl_divergence(Pareto, Gamma)",
+    )?;
+    let scale = p.scale().data_vec()?;
+    let alpha = p.alpha().data_vec()?;
+    let conc = q.concentration().data_vec()?;
+    let rate = q.rate().data_vec()?;
+    let one = T::from(1.0).unwrap();
+
+    let result: Vec<T> = scale
+        .iter()
+        .zip(alpha.iter())
+        .zip(conc.iter().cycle())
+        .zip(rate.iter().cycle())
+        .map(|(((&s, &a), &c), &r)| {
+            if a <= one {
+                T::infinity()
+            } else {
+                let common = s.ln() + one / a;
+                let t1 = a.ln() - common;
+                let t2 = lgamma_scalar(c) - c * r.ln();
+                let t3 = (one - c) * common;
+                let t4 = r * a * s / (a - one);
+                t1 + t2 + t3 + t4 - one
+            }
+        })
+        .collect();
+
+    Tensor::from_storage(
+        TensorStorage::cpu(result),
+        p.scale().shape().to_vec(),
+        false,
+    )
+}
+
+/// KL(Pareto(scale, α) || Normal(loc, scale2)) (cross-family).
+///
+/// Mirrors `torch/distributions/kl.py:828-838` `_kl_pareto_normal`:
+/// ```text
+/// var = 2·scale2²;  common = scale/(α-1)
+/// t1 = ln(sqrt(2π)·scale2·α/scale)
+/// t2 = 1/α
+/// t3 = α·common²/(α-2)
+/// t4 = (α·common - loc)²
+/// KL = t1 - t2 + (t3 + t4)/var - 1;  +inf when α <= 2.
+/// ```
+fn kl_pareto_normal<T: Float>(p: &Pareto<T>, q: &Normal<T>) -> FerrotorchResult<Tensor<T>> {
+    crate::fallback::check_gpu_fallback_opt_in(
+        &[p.scale(), p.alpha(), q.loc(), q.scale()],
+        "kl_divergence(Pareto, Normal)",
+    )?;
+    let scale = p.scale().data_vec()?;
+    let alpha = p.alpha().data_vec()?;
+    let loc = q.loc().data_vec()?;
+    let scale2 = q.scale().data_vec()?;
+    let one = T::from(1.0).unwrap();
+    let two = T::from(2.0).unwrap();
+    let sqrt_two_pi = T::from((2.0 * std::f64::consts::PI).sqrt()).unwrap();
+
+    let result: Vec<T> = scale
+        .iter()
+        .zip(alpha.iter())
+        .zip(loc.iter().cycle())
+        .zip(scale2.iter().cycle())
+        .map(|(((&s, &a), &loc), &s2)| {
+            if a <= two {
+                T::infinity()
+            } else {
+                let var = two * s2 * s2;
+                let common = s / (a - one);
+                let t1 = (sqrt_two_pi * s2 * a / s).ln();
+                let t2 = one / a;
+                let t3 = a * common * common / (a - two);
+                let t4_inner = a * common - loc;
+                let t4 = t4_inner * t4_inner;
+                t1 - t2 + (t3 + t4) / var - one
+            }
+        })
+        .collect();
+
+    Tensor::from_storage(
+        TensorStorage::cpu(result),
+        p.scale().shape().to_vec(),
+        false,
+    )
+}
+
+/// KL(Uniform(low, high) || Exponential(rate)) (cross-family).
+///
+/// Mirrors `torch/distributions/kl.py:889-893` `_kl_uniform_exponential`:
+/// ```text
+/// KL = rate·(high+low)/2 - ln((high-low)·rate);  +inf when low < 0.
+/// ```
+fn kl_uniform_exponential<T: Float>(
+    p: &Uniform<T>,
+    q: &Exponential<T>,
+) -> FerrotorchResult<Tensor<T>> {
+    crate::fallback::check_gpu_fallback_opt_in(
+        &[p.low(), p.high(), q.rate()],
+        "kl_divergence(Uniform, Exponential)",
+    )?;
+    let low = p.low().data_vec()?;
+    let high = p.high().data_vec()?;
+    let rate = q.rate().data_vec()?;
+    let zero = T::from(0.0).unwrap();
+    let two = T::from(2.0).unwrap();
+
+    let result: Vec<T> = low
+        .iter()
+        .zip(high.iter())
+        .zip(rate.iter().cycle())
+        .map(|((&low, &high), &r)| {
+            if low < zero {
+                T::infinity()
+            } else {
+                r * (high + low) / two - ((high - low) * r).ln()
+            }
+        })
+        .collect();
+
+    Tensor::from_storage(TensorStorage::cpu(result), p.low().shape().to_vec(), false)
+}
+
+/// KL(Uniform(low, high) || Gamma(conc, rate)) (cross-family).
+///
+/// Mirrors `torch/distributions/kl.py:896-909` `_kl_uniform_gamma`:
+/// ```text
+/// common = high - low
+/// t1 = ln(common)
+/// t2 = lnΓ(c) - c·ln(rate)
+/// t3 = (1-c)·(x·ln(x)|_low^high - common)/common      [x·ln(x), 0·ln0 = 0]
+/// t4 = rate·(high+low)/2
+/// KL = -t1 + t2 + t3 + t4;  +inf when low < 0.
+/// ```
+fn kl_uniform_gamma<T: Float>(p: &Uniform<T>, q: &Gamma<T>) -> FerrotorchResult<Tensor<T>> {
+    crate::fallback::check_gpu_fallback_opt_in(
+        &[p.low(), p.high(), q.concentration(), q.rate()],
+        "kl_divergence(Uniform, Gamma)",
+    )?;
+    let low = p.low().data_vec()?;
+    let high = p.high().data_vec()?;
+    let conc = q.concentration().data_vec()?;
+    let rate = q.rate().data_vec()?;
+    let zero = T::from(0.0).unwrap();
+    let one = T::from(1.0).unwrap();
+    let two = T::from(2.0).unwrap();
+
+    let result: Vec<T> = low
+        .iter()
+        .zip(high.iter())
+        .zip(conc.iter().cycle())
+        .zip(rate.iter().cycle())
+        .map(|(((&low, &high), &c), &r)| {
+            if low < zero {
+                T::infinity()
+            } else {
+                let common = high - low;
+                let t1 = common.ln();
+                let t2 = lgamma_scalar(c) - c * r.ln();
+                let t3 = (one - c) * (x_log_x(high) - x_log_x(low) - common) / common;
+                let t4 = r * (high + low) / two;
+                -t1 + t2 + t3 + t4
+            }
+        })
+        .collect();
+
+    Tensor::from_storage(TensorStorage::cpu(result), p.low().shape().to_vec(), false)
+}
+
+/// `x·ln(x)` with the convention `0·ln(0) = 0`. Mirrors
+/// `torch.special.xlogy(x, x)` used by `_x_log_x` in `kl.py:148-152`.
+fn x_log_x<T: Float>(x: T) -> T {
+    let zero = T::from(0.0).unwrap();
+    if x <= zero { zero } else { x * x.ln() }
+}
+
+/// KL(Uniform(low, high) || Pareto(scale, α)) (cross-family).
+///
+/// Mirrors `torch/distributions/kl.py:934-941` `_kl_uniform_pareto`:
+/// ```text
+/// support = high - low
+/// t1 = ln(α · scale^α · support)
+/// t2 = (x·ln(x)|_low^high - support)/support
+/// KL = t2·(α+1) - t1;  +inf when low < scale (Uniform support below Pareto's).
+/// ```
+fn kl_uniform_pareto<T: Float>(p: &Uniform<T>, q: &Pareto<T>) -> FerrotorchResult<Tensor<T>> {
+    crate::fallback::check_gpu_fallback_opt_in(
+        &[p.low(), p.high(), q.scale(), q.alpha()],
+        "kl_divergence(Uniform, Pareto)",
+    )?;
+    let low = p.low().data_vec()?;
+    let high = p.high().data_vec()?;
+    let scale = q.scale().data_vec()?;
+    let alpha = q.alpha().data_vec()?;
+    let one = T::from(1.0).unwrap();
+
+    let result: Vec<T> = low
+        .iter()
+        .zip(high.iter())
+        .zip(scale.iter().cycle())
+        .zip(alpha.iter().cycle())
+        .map(|(((&low, &high), &s), &a)| {
+            if low < s {
+                T::infinity()
+            } else {
+                let support = high - low;
+                let t1 = (a * s.powf(a) * support).ln();
+                let t2 = (x_log_x(high) - x_log_x(low) - support) / support;
+                t2 * (a + one) - t1
+            }
+        })
+        .collect();
+
+    Tensor::from_storage(TensorStorage::cpu(result), p.low().shape().to_vec(), false)
+}
+
+/// KL(Uniform(low, high) || Beta(α, β)) (cross-family).
+///
+/// Mirrors `torch/distributions/kl.py:847-869` `_kl_uniform_beta`:
+/// ```text
+/// common = high - low
+/// t1 = ln(common)
+/// t2 = (α-1)·(x·ln(x)|_low^high - common)/common
+/// t3 = (β-1)·((1-x)·ln(1-x)|_low^high + common)/common
+/// t4 = lnΓ(α) + lnΓ(β) - lnΓ(α+β)
+/// KL = t3 + t4 - t1 - t2;  +inf when the Uniform support escapes [0,1].
+/// ```
+fn kl_uniform_beta<T: Float>(p: &Uniform<T>, q: &Beta<T>) -> FerrotorchResult<Tensor<T>> {
+    crate::fallback::check_gpu_fallback_opt_in(
+        &[p.low(), p.high(), q.concentration1(), q.concentration0()],
+        "kl_divergence(Uniform, Beta)",
+    )?;
+    let low = p.low().data_vec()?;
+    let high = p.high().data_vec()?;
+    let a = q.concentration1().data_vec()?;
+    let b = q.concentration0().data_vec()?;
+    let zero = T::from(0.0).unwrap();
+    let one = T::from(1.0).unwrap();
+
+    let result: Vec<T> = low
+        .iter()
+        .zip(high.iter())
+        .zip(a.iter().cycle())
+        .zip(b.iter().cycle())
+        .map(|(((&low, &high), &a), &b)| {
+            if low < zero || high > one {
+                T::infinity()
+            } else {
+                let common = high - low;
+                let t1 = common.ln();
+                let t2 = (a - one) * (x_log_x(high) - x_log_x(low) - common) / common;
+                let t3 = (b - one) * (x_log_x(one - high) - x_log_x(one - low) + common) / common;
+                let t4 = lgamma_scalar(a) + lgamma_scalar(b) - lgamma_scalar(a + b);
+                t3 + t4 - t1 - t2
+            }
+        })
+        .collect();
+
+    Tensor::from_storage(TensorStorage::cpu(result), p.low().shape().to_vec(), false)
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -2012,6 +2642,268 @@ mod tests {
             "expected {expected}, got {}",
             kl.item().unwrap()
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // #1374 wave-M: Dirichlet-Dirichlet + Beta/Pareto/Uniform cross-family.
+    // Reference values from live `torch.distributions.kl_divergence` (f64,
+    // this machine 2026-05-26); each `expected` traces to a `@register_kl`
+    // body in `torch/distributions/kl.py` (R-CHAR-3 non-tautological).
+    // -----------------------------------------------------------------------
+
+    use crate::Dirichlet;
+
+    fn approx(got: f64, expected: f64, tol: f64, what: &str) {
+        assert!(
+            (got - expected).abs() < tol,
+            "{what}: got {got}, torch {expected}, |err|={}",
+            (got - expected).abs()
+        );
+    }
+
+    // -- Dirichlet-Dirichlet -------------------------------------------------
+
+    #[test]
+    fn test_kl_dirichlet_dirichlet_same_is_zero() {
+        let p = Dirichlet::new(tensor(&[1.0f64, 2.0, 3.0]).unwrap()).unwrap();
+        let q = Dirichlet::new(tensor(&[1.0f64, 2.0, 3.0]).unwrap()).unwrap();
+        let kl = kl_divergence(&p, &q).unwrap();
+        approx(kl.item().unwrap(), 0.0, 1e-12, "Dir-Dir same");
+    }
+
+    #[test]
+    fn test_kl_dirichlet_dirichlet_known_value() {
+        // torch.distributions.kl_divergence(Dirichlet([1,2,3]), Dirichlet([2,2,2]))
+        let p = Dirichlet::new(tensor(&[1.0f64, 2.0, 3.0]).unwrap()).unwrap();
+        let q = Dirichlet::new(tensor(&[2.0f64, 2.0, 2.0]).unwrap()).unwrap();
+        let kl = kl_divergence(&p, &q).unwrap();
+        approx(
+            kl.item().unwrap(),
+            0.806_852_819_440_054_7,
+            1e-10,
+            "Dir-Dir",
+        );
+    }
+
+    // -- Beta-Exponential ----------------------------------------------------
+
+    #[test]
+    fn test_kl_beta_exponential_known_value() {
+        // kl.py:533-539. torch: KL(Beta(2,3) || Exp(1.5)).
+        let p = Beta::new(scalar(2.0f64).unwrap(), scalar(3.0f64).unwrap()).unwrap();
+        let q = Exponential::new(scalar(1.5f64).unwrap()).unwrap();
+        let kl = kl_divergence(&p, &q).unwrap();
+        approx(
+            kl.item().unwrap(),
+            0.429_441_541_679_836_06,
+            1e-10,
+            "Beta-Exp",
+        );
+    }
+
+    // -- Beta-Gamma ----------------------------------------------------------
+
+    #[test]
+    fn test_kl_beta_gamma_known_value() {
+        // kl.py:542-552. torch: KL(Beta(2,3) || Gamma(2.0, 1.5)).
+        let p = Beta::new(scalar(2.0f64).unwrap(), scalar(3.0f64).unwrap()).unwrap();
+        let q = Gamma::new(scalar(2.0f64).unwrap(), scalar(1.5f64).unwrap()).unwrap();
+        let kl = kl_divergence(&p, &q).unwrap();
+        approx(
+            kl.item().unwrap(),
+            1.107_309_766_905_004_7,
+            1e-10,
+            "Beta-Gamma",
+        );
+    }
+
+    // -- Beta-Normal ---------------------------------------------------------
+
+    #[test]
+    fn test_kl_beta_normal_known_value() {
+        // kl.py:556-568. torch: KL(Beta(2,3) || Normal(0.5, 1.0)).
+        let p = Beta::new(scalar(2.0f64).unwrap(), scalar(3.0f64).unwrap()).unwrap();
+        let q = Normal::new(scalar(0.5f64).unwrap(), scalar(1.0f64).unwrap()).unwrap();
+        let kl = kl_divergence(&p, &q).unwrap();
+        approx(
+            kl.item().unwrap(),
+            1.178_845_182_992_673,
+            1e-10,
+            "Beta-Normal",
+        );
+    }
+
+    // -- Beta-Uniform --------------------------------------------------------
+
+    #[test]
+    fn test_kl_beta_uniform_contained_known_value() {
+        // kl.py:571-577. torch: KL(Beta(2,3) || Uniform(-1, 2)) (U covers [0,1]).
+        let p = Beta::new(scalar(2.0f64).unwrap(), scalar(3.0f64).unwrap()).unwrap();
+        let q = Uniform::new(scalar(-1.0f64).unwrap(), scalar(2.0f64).unwrap()).unwrap();
+        let kl = kl_divergence(&p, &q).unwrap();
+        approx(
+            kl.item().unwrap(),
+            1.333_518_938_456_110_1,
+            1e-10,
+            "Beta-Unif",
+        );
+    }
+
+    #[test]
+    fn test_kl_beta_uniform_support_violation_is_inf() {
+        // U(0.2, 0.8) does NOT cover Beta support [0,1] → +inf.
+        let p = Beta::new(scalar(2.0f64).unwrap(), scalar(3.0f64).unwrap()).unwrap();
+        let q = Uniform::new(scalar(0.2f64).unwrap(), scalar(0.8f64).unwrap()).unwrap();
+        let kl = kl_divergence(&p, &q).unwrap();
+        assert!(kl.item().unwrap().is_infinite());
+    }
+
+    // -- Pareto-Exponential --------------------------------------------------
+
+    #[test]
+    fn test_kl_pareto_exponential_known_value() {
+        // kl.py:802-810. torch: KL(Pareto(1, 3) || Exp(0.5)).
+        let p = Pareto::new(scalar(1.0f64).unwrap(), scalar(3.0f64).unwrap()).unwrap();
+        let q = Exponential::new(scalar(0.5f64).unwrap()).unwrap();
+        let kl = kl_divergence(&p, &q).unwrap();
+        approx(
+            kl.item().unwrap(),
+            1.208_426_135_894_721_5,
+            1e-10,
+            "Pareto-Exp",
+        );
+    }
+
+    #[test]
+    fn test_kl_pareto_exponential_alpha_le_1_is_inf() {
+        let p = Pareto::new(scalar(1.0f64).unwrap(), scalar(0.5f64).unwrap()).unwrap();
+        let q = Exponential::new(scalar(0.5f64).unwrap()).unwrap();
+        assert!(kl_divergence(&p, &q).unwrap().item().unwrap().is_infinite());
+    }
+
+    // -- Pareto-Gamma --------------------------------------------------------
+
+    #[test]
+    fn test_kl_pareto_gamma_known_value() {
+        // kl.py:813-825. torch: KL(Pareto(1, 3) || Gamma(2.0, 0.5)).
+        let p = Pareto::new(scalar(1.0f64).unwrap(), scalar(3.0f64).unwrap()).unwrap();
+        let q = Gamma::new(scalar(2.0f64).unwrap(), scalar(0.5f64).unwrap()).unwrap();
+        let kl = kl_divergence(&p, &q).unwrap();
+        approx(
+            kl.item().unwrap(),
+            1.568_239_983_121_333_8,
+            1e-10,
+            "Pareto-Gamma",
+        );
+    }
+
+    // -- Pareto-Normal -------------------------------------------------------
+
+    #[test]
+    fn test_kl_pareto_normal_known_value() {
+        // kl.py:828-838. torch: KL(Pareto(1, 3) || Normal(2.0, 1.0)).
+        let p = Pareto::new(scalar(1.0f64).unwrap(), scalar(3.0f64).unwrap()).unwrap();
+        let q = Normal::new(scalar(2.0f64).unwrap(), scalar(1.0f64).unwrap()).unwrap();
+        let kl = kl_divergence(&p, &q).unwrap();
+        approx(
+            kl.item().unwrap(),
+            1.184_217_488_539_449_2,
+            1e-10,
+            "Pareto-Normal",
+        );
+    }
+
+    #[test]
+    fn test_kl_pareto_normal_alpha_le_2_is_inf() {
+        let p = Pareto::new(scalar(1.0f64).unwrap(), scalar(1.5f64).unwrap()).unwrap();
+        let q = Normal::new(scalar(2.0f64).unwrap(), scalar(1.0f64).unwrap()).unwrap();
+        assert!(kl_divergence(&p, &q).unwrap().item().unwrap().is_infinite());
+    }
+
+    // -- Uniform-Exponential -------------------------------------------------
+
+    #[test]
+    fn test_kl_uniform_exponential_known_value() {
+        // kl.py:889-893. torch: KL(Uniform(0.5, 2.0) || Exp(1.0)).
+        let p = Uniform::new(scalar(0.5f64).unwrap(), scalar(2.0f64).unwrap()).unwrap();
+        let q = Exponential::new(scalar(1.0f64).unwrap()).unwrap();
+        let kl = kl_divergence(&p, &q).unwrap();
+        approx(
+            kl.item().unwrap(),
+            0.844_534_891_891_835_6,
+            1e-10,
+            "Unif-Exp",
+        );
+    }
+
+    #[test]
+    fn test_kl_uniform_exponential_neg_low_is_inf() {
+        let p = Uniform::new(scalar(-0.5f64).unwrap(), scalar(2.0f64).unwrap()).unwrap();
+        let q = Exponential::new(scalar(1.0f64).unwrap()).unwrap();
+        assert!(kl_divergence(&p, &q).unwrap().item().unwrap().is_infinite());
+    }
+
+    // -- Uniform-Gamma -------------------------------------------------------
+
+    #[test]
+    fn test_kl_uniform_gamma_known_value() {
+        // kl.py:896-909. torch: KL(Uniform(0.5, 2.0) || Gamma(2.0, 1.0)).
+        let p = Uniform::new(scalar(0.5f64).unwrap(), scalar(2.0f64).unwrap()).unwrap();
+        let q = Gamma::new(scalar(2.0f64).unwrap(), scalar(1.0f64).unwrap()).unwrap();
+        let kl = kl_divergence(&p, &q).unwrap();
+        approx(
+            kl.item().unwrap(),
+            0.689_289_590_958_593_4,
+            1e-10,
+            "Unif-Gamma",
+        );
+    }
+
+    // -- Uniform-Pareto ------------------------------------------------------
+
+    #[test]
+    fn test_kl_uniform_pareto_known_value() {
+        // kl.py:934-941. torch: KL(Uniform(2.0, 4.0) || Pareto(1, 3)).
+        let p = Uniform::new(scalar(2.0f64).unwrap(), scalar(4.0f64).unwrap()).unwrap();
+        let q = Pareto::new(scalar(1.0f64).unwrap(), scalar(3.0f64).unwrap()).unwrap();
+        let kl = kl_divergence(&p, &q).unwrap();
+        approx(
+            kl.item().unwrap(),
+            2.526_006_697_491_288,
+            1e-10,
+            "Unif-Pareto",
+        );
+    }
+
+    #[test]
+    fn test_kl_uniform_pareto_low_below_scale_is_inf() {
+        let p = Uniform::new(scalar(0.5f64).unwrap(), scalar(4.0f64).unwrap()).unwrap();
+        let q = Pareto::new(scalar(1.0f64).unwrap(), scalar(3.0f64).unwrap()).unwrap();
+        assert!(kl_divergence(&p, &q).unwrap().item().unwrap().is_infinite());
+    }
+
+    // -- Uniform-Beta --------------------------------------------------------
+
+    #[test]
+    fn test_kl_uniform_beta_known_value() {
+        // kl.py:847-869. torch: KL(Uniform(0.2, 0.8) || Beta(2,3)).
+        let p = Uniform::new(scalar(0.2f64).unwrap(), scalar(0.8f64).unwrap()).unwrap();
+        let q = Beta::new(scalar(2.0f64).unwrap(), scalar(3.0f64).unwrap()).unwrap();
+        let kl = kl_divergence(&p, &q).unwrap();
+        approx(
+            kl.item().unwrap(),
+            0.309_055_266_800_728_8,
+            1e-10,
+            "Unif-Beta",
+        );
+    }
+
+    #[test]
+    fn test_kl_uniform_beta_support_violation_is_inf() {
+        // Uniform support escapes [0,1] → +inf.
+        let p = Uniform::new(scalar(-0.2f64).unwrap(), scalar(0.8f64).unwrap()).unwrap();
+        let q = Beta::new(scalar(2.0f64).unwrap(), scalar(3.0f64).unwrap()).unwrap();
+        assert!(kl_divergence(&p, &q).unwrap().item().unwrap().is_infinite());
     }
 
     // -- Drift prevention: doc table vs dispatcher ---------------------------

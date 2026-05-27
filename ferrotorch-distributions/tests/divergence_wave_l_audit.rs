@@ -234,10 +234,13 @@ fn audit_1374_gumbel_normal_nonnegative_and_known() {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn audit_1375_supported_pair_count_is_25() {
+fn audit_1375_supported_pair_count() {
     // The explicit Any::downcast_ref match (the Rust-idiomatic register_kl
-    // analog, #1375) now exposes 25 pairs after the wave-L additions.
-    assert_eq!(kl_supported_pair_count(), 25);
+    // analog, #1375) exposes 37 pairs after the wave-M KL additions (#1374);
+    // the precise count is also drift-checked by
+    // `kl::tests::kl_doc_table_matches_dispatcher` and
+    // `divergence_wave_m_audit::audit_1374_supported_pair_count_is_37`.
+    assert_eq!(kl_supported_pair_count(), 37);
 }
 
 // ---------------------------------------------------------------------------

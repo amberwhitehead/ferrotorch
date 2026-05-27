@@ -53,6 +53,24 @@ scalars to operate on `Vec<T>` iterators rather than spinning up
   The scalar forms exist for per-element host-side compute inside
   distribution formulas.
 
+- REQ-5 (#1379): `pub(crate) fn trigamma_scalar<T: Float>(x: T) -> T`
+  computes `ψ'(x)` via the recurrence `ψ'(x) = ψ'(x+1) + 1/x²`
+  (shift `x ≥ 6`) + the Abramowitz–Stegun 6.4.12 asymptotic series
+  `1/y + 1/(2y²) + 1/(6y³) - 1/(30y⁵) + 1/(42y⁷) - 1/(30y⁹)`, with
+  reflection `ψ'(x) = π²/sin²(πx) - ψ'(1-x)` for `x < 0`. The general
+  entry point `pub(crate) fn polygamma_scalar<T: Float>(n: u32, x: T)
+  -> T` covers `n = 0` (digamma), `n = 1` (trigamma), and `n ≥ 2`
+  (`(-1)^(n+1)·n!·ζ(n+1, x)` via a Hurwitz-zeta recurrence shift to
+  `x ≥ 10` + a 3-Bernoulli Euler–Maclaurin tail). `polygamma_scalar`
+  is the production consumer of both `digamma_scalar` (which now
+  delegates to `polygamma_scalar(0, x)`) and `trigamma_scalar`
+  (invoked from the `n == 1` arm). Mirrors `scipy.special.polygamma`
+  / `torch.special.polygamma`. Accuracy: trigamma ~1e-9 rel f64,
+  polygamma(n≥2) ~1e-7 rel f64. `multigammaln(a, p)` is deliberately
+  NOT shipped (its only consumer would be a Wishart family that does
+  not exist yet — shipping it would be vocabulary-without-consumer,
+  R-DEFER-1); it is the open "exotic tail" of #1379.
+
 ## Acceptance Criteria
 
 - [x] AC-1: `pub(crate) fn lgamma_scalar<T: Float>(x: T) -> T` with
@@ -243,3 +261,4 @@ Expected: `4 passed`.
 | REQ-2 | SHIPPED | impl: `pub(crate) fn digamma_scalar<T: Float>(x: T) -> T` with recurrence + Abramowitz-Stegun asymptotic + reflection branch in `special_fns.rs`, matching scipy reference values to 1e-9 f64; non-test consumer: `kl_gamma_scalar` in `kl.rs` calls `digamma_scalar(pa)`; `fn Beta::entropy in beta.rs` calls `digamma_scalar` on each concentration; `fn Dirichlet::entropy in dirichlet.rs` similarly. 5 production callers. |
 | REQ-3 | SHIPPED | impl: both functions are `<T: Float>` generic with f64 constants promoted via `T::from(<f64>).unwrap()` in `special_fns.rs` — the `LANCZOS_COEFFICIENTS: [f64; 9]` const is f64 to preserve precision; non-test consumer: `lgamma_f32_round_trip` test exercises the f32-promotion path with 15 reference cases; in production `fn Beta::log_prob` operates on `T = f32` AND `T = f64` (both tested by `_f64` variants) routing through the same generic body. |
 | REQ-4 | SHIPPED | impl: `pub(crate) fn lgamma_scalar`, `pub(crate) fn digamma_scalar`, and `pub(crate) mod special_fns;` in `lib.rs:77` together make the module crate-internal; non-test consumer: 9 production sites within `ferrotorch-distributions/src/` (`gamma.rs`, `beta.rs`, `dirichlet.rs`, `kumaraswamy.rs`, `multinomial.rs`, `poisson.rs`, `student_t.rs`, `weibull.rs`, `kl.rs`); `cargo doc -p ferrotorch-distributions` omits these from public docs by virtue of `pub(crate)`. |
+| REQ-5 | SHIPPED (#1379) | impl: `pub(crate) fn trigamma_scalar<T: Float>` (recurrence + A&S 6.4.12 asymptotic + reflection) and `pub(crate) fn polygamma_scalar<T: Float>(n: u32, x: T)` (n=0 digamma kernel, n=1 trigamma, n≥2 Hurwitz-zeta) in `special_fns.rs`, matching `scipy.special.polygamma` to 1e-9 (trigamma) / 1e-7 (n≥2) f64; non-test consumer: `polygamma_scalar` calls `trigamma_scalar` from its `n == 1` arm (production caller of trigamma), and `digamma_scalar` now delegates to `polygamma_scalar(0, x)` — so the 5 existing digamma callers (`kl_gamma_scalar` in `kl.rs`, `kl_dirichlet_dirichlet` in `kl.rs`, `Beta::entropy` in `beta.rs`, `Dirichlet::entropy` in `dirichlet.rs`, `StudentT::entropy` in `student_t.rs`) transitively consume `polygamma_scalar`. Pinned by `trigamma_matches_scipy_reference`, `trigamma_negative_reflection_matches_scipy`, `trigamma_finite_difference_of_digamma`, `polygamma_general_matches_scipy_reference`, `polygamma_order0_is_digamma_order1_is_trigamma`. `multigammaln` left open (no Wishart consumer yet — R-DEFER-1). |
