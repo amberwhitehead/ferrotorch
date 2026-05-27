@@ -36,7 +36,8 @@ use ferrotorch_vision::models::detection::roi_heads_postprocess::postprocess_mas
 fn divergence_mask_paste_byte_level_vs_torchvision() {
     let m = 4usize;
     // [1, 2, 4, 4]: channel 0 = -3 everywhere, channel 1 = gradient (r*M+c)/16*6-3.
-    let mut logits = vec![-3.0_f32; 1 * 2 * m * m];
+    // N=1, C=2 -> flat len = 2 * m * m.
+    let mut logits = vec![-3.0_f32; 2 * m * m];
     let plane = m * m;
     for r in 0..m {
         for c in 0..m {

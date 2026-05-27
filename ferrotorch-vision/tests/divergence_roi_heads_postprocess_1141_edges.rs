@@ -257,13 +257,15 @@ fn divergence_case8_mask_selects_label_channel_no_offset() {
     // [N=2, C=3, 4, 4]. det0: ch1=+10; det1: ch2=+10; all other channels -10.
     let mut logits = vec![-10.0_f32; 2 * 3 * 4 * 4];
     let plane = 4 * 4;
+    // [det][channel] flat base = (det * C + channel) * plane, with C = 3.
+    let base = |det: usize, channel: usize| (det * 3 + channel) * plane;
     // det 0, channel 1 -> +10
     for i in 0..plane {
-        logits[0 * 3 * plane + 1 * plane + i] = 10.0;
+        logits[base(0, 1) + i] = 10.0;
     }
     // det 1, channel 2 -> +10
     for i in 0..plane {
-        logits[1 * 3 * plane + 2 * plane + i] = 10.0;
+        logits[base(1, 2) + i] = 10.0;
     }
     let mask_logits = from_slice::<f32>(&logits, &[2, 3, 4, 4]).unwrap();
     let labels = vec![1usize, 2usize];
