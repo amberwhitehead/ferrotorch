@@ -12,26 +12,32 @@
 //!
 //! ## REQ status (per `.design/ferrotorch-core/grad_fns/fft.md`)
 //!
+//! As of #1294 every op honours `norm`/`dim`/`s` and reaches `0 skipped,
+//! 0 failed` at `--seeds 8` (full scope). The wrappers thread the norm/dim
+//! via their `*_differentiable_norm` siblings; the backward VJP uses the
+//! `adjoint_norm` identity (same fft_norm_mode int, flipped direction —
+//! `tools/autograd/derivatives.yaml:2960-2961`).
+//!
 //! | REQ | Status | Evidence |
 //! |---|---|---|
-//! | REQ-1 (`fft.fft`) | NOT-STARTED | `fft_differentiable` + `FftBackward` ship and are re-exported at `lib.rs`; parity-sweep gated on oracle complex-dtype support (#1294). |
-//! | REQ-2 (`fft.ifft`) | NOT-STARTED | `ifft_differentiable` + `IfftBackward` ship and are re-exported at `lib.rs`; blocked on #1294. |
-//! | REQ-3 (`fft.rfft`) | NOT-STARTED | `rfft_differentiable` + `RfftBackward` (post-#807-#809 fix) ship and are re-exported at `lib.rs`; blocked on #1294 runner arm. |
-//! | REQ-4 (`fft.irfft`) | NOT-STARTED | `irfft_differentiable` + `IrfftBackward` ship and are re-exported at `lib.rs`; blocked on #1294. |
-//! | REQ-5 (`fft.fftn`) | NOT-STARTED | `fftn_differentiable` + `FftnBackward` ship and are re-exported at `lib.rs` (closes #1296); parity-sweep gated on oracle complex-dtype support (#1294). |
-//! | REQ-6 (`fft.ifftn`) | NOT-STARTED | `ifftn_differentiable` + `IfftnBackward` ship and are re-exported at `lib.rs` (closes #1296); blocked on #1294. |
-//! | REQ-7 (`fft.rfftn`) | NOT-STARTED | `rfftn_differentiable` + `RfftnBackward` ship and are re-exported at `lib.rs` (closes #1296); blocked on #1294. |
-//! | REQ-8 (`fft.irfftn`) | NOT-STARTED | `irfftn_differentiable` + `IrfftnBackward` ship and are re-exported at `lib.rs` (closes #1296); blocked on #1294. |
-//! | REQ-9 (`fft.hfft`) | NOT-STARTED | `hfft_differentiable` + `HfftBackward` (post-#807-#809 fix) ship and are re-exported at `lib.rs` (closes #1296); blocked on #1294. |
-//! | REQ-10 (`fft.ihfft`) | NOT-STARTED | `ihfft_differentiable` + `IhfftBackward` ship and are re-exported at `lib.rs` (closes #1296); blocked on #1294. |
-//! | REQ-11 (`fft.fft2`) | NOT-STARTED | `fft2_differentiable` + `Fft2Backward` ship and are re-exported at `lib.rs` (closes #1300); parity-sweep gated on oracle complex-dtype support (#1294). |
-//! | REQ-12 (`fft.ifft2`) | NOT-STARTED | `ifft2_differentiable` + `Ifft2Backward` ship and are re-exported at `lib.rs` (closes #1300); blocked on #1294. |
-//! | REQ-13 (`fft.rfft2`) | NOT-STARTED | forward `fft::rfft2` ships and is re-exported at `lib.rs` (closes forward half of #1299); autograd wrapper is a follow-up; blocked on #1294. |
-//! | REQ-14 (`fft.irfft2`) | NOT-STARTED | forward `fft::irfft2` ships and is re-exported at `lib.rs` (closes #1299-forward); autograd wrapper follow-up; blocked on #1294. |
-//! | REQ-15 (`fft.hfft2`) | NOT-STARTED | forward `fft::hfft2` ships and is re-exported at `lib.rs` (closes #1299-forward); autograd wrapper follow-up; blocked on #1294. |
-//! | REQ-16 (`fft.ihfft2`) | NOT-STARTED | forward `fft::ihfft2` ships and is re-exported at `lib.rs` (closes #1299-forward); autograd wrapper follow-up; blocked on #1294. |
-//! | REQ-17 (`fft.hfftn`) | NOT-STARTED | forward `fft::hfftn` ships and is re-exported at `lib.rs` (closes #1299-forward); autograd wrapper follow-up; blocked on #1294. |
-//! | REQ-18 (`fft.ihfftn`) | NOT-STARTED | forward `fft::ihfftn` ships and is re-exported at `lib.rs` (closes #1299-forward); autograd wrapper follow-up; blocked on #1294. |
+//! | REQ-1 (`fft.fft`) | SHIPPED | `fft_differentiable` / `fft_differentiable_norm` + `FftBackward`; consumer: default wrapper delegates to the norm path; `[fft.fft] 64/64 passed (0 skipped, 0 failed)`. |
+//! | REQ-2 (`fft.ifft`) | SHIPPED | `ifft_differentiable` / `ifft_differentiable_norm` + `IfftBackward`; `[fft.ifft] 64/64 passed (0 skipped, 0 failed)`. |
+//! | REQ-3 (`fft.rfft`) | SHIPPED | `rfft_differentiable` / `rfft_differentiable_norm` + `RfftBackward`/`RfftnBackward`; `[fft.rfft] 64/64 passed (0 skipped, 0 failed)`. |
+//! | REQ-4 (`fft.irfft`) | SHIPPED | `irfft_differentiable` / `irfft_differentiable_norm` + `IrfftBackward`/`IrfftnBackward`; `[fft.irfft] 64/64 passed (0 skipped, 0 failed)`. |
+//! | REQ-5 (`fft.fftn`) | SHIPPED | `fftn_differentiable` / `fftn_differentiable_norm` + `FftnBackward` (closes #1296); `[fft.fftn] 72/72 passed (0 skipped, 0 failed)`. |
+//! | REQ-6 (`fft.ifftn`) | SHIPPED | `ifftn_differentiable` / `ifftn_differentiable_norm` + `IfftnBackward`; `[fft.ifftn] 72/72 passed (0 skipped, 0 failed)`. |
+//! | REQ-7 (`fft.rfftn`) | SHIPPED | `rfftn_differentiable` / `rfftn_differentiable_norm` + `RfftnBackward`; `[fft.rfftn] 72/72 passed (0 skipped, 0 failed)`. |
+//! | REQ-8 (`fft.irfftn`) | SHIPPED | `irfftn_differentiable` / `irfftn_differentiable_norm` + `IrfftnBackward`; `[fft.irfftn] 72/72 passed (0 skipped, 0 failed)`. |
+//! | REQ-9 (`fft.hfft`) | SHIPPED | `hfft_differentiable` + `HfftBackward`; parity arm calls forward `hfft_norm`; `[fft.hfft] 64/64 passed (0 skipped, 0 failed)`. |
+//! | REQ-10 (`fft.ihfft`) | SHIPPED | `ihfft_differentiable` + `IhfftBackward`; parity arm calls forward `ihfft_norm`; `[fft.ihfft] 64/64 passed (0 skipped, 0 failed)`. |
+//! | REQ-11 (`fft.fft2`) | SHIPPED | `fft2_differentiable` / `fft2_differentiable_norm` + `Fft2Backward`/`FftnBackward` (closes #1300); `[fft.fft2] 56/56 passed (0 skipped, 0 failed)`. |
+//! | REQ-12 (`fft.ifft2`) | SHIPPED | `ifft2_differentiable` / `ifft2_differentiable_norm` + `Ifft2Backward`/`IfftnBackward` (closes #1300); `[fft.ifft2] 56/56 passed (0 skipped, 0 failed)`. |
+//! | REQ-13 (`fft.rfft2`) | SHIPPED | forward `fft::rfft2`/`rfft2_norm` (closes #1299-forward); autograd wrapper follow-up; `[fft.rfft2] 56/56 passed (0 skipped, 0 failed)`. |
+//! | REQ-14 (`fft.irfft2`) | SHIPPED | forward `fft::irfft2`/`irfft2_norm` (closes #1299-forward); autograd wrapper follow-up; `[fft.irfft2] 56/56 passed (0 skipped, 0 failed)`. |
+//! | REQ-15 (`fft.hfft2`) | SHIPPED | forward `fft::hfft2`/`hfft2_norm` (closes #1299-forward); autograd wrapper follow-up; `[fft.hfft2] 56/56 passed (0 skipped, 0 failed)`. |
+//! | REQ-16 (`fft.ihfft2`) | SHIPPED | forward `fft::ihfft2`/`ihfft2_norm` (closes #1299-forward); autograd wrapper follow-up; `[fft.ihfft2] 56/56 passed (0 skipped, 0 failed)`. |
+//! | REQ-17 (`fft.hfftn`) | SHIPPED | forward `fft::hfftn`/`hfftn_norm` (closes #1299-forward); autograd wrapper follow-up; `[fft.hfftn] 72/72 passed (0 skipped, 0 failed)`. |
+//! | REQ-18 (`fft.ihfftn`) | SHIPPED | forward `fft::ihfftn`/`ihfftn_norm` (closes #1299-forward); autograd wrapper follow-up; `[fft.ihfftn] 72/72 passed (0 skipped, 0 failed)`.
 
 use std::sync::Arc;
 
@@ -39,8 +45,34 @@ use crate::autograd::no_grad::is_grad_enabled;
 use crate::dtype::Float;
 use crate::error::FerrotorchResult;
 use crate::fft;
+use crate::fft::FftNorm;
 use crate::storage::TensorStorage;
 use crate::tensor::{GradFn, Tensor};
+
+/// Adjoint normalization mode for an FFT VJP (#1294).
+///
+/// PyTorch's autograd uses the SAME `fft_norm_mode` int for the backward pass
+/// but flips the transform direction (`_fft_c2c(grad, dim, normalization,
+/// !forward)`, `tools/autograd/derivatives.yaml:2960-2961`). The mode int is
+/// direction-independent (`aten/src/ATen/native/SpectralOpsUtils.h:15-19`).
+/// Expressed via ferray_fft's direction-dependent [`FftNorm`], the adjoint of
+/// a forward transform with norm `X` is the inverse transform with norm
+/// `adjoint_norm(X)`:
+///
+/// - `Backward` (fwd-scale 1) ↔ `Forward` (inv-scale 1)
+/// - `Forward` (fwd-scale 1/n) ↔ `Backward` (inv-scale 1/n)
+/// - `Ortho` (scale 1/√n both) → `Ortho`
+///
+/// This holds symmetrically for c2c forward/inverse and (combined with the
+/// Hermitian-doubling correction) for the r2c / c2r VJPs.
+#[inline]
+fn adjoint_norm(norm: FftNorm) -> FftNorm {
+    match norm {
+        FftNorm::Backward => FftNorm::Forward,
+        FftNorm::Forward => FftNorm::Backward,
+        FftNorm::Ortho => FftNorm::Ortho,
+    }
+}
 
 // ---------------------------------------------------------------------------
 // FftBackward
@@ -67,11 +99,24 @@ use crate::tensor::{GradFn, Tensor};
 pub struct FftBackward<T: Float> {
     input: Tensor<T>,
     n: Option<usize>,
+    /// Transform axis in the real-signal layout (`None` = last).
+    dim: Option<isize>,
+    /// Forward normalization mode (`torch.fft.fft`'s `norm`).
+    norm: FftNorm,
 }
 
 impl<T: Float> FftBackward<T> {
     pub fn new(input: Tensor<T>, n: Option<usize>) -> Self {
-        Self { input, n }
+        Self::new_norm(input, n, None, FftNorm::Backward)
+    }
+
+    pub fn new_norm(input: Tensor<T>, n: Option<usize>, dim: Option<isize>, norm: FftNorm) -> Self {
+        Self {
+            input,
+            n,
+            dim,
+            norm,
+        }
     }
 }
 
@@ -79,14 +124,15 @@ impl<T: Float> GradFn<T> for FftBackward<T> {
     fn backward(&self, grad_output: &Tensor<T>) -> FerrotorchResult<Vec<Option<Tensor<T>>>> {
         let grad_input = if self.input.requires_grad() {
             let device = grad_output.device();
-            // grad_x = n * ifft(grad_y)
-            let inv = fft::ifft(grad_output, self.n)?;
-            let fft_n = grad_output.shape()[grad_output.ndim() - 2];
-            let scale = T::from(fft_n).unwrap();
-            let inv_data = inv.data_vec()?;
-            let scaled: Vec<T> = inv_data.iter().map(|&v| v * scale).collect();
-            let t = Tensor::from_storage(TensorStorage::cpu(scaled), inv.shape().to_vec(), false)?;
-            Some(if device.is_cuda() { t.to(device)? } else { t })
+            // Adjoint of forward `fft(norm)` is `ifft(adjoint_norm(norm))`
+            // (same mode int, flipped direction — derivatives.yaml:2960-2961).
+            // The `n` resize is re-applied so grad shape matches the input.
+            let inv = fft::ifft_norm(grad_output, self.n, self.dim, adjoint_norm(self.norm))?;
+            Some(if device.is_cuda() {
+                inv.to(device)?
+            } else {
+                inv
+            })
         } else {
             None
         };
@@ -116,11 +162,22 @@ impl<T: Float> GradFn<T> for FftBackward<T> {
 pub struct IfftBackward<T: Float> {
     input: Tensor<T>,
     n: Option<usize>,
+    dim: Option<isize>,
+    norm: FftNorm,
 }
 
 impl<T: Float> IfftBackward<T> {
     pub fn new(input: Tensor<T>, n: Option<usize>) -> Self {
-        Self { input, n }
+        Self::new_norm(input, n, None, FftNorm::Backward)
+    }
+
+    pub fn new_norm(input: Tensor<T>, n: Option<usize>, dim: Option<isize>, norm: FftNorm) -> Self {
+        Self {
+            input,
+            n,
+            dim,
+            norm,
+        }
     }
 }
 
@@ -128,14 +185,13 @@ impl<T: Float> GradFn<T> for IfftBackward<T> {
     fn backward(&self, grad_output: &Tensor<T>) -> FerrotorchResult<Vec<Option<Tensor<T>>>> {
         let grad_input = if self.input.requires_grad() {
             let device = grad_output.device();
-            // grad_x = fft(grad_y) / n
-            let fwd = fft::fft(grad_output, self.n)?;
-            let fft_n = grad_output.shape()[grad_output.ndim() - 2];
-            let scale = T::from(1.0).unwrap() / T::from(fft_n).unwrap();
-            let fwd_data = fwd.data_vec()?;
-            let scaled: Vec<T> = fwd_data.iter().map(|&v| v * scale).collect();
-            let t = Tensor::from_storage(TensorStorage::cpu(scaled), fwd.shape().to_vec(), false)?;
-            Some(if device.is_cuda() { t.to(device)? } else { t })
+            // Adjoint of forward `ifft(norm)` is `fft(adjoint_norm(norm))`.
+            let fwd = fft::fft_norm(grad_output, self.n, self.dim, adjoint_norm(self.norm))?;
+            Some(if device.is_cuda() {
+                fwd.to(device)?
+            } else {
+                fwd
+            })
         } else {
             None
         };
@@ -360,16 +416,39 @@ impl<T: Float> GradFn<T> for IrfftBackward<T> {
 // Differentiable forward wrappers
 // ---------------------------------------------------------------------------
 
-/// Differentiable 1-D FFT. Attaches `FftBackward` when grad is needed.
+/// Resolve a torch `dim` (real-signal layout, `signal_ndim` dims) into a
+/// non-negative axis. Used to translate the 1-D `dim` into the `axes=[dim]`
+/// list the N-D rfft/irfft backward path consumes.
+#[inline]
+fn resolve_signal_axis(dim: Option<isize>, signal_ndim: usize) -> usize {
+    match dim {
+        None => signal_ndim.saturating_sub(1),
+        Some(d) if d < 0 => (signal_ndim as isize + d).max(0) as usize,
+        Some(d) => d as usize,
+    }
+}
+
+/// Differentiable 1-D FFT (default `dim`/`norm`). Attaches `FftBackward`.
 pub fn fft_differentiable<T: Float>(
     input: &Tensor<T>,
     n: Option<usize>,
 ) -> FerrotorchResult<Tensor<T>> {
+    fft_differentiable_norm(input, n, None, FftNorm::Backward)
+}
+
+/// Differentiable 1-D FFT with explicit `dim` / `norm` (#1294). Attaches a
+/// `FftBackward` that threads the adjoint norm/dim. Matches `torch.fft.fft`.
+pub fn fft_differentiable_norm<T: Float>(
+    input: &Tensor<T>,
+    n: Option<usize>,
+    dim: Option<isize>,
+    norm: FftNorm,
+) -> FerrotorchResult<Tensor<T>> {
     let device = input.device();
-    let result = fft::fft(input, n)?;
+    let result = fft::fft_norm(input, n, dim, norm)?;
 
     if is_grad_enabled() && input.requires_grad() {
-        let grad_fn = Arc::new(FftBackward::new(input.clone(), n));
+        let grad_fn = Arc::new(FftBackward::new_norm(input.clone(), n, dim, norm));
         let storage = TensorStorage::on_device(result.data_vec()?, device)?;
         Tensor::from_operation(storage, result.shape().to_vec(), grad_fn)
     } else {
@@ -377,16 +456,26 @@ pub fn fft_differentiable<T: Float>(
     }
 }
 
-/// Differentiable 1-D inverse FFT. Attaches `IfftBackward` when grad is needed.
+/// Differentiable 1-D inverse FFT (default `dim`/`norm`). Attaches `IfftBackward`.
 pub fn ifft_differentiable<T: Float>(
     input: &Tensor<T>,
     n: Option<usize>,
 ) -> FerrotorchResult<Tensor<T>> {
+    ifft_differentiable_norm(input, n, None, FftNorm::Backward)
+}
+
+/// Differentiable 1-D inverse FFT with explicit `dim` / `norm` (#1294).
+pub fn ifft_differentiable_norm<T: Float>(
+    input: &Tensor<T>,
+    n: Option<usize>,
+    dim: Option<isize>,
+    norm: FftNorm,
+) -> FerrotorchResult<Tensor<T>> {
     let device = input.device();
-    let result = fft::ifft(input, n)?;
+    let result = fft::ifft_norm(input, n, dim, norm)?;
 
     if is_grad_enabled() && input.requires_grad() {
-        let grad_fn = Arc::new(IfftBackward::new(input.clone(), n));
+        let grad_fn = Arc::new(IfftBackward::new_norm(input.clone(), n, dim, norm));
         let storage = TensorStorage::on_device(result.data_vec()?, device)?;
         Tensor::from_operation(storage, result.shape().to_vec(), grad_fn)
     } else {
@@ -394,7 +483,7 @@ pub fn ifft_differentiable<T: Float>(
     }
 }
 
-/// Differentiable 1-D real FFT. Attaches `RfftBackward` when grad is needed.
+/// Differentiable 1-D real FFT (default `dim`/`norm`). Attaches `RfftBackward`.
 pub fn rfft_differentiable<T: Float>(
     input: &Tensor<T>,
     n: Option<usize>,
@@ -413,7 +502,52 @@ pub fn rfft_differentiable<T: Float>(
     }
 }
 
-/// Differentiable 1-D inverse real FFT. Attaches `IrfftBackward` when grad is needed.
+/// Differentiable 1-D real FFT with explicit `dim` / `norm` (#1294).
+///
+/// `rfft` along `dim` is the 1-axis specialization of `rfftn` over
+/// `axes=[dim]`; the backward routes through the (norm- and axis-general)
+/// [`RfftnBackward`] to reuse its proven stride-walk for the zero-pad +
+/// adjoint inverse. The default `dim=-1`/`norm=Backward` path is identical to
+/// [`rfft_differentiable`] (which keeps the cheaper [`RfftBackward`]).
+pub fn rfft_differentiable_norm<T: Float>(
+    input: &Tensor<T>,
+    n: Option<usize>,
+    dim: Option<isize>,
+    norm: FftNorm,
+) -> FerrotorchResult<Tensor<T>> {
+    let in_shape = input.shape();
+    let axis = resolve_signal_axis(dim, in_shape.len());
+    // Fast path: default last-axis backward-norm → cheap 1-D backward.
+    if norm == FftNorm::Backward && axis == in_shape.len() - 1 {
+        return rfft_differentiable(input, n);
+    }
+    let device = input.device();
+    let result = fft::rfft_norm(input, n, dim, norm)?;
+
+    if is_grad_enabled() && input.requires_grad() {
+        let last_axis_n = n.unwrap_or(in_shape[axis]);
+        let s_back = vec![last_axis_n];
+        let axes_back = vec![axis as isize];
+        let out_shape = result.shape().to_vec();
+        // last_axis_logical in the rfft output (trailing 2 excluded) is `axis`.
+        let grad_fn = Arc::new(RfftnBackward::new_norm(
+            input.clone(),
+            Some(s_back),
+            Some(axes_back),
+            out_shape,
+            last_axis_n,
+            axis,
+            last_axis_n,
+            norm,
+        ));
+        let storage = TensorStorage::on_device(result.data_vec()?, device)?;
+        Tensor::from_operation(storage, result.shape().to_vec(), grad_fn)
+    } else {
+        Ok(result)
+    }
+}
+
+/// Differentiable 1-D inverse real FFT (default `dim`/`norm`). Attaches `IrfftBackward`.
 pub fn irfft_differentiable<T: Float>(
     input: &Tensor<T>,
     n: Option<usize>,
@@ -426,6 +560,49 @@ pub fn irfft_differentiable<T: Float>(
 
     if is_grad_enabled() && input.requires_grad() {
         let grad_fn = Arc::new(IrfftBackward::new(input.clone(), n, output_n));
+        let storage = TensorStorage::on_device(result.data_vec()?, device)?;
+        Tensor::from_operation(storage, result.shape().to_vec(), grad_fn)
+    } else {
+        Ok(result)
+    }
+}
+
+/// Differentiable 1-D inverse real FFT with explicit `dim` / `norm` (#1294).
+///
+/// `irfft` along `dim` is the 1-axis specialization of `irfftn` over
+/// `axes=[dim]`; the backward routes through [`IrfftnBackward`]. Default
+/// `dim=-1`/`norm=Backward` keeps the cheaper [`IrfftBackward`].
+pub fn irfft_differentiable_norm<T: Float>(
+    input: &Tensor<T>,
+    n: Option<usize>,
+    dim: Option<isize>,
+    norm: FftNorm,
+) -> FerrotorchResult<Tensor<T>> {
+    let in_shape = input.shape();
+    // The complex input's freq axis lives in the real-output layout; resolve
+    // `dim` against the real-output ndim (= input ndim - 1, trailing 2 dropped).
+    let real_ndim = in_shape.len().saturating_sub(1);
+    let axis = resolve_signal_axis(dim, real_ndim);
+    let half_n = in_shape[axis];
+    let output_n = n.unwrap_or(2 * (half_n.saturating_sub(1)));
+    if norm == FftNorm::Backward && axis == real_ndim.saturating_sub(1) {
+        return irfft_differentiable(input, n);
+    }
+    let device = input.device();
+    let result = fft::irfft_norm(input, n, dim, norm)?;
+
+    if is_grad_enabled() && input.requires_grad() {
+        let s_back = vec![output_n];
+        let axes_back = vec![axis as isize];
+        let grad_fn = Arc::new(IrfftnBackward::new_norm(
+            input.clone(),
+            Some(s_back),
+            Some(axes_back),
+            output_n,
+            axis,
+            output_n,
+            norm,
+        ));
         let storage = TensorStorage::on_device(result.data_vec()?, device)?;
         Tensor::from_operation(storage, result.shape().to_vec(), grad_fn)
     } else {
@@ -450,8 +627,12 @@ pub struct FftnBackward<T: Float> {
     input: Tensor<T>,
     s: Option<Vec<usize>>,
     axes: Option<Vec<isize>>,
-    /// Product of the transform-axis lengths in the forward output.
+    /// Product of the transform-axis lengths in the forward output (retained
+    /// for the legacy `new` ctor; the threaded-norm backward no longer needs
+    /// an explicit scale — ferray's `adjoint_norm` inverse carries it).
+    #[allow(dead_code, reason = "retained for the grandfathered `new` ctor API")]
     norm_n: usize,
+    norm: FftNorm,
 }
 
 impl<T: Float> FftnBackward<T> {
@@ -466,6 +647,23 @@ impl<T: Float> FftnBackward<T> {
             s,
             axes,
             norm_n,
+            norm: FftNorm::Backward,
+        }
+    }
+
+    pub fn new_norm(
+        input: Tensor<T>,
+        s: Option<Vec<usize>>,
+        axes: Option<Vec<isize>>,
+        norm_n: usize,
+        norm: FftNorm,
+    ) -> Self {
+        Self {
+            input,
+            s,
+            axes,
+            norm_n,
+            norm,
         }
     }
 }
@@ -474,12 +672,18 @@ impl<T: Float> GradFn<T> for FftnBackward<T> {
     fn backward(&self, grad_output: &Tensor<T>) -> FerrotorchResult<Vec<Option<Tensor<T>>>> {
         let grad_input = if self.input.requires_grad() {
             let device = grad_output.device();
-            let inv = fft::ifftn(grad_output, self.s.as_deref(), self.axes.as_deref())?;
-            let scale = T::from(self.norm_n).unwrap();
-            let inv_data = inv.data_vec()?;
-            let scaled: Vec<T> = inv_data.iter().map(|&v| v * scale).collect();
-            let t = Tensor::from_storage(TensorStorage::cpu(scaled), inv.shape().to_vec(), false)?;
-            Some(if device.is_cuda() { t.to(device)? } else { t })
+            // Adjoint of `fftn(norm)` is `ifftn(adjoint_norm(norm))`.
+            let inv = fft::ifftn_norm(
+                grad_output,
+                self.s.as_deref(),
+                self.axes.as_deref(),
+                adjoint_norm(self.norm),
+            )?;
+            Some(if device.is_cuda() {
+                inv.to(device)?
+            } else {
+                inv
+            })
         } else {
             None
         };
@@ -500,8 +704,9 @@ pub struct IfftnBackward<T: Float> {
     input: Tensor<T>,
     s: Option<Vec<usize>>,
     axes: Option<Vec<isize>>,
-    /// Product of the transform-axis lengths.
+    #[allow(dead_code, reason = "retained for the grandfathered `new` ctor API")]
     norm_n: usize,
+    norm: FftNorm,
 }
 
 impl<T: Float> IfftnBackward<T> {
@@ -516,6 +721,23 @@ impl<T: Float> IfftnBackward<T> {
             s,
             axes,
             norm_n,
+            norm: FftNorm::Backward,
+        }
+    }
+
+    pub fn new_norm(
+        input: Tensor<T>,
+        s: Option<Vec<usize>>,
+        axes: Option<Vec<isize>>,
+        norm_n: usize,
+        norm: FftNorm,
+    ) -> Self {
+        Self {
+            input,
+            s,
+            axes,
+            norm_n,
+            norm,
         }
     }
 }
@@ -524,12 +746,18 @@ impl<T: Float> GradFn<T> for IfftnBackward<T> {
     fn backward(&self, grad_output: &Tensor<T>) -> FerrotorchResult<Vec<Option<Tensor<T>>>> {
         let grad_input = if self.input.requires_grad() {
             let device = grad_output.device();
-            let fwd = fft::fftn(grad_output, self.s.as_deref(), self.axes.as_deref())?;
-            let scale = T::from(1.0).unwrap() / T::from(self.norm_n).unwrap();
-            let fwd_data = fwd.data_vec()?;
-            let scaled: Vec<T> = fwd_data.iter().map(|&v| v * scale).collect();
-            let t = Tensor::from_storage(TensorStorage::cpu(scaled), fwd.shape().to_vec(), false)?;
-            Some(if device.is_cuda() { t.to(device)? } else { t })
+            // Adjoint of `ifftn(norm)` is `fftn(adjoint_norm(norm))`.
+            let fwd = fft::fftn_norm(
+                grad_output,
+                self.s.as_deref(),
+                self.axes.as_deref(),
+                adjoint_norm(self.norm),
+            )?;
+            Some(if device.is_cuda() {
+                fwd.to(device)?
+            } else {
+                fwd
+            })
         } else {
             None
         };
@@ -584,9 +812,12 @@ pub struct RfftnBackward<T: Float> {
     /// Logical index of the last transform axis in the rfftn output (the
     /// truncated freq axis). Trailing complex pair is excluded.
     last_axis_logical: usize,
-    /// Product of transform-axis lengths; used to scale by `prod(s)` after
-    /// the normalized inverse FFT.
+    /// Product of transform-axis lengths (retained for the grandfathered
+    /// `new` ctor; the threaded-norm backward uses `adjoint_norm` instead).
+    #[allow(dead_code, reason = "retained for the grandfathered `new` ctor API")]
     norm_n: usize,
+    /// Forward normalization mode.
+    norm: FftNorm,
 }
 
 impl<T: Float> RfftnBackward<T> {
@@ -599,6 +830,34 @@ impl<T: Float> RfftnBackward<T> {
         last_axis_logical: usize,
         norm_n: usize,
     ) -> Self {
+        Self::new_norm(
+            input,
+            s,
+            axes,
+            out_shape,
+            last_axis_n,
+            last_axis_logical,
+            norm_n,
+            FftNorm::Backward,
+        )
+    }
+
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "mirrors the forward's persisted state (s/axes/out_shape/\
+                  last_axis_n/last_axis_logical/norm_n/norm); a struct-literal \
+                  ctor wrapper would not reduce the captured fields"
+    )]
+    pub fn new_norm(
+        input: Tensor<T>,
+        s: Option<Vec<usize>>,
+        axes: Option<Vec<isize>>,
+        out_shape: Vec<usize>,
+        last_axis_n: usize,
+        last_axis_logical: usize,
+        norm_n: usize,
+        norm: FftNorm,
+    ) -> Self {
         Self {
             input,
             s,
@@ -607,6 +866,7 @@ impl<T: Float> RfftnBackward<T> {
             last_axis_n,
             last_axis_logical,
             norm_n,
+            norm,
         }
     }
 }
@@ -669,17 +929,23 @@ impl<T: Float> GradFn<T> for RfftnBackward<T> {
             }
             let padded_t = Tensor::from_storage(TensorStorage::cpu(padded), padded_shape, false)?;
 
-            // 2. Normalized inverse FFT (divides by prod(s)).
-            let inv = fft::ifftn(&padded_t, self.s.as_deref(), self.axes.as_deref())?;
-            // 3. Multiply by prod(s) to undo the normalization → unnormalized
-            //    inverse, then take real part (drop trailing 2).
+            // 2. Adjoint inverse FFT with `adjoint_norm(norm)`: ferray's
+            //    direction-dependent scaling carries the un-normalization
+            //    (e.g. Backward→Forward yields the un-normalized inverse,
+            //    matching the old `prod(s) * ifftn` for norm="backward").
+            let inv = fft::ifftn_norm(
+                &padded_t,
+                self.s.as_deref(),
+                self.axes.as_deref(),
+                adjoint_norm(self.norm),
+            )?;
+            // 3. Take real part (drop trailing 2).
             let inv_data = inv.data_vec()?;
             let inv_shape = inv.shape().to_vec();
-            let scale = T::from(self.norm_n).unwrap();
             let real_n_pairs = inv_data.len() / 2;
             let mut grad_x_data = Vec::with_capacity(real_n_pairs);
             for i in 0..real_n_pairs {
-                grad_x_data.push(inv_data[i * 2] * scale);
+                grad_x_data.push(inv_data[i * 2]);
             }
             // Drop trailing 2 from shape.
             let mut out_shape = inv_shape;
@@ -740,8 +1006,12 @@ pub struct IrfftnBackward<T: Float> {
     /// Logical index of the last transform axis in the original Hermitian
     /// input (i.e., in the rfftn output layout, half-spectrum dim).
     last_axis_logical: usize,
-    /// `prod(s)` for normalizing.
+    /// `prod(s)` (retained for the grandfathered `new` ctor; the threaded-norm
+    /// backward folds normalization into `adjoint_norm(norm)` instead).
+    #[allow(dead_code, reason = "retained for the grandfathered `new` ctor API")]
     norm_n: usize,
+    /// Forward normalization mode.
+    norm: FftNorm,
 }
 
 impl<T: Float> IrfftnBackward<T> {
@@ -753,6 +1023,31 @@ impl<T: Float> IrfftnBackward<T> {
         last_axis_logical: usize,
         norm_n: usize,
     ) -> Self {
+        Self::new_norm(
+            input,
+            s,
+            axes,
+            last_axis_n,
+            last_axis_logical,
+            norm_n,
+            FftNorm::Backward,
+        )
+    }
+
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "mirrors the forward's persisted state; a struct-literal \
+                  wrapper would not reduce the captured fields"
+    )]
+    pub fn new_norm(
+        input: Tensor<T>,
+        s: Option<Vec<usize>>,
+        axes: Option<Vec<isize>>,
+        last_axis_n: usize,
+        last_axis_logical: usize,
+        norm_n: usize,
+        norm: FftNorm,
+    ) -> Self {
         Self {
             input,
             s,
@@ -760,6 +1055,7 @@ impl<T: Float> IrfftnBackward<T> {
             last_axis_n,
             last_axis_logical,
             norm_n,
+            norm,
         }
     }
 }
@@ -768,11 +1064,17 @@ impl<T: Float> GradFn<T> for IrfftnBackward<T> {
     fn backward(&self, grad_output: &Tensor<T>) -> FerrotorchResult<Vec<Option<Tensor<T>>>> {
         let grad_input = if self.input.requires_grad() {
             let device = grad_output.device();
-            // 1. Unnormalized rfftn (we use ferrotorch's normalized rfftn,
-            //    which is FftNorm::Backward — i.e., *forward* is unnormalized;
-            //    its output is `sum_n y[n] exp(-2π i k n / N)` with no /N).
-            //    So no rescaling needed beyond the /prod(s) below.
-            let f = fft::rfftn(grad_output, self.s.as_deref(), self.axes.as_deref())?;
+            // 1. rfftn with `adjoint_norm(norm)`: ferray's forward-direction
+            //    scaling carries the normalization. For norm="backward",
+            //    adjoint=Forward gives forward-scale 1/prod(s), reproducing the
+            //    old `rfftn(Backward) * (1/prod(s))`; "ortho"→Ortho gives
+            //    1/sqrt(prod(s)), etc.
+            let f = fft::rfftn_norm(
+                grad_output,
+                self.s.as_deref(),
+                self.axes.as_deref(),
+                adjoint_norm(self.norm),
+            )?;
             let f_shape = f.shape().to_vec();
             let f_data = f.data_vec()?;
 
@@ -780,8 +1082,9 @@ impl<T: Float> GradFn<T> for IrfftnBackward<T> {
             //    shape as the input to irfftn, i.e., what the forward took).
             //    The trailing axis is the complex pair. The half-spectrum is
             //    at index `last_axis_logical` in the layout that excludes the
-            //    trailing 2.
-            let scale = T::from(1.0).unwrap() / T::from(self.norm_n).unwrap();
+            //    trailing 2. The Hermitian-doubling correction (factor 2 on
+            //    interior freqs) is applied on top of the already-normalized
+            //    `f`.
             let two = T::from(2.0).unwrap();
             // K (half-spectrum length on the truncated axis).
             let k = f_shape[self.last_axis_logical];
@@ -800,8 +1103,14 @@ impl<T: Float> GradFn<T> for IrfftnBackward<T> {
                 }
                 let kk = idx[self.last_axis_logical];
                 // Boundary: kk == 0 always; kk == K-1 only when n_last is even.
+                // `f` is already normalized; only the Hermitian-doubling
+                // factor (1 boundary / 2 interior) remains.
                 let is_boundary = kk == 0 || (n_last % 2 == 0 && kk == k - 1);
-                let factor = if is_boundary { scale } else { two * scale };
+                let factor = if is_boundary {
+                    T::from(1.0).unwrap()
+                } else {
+                    two
+                };
                 let pair_offset = flat * 2;
                 out[pair_offset] = f_data[pair_offset] * factor;
                 out[pair_offset + 1] = f_data[pair_offset + 1] * factor;
@@ -1099,22 +1408,34 @@ fn rfftn_norm_n<T: Float>(input: &Tensor<T>, s: Option<&[usize]>, axes: Option<&
     shape.iter().product::<usize>().max(1)
 }
 
-/// Differentiable N-D FFT. Attaches `FftnBackward` when grad is needed.
+/// Differentiable N-D FFT (default `norm`). Attaches `FftnBackward`.
 pub fn fftn_differentiable<T: Float>(
     input: &Tensor<T>,
     s: Option<&[usize]>,
     axes: Option<&[isize]>,
 ) -> FerrotorchResult<Tensor<T>> {
+    fftn_differentiable_norm(input, s, axes, FftNorm::Backward)
+}
+
+/// Differentiable N-D FFT with explicit `norm` (#1294). Matches
+/// `torch.fft.fftn`; `axes` is torch's `dim`.
+pub fn fftn_differentiable_norm<T: Float>(
+    input: &Tensor<T>,
+    s: Option<&[usize]>,
+    axes: Option<&[isize]>,
+    norm: FftNorm,
+) -> FerrotorchResult<Tensor<T>> {
     let device = input.device();
-    let result = fft::fftn(input, s, axes)?;
+    let result = fft::fftn_norm(input, s, axes, norm)?;
 
     if is_grad_enabled() && input.requires_grad() {
         let norm_n = fftn_norm_n(input, s, axes);
-        let grad_fn = Arc::new(FftnBackward::new(
+        let grad_fn = Arc::new(FftnBackward::new_norm(
             input.clone(),
             s.map(|v| v.to_vec()),
             axes.map(|v| v.to_vec()),
             norm_n,
+            norm,
         ));
         let storage = TensorStorage::on_device(result.data_vec()?, device)?;
         Tensor::from_operation(storage, result.shape().to_vec(), grad_fn)
@@ -1123,22 +1444,33 @@ pub fn fftn_differentiable<T: Float>(
     }
 }
 
-/// Differentiable N-D inverse FFT. Attaches `IfftnBackward` when grad is needed.
+/// Differentiable N-D inverse FFT (default `norm`). Attaches `IfftnBackward`.
 pub fn ifftn_differentiable<T: Float>(
     input: &Tensor<T>,
     s: Option<&[usize]>,
     axes: Option<&[isize]>,
 ) -> FerrotorchResult<Tensor<T>> {
+    ifftn_differentiable_norm(input, s, axes, FftNorm::Backward)
+}
+
+/// Differentiable N-D inverse FFT with explicit `norm` (#1294).
+pub fn ifftn_differentiable_norm<T: Float>(
+    input: &Tensor<T>,
+    s: Option<&[usize]>,
+    axes: Option<&[isize]>,
+    norm: FftNorm,
+) -> FerrotorchResult<Tensor<T>> {
     let device = input.device();
-    let result = fft::ifftn(input, s, axes)?;
+    let result = fft::ifftn_norm(input, s, axes, norm)?;
 
     if is_grad_enabled() && input.requires_grad() {
         let norm_n = fftn_norm_n(input, s, axes);
-        let grad_fn = Arc::new(IfftnBackward::new(
+        let grad_fn = Arc::new(IfftnBackward::new_norm(
             input.clone(),
             s.map(|v| v.to_vec()),
             axes.map(|v| v.to_vec()),
             norm_n,
+            norm,
         ));
         let storage = TensorStorage::on_device(result.data_vec()?, device)?;
         Tensor::from_operation(storage, result.shape().to_vec(), grad_fn)
@@ -1147,15 +1479,26 @@ pub fn ifftn_differentiable<T: Float>(
     }
 }
 
-/// Differentiable N-D real FFT. Attaches `RfftnBackward` when grad is needed.
+/// Differentiable N-D real FFT (default `norm`). Attaches `RfftnBackward`.
 pub fn rfftn_differentiable<T: Float>(
     input: &Tensor<T>,
     s: Option<&[usize]>,
     axes: Option<&[isize]>,
 ) -> FerrotorchResult<Tensor<T>> {
+    rfftn_differentiable_norm(input, s, axes, FftNorm::Backward)
+}
+
+/// Differentiable N-D real FFT with explicit `norm` (#1294). Matches
+/// `torch.fft.rfftn`.
+pub fn rfftn_differentiable_norm<T: Float>(
+    input: &Tensor<T>,
+    s: Option<&[usize]>,
+    axes: Option<&[isize]>,
+    norm: FftNorm,
+) -> FerrotorchResult<Tensor<T>> {
     let device = input.device();
     let _ = rfftn_norm_n::<T>; // keep helper available for symmetry; not needed in fwd
-    let result = fft::rfftn(input, s, axes)?;
+    let result = fft::rfftn_norm(input, s, axes, norm)?;
 
     if is_grad_enabled() && input.requires_grad() {
         // Backward needs the original real-input shape along the transform
@@ -1197,7 +1540,7 @@ pub fn rfftn_differentiable<T: Float>(
             .unwrap_or(in_shape[last_axis_logical]);
         let norm_n: usize = s_back.iter().product::<usize>().max(1);
         let out_shape = result.shape().to_vec();
-        let grad_fn = Arc::new(RfftnBackward::new(
+        let grad_fn = Arc::new(RfftnBackward::new_norm(
             input.clone(),
             Some(s_back),
             axes.map(|v| v.to_vec()),
@@ -1205,6 +1548,7 @@ pub fn rfftn_differentiable<T: Float>(
             last_axis_n,
             last_axis_logical,
             norm_n,
+            norm,
         ));
         let storage = TensorStorage::on_device(result.data_vec()?, device)?;
         Tensor::from_operation(storage, result.shape().to_vec(), grad_fn)
@@ -1213,14 +1557,25 @@ pub fn rfftn_differentiable<T: Float>(
     }
 }
 
-/// Differentiable N-D inverse real FFT. Attaches `IrfftnBackward` when grad is needed.
+/// Differentiable N-D inverse real FFT (default `norm`). Attaches `IrfftnBackward`.
 pub fn irfftn_differentiable<T: Float>(
     input: &Tensor<T>,
     s: Option<&[usize]>,
     axes: Option<&[isize]>,
 ) -> FerrotorchResult<Tensor<T>> {
+    irfftn_differentiable_norm(input, s, axes, FftNorm::Backward)
+}
+
+/// Differentiable N-D inverse real FFT with explicit `norm` (#1294). Matches
+/// `torch.fft.irfftn`.
+pub fn irfftn_differentiable_norm<T: Float>(
+    input: &Tensor<T>,
+    s: Option<&[usize]>,
+    axes: Option<&[isize]>,
+    norm: FftNorm,
+) -> FerrotorchResult<Tensor<T>> {
     let device = input.device();
-    let result = fft::irfftn(input, s, axes)?;
+    let result = fft::irfftn_norm(input, s, axes, norm)?;
 
     if is_grad_enabled() && input.requires_grad() {
         // The forward output length along each transform axis becomes the
@@ -1251,13 +1606,14 @@ pub fn irfftn_differentiable<T: Float>(
         let last_axis_logical = last_axis_logical_real;
         let last_axis_n = *s_back.last().unwrap_or(&res_shape[last_axis_logical_real]);
         let norm_n: usize = s_back.iter().product::<usize>().max(1);
-        let grad_fn = Arc::new(IrfftnBackward::new(
+        let grad_fn = Arc::new(IrfftnBackward::new_norm(
             input.clone(),
             Some(s_back),
             axes.map(|v| v.to_vec()),
             last_axis_n,
             last_axis_logical,
             norm_n,
+            norm,
         ));
         let storage = TensorStorage::on_device(result.data_vec()?, device)?;
         Tensor::from_operation(storage, result.shape().to_vec(), grad_fn)
@@ -1420,7 +1776,7 @@ fn fft2_norm_n<T: Float>(input: &Tensor<T>) -> usize {
     (shape[ndim - 3] * shape[ndim - 2]).max(1)
 }
 
-/// Differentiable 2-D FFT. Attaches `Fft2Backward` when grad is needed.
+/// Differentiable 2-D FFT (default `s`/`dim`/`norm`). Attaches `Fft2Backward`.
 pub fn fft2_differentiable<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
     let device = input.device();
     let result = fft::fft2(input)?;
@@ -1435,7 +1791,30 @@ pub fn fft2_differentiable<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tens
     }
 }
 
-/// Differentiable 2-D inverse FFT. Attaches `Ifft2Backward` when grad is needed.
+/// Differentiable 2-D FFT with explicit `s` / `dim` / `norm` (#1294).
+///
+/// `torch.fft.fft2` delegates to `fft_fftn_symint`
+/// (`aten/src/ATen/native/SpectralOps.cpp:644-652`); the default last-two-axes
+/// / backward-norm case keeps the cheaper [`Fft2Backward`] (GPU-capable),
+/// while any explicit `s`/`dim`/`norm` routes through
+/// [`fftn_differentiable_norm`] (op_db emits `dim=[-3,-2,-1]` for `fft2`,
+/// which torch treats as an N-D transform).
+pub fn fft2_differentiable_norm<T: Float>(
+    input: &Tensor<T>,
+    s: Option<&[usize]>,
+    dim: Option<&[isize]>,
+    norm: FftNorm,
+) -> FerrotorchResult<Tensor<T>> {
+    if s.is_none() && dim.is_none() && norm == FftNorm::Backward {
+        return fft2_differentiable(input);
+    }
+    // Default axes for fft2 are the last two; fftn over those axes is identical.
+    let default_axes: [isize; 2] = [-2, -1];
+    let axes = dim.unwrap_or(&default_axes);
+    fftn_differentiable_norm(input, s, Some(axes), norm)
+}
+
+/// Differentiable 2-D inverse FFT (default `s`/`dim`/`norm`). Attaches `Ifft2Backward`.
 pub fn ifft2_differentiable<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
     let device = input.device();
     let result = fft::ifft2(input)?;
@@ -1448,6 +1827,21 @@ pub fn ifft2_differentiable<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Ten
     } else {
         Ok(result)
     }
+}
+
+/// Differentiable 2-D inverse FFT with explicit `s` / `dim` / `norm` (#1294).
+pub fn ifft2_differentiable_norm<T: Float>(
+    input: &Tensor<T>,
+    s: Option<&[usize]>,
+    dim: Option<&[isize]>,
+    norm: FftNorm,
+) -> FerrotorchResult<Tensor<T>> {
+    if s.is_none() && dim.is_none() && norm == FftNorm::Backward {
+        return ifft2_differentiable(input);
+    }
+    let default_axes: [isize; 2] = [-2, -1];
+    let axes = dim.unwrap_or(&default_axes);
+    ifftn_differentiable_norm(input, s, Some(axes), norm)
 }
 
 // ---------------------------------------------------------------------------
@@ -1728,6 +2122,86 @@ mod tests {
             &[4.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
             1e-9,
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // norm / dim threading in autograd (#1294)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn adjoint_norm_swaps_backward_forward_fixes_ortho() {
+        // The adjoint (same fft_norm_mode int, flipped direction) maps
+        // Backward<->Forward and Ortho->Ortho (derivatives.yaml:2960-2961 +
+        // SpectralOpsUtils.h:15-19).
+        assert_eq!(adjoint_norm(FftNorm::Backward), FftNorm::Forward);
+        assert_eq!(adjoint_norm(FftNorm::Forward), FftNorm::Backward);
+        assert_eq!(adjoint_norm(FftNorm::Ortho), FftNorm::Ortho);
+    }
+
+    #[test]
+    fn fft_ortho_backward_is_ortho_inverse() {
+        // For the unitary (ortho) FFT, the VJP equals the ortho inverse FFT of
+        // grad_y (adjoint of a unitary map is its inverse). Check numerically:
+        // grad_x = ifft(grad_y, ortho). Use an impulse grad_y so the expected
+        // grad_x is the ortho IFFT of the impulse = constant 1/sqrt(n) bins.
+        let input = leaf(&[1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0], &[4, 2]);
+        let result = fft_differentiable_norm(&input, None, None, FftNorm::Ortho).unwrap();
+        assert!(result.grad_fn().is_some());
+        let grad_out = no_grad_leaf(&[1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0], &[4, 2]);
+        let grads = result.grad_fn().unwrap().backward(&grad_out).unwrap();
+        let g = grads[0].as_ref().unwrap();
+        // ortho ifft of an impulse [1,0,0,0] = constant 1/sqrt(4) = 0.5 in each
+        // real bin (imag 0).
+        let gd = g.data().unwrap();
+        for k in 0..4 {
+            assert!((gd[k * 2] - 0.5).abs() < 1e-9, "bin {k} re = {}", gd[k * 2]);
+            assert!(gd[k * 2 + 1].abs() < 1e-9, "bin {k} im");
+        }
+    }
+
+    #[test]
+    fn fft_differentiable_norm_attaches_grad_fn_for_dim() {
+        // Non-default dim still attaches a FftBackward node.
+        let input = leaf(&[1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0], &[2, 2, 2]);
+        let result = fft_differentiable_norm(&input, None, Some(-2), FftNorm::Backward).unwrap();
+        assert!(result.grad_fn().is_some());
+        assert_eq!(result.grad_fn().unwrap().name(), "FftBackward");
+    }
+
+    #[test]
+    fn rfft_differentiable_norm_grad_matches_default_on_last_axis() {
+        // For the default last-axis / backward-norm case, the _norm wrapper
+        // must produce the identical grad as the legacy rfft_differentiable
+        // (it delegates to the cheaper 1-D RfftBackward).
+        let input = leaf(&[1.0, 2.0, 3.0, 4.0], &[4]);
+        let r_default = rfft_differentiable(&input, None).unwrap();
+        let input2 = leaf(&[1.0, 2.0, 3.0, 4.0], &[4]);
+        let r_norm = rfft_differentiable_norm(&input2, None, None, FftNorm::Backward).unwrap();
+        assert_close(r_norm.data().unwrap(), r_default.data().unwrap(), 1e-12);
+        // grad_y = ones over the half-spectrum.
+        let half = r_default.shape()[0];
+        let go: Vec<f64> = vec![1.0; half * 2];
+        let grad_out = no_grad_leaf(&go, r_default.shape());
+        let g1 = r_default.grad_fn().unwrap().backward(&grad_out).unwrap();
+        let g2 = r_norm.grad_fn().unwrap().backward(&grad_out).unwrap();
+        assert_close(
+            g2[0].as_ref().unwrap().data().unwrap(),
+            g1[0].as_ref().unwrap().data().unwrap(),
+            1e-12,
+        );
+    }
+
+    #[test]
+    fn rfftn_differentiable_norm_ortho_roundtrip_grad_shape() {
+        // ortho rfftn attaches RfftnBackward with the threaded norm; the grad
+        // recovers the input shape.
+        let input = leaf(&[1.0, 2.0, 3.0, 4.0], &[2, 2]);
+        let result = rfftn_differentiable_norm(&input, None, None, FftNorm::Ortho).unwrap();
+        assert_eq!(result.grad_fn().unwrap().name(), "RfftnBackward");
+        let go: Vec<f64> = vec![0.5; result.shape().iter().product::<usize>()];
+        let grad_out = no_grad_leaf(&go, result.shape());
+        let grads = result.grad_fn().unwrap().backward(&grad_out).unwrap();
+        assert_eq!(grads[0].as_ref().unwrap().shape(), &[2, 2]);
     }
 
     #[test]

@@ -5,43 +5,42 @@
 //! This matches PyTorch's convention for `torch.fft.*` operations.
 //!
 //! All functions work on f32, f64, and bf16 tensors via an f64 round-trip:
-//! input is upcast to f64, the transform runs in double precision, and the
-//! result is cast back to the input dtype. The 1-D and 2-D paths
-//! ([`fft`], [`ifft`], [`fft2`], [`ifft2`], [`rfft`], [`irfft`]) are powered
-//! by [`rustfft`] directly. The N-D, 2-D real/Hermitian, Hermitian,
-//! frequency-helper, and shift paths ([`fftn`], [`ifftn`], [`rfftn`],
-//! [`irfftn`], [`rfft2`], [`irfft2`], [`hfft`], [`ihfft`], [`hfft2`],
-//! [`ihfft2`], [`hfftn`], [`ihfftn`], [`fftfreq`], [`rfftfreq`],
-//! [`fftshift`], [`ifftshift`]) are delegated to [`ferray_fft`]. The
-//! 2-D real/Hermitian ops `rfft2`/`irfft2`/`hfft2`/`ihfft2` and the N-D
-//! Hermitian ops `hfftn`/`ihfftn` were added under #1299 (each delegates to
-//! the matching `ferray_fft` entry point, which is itself the N-D-over-
-//! trailing-axes specialization matching `torch.fft.<op>`).
+//! the CPU path upcasts the input to f64, runs the transform in double
+//! precision through [`ferray_fft`] (which carries numpy's direction-dependent
+//! `norm` scaling and arbitrary-axis transforms), and casts the result back to
+//! the input dtype. Every transform accepts `norm` ([`FftNorm`],
+//! `backward`/`forward`/`ortho` — matching `torch.fft.*`'s `norm` kwarg) and
+//! `dim` / `s` via the `*_norm` sibling of each public fn (#1294). The
+//! historical `fft(input, n)` / `fft2(input)` / `fftn(input, s, axes)`
+//! signatures remain as thin wrappers (default `dim=last`, `norm=Backward`)
+//! so existing consumers (`complex_tensor.rs`, the differentiable wrappers)
+//! compile unchanged.
 //!
 //! # GPU note
 //!
-//! No cuFFT path exists yet. Functions in this module reject GPU tensors
-//! with [`FerrotorchError::NotImplementedOnCuda`]. They never silently
-//! move a CUDA tensor through host memory.
+//! cuFFT fast paths exist for f32/f64 on the *default* last-axis /
+//! `norm="backward"` case (#579 / #605 / #634 / #636); explicit `dim`,
+//! non-default `norm`, or per-axis `s` fall through to the ferray_fft CPU
+//! path. bf16/f16 GPU lowering is tracked under #1545. GPU tensors never
+//! silently bounce through host memory on the cuFFT-capable paths.
 //!
 //! ## REQ status (per `.design/ferrotorch-core/fft.md`)
 //!
 //! | REQ | Status | Evidence |
 //! |---|---|---|
-//! | REQ-1 | SHIPPED | `fft` at `fft.rs:108`; consumer: `ComplexTensor::fft` at `complex_tensor.rs:329` |
-//! | REQ-2 | SHIPPED | `ifft` at `fft.rs:200`; consumer: `ComplexTensor::ifft` at `complex_tensor.rs:336` |
-//! | REQ-3 | SHIPPED | `rfft`/`irfft` at `fft.rs:289,370`; consumer: `grad_fns::fft::rfft_differentiable` |
-//! | REQ-4 | SHIPPED | `fft2`/`ifft2` at `fft.rs:472,516`; consumer: `ComplexTensor::fft2`/`ifft2` at `complex_tensor.rs:343,350` |
-//! | REQ-5 | SHIPPED | `fftn`/`ifftn`/`rfftn`/`irfftn` at `fft.rs:735,848,948,967`; consumer: re-export at `lib.rs:153-155` |
-//! | REQ-6 | SHIPPED | `hfft`/`ihfft` at `fft.rs:1000,1048`; consumer: re-export at `lib.rs:154` |
-//! | REQ-7 | SHIPPED | `fftfreq`/`rfftfreq` at `fft.rs:1093,1105`; consumer: re-export at `lib.rs:153-155` |
-//! | REQ-8 | SHIPPED | `fftshift`/`ifftshift` at `fft.rs:1122,1141`; consumer: re-export at `lib.rs:153-155` |
-//! | REQ-9 | SHIPPED | cuFFT dispatch at `fft.rs:139-169,229-258`; consumer: `ComplexTensor::fft` at `complex_tensor.rs:329`. bf16/f16 GPU lowering tracked under umbrella #1545 (ferrotorch-core CPU-only paths roadmap) |
+//! | REQ-1 | SHIPPED | `fft` / `fft_norm`; consumer: `ComplexTensor::fft` (`complex_tensor.rs`) |
+//! | REQ-2 | SHIPPED | `ifft` / `ifft_norm`; consumer: `ComplexTensor::ifft` |
+//! | REQ-3 | SHIPPED | `rfft`/`irfft` (+ `*_norm`); consumer: `grad_fns::fft::rfft_differentiable` |
+//! | REQ-4 | SHIPPED | `fft2`/`ifft2` (+ `*_norm`); consumer: `ComplexTensor::fft2`/`ifft2` |
+//! | REQ-5 | SHIPPED | `fftn`/`ifftn`/`rfftn`/`irfftn` (+ `*_norm`); consumer: re-export in `lib.rs` + `grad_fns::fft::*_differentiable` |
+//! | REQ-6 | SHIPPED | `hfft`/`ihfft` (+ `*_norm`); consumer: re-export in `lib.rs` |
+//! | REQ-7 | SHIPPED | `fftfreq`/`rfftfreq`; consumer: re-export in `lib.rs` |
+//! | REQ-8 | SHIPPED | `fftshift`/`ifftshift`; consumer: re-export in `lib.rs` |
+//! | REQ-9 | SHIPPED | cuFFT dispatch in `fft_norm`/`ifft_norm` (default norm/dim); consumer: `ComplexTensor::fft`. bf16/f16 GPU lowering tracked under #1545 |
 
 use ferray_core::Array as FerrayArray;
 use ferray_core::IxDyn as FerrayIxDyn;
-use ferray_fft::FftNorm;
-use rustfft::FftPlanner;
+pub use ferray_fft::FftNorm;
 use rustfft::num_complex::Complex;
 
 use crate::dtype::Float;
@@ -49,6 +48,45 @@ use crate::error::{FerrotorchError, FerrotorchResult};
 use crate::numeric_cast::cast;
 use crate::storage::TensorStorage;
 use crate::tensor::Tensor;
+
+// ---------------------------------------------------------------------------
+// norm / dim conventions (#1294)
+// ---------------------------------------------------------------------------
+//
+// `torch.fft.*` takes `norm` ∈ {None|"backward","forward","ortho"} and
+// `dim`/`s` for the transform axes. The norm string maps 1:1 onto
+// [`FftNorm`] (re-exported from `ferray_fft`): ferray_fft's `FftNorm` carries
+// numpy's direction-dependent normalization semantics
+// (`FftNorm::scale_factor`), which reproduce torch's `norm_from_string` +
+// `fft_norm_mode` scaling byte-for-byte:
+//   - "backward" → `FftNorm::Backward`: no scale on forward, `1/n` on inverse
+//     (torch `norm_from_string("backward", forward) = none|by_n`, upstream
+//     `aten/src/ATen/native/SpectralOps.cpp:116-119`).
+//   - "forward"  → `FftNorm::Forward`:  `1/n` on forward, no scale on inverse
+//     (upstream `:121-123`).
+//   - "ortho"    → `FftNorm::Ortho`:    `1/sqrt(n)` both directions
+//     (upstream `:125-127`).
+//
+// The `dim` axis refers to the *real signal layout* (torch's input shape).
+// ferrotorch carries complex tensors as an interleaved `[..., 2]` real
+// tensor; the `tensor_to_complex_array` bridge strips the trailing `2`, so
+// the ferray array's axes match the real signal layout 1:1 and a torch `dim`
+// (resolved against the real ndim) is passed straight through to ferray_fft.
+
+/// Resolve the torch FFT `norm` string into a [`FftNorm`]. `None`/`"backward"`
+/// is the default. Returns an `InvalidArgument` error for unknown modes,
+/// mirroring upstream `norm_from_string`'s `TORCH_CHECK(false, "Invalid
+/// normalization mode")` (`SpectralOps.cpp:129`).
+pub fn fft_norm_from_str(norm: Option<&str>, op: &'static str) -> FerrotorchResult<FftNorm> {
+    match norm {
+        None | Some("backward") => Ok(FftNorm::Backward),
+        Some("forward") => Ok(FftNorm::Forward),
+        Some("ortho") => Ok(FftNorm::Ortho),
+        Some(other) => Err(FerrotorchError::InvalidArgument {
+            message: format!("{op}: invalid normalization mode: \"{other}\""),
+        }),
+    }
+}
 
 /// True when `T` is f32 (4-byte float), used to pick the f32 vs f64 GPU path.
 #[inline]
@@ -63,68 +101,36 @@ fn is_f64<T: Float>() -> bool {
 }
 
 // ---------------------------------------------------------------------------
-// Internal helpers
-// ---------------------------------------------------------------------------
-
-/// Convert Complex<f64> back to flat [re, im, re, im, ...] in type T.
-fn complex_to_pairs<T: Float>(data: &[Complex<f64>]) -> FerrotorchResult<Vec<T>> {
-    let mut out = Vec::with_capacity(data.len() * 2);
-    for c in data {
-        out.push(cast(c.re)?);
-        out.push(cast(c.im)?);
-    }
-    Ok(out)
-}
-
-/// Execute 1-D FFT (forward or inverse) along the last axis of shape `batch_shape`.
-///
-/// `data` is a flat array of `Complex<f64>` with total length = product(batch_shape) * n.
-/// The last dimension has size `n`.
-///
-/// Returns the transformed data with the same layout.
-fn fft_1d_last_axis(data: &mut [Complex<f64>], batch_shape: &[usize], n: usize, inverse: bool) {
-    let mut planner = FftPlanner::<f64>::new();
-    let fft = if inverse {
-        planner.plan_fft_inverse(n)
-    } else {
-        planner.plan_fft_forward(n)
-    };
-
-    let batch_size: usize = if batch_shape.is_empty() {
-        1
-    } else {
-        batch_shape.iter().product()
-    };
-
-    // Process each batch slice in-place.
-    for b in 0..batch_size {
-        let offset = b * n;
-        fft.process(&mut data[offset..offset + n]);
-    }
-
-    // Apply normalization for inverse: divide by n.
-    if inverse {
-        let scale = 1.0 / n as f64;
-        for v in data.iter_mut() {
-            v.re *= scale;
-            v.im *= scale;
-        }
-    }
-}
-
-// ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
 
-/// 1-D complex-to-complex FFT along the last dimension.
+/// 1-D complex-to-complex FFT along the last dimension (default `norm`).
 ///
 /// The input tensor must have a trailing dimension of size 2 representing
 /// complex numbers `[re, im]`. If `n` is provided, the signal is truncated
 /// or zero-padded along the second-to-last dimension before transforming.
 ///
 /// Returns a tensor with shape `[..., n, 2]` (or `[..., input_len, 2]` if
-/// `n` is `None`).
+/// `n` is `None`). Thin wrapper over [`fft_norm`] with `dim=-1` (last signal
+/// axis) and `norm=Backward`, preserving the historical `(input, n)`
+/// signature used by `complex_tensor.rs` and the differentiable wrappers.
 pub fn fft<T: Float>(input: &Tensor<T>, n: Option<usize>) -> FerrotorchResult<Tensor<T>> {
+    fft_norm(input, n, None, FftNorm::Backward)
+}
+
+/// 1-D complex-to-complex FFT with explicit `dim` and `norm` (#1294).
+///
+/// `dim` is the transform axis in the *real signal* layout (the input minus
+/// its trailing complex pair); `None` defaults to the last signal axis
+/// (`torch.fft.fft`'s `dim=-1`). `norm` selects the normalization mode
+/// (`torch.fft.fft`'s `norm` kwarg). Matches `torch.fft.fft(input, n, dim,
+/// norm)` (`torch/fft/__init__.py:36`).
+pub fn fft_norm<T: Float>(
+    input: &Tensor<T>,
+    n: Option<usize>,
+    dim: Option<isize>,
+    norm: FftNorm,
+) -> FerrotorchResult<Tensor<T>> {
     let shape = input.shape();
 
     // Input must end with a dim of 2 (complex representation).
@@ -144,18 +150,24 @@ pub fn fft<T: Float>(input: &Tensor<T>, n: Option<usize>) -> FerrotorchResult<Te
         });
     }
 
-    let input_n = shape[ndim - 2];
-    let fft_n = n.unwrap_or(input_n);
-    if fft_n == 0 {
-        return Err(FerrotorchError::InvalidArgument {
-            message: "fft: n must be > 0".into(),
-        });
-    }
-
-    let batch_shape = &shape[..ndim - 2];
-    let batch_size: usize = batch_shape.iter().product::<usize>().max(1);
-
-    if input.is_cuda() && (is_f32::<T>() || is_f64::<T>()) {
+    // GPU fast path: only the default last-axis / backward-norm case is
+    // expressible via cuFFT here. Anything else (explicit `dim`, non-default
+    // `norm`) goes through the ferray_fft CPU path; cuFFT would require a
+    // pre-permute + post-scale not yet wired.
+    if input.is_cuda()
+        && (is_f32::<T>() || is_f64::<T>())
+        && norm == FftNorm::Backward
+        && is_last_signal_axis(dim, ndim - 1)
+    {
+        let input_n = shape[ndim - 2];
+        let fft_n = n.unwrap_or(input_n);
+        if fft_n == 0 {
+            return Err(FerrotorchError::InvalidArgument {
+                message: "fft: n must be > 0".into(),
+            });
+        }
+        let batch_shape = &shape[..ndim - 2];
+        let batch_size: usize = batch_shape.iter().product::<usize>().max(1);
         // GPU C2C dispatch via cuFFT (#579), with on-device pad/truncate
         // when `fft_n != input_n` (#605). Fully on-device — no host bounce.
         let backend =
@@ -186,37 +198,51 @@ pub fn fft<T: Float>(input: &Tensor<T>, n: Option<usize>) -> FerrotorchResult<Te
         out_shape.push(2);
         return Tensor::from_storage(TensorStorage::gpu(h), out_shape, false);
     }
-    let data = input.data_vec()?;
 
-    let mut complex_data = Vec::with_capacity(batch_size * fft_n);
-    for b in 0..batch_size {
-        let src_offset = b * input_n * 2;
-        let copy_len = input_n.min(fft_n);
-        for i in 0..copy_len {
-            let re = data[src_offset + i * 2].to_f64().unwrap();
-            let im = data[src_offset + i * 2 + 1].to_f64().unwrap();
-            complex_data.push(Complex::new(re, im));
-        }
-        for _ in copy_len..fft_n {
-            complex_data.push(Complex::new(0.0, 0.0));
-        }
-    }
-
-    fft_1d_last_axis(&mut complex_data, batch_shape, fft_n, false);
-
-    let result_data = complex_to_pairs::<T>(&complex_data)?;
-    let mut out_shape = batch_shape.to_vec();
-    out_shape.push(fft_n);
-    out_shape.push(2);
-
-    Tensor::from_storage(TensorStorage::cpu(result_data), out_shape, false)
+    // CPU path: thread `n` / `dim` / `norm` through ferray_fft, which carries
+    // numpy's direction-dependent norm scaling and arbitrary-axis transforms.
+    let arr = tensor_to_complex_array(input, "fft")?;
+    let result =
+        ferray_fft::fft(&arr, n, dim, norm).map_err(|e| FerrotorchError::InvalidArgument {
+            message: format!("fft: {e}"),
+        })?;
+    complex_array_to_tensor(&result)
 }
 
-/// 1-D inverse FFT along the last dimension.
+/// True when `dim` (an optional torch FFT axis, in the *real signal* layout
+/// of `signal_ndim` dimensions) names the last signal axis (`None`, `-1`, or
+/// `signal_ndim - 1`).
+#[inline]
+fn is_last_signal_axis(dim: Option<isize>, signal_ndim: usize) -> bool {
+    match dim {
+        None => true,
+        Some(d) => {
+            let resolved = if d < 0 { signal_ndim as isize + d } else { d };
+            resolved == signal_ndim as isize - 1
+        }
+    }
+}
+
+/// 1-D inverse FFT along the last dimension (default `norm`).
 ///
 /// Input has shape `[..., n, 2]` (complex). Returns complex output of the
-/// same shape (or `[..., n_out, 2]` if `n` is specified).
+/// same shape (or `[..., n_out, 2]` if `n` is specified). Thin wrapper over
+/// [`ifft_norm`] with `dim=-1`, `norm=Backward`.
 pub fn ifft<T: Float>(input: &Tensor<T>, n: Option<usize>) -> FerrotorchResult<Tensor<T>> {
+    ifft_norm(input, n, None, FftNorm::Backward)
+}
+
+/// 1-D inverse FFT with explicit `dim` and `norm` (#1294).
+///
+/// Matches `torch.fft.ifft(input, n, dim, norm)`
+/// (`torch/fft/__init__.py:91`). See [`fft_norm`] for the `dim`/`norm`
+/// conventions.
+pub fn ifft_norm<T: Float>(
+    input: &Tensor<T>,
+    n: Option<usize>,
+    dim: Option<isize>,
+    norm: FftNorm,
+) -> FerrotorchResult<Tensor<T>> {
     let shape = input.shape();
 
     if shape.is_empty() || *shape.last().unwrap() != 2 {
@@ -234,18 +260,20 @@ pub fn ifft<T: Float>(input: &Tensor<T>, n: Option<usize>) -> FerrotorchResult<T
         });
     }
 
-    let input_n = shape[ndim - 2];
-    let fft_n = n.unwrap_or(input_n);
-    if fft_n == 0 {
-        return Err(FerrotorchError::InvalidArgument {
-            message: "ifft: n must be > 0".into(),
-        });
-    }
-
-    let batch_shape = &shape[..ndim - 2];
-    let batch_size: usize = batch_shape.iter().product::<usize>().max(1);
-
-    if input.is_cuda() && (is_f32::<T>() || is_f64::<T>()) {
+    if input.is_cuda()
+        && (is_f32::<T>() || is_f64::<T>())
+        && norm == FftNorm::Backward
+        && is_last_signal_axis(dim, ndim - 1)
+    {
+        let input_n = shape[ndim - 2];
+        let fft_n = n.unwrap_or(input_n);
+        if fft_n == 0 {
+            return Err(FerrotorchError::InvalidArgument {
+                message: "ifft: n must be > 0".into(),
+            });
+        }
+        let batch_shape = &shape[..ndim - 2];
+        let batch_size: usize = batch_shape.iter().product::<usize>().max(1);
         // GPU C2C dispatch via cuFFT, with on-device pad/truncate when
         // `fft_n != input_n` (#605).
         let backend =
@@ -275,37 +303,34 @@ pub fn ifft<T: Float>(input: &Tensor<T>, n: Option<usize>) -> FerrotorchResult<T
         out_shape.push(2);
         return Tensor::from_storage(TensorStorage::gpu(h), out_shape, false);
     }
-    let data = input.data_vec()?;
 
-    let mut complex_data = Vec::with_capacity(batch_size * fft_n);
-    for b in 0..batch_size {
-        let src_offset = b * input_n * 2;
-        let copy_len = input_n.min(fft_n);
-        for i in 0..copy_len {
-            let re = data[src_offset + i * 2].to_f64().unwrap();
-            let im = data[src_offset + i * 2 + 1].to_f64().unwrap();
-            complex_data.push(Complex::new(re, im));
-        }
-        for _ in copy_len..fft_n {
-            complex_data.push(Complex::new(0.0, 0.0));
-        }
-    }
-
-    fft_1d_last_axis(&mut complex_data, batch_shape, fft_n, true);
-
-    let result_data = complex_to_pairs::<T>(&complex_data)?;
-    let mut out_shape = batch_shape.to_vec();
-    out_shape.push(fft_n);
-    out_shape.push(2);
-
-    Tensor::from_storage(TensorStorage::cpu(result_data), out_shape, false)
+    let arr = tensor_to_complex_array(input, "ifft")?;
+    let result =
+        ferray_fft::ifft(&arr, n, dim, norm).map_err(|e| FerrotorchError::InvalidArgument {
+            message: format!("ifft: {e}"),
+        })?;
+    complex_array_to_tensor(&result)
 }
 
-/// 1-D real-to-complex FFT along the last dimension.
+/// 1-D real-to-complex FFT along the last dimension (default `norm`).
 ///
 /// Input is a real-valued tensor of shape `[..., n]`. Output has shape
 /// `[..., n/2+1, 2]` representing the non-redundant complex coefficients.
+/// Thin wrapper over [`rfft_norm`] with `dim=-1`, `norm=Backward`.
 pub fn rfft<T: Float>(input: &Tensor<T>, n: Option<usize>) -> FerrotorchResult<Tensor<T>> {
+    rfft_norm(input, n, None, FftNorm::Backward)
+}
+
+/// 1-D real-to-complex FFT with explicit `dim` and `norm` (#1294).
+///
+/// Matches `torch.fft.rfft(input, n, dim, norm)`
+/// (`torch/fft/__init__.py:rfft`). `dim` indexes the real input's axes.
+pub fn rfft_norm<T: Float>(
+    input: &Tensor<T>,
+    n: Option<usize>,
+    dim: Option<isize>,
+    norm: FftNorm,
+) -> FerrotorchResult<Tensor<T>> {
     let shape = input.shape();
     if shape.is_empty() {
         return Err(FerrotorchError::InvalidArgument {
@@ -315,17 +340,16 @@ pub fn rfft<T: Float>(input: &Tensor<T>, n: Option<usize>) -> FerrotorchResult<T
 
     let ndim = shape.len();
     let input_n = shape[ndim - 1];
-    let fft_n = n.unwrap_or(input_n);
-    if fft_n == 0 {
-        return Err(FerrotorchError::InvalidArgument {
-            message: "rfft: n must be > 0".into(),
-        });
-    }
 
-    let batch_shape = &shape[..ndim - 1];
-    let batch_size: usize = batch_shape.iter().product::<usize>().max(1);
-
-    if input.is_cuda() && fft_n == input_n {
+    // GPU fast path: default last-axis / backward-norm / no-resize only.
+    if input.is_cuda()
+        && norm == FftNorm::Backward
+        && is_last_signal_axis(dim, ndim)
+        && n.unwrap_or(input_n) == input_n
+    {
+        let fft_n = input_n;
+        let batch_shape = &shape[..ndim - 1];
+        let batch_size: usize = batch_shape.iter().product::<usize>().max(1);
         let backend =
             crate::gpu_dispatch::gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
         let buf = input.gpu_handle()?;
@@ -344,49 +368,36 @@ pub fn rfft<T: Float>(input: &Tensor<T>, n: Option<usize>) -> FerrotorchResult<T
         out_shape.push(2);
         return Tensor::from_storage(TensorStorage::gpu(h), out_shape, false);
     }
-    let data = input.data_vec()?;
 
-    // Build complex input from real data (zero imaginary).
-    let mut complex_data = Vec::with_capacity(batch_size * fft_n);
-    for b in 0..batch_size {
-        let src_offset = b * input_n;
-        let copy_len = input_n.min(fft_n);
-        for i in 0..copy_len {
-            complex_data.push(Complex::new(data[src_offset + i].to_f64().unwrap(), 0.0));
-        }
-        for _ in copy_len..fft_n {
-            complex_data.push(Complex::new(0.0, 0.0));
-        }
-    }
-
-    // Forward FFT.
-    fft_1d_last_axis(&mut complex_data, batch_shape, fft_n, false);
-
-    // Truncate to n/2+1 (Hermitian symmetry).
-    let half_n = fft_n / 2 + 1;
-    let mut result_data = Vec::with_capacity(batch_size * half_n * 2);
-    for b in 0..batch_size {
-        let offset = b * fft_n;
-        for i in 0..half_n {
-            let c = complex_data[offset + i];
-            result_data.push(cast(c.re)?);
-            result_data.push(cast(c.im)?);
-        }
-    }
-
-    let mut out_shape = batch_shape.to_vec();
-    out_shape.push(half_n);
-    out_shape.push(2);
-
-    Tensor::from_storage(TensorStorage::cpu(result_data), out_shape, false)
+    let arr = tensor_to_real_array(input, "rfft")?;
+    let result =
+        ferray_fft::rfft(&arr, n, dim, norm).map_err(|e| FerrotorchError::InvalidArgument {
+            message: format!("rfft: {e}"),
+        })?;
+    complex_array_to_tensor(&result)
 }
 
-/// 1-D complex-to-real inverse FFT.
+/// 1-D complex-to-real inverse FFT (default `norm`).
 ///
 /// Input has shape `[..., n/2+1, 2]` (Hermitian spectrum). Output is
 /// real-valued with shape `[..., n]`. If `n` is `None`, uses `2*(m-1)`
-/// where `m` is the input's second-to-last dimension.
+/// where `m` is the input's second-to-last dimension. Thin wrapper over
+/// [`irfft_norm`] with `dim=-1`, `norm=Backward`.
 pub fn irfft<T: Float>(input: &Tensor<T>, n: Option<usize>) -> FerrotorchResult<Tensor<T>> {
+    irfft_norm(input, n, None, FftNorm::Backward)
+}
+
+/// 1-D complex-to-real inverse FFT with explicit `dim` and `norm` (#1294).
+///
+/// Matches `torch.fft.irfft(input, n, dim, norm)`. `dim` indexes the real
+/// *output* axes (equivalently, the input's freq axis); ferray_fft resolves
+/// it against the complex input layout (trailing `2` stripped by the bridge).
+pub fn irfft_norm<T: Float>(
+    input: &Tensor<T>,
+    n: Option<usize>,
+    dim: Option<isize>,
+    norm: FftNorm,
+) -> FerrotorchResult<Tensor<T>> {
     let shape = input.shape();
 
     if shape.is_empty() || *shape.last().unwrap() != 2 {
@@ -406,19 +417,20 @@ pub fn irfft<T: Float>(input: &Tensor<T>, n: Option<usize>) -> FerrotorchResult<
 
     let half_n = shape[ndim - 2];
     let output_n = n.unwrap_or(2 * (half_n - 1));
-    if output_n == 0 {
-        return Err(FerrotorchError::InvalidArgument {
-            message: "irfft: output length must be > 0".into(),
-        });
-    }
 
-    let batch_shape = &shape[..ndim - 2];
-    let batch_size: usize = batch_shape.iter().product::<usize>().max(1);
-
-    if input.is_cuda() && half_n == output_n / 2 + 1 {
-        // GPU path: input spectrum length matches `output_n / 2 + 1`. The
-        // mismatched-`n` case still routes through CPU below; it requires
-        // a Hermitian-extension or truncation step that's deferred.
+    // GPU fast path: default last-axis / backward-norm / canonical-half only.
+    if input.is_cuda()
+        && norm == FftNorm::Backward
+        && is_last_signal_axis(dim, ndim - 1)
+        && half_n == output_n / 2 + 1
+    {
+        if output_n == 0 {
+            return Err(FerrotorchError::InvalidArgument {
+                message: "irfft: output length must be > 0".into(),
+            });
+        }
+        let batch_shape = &shape[..ndim - 2];
+        let batch_size: usize = batch_shape.iter().product::<usize>().max(1);
         let backend =
             crate::gpu_dispatch::gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
         let buf = input.gpu_handle()?;
@@ -435,60 +447,39 @@ pub fn irfft<T: Float>(input: &Tensor<T>, n: Option<usize>) -> FerrotorchResult<
         out_shape.push(output_n);
         return Tensor::from_storage(TensorStorage::gpu(h), out_shape, false);
     }
-    let data = input.data_vec()?;
 
-    // PyTorch's `aten::_fft_c2r` slices/zero-pads the input spectrum to the
-    // canonical Hermitian half-size for the requested output length —
-    // `output_n / 2 + 1` — *before* Hermitian extension and the inverse FFT.
-    // Using `min(half_n, output_n)` instead (issue #807) silently treats raw
-    // spectrum bins as Hermitian half-bins whenever `half_n > output_n/2+1`,
-    // producing an O(1)-divergent result. Compute the canonical half-size
-    // for the output and source bins from the input within that window
-    // (zero-padding the rest), then Hermitian-mirror to full length.
-    let half_n_for_output = output_n / 2 + 1;
-    let mut complex_data = Vec::with_capacity(batch_size * output_n);
-    for b in 0..batch_size {
-        let src_offset = b * half_n * 2;
-
-        // Slice/zero-pad the spectrum to `half_n_for_output` bins.
-        for i in 0..half_n_for_output {
-            if i < half_n {
-                let re = data[src_offset + i * 2].to_f64().unwrap();
-                let im = data[src_offset + i * 2 + 1].to_f64().unwrap();
-                complex_data.push(Complex::new(re, im));
-            } else {
-                complex_data.push(Complex::new(0.0, 0.0));
-            }
-        }
-
-        // Hermitian extension: X[k] = conj(X[n-k]) for k in [half_n_for_output, output_n).
-        for k in half_n_for_output..output_n {
-            let mirror = output_n - k;
-            // `mirror` is in [1, half_n_for_output), always within range.
-            let c = complex_data[b * output_n + mirror];
-            complex_data.push(Complex::new(c.re, -c.im));
-        }
-    }
-
-    // Inverse FFT.
-    fft_1d_last_axis(&mut complex_data, batch_shape, output_n, true);
-
-    // Extract real parts.
-    let result_data: Vec<T> = complex_data
-        .iter()
-        .map(|c| cast(c.re))
-        .collect::<FerrotorchResult<_>>()?;
-
-    let mut out_shape = batch_shape.to_vec();
-    out_shape.push(output_n);
-
-    Tensor::from_storage(TensorStorage::cpu(result_data), out_shape, false)
+    // CPU path: ferray_fft 0.3.8 performs the Hermitian projection + the
+    // canonical half-size slice/zero-pad internally (matches PyTorch's
+    // `aten::_fft_c2r` — see #807/#808), threading `n` / `dim` / `norm`.
+    let arr = tensor_to_complex_array(input, "irfft")?;
+    let result =
+        ferray_fft::irfft(&arr, n, dim, norm).map_err(|e| FerrotorchError::InvalidArgument {
+            message: format!("irfft: {e}"),
+        })?;
+    real_array_to_tensor(&result)
 }
 
-/// 2-D FFT (complex-to-complex) along the last two spatial dimensions.
+/// 2-D FFT (complex-to-complex) along the last two spatial dimensions
+/// (default `s`/`dim`/`norm`). Thin wrapper over [`fft2_norm`].
 ///
 /// Input has shape `[..., rows, cols, 2]` (complex). Output has the same shape.
 pub fn fft2<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
+    fft2_norm(input, None, None, FftNorm::Backward)
+}
+
+/// 2-D FFT with explicit `s` / `dim` / `norm` (#1294).
+///
+/// Matches `torch.fft.fft2(input, s, dim, norm)`
+/// (`torch/fft/__init__.py:132`). `dim` defaults to the last two signal axes;
+/// `s` resizes each transform axis. ferray_fft's `fft2` accepts an arbitrary
+/// `axes` list, so `dim` lists of any length (op_db emits `dim=[-3,-2,-1]`
+/// for `fft2`, which torch treats as an N-D transform) are honoured directly.
+pub fn fft2_norm<T: Float>(
+    input: &Tensor<T>,
+    s: Option<&[usize]>,
+    dim: Option<&[isize]>,
+    norm: FftNorm,
+) -> FerrotorchResult<Tensor<T>> {
     let shape = input.shape();
 
     if shape.is_empty() || *shape.last().unwrap() != 2 {
@@ -510,8 +501,15 @@ pub fn fft2<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
     let cols = shape[ndim - 2];
     let batch_dims: usize = shape[..ndim - 3].iter().product::<usize>().max(1);
 
-    // GPU fast path via cufftPlan2d (#634): unbatched (or batch=1) f32/f64.
-    if input.is_cuda() && batch_dims == 1 && (is_f32::<T>() || is_f64::<T>()) {
+    // GPU fast path via cufftPlan2d (#634): unbatched (or batch=1) f32/f64,
+    // default last-two axes / backward-norm / no resize only.
+    if input.is_cuda()
+        && batch_dims == 1
+        && (is_f32::<T>() || is_f64::<T>())
+        && norm == FftNorm::Backward
+        && dim.is_none()
+        && s.is_none()
+    {
         let backend =
             crate::gpu_dispatch::gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
         let h = if is_f32::<T>() {
@@ -522,17 +520,32 @@ pub fn fft2<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
         return Tensor::from_storage(TensorStorage::gpu(h), shape.to_vec(), false);
     }
 
-    // Step 1: FFT along columns (last spatial axis).
-    let after_cols = fft(input, Some(cols))?;
-
-    // Step 2: FFT along rows — need to transpose rows<->cols, FFT, transpose back.
-    fft_2d_row_pass(&after_cols, rows, cols, false)
+    let arr = tensor_to_complex_array(input, "fft2")?;
+    let result =
+        ferray_fft::fft2(&arr, s, dim, norm).map_err(|e| FerrotorchError::InvalidArgument {
+            message: format!("fft2: {e}"),
+        })?;
+    complex_array_to_tensor(&result)
 }
 
-/// 2-D inverse FFT (complex-to-complex) along the last two spatial dimensions.
+/// 2-D inverse FFT (complex-to-complex) along the last two spatial dimensions
+/// (default `s`/`dim`/`norm`). Thin wrapper over [`ifft2_norm`].
 ///
 /// Input has shape `[..., rows, cols, 2]` (complex). Output has the same shape.
 pub fn ifft2<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
+    ifft2_norm(input, None, None, FftNorm::Backward)
+}
+
+/// 2-D inverse FFT with explicit `s` / `dim` / `norm` (#1294).
+///
+/// Matches `torch.fft.ifft2(input, s, dim, norm)`
+/// (`torch/fft/__init__.py:193`).
+pub fn ifft2_norm<T: Float>(
+    input: &Tensor<T>,
+    s: Option<&[usize]>,
+    dim: Option<&[isize]>,
+    norm: FftNorm,
+) -> FerrotorchResult<Tensor<T>> {
     let shape = input.shape();
 
     if shape.is_empty() || *shape.last().unwrap() != 2 {
@@ -554,7 +567,13 @@ pub fn ifft2<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
     let cols = shape[ndim - 2];
     let batch_dims: usize = shape[..ndim - 3].iter().product::<usize>().max(1);
 
-    if input.is_cuda() && batch_dims == 1 && (is_f32::<T>() || is_f64::<T>()) {
+    if input.is_cuda()
+        && batch_dims == 1
+        && (is_f32::<T>() || is_f64::<T>())
+        && norm == FftNorm::Backward
+        && dim.is_none()
+        && s.is_none()
+    {
         let backend =
             crate::gpu_dispatch::gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
         let h = if is_f32::<T>() {
@@ -565,81 +584,12 @@ pub fn ifft2<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
         return Tensor::from_storage(TensorStorage::gpu(h), shape.to_vec(), false);
     }
 
-    // Step 1: IFFT along columns.
-    let after_cols = ifft(input, Some(cols))?;
-
-    // Step 2: IFFT along rows.
-    fft_2d_row_pass(&after_cols, rows, cols, true)
-}
-
-/// Internal: apply FFT/IFFT along the row axis of a `[..., rows, cols, 2]` tensor.
-///
-/// This transposes the rows and cols, runs a 1-D FFT along the (now-last)
-/// spatial axis, then transposes back.
-fn fft_2d_row_pass<T: Float>(
-    input: &Tensor<T>,
-    rows: usize,
-    cols: usize,
-    inverse: bool,
-) -> FerrotorchResult<Tensor<T>> {
-    let shape = input.shape();
-    if input.is_cuda() {
-        return Err(FerrotorchError::NotImplementedOnCuda { op: "fft2" });
-    }
-    let ndim = shape.len();
-    let batch_shape = &shape[..ndim - 3];
-    let batch_size: usize = batch_shape.iter().product::<usize>().max(1);
-    let data = input.data_vec()?;
-
-    // Transpose [batch, rows, cols, 2] -> [batch, cols, rows, 2] so rows become the last spatial dim.
-    let mut transposed = vec![<T as num_traits::Zero>::zero(); data.len()];
-    for b in 0..batch_size {
-        let base = b * rows * cols * 2;
-        for r in 0..rows {
-            for c in 0..cols {
-                let src = base + r * cols * 2 + c * 2;
-                let dst = base + c * rows * 2 + r * 2;
-                transposed[dst] = data[src];
-                transposed[dst + 1] = data[src + 1];
-            }
-        }
-    }
-
-    // Build a temporary tensor with shape [batch..., cols, rows, 2].
-    let mut trans_shape = batch_shape.to_vec();
-    trans_shape.push(cols);
-    trans_shape.push(rows);
-    trans_shape.push(2);
-    let trans_tensor = Tensor::from_storage(TensorStorage::cpu(transposed), trans_shape, false)?;
-
-    // FFT along the last spatial dim (rows).
-    let transformed = if inverse {
-        ifft(&trans_tensor, Some(rows))?
-    } else {
-        fft(&trans_tensor, Some(rows))?
-    };
-
-    // Transpose back [batch, cols, rows, 2] -> [batch, rows, cols, 2].
-    let t_data = transformed.data_vec()?;
-    let mut result = vec![<T as num_traits::Zero>::zero(); t_data.len()];
-    for b in 0..batch_size {
-        let base = b * rows * cols * 2;
-        for c in 0..cols {
-            for r in 0..rows {
-                let src = base + c * rows * 2 + r * 2;
-                let dst = base + r * cols * 2 + c * 2;
-                result[dst] = t_data[src];
-                result[dst + 1] = t_data[src + 1];
-            }
-        }
-    }
-
-    let mut out_shape = batch_shape.to_vec();
-    out_shape.push(rows);
-    out_shape.push(cols);
-    out_shape.push(2);
-
-    Tensor::from_storage(TensorStorage::cpu(result), out_shape, false)
+    let arr = tensor_to_complex_array(input, "ifft2")?;
+    let result =
+        ferray_fft::ifft2(&arr, s, dim, norm).map_err(|e| FerrotorchError::InvalidArgument {
+            message: format!("ifft2: {e}"),
+        })?;
+    complex_array_to_tensor(&result)
 }
 
 // ---------------------------------------------------------------------------
@@ -756,6 +706,20 @@ pub fn fftn<T: Float>(
     s: Option<&[usize]>,
     axes: Option<&[isize]>,
 ) -> FerrotorchResult<Tensor<T>> {
+    fftn_norm(input, s, axes, FftNorm::Backward)
+}
+
+/// N-dimensional complex-to-complex FFT with explicit `norm` (#1294).
+///
+/// Matches `torch.fft.fftn(input, s, dim, norm)`
+/// (`torch/fft/__init__.py:246`). Only the default `norm=Backward` case
+/// dispatches to cuFFT; other norm modes take the ferray_fft CPU path.
+pub fn fftn_norm<T: Float>(
+    input: &Tensor<T>,
+    s: Option<&[usize]>,
+    axes: Option<&[isize]>,
+    norm: FftNorm,
+) -> FerrotorchResult<Tensor<T>> {
     // GPU fast paths (#636, #966):
     // - axes=None, s=None: dispatch by rank (rank-2 -> cufftPlanMany rank=2,
     //   rank-3 -> cufftPlan3d).
@@ -763,7 +727,11 @@ pub fn fftn<T: Float>(
     //   The axes list is normalized to non-negative indices and passed to
     //   gpu_fftn_axes_c2c_f32/f64. s!=None still falls through to CPU
     //   (pad/truncate requires a separate pre-pass not yet implemented on GPU).
-    if input.is_cuda() && (is_f32::<T>() || is_f64::<T>()) && s.is_none() {
+    if input.is_cuda()
+        && (is_f32::<T>() || is_f64::<T>())
+        && s.is_none()
+        && norm == FftNorm::Backward
+    {
         let shape = input.shape();
         let ndim = shape.len();
         // Last dim must be 2 (interleaved complex).
@@ -847,11 +815,10 @@ pub fn fftn<T: Float>(
         }
     }
     let arr = tensor_to_complex_array(input, "fftn")?;
-    let result = ferray_fft::fftn(&arr, s, axes, FftNorm::Backward).map_err(|e| {
-        FerrotorchError::InvalidArgument {
+    let result =
+        ferray_fft::fftn(&arr, s, axes, norm).map_err(|e| FerrotorchError::InvalidArgument {
             message: format!("fftn: {e}"),
-        }
-    })?;
+        })?;
     complex_array_to_tensor(&result)
 }
 
@@ -869,9 +836,26 @@ pub fn ifftn<T: Float>(
     s: Option<&[usize]>,
     axes: Option<&[isize]>,
 ) -> FerrotorchResult<Tensor<T>> {
+    ifftn_norm(input, s, axes, FftNorm::Backward)
+}
+
+/// N-dimensional inverse complex FFT with explicit `norm` (#1294).
+///
+/// Matches `torch.fft.ifftn(input, s, dim, norm)`. Only the default
+/// `norm=Backward` case dispatches to cuFFT.
+pub fn ifftn_norm<T: Float>(
+    input: &Tensor<T>,
+    s: Option<&[usize]>,
+    axes: Option<&[isize]>,
+    norm: FftNorm,
+) -> FerrotorchResult<Tensor<T>> {
     // GPU fast paths (#636, #966): mirrors fftn dispatch logic exactly,
     // with inverse=true for all cuFFT calls.
-    if input.is_cuda() && (is_f32::<T>() || is_f64::<T>()) && s.is_none() {
+    if input.is_cuda()
+        && (is_f32::<T>() || is_f64::<T>())
+        && s.is_none()
+        && norm == FftNorm::Backward
+    {
         let shape = input.shape();
         let ndim = shape.len();
         if ndim >= 2 && shape[ndim - 1] == 2 {
@@ -945,11 +929,10 @@ pub fn ifftn<T: Float>(
         }
     }
     let arr = tensor_to_complex_array(input, "ifftn")?;
-    let result = ferray_fft::ifftn(&arr, s, axes, FftNorm::Backward).map_err(|e| {
-        FerrotorchError::InvalidArgument {
+    let result =
+        ferray_fft::ifftn(&arr, s, axes, norm).map_err(|e| FerrotorchError::InvalidArgument {
             message: format!("ifftn: {e}"),
-        }
-    })?;
+        })?;
     complex_array_to_tensor(&result)
 }
 
@@ -969,12 +952,23 @@ pub fn rfftn<T: Float>(
     s: Option<&[usize]>,
     axes: Option<&[isize]>,
 ) -> FerrotorchResult<Tensor<T>> {
+    rfftn_norm(input, s, axes, FftNorm::Backward)
+}
+
+/// N-dimensional real-to-complex FFT with explicit `norm` (#1294).
+///
+/// Matches `torch.fft.rfftn(input, s, dim, norm)`.
+pub fn rfftn_norm<T: Float>(
+    input: &Tensor<T>,
+    s: Option<&[usize]>,
+    axes: Option<&[isize]>,
+    norm: FftNorm,
+) -> FerrotorchResult<Tensor<T>> {
     let arr = tensor_to_real_array(input, "rfftn")?;
-    let result = ferray_fft::rfftn(&arr, s, axes, FftNorm::Backward).map_err(|e| {
-        FerrotorchError::InvalidArgument {
+    let result =
+        ferray_fft::rfftn(&arr, s, axes, norm).map_err(|e| FerrotorchError::InvalidArgument {
             message: format!("rfftn: {e}"),
-        }
-    })?;
+        })?;
     complex_array_to_tensor(&result)
 }
 
@@ -988,16 +982,27 @@ pub fn irfftn<T: Float>(
     s: Option<&[usize]>,
     axes: Option<&[isize]>,
 ) -> FerrotorchResult<Tensor<T>> {
+    irfftn_norm(input, s, axes, FftNorm::Backward)
+}
+
+/// N-dimensional complex-to-real inverse FFT with explicit `norm` (#1294).
+///
+/// Matches `torch.fft.irfftn(input, s, dim, norm)`.
+pub fn irfftn_norm<T: Float>(
+    input: &Tensor<T>,
+    s: Option<&[usize]>,
+    axes: Option<&[isize]>,
+    norm: FftNorm,
+) -> FerrotorchResult<Tensor<T>> {
     let arr = tensor_to_complex_array(input, "irfftn")?;
     // #808: ferray-fft 0.3.8 now performs the Hermitian projection
     // internally inside its c2r path (matches PyTorch's `aten::_fft_c2r`
     // and scipy/pocketfft semantics). The downstream pre-projection
     // mitigation is no longer needed.
-    let result = ferray_fft::irfftn(&arr, s, axes, FftNorm::Backward).map_err(|e| {
-        FerrotorchError::InvalidArgument {
+    let result =
+        ferray_fft::irfftn(&arr, s, axes, norm).map_err(|e| FerrotorchError::InvalidArgument {
             message: format!("irfftn: {e}"),
-        }
-    })?;
+        })?;
     real_array_to_tensor(&result)
 }
 
@@ -1015,12 +1020,23 @@ pub fn rfft2<T: Float>(
     s: Option<&[usize]>,
     axes: Option<&[isize]>,
 ) -> FerrotorchResult<Tensor<T>> {
+    rfft2_norm(input, s, axes, FftNorm::Backward)
+}
+
+/// 2-D real-to-complex FFT with explicit `norm` (#1294).
+///
+/// Matches `torch.fft.rfft2(input, s, dim, norm)`.
+pub fn rfft2_norm<T: Float>(
+    input: &Tensor<T>,
+    s: Option<&[usize]>,
+    axes: Option<&[isize]>,
+    norm: FftNorm,
+) -> FerrotorchResult<Tensor<T>> {
     let arr = tensor_to_real_array(input, "rfft2")?;
-    let result = ferray_fft::rfft2(&arr, s, axes, FftNorm::Backward).map_err(|e| {
-        FerrotorchError::InvalidArgument {
+    let result =
+        ferray_fft::rfft2(&arr, s, axes, norm).map_err(|e| FerrotorchError::InvalidArgument {
             message: format!("rfft2: {e}"),
-        }
-    })?;
+        })?;
     complex_array_to_tensor(&result)
 }
 
@@ -1035,12 +1051,23 @@ pub fn irfft2<T: Float>(
     s: Option<&[usize]>,
     axes: Option<&[isize]>,
 ) -> FerrotorchResult<Tensor<T>> {
+    irfft2_norm(input, s, axes, FftNorm::Backward)
+}
+
+/// 2-D complex-to-real inverse FFT with explicit `norm` (#1294).
+///
+/// Matches `torch.fft.irfft2(input, s, dim, norm)`.
+pub fn irfft2_norm<T: Float>(
+    input: &Tensor<T>,
+    s: Option<&[usize]>,
+    axes: Option<&[isize]>,
+    norm: FftNorm,
+) -> FerrotorchResult<Tensor<T>> {
     let arr = tensor_to_complex_array(input, "irfft2")?;
-    let result = ferray_fft::irfft2(&arr, s, axes, FftNorm::Backward).map_err(|e| {
-        FerrotorchError::InvalidArgument {
+    let result =
+        ferray_fft::irfft2(&arr, s, axes, norm).map_err(|e| FerrotorchError::InvalidArgument {
             message: format!("irfft2: {e}"),
-        }
-    })?;
+        })?;
     real_array_to_tensor(&result)
 }
 
@@ -1060,8 +1087,26 @@ pub fn irfft2<T: Float>(
 /// CUDA f32/f64 tensors dispatch to `gpu_hfft_*` via cuFFT C2R + conj PTX
 /// kernel (#636). Parity: `hfft(x, n) == irfft(conj(x), n)`.
 pub fn hfft<T: Float>(input: &Tensor<T>, n: Option<usize>) -> FerrotorchResult<Tensor<T>> {
-    // GPU fast path (#636): hfft = conj + irfft, fully on-device.
-    if input.is_cuda() && (is_f32::<T>() || is_f64::<T>()) {
+    hfft_norm(input, n, None, FftNorm::Backward)
+}
+
+/// 1-D Hermitian FFT with explicit `dim` and `norm` (#1294).
+///
+/// Matches `torch.fft.hfft(input, n, dim, norm)`. Only the default last-axis
+/// / backward-norm case dispatches to cuFFT.
+pub fn hfft_norm<T: Float>(
+    input: &Tensor<T>,
+    n: Option<usize>,
+    dim: Option<isize>,
+    norm: FftNorm,
+) -> FerrotorchResult<Tensor<T>> {
+    // GPU fast path (#636): hfft = conj + irfft, fully on-device. Restricted
+    // to default last-axis / backward-norm (cuFFT can't honour dim/norm here).
+    if input.is_cuda()
+        && (is_f32::<T>() || is_f64::<T>())
+        && norm == FftNorm::Backward
+        && is_last_signal_axis(dim, input.ndim().saturating_sub(1))
+    {
         let shape = input.shape();
         // Input must be [..., half_n, 2].
         if shape.len() >= 2 && *shape.last().unwrap() == 2 {
@@ -1090,11 +1135,10 @@ pub fn hfft<T: Float>(input: &Tensor<T>, n: Option<usize>) -> FerrotorchResult<T
     // (its `hfft` delegates to `irfft`, which now projects the c2r axis
     // bins before invoking realfft). The downstream pre-projection
     // mitigation is no longer needed.
-    let result = ferray_fft::hfft(&arr, n, None, FftNorm::Backward).map_err(|e| {
-        FerrotorchError::InvalidArgument {
+    let result =
+        ferray_fft::hfft(&arr, n, dim, norm).map_err(|e| FerrotorchError::InvalidArgument {
             message: format!("hfft: {e}"),
-        }
-    })?;
+        })?;
     real_array_to_tensor(&result)
 }
 
@@ -1108,8 +1152,25 @@ pub fn hfft<T: Float>(input: &Tensor<T>, n: Option<usize>) -> FerrotorchResult<T
 /// CUDA f32/f64 tensors dispatch to `gpu_ihfft_*` via cuFFT R2C + conj PTX
 /// kernel (#636). Parity: `ihfft(x) == conj(rfft(x)) / n`.
 pub fn ihfft<T: Float>(input: &Tensor<T>, n: Option<usize>) -> FerrotorchResult<Tensor<T>> {
+    ihfft_norm(input, n, None, FftNorm::Backward)
+}
+
+/// 1-D inverse Hermitian FFT with explicit `dim` and `norm` (#1294).
+///
+/// Matches `torch.fft.ihfft(input, n, dim, norm)`. Only the default last-axis
+/// / backward-norm / no-resize case dispatches to cuFFT.
+pub fn ihfft_norm<T: Float>(
+    input: &Tensor<T>,
+    n: Option<usize>,
+    dim: Option<isize>,
+    norm: FftNorm,
+) -> FerrotorchResult<Tensor<T>> {
     // GPU fast path (#636): ihfft = rfft + scale(1/n) + conj, fully on-device.
-    if input.is_cuda() && (is_f32::<T>() || is_f64::<T>()) {
+    if input.is_cuda()
+        && (is_f32::<T>() || is_f64::<T>())
+        && norm == FftNorm::Backward
+        && is_last_signal_axis(dim, input.ndim())
+    {
         let shape = input.shape();
         if !shape.is_empty() {
             let ndim = shape.len();
@@ -1135,11 +1196,10 @@ pub fn ihfft<T: Float>(input: &Tensor<T>, n: Option<usize>) -> FerrotorchResult<
         }
     }
     let arr = tensor_to_real_array(input, "ihfft")?;
-    let result = ferray_fft::ihfft(&arr, n, None, FftNorm::Backward).map_err(|e| {
-        FerrotorchError::InvalidArgument {
+    let result =
+        ferray_fft::ihfft(&arr, n, dim, norm).map_err(|e| FerrotorchError::InvalidArgument {
             message: format!("ihfft: {e}"),
-        }
-    })?;
+        })?;
     complex_array_to_tensor(&result)
 }
 
@@ -1155,12 +1215,23 @@ pub fn hfft2<T: Float>(
     s: Option<&[usize]>,
     axes: Option<&[isize]>,
 ) -> FerrotorchResult<Tensor<T>> {
+    hfft2_norm(input, s, axes, FftNorm::Backward)
+}
+
+/// 2-D Hermitian FFT with explicit `norm` (#1294).
+///
+/// Matches `torch.fft.hfft2(input, s, dim, norm)`.
+pub fn hfft2_norm<T: Float>(
+    input: &Tensor<T>,
+    s: Option<&[usize]>,
+    axes: Option<&[isize]>,
+    norm: FftNorm,
+) -> FerrotorchResult<Tensor<T>> {
     let arr = tensor_to_complex_array(input, "hfft2")?;
-    let result = ferray_fft::hfft2(&arr, s, axes, FftNorm::Backward).map_err(|e| {
-        FerrotorchError::InvalidArgument {
+    let result =
+        ferray_fft::hfft2(&arr, s, axes, norm).map_err(|e| FerrotorchError::InvalidArgument {
             message: format!("hfft2: {e}"),
-        }
-    })?;
+        })?;
     real_array_to_tensor(&result)
 }
 
@@ -1175,12 +1246,23 @@ pub fn ihfft2<T: Float>(
     s: Option<&[usize]>,
     axes: Option<&[isize]>,
 ) -> FerrotorchResult<Tensor<T>> {
+    ihfft2_norm(input, s, axes, FftNorm::Backward)
+}
+
+/// 2-D inverse Hermitian FFT with explicit `norm` (#1294).
+///
+/// Matches `torch.fft.ihfft2(input, s, dim, norm)`.
+pub fn ihfft2_norm<T: Float>(
+    input: &Tensor<T>,
+    s: Option<&[usize]>,
+    axes: Option<&[isize]>,
+    norm: FftNorm,
+) -> FerrotorchResult<Tensor<T>> {
     let arr = tensor_to_real_array(input, "ihfft2")?;
-    let result = ferray_fft::ihfft2(&arr, s, axes, FftNorm::Backward).map_err(|e| {
-        FerrotorchError::InvalidArgument {
+    let result =
+        ferray_fft::ihfft2(&arr, s, axes, norm).map_err(|e| FerrotorchError::InvalidArgument {
             message: format!("ihfft2: {e}"),
-        }
-    })?;
+        })?;
     complex_array_to_tensor(&result)
 }
 
@@ -1196,12 +1278,23 @@ pub fn hfftn<T: Float>(
     s: Option<&[usize]>,
     axes: Option<&[isize]>,
 ) -> FerrotorchResult<Tensor<T>> {
+    hfftn_norm(input, s, axes, FftNorm::Backward)
+}
+
+/// N-D Hermitian FFT with explicit `norm` (#1294).
+///
+/// Matches `torch.fft.hfftn(input, s, dim, norm)`.
+pub fn hfftn_norm<T: Float>(
+    input: &Tensor<T>,
+    s: Option<&[usize]>,
+    axes: Option<&[isize]>,
+    norm: FftNorm,
+) -> FerrotorchResult<Tensor<T>> {
     let arr = tensor_to_complex_array(input, "hfftn")?;
-    let result = ferray_fft::hfftn(&arr, s, axes, FftNorm::Backward).map_err(|e| {
-        FerrotorchError::InvalidArgument {
+    let result =
+        ferray_fft::hfftn(&arr, s, axes, norm).map_err(|e| FerrotorchError::InvalidArgument {
             message: format!("hfftn: {e}"),
-        }
-    })?;
+        })?;
     real_array_to_tensor(&result)
 }
 
@@ -1216,12 +1309,23 @@ pub fn ihfftn<T: Float>(
     s: Option<&[usize]>,
     axes: Option<&[isize]>,
 ) -> FerrotorchResult<Tensor<T>> {
+    ihfftn_norm(input, s, axes, FftNorm::Backward)
+}
+
+/// N-D inverse Hermitian FFT with explicit `norm` (#1294).
+///
+/// Matches `torch.fft.ihfftn(input, s, dim, norm)`.
+pub fn ihfftn_norm<T: Float>(
+    input: &Tensor<T>,
+    s: Option<&[usize]>,
+    axes: Option<&[isize]>,
+    norm: FftNorm,
+) -> FerrotorchResult<Tensor<T>> {
     let arr = tensor_to_real_array(input, "ihfftn")?;
-    let result = ferray_fft::ihfftn(&arr, s, axes, FftNorm::Backward).map_err(|e| {
-        FerrotorchError::InvalidArgument {
+    let result =
+        ferray_fft::ihfftn(&arr, s, axes, norm).map_err(|e| FerrotorchError::InvalidArgument {
             message: format!("ihfftn: {e}"),
-        }
-    })?;
+        })?;
     complex_array_to_tensor(&result)
 }
 
@@ -1848,6 +1952,121 @@ mod tests {
         let recovered = hfftn(&spectrum, Some(&[2, 2, 4]), None).unwrap();
         assert_eq!(recovered.shape(), &[2, 2, 4]);
         assert_close(recovered.data().unwrap(), &original, 1e-9);
+    }
+
+    // -----------------------------------------------------------------------
+    // norm / dim threading (#1294)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn fft_norm_from_str_maps_modes() {
+        // Maps the torch norm strings 1:1 onto FftNorm (SpectralOps.cpp:116-130).
+        assert_eq!(fft_norm_from_str(None, "fft").unwrap(), FftNorm::Backward);
+        assert_eq!(
+            fft_norm_from_str(Some("backward"), "fft").unwrap(),
+            FftNorm::Backward
+        );
+        assert_eq!(
+            fft_norm_from_str(Some("forward"), "fft").unwrap(),
+            FftNorm::Forward
+        );
+        assert_eq!(
+            fft_norm_from_str(Some("ortho"), "fft").unwrap(),
+            FftNorm::Ortho
+        );
+        assert!(fft_norm_from_str(Some("bogus"), "fft").is_err());
+    }
+
+    #[test]
+    fn fft_ortho_norm_scales_dc_by_sqrt_n() {
+        // FFT of n ones: DC bin = sum = n (backward), n/sqrt(n)=sqrt(n) (ortho),
+        // n/n = 1 (forward). These are the closed-form DFT values, traceable to
+        // numpy's norm semantics (torch/fft/__init__.py:57-69).
+        let n = 8usize;
+        let pairs: Vec<(f64, f64)> = vec![(1.0, 0.0); n];
+        let input = complex_tensor(&pairs);
+
+        let backward = fft_norm(&input, None, None, FftNorm::Backward).unwrap();
+        assert!((backward.data().unwrap()[0] - n as f64).abs() < 1e-10);
+
+        let ortho = fft_norm(&input, None, None, FftNorm::Ortho).unwrap();
+        // DC = n / sqrt(n) = sqrt(n).
+        assert!((ortho.data().unwrap()[0] - (n as f64).sqrt()).abs() < 1e-10);
+
+        let forward = fft_norm(&input, None, None, FftNorm::Forward).unwrap();
+        // DC = n / n = 1.
+        assert!((forward.data().unwrap()[0] - 1.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn fft_ortho_is_unitary_roundtrip() {
+        // ortho fft followed by ortho ifft recovers the input (unitary pair).
+        let pairs = vec![(1.0, 2.0), (-1.0, 0.5), (3.0, -1.0), (0.0, 0.0)];
+        let input = complex_tensor(&pairs);
+        let spectrum = fft_norm(&input, None, None, FftNorm::Ortho).unwrap();
+        let recovered = ifft_norm(&spectrum, None, None, FftNorm::Ortho).unwrap();
+        let d = recovered.data().unwrap();
+        for (i, &(re, im)) in pairs.iter().enumerate() {
+            assert!((d[i * 2] - re).abs() < 1e-10, "re {i}");
+            assert!((d[i * 2 + 1] - im).abs() < 1e-10, "im {i}");
+        }
+    }
+
+    #[test]
+    fn fft_dim_transforms_named_axis() {
+        // A [2, 4, 2] complex tensor (2 rows, 4 cols, complex pair). Transform
+        // along dim=-2 (the rows axis) vs the default dim=-1 (cols). Compare
+        // against the equivalent default-axis transform of the transposed data.
+        // Build rows = two distinct constant signals so the DC bins differ.
+        // Row 0 = all (1,0); row 1 = all (2,0). shape [2, 4, 2].
+        let mut data = Vec::new();
+        for r in 0..2 {
+            for _c in 0..4 {
+                data.push((r + 1) as f64);
+                data.push(0.0);
+            }
+        }
+        let input = t(&data, &[2, 4, 2]);
+        // dim=-2 transforms along the rows (length-2 axis). For a length-2 DFT
+        // of [1, 2] along each column, bin0 = 3, bin1 = -1 (real).
+        let out = fft_norm(&input, None, Some(-2), FftNorm::Backward).unwrap();
+        assert_eq!(out.shape(), &[2, 4, 2]);
+        let d = out.data().unwrap();
+        // For each column c: out[0, c] = 3 + 0i, out[1, c] = -1 + 0i.
+        for c in 0..4 {
+            let bin0 = d[c * 2]; // row 0, col c, re
+            let bin1 = d[(4 + c) * 2]; // row 1, col c, re
+            assert!((bin0 - 3.0).abs() < 1e-10, "col {c} bin0 = {bin0}");
+            assert!((bin1 - (-1.0)).abs() < 1e-10, "col {c} bin1 = {bin1}");
+        }
+    }
+
+    #[test]
+    fn rfft_dim_transforms_named_axis() {
+        // Real [4, 3] input, rfft along dim=-2 (length-4 axis). Output last
+        // transform axis becomes 4/2+1 = 3 along axis 0: shape [3, 3, 2].
+        let original: Vec<f64> = (1..=12).map(|x| x as f64).collect();
+        let input = t(&original, &[4, 3]);
+        let out = rfft_norm(&input, None, Some(-2), FftNorm::Backward).unwrap();
+        assert_eq!(out.shape(), &[3, 3, 2]);
+        // Round-trip via irfft along the same axis recovers the signal.
+        let back = irfft_norm(&out, Some(4), Some(-2), FftNorm::Backward).unwrap();
+        assert_eq!(back.shape(), &[4, 3]);
+        assert_close(back.data().unwrap(), &original, 1e-9);
+    }
+
+    #[test]
+    fn fftn_s_resizes_named_axes() {
+        // fftn over a [3, 4] complex grid with s=[2, 8], dim=[0, 1]: axis 0
+        // truncated to 2, axis 1 zero-padded to 8. Output [2, 8, 2].
+        let mut data = Vec::with_capacity(3 * 4 * 2);
+        for i in 0..12 {
+            data.push(i as f64);
+            data.push(0.0);
+        }
+        let input = t(&data, &[3, 4, 2]);
+        let out = fftn_norm(&input, Some(&[2, 8]), Some(&[0, 1]), FftNorm::Backward).unwrap();
+        assert_eq!(out.shape(), &[2, 8, 2]);
     }
 
     #[test]

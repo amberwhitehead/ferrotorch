@@ -166,16 +166,22 @@ pub use named_tensor::NamedTensor;
 // already declared `pub mod linalg;` above.
 pub use dispatch::{DispatchKey, DispatchKeySet, Dispatcher, Kernel};
 pub use fft::{
-    fft, fft2, fftfreq, fftn, fftshift, hfft, hfft2, hfftn, ifft, ifft2, ifftn, ifftshift, ihfft,
-    ihfft2, ihfftn, irfft, irfft2, irfftn, rfft, rfft2, rfftfreq, rfftn,
+    FftNorm, fft, fft_norm, fft2, fft2_norm, fftfreq, fftn, fftn_norm, fftshift, hfft, hfft_norm,
+    hfft2, hfft2_norm, hfftn, hfftn_norm, ifft, ifft_norm, ifft2, ifft2_norm, ifftn, ifftn_norm,
+    ifftshift, ihfft, ihfft_norm, ihfft2, ihfft2_norm, ihfftn, ihfftn_norm, irfft, irfft_norm,
+    irfft2, irfft2_norm, irfftn, irfftn_norm, rfft, rfft_norm, rfft2, rfft2_norm, rfftfreq, rfftn,
+    rfftn_norm,
 };
 pub use flex_attention::flex_attention;
 pub use grad_fns::activation::{GeluApproximate, gelu, gelu_with, sigmoid, tanh};
 pub use grad_fns::cumulative::{cummax, cummin, cumprod, cumsum, logcumsumexp};
 pub use grad_fns::fft::{
-    fft_differentiable, fft2_differentiable, fftn_differentiable, hfft_differentiable,
-    ifft_differentiable, ifft2_differentiable, ifftn_differentiable, ihfft_differentiable,
-    irfft_differentiable, irfftn_differentiable, rfft_differentiable, rfftn_differentiable,
+    fft_differentiable, fft_differentiable_norm, fft2_differentiable, fft2_differentiable_norm,
+    fftn_differentiable, fftn_differentiable_norm, hfft_differentiable, ifft_differentiable,
+    ifft_differentiable_norm, ifft2_differentiable, ifft2_differentiable_norm,
+    ifftn_differentiable, ifftn_differentiable_norm, ihfft_differentiable, irfft_differentiable,
+    irfft_differentiable_norm, irfftn_differentiable, irfftn_differentiable_norm,
+    rfft_differentiable, rfft_differentiable_norm, rfftn_differentiable, rfftn_differentiable_norm,
 };
 pub use grad_fns::quantize_grad::fake_quantize_differentiable;
 pub use grad_fns::reduction::{

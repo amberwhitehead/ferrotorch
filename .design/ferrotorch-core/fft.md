@@ -18,12 +18,17 @@ N-D forward and inverse complex-to-complex, real-to-complex, and
 Hermitian transforms (`fft`, `ifft`, `fft2`, `ifft2`, `fftn`,
 `ifftn`, `rfft`, `irfft`, `rfftn`, `irfftn`, `hfft`, `ihfft`) plus
 the frequency helpers (`fftfreq`, `rfftfreq`) and the spectrum
-shifters (`fftshift`, `ifftshift`). The 1-D / 2-D paths run on
-[rustfft](https://crates.io/crates/rustfft) directly; the N-D /
-Hermitian / shift helpers delegate to
-[ferray_fft](https://crates.io/crates/ferray-fft). Complex values
-follow PyTorch's "trailing dim of size 2" interleaved-real
-representation. GPU paths exist for f32/f64 via cuFFT (#579 / #605).
+shifters (`fftshift`, `ifftshift`). The CPU path for every transform
+delegates to [ferray_fft](https://crates.io/crates/ferray-fft), which
+carries numpy's direction-dependent `norm` scaling and arbitrary-axis
+transforms. As of #1294 every transform accepts `norm`
+(`backward`/`forward`/`ortho` via the re-exported `FftNorm`) and `dim` / `s`
+through the `*_norm` sibling of each public fn (e.g. `fft_norm(input, n, dim,
+norm)`); the historical `fft(input, n)` / `fft2(input)` / `fftn(input, s,
+axes)` signatures remain as default-arg wrappers. Complex values follow
+PyTorch's "trailing dim of size 2" interleaved-real representation. GPU paths
+exist for f32/f64 via cuFFT on the default last-axis / `norm="backward"` case
+(#579 / #605 / #634 / #636).
 
 ## Requirements
 
@@ -54,10 +59,18 @@ representation. GPU paths exist for f32/f64 via cuFFT (#579 / #605).
   / `torch.fft.ifftshift`.
 - REQ-9: GPU dispatch — `fft`/`ifft` route to cuFFT for f32/f64 on
   CUDA (`backend.fft_c2c_*` and `pad_truncate_complex_*` from #579 /
-  #605). bf16/f16 take the CPU path via f64 round-trip (open prereq
-  blocker #1545). N-D / Hermitian / shift helpers are CPU-only;
-  CUDA inputs receive `Err(NotImplementedOnCuda)` from the underlying
-  `ferray_fft` calls.
+  #605) on the default last-axis / `norm="backward"` case; explicit
+  `dim`/`norm`/`s` fall through to the ferray_fft CPU path. bf16/f16 take
+  the CPU path via f64 round-trip (open prereq blocker #1545).
+- REQ-10: `norm` / `dim` / `s` parameters (#1294) — every transform exposes a
+  `*_norm` sibling honouring `torch.fft.*`'s `norm`
+  (`backward`/`forward`/`ortho`), `dim`, and (for 2-D/N-D) `s` kwargs. The
+  norm string maps 1:1 onto the re-exported `FftNorm` (numpy's
+  direction-dependent scaling, matching `SpectralOps.cpp:116-130` +
+  `SpectralOpsUtils.h:15-19`); `dim`/`s` thread through ferray_fft's
+  axis-aware transforms. Mirrors the Python signatures
+  `fft(input, n, dim, norm)` / `fft2(input, s, dim, norm)` /
+  `fftn(input, s, dim, norm)` (`torch/fft/__init__.py:36,132,246`).
 
 ## Acceptance Criteria
 
@@ -69,64 +82,60 @@ representation. GPU paths exist for f32/f64 via cuFFT (#579 / #605).
 - [x] AC-3: `rfft` of an even-length real signal produces shape
   `[..., n/2+1, 2]`.
 - [x] AC-4: CUDA f32/f64 `fft` paths route through `backend.fft_c2c_*`
-  per the dispatch at `fft.rs:139-169` (cuFFT, no host bounce).
+  on the default last-axis / `norm="backward"` case (the cuFFT branch in
+  `fft_norm` / `ifft_norm`, cuFFT, no host bounce).
 - [ ] AC-5: bf16/f16 GPU fft path — NOT-STARTED, blocked on #1545
   (cuFFT only supports f32/f64; the implementation currently
   upcasts via `data_vec()` → CPU round-trip).
+- [x] AC-6: `norm` / `dim` / `s` (#1294) — `fft_norm`/`ifft_norm`/… honour
+  `ortho`/`forward` norm and arbitrary `dim`/`s`; verified by the host-side
+  tests (`fft_ortho_norm_scales_dc_by_sqrt_n`, `fft_dim_transforms_named_axis`,
+  `rfft_dim_transforms_named_axis`, `fftn_s_resizes_named_axes`) and the
+  parity sweep (`grad_fns/fft.md` ACs, all 18 ops `0 skipped, 0 failed`).
 
 ## Architecture
 
-The module imports `rustfft::FftPlanner` (`fft.rs:25-26`) for the
-1-D / 2-D paths and `ferray_fft::FftNorm` (`:24`) for the higher-
-dimensional delegate path. Complex values are flat
-`[re, im, re, im, ...]` in the tensor buffer per PyTorch's
-convention.
+Complex values are flat `[re, im, re, im, ...]` in the tensor buffer per
+PyTorch's convention. The CPU path delegates to `ferray_fft` for every
+transform; the bridge (`tensor_to_complex_array` / `tensor_to_real_array` /
+`complex_array_to_tensor` / `real_array_to_tensor`) moves data between
+ferrotorch's interleaved-`[..., 2]` layout and ferray's
+`Array<Complex<f64>, IxDyn>` (stripping / appending the trailing complex pair),
+computing the butterfly in f64.
 
-`fft_1d_last_axis` at `fft.rs:66-94` plans the FFT once via
-`FftPlanner::plan_fft_forward(n)` / `plan_fft_inverse(n)` and walks
-each batch slice `data[b*n..(b+1)*n]` calling `fft.process` in place.
-The inverse path applies `1/n` normalisation after the transform.
+Each public fn is a thin default-arg wrapper over a `*_norm` sibling threading
+`norm` ([`FftNorm`]) and `dim` / `s`:
 
-`fft` at `:108` validates trailing-dim-2 + ndim ≥ 2, computes the
-batch size, and either dispatches to cuFFT (`backend.fft_c2c_{f32,f64}`
-at `:160-164`, with optional `pad_truncate_complex_*` at `:151-158`
-for n != input_n per #605) or builds a host-side
-`Vec<Complex<f64>>`, calls `fft_1d_last_axis`, and writes back
-`[re, im]` pairs cast via `complex_to_pairs::<T>` at `:51`.
+- `fft` → `fft_norm(input, n, dim, norm)`; `ifft` → `ifft_norm`. cuFFT
+  (`backend.fft_c2c_{f32,f64}`, with `pad_truncate_complex_*` for `n !=
+  input_n` per #605) handles the default last-axis / `norm="backward"` case;
+  everything else goes through `ferray_fft::fft` / `ifft` (which take
+  `axis: Option<isize>` + `norm: FftNorm`).
+- `rfft` → `rfft_norm` / `irfft` → `irfft_norm` (real-to-complex pair;
+  `ferray_fft::rfft` / `irfft` thread `axis` + `norm`). `rfft` output has
+  shape `[..., n/2+1, 2]`.
+- `fft2` → `fft2_norm` / `ifft2` → `ifft2_norm` (`ferray_fft::fft2` / `ifft2`
+  with `s` / `axes` / `norm`; arbitrary-length `dim` lists are honoured since
+  ferray's `fft2` accepts any `axes`).
+- `fftn`/`ifftn`/`rfftn`/`irfftn` → their `*_norm` siblings delegating to
+  `ferray_fft::fftn` / `ifftn` / `rfftn` / `irfftn`.
+- `hfft` → `hfft_norm` / `ihfft` → `ihfft_norm`, and the 2-D / N-D Hermitian
+  ops `hfft2`/`ihfft2`/`hfftn`/`ihfftn` → their `*_norm` siblings, all
+  delegating to the matching `ferray_fft::h*` / `ih*` entry points.
 
-`ifft` at `:200` is symmetric to `fft` — the inverse-transform plan
-selector and the same cuFFT-vs-rustfft branching.
+The norm string→`FftNorm` mapping is `fft_norm_from_str` (`backward`→`Backward`,
+`forward`→`Forward`, `ortho`→`Ortho`, unknown→`InvalidArgument`, mirroring
+upstream `norm_from_string`'s `TORCH_CHECK`).
 
-`rfft` at `:289` / `irfft` at `:370` handle the real-to-complex
-path. The output of `rfft` has shape `[..., n/2+1, 2]`; the inverse
-`irfft` accepts that shape and reproduces the real signal.
+`fftfreq` / `rfftfreq` build `f64` 1-D tensors via `crate::creation::from_vec`.
+`fftshift` / `ifftshift` delegate to `ferray_fft::fftshift` / `ifftshift`.
 
-`fft2` / `ifft2` at `:472` / `:516` are 2-D variants — they run two
-sequential 1-D FFTs (transpose + fft + transpose).
-
-`fftn` / `ifftn` / `rfftn` / `irfftn` at `:735` / `:848` / `:948` /
-`:967` delegate to `ferray_fft` via the bridge:
-`ferray_fft::fftn(ferray_array, ...)` etc. The bridge constructs a
-`ferray_core::Array<Complex<f64>, IxDyn>` from the tensor's host
-buffer and casts the result back via `complex_to_pairs`. **GPU
-inputs**: this delegate path requires CPU data, so CUDA tensors
-take the host-bounce-and-back route — but only for the N-D /
-Hermitian helpers, not the 1-D / 2-D core which have direct cuFFT
-support.
-
-`hfft` / `ihfft` at `:1000` / `:1048` cover the Hermitian-symmetric
-FFT pair through `ferray_fft::hfft` / `ihfft`.
-
-`fftfreq` / `rfftfreq` at `:1093` / `:1105` build `f64` 1-D tensors
-via `crate::creation::from_vec`. `fftshift` / `ifftshift` at `:1122`
-/ `:1141` delegate to `ferray_fft::fftshift` / `ifftshift`.
-
-**Non-test consumer**: `crate::complex_tensor::ComplexTensor`
-methods at `complex_tensor.rs:324-352` (`fft`/`ifft`/`fft2`/`ifft2`)
-delegate to `crate::fft::fft` / `ifft` / `fft2` / `ifft2`
-respectively. Re-exported at `lib.rs:153-156` as the top-level
-`ferrotorch_core::{fft, fft2, ifft, ifft2, fftn, ifftn, rfft, irfft,
-rfftn, irfftn, hfft, ihfft, fftfreq, rfftfreq, fftshift, ifftshift}`.
+**Non-test consumer**: `crate::complex_tensor::ComplexTensor` (`ComplexTensor::
+fft`/`ifft`/`fft2`/`ifft2`) delegates to `crate::fft::fft` / `ifft` / `fft2` /
+`ifft2` (the default-arg wrappers, which in turn consume the `*_norm` path).
+Re-exported in `lib.rs` as the top-level `ferrotorch_core::{fft, fft_norm,
+ifft, …, FftNorm}` (and the `*_differentiable` / `*_differentiable_norm`
+autograd wrappers from `grad_fns::fft`).
 
 ## Parity contract
 

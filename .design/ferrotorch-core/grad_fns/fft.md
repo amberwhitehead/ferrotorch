@@ -182,42 +182,38 @@ data without a separate complex dtype.
 
 ## Acceptance Criteria
 
-> **AC smoke-metric note (#1294 landed).** The original AC text demanded the
-> literal `passed (0 skipped, 0 failed)` grep pattern. That `0 skipped` form
-> is **unachievable** for ferrotorch's fixed-axis FFT kernels: op_db emits
-> samples with `norm="ortho"` and arbitrary `dim`/`s` kwargs that ferrotorch's
-> kernels (last-axis-1-D / trailing-2-axes-2-D / all-inner-axes-N-D,
-> `norm="backward"` only) cannot honour. The `dispatch_fft` fn at
-> `tools/parity-sweep/runner/src/main.rs:4793` (routed from the match arm at
-> `:4760`) returns `Ok(None)` (a
-> *legitimate* skip, not a failure) for those, so every op reports
-> `K/N passed (S skipped, 0 failed)` with `K >= 8` and `S > 0`. The honest
-> smoke criterion R-DEFER-6 binds to is therefore **`K >= 1` passed with
-> `0 failed`** (grep `\[fft.<op>\] [1-9][0-9]*/[0-9]+ passed \([0-9]+ skipped,
-> 0 failed\)` >= 1). All 18 ACs below are verified under that criterion at
-> `--seeds 8` (measured 2026-05-27 — see `## Verification` for the per-op
-> table). The skipped non-default-norm/dim/s coverage is a future-work item,
-> not a divergence.
+> **AC smoke-metric note (#1294 full scope landed 2026-05-27).** The FFT
+> functions now honour `norm` / `dim` / `s` end-to-end (the `*_norm` kernel
+> family + `*_differentiable_norm` autograd wrappers + the `dispatch_fft`
+> decode of the `norm`/`dim`/`s` kwargs). The 40 op_db samples that previously
+> SKIPPED (because the fixed-axis / `norm="backward"`-only kernels couldn't
+> express them) now RUN and PASS. The literal `passed (0 skipped, 0 failed)`
+> grep pattern is therefore achievable and is the AC criterion: every op
+> reports `N/N passed (0 skipped, 0 failed)` at `--seeds 8`
+> (`grep -c "passed (0 skipped, 0 failed)"` = 1 for all 18). The FFT family
+> uses `tolerance_for` rtol=1e-4 (the many-FMA reduction lands within f32
+> cross-implementation ULP variance, same precedent as matmul/conv/norm —
+> see the runner's `tolerance_for` doc-comment).
 
-- [x] AC-1: `fft.fft` parity-sweep at `--seeds 8` returns `[fft.fft] 24/64
-  passed (40 skipped, 0 failed)` (K=24 >= 1, 0 failed). Closed by #1294.
-- [x] AC-2: `fft.ifft` parity-sweep — `24/64 passed (40 skipped, 0 failed)`.
-- [x] AC-3: `fft.rfft` parity-sweep — `24/64 passed (40 skipped, 0 failed)`.
-- [x] AC-4: `fft.irfft` parity-sweep — `24/64 passed (40 skipped, 0 failed)`.
-- [x] AC-5: `fft.fftn` parity-sweep — `16/72 passed (56 skipped, 0 failed)`.
-- [x] AC-6: `fft.ifftn` parity-sweep — `16/72 passed (56 skipped, 0 failed)`.
-- [x] AC-7: `fft.rfftn` parity-sweep — `16/72 passed (56 skipped, 0 failed)`.
-- [x] AC-8: `fft.irfftn` parity-sweep — `16/72 passed (56 skipped, 0 failed)`.
-- [x] AC-9: `fft.hfft` parity-sweep — `24/64 passed (40 skipped, 0 failed)`.
-- [x] AC-10: `fft.ihfft` parity-sweep — `24/64 passed (40 skipped, 0 failed)`.
-- [x] AC-11: `fft.fft2` parity-sweep — `8/56 passed (48 skipped, 0 failed)`.
-- [x] AC-12: `fft.ifft2` parity-sweep — `8/56 passed (48 skipped, 0 failed)`.
-- [x] AC-13: `fft.rfft2` parity-sweep — `8/56 passed (48 skipped, 0 failed)`.
-- [x] AC-14: `fft.irfft2` parity-sweep — `8/56 passed (48 skipped, 0 failed)`.
-- [x] AC-15: `fft.hfft2` parity-sweep — `8/56 passed (48 skipped, 0 failed)`.
-- [x] AC-16: `fft.ihfft2` parity-sweep — `8/56 passed (48 skipped, 0 failed)`.
-- [x] AC-17: `fft.hfftn` parity-sweep — `16/72 passed (56 skipped, 0 failed)`.
-- [x] AC-18: `fft.ihfftn` parity-sweep — `16/72 passed (56 skipped, 0 failed)`.
+- [x] AC-1: `fft.fft` parity-sweep at `--seeds 8` returns `[fft.fft] 64/64
+  passed (0 skipped, 0 failed)`. Closed by #1294.
+- [x] AC-2: `fft.ifft` parity-sweep — `64/64 passed (0 skipped, 0 failed)`.
+- [x] AC-3: `fft.rfft` parity-sweep — `64/64 passed (0 skipped, 0 failed)`.
+- [x] AC-4: `fft.irfft` parity-sweep — `64/64 passed (0 skipped, 0 failed)`.
+- [x] AC-5: `fft.fftn` parity-sweep — `72/72 passed (0 skipped, 0 failed)`.
+- [x] AC-6: `fft.ifftn` parity-sweep — `72/72 passed (0 skipped, 0 failed)`.
+- [x] AC-7: `fft.rfftn` parity-sweep — `72/72 passed (0 skipped, 0 failed)`.
+- [x] AC-8: `fft.irfftn` parity-sweep — `72/72 passed (0 skipped, 0 failed)`.
+- [x] AC-9: `fft.hfft` parity-sweep — `64/64 passed (0 skipped, 0 failed)`.
+- [x] AC-10: `fft.ihfft` parity-sweep — `64/64 passed (0 skipped, 0 failed)`.
+- [x] AC-11: `fft.fft2` parity-sweep — `56/56 passed (0 skipped, 0 failed)`.
+- [x] AC-12: `fft.ifft2` parity-sweep — `56/56 passed (0 skipped, 0 failed)`.
+- [x] AC-13: `fft.rfft2` parity-sweep — `56/56 passed (0 skipped, 0 failed)`.
+- [x] AC-14: `fft.irfft2` parity-sweep — `56/56 passed (0 skipped, 0 failed)`.
+- [x] AC-15: `fft.hfft2` parity-sweep — `56/56 passed (0 skipped, 0 failed)`.
+- [x] AC-16: `fft.ihfft2` parity-sweep — `56/56 passed (0 skipped, 0 failed)`.
+- [x] AC-17: `fft.hfftn` parity-sweep — `72/72 passed (0 skipped, 0 failed)`.
+- [x] AC-18: `fft.ihfftn` parity-sweep — `72/72 passed (0 skipped, 0 failed)`.
 - [x] AC-19: `cargo test -p ferrotorch-core --lib grad_fns::fft` passes —
   the in-file `#[cfg(test)] mod tests` at `grad_fns/fft.rs:1296-1513`
   covers `grad_fn` attachment for all ten differentiable wrappers
@@ -513,41 +509,53 @@ failed)` with N >= 1.
 
 ## REQ status table
 
+As of #1294 the autograd wrappers thread `norm` / `dim` / `s` end-to-end (the
+`*_differentiable_norm` siblings of each wrapper; the backward VJP uses the
+`adjoint_norm` identity from `tools/autograd/derivatives.yaml:2960-2961`). The
+parity smoke counts below are now `0 skipped, 0 failed` at `--seeds 8` — the
+40 previously-skipped `norm`/`dim`/`s` samples RUN and PASS. Cites use symbol
+anchors per R-CITE-2b.
+
 | REQ | Status | Evidence |
 |---|---|---|
-| REQ-1 | SHIPPED | impl `pub fn fft_differentiable` at `grad_fns/fft.rs:364` + `FftBackward` struct; re-exported at `lib.rs:175-179`. Non-test production consumer: `dispatch_fft` arm `"fft.fft" => gfft::fft_differentiable(&to_complex(&real)?, n)` at `tools/parity-sweep/runner/src/main.rs:4852` (the parity-sweep binary links `ferrotorch_core` and invokes the wrapper). Parity smoke `--seeds 8`: `[fft.fft] 24/64 passed (40 skipped, 0 failed)` (K=24 >= 1, 0 failed). Closes #1294. |
-| REQ-2 | SHIPPED | impl `ifft_differentiable` + `IfftBackward`; re-exported `lib.rs:175-179`. Consumer: `main.rs:4853` (`"fft.ifft" => gfft::ifft_differentiable`). Smoke: `24/64 passed (40 skipped, 0 failed)`. |
-| REQ-3 | SHIPPED | impl `rfft_differentiable` at `grad_fns/fft.rs:398` + `RfftBackward`; re-exported `lib.rs:175-179`. Consumer: `main.rs` (`"fft.rfft" => gfft::rfft_differentiable(&real, n)`). Smoke: `24/64 passed (40 skipped, 0 failed)`. |
-| REQ-4 | SHIPPED | impl `irfft_differentiable` + `IrfftBackward`; re-exported `lib.rs:175-179`. Consumer: `main.rs` (`"fft.irfft" => gfft::irfft_differentiable(&to_complex(&real)?, n)`). Smoke: `24/64 passed (40 skipped, 0 failed)`. |
-| REQ-5 | SHIPPED | impl `fftn_differentiable` at `grad_fns/fft.rs:1103` + `FftnBackward`; re-exported `lib.rs:175-179` (#1296). Consumer: `main.rs` (`"fft.fftn" => gfft::fftn_differentiable(&to_complex(&real)?, None, None)`). Smoke: `16/72 passed (56 skipped, 0 failed)`. |
-| REQ-6 | SHIPPED | impl `ifftn_differentiable` at `grad_fns/fft.rs:1127` + `IfftnBackward`; re-exported `lib.rs:175-179`. Consumer: `main.rs` (`"fft.ifftn" => gfft::ifftn_differentiable`). Smoke: `16/72 passed (56 skipped, 0 failed)`. |
-| REQ-7 | SHIPPED | impl `rfftn_differentiable` at `grad_fns/fft.rs:1151` + `RfftnBackward`; re-exported `lib.rs:175-179`. Consumer: `main.rs` (`"fft.rfftn" => gfft::rfftn_differentiable(&real, None, None)`). Smoke: `16/72 passed (56 skipped, 0 failed)`. |
-| REQ-8 | SHIPPED | impl `irfftn_differentiable` at `grad_fns/fft.rs:1217` + `IrfftnBackward`; re-exported `lib.rs:175-179`. Consumer: `main.rs` (`"fft.irfftn" => gfft::irfftn_differentiable`). Smoke: `16/72 passed (56 skipped, 0 failed)`. |
-| REQ-9 | SHIPPED | impl `hfft_differentiable` + `HfftBackward` (wrapper); the parity arm calls the forward kernel `ferrotorch_core::hfft` (re-exported `lib.rs:168-171`). Consumer: `main.rs` (`"fft.hfft" => ferrotorch_core::hfft(&to_complex(&real)?, n)`). Smoke: `24/64 passed (40 skipped, 0 failed)`. |
-| REQ-10 | SHIPPED | impl `ihfft_differentiable` + `IhfftBackward`; parity arm calls forward `ferrotorch_core::ihfft` (`lib.rs:168-171`). Consumer: `main.rs` (`"fft.ihfft" => ferrotorch_core::ihfft(&real, n)`). Smoke: `24/64 passed (40 skipped, 0 failed)`. |
-| REQ-11 | SHIPPED | impl `fft2_differentiable` at `grad_fns/fft.rs:1424` + `Fft2Backward` (#1300); re-exported `lib.rs:175-179`. Consumer: `main.rs` (`"fft.fft2" => gfft::fft2_differentiable(&to_complex(&real)?)`). Smoke: `8/56 passed (48 skipped, 0 failed)`. |
-| REQ-12 | SHIPPED | impl `ifft2_differentiable` at `grad_fns/fft.rs:1439` + `Ifft2Backward` (#1300); re-exported `lib.rs:175-179`. Consumer: `main.rs` (`"fft.ifft2" => gfft::ifft2_differentiable`). Smoke: `8/56 passed (48 skipped, 0 failed)`. |
-| REQ-13 | SHIPPED | forward `rfft2` at `fft.rs:1013` (delegates `ferray_fft::rfft2`); re-exported `lib.rs:168-171` (#1299). Consumer: `main.rs` (`"fft.rfft2" => ferrotorch_core::rfft2(&real, None, None)`). Smoke: `8/56 passed (48 skipped, 0 failed)`. `rfft2_differentiable` autograd wrapper remains a follow-up. |
-| REQ-14 | SHIPPED | forward `irfft2` at `fft.rs:1033` (delegates `ferray_fft::irfft2`); re-exported `lib.rs:168-171`. Consumer: `main.rs` (`"fft.irfft2" => ferrotorch_core::irfft2(&to_complex(&real)?, None, None)`). Smoke: `8/56 passed (48 skipped, 0 failed)`. `irfft2_differentiable` follow-up. |
-| REQ-15 | SHIPPED | forward `hfft2` at `fft.rs:1153` (delegates `ferray_fft::hfft2`); re-exported `lib.rs:168-171`. Consumer: `main.rs` (`"fft.hfft2" => ferrotorch_core::hfft2(&to_complex(&real)?, None, None)`). Smoke: `8/56 passed (48 skipped, 0 failed)`. `hfft2_differentiable` follow-up. |
-| REQ-16 | SHIPPED | forward `ihfft2` at `fft.rs:1173` (delegates `ferray_fft::ihfft2`); re-exported `lib.rs:168-171`. Consumer: `main.rs` (`"fft.ihfft2" => ferrotorch_core::ihfft2(&real, None, None)`). Smoke: `8/56 passed (48 skipped, 0 failed)`. `ihfft2_differentiable` follow-up. |
-| REQ-17 | SHIPPED | forward `hfftn` at `fft.rs:1194` (delegates `ferray_fft::hfftn`); re-exported `lib.rs:168-171`. Consumer: `main.rs` (`"fft.hfftn" => ferrotorch_core::hfftn(&to_complex(&real)?, None, None)`). Smoke: `16/72 passed (56 skipped, 0 failed)`. `hfftn_differentiable` follow-up. |
-| REQ-18 | SHIPPED | forward `ihfftn` at `fft.rs:1214` (delegates `ferray_fft::ihfftn`); re-exported `lib.rs:168-171`. Consumer: `main.rs` (`"fft.ihfftn" => ferrotorch_core::ihfftn(&real, None, None)`). Smoke: `16/72 passed (56 skipped, 0 failed)`. `ihfftn_differentiable` follow-up. |
+| REQ-1 | SHIPPED | impl `pub fn fft_differentiable` (+ `fft_differentiable_norm`) + `FftBackward` (carries `dim`/`norm`) in `grad_fns/fft.rs`; re-exported in `lib.rs`. Non-test production consumer: `fft_differentiable` delegates to `fft_differentiable_norm` (the default-arg wrapper IS the consumer of the norm path) + `dispatch_fft` arm `"fft.fft"`. Parity smoke `--seeds 8`: `[fft.fft] 64/64 passed (0 skipped, 0 failed)` (K=1, 0 failed). Closes #1294. |
+| REQ-2 | SHIPPED | impl `ifft_differentiable` / `ifft_differentiable_norm` + `IfftBackward`; consumer: `ifft_differentiable` → `ifft_differentiable_norm`. Smoke: `[fft.ifft] 64/64 passed (0 skipped, 0 failed)`. |
+| REQ-3 | SHIPPED | impl `rfft_differentiable` / `rfft_differentiable_norm` + `RfftBackward` (1-D fast path) / `RfftnBackward` (axis-general path). Consumer: `rfft_differentiable` → `rfft_differentiable_norm`. Smoke: `[fft.rfft] 64/64 passed (0 skipped, 0 failed)`. |
+| REQ-4 | SHIPPED | impl `irfft_differentiable` / `irfft_differentiable_norm` + `IrfftBackward` / `IrfftnBackward`. Consumer: `irfft_differentiable` → `irfft_differentiable_norm`. Smoke: `[fft.irfft] 64/64 passed (0 skipped, 0 failed)`. |
+| REQ-5 | SHIPPED | impl `fftn_differentiable` / `fftn_differentiable_norm` + `FftnBackward` (threaded `norm`, #1296). Consumer: `fftn_differentiable` → `fftn_differentiable_norm`. Smoke: `[fft.fftn] 72/72 passed (0 skipped, 0 failed)`. |
+| REQ-6 | SHIPPED | impl `ifftn_differentiable` / `ifftn_differentiable_norm` + `IfftnBackward`. Consumer: `ifftn_differentiable` → `ifftn_differentiable_norm`. Smoke: `[fft.ifftn] 72/72 passed (0 skipped, 0 failed)`. |
+| REQ-7 | SHIPPED | impl `rfftn_differentiable` / `rfftn_differentiable_norm` + `RfftnBackward` (threaded `norm`). Consumer: `rfftn_differentiable` → `rfftn_differentiable_norm`. Smoke: `[fft.rfftn] 72/72 passed (0 skipped, 0 failed)`. |
+| REQ-8 | SHIPPED | impl `irfftn_differentiable` / `irfftn_differentiable_norm` + `IrfftnBackward` (threaded `norm`). Consumer: `irfftn_differentiable` → `irfftn_differentiable_norm`. Smoke: `[fft.irfftn] 72/72 passed (0 skipped, 0 failed)`. |
+| REQ-9 | SHIPPED | impl `hfft_differentiable` + `HfftBackward`; the parity arm calls the forward kernel `ferrotorch_core::hfft_norm` (re-exported in `lib.rs`), whose production consumer is the default `hfft` wrapper. Smoke: `[fft.hfft] 64/64 passed (0 skipped, 0 failed)`. |
+| REQ-10 | SHIPPED | impl `ihfft_differentiable` + `IhfftBackward`; parity arm calls forward `ferrotorch_core::ihfft_norm` (consumer: default `ihfft` wrapper). Smoke: `[fft.ihfft] 64/64 passed (0 skipped, 0 failed)`. |
+| REQ-11 | SHIPPED | impl `fft2_differentiable` / `fft2_differentiable_norm` + `Fft2Backward` (default) / `FftnBackward` (norm/dim/s path, mirrors `aten::fft_fft2_symint` → `fft_fftn_symint`). Consumer: `fft2_differentiable` → `fft2_differentiable_norm`. Smoke: `[fft.fft2] 56/56 passed (0 skipped, 0 failed)`. |
+| REQ-12 | SHIPPED | impl `ifft2_differentiable` / `ifft2_differentiable_norm` + `Ifft2Backward` / `IfftnBackward`. Consumer: `ifft2_differentiable` → `ifft2_differentiable_norm`. Smoke: `[fft.ifft2] 56/56 passed (0 skipped, 0 failed)`. |
+| REQ-13 | SHIPPED | forward `rfft2` / `rfft2_norm` (delegates `ferray_fft::rfft2` with threaded `norm`); consumer: default `rfft2` wrapper. Smoke: `[fft.rfft2] 56/56 passed (0 skipped, 0 failed)`. `rfft2_differentiable` autograd wrapper remains a follow-up. |
+| REQ-14 | SHIPPED | forward `irfft2` / `irfft2_norm` (delegates `ferray_fft::irfft2`); consumer: default `irfft2` wrapper. Smoke: `[fft.irfft2] 56/56 passed (0 skipped, 0 failed)`. `irfft2_differentiable` follow-up. |
+| REQ-15 | SHIPPED | forward `hfft2` / `hfft2_norm` (delegates `ferray_fft::hfft2`); consumer: default `hfft2` wrapper. Smoke: `[fft.hfft2] 56/56 passed (0 skipped, 0 failed)`. `hfft2_differentiable` follow-up. |
+| REQ-16 | SHIPPED | forward `ihfft2` / `ihfft2_norm` (delegates `ferray_fft::ihfft2`); consumer: default `ihfft2` wrapper. Smoke: `[fft.ihfft2] 56/56 passed (0 skipped, 0 failed)`. `ihfft2_differentiable` follow-up. |
+| REQ-17 | SHIPPED | forward `hfftn` / `hfftn_norm` (delegates `ferray_fft::hfftn`); consumer: default `hfftn` wrapper. Smoke: `[fft.hfftn] 72/72 passed (0 skipped, 0 failed)`. `hfftn_differentiable` follow-up. |
+| REQ-18 | SHIPPED | forward `ihfftn` / `ihfftn_norm` (delegates `ferray_fft::ihfftn`); consumer: default `ihfftn` wrapper. Smoke: `[fft.ihfftn] 72/72 passed (0 skipped, 0 failed)`. `ihfftn_differentiable` follow-up. |
 
 ### Blocker summary
 
-- **#1294** — CLOSED. The parity-sweep oracle now round-trips
+- **#1294** — CLOSED (full scope). The parity-sweep oracle round-trips
   `torch.complex64` / `torch.complex128` as interleaved-`[..., 2]` real
   buffers (`oracle.py` `tensor_to_wire` / `wire_to_tensor`, via
   `torch.view_as_real` / `view_as_complex` with `resolve_conj()` for the
   inverse transforms' lazy-conjugate outputs), the runner decodes that wire
-  form in `WireTensor::to_f32`'s `complex64`/`complex128` arm
-  (`main.rs:58`), and all 18 FFT ops dispatch through `dispatch_fft`
-  (`main.rs:4793`). Every op verifies `K >= 1` passed with `0 failed` at
-  `--seeds 8` (see `## Acceptance Criteria` + `## Verification`). The
-  non-default `norm`/`dim`/`s` op_db samples are legitimately skipped
-  (ferrotorch's fixed-axis kernels can't honour them); supporting them is a
-  future-work item, not a divergence.
+  form in `WireTensor::to_f32`'s `complex64`/`complex128` arm and all 18 FFT
+  ops dispatch through `dispatch_fft`. The FFT functions now honour `norm`
+  (`backward`/`forward`/`ortho` via the `FftNorm` re-export — the norm string
+  maps 1:1 onto numpy's direction-dependent scaling, matching
+  `aten/src/ATen/native/SpectralOps.cpp:116-130` + `SpectralOpsUtils.h:15-19`)
+  and arbitrary `dim` / `s` (threaded through ferray_fft's axis-aware
+  transforms). The 40 op_db samples that previously SKIPPED (because the
+  fixed-axis kernels couldn't express `norm`/`dim`/`s`) now RUN and PASS:
+  **every op reports `N/N passed (0 skipped, 0 failed)` at `--seeds 8`**
+  (`grep -c "passed (0 skipped, 0 failed)"` = 1 for all 18). The earlier
+  "non-default samples are legitimately skipped" rationale is superseded —
+  that was the deferral the build closed.
 - **#1296** — CLOSED. Six N-D / Hermitian differentiable wrappers (REQ-5..10)
   re-exported in `lib.rs`.
 - **#1299** — forward ops CLOSED. The six forward kernels (`rfft2`,
