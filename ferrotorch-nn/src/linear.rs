@@ -23,7 +23,7 @@
 //! | REQ-3 | SHIPPED | impl: shape flatten/reshape pre/post `linear_fused` inside `<Linear as Module>::forward` here, mirroring `linear.py:67-70`; non-test consumer: transformer blocks in `ferrotorch-nn/src/transformer.rs` and `ferrotorch-llama/src/attention.rs` feed 3-D `[B, T, H]` tensors through `Linear::forward` for QKV projection. |
 //! | REQ-4 | SHIPPED | impl: the `linear_fused(&input_2d, weight.tensor(), bias_opt)` call inside `<Linear as Module>::forward` mirroring `linear.py:130-134`'s `F.linear`; non-test consumer: every model in `ferrotorch-vision/src/models/` invokes `Linear::forward` through its classifier head. |
 //! | REQ-5 | SHIPPED | impl: `kaiming_uniform(&mut weight, NonLinearity::ReLU)` call inside `Linear::new` here; non-test consumer: `Linear::new` is the construction path used by every consumer above. NOTE: gain divergence from upstream `linear.py:124`. |
-//! | REQ-6 | SHIPPED | impl: `crate::init::zeros(&mut b)?` call inside `Linear::new` here; non-test consumer: same as REQ-5. NOTE: divergence from upstream `linear.py:125-128` uniform bias init. |
+//! | REQ-6 | SHIPPED | impl: `crate::init::uniform(&mut b, -bound, bound)?` with `bound = 1/sqrt(in_features)` call inside `Linear::new` here mirroring `torch/nn/modules/linear.py:124-128`; non-test consumer: same as REQ-5. |
 //! | REQ-7 | SHIPPED | impl: `impl<T: Float> Module<T> for Linear<T>` block here providing `forward`/`parameters`/`parameters_mut`/`named_parameters`/`train`/`eval`/`is_training`; non-test consumer: `ferrotorch_optim::Optimizer` consumes `Module::parameters_mut()` to apply updates. |
 //! | REQ-8 | SHIPPED | impl: `impl<T: Float> Display for Linear<T>` block here matching upstream `linear.py:136-140`'s `extra_repr`; non-test consumer: `format!("{layer}")` in model summary printing (e.g. `ferrotorch_train` learner emits module displays in logs). |
 //! | REQ-9 | SHIPPED | `Linear` carries only `Parameter<T>` fields which are `Send + Sync`; verified at compile time via `assert_send_sync::<Linear<f32>>()` in tests; non-test consumer: any multi-threaded `DataParallel`-style training scaffolding in `ferrotorch-train` requires `Send + Sync`. |
@@ -49,7 +49,8 @@ use crate::parameter::Parameter;
 ///
 /// - **Weight**: Kaiming uniform with `gain = sqrt(2)` (ReLU). This is
 ///   the PyTorch default for `nn.Linear`.
-/// - **Bias**: Zeros.
+/// - **Bias**: Uniform `U(-bound, bound)` with `bound = 1/sqrt(in_features)`,
+///   mirroring `torch/nn/modules/linear.py:124-128`.
 ///
 /// # Examples
 ///
@@ -100,10 +101,19 @@ impl<T: Float> Linear<T> {
         let mut weight = Parameter::zeros(&[out_features, in_features])?;
         kaiming_uniform(&mut weight, NonLinearity::ReLU)?;
 
-        // Initialize bias with zeros.
+        // Initialize bias U(-bound, bound) with bound = 1/sqrt(fan_in),
+        // fan_in = in_features. Mirrors `torch/nn/modules/linear.py:124-128`:
+        //   `fan_in, _ = init._calculate_fan_in_and_fan_out(self.weight)`
+        //   `bound = 1 / math.sqrt(fan_in) if fan_in > 0 else 0`
+        //   `init.uniform_(self.bias, -bound, bound)`
         let bias_param = if bias {
             let mut b = Parameter::zeros(&[out_features])?;
-            crate::init::zeros(&mut b)?;
+            let bound = if in_features > 0 {
+                1.0 / (in_features as f64).sqrt()
+            } else {
+                0.0
+            };
+            crate::init::uniform(&mut b, -bound, bound)?;
             Some(b)
         } else {
             None
@@ -717,6 +727,39 @@ mod tests {
         fn assert_send_sync<T: Send + Sync>() {}
         assert_send_sync::<Linear<f32>>();
         assert_send_sync::<Linear<f64>>();
+    }
+
+    // -----------------------------------------------------------------------
+    // Bias init bounds — REQ-6 / closes #1450
+    // -----------------------------------------------------------------------
+
+    /// Verifies bias is initialized within `U(-bound, bound)` where
+    /// `bound = 1/sqrt(in_features)` per `torch/nn/modules/linear.py:124-128`.
+    /// Pre-fix the bias was identically 0.0 (zeros_init), which would FAIL
+    /// the `nonzero` assertion below with overwhelming probability.
+    #[test]
+    fn test_linear_bias_init_bounded_uniform() {
+        let in_features = 64usize;
+        let out_features = 128usize;
+        let layer = Linear::<f32>::new(in_features, out_features, true).unwrap();
+        let bias = layer.bias.as_ref().expect("bias requested");
+        let bias_data = bias.tensor().data_vec().unwrap();
+        let bound = 1.0_f32 / (in_features as f32).sqrt();
+        let mut nonzero = 0usize;
+        for &b in &bias_data {
+            assert!(
+                b.abs() <= bound + 1e-6,
+                "bias element {b} exceeds bound {bound}"
+            );
+            if b != 0.0 {
+                nonzero += 1;
+            }
+        }
+        assert!(
+            nonzero > out_features / 2,
+            "expected most bias entries to be nonzero (got {nonzero}/{out_features}); \
+             would FAIL pre-fix when bias was zeros_init"
+        );
     }
 
     // -----------------------------------------------------------------------

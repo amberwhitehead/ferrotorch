@@ -17,7 +17,7 @@
 //! | REQ-6 | SHIPPED | impl: `pub struct Conv1d` / `Conv3d` / `ConvTranspose{1,2,3}d` here; non-test consumer: `ferrotorch-vision/src/models/inception.rs` uses `Conv2d` + `ConvTranspose2d`; `ferrotorch-nn/src/lazy_conv.rs` instantiates `Conv{1,2,3}d` via the materialize path. |
 //! | REQ-7 | SHIPPED | impl: `impl<T: Float> Module<T> for Conv2d<T>` block (and analogues for the other 5) here; non-test consumer: `ferrotorch_optim` walks `Module::parameters_mut()` across every conv in a training loop. |
 //! | REQ-8 | SHIPPED | impl: the `Conv2d::set_weight` and `Conv2d::from_parts` methods here; non-test consumer: `ferrotorch-nn/src/functional.rs` (the stateless `nn::functional::conv2d` entry point) uses `Conv2d::from_parts` to drive the existing forward path with user-supplied parameters. |
-//! | REQ-9 | SHIPPED | impl: `kaiming_uniform(&mut weight, NonLinearity::ReLU)` + `zeros_init(&mut b)` inside `Conv2d::new_full` here; non-test consumer: `Conv2d::new` is the path used by every vision-model constructor. NOTE: gain divergence + bias-init divergence per blocker #1450. |
+//! | REQ-9 | SHIPPED | impl: `kaiming_uniform(&mut weight, NonLinearity::ReLU)` + `uniform_init(&mut b, -bound, bound)` (bound = 1/sqrt(fan_in)) inside every `Conv*d::new[_full]` here, mirroring `torch/nn/modules/conv.py:182-201`; non-test consumer: `Conv2d::new` is the path used by every vision-model constructor. (closes #1450 — bias U(-bound,bound). Kaiming gain divergence (`a=sqrt(5)` upstream vs `ReLU` here) remains as separate followup.) |
 //! | REQ-10 | NOT-STARTED | blocker #1443 — `padding_mode` kwarg not threaded through `Conv*d::new`; only zero padding works. Upstream `_ConvNd.__init__` (`conv.py`) routes non-zero modes through `F.pad(...)`. |
 //! | REQ-11 | NOT-STARTED | blocker #1441 (umbrella) — parity-sweep runner arms for all 6 conv ops are absent; sweep reports `0/N passed, N skipped` for each. The forward paths themselves are end-to-end verified by 60+ lib tests; only the runner-arm wiring is missing. |
 
@@ -30,7 +30,7 @@ use ferrotorch_core::storage::TensorStorage;
 use ferrotorch_core::tensor::{GradFn, Tensor};
 use ferrotorch_core::{FerrotorchError, FerrotorchResult, Float};
 
-use crate::init::{NonLinearity, kaiming_uniform, zeros as zeros_init};
+use crate::init::{NonLinearity, kaiming_uniform, uniform as uniform_init};
 use crate::module::Module;
 use crate::parameter::Parameter;
 
@@ -302,7 +302,8 @@ impl<T: Float> Conv2d<T> {
     /// Create a new `Conv2d` layer (dense, dilation `(1, 1)`, `groups = 1`).
     ///
     /// Weight is initialized with Kaiming uniform (ReLU gain).
-    /// Bias, if enabled, is initialized to zeros.
+    /// Bias, if enabled, is initialized U(-bound, bound) with
+    /// `bound = 1/sqrt(fan_in)` per `torch/nn/modules/conv.py:198-201`.
     ///
     /// This is a thin shim over [`Conv2d::new_full`] preserved for
     /// backwards compatibility with existing callers (see Phase 5 of #1002).
@@ -332,7 +333,8 @@ impl<T: Float> Conv2d<T> {
     /// `groups` must divide BOTH `in_channels` and `out_channels` (PyTorch
     /// `torch.nn.Conv2d` raises `ValueError` otherwise). `dilation` must be
     /// strictly positive in both dimensions. Weight is initialised with
-    /// Kaiming uniform (ReLU gain), bias (if enabled) with zeros.
+    /// Kaiming uniform (ReLU gain); bias (if enabled) with U(-bound, bound)
+    /// where `bound = 1/sqrt(fan_in)` per `torch/nn/modules/conv.py:198-201`.
     ///
     /// # GPU coverage caveat
     ///
@@ -401,7 +403,16 @@ impl<T: Float> Conv2d<T> {
 
         let bias_param = if bias {
             let mut b = Parameter::zeros(&[out_channels])?;
-            zeros_init(&mut b)?;
+            // `torch/nn/modules/conv.py:198-201`: `fan_in, _ = init._calculate_fan_in_and_fan_out(weight);
+            //   bound = 1 / sqrt(fan_in); init.uniform_(self.bias, -bound, bound)`. For Conv2d
+            //   `fan_in = (in_channels/groups) * kH * kW`.
+            let fan_in = (in_channels / groups) * kh * kw;
+            let bound = if fan_in > 0 {
+                1.0 / (fan_in as f64).sqrt()
+            } else {
+                0.0
+            };
+            uniform_init(&mut b, -bound, bound)?;
             Some(b)
         } else {
             None
@@ -1182,7 +1193,8 @@ impl<T: Float> Conv1d<T> {
     /// Create a new `Conv1d` layer.
     ///
     /// Weight is initialized with Kaiming uniform (ReLU gain).
-    /// Bias, if enabled, is initialized to zeros.
+    /// Bias, if enabled, is initialized U(-bound, bound) with
+    /// `bound = 1/sqrt(fan_in)` per `torch/nn/modules/conv.py:198-201`.
     pub fn new(
         in_channels: usize,
         out_channels: usize,
@@ -1212,7 +1224,15 @@ impl<T: Float> Conv1d<T> {
 
         let bias_param = if bias {
             let mut b = Parameter::zeros(&[out_channels])?;
-            zeros_init(&mut b)?;
+            // `torch/nn/modules/conv.py:198-201`: bias U(-bound, bound) with
+            //   `bound = 1 / sqrt(fan_in)`, `fan_in = in_channels * kernel_size` for Conv1d.
+            let fan_in = in_channels * kernel_size;
+            let bound = if fan_in > 0 {
+                1.0 / (fan_in as f64).sqrt()
+            } else {
+                0.0
+            };
+            uniform_init(&mut b, -bound, bound)?;
             Some(b)
         } else {
             None
@@ -1673,7 +1693,8 @@ impl<T: Float> ConvTranspose2d<T> {
     /// Create a new `ConvTranspose2d` layer.
     ///
     /// Weight is initialized with Kaiming uniform (ReLU gain).
-    /// Bias, if enabled, is initialized to zeros.
+    /// Bias, if enabled, is initialized U(-bound, bound) with
+    /// `bound = 1/sqrt(fan_in)` per `torch/nn/modules/conv.py:198-201`.
     pub fn new(
         in_channels: usize,
         out_channels: usize,
@@ -1704,14 +1725,25 @@ impl<T: Float> ConvTranspose2d<T> {
             });
         }
 
-        // Weight shape: [in_channels, out_channels, kH, kW]
+        // Weight shape: [in_channels, out_channels, kH, kW] (transposed layout per
+        // `torch/nn/modules/conv.py:161-167`).
         let (kh, kw) = kernel_size;
         let mut weight = Parameter::zeros(&[in_channels, out_channels, kh, kw])?;
         kaiming_uniform(&mut weight, NonLinearity::ReLU)?;
 
         let bias_param = if bias {
             let mut b = Parameter::zeros(&[out_channels])?;
-            zeros_init(&mut b)?;
+            // `torch/nn/modules/conv.py:198-201`: bias U(-bound, bound) with
+            //   `bound = 1 / sqrt(fan_in)`. For ConvTranspose2d weight shape
+            //   `[in_channels, out_channels/groups, kH, kW]`, `_calculate_fan_in_and_fan_out`
+            //   yields `fan_in = (out_channels/groups) * kH * kW`. groups=1 here.
+            let fan_in = out_channels * kh * kw;
+            let bound = if fan_in > 0 {
+                1.0 / (fan_in as f64).sqrt()
+            } else {
+                0.0
+            };
+            uniform_init(&mut b, -bound, bound)?;
             Some(b)
         } else {
             None
@@ -2456,7 +2488,8 @@ impl<T: Float> Conv3d<T> {
     /// Create a new `Conv3d` layer.
     ///
     /// Weight is initialized with Kaiming uniform (ReLU gain).
-    /// Bias, if enabled, is initialized to zeros.
+    /// Bias, if enabled, is initialized U(-bound, bound) with
+    /// `bound = 1/sqrt(fan_in)` per `torch/nn/modules/conv.py:198-201`.
     pub fn new(
         in_channels: usize,
         out_channels: usize,
@@ -2487,7 +2520,15 @@ impl<T: Float> Conv3d<T> {
 
         let bias_param = if bias {
             let mut b = Parameter::zeros(&[out_channels])?;
-            zeros_init(&mut b)?;
+            // `torch/nn/modules/conv.py:198-201`: bias U(-bound, bound) with
+            //   `bound = 1 / sqrt(fan_in)`, `fan_in = in_channels * kD * kH * kW` for Conv3d.
+            let fan_in = in_channels * kd * kh * kw;
+            let bound = if fan_in > 0 {
+                1.0 / (fan_in as f64).sqrt()
+            } else {
+                0.0
+            };
+            uniform_init(&mut b, -bound, bound)?;
             Some(b)
         } else {
             None
@@ -2998,7 +3039,8 @@ impl<T: Float> ConvTranspose1d<T> {
     /// Create a new `ConvTranspose1d` layer.
     ///
     /// Weight is initialized with Kaiming uniform (ReLU gain).
-    /// Bias, if enabled, is initialized to zeros.
+    /// Bias, if enabled, is initialized U(-bound, bound) with
+    /// `bound = 1/sqrt(fan_in)` per `torch/nn/modules/conv.py:198-201`.
     pub fn new(
         in_channels: usize,
         out_channels: usize,
@@ -3029,13 +3071,22 @@ impl<T: Float> ConvTranspose1d<T> {
             });
         }
 
-        // Weight shape: [in_channels, out_channels, kernel_size]
+        // Weight shape: [in_channels, out_channels, kernel_size] (transposed layout).
         let mut weight = Parameter::zeros(&[in_channels, out_channels, kernel_size])?;
         kaiming_uniform(&mut weight, NonLinearity::ReLU)?;
 
         let bias_param = if bias {
             let mut b = Parameter::zeros(&[out_channels])?;
-            zeros_init(&mut b)?;
+            // `torch/nn/modules/conv.py:198-201`: bias U(-bound, bound) with
+            //   `bound = 1 / sqrt(fan_in)`. ConvTranspose1d: weight shape
+            //   `[in_channels, out_channels/groups, K]`, fan_in = out_channels * K (groups=1).
+            let fan_in = out_channels * kernel_size;
+            let bound = if fan_in > 0 {
+                1.0 / (fan_in as f64).sqrt()
+            } else {
+                0.0
+            };
+            uniform_init(&mut b, -bound, bound)?;
             Some(b)
         } else {
             None
@@ -3529,7 +3580,8 @@ impl<T: Float> ConvTranspose3d<T> {
     /// Create a new `ConvTranspose3d` layer.
     ///
     /// Weight is initialized with Kaiming uniform (ReLU gain).
-    /// Bias, if enabled, is initialized to zeros.
+    /// Bias, if enabled, is initialized U(-bound, bound) with
+    /// `bound = 1/sqrt(fan_in)` per `torch/nn/modules/conv.py:198-201`.
     pub fn new(
         in_channels: usize,
         out_channels: usize,
@@ -3564,14 +3616,22 @@ impl<T: Float> ConvTranspose3d<T> {
             });
         }
 
-        // Weight shape: [in_channels, out_channels, kD, kH, kW]
+        // Weight shape: [in_channels, out_channels, kD, kH, kW] (transposed layout).
         let (kd, kh, kw) = kernel_size;
         let mut weight = Parameter::zeros(&[in_channels, out_channels, kd, kh, kw])?;
         kaiming_uniform(&mut weight, NonLinearity::ReLU)?;
 
         let bias_param = if bias {
             let mut b = Parameter::zeros(&[out_channels])?;
-            zeros_init(&mut b)?;
+            // `torch/nn/modules/conv.py:198-201`: bias U(-bound, bound) with
+            //   `bound = 1 / sqrt(fan_in)`. ConvTranspose3d: fan_in = out_channels * kD*kH*kW.
+            let fan_in = out_channels * kd * kh * kw;
+            let bound = if fan_in > 0 {
+                1.0 / (fan_in as f64).sqrt()
+            } else {
+                0.0
+            };
+            uniform_init(&mut b, -bound, bound)?;
             Some(b)
         } else {
             None
@@ -4189,6 +4249,44 @@ impl<T: Float> GradFn<T> for ConvTranspose3dBackward<T> {
 mod tests {
     use super::*;
     use crate::module::Module;
+
+    // -----------------------------------------------------------------------
+    // Bias init bounds — REQ-9 / closes #1450
+    // -----------------------------------------------------------------------
+
+    /// Verifies Conv2d bias is initialized within `U(-bound, bound)` where
+    /// `bound = 1/sqrt((in_channels/groups) * kH * kW)` per
+    /// `torch/nn/modules/conv.py:198-201`. Pre-fix the bias was zeros_init.
+    #[test]
+    fn test_conv2d_bias_init_bounded_uniform() {
+        let in_c = 16usize;
+        let out_c = 32usize;
+        let kh = 3usize;
+        let kw = 3usize;
+        let groups = 1usize;
+        let layer =
+            Conv2d::<f32>::new_full(in_c, out_c, (kh, kw), (1, 1), (0, 0), (1, 1), groups, true)
+                .unwrap();
+        let bias = layer.bias.as_ref().expect("bias requested");
+        let bias_data = bias.tensor().data_vec().unwrap();
+        let fan_in = (in_c / groups) * kh * kw;
+        let bound = 1.0_f32 / (fan_in as f32).sqrt();
+        let mut nonzero = 0usize;
+        for &b in &bias_data {
+            assert!(
+                b.abs() <= bound + 1e-6,
+                "Conv2d bias element {b} exceeds bound {bound}"
+            );
+            if b != 0.0 {
+                nonzero += 1;
+            }
+        }
+        assert!(
+            nonzero > out_c / 2,
+            "expected most Conv2d bias entries to be nonzero; \
+             would FAIL pre-fix when bias was zeros_init"
+        );
+    }
 
     /// Helper: create a tensor from flat data and shape.
     fn t(data: &[f32], shape: &[usize]) -> Tensor<f32> {
