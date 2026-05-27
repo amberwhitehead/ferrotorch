@@ -563,6 +563,14 @@ pub fn matrix_norm<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
         });
     }
 
+    // Autograd path (CPU): delegate to the differentiable wrapper, which
+    // computes the forward under `no_grad` (preventing re-entry here) and
+    // attaches `NormBackward` (`dx = grad * x / ||x||_F`). CUDA stays
+    // forward-only.
+    if !input.is_cuda() && crate::autograd::no_grad::is_grad_enabled() && input.requires_grad() {
+        return crate::grad_fns::linalg::matrix_norm_differentiable(input);
+    }
+
     if input.is_cuda() {
         // Frobenius norm: sqrt(sum_ij A_ij^2). Composes existing GPU
         // primitives (mul → reduce_sum → sqrt) — three kernel launches but
@@ -623,6 +631,13 @@ pub fn pinv<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
         });
     }
 
+    // Autograd path: delegate to the differentiable wrapper, which computes
+    // the forward under `no_grad` (preventing re-entry here) and attaches
+    // `PinvBackward` (the algebraic full-rank Moore-Penrose VJP).
+    if crate::autograd::no_grad::is_grad_enabled() && input.requires_grad() {
+        return crate::grad_fns::linalg::pinv_differentiable(input);
+    }
+
     if is_f32::<T>() {
         let arr = tensor_to_array2_f32(input)?;
         let r = ferray_linalg::pinv(&arr, None).map_err(FerrotorchError::Ferray)?;
@@ -661,6 +676,13 @@ pub fn eigh<T: Float>(a: &Tensor<T>) -> FerrotorchResult<(Tensor<T>, Tensor<T>)>
         });
     }
     let n = shape[0];
+
+    // Autograd path (CPU): delegate to the differentiable wrapper, which
+    // computes the forward under `no_grad` (preventing re-entry here) and
+    // attaches the split `EighBackwardW` / `EighBackwardV` nodes.
+    if !a.is_cuda() && crate::autograd::no_grad::is_grad_enabled() && a.requires_grad() {
+        return crate::grad_fns::linalg::eigh_differentiable(a);
+    }
 
     if a.is_cuda() {
         let backend =
@@ -718,6 +740,13 @@ pub fn eigvalsh<T: Float>(a: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
         });
     }
     let n = shape[0];
+
+    // Autograd path (CPU): delegate to the differentiable wrapper, which
+    // computes the forward (and the eigenvector solve the VJP needs) under
+    // `no_grad` (preventing re-entry here) and attaches `EigvalshBackward`.
+    if !a.is_cuda() && crate::autograd::no_grad::is_grad_enabled() && a.requires_grad() {
+        return crate::grad_fns::linalg::eigvalsh_differentiable(a);
+    }
 
     if a.is_cuda() {
         let backend =
@@ -876,6 +905,13 @@ pub fn lu<T: Float>(a: &Tensor<T>) -> FerrotorchResult<(Tensor<T>, Tensor<T>, Te
         });
     }
 
+    // Autograd path: delegate to the differentiable wrapper, which computes the
+    // forward under `no_grad` (preventing re-entry here) and attaches the split
+    // `LuBackwardL` / `LuBackwardU` nodes (square m == n case).
+    if crate::autograd::no_grad::is_grad_enabled() && a.requires_grad() {
+        return crate::grad_fns::linalg::lu_differentiable(a);
+    }
+
     if is_f32::<T>() {
         let arr = tensor_to_array2_f32(a)?;
         let (p, l, u) = ferray_linalg::lu(&arr).map_err(FerrotorchError::Ferray)?;
@@ -925,6 +961,14 @@ pub fn lu_factor<T: Float>(a: &Tensor<T>) -> FerrotorchResult<(Tensor<T>, Vec<i3
         });
     }
     let n = shape[0];
+
+    // Autograd path (CPU): delegate to the differentiable wrapper, which
+    // computes the forward under `no_grad` (preventing re-entry here) and
+    // attaches `LuFactorBackward` (the packed-LU square-case VJP). CUDA stays
+    // forward-only.
+    if !a.is_cuda() && crate::autograd::no_grad::is_grad_enabled() && a.requires_grad() {
+        return crate::grad_fns::linalg::lu_factor_differentiable(a);
+    }
 
     if a.is_cuda() && (is_f32::<T>() || is_f64::<T>()) {
         let backend =
@@ -1120,6 +1164,13 @@ pub fn lstsq<T: Float>(
         });
     }
 
+    // Autograd path: delegate to the differentiable wrapper, which computes the
+    // forward under `no_grad` (preventing re-entry here) and attaches
+    // `LstsqBackward` to the `solution` output (full-rank, via pinv_backward).
+    if crate::autograd::no_grad::is_grad_enabled() && (a.requires_grad() || b.requires_grad()) {
+        return crate::grad_fns::linalg::lstsq_differentiable(a, b, rcond);
+    }
+
     if is_f32::<T>() {
         let a_arr = tensor_to_array2_f32(a)?;
         let b_arr = tensor_to_arraydyn_f32(b)?;
@@ -1281,6 +1332,13 @@ pub fn tensorinv<T: Float>(a: &Tensor<T>, ind: usize) -> FerrotorchResult<Tensor
 pub fn vector_norm<T: Float>(input: &Tensor<T>, ord: f64) -> FerrotorchResult<Tensor<T>> {
     require_cpu(input, "vector_norm")?;
     let order = float_to_norm_order(ord);
+
+    // Autograd path: delegate to the differentiable wrapper (the `ord == 2.0`
+    // Euclidean branch attaches `NormBackward`; other `ord` values fall through
+    // to the plain forward inside the wrapper).
+    if crate::autograd::no_grad::is_grad_enabled() && input.requires_grad() {
+        return crate::grad_fns::linalg::vector_norm_differentiable(input, ord);
+    }
 
     if is_f32::<T>() {
         let arr = tensor_to_arraydyn_f32(input)?;
@@ -1482,6 +1540,13 @@ fn float_to_norm_order<T: Into<f64>>(ord: T) -> ferray_linalg::NormOrder {
 pub fn cross<T: Float>(a: &Tensor<T>, b: &Tensor<T>, dim: i64) -> FerrotorchResult<Tensor<T>> {
     require_cpu(a, "cross")?;
     require_cpu(b, "cross")?;
+
+    // Autograd path: delegate to the differentiable wrapper, which computes
+    // the forward under `no_grad` (preventing re-entry here) and attaches
+    // `CrossBackward` (`da = cross(b, grad)`, `db = cross(grad, a)`).
+    if crate::autograd::no_grad::is_grad_enabled() && (a.requires_grad() || b.requires_grad()) {
+        return crate::grad_fns::linalg::cross_differentiable(a, b, dim);
+    }
 
     let a_shape = a.shape();
     let b_shape = b.shape();
