@@ -163,7 +163,11 @@ fn graphed_decode_twelve_sequential_steps_match_eager() {
         let eager = model
             .forward_from_ids(&[token])
             .unwrap_or_else(|e| panic!("step {step} token {token}: eager oracle failed: {e:?}"));
-        assert_bit_identical(&graphed, &eager, &format!("depth step {step} token {token}"));
+        assert_bit_identical(
+            &graphed,
+            &eager,
+            &format!("depth step {step} token {token}"),
+        );
     }
     assert_eq!(decoder.num_replays(), tokens.len() as u64);
 }
@@ -237,7 +241,10 @@ fn graphed_eager_eager_graphed_with_big_eager_alloc_between() {
             .expect("big eager prefill must succeed (default pool intact)");
         assert_eq!(e_big.len(), big_ids.len() * model.config.vocab_size);
         for &v in &e_big {
-            assert!(v.is_finite(), "cycle {cycle}: big eager produced non-finite logit");
+            assert!(
+                v.is_finite(),
+                "cycle {cycle}: big eager produced non-finite logit"
+            );
         }
 
         // graphed again — must STILL match the oracle after the big eager
@@ -315,12 +322,20 @@ fn two_graphed_decoders_alive_interleaved_replays() {
         let g1 = dec1
             .decode_step(token)
             .unwrap_or_else(|e| panic!("step {step}: dec1 decode failed: {e:?}"));
-        assert_bit_identical(&g1, &eager, &format!("two-decoder step {step} dec1 token {token}"));
+        assert_bit_identical(
+            &g1,
+            &eager,
+            &format!("two-decoder step {step} dec1 token {token}"),
+        );
 
         let g2 = dec2
             .decode_step(token)
             .unwrap_or_else(|e| panic!("step {step}: dec2 decode failed: {e:?}"));
-        assert_bit_identical(&g2, &eager, &format!("two-decoder step {step} dec2 token {token}"));
+        assert_bit_identical(
+            &g2,
+            &eager,
+            &format!("two-decoder step {step} dec2 token {token}"),
+        );
     }
 }
 
