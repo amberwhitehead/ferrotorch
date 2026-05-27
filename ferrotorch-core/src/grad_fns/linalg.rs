@@ -11,11 +11,11 @@
 //! | REQ-2 (`bmm`) | SHIPPED | `bmm_differentiable` + `BmmBackward` consumed by `Tensor::bmm`, by `flex_attention.rs`, and by `ferrotorch-nn/src/attention.rs`; parity `8/8 passed`. |
 //! | REQ-3 (`matmul`) | SHIPPED | `matmul_differentiable` + `MatmulBackward` consumed by `Tensor::matmul`, `ferrotorch-vision/src/models/swin.rs`, `einsum.rs`, and the forward-AD primal; parity `120/120 passed` under matmul-family `rtol=1e-4` (closes #1347). |
 //! | REQ-4 (`linalg.matmul`) | SHIPPED | aliased to REQ-3 by upstream design; `Tensor::matmul` covers both since the Python API surface is identical; parity `120/120 passed`. |
-//! | REQ-5 (`addmm`) | NOT-STARTED | no `AddmmBackward` or `addmm_differentiable` in this file; the `linear_fused` shape covers only the `A @ W^T + bias` slice. Blocker #1345. |
-//! | REQ-6 (`addbmm`) | NOT-STARTED | not present. Blocker #1345. |
-//! | REQ-7 (`baddbmm`) | NOT-STARTED | not present. Blocker #1345. |
-//! | REQ-8 (`addmv`) | NOT-STARTED | not present. Blocker #1345. |
-//! | REQ-9 (`addr`) | NOT-STARTED | not present. Blocker #1345. |
+//! | REQ-5 (`addmm`) | SHIPPED | `AddmmBackward` + `addmm_differentiable` (VJP `dself=beta*grad`, `dmat1=alpha*grad@mat2^T`, `dmat2=alpha*mat1^T@grad` per `derivatives.yaml:256`); FD-verified `grad_fns::linalg::tests::addmm_public_forward_is_grad_aware_and_matches_fd`; non-test consumer: the grad-aware `crate::linalg::addmm` forward delegates here. Closes #1583. |
+//! | REQ-6 (`addbmm`) | SHIPPED | `AddbmmBackward` + `addbmm_differentiable` (per `derivatives.yaml:238`); FD-verified `grad_fns::linalg::tests::addbmm_public_forward_is_grad_aware_and_matches_fd`; non-test consumer: the grad-aware `crate::linalg::addbmm` forward delegates here. Closes #1583. |
+//! | REQ-7 (`baddbmm`) | SHIPPED | `BaddbmmBackward` + `baddbmm_differentiable` (per `derivatives.yaml:359`); FD-verified `grad_fns::linalg::tests::baddbmm_public_forward_is_grad_aware_and_matches_fd`; non-test consumer: the grad-aware `crate::linalg::baddbmm` forward delegates here. Closes #1583. |
+//! | REQ-8 (`addmv`) | SHIPPED | `AddmvBackward` + `addmv_differentiable` (per `derivatives.yaml:267`); FD-verified `grad_fns::linalg::tests::addmv_public_forward_is_grad_aware_and_matches_fd`; non-test consumer: the grad-aware `crate::linalg::addmv` forward delegates here. Closes #1583. |
+//! | REQ-9 (`addr`) | SHIPPED | `AddrBackward` + `addr_differentiable` (per `derivatives.yaml:273`); FD-verified `grad_fns::linalg::tests::addr_public_forward_is_grad_aware_and_matches_fd`; non-test consumer: the grad-aware `crate::linalg::addr` forward delegates here. Closes #1583. |
 //! | REQ-10 (`linalg.solve`) | SHIPPED | `LinalgSolveBackward` + `solve_differentiable` (VJP `gB = A^-T @ gX`, `gA = -gB @ X^T` per `FunctionsManual.cpp:6160`); FD-verified `tests/divergence_linalg_grad_audit.rs:solve_backward_*`; non-test consumer `tools/parity-sweep/runner/src/main.rs` `"linalg.solve"` arm (parity 24/24 non-skipped, 0 failed). Blocker #1345. |
 //! | REQ-11 (`linalg.svd`) | NOT-STARTED | forward exists; no `LinalgSvdBackward`. Blocker #1345. |
 //! | REQ-12 (`linalg.eig`) | NOT-STARTED | forward exists; no backward. Blocker #1345. |
@@ -36,11 +36,11 @@
 //! | REQ-27 (`linalg.lu`) | NOT-STARTED | forward exists; no backward. Blocker #1345. |
 //! | REQ-28 (`linalg.lu_factor`) | NOT-STARTED | forward exists; no backward. Blocker #1345. |
 //! | REQ-29 (`trace`) | SHIPPED | `TraceBackward` + `trace_differentiable` (VJP `dA = grad * I` per `derivatives.yaml:1785`), forward `crate::linalg::trace`; FD-verified `tests/divergence_linalg_grad_audit.rs:trace_backward_matches_finite_difference`; non-test consumer `tools/parity-sweep/runner/src/main.rs` `"trace"` arm (parity 8/8, 0 failed). Blocker #1345. |
-//! | REQ-30 (`diagonal`) | NOT-STARTED | forward-only `diagonal` exists in `crate::linalg`; no autograd. Blocker #1345. |
-//! | REQ-31 (`diag`) | NOT-STARTED | forward-only `diag` exists in `ops::tensor_ops`; no autograd. Blocker #1345. |
-//! | REQ-32 (`tril`) | NOT-STARTED | forward-only `tril` exists in `ops::tensor_ops`; no autograd. Blocker #1345. |
-//! | REQ-33 (`triu`) | NOT-STARTED | forward-only `triu` exists in `ops::tensor_ops`; no autograd. Blocker #1345. |
-//! | REQ-34 (`kron`) | NOT-STARTED | no `kron` anywhere. Blocker #1345. |
+//! | REQ-30 (`diagonal`) | SHIPPED | `DiagonalBackward` + `diagonal_differentiable` (VJP scatters grad onto the offset-th diagonal per `derivatives.yaml:573` `diagonal_backward_symint`); FD-verified `grad_fns::linalg::tests::diagonal_public_forward_is_grad_aware_and_matches_fd`; non-test consumer: the now-grad-aware `crate::linalg::diagonal` forward delegates here. Closes #1583. |
+//! | REQ-31 (`diag`) | SHIPPED | `DiagBackward` + `diag_differentiable` (adjoint of the 0/1 selection: gather for 1-D, scatter for 2-D); FD-verified `grad_fns::linalg::tests::diag_extract_public_forward_is_grad_aware_and_matches_fd` + `diag_construct_public_forward_is_grad_aware_and_matches_fd`; non-test consumer: the now-grad-aware `crate::ops::tensor_ops::diag` forward delegates here. Closes #1583. |
+//! | REQ-32 (`tril`) | SHIPPED | `TriangularBackward` + `tril_differentiable` (VJP masks grad by the kept lower triangle per `derivatives.yaml:1805` `grad.tril_symint`); FD-verified `grad_fns::linalg::tests::tril_public_forward_is_grad_aware_and_matches_fd`; non-test consumer: the now-grad-aware `crate::ops::tensor_ops::tril` forward delegates here. Closes #1583. |
+//! | REQ-33 (`triu`) | SHIPPED | `triu_differentiable` (sharing `TriangularBackward`; VJP masks grad by the kept upper triangle per `derivatives.yaml:1809` `grad.triu_symint`); FD-verified `grad_fns::linalg::tests::triu_public_forward_is_grad_aware_and_matches_fd`; non-test consumer: the now-grad-aware `crate::ops::tensor_ops::triu` forward delegates here. Closes #1583. |
+//! | REQ-34 (`kron`) | SHIPPED | `KronBackward` + `kron_differentiable` (per-Kron-block VJP per `LinearAlgebra.cpp:3530` `kron`); FD-verified `grad_fns::linalg::tests::kron_public_forward_is_grad_aware_and_matches_fd`; non-test consumer: the new grad-aware `crate::linalg::kron` forward delegates here. Closes #1583. |
 //! | REQ-35 (`outer`) | SHIPPED | `OuterBackward` + `outer_differentiable` (VJP `da = grad @ b`, `db = grad^T @ a` per `derivatives.yaml:275-276`), forward `crate::linalg::outer`; FD-verified `tests/divergence_linalg_grad_audit.rs:outer_backward_matches_finite_difference`; non-test consumer `tools/parity-sweep/runner/src/main.rs` `"outer"` arm (parity 8/8, 0 failed). Blocker #1345. |
 
 use std::any::TypeId;
@@ -3857,7 +3857,9 @@ pub fn diagonal_differentiable<T: Float>(
     a: &Tensor<T>,
     offset: i64,
 ) -> FerrotorchResult<Tensor<T>> {
-    let result = linalg_fwd::diagonal(a, offset)?;
+    // Forward computed under `no_grad`: `linalg_fwd::diagonal` delegates back
+    // here when grad is enabled, so the bare `no_grad` call prevents re-entry.
+    let result = crate::autograd::no_grad::no_grad(|| linalg_fwd::diagonal(a, offset))?;
     if is_grad_enabled() && a.requires_grad() {
         let shape = a.shape();
         let grad_fn = Arc::new(DiagonalForward {
@@ -3965,7 +3967,9 @@ impl<T: Float> GradFn<T> for DiagForward<T> {
 /// `crate::ops::tensor_ops::diag` (1-D → 2-D construct or 2-D → 1-D extract);
 /// VJP is the adjoint selection.
 pub fn diag_differentiable<T: Float>(a: &Tensor<T>, diagonal: i64) -> FerrotorchResult<Tensor<T>> {
-    let result = crate::ops::tensor_ops::diag(a, diagonal)?;
+    // Forward under `no_grad`: `crate::ops::tensor_ops::diag` delegates back
+    // here when grad is enabled, so the bare `no_grad` call prevents re-entry.
+    let result = crate::autograd::no_grad::no_grad(|| crate::ops::tensor_ops::diag(a, diagonal))?;
     if is_grad_enabled() && a.requires_grad() {
         let grad_fn = Arc::new(DiagForward {
             input: a.clone(),
@@ -4058,7 +4062,9 @@ impl<T: Float> GradFn<T> for TriangularForward<T> {
 /// Differentiable `tril(A, diagonal)`. Forward is
 /// `crate::ops::tensor_ops::tril` (2-D, lower-triangular zeroing).
 pub fn tril_differentiable<T: Float>(a: &Tensor<T>, diagonal: i64) -> FerrotorchResult<Tensor<T>> {
-    let result = crate::ops::tensor_ops::tril(a, diagonal)?;
+    // Forward under `no_grad`: `crate::ops::tensor_ops::tril` delegates back
+    // here when grad is enabled, so the bare `no_grad` call prevents re-entry.
+    let result = crate::autograd::no_grad::no_grad(|| crate::ops::tensor_ops::tril(a, diagonal))?;
     if is_grad_enabled() && a.requires_grad() {
         let shape = a.shape();
         let grad_fn = Arc::new(TriangularForward {
@@ -4081,7 +4087,9 @@ pub fn tril_differentiable<T: Float>(a: &Tensor<T>, diagonal: i64) -> Ferrotorch
 /// Differentiable `triu(A, diagonal)`. Forward is
 /// `crate::ops::tensor_ops::triu` (2-D, upper-triangular zeroing).
 pub fn triu_differentiable<T: Float>(a: &Tensor<T>, diagonal: i64) -> FerrotorchResult<Tensor<T>> {
-    let result = crate::ops::tensor_ops::triu(a, diagonal)?;
+    // Forward under `no_grad`: `crate::ops::tensor_ops::triu` delegates back
+    // here when grad is enabled, so the bare `no_grad` call prevents re-entry.
+    let result = crate::autograd::no_grad::no_grad(|| crate::ops::tensor_ops::triu(a, diagonal))?;
     if is_grad_enabled() && a.requires_grad() {
         let shape = a.shape();
         let grad_fn = Arc::new(TriangularForward {
@@ -5183,5 +5191,444 @@ mod tests {
             x.data().unwrap().iter().sum()
         });
         assert_grad_close64(&grad_b, &num_b, 1e-4, "solve dB (vector RHS) vs FD");
+    }
+
+    // -----------------------------------------------------------------------
+    // #1583 consumer-wiring FD tests: each drives the now-grad-aware PUBLIC
+    // forward (not the wrapper directly) and checks A.grad vs central FD.
+    // addmm/addbmm/baddbmm/addmv/addr forwards live in `crate::linalg`; the
+    // structural diag/tril/triu forwards live in `crate::ops::tensor_ops`;
+    // diagonal lives in `crate::linalg`.
+    // -----------------------------------------------------------------------
+
+    // addmm — VJP dself=beta*grad, dmat1=alpha*grad@mat2^T, dmat2=alpha*mat1^T@grad
+    //   (derivatives.yaml:256 addmm; LinearAlgebra.cpp:194,1620).
+    #[test]
+    fn addmm_public_forward_is_grad_aware_and_matches_fd() {
+        let self_d = vec![0.5, -1.0, 2.0, 1.5];
+        let m1_d = vec![1.0, 2.0, -1.0, 0.5, 3.0, 1.0];
+        let m2_d = vec![2.0, -1.0, 0.5, 1.0, 1.5, -0.5];
+        let self_s = [2usize, 2];
+        let m1_s = [2usize, 3];
+        let m2_s = [3usize, 2];
+        let (beta, alpha) = (0.75f64, 1.25f64);
+
+        let s = leaf64(&self_d, &self_s);
+        let m1 = leaf64(&m1_d, &m1_s);
+        let m2 = leaf64(&m2_d, &m2_s);
+        let c = linalg_fwd::addmm(&s, &m1, &m2, beta, alpha).unwrap();
+        assert!(
+            c.grad_fn().is_some(),
+            "addmm public forward must attach a grad_fn"
+        );
+        assert_eq!(c.shape(), &[2, 2]);
+        let loss = crate::grad_fns::reduction::sum(&c).unwrap();
+        loss.backward().unwrap();
+        let g_self = s.grad().unwrap().unwrap().data().unwrap().to_vec();
+        let g_m1 = m1.grad().unwrap().unwrap().data().unwrap().to_vec();
+        let g_m2 = m2.grad().unwrap().unwrap().data().unwrap().to_vec();
+
+        let num_self = fd_grad64(&self_d, &self_s, 1e-6, |x| {
+            let m1 = no_grad_leaf64(&m1_d, &m1_s);
+            let m2 = no_grad_leaf64(&m2_d, &m2_s);
+            linalg_fwd::addmm(x, &m1, &m2, beta, alpha)
+                .unwrap()
+                .data()
+                .unwrap()
+                .iter()
+                .sum()
+        });
+        assert_grad_close64(&g_self, &num_self, 1e-5, "addmm dself vs FD");
+        let num_m1 = fd_grad64(&m1_d, &m1_s, 1e-6, |x| {
+            let s = no_grad_leaf64(&self_d, &self_s);
+            let m2 = no_grad_leaf64(&m2_d, &m2_s);
+            linalg_fwd::addmm(&s, x, &m2, beta, alpha)
+                .unwrap()
+                .data()
+                .unwrap()
+                .iter()
+                .sum()
+        });
+        assert_grad_close64(&g_m1, &num_m1, 1e-5, "addmm dmat1 vs FD");
+        let num_m2 = fd_grad64(&m2_d, &m2_s, 1e-6, |x| {
+            let s = no_grad_leaf64(&self_d, &self_s);
+            let m1 = no_grad_leaf64(&m1_d, &m1_s);
+            linalg_fwd::addmm(&s, &m1, x, beta, alpha)
+                .unwrap()
+                .data()
+                .unwrap()
+                .iter()
+                .sum()
+        });
+        assert_grad_close64(&g_m2, &num_m2, 1e-5, "addmm dmat2 vs FD");
+    }
+
+    // addmv — VJP dself=beta*grad, dmat=alpha*outer(grad,vec), dvec=alpha*mat^T@grad
+    //   (derivatives.yaml:267 addmv; Blas.cpp:40,72).
+    #[test]
+    fn addmv_public_forward_is_grad_aware_and_matches_fd() {
+        let self_d = vec![0.5, -1.0];
+        let mat_d = vec![1.0, 2.0, -1.0, 0.5, 3.0, 1.0];
+        let vec_d = vec![2.0, -1.0, 0.5];
+        let self_s = [2usize];
+        let mat_s = [2usize, 3];
+        let vec_s = [3usize];
+        let (beta, alpha) = (0.5f64, 2.0f64);
+
+        let s = leaf64(&self_d, &self_s);
+        let mat = leaf64(&mat_d, &mat_s);
+        let v = leaf64(&vec_d, &vec_s);
+        let c = linalg_fwd::addmv(&s, &mat, &v, beta, alpha).unwrap();
+        assert!(
+            c.grad_fn().is_some(),
+            "addmv public forward must attach a grad_fn"
+        );
+        assert_eq!(c.shape(), &[2]);
+        let loss = crate::grad_fns::reduction::sum(&c).unwrap();
+        loss.backward().unwrap();
+        let g_mat = mat.grad().unwrap().unwrap().data().unwrap().to_vec();
+        let g_vec = v.grad().unwrap().unwrap().data().unwrap().to_vec();
+
+        let num_mat = fd_grad64(&mat_d, &mat_s, 1e-6, |x| {
+            let s = no_grad_leaf64(&self_d, &self_s);
+            let v = no_grad_leaf64(&vec_d, &vec_s);
+            linalg_fwd::addmv(&s, x, &v, beta, alpha)
+                .unwrap()
+                .data()
+                .unwrap()
+                .iter()
+                .sum()
+        });
+        assert_grad_close64(&g_mat, &num_mat, 1e-5, "addmv dmat vs FD");
+        let num_vec = fd_grad64(&vec_d, &vec_s, 1e-6, |x| {
+            let s = no_grad_leaf64(&self_d, &self_s);
+            let mat = no_grad_leaf64(&mat_d, &mat_s);
+            linalg_fwd::addmv(&s, &mat, x, beta, alpha)
+                .unwrap()
+                .data()
+                .unwrap()
+                .iter()
+                .sum()
+        });
+        assert_grad_close64(&g_vec, &num_vec, 1e-5, "addmv dvec vs FD");
+    }
+
+    // addr — VJP dself=beta*grad, dvec1=alpha*grad@vec2, dvec2=alpha*grad^T@vec1
+    //   (derivatives.yaml:273 addr; LinearAlgebra.cpp:1200).
+    #[test]
+    fn addr_public_forward_is_grad_aware_and_matches_fd() {
+        let self_d = vec![0.5, -1.0, 2.0, 1.5, 0.0, -0.5];
+        let v1_d = vec![1.5, -2.0];
+        let v2_d = vec![2.0, 1.0, -1.5];
+        let self_s = [2usize, 3];
+        let v1_s = [2usize];
+        let v2_s = [3usize];
+        let (beta, alpha) = (1.0f64, 0.5f64);
+
+        let s = leaf64(&self_d, &self_s);
+        let v1 = leaf64(&v1_d, &v1_s);
+        let v2 = leaf64(&v2_d, &v2_s);
+        let c = linalg_fwd::addr(&s, &v1, &v2, beta, alpha).unwrap();
+        assert!(
+            c.grad_fn().is_some(),
+            "addr public forward must attach a grad_fn"
+        );
+        assert_eq!(c.shape(), &[2, 3]);
+        let loss = crate::grad_fns::reduction::sum(&c).unwrap();
+        loss.backward().unwrap();
+        let g_v1 = v1.grad().unwrap().unwrap().data().unwrap().to_vec();
+        let g_v2 = v2.grad().unwrap().unwrap().data().unwrap().to_vec();
+
+        let num_v1 = fd_grad64(&v1_d, &v1_s, 1e-6, |x| {
+            let s = no_grad_leaf64(&self_d, &self_s);
+            let v2 = no_grad_leaf64(&v2_d, &v2_s);
+            linalg_fwd::addr(&s, x, &v2, beta, alpha)
+                .unwrap()
+                .data()
+                .unwrap()
+                .iter()
+                .sum()
+        });
+        assert_grad_close64(&g_v1, &num_v1, 1e-5, "addr dvec1 vs FD");
+        let num_v2 = fd_grad64(&v2_d, &v2_s, 1e-6, |x| {
+            let s = no_grad_leaf64(&self_d, &self_s);
+            let v1 = no_grad_leaf64(&v1_d, &v1_s);
+            linalg_fwd::addr(&s, &v1, x, beta, alpha)
+                .unwrap()
+                .data()
+                .unwrap()
+                .iter()
+                .sum()
+        });
+        assert_grad_close64(&g_v2, &num_v2, 1e-5, "addr dvec2 vs FD");
+    }
+
+    // addbmm — VJP dself=beta*grad, dbatch1[b]=alpha*grad@batch2[b]^T,
+    //   dbatch2[b]=alpha*batch1[b]^T@grad (derivatives.yaml:238 addbmm).
+    #[test]
+    fn addbmm_public_forward_is_grad_aware_and_matches_fd() {
+        // 2 batches of [2,2] @ [2,2], self [2,2].
+        let self_d = vec![0.5, -1.0, 2.0, 1.5];
+        let b1_d = vec![1.0, 2.0, -1.0, 0.5, 0.5, -1.0, 2.0, 1.0];
+        let b2_d = vec![2.0, -1.0, 0.5, 1.0, 1.0, 0.0, -0.5, 2.0];
+        let self_s = [2usize, 2];
+        let b_s = [2usize, 2, 2];
+        let (beta, alpha) = (0.5f64, 1.5f64);
+
+        let s = leaf64(&self_d, &self_s);
+        let b1 = leaf64(&b1_d, &b_s);
+        let b2 = leaf64(&b2_d, &b_s);
+        let c = linalg_fwd::addbmm(&s, &b1, &b2, beta, alpha).unwrap();
+        assert!(
+            c.grad_fn().is_some(),
+            "addbmm public forward must attach a grad_fn"
+        );
+        assert_eq!(c.shape(), &[2, 2]);
+        let loss = crate::grad_fns::reduction::sum(&c).unwrap();
+        loss.backward().unwrap();
+        let g_b1 = b1.grad().unwrap().unwrap().data().unwrap().to_vec();
+
+        let num_b1 = fd_grad64(&b1_d, &b_s, 1e-6, |x| {
+            let s = no_grad_leaf64(&self_d, &self_s);
+            let b2 = no_grad_leaf64(&b2_d, &b_s);
+            linalg_fwd::addbmm(&s, x, &b2, beta, alpha)
+                .unwrap()
+                .data()
+                .unwrap()
+                .iter()
+                .sum()
+        });
+        assert_grad_close64(&g_b1, &num_b1, 1e-5, "addbmm dbatch1 vs FD");
+    }
+
+    // baddbmm — per-batch addmm VJP (derivatives.yaml:359 baddbmm).
+    #[test]
+    fn baddbmm_public_forward_is_grad_aware_and_matches_fd() {
+        let self_d = vec![0.5, -1.0, 2.0, 1.5, 0.0, 1.0, -0.5, 2.0];
+        let b1_d = vec![1.0, 2.0, -1.0, 0.5, 0.5, -1.0, 2.0, 1.0];
+        let b2_d = vec![2.0, -1.0, 0.5, 1.0, 1.0, 0.0, -0.5, 2.0];
+        let s_s = [2usize, 2, 2];
+        let (beta, alpha) = (1.0f64, 0.75f64);
+
+        let s = leaf64(&self_d, &s_s);
+        let b1 = leaf64(&b1_d, &s_s);
+        let b2 = leaf64(&b2_d, &s_s);
+        let c = linalg_fwd::baddbmm(&s, &b1, &b2, beta, alpha).unwrap();
+        assert!(
+            c.grad_fn().is_some(),
+            "baddbmm public forward must attach a grad_fn"
+        );
+        assert_eq!(c.shape(), &[2, 2, 2]);
+        let loss = crate::grad_fns::reduction::sum(&c).unwrap();
+        loss.backward().unwrap();
+        let g_b2 = b2.grad().unwrap().unwrap().data().unwrap().to_vec();
+
+        let num_b2 = fd_grad64(&b2_d, &s_s, 1e-6, |x| {
+            let s = no_grad_leaf64(&self_d, &s_s);
+            let b1 = no_grad_leaf64(&b1_d, &s_s);
+            linalg_fwd::baddbmm(&s, &b1, x, beta, alpha)
+                .unwrap()
+                .data()
+                .unwrap()
+                .iter()
+                .sum()
+        });
+        assert_grad_close64(&g_b2, &num_b2, 1e-5, "baddbmm dbatch2 vs FD");
+    }
+
+    // kron — per-Kron-block VJP (LinearAlgebra.cpp:3530 kron).
+    #[test]
+    fn kron_public_forward_is_grad_aware_and_matches_fd() {
+        let a_d = vec![1.0, 2.0, -1.0, 0.5];
+        let b_d = vec![2.0, -1.0, 0.5, 1.0];
+        let a_s = [2usize, 2];
+        let b_s = [2usize, 2];
+
+        let a = leaf64(&a_d, &a_s);
+        let b = leaf64(&b_d, &b_s);
+        let c = linalg_fwd::kron(&a, &b).unwrap();
+        assert!(
+            c.grad_fn().is_some(),
+            "kron public forward must attach a grad_fn"
+        );
+        assert_eq!(c.shape(), &[4, 4]);
+        let loss = crate::grad_fns::reduction::sum(&c).unwrap();
+        loss.backward().unwrap();
+        let g_a = a.grad().unwrap().unwrap().data().unwrap().to_vec();
+        let g_b = b.grad().unwrap().unwrap().data().unwrap().to_vec();
+
+        let num_a = fd_grad64(&a_d, &a_s, 1e-6, |x| {
+            let b = no_grad_leaf64(&b_d, &b_s);
+            linalg_fwd::kron(x, &b)
+                .unwrap()
+                .data()
+                .unwrap()
+                .iter()
+                .sum()
+        });
+        assert_grad_close64(&g_a, &num_a, 1e-5, "kron dA vs FD");
+        let num_b = fd_grad64(&b_d, &b_s, 1e-6, |x| {
+            let a = no_grad_leaf64(&a_d, &a_s);
+            linalg_fwd::kron(&a, x)
+                .unwrap()
+                .data()
+                .unwrap()
+                .iter()
+                .sum()
+        });
+        assert_grad_close64(&g_b, &num_b, 1e-5, "kron dB vs FD");
+    }
+
+    // diagonal — VJP scatters grad onto the offset-th diagonal
+    //   (derivatives.yaml:573 diagonal_backward_symint).
+    #[test]
+    fn diagonal_public_forward_is_grad_aware_and_matches_fd() {
+        let a_d = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0];
+        let a_s = [3usize, 3];
+        let offset = 1i64;
+
+        let a = leaf64(&a_d, &a_s);
+        let d = linalg_fwd::diagonal(&a, offset).unwrap();
+        assert!(
+            d.grad_fn().is_some(),
+            "diagonal public forward must attach a grad_fn"
+        );
+        let loss = crate::grad_fns::reduction::sum(&d).unwrap();
+        loss.backward().unwrap();
+        let g = a.grad().unwrap().unwrap().data().unwrap().to_vec();
+
+        let num = fd_grad64(&a_d, &a_s, 1e-6, |x| {
+            linalg_fwd::diagonal(x, offset)
+                .unwrap()
+                .data()
+                .unwrap()
+                .iter()
+                .sum()
+        });
+        assert_grad_close64(&g, &num, 1e-5, "diagonal vs FD");
+    }
+
+    // diag (2-D extract) — VJP scatters grad onto the diagonal.
+    #[test]
+    fn diag_extract_public_forward_is_grad_aware_and_matches_fd() {
+        let a_d = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0];
+        let a_s = [3usize, 3];
+
+        let a = leaf64(&a_d, &a_s);
+        let d = crate::ops::tensor_ops::diag(&a, 0).unwrap();
+        assert!(
+            d.grad_fn().is_some(),
+            "diag (extract) public forward must attach a grad_fn"
+        );
+        assert_eq!(d.shape(), &[3]);
+        let loss = crate::grad_fns::reduction::sum(&d).unwrap();
+        loss.backward().unwrap();
+        let g = a.grad().unwrap().unwrap().data().unwrap().to_vec();
+
+        let num = fd_grad64(&a_d, &a_s, 1e-6, |x| {
+            crate::ops::tensor_ops::diag(x, 0)
+                .unwrap()
+                .data()
+                .unwrap()
+                .iter()
+                .sum()
+        });
+        assert_grad_close64(&g, &num, 1e-5, "diag (extract) vs FD");
+    }
+
+    // diag (1-D construct) — VJP gathers grad's diagonal.
+    #[test]
+    fn diag_construct_public_forward_is_grad_aware_and_matches_fd() {
+        let a_d = vec![1.0, 2.0, 3.0];
+        let a_s = [3usize];
+
+        let a = leaf64(&a_d, &a_s);
+        let d = crate::ops::tensor_ops::diag(&a, 0).unwrap();
+        assert!(
+            d.grad_fn().is_some(),
+            "diag (construct) public forward must attach a grad_fn"
+        );
+        assert_eq!(d.shape(), &[3, 3]);
+        // Weighted loss so the gradient is not uniformly 1 (catches scatter bugs).
+        let w = no_grad_leaf64(&[1.0, 0.0, 0.0, 0.0, 2.0, 0.0, 0.0, 0.0, 3.0], &[3usize, 3]);
+        let prod = crate::grad_fns::arithmetic::mul(&d, &w).unwrap();
+        let loss = crate::grad_fns::reduction::sum(&prod).unwrap();
+        loss.backward().unwrap();
+        let g = a.grad().unwrap().unwrap().data().unwrap().to_vec();
+
+        let num = fd_grad64(&a_d, &a_s, 1e-6, |x| {
+            let dd = crate::ops::tensor_ops::diag(x, 0).unwrap();
+            let wv = [1.0, 0.0, 0.0, 0.0, 2.0, 0.0, 0.0, 0.0, 3.0];
+            dd.data()
+                .unwrap()
+                .iter()
+                .zip(wv.iter())
+                .map(|(a, b)| a * b)
+                .sum()
+        });
+        assert_grad_close64(&g, &num, 1e-5, "diag (construct) vs FD");
+    }
+
+    // tril — VJP masks grad by the kept lower triangle (derivatives.yaml:1805).
+    #[test]
+    fn tril_public_forward_is_grad_aware_and_matches_fd() {
+        let a_d = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0];
+        let a_s = [3usize, 3];
+        // Weighted loss to catch the mask: w has support on both triangles.
+        let w = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0];
+
+        let a = leaf64(&a_d, &a_s);
+        let t = crate::ops::tensor_ops::tril(&a, 0).unwrap();
+        assert!(
+            t.grad_fn().is_some(),
+            "tril public forward must attach a grad_fn"
+        );
+        let wt = no_grad_leaf64(&w, &a_s);
+        let prod = crate::grad_fns::arithmetic::mul(&t, &wt).unwrap();
+        let loss = crate::grad_fns::reduction::sum(&prod).unwrap();
+        loss.backward().unwrap();
+        let g = a.grad().unwrap().unwrap().data().unwrap().to_vec();
+
+        let num = fd_grad64(&a_d, &a_s, 1e-6, |x| {
+            let t = crate::ops::tensor_ops::tril(x, 0).unwrap();
+            t.data()
+                .unwrap()
+                .iter()
+                .zip(w.iter())
+                .map(|(a, b)| a * b)
+                .sum()
+        });
+        assert_grad_close64(&g, &num, 1e-5, "tril vs FD");
+    }
+
+    // triu — VJP masks grad by the kept upper triangle (derivatives.yaml:1809).
+    #[test]
+    fn triu_public_forward_is_grad_aware_and_matches_fd() {
+        let a_d = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0];
+        let a_s = [3usize, 3];
+        let w = [9.0, 8.0, 7.0, 6.0, 5.0, 4.0, 3.0, 2.0, 1.0];
+
+        let a = leaf64(&a_d, &a_s);
+        let t = crate::ops::tensor_ops::triu(&a, 0).unwrap();
+        assert!(
+            t.grad_fn().is_some(),
+            "triu public forward must attach a grad_fn"
+        );
+        let wt = no_grad_leaf64(&w, &a_s);
+        let prod = crate::grad_fns::arithmetic::mul(&t, &wt).unwrap();
+        let loss = crate::grad_fns::reduction::sum(&prod).unwrap();
+        loss.backward().unwrap();
+        let g = a.grad().unwrap().unwrap().data().unwrap().to_vec();
+
+        let num = fd_grad64(&a_d, &a_s, 1e-6, |x| {
+            let t = crate::ops::tensor_ops::triu(x, 0).unwrap();
+            t.data()
+                .unwrap()
+                .iter()
+                .zip(w.iter())
+                .map(|(a, b)| a * b)
+                .sum()
+        });
+        assert_grad_close64(&g, &num, 1e-5, "triu vs FD");
     }
 }

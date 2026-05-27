@@ -37,6 +37,12 @@ fn is_f32<T: Float>() -> bool {
 /// `diagonal=0` is the main diagonal, `diagonal>0` is above, `diagonal<0` is below.
 ///
 /// Matches PyTorch's `torch.triu`.
+///
+/// # Backward
+/// Autograd-aware (CPU): when grad tracking is active for `input`, this routes
+/// through `crate::grad_fns::linalg::triu_differentiable` (the VJP masks the
+/// upstream gradient by the kept upper triangle, per `triu -> grad.triu_symint`
+/// at upstream `tools/autograd/derivatives.yaml:1809`).
 pub fn triu<T: Float>(input: &Tensor<T>, diagonal: i64) -> FerrotorchResult<Tensor<T>> {
     if input.ndim() != 2 {
         return Err(FerrotorchError::InvalidArgument {
@@ -45,6 +51,13 @@ pub fn triu<T: Float>(input: &Tensor<T>, diagonal: i64) -> FerrotorchResult<Tens
     }
     if input.is_cuda() {
         return Err(FerrotorchError::NotImplementedOnCuda { op: "triu" });
+    }
+
+    // Autograd path: delegate to the differentiable wrapper, which computes
+    // the forward inside `no_grad` (preventing re-entry here) and attaches
+    // `TriangularBackward`.
+    if is_grad_enabled() && input.requires_grad() {
+        return crate::grad_fns::linalg::triu_differentiable(input, diagonal);
     }
 
     let rows = input.shape()[0];
@@ -71,6 +84,12 @@ pub fn triu<T: Float>(input: &Tensor<T>, diagonal: i64) -> FerrotorchResult<Tens
 /// Elements above the `diagonal`-th diagonal are set to zero.
 ///
 /// Matches PyTorch's `torch.tril`.
+///
+/// # Backward
+/// Autograd-aware (CPU): when grad tracking is active for `input`, this routes
+/// through `crate::grad_fns::linalg::tril_differentiable` (the VJP masks the
+/// upstream gradient by the kept lower triangle, per `tril -> grad.tril_symint`
+/// at upstream `tools/autograd/derivatives.yaml:1805`).
 pub fn tril<T: Float>(input: &Tensor<T>, diagonal: i64) -> FerrotorchResult<Tensor<T>> {
     if input.ndim() != 2 {
         return Err(FerrotorchError::InvalidArgument {
@@ -79,6 +98,13 @@ pub fn tril<T: Float>(input: &Tensor<T>, diagonal: i64) -> FerrotorchResult<Tens
     }
     if input.is_cuda() {
         return Err(FerrotorchError::NotImplementedOnCuda { op: "tril" });
+    }
+
+    // Autograd path: delegate to the differentiable wrapper, which computes
+    // the forward inside `no_grad` (preventing re-entry here) and attaches
+    // `TriangularBackward`.
+    if is_grad_enabled() && input.requires_grad() {
+        return crate::grad_fns::linalg::tril_differentiable(input, diagonal);
     }
 
     let rows = input.shape()[0];
@@ -107,9 +133,22 @@ pub fn tril<T: Float>(input: &Tensor<T>, diagonal: i64) -> FerrotorchResult<Tens
 /// - If `input` is 1-D: returns a 2-D tensor with `input` on the `diagonal`-th diagonal.
 ///
 /// Matches PyTorch's `torch.diag`.
+///
+/// # Backward
+/// Autograd-aware (CPU): when grad tracking is active for `input`, this routes
+/// through `crate::grad_fns::linalg::diag_differentiable` (the adjoint of the
+/// 0/1 selection — for a 1-D input the VJP gathers grad's diagonal, for a 2-D
+/// input it scatters grad onto the `diagonal`-th diagonal of a zero matrix).
 pub fn diag<T: Float>(input: &Tensor<T>, diagonal: i64) -> FerrotorchResult<Tensor<T>> {
     if input.is_cuda() {
         return Err(FerrotorchError::NotImplementedOnCuda { op: "diag" });
+    }
+
+    // Autograd path: delegate to the differentiable wrapper, which computes
+    // the forward inside `no_grad` (preventing re-entry here) and attaches
+    // `DiagBackward`.
+    if is_grad_enabled() && input.requires_grad() {
+        return crate::grad_fns::linalg::diag_differentiable(input, diagonal);
     }
 
     match input.ndim() {

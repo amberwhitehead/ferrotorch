@@ -55,16 +55,22 @@ matching `*_differentiable` wrapper (which computes the forward under
 public-forward-driven test in this file's `#[cfg(test)] mod tests` — these
 are SHIPPED end-to-end (REQ-10/18/20/29/35).
 
-A set of `*Backward` structs still exists in this file BUT has no non-test
-production consumer (the corresponding forward is not grad-aware and no
-`Tensor` method or public forward delegates to it): the fused-affine
-family (`AddmmBackward`, `AddbmmBackward`, `BaddbmmBackward`, `AddmvBackward`,
-`AddrBackward`), the structural-autograd `KronBackward`, and the
-diagonal-family `DiagonalBackward` / `DiagBackward` / `TriangularBackward`.
-Per R-DOC-4 these are **NOT-STARTED end-to-end** and tracked by the
-remaining consumer-wiring prereq blocker #1583 (the impl exists; the
-grad-aware forward wiring — mirroring the qr/cholesky/slogdet and now
-solve/inv/det/trace/outer pattern — does not).
+The fused-affine family (`AddmmBackward`, `AddbmmBackward`,
+`BaddbmmBackward`, `AddmvBackward`, `AddrBackward`), the structural-autograd
+`KronBackward`, and the diagonal-family `DiagonalBackward` / `DiagBackward`
+/ `TriangularBackward` shipped end-to-end 2026-05-27 (closing the remaining
+scope of #1583): grad-aware public forwards `pub fn addmm` / `addbmm` /
+`baddbmm` / `addmv` / `addr` / `kron` / `diagonal` in
+`ferrotorch-core/src/linalg.rs` (the `torch.addmm`/.../`torch.kron`/
+`torch.linalg.diagonal` public surfaces) and the now-grad-aware
+`pub fn diag` / `tril` / `triu` in
+`ferrotorch-core/src/ops/tensor_ops.rs` delegate to the matching
+`*_differentiable` wrapper (the structural diag/tril/triu/diagonal wrappers
+compute the forward under `no_grad` to avoid re-entry; the addmm-family and
+kron wrappers compute the fused forward inline). Each VJP is FD-verified by
+a public-forward-driven test in this file's `#[cfg(test)] mod tests`
+(REQ-5/6/7/8/9/30/31/32/33/34). With these wired, **#1583 is fully
+resolved** — all its ops are grad-aware end-to-end.
 
 The remaining `torch.linalg.*` factorizations (`svd`, `eig`, `eigh`,
 `eigvals`, `eigvalsh`, `pinv`, `lstsq`, `norm`, `matrix_rank`, `cross`,
@@ -122,41 +128,45 @@ sub-blocker #1577.
 - REQ-5: `addmm(self, mat1, mat2, beta=1, alpha=1) = beta * self + alpha *
   mat1 @ mat2`. Mirrors `TORCH_META_FUNC(addmm)` and
   `TORCH_IMPL_FUNC(addmm_out_cpu)` in
-  `aten/src/ATen/native/LinearAlgebra.cpp`. **NOT-STARTED end-to-end**:
-  `AddmmBackward` + `addmm_differentiable` now exist in
-  `ferrotorch-core/src/grad_fns/linalg.rs`, but there is NO non-test
-  production consumer (no public `addmm` forward delegating to the
-  wrapper); only the parity-sweep runner + in-file tests call it. Open
-  prereq blocker #1583 (consumer wiring).
+  `aten/src/ATen/native/LinearAlgebra.cpp`. **SHIPPED** (2026-05-27,
+  closing #1583): `AddmmBackward` + `addmm_differentiable` in
+  `ferrotorch-core/src/grad_fns/linalg.rs`; non-test production consumer:
+  the grad-aware forward `pub fn addmm` in `ferrotorch-core/src/linalg.rs`
+  (the `torch.addmm` public surface) delegates to `addmm_differentiable`.
+  FD-verified by `fn addmm_public_forward_is_grad_aware_and_matches_fd`.
 
 - REQ-6: `addbmm(self, batch1, batch2, beta=1, alpha=1) = beta * self +
   alpha * sum_b(batch1[b] @ batch2[b])`. Mirrors `Tensor addbmm(...)` in
-  `aten/src/ATen/native/LinearAlgebra.cpp`. **NOT-STARTED end-to-end**:
-  `AddbmmBackward` + `addbmm_differentiable` exist in
-  `ferrotorch-core/src/grad_fns/linalg.rs` but have no non-test
-  production consumer. Open prereq blocker #1583.
+  `aten/src/ATen/native/LinearAlgebra.cpp`. **SHIPPED** (2026-05-27):
+  `AddbmmBackward` + `addbmm_differentiable` in
+  `ferrotorch-core/src/grad_fns/linalg.rs`; non-test production consumer:
+  the grad-aware forward `pub fn addbmm` in `ferrotorch-core/src/linalg.rs`.
+  FD-verified by `fn addbmm_public_forward_is_grad_aware_and_matches_fd`.
 
 - REQ-7: `baddbmm(self, batch1, batch2, beta=1, alpha=1) = beta * self +
   alpha * bmm(batch1, batch2)`. Mirrors `TORCH_META_FUNC(baddbmm)` and
   `TORCH_IMPL_FUNC(baddbmm_out_cpu)` in
-  `aten/src/ATen/native/LinearAlgebra.cpp`. **NOT-STARTED end-to-end**:
-  `BaddbmmBackward` + `baddbmm_differentiable` exist in
-  `ferrotorch-core/src/grad_fns/linalg.rs` but have no non-test
-  production consumer. Open prereq blocker #1583.
+  `aten/src/ATen/native/LinearAlgebra.cpp`. **SHIPPED** (2026-05-27):
+  `BaddbmmBackward` + `baddbmm_differentiable` in
+  `ferrotorch-core/src/grad_fns/linalg.rs`; non-test production consumer:
+  the grad-aware forward `pub fn baddbmm` in `ferrotorch-core/src/linalg.rs`.
+  FD-verified by `fn baddbmm_public_forward_is_grad_aware_and_matches_fd`.
 
 - REQ-8: `addmv(self, mat, vec, beta=1, alpha=1) = beta * self + alpha *
   mat @ vec`. Mirrors `TORCH_META_FUNC(addmv)` and
   `TORCH_IMPL_FUNC(addmv_out_cpu)` in `aten/src/ATen/native/Blas.cpp`.
-  **NOT-STARTED end-to-end**: `AddmvBackward` + `addmv_differentiable`
-  exist in `ferrotorch-core/src/grad_fns/linalg.rs` but have no non-test
-  production consumer. Open prereq blocker #1583.
+  **SHIPPED** (2026-05-27): `AddmvBackward` + `addmv_differentiable` in
+  `ferrotorch-core/src/grad_fns/linalg.rs`; non-test production consumer:
+  the grad-aware forward `pub fn addmv` in `ferrotorch-core/src/linalg.rs`.
+  FD-verified by `fn addmv_public_forward_is_grad_aware_and_matches_fd`.
 
 - REQ-9: `addr(self, vec1, vec2, beta=1, alpha=1) = beta * self + alpha *
   outer(vec1, vec2)`. Mirrors `Tensor addr(const Tensor& self, ...)` in
-  `aten/src/ATen/native/LinearAlgebra.cpp`. **NOT-STARTED end-to-end**:
-  `AddrBackward` + `addr_differentiable` exist in
-  `ferrotorch-core/src/grad_fns/linalg.rs` but have no non-test
-  production consumer. Open prereq blocker #1583.
+  `aten/src/ATen/native/LinearAlgebra.cpp`. **SHIPPED** (2026-05-27):
+  `AddrBackward` + `addr_differentiable` in
+  `ferrotorch-core/src/grad_fns/linalg.rs`; non-test production consumer:
+  the grad-aware forward `pub fn addr` in `ferrotorch-core/src/linalg.rs`.
+  FD-verified by `fn addr_public_forward_is_grad_aware_and_matches_fd`.
 
 - REQ-10: `linalg.solve(A, B)` — solve a square system `A @ X = B`.
   Mirrors `Tensor linalg_solve(const Tensor& A, ...)` in
@@ -356,41 +366,48 @@ sub-blocker #1577.
 
 - REQ-30: `diagonal(A, offset=0, dim1=0, dim2=1)`. Mirrors `Tensor
   linalg_diagonal(...)` in `aten/src/ATen/native/LinearAlgebra.cpp`.
-  **NOT-STARTED end-to-end**: forward-only `pub fn diagonal` in
-  `ferrotorch-core/src/linalg.rs` + `DiagonalBackward` /
-  `diagonal_differentiable` in `ferrotorch-core/src/grad_fns/linalg.rs`
-  exist, but the forward is NOT grad-aware and the wrapper has no non-test
-  production consumer. Open prereq blocker #1583.
+  **SHIPPED** (2026-05-27, closing #1583): `DiagonalBackward` /
+  `diagonal_differentiable` in `ferrotorch-core/src/grad_fns/linalg.rs`;
+  non-test production consumer: the now-grad-aware forward `pub fn
+  diagonal` in `ferrotorch-core/src/linalg.rs` delegates to
+  `diagonal_differentiable` when grad is enabled (forward computed under
+  `no_grad`). FD-verified by
+  `fn diagonal_public_forward_is_grad_aware_and_matches_fd`.
 
 - REQ-31: `diag(A, diagonal=0)` — extract or construct a diagonal.
-  **NOT-STARTED end-to-end**: forward-only `pub fn diag` in
-  `ferrotorch-core/src/ops/tensor_ops.rs` + `DiagBackward` /
-  `diag_differentiable` in `ferrotorch-core/src/grad_fns/linalg.rs`
-  exist, but the forward is NOT grad-aware and the wrapper has no non-test
-  production consumer. Open prereq blocker #1583.
+  **SHIPPED** (2026-05-27): `DiagBackward` / `diag_differentiable` in
+  `ferrotorch-core/src/grad_fns/linalg.rs`; non-test production consumer:
+  the now-grad-aware forward `pub fn diag` in
+  `ferrotorch-core/src/ops/tensor_ops.rs` delegates to
+  `diag_differentiable` when grad is enabled (forward under `no_grad`).
+  FD-verified by `fn diag_extract_public_forward_is_grad_aware_and_matches_fd`
+  + `fn diag_construct_public_forward_is_grad_aware_and_matches_fd`.
 
 - REQ-32: `tril(A, diagonal=0)` — lower triangular zeroing.
-  **NOT-STARTED end-to-end**: forward-only `pub fn tril` in
-  `ferrotorch-core/src/ops/tensor_ops.rs` + `TriangularBackward` /
-  `tril_differentiable` in `ferrotorch-core/src/grad_fns/linalg.rs`
-  exist, but the forward is NOT grad-aware and the wrapper has no non-test
-  production consumer. Open prereq blocker #1583.
+  **SHIPPED** (2026-05-27): `TriangularBackward` / `tril_differentiable`
+  in `ferrotorch-core/src/grad_fns/linalg.rs`; non-test production
+  consumer: the now-grad-aware forward `pub fn tril` in
+  `ferrotorch-core/src/ops/tensor_ops.rs` delegates to
+  `tril_differentiable` when grad is enabled (forward under `no_grad`).
+  FD-verified by `fn tril_public_forward_is_grad_aware_and_matches_fd`.
 
 - REQ-33: `triu(A, diagonal=0)` — upper triangular zeroing.
-  **NOT-STARTED end-to-end**: forward-only `pub fn triu` in
-  `ferrotorch-core/src/ops/tensor_ops.rs` + `triu_differentiable`
-  (sharing `TriangularBackward`) in
-  `ferrotorch-core/src/grad_fns/linalg.rs` exist, but the forward is NOT
-  grad-aware and the wrapper has no non-test production consumer. Open
-  prereq blocker #1583.
+  **SHIPPED** (2026-05-27): `triu_differentiable` (sharing
+  `TriangularBackward`) in `ferrotorch-core/src/grad_fns/linalg.rs`;
+  non-test production consumer: the now-grad-aware forward `pub fn triu`
+  in `ferrotorch-core/src/ops/tensor_ops.rs` delegates to
+  `triu_differentiable` when grad is enabled (forward under `no_grad`).
+  FD-verified by `fn triu_public_forward_is_grad_aware_and_matches_fd`.
 
 - REQ-34: `kron(A, B)` — Kronecker product. Mirrors `Tensor kron(const
   Tensor& self, const Tensor& other)` in
-  `aten/src/ATen/native/LinearAlgebra.cpp`. **NOT-STARTED end-to-end**:
-  `KronBackward` + `kron_differentiable` exist in
-  `ferrotorch-core/src/grad_fns/linalg.rs`, but there is NO public
-  `pub fn kron` forward anywhere in ferrotorch-core src/, so no non-test
-  production consumer. Open prereq blocker #1583.
+  `aten/src/ATen/native/LinearAlgebra.cpp`. **SHIPPED** (2026-05-27):
+  `KronBackward` + `kron_differentiable` in
+  `ferrotorch-core/src/grad_fns/linalg.rs`; non-test production consumer:
+  the new grad-aware forward `pub fn kron` in
+  `ferrotorch-core/src/linalg.rs` (the `torch.kron` public surface)
+  delegates to `kron_differentiable`. FD-verified by
+  `fn kron_public_forward_is_grad_aware_and_matches_fd`.
 
 - REQ-35: `outer(self, vec2)` — outer product. Mirrors `Tensor outer(
   const Tensor& self, const Tensor& vec2)` in
@@ -477,9 +494,11 @@ sub-blocker #1577.
   / `diagonal` / `diag` / `tril` / `triu` / `kron` / `outer`
   `GradFn`-bearing fused implementations (the `*Backward` structs +
   `*_differentiable` wrappers) exist in
-  `ferrotorch-core/src/grad_fns/linalg.rs`. (Note: the IMPLS land here,
-  but none is wired to a non-test production consumer — that end-to-end
-  wiring is AC-tracked separately and blocked on #1583.)
+  `ferrotorch-core/src/grad_fns/linalg.rs` AND every one is now wired to a
+  non-test production consumer (the grad-aware public forwards
+  `crate::linalg::{addmm,addbmm,baddbmm,addmv,addr,kron,diagonal,trace,outer}`
+  and `crate::ops::tensor_ops::{diag,tril,triu}` delegate to them) —
+  closing #1583's consumer-wiring scope (2026-05-27).
 - [ ] AC-12: `linalg.solve` / `linalg.svd` / `linalg.eig` / `linalg.eigh`
   / `linalg.eigvals` / `linalg.eigvalsh` / `linalg.qr` / `linalg.cholesky`
   / `linalg.inv` / `linalg.pinv` / `linalg.det` / `linalg.slogdet` /
@@ -619,23 +638,26 @@ REQ-3: any caller of `Tensor::matmul` or
 linalg_matmul` exists in ferrotorch — the Python-API alias is provided
 by `Tensor::matmul` itself.
 
-### REQ-5..REQ-9 addmm/addbmm/baddbmm/addmv/addr (NOT-STARTED end-to-end)
+### REQ-5..REQ-9 addmm/addbmm/baddbmm/addmv/addr (SHIPPED)
 
 The fused `BLAS-3` family `C = beta * self + alpha * mat1 @ mat2`
 (addmm), the batched-sum `addbmm`, the per-batch `baddbmm`, the matrix-
-vector `addmv`, and the rank-1-outer `addr` now have `*Backward`
+vector `addmv`, and the rank-1-outer `addr` have `*Backward`
 `GradFn` structs and `*_differentiable` wrappers in
 `ferrotorch-core/src/grad_fns/linalg.rs` (`AddmmBackward`,
 `AddbmmBackward`, `BaddbmmBackward`, `AddmvBackward`, `AddrBackward`).
-However, none of them is wired into a non-test production consumer:
-there is no public `addmm` / `addbmm` / `baddbmm` / `addmv` / `addr`
-forward (nor a `Tensor` method) that delegates to the wrapper, so the
-only callers are the parity-sweep runner (test-side, does not count per
-R-DOC-4) and the in-file `#[cfg(test)] mod tests`. The fused
-`pub fn linear_fused` is a related-but-distinct op: it is hard-coded to
-`A @ W^T + bias` (`beta=1, alpha=1`, bias instead of `self`, weight
-transposed) and does not expose the general `addmm` API. The
-consumer-wiring gap is tracked by blocker #1583.
+As of 2026-05-27 (closing #1583), each is wired into a non-test
+production consumer: the grad-aware public forwards `pub fn addmm` /
+`addbmm` / `baddbmm` / `addmv` / `addr` in
+`ferrotorch-core/src/linalg.rs` (the `torch.addmm` / `torch.addbmm` /
+`torch.baddbmm` / `torch.addmv` / `torch.addr` public surfaces) delegate
+to the matching `*_differentiable` wrapper, which computes the fused
+forward inline and attaches the `GradFn` when
+`is_grad_enabled() && any-operand.requires_grad()` (no `no_grad` re-entry
+guard is needed because the wrapper does not call back into the public
+forward). The fused `pub fn linear_fused` remains a related-but-distinct
+op (hard-coded `A @ W^T + bias`); the general fused-affine API is now the
+`addmm`-family forwards.
 
 ### REQ-10..REQ-28 torch.linalg.* factorization family
 
@@ -664,15 +686,18 @@ The closed-form-VJP `*Backward` structs that are wired end-to-end:
   `det_forward_is_grad_aware_and_matches_fd`). `det_differentiable`'s
   internal `inv` (for the VJP) is also computed under `no_grad`.
 
-The closed-form-VJP `*Backward` structs that exist but are NOT yet wired:
+The closed-form-VJP `*Backward` structs that shipped 2026-05-27 (closing
+the remaining scope of #1583):
 - the fused-affine family (`addmm`/`addbmm`/`baddbmm`/`addmv`/`addr`) and
-  the structural `kron`/`diag`/`tril`/`triu`/`diagonal` — their forwards
-  are not grad-aware (or, for `addmm`-family and `kron`, no public forward
-  exists at all). The only caller of those `*_differentiable` wrappers is
-  the parity-sweep runner (test-side). These are NOT-STARTED end-to-end
-  pending the remaining scope of blocker #1583 (grad-aware forward wiring /
-  public forward, mirroring the qr/cholesky/slogdet and
-  solve/inv/det/trace/outer pattern above).
+  the structural `kron`/`diag`/`tril`/`triu`/`diagonal` — their grad-aware
+  public forwards (`crate::linalg::{addmm,addbmm,baddbmm,addmv,addr,kron,
+  diagonal}` and `crate::ops::tensor_ops::{diag,tril,triu}`) now delegate
+  to the matching `*_differentiable` wrapper, mirroring the
+  qr/cholesky/slogdet and solve/inv/det/trace/outer pattern above. With
+  these wired, **#1583 is fully resolved**; only the research-grade
+  factorizations (svd/eigh/eigvalsh/pinv/lstsq/lu under #1577, and
+  eig/eigvals/norm/matrix_rank/cross/householder_product under #1345)
+  remain forward-only.
 
 The QR multi-output case is handled by SPLITTING the jointly-linear
 `(gQ, gR)` VJP across two single-output nodes — `QrBackwardQ` on the `Q`
@@ -707,30 +732,30 @@ enabled, and each VJP is FD-verified by a public-forward-driven test in
 this file's `#[cfg(test)] mod tests`. The grad-aware forward is the
 non-test production consumer.
 
-The remainder (`diagonal`/`diag`/`tril`/`triu`/`kron`) still has a
-`*Backward` `GradFn` + `*_differentiable` wrapper in
-`ferrotorch-core/src/grad_fns/linalg.rs`, but is NOT wired into a non-test
-production consumer (the forwards are not grad-aware and there is no
-`Tensor` method delegating to the wrapper):
+The remainder (`diagonal`/`diag`/`tril`/`triu`/`kron`) shipped end-to-end
+2026-05-27 (closing the last scope of #1583): each `*Backward` `GradFn` +
+`*_differentiable` wrapper in `ferrotorch-core/src/grad_fns/linalg.rs` is
+now consumed by a grad-aware public forward:
 
-- `diagonal`: forward-only `pub fn diagonal` in
-  `ferrotorch-core/src/linalg.rs` + `DiagonalBackward` /
-  `diagonal_differentiable`. Blocker #1583.
-- `diag`: forward-only `pub fn diag` in
-  `ferrotorch-core/src/ops/tensor_ops.rs` + `DiagBackward` /
-  `diag_differentiable`. Blocker #1583.
-- `tril`: forward-only `pub fn tril` in
-  `ferrotorch-core/src/ops/tensor_ops.rs` + `TriangularBackward` /
-  `tril_differentiable`. Blocker #1583.
-- `triu`: forward-only `pub fn triu` in
-  `ferrotorch-core/src/ops/tensor_ops.rs` + `triu_differentiable`
-  (sharing `TriangularBackward`). Blocker #1583.
-- `kron`: `KronBackward` / `kron_differentiable` exist, but there is NO
-  public `pub fn kron` forward anywhere in ferrotorch-core src/. Blocker
-  #1583.
+- `diagonal`: the now-grad-aware `pub fn diagonal` in
+  `ferrotorch-core/src/linalg.rs` delegates to `diagonal_differentiable`
+  (forward computed under `no_grad`). `DiagonalBackward`.
+- `diag`: the now-grad-aware `pub fn diag` in
+  `ferrotorch-core/src/ops/tensor_ops.rs` delegates to
+  `diag_differentiable` (forward under `no_grad`). `DiagBackward`.
+- `tril`: the now-grad-aware `pub fn tril` in
+  `ferrotorch-core/src/ops/tensor_ops.rs` delegates to
+  `tril_differentiable` (forward under `no_grad`). `TriangularBackward`.
+- `triu`: the now-grad-aware `pub fn triu` in
+  `ferrotorch-core/src/ops/tensor_ops.rs` delegates to
+  `triu_differentiable` (sharing `TriangularBackward`; forward under
+  `no_grad`).
+- `kron`: the new grad-aware `pub fn kron` in
+  `ferrotorch-core/src/linalg.rs` delegates to `kron_differentiable`.
+  `KronBackward`.
 
-Grad-aware forward wiring for the remaining REQ-30..34
-(diagonal/diag/tril/triu/kron) is tracked by #1583.
+With REQ-30..34 wired, **#1583 is fully resolved** — every op it covers is
+grad-aware end-to-end.
 
 ## Parity contract
 
@@ -740,11 +765,11 @@ Grad-aware forward wiring for the remaining REQ-30..34
 | `bmm` | `TORCH_IMPL_FUNC(bmm_out_cpu)` in `aten/src/ATen/native/LinearAlgebra.cpp` | per-batch `mm` VJP composed via `batch_transpose` | 3D inputs only (Err on other ranks); batch-dim mismatch → `ShapeMismatch`; CUDA via `SgemmStridedBatched`/`DgemmStridedBatched`; autocast f32→ `bmm_f16_f32` Tensor Core path. SHIPPED (REQ-2). |
 | `matmul` | `Tensor matmul(...)` in `aten/src/ATen/native/LinearAlgebra.cpp` | rank-dispatched: dot/mv/vm/mm/bmm/broadcast_bmm | 1D×1D=dot; 2D×1D=mv; 1D×2D=vm; 2D×2D=mm; 3D×3D=bmm; broadcast ≥3D=gemmStridedBatched with stride-0 on broadcasted axes. CUDA covers all of these for f32/f64; bf16/f16 covered for 2D×2D; other dtype combos err `NotImplementedOnCuda`. SHIPPED (REQ-3). |
 | `linalg.matmul` | `Tensor linalg_matmul(...)` in `aten/src/ATen/native/LinearAlgebra.cpp` | alias for `matmul` | upstream `linalg_matmul` is literally `at::matmul(tensor1, tensor2)`; ferrotorch's `Tensor::matmul` covers both since the Python API surface is the same. SHIPPED (REQ-4). |
-| `addmm` | `TORCH_IMPL_FUNC(addmm_out_cpu)` in `aten/src/ATen/native/LinearAlgebra.cpp` | dself=beta·grad, dmat1=alpha·grad·mat2^T, dmat2=alpha·mat1^T·grad | `AddmmBackward` impl exists; NOT-STARTED end-to-end (no production consumer). Blocker #1583. |
-| `addbmm` | `Tensor addbmm(...)` in `aten/src/ATen/native/LinearAlgebra.cpp` | dself=beta·grad, dbatch1=alpha·grad·batch2^T (broadcast over batch), dbatch2=alpha·batch1^T·grad (sum over batch) | `AddbmmBackward` impl exists; NOT-STARTED end-to-end. Blocker #1583. |
-| `baddbmm` | `TORCH_IMPL_FUNC(baddbmm_out_cpu)` in `aten/src/ATen/native/LinearAlgebra.cpp` | per-batch addmm-like VJP | `BaddbmmBackward` impl exists; NOT-STARTED end-to-end. Blocker #1583. |
-| `addmv` | `TORCH_IMPL_FUNC(addmv_out_cpu)` in `aten/src/ATen/native/Blas.cpp` | dself=beta·grad, dmat=alpha·outer(grad,vec), dvec=alpha·mat^T·grad | `AddmvBackward` impl exists; NOT-STARTED end-to-end. Blocker #1583. |
-| `addr` | `Tensor addr(...)` in `aten/src/ATen/native/LinearAlgebra.cpp` | dself=beta·grad, dvec1=alpha·grad@vec2, dvec2=alpha·vec1^T@grad | `AddrBackward` impl exists; NOT-STARTED end-to-end. Blocker #1583. |
+| `addmm` | `TORCH_IMPL_FUNC(addmm_out_cpu)` in `aten/src/ATen/native/LinearAlgebra.cpp` | dself=beta·grad, dmat1=alpha·grad·mat2^T, dmat2=alpha·mat1^T·grad | SHIPPED (REQ-5): `AddmmBackward` + grad-aware `pub fn addmm` forward delegating to `addmm_differentiable`. FD-verified. |
+| `addbmm` | `Tensor addbmm(...)` in `aten/src/ATen/native/LinearAlgebra.cpp` | dself=beta·grad, dbatch1=alpha·grad·batch2^T (broadcast over batch), dbatch2=alpha·batch1^T·grad (sum over batch) | SHIPPED (REQ-6): `AddbmmBackward` + grad-aware `pub fn addbmm` forward. FD-verified. |
+| `baddbmm` | `TORCH_IMPL_FUNC(baddbmm_out_cpu)` in `aten/src/ATen/native/LinearAlgebra.cpp` | per-batch addmm-like VJP | SHIPPED (REQ-7): `BaddbmmBackward` + grad-aware `pub fn baddbmm` forward. FD-verified. |
+| `addmv` | `TORCH_IMPL_FUNC(addmv_out_cpu)` in `aten/src/ATen/native/Blas.cpp` | dself=beta·grad, dmat=alpha·outer(grad,vec), dvec=alpha·mat^T·grad | SHIPPED (REQ-8): `AddmvBackward` + grad-aware `pub fn addmv` forward. FD-verified. |
+| `addr` | `Tensor addr(...)` in `aten/src/ATen/native/LinearAlgebra.cpp` | dself=beta·grad, dvec1=alpha·grad@vec2, dvec2=alpha·vec1^T@grad | SHIPPED (REQ-9): `AddrBackward` + grad-aware `pub fn addr` forward. FD-verified. |
 | `linalg.solve` | `Tensor linalg_solve(...)` in `aten/src/ATen/native/BatchLinearAlgebra.cpp` | `gB = A^{-T} @ gX`, `gA = -gB @ X^T` (`linalg_solve_backward` in `FunctionsManual.cpp`) | SHIPPED (REQ-10): `LinalgSolveBackward` + grad-aware `pub fn solve` forward delegating to `solve_differentiable`. FD-verified (matrix + vector RHS). |
 | `linalg.svd` | `svd = _add_docstr(...)` in `torch/linalg/__init__.py` | F-matrix formula with U/S/Vh | No `GradFn`; forward-only. NOT-STARTED. Blocker #1577. |
 | `linalg.eig` | `eig = _add_docstr(...)` in `torch/linalg/__init__.py` | F-matrix formula with eigenvalue spacing | No `GradFn`; forward-only. NOT-STARTED. Blocker #1345. |
@@ -765,11 +790,11 @@ Grad-aware forward wiring for the remaining REQ-30..34
 | `linalg.lu` | `lu = _add_docstr(...)` in `torch/linalg/__init__.py` | P/L/U VJP | No `GradFn`; forward-only. NOT-STARTED. Blocker #1577. |
 | `linalg.lu_factor` | `lu_factor = _add_docstr(...)` in `torch/linalg/__init__.py` | same as `lu` minus the explicit unpacking | No `GradFn`; forward-only. NOT-STARTED. Blocker #1577. |
 | `trace` | upstream tensor method (no dedicated impl in `LinearAlgebra.cpp`) | `dA = grad · I` (`trace_backward_symint` in `derivatives.yaml`) | SHIPPED (REQ-29): `TraceBackward` + grad-aware `pub fn trace` forward delegating to `trace_differentiable`. FD-verified. |
-| `diagonal` | `Tensor linalg_diagonal(...)` in `aten/src/ATen/native/LinearAlgebra.cpp` | inverse of `diag_embed` — scatter grad onto the diagonal of zeros | `DiagonalBackward` impl exists, but `pub fn diagonal` forward is not grad-aware. NOT-STARTED end-to-end. Blocker #1583. |
-| `diag` | upstream tensor method `Tensor::diag(...)` | scatter or extract VJP based on input rank | `DiagBackward` impl exists, but `pub fn diag` forward (in `ops/tensor_ops.rs`) is not grad-aware. NOT-STARTED end-to-end. Blocker #1583. |
-| `tril` | upstream tensor method `Tensor::tril(...)` | grad masked by lower triangular | `TriangularBackward` impl exists, but `pub fn tril` forward (in `ops/tensor_ops.rs`) is not grad-aware. NOT-STARTED end-to-end. Blocker #1583. |
-| `triu` | upstream tensor method `Tensor::triu(...)` | grad masked by upper triangular | `triu_differentiable` impl exists (shares `TriangularBackward`), but `pub fn triu` forward (in `ops/tensor_ops.rs`) is not grad-aware. NOT-STARTED end-to-end. Blocker #1583. |
-| `kron` | `Tensor kron(...)` in `aten/src/ATen/native/LinearAlgebra.cpp` | `dA = sum over kron-blocks of grad·B^T`, `dB = sum over kron-blocks of A^T·grad` | `KronBackward` impl exists, but no public `kron` forward exists. NOT-STARTED end-to-end. Blocker #1583. |
+| `diagonal` | `Tensor linalg_diagonal(...)` in `aten/src/ATen/native/LinearAlgebra.cpp` | inverse of `diag_embed` — scatter grad onto the diagonal of zeros | SHIPPED (REQ-30): `DiagonalBackward` + now-grad-aware `pub fn diagonal` forward (in `linalg.rs`) delegating to `diagonal_differentiable`. FD-verified. |
+| `diag` | upstream tensor method `Tensor::diag(...)` | scatter or extract VJP based on input rank | SHIPPED (REQ-31): `DiagBackward` + now-grad-aware `pub fn diag` forward (in `ops/tensor_ops.rs`) delegating to `diag_differentiable`. FD-verified (extract + construct). |
+| `tril` | upstream tensor method `Tensor::tril(...)` | grad masked by lower triangular | SHIPPED (REQ-32): `TriangularBackward` + now-grad-aware `pub fn tril` forward (in `ops/tensor_ops.rs`) delegating to `tril_differentiable`. FD-verified. |
+| `triu` | upstream tensor method `Tensor::triu(...)` | grad masked by upper triangular | SHIPPED (REQ-33): `triu_differentiable` (shares `TriangularBackward`) + now-grad-aware `pub fn triu` forward (in `ops/tensor_ops.rs`). FD-verified. |
+| `kron` | `Tensor kron(...)` in `aten/src/ATen/native/LinearAlgebra.cpp` | `dA = sum over kron-blocks of grad·B^T`, `dB = sum over kron-blocks of A^T·grad` | SHIPPED (REQ-34): `KronBackward` + new grad-aware `pub fn kron` forward (in `linalg.rs`) delegating to `kron_differentiable`. FD-verified. |
 | `outer` | `Tensor outer(...)` in `aten/src/ATen/native/LinearAlgebra.cpp` | `da = grad @ b`, `db = grad^T @ a` | SHIPPED (REQ-35): `OuterBackward` + grad-aware `pub fn outer` forward delegating to `outer_differentiable`. FD-verified. |
 
 Parity-sweep audit reference: only the four matmul-family ops (`mm`,
@@ -880,11 +905,11 @@ expectations).
 | REQ-2 (bmm) | SHIPPED | impl: `pub fn bmm_differentiable` + `pub fn bmm` (forward) + `pub struct BmmBackward` + `fn batch_transpose` in `ferrotorch-core/src/grad_fns/linalg.rs` mirroring `TORCH_IMPL_FUNC(bmm_out_cpu)` at `aten/src/ATen/native/LinearAlgebra.cpp:1894`; non-test consumer: `pub fn bmm` (the `Tensor::bmm` method) in `ferrotorch-core/src/methods.rs`, `crate::grad_fns::linalg::bmm_differentiable` in `ferrotorch-core/src/flex_attention.rs` (attention scores + output), `use ferrotorch_core::grad_fns::linalg::{bmm_differentiable, mm_differentiable}` in `ferrotorch-nn/src/attention.rs`, and `crate::grad_fns::linalg::bmm` (forward-only) in `ferrotorch-core/src/einsum.rs`. Runner arm wired at `"bmm"` arm in `dispatch_f32` in `tools/parity-sweep/runner/src/main.rs` (closes #1344 for bmm; smoke `8/8 passed, 0 failed` at seeds=8 on 2026-05-25). |
 | REQ-3 (matmul) | SHIPPED | impl: `pub fn matmul_differentiable` + `pub struct MatmulBackward` in `ferrotorch-core/src/grad_fns/linalg.rs` mirroring `Tensor matmul(const Tensor & tensor1, const Tensor & tensor2)` at `aten/src/ATen/native/LinearAlgebra.cpp:2190`. Non-test production consumers: `pub fn matmul` (the `Tensor::matmul` method) in `ferrotorch-core/src/methods.rs`, `use ferrotorch_core::grad_fns::linalg::matmul_differentiable` in `ferrotorch-vision/src/models/swin.rs` (Swin attention), `crate::grad_fns::linalg::matmul_differentiable` in `ferrotorch-core/src/einsum.rs` (two-input matmul branch of einsum), and `ferrotorch-core/src/autograd/forward_ad.rs` (forward-AD primal `matmul_diff(a, b)`). The CPU broadcast / 3D-x-2D / 4D paths now route per-batch slabs through `fn broadcast_matmul in ops/linalg.rs` (the per-batch loop dispatches to `pub fn mm_raw in ops/linalg.rs`, faer-backed), consolidating accumulation behavior with `mm` and `bmm`. Runner arm wired at `"matmul"` arm in `dispatch_f32` in `tools/parity-sweep/runner/src/main.rs` (closes #1347; smoke `120/120 passed, 0 failed` at seeds=8 on 2026-05-26). **Tolerance: `rtol=1e-4` for matmul-family ops (cross-BLAS ULP variance; ferrotorch=faer vs torch=MKL)**; verified 2026-05-26 the structural f32 ULP drift `~4e-6 at \|e\|=0.14` lands well within the widened envelope; byte-for-byte parity vs MKL requires the MKL/OpenBLAS FFI follow-up (future epic). The per-op tolerance override lives in `fn tolerance_for in tools/parity-sweep/runner/src/main.rs`. |
 | REQ-4 (linalg.matmul) | SHIPPED | aliased to REQ-3 (`Tensor linalg_matmul(const Tensor & tensor1, const Tensor & tensor2)` at `aten/src/ATen/native/LinearAlgebra.cpp:2206` is literally `return at::matmul(tensor1, tensor2)`). Same `matmul_differentiable` impl in `ferrotorch-core/src/grad_fns/linalg.rs`; same non-test production consumers as REQ-3 — any call to `Tensor::matmul` satisfies the Python-API alias per goal.md R-DEV-2. op_db does NOT register `linalg.matmul` as a separate entry (verified 2026-05-26 via `parity-sweep list-ops | grep linalg.m` — only matrix_norm/matrix_power/matrix_rank/multi_dot appear), so the parity-sweep runner aliases the bare `linalg.matmul` route name to `matmul` via `fn oracle_name in tools/parity-sweep/runner/src/main.rs`. Runner arm wired at `"linalg.matmul"` arm in `dispatch_f32` (closes #1347; smoke `120/120 passed, 0 failed` at seeds=8 on 2026-05-26). **Tolerance: `rtol=1e-4` for matmul-family ops (cross-BLAS ULP variance; ferrotorch=faer vs torch=MKL)** — same envelope as REQ-3 (see `fn tolerance_for in tools/parity-sweep/runner/src/main.rs`); byte-for-byte parity vs MKL requires the MKL/OpenBLAS FFI follow-up (future epic). |
-| REQ-5 (addmm) | NOT-STARTED | open prereq blocker #1583. Impl exists: `pub struct AddmmBackward` + `pub fn addmm_differentiable` in `ferrotorch-core/src/grad_fns/linalg.rs` (VJP `dself=beta·grad`, `dmat1=alpha·grad·mat2^T`, `dmat2=alpha·mat1^T·grad`, mirroring `TORCH_IMPL_FUNC(addmm_out_cpu)` in `LinearAlgebra.cpp`). But there is NO non-test production consumer: no `pub fn addmm` public forward exists in `ferrotorch-core/src/linalg.rs` or `ferrotorch-core/src/methods.rs`, and the only callers of `addmm_differentiable` are the parity-sweep runner (test-side, does not count) and the in-file `#[cfg(test)] mod tests`. Cannot be SHIPPED end-to-end per R-DOC-4 until a grad-aware forward delegates to it. |
-| REQ-6 (addbmm) | NOT-STARTED | open prereq blocker #1583. Impl exists: `pub struct AddbmmBackward` + `pub fn addbmm_differentiable` in `ferrotorch-core/src/grad_fns/linalg.rs` (mirroring `Tensor addbmm(...)` in `LinearAlgebra.cpp`), but no non-test production consumer (no public `addbmm` forward; only the parity-sweep runner + in-file tests call `addbmm_differentiable`). |
-| REQ-7 (baddbmm) | NOT-STARTED | open prereq blocker #1583. Impl exists: `pub struct BaddbmmBackward` + `pub fn baddbmm_differentiable` in `ferrotorch-core/src/grad_fns/linalg.rs` (mirroring `TORCH_IMPL_FUNC(baddbmm_out_cpu)` in `LinearAlgebra.cpp`), but no non-test production consumer. |
-| REQ-8 (addmv) | NOT-STARTED | open prereq blocker #1583. Impl exists: `pub struct AddmvBackward` + `pub fn addmv_differentiable` in `ferrotorch-core/src/grad_fns/linalg.rs` (mirroring `TORCH_IMPL_FUNC(addmv_out_cpu)` in `Blas.cpp`), but no non-test production consumer. |
-| REQ-9 (addr) | NOT-STARTED | open prereq blocker #1583. Impl exists: `pub struct AddrBackward` + `pub fn addr_differentiable` in `ferrotorch-core/src/grad_fns/linalg.rs` (mirroring `Tensor addr(...)` in `LinearAlgebra.cpp`), but no non-test production consumer. |
+| REQ-5 (addmm) | SHIPPED | impl: `pub struct AddmmBackward` + `pub fn addmm_differentiable` in `ferrotorch-core/src/grad_fns/linalg.rs` (VJP `dself=beta·grad`, `dmat1=alpha·grad·mat2^T`, `dmat2=alpha·mat1^T·grad`, mirroring `TORCH_IMPL_FUNC(addmm_out_cpu)` at `aten/src/ATen/native/LinearAlgebra.cpp:1620` + `addmm` at `tools/autograd/derivatives.yaml:256`). FD-verified by `fn addmm_public_forward_is_grad_aware_and_matches_fd` in the in-file `#[cfg(test)] mod tests` (drives the public forward; checks `dself`/`dmat1`/`dmat2` vs central FD). Non-test production consumer: the grad-aware forward `pub fn addmm` in `ferrotorch-core/src/linalg.rs` (the `torch.addmm` public surface) delegates to `addmm_differentiable`; the wrapper attaches the `GradFn` when grad is enabled (the wrapper computes the fused-affine forward inline, so no re-entry guard is needed). |
+| REQ-6 (addbmm) | SHIPPED | impl: `pub struct AddbmmBackward` + `pub fn addbmm_differentiable` in `ferrotorch-core/src/grad_fns/linalg.rs` (mirroring `Tensor addbmm(...)` at `aten/src/ATen/native/LinearAlgebra.cpp:1615` + `addbmm` at `tools/autograd/derivatives.yaml:238`). FD-verified by `fn addbmm_public_forward_is_grad_aware_and_matches_fd`. Non-test production consumer: the grad-aware forward `pub fn addbmm` in `ferrotorch-core/src/linalg.rs` delegates to `addbmm_differentiable`. |
+| REQ-7 (baddbmm) | SHIPPED | impl: `pub struct BaddbmmBackward` + `pub fn baddbmm_differentiable` in `ferrotorch-core/src/grad_fns/linalg.rs` (mirroring `TORCH_IMPL_FUNC(baddbmm_out_cpu)` at `aten/src/ATen/native/LinearAlgebra.cpp:1886` + `baddbmm` at `tools/autograd/derivatives.yaml:359`). FD-verified by `fn baddbmm_public_forward_is_grad_aware_and_matches_fd`. Non-test production consumer: the grad-aware forward `pub fn baddbmm` in `ferrotorch-core/src/linalg.rs` delegates to `baddbmm_differentiable`. |
+| REQ-8 (addmv) | SHIPPED | impl: `pub struct AddmvBackward` + `pub fn addmv_differentiable` in `ferrotorch-core/src/grad_fns/linalg.rs` (mirroring `TORCH_IMPL_FUNC(addmv_out_cpu)` at `aten/src/ATen/native/Blas.cpp:72` + `addmv` at `tools/autograd/derivatives.yaml:267`). FD-verified by `fn addmv_public_forward_is_grad_aware_and_matches_fd`. Non-test production consumer: the grad-aware forward `pub fn addmv` in `ferrotorch-core/src/linalg.rs` delegates to `addmv_differentiable`. |
+| REQ-9 (addr) | SHIPPED | impl: `pub struct AddrBackward` + `pub fn addr_differentiable` in `ferrotorch-core/src/grad_fns/linalg.rs` (mirroring `Tensor addr(...)` at `aten/src/ATen/native/LinearAlgebra.cpp:1200` + `addr` at `tools/autograd/derivatives.yaml:273`). FD-verified by `fn addr_public_forward_is_grad_aware_and_matches_fd`. Non-test production consumer: the grad-aware forward `pub fn addr` in `ferrotorch-core/src/linalg.rs` delegates to `addr_differentiable`. |
 | REQ-10 (linalg.solve) | SHIPPED | impl: `pub struct LinalgSolveBackward` + `pub fn solve_differentiable` in `ferrotorch-core/src/grad_fns/linalg.rs` (VJP `gB = A^{-T} @ gX`, `gA = -gB @ X^T`, mirroring `linalg_solve_backward` at `torch/csrc/autograd/FunctionsManual.cpp:6160`). FD-verified by `fn solve_forward_is_grad_aware_and_matches_fd_matrix_rhs` + `fn solve_forward_is_grad_aware_and_matches_fd_vector_rhs` in the in-file `#[cfg(test)] mod tests` (both drive the public forward and check `A.grad`/`B.grad` vs central FD). Non-test production consumer: the grad-aware forward `pub fn solve` in `ferrotorch-core/src/linalg.rs` (the `torch.linalg.solve` public surface) delegates to `solve_differentiable` when `!a.is_cuda() && is_grad_enabled() && (a.requires_grad() || b.requires_grad())`; the wrapper computes the forward under `no_grad` to avoid re-entry. |
 | REQ-11 (linalg.svd) | NOT-STARTED | open prereq blocker #1577 (research-grade degenerate-singular-value / gauge-freedom VJP). No `LinalgSvdBackward` `GradFn` in `ferrotorch-core/src/grad_fns/linalg.rs`; forward-only `pub fn svd` in `ferrotorch-core/src/linalg.rs`. Upstream `svd = _add_docstr(...)` in `torch/linalg/__init__.py`. |
 | REQ-12 (linalg.eig) | NOT-STARTED | open prereq blocker #1345. No `LinalgEigBackward` `GradFn` in `ferrotorch-core/src/grad_fns/linalg.rs`; forward-only `pub fn eig` in `ferrotorch-core/src/linalg.rs`. Upstream `eig = _add_docstr(...)` in `torch/linalg/__init__.py`. |
@@ -905,9 +930,9 @@ expectations).
 | REQ-27 (linalg.lu) | NOT-STARTED | open prereq blocker #1577 (LU pivoting VJP, gauge-freedom subset). No `LinalgLuBackward` `GradFn` in `ferrotorch-core/src/grad_fns/linalg.rs`; forward-only `pub fn lu` in `ferrotorch-core/src/linalg.rs`. Upstream `lu = _add_docstr(...)` in `torch/linalg/__init__.py`. |
 | REQ-28 (linalg.lu_factor) | NOT-STARTED | open prereq blocker #1577 (same LU VJP minus explicit unpacking). No `LinalgLuFactorBackward` `GradFn` in `ferrotorch-core/src/grad_fns/linalg.rs`; forward-only `pub fn lu_factor` in `ferrotorch-core/src/linalg.rs`. Upstream `lu_factor = _add_docstr(...)` in `torch/linalg/__init__.py`. |
 | REQ-29 (trace) | SHIPPED | impl: `pub struct TraceBackward` + `pub fn trace_differentiable` in `ferrotorch-core/src/grad_fns/linalg.rs` (VJP `dA = grad * I`, mirroring `trace_backward_symint` at `tools/autograd/derivatives.yaml:1785`). FD-verified by `fn trace_forward_is_grad_aware_and_matches_fd` in the in-file `#[cfg(test)] mod tests` (drives the public forward, checks `A.grad` vs central FD). Non-test production consumer: the grad-aware forward `pub fn trace` in `ferrotorch-core/src/linalg.rs` delegates to `trace_differentiable` when `is_grad_enabled() && a.requires_grad()`; the wrapper computes the forward under `no_grad` to avoid re-entry. |
-| REQ-30 (diagonal) | NOT-STARTED | open prereq blocker #1583. Impl exists: `pub struct DiagonalBackward` + `pub fn diagonal_differentiable` in `ferrotorch-core/src/grad_fns/linalg.rs`. But the forward `pub fn diagonal` in `ferrotorch-core/src/linalg.rs` is NOT grad-aware and there is no non-test production consumer of `diagonal_differentiable`. Upstream `Tensor linalg_diagonal(...)` in `LinearAlgebra.cpp`. |
-| REQ-31 (diag) | NOT-STARTED | open prereq blocker #1583. Impl exists: `pub struct DiagBackward` + `pub fn diag_differentiable` in `ferrotorch-core/src/grad_fns/linalg.rs`. But the forward `pub fn diag` in `ferrotorch-core/src/ops/tensor_ops.rs` is NOT grad-aware and there is no non-test production consumer of `diag_differentiable`. Upstream tensor method `Tensor::diag(...)`. |
-| REQ-32 (tril) | NOT-STARTED | open prereq blocker #1583. Impl exists: `pub struct TriangularBackward` + `pub fn tril_differentiable` in `ferrotorch-core/src/grad_fns/linalg.rs` (VJP = grad masked by the lower triangle). But the forward `pub fn tril` in `ferrotorch-core/src/ops/tensor_ops.rs` is NOT grad-aware and there is no non-test production consumer of `tril_differentiable`. Upstream tensor method `Tensor::tril(...)`. |
-| REQ-33 (triu) | NOT-STARTED | open prereq blocker #1583. Impl exists: `pub fn triu_differentiable` (sharing `pub struct TriangularBackward`) in `ferrotorch-core/src/grad_fns/linalg.rs` (VJP = grad masked by the upper triangle). But the forward `pub fn triu` in `ferrotorch-core/src/ops/tensor_ops.rs` is NOT grad-aware and there is no non-test production consumer of `triu_differentiable`. Upstream tensor method `Tensor::triu(...)`. |
-| REQ-34 (kron) | NOT-STARTED | open prereq blocker #1583. Impl exists: `pub struct KronBackward` + `pub fn kron_differentiable` in `ferrotorch-core/src/grad_fns/linalg.rs` (mirroring `Tensor kron(...)` in `LinearAlgebra.cpp`). But there is NO public `pub fn kron` forward anywhere in ferrotorch-core src/, so no non-test production consumer; only the parity-sweep runner + in-file tests call `kron_differentiable`. |
+| REQ-30 (diagonal) | SHIPPED | impl: `pub struct DiagonalBackward` + `pub fn diagonal_differentiable` in `ferrotorch-core/src/grad_fns/linalg.rs` (VJP scatters grad onto the offset-th diagonal of a zero matrix, per `diagonal_backward_symint` at `tools/autograd/derivatives.yaml:573`). FD-verified by `fn diagonal_public_forward_is_grad_aware_and_matches_fd`. Non-test production consumer: the now-grad-aware forward `pub fn diagonal` in `ferrotorch-core/src/linalg.rs` (the `torch.linalg.diagonal` public surface) delegates to `diagonal_differentiable` when `is_grad_enabled() && a.requires_grad()`; the wrapper computes the forward under `no_grad` (preventing re-entry). Upstream `Tensor linalg_diagonal(...)` at `aten/src/ATen/native/LinearAlgebra.cpp:2215`. |
+| REQ-31 (diag) | SHIPPED | impl: `pub struct DiagBackward` + `pub fn diag_differentiable` in `ferrotorch-core/src/grad_fns/linalg.rs` (adjoint of the 0/1 selection — gather for the 1-D-construct forward, scatter for the 2-D-extract forward). FD-verified by `fn diag_extract_public_forward_is_grad_aware_and_matches_fd` + `fn diag_construct_public_forward_is_grad_aware_and_matches_fd`. Non-test production consumer: the now-grad-aware forward `pub fn diag` in `ferrotorch-core/src/ops/tensor_ops.rs` (the `torch.diag` public surface) delegates to `diag_differentiable` when grad is enabled; the wrapper computes the forward under `no_grad`. |
+| REQ-32 (tril) | SHIPPED | impl: `pub struct TriangularBackward` + `pub fn tril_differentiable` in `ferrotorch-core/src/grad_fns/linalg.rs` (VJP = grad masked by the kept lower triangle, per `tril -> grad.tril_symint` at `tools/autograd/derivatives.yaml:1805`). FD-verified by `fn tril_public_forward_is_grad_aware_and_matches_fd`. Non-test production consumer: the now-grad-aware forward `pub fn tril` in `ferrotorch-core/src/ops/tensor_ops.rs` (the `torch.tril` public surface) delegates to `tril_differentiable` when grad is enabled; the wrapper computes the forward under `no_grad`. |
+| REQ-33 (triu) | SHIPPED | impl: `pub fn triu_differentiable` (sharing `pub struct TriangularBackward`) in `ferrotorch-core/src/grad_fns/linalg.rs` (VJP = grad masked by the kept upper triangle, per `triu -> grad.triu_symint` at `tools/autograd/derivatives.yaml:1809`). FD-verified by `fn triu_public_forward_is_grad_aware_and_matches_fd`. Non-test production consumer: the now-grad-aware forward `pub fn triu` in `ferrotorch-core/src/ops/tensor_ops.rs` (the `torch.triu` public surface) delegates to `triu_differentiable` when grad is enabled; the wrapper computes the forward under `no_grad`. |
+| REQ-34 (kron) | SHIPPED | impl: `pub struct KronBackward` + `pub fn kron_differentiable` in `ferrotorch-core/src/grad_fns/linalg.rs` (per-Kron-block VJP, mirroring `Tensor kron(...)` at `aten/src/ATen/native/LinearAlgebra.cpp:3530`). FD-verified by `fn kron_public_forward_is_grad_aware_and_matches_fd`. Non-test production consumer: the new grad-aware forward `pub fn kron` in `ferrotorch-core/src/linalg.rs` (the `torch.kron` public surface) delegates to `kron_differentiable`; the wrapper attaches the `GradFn` when grad is enabled (forward computed inline, no re-entry guard needed). |
 | REQ-35 (outer) | SHIPPED | impl: `pub struct OuterBackward` + `pub fn outer_differentiable` in `ferrotorch-core/src/grad_fns/linalg.rs` (VJP `da = grad @ b`, `db = grad^T @ a`, the unscaled `addr` vec1/vec2 case at `tools/autograd/derivatives.yaml:275-276`). FD-verified by `fn outer_forward_is_grad_aware_and_matches_fd` in the in-file `#[cfg(test)] mod tests` (drives the public forward, loss = sum(C), checks both `a.grad` and `b.grad` vs central FD). Non-test production consumer: the grad-aware forward `pub fn outer` in `ferrotorch-core/src/linalg.rs` delegates to `outer_differentiable` when `is_grad_enabled() && (a.requires_grad() || b.requires_grad())`; the wrapper computes the forward under `no_grad` to avoid re-entry. |

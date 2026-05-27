@@ -1636,6 +1636,12 @@ pub fn multi_dot<T: Float>(matrices: &[&Tensor<T>]) -> FerrotorchResult<Tensor<T
 ///
 /// Mirrors `torch.linalg.diagonal` (and `torch.diagonal` with `dim1=0,
 /// dim2=1`).
+///
+/// # Backward
+/// Autograd-aware (CPU): when grad tracking is active for `a`, this routes
+/// through `crate::grad_fns::linalg::diagonal_differentiable` (the VJP
+/// scatters `grad` back onto the `offset`-th diagonal of a zero matrix, per
+/// `diagonal_backward_symint`, upstream `tools/autograd/derivatives.yaml:573`).
 pub fn diagonal<T: Float>(a: &Tensor<T>, offset: i64) -> FerrotorchResult<Tensor<T>> {
     require_cpu(a, "diagonal")?;
     let shape = a.shape();
@@ -1643,6 +1649,13 @@ pub fn diagonal<T: Float>(a: &Tensor<T>, offset: i64) -> FerrotorchResult<Tensor
         return Err(FerrotorchError::InvalidArgument {
             message: format!("diagonal requires a 2-D tensor, got {shape:?}"),
         });
+    }
+
+    // Autograd path: delegate to the differentiable wrapper, which computes
+    // the forward inside `no_grad` (preventing re-entry here) and attaches
+    // `DiagonalBackward`.
+    if crate::autograd::no_grad::is_grad_enabled() && a.requires_grad() {
+        return crate::grad_fns::linalg::diagonal_differentiable(a, offset);
     }
     let (m, n) = (shape[0] as i64, shape[1] as i64);
     let row_start: i64;
@@ -1751,6 +1764,129 @@ pub fn outer<T: Float>(a: &Tensor<T>, b: &Tensor<T>) -> FerrotorchResult<Tensor<
         }
     }
     Tensor::from_storage(TensorStorage::cpu(out), vec![m, n], false)
+}
+
+// ---------------------------------------------------------------------------
+// Fused-affine family + Kronecker (grad-aware public forwards)
+// ---------------------------------------------------------------------------
+//
+// These are the `torch.addmm` / `torch.addbmm` / `torch.baddbmm` /
+// `torch.addmv` / `torch.addr` / `torch.kron` public surface. Each delegates
+// to the matching `crate::grad_fns::linalg::*_differentiable` wrapper, which
+// computes the fused-affine forward inline and attaches the `*Backward`
+// `GradFn` when `is_grad_enabled() && any-operand.requires_grad()` (else
+// returns a plain tensor). The wrapper does NOT call back into these forwards,
+// so no `no_grad` re-entry guard is needed.
+
+/// `addmm(self, mat1, mat2, beta, alpha) = beta*self + alpha*(mat1 @ mat2)`.
+///
+/// Mirrors `torch.addmm`; upstream `TORCH_META_FUNC(addmm)` /
+/// `TORCH_IMPL_FUNC(addmm_out_cpu)` in
+/// `aten/src/ATen/native/LinearAlgebra.cpp:194,1620` (`self` is broadcast to
+/// the `mat1 @ mat2` shape). VJP per `addmm` at
+/// `tools/autograd/derivatives.yaml:256`.
+///
+/// # Backward
+/// Autograd-aware (CPU): delegates to
+/// `crate::grad_fns::linalg::addmm_differentiable`.
+pub fn addmm<T: Float>(
+    self_: &Tensor<T>,
+    mat1: &Tensor<T>,
+    mat2: &Tensor<T>,
+    beta: T,
+    alpha: T,
+) -> FerrotorchResult<Tensor<T>> {
+    crate::grad_fns::linalg::addmm_differentiable(self_, mat1, mat2, beta, alpha)
+}
+
+/// `addmv(self, mat, vec, beta, alpha) = beta*self + alpha*(mat @ vec)`.
+///
+/// Mirrors `torch.addmv`; upstream `TORCH_META_FUNC(addmv)` /
+/// `TORCH_IMPL_FUNC(addmv_out_cpu)` in `aten/src/ATen/native/Blas.cpp:40,72`.
+/// VJP per `addmv` at `tools/autograd/derivatives.yaml:267`.
+///
+/// # Backward
+/// Autograd-aware (CPU): delegates to
+/// `crate::grad_fns::linalg::addmv_differentiable`.
+pub fn addmv<T: Float>(
+    self_: &Tensor<T>,
+    mat: &Tensor<T>,
+    vec: &Tensor<T>,
+    beta: T,
+    alpha: T,
+) -> FerrotorchResult<Tensor<T>> {
+    crate::grad_fns::linalg::addmv_differentiable(self_, mat, vec, beta, alpha)
+}
+
+/// `addr(self, vec1, vec2, beta, alpha) = beta*self + alpha*outer(vec1, vec2)`.
+///
+/// Mirrors `torch.addr`; upstream `Tensor addr(...)` in
+/// `aten/src/ATen/native/LinearAlgebra.cpp:1200`. VJP per `addr` at
+/// `tools/autograd/derivatives.yaml:273`.
+///
+/// # Backward
+/// Autograd-aware (CPU): delegates to
+/// `crate::grad_fns::linalg::addr_differentiable`.
+pub fn addr<T: Float>(
+    self_: &Tensor<T>,
+    vec1: &Tensor<T>,
+    vec2: &Tensor<T>,
+    beta: T,
+    alpha: T,
+) -> FerrotorchResult<Tensor<T>> {
+    crate::grad_fns::linalg::addr_differentiable(self_, vec1, vec2, beta, alpha)
+}
+
+/// `addbmm(self, batch1, batch2, beta, alpha) = beta*self + alpha*sum_b(batch1[b] @ batch2[b])`.
+///
+/// Mirrors `torch.addbmm`; upstream `Tensor addbmm(...)` in
+/// `aten/src/ATen/native/LinearAlgebra.cpp:1615`. VJP per `addbmm` at
+/// `tools/autograd/derivatives.yaml:238`.
+///
+/// # Backward
+/// Autograd-aware (CPU): delegates to
+/// `crate::grad_fns::linalg::addbmm_differentiable`.
+pub fn addbmm<T: Float>(
+    self_: &Tensor<T>,
+    batch1: &Tensor<T>,
+    batch2: &Tensor<T>,
+    beta: T,
+    alpha: T,
+) -> FerrotorchResult<Tensor<T>> {
+    crate::grad_fns::linalg::addbmm_differentiable(self_, batch1, batch2, beta, alpha)
+}
+
+/// `baddbmm(self, batch1, batch2, beta, alpha) = beta*self + alpha*bmm(batch1, batch2)`.
+///
+/// Mirrors `torch.baddbmm`; upstream `TORCH_META_FUNC(baddbmm)` /
+/// `TORCH_IMPL_FUNC(baddbmm_out_cpu)` in
+/// `aten/src/ATen/native/LinearAlgebra.cpp:340,1886`. VJP per `baddbmm` at
+/// `tools/autograd/derivatives.yaml:359`.
+///
+/// # Backward
+/// Autograd-aware (CPU): delegates to
+/// `crate::grad_fns::linalg::baddbmm_differentiable`.
+pub fn baddbmm<T: Float>(
+    self_: &Tensor<T>,
+    batch1: &Tensor<T>,
+    batch2: &Tensor<T>,
+    beta: T,
+    alpha: T,
+) -> FerrotorchResult<Tensor<T>> {
+    crate::grad_fns::linalg::baddbmm_differentiable(self_, batch1, batch2, beta, alpha)
+}
+
+/// `kron(self, other)` — Kronecker product (2-D × 2-D here).
+///
+/// Mirrors `torch.kron`; upstream `Tensor kron(const Tensor& self, const
+/// Tensor& other)` in `aten/src/ATen/native/LinearAlgebra.cpp:3530`.
+///
+/// # Backward
+/// Autograd-aware (CPU): delegates to
+/// `crate::grad_fns::linalg::kron_differentiable` (per-Kron-block VJP
+/// `dA = sum grad·B^T`, `dB = sum A^T·grad`).
+pub fn kron<T: Float>(self_: &Tensor<T>, other: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
+    crate::grad_fns::linalg::kron_differentiable(self_, other)
 }
 
 // ===========================================================================
