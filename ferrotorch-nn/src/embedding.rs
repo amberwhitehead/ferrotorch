@@ -20,7 +20,7 @@
 //! | REQ-6 | SHIPPED | impl: the `Embedding::sparse_grad` accessor here returning a `SparseGrad<T>`; non-test consumer: `ferrotorch_optim::SparseAdam` consumes this view in its update path (the `sparse=True` codepath in optim). |
 //! | REQ-7 | SHIPPED | impl: `pub struct EmbeddingBag<T: Float>` + `pub enum EmbeddingBagMode` + `Module` impl here; non-test consumer: `pub use embedding::{EmbeddingBag, EmbeddingBagMode}` in `lib.rs` exposes the type for downstream models. |
 //! | REQ-8 | SHIPPED | impl: both `Module<T> for Embedding<T>` and `Module<T> for EmbeddingBag<T>` impl blocks here; non-test consumer: `ferrotorch_optim::Optimizer` iterates `model.parameters_mut()` which surfaces the embedding's weight parameter for every step. |
-//! | REQ-9 | SHIPPED | impl: free fn `renorm_weight_rows_in_place` here (faithful translation of `embedding_renorm_cpu_` at `aten/src/ATen/native/Embedding.cpp:181-212` — sort+dedup touched rows, scale rows with norm > max_norm by `max_norm/(norm+1e-7)`, persist via `Tensor::update_data`), called by `Embedding::renorm_weight_in_place` and `EmbeddingBag::forward_bag`; `with_max_norm`/`with_norm_type`/`with_scale_grad_by_freq` builders on `Embedding<T>`, plus `EmbeddingBag::new_with` + `with_max_norm`/`with_norm_type`/`with_scale_grad_by_freq`/`with_sparse`/`with_include_last_offset` and `padding_idx` exclusion in `forward_bag`. `EmbeddingBackward::scale_grad_by_freq` divides each touched row's grad by its forward count (`torch/nn/functional.py:2499-2500`). Renorm runs BEFORE the gather, matching `F.embedding`/`F.embedding_bag` (`functional.py:2561-2573`, `2766-2771`). Non-test consumer: `<Embedding as Module>::forward` here calls `self.renorm_weight_in_place(&indices)?` on every forward, and the builder API is re-exported via `pub use embedding::Embedding` in `lib.rs` (held by `ferrotorch-llama/src/model.rs`'s `embed_tokens`); `EmbeddingBag::forward_bag` / `<EmbeddingBag as Module>::forward` are the in-crate consumers of the bag kwargs. |
+//! | REQ-9 | SHIPPED | impl: free fn `renorm_weight_rows_in_place` here (faithful translation of `embedding_renorm_cpu_` at `aten/src/ATen/native/Embedding.cpp:181-212` — sort+dedup touched rows, row norm via `at::norm` special-cased per `aten/src/ATen/native/cpu/ReduceOpsKernel.cpp:191-203` for `norm_type` 0/+inf/-inf, scale rows with norm > max_norm by `max_norm/(norm+1e-7)`, persist via `Tensor::update_data`), called by `Embedding::renorm_weight_in_place` and `EmbeddingBag::forward_bag`; `with_max_norm`/`with_norm_type`/`with_scale_grad_by_freq` builders on `Embedding<T>`, plus `EmbeddingBag::new_with` + `with_max_norm`/`with_norm_type`/`with_scale_grad_by_freq`/`with_sparse`/`with_include_last_offset` and `padding_idx` exclusion in `forward_bag`. `EmbeddingBackward::scale_grad_by_freq` divides each touched row's grad by its forward count (`torch/nn/functional.py:2499-2500`). Renorm runs BEFORE the gather, matching `F.embedding`/`F.embedding_bag` (`functional.py:2561-2573`, `2766-2771`). Consumer surface: per goal.md S5, `Embedding`/`EmbeddingBag` ARE boundary public API (the module mirrors `torch.nn.Embedding`/`torch.nn.EmbeddingBag` field-for-field — the user-facing kwargs ARE the deliverable), grandfathered SHIPPED with no further downstream caller required. The renorm is on the live forward path: `<Embedding as Module>::forward` here calls `self.renorm_weight_in_place(&indices)?` on every forward (no-op when `max_norm` unset), and `EmbeddingBag::forward_bag` / `<EmbeddingBag as Module>::forward` consume the bag kwargs; both types are re-exported via `pub use embedding::{Embedding, EmbeddingBag, EmbeddingBagMode}` in `lib.rs` as the public consumer surface. (NB #1566: the prior cite to `ferrotorch-llama/src/model.rs embed_tokens` as the renorm consumer was FALSE — `model.rs` constructs `Embedding::new(.., None)` with no `max_norm`/`EmbeddingBag`; corrected to the S5 boundary-API rationale.) |
 //! | REQ-10 | NOT-STARTED | blocker #1441 (umbrella) — parity-sweep runner arms absent for both `nn.functional.embedding` and `nn.functional.embedding_bag`. Lib tests verify the impl end-to-end. |
 
 use std::any::TypeId;
@@ -105,12 +105,41 @@ fn renorm_weight_rows_in_place<T: Float>(
     for &idx in &sorted {
         let row_start = idx * dim;
         let row = &weight_data[row_start..row_start + dim];
-        let mut acc = 0.0f64;
-        for &v in row {
-            let vf = num_traits::ToPrimitive::to_f64(&v).unwrap_or(0.0);
-            acc += vf.abs().powf(norm_type);
-        }
-        let norm = acc.powf(1.0 / norm_type);
+        // `row.norm(norm_type)` = `at::norm`, which special-cases the
+        // non-finite / degenerate orders rather than evaluating the generic
+        // `(Σ|x|^p)^(1/p)` formula — that formula gives `inf^0 = 1` for
+        // `p = +inf` and `x^0 = 1` for `p = 0`, both wrong. Mirror the kernel
+        // dispatch at `aten/src/ATen/native/cpu/ReduceOpsKernel.cpp:191-203`:
+        //   p == 0     -> NormZeroOps : count of nonzero elements (L0)
+        //   p == +inf  -> AbsMaxOps   : max_i |x_i|  (infinity norm)
+        //   p == -inf  -> AbsMinOps   : min_i |x_i|  (acc seeded +inf)
+        //   else       -> NormOps     : (Σ|x|^p)^(1/p)
+        // (p == 1 / p == 2 are exact under the generic formula, so they need
+        // no separate arm here.)
+        let norm = if norm_type == 0.0 {
+            // NormZeroOps (`SharedReduceOps.h:285`): count of nonzeros.
+            row.iter()
+                .filter(|&&v| num_traits::ToPrimitive::to_f64(&v).unwrap_or(0.0) != 0.0)
+                .count() as f64
+        } else if norm_type == f64::INFINITY {
+            // AbsMaxOps (`SharedReduceOps.h:216`): max_i |x_i|.
+            row.iter().fold(0.0f64, |acc, &v| {
+                acc.max(num_traits::ToPrimitive::to_f64(&v).unwrap_or(0.0).abs())
+            })
+        } else if norm_type == f64::NEG_INFINITY {
+            // AbsMinOps (`SharedReduceOps.h:186`): min_i |x_i|, acc seeded +inf.
+            row.iter().fold(f64::INFINITY, |acc, &v| {
+                acc.min(num_traits::ToPrimitive::to_f64(&v).unwrap_or(0.0).abs())
+            })
+        } else {
+            // NormOps: generic finite p-norm `(Σ|x|^p)^(1/p)`.
+            let mut acc = 0.0f64;
+            for &v in row {
+                let vf = num_traits::ToPrimitive::to_f64(&v).unwrap_or(0.0);
+                acc += vf.abs().powf(norm_type);
+            }
+            acc.powf(1.0 / norm_type)
+        };
         if norm > max_norm {
             // Lazily materialise the mutable copy only when a row needs
             // clipping, so the no-clip case never touches the buffer.

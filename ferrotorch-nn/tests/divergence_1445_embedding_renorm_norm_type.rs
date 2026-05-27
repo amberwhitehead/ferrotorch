@@ -26,8 +26,8 @@
 
 use ferrotorch_core::storage::TensorStorage;
 use ferrotorch_core::tensor::Tensor;
-use ferrotorch_nn::module::Module;
 use ferrotorch_nn::Embedding;
+use ferrotorch_nn::module::Module;
 
 fn weight_3x2(rows: &[f64; 6]) -> Tensor<f64> {
     Tensor::from_storage(TensorStorage::cpu(rows.to_vec()), vec![3, 2], true).unwrap()
@@ -56,8 +56,18 @@ fn renorm_norm_type_2_control_matches_torch() {
     let scale = 2.0 / (5.0 + 1e-7);
     let exp1 = 3.0 * scale; // torch: 1.1999999952...
     let exp2 = 4.0 * scale; // torch: 1.5999999936...
-    assert!((w[2] - exp1).abs() < 1e-12, "row1[0] got {}, want {}", w[2], exp1);
-    assert!((w[3] - exp2).abs() < 1e-12, "row1[1] got {}, want {}", w[3], exp2);
+    assert!(
+        (w[2] - exp1).abs() < 1e-12,
+        "row1[0] got {}, want {}",
+        w[2],
+        exp1
+    );
+    assert!(
+        (w[3] - exp2).abs() < 1e-12,
+        "row1[1] got {}, want {}",
+        w[3],
+        exp2
+    );
 }
 
 /// Divergence: ferrotorch's `renorm_weight_rows_in_place` diverges from

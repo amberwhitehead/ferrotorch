@@ -170,7 +170,18 @@ returns `[&weight]`, `named_parameters()` yields `("weight",
   at `ferrotorch-nn/src/lib.rs`.
 - `ferrotorch-llama/src/model.rs` carries `pub embed_tokens:
   Embedding<T>` and constructs it via `Embedding::new(cfg.vocab_size,
-  cfg.hidden_size, None)?` — the standard Llama embedding table.
+  cfg.hidden_size, None)?` — the standard Llama embedding table. This
+  is the consumer for REQ-1/2/3 (the basic lookup table) only. It
+  constructs with `padding_idx=None`, `max_norm=None`, default
+  `norm_type`, and never touches `EmbeddingBag` — so it is **NOT** a
+  consumer of the REQ-9 `max_norm`/`norm_type`/`scale_grad_by_freq`/
+  `EmbeddingBag` kwargs (#1566 corrected the earlier overstatement).
+- For REQ-9 specifically: per goal.md S5, `Embedding` and
+  `EmbeddingBag` are themselves the **boundary public API** mirroring
+  `torch.nn.Embedding` / `torch.nn.EmbeddingBag` — the module IS what
+  users call. The builder kwargs + `forward`/`forward_bag` are the
+  consumer surface; no further downstream caller is required for the
+  REQ to be SHIPPED (S5 grandfathers boundary methods).
 - `ferrotorch_optim`'s SparseAdam consumes `Embedding::sparse_grad`
   in its update step.
 
@@ -238,5 +249,5 @@ Expected grep count after blocker #1441 closes: `>= 1` for each.
 | REQ-6 | SHIPPED | impl: `Embedding::sparse_grad` defined further in `embedding.rs` returning a `SparseGrad<T>`; non-test consumer: `ferrotorch_optim::SparseAdam` consumes this view in its update path (the `sparse=True` codepath in optim). |
 | REQ-7 | SHIPPED | impl: `pub struct EmbeddingBag<T: Float>` + `pub enum EmbeddingBagMode` + `impl Module` in `embedding.rs`; non-test consumer: `pub use embedding::{EmbeddingBag, EmbeddingBagMode}` in `lib.rs` exposes the type for downstream models. |
 | REQ-8 | SHIPPED | impl: both `Module<T> for Embedding<T>` and `Module<T> for EmbeddingBag<T>` impl blocks in `embedding.rs`; non-test consumer: `ferrotorch_optim::Optimizer` iterates `model.parameters_mut()` which surfaces the embedding's weight parameter for every step. |
-| REQ-9 | SHIPPED | impl: free fn `renorm_weight_rows_in_place` (faithful `embedding_renorm_cpu_` translation, persisted in-place weight mutation via `Tensor::update_data`) in `embedding.rs`, called by `Embedding::renorm_weight_in_place` and `EmbeddingBag::forward_bag`; `with_max_norm`/`with_norm_type`/`with_scale_grad_by_freq` on `Embedding`, plus `EmbeddingBag::new_with` + `with_max_norm`/`with_norm_type`/`with_scale_grad_by_freq`/`with_sparse`/`with_include_last_offset` + `padding_idx` exclusion in `forward_bag`. Non-test production consumer: `<Embedding as Module>::forward` in `embedding.rs` calls `self.renorm_weight_in_place(&indices)?` before every gather (the renorm is on the live forward path), and `Embedding`'s builder API is re-exported via `pub use embedding::Embedding` in `lib.rs` and held by `ferrotorch-llama/src/model.rs`'s `embed_tokens`; `EmbeddingBag::forward_bag`/`<EmbeddingBag as Module>::forward` are the in-crate consumers of the bag kwargs, re-exported via `pub use embedding::{EmbeddingBag, EmbeddingBagMode}` in `lib.rs`. `EmbeddingBag` per-bag backward remains unimplemented (forward returns a non-grad tensor) — tracked separately. |
+| REQ-9 | SHIPPED | impl: free fn `renorm_weight_rows_in_place` (faithful `embedding_renorm_cpu_` translation, persisted in-place weight mutation via `Tensor::update_data`, row norm via `at::norm` special-cased per `aten/src/ATen/native/cpu/ReduceOpsKernel.cpp:191-203` for `norm_type` 0/+inf/-inf) in `embedding.rs`, called by `Embedding::renorm_weight_in_place` and `EmbeddingBag::forward_bag`; `with_max_norm`/`with_norm_type`/`with_scale_grad_by_freq` on `Embedding`, plus `EmbeddingBag::new_with` + `with_max_norm`/`with_norm_type`/`with_scale_grad_by_freq`/`with_sparse`/`with_include_last_offset` + `padding_idx` exclusion in `forward_bag`. Consumer surface: per goal.md S5, `Embedding`/`EmbeddingBag` ARE boundary public API mirroring `torch.nn.Embedding`/`torch.nn.EmbeddingBag` (the user-facing kwargs ARE the deliverable) — grandfathered SHIPPED with no further downstream caller required. `<Embedding as Module>::forward` calls `self.renorm_weight_in_place(&indices)?` before every gather (renorm on the live forward path, no-op when `max_norm` unset); `EmbeddingBag::forward_bag`/`<EmbeddingBag as Module>::forward` consume the bag kwargs; both re-exported via `pub use embedding::{Embedding, EmbeddingBag, EmbeddingBagMode}` in `lib.rs` as the public consumer surface. `EmbeddingBag` per-bag backward remains unimplemented (forward returns a non-grad tensor) — tracked separately. (NB #1566: prior cite of `ferrotorch-llama/src/model.rs embed_tokens` as the renorm consumer was FALSE — `model.rs` uses `Embedding::new(.., None)` with no `max_norm`/`EmbeddingBag`; corrected to the S5 boundary-API rationale.) |
 | REQ-10 | NOT-STARTED | blocker #1441 (umbrella) — parity-sweep runner arms absent for both `nn.functional.embedding` and `nn.functional.embedding_bag`. Lib tests verify the impl end-to-end. |
