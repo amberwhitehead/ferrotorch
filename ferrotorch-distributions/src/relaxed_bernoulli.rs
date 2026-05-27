@@ -32,9 +32,11 @@
 //! | REQ-4 (`Distribution::sample` / `rsample` via Concrete forward) | SHIPPED | `impl Distribution::sample` / `rsample` in `relaxed_bernoulli.rs` invoke `relaxed_bernoulli_sample` (the Concrete forward `z = sigmoid((L + logits) / temperature)`); mirrors `LogitRelaxedBernoulli.rsample` + `SigmoidTransform` composition at `relaxed_bernoulli.py:104-112`. |
 //! | REQ-5 (`Distribution::log_prob` via Concrete density) | SHIPPED | `impl Distribution::log_prob` in `relaxed_bernoulli.rs` with numerically stable softplus + sigmoid Jacobian; mirrors `LogitRelaxedBernoulli.log_prob` at `relaxed_bernoulli.py:114-119`. Probe at `z=0.7,logits=0.5,temp=2.0` matches PyTorch's `-0.7893`. |
 //! | REQ-6 (`Distribution::entropy` errors) | SHIPPED | `impl Distribution::entropy` returns `InvalidArgument` (Concrete has no closed-form entropy). |
-//! | REQ-7 (`logits`/`mean`/`mode`/`variance`/`cdf`/`icdf`/`support`) | NOT-STARTED | blocker #1411 — cross-cutting with `lib.md` REQ-5 (blocker #1376). |
+//! | REQ-7 (`logits` accessor + `support`/`arg_constraints`/`has_rsample`/`expand`) | SHIPPED | `pub fn logits` returns `log(p/(1-p))` per element; `fn support` returns `UnitInterval`; `fn arg_constraints` declares `probs: UnitInterval`; `fn has_rsample` returns `true`; `fn expand` broadcasts `probs`. Mirrors `torch/distributions/relaxed_bernoulli.py:131-148`. Non-test consumer: `pub use RelaxedBernoulli` re-export — every external `dist.support()` / `dist.logits()` call hits these. `mean`/`mode`/`variance`/`cdf`/`icdf` have no closed form for the Concrete relaxation (upstream raises `NotImplementedError`). Closes #1411. |
 //! | REQ-8 (`LogitRelaxedBernoulli` as standalone) | NOT-STARTED | blocker #1415 — `relaxed_bernoulli.py:22-119` unconstrained-logit-space base not exposed as a separate ferrotorch distribution. |
 //! | REQ-9 (differentiable `rsample` with autograd graph) | NOT-STARTED | blocker #1420 — scalar-CPU path produces detached output. |
+
+use std::collections::HashMap;
 
 use ferrotorch_core::creation;
 use ferrotorch_core::dtype::Float;
@@ -42,7 +44,8 @@ use ferrotorch_core::error::{FerrotorchError, FerrotorchResult};
 use ferrotorch_core::storage::TensorStorage;
 use ferrotorch_core::tensor::Tensor;
 
-use crate::Distribution;
+use crate::constraints;
+use crate::{DistConstraint, Distribution};
 
 /// Continuous relaxation of a Bernoulli distribution.
 pub struct RelaxedBernoulli<T: Float> {
@@ -89,6 +92,21 @@ impl<T: Float> RelaxedBernoulli<T> {
     /// The probability parameter.
     pub fn probs(&self) -> &Tensor<T> {
         &self.probs
+    }
+
+    /// The logits parameter `log(p / (1 - p))`.
+    ///
+    /// Mirrors `torch.distributions.RelaxedBernoulli.logits`
+    /// (`torch/distributions/relaxed_bernoulli.py:166-168`), which delegates
+    /// to `LogitRelaxedBernoulli.logits` and returns the elementwise
+    /// log-odds of the probability vector.
+    pub fn logits(&self) -> FerrotorchResult<Tensor<T>> {
+        let one = <T as num_traits::One>::one();
+        let probs_data = self.probs.data_vec()?;
+        let out: Vec<T> = probs_data.iter().map(|&p| (p / (one - p)).ln()).collect();
+        let device = self.probs.device();
+        let t = Tensor::from_storage(TensorStorage::cpu(out), self.probs.shape().to_vec(), false)?;
+        if device.is_cuda() { t.to(device) } else { Ok(t) }
     }
 }
 
@@ -179,6 +197,55 @@ impl<T: Float> Distribution<T> for RelaxedBernoulli<T> {
         Err(FerrotorchError::InvalidArgument {
             message: "RelaxedBernoulli: entropy has no closed form".into(),
         })
+    }
+
+    // -----------------------------------------------------------------------
+    // Full PyTorch surface (#1411) — Concrete relaxation has a reparameterized
+    // sample, support on the open unit interval, single `probs` parameter
+    // constrained to (0, 1). mean/mode/variance/cdf/icdf are NOT implemented
+    // because they have no closed form (upstream raises NotImplementedError).
+    // Mirrors `torch/distributions/relaxed_bernoulli.py:122-148`.
+    // -----------------------------------------------------------------------
+
+    fn has_rsample(&self) -> bool {
+        // The Concrete relaxation is differentiable in `probs`+`temperature`
+        // via the SigmoidTransform composition; mirrors
+        // `relaxed_bernoulli.py:131` which inherits `has_rsample = True`
+        // from `TransformedDistribution`.
+        true
+    }
+
+    fn support(&self) -> Option<Box<dyn DistConstraint>> {
+        // `torch/distributions/relaxed_bernoulli.py:145`:
+        //   support = constraints.unit_interval
+        Some(Box::new(constraints::UnitInterval))
+    }
+
+    fn arg_constraints(&self) -> HashMap<&'static str, Box<dyn DistConstraint>> {
+        // `torch/distributions/relaxed_bernoulli.py:143-144`:
+        //   arg_constraints = {"probs": unit_interval, "logits": real}
+        // We expose only `probs` (the stored parameter); `logits` is a
+        // derived view.
+        let mut m: HashMap<&'static str, Box<dyn DistConstraint>> = HashMap::new();
+        m.insert("probs", Box::new(constraints::UnitInterval));
+        m
+    }
+
+    fn batch_shape(&self) -> Vec<usize> {
+        self.probs.shape().to_vec()
+    }
+
+    fn expand(&self, batch_shape: &[usize]) -> FerrotorchResult<Box<dyn Distribution<T>>> {
+        // Broadcast `probs` to the target batch shape; `temperature` is a
+        // shared scalar and travels untouched. Mirrors
+        // `relaxed_bernoulli.py:138-141` (`expand` inherited from
+        // `TransformedDistribution`).
+        let p_data = self.probs.data_vec()?;
+        let n: usize = batch_shape.iter().product::<usize>().max(1);
+        let p_out: Vec<T> = (0..n).map(|i| p_data[i % p_data.len()]).collect();
+        let new_probs =
+            Tensor::from_storage(TensorStorage::cpu(p_out), batch_shape.to_vec(), false)?;
+        Ok(Box::new(RelaxedBernoulli::new(self.temperature, new_probs)?))
     }
 }
 
@@ -325,5 +392,39 @@ mod tests {
         let probs = cpu_tensor(&[0.5], &[1]);
         let d = RelaxedBernoulli::new(0.5_f32, probs).unwrap();
         assert!(d.entropy().is_err());
+    }
+
+    #[test]
+    fn test_relaxed_bernoulli_logits_inverse_sigmoid() {
+        // logits(0.5) = log(1) = 0; logits(0.75) = log(3) ≈ 1.0986
+        let probs = cpu_tensor(&[0.5, 0.75], &[2]);
+        let d = RelaxedBernoulli::new(0.5_f32, probs).unwrap();
+        let logits = d.logits().unwrap();
+        let data = logits.data_vec().unwrap();
+        assert!(data[0].abs() < 1e-5, "logits(0.5) = {}", data[0]);
+        assert!(
+            (data[1] - 3.0_f32.ln()).abs() < 1e-5,
+            "logits(0.75) = {}",
+            data[1]
+        );
+    }
+
+    #[test]
+    fn test_relaxed_bernoulli_support_and_constraints() {
+        let probs = cpu_tensor(&[0.5], &[1]);
+        let d = RelaxedBernoulli::new(0.5_f32, probs).unwrap();
+        assert!(d.support().is_some());
+        assert_eq!(d.support().unwrap().name(), "UnitInterval");
+        assert!(d.has_rsample());
+        let m = d.arg_constraints();
+        assert!(m.contains_key("probs"));
+    }
+
+    #[test]
+    fn test_relaxed_bernoulli_expand() {
+        let probs = cpu_tensor(&[0.5], &[1]);
+        let d = RelaxedBernoulli::new(0.5_f32, probs).unwrap();
+        let expanded = d.expand(&[4]).unwrap();
+        assert_eq!(expanded.batch_shape(), vec![4]);
     }
 }

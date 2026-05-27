@@ -36,8 +36,8 @@
 //! | REQ-6 (log_prob via logsumexp) | SHIPPED | the manual logsumexp body in `mixture_same_family.rs`. |
 //! | REQ-7 (`rsample` errors — not reparameterizable) | SHIPPED | the `rsample` body returns `InvalidArgument` in `mixture_same_family.rs`. |
 //! | REQ-8 (`entropy` errors — no closed form) | SHIPPED | the `entropy` body returns `InvalidArgument` in `mixture_same_family.rs`. |
-//! | REQ-9 (mean/variance via law-of-total-variance) | NOT-STARTED | blocker #1388 — default trait impls error. |
-//! | REQ-10 (cdf via sum cdf_x * mix_probs) | NOT-STARTED | blocker #1389 — default trait cdf errors. |
+//! | REQ-9 (mean/variance via law-of-total-variance) | SHIPPED | `fn mean` returns `sum_k mix_probs[k] * components.mean()[k]` and `fn variance` uses law of total variance `E[Var(X|K)] + Var(E[X|K])` mirroring `torch/distributions/mixture_same_family.py:155-189`; non-test consumer: `pub use mixture_same_family::MixtureSameFamily` re-export — every external `dist.mean()` / `dist.variance()` call hits these overrides; closes #1388. |
+//! | REQ-10 (cdf via sum cdf_x * mix_probs) | SHIPPED | `fn cdf` returns `sum_k mix_probs[k] * components.cdf(value)[k]` mirroring `torch/distributions/mixture_same_family.py:191-201`; non-test consumer: `pub use MixtureSameFamily` re-export; closes #1389. |
 //! | REQ-11 (multi-event-dim component support) | NOT-STARTED | blocker #1390 — current impl assumes scalar event_shape. |
 
 use ferrotorch_core::dtype::Float;
@@ -241,6 +241,117 @@ impl<T: Float, D: Distribution<T>> Distribution<T> for MixtureSameFamily<T, D> {
             message: "MixtureSameFamily: entropy has no closed form for general mixtures".into(),
         })
     }
+
+    fn mean(&self) -> FerrotorchResult<Tensor<T>> {
+        // Reference: torch.distributions.MixtureSameFamily.mean
+        // (`torch/distributions/mixture_same_family.py:155-162`):
+        //   mean = sum_k mix_probs[k] * components_mean[k]
+        // Components are stored as a single distribution whose batch shape's
+        // rightmost dim is the component index (size K). We weight the
+        // per-component means by the mixing probabilities and sum.
+        let comp_mean = self.components.mean()?;
+        let comp_data = comp_mean.data_vec()?;
+        let mix_probs = self.mixing.probs().data_vec()?;
+        let k = self.num_components;
+        if comp_data.len() % k != 0 {
+            return Err(FerrotorchError::ShapeMismatch {
+                message: format!(
+                    "MixtureSameFamily: components.mean() numel {} not divisible by K={}",
+                    comp_data.len(),
+                    k
+                ),
+            });
+        }
+        let outer = comp_data.len() / k;
+        let zero = <T as num_traits::Zero>::zero();
+        let mut out = Vec::with_capacity(outer);
+        for i in 0..outer {
+            let mut acc = zero;
+            for j in 0..k {
+                acc += mix_probs[j] * comp_data[i * k + j];
+            }
+            out.push(acc);
+        }
+        let mut out_shape = comp_mean.shape().to_vec();
+        out_shape.pop();
+        Tensor::from_storage(TensorStorage::cpu(out), out_shape, false)
+    }
+
+    fn variance(&self) -> FerrotorchResult<Tensor<T>> {
+        // Reference: torch.distributions.MixtureSameFamily.variance
+        // (`torch/distributions/mixture_same_family.py:164-189`):
+        //   Var(X) = E[Var(X|K)] + Var(E[X|K])
+        //          = sum_k pi_k * Var_k + sum_k pi_k * (mu_k - mu)^2
+        // where mu = sum_k pi_k * mu_k. We need both components.mean() and
+        // components.variance() to be available.
+        let comp_mean = self.components.mean()?;
+        let comp_var = self.components.variance()?;
+        let mean_data = comp_mean.data_vec()?;
+        let var_data = comp_var.data_vec()?;
+        let mix_probs = self.mixing.probs().data_vec()?;
+        let k = self.num_components;
+        let outer = mean_data.len() / k;
+        let zero = <T as num_traits::Zero>::zero();
+
+        let mut out = Vec::with_capacity(outer);
+        for i in 0..outer {
+            // overall mean for this outer slot
+            let mut mu = zero;
+            for j in 0..k {
+                mu += mix_probs[j] * mean_data[i * k + j];
+            }
+            // law of total variance
+            let mut acc = zero;
+            for j in 0..k {
+                let diff = mean_data[i * k + j] - mu;
+                acc += mix_probs[j] * (var_data[i * k + j] + diff * diff);
+            }
+            out.push(acc);
+        }
+        let mut out_shape = comp_mean.shape().to_vec();
+        out_shape.pop();
+        Tensor::from_storage(TensorStorage::cpu(out), out_shape, false)
+    }
+
+    fn cdf(&self, value: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
+        // Reference: torch.distributions.MixtureSameFamily.cdf
+        // (`torch/distributions/mixture_same_family.py:191-201`):
+        //   cdf(x) = sum_k mix_probs[k] * components.cdf(x)[k]
+        // We tile `value` to [..., K] and call components.cdf, then weight
+        // and sum over the trailing K dim.
+        let v_shape = value.shape().to_vec();
+        let v_data = value.data_vec()?;
+        let k = self.num_components;
+        let mut tiled = Vec::with_capacity(v_data.len() * k);
+        for &v in v_data.iter() {
+            for _ in 0..k {
+                tiled.push(v);
+            }
+        }
+        let mut tiled_shape = v_shape.clone();
+        tiled_shape.push(k);
+        let v_dev = value.device();
+        let value_tiled = {
+            let t = Tensor::from_storage(TensorStorage::cpu(tiled), tiled_shape, false)?;
+            if v_dev.is_cuda() { t.to(v_dev)? } else { t }
+        };
+
+        let comp_cdf = self.components.cdf(&value_tiled)?;
+        let comp_data = comp_cdf.data_vec()?;
+        let mix_probs = self.mixing.probs().data_vec()?;
+        let outer = v_data.len();
+        let zero = <T as num_traits::Zero>::zero();
+        let mut out = Vec::with_capacity(outer);
+        for i in 0..outer {
+            let mut acc = zero;
+            for j in 0..k {
+                acc += mix_probs[j] * comp_data[i * k + j];
+            }
+            out.push(acc);
+        }
+        let t = Tensor::from_storage(TensorStorage::cpu(out), v_shape, false)?;
+        if v_dev.is_cuda() { t.to(v_dev) } else { Ok(t) }
+    }
 }
 
 #[cfg(test)]
@@ -323,6 +434,55 @@ mod tests {
         // logsumexp([-1.0243, -21.22]) ≈ -1.0243.
         let val = lp.data().unwrap()[0];
         assert!((val + 1.0243).abs() < 0.01, "expected ≈ -1.0243, got {val}");
+    }
+
+    #[test]
+    fn test_mixture_mean_weighted_sum() {
+        // Two Normals: N(-1, 1) and N(3, 1), mixing 0.25/0.75.
+        // mean = 0.25 * -1 + 0.75 * 3 = -0.25 + 2.25 = 2.0
+        let probs = cpu_tensor(&[0.25, 0.75], &[2]);
+        let mixing = Categorical::new(probs).unwrap();
+        let loc = cpu_tensor(&[-1.0, 3.0], &[2]);
+        let scale = cpu_tensor(&[1.0, 1.0], &[2]);
+        let components = Normal::new(loc, scale).unwrap();
+        let m = MixtureSameFamily::new(mixing, components).unwrap();
+
+        let mean = m.mean().unwrap();
+        let val = mean.data_vec().unwrap()[0];
+        assert!((val - 2.0).abs() < 1e-5, "expected 2.0, got {val}");
+    }
+
+    #[test]
+    fn test_mixture_variance_total_variance_law() {
+        // Two Normals: N(0, 1) and N(2, 1), 50/50.
+        // mean = 1.0
+        // Var = 0.5*(1 + (0-1)^2) + 0.5*(1 + (2-1)^2) = 0.5*2 + 0.5*2 = 2.0
+        let probs = cpu_tensor(&[0.5, 0.5], &[2]);
+        let mixing = Categorical::new(probs).unwrap();
+        let loc = cpu_tensor(&[0.0, 2.0], &[2]);
+        let scale = cpu_tensor(&[1.0, 1.0], &[2]);
+        let components = Normal::new(loc, scale).unwrap();
+        let m = MixtureSameFamily::new(mixing, components).unwrap();
+
+        let var = m.variance().unwrap();
+        let val = var.data_vec().unwrap()[0];
+        assert!((val - 2.0).abs() < 1e-5, "expected 2.0, got {val}");
+    }
+
+    #[test]
+    fn test_mixture_cdf_weighted_sum() {
+        // Two Normals: N(0,1) and N(0,1) — identical, weights 0.5/0.5.
+        // CDF at x=0 is 0.5 for each, so weighted sum is 0.5.
+        let probs = cpu_tensor(&[0.5, 0.5], &[2]);
+        let mixing = Categorical::new(probs).unwrap();
+        let loc = cpu_tensor(&[0.0, 0.0], &[2]);
+        let scale = cpu_tensor(&[1.0, 1.0], &[2]);
+        let components = Normal::new(loc, scale).unwrap();
+        let m = MixtureSameFamily::new(mixing, components).unwrap();
+        let value = cpu_tensor(&[0.0], &[1]);
+        let c = m.cdf(&value).unwrap();
+        let v = c.data_vec().unwrap()[0];
+        assert!((v - 0.5).abs() < 1e-4, "expected 0.5, got {v}");
     }
 
     #[test]

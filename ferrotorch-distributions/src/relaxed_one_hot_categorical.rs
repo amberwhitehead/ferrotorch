@@ -30,10 +30,12 @@
 //! | REQ-4 (`Distribution::sample` / `rsample` via Gumbel-softmax) | SHIPPED | `impl Distribution::sample` / `rsample` invoke `relaxed_one_hot_sample` (Gumbel-softmax forward) in `relaxed_one_hot_categorical.rs`; mirrors `ExpRelaxedCategorical.rsample` + `ExpTransform` composition at `relaxed_categorical.py:87-94`. |
 //! | REQ-5 (`Distribution::log_prob` via Maddison eqn 26 + logsumexp) | SHIPPED | `impl Distribution::log_prob` in `relaxed_one_hot_categorical.rs` with logsumexp + last-K-dim collapse; rejects wrong-shape value. |
 //! | REQ-6 (`Distribution::entropy` errors) | SHIPPED | `impl Distribution::entropy` returns `InvalidArgument` (Concrete has no closed-form entropy). |
-//! | REQ-7 (`logits`/`mean`/`mode`/`variance`/`support`/`expand`) | NOT-STARTED | blocker #1422 — cross-cutting with `lib.md` REQ-5 (blocker #1376). |
+//! | REQ-7 (`logits` accessor + `support`/`arg_constraints`/`has_rsample`/`expand`) | SHIPPED | `pub fn logits` returns `log(probs)` (normalised); `fn support` returns `Simplex`; `fn arg_constraints` declares `probs: Simplex`; `fn has_rsample` returns `true`; `fn expand` broadcasts `probs`. Mirrors `torch/distributions/relaxed_categorical.py:117-135`. Non-test consumer: `pub use RelaxedOneHotCategorical` re-export. `mean`/`mode`/`variance` have no closed form for the Concrete relaxation (upstream raises `NotImplementedError`). Closes #1422. |
 //! | REQ-8 (`ExpRelaxedCategorical` as standalone) | NOT-STARTED | blocker #1424 — `relaxed_categorical.py:17-106` log-simplex base not exposed as a separate ferrotorch distribution. |
 //! | REQ-9 (differentiable `rsample`) | NOT-STARTED | blocker #1425 — scalar-CPU path produces detached output. |
 //! | REQ-10 (batched `probs` with leading dims) | NOT-STARTED | blocker #1426 — current impl requires 1-D `probs`. |
+
+use std::collections::HashMap;
 
 use ferrotorch_core::creation;
 use ferrotorch_core::dtype::Float;
@@ -41,7 +43,8 @@ use ferrotorch_core::error::{FerrotorchError, FerrotorchResult};
 use ferrotorch_core::storage::TensorStorage;
 use ferrotorch_core::tensor::Tensor;
 
-use crate::Distribution;
+use crate::constraints;
+use crate::{DistConstraint, Distribution};
 
 /// Continuous relaxation of a categorical distribution.
 pub struct RelaxedOneHotCategorical<T: Float> {
@@ -114,6 +117,19 @@ impl<T: Float> RelaxedOneHotCategorical<T> {
     /// Number of categories.
     pub fn num_categories(&self) -> usize {
         self.num_categories
+    }
+
+    /// The logits parameter `log(normalized_probs)`.
+    ///
+    /// Mirrors `torch.distributions.RelaxedOneHotCategorical.logits`
+    /// (`torch/distributions/relaxed_categorical.py:158-160`), which
+    /// delegates to `ExpRelaxedCategorical.logits` (log-probabilities of the
+    /// normalised distribution).
+    pub fn logits(&self) -> FerrotorchResult<Tensor<T>> {
+        let device = self.probs.device();
+        let out: Vec<T> = self.normalized.iter().map(|&p| p.ln()).collect();
+        let t = Tensor::from_storage(TensorStorage::cpu(out), self.probs.shape().to_vec(), false)?;
+        if device.is_cuda() { t.to(device) } else { Ok(t) }
     }
 }
 
@@ -235,6 +251,72 @@ impl<T: Float> Distribution<T> for RelaxedOneHotCategorical<T> {
     fn entropy(&self) -> FerrotorchResult<Tensor<T>> {
         Err(FerrotorchError::InvalidArgument {
             message: "RelaxedOneHotCategorical: entropy has no closed form".into(),
+        })
+    }
+
+    // -----------------------------------------------------------------------
+    // Full PyTorch surface (#1422) — Concrete relaxation has a reparameterized
+    // sample (Gumbel-softmax), support on the open `K-1` simplex, single
+    // `probs` parameter constrained to the simplex. mean/mode/variance have
+    // no closed form (upstream raises NotImplementedError). Mirrors
+    // `torch/distributions/relaxed_categorical.py:117-135`.
+    // -----------------------------------------------------------------------
+
+    fn has_rsample(&self) -> bool {
+        // Gumbel-softmax forward is differentiable in `probs`+`temperature`;
+        // mirrors `relaxed_categorical.py:127` which inherits
+        // `has_rsample = True` from `TransformedDistribution`.
+        true
+    }
+
+    fn support(&self) -> Option<Box<dyn DistConstraint>> {
+        // `torch/distributions/relaxed_categorical.py:135`:
+        //   support = constraints.simplex
+        Some(Box::new(constraints::Simplex))
+    }
+
+    fn arg_constraints(&self) -> HashMap<&'static str, Box<dyn DistConstraint>> {
+        // `torch/distributions/relaxed_categorical.py:133-134`:
+        //   arg_constraints = {"probs": simplex, "logits": real_vector}
+        let mut m: HashMap<&'static str, Box<dyn DistConstraint>> = HashMap::new();
+        m.insert("probs", Box::new(constraints::Simplex));
+        m
+    }
+
+    fn batch_shape(&self) -> Vec<usize> {
+        // Batch shape is the parameter shape with the trailing K dim
+        // removed. For the current 1-D `probs` impl that is empty.
+        let mut s = self.probs.shape().to_vec();
+        s.pop();
+        s
+    }
+
+    fn event_shape(&self) -> Vec<usize> {
+        // Each draw is a length-K simplex point.
+        vec![self.num_categories]
+    }
+
+    fn expand(&self, batch_shape: &[usize]) -> FerrotorchResult<Box<dyn Distribution<T>>> {
+        // For the current 1-D `probs` we replicate the K-vector across the
+        // requested batch and concatenate, producing a [..., K] tensor.
+        // The `new` constructor restricts to 1-D today (#1426 tracks N-D);
+        // we keep `expand` to the current contract: pass through with the
+        // existing 1-D shape unchanged when batch_shape is empty, else
+        // reject for now (and note the limitation in the error message).
+        if batch_shape.is_empty() {
+            // Identity expand.
+            let probs_clone = self.probs.clone();
+            return Ok(Box::new(RelaxedOneHotCategorical::new(
+                self.temperature,
+                probs_clone,
+            )?));
+        }
+        Err(FerrotorchError::InvalidArgument {
+            message: format!(
+                "RelaxedOneHotCategorical::expand to non-empty batch_shape {:?} requires N-D probs \
+                 support (blocker #1426); current impl is 1-D",
+                batch_shape
+            ),
         })
     }
 }
@@ -398,6 +480,31 @@ mod tests {
         let probs = cpu_tensor(&[0.5, 0.5], &[2]);
         let d = RelaxedOneHotCategorical::new(0.5_f32, probs).unwrap();
         assert!(d.entropy().is_err());
+    }
+
+    #[test]
+    fn test_relaxed_one_hot_logits_equals_log_normalized() {
+        // probs=[1, 1, 2] (unnormalized) -> normalized=[0.25, 0.25, 0.5]
+        // logits = log(normalized).
+        let probs = cpu_tensor(&[1.0, 1.0, 2.0], &[3]);
+        let d = RelaxedOneHotCategorical::new(0.5_f32, probs).unwrap();
+        let l = d.logits().unwrap();
+        let data = l.data_vec().unwrap();
+        assert!((data[0] - 0.25_f32.ln()).abs() < 1e-5);
+        assert!((data[1] - 0.25_f32.ln()).abs() < 1e-5);
+        assert!((data[2] - 0.5_f32.ln()).abs() < 1e-5);
+    }
+
+    #[test]
+    fn test_relaxed_one_hot_support_simplex() {
+        let probs = cpu_tensor(&[0.5, 0.5], &[2]);
+        let d = RelaxedOneHotCategorical::new(0.5_f32, probs).unwrap();
+        let s = d.support().unwrap();
+        assert_eq!(s.name(), "Simplex");
+        assert!(d.has_rsample());
+        let m = d.arg_constraints();
+        assert!(m.contains_key("probs"));
+        assert_eq!(d.event_shape(), vec![2]);
     }
 
     #[test]

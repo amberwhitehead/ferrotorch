@@ -16,12 +16,13 @@
 //! | REQ-8 (`Distribution::mean`) | SHIPPED | `impl Distribution::mean` returns `loc.clone()`; mirrors `von_mises.py:199-204` (circular mean). |
 //! | REQ-9 (`Distribution::rsample` errors) | SHIPPED | `impl Distribution::rsample` returns `InvalidArgument`; mirrors upstream's `has_rsample = False` at `von_mises.py:131`. |
 //! | REQ-10 (`mode`/`variance`/`expand`/`support`/`_log_modified_bessel_fn(order=1)`) | SHIPPED | `fn mode` returns `loc.clone()` mirroring `torch/distributions/von_mises.py:206-208`; `fn variance` invokes `log_bessel_i1` - `log_bessel_i0` ratio mirroring `von_mises.py:210-221`; `fn log_bessel_i1` mirrors `_log_modified_bessel_fn(order=1)` at `von_mises.py:43-89` using `_I1_COEF_SMALL`/`_I1_COEF_LARGE`; `fn support` returns `Real`; `fn expand` broadcasts both parameter tensors mirroring `von_mises.py:190-197`. Consumer: trait dispatch via `pub use VonMises` re-export. Closes #1431. |
-//! | REQ-11 (RNG: `creation::rand` instead of xorshift) | NOT-STARTED | blocker #1432 — sampler uses hand-rolled xorshift seeded from `SystemTime + ThreadId.hash()`; breaks seed reproducibility. |
-//! | REQ-12 (small-kappa Taylor fallback) | NOT-STARTED | blocker #1433 — upstream `_proposal_r_taylor = 1/kappa + kappa` for `kappa < 1e-5` (`von_mises.py:170-171`) not implemented; loop may hang for very small `kappa`. |
+//! | REQ-11 (RNG: `creation::rand` instead of xorshift) | SHIPPED | the `sample` body in `von_mises.rs` now draws all uniforms via a bulk `ferrotorch_core::creation::rand` allocation up-front, indexing into the resulting vec for each rejection step. The xorshift hash on `SystemTime + ThreadId` is gone; non-test consumer: `pub use von_mises::VonMises` re-export — any caller using `dist.sample(...)` now routes through the workspace-RNG which honours `ferrotorch_core::manual_seed`. Closes #1432. |
+//! | REQ-12 (small-kappa Taylor fallback) | SHIPPED | the `sample` body branches to `_proposal_r_taylor = 1.0 / kappa + kappa` for `kappa < 1e-5` per `torch/distributions/von_mises.py:170-171` (`_rejection_sample_with_taylor_fallback`); avoids the Best's rejection loop hanging when the proposal radius collapses. Non-test consumer: same as REQ-11. Closes #1433. |
 //! | REQ-13 (entropy override uses exact log_bessel I_1/I_0 ratio + Stirling tails) | SHIPPED | `fn entropy` in `von_mises.rs` evaluates `log(2π) + log_bessel_i0(kappa) - kappa * exp(log_bessel_i1(kappa) - log_bessel_i0(kappa))` using the upstream-Bessel polynomial coefficient table from `log_bessel_i1`/`log_bessel_i0` (already SHIPPED for variance under REQ-10). Replaces the prior 1-term `1 - 1/(2*kappa)` asymptote with the exact ratio. Closes #1434. |
 
 use std::collections::HashMap;
 
+use ferrotorch_core::creation;
 use ferrotorch_core::dtype::Float;
 use ferrotorch_core::error::{FerrotorchError, FerrotorchResult};
 use ferrotorch_core::storage::TensorStorage;
@@ -131,34 +132,45 @@ impl<T: Float> Distribution<T> for VonMises<T> {
             &[&self.loc, &self.concentration],
             "VonMises::sample",
         )?;
-        // Best's algorithm for Von Mises sampling.
+        // Best's algorithm for Von Mises sampling — closes #1432 (uses
+        // workspace `creation::rand` instead of a per-call xorshift seeded
+        // from `SystemTime + ThreadId`) and #1433 (small-kappa Taylor
+        // fallback so the rejection loop never collapses).
         let l_data = self.loc.data()?;
         let k_data = self.concentration.data()?;
         let numel: usize = shape.iter().product();
 
-        // Use uniform samples and rejection sampling.
         let pi = T::from(std::f64::consts::PI).unwrap();
         let two = T::from(2.0).unwrap();
         let one = <T as num_traits::One>::one();
         let zero = <T as num_traits::Zero>::zero();
+        let half = T::from(0.5).unwrap();
+        // Per upstream `torch/distributions/von_mises.py:170-171`, when
+        // `concentration < 1e-5` the Bessel ratio `(rho - sqrt(2*rho))/...`
+        // becomes numerically unstable; switch to the Taylor expansion
+        // `_proposal_r_taylor(kappa) = 1/kappa + kappa` which keeps `r`
+        // bounded away from `1`. The threshold matches PyTorch.
+        let small_kappa_threshold = T::from(1e-5).unwrap();
+
+        // Bulk-draw uniforms via the workspace RNG (`creation::rand` honours
+        // `ferrotorch_core::manual_seed`). The rejection loop is bounded in
+        // expectation but unbounded in the worst case, so we pre-allocate a
+        // generous buffer and top up if we exhaust it. Each accepted draw
+        // consumes 3 uniforms on average (u1 for z, u2 for the accept test,
+        // u3 for the sign), and Best's algorithm accepts with probability
+        // > 0.5 for all kappa > 0.
+        let mut uniforms = creation::rand::<T>(&[numel * 8])?.data_vec()?;
+        let mut u_idx = 0usize;
+        // Closure-free helper: refresh the buffer when we run out.
+        let refresh_if_needed = |idx: &mut usize, buf: &mut Vec<T>| -> FerrotorchResult<()> {
+            if *idx >= buf.len() {
+                let more = creation::rand::<T>(&[buf.len()])?.data_vec()?;
+                buf.extend(more);
+            }
+            Ok(())
+        };
 
         let mut out = Vec::with_capacity(numel);
-        let mut rng_state = {
-            use std::collections::hash_map::DefaultHasher;
-            use std::hash::{Hash, Hasher};
-            let mut h = DefaultHasher::new();
-            std::time::SystemTime::now().hash(&mut h);
-            std::thread::current().id().hash(&mut h);
-            h.finish()
-        };
-
-        let mut next_u = || -> T {
-            rng_state ^= rng_state << 13;
-            rng_state ^= rng_state >> 7;
-            rng_state ^= rng_state << 17;
-            T::from((rng_state as f64) / (u64::MAX as f64)).unwrap()
-        };
-
         for i in 0..numel {
             let li = if l_data.len() == 1 {
                 0
@@ -172,25 +184,34 @@ impl<T: Float> Distribution<T> for VonMises<T> {
             };
             let kappa = k_data[ki];
 
-            // Best's algorithm
-            let tau = one + (one + T::from(4.0).unwrap() * kappa * kappa).sqrt();
-            let rho = (tau - (two * tau).sqrt()) / (two * kappa);
-            let r = (one + rho * rho) / (two * rho);
+            // _proposal_r mirroring `von_mises.py:163-171`: stable Bessel
+            // ratio for kappa >= 1e-5, Taylor expansion otherwise.
+            let r = if kappa < small_kappa_threshold {
+                // Taylor: r ≈ 1/kappa + kappa  (PyTorch's _proposal_r_taylor)
+                one / kappa + kappa
+            } else {
+                let tau = one + (one + T::from(4.0).unwrap() * kappa * kappa).sqrt();
+                let rho = (tau - (two * tau).sqrt()) / (two * kappa);
+                (one + rho * rho) / (two * rho)
+            };
 
             let sample = loop {
-                let u1 = next_u();
+                refresh_if_needed(&mut u_idx, &mut uniforms)?;
+                let u1 = uniforms[u_idx];
+                u_idx += 1;
                 let z = (pi * u1).cos();
                 let w = (one + r * z) / (r + z);
-                let u2 = next_u();
+
+                refresh_if_needed(&mut u_idx, &mut uniforms)?;
+                let u2 = uniforms[u_idx];
+                u_idx += 1;
                 let c = kappa * (r - w);
 
                 if c * (two - c) > u2 || c.ln() >= u2.ln() + one - c {
-                    let u3 = next_u();
-                    let sign = if u3 > T::from(0.5).unwrap() {
-                        one
-                    } else {
-                        zero - one
-                    };
+                    refresh_if_needed(&mut u_idx, &mut uniforms)?;
+                    let u3 = uniforms[u_idx];
+                    u_idx += 1;
+                    let sign = if u3 > half { one } else { zero - one };
                     break sign * w.acos() + l_data[li];
                 }
             };
@@ -376,6 +397,43 @@ mod tests {
         let lp_mode = d.log_prob(&at_mode).unwrap().data().unwrap()[0];
         let lp_away = d.log_prob(&away).unwrap().data().unwrap()[0];
         assert!(lp_mode > lp_away, "log_prob should be highest at mode");
+    }
+
+    #[test]
+    fn test_von_mises_small_kappa_terminates() {
+        // Pre-fix: kappa < 1e-5 made Best's loop hang because rho → 0.
+        // Post-fix (REQ-12): Taylor fallback gives finite r, so sample
+        // terminates promptly. The actual value just needs to be in [-pi, pi].
+        let d = VonMises::new(scalar(0.0), scalar(1e-8)).unwrap();
+        let s = d.sample(&[20]).unwrap();
+        let pi = std::f64::consts::PI;
+        for &v in s.data().unwrap() {
+            assert!(
+                v >= -pi && v <= pi,
+                "small-kappa VonMises sample out of [-pi, pi]: {v}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_von_mises_seed_reproducibility() {
+        // Closes #1432: with a fixed manual_seed, two independent samples
+        // should match byte-for-byte because we now route through
+        // creation::rand (which honours the workspace RNG).
+        ferrotorch_core::manual_seed(0xC0FFEE);
+        let d1 = VonMises::new(scalar(0.0), scalar(2.0)).unwrap();
+        let s1 = d1.sample(&[50]).unwrap();
+        let v1 = s1.data().unwrap().to_vec();
+
+        ferrotorch_core::manual_seed(0xC0FFEE);
+        let d2 = VonMises::new(scalar(0.0), scalar(2.0)).unwrap();
+        let s2 = d2.sample(&[50]).unwrap();
+        let v2 = s2.data().unwrap().to_vec();
+
+        assert_eq!(
+            v1, v2,
+            "seed reproducibility broken — VonMises::sample should be deterministic under manual_seed"
+        );
     }
 
     #[test]

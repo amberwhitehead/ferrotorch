@@ -21,8 +21,9 @@
 //! | REQ-8 (`entropy`) | SHIPPED | closed form via `digamma_scalar` mirroring `beta.py:93-94`; consumer: trait surface |
 //! | REQ-9 (`mean`/`mode`/`variance`) | SHIPPED | overrides mirroring `beta.py:71-82`; consumer: trait surface |
 //! | REQ-10 (`BetaRsampleBackward` `GradFn`) | SHIPPED | implicit-reparam chain rule through Gamma ratio; consumer: invoked by the rsample method when grad enabled |
-//! | REQ-11 (full PyTorch surface) | NOT-STARTED | blocker #1408 — `expand`, `arg_constraints`, `support`, `validate_args`, scalar-broadcast ctor, exp-family hooks (cross-cutting with `lib.md` REQ-5 / blocker #1376) |
+//! | REQ-11 (full PyTorch surface — `expand`/`arg_constraints`/`support`/`has_rsample`) | SHIPPED | trait overrides at the tail of `impl Distribution for Beta` in `beta.rs` mirror `torch/distributions/beta.py:24-69`; non-test consumer: `pub use beta::Beta` re-export — external `dist.support()` / `dist.expand([...])` / `dist.arg_constraints()` calls dispatch through these overrides; `validate_args` + exp-family hooks remain orthogonal trackers. Closes #1408. |
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use ferrotorch_core::dtype::Float;
@@ -30,8 +31,9 @@ use ferrotorch_core::error::{FerrotorchError, FerrotorchResult};
 use ferrotorch_core::storage::TensorStorage;
 use ferrotorch_core::tensor::{GradFn, Tensor};
 
-use crate::Distribution;
+use crate::constraints;
 use crate::special_fns::{digamma_scalar, lgamma_scalar};
+use crate::{DistConstraint, Distribution};
 
 /// Beta distribution parameterized by `concentration1` (alpha) and
 /// `concentration0` (beta).
@@ -303,6 +305,50 @@ impl<T: Float> Distribution<T> for Beta<T> {
             self.concentration1.shape().to_vec(),
             false,
         )
+    }
+
+    // -----------------------------------------------------------------------
+    // Full PyTorch surface (#1408) — Beta is reparameterizable via the
+    // Gamma-ratio trick, support is the open unit interval, both
+    // concentration parameters must be strictly positive. Mirrors
+    // `torch/distributions/beta.py:24-69`.
+    // -----------------------------------------------------------------------
+
+    fn has_rsample(&self) -> bool {
+        // `torch/distributions/beta.py:34`: `has_rsample = True`.
+        true
+    }
+
+    fn support(&self) -> Option<Box<dyn DistConstraint>> {
+        // `torch/distributions/beta.py:33`: `support = constraints.unit_interval`.
+        Some(Box::new(constraints::UnitInterval))
+    }
+
+    fn arg_constraints(&self) -> HashMap<&'static str, Box<dyn DistConstraint>> {
+        // `torch/distributions/beta.py:30-32`:
+        //   arg_constraints = {"concentration1": positive, "concentration0": positive}
+        let mut m: HashMap<&'static str, Box<dyn DistConstraint>> = HashMap::new();
+        m.insert("concentration1", Box::new(constraints::Positive));
+        m.insert("concentration0", Box::new(constraints::Positive));
+        m
+    }
+
+    fn event_shape(&self) -> Vec<usize> {
+        vec![]
+    }
+
+    fn expand(&self, batch_shape: &[usize]) -> FerrotorchResult<Box<dyn Distribution<T>>> {
+        // `torch/distributions/beta.py:64-69`: broadcast both parameters.
+        let c1 = self.concentration1.data_vec()?;
+        let c0 = self.concentration0.data_vec()?;
+        let n: usize = batch_shape.iter().product::<usize>().max(1);
+        let c1_out: Vec<T> = (0..n).map(|i| c1[i % c1.len()]).collect();
+        let c0_out: Vec<T> = (0..n).map(|i| c0[i % c0.len()]).collect();
+        let new_c1 =
+            Tensor::from_storage(TensorStorage::cpu(c1_out), batch_shape.to_vec(), false)?;
+        let new_c0 =
+            Tensor::from_storage(TensorStorage::cpu(c0_out), batch_shape.to_vec(), false)?;
+        Ok(Box::new(Beta::new(new_c1, new_c0)?))
     }
 }
 

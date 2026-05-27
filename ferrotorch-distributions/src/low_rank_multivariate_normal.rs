@@ -33,8 +33,8 @@
 //! | REQ-4 (`Distribution<T>` impl delegating to inner MVN) | SHIPPED | the impl block in `low_rank_multivariate_normal.rs`. |
 //! | REQ-5 (mean override returns loc directly) | SHIPPED | the `mean()` body in `low_rank_multivariate_normal.rs`. |
 //! | REQ-6 (Woodbury/capacitance-tril fast paths) | NOT-STARTED | blocker #1385 — current impl is dense `O(d^3)` not `O(d * r^2)`. |
-//! | REQ-7 (variance override) | NOT-STARTED | blocker #1386 — default trait `variance()` returns `InvalidArgument`. |
-//! | REQ-8 (scale_tril/covariance_matrix/precision_matrix accessors) | NOT-STARTED | blocker #1387 — matrix-form accessors absent. |
+//! | REQ-7 (variance override) | SHIPPED | `fn variance` returns `(cov_factor ** 2).sum(-1) + cov_diag` mirroring `torch/distributions/lowrank_multivariate_normal.py:189-196`; non-test consumer: `pub use low_rank_multivariate_normal::LowRankMultivariateNormal` re-export — every external `dist.variance()` call hits this override; closes #1386. |
+//! | REQ-8 (scale_tril/covariance_matrix/precision_matrix accessors) | SHIPPED | `pub fn scale_tril` / `pub fn covariance_matrix` / `pub fn precision_matrix` delegate to the inner dense `MultivariateNormal` mirroring `torch/distributions/lowrank_multivariate_normal.py:165-186`; non-test consumer: `pub use LowRankMultivariateNormal` re-export exposes all three as public surface; closes #1387. |
 
 use ferrotorch_core::dtype::Float;
 use ferrotorch_core::error::{FerrotorchError, FerrotorchResult};
@@ -173,6 +173,35 @@ impl<T: Float> LowRankMultivariateNormal<T> {
     pub fn rank(&self) -> usize {
         self.r
     }
+
+    /// Lower-triangular Cholesky factor `L` of `Σ = L L^T`.
+    ///
+    /// Delegates to the inner dense [`MultivariateNormal`]'s `scale_tril`
+    /// accessor. Mirrors
+    /// `torch/distributions/lowrank_multivariate_normal.py:165-167` (`scale_tril`
+    /// property), which materialises the dense Cholesky on demand. Closes #1387.
+    pub fn scale_tril(&self) -> &Tensor<T> {
+        self.inner.scale_tril()
+    }
+
+    /// Dense covariance matrix `Σ = W W^T + diag(D)`.
+    ///
+    /// Delegates to the inner dense [`MultivariateNormal`]'s
+    /// `covariance_matrix` accessor. Mirrors
+    /// `torch/distributions/lowrank_multivariate_normal.py:169-175`. Closes #1387.
+    pub fn covariance_matrix(&self) -> FerrotorchResult<Tensor<T>> {
+        self.inner.covariance_matrix()
+    }
+
+    /// Dense precision matrix `Σ⁻¹`.
+    ///
+    /// Delegates to the inner dense [`MultivariateNormal`]'s
+    /// `precision_matrix` accessor. Mirrors
+    /// `torch/distributions/lowrank_multivariate_normal.py:177-186` (without
+    /// the Woodbury fast path — #1385 tracks that optimisation). Closes #1387.
+    pub fn precision_matrix(&self) -> FerrotorchResult<Tensor<T>> {
+        self.inner.precision_matrix()
+    }
 }
 
 impl<T: Float> Distribution<T> for LowRankMultivariateNormal<T> {
@@ -196,6 +225,32 @@ impl<T: Float> Distribution<T> for LowRankMultivariateNormal<T> {
 
     fn entropy(&self) -> FerrotorchResult<Tensor<T>> {
         self.inner.entropy()
+    }
+
+    fn variance(&self) -> FerrotorchResult<Tensor<T>> {
+        // Reference: torch.distributions.LowRankMultivariateNormal.variance
+        // (`torch/distributions/lowrank_multivariate_normal.py:189-196`):
+        //   variance = (cov_factor ** 2).sum(-1) + cov_diag
+        // Σ_ii = sum_k W_ik^2 + D_i, which is exactly the diagonal of the
+        // low-rank-plus-diagonal covariance — avoids materialising the dense
+        // [d, d] matrix entirely.
+        let factor_data = self.cov_factor.data_vec()?;
+        let diag_data = self.cov_diag.data_vec()?;
+        let d = self.d;
+        let r = self.r;
+        let zero = <T as num_traits::Zero>::zero();
+        let mut out = Vec::with_capacity(d);
+        for i in 0..d {
+            let mut sq_sum = zero;
+            for k in 0..r {
+                let v = factor_data[i * r + k];
+                sq_sum += v * v;
+            }
+            out.push(sq_sum + diag_data[i]);
+        }
+        let device = self.cov_diag.device();
+        let t = Tensor::from_storage(TensorStorage::cpu(out), vec![d], false)?;
+        if device.is_cuda() { t.to(device) } else { Ok(t) }
     }
 }
 
@@ -259,6 +314,37 @@ mod tests {
             (val - expected).abs() < 1e-4,
             "expected ≈ {expected}, got {val}"
         );
+    }
+
+    #[test]
+    fn test_low_rank_variance_matches_diag_formula() {
+        // Σ = W W^T + diag(D). Variance is the diagonal: sum_k W_ik^2 + D_i.
+        // Probe: factor=[1, 2; 0.5, 0.5], diag=[0.1, 0.2].
+        // Σ_00 = 1^2 + 2^2 + 0.1 = 5.1
+        // Σ_11 = 0.5^2 + 0.5^2 + 0.2 = 0.7
+        let loc = cpu_tensor(&[0.0, 0.0], &[2]);
+        let factor = cpu_tensor(&[1.0, 2.0, 0.5, 0.5], &[2, 2]);
+        let diag = cpu_tensor(&[0.1, 0.2], &[2]);
+        let mvn = LowRankMultivariateNormal::new(loc, factor, diag).unwrap();
+        let v = mvn.variance().unwrap();
+        assert_eq!(v.shape(), &[2]);
+        let data = v.data_vec().unwrap();
+        assert!((data[0] - 5.1).abs() < 1e-5, "variance[0] = {}", data[0]);
+        assert!((data[1] - 0.7).abs() < 1e-5, "variance[1] = {}", data[1]);
+    }
+
+    #[test]
+    fn test_low_rank_matrix_accessors_present() {
+        // scale_tril / covariance_matrix / precision_matrix should return
+        // tensors of shape [d, d]. We just check the shape; numerical
+        // correctness is exercised by the inner MultivariateNormal tests.
+        let loc = cpu_tensor(&[0.0, 0.0, 0.0], &[3]);
+        let factor = cpu_tensor(&[0.5, 0.5, 0.5], &[3, 1]);
+        let diag = cpu_tensor(&[0.5, 0.5, 0.5], &[3]);
+        let mvn = LowRankMultivariateNormal::new(loc, factor, diag).unwrap();
+        assert_eq!(mvn.scale_tril().shape(), &[3, 3]);
+        assert_eq!(mvn.covariance_matrix().unwrap().shape(), &[3, 3]);
+        assert_eq!(mvn.precision_matrix().unwrap().shape(), &[3, 3]);
     }
 
     #[test]
