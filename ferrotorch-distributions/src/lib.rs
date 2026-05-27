@@ -112,7 +112,7 @@ pub use mixture_same_family::MixtureSameFamily;
 pub use multinomial::Multinomial;
 pub use multivariate_normal::MultivariateNormal;
 pub use normal::Normal;
-pub use one_hot_categorical::OneHotCategorical;
+pub use one_hot_categorical::{OneHotCategorical, OneHotCategoricalStraightThrough};
 pub use pareto::Pareto;
 pub use poisson::Poisson;
 pub use relaxed_bernoulli::RelaxedBernoulli;

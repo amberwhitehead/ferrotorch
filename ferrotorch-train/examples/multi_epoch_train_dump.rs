@@ -66,8 +66,9 @@ use ferrotorch_serialize::{load_safetensors, save_safetensors};
 use ferrotorch_train::amp::{AmpContext, AutocastDtype, GradScalerConfig};
 use ferrotorch_train::callback::EmaCallback;
 use ferrotorch_train::history::{EpochResult, TrainingHistory};
-use ferrotorch_train::learner::{Learner, LossFn};
+use ferrotorch_train::learner::{ClassificationAdapter, Learner, LossFn};
 use ferrotorch_train::tensorboard::TensorBoardCallback;
+use ferrotorch_train::{AccuracyMetric, RunningAverage, TopKAccuracy};
 
 // ---------------------------------------------------------------------------
 // Hyperparameters — must match `scripts/pin_pretrained_training_trajectory.py`.
@@ -584,6 +585,94 @@ fn run_learner_smoke(args: &Args) -> FerrotorchResult<()> {
     // -- Build EmaCallback (#1497) and wire grad_clip_norm (#1503). ---
     let ema_cb = EmaCallback::new(0.99);
 
+    // -- Build classification metrics + adapters (#1494/#1495/#1496). --
+    // The MLP here is a regression model with output shape [B=BATCH,
+    // D_OUT=8]; treating argmax-of-pred vs argmax-of-target as a
+    // pseudo-classification "match" lets us exercise the entire
+    // accuracy / top-k metric wiring end-to-end on every default
+    // invocation. The exact correctness threshold doesn't matter for
+    // the consumer-wiring contract — only that the adapter is invoked,
+    // the metric updates per batch, and the value surfaces in the
+    // epoch metrics map. Test-only correctness lives in the metric
+    // crate's own unit tests.
+    let accuracy_metric = AccuracyMetric::new();
+    let accuracy_adapter: ClassificationAdapter<f32> = Box::new(
+        |pred: &Tensor<f32>, target: &Tensor<f32>| -> FerrotorchResult<(usize, usize)> {
+            let pred_data = pred.data_vec()?;
+            let target_data = target.data_vec()?;
+            let pred_shape = pred.shape();
+            let target_shape = target.shape();
+            // Expect [B, C] for both pred and target (one-hot-ish).
+            if pred_shape.len() < 2 || target_shape.len() < 2 {
+                return Err(FerrotorchError::ShapeMismatch {
+                    message: format!(
+                        "accuracy adapter: expected 2-D pred/target, got {pred_shape:?} / {target_shape:?}"
+                    ),
+                });
+            }
+            let n = pred_shape[0];
+            let c = pred_shape[pred_shape.len() - 1];
+            let mut correct = 0;
+            for i in 0..n {
+                let p_row = &pred_data[i * c..(i + 1) * c];
+                let t_row = &target_data[i * c..(i + 1) * c];
+                let p_argmax = p_row
+                    .iter()
+                    .enumerate()
+                    .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
+                    .map(|(i, _)| i)
+                    .unwrap_or(0);
+                let t_argmax = t_row
+                    .iter()
+                    .enumerate()
+                    .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
+                    .map(|(i, _)| i)
+                    .unwrap_or(0);
+                if p_argmax == t_argmax {
+                    correct += 1;
+                }
+            }
+            Ok((correct, n))
+        },
+    );
+
+    let topk_metric = TopKAccuracy::new(3);
+    let topk_adapter: ClassificationAdapter<f32> = Box::new(
+        |pred: &Tensor<f32>, target: &Tensor<f32>| -> FerrotorchResult<(usize, usize)> {
+            let pred_data = pred.data_vec()?;
+            let target_data = target.data_vec()?;
+            let pred_shape = pred.shape();
+            let n = pred_shape[0];
+            let c = pred_shape[pred_shape.len() - 1];
+            let k = 3;
+            let mut correct = 0;
+            for i in 0..n {
+                let p_row = &pred_data[i * c..(i + 1) * c];
+                let t_row = &target_data[i * c..(i + 1) * c];
+                let t_argmax = t_row
+                    .iter()
+                    .enumerate()
+                    .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
+                    .map(|(i, _)| i)
+                    .unwrap_or(0);
+                // Build top-k indices of pred row by partial sort.
+                let mut indexed: Vec<(usize, f32)> = p_row.iter().copied().enumerate().collect();
+                indexed.sort_by(|(_, a), (_, b)| {
+                    b.partial_cmp(a).unwrap_or(std::cmp::Ordering::Equal)
+                });
+                let top_k: Vec<usize> = indexed.iter().take(k).map(|(i, _)| *i).collect();
+                if top_k.contains(&t_argmax) {
+                    correct += 1;
+                }
+            }
+            Ok((correct, n))
+        },
+    );
+
+    // RunningAverage with window 8 — smaller than BATCH×n_batches so the
+    // window has to actually slide, exercising the head-drop branch.
+    let running_avg = RunningAverage::new(8);
+
     // -- Compose the Learner with all the new wiring. ----------------
     // Note: with_amp_context clears any standalone GradScaler — we
     // exercise the AmpContext branch in this smoke. The grad_clip_norm
@@ -594,6 +683,9 @@ fn run_learner_smoke(args: &Args) -> FerrotorchResult<()> {
         .with_callback(Box::new(tb_cb))
         .with_ema_callback(ema_cb)
         .with_grad_clip_norm(1.0)
+        .with_accuracy_metric(accuracy_metric, accuracy_adapter)
+        .with_topk_accuracy_metric(topk_metric, topk_adapter)
+        .with_running_average_metric(running_avg)
         .with_checkpointing(args.output_dir.join("learner_ckpts"));
 
     // -- If --resume was passed, restore the Learner from a checkpoint
@@ -668,6 +760,14 @@ fn run_learner_smoke(args: &Args) -> FerrotorchResult<()> {
             ema.num_updates(),
             ema.is_initialized(),
         );
+    }
+
+    // -- Metric snapshot read (production-consumer site for
+    //    #1494/#1495/#1496). The snapshot vector is what downstream
+    //    JSON / tensorboard dumps consume; printing it here proves the
+    //    metric.update() path ran on every batch of the smoke fit. ---
+    for (name, value) in learner.metric_snapshot() {
+        eprintln!("[multi_epoch_train_dump] post-fit metric {name}={value:.6}");
     }
 
     // -- Save the final model state via safetensors so a future

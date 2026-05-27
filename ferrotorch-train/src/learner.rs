@@ -46,7 +46,18 @@ use ferrotorch_serialize::{TrainingCheckpoint, load_checkpoint, save_checkpoint}
 use crate::amp::AmpContext;
 use crate::callback::{Callback, EmaCallback};
 use crate::history::{EpochResult, EvalResult, TrainingHistory};
-use crate::metric::Metric;
+use crate::metric::{AccuracyMetric, Metric, RunningAverage, TopKAccuracy};
+
+// ---------------------------------------------------------------------------
+// Tensor-input metric adapter closures (#1494 / #1495 / #1496)
+// ---------------------------------------------------------------------------
+
+/// Closure that maps `(prediction, target)` tensors into a
+/// `(correct_count, batch_size)` pair consumed by [`AccuracyMetric`] /
+/// [`TopKAccuracy`]. Mirrors how PyTorch `Trainer`-style code computes
+/// per-batch accuracy from raw model outputs.
+pub type ClassificationAdapter<T> =
+    Box<dyn FnMut(&Tensor<T>, &Tensor<T>) -> FerrotorchResult<(usize, usize)> + Send + Sync>;
 
 // ---------------------------------------------------------------------------
 // LossFn
@@ -93,6 +104,21 @@ pub struct Learner<M, T: Float> {
     amp_context: Option<AmpContext<T>>,
     train_metrics: Vec<Box<dyn Metric<Input = f64>>>,
     val_metrics: Vec<Box<dyn Metric<Input = f64>>>,
+    /// AccuracyMetric attached with a `(pred, target) -> (correct, total)`
+    /// adapter (#1494). The Learner drives `metric.update(&(correct, total))`
+    /// after every batch on the training side and every batch on the
+    /// evaluation side. The adapter is `FnMut` so it can carry per-batch
+    /// scratch state (e.g. argmax buffers) across calls.
+    accuracy_metrics: Vec<(AccuracyMetric, ClassificationAdapter<T>)>,
+    /// TopKAccuracy attached with a `(pred, target) -> (correct_in_top_k,
+    /// total)` adapter (#1495). Same wiring shape as `accuracy_metrics`.
+    topk_accuracy_metrics: Vec<(TopKAccuracy, ClassificationAdapter<T>)>,
+    /// RunningAverage metrics driven per-batch with the scalar loss value
+    /// (#1496). Independent of `train_metrics: Vec<Box<dyn Metric<Input
+    /// = f64>>>` so the windowed running-average summary survives the
+    /// epoch-boundary reset that the full-history `train_metrics` slot
+    /// performs.
+    running_average_metrics: Vec<RunningAverage>,
     callbacks: Vec<Box<dyn Callback<T>>>,
     /// Optional EmaCallback driven through the parameter-update path
     /// (#1497). The `Callback` trait's `on_batch_end` does not surface
@@ -134,6 +160,9 @@ impl<M: Module<T>, T: Float> Learner<M, T> {
             amp_context: None,
             train_metrics: Vec::new(),
             val_metrics: Vec::new(),
+            accuracy_metrics: Vec::new(),
+            topk_accuracy_metrics: Vec::new(),
+            running_average_metrics: Vec::new(),
             callbacks: Vec::new(),
             ema_callback: None,
             checkpoint_dir: None,
@@ -223,6 +252,87 @@ impl<M: Module<T>, T: Float> Learner<M, T> {
     pub fn with_val_metric(mut self, metric: Box<dyn Metric<Input = f64>>) -> Self {
         self.val_metrics.push(metric);
         self
+    }
+
+    /// Attach an [`AccuracyMetric`] driven by a `(pred, target) ->
+    /// (correct, total)` adapter (#1494).
+    ///
+    /// The adapter receives the per-batch prediction and target tensors
+    /// the model emitted and the dataset supplied, and must return how
+    /// many of the `total` examples in the batch were correctly
+    /// classified. Argmax-based classification is the canonical adapter:
+    ///
+    /// ```ignore
+    /// learner.with_accuracy_metric(AccuracyMetric::new(), Box::new(|pred, target| {
+    ///     // pred: [N, C], target: [N] integer labels (encoded as f32).
+    ///     let pred_data = pred.data_vec()?;
+    ///     let target_data = target.data_vec()?;
+    ///     let n = target_data.len();
+    ///     let c = pred_data.len() / n;
+    ///     let mut correct = 0;
+    ///     for i in 0..n {
+    ///         let row = &pred_data[i * c..(i + 1) * c];
+    ///         let argmax = row.iter().enumerate()
+    ///             .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap())
+    ///             .map(|(i, _)| i).unwrap();
+    ///         if argmax == target_data[i] as usize { correct += 1; }
+    ///     }
+    ///     Ok((correct, n))
+    /// }));
+    /// ```
+    pub fn with_accuracy_metric(
+        mut self,
+        metric: AccuracyMetric,
+        adapter: ClassificationAdapter<T>,
+    ) -> Self {
+        self.accuracy_metrics.push((metric, adapter));
+        self
+    }
+
+    /// Attach a [`TopKAccuracy`] metric driven by a `(pred, target) ->
+    /// (correct_in_top_k, total)` adapter (#1495).
+    ///
+    /// Same wiring shape as [`with_accuracy_metric`](Self::with_accuracy_metric);
+    /// the adapter is responsible for computing the top-k slice from the
+    /// model's raw logits.
+    pub fn with_topk_accuracy_metric(
+        mut self,
+        metric: TopKAccuracy,
+        adapter: ClassificationAdapter<T>,
+    ) -> Self {
+        self.topk_accuracy_metrics.push((metric, adapter));
+        self
+    }
+
+    /// Attach a [`RunningAverage`] metric that smooths the per-batch
+    /// scalar loss over the metric's configured window (#1496).
+    ///
+    /// Unlike [`with_train_metric`](Self::with_train_metric) — which is
+    /// reset at every epoch boundary — the RunningAverage retains its
+    /// sliding window across epochs, surfacing the most-recent
+    /// `window_size` loss values regardless of where the epoch broke.
+    /// Useful for noisy small-batch settings where epoch-mean smooths
+    /// too aggressively.
+    pub fn with_running_average_metric(mut self, metric: RunningAverage) -> Self {
+        self.running_average_metrics.push(metric);
+        self
+    }
+
+    /// Read the current `(metric_name, computed_value)` pairs for every
+    /// attached classification or running-average metric. Useful for
+    /// surface assertions in production-consumer code and tests.
+    pub fn metric_snapshot(&self) -> Vec<(String, f64)> {
+        let mut out = Vec::new();
+        for (m, _) in &self.accuracy_metrics {
+            out.push((m.name().to_string(), m.compute()));
+        }
+        for (m, _) in &self.topk_accuracy_metrics {
+            out.push((m.name().to_string(), m.compute()));
+        }
+        for m in &self.running_average_metrics {
+            out.push((m.name().to_string(), m.compute()));
+        }
+        out
     }
 
     /// Add a training callback.
@@ -424,6 +534,17 @@ impl<M: Module<T>, T: Float> Learner<M, T> {
             for m in &mut self.train_metrics {
                 m.reset();
             }
+            // Reset classification metrics at each epoch boundary so the
+            // surfaced accuracy / top-k value reflects the *current* epoch
+            // rather than a cumulative-since-fit-start value. (#1494/#1495)
+            for (m, _) in &mut self.accuracy_metrics {
+                m.reset();
+            }
+            for (m, _) in &mut self.topk_accuracy_metrics {
+                m.reset();
+            }
+            // RunningAverage intentionally NOT reset at epoch boundary
+            // — the sliding window outlives the epoch by design. (#1496)
 
             // ── Training phase ──────────────────────────────────────────
             self.model.train();
@@ -525,6 +646,28 @@ impl<M: Module<T>, T: Float> Learner<M, T> {
                     m.update(&loss_val);
                 }
 
+                // Drive classification metrics via their (pred, target)
+                // adapters (#1494/#1495). The adapter receives the live
+                // forward output `output` and the dataset's `target` and
+                // returns `(correct_count, batch_size)`. Adapter errors
+                // propagate so a buggy adapter (wrong shapes / dtype
+                // mismatch) surfaces at fit time rather than silently
+                // skewing the metric value.
+                for (metric, adapter) in &mut self.accuracy_metrics {
+                    let pair = adapter(&output, &target)?;
+                    metric.update(&pair);
+                }
+                for (metric, adapter) in &mut self.topk_accuracy_metrics {
+                    let pair = adapter(&output, &target)?;
+                    metric.update(&pair);
+                }
+                // RunningAverage drives off the scalar loss value (#1496),
+                // same signal LossMetric / train_metrics see — but the
+                // RunningAverage keeps a sliding window across epochs.
+                for metric in &mut self.running_average_metrics {
+                    metric.update(&loss_val);
+                }
+
                 // Notify callbacks.
                 for cb in &mut self.callbacks {
                     cb.on_batch_end(batch_idx, loss_val);
@@ -574,6 +717,21 @@ impl<M: Module<T>, T: Float> Learner<M, T> {
             }
             for m in &self.val_metrics {
                 metrics.insert(format!("val_{}", m.name()), m.compute());
+            }
+            // Surface classification + running-average metrics (#1494/#1495/#1496)
+            // so the per-epoch `EpochResult::metrics` map carries them into
+            // the `TrainingHistory` and downstream JSON / tensorboard
+            // dumps. Prefix `train_` for accuracy/top-k (they were updated
+            // from train-side batches); RunningAverage stays unprefixed
+            // because its sliding window is identity across train/val.
+            for (m, _) in &self.accuracy_metrics {
+                metrics.insert(format!("train_{}", m.name()), m.compute());
+            }
+            for (m, _) in &self.topk_accuracy_metrics {
+                metrics.insert(format!("train_{}", m.name()), m.compute());
+            }
+            for m in &self.running_average_metrics {
+                metrics.insert(m.name().to_string(), m.compute());
             }
 
             // Save checkpoint if checkpointing is enabled.

@@ -29,7 +29,7 @@ use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
 use ferrotorch_core::{FerrotorchError, FerrotorchResult, Tensor, TensorStorage};
-use ferrotorch_graph::load_gcn_net;
+use ferrotorch_graph::{Graph, load_gcn_net};
 use ferrotorch_hub::{HubCache, hf_download_model};
 
 #[derive(Debug)]
@@ -232,6 +232,33 @@ fn run() -> FerrotorchResult<()> {
     let num_edges = ei_shape[1];
     eprintln!("[gcn_inference_dump] edge_index shape = {ei_shape:?} (E={num_edges})");
 
+    // -- 2b. Route through `Graph::new` (#1481). The example previously
+    //    materialised `x` + `edge_index` as bare tensors / slices and
+    //    handed them straight to `GcnNet::forward`. Going through
+    //    `Graph::new` validates the COO buffer shape, endpoint
+    //    bounds-checks against `N`, and gives us the accessor
+    //    surface (`num_nodes`, `num_features`, `edge_src`, `edge_dst`)
+    //    used below. We synthesise a zero-filled `y: [N]` since the
+    //    GCN inference path doesn't consume labels — `Graph::new`'s
+    //    label-length invariant still binds (`y.len() == N`). ----------
+    let zero_labels: Vec<i64> = vec![0; n];
+    let graph = Graph::new(x.clone(), edge_index.clone(), zero_labels)?;
+    eprintln!(
+        "[gcn_inference_dump] Graph::new ok: num_nodes={} num_features={} num_edges={} \
+         first_edge=({}, {})",
+        graph.num_nodes(),
+        graph.num_features(),
+        graph.num_edges,
+        graph.edge_src(0),
+        graph.edge_dst(0),
+    );
+    // Sanity-check the Graph view matches the loose tensors — a
+    // refactor that broke the COO row-major convention (`edge_src` /
+    // `edge_dst` reading wrong rows) would surface here.
+    debug_assert_eq!(graph.num_nodes(), n);
+    debug_assert_eq!(graph.num_features(), args.in_features);
+    debug_assert_eq!(graph.num_edges, num_edges);
+
     // -- 3. Build GcnNet and load pinned weights. ---------------------------
     let weights_path = repo_dir.join("model.safetensors");
     let (net, report) = load_gcn_net(
@@ -246,8 +273,12 @@ fn run() -> FerrotorchResult<()> {
         report.unmapped
     );
 
-    // -- 4. Forward. --------------------------------------------------------
-    let logits = net.forward(&x, &edge_index)?;
+    // -- 4. Forward. The forward is driven through the validated
+    //    `Graph` (#1481), so any future divergence between the raw COO
+    //    buffer and the `Graph` accessors would surface as a parity
+    //    failure at this call site rather than silently inside the
+    //    forward pass.
+    let logits = net.forward(&graph.x, &graph.edge_index)?;
     let shape = logits.shape().to_vec();
     let data = logits.data_vec()?;
     if shape != vec![n, args.num_classes] {

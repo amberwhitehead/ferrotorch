@@ -368,58 +368,24 @@ impl<T: Float> Distribution<T> for OneHotCategoricalStraightThrough<T> {
         //
         // Forward value: a discrete one-hot. Gradient path: the
         // (probs - probs.detach()) term carries grads through `probs` while
-        // contributing zero to the forward value. We replicate the formula
-        // via the ferrotorch tensor ops; `probs.detach()` is materialised
-        // by constructing a parallel non-grad tensor with the same data.
-        //
-        // The result inherits gradient tracking from `probs` if `probs`
-        // requires_grad.
+        // contributing zero to the forward value (the straight-through
+        // estimator of Bengio et al. 2013). We compose this via
+        // autograd-aware `add` / `sub` and the `Tensor::detach` primitive
+        // so the gradient slot is wired through `probs` whenever the
+        // caller set `requires_grad` on it. `add`/`sub` broadcast the
+        // 1-D probs `[K]` against the sample's leading dims `[shape..., K]`
+        // automatically — see `ferrotorch_core::grad_fns::arithmetic::add`
+        // which calls into `meta_propagate::binary_broadcast` first.
         let samples = self.inner.sample(shape)?;
-
-        // Broadcast `probs` (shape `[K]`) over the sample's leading dims
-        // (`shape`). Build a per-sample-leading-dim copy of `probs` so the
-        // shapes line up under the bare elementwise ops we use here.
-        let device = self.inner.probs.device();
-        let n: usize = shape.iter().product();
-        let k = self.inner.num_categories;
-        let probs_data = self.inner.probs.data_vec()?;
-        let mut broadcast = Vec::with_capacity(n * k);
-        for _ in 0..n {
-            broadcast.extend_from_slice(&probs_data);
-        }
-        let mut out_shape = shape.to_vec();
-        out_shape.push(k);
-
-        // Use the probs tensor (possibly requires_grad) for the gradient
-        // path; we cannot literally call `.detach()` since the closed-form
-        // `samples + (probs - probs.detach())` collapses to `samples` in
-        // value but routes gradients only through the `probs` factor.
-        // Concretely: with no autograd graph attached to `samples` and the
-        // broadcast `probs` clone, the addition `samples + probs - probs`
-        // is value-zero on the parameter contribution. Carry through the
-        // grad path by composing with the autograd-aware ops over
-        // `inner.probs` (which has `requires_grad` if the caller wired it).
-        let broadcast_storage = TensorStorage::on_device(broadcast, device)?;
-        let probs_broadcast = if self.inner.probs.requires_grad()
-            && ferrotorch_core::is_grad_enabled()
-        {
-            // requires_grad path is intentionally kept simple — produce the
-            // straight-through value (= samples) without an autograd graph.
-            // Gradient flow through a multi-element broadcast of a 1-D probs
-            // tensor requires a custom backward (see #1418 follow-on issue).
-            // For now we honour the *value* contract; if the caller wires
-            // probs.requires_grad they get the discrete sample with no grad
-            // chain, identical to the upstream value when called outside an
-            // autograd context.
-            Tensor::from_storage(broadcast_storage, out_shape.clone(), false)?
-        } else {
-            Tensor::from_storage(broadcast_storage, out_shape.clone(), false)?
-        };
-        // samples + (probs - probs.detach()) ≡ samples in value.
-        // Build the explicit composition for shape-conformance and to set
-        // up the gradient slot when we do wire a backward.
-        let _ = probs_broadcast;
-        Ok(samples)
+        let probs = &self.inner.probs;
+        let probs_detached = probs.detach();
+        // (probs - probs.detach()): value-zero, gradient flows through
+        // the left operand (probs) since the right operand has no grad_fn.
+        let zero_with_grad = ferrotorch_core::grad_fns::arithmetic::sub(probs, &probs_detached)?;
+        // samples + (probs - probs.detach()): broadcasts [K] over
+        // [shape..., K]; value == samples, gradient routes back via the
+        // sub above to `probs`.
+        ferrotorch_core::grad_fns::arithmetic::add(&samples, &zero_with_grad)
     }
 
     fn log_prob(&self, value: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {

@@ -128,26 +128,45 @@ pub fn gather<T: Float>(
     index: &[usize],
     index_shape: &[usize],
 ) -> FerrotorchResult<Tensor<T>> {
-    let ndim = input.ndim();
-    if ndim == 0 {
-        return Err(FerrotorchError::InvalidArgument {
-            message: "gather: input must have at least 1 dimension".into(),
-        });
-    }
-    let dim = normalize_axis(dim, ndim)?;
-    let input_shape = input.shape();
-
     if input.is_cuda() {
         return Err(FerrotorchError::NotImplementedOnCuda { op: "gather" });
     }
 
-    validate_gather_shapes(input_shape, dim, index_shape, index, input_shape[dim])?;
+    // PyTorch treats 0-D tensors as if they had `ensure_nonempty_dim(self.dim()) == 1`
+    // for gather/scatter shape checks (see `ScatterGatherChecks.h:44`
+    // `ensure_nonempty_dim`). Mirror that here: a 0-D input acts like a
+    // 1-element tensor of shape `[1]` along the only valid axis (dim 0). When
+    // index is also 0-D (rank-0 scalar index), promote it to shape `[1]` so
+    // the ndim-equality validation succeeds; the output shape preserves the
+    // caller's original `index_shape` (still `[]`) so 0-D in → 0-D out.
+    let ndim = input.ndim();
+    let effective_input_shape: Vec<usize> = if ndim == 0 {
+        vec![1]
+    } else {
+        input.shape().to_vec()
+    };
+    let effective_ndim = effective_input_shape.len();
+    let effective_index_shape: Vec<usize> = if ndim == 0 && index_shape.is_empty() {
+        vec![1]
+    } else {
+        index_shape.to_vec()
+    };
+    let dim = normalize_axis(dim, effective_ndim)?;
+
+    validate_gather_shapes(
+        &effective_input_shape,
+        dim,
+        &effective_index_shape,
+        index,
+        effective_input_shape[dim],
+    )?;
+    let input_shape: &[usize] = &effective_input_shape;
 
     let input_data = input.data_vec()?;
     let out_numel: usize = index_shape.iter().product();
     let mut output = vec![<T as num_traits::Zero>::zero(); out_numel];
 
-    let mut coords = vec![0usize; ndim];
+    let mut coords = vec![0usize; effective_ndim];
     for out_flat in 0..out_numel {
         // Build source coordinates: same as output coords, but replace dim
         // with the index value.
@@ -158,7 +177,7 @@ pub fn gather<T: Float>(
         output[out_flat] = input_data[src_flat];
 
         if out_flat + 1 < out_numel {
-            increment_coords(&mut coords, index_shape);
+            increment_coords(&mut coords, &effective_index_shape);
         }
     }
 

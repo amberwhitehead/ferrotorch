@@ -96,3 +96,13 @@ path = "examples/train_mnist.rs"
 [[example]]
 name = "ferrotorch_bench"
 path = "examples/ferrotorch_bench.rs"
+
+[[example]]
+name = "script_macro_demo"
+path = "examples/script_macro_demo.rs"
+# Non-test production consumer for `ferrotorch-jit-script` #[script]
+# proc-macro (#1482). Requires both the `jit` and `jit-script` features
+# (default-enabled). A user opting out of either gets a clean "missing
+# feature" error from cargo rather than a build failure inside the
+# example.
+required-features = ["jit", "jit-script"]

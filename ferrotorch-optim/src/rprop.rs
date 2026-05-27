@@ -24,7 +24,7 @@
 //! | REQ-5 | SHIPPED | `state_dict` at `rprop.rs:303-315` plus `load_state_dict` at `rprop.rs:317-349`; consumer: `ferrotorch/src/lib.rs:61` re-export. |
 //! | REQ-6 | SHIPPED | builder setters at `rprop.rs:71-90`; consumer: `ferrotorch/src/lib.rs:61` re-export. |
 //! | REQ-7 | SHIPPED | full `Optimizer<T>` impl at `rprop.rs:159-350`; consumer: `ferrotorch/src/lib.rs:61` re-export. |
-//! | REQ-8 | SHIPPED | `FerrotorchError::NotImplementedOnCuda` at `rprop.rs:182` (intentional divergence tracked by #1468); consumer: `ferrotorch/src/lib.rs:61` re-export. |
+//! | REQ-8 | SHIPPED | default fail-fast: `FerrotorchError::NotImplementedOnCuda` at `rprop.rs` gated on `!self.config.cpu_fallback`; opt-in fallback path falls through to the existing `fill_f64_workspace` + `update_data` round-trip (`data_vec`/`cpu_to_gpu` handle the CUDA leg transparently); consumer: `ferrotorch/src/lib.rs:61` re-export. Closes #1468. |
 
 use std::collections::HashMap;
 
@@ -68,6 +68,24 @@ pub struct RpropConfig {
     pub etas: (f64, f64),
     /// Minimum and maximum allowed step sizes (default: (1e-6, 50.0)).
     pub step_sizes: (f64, f64),
+    /// Opt-in CPU fallback for CUDA-resident parameters (default: `false`).
+    ///
+    /// When `false` (default), an Rprop `step()` on a CUDA parameter
+    /// returns `FerrotorchError::NotImplementedOnCuda { op: "Rprop" }`
+    /// — see the CL-1105 design note at the top of this file for why a
+    /// fully device-resident Rprop step is not yet expressible from
+    /// ferrotorch-core's current op set.
+    ///
+    /// When `true`, the step body falls through the existing
+    /// `fill_f64_workspace` / `update_data` round-trip path: each per-
+    /// parameter step reads `tensor.data_vec()` (synchronous device →
+    /// host copy), runs the element-wise sign-product math on host
+    /// f64 buffers, then writes back via `update_data` (synchronous
+    /// host → device copy through `cpu_to_gpu`). This is correct but
+    /// slow — every step pays two PCIe transits per parameter — and is
+    /// explicitly opt-in so callers acknowledge the perf hit rather
+    /// than silently demoting their CUDA training. Closes #1468.
+    pub cpu_fallback: bool,
 }
 
 impl Default for RpropConfig {
@@ -76,6 +94,9 @@ impl Default for RpropConfig {
             lr: 1e-2,
             etas: (0.5, 1.2),
             step_sizes: (1e-6, 50.0),
+            // R-CODE-4 default: never silently demote CUDA work to CPU.
+            // Callers must opt in via `with_cpu_fallback(true)`.
+            cpu_fallback: false,
         }
     }
 }
@@ -99,6 +120,19 @@ impl RpropConfig {
     #[must_use]
     pub fn with_step_sizes(mut self, step_sizes: (f64, f64)) -> Self {
         self.step_sizes = step_sizes;
+        self
+    }
+
+    /// Opt in to the CPU fallback for CUDA-resident parameters (#1468).
+    ///
+    /// See the field docs for the perf trade-off — every step incurs
+    /// two PCIe transits per CUDA parameter. The opt-in flag exists so
+    /// callers training on CUDA can choose between "fail fast"
+    /// (default) and "tolerate the round-trip" without the runtime
+    /// silently picking either policy.
+    #[must_use]
+    pub fn with_cpu_fallback(mut self, cpu_fallback: bool) -> Self {
+        self.cpu_fallback = cpu_fallback;
         self
     }
 }
@@ -191,7 +225,18 @@ impl<T: Float> Optimizer<T> for Rprop<T> {
                     None => continue,
                 };
 
-                if tensor.is_cuda() {
+                // CUDA dispatch (#1468). The default policy is to
+                // fail fast — see CL-1105 design note. When the caller
+                // opts in via `RpropConfig::with_cpu_fallback(true)`,
+                // we fall through to the existing host f64 workspace
+                // path, which works on CUDA tensors transparently:
+                // `fill_f64_workspace` already routes `is_cuda()` through
+                // `tensor.data_vec()` (sync device→host copy) and
+                // `update_data` already routes the writeback through
+                // `cpu_to_gpu` (sync host→device copy). The cost is
+                // two PCIe transits per parameter per step, which is
+                // why the opt-in flag exists.
+                if tensor.is_cuda() && !self.config.cpu_fallback {
                     return Err(FerrotorchError::NotImplementedOnCuda { op: "Rprop" });
                 }
 
@@ -546,6 +591,28 @@ mod tests {
         assert_eq!(config.lr, 1e-2);
         assert_eq!(config.etas, (0.5, 1.2));
         assert_eq!(config.step_sizes, (1e-6, 50.0));
+        // R-CODE-4: default is fail-fast on CUDA. The flag must stay
+        // `false` by default — flipping the default would silently
+        // demote every existing caller's CUDA training to host
+        // round-trips. (#1468)
+        assert!(!config.cpu_fallback);
+    }
+
+    /// `with_cpu_fallback(true)` enables the opt-in CPU round-trip path
+    /// (#1468). On a CPU parameter the step body runs exactly as before
+    /// — the field has no effect on CPU — so we assert by inspecting
+    /// the config + running a step that must succeed.
+    #[test]
+    fn test_rprop_cpu_fallback_field_opt_in() {
+        let cfg = RpropConfig::default().with_cpu_fallback(true);
+        assert!(cfg.cpu_fallback);
+
+        // CPU step still succeeds with cpu_fallback=true (no-op on CPU).
+        let p = scalar_param(1.0);
+        let mut opt = Rprop::new(vec![p], cfg);
+        set_grad_scalar(&opt, 0, 0, 1.0);
+        opt.step()
+            .expect("CPU step succeeds with cpu_fallback=true");
     }
 
     #[test]

@@ -314,86 +314,241 @@ impl<T: Float> Tensor<T> {
 
     /// Multiply another tensor elementwise in-place: `self *= other`.
     ///
-    /// Both tensors must have the same shape.
+    /// `other` may be broadcast to `self.shape()` (PyTorch parity for
+    /// `Tensor.mul_(other)` — `aten/src/ATen/native/BinaryOps.cpp:441
+    /// TORCH_IMPL_FUNC(mul_out)` inherits broadcasting via `TensorIterator`);
+    /// the broadcast result must equal `self.shape()` — an in-place op
+    /// cannot resize the target tensor.
+    ///
+    /// The same-shape, both-on-CUDA, `T == f32` path takes the GPU `mul_f32`
+    /// kernel and swaps the storage (no CPU round-trip). Anything else
+    /// (broadcasting or non-f32 or CPU) routes through
+    /// `grad_fns::arithmetic::mul` (which itself handles CPU + GPU broadcasting
+    /// via `binary_broadcast` / `broadcast_mul_*`) and swaps the resulting
+    /// storage in.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if shapes are not broadcast-compatible, if the
+    /// broadcast result differs from `self.shape()`, or if the tensor is
+    /// part of the computation graph or is a leaf with `requires_grad = true`.
     pub fn mul_(&self, other: &Tensor<T>) -> FerrotorchResult<&Self> {
         check_inplace_allowed(self, "mul_")?;
-        if self.shape() != other.shape() {
+
+        // Same-shape fast paths (preserve previous behavior).
+        if self.shape() == other.shape() {
+            if self.is_cuda()
+                && other.is_cuda()
+                && std::any::TypeId::of::<T>() == std::any::TypeId::of::<f32>()
+            {
+                if let Some(backend) = crate::gpu_dispatch::gpu_backend() {
+                    let handle = backend.mul_f32(self.gpu_handle()?, other.gpu_handle()?)?;
+                    let storage = crate::storage::TensorStorage::gpu(handle);
+                    // SAFETY: check_inplace_allowed at the top of `mul_` already
+                    // proved `self` has no grad_fn and is not a requires_grad leaf;
+                    // single-threaded `&self` satisfies update_storage's
+                    // exclusive-access contract.
+                    unsafe { self.update_storage(storage)? };
+                    return Ok(self);
+                }
+            }
+
+            let mut data = self.data_vec()?;
+            let other_data = other.data_vec()?;
+            for (a, &b) in data.iter_mut().zip(other_data.iter()) {
+                *a = *a * b;
+            }
+            // SAFETY: check_inplace_allowed at the top of `mul_` ensures `self`
+            // is not part of the autograd graph; satisfies update_data's
+            // exclusive-access contract.
+            unsafe { self.update_data(&data)? };
+            return Ok(self);
+        }
+
+        // Broadcast path. `arithmetic::mul` handles broadcast shape inference
+        // and CPU/GPU dispatch via `meta_propagate::binary_broadcast` and
+        // `broadcast_mul_*` kernels. We then check the broadcast result
+        // matches `self.shape()` — in-place mul cannot resize the target
+        // (PyTorch invariant for all `_` ops).
+        let result = crate::grad_fns::arithmetic::mul(self, other).map_err(|e| match e {
+            FerrotorchError::ShapeMismatch { message } => FerrotorchError::ShapeMismatch {
+                message: format!("mul_: {message}"),
+            },
+            other => other,
+        })?;
+        if result.shape() != self.shape() {
             return Err(FerrotorchError::ShapeMismatch {
                 message: format!(
-                    "mul_: shape mismatch {:?} vs {:?}",
+                    "mul_: broadcast result {:?} does not match self.shape() {:?} \
+                     — in-place mul cannot resize the target tensor",
+                    result.shape(),
                     self.shape(),
-                    other.shape()
                 ),
             });
         }
-
-        if self.is_cuda()
-            && other.is_cuda()
-            && std::any::TypeId::of::<T>() == std::any::TypeId::of::<f32>()
-        {
-            if let Some(backend) = crate::gpu_dispatch::gpu_backend() {
-                let handle = backend.mul_f32(self.gpu_handle()?, other.gpu_handle()?)?;
-                let storage = crate::storage::TensorStorage::gpu(handle);
-                // SAFETY: check_inplace_allowed at the top of `mul_` already
-                // proved `self` has no grad_fn and is not a requires_grad leaf;
-                // single-threaded `&self` satisfies update_storage's
-                // exclusive-access contract.
-                unsafe { self.update_storage(storage)? };
-                return Ok(self);
-            }
-        }
-
-        let mut data = self.data_vec()?;
-        let other_data = other.data_vec()?;
-        for (a, &b) in data.iter_mut().zip(other_data.iter()) {
-            *a = *a * b;
-        }
-        // SAFETY: check_inplace_allowed at the top of `mul_` ensures `self`
-        // is not part of the autograd graph; satisfies update_data's
-        // exclusive-access contract.
-        unsafe { self.update_data(&data)? };
+        let (storage, _shape) = result.into_storage_and_shape()?;
+        // SAFETY: check_inplace_allowed above ensures `self` is not in the
+        // autograd graph and not a requires_grad leaf; `storage` was just
+        // produced from a freshly-allocated tensor with no aliases; numel
+        // matches because we asserted `result.shape() == self.shape()`.
+        unsafe { self.update_storage(storage)? };
         Ok(self)
     }
 
     /// Divide by another tensor elementwise in-place: `self /= other`.
     ///
-    /// Both tensors must have the same shape.
+    /// `other` may be broadcast to `self.shape()` (PyTorch parity for
+    /// `Tensor.div_(other)` — `aten/src/ATen/native/BinaryOps.cpp:447
+    /// TORCH_IMPL_FUNC(div_out)` inherits broadcasting via `TensorIterator`);
+    /// the broadcast result must equal `self.shape()` — an in-place op
+    /// cannot resize the target tensor.
+    ///
+    /// The same-shape, both-on-CUDA, `T == f32` path takes the GPU `div_f32`
+    /// kernel and swaps the storage (no CPU round-trip). Anything else routes
+    /// through `grad_fns::arithmetic::div`.
+    ///
+    /// True-division semantics (PyTorch parity, no rounding). For
+    /// floor / trunc rounding modes use [`Tensor::div_rounding_`].
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if shapes are not broadcast-compatible, if the
+    /// broadcast result differs from `self.shape()`, or if the tensor is
+    /// part of the computation graph or is a leaf with `requires_grad = true`.
     pub fn div_(&self, other: &Tensor<T>) -> FerrotorchResult<&Self> {
         check_inplace_allowed(self, "div_")?;
-        if self.shape() != other.shape() {
+
+        if self.shape() == other.shape() {
+            if self.is_cuda()
+                && other.is_cuda()
+                && std::any::TypeId::of::<T>() == std::any::TypeId::of::<f32>()
+            {
+                if let Some(backend) = crate::gpu_dispatch::gpu_backend() {
+                    let handle = backend.div_f32(self.gpu_handle()?, other.gpu_handle()?)?;
+                    let storage = crate::storage::TensorStorage::gpu(handle);
+                    // SAFETY: check_inplace_allowed at the top of `div_` already
+                    // proved `self` has no grad_fn and is not a requires_grad leaf;
+                    // single-threaded `&self` satisfies update_storage's
+                    // exclusive-access contract.
+                    unsafe { self.update_storage(storage)? };
+                    return Ok(self);
+                }
+            }
+
+            let mut data = self.data_vec()?;
+            let other_data = other.data_vec()?;
+            for (a, &b) in data.iter_mut().zip(other_data.iter()) {
+                *a = *a / b;
+            }
+            // SAFETY: check_inplace_allowed at the top of `div_` ensures `self`
+            // is not part of the autograd graph; satisfies update_data's
+            // exclusive-access contract.
+            unsafe { self.update_data(&data)? };
+            return Ok(self);
+        }
+
+        // Broadcast path.
+        let result = crate::grad_fns::arithmetic::div(self, other).map_err(|e| match e {
+            FerrotorchError::ShapeMismatch { message } => FerrotorchError::ShapeMismatch {
+                message: format!("div_: {message}"),
+            },
+            other => other,
+        })?;
+        if result.shape() != self.shape() {
             return Err(FerrotorchError::ShapeMismatch {
                 message: format!(
-                    "div_: shape mismatch {:?} vs {:?}",
+                    "div_: broadcast result {:?} does not match self.shape() {:?} \
+                     — in-place div cannot resize the target tensor",
+                    result.shape(),
                     self.shape(),
-                    other.shape()
+                ),
+            });
+        }
+        let (storage, _shape) = result.into_storage_and_shape()?;
+        // SAFETY: see `mul_` broadcast-path SAFETY.
+        unsafe { self.update_storage(storage)? };
+        Ok(self)
+    }
+
+    /// In-place division with a `rounding_mode` kwarg, mirroring
+    /// `torch.Tensor.div_(other, *, rounding_mode=...)` per
+    /// `torch/_tensor_docs.py:1746` and `aten/src/ATen/native/BinaryOps.cpp:176`
+    /// `TORCH_META_FUNC2(div, Tensor_mode)`.
+    ///
+    /// Accepted modes:
+    ///
+    /// - `"trunc"` — `self = (self / other).trunc()` (rounds toward zero).
+    /// - `"floor"` — `self = (self / other).floor()` (rounds toward negative infinity).
+    ///
+    /// For true-division (no rounding), use [`Tensor::div_`] directly. Any other
+    /// `mode` string returns `InvalidArgument` matching upstream:
+    ///
+    /// > `div expected rounding_mode to be one of None, 'trunc', or 'floor' but found '...'`
+    /// > (`BinaryOps.cpp:186`)
+    ///
+    /// Broadcasting follows `div_` semantics — `other` may broadcast to
+    /// `self.shape()` and the broadcast result must equal `self.shape()`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if `mode` is unrecognized, if shapes are not
+    /// broadcast-compatible, or if the tensor is part of the computation graph
+    /// or is a leaf with `requires_grad = true`.
+    pub fn div_rounding_(&self, other: &Tensor<T>, rounding_mode: &str) -> FerrotorchResult<&Self> {
+        check_inplace_allowed(self, "div_rounding_")?;
+        match rounding_mode {
+            "trunc" | "floor" => {}
+            other_mode => {
+                return Err(FerrotorchError::InvalidArgument {
+                    message: format!(
+                        "div_rounding_: expected rounding_mode to be one of 'trunc' or 'floor' \
+                         but found '{other_mode}'"
+                    ),
+                });
+            }
+        }
+
+        // Compute true-division result via the same broadcast-aware path as
+        // `div_`, then apply the rounding op element-wise on host data and
+        // swap back. We re-use `arithmetic::div` for shape correctness and
+        // bring the result down to host data for the rounding pass — GPU
+        // rounding kernels would be a separate dispatch arm; this CPU-side
+        // rounding is correct on both CPU and GPU operands because
+        // `data_vec()` is device-transparent.
+        let result = crate::grad_fns::arithmetic::div(self, other).map_err(|e| match e {
+            FerrotorchError::ShapeMismatch { message } => FerrotorchError::ShapeMismatch {
+                message: format!("div_rounding_: {message}"),
+            },
+            other => other,
+        })?;
+        if result.shape() != self.shape() {
+            return Err(FerrotorchError::ShapeMismatch {
+                message: format!(
+                    "div_rounding_: broadcast result {:?} does not match self.shape() {:?} \
+                     — in-place div cannot resize the target tensor",
+                    result.shape(),
+                    self.shape(),
                 ),
             });
         }
 
-        if self.is_cuda()
-            && other.is_cuda()
-            && std::any::TypeId::of::<T>() == std::any::TypeId::of::<f32>()
-        {
-            if let Some(backend) = crate::gpu_dispatch::gpu_backend() {
-                let handle = backend.div_f32(self.gpu_handle()?, other.gpu_handle()?)?;
-                let storage = crate::storage::TensorStorage::gpu(handle);
-                // SAFETY: check_inplace_allowed at the top of `div_` already
-                // proved `self` has no grad_fn and is not a requires_grad leaf;
-                // single-threaded `&self` satisfies update_storage's
-                // exclusive-access contract.
-                unsafe { self.update_storage(storage)? };
-                return Ok(self);
+        let mut data = result.data_vec()?;
+        match rounding_mode {
+            "trunc" => {
+                for x in &mut data {
+                    *x = num_traits::Float::trunc(*x);
+                }
             }
+            "floor" => {
+                for x in &mut data {
+                    *x = num_traits::Float::floor(*x);
+                }
+            }
+            _ => unreachable!("validated above"),
         }
-
-        let mut data = self.data_vec()?;
-        let other_data = other.data_vec()?;
-        for (a, &b) in data.iter_mut().zip(other_data.iter()) {
-            *a = *a / b;
-        }
-        // SAFETY: check_inplace_allowed at the top of `div_` ensures `self`
-        // is not part of the autograd graph; satisfies update_data's
-        // exclusive-access contract.
+        // SAFETY: check_inplace_allowed above ensures `self` is not in the
+        // autograd graph and not a requires_grad leaf; `data` has the same
+        // numel as `self` (`result.shape() == self.shape()` was asserted).
         unsafe { self.update_data(&data)? };
         Ok(self)
     }
@@ -402,6 +557,10 @@ impl<T: Float> Tensor<T> {
     ///
     /// Each element `x` is replaced with `min.max(x.min(max))`, matching
     /// PyTorch's `Tensor.clamp_()`.
+    ///
+    /// This is the both-bounds-required overload; for the
+    /// `(Option<T>, Option<T>)` overload that mirrors torch's
+    /// `clamp_(min=None, max=None)` see [`Tensor::clamp_opt_`].
     ///
     /// # Errors
     ///
@@ -429,6 +588,103 @@ impl<T: Float> Tensor<T> {
         // computation graph and does not require grad, so no concurrent access.
         unsafe { self.update_data(&data)? };
 
+        Ok(self)
+    }
+
+    /// Clamp with optional bounds — `Tensor.clamp_(min=None, max=None)` parity.
+    ///
+    /// Mirrors `torch.Tensor.clamp_(min=None, max=None) -> Tensor` per
+    /// `torch/_tensor_docs.py:1141` and the structured kernel
+    /// `TORCH_IMPL_FUNC(clamp_out)` at
+    /// `aten/src/ATen/native/TensorCompare.cpp:831`. Either bound may be
+    /// `None`:
+    ///
+    /// - `clamp_opt_(Some(lo), Some(hi))` — equivalent to `clamp_(lo, hi)`.
+    /// - `clamp_opt_(Some(lo), None)` — `clamp_min_` (lower bound only).
+    /// - `clamp_opt_(None, Some(hi))` — `clamp_max_` (upper bound only).
+    /// - `clamp_opt_(None, None)` — rejected with `InvalidArgument`
+    ///   matching upstream "torch.clamp: At least one of 'min' or 'max' must
+    ///   not be None" (`TensorCompare.cpp:106`).
+    ///
+    /// NaN-bound parity: if either supplied bound is NaN, the entire tensor
+    /// is filled with NaN (PyTorch's `at::fill_(result, NaN)` branch at
+    /// `TensorCompare.cpp:844`, executed when `min.isNan() || max.isNan()`).
+    ///
+    /// Per-element NaN inputs propagate (matching the kernel's
+    /// `std::min(std::max(a, min), max)` semantics — when `a` is NaN, both
+    /// comparisons evaluate false in this implementation and `a` is left
+    /// unchanged, which propagates NaN through).
+    ///
+    /// # Errors
+    ///
+    /// - Returns an error if both `min` and `max` are `None`.
+    /// - Returns an error if `min > max` (when both are `Some`).
+    /// - Returns an error if the tensor is part of the computation graph or
+    ///   is a leaf with `requires_grad = true`.
+    pub fn clamp_opt_(&self, min: Option<T>, max: Option<T>) -> FerrotorchResult<&Self> {
+        if min.is_none() && max.is_none() {
+            return Err(FerrotorchError::InvalidArgument {
+                message: "clamp_opt_: at least one of 'min' or 'max' must not be None".into(),
+            });
+        }
+        if let (Some(lo), Some(hi)) = (min, max) {
+            if lo > hi {
+                return Err(FerrotorchError::InvalidArgument {
+                    message: format!("clamp_opt_ requires min <= max, got min={lo:?}, max={hi:?}"),
+                });
+            }
+        }
+
+        check_inplace_allowed(self, "clamp_opt_")?;
+
+        // NaN-bound special case: PyTorch's `TORCH_IMPL_FUNC(clamp_out)` at
+        // `aten/src/ATen/native/TensorCompare.cpp:844` fills the entire
+        // result with NaN if any bound is NaN. Mirror that here.
+        let min_is_nan = min.is_some_and(num_traits::Float::is_nan);
+        let max_is_nan = max.is_some_and(num_traits::Float::is_nan);
+        if min_is_nan || max_is_nan {
+            let nan = <T as num_traits::Float>::nan();
+            let new_data = vec![nan; self.numel()];
+            // SAFETY: check_inplace_allowed above ensures `self` is not in
+            // the autograd graph and not a requires_grad leaf; new_data
+            // matches self.numel() by construction.
+            unsafe { self.update_data(&new_data)? };
+            return Ok(self);
+        }
+
+        let mut data = self.data_vec()?;
+        match (min, max) {
+            (Some(lo), Some(hi)) => {
+                for x in &mut data {
+                    // NaN inputs propagate: `*x < lo` and `*x > hi` are both
+                    // false when `*x` is NaN, leaving `*x` unchanged.
+                    if *x < lo {
+                        *x = lo;
+                    } else if *x > hi {
+                        *x = hi;
+                    }
+                }
+            }
+            (Some(lo), None) => {
+                for x in &mut data {
+                    if *x < lo {
+                        *x = lo;
+                    }
+                }
+            }
+            (None, Some(hi)) => {
+                for x in &mut data {
+                    if *x > hi {
+                        *x = hi;
+                    }
+                }
+            }
+            (None, None) => unreachable!("rejected above"),
+        }
+        // SAFETY: check_inplace_allowed above ensures `self` is not in the
+        // autograd graph and not a requires_grad leaf; satisfies update_data's
+        // exclusive-access contract.
+        unsafe { self.update_data(&data)? };
         Ok(self)
     }
 }
