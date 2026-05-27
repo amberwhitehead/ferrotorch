@@ -4,7 +4,7 @@
 //! The builder's `divergence_critic_batchnorm_gpu.rs` pinned the GPU backward
 //! against torch — but only for ONE shape per op, and (for LRN) only 3 sampled
 //! grad_input indices. The user's failure class is "a GPU kernel that compiles
-//! + produces plausible-but-wrong gradients" — a kernel that is right for the
+//! and produces plausible-but-wrong gradients" — a kernel that is right for the
 //! builder's specific shape but wrong for the GENERAL reduction (B>1, C>1,
 //! spatial>1) or at WINDOW BOUNDARIES (LRN cross-channel edges, even `size`).
 //!
