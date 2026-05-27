@@ -67,19 +67,30 @@ preconditioned direction onto the scaled raw gradient).
 ## Requirements
 
 - REQ-1: `pub struct KfacConfig` with `lr` (1e-3), `damping` (1e-3),
-  `momentum` (0.9), `update_freq` (10), `weight_decay` (0.0),
-  `maximize` (false). Builder-style `with_*` setters.
+  `momentum` (0.9, gradient-buffer momentum), `stat_decay` (0.95, factor-EMA
+  decay), `update_freq` (10), `weight_decay` (0.0), `maximize` (false).
+  Builder-style `with_*` setters. `momentum` and `stat_decay` are two
+  INDEPENDENT hyperparameters, matching KFAC-PyTorch's split (`momentum`
+  feeds the parameter update; `stat_decay` feeds the Kronecker-factor running
+  average).
 - REQ-2: `pub struct Kfac<T: Float>` with `new(params, config)` and
   full `Optimizer<T>` impl.
 - REQ-3: `update_factors(param_name: &str, input_activation: &Tensor<T>,
-  output_gradient: &Tensor<T>)` — exponential moving average update of
-  the Kronecker factors:
+  output_gradient: &Tensor<T>)` — SEED-then-EMA update of the Kronecker
+  factors using `stat_decay` (NOT `momentum`). On the FIRST update for a key
+  the factor is seeded with the unbiased batch covariance (no down-scaling);
+  subsequent updates EMA-blend:
   ```text
-  A = momentum * A + (1 - momentum) * (a^T a) / batch
-  G = momentum * G + (1 - momentum) * (g^T g) / batch
+  A_batch = (a^T a) / batch
+  // first update for the key (uninitialized):
+  A = A_batch
+  // subsequent updates:
+  A = stat_decay * A + (1 - stat_decay) * A_batch
   ```
-  Rejects 1-D inputs and batch-size mismatch with
-  `FerrotorchError::InvalidArgument`.
+  (same recursion for `G`). This mirrors KFAC-PyTorch's `update_running_stat`
+  (`m_aa = aa` when `steps == 0`, else blend with `stat_decay`) so early-step
+  factors are never biased ~10x low. Rejects 1-D inputs and batch-size
+  mismatch with `FerrotorchError::InvalidArgument`.
 - REQ-4: Per-`String`-keyed factor state in `factors: HashMap<String,
   KroneckerFactors<T>>`. K-FAC keeps the string-key scheme (NOT the
   CL-1122 `ParamKey` typed-key scheme) because `update_factors`
@@ -107,12 +118,15 @@ preconditioned direction onto the scaled raw gradient).
   (`test_kfac_config_defaults`).
 - [x] AC-2: Constructor accepts a parameter list and stores them in a
   single param group (`test_kfac_construction`).
-- [x] AC-3: `update_factors` stores running averages of the outer
-  products with the configured momentum coefficient
-  (`test_update_factors_stores_running_averages`).
-- [x] AC-4: EMA blending across multiple `update_factors` calls
-  produces the expected exponentially-weighted average
-  (`test_update_factors_ema_blending`).
+- [x] AC-3: `update_factors` seeds the factor with the unbiased batch
+  covariance on the first call (no down-scaling)
+  (`test_update_factors_stores_running_averages`,
+  `divergence_kfac_ema_zero_init_biases_factor_low`).
+- [x] AC-4: EMA blending across multiple `update_factors` calls uses
+  `stat_decay` (independent of `momentum`) and produces the expected
+  seed-then-EMA recursion (`test_update_factors_ema_blending`,
+  `test_update_factors_multistep_ema_recursion`,
+  `divergence_kfac_momentum_doubles_as_stat_decay`).
 - [x] AC-5: With identity factors (zero `update_factors` calls),
   `step` falls back to vanilla SGD on the gradient
   (`test_step_with_identity_factors_matches_sgd`).
@@ -144,8 +158,9 @@ preconditioned direction onto the scaled raw gradient).
 
 ### Config
 
-`#[derive(Debug, Clone, Copy)]`, `#[non_exhaustive]`, six fields plus
-six builder `with_*` setters.
+`#[derive(Debug, Clone, Copy)]`, `#[non_exhaustive]`, seven fields (`lr`,
+`damping`, `momentum`, `stat_decay`, `update_freq`, `weight_decay`,
+`maximize`) plus seven builder `with_*` setters.
 
 ### `KroneckerFactors<T>`
 
@@ -167,10 +182,14 @@ Per-parameter struct holding:
 Accepts user-supplied `param_name`, the input activation `a: [batch,
 in_features]`, and the output gradient `g: [batch, out_features]`.
 Constructs `A_batch = (a^T @ a) / batch` and `G_batch = (g^T @ g) / batch`
-on the activation's device via `tensor_matmul` (cuBLAS GEMM on CUDA),
-then blends `A = mom * A + (1 - mom) * A_batch` (same for `G`).
-Invalidates the cached inverses. Lazy-initializes the factor entry on
-first call.
+on the activation's device via `tensor_matmul` (cuBLAS GEMM on CUDA). On the
+FIRST call for a key it SEEDS the factor entry with `A_batch`/`G_batch`
+directly (the unbiased single-batch curvature estimate — no down-scaling);
+on subsequent calls it EMA-blends `A = stat_decay * A + (1 - stat_decay) *
+A_batch` (same for `G`). `stat_decay` (default 0.95) is read from
+`KfacConfig::stat_decay`, independent of `KfacConfig::momentum` (the
+gradient-buffer coefficient consumed in `step`). Invalidates the cached
+inverses.
 
 ### `invert_damped_tensor`
 
@@ -288,9 +307,9 @@ Expected: all CPU-path tests pass; CUDA tests run only with
 
 | REQ | Status | Evidence |
 |---|---|---|
-| REQ-1 | SHIPPED | impl: `pub struct KfacConfig` at `ferrotorch-optim/src/natural_gradient.rs` + builder setters at `ferrotorch-optim/src/natural_gradient.rs`; non-test consumer: `ferrotorch/src/lib.rs` `pub use ferrotorch_optim::*;` re-export. |
+| REQ-1 | SHIPPED | impl: `pub struct KfacConfig` (incl. the `stat_decay` field, default 0.95) plus the `with_*` builder setters (incl. `with_stat_decay`) in `natural_gradient.rs`; non-test consumer: `Kfac::update_factors` reads `config.stat_decay` for the factor EMA + `ferrotorch/src/lib.rs` `pub use ferrotorch_optim::*;` re-export. |
 | REQ-2 | SHIPPED | impl: `pub struct Kfac<T>` at `ferrotorch-optim/src/natural_gradient.rs` + `impl<T: Float> Optimizer<T>` at `ferrotorch-optim/src/natural_gradient.rs`; non-test consumer: `ferrotorch/src/lib.rs` re-export. |
-| REQ-3 | SHIPPED | impl: `pub fn update_factors` at `ferrotorch-optim/src/natural_gradient.rs`; non-test consumer: `ferrotorch/src/lib.rs` re-export. |
+| REQ-3 | SHIPPED | impl: `pub fn update_factors` in `natural_gradient.rs` — seeds `A = A_batch` on the first call (the `needs_seed` branch) then EMA-blends with `config.stat_decay` (the `else` branch); non-test consumer: `ferrotorch/src/lib.rs` re-export. |
 | REQ-4 | SHIPPED | impl: `factors: HashMap<String, KroneckerFactors<T>>` at `ferrotorch-optim/src/natural_gradient.rs` + lazy-init at `ferrotorch-optim/src/natural_gradient.rs`; non-test consumer: `ferrotorch/src/lib.rs` re-export. |
 | REQ-5 | SHIPPED | impl: `invert_damped_tensor` at `ferrotorch-optim/src/natural_gradient.rs` dispatching to `ferrotorch_core::linalg::solve` (cuSOLVER on CUDA); non-test consumer: `ferrotorch/src/lib.rs` re-export. |
 | REQ-6 | SHIPPED | impl: `step` at `ferrotorch-optim/src/natural_gradient.rs` with the inverse-cache gate at `ferrotorch-optim/src/natural_gradient.rs`; non-test consumer: `ferrotorch/src/lib.rs` re-export. |

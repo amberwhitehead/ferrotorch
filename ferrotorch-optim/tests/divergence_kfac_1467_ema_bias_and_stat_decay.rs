@@ -54,31 +54,32 @@ fn a_factor_of(opt: &Kfac<f64>, key: &str) -> Vec<f64> {
         .unwrap_or_default()
 }
 
-/// Divergence: `ferrotorch-optim/src/natural_gradient.rs:330-368`
-/// (`Kfac::update_factors`) zero-initializes the running Kronecker factor and
-/// then applies the EMA `A = momentum*A_old + (1-momentum)*A_batch` with
-/// `A_old = 0`. With the default `momentum = 0.9` the factor after the FIRST
-/// mini-batch is `0.1 * A_batch` — biased 10x low — and there is no
-/// bias-correction term.
+/// Regression (FIXED #1588): `Kfac::update_factors` previously zero-initialized
+/// the running Kronecker factor and then applied the EMA
+/// `A = momentum*A_old + (1-momentum)*A_batch` with `A_old = 0`. With the
+/// default coefficient the factor after the FIRST mini-batch was
+/// `(1-decay) * A_batch` — biased ~10x low — with no bias-correction term.
 ///
 /// K-FAC requires `A` to estimate the curvature `E[a aᵀ]`; a single mini-batch
-/// is the unbiased estimate `A_batch`. KFAC-PyTorch seeds the running stat with
-/// the first batch's estimate so the factor is never down-scaled. ferrotorch
-/// returns `0.1 * A_batch` instead, so the preconditioner on early steps is
-/// off by ~10x in `A` (and another ~10x in `G`).
+/// is the unbiased estimate `A_batch`. KFAC-PyTorch SEEDS the running stat with
+/// the first batch's estimate (`self.m_aa[...] = aa` on `steps == 0`) so the
+/// factor is never down-scaled. The fix seeds `A = A_batch` on the first
+/// `update_factors` call for each key (then EMA-blends with `stat_decay` from
+/// the second call onward), so this test now passes and pins the seeding
+/// behavior as permanent regression coverage.
 ///
 /// Closed-form expected: A_batch = (a^T a)/N with a = [[1,0,0],[0,1,0]], N=2
-///   A_batch = diag(0.5, 0.5, 0.0). Element (0,0) = 0.5.
-/// ferrotorch returns 0.1 * 0.5 = 0.05.
+///   A_batch = diag(0.5, 0.5, 0.0). Element (0,0) = 0.5 (the seeded value).
 /// Tracking: #1588
 #[test]
-#[ignore = "divergence: Kfac zero-init EMA biases factors ~10x low on early steps; tracking #1588"]
 fn divergence_kfac_ema_zero_init_biases_factor_low() {
     let p = Parameter::from_slice(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0], &[2, 3]).unwrap();
-    let config = KfacConfig::default(); // momentum (== EMA decay here) = 0.9
+    // Default config: first update seeds A = A_batch regardless of stat_decay.
+    let config = KfacConfig::default();
     let mut kfac = Kfac::new(vec![p], config);
 
-    kfac.update_factors("layer", &act_2x3(), &grad_2x2()).unwrap();
+    kfac.update_factors("layer", &act_2x3(), &grad_2x2())
+        .unwrap();
 
     let a = a_factor_of(&kfac, "layer");
     assert_eq!(a.len(), 9, "A must be [3,3]");
@@ -93,31 +94,31 @@ fn divergence_kfac_ema_zero_init_biases_factor_low() {
     );
 }
 
-/// Divergence: `Kfac::update_factors` uses the single `momentum`
-/// (`KfacConfig::momentum`) field as the factor-EMA decay
-/// (`natural_gradient.rs:322,361-368`) AND `Kfac::step` uses the SAME field as
-/// the gradient-momentum buffer coefficient (`natural_gradient.rs:547-582`).
+/// Regression (FIXED #1589): `Kfac::update_factors` previously used the single
+/// `momentum` (`KfacConfig::momentum`) field as the factor-EMA decay AND
+/// `Kfac::step` used the SAME field as the gradient-momentum buffer
+/// coefficient, so `stat_decay != momentum` was unrepresentable.
 ///
 /// In the K-FAC reference (KFAC-PyTorch `KFACOptimizer`) these are two
 /// independent hyperparameters: `stat_decay` (default 0.95) for the factor EMA
-/// and `momentum` (default 0.9) for the parameter update. ferrotorch cannot
-/// represent `stat_decay != momentum`, so any configuration matching the
-/// reference defaults is unreachable.
+/// and `momentum` (default 0.9) for the parameter update. The fix adds a
+/// separate `stat_decay` field (default 0.95) to `KfacConfig`; the factor EMA
+/// now reads `stat_decay`, and `momentum` feeds only the gradient buffer.
 ///
-/// We pin the observable consequence: setting `momentum` to a value chosen for
-/// the gradient buffer (say 0.0, i.e. no gradient momentum) forces the factor
-/// EMA decay to 0.0 as well, meaning the factor is OVERWRITTEN each step
-/// (`A = 0*A_old + 1*A_batch`) instead of being a running average. A true
-/// running-average factor (stat_decay > 0) blends across batches.
+/// We pin the observable consequence: a user wanting NO gradient momentum sets
+/// `momentum = 0.0`. Before the fix that forced the factor EMA decay to 0.0,
+/// OVERWRITING the factor each step. After the fix `stat_decay` stays at its
+/// 0.95 default, so the factor is a true running average that blends across
+/// batches.
 ///
-/// Closed-form: with a real EMA decay d>0 and two DIFFERENT batches B1, B2,
-/// A_after_two retains a contribution from B1. With ferrotorch forced to
-/// momentum=0 (because the user wanted NO gradient momentum),
-/// A_after_two = B2 exactly — B1 is forgotten. The factor is not a running
-/// average at all.
+/// Closed-form: with `stat_decay = 0.95` and two DIFFERENT batches B1, B2, the
+/// factor is seeded with B1 then blended: A[0,0] = 0.95*B1[0,0] + 0.05*B2[0,0].
+/// Batch 1 excites channel 0 (B1[0,0] = 2) while batch 2 has nothing there
+/// (B2[0,0] = 0), so A[0,0] = 0.95*2 = 1.9 > 0 — batch 1 is retained. This
+/// test now passes and pins the stat_decay/momentum separation as permanent
+/// regression coverage.
 /// Tracking: #1589
 #[test]
-#[ignore = "divergence: Kfac momentum doubles as stat_decay; cannot match K-FAC reference; tracking #1589"]
 fn divergence_kfac_momentum_doubles_as_stat_decay() {
     // User wants NO gradient momentum -> sets momentum = 0.0.
     let p = Parameter::from_slice(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0], &[2, 3]).unwrap();
@@ -192,7 +193,8 @@ fn divergence_kfac_step_nonsquare_kronecker_ordering() {
     let grad_w: Vec<f64> = (1..=(out * inn)).map(|v| v as f64).collect();
     p.tensor()
         .set_grad(Some(
-            Tensor::from_storage(TensorStorage::cpu(grad_w.clone()), vec![out, inn], false).unwrap(),
+            Tensor::from_storage(TensorStorage::cpu(grad_w.clone()), vec![out, inn], false)
+                .unwrap(),
         ))
         .unwrap();
 

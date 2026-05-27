@@ -55,9 +55,9 @@
 //!
 //! | REQ | Status | Evidence |
 //! | --- | --- | --- |
-//! | REQ-1 | SHIPPED | `KfacConfig` plus its `with_*` setters in `natural_gradient.rs`; consumer: `ferrotorch/src/lib.rs` `pub use ferrotorch_optim::*;` re-export. |
+//! | REQ-1 | SHIPPED | `KfacConfig` (incl. `stat_decay`, default 0.95) plus its `with_*` setters (incl. `with_stat_decay`) in `natural_gradient.rs`; consumer: `Kfac::update_factors` reads `config.stat_decay` for the factor EMA + `ferrotorch/src/lib.rs` `pub use ferrotorch_optim::*;` re-export. |
 //! | REQ-2 | SHIPPED | `Kfac<T>` plus `impl Optimizer<T>` in `natural_gradient.rs`; consumer: `ferrotorch/src/lib.rs` re-export. |
-//! | REQ-3 | SHIPPED | `Kfac::update_factors` in `natural_gradient.rs`; consumer: `ferrotorch/src/lib.rs` re-export. |
+//! | REQ-3 | SHIPPED | `Kfac::update_factors` in `natural_gradient.rs` — seeds `A = A_batch` on the first call then EMA-blends with `config.stat_decay`; consumer: `ferrotorch/src/lib.rs` re-export. |
 //! | REQ-4 | SHIPPED | `factors: HashMap<String, KroneckerFactors<T>>` field plus lazy-init branch in `Kfac::update_factors` (`natural_gradient.rs`); consumer: `ferrotorch/src/lib.rs` re-export. |
 //! | REQ-5 | SHIPPED | `invert_damped_tensor` in `natural_gradient.rs` dispatches to `ferrotorch_core::linalg::solve` (cuSOLVER on CUDA); consumer: `ferrotorch/src/lib.rs` re-export. |
 //! | REQ-6 | SHIPPED | `Kfac::step` in `natural_gradient.rs` with the inverse-cache gate; consumer: `ferrotorch/src/lib.rs` re-export. |
@@ -95,8 +95,20 @@ pub struct KfacConfig {
     /// Tikhonov damping added to Kronecker factors before inversion
     /// (default: 1e-3).
     pub damping: f64,
-    /// Momentum coefficient for the preconditioned gradient (default: 0.9).
+    /// Momentum coefficient for the preconditioned gradient buffer
+    /// (default: 0.9). This is the gradient-update momentum ONLY — it does
+    /// NOT control the Kronecker-factor running average (see [`Self::stat_decay`]).
+    /// Matches KFAC-PyTorch's `momentum` hyperparameter, which feeds the
+    /// parameter update, not the curvature EMA.
     pub momentum: f64,
+    /// Exponential-moving-average decay for the Kronecker factors
+    /// (default: 0.95). The running curvature stat is blended as
+    /// `A = stat_decay * A_old + (1 - stat_decay) * A_batch` from the second
+    /// `update_factors` call onward; the first call SEEDS `A = A_batch`
+    /// directly (no down-scaling). This is a SEPARATE hyperparameter from
+    /// [`Self::momentum`], matching KFAC-PyTorch's `stat_decay` (default 0.95)
+    /// vs `momentum` (default 0.9) split.
+    pub stat_decay: f64,
     /// How often (in steps) to recompute the Kronecker factor inverses
     /// (default: 10).  The running-average factors themselves are updated
     /// every time `update_factors` is called.
@@ -114,6 +126,7 @@ impl Default for KfacConfig {
             lr: 1e-3,
             damping: 1e-3,
             momentum: 0.9,
+            stat_decay: 0.95,
             update_freq: 10,
             weight_decay: 0.0,
             maximize: false,
@@ -136,10 +149,26 @@ impl KfacConfig {
         self
     }
 
-    /// Set the momentum coefficient for the preconditioned gradient.
+    /// Set the momentum coefficient for the preconditioned gradient buffer.
+    ///
+    /// This is the gradient-update momentum only; it does NOT affect the
+    /// Kronecker-factor running average (use [`Self::with_stat_decay`] for
+    /// the factor EMA decay).
     #[must_use]
     pub fn with_momentum(mut self, momentum: f64) -> Self {
         self.momentum = momentum;
+        self
+    }
+
+    /// Set the EMA decay for the Kronecker factors (KFAC-PyTorch `stat_decay`,
+    /// default 0.95).
+    ///
+    /// The factor running average is `A = stat_decay * A_old + (1 - stat_decay)
+    /// * A_batch` from the second `update_factors` call onward; the first call
+    /// seeds `A = A_batch` directly. Independent of [`Self::with_momentum`].
+    #[must_use]
+    pub fn with_stat_decay(mut self, stat_decay: f64) -> Self {
+        self.stat_decay = stat_decay;
         self
     }
 
@@ -268,12 +297,23 @@ impl<T: Float> Kfac<T> {
     ///   gradients (∂L/∂y).
     ///
     /// The factors are updated as exponential moving averages with the
-    /// momentum coefficient from `KfacConfig::momentum`:
+    /// `stat_decay` coefficient from `KfacConfig::stat_decay` (NOT
+    /// `KfacConfig::momentum`, which is the gradient-buffer momentum). On the
+    /// FIRST update for a given key the factor is SEEDED with the unbiased
+    /// batch covariance (no down-scaling); subsequent updates EMA-blend:
     ///
     /// ```text
-    /// A = momentum * A + (1 - momentum) * (a^T a) / batch_size
-    /// G = momentum * G + (1 - momentum) * (g^T g) / batch_size
+    /// A_batch = (a^T a) / batch_size
+    /// // first update (factor uninitialized):
+    /// A = A_batch
+    /// // subsequent updates:
+    /// A = stat_decay * A + (1 - stat_decay) * A_batch
     /// ```
+    ///
+    /// This matches KFAC-PyTorch's `update_running_stat` semantics: the
+    /// running stat is seeded with the first mini-batch estimate (`m_aa = aa`
+    /// when `steps == 0`) so the factor is never biased low on early steps,
+    /// then blended with `stat_decay` (default 0.95) thereafter.
     pub fn update_factors(
         &mut self,
         param_name: &str,
@@ -318,54 +358,60 @@ impl<T: Float> Kfac<T> {
         let g_batch_unscaled = no_grad(|| tensor_matmul(&g_t, output_gradient))?;
         let g_batch = no_grad(|| mul(&g_batch_unscaled, &inv_batch_t))?;
 
-        // Exponential moving average update (device-resident).
-        let mom = self.config.momentum;
-        let mom_t = scalar(cast::<f64, T>(mom)?)?.to(device)?;
-        let one_minus_mom_t = scalar(cast::<f64, T>(1.0 - mom)?)?.to(device)?;
+        // Factor EMA uses `stat_decay` (KFAC-PyTorch default 0.95), which is a
+        // SEPARATE hyperparameter from `momentum` (the gradient-buffer
+        // coefficient, consumed in `step`). #1589.
+        let decay = self.config.stat_decay;
+        let decay_t = scalar(cast::<f64, T>(decay)?)?.to(device)?;
+        let one_minus_decay_t = scalar(cast::<f64, T>(1.0 - decay)?)?.to(device)?;
 
-        // Initialize factor tensors on the activation's device when first
-        // seen — zero-initialized to match the scalar-loop semantics.
+        // Whether this key's factors have not yet been initialized. On the
+        // FIRST update we SEED `A = A_batch` / `G = G_batch` directly (the
+        // unbiased single-batch curvature estimate) rather than blending into
+        // a zero-init factor — the zero-init + immediate EMA would down-scale
+        // the first estimate by `(1 - decay)` (~10x low at decay=0.9). #1588.
+        // This mirrors KFAC-PyTorch (`m_aa = aa` when `steps == 0`).
         let key_owned = param_name.to_string();
-        let needs_init = !self.factors.contains_key(&key_owned);
-        if needs_init {
-            let zero_a =
-                ferrotorch_core::creation::zeros::<T>(&[in_features, in_features])?.to(device)?;
-            let zero_g =
-                ferrotorch_core::creation::zeros::<T>(&[out_features, out_features])?.to(device)?;
+        let needs_seed = !self.factors.contains_key(&key_owned);
+
+        if needs_seed {
+            // Seed: store the batch covariance verbatim (already on `device`).
             self.factors.insert(
                 key_owned.clone(),
                 KroneckerFactors {
-                    a_factor: zero_a,
+                    a_factor: a_batch,
                     a_size: in_features,
-                    g_factor: zero_g,
+                    g_factor: g_batch,
                     g_size: out_features,
                     a_inv: None,
                     g_inv: None,
                     momentum_buf: None,
                 },
             );
+        } else {
+            let factors = self.factors.get_mut(&key_owned).unwrap();
+            // If the existing factors live on a different device (e.g. loaded
+            // from a state_dict on CPU then params moved to CUDA), migrate
+            // them once on first reuse.
+            if factors.a_factor.device() != device {
+                factors.a_factor = factors.a_factor.clone().to(device)?;
+            }
+            if factors.g_factor.device() != device {
+                factors.g_factor = factors.g_factor.clone().to(device)?;
+            }
+
+            // A = stat_decay * A_old + (1 - stat_decay) * A_batch
+            let a_old_scaled = no_grad(|| mul(&factors.a_factor, &decay_t))?;
+            let a_batch_scaled = no_grad(|| mul(&a_batch, &one_minus_decay_t))?;
+            factors.a_factor = no_grad(|| add(&a_old_scaled, &a_batch_scaled))?;
+
+            // G = stat_decay * G_old + (1 - stat_decay) * G_batch
+            let g_old_scaled = no_grad(|| mul(&factors.g_factor, &decay_t))?;
+            let g_batch_scaled = no_grad(|| mul(&g_batch, &one_minus_decay_t))?;
+            factors.g_factor = no_grad(|| add(&g_old_scaled, &g_batch_scaled))?;
         }
 
         let factors = self.factors.get_mut(&key_owned).unwrap();
-        // If the existing factors live on a different device (e.g. loaded
-        // from a state_dict on CPU then params moved to CUDA), migrate
-        // them once on first reuse.
-        if factors.a_factor.device() != device {
-            factors.a_factor = factors.a_factor.clone().to(device)?;
-        }
-        if factors.g_factor.device() != device {
-            factors.g_factor = factors.g_factor.clone().to(device)?;
-        }
-
-        // A = mom * A_old + (1 - mom) * A_batch
-        let a_old_scaled = no_grad(|| mul(&factors.a_factor, &mom_t))?;
-        let a_batch_scaled = no_grad(|| mul(&a_batch, &one_minus_mom_t))?;
-        factors.a_factor = no_grad(|| add(&a_old_scaled, &a_batch_scaled))?;
-
-        // G = mom * G_old + (1 - mom) * G_batch
-        let g_old_scaled = no_grad(|| mul(&factors.g_factor, &mom_t))?;
-        let g_batch_scaled = no_grad(|| mul(&g_batch, &one_minus_mom_t))?;
-        factors.g_factor = no_grad(|| add(&g_old_scaled, &g_batch_scaled))?;
 
         // Invalidate cached inverses — they will be recomputed on the next
         // step (or when `update_freq` triggers).
@@ -840,6 +886,9 @@ mod tests {
         assert!((config.lr - 1e-3).abs() < 1e-12);
         assert!((config.damping - 1e-3).abs() < 1e-12);
         assert!((config.momentum - 0.9).abs() < 1e-12);
+        // stat_decay (factor EMA) is a SEPARATE hyperparameter from momentum
+        // (gradient buffer), matching KFAC-PyTorch's defaults. #1589.
+        assert!((config.stat_decay - 0.95).abs() < 1e-12);
         assert_eq!(config.update_freq, 10);
         assert!((config.weight_decay - 0.0).abs() < 1e-12);
     }
@@ -926,14 +975,21 @@ mod tests {
 
     #[test]
     fn test_update_factors_ema_blending() {
+        // Factor EMA uses `stat_decay`, SEEDED by the first batch (#1588,
+        // #1589). With stat_decay = 0.5 the recursion is:
+        //   step 1 (seed): A = A_batch_1
+        //   step k>=2:     A = 0.5 * A_old + 0.5 * A_batch_k
+        // The expected values are computed independently from the closed-form
+        // seed-then-EMA recursion (R-CHAR-3), never copied from the impl.
         let p = param_from(&[1.0, 2.0, 3.0, 4.0], &[2, 2]);
         let config = KfacConfig {
-            momentum: 0.5, // 50/50 blend
+            stat_decay: 0.5, // 50/50 blend from the 2nd update onward
             ..Default::default()
         };
         let mut kfac = Kfac::new(vec![p], config);
 
-        // First update: identity-like activations and gradients.
+        // Batch with A_batch[0,0] = 0.5:
+        //   a = [[1,0],[0,1]] -> a^T a = I -> /2 = [[0.5,0],[0,0.5]]
         let act1 = Tensor::from_storage(
             TensorStorage::cpu(vec![1.0, 0.0, 0.0, 1.0]),
             vec![2, 2],
@@ -949,22 +1005,104 @@ mod tests {
 
         kfac.update_factors("test", &act1, &grad1).unwrap();
 
-        // First update: A = 0.5 * 0 + 0.5 * [[0.5,0],[0,0.5]] = [[0.25,0],[0,0.25]]
+        // First update SEEDS the factor with the unbiased batch covariance:
+        //   A[0,0] = A_batch[0,0] = 0.5  (NOT 0.25 — no down-scaling). #1588.
         {
             let f = kfac.factors.get("test").unwrap();
             let a_data = f.a_factor.data().unwrap().to_vec();
-            assert!((a_data[0] - 0.25).abs() < 1e-12);
+            assert!(
+                (a_data[0] - 0.5).abs() < 1e-12,
+                "first update must seed A[0,0] = A_batch = 0.5, got {}",
+                a_data[0]
+            );
         }
 
-        // Second update with same data:
-        // A = 0.5 * [[0.25,0],[0,0.25]] + 0.5 * [[0.5,0],[0,0.5]]
-        //   = [[0.125,0],[0,0.125]] + [[0.25,0],[0,0.25]]
-        //   = [[0.375,0],[0,0.375]]
+        // Second update with same data, stat_decay = 0.5:
+        //   A = 0.5 * [[0.5,0],[0,0.5]] + 0.5 * [[0.5,0],[0,0.5]] = [[0.5,0],[0,0.5]]
+        // (idempotent because the batch equals the seed) — A[0,0] stays 0.5.
         kfac.update_factors("test", &act1, &grad1).unwrap();
+        {
+            let f = kfac.factors.get("test").unwrap();
+            let a_data = f.a_factor.data().unwrap().to_vec();
+            assert!((a_data[0] - 0.5).abs() < 1e-12);
+        }
+
+        // Third update with a DIFFERENT batch B3 (A_batch3[0,0] = 0.0):
+        //   a3 = [[0,0],[0,1]] -> a3^T a3 = diag(0,1) -> /2 = diag(0,0.5)
+        //   A[0,0] = 0.5 * 0.5 + 0.5 * 0.0 = 0.25
+        let act3 = Tensor::from_storage(
+            TensorStorage::cpu(vec![0.0, 0.0, 0.0, 1.0]),
+            vec![2, 2],
+            false,
+        )
+        .unwrap();
+        kfac.update_factors("test", &act3, &grad1).unwrap();
 
         let f = kfac.factors.get("test").unwrap();
         let a_data = f.a_factor.data().unwrap().to_vec();
-        assert!((a_data[0] - 0.375).abs() < 1e-12);
+        assert!(
+            (a_data[0] - 0.25).abs() < 1e-12,
+            "EMA after seed+blend must give A[0,0] = 0.25, got {}",
+            a_data[0]
+        );
+        // Channel 1 retains its accumulated curvature: 0.5*0.5 + 0.5*0.5 = 0.5.
+        assert!((a_data[3] - 0.5).abs() < 1e-12);
+    }
+
+    /// Multi-step EMA recursion check (#1588/#1589, R-CHAR-3): after K batches
+    /// the factor equals the closed-form seed-then-`stat_decay`-EMA of the
+    /// per-batch covariances, computed independently here on the host. Uses a
+    /// non-trivial `stat_decay = 0.8` and three distinct batches whose `[0,0]`
+    /// covariances are `c1, c2, c3`. Expected:
+    ///   A1 = c1                          (seed)
+    ///   A2 = 0.8*c1 + 0.2*c2
+    ///   A3 = 0.8*A2 + 0.2*c3
+    #[test]
+    fn test_update_factors_multistep_ema_recursion() {
+        let p = param_from(&[1.0, 2.0, 3.0, 4.0], &[2, 2]);
+        let decay = 0.8_f64;
+        let config = KfacConfig {
+            stat_decay: decay,
+            ..Default::default()
+        };
+        let mut kfac = Kfac::new(vec![p], config);
+
+        let grad = Tensor::from_storage(
+            TensorStorage::cpu(vec![1.0, 0.0, 0.0, 1.0]),
+            vec![2, 2],
+            false,
+        )
+        .unwrap();
+
+        // Per-batch [0,0] covariances chosen via a[0,0] = sqrt(2*c) so that
+        // A_batch[0,0] = (a[0,0]^2)/2 = c. Channels 1.. stay zero.
+        let cs = [1.5_f64, 0.5, 3.0];
+        let mut expected = 0.0_f64;
+        for (i, &c) in cs.iter().enumerate() {
+            let val = (2.0 * c).sqrt();
+            // a = [[val,0],[0,0]] -> a^T a = diag(val^2,0) -> /2 = diag(c,0)
+            let act = Tensor::from_storage(
+                TensorStorage::cpu(vec![val, 0.0, 0.0, 0.0]),
+                vec![2, 2],
+                false,
+            )
+            .unwrap();
+            kfac.update_factors("layer", &act, &grad).unwrap();
+
+            // Independent reference recursion.
+            expected = if i == 0 {
+                c
+            } else {
+                decay * expected + (1.0 - decay) * c
+            };
+        }
+
+        let f = kfac.factors.get("layer").unwrap();
+        let a00 = f.a_factor.data().unwrap().to_vec()[0];
+        assert!(
+            (a00 - expected).abs() < 1e-12,
+            "seed-then-EMA recursion: expected A[0,0] = {expected}, got {a00}"
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -994,6 +1132,7 @@ mod tests {
             lr,
             damping: 0.0,
             momentum: 0.0,
+            stat_decay: 0.95,
             update_freq: 1,
             weight_decay: 0.0,
             maximize: false,
@@ -1056,6 +1195,7 @@ mod tests {
             lr: 0.01,
             damping: 1e-3,
             momentum: 0.0,
+            stat_decay: 0.95,
             update_freq: 1,
             weight_decay: 0.0,
             maximize: false,
@@ -1097,6 +1237,7 @@ mod tests {
             lr,
             damping: 0.1,
             momentum: 0.0,
+            stat_decay: 0.95,
             update_freq: 1,
             weight_decay: 0.0,
             maximize: false,
