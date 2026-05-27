@@ -20,13 +20,13 @@ use std::path::PathBuf;
 
 use ferrotorch_core::creation::{from_slice, scalar};
 use ferrotorch_distributions::{
+    Beta, Cauchy, Dirichlet, Distribution, Exponential, Gamma, Gumbel, HalfNormal, Independent,
+    Kumaraswamy, Laplace, LogNormal, LowRankMultivariateNormal, MixtureSameFamily,
+    MultivariateNormal, Normal, Pareto, RelaxedBernoulli, StudentT, Uniform, VonMises, Weibull,
     transforms::{
         AffineTransform, ComposeTransform, ExpTransform, SigmoidTransform, SoftplusTransform,
         TanhTransform, Transform,
     },
-    Beta, Cauchy, Dirichlet, Distribution, Exponential, Gamma, Gumbel, HalfNormal, Independent,
-    Kumaraswamy, Laplace, LogNormal, LowRankMultivariateNormal, MixtureSameFamily,
-    MultivariateNormal, Normal, Pareto, StudentT, Uniform, VonMises, Weibull,
 };
 use serde_json::Value;
 
@@ -137,8 +137,12 @@ fn distribution_trait_cdf_default_returns_error() {
 
 #[test]
 fn distribution_trait_mean_mode_variance_default_error() {
-    // VonMises doesn't implement variance; calls through to the default error.
-    let d = VonMises::new(scalar(0.0f64).unwrap(), scalar(1.0f64).unwrap()).unwrap();
+    // RelaxedBernoulli has no variance override (upstream `RelaxedBernoulli`
+    // is a `TransformedDistribution` and inherits the base `Distribution`
+    // which raises on `.variance`; see torch/distributions/relaxed_bernoulli.py:122).
+    // VonMises grew a variance override in #1431/#1434, so it can no longer
+    // exercise the default-error path here.
+    let d = RelaxedBernoulli::new(0.5f64, scalar(0.3f64).unwrap()).unwrap();
     assert!(d.variance().is_err());
 }
 
