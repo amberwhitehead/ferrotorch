@@ -140,7 +140,12 @@ fn divergence_hh_dirty_input_invariance_square_3x3() {
     ];
     close(&q, &torch_q, 1e-9, "hh dirty square 3x3 Q vs torch");
     close(&gv, &torch_gv, 1e-9, "hh dirty square 3x3 V.grad vs torch");
-    close(&gtau, &torch_gtau, 1e-9, "hh dirty square 3x3 tau.grad vs torch");
+    close(
+        &gtau,
+        &torch_gtau,
+        1e-9,
+        "hh dirty square 3x3 tau.grad vs torch",
+    );
 }
 
 /// Divergence probe: dirty tall 4x3 (diag=999, upper=888) forward + grads.
@@ -189,7 +194,12 @@ fn divergence_hh_dirty_input_invariance_tall_4x3() {
     ];
     close(&q, &torch_q, 1e-9, "hh dirty tall 4x3 Q vs torch");
     close(&gv, &torch_gv, 1e-9, "hh dirty tall 4x3 V.grad vs torch");
-    close(&gtau, &torch_gtau, 1e-9, "hh dirty tall 4x3 tau.grad vs torch");
+    close(
+        &gtau,
+        &torch_gtau,
+        1e-9,
+        "hh dirty tall 4x3 tau.grad vs torch",
+    );
 }
 
 /// Divergence probe: tau_j == 0 (identity reflector i=1). torch: sigma_1 =
@@ -201,9 +211,7 @@ fn divergence_hh_tau_zero_middle_square_3x3() {
     let tau = [0.4, 0.0, 0.6];
     let g = [0.2, -0.5, 0.7, 0.3, 0.1, -0.4, -0.6, 0.8, 0.25];
     let (q, gv, gtau) = fwd_and_grad(&v, &[3, 3], &tau, &g);
-    let torch_q = [
-        0.6, -0.2, -0.048, -0.2, 0.9, -0.024, -0.12, -0.06, 0.385_6,
-    ];
+    let torch_q = [0.6, -0.2, -0.048, -0.2, 0.9, -0.024, -0.12, -0.06, 0.385_6];
     let torch_gv = [0.0, 0.0, 0.0, -0.036_8, 0.0, 0.0, -0.024, 0.0, 0.0];
     let torch_gtau = [-0.134, -0.236_509, -0.181];
     close(&q, &torch_q, 1e-9, "hh tau=0 mid Q vs torch");
