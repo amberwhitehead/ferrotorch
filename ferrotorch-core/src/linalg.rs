@@ -4,18 +4,23 @@
 //! decompositions, solvers, norms, and related functions. Each delegates to
 //! the corresponding ferray-linalg routine via the same Array bridge pattern.
 //!
-//! **Backward support**: These operations currently return non-grad tensors.
-//! Gradient functions for SVD, solve, and others will be added in a future
-//! pass (the math is well-known but complex).
+//! **Backward support**: `solve`, `det`, `inv`, `trace`, `outer` (here) and
+//! `qr`, `cholesky`, `slogdet` are autograd-aware: when grad tracking is
+//! active they delegate to the matching `crate::grad_fns::linalg::*_differentiable`
+//! wrapper (which computes the forward under `no_grad` to avoid re-entry and
+//! attaches the closed-form `*Backward` VJP). The remaining factorizations
+//! (svd/eig/eigh/eigvals/eigvalsh/pinv/lstsq/lu/lu_factor/norm/matrix_rank/
+//! householder_product) return non-grad tensors (research-grade VJPs tracked
+//! under #1577/#1345).
 //!
 //! ## REQ status (per `.design/ferrotorch-core/linalg.md`)
 //!
 //! | REQ | Status | Evidence |
 //! |---|---|---|
 //! | REQ-1 | SHIPPED | impl `svd` via `ferray_linalg::svd`; non-test consumer `pinv`, `svdvals`, `matrix_rank`, `cond`. |
-//! | REQ-2 | SHIPPED | impl `solve`; non-test consumer `ferrotorch-distributions::multivariate_normal`. |
-//! | REQ-3 | SHIPPED | impl `det`; non-test consumer `slogdet`. |
-//! | REQ-4 | SHIPPED | impl `inv`; non-test consumer `inv_ex`. |
+//! | REQ-2 | SHIPPED | impl `solve` (grad-aware: delegates to `grad_fns::linalg::solve_differentiable`); non-test consumer `ferrotorch-distributions::multivariate_normal`. |
+//! | REQ-3 | SHIPPED | impl `det` (grad-aware: delegates to `grad_fns::linalg::det_differentiable`); non-test consumer `slogdet`. |
+//! | REQ-4 | SHIPPED | impl `inv` (grad-aware: delegates to `grad_fns::linalg::inv_differentiable`); non-test consumer `inv_ex`. |
 //! | REQ-5 | SHIPPED | impl `qr`; non-test consumer pub API + linear-regression downstream. |
 //! | REQ-6 | SHIPPED | impl `cholesky`; non-test consumer `ferrotorch-distributions::multivariate_normal`. |
 //! | REQ-7 | SHIPPED | impl `matrix_norm`; non-test consumer pub API. |
@@ -38,8 +43,8 @@
 //! | REQ-24 | SHIPPED | impl `ldl_factor`, `ldl_solve`; non-test consumer pub API. |
 //! | REQ-25 | SHIPPED | impl `householder_product`; non-test consumer `qr` reconstruction. |
 //! | REQ-26 | SHIPPED | impl `cholesky_ex`, `inv_ex`, `solve_ex`; non-test consumer pub API. |
-//! | REQ-27 | SHIPPED | impl `trace` (sum of main diagonal); non-test consumer `grad_fns::linalg::trace_differentiable`. |
-//! | REQ-28 | SHIPPED | impl `outer` (1-D × 1-D outer product); non-test consumer `grad_fns::linalg::outer_differentiable`. |
+//! | REQ-27 | SHIPPED | impl `trace` (sum of main diagonal; grad-aware: delegates to `grad_fns::linalg::trace_differentiable` when grad enabled). |
+//! | REQ-28 | SHIPPED | impl `outer` (1-D × 1-D outer product; grad-aware: delegates to `grad_fns::linalg::outer_differentiable` when grad enabled). |
 
 use crate::dtype::Float;
 use crate::error::{FerrotorchError, FerrotorchResult};
@@ -229,7 +234,10 @@ pub fn svd<T: Float>(input: &Tensor<T>) -> FerrotorchResult<(Tensor<T>, Tensor<T
 /// (multiple RHS columns).
 ///
 /// # Backward
-/// Not yet implemented. Returns non-grad tensors.
+/// Autograd-aware (CPU): when grad tracking is active for `a` or `b`, this
+/// routes through `crate::grad_fns::linalg::solve_differentiable` (the real
+/// `linalg_solve_backward` VJP: `gB = A^{-T} @ gX`, `gA = -gB @ X^T`). The
+/// CUDA forward stays forward-only.
 pub fn solve<T: Float>(a: &Tensor<T>, b: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
     if a.ndim() != 2 {
         return Err(FerrotorchError::InvalidArgument {
@@ -250,6 +258,16 @@ pub fn solve<T: Float>(a: &Tensor<T>, b: &Tensor<T>) -> FerrotorchResult<Tensor<
             expected: a.device(),
             got: b.device(),
         });
+    }
+
+    // Autograd path (CPU): delegate to the differentiable wrapper, which
+    // computes the forward inside `no_grad` (preventing re-entry here) and
+    // attaches `LinalgSolveBackward`. CUDA stays forward-only.
+    if !a.is_cuda()
+        && crate::autograd::no_grad::is_grad_enabled()
+        && (a.requires_grad() || b.requires_grad())
+    {
+        return crate::grad_fns::linalg::solve_differentiable(a, b);
     }
 
     if a.is_cuda() {
@@ -305,7 +323,9 @@ pub fn solve<T: Float>(a: &Tensor<T>, b: &Tensor<T>) -> FerrotorchResult<Tensor<
 /// Returns a scalar tensor.
 ///
 /// # Backward
-/// Not yet implemented. Returns non-grad tensors.
+/// Autograd-aware (CPU): when grad tracking is active for `input`, this routes
+/// through `crate::grad_fns::linalg::det_differentiable` (the invertible-branch
+/// VJP `dA = grad * det(A) * inv(A)^T`).
 pub fn det<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
     require_cpu(input, "det")?;
     let shape = input.shape();
@@ -313,6 +333,13 @@ pub fn det<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
         return Err(FerrotorchError::InvalidArgument {
             message: format!("det requires a square 2-D tensor, got {shape:?}"),
         });
+    }
+
+    // Autograd path: delegate to the differentiable wrapper, which computes
+    // the forward (and the VJP's internal `inv`) inside `no_grad` (preventing
+    // re-entry here) and attaches `LinalgDetBackward`.
+    if crate::autograd::no_grad::is_grad_enabled() && input.requires_grad() {
+        return crate::grad_fns::linalg::det_differentiable(input);
     }
 
     if is_f32::<T>() {
@@ -339,7 +366,9 @@ pub fn det<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
 /// Matrix inverse of a square 2-D tensor.
 ///
 /// # Backward
-/// Not yet implemented. Returns non-grad tensors.
+/// Autograd-aware (CPU): when grad tracking is active for `input`, this routes
+/// through `crate::grad_fns::linalg::inv_differentiable` (the VJP
+/// `dA = -Y^T @ grad @ Y^T`, `Y = A^{-1}`).
 pub fn inv<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
     require_cpu(input, "inv")?;
     let shape = input.shape();
@@ -347,6 +376,13 @@ pub fn inv<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
         return Err(FerrotorchError::InvalidArgument {
             message: format!("inv requires a square 2-D tensor, got {shape:?}"),
         });
+    }
+
+    // Autograd path: delegate to the differentiable wrapper, which computes
+    // the forward inside `no_grad` (preventing re-entry here) and attaches
+    // `LinalgInvBackward`.
+    if crate::autograd::no_grad::is_grad_enabled() && input.requires_grad() {
+        return crate::grad_fns::linalg::inv_differentiable(input);
     }
 
     let n = shape[0];
@@ -1643,8 +1679,9 @@ pub fn diagonal<T: Float>(a: &Tensor<T>, offset: i64) -> FerrotorchResult<Tensor
 /// input, so a non-2-D tensor is an error here too.
 ///
 /// # Backward
-/// Forward-only. The autograd-tracking wrapper lives in
-/// `crate::grad_fns::linalg::trace_differentiable`.
+/// Autograd-aware (CPU): when grad tracking is active for `a`, this routes
+/// through `crate::grad_fns::linalg::trace_differentiable` (the VJP
+/// `dA = grad * I`, `trace_backward_symint`).
 pub fn trace<T: Float>(a: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
     require_cpu(a, "trace")?;
     let shape = a.shape();
@@ -1653,6 +1690,14 @@ pub fn trace<T: Float>(a: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
             message: format!("trace requires a 2-D tensor, got {shape:?}"),
         });
     }
+
+    // Autograd path: delegate to the differentiable wrapper, which computes
+    // the forward inside `no_grad` (preventing re-entry here) and attaches
+    // `TraceBackward`.
+    if crate::autograd::no_grad::is_grad_enabled() && a.requires_grad() {
+        return crate::grad_fns::linalg::trace_differentiable(a);
+    }
+
     let (m, n) = (shape[0], shape[1]);
     let k = m.min(n);
     let data = a.data()?;
@@ -1670,8 +1715,9 @@ pub fn trace<T: Float>(a: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
 /// itself an alias of `ger`); both operands must be 1-D.
 ///
 /// # Backward
-/// Forward-only. The autograd-tracking wrapper lives in
-/// `crate::grad_fns::linalg::outer_differentiable`.
+/// Autograd-aware (CPU): when grad tracking is active for `a` or `b`, this
+/// routes through `crate::grad_fns::linalg::outer_differentiable` (the VJP
+/// `da = grad_C @ b`, `db = grad_C^T @ a`).
 pub fn outer<T: Float>(a: &Tensor<T>, b: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
     require_cpu(a, "outer")?;
     require_cpu(b, "outer")?;
@@ -1684,6 +1730,14 @@ pub fn outer<T: Float>(a: &Tensor<T>, b: &Tensor<T>) -> FerrotorchResult<Tensor<
             ),
         });
     }
+
+    // Autograd path: delegate to the differentiable wrapper, which computes
+    // the forward inside `no_grad` (preventing re-entry here) and attaches
+    // `OuterBackward`.
+    if crate::autograd::no_grad::is_grad_enabled() && (a.requires_grad() || b.requires_grad()) {
+        return crate::grad_fns::linalg::outer_differentiable(a, b);
+    }
+
     let m = a.shape()[0];
     let n = b.shape()[0];
     let a_data = a.data()?;

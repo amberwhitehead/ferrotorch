@@ -1979,8 +1979,12 @@ impl<T: Float> GradFn<T> for TraceBackward<T> {
 }
 
 /// Differentiable `trace`. Attaches `TraceBackward` when grad is needed.
+///
+/// Forward computed under `no_grad`: `linalg_fwd::trace` (the public
+/// `crate::linalg::trace` forward) delegates back here when grad is enabled,
+/// so the guard prevents infinite re-entry.
 pub fn trace_differentiable<T: Float>(a: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
-    let result = linalg_fwd::trace(a)?;
+    let result = crate::autograd::no_grad::no_grad(|| linalg_fwd::trace(a))?;
     if is_grad_enabled() && a.requires_grad() {
         let shape = a.shape();
         let grad_fn = Arc::new(TraceForward {
@@ -2068,8 +2072,12 @@ impl<T: Float> GradFn<T> for OuterBackward<T> {
 }
 
 /// Differentiable `outer`. Attaches `OuterBackward` when grad is needed.
+///
+/// Forward computed under `no_grad`: `linalg_fwd::outer` (the public
+/// `crate::linalg::outer` forward) delegates back here when grad is enabled,
+/// so the guard prevents infinite re-entry.
 pub fn outer_differentiable<T: Float>(a: &Tensor<T>, b: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
-    let result = linalg_fwd::outer(a, b)?;
+    let result = crate::autograd::no_grad::no_grad(|| linalg_fwd::outer(a, b))?;
     if is_grad_enabled() && (a.requires_grad() || b.requires_grad()) {
         let grad_fn = Arc::new(OuterBackward::new(a.clone(), b.clone()));
         let (storage, shape) = result.into_storage_and_shape()?;
@@ -2137,8 +2145,12 @@ impl<T: Float> GradFn<T> for InvForward<T> {
 }
 
 /// Differentiable `inv`. Attaches `LinalgInvBackward` when grad is needed.
+///
+/// Forward computed under `no_grad`: `linalg_fwd::inv` (the public
+/// `crate::linalg::inv` forward) delegates back here when grad is enabled, so
+/// the guard prevents infinite re-entry.
 pub fn inv_differentiable<T: Float>(a: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
-    let result = linalg_fwd::inv(a)?;
+    let result = crate::autograd::no_grad::no_grad(|| linalg_fwd::inv(a))?;
     if is_grad_enabled() && a.requires_grad() {
         let grad_fn = Arc::new(InvForward {
             input: a.clone(),
@@ -2213,11 +2225,16 @@ impl<T: Float> GradFn<T> for DetForward<T> {
 }
 
 /// Differentiable `det`. Attaches `LinalgDetBackward` when grad is needed.
+///
+/// Forward (and the VJP's internal `inv`) computed under `no_grad`:
+/// `linalg_fwd::det` / `linalg_fwd::inv` (the public `crate::linalg::{det,inv}`
+/// forwards) delegate back here when grad is enabled, so the guard prevents
+/// infinite re-entry.
 pub fn det_differentiable<T: Float>(a: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
-    let result = linalg_fwd::det(a)?;
+    let result = crate::autograd::no_grad::no_grad(|| linalg_fwd::det(a))?;
     if is_grad_enabled() && a.requires_grad() {
         let det_val: T = result.item()?;
-        let inv = linalg_fwd::inv(a)?;
+        let inv = crate::autograd::no_grad::no_grad(|| linalg_fwd::inv(a))?;
         let inv_t = mat_transpose(&inv)?;
         let grad_fn = Arc::new(DetForward {
             input: a.clone(),
@@ -2313,8 +2330,12 @@ impl<T: Float> GradFn<T> for LinalgSolveBackward<T> {
 }
 
 /// Differentiable `solve`. Attaches `LinalgSolveBackward` when grad is needed.
+///
+/// Forward computed under `no_grad`: `linalg_fwd::solve` (the public
+/// `crate::linalg::solve` forward) delegates back here when grad is enabled, so
+/// the guard prevents infinite re-entry.
 pub fn solve_differentiable<T: Float>(a: &Tensor<T>, b: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
-    let result = linalg_fwd::solve(a, b)?;
+    let result = crate::autograd::no_grad::no_grad(|| linalg_fwd::solve(a, b))?;
     if is_grad_enabled() && (a.requires_grad() || b.requires_grad()) {
         let grad_fn = Arc::new(LinalgSolveBackward {
             a: a.clone(),
@@ -4976,5 +4997,191 @@ mod tests {
             r.data().unwrap().iter().sum()
         });
         assert_grad_close64(&g_r_only, &num_r, 1e-4, "qr R-only vs FD");
+    }
+
+    // -----------------------------------------------------------------------
+    // Grad-aware-forward wiring audits (#1583): trace / outer / det / inv /
+    // solve. Each test drives the *public production forward* `crate::linalg::X`
+    // (aliased `linalg_fwd::X`) on a `requires_grad` leaf — the path a real
+    // autograd user hits — then checks `input.grad` against a CENTRAL finite
+    // difference of that same forward at perturbed (no-grad) inputs (R-CHAR-3:
+    // reference reconstructed from the forward, not a cached constant). These
+    // would all read `grad == None` before the forwards delegated to the
+    // `*_differentiable` wrappers.
+    // -----------------------------------------------------------------------
+
+    // trace — VJP dA = grad * I (derivatives.yaml:1785 trace_backward_symint).
+    #[test]
+    fn trace_forward_is_grad_aware_and_matches_fd() {
+        let a_data = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.5];
+        let shape = [3, 3];
+
+        let a = leaf64(&a_data, &shape);
+        // Drive the PUBLIC forward, not the wrapper directly.
+        let s = linalg_fwd::trace(&a).unwrap();
+        assert!(
+            s.grad_fn().is_some(),
+            "trace forward must attach a grad_fn when input requires_grad"
+        );
+        assert!(s.is_scalar());
+        s.backward().unwrap();
+        let analytic = a.grad().unwrap().unwrap().data().unwrap().to_vec();
+
+        let numeric = fd_grad64(&a_data, &shape, 1e-6, |x| {
+            linalg_fwd::trace(x).unwrap().item().unwrap()
+        });
+        assert_grad_close64(&analytic, &numeric, 1e-5, "trace forward vs FD");
+    }
+
+    // outer — VJP da = grad @ b, db = grad^T @ a (derivatives.yaml:275-276).
+    #[test]
+    fn outer_forward_is_grad_aware_and_matches_fd() {
+        let a_data = vec![1.5, -2.0, 0.5];
+        let b_data = vec![2.0, 1.0, -1.5, 3.0];
+        let a_shape = [3usize];
+        let b_shape = [4usize];
+
+        let a = leaf64(&a_data, &a_shape);
+        let b = leaf64(&b_data, &b_shape);
+        let c = linalg_fwd::outer(&a, &b).unwrap();
+        assert!(
+            c.grad_fn().is_some(),
+            "outer forward must attach a grad_fn when input requires_grad"
+        );
+        assert_eq!(c.shape(), &[3, 4]);
+        // Scalar loss = sum(C) so both a.grad and b.grad are exercised.
+        let loss = crate::grad_fns::reduction::sum(&c).unwrap();
+        loss.backward().unwrap();
+        let grad_a = a.grad().unwrap().unwrap().data().unwrap().to_vec();
+        let grad_b = b.grad().unwrap().unwrap().data().unwrap().to_vec();
+
+        // FD wrt a (b fixed as no-grad).
+        let num_a = fd_grad64(&a_data, &a_shape, 1e-6, |x| {
+            let bb = no_grad_leaf64(&b_data, &b_shape);
+            let c = linalg_fwd::outer(x, &bb).unwrap();
+            c.data().unwrap().iter().sum()
+        });
+        assert_grad_close64(&grad_a, &num_a, 1e-5, "outer da vs FD");
+
+        // FD wrt b (a fixed as no-grad).
+        let num_b = fd_grad64(&b_data, &b_shape, 1e-6, |x| {
+            let aa = no_grad_leaf64(&a_data, &a_shape);
+            let c = linalg_fwd::outer(&aa, x).unwrap();
+            c.data().unwrap().iter().sum()
+        });
+        assert_grad_close64(&grad_b, &num_b, 1e-5, "outer db vs FD");
+    }
+
+    // det — VJP dA = grad * det(A) * inv(A)^T (FunctionsManual.cpp:4373).
+    #[test]
+    fn det_forward_is_grad_aware_and_matches_fd() {
+        // Well-conditioned non-symmetric 3x3, det far from 0.
+        let a_data = vec![2.0, 1.0, 0.0, 0.5, 3.0, 1.0, 0.0, 1.0, 2.5];
+        let shape = [3, 3];
+
+        let a = leaf64(&a_data, &shape);
+        let d = linalg_fwd::det(&a).unwrap();
+        assert!(
+            d.grad_fn().is_some(),
+            "det forward must attach a grad_fn when input requires_grad"
+        );
+        assert!(d.is_scalar());
+        d.backward().unwrap();
+        let analytic = a.grad().unwrap().unwrap().data().unwrap().to_vec();
+
+        let numeric = fd_grad64(&a_data, &shape, 1e-6, |x| {
+            linalg_fwd::det(x).unwrap().item().unwrap()
+        });
+        assert_grad_close64(&analytic, &numeric, 1e-4, "det forward vs FD");
+    }
+
+    // inv — VJP dA = -Y^T @ grad @ Y^T, Y = A^{-1} (derivatives.yaml:916).
+    #[test]
+    fn inv_forward_is_grad_aware_and_matches_fd() {
+        let a_data = vec![2.0, 1.0, 0.0, 0.5, 3.0, 1.0, 0.0, 1.0, 2.5];
+        let shape = [3, 3];
+
+        let a = leaf64(&a_data, &shape);
+        let y = linalg_fwd::inv(&a).unwrap();
+        assert!(
+            y.grad_fn().is_some(),
+            "inv forward must attach a grad_fn when input requires_grad"
+        );
+        assert_eq!(y.shape(), &[3, 3]);
+        // Scalar loss = sum(Y) covers every entry of the inverse.
+        let loss = crate::grad_fns::reduction::sum(&y).unwrap();
+        loss.backward().unwrap();
+        let analytic = a.grad().unwrap().unwrap().data().unwrap().to_vec();
+
+        let numeric = fd_grad64(&a_data, &shape, 1e-6, |x| {
+            let y = linalg_fwd::inv(x).unwrap();
+            y.data().unwrap().iter().sum()
+        });
+        assert_grad_close64(&analytic, &numeric, 1e-4, "inv forward vs FD");
+    }
+
+    // solve (matrix RHS) — VJP gA = -gB @ X^T, gB = A^{-T} @ gX
+    //   (FunctionsManual.cpp:6160 linalg_solve_backward).
+    #[test]
+    fn solve_forward_is_grad_aware_and_matches_fd_matrix_rhs() {
+        let a_data = vec![3.0, 1.0, 0.5, 1.0, 4.0, 1.5, 0.5, 1.5, 5.0];
+        let b_data = vec![1.0, 2.0, -1.0, 0.5, 2.0, 1.0];
+        let a_shape = [3usize, 3];
+        let b_shape = [3usize, 2];
+
+        let a = leaf64(&a_data, &a_shape);
+        let b = no_grad_leaf64(&b_data, &b_shape);
+        let x = linalg_fwd::solve(&a, &b).unwrap();
+        assert!(
+            x.grad_fn().is_some(),
+            "solve forward must attach a grad_fn when A requires_grad"
+        );
+        assert_eq!(x.shape(), &[3, 2]);
+        let loss = crate::grad_fns::reduction::sum(&x).unwrap();
+        loss.backward().unwrap();
+        let grad_a = a.grad().unwrap().unwrap().data().unwrap().to_vec();
+
+        // FD wrt A (B fixed as no-grad).
+        let num_a = fd_grad64(&a_data, &a_shape, 1e-6, |xa| {
+            let bb = no_grad_leaf64(&b_data, &b_shape);
+            let x = linalg_fwd::solve(xa, &bb).unwrap();
+            x.data().unwrap().iter().sum()
+        });
+        assert_grad_close64(&grad_a, &num_a, 1e-3, "solve dA (matrix RHS) vs FD");
+    }
+
+    // solve (vector RHS) — exercises the unsqueeze/squeeze column-promotion
+    // branch + both grad_A and grad_B slots.
+    #[test]
+    fn solve_forward_is_grad_aware_and_matches_fd_vector_rhs() {
+        let a_data = vec![3.0, 1.0, 0.5, 1.0, 4.0, 1.5, 0.5, 1.5, 5.0];
+        let b_data = vec![1.0, 2.0, -1.0];
+        let a_shape = [3usize, 3];
+        let b_shape = [3usize];
+
+        // grad on both A and B.
+        let a = leaf64(&a_data, &a_shape);
+        let b = leaf64(&b_data, &b_shape);
+        let x = linalg_fwd::solve(&a, &b).unwrap();
+        assert!(x.grad_fn().is_some(), "solve (vec RHS) must attach grad_fn");
+        assert_eq!(x.shape(), &[3]);
+        let loss = crate::grad_fns::reduction::sum(&x).unwrap();
+        loss.backward().unwrap();
+        let grad_a = a.grad().unwrap().unwrap().data().unwrap().to_vec();
+        let grad_b = b.grad().unwrap().unwrap().data().unwrap().to_vec();
+
+        let num_a = fd_grad64(&a_data, &a_shape, 1e-6, |xa| {
+            let bb = no_grad_leaf64(&b_data, &b_shape);
+            let x = linalg_fwd::solve(xa, &bb).unwrap();
+            x.data().unwrap().iter().sum()
+        });
+        assert_grad_close64(&grad_a, &num_a, 1e-3, "solve dA (vector RHS) vs FD");
+
+        let num_b = fd_grad64(&b_data, &b_shape, 1e-6, |xb| {
+            let aa = no_grad_leaf64(&a_data, &a_shape);
+            let x = linalg_fwd::solve(&aa, xb).unwrap();
+            x.data().unwrap().iter().sum()
+        });
+        assert_grad_close64(&grad_b, &num_b, 1e-4, "solve dB (vector RHS) vs FD");
     }
 }
