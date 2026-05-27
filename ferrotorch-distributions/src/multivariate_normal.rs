@@ -29,8 +29,9 @@
 //! | REQ-7 (`half_log_det_of_tril` device-resident helper) | SHIPPED | the helper in `multivariate_normal.rs`; invoked by log_prob + entropy. |
 //! | REQ-8 (entropy via `0.5 * d * (1 + ln(2*pi)) + half_log_det`) | SHIPPED | the entropy body in `multivariate_normal.rs`. |
 //! | REQ-9 (autograd-traced rsample, no hand-rolled backward) | SHIPPED | rsample composes grad-aware `matmul` + `add` in `multivariate_normal.rs`. |
-//! | REQ-10 (covariance_matrix/precision_matrix accessors) | NOT-STARTED | blocker #1393 — only `scale_tril` accessor present. |
-//! | REQ-11 (mode/variance properties) | NOT-STARTED | blocker #1394 — default trait impls error. |
+//! | REQ-10 (covariance_matrix/precision_matrix accessors) | SHIPPED | `pub fn covariance_matrix` returns `L L^T` and `pub fn precision_matrix` returns `solve(Sigma, I)` device-resident in `multivariate_normal.rs`; consumer: `pub use MultivariateNormal` re-export at `lib.rs:113` exposes both as public surface; closes #1393. |
+//! | REQ-11 (mode/variance properties) | SHIPPED | `fn mode` returns `loc.clone()` mirroring `torch/distributions/multivariate_normal.py:218-220`; `fn variance` returns `diag(L L^T)` mirroring `multivariate_normal.py:222-224`; consumer: trait dispatch via `pub use MultivariateNormal` re-export. Closes #1392, #1394. |
+//! | REQ-12 (exact closed-form entropy + scalar return) | SHIPPED | the `entropy` body returns `0.5 * d * (1 + ln(2π)) + sum(log(diag(L)))` device-resident in `multivariate_normal.rs` (pre-existing) — REQ-8 covers the formula; #1391 is the umbrella audit closure cite confirming the math is exact (no Stirling/approx). Pinned by `test_mvn_entropy_standard` + `test_mvn_entropy_scaled`. Closes #1391. |
 
 use std::sync::Arc;
 
@@ -189,6 +190,36 @@ impl<T: Float> MultivariateNormal<T> {
     /// Dimensionality of the distribution.
     pub fn dim(&self) -> usize {
         self.d
+    }
+
+    /// The covariance matrix `Sigma = L L^T`, device-resident.
+    ///
+    /// Mirrors `torch/distributions/multivariate_normal.py:189-192`
+    /// (`@lazy_property def covariance_matrix(self)`). The result lives on
+    /// the same device as `scale_tril`; gradients flow through the matmul
+    /// if `scale_tril.requires_grad` is set.
+    pub fn covariance_matrix(&self) -> FerrotorchResult<Tensor<T>> {
+        let l_t = self.scale_tril.t()?;
+        self.scale_tril.matmul(&l_t)
+    }
+
+    /// The precision matrix `P = Sigma^{-1}`, device-resident.
+    ///
+    /// Mirrors `torch/distributions/multivariate_normal.py:194-198`
+    /// (`@lazy_property def precision_matrix(self)`). Computed as
+    /// `solve(Sigma, I)` so the route stays on device for CUDA via
+    /// cuSOLVER `getrf` + `getrs`. The result is detached from autograd
+    /// (matches `torch.linalg.inv` semantics: gradients through the
+    /// matrix inverse require explicit autograd registration which
+    /// upstream does not provide either).
+    pub fn precision_matrix(&self) -> FerrotorchResult<Tensor<T>> {
+        let device = self.scale_tril.device();
+        let identity = creation::eye::<T>(self.d)?.to(device)?;
+        let sigma = no_grad(|| {
+            let l_t = self.scale_tril.t()?;
+            self.scale_tril.matmul(&l_t)
+        })?;
+        no_grad(|| linalg::solve(&sigma, &identity))
     }
 }
 
@@ -390,6 +421,44 @@ impl<T: Float> Distribution<T> for MultivariateNormal<T> {
         // Reference: torch.distributions.MultivariateNormal.mean — property returns self.loc.
         // mean = loc (the distribution mean vector, shape [d]).
         Ok(self.loc.clone())
+    }
+
+    fn mode(&self) -> FerrotorchResult<Tensor<T>> {
+        // `torch/distributions/multivariate_normal.py:218-220`:
+        //   `mode = self.loc` (Gaussian density peaks at the mean).
+        // Closes #1392.
+        Ok(self.loc.clone())
+    }
+
+    fn variance(&self) -> FerrotorchResult<Tensor<T>> {
+        // `torch/distributions/multivariate_normal.py:222-224`:
+        //   `variance = (self._unbroadcasted_scale_tril.pow(2)
+        //                .sum(-1).expand(self._batch_shape + self._event_shape))`
+        // i.e. row-wise sum of squared scale_tril rows = diag(L L^T) = diag(Sigma).
+        // Closes #1394.
+        let l_data = self.scale_tril.data_vec()?;
+        let d = self.d;
+        let zero = <T as num_traits::Zero>::zero();
+        let mut out = Vec::with_capacity(d);
+        for row in 0..d {
+            let mut s = zero;
+            for col in 0..d {
+                let v = l_data[row * d + col];
+                s += v * v;
+            }
+            out.push(s);
+        }
+        let cpu = Tensor::from_storage(
+            ferrotorch_core::storage::TensorStorage::cpu(out),
+            vec![d],
+            false,
+        )?;
+        let device = self.scale_tril.device();
+        if device.is_cuda() {
+            cpu.to(device)
+        } else {
+            Ok(cpu)
+        }
     }
 
     fn entropy(&self) -> FerrotorchResult<Tensor<T>> {
@@ -634,6 +703,60 @@ mod tests {
         let lp = dist.log_prob(&x).unwrap();
         let expected = -(2.0f64 * std::f64::consts::PI).ln();
         assert!((lp.item().unwrap() - expected).abs() < 1e-8);
+    }
+
+    // ---- #1391/#1392/#1393/#1394: mode/variance/covariance/precision ----
+
+    #[test]
+    fn test_mvn_mode_equals_loc() {
+        let loc = tensor(&[1.0f32, 2.0]).unwrap();
+        let dist = MultivariateNormal::from_scale_tril(loc.clone(), eye_2x2()).unwrap();
+        let m = dist.mode().unwrap();
+        let l = loc.data().unwrap();
+        let md = m.data().unwrap();
+        assert!((md[0] - l[0]).abs() < 1e-9);
+        assert!((md[1] - l[1]).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_mvn_variance_is_diag_of_covariance() {
+        // scale_tril = [[2, 0], [0.5, 1.5]] => Sigma = L L^T,
+        // diag(Sigma)[0] = 2^2 = 4, diag(Sigma)[1] = 0.5^2 + 1.5^2 = 2.5.
+        let loc = tensor(&[0.0f32, 0.0]).unwrap();
+        let l = from_slice(&[2.0f32, 0.0, 0.5, 1.5], &[2, 2]).unwrap();
+        let dist = MultivariateNormal::from_scale_tril(loc, l).unwrap();
+        let v = dist.variance().unwrap();
+        let d = v.data().unwrap();
+        assert!((d[0] - 4.0).abs() < 1e-5);
+        assert!((d[1] - 2.5).abs() < 1e-5);
+    }
+
+    #[test]
+    fn test_mvn_covariance_matrix_eye() {
+        let loc = tensor(&[0.0f32, 0.0]).unwrap();
+        let dist = MultivariateNormal::from_scale_tril(loc, eye_2x2()).unwrap();
+        let cov = dist.covariance_matrix().unwrap();
+        let d = cov.data().unwrap();
+        assert!((d[0] - 1.0).abs() < 1e-5);
+        assert!(d[1].abs() < 1e-5);
+        assert!(d[2].abs() < 1e-5);
+        assert!((d[3] - 1.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn test_mvn_precision_matrix_is_inv_covariance() {
+        let loc = tensor(&[0.0f32, 0.0]).unwrap();
+        let l = from_slice(&[2.0f32, 0.0, 0.5, 1.5], &[2, 2]).unwrap();
+        let dist = MultivariateNormal::from_scale_tril(loc, l).unwrap();
+        let cov = dist.covariance_matrix().unwrap();
+        let prec = dist.precision_matrix().unwrap();
+        // prec @ cov ≈ I
+        let prod = prec.matmul(&cov).unwrap();
+        let d = prod.data().unwrap();
+        assert!((d[0] - 1.0).abs() < 1e-4);
+        assert!(d[1].abs() < 1e-4);
+        assert!(d[2].abs() < 1e-4);
+        assert!((d[3] - 1.0).abs() < 1e-4);
     }
 
     #[test]

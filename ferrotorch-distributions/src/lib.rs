@@ -399,3 +399,37 @@ pub trait Distribution<T: Float>: Send + Sync {
         )
     }
 }
+
+// ---------------------------------------------------------------------------
+// ExponentialFamily trait (#1404, #1407)
+// ---------------------------------------------------------------------------
+
+/// Marker trait for distributions in the exponential family.
+///
+/// An exponential-family density has the canonical form
+/// `p(x; θ) = exp(<t(x), η(θ)> − F(η) + k(x))` where:
+/// - `η(θ)` are the **natural parameters** (returned by [`natural_params`](ExponentialFamily::natural_params))
+/// - `F(η)` is the **log-normalizer** (returned by [`log_normalizer`](ExponentialFamily::log_normalizer))
+/// - `k(x)` is the carrier measure (its expectation is
+///   [`mean_carrier_measure`](ExponentialFamily::mean_carrier_measure))
+///
+/// Mirrors `torch.distributions.ExponentialFamily` (`torch/distributions/exp_family.py:11-66`).
+/// Used by KL-divergence machinery and analytic entropy reasoning.
+pub trait ExponentialFamily<T: Float>: Distribution<T> {
+    /// The natural parameters `η(θ)` as a flat list of `Tensor<T>`.
+    /// Mirrors `_natural_params` (`exp_family.py:32-38`).
+    fn natural_params(&self) -> FerrotorchResult<Vec<Tensor<T>>>;
+
+    /// The log-normalizer `F(η)` evaluated at the given natural-parameter
+    /// tuple. The argument is the same shape/order as
+    /// [`natural_params`](Self::natural_params) returns. Mirrors
+    /// `_log_normalizer(*natural_params)` (`exp_family.py:40-45`).
+    fn log_normalizer(&self, natural_params: &[Tensor<T>]) -> FerrotorchResult<Tensor<T>>;
+
+    /// The expected carrier measure `E[k(X)]`. Returns 0 for most
+    /// continuous families. Mirrors `_mean_carrier_measure`
+    /// (`exp_family.py:47-53`).
+    fn mean_carrier_measure(&self) -> FerrotorchResult<T> {
+        Ok(<T as num_traits::Zero>::zero())
+    }
+}

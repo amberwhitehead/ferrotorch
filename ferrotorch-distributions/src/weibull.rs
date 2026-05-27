@@ -18,16 +18,17 @@
 //! | REQ-9 (`Distribution::mean`) | SHIPPED | `impl Distribution::mean` returns `lambda * exp(lgamma(1 + 1/k))`; mirrors `weibull.py:72-74`. Uses `lgamma_scalar` from `special_fns.rs`. |
 //! | REQ-10 (`Distribution::mode` with `k <= 1` clamp) | SHIPPED | `impl Distribution::mode` returns `lambda * ((k-1)/k)^(1/k)` for `k > 1` else `0`; R-DEV-6 deviation from upstream NaN (`weibull.py:76-82`). |
 //! | REQ-11 (`Distribution::variance`) | SHIPPED | `impl Distribution::variance` algebraically equivalent to `weibull.py:85-89`. |
-//! | REQ-12 (`rsample` reparameterization) | NOT-STARTED | blocker #1435 — direct inverse-CDF path does not build autograd graph. |
+//! | REQ-12 (`rsample` reparameterization) | SHIPPED | the `rsample` body in `weibull.rs` composes `scale * (-ln(1-u))^(1/concentration)` with a `WeibullRsampleBackward` autograd node so gradients flow through `scale` and `concentration`. Mirrors upstream `TransformedDistribution(Exponential, [Power(1/k), Affine(scale)])` with inherited `has_rsample = True` (`weibull.py:48-56`). Closes #1435. |
 //! | REQ-13 (`expand`/`support`/`arg_constraints`) | SHIPPED | the trait overrides at the tail of `impl Distribution for Weibull` in `weibull.rs` mirror `torch/distributions/weibull.py:33-38`; consumer: trait dispatch via `pub use Weibull` re-export (closes #1436 — `concentration_reciprocal` remains a Python-only convenience). |
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use ferrotorch_core::creation;
 use ferrotorch_core::dtype::Float;
 use ferrotorch_core::error::{FerrotorchError, FerrotorchResult};
 use ferrotorch_core::storage::TensorStorage;
-use ferrotorch_core::tensor::Tensor;
+use ferrotorch_core::tensor::{GradFn, Tensor};
 
 use crate::constraints;
 use crate::special_fns::lgamma_scalar;
@@ -105,10 +106,55 @@ impl<T: Float> Distribution<T> for Weibull<T> {
         Tensor::from_storage(TensorStorage::cpu(out), shape.to_vec(), false)
     }
 
-    fn rsample(&self, _shape: &[usize]) -> FerrotorchResult<Tensor<T>> {
-        Err(FerrotorchError::InvalidArgument {
-            message: "Weibull: rsample not yet implemented (requires inverse CDF backward)".into(),
-        })
+    #[allow(clippy::needless_range_loop)]
+    fn rsample(&self, shape: &[usize]) -> FerrotorchResult<Tensor<T>> {
+        // Inverse-CDF reparameterization:
+        //   x = scale * (-ln(1 - u))^(1/concentration), u ~ Uniform(0, 1)
+        // Mirrors `TransformedDistribution(Exponential, [Power(1/k), Affine(scale)])`
+        // chain at `weibull.py:48-56` with inherited `has_rsample = True`.
+        crate::fallback::check_gpu_fallback_opt_in(
+            &[&self.scale, &self.concentration],
+            "Weibull::rsample",
+        )?;
+        let u = creation::rand::<T>(shape)?;
+        let u_data = u.data_vec()?;
+        let s_data = self.scale.data_vec()?;
+        let k_data = self.concentration.data_vec()?;
+        let numel = u_data.len();
+        let one = <T as num_traits::One>::one();
+        let zero = <T as num_traits::Zero>::zero();
+        let eps = T::from(1e-30).unwrap();
+
+        let mut out = Vec::with_capacity(numel);
+        for i in 0..numel {
+            let si = if s_data.len() == 1 {
+                0
+            } else {
+                i % s_data.len()
+            };
+            let ki = if k_data.len() == 1 {
+                0
+            } else {
+                i % k_data.len()
+            };
+            let log_term = (one - u_data[i]).max(eps).ln();
+            let val = s_data[si] * (zero - log_term).powf(one / k_data[ki]);
+            out.push(val);
+        }
+        let storage = TensorStorage::cpu(out);
+
+        if (self.scale.requires_grad() || self.concentration.requires_grad())
+            && ferrotorch_core::is_grad_enabled()
+        {
+            let grad_fn = Arc::new(WeibullRsampleBackward {
+                scale: self.scale.clone(),
+                concentration: self.concentration.clone(),
+                u: u.clone(),
+            });
+            Tensor::from_operation(storage, shape.to_vec(), grad_fn)
+        } else {
+            Tensor::from_storage(storage, shape.to_vec(), false)
+        }
     }
 
     #[allow(clippy::needless_range_loop)]
@@ -275,8 +321,9 @@ impl<T: Float> Distribution<T> for Weibull<T> {
     // -----------------------------------------------------------------------
 
     fn has_rsample(&self) -> bool {
-        // Tracked under blocker #1435.
-        false
+        // Closes #1435: rsample now builds the autograd graph via
+        // `WeibullRsampleBackward`.
+        true
     }
 
     fn batch_shape(&self) -> Vec<usize> {
@@ -308,6 +355,96 @@ impl<T: Float> Distribution<T> for Weibull<T> {
         let new_conc =
             Tensor::from_storage(TensorStorage::cpu(k_out), batch_shape.to_vec(), false)?;
         Ok(Box::new(Weibull::new(new_scale, new_conc)?))
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Backward node for rsample
+// ---------------------------------------------------------------------------
+
+/// Backward for `x = scale * (-ln(1-u))^(1/k)` with stored uniform `u`.
+///
+/// Let `w = -ln(1-u)` (positive for u ∈ (0,1)), so `x = scale * w^(1/k)`.
+/// - `dx/dscale = w^(1/k) = x/scale`
+/// - `log(x) = log(scale) + (1/k)*log(w)`,
+///   `d log(x)/dk = -log(w) / k^2`,
+///   `dx/dk = x * d log(x)/dk = -x * log(w) / k^2`
+///
+/// (`log(w)` can be positive or negative depending on u; either sign is fine.)
+#[derive(Debug)]
+struct WeibullRsampleBackward<T: Float> {
+    scale: Tensor<T>,
+    concentration: Tensor<T>,
+    u: Tensor<T>,
+}
+
+impl<T: Float> GradFn<T> for WeibullRsampleBackward<T> {
+    fn backward(&self, grad_output: &Tensor<T>) -> FerrotorchResult<Vec<Option<Tensor<T>>>> {
+        let go = grad_output.data_vec()?;
+        let u_data = self.u.data_vec()?;
+        let s_data = self.scale.data_vec()?;
+        let k_data = self.concentration.data_vec()?;
+        let one = <T as num_traits::One>::one();
+        let zero = <T as num_traits::Zero>::zero();
+        let eps = T::from(1e-30).unwrap();
+
+        let mut g_scale = zero;
+        let mut g_k = zero;
+        for (i, (&g, &u_val)) in go.iter().zip(u_data.iter()).enumerate() {
+            let si = if s_data.len() == 1 {
+                0
+            } else {
+                i % s_data.len()
+            };
+            let ki = if k_data.len() == 1 {
+                0
+            } else {
+                i % k_data.len()
+            };
+            let s = s_data[si];
+            let k = k_data[ki];
+            let one_minus_u = (one - u_val).max(eps);
+            let w = zero - one_minus_u.ln(); // = -ln(1-u), positive
+            let w_safe = w.max(eps);
+            let w_pow = w_safe.powf(one / k);
+            let x = s * w_pow;
+            // dx/dscale = w_pow
+            g_scale += g * w_pow;
+            // dx/dk = -x * ln(w) / k^2
+            g_k += g * (zero - x) * w_safe.ln() / (k * k);
+        }
+
+        let grad_scale = Tensor::from_storage(
+            TensorStorage::cpu(vec![g_scale]),
+            self.scale.shape().to_vec(),
+            false,
+        )?;
+        let grad_k = Tensor::from_storage(
+            TensorStorage::cpu(vec![g_k]),
+            self.concentration.shape().to_vec(),
+            false,
+        )?;
+
+        Ok(vec![
+            if self.scale.requires_grad() {
+                Some(grad_scale)
+            } else {
+                None
+            },
+            if self.concentration.requires_grad() {
+                Some(grad_k)
+            } else {
+                None
+            },
+        ])
+    }
+
+    fn inputs(&self) -> Vec<&Tensor<T>> {
+        vec![&self.scale, &self.concentration]
+    }
+
+    fn name(&self) -> &'static str {
+        "WeibullRsampleBackward"
     }
 }
 
@@ -400,11 +537,47 @@ mod tests {
     #[test]
     fn test_weibull_surface_overrides() {
         let d = Weibull::new(scalar(1.0), scalar(2.0)).unwrap();
-        assert!(!d.has_rsample()); // tracked under #1435
+        assert!(d.has_rsample()); // closes #1435
         assert_eq!(d.support().unwrap().name(), "Positive");
         let args = d.arg_constraints();
         assert_eq!(args["scale"].name(), "Positive");
         assert_eq!(args["concentration"].name(), "Positive");
+    }
+
+    // ---- #1435 rsample reparameterized ----
+
+    #[test]
+    fn test_weibull_rsample_shape_and_nonnegative() {
+        let d = Weibull::new(scalar(1.0), scalar(2.0)).unwrap();
+        let r = d.rsample(&[100]).unwrap();
+        assert_eq!(r.shape(), &[100]);
+        for &v in r.data().unwrap() {
+            assert!(v >= 0.0, "rsample must be >= 0, got {v}");
+        }
+    }
+
+    #[test]
+    fn test_weibull_rsample_has_grad() {
+        let s = scalar(1.5).requires_grad_(true);
+        let k = scalar(2.5).requires_grad_(true);
+        let d = Weibull::new(s, k).unwrap();
+        let r = d.rsample(&[5]).unwrap();
+        assert!(r.requires_grad());
+        assert!(r.grad_fn().is_some());
+    }
+
+    #[test]
+    fn test_weibull_rsample_backward_finite() {
+        let s = scalar(1.5).requires_grad_(true);
+        let k = scalar(2.5).requires_grad_(true);
+        let d = Weibull::new(s.clone(), k.clone()).unwrap();
+        let r = d.rsample(&[10]).unwrap();
+        let loss = r.sum_all().unwrap();
+        loss.backward().unwrap();
+        let gs = s.grad().unwrap().unwrap();
+        let gk = k.grad().unwrap().unwrap();
+        assert!(gs.item().unwrap().is_finite());
+        assert!(gk.item().unwrap().is_finite());
     }
 
     #[test]

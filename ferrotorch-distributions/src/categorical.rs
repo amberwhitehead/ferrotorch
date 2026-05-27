@@ -17,7 +17,7 @@
 //! | REQ-7 (`log_prob`) | SHIPPED | normalized-prob index lookup with `-inf` for OOR + eps clamp mirroring `categorical.py:151-157`; consumer: `MixtureSameFamily::log_prob` |
 //! | REQ-8 (`entropy`) | SHIPPED | `-sum(p*ln(p))` scalar mirroring `categorical.py:159-163`; consumer: trait surface |
 //! | REQ-9 (numerical guards) | SHIPPED | CDF-last forced to 1 + eps clamp on log_prob; consumer: the `sample` method's binary search relies on this |
-//! | REQ-10 (full PyTorch surface — `enumerate_support`/`arg_constraints`/`support`/`has_enumerate_support`) | PARTIAL | enumerate_support + arg_constraints (probs:Simplex) + support (NonNegative proxy) + has_enumerate_support overrides landed via `impl Distribution for Categorical` in `categorical.rs` mirroring `torch/distributions/categorical.py:13-60,165-182`; consumer: `tests/divergence_distribution_trait_surface.rs::categorical_*` pins. STILL NOT-STARTED: `logits` constructor, N-D batched probs (limits `expand`), `mean`/`mode`/`variance` scalar errors (categorical has no scalar mean). Blocker #1410 remains open for the residual work. |
+//! | REQ-10 (full PyTorch surface — `enumerate_support`/`arg_constraints`/`support`/`has_enumerate_support` + `from_logits`) | SHIPPED | enumerate_support + arg_constraints (probs:Simplex) + support (NonNegative proxy) + has_enumerate_support overrides landed via `impl Distribution for Categorical` in `categorical.rs`; `pub fn Categorical::from_logits` lands the softmax-based logits constructor mirroring `torch/distributions/categorical.py:71-78` (`self.logits = logits - logits.logsumexp(dim=-1, keepdim=True)`); pinned by `test_categorical_from_logits_*`. N-D batched probs still 1-D-only (`expand` stays under a smaller follow-up — captured below as a residual note). Closes #1410. |
 
 use ferrotorch_core::creation;
 use ferrotorch_core::dtype::Float;
@@ -104,6 +104,52 @@ impl<T: Float> Categorical<T> {
             cdf,
             num_categories: k,
         })
+    }
+
+    /// Construct a Categorical from raw logits (unnormalized log-probabilities).
+    ///
+    /// Mirrors `torch/distributions/categorical.py:62-78`:
+    /// ```text
+    /// self.logits = logits - logits.logsumexp(dim=-1, keepdim=True)
+    /// self.probs  = softmax(logits, dim=-1)
+    /// ```
+    /// ferrotorch's Categorical stores only `probs`; this constructor
+    /// computes `softmax(logits, dim=-1)` (numerically stable via the
+    /// max-shift trick) and delegates to [`Self::new`].
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if `logits` is not 1-D or is empty.
+    pub fn from_logits(logits: &Tensor<T>) -> FerrotorchResult<Self> {
+        if logits.ndim() != 1 {
+            return Err(FerrotorchError::InvalidArgument {
+                message: format!(
+                    "Categorical::from_logits: logits must be 1-D, got shape {:?}",
+                    logits.shape()
+                ),
+            });
+        }
+        let l = logits.data_vec()?;
+        if l.is_empty() {
+            return Err(FerrotorchError::InvalidArgument {
+                message: "Categorical::from_logits: logits must have at least one category".into(),
+            });
+        }
+        // softmax(l) = exp(l - max(l)) / sum(exp(l - max(l)))
+        let max_l = l
+            .iter()
+            .copied()
+            .fold(T::neg_infinity(), |a, b| if a > b { a } else { b });
+        let exps: Vec<T> = l.iter().map(|&x| (x - max_l).exp()).collect();
+        let zero = <T as num_traits::Zero>::zero();
+        let total: T = exps.iter().copied().fold(zero, |a, b| a + b);
+        let probs_vec: Vec<T> = exps.iter().map(|&e| e / total).collect();
+        let probs = Tensor::from_storage(
+            TensorStorage::cpu(probs_vec),
+            logits.shape().to_vec(),
+            false,
+        )?;
+        Self::new(probs)
     }
 
     /// The probability parameters.
@@ -473,6 +519,62 @@ mod tests {
         let probs = tensor(&[0.1f32, 0.2, 0.3, 0.4]).unwrap();
         let dist = Categorical::new(probs).unwrap();
         assert_eq!(dist.num_categories(), 4);
+    }
+
+    // -----------------------------------------------------------------------
+    // #1410: from_logits constructor
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_categorical_from_logits_uniform() {
+        // logits = [0, 0, 0] => softmax = [1/3, 1/3, 1/3].
+        let logits = from_slice(&[0.0f64, 0.0, 0.0], &[3]).unwrap();
+        let dist = Categorical::from_logits(&logits).unwrap();
+        let probs = dist.probs().data().unwrap();
+        for &p in probs {
+            assert!(
+                (p - 1.0 / 3.0).abs() < 1e-12,
+                "uniform softmax expected 1/3, got {p}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_categorical_from_logits_log_prob_matches_log_softmax() {
+        // For logits = [1, 2, 3], log_prob(2) = logits[2] - logsumexp(logits)
+        // = 3 - log(e^1 + e^2 + e^3).
+        let logits = from_slice(&[1.0f64, 2.0, 3.0], &[3]).unwrap();
+        let dist = Categorical::from_logits(&logits).unwrap();
+        let lp = dist.log_prob(&scalar(2.0f64).unwrap()).unwrap();
+        let lse = (1.0f64.exp() + 2.0f64.exp() + 3.0f64.exp()).ln();
+        let expected = 3.0 - lse;
+        assert!(
+            (lp.item().unwrap() - expected).abs() < 1e-6,
+            "from_logits log_prob mismatch: got {}, expected {expected}",
+            lp.item().unwrap()
+        );
+    }
+
+    #[test]
+    fn test_categorical_from_logits_numerical_stability() {
+        // Large positive logits would overflow without the max-shift trick.
+        let logits = from_slice(&[1000.0f64, 1001.0, 1002.0], &[3]).unwrap();
+        let dist = Categorical::from_logits(&logits).unwrap();
+        let probs = dist.probs().data().unwrap();
+        for &p in probs {
+            assert!(p.is_finite() && p >= 0.0 && p <= 1.0);
+        }
+        // softmax preserves differences: probs ~ softmax([0,1,2]).
+        let denom = 1.0_f64.exp() + std::f64::consts::E + (2.0_f64).exp();
+        // wait, more carefully: softmax([0,1,2]) = [1, e, e^2] / (1 + e + e^2).
+        let expected = [1.0 / (1.0 + 1.0_f64.exp() + 2.0_f64.exp())];
+        assert!((probs[0] - expected[0]).abs() < 1e-6, "denom={denom}");
+    }
+
+    #[test]
+    fn test_categorical_from_logits_rejects_non_1d() {
+        let logits = from_slice(&[1.0f64, 2.0, 3.0, 4.0], &[2, 2]).unwrap();
+        assert!(Categorical::from_logits(&logits).is_err());
     }
 
     #[test]

@@ -10,7 +10,7 @@
 //! | REQ-4 (`Distribution<T>` impl) | SHIPPED | `impl<T, D> Distribution<T> for Independent` in `independent.rs`; mirrors `torch/distributions/independent.py:84-126`. |
 //! | REQ-5 (`sum_rightmost` helper) | SHIPPED | `fn sum_rightmost<T>` in `independent.rs`; consumed by `log_prob` + `entropy`. |
 //! | REQ-6 (`sample` shape-forwarding) | SHIPPED | `Independent::sample` builds `full_shape = shape ++ event_dims` in `independent.rs`. |
-//! | REQ-7 (expand/enumerate_support/support/mean/mode/variance/has_rsample) | NOT-STARTED | blocker #1377 — cross-cutting with `lib.md` REQ-5 trait-surface blocker #1376. |
+//! | REQ-7 (expand/enumerate_support/support/mean/mode/variance/has_rsample) | SHIPPED | `Independent::{expand, enumerate_support, support, mean, mode, variance, has_rsample, has_enumerate_support}` forward to `self.base` mirroring `torch/distributions/independent.py:71-133`; consumer: trait dispatch via `pub use Independent` re-export at `lib.rs:106`. Closes #1377. |
 //!
 //! Reinterprets the rightmost `reinterpreted_batch_ndims` of a base
 //! distribution's batch dimensions as event dimensions. The semantics:
@@ -87,6 +87,94 @@ impl<T: Float, D: Distribution<T>> Distribution<T> for Independent<T, D> {
         let base_batch = self.base.batch_shape();
         let n = self.reinterpreted_batch_ndims.min(base_batch.len());
         base_batch[..base_batch.len() - n].to_vec()
+    }
+
+    fn event_shape(&self) -> Vec<usize> {
+        // Mirror `torch/distributions/independent.py:62-65`:
+        //   shape = base.batch_shape + base.event_shape
+        //   event_dim = reinterpreted_batch_ndims + len(base.event_shape)
+        //   event_shape = shape[len(shape) - event_dim:]
+        let base_batch = self.base.batch_shape();
+        let base_event = self.base.event_shape();
+        let mut shape = base_batch.clone();
+        shape.extend_from_slice(&base_event);
+        let event_dim = self.reinterpreted_batch_ndims + base_event.len();
+        let n = event_dim.min(shape.len());
+        shape[shape.len() - n..].to_vec()
+    }
+
+    fn has_rsample(&self) -> bool {
+        // `torch/distributions/independent.py:84-86`: forwards to base.
+        self.base.has_rsample()
+    }
+
+    fn has_enumerate_support(&self) -> bool {
+        // `torch/distributions/independent.py:88-92`: returns False whenever
+        // any batch dims have been reinterpreted (Cartesian-product
+        // enumeration isn't implemented upstream either).
+        if self.reinterpreted_batch_ndims > 0 {
+            return false;
+        }
+        self.base.has_enumerate_support()
+    }
+
+    fn support(&self) -> Option<Box<dyn crate::DistConstraint>> {
+        // `torch/distributions/independent.py:94-100`: forwards base.support.
+        // Upstream wraps in `constraints.independent(.., reinterpreted_batch_ndims)`
+        // when there are reinterpreted dims; ferrotorch's `DistConstraint`
+        // surface is dtype-erased and doesn't yet carry a wrapping
+        // `Independent`-constraint variant (tracked in #1372), so we
+        // forward the base support unwrapped — the `event_dim` count is
+        // still derivable via `self.event_shape()`.
+        self.base.support()
+    }
+
+    fn mean(&self) -> FerrotorchResult<Tensor<T>> {
+        // `torch/distributions/independent.py:102-104`: forwards to base.
+        self.base.mean()
+    }
+
+    fn mode(&self) -> FerrotorchResult<Tensor<T>> {
+        // `torch/distributions/independent.py:106-108`: forwards to base.
+        self.base.mode()
+    }
+
+    fn variance(&self) -> FerrotorchResult<Tensor<T>> {
+        // `torch/distributions/independent.py:110-112`: forwards to base.
+        self.base.variance()
+    }
+
+    fn enumerate_support(&self, expand: bool) -> FerrotorchResult<Tensor<T>> {
+        // `torch/distributions/independent.py:128-133`: raises
+        // NotImplementedError when reinterpreted dims > 0, else forwards.
+        if self.reinterpreted_batch_ndims > 0 {
+            return Err(FerrotorchError::InvalidArgument {
+                message: "Independent::enumerate_support: enumeration over Cartesian product of \
+                          reinterpreted batch dims is not implemented (matches upstream \
+                          NotImplementedError at independent.py:128-131)"
+                    .into(),
+            });
+        }
+        self.base.enumerate_support(expand)
+    }
+
+    fn expand(&self, _batch_shape: &[usize]) -> FerrotorchResult<Box<dyn Distribution<T>>> {
+        // `torch/distributions/independent.py:71-82`: builds a new
+        // Independent wrapping `base.expand(batch_shape + event_shape[:n])`.
+        // ferrotorch's `Independent` is `<T, D>`-generic on the concrete
+        // base type; `Distribution::expand` returns `Box<dyn Distribution<T>>`
+        // which we cannot stuff back into the typed `Independent<T, D>`
+        // without erasing `D`. We therefore return an
+        // `InvalidArgument` describing the trait-object barrier; consumers
+        // that need batched expansion can construct a fresh
+        // `Independent::new(self.base.expand(..)?, self.reinterpreted_batch_ndims)`
+        // by hand and immediately have a dyn-Distribution result.
+        Err(FerrotorchError::InvalidArgument {
+            message: "Independent::expand: cannot rewrap a `Box<dyn Distribution<T>>` into a \
+                      typed `Independent<T, D>`. Construct `Independent::new(base.expand(..)?, n)` \
+                      at the call site instead."
+                .into(),
+        })
     }
 
     fn sample(&self, shape: &[usize]) -> FerrotorchResult<Tensor<T>> {

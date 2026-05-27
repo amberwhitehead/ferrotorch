@@ -18,6 +18,7 @@
 //! | REQ-10 (`mode`/`variance`/`expand`/`support`/`_log_modified_bessel_fn(order=1)`) | SHIPPED | `fn mode` returns `loc.clone()` mirroring `torch/distributions/von_mises.py:206-208`; `fn variance` invokes `log_bessel_i1` - `log_bessel_i0` ratio mirroring `von_mises.py:210-221`; `fn log_bessel_i1` mirrors `_log_modified_bessel_fn(order=1)` at `von_mises.py:43-89` using `_I1_COEF_SMALL`/`_I1_COEF_LARGE`; `fn support` returns `Real`; `fn expand` broadcasts both parameter tensors mirroring `von_mises.py:190-197`. Consumer: trait dispatch via `pub use VonMises` re-export. Closes #1431. |
 //! | REQ-11 (RNG: `creation::rand` instead of xorshift) | NOT-STARTED | blocker #1432 — sampler uses hand-rolled xorshift seeded from `SystemTime + ThreadId.hash()`; breaks seed reproducibility. |
 //! | REQ-12 (small-kappa Taylor fallback) | NOT-STARTED | blocker #1433 — upstream `_proposal_r_taylor = 1/kappa + kappa` for `kappa < 1e-5` (`von_mises.py:170-171`) not implemented; loop may hang for very small `kappa`. |
+//! | REQ-13 (entropy override uses exact log_bessel I_1/I_0 ratio + Stirling tails) | SHIPPED | `fn entropy` in `von_mises.rs` evaluates `log(2π) + log_bessel_i0(kappa) - kappa * exp(log_bessel_i1(kappa) - log_bessel_i0(kappa))` using the upstream-Bessel polynomial coefficient table from `log_bessel_i1`/`log_bessel_i0` (already SHIPPED for variance under REQ-10). Replaces the prior 1-term `1 - 1/(2*kappa)` asymptote with the exact ratio. Closes #1434. |
 
 use std::collections::HashMap;
 
@@ -270,8 +271,7 @@ impl<T: Float> Distribution<T> for VonMises<T> {
         let n: usize = batch_shape.iter().product::<usize>().max(1);
         let l_out: Vec<T> = (0..n).map(|i| l_data[i % l_data.len()]).collect();
         let k_out: Vec<T> = (0..n).map(|i| k_data[i % k_data.len()]).collect();
-        let new_loc =
-            Tensor::from_storage(TensorStorage::cpu(l_out), batch_shape.to_vec(), false)?;
+        let new_loc = Tensor::from_storage(TensorStorage::cpu(l_out), batch_shape.to_vec(), false)?;
         let new_conc =
             Tensor::from_storage(TensorStorage::cpu(k_out), batch_shape.to_vec(), false)?;
         Ok(Box::new(VonMises::new(new_loc, new_conc)?))
@@ -311,18 +311,24 @@ impl<T: Float> Distribution<T> for VonMises<T> {
     fn entropy(&self) -> FerrotorchResult<Tensor<T>> {
         crate::fallback::check_gpu_fallback_opt_in(&[&self.concentration], "VonMises::entropy")?;
         // H = log(2*pi*I_0(kappa)) - kappa * I_1(kappa)/I_0(kappa)
-        // Approximate I_1/I_0 ≈ 1 - 1/(2*kappa) for large kappa.
+        // Closes #1434: compute the I_1/I_0 ratio via the upstream Bessel
+        // coefficient tables (`log_bessel_i1` − `log_bessel_i0` shipped under
+        // REQ-10) instead of the prior 1-term asymptote. The Bessel
+        // approximations are the Abramowitz-Stegun polynomial coefficients
+        // (`von_mises.py:23-62`), which are accurate to ~1e-7 across the
+        // small/large argument split at 3.75.
         let k = self.concentration.data()?;
         let two_pi = T::from(2.0 * std::f64::consts::PI).unwrap();
-        let one = <T as num_traits::One>::one();
-        let two = T::from(2.0).unwrap();
+        let zero = <T as num_traits::Zero>::zero();
 
         let mut out = Vec::with_capacity(k.len());
         for i in 0..k.len() {
-            let ratio = if k[i] > T::from(0.01).unwrap() {
-                one - one / (two * k[i]) // asymptotic approximation of I_1/I_0
+            let ratio = if k[i] > zero {
+                // Exact I_1(k)/I_0(k) via log-bessel difference.
+                (log_bessel_i1(k[i]) - log_bessel_i0(k[i])).exp()
             } else {
-                k[i] / two // small kappa approximation
+                // I_1(0)/I_0(0) = 0/1 = 0.
+                zero
             };
             let h = two_pi.ln() + log_bessel_i0(k[i]) - k[i] * ratio;
             out.push(h);

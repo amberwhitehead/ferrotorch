@@ -14,16 +14,17 @@
 //! | REQ-6 (`Distribution::mean`) | SHIPPED | `impl Distribution::mean` in `pareto.rs` returns `alpha*scale/(alpha-1)` if `alpha>1` else `inf`; mirrors `pareto.py:53-57`. |
 //! | REQ-7 (`Distribution::variance`) | SHIPPED | `impl Distribution::variance` in `pareto.rs` branches on `alpha>2`; mirrors `pareto.py:63-67`. |
 //! | REQ-8 (`Distribution::entropy`) | SHIPPED | `impl Distribution::entropy` in `pareto.rs` returns `log(scale/alpha)+1+1/alpha`; mirrors `pareto.py:73-74`. |
-//! | REQ-9 (`rsample` reparameterization) | NOT-STARTED | blocker #1395 — direct scalar-CPU path does not build autograd graph through inverse-CDF. |
+//! | REQ-9 (`rsample` reparameterization) | SHIPPED | the `rsample` body in `pareto.rs` composes `scale / u^(1/alpha)` with a `ParetoRsampleBackward` autograd node so gradients flow through `scale` and `alpha`. Mirrors upstream `TransformedDistribution(Exponential, [ExpTransform, AffineTransform(scale)])` with `has_rsample = True` (`pareto.py:33-43`). Closes #1395. |
 //! | REQ-10 (`mode`/`support`/`expand`/`cdf`/`icdf`/`arg_constraints`) | SHIPPED | the trait overrides at the tail of `impl Distribution for Pareto` in `pareto.rs` mirror `torch/distributions/pareto.py:31, 69-71`; consumer: trait dispatch via `pub use Pareto` re-export (closes #1405; `rsample` remains under #1395). |
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use ferrotorch_core::creation;
 use ferrotorch_core::dtype::Float;
 use ferrotorch_core::error::{FerrotorchError, FerrotorchResult};
 use ferrotorch_core::storage::TensorStorage;
-use ferrotorch_core::tensor::Tensor;
+use ferrotorch_core::tensor::{GradFn, Tensor};
 
 use crate::constraints;
 use crate::{DistConstraint, Distribution};
@@ -95,10 +96,54 @@ impl<T: Float> Distribution<T> for Pareto<T> {
         Tensor::from_storage(TensorStorage::cpu(out), shape.to_vec(), false)
     }
 
-    fn rsample(&self, _shape: &[usize]) -> FerrotorchResult<Tensor<T>> {
-        Err(FerrotorchError::InvalidArgument {
-            message: "Pareto: rsample not yet implemented".into(),
-        })
+    #[allow(clippy::needless_range_loop)]
+    fn rsample(&self, shape: &[usize]) -> FerrotorchResult<Tensor<T>> {
+        // Inverse-CDF reparameterization: x = scale * (1 - u)^(-1/alpha)
+        // (equivalent to `scale / u^(1/alpha)` since u and (1-u) are
+        // both Uniform(0,1)). Mirrors `TransformedDistribution(Exponential,
+        // [ExpTransform, AffineTransform(scale=scale)])` chain at
+        // `torch/distributions/pareto.py:33-43`. The forward is computed
+        // scalar-wise; the backward (`ParetoRsampleBackward`) carries the
+        // gradients through `scale` and `alpha`.
+        crate::fallback::check_gpu_fallback_opt_in(&[&self.scale, &self.alpha], "Pareto::rsample")?;
+        let u = creation::rand::<T>(shape)?;
+        let u_data = u.data_vec()?;
+        let s_data = self.scale.data_vec()?;
+        let a_data = self.alpha.data_vec()?;
+        let numel = u_data.len();
+        let one = <T as num_traits::One>::one();
+        let eps = T::from(1e-30).unwrap();
+
+        let mut out = Vec::with_capacity(numel);
+        for i in 0..numel {
+            let si = if s_data.len() == 1 {
+                0
+            } else {
+                i % s_data.len()
+            };
+            let ai = if a_data.len() == 1 {
+                0
+            } else {
+                i % a_data.len()
+            };
+            // x = scale / u^(1/alpha)
+            let val = s_data[si] / u_data[i].max(eps).powf(one / a_data[ai]);
+            out.push(val);
+        }
+        let storage = TensorStorage::cpu(out);
+
+        if (self.scale.requires_grad() || self.alpha.requires_grad())
+            && ferrotorch_core::is_grad_enabled()
+        {
+            let grad_fn = Arc::new(ParetoRsampleBackward {
+                scale: self.scale.clone(),
+                alpha: self.alpha.clone(),
+                u: u.clone(),
+            });
+            Tensor::from_operation(storage, shape.to_vec(), grad_fn)
+        } else {
+            Tensor::from_storage(storage, shape.to_vec(), false)
+        }
     }
 
     #[allow(clippy::needless_range_loop)]
@@ -243,8 +288,9 @@ impl<T: Float> Distribution<T> for Pareto<T> {
     fn has_rsample(&self) -> bool {
         // `torch/distributions/pareto.py` inherits TransformedDistribution
         // (Exponential + ExpTransform + AffineTransform) with `has_rsample = True`.
-        // ferrotorch's direct path does not build the autograd graph; tracked by #1395.
-        false
+        // ferrotorch's direct path builds the autograd graph via
+        // `ParetoRsampleBackward` (closes #1395).
+        true
     }
 
     fn batch_shape(&self) -> Vec<usize> {
@@ -290,6 +336,95 @@ impl<T: Float> Distribution<T> for Pareto<T> {
         let new_alpha =
             Tensor::from_storage(TensorStorage::cpu(a_out), batch_shape.to_vec(), false)?;
         Ok(Box::new(Pareto::new(new_scale, new_alpha)?))
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Backward node for rsample
+// ---------------------------------------------------------------------------
+
+/// Backward for `x = scale * u^(-1/alpha)`.
+///
+/// Let `c = u^(-1/alpha)`, so `x = scale * c`.
+/// - `dx/dscale = c = x/scale` (sum over sample dims)
+/// - `log(c) = -ln(u)/alpha`, so `d log(c)/d alpha = ln(u)/alpha^2`,
+///   `dc/d alpha = c * ln(u) / alpha^2`,
+///   `dx/d alpha = scale * dc/d alpha = x * ln(u) / alpha^2` (sum over dims)
+///
+/// Note `ln(u)` is negative for `u in (0,1)`, so `dx/d alpha < 0` — matches
+/// the intuition that increasing `alpha` lowers tail weight, shrinking samples.
+#[derive(Debug)]
+struct ParetoRsampleBackward<T: Float> {
+    scale: Tensor<T>,
+    alpha: Tensor<T>,
+    u: Tensor<T>,
+}
+
+impl<T: Float> GradFn<T> for ParetoRsampleBackward<T> {
+    fn backward(&self, grad_output: &Tensor<T>) -> FerrotorchResult<Vec<Option<Tensor<T>>>> {
+        let go = grad_output.data_vec()?;
+        let u_data = self.u.data_vec()?;
+        let s_data = self.scale.data_vec()?;
+        let a_data = self.alpha.data_vec()?;
+        let one = <T as num_traits::One>::one();
+        let zero = <T as num_traits::Zero>::zero();
+        let eps = T::from(1e-30).unwrap();
+
+        let mut g_scale = zero;
+        let mut g_alpha = zero;
+        for (i, (&g, &u_val)) in go.iter().zip(u_data.iter()).enumerate() {
+            let si = if s_data.len() == 1 {
+                0
+            } else {
+                i % s_data.len()
+            };
+            let ai = if a_data.len() == 1 {
+                0
+            } else {
+                i % a_data.len()
+            };
+            let s = s_data[si];
+            let a = a_data[ai];
+            let u_safe = u_val.max(eps);
+            let c = u_safe.powf(-one / a);
+            let x = s * c;
+            // dx/dscale = c
+            g_scale += g * c;
+            // dx/dalpha = x * ln(u) / alpha^2
+            g_alpha += g * x * u_safe.ln() / (a * a);
+        }
+
+        let grad_scale = Tensor::from_storage(
+            TensorStorage::cpu(vec![g_scale]),
+            self.scale.shape().to_vec(),
+            false,
+        )?;
+        let grad_alpha = Tensor::from_storage(
+            TensorStorage::cpu(vec![g_alpha]),
+            self.alpha.shape().to_vec(),
+            false,
+        )?;
+
+        Ok(vec![
+            if self.scale.requires_grad() {
+                Some(grad_scale)
+            } else {
+                None
+            },
+            if self.alpha.requires_grad() {
+                Some(grad_alpha)
+            } else {
+                None
+            },
+        ])
+    }
+
+    fn inputs(&self) -> Vec<&Tensor<T>> {
+        vec![&self.scale, &self.alpha]
+    }
+
+    fn name(&self) -> &'static str {
+        "ParetoRsampleBackward"
     }
 }
 
@@ -361,12 +496,48 @@ mod tests {
     #[test]
     fn test_pareto_surface_overrides() {
         let d = Pareto::new(scalar(1.0), scalar(2.0)).unwrap();
-        assert!(!d.has_rsample()); // tracked under #1395
+        assert!(d.has_rsample()); // closes #1395
         let s = d.support().unwrap();
         assert_eq!(s.name(), "GreaterThanEq");
         let args = d.arg_constraints();
         assert_eq!(args["alpha"].name(), "Positive");
         assert_eq!(args["scale"].name(), "Positive");
+    }
+
+    // ---- #1395 rsample reparameterized ----
+
+    #[test]
+    fn test_pareto_rsample_shape_and_range() {
+        let d = Pareto::new(scalar(2.0), scalar(3.0)).unwrap();
+        let s = d.rsample(&[100]).unwrap();
+        assert_eq!(s.shape(), &[100]);
+        for &v in s.data().unwrap() {
+            assert!(v >= 2.0, "rsample must be >= scale, got {v}");
+        }
+    }
+
+    #[test]
+    fn test_pareto_rsample_has_grad() {
+        let s = scalar(2.0).requires_grad_(true);
+        let a = scalar(3.0).requires_grad_(true);
+        let d = Pareto::new(s, a).unwrap();
+        let r = d.rsample(&[5]).unwrap();
+        assert!(r.requires_grad());
+        assert!(r.grad_fn().is_some());
+    }
+
+    #[test]
+    fn test_pareto_rsample_backward_finite() {
+        let s = scalar(2.0).requires_grad_(true);
+        let a = scalar(3.0).requires_grad_(true);
+        let d = Pareto::new(s.clone(), a.clone()).unwrap();
+        let r = d.rsample(&[10]).unwrap();
+        let loss = r.sum_all().unwrap();
+        loss.backward().unwrap();
+        let gs = s.grad().unwrap().unwrap();
+        let ga = a.grad().unwrap().unwrap();
+        assert!(gs.item().unwrap().is_finite());
+        assert!(ga.item().unwrap().is_finite());
     }
 
     #[test]

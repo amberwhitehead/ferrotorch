@@ -13,12 +13,12 @@
 //! | REQ-3 (`rate` + inherent `mean`/`variance` accessors) | SHIPPED | `Poisson::rate`, inherent `Poisson::mean`, `Poisson::variance` borrow-returners in `poisson.rs`. Mirror `poisson.py:38-48` @property's. |
 //! | REQ-4 (`Distribution::sample` via Knuth) | SHIPPED | `impl Distribution::sample` in `poisson.rs` via Knuth's algorithm with pre-allocated uniform batch buffer; equivalent to the small-lambda branch of `aten::poisson` dispatched by `torch.poisson(rate)` at `poisson.py:70-73`. |
 //! | REQ-5 (`Distribution::rsample` errors) | SHIPPED | `impl Distribution::rsample` in `poisson.rs` returns `InvalidArgument` (Poisson is discrete). |
-//! | REQ-6 (`Distribution::log_prob`) | SHIPPED | `impl Distribution::log_prob` in `poisson.rs` returns `k * ln(lambda) - lambda - lgamma(k+1)`; mirrors `poisson.py:75-79`. Known divergence on `xlogy` boundary at `k=0,lambda=0` — blocker #1409. |
-//! | REQ-7 (`Distribution::entropy`) | SHIPPED | `impl Distribution::entropy` in `poisson.rs` with dual-branch (enumeration for `lambda<1`, Stirling series otherwise); R-DEV-7 enhancement (upstream does not ship a closed-form entropy). |
+//! | REQ-6 (`Distribution::log_prob`) | SHIPPED | `impl Distribution::log_prob` in `poisson.rs` returns `xlogy(k, lambda) - lambda - lgamma(k+1)`; mirrors `poisson.py:75-79` exactly (`value.xlogy(rate) - rate - (value + 1).lgamma()`). `xlogy(0, 0) = 0` by convention closes #1409 (no NaN at the `k=0, lambda=0` boundary). |
+//! | REQ-7 (`Distribution::entropy`) | SHIPPED | `impl Distribution::entropy` in `poisson.rs` with dual-branch (enumeration for `lambda<1`, Stirling series otherwise); R-DEV-7 enhancement (upstream does not ship a closed-form entropy). Stirling series at large lambda pinned by `test_poisson_entropy_matches_stirling_large_lambda` (closes #1415). |
 //! | REQ-8 (`Distribution::mean`) | SHIPPED | `impl Distribution::mean` returns `rate.clone()`; mirrors `poisson.py:38-40`. |
 //! | REQ-9 (`Distribution::mode`) | SHIPPED | `impl Distribution::mode` returns `floor(rate)`; mirrors `poisson.py:42-44`. |
 //! | REQ-10 (`Distribution::variance`) | SHIPPED | `impl Distribution::variance` returns `rate.clone()`; mirrors `poisson.py:46-48`. |
-//! | REQ-11 (`ExponentialFamily` machinery — natural-params) | NOT-STARTED | blocker #1407 — `_natural_params`/`_log_normalizer` not implemented. |
+//! | REQ-11 (`ExponentialFamily` machinery — natural-params) | SHIPPED | `impl ExponentialFamily<T> for Poisson<T>` in `poisson.rs` with `natural_params = (ln(rate),)`, `log_normalizer(eta) = exp(eta) = rate`, `mean_carrier_measure = 0` mirroring `torch/distributions/poisson.py:81-87`. Consumer: `pub use Poisson` re-export + the `ExponentialFamily` trait in `lib.rs`. Closes #1407. |
 //! | REQ-12 (full PyTorch surface — `support`/`arg_constraints`/`expand`) | SHIPPED | the trait overrides at the tail of `impl Distribution for Poisson` in `poisson.rs` mirror `torch/distributions/poisson.py:35-36`; consumer: trait dispatch via `pub use Poisson` re-export. |
 
 use std::collections::HashMap;
@@ -132,16 +132,26 @@ impl<T: Float> Distribution<T> for Poisson<T> {
 
     fn log_prob(&self, value: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
         crate::fallback::check_gpu_fallback_opt_in(&[&self.rate, value], "Poisson::log_prob")?;
-        // log_prob = k * ln(lambda) - lambda - lgamma(k + 1)
+        // `torch/distributions/poisson.py:75-79`:
+        //   log_prob = value.xlogy(rate) - rate - (value + 1).lgamma()
+        // xlogy(0, x) = 0 by convention — closes the k=0,lambda=0 NaN
+        // divergence under #1409.
         let device = self.rate.device();
         let rate_data = self.rate.data_vec()?;
         let val_data = value.data_vec()?;
         let one = <T as num_traits::One>::one();
+        let zero = <T as num_traits::Zero>::zero();
 
         let result: Vec<T> = val_data
             .iter()
             .zip(rate_data.iter().cycle())
-            .map(|(&k, &lambda)| k * lambda.ln() - lambda - lgamma_scalar(k + one))
+            .map(|(&k, &lambda)| {
+                // xlogy(k, lambda) — returns 0 when k == 0, regardless
+                // of lambda (matches torch.xlogy and the convention
+                // `0 * log(x) = 0`).
+                let xlogy_term = if k == zero { zero } else { k * lambda.ln() };
+                xlogy_term - lambda - lgamma_scalar(k + one)
+            })
             .collect();
 
         let out = Tensor::from_storage(TensorStorage::cpu(result), value.shape().to_vec(), false)?;
@@ -275,9 +285,48 @@ impl<T: Float> Distribution<T> for Poisson<T> {
     }
 }
 
+// ---------------------------------------------------------------------------
+// ExponentialFamily impl (#1407)
+// ---------------------------------------------------------------------------
+
+impl<T: Float> crate::ExponentialFamily<T> for Poisson<T> {
+    fn natural_params(&self) -> FerrotorchResult<Vec<Tensor<T>>> {
+        // `torch/distributions/poisson.py:81-83`:
+        //   _natural_params = (torch.log(self.rate),)
+        let rate_d = self.rate.data_vec()?;
+        let out: Vec<T> = rate_d.iter().map(|&r| r.ln()).collect();
+        let t = Tensor::from_storage(TensorStorage::cpu(out), self.rate.shape().to_vec(), false)?;
+        Ok(vec![t])
+    }
+
+    fn log_normalizer(&self, natural_params: &[Tensor<T>]) -> FerrotorchResult<Tensor<T>> {
+        // `torch/distributions/poisson.py:85-87`: `_log_normalizer(x) = exp(x)`.
+        if natural_params.len() != 1 {
+            return Err(FerrotorchError::InvalidArgument {
+                message: format!(
+                    "Poisson::log_normalizer expects 1 natural param, got {}",
+                    natural_params.len()
+                ),
+            });
+        }
+        let x = natural_params[0].data_vec()?;
+        let out: Vec<T> = x.iter().map(|&v| v.exp()).collect();
+        Tensor::from_storage(
+            TensorStorage::cpu(out),
+            natural_params[0].shape().to_vec(),
+            false,
+        )
+    }
+
+    fn mean_carrier_measure(&self) -> FerrotorchResult<T> {
+        Ok(<T as num_traits::Zero>::zero())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ExponentialFamily;
     use ferrotorch_core::creation::{from_slice, scalar};
 
     #[test]
@@ -426,6 +475,72 @@ mod tests {
         assert_eq!(s.name(), "NonNegative");
         let args = dist.arg_constraints();
         assert_eq!(args["rate"].name(), "NonNegative");
+    }
+
+    // -----------------------------------------------------------------------
+    // #1409 xlogy fix: log_prob(0, 0) should be 0, not NaN
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_poisson_log_prob_zero_zero_is_zero_not_nan() {
+        // torch.distributions.Poisson(rate=0.0).log_prob(tensor(0.0)) returns 0
+        // via `value.xlogy(rate)` returning 0 at the (0, 0) boundary. Pre-#1409
+        // ferrotorch computed `0 * ln(0) = NaN` here. Pinned by #1409.
+        let dist = Poisson::new(scalar(0.0f64).unwrap()).unwrap();
+        let x = scalar(0.0f64).unwrap();
+        let lp = dist.log_prob(&x).unwrap();
+        let val = lp.item().unwrap();
+        assert!(
+            !val.is_nan(),
+            "Poisson(0).log_prob(0) must NOT be NaN (#1409); got {val}"
+        );
+        assert!(
+            (val - 0.0).abs() < 1e-12,
+            "Poisson(0).log_prob(0) must be 0 (xlogy(0,0)=0); got {val}"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // #1407 ExponentialFamily interface
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_poisson_natural_params_is_log_rate() {
+        let dist = Poisson::new(scalar(2.0f64).unwrap()).unwrap();
+        let np = dist.natural_params().unwrap();
+        assert_eq!(np.len(), 1);
+        assert!((np[0].item().unwrap() - 2.0f64.ln()).abs() < 1e-12);
+    }
+
+    #[test]
+    fn test_poisson_log_normalizer_is_exp_eta() {
+        let dist = Poisson::new(scalar(3.5f64).unwrap()).unwrap();
+        let np = dist.natural_params().unwrap();
+        let lz = dist.log_normalizer(&np).unwrap();
+        // exp(log(3.5)) = 3.5
+        assert!((lz.item().unwrap() - 3.5).abs() < 1e-10);
+    }
+
+    // -----------------------------------------------------------------------
+    // #1415 Stirling entropy override remains numerically tight for large rate
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_poisson_entropy_matches_stirling_large_lambda() {
+        // For lambda=10, the Stirling-series tail terms are:
+        //   H ≈ 0.5*ln(2*pi*e*lambda) - 1/(12*lambda) - 1/(24*lambda^2)
+        // = 0.5*ln(2*pi*e*10) - 1/120 - 1/2400.
+        // Pinning the closed-form override against the formula directly.
+        let lambda = 10.0f64;
+        let dist = Poisson::new(scalar(lambda).unwrap()).unwrap();
+        let h = dist.entropy().unwrap().item().unwrap();
+        let expected = 0.5 * (2.0 * std::f64::consts::PI * std::f64::consts::E * lambda).ln()
+            - 1.0 / (12.0 * lambda)
+            - 1.0 / (24.0 * lambda * lambda);
+        assert!(
+            (h - expected).abs() < 1e-9,
+            "Stirling entropy mismatch: got {h}, expected {expected}"
+        );
     }
 
     #[test]

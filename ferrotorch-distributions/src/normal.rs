@@ -19,7 +19,7 @@
 //! | REQ-10 (icdf via `erfinv`) | SHIPPED | the icdf body in `normal.rs` dispatches to `ferrotorch_core::special::erfinv`. |
 //! | REQ-11 (mean/mode/variance/stddev/entropy closed forms) | SHIPPED | the property bodies in `normal.rs`. |
 //! | REQ-12 (device-resident outputs) | SHIPPED | `out.to(device)` at the tail of every method in `normal.rs`. |
-//! | REQ-13 (`ExponentialFamily` interface) | NOT-STARTED | blocker #1404 — `_natural_params` / `_log_normalizer` / `_mean_carrier_measure` not implemented. |
+//! | REQ-13 (`ExponentialFamily` interface) | SHIPPED | `impl ExponentialFamily<T> for Normal<T>` in `normal.rs` with `natural_params = (loc/scale^2, -1/(2*scale^2))`, `log_normalizer = -eta1^2/(4*eta2) + 0.5*log(-π/eta2)`, `mean_carrier_measure = 0` mirroring `torch/distributions/normal.py:116-122`. Consumer: `pub use Normal` re-export + the new `ExponentialFamily` trait in `lib.rs`. Closes #1404. |
 //! | REQ-14 (full PyTorch surface — `has_rsample`/`support`/`arg_constraints`/`expand`) | SHIPPED | the trait overrides at the tail of `impl Distribution for Normal` in `normal.rs` mirror `torch/distributions/normal.py:15-58`; consumer: trait dispatch + `tests/divergence_distribution_trait_surface.rs::normal_*` pin every override (closes #1376 partial). |
 
 use std::sync::Arc;
@@ -520,9 +520,79 @@ impl<T: Float> GradFn<T> for NormalLogProbBackward<T> {
     }
 }
 
+// ---------------------------------------------------------------------------
+// ExponentialFamily impl (#1404)
+// ---------------------------------------------------------------------------
+
+impl<T: Float> crate::ExponentialFamily<T> for Normal<T> {
+    fn natural_params(&self) -> FerrotorchResult<Vec<Tensor<T>>> {
+        // `torch/distributions/normal.py:116-118`:
+        //   _natural_params = (loc / scale.pow(2), -0.5 * scale.pow(2).reciprocal())
+        let loc_d = self.loc.data_vec()?;
+        let scale_d = self.scale.data_vec()?;
+        let half = T::from(0.5).unwrap();
+        let one = <T as num_traits::One>::one();
+        let eta1: Vec<T> = loc_d
+            .iter()
+            .zip(scale_d.iter())
+            .map(|(&l, &s)| l / (s * s))
+            .collect();
+        let eta2: Vec<T> = scale_d.iter().map(|&s| -half * (one / (s * s))).collect();
+        let t1 = Tensor::from_storage(TensorStorage::cpu(eta1), self.loc.shape().to_vec(), false)?;
+        let t2 =
+            Tensor::from_storage(TensorStorage::cpu(eta2), self.scale.shape().to_vec(), false)?;
+        Ok(vec![t1, t2])
+    }
+
+    fn log_normalizer(&self, natural_params: &[Tensor<T>]) -> FerrotorchResult<Tensor<T>> {
+        // `torch/distributions/normal.py:120-122`:
+        //   _log_normalizer(x, y) = -0.25 * x^2 / y + 0.5 * log(-pi / y)
+        // where x = eta1, y = eta2 (< 0).
+        if natural_params.len() != 2 {
+            return Err(FerrotorchError::InvalidArgument {
+                message: format!(
+                    "Normal::log_normalizer expects 2 natural params, got {}",
+                    natural_params.len()
+                ),
+            });
+        }
+        let x = natural_params[0].data_vec()?;
+        let y = natural_params[1].data_vec()?;
+        if x.len() != y.len() {
+            return Err(FerrotorchError::ShapeMismatch {
+                message: format!(
+                    "Normal::log_normalizer: eta1 len {} != eta2 len {}",
+                    x.len(),
+                    y.len()
+                ),
+            });
+        }
+        let quarter = T::from(0.25).unwrap();
+        let half = T::from(0.5).unwrap();
+        let pi = T::from(std::f64::consts::PI).unwrap();
+        let zero = <T as num_traits::Zero>::zero();
+        let out: Vec<T> = x
+            .iter()
+            .zip(y.iter())
+            .map(|(&xi, &yi)| -quarter * xi * xi / yi + half * ((zero - pi) / yi).ln())
+            .collect();
+        Tensor::from_storage(
+            TensorStorage::cpu(out),
+            natural_params[0].shape().to_vec(),
+            false,
+        )
+    }
+
+    fn mean_carrier_measure(&self) -> FerrotorchResult<T> {
+        // `torch/distributions/normal.py:37`: `_mean_carrier_measure = 0`.
+        Ok(<T as num_traits::Zero>::zero())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ExponentialFamily;
     use ferrotorch_core::creation::{from_slice, scalar};
 
     #[test]
@@ -721,6 +791,40 @@ mod tests {
         let x = scalar(0.0f64).unwrap();
         let c = dist.cdf(&x).unwrap();
         assert!((c.item().unwrap() - 0.5).abs() < 1e-5);
+    }
+
+    // -----------------------------------------------------------------------
+    // ExponentialFamily (#1404)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_normal_natural_params_shape_and_values() {
+        // For Normal(loc=2, scale=3): eta1 = 2/9, eta2 = -1/(2*9) = -1/18.
+        let loc = scalar(2.0f64).unwrap();
+        let scale = scalar(3.0f64).unwrap();
+        let d = Normal::new(loc, scale).unwrap();
+        let np = d.natural_params().unwrap();
+        assert_eq!(np.len(), 2);
+        assert!((np[0].item().unwrap() - 2.0 / 9.0).abs() < 1e-12);
+        assert!((np[1].item().unwrap() - (-1.0 / 18.0)).abs() < 1e-12);
+    }
+
+    #[test]
+    fn test_normal_log_normalizer_matches_log_partition() {
+        // log_normalizer(eta1, eta2) = -0.25*eta1^2/eta2 + 0.5*log(-pi/eta2)
+        // For Normal(loc=0, scale=1): eta1=0, eta2=-0.5.
+        // log_normalizer = 0 + 0.5*log(2*pi) (matches standard normal partition).
+        let d = Normal::new(scalar(0.0f64).unwrap(), scalar(1.0f64).unwrap()).unwrap();
+        let np = d.natural_params().unwrap();
+        let lz = d.log_normalizer(&np).unwrap();
+        let expected = 0.5 * (2.0f64 * std::f64::consts::PI).ln();
+        assert!((lz.item().unwrap() - expected).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_normal_mean_carrier_measure_zero() {
+        let d = Normal::new(scalar(1.0f64).unwrap(), scalar(2.0f64).unwrap()).unwrap();
+        assert_eq!(d.mean_carrier_measure().unwrap(), 0.0);
     }
 
     #[test]

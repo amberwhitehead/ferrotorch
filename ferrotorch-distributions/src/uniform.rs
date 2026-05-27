@@ -287,7 +287,11 @@ impl<T: Float> Distribution<T> for Uniform<T> {
         let hi = self.high.data_vec()?;
         let nan = T::from(f64::NAN).unwrap();
         let result: Vec<T> = hi.iter().map(|&h| nan * h).collect();
-        Tensor::from_storage(TensorStorage::cpu(result), self.high.shape().to_vec(), false)
+        Tensor::from_storage(
+            TensorStorage::cpu(result),
+            self.high.shape().to_vec(),
+            false,
+        )
     }
 
     fn stddev(&self) -> FerrotorchResult<Tensor<T>> {
