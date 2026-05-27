@@ -127,7 +127,7 @@ impl<T: Float, D: Distribution<T>> MixtureSameFamily<T, D> {
     }
 }
 
-impl<T: Float, D: Distribution<T>> Distribution<T> for MixtureSameFamily<T, D> {
+impl<T: Float, D: Distribution<T> + 'static> Distribution<T> for MixtureSameFamily<T, D> {
     fn sample(&self, shape: &[usize]) -> FerrotorchResult<Tensor<T>> {
         crate::fallback::check_gpu_fallback_opt_in(
             &[self.mixing.probs()],

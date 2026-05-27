@@ -80,7 +80,7 @@ impl<T: Float, D: Distribution<T>> Independent<T, D> {
     }
 }
 
-impl<T: Float, D: Distribution<T>> Distribution<T> for Independent<T, D> {
+impl<T: Float, D: Distribution<T> + 'static> Distribution<T> for Independent<T, D> {
     fn batch_shape(&self) -> Vec<usize> {
         // Independent reinterprets the rightmost `reinterpreted_batch_ndims` batch
         // dims as event dims, so the exposed batch shape has those dims removed.
@@ -218,6 +218,23 @@ impl<T: Float, D: Distribution<T>> Distribution<T> for Independent<T, D> {
     fn entropy(&self) -> FerrotorchResult<Tensor<T>> {
         let base_h = self.base.entropy()?;
         sum_rightmost(&base_h, self.reinterpreted_batch_ndims)
+    }
+
+    fn kl_recurse(&self) -> Option<crate::KlRecurseInfo<'_, T>> {
+        // `torch/distributions/kl.py:944-949` `_kl_independent_independent`:
+        //   if p.reinterpreted_batch_ndims != q.reinterpreted_batch_ndims: raise
+        //   result = kl_divergence(p.base_dist, q.base_dist)
+        //   return _sum_rightmost(result, p.reinterpreted_batch_ndims)
+        // We expose the type-erased base + `reinterpreted_batch_ndims` so the KL
+        // recursion in `kl::kl_divergence_dyn` can re-dispatch on the base and
+        // sum the rightmost `n` dims, without the dispatcher needing the
+        // concrete generic base type `D`.
+        Some(crate::KlRecurseInfo {
+            base: &self.base,
+            kind: crate::KlRecurseKind::Independent {
+                reinterpreted_batch_ndims: self.reinterpreted_batch_ndims,
+            },
+        })
     }
 }
 

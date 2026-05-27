@@ -11,7 +11,8 @@ upstream-paths:
 ## Summary
 
 `ferrotorch-distributions/src/kl.rs` provides analytical closed-form
-KL divergence formulas for 84 distribution pairs:
+KL divergence formulas for 86 distribution pairs (84 concrete closed-form
+pairs + 2 recursion-based pairs):
 Normal-Normal, Bernoulli-Bernoulli, Uniform-Uniform,
 Categorical-Categorical, Normal-Uniform, Uniform-Normal,
 Laplace-Laplace, Exponential-Exponential, Gamma-Gamma,
@@ -48,7 +49,18 @@ CB-Exponential `kl.py:586`; CB-Normal `kl.py:595`; CB-Uniform `kl.py:607`
 and 7 support-mismatch `+inf` (CB-Pareto `kl.py:581`;
 {Exponential,Gamma,Gumbel,Laplace,Normal,Pareto}-CB
 `kl.py:621,666,719,741,762,796`).
-Mirrors `torch/distributions/kl.py`. The dispatcher
+The #1374 final tail added 2 RECURSION-based pairs that re-dispatch into
+a base distribution rather than reading concrete parameters:
+Independent-Independent (`kl.py:944-949` `_kl_independent_independent`)
+and TransformedDistribution-TransformedDistribution (`kl.py:496-502`
+`_kl_transformed_transformed`). These are dispatched through the new
+`Distribution::kl_recurse` hook (in `lib.rs`) via the public
+`kl_divergence_dyn` entry, NOT by the `Any::downcast_ref` chain (which
+cannot match the generic `Independent<T, D>` base type). The last
+missing pair, ExponentialFamily-ExponentialFamily (`kl.py:282-300`), is
+NOT-STARTED — blocked on #1575 (needs a generic-ExponentialFamily
+dispatch path + a differentiable `log_normalizer`).
+Mirrors `torch/distributions/kl.py`. The concrete-pair dispatcher
 is a hand-coded chain of `Any::downcast_ref` arms; the same pattern
 PyTorch ships via `register_kl` + `_dispatch_kl` but expressed in
 Rust without the runtime-class-decorator machinery — this explicit
@@ -110,8 +122,9 @@ match is the deliberate Rust-idiomatic design (REQ-8 / #1375).
   crate-wide CPU-fallback policy. CUDA inputs without the env var
   return `NotImplementedOnCuda`.
 
-- REQ-7: PARTIAL — PyTorch ships ~88 KL pairs. ferrotorch now ships
-  84 (was 41). The #1374 ContinuousBernoulli sub-part added 13 pairs
+- REQ-7: PARTIAL — PyTorch ships ~87 registered KL pairs. ferrotorch now
+  ships 86 (was 41); only ExponentialFamily-ExponentialFamily remains.
+  The #1374 ContinuousBernoulli sub-part added 13 pairs
   that needed the new `ContinuousBernoulli` struct
   (`continuous_bernoulli.rs`): 6 finite — `kl_continuous_bernoulli_continuous_bernoulli`
   (`kl.py:255-260`), `kl_beta_continuous_bernoulli` (`kl.py:518-525`),
@@ -155,23 +168,48 @@ match is the deliberate Rust-idiomatic design (REQ-8 / #1375).
       Normal-{Beta,Exponential,Gamma,Pareto} (`kl.py:761-765`);
       Pareto-{Beta,Uniform} (`kl.py:795-797`); Poisson-Bernoulli
       (`kl.py:841`).
-  Still NOT-STARTED (each a concrete prereq, not a deferral):
-    - Independent-Independent (`kl.py:944`) — `Independent<T, D>` is
-      generic over the concrete base `D`, so the `Any::downcast_ref`
-      dispatch cannot match it without a KL-recursion trait hook on the
-      `Distribution` trait (in `lib.rs`) + an override in
-      `independent.rs`. Both files are outside the kl.rs+kl.md manifest;
-      this needs a follow-up acto-builder dispatch with an expanded
-      manifest.
-    - TransformedDistribution-TransformedDistribution (`kl.py:496`) +
-      ExponentialFamily-ExponentialFamily (`kl.py:282`) — need the
-      base-recursion / Bregman-divergence trait surface.
-  Closing the remaining ~4 is tracked by blocker #1374 (stays open).
-  The Independent / TransformedDistribution / ExponentialFamily
-  KL-recursion (and Bregman) trait hooks must each be filed as their own
-  blockers before the dependent KL pairs can ship; the missing
-  distribution-type prerequisites (Geometric, ContinuousBernoulli) have
-  now shipped.
+  The #1374 final tail SHIPPED the 2 recursion-based pairs (84 -> 86):
+    - Independent-Independent (`kl.py:944-949`
+      `_kl_independent_independent`): `fn kl_divergence_dyn` checks both
+      operands' `Distribution::kl_recurse` hook; for two `Independent`s it
+      raises (InvalidArgument, mirroring NotImplementedError) when
+      `reinterpreted_batch_ndims` differ, else recurses
+      `kl_divergence_dyn(p.base, q.base)` and applies
+      `fn kl_sum_rightmost(result, n)` (mirrors `_sum_rightmost`,
+      `torch/distributions/utils.py:76-87`). The hook needed:
+      `pub trait AsDistAny` + blanket impl as a `Distribution` supertrait
+      (in `lib.rs`) so a type-erased `&dyn Distribution<T>` base can
+      recover `&dyn Any` for the downcast chain; `enum KlRecurseKind` +
+      `struct KlRecurseInfo` + the `fn Distribution::kl_recurse` default
+      (in `lib.rs`); the `fn Independent::kl_recurse` override (in
+      `independent.rs`).
+    - TransformedDistribution-TransformedDistribution (`kl.py:496-502`
+      `_kl_transformed_transformed`): `fn kl_divergence_dyn` raises when
+      the transform-chain fingerprints (`fn Transform::transform_eq_key`,
+      mirroring each `Transform.__eq__`) or the event shapes differ, else
+      returns the base KL unchanged (`kl.py:502`). The hook needed:
+      `fn Transform::transform_eq_key` default (= `name()`) + overrides
+      on `AffineTransform` (folds `loc`/`scale`, mirrors
+      `transforms.py:808-825`) and `PowerTransform` (folds `exponent`,
+      `transforms.py:621-624`); the `fn TransformedDistribution::kl_recurse`
+      override (all in `transforms.rs`).
+  Still NOT-STARTED (a concrete prereq, not a deferral):
+    - ExponentialFamily-ExponentialFamily (`kl.py:282-300`
+      `_kl_expfamily_expfamily`) — blocked on #1575. Two prerequisites:
+      (1) a dispatch path that matches a GENERIC `T: ExponentialFamily`
+      pair — the closed `Any::downcast_ref` chain in `kl_dispatch` cannot
+      express a "match any exponential family" arm (it matches concrete
+      types only); and (2) a DIFFERENTIABLE `log_normalizer`: torch calls
+      `torch.autograd.grad(lg_normal.sum(), p_nparams, create_graph=True)`
+      (`kl.py:292`), but ferrotorch's `ExponentialFamily::log_normalizer`
+      impls (`normal.rs`, `poisson.rs`) compute on raw `.data_vec()` with
+      `requires_grad=false` and build no autograd graph, so `grad()`
+      through them is impossible. Do NOT half-build a Bregman fallback
+      without both prerequisites.
+  Closing the last pair is tracked by blocker #1575; blocker #1374 stays
+  open until #1575 resolves. The missing distribution-type prerequisites
+  (Geometric, ContinuousBernoulli) and the recursion trait hooks have now
+  all shipped.
 
 - REQ-8: SHIPPED (design decision, #1375) — the explicit
   `Any::downcast_ref` match in `kl_dispatch` IS the chosen
@@ -207,14 +245,16 @@ match is the deliberate Rust-idiomatic design (REQ-8 / #1375).
 - [x] AC-5: Every formula's first statement is the fallback guard.
 - [x] AC-6: The doc-table on `kl_divergence` lists exactly 84 pairs,
   matching `KL_SUPPORTED_PAIR_COUNT`.
-- [~] AC-7: PyTorch's full ~88-pair coverage — 84/~88 shipped
+- [~] AC-7: PyTorch's full ~87-pair coverage — 86/~87 shipped
   (the #1562 closure added 27 pairs; the #1374 Binomial sub-part added
   the Binomial-Binomial + Poisson-Binomial pair; the #1374 Geometric
   sub-part added the Geometric-Geometric pair; the #1374
-  ContinuousBernoulli sub-part added the 13 CB pairs); blocker #1374
-  stays open for the remaining ~4 (Independent-Independent /
-  TransformedDistribution / ExponentialFamily pairs blocked on a
-  KL-recursion / Bregman trait hook outside the kl.rs manifest).
+  ContinuousBernoulli sub-part added the 13 CB pairs; the #1374 final
+  tail added the 2 recursion pairs Independent-Independent +
+  TransformedDistribution-TransformedDistribution); only
+  ExponentialFamily-ExponentialFamily remains, blocked on #1575 (generic
+  exponential-family dispatch + differentiable log_normalizer). Blocker
+  #1374 stays open until #1575 resolves.
 - [x] AC-8: `register_kl` extension API — closed as a design
   decision (#1375): the explicit `Any::downcast_ref` match is the
   chosen Rust-idiomatic dispatch; the drift test enforces
@@ -426,10 +466,10 @@ Expected: `114 passed`.
 | REQ | Status | Evidence |
 |---|---|---|
 | REQ-1 | SHIPPED | impl: `pub fn kl_divergence<T: Float, P, Q>` with `P: Distribution<T> + 'static`, `Q: Distribution<T> + 'static` bounds in `kl.rs`, mirroring `torch/distributions/kl.py:kl_divergence`; non-test consumer: `pub mod kl` in `lib.rs:63` and `pub fn kl_divergence` exposes it as grandfathered public API; tests `test_kl_*` (~25 sites) exercise it through the trait dispatch path. |
-| REQ-2 | SHIPPED | impl: `pub const fn kl_supported_pair_count() -> usize` and `KL_SUPPORTED_PAIR_COUNT: usize = 84` constant in `kl.rs`; non-test consumer: the const fn is grandfathered public API (introspection extension point); the drift-prevention test `kl_doc_table_matches_dispatcher` reads `include_str!("kl.rs")` and asserts the three-way invariant against the public accessor — that test is the production check. `audit_1374_supported_pair_count_is_41` in `divergence_wave_m_audit.rs` pins the accessor (now 84). |
-| REQ-3 | SHIPPED | impl: `fn kl_dispatch<T: Float>(p: &dyn Any, q: &dyn Any)` 84-arm `Any::downcast_ref` chain in `kl.rs`, mirroring PyTorch's `_dispatch_kl` in `torch/distributions/kl.py:113-138`; non-test consumer: `pub fn kl_divergence` invokes `kl_dispatch::<T>(p, q)` on every call — that's the in-crate production consumer. |
+| REQ-2 | SHIPPED | impl: `pub const fn kl_supported_pair_count() -> usize` and `KL_SUPPORTED_PAIR_COUNT: usize = 86` constant in `kl.rs` (84 concrete `downcast_ref` arms + 2 recursion arms); non-test consumer: the const fn is grandfathered public API (introspection extension point); the drift-prevention test `kl_doc_table_matches_dispatcher` reads `include_str!("kl.rs")` and asserts the three-way invariant (constant == doc-table rows == `downcast_ref` arms + `KL_RECURSION_ARM_COUNT`) against the public accessor — that test is the production check. `audit_1374_supported_pair_count_is_41` in `divergence_wave_m_audit.rs` pins the accessor (now 86). |
+| REQ-3 | SHIPPED | impl: `fn kl_dispatch<T: Float>(p: &dyn Any, q: &dyn Any)` 84-arm `Any::downcast_ref` chain in `kl.rs`, mirroring PyTorch's `_dispatch_kl` in `torch/distributions/kl.py:113-138`, plus `pub fn kl_divergence_dyn` which applies the 2 recursion arms (`Distribution::kl_recurse`) before the concrete chain; non-test consumer: `pub fn kl_divergence` invokes `kl_divergence_dyn::<T>(p, q)` on every call — that's the in-crate production consumer. |
 | REQ-4 | SHIPPED | impl: 8 same-family `fn kl_<p>_<q><T: Float>` formulas in `kl.rs` (`kl_normal_normal`, `kl_bernoulli_bernoulli`, `kl_uniform_uniform`, `kl_categorical_categorical`, `kl_laplace_laplace`, `kl_exponential_exponential`, `kl_gamma_gamma`, `kl_poisson_poisson`), mirroring the `@register_kl` bodies in `torch/distributions/kl.py`; non-test consumer: `fn kl_dispatch in kl.rs` invokes each formula in its respective arm — 8 production call sites. |
 | REQ-5 | SHIPPED | impl: 4 cross-family formulas (`kl_normal_uniform`, `kl_uniform_normal`, `kl_gamma_exponential`, `kl_exponential_gamma`) in `kl.rs`; the last two use `fn kl_gamma_scalar` via `Exp(λ) ≡ Gamma(1, λ)`; non-test consumer: `fn kl_dispatch in kl.rs` calls each — 4 production call sites; `fn kl_gamma_scalar` is consumed by 3 production sites internally (Gamma-Gamma, Gamma-Exp, Exp-Gamma). |
 | REQ-6 | SHIPPED | impl: every formula's first statement is `crate::fallback::check_gpu_fallback_opt_in(&[...], "kl_divergence(P, Q)")?` in `kl.rs` — 38 production call sites of the fallback gate (one per scalar formula fn; the four MVN/LowRankMVN pairs share the gate inside `fn kl_mvn_pair`); non-test consumer: this IS the production consumer of `fn check_gpu_fallback_opt_in in fallback.rs` (per `fallback.md` REQ-2). The `op` argument names every call site. |
-| REQ-7 | PARTIAL | blocker #1374 — PyTorch ships ~88 (P, Q) KL pairs; ferrotorch now has 84 (was 41). The #1374 ContinuousBernoulli sub-part added 13 pairs that needed the new `ContinuousBernoulli` struct (`continuous_bernoulli.rs`): 6 finite — `fn kl_continuous_bernoulli_continuous_bernoulli` (`kl.py:255-260`), `fn kl_beta_continuous_bernoulli` (`kl.py:518-525`), `fn kl_continuous_bernoulli_exponential` (`kl.py:586-588`), `fn kl_continuous_bernoulli_normal` (`kl.py:595-604`), `fn kl_continuous_bernoulli_uniform` (`kl.py:607-617`, where-mask `+inf` on `q.low>=0 \| q.high<=1`), `fn kl_uniform_continuous_bernoulli` (`kl.py:871-886`, where-mask `+inf` on `p.high>=1 \| p.low<=0`) — plus 7 `+inf` via `fn kl_infinite_like`: ContinuousBernoulli-Pareto (`kl.py:581`), {Exponential,Gamma,Gumbel,Laplace,Normal,Pareto}-ContinuousBernoulli (`kl.py:621,666,719,741,762,796`). The CB closed forms reuse the crate-visible `_lims`-cutoff scalar helpers (`cont_bern_log_norm_scalar`/`mean_scalar`/`entropy_scalar`/`variance_scalar`/`logits_scalar`) from `continuous_bernoulli.rs`. Non-test consumer: each invoked by its `fn kl_dispatch` downcast arm in `kl.rs`, reached via `pub fn kl_divergence`. Pinned by `test_kl_cb_cb_{same_is_zero,known_value,near_half,batched,scalar_p_batched_q_broadcast}`, `test_kl_beta_cb_known_value`, `test_kl_cb_exponential_known_value`, `test_kl_cb_normal_known_value`, `test_kl_cb_uniform_{contains_support_is_inf,wider_is_finite}`, `test_kl_uniform_cb_{inner_is_finite,touching_support_is_inf}`, `test_kl_cb_support_mismatch_infinity_family` in `kl.rs` `mod tests` (live-torch 2.11 f64, R-CHAR-3 non-tautological). The #1374 Binomial sub-part added 2 pairs that needed the new `Binomial` struct (`binomial.rs`): finite `fn kl_binomial_binomial` (mirrors `kl.py:231-244`: `n·(p·(logit_p−logit_q)+ln(1−p)−ln(1−q))`, `+inf` where `n_p>n_q`, `InvalidArgument` where `n_p<n_q`) + Poisson-Binomial routed through `fn kl_infinite_like` (mirrors `_kl_poisson_infinity` `kl.py:842`). The #1374 Geometric sub-part added 1 pair that needed the new `Geometric` struct (`geometric.rs`): finite `fn kl_geometric_geometric` (mirrors `kl.py:320-322`: `-p.entropy() - log1p(-q.probs)/p.probs - q.logits`); non-test consumer: its `fn kl_dispatch` downcast arm reads `p.probs()`/`q.probs()` off the `Geometric` accessors, reached via `pub fn kl_divergence`; pinned by `test_kl_geometric_geometric_{same_is_zero,known_value,batched,nonnegative}` in `kl.rs` `mod tests` (live-torch 2.11 f64). Non-test consumer (Binomial): each is invoked by its `fn kl_dispatch` downcast arm in `kl.rs` (the in-crate production caller, reached via `pub fn kl_divergence`); `fn kl_binomial_binomial` reads `p.total_count().data_vec()?` / `p.probs().data_vec()?` off the `Binomial` accessors. Pinned by `test_kl_binomial_binomial_{same_is_zero,known_value,known_value_2,larger_np_is_inf,smaller_np_errors}` + `test_kl_poisson_binomial_is_inf` in `kl.rs` `mod tests` (live-torch 2.11 f64 reference values, R-CHAR-3 non-tautological). The #1562 both-types-exist closure earlier added 27 pairs. Finite impl: `fn kl_onehotcategorical_onehotcategorical` (mirrors `kl.py:474-476`), `fn kl_bernoulli_poisson` (`kl.py:513-516`), `fn kl_normal_laplace` (`kl.py:782-792`, `erf` via `ferrotorch_core::special::erf`) in `kl.rs`. `+inf` impl: 24 support-mismatch arms routed through `fn kl_infinite_like` (mirrors `_infinite_like` at `kl.py:141-145`): Beta-Pareto `kl.py:528`; Exponential-{Beta,Pareto,Uniform} `kl.py:620-623`; Gamma-{Beta,Pareto,Uniform} `kl.py:665-668`; Gumbel-{Beta,Exponential,Gamma,Pareto,Uniform} `kl.py:718-723`; Laplace-{Beta,Exponential,Gamma,Pareto,Uniform} `kl.py:740-745`; Normal-{Beta,Exponential,Gamma,Pareto} `kl.py:761-765`; Pareto-{Beta,Uniform} `kl.py:795-797`; Poisson-Bernoulli `kl.py:841`. Pinned by `divergence_kl_onehotcategorical_onehotcategorical_missing`, `divergence_kl_bernoulli_poisson_missing`, `divergence_kl_normal_laplace_missing` + the extended `divergence_kl_support_mismatch_family_is_positive_infinity` / second-point tests in `divergence_kl_1374_both_types_exist_gaps.rs`. Plus the prior wave-N MVN/LowRankMVN pairs (`fn kl_multivariatenormal_multivariatenormal` etc.). Still NOT-STARTED: `Independent-Independent` (`kl.py:944`, generic-base barrier needs a `Distribution`-trait KL hook in `lib.rs` + `independent.rs`, outside this manifest); TransformedDistribution-TransformedDistribution + ExponentialFamily-ExponentialFamily (base-recursion / Bregman trait surface). #1374 stays open for the remaining ~4. |
-| REQ-8 | SHIPPED (design decision) | #1375 — the explicit `Any::downcast_ref` match in `fn kl_dispatch in kl.rs` is the deliberate Rust-idiomatic equivalent of PyTorch's `@register_kl` + `_dispatch_kl` (`torch/distributions/kl.py:51-138`), a Python-runtime open-extension pattern. The maintainability a registry would buy is delivered by the `kl_doc_table_matches_dispatcher` drift test that pins the doc table, the `KL_SUPPORTED_PAIR_COUNT` constant, and the dispatcher arms in lockstep; non-test consumer: `pub fn kl_divergence` invokes the match on every call. A `Lazy<HashMap<(TypeId,TypeId),Fn>>` registry would add indirection without enabling cross-crate extension (formulas need crate-private typed accessors). `audit_1375_supported_pair_count` in `divergence_wave_l_audit.rs` pins the count (currently 71). Closes #1375. |
+| REQ-7 | PARTIAL | blocker #1374 — PyTorch ships ~87 (P, Q) KL pairs; ferrotorch now has 86 (was 41). The #1374 ContinuousBernoulli sub-part added 13 pairs that needed the new `ContinuousBernoulli` struct (`continuous_bernoulli.rs`): 6 finite — `fn kl_continuous_bernoulli_continuous_bernoulli` (`kl.py:255-260`), `fn kl_beta_continuous_bernoulli` (`kl.py:518-525`), `fn kl_continuous_bernoulli_exponential` (`kl.py:586-588`), `fn kl_continuous_bernoulli_normal` (`kl.py:595-604`), `fn kl_continuous_bernoulli_uniform` (`kl.py:607-617`, where-mask `+inf` on `q.low>=0 \| q.high<=1`), `fn kl_uniform_continuous_bernoulli` (`kl.py:871-886`, where-mask `+inf` on `p.high>=1 \| p.low<=0`) — plus 7 `+inf` via `fn kl_infinite_like`: ContinuousBernoulli-Pareto (`kl.py:581`), {Exponential,Gamma,Gumbel,Laplace,Normal,Pareto}-ContinuousBernoulli (`kl.py:621,666,719,741,762,796`). The CB closed forms reuse the crate-visible `_lims`-cutoff scalar helpers (`cont_bern_log_norm_scalar`/`mean_scalar`/`entropy_scalar`/`variance_scalar`/`logits_scalar`) from `continuous_bernoulli.rs`. Non-test consumer: each invoked by its `fn kl_dispatch` downcast arm in `kl.rs`, reached via `pub fn kl_divergence`. Pinned by `test_kl_cb_cb_{same_is_zero,known_value,near_half,batched,scalar_p_batched_q_broadcast}`, `test_kl_beta_cb_known_value`, `test_kl_cb_exponential_known_value`, `test_kl_cb_normal_known_value`, `test_kl_cb_uniform_{contains_support_is_inf,wider_is_finite}`, `test_kl_uniform_cb_{inner_is_finite,touching_support_is_inf}`, `test_kl_cb_support_mismatch_infinity_family` in `kl.rs` `mod tests` (live-torch 2.11 f64, R-CHAR-3 non-tautological). The #1374 Binomial sub-part added 2 pairs that needed the new `Binomial` struct (`binomial.rs`): finite `fn kl_binomial_binomial` (mirrors `kl.py:231-244`: `n·(p·(logit_p−logit_q)+ln(1−p)−ln(1−q))`, `+inf` where `n_p>n_q`, `InvalidArgument` where `n_p<n_q`) + Poisson-Binomial routed through `fn kl_infinite_like` (mirrors `_kl_poisson_infinity` `kl.py:842`). The #1374 Geometric sub-part added 1 pair that needed the new `Geometric` struct (`geometric.rs`): finite `fn kl_geometric_geometric` (mirrors `kl.py:320-322`: `-p.entropy() - log1p(-q.probs)/p.probs - q.logits`); non-test consumer: its `fn kl_dispatch` downcast arm reads `p.probs()`/`q.probs()` off the `Geometric` accessors, reached via `pub fn kl_divergence`; pinned by `test_kl_geometric_geometric_{same_is_zero,known_value,batched,nonnegative}` in `kl.rs` `mod tests` (live-torch 2.11 f64). Non-test consumer (Binomial): each is invoked by its `fn kl_dispatch` downcast arm in `kl.rs` (the in-crate production caller, reached via `pub fn kl_divergence`); `fn kl_binomial_binomial` reads `p.total_count().data_vec()?` / `p.probs().data_vec()?` off the `Binomial` accessors. Pinned by `test_kl_binomial_binomial_{same_is_zero,known_value,known_value_2,larger_np_is_inf,smaller_np_errors}` + `test_kl_poisson_binomial_is_inf` in `kl.rs` `mod tests` (live-torch 2.11 f64 reference values, R-CHAR-3 non-tautological). The #1562 both-types-exist closure earlier added 27 pairs. Finite impl: `fn kl_onehotcategorical_onehotcategorical` (mirrors `kl.py:474-476`), `fn kl_bernoulli_poisson` (`kl.py:513-516`), `fn kl_normal_laplace` (`kl.py:782-792`, `erf` via `ferrotorch_core::special::erf`) in `kl.rs`. `+inf` impl: 24 support-mismatch arms routed through `fn kl_infinite_like` (mirrors `_infinite_like` at `kl.py:141-145`): Beta-Pareto `kl.py:528`; Exponential-{Beta,Pareto,Uniform} `kl.py:620-623`; Gamma-{Beta,Pareto,Uniform} `kl.py:665-668`; Gumbel-{Beta,Exponential,Gamma,Pareto,Uniform} `kl.py:718-723`; Laplace-{Beta,Exponential,Gamma,Pareto,Uniform} `kl.py:740-745`; Normal-{Beta,Exponential,Gamma,Pareto} `kl.py:761-765`; Pareto-{Beta,Uniform} `kl.py:795-797`; Poisson-Bernoulli `kl.py:841`. Pinned by `divergence_kl_onehotcategorical_onehotcategorical_missing`, `divergence_kl_bernoulli_poisson_missing`, `divergence_kl_normal_laplace_missing` + the extended `divergence_kl_support_mismatch_family_is_positive_infinity` / second-point tests in `divergence_kl_1374_both_types_exist_gaps.rs`. Plus the prior wave-N MVN/LowRankMVN pairs (`fn kl_multivariatenormal_multivariatenormal` etc.). The #1374 final tail SHIPPED the 2 recursion pairs (84 -> 86): **Independent-Independent** (`kl.py:944-949`) — impl `pub fn kl_divergence_dyn in kl.rs` + `fn kl_recurse_pair`/`fn kl_sum_rightmost in kl.rs`, dispatched via the new `pub trait AsDistAny` (`Distribution` supertrait) + `enum KlRecurseKind`/`struct KlRecurseInfo`/`fn Distribution::kl_recurse` in `lib.rs` + `fn Independent::kl_recurse in independent.rs`; non-test consumer: `pub fn kl_divergence` -> `kl_divergence_dyn` invokes the recursion arm on every `Independent` pair; pinned by `test_kl_independent_independent_{known_value,same_is_zero,ndims_2_is_scalar,ndims_mismatch_errs,nested_recursion}` in `kl.rs mod tests` (live-torch 2.11 f64, R-CHAR-3). **TransformedDistribution-TransformedDistribution** (`kl.py:496-502`) — impl `fn kl_recurse_pair in kl.rs` (transform-fingerprint + event-shape guards then base recursion) + `fn Transform::transform_eq_key in transforms.rs` (overrides on `AffineTransform`/`PowerTransform`) + `fn TransformedDistribution::kl_recurse in transforms.rs`; non-test consumer: `pub fn kl_divergence` -> `kl_divergence_dyn` invokes it on every Transformed pair; pinned by `test_kl_transformed_transformed_{same_affine_known_value,same_exp_known_value,same_is_zero,different_transforms_errs,different_transform_types_errs}` + `test_kl_transformed_base_independent_nested_recursion` + `test_kl_mixed_recursion_kinds_fall_through_errs` in `kl.rs mod tests`. Still NOT-STARTED: `ExponentialFamily-ExponentialFamily` (`kl.py:282-300`) — blocker **#1575**: needs (1) generic-`ExponentialFamily` dispatch (closed `downcast_ref` chain can't match a "any exp-family" arm) and (2) a differentiable `log_normalizer` (current impls in `normal.rs`/`poisson.rs` compute on raw `.data_vec()`, no autograd graph, so `torch.autograd.grad(..., create_graph=True)` at `kl.py:292` cannot be mirrored). #1374 stays open until #1575 resolves. |
+| REQ-8 | SHIPPED (design decision) | #1375 — the explicit `Any::downcast_ref` match in `fn kl_dispatch in kl.rs` is the deliberate Rust-idiomatic equivalent of PyTorch's `@register_kl` + `_dispatch_kl` (`torch/distributions/kl.py:51-138`), a Python-runtime open-extension pattern. The maintainability a registry would buy is delivered by the `kl_doc_table_matches_dispatcher` drift test that pins the doc table, the `KL_SUPPORTED_PAIR_COUNT` constant, and the dispatcher arms in lockstep; non-test consumer: `pub fn kl_divergence` invokes the match on every call. A `Lazy<HashMap<(TypeId,TypeId),Fn>>` registry would add indirection without enabling cross-crate extension (formulas need crate-private typed accessors). `audit_1375_supported_pair_count` in `divergence_wave_l_audit.rs` pins the count (currently 86). Closes #1375. |

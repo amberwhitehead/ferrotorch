@@ -138,12 +138,84 @@ pub use uniform::Uniform;
 pub use von_mises::VonMises;
 pub use weibull::Weibull;
 
+use std::any::Any;
 use std::collections::HashMap;
 use std::fmt::Debug;
 
 use ferrotorch_core::dtype::Float;
 use ferrotorch_core::error::{FerrotorchError, FerrotorchResult};
 use ferrotorch_core::tensor::Tensor;
+
+// ---------------------------------------------------------------------------
+// AsDistAny — vtable-resident `&dyn Any` downcast hook (#1374 KL recursion)
+// ---------------------------------------------------------------------------
+
+/// Upcast a `&dyn Distribution<T>` (or any `'static` value) to `&dyn Any`.
+///
+/// `kl_dispatch` (in `kl.rs`) matches concrete `(P, Q)` pairs by
+/// `Any::downcast_ref`, which a *sized* `&P: Distribution<T> + 'static`
+/// coerces into for free. But the recursion-based KL pairs
+/// (`Independent-Independent`, `TransformedDistribution-TransformedDistribution`,
+/// mirroring `torch/distributions/kl.py:944-949,496-502`) must re-dispatch on
+/// a *type-erased* base distribution — a `&dyn Distribution<T>` — which has
+/// already lost the `Any` vtable entry. Making `AsDistAny` a supertrait of
+/// [`Distribution`] puts `as_dist_any` *in the `Distribution` vtable*, so
+/// every `&dyn Distribution<T>` can recover its concrete `&dyn Any` for the
+/// downcast chain. The blanket impl below covers every `'static` type, so no
+/// per-distribution boilerplate is needed.
+pub trait AsDistAny {
+    /// Recover the value as `&dyn Any` for concrete-type downcasting.
+    fn as_dist_any(&self) -> &dyn Any;
+}
+
+impl<U: 'static> AsDistAny for U {
+    fn as_dist_any(&self) -> &dyn Any {
+        self
+    }
+}
+
+/// Which recursion-based KL registration a distribution participates in.
+///
+/// Mirrors the two `@register_kl` registrations that recurse into a base
+/// distribution rather than reading concrete parameters:
+/// `_kl_independent_independent` (`torch/distributions/kl.py:944-949`) and
+/// `_kl_transformed_transformed` (`torch/distributions/kl.py:496-502`).
+#[derive(Debug, Clone)]
+pub enum KlRecurseKind {
+    /// [`Independent`]: `KL = _sum_rightmost(KL(p.base, q.base), n)` when the
+    /// two share `reinterpreted_batch_ndims = n`, else `NotImplementedError`.
+    /// Mirrors `torch/distributions/kl.py:944-949`.
+    Independent {
+        /// `reinterpreted_batch_ndims` — the number of rightmost dims of the
+        /// base-dist KL result to sum out.
+        reinterpreted_batch_ndims: usize,
+    },
+    /// [`TransformedDistribution`]: `KL = KL(p.base, q.base)` when the two
+    /// have equal transform chains AND equal event shapes, else
+    /// `NotImplementedError`. Mirrors `torch/distributions/kl.py:496-502`.
+    Transformed {
+        /// Structural fingerprint of the transform chain — equal iff the two
+        /// chains are equal under each `Transform`'s `__eq__` semantics
+        /// (`torch/distributions/transforms.py` per-transform `__eq__`).
+        transform_fingerprint: Vec<String>,
+        /// The distribution's `event_shape` (the `p.event_shape !=
+        /// q.event_shape` guard at `torch/distributions/kl.py:500-501`).
+        event_shape: Vec<usize>,
+    },
+}
+
+/// Recursion descriptor returned by [`Distribution::kl_recurse`].
+///
+/// Carries the type-erased base distribution to re-dispatch on plus the
+/// per-kind metadata the KL recursion needs. `None` from `kl_recurse` (the
+/// trait default) means the distribution participates in KL only via concrete
+/// closed-form arms, not recursion.
+pub struct KlRecurseInfo<'a, T: Float> {
+    /// The base distribution to re-run `kl_divergence` on.
+    pub base: &'a dyn Distribution<T>,
+    /// Which recursion registration this distribution participates in.
+    pub kind: KlRecurseKind,
+}
 
 // ---------------------------------------------------------------------------
 // Dyn-safe constraint object surface (REQ-5: support / arg_constraints)
@@ -222,7 +294,7 @@ where
 ///
 /// Distributions that cannot be reparameterized (e.g., [`Bernoulli`],
 /// [`Categorical`]) return an error from `rsample`.
-pub trait Distribution<T: Float>: Send + Sync {
+pub trait Distribution<T: Float>: Send + Sync + AsDistAny {
     /// Draw samples from the distribution.
     ///
     /// The returned tensor has the given `shape` and `requires_grad = false`.
@@ -412,6 +484,21 @@ pub trait Distribution<T: Float>: Send + Sync {
             h.shape().to_vec(),
             false,
         )
+    }
+
+    /// Recursion descriptor for the KL pairs that re-dispatch into a base
+    /// distribution instead of reading concrete parameters.
+    ///
+    /// Default returns `None` (the distribution participates in KL only via
+    /// concrete closed-form arms). [`Independent`] and
+    /// [`TransformedDistribution`] override this to expose their type-erased
+    /// base + the per-kind guard metadata, which lets `kl_divergence` mirror
+    /// `_kl_independent_independent` (`torch/distributions/kl.py:944-949`) and
+    /// `_kl_transformed_transformed` (`torch/distributions/kl.py:496-502`)
+    /// without the dispatcher needing the concrete generic base type `D`
+    /// (which `Any::downcast_ref` cannot recover for `Independent<T, D>`).
+    fn kl_recurse(&self) -> Option<KlRecurseInfo<'_, T>> {
+        None
     }
 }
 

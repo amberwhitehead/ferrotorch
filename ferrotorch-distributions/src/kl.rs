@@ -20,7 +20,7 @@
 //! | REQ-4 (8 same-family closed-form formulas) | SHIPPED | 8 closed-form helpers in `kl.rs` (`kl_normal_normal`, `kl_bernoulli_bernoulli`, `kl_uniform_uniform`, `kl_categorical_categorical`, `kl_laplace_laplace`, `kl_exponential_exponential`, `kl_gamma_gamma`, `kl_poisson_poisson`) mirroring `@register_kl` bodies in `torch/distributions/kl.py`; consumer: the dispatcher invokes each formula |
 //! | REQ-5 (cross-family finite formulas) | SHIPPED | `kl_uniform_normal`, `kl_gamma_exponential`, `kl_exponential_gamma` in `kl.rs`; last two use `kl_gamma_scalar` via `Exp(λ) ≡ Gamma(1, λ)`; consumer: the dispatcher calls each; `kl_gamma_scalar` is consumed by 3 production sites internally. (Normal-Uniform was a finite arm here but moved to the `+inf` support-mismatch family per `kl.py:766,768` `_kl_normal_infinity` — #1563.) |
 //! | REQ-6 (fallback guard on every formula) | SHIPPED | every finite formula's first statement is `crate::fallback::check_gpu_fallback_opt_in(&[...], "kl_divergence(P, Q)")?` in `kl.rs`; consumer: this IS the production consumer of `fn check_gpu_fallback_opt_in` per `fallback.md` REQ-2 (the `+inf` support-mismatch arms read a single param tensor that is already host-resident, so they hand it straight to `kl_infinite_like`) |
-//! | REQ-7 (full ~75-pair PyTorch coverage) | PARTIAL | blocker #1374 — ferrotorch now ships 84 of PyTorch's ~88 (P,Q) pairs (was 41). The #1562 closure added 27; the #1374 Binomial sub-part added 2: `kl_binomial_binomial` (finite, mirrors `torch/distributions/kl.py:231-244`) + Poisson-Binomial via `kl_infinite_like` (`_kl_poisson_infinity` `kl.py:842`). The #1374 Geometric sub-part added 1: `kl_geometric_geometric` (finite, `kl.py:320-322`). The #1374 ContinuousBernoulli sub-part added 13 (needed the new `ContinuousBernoulli` struct, `continuous_bernoulli.rs`): 6 finite — `kl_continuous_bernoulli_continuous_bernoulli` (`kl.py:255-260`), `kl_beta_continuous_bernoulli` (`kl.py:518-525`), `kl_continuous_bernoulli_exponential` (`kl.py:586-588`), `kl_continuous_bernoulli_normal` (`kl.py:595-604`), `kl_continuous_bernoulli_uniform` (`kl.py:607-617`, where-mask `+inf` when the Uniform support contains [0,1]), `kl_uniform_continuous_bernoulli` (`kl.py:871-886`, where-mask) — plus 7 support-mismatch `+inf` via `kl_infinite_like`: ContinuousBernoulli-Pareto (`kl.py:581`), {Exponential,Gamma,Gumbel,Laplace,Normal,Pareto}-ContinuousBernoulli (`kl.py:621,666,719,741,762,796`); the CB closed forms reuse the crate-visible `_lims=(0.499,0.501)` Taylor-cutoff scalar helpers from `continuous_bernoulli.rs`. Finite #1562 arms (`kl_onehotcategorical_onehotcategorical` `kl.py:474-476`, `kl_bernoulli_poisson` `kl.py:513-516`, `kl_normal_laplace` `kl.py:782-792`) + 24 support-mismatch `+inf` arms (PyTorch's `_infinite_like` registrations: Beta-Pareto `kl.py:528`; Exponential-{Beta,Pareto,Uniform} `kl.py:620-623`; Gamma-{Beta,Pareto,Uniform} `kl.py:665-668`; Gumbel-{Beta,Exponential,Gamma,Pareto,Uniform} `kl.py:718-723`; Laplace-{Beta,Exponential,Gamma,Pareto,Uniform} `kl.py:740-745`; Normal-{Beta,Exponential,Gamma,Pareto} `kl.py:761-765`; Pareto-{Beta,Uniform} `kl.py:795-797`; Poisson-Bernoulli `kl.py:841`) routed through the `kl_infinite_like` helper; consumer: each is invoked by its dispatcher downcast arm. Still NOT-STARTED: (a) `Independent-Independent` (`kl.py:944`) — `Independent<T, D>` is generic over the concrete base `D`, so `Any::downcast_ref` cannot match it without a KL-recursion trait hook on `Distribution` (`lib.rs`) + an override in `independent.rs`, both outside this manifest (concrete prereq, not a deferral); (b) TransformedDistribution-TransformedDistribution / ExponentialFamily-ExponentialFamily — each blocked on a base-recursion / Bregman trait surface. #1374 stays open for the remaining ~4. |
+//! | REQ-7 (full ~75-pair PyTorch coverage) | PARTIAL | blocker #1374 — ferrotorch now ships 86 of PyTorch's ~87 (P,Q) pairs (was 41). The #1562 closure added 27; the #1374 Binomial sub-part added 2: `kl_binomial_binomial` (finite, mirrors `torch/distributions/kl.py:231-244`) + Poisson-Binomial via `kl_infinite_like` (`_kl_poisson_infinity` `kl.py:842`). The #1374 Geometric sub-part added 1: `kl_geometric_geometric` (finite, `kl.py:320-322`). The #1374 ContinuousBernoulli sub-part added 13 (needed the new `ContinuousBernoulli` struct, `continuous_bernoulli.rs`): 6 finite — `kl_continuous_bernoulli_continuous_bernoulli` (`kl.py:255-260`), `kl_beta_continuous_bernoulli` (`kl.py:518-525`), `kl_continuous_bernoulli_exponential` (`kl.py:586-588`), `kl_continuous_bernoulli_normal` (`kl.py:595-604`), `kl_continuous_bernoulli_uniform` (`kl.py:607-617`, where-mask `+inf` when the Uniform support contains [0,1]), `kl_uniform_continuous_bernoulli` (`kl.py:871-886`, where-mask) — plus 7 support-mismatch `+inf` via `kl_infinite_like`: ContinuousBernoulli-Pareto (`kl.py:581`), {Exponential,Gamma,Gumbel,Laplace,Normal,Pareto}-ContinuousBernoulli (`kl.py:621,666,719,741,762,796`); the CB closed forms reuse the crate-visible `_lims=(0.499,0.501)` Taylor-cutoff scalar helpers from `continuous_bernoulli.rs`. Finite #1562 arms (`kl_onehotcategorical_onehotcategorical` `kl.py:474-476`, `kl_bernoulli_poisson` `kl.py:513-516`, `kl_normal_laplace` `kl.py:782-792`) + 24 support-mismatch `+inf` arms (PyTorch's `_infinite_like` registrations: Beta-Pareto `kl.py:528`; Exponential-{Beta,Pareto,Uniform} `kl.py:620-623`; Gamma-{Beta,Pareto,Uniform} `kl.py:665-668`; Gumbel-{Beta,Exponential,Gamma,Pareto,Uniform} `kl.py:718-723`; Laplace-{Beta,Exponential,Gamma,Pareto,Uniform} `kl.py:740-745`; Normal-{Beta,Exponential,Gamma,Pareto} `kl.py:761-765`; Pareto-{Beta,Uniform} `kl.py:795-797`; Poisson-Bernoulli `kl.py:841`) routed through the `kl_infinite_like` helper; consumer: each is invoked by its dispatcher downcast arm. The #1374 final tail SHIPPED the 2 recursion pairs (84 -> 86): `Independent-Independent` (`kl.py:944-949`, `pub fn kl_divergence_dyn` + `kl_recurse_pair`/`kl_sum_rightmost` in `kl.rs`, dispatched via the new `AsDistAny` `Distribution` supertrait + `Distribution::kl_recurse` in `lib.rs` + `Independent::kl_recurse` in `independent.rs`) and `TransformedDistribution-TransformedDistribution` (`kl.py:496-502`, `kl_recurse_pair` transform-fingerprint/event-shape guards + `Transform::transform_eq_key` + `TransformedDistribution::kl_recurse` in `transforms.rs`); consumer: `pub fn kl_divergence` -> `kl_divergence_dyn` invokes each on every matching pair. Still NOT-STARTED: `ExponentialFamily-ExponentialFamily` (`kl.py:282-300`) — blocker #1575: needs a generic-exp-family dispatch path + a differentiable `log_normalizer` (current impls compute on raw `.data_vec()` with no autograd graph). #1374 stays open until #1575 resolves. |
 //! | REQ-8 (`register_kl` extension API) | SHIPPED (design decision, #1375) | the explicit `Any::downcast_ref` match in `kl_dispatch` is the deliberate Rust-idiomatic equivalent of PyTorch's `@register_kl` + `_dispatch_kl` (a Python-runtime open-extension pattern). Rust's static analog is the closed-crate match, kept maintainable by the `kl_doc_table_matches_dispatcher` drift test that pins the doc table, the const count, and the dispatcher arms in lockstep. A `Lazy<HashMap<(TypeId,TypeId),Fn>>` registry would add indirection without enabling cross-crate extension (formulas need concrete accessors). Documented in `kl.md` REQ-8. Closes #1375. |
 
 use ferrotorch_core::dtype::Float;
@@ -148,8 +148,17 @@ const EULER_GAMMA: f64 = 0.577_215_664_901_532_9;
 /// | Laplace | ContinuousBernoulli |
 /// | Normal | ContinuousBernoulli |
 /// | Pareto | ContinuousBernoulli |
+/// | Independent | Independent |
+/// | TransformedDistribution | TransformedDistribution |
 ///
 /// The same set is also reported by [`kl_supported_pair_count`].
+///
+/// The last two pairs are *recursion-based*: they re-dispatch
+/// `kl_divergence(p.base_dist, q.base_dist)` rather than reading concrete
+/// parameters (mirroring `_kl_independent_independent` /
+/// `_kl_transformed_transformed`), so they are handled in
+/// [`kl_divergence_dyn`] via [`Distribution::kl_recurse`] instead of the
+/// [`kl_dispatch`] `Any::downcast_ref` chain.
 ///
 /// # Errors
 ///
@@ -168,7 +177,152 @@ where
     P: Distribution<T> + 'static,
     Q: Distribution<T> + 'static,
 {
-    kl_dispatch::<T>(p, q)
+    kl_divergence_dyn::<T>(p, q)
+}
+
+/// Type-erased KL-divergence entry point.
+///
+/// Identical to [`kl_divergence`] but operates on already-`dyn`-erased
+/// operands. This is the form the recursion-based pairs re-enter on:
+/// `Independent-Independent` (`torch/distributions/kl.py:944-949`) and
+/// `TransformedDistribution-TransformedDistribution`
+/// (`torch/distributions/kl.py:496-502`) both recurse into
+/// `kl_divergence(p.base_dist, q.base_dist)`, where the base distributions are
+/// type-erased (`Box<dyn Distribution<T>>` / a generic `D`). It first applies
+/// the two recursion registrations (via [`Distribution::kl_recurse`]) and only
+/// then falls through to the concrete [`kl_dispatch`] `Any`-downcast chain.
+///
+/// # Errors
+///
+/// Returns an error if no KL formula is registered for the runtime `(P, Q)`
+/// pair, or if a recursion guard fails (mismatched `reinterpreted_batch_ndims`
+/// for `Independent`, or unequal transform chains for
+/// `TransformedDistribution`) — mirroring upstream's `NotImplementedError`.
+pub fn kl_divergence_dyn<T: Float>(
+    p: &dyn Distribution<T>,
+    q: &dyn Distribution<T>,
+) -> FerrotorchResult<Tensor<T>> {
+    // Recursion-based pairs first (they cannot be matched by `Any::downcast_ref`
+    // because `Independent<T, D>` is generic over the erased base type `D`).
+    if let (Some(pr), Some(qr)) = (p.kl_recurse(), q.kl_recurse()) {
+        if let Some(result) = kl_recurse_pair(&pr, &qr)? {
+            return result;
+        }
+    }
+    kl_dispatch::<T>(p.as_dist_any(), q.as_dist_any())
+}
+
+/// Apply the two recursion-based KL registrations when both operands expose a
+/// [`KlRecurseInfo`]. Returns:
+/// - `Ok(Some(Ok(tensor)))` / `Ok(Some(Err(..)))` — a matching recursion arm
+///   fired (possibly raising a guard error like upstream's
+///   `NotImplementedError`).
+/// - `Ok(None)` — the two recursion kinds don't pair (e.g. an `Independent`
+///   against a `TransformedDistribution`); the caller falls through to the
+///   concrete dispatch chain.
+#[allow(
+    clippy::type_complexity,
+    reason = "the nested Result models the three \
+    recursion outcomes (matched-ok / matched-guard-error / no-match) distinctly; \
+    a flatter type would conflate a guard NotImplementedError with a non-match"
+)]
+fn kl_recurse_pair<T: Float>(
+    pr: &crate::KlRecurseInfo<'_, T>,
+    qr: &crate::KlRecurseInfo<'_, T>,
+) -> FerrotorchResult<Option<FerrotorchResult<Tensor<T>>>> {
+    use crate::KlRecurseKind::{Independent, Transformed};
+    match (&pr.kind, &qr.kind) {
+        // _kl_independent_independent (kl.py:944-949)
+        (
+            Independent {
+                reinterpreted_batch_ndims: pn,
+            },
+            Independent {
+                reinterpreted_batch_ndims: qn,
+            },
+        ) => {
+            // kl.py:946-947: `if p.reinterpreted_batch_ndims !=
+            //   q.reinterpreted_batch_ndims: raise NotImplementedError`.
+            if pn != qn {
+                return Ok(Some(Err(FerrotorchError::InvalidArgument {
+                    message: format!(
+                        "kl_divergence(Independent, Independent): reinterpreted_batch_ndims \
+                         must match ({pn} vs {qn}); mirrors NotImplementedError at \
+                         torch/distributions/kl.py:946-947"
+                    ),
+                })));
+            }
+            // kl.py:948-949: `result = kl_divergence(p.base_dist, q.base_dist)`
+            //   then `return _sum_rightmost(result, p.reinterpreted_batch_ndims)`.
+            let base_kl = match kl_divergence_dyn::<T>(pr.base, qr.base) {
+                Ok(t) => t,
+                Err(e) => return Ok(Some(Err(e))),
+            };
+            Ok(Some(kl_sum_rightmost(&base_kl, *pn)))
+        }
+        // _kl_transformed_transformed (kl.py:496-502)
+        (
+            Transformed {
+                transform_fingerprint: pf,
+                event_shape: pe,
+            },
+            Transformed {
+                transform_fingerprint: qf,
+                event_shape: qe,
+            },
+        ) => {
+            // kl.py:498-499: `if p.transforms != q.transforms: raise`.
+            if pf != qf {
+                return Ok(Some(Err(FerrotorchError::InvalidArgument {
+                    message: "kl_divergence(TransformedDistribution, TransformedDistribution): \
+                              the two transform chains must be equal; mirrors \
+                              NotImplementedError at torch/distributions/kl.py:498-499"
+                        .into(),
+                })));
+            }
+            // kl.py:500-501: `if p.event_shape != q.event_shape: raise`.
+            if pe != qe {
+                return Ok(Some(Err(FerrotorchError::InvalidArgument {
+                    message: "kl_divergence(TransformedDistribution, TransformedDistribution): \
+                              the two event shapes must be equal; mirrors NotImplementedError \
+                              at torch/distributions/kl.py:500-501"
+                        .into(),
+                })));
+            }
+            // kl.py:502: `return kl_divergence(p.base_dist, q.base_dist)`.
+            Ok(Some(kl_divergence_dyn::<T>(pr.base, qr.base)))
+        }
+        // Mixed recursion kinds (Independent vs Transformed) have no registered
+        // recursion pair — fall through to the concrete dispatch (which will
+        // raise the no-formula error).
+        _ => Ok(None),
+    }
+}
+
+/// Sum the rightmost `n` dims of `t`, removing them. Mirrors
+/// `torch/distributions/utils.py:76-87` `_sum_rightmost` (used by
+/// `_kl_independent_independent`). `n == 0` returns a clone.
+fn kl_sum_rightmost<T: Float>(t: &Tensor<T>, n: usize) -> FerrotorchResult<Tensor<T>> {
+    let shape = t.shape();
+    if n > shape.len() {
+        return Err(FerrotorchError::InvalidArgument {
+            message: format!(
+                "kl_divergence(Independent, Independent): cannot sum {} rightmost dims of a \
+                 {}-D base-KL result",
+                n,
+                shape.len()
+            ),
+        });
+    }
+    if n == 0 {
+        return Ok(t.clone());
+    }
+    let mut out = t.clone();
+    for _ in 0..n {
+        let last_dim = (out.ndim() - 1) as i64;
+        out = ferrotorch_core::grad_fns::reduction::sum_dim(&out, last_dim, false)?;
+    }
+    Ok(out)
 }
 
 /// Number of `(P, Q)` distribution pairs for which [`kl_divergence`] has a
@@ -182,7 +336,19 @@ pub const fn kl_supported_pair_count() -> usize {
 /// Compile-time count of registered `(P, Q)` pairs. Update this when adding
 /// or removing a branch in [`kl_dispatch`] **and** the doc table on
 /// [`kl_divergence`] in lockstep; the drift test enforces the invariant.
-const KL_SUPPORTED_PAIR_COUNT: usize = 84;
+///
+/// Breakdown: 84 concrete `Any::downcast_ref` arms in [`kl_dispatch`] + 2
+/// recursion-based arms in [`kl_divergence_dyn`] (`Independent-Independent`
+/// and `TransformedDistribution-TransformedDistribution`, #1374), which
+/// dispatch via [`Distribution::kl_recurse`] rather than `downcast_ref`.
+const KL_SUPPORTED_PAIR_COUNT: usize = 86;
+
+/// Number of recursion-based KL arms handled in [`kl_divergence_dyn`] (not in
+/// the [`kl_dispatch`] `downcast_ref` chain): `Independent-Independent` +
+/// `TransformedDistribution-TransformedDistribution` (#1374). Kept as a named
+/// constant so the drift test can add it to the `downcast_ref` arm count.
+#[cfg(test)]
+const KL_RECURSION_ARM_COUNT: usize = 2;
 
 fn kl_dispatch<T: Float>(
     p: &dyn std::any::Any,
@@ -4746,14 +4912,18 @@ mod tests {
              KL_SUPPORTED_PAIR_COUNT ({expected}) — update both together"
         );
 
-        // (2) Count dispatcher arms: each registered pair uses
-        // `p.downcast_ref::<...>()` exactly once. We count the occurrences of
-        // that fragment in the body of `fn kl_dispatch`.
-        let dispatch_arms = count_dispatcher_arms(SRC);
+        // (2) Count dispatcher arms: each registered concrete pair uses
+        // `p.downcast_ref::<...>()` exactly once in the body of `fn
+        // kl_dispatch`; the 2 recursion-based pairs (Independent-Independent
+        // and TransformedDistribution-TransformedDistribution, #1374) are
+        // dispatched via `Distribution::kl_recurse` in `kl_divergence_dyn`, NOT
+        // by `downcast_ref`, so they are counted by the named constant
+        // `KL_RECURSION_ARM_COUNT`.
+        let dispatch_arms = count_dispatcher_arms(SRC) + KL_RECURSION_ARM_COUNT;
         assert_eq!(
             dispatch_arms, expected,
-            "dispatcher arms ({dispatch_arms}) in `kl_dispatch` must equal \
-             KL_SUPPORTED_PAIR_COUNT ({expected})"
+            "dispatcher arms ({dispatch_arms} = downcast_ref arms + \
+             KL_RECURSION_ARM_COUNT) must equal KL_SUPPORTED_PAIR_COUNT ({expected})"
         );
     }
 
@@ -4993,5 +5163,275 @@ mod tests {
         .unwrap();
         let kl = kl_divergence(&p, &q).unwrap();
         approx(kl.item().unwrap(), 2.207_128_053_688_782_3, 1e-9, "LR-MVN");
+    }
+
+    // -----------------------------------------------------------------------
+    // #1374 final tail: recursion-based KL pairs (Independent-Independent,
+    // TransformedDistribution-TransformedDistribution).
+    //
+    // Reference values from live `torch.distributions.kl_divergence` (f64,
+    // torch 2.11, this machine 2026-05-27). Each `expected` traces to a
+    // `@register_kl` body: `_kl_independent_independent`
+    // (`torch/distributions/kl.py:944-949`) and `_kl_transformed_transformed`
+    // (`torch/distributions/kl.py:496-502`) — both recurse into
+    // `kl_divergence(p.base_dist, q.base_dist)`, so the oracle values are the
+    // (sum-rightmost of the) underlying Normal-Normal KL, NOT a tautology
+    // (R-CHAR-3).
+    // -----------------------------------------------------------------------
+
+    use crate::transforms::{AffineTransform, ExpTransform};
+    use crate::{Independent, Normal, TransformedDistribution};
+    use ferrotorch_core::tensor::Tensor as FtTensor;
+
+    fn slice2(data: &[f64], shape: &[usize]) -> FtTensor<f64> {
+        ferrotorch_core::creation::from_slice(data, shape).unwrap()
+    }
+
+    // -- Independent-Independent (kl.py:944-949) -----------------------------
+
+    #[test]
+    fn test_kl_independent_independent_known_value() {
+        // torch: Independent(Normal(loc=[2,3], scale=[2,3]), 1) for p and q,
+        // KL sums the per-element Normal-Normal KL over the last (event) dim,
+        // yielding a [2]-shaped result (kl.py:948-949 `_sum_rightmost(.., 1)`).
+        let loc_p = slice2(&[0.0, 1.0, 2.0, -1.0, 0.5, 3.0], &[2, 3]);
+        let scale_p = slice2(&[1.0, 2.0, 0.5, 1.5, 1.0, 2.0], &[2, 3]);
+        let loc_q = slice2(&[0.5, 0.0, 1.0, 0.0, 1.0, 2.0], &[2, 3]);
+        let scale_q = slice2(&[1.2, 1.0, 1.0, 2.0, 0.8, 1.5], &[2, 3]);
+        let p = Independent::new(Normal::new(loc_p, scale_p).unwrap(), 1).unwrap();
+        let q = Independent::new(Normal::new(loc_q, scale_q).unwrap(), 1).unwrap();
+        let kl = kl_divergence(&p, &q).unwrap();
+        assert_eq!(kl.shape(), &[2], "Independent(.,1) reduces the last dim");
+        assert_close_slice(
+            kl.data().unwrap(),
+            // torch.distributions.kl_divergence(p, q).tolist()
+            &[2.241_349_334_571_732, 0.770_780_059_796_901_5],
+            1e-12,
+            "ind-ind known value",
+        );
+    }
+
+    #[test]
+    fn test_kl_independent_independent_same_is_zero() {
+        let loc = slice2(&[0.0, 1.0, 2.0, -1.0, 0.5, 3.0], &[2, 3]);
+        let scale = slice2(&[1.0, 2.0, 0.5, 1.5, 1.0, 2.0], &[2, 3]);
+        let mk = || Independent::new(Normal::new(loc.clone(), scale.clone()).unwrap(), 1).unwrap();
+        let kl = kl_divergence(&mk(), &mk()).unwrap();
+        assert_eq!(kl.shape(), &[2]);
+        assert_close_slice(kl.data().unwrap(), &[0.0, 0.0], 1e-12, "ind-ind same");
+    }
+
+    #[test]
+    fn test_kl_independent_independent_ndims_2_is_scalar() {
+        // reinterpreted_batch_ndims = 2 over a [2,3] base reduces BOTH dims,
+        // giving a scalar KL (kl.py:949 `_sum_rightmost(result, 2)`).
+        let loc_p = slice2(&[0.0, 1.0, 2.0, -1.0, 0.5, 3.0], &[2, 3]);
+        let scale_p = slice2(&[1.0, 2.0, 0.5, 1.5, 1.0, 2.0], &[2, 3]);
+        let loc_q = slice2(&[0.5, 0.0, 1.0, 0.0, 1.0, 2.0], &[2, 3]);
+        let scale_q = slice2(&[1.2, 1.0, 1.0, 2.0, 0.8, 1.5], &[2, 3]);
+        let p = Independent::new(Normal::new(loc_p, scale_p).unwrap(), 2).unwrap();
+        let q = Independent::new(Normal::new(loc_q, scale_q).unwrap(), 2).unwrap();
+        let kl = kl_divergence(&p, &q).unwrap();
+        assert_eq!(kl.shape(), [] as [usize; 0]);
+        // 2.241349334571732 + 0.7707800597969015
+        approx(kl.item().unwrap(), 3.012_129_394_368_633_6, 1e-12, "ind2");
+    }
+
+    #[test]
+    fn test_kl_independent_independent_ndims_mismatch_errs() {
+        // kl.py:946-947: `if p.reinterpreted_batch_ndims !=
+        //   q.reinterpreted_batch_ndims: raise NotImplementedError`.
+        let loc = slice2(&[0.0, 0.0, 0.0, 0.0, 0.0, 0.0], &[2, 3]);
+        let scale = slice2(&[1.0, 1.0, 1.0, 1.0, 1.0, 1.0], &[2, 3]);
+        let p = Independent::new(Normal::new(loc.clone(), scale.clone()).unwrap(), 1).unwrap();
+        let q = Independent::new(Normal::new(loc, scale).unwrap(), 2).unwrap();
+        assert!(
+            kl_divergence(&p, &q).is_err(),
+            "mismatched reinterpreted_batch_ndims must error (NotImplementedError upstream)"
+        );
+    }
+
+    #[test]
+    fn test_kl_independent_independent_nested_recursion() {
+        // Independent(Independent(Normal[2,3],1),1): the two-level wrap reduces
+        // BOTH dims (1 per level) → scalar, identical to ndims=2 above.
+        let loc_p = slice2(&[0.0, 1.0, 2.0, -1.0, 0.5, 3.0], &[2, 3]);
+        let scale_p = slice2(&[1.0, 2.0, 0.5, 1.5, 1.0, 2.0], &[2, 3]);
+        let loc_q = slice2(&[0.5, 0.0, 1.0, 0.0, 1.0, 2.0], &[2, 3]);
+        let scale_q = slice2(&[1.2, 1.0, 1.0, 2.0, 0.8, 1.5], &[2, 3]);
+        let p = Independent::new(
+            Independent::new(Normal::new(loc_p, scale_p).unwrap(), 1).unwrap(),
+            1,
+        )
+        .unwrap();
+        let q = Independent::new(
+            Independent::new(Normal::new(loc_q, scale_q).unwrap(), 1).unwrap(),
+            1,
+        )
+        .unwrap();
+        let kl = kl_divergence(&p, &q).unwrap();
+        assert_eq!(kl.shape(), [] as [usize; 0]);
+        approx(
+            kl.item().unwrap(),
+            3.012_129_394_368_633_6,
+            1e-12,
+            "nested ind",
+        );
+    }
+
+    // -- TransformedDistribution-TransformedDistribution (kl.py:496-502) -----
+
+    fn boxed_normal(loc: &[f64], scale: &[f64]) -> Box<dyn Distribution<f64>> {
+        let n = Normal::new(slice2(loc, &[loc.len()]), slice2(scale, &[scale.len()])).unwrap();
+        Box::new(n)
+    }
+
+    #[test]
+    fn test_kl_transformed_transformed_same_affine_known_value() {
+        // torch: TransformedDistribution(Normal([2]), [AffineTransform(2,3)])
+        // for both. `_kl_transformed_transformed` returns the base Normal KL
+        // UNCHANGED (kl.py:502), since the matching transforms cancel.
+        let tp = TransformedDistribution::new(
+            boxed_normal(&[0.0, 1.0], &[1.0, 2.0]),
+            vec![Box::new(AffineTransform::new(2.0, 3.0))],
+        );
+        let tq = TransformedDistribution::new(
+            boxed_normal(&[0.5, 0.0], &[1.5, 1.0]),
+            vec![Box::new(AffineTransform::new(2.0, 3.0))],
+        );
+        let kl = kl_divergence(&tp, &tq).unwrap();
+        assert_eq!(kl.shape(), &[2]);
+        assert_close_slice(
+            kl.data().unwrap(),
+            // == kl_divergence(Normal([0,1],[1,2]), Normal([0.5,0],[1.5,1]))
+            &[0.183_242_885_885_942_17, 1.306_852_819_440_054_6],
+            1e-12,
+            "td-td affine",
+        );
+    }
+
+    #[test]
+    fn test_kl_transformed_transformed_same_exp_known_value() {
+        // Same value as the affine case: the matching ExpTransform cancels,
+        // leaving the base Normal-Normal KL (kl.py:502).
+        let tp = TransformedDistribution::new(
+            boxed_normal(&[0.0, 1.0], &[1.0, 2.0]),
+            vec![Box::new(ExpTransform)],
+        );
+        let tq = TransformedDistribution::new(
+            boxed_normal(&[0.5, 0.0], &[1.5, 1.0]),
+            vec![Box::new(ExpTransform)],
+        );
+        let kl = kl_divergence(&tp, &tq).unwrap();
+        assert_close_slice(
+            kl.data().unwrap(),
+            &[0.183_242_885_885_942_17, 1.306_852_819_440_054_6],
+            1e-12,
+            "td-td exp",
+        );
+    }
+
+    #[test]
+    fn test_kl_transformed_transformed_same_is_zero() {
+        let mk = || {
+            TransformedDistribution::new(
+                boxed_normal(&[0.0, 1.0], &[1.0, 2.0]),
+                vec![Box::new(AffineTransform::new(2.0, 3.0))],
+            )
+        };
+        let kl = kl_divergence(&mk(), &mk()).unwrap();
+        assert_close_slice(kl.data().unwrap(), &[0.0, 0.0], 1e-12, "td-td same");
+    }
+
+    #[test]
+    fn test_kl_transformed_transformed_different_transforms_errs() {
+        // kl.py:498-499: `if p.transforms != q.transforms: raise`. Two affines
+        // with different scale (3 vs 4) must compare unequal via
+        // `AffineTransform::transform_eq_key` (mirrors AffineTransform.__eq__).
+        let tp = TransformedDistribution::new(
+            boxed_normal(&[0.0, 1.0], &[1.0, 2.0]),
+            vec![Box::new(AffineTransform::new(2.0, 3.0))],
+        );
+        let tq = TransformedDistribution::new(
+            boxed_normal(&[0.5, 0.0], &[1.5, 1.0]),
+            vec![Box::new(AffineTransform::new(2.0, 4.0))],
+        );
+        assert!(
+            kl_divergence(&tp, &tq).is_err(),
+            "differing transform chains must error (NotImplementedError upstream)"
+        );
+    }
+
+    #[test]
+    fn test_kl_transformed_transformed_different_transform_types_errs() {
+        // Affine vs Exp: different transform types -> unequal fingerprints.
+        let tp = TransformedDistribution::new(
+            boxed_normal(&[0.0, 1.0], &[1.0, 2.0]),
+            vec![Box::new(AffineTransform::new(0.0, 1.0))],
+        );
+        let tq = TransformedDistribution::new(
+            boxed_normal(&[0.5, 0.0], &[1.5, 1.0]),
+            vec![Box::new(ExpTransform)],
+        );
+        assert!(kl_divergence(&tp, &tq).is_err());
+    }
+
+    #[test]
+    fn test_kl_transformed_base_independent_nested_recursion() {
+        // TransformedDistribution(Independent(Normal[2,3],1), [Affine(0,1)]):
+        // the matching identity-affine transform cancels (kl.py:502), then the
+        // base Independent-Independent recursion sums the last dim
+        // (kl.py:948-949) → [2]-shaped, matching the plain Independent case.
+        let bp = Independent::new(
+            Normal::new(
+                slice2(&[0.0, 1.0, 2.0, -1.0, 0.5, 3.0], &[2, 3]),
+                slice2(&[1.0, 2.0, 0.5, 1.5, 1.0, 2.0], &[2, 3]),
+            )
+            .unwrap(),
+            1,
+        )
+        .unwrap();
+        let bq = Independent::new(
+            Normal::new(
+                slice2(&[0.5, 0.0, 1.0, 0.0, 1.0, 2.0], &[2, 3]),
+                slice2(&[1.2, 1.0, 1.0, 2.0, 0.8, 1.5], &[2, 3]),
+            )
+            .unwrap(),
+            1,
+        )
+        .unwrap();
+        let tp = TransformedDistribution::new(
+            Box::new(bp),
+            vec![Box::new(AffineTransform::new(0.0, 1.0))],
+        );
+        let tq = TransformedDistribution::new(
+            Box::new(bq),
+            vec![Box::new(AffineTransform::new(0.0, 1.0))],
+        );
+        let kl = kl_divergence(&tp, &tq).unwrap();
+        assert_eq!(kl.shape(), &[2]);
+        assert_close_slice(
+            kl.data().unwrap(),
+            &[2.241_349_334_571_732, 0.770_780_059_796_901_5],
+            1e-12,
+            "td(ind) nested",
+        );
+    }
+
+    #[test]
+    fn test_kl_mixed_recursion_kinds_fall_through_errs() {
+        // An Independent against a TransformedDistribution has no recursion
+        // pair AND no concrete arm -> the dispatch falls through to the
+        // no-formula error (kl_recurse_pair returns None).
+        let p = Independent::new(
+            Normal::new(slice2(&[0.0, 1.0], &[2]), slice2(&[1.0, 1.0], &[2])).unwrap(),
+            1,
+        )
+        .unwrap();
+        let q = TransformedDistribution::new(
+            boxed_normal(&[0.0, 1.0], &[1.0, 1.0]),
+            vec![Box::new(ExpTransform)],
+        );
+        assert!(kl_divergence(&p, &q).is_err());
     }
 }

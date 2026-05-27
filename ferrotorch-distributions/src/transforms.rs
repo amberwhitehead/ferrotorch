@@ -147,6 +147,25 @@ pub trait Transform<T: Float>: Send + Sync {
     fn sign(&self) -> Option<i32> {
         None
     }
+
+    /// Structural equality key used by `TransformedDistribution`-`TransformedDistribution`
+    /// KL recursion to mirror PyTorch's per-transform `__eq__`
+    /// (`torch/distributions/kl.py:498` `if p.transforms != q.transforms`).
+    ///
+    /// PyTorch's `Transform.__eq__` is type-identity for the unparameterised
+    /// transforms (`isinstance(other, ExpTransform)` at
+    /// `torch/distributions/transforms.py:586`, `SigmoidTransform` :621,
+    /// `SoftplusTransform` :657, `AbsTransform` :683, `TanhTransform` :724,
+    /// `SoftmaxTransform`/`StickBreakingTransform` :960,:1001), so the default
+    /// returns [`name`](Transform::name). Parameterised transforms
+    /// (`AffineTransform.__eq__` compares `loc`/`scale` at
+    /// `transforms.py:808-825`, `PowerTransform` compares the exponent) override
+    /// this to fold their parameters into the key so two affines with different
+    /// scales compare unequal — exactly as `p.transforms != q.transforms` does
+    /// upstream.
+    fn transform_eq_key(&self) -> String {
+        self.name().to_string()
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -278,6 +297,14 @@ impl<T: Float> Transform<T> for AffineTransform<T> {
             zero - self.scale
         };
         Some(abs_scale.ln())
+    }
+
+    fn transform_eq_key(&self) -> String {
+        // `torch/distributions/transforms.py:808-825` `AffineTransform.__eq__`
+        // compares BOTH `loc` and `scale`; two affines with different params
+        // are unequal. Fold them into the key (debug-formatted so f32/f64 bits
+        // round-trip stably for the structural comparison).
+        format!("AffineTransform(loc={:?},scale={:?})", self.loc, self.scale)
     }
 }
 
@@ -701,6 +728,14 @@ impl<T: Float> Transform<T> for PowerTransform<T> {
     fn codomain(&self) -> Box<dyn DistConstraint> {
         // `transforms.py:605` `codomain = constraints.positive`.
         Box::new(crate::constraints::Positive)
+    }
+
+    fn transform_eq_key(&self) -> String {
+        // `transforms.py:621-624` `PowerTransform.__eq__` compares `exponent`
+        // (`self.exponent.eq(other.exponent).all()`). Fold the scalar exponent
+        // into the key so two power transforms with different exponents are
+        // structurally unequal.
+        format!("PowerTransform(exponent={:?})", self.exponent)
     }
 }
 
@@ -1918,6 +1953,30 @@ impl<T: Float> Distribution<T> for TransformedDistribution<T> {
             Some(last) => Some(last.codomain()),
             None => self.base.support(),
         }
+    }
+
+    fn kl_recurse(&self) -> Option<crate::KlRecurseInfo<'_, T>> {
+        // `torch/distributions/kl.py:496-502` `_kl_transformed_transformed`:
+        //   if p.transforms != q.transforms: raise NotImplementedError
+        //   if p.event_shape != q.event_shape: raise NotImplementedError
+        //   return kl_divergence(p.base_dist, q.base_dist)
+        // We expose the type-erased base, the per-transform structural
+        // fingerprint (mirroring each `Transform.__eq__`), and the
+        // `event_shape` so `kl::kl_divergence_dyn` can apply the two guards
+        // and recurse on the base. Returns the base KL unchanged (no
+        // sum-rightmost, unlike `Independent`).
+        let transform_fingerprint: Vec<String> = self
+            .transforms
+            .iter()
+            .map(|t| t.transform_eq_key())
+            .collect();
+        Some(crate::KlRecurseInfo {
+            base: self.base.as_ref(),
+            kind: crate::KlRecurseKind::Transformed {
+                transform_fingerprint,
+                event_shape: self.event_shape(),
+            },
+        })
     }
 }
 
