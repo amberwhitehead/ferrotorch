@@ -401,25 +401,20 @@ upstream = [
   "/home/doll/pytorch/aten/src/ATen/native/TensorCompare.cpp",
 ]
 design = ".design/ferrotorch-core/grad_fns/comparison.md"
-parity_ops = [
-  "eq",
-  "ne",
-  "lt",
-  "le",
-  "gt",
-  "ge",
-  "logical_and",
-  "logical_or",
-  "logical_xor",
-  "logical_not",
-  "max",
-  "min",
-  "maximum",
-  "minimum",
-  "isnan",
-  "isinf",
-  "isfinite",
-]
+# parity_ops intentionally empty: this file currently ships only
+# `where_` / `where_bt` (orphan code paths without a production consumer —
+# tracked in #1295 / #1297). The parity-sweep `where` arm at
+# `tools/parity-sweep/runner/src/main.rs:920` dispatches to
+# `grad_fns::indexing::where_cond_bcast`, NOT this file's `where_`, so
+# attributing `where` here would be a false claim. The 17 elementwise
+# comparison ops (eq/ne/lt/le/gt/ge/logical_*/maximum/minimum/isnan/
+# isinf/isfinite) that were formerly listed here are NOT implemented in
+# this file; `max`/`min` are owned by `grad_fns/reduction.rs` (see line
+# below). When the orphan `where_` / `where_bt` are wired to a
+# production consumer (closing #1295/#1297) and the parity-sweep
+# dispatch arm is updated to exercise comparison's path, this list
+# should be repopulated with `"where"` (and only `"where"`).
+parity_ops = []
 
 
 [[route]]
