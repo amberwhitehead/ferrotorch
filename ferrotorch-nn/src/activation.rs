@@ -13,13 +13,13 @@
 //! | REQ-2 | SHIPPED | `pub struct Sigmoid`, `pub struct Tanh` zero-param wrappers mirror `torch/nn/modules/activation.py:337-434`; consumed by `ferrotorch-rl/src/mlp_policy.rs:53` (`use ferrotorch_nn::activation::Tanh;`). |
 //! | REQ-3 | SHIPPED | `pub struct GELU` plus `pub use act::GeluApproximate` re-export covers `None`/`Tanh`/`Sigmoid` modes mirroring `torch/nn/modules/activation.py:777-824`; consumed by `ferrotorch-bert/src/layer.rs:13` and `ferrotorch-whisper/src/encoder.rs:27`. |
 //! | REQ-4 | SHIPPED | `pub struct SiLU` (`x * sigmoid(x)`) mirrors `torch/nn/modules/activation.py:435-484`; consumed by `ferrotorch-diffusion/src/vae.rs:24` ResnetBlock chain. |
-//! | REQ-5 | SHIPPED | `pub struct Softmax`, `pub struct LogSoftmax`, `pub struct Softmin`, `pub struct Softmax2d` (CPU-only — see REQ-11) mirror `torch/nn/modules/activation.py:1709-1929`; consumed by `ferrotorch-nn/src/lib.rs:189-193` re-exports and downstream classifier heads. |
+//! | REQ-5 | SHIPPED | `pub struct Softmax`, `pub struct LogSoftmax`, `pub struct Softmin`, `pub struct Softmax2d` (GPU forward via REQ-11) mirror `torch/nn/modules/activation.py:1709-1929`; consumed by `ferrotorch-nn/src/lib.rs:189-193` re-exports and downstream classifier heads. |
 //! | REQ-6 | SHIPPED | `pub struct LeakyReLU`, `pub struct PReLU<T>`, `pub struct ELU`, `pub struct CELU`, `pub struct SELU`, `pub struct RReLU` parameterised activations mirror `torch/nn/modules/activation.py:153-218, 575-735, 874-931, 1575-1656`; consumed via `ferrotorch-nn/src/lib.rs:189-193` re-exports. |
 //! | REQ-7 | SHIPPED | `pub struct Hardtanh`, `pub struct ReLU6`, `pub struct HardSigmoid`, `pub struct HardSwish`, `pub struct Hardshrink`, `pub struct Softshrink`, `pub struct Tanhshrink`, `pub struct Softsign`, `pub struct LogSigmoid`, `pub struct Threshold`, `pub struct Softplus`, `pub struct Mish`, `pub struct GLU` mirror their counterparts at `torch/nn/modules/activation.py:219-336, 364-406, 485-574, 530-574, 680-735, 736-776, 825-873, 958-1056`; consumed by `ferrotorch-vision/src/models/mobilenet.rs:51` (`HardSigmoid, HardSwish, ReLU, ReLU6`). |
 //! | REQ-8 | SHIPPED | `pub struct PReLU<T: Float>` owns `pub alpha: Parameter<T>` and the hand-written `Module<T>` impl returns `("alpha", ..)` via `named_parameters` mirroring `torch/nn/modules/activation.py:1575-1656`; consumed via `ferrotorch-nn/src/lib.rs:189-193` re-export; pinned by `test_prelu_has_parameter`. |
 //! | REQ-9 | SHIPPED | The `impl_activation_module!` declarative macro synthesises `Module<T>::{forward, parameters, parameters_mut, named_parameters, train, eval, is_training}` for every zero-param activation (`PReLU` has a hand-written impl) mirroring `torch/nn/modules/module.py`; consumed by `ferrotorch-vision/src/models/vgg.rs` building `Module<f32>` chains. |
 //! | REQ-10 | SHIPPED | Every `forward` delegates to `act::*` in `ferrotorch_core::grad_fns::activation`, which attaches `ReluBackward`/`SigmoidBackward`/`TanhBackward`/`GeluBackward`/`SiluBackward`/`SoftmaxBackward`/`LogSoftmaxBackward`/`LeakyReluBackward`/`EluBackward`/`MishBackward`/`SoftplusBackward`/`GLUBackward`/`PReluBackward` when grad is enabled mirroring `aten/src/ATen/native/Activation.cpp`; consumed by `ferrotorch-optim/src/sgd.rs:818` end-to-end backward in the SGD harness. |
-//! | REQ-11 | NOT-STARTED | `Softmax2d` forward rejects CUDA input with `NotImplementedOnCuda`; GPU-resident forward + backward is open blocker #1451. |
+//! | REQ-11 | SHIPPED | `Softmax2d::forward` dispatches CUDA input to `GpuBackend::softmax2d_f32` (channel-axis softmax; PTX in `ferrotorch-gpu/src/group_norm.rs`, wired via `CudaBackendImpl::softmax2d_f32`); CUDA-with-no-backend still returns `NotImplementedOnCuda`. Forward-only. Closed #1451; runtime parity pinned by `#[ignore]`'d `softmax2d_forward_gpu_matches_cpu`. |
 
 use ferrotorch_core::grad_fns::activation as act;
 use ferrotorch_core::grad_fns::arithmetic;
@@ -129,17 +129,30 @@ impl Softmax2d {
             });
         }
 
-        if input.is_cuda() {
-            return Err(
-                ferrotorch_core::error::FerrotorchError::NotImplementedOnCuda { op: "Softmax2d" },
-            );
-        }
-
         let shape = input.shape();
         let n = shape[0];
         let c = shape[1];
         let h = shape[2];
         let w = shape[3];
+
+        // GPU fast path: native channel-axis softmax kernel (#1451). Softmax2d
+        // is forward-only here (the CPU path returns a non-grad tensor), so the
+        // GPU branch likewise returns a non-grad GPU-resident tensor. Mirrors
+        // `torch.nn.Softmax2d` (softmax over `dim=1`).
+        if input.is_cuda() {
+            if let Some(backend) = ferrotorch_core::gpu_dispatch::gpu_backend() {
+                let handle = backend.softmax2d_f32(input.gpu_handle()?, n, c, h * w)?;
+                return Tensor::from_storage(
+                    ferrotorch_core::storage::TensorStorage::gpu(handle),
+                    shape.to_vec(),
+                    false,
+                );
+            }
+            return Err(
+                ferrotorch_core::error::FerrotorchError::NotImplementedOnCuda { op: "Softmax2d" },
+            );
+        }
+
         let data = input.data()?;
         let mut out = vec![<T as num_traits::Zero>::zero(); n * c * h * w];
 
@@ -3019,5 +3032,46 @@ mod tests {
         let m = ReLU::new();
         let sd = Module::<f64>::state_dict(&m);
         assert!(sd.is_empty());
+    }
+
+    /// #1451: `Softmax2d::forward` on a CUDA-resident `[N, C, H, W]` input must
+    /// route through `GpuBackend::softmax2d_f32` (channel-axis softmax) and
+    /// match the CPU path within f32 tolerance.
+    ///
+    /// Gated `#[ignore]` because it needs real CUDA hardware (the build host
+    /// has none); it documents the expected GPU↔CPU parity for a future
+    /// CUDA-host run. Tracking #1451.
+    #[test]
+    #[cfg(feature = "cuda")]
+    #[ignore = "needs CUDA hardware; tracking #1451"]
+    fn softmax2d_forward_gpu_matches_cpu() {
+        use ferrotorch_core::Device;
+        use ferrotorch_core::storage::TensorStorage;
+        use ferrotorch_gpu::init_cuda_backend;
+        init_cuda_backend().expect("CUDA init failed");
+
+        // [N=2, C=5, H=3, W=4].
+        let (n, c, h, w) = (2usize, 5usize, 3usize, 4usize);
+        let total = n * c * h * w;
+        let data: Vec<f32> = (0..total).map(|k| ((k % 11) as f32) * 0.3 - 1.4).collect();
+
+        let sm = Softmax2d::new();
+
+        let x_cpu = Tensor::from_storage(TensorStorage::cpu(data.clone()), vec![n, c, h, w], false)
+            .unwrap();
+        let y_cpu = sm.forward(&x_cpu).unwrap();
+        let cpu_vals = y_cpu.data().unwrap().to_vec();
+
+        let x_gpu = x_cpu.to(Device::Cuda(0)).unwrap();
+        let y_gpu = sm.forward(&x_gpu).unwrap();
+        assert!(y_gpu.is_cuda(), "Softmax2d GPU output must stay on CUDA");
+        let gpu_vals = y_gpu.data_vec().unwrap();
+
+        assert_eq!(gpu_vals.len(), cpu_vals.len());
+        let mut max_abs = 0.0f32;
+        for (g, c) in gpu_vals.iter().zip(cpu_vals.iter()) {
+            max_abs = max_abs.max((g - c).abs());
+        }
+        assert!(max_abs < 1e-4, "Softmax2d GPU vs CPU max|Δ| = {max_abs}");
     }
 }

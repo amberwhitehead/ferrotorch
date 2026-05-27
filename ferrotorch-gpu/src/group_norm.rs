@@ -39,11 +39,11 @@
 //!
 //! | REQ | Status | Evidence |
 //! |---|---|---|
-//! | REQ-1 (`gpu_group_norm_f32`) | NOT-STARTED | blocker #1356 — impl: `pub fn gpu_group_norm_f32 in group_norm.rs` mirrors upstream `GroupNormKernelImpl` at `aten/src/ATen/native/cuda/group_norm_kernel.cu:649`, BUT no non-test production consumer invokes it (only `#[cfg(test)] mod tests` callers + `pub use` re-export at `lib.rs`). Prereq: needs a `group_norm_f32` trait method on `GpuBackend` + `CudaBackendImpl` consumer wiring |
+//! | REQ-1 (`gpu_group_norm_f32`) | SHIPPED | impl: `pub fn gpu_group_norm_f32 in group_norm.rs` mirrors upstream `GroupNormKernelImpl` at `aten/src/ATen/native/cuda/group_norm_kernel.cu:649`. Non-test consumer: `CudaBackendImpl::group_norm_f32 in backend_impl.rs` → `GpuBackend::group_norm_f32` → `ferrotorch-nn::GroupNorm::forward` GPU fast path (#1356) |
 //! | REQ-2 (PTX template + ABI) | SHIPPED | `pub(crate) const GROUP_NORM_PTX in group_norm.rs` carries the three-pass mean / variance / affine PTX; ABI matches the launch site; verified by unit tests being numerically correct |
 //! | REQ-3 (input validation) | SHIPPED | validation checks in `pub fn gpu_group_norm_f32 in group_norm.rs` (groups divisibility, input length, weight length, bias length, device ordinal) |
 //! | REQ-4 (degenerate short-circuit) | SHIPPED | degenerate short-circuit in `gpu_group_norm_f32 in group_norm.rs` returns `alloc_zeros_f32(n, device)` for `n == 0 || channels == 0 || hw == 0` |
-//! | REQ-5 (backend trait wiring) | NOT-STARTED | blocker #1357 — no `group_norm_*` trait method exists on `GpuBackend` in `ferrotorch-core/src/gpu_dispatch.rs`, and no `fn group_norm_*` exists in `backend_impl.rs`. Prereq: add `group_norm_f32` to the `GpuBackend` trait + wire `CudaBackendImpl` to call `crate::group_norm::gpu_group_norm_f32`; ferrotorch-nn's `GroupNorm` currently falls back to a CPU path or per-element kernels |
+//! | REQ-5 (backend trait wiring) | SHIPPED | `fn group_norm_f32` on `GpuBackend` in `ferrotorch-core/src/gpu_dispatch.rs` (default `InvalidArgument`) overridden by `CudaBackendImpl::group_norm_f32 in backend_impl.rs` calling `crate::group_norm::gpu_group_norm_f32`. Consumer: `ferrotorch-nn::GroupNorm::forward` dispatches to `backend.group_norm_f32(...)` for CUDA input (#1357) |
 
 #[cfg(feature = "cuda")]
 use cudarc::driver::{LaunchConfig, PushKernelArg};
@@ -417,6 +417,249 @@ pub fn gpu_group_norm_f32(
     Ok(out)
 }
 
+// ---------------------------------------------------------------------------
+// Softmax2d (#1451): channel-axis softmax over [N, C, H*W].
+// ---------------------------------------------------------------------------
+
+/// PTX source for the channel-axis softmax (`Softmax2d`) forward kernel.
+///
+/// One thread per `(n, p)` spatial position (grid is flat over `n * hw`
+/// threads). Each thread walks the `c` channel values — which are strided
+/// `hw` apart in the `[N, C, H*W]` row-major buffer — three times:
+/// max-find, `exp` sum, then normalize. All accumulation is f32 with the
+/// standard max-subtraction for numerical stability, matching
+/// `torch.nn.Softmax2d` (softmax over `dim=1`).
+///
+/// ABI: `(in_ptr, out_ptr, total, channels, hw)` where `total = n * hw`.
+#[cfg(feature = "cuda")]
+pub(crate) const SOFTMAX2D_PTX: &str = "\
+.version 7.0
+.target sm_52
+.address_size 64
+
+.visible .entry softmax2d_kernel(
+    .param .u64 in_ptr,
+    .param .u64 out_ptr,
+    .param .u32 total,
+    .param .u32 channels,
+    .param .u32 hw
+) {
+    .reg .u32 %r_tid, %gid, %total_r, %c_r, %hw_r, %nidx, %pidx, %ci;
+    .reg .u64 %in, %out, %base, %off, %el_per_n, %addr;
+    .reg .f32 %val, %maxv, %sum, %e, %inv, %log2e;
+    .reg .pred %oob, %lp;
+
+    ld.param.u64 %in,  [in_ptr];
+    ld.param.u64 %out, [out_ptr];
+    ld.param.u32 %total_r, [total];
+    ld.param.u32 %c_r,     [channels];
+    ld.param.u32 %hw_r,    [hw];
+
+    // log2(e): exp(v) is computed as ex2.approx.f32(v * log2(e)).
+    mov.f32 %log2e, 0f3FB8AA3B;
+
+    // global thread id = ctaid.x * ntid.x + tid.x
+    mov.u32 %r_tid, %tid.x;
+    mov.u32 %gid, %ctaid.x;
+    mov.u32 %nidx, %ntid.x;
+    mul.lo.u32 %gid, %gid, %nidx;
+    add.u32 %gid, %gid, %r_tid;
+
+    setp.ge.u32 %oob, %gid, %total_r;
+    @%oob bra DONE;
+
+    // gid encodes (n, p): n = gid / hw, p = gid % hw.
+    div.u32 %nidx, %gid, %hw_r;
+    rem.u32 %pidx, %gid, %hw_r;
+
+    // base element offset for (n, channel 0, p) = (n * channels) * hw + p
+    cvt.u64.u32 %el_per_n, %c_r;
+    cvt.u64.u32 %base, %nidx;
+    mul.lo.u64 %base, %base, %el_per_n;   // n * channels
+    cvt.u64.u32 %off, %hw_r;
+    mul.lo.u64 %base, %base, %off;         // (n * channels) * hw
+    cvt.u64.u32 %off, %pidx;
+    add.u64 %base, %base, %off;            // + p
+    shl.b64 %base, %base, 2;               // bytes
+    add.u64 %base, %in, %base;
+
+    // hw in bytes (stride between consecutive channels)
+    cvt.u64.u32 %el_per_n, %hw_r;
+    shl.b64 %el_per_n, %el_per_n, 2;
+
+    // ---- Pass 1: max over channels ----
+    mov.f32 %maxv, 0fFF800000;             // -inf
+    mov.u32 %ci, 0;
+    mov.u64 %addr, %base;
+MX:
+    setp.ge.u32 %lp, %ci, %c_r;
+    @%lp bra MXD;
+    ld.global.f32 %val, [%addr];
+    max.f32 %maxv, %maxv, %val;
+    add.u64 %addr, %addr, %el_per_n;
+    add.u32 %ci, %ci, 1;
+    bra MX;
+    // ---- Pass 2: sum of exp(x - max) ----
+MXD:
+    mov.f32 %sum, 0f00000000;
+    mov.u32 %ci, 0;
+    mov.u64 %addr, %base;
+SX:
+    setp.ge.u32 %lp, %ci, %c_r;
+    @%lp bra SXD;
+    ld.global.f32 %val, [%addr];
+    sub.f32 %val, %val, %maxv;
+    mul.f32 %val, %val, %log2e;
+    ex2.approx.f32 %e, %val;               // exp(x - max) = 2^((x-max)*log2 e)
+    add.f32 %sum, %sum, %e;
+    add.u64 %addr, %addr, %el_per_n;
+    add.u32 %ci, %ci, 1;
+    bra SX;
+SXD:
+    rcp.approx.f32 %inv, %sum;
+
+    // ---- Pass 3: write exp(x - max) / sum ----
+    // out base offset matches in base offset.
+    cvt.u64.u32 %el_per_n, %c_r;
+    cvt.u64.u32 %addr, %nidx;
+    mul.lo.u64 %addr, %addr, %el_per_n;
+    cvt.u64.u32 %off, %hw_r;
+    mul.lo.u64 %addr, %addr, %off;
+    cvt.u64.u32 %off, %pidx;
+    add.u64 %addr, %addr, %off;
+    shl.b64 %addr, %addr, 2;
+    add.u64 %addr, %out, %addr;
+    cvt.u64.u32 %el_per_n, %hw_r;
+    shl.b64 %el_per_n, %el_per_n, 2;
+
+    mov.u32 %ci, 0;
+    mov.u64 %off, %base;
+WX:
+    setp.ge.u32 %lp, %ci, %c_r;
+    @%lp bra DONE;
+    ld.global.f32 %val, [%off];
+    sub.f32 %val, %val, %maxv;
+    mul.f32 %val, %val, %log2e;
+    ex2.approx.f32 %e, %val;
+    mul.f32 %e, %e, %inv;
+    st.global.f32 [%addr], %e;
+    add.u64 %off, %off, %el_per_n;
+    add.u64 %addr, %addr, %el_per_n;
+    add.u32 %ci, %ci, 1;
+    bra WX;
+DONE:
+    ret;
+}
+";
+
+/// GPU forward `Softmax2d` over a `[N, C, H*W]`-laid-out f32 buffer.
+///
+/// Computes softmax over the channel axis (PyTorch `dim=1`):
+/// `out[n,c,p] = exp(x[n,c,p] - m) / Σ_{c'} exp(x[n,c',p] - m)` where
+/// `m = max_{c'} x[n,c',p]` and `p` ranges over the `hw = H*W` spatial
+/// positions. Mirrors `torch.nn.Softmax2d`.
+///
+/// # Arguments
+///
+/// - `input` — flat `[N * C * H * W]` f32 buffer in row-major layout.
+/// - `n` — batch size.
+/// - `c` — channel count (softmax axis).
+/// - `hw` — flattened spatial size `H * W`.
+/// - `device` — owning GPU device.
+///
+/// # Errors
+///
+/// - [`GpuError::ShapeMismatch`] when `input.len() != n * c * hw`.
+/// - [`GpuError::DeviceMismatch`] when `input` lives on another device.
+/// - [`GpuError::PtxCompileFailed`] if the PTX module fails to compile.
+/// - [`GpuError::Driver`] on launch failure.
+#[cfg(feature = "cuda")]
+pub fn gpu_softmax2d_f32(
+    input: &CudaBuffer<f32>,
+    n: usize,
+    c: usize,
+    hw: usize,
+    device: &GpuDevice,
+) -> GpuResult<CudaBuffer<f32>> {
+    let total_elems = n * c * hw;
+    if input.len() != total_elems {
+        return Err(GpuError::ShapeMismatch {
+            op: "softmax2d",
+            expected: vec![n, c, hw],
+            got: vec![input.len()],
+        });
+    }
+    if input.device_ordinal() != device.ordinal() {
+        return Err(GpuError::DeviceMismatch {
+            expected: device.ordinal(),
+            got: input.device_ordinal(),
+        });
+    }
+
+    // Degenerate / empty shape: nothing to normalize, return zeros.
+    if total_elems == 0 || c == 0 || hw == 0 {
+        return alloc_zeros_f32(total_elems, device);
+    }
+
+    let ctx = device.context();
+    let stream = device.stream();
+
+    let f = match crate::module_cache::get_or_compile(
+        ctx,
+        SOFTMAX2D_PTX,
+        "softmax2d_kernel",
+        device.ordinal() as u32,
+    ) {
+        Ok(f) => f,
+        Err(e) => {
+            return Err(GpuError::PtxCompileFailed {
+                kernel: "softmax2d_kernel",
+                source: e,
+            });
+        }
+    };
+
+    let mut out = alloc_zeros_f32(total_elems, device)?;
+    let total = (n * hw) as u32; // one thread per (n, p) spatial position
+    let channels_u32 = c as u32;
+    let hw_u32 = hw as u32;
+
+    const BLOCK: u32 = 256;
+    let grid = total.div_ceil(BLOCK).max(1);
+    let cfg = LaunchConfig {
+        grid_dim: (grid, 1, 1),
+        block_dim: (BLOCK, 1, 1),
+        shared_mem_bytes: 0,
+    };
+
+    // SAFETY:
+    // - `f` is a valid PTX `CudaFunction` for `softmax2d_kernel` returned by
+    //   `module_cache::get_or_compile`; ABI matches `(in_ptr, out_ptr, total,
+    //   channels, hw)` exactly per `SOFTMAX2D_PTX`.
+    // - `input.len() == n * c * hw` (validated above) and `input` lives on
+    //   `device` (validated above). `out` was just allocated with the same
+    //   length and cannot alias `input` (Rust borrow rules; `out` is `&mut`).
+    // - Each thread handles one `(n, p)` position; the kernel guards
+    //   `gid >= total` (= `n * hw`) and walks exactly `c` channel values that
+    //   are `hw` elements apart, all in `[0, n*c*hw)`.
+    // - No shared memory is used (the per-position reduction is sequential
+    //   within a single thread).
+    // - Stream sync is the caller's responsibility (matches every other
+    //   kernel launch in this crate).
+    unsafe {
+        stream
+            .launch_builder(&f)
+            .arg(input.inner())
+            .arg(out.inner_mut())
+            .arg(&total)
+            .arg(&channels_u32)
+            .arg(&hw_u32)
+            .launch(cfg)?;
+    }
+
+    Ok(out)
+}
+
 #[cfg(all(test, feature = "cuda"))]
 mod tests {
     use super::*;
@@ -562,6 +805,103 @@ mod tests {
         let gg = cpu_to_gpu(&gamma, &device).unwrap();
         let bg = cpu_to_gpu(&beta, &device).unwrap();
         let res = gpu_group_norm_f32(&xg, &gg, &bg, b, c, groups, hw, 1e-6, &device);
+        assert!(matches!(res, Err(GpuError::ShapeMismatch { .. })));
+    }
+
+    /// Reference CPU channel-axis softmax over `[N, C, H*W]` (PyTorch
+    /// `Softmax2d`, softmax over `dim=1`).
+    fn cpu_softmax2d_ref(x: &[f32], n: usize, c: usize, hw: usize) -> Vec<f32> {
+        let mut out = vec![0.0f32; n * c * hw];
+        for ni in 0..n {
+            for p in 0..hw {
+                let mut maxv = f32::NEG_INFINITY;
+                for ci in 0..c {
+                    let v = x[(ni * c + ci) * hw + p];
+                    if v > maxv {
+                        maxv = v;
+                    }
+                }
+                let mut sum = 0.0f32;
+                for ci in 0..c {
+                    sum += (x[(ni * c + ci) * hw + p] - maxv).exp();
+                }
+                for ci in 0..c {
+                    let idx = (ni * c + ci) * hw + p;
+                    out[idx] = (x[idx] - maxv).exp() / sum;
+                }
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn softmax2d_matches_cpu_small() {
+        let device = match GpuDevice::new(0) {
+            Ok(d) => d,
+            Err(_) => return,
+        };
+        let n = 2;
+        let c = 5;
+        let hw = 3 * 4; // 3x4 spatial
+        let total = n * c * hw;
+        let x: Vec<f32> = (0..total).map(|k| ((k % 11) as f32) * 0.3 - 1.4).collect();
+
+        let xg = cpu_to_gpu(&x, &device).unwrap();
+        let yg = gpu_softmax2d_f32(&xg, n, c, hw, &device).unwrap();
+        let got = gpu_to_cpu(&yg, &device).unwrap();
+        let expected = cpu_softmax2d_ref(&x, n, c, hw);
+        assert_eq!(got.len(), expected.len());
+        let mut max_abs = 0.0f32;
+        for (a, e) in got.iter().zip(expected.iter()) {
+            let d = (a - e).abs();
+            if d > max_abs {
+                max_abs = d;
+            }
+        }
+        assert!(
+            max_abs < 1e-4,
+            "softmax2d gpu vs cpu max abs diff = {max_abs}"
+        );
+    }
+
+    #[test]
+    fn softmax2d_columns_sum_to_one() {
+        let device = match GpuDevice::new(0) {
+            Ok(d) => d,
+            Err(_) => return,
+        };
+        let n = 1;
+        let c = 8;
+        let hw = 4;
+        let total = n * c * hw;
+        let x: Vec<f32> = (0..total)
+            .map(|k| ((k as f32) * 0.05).cos() * 3.0)
+            .collect();
+        let xg = cpu_to_gpu(&x, &device).unwrap();
+        let yg = gpu_softmax2d_f32(&xg, n, c, hw, &device).unwrap();
+        let got = gpu_to_cpu(&yg, &device).unwrap();
+        // Every (n, p) column over the channel axis must sum to 1.
+        for ni in 0..n {
+            for p in 0..hw {
+                let mut s = 0.0f32;
+                for ci in 0..c {
+                    s += got[(ni * c + ci) * hw + p];
+                }
+                assert!((s - 1.0).abs() < 1e-4, "column sum = {s}, expected 1.0");
+            }
+        }
+    }
+
+    #[test]
+    fn softmax2d_validates_length() {
+        let device = match GpuDevice::new(0) {
+            Ok(d) => d,
+            Err(_) => return,
+        };
+        // Buffer length disagrees with declared n*c*hw.
+        let x = vec![0.0f32; 10];
+        let xg = cpu_to_gpu(&x, &device).unwrap();
+        let res = gpu_softmax2d_f32(&xg, 2, 3, 4, &device); // expects 24
         assert!(matches!(res, Err(GpuError::ShapeMismatch { .. })));
     }
 }

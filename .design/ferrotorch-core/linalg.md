@@ -78,6 +78,12 @@ symmetric eigenproblems route through cuSOLVER `syevd`.
 - REQ-26: `cholesky_ex(_)` / `inv_ex(_)` / `solve_ex(_, _)` — "_ex"
   variants returning `(value, info)` where `info` is a status code
   rather than raising. Mirror `torch.linalg.{cholesky,inv,solve}_ex`.
+- REQ-27: `trace(A)` — sum of the main-diagonal elements of a 2-D
+  tensor. Mirrors `torch.trace` (`aten/src/ATen/native/LinearAlgebra.cpp`
+  `Tensor trace_cpu`). Scalar output; non-2-D input is an error.
+- REQ-28: `outer(a, b)` — 1-D × 1-D outer product
+  `out[i,j] = a[i] * b[j]`. Mirrors `torch.outer`
+  (`aten/src/ATen/native/LinearAlgebra.cpp:1337`, alias of `ger`).
 
 ## Acceptance Criteria
 
@@ -176,3 +182,5 @@ Expected: round-trip tests for each decomposition pass.
 | REQ-24 | SHIPPED | impl: `ldl_factor` at `ferrotorch-core/src/linalg.rs:1713`, `ldl_solve` at `:1764`; non-test consumer: pub API. |
 | REQ-25 | SHIPPED | impl: `householder_product` at `ferrotorch-core/src/linalg.rs:1835`; non-test consumer: pub API used by `qr` reconstruction. |
 | REQ-26 | SHIPPED | impl: `cholesky_ex` at `ferrotorch-core/src/linalg.rs:2111`, `inv_ex` at `:2139`, `solve_ex` at `:2166`; non-test consumer: pub API. |
+| REQ-27 | SHIPPED | impl: `trace` in `ferrotorch-core/src/linalg.rs`; non-test consumer: `ferrotorch-core/src/grad_fns/linalg.rs` `trace_differentiable` (forward call) wired to the `"trace"` parity-sweep runner arm. |
+| REQ-28 | SHIPPED | impl: `outer` in `ferrotorch-core/src/linalg.rs`; non-test consumer: `ferrotorch-core/src/grad_fns/linalg.rs` `outer_differentiable` (forward call) wired to the `"outer"` parity-sweep runner arm. |

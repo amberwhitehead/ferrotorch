@@ -131,8 +131,18 @@ by prereq blocker #1345.
   `torch/linalg/__init__.py:2218`. A forward-only implementation exists
   in `ferrotorch-core/src/linalg.rs` (the ops module — different file
   from this `grad_fns/linalg.rs`), routed through `ferray_linalg::solve`.
-  **NOT-STARTED in this file** — there is no `LinalgSolveBackward`
-  `GradFn` here. Open prereq blocker #1345.
+  **SHIPPED** (2026-05-27): `LinalgSolveBackward` +
+  `solve_differentiable` at `ferrotorch-core/src/grad_fns/linalg.rs`
+  attach the VJP `gB = A^{-T} @ gX` (computed as `solve(A^T, gX)`) and
+  `gA = -gB @ X^T` (vector RHS promoted to a column matrix), grounded in
+  `torch/csrc/autograd/FunctionsManual.cpp:6160 linalg_solve_backward`.
+  Both gradient slots FD-verified at
+  `ferrotorch-core/tests/divergence_linalg_grad_audit.rs`
+  (`solve_backward_matrix_rhs_*` and `solve_backward_vector_rhs_*`).
+  Non-test production consumer: the `"linalg.solve"` arm in
+  `tools/parity-sweep/runner/src/main.rs` (`24/192` non-skipped samples
+  pass, `0 failed`; batched/0-sized op_db samples legitimately skipped
+  since the faer forward is square-2-D-only). Closes #1345 (this REQ).
 
 - REQ-11: `linalg.svd(A, full_matrices=True)` — singular value
   decomposition `A = U @ diag(S) @ Vh`. Documented at
@@ -179,7 +189,13 @@ by prereq blocker #1345.
   const Tensor& A)` at `aten/src/ATen/native/BatchLinearAlgebra.cpp:1683`
   and documented at `torch/linalg/__init__.py:214`. Forward-only impl in
   `ferrotorch-core/src/linalg.rs` via `ferray_linalg::inv`.
-  **NOT-STARTED in this file**. Open prereq blocker #1345.
+  **SHIPPED** (2026-05-27): `LinalgInvBackward` + `inv_differentiable`
+  attach `dA = -Y^T @ grad @ Y^T` (`Y` = the retained inverse), grounded
+  in `tools/autograd/derivatives.yaml:917` (`linalg_inv_ex`). FD-verified
+  at `ferrotorch-core/tests/divergence_linalg_grad_audit.rs:inv_backward_matches_finite_difference`.
+  Non-test consumer: the `"linalg.inv"` arm in
+  `tools/parity-sweep/runner/src/main.rs` (`8/64` non-skipped pass,
+  `0 failed`; batched/0-sized skipped). Closes #1345 (this REQ).
 
 - REQ-19: `linalg.pinv(A, atol=None, rtol=None)` — Moore-Penrose
   pseudoinverse. Mirrors `Tensor linalg_pinv(...)` at
@@ -191,7 +207,14 @@ by prereq blocker #1345.
   Tensor& A)` at `aten/src/ATen/native/LinearAlgebra.cpp:378` and
   documented at `torch/linalg/__init__.py:390`. Forward-only impl in
   `ferrotorch-core/src/linalg.rs` via `ferray_linalg::det`.
-  **NOT-STARTED in this file**. Open prereq blocker #1345.
+  **SHIPPED** (2026-05-27): `LinalgDetBackward` + `det_differentiable`
+  attach `dA = det(A) * grad * inv(A)^T` (the invertible branch of
+  `torch/csrc/autograd/FunctionsManual.cpp:4373 linalg_det_backward`,
+  which solves `A^T G = det * grad * I`). FD-verified at
+  `ferrotorch-core/tests/divergence_linalg_grad_audit.rs:det_backward_matches_finite_difference`.
+  Non-test consumer: the `"linalg.det"` arm in
+  `tools/parity-sweep/runner/src/main.rs` (`16/72` non-skipped pass,
+  `0 failed`; batched/0-sized skipped). Closes #1345 (this REQ).
 
 - REQ-21: `linalg.slogdet(A)` — sign and log-magnitude of the
   determinant. Documented at `torch/linalg/__init__.py:424`.
@@ -238,10 +261,16 @@ by prereq blocker #1345.
   impl in `ferrotorch-core/src/linalg.rs`. **NOT-STARTED in this file**.
   Open prereq blocker #1345.
 
-- REQ-29: `trace(A)` — sum of the main diagonal. **NOT-STARTED** — no
-  `pub fn trace` or `TraceBackward` exists anywhere in ferrotorch-core
-  src/ outside `autograd::anomaly::trace` (which is an unrelated
-  stack-trace function). Open prereq blocker #1345.
+- REQ-29: `trace(A)` — sum of the main diagonal. **SHIPPED**
+  (2026-05-27): forward `crate::linalg::trace` (sum of `A[i,i]`,
+  scalar output) + `TraceBackward` / `trace_differentiable` in
+  `ferrotorch-core/src/grad_fns/linalg.rs` attach the VJP `dA = grad * I`
+  per `tools/autograd/derivatives.yaml:1785 trace_backward_symint`.
+  FD-verified at
+  `ferrotorch-core/tests/divergence_linalg_grad_audit.rs:trace_backward_matches_finite_difference`.
+  Non-test consumer: the `"trace"` arm in
+  `tools/parity-sweep/runner/src/main.rs` (parity `8/8`, `0 failed`).
+  Closes #1345 (this REQ).
 
 - REQ-30: `diagonal(A, offset=0, dim1=0, dim2=1)`. Mirrors `Tensor
   linalg_diagonal(const Tensor& A, int64_t offset, int64_t dim1, int64_t
@@ -270,12 +299,17 @@ by prereq blocker #1345.
 - REQ-35: `outer(self, vec2)` — outer product. Mirrors `Tensor outer(
   const Tensor& self, const Tensor& vec2)` at
   `aten/src/ATen/native/LinearAlgebra.cpp:1337` (which delegates to
-  `self.reshape({-1, 1}) * vec2`). **NOT-STARTED in this file** — there
-  is no `pub fn outer` or `OuterBackward` at the public surface. The
-  outer-product pattern IS used internally inside `MvBackward` (`dA =
-  outer(grad_y, x)`) and `MatmulBackward` (vm branch), but only as
-  unexported helpers, not a publicly callable `outer` op. Open prereq
-  blocker #1345.
+  `self.reshape({-1, 1}) * vec2`). **SHIPPED** (2026-05-27): forward
+  `crate::linalg::outer` (`out[i,j] = a[i] * b[j]`, 1-D × 1-D) +
+  `OuterBackward` / `outer_differentiable` in
+  `ferrotorch-core/src/grad_fns/linalg.rs` attach `da = grad_C @ b`,
+  `db = grad_C^T @ a` per `tools/autograd/derivatives.yaml:275-276` (the
+  `addr` vec1/vec2 gradients, of which `outer` is the unscaled case).
+  FD-verified at
+  `ferrotorch-core/tests/divergence_linalg_grad_audit.rs:outer_backward_matches_finite_difference`.
+  Non-test consumer: the `"outer"` arm in
+  `tools/parity-sweep/runner/src/main.rs` (parity `8/8`, `0 failed`).
+  Closes #1345 (this REQ).
 
 ## Acceptance Criteria
 
@@ -326,11 +360,19 @@ by prereq blocker #1345.
   the matmul-family `rtol=1e-4` tolerance contract (closes #1347):
   `mm 24/24 passed, 0 failed`; `bmm 8/8 passed, 0 failed`;
   `matmul 120/120 passed, 0 failed`; `linalg.matmul 120/120 passed,
-  0 failed` (all verified 2026-05-26 at seeds=8). The remaining 31
-  NOT-STARTED linalg ops still report `N skipped (runner has no arm)`
-  and are tracked under prereq blocker #1345 — those ops require new
-  `*Backward` `GradFn` impls in `grad_fns/linalg.rs` before runner arms
-  can be wired.
+  0 failed` (all verified 2026-05-26 at seeds=8). The tractable-VJP
+  slice landed 2026-05-27 (closes the #1345 sub-slice): `trace 8/8,
+  0 failed`; `outer 8/8, 0 failed`; `linalg.det 16/72 non-skipped,
+  0 failed`; `linalg.inv 8/64 non-skipped, 0 failed`; `linalg.solve
+  24/192 non-skipped, 0 failed` (the det/inv/solve skips are op_db's
+  batched / 0-sized samples — the faer forward is square-2-D-only).
+  The remaining linalg ops (svd/qr/cholesky/eigh/eig/pinv/lstsq/
+  slogdet/norm/matrix_rank/lu/householder_product backward, and the
+  fused add{mm,bmm,mv,r}/baddbmm/kron family, plus diagonal/diag/
+  tril/triu autograd) still report `N skipped (runner has no arm)`
+  and remain tracked under prereq blocker #1345 — those backwards are
+  matrix-decomposition differentials (or fused-affine VJPs) that exceed
+  the single-dispatch tractable scope and each need their own dispatch.
 - [ ] AC-11: `addmm` / `addbmm` / `baddbmm` / `addmv` / `addr` / `trace`
   / `diag` / `tril` / `triu` / `kron` / `outer` `GradFn`-bearing fused
   implementations land in `ferrotorch-core/src/grad_fns/linalg.rs`.
@@ -492,26 +534,24 @@ SVD backward uses the F-matrix formula `dA = U (F ∘ (U^T dU - dU^T U) /
 2) S + dS) Vh + ...`, which is its own substantial work item. Tracked
 by blocker #1345.
 
-### REQ-29..REQ-35 trace/diagonal/diag/tril/triu/kron/outer (NOT-STARTED)
+### REQ-29..REQ-35 trace/diagonal/diag/tril/triu/kron/outer
 
-- `trace`: no `pub fn trace` anywhere. The `autograd::anomaly::trace`
-  method in `ferrotorch-core/src/autograd/anomaly.rs:106` is an unrelated
-  stack-trace function (returns `&str`).
+- `trace`: **SHIPPED** — forward `crate::linalg::trace` + `TraceBackward`
+  / `trace_differentiable` (VJP `dA = grad * I`). FD-verified.
 - `diagonal`: forward-only `pub fn diagonal` exists at
-  `ferrotorch-core/src/linalg.rs:1545`. No autograd.
+  `ferrotorch-core/src/linalg.rs`. No autograd yet. Blocker #1345.
 - `diag`: forward-only `pub fn diag` exists at
-  `ferrotorch-core/src/ops/tensor_ops.rs:98`. No autograd.
+  `ferrotorch-core/src/ops/tensor_ops.rs:98`. No autograd. Blocker #1345.
 - `tril`: forward-only `pub fn tril` exists at
-  `ferrotorch-core/src/ops/tensor_ops.rs:62`. No autograd.
+  `ferrotorch-core/src/ops/tensor_ops.rs:62`. No autograd. Blocker #1345.
 - `triu`: forward-only `pub fn triu` exists at
-  `ferrotorch-core/src/ops/tensor_ops.rs:28`. No autograd.
-- `kron`: no `pub fn kron` anywhere in ferrotorch-core.
-- `outer`: no `pub fn outer` at the public surface. The outer-product
-  PATTERN is used inside `MvBackward` (`dA = outer(grad_y, x)`) and the
-  vm branch of `MatmulBackward`, but only as inline helpers, not a
-  publicly callable op.
+  `ferrotorch-core/src/ops/tensor_ops.rs:28`. No autograd. Blocker #1345.
+- `kron`: no `pub fn kron` anywhere in ferrotorch-core. Blocker #1345.
+- `outer`: **SHIPPED** — forward `crate::linalg::outer` + `OuterBackward`
+  / `outer_differentiable` (VJP `da = grad @ b`, `db = grad^T @ a`).
+  FD-verified.
 
-Tracked by blocker #1345.
+Remaining (diagonal/diag/tril/triu/kron autograd) tracked by #1345.
 
 ## Parity contract
 
@@ -526,7 +566,11 @@ Tracked by blocker #1345.
 | `baddbmm` | `aten/src/ATen/native/LinearAlgebra.cpp:1886 TORCH_IMPL_FUNC(baddbmm_out_cpu)` | per-batch addmm-like VJP | NOT-STARTED. Blocker #1345. |
 | `addmv` | `aten/src/ATen/native/Blas.cpp:72 TORCH_IMPL_FUNC(addmv_out_cpu)` | dself=beta·grad, dmat=alpha·outer(grad,vec), dvec=alpha·mat^T·grad | NOT-STARTED. Blocker #1345. |
 | `addr` | `aten/src/ATen/native/LinearAlgebra.cpp:1200 Tensor addr(...)` | dself=beta·grad, dvec1=alpha·grad@vec2, dvec2=alpha·vec1^T@grad | NOT-STARTED. Blocker #1345. |
-| `linalg.solve` | `aten/src/ATen/native/BatchLinearAlgebra.cpp:2020 Tensor linalg_solve(...)` | dA=−A^{-T}@grad@X^T, dB=A^{-T}@grad | NOT-STARTED in this file (forward exists in `ferrotorch-core/src/linalg.rs`). Blocker #1345. |
+| `linalg.solve` | `aten/src/ATen/native/BatchLinearAlgebra.cpp:2020 Tensor linalg_solve(...)` | `gB = A^{-T} @ gX`, `gA = -gB @ X^T` (`FunctionsManual.cpp:6160`) | SHIPPED 2026-05-27 (`LinalgSolveBackward` + `solve_differentiable`; FD-verified; runner `"linalg.solve"` arm 24/192 non-skipped, 0 failed; batched/empty skipped). |
+| `trace` | `aten/src/ATen/native/LinearAlgebra.cpp Tensor trace_cpu(...)` | `dA = grad * I` (`derivatives.yaml:1785`) | SHIPPED 2026-05-27 (`TraceBackward` + `trace_differentiable`; FD-verified; runner `"trace"` 8/8, 0 failed). |
+| `outer` | `aten/src/ATen/native/LinearAlgebra.cpp:1337 Tensor outer(...)` | `da = grad @ b`, `db = grad^T @ a` (`derivatives.yaml:275-276`) | SHIPPED 2026-05-27 (`OuterBackward` + `outer_differentiable`; FD-verified; runner `"outer"` 8/8, 0 failed). |
+| `linalg.det` | `aten/src/ATen/native/LinearAlgebra.cpp:378 Tensor linalg_det(...)` | `dA = det * grad * inv(A)^T` (`FunctionsManual.cpp:4373`) | SHIPPED 2026-05-27 (`LinalgDetBackward` + `det_differentiable`; FD-verified; runner `"linalg.det"` 16/72 non-skipped, 0 failed). |
+| `linalg.inv` | `aten/src/ATen/native/BatchLinearAlgebra.cpp:1683 Tensor linalg_inv(...)` | `dA = -inv^T @ grad @ inv^T` (`derivatives.yaml:917`) | SHIPPED 2026-05-27 (`LinalgInvBackward` + `inv_differentiable`; FD-verified; runner `"linalg.inv"` 8/64 non-skipped, 0 failed). |
 | `linalg.svd` | `torch/linalg/__init__.py:1739 svd = _add_docstr(...)` | F-matrix formula with U/S/Vh | NOT-STARTED in this file (forward exists in `ferrotorch-core/src/linalg.rs`). Blocker #1345. |
 | `linalg.eig` | `torch/linalg/__init__.py:474 eig = _add_docstr(...)` | F-matrix formula with eigenvalue spacing | NOT-STARTED. Blocker #1345. |
 | `linalg.eigh` | `torch/linalg/__init__.py:642 eigh = _add_docstr(...)` | sym F-matrix (real spectrum) | NOT-STARTED. Blocker #1345. |

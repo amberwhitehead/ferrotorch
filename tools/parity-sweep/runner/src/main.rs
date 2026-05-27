@@ -3115,6 +3115,86 @@ fn dispatch_f32(
             grad_fns::linalg::matmul_differentiable(&a, &b)?
         })),
 
+        // `torch.trace(input)` — sum of the main-diagonal elements of a 2-D
+        // matrix. Upstream `Tensor trace_cpu(const Tensor& self)` at
+        // `aten/src/ATen/native/LinearAlgebra.cpp` (the `trace` native impl);
+        // VJP `trace_backward_symint` at `tools/autograd/derivatives.yaml:1785`.
+        // Routes through `grad_fns::linalg::trace_differentiable`, which
+        // attaches `TraceBackward` (`dA = grad * I`). op_db emits a single 2-D
+        // `[5,5]` sample, no batching — fully covered.
+        "trace" => Ok(Some({
+            let a = unary("trace")?;
+            grad_fns::linalg::trace_differentiable(&a)?
+        })),
+        // `torch.outer(input, vec2)` — 1-D × 1-D outer product
+        // `out[i,j] = input[i] * vec2[j]`. Upstream `Tensor outer(const Tensor&
+        // self, const Tensor& vec2)` at
+        // `aten/src/ATen/native/LinearAlgebra.cpp` (alias of `ger`); VJP per
+        // `tools/autograd/derivatives.yaml:275-276` (the `addr` vec1/vec2
+        // gradients): `da = grad @ b`, `db = grad^T @ a`. Routes through
+        // `grad_fns::linalg::outer_differentiable` (attaches `OuterBackward`).
+        // op_db emits a single `[5] × [10]` sample — fully covered.
+        "outer" => Ok(Some({
+            let (a, b) = binary("outer")?;
+            grad_fns::linalg::outer_differentiable(&a, &b)?
+        })),
+        // `torch.linalg.det(A)` — determinant of a square matrix. Upstream
+        // entry `aten/src/ATen/native/LinearAlgebra.cpp` `linalg_det`; VJP
+        // `linalg_det_backward` at
+        // `torch/csrc/autograd/FunctionsManual.cpp:4373` (`dA = det * grad *
+        // inv(A)^T`, invertible branch). Routes through
+        // `grad_fns::linalg::det_differentiable` (attaches `LinalgDetBackward`).
+        //
+        // Legitimate skip: op_db emits batched (`[*, n, n]`) and 0-sized
+        // (`[0,0]`, `[1,1]`) samples. ferrotorch's faer-backed forward
+        // (`crate::linalg::det`) is square-2-D-only (REQ-3 of
+        // `.design/ferrotorch-core/linalg.md`), so non-2-D or empty inputs are
+        // skipped rather than dispatch-errored. The batched-det / 0-dim
+        // expansion is tracked separately (not a parity divergence).
+        "linalg.det" => {
+            let a = unary("linalg.det")?;
+            if a.ndim() != 2 || a.shape()[0] != a.shape()[1] || a.numel() == 0 {
+                return Ok(None);
+            }
+            Ok(Some(grad_fns::linalg::det_differentiable(&a)?))
+        }
+        // `torch.linalg.inv(A)` — inverse of a square invertible matrix.
+        // Upstream `linalg_inv` (`aten/src/ATen/native/BatchLinearAlgebra.cpp`);
+        // VJP per `tools/autograd/derivatives.yaml:917` (`linalg_inv_ex`:
+        // `dA = -inv^T @ grad @ inv^T`). Routes through
+        // `grad_fns::linalg::inv_differentiable` (attaches `LinalgInvBackward`).
+        // Legitimate skip: batched / 0-sized op_db samples (forward is
+        // square-2-D-only, REQ-4 of `.design/ferrotorch-core/linalg.md`).
+        "linalg.inv" => {
+            let a = unary("linalg.inv")?;
+            if a.ndim() != 2 || a.shape()[0] != a.shape()[1] || a.numel() == 0 {
+                return Ok(None);
+            }
+            Ok(Some(grad_fns::linalg::inv_differentiable(&a)?))
+        }
+        // `torch.linalg.solve(A, B)` — solves `A X = B`. Upstream `linalg_solve`
+        // (`aten/src/ATen/native/BatchLinearAlgebra.cpp`); VJP
+        // `linalg_solve_backward` at
+        // `torch/csrc/autograd/FunctionsManual.cpp:6160` (`gB = A^{-T} @ gX`,
+        // `gA = -gB @ X^T`). Routes through
+        // `grad_fns::linalg::solve_differentiable` (attaches
+        // `LinalgSolveBackward`). `B` may be `[n]` (vector RHS) or `[n, k]`.
+        // Legitimate skip: batched `A` (`[*, n, n]`) / 0-sized op_db samples
+        // (forward is square-2-D-only, REQ-2 of
+        // `.design/ferrotorch-core/linalg.md`).
+        "linalg.solve" => {
+            let (a, b) = binary("linalg.solve")?;
+            if a.ndim() != 2 || a.shape()[0] != a.shape()[1] || a.numel() == 0 || b.numel() == 0 {
+                return Ok(None);
+            }
+            // B must be [n] or [n, k] with n == A rows; broadcasted-batch RHS
+            // is the batched path (skip).
+            if b.ndim() > 2 || b.shape()[0] != a.shape()[0] {
+                return Ok(None);
+            }
+            Ok(Some(grad_fns::linalg::solve_differentiable(&a, &b)?))
+        }
+
         // `torch.einsum(equation, *operands)` —
         // `aten/src/ATen/native/Linear.cpp:286 Tensor einsum`.
         // The op_db wire shape is `args = [List[Tensor], equation: str]`
@@ -5299,6 +5379,22 @@ fn dispatch_ops() -> &'static [&'static str] {
         "bmm",
         "matmul",
         "linalg.matmul",
+        // Decomposition / reduction linalg — wired 2026-05-27 (closes the
+        // tractable-VJP slice of #1344 / #1345). Each routes through a
+        // `grad_fns::linalg::*_differentiable` wrapper that attaches a
+        // closed-form `*Backward` GradFn (FD-verified in
+        // `ferrotorch-core/tests/divergence_linalg_grad_audit.rs`). `trace` /
+        // `outer` are exact; `linalg.det` / `linalg.inv` / `linalg.solve` use
+        // the widened `tolerance_for` rtol=1e-4 (faer LU vs LAPACK ULP drift)
+        // and legitimate-skip op_db's batched / 0-sized samples (forward is
+        // square-2-D-only). The matrix-decomposition backwards
+        // (svd/qr/cholesky/eigh/...) and the fused add{mm,bmm,mv,r}/baddbmm/
+        // kron family remain NOT-STARTED under #1345.
+        "trace",
+        "outer",
+        "linalg.det",
+        "linalg.inv",
+        "linalg.solve",
         // Einsum + SDPA — runner arms wired 2026-05-26 to close #1532.
         // `einsum` consumes op_db's `[List[Tensor], equation_str]` envelope
         // (closed under REQ-2/REQ-5 of `.design/ferrotorch-core/einsum.md`);
@@ -5863,6 +5959,17 @@ fn tolerance_for(op: &str) -> (f32, f32) {
             }
         }
         "bmm" => (1e-4, 1e-7),
+        // Decomposition-family (LU-based forward via faer vs torch's LAPACK):
+        // `linalg.det` / `linalg.inv` / `linalg.solve` accumulate over an LU
+        // factorization whose pivot order and FMA schedule differ from
+        // LAPACK's, inducing the same structural cross-implementation f32 ULP
+        // drift as the matmul family. The 5x5 op_db sample for `linalg.inv`
+        // lands ~3e-5 off the LAPACK result element-wise; rtol=1e-4 absorbs it
+        // without masking a real divergence (byte-exact parity requires the
+        // future MKL/LAPACK FFI epic, same as matmul). `trace` / `outer` are
+        // exact (a pure diagonal sum / a single multiply per element) and
+        // stay at the default `tol_f32()`.
+        "linalg.det" | "linalg.inv" | "linalg.solve" => (1e-4, 1e-7),
         // local_response_norm: power(beta) on a sum across the cross-channel
         // window induces wider f32 drift than other norm ops; empirically
         // ~1e-3 (e.g. shape=[1,6,3] index 10 differs by 3e-3 at |e|=4.5).

@@ -1261,6 +1261,58 @@ pub trait GpuBackend: Send + Sync {
         })
     }
 
+    // GroupNorm f32 (#1356 / #1357).
+    //
+    // Channel-group normalization over a `[batch, channels, hw]`-laid-out f32
+    // buffer (PyTorch `[N, C, H, W]` flattened to `hw = H*W`). `channels` is
+    // split into `groups` groups; per-`(batch, group)` mean/var are taken over
+    // `(channels/groups) * hw` elements, then the per-channel affine
+    // `weight[c] * normed + bias[c]` is applied. `weight`/`bias` have length
+    // `channels`. Mirrors `aten/src/ATen/native/cuda/group_norm_kernel.cu`
+    // (`GroupNormKernelImpl`). The default impl returns `InvalidArgument` so
+    // existing backends compile unchanged; the CUDA backend overrides it with
+    // the `gpu_group_norm_f32` PTX kernel. Non-test production consumer:
+    // `ferrotorch-nn::GroupNorm::forward` GPU fast path.
+    fn group_norm_f32(
+        &self,
+        _input: &GpuBufferHandle,
+        _weight: &GpuBufferHandle,
+        _bias: &GpuBufferHandle,
+        _batch: usize,
+        _channels: usize,
+        _groups: usize,
+        _hw: usize,
+        _eps: f32,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::InvalidArgument {
+            message: "group_norm_f32 GPU op not implemented for this backend".into(),
+        })
+    }
+
+    // Softmax2d f32 (#1451).
+    //
+    // Channel-axis softmax over a `[n, c, hw]`-laid-out f32 buffer
+    // (PyTorch `[N, C, H, W]` flattened to `hw = H*W`). For each `(n, p)`
+    // spatial position, softmax is taken over the `c` channel values that are
+    // strided `hw` apart in the flat buffer:
+    // `out[n,c,p] = exp(x[n,c,p] - max_c') / Σ_c' exp(x[n,c',p] - max_c')`.
+    // Mirrors `torch.nn.Softmax2d` (`torch/nn/modules/activation.py`). The
+    // default impl returns `InvalidArgument` so existing backends compile
+    // unchanged; the CUDA backend overrides it with the `gpu_softmax2d_f32`
+    // PTX kernel. Non-test production consumer:
+    // `ferrotorch-nn::Softmax2d::forward` GPU fast path.
+    fn softmax2d_f32(
+        &self,
+        _input: &GpuBufferHandle,
+        _n: usize,
+        _c: usize,
+        _hw: usize,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::InvalidArgument {
+            message: "softmax2d_f32 GPU op not implemented for this backend".into(),
+        })
+    }
+
     // RMSNorm f32 (row-wise, weight only — no bias, no mean centering)
     fn rmsnorm_f32(
         &self,

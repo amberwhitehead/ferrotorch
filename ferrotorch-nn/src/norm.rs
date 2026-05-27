@@ -11,7 +11,7 @@
 //! |---|---|---|
 //! | REQ-1 | SHIPPED | `pub struct LayerNorm<T: Float>` + `impl<T: Float> Module<T> for LayerNorm<T>` mirrors `torch/nn/modules/normalization.py:105-238`; consumed by `ferrotorch-bert/src/attention.rs:18,194,209` (`pub layer_norm: LayerNorm<T>`) and `ferrotorch-whisper/src/layer.rs:12`. Runner-arm: #1447. |
 //! | REQ-2 | SHIPPED | GPU fast path inside `LayerNorm::forward` dispatches to `backend.layernorm_f32(input, weight, bias, batch, norm_size, eps)` when `input.is_cuda() && self.elementwise_affine` mirroring `aten/src/ATen/native/Normalization.cpp` `native_layer_norm_cuda`; consumed by `ferrotorch-bert/src/attention.rs:209` and `ferrotorch-whisper/src/encoder.rs:27` pushing GPU-resident inputs through this path during inference. |
-//! | REQ-3 | SHIPPED | `pub struct GroupNorm<T: Float>` + `GroupNormBackward<T>` mirrors `torch/nn/modules/normalization.py:239-342`; consumed by `ferrotorch-diffusion/src/vae.rs:39,99` (`pub conv_norm_out: GroupNorm<T>`). Runner-arm: #1447. |
+//! | REQ-3 | SHIPPED | `pub struct GroupNorm<T: Float>` + `GroupNormBackward<T>` mirrors `torch/nn/modules/normalization.py:239-342`; consumed by `ferrotorch-diffusion/src/vae.rs:39,99` (`pub conv_norm_out: GroupNorm<T>`). GPU forward fast path (#1357): `GroupNorm::forward` dispatches to `backend.group_norm_f32(...)` for CUDA input (kernel in `ferrotorch-gpu/src/group_norm.rs`). Runner-arm: #1447. |
 //! | REQ-4 | SHIPPED | `pub struct RMSNorm<T: Float>` + `RMSNormBackward<T>` with `mean(x^2)` denominator (no centering, no bias) mirrors `torch/nn/modules/normalization.py:343-435`; consumed via `ferrotorch-nn/src/lib.rs:227` re-export (Llama / T5 stacks). |
 //! | REQ-5 | SHIPPED | `pub struct BatchNorm2d<T: Float>` + `BatchNorm2dBackward<T>` with per-channel running stats and train/eval branching mirrors `torch/nn/modules/batchnorm.py:420-498`; consumed by `ferrotorch-distributed/src/sync_batch_norm.rs:3,595` and `ferrotorch-vision/src/models/segmentation/fcn.rs:34`. CPU-only — blocker #1449 for GPU. Runner-arm: #1447. |
 //! | REQ-6 | SHIPPED | `pub struct BatchNorm1d<T: Float>` + `BatchNorm1dBackward<T>` mirrors `torch/nn/modules/batchnorm.py:306-383`; consumed by `ferrotorch-nn/src/lazy_norm.rs:154` (`lazy_batchnorm!(LazyBatchNorm1d, BatchNorm1d, ...)`) and `ferrotorch-nn/src/lib.rs:225-228` re-exports. CPU-only; blocker #1449. |
@@ -573,7 +573,41 @@ impl<T: Float> Module<T> for GroupNorm<T> {
         let spatial = spatial_size.max(1);
         let group_size = channels_per_group * spatial;
 
+        // GPU fast path: native GroupNorm kernel (#1357). `weight`/`bias`
+        // always have length `num_channels` (ones / zeros when `affine` is
+        // false), so the kernel's unconditional per-channel affine is the
+        // identity in the non-affine case. Mirrors the LayerNorm fast path
+        // and `aten/src/ATen/native/cuda/group_norm_kernel.cu`
+        // `GroupNormKernelImpl`.
         if input.is_cuda() {
+            if let Some(backend) = gpu_backend() {
+                let eps_f32 = self.eps as f32;
+                let handle = backend.group_norm_f32(
+                    input.gpu_handle()?,
+                    self.weight.tensor().gpu_handle()?,
+                    self.bias.tensor().gpu_handle()?,
+                    batch_size,
+                    channels,
+                    self.num_groups,
+                    spatial,
+                    eps_f32,
+                )?;
+                return if is_grad_enabled() && input.requires_grad() {
+                    let grad_fn = Arc::new(GroupNormBackward {
+                        input: input.clone(),
+                        weight: self.weight.tensor().clone(),
+                        bias: self.bias.tensor().clone(),
+                        num_groups: self.num_groups,
+                        num_channels: self.num_channels,
+                        eps: self.eps,
+                        affine: self.affine,
+                    });
+                    Tensor::from_operation(TensorStorage::gpu(handle), shape.to_vec(), grad_fn)
+                } else {
+                    Tensor::from_storage(TensorStorage::gpu(handle), shape.to_vec(), false)
+                };
+            }
+            // CUDA input without a registered GPU backend: reject honestly.
             return Err(FerrotorchError::NotImplementedOnCuda {
                 op: "GroupNorm::forward",
             });
@@ -5879,5 +5913,60 @@ mod tests {
         assert_eq!(bn.num_batches_tracked(), 0);
         bn.set_running_var(&[1.0_f32, 1.0]).unwrap();
         assert_eq!(bn.num_batches_tracked(), 0);
+    }
+
+    /// #1357: `GroupNorm::forward` on a CUDA-resident input must route through
+    /// `GpuBackend::group_norm_f32` and produce values matching the CPU path
+    /// within f32 tolerance.
+    ///
+    /// Gated `#[ignore]` because it needs real CUDA hardware (the build host
+    /// has none); it documents the expected GPU↔CPU parity for a future
+    /// CUDA-host run. Tracking #1356/#1357.
+    #[test]
+    #[cfg(feature = "cuda")]
+    #[ignore = "needs CUDA hardware; tracking #1356/#1357"]
+    fn group_norm_forward_gpu_matches_cpu() {
+        use crate::module::Module as _;
+        use ferrotorch_core::Device;
+        use ferrotorch_gpu::init_cuda_backend;
+        init_cuda_backend().expect("CUDA init failed");
+
+        // [B=2, C=8, H=3, W=4] with G=4 groups.
+        let b = 2;
+        let c = 8;
+        let h = 3;
+        let w = 4;
+        let n = b * c * h * w;
+        let data: Vec<f32> = (0..n).map(|k| ((k % 17) as f32) * 0.13 - 1.1).collect();
+
+        // Non-trivial affine so the GPU path exercises weight/bias, not just
+        // the identity gamma=1 / beta=0 defaults.
+        let gamma: Vec<f32> = (0..c).map(|k| 1.0 + 0.05 * (k as f32)).collect();
+        let beta: Vec<f32> = (0..c).map(|k| -0.1 + 0.02 * (k as f32)).collect();
+        let mut gn = GroupNorm::<f32>::new(4, c, 1e-5, true).unwrap();
+        gn.weight
+            .set_data(Tensor::from_storage(TensorStorage::cpu(gamma), vec![c], false).unwrap());
+        gn.bias
+            .set_data(Tensor::from_storage(TensorStorage::cpu(beta), vec![c], false).unwrap());
+
+        let x_cpu = Tensor::from_storage(TensorStorage::cpu(data.clone()), vec![b, c, h, w], false)
+            .unwrap();
+        let y_cpu = gn.forward(&x_cpu).unwrap();
+        let cpu_vals = y_cpu.data().unwrap().to_vec();
+
+        // Move the whole module (weight + bias) to CUDA, then run on a
+        // CUDA-resident input so `GroupNorm::forward` takes the GPU fast path.
+        gn.to_device(Device::Cuda(0)).unwrap();
+        let x_gpu = x_cpu.to(Device::Cuda(0)).unwrap();
+        let y_gpu = gn.forward(&x_gpu).unwrap();
+        assert!(y_gpu.is_cuda(), "GroupNorm GPU output must stay on CUDA");
+        let gpu_vals = y_gpu.data_vec().unwrap();
+
+        assert_eq!(gpu_vals.len(), cpu_vals.len());
+        let mut max_abs = 0.0f32;
+        for (g, c) in gpu_vals.iter().zip(cpu_vals.iter()) {
+            max_abs = max_abs.max((g - c).abs());
+        }
+        assert!(max_abs < 1e-4, "GroupNorm GPU vs CPU max|Δ| = {max_abs}");
     }
 }

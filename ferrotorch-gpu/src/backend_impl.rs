@@ -3473,6 +3473,42 @@ impl GpuBackend for CudaBackendImpl {
         Ok(Self::wrap_buffer(result, input.device_ordinal()))
     }
 
+    fn group_norm_f32(
+        &self,
+        input: &GpuBufferHandle,
+        weight: &GpuBufferHandle,
+        bias: &GpuBufferHandle,
+        batch: usize,
+        channels: usize,
+        groups: usize,
+        hw: usize,
+        eps: f32,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        let in_buf = Self::unwrap_buffer(input)?;
+        let w_buf = Self::unwrap_buffer(weight)?;
+        let b_buf = Self::unwrap_buffer(bias)?;
+        let dev = self.device(input.device_ordinal())?;
+        let result = crate::group_norm::gpu_group_norm_f32(
+            in_buf, w_buf, b_buf, batch, channels, groups, hw, eps, dev,
+        )
+        .map_err(Self::map_gpu_err)?;
+        Ok(Self::wrap_buffer(result, input.device_ordinal()))
+    }
+
+    fn softmax2d_f32(
+        &self,
+        input: &GpuBufferHandle,
+        n: usize,
+        c: usize,
+        hw: usize,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        let in_buf = Self::unwrap_buffer(input)?;
+        let dev = self.device(input.device_ordinal())?;
+        let result = crate::group_norm::gpu_softmax2d_f32(in_buf, n, c, hw, dev)
+            .map_err(Self::map_gpu_err)?;
+        Ok(Self::wrap_buffer(result, input.device_ordinal()))
+    }
+
     fn rmsnorm_f32(
         &self,
         input: &GpuBufferHandle,

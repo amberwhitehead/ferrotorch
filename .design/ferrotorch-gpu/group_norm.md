@@ -53,10 +53,12 @@ per-channel affine `gamma`/`beta`. Mirrors the
 - [x] AC-4: Three unit tests in `mod tests` exercise small-shape
   parity vs CPU reference, the SD-VAE `[1, 128, 4, 4]` shape with
   G=32, and the divisibility-rejection error path.
-- [ ] AC-5: Non-test consumer wired through `CudaBackendImpl` —
-  currently no `group_norm_*` trait method consumes this kernel in
-  `backend_impl.rs`; the kernel is exported but not dispatched to
-  from ferrotorch-core's gpu-dispatch path. See REQ-5 blocker.
+- [x] AC-5: Non-test consumer wired through `CudaBackendImpl` —
+  `CudaBackendImpl::group_norm_f32` in `backend_impl.rs` calls
+  `crate::group_norm::gpu_group_norm_f32`, and ferrotorch-core's
+  `GpuBackend::group_norm_f32` trait method (gpu_dispatch.rs) is
+  consumed by `ferrotorch-nn::GroupNorm::forward`'s GPU fast path
+  (#1356/#1357 landed).
 
 ## Architecture
 
@@ -87,14 +89,15 @@ runs three passes per `(b, g)` block:
   `c = c_start + i/hw`, loads `gamma[c]`/`beta[c]`, writes
   `out = gamma * (x - mean) * inv_std + beta` via `fma.rn.f32`.
 
-Non-test consumer (REQ-5): no production consumer currently routes to
-this kernel — the `pub use group_norm::gpu_group_norm_f32` re-export
-at `ferrotorch-gpu/src/lib.rs:224` exposes the symbol, but
-`CudaBackendImpl` in `backend_impl.rs` does not yet implement a
-`group_norm_*` trait method, and ferrotorch-core's gpu-dispatch
-surface does not list one. The autocast op-list at
-`ferrotorch-core/src/autograd/autocast_ops.rs:39` mentions
-`"group_norm"`, but the dispatch wiring through GPU is missing.
+Non-test consumer (REQ-5): `CudaBackendImpl::group_norm_f32` in
+`ferrotorch-gpu/src/backend_impl.rs` unwraps the three f32 handles and
+calls `crate::group_norm::gpu_group_norm_f32`. This overrides the
+`GpuBackend::group_norm_f32` default (`InvalidArgument`) declared in
+`ferrotorch-core/src/gpu_dispatch.rs`, which is invoked by
+`ferrotorch-nn::GroupNorm::forward`'s GPU fast path when
+`input.is_cuda()` and a backend is registered (`ferrotorch-nn/src/norm.rs`).
+The `pub use group_norm::gpu_group_norm_f32` re-export at
+`ferrotorch-gpu/src/lib.rs` remains the ergonomic symbol export.
 
 ## Parity contract
 
@@ -122,6 +125,25 @@ for the mean / inv_std computation, which is bit-equivalent to what
 upstream uses for f32 (the variance reduction itself is
 single-precision; for `T_ACC = float` upstream behaves the same way).
 
+## Softmax2d co-resident kernel (#1451)
+
+`group_norm.rs` also hosts the channel-axis softmax (`Softmax2d`)
+forward kernel, since it is a norm-adjacent reduction over the channel
+axis and the manifest for that build excluded `kernels.rs`:
+
+- `pub(crate) const SOFTMAX2D_PTX` — `softmax2d_kernel` ABI
+  `(in_ptr, out_ptr, total, channels, hw)`; one thread per `(n, p)`
+  spatial position, three sequential per-position passes
+  (max-find, `exp` sum via `ex2.approx.f32(v * log2(e))`, normalize)
+  over `c` channel values strided `hw` apart. Mirrors
+  `torch.nn.Softmax2d` (softmax over `dim=1`).
+- `pub fn gpu_softmax2d_f32(input, n, c, hw, device)` — validates
+  `input.len() == n*c*hw`, device match, short-circuits the
+  degenerate shape, launches `softmax2d_kernel`.
+- Non-test consumer: `CudaBackendImpl::softmax2d_f32 in backend_impl.rs`
+  → `GpuBackend::softmax2d_f32` (gpu_dispatch.rs) →
+  `ferrotorch-nn::Softmax2d::forward` GPU fast path.
+
 ## Verification
 
 Unit tests in `ferrotorch-gpu/src/group_norm.rs` `mod tests`:
@@ -129,6 +151,12 @@ Unit tests in `ferrotorch-gpu/src/group_norm.rs` `mod tests`:
 - `group_norm_matches_cpu_small` — `[2, 16, 5]` with G=4, eps=1e-6.
 - `group_norm_sd_vae_shape` — `[1, 128, 16]` with G=32 (SD VAE shape).
 - `group_norm_validates_groups_divisibility` — error-path: C=10, G=3.
+- `softmax2d_matches_cpu_small` — `[2, 5, 12]` channel-axis softmax
+  vs CPU reference.
+- `softmax2d_columns_sum_to_one` — every `(n, p)` channel column sums
+  to 1.0 within 1e-4.
+- `softmax2d_validates_length` — error-path: buffer length disagrees
+  with `n*c*hw`.
 
 Each test uses the `match GpuDevice::new(0)` graceful-skip pattern.
 
@@ -145,8 +173,8 @@ without CUDA).
 
 | REQ | Status | Evidence |
 |---|---|---|
-| REQ-1 | NOT-STARTED | impl: `pub fn gpu_group_norm_f32 in ferrotorch-gpu/src/group_norm.rs` (line 280) mirrors upstream `GroupNormKernelImpl` at `aten/src/ATen/native/cuda/group_norm_kernel.cu:649`, BUT no non-test production consumer invokes it — only the three `#[cfg(test)] mod tests` callers and the `pub use` re-export at `lib.rs:224` reference it. Open prereq blocker #1356: needs a `group_norm_f32` trait method on `GpuBackend` + `CudaBackendImpl` consumer wiring. |
+| REQ-1 | SHIPPED | impl: `pub fn gpu_group_norm_f32 in ferrotorch-gpu/src/group_norm.rs` mirrors upstream `GroupNormKernelImpl` at `aten/src/ATen/native/cuda/group_norm_kernel.cu:649`. Non-test production consumer: `CudaBackendImpl::group_norm_f32 in ferrotorch-gpu/src/backend_impl.rs` calls it; reached from `ferrotorch-nn::GroupNorm::forward` (`ferrotorch-nn/src/norm.rs`) GPU fast path → `GpuBackend::group_norm_f32` (`ferrotorch-core/src/gpu_dispatch.rs`). (#1356) |
 | REQ-2 | SHIPPED | impl: `pub(crate) const GROUP_NORM_PTX in group_norm.rs` (line 56) carries the three-pass mean / variance / affine PTX; ABI matches the launch site at `group_norm.rs:388`. (Implementation-detail REQ; verified by the unit tests being numerically correct.) |
 | REQ-3 | SHIPPED | impl: validation checks at `group_norm.rs` lines 291-328 (groups divisibility, input length, weight length, bias length, device ordinal). |
 | REQ-4 | SHIPPED | impl: degenerate short-circuit at `group_norm.rs:331` returns `alloc_zeros_f32(n, device)` for `n == 0 || channels == 0 || hw == 0`. |
-| REQ-5 | NOT-STARTED | no `group_norm_*` trait method exists on `GpuBackend` in `ferrotorch-core/src/gpu_dispatch.rs`, and no `fn group_norm_*` exists in `backend_impl.rs`. Open prereq blocker #1357: add `group_norm_f32` to the `GpuBackend` trait + wire `CudaBackendImpl` to call `crate::group_norm::gpu_group_norm_f32`. ferrotorch-nn's `GroupNorm` module currently falls back to a CPU path or per-element kernels rather than this single optimised kernel. |
+| REQ-5 | SHIPPED | impl: `fn group_norm_f32` on the `GpuBackend` trait in `ferrotorch-core/src/gpu_dispatch.rs` (default `InvalidArgument`), overridden by `CudaBackendImpl::group_norm_f32 in ferrotorch-gpu/src/backend_impl.rs` calling `crate::group_norm::gpu_group_norm_f32`. Non-test production consumer: `ferrotorch-nn::GroupNorm::forward` GPU fast path in `ferrotorch-nn/src/norm.rs` dispatches to `backend.group_norm_f32(...)` for CUDA-resident input (replacing the prior `NotImplementedOnCuda` reject). (#1357) |

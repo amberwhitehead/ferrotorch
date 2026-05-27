@@ -38,6 +38,8 @@
 //! | REQ-24 | SHIPPED | impl `ldl_factor`, `ldl_solve`; non-test consumer pub API. |
 //! | REQ-25 | SHIPPED | impl `householder_product`; non-test consumer `qr` reconstruction. |
 //! | REQ-26 | SHIPPED | impl `cholesky_ex`, `inv_ex`, `solve_ex`; non-test consumer pub API. |
+//! | REQ-27 | SHIPPED | impl `trace` (sum of main diagonal); non-test consumer `grad_fns::linalg::trace_differentiable`. |
+//! | REQ-28 | SHIPPED | impl `outer` (1-D × 1-D outer product); non-test consumer `grad_fns::linalg::outer_differentiable`. |
 
 use crate::dtype::Float;
 use crate::error::{FerrotorchError, FerrotorchResult};
@@ -1603,6 +1605,73 @@ pub fn diagonal<T: Float>(a: &Tensor<T>, offset: i64) -> FerrotorchResult<Tensor
         out.push(data[r * shape[1] + c]);
     }
     Tensor::from_storage(TensorStorage::cpu(out), vec![len], false)
+}
+
+// ---------------------------------------------------------------------------
+// Trace (sum of main diagonal) and outer product
+// ---------------------------------------------------------------------------
+
+/// Sum of the main-diagonal elements of a 2-D tensor: `sum_i A[i, i]`.
+///
+/// Returns a scalar tensor. Mirrors `torch.trace` (`aten/src/ATen/native/
+/// LinearAlgebra.cpp` `Tensor trace_cpu`); `torch.trace` requires a 2-D
+/// input, so a non-2-D tensor is an error here too.
+///
+/// # Backward
+/// Forward-only. The autograd-tracking wrapper lives in
+/// `crate::grad_fns::linalg::trace_differentiable`.
+pub fn trace<T: Float>(a: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
+    require_cpu(a, "trace")?;
+    let shape = a.shape();
+    if shape.len() != 2 {
+        return Err(FerrotorchError::InvalidArgument {
+            message: format!("trace requires a 2-D tensor, got {shape:?}"),
+        });
+    }
+    let (m, n) = (shape[0], shape[1]);
+    let k = m.min(n);
+    let data = a.data()?;
+    let mut acc = <T as num_traits::Zero>::zero();
+    for i in 0..k {
+        acc += data[i * n + i];
+    }
+    Tensor::from_storage(TensorStorage::cpu(vec![acc]), vec![], false)
+}
+
+/// Outer product of two 1-D tensors: `out[i, j] = a[i] * b[j]`.
+///
+/// `a` is length `m`, `b` is length `n`; the result is `[m, n]`. Mirrors
+/// `torch.outer` (`aten/src/ATen/native/LinearAlgebra.cpp` `Tensor outer`,
+/// itself an alias of `ger`); both operands must be 1-D.
+///
+/// # Backward
+/// Forward-only. The autograd-tracking wrapper lives in
+/// `crate::grad_fns::linalg::outer_differentiable`.
+pub fn outer<T: Float>(a: &Tensor<T>, b: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
+    require_cpu(a, "outer")?;
+    require_cpu(b, "outer")?;
+    if a.ndim() != 1 || b.ndim() != 1 {
+        return Err(FerrotorchError::InvalidArgument {
+            message: format!(
+                "outer requires 1-D tensors, got {:?} and {:?}",
+                a.shape(),
+                b.shape()
+            ),
+        });
+    }
+    let m = a.shape()[0];
+    let n = b.shape()[0];
+    let a_data = a.data()?;
+    let b_data = b.data()?;
+    let mut out = vec![<T as num_traits::Zero>::zero(); m * n];
+    for i in 0..m {
+        let ai = a_data[i];
+        let row = i * n;
+        for j in 0..n {
+            out[row + j] = ai * b_data[j];
+        }
+    }
+    Tensor::from_storage(TensorStorage::cpu(out), vec![m, n], false)
 }
 
 // ===========================================================================

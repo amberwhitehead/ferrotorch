@@ -16,7 +16,7 @@
 //! | REQ-7 (`baddbmm`) | NOT-STARTED | not present. Blocker #1345. |
 //! | REQ-8 (`addmv`) | NOT-STARTED | not present. Blocker #1345. |
 //! | REQ-9 (`addr`) | NOT-STARTED | not present. Blocker #1345. |
-//! | REQ-10 (`linalg.solve`) | NOT-STARTED | forward exists in `crate::linalg`; no `LinalgSolveBackward` in this file. Blocker #1345. |
+//! | REQ-10 (`linalg.solve`) | SHIPPED | `LinalgSolveBackward` + `solve_differentiable` (VJP `gB = A^-T @ gX`, `gA = -gB @ X^T` per `FunctionsManual.cpp:6160`); FD-verified `tests/divergence_linalg_grad_audit.rs:solve_backward_*`; non-test consumer `tools/parity-sweep/runner/src/main.rs` `"linalg.solve"` arm (parity 24/24 non-skipped, 0 failed). Blocker #1345. |
 //! | REQ-11 (`linalg.svd`) | NOT-STARTED | forward exists; no `LinalgSvdBackward`. Blocker #1345. |
 //! | REQ-12 (`linalg.eig`) | NOT-STARTED | forward exists; no backward. Blocker #1345. |
 //! | REQ-13 (`linalg.eigh`) | NOT-STARTED | forward exists; no backward. Blocker #1345. |
@@ -24,9 +24,9 @@
 //! | REQ-15 (`linalg.eigvalsh`) | NOT-STARTED | forward exists; no backward. Blocker #1345. |
 //! | REQ-16 (`linalg.qr`) | NOT-STARTED | forward exists; no backward. Blocker #1345. |
 //! | REQ-17 (`linalg.cholesky`) | NOT-STARTED | forward exists; no backward. Blocker #1345. |
-//! | REQ-18 (`linalg.inv`) | NOT-STARTED | forward exists; no backward. Blocker #1345. |
+//! | REQ-18 (`linalg.inv`) | SHIPPED | `LinalgInvBackward` + `inv_differentiable` (VJP `dA = -Y^T @ grad @ Y^T` per `derivatives.yaml:917`); FD-verified `tests/divergence_linalg_grad_audit.rs:inv_backward_matches_finite_difference`; non-test consumer `tools/parity-sweep/runner/src/main.rs` `"linalg.inv"` arm. Blocker #1345. |
 //! | REQ-19 (`linalg.pinv`) | NOT-STARTED | forward exists; no backward. Blocker #1345. |
-//! | REQ-20 (`linalg.det`) | NOT-STARTED | forward exists; no backward. Blocker #1345. |
+//! | REQ-20 (`linalg.det`) | SHIPPED | `LinalgDetBackward` + `det_differentiable` (VJP `dA = det * grad * inv(A)^T` per `FunctionsManual.cpp:4373` invertible branch); FD-verified `tests/divergence_linalg_grad_audit.rs:det_backward_matches_finite_difference`; non-test consumer `tools/parity-sweep/runner/src/main.rs` `"linalg.det"` arm. Blocker #1345. |
 //! | REQ-21 (`linalg.slogdet`) | NOT-STARTED | forward exists; no backward. Blocker #1345. |
 //! | REQ-22 (`linalg.lstsq`) | NOT-STARTED | forward exists; no backward. Blocker #1345. |
 //! | REQ-23 (`linalg.norm`) | NOT-STARTED | forward exists; no backward. Blocker #1345. |
@@ -35,13 +35,13 @@
 //! | REQ-26 (`linalg.householder_product`) | NOT-STARTED | forward exists; no backward. Blocker #1345. |
 //! | REQ-27 (`linalg.lu`) | NOT-STARTED | forward exists; no backward. Blocker #1345. |
 //! | REQ-28 (`linalg.lu_factor`) | NOT-STARTED | forward exists; no backward. Blocker #1345. |
-//! | REQ-29 (`trace`) | NOT-STARTED | no public `trace` op exists; the `autograd::anomaly::trace` is unrelated. Blocker #1345. |
+//! | REQ-29 (`trace`) | SHIPPED | `TraceBackward` + `trace_differentiable` (VJP `dA = grad * I` per `derivatives.yaml:1785`), forward `crate::linalg::trace`; FD-verified `tests/divergence_linalg_grad_audit.rs:trace_backward_matches_finite_difference`; non-test consumer `tools/parity-sweep/runner/src/main.rs` `"trace"` arm (parity 8/8, 0 failed). Blocker #1345. |
 //! | REQ-30 (`diagonal`) | NOT-STARTED | forward-only `diagonal` exists in `crate::linalg`; no autograd. Blocker #1345. |
 //! | REQ-31 (`diag`) | NOT-STARTED | forward-only `diag` exists in `ops::tensor_ops`; no autograd. Blocker #1345. |
 //! | REQ-32 (`tril`) | NOT-STARTED | forward-only `tril` exists in `ops::tensor_ops`; no autograd. Blocker #1345. |
 //! | REQ-33 (`triu`) | NOT-STARTED | forward-only `triu` exists in `ops::tensor_ops`; no autograd. Blocker #1345. |
 //! | REQ-34 (`kron`) | NOT-STARTED | no `kron` anywhere. Blocker #1345. |
-//! | REQ-35 (`outer`) | NOT-STARTED | no public `outer` op; the pattern is used internally inside `MvBackward` and the vm branch of `MatmulBackward`. Blocker #1345. |
+//! | REQ-35 (`outer`) | SHIPPED | `OuterBackward` + `outer_differentiable` (VJP `da = grad @ b`, `db = grad^T @ a` per `derivatives.yaml:275-276`), forward `crate::linalg::outer`; FD-verified `tests/divergence_linalg_grad_audit.rs:outer_backward_matches_finite_difference`; non-test consumer `tools/parity-sweep/runner/src/main.rs` `"outer"` arm (parity 8/8, 0 failed). Blocker #1345. |
 
 use std::any::TypeId;
 use std::sync::Arc;
@@ -51,6 +51,7 @@ use crate::autograd::no_grad::is_grad_enabled;
 use crate::dtype::Float;
 use crate::error::{FerrotorchError, FerrotorchResult};
 use crate::gpu_dispatch::gpu_backend;
+use crate::linalg as linalg_fwd;
 use crate::ops::linalg::{self, mm, transpose};
 use crate::storage::TensorStorage;
 use crate::tensor::{GradFn, Tensor};
@@ -1918,6 +1919,414 @@ pub fn permute_0213<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> 
     }
 
     Tensor::from_storage(TensorStorage::cpu(out), out_shape, false)
+}
+
+// ===========================================================================
+// Decomposition / reduction linalg ops with closed-form VJPs (#1345)
+//
+// These wrappers consume the forward implementations in `crate::linalg`
+// (faer-backed) and attach a `GradFn` whose backward is a closed-form
+// matrix differential. Each VJP below is grounded in a named PyTorch
+// `file:line` and FD-verified in
+// `tests/divergence_linalg_grad_audit.rs`.
+// ===========================================================================
+
+/// Helper: 2-D matrix transpose of a non-grad tensor (used by the matrix
+/// VJPs below). Always materialises a contiguous CPU result.
+fn mat_transpose<T: Float>(t: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
+    transpose(t)
+}
+
+// ---------------------------------------------------------------------------
+// TraceBackward — s = trace(A) = sum_i A[i,i]   (2D -> scalar)
+// ---------------------------------------------------------------------------
+
+/// Backward for `s = trace(A)`.
+///
+/// VJP (`tools/autograd/derivatives.yaml:1785` `trace_backward_symint`):
+/// `dA = grad_s * I` — i.e. `dA[i,j] = grad_s` on the main diagonal, else 0.
+#[derive(Debug)]
+pub struct TraceBackward<T: Float> {
+    rows: usize,
+    cols: usize,
+    _marker: std::marker::PhantomData<T>,
+}
+
+impl<T: Float> GradFn<T> for TraceBackward<T> {
+    fn backward(&self, grad_output: &Tensor<T>) -> FerrotorchResult<Vec<Option<Tensor<T>>>> {
+        let g: T = grad_output.item()?;
+        let zero = <T as num_traits::Zero>::zero();
+        let mut out = vec![zero; self.rows * self.cols];
+        let k = self.rows.min(self.cols);
+        for i in 0..k {
+            out[i * self.cols + i] = g;
+        }
+        let grad_a =
+            Tensor::from_storage(TensorStorage::cpu(out), vec![self.rows, self.cols], false)?;
+        Ok(vec![Some(grad_a)])
+    }
+
+    fn inputs(&self) -> Vec<&Tensor<T>> {
+        // Trace's input is not retained (the VJP needs only the shape, which
+        // is captured at forward time). The autograd graph edge is carried by
+        // the leaf the differentiable wrapper passed to `from_operation`.
+        vec![]
+    }
+
+    fn name(&self) -> &'static str {
+        "TraceBackward"
+    }
+}
+
+/// Differentiable `trace`. Attaches `TraceBackward` when grad is needed.
+pub fn trace_differentiable<T: Float>(a: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
+    let result = linalg_fwd::trace(a)?;
+    if is_grad_enabled() && a.requires_grad() {
+        let shape = a.shape();
+        let grad_fn = Arc::new(TraceForward {
+            input: a.clone(),
+            inner: TraceBackward {
+                rows: shape[0],
+                cols: shape[1],
+                _marker: std::marker::PhantomData,
+            },
+        });
+        let (storage, shape) = result.into_storage_and_shape()?;
+        Tensor::from_operation(storage, shape, grad_fn)
+    } else {
+        Ok(result)
+    }
+}
+
+/// `TraceBackward` retains only shape; this wrapper carries the input edge so
+/// the graph connects back to the leaf `A`.
+#[derive(Debug)]
+struct TraceForward<T: Float> {
+    input: Tensor<T>,
+    inner: TraceBackward<T>,
+}
+
+impl<T: Float> GradFn<T> for TraceForward<T> {
+    fn backward(&self, grad_output: &Tensor<T>) -> FerrotorchResult<Vec<Option<Tensor<T>>>> {
+        self.inner.backward(grad_output)
+    }
+    fn inputs(&self) -> Vec<&Tensor<T>> {
+        vec![&self.input]
+    }
+    fn name(&self) -> &'static str {
+        "TraceBackward"
+    }
+}
+
+// ---------------------------------------------------------------------------
+// OuterBackward — C = outer(a, b)   (1D x 1D -> 2D)
+// ---------------------------------------------------------------------------
+
+/// Backward for `C = outer(a, b)` where `C[i,j] = a[i] * b[j]`.
+///
+/// VJP (`tools/autograd/derivatives.yaml:275-276`, `vec1`/`vec2` of `addr`,
+/// which is `outer` composed with `addmm`-style scaling):
+/// - `da = grad_C @ b`     (mv: `[m,n] @ [n] -> [m]`)
+/// - `db = grad_C^T @ a`   (mv: `[n,m] @ [m] -> [n]`)
+#[derive(Debug)]
+pub struct OuterBackward<T: Float> {
+    a: Tensor<T>,
+    b: Tensor<T>,
+}
+
+impl<T: Float> OuterBackward<T> {
+    pub fn new(a: Tensor<T>, b: Tensor<T>) -> Self {
+        Self { a, b }
+    }
+}
+
+impl<T: Float> GradFn<T> for OuterBackward<T> {
+    fn backward(&self, grad_output: &Tensor<T>) -> FerrotorchResult<Vec<Option<Tensor<T>>>> {
+        let grad_a = if self.a.requires_grad() {
+            // da = grad_C @ b
+            Some(linalg::mv(grad_output, &self.b)?)
+        } else {
+            None
+        };
+        let grad_b = if self.b.requires_grad() {
+            // db = grad_C^T @ a
+            let gt = mat_transpose(grad_output)?;
+            Some(linalg::mv(&gt, &self.a)?)
+        } else {
+            None
+        };
+        Ok(vec![grad_a, grad_b])
+    }
+
+    fn inputs(&self) -> Vec<&Tensor<T>> {
+        vec![&self.a, &self.b]
+    }
+
+    fn name(&self) -> &'static str {
+        "OuterBackward"
+    }
+}
+
+/// Differentiable `outer`. Attaches `OuterBackward` when grad is needed.
+pub fn outer_differentiable<T: Float>(a: &Tensor<T>, b: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
+    let result = linalg_fwd::outer(a, b)?;
+    if is_grad_enabled() && (a.requires_grad() || b.requires_grad()) {
+        let grad_fn = Arc::new(OuterBackward::new(a.clone(), b.clone()));
+        let (storage, shape) = result.into_storage_and_shape()?;
+        Tensor::from_operation(storage, shape, grad_fn)
+    } else {
+        Ok(result)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// LinalgInvBackward — Y = inv(A)   (2D square)
+// ---------------------------------------------------------------------------
+
+/// Backward for `Y = inv(A)`.
+///
+/// VJP (`tools/autograd/derivatives.yaml:917` `linalg_inv_ex`:
+/// `inverse: -inv @ A_t @ inv`, transposed to VJP form):
+/// `dA = -Y^T @ grad_Y @ Y^T`.
+#[derive(Debug)]
+pub struct LinalgInvBackward<T: Float> {
+    /// The computed inverse `Y` (output), retained for the VJP.
+    inv: Tensor<T>,
+}
+
+impl<T: Float> GradFn<T> for LinalgInvBackward<T> {
+    fn backward(&self, grad_output: &Tensor<T>) -> FerrotorchResult<Vec<Option<Tensor<T>>>> {
+        // dA = -Y^T @ grad_Y @ Y^T
+        let yt = mat_transpose(&self.inv)?;
+        let tmp = mm(&yt, grad_output)?; // Y^T @ grad
+        let prod = mm(&tmp, &yt)?; // (Y^T @ grad) @ Y^T
+        let data = prod.data()?;
+        let neg: Vec<T> = data.iter().map(|&v| -v).collect();
+        let grad_a = Tensor::from_storage(TensorStorage::cpu(neg), prod.shape().to_vec(), false)?;
+        Ok(vec![Some(grad_a)])
+    }
+
+    fn inputs(&self) -> Vec<&Tensor<T>> {
+        // The VJP closes over the retained inverse only; the graph edge to the
+        // leaf `A` is carried by `InvForward` below.
+        vec![]
+    }
+
+    fn name(&self) -> &'static str {
+        "LinalgInvBackward"
+    }
+}
+
+/// Carries the input edge for `inv` (the VJP itself only needs the output).
+#[derive(Debug)]
+struct InvForward<T: Float> {
+    input: Tensor<T>,
+    inner: LinalgInvBackward<T>,
+}
+
+impl<T: Float> GradFn<T> for InvForward<T> {
+    fn backward(&self, grad_output: &Tensor<T>) -> FerrotorchResult<Vec<Option<Tensor<T>>>> {
+        self.inner.backward(grad_output)
+    }
+    fn inputs(&self) -> Vec<&Tensor<T>> {
+        vec![&self.input]
+    }
+    fn name(&self) -> &'static str {
+        "LinalgInvBackward"
+    }
+}
+
+/// Differentiable `inv`. Attaches `LinalgInvBackward` when grad is needed.
+pub fn inv_differentiable<T: Float>(a: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
+    let result = linalg_fwd::inv(a)?;
+    if is_grad_enabled() && a.requires_grad() {
+        let grad_fn = Arc::new(InvForward {
+            input: a.clone(),
+            inner: LinalgInvBackward {
+                inv: result.clone(),
+            },
+        });
+        let (storage, shape) = result.into_storage_and_shape()?;
+        Tensor::from_operation(storage, shape, grad_fn)
+    } else {
+        Ok(result)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// LinalgDetBackward — d = det(A)   (2D square -> scalar)
+// ---------------------------------------------------------------------------
+
+/// Backward for `d = det(A)`.
+///
+/// VJP (`torch/csrc/autograd/FunctionsManual.cpp:4373` `linalg_det_backward`,
+/// invertible branch — the gradient solving `A^T G = det * grad * I`):
+/// `dA = grad_d * det(A) * inv(A)^T`.
+#[derive(Debug)]
+pub struct LinalgDetBackward<T: Float> {
+    /// Retained inverse-transpose of `A`.
+    inv_t: Tensor<T>,
+    /// Retained scalar determinant value.
+    det: T,
+}
+
+impl<T: Float> GradFn<T> for LinalgDetBackward<T> {
+    fn backward(&self, grad_output: &Tensor<T>) -> FerrotorchResult<Vec<Option<Tensor<T>>>> {
+        let g: T = grad_output.item()?;
+        let scale = g * self.det;
+        let data = self.inv_t.data()?;
+        let scaled: Vec<T> = data.iter().map(|&v| scale * v).collect();
+        let grad_a = Tensor::from_storage(
+            TensorStorage::cpu(scaled),
+            self.inv_t.shape().to_vec(),
+            false,
+        )?;
+        Ok(vec![Some(grad_a)])
+    }
+
+    fn inputs(&self) -> Vec<&Tensor<T>> {
+        vec![]
+    }
+
+    fn name(&self) -> &'static str {
+        "LinalgDetBackward"
+    }
+}
+
+/// Carries the input edge for `det`.
+#[derive(Debug)]
+struct DetForward<T: Float> {
+    input: Tensor<T>,
+    inner: LinalgDetBackward<T>,
+}
+
+impl<T: Float> GradFn<T> for DetForward<T> {
+    fn backward(&self, grad_output: &Tensor<T>) -> FerrotorchResult<Vec<Option<Tensor<T>>>> {
+        self.inner.backward(grad_output)
+    }
+    fn inputs(&self) -> Vec<&Tensor<T>> {
+        vec![&self.input]
+    }
+    fn name(&self) -> &'static str {
+        "LinalgDetBackward"
+    }
+}
+
+/// Differentiable `det`. Attaches `LinalgDetBackward` when grad is needed.
+pub fn det_differentiable<T: Float>(a: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
+    let result = linalg_fwd::det(a)?;
+    if is_grad_enabled() && a.requires_grad() {
+        let det_val: T = result.item()?;
+        let inv = linalg_fwd::inv(a)?;
+        let inv_t = mat_transpose(&inv)?;
+        let grad_fn = Arc::new(DetForward {
+            input: a.clone(),
+            inner: LinalgDetBackward {
+                inv_t,
+                det: det_val,
+            },
+        });
+        let (storage, shape) = result.into_storage_and_shape()?;
+        Tensor::from_operation(storage, shape, grad_fn)
+    } else {
+        Ok(result)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// LinalgSolveBackward — X = solve(A, B)   (A: 2D square, B: [n] or [n,k])
+// ---------------------------------------------------------------------------
+
+/// Backward for `X = solve(A, B)` (i.e. `X = A^{-1} B`).
+///
+/// VJP (`torch/csrc/autograd/FunctionsManual.cpp:6160`
+/// `linalg_solve_backward`, real case):
+/// - `gB = A^{-T} @ gX`           (solve with `A^T`)
+/// - `gA = -gB @ X^T`             (outer/matmul; vector RHS handled by
+///   unsqueeze/squeeze to a column matrix)
+#[derive(Debug)]
+pub struct LinalgSolveBackward<T: Float> {
+    a: Tensor<T>,
+    /// The `B` graph edge — retained for gradient-slot ordering and the
+    /// `requires_grad` check; the numeric VJP uses only `X`.
+    b: Tensor<T>,
+    /// Retained solution `X`.
+    x: Tensor<T>,
+    /// Whether `B` (and hence `X`) was a 1-D vector RHS.
+    vector_rhs: bool,
+}
+
+impl<T: Float> GradFn<T> for LinalgSolveBackward<T> {
+    fn backward(&self, grad_output: &Tensor<T>) -> FerrotorchResult<Vec<Option<Tensor<T>>>> {
+        // gB = A^{-T} @ gX, computed as solve(A^T, gX).
+        let at = mat_transpose(&self.a)?;
+        let gb = crate::autograd::no_grad::no_grad(|| linalg_fwd::solve(&at, grad_output))?;
+
+        let grad_b = if self.b.requires_grad() {
+            Some(gb.clone())
+        } else {
+            None
+        };
+
+        let grad_a = if self.a.requires_grad() {
+            // gA = -gB @ X^T. Promote vector forms to column matrices first.
+            let (gb_m, x_m) = if self.vector_rhs {
+                let n = gb.shape()[0];
+                let gb_col = Tensor::from_storage(
+                    TensorStorage::cpu(gb.data()?.to_vec()),
+                    vec![n, 1],
+                    false,
+                )?;
+                let xn = self.x.shape()[0];
+                let x_col = Tensor::from_storage(
+                    TensorStorage::cpu(self.x.data()?.to_vec()),
+                    vec![xn, 1],
+                    false,
+                )?;
+                (gb_col, x_col)
+            } else {
+                (gb.clone(), self.x.clone())
+            };
+            let xt = mat_transpose(&x_m)?;
+            let prod = mm(&gb_m, &xt)?;
+            let data = prod.data()?;
+            let neg: Vec<T> = data.iter().map(|&v| -v).collect();
+            Some(Tensor::from_storage(
+                TensorStorage::cpu(neg),
+                prod.shape().to_vec(),
+                false,
+            )?)
+        } else {
+            None
+        };
+
+        Ok(vec![grad_a, grad_b])
+    }
+
+    fn inputs(&self) -> Vec<&Tensor<T>> {
+        vec![&self.a, &self.b]
+    }
+
+    fn name(&self) -> &'static str {
+        "LinalgSolveBackward"
+    }
+}
+
+/// Differentiable `solve`. Attaches `LinalgSolveBackward` when grad is needed.
+pub fn solve_differentiable<T: Float>(a: &Tensor<T>, b: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
+    let result = linalg_fwd::solve(a, b)?;
+    if is_grad_enabled() && (a.requires_grad() || b.requires_grad()) {
+        let grad_fn = Arc::new(LinalgSolveBackward {
+            a: a.clone(),
+            b: b.clone(),
+            x: result.clone(),
+            vector_rhs: b.ndim() == 1,
+        });
+        let (storage, shape) = result.into_storage_and_shape()?;
+        Tensor::from_operation(storage, shape, grad_fn)
+    } else {
+        Ok(result)
+    }
 }
 
 // ---------------------------------------------------------------------------
