@@ -77,7 +77,11 @@ polynomial families).
   PyTorch users compose from `torch.lgamma`).
 - REQ-15: Multivariate log-gamma — `multigammaln(input, p)` and its alias
   `mvlgamma(input, p)` computing `(p(p-1)/4) ln(π) + Σ_{i=1}^p lgamma(a +
-  (1-i)/2)`. Domain `a > (p-1)/2` (NaN outside); `p >= 1` (error for `p == 0`).
+  (1-i)/2)`. `p >= 1` (error for `p == 0`, matching `mvlgamma_check` at
+  `UnaryOps.cpp:884`). The documented domain `a > (p-1)/2`
+  (`torch/special/__init__.py:862`) is only "undefined" outside it — torch
+  applies NO NaN guard and emits the ordinary finite lgamma-sum (or `+inf` at an
+  lgamma pole); ferrotorch matches that contract exactly.
   Mirrors `torch.special.multigammaln` / `torch.mvlgamma`.
 - REQ-16: Gamma sign — `gammaln_sign(input)` returning the `±1`/`NaN` factor
   that `lgamma = ln|Γ|` discards: `+1` for `x > 0`, `NaN` at negative-integer
@@ -179,5 +183,5 @@ recurrence-identity checks (`H_n(x) - 2x*H_{n-1}(x) + 2(n-1)*H_{n-2}(x) =
 | REQ-12 | SHIPPED | impl: `shifted_chebyshev_polynomial_{t,u,v,w}` at `special.rs:875-908`; non-test consumer: accessible via `ferrotorch_core::special::shifted_chebyshev_polynomial_*` |
 | REQ-13 | SHIPPED | impl: `pub fn gammainc` / `pub fn gammaincc` in `special.rs` (boundary kernels `calc_igamma_f64` / `calc_igammac_f64` over NR core `gammp_core_f64` / `gammq_core_f64`) mirror `torch.special.gammainc` / `gammaincc` (`aten/src/ATen/native/Math.h:1144 calc_igamma`, `:1085 calc_igammac`); non-test consumer: re-exported as top-level `ferrotorch_core::gammainc` / `ferrotorch_core::gammaincc` in `lib.rs` — per goal.md S5 the public `torch.special` surface IS the consumer (boundary API needs no further downstream caller) |
 | REQ-14 | SHIPPED | impl: `pub fn log_beta` / `pub fn beta` in `special.rs` (scalar `log_beta_scalar` / `beta_scalar`) mirror `scipy.special.betaln` / `beta`; non-test consumer: re-exported as `ferrotorch_core::log_beta` / `ferrotorch_core::beta` in `lib.rs` (S5 public-surface consumer) |
-| REQ-15 | SHIPPED | impl: `pub fn multigammaln` + alias `pub fn mvlgamma` in `special.rs` (scalar `multigammaln_scalar`) mirror `torch.special.multigammaln` / `torch.mvlgamma` (`aten/src/ATen/native/UnaryOps.cpp:887 mvlgamma`, domain `a > (p-1)/2` per `torch/special/__init__.py:862`); non-test consumer: re-exported as `ferrotorch_core::multigammaln` / `ferrotorch_core::mvlgamma` in `lib.rs` (S5 public-surface consumer) |
+| REQ-15 | SHIPPED | impl: `pub fn multigammaln` + alias `pub fn mvlgamma` in `special.rs` (scalar `multigammaln_scalar`) mirror `torch.special.multigammaln` / `torch.mvlgamma` (`aten/src/ATen/native/UnaryOps.cpp:887 mvlgamma`; only guard is `p >= 1` per `mvlgamma_check` at `UnaryOps.cpp:884` — NO fabricated NaN domain-guard; out-of-domain `a <= (p-1)/2` returns the ordinary finite lgamma-sum or `+inf` at an lgamma pole, matching torch); non-test consumer: re-exported as `ferrotorch_core::multigammaln` / `ferrotorch_core::mvlgamma` in `lib.rs` (S5 public-surface consumer) |
 | REQ-16 | SHIPPED | impl: `pub fn gammaln_sign` in `special.rs` (scalar `gammaln_sign_scalar`) mirrors `scipy.special.gammasgn`; non-test consumer: re-exported as `ferrotorch_core::gammaln_sign` in `lib.rs` (S5 public-surface consumer) |

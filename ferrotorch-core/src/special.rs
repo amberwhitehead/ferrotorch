@@ -878,19 +878,16 @@ fn beta_scalar<T: Float>(a: T, b: T) -> T {
 /// `C + Σ_{i=1}^p lgamma(a + (1 - i)/2)` with `C = (p(p-1)/4) ln(π)`.
 ///
 /// Mirrors `torch.special.multigammaln` / `torch.mvlgamma`
-/// (`aten/src/ATen/native/UnaryOps.cpp:887-905`). The documented domain is
-/// `a > (p - 1)/2` (per `torch/special/__init__.py:862`); outside it, the
-/// individual `lgamma(a + (1-i)/2)` evaluations land in the gamma-reflection
-/// branch, so we return NaN to flag the undefined region rather than emit a
-/// silently-wrong value.
+/// (`aten/src/ATen/native/UnaryOps.cpp:887-905`). The kernel performs NO domain
+/// check beyond `p >= 1` (`mvlgamma_check`, `UnaryOps.cpp:884`); it computes the
+/// `lgamma`-sum verbatim for any `a`. The documented domain `a > (p - 1)/2`
+/// (`torch/special/__init__.py:862`) only means the result is mathematically
+/// "undefined" outside it — torch still emits the ordinary finite value of
+/// `Σ lgamma(a + (1-i)/2)`, or `+inf` when an argument lands on a non-positive
+/// integer pole. We match that contract: no fabricated NaN guard.
 fn multigammaln_scalar<T: Float>(a: T, p: usize) -> T {
     let af = <T as num_traits::ToPrimitive>::to_f64(&a).unwrap_or(f64::NAN);
     let pf = p as f64;
-    // Documented domain check: a > (p - 1)/2. NaN inputs and out-of-domain
-    // values both map to NaN (the `> ` comparison is false for NaN).
-    if af.is_nan() || af <= (pf - 1.0) / 2.0 {
-        return T::from(f64::NAN).unwrap();
-    }
     let c = (pf * (pf - 1.0) / 4.0) * std::f64::consts::PI.ln();
     let mut sum = 0.0_f64;
     for i in 1..=p {
@@ -2281,14 +2278,26 @@ mod tests {
     }
 
     #[test]
-    fn multigammaln_domain_violation_is_nan() {
-        // Domain is a > (p-1)/2; for p=3, (p-1)/2 = 1.0, so a=0.5 is out.
-        let a = t(&[0.5], &[1]);
-        let r = multigammaln(&a, 3).unwrap();
+    fn multigammaln_out_of_domain_matches_torch() {
+        // torch's mvlgamma (aten/src/ATen/native/UnaryOps.cpp:887) has NO domain
+        // guard beyond p >= 1: out-of-domain inputs (a <= (p-1)/2) get the
+        // ordinary finite lgamma-sum, and +inf only when an lgamma argument hits
+        // a non-positive integer pole.
+        //
+        // Oracle (live torch 2.11, this machine, 2026-05-27):
+        //   torch.special.multigammaln(0.3, 3) == 6.026863353182922  (finite)
+        //   torch.special.multigammaln(0.5, 3) == inf  (args 0.5,0.0,-0.5; pole at 0.0)
+        let finite = multigammaln(&t(&[0.3], &[1]), 3).unwrap();
         assert!(
-            r.data().unwrap()[0].is_nan(),
-            "got {}",
-            r.data().unwrap()[0]
+            (finite.data().unwrap()[0] - 6.026_863_353_182_922).abs() < 1e-12,
+            "multigammaln(0.3, 3): torch returns finite 6.026863353182922, got {}",
+            finite.data().unwrap()[0]
+        );
+        let pole = multigammaln(&t(&[0.5], &[1]), 3).unwrap();
+        assert!(
+            pole.data().unwrap()[0] == f64::INFINITY,
+            "multigammaln(0.5, 3): torch returns +inf (lgamma pole), got {}",
+            pole.data().unwrap()[0]
         );
     }
 

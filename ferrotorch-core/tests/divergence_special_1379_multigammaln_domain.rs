@@ -28,7 +28,7 @@
 //! NaN where torch returns a real (or +inf) value, which is a release-blocker
 //! for #1379. The failing test IS the block. Tracking: #1571.
 
-use ferrotorch_core::{multigammaln, Tensor, TensorStorage};
+use ferrotorch_core::{Tensor, TensorStorage, multigammaln};
 
 fn t(data: &[f64], shape: &[usize]) -> Tensor<f64> {
     Tensor::from_storage(TensorStorage::cpu(data.to_vec()), shape.to_vec(), false).unwrap()
