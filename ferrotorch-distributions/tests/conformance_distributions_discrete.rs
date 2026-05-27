@@ -600,8 +600,11 @@ fn kl_divergence_self_is_zero() {
 
 #[test]
 fn kl_divergence_unsupported_pair_returns_error() {
-    // Exponential vs Normal — no registered formula.
-    let p = Exponential::new(scalar(1.0f64).unwrap()).unwrap();
+    // Bernoulli (discrete) vs Normal (continuous) — no closed-form KL formula
+    // is registered and none is meaningful (incompatible supports). PyTorch
+    // likewise has no `@register_kl(Bernoulli, Normal)`. (Exponential-Normal,
+    // the prior probe here, became a supported pair in the #1374 KL expansion.)
+    let p = Bernoulli::new(scalar(0.5f64).unwrap()).unwrap();
     let q = Normal::new(scalar(0.0f64).unwrap(), scalar(1.0f64).unwrap()).unwrap();
     assert!(
         kl_divergence(&p, &q).is_err(),

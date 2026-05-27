@@ -22,7 +22,7 @@
 //! | REQ-5 (`ComposeTransform<T>`) | SHIPPED | `pub struct ComposeTransform<T: Float>` + L→R forward + R→L inverse + sum-of-LDJs + empty-chain identity branch in `transforms.rs` mirroring `torch/distributions/transforms.py:ComposeTransform`; consumer: `fn TransformedDistribution::entropy` reads `constant_entropy_contribution()` override on chained instances |
 //! | REQ-6 (`TransformedDistribution<T>`) | SHIPPED | `pub struct TransformedDistribution<T: Float>` with `Box<dyn Distribution<T>>` base + `Vec<Box<dyn Transform<T>>>` chain + full `Distribution` impl in `transforms.rs` mirroring `torch/distributions/transformed_distribution.py:TransformedDistribution`; consumer: `pub use transforms::TransformedDistribution` in `lib.rs` — grandfathered public API |
 //! | REQ-7 (`TransformedDistribution::entropy` three-case dispatcher) | SHIPPED | `fn TransformedDistribution::entropy` three-case dispatch (empty, all-constant-Jacobian, single-Exp) with named-transform error on fall-through in `transforms.rs`; consumer: the `impl Distribution::entropy` IS the dispatcher; `test_transformed_distribution_entropy_*` tests pin all four branches |
-//! | REQ-8 (11 missing upstream transforms + domain/codomain) | NOT-STARTED | blocker #1373 — 11 of 16 upstream transforms not ported (`AbsTransform`, `PowerTransform`, `SoftmaxTransform`, `StickBreakingTransform`, `CatTransform`, `StackTransform`, `CorrCholeskyTransform`, `LowerCholeskyTransform`, `PositiveDefiniteTransform`, `ReshapeTransform`, `IndependentTransform`, `CumulativeDistributionTransform`); also Constraint domain/codomain linkage missing |
+//! | REQ-8 (11 missing upstream transforms + domain/codomain) | PARTIAL | #1373 — Constraint domain/codomain linkage SHIPPED: `fn Transform::domain` / `fn Transform::codomain` return `Box<dyn DistConstraint>` (default `Real`/`Real`) with per-transform overrides mirroring `torch/distributions/transforms.py` domain/codomain attributes; consumer: `fn TransformedDistribution::support` returns the chain's final codomain (`transformed_distribution.py:129-137`). Still NOT-STARTED: 11 of 16 upstream transforms (`AbsTransform`, `PowerTransform`, `SoftmaxTransform`, `StickBreakingTransform`, `CatTransform`, `StackTransform`, `CorrCholeskyTransform`, `LowerCholeskyTransform`, `PositiveDefiniteTransform`, `ReshapeTransform`, `IndependentTransform`, `CumulativeDistributionTransform`); blocker #1373 stays open for those |
 //! | REQ-9 (Monte-Carlo entropy fallback) | SHIPPED | `fn TransformedDistribution::entropy_monte_carlo` estimates `H(Y) = H(X) + E_X[log|det J_f(X)|]` with `MC_ENTROPY_SAMPLES` base draws pushed through each link's `log_abs_det_jacobian` for the X-dependent chains (Sigmoid/Tanh/Softplus/multi-Exp/Exp-then-Affine) in `transforms.rs`; consumer: `fn TransformedDistribution::entropy` invokes it as path 4 on fall-through — `td.entropy()` on a Sigmoid/Tanh chain now returns a value instead of erroring. FD/quadrature-verified by `test_transformed_distribution_entropy_{sigmoid,exp_then_affine}_monte_carlo`. Closes #1378. |
 
 use ferrotorch_core::autograd::no_grad;
@@ -36,6 +36,8 @@ use ferrotorch_core::grad_fns::arithmetic::{add, div, mul, neg, sub};
 use ferrotorch_core::grad_fns::transcendental::{exp as exp_op, log as log_op};
 use ferrotorch_core::storage::TensorStorage;
 use ferrotorch_core::tensor::Tensor;
+
+use crate::DistConstraint;
 
 // ---------------------------------------------------------------------------
 // Transform trait
@@ -93,6 +95,30 @@ pub trait Transform<T: Float>: Send + Sync {
     fn is_exp_transform(&self) -> bool {
         false
     }
+
+    /// The [`Constraint`](crate::constraints::Constraint) on the transform's
+    /// input space (the set of valid `x` for [`forward`](Transform::forward)).
+    ///
+    /// Returned as an object-safe [`DistConstraint`] because the underlying
+    /// `Constraint` trait carries a generic `check<T: Float>` method that
+    /// forbids trait-object use (see [`crate::DistConstraint`]). The default
+    /// is the real line; concrete transforms override to advertise their true
+    /// domain. Mirrors the `domain: constraints.Constraint` class attribute
+    /// at `torch/distributions/transforms.py:94`.
+    fn domain(&self) -> Box<dyn DistConstraint> {
+        Box::new(crate::constraints::Real)
+    }
+
+    /// The [`Constraint`](crate::constraints::Constraint) on the transform's
+    /// output space (the set of valid `y = f(x)`).
+    ///
+    /// The default is the real line; concrete transforms override (e.g.
+    /// [`ExpTransform`] → positive reals). Mirrors the
+    /// `codomain: constraints.Constraint` class attribute at
+    /// `torch/distributions/transforms.py:95`.
+    fn codomain(&self) -> Box<dyn DistConstraint> {
+        Box::new(crate::constraints::Real)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -130,6 +156,12 @@ impl<T: Float> Transform<T> for ExpTransform {
 
     fn is_exp_transform(&self) -> bool {
         true
+    }
+
+    fn codomain(&self) -> Box<dyn DistConstraint> {
+        // y = exp(x) maps R → (0, ∞). `domain` is the default Real.
+        // Mirrors `torch/distributions/transforms.py:581-582`.
+        Box::new(crate::constraints::Positive)
     }
 }
 
@@ -270,6 +302,12 @@ impl<T: Float> Transform<T> for SigmoidTransform {
     fn name(&self) -> &'static str {
         "SigmoidTransform"
     }
+
+    fn codomain(&self) -> Box<dyn DistConstraint> {
+        // y = sigma(x) maps R → (0, 1). `domain` is the default Real.
+        // Mirrors `torch/distributions/transforms.py:652-653`.
+        Box::new(crate::constraints::UnitInterval)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -329,6 +367,17 @@ impl<T: Float> Transform<T> for TanhTransform {
     fn name(&self) -> &'static str {
         "TanhTransform"
     }
+
+    fn codomain(&self) -> Box<dyn DistConstraint> {
+        // y = tanh(x) maps R → (-1, 1). `domain` is the default Real.
+        // Upstream uses `constraints.interval(-1.0, 1.0)`
+        // (`torch/distributions/transforms.py:719-720`); ferrotorch's
+        // `ClosedInterval` is the corresponding bounded-interval constraint.
+        Box::new(crate::constraints::ClosedInterval {
+            lower_bound: T::from(-1.0).unwrap(),
+            upper_bound: T::from(1.0).unwrap(),
+        })
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -376,6 +425,12 @@ impl<T: Float> Transform<T> for SoftplusTransform {
 
     fn name(&self) -> &'static str {
         "SoftplusTransform"
+    }
+
+    fn codomain(&self) -> Box<dyn DistConstraint> {
+        // y = softplus(x) = log(1 + exp(x)) maps R → (0, ∞). `domain` is the
+        // default Real. Mirrors `torch/distributions/transforms.py:678-679`.
+        Box::new(crate::constraints::Positive)
     }
 }
 
@@ -472,6 +527,27 @@ impl<T: Float> Transform<T> for ComposeTransform<T> {
             acc += c;
         }
         Some(acc)
+    }
+
+    fn domain(&self) -> Box<dyn DistConstraint> {
+        // The composed forward applies links left-to-right, so the chain's
+        // input space is the FIRST link's domain. Empty chain → identity →
+        // the default Real. Mirrors `torch/distributions/transforms.py:313-328`
+        // (event-dim bookkeeping omitted; ferrotorch transforms are event_dim=0).
+        match self.transforms.first() {
+            Some(first) => first.domain(),
+            None => Box::new(crate::constraints::Real),
+        }
+    }
+
+    fn codomain(&self) -> Box<dyn DistConstraint> {
+        // The chain's output space is the LAST link's codomain. Empty chain →
+        // identity → the default Real. Mirrors
+        // `torch/distributions/transforms.py:332-347`.
+        match self.transforms.last() {
+            Some(last) => last.codomain(),
+            None => Box::new(crate::constraints::Real),
+        }
     }
 }
 
@@ -639,6 +715,18 @@ impl<T: Float> Distribution<T> for TransformedDistribution<T> {
         // onto `base_entropy`'s shape.
         self.entropy_monte_carlo(&base_entropy)
     }
+
+    fn support(&self) -> Option<Box<dyn DistConstraint>> {
+        // The support of a transformed distribution is the codomain of the
+        // LAST transform in the chain (the final output space). For an empty
+        // chain the support is the base distribution's support. This is the
+        // production consumer of `Transform::codomain()` (#1373) and mirrors
+        // `torch/distributions/transformed_distribution.py:129-137`.
+        match self.transforms.last() {
+            Some(last) => Some(last.codomain()),
+            None => self.base.support(),
+        }
+    }
 }
 
 /// Number of base samples drawn to Monte-Carlo estimate
@@ -718,6 +806,74 @@ impl<T: Float> TransformedDistribution<T> {
 mod tests {
     use super::*;
     use ferrotorch_core::creation::{from_slice, scalar};
+
+    // -- domain / codomain Constraint linkage (#1373) ------------------------
+
+    #[test]
+    fn test_transform_domain_codomain_names() {
+        // Each transform advertises its input/output Constraint, mirroring the
+        // `domain`/`codomain` class attributes in
+        // `torch/distributions/transforms.py`.
+        let exp: &dyn Transform<f64> = &ExpTransform;
+        assert_eq!(exp.domain().name(), "Real");
+        assert_eq!(exp.codomain().name(), "Positive"); // transforms.py:581-582
+
+        let sig: &dyn Transform<f64> = &SigmoidTransform;
+        assert_eq!(sig.domain().name(), "Real");
+        assert_eq!(sig.codomain().name(), "UnitInterval"); // transforms.py:652-653
+
+        let sp: &dyn Transform<f64> = &SoftplusTransform;
+        assert_eq!(sp.domain().name(), "Real");
+        assert_eq!(sp.codomain().name(), "Positive"); // transforms.py:678-679
+
+        let tanh: &dyn Transform<f64> = &TanhTransform;
+        assert_eq!(tanh.domain().name(), "Real");
+        assert_eq!(tanh.codomain().name(), "ClosedInterval"); // transforms.py:719-720
+
+        let affine: AffineTransform<f64> = AffineTransform::new(1.0, 2.0);
+        assert_eq!(affine.domain().name(), "Real"); // transforms.py:789-799
+        assert_eq!(affine.codomain().name(), "Real");
+    }
+
+    #[test]
+    fn test_compose_domain_codomain_endpoints() {
+        // Compose [Affine, Exp]: domain = first.domain = Real,
+        // codomain = last.codomain = Positive. Mirrors transforms.py:313-347.
+        let chain: ComposeTransform<f64> = ComposeTransform::new(vec![
+            Box::new(AffineTransform::new(0.0, 2.0)),
+            Box::new(ExpTransform),
+        ]);
+        assert_eq!(chain.domain().name(), "Real");
+        assert_eq!(chain.codomain().name(), "Positive");
+
+        // Compose [Exp, Sigmoid]: domain = Real (Exp), codomain = UnitInterval.
+        let chain2: ComposeTransform<f64> =
+            ComposeTransform::new(vec![Box::new(ExpTransform), Box::new(SigmoidTransform)]);
+        assert_eq!(chain2.domain().name(), "Real");
+        assert_eq!(chain2.codomain().name(), "UnitInterval");
+
+        // Empty chain → identity → Real/Real.
+        let empty: ComposeTransform<f64> = ComposeTransform::new(vec![]);
+        assert_eq!(empty.domain().name(), "Real");
+        assert_eq!(empty.codomain().name(), "Real");
+    }
+
+    #[test]
+    fn test_transformed_distribution_support_is_last_codomain() {
+        // Production consumer of Transform::codomain (#1373):
+        // TransformedDistribution::support returns the chain's final codomain.
+        use crate::Normal;
+        let base = Normal::new(scalar(0.0f64).unwrap(), scalar(1.0f64).unwrap()).unwrap();
+        // Normal → exp = LogNormal, support is the positive reals.
+        let td = TransformedDistribution::new(Box::new(base), vec![Box::new(ExpTransform)]);
+        let support = td.support().expect("transformed support must be Some");
+        assert_eq!(support.name(), "Positive");
+
+        // Normal → sigmoid: support is the unit interval.
+        let base2 = Normal::new(scalar(0.0f64).unwrap(), scalar(1.0f64).unwrap()).unwrap();
+        let td2 = TransformedDistribution::new(Box::new(base2), vec![Box::new(SigmoidTransform)]);
+        assert_eq!(td2.support().unwrap().name(), "UnitInterval");
+    }
 
     // -- ExpTransform --------------------------------------------------------
 

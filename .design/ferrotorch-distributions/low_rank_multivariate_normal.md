@@ -55,14 +55,17 @@ the current per-call cost is `O(d^3)` (Cholesky) rather than the
   Mirrors upstream's `mean` property at
   `lowrank_multivariate_normal.py:157-159`.
 
-- REQ-6: NOT-STARTED — Woodbury fast paths
-  (`_batch_capacitance_tril`, `_batch_lowrank_logdet`,
-  `_batch_lowrank_mahalanobis`) at
-  `lowrank_multivariate_normal.py:16-51` are NOT implemented. The
-  current impl reifies the full `[d, d]` covariance, costing
-  `O(d^2)` memory and `O(d^3)` per `log_prob`. Upstream achieves
-  `O(d * r^2)` per call via the matrix-determinant lemma + Woodbury
-  identity. Blocker #1385 tracks the Woodbury fast-path.
+- REQ-6: SHIPPED — Woodbury fast path for `log_prob`. The
+  `Distribution::log_prob` override evaluates the Mahalanobis
+  distance via the Woodbury matrix identity and the
+  log-determinant via the matrix-determinant lemma, both expressed
+  over the `r×r` capacitance matrix `C = I_r + Wᵀ D⁻¹ W`. This
+  mirrors `_batch_capacitance_tril` / `_batch_lowrank_logdet` /
+  `_batch_lowrank_mahalanobis` at
+  `lowrank_multivariate_normal.py:16-51,225-240`. Cost is
+  `O(d·r² + r³)` per call with no dense `[d, d]` Σ⁻¹ ever formed.
+  Sampling and the matrix accessors still use the dense inner
+  `MultivariateNormal`. Blocker #1385.
 
 - REQ-7: NOT-STARTED — `variance` property is not overridden.
   Upstream computes `cov_factor.pow(2).sum(-1) + cov_diag`
@@ -94,7 +97,11 @@ the current per-call cost is `O(d^3)` (Cholesky) rather than the
   `log_prob == -1.5 * ln(2*pi)`.
 - [x] AC-7: `test_low_rank_sample_shape` validates that
   `sample(&[10])` returns `[10, 3]`.
-- [ ] AC-8: Woodbury fast path — blocker #1385.
+- [x] AC-8: Woodbury fast path — `log_prob` via Woodbury identity
+  + matrix-determinant lemma over the `r×r` capacitance matrix.
+  Cross-checked against an independent dense oracle by
+  `test_low_rank_woodbury_matches_dense_path_{rank1,rank2}` and
+  `divergence_wave_l_audit::audit_1385_*`. Closes #1385.
 - [ ] AC-9: `variance` override — blocker #1386.
 - [ ] AC-10: `scale_tril` / `covariance_matrix` /
   `precision_matrix` accessors — blocker #1387.
@@ -158,9 +165,10 @@ delegating to `self.inner.mean()`, which would also return
 `MultivariateNormal` invokes are independently audited (see
 `.design/ferrotorch-core/linalg.md`). Edge cases preserved:
 
-- **`r << d`** — Currently `O(d^3)` (Cholesky) instead of the
-  upstream `O(d * r^2)`. Numerically correct, just slow.
-  Blocker #1385.
+- **`r << d`** — `log_prob` uses the Woodbury fast path
+  (`O(d·r²+r³)`), matching the upstream asymptotics; sampling still
+  goes through the dense inner `MultivariateNormal` Cholesky.
+  Closed by #1385.
 - **`cov_diag[i] <= 0`** — constructor returns
   `InvalidArgument`. Upstream's `arg_constraints` with
   `constraints.positive` would do the same. Test
@@ -204,6 +212,6 @@ Expected: `6 passed`.
 | REQ-3 | SHIPPED | impl: `loc()`/`cov_factor()`/`cov_diag()`/`dim()`/`rank()` accessors at `low_rank_multivariate_normal.rs:140-162`; non-test consumer: re-export at `lib.rs:110` exposes them as the introspection surface. |
 | REQ-4 | SHIPPED | impl: `impl<T: Float> Distribution<T> for LowRankMultivariateNormal<T>` at `low_rank_multivariate_normal.rs:165-187` delegating to inner `MultivariateNormal`, mirroring upstream surface at `lowrank_multivariate_normal.py:214-252`; non-test consumer: re-export means external Distribution-trait calls hit this impl. |
 | REQ-5 | SHIPPED | impl: `mean()` override returning `self.loc.clone()` at `low_rank_multivariate_normal.rs:178-182`, mirroring `lowrank_multivariate_normal.py:157-159`; non-test consumer: re-export at `lib.rs:110` exposes the override via the `Distribution` trait. |
-| REQ-6 | NOT-STARTED | blocker #1385 — Woodbury / capacitance-tril fast paths at `lowrank_multivariate_normal.py:16-51` not implemented; ferrotorch reifies the dense `[d, d]` covariance at `low_rank_multivariate_normal.rs:107-125` and pays `O(d^3)` per `log_prob`. |
+| REQ-6 | SHIPPED | impl: `fn LowRankMultivariateNormal::woodbury_log_prob` + `fn capacitance_tril` in `low_rank_multivariate_normal.rs` evaluate the Mahalanobis distance via the Woodbury identity and `log|Σ|` via the matrix-determinant lemma over the `r×r` capacitance matrix `C = I_r + Wᵀ D⁻¹ W` (`O(d·r²+r³)`, no dense `[d, d]` Σ⁻¹), mirroring `lowrank_multivariate_normal.py:16-51,225-240`; non-test consumer: the `impl Distribution::log_prob` override calls `woodbury_log_prob` and is reached on every `dist.log_prob(value)` via the `pub use low_rank_multivariate_normal::LowRankMultivariateNormal` re-export at `lib.rs:111`. Dense-oracle-verified by `test_low_rank_woodbury_matches_dense_path_{rank1,rank2}` + `divergence_wave_l_audit::audit_1385_*`. Closes #1385. |
 | REQ-7 | NOT-STARTED | blocker #1386 — `variance` override not implemented; the inherited trait default at `lib.rs:223-227` returns `InvalidArgument`. Upstream computes `cov_factor.pow(2).sum(-1) + cov_diag` at `lowrank_multivariate_normal.py:165-169`. |
 | REQ-8 | NOT-STARTED | blocker #1387 — `scale_tril` / `covariance_matrix` / `precision_matrix` accessors at `lowrank_multivariate_normal.py:171-212` not exposed; the inner `MultivariateNormal::scale_tril` is private to `LowRankMultivariateNormal`. |

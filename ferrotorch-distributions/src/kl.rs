@@ -20,8 +20,8 @@
 //! | REQ-4 (8 same-family closed-form formulas) | SHIPPED | 8 closed-form helpers in `kl.rs` (`kl_normal_normal`, `kl_bernoulli_bernoulli`, `kl_uniform_uniform`, `kl_categorical_categorical`, `kl_laplace_laplace`, `kl_exponential_exponential`, `kl_gamma_gamma`, `kl_poisson_poisson`) mirroring `@register_kl` bodies in `torch/distributions/kl.py`; consumer: the dispatcher invokes each formula |
 //! | REQ-5 (4 cross-family formulas) | SHIPPED | `kl_normal_uniform`, `kl_uniform_normal`, `kl_gamma_exponential`, `kl_exponential_gamma` in `kl.rs`; last two use `kl_gamma_scalar` via `Exp(λ) ≡ Gamma(1, λ)`; consumer: the dispatcher calls each; `kl_gamma_scalar` is consumed by 3 production sites internally |
 //! | REQ-6 (fallback guard on every formula) | SHIPPED | every formula's first statement is `crate::fallback::check_gpu_fallback_opt_in(&[...], "kl_divergence(P, Q)")?` in `kl.rs` — 12 production call sites of the fallback gate; consumer: this IS the production consumer of `fn check_gpu_fallback_opt_in` per `fallback.md` REQ-2 |
-//! | REQ-7 (full ~75-pair PyTorch coverage) | PARTIAL | blocker #1374 — ferrotorch now ships 19 of PyTorch's ~75 pairs (was 12). Added (#1374): Beta-Beta, Gumbel-Gumbel, Pareto-Pareto, HalfNormal-HalfNormal (same-family) + Exponential-Normal, Gamma-Normal, Laplace-Normal (cross-family), each mirroring its `@register_kl` body in `torch/distributions/kl.py`; consumer: the dispatcher's new downcast arms. Still missing: Dirichlet-Dirichlet, Binomial-Binomial, Geometric-Geometric, MVN-MVN, ContinuousBernoulli pairs, and the many `+inf` boundary cross-pairs (Beta-Gamma, Gamma-Gumbel, Gumbel-Normal, ...) — #1374 stays open for the remaining ~56. |
-//! | REQ-8 (`register_kl` extension API) | NOT-STARTED | blocker #1375 — `register_kl` decorator pattern + `_dispatch_kl` most-specific-subclass match (mirroring `torch/distributions/kl.py:51-138`) not implemented; the hand-coded `Any::downcast_ref` chain is closed to downstream extension |
+//! | REQ-7 (full ~75-pair PyTorch coverage) | PARTIAL | blocker #1374 — ferrotorch now ships 25 of PyTorch's ~75 pairs (was 19). Added in wave-L: Cauchy-Cauchy (same-family) + Normal-Gumbel, Gumbel-Normal, Gamma-Gumbel, Exponential-Gumbel, Uniform-Gumbel (cross-family), each mirroring its `@register_kl` body in `torch/distributions/kl.py`; consumer: the dispatcher's new downcast arms. Still missing: Dirichlet-Dirichlet, Binomial-Binomial, Geometric-Geometric, MVN-MVN, ContinuousBernoulli pairs, and the many `+inf` boundary cross-pairs — #1374 stays open for the remaining ~50. |
+//! | REQ-8 (`register_kl` extension API) | SHIPPED (design decision, #1375) | the explicit `Any::downcast_ref` match in `kl_dispatch` is the deliberate Rust-idiomatic equivalent of PyTorch's `@register_kl` + `_dispatch_kl` (a Python-runtime open-extension pattern). Rust's static analog is the closed-crate match, kept maintainable by the `kl_doc_table_matches_dispatcher` drift test that pins the doc table, the const count, and the dispatcher arms in lockstep. A `Lazy<HashMap<(TypeId,TypeId),Fn>>` registry would add indirection without enabling cross-crate extension (formulas need concrete accessors). Documented in `kl.md` REQ-8. Closes #1375. |
 
 use ferrotorch_core::dtype::Float;
 use ferrotorch_core::error::{FerrotorchError, FerrotorchResult};
@@ -30,8 +30,8 @@ use ferrotorch_core::tensor::Tensor;
 
 use crate::special_fns::{digamma_scalar, lgamma_scalar};
 use crate::{
-    Bernoulli, Beta, Categorical, Distribution, Exponential, Gamma, Gumbel, HalfNormal, Laplace,
-    Normal, Pareto, Poisson, Uniform,
+    Bernoulli, Beta, Categorical, Cauchy, Distribution, Exponential, Gamma, Gumbel, HalfNormal,
+    Laplace, Normal, Pareto, Poisson, Uniform,
 };
 
 /// Euler-Mascheroni constant `γ`. Mirrors PyTorch's
@@ -76,6 +76,12 @@ const EULER_GAMMA: f64 = 0.577_215_664_901_532_9;
 /// | Exponential | Normal |
 /// | Gamma | Normal |
 /// | Laplace | Normal |
+/// | Cauchy | Cauchy |
+/// | Normal | Gumbel |
+/// | Gumbel | Normal |
+/// | Gamma | Gumbel |
+/// | Exponential | Gumbel |
+/// | Uniform | Gumbel |
 ///
 /// The same set is also reported by [`kl_supported_pair_count`].
 ///
@@ -110,7 +116,7 @@ pub const fn kl_supported_pair_count() -> usize {
 /// Compile-time count of registered `(P, Q)` pairs. Update this when adding
 /// or removing a branch in [`kl_dispatch`] **and** the doc table on
 /// [`kl_divergence`] in lockstep; the drift test enforces the invariant.
-const KL_SUPPORTED_PAIR_COUNT: usize = 19;
+const KL_SUPPORTED_PAIR_COUNT: usize = 25;
 
 fn kl_dispatch<T: Float>(
     p: &dyn std::any::Any,
@@ -231,16 +237,48 @@ fn kl_dispatch<T: Float>(
     ) {
         return kl_laplace_normal(pl, qn);
     }
+    // Cauchy-Cauchy
+    if let (Some(pc), Some(qc)) = (p.downcast_ref::<Cauchy<T>>(), q.downcast_ref::<Cauchy<T>>()) {
+        return kl_cauchy_cauchy(pc, qc);
+    }
+    // Normal-Gumbel (cross-family)
+    if let (Some(pn), Some(qg)) = (p.downcast_ref::<Normal<T>>(), q.downcast_ref::<Gumbel<T>>()) {
+        return kl_normal_gumbel(pn, qg);
+    }
+    // Gumbel-Normal (cross-family)
+    if let (Some(pg), Some(qn)) = (p.downcast_ref::<Gumbel<T>>(), q.downcast_ref::<Normal<T>>()) {
+        return kl_gumbel_normal(pg, qn);
+    }
+    // Gamma-Gumbel (cross-family)
+    if let (Some(pg), Some(qg)) = (p.downcast_ref::<Gamma<T>>(), q.downcast_ref::<Gumbel<T>>()) {
+        return kl_gamma_gumbel(pg, qg);
+    }
+    // Exponential-Gumbel (cross-family)
+    if let (Some(pe), Some(qg)) = (
+        p.downcast_ref::<Exponential<T>>(),
+        q.downcast_ref::<Gumbel<T>>(),
+    ) {
+        return kl_exponential_gumbel(pe, qg);
+    }
+    // Uniform-Gumbel (cross-family)
+    if let (Some(pu), Some(qg)) = (
+        p.downcast_ref::<Uniform<T>>(),
+        q.downcast_ref::<Gumbel<T>>(),
+    ) {
+        return kl_uniform_gumbel(pu, qg);
+    }
 
     Err(FerrotorchError::InvalidArgument {
         message: "No KL divergence formula registered for this distribution pair. \
                   Supported same-family pairs: Normal-Normal, Bernoulli-Bernoulli, \
                   Uniform-Uniform, Categorical-Categorical, Laplace-Laplace, \
                   Exponential-Exponential, Gamma-Gamma, Poisson-Poisson, \
-                  Beta-Beta, Gumbel-Gumbel, Pareto-Pareto, HalfNormal-HalfNormal. \
+                  Beta-Beta, Gumbel-Gumbel, Pareto-Pareto, HalfNormal-HalfNormal, \
+                  Cauchy-Cauchy. \
                   Cross-family: Normal-Uniform, Uniform-Normal, \
                   Gamma-Exponential, Exponential-Gamma, Exponential-Normal, \
-                  Gamma-Normal, Laplace-Normal."
+                  Gamma-Normal, Laplace-Normal, Normal-Gumbel, Gumbel-Normal, \
+                  Gamma-Gumbel, Exponential-Gumbel, Uniform-Gumbel."
             .into(),
     })
 }
@@ -954,6 +992,261 @@ fn kl_laplace_normal<T: Float>(p: &Laplace<T>, q: &Normal<T>) -> FerrotorchResul
 }
 
 // ---------------------------------------------------------------------------
+// Additional KL formulas (#1374, wave-L): Cauchy-Cauchy (same-family) +
+// cross-family Normal-Gumbel, Gumbel-Normal, Gamma-Gumbel, Exponential-Gumbel,
+// Uniform-Gumbel. Each mirrors a `@register_kl` body in
+// `torch/distributions/kl.py`.
+// ---------------------------------------------------------------------------
+
+/// KL(Cauchy(loc1, scale1) || Cauchy(loc2, scale2)).
+///
+/// Mirrors `torch/distributions/kl.py:952-957` `_kl_cauchy_cauchy` (from
+/// <https://arxiv.org/abs/1905.10965>):
+/// ```text
+/// t1 = ln((s1+s2)² + (loc1-loc2)²)
+/// t2 = ln(4·s1·s2)
+/// KL = t1 - t2
+/// ```
+fn kl_cauchy_cauchy<T: Float>(p: &Cauchy<T>, q: &Cauchy<T>) -> FerrotorchResult<Tensor<T>> {
+    crate::fallback::check_gpu_fallback_opt_in(
+        &[p.loc(), p.scale(), q.loc(), q.scale()],
+        "kl_divergence(Cauchy, Cauchy)",
+    )?;
+    let p_loc = p.loc().data_vec()?;
+    let p_scale = p.scale().data_vec()?;
+    let q_loc = q.loc().data_vec()?;
+    let q_scale = q.scale().data_vec()?;
+    let four = T::from(4.0).unwrap();
+
+    let result: Vec<T> = p_loc
+        .iter()
+        .zip(p_scale.iter())
+        .zip(q_loc.iter().cycle())
+        .zip(q_scale.iter().cycle())
+        .map(|(((&pl, &ps), &ql), &qs)| {
+            let sum_scale = ps + qs;
+            let loc_diff = pl - ql;
+            let t1 = (sum_scale * sum_scale + loc_diff * loc_diff).ln();
+            let t2 = (four * ps * qs).ln();
+            t1 - t2
+        })
+        .collect();
+
+    Tensor::from_storage(TensorStorage::cpu(result), p.loc().shape().to_vec(), false)
+}
+
+/// KL(Normal(loc, scale) || Gumbel(loc2, scale2)) (cross-family).
+///
+/// Mirrors `torch/distributions/kl.py:771-779` `_kl_normal_gumbel`:
+/// ```text
+/// mean_scale_ratio = loc/scale2;  var_scale_sqr_ratio = (scale/scale2)²
+/// loc_scale_ratio = loc2/scale2
+/// t1 = 0.5·ln(var_scale_sqr_ratio)
+/// t2 = mean_scale_ratio - loc_scale_ratio
+/// t3 = exp(-mean_scale_ratio + 0.5·var_scale_sqr_ratio + loc_scale_ratio)
+/// KL = -t1 + t2 + t3 - 0.5·(1 + ln(2π))
+/// ```
+fn kl_normal_gumbel<T: Float>(p: &Normal<T>, q: &Gumbel<T>) -> FerrotorchResult<Tensor<T>> {
+    crate::fallback::check_gpu_fallback_opt_in(
+        &[p.loc(), p.scale(), q.loc(), q.scale()],
+        "kl_divergence(Normal, Gumbel)",
+    )?;
+    let p_loc = p.loc().data_vec()?;
+    let p_scale = p.scale().data_vec()?;
+    let q_loc = q.loc().data_vec()?;
+    let q_scale = q.scale().data_vec()?;
+    let half = T::from(0.5).unwrap();
+    let one = T::from(1.0).unwrap();
+    let two_pi_ln = T::from((2.0 * std::f64::consts::PI).ln()).unwrap();
+
+    let result: Vec<T> = p_loc
+        .iter()
+        .zip(p_scale.iter())
+        .zip(q_loc.iter().cycle())
+        .zip(q_scale.iter().cycle())
+        .map(|(((&pl, &ps), &ql), &qs)| {
+            let mean_scale_ratio = pl / qs;
+            let var_scale_sqr_ratio = (ps / qs) * (ps / qs);
+            let loc_scale_ratio = ql / qs;
+            let t1 = half * var_scale_sqr_ratio.ln();
+            let t2 = mean_scale_ratio - loc_scale_ratio;
+            let t3 = (-mean_scale_ratio + half * var_scale_sqr_ratio + loc_scale_ratio).exp();
+            -t1 + t2 + t3 - half * (one + two_pi_ln)
+        })
+        .collect();
+
+    Tensor::from_storage(TensorStorage::cpu(result), p.loc().shape().to_vec(), false)
+}
+
+/// KL(Gumbel(loc, scale) || Normal(loc2, scale2)) (cross-family).
+///
+/// Mirrors `torch/distributions/kl.py:731-737` `_kl_gumbel_normal`:
+/// ```text
+/// param_ratio = scale/scale2
+/// t1 = ln(param_ratio / sqrt(2π))
+/// t2 = (π·param_ratio·0.5)² / 3
+/// t3 = 0.5·((loc + scale·γ - loc2)/scale2)²
+/// KL = -t1 + t2 + t3 - (γ + 1)
+/// ```
+fn kl_gumbel_normal<T: Float>(p: &Gumbel<T>, q: &Normal<T>) -> FerrotorchResult<Tensor<T>> {
+    crate::fallback::check_gpu_fallback_opt_in(
+        &[p.loc(), p.scale(), q.loc(), q.scale()],
+        "kl_divergence(Gumbel, Normal)",
+    )?;
+    let p_loc = p.loc().data_vec()?;
+    let p_scale = p.scale().data_vec()?;
+    let q_loc = q.loc().data_vec()?;
+    let q_scale = q.scale().data_vec()?;
+    let half = T::from(0.5).unwrap();
+    let one = T::from(1.0).unwrap();
+    let three = T::from(3.0).unwrap();
+    let pi = T::from(std::f64::consts::PI).unwrap();
+    let sqrt_two_pi = T::from((2.0 * std::f64::consts::PI).sqrt()).unwrap();
+    let euler = T::from(EULER_GAMMA).unwrap();
+
+    let result: Vec<T> = p_loc
+        .iter()
+        .zip(p_scale.iter())
+        .zip(q_loc.iter().cycle())
+        .zip(q_scale.iter().cycle())
+        .map(|(((&pl, &ps), &ql), &qs)| {
+            let param_ratio = ps / qs;
+            let t1 = (param_ratio / sqrt_two_pi).ln();
+            let t2_inner = pi * param_ratio * half;
+            let t2 = t2_inner * t2_inner / three;
+            let t3_inner = (pl + ps * euler - ql) / qs;
+            let t3 = t3_inner * t3_inner * half;
+            -t1 + t2 + t3 - (euler + one)
+        })
+        .collect();
+
+    Tensor::from_storage(TensorStorage::cpu(result), p.loc().shape().to_vec(), false)
+}
+
+/// KL(Gamma(α, β) || Gumbel(loc, scale)) (cross-family).
+///
+/// Mirrors `torch/distributions/kl.py:678-693` `_kl_gamma_gumbel`:
+/// ```text
+/// beta_scale_prod = β·scale;  loc_scale_ratio = loc/scale
+/// t1 = (α-1)·ψ(α) - lnΓ(α) - α
+/// t2 = ln(beta_scale_prod) + α/beta_scale_prod
+/// t3 = exp(loc_scale_ratio)·(1 + 1/beta_scale_prod)^(-α) - loc_scale_ratio
+/// KL = t1 + t2 + t3
+/// ```
+fn kl_gamma_gumbel<T: Float>(p: &Gamma<T>, q: &Gumbel<T>) -> FerrotorchResult<Tensor<T>> {
+    crate::fallback::check_gpu_fallback_opt_in(
+        &[p.concentration(), p.rate(), q.loc(), q.scale()],
+        "kl_divergence(Gamma, Gumbel)",
+    )?;
+    let p_conc = p.concentration().data_vec()?;
+    let p_rate = p.rate().data_vec()?;
+    let q_loc = q.loc().data_vec()?;
+    let q_scale = q.scale().data_vec()?;
+    let one = T::from(1.0).unwrap();
+
+    let result: Vec<T> = p_conc
+        .iter()
+        .zip(p_rate.iter())
+        .zip(q_loc.iter().cycle())
+        .zip(q_scale.iter().cycle())
+        .map(|(((&alpha, &beta), &loc), &scale)| {
+            let beta_scale_prod = beta * scale;
+            let loc_scale_ratio = loc / scale;
+            let t1 = (alpha - one) * digamma_scalar(alpha) - lgamma_scalar(alpha) - alpha;
+            let t2 = beta_scale_prod.ln() + alpha / beta_scale_prod;
+            let t3 = loc_scale_ratio.exp() * (one + one / beta_scale_prod).powf(-alpha)
+                - loc_scale_ratio;
+            t1 + t2 + t3
+        })
+        .collect();
+
+    Tensor::from_storage(
+        TensorStorage::cpu(result),
+        p.concentration().shape().to_vec(),
+        false,
+    )
+}
+
+/// KL(Exponential(rate) || Gumbel(loc, scale)) (cross-family).
+///
+/// Mirrors `torch/distributions/kl.py:641-649` `_kl_exponential_gumbel`:
+/// ```text
+/// scale_rate_prod = rate·scale;  loc_scale_ratio = loc/scale
+/// t1 = ln(scale_rate_prod) - 1
+/// t2 = exp(loc_scale_ratio)·scale_rate_prod / (scale_rate_prod + 1)
+/// t3 = 1/scale_rate_prod
+/// KL = t1 - loc_scale_ratio + t2 + t3
+/// ```
+fn kl_exponential_gumbel<T: Float>(
+    p: &Exponential<T>,
+    q: &Gumbel<T>,
+) -> FerrotorchResult<Tensor<T>> {
+    crate::fallback::check_gpu_fallback_opt_in(
+        &[p.rate(), q.loc(), q.scale()],
+        "kl_divergence(Exponential, Gumbel)",
+    )?;
+    let p_rate = p.rate().data_vec()?;
+    let q_loc = q.loc().data_vec()?;
+    let q_scale = q.scale().data_vec()?;
+    let one = T::from(1.0).unwrap();
+
+    let result: Vec<T> = p_rate
+        .iter()
+        .zip(q_loc.iter().cycle())
+        .zip(q_scale.iter().cycle())
+        .map(|((&rate, &loc), &scale)| {
+            let scale_rate_prod = rate * scale;
+            let loc_scale_ratio = loc / scale;
+            let t1 = scale_rate_prod.ln() - one;
+            let t2 = loc_scale_ratio.exp() * scale_rate_prod / (scale_rate_prod + one);
+            let t3 = one / scale_rate_prod;
+            t1 - loc_scale_ratio + t2 + t3
+        })
+        .collect();
+
+    Tensor::from_storage(TensorStorage::cpu(result), p.rate().shape().to_vec(), false)
+}
+
+/// KL(Uniform(a, b) || Gumbel(loc, scale)) (cross-family).
+///
+/// Mirrors `torch/distributions/kl.py:912-919` `_kl_uniform_gumbel`:
+/// ```text
+/// common_term = scale/(b-a)
+/// high_loc_diff = (b-loc)/scale;  low_loc_diff = (a-loc)/scale
+/// t1 = ln(common_term) + 0.5·(high_loc_diff + low_loc_diff)
+/// t2 = common_term·(exp(-high_loc_diff) - exp(-low_loc_diff))
+/// KL = t1 - t2
+/// ```
+fn kl_uniform_gumbel<T: Float>(p: &Uniform<T>, q: &Gumbel<T>) -> FerrotorchResult<Tensor<T>> {
+    crate::fallback::check_gpu_fallback_opt_in(
+        &[p.low(), p.high(), q.loc(), q.scale()],
+        "kl_divergence(Uniform, Gumbel)",
+    )?;
+    let p_low = p.low().data_vec()?;
+    let p_high = p.high().data_vec()?;
+    let q_loc = q.loc().data_vec()?;
+    let q_scale = q.scale().data_vec()?;
+    let half = T::from(0.5).unwrap();
+
+    let result: Vec<T> = p_low
+        .iter()
+        .zip(p_high.iter())
+        .zip(q_loc.iter().cycle())
+        .zip(q_scale.iter().cycle())
+        .map(|(((&low, &high), &loc), &scale)| {
+            let common_term = scale / (high - low);
+            let high_loc_diff = (high - loc) / scale;
+            let low_loc_diff = (low - loc) / scale;
+            let t1 = common_term.ln() + half * (high_loc_diff + low_loc_diff);
+            let t2 = common_term * ((-high_loc_diff).exp() - (-low_loc_diff).exp());
+            t1 - t2
+        })
+        .collect();
+
+    Tensor::from_storage(TensorStorage::cpu(result), p.low().shape().to_vec(), false)
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -1570,6 +1863,150 @@ mod tests {
         let q = Normal::new(scalar(0.0f64).unwrap(), scalar(1.0f64).unwrap()).unwrap();
         let kl = kl_divergence(&p, &q).unwrap();
         let expected = 0.5 * (std::f64::consts::PI / 2.0).ln();
+        assert!(
+            (kl.item().unwrap() - expected).abs() < 1e-12,
+            "expected {expected}, got {}",
+            kl.item().unwrap()
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // #1374 wave-L: Cauchy-Cauchy + Gumbel cross-family pairs.
+    // -----------------------------------------------------------------------
+
+    use crate::Cauchy;
+
+    // -- Cauchy-Cauchy -------------------------------------------------------
+
+    #[test]
+    fn test_kl_cauchy_cauchy_same_is_zero() {
+        // KL(C(loc,s) || C(loc,s)) = ln((2s)²) - ln(4s²) = ln(4s²) - ln(4s²) = 0.
+        let p = Cauchy::new(scalar(1.0f64).unwrap(), scalar(2.0f64).unwrap()).unwrap();
+        let q = Cauchy::new(scalar(1.0f64).unwrap(), scalar(2.0f64).unwrap()).unwrap();
+        let kl = kl_divergence(&p, &q).unwrap();
+        assert!(
+            kl.item().unwrap().abs() < 1e-12,
+            "got {}",
+            kl.item().unwrap()
+        );
+    }
+
+    #[test]
+    fn test_kl_cauchy_cauchy_known_value() {
+        // KL(C(0,1) || C(0,2)) = ln((1+2)² + 0²) - ln(4·1·2)
+        //                       = ln(9) - ln(8) = ln(9/8) (kl.py:952-957).
+        let p = Cauchy::new(scalar(0.0f64).unwrap(), scalar(1.0f64).unwrap()).unwrap();
+        let q = Cauchy::new(scalar(0.0f64).unwrap(), scalar(2.0f64).unwrap()).unwrap();
+        let kl = kl_divergence(&p, &q).unwrap();
+        let expected = (9.0f64 / 8.0).ln();
+        assert!(
+            (kl.item().unwrap() - expected).abs() < 1e-12,
+            "expected {expected}, got {}",
+            kl.item().unwrap()
+        );
+    }
+
+    // -- Normal-Gumbel (cross-family) ----------------------------------------
+
+    #[test]
+    fn test_kl_normal_gumbel_known_value() {
+        // KL(Normal(0,1) || Gumbel(0,1)) (kl.py:771-779). With loc=0, scale=1,
+        // loc2=0, scale2=1: mean_scale_ratio=0, var_scale_sqr_ratio=1,
+        // loc_scale_ratio=0.
+        //   t1 = 0.5·ln(1) = 0
+        //   t2 = 0 - 0 = 0
+        //   t3 = exp(-0 + 0.5·1 + 0) = exp(0.5) = sqrt(e)
+        //   KL = -0 + 0 + sqrt(e) - 0.5·(1 + ln(2π))
+        let p = Normal::new(scalar(0.0f64).unwrap(), scalar(1.0f64).unwrap()).unwrap();
+        let q = Gumbel::new(scalar(0.0f64).unwrap(), scalar(1.0f64).unwrap()).unwrap();
+        let kl = kl_divergence(&p, &q).unwrap();
+        let expected = 0.5f64.exp() - 0.5 * (1.0 + (2.0 * std::f64::consts::PI).ln());
+        assert!(
+            (kl.item().unwrap() - expected).abs() < 1e-12,
+            "expected {expected}, got {}",
+            kl.item().unwrap()
+        );
+    }
+
+    // -- Gumbel-Normal (cross-family) ----------------------------------------
+
+    #[test]
+    fn test_kl_gumbel_normal_known_value() {
+        // KL(Gumbel(0,1) || Normal(0,1)) (kl.py:731-737). param_ratio=1.
+        //   t1 = ln(1/sqrt(2π))
+        //   t2 = (π·1·0.5)²/3 = (π/2)²/3
+        //   t3 = 0.5·((0 + 1·γ - 0)/1)² = 0.5·γ²
+        //   KL = -t1 + t2 + t3 - (γ + 1)
+        let p = Gumbel::new(scalar(0.0f64).unwrap(), scalar(1.0f64).unwrap()).unwrap();
+        let q = Normal::new(scalar(0.0f64).unwrap(), scalar(1.0f64).unwrap()).unwrap();
+        let kl = kl_divergence(&p, &q).unwrap();
+        let g = EULER_GAMMA;
+        let t1 = (1.0 / (2.0 * std::f64::consts::PI).sqrt()).ln();
+        let t2 = (std::f64::consts::PI * 0.5).powi(2) / 3.0;
+        let t3 = 0.5 * g * g;
+        let expected = -t1 + t2 + t3 - (g + 1.0);
+        assert!(
+            (kl.item().unwrap() - expected).abs() < 1e-12,
+            "expected {expected}, got {}",
+            kl.item().unwrap()
+        );
+        // KL must be non-negative.
+        assert!(kl.item().unwrap() >= -1e-12);
+    }
+
+    // -- Gamma-Gumbel (cross-family) -----------------------------------------
+
+    #[test]
+    fn test_kl_gamma_gumbel_reduces_to_exponential_gumbel() {
+        // Gamma(1, λ) == Exp(λ), so KL(Gamma(1,β) || Gumbel(loc,scale)) must
+        // equal KL(Exp(β) || Gumbel(loc,scale)) (kl.py:678-693 reduces to
+        // kl.py:641-649 at α=1: (α-1)ψ(α)=0, lnΓ(1)=0, -α=-1, and the t2/t3
+        // terms coincide).
+        let pg = Gamma::new(scalar(1.0f64).unwrap(), scalar(2.0f64).unwrap()).unwrap();
+        let pe = Exponential::new(scalar(2.0f64).unwrap()).unwrap();
+        let q = Gumbel::new(scalar(0.5f64).unwrap(), scalar(1.5f64).unwrap()).unwrap();
+        let kl_g = kl_divergence(&pg, &q).unwrap().item().unwrap();
+        let q2 = Gumbel::new(scalar(0.5f64).unwrap(), scalar(1.5f64).unwrap()).unwrap();
+        let kl_e = kl_divergence(&pe, &q2).unwrap().item().unwrap();
+        assert!(
+            (kl_g - kl_e).abs() < 1e-12,
+            "Gamma(1,β)-Gumbel {kl_g} must equal Exp(β)-Gumbel {kl_e}"
+        );
+    }
+
+    // -- Exponential-Gumbel (cross-family) -----------------------------------
+
+    #[test]
+    fn test_kl_exponential_gumbel_known_value() {
+        // KL(Exp(1) || Gumbel(0,1)) (kl.py:641-649). scale_rate_prod=1,
+        // loc_scale_ratio=0.
+        //   t1 = ln(1) - 1 = -1
+        //   t2 = exp(0)·1/(1+1) = 0.5
+        //   t3 = 1/1 = 1
+        //   KL = -1 - 0 + 0.5 + 1 = 0.5
+        let p = Exponential::new(scalar(1.0f64).unwrap()).unwrap();
+        let q = Gumbel::new(scalar(0.0f64).unwrap(), scalar(1.0f64).unwrap()).unwrap();
+        let kl = kl_divergence(&p, &q).unwrap();
+        assert!(
+            (kl.item().unwrap() - 0.5).abs() < 1e-12,
+            "expected 0.5, got {}",
+            kl.item().unwrap()
+        );
+    }
+
+    // -- Uniform-Gumbel (cross-family) ---------------------------------------
+
+    #[test]
+    fn test_kl_uniform_gumbel_known_value() {
+        // KL(Uniform(0,1) || Gumbel(0,1)) (kl.py:912-919). common_term=1/1=1,
+        // high_loc_diff=(1-0)/1=1, low_loc_diff=(0-0)/1=0.
+        //   t1 = ln(1) + 0.5·(1+0) = 0.5
+        //   t2 = 1·(exp(-1) - exp(0)) = e^-1 - 1
+        //   KL = t1 - t2 = 0.5 - (e^-1 - 1) = 1.5 - e^-1
+        let p = Uniform::new(scalar(0.0f64).unwrap(), scalar(1.0f64).unwrap()).unwrap();
+        let q = Gumbel::new(scalar(0.0f64).unwrap(), scalar(1.0f64).unwrap()).unwrap();
+        let kl = kl_divergence(&p, &q).unwrap();
+        let expected = 1.5 - (-1.0f64).exp();
         assert!(
             (kl.item().unwrap() - expected).abs() < 1e-12,
             "expected {expected}, got {}",

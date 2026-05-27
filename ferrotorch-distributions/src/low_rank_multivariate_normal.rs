@@ -14,12 +14,15 @@
 //!
 //! # Implementation note
 //!
-//! The current implementation builds the dense `[d, d]` covariance and
-//! delegates to [`MultivariateNormal::from_covariance`] for sampling and
-//! log_prob. This is correct but `O(d²)` in memory and `O(d³)` in
-//! per-call cost — acceptable for moderate `d` (a few hundred). The
-//! O(d r²) Woodbury fast paths can be added incrementally as a follow-up
-//! once we need them; correctness lands first.
+//! Sampling and the `scale_tril` / `covariance_matrix` accessors delegate to
+//! a dense inner [`MultivariateNormal`] built from `Σ = W Wᵀ + diag(D)`. The
+//! hot `log_prob` path, however, uses the **Woodbury fast path**: the
+//! Mahalanobis distance is evaluated via the Woodbury matrix identity and the
+//! log-determinant via the matrix-determinant lemma, both expressed over the
+//! `r×r` capacitance matrix `C = I_r + Wᵀ D⁻¹ W`. This is `O(d·r²)` per call
+//! instead of `O(d³)` and never materialises the dense `[d, d]` Σ⁻¹. It
+//! mirrors PyTorch's `_capacitance_tril` approach
+//! (`torch/distributions/lowrank_multivariate_normal.py:16-51,225-240`).
 //!
 //! Mirrors `torch.distributions.LowRankMultivariateNormal`.
 //!
@@ -32,7 +35,7 @@
 //! | REQ-3 (5 accessors: loc/cov_factor/cov_diag/dim/rank) | SHIPPED | the accessors in `low_rank_multivariate_normal.rs`. |
 //! | REQ-4 (`Distribution<T>` impl delegating to inner MVN) | SHIPPED | the impl block in `low_rank_multivariate_normal.rs`. |
 //! | REQ-5 (mean override returns loc directly) | SHIPPED | the `mean()` body in `low_rank_multivariate_normal.rs`. |
-//! | REQ-6 (Woodbury/capacitance-tril fast paths) | NOT-STARTED | blocker #1385 — current impl is dense `O(d^3)` not `O(d * r^2)`. |
+//! | REQ-6 (Woodbury/capacitance-tril fast paths) | SHIPPED | `fn log_prob` override computes the Mahalanobis distance via the Woodbury identity + the log-determinant via the matrix-determinant lemma over the `r×r` capacitance matrix `C = I_r + Wᵀ D⁻¹ W` (`_batch_capacitance_tril`/`_batch_lowrank_logdet`/`_batch_lowrank_mahalanobis` at `torch/distributions/lowrank_multivariate_normal.py:16-51,225-240`) — `O(d·r²)` not `O(d³)`, no dense `[d, d]` Σ formed; non-test consumer: the `impl Distribution::log_prob` override IS reached on every `dist.log_prob(value)` via the `pub use LowRankMultivariateNormal` re-export. FD/dense-path-verified by `test_low_rank_woodbury_*` + `divergence_wave_l_audit`. Closes #1385. |
 //! | REQ-7 (variance override) | SHIPPED | `fn variance` returns `(cov_factor ** 2).sum(-1) + cov_diag` mirroring `torch/distributions/lowrank_multivariate_normal.py:189-196`; non-test consumer: `pub use low_rank_multivariate_normal::LowRankMultivariateNormal` re-export — every external `dist.variance()` call hits this override; closes #1386. |
 //! | REQ-8 (scale_tril/covariance_matrix/precision_matrix accessors) | SHIPPED | `pub fn scale_tril` / `pub fn covariance_matrix` / `pub fn precision_matrix` delegate to the inner dense `MultivariateNormal` mirroring `torch/distributions/lowrank_multivariate_normal.py:165-186`; non-test consumer: `pub use LowRankMultivariateNormal` re-export exposes all three as public surface; closes #1387. |
 
@@ -197,10 +200,153 @@ impl<T: Float> LowRankMultivariateNormal<T> {
     ///
     /// Delegates to the inner dense [`MultivariateNormal`]'s
     /// `precision_matrix` accessor. Mirrors
-    /// `torch/distributions/lowrank_multivariate_normal.py:177-186` (without
-    /// the Woodbury fast path — #1385 tracks that optimisation). Closes #1387.
+    /// `torch/distributions/lowrank_multivariate_normal.py:177-186`. Closes #1387.
     pub fn precision_matrix(&self) -> FerrotorchResult<Tensor<T>> {
         self.inner.precision_matrix()
+    }
+
+    /// Lower-triangular Cholesky factor of the `r×r` capacitance matrix
+    /// `C = I_r + Wᵀ D⁻¹ W` (`_batch_capacitance_tril` at
+    /// `torch/distributions/lowrank_multivariate_normal.py:16-25`).
+    ///
+    /// `C` is symmetric positive-definite (its eigenvalues are bounded below
+    /// by 1), so the small dense Cholesky is well-conditioned. Returned in
+    /// row-major `[r, r]` layout with the strict upper triangle zeroed.
+    ///
+    /// `factor_data` is `W` in row-major `[d, r]`; `diag_data` is `D` of
+    /// length `d`. CPU-resident: this is `O(d·r² + r³)` work on host slices.
+    fn capacitance_tril(factor_data: &[T], diag_data: &[T], d: usize, r: usize) -> Vec<T> {
+        let zero = <T as num_traits::Zero>::zero();
+        let one = <T as num_traits::One>::one();
+
+        // K = Wᵀ D⁻¹ W + I_r, an r×r symmetric matrix.
+        // K[a, b] = sum_i W[i, a] * W[i, b] / D[i]   (+ 1 on the diagonal).
+        let mut k = vec![zero; r * r];
+        for a in 0..r {
+            for b in 0..r {
+                let mut acc = zero;
+                for i in 0..d {
+                    acc += factor_data[i * r + a] * factor_data[i * r + b] / diag_data[i];
+                }
+                if a == b {
+                    acc += one;
+                }
+                k[a * r + b] = acc;
+            }
+        }
+
+        // Cholesky K = L Lᵀ (lower-triangular L), standard Cholesky–Banachiewicz.
+        let mut l = vec![zero; r * r];
+        for a in 0..r {
+            for b in 0..=a {
+                let mut sum = k[a * r + b];
+                for c in 0..b {
+                    sum = sum - l[a * r + c] * l[b * r + c];
+                }
+                if a == b {
+                    l[a * r + b] = sum.sqrt();
+                } else {
+                    l[a * r + b] = sum / l[b * r + b];
+                }
+            }
+        }
+        l
+    }
+
+    /// Woodbury `log_prob`: evaluates `log N(value; loc, Σ)` for
+    /// `Σ = W Wᵀ + diag(D)` without forming the dense `[d, d]` matrix.
+    ///
+    /// Mirrors `_batch_lowrank_mahalanobis` + `_batch_lowrank_logdet` +
+    /// `LowRankMultivariateNormal.log_prob`
+    /// (`torch/distributions/lowrank_multivariate_normal.py:28-51,225-240`):
+    ///
+    /// ```text
+    /// log|Σ|       = 2·Σ_a log(L_aa) + Σ_i log(D_i)          (det lemma)
+    /// Wt_Dinv_x    = Wᵀ D⁻¹ (value - loc)                    (length r)
+    /// M            = Σ_i (value-loc)_i² / D_i
+    ///                  - |L⁻¹ Wt_Dinv_x|²                    (Woodbury)
+    /// log_prob     = -0.5·(d·ln(2π) + log|Σ| + M)
+    /// ```
+    ///
+    /// where `L = chol(C)`, `C = I_r + Wᵀ D⁻¹ W` the capacitance matrix.
+    fn woodbury_log_prob(&self, value: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
+        let d = self.d;
+        let r = self.r;
+        let factor_data = self.cov_factor.data_vec()?;
+        let diag_data = self.cov_diag.data_vec()?;
+        let loc_data = self.loc.data_vec()?;
+        let value_data = value.data_vec()?;
+
+        let zero = <T as num_traits::Zero>::zero();
+
+        // The single-event log_prob: `value` must address the d-vector. When
+        // batched the inner-MVN path is the documented fallback (the Woodbury
+        // override is the single-event hot path, matching the dense-path shape
+        // contract pinned by `test_low_rank_log_prob_at_mean_diagonal_only`).
+        if value_data.len() != d {
+            return self.inner.log_prob(value);
+        }
+
+        let l = Self::capacitance_tril(&factor_data, &diag_data, d, r);
+
+        // log|Σ| = 2·Σ_a log(L_aa) + Σ_i log(D_i).
+        let two = T::from(2.0).unwrap();
+        let mut log_det = zero;
+        for a in 0..r {
+            log_det += two * l[a * r + a].ln();
+        }
+        for &di in &diag_data {
+            log_det += di.ln();
+        }
+
+        // diff = value - loc; mahalanobis_term1 = Σ_i diff_i² / D_i.
+        let mut diff = vec![zero; d];
+        let mut maha_term1 = zero;
+        for i in 0..d {
+            let di = value_data[i] - loc_data[i];
+            diff[i] = di;
+            maha_term1 += di * di / diag_data[i];
+        }
+
+        // Wt_Dinv_x[a] = Σ_i W[i, a] * diff_i / D_i   (length r).
+        let mut wt_dinv_x = vec![zero; r];
+        for a in 0..r {
+            let mut acc = zero;
+            for i in 0..d {
+                acc += factor_data[i * r + a] * diff[i] / diag_data[i];
+            }
+            wt_dinv_x[a] = acc;
+        }
+
+        // mahalanobis_term2 = |L⁻¹ Wt_Dinv_x|²: solve L z = Wt_Dinv_x by
+        // forward-substitution (L lower-triangular), then sum z².
+        let mut z = vec![zero; r];
+        let mut maha_term2 = zero;
+        for a in 0..r {
+            let mut sum = wt_dinv_x[a];
+            for c in 0..a {
+                sum = sum - l[a * r + c] * z[c];
+            }
+            let za = sum / l[a * r + a];
+            z[a] = za;
+            maha_term2 += za * za;
+        }
+
+        let maha = maha_term1 - maha_term2;
+
+        // log_prob = -0.5·(d·ln(2π) + log|Σ| + M).
+        let half = T::from(0.5).unwrap();
+        let two_pi_ln = T::from((2.0 * std::f64::consts::PI).ln()).unwrap();
+        let d_t = T::from(d as f64).unwrap();
+        let lp = -half * (d_t * two_pi_ln + log_det + maha);
+
+        let device = value.device();
+        let t = Tensor::from_storage(TensorStorage::cpu(vec![lp]), vec![], false)?;
+        if device.is_cuda() {
+            t.to(device)
+        } else {
+            Ok(t)
+        }
     }
 }
 
@@ -214,7 +360,10 @@ impl<T: Float> Distribution<T> for LowRankMultivariateNormal<T> {
     }
 
     fn log_prob(&self, value: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
-        self.inner.log_prob(value)
+        // Woodbury fast path (#1385): O(d·r²) Mahalanobis + matrix-determinant
+        // lemma over the r×r capacitance matrix, no dense [d, d] Σ formed.
+        // Mirrors `lowrank_multivariate_normal.py:225-240`.
+        self.woodbury_log_prob(value)
     }
 
     fn mean(&self) -> FerrotorchResult<Tensor<T>> {
@@ -250,7 +399,11 @@ impl<T: Float> Distribution<T> for LowRankMultivariateNormal<T> {
         }
         let device = self.cov_diag.device();
         let t = Tensor::from_storage(TensorStorage::cpu(out), vec![d], false)?;
-        if device.is_cuda() { t.to(device) } else { Ok(t) }
+        if device.is_cuda() {
+            t.to(device)
+        } else {
+            Ok(t)
+        }
     }
 }
 
@@ -345,6 +498,142 @@ mod tests {
         assert_eq!(mvn.scale_tril().shape(), &[3, 3]);
         assert_eq!(mvn.covariance_matrix().unwrap().shape(), &[3, 3]);
         assert_eq!(mvn.precision_matrix().unwrap().shape(), &[3, 3]);
+    }
+
+    /// Dense-path oracle: build Σ = W Wᵀ + diag(D) explicitly, invert it,
+    /// and evaluate the multivariate-normal log density directly. Independent
+    /// of the Woodbury production path, so it is a genuine cross-check.
+    fn dense_log_prob_oracle(
+        loc: &[f64],
+        factor: &[f64],
+        diag: &[f64],
+        value: &[f64],
+        d: usize,
+        r: usize,
+    ) -> f64 {
+        // Σ
+        let mut cov = vec![0.0f64; d * d];
+        for i in 0..d {
+            for j in 0..d {
+                let mut acc = 0.0;
+                for k in 0..r {
+                    acc += factor[i * r + k] * factor[j * r + k];
+                }
+                if i == j {
+                    acc += diag[i];
+                }
+                cov[i * d + j] = acc;
+            }
+        }
+        // Invert Σ and get its determinant via Gauss-Jordan with an augmented
+        // identity. d is tiny in the tests so naive elimination is fine.
+        let mut a = cov.clone();
+        let mut inv = vec![0.0f64; d * d];
+        for i in 0..d {
+            inv[i * d + i] = 1.0;
+        }
+        let mut det = 1.0;
+        for col in 0..d {
+            // pivot
+            let piv = a[col * d + col];
+            det *= piv;
+            let piv_inv = 1.0 / piv;
+            for j in 0..d {
+                a[col * d + j] *= piv_inv;
+                inv[col * d + j] *= piv_inv;
+            }
+            for row in 0..d {
+                if row == col {
+                    continue;
+                }
+                let f = a[row * d + col];
+                for j in 0..d {
+                    a[row * d + j] -= f * a[col * d + j];
+                    inv[row * d + j] -= f * inv[col * d + j];
+                }
+            }
+        }
+        // Mahalanobis = (x-μ)ᵀ Σ⁻¹ (x-μ)
+        let diff: Vec<f64> = (0..d).map(|i| value[i] - loc[i]).collect();
+        let mut maha = 0.0;
+        for i in 0..d {
+            for j in 0..d {
+                maha += diff[i] * inv[i * d + j] * diff[j];
+            }
+        }
+        -0.5 * (d as f64 * (2.0 * std::f64::consts::PI).ln() + det.ln() + maha)
+    }
+
+    #[test]
+    fn test_low_rank_woodbury_matches_dense_path_rank1() {
+        // d=3, r=1. Woodbury log_prob must match the explicit dense oracle.
+        let loc = [0.5f64, -1.0, 2.0];
+        let factor = [1.0f64, 0.5, -0.5]; // [3,1]
+        let diag = [1.0f64, 2.0, 0.5];
+        let value = [0.0f64, 0.0, 1.0];
+
+        let loc_t = Tensor::from_storage(TensorStorage::cpu(loc.to_vec()), vec![3], false).unwrap();
+        let factor_t =
+            Tensor::from_storage(TensorStorage::cpu(factor.to_vec()), vec![3, 1], false).unwrap();
+        let diag_t =
+            Tensor::from_storage(TensorStorage::cpu(diag.to_vec()), vec![3], false).unwrap();
+        let value_t =
+            Tensor::from_storage(TensorStorage::cpu(value.to_vec()), vec![3], false).unwrap();
+
+        let mvn = LowRankMultivariateNormal::new(loc_t, factor_t, diag_t).unwrap();
+        let got = mvn.log_prob(&value_t).unwrap().item().unwrap();
+        let expected = dense_log_prob_oracle(&loc, &factor, &diag, &value, 3, 1);
+        assert!(
+            (got - expected).abs() < 1e-9,
+            "Woodbury log_prob {got} vs dense oracle {expected}"
+        );
+    }
+
+    #[test]
+    fn test_low_rank_woodbury_matches_dense_path_rank2() {
+        // d=4, r=2 (r < d), a non-trivial low-rank-plus-diag covariance.
+        let loc = [1.0f64, 0.0, -0.5, 0.25];
+        let factor = [
+            0.8f64, -0.2, // row 0
+            0.3, 0.6, // row 1
+            -0.4, 0.1, // row 2
+            0.5, 0.5, // row 3
+        ]; // [4,2]
+        let diag = [0.5f64, 1.0, 0.75, 1.25];
+        let value = [0.2f64, -0.3, 0.4, 0.1];
+
+        let loc_t = Tensor::from_storage(TensorStorage::cpu(loc.to_vec()), vec![4], false).unwrap();
+        let factor_t =
+            Tensor::from_storage(TensorStorage::cpu(factor.to_vec()), vec![4, 2], false).unwrap();
+        let diag_t =
+            Tensor::from_storage(TensorStorage::cpu(diag.to_vec()), vec![4], false).unwrap();
+        let value_t =
+            Tensor::from_storage(TensorStorage::cpu(value.to_vec()), vec![4], false).unwrap();
+
+        let mvn = LowRankMultivariateNormal::new(loc_t, factor_t, diag_t).unwrap();
+        let got = mvn.log_prob(&value_t).unwrap().item().unwrap();
+        let expected = dense_log_prob_oracle(&loc, &factor, &diag, &value, 4, 2);
+        assert!(
+            (got - expected).abs() < 1e-9,
+            "Woodbury log_prob {got} vs dense oracle {expected}"
+        );
+    }
+
+    #[test]
+    fn test_low_rank_woodbury_diagonal_only_analytic() {
+        // W = 0 → Σ = I_3; log_prob at the mean must equal -1.5·ln(2π), the
+        // analytic standard-normal value (unchanged from the dense path).
+        let loc = cpu_tensor(&[0.0, 0.0, 0.0], &[3]);
+        let factor = cpu_tensor(&[0.0, 0.0, 0.0], &[3, 1]);
+        let diag = cpu_tensor(&[1.0, 1.0, 1.0], &[3]);
+        let mvn = LowRankMultivariateNormal::new(loc, factor, diag).unwrap();
+        let value = cpu_tensor(&[0.0, 0.0, 0.0], &[3]);
+        let lp = mvn.log_prob(&value).unwrap().item().unwrap();
+        let expected = -1.5_f32 * (2.0 * std::f32::consts::PI).ln();
+        assert!(
+            (lp - expected).abs() < 1e-5,
+            "expected {expected}, got {lp}"
+        );
     }
 
     #[test]
