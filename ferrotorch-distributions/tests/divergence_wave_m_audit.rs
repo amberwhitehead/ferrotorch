@@ -34,8 +34,8 @@ fn audit_1374_supported_pair_count_is_41() {
     // dispatcher arms agree with this number.
     assert_eq!(
         kl_supported_pair_count(),
-        71,
-        "#1562 both-types-exist gaps added 27 pairs (41 -> 68); #1374 Binomial sub-part added Binomial-Binomial + Poisson-Binomial (68 -> 70); #1374 Geometric sub-part added Geometric-Geometric (70 -> 71); update this audit + the doc table together"
+        84,
+        "#1562 both-types-exist gaps added 27 pairs (41 -> 68); #1374 Binomial sub-part added Binomial-Binomial + Poisson-Binomial (68 -> 70); #1374 Geometric sub-part added Geometric-Geometric (70 -> 71); #1374 ContinuousBernoulli sub-part added 13 CB pairs (71 -> 84); update this audit + the doc table together"
     );
 }
 

@@ -16,6 +16,7 @@
 //! | [`Uniform`] | `low`, `high` | Yes |
 //! | [`Bernoulli`] | `probs` | No (discrete) |
 //! | [`Binomial`] | `total_count`, `probs` | No (discrete) |
+//! | [`ContinuousBernoulli`] | `probs` | Yes (continuous on [0,1]) |
 //! | [`Categorical`] | `probs` | No (discrete) |
 //! | [`Geometric`] | `probs` | No (discrete) |
 //! | [`Beta`] | `concentration1`, `concentration0` | Yes |
@@ -70,6 +71,7 @@ mod binomial;
 mod categorical;
 mod cauchy;
 pub mod constraints;
+mod continuous_bernoulli;
 mod dirichlet;
 mod exponential;
 pub(crate) mod fallback;
@@ -104,6 +106,7 @@ pub use beta::Beta;
 pub use binomial::Binomial;
 pub use categorical::Categorical;
 pub use cauchy::Cauchy;
+pub use continuous_bernoulli::ContinuousBernoulli;
 pub use dirichlet::Dirichlet;
 pub use exponential::Exponential;
 pub use gamma::Gamma;

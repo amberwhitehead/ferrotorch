@@ -15,12 +15,12 @@
 //! | REQ | Status | Evidence |
 //! |---|---|---|
 //! | REQ-1 (`kl_divergence<T, P, Q>` public entry point) | SHIPPED | `pub fn kl_divergence<T: Float, P, Q>` with `P: Distribution<T> + 'static`, `Q: Distribution<T> + 'static` bounds in `kl.rs` mirroring `torch/distributions/kl.py:kl_divergence`; consumer: `pub mod kl` in `lib.rs` exposes it as grandfathered public API; `test_kl_*` (~25 sites) exercise the dispatch path |
-//! | REQ-2 (`kl_supported_pair_count` introspection) | SHIPPED | `pub const fn kl_supported_pair_count() -> usize` + `KL_SUPPORTED_PAIR_COUNT: usize = 71` in `kl.rs`; consumer: const fn is grandfathered public API; drift-prevention test `kl_doc_table_matches_dispatcher` reads `include_str!("kl.rs")` and asserts three-way invariant against the public accessor |
-//! | REQ-3 (`kl_dispatch` `Any::downcast_ref` chain) | SHIPPED | the dispatcher in `kl.rs` is a 71-arm chain mirroring PyTorch's `_dispatch_kl` in `torch/distributions/kl.py:113-138`; consumer: `pub fn kl_divergence` invokes the dispatcher on every call |
+//! | REQ-2 (`kl_supported_pair_count` introspection) | SHIPPED | `pub const fn kl_supported_pair_count() -> usize` + `KL_SUPPORTED_PAIR_COUNT: usize = 84` in `kl.rs`; consumer: const fn is grandfathered public API; drift-prevention test `kl_doc_table_matches_dispatcher` reads `include_str!("kl.rs")` and asserts three-way invariant against the public accessor |
+//! | REQ-3 (`kl_dispatch` `Any::downcast_ref` chain) | SHIPPED | the dispatcher in `kl.rs` is an 84-arm chain mirroring PyTorch's `_dispatch_kl` in `torch/distributions/kl.py:113-138`; consumer: `pub fn kl_divergence` invokes the dispatcher on every call |
 //! | REQ-4 (8 same-family closed-form formulas) | SHIPPED | 8 closed-form helpers in `kl.rs` (`kl_normal_normal`, `kl_bernoulli_bernoulli`, `kl_uniform_uniform`, `kl_categorical_categorical`, `kl_laplace_laplace`, `kl_exponential_exponential`, `kl_gamma_gamma`, `kl_poisson_poisson`) mirroring `@register_kl` bodies in `torch/distributions/kl.py`; consumer: the dispatcher invokes each formula |
 //! | REQ-5 (cross-family finite formulas) | SHIPPED | `kl_uniform_normal`, `kl_gamma_exponential`, `kl_exponential_gamma` in `kl.rs`; last two use `kl_gamma_scalar` via `Exp(λ) ≡ Gamma(1, λ)`; consumer: the dispatcher calls each; `kl_gamma_scalar` is consumed by 3 production sites internally. (Normal-Uniform was a finite arm here but moved to the `+inf` support-mismatch family per `kl.py:766,768` `_kl_normal_infinity` — #1563.) |
 //! | REQ-6 (fallback guard on every formula) | SHIPPED | every finite formula's first statement is `crate::fallback::check_gpu_fallback_opt_in(&[...], "kl_divergence(P, Q)")?` in `kl.rs`; consumer: this IS the production consumer of `fn check_gpu_fallback_opt_in` per `fallback.md` REQ-2 (the `+inf` support-mismatch arms read a single param tensor that is already host-resident, so they hand it straight to `kl_infinite_like`) |
-//! | REQ-7 (full ~75-pair PyTorch coverage) | PARTIAL | blocker #1374 — ferrotorch now ships 71 of PyTorch's ~75 pairs (was 41). The #1562 closure added 27; the #1374 Binomial sub-part added 2: `kl_binomial_binomial` (finite, mirrors `torch/distributions/kl.py:231-244`: `n·(p·(logit_p−logit_q)+ln(1−p)−ln(1−q))`, `+inf` where `n_p>n_q`, `InvalidArgument` where `n_p<n_q`) + Poisson-Binomial routed through `kl_infinite_like` (mirrors `_kl_poisson_infinity` `kl.py:842`). The #1374 Geometric sub-part added 1: `kl_geometric_geometric` (finite, mirrors `kl.py:320-322`: `-p.entropy() - log1p(-q.probs)/p.probs - q.logits`). Finite #1562 arms (`kl_onehotcategorical_onehotcategorical` `kl.py:474-476`, `kl_bernoulli_poisson` `kl.py:513-516`, `kl_normal_laplace` `kl.py:782-792`) + 24 support-mismatch `+inf` arms (PyTorch's `_infinite_like` registrations: Beta-Pareto `kl.py:528`; Exponential-{Beta,Pareto,Uniform} `kl.py:620-623`; Gamma-{Beta,Pareto,Uniform} `kl.py:665-668`; Gumbel-{Beta,Exponential,Gamma,Pareto,Uniform} `kl.py:718-723`; Laplace-{Beta,Exponential,Gamma,Pareto,Uniform} `kl.py:740-745`; Normal-{Beta,Exponential,Gamma,Pareto} `kl.py:761-765`; Pareto-{Beta,Uniform} `kl.py:795-797`; Poisson-Bernoulli `kl.py:841`) routed through the `kl_infinite_like` helper; consumer: each is invoked by its dispatcher downcast arm. Still NOT-STARTED: (a) `Independent-Independent` (`kl.py:944`) — `Independent<T, D>` is generic over the concrete base `D`, so `Any::downcast_ref` cannot match it without a KL-recursion trait hook on `Distribution` (`lib.rs`) + an override in `independent.rs`, both outside this manifest (concrete prereq, not a deferral); (b) ContinuousBernoulli-* pairs (need a `ContinuousBernoulli` struct), TransformedDistribution-TransformedDistribution / ExponentialFamily-ExponentialFamily — each blocked on a missing distribution TYPE or trait surface. #1374 stays open for the remaining ~4. |
+//! | REQ-7 (full ~75-pair PyTorch coverage) | PARTIAL | blocker #1374 — ferrotorch now ships 84 of PyTorch's ~88 (P,Q) pairs (was 41). The #1562 closure added 27; the #1374 Binomial sub-part added 2: `kl_binomial_binomial` (finite, mirrors `torch/distributions/kl.py:231-244`) + Poisson-Binomial via `kl_infinite_like` (`_kl_poisson_infinity` `kl.py:842`). The #1374 Geometric sub-part added 1: `kl_geometric_geometric` (finite, `kl.py:320-322`). The #1374 ContinuousBernoulli sub-part added 13 (needed the new `ContinuousBernoulli` struct, `continuous_bernoulli.rs`): 6 finite — `kl_continuous_bernoulli_continuous_bernoulli` (`kl.py:255-260`), `kl_beta_continuous_bernoulli` (`kl.py:518-525`), `kl_continuous_bernoulli_exponential` (`kl.py:586-588`), `kl_continuous_bernoulli_normal` (`kl.py:595-604`), `kl_continuous_bernoulli_uniform` (`kl.py:607-617`, where-mask `+inf` when the Uniform support contains [0,1]), `kl_uniform_continuous_bernoulli` (`kl.py:871-886`, where-mask) — plus 7 support-mismatch `+inf` via `kl_infinite_like`: ContinuousBernoulli-Pareto (`kl.py:581`), {Exponential,Gamma,Gumbel,Laplace,Normal,Pareto}-ContinuousBernoulli (`kl.py:621,666,719,741,762,796`); the CB closed forms reuse the crate-visible `_lims=(0.499,0.501)` Taylor-cutoff scalar helpers from `continuous_bernoulli.rs`. Finite #1562 arms (`kl_onehotcategorical_onehotcategorical` `kl.py:474-476`, `kl_bernoulli_poisson` `kl.py:513-516`, `kl_normal_laplace` `kl.py:782-792`) + 24 support-mismatch `+inf` arms (PyTorch's `_infinite_like` registrations: Beta-Pareto `kl.py:528`; Exponential-{Beta,Pareto,Uniform} `kl.py:620-623`; Gamma-{Beta,Pareto,Uniform} `kl.py:665-668`; Gumbel-{Beta,Exponential,Gamma,Pareto,Uniform} `kl.py:718-723`; Laplace-{Beta,Exponential,Gamma,Pareto,Uniform} `kl.py:740-745`; Normal-{Beta,Exponential,Gamma,Pareto} `kl.py:761-765`; Pareto-{Beta,Uniform} `kl.py:795-797`; Poisson-Bernoulli `kl.py:841`) routed through the `kl_infinite_like` helper; consumer: each is invoked by its dispatcher downcast arm. Still NOT-STARTED: (a) `Independent-Independent` (`kl.py:944`) — `Independent<T, D>` is generic over the concrete base `D`, so `Any::downcast_ref` cannot match it without a KL-recursion trait hook on `Distribution` (`lib.rs`) + an override in `independent.rs`, both outside this manifest (concrete prereq, not a deferral); (b) TransformedDistribution-TransformedDistribution / ExponentialFamily-ExponentialFamily — each blocked on a base-recursion / Bregman trait surface. #1374 stays open for the remaining ~4. |
 //! | REQ-8 (`register_kl` extension API) | SHIPPED (design decision, #1375) | the explicit `Any::downcast_ref` match in `kl_dispatch` is the deliberate Rust-idiomatic equivalent of PyTorch's `@register_kl` + `_dispatch_kl` (a Python-runtime open-extension pattern). Rust's static analog is the closed-crate match, kept maintainable by the `kl_doc_table_matches_dispatcher` drift test that pins the doc table, the const count, and the dispatcher arms in lockstep. A `Lazy<HashMap<(TypeId,TypeId),Fn>>` registry would add indirection without enabling cross-crate extension (formulas need concrete accessors). Documented in `kl.md` REQ-8. Closes #1375. |
 
 use ferrotorch_core::dtype::Float;
@@ -29,11 +29,16 @@ use ferrotorch_core::shape::broadcast_shapes;
 use ferrotorch_core::storage::TensorStorage;
 use ferrotorch_core::tensor::Tensor;
 
+use crate::continuous_bernoulli::{
+    cont_bern_log_norm_scalar, entropy_scalar as cb_entropy_scalar,
+    logits_scalar as cb_logits_scalar, mean_scalar as cb_mean_scalar,
+    variance_scalar as variance_scalar_kl,
+};
 use crate::special_fns::{digamma_scalar, lgamma_scalar};
 use crate::{
-    Bernoulli, Beta, Binomial, Categorical, Cauchy, Dirichlet, Distribution, Exponential, Gamma,
-    Geometric, Gumbel, HalfNormal, Laplace, LowRankMultivariateNormal, MultivariateNormal, Normal,
-    OneHotCategorical, Pareto, Poisson, Uniform,
+    Bernoulli, Beta, Binomial, Categorical, Cauchy, ContinuousBernoulli, Dirichlet, Distribution,
+    Exponential, Gamma, Geometric, Gumbel, HalfNormal, Laplace, LowRankMultivariateNormal,
+    MultivariateNormal, Normal, OneHotCategorical, Pareto, Poisson, Uniform,
 };
 
 /// Euler-Mascheroni constant `γ`. Mirrors PyTorch's
@@ -130,6 +135,19 @@ const EULER_GAMMA: f64 = 0.577_215_664_901_532_9;
 /// | Binomial | Binomial |
 /// | Poisson | Binomial |
 /// | Geometric | Geometric |
+/// | ContinuousBernoulli | ContinuousBernoulli |
+/// | Beta | ContinuousBernoulli |
+/// | ContinuousBernoulli | Exponential |
+/// | ContinuousBernoulli | Normal |
+/// | ContinuousBernoulli | Uniform |
+/// | Uniform | ContinuousBernoulli |
+/// | ContinuousBernoulli | Pareto |
+/// | Exponential | ContinuousBernoulli |
+/// | Gamma | ContinuousBernoulli |
+/// | Gumbel | ContinuousBernoulli |
+/// | Laplace | ContinuousBernoulli |
+/// | Normal | ContinuousBernoulli |
+/// | Pareto | ContinuousBernoulli |
 ///
 /// The same set is also reported by [`kl_supported_pair_count`].
 ///
@@ -164,7 +182,7 @@ pub const fn kl_supported_pair_count() -> usize {
 /// Compile-time count of registered `(P, Q)` pairs. Update this when adding
 /// or removing a branch in [`kl_dispatch`] **and** the doc table on
 /// [`kl_divergence`] in lockstep; the drift test enforces the invariant.
-const KL_SUPPORTED_PAIR_COUNT: usize = 71;
+const KL_SUPPORTED_PAIR_COUNT: usize = 84;
 
 fn kl_dispatch<T: Float>(
     p: &dyn std::any::Any,
@@ -573,6 +591,95 @@ fn kl_dispatch<T: Float>(
     ) {
         return kl_geometric_geometric(pg, qg);
     }
+    // ---- #1374: ContinuousBernoulli pairs ----
+    // ContinuousBernoulli-ContinuousBernoulli (kl.py:255-260, finite)
+    if let (Some(pc), Some(qc)) = (
+        p.downcast_ref::<ContinuousBernoulli<T>>(),
+        q.downcast_ref::<ContinuousBernoulli<T>>(),
+    ) {
+        return kl_continuous_bernoulli_continuous_bernoulli(pc, qc);
+    }
+    // Beta-ContinuousBernoulli (kl.py:518-525, finite)
+    if let (Some(pb), Some(qc)) = (
+        p.downcast_ref::<Beta<T>>(),
+        q.downcast_ref::<ContinuousBernoulli<T>>(),
+    ) {
+        return kl_beta_continuous_bernoulli(pb, qc);
+    }
+    // ContinuousBernoulli-Exponential (kl.py:586-588, finite)
+    if let (Some(pc), Some(qe)) = (
+        p.downcast_ref::<ContinuousBernoulli<T>>(),
+        q.downcast_ref::<Exponential<T>>(),
+    ) {
+        return kl_continuous_bernoulli_exponential(pc, qe);
+    }
+    // ContinuousBernoulli-Normal (kl.py:595-604, finite)
+    if let (Some(pc), Some(qn)) = (
+        p.downcast_ref::<ContinuousBernoulli<T>>(),
+        q.downcast_ref::<Normal<T>>(),
+    ) {
+        return kl_continuous_bernoulli_normal(pc, qn);
+    }
+    // ContinuousBernoulli-Uniform (kl.py:607-617, finite with where-mask +inf)
+    if let (Some(pc), Some(qu)) = (
+        p.downcast_ref::<ContinuousBernoulli<T>>(),
+        q.downcast_ref::<Uniform<T>>(),
+    ) {
+        return kl_continuous_bernoulli_uniform(pc, qu);
+    }
+    // Uniform-ContinuousBernoulli (kl.py:871-886, finite with where-mask +inf)
+    if let (Some(pu), Some(qc)) = (
+        p.downcast_ref::<Uniform<T>>(),
+        q.downcast_ref::<ContinuousBernoulli<T>>(),
+    ) {
+        return kl_uniform_continuous_bernoulli(pu, qc);
+    }
+    // ContinuousBernoulli-Pareto (kl.py:581-583, `_kl_continuous_bernoulli_infinity` -> +inf)
+    if let (Some(pc), Some(_)) = (
+        p.downcast_ref::<ContinuousBernoulli<T>>(),
+        q.downcast_ref::<Pareto<T>>(),
+    ) {
+        return kl_infinite_like(pc.probs());
+    }
+    // {Exponential, Gamma, Gumbel, Laplace, Normal, Pareto}-ContinuousBernoulli
+    // (kl.py:621,666,719,741,762,796): each shares a `_infinite_like(p.<param>)`
+    // body — the source distribution's support extends past [0,1], so KL is +inf.
+    if let (Some(pe), Some(_)) = (
+        p.downcast_ref::<Exponential<T>>(),
+        q.downcast_ref::<ContinuousBernoulli<T>>(),
+    ) {
+        return kl_infinite_like(pe.rate());
+    }
+    if let (Some(pg), Some(_)) = (
+        p.downcast_ref::<Gamma<T>>(),
+        q.downcast_ref::<ContinuousBernoulli<T>>(),
+    ) {
+        return kl_infinite_like(pg.concentration());
+    }
+    if let (Some(pg), Some(_)) = (
+        p.downcast_ref::<Gumbel<T>>(),
+        q.downcast_ref::<ContinuousBernoulli<T>>(),
+    ) {
+        return kl_infinite_like(pg.loc());
+    }
+    if let (Some(pl), Some(_)) = (
+        p.downcast_ref::<Laplace<T>>(),
+        q.downcast_ref::<ContinuousBernoulli<T>>(),
+    ) {
+        return kl_infinite_like(pl.loc());
+    }
+    if let (Some(pn), Some(_)) = (
+        p.downcast_ref::<Normal<T>>(),
+        q.downcast_ref::<ContinuousBernoulli<T>>(),
+    ) {
+        return kl_infinite_like(pn.loc());
+    }
+    if let (Some(pp_), Some(_)) = (
+        p.downcast_ref::<Pareto<T>>(),
+        q.downcast_ref::<ContinuousBernoulli<T>>(),
+    ) {
+        return kl_infinite_like(pp_.scale());
+    }
 
     Err(FerrotorchError::InvalidArgument {
         message: "No KL divergence formula registered for this distribution pair. \
@@ -598,8 +705,14 @@ fn kl_dispatch<T: Float>(
                   Gumbel-{Beta,Exponential,Gamma,Pareto,Uniform}, \
                   Laplace-{Beta,Exponential,Gamma,Pareto,Uniform}, \
                   Normal-{Beta,Exponential,Gamma,Pareto}, Pareto-{Beta,Uniform}, \
-                  Poisson-Bernoulli, Poisson-Binomial. \
-                  Discrete same-family: Binomial-Binomial, Geometric-Geometric."
+                  Poisson-Bernoulli, Poisson-Binomial, \
+                  ContinuousBernoulli-Pareto, \
+                  {Exponential,Gamma,Gumbel,Laplace,Normal,Pareto}-ContinuousBernoulli. \
+                  Discrete same-family: Binomial-Binomial, Geometric-Geometric. \
+                  ContinuousBernoulli: ContinuousBernoulli-ContinuousBernoulli, \
+                  Beta-ContinuousBernoulli, ContinuousBernoulli-Exponential, \
+                  ContinuousBernoulli-Normal, ContinuousBernoulli-Uniform, \
+                  Uniform-ContinuousBernoulli."
             .into(),
     })
 }
@@ -2702,6 +2815,259 @@ fn kl_geometric_geometric<T: Float>(
 }
 
 // ---------------------------------------------------------------------------
+// Additional KL formulas (#1374): ContinuousBernoulli pairs. Each mirrors a
+// `@register_kl` body in `torch/distributions/kl.py`. The CB closed forms
+// (`mean`, `entropy`, `_cont_bern_log_norm`, `logits`) carry the
+// `_lims = (0.499, 0.501)` Taylor cutoff; ferrotorch reuses the crate-visible
+// scalar helpers from `continuous_bernoulli.rs` (the same code that powers
+// `ContinuousBernoulli::{mean, entropy}`), so the cutoff is honoured here too.
+// ---------------------------------------------------------------------------
+
+/// KL(ContinuousBernoulli(λp) || ContinuousBernoulli(λq)) (finite).
+///
+/// Mirrors `torch/distributions/kl.py:255-260`
+/// `_kl_continuous_bernoulli_continuous_bernoulli`:
+/// ```text
+/// t1 = p.mean·(p.logits - q.logits)
+/// t2 = p._cont_bern_log_norm() + log1p(-p.probs)
+/// t3 = -q._cont_bern_log_norm() - log1p(-q.probs)
+/// KL = t1 + t2 + t3
+/// ```
+/// `p`/`q` probs broadcast right-aligned (NOT `iter().cycle()`).
+fn kl_continuous_bernoulli_continuous_bernoulli<T: Float>(
+    p: &ContinuousBernoulli<T>,
+    q: &ContinuousBernoulli<T>,
+) -> FerrotorchResult<Tensor<T>> {
+    crate::fallback::check_gpu_fallback_opt_in(
+        &[p.probs(), q.probs()],
+        "kl_divergence(ContinuousBernoulli, ContinuousBernoulli)",
+    )?;
+    let p_probs = p.probs().data_vec()?;
+    let q_probs = q.probs().data_vec()?;
+
+    let plan = kl_broadcast_index_pairs(p.probs().shape(), q.probs().shape())?;
+    let result: Vec<T> = plan
+        .p_idx
+        .iter()
+        .zip(plan.q_idx.iter())
+        .map(|(&pi, &qi)| {
+            let pp = p_probs[pi];
+            let qp = q_probs[qi];
+            let t1 = cb_mean_scalar(pp) * (cb_logits_scalar(pp) - cb_logits_scalar(qp));
+            let t2 = cont_bern_log_norm_scalar(pp) + (-pp).ln_1p();
+            let t3 = -cont_bern_log_norm_scalar(qp) - (-qp).ln_1p();
+            t1 + t2 + t3
+        })
+        .collect();
+
+    Tensor::from_storage(TensorStorage::cpu(result), plan.out_shape, false)
+}
+
+/// KL(Beta(α, β) || ContinuousBernoulli(λ)) (cross-family, finite).
+///
+/// Mirrors `torch/distributions/kl.py:518-525` `_kl_beta_continuous_bernoulli`:
+/// ```text
+/// KL = -H(Beta) - Beta.mean·q.logits - log1p(-q.probs) - q._cont_bern_log_norm()
+/// ```
+/// where `Beta.mean = α/(α+β)` and `H(Beta)` uses `beta_entropy_scalar`.
+fn kl_beta_continuous_bernoulli<T: Float>(
+    p: &Beta<T>,
+    q: &ContinuousBernoulli<T>,
+) -> FerrotorchResult<Tensor<T>> {
+    crate::fallback::check_gpu_fallback_opt_in(
+        &[p.concentration1(), p.concentration0(), q.probs()],
+        "kl_divergence(Beta, ContinuousBernoulli)",
+    )?;
+    let a_v = p.concentration1().data_vec()?;
+    let b_v = p.concentration0().data_vec()?;
+    let q_probs = q.probs().data_vec()?;
+
+    let plan = kl_broadcast_index_pairs(p.concentration1().shape(), q.probs().shape())?;
+    let result: Vec<T> = plan
+        .p_idx
+        .iter()
+        .zip(plan.q_idx.iter())
+        .map(|(&pi, &qi)| {
+            let (a, b) = (a_v[pi], b_v[pi]);
+            let qp = q_probs[qi];
+            let beta_mean = a / (a + b);
+            -beta_entropy_scalar(a, b)
+                - beta_mean * cb_logits_scalar(qp)
+                - (-qp).ln_1p()
+                - cont_bern_log_norm_scalar(qp)
+        })
+        .collect();
+
+    Tensor::from_storage(TensorStorage::cpu(result), plan.out_shape, false)
+}
+
+/// KL(ContinuousBernoulli(λ) || Exponential(rate)) (cross-family, finite).
+///
+/// Mirrors `torch/distributions/kl.py:586-588`
+/// `_kl_continuous_bernoulli_exponential`:
+/// ```text
+/// KL = -H(CB) - ln(rate) + rate·CB.mean
+/// ```
+fn kl_continuous_bernoulli_exponential<T: Float>(
+    p: &ContinuousBernoulli<T>,
+    q: &Exponential<T>,
+) -> FerrotorchResult<Tensor<T>> {
+    crate::fallback::check_gpu_fallback_opt_in(
+        &[p.probs(), q.rate()],
+        "kl_divergence(ContinuousBernoulli, Exponential)",
+    )?;
+    let p_probs = p.probs().data_vec()?;
+    let rate = q.rate().data_vec()?;
+
+    let plan = kl_broadcast_index_pairs(p.probs().shape(), q.rate().shape())?;
+    let result: Vec<T> = plan
+        .p_idx
+        .iter()
+        .zip(plan.q_idx.iter())
+        .map(|(&pi, &qi)| {
+            let pp = p_probs[pi];
+            let r = rate[qi];
+            -cb_entropy_scalar(pp) - r.ln() + r * cb_mean_scalar(pp)
+        })
+        .collect();
+
+    Tensor::from_storage(TensorStorage::cpu(result), plan.out_shape, false)
+}
+
+/// KL(ContinuousBernoulli(λ) || Normal(loc, scale)) (cross-family, finite).
+///
+/// Mirrors `torch/distributions/kl.py:595-604` `_kl_continuous_bernoulli_normal`:
+/// ```text
+/// t1 = -H(CB)
+/// t2 = 0.5·(ln(2π) + (loc/scale)²) + ln(scale)
+/// t3 = (CB.var + CB.mean² - 2·loc·CB.mean)/(2·scale²)
+/// KL = t1 + t2 + t3
+/// ```
+fn kl_continuous_bernoulli_normal<T: Float>(
+    p: &ContinuousBernoulli<T>,
+    q: &Normal<T>,
+) -> FerrotorchResult<Tensor<T>> {
+    crate::fallback::check_gpu_fallback_opt_in(
+        &[p.probs(), q.loc(), q.scale()],
+        "kl_divergence(ContinuousBernoulli, Normal)",
+    )?;
+    let p_probs = p.probs().data_vec()?;
+    let loc = q.loc().data_vec()?;
+    let scale = q.scale().data_vec()?;
+    let half = T::from(0.5).unwrap();
+    let two = T::from(2.0).unwrap();
+    let ln_2pi = T::from((2.0 * std::f64::consts::PI).ln()).unwrap();
+
+    let plan = kl_broadcast_index_pairs(p.probs().shape(), q.loc().shape())?;
+    let result: Vec<T> = plan
+        .p_idx
+        .iter()
+        .zip(plan.q_idx.iter())
+        .map(|(&pi, &qi)| {
+            let pp = p_probs[pi];
+            let (l, s) = (loc[qi], scale[qi]);
+            let cb_mean = cb_mean_scalar(pp);
+            let cb_var = variance_scalar_kl(pp);
+            let t1 = -cb_entropy_scalar(pp);
+            let t2 = half * (ln_2pi + (l / s) * (l / s)) + s.ln();
+            let t3 = (cb_var + cb_mean * cb_mean - two * l * cb_mean) / (two * s * s);
+            t1 + t2 + t3
+        })
+        .collect();
+
+    Tensor::from_storage(TensorStorage::cpu(result), plan.out_shape, false)
+}
+
+/// KL(ContinuousBernoulli(λ) || Uniform(low, high)) (cross-family).
+///
+/// Mirrors `torch/distributions/kl.py:607-617` `_kl_continuous_bernoulli_uniform`:
+/// ```text
+/// result = -H(CB) + ln(high - low)
+/// KL = +inf where (q.low >= 0) OR (q.high <= 1)  [Uniform support contains CB's [0,1]]
+/// ```
+fn kl_continuous_bernoulli_uniform<T: Float>(
+    p: &ContinuousBernoulli<T>,
+    q: &Uniform<T>,
+) -> FerrotorchResult<Tensor<T>> {
+    crate::fallback::check_gpu_fallback_opt_in(
+        &[p.probs(), q.low(), q.high()],
+        "kl_divergence(ContinuousBernoulli, Uniform)",
+    )?;
+    let p_probs = p.probs().data_vec()?;
+    let low = q.low().data_vec()?;
+    let high = q.high().data_vec()?;
+    let zero = T::from(0.0).unwrap();
+    let one = T::from(1.0).unwrap();
+
+    let plan = kl_broadcast_index_pairs(p.probs().shape(), q.low().shape())?;
+    let result: Vec<T> = plan
+        .p_idx
+        .iter()
+        .zip(plan.q_idx.iter())
+        .map(|(&pi, &qi)| {
+            let pp = p_probs[pi];
+            let (lo, hi) = (low[qi], high[qi]);
+            // `torch.ge(q.low, 0) | torch.le(q.high, 1)` -> +inf (kl.py:610-616).
+            if lo >= zero || hi <= one {
+                T::infinity()
+            } else {
+                -cb_entropy_scalar(pp) + (hi - lo).ln()
+            }
+        })
+        .collect();
+
+    Tensor::from_storage(TensorStorage::cpu(result), plan.out_shape, false)
+}
+
+/// KL(Uniform(low, high) || ContinuousBernoulli(λ)) (cross-family).
+///
+/// Mirrors `torch/distributions/kl.py:871-886` `_kl_uniform_continuous_bernoulli`:
+/// ```text
+/// result = -H(Uniform) - Uniform.mean·q.logits - log1p(-q.probs) - q._cont_bern_log_norm()
+/// KL = +inf where (p.high >= 1) OR (p.low <= 0)  [Uniform support not in CB's [0,1]]
+/// ```
+/// where `H(Uniform) = ln(high - low)` and `Uniform.mean = (low + high)/2`.
+fn kl_uniform_continuous_bernoulli<T: Float>(
+    p: &Uniform<T>,
+    q: &ContinuousBernoulli<T>,
+) -> FerrotorchResult<Tensor<T>> {
+    crate::fallback::check_gpu_fallback_opt_in(
+        &[p.low(), p.high(), q.probs()],
+        "kl_divergence(Uniform, ContinuousBernoulli)",
+    )?;
+    let low = p.low().data_vec()?;
+    let high = p.high().data_vec()?;
+    let q_probs = q.probs().data_vec()?;
+    let zero = T::from(0.0).unwrap();
+    let one = T::from(1.0).unwrap();
+    let two = T::from(2.0).unwrap();
+
+    let plan = kl_broadcast_index_pairs(p.low().shape(), q.probs().shape())?;
+    let result: Vec<T> = plan
+        .p_idx
+        .iter()
+        .zip(plan.q_idx.iter())
+        .map(|(&pi, &qi)| {
+            let (lo, hi) = (low[pi], high[pi]);
+            let qp = q_probs[qi];
+            // `torch.ge(p.high, 1) | torch.le(p.low, 0)` -> +inf (kl.py:879-885).
+            if hi >= one || lo <= zero {
+                T::infinity()
+            } else {
+                let uni_entropy = (hi - lo).ln();
+                let uni_mean = (lo + hi) / two;
+                -uni_entropy
+                    - uni_mean * cb_logits_scalar(qp)
+                    - (-qp).ln_1p()
+                    - cont_bern_log_norm_scalar(qp)
+            }
+        })
+        .collect();
+
+    Tensor::from_storage(TensorStorage::cpu(result), plan.out_shape, false)
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -3876,6 +4242,248 @@ mod tests {
         let q = Geometric::new(scalar(0.7f64).unwrap()).unwrap();
         let kl = kl_divergence(&p, &q).unwrap();
         assert!(kl.item().unwrap() >= -1e-12, "got {}", kl.item().unwrap());
+    }
+
+    // -- ContinuousBernoulli pairs (#1374 sub-part) --------------------------
+    // Reference values from live `torch.distributions.kl_divergence` (f64,
+    // torch 2.11.0+cu130, this machine 2026-05-27); each traces to a
+    // `_kl_*continuous_bernoulli*` body in `torch/distributions/kl.py`
+    // (R-CHAR-3 non-tautological).
+
+    #[test]
+    fn test_kl_cb_cb_same_is_zero() {
+        let mk = || ContinuousBernoulli::new(scalar(0.3f64).unwrap()).unwrap();
+        let kl = kl_divergence(&mk(), &mk()).unwrap();
+        approx(kl.item().unwrap(), 0.0, 1e-12, "CB-CB same");
+    }
+
+    #[test]
+    fn test_kl_cb_cb_known_value() {
+        // torch: kl_divergence(CB(0.3), CB(0.6)) == 0.06451926445321665
+        //        (kl.py:255-260).
+        let p = ContinuousBernoulli::new(scalar(0.3f64).unwrap()).unwrap();
+        let q = ContinuousBernoulli::new(scalar(0.6f64).unwrap()).unwrap();
+        let kl = kl_divergence(&p, &q).unwrap();
+        approx(kl.item().unwrap(), 0.064_519_264_453_216_65, 1e-12, "CB-CB");
+    }
+
+    #[test]
+    fn test_kl_cb_cb_near_half() {
+        // torch: kl_divergence(CB(0.5), CB(0.7)) == 0.029736123251875357.
+        // p=0.5 engages the Taylor cutoff in p.mean / p._cont_bern_log_norm.
+        let p = ContinuousBernoulli::new(scalar(0.5f64).unwrap()).unwrap();
+        let q = ContinuousBernoulli::new(scalar(0.7f64).unwrap()).unwrap();
+        let kl = kl_divergence(&p, &q).unwrap();
+        approx(
+            kl.item().unwrap(),
+            0.029_736_123_251_875_357,
+            1e-12,
+            "CB-CB near-0.5",
+        );
+    }
+
+    #[test]
+    fn test_kl_cb_cb_batched() {
+        // torch: kl_divergence(CB([0.3,0.5]), CB([0.6,0.4]))
+        //        == [0.06451926445321665, 0.006840721103852643].
+        use ferrotorch_core::creation::from_slice;
+        let p = ContinuousBernoulli::new(from_slice(&[0.3f64, 0.5], &[2]).unwrap()).unwrap();
+        let q = ContinuousBernoulli::new(from_slice(&[0.6f64, 0.4], &[2]).unwrap()).unwrap();
+        let kl = kl_divergence(&p, &q).unwrap();
+        assert_eq!(kl.shape(), &[2]);
+        let d = kl.data().unwrap();
+        approx(d[0], 0.064_519_264_453_216_65, 1e-12, "CB-CB batched 0");
+        approx(d[1], 0.006_840_721_103_852_643, 1e-12, "CB-CB batched 1");
+    }
+
+    #[test]
+    fn test_kl_cb_cb_scalar_p_batched_q_broadcast() {
+        // torch: kl_divergence(CB(0.3), CB([0.6,0.4]))
+        //        == [0.06451926445321665, 0.00793458221874696]. scalar-p
+        //        broadcasts against batched-q (the #1569/#1573 contract).
+        use ferrotorch_core::creation::from_slice;
+        let p = ContinuousBernoulli::new(scalar(0.3f64).unwrap()).unwrap();
+        let q = ContinuousBernoulli::new(from_slice(&[0.6f64, 0.4], &[2]).unwrap()).unwrap();
+        let kl = kl_divergence(&p, &q).unwrap();
+        assert_eq!(kl.shape(), &[2]);
+        let d = kl.data().unwrap();
+        approx(d[0], 0.064_519_264_453_216_65, 1e-12, "CB-CB bcast 0");
+        approx(d[1], 0.007_934_582_218_746_96, 1e-12, "CB-CB bcast 1");
+    }
+
+    #[test]
+    fn test_kl_beta_cb_known_value() {
+        // torch: kl_divergence(Beta(2,3), CB(0.4)) == 0.20120086008103655
+        //        (kl.py:518-525).
+        let p = Beta::new(scalar(2.0f64).unwrap(), scalar(3.0f64).unwrap()).unwrap();
+        let q = ContinuousBernoulli::new(scalar(0.4f64).unwrap()).unwrap();
+        let kl = kl_divergence(&p, &q).unwrap();
+        approx(
+            kl.item().unwrap(),
+            0.201_200_860_081_036_55,
+            1e-10,
+            "Beta-CB",
+        );
+    }
+
+    #[test]
+    fn test_kl_cb_exponential_known_value() {
+        // torch: kl_divergence(CB(0.4), Exp(1.5)) == 0.30081213462304146
+        //        (kl.py:586-588).
+        let p = ContinuousBernoulli::new(scalar(0.4f64).unwrap()).unwrap();
+        let q = Exponential::new(scalar(1.5f64).unwrap()).unwrap();
+        let kl = kl_divergence(&p, &q).unwrap();
+        approx(
+            kl.item().unwrap(),
+            0.300_812_134_623_041_46,
+            1e-12,
+            "CB-Exponential",
+        );
+    }
+
+    #[test]
+    fn test_kl_cb_normal_known_value() {
+        // torch: kl_divergence(CB(0.4), Normal(0.5,2.0)) == 1.6293812910784005
+        //        (kl.py:595-604).
+        let p = ContinuousBernoulli::new(scalar(0.4f64).unwrap()).unwrap();
+        let q = Normal::new(scalar(0.5f64).unwrap(), scalar(2.0f64).unwrap()).unwrap();
+        let kl = kl_divergence(&p, &q).unwrap();
+        approx(
+            kl.item().unwrap(),
+            1.629_381_291_078_400_5,
+            1e-12,
+            "CB-Normal",
+        );
+    }
+
+    #[test]
+    fn test_kl_cb_uniform_contains_support_is_inf() {
+        // U(0,1) covers CB's [0,1] -> +inf (kl.py:607-617 where-mask:
+        // q.low >= 0 | q.high <= 1).
+        let p = ContinuousBernoulli::new(scalar(0.4f64).unwrap()).unwrap();
+        let q = Uniform::new(scalar(0.0f64).unwrap(), scalar(1.0f64).unwrap()).unwrap();
+        let kl = kl_divergence(&p, &q).unwrap();
+        assert!(
+            kl.item().unwrap().is_infinite() && kl.item().unwrap() > 0.0,
+            "expected +inf, got {}",
+            kl.item().unwrap()
+        );
+    }
+
+    #[test]
+    fn test_kl_cb_uniform_wider_is_finite() {
+        // torch: kl_divergence(CB(0.4), U(-0.5,1.5)) == 0.6999692297265036.
+        // low<0 AND high>1 -> finite branch.
+        let p = ContinuousBernoulli::new(scalar(0.4f64).unwrap()).unwrap();
+        let q = Uniform::new(scalar(-0.5f64).unwrap(), scalar(1.5f64).unwrap()).unwrap();
+        let kl = kl_divergence(&p, &q).unwrap();
+        approx(
+            kl.item().unwrap(),
+            0.699_969_229_726_503_6,
+            1e-12,
+            "CB-Uniform wide",
+        );
+    }
+
+    #[test]
+    fn test_kl_uniform_cb_inner_is_finite() {
+        // torch: kl_divergence(U(0.2,0.8), CB(0.4)) == 0.5176663448698431.
+        // Uniform [0.2,0.8] strictly inside (0,1) -> finite (kl.py:871-886).
+        let p = Uniform::new(scalar(0.2f64).unwrap(), scalar(0.8f64).unwrap()).unwrap();
+        let q = ContinuousBernoulli::new(scalar(0.4f64).unwrap()).unwrap();
+        let kl = kl_divergence(&p, &q).unwrap();
+        approx(
+            kl.item().unwrap(),
+            0.517_666_344_869_843_1,
+            1e-12,
+            "Uniform-CB inner",
+        );
+    }
+
+    #[test]
+    fn test_kl_uniform_cb_touching_support_is_inf() {
+        // U(0,1) -> +inf (p.high >= 1 | p.low <= 0, kl.py:879-885); also
+        // U(-0.5,1.5) -> +inf.
+        let q = ContinuousBernoulli::new(scalar(0.4f64).unwrap()).unwrap();
+        for (lo, hi) in [(0.0f64, 1.0f64), (-0.5, 1.5)] {
+            let p = Uniform::new(scalar(lo).unwrap(), scalar(hi).unwrap()).unwrap();
+            let kl = kl_divergence(&p, &q).unwrap();
+            assert!(
+                kl.item().unwrap().is_infinite() && kl.item().unwrap() > 0.0,
+                "U({lo},{hi})-CB expected +inf, got {}",
+                kl.item().unwrap()
+            );
+        }
+    }
+
+    #[test]
+    fn test_kl_cb_support_mismatch_infinity_family() {
+        // The 7 `+inf` CB cross-pairs (kl.py:581,621,666,719,741,762,796).
+        let cb = ContinuousBernoulli::new(scalar(0.4f64).unwrap()).unwrap();
+        let chk = |kl: f64, what: &str| {
+            assert!(
+                kl.is_infinite() && kl > 0.0,
+                "{what}: expected +inf, got {kl}"
+            );
+        };
+        // CB-Pareto (`_kl_continuous_bernoulli_infinity`).
+        let pareto = Pareto::new(scalar(1.0f64).unwrap(), scalar(3.0f64).unwrap()).unwrap();
+        chk(
+            kl_divergence(&cb, &pareto).unwrap().item().unwrap(),
+            "CB-Pareto",
+        );
+        // {Exponential,Gamma,Gumbel,Laplace,Normal,Pareto}-CB.
+        chk(
+            kl_divergence(&Exponential::new(scalar(1.5f64).unwrap()).unwrap(), &cb)
+                .unwrap()
+                .item()
+                .unwrap(),
+            "Exponential-CB",
+        );
+        chk(
+            kl_divergence(
+                &Gamma::new(scalar(2.0f64).unwrap(), scalar(1.0f64).unwrap()).unwrap(),
+                &cb,
+            )
+            .unwrap()
+            .item()
+            .unwrap(),
+            "Gamma-CB",
+        );
+        chk(
+            kl_divergence(
+                &Gumbel::new(scalar(0.0f64).unwrap(), scalar(1.0f64).unwrap()).unwrap(),
+                &cb,
+            )
+            .unwrap()
+            .item()
+            .unwrap(),
+            "Gumbel-CB",
+        );
+        chk(
+            kl_divergence(
+                &Laplace::new(scalar(0.0f64).unwrap(), scalar(1.0f64).unwrap()).unwrap(),
+                &cb,
+            )
+            .unwrap()
+            .item()
+            .unwrap(),
+            "Laplace-CB",
+        );
+        chk(
+            kl_divergence(
+                &Normal::new(scalar(0.0f64).unwrap(), scalar(1.0f64).unwrap()).unwrap(),
+                &cb,
+            )
+            .unwrap()
+            .item()
+            .unwrap(),
+            "Normal-CB",
+        );
+        chk(
+            kl_divergence(&pareto, &cb).unwrap().item().unwrap(),
+            "Pareto-CB",
+        );
     }
 
     // -- #1573: p-vs-q broadcast coverage (live-torch 2.11 f64 oracle) -------

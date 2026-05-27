@@ -1758,6 +1758,15 @@ parity_ops = []
 
 
 [[route]]
+crate_pattern = "ferrotorch-distributions/src/continuous_bernoulli.rs"
+upstream = [
+  "/home/doll/pytorch/torch/distributions/",
+]
+design = ".design/ferrotorch-distributions/continuous_bernoulli.md"
+parity_ops = []
+
+
+[[route]]
 crate_pattern = "ferrotorch-distributions/src/beta.rs"
 upstream = [
   "/home/doll/pytorch/torch/distributions/",
