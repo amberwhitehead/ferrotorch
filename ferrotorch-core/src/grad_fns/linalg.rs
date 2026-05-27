@@ -32,7 +32,7 @@
 //! | REQ-23 (`linalg.norm`) | NOT-STARTED | forward exists; no backward. Blocker #1345. |
 //! | REQ-24 (`linalg.matrix_rank`) | NOT-STARTED | forward exists; no backward. Blocker #1345. |
 //! | REQ-25 (`linalg.cross`) | NOT-STARTED | forward exists; no backward. Blocker #1345. |
-//! | REQ-26 (`linalg.householder_product`) | NOT-STARTED | forward exists; no backward. Blocker #1345. |
+//! | REQ-26 (`linalg.householder_product`) | SHIPPED | `HouseholderProductBackward` + `householder_product_differentiable` (real reflector-recursion VJP — `tril(V,-1)` unit-diag, `sigma_j=tau_j/(tau_j‖input[:,j]‖²-1)`, `K=Q_full@grad^T`, per-`i` `update_grad` + `K←H_{i+1}^{-1}KH_i` advance, `grad_V=tril(-1)`) per `FunctionsManual.cpp:5544`; verified vs LIVE torch 2.11.0 float64 by `grad_fns::linalg::tests::householder_product_backward_{square_3x3,tall_4x3,tall_4x2}_matches_torch` (V.grad + tau.grad at `1e-9`); non-test consumer: the now-`[m,k]`-shaped grad-aware `crate::linalg::householder_product` forward delegates here (with `crate::linalg::householder_product_full` giving the `[m,m]` reconstruction). Residual #1345 = eig/eigvals (complex). |
 //! | REQ-27 (`linalg.lu`) | NOT-STARTED | forward exists; no backward. Blocker #1345. |
 //! | REQ-28 (`linalg.lu_factor`) | NOT-STARTED | forward exists; no backward. Blocker #1345. |
 //! | REQ-29 (`trace`) | SHIPPED | `TraceBackward` + `trace_differentiable` (VJP `dA = grad * I` per `derivatives.yaml:1785`), forward `crate::linalg::trace`; FD-verified `tests/divergence_linalg_grad_audit.rs:trace_backward_matches_finite_difference`; non-test consumer `tools/parity-sweep/runner/src/main.rs` `"trace"` arm (parity 8/8, 0 failed). Blocker #1345. |
@@ -5392,6 +5392,302 @@ pub fn triu_differentiable<T: Float>(a: &Tensor<T>, diagonal: i64) -> Ferrotorch
 }
 
 // ---------------------------------------------------------------------------
+// HouseholderProductBackward — Q[:, :k] = householder_product(V, tau)
+//   (real case; V is [m,k] with implicit unit diagonal + zeros above; tau [k])
+// ---------------------------------------------------------------------------
+
+/// Backward for `Q = householder_product(V, tau)` (real case).
+///
+/// `Q = H_0 H_1 ... H_{k-1}` where `H_i = I - tau_i v_i v_i^T` and `v_i` is the
+/// `i`-th reflector (column `i` of `V` with implicit unit at row `i` and zeros
+/// above). The public forward returns the first `k` columns of `Q`, matching
+/// `torch.linalg.householder_product` (shape `[m, k]`).
+///
+/// The VJP mirrors `householder_product_backward` (real, `flip_order = false`)
+/// at `torch/csrc/autograd/FunctionsManual.cpp:5544`. Given `grad` (shape
+/// `[m, k]`):
+/// 1. `input = tril(V, -1)` with unit diagonal (`FunctionsManual.cpp:5564-5565`).
+/// 2. `sigma_j = tau_j / (tau_j * ||input[:, j]||^2 - 1)` so
+///    `H(sigma_j) = H(tau_j)^{-1}` (`FunctionsManual.cpp:5574-5577`).
+/// 3. `K = Q_full @ grad^T` where `Q_full` is the full `[m, m]` orthogonal
+///    matrix (`grad` is zero-extended to `[m, m]`)
+///    (`FunctionsManual.cpp:5579`).
+/// 4. `K <- H_0^{-1} @ K` (`FunctionsManual.cpp:5638`), then for each `i` in
+///    `0..k`: emit `grad_v_i`/`grad_tau_i` via `update_grad`
+///    (`FunctionsManual.cpp:5593-5608`) and, when `i != k-1`, advance
+///    `K <- H_{i+1}^{-1} @ K @ H_i` (`FunctionsManual.cpp:5701-5709`).
+/// 5. `grad_V = tril(grad_V, -1)` (`FunctionsManual.cpp:5715`) — only the
+///    strictly-lower part is active in the forward.
+///
+/// `Q_full` is retained because step 3 needs the full square reconstruction
+/// (the public output is the truncated `[m, k]` slice).
+#[derive(Debug)]
+pub struct HouseholderProductBackward<T: Float> {
+    /// Input reflector matrix `V` (`[m, k]`), retained for graph edges + the VJP.
+    v: Tensor<T>,
+    /// Input scalar coefficients `tau` (`[k]`).
+    tau: Tensor<T>,
+    /// Full `[m, m]` orthogonal product `Q_full = H_0 ... H_{k-1}`.
+    q_full: Tensor<T>,
+}
+
+impl<T: Float> HouseholderProductBackward<T> {
+    fn new(v: Tensor<T>, tau: Tensor<T>, q_full: Tensor<T>) -> Self {
+        Self { v, tau, q_full }
+    }
+}
+
+impl<T: Float> GradFn<T> for HouseholderProductBackward<T> {
+    fn backward(&self, grad_output: &Tensor<T>) -> FerrotorchResult<Vec<Option<Tensor<T>>>> {
+        let m = self.v.shape()[0];
+        let k = self.v.shape()[1];
+
+        let v_raw: Vec<f64> = self
+            .v
+            .data()?
+            .iter()
+            .map(|&x| x.to_f64().unwrap())
+            .collect();
+        let tau: Vec<f64> = self
+            .tau
+            .data()?
+            .iter()
+            .map(|&x| x.to_f64().unwrap())
+            .collect();
+        let q_full: Vec<f64> = self
+            .q_full
+            .data()?
+            .iter()
+            .map(|&x| x.to_f64().unwrap())
+            .collect();
+        let grad: Vec<f64> = grad_output
+            .data()?
+            .iter()
+            .map(|&x| x.to_f64().unwrap())
+            .collect();
+
+        // Step 1: input = tril(V, -1) with unit diagonal (row-major [m,k]).
+        // input[i,j] = V[i,j] for i>j, 1 for i==j, 0 for i<j.
+        let mut input = vec![0.0f64; m * k];
+        for i in 0..m {
+            for j in 0..k {
+                input[i * k + j] = match i.cmp(&j) {
+                    std::cmp::Ordering::Equal => 1.0,
+                    std::cmp::Ordering::Greater => v_raw[i * k + j],
+                    std::cmp::Ordering::Less => 0.0,
+                };
+            }
+        }
+
+        // Step 2: sigma_j = tau_j / (tau_j * ||input[:, j]||^2 - 1).
+        let mut sigma = vec![0.0f64; k];
+        for j in 0..k {
+            let mut norm_sq = 0.0f64;
+            for i in 0..m {
+                let e = input[i * k + j];
+                norm_sq += e * e;
+            }
+            sigma[j] = tau[j] / (tau[j] * norm_sq - 1.0);
+        }
+
+        // Step 3: K = Q_full @ grad_full^T (row-major [m,m]). grad is [m,k];
+        // grad_full zero-extends to [m,m]. K[r,c] = sum_p Qfull[r,p]*grad[c,p]
+        // (= sum over the first k columns of grad, the rest are zero).
+        let mut k_mat = vec![0.0f64; m * m];
+        for r in 0..m {
+            for c in 0..m {
+                let mut acc = 0.0f64;
+                for p in 0..k {
+                    acc += q_full[r * m + p] * grad[c * k + p];
+                }
+                k_mat[r * m + c] = acc;
+            }
+        }
+
+        // Helper: extract reflector column j of `input` as a full [m] vector.
+        let reflector = |j: usize| -> Vec<f64> {
+            let mut vj = vec![0.0f64; m];
+            for i in 0..m {
+                vj[i] = input[i * k + j];
+            }
+            vj
+        };
+
+        // Apply (I - t * vj * vj^T) from the LEFT: K <- K - t*vj*(vj^T K).
+        // Mirrors apply_simple_transformation left branch, out-of-place,
+        // condition_with_I=true (FunctionsManual.cpp:5524-5525).
+        let apply_left = |k_mat: &mut Vec<f64>, vj: &[f64], t: f64| {
+            // row vector w = vj^T K  (length m)
+            let mut w = vec![0.0f64; m];
+            for c in 0..m {
+                let mut acc = 0.0f64;
+                for i in 0..m {
+                    acc += vj[i] * k_mat[i * m + c];
+                }
+                w[c] = acc;
+            }
+            for r in 0..m {
+                let tv = t * vj[r];
+                if tv == 0.0 {
+                    continue;
+                }
+                for c in 0..m {
+                    k_mat[r * m + c] -= tv * w[c];
+                }
+            }
+        };
+
+        // Apply (I - t * vj * vj^T) from the RIGHT: K <- K - t*(K vj)*vj^T.
+        // Mirrors apply_simple_transformation right branch out-of-place
+        // (FunctionsManual.cpp:5538-5539).
+        let apply_right = |k_mat: &mut Vec<f64>, vj: &[f64], t: f64| {
+            // column vector u = K vj  (length m)
+            let mut u = vec![0.0f64; m];
+            for r in 0..m {
+                let mut acc = 0.0f64;
+                for c in 0..m {
+                    acc += k_mat[r * m + c] * vj[c];
+                }
+                u[r] = acc;
+            }
+            for r in 0..m {
+                let tu = t * u[r];
+                if tu == 0.0 {
+                    continue;
+                }
+                for c in 0..m {
+                    k_mat[r * m + c] -= tu * vj[c];
+                }
+            }
+        };
+
+        // Step 4a: K <- H_0^{-1} @ K  (left reflector with sigma_0).
+        let v0 = reflector(0);
+        apply_left(&mut k_mat, &v0, sigma[0]);
+
+        // Step 4b: main loop. update_grad on K, then advance K.
+        let mut grad_v = vec![0.0f64; m * k];
+        let mut grad_tau = vec![0.0f64; k];
+        for i in 0..k {
+            let vi = reflector(i);
+            let ti = tau[i];
+            // update_grad (FunctionsManual.cpp:5593-5608), real case:
+            //   v   = vi[i:]                       (length m-i)
+            //   vHK = v^T @ K[i:, :]               (row vector, length m)
+            //   Kv  = K[:, i:] @ v                 (column vector, length m)
+            //   v_grad = -ti*vHK^T - ti*Kv         (length m)
+            //   tau_grad = -(vHK[i:] @ v)          (scalar)
+            // vHK[c] = sum_{r>=i} vi[r] * K[r,c]
+            let mut vhk = vec![0.0f64; m];
+            for c in 0..m {
+                let mut acc = 0.0f64;
+                for r in i..m {
+                    acc += vi[r] * k_mat[r * m + c];
+                }
+                vhk[c] = acc;
+            }
+            // Kv[r] = sum_{c>=i} K[r,c] * vi[c]
+            let mut kv = vec![0.0f64; m];
+            for r in 0..m {
+                let mut acc = 0.0f64;
+                for c in i..m {
+                    acc += k_mat[r * m + c] * vi[c];
+                }
+                kv[r] = acc;
+            }
+            // v_grad[r] = -ti*vhk[r] - ti*kv[r]  (vHK^T identified with vhk).
+            for r in 0..m {
+                grad_v[r * k + i] = -ti * vhk[r] - ti * kv[r];
+            }
+            // tau_grad = -(sum_{c>=i} vhk[c] * vi[c]).
+            let mut tg = 0.0f64;
+            for c in i..m {
+                tg += vhk[c] * vi[c];
+            }
+            grad_tau[i] = -tg;
+
+            // Advance: K <- H_{i+1}^{-1} @ K @ H_i  (FunctionsManual.cpp:5701-5709).
+            if i != k - 1 {
+                let v_next = reflector(i + 1);
+                apply_left(&mut k_mat, &v_next, sigma[i + 1]);
+                apply_right(&mut k_mat, &vi, ti);
+            }
+        }
+
+        // Step 5: grad_V is strictly lower-triangular (forward only touches the
+        // strict lower part). Zero the diagonal + upper part.
+        for i in 0..m {
+            for j in 0..k {
+                if i <= j {
+                    grad_v[i * k + j] = 0.0;
+                }
+            }
+        }
+
+        let grad_v_out: Vec<T> = grad_v.into_iter().map(|x| T::from(x).unwrap()).collect();
+        let grad_tau_out: Vec<T> = grad_tau.into_iter().map(|x| T::from(x).unwrap()).collect();
+
+        let grad_v_tensor = if self.v.requires_grad() {
+            Some(Tensor::from_storage(
+                TensorStorage::cpu(grad_v_out),
+                vec![m, k],
+                false,
+            )?)
+        } else {
+            None
+        };
+        let grad_tau_tensor = if self.tau.requires_grad() {
+            Some(Tensor::from_storage(
+                TensorStorage::cpu(grad_tau_out),
+                vec![k],
+                false,
+            )?)
+        } else {
+            None
+        };
+
+        Ok(vec![grad_v_tensor, grad_tau_tensor])
+    }
+
+    fn inputs(&self) -> Vec<&Tensor<T>> {
+        vec![&self.v, &self.tau]
+    }
+
+    fn name(&self) -> &'static str {
+        "HouseholderProductBackward"
+    }
+}
+
+/// Differentiable `householder_product`. Attaches `HouseholderProductBackward`
+/// (the real reflector-recursion VJP) when grad is needed.
+///
+/// Forward computed under `no_grad`: `linalg_fwd::householder_product` (the
+/// public `crate::linalg::householder_product` forward) delegates back here
+/// when grad is enabled, so the guard prevents infinite re-entry. The forward
+/// returns the truncated `[m, k]` product (matching torch); the backward
+/// reconstructs the full `[m, m]` `Q` from `(V, tau)` under `no_grad` for the
+/// `K = Q_full @ grad^T` step.
+pub fn householder_product_differentiable<T: Float>(
+    v: &Tensor<T>,
+    tau: &Tensor<T>,
+) -> FerrotorchResult<Tensor<T>> {
+    let result = crate::autograd::no_grad::no_grad(|| linalg_fwd::householder_product(v, tau))?;
+    if is_grad_enabled() && (v.requires_grad() || tau.requires_grad()) {
+        let q_full =
+            crate::autograd::no_grad::no_grad(|| linalg_fwd::householder_product_full(v, tau))?;
+        let grad_fn = Arc::new(HouseholderProductBackward::new(
+            v.clone(),
+            tau.clone(),
+            q_full,
+        ));
+        let (storage, shape) = result.into_storage_and_shape()?;
+        Tensor::from_operation(storage, shape, grad_fn)
+    } else {
+        Ok(result)
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -7457,5 +7753,182 @@ mod tests {
             0.158_164_374_952_315_28,
         ];
         assert_grad_close64(&g, &torch, 1e-6, "svd S-only tall 4x3 A.grad vs torch");
+    }
+
+    // -----------------------------------------------------------------------
+    // householder_product backward (REQ-26, #1345) — verified vs LIVE torch
+    // 2.11.0 float64 (R-CHAR-3 (a)). Reproduce each oracle with:
+    //   import torch; torch.set_default_dtype(torch.float64)
+    //   V = torch.tensor(<v_data>).reshape(v_shape).requires_grad_(True)
+    //   tau = torch.tensor(<tau_data>).requires_grad_(True)
+    //   Q = torch.linalg.householder_product(V, tau)   # shape [m, k]
+    //   Q.backward(torch.tensor(<g_data>).reshape(Q.shape))
+    //   V.grad.reshape(-1); tau.grad.reshape(-1)
+    // The ferrotorch side drives the PUBLIC grad-aware forward
+    // `linalg_fwd::householder_product` through a `sum(Q * g)` loss (so
+    // `dQ == g`), exercising `HouseholderProductBackward` end-to-end.
+    // -----------------------------------------------------------------------
+
+    /// Drive `linalg_fwd::householder_product` (the public forward) on
+    /// grad-tracking `(V, tau)` leaves through the linear loss `sum(Q * g)`,
+    /// returning `(V.grad, tau.grad)`.
+    fn hh_grad(
+        v_data: &[f64],
+        v_shape: &[usize],
+        tau_data: &[f64],
+        g_data: &[f64],
+    ) -> (Vec<f64>, Vec<f64>) {
+        let v = leaf64(v_data, v_shape);
+        let tau = leaf64(tau_data, &[tau_data.len()]);
+        let q = linalg_fwd::householder_product(&v, &tau).unwrap();
+        let m = v_shape[0];
+        let k = v_shape[1];
+        assert_eq!(q.shape(), &[m, k], "torch returns the leading k columns");
+        assert!(
+            q.grad_fn().is_some(),
+            "householder_product forward must attach a grad_fn when inputs require grad"
+        );
+        let g = no_grad_leaf64(g_data, &[m, k]);
+        let loss =
+            crate::grad_fns::reduction::sum(&crate::grad_fns::arithmetic::mul(&q, &g).unwrap())
+                .unwrap();
+        loss.backward().unwrap();
+        let gv = v.grad().unwrap().unwrap().data().unwrap().to_vec();
+        let gt = tau.grad().unwrap().unwrap().data().unwrap().to_vec();
+        (gv, gt)
+    }
+
+    // (a) SQUARE 3x3, k=3.
+    #[test]
+    fn householder_product_backward_square_3x3_matches_torch() {
+        let v = [1.0, 0.2, 0.3, 0.5, 1.0, 0.1, 0.3, 0.15, 1.0];
+        let tau = [0.4, 0.5, 0.6];
+        let g = [0.2, -0.5, 0.7, 0.3, 0.1, -0.4, -0.6, 0.8, 0.25];
+        let (gv, gt) = hh_grad(&v, &[3, 3], &tau, &g);
+        // LIVE torch.linalg.householder_product V.grad / tau.grad.
+        let torch_gv = [
+            0.0,
+            0.0,
+            0.0,
+            -0.063_616_000_000_000_034,
+            0.0,
+            0.0,
+            0.059_570_000_000_000_04,
+            -0.320_460_000_000_000_02,
+            0.0,
+        ];
+        let torch_gt = [
+            -0.181_823_749_999_999_98,
+            -0.236_509_000_000_000_02,
+            -0.217_588_749_999_999_94,
+        ];
+        assert_grad_close64(
+            &gv,
+            &torch_gv,
+            1e-9,
+            "householder square 3x3 V.grad vs torch",
+        );
+        assert_grad_close64(
+            &gt,
+            &torch_gt,
+            1e-9,
+            "householder square 3x3 tau.grad vs torch",
+        );
+    }
+
+    // (b) TALL 4x3, k=3 (m > k == cols).
+    #[test]
+    fn householder_product_backward_tall_4x3_matches_torch() {
+        let v = [1.0, 0.2, 0.3, 0.5, 1.0, 0.1, 0.3, 0.15, 1.0, 0.6, 0.35, 0.4];
+        let tau = [0.4, 0.5, 0.6];
+        let g = [
+            0.2, -0.5, 0.7, 0.3, 0.1, -0.4, -0.6, 0.8, 0.25, 0.4, -0.2, 0.9,
+        ];
+        let (gv, gt) = hh_grad(&v, &[4, 3], &tau, &g);
+        let torch_gv = [
+            0.0,
+            0.0,
+            0.0,
+            -0.066_642_400_000_000_046,
+            0.0,
+            0.0,
+            0.013_191_200_000_000_153,
+            -0.341_559_599_999_999_63,
+            0.0,
+            -0.062_754_800_000_000_027,
+            0.021_881_199_999_999_948,
+            -0.419_784_150_000_000_02,
+        ];
+        let torch_gt = [
+            -0.352_916_900_000_000_03,
+            -0.258_881_520_000_000_09,
+            -0.424_873_349_999_999_48,
+        ];
+        assert_grad_close64(&gv, &torch_gv, 1e-9, "householder tall 4x3 V.grad vs torch");
+        assert_grad_close64(
+            &gt,
+            &torch_gt,
+            1e-9,
+            "householder tall 4x3 tau.grad vs torch",
+        );
+    }
+
+    // (c) TALL 4x2, k=2 < m (truncated product — exercises k < cols active set).
+    #[test]
+    fn householder_product_backward_tall_4x2_matches_torch() {
+        let v = [1.0, 0.2, 0.5, 1.0, 0.3, 0.15, 0.6, 0.35];
+        let tau = [0.4, 0.5];
+        let g = [0.2, -0.5, 0.3, 0.1, -0.6, 0.8, 0.4, -0.2];
+        let (gv, gt) = hh_grad(&v, &[4, 2], &tau, &g);
+        let torch_gv = [
+            0.0,
+            0.0,
+            -0.058_900_000_000_000_063,
+            0.0,
+            0.190_900_000_000_000_1,
+            -0.419_799_999_999_999_84,
+            -0.173_300_000_000_000_04,
+            0.060_399_999_999_999_961,
+        ];
+        let torch_gt = [-0.369_575_000_000_000_04, -0.249_660_000_000_000_1];
+        assert_grad_close64(&gv, &torch_gv, 1e-9, "householder tall 4x2 V.grad vs torch");
+        assert_grad_close64(
+            &gt,
+            &torch_gt,
+            1e-9,
+            "householder tall 4x2 tau.grad vs torch",
+        );
+    }
+
+    // V-only / tau-only grad paths: when only one input requires grad, the
+    // backward returns `None` for the other (no spurious accumulation).
+    #[test]
+    fn householder_product_backward_single_input_grad() {
+        let v_data = [1.0, 0.2, 0.3, 0.5, 1.0, 0.1, 0.3, 0.15, 1.0];
+        let tau_data = [0.4, 0.5, 0.6];
+        let g_data = [0.2, -0.5, 0.7, 0.3, 0.1, -0.4, -0.6, 0.8, 0.25];
+
+        // tau-only: V is a no-grad leaf.
+        let v = no_grad_leaf64(&v_data, &[3, 3]);
+        let tau = leaf64(&tau_data, &[3]);
+        let q = linalg_fwd::householder_product(&v, &tau).unwrap();
+        let g = no_grad_leaf64(&g_data, &[3, 3]);
+        let loss =
+            crate::grad_fns::reduction::sum(&crate::grad_fns::arithmetic::mul(&q, &g).unwrap())
+                .unwrap();
+        loss.backward().unwrap();
+        assert!(v.grad().unwrap().is_none(), "V must carry no grad");
+        let gt = tau.grad().unwrap().unwrap().data().unwrap().to_vec();
+        let torch_gt = [
+            -0.181_823_749_999_999_98,
+            -0.236_509_000_000_000_02,
+            -0.217_588_749_999_999_94,
+        ];
+        assert_grad_close64(
+            &gt,
+            &torch_gt,
+            1e-9,
+            "householder tau-only tau.grad vs torch",
+        );
     }
 }

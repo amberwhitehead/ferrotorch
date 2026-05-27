@@ -82,16 +82,20 @@ grad-aware forwards in `ferrotorch-core/src/linalg.rs` delegating to them
 (SHIPPED — REQ-11/13/15/19/22/23/25/27/28). `matrix_rank` is
 non-differentiable and mirrors torch's no-grad contract (REQ-24, no
 `GradFn` needed). With `svd` landed, **the differentiable scope of
-sub-blocker #1577 is complete** — `eig`/`eigvals` need complex-tensor
-autograd and `householder_product` is a reflector-recursion VJP, both
-tracked separately under #1345.
+sub-blocker #1577 is complete**. `householder_product` (REQ-26) shipped
+2026-05-27 — `HouseholderProductBackward` + `householder_product_differentiable`
+implement the real reflector-recursion VJP (`FunctionsManual.cpp:5544`),
+consumed by the now-`[m,k]`-shaped grad-aware `pub fn householder_product`;
+the only residual #1345 ops are `eig`/`eigvals`, which need complex-tensor
+autograd.
 
 The remaining `torch.linalg.*` factorizations are still **forward-only** in
 `ferrotorch-core/src/linalg.rs` with no `*Backward` `GradFn`:
 `eig` / `eigvals` (COMPLEX eigenvectors — blocked on a complex-tensor
-autograd primitive, #1345), `householder_product` (reflector-recursion VJP,
-#1345), and the RECTANGULAR `m != n` LU and the rank-deficient `lstsq` /
-non-`p=2` `norm` branches (residual follow-ups under #1577).
+autograd primitive, #1345), and the RECTANGULAR `m != n` LU and the
+rank-deficient `lstsq` / non-`p=2` `norm` branches (residual follow-ups under
+#1577). `householder_product` is no longer forward-only — it shipped its
+reflector-recursion backward 2026-05-27 (REQ-26).
 
 ## Requirements
 
@@ -436,9 +440,31 @@ non-`p=2` `norm` branches (residual follow-ups under #1577).
 - REQ-26: `linalg.householder_product(A, tau)`. Mirrors `Tensor
   linalg_householder_product(...)` in
   `aten/src/ATen/native/BatchLinearAlgebra.cpp` and documented in
-  `torch/linalg/__init__.py`. Forward-only impl `pub fn
-  householder_product` in `ferrotorch-core/src/linalg.rs`.
-  **NOT-STARTED in this file**. Open prereq blocker #1345.
+  `torch/linalg/__init__.py`. **SHIPPED** (2026-05-27): `HouseholderProductBackward`
+  + `householder_product_differentiable` in
+  `ferrotorch-core/src/grad_fns/linalg.rs` implement the real
+  reflector-recursion VJP — `input = tril(V,-1)` with unit diagonal,
+  `sigma_j = tau_j / (tau_j ||input[:,j]||^2 - 1)` so
+  `H(sigma_j) = H(tau_j)^{-1}`, `K = Q_full @ grad^T`, then the
+  `K <- H_0^{-1} K` priming + the per-`i` `update_grad`
+  (`v_grad = -tau_i*(vHK^T) - tau_i*Kv`, `tau_grad = -(vHK[i:]@v)`) and
+  `K <- H_{i+1}^{-1} K H_i` advance, with `grad_V = tril(grad_V,-1)` — grounded
+  in `householder_product_backward` (real, `flip_order=false`) at upstream
+  `torch/csrc/autograd/FunctionsManual.cpp:5544`. The grad-aware forward `pub fn
+  householder_product` in `ferrotorch-core/src/linalg.rs` now matches torch's
+  output shape `[m, k]` (the leading `k` columns of `Q`, NOT the full `[m, m]`
+  matrix) and delegates to `householder_product_differentiable` when
+  `is_grad_enabled() && (v.requires_grad() || tau.requires_grad())`; the new
+  `pub fn householder_product_full` provides the full `[m, m]`
+  reconstruction the backward needs for `K = Q_full @ grad^T` (computed under
+  `no_grad`). Verified vs LIVE torch 2.11.0 float64 `V.grad`/`tau.grad` for
+  SQUARE (3×3), TALL-full (4×3), and TALL-truncated (4×2, `k<m`) inputs by
+  `grad_fns::linalg::tests::householder_product_backward_{square_3x3,tall_4x3,
+  tall_4x2}_matches_torch` at `1e-9`, plus the tau-only single-input path by
+  `householder_product_backward_single_input_grad`. The complex case (the
+  `.mH()`/`.conj()` terms) is out of scope — it needs complex-tensor autograd
+  (#1345). The residual eig/eigvals (complex eigenvectors) remain the only
+  NOT-STARTED ops under #1345.
 
 - REQ-27: `linalg.lu(A, pivot=True)` — LU factorization with pivoting.
   Documented in `torch/linalg/__init__.py`. **SHIPPED** (2026-05-27, the
@@ -835,11 +861,20 @@ accumulated into `A.grad`. Consumed by the grad-aware `pub fn svd` in
 invariance terms) is out of scope (#1345). With this landed the
 differentiable scope of #1577 is complete.
 
+`linalg.householder_product` is **SHIPPED** (2026-05-27, REQ-26):
+`HouseholderProductBackward` + `householder_product_differentiable` implement
+the real reflector-recursion VJP grounded in `householder_product_backward`
+(real, `flip_order=false`) at `FunctionsManual.cpp:5544`. As part of this the
+forward `pub fn householder_product` in `ferrotorch-core/src/linalg.rs` was
+corrected to return torch's `[m, k]` shape (the leading `k` columns of `Q`,
+not the full `[m, m]` matrix); the new `pub fn householder_product_full`
+exposes the `[m, m]` reconstruction the backward needs. The grad-aware
+forward is the non-test production consumer. Verified vs LIVE torch float64.
+
 The factorizations that remain forward-only in
 `ferrotorch-core/src/linalg.rs` (routed through `ferray_linalg::*`, no
 `*Backward` `GradFn`): `linalg.eig` / `linalg.eigvals` (COMPLEX
-eigenvectors — need a complex-tensor autograd primitive),
-`linalg.householder_product` (reflector-recursion VJP), and
+eigenvectors — need a complex-tensor autograd primitive) and
 `linalg.matrix_rank` (non-differentiable, mirrors torch). These stay
 NOT-STARTED under #1345. The rectangular `m != n` LU / rank-deficient
 `lstsq` / non-`p=2` `norm` branches are residual follow-ups under #1577.
@@ -908,7 +943,7 @@ grad-aware end-to-end.
 | `linalg.norm` | `norm = _add_docstr(...)` in `torch/linalg/__init__.py` | Frobenius/Euclidean `p=2`: `dx = grad · x / norm` | SHIPPED (REQ-23, `p=2`): `NormBackward` + grad-aware `matrix_norm`/`vector_norm`. FD-verified. Non-`p=2` ords residual. |
 | `linalg.matrix_rank` | `Tensor linalg_matrix_rank(...)` in `aten/src/ATen/native/LinearAlgebra.cpp` | rank is integer; NON-DIFFERENTIABLE | SHIPPED (REQ-24): no `GradFn` — mirrors torch's no-`derivatives.yaml`-entry / no-grad contract (R-DEV-1). |
 | `linalg.cross` | `cross = _add_docstr(...)` in `torch/linalg/__init__.py` | `da = cross(b, grad)`, `db = cross(grad, a)` | SHIPPED (REQ-25): `CrossBackward` (bilinear) + grad-aware `pub fn cross`. FD-verified dA+dB. |
-| `linalg.householder_product` | `Tensor linalg_householder_product(...)` in `aten/src/ATen/native/BatchLinearAlgebra.cpp` | reflector-recursion VJP | No `GradFn`; forward-only. NOT-STARTED. Blocker #1345 (reflector recurrence). |
+| `linalg.householder_product` | `Tensor linalg_householder_product(...)` in `aten/src/ATen/native/BatchLinearAlgebra.cpp` | reflector-recursion VJP (`householder_product_backward` in `FunctionsManual.cpp`) | SHIPPED (REQ-26): `HouseholderProductBackward` + `householder_product_differentiable`; grad-aware `pub fn householder_product` (now `[m,k]`-shaped, matching torch) delegates here; `householder_product_full` gives the `[m,m]` reconstruction for the VJP. Verified vs LIVE torch float64 (square/tall-full/tall-truncated). Complex case under #1345. |
 | `linalg.lu` | `lu = _add_docstr(...)` in `torch/linalg/__init__.py` | `m==n`: tri-solve VJP + `P^T` adjoint | SHIPPED (REQ-27, square): split `LuBackwardL`/`LuBackwardU` + grad-aware `pub fn lu`. FD-verified pivoted. Rectangular residual #1577. |
 | `linalg.lu_factor` | `lu_factor = _add_docstr(...)` in `torch/linalg/__init__.py` | same as `lu` minus the explicit unpacking | SHIPPED (REQ-28, square): `LuFactorBackward` (packed) + grad-aware `pub fn lu_factor`. FD-verified pivoted. Rectangular residual #1577. |
 | `trace` | upstream tensor method (no dedicated impl in `LinearAlgebra.cpp`) | `dA = grad · I` (`trace_backward_symint` in `derivatives.yaml`) | SHIPPED (REQ-29): `TraceBackward` + grad-aware `pub fn trace` forward delegating to `trace_differentiable`. FD-verified. |

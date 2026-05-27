@@ -2662,9 +2662,11 @@ fn cpu_diagonal() {
     }
 }
 
-/// `householder_product`: ferrotorch returns the full m×m Q matrix; PyTorch's
-/// `torch.linalg.householder_product` returns Q's first k columns (m×k). To
-/// compare we slice ferrotorch's Q to its first k columns before assert.
+/// `householder_product`: ferrotorch's `pub fn householder_product` now mirrors
+/// `torch.linalg.householder_product` exactly — it returns Q's first `k` columns
+/// (shape `[m, k]`), so we compare directly against the PyTorch reference with
+/// no slicing workaround. (The full `[m, m]` reconstruction is available via
+/// `householder_product_full`, used only by the reflector-recursion backward.)
 #[test]
 fn cpu_householder_product() {
     let file = load_fixtures();
@@ -2684,18 +2686,15 @@ fn cpu_householder_product() {
         let v = make_cpu_f64(v_data, v_shape, false);
         let tau = make_cpu_f64(tau_data, tau_shape, false);
         let q = householder_product(&v, &tau).expect("householder_product");
-        // q is [m, m] in ferrotorch; the PyTorch reference is [m, k]. Slice
-        // q's first k columns row-by-row.
-        let q_d = read_back_f64(&q);
         let m = v_shape[0];
         let k = v_shape[1];
-        assert_eq!(q.shape(), &[m, m], "ferrotorch hh_product returns [m, m]");
-        let mut q_mk = Vec::with_capacity(m * k);
-        for i in 0..m {
-            for j in 0..k {
-                q_mk.push(q_d[i * m + j]);
-            }
-        }
+        // ferrotorch matches torch's [m, k] output shape directly.
+        assert_eq!(
+            q.shape(),
+            &[m, k],
+            "householder_product mirrors torch [m, k]"
+        );
+        let q_mk = read_back_f64(&q);
         check_f64(
             &format!("hh_product tag={:?}", f.tag),
             &q_mk,

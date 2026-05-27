@@ -2270,11 +2270,45 @@ pub fn ldl_solve<T: Float>(
 ///
 /// `v` is `[m, k]` whose `j`-th column is the Householder vector for the
 /// `j`-th reflection (with implicit unit at row `j`). `tau` is `[k]` of
-/// scalar coefficients. Returns `Q` of shape `[m, m]` such that
-/// `Q = (I - tau_0 v_0 v_0^T)(I - tau_1 v_1 v_1^T) ... `.
+/// scalar coefficients. Returns the first `k` columns of `Q`, shape `[m, k]`,
+/// where `Q = (I - tau_0 v_0 v_0^T)(I - tau_1 v_1 v_1^T) ...`.
 ///
-/// Mirrors `torch.linalg.householder_product`.
+/// Mirrors `torch.linalg.householder_product` (which returns the leading `k`
+/// columns of the reconstructed orthogonal factor — shape `[m, k]`, NOT the
+/// full `[m, m]` matrix). When grad is enabled and either input requires grad,
+/// delegates to `crate::grad_fns::linalg::householder_product_differentiable`
+/// to attach the reflector-recursion VJP.
 pub fn householder_product<T: Float>(
+    v: &Tensor<T>,
+    tau: &Tensor<T>,
+) -> FerrotorchResult<Tensor<T>> {
+    if crate::autograd::no_grad::is_grad_enabled() && (v.requires_grad() || tau.requires_grad()) {
+        return crate::grad_fns::linalg::householder_product_differentiable(v, tau);
+    }
+    let q = householder_product_full(v, tau)?;
+    let m = v.shape()[0];
+    let k = v.shape()[1];
+    if k == m {
+        return Ok(q);
+    }
+    // Slice the leading k columns of the row-major [m, m] product.
+    let q_data = q.data()?;
+    let mut out = Vec::with_capacity(m * k);
+    for i in 0..m {
+        for j in 0..k {
+            out.push(q_data[i * m + j]);
+        }
+    }
+    Tensor::from_storage(TensorStorage::cpu(out), vec![m, k], false)
+}
+
+/// Reconstructs the FULL `[m, m]` orthogonal product
+/// `Q = (I - tau_0 v_0 v_0^T)(I - tau_1 v_1 v_1^T) ...` from the compact
+/// `(v, tau)` representation. The public `householder_product` returns only the
+/// leading `k` columns of this (torch contract); the backward VJP
+/// (`HouseholderProductBackward`) needs the full square `Q` for its
+/// `K = Q_full @ grad^T` step, so this is exposed crate-wide.
+pub fn householder_product_full<T: Float>(
     v: &Tensor<T>,
     tau: &Tensor<T>,
 ) -> FerrotorchResult<Tensor<T>> {
@@ -3533,14 +3567,19 @@ mod tests {
 
     #[test]
     fn householder_product_identity_when_no_reflectors() {
-        // k=0 → tau is empty → output is I_m.
+        // k=0 → tau is empty → torch returns the leading 0 columns, shape [3,0].
+        // (torch.linalg.householder_product(zeros(3,0), zeros(0)) → shape [3,0].)
         let v =
             Tensor::from_storage(TensorStorage::cpu(Vec::<f64>::new()), vec![3, 0], false).unwrap();
         let tau =
             Tensor::from_storage(TensorStorage::cpu(Vec::<f64>::new()), vec![0], false).unwrap();
         let q = householder_product(&v, &tau).unwrap();
-        assert_eq!(q.shape(), &[3, 3]);
-        let d = q.data().unwrap();
+        assert_eq!(q.shape(), &[3, 0]);
+        assert!(q.data().unwrap().is_empty());
+        // The FULL reconstruction (used by the backward) is still I_3.
+        let q_full = householder_product_full(&v, &tau).unwrap();
+        assert_eq!(q_full.shape(), &[3, 3]);
+        let d = q_full.data().unwrap();
         for i in 0..3 {
             for j in 0..3 {
                 let expected = if i == j { 1.0 } else { 0.0 };
@@ -3555,15 +3594,15 @@ mod tests {
         // with tau = 2 → I - 2·v0·v0^T = I - 2·e_0·e_0^T = diag(-1, 1).
         // V is [m=2, k=1]: v[0,0] is the implicit unit (we store anything;
         // householder_product overrides with 1), v[1,0] = 0 (below row 0).
+        // torch.linalg.householder_product returns the leading k=1 column → [2,1].
         let v = Tensor::from_storage(TensorStorage::cpu(vec![0.0_f64, 0.0]), vec![2, 1], false)
             .unwrap();
         let tau = Tensor::from_storage(TensorStorage::cpu(vec![2.0_f64]), vec![1], false).unwrap();
         let q = householder_product(&v, &tau).unwrap();
+        assert_eq!(q.shape(), &[2, 1]);
         let d = q.data().unwrap();
-        // Q = diag(-1, 1).
+        // First column of Q = diag(-1, 1) is [-1, 0]^T.
         assert!((d[0] + 1.0).abs() < 1e-12);
         assert!(d[1].abs() < 1e-12);
-        assert!(d[2].abs() < 1e-12);
-        assert!((d[3] - 1.0).abs() < 1e-12);
     }
 }
