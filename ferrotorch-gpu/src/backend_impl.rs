@@ -869,10 +869,10 @@ impl GpuBackend for CudaBackendImpl {
                 // and tag the handle `DType::Bool`. The `&[u8]` view of the
                 // serialised `&[bool]` is byte-identical — no value translation.
                 let count = data.len(); // 1 byte per bool
-                // `data` is already `&[u8]`; the bytes are exactly the `bool`
-                // values (each 0 or 1) reinterpreted, which `u8` reads back
-                // identically. No `from_raw_parts` reinterpret is needed (unlike
-                // the multi-byte arms): a bool slice IS a byte slice here.
+                                        // `data` is already `&[u8]`; the bytes are exactly the `bool`
+                                        // values (each 0 or 1) reinterpreted, which `u8` reads back
+                                        // identically. No `from_raw_parts` reinterpret is needed (unlike
+                                        // the multi-byte arms): a bool slice IS a byte slice here.
                 debug_assert_eq!(count, data.len());
                 let buf = crate::transfer::cpu_to_gpu(data, dev).map_err(Self::map_gpu_err)?;
                 Ok(Self::wrap_buffer_bool(buf, device))
@@ -3493,6 +3493,57 @@ impl GpuBackend for CudaBackendImpl {
         )
         .map_err(Self::map_gpu_err)?;
         Ok(Self::wrap_buffer(result, input.device_ordinal()))
+    }
+
+    fn batch_norm_f32(
+        &self,
+        input: &GpuBufferHandle,
+        weight: &GpuBufferHandle,
+        bias: &GpuBufferHandle,
+        mean: &GpuBufferHandle,
+        var: &GpuBufferHandle,
+        batch: usize,
+        channels: usize,
+        hw: usize,
+        eps: f32,
+        training: bool,
+    ) -> FerrotorchResult<(GpuBufferHandle, GpuBufferHandle, GpuBufferHandle)> {
+        let in_buf = Self::unwrap_buffer(input)?;
+        let w_buf = Self::unwrap_buffer(weight)?;
+        let b_buf = Self::unwrap_buffer(bias)?;
+        let dev = self.device(input.device_ordinal())?;
+        // The kernel reads (eval) or writes (training) per-channel mean/var, so
+        // it needs owned mutable buffers. Stage the (small `[channels]`) input
+        // stats through host memory into fresh device buffers so the caller's
+        // handles are never mutated in place; the (possibly updated) stats are
+        // returned to the caller as new handles.
+        let mean_host = crate::transfer::gpu_to_cpu(Self::unwrap_buffer(mean)?, dev)
+            .map_err(Self::map_gpu_err)?;
+        let var_host = crate::transfer::gpu_to_cpu(Self::unwrap_buffer(var)?, dev)
+            .map_err(Self::map_gpu_err)?;
+        let mut mean_buf =
+            crate::transfer::cpu_to_gpu(&mean_host, dev).map_err(Self::map_gpu_err)?;
+        let mut var_buf = crate::transfer::cpu_to_gpu(&var_host, dev).map_err(Self::map_gpu_err)?;
+        let result = crate::group_norm::gpu_batch_norm_f32(
+            in_buf,
+            w_buf,
+            b_buf,
+            &mut mean_buf,
+            &mut var_buf,
+            batch,
+            channels,
+            hw,
+            eps,
+            training,
+            dev,
+        )
+        .map_err(Self::map_gpu_err)?;
+        let ord = input.device_ordinal();
+        Ok((
+            Self::wrap_buffer(result, ord),
+            Self::wrap_buffer(mean_buf, ord),
+            Self::wrap_buffer(var_buf, ord),
+        ))
     }
 
     fn softmax2d_f32(

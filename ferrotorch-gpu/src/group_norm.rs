@@ -660,6 +660,402 @@ pub fn gpu_softmax2d_f32(
     Ok(out)
 }
 
+// ---------------------------------------------------------------------------
+// BatchNorm (#1449): per-channel normalize over (N, spatial).
+// ---------------------------------------------------------------------------
+
+/// PTX source for the BatchNorm forward kernel (f32).
+///
+/// One CUDA block per channel (grid: `(channels, 1, 1)`), 256 threads per
+/// block. In **training** mode (`training != 0`) the block reduces over all
+/// `batch * hw` elements of its channel — strided across the batch — to
+/// compute the biased mean and variance, writes them back to `mean_ptr` /
+/// `var_ptr` (so the host can update running stats), then normalizes and
+/// applies the per-channel affine. In **eval** mode (`training == 0`) the
+/// block reads the precomputed per-channel mean/var from `mean_ptr` /
+/// `var_ptr` (the running statistics) and only normalizes + affines.
+///
+/// Element `i in [0, batch*hw)` for channel `c` maps to batch
+/// `b = i / hw`, spatial position `s = i % hw`, global offset
+/// `((b*channels + c)*hw + s)`. Mirrors the per-channel reduction in
+/// `aten/src/ATen/native/Normalization.cpp`
+/// `batch_norm_cpu_transform_input_template` (mean over `(N, *spatial)`,
+/// biased variance, `y = γ*(x-μ)/sqrt(σ²+eps) + β`).
+///
+/// ABI: `(in_ptr, out_ptr, w_ptr, b_ptr, mean_ptr, var_ptr, batch,
+/// channels, hw, eps, training)`.
+#[cfg(feature = "cuda")]
+pub(crate) const BATCH_NORM_PTX: &str = "\
+.version 7.0
+.target sm_52
+.address_size 64
+
+.shared .align 4 .f32 bdata[256];
+
+.visible .entry batch_norm_kernel(
+    .param .u64 in_ptr,
+    .param .u64 out_ptr,
+    .param .u64 w_ptr,
+    .param .u64 b_ptr,
+    .param .u64 mean_ptr,
+    .param .u64 var_ptr,
+    .param .u32 batch,
+    .param .u32 channels,
+    .param .u32 hw,
+    .param .f32 eps,
+    .param .u32 training
+) {
+    .reg .u32 %r_tid, %r_bdim, %r_c, %batch_r, %channels_r, %hw_r, %train_r;
+    .reg .u32 %n_elem, %i, %bb, %ss, %half, %r_otid, %goff;
+    .reg .u64 %in, %out, %w, %bv, %mp, %vp, %off, %sbase, %saddr;
+    .reg .f32 %val, %mean, %var, %diff, %eps_r, %inv_std, %normed;
+    .reg .f32 %wv, %bw, %result, %other, %n_f;
+    .reg .pred %lp, %rp, %is_eval;
+
+    ld.param.u64 %in,  [in_ptr];
+    ld.param.u64 %out, [out_ptr];
+    ld.param.u64 %w,   [w_ptr];
+    ld.param.u64 %bv,  [b_ptr];
+    ld.param.u64 %mp,  [mean_ptr];
+    ld.param.u64 %vp,  [var_ptr];
+    ld.param.u32 %batch_r,    [batch];
+    ld.param.u32 %channels_r, [channels];
+    ld.param.u32 %hw_r,       [hw];
+    ld.param.f32 %eps_r,      [eps];
+    ld.param.u32 %train_r,    [training];
+
+    mov.u64 %sbase, bdata;
+    mov.u32 %r_c,    %ctaid.x;        // channel index
+    mov.u32 %r_bdim, %ntid.x;
+    mov.u32 %r_tid,  %tid.x;
+
+    // n_elem = batch * hw  (elements reduced per channel)
+    mul.lo.u32 %n_elem, %batch_r, %hw_r;
+    cvt.rn.f32.u32 %n_f, %n_elem;
+
+    // channel byte offset into the per-channel mean/var arrays
+    cvt.u64.u32 %off, %r_c;
+    shl.b64 %off, %off, 2;
+
+    setp.eq.u32 %is_eval, %train_r, 0;
+    @%is_eval bra EVAL;
+
+    // ===== Training: reduce mean over (batch, hw) =====
+    mov.f32 %mean, 0f00000000;
+    mov.u32 %i, %r_tid;
+BSM:
+    setp.ge.u32 %lp, %i, %n_elem;
+    @%lp bra BSMD;
+    // global offset = ((b*channels + c)*hw + s) where b=i/hw, s=i%hw
+    div.u32 %bb, %i, %hw_r;
+    rem.u32 %ss, %i, %hw_r;
+    mad.lo.u32 %goff, %bb, %channels_r, %r_c;   // b*channels + c
+    mad.lo.u32 %goff, %goff, %hw_r, %ss;        // *hw + s   (NOTE: mul then add)
+    cvt.u64.u32 %off, %goff;
+    shl.b64 %off, %off, 2;
+    add.u64 %off, %in, %off;
+    ld.global.f32 %val, [%off];
+    add.f32 %mean, %mean, %val;
+    add.u32 %i, %i, %r_bdim;
+    bra BSM;
+BSMD:
+    cvt.u64.u32 %off, %r_tid;
+    shl.b64 %off, %off, 2;
+    add.u64 %saddr, %sbase, %off;
+    st.shared.f32 [%saddr], %mean;
+    bar.sync 0;
+    mov.u32 %half, %r_bdim;
+BMR:
+    shr.u32 %half, %half, 1;
+    setp.eq.u32 %rp, %half, 0;
+    @%rp bra BMRD;
+    setp.ge.u32 %rp, %r_tid, %half;
+    @%rp bra BMRS;
+    add.u32 %r_otid, %r_tid, %half;
+    cvt.u64.u32 %off, %r_otid;
+    shl.b64 %off, %off, 2;
+    add.u64 %saddr, %sbase, %off;
+    ld.shared.f32 %other, [%saddr];
+    cvt.u64.u32 %off, %r_tid;
+    shl.b64 %off, %off, 2;
+    add.u64 %saddr, %sbase, %off;
+    ld.shared.f32 %mean, [%saddr];
+    add.f32 %mean, %mean, %other;
+    st.shared.f32 [%saddr], %mean;
+BMRS:
+    bar.sync 0;
+    bra BMR;
+BMRD:
+    ld.shared.f32 %mean, [%sbase];
+    div.approx.f32 %mean, %mean, %n_f;
+    bar.sync 0;
+
+    // ----- variance over (batch, hw) -----
+    mov.f32 %var, 0f00000000;
+    mov.u32 %i, %r_tid;
+BSV:
+    setp.ge.u32 %lp, %i, %n_elem;
+    @%lp bra BSVD;
+    div.u32 %bb, %i, %hw_r;
+    rem.u32 %ss, %i, %hw_r;
+    mad.lo.u32 %goff, %bb, %channels_r, %r_c;
+    mad.lo.u32 %goff, %goff, %hw_r, %ss;
+    cvt.u64.u32 %off, %goff;
+    shl.b64 %off, %off, 2;
+    add.u64 %off, %in, %off;
+    ld.global.f32 %val, [%off];
+    sub.f32 %diff, %val, %mean;
+    fma.rn.f32 %var, %diff, %diff, %var;
+    add.u32 %i, %i, %r_bdim;
+    bra BSV;
+BSVD:
+    cvt.u64.u32 %off, %r_tid;
+    shl.b64 %off, %off, 2;
+    add.u64 %saddr, %sbase, %off;
+    st.shared.f32 [%saddr], %var;
+    bar.sync 0;
+    mov.u32 %half, %r_bdim;
+BVR:
+    shr.u32 %half, %half, 1;
+    setp.eq.u32 %rp, %half, 0;
+    @%rp bra BVRD;
+    setp.ge.u32 %rp, %r_tid, %half;
+    @%rp bra BVRS;
+    add.u32 %r_otid, %r_tid, %half;
+    cvt.u64.u32 %off, %r_otid;
+    shl.b64 %off, %off, 2;
+    add.u64 %saddr, %sbase, %off;
+    ld.shared.f32 %other, [%saddr];
+    cvt.u64.u32 %off, %r_tid;
+    shl.b64 %off, %off, 2;
+    add.u64 %saddr, %sbase, %off;
+    ld.shared.f32 %var, [%saddr];
+    add.f32 %var, %var, %other;
+    st.shared.f32 [%saddr], %var;
+BVRS:
+    bar.sync 0;
+    bra BVR;
+BVRD:
+    ld.shared.f32 %var, [%sbase];
+    div.approx.f32 %var, %var, %n_f;
+    bar.sync 0;
+
+    // thread 0 writes the biased mean/var back for the host running-stat update
+    setp.ne.u32 %rp, %r_tid, 0;
+    @%rp bra BSTATS_DONE;
+    cvt.u64.u32 %off, %r_c;
+    shl.b64 %off, %off, 2;
+    add.u64 %saddr, %mp, %off;
+    st.global.f32 [%saddr], %mean;
+    add.u64 %saddr, %vp, %off;
+    st.global.f32 [%saddr], %var;
+BSTATS_DONE:
+    bra NORM;
+
+EVAL:
+    // read running mean/var for this channel
+    cvt.u64.u32 %off, %r_c;
+    shl.b64 %off, %off, 2;
+    add.u64 %saddr, %mp, %off;
+    ld.global.f32 %mean, [%saddr];
+    add.u64 %saddr, %vp, %off;
+    ld.global.f32 %var, [%saddr];
+
+NORM:
+    // inv_std = 1 / sqrt(var + eps)
+    add.f32 %var, %var, %eps_r;
+    sqrt.approx.f32 %inv_std, %var;
+    rcp.approx.f32 %inv_std, %inv_std;
+
+    // per-channel affine
+    cvt.u64.u32 %off, %r_c;
+    shl.b64 %off, %off, 2;
+    add.u64 %saddr, %w, %off;
+    ld.global.f32 %wv, [%saddr];
+    add.u64 %saddr, %bv, %off;
+    ld.global.f32 %bw, [%saddr];
+
+    // write normalized + affine for each element in the channel
+    mov.u32 %i, %r_tid;
+BNW:
+    setp.ge.u32 %lp, %i, %n_elem;
+    @%lp bra BNWD;
+    div.u32 %bb, %i, %hw_r;
+    rem.u32 %ss, %i, %hw_r;
+    mad.lo.u32 %goff, %bb, %channels_r, %r_c;
+    mad.lo.u32 %goff, %goff, %hw_r, %ss;
+    cvt.u64.u32 %off, %goff;
+    shl.b64 %off, %off, 2;
+    add.u64 %off, %in, %off;
+    ld.global.f32 %val, [%off];
+    sub.f32 %normed, %val, %mean;
+    mul.f32 %normed, %normed, %inv_std;
+    fma.rn.f32 %result, %wv, %normed, %bw;
+    cvt.u64.u32 %off, %goff;
+    shl.b64 %off, %off, 2;
+    add.u64 %off, %out, %off;
+    st.global.f32 [%off], %result;
+    add.u32 %i, %i, %r_bdim;
+    bra BNW;
+BNWD:
+    ret;
+}
+";
+
+/// GPU forward BatchNorm over a `[batch, channels, hw]`-laid-out f32 buffer.
+///
+/// Computes `out = γ[c] * (x - μ_c) / sqrt(σ²_c + eps) + β[c]`, where the
+/// per-channel mean / variance are taken over `(batch, hw)` in **training**
+/// mode (`training == true`) or read from the provided running statistics in
+/// **eval** mode. In training mode the computed biased mean / variance are
+/// written into the returned `(mean, var)` buffers so the caller can update
+/// the running statistics; in eval mode the caller-supplied `mean` / `var`
+/// buffers are used unchanged.
+///
+/// # Arguments
+///
+/// - `input` — flat `[batch * channels * hw]` f32 buffer (`hw = ∏ spatial`).
+/// - `weight` / `bias` — `[channels]` per-channel affine (ones / zeros when
+///   the layer is non-affine, so the affine is the identity).
+/// - `mean` / `var` — `[channels]` buffers: input running stats in eval mode,
+///   output batch stats in training mode.
+/// - `batch`, `channels`, `hw` — outer dims.
+/// - `eps` — numerical-stability constant.
+/// - `training` — `true` to compute batch stats, `false` to use `mean`/`var`.
+/// - `device` — owning GPU device for all buffers.
+///
+/// # Errors
+///
+/// - [`GpuError::ShapeMismatch`] when any buffer length disagrees with the
+///   declared dims.
+/// - [`GpuError::DeviceMismatch`] when buffers live on a different device.
+/// - [`GpuError::PtxCompileFailed`] if the PTX module fails to compile.
+/// - [`GpuError::Driver`] on launch failure.
+#[cfg(feature = "cuda")]
+#[allow(clippy::too_many_arguments)]
+pub fn gpu_batch_norm_f32(
+    input: &CudaBuffer<f32>,
+    weight: &CudaBuffer<f32>,
+    bias: &CudaBuffer<f32>,
+    mean: &mut CudaBuffer<f32>,
+    var: &mut CudaBuffer<f32>,
+    batch: usize,
+    channels: usize,
+    hw: usize,
+    eps: f32,
+    training: bool,
+    device: &GpuDevice,
+) -> GpuResult<CudaBuffer<f32>> {
+    let n = batch * channels * hw;
+    if input.len() != n {
+        return Err(GpuError::ShapeMismatch {
+            op: "batch_norm",
+            expected: vec![batch, channels, hw],
+            got: vec![input.len()],
+        });
+    }
+    for (name_len, buf_len) in [
+        ("weight", weight.len()),
+        ("bias", bias.len()),
+        ("mean", mean.len()),
+        ("var", var.len()),
+    ] {
+        let _ = name_len;
+        if buf_len != channels {
+            return Err(GpuError::ShapeMismatch {
+                op: "batch_norm",
+                expected: vec![channels],
+                got: vec![buf_len],
+            });
+        }
+    }
+    if input.device_ordinal() != device.ordinal()
+        || weight.device_ordinal() != device.ordinal()
+        || bias.device_ordinal() != device.ordinal()
+        || mean.device_ordinal() != device.ordinal()
+        || var.device_ordinal() != device.ordinal()
+    {
+        return Err(GpuError::DeviceMismatch {
+            expected: device.ordinal(),
+            got: input.device_ordinal(),
+        });
+    }
+
+    // Degenerate / empty shape: nothing to normalize.
+    if n == 0 || channels == 0 || hw == 0 || batch == 0 {
+        return alloc_zeros_f32(n, device);
+    }
+
+    let ctx = device.context();
+    let stream = device.stream();
+
+    let f = match crate::module_cache::get_or_compile(
+        ctx,
+        BATCH_NORM_PTX,
+        "batch_norm_kernel",
+        device.ordinal() as u32,
+    ) {
+        Ok(f) => f,
+        Err(e) => {
+            return Err(GpuError::PtxCompileFailed {
+                kernel: "batch_norm_kernel",
+                source: e,
+            });
+        }
+    };
+
+    let mut out = alloc_zeros_f32(n, device)?;
+    let batch_u32 = batch as u32;
+    let channels_u32 = channels as u32;
+    let hw_u32 = hw as u32;
+    let training_u32: u32 = if training { 1 } else { 0 };
+
+    let cfg = LaunchConfig {
+        grid_dim: (channels_u32.max(1), 1, 1),
+        block_dim: (256, 1, 1),
+        shared_mem_bytes: 256 * 4,
+    };
+
+    // SAFETY:
+    // - `f` is a valid PTX `CudaFunction` for `batch_norm_kernel` returned by
+    //   `module_cache::get_or_compile`; ABI matches `(in_ptr, out_ptr, w_ptr,
+    //   b_ptr, mean_ptr, var_ptr, batch, channels, hw, eps, training)` exactly
+    //   per `BATCH_NORM_PTX`.
+    // - `input.len() == batch * channels * hw` and
+    //   `weight.len() == bias.len() == mean.len() == var.len() == channels`
+    //   (all validated above). All buffers live on `device` (validated above).
+    // - `out` was just allocated with `input.len()` elements and cannot alias
+    //   `input`/`weight`/`bias`/`mean`/`var` (Rust borrow rules; `out` is &mut).
+    //   `mean`/`var` are `&mut`: in training mode thread 0 of each block
+    //   writes its channel's stat (`channels` disjoint slots, one block per
+    //   channel — no data race); in eval mode they are read-only.
+    // - Grid `(channels, 1, 1)` × block `(256, 1, 1)`: each block reads/writes
+    //   exactly the `batch * hw` elements of channel `c` whose flat offset is
+    //   `((b*channels + c)*hw + s) ∈ [0, batch*channels*hw)`.
+    // - Shared memory: 256 * 4 = 1024 bytes (matches PTX `.shared bdata[256]`),
+    //   one f32 per thread for the mean and variance block reductions.
+    // - `eps: f32` / `training: u32` passed by-ref; cudarc copies them into the
+    //   launch parameter buffer. Stream sync is the caller's responsibility.
+    unsafe {
+        stream
+            .launch_builder(&f)
+            .arg(input.inner())
+            .arg(out.inner_mut())
+            .arg(weight.inner())
+            .arg(bias.inner())
+            .arg(mean.inner_mut())
+            .arg(var.inner_mut())
+            .arg(&batch_u32)
+            .arg(&channels_u32)
+            .arg(&hw_u32)
+            .arg(&eps)
+            .arg(&training_u32)
+            .launch(cfg)?;
+    }
+
+    Ok(out)
+}
+
 #[cfg(all(test, feature = "cuda"))]
 mod tests {
     use super::*;
@@ -902,6 +1298,210 @@ mod tests {
         let x = vec![0.0f32; 10];
         let xg = cpu_to_gpu(&x, &device).unwrap();
         let res = gpu_softmax2d_f32(&xg, 2, 3, 4, &device); // expects 24
+        assert!(matches!(res, Err(GpuError::ShapeMismatch { .. })));
+    }
+
+    /// Reference CPU BatchNorm over `[batch, channels, hw]` with per-channel
+    /// γ, β. `training` selects batch-stats (biased mean/var over (N, hw)) vs.
+    /// the supplied `mean`/`var` running statistics.
+    #[allow(clippy::too_many_arguments)]
+    fn cpu_batch_norm_ref(
+        x: &[f32],
+        gamma: &[f32],
+        beta: &[f32],
+        mean_in: &[f32],
+        var_in: &[f32],
+        batch: usize,
+        channels: usize,
+        hw: usize,
+        eps: f32,
+        training: bool,
+    ) -> Vec<f32> {
+        let mut out = vec![0.0f32; batch * channels * hw];
+        let n = (batch * hw) as f64;
+        for c in 0..channels {
+            let (mean, var) = if training {
+                let mut s = 0.0f64;
+                for b in 0..batch {
+                    for p in 0..hw {
+                        s += x[(b * channels + c) * hw + p] as f64;
+                    }
+                }
+                let m = s / n;
+                let mut vs = 0.0f64;
+                for b in 0..batch {
+                    for p in 0..hw {
+                        let d = x[(b * channels + c) * hw + p] as f64 - m;
+                        vs += d * d;
+                    }
+                }
+                (m as f32, (vs / n) as f32)
+            } else {
+                (mean_in[c], var_in[c])
+            };
+            let inv_std = 1.0 / (var + eps).sqrt();
+            for b in 0..batch {
+                for p in 0..hw {
+                    let i = (b * channels + c) * hw + p;
+                    out[i] = gamma[c] * (x[i] - mean) * inv_std + beta[c];
+                }
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn batch_norm_training_matches_cpu() {
+        let device = match GpuDevice::new(0) {
+            Ok(d) => d,
+            Err(_) => return,
+        };
+        let batch = 4;
+        let channels = 8;
+        let hw = 3 * 3;
+        let eps = 1e-5_f32;
+        let n = batch * channels * hw;
+        let x: Vec<f32> = (0..n).map(|k| ((k % 17) as f32) * 0.13 - 0.9).collect();
+        let gamma: Vec<f32> = (0..channels).map(|k| 1.0 + 0.07 * (k as f32)).collect();
+        let beta: Vec<f32> = (0..channels).map(|k| -0.2 + 0.03 * (k as f32)).collect();
+
+        let xg = cpu_to_gpu(&x, &device).unwrap();
+        let gg = cpu_to_gpu(&gamma, &device).unwrap();
+        let bg = cpu_to_gpu(&beta, &device).unwrap();
+        let mut mean_g = cpu_to_gpu(&vec![0.0f32; channels], &device).unwrap();
+        let mut var_g = cpu_to_gpu(&vec![1.0f32; channels], &device).unwrap();
+
+        let yg = gpu_batch_norm_f32(
+            &xg,
+            &gg,
+            &bg,
+            &mut mean_g,
+            &mut var_g,
+            batch,
+            channels,
+            hw,
+            eps,
+            true,
+            &device,
+        )
+        .unwrap();
+        let got = gpu_to_cpu(&yg, &device).unwrap();
+        let expected =
+            cpu_batch_norm_ref(&x, &gamma, &beta, &[], &[], batch, channels, hw, eps, true);
+        let mut max_abs = 0.0f32;
+        for (a, e) in got.iter().zip(expected.iter()) {
+            max_abs = max_abs.max((a - e).abs());
+        }
+        assert!(
+            max_abs < 1e-4,
+            "batch_norm train gpu vs cpu max|Δ| = {max_abs}"
+        );
+
+        // The kernel must also have written the biased batch mean/var back.
+        let mean_back = gpu_to_cpu(&mean_g, &device).unwrap();
+        let var_back = gpu_to_cpu(&var_g, &device).unwrap();
+        for c in 0..channels {
+            let mut s = 0.0f64;
+            for b in 0..batch {
+                for p in 0..hw {
+                    s += x[(b * channels + c) * hw + p] as f64;
+                }
+            }
+            let m = (s / (batch * hw) as f64) as f32;
+            assert!(
+                (mean_back[c] - m).abs() < 1e-4,
+                "mean[{c}] {} vs {m}",
+                mean_back[c]
+            );
+            assert!(var_back[c] >= 0.0);
+        }
+    }
+
+    #[test]
+    fn batch_norm_eval_uses_running_stats() {
+        let device = match GpuDevice::new(0) {
+            Ok(d) => d,
+            Err(_) => return,
+        };
+        let batch = 2;
+        let channels = 5;
+        let hw = 4;
+        let eps = 1e-5_f32;
+        let n = batch * channels * hw;
+        let x: Vec<f32> = (0..n).map(|k| ((k as f32) * 0.05).sin()).collect();
+        let gamma: Vec<f32> = (0..channels).map(|k| 0.5 + 0.2 * (k as f32)).collect();
+        let beta: Vec<f32> = (0..channels).map(|k| 0.1 * (k as f32)).collect();
+        let running_mean: Vec<f32> = (0..channels).map(|k| 0.05 * (k as f32) - 0.1).collect();
+        let running_var: Vec<f32> = (0..channels).map(|k| 0.8 + 0.1 * (k as f32)).collect();
+
+        let xg = cpu_to_gpu(&x, &device).unwrap();
+        let gg = cpu_to_gpu(&gamma, &device).unwrap();
+        let bg = cpu_to_gpu(&beta, &device).unwrap();
+        let mut mean_g = cpu_to_gpu(&running_mean, &device).unwrap();
+        let mut var_g = cpu_to_gpu(&running_var, &device).unwrap();
+
+        let yg = gpu_batch_norm_f32(
+            &xg,
+            &gg,
+            &bg,
+            &mut mean_g,
+            &mut var_g,
+            batch,
+            channels,
+            hw,
+            eps,
+            false,
+            &device,
+        )
+        .unwrap();
+        let got = gpu_to_cpu(&yg, &device).unwrap();
+        let expected = cpu_batch_norm_ref(
+            &x,
+            &gamma,
+            &beta,
+            &running_mean,
+            &running_var,
+            batch,
+            channels,
+            hw,
+            eps,
+            false,
+        );
+        let mut max_abs = 0.0f32;
+        for (a, e) in got.iter().zip(expected.iter()) {
+            max_abs = max_abs.max((a - e).abs());
+        }
+        assert!(
+            max_abs < 1e-4,
+            "batch_norm eval gpu vs cpu max|Δ| = {max_abs}"
+        );
+    }
+
+    #[test]
+    fn batch_norm_validates_lengths() {
+        let device = match GpuDevice::new(0) {
+            Ok(d) => d,
+            Err(_) => return,
+        };
+        let x = vec![0.0f32; 10]; // not batch*channels*hw
+        let xg = cpu_to_gpu(&x, &device).unwrap();
+        let gg = cpu_to_gpu(&vec![1.0f32; 3], &device).unwrap();
+        let bg = cpu_to_gpu(&vec![0.0f32; 3], &device).unwrap();
+        let mut mean_g = cpu_to_gpu(&vec![0.0f32; 3], &device).unwrap();
+        let mut var_g = cpu_to_gpu(&vec![1.0f32; 3], &device).unwrap();
+        let res = gpu_batch_norm_f32(
+            &xg,
+            &gg,
+            &bg,
+            &mut mean_g,
+            &mut var_g,
+            2,
+            3,
+            4,
+            1e-5,
+            true,
+            &device,
+        );
         assert!(matches!(res, Err(GpuError::ShapeMismatch { .. })));
     }
 }

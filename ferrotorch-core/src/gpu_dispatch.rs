@@ -1289,6 +1289,44 @@ pub trait GpuBackend: Send + Sync {
         })
     }
 
+    // BatchNorm f32 (#1449).
+    //
+    // Per-channel normalization over a `[batch, channels, hw]`-laid-out f32
+    // buffer (PyTorch `[N, C, *spatial]` flattened to `hw = ∏ spatial`). In
+    // **training** mode (`training == true`) the per-channel mean / variance
+    // are computed over `(batch, hw)` (biased, like PyTorch) and the computed
+    // batch stats are returned as the second / third tuple element so the
+    // caller can update its running statistics; in **eval** mode the
+    // caller-supplied `mean` / `var` (the running stats) are used and returned
+    // unchanged. `weight`/`bias` have length `channels` (ones / zeros when the
+    // layer is non-affine). Mirrors `aten/src/ATen/native/Normalization.cpp`
+    // `batch_norm_cpu_transform_input_template`. The default impl returns
+    // `InvalidArgument` so existing backends compile unchanged; the CUDA
+    // backend overrides it with the `gpu_batch_norm_f32` PTX kernel. Non-test
+    // production consumer: `ferrotorch-nn::BatchNorm{1,2,3}d::forward` GPU fast
+    // path.
+    //
+    // Returns `(output, mean_out, var_out)` where `output` has the input shape
+    // and `mean_out` / `var_out` have length `channels`.
+    #[allow(clippy::too_many_arguments)]
+    fn batch_norm_f32(
+        &self,
+        _input: &GpuBufferHandle,
+        _weight: &GpuBufferHandle,
+        _bias: &GpuBufferHandle,
+        _mean: &GpuBufferHandle,
+        _var: &GpuBufferHandle,
+        _batch: usize,
+        _channels: usize,
+        _hw: usize,
+        _eps: f32,
+        _training: bool,
+    ) -> FerrotorchResult<(GpuBufferHandle, GpuBufferHandle, GpuBufferHandle)> {
+        Err(FerrotorchError::InvalidArgument {
+            message: "batch_norm_f32 GPU op not implemented for this backend".into(),
+        })
+    }
+
     // Softmax2d f32 (#1451).
     //
     // Channel-axis softmax over a `[n, c, hw]`-laid-out f32 buffer

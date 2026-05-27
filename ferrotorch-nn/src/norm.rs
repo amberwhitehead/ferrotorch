@@ -49,6 +49,132 @@ fn zero<T: Float>() -> T {
     <T as num_traits::Zero>::zero()
 }
 
+/// Read an f32-tagged GPU buffer handle back to a host `Vec<f32>`.
+///
+/// `GpuBackend::gpu_to_cpu` returns raw bytes; the BatchNorm stat buffers are
+/// f32, so reinterpret the byte stream as little-endian f32. Used only for the
+/// tiny `[channels]` running-stat read-back in [`batch_norm_gpu_forward`].
+fn gpu_handle_to_f32(
+    backend: &dyn ferrotorch_core::gpu_dispatch::GpuBackend,
+    handle: &ferrotorch_core::gpu_dispatch::GpuBufferHandle,
+) -> FerrotorchResult<Vec<f32>> {
+    let bytes = backend.gpu_to_cpu(handle)?;
+    Ok(bytes
+        .chunks_exact(4)
+        .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+        .collect())
+}
+
+/// GPU forward for the BatchNorm family (#1449), shared by
+/// `BatchNorm{1,2,3}d::forward`.
+///
+/// Dispatches to the backend `batch_norm_f32` kernel
+/// (`ferrotorch-gpu/src/group_norm.rs::gpu_batch_norm_f32`), which performs
+/// the per-channel normalization over `(batch, spatial)` and applies the
+/// per-channel affine. `weight` / `bias` are materialized on-device as
+/// `[channels]` buffers (ones / zeros when the layer is non-affine, so the
+/// affine is the identity). In training mode the kernel returns the biased
+/// batch mean / variance, which this helper folds into the `running_mean` /
+/// `running_var` mutexes using the same momentum + Bessel-corrected variance
+/// update as the CPU path. Mirrors
+/// `aten/src/ATen/native/Normalization.cpp::batch_norm_cuda`.
+///
+/// f32-only (the kernel is f32); the caller must gate on `is_f32::<T>()`.
+/// Returns the GPU output buffer handle (input shape).
+#[allow(clippy::too_many_arguments)]
+fn batch_norm_gpu_forward<T: Float>(
+    input: &Tensor<T>,
+    weight: Option<&Tensor<T>>,
+    bias: Option<&Tensor<T>>,
+    running_mean: &Mutex<Vec<f64>>,
+    running_var: &Mutex<Vec<f64>>,
+    num_batches_tracked: &Mutex<usize>,
+    momentum: f64,
+    eps: f64,
+    channels: usize,
+    spatial: usize,
+    is_training: bool,
+) -> FerrotorchResult<Option<ferrotorch_core::gpu_dispatch::GpuBufferHandle>> {
+    let Some(backend) = gpu_backend() else {
+        return Ok(None);
+    };
+    let batch = input.numel() / (channels * spatial.max(1));
+
+    // Per-channel affine, materialized on the same device as `input`.
+    // For the affine case we reuse the layer's f32 weight/bias tensors; for
+    // the non-affine case we build ones/zeros and move them to the device.
+    let weight_dev;
+    let bias_dev;
+    let (w_handle, b_handle) = match (weight, bias) {
+        (Some(w), Some(b)) => (w.gpu_handle()?, b.gpu_handle()?),
+        _ => {
+            weight_dev = ferrotorch_core::creation::ones::<T>(&[channels])?.to(input.device())?;
+            bias_dev = ferrotorch_core::creation::zeros::<T>(&[channels])?.to(input.device())?;
+            (weight_dev.gpu_handle()?, bias_dev.gpu_handle()?)
+        }
+    };
+
+    // Running stats live in f64; the kernel is f32. Push the current running
+    // mean/var to the device (used directly in eval mode, ignored in training
+    // mode where the kernel recomputes them).
+    let rm_snapshot: Vec<f32> = running_mean
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|v| *v as f32)
+        .collect();
+    let rv_snapshot: Vec<f32> = running_var
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|v| *v as f32)
+        .collect();
+    let mean_in = ferrotorch_core::creation::from_slice::<f32>(&rm_snapshot, &[channels])?
+        .to(input.device())?;
+    let var_in = ferrotorch_core::creation::from_slice::<f32>(&rv_snapshot, &[channels])?
+        .to(input.device())?;
+
+    let (out_handle, mean_out, var_out) = backend.batch_norm_f32(
+        input.gpu_handle()?,
+        w_handle,
+        b_handle,
+        mean_in.gpu_handle()?,
+        var_in.gpu_handle()?,
+        batch,
+        channels,
+        spatial.max(1),
+        eps as f32,
+        is_training,
+    )?;
+
+    if is_training {
+        // The kernel wrote the biased batch mean/var into `mean_out`/`var_out`.
+        // Fold them into the running statistics exactly like the CPU path:
+        //   running = (1 - momentum) * running + momentum * batch
+        // with a Bessel correction applied to the variance term.
+        let batch_mean = gpu_handle_to_f32(backend, &mean_out)?;
+        let batch_var = gpu_handle_to_f32(backend, &var_out)?;
+        let count = batch * spatial.max(1);
+        let bessel = if count > 1 {
+            count as f64 / (count as f64 - 1.0)
+        } else {
+            1.0
+        };
+        let mut rm = running_mean.lock().unwrap();
+        let mut rv = running_var.lock().unwrap();
+        let mut nbt = num_batches_tracked.lock().unwrap();
+        *nbt += 1;
+        for c in 0..channels {
+            let bm = batch_mean[c] as f64;
+            let bv = batch_var[c] as f64;
+            rm[c] = (1.0 - momentum) * rm[c] + momentum * bm;
+            rv[c] = (1.0 - momentum) * rv[c] + momentum * bv * bessel;
+        }
+    }
+
+    Ok(Some(out_handle))
+}
+
 // ===========================================================================
 // LayerNorm
 // ===========================================================================
@@ -1494,7 +1620,44 @@ impl<T: Float> Module<T> for BatchNorm2d<T> {
             });
         }
 
+        // GPU fast path (#1449): per-channel normalize over (B, H, W). f32-only
+        // (the kernel is f32); running-stat update mirrors the CPU branch.
         if input.is_cuda() {
+            if is_f32::<T>() {
+                let is_training = *self.training.lock().unwrap();
+                if let Some(handle) = batch_norm_gpu_forward(
+                    input,
+                    self.weight.as_ref().map(|w| w.tensor()),
+                    self.bias.as_ref().map(|b| b.tensor()),
+                    &self.running_mean,
+                    &self.running_var,
+                    &self.num_batches_tracked,
+                    self.momentum,
+                    self.eps,
+                    channels,
+                    spatial,
+                    is_training,
+                )? {
+                    return if is_grad_enabled() && input.requires_grad() {
+                        let grad_fn = Arc::new(BatchNorm2dBackward {
+                            input: input.clone(),
+                            x_hat: Tensor::from_storage(
+                                TensorStorage::cpu(Vec::new()),
+                                vec![0],
+                                false,
+                            )?,
+                            weight: self.weight.as_ref().map(|w| w.tensor().clone()),
+                            bias: self.bias.as_ref().map(|b| b.tensor().clone()),
+                            chan_var: Vec::new(),
+                            eps: self.eps,
+                            affine: self.affine,
+                        });
+                        Tensor::from_operation(TensorStorage::gpu(handle), shape, grad_fn)
+                    } else {
+                        Tensor::from_storage(TensorStorage::gpu(handle), shape, false)
+                    };
+                }
+            }
             return Err(FerrotorchError::NotImplementedOnCuda {
                 op: "BatchNorm2d::forward",
             });
@@ -2108,7 +2271,43 @@ impl<T: Float> Module<T> for BatchNorm1d<T> {
             return Ok(input.clone());
         }
 
+        // GPU fast path (#1449): per-channel normalize over (N,) or (N, L).
         if input.is_cuda() {
+            if is_f32::<T>() {
+                let is_training = *self.training.lock().unwrap();
+                if let Some(handle) = batch_norm_gpu_forward(
+                    input,
+                    self.weight.as_ref().map(|w| w.tensor()),
+                    self.bias.as_ref().map(|b| b.tensor()),
+                    &self.running_mean,
+                    &self.running_var,
+                    &self.num_batches_tracked,
+                    self.momentum,
+                    self.eps,
+                    channels,
+                    length,
+                    is_training,
+                )? {
+                    return if is_grad_enabled() && input.requires_grad() {
+                        let grad_fn = Arc::new(BatchNorm1dBackward {
+                            input: input.clone(),
+                            x_hat: Tensor::from_storage(
+                                TensorStorage::cpu(Vec::new()),
+                                vec![0],
+                                false,
+                            )?,
+                            weight: self.weight.as_ref().map(|w| w.tensor().clone()),
+                            bias: self.bias.as_ref().map(|b| b.tensor().clone()),
+                            chan_var: Vec::new(),
+                            eps: self.eps,
+                            affine: self.affine,
+                        });
+                        Tensor::from_operation(TensorStorage::gpu(handle), shape, grad_fn)
+                    } else {
+                        Tensor::from_storage(TensorStorage::gpu(handle), shape, false)
+                    };
+                }
+            }
             return Err(FerrotorchError::NotImplementedOnCuda {
                 op: "BatchNorm1d::forward",
             });
@@ -2684,7 +2883,43 @@ impl<T: Float> Module<T> for BatchNorm3d<T> {
             return Ok(input.clone());
         }
 
+        // GPU fast path (#1449): per-channel normalize over (B, D, H, W).
         if input.is_cuda() {
+            if is_f32::<T>() {
+                let is_training = *self.training.lock().unwrap();
+                if let Some(handle) = batch_norm_gpu_forward(
+                    input,
+                    self.weight.as_ref().map(|w| w.tensor()),
+                    self.bias.as_ref().map(|b| b.tensor()),
+                    &self.running_mean,
+                    &self.running_var,
+                    &self.num_batches_tracked,
+                    self.momentum,
+                    self.eps,
+                    channels,
+                    spatial,
+                    is_training,
+                )? {
+                    return if is_grad_enabled() && input.requires_grad() {
+                        let grad_fn = Arc::new(BatchNorm3dBackward {
+                            input: input.clone(),
+                            x_hat: Tensor::from_storage(
+                                TensorStorage::cpu(Vec::new()),
+                                vec![0],
+                                false,
+                            )?,
+                            weight: self.weight.as_ref().map(|w| w.tensor().clone()),
+                            bias: self.bias.as_ref().map(|b| b.tensor().clone()),
+                            chan_var: Vec::new(),
+                            eps: self.eps,
+                            affine: self.affine,
+                        });
+                        Tensor::from_operation(TensorStorage::gpu(handle), shape, grad_fn)
+                    } else {
+                        Tensor::from_storage(TensorStorage::gpu(handle), shape, false)
+                    };
+                }
+            }
             return Err(FerrotorchError::NotImplementedOnCuda {
                 op: "BatchNorm3d::forward",
             });
@@ -3389,7 +3624,41 @@ impl<T: Float> InstanceNormInner<T> {
             return Ok(input.clone());
         }
 
+        // GPU fast path (#1449): InstanceNorm is exactly GroupNorm with
+        // `num_groups == num_channels` — each (batch, channel) slice is its
+        // own normalization group over the spatial dims, with a per-channel
+        // affine. `weight`/`bias` always have length `num_features` (ones /
+        // zeros when `affine == false`, so the kernel's unconditional affine
+        // is the identity). Mirrors `torch/nn/functional.py::instance_norm`
+        // which lowers to the group-norm reduction for the per-instance case.
         if input.is_cuda() {
+            if let Some(backend) = gpu_backend() {
+                let eps_f32 = self.eps as f32;
+                let handle = backend.group_norm_f32(
+                    input.gpu_handle()?,
+                    self.weight.tensor().gpu_handle()?,
+                    self.bias.tensor().gpu_handle()?,
+                    batch,
+                    channels,
+                    channels, // num_groups == num_channels ⇒ InstanceNorm
+                    spatial,
+                    eps_f32,
+                )?;
+                return if is_grad_enabled() && input.requires_grad() {
+                    let grad_fn = Arc::new(InstanceNormBackward {
+                        input: input.clone(),
+                        weight: self.weight.tensor().clone(),
+                        bias: self.bias.tensor().clone(),
+                        num_features: self.num_features,
+                        eps: self.eps,
+                        affine: self.affine,
+                    });
+                    Tensor::from_operation(TensorStorage::gpu(handle), shape, grad_fn)
+                } else {
+                    Tensor::from_storage(TensorStorage::gpu(handle), shape, false)
+                };
+            }
+            // CUDA input without a registered GPU backend: reject honestly.
             return Err(FerrotorchError::NotImplementedOnCuda {
                 op: "InstanceNorm::forward",
             });
@@ -5968,5 +6237,190 @@ mod tests {
             max_abs = max_abs.max((g - c).abs());
         }
         assert!(max_abs < 1e-4, "GroupNorm GPU vs CPU max|Δ| = {max_abs}");
+    }
+
+    /// #1449: `BatchNorm2d::forward` in **eval** mode on a CUDA-resident input
+    /// must route through `GpuBackend::batch_norm_f32` and match the CPU path
+    /// (which is itself PyTorch-parity-verified by the conformance suite) to
+    /// f32 tolerance. The host has CUDA, so this runs live (not `#[ignore]`).
+    #[test]
+    #[cfg(feature = "cuda")]
+    fn batch_norm2d_eval_forward_gpu_matches_cpu() {
+        use crate::module::Module as _;
+        use ferrotorch_core::Device;
+        use ferrotorch_gpu::init_cuda_backend;
+        if init_cuda_backend().is_err() {
+            return;
+        }
+
+        let (b, c, h, w) = (2usize, 6usize, 4usize, 5usize);
+        let n = b * c * h * w;
+        let data: Vec<f32> = (0..n).map(|k| ((k % 19) as f32) * 0.11 - 1.0).collect();
+        let gamma: Vec<f32> = (0..c).map(|k| 1.0 + 0.07 * (k as f32)).collect();
+        let beta: Vec<f32> = (0..c).map(|k| -0.2 + 0.03 * (k as f32)).collect();
+        let rmean: Vec<f32> = (0..c).map(|k| 0.05 * (k as f32) - 0.1).collect();
+        let rvar: Vec<f32> = (0..c).map(|k| 0.8 + 0.05 * (k as f32)).collect();
+
+        let make = || {
+            let mut bn = BatchNorm2d::<f32>::new(c, 1e-5, 0.1, true).unwrap();
+            bn.weight.as_mut().unwrap().set_data(
+                Tensor::from_storage(TensorStorage::cpu(gamma.clone()), vec![c], false).unwrap(),
+            );
+            bn.bias.as_mut().unwrap().set_data(
+                Tensor::from_storage(TensorStorage::cpu(beta.clone()), vec![c], false).unwrap(),
+            );
+            bn.set_running_mean(&rmean).unwrap();
+            bn.set_running_var(&rvar).unwrap();
+            bn.eval();
+            bn
+        };
+
+        let x_cpu = Tensor::from_storage(TensorStorage::cpu(data.clone()), vec![b, c, h, w], false)
+            .unwrap();
+        let bn_cpu = make();
+        let cpu_vals = bn_cpu.forward(&x_cpu).unwrap().data().unwrap().to_vec();
+
+        let mut bn_gpu = make();
+        bn_gpu.to_device(Device::Cuda(0)).unwrap();
+        let x_gpu = x_cpu.to(Device::Cuda(0)).unwrap();
+        let y_gpu = bn_gpu.forward(&x_gpu).unwrap();
+        assert!(y_gpu.is_cuda(), "BatchNorm2d GPU output must stay on CUDA");
+        let gpu_vals = y_gpu.data_vec().unwrap();
+
+        assert_eq!(gpu_vals.len(), cpu_vals.len());
+        let mut max_abs = 0.0f32;
+        for (g, cv) in gpu_vals.iter().zip(cpu_vals.iter()) {
+            max_abs = max_abs.max((g - cv).abs());
+        }
+        assert!(
+            max_abs < 1e-4,
+            "BatchNorm2d eval GPU vs CPU max|Δ| = {max_abs}"
+        );
+    }
+
+    /// #1449: `BatchNorm2d::forward` in **train** mode on CUDA must compute the
+    /// batch statistics on-device, match the CPU forward, AND fold the same
+    /// running-mean / running-var update back (momentum + Bessel correction).
+    #[test]
+    #[cfg(feature = "cuda")]
+    fn batch_norm2d_train_forward_gpu_matches_cpu() {
+        use crate::module::Module as _;
+        use ferrotorch_core::Device;
+        use ferrotorch_gpu::init_cuda_backend;
+        if init_cuda_backend().is_err() {
+            return;
+        }
+
+        let (b, c, h, w) = (4usize, 5usize, 3usize, 3usize);
+        let n = b * c * h * w;
+        let data: Vec<f32> = (0..n).map(|k| ((k as f32) * 0.037).sin() * 1.3).collect();
+        let gamma: Vec<f32> = (0..c).map(|k| 0.9 + 0.04 * (k as f32)).collect();
+        let beta: Vec<f32> = (0..c).map(|k| 0.02 * (k as f32)).collect();
+
+        let make = || {
+            let mut bn = BatchNorm2d::<f32>::new(c, 1e-5, 0.1, true).unwrap();
+            bn.weight.as_mut().unwrap().set_data(
+                Tensor::from_storage(TensorStorage::cpu(gamma.clone()), vec![c], false).unwrap(),
+            );
+            bn.bias.as_mut().unwrap().set_data(
+                Tensor::from_storage(TensorStorage::cpu(beta.clone()), vec![c], false).unwrap(),
+            );
+            bn // default training=true
+        };
+
+        let x_cpu = Tensor::from_storage(TensorStorage::cpu(data.clone()), vec![b, c, h, w], false)
+            .unwrap();
+        let bn_cpu = make();
+        let cpu_vals = bn_cpu.forward(&x_cpu).unwrap().data().unwrap().to_vec();
+        let cpu_rmean = bn_cpu.running_mean();
+        let cpu_rvar = bn_cpu.running_var();
+
+        let mut bn_gpu = make();
+        bn_gpu.to_device(Device::Cuda(0)).unwrap();
+        let x_gpu = x_cpu.to(Device::Cuda(0)).unwrap();
+        let y_gpu = bn_gpu.forward(&x_gpu).unwrap();
+        assert!(y_gpu.is_cuda());
+        let gpu_vals = y_gpu.data_vec().unwrap();
+
+        let mut max_abs = 0.0f32;
+        for (g, cv) in gpu_vals.iter().zip(cpu_vals.iter()) {
+            max_abs = max_abs.max((g - cv).abs());
+        }
+        assert!(
+            max_abs < 1e-4,
+            "BatchNorm2d train GPU vs CPU max|Δ| = {max_abs}"
+        );
+
+        // Running-stat update must match the CPU path and increment the counter.
+        let gpu_rmean = bn_gpu.running_mean();
+        let gpu_rvar = bn_gpu.running_var();
+        assert_eq!(bn_gpu.num_batches_tracked(), 1);
+        for cc in 0..c {
+            assert!(
+                (gpu_rmean[cc] - cpu_rmean[cc]).abs() < 1e-4,
+                "running_mean[{cc}] gpu={} cpu={}",
+                gpu_rmean[cc],
+                cpu_rmean[cc]
+            );
+            assert!(
+                (gpu_rvar[cc] - cpu_rvar[cc]).abs() < 1e-4,
+                "running_var[{cc}] gpu={} cpu={}",
+                gpu_rvar[cc],
+                cpu_rvar[cc]
+            );
+        }
+    }
+
+    /// #1449: `InstanceNorm2d::forward` on CUDA routes through the GroupNorm
+    /// kernel with `num_groups == num_channels` and must match the CPU path.
+    #[test]
+    #[cfg(feature = "cuda")]
+    fn instance_norm2d_forward_gpu_matches_cpu() {
+        use crate::module::Module as _;
+        use ferrotorch_core::Device;
+        use ferrotorch_gpu::init_cuda_backend;
+        if init_cuda_backend().is_err() {
+            return;
+        }
+
+        let (b, c, h, w) = (3usize, 4usize, 5usize, 4usize);
+        let n = b * c * h * w;
+        let data: Vec<f32> = (0..n).map(|k| ((k % 23) as f32) * 0.09 - 0.8).collect();
+        let gamma: Vec<f32> = (0..c).map(|k| 1.0 + 0.06 * (k as f32)).collect();
+        let beta: Vec<f32> = (0..c).map(|k| -0.05 + 0.04 * (k as f32)).collect();
+
+        let make = || {
+            let mut inorm = InstanceNorm2d::<f32>::new(c, 1e-5, true).unwrap();
+            inorm.inner.weight.set_data(
+                Tensor::from_storage(TensorStorage::cpu(gamma.clone()), vec![c], false).unwrap(),
+            );
+            inorm.inner.bias.set_data(
+                Tensor::from_storage(TensorStorage::cpu(beta.clone()), vec![c], false).unwrap(),
+            );
+            inorm
+        };
+
+        let x_cpu = Tensor::from_storage(TensorStorage::cpu(data.clone()), vec![b, c, h, w], false)
+            .unwrap();
+        let cpu_vals = make().forward(&x_cpu).unwrap().data().unwrap().to_vec();
+
+        let mut gpu = make();
+        gpu.to_device(Device::Cuda(0)).unwrap();
+        let x_gpu = x_cpu.to(Device::Cuda(0)).unwrap();
+        let y_gpu = gpu.forward(&x_gpu).unwrap();
+        assert!(
+            y_gpu.is_cuda(),
+            "InstanceNorm2d GPU output must stay on CUDA"
+        );
+        let gpu_vals = y_gpu.data_vec().unwrap();
+
+        let mut max_abs = 0.0f32;
+        for (g, cv) in gpu_vals.iter().zip(cpu_vals.iter()) {
+            max_abs = max_abs.max((g - cv).abs());
+        }
+        assert!(
+            max_abs < 1e-4,
+            "InstanceNorm2d GPU vs CPU max|Δ| = {max_abs}"
+        );
     }
 }
