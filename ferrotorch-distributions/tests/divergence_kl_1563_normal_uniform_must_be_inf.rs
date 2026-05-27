@@ -40,9 +40,11 @@
 //! (torch 2.11.0, 2026-05-27); non-tautological per R-CHAR-3 (the expected
 //! `+inf` traces to `_infinite_like` at kl.py:145 = `torch.full_like(., inf)`).
 //!
-//! Tracking: #1563 (release-blocker: wrong-value bug in a pre-existing arm).
-//! The two divergence tests are `#[ignore]`d because #1563 now tracks the fix;
-//! the control test stays green to pin that the bug is direction-specific.
+//! Tracking: #1563 (release-blocker: wrong-value bug in a pre-existing arm) —
+//! FIXED: the Normal-Uniform dispatcher arm now routes through `kl_infinite_like`
+//! (mirroring `_kl_normal_infinity` -> `_infinite_like(p.loc)` at kl.py:766,768),
+//! so the two divergence tests run as regular `#[test]`s (regression coverage).
+//! The control test stays green to pin that the bug was direction-specific.
 
 use ferrotorch_core::creation::scalar;
 use ferrotorch_distributions::kl::kl_divergence;
@@ -60,7 +62,6 @@ fn item(t: ferrotorch_core::tensor::Tensor<f64>) -> f64 {
 /// Upstream returns `+inf`; ferrotorch returns ~ -0.0326441720847821.
 /// Tracking: #1563
 #[test]
-#[ignore = "divergence: kl_normal_uniform returns finite (even negative) where torch kl.py:766,768 returns +inf; tracking #1563"]
 fn divergence_kl_normal_uniform_must_be_positive_infinity() {
     let p = Normal::new(scalar(0.0f64).unwrap(), scalar(1.0f64).unwrap()).unwrap();
     let q = Uniform::new(scalar(-2.0f64).unwrap(), scalar(2.0f64).unwrap()).unwrap();
@@ -78,7 +79,6 @@ fn divergence_kl_normal_uniform_must_be_positive_infinity() {
 /// finite formula instead returns a finite number that grows with the range.
 /// Tracking: #1563
 #[test]
-#[ignore = "divergence: kl_normal_uniform returns finite where torch kl.py:766,768 returns +inf; tracking #1563"]
 fn divergence_kl_normal_uniform_wide_range_still_inf() {
     let p = Normal::new(scalar(1.0f64).unwrap(), scalar(0.5f64).unwrap()).unwrap();
     let q = Uniform::new(scalar(-100.0f64).unwrap(), scalar(100.0f64).unwrap()).unwrap();

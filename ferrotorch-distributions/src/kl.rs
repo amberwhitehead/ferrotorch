@@ -18,7 +18,7 @@
 //! | REQ-2 (`kl_supported_pair_count` introspection) | SHIPPED | `pub const fn kl_supported_pair_count() -> usize` + `KL_SUPPORTED_PAIR_COUNT: usize = 68` in `kl.rs`; consumer: const fn is grandfathered public API; drift-prevention test `kl_doc_table_matches_dispatcher` reads `include_str!("kl.rs")` and asserts three-way invariant against the public accessor |
 //! | REQ-3 (`kl_dispatch` `Any::downcast_ref` chain) | SHIPPED | the dispatcher in `kl.rs` is a 68-arm chain mirroring PyTorch's `_dispatch_kl` in `torch/distributions/kl.py:113-138`; consumer: `pub fn kl_divergence` invokes the dispatcher on every call |
 //! | REQ-4 (8 same-family closed-form formulas) | SHIPPED | 8 closed-form helpers in `kl.rs` (`kl_normal_normal`, `kl_bernoulli_bernoulli`, `kl_uniform_uniform`, `kl_categorical_categorical`, `kl_laplace_laplace`, `kl_exponential_exponential`, `kl_gamma_gamma`, `kl_poisson_poisson`) mirroring `@register_kl` bodies in `torch/distributions/kl.py`; consumer: the dispatcher invokes each formula |
-//! | REQ-5 (4 cross-family formulas) | SHIPPED | `kl_normal_uniform`, `kl_uniform_normal`, `kl_gamma_exponential`, `kl_exponential_gamma` in `kl.rs`; last two use `kl_gamma_scalar` via `Exp(λ) ≡ Gamma(1, λ)`; consumer: the dispatcher calls each; `kl_gamma_scalar` is consumed by 3 production sites internally |
+//! | REQ-5 (cross-family finite formulas) | SHIPPED | `kl_uniform_normal`, `kl_gamma_exponential`, `kl_exponential_gamma` in `kl.rs`; last two use `kl_gamma_scalar` via `Exp(λ) ≡ Gamma(1, λ)`; consumer: the dispatcher calls each; `kl_gamma_scalar` is consumed by 3 production sites internally. (Normal-Uniform was a finite arm here but moved to the `+inf` support-mismatch family per `kl.py:766,768` `_kl_normal_infinity` — #1563.) |
 //! | REQ-6 (fallback guard on every formula) | SHIPPED | every finite formula's first statement is `crate::fallback::check_gpu_fallback_opt_in(&[...], "kl_divergence(P, Q)")?` in `kl.rs`; consumer: this IS the production consumer of `fn check_gpu_fallback_opt_in` per `fallback.md` REQ-2 (the `+inf` support-mismatch arms read a single param tensor that is already host-resident, so they hand it straight to `kl_infinite_like`) |
 //! | REQ-7 (full ~75-pair PyTorch coverage) | PARTIAL | blocker #1374 — ferrotorch now ships 68 of PyTorch's ~75 pairs (was 41). The #1562 both-types-exist gap closure added 27 pairs: 3 finite (`kl_onehotcategorical_onehotcategorical` mirrors `torch/distributions/kl.py:474-476`, `kl_bernoulli_poisson` `kl.py:513-516`, `kl_normal_laplace` `kl.py:782-792`) + 24 support-mismatch `+inf` arms (PyTorch's `_infinite_like` registrations: Beta-Pareto `kl.py:528`; Exponential-{Beta,Pareto,Uniform} `kl.py:620-623`; Gamma-{Beta,Pareto,Uniform} `kl.py:665-668`; Gumbel-{Beta,Exponential,Gamma,Pareto,Uniform} `kl.py:718-723`; Laplace-{Beta,Exponential,Gamma,Pareto,Uniform} `kl.py:740-745`; Normal-{Beta,Exponential,Gamma,Pareto} `kl.py:761-765`; Pareto-{Beta,Uniform} `kl.py:795-797`; Poisson-Bernoulli `kl.py:841`) routed through the `kl_infinite_like` helper; consumer: each is invoked by its dispatcher downcast arm. Still NOT-STARTED: (a) `Independent-Independent` (`kl.py:944`) — `Independent<T, D>` is generic over the concrete base `D`, so `Any::downcast_ref` cannot match it without a KL-recursion trait hook on `Distribution` (`lib.rs`) + an override in `independent.rs`, both outside this manifest (concrete prereq, not a deferral); (b) Binomial-Binomial + Poisson-Binomial (need a `Binomial` struct), Geometric-Geometric (need a `Geometric` struct), ContinuousBernoulli-* pairs (need a `ContinuousBernoulli` struct), TransformedDistribution-TransformedDistribution / ExponentialFamily-ExponentialFamily — each blocked on a missing distribution TYPE or trait surface. #1374 stays open for the remaining ~7. |
 //! | REQ-8 (`register_kl` extension API) | SHIPPED (design decision, #1375) | the explicit `Any::downcast_ref` match in `kl_dispatch` is the deliberate Rust-idiomatic equivalent of PyTorch's `@register_kl` + `_dispatch_kl` (a Python-runtime open-extension pattern). Rust's static analog is the closed-crate match, kept maintainable by the `kl_doc_table_matches_dispatcher` drift test that pins the doc table, the const count, and the dispatcher arms in lockstep. A `Lazy<HashMap<(TypeId,TypeId),Fn>>` registry would add indirection without enabling cross-crate extension (formulas need concrete accessors). Documented in `kl.md` REQ-8. Closes #1375. |
@@ -191,12 +191,16 @@ fn kl_dispatch<T: Float>(
     ) {
         return kl_categorical_categorical(pc, qc);
     }
-    // Normal-Uniform
-    if let (Some(pn), Some(qu)) = (
+    // Normal-Uniform (kl.py:766,768): registered in `_kl_normal_infinity` ->
+    // `_infinite_like(p.loc)` -> +inf. A Normal's support is all of R, which is
+    // NOT contained in a Uniform's bounded [low,high], so KL(Normal||Uniform)
+    // is +inf everywhere (mirrors the Normal-{Beta,Exponential,Gamma,Pareto}
+    // arms below). The opposite direction (Uniform,Normal) is finite (kl.py:925).
+    if let (Some(pn), Some(_qu)) = (
         p.downcast_ref::<Normal<T>>(),
         q.downcast_ref::<Uniform<T>>(),
     ) {
-        return kl_normal_uniform(pn, qu);
+        return kl_infinite_like(pn.loc());
     }
     // Uniform-Normal
     if let (Some(pu), Some(qn)) = (
@@ -506,7 +510,8 @@ fn kl_dispatch<T: Float>(
         return kl_infinite_like(pl.loc());
     }
     // Normal-{Beta, Exponential, Gamma, Pareto} (kl.py:761-765; Normal-Uniform
-    // is registered separately above as a finite cross-family formula).
+    // shares this `_kl_normal_infinity` family at kl.py:766,768 and is routed
+    // through `kl_infinite_like` in the Normal-Uniform arm above).
     if let (Some(pn), Some(_)) = (p.downcast_ref::<Normal<T>>(), q.downcast_ref::<Beta<T>>()) {
         return kl_infinite_like(pn.loc());
     }
@@ -708,46 +713,6 @@ fn kl_categorical_categorical<T: Float>(
 
     // Categorical KL is a scalar
     Tensor::from_storage(TensorStorage::cpu(vec![kl]), vec![], false)
-}
-
-/// KL(Normal(loc, scale) || Uniform(a, b))
-///
-/// = -entropy(Normal) - log(1/(b-a))  if the normal is "contained"
-///
-/// More precisely:
-/// KL(N || U) = -H(N) + log(b-a)
-///
-/// where H(N) = 0.5 * ln(2*pi*e*scale^2).
-///
-/// Note: this is only finite when the Uniform support covers the Normal
-/// effectively. We compute the analytical formula unconditionally (as
-/// PyTorch does for some cross-family pairs).
-fn kl_normal_uniform<T: Float>(p: &Normal<T>, q: &Uniform<T>) -> FerrotorchResult<Tensor<T>> {
-    crate::fallback::check_gpu_fallback_opt_in(
-        &[p.loc(), p.scale(), q.low(), q.high()],
-        "kl_divergence(Normal, Uniform)",
-    )?;
-    let p_loc = p.loc().data_vec()?;
-    let p_scale = p.scale().data_vec()?;
-    let q_low = q.low().data_vec()?;
-    let q_high = q.high().data_vec()?;
-
-    let half = T::from(0.5).unwrap();
-    let two_pi_e = T::from(2.0 * std::f64::consts::PI * std::f64::consts::E).unwrap();
-
-    let result: Vec<T> = p_loc
-        .iter()
-        .zip(p_scale.iter())
-        .zip(q_low.iter().cycle())
-        .zip(q_high.iter().cycle())
-        .map(|(((&_pl, &ps), &ql), &qh)| {
-            let entropy = half * (two_pi_e * ps * ps).ln();
-            let log_range = (qh - ql).ln();
-            -entropy + log_range
-        })
-        .collect();
-
-    Tensor::from_storage(TensorStorage::cpu(result), p.loc().shape().to_vec(), false)
 }
 
 /// KL(Uniform(a, b) || Normal(loc, scale))
@@ -2631,8 +2596,11 @@ mod tests {
         let p = Normal::new(scalar(0.0f32).unwrap(), scalar(1.0f32).unwrap()).unwrap();
         let q = Uniform::new(scalar(-10.0f32).unwrap(), scalar(10.0f32).unwrap()).unwrap();
         let kl = kl_divergence(&p, &q).unwrap();
-        // Should be finite and non-negative-ish
-        assert!(kl.item().unwrap().is_finite());
+        // KL(Normal || Uniform) is +inf: Normal's support R is not contained in
+        // Uniform's [low,high] (kl.py:766,768 -> _kl_normal_infinity ->
+        // _infinite_like(p.loc)).
+        let v = kl.item().unwrap();
+        assert!(v.is_infinite() && v > 0.0);
     }
 
     // -- Uniform-Normal (cross-family) ---------------------------------------
