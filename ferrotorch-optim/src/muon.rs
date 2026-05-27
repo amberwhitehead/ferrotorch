@@ -924,23 +924,44 @@ mod tests {
     #[test]
     fn test_newton_schulz_with_custom_coefficients_quintic() {
         // Quintic (3.4445, -4.7750, 2.0315) — the upstream Keller-Jordan
-        // default. The result must still be near-orthogonal for a
-        // non-singular input.
+        // default. The quintic iteration is DELIBERATELY non-convergent to
+        // an orthogonal matrix: upstream's docstring
+        // (`torch/optim/_muon.py:34-41`) states it "does not produce UV^T
+        // but rather something like US'V^T where S'_{ii} ~ Uniform(0.5,
+        // 1.5)". The coefficients maximize the slope at zero to pull
+        // singular values toward (but not all the way to) one in few
+        // steps; column orthogonality (off-diagonal of GᵀG ≈ 0) is NOT a
+        // guaranteed property and does NOT hold for this input — it
+        // converges to ≈ -0.26 / +0.29, never 0 (verified: the off-diagonal
+        // oscillates around 0.28–0.32 even at 50 steps). So the property
+        // this test asserts is the one the quintic actually contracts:
+        // every singular value of the output lands in [0.5, 1.5].
+        //
+        // For the 2×2 output G, the squared singular values are the
+        // eigenvalues of GᵀG, computable in closed form from the entries
+        // of GᵀG = [[dot00, dot01], [dot01, dot11]]. Each squared singular
+        // value must lie in [0.5², 1.5²] = [0.25, 2.25].
         let g = leaf(&[3.0, 1.0, 1.0, 2.0], &[2, 2], false);
         let orth = newton_schulz_orthogonalize_tensor(&g, 5, (3.4445, -4.7750, 2.0315)).unwrap();
         let data = orth.data_vec().unwrap();
-        // Check orth^T @ orth ≈ I (up to ~5e-3 — quintic over-shoots
-        // slightly per the upstream docstring "S' ~ Uniform(0.5, 1.5)").
+        // GᵀG entries (G stored row-major: data = [g00, g01, g10, g11];
+        // columns are (g00,g10) and (g01,g11)).
         let dot00 = data[0] * data[0] + data[2] * data[2];
         let dot11 = data[1] * data[1] + data[3] * data[3];
         let dot01 = data[0] * data[1] + data[2] * data[3];
+        // Eigenvalues of the symmetric 2×2 [[dot00, dot01], [dot01, dot11]].
+        let trace = dot00 + dot11;
+        let det = dot00 * dot11 - dot01 * dot01;
+        let disc = (trace * trace - 4.0 * det).max(0.0).sqrt();
+        let sq_sigma_max = (trace + disc) / 2.0;
+        let sq_sigma_min = (trace - disc) / 2.0;
+        // S'_{ii} ~ Uniform(0.5, 1.5) per the upstream docstring; squared
+        // singular values therefore lie in [0.25, 2.25].
         assert!(
-            (dot00 - 1.0).abs() < 0.5 && (dot11 - 1.0).abs() < 0.5,
-            "quintic NS should produce columns with norm ≈ 1 (dot00={dot00}, dot11={dot11})"
-        );
-        assert!(
-            dot01.abs() < 0.1,
-            "quintic NS should produce near-orthogonal columns (dot01={dot01})"
+            (0.25..=2.25).contains(&sq_sigma_min) && (0.25..=2.25).contains(&sq_sigma_max),
+            "quintic NS singular values must land in [0.5, 1.5] per \
+             torch/optim/_muon.py:34-41 (S' ~ Uniform(0.5, 1.5)): \
+             sq_sigma_min={sq_sigma_min}, sq_sigma_max={sq_sigma_max}"
         );
     }
 
