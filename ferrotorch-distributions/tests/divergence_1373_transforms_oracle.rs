@@ -103,7 +103,15 @@ fn divergence_corr_cholesky_d3_forward_inverse_ldj() {
     approx(
         y.data().unwrap(),
         &[
-            1.0f32, 0.0, 0.0, 0.19737533, 0.98032802, 0.0, -0.46211717, 0.53596479, 0.70653343,
+            1.0f32,
+            0.0,
+            0.0,
+            0.19737533,
+            0.98032802,
+            0.0,
+            -0.46211717,
+            0.53596479,
+            0.70653343,
         ],
         1e-5,
         "CC forward",
@@ -202,7 +210,12 @@ fn divergence_cdf_transform_normal() {
         "CDF forward",
     );
     let xi = cdf.inverse(&y).unwrap();
-    approx(xi.data().unwrap(), &[-1.0f32, 0.0, 0.5, 1.5], 1e-4, "CDF inv");
+    approx(
+        xi.data().unwrap(),
+        &[-1.0f32, 0.0, 0.5, 1.5],
+        1e-4,
+        "CDF inv",
+    );
     let ldj = cdf.log_abs_det_jacobian(&x, &y).unwrap();
     approx(
         ldj.data().unwrap(),

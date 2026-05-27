@@ -141,7 +141,11 @@ fn scatter_reduce_prod_attaches_grad_fn_and_matches_torch() {
         ScatterReduce::Prod,
         true,
     );
-    assert_eq!(gi, vec![2., 2., 9.], "prod inp.grad (no zeros, include_self)");
+    assert_eq!(
+        gi,
+        vec![2., 2., 9.],
+        "prod inp.grad (no zeros, include_self)"
+    );
     assert_eq!(gs, vec![1., 9.], "prod src.grad (no zeros, include_self)");
 
     // prod with a SINGLE zero in src scattering into slot 0, include_self=True.
@@ -201,7 +205,11 @@ fn scatter_reduce_prod_attaches_grad_fn_and_matches_torch() {
         ScatterReduce::Prod,
         false,
     );
-    assert_eq!(gi, vec![0., 2., 0.], "prod inp.grad (no zeros, !include_self)");
+    assert_eq!(
+        gi,
+        vec![0., 2., 0.],
+        "prod inp.grad (no zeros, !include_self)"
+    );
     assert_eq!(gs, vec![1., 3.], "prod src.grad (no zeros, !include_self)");
 }
 
@@ -301,12 +309,18 @@ fn scatter_reduce_amax_amin_backward_matches_torch_incl_ties() {
 ///   inp.grad=[[0.5,2,0],[4,0,6]]  src.grad=[[0.5,5,3],[0,0,0]]
 #[test]
 fn scatter_reduce_2d_amax_tie_matches_torch() {
-    let input =
-        Tensor::from_storage(TensorStorage::cpu(vec![9., 2., 3., 4., 5., 6.]), vec![2, 3], true)
-            .unwrap();
-    let src =
-        Tensor::from_storage(TensorStorage::cpu(vec![9., 8., 7., 1., 1., 1.]), vec![2, 3], true)
-            .unwrap();
+    let input = Tensor::from_storage(
+        TensorStorage::cpu(vec![9., 2., 3., 4., 5., 6.]),
+        vec![2, 3],
+        true,
+    )
+    .unwrap();
+    let src = Tensor::from_storage(
+        TensorStorage::cpu(vec![9., 8., 7., 1., 1., 1.]),
+        vec![2, 3],
+        true,
+    )
+    .unwrap();
     let go = Tensor::from_storage(
         TensorStorage::cpu(vec![1., 2., 3., 4., 5., 6.]),
         vec![2, 3],

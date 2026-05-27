@@ -16,17 +16,16 @@ use ferrotorch_distributions::{
 fn approx(a: &[f32], b: &[f32], tol: f32, ctx: &str) {
     assert_eq!(a.len(), b.len(), "{ctx}: length {a:?} vs {b:?}");
     for (i, (x, y)) in a.iter().zip(b.iter()).enumerate() {
-        assert!(
-            (x - y).abs() < tol,
-            "{ctx}: idx {i} got {x} expected {y}"
-        );
+        assert!((x - y).abs() < tol, "{ctx}: idx {i} got {x} expected {y}");
     }
 }
 
 #[test]
 fn divergence_cat_transform_forward_ldj() {
-    let transforms: Vec<Box<dyn Transform<f32>>> =
-        vec![Box::new(ExpTransform), Box::new(AffineTransform::new(1.0f32, 2.0f32))];
+    let transforms: Vec<Box<dyn Transform<f32>>> = vec![
+        Box::new(ExpTransform),
+        Box::new(AffineTransform::new(1.0f32, 2.0f32)),
+    ];
     let ct = CatTransform::new(transforms, 0, vec![2, 1]).unwrap();
     let x = from_slice(&[0.1f32, 0.2, 0.3], &[3]).unwrap();
     let y = ct.forward(&x).unwrap();
@@ -47,8 +46,10 @@ fn divergence_cat_transform_forward_ldj() {
 
 #[test]
 fn divergence_stack_transform_forward_ldj() {
-    let transforms: Vec<Box<dyn Transform<f32>>> =
-        vec![Box::new(ExpTransform), Box::new(AffineTransform::new(0.0f32, 3.0f32))];
+    let transforms: Vec<Box<dyn Transform<f32>>> = vec![
+        Box::new(ExpTransform),
+        Box::new(AffineTransform::new(0.0f32, 3.0f32)),
+    ];
     let st = StackTransform::new(transforms, 0);
     let x = from_slice(&[0.1f32, 0.2, 0.3, 0.4], &[2, 2]).unwrap();
     let y = st.forward(&x).unwrap();
