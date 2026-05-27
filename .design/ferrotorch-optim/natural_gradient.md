@@ -5,7 +5,13 @@ tier: 3-component
 status: draft
 baseline-pytorch: 6710f8ebc (working tree at /home/doll/pytorch)
 upstream-paths:
-  - torch/optim/optimizer.py
+  - torch/optim/optimizer.py   # CONTRACT ONLY (Optimizer base class)
+academic-source:
+  - Martens & Grosse 2015, "Optimizing Neural Networks with
+    Kronecker-factored Approximate Curvature", ICML 2015, arXiv:1503.05671
+reference-impl:
+  - KFAC-PyTorch (github.com/alecwangcq/KFAC-Pytorch, KFACOptimizer)
+rdev7-exemption: yes  # K-FAC has no torch.optim op; custom add
 -->
 
 ## Summary
@@ -22,13 +28,41 @@ F_W^{-1} ≈ A^{-1} ⊗ G^{-1}
 natural_grad_W = G^{-1} @ grad_W @ A^{-1}
 ```
 
-**K-FAC is NOT in upstream `torch.optim`.** This module is a Rust
-ecosystem addition (R-DEV-7 — Rust analog of nngeometry / KFAC-PyTorch).
-The upstream cite is `torch/optim/optimizer.py` because the
-`Optimizer` trait surface is what ferrotorch's `Kfac` implements; the
-algorithmic substance comes from the Martens & Grosse paper plus the
-companion implementations in the Python ecosystem. Parity-oracle
-selection tracked by #1467.
+**K-FAC is NOT in upstream `torch.optim`** — there is no
+`torch.optim.KFAC` op and no ATen kernel for it. Per **R-DEV-7**
+(Rust-ecosystem analog), this module is a **custom add, exempt from the
+op-level upstream-cite rule** (resolved as the answer to #1467). The
+exemption is recorded in three places: the metadata header above, the
+route comment in `tooling/translate-routes.toml`, and this paragraph.
+
+The cite split is:
+
+- **Algorithm** — the Kronecker-factored Fisher approximation, the EMA
+  factor accumulation, Tikhonov damping, the `G^{-1} @ grad_W @ A^{-1}`
+  preconditioner, and the periodic inverse-recompute interval all come
+  from the **academic source**: Martens & Grosse 2015, *Optimizing
+  Neural Networks with Kronecker-factored Approximate Curvature*, ICML
+  2015 (**arXiv:1503.05671**), with the **KFAC-PyTorch** reference impl
+  (`github.com/alecwangcq/KFAC-Pytorch`, `KFACOptimizer`) as the
+  companion engineering reference.
+- **Contract** — the only thing preserved from upstream PyTorch is the
+  `Optimizer` base-class API surface (`step` / `state_dict` /
+  `load_state_dict` / `add_param_group` / `zero_grad`), so the route's
+  `upstream` points at `torch/optim/optimizer.py:339` (`class
+  Optimizer`) — the file ferrotorch's `impl<T> Optimizer<T> for Kfac<T>`
+  mirrors. `step` is the abstract `raise NotImplementedError` at
+  `torch/optim/optimizer.py:1094`; `state_dict` at `:681`;
+  `add_param_group` at `:1104`.
+
+Because no torch op exists, the correctness contract is between this
+implementation and the **closed-form K-FAC math** — verified
+non-tautologically (R-CHAR-3) by `test_kronecker_identity_matches_dense_fisher`
+(builds the dense Fisher `kron(A+λI, G+λI)`, solves it independently, and
+asserts the reshaped solution equals the step's `G_d^{-1} @ grad @
+A_d^{-1}` preconditioner — i.e. the Kronecker identity
+`(A⊗G)^{-1} vec(grad) = vec(G^{-1} grad A^{-1})` holds) and
+`test_damping_limit_recovers_scaled_sgd` (λ→∞ collapses the
+preconditioned direction onto the scaled raw gradient).
 
 ## Requirements
 
@@ -179,13 +213,25 @@ per-step `format!()` allocation when `step()` constructs the
 
 ## Parity contract
 
-`parity_ops = []`. **K-FAC is not in upstream torch.optim**; the parity
-contract is between this implementation and the Martens & Grosse 2015
-algorithmic specification, with cross-validation against the
-`kfac_*_within_tolerance` CUDA tests (which verify CPU↔CUDA agreement
-within `1e-6` for f64). Parity-oracle selection (nngeometry,
-KFAC-PyTorch, or a deliberate exemption from the upstream-cite rule)
-tracked by #1467.
+`parity_ops = []`. **K-FAC is not in upstream torch.optim**, so there is
+no parity-sweep op and no torch oracle. #1467 is **resolved as the
+R-DEV-7 custom-add exemption** (not by selecting a third-party Python
+oracle): the correctness contract is between this implementation and the
+**closed-form Martens & Grosse 2015 math**, verified by:
+
+- `test_kronecker_identity_matches_dense_fisher` — builds the dense
+  Fisher `M = kron(A+λI, G+λI)`, solves `M @ y = vec(grad^T)` via the
+  independent `ferrotorch_core::linalg::{kron, solve}` path, reshapes,
+  and asserts equality with the step's preconditioner `G_d^{-1} @ grad @
+  A_d^{-1}` (`G_d = G+λI`, `A_d = A+λI`). This confirms the Kronecker
+  identity `(A⊗G)^{-1} vec(X) = vec(G^{-1} X A^{-1})` holds for the
+  damped factors — the algebraic heart of K-FAC.
+- `test_damping_limit_recovers_scaled_sgd` — λ→∞ drives `(A+λI)^{-1} →
+  (1/λ)I` and `(G+λI)^{-1} → (1/λ)I`, so the preconditioned direction
+  collapses onto `(1/λ²) · grad` (scaled gradient descent), confirming
+  the damping limit.
+- `kfac_*_within_tolerance` CUDA tests cross-validate CPU↔CUDA agreement
+  within `1e-6` for f64.
 
 Edge cases the code owns:
 
@@ -216,6 +262,10 @@ CUDA-conditional):
 - `test_step_with_identity_factors_matches_sgd`
 - `test_convergence_quadratic`
 - `test_convergence_with_kfac_factors`
+- `test_kronecker_identity_matches_dense_fisher` (R-CHAR-3 — the
+  Kronecker identity verified against the dense Fisher via
+  `linalg::kron` + `linalg::solve`)
+- `test_damping_limit_recovers_scaled_sgd` (R-CHAR-3 — λ→∞ damping limit)
 - `test_state_dict_roundtrip`
 - `test_kfac_lr_accessors`
 - `test_kfac_weight_decay`

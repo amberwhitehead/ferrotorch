@@ -3638,10 +3638,21 @@ design = ".design/ferrotorch-optim/nadam.md"
 parity_ops = []
 
 
+# R-DEV-7 ECOSYSTEM ADDITION (custom add — exempt from op-level upstream-cite).
+# K-FAC (Kronecker-Factored Approximate Curvature) is NOT in upstream
+# torch.optim. The algorithm comes from the academic source — Martens &
+# Grosse 2015, "Optimizing Neural Networks with Kronecker-factored Approximate
+# Curvature", ICML 2015 (arXiv:1503.05671) — and the companion reference impl
+# KFAC-PyTorch (github.com/alecwangcq/KFAC-Pytorch, KFACOptimizer). What
+# ferrotorch's Kfac DOES preserve from upstream is the Optimizer base-class
+# CONTRACT (step / state_dict / load_state_dict / add_param_group / zero_grad),
+# so the route's upstream points at torch/optim/optimizer.py — the file whose
+# API surface Kfac<T>'s `Optimizer<T>` trait impl mirrors. The Kronecker math
+# is verified against the closed form in mod tests (no torch parity op exists).
 [[route]]
 crate_pattern = "ferrotorch-optim/src/natural_gradient.rs"
 upstream = [
-  "/home/doll/pytorch/torch/optim/",
+  "/home/doll/pytorch/torch/optim/optimizer.py",
 ]
 design = ".design/ferrotorch-optim/natural_gradient.md"
 parity_ops = []

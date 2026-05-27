@@ -27,6 +27,30 @@
 //! All parameter updates execute inside `no_grad()` so the optimizer step is
 //! never recorded in the autograd graph.
 //!
+//! # Upstream provenance (R-DEV-7 ecosystem addition, #1467)
+//!
+//! K-FAC is **not** in upstream `torch.optim` — there is no `torch.optim.KFAC`
+//! op or ATen kernel. Per R-DEV-7 this module is a custom add, **exempt from
+//! the op-level upstream-cite rule**. The cite splits two ways:
+//!
+//! - **Algorithm** — Martens & Grosse 2015, *Optimizing Neural Networks with
+//!   Kronecker-factored Approximate Curvature*, ICML 2015 (arXiv:1503.05671),
+//!   with the KFAC-PyTorch reference impl
+//!   (`github.com/alecwangcq/KFAC-Pytorch`, `KFACOptimizer`) as the companion.
+//! - **Contract** — the `Optimizer` base-class API surface
+//!   (`torch/optim/optimizer.py:339`, `class Optimizer`), which this module's
+//!   `impl<T> Optimizer<T> for Kfac<T>` mirrors (`step` at `:1094`,
+//!   `state_dict` at `:681`, `add_param_group` at `:1104`).
+//!
+//! Because no torch parity op exists, correctness is pinned by the closed-form
+//! K-FAC math (R-CHAR-3, no tautologies):
+//! `tests::test_kronecker_identity_matches_dense_fisher` builds the dense
+//! Fisher `kron(A+λI, G+λI)`, inverts it via the independent
+//! `linalg::{kron, solve}` path, and asserts the reshaped solution equals the
+//! step's `G_d^{-1} @ grad @ A_d^{-1}` preconditioner; and
+//! `tests::test_damping_limit_recovers_scaled_sgd` confirms λ→∞ recovers
+//! scaled gradient descent.
+//!
 //! ## REQ status (per `.design/ferrotorch-optim/natural_gradient.md`)
 //!
 //! | REQ | Status | Evidence |
@@ -1122,6 +1146,175 @@ mod tests {
             "expected W[1] near 0, got {}",
             final_w[1]
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // R-CHAR-3 — Kronecker identity verified against the dense Fisher.
+    //
+    // K-FAC's whole premise is the algebraic identity
+    //     (A ⊗ G)^{-1} vec(X) = vec(G^{-1} X A^{-1})
+    // so the cheap per-layer preconditioner `G_d^{-1} @ grad @ A_d^{-1}`
+    // (with damped factors A_d = A + λI, G_d = G + λI) equals the result of
+    // inverting the *full* dense Fisher `A_d ⊗ G_d` and applying it to the
+    // flattened gradient. We verify this NON-tautologically: the expected
+    // value is computed via a completely independent path
+    // (`linalg::kron` builds the dense Fisher, `linalg::solve` inverts it),
+    // never by re-deriving from the same `G_d^{-1} grad A_d^{-1}` expression.
+    //
+    // Layout note: ferrotorch's `linalg::kron` lays out
+    //   kron(A,G)[(i*r+u), (j*s+v)] = A[i,j]·G[u,v]
+    // (torch convention, row-major). With A: [in,in] (indices i,j) and
+    // G: [out,out] (indices u,v), applying `M = kron(A_d,G_d)` to the
+    // row-major flatten of a [in,out] matrix Y yields the row-major flatten
+    // of `Z = A_d · Y · G_d` (A_d, G_d symmetric ⇒ no transpose). Setting
+    // Z = grad_W^T ([in,out]) and solving for Y gives Y = U^T, where
+    // U = G_d^{-1} @ grad_W @ A_d^{-1} is exactly the K-FAC preconditioner.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_kronecker_identity_matches_dense_fisher() {
+        use ferrotorch_core::linalg::{kron, solve};
+        use ferrotorch_core::ops::linalg::matmul;
+
+        let lambda = 0.5_f64;
+        let inn = 2usize;
+        let out = 3usize;
+
+        // Symmetric SPD input covariance A: [in,in].
+        let a = Tensor::from_storage(
+            TensorStorage::cpu(vec![2.0, 1.0, 1.0, 3.0]),
+            vec![inn, inn],
+            false,
+        )
+        .unwrap();
+        // Symmetric SPD output-grad covariance G: [out,out].
+        let g = Tensor::from_storage(
+            TensorStorage::cpu(vec![4.0, 1.0, 0.0, 1.0, 5.0, 2.0, 0.0, 2.0, 6.0]),
+            vec![out, out],
+            false,
+        )
+        .unwrap();
+        // grad_W: [out,in].
+        let grad_w = Tensor::from_storage(
+            TensorStorage::cpu(vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0]),
+            vec![out, inn],
+            false,
+        )
+        .unwrap();
+
+        // Damped factors A_d = A + λI, G_d = G + λI (built explicitly so
+        // the test does not depend on `invert_damped_tensor`'s internals).
+        let damp_a = mul(&eye::<f64>(inn).unwrap(), &scalar(lambda).unwrap()).unwrap();
+        let a_d = add(&a, &damp_a).unwrap();
+        let damp_g = mul(&eye::<f64>(out).unwrap(), &scalar(lambda).unwrap()).unwrap();
+        let g_d = add(&g, &damp_g).unwrap();
+
+        // --- Path 1: the K-FAC preconditioner U = G_d^{-1} @ grad @ A_d^{-1}.
+        // invert_damped_tensor(A, λ) = (A + λI)^{-1}, identical to A_d^{-1}.
+        let a_inv = invert_damped_tensor(&a, lambda).unwrap();
+        let g_inv = invert_damped_tensor(&g, lambda).unwrap();
+        let temp = matmul(&g_inv, &grad_w).unwrap(); // [out,in]
+        let u_kfac = matmul(&temp, &a_inv).unwrap(); // [out,in]
+
+        // --- Path 2 (INDEPENDENT): dense Fisher M = kron(A_d, G_d), then
+        // solve M @ y = vec_rowmajor(grad_W^T), reshape to [in,out], transpose.
+        let m = kron(&a_d, &g_d).unwrap(); // [in*out, in*out]
+        // b = row-major flatten of grad_W^T ([in,out]); grad_W^T[j,u]=grad_W[u,j].
+        let grad_wt = grad_w.t().unwrap(); // [in,out]
+        let b_vec = grad_wt.data_vec().unwrap(); // length in*out, row-major
+        let b = Tensor::from_storage(TensorStorage::cpu(b_vec), vec![inn * out, 1], false).unwrap();
+        let y = solve(&m, &b).unwrap(); // [in*out, 1]
+        let y_data = y.data_vec().unwrap();
+        // Reshape y -> Y [in,out] (row-major), then U_dense = Y^T : [out,in].
+        let y_mat =
+            Tensor::from_storage(TensorStorage::cpu(y_data), vec![inn, out], false).unwrap();
+        let u_dense = y_mat.t().unwrap(); // [out,in]
+
+        let u_kfac_d = u_kfac.data_vec().unwrap();
+        let u_dense_d = u_dense.data_vec().unwrap();
+        assert_eq!(u_kfac_d.len(), u_dense_d.len());
+        for (i, (k, d)) in u_kfac_d.iter().zip(u_dense_d.iter()).enumerate() {
+            assert!(
+                (k - d).abs() < 1e-9,
+                "Kronecker identity violated at idx {i}: \
+                 preconditioner G_d^-1 grad A_d^-1 = {k}, dense (A_d⊗G_d)^-1 = {d}"
+            );
+        }
+
+        // Cross-check: the dense Fisher applied to U^T must reproduce grad_W^T.
+        // M @ vec(U^T) == vec(grad_W^T).
+        let ut = u_kfac.t().unwrap(); // [in,out]
+        let ut_vec = ut.data_vec().unwrap();
+        let ut_t =
+            Tensor::from_storage(TensorStorage::cpu(ut_vec), vec![inn * out, 1], false).unwrap();
+        let recon = matmul(&m, &ut_t).unwrap();
+        let recon_d = recon.data_vec().unwrap();
+        let target = grad_wt.data_vec().unwrap();
+        for (i, (r, t)) in recon_d.iter().zip(target.iter()).enumerate() {
+            assert!(
+                (r - t).abs() < 1e-9,
+                "(A_d⊗G_d) @ vec(U^T) != vec(grad_W^T) at idx {i}: {r} vs {t}"
+            );
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // R-CHAR-3 — damping limit: λ→∞ recovers scaled gradient descent.
+    //
+    // As λ→∞, (A + λI)^{-1} → (1/λ) I and (G + λI)^{-1} → (1/λ) I, so the
+    // preconditioned gradient G_d^{-1} @ grad @ A_d^{-1} → (1/λ²) grad —
+    // i.e. plain (scaled) gradient descent. We pick a large λ and assert
+    // the preconditioned direction matches (1/λ²)·grad to leading order.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_damping_limit_recovers_scaled_sgd() {
+        use ferrotorch_core::ops::linalg::matmul;
+
+        let lambda = 1.0e7_f64; // very large damping
+        let inn = 2usize;
+        let out = 3usize;
+
+        // Finite (order-1) factors — overwhelmed by the huge λ.
+        let a = Tensor::from_storage(
+            TensorStorage::cpu(vec![2.0, 1.0, 1.0, 3.0]),
+            vec![inn, inn],
+            false,
+        )
+        .unwrap();
+        let g = Tensor::from_storage(
+            TensorStorage::cpu(vec![4.0, 1.0, 0.0, 1.0, 5.0, 2.0, 0.0, 2.0, 6.0]),
+            vec![out, out],
+            false,
+        )
+        .unwrap();
+        let grad_w = Tensor::from_storage(
+            TensorStorage::cpu(vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0]),
+            vec![out, inn],
+            false,
+        )
+        .unwrap();
+
+        let a_inv = invert_damped_tensor(&a, lambda).unwrap();
+        let g_inv = invert_damped_tensor(&g, lambda).unwrap();
+        let temp = matmul(&g_inv, &grad_w).unwrap();
+        let u = matmul(&temp, &a_inv).unwrap();
+        let u_d = u.data_vec().unwrap();
+
+        // Expected leading-order direction: (1/λ²) · grad_W.
+        let grad_d = grad_w.data_vec().unwrap();
+        let scale = 1.0 / (lambda * lambda);
+        for (i, (precond, &raw)) in u_d.iter().zip(grad_d.iter()).enumerate() {
+            let expected = scale * raw;
+            // Relative tolerance: O(1/λ) correction terms are ~1e-7 of the
+            // leading term, well inside 1e-4 relative.
+            let rel_err = (precond - expected).abs() / expected.abs().max(1e-30);
+            assert!(
+                rel_err < 1e-4,
+                "damping limit failed at idx {i}: preconditioned={precond}, \
+                 (1/λ²)·grad={expected}, rel_err={rel_err}"
+            );
+        }
     }
 
     // -----------------------------------------------------------------------
