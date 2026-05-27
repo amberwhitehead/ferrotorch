@@ -52,6 +52,11 @@ fn cpu_tensor(data: &[f32], shape: &[usize]) -> Tensor<f32> {
 /// (N, *spatial), then y = γ·(x−μ)/sqrt(σ²+eps)+β.
 /// Tracking: #1449 re-audit.
 #[test]
+#[allow(
+    clippy::identity_op,
+    clippy::erasing_op,
+    reason = "explicit b*CHW + c*HW + h*W + w flat-index expressions keep the NCHW stride layout legible; the 0*/1* terms document which dim each factor indexes"
+)]
 fn divergence_batchnorm2d_gpu_train_output_vs_torch() {
     if !cuda_ready() {
         return;
@@ -173,6 +178,11 @@ fn divergence_batchnorm2d_gpu_running_stats_vs_torch() {
 /// training.
 /// Tracking: #1449 re-audit.
 #[test]
+#[allow(
+    clippy::identity_op,
+    clippy::erasing_op,
+    reason = "explicit b*CHW + c*HW + h*W + w flat-index expressions keep the NCHW stride layout legible; the 0*/1* terms document which dim each factor indexes"
+)]
 fn divergence_batchnorm2d_gpu_eval_output_vs_torch() {
     if !cuda_ready() {
         return;
@@ -362,6 +372,11 @@ fn make_go(n: usize) -> Vec<f32> {
 /// `aten/src/ATen/native/cuda/Normalization.cuh:388 batch_norm_backward_kernel`
 /// (train branch: grad_input = (go - (x-mean)*proj_scale - grad_mean)*grad_scale).
 #[test]
+#[allow(
+    clippy::identity_op,
+    clippy::erasing_op,
+    reason = "explicit b*CHW + c*HW + h*W + w flat-index expressions keep the NCHW stride layout legible; the 0*/1* terms document which dim each factor indexes"
+)]
 fn divergence_batchnorm2d_gpu_train_backward_vs_torch() {
     if !cuda_ready() {
         return;
@@ -397,7 +412,7 @@ fn divergence_batchnorm2d_gpu_train_backward_vs_torch() {
     );
     let gid = gi.data_vec().unwrap();
     let idx_239 = ((1 * c + 5) * h + 3) * w + 4;
-    for (idx, torch) in [(0usize, -0.196_770_15_f32), (idx_239, -0.223_190_10_f32)] {
+    for (idx, torch) in [(0usize, -0.196_770_15_f32), (idx_239, -0.223_190_1_f32)] {
         assert!(
             (gid[idx] - torch).abs() < 1e-3,
             "BN2d train grad_input[{idx}]: torch={torch} ferrotorch={}",
@@ -415,7 +430,7 @@ fn divergence_batchnorm2d_gpu_train_backward_vs_torch() {
         .expect("grad_weight populated");
     assert!(gw.is_cuda(), "grad_weight must stay on CUDA");
     let gwd = gw.data_vec().unwrap();
-    for (idx, torch) in [(0usize, 0.767_532_89_f32), (5usize, -0.611_419_50_f32)] {
+    for (idx, torch) in [(0usize, 0.767_532_9_f32), (5usize, -0.611_419_5_f32)] {
         assert!(
             (gwd[idx] - torch).abs() < 1e-3,
             "BN2d train grad_weight[{idx}]: torch={torch} ferrotorch={}",
@@ -433,7 +448,7 @@ fn divergence_batchnorm2d_gpu_train_backward_vs_torch() {
         .expect("grad_bias populated");
     assert!(gb.is_cuda(), "grad_bias must stay on CUDA");
     let gbd = gb.data_vec().unwrap();
-    for (idx, torch) in [(0usize, 2.0_f32), (5usize, 2.150_000_1_f32)] {
+    for (idx, torch) in [(0usize, 2.0_f32), (5usize, 2.15_f32)] {
         assert!(
             (gbd[idx] - torch).abs() < 1e-3,
             "BN2d train grad_bias[{idx}]: torch={torch} ferrotorch={}",
@@ -448,6 +463,11 @@ fn divergence_batchnorm2d_gpu_train_backward_vs_torch() {
 /// `Normalization.cuh:388` eval branch: grad_input = go * invstd * weight,
 /// invstd = 1/sqrt(running_var + eps).
 #[test]
+#[allow(
+    clippy::identity_op,
+    clippy::erasing_op,
+    reason = "explicit b*CHW + c*HW + h*W + w flat-index expressions keep the NCHW stride layout legible; the 0*/1* terms document which dim each factor indexes"
+)]
 fn divergence_batchnorm2d_gpu_eval_backward_vs_torch() {
     if !cuda_ready() {
         return;
@@ -485,7 +505,7 @@ fn divergence_batchnorm2d_gpu_eval_backward_vs_torch() {
     assert!(gi.is_cuda(), "grad_input must stay on CUDA");
     let gid = gi.data_vec().unwrap();
     let idx_239 = ((1 * c + 5) * h + 3) * w + 4;
-    for (idx, torch) in [(0usize, -0.111_802_70_f32), (idx_239, -0.065_872_94_f32)] {
+    for (idx, torch) in [(0usize, -0.111_802_7_f32), (idx_239, -0.065_872_94_f32)] {
         assert!(
             (gid[idx] - torch).abs() < 1e-3,
             "BN2d eval grad_input[{idx}]: torch={torch} ferrotorch={}",
@@ -502,7 +522,7 @@ fn divergence_batchnorm2d_gpu_eval_backward_vs_torch() {
         .unwrap()
         .expect("grad_weight populated");
     let gwd = gw.data_vec().unwrap();
-    for (idx, torch) in [(0usize, 0.650_132_72_f32), (5usize, -0.700_692_95_f32)] {
+    for (idx, torch) in [(0usize, 0.650_132_7_f32), (5usize, -0.700_692_95_f32)] {
         assert!(
             (gwd[idx] - torch).abs() < 1e-3,
             "BN2d eval grad_weight[{idx}]: torch={torch} ferrotorch={}",
@@ -520,6 +540,11 @@ fn divergence_batchnorm2d_gpu_eval_backward_vs_torch() {
 /// `torch/nn/functional.py instance_norm` (lowers to the per-instance
 /// batch-norm reduction).
 #[test]
+#[allow(
+    clippy::identity_op,
+    clippy::erasing_op,
+    reason = "explicit b*CHW + c*HW + h*W + w flat-index expressions keep the NCHW stride layout legible; the 0*/1* terms document which dim each factor indexes"
+)]
 fn divergence_instancenorm2d_gpu_backward_vs_torch() {
     if !cuda_ready() {
         return;
@@ -568,7 +593,7 @@ fn divergence_instancenorm2d_gpu_backward_vs_torch() {
         .expect("grad_weight populated");
     assert!(gw.is_cuda(), "InstanceNorm grad_weight must stay on CUDA");
     let gwd = gw.data_vec().unwrap();
-    let torch_gw = [2.065_219_6_f32, -0.002_241_67, -0.896_856_78, -0.520_810_96];
+    let torch_gw = [2.065_219_6_f32, -0.002_241_67, -0.896_856_8, -0.520_810_96];
     for (idx, &torch) in torch_gw.iter().enumerate() {
         assert!(
             (gwd[idx] - torch).abs() < 1e-3,
@@ -579,7 +604,7 @@ fn divergence_instancenorm2d_gpu_backward_vs_torch() {
     let bias = params.iter().find(|(n, _)| n == "bias").unwrap().1;
     let gb = bias.tensor().grad().unwrap().expect("grad_bias populated");
     let gbd = gb.data_vec().unwrap();
-    let torch_gb = [3.419_999_8_f32, 4.5, 5.579_999_9, 4.02];
+    let torch_gb = [3.419_999_8_f32, 4.5, 5.58, 4.02];
     for (idx, &torch) in torch_gb.iter().enumerate() {
         assert!(
             (gbd[idx] - torch).abs() < 1e-3,
@@ -597,6 +622,11 @@ fn divergence_instancenorm2d_gpu_backward_vs_torch() {
 /// `torch/nn/functional.py:3032-3046 local_response_norm` (square →
 /// avg_pool-over-channels → `*alpha + k` → pow(beta) → divide).
 #[test]
+#[allow(
+    clippy::identity_op,
+    clippy::erasing_op,
+    reason = "explicit b*CHW + c*HW + h*W + w flat-index expressions keep the NCHW stride layout legible; the 0*/1* terms document which dim each factor indexes"
+)]
 fn divergence_local_response_norm_gpu_fwd_bwd_vs_torch() {
     if !cuda_ready() {
         return;
