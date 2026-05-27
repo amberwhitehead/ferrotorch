@@ -5,7 +5,10 @@
 // /tmp/oracle_bn_in.py (BatchNorm/InstanceNorm). Each array is the `.grad`
 // (or forward output) tensor torch produced for the input the test reconstructs.
 
-#[allow(dead_code, reason = "torch oracle data consumed via include! by divergence_critic_norm_gpu_backward_reaudit.rs; cargo also compiles this file as a standalone tests/ target where the consts have no consumer")]
+#[allow(
+    dead_code,
+    reason = "torch oracle data consumed via include! by divergence_critic_norm_gpu_backward_reaudit.rs; cargo also compiles this file as a standalone tests/ target where the consts have no consumer"
+)]
 const LRNA_OUT: [f32; 60] = [
     -9.999_749_7e-1,
     -8.299_849_6e-1,
@@ -68,7 +71,10 @@ const LRNA_OUT: [f32; 60] = [
     1.999_949_9e-2,
     1.899_965_6e-1,
 ];
-#[allow(dead_code, reason = "torch oracle data consumed via include! by divergence_critic_norm_gpu_backward_reaudit.rs; cargo also compiles this file as a standalone tests/ target where the consts have no consumer")]
+#[allow(
+    dead_code,
+    reason = "torch oracle data consumed via include! by divergence_critic_norm_gpu_backward_reaudit.rs; cargo also compiles this file as a standalone tests/ target where the consts have no consumer"
+)]
 const LRNA_GI: [f32; 60] = [
     -9.999_252e-2,
     -2.999_810_7e-2,
@@ -131,7 +137,10 @@ const LRNA_GI: [f32; 60] = [
     1.099_972_9e-1,
     1.799_972_8e-1,
 ];
-#[allow(dead_code, reason = "torch oracle data consumed via include! by divergence_critic_norm_gpu_backward_reaudit.rs; cargo also compiles this file as a standalone tests/ target where the consts have no consumer")]
+#[allow(
+    dead_code,
+    reason = "torch oracle data consumed via include! by divergence_critic_norm_gpu_backward_reaudit.rs; cargo also compiles this file as a standalone tests/ target where the consts have no consumer"
+)]
 const LRNB_OUT: [f32; 24] = [
     -7.348_369_4e-1,
     -5.633_78e-1,
@@ -158,7 +167,10 @@ const LRNB_OUT: [f32; 24] = [
     -7.348_320_5e-1,
     -5.633_724_3e-1,
 ];
-#[allow(dead_code, reason = "torch oracle data consumed via include! by divergence_critic_norm_gpu_backward_reaudit.rs; cargo also compiles this file as a standalone tests/ target where the consts have no consumer")]
+#[allow(
+    dead_code,
+    reason = "torch oracle data consumed via include! by divergence_critic_norm_gpu_backward_reaudit.rs; cargo also compiles this file as a standalone tests/ target where the consts have no consumer"
+)]
 const LRNB_GI: [f32; 24] = [
     -9.797_706_5e-2,
     -5.715_338_5e-2,
@@ -185,7 +197,10 @@ const LRNB_GI: [f32; 24] = [
     -5.715_095e-2,
     -1.632_747e-2,
 ];
-#[allow(dead_code, reason = "torch oracle data consumed via include! by divergence_critic_norm_gpu_backward_reaudit.rs; cargo also compiles this file as a standalone tests/ target where the consts have no consumer")]
+#[allow(
+    dead_code,
+    reason = "torch oracle data consumed via include! by divergence_critic_norm_gpu_backward_reaudit.rs; cargo also compiles this file as a standalone tests/ target where the consts have no consumer"
+)]
 const LRNC_OUT: [f32; 24] = [
     -7.916_192_4e-1,
     -5.937_425e-1,
@@ -212,7 +227,10 @@ const LRNC_OUT: [f32; 24] = [
     0.00000000e+00,
     1.979_195e-1,
 ];
-#[allow(dead_code, reason = "torch oracle data consumed via include! by divergence_critic_norm_gpu_backward_reaudit.rs; cargo also compiles this file as a standalone tests/ target where the consts have no consumer")]
+#[allow(
+    dead_code,
+    reason = "torch oracle data consumed via include! by divergence_critic_norm_gpu_backward_reaudit.rs; cargo also compiles this file as a standalone tests/ target where the consts have no consumer"
+)]
 const LRNC_GI: [f32; 24] = [
     -9.893_637e-2,
     -3.298_168_6e-2,
@@ -239,7 +257,10 @@ const LRNC_GI: [f32; 24] = [
     3.298_569_5e-2,
     9.895_841e-2,
 ];
-#[allow(dead_code, reason = "torch oracle data consumed via include! by divergence_critic_norm_gpu_backward_reaudit.rs; cargo also compiles this file as a standalone tests/ target where the consts have no consumer")]
+#[allow(
+    dead_code,
+    reason = "torch oracle data consumed via include! by divergence_critic_norm_gpu_backward_reaudit.rs; cargo also compiles this file as a standalone tests/ target where the consts have no consumer"
+)]
 const BNG_GI: [f32; 180] = [
     -2.824_982e-1,
     -1.898_899_7e-1,
@@ -422,7 +443,10 @@ const BNG_GI: [f32; 180] = [
     1.210_730_2e-2,
     1.14736915e-01,
 ];
-#[allow(dead_code, reason = "torch oracle data consumed via include! by divergence_critic_norm_gpu_backward_reaudit.rs; cargo also compiles this file as a standalone tests/ target where the consts have no consumer")]
+#[allow(
+    dead_code,
+    reason = "torch oracle data consumed via include! by divergence_critic_norm_gpu_backward_reaudit.rs; cargo also compiles this file as a standalone tests/ target where the consts have no consumer"
+)]
 const BNG_GW: [f32; 5] = [
     -3.796_415_6e-1,
     -3.088_055_3e-1,
@@ -430,9 +454,15 @@ const BNG_GW: [f32; 5] = [
     2.214_802_5e-1,
     8.000_997_5e-2,
 ];
-#[allow(dead_code, reason = "torch oracle data consumed via include! by divergence_critic_norm_gpu_backward_reaudit.rs; cargo also compiles this file as a standalone tests/ target where the consts have no consumer")]
+#[allow(
+    dead_code,
+    reason = "torch oracle data consumed via include! by divergence_critic_norm_gpu_backward_reaudit.rs; cargo also compiles this file as a standalone tests/ target where the consts have no consumer"
+)]
 const BNG_GB: [f32; 5] = [1.550_000_1, 2.0, 1.75, 1.85, 1.6];
-#[allow(dead_code, reason = "torch oracle data consumed via include! by divergence_critic_norm_gpu_backward_reaudit.rs; cargo also compiles this file as a standalone tests/ target where the consts have no consumer")]
+#[allow(
+    dead_code,
+    reason = "torch oracle data consumed via include! by divergence_critic_norm_gpu_backward_reaudit.rs; cargo also compiles this file as a standalone tests/ target where the consts have no consumer"
+)]
 const ING_GI: [f32; 48] = [
     -1.435_660_1e-4,
     -1.025_881_7e-4,
@@ -483,11 +513,20 @@ const ING_GI: [f32; 48] = [
     -6.276_353_4e-2,
     -1.617_292_7e-2,
 ];
-#[allow(dead_code, reason = "torch oracle data consumed via include! by divergence_critic_norm_gpu_backward_reaudit.rs; cargo also compiles this file as a standalone tests/ target where the consts have no consumer")]
+#[allow(
+    dead_code,
+    reason = "torch oracle data consumed via include! by divergence_critic_norm_gpu_backward_reaudit.rs; cargo also compiles this file as a standalone tests/ target where the consts have no consumer"
+)]
 const ING_GW: [f32; 3] = [1.466_251_9, -6.458_490_5e-1, 8.501_347_3e-1];
-#[allow(dead_code, reason = "torch oracle data consumed via include! by divergence_critic_norm_gpu_backward_reaudit.rs; cargo also compiles this file as a standalone tests/ target where the consts have no consumer")]
+#[allow(
+    dead_code,
+    reason = "torch oracle data consumed via include! by divergence_critic_norm_gpu_backward_reaudit.rs; cargo also compiles this file as a standalone tests/ target where the consts have no consumer"
+)]
 const ING_GB: [f32; 3] = [4.800_000_2e-1, 3.199_999_6e-1, 1.04];
-#[allow(dead_code, reason = "torch oracle data consumed via include! by divergence_critic_norm_gpu_backward_reaudit.rs; cargo also compiles this file as a standalone tests/ target where the consts have no consumer")]
+#[allow(
+    dead_code,
+    reason = "torch oracle data consumed via include! by divergence_critic_norm_gpu_backward_reaudit.rs; cargo also compiles this file as a standalone tests/ target where the consts have no consumer"
+)]
 const BN1DG_GI: [f32; 60] = [
     -2.019_616e-1,
     -1.280_862_5e-1,
@@ -550,9 +589,15 @@ const BN1DG_GI: [f32; 60] = [
     -8.814_990_5e-2,
     1.153_649_5e-2,
 ];
-#[allow(dead_code, reason = "torch oracle data consumed via include! by divergence_critic_norm_gpu_backward_reaudit.rs; cargo also compiles this file as a standalone tests/ target where the consts have no consumer")]
+#[allow(
+    dead_code,
+    reason = "torch oracle data consumed via include! by divergence_critic_norm_gpu_backward_reaudit.rs; cargo also compiles this file as a standalone tests/ target where the consts have no consumer"
+)]
 const BN1DG_GW: [f32; 3] = [3.652_685_6e-1, -3.624_209_2e-1, 9.807_532e-2];
-#[allow(dead_code, reason = "torch oracle data consumed via include! by divergence_critic_norm_gpu_backward_reaudit.rs; cargo also compiles this file as a standalone tests/ target where the consts have no consumer")]
+#[allow(
+    dead_code,
+    reason = "torch oracle data consumed via include! by divergence_critic_norm_gpu_backward_reaudit.rs; cargo also compiles this file as a standalone tests/ target where the consts have no consumer"
+)]
 const BNNA_GI: [f32; 72] = [
     -2.590_900_4e-1,
     -1.598_736_5e-1,
@@ -627,7 +672,10 @@ const BNNA_GI: [f32; 72] = [
     -2.999_645_5e-1,
     -2.090_091_3e-1,
 ];
-#[allow(dead_code, reason = "torch oracle data consumed via include! by divergence_critic_norm_gpu_backward_reaudit.rs; cargo also compiles this file as a standalone tests/ target where the consts have no consumer")]
+#[allow(
+    dead_code,
+    reason = "torch oracle data consumed via include! by divergence_critic_norm_gpu_backward_reaudit.rs; cargo also compiles this file as a standalone tests/ target where the consts have no consumer"
+)]
 const BN3D_GI: [f32; 48] = [
     -3.288_95e-1,
     -2.028_739_8e-1,
@@ -678,7 +726,13 @@ const BN3D_GI: [f32; 48] = [
     8.921_336_4e-2,
     1.837_134_8e-1,
 ];
-#[allow(dead_code, reason = "torch oracle data consumed via include! by divergence_critic_norm_gpu_backward_reaudit.rs; cargo also compiles this file as a standalone tests/ target where the consts have no consumer")]
+#[allow(
+    dead_code,
+    reason = "torch oracle data consumed via include! by divergence_critic_norm_gpu_backward_reaudit.rs; cargo also compiles this file as a standalone tests/ target where the consts have no consumer"
+)]
 const BN3D_GW: [f32; 3] = [1.621_803e-1, -2.444_343_9e-1, -5.905_509_4e-2];
-#[allow(dead_code, reason = "torch oracle data consumed via include! by divergence_critic_norm_gpu_backward_reaudit.rs; cargo also compiles this file as a standalone tests/ target where the consts have no consumer")]
+#[allow(
+    dead_code,
+    reason = "torch oracle data consumed via include! by divergence_critic_norm_gpu_backward_reaudit.rs; cargo also compiles this file as a standalone tests/ target where the consts have no consumer"
+)]
 const BN3D_GB: [f32; 3] = [6.5e-1, 7.5e-1, 8.5e-1];
