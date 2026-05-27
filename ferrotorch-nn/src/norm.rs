@@ -1620,6 +1620,20 @@ impl<T: Float> Module<T> for BatchNorm2d<T> {
             });
         }
 
+        // torch `_verify_batch_size` guard (`torch/nn/functional.py:2811-2814`):
+        // in training mode the per-channel element count (numel / channels =
+        // batch * spatial) must exceed 1 — variance is undefined with a single
+        // sample. Fires BEFORE the CPU/GPU dispatch so both paths reject
+        // identically (#1558).
+        if *self.training.lock().unwrap() && batch * spatial <= 1 {
+            return Err(FerrotorchError::InvalidArgument {
+                message: format!(
+                    "Expected more than 1 value per channel when training, got input size {:?}",
+                    shape
+                ),
+            });
+        }
+
         // GPU fast path (#1449): per-channel normalize over (B, H, W). f32-only
         // (the kernel is f32); running-stat update mirrors the CPU branch.
         if input.is_cuda() {
@@ -2271,6 +2285,20 @@ impl<T: Float> Module<T> for BatchNorm1d<T> {
             return Ok(input.clone());
         }
 
+        // torch `_verify_batch_size` guard (`torch/nn/functional.py:2811-2814`):
+        // in training mode the per-channel element count (numel / channels =
+        // batch * length) must exceed 1 — variance is undefined with a single
+        // sample. Fires BEFORE the CPU/GPU dispatch so both paths reject
+        // identically (#1558).
+        if *self.training.lock().unwrap() && batch * length <= 1 {
+            return Err(FerrotorchError::InvalidArgument {
+                message: format!(
+                    "Expected more than 1 value per channel when training, got input size {:?}",
+                    shape
+                ),
+            });
+        }
+
         // GPU fast path (#1449): per-channel normalize over (N,) or (N, L).
         if input.is_cuda() {
             if is_f32::<T>() {
@@ -2881,6 +2909,20 @@ impl<T: Float> Module<T> for BatchNorm3d<T> {
 
         if batch == 0 {
             return Ok(input.clone());
+        }
+
+        // torch `_verify_batch_size` guard (`torch/nn/functional.py:2811-2814`):
+        // in training mode the per-channel element count (numel / channels =
+        // batch * spatial) must exceed 1 — variance is undefined with a single
+        // sample. Fires BEFORE the CPU/GPU dispatch so both paths reject
+        // identically (#1558).
+        if *self.training.lock().unwrap() && batch * spatial <= 1 {
+            return Err(FerrotorchError::InvalidArgument {
+                message: format!(
+                    "Expected more than 1 value per channel when training, got input size {:?}",
+                    shape
+                ),
+            });
         }
 
         // GPU fast path (#1449): per-channel normalize over (B, D, H, W).

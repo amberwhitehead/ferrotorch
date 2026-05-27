@@ -30,7 +30,6 @@ fn cuda_ready() -> bool {
 /// ferrotorch returns `Ok([0.0, 0.0, 0.0])` (verified live on RTX 3090).
 /// Tracking: #1558
 #[test]
-#[ignore = "divergence: BatchNorm train missing _verify_batch_size guard; tracking #1558"]
 fn divergence_batchnorm2d_train_count1_must_reject() {
     if !cuda_ready() {
         return;
