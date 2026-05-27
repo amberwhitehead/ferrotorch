@@ -1575,7 +1575,12 @@ fn beta_entropy_scalar<T: Float>(a: T, b: T) -> T {
 /// t4 = ψ(α_k) - ψ(sum_p)
 /// KL = t1 - t2 + Σ_k t3·t4
 /// ```
-/// One scalar KL per batch row; output shape == `batch_shape`.
+/// The per-vector KL reduces over the last (event) dim `K` to one scalar; the
+/// leading batch dims of `p` and `q` are broadcast against each other (mirroring
+/// torch's `broadcast_all` on the concentration tensors in `_kl_dirichlet_dirichlet`,
+/// `torch/distributions/kl.py:263-272`), so disjoint batch dims (`p:[2,1,K]` vs
+/// `q:[1,2,K]` -> `[2,2]`) produce the broadcast batch shape instead of
+/// truncating to `p`'s batch shape. Output shape == broadcast `batch_shape`.
 fn kl_dirichlet_dirichlet<T: Float>(
     p: &Dirichlet<T>,
     q: &Dirichlet<T>,
@@ -1593,27 +1598,38 @@ fn kl_dirichlet_dirichlet<T: Float>(
         });
     }
     let zero = T::from(0.0).unwrap();
-    let b = pa.len() / k;
 
-    let mut out = Vec::with_capacity(b);
-    for bi in 0..b {
-        let prow = &pa[bi * k..bi * k + k];
-        // q broadcasts over p's batch rows when q has a single row.
-        let qbi = if qa.len() == k { 0 } else { bi };
-        let qrow = &qa[qbi * k..qbi * k + k];
-        let sum_p: T = prow.iter().copied().fold(zero, |acc, x| acc + x);
-        let sum_q: T = qrow.iter().copied().fold(zero, |acc, x| acc + x);
-        let t1 = lgamma_scalar(sum_p) - lgamma_scalar(sum_q);
-        let dig_sum_p = digamma_scalar(sum_p);
-        let mut t2 = zero;
-        let mut t34 = zero;
-        for (&ak, &bk) in prow.iter().zip(qrow.iter()) {
-            t2 += lgamma_scalar(ak) - lgamma_scalar(bk);
-            t34 += (ak - bk) * (digamma_scalar(ak) - dig_sum_p);
-        }
-        out.push(t1 - t2 + t34);
-    }
-    Tensor::from_storage(TensorStorage::cpu(out), p.batch_shape(), false)
+    // Broadcast over the BATCH dims (concentration is `[*batch, K]`; the KL
+    // reduces over the trailing event dim K). `kl_broadcast_index_pairs` gives
+    // the broadcast batch shape plus, per output element, the flat BATCH index
+    // into p's and q's row-major concentration vectors; each row starts at
+    // `idx * k`.
+    let p_batch = &p.concentration().shape()[..p.concentration().shape().len() - 1];
+    let q_batch = &q.concentration().shape()[..q.concentration().shape().len() - 1];
+    let plan = kl_broadcast_index_pairs(p_batch, q_batch)?;
+
+    let out: Vec<T> = plan
+        .p_idx
+        .iter()
+        .zip(plan.q_idx.iter())
+        .map(|(&pi, &qi)| {
+            let prow = &pa[pi * k..pi * k + k];
+            let qrow = &qa[qi * k..qi * k + k];
+            let sum_p: T = prow.iter().copied().fold(zero, |acc, x| acc + x);
+            let sum_q: T = qrow.iter().copied().fold(zero, |acc, x| acc + x);
+            let t1 = lgamma_scalar(sum_p) - lgamma_scalar(sum_q);
+            let dig_sum_p = digamma_scalar(sum_p);
+            let mut t2 = zero;
+            let mut t34 = zero;
+            for (&ak, &bk) in prow.iter().zip(qrow.iter()) {
+                t2 += lgamma_scalar(ak) - lgamma_scalar(bk);
+                t34 += (ak - bk) * (digamma_scalar(ak) - dig_sum_p);
+            }
+            t1 - t2 + t34
+        })
+        .collect();
+
+    Tensor::from_storage(TensorStorage::cpu(out), plan.out_shape, false)
 }
 
 /// KL(Beta(α, β) || Exponential(rate)) (cross-family).

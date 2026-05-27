@@ -34,18 +34,16 @@
 //! Tracking: #1574
 
 use ferrotorch_core::creation::from_slice;
-use ferrotorch_distributions::kl::kl_divergence;
 use ferrotorch_distributions::Dirichlet;
+use ferrotorch_distributions::kl::kl_divergence;
 
 #[test]
 fn divergence_kl_1573_dirichlet_disjoint_batch_broadcast() {
     // p concentration [2,1,3], q concentration [1,2,3] -> batch broadcast [2,2].
     let p = Dirichlet::new(from_slice(&[1.0f64, 2.0, 3.0, 2.0, 2.0, 2.0], &[2, 1, 3]).unwrap())
         .unwrap();
-    let q = Dirichlet::new(
-        from_slice(&[2.0f64, 2.0, 2.0, 1.0, 1.0, 1.0], &[1, 2, 3]).unwrap(),
-    )
-    .unwrap();
+    let q = Dirichlet::new(from_slice(&[2.0f64, 2.0, 2.0, 1.0, 1.0, 1.0], &[1, 2, 3]).unwrap())
+        .unwrap();
 
     let out = kl_divergence(&p, &q).unwrap();
     assert_eq!(
