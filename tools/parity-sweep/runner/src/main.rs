@@ -3466,11 +3466,22 @@ fn dispatch_f32(
             if pads.iter().any(|&p| p < 0) {
                 return Ok(None);
             }
-            let mode_str = kwargs
-                .get("mode")
+            // op_db's `F.pad` sample_inputs supply `mode` and `value` as
+            // POSITIONAL args (`args[2]`, `args[3]`) per the upstream signature
+            // `pad(input, pad, mode="constant", value=None)`
+            // (`torch/nn/functional.py:5532`), not as kwargs. Read positional
+            // first, fall back to kwargs for hand-crafted samples. Reading only
+            // kwargs left `value` always 0 and silently dropped the fill (#1553).
+            let mode_str = args
+                .get(2)
                 .and_then(Value::as_str)
+                .or_else(|| kwargs.get("mode").and_then(Value::as_str))
                 .unwrap_or("constant");
-            let value_f = kwargs.get("value").and_then(Value::as_f64).unwrap_or(0.0) as f32;
+            let value_f = args
+                .get(3)
+                .and_then(Value::as_f64)
+                .or_else(|| kwargs.get("value").and_then(Value::as_f64))
+                .unwrap_or(0.0) as f32;
             let mode = match mode_str {
                 "constant" => ferrotorch_nn::functional::PaddingMode::Zeros,
                 "reflect" => ferrotorch_nn::functional::PaddingMode::Reflect,

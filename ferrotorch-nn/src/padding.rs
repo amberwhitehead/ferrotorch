@@ -622,18 +622,16 @@ pub fn functional_pad_1d<T: Float>(
     let data = input.data_vec()?;
     let shape = input.shape();
     let (out_data, new_shape) = match mode {
-        PaddingMode::Zeros => pad_1d_constant(
-            &data,
-            shape,
-            pad_left,
-            pad_right,
-            <T as num_traits::Zero>::zero(),
-        ),
+        // `Zeros` is the runner's mapping for torch `mode="constant"`; the fill
+        // is the `value` kwarg, not a hardcoded zero. Upstream
+        // `aten/src/ATen/native/PadNd.cpp:94` does `output.fill_(value)` then
+        // copies the source in. ZeroPad layers pass `T::zero()` explicitly, so
+        // threading `value` here is the constant-pad semantics (#1553).
+        PaddingMode::Zeros => pad_1d_constant(&data, shape, pad_left, pad_right, value),
         PaddingMode::Reflect => pad_1d_reflect(&data, shape, pad_left, pad_right)?,
         PaddingMode::Replicate => pad_1d_replicate(&data, shape, pad_left, pad_right),
         PaddingMode::Circular => pad_1d_circular(&data, shape, pad_left, pad_right),
     };
-    let _ = value; // only used for ConstantPad, not this code path
     Tensor::from_storage(TensorStorage::cpu(out_data), new_shape, false)
 }
 
@@ -791,14 +789,10 @@ pub fn functional_pad_2d<T: Float>(
     let shape = input.shape();
     let input_shape = shape.to_vec();
     let (out_data, new_shape) = match mode {
+        // `Zeros` carries the torch `mode="constant"` fill `value` (see the
+        // PadNd.cpp:94 note on `functional_pad_1d`); #1553.
         PaddingMode::Zeros => pad_2d_constant(
-            &data,
-            shape,
-            pad_left,
-            pad_right,
-            pad_top,
-            pad_bottom,
-            <T as num_traits::Zero>::zero(),
+            &data, shape, pad_left, pad_right, pad_top, pad_bottom, value,
         ),
         PaddingMode::Reflect => {
             pad_2d_reflect(&data, shape, pad_left, pad_right, pad_top, pad_bottom)?
@@ -810,7 +804,6 @@ pub fn functional_pad_2d<T: Float>(
             pad_2d_circular(&data, shape, pad_left, pad_right, pad_top, pad_bottom)
         }
     };
-    let _ = value;
 
     // Grad path: attach Pad2dBackward so the autograd graph stays connected
     // (the prior `from_storage(..., false)` severed it — #1550).
@@ -847,16 +840,10 @@ pub fn functional_pad_3d<T: Float>(
     let data = input.data_vec()?;
     let shape = input.shape();
     let (out_data, new_shape) = match mode {
+        // `Zeros` carries the torch `mode="constant"` fill `value` (see the
+        // PadNd.cpp:94 note on `functional_pad_1d`); #1553.
         PaddingMode::Zeros => pad_3d_constant(
-            &data,
-            shape,
-            pad_left,
-            pad_right,
-            pad_top,
-            pad_bottom,
-            pad_front,
-            pad_back,
-            <T as num_traits::Zero>::zero(),
+            &data, shape, pad_left, pad_right, pad_top, pad_bottom, pad_front, pad_back, value,
         ),
         PaddingMode::Reflect => pad_3d_reflect(
             &data, shape, pad_left, pad_right, pad_top, pad_bottom, pad_front, pad_back,
@@ -868,7 +855,6 @@ pub fn functional_pad_3d<T: Float>(
             &data, shape, pad_left, pad_right, pad_top, pad_bottom, pad_front, pad_back,
         ),
     };
-    let _ = value;
     Tensor::from_storage(TensorStorage::cpu(out_data), new_shape, false)
 }
 
@@ -1904,5 +1890,52 @@ mod tests {
         let (out, new_shape) = pad_3d_constant::<f32>(&[], &[0, 2, 2, 3], 1, 1, 1, 1, 1, 1, 3.0);
         assert_eq!(new_shape, vec![0, 4, 4, 5]);
         assert!(out.iter().all(|&v| v == 3.0));
+    }
+
+    // -----------------------------------------------------------------------
+    // Regression: `functional_pad_{1,2,3}d` constant-mode must use `value`.
+    //
+    // The runner maps torch `mode="constant"` -> `PaddingMode::Zeros` and passes
+    // the `value` kwarg through. Pre-fix the `Zeros` arm hardcoded `T::zero()`
+    // and dropped `value` (`let _ = value;`), so `F.pad(x, p, "constant", 2.0)`
+    // filled 0 instead of 2 — 256 parity-sweep failures (ferrotorch=0 vs
+    // torch=2). Upstream `aten/src/ATen/native/PadNd.cpp:94` does
+    // `output.fill_(value)` before copying the source. #1553.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_functional_pad_1d_constant_uses_value() {
+        let input = t(&[1.0, 2.0, 3.0], &[1, 1, 3]);
+        let out = functional_pad_1d(&input, 1, 1, PaddingMode::Zeros, 2.0).unwrap();
+        assert_eq!(out.shape(), &[1, 1, 5]);
+        // Padded region (first + last) must be the fill `value` 2.0, not 0.0.
+        assert_close(out.data().unwrap(), &[2.0, 1.0, 2.0, 3.0, 2.0], 1e-7);
+    }
+
+    #[test]
+    fn test_functional_pad_2d_constant_uses_value() {
+        // 1x1x2x2 input, pad (left, right, top, bottom) = (1, 1, 1, 1).
+        let input = t(&[1.0, 2.0, 3.0, 4.0], &[1, 1, 2, 2]);
+        let out = functional_pad_2d(&input, 1, 1, 1, 1, PaddingMode::Zeros, 2.0).unwrap();
+        assert_eq!(out.shape(), &[1, 1, 4, 4]);
+        #[rustfmt::skip]
+        let expected = [
+            2.0, 2.0, 2.0, 2.0,
+            2.0, 1.0, 2.0, 2.0,
+            2.0, 3.0, 4.0, 2.0,
+            2.0, 2.0, 2.0, 2.0,
+        ];
+        assert_close(out.data().unwrap(), &expected, 1e-7);
+        // The border is the fill value; no padded cell is 0.
+        assert!(out.data().unwrap().iter().all(|&v| v != 0.0));
+    }
+
+    #[test]
+    fn test_functional_pad_3d_constant_uses_value() {
+        // 1x1x1x1x1 input, pad all six axes by 0 except left/right by 1.
+        let input = t(&[5.0], &[1, 1, 1, 1, 1]);
+        let out = functional_pad_3d(&input, 1, 1, 0, 0, 0, 0, PaddingMode::Zeros, 2.0).unwrap();
+        assert_eq!(out.shape(), &[1, 1, 1, 1, 3]);
+        assert_close(out.data().unwrap(), &[2.0, 5.0, 2.0], 1e-7);
     }
 }
