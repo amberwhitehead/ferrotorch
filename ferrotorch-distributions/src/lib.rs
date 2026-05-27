@@ -17,6 +17,7 @@
 //! | [`Bernoulli`] | `probs` | No (discrete) |
 //! | [`Binomial`] | `total_count`, `probs` | No (discrete) |
 //! | [`Categorical`] | `probs` | No (discrete) |
+//! | [`Geometric`] | `probs` | No (discrete) |
 //! | [`Beta`] | `concentration1`, `concentration0` | Yes |
 //! | [`Gamma`] | `concentration`, `rate` | Yes |
 //! | [`Exponential`] | `rate` | Yes |
@@ -73,6 +74,7 @@ mod dirichlet;
 mod exponential;
 pub(crate) mod fallback;
 mod gamma;
+mod geometric;
 mod gumbel;
 mod half_normal;
 mod independent;
@@ -105,6 +107,7 @@ pub use cauchy::Cauchy;
 pub use dirichlet::Dirichlet;
 pub use exponential::Exponential;
 pub use gamma::Gamma;
+pub use geometric::Geometric;
 pub use gumbel::Gumbel;
 pub use half_normal::HalfNormal;
 pub use independent::Independent;

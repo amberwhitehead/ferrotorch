@@ -15,12 +15,12 @@
 //! | REQ | Status | Evidence |
 //! |---|---|---|
 //! | REQ-1 (`kl_divergence<T, P, Q>` public entry point) | SHIPPED | `pub fn kl_divergence<T: Float, P, Q>` with `P: Distribution<T> + 'static`, `Q: Distribution<T> + 'static` bounds in `kl.rs` mirroring `torch/distributions/kl.py:kl_divergence`; consumer: `pub mod kl` in `lib.rs` exposes it as grandfathered public API; `test_kl_*` (~25 sites) exercise the dispatch path |
-//! | REQ-2 (`kl_supported_pair_count` introspection) | SHIPPED | `pub const fn kl_supported_pair_count() -> usize` + `KL_SUPPORTED_PAIR_COUNT: usize = 70` in `kl.rs`; consumer: const fn is grandfathered public API; drift-prevention test `kl_doc_table_matches_dispatcher` reads `include_str!("kl.rs")` and asserts three-way invariant against the public accessor |
-//! | REQ-3 (`kl_dispatch` `Any::downcast_ref` chain) | SHIPPED | the dispatcher in `kl.rs` is a 70-arm chain mirroring PyTorch's `_dispatch_kl` in `torch/distributions/kl.py:113-138`; consumer: `pub fn kl_divergence` invokes the dispatcher on every call |
+//! | REQ-2 (`kl_supported_pair_count` introspection) | SHIPPED | `pub const fn kl_supported_pair_count() -> usize` + `KL_SUPPORTED_PAIR_COUNT: usize = 71` in `kl.rs`; consumer: const fn is grandfathered public API; drift-prevention test `kl_doc_table_matches_dispatcher` reads `include_str!("kl.rs")` and asserts three-way invariant against the public accessor |
+//! | REQ-3 (`kl_dispatch` `Any::downcast_ref` chain) | SHIPPED | the dispatcher in `kl.rs` is a 71-arm chain mirroring PyTorch's `_dispatch_kl` in `torch/distributions/kl.py:113-138`; consumer: `pub fn kl_divergence` invokes the dispatcher on every call |
 //! | REQ-4 (8 same-family closed-form formulas) | SHIPPED | 8 closed-form helpers in `kl.rs` (`kl_normal_normal`, `kl_bernoulli_bernoulli`, `kl_uniform_uniform`, `kl_categorical_categorical`, `kl_laplace_laplace`, `kl_exponential_exponential`, `kl_gamma_gamma`, `kl_poisson_poisson`) mirroring `@register_kl` bodies in `torch/distributions/kl.py`; consumer: the dispatcher invokes each formula |
 //! | REQ-5 (cross-family finite formulas) | SHIPPED | `kl_uniform_normal`, `kl_gamma_exponential`, `kl_exponential_gamma` in `kl.rs`; last two use `kl_gamma_scalar` via `Exp(λ) ≡ Gamma(1, λ)`; consumer: the dispatcher calls each; `kl_gamma_scalar` is consumed by 3 production sites internally. (Normal-Uniform was a finite arm here but moved to the `+inf` support-mismatch family per `kl.py:766,768` `_kl_normal_infinity` — #1563.) |
 //! | REQ-6 (fallback guard on every formula) | SHIPPED | every finite formula's first statement is `crate::fallback::check_gpu_fallback_opt_in(&[...], "kl_divergence(P, Q)")?` in `kl.rs`; consumer: this IS the production consumer of `fn check_gpu_fallback_opt_in` per `fallback.md` REQ-2 (the `+inf` support-mismatch arms read a single param tensor that is already host-resident, so they hand it straight to `kl_infinite_like`) |
-//! | REQ-7 (full ~75-pair PyTorch coverage) | PARTIAL | blocker #1374 — ferrotorch now ships 70 of PyTorch's ~75 pairs (was 41). The #1562 closure added 27; the #1374 Binomial sub-part added 2: `kl_binomial_binomial` (finite, mirrors `torch/distributions/kl.py:231-244`: `n·(p·(logit_p−logit_q)+ln(1−p)−ln(1−q))`, `+inf` where `n_p>n_q`, `InvalidArgument` where `n_p<n_q`) + Poisson-Binomial routed through `kl_infinite_like` (mirrors `_kl_poisson_infinity` `kl.py:842`). Finite #1562 arms (`kl_onehotcategorical_onehotcategorical` `kl.py:474-476`, `kl_bernoulli_poisson` `kl.py:513-516`, `kl_normal_laplace` `kl.py:782-792`) + 24 support-mismatch `+inf` arms (PyTorch's `_infinite_like` registrations: Beta-Pareto `kl.py:528`; Exponential-{Beta,Pareto,Uniform} `kl.py:620-623`; Gamma-{Beta,Pareto,Uniform} `kl.py:665-668`; Gumbel-{Beta,Exponential,Gamma,Pareto,Uniform} `kl.py:718-723`; Laplace-{Beta,Exponential,Gamma,Pareto,Uniform} `kl.py:740-745`; Normal-{Beta,Exponential,Gamma,Pareto} `kl.py:761-765`; Pareto-{Beta,Uniform} `kl.py:795-797`; Poisson-Bernoulli `kl.py:841`) routed through the `kl_infinite_like` helper; consumer: each is invoked by its dispatcher downcast arm. Still NOT-STARTED: (a) `Independent-Independent` (`kl.py:944`) — `Independent<T, D>` is generic over the concrete base `D`, so `Any::downcast_ref` cannot match it without a KL-recursion trait hook on `Distribution` (`lib.rs`) + an override in `independent.rs`, both outside this manifest (concrete prereq, not a deferral); (b) Geometric-Geometric (need a `Geometric` struct), ContinuousBernoulli-* pairs (need a `ContinuousBernoulli` struct), TransformedDistribution-TransformedDistribution / ExponentialFamily-ExponentialFamily — each blocked on a missing distribution TYPE or trait surface. #1374 stays open for the remaining ~5. |
+//! | REQ-7 (full ~75-pair PyTorch coverage) | PARTIAL | blocker #1374 — ferrotorch now ships 71 of PyTorch's ~75 pairs (was 41). The #1562 closure added 27; the #1374 Binomial sub-part added 2: `kl_binomial_binomial` (finite, mirrors `torch/distributions/kl.py:231-244`: `n·(p·(logit_p−logit_q)+ln(1−p)−ln(1−q))`, `+inf` where `n_p>n_q`, `InvalidArgument` where `n_p<n_q`) + Poisson-Binomial routed through `kl_infinite_like` (mirrors `_kl_poisson_infinity` `kl.py:842`). The #1374 Geometric sub-part added 1: `kl_geometric_geometric` (finite, mirrors `kl.py:320-322`: `-p.entropy() - log1p(-q.probs)/p.probs - q.logits`). Finite #1562 arms (`kl_onehotcategorical_onehotcategorical` `kl.py:474-476`, `kl_bernoulli_poisson` `kl.py:513-516`, `kl_normal_laplace` `kl.py:782-792`) + 24 support-mismatch `+inf` arms (PyTorch's `_infinite_like` registrations: Beta-Pareto `kl.py:528`; Exponential-{Beta,Pareto,Uniform} `kl.py:620-623`; Gamma-{Beta,Pareto,Uniform} `kl.py:665-668`; Gumbel-{Beta,Exponential,Gamma,Pareto,Uniform} `kl.py:718-723`; Laplace-{Beta,Exponential,Gamma,Pareto,Uniform} `kl.py:740-745`; Normal-{Beta,Exponential,Gamma,Pareto} `kl.py:761-765`; Pareto-{Beta,Uniform} `kl.py:795-797`; Poisson-Bernoulli `kl.py:841`) routed through the `kl_infinite_like` helper; consumer: each is invoked by its dispatcher downcast arm. Still NOT-STARTED: (a) `Independent-Independent` (`kl.py:944`) — `Independent<T, D>` is generic over the concrete base `D`, so `Any::downcast_ref` cannot match it without a KL-recursion trait hook on `Distribution` (`lib.rs`) + an override in `independent.rs`, both outside this manifest (concrete prereq, not a deferral); (b) ContinuousBernoulli-* pairs (need a `ContinuousBernoulli` struct), TransformedDistribution-TransformedDistribution / ExponentialFamily-ExponentialFamily — each blocked on a missing distribution TYPE or trait surface. #1374 stays open for the remaining ~4. |
 //! | REQ-8 (`register_kl` extension API) | SHIPPED (design decision, #1375) | the explicit `Any::downcast_ref` match in `kl_dispatch` is the deliberate Rust-idiomatic equivalent of PyTorch's `@register_kl` + `_dispatch_kl` (a Python-runtime open-extension pattern). Rust's static analog is the closed-crate match, kept maintainable by the `kl_doc_table_matches_dispatcher` drift test that pins the doc table, the const count, and the dispatcher arms in lockstep. A `Lazy<HashMap<(TypeId,TypeId),Fn>>` registry would add indirection without enabling cross-crate extension (formulas need concrete accessors). Documented in `kl.md` REQ-8. Closes #1375. |
 
 use ferrotorch_core::dtype::Float;
@@ -31,7 +31,7 @@ use ferrotorch_core::tensor::Tensor;
 use crate::special_fns::{digamma_scalar, lgamma_scalar};
 use crate::{
     Bernoulli, Beta, Binomial, Categorical, Cauchy, Dirichlet, Distribution, Exponential, Gamma,
-    Gumbel, HalfNormal, Laplace, LowRankMultivariateNormal, MultivariateNormal, Normal,
+    Geometric, Gumbel, HalfNormal, Laplace, LowRankMultivariateNormal, MultivariateNormal, Normal,
     OneHotCategorical, Pareto, Poisson, Uniform,
 };
 
@@ -128,6 +128,7 @@ const EULER_GAMMA: f64 = 0.577_215_664_901_532_9;
 /// | Poisson | Bernoulli |
 /// | Binomial | Binomial |
 /// | Poisson | Binomial |
+/// | Geometric | Geometric |
 ///
 /// The same set is also reported by [`kl_supported_pair_count`].
 ///
@@ -162,7 +163,7 @@ pub const fn kl_supported_pair_count() -> usize {
 /// Compile-time count of registered `(P, Q)` pairs. Update this when adding
 /// or removing a branch in [`kl_dispatch`] **and** the doc table on
 /// [`kl_divergence`] in lockstep; the drift test enforces the invariant.
-const KL_SUPPORTED_PAIR_COUNT: usize = 70;
+const KL_SUPPORTED_PAIR_COUNT: usize = 71;
 
 fn kl_dispatch<T: Float>(
     p: &dyn std::any::Any,
@@ -564,6 +565,13 @@ fn kl_dispatch<T: Float>(
     ) {
         return kl_infinite_like(pp_.rate());
     }
+    // Geometric-Geometric (kl.py:320-322, discrete same-family, finite)
+    if let (Some(pg), Some(qg)) = (
+        p.downcast_ref::<Geometric<T>>(),
+        q.downcast_ref::<Geometric<T>>(),
+    ) {
+        return kl_geometric_geometric(pg, qg);
+    }
 
     Err(FerrotorchError::InvalidArgument {
         message: "No KL divergence formula registered for this distribution pair. \
@@ -590,7 +598,7 @@ fn kl_dispatch<T: Float>(
                   Laplace-{Beta,Exponential,Gamma,Pareto,Uniform}, \
                   Normal-{Beta,Exponential,Gamma,Pareto}, Pareto-{Beta,Uniform}, \
                   Poisson-Bernoulli, Poisson-Binomial. \
-                  Discrete same-family: Binomial-Binomial."
+                  Discrete same-family: Binomial-Binomial, Geometric-Geometric."
             .into(),
     })
 }
@@ -2482,6 +2490,58 @@ fn kl_binomial_binomial<T: Float>(p: &Binomial<T>, q: &Binomial<T>) -> Ferrotorc
     )
 }
 
+/// KL(Geometric(p) || Geometric(q)) (discrete same-family, finite).
+///
+/// Mirrors `torch/distributions/kl.py:320-322` `_kl_geometric_geometric`:
+/// ```text
+/// KL = -p.entropy() - log1p(-q.probs)/p.probs - q.logits
+/// ```
+/// where `q.logits = ln(q) - log1p(-q)` (the binary logit) and
+/// `H(Geometric(p)) = BCE_with_logits(logit_p, p)/p`. The probability vectors
+/// are clamped to `[eps, 1-eps]` (`eps = finfo(dtype).eps = T::epsilon()`,
+/// `torch/distributions/utils.py:124`) to keep the logs finite — the same
+/// clamp `probs_to_logits`/`logits_to_probs` use internally. `q` broadcasts
+/// over `p` via `cycle()`, matching the other same-family KL bodies.
+fn kl_geometric_geometric<T: Float>(
+    p: &Geometric<T>,
+    q: &Geometric<T>,
+) -> FerrotorchResult<Tensor<T>> {
+    crate::fallback::check_gpu_fallback_opt_in(
+        &[p.probs(), q.probs()],
+        "kl_divergence(Geometric, Geometric)",
+    )?;
+    let p_probs = p.probs().data_vec()?;
+    let q_probs = q.probs().data_vec()?;
+    let one = T::from(1.0).unwrap();
+    let zero = T::from(0.0).unwrap();
+    let eps = <T as num_traits::Float>::epsilon();
+
+    let result: Vec<T> = p_probs
+        .iter()
+        .zip(q_probs.iter().cycle())
+        .map(|(&pp, &qp)| {
+            let pc = pp.max(eps).min(one - eps);
+            let qc = qp.max(eps).min(one - eps);
+            // H(Geometric(p)) = BCE_with_logits(logit_p, p)/p, stable form
+            //   max(ℓ,0) - ℓ·t + log1p(exp(-|ℓ|)), t = p.
+            let logit_p = pc.ln() - (-pc).ln_1p();
+            let abs_lp = logit_p.abs();
+            let max_lp0 = if logit_p > zero { logit_p } else { zero };
+            let entropy_p = (max_lp0 - logit_p * pp + (-abs_lp).exp().ln_1p()) / pp;
+            // q.logits = ln(q) - log1p(-q).
+            let q_logit = qc.ln() - (-qc).ln_1p();
+            // -p.entropy() - log1p(-q.probs)/p.probs - q.logits
+            -entropy_p - (-qc).ln_1p() / pp - q_logit
+        })
+        .collect();
+
+    Tensor::from_storage(
+        TensorStorage::cpu(result),
+        p.probs().shape().to_vec(),
+        false,
+    )
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -3595,6 +3655,68 @@ mod tests {
             "expected +inf, got {}",
             kl.item().unwrap()
         );
+    }
+
+    // -- Geometric-Geometric (#1374 sub-part) --------------------------------
+    // Reference values from live `torch.distributions.kl_divergence` (f64,
+    // torch 2.11.0+cu130, this machine 2026-05-27); each traces to the
+    // `_kl_geometric_geometric` body at `torch/distributions/kl.py:320-322`
+    // (R-CHAR-3 non-tautological).
+
+    #[test]
+    fn test_kl_geometric_geometric_same_is_zero() {
+        let p = Geometric::new(scalar(0.3f64).unwrap()).unwrap();
+        let q = Geometric::new(scalar(0.3f64).unwrap()).unwrap();
+        let kl = kl_divergence(&p, &q).unwrap();
+        assert!(
+            kl.item().unwrap().abs() < 1e-12,
+            "KL(Geom(0.3) || Geom(0.3)) should be 0, got {}",
+            kl.item().unwrap()
+        );
+    }
+
+    #[test]
+    fn test_kl_geometric_geometric_known_value() {
+        // torch: kl_divergence(Geometric(0.3), Geometric(0.5))
+        //        == 0.27427626168350594 (kl.py:320-322).
+        let p = Geometric::new(scalar(0.3f64).unwrap()).unwrap();
+        let q = Geometric::new(scalar(0.5f64).unwrap()).unwrap();
+        let kl = kl_divergence(&p, &q).unwrap();
+        assert!(
+            (kl.item().unwrap() - 0.274_276_261_683_505_94).abs() < 1e-12,
+            "expected torch value 0.27427626168350594, got {}",
+            kl.item().unwrap()
+        );
+    }
+
+    #[test]
+    fn test_kl_geometric_geometric_batched() {
+        // torch: kl_divergence(Geometric([0.3,0.5]), Geometric([0.5,0.4]))
+        //        == [0.27427626168350594, 0.040821994520255145] (kl.py:320-322).
+        use ferrotorch_core::creation::from_slice;
+        let p = Geometric::new(from_slice(&[0.3f64, 0.5], &[2]).unwrap()).unwrap();
+        let q = Geometric::new(from_slice(&[0.5f64, 0.4], &[2]).unwrap()).unwrap();
+        let kl = kl_divergence(&p, &q).unwrap();
+        assert_eq!(kl.shape(), &[2]);
+        let d = kl.data().unwrap();
+        assert!(
+            (d[0] - 0.274_276_261_683_505_94).abs() < 1e-12,
+            "elem 0: expected 0.27427626168350594, got {}",
+            d[0]
+        );
+        assert!(
+            (d[1] - 0.040_821_994_520_255_145).abs() < 1e-12,
+            "elem 1: expected 0.040821994520255145, got {}",
+            d[1]
+        );
+    }
+
+    #[test]
+    fn test_kl_geometric_geometric_nonnegative() {
+        let p = Geometric::new(scalar(0.2f64).unwrap()).unwrap();
+        let q = Geometric::new(scalar(0.7f64).unwrap()).unwrap();
+        let kl = kl_divergence(&p, &q).unwrap();
+        assert!(kl.item().unwrap() >= -1e-12, "got {}", kl.item().unwrap());
     }
 
     // -- Drift prevention: doc table vs dispatcher ---------------------------

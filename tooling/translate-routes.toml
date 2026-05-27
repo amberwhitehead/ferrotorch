@@ -1749,6 +1749,15 @@ parity_ops = []
 
 
 [[route]]
+crate_pattern = "ferrotorch-distributions/src/geometric.rs"
+upstream = [
+  "/home/doll/pytorch/torch/distributions/",
+]
+design = ".design/ferrotorch-distributions/geometric.md"
+parity_ops = []
+
+
+[[route]]
 crate_pattern = "ferrotorch-distributions/src/beta.rs"
 upstream = [
   "/home/doll/pytorch/torch/distributions/",
