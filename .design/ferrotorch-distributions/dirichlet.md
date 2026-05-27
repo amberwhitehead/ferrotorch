@@ -12,7 +12,8 @@ upstream-paths:
 
 `ferrotorch-distributions/src/dirichlet.rs` implements the
 Dirichlet distribution over the K-1 dimensional probability
-simplex, parameterized by a 1-D `concentration` (alpha) tensor.
+simplex, parameterized by a `concentration` (alpha) tensor of shape
+`[*batch, K]` (trailing dim is the event dim, leading dims batch).
 Mirrors `torch.distributions.Dirichlet`. Sampling uses
 Marsaglia-and-Tsang Gamma-rejection per category followed by
 normalization. The `rsample` path attaches a
@@ -30,15 +31,17 @@ CPU→GPU round-trip).
 ## Requirements
 
 - REQ-1: `pub struct Dirichlet<T: Float>` holding `concentration:
-  Tensor<T>` (alpha, 1-D, length K) and `k: usize` (cached). Mirrors
-  `torch/distributions/dirichlet.py:Dirichlet.__init__`.
+  Tensor<T>` (alpha, shape `[*batch, K]`), `k: usize` (the trailing
+  event dim, cached) and `batch_shape: Vec<usize>` (the leading
+  batch dims). Mirrors `torch/distributions/dirichlet.py:Dirichlet.__init__`.
 
 - REQ-2: `pub fn Dirichlet::new(concentration) ->
-  FerrotorchResult<Self>` validates: `concentration.ndim() == 1`
-  and `concentration.shape()[0] > 0`. Returns `InvalidArgument`
-  otherwise. The upstream ndim check is the same (`dirichlet.py:67-68`).
-  Upstream supports N-D batched concentration; ferrotorch
-  currently restricts to 1-D (tracked by REQ-12).
+  FerrotorchResult<Self>` validates `concentration.ndim() >= 1`
+  and the trailing dim `K = shape[-1] > 0`, storing
+  `batch_shape = shape[:-1]`. Returns `InvalidArgument` otherwise.
+  Mirrors upstream `dirichlet.py:66-72` (`dim() < 1` rejected;
+  `batch_shape, event_shape = shape[:-1], shape[-1:]`). N-D batched
+  concentration is accepted (#1548).
 
 - REQ-3: `pub fn concentration(&self) -> &Tensor<T>` and
   `pub fn num_categories(&self) -> usize` accessors. Mirrors
@@ -100,13 +103,19 @@ CPU→GPU round-trip).
   `TensorStorage::on_device(device)` so the gradient tensor
   lands on the parameter's device directly.
 
-- REQ-12: NOT-STARTED — N-D batched concentration (PyTorch
-  supports `concentration` with arbitrary batch dims; the event
-  dim is the last) + `expand` + `arg_constraints` + `support`
-  + `mode` (closed-form `(α-1)/sum(α-1)` with NaN for α≤1
-  components) + `validate_args` not implemented.
-  Cross-cutting with `lib.md` REQ-5 (blocker #1376). Tracked as
-  blocker #1412 for the Dirichlet-side fill-out.
+- REQ-12: SHIPPED (#1412 / #1547 / #1548 / #1549) — N-D batched
+  concentration with arbitrary leading batch dims (event dim is the
+  trailing `K`). `sample`/`rsample`/`log_prob`/`mean`/`variance`/
+  `entropy` all iterate the `b = prod(batch_shape)` batch rows, each
+  owning its own length-`K` alpha slice. `batch_shape()` returns
+  `shape[:-1]`; `expand(new_batch)` broadcast-materializes the
+  concentration to `new_batch ++ [K]`; `support = simplex`;
+  `arg_constraints = {concentration: positive}`. `mode` is the
+  clamped `(α-1)/sum(α-1)` per row, with all-α<1 rows returning
+  `one_hot(argmax)` (NOT NaN — #1549, matching `dirichlet.py:107-110`).
+  `log_prob` validates `value` against the simplex support via
+  `constraints::Simplex::check_tensor` (#1547). Cross-cutting with
+  `lib.md` REQ-5 (#1376), which already shipped the trait surface.
 
 ## Acceptance Criteria
 
@@ -127,8 +136,8 @@ CPU→GPU round-trip).
 - [x] AC-12: `test_dirichlet_*` test suite (12 tests) covers
   shape, simplex invariant, grad attachment, log_prob, entropy,
   errors, f64, concentrated-distribution mean check.
-- [ ] AC-13: N-D batched concentration / `expand` / `mode` —
-  blocker #1412.
+- [x] AC-13: N-D batched concentration / `expand` to a new batch
+  dim / `mode` one-hot for all-α<1 (#1412 / #1547 / #1548 / #1549).
 
 ## Architecture
 
@@ -227,8 +236,13 @@ Edge cases covered:
   near the mean (1/K, 1/K, ..., 1/K). Empirical-mean check via
   CLT-tightened bound at `test_dirichlet_concentrated`.
 - **Empty `concentration`**: rejected at construction.
-- **N-D `concentration`**: rejected at construction (until
-  blocker #1412 closes).
+- **N-D `concentration`**: accepted; `batch_shape = shape[:-1]`,
+  event dim is the trailing `K` (#1548). `sample([2,3])` gives a
+  `[2,3]` sample; `log_prob` over `[2,3]` value reduces to `[2]`.
+- **`mode` all-α<1**: returns `one_hot(argmax)` (e.g.
+  `Dir([0.5,0.5,0.5]).mode == [1,0,0]`), NOT NaN (#1549).
+- **Off-simplex `log_prob` value**: rejected via
+  `Simplex::check_tensor` (#1547).
 - **Gradient flow** through `rsample`: pinned by
   `test_dirichlet_rsample_has_grad`.
 - **`requires_grad = false`**: no GradFn attached;
@@ -272,4 +286,4 @@ Expected: `12 passed; 0 failed`.
 | REQ-9 | SHIPPED | impl: `fn Dirichlet::variance` in `dirichlet.rs` with `α*(α₀-α)/(α₀²*(α₀+1))` formula mirroring `dirichlet.py:113-120`; non-test consumer: external `dist.variance()` calls. |
 | REQ-10 | SHIPPED | impl: `fn Dirichlet::entropy` in `dirichlet.rs` with device-resident `sum(lgamma(α))-lgamma(α₀)-(K-α₀)ψ(α₀)-sum((α-1)ψ(α))` formula mirroring `dirichlet.py:122-130`; non-test consumer: external `dist.entropy()` calls; `test_dirichlet_entropy_uniform` pins the closed-form. |
 | REQ-11 | SHIPPED | impl: `struct DirichletRsampleBackward<T: Float>` with `GradFn::backward` in `dirichlet.rs` implementing implicit-reparam + simplex projection; non-test consumer: invoked by `fn Dirichlet::rsample` when concentration requires grad. |
-| REQ-12 | NOT-STARTED | blocker #1412 — N-D batched concentration, `expand`, `arg_constraints`, `support`, `mode` (from `dirichlet.py:54-58, 75-83, 103-111`) not implemented. Cross-cutting with `lib.md` REQ-5 (blocker #1376). |
+| REQ-12 | SHIPPED | impl: N-D batched `Dirichlet::new`/`sample`/`rsample`/`log_prob`/`mean`/`variance`/`entropy` + `batch_shape`/`expand`/`support`/`arg_constraints`/`mode`/`has_rsample` overrides in `dirichlet.rs` mirroring `torch/distributions/dirichlet.py:55-59, 71, 76-83, 90-130`; `mode` all-α<1 → `one_hot(argmax)` per `dirichlet.py:107-110` (#1549); `log_prob` validates the sample via `constraints::Simplex::check_tensor` (#1547). Non-test consumer: trait dispatch via `pub use Dirichlet` re-export in `lib.rs`; `fn Dirichlet::log_prob` is itself the in-crate production consumer of `Simplex::check_tensor`. Closes #1412 #1547 #1548 #1549. |

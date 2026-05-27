@@ -37,28 +37,29 @@
 //! | REQ-9 (`variance` device-resident) | SHIPPED | closed-form via scalar broadcasts mirroring `dirichlet.py:113-120`; consumer: trait surface |
 //! | REQ-10 (`entropy` device-resident) | SHIPPED | composed `lgamma`/`digamma` formula mirroring `dirichlet.py:122-130`; consumer: trait surface |
 //! | REQ-11 (`DirichletRsampleBackward`) | SHIPPED | implicit-reparam + simplex projection; consumer: invoked by the rsample method when concentration requires grad |
-//! | REQ-12 (full PyTorch surface) | NOT-STARTED | blocker #1412 — N-D batched concentration, `expand`, `arg_constraints`, `support`, `mode` (cross-cutting with `lib.md` REQ-5 / blocker #1376) |
+//! | REQ-12 (full PyTorch surface, N-D batched) | SHIPPED | #1412/#1547/#1548/#1549 — `Dirichlet::new` accepts `[*batch, K]` (`ndim() >= 1`); `batch_shape`/`expand`/`support`/`arg_constraints`/`mode`/`has_rsample` overrides + N-D batched `sample`/`rsample`/`log_prob`/`mean`/`variance`/`entropy` in `dirichlet.rs` mirroring `torch/distributions/dirichlet.py:55-59, 71, 76-83, 90-130`. `mode` all-α<1 rows return `one_hot(argmax)` per `dirichlet.py:107-110` (NOT NaN). `log_prob` validates `value` against the simplex support via `constraints::Simplex::check_tensor` (production consumer). Consumer: trait dispatch via `pub use Dirichlet` re-export in `lib.rs`. |
 
 use std::sync::Arc;
 
-use ferrotorch_core::autograd::no_grad;
 use ferrotorch_core::creation;
 use ferrotorch_core::dtype::Float;
 use ferrotorch_core::error::{FerrotorchError, FerrotorchResult};
-use ferrotorch_core::grad_fns::arithmetic::{add, mul, sub};
-use ferrotorch_core::grad_fns::reduction::sum_dim;
-use ferrotorch_core::grad_fns::transcendental::log as log_op;
-use ferrotorch_core::special::{digamma, lgamma};
 use ferrotorch_core::storage::TensorStorage;
 use ferrotorch_core::tensor::{GradFn, Tensor};
 
-use crate::Distribution;
-use crate::special_fns::digamma_scalar;
+use std::collections::HashMap;
+
+use crate::constraints;
+use crate::constraints::Constraint;
+use crate::special_fns::{digamma_scalar, lgamma_scalar};
+use crate::{DistConstraint, Distribution};
 
 /// Dirichlet distribution parameterized by `concentration` (alpha).
 ///
-/// `concentration` is a 1-D tensor of length `K` whose elements must be positive.
-/// Samples lie on the `(K-1)`-dimensional probability simplex.
+/// `concentration` is a tensor of shape `[*batch, K]` whose elements must be
+/// positive. The trailing dim `K` is the event dim; the leading dims (if any)
+/// are the batch dims. Samples lie on the `(K-1)`-dimensional probability
+/// simplex and have shape `sample_shape ++ batch_shape ++ [K]`.
 ///
 /// # Reparameterization
 ///
@@ -66,29 +67,43 @@ use crate::special_fns::digamma_scalar;
 /// Gradients flow through the concentration parameters.
 pub struct Dirichlet<T: Float> {
     concentration: Tensor<T>,
+    /// Number of categories — the trailing dim of `concentration`.
     k: usize,
+    /// Leading batch dims — `concentration.shape()[..ndim-1]`. Empty for the
+    /// 1-D case.
+    batch_shape: Vec<usize>,
 }
 
 impl<T: Float> Dirichlet<T> {
     /// Create a new Dirichlet distribution.
     ///
-    /// `concentration` must be a 1-D tensor with positive elements.
+    /// `concentration` must have at least one dimension; the trailing dim `K`
+    /// is the event dim and any leading dims are batch dims. Mirrors
+    /// `torch/distributions/dirichlet.py:66-72`:
+    ///   if concentration.dim() < 1: raise ValueError(...)
+    ///   batch_shape, event_shape = concentration.shape[:-1], concentration.shape[-1:]
     pub fn new(concentration: Tensor<T>) -> FerrotorchResult<Self> {
-        if concentration.ndim() != 1 {
+        if concentration.ndim() < 1 {
             return Err(FerrotorchError::InvalidArgument {
                 message: format!(
-                    "Dirichlet: concentration must be 1-D, got shape {:?}",
+                    "Dirichlet: concentration must be at least 1-D, got shape {:?}",
                     concentration.shape()
                 ),
             });
         }
-        let k = concentration.shape()[0];
+        let shape = concentration.shape();
+        let k = *shape.last().unwrap();
         if k == 0 {
             return Err(FerrotorchError::InvalidArgument {
-                message: "Dirichlet: concentration must have at least one element".into(),
+                message: "Dirichlet: concentration last dim (K) must be >= 1".into(),
             });
         }
-        Ok(Self { concentration, k })
+        let batch_shape = shape[..shape.len() - 1].to_vec();
+        Ok(Self {
+            concentration,
+            k,
+            batch_shape,
+        })
     }
 
     /// The concentration (alpha) parameter.
@@ -96,9 +111,15 @@ impl<T: Float> Dirichlet<T> {
         &self.concentration
     }
 
-    /// Number of categories (K).
+    /// Number of categories (K) — the trailing event dim.
     pub fn num_categories(&self) -> usize {
         self.k
+    }
+
+    /// Number of batch elements `prod(batch_shape)` (1 for a 1-D
+    /// concentration).
+    fn num_batches(&self) -> usize {
+        self.batch_shape.iter().product::<usize>().max(1)
     }
 }
 
@@ -159,32 +180,42 @@ fn sample_standard_normal<T: Float>() -> T {
 impl<T: Float> Distribution<T> for Dirichlet<T> {
     fn sample(&self, shape: &[usize]) -> FerrotorchResult<Tensor<T>> {
         // Gamma rejection sampling is intrinsically scalar — there is no
-        // GPU Gamma kernel in ferrotorch-core. We read alpha (size K, a
-        // small parameter tensor) once, run the host sampler, and build the
-        // result tensor directly on the caller's device via
+        // GPU Gamma kernel in ferrotorch-core. We read alpha (the [*batch, K]
+        // parameter tensor) once, run the host sampler, and build the result
+        // tensor directly on the caller's device via
         // `TensorStorage::on_device(...)`. This matches PyTorch's Dirichlet
         // behaviour on CUDA prior to the dedicated CUDA Gamma sampler
         // (which composed `_standard_gamma` + division).
+        //
+        // For batched concentration each of the `b` batch rows owns its own
+        // length-K alpha slice; the output is `sample_shape ++ batch_shape ++
+        // [K]` mirroring `torch/distributions/dirichlet.py:86-88`
+        // (`_extended_shape(sample_shape)` then a per-element gamma draw).
         let device = self.concentration.device();
         let n: usize = shape.iter().product();
         let k = self.k;
+        let b = self.num_batches();
         let alpha = self.concentration.data_vec()?;
 
-        let mut result = Vec::with_capacity(n * k);
+        let mut result = Vec::with_capacity(n * b * k);
         for _ in 0..n {
-            let mut gammas = Vec::with_capacity(k);
-            let mut total = <T as num_traits::Zero>::zero();
-            for &a in &alpha {
-                let g = sample_gamma(a);
-                gammas.push(g);
-                total += g;
-            }
-            for g in gammas {
-                result.push(g / total);
+            for bi in 0..b {
+                let row = &alpha[bi * k..bi * k + k];
+                let mut gammas = Vec::with_capacity(k);
+                let mut total = <T as num_traits::Zero>::zero();
+                for &a in row {
+                    let g = sample_gamma(a);
+                    gammas.push(g);
+                    total += g;
+                }
+                for g in gammas {
+                    result.push(g / total);
+                }
             }
         }
 
         let mut out_shape = shape.to_vec();
+        out_shape.extend_from_slice(&self.batch_shape);
         out_shape.push(k);
         // Direct upload to device — no CPU materialize + `to(device)` hop.
         let storage = TensorStorage::on_device(result, device)?;
@@ -195,28 +226,37 @@ impl<T: Float> Distribution<T> for Dirichlet<T> {
         // Same scalar Gamma rejection sampling as `sample`, but attach the
         // implicit-reparameterization backward node so gradients can flow
         // through `concentration`. Result storage lands on the parameter
-        // device directly (no `Tensor::to` hop).
+        // device directly (no `Tensor::to` hop). Batched concentration is
+        // laid out as `[n_samples, b, K]` flattened — each batch row owns its
+        // own length-K alpha slice.
         let device = self.concentration.device();
         let n: usize = shape.iter().product();
         let k = self.k;
+        let b = self.num_batches();
         let alpha = self.concentration.data_vec()?;
 
-        let mut gamma_vals = Vec::with_capacity(n * k);
-        let mut result = Vec::with_capacity(n * k);
+        let total_rows = n * b;
+        let mut gamma_vals = Vec::with_capacity(total_rows * k);
+        let mut result = Vec::with_capacity(total_rows * k);
 
         for s in 0..n {
-            let mut total = <T as num_traits::Zero>::zero();
-            for &a in &alpha {
-                let g = sample_gamma(a);
-                gamma_vals.push(g);
-                total += g;
-            }
-            for j in 0..k {
-                result.push(gamma_vals[s * k + j] / total);
+            for bi in 0..b {
+                let arow = &alpha[bi * k..bi * k + k];
+                let mut total = <T as num_traits::Zero>::zero();
+                let base = (s * b + bi) * k;
+                for &a in arow {
+                    let g = sample_gamma(a);
+                    gamma_vals.push(g);
+                    total += g;
+                }
+                for j in 0..k {
+                    result.push(gamma_vals[base + j] / total);
+                }
             }
         }
 
         let mut out_shape = shape.to_vec();
+        out_shape.extend_from_slice(&self.batch_shape);
         out_shape.push(k);
 
         if self.concentration.requires_grad() && ferrotorch_core::is_grad_enabled() {
@@ -228,6 +268,7 @@ impl<T: Float> Distribution<T> for Dirichlet<T> {
                 concentration: self.concentration.clone(),
                 samples: sample_tensor,
                 n,
+                b,
                 k,
             });
             let storage = TensorStorage::on_device(result, device)?;
@@ -239,21 +280,20 @@ impl<T: Float> Distribution<T> for Dirichlet<T> {
     }
 
     fn log_prob(&self, value: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
-        // log_prob(x) = lgamma(sum(alpha)) - sum(lgamma(alpha))
-        //              + sum_k (alpha_k - 1) * log(x_k)         over last dim
+        // log_prob(x) = sum_k (alpha_k - 1) * log(x_k)      over last dim
+        //              + lgamma(sum_k alpha_k)              per batch row
+        //              - sum_k lgamma(alpha_k)              per batch row
         //
-        // Device-resident composition:
-        //   normalizer = lgamma(alpha_sum_scalar) - sum_all(lgamma(alpha))
-        //   per_sample = sum_dim((alpha - 1) * log(x), dim=-1)
-        //   log_prob = per_sample + normalizer            (broadcast scalar)
+        // Mirrors `torch/distributions/dirichlet.py:90-97`:
+        //   xlogy(self.concentration - 1.0, value).sum(-1)
+        //     + lgamma(self.concentration.sum(-1)) - lgamma(self.concentration).sum(-1)
         //
-        // `value` is the [..., K] sample tensor; we broadcast the `[K]`
-        // concentration vector against it. The `log(x)` factor is what
-        // forces a `+epsilon` floor on x to avoid `log(0)` exploding when
-        // alpha == 1 (we still gate the (alpha-1) factor to zero on that
-        // path so the limit is preserved). The PyTorch reference uses
-        // `xlogy(alpha-1, x)`; here we replicate it via the same clamp
-        // applied in the prior CPU body.
+        // Host-side scalar composition. The trailing dim K is the event dim;
+        // every batch row (and every leading sample row) owns its own length-K
+        // alpha slice (broadcast by batch index). The normalizer is a per-row
+        // function of alpha. `xlogy(α-1, x)` makes the α==1 boundary contribute
+        // 0 even when `x==0` (`0 * log(0) -> 0`), so we replicate it exactly
+        // rather than calling `log` then multiplying.
         if value.device() != self.concentration.device() {
             return Err(FerrotorchError::DeviceMismatch {
                 expected: self.concentration.device(),
@@ -261,6 +301,7 @@ impl<T: Float> Distribution<T> for Dirichlet<T> {
             });
         }
         let k = self.k;
+        let b = self.num_batches();
         let device = self.concentration.device();
 
         let val_shape = value.shape().to_vec();
@@ -273,132 +314,329 @@ impl<T: Float> Distribution<T> for Dirichlet<T> {
             });
         }
 
-        // Constants on the parameter device.
+        // Validate that `value` lies on the simplex support. This is the
+        // production consumer of `constraints::Simplex::check_tensor` — the
+        // full-vector simplex predicate (non-negativity AND sum-to-one over
+        // the trailing dim) mirroring `dirichlet.py:91-92`
+        // (`self._validate_sample(value)` against `support = constraints.simplex`).
+        if !constraints::Simplex.check_tensor(value)? {
+            return Err(FerrotorchError::InvalidArgument {
+                message: "Dirichlet log_prob: value is not on the probability simplex \
+                          (Simplex support: elements >= 0 and last dim sums to 1)"
+                    .into(),
+            });
+        }
+
+        let alpha = self.concentration.data_vec()?;
+        let xs = value.data_vec()?;
+        let n_value_rows = xs.len() / k;
+        // The value's batch rows must align with the concentration's batch
+        // rows (broadcast leading sample dims share the same b-cycle).
+        if n_value_rows % b != 0 {
+            return Err(FerrotorchError::ShapeMismatch {
+                message: format!(
+                    "Dirichlet log_prob: value batch rows {n_value_rows} not a multiple \
+                     of concentration batch count {b} (concentration shape {:?})",
+                    self.concentration.shape()
+                ),
+            });
+        }
+        let zero = <T as num_traits::Zero>::zero();
         let one = <T as num_traits::One>::one();
-        let one_t = creation::full(&[k], one)?.to(device)?;
-        let alpha_minus_one = no_grad(|| sub(&self.concentration, &one_t))?;
 
-        // log(x) with a numerical floor to mirror the prior body's behaviour
-        // for the alpha==1 boundary. We build a scalar floor on device and
-        // take elementwise max via `(x + 0).max(floor)` analogue. Since
-        // ferrotorch's elementwise `max` is not a public grad-aware op on
-        // the same surface, we instead piggyback on the prior body's
-        // semantics: clamp via `x + floor_offset` would alter the value, so
-        // we keep things simple and call `log` directly. For x_k > 0 (the
-        // simplex contract) `log(x_k)` is finite; PyTorch's xlogy mainly
-        // guards the (alpha_k == 1 ⇒ 0 * log(0)) limit, which we recover by
-        // multiplying by `(alpha_k - 1)` (zero) after the log. Modern f32
-        // log of a tiny positive is a large negative finite number that is
-        // immediately killed by the zero coefficient when alpha == 1.
-        let log_x = log_op(value)?;
-        // term: (alpha - 1) * log(x), broadcasting alpha_minus_one [K] over
-        // value [..., K].
-        let term = mul(&log_x, &alpha_minus_one)?;
-        // Reduce the last dim → per-sample sum.
-        let per_sample = sum_dim(&term, -1, false)?;
+        // Per-batch-row normalizer = lgamma(sum(α)) - sum(lgamma(α)).
+        let mut normalizer = Vec::with_capacity(b);
+        for bi in 0..b {
+            let arow = &alpha[bi * k..bi * k + k];
+            let mut alpha_sum = zero;
+            let mut sum_lgamma = zero;
+            for &a in arow {
+                alpha_sum += a;
+                sum_lgamma += lgamma_scalar(a);
+            }
+            normalizer.push(lgamma_scalar(alpha_sum) - sum_lgamma);
+        }
 
-        // Normalizer = lgamma(sum(alpha)) - sum(lgamma(alpha)). Pure scalar
-        // function of the concentration; compute device-resident via tensor
-        // ops so future GPU lgamma kernel composes transparently.
-        let lgamma_alpha = no_grad(|| lgamma(&self.concentration))?; // [K]
-        let sum_lgamma = no_grad(|| lgamma_alpha.sum_all())?; // 0-D
-        let alpha_sum = no_grad(|| self.concentration.sum_all())?; // 0-D
-        // lgamma is a tensor op; we wrap the 0-D alpha_sum in a 1-D view
-        // because `unary_map` requires a non-empty shape.
-        let alpha_sum_1d = alpha_sum.view(&[1])?;
-        let lgamma_alpha_sum_1d = no_grad(|| lgamma(&alpha_sum_1d))?;
-        let lgamma_alpha_sum = lgamma_alpha_sum_1d.view(&[])?;
-        let normalizer = no_grad(|| sub(&lgamma_alpha_sum, &sum_lgamma))?;
+        // Per value row: xlogy(α-1, x).sum(-1) + normalizer[bi].
+        let mut out = Vec::with_capacity(n_value_rows);
+        for r in 0..n_value_rows {
+            let bi = r % b;
+            let arow = &alpha[bi * k..bi * k + k];
+            let xrow = &xs[r * k..r * k + k];
+            let mut acc = zero;
+            for j in 0..k {
+                let coeff = arow[j] - one;
+                // xlogy(coeff, x): 0 when coeff == 0 regardless of x.
+                if coeff != zero {
+                    acc += coeff * xrow[j].ln();
+                }
+            }
+            out.push(acc + normalizer[bi]);
+        }
 
-        // log_prob = per_sample + normalizer (broadcast 0-D scalar over
-        // per_sample's shape).
-        let log_prob = add(&per_sample, &normalizer)?;
-
-        Ok(log_prob)
+        // Output shape = value.shape()[..len-1] (drop the trailing event dim).
+        let out_shape = val_shape[..val_shape.len() - 1].to_vec();
+        let storage = TensorStorage::on_device(out, device)?;
+        Tensor::from_storage(storage, out_shape, false)
     }
 
     fn mean(&self) -> FerrotorchResult<Tensor<T>> {
-        // Reference: torch.distributions.Dirichlet.mean
+        // Reference: `torch/distributions/dirichlet.py:99-101`
         //   mean = concentration / concentration.sum(-1, keepdim=True)
-        // Device-resident: sum_dim + div over the parameter tensor.
+        // Host-side per-batch-row normalization over the trailing event dim;
+        // output shape matches the concentration ([*batch, K]).
+        let k = self.k;
+        let b = self.num_batches();
         let device = self.concentration.device();
-        let _ = device; // device check is implicit in the ops below
-        let alpha_sum_keepdim = no_grad(|| sum_dim(&self.concentration, -1, true))?;
-        // For 1-D alpha shape [K], keepdim=true gives [1]; broadcasting in
-        // `div` will materialize the [K] result.
-        ferrotorch_core::grad_fns::arithmetic::div(&self.concentration, &alpha_sum_keepdim)
+        let alpha = self.concentration.data_vec()?;
+        let zero = <T as num_traits::Zero>::zero();
+
+        let mut out = Vec::with_capacity(b * k);
+        for bi in 0..b {
+            let arow = &alpha[bi * k..bi * k + k];
+            let mut s = zero;
+            for &a in arow {
+                s += a;
+            }
+            for &a in arow {
+                out.push(a / s);
+            }
+        }
+        let storage = TensorStorage::on_device(out, device)?;
+        Tensor::from_storage(storage, self.concentration.shape().to_vec(), false)
     }
 
     fn variance(&self) -> FerrotorchResult<Tensor<T>> {
-        // Reference: torch.distributions.Dirichlet.variance
+        // Reference: `torch/distributions/dirichlet.py:113-120`
         //   variance[i] = alpha[i] * (alpha0 - alpha[i]) / (alpha0^2 * (alpha0 + 1))
-        // Device-resident: compose scalar-broadcast ops.
+        // Host-side per-batch-row; output shape matches concentration.
+        let k = self.k;
+        let b = self.num_batches();
         let device = self.concentration.device();
-
-        // alpha0 = sum(alpha)  (0-D)
-        let alpha0 = no_grad(|| self.concentration.sum_all())?;
-        // alpha0_minus_alpha = alpha0 - alpha   (broadcast 0-D over [K])
-        let alpha0_minus_alpha = no_grad(|| sub(&alpha0, &self.concentration))?;
-        // numerator = alpha * (alpha0 - alpha)
-        let num = no_grad(|| mul(&self.concentration, &alpha0_minus_alpha))?;
-        // alpha0_sq = alpha0 * alpha0
-        let alpha0_sq = no_grad(|| mul(&alpha0, &alpha0))?;
-        // alpha0_plus_one = alpha0 + 1
+        let alpha = self.concentration.data_vec()?;
+        let zero = <T as num_traits::Zero>::zero();
         let one = <T as num_traits::One>::one();
-        let one_scalar = creation::full(&[], one)?.to(device)?;
-        let alpha0_plus_one = no_grad(|| add(&alpha0, &one_scalar))?;
-        // denom = alpha0_sq * alpha0_plus_one
-        let denom = no_grad(|| mul(&alpha0_sq, &alpha0_plus_one))?;
-        // result = num / denom  (broadcast 0-D denom over [K] num)
-        ferrotorch_core::grad_fns::arithmetic::div(&num, &denom)
+
+        let mut out = Vec::with_capacity(b * k);
+        for bi in 0..b {
+            let arow = &alpha[bi * k..bi * k + k];
+            let mut a0 = zero;
+            for &a in arow {
+                a0 += a;
+            }
+            let denom = a0 * a0 * (a0 + one);
+            for &a in arow {
+                out.push(a * (a0 - a) / denom);
+            }
+        }
+        let storage = TensorStorage::on_device(out, device)?;
+        Tensor::from_storage(storage, self.concentration.shape().to_vec(), false)
     }
 
     fn entropy(&self) -> FerrotorchResult<Tensor<T>> {
-        // Reference: torch.distributions.Dirichlet.entropy
+        // Reference: `torch/distributions/dirichlet.py:122-130`
         //   H = sum(lgamma(alpha_k)) - lgamma(alpha0)
         //       - (K - alpha0) * digamma(alpha0)
         //       - sum((alpha_k - 1) * digamma(alpha_k))
-        // Device-resident composition.
+        // Host-side per-batch-row; output shape == batch_shape (scalar for the
+        // 1-D case).
         let k = self.k;
+        let b = self.num_batches();
+        let device = self.concentration.device();
+        let alpha = self.concentration.data_vec()?;
+        let zero = <T as num_traits::Zero>::zero();
+        let one = <T as num_traits::One>::one();
+        let k_t = T::from(k).unwrap();
+
+        let mut out = Vec::with_capacity(b);
+        for bi in 0..b {
+            let arow = &alpha[bi * k..bi * k + k];
+            let mut a0 = zero;
+            let mut sum_lgamma = zero;
+            let mut term3 = zero;
+            for &a in arow {
+                a0 += a;
+                sum_lgamma += lgamma_scalar(a);
+                term3 += (a - one) * digamma_scalar(a);
+            }
+            let h = sum_lgamma - lgamma_scalar(a0) - (k_t - a0) * digamma_scalar(a0) - term3;
+            out.push(h);
+        }
+        let storage = TensorStorage::on_device(out, device)?;
+        Tensor::from_storage(storage, self.batch_shape.clone(), false)
+    }
+
+    // -----------------------------------------------------------------------
+    // Full PyTorch surface (#1412 / #1547 / #1548 / #1549) — N-D batched.
+    //
+    // Mirrors `torch/distributions/dirichlet.py:55-59, 71, 76-83, 100-111`:
+    //   arg_constraints = {"concentration": constraints.independent(constraints.positive, 1)}
+    //   support         = constraints.simplex
+    //   has_rsample     = True
+    //   batch_shape     = concentration.shape[:-1]
+    //   expand          = concentration.expand(batch_shape + event_shape)
+    //   mode            = (concentration - 1).clamp(min=0) / sum(.., -1, True);
+    //                     all-α<1 rows substitute one_hot(argmax) (NOT NaN)
+    // All methods handle arbitrary leading batch dims (`[*batch, K]`).
+    // -----------------------------------------------------------------------
+
+    fn has_rsample(&self) -> bool {
+        // `torch/distributions/dirichlet.py:59`: `has_rsample = True`.
+        true
+    }
+
+    fn batch_shape(&self) -> Vec<usize> {
+        // `torch/distributions/dirichlet.py:71`:
+        //   batch_shape = concentration.shape[:-1]
+        self.batch_shape.clone()
+    }
+
+    fn event_shape(&self) -> Vec<usize> {
+        // The simplex event has dimension K (the trailing dim of every sample).
+        vec![self.k]
+    }
+
+    fn support(&self) -> Option<Box<dyn DistConstraint>> {
+        // `torch/distributions/dirichlet.py:47`: `support = constraints.simplex`.
+        Some(Box::new(constraints::Simplex))
+    }
+
+    fn arg_constraints(&self) -> HashMap<&'static str, Box<dyn DistConstraint>> {
+        // `torch/distributions/dirichlet.py:46`:
+        //   arg_constraints = {"concentration": independent(constraints.positive, 1)}
+        // ferrotorch ships scalar `Positive` here because the `Independent`
+        // composite constraint variant is still under #1372 follow-up; the
+        // per-element semantics (each α_k > 0) match what `Positive` checks.
+        let mut m: HashMap<&'static str, Box<dyn DistConstraint>> = HashMap::new();
+        m.insert("concentration", Box::new(constraints::Positive));
+        m
+    }
+
+    fn mode(&self) -> FerrotorchResult<Tensor<T>> {
+        // `torch/distributions/dirichlet.py:104-111`:
+        //   concentrationm1 = (self.concentration - 1).clamp(min=0.0)
+        //   mode = concentrationm1 / concentrationm1.sum(-1, True)
+        //   mask = (self.concentration < 1).all(dim=-1)
+        //   mode[mask] = one_hot(mode[mask].argmax(dim=-1), K).to(mode)
+        //
+        // Per batch row: clamp `(α-1)` at 0, normalize over the event dim. For
+        // a row where every α < 1 the clamped numerator is all-zero (sum 0),
+        // so upstream substitutes the one-hot of argmax — NOT NaN. Since the
+        // clamped numerator is all-zero in that branch, `argmax` over the
+        // numerator is 0; PyTorch's `mode[mask].argmax` is over the (all-zero)
+        // `mode` slice and likewise returns index 0. We replicate index 0.
+        let k = self.k;
+        let b = self.num_batches();
+        let alpha = self.concentration.data_vec()?;
+        let one = <T as num_traits::One>::one();
+        let zero = <T as num_traits::Zero>::zero();
         let device = self.concentration.device();
 
-        // alpha0 (0-D) and alpha0_1d for unary_map convenience.
-        let alpha0 = no_grad(|| self.concentration.sum_all())?; // 0-D
-        let alpha0_1d = alpha0.view(&[1])?;
+        let mut result = Vec::with_capacity(b * k);
+        for bi in 0..b {
+            let arow = &alpha[bi * k..bi * k + k];
+            let all_below_one = arow.iter().all(|a| *a < one);
+            if all_below_one {
+                // One-hot at argmax of the all-zero clamped numerator -> idx 0.
+                // (Upstream: `one_hot(mode.argmax(-1), K)` with mode all-zero
+                // resolves to the first index.)
+                for j in 0..k {
+                    result.push(if j == 0 { one } else { zero });
+                }
+            } else {
+                let mut sum_am1 = zero;
+                let mut am1: Vec<T> = Vec::with_capacity(k);
+                for &a in arow {
+                    let v = if a > one { a - one } else { zero };
+                    am1.push(v);
+                    sum_am1 += v;
+                }
+                for v in &am1 {
+                    result.push(*v / sum_am1);
+                }
+            }
+        }
+        let storage = TensorStorage::on_device(result, device)?;
+        Tensor::from_storage(storage, self.concentration.shape().to_vec(), false)
+    }
 
-        // sum_lgamma = sum(lgamma(alpha))
-        let lgamma_alpha = no_grad(|| lgamma(&self.concentration))?;
-        let sum_lgamma = no_grad(|| lgamma_alpha.sum_all())?;
+    fn expand(&self, batch_shape: &[usize]) -> FerrotorchResult<Box<dyn Distribution<T>>> {
+        // `torch/distributions/dirichlet.py:76-83`:
+        //   new.concentration = self.concentration.expand(batch_shape + self.event_shape)
+        // The target concentration shape is `batch_shape ++ [K]`. The source
+        // concentration (shape `self.batch_shape ++ [K]`) must broadcast to it
+        // per PyTorch's `Tensor.expand` rules: source batch dims, right-aligned
+        // under the target batch dims, must each be 1 or equal the target. We
+        // materialize the broadcast host-side (CPU path; the lib.rs `expand`
+        // doc note records that ferrotorch materializes the broadcast for
+        // simplicity rather than constructing a strided view).
+        let k = self.k;
+        let src_batch = &self.batch_shape;
+        let tgt_batch = batch_shape;
 
-        // lgamma_alpha0
-        let lgamma_alpha0_1d = no_grad(|| lgamma(&alpha0_1d))?;
-        let lgamma_alpha0 = lgamma_alpha0_1d.view(&[])?;
+        if src_batch.len() > tgt_batch.len() {
+            return Err(FerrotorchError::InvalidArgument {
+                message: format!(
+                    "Dirichlet::expand: cannot expand batch_shape {src_batch:?} to \
+                     {tgt_batch:?} (target has fewer dims)"
+                ),
+            });
+        }
+        let pad = tgt_batch.len() - src_batch.len();
+        for (i, &s) in src_batch.iter().enumerate() {
+            let t = tgt_batch[pad + i];
+            if s != t && s != 1 {
+                return Err(FerrotorchError::InvalidArgument {
+                    message: format!(
+                        "Dirichlet::expand: source batch dim {s} (axis {i}) is not \
+                         broadcastable to target {t} (batch_shape {src_batch:?} -> {tgt_batch:?})"
+                    ),
+                });
+            }
+        }
 
-        // digamma_alpha0
-        let digamma_alpha0_1d = no_grad(|| digamma(&alpha0_1d))?;
-        let digamma_alpha0 = digamma_alpha0_1d.view(&[])?;
+        // Source strides over the source batch dims (row-major); broadcast
+        // dims (size 1) contribute stride 0 so they re-read the same row.
+        let mut src_strides = vec![0usize; src_batch.len()];
+        let mut acc = 1usize;
+        for i in (0..src_batch.len()).rev() {
+            src_strides[i] = if src_batch[i] == 1 { 0 } else { acc };
+            acc *= src_batch[i].max(1);
+        }
+        // Target strides for decoding a flat batch index into coordinates.
+        let mut tgt_strides = vec![1usize; tgt_batch.len()];
+        let mut tacc = 1usize;
+        for i in (0..tgt_batch.len()).rev() {
+            tgt_strides[i] = tacc;
+            tacc *= tgt_batch[i].max(1);
+        }
 
-        // (K - alpha0) * digamma_alpha0
-        let k_scalar = creation::full(&[], T::from(k).unwrap())?.to(device)?;
-        let k_minus_alpha0 = no_grad(|| sub(&k_scalar, &alpha0))?;
-        let term2 = no_grad(|| mul(&k_minus_alpha0, &digamma_alpha0))?;
+        let src = self.concentration.data_vec()?;
+        let tgt_b: usize = tgt_batch.iter().product::<usize>().max(1);
+        let mut out = Vec::with_capacity(tgt_b * k);
+        for flat in 0..tgt_b {
+            // Decode `flat` into target batch coordinates, then map to the
+            // source batch row (collapsing broadcast dims to index 0).
+            let mut src_row = 0usize;
+            for i in 0..tgt_batch.len() {
+                let coord = (flat / tgt_strides[i]) % tgt_batch[i].max(1);
+                if i >= pad {
+                    let si = i - pad;
+                    let use_coord = if src_batch[si] == 1 { 0 } else { coord };
+                    src_row += use_coord * src_strides[si];
+                }
+            }
+            let base = src_row * k;
+            out.extend_from_slice(&src[base..base + k]);
+        }
 
-        // sum((alpha_k - 1) * digamma(alpha_k))
-        let one = <T as num_traits::One>::one();
-        let one_vec = creation::full(&[k], one)?.to(device)?;
-        let alpha_minus_one = no_grad(|| sub(&self.concentration, &one_vec))?;
-        let digamma_alpha = no_grad(|| digamma(&self.concentration))?;
-        let prod = no_grad(|| mul(&alpha_minus_one, &digamma_alpha))?;
-        let term3 = no_grad(|| prod.sum_all())?;
-
-        // H = sum_lgamma - lgamma_alpha0 - term2 - term3
-        let h = no_grad(|| {
-            let a = sub(&sum_lgamma, &lgamma_alpha0)?;
-            let b = sub(&a, &term2)?;
-            sub(&b, &term3)
-        })?;
-
-        Ok(h)
+        let device = self.concentration.device();
+        let mut new_shape = tgt_batch.to_vec();
+        new_shape.push(k);
+        let storage = TensorStorage::on_device(out, device)?;
+        let requires_grad = self.concentration.requires_grad();
+        let new_conc = Tensor::from_storage(storage, new_shape, requires_grad)?;
+        Ok(Box::new(Dirichlet::new(new_conc)?))
     }
 }
 
@@ -423,7 +661,11 @@ impl<T: Float> Distribution<T> for Dirichlet<T> {
 struct DirichletRsampleBackward<T: Float> {
     concentration: Tensor<T>,
     samples: Tensor<T>,
+    /// Number of leading sample rows (`prod(sample_shape)`).
     n: usize,
+    /// Number of concentration batch rows (`prod(batch_shape)`, 1 for 1-D).
+    b: usize,
+    /// Number of categories (event dim).
     k: usize,
 }
 
@@ -431,30 +673,43 @@ impl<T: Float> GradFn<T> for DirichletRsampleBackward<T> {
     fn backward(&self, grad_output: &Tensor<T>) -> FerrotorchResult<Vec<Option<Tensor<T>>>> {
         let device = grad_output.device();
         // The gradient kernel itself is scalar (per-element rejection-grad
-        // formula); we read back grad_output / samples / concentration
-        // once, then upload the [K] gradient tensor directly to `device`.
+        // formula); we read back grad_output / samples / concentration once,
+        // then upload the [*batch, K] gradient tensor directly to `device`.
+        //
+        // Layout: samples / grad_output are `[n_samples, b, K]` flattened;
+        // each batch row `bi` owns its own length-K alpha slice and accumulates
+        // its own gradient slot. The gradient tensor has the same shape as the
+        // concentration (`[*batch, K]`).
         let go = grad_output.data_vec()?;
         let x_data = self.samples.data_vec()?;
         let alpha = self.concentration.data_vec()?;
         let n = self.n;
+        let b = self.b;
         let k = self.k;
         let zero = <T as num_traits::Zero>::zero();
 
-        // digamma is currently scalar in the host body. The math is
-        // identical to the prior implementation.
-        let alpha_sum: T = alpha.iter().copied().fold(zero, |a, b| a + b);
-        let dig_sum = digamma_scalar(alpha_sum);
+        // Per-batch-row digamma(sum(alpha_row)).
+        let mut dig_sum = Vec::with_capacity(b);
+        for bi in 0..b {
+            let arow = &alpha[bi * k..bi * k + k];
+            let asum: T = arow.iter().copied().fold(zero, |a, c| a + c);
+            dig_sum.push(digamma_scalar(asum));
+        }
 
-        let mut grad_alpha = vec![zero; k];
+        let mut grad_alpha = vec![zero; b * k];
         for s in 0..n {
-            let mut xg_sum = zero;
-            for j in 0..k {
-                xg_sum += x_data[s * k + j] * go[s * k + j];
-            }
-            for j in 0..k {
-                let dig_alpha_j = digamma_scalar(alpha[j]);
-                let grad_j = x_data[s * k + j] * (dig_alpha_j - dig_sum);
-                grad_alpha[j] += (go[s * k + j] - xg_sum) * grad_j;
+            for bi in 0..b {
+                let base = (s * b + bi) * k;
+                let arow = &alpha[bi * k..bi * k + k];
+                let mut xg_sum = zero;
+                for j in 0..k {
+                    xg_sum += x_data[base + j] * go[base + j];
+                }
+                for j in 0..k {
+                    let dig_alpha_j = digamma_scalar(arow[j]);
+                    let grad_j = x_data[base + j] * (dig_alpha_j - dig_sum[bi]);
+                    grad_alpha[bi * k + j] += (go[base + j] - xg_sum) * grad_j;
+                }
             }
         }
 
@@ -602,13 +857,19 @@ mod tests {
     }
 
     #[test]
-    fn test_dirichlet_not_1d_errors() {
+    fn test_dirichlet_nd_accepted() {
+        // Upstream accepts `concentration.dim() >= 1` (dirichlet.py:66-72);
+        // a [2,2] concentration yields batch_shape [2], event [2].
         let alpha = from_slice(&[1.0f32, 2.0, 3.0, 4.0], &[2, 2]).unwrap();
-        assert!(Dirichlet::new(alpha).is_err());
+        let dist = Dirichlet::new(alpha).unwrap();
+        assert_eq!(dist.batch_shape(), vec![2]);
+        assert_eq!(dist.num_categories(), 2);
     }
 
     #[test]
     fn test_dirichlet_empty_errors() {
+        // A trailing-zero event dim (K == 0) is rejected (dirichlet.py: K must
+        // be >= 1 for a valid simplex).
         let alpha = from_slice::<f32>(&[], &[0]).unwrap();
         assert!(Dirichlet::new(alpha).is_err());
     }
@@ -633,6 +894,150 @@ mod tests {
             let sum: f64 = (0..3).map(|j| data[s * 3 + j]).sum();
             assert!((sum - 1.0).abs() < 1e-10);
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // Wave-H #1412: support / arg_constraints / mode / expand (1-D path)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_dirichlet_has_rsample_true() {
+        let alpha = tensor(&[2.0f32, 3.0]).unwrap();
+        let dist = Dirichlet::new(alpha).unwrap();
+        assert!(dist.has_rsample());
+    }
+
+    #[test]
+    fn test_dirichlet_support_is_simplex() {
+        let alpha = tensor(&[1.0f32, 1.0, 1.0]).unwrap();
+        let dist = Dirichlet::new(alpha).unwrap();
+        let sup = dist.support().unwrap();
+        assert_eq!(sup.name(), "Simplex");
+        assert_eq!(sup.event_dim(), 1);
+    }
+
+    #[test]
+    fn test_dirichlet_arg_constraints_concentration_positive() {
+        let alpha = tensor(&[2.0f32, 3.0]).unwrap();
+        let dist = Dirichlet::new(alpha).unwrap();
+        let ac = dist.arg_constraints();
+        assert_eq!(ac.len(), 1);
+        assert_eq!(ac.get("concentration").unwrap().name(), "Positive");
+    }
+
+    #[test]
+    fn test_dirichlet_mode_alpha_gt_one() {
+        // For α = [2, 3, 4]: mode = (α-1) / sum(α-1) = [1, 2, 3] / 6.
+        let alpha = tensor(&[2.0f32, 3.0, 4.0]).unwrap();
+        let dist = Dirichlet::new(alpha).unwrap();
+        let mode = dist.mode().unwrap();
+        let data = mode.data().unwrap();
+        assert!((data[0] - 1.0 / 6.0).abs() < 1e-6);
+        assert!((data[1] - 2.0 / 6.0).abs() < 1e-6);
+        assert!((data[2] - 3.0 / 6.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_dirichlet_mode_all_alpha_below_one_is_one_hot() {
+        // Upstream `dirichlet.py:107-110`: all-α<1 rows return one_hot(argmax),
+        // NOT NaN. For α = [0.5, 0.5, 0.5] the clamped numerator is all-zero so
+        // argmax = 0 → mode = [1, 0, 0] (verified live torch 2.11, #1549).
+        let alpha = tensor(&[0.5f32, 0.5, 0.5]).unwrap();
+        let dist = Dirichlet::new(alpha).unwrap();
+        let mode = dist.mode().unwrap();
+        let data = mode.data().unwrap();
+        assert_eq!(
+            data[0], 1.0f32,
+            "mode[0] must be 1.0 (one-hot), got {}",
+            data[0]
+        );
+        assert_eq!(data[1], 0.0f32, "mode[1] must be 0.0, got {}", data[1]);
+        assert_eq!(data[2], 0.0f32, "mode[2] must be 0.0, got {}", data[2]);
+    }
+
+    #[test]
+    fn test_dirichlet_event_shape() {
+        let alpha = tensor(&[1.0f32, 1.0, 1.0, 1.0]).unwrap();
+        let dist = Dirichlet::new(alpha).unwrap();
+        assert_eq!(dist.event_shape(), vec![4]);
+    }
+
+    #[test]
+    fn test_dirichlet_expand_empty_batch_clones() {
+        let alpha = tensor(&[2.0f32, 3.0]).unwrap();
+        let dist = Dirichlet::new(alpha).unwrap();
+        let expanded = dist.expand(&[]).unwrap();
+        // sample shape must still have trailing K = 2.
+        let s = expanded.sample(&[5]).unwrap();
+        assert_eq!(s.shape(), &[5, 2]);
+    }
+
+    #[test]
+    fn test_dirichlet_expand_to_new_batch_dim() {
+        // `dirichlet.py:76-83`: expanding a 1-D Dirichlet (K=2) to batch [4]
+        // broadcasts concentration to [4, 2]; sample shape is then [4, 2].
+        let alpha = tensor(&[2.0f32, 3.0]).unwrap();
+        let dist = Dirichlet::new(alpha).unwrap();
+        let expanded = dist.expand(&[4]).unwrap();
+        assert_eq!(expanded.batch_shape(), vec![4]);
+        let s = expanded.sample(&[]).unwrap();
+        assert_eq!(s.shape(), &[4, 2]);
+    }
+
+    #[test]
+    fn test_dirichlet_nd_batched_shapes() {
+        // Concentration [2, 3] -> batch_shape [2], event [3]; sample [2,3];
+        // log_prob over a [2,3] value reduces the event dim -> [2].
+        let alpha = from_slice(&[1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0], &[2, 3]).unwrap();
+        let dist = Dirichlet::new(alpha).unwrap();
+        assert_eq!(dist.batch_shape(), vec![2]);
+        assert_eq!(dist.event_shape(), vec![3]);
+        let s = dist.sample(&[]).unwrap();
+        assert_eq!(s.shape(), &[2, 3]);
+        let value = from_slice(&[0.2f32, 0.3, 0.5, 0.1, 0.4, 0.5], &[2, 3]).unwrap();
+        let lp = dist.log_prob(&value).unwrap();
+        assert_eq!(lp.shape(), &[2]);
+        // mean of a batched Dirichlet matches per-row α / sum(α).
+        let m = dist.mean().unwrap();
+        assert_eq!(m.shape(), &[2, 3]);
+        let md = m.data().unwrap();
+        assert!((md[0] - 1.0 / 6.0).abs() < 1e-6);
+        assert!((md[3] - 4.0 / 15.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_dirichlet_log_prob_batched_matches_per_row() {
+        // A batched [2,K] Dirichlet's log_prob must equal the two independent
+        // 1-D Dirichlet log_probs computed row-by-row (validates the batched
+        // normalizer is per-row, not global).
+        let a0 = [2.0f32, 3.0, 4.0];
+        let a1 = [1.0f32, 1.0, 1.0];
+        let batched = from_slice(&[a0[0], a0[1], a0[2], a1[0], a1[1], a1[2]], &[2, 3]).unwrap();
+        let dist = Dirichlet::new(batched).unwrap();
+        let x = from_slice(&[0.2f32, 0.3, 0.5, 0.25, 0.25, 0.5], &[2, 3]).unwrap();
+        let lp = dist.log_prob(&x).unwrap();
+        let lpd = lp.data().unwrap();
+
+        let d0 = Dirichlet::new(tensor(&a0).unwrap()).unwrap();
+        let x0 = tensor(&[0.2f32, 0.3, 0.5]).unwrap();
+        let e0 = d0.log_prob(&x0).unwrap().item().unwrap();
+        let d1 = Dirichlet::new(tensor(&a1).unwrap()).unwrap();
+        let x1 = tensor(&[0.25f32, 0.25, 0.5]).unwrap();
+        let e1 = d1.log_prob(&x1).unwrap().item().unwrap();
+
+        assert!((lpd[0] - e0).abs() < 1e-5, "row0: {} vs {}", lpd[0], e0);
+        assert!((lpd[1] - e1).abs() < 1e-5, "row1: {} vs {}", lpd[1], e1);
+    }
+
+    #[test]
+    fn test_dirichlet_log_prob_rejects_off_simplex() {
+        // log_prob validates value against the Simplex support (consumer of
+        // constraints::Simplex::check_tensor). A vector summing to 1.1 is off
+        // the simplex -> Err (dirichlet.py:91-92 validate_sample).
+        let alpha = tensor(&[1.0f32, 1.0, 1.0]).unwrap();
+        let dist = Dirichlet::new(alpha).unwrap();
+        let bad = tensor(&[0.2f32, 0.5, 0.4]).unwrap(); // sums to 1.1
+        assert!(dist.log_prob(&bad).is_err());
     }
 
     #[test]

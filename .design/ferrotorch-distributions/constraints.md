@@ -22,15 +22,18 @@ variants in its `__all__`).
 ## Requirements
 
 - REQ-1: `pub trait Constraint: Send + Sync` with one required
-  method — `check<T: Float>(&self, value: T) -> bool` — plus three
-  defaults: `is_discrete() -> bool { false }`, `event_dim() -> usize
-  { 0 }`, and a required `name(&self) -> &'static str` for
+  method — `check<T: Float>(&self, value: T) -> bool` — plus four
+  defaults: `check_tensor<T: Float>(&self, value: &Tensor<T>) ->
+  FerrotorchResult<bool>` (default AND-reduces the scalar `check`
+  element-wise), `is_discrete() -> bool { false }`, `event_dim() ->
+  usize { 0 }`, and a required `name(&self) -> &'static str` for
   diagnostics. Mirrors `torch/distributions/constraints.py:80-106`
   `class Constraint` with its `is_discrete` and `event_dim`
-  class-level attributes and its `check(value)` method. The Rust
-  generic `<T: Float>` on `check` is the analog of PyTorch's
-  runtime-tensor-dtype dispatch (R-DEV-1: numerical contract
-  matched by the type system).
+  class-level attributes and its `check(value)` method. PyTorch's
+  `check` takes a tensor and returns a boolean tensor; ferrotorch
+  splits this into a per-element scalar `check<T>` (the R-DEV-1
+  dtype-monomorphised analog) plus the tensor-level `check_tensor`
+  for constraints whose validity is a vector property (`Simplex`).
 
 - REQ-2: `pub struct Real` with `impl Constraint for Real` rejecting
   NaN (`!value.is_nan()`) and accepting all finite + infinite
@@ -72,11 +75,16 @@ variants in its `__all__`).
   any future Rust ecosystem `Boolean` newtype; the `boolean()`
   free-function preserves the user-facing name.)
 
-- REQ-7: `Simplex` constraint with `event_dim() -> 1` override —
-  per-element check is `value >= 0`; full sum-to-one validation is
-  caller responsibility (the trait's `check` operates on a scalar,
-  not a tensor, so vector-level invariants must be checked
-  separately). Mirrors upstream `_Simplex` with `event_dim = 1`.
+- REQ-7: `Simplex` constraint with `event_dim() -> 1` override.
+  Two predicate surfaces: the scalar `check(value)` verifies the
+  per-element non-negativity half (`value >= 0`), and the tensor-level
+  `check_tensor(value)` (added under #1547) does the FULL vector check
+  — `all(value >= 0, dim=-1) & ((value.sum(-1) - 1).abs() < 1e-6)` —
+  reducing over the trailing event dim. The `Constraint` trait gains a
+  default `check_tensor` (AND-reduce of the scalar `check`); `Simplex`
+  overrides it. Mirrors upstream `_Simplex.check` (which operates on a
+  tensor) with `event_dim = 1`. Production consumer: `Dirichlet::log_prob`
+  validates its sample against `Simplex::check_tensor`.
 
 - REQ-8: NOT-STARTED — the 17 missing upstream variants
   (`_IntegerInterval`, `_IntegerGreaterThan`, `_NonnegativeInteger`,
@@ -162,14 +170,17 @@ matches PyTorch's mix-dtype tolerance.
 
 `Simplex` is unusual: its `event_dim()` overrides the default to
 return `1`, signalling that the constrained space is a vector
-(sum-to-one over the last dim) rather than a scalar. But the
-trait's `check` operates on a scalar, so `Simplex::check(v)`
-checks only that the individual scalar `v >= 0`. The doc-comment
-on `Simplex` makes this explicit: "full simplex check requires
-sum-to-one over the event dimension, done by the caller". This is
-a known limitation tracked under blocker #1371 — full vector
-validation needs a tensor-level `check_tensor` method which is the
-correct shape once concrete distributions wire `arg_constraints`.
+(sum-to-one over the last dim) rather than a scalar. The scalar
+`check(v)` can only verify the per-element half (`v >= 0`), so the
+full vector contract lives in `check_tensor` (added under #1547),
+which reduces over the trailing event dim:
+`all(value >= 0, dim=-1) & ((value.sum(-1) - 1).abs() < 1e-6)`,
+mirroring upstream `_Simplex.check`. `check_tensor` chunks the flat
+buffer into rows of length `K` (the last dim) and rejects the whole
+tensor if any row is negative or its sum drifts from 1 by `>= 1e-6`.
+The production consumer is `Dirichlet::log_prob`, which validates
+the sample against `Simplex::check_tensor` before computing the
+density (`dirichlet.py:91-92` `_validate_sample`).
 
 ### The unused-API problem (REQ-9)
 
@@ -273,12 +284,12 @@ Expected: `15 passed`.
 
 | REQ | Status | Evidence |
 |---|---|---|
-| REQ-1 | SHIPPED | impl: `pub trait Constraint: Send + Sync` with `check<T: Float>`, default `is_discrete`/`event_dim`, required `name` in `constraints.rs`, mirroring `torch/distributions/constraints.py:80-106`; non-test consumer: `pub use constraints` block in `lib.rs` is the crate-level re-export, and `pub trait Constraint` is itself the public extension point (grandfathered public API per goal.md S5). |
+| REQ-1 | SHIPPED | impl: `pub trait Constraint: Send + Sync` with `check<T: Float>`, default `check_tensor<T: Float>` (AND-reduce of scalar `check`), default `is_discrete`/`event_dim`, required `name` in `constraints.rs`, mirroring `torch/distributions/constraints.py:80-106`; non-test consumer: `fn Dirichlet::log_prob` in `dirichlet.rs` calls `Simplex::check_tensor` (the trait's tensor-level method) — a production consumer of the trait surface; `pub trait Constraint` is also the public extension point (grandfathered public API per goal.md S5). |
 | REQ-2 | SHIPPED | impl: `pub struct Real` + `impl Constraint for Real` (rejects NaN) + `pub fn real()` constructor in `constraints.rs`, mirroring `torch/distributions/constraints.py:_Real`; non-test consumer: `pub use constraints` in `lib.rs` re-exports both the type and the `real()` factory as crate-public API. |
 | REQ-3 | SHIPPED | impl: `pub struct Positive`, `NonNegative`, `LessThan<T>` + `positive()`/`nonnegative()`/`less_than()` constructors in `constraints.rs`, mirroring upstream's `_GreaterThan(0.)`, `_GreaterThanEq(0.)`, `_LessThan(...)`; non-test consumer: `pub use constraints` re-export in `lib.rs`. |
 | REQ-4 | SHIPPED | impl: `pub struct GreaterThan<T: Float>` + `GreaterThanEq<T: Float>` with `T::from(self.lower_bound).unwrap()` promotion in `check::<U>` and `greater_than(lower)`/`greater_than_eq(lower)` constructors in `constraints.rs`, mirroring `torch/distributions/constraints.py:_GreaterThan` / `_GreaterThanEq`; non-test consumer: `pub use constraints` re-export in `lib.rs`. |
 | REQ-5 | SHIPPED | impl: `pub struct OpenInterval<T>`, `ClosedInterval<T>`, `HalfOpenInterval<T>` + their constructors in `constraints.rs`, mirroring `_Interval` and `_HalfOpenInterval` in `torch/distributions/constraints.py`; non-test consumer: `pub use constraints` re-export in `lib.rs`. |
 | REQ-6 | SHIPPED | impl: `pub struct UnitInterval`, `BooleanConstraint` + `unit_interval()` / `boolean()` constructors in `constraints.rs`, with `BooleanConstraint::is_discrete() -> true`; mirroring `unit_interval = _Interval(0., 1.)` and `boolean = _Boolean()`; non-test consumer: `pub use constraints` re-export in `lib.rs`. |
-| REQ-7 | SHIPPED | impl: `pub struct Simplex` with `event_dim() -> 1` override + `simplex()` constructor in `constraints.rs`, mirroring `_Simplex` in `torch/distributions/constraints.py`; non-test consumer: `pub use constraints` re-export in `lib.rs`. The scalar-only `check` is doc-commented as a known limitation; full vector validation is tracked under blocker #1371. |
+| REQ-7 | SHIPPED | impl: `pub struct Simplex` with `event_dim() -> 1` + `check_tensor` full-vector override (`all(value >= 0, dim=-1) & ((value.sum(-1) - 1).abs() < 1e-6)`) + `simplex()` constructor in `constraints.rs`, mirroring `_Simplex.check` in `torch/distributions/constraints.py`; non-test consumer: `fn Dirichlet::log_prob` in `dirichlet.rs` validates its sample against `Simplex::check_tensor` (the production consumer added with #1547). The earlier scalar-only-check limitation is now closed by `check_tensor`. |
 | REQ-8 | NOT-STARTED | blocker #1372 — 17 of 28 upstream constraint variants are not ported (`IntegerInterval`, `NonNegativeInteger`, `PositiveDefinite`, `PositiveSemiDefinite`, `Multinomial`, `OneHot`, `Symmetric`, `LowerCholesky`, `LowerTriangular`, `CorrCholesky`, `RealVector`, `Cat`, `Stack`, `Independent` composite, `_Dependent` / `is_dependent` machinery, `MixtureSameFamilyConstraint`). Most of these are needed by specific concrete distributions (e.g. `MultivariateNormal.support = real_vector`). |
 | REQ-9 | NOT-STARTED | blocker #1371 — no concrete distribution declares `arg_constraints` or `support`. The Constraint trait + 11 impls have zero production consumers inside `ferrotorch-distributions/src/`; only `tests/conformance_distributions_discrete.rs` exercises them (test-only, does not count per R-DOC-3). Resolution requires the `Distribution`-trait-surface blocker (#1376) to land first. |

@@ -64,70 +64,61 @@ fn audit_1372_nonnegative_integer_check() {
 // #1372 constraints — Simplex FULL VECTOR check (DIVERGENCE expected)
 // ============================================================================
 
-/// Divergence: ferrotorch's `Simplex::check` diverges from
-/// `pytorch torch/distributions/constraints.py:533` for a non-normalized
-/// vector. Upstream `_Simplex.check`:
+/// FIXED (#1547): `Simplex::check_tensor` now does the FULL vector check
+/// matching `torch/distributions/constraints.py:_Simplex.check`:
 ///   return torch.all(value >= 0, dim=-1) & ((value.sum(-1) - 1).abs() < 1e-6)
-/// does a FULL vector check: all elements >= 0 AND sum ~= 1.
+/// A vector summing to 1.1 is REJECTED (the sum-to-one half the scalar
+/// per-element `check` could not express).
 ///
-/// ferrotorch's `Constraint::check<T: Float>(&self, value: T)` takes a SCALAR,
-/// so it can only verify the per-element non-negativity (`value >= 0`). It
-/// cannot detect that [0.2, 0.5, 0.4] sums to 1.1 (not 1) — every element
-/// passes the scalar check individually. Upstream returns False for this
-/// vector; ferrotorch's surface returns True for each element.
-///
-/// This test demonstrates the missing full-vector check by asserting the
-/// observable PyTorch contract: a vector that sums to 1.1 must be REJECTED.
-/// We express "the constraint rejects this vector" as "at least one element
-/// check returns false", which is the strongest statement the scalar surface
-/// can make. It FAILS because all three elements are individually >= 0.
-///
-/// Probe input: [0.2, 0.5, 0.4] (sum = 1.1). Upstream: reject. ferrotorch: accept.
+/// Probe input: [0.2, 0.5, 0.4] (sum = 1.1). Upstream: reject. ferrotorch: reject.
 #[test]
 fn audit_1372_simplex_rejects_non_normalized_vector() {
     let c = Simplex;
-    let v = [0.2f32, 0.5, 0.4]; // sums to 1.1 -> upstream rejects this vector
-
-    // Upstream `simplex.check([0.2,0.5,0.4])` == False (verified live torch).
-    // The only way ferrotorch's scalar surface can reject the vector is for
-    // some element check to fail. Since all elements are >= 0, the vector is
-    // (incorrectly) accepted -> this assertion FAILS, pinning the divergence.
-    let vector_rejected = v.iter().any(|&x| !c.check(x));
+    let v = tensor(&[0.2f32, 0.5, 0.4]).unwrap(); // sums to 1.1 -> reject
     assert!(
-        vector_rejected,
-        "Simplex must reject vector [0.2,0.5,0.4] (sum=1.1); upstream \
-         constraints.py:533 checks (value.sum(-1)-1).abs() < 1e-6 but \
-         ferrotorch's scalar Simplex::check only tests per-element >= 0"
+        !c.check_tensor(&v).unwrap(),
+        "Simplex::check_tensor must reject [0.2,0.5,0.4] (sum=1.1); upstream \
+         constraints.py:_Simplex.check requires (value.sum(-1)-1).abs() < 1e-6"
     );
 }
 
-/// Companion probe: a properly normalized simplex vector must be ACCEPTED.
-/// This one PASSES under both upstream and ferrotorch — it confirms the
-/// divergence above is specifically the missing sum-to-one check, not a
-/// blanket rejection.
-/// Upstream: `simplex.check([0.2,0.5,0.3])` == True (verified live torch).
+/// Companion probe: a properly normalized simplex vector must be ACCEPTED by
+/// the full-vector `check_tensor`. Upstream: `simplex.check([0.2,0.5,0.3])`
+/// == True (verified live torch).
 #[test]
 fn audit_1372_simplex_accepts_normalized_vector() {
     let c = Simplex;
-    let v = [0.2f32, 0.5, 0.3]; // sums to 1.0 -> accept
-    let vector_accepted = v.iter().all(|&x| c.check(x));
-    assert!(vector_accepted, "valid simplex vector must be accepted");
+    let v = tensor(&[0.2f32, 0.5, 0.3]).unwrap(); // sums to 1.0 -> accept
+    assert!(
+        c.check_tensor(&v).unwrap(),
+        "valid simplex vector must be accepted by check_tensor"
+    );
 }
 
-/// Divergence companion: a vector with a negative element AND that happens to
-/// sum to 1.0 ([-0.1, 0.6, 0.5]) must be REJECTED by upstream because of the
-/// negative element. The scalar surface CAN catch this one (the -0.1 element
-/// fails `>= 0`), so this test PASSES — it documents that the per-element
-/// non-negativity half is wired, isolating the sum-to-one half as the gap.
+/// A vector with a negative element ([-0.1, 0.6, 0.5]) must be REJECTED by
+/// `check_tensor` because of the negative element (the non-negativity half).
 /// Upstream: `simplex.check([-0.1,0.6,0.5])` == False (verified live torch).
 #[test]
 fn audit_1372_simplex_rejects_negative_element_vector() {
     let c = Simplex;
-    let v = [-0.1f32, 0.6, 0.5];
-    let vector_rejected = v.iter().any(|&x| !c.check(x));
+    let v = tensor(&[-0.1f32, 0.6, 0.5]).unwrap();
     assert!(
-        vector_rejected,
-        "simplex must reject vector with negative element"
+        !c.check_tensor(&v).unwrap(),
+        "simplex must reject vector with a negative element"
+    );
+}
+
+/// Batched probe: `check_tensor` reduces over the trailing event dim, so a
+/// [2, 3] tensor is valid iff BOTH rows are on the simplex.
+#[test]
+fn audit_1372_simplex_check_tensor_batched() {
+    let c = Simplex;
+    let ok = from_slice(&[0.2f32, 0.5, 0.3, 0.1, 0.4, 0.5], &[2, 3]).unwrap();
+    assert!(c.check_tensor(&ok).unwrap(), "both rows valid -> accept");
+    let bad = from_slice(&[0.2f32, 0.5, 0.3, 0.1, 0.4, 0.6], &[2, 3]).unwrap();
+    assert!(
+        !c.check_tensor(&bad).unwrap(),
+        "second row sums to 1.1 -> reject the whole batch"
     );
 }
 
@@ -170,15 +161,15 @@ fn audit_1412_dirichlet_nd_batched_sample_shape() {
 #[test]
 fn audit_1412_dirichlet_nd_batched_log_prob_shape() {
     let alpha = from_slice(&[1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0], &[2, 3]).unwrap();
-    let dist = Dirichlet::new(alpha)
-        .expect("Dirichlet must accept N-D batched concentration [2,3]");
-    let value = from_slice(
-        &[0.2f32, 0.3, 0.5, 0.1, 0.4, 0.5],
-        &[2, 3],
-    )
-    .unwrap();
+    let dist =
+        Dirichlet::new(alpha).expect("Dirichlet must accept N-D batched concentration [2,3]");
+    let value = from_slice(&[0.2f32, 0.3, 0.5, 0.1, 0.4, 0.5], &[2, 3]).unwrap();
     let lp = dist.log_prob(&value).unwrap();
-    assert_eq!(lp.shape(), &[2], "batched Dirichlet log_prob shape must be [2]");
+    assert_eq!(
+        lp.shape(),
+        &[2],
+        "batched Dirichlet log_prob shape must be [2]"
+    );
 }
 
 /// Divergence companion: batch_shape of a [B, K] Dirichlet is [B].
@@ -187,9 +178,13 @@ fn audit_1412_dirichlet_nd_batched_log_prob_shape() {
 #[test]
 fn audit_1412_dirichlet_nd_batch_shape() {
     let alpha = from_slice(&[1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0], &[2, 3]).unwrap();
-    let dist = Dirichlet::new(alpha)
-        .expect("Dirichlet must accept N-D batched concentration [2,3]");
-    assert_eq!(dist.batch_shape(), vec![2], "batched Dirichlet batch_shape must be [2]");
+    let dist =
+        Dirichlet::new(alpha).expect("Dirichlet must accept N-D batched concentration [2,3]");
+    assert_eq!(
+        dist.batch_shape(),
+        vec![2],
+        "batched Dirichlet batch_shape must be [2]"
+    );
 }
 
 // ============================================================================
