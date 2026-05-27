@@ -626,19 +626,21 @@ fn kl_normal_normal<T: Float>(p: &Normal<T>, q: &Normal<T>) -> FerrotorchResult<
     let half = T::from(0.5).unwrap();
     let one = T::from(1.0).unwrap();
 
-    let result: Vec<T> = p_loc
+    let plan = kl_broadcast_index_pairs(p.loc().shape(), q.loc().shape())?;
+    let result: Vec<T> = plan
+        .p_idx
         .iter()
-        .zip(p_scale.iter())
-        .zip(q_loc.iter().cycle())
-        .zip(q_scale.iter().cycle())
-        .map(|(((&pl, &ps), &ql), &qs)| {
+        .zip(plan.q_idx.iter())
+        .map(|(&pi, &qi)| {
+            let (pl, ps) = (p_loc[pi], p_scale[pi]);
+            let (ql, qs) = (q_loc[qi], q_scale[qi]);
             let var_ratio = (ps / qs) * (ps / qs);
             let mean_diff_sq = ((pl - ql) / qs) * ((pl - ql) / qs);
             half * (var_ratio + mean_diff_sq - one - var_ratio.ln())
         })
         .collect();
 
-    Tensor::from_storage(TensorStorage::cpu(result), p.loc().shape().to_vec(), false)
+    Tensor::from_storage(TensorStorage::cpu(result), plan.out_shape, false)
 }
 
 /// KL(Bernoulli(p) || Bernoulli(q))
@@ -658,21 +660,19 @@ fn kl_bernoulli_bernoulli<T: Float>(
     let one = T::from(1.0).unwrap();
     let eps = T::from(1e-7).unwrap();
 
-    let result: Vec<T> = p_probs
+    let plan = kl_broadcast_index_pairs(p.probs().shape(), q.probs().shape())?;
+    let result: Vec<T> = plan
+        .p_idx
         .iter()
-        .zip(q_probs.iter().cycle())
-        .map(|(&pp, &qp)| {
-            let pp = pp.max(eps).min(one - eps);
-            let qp = qp.max(eps).min(one - eps);
+        .zip(plan.q_idx.iter())
+        .map(|(&pi, &qi)| {
+            let pp = p_probs[pi].max(eps).min(one - eps);
+            let qp = q_probs[qi].max(eps).min(one - eps);
             pp * (pp / qp).ln() + (one - pp) * ((one - pp) / (one - qp)).ln()
         })
         .collect();
 
-    Tensor::from_storage(
-        TensorStorage::cpu(result),
-        p.probs().shape().to_vec(),
-        false,
-    )
+    Tensor::from_storage(TensorStorage::cpu(result), plan.out_shape, false)
 }
 
 /// KL(Uniform(a1, b1) || Uniform(a2, b2))
@@ -688,12 +688,14 @@ fn kl_uniform_uniform<T: Float>(p: &Uniform<T>, q: &Uniform<T>) -> FerrotorchRes
     let q_low = q.low().data_vec()?;
     let q_high = q.high().data_vec()?;
 
-    let result: Vec<T> = p_low
+    let plan = kl_broadcast_index_pairs(p.low().shape(), q.low().shape())?;
+    let result: Vec<T> = plan
+        .p_idx
         .iter()
-        .zip(p_high.iter())
-        .zip(q_low.iter().cycle())
-        .zip(q_high.iter().cycle())
-        .map(|(((&pl, &ph), &ql), &qh)| {
+        .zip(plan.q_idx.iter())
+        .map(|(&pi, &qi)| {
+            let (pl, ph) = (p_low[pi], p_high[pi]);
+            let (ql, qh) = (q_low[qi], q_high[qi]);
             if ql > pl || qh < ph {
                 T::infinity()
             } else {
@@ -702,7 +704,7 @@ fn kl_uniform_uniform<T: Float>(p: &Uniform<T>, q: &Uniform<T>) -> FerrotorchRes
         })
         .collect();
 
-    Tensor::from_storage(TensorStorage::cpu(result), p.low().shape().to_vec(), false)
+    Tensor::from_storage(TensorStorage::cpu(result), plan.out_shape, false)
 }
 
 /// KL(Categorical(p) || Categorical(q))
@@ -765,12 +767,14 @@ fn kl_uniform_normal<T: Float>(p: &Uniform<T>, q: &Normal<T>) -> FerrotorchResul
     let twelve = T::from(12.0).unwrap();
     let two = T::from(2.0).unwrap();
 
-    let result: Vec<T> = p_low
+    let plan = kl_broadcast_index_pairs(p.low().shape(), q.loc().shape())?;
+    let result: Vec<T> = plan
+        .p_idx
         .iter()
-        .zip(p_high.iter())
-        .zip(q_loc.iter().cycle())
-        .zip(q_scale.iter().cycle())
-        .map(|(((&pl, &ph), &ql), &qs)| {
+        .zip(plan.q_idx.iter())
+        .map(|(&pi, &qi)| {
+            let (pl, ph) = (p_low[pi], p_high[pi]);
+            let (ql, qs) = (q_loc[qi], q_scale[qi]);
             let range = ph - pl;
             let entropy_uniform = range.ln();
             let log_normal_term = half * (two_pi * qs * qs).ln();
@@ -782,7 +786,7 @@ fn kl_uniform_normal<T: Float>(p: &Uniform<T>, q: &Normal<T>) -> FerrotorchResul
         })
         .collect();
 
-    Tensor::from_storage(TensorStorage::cpu(result), p.low().shape().to_vec(), false)
+    Tensor::from_storage(TensorStorage::cpu(result), plan.out_shape, false)
 }
 
 // ---------------------------------------------------------------------------
@@ -808,19 +812,21 @@ fn kl_laplace_laplace<T: Float>(p: &Laplace<T>, q: &Laplace<T>) -> FerrotorchRes
     let one = T::from(1.0).unwrap();
     let zero = T::from(0.0).unwrap();
 
-    let result: Vec<T> = p_loc
+    let plan = kl_broadcast_index_pairs(p.loc().shape(), q.loc().shape())?;
+    let result: Vec<T> = plan
+        .p_idx
         .iter()
-        .zip(p_scale.iter())
-        .zip(q_loc.iter().cycle())
-        .zip(q_scale.iter().cycle())
-        .map(|(((&pl, &ps), &ql), &qs)| {
+        .zip(plan.q_idx.iter())
+        .map(|(&pi, &qi)| {
+            let (pl, ps) = (p_loc[pi], p_scale[pi]);
+            let (ql, qs) = (q_loc[qi], q_scale[qi]);
             let diff = pl - ql;
             let abs_diff = if diff < zero { zero - diff } else { diff };
             (qs / ps).ln() + (ps * (-abs_diff / ps).exp() + abs_diff) / qs - one
         })
         .collect();
 
-    Tensor::from_storage(TensorStorage::cpu(result), p.loc().shape().to_vec(), false)
+    Tensor::from_storage(TensorStorage::cpu(result), plan.out_shape, false)
 }
 
 /// KL(Exponential(rate1) || Exponential(rate2))
@@ -838,13 +844,18 @@ fn kl_exponential_exponential<T: Float>(
     let q_rate = q.rate().data_vec()?;
     let one = T::from(1.0).unwrap();
 
-    let result: Vec<T> = p_rate
+    let plan = kl_broadcast_index_pairs(p.rate().shape(), q.rate().shape())?;
+    let result: Vec<T> = plan
+        .p_idx
         .iter()
-        .zip(q_rate.iter().cycle())
-        .map(|(&pr, &qr)| (pr / qr).ln() + qr / pr - one)
+        .zip(plan.q_idx.iter())
+        .map(|(&pi, &qi)| {
+            let (pr, qr) = (p_rate[pi], q_rate[qi]);
+            (pr / qr).ln() + qr / pr - one
+        })
         .collect();
 
-    Tensor::from_storage(TensorStorage::cpu(result), p.rate().shape().to_vec(), false)
+    Tensor::from_storage(TensorStorage::cpu(result), plan.out_shape, false)
 }
 
 /// KL(Gamma(α1, β1) || Gamma(α2, β2))
@@ -866,19 +877,15 @@ fn kl_gamma_gamma<T: Float>(p: &Gamma<T>, q: &Gamma<T>) -> FerrotorchResult<Tens
     let q_conc = q.concentration().data_vec()?;
     let q_rate = q.rate().data_vec()?;
 
-    let result: Vec<T> = p_conc
+    let plan = kl_broadcast_index_pairs(p.concentration().shape(), q.concentration().shape())?;
+    let result: Vec<T> = plan
+        .p_idx
         .iter()
-        .zip(p_rate.iter())
-        .zip(q_conc.iter().cycle())
-        .zip(q_rate.iter().cycle())
-        .map(|(((&pa, &pb), &qa), &qb)| kl_gamma_scalar(pa, pb, qa, qb))
+        .zip(plan.q_idx.iter())
+        .map(|(&pi, &qi)| kl_gamma_scalar(p_conc[pi], p_rate[pi], q_conc[qi], q_rate[qi]))
         .collect();
 
-    Tensor::from_storage(
-        TensorStorage::cpu(result),
-        p.concentration().shape().to_vec(),
-        false,
-    )
+    Tensor::from_storage(TensorStorage::cpu(result), plan.out_shape, false)
 }
 
 /// Scalar KL(Gamma(α1, β1) || Gamma(α2, β2)). Factored out so the
@@ -903,13 +910,18 @@ fn kl_poisson_poisson<T: Float>(p: &Poisson<T>, q: &Poisson<T>) -> FerrotorchRes
     let p_rate = p.rate().data_vec()?;
     let q_rate = q.rate().data_vec()?;
 
-    let result: Vec<T> = p_rate
+    let plan = kl_broadcast_index_pairs(p.rate().shape(), q.rate().shape())?;
+    let result: Vec<T> = plan
+        .p_idx
         .iter()
-        .zip(q_rate.iter().cycle())
-        .map(|(&pr, &qr)| pr * (pr.ln() - qr.ln()) - pr + qr)
+        .zip(plan.q_idx.iter())
+        .map(|(&pi, &qi)| {
+            let (pr, qr) = (p_rate[pi], q_rate[qi]);
+            pr * (pr.ln() - qr.ln()) - pr + qr
+        })
         .collect();
 
-    Tensor::from_storage(TensorStorage::cpu(result), p.rate().shape().to_vec(), false)
+    Tensor::from_storage(TensorStorage::cpu(result), plan.out_shape, false)
 }
 
 /// KL(Gamma(α, β) || Exponential(λ))
@@ -926,18 +938,15 @@ fn kl_gamma_exponential<T: Float>(p: &Gamma<T>, q: &Exponential<T>) -> Ferrotorc
     let q_rate = q.rate().data_vec()?;
     let one = T::from(1.0).unwrap();
 
-    let result: Vec<T> = p_conc
+    let plan = kl_broadcast_index_pairs(p.concentration().shape(), q.rate().shape())?;
+    let result: Vec<T> = plan
+        .p_idx
         .iter()
-        .zip(p_rate.iter())
-        .zip(q_rate.iter().cycle())
-        .map(|((&pa, &pb), &qb)| kl_gamma_scalar(pa, pb, one, qb))
+        .zip(plan.q_idx.iter())
+        .map(|(&pi, &qi)| kl_gamma_scalar(p_conc[pi], p_rate[pi], one, q_rate[qi]))
         .collect();
 
-    Tensor::from_storage(
-        TensorStorage::cpu(result),
-        p.concentration().shape().to_vec(),
-        false,
-    )
+    Tensor::from_storage(TensorStorage::cpu(result), plan.out_shape, false)
 }
 
 /// KL(Exponential(λ) || Gamma(α, β))
@@ -954,14 +963,15 @@ fn kl_exponential_gamma<T: Float>(p: &Exponential<T>, q: &Gamma<T>) -> Ferrotorc
     let q_rate = q.rate().data_vec()?;
     let one = T::from(1.0).unwrap();
 
-    let result: Vec<T> = p_rate
+    let plan = kl_broadcast_index_pairs(p.rate().shape(), q.concentration().shape())?;
+    let result: Vec<T> = plan
+        .p_idx
         .iter()
-        .zip(q_conc.iter().cycle())
-        .zip(q_rate.iter().cycle())
-        .map(|((&pb, &qa), &qb)| kl_gamma_scalar(one, pb, qa, qb))
+        .zip(plan.q_idx.iter())
+        .map(|(&pi, &qi)| kl_gamma_scalar(one, p_rate[pi], q_conc[qi], q_rate[qi]))
         .collect();
 
-    Tensor::from_storage(TensorStorage::cpu(result), p.rate().shape().to_vec(), false)
+    Tensor::from_storage(TensorStorage::cpu(result), plan.out_shape, false)
 }
 
 // ---------------------------------------------------------------------------
@@ -992,17 +1002,19 @@ fn kl_beta_beta<T: Float>(p: &Beta<T>, q: &Beta<T>) -> FerrotorchResult<Tensor<T
         ],
         "kl_divergence(Beta, Beta)",
     )?;
-    let pa = p.concentration1().data_vec()?;
-    let pb = p.concentration0().data_vec()?;
-    let qa = q.concentration1().data_vec()?;
-    let qb = q.concentration0().data_vec()?;
+    let pa_v = p.concentration1().data_vec()?;
+    let pb_v = p.concentration0().data_vec()?;
+    let qa_v = q.concentration1().data_vec()?;
+    let qb_v = q.concentration0().data_vec()?;
 
-    let result: Vec<T> = pa
+    let plan = kl_broadcast_index_pairs(p.concentration1().shape(), q.concentration1().shape())?;
+    let result: Vec<T> = plan
+        .p_idx
         .iter()
-        .zip(pb.iter())
-        .zip(qa.iter().cycle())
-        .zip(qb.iter().cycle())
-        .map(|(((&pa, &pb), &qa), &qb)| {
+        .zip(plan.q_idx.iter())
+        .map(|(&pi, &qi)| {
+            let (pa, pb) = (pa_v[pi], pb_v[pi]);
+            let (qa, qb) = (qa_v[qi], qb_v[qi]);
             let sum_p = pa + pb;
             let sum_q = qa + qb;
             let t1 = lgamma_scalar(qa) + lgamma_scalar(qb) + lgamma_scalar(sum_p);
@@ -1014,11 +1026,7 @@ fn kl_beta_beta<T: Float>(p: &Beta<T>, q: &Beta<T>) -> FerrotorchResult<Tensor<T
         })
         .collect();
 
-    Tensor::from_storage(
-        TensorStorage::cpu(result),
-        p.concentration1().shape().to_vec(),
-        false,
-    )
+    Tensor::from_storage(TensorStorage::cpu(result), plan.out_shape, false)
 }
 
 /// KL(Gumbel(loc1, scale1) || Gumbel(loc2, scale2)).
@@ -1043,12 +1051,14 @@ fn kl_gumbel_gumbel<T: Float>(p: &Gumbel<T>, q: &Gumbel<T>) -> FerrotorchResult<
     let one = T::from(1.0).unwrap();
     let euler = T::from(EULER_GAMMA).unwrap();
 
-    let result: Vec<T> = p_loc
+    let plan = kl_broadcast_index_pairs(p.loc().shape(), q.loc().shape())?;
+    let result: Vec<T> = plan
+        .p_idx
         .iter()
-        .zip(p_scale.iter())
-        .zip(q_loc.iter().cycle())
-        .zip(q_scale.iter().cycle())
-        .map(|(((&pl, &ps), &ql), &qs)| {
+        .zip(plan.q_idx.iter())
+        .map(|(&pi, &qi)| {
+            let (pl, ps) = (p_loc[pi], p_scale[pi]);
+            let (ql, qs) = (q_loc[qi], q_scale[qi]);
             let ct1 = ps / qs;
             let ct2 = ql / qs;
             let ct3 = pl / qs;
@@ -1059,7 +1069,7 @@ fn kl_gumbel_gumbel<T: Float>(p: &Gumbel<T>, q: &Gumbel<T>) -> FerrotorchResult<
         })
         .collect();
 
-    Tensor::from_storage(TensorStorage::cpu(result), p.loc().shape().to_vec(), false)
+    Tensor::from_storage(TensorStorage::cpu(result), plan.out_shape, false)
 }
 
 /// KL(Pareto(scale1, α1) || Pareto(scale2, α2)).
@@ -1082,12 +1092,14 @@ fn kl_pareto_pareto<T: Float>(p: &Pareto<T>, q: &Pareto<T>) -> FerrotorchResult<
     let q_alpha = q.alpha().data_vec()?;
     let one = T::from(1.0).unwrap();
 
-    let result: Vec<T> = p_scale
+    let plan = kl_broadcast_index_pairs(p.scale().shape(), q.scale().shape())?;
+    let result: Vec<T> = plan
+        .p_idx
         .iter()
-        .zip(p_alpha.iter())
-        .zip(q_scale.iter().cycle())
-        .zip(q_alpha.iter().cycle())
-        .map(|(((&ps, &pa), &qs), &qa)| {
+        .zip(plan.q_idx.iter())
+        .map(|(&pi, &qi)| {
+            let (ps, pa) = (p_scale[pi], p_alpha[pi]);
+            let (qs, qa) = (q_scale[qi], q_alpha[qi]);
             // Pareto support lower bound is `scale`; KL is +inf when p's
             // support extends below q's (p.scale < q.scale).
             if ps < qs {
@@ -1100,11 +1112,7 @@ fn kl_pareto_pareto<T: Float>(p: &Pareto<T>, q: &Pareto<T>) -> FerrotorchResult<
         })
         .collect();
 
-    Tensor::from_storage(
-        TensorStorage::cpu(result),
-        p.scale().shape().to_vec(),
-        false,
-    )
+    Tensor::from_storage(TensorStorage::cpu(result), plan.out_shape, false)
 }
 
 /// KL(HalfNormal(scale1) || HalfNormal(scale2)).
@@ -1126,20 +1134,19 @@ fn kl_halfnormal_halfnormal<T: Float>(
     let half = T::from(0.5).unwrap();
     let one = T::from(1.0).unwrap();
 
-    let result: Vec<T> = p_scale
+    let plan = kl_broadcast_index_pairs(p.scale().shape(), q.scale().shape())?;
+    let result: Vec<T> = plan
+        .p_idx
         .iter()
-        .zip(q_scale.iter().cycle())
-        .map(|(&ps, &qs)| {
+        .zip(plan.q_idx.iter())
+        .map(|(&pi, &qi)| {
+            let (ps, qs) = (p_scale[pi], q_scale[qi]);
             let var_ratio = (ps / qs) * (ps / qs);
             half * (var_ratio - one - var_ratio.ln())
         })
         .collect();
 
-    Tensor::from_storage(
-        TensorStorage::cpu(result),
-        p.scale().shape().to_vec(),
-        false,
-    )
+    Tensor::from_storage(TensorStorage::cpu(result), plan.out_shape, false)
 }
 
 /// KL(Exponential(rate) || Normal(loc, scale)) (cross-family).
@@ -1167,11 +1174,14 @@ fn kl_exponential_normal<T: Float>(
     let two = T::from(2.0).unwrap();
     let two_pi = T::from(2.0 * std::f64::consts::PI).unwrap();
 
-    let result: Vec<T> = p_rate
+    let plan = kl_broadcast_index_pairs(p.rate().shape(), q.loc().shape())?;
+    let result: Vec<T> = plan
+        .p_idx
         .iter()
-        .zip(q_loc.iter().cycle())
-        .zip(q_scale.iter().cycle())
-        .map(|((&rate, &loc), &scale)| {
+        .zip(plan.q_idx.iter())
+        .map(|(&pi, &qi)| {
+            let rate = p_rate[pi];
+            let (loc, scale) = (q_loc[qi], q_scale[qi]);
             let var = scale * scale;
             let rate_sqr = rate * rate;
             let t1 = half * (rate_sqr * var * two_pi).ln();
@@ -1182,7 +1192,7 @@ fn kl_exponential_normal<T: Float>(
         })
         .collect();
 
-    Tensor::from_storage(TensorStorage::cpu(result), p.rate().shape().to_vec(), false)
+    Tensor::from_storage(TensorStorage::cpu(result), plan.out_shape, false)
 }
 
 /// KL(Gamma(α, β) || Normal(loc, scale)) (cross-family).
@@ -1207,12 +1217,14 @@ fn kl_gamma_normal<T: Float>(p: &Gamma<T>, q: &Normal<T>) -> FerrotorchResult<Te
     let one = T::from(1.0).unwrap();
     let two_pi = T::from(2.0 * std::f64::consts::PI).unwrap();
 
-    let result: Vec<T> = p_conc
+    let plan = kl_broadcast_index_pairs(p.concentration().shape(), q.loc().shape())?;
+    let result: Vec<T> = plan
+        .p_idx
         .iter()
-        .zip(p_rate.iter())
-        .zip(q_loc.iter().cycle())
-        .zip(q_scale.iter().cycle())
-        .map(|(((&alpha, &beta), &loc), &scale)| {
+        .zip(plan.q_idx.iter())
+        .map(|(&pi, &qi)| {
+            let (alpha, beta) = (p_conc[pi], p_rate[pi]);
+            let (loc, scale) = (q_loc[qi], q_scale[qi]);
             let var = scale * scale;
             let beta_sqr = beta * beta;
             let t1 = half * (beta_sqr * var * two_pi).ln() - alpha - lgamma_scalar(alpha);
@@ -1223,11 +1235,7 @@ fn kl_gamma_normal<T: Float>(p: &Gamma<T>, q: &Normal<T>) -> FerrotorchResult<Te
         })
         .collect();
 
-    Tensor::from_storage(
-        TensorStorage::cpu(result),
-        p.concentration().shape().to_vec(),
-        false,
-    )
+    Tensor::from_storage(TensorStorage::cpu(result), plan.out_shape, false)
 }
 
 /// KL(Laplace(loc, scale) || Normal(loc2, scale2)) (cross-family).
@@ -1253,12 +1261,14 @@ fn kl_laplace_normal<T: Float>(p: &Laplace<T>, q: &Normal<T>) -> FerrotorchResul
     let two = T::from(2.0).unwrap();
     let pi = T::from(std::f64::consts::PI).unwrap();
 
-    let result: Vec<T> = p_loc
+    let plan = kl_broadcast_index_pairs(p.loc().shape(), q.loc().shape())?;
+    let result: Vec<T> = plan
+        .p_idx
         .iter()
-        .zip(p_scale.iter())
-        .zip(q_loc.iter().cycle())
-        .zip(q_scale.iter().cycle())
-        .map(|(((&pl, &ps), &ql), &qs)| {
+        .zip(plan.q_idx.iter())
+        .map(|(&pi_idx, &qi)| {
+            let (pl, ps) = (p_loc[pi_idx], p_scale[pi_idx]);
+            let (ql, qs) = (q_loc[qi], q_scale[qi]);
             let var = qs * qs;
             let ratio = ps * ps / var;
             let t1 = half * (two * ratio / pi).ln();
@@ -1269,7 +1279,7 @@ fn kl_laplace_normal<T: Float>(p: &Laplace<T>, q: &Normal<T>) -> FerrotorchResul
         })
         .collect();
 
-    Tensor::from_storage(TensorStorage::cpu(result), p.loc().shape().to_vec(), false)
+    Tensor::from_storage(TensorStorage::cpu(result), plan.out_shape, false)
 }
 
 // ---------------------------------------------------------------------------
@@ -1299,12 +1309,14 @@ fn kl_cauchy_cauchy<T: Float>(p: &Cauchy<T>, q: &Cauchy<T>) -> FerrotorchResult<
     let q_scale = q.scale().data_vec()?;
     let four = T::from(4.0).unwrap();
 
-    let result: Vec<T> = p_loc
+    let plan = kl_broadcast_index_pairs(p.loc().shape(), q.loc().shape())?;
+    let result: Vec<T> = plan
+        .p_idx
         .iter()
-        .zip(p_scale.iter())
-        .zip(q_loc.iter().cycle())
-        .zip(q_scale.iter().cycle())
-        .map(|(((&pl, &ps), &ql), &qs)| {
+        .zip(plan.q_idx.iter())
+        .map(|(&pi, &qi)| {
+            let (pl, ps) = (p_loc[pi], p_scale[pi]);
+            let (ql, qs) = (q_loc[qi], q_scale[qi]);
             let sum_scale = ps + qs;
             let loc_diff = pl - ql;
             let t1 = (sum_scale * sum_scale + loc_diff * loc_diff).ln();
@@ -1313,7 +1325,7 @@ fn kl_cauchy_cauchy<T: Float>(p: &Cauchy<T>, q: &Cauchy<T>) -> FerrotorchResult<
         })
         .collect();
 
-    Tensor::from_storage(TensorStorage::cpu(result), p.loc().shape().to_vec(), false)
+    Tensor::from_storage(TensorStorage::cpu(result), plan.out_shape, false)
 }
 
 /// KL(Normal(loc, scale) || Gumbel(loc2, scale2)) (cross-family).
@@ -1340,12 +1352,14 @@ fn kl_normal_gumbel<T: Float>(p: &Normal<T>, q: &Gumbel<T>) -> FerrotorchResult<
     let one = T::from(1.0).unwrap();
     let two_pi_ln = T::from((2.0 * std::f64::consts::PI).ln()).unwrap();
 
-    let result: Vec<T> = p_loc
+    let plan = kl_broadcast_index_pairs(p.loc().shape(), q.loc().shape())?;
+    let result: Vec<T> = plan
+        .p_idx
         .iter()
-        .zip(p_scale.iter())
-        .zip(q_loc.iter().cycle())
-        .zip(q_scale.iter().cycle())
-        .map(|(((&pl, &ps), &ql), &qs)| {
+        .zip(plan.q_idx.iter())
+        .map(|(&pi, &qi)| {
+            let (pl, ps) = (p_loc[pi], p_scale[pi]);
+            let (ql, qs) = (q_loc[qi], q_scale[qi]);
             let mean_scale_ratio = pl / qs;
             let var_scale_sqr_ratio = (ps / qs) * (ps / qs);
             let loc_scale_ratio = ql / qs;
@@ -1356,7 +1370,7 @@ fn kl_normal_gumbel<T: Float>(p: &Normal<T>, q: &Gumbel<T>) -> FerrotorchResult<
         })
         .collect();
 
-    Tensor::from_storage(TensorStorage::cpu(result), p.loc().shape().to_vec(), false)
+    Tensor::from_storage(TensorStorage::cpu(result), plan.out_shape, false)
 }
 
 /// KL(Gumbel(loc, scale) || Normal(loc2, scale2)) (cross-family).
@@ -1385,12 +1399,14 @@ fn kl_gumbel_normal<T: Float>(p: &Gumbel<T>, q: &Normal<T>) -> FerrotorchResult<
     let sqrt_two_pi = T::from((2.0 * std::f64::consts::PI).sqrt()).unwrap();
     let euler = T::from(EULER_GAMMA).unwrap();
 
-    let result: Vec<T> = p_loc
+    let plan = kl_broadcast_index_pairs(p.loc().shape(), q.loc().shape())?;
+    let result: Vec<T> = plan
+        .p_idx
         .iter()
-        .zip(p_scale.iter())
-        .zip(q_loc.iter().cycle())
-        .zip(q_scale.iter().cycle())
-        .map(|(((&pl, &ps), &ql), &qs)| {
+        .zip(plan.q_idx.iter())
+        .map(|(&pi_idx, &qi)| {
+            let (pl, ps) = (p_loc[pi_idx], p_scale[pi_idx]);
+            let (ql, qs) = (q_loc[qi], q_scale[qi]);
             let param_ratio = ps / qs;
             let t1 = (param_ratio / sqrt_two_pi).ln();
             let t2_inner = pi * param_ratio * half;
@@ -1401,7 +1417,7 @@ fn kl_gumbel_normal<T: Float>(p: &Gumbel<T>, q: &Normal<T>) -> FerrotorchResult<
         })
         .collect();
 
-    Tensor::from_storage(TensorStorage::cpu(result), p.loc().shape().to_vec(), false)
+    Tensor::from_storage(TensorStorage::cpu(result), plan.out_shape, false)
 }
 
 /// KL(Gamma(α, β) || Gumbel(loc, scale)) (cross-family).
@@ -1425,12 +1441,14 @@ fn kl_gamma_gumbel<T: Float>(p: &Gamma<T>, q: &Gumbel<T>) -> FerrotorchResult<Te
     let q_scale = q.scale().data_vec()?;
     let one = T::from(1.0).unwrap();
 
-    let result: Vec<T> = p_conc
+    let plan = kl_broadcast_index_pairs(p.concentration().shape(), q.loc().shape())?;
+    let result: Vec<T> = plan
+        .p_idx
         .iter()
-        .zip(p_rate.iter())
-        .zip(q_loc.iter().cycle())
-        .zip(q_scale.iter().cycle())
-        .map(|(((&alpha, &beta), &loc), &scale)| {
+        .zip(plan.q_idx.iter())
+        .map(|(&pi, &qi)| {
+            let (alpha, beta) = (p_conc[pi], p_rate[pi]);
+            let (loc, scale) = (q_loc[qi], q_scale[qi]);
             let beta_scale_prod = beta * scale;
             let loc_scale_ratio = loc / scale;
             let t1 = (alpha - one) * digamma_scalar(alpha) - lgamma_scalar(alpha) - alpha;
@@ -1441,11 +1459,7 @@ fn kl_gamma_gumbel<T: Float>(p: &Gamma<T>, q: &Gumbel<T>) -> FerrotorchResult<Te
         })
         .collect();
 
-    Tensor::from_storage(
-        TensorStorage::cpu(result),
-        p.concentration().shape().to_vec(),
-        false,
-    )
+    Tensor::from_storage(TensorStorage::cpu(result), plan.out_shape, false)
 }
 
 /// KL(Exponential(rate) || Gumbel(loc, scale)) (cross-family).
@@ -1471,11 +1485,14 @@ fn kl_exponential_gumbel<T: Float>(
     let q_scale = q.scale().data_vec()?;
     let one = T::from(1.0).unwrap();
 
-    let result: Vec<T> = p_rate
+    let plan = kl_broadcast_index_pairs(p.rate().shape(), q.loc().shape())?;
+    let result: Vec<T> = plan
+        .p_idx
         .iter()
-        .zip(q_loc.iter().cycle())
-        .zip(q_scale.iter().cycle())
-        .map(|((&rate, &loc), &scale)| {
+        .zip(plan.q_idx.iter())
+        .map(|(&pi, &qi)| {
+            let rate = p_rate[pi];
+            let (loc, scale) = (q_loc[qi], q_scale[qi]);
             let scale_rate_prod = rate * scale;
             let loc_scale_ratio = loc / scale;
             let t1 = scale_rate_prod.ln() - one;
@@ -1485,7 +1502,7 @@ fn kl_exponential_gumbel<T: Float>(
         })
         .collect();
 
-    Tensor::from_storage(TensorStorage::cpu(result), p.rate().shape().to_vec(), false)
+    Tensor::from_storage(TensorStorage::cpu(result), plan.out_shape, false)
 }
 
 /// KL(Uniform(a, b) || Gumbel(loc, scale)) (cross-family).
@@ -1509,12 +1526,14 @@ fn kl_uniform_gumbel<T: Float>(p: &Uniform<T>, q: &Gumbel<T>) -> FerrotorchResul
     let q_scale = q.scale().data_vec()?;
     let half = T::from(0.5).unwrap();
 
-    let result: Vec<T> = p_low
+    let plan = kl_broadcast_index_pairs(p.low().shape(), q.loc().shape())?;
+    let result: Vec<T> = plan
+        .p_idx
         .iter()
-        .zip(p_high.iter())
-        .zip(q_loc.iter().cycle())
-        .zip(q_scale.iter().cycle())
-        .map(|(((&low, &high), &loc), &scale)| {
+        .zip(plan.q_idx.iter())
+        .map(|(&pi, &qi)| {
+            let (low, high) = (p_low[pi], p_high[pi]);
+            let (loc, scale) = (q_loc[qi], q_scale[qi]);
             let common_term = scale / (high - low);
             let high_loc_diff = (high - loc) / scale;
             let low_loc_diff = (low - loc) / scale;
@@ -1524,7 +1543,7 @@ fn kl_uniform_gumbel<T: Float>(p: &Uniform<T>, q: &Gumbel<T>) -> FerrotorchResul
         })
         .collect();
 
-    Tensor::from_storage(TensorStorage::cpu(result), p.low().shape().to_vec(), false)
+    Tensor::from_storage(TensorStorage::cpu(result), plan.out_shape, false)
 }
 
 // ---------------------------------------------------------------------------
@@ -1608,22 +1627,23 @@ fn kl_beta_exponential<T: Float>(p: &Beta<T>, q: &Exponential<T>) -> FerrotorchR
         &[p.concentration1(), p.concentration0(), q.rate()],
         "kl_divergence(Beta, Exponential)",
     )?;
-    let a = p.concentration1().data_vec()?;
-    let b = p.concentration0().data_vec()?;
+    let a_v = p.concentration1().data_vec()?;
+    let b_v = p.concentration0().data_vec()?;
     let rate = q.rate().data_vec()?;
 
-    let result: Vec<T> = a
+    let plan = kl_broadcast_index_pairs(p.concentration1().shape(), q.rate().shape())?;
+    let result: Vec<T> = plan
+        .p_idx
         .iter()
-        .zip(b.iter())
-        .zip(rate.iter().cycle())
-        .map(|((&a, &b), &r)| -beta_entropy_scalar(a, b) - r.ln() + r * (a / (a + b)))
+        .zip(plan.q_idx.iter())
+        .map(|(&pi, &qi)| {
+            let (a, b) = (a_v[pi], b_v[pi]);
+            let r = rate[qi];
+            -beta_entropy_scalar(a, b) - r.ln() + r * (a / (a + b))
+        })
         .collect();
 
-    Tensor::from_storage(
-        TensorStorage::cpu(result),
-        p.concentration1().shape().to_vec(),
-        false,
-    )
+    Tensor::from_storage(TensorStorage::cpu(result), plan.out_shape, false)
 }
 
 /// KL(Beta(α, β) || Gamma(conc, rate)) (cross-family).
@@ -1646,18 +1666,20 @@ fn kl_beta_gamma<T: Float>(p: &Beta<T>, q: &Gamma<T>) -> FerrotorchResult<Tensor
         ],
         "kl_divergence(Beta, Gamma)",
     )?;
-    let a = p.concentration1().data_vec()?;
-    let b = p.concentration0().data_vec()?;
+    let a_v = p.concentration1().data_vec()?;
+    let b_v = p.concentration0().data_vec()?;
     let conc = q.concentration().data_vec()?;
     let rate = q.rate().data_vec()?;
     let one = T::from(1.0).unwrap();
 
-    let result: Vec<T> = a
+    let plan = kl_broadcast_index_pairs(p.concentration1().shape(), q.concentration().shape())?;
+    let result: Vec<T> = plan
+        .p_idx
         .iter()
-        .zip(b.iter())
-        .zip(conc.iter().cycle())
-        .zip(rate.iter().cycle())
-        .map(|(((&a, &b), &c), &r)| {
+        .zip(plan.q_idx.iter())
+        .map(|(&pi, &qi)| {
+            let (a, b) = (a_v[pi], b_v[pi]);
+            let (c, r) = (conc[qi], rate[qi]);
             let t1 = -beta_entropy_scalar(a, b);
             let t2 = lgamma_scalar(c) - c * r.ln();
             let t3 = (c - one) * (digamma_scalar(a) - digamma_scalar(a + b));
@@ -1666,11 +1688,7 @@ fn kl_beta_gamma<T: Float>(p: &Beta<T>, q: &Gamma<T>) -> FerrotorchResult<Tensor
         })
         .collect();
 
-    Tensor::from_storage(
-        TensorStorage::cpu(result),
-        p.concentration1().shape().to_vec(),
-        false,
-    )
+    Tensor::from_storage(TensorStorage::cpu(result), plan.out_shape, false)
 }
 
 /// KL(Beta(α, β) || Normal(loc, scale)) (cross-family).
@@ -1689,20 +1707,22 @@ fn kl_beta_normal<T: Float>(p: &Beta<T>, q: &Normal<T>) -> FerrotorchResult<Tens
         &[p.concentration1(), p.concentration0(), q.loc(), q.scale()],
         "kl_divergence(Beta, Normal)",
     )?;
-    let a = p.concentration1().data_vec()?;
-    let b = p.concentration0().data_vec()?;
+    let a_v = p.concentration1().data_vec()?;
+    let b_v = p.concentration0().data_vec()?;
     let loc = q.loc().data_vec()?;
     let scale = q.scale().data_vec()?;
     let half = T::from(0.5).unwrap();
     let one = T::from(1.0).unwrap();
     let two_pi = T::from(2.0 * std::f64::consts::PI).unwrap();
 
-    let result: Vec<T> = a
+    let plan = kl_broadcast_index_pairs(p.concentration1().shape(), q.loc().shape())?;
+    let result: Vec<T> = plan
+        .p_idx
         .iter()
-        .zip(b.iter())
-        .zip(loc.iter().cycle())
-        .zip(scale.iter().cycle())
-        .map(|(((&a, &b), &loc), &scale)| {
+        .zip(plan.q_idx.iter())
+        .map(|(&pi, &qi)| {
+            let (a, b) = (a_v[pi], b_v[pi]);
+            let (loc, scale) = (loc[qi], scale[qi]);
             let e_beta = a / (a + b);
             let var = scale * scale;
             let t1 = -beta_entropy_scalar(a, b);
@@ -1714,11 +1734,7 @@ fn kl_beta_normal<T: Float>(p: &Beta<T>, q: &Normal<T>) -> FerrotorchResult<Tens
         })
         .collect();
 
-    Tensor::from_storage(
-        TensorStorage::cpu(result),
-        p.concentration1().shape().to_vec(),
-        false,
-    )
+    Tensor::from_storage(TensorStorage::cpu(result), plan.out_shape, false)
 }
 
 /// KL(Beta(α, β) || Uniform(low, high)) (cross-family).
@@ -1734,19 +1750,21 @@ fn kl_beta_uniform<T: Float>(p: &Beta<T>, q: &Uniform<T>) -> FerrotorchResult<Te
         &[p.concentration1(), p.concentration0(), q.low(), q.high()],
         "kl_divergence(Beta, Uniform)",
     )?;
-    let a = p.concentration1().data_vec()?;
-    let b = p.concentration0().data_vec()?;
+    let a_v = p.concentration1().data_vec()?;
+    let b_v = p.concentration0().data_vec()?;
     let low = q.low().data_vec()?;
     let high = q.high().data_vec()?;
     let zero = T::from(0.0).unwrap();
     let one = T::from(1.0).unwrap();
 
-    let result: Vec<T> = a
+    let plan = kl_broadcast_index_pairs(p.concentration1().shape(), q.low().shape())?;
+    let result: Vec<T> = plan
+        .p_idx
         .iter()
-        .zip(b.iter())
-        .zip(low.iter().cycle())
-        .zip(high.iter().cycle())
-        .map(|(((&a, &b), &low), &high)| {
+        .zip(plan.q_idx.iter())
+        .map(|(&pi, &qi)| {
+            let (a, b) = (a_v[pi], b_v[pi]);
+            let (low, high) = (low[qi], high[qi]);
             if low > zero || high < one {
                 T::infinity()
             } else {
@@ -1755,11 +1773,7 @@ fn kl_beta_uniform<T: Float>(p: &Beta<T>, q: &Uniform<T>) -> FerrotorchResult<Te
         })
         .collect();
 
-    Tensor::from_storage(
-        TensorStorage::cpu(result),
-        p.concentration1().shape().to_vec(),
-        false,
-    )
+    Tensor::from_storage(TensorStorage::cpu(result), plan.out_shape, false)
 }
 
 /// KL(Pareto(scale, α) || Exponential(rate)) (cross-family).
@@ -1784,11 +1798,14 @@ fn kl_pareto_exponential<T: Float>(
     let rate = q.rate().data_vec()?;
     let one = T::from(1.0).unwrap();
 
-    let result: Vec<T> = scale
+    let plan = kl_broadcast_index_pairs(p.scale().shape(), q.rate().shape())?;
+    let result: Vec<T> = plan
+        .p_idx
         .iter()
-        .zip(alpha.iter())
-        .zip(rate.iter().cycle())
-        .map(|((&s, &a), &r)| {
+        .zip(plan.q_idx.iter())
+        .map(|(&pi, &qi)| {
+            let (s, a) = (scale[pi], alpha[pi]);
+            let r = rate[qi];
             if a <= one {
                 T::infinity()
             } else {
@@ -1798,11 +1815,7 @@ fn kl_pareto_exponential<T: Float>(
         })
         .collect();
 
-    Tensor::from_storage(
-        TensorStorage::cpu(result),
-        p.scale().shape().to_vec(),
-        false,
-    )
+    Tensor::from_storage(TensorStorage::cpu(result), plan.out_shape, false)
 }
 
 /// KL(Pareto(scale, α) || Gamma(conc, rate)) (cross-family).
@@ -1827,12 +1840,14 @@ fn kl_pareto_gamma<T: Float>(p: &Pareto<T>, q: &Gamma<T>) -> FerrotorchResult<Te
     let rate = q.rate().data_vec()?;
     let one = T::from(1.0).unwrap();
 
-    let result: Vec<T> = scale
+    let plan = kl_broadcast_index_pairs(p.scale().shape(), q.concentration().shape())?;
+    let result: Vec<T> = plan
+        .p_idx
         .iter()
-        .zip(alpha.iter())
-        .zip(conc.iter().cycle())
-        .zip(rate.iter().cycle())
-        .map(|(((&s, &a), &c), &r)| {
+        .zip(plan.q_idx.iter())
+        .map(|(&pi, &qi)| {
+            let (s, a) = (scale[pi], alpha[pi]);
+            let (c, r) = (conc[qi], rate[qi]);
             if a <= one {
                 T::infinity()
             } else {
@@ -1846,11 +1861,7 @@ fn kl_pareto_gamma<T: Float>(p: &Pareto<T>, q: &Gamma<T>) -> FerrotorchResult<Te
         })
         .collect();
 
-    Tensor::from_storage(
-        TensorStorage::cpu(result),
-        p.scale().shape().to_vec(),
-        false,
-    )
+    Tensor::from_storage(TensorStorage::cpu(result), plan.out_shape, false)
 }
 
 /// KL(Pareto(scale, α) || Normal(loc, scale2)) (cross-family).
@@ -1877,12 +1888,14 @@ fn kl_pareto_normal<T: Float>(p: &Pareto<T>, q: &Normal<T>) -> FerrotorchResult<
     let two = T::from(2.0).unwrap();
     let sqrt_two_pi = T::from((2.0 * std::f64::consts::PI).sqrt()).unwrap();
 
-    let result: Vec<T> = scale
+    let plan = kl_broadcast_index_pairs(p.scale().shape(), q.loc().shape())?;
+    let result: Vec<T> = plan
+        .p_idx
         .iter()
-        .zip(alpha.iter())
-        .zip(loc.iter().cycle())
-        .zip(scale2.iter().cycle())
-        .map(|(((&s, &a), &loc), &s2)| {
+        .zip(plan.q_idx.iter())
+        .map(|(&pi, &qi)| {
+            let (s, a) = (scale[pi], alpha[pi]);
+            let (loc, s2) = (loc[qi], scale2[qi]);
             if a <= two {
                 T::infinity()
             } else {
@@ -1898,11 +1911,7 @@ fn kl_pareto_normal<T: Float>(p: &Pareto<T>, q: &Normal<T>) -> FerrotorchResult<
         })
         .collect();
 
-    Tensor::from_storage(
-        TensorStorage::cpu(result),
-        p.scale().shape().to_vec(),
-        false,
-    )
+    Tensor::from_storage(TensorStorage::cpu(result), plan.out_shape, false)
 }
 
 /// KL(Uniform(low, high) || Exponential(rate)) (cross-family).
@@ -1925,11 +1934,14 @@ fn kl_uniform_exponential<T: Float>(
     let zero = T::from(0.0).unwrap();
     let two = T::from(2.0).unwrap();
 
-    let result: Vec<T> = low
+    let plan = kl_broadcast_index_pairs(p.low().shape(), q.rate().shape())?;
+    let result: Vec<T> = plan
+        .p_idx
         .iter()
-        .zip(high.iter())
-        .zip(rate.iter().cycle())
-        .map(|((&low, &high), &r)| {
+        .zip(plan.q_idx.iter())
+        .map(|(&pi, &qi)| {
+            let (low, high) = (low[pi], high[pi]);
+            let r = rate[qi];
             if low < zero {
                 T::infinity()
             } else {
@@ -1938,7 +1950,7 @@ fn kl_uniform_exponential<T: Float>(
         })
         .collect();
 
-    Tensor::from_storage(TensorStorage::cpu(result), p.low().shape().to_vec(), false)
+    Tensor::from_storage(TensorStorage::cpu(result), plan.out_shape, false)
 }
 
 /// KL(Uniform(low, high) || Gamma(conc, rate)) (cross-family).
@@ -1965,12 +1977,14 @@ fn kl_uniform_gamma<T: Float>(p: &Uniform<T>, q: &Gamma<T>) -> FerrotorchResult<
     let one = T::from(1.0).unwrap();
     let two = T::from(2.0).unwrap();
 
-    let result: Vec<T> = low
+    let plan = kl_broadcast_index_pairs(p.low().shape(), q.concentration().shape())?;
+    let result: Vec<T> = plan
+        .p_idx
         .iter()
-        .zip(high.iter())
-        .zip(conc.iter().cycle())
-        .zip(rate.iter().cycle())
-        .map(|(((&low, &high), &c), &r)| {
+        .zip(plan.q_idx.iter())
+        .map(|(&pi, &qi)| {
+            let (low, high) = (low[pi], high[pi]);
+            let (c, r) = (conc[qi], rate[qi]);
             if low < zero {
                 T::infinity()
             } else {
@@ -1984,7 +1998,7 @@ fn kl_uniform_gamma<T: Float>(p: &Uniform<T>, q: &Gamma<T>) -> FerrotorchResult<
         })
         .collect();
 
-    Tensor::from_storage(TensorStorage::cpu(result), p.low().shape().to_vec(), false)
+    Tensor::from_storage(TensorStorage::cpu(result), plan.out_shape, false)
 }
 
 /// `x·ln(x)` with the convention `0·ln(0) = 0`. Mirrors
@@ -2014,12 +2028,14 @@ fn kl_uniform_pareto<T: Float>(p: &Uniform<T>, q: &Pareto<T>) -> FerrotorchResul
     let alpha = q.alpha().data_vec()?;
     let one = T::from(1.0).unwrap();
 
-    let result: Vec<T> = low
+    let plan = kl_broadcast_index_pairs(p.low().shape(), q.scale().shape())?;
+    let result: Vec<T> = plan
+        .p_idx
         .iter()
-        .zip(high.iter())
-        .zip(scale.iter().cycle())
-        .zip(alpha.iter().cycle())
-        .map(|(((&low, &high), &s), &a)| {
+        .zip(plan.q_idx.iter())
+        .map(|(&pi, &qi)| {
+            let (low, high) = (low[pi], high[pi]);
+            let (s, a) = (scale[qi], alpha[qi]);
             if low < s {
                 T::infinity()
             } else {
@@ -2031,7 +2047,7 @@ fn kl_uniform_pareto<T: Float>(p: &Uniform<T>, q: &Pareto<T>) -> FerrotorchResul
         })
         .collect();
 
-    Tensor::from_storage(TensorStorage::cpu(result), p.low().shape().to_vec(), false)
+    Tensor::from_storage(TensorStorage::cpu(result), plan.out_shape, false)
 }
 
 /// KL(Uniform(low, high) || Beta(α, β)) (cross-family).
@@ -2052,17 +2068,19 @@ fn kl_uniform_beta<T: Float>(p: &Uniform<T>, q: &Beta<T>) -> FerrotorchResult<Te
     )?;
     let low = p.low().data_vec()?;
     let high = p.high().data_vec()?;
-    let a = q.concentration1().data_vec()?;
-    let b = q.concentration0().data_vec()?;
+    let a_v = q.concentration1().data_vec()?;
+    let b_v = q.concentration0().data_vec()?;
     let zero = T::from(0.0).unwrap();
     let one = T::from(1.0).unwrap();
 
-    let result: Vec<T> = low
+    let plan = kl_broadcast_index_pairs(p.low().shape(), q.concentration1().shape())?;
+    let result: Vec<T> = plan
+        .p_idx
         .iter()
-        .zip(high.iter())
-        .zip(a.iter().cycle())
-        .zip(b.iter().cycle())
-        .map(|(((&low, &high), &a), &b)| {
+        .zip(plan.q_idx.iter())
+        .map(|(&pi, &qi)| {
+            let (low, high) = (low[pi], high[pi]);
+            let (a, b) = (a_v[qi], b_v[qi]);
             if low < zero || high > one {
                 T::infinity()
             } else {
@@ -2076,7 +2094,7 @@ fn kl_uniform_beta<T: Float>(p: &Uniform<T>, q: &Beta<T>) -> FerrotorchResult<Te
         })
         .collect();
 
-    Tensor::from_storage(TensorStorage::cpu(result), p.low().shape().to_vec(), false)
+    Tensor::from_storage(TensorStorage::cpu(result), plan.out_shape, false)
 }
 
 // ---------------------------------------------------------------------------
@@ -2350,21 +2368,21 @@ fn kl_bernoulli_poisson<T: Float>(p: &Bernoulli<T>, q: &Poisson<T>) -> Ferrotorc
     let one = T::from(1.0).unwrap();
     let eps = T::from(1e-7).unwrap();
 
-    let result: Vec<T> = p_probs
+    let plan = kl_broadcast_index_pairs(p.probs().shape(), q.rate().shape())?;
+    let result: Vec<T> = plan
+        .p_idx
         .iter()
-        .zip(q_rate.iter().cycle())
-        .map(|(&pp, &rate)| {
+        .zip(plan.q_idx.iter())
+        .map(|(&pi, &qi)| {
+            let pp = p_probs[pi];
+            let rate = q_rate[qi];
             let pc = pp.max(eps).min(one - eps);
             let entropy = -(pc * pc.ln()) - (one - pc) * (one - pc).ln();
             -entropy - (pp * rate.ln() - rate)
         })
         .collect();
 
-    Tensor::from_storage(
-        TensorStorage::cpu(result),
-        p.probs().shape().to_vec(),
-        false,
-    )
+    Tensor::from_storage(TensorStorage::cpu(result), plan.out_shape, false)
 }
 
 /// KL(Normal(loc1, scale1) || Laplace(loc2, scale2)) (cross-family, finite).
@@ -2395,25 +2413,30 @@ fn kl_normal_laplace<T: Float>(p: &Normal<T>, q: &Laplace<T>) -> FerrotorchResul
     let sqrt_half = T::from(0.5_f64.sqrt()).unwrap();
     let half_ln_half_pi_term = T::from(0.5 * (1.0 + (0.5 * std::f64::consts::PI).ln())).unwrap();
 
+    // Broadcast p (loc/scale) against q (loc/scale) jointly, mirroring torch's
+    // `broadcast_all` (`torch/distributions/utils.py:27`); output shape is the
+    // broadcast shape, not p's shape.
+    let plan = kl_broadcast_index_pairs(p.loc().shape(), q.loc().shape())?;
+    let n = plan.out_shape.iter().product::<usize>().max(1);
+
     // erf argument = sqrt(0.5) * (loc_diff / scale1), one per output element.
-    // q broadcasts over p via `cycle()`, matching the other cross-family bodies.
-    let n = p_loc.len();
-    let erf_args: Vec<T> = p_loc
+    let erf_args: Vec<T> = plan
+        .p_idx
         .iter()
-        .zip(p_scale.iter())
-        .zip(q_loc.iter().cycle())
-        .map(|((&pl, &ps), &ql)| sqrt_half * ((pl - ql) / ps))
+        .zip(plan.q_idx.iter())
+        .map(|(&pi, &qi)| sqrt_half * ((p_loc[pi] - q_loc[qi]) / p_scale[pi]))
         .collect();
     let erf_tensor = Tensor::from_storage(TensorStorage::cpu(erf_args), vec![n], false)?;
     let erf_vals = ferrotorch_core::special::erf(&erf_tensor)?.data_vec()?;
 
-    let result: Vec<T> = p_loc
+    let result: Vec<T> = plan
+        .p_idx
         .iter()
-        .zip(p_scale.iter())
-        .zip(q_loc.iter().cycle())
-        .zip(q_scale.iter().cycle())
+        .zip(plan.q_idx.iter())
         .zip(erf_vals.iter())
-        .map(|((((&pl, &ps), &ql), &qs), &erf_v)| {
+        .map(|((&pi, &qi), &erf_v)| {
+            let (pl, ps) = (p_loc[pi], p_scale[pi]);
+            let (ql, qs) = (q_loc[qi], q_scale[qi]);
             let loc_diff = pl - ql;
             let scale_ratio = ps / qs;
             let ldsr = loc_diff / ps;
@@ -2424,7 +2447,7 @@ fn kl_normal_laplace<T: Float>(p: &Normal<T>, q: &Laplace<T>) -> FerrotorchResul
         })
         .collect();
 
-    Tensor::from_storage(TensorStorage::cpu(result), p.loc().shape().to_vec(), false)
+    Tensor::from_storage(TensorStorage::cpu(result), plan.out_shape, false)
 }
 
 /// KL(Binomial(n_p, p) || Binomial(n_q, q)) (discrete same-family).
@@ -2453,11 +2476,15 @@ fn kl_binomial_binomial<T: Float>(p: &Binomial<T>, q: &Binomial<T>) -> Ferrotorc
     let one = T::from(1.0).unwrap();
     let eps = T::from(1e-7).unwrap();
 
-    // `n_p < n_q` anywhere is unsupported (matches torch NotImplementedError at
-    // kl.py:235-238: "KL between Binomials where q.total_count > p.total_count").
-    for (i, &pn) in p_count.iter().enumerate() {
-        let qn = q_count[i % q_count.len()];
-        if pn < qn {
+    // Broadcast p (total_count/probs) against q (total_count/probs) jointly,
+    // mirroring torch's `broadcast_all` (`torch/distributions/utils.py:27`).
+    let plan = kl_broadcast_index_pairs(p.total_count().shape(), q.total_count().shape())?;
+
+    // `n_p < n_q` anywhere (over the broadcast tensors) is unsupported (matches
+    // torch NotImplementedError at kl.py:235-238: "KL between Binomials where
+    // q.total_count > p.total_count").
+    for (&pi, &qi) in plan.p_idx.iter().zip(plan.q_idx.iter()) {
+        if p_count[pi] < q_count[qi] {
             return Err(FerrotorchError::InvalidArgument {
                 message: "kl_divergence(Binomial, Binomial): q.total_count > p.total_count is \
                           not implemented (matches torch NotImplementedError, kl.py:235-238)."
@@ -2466,12 +2493,13 @@ fn kl_binomial_binomial<T: Float>(p: &Binomial<T>, q: &Binomial<T>) -> Ferrotorc
         }
     }
 
-    let result: Vec<T> = p_count
+    let result: Vec<T> = plan
+        .p_idx
         .iter()
-        .zip(p_probs.iter())
-        .zip(q_probs.iter().cycle())
-        .zip(q_count.iter().cycle())
-        .map(|(((&pn, &pp), &qp), &qn)| {
+        .zip(plan.q_idx.iter())
+        .map(|(&pi, &qi)| {
+            let (pn, pp) = (p_count[pi], p_probs[pi]);
+            let (qn, qp) = (q_count[qi], q_probs[qi]);
             if pn > qn {
                 return T::infinity();
             }
@@ -2484,11 +2512,7 @@ fn kl_binomial_binomial<T: Float>(p: &Binomial<T>, q: &Binomial<T>) -> Ferrotorc
         })
         .collect();
 
-    Tensor::from_storage(
-        TensorStorage::cpu(result),
-        p.total_count().shape().to_vec(),
-        false,
-    )
+    Tensor::from_storage(TensorStorage::cpu(result), plan.out_shape, false)
 }
 
 /// Row-major (C-contiguous) strides for `shape` — the element step each axis
@@ -2531,6 +2555,67 @@ fn kl_broadcast_flat_index(
         }
     }
     src_flat
+}
+
+/// Compute the broadcast plan for a KL pair: given `p`'s and `q`'s batch
+/// shapes, return the broadcast output shape together with, for every output
+/// element, the pair of source flat indices `(pi, qi)` into `p`'s and `q`'s
+/// (already right-aligned, C-contiguous) parameter vectors.
+///
+/// This is the shared machinery every same/cross-family KL pair uses to mirror
+/// torch's `broadcast_all` (`torch/distributions/utils.py:27-59`), which
+/// broadcasts every parameter tensor of `p` and `q` jointly before evaluating
+/// the closed form. Because each ferrotorch distribution enforces that all of
+/// its own parameter tensors share one shape at construction (e.g.
+/// `Normal::new` requires `loc.shape() == scale.shape()`), broadcasting `p`
+/// against `q` reduces to broadcasting one representative `p` shape against one
+/// representative `q` shape; every `p` parameter is indexed by `pi` and every
+/// `q` parameter by `qi`. The output tensor is shaped by the broadcast — so
+/// `KL(scalar_p, batched_q)` and disjoint batch dims (`p:[2,1]` vs `q:[1,3]` ->
+/// `[2,3]`) match upstream instead of silently truncating to `p`'s shape.
+struct KlBroadcastPlan {
+    /// The broadcast output shape (the shape of the returned KL tensor).
+    out_shape: Vec<usize>,
+    /// For each output element, the flat index into `p`'s parameter vectors.
+    p_idx: Vec<usize>,
+    /// For each output element, the flat index into `q`'s parameter vectors.
+    q_idx: Vec<usize>,
+}
+
+fn kl_broadcast_index_pairs(
+    p_shape: &[usize],
+    q_shape: &[usize],
+) -> FerrotorchResult<KlBroadcastPlan> {
+    let out_shape = broadcast_shapes(p_shape, q_shape)?;
+    let out_ndim = out_shape.len();
+    let out_strides = kl_row_major_strides(&out_shape);
+    let p_strides = kl_row_major_strides(p_shape);
+    let q_strides = kl_row_major_strides(q_shape);
+    let numel: usize = out_shape.iter().product();
+
+    let mut p_idx = Vec::with_capacity(numel);
+    let mut q_idx = Vec::with_capacity(numel);
+    for out_flat in 0..numel {
+        p_idx.push(kl_broadcast_flat_index(
+            out_flat,
+            &out_strides,
+            out_ndim,
+            p_shape,
+            &p_strides,
+        ));
+        q_idx.push(kl_broadcast_flat_index(
+            out_flat,
+            &out_strides,
+            out_ndim,
+            q_shape,
+            &q_strides,
+        ));
+    }
+    Ok(KlBroadcastPlan {
+        out_shape,
+        p_idx,
+        q_idx,
+    })
 }
 
 /// KL(Geometric(p) || Geometric(q)) (discrete same-family, finite).
@@ -3775,6 +3860,238 @@ mod tests {
         let q = Geometric::new(scalar(0.7f64).unwrap()).unwrap();
         let kl = kl_divergence(&p, &q).unwrap();
         assert!(kl.item().unwrap() >= -1e-12, "got {}", kl.item().unwrap());
+    }
+
+    // -- #1573: p-vs-q broadcast coverage (live-torch 2.11 f64 oracle) -------
+    //
+    // Every KL pair must broadcast p against q exactly like torch's
+    // `broadcast_all` (`torch/distributions/utils.py:27`): scalar-p/batched-q
+    // emits the batched shape (the old `zip().cycle()` path silently truncated
+    // to p's shape) and disjoint 2-D batch dims (`p:[2,1]` vs `q:[1,3]`) emit
+    // the `[2,3]` broadcast. These probe the multi-param joint broadcast
+    // (Normal/Beta/Gamma carry two params each; Bernoulli one). Reference
+    // values were produced by `torch.distributions.kl_divergence` 2.11 f64.
+
+    fn assert_close_slice(got: &[f64], want: &[f64], tol: f64, label: &str) {
+        assert_eq!(got.len(), want.len(), "{label}: length mismatch");
+        for (i, (&g, &w)) in got.iter().zip(want.iter()).enumerate() {
+            assert!((g - w).abs() < tol, "{label}[{i}]: got {g}, want {w}");
+        }
+    }
+
+    #[test]
+    fn test_kl_normal_normal_scalar_p_batched_q() {
+        use ferrotorch_core::creation::from_slice;
+        // torch: KL(Normal(0,1), Normal([0.5,1.0,-1.0], [2.0,0.5,1.5]))
+        let p = Normal::new(scalar(0.0f64).unwrap(), scalar(1.0f64).unwrap()).unwrap();
+        let q = Normal::new(
+            from_slice(&[0.5f64, 1.0, -1.0], &[3]).unwrap(),
+            from_slice(&[2.0f64, 0.5, 1.5], &[3]).unwrap(),
+        )
+        .unwrap();
+        let kl = kl_divergence(&p, &q).unwrap();
+        assert_eq!(
+            kl.shape(),
+            &[3],
+            "scalar-p must broadcast to q's batch shape"
+        );
+        assert_close_slice(
+            &kl.data().unwrap(),
+            &[0.3493971805599453, 2.8068528194400546, 0.3499095525526088],
+            1e-12,
+            "normal scalarP_batchedQ",
+        );
+    }
+
+    #[test]
+    fn test_kl_normal_normal_disjoint_2d() {
+        use ferrotorch_core::creation::from_slice;
+        // torch: p loc[[0],[1]] scale[[1],[2]] ([2,1]); q loc[[0.5,-0.5,2.0]]
+        //        scale[[1.5,0.8,1.0]] ([1,3]) -> broadcast [2,3].
+        let p = Normal::new(
+            from_slice(&[0.0f64, 1.0], &[2, 1]).unwrap(),
+            from_slice(&[1.0f64, 2.0], &[2, 1]).unwrap(),
+        )
+        .unwrap();
+        let q = Normal::new(
+            from_slice(&[0.5f64, -0.5, 2.0], &[1, 3]).unwrap(),
+            from_slice(&[1.5f64, 0.8, 1.0], &[1, 3]).unwrap(),
+        )
+        .unwrap();
+        let kl = kl_divergence(&p, &q).unwrap();
+        assert_eq!(kl.shape(), &[2, 3], "disjoint dims must broadcast to [2,3]");
+        assert_close_slice(
+            &kl.data().unwrap(),
+            &[
+                0.18324288588594217,
+                0.25341894868579024,
+                2.0,
+                0.15676237199266352,
+                3.466521768125845,
+                1.3068528194400546,
+            ],
+            1e-12,
+            "normal disjoint2d",
+        );
+    }
+
+    #[test]
+    fn test_kl_beta_beta_scalar_p_batched_q() {
+        use ferrotorch_core::creation::from_slice;
+        // torch: KL(Beta(2,3), Beta([1,2.5,4], [2,1,3]))
+        let p = Beta::new(scalar(2.0f64).unwrap(), scalar(3.0f64).unwrap()).unwrap();
+        let q = Beta::new(
+            from_slice(&[1.0f64, 2.5, 4.0], &[3]).unwrap(),
+            from_slice(&[2.0f64, 1.0, 3.0], &[3]).unwrap(),
+        )
+        .unwrap();
+        let kl = kl_divergence(&p, &q).unwrap();
+        assert_eq!(kl.shape(), &[3]);
+        // tol 1e-6: ferrotorch's digamma/lgamma scalars match torch to ~1e-9
+        // (same precision profile as the other Beta/Gamma KL tests in this
+        // file); the broadcast shape + element layout is exact.
+        assert_close_slice(
+            &kl.data().unwrap(),
+            &[0.12509280256138844, 0.9436159179138452, 0.557228754232566],
+            1e-6,
+            "beta scalarP_batchedQ",
+        );
+    }
+
+    #[test]
+    fn test_kl_beta_beta_disjoint_2d() {
+        use ferrotorch_core::creation::from_slice;
+        // torch: p c1[[2],[0.5]] c0[[3],[1.5]] ([2,1]); q c1[[1,2.5,4]]
+        //        c0[[2,1,3]] ([1,3]) -> [2,3].
+        let p = Beta::new(
+            from_slice(&[2.0f64, 0.5], &[2, 1]).unwrap(),
+            from_slice(&[3.0f64, 1.5], &[2, 1]).unwrap(),
+        )
+        .unwrap();
+        let q = Beta::new(
+            from_slice(&[1.0f64, 2.5, 4.0], &[1, 3]).unwrap(),
+            from_slice(&[2.0f64, 1.0, 3.0], &[1, 3]).unwrap(),
+        )
+        .unwrap();
+        let kl = kl_divergence(&p, &q).unwrap();
+        assert_eq!(kl.shape(), &[2, 3]);
+        assert_close_slice(
+            &kl.data().unwrap(),
+            &[
+                0.12509280256138844,
+                0.9436159179138452,
+                0.557228754232566,
+                0.24156447527049021,
+                3.2115681045162243,
+                4.385544538087896,
+            ],
+            1e-6,
+            "beta disjoint2d",
+        );
+    }
+
+    #[test]
+    fn test_kl_gamma_gamma_scalar_p_batched_q() {
+        use ferrotorch_core::creation::from_slice;
+        // torch: KL(Gamma(2,1.5), Gamma([1,3,2], [2,1,0.5]))
+        let p = Gamma::new(scalar(2.0f64).unwrap(), scalar(1.5f64).unwrap()).unwrap();
+        let q = Gamma::new(
+            from_slice(&[1.0f64, 3.0, 2.0], &[3]).unwrap(),
+            from_slice(&[2.0f64, 1.0, 0.5], &[3]).unwrap(),
+        )
+        .unwrap();
+        let kl = kl_divergence(&p, &q).unwrap();
+        assert_eq!(kl.shape(), &[3]);
+        // tol 1e-6: digamma/lgamma scalar precision (see beta tests above).
+        assert_close_slice(
+            &kl.data().unwrap(),
+            &[0.8017689293133528, 0.8200915031193047, 0.8638912440028863],
+            1e-6,
+            "gamma scalarP_batchedQ",
+        );
+    }
+
+    #[test]
+    fn test_kl_gamma_gamma_disjoint_2d() {
+        use ferrotorch_core::creation::from_slice;
+        // torch: p conc[[2],[4]] rate[[1.5],[2]] ([2,1]); q conc[[1,3,2]]
+        //        rate[[2,1,0.5]] ([1,3]) -> [2,3].
+        let p = Gamma::new(
+            from_slice(&[2.0f64, 4.0], &[2, 1]).unwrap(),
+            from_slice(&[1.5f64, 2.0], &[2, 1]).unwrap(),
+        )
+        .unwrap();
+        let q = Gamma::new(
+            from_slice(&[1.0f64, 3.0, 2.0], &[1, 3]).unwrap(),
+            from_slice(&[2.0f64, 1.0, 0.5], &[1, 3]).unwrap(),
+        )
+        .unwrap();
+        let kl = kl_divergence(&p, &q).unwrap();
+        assert_eq!(kl.shape(), &[2, 3]);
+        assert_close_slice(
+            &kl.data().unwrap(),
+            &[
+                0.8017689293133528,
+                0.8200915031193047,
+                0.8638912440028863,
+                1.976593536067346,
+                0.23694692144352647,
+                0.49306458987532675,
+            ],
+            1e-6,
+            "gamma disjoint2d",
+        );
+    }
+
+    #[test]
+    fn test_kl_bernoulli_bernoulli_scalar_p_batched_q() {
+        use ferrotorch_core::creation::from_slice;
+        // torch: KL(Bernoulli(0.3), Bernoulli([0.5,0.1,0.8]))
+        let p = Bernoulli::new(scalar(0.3f64).unwrap()).unwrap();
+        let q = Bernoulli::new(from_slice(&[0.5f64, 0.1, 0.8], &[3]).unwrap()).unwrap();
+        let kl = kl_divergence(&p, &q).unwrap();
+        assert_eq!(
+            kl.shape(),
+            &[3],
+            "scalar-p must broadcast to q's batch shape"
+        );
+        assert_close_slice(
+            &kl.data().unwrap(),
+            &[0.08228287850505181, 0.1536635868037986, 0.5826853020432397],
+            1e-9,
+            "bern scalarP_batchedQ",
+        );
+    }
+
+    #[test]
+    fn test_kl_bernoulli_bernoulli_disjoint_2d() {
+        use ferrotorch_core::creation::from_slice;
+        // p probs[[0.3],[0.6]] ([2,1]); q probs[[0.5,0.1,0.8]] ([1,3]) -> [2,3].
+        // NOTE: torch's `_kl_bernoulli_bernoulli` (kl.py:204-216) raises
+        // IndexError on disjoint p/q broadcast (its `q.probs == 0` /
+        // `p.probs == 0` masked-assign uses a non-broadcast mask). The oracle
+        // here is therefore the element-wise closed form
+        //   p·ln(p/q) + (1-p)·ln((1-p)/(1-q))
+        // evaluated on the manual `torch.broadcast_tensors(p, q)` (R-CHAR-3:
+        // traceable to the torch op + the kl.py:204-216 formula). ferrotorch's
+        // broadcast is correct here where torch's masked path is buggy (R-DEV-6).
+        let p = Bernoulli::new(from_slice(&[0.3f64, 0.6], &[2, 1]).unwrap()).unwrap();
+        let q = Bernoulli::new(from_slice(&[0.5f64, 0.1, 0.8], &[1, 3]).unwrap()).unwrap();
+        let kl = kl_divergence(&p, &q).unwrap();
+        assert_eq!(kl.shape(), &[2, 3], "disjoint dims must broadcast to [2,3]");
+        assert_close_slice(
+            &kl.data().unwrap(),
+            &[
+                0.08228287850505178,
+                0.15366358680379852,
+                0.5826853020432397,
+                0.020135513550688863,
+                0.7506835950503014,
+                0.10464962875290959,
+            ],
+            1e-9,
+            "bern disjoint2d",
+        );
     }
 
     // -- Drift prevention: doc table vs dispatcher ---------------------------

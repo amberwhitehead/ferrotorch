@@ -271,14 +271,38 @@ Each follows the same pattern:
 1. Call `check_gpu_fallback_opt_in` with all parameter tensors and
    the op name.
 2. Read parameter data into `Vec<T>` via `data_vec()?`.
-3. Compute the formula element-wise via `zip(...).cycle().map(...)`
-   broadcasting (PyTorch broadcasts q against p; we do the same
-   by `cycle()`-ing q over p).
-4. Wrap the result in a tensor matching p's shape via
-   `Tensor::from_storage(TensorStorage::cpu(...), p.shape(), false)`.
+3. Build the p-vs-q broadcast plan with `kl_broadcast_index_pairs`
+   (#1573): given `p`'s and `q`'s batch shapes it returns the broadcast
+   output shape plus, for every output element, the source flat indices
+   `(pi, qi)` into `p`'s and `q`'s parameter vectors. This mirrors torch's
+   `broadcast_all` (`torch/distributions/utils.py:27`), which broadcasts
+   every parameter tensor of `p` and `q` jointly before evaluating the
+   closed form. Because each distribution enforces that all of its own
+   parameter tensors share one shape at construction (e.g. `Normal::new`
+   requires `loc.shape() == scale.shape()`), broadcasting `p` against `q`
+   reduces to broadcasting one representative `p` shape against one
+   representative `q` shape; every `p` parameter is indexed by `pi`, every
+   `q` parameter by `qi`. The formula is then evaluated element-wise over
+   the index pairs.
+4. Wrap the result in a tensor of the **broadcast output shape** (`plan.out_shape`)
+   via `Tensor::from_storage(TensorStorage::cpu(...), plan.out_shape, false)`.
+   This is NOT `p.<param>().shape()` — `KL(scalar_p, batched_q)` and disjoint
+   batch dims (`p:[2,1]` vs `q:[1,3]` -> `[2,3]`) match upstream instead of
+   silently truncating to `p`'s shape (the #1569/#1572 bug class, closed for
+   the whole pair family by #1573).
 
 The `kl_gamma_gamma` body uses `digamma_scalar` and `lgamma_scalar`
 from `special_fns.rs` (REQ-1 of `special_fns.md`).
+
+The shared broadcast machinery lives in `fn kl_broadcast_index_pairs`
+(returning `struct KlBroadcastPlan`), built on the `fn kl_row_major_strides`
++ `fn kl_broadcast_flat_index` helpers and `ferrotorch_core::shape::broadcast_shapes`
+in `kl.rs`. The categorical / one-hot-categorical (event-dim reduction to a
+scalar), Dirichlet (bespoke per-row batch handling), and (Low-Rank)MVN
+(full-vector, scalar result) pairs do NOT use this plan — they reduce over the
+event dimension and were left on their existing shape logic. The `+inf`
+support-mismatch arms keep `kl_infinite_like(p.<param>)` (matching torch's
+`_infinite_like(tensor)`, which shapes off the single passed tensor).
 
 ### Cross-family formulas (REQ-5)
 
@@ -287,7 +311,8 @@ expressions involving `2π`, `2πe`, and the second moment of the
 uniform. See the bodies for the algebraic derivations.
 
 `kl_gamma_exponential` and `kl_exponential_gamma` exploit the
-identity `Exp(λ) ≡ Gamma(1, λ)`:
+identity `Exp(λ) ≡ Gamma(1, λ)`, evaluated over the p-vs-q broadcast plan
+(#1573):
 
 ```rust
 fn kl_gamma_exponential<T: Float>(p: &Gamma<T>, q: &Exponential<T>) -> ... {
@@ -295,9 +320,11 @@ fn kl_gamma_exponential<T: Float>(p: &Gamma<T>, q: &Exponential<T>) -> ... {
     let p_rate = p.rate().data_vec()?;
     let q_rate = q.rate().data_vec()?;
     let one = T::from(1.0).unwrap();
-    p_conc.iter().zip(p_rate.iter()).zip(q_rate.iter().cycle())
-        .map(|((&pa, &pb), &qb)| kl_gamma_scalar(pa, pb, one, qb))
-        .collect()
+    let plan = kl_broadcast_index_pairs(p.concentration().shape(), q.rate().shape())?;
+    let result: Vec<T> = plan.p_idx.iter().zip(plan.q_idx.iter())
+        .map(|(&pi, &qi)| kl_gamma_scalar(p_conc[pi], p_rate[pi], one, q_rate[qi]))
+        .collect();
+    Tensor::from_storage(TensorStorage::cpu(result), plan.out_shape, false)
 }
 ```
 
