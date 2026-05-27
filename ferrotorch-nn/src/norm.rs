@@ -13,12 +13,12 @@
 //! | REQ-2 | SHIPPED | GPU fast path inside `LayerNorm::forward` dispatches to `backend.layernorm_f32(input, weight, bias, batch, norm_size, eps)` when `input.is_cuda() && self.elementwise_affine` mirroring `aten/src/ATen/native/Normalization.cpp` `native_layer_norm_cuda`; consumed by `ferrotorch-bert/src/attention.rs:209` and `ferrotorch-whisper/src/encoder.rs:27` pushing GPU-resident inputs through this path during inference. |
 //! | REQ-3 | SHIPPED | `pub struct GroupNorm<T: Float>` + `GroupNormBackward<T>` mirrors `torch/nn/modules/normalization.py:239-342`; consumed by `ferrotorch-diffusion/src/vae.rs:39,99` (`pub conv_norm_out: GroupNorm<T>`). GPU forward fast path (#1357): `GroupNorm::forward` dispatches to `backend.group_norm_f32(...)` for CUDA input (kernel in `ferrotorch-gpu/src/group_norm.rs`). Runner-arm: #1447. |
 //! | REQ-4 | SHIPPED | `pub struct RMSNorm<T: Float>` + `RMSNormBackward<T>` with `mean(x^2)` denominator (no centering, no bias) mirrors `torch/nn/modules/normalization.py:343-435`; consumed via `ferrotorch-nn/src/lib.rs:227` re-export (Llama / T5 stacks). |
-//! | REQ-5 | SHIPPED | `pub struct BatchNorm2d<T: Float>` + `BatchNorm2dBackward<T>` with per-channel running stats and train/eval branching mirrors `torch/nn/modules/batchnorm.py:420-498`; consumed by `ferrotorch-distributed/src/sync_batch_norm.rs:3,595` and `ferrotorch-vision/src/models/segmentation/fcn.rs:34`. CPU-only — blocker #1449 for GPU. Runner-arm: #1447. |
-//! | REQ-6 | SHIPPED | `pub struct BatchNorm1d<T: Float>` + `BatchNorm1dBackward<T>` mirrors `torch/nn/modules/batchnorm.py:306-383`; consumed by `ferrotorch-nn/src/lazy_norm.rs:154` (`lazy_batchnorm!(LazyBatchNorm1d, BatchNorm1d, ...)`) and `ferrotorch-nn/src/lib.rs:225-228` re-exports. CPU-only; blocker #1449. |
-//! | REQ-7 | SHIPPED | `pub struct BatchNorm3d<T: Float>` + `BatchNorm3dBackward<T>` mirrors `torch/nn/modules/batchnorm.py:535-613`; consumed by `ferrotorch-nn/src/lazy_norm.rs:155` and `lib.rs:225-228` re-exports. CPU-only; blocker #1449. |
+//! | REQ-5 | SHIPPED | `pub struct BatchNorm2d<T: Float>` + `BatchNorm2dBackward<T>` with per-channel running stats and train/eval branching mirrors `torch/nn/modules/batchnorm.py:420-498`; consumed by `ferrotorch-distributed/src/sync_batch_norm.rs:3,595` and `ferrotorch-vision/src/models/segmentation/fcn.rs:34`. GPU fwd via `batch_norm_gpu_forward`; GPU backward (#1449) via `batch_norm_gpu_backward` → `backend.batch_norm_backward_f32` (kernel `gpu_batch_norm_backward_f32` in `ferrotorch-gpu/src/group_norm.rs`, mirrors `aten/src/ATen/native/cuda/Normalization.cuh:388`), on-device, NO `.cpu()` round trip; live-vs-torch grad parity (<1e-3) pinned by `divergence_batchnorm2d_gpu_{train,eval}_backward_vs_torch`. Runner-arm: #1447. |
+//! | REQ-6 | SHIPPED | `pub struct BatchNorm1d<T: Float>` + `BatchNorm1dBackward<T>` mirrors `torch/nn/modules/batchnorm.py:306-383`; consumed by `ferrotorch-nn/src/lazy_norm.rs:154` (`lazy_batchnorm!(LazyBatchNorm1d, BatchNorm1d, ...)`) and `ferrotorch-nn/src/lib.rs:225-228` re-exports. GPU fwd + backward (#1449) via the shared `batch_norm_gpu_backward` helper, on-device. |
+//! | REQ-7 | SHIPPED | `pub struct BatchNorm3d<T: Float>` + `BatchNorm3dBackward<T>` mirrors `torch/nn/modules/batchnorm.py:535-613`; consumed by `ferrotorch-nn/src/lazy_norm.rs:155` and `lib.rs:225-228` re-exports. GPU fwd + backward (#1449) via the shared `batch_norm_gpu_backward` helper, on-device. |
 //! | REQ-8 | SHIPPED | `pub fn set_running_mean / set_running_var / set_num_batches_tracked` plus matching read accessors on every `BatchNorm{1,2,3}d<T>` with finite + non-negative validation; consumed by `ferrotorch-distributed/src/sync_batch_norm.rs` all-reducing `running_mean()` / `running_var()` and by vision state-dict loaders downcasting via `as_any`. Pinned by `bn{1,2,3}d_set_running_*_round_trip` and `bn{1,2,3}d_set_running_stats_flow_through_eval_forward`. |
-//! | REQ-9 | SHIPPED | `pub struct InstanceNorm1d<T>`, `pub struct InstanceNorm2d<T>`, `pub struct InstanceNorm3d<T>` newtypes around `InstanceNormInner<T>` + `InstanceNormBackward<T>` mirror `torch/nn/modules/instancenorm.py`; consumed by `ferrotorch-nn/src/lazy_norm.rs:14` and `lib.rs:225-228` re-exports. CPU-only; blocker #1449. |
-//! | REQ-10 | SHIPPED | `pub struct LocalResponseNorm` + `LocalResponseNormBackward<T>` mirrors `torch/nn/modules/normalization.py:16-73`; consumed via `ferrotorch-nn/src/lib.rs:227` re-export. CPU-only — CUDA input returns `NotImplementedOnCuda`; blocker #1449. |
+//! | REQ-9 | SHIPPED | `pub struct InstanceNorm1d<T>`, `pub struct InstanceNorm2d<T>`, `pub struct InstanceNorm3d<T>` newtypes around `InstanceNormInner<T>` + `InstanceNormBackward<T>` mirror `torch/nn/modules/instancenorm.py`; consumed by `ferrotorch-nn/src/lazy_norm.rs:14` and `lib.rs:225-228` re-exports. GPU fwd via `group_norm_f32`; GPU backward (#1449) via `instance_norm_gpu_backward` (reshape `[B,C,S]`→`[1,B*C,S]` + `batch_norm_backward_f32` + `sum_axis_f32` reduce), on-device, NO `.cpu()` round trip; live-vs-torch grad parity (<1e-3) pinned by `divergence_instancenorm2d_gpu_backward_vs_torch`. |
+//! | REQ-10 | SHIPPED | `pub struct LocalResponseNorm` + `LocalResponseNormBackward<T>` mirrors `torch/nn/modules/normalization.py:16-73`; consumed via `ferrotorch-nn/src/lib.rs:227` re-export. GPU fwd + backward (#1449) via `backend.local_response_norm_f32` / `local_response_norm_backward_f32` (kernels in `ferrotorch-gpu/src/group_norm.rs`, mirror `torch/nn/functional.py:3032-3046`), on-device with GPU-resident saved `denom`, NO `.cpu()` round trip; live-vs-torch fwd+grad parity (<1e-3) pinned by `divergence_local_response_norm_gpu_fwd_bwd_vs_torch`. |
 //! | REQ-11 | SHIPPED | Every norm layer has `impl<T: Float> Module<T>` with the seven required methods; BatchNorm additionally implements `as_any() -> Option<&dyn Any>` returning `Some(self)`; consumed by `ferrotorch-bert/src/attention.rs` invoking `self.layer_norm.forward(...)` through the trait and by vision state-dict loaders downcasting via `as_any`. Pinned by `bn{1,2,3}d_as_any_downcasts_to_concrete_type`. |
 //! | REQ-12 | SHIPPED | Every forward returns `Tensor::from_operation(storage, shape, grad_fn)` when `is_grad_enabled() && input.requires_grad()`; backward nodes `LayerNormBackward`, `GroupNormBackward`, `RMSNormBackward`, `BatchNorm{1,2,3}dBackward`, `InstanceNormBackward`, `LocalResponseNormBackward` all live in this file; consumed by `ferrotorch-optim` training loops driving `backward()` through these nodes when models composed from `ferrotorch-bert` / `ferrotorch-diffusion` / `ferrotorch-vision` are trained. |
 
@@ -173,6 +173,189 @@ fn batch_norm_gpu_forward<T: Float>(
     }
 
     Ok(Some(out_handle))
+}
+
+/// GPU backward for the BatchNorm / InstanceNorm family (#1449), shared by
+/// `BatchNorm{1,2,3}dBackward` and `InstanceNormBackward`.
+///
+/// Dispatches to the backend `batch_norm_backward_f32` kernel
+/// (`ferrotorch-gpu/src/group_norm.rs::gpu_batch_norm_backward_f32`), which
+/// computes `(grad_input, grad_weight, grad_bias)` entirely on-device — there
+/// is NO `.cpu()` round trip (R-CODE-4). All grad tensors stay GPU-resident.
+/// Mirrors `aten/src/ATen/native/cuda/Normalization.cuh:388
+/// batch_norm_backward_kernel`. f32-only; the caller must gate on `is_f32::<T>()`.
+///
+/// `mean`/`var` are length-`channels` host snapshots used only in eval mode
+/// (`!training`); in training mode the kernel recomputes batch stats from
+/// `input`, so the passed buffers are ignored but must be valid `[channels]`.
+/// `weight_buf` is the affine scale; when the layer is non-affine the caller
+/// passes an all-ones `[channels]` buffer so `grad_scale = invstd`.
+/// `want_weight_grad` / `want_bias_grad` gate whether the (always-computed)
+/// `grad_weight` / `grad_bias` buffers are surfaced to the autograd graph.
+///
+/// Returns `None` when no GPU backend is registered (caller falls back / errors).
+#[allow(clippy::too_many_arguments)]
+#[allow(
+    clippy::fn_params_excessive_bools,
+    reason = "the four flags (training / affine / want_weight_grad / want_bias_grad) each \
+              control a distinct branch of the BatchNorm backward contract and mirror \
+              PyTorch's train arg + grad_input_mask; no meaningful struct grouping exists"
+)]
+fn batch_norm_gpu_backward<T: Float>(
+    input: &Tensor<T>,
+    grad_output: &Tensor<T>,
+    weight_buf: &Tensor<T>,
+    mean: &[f64],
+    var: &[f64],
+    batch: usize,
+    channels: usize,
+    spatial: usize,
+    eps: f64,
+    training: bool,
+    affine: bool,
+    want_weight_grad: bool,
+    want_bias_grad: bool,
+) -> FerrotorchResult<Option<Vec<Option<Tensor<T>>>>> {
+    let Some(backend) = gpu_backend() else {
+        return Ok(None);
+    };
+    let mean_f32: Vec<f32> = mean.iter().map(|v| *v as f32).collect();
+    let var_f32: Vec<f32> = var.iter().map(|v| *v as f32).collect();
+    let mean_dev =
+        ferrotorch_core::creation::from_slice::<f32>(&mean_f32, &[channels])?.to(input.device())?;
+    let var_dev =
+        ferrotorch_core::creation::from_slice::<f32>(&var_f32, &[channels])?.to(input.device())?;
+
+    let (gi_h, gw_h, gb_h) = backend.batch_norm_backward_f32(
+        input.gpu_handle()?,
+        grad_output.gpu_handle()?,
+        weight_buf.gpu_handle()?,
+        mean_dev.gpu_handle()?,
+        var_dev.gpu_handle()?,
+        batch,
+        channels,
+        spatial.max(1),
+        eps as f32,
+        training,
+    )?;
+
+    let grad_input = Tensor::from_storage(TensorStorage::gpu(gi_h), input.shape().to_vec(), false)?;
+    let grad_weight = if affine && want_weight_grad {
+        Some(Tensor::from_storage(
+            TensorStorage::gpu(gw_h),
+            vec![channels],
+            false,
+        )?)
+    } else {
+        None
+    };
+    let grad_bias = if affine && want_bias_grad {
+        Some(Tensor::from_storage(
+            TensorStorage::gpu(gb_h),
+            vec![channels],
+            false,
+        )?)
+    } else {
+        None
+    };
+
+    Ok(Some(vec![Some(grad_input), grad_weight, grad_bias]))
+}
+
+/// GPU backward for InstanceNorm (#1449).
+///
+/// InstanceNorm is BatchNorm applied per-instance: each `(b, c)` slice is its
+/// own normalization group over the spatial dims. We reshape `[B, C, S]` to
+/// `[1, B*C, S]` and reuse the on-device `batch_norm_backward_f32` kernel in
+/// training mode (InstanceNorm always uses instance stats). The per-channel
+/// affine `weight[c]` is tiled to `[B*C]`; the returned `grad_weight` /
+/// `grad_bias` of length `B*C` are summed over the batch axis on-device
+/// (`sum_axis_f32` over a `[B, C]` view) to `[C]`. `grad_input` keeps `[B,C,S]`.
+/// The full gradient-data path stays GPU-resident — NO `.cpu()` round trip
+/// (R-CODE-4). f32-only; the caller gates on `is_f32::<T>()`.
+///
+/// Returns `None` when no GPU backend is registered.
+#[allow(clippy::too_many_arguments)]
+#[allow(
+    clippy::fn_params_excessive_bools,
+    reason = "affine / want_weight_grad / want_bias_grad each gate a distinct branch of the \
+              InstanceNorm backward contract and mirror PyTorch's grad_input_mask; no \
+              meaningful struct grouping exists"
+)]
+fn instance_norm_gpu_backward<T: Float>(
+    input: &Tensor<T>,
+    grad_output: &Tensor<T>,
+    weight: &Tensor<T>,
+    batch: usize,
+    channels: usize,
+    spatial: usize,
+    eps: f64,
+    affine: bool,
+    want_weight_grad: bool,
+    want_bias_grad: bool,
+) -> FerrotorchResult<Option<Vec<Option<Tensor<T>>>>> {
+    let Some(backend) = gpu_backend() else {
+        return Ok(None);
+    };
+    let bc = batch * channels;
+
+    // Tile the per-channel affine `weight[c]` to `[B*C]` (slot b*C+c = w[c]).
+    // Non-affine ⇒ all ones, so the kernel's `grad_scale = invstd`.
+    let weight_host: Vec<f32> = if affine {
+        // `weight` is the (GPU-resident) per-channel affine param of length
+        // `channels`; read it back (tiny) to tile to `[B*C]`. This is the affine
+        // PARAMETER, not gradient data — no grad round trip.
+        let w = weight.data_vec()?;
+        let mut tiled = vec![0.0f32; bc];
+        for b in 0..batch {
+            for c in 0..channels {
+                tiled[b * channels + c] = w[c].to_f32().unwrap();
+            }
+        }
+        tiled
+    } else {
+        vec![1.0f32; bc]
+    };
+    let weight_dev =
+        ferrotorch_core::creation::from_slice::<f32>(&weight_host, &[bc])?.to(input.device())?;
+    // Eval-mode stats are unused (training=true recomputes), but the kernel
+    // needs valid `[B*C]` buffers.
+    let stat_dummy = ferrotorch_core::creation::zeros::<f32>(&[bc])?.to(input.device())?;
+
+    let (gi_h, gw_h, gb_h) = backend.batch_norm_backward_f32(
+        input.gpu_handle()?,
+        grad_output.gpu_handle()?,
+        weight_dev.gpu_handle()?,
+        stat_dummy.gpu_handle()?,
+        stat_dummy.gpu_handle()?,
+        1,  // batch == 1 for the reshaped [1, B*C, S] view
+        bc, // channels == B*C
+        spatial.max(1),
+        eps as f32,
+        true, // InstanceNorm always uses instance stats
+    )?;
+
+    let grad_input = Tensor::from_storage(TensorStorage::gpu(gi_h), input.shape().to_vec(), false)?;
+
+    // Reduce grad_weight / grad_bias from `[B*C]` to `[C]` by summing the
+    // `[B, C]` view over axis 0 — entirely on-device.
+    let reduce =
+        |handle: ferrotorch_core::gpu_dispatch::GpuBufferHandle| -> FerrotorchResult<Tensor<T>> {
+            let summed = backend.sum_axis_f32(&handle, &[batch, channels], 0)?;
+            Tensor::from_storage(TensorStorage::gpu(summed), vec![channels], false)
+        };
+    let grad_weight = if affine && want_weight_grad {
+        Some(reduce(gw_h)?)
+    } else {
+        None
+    };
+    let grad_bias = if affine && want_bias_grad {
+        Some(reduce(gb_h)?)
+    } else {
+        None
+    };
+
+    Ok(Some(vec![Some(grad_input), grad_weight, grad_bias]))
 }
 
 // ===========================================================================
@@ -1665,6 +1848,9 @@ impl<T: Float> Module<T> for BatchNorm2d<T> {
                             chan_var: Vec::new(),
                             eps: self.eps,
                             affine: self.affine,
+                            is_training,
+                            running_mean: self.running_mean.lock().unwrap().clone(),
+                            running_var: self.running_var.lock().unwrap().clone(),
                         });
                         Tensor::from_operation(TensorStorage::gpu(handle), shape, grad_fn)
                     } else {
@@ -1803,6 +1989,9 @@ impl<T: Float> Module<T> for BatchNorm2d<T> {
                 chan_var: chan_var.iter().map(|v| v.to_f64().unwrap()).collect(),
                 eps: self.eps,
                 affine: self.affine,
+                is_training,
+                running_mean: self.running_mean.lock().unwrap().clone(),
+                running_var: self.running_var.lock().unwrap().clone(),
             });
 
             Tensor::from_operation(
@@ -1889,13 +2078,21 @@ impl<T: Float> Module<T> for BatchNorm2d<T> {
 struct BatchNorm2dBackward<T: Float> {
     input: Tensor<T>,
     /// Pre-computed normalized values `(x - mean) / sqrt(var + eps)`.
+    /// Empty on the GPU path (the GPU backward kernel recomputes from `input`).
     x_hat: Tensor<T>,
     weight: Option<Tensor<T>>,
     bias: Option<Tensor<T>>,
-    /// Per-channel batch variances (biased).
+    /// Per-channel batch variances (biased). Empty on the GPU path.
     chan_var: Vec<f64>,
     eps: f64,
     affine: bool,
+    /// GPU backward (#1449): forward training-mode flag (kernel recomputes
+    /// batch stats) vs. eval (uses the running snapshots).
+    is_training: bool,
+    /// Running-mean snapshot for the GPU eval-mode backward (`[channels]`).
+    running_mean: Vec<f64>,
+    /// Running-var snapshot for the GPU eval-mode backward (`[channels]`).
+    running_var: Vec<f64>,
 }
 
 impl<T: Float> GradFn<T> for BatchNorm2dBackward<T> {
@@ -1909,6 +2106,40 @@ impl<T: Float> GradFn<T> for BatchNorm2dBackward<T> {
         let count = batch * spatial;
         let count_t = T::from(count).unwrap();
 
+        // GPU-native backward (#1449): compute grad_input/weight/bias on-device
+        // — NO `.cpu()` round trip (R-CODE-4). Mirrors the LayerNormBackward GPU
+        // fast path above.
+        if self.input.is_cuda() && is_f32::<T>() {
+            let weight_dev;
+            let weight_buf = match self.weight.as_ref() {
+                Some(w) => w,
+                None => {
+                    weight_dev = ferrotorch_core::creation::ones::<T>(&[channels])?
+                        .to(self.input.device())?;
+                    &weight_dev
+                }
+            };
+            if let Some(grads) = batch_norm_gpu_backward(
+                &self.input,
+                grad_output,
+                weight_buf,
+                &self.running_mean,
+                &self.running_var,
+                batch,
+                channels,
+                spatial,
+                self.eps,
+                self.is_training,
+                self.affine,
+                self.weight.as_ref().is_some_and(|w| w.requires_grad()),
+                self.bias.as_ref().is_some_and(|b| b.requires_grad()),
+            )? {
+                return Ok(grads);
+            }
+            return Err(FerrotorchError::NotImplementedOnCuda {
+                op: "BatchNorm2dBackward",
+            });
+        }
         if self.input.is_cuda() {
             return Err(FerrotorchError::NotImplementedOnCuda {
                 op: "BatchNorm2dBackward",
@@ -2329,6 +2560,9 @@ impl<T: Float> Module<T> for BatchNorm1d<T> {
                             chan_var: Vec::new(),
                             eps: self.eps,
                             affine: self.affine,
+                            is_training,
+                            running_mean: self.running_mean.lock().unwrap().clone(),
+                            running_var: self.running_var.lock().unwrap().clone(),
                         });
                         Tensor::from_operation(TensorStorage::gpu(handle), shape, grad_fn)
                     } else {
@@ -2458,6 +2692,9 @@ impl<T: Float> Module<T> for BatchNorm1d<T> {
                 chan_var: chan_var.iter().map(|v| v.to_f64().unwrap()).collect(),
                 eps: self.eps,
                 affine: self.affine,
+                is_training,
+                running_mean: self.running_mean.lock().unwrap().clone(),
+                running_var: self.running_var.lock().unwrap().clone(),
             });
 
             Tensor::from_operation(
@@ -2527,6 +2764,12 @@ struct BatchNorm1dBackward<T: Float> {
     chan_var: Vec<f64>,
     eps: f64,
     affine: bool,
+    /// GPU backward (#1449): forward training-mode flag.
+    is_training: bool,
+    /// Running-mean snapshot for the GPU eval-mode backward (`[channels]`).
+    running_mean: Vec<f64>,
+    /// Running-var snapshot for the GPU eval-mode backward (`[channels]`).
+    running_var: Vec<f64>,
 }
 
 impl<T: Float> GradFn<T> for BatchNorm1dBackward<T> {
@@ -2539,6 +2782,38 @@ impl<T: Float> GradFn<T> for BatchNorm1dBackward<T> {
         let count = batch * length;
         let count_t = T::from(count).unwrap();
 
+        // GPU-native backward (#1449): on-device, NO `.cpu()` round trip.
+        if self.input.is_cuda() && is_f32::<T>() {
+            let weight_dev;
+            let weight_buf = match self.weight.as_ref() {
+                Some(w) => w,
+                None => {
+                    weight_dev = ferrotorch_core::creation::ones::<T>(&[channels])?
+                        .to(self.input.device())?;
+                    &weight_dev
+                }
+            };
+            if let Some(grads) = batch_norm_gpu_backward(
+                &self.input,
+                grad_output,
+                weight_buf,
+                &self.running_mean,
+                &self.running_var,
+                batch,
+                channels,
+                length,
+                self.eps,
+                self.is_training,
+                self.affine,
+                self.weight.as_ref().is_some_and(|w| w.requires_grad()),
+                self.bias.as_ref().is_some_and(|b| b.requires_grad()),
+            )? {
+                return Ok(grads);
+            }
+            return Err(FerrotorchError::NotImplementedOnCuda {
+                op: "BatchNorm1dBackward",
+            });
+        }
         if self.input.is_cuda() {
             return Err(FerrotorchError::NotImplementedOnCuda {
                 op: "BatchNorm1dBackward",
@@ -2955,6 +3230,9 @@ impl<T: Float> Module<T> for BatchNorm3d<T> {
                             chan_var: Vec::new(),
                             eps: self.eps,
                             affine: self.affine,
+                            is_training,
+                            running_mean: self.running_mean.lock().unwrap().clone(),
+                            running_var: self.running_var.lock().unwrap().clone(),
                         });
                         Tensor::from_operation(TensorStorage::gpu(handle), shape, grad_fn)
                     } else {
@@ -3084,6 +3362,9 @@ impl<T: Float> Module<T> for BatchNorm3d<T> {
                 chan_var: chan_var.iter().map(|v| v.to_f64().unwrap()).collect(),
                 eps: self.eps,
                 affine: self.affine,
+                is_training,
+                running_mean: self.running_mean.lock().unwrap().clone(),
+                running_var: self.running_var.lock().unwrap().clone(),
             });
 
             Tensor::from_operation(
@@ -3152,6 +3433,12 @@ struct BatchNorm3dBackward<T: Float> {
     chan_var: Vec<f64>,
     eps: f64,
     affine: bool,
+    /// GPU backward (#1449): forward training-mode flag.
+    is_training: bool,
+    /// Running-mean snapshot for the GPU eval-mode backward (`[channels]`).
+    running_mean: Vec<f64>,
+    /// Running-var snapshot for the GPU eval-mode backward (`[channels]`).
+    running_var: Vec<f64>,
 }
 
 impl<T: Float> GradFn<T> for BatchNorm3dBackward<T> {
@@ -3163,6 +3450,38 @@ impl<T: Float> GradFn<T> for BatchNorm3dBackward<T> {
         let count = batch * spatial;
         let count_t = T::from(count).unwrap();
 
+        // GPU-native backward (#1449): on-device, NO `.cpu()` round trip.
+        if self.input.is_cuda() && is_f32::<T>() {
+            let weight_dev;
+            let weight_buf = match self.weight.as_ref() {
+                Some(w) => w,
+                None => {
+                    weight_dev = ferrotorch_core::creation::ones::<T>(&[channels])?
+                        .to(self.input.device())?;
+                    &weight_dev
+                }
+            };
+            if let Some(grads) = batch_norm_gpu_backward(
+                &self.input,
+                grad_output,
+                weight_buf,
+                &self.running_mean,
+                &self.running_var,
+                batch,
+                channels,
+                spatial,
+                self.eps,
+                self.is_training,
+                self.affine,
+                self.weight.as_ref().is_some_and(|w| w.requires_grad()),
+                self.bias.as_ref().is_some_and(|b| b.requires_grad()),
+            )? {
+                return Ok(grads);
+            }
+            return Err(FerrotorchError::NotImplementedOnCuda {
+                op: "BatchNorm3dBackward",
+            });
+        }
         if self.input.is_cuda() {
             return Err(FerrotorchError::NotImplementedOnCuda {
                 op: "BatchNorm3dBackward",
@@ -3375,6 +3694,45 @@ impl<T: Float> Module<T> for LocalResponseNorm {
         let channels = shape[1];
         let spatial: usize = shape[2..].iter().product();
 
+        // GPU-native forward (#1449): square → windowed channel sum → affine →
+        // pow(beta) → divide, on-device. NO `.cpu()` round trip (R-CODE-4).
+        // The saved `denom` buffer is kept GPU-resident for the backward.
+        // f32-only.
+        if input.is_cuda() && is_f32::<T>() {
+            if let Some(backend) = gpu_backend() {
+                let (out_h, denom_h) = backend.local_response_norm_f32(
+                    input.gpu_handle()?,
+                    batch,
+                    channels,
+                    spatial,
+                    self.size,
+                    self.alpha as f32,
+                    self.beta as f32,
+                    self.k as f32,
+                )?;
+                let denom_gpu =
+                    Tensor::from_storage(TensorStorage::gpu(denom_h), shape.clone(), false)?;
+                return if is_grad_enabled() && input.requires_grad() {
+                    Tensor::from_operation(
+                        TensorStorage::gpu(out_h),
+                        shape,
+                        Arc::new(LocalResponseNormBackward {
+                            input: input.clone(),
+                            denom: Vec::new(),
+                            denom_gpu: Some(denom_gpu),
+                            size: self.size,
+                            alpha: self.alpha,
+                            beta: self.beta,
+                        }),
+                    )
+                } else {
+                    Tensor::from_storage(TensorStorage::gpu(out_h), shape, false)
+                };
+            }
+            return Err(FerrotorchError::NotImplementedOnCuda {
+                op: "LocalResponseNorm::forward",
+            });
+        }
         if input.is_cuda() {
             return Err(FerrotorchError::NotImplementedOnCuda {
                 op: "LocalResponseNorm::forward",
@@ -3437,6 +3795,7 @@ impl<T: Float> Module<T> for LocalResponseNorm {
                 Arc::new(LocalResponseNormBackward {
                     input: input.clone(),
                     denom,
+                    denom_gpu: None,
                     size: self.size,
                     alpha: self.alpha,
                     beta: self.beta,
@@ -3492,8 +3851,11 @@ impl<T: Float> Module<T> for LocalResponseNorm {
 #[derive(Debug)]
 struct LocalResponseNormBackward<T: Float> {
     input: Tensor<T>,
-    /// Pre-computed denominator `D_c` per element.
+    /// Pre-computed denominator `D_c` per element (CPU path). Empty on GPU.
     denom: Vec<T>,
+    /// GPU backward (#1449): the GPU-resident `denom` buffer saved by the
+    /// forward kernel, consumed directly by the backward kernel.
+    denom_gpu: Option<Tensor<T>>,
     size: usize,
     alpha: f64,
     beta: f64,
@@ -3505,6 +3867,33 @@ impl<T: Float> GradFn<T> for LocalResponseNormBackward<T> {
             return Ok(vec![None]);
         }
 
+        // GPU-native backward (#1449): consumes the saved GPU `denom` buffer and
+        // computes grad_input on-device. NO `.cpu()` round trip (R-CODE-4).
+        if self.input.is_cuda() && is_f32::<T>() {
+            if let (Some(backend), Some(denom_gpu)) = (gpu_backend(), self.denom_gpu.as_ref()) {
+                let shape = self.input.shape();
+                let batch = shape[0];
+                let channels = shape[1];
+                let spatial: usize = shape[2..].iter().product();
+                let gi_h = backend.local_response_norm_backward_f32(
+                    self.input.gpu_handle()?,
+                    grad_output.gpu_handle()?,
+                    denom_gpu.gpu_handle()?,
+                    batch,
+                    channels,
+                    spatial,
+                    self.size,
+                    self.alpha as f32,
+                    self.beta as f32,
+                )?;
+                let grad_input =
+                    Tensor::from_storage(TensorStorage::gpu(gi_h), shape.to_vec(), false)?;
+                return Ok(vec![Some(grad_input)]);
+            }
+            return Err(FerrotorchError::NotImplementedOnCuda {
+                op: "LocalResponseNormBackward",
+            });
+        }
         if self.input.is_cuda() {
             return Err(FerrotorchError::NotImplementedOnCuda {
                 op: "LocalResponseNormBackward",
@@ -3788,6 +4177,34 @@ impl<T: Float> GradFn<T> for InstanceNormBackward<T> {
         let n_t = T::from(spatial).unwrap();
         let eps_t = T::from(self.eps).unwrap();
 
+        // GPU-native backward (#1449): InstanceNorm is BatchNorm applied
+        // per-instance. Reshape `[B, C, S]` → `[1, B*C, S]` so each (b, c)
+        // becomes its own normalization "channel" reduced over spatial only
+        // (InstanceNorm always uses instance stats, i.e. training=true). The
+        // per-channel affine `weight[c]` is tiled to `[B*C]`; grad_weight /
+        // grad_bias come back `[B*C]` and are summed over the batch axis
+        // on-device (`sum_axis_f32`) to `[C]`. grad_input keeps `[B, C, S]`.
+        // The full grad-data path stays on-GPU — NO `.cpu()` round trip
+        // (R-CODE-4). f32-only.
+        if self.input.is_cuda() && is_f32::<T>() {
+            if let Some(grads) = instance_norm_gpu_backward(
+                &self.input,
+                grad_output,
+                &self.weight,
+                batch,
+                channels,
+                spatial,
+                self.eps,
+                self.affine,
+                self.weight.requires_grad(),
+                self.bias.requires_grad(),
+            )? {
+                return Ok(grads);
+            }
+            return Err(FerrotorchError::NotImplementedOnCuda {
+                op: "InstanceNormBackward",
+            });
+        }
         if self.input.is_cuda() {
             return Err(FerrotorchError::NotImplementedOnCuda {
                 op: "InstanceNormBackward",

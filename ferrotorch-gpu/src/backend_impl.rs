@@ -3546,6 +3546,81 @@ impl GpuBackend for CudaBackendImpl {
         ))
     }
 
+    fn batch_norm_backward_f32(
+        &self,
+        input: &GpuBufferHandle,
+        grad_output: &GpuBufferHandle,
+        weight: &GpuBufferHandle,
+        running_mean: &GpuBufferHandle,
+        running_var: &GpuBufferHandle,
+        batch: usize,
+        channels: usize,
+        hw: usize,
+        eps: f32,
+        training: bool,
+    ) -> FerrotorchResult<(GpuBufferHandle, GpuBufferHandle, GpuBufferHandle)> {
+        let in_buf = Self::unwrap_buffer(input)?;
+        let go_buf = Self::unwrap_buffer(grad_output)?;
+        let w_buf = Self::unwrap_buffer(weight)?;
+        let rm_buf = Self::unwrap_buffer(running_mean)?;
+        let rv_buf = Self::unwrap_buffer(running_var)?;
+        let dev = self.device(input.device_ordinal())?;
+        let (gi, gw, gb) = crate::group_norm::gpu_batch_norm_backward_f32(
+            in_buf, go_buf, w_buf, rm_buf, rv_buf, batch, channels, hw, eps, training, dev,
+        )
+        .map_err(Self::map_gpu_err)?;
+        let ord = input.device_ordinal();
+        Ok((
+            Self::wrap_buffer(gi, ord),
+            Self::wrap_buffer(gw, ord),
+            Self::wrap_buffer(gb, ord),
+        ))
+    }
+
+    fn local_response_norm_f32(
+        &self,
+        input: &GpuBufferHandle,
+        batch: usize,
+        channels: usize,
+        spatial: usize,
+        size: usize,
+        alpha: f32,
+        beta: f32,
+        k: f32,
+    ) -> FerrotorchResult<(GpuBufferHandle, GpuBufferHandle)> {
+        let in_buf = Self::unwrap_buffer(input)?;
+        let dev = self.device(input.device_ordinal())?;
+        let (out, denom) = crate::group_norm::gpu_local_response_norm_f32(
+            in_buf, batch, channels, spatial, size, alpha, beta, k, dev,
+        )
+        .map_err(Self::map_gpu_err)?;
+        let ord = input.device_ordinal();
+        Ok((Self::wrap_buffer(out, ord), Self::wrap_buffer(denom, ord)))
+    }
+
+    fn local_response_norm_backward_f32(
+        &self,
+        input: &GpuBufferHandle,
+        grad_output: &GpuBufferHandle,
+        denom: &GpuBufferHandle,
+        batch: usize,
+        channels: usize,
+        spatial: usize,
+        size: usize,
+        alpha: f32,
+        beta: f32,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        let in_buf = Self::unwrap_buffer(input)?;
+        let go_buf = Self::unwrap_buffer(grad_output)?;
+        let dn_buf = Self::unwrap_buffer(denom)?;
+        let dev = self.device(input.device_ordinal())?;
+        let gi = crate::group_norm::gpu_local_response_norm_backward_f32(
+            in_buf, go_buf, dn_buf, batch, channels, spatial, size, alpha, beta, dev,
+        )
+        .map_err(Self::map_gpu_err)?;
+        Ok(Self::wrap_buffer(gi, input.device_ordinal()))
+    }
+
     fn softmax2d_f32(
         &self,
         input: &GpuBufferHandle,

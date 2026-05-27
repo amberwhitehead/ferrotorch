@@ -44,6 +44,8 @@
 //! | REQ-3 (input validation) | SHIPPED | validation checks in `pub fn gpu_group_norm_f32 in group_norm.rs` (groups divisibility, input length, weight length, bias length, device ordinal) |
 //! | REQ-4 (degenerate short-circuit) | SHIPPED | degenerate short-circuit in `gpu_group_norm_f32 in group_norm.rs` returns `alloc_zeros_f32(n, device)` for `n == 0 || channels == 0 || hw == 0` |
 //! | REQ-5 (backend trait wiring) | SHIPPED | `fn group_norm_f32` on `GpuBackend` in `ferrotorch-core/src/gpu_dispatch.rs` (default `InvalidArgument`) overridden by `CudaBackendImpl::group_norm_f32 in backend_impl.rs` calling `crate::group_norm::gpu_group_norm_f32`. Consumer: `ferrotorch-nn::GroupNorm::forward` dispatches to `backend.group_norm_f32(...)` for CUDA input (#1357) |
+//! | REQ-6 (`gpu_batch_norm_backward_f32`, #1449) | SHIPPED | impl: `pub fn gpu_batch_norm_backward_f32 in group_norm.rs` (PTX `BATCH_NORM_BACKWARD_PTX`) mirrors `aten/src/ATen/native/cuda/Normalization.cuh:388 batch_norm_backward_kernel`. Non-test consumer: `CudaBackendImpl::batch_norm_backward_f32 in backend_impl.rs` → `GpuBackend::batch_norm_backward_f32` → `ferrotorch-nn::BatchNorm{1,2,3}dBackward` + `InstanceNormBackward` GPU backward. Live-vs-torch grad parity (<1e-3) pinned by `ferrotorch-nn` `divergence_critic_batchnorm_gpu.rs`. |
+//! | REQ-7 (`gpu_local_response_norm_f32` + backward, #1449) | SHIPPED | impl: `pub fn gpu_local_response_norm_f32` (PTX `LRN_FORWARD_PTX`) + `pub fn gpu_local_response_norm_backward_f32` (PTX `LRN_BACKWARD_PTX`) in `group_norm.rs` mirror `torch/nn/functional.py:3032-3046 local_response_norm`. Non-test consumer: `CudaBackendImpl::local_response_norm_f32` / `local_response_norm_backward_f32 in backend_impl.rs` → `ferrotorch-nn::LocalResponseNorm::forward` + `LocalResponseNormBackward`. Live-vs-torch fwd+grad parity (<1e-3) pinned by `divergence_local_response_norm_gpu_fwd_bwd_vs_torch`. |
 
 #[cfg(feature = "cuda")]
 use cudarc::driver::{LaunchConfig, PushKernelArg};
@@ -1054,6 +1056,1001 @@ pub fn gpu_batch_norm_f32(
     }
 
     Ok(out)
+}
+
+/// PTX source for the BatchNorm **backward** kernel (#1449).
+///
+/// One CUDA block per channel (grid `(channels, 1, 1)`, block `(256, 1, 1)`).
+/// Mirrors `aten/src/ATen/native/cuda/Normalization.cuh:388` `batch_norm_backward_kernel`:
+///
+/// ```text
+/// N = batch * hw
+/// mean, invstd:
+///   train: recomputed from input over (batch, hw)  (biased var, +eps)
+///   eval : mean = running_mean[c]; invstd = 1/sqrt(running_var[c] + eps)
+/// reduce over (batch, hw):
+///   grad_output_sum = Σ go
+///   dot_p           = Σ (x - mean) * go
+/// grad_mean   = grad_output_sum / N
+/// proj_scale  = dot_p / N * invstd * invstd
+/// grad_scale  = invstd * weight[c]
+/// grad_input  = train ? (go - (x - mean)*proj_scale - grad_mean) * grad_scale
+///                     : go * grad_scale
+/// grad_weight[c] = dot_p * invstd          (thread 0)
+/// grad_bias[c]   = grad_output_sum         (thread 0)
+/// ```
+///
+/// ABI: `(in_ptr, go_ptr, gi_ptr, gw_ptr, gb_ptr, w_ptr, rmean_ptr, rvar_ptr,
+/// batch, channels, hw, eps, training)`. `gw`/`gb` are `[channels]`; in the
+/// non-affine case the caller passes an all-ones `weight` buffer (so
+/// `grad_scale = invstd`) and discards the `gw`/`gb` outputs.
+#[cfg(feature = "cuda")]
+pub(crate) const BATCH_NORM_BACKWARD_PTX: &str = "\
+.version 7.0
+.target sm_52
+.address_size 64
+
+.shared .align 4 .f32 bbdata[256];
+
+.visible .entry batch_norm_backward_kernel(
+    .param .u64 in_ptr,
+    .param .u64 go_ptr,
+    .param .u64 gi_ptr,
+    .param .u64 gw_ptr,
+    .param .u64 gb_ptr,
+    .param .u64 w_ptr,
+    .param .u64 rmean_ptr,
+    .param .u64 rvar_ptr,
+    .param .u32 batch,
+    .param .u32 channels,
+    .param .u32 hw,
+    .param .f32 eps,
+    .param .u32 training
+) {
+    .reg .u32 %r_tid, %r_bdim, %r_c, %batch_r, %channels_r, %hw_r, %train_r;
+    .reg .u32 %n_elem, %i, %bb, %ss, %half, %r_otid, %goff;
+    .reg .u64 %in, %go, %gi, %gw, %gb, %w, %rmp, %rvp, %off, %sbase, %saddr;
+    .reg .f32 %val, %mean, %var, %diff, %eps_r, %inv_std, %g, %n_f;
+    .reg .f32 %gsum, %dotp, %other, %wv, %grad_mean, %proj_scale, %grad_scale;
+    .reg .f32 %proj, %result;
+    .reg .pred %lp, %rp, %is_eval;
+
+    ld.param.u64 %in,  [in_ptr];
+    ld.param.u64 %go,  [go_ptr];
+    ld.param.u64 %gi,  [gi_ptr];
+    ld.param.u64 %gw,  [gw_ptr];
+    ld.param.u64 %gb,  [gb_ptr];
+    ld.param.u64 %w,   [w_ptr];
+    ld.param.u64 %rmp, [rmean_ptr];
+    ld.param.u64 %rvp, [rvar_ptr];
+    ld.param.u32 %batch_r,    [batch];
+    ld.param.u32 %channels_r, [channels];
+    ld.param.u32 %hw_r,       [hw];
+    ld.param.f32 %eps_r,      [eps];
+    ld.param.u32 %train_r,    [training];
+
+    mov.u64 %sbase, bbdata;
+    mov.u32 %r_c,    %ctaid.x;
+    mov.u32 %r_bdim, %ntid.x;
+    mov.u32 %r_tid,  %tid.x;
+
+    mul.lo.u32 %n_elem, %batch_r, %hw_r;
+    cvt.rn.f32.u32 %n_f, %n_elem;
+
+    setp.eq.u32 %is_eval, %train_r, 0;
+    @%is_eval bra BB_EVAL;
+
+    // ===== Training: recompute mean over (batch, hw) =====
+    mov.f32 %mean, 0f00000000;
+    mov.u32 %i, %r_tid;
+BB_MS:
+    setp.ge.u32 %lp, %i, %n_elem;
+    @%lp bra BB_MSD;
+    div.u32 %bb, %i, %hw_r;
+    rem.u32 %ss, %i, %hw_r;
+    mad.lo.u32 %goff, %bb, %channels_r, %r_c;
+    mad.lo.u32 %goff, %goff, %hw_r, %ss;
+    cvt.u64.u32 %off, %goff;
+    shl.b64 %off, %off, 2;
+    add.u64 %off, %in, %off;
+    ld.global.f32 %val, [%off];
+    add.f32 %mean, %mean, %val;
+    add.u32 %i, %i, %r_bdim;
+    bra BB_MS;
+BB_MSD:
+    cvt.u64.u32 %off, %r_tid;
+    shl.b64 %off, %off, 2;
+    add.u64 %saddr, %sbase, %off;
+    st.shared.f32 [%saddr], %mean;
+    bar.sync 0;
+    mov.u32 %half, %r_bdim;
+BB_MR:
+    shr.u32 %half, %half, 1;
+    setp.eq.u32 %rp, %half, 0;
+    @%rp bra BB_MRD;
+    setp.ge.u32 %rp, %r_tid, %half;
+    @%rp bra BB_MRS;
+    add.u32 %r_otid, %r_tid, %half;
+    cvt.u64.u32 %off, %r_otid;
+    shl.b64 %off, %off, 2;
+    add.u64 %saddr, %sbase, %off;
+    ld.shared.f32 %other, [%saddr];
+    cvt.u64.u32 %off, %r_tid;
+    shl.b64 %off, %off, 2;
+    add.u64 %saddr, %sbase, %off;
+    ld.shared.f32 %mean, [%saddr];
+    add.f32 %mean, %mean, %other;
+    st.shared.f32 [%saddr], %mean;
+BB_MRS:
+    bar.sync 0;
+    bra BB_MR;
+BB_MRD:
+    ld.shared.f32 %mean, [%sbase];
+    div.approx.f32 %mean, %mean, %n_f;
+    bar.sync 0;
+
+    // ----- variance over (batch, hw) -----
+    mov.f32 %var, 0f00000000;
+    mov.u32 %i, %r_tid;
+BB_VS:
+    setp.ge.u32 %lp, %i, %n_elem;
+    @%lp bra BB_VSD;
+    div.u32 %bb, %i, %hw_r;
+    rem.u32 %ss, %i, %hw_r;
+    mad.lo.u32 %goff, %bb, %channels_r, %r_c;
+    mad.lo.u32 %goff, %goff, %hw_r, %ss;
+    cvt.u64.u32 %off, %goff;
+    shl.b64 %off, %off, 2;
+    add.u64 %off, %in, %off;
+    ld.global.f32 %val, [%off];
+    sub.f32 %diff, %val, %mean;
+    fma.rn.f32 %var, %diff, %diff, %var;
+    add.u32 %i, %i, %r_bdim;
+    bra BB_VS;
+BB_VSD:
+    cvt.u64.u32 %off, %r_tid;
+    shl.b64 %off, %off, 2;
+    add.u64 %saddr, %sbase, %off;
+    st.shared.f32 [%saddr], %var;
+    bar.sync 0;
+    mov.u32 %half, %r_bdim;
+BB_VR:
+    shr.u32 %half, %half, 1;
+    setp.eq.u32 %rp, %half, 0;
+    @%rp bra BB_VRD;
+    setp.ge.u32 %rp, %r_tid, %half;
+    @%rp bra BB_VRS;
+    add.u32 %r_otid, %r_tid, %half;
+    cvt.u64.u32 %off, %r_otid;
+    shl.b64 %off, %off, 2;
+    add.u64 %saddr, %sbase, %off;
+    ld.shared.f32 %other, [%saddr];
+    cvt.u64.u32 %off, %r_tid;
+    shl.b64 %off, %off, 2;
+    add.u64 %saddr, %sbase, %off;
+    ld.shared.f32 %var, [%saddr];
+    add.f32 %var, %var, %other;
+    st.shared.f32 [%saddr], %var;
+BB_VRS:
+    bar.sync 0;
+    bra BB_VR;
+BB_VRD:
+    ld.shared.f32 %var, [%sbase];
+    div.approx.f32 %var, %var, %n_f;
+    bar.sync 0;
+    add.f32 %var, %var, %eps_r;
+    sqrt.approx.f32 %inv_std, %var;
+    rcp.approx.f32 %inv_std, %inv_std;
+    bra BB_REDUCE;
+
+BB_EVAL:
+    cvt.u64.u32 %off, %r_c;
+    shl.b64 %off, %off, 2;
+    add.u64 %saddr, %rmp, %off;
+    ld.global.f32 %mean, [%saddr];
+    add.u64 %saddr, %rvp, %off;
+    ld.global.f32 %var, [%saddr];
+    add.f32 %var, %var, %eps_r;
+    sqrt.approx.f32 %inv_std, %var;
+    rcp.approx.f32 %inv_std, %inv_std;
+
+BB_REDUCE:
+    // ----- reduce grad_output_sum (gsum) -----
+    mov.f32 %gsum, 0f00000000;
+    mov.u32 %i, %r_tid;
+BB_GS:
+    setp.ge.u32 %lp, %i, %n_elem;
+    @%lp bra BB_GSD;
+    div.u32 %bb, %i, %hw_r;
+    rem.u32 %ss, %i, %hw_r;
+    mad.lo.u32 %goff, %bb, %channels_r, %r_c;
+    mad.lo.u32 %goff, %goff, %hw_r, %ss;
+    cvt.u64.u32 %off, %goff;
+    shl.b64 %off, %off, 2;
+    add.u64 %off, %go, %off;
+    ld.global.f32 %g, [%off];
+    add.f32 %gsum, %gsum, %g;
+    add.u32 %i, %i, %r_bdim;
+    bra BB_GS;
+BB_GSD:
+    cvt.u64.u32 %off, %r_tid;
+    shl.b64 %off, %off, 2;
+    add.u64 %saddr, %sbase, %off;
+    st.shared.f32 [%saddr], %gsum;
+    bar.sync 0;
+    mov.u32 %half, %r_bdim;
+BB_GR:
+    shr.u32 %half, %half, 1;
+    setp.eq.u32 %rp, %half, 0;
+    @%rp bra BB_GRD;
+    setp.ge.u32 %rp, %r_tid, %half;
+    @%rp bra BB_GRS;
+    add.u32 %r_otid, %r_tid, %half;
+    cvt.u64.u32 %off, %r_otid;
+    shl.b64 %off, %off, 2;
+    add.u64 %saddr, %sbase, %off;
+    ld.shared.f32 %other, [%saddr];
+    cvt.u64.u32 %off, %r_tid;
+    shl.b64 %off, %off, 2;
+    add.u64 %saddr, %sbase, %off;
+    ld.shared.f32 %gsum, [%saddr];
+    add.f32 %gsum, %gsum, %other;
+    st.shared.f32 [%saddr], %gsum;
+BB_GRS:
+    bar.sync 0;
+    bra BB_GR;
+BB_GRD:
+    ld.shared.f32 %gsum, [%sbase];
+    bar.sync 0;
+
+    // ----- reduce dot_p = sum (x - mean) * go -----
+    mov.f32 %dotp, 0f00000000;
+    mov.u32 %i, %r_tid;
+BB_DS:
+    setp.ge.u32 %lp, %i, %n_elem;
+    @%lp bra BB_DSD;
+    div.u32 %bb, %i, %hw_r;
+    rem.u32 %ss, %i, %hw_r;
+    mad.lo.u32 %goff, %bb, %channels_r, %r_c;
+    mad.lo.u32 %goff, %goff, %hw_r, %ss;
+    cvt.u64.u32 %off, %goff;
+    shl.b64 %off, %off, 2;
+    add.u64 %saddr, %in, %off;
+    ld.global.f32 %val, [%saddr];
+    add.u64 %saddr, %go, %off;
+    ld.global.f32 %g, [%saddr];
+    sub.f32 %diff, %val, %mean;
+    fma.rn.f32 %dotp, %diff, %g, %dotp;
+    add.u32 %i, %i, %r_bdim;
+    bra BB_DS;
+BB_DSD:
+    cvt.u64.u32 %off, %r_tid;
+    shl.b64 %off, %off, 2;
+    add.u64 %saddr, %sbase, %off;
+    st.shared.f32 [%saddr], %dotp;
+    bar.sync 0;
+    mov.u32 %half, %r_bdim;
+BB_DR:
+    shr.u32 %half, %half, 1;
+    setp.eq.u32 %rp, %half, 0;
+    @%rp bra BB_DRD;
+    setp.ge.u32 %rp, %r_tid, %half;
+    @%rp bra BB_DRS;
+    add.u32 %r_otid, %r_tid, %half;
+    cvt.u64.u32 %off, %r_otid;
+    shl.b64 %off, %off, 2;
+    add.u64 %saddr, %sbase, %off;
+    ld.shared.f32 %other, [%saddr];
+    cvt.u64.u32 %off, %r_tid;
+    shl.b64 %off, %off, 2;
+    add.u64 %saddr, %sbase, %off;
+    ld.shared.f32 %dotp, [%saddr];
+    add.f32 %dotp, %dotp, %other;
+    st.shared.f32 [%saddr], %dotp;
+BB_DRS:
+    bar.sync 0;
+    bra BB_DR;
+BB_DRD:
+    ld.shared.f32 %dotp, [%sbase];
+    bar.sync 0;
+
+    // ----- per-channel weight value, scales -----
+    cvt.u64.u32 %off, %r_c;
+    shl.b64 %off, %off, 2;
+    add.u64 %saddr, %w, %off;
+    ld.global.f32 %wv, [%saddr];
+
+    div.approx.f32 %grad_mean, %gsum, %n_f;       // grad_output_sum / N
+    div.approx.f32 %proj_scale, %dotp, %n_f;       // dot_p / N
+    mul.f32 %proj_scale, %proj_scale, %inv_std;
+    mul.f32 %proj_scale, %proj_scale, %inv_std;    // * invstd^2
+    mul.f32 %grad_scale, %inv_std, %wv;            // invstd * w
+
+    // ----- write grad_input -----
+    mov.u32 %i, %r_tid;
+BB_GIW:
+    setp.ge.u32 %lp, %i, %n_elem;
+    @%lp bra BB_GIWD;
+    div.u32 %bb, %i, %hw_r;
+    rem.u32 %ss, %i, %hw_r;
+    mad.lo.u32 %goff, %bb, %channels_r, %r_c;
+    mad.lo.u32 %goff, %goff, %hw_r, %ss;
+    cvt.u64.u32 %off, %goff;
+    shl.b64 %off, %off, 2;
+    add.u64 %saddr, %go, %off;
+    ld.global.f32 %g, [%saddr];
+    @%is_eval bra BB_GIW_EVAL;
+    // train: (go - (x - mean)*proj_scale - grad_mean) * grad_scale
+    add.u64 %saddr, %in, %off;
+    ld.global.f32 %val, [%saddr];
+    sub.f32 %diff, %val, %mean;
+    mul.f32 %proj, %diff, %proj_scale;
+    sub.f32 %result, %g, %proj;
+    sub.f32 %result, %result, %grad_mean;
+    mul.f32 %result, %result, %grad_scale;
+    bra BB_GIW_STORE;
+BB_GIW_EVAL:
+    // eval: go * grad_scale
+    mul.f32 %result, %g, %grad_scale;
+BB_GIW_STORE:
+    add.u64 %saddr, %gi, %off;
+    st.global.f32 [%saddr], %result;
+    add.u32 %i, %i, %r_bdim;
+    bra BB_GIW;
+BB_GIWD:
+    // ----- thread 0 writes grad_weight / grad_bias -----
+    setp.ne.u32 %rp, %r_tid, 0;
+    @%rp bra BB_DONE;
+    mul.f32 %result, %dotp, %inv_std;     // grad_weight = dot_p * invstd
+    cvt.u64.u32 %off, %r_c;
+    shl.b64 %off, %off, 2;
+    add.u64 %saddr, %gw, %off;
+    st.global.f32 [%saddr], %result;
+    add.u64 %saddr, %gb, %off;
+    st.global.f32 [%saddr], %gsum;        // grad_bias = grad_output_sum
+BB_DONE:
+    ret;
+}
+";
+
+/// GPU backward BatchNorm over a `[batch, channels, hw]`-laid-out f32 buffer
+/// (#1449).
+///
+/// Computes `(grad_input, grad_weight, grad_bias)` on-device, mirroring
+/// `aten/src/ATen/native/cuda/Normalization.cuh:388 batch_norm_backward_kernel`.
+/// In **training** mode the per-channel mean / variance are recomputed from
+/// `input` (no saved buffers required); in **eval** mode the supplied
+/// `running_mean` / `running_var` are used. `weight` has length `channels`
+/// (all-ones when the layer is non-affine, so `grad_scale = invstd`).
+///
+/// # Arguments
+///
+/// - `input` — flat `[batch * channels * hw]` f32 forward input.
+/// - `grad_output` — flat `[batch * channels * hw]` upstream gradient.
+/// - `weight` — `[channels]` affine scale (ones when non-affine).
+/// - `running_mean` / `running_var` — `[channels]` running stats (read only in
+///   eval mode; ignored in training mode but must be valid `[channels]`).
+/// - `batch`, `channels`, `hw` — outer dims.
+/// - `eps` — numerical-stability constant.
+/// - `training` — `true` to recompute batch stats, `false` to use running stats.
+/// - `device` — owning GPU device for all buffers.
+///
+/// Returns `(grad_input, grad_weight, grad_bias)`: `grad_input` has the input
+/// shape, `grad_weight` / `grad_bias` have length `channels`.
+///
+/// # Errors
+///
+/// - [`GpuError::ShapeMismatch`] when any buffer length disagrees with the dims.
+/// - [`GpuError::DeviceMismatch`] when buffers live on a different device.
+/// - [`GpuError::PtxCompileFailed`] if the PTX module fails to compile.
+/// - [`GpuError::Driver`] on launch failure.
+#[cfg(feature = "cuda")]
+#[allow(clippy::too_many_arguments)]
+pub fn gpu_batch_norm_backward_f32(
+    input: &CudaBuffer<f32>,
+    grad_output: &CudaBuffer<f32>,
+    weight: &CudaBuffer<f32>,
+    running_mean: &CudaBuffer<f32>,
+    running_var: &CudaBuffer<f32>,
+    batch: usize,
+    channels: usize,
+    hw: usize,
+    eps: f32,
+    training: bool,
+    device: &GpuDevice,
+) -> GpuResult<(CudaBuffer<f32>, CudaBuffer<f32>, CudaBuffer<f32>)> {
+    let n = batch * channels * hw;
+    for (buf_len, want) in [(input.len(), n), (grad_output.len(), n)] {
+        if buf_len != want {
+            return Err(GpuError::ShapeMismatch {
+                op: "batch_norm_backward",
+                expected: vec![batch, channels, hw],
+                got: vec![buf_len],
+            });
+        }
+    }
+    for buf_len in [weight.len(), running_mean.len(), running_var.len()] {
+        if buf_len != channels {
+            return Err(GpuError::ShapeMismatch {
+                op: "batch_norm_backward",
+                expected: vec![channels],
+                got: vec![buf_len],
+            });
+        }
+    }
+    if input.device_ordinal() != device.ordinal()
+        || grad_output.device_ordinal() != device.ordinal()
+        || weight.device_ordinal() != device.ordinal()
+        || running_mean.device_ordinal() != device.ordinal()
+        || running_var.device_ordinal() != device.ordinal()
+    {
+        return Err(GpuError::DeviceMismatch {
+            expected: device.ordinal(),
+            got: input.device_ordinal(),
+        });
+    }
+
+    if n == 0 || channels == 0 || hw == 0 || batch == 0 {
+        return Ok((
+            alloc_zeros_f32(n, device)?,
+            alloc_zeros_f32(channels, device)?,
+            alloc_zeros_f32(channels, device)?,
+        ));
+    }
+
+    let ctx = device.context();
+    let stream = device.stream();
+
+    let f = match crate::module_cache::get_or_compile(
+        ctx,
+        BATCH_NORM_BACKWARD_PTX,
+        "batch_norm_backward_kernel",
+        device.ordinal() as u32,
+    ) {
+        Ok(f) => f,
+        Err(e) => {
+            return Err(GpuError::PtxCompileFailed {
+                kernel: "batch_norm_backward_kernel",
+                source: e,
+            });
+        }
+    };
+
+    let mut grad_input = alloc_zeros_f32(n, device)?;
+    let mut grad_weight = alloc_zeros_f32(channels, device)?;
+    let mut grad_bias = alloc_zeros_f32(channels, device)?;
+    let batch_u32 = batch as u32;
+    let channels_u32 = channels as u32;
+    let hw_u32 = hw as u32;
+    let training_u32: u32 = if training { 1 } else { 0 };
+
+    let cfg = LaunchConfig {
+        grid_dim: (channels_u32.max(1), 1, 1),
+        block_dim: (256, 1, 1),
+        shared_mem_bytes: 256 * 4,
+    };
+
+    // SAFETY:
+    // - `f` is the `batch_norm_backward_kernel` `CudaFunction` from
+    //   `module_cache::get_or_compile`; its ABI matches the arg order
+    //   `(in, go, gi, gw, gb, w, rmean, rvar, batch, channels, hw, eps,
+    //   training)` declared in `BATCH_NORM_BACKWARD_PTX`.
+    // - `input.len() == grad_output.len() == batch*channels*hw` and
+    //   `weight.len() == running_mean.len() == running_var.len() == channels`
+    //   (validated above). All buffers (incl. the freshly allocated `gi`/`gw`/
+    //   `gb`) live on `device` (validated above).
+    // - `gi`/`gw`/`gb` are `&mut` (disjoint, freshly allocated, cannot alias the
+    //   `&` read-only inputs by Rust borrow rules). Grid `(channels,1,1)`: block
+    //   `c` writes only channel `c`'s `batch*hw` `gi` slots plus the single
+    //   `gw[c]`/`gb[c]` slot (thread 0), so writes are disjoint across blocks.
+    // - Shared memory 256*4 = 1024 bytes matches PTX `.shared bbdata[256]` (one
+    //   f32 per thread, reused across the mean/var/gsum/dotp block reductions).
+    // - `eps: f32` / `training: u32` are passed by-ref; cudarc copies them into
+    //   the launch parameter buffer. Stream sync is the caller's responsibility.
+    unsafe {
+        stream
+            .launch_builder(&f)
+            .arg(input.inner())
+            .arg(grad_output.inner())
+            .arg(grad_input.inner_mut())
+            .arg(grad_weight.inner_mut())
+            .arg(grad_bias.inner_mut())
+            .arg(weight.inner())
+            .arg(running_mean.inner())
+            .arg(running_var.inner())
+            .arg(&batch_u32)
+            .arg(&channels_u32)
+            .arg(&hw_u32)
+            .arg(&eps)
+            .arg(&training_u32)
+            .launch(cfg)?;
+    }
+
+    Ok((grad_input, grad_weight, grad_bias))
+}
+
+/// PTX source for the LocalResponseNorm **forward** kernel (#1449).
+///
+/// One thread per output element of a `[batch, channels, spatial]`-laid-out
+/// f32 buffer. Mirrors the `torch/nn/functional.py:3032-3046`
+/// `local_response_norm` decomposition (square → windowed channel sum via
+/// avg_pool → `* alpha + k` → `pow(beta)` → divide):
+///
+/// ```text
+/// half = size / 2;  upper = size - half     (== (size+1)/2)
+/// window for output channel c (in original-channel coords, zero-padded):
+///   [c - half, c + upper)  clamped to [0, channels)
+/// sq_sum   = Σ_{j in window} x[b,j,s]^2
+/// denom    = (sq_sum / size) * alpha + k
+/// out      = x[b,c,s] / pow(denom, beta)
+/// denom_out[b,c,s] = denom    (saved for backward)
+/// ```
+///
+/// ABI: `(in_ptr, out_ptr, denom_ptr, batch, channels, spatial, size, alpha,
+/// beta, k)`. `denom_ptr` receives the per-element `denom` for the backward.
+#[cfg(feature = "cuda")]
+pub(crate) const LRN_FORWARD_PTX: &str = "\
+.version 7.0
+.target sm_52
+.address_size 64
+
+.visible .entry lrn_forward_kernel(
+    .param .u64 in_ptr,
+    .param .u64 out_ptr,
+    .param .u64 denom_ptr,
+    .param .u32 batch,
+    .param .u32 channels,
+    .param .u32 spatial,
+    .param .u32 size,
+    .param .f32 alpha,
+    .param .f32 beta,
+    .param .f32 k
+) {
+    .reg .u32 %r_tid, %r_bdim, %gid, %n, %bs_i, %c_i, %s_i, %half, %upper;
+    .reg .u32 %cs, %ce, %j, %cspatial, %spatial_r, %channels_r, %jidx, %size_r, %base, %tmp;
+    .reg .u64 %in, %out, %dn, %off, %addr;
+    .reg .f32 %xv, %sq, %denom, %size_f, %alpha_r, %beta_r, %k_r, %powd, %lg;
+    .reg .pred %p;
+
+    ld.param.u64 %in,  [in_ptr];
+    ld.param.u64 %out, [out_ptr];
+    ld.param.u64 %dn,  [denom_ptr];
+    ld.param.u32 %channels_r, [channels];
+    ld.param.u32 %spatial_r,  [spatial];
+    ld.param.u32 %size_r,     [size];
+    ld.param.f32 %alpha_r,    [alpha];
+    ld.param.f32 %beta_r,     [beta];
+    ld.param.f32 %k_r,        [k];
+
+    // global thread id = ctaid.x * ntid.x + tid.x
+    mov.u32 %r_tid,  %tid.x;
+    mov.u32 %gid,    %ctaid.x;
+    mov.u32 %r_bdim, %ntid.x;
+    mad.lo.u32 %gid, %gid, %r_bdim, %r_tid;
+
+    // cspatial = channels * spatial ; n = batch * cspatial
+    mul.lo.u32 %cspatial, %channels_r, %spatial_r;
+    ld.param.u32 %tmp, [batch];
+    mul.lo.u32 %n, %tmp, %cspatial;
+    setp.ge.u32 %p, %gid, %n;
+    @%p bra LRN_F_DONE;
+
+    // decode (bs_i, c_i, s_i) from gid
+    div.u32 %bs_i, %gid, %cspatial;
+    rem.u32 %tmp, %gid, %cspatial;
+    div.u32 %c_i, %tmp, %spatial_r;
+    rem.u32 %s_i, %tmp, %spatial_r;
+
+    // half = size/2 ; upper = size - half
+    shr.u32 %half, %size_r, 1;
+    sub.u32 %upper, %size_r, %half;
+
+    // c_start = (c_i >= half) ? c_i - half : 0
+    setp.lt.u32 %p, %c_i, %half;
+    sub.u32 %cs, %c_i, %half;
+    @%p mov.u32 %cs, 0;
+    // c_end = min(c_i + upper, channels)
+    add.u32 %ce, %c_i, %upper;
+    setp.lt.u32 %p, %channels_r, %ce;
+    @%p mov.u32 %ce, %channels_r;
+
+    // base of (bs_i, 0, s_i) = bs_i*cspatial + s_i
+    mad.lo.u32 %base, %bs_i, %cspatial, %s_i;
+
+    // sq_sum over window channels [cs, ce)
+    mov.f32 %sq, 0f00000000;
+    mov.u32 %j, %cs;
+LRN_F_WIN:
+    setp.ge.u32 %p, %j, %ce;
+    @%p bra LRN_F_WIND;
+    mad.lo.u32 %jidx, %j, %spatial_r, %base;   // bs*CS + j*S + s
+    cvt.u64.u32 %off, %jidx;
+    shl.b64 %off, %off, 2;
+    add.u64 %addr, %in, %off;
+    ld.global.f32 %xv, [%addr];
+    fma.rn.f32 %sq, %xv, %xv, %sq;
+    add.u32 %j, %j, 1;
+    bra LRN_F_WIN;
+LRN_F_WIND:
+    // denom = (sq / size) * alpha + k
+    cvt.rn.f32.u32 %size_f, %size_r;
+    div.approx.f32 %denom, %sq, %size_f;
+    fma.rn.f32 %denom, %denom, %alpha_r, %k_r;
+
+    // out = x / pow(denom, beta) = x * exp2(beta * log2(denom))^-1 ;
+    // here we compute pow(denom, beta) = exp2(beta * log2(denom)) then divide
+    cvt.u64.u32 %off, %gid;
+    shl.b64 %off, %off, 2;
+    add.u64 %addr, %in, %off;
+    ld.global.f32 %xv, [%addr];
+    lg2.approx.f32 %lg, %denom;
+    mul.f32 %lg, %lg, %beta_r;
+    ex2.approx.f32 %powd, %lg;        // denom^beta
+    div.approx.f32 %xv, %xv, %powd;
+    add.u64 %addr, %out, %off;
+    st.global.f32 [%addr], %xv;
+    // save denom for backward
+    add.u64 %addr, %dn, %off;
+    st.global.f32 [%addr], %denom;
+LRN_F_DONE:
+    ret;
+}
+";
+
+/// PTX source for the LocalResponseNorm **backward** kernel (#1449).
+///
+/// One thread per input element. Mirrors the ferrotorch CPU
+/// `LocalResponseNormBackward` VJP (which itself mirrors the
+/// `torch/nn/functional.py` decomposition):
+///
+/// ```text
+/// half = size/2 ; upper = size - half
+/// term1 = denom[i]^(-beta) * go[i]
+/// cross window for input channel i_c: c in [i_c+1-upper, i_c+half+1) clamped
+/// cross_sum = Σ_c go[c] * x[c] * denom[c]^(-beta-1)
+/// grad_input[i] = term1 - 2*beta*alpha/size * x[i] * cross_sum
+/// ```
+///
+/// ABI: `(in_ptr, go_ptr, denom_ptr, gi_ptr, batch, channels, spatial, size,
+/// alpha, beta)`.
+#[cfg(feature = "cuda")]
+pub(crate) const LRN_BACKWARD_PTX: &str = "\
+.version 7.0
+.target sm_52
+.address_size 64
+
+.visible .entry lrn_backward_kernel(
+    .param .u64 in_ptr,
+    .param .u64 go_ptr,
+    .param .u64 denom_ptr,
+    .param .u64 gi_ptr,
+    .param .u32 batch,
+    .param .u32 channels,
+    .param .u32 spatial,
+    .param .u32 size,
+    .param .f32 alpha,
+    .param .f32 beta
+) {
+    .reg .u32 %r_tid, %r_bdim, %gid, %n, %bs_i, %ic, %s_i, %half, %upper;
+    .reg .u32 %cs, %ce, %c, %cspatial, %spatial_r, %channels_r, %cidx, %size_r, %base, %tmp;
+    .reg .u64 %in, %go, %dn, %gi, %off, %addr;
+    .reg .f32 %xv, %gov, %dv, %term1, %cross, %denom_i, %xi, %res;
+    .reg .f32 %alpha_r, %beta_r, %size_f, %lg, %powc, %coef;
+    .reg .pred %p;
+
+    ld.param.u64 %in,  [in_ptr];
+    ld.param.u64 %go,  [go_ptr];
+    ld.param.u64 %dn,  [denom_ptr];
+    ld.param.u64 %gi,  [gi_ptr];
+    ld.param.u32 %channels_r, [channels];
+    ld.param.u32 %spatial_r,  [spatial];
+    ld.param.u32 %size_r,     [size];
+    ld.param.f32 %alpha_r,    [alpha];
+    ld.param.f32 %beta_r,     [beta];
+
+    mov.u32 %r_tid,  %tid.x;
+    mov.u32 %gid,    %ctaid.x;
+    mov.u32 %r_bdim, %ntid.x;
+    mad.lo.u32 %gid, %gid, %r_bdim, %r_tid;
+
+    mul.lo.u32 %cspatial, %channels_r, %spatial_r;
+    ld.param.u32 %tmp, [batch];
+    mul.lo.u32 %n, %tmp, %cspatial;
+    setp.ge.u32 %p, %gid, %n;
+    @%p bra LRN_B_DONE;
+
+    div.u32 %bs_i, %gid, %cspatial;
+    rem.u32 %tmp, %gid, %cspatial;
+    div.u32 %ic, %tmp, %spatial_r;
+    rem.u32 %s_i, %tmp, %spatial_r;
+
+    shr.u32 %half, %size_r, 1;
+    sub.u32 %upper, %size_r, %half;
+
+    // term1 = denom[gid]^(-beta) * go[gid]
+    cvt.u64.u32 %off, %gid;
+    shl.b64 %off, %off, 2;
+    add.u64 %addr, %dn, %off;
+    ld.global.f32 %denom_i, [%addr];
+    add.u64 %addr, %go, %off;
+    ld.global.f32 %gov, [%addr];
+    add.u64 %addr, %in, %off;
+    ld.global.f32 %xi, [%addr];
+    lg2.approx.f32 %lg, %denom_i;
+    mul.f32 %lg, %lg, %beta_r;
+    neg.f32 %lg, %lg;
+    ex2.approx.f32 %term1, %lg;        // denom_i^(-beta)
+    mul.f32 %term1, %term1, %gov;
+
+    // cross window for input channel ic:  c in [ic+1-upper, ic+half+1)
+    // c_start = (ic+1 >= upper) ? ic+1-upper : 0
+    add.u32 %tmp, %ic, 1;
+    setp.lt.u32 %p, %tmp, %upper;
+    sub.u32 %cs, %tmp, %upper;
+    @%p mov.u32 %cs, 0;
+    // c_end = min(ic + half + 1, channels)
+    add.u32 %ce, %ic, %half;
+    add.u32 %ce, %ce, 1;
+    setp.lt.u32 %p, %channels_r, %ce;
+    @%p mov.u32 %ce, %channels_r;
+
+    // base = bs_i*cspatial + s_i
+    mad.lo.u32 %base, %bs_i, %cspatial, %s_i;
+
+    mov.f32 %cross, 0f00000000;
+    mov.u32 %c, %cs;
+LRN_B_WIN:
+    setp.ge.u32 %p, %c, %ce;
+    @%p bra LRN_B_WIND;
+    mad.lo.u32 %cidx, %c, %spatial_r, %base;     // bs*C*S + c*S + s
+    cvt.u64.u32 %off, %cidx;
+    shl.b64 %off, %off, 2;
+    add.u64 %addr, %go, %off;
+    ld.global.f32 %gov, [%addr];
+    add.u64 %addr, %in, %off;
+    ld.global.f32 %xv, [%addr];
+    add.u64 %addr, %dn, %off;
+    ld.global.f32 %dv, [%addr];
+    // dv^(-beta-1) = exp2((-beta-1)*log2(dv))
+    lg2.approx.f32 %lg, %dv;
+    add.f32 %coef, %beta_r, 0f3F800000;      // beta + 1.0
+    neg.f32 %coef, %coef;                      // -(beta+1)
+    mul.f32 %lg, %lg, %coef;
+    ex2.approx.f32 %powc, %lg;
+    mul.f32 %res, %gov, %xv;
+    fma.rn.f32 %cross, %res, %powc, %cross;
+    add.u32 %c, %c, 1;
+    bra LRN_B_WIN;
+LRN_B_WIND:
+    // coef2 = 2 * beta * alpha / size
+    cvt.rn.f32.u32 %size_f, %size_r;
+    mov.f32 %coef, 0f40000000;                 // 2.0
+    mul.f32 %coef, %coef, %beta_r;
+    mul.f32 %coef, %coef, %alpha_r;
+    div.approx.f32 %coef, %coef, %size_f;
+    // grad_input = term1 - coef2 * x[i] * cross
+    mul.f32 %res, %coef, %xi;
+    mul.f32 %res, %res, %cross;
+    sub.f32 %res, %term1, %res;
+
+    cvt.u64.u32 %off, %gid;
+    shl.b64 %off, %off, 2;
+    add.u64 %addr, %gi, %off;
+    st.global.f32 [%addr], %res;
+LRN_B_DONE:
+    ret;
+}
+";
+
+/// GPU forward LocalResponseNorm over a `[batch, channels, spatial]`-laid-out
+/// f32 buffer (#1449).
+///
+/// Mirrors `torch/nn/functional.py:3032-3046 local_response_norm`. Returns
+/// `(output, denom)` where `denom[i] = (Σ_window x²/size)*alpha + k` is saved
+/// for the backward pass. One thread per element.
+///
+/// # Errors
+///
+/// - [`GpuError::ShapeMismatch`] when `input.len() != batch*channels*spatial`.
+/// - [`GpuError::DeviceMismatch`] when `input` lives on a different device.
+/// - [`GpuError::PtxCompileFailed`] if the PTX module fails to compile.
+/// - [`GpuError::Driver`] on launch failure.
+#[cfg(feature = "cuda")]
+#[allow(clippy::too_many_arguments)]
+pub fn gpu_local_response_norm_f32(
+    input: &CudaBuffer<f32>,
+    batch: usize,
+    channels: usize,
+    spatial: usize,
+    size: usize,
+    alpha: f32,
+    beta: f32,
+    k: f32,
+    device: &GpuDevice,
+) -> GpuResult<(CudaBuffer<f32>, CudaBuffer<f32>)> {
+    let n = batch * channels * spatial;
+    if input.len() != n {
+        return Err(GpuError::ShapeMismatch {
+            op: "local_response_norm",
+            expected: vec![batch, channels, spatial],
+            got: vec![input.len()],
+        });
+    }
+    if input.device_ordinal() != device.ordinal() {
+        return Err(GpuError::DeviceMismatch {
+            expected: device.ordinal(),
+            got: input.device_ordinal(),
+        });
+    }
+    if n == 0 || channels == 0 || size == 0 {
+        return Ok((alloc_zeros_f32(n, device)?, alloc_zeros_f32(n, device)?));
+    }
+
+    let ctx = device.context();
+    let stream = device.stream();
+    let f = match crate::module_cache::get_or_compile(
+        ctx,
+        LRN_FORWARD_PTX,
+        "lrn_forward_kernel",
+        device.ordinal() as u32,
+    ) {
+        Ok(f) => f,
+        Err(e) => {
+            return Err(GpuError::PtxCompileFailed {
+                kernel: "lrn_forward_kernel",
+                source: e,
+            });
+        }
+    };
+
+    let mut out = alloc_zeros_f32(n, device)?;
+    let mut denom = alloc_zeros_f32(n, device)?;
+    let batch_u32 = batch as u32;
+    let channels_u32 = channels as u32;
+    let spatial_u32 = spatial as u32;
+    let size_u32 = size as u32;
+    let block = 256u32;
+    let grid = (n as u32).div_ceil(block);
+    let cfg = LaunchConfig {
+        grid_dim: (grid.max(1), 1, 1),
+        block_dim: (block, 1, 1),
+        shared_mem_bytes: 0,
+    };
+
+    // SAFETY:
+    // - `f` is the `lrn_forward_kernel` `CudaFunction`; ABI matches
+    //   `(in, out, denom, batch, channels, spatial, size, alpha, beta, k)` per
+    //   `LRN_FORWARD_PTX`.
+    // - `input.len() == n` (validated). `out`/`denom` are freshly allocated with
+    //   `n` elements on `device`, cannot alias `input` (Rust borrow rules: `&mut`
+    //   vs `&`). Each thread `gid < n` writes exactly `out[gid]`/`denom[gid]`
+    //   (disjoint) and reads only window elements within `[0, n)`.
+    // - No shared memory. Grid covers all `n` elements; threads with `gid >= n`
+    //   early-return before any memory access.
+    unsafe {
+        stream
+            .launch_builder(&f)
+            .arg(input.inner())
+            .arg(out.inner_mut())
+            .arg(denom.inner_mut())
+            .arg(&batch_u32)
+            .arg(&channels_u32)
+            .arg(&spatial_u32)
+            .arg(&size_u32)
+            .arg(&alpha)
+            .arg(&beta)
+            .arg(&k)
+            .launch(cfg)?;
+    }
+
+    Ok((out, denom))
+}
+
+/// GPU backward LocalResponseNorm (#1449).
+///
+/// Mirrors the ferrotorch CPU `LocalResponseNormBackward` VJP. Consumes the
+/// `denom` buffer saved by [`gpu_local_response_norm_f32`]. One thread per
+/// element. Returns `grad_input` (input shape).
+///
+/// # Errors
+///
+/// - [`GpuError::ShapeMismatch`] when any buffer length disagrees with the dims.
+/// - [`GpuError::DeviceMismatch`] when buffers live on a different device.
+/// - [`GpuError::PtxCompileFailed`] if the PTX module fails to compile.
+/// - [`GpuError::Driver`] on launch failure.
+#[cfg(feature = "cuda")]
+#[allow(clippy::too_many_arguments)]
+pub fn gpu_local_response_norm_backward_f32(
+    input: &CudaBuffer<f32>,
+    grad_output: &CudaBuffer<f32>,
+    denom: &CudaBuffer<f32>,
+    batch: usize,
+    channels: usize,
+    spatial: usize,
+    size: usize,
+    alpha: f32,
+    beta: f32,
+    device: &GpuDevice,
+) -> GpuResult<CudaBuffer<f32>> {
+    let n = batch * channels * spatial;
+    for buf_len in [input.len(), grad_output.len(), denom.len()] {
+        if buf_len != n {
+            return Err(GpuError::ShapeMismatch {
+                op: "local_response_norm_backward",
+                expected: vec![batch, channels, spatial],
+                got: vec![buf_len],
+            });
+        }
+    }
+    if input.device_ordinal() != device.ordinal()
+        || grad_output.device_ordinal() != device.ordinal()
+        || denom.device_ordinal() != device.ordinal()
+    {
+        return Err(GpuError::DeviceMismatch {
+            expected: device.ordinal(),
+            got: input.device_ordinal(),
+        });
+    }
+    if n == 0 || channels == 0 || size == 0 {
+        return alloc_zeros_f32(n, device);
+    }
+
+    let ctx = device.context();
+    let stream = device.stream();
+    let f = match crate::module_cache::get_or_compile(
+        ctx,
+        LRN_BACKWARD_PTX,
+        "lrn_backward_kernel",
+        device.ordinal() as u32,
+    ) {
+        Ok(f) => f,
+        Err(e) => {
+            return Err(GpuError::PtxCompileFailed {
+                kernel: "lrn_backward_kernel",
+                source: e,
+            });
+        }
+    };
+
+    let mut grad_input = alloc_zeros_f32(n, device)?;
+    let batch_u32 = batch as u32;
+    let channels_u32 = channels as u32;
+    let spatial_u32 = spatial as u32;
+    let size_u32 = size as u32;
+    let block = 256u32;
+    let grid = (n as u32).div_ceil(block);
+    let cfg = LaunchConfig {
+        grid_dim: (grid.max(1), 1, 1),
+        block_dim: (block, 1, 1),
+        shared_mem_bytes: 0,
+    };
+
+    // SAFETY:
+    // - `f` is the `lrn_backward_kernel` `CudaFunction`; ABI matches
+    //   `(in, go, denom, gi, batch, channels, spatial, size, alpha, beta)` per
+    //   `LRN_BACKWARD_PTX`.
+    // - `input.len() == grad_output.len() == denom.len() == n` (validated).
+    //   `grad_input` is freshly allocated with `n` elements on `device` and
+    //   cannot alias the `&` inputs (`&mut` vs `&`). Each thread `gid < n` writes
+    //   only `grad_input[gid]` (disjoint) and reads window elements in `[0, n)`.
+    // - No shared memory; threads with `gid >= n` early-return before access.
+    unsafe {
+        stream
+            .launch_builder(&f)
+            .arg(input.inner())
+            .arg(grad_output.inner())
+            .arg(denom.inner())
+            .arg(grad_input.inner_mut())
+            .arg(&batch_u32)
+            .arg(&channels_u32)
+            .arg(&spatial_u32)
+            .arg(&size_u32)
+            .arg(&alpha)
+            .arg(&beta)
+            .launch(cfg)?;
+    }
+
+    Ok(grad_input)
 }
 
 #[cfg(all(test, feature = "cuda"))]

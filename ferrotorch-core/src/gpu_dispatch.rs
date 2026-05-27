@@ -1327,6 +1327,105 @@ pub trait GpuBackend: Send + Sync {
         })
     }
 
+    // BatchNorm backward f32 (#1449).
+    //
+    // On-device gradient for the BatchNorm family over a
+    // `[batch, channels, hw]`-laid-out f32 buffer. Mirrors
+    // `aten/src/ATen/native/cuda/Normalization.cuh:388 batch_norm_backward_kernel`:
+    // one reduction per channel computes `grad_output_sum = Σ go` and
+    // `dot_p = Σ (x - mean) * go`, then
+    //   grad_input  = train ? (go - (x-mean)*proj_scale - grad_mean) * grad_scale
+    //                       : go * grad_scale
+    //   grad_weight = dot_p * invstd ; grad_bias = grad_output_sum
+    // where `proj_scale = dot_p/N * invstd²`, `grad_mean = grad_output_sum/N`,
+    // `grad_scale = invstd * weight[c]`. In **training** mode `mean`/`invstd` are
+    // recomputed from `input` (biased var, +eps); in **eval** mode they come from
+    // `running_mean`/`running_var`. `weight` has length `channels` (all-ones for
+    // the non-affine case so `grad_scale = invstd`). The default impl returns
+    // `InvalidArgument`; the CUDA backend overrides it with
+    // `gpu_batch_norm_backward_f32`. Non-test production consumer:
+    // `ferrotorch-nn::BatchNorm{1,2,3}dBackward::backward` / `InstanceNormBackward`
+    // GPU fast path.
+    //
+    // Returns `(grad_input, grad_weight, grad_bias)`: `grad_input` has the input
+    // shape, `grad_weight` / `grad_bias` have length `channels`.
+    #[allow(clippy::too_many_arguments)]
+    fn batch_norm_backward_f32(
+        &self,
+        _input: &GpuBufferHandle,
+        _grad_output: &GpuBufferHandle,
+        _weight: &GpuBufferHandle,
+        _running_mean: &GpuBufferHandle,
+        _running_var: &GpuBufferHandle,
+        _batch: usize,
+        _channels: usize,
+        _hw: usize,
+        _eps: f32,
+        _training: bool,
+    ) -> FerrotorchResult<(GpuBufferHandle, GpuBufferHandle, GpuBufferHandle)> {
+        Err(FerrotorchError::InvalidArgument {
+            message: "batch_norm_backward_f32 GPU op not implemented for this backend".into(),
+        })
+    }
+
+    // LocalResponseNorm forward f32 (#1449).
+    //
+    // Per-element cross-channel normalization over a
+    // `[batch, channels, spatial]`-laid-out f32 buffer. Mirrors
+    // `torch/nn/functional.py:3032-3046 local_response_norm` (square → windowed
+    // channel sum → `* alpha + k` → `pow(beta)` → divide):
+    //   denom[i] = (Σ_window x² / size) * alpha + k
+    //   out[i]   = x[i] / denom[i]^beta
+    // Returns `(output, denom)`; `denom` (input shape) is the saved buffer the
+    // backward consumes. The default impl returns `InvalidArgument`; the CUDA
+    // backend overrides it with `gpu_local_response_norm_f32`. Non-test
+    // production consumer: `ferrotorch-nn::LocalResponseNorm::forward` GPU path.
+    #[allow(clippy::too_many_arguments)]
+    fn local_response_norm_f32(
+        &self,
+        _input: &GpuBufferHandle,
+        _batch: usize,
+        _channels: usize,
+        _spatial: usize,
+        _size: usize,
+        _alpha: f32,
+        _beta: f32,
+        _k: f32,
+    ) -> FerrotorchResult<(GpuBufferHandle, GpuBufferHandle)> {
+        Err(FerrotorchError::InvalidArgument {
+            message: "local_response_norm_f32 GPU op not implemented for this backend".into(),
+        })
+    }
+
+    // LocalResponseNorm backward f32 (#1449).
+    //
+    // On-device VJP for `local_response_norm`, consuming the `denom` buffer
+    // saved by `local_response_norm_f32`. One thread per element:
+    //   term1 = denom[i]^(-beta) * go[i]
+    //   cross = Σ_{c in window(i)} go[c] * x[c] * denom[c]^(-beta-1)
+    //   grad_input[i] = term1 - 2*beta*alpha/size * x[i] * cross
+    // The default impl returns `InvalidArgument`; the CUDA backend overrides it
+    // with `gpu_local_response_norm_backward_f32`. Non-test production consumer:
+    // `ferrotorch-nn::LocalResponseNormBackward::backward` GPU path.
+    #[allow(clippy::too_many_arguments)]
+    fn local_response_norm_backward_f32(
+        &self,
+        _input: &GpuBufferHandle,
+        _grad_output: &GpuBufferHandle,
+        _denom: &GpuBufferHandle,
+        _batch: usize,
+        _channels: usize,
+        _spatial: usize,
+        _size: usize,
+        _alpha: f32,
+        _beta: f32,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::InvalidArgument {
+            message: "local_response_norm_backward_f32 GPU op not implemented for this backend"
+                .into(),
+        })
+    }
+
     // Softmax2d f32 (#1451).
     //
     // Channel-axis softmax over a `[n, c, hw]`-laid-out f32 buffer

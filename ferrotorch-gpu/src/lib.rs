@@ -236,6 +236,10 @@ pub use graph::{
 };
 #[cfg(feature = "cuda")]
 pub use group_norm::gpu_group_norm_f32;
+#[cfg(feature = "cuda")]
+pub use group_norm::{
+    gpu_batch_norm_backward_f32, gpu_local_response_norm_backward_f32, gpu_local_response_norm_f32,
+};
 pub use kernels::{gpu_add, gpu_mul, gpu_neg, gpu_relu, gpu_sub};
 pub use kernels::{
     gpu_add_into, gpu_add_into_on_stream, gpu_embed_lookup_into, gpu_gelu_into, gpu_layernorm_into,
