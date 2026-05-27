@@ -827,6 +827,34 @@ impl JsonGrammar {
                 }
             }
         }
+        // REQ-7 / #1490: whitespace also legally TERMINATES a number
+        // when the digit-state is at a valid completion point. Without
+        // this branch, `{ "a" : 1 }` rejects at the space after the
+        // digit because `Phase::NumberDigits` is not a structural
+        // phase and `valid_next_chars_for` doesn't emit whitespace
+        // there. We add the whitespace chars to the mask iff at least
+        // one digit has been emitted AND we're not mid-decimal /
+        // mid-exponent-without-digit — the same completion-state
+        // predicate used by the DFA dispatch's `complete_states`.
+        if self.whitespace_permissive
+            && let Phase::NumberDigits {
+                had_digits,
+                had_decimal,
+                had_fractional_digit,
+                had_exponent_marker,
+                had_exponent_digit,
+                ..
+            } = &frame.phase
+            && *had_digits
+            && (!*had_decimal || *had_fractional_digit)
+            && (!*had_exponent_marker || *had_exponent_digit)
+        {
+            for ws in [' ', '\t', '\n', '\r'] {
+                if !chars.contains(&ws) {
+                    chars.push(ws);
+                }
+            }
+        }
         chars
     }
 
@@ -858,6 +886,30 @@ impl JsonGrammar {
             && !self.frames.is_empty()
             && is_structural_phase(&self.frames[self.frames.len() - 1].phase)
         {
+            return Ok(());
+        }
+        // REQ-7 / #1490: whitespace-permissive mode also TERMINATES a
+        // number frame when the digits-state is at a completion point.
+        // `valid_next_chars` above already gates the mask so this
+        // branch is unreachable unless the number frame is at a legal
+        // completion state. We pop the frame (treating the number as
+        // complete) and silently consume the whitespace — the parent's
+        // post-pop phase is structural (`ObjectAfterValue` /
+        // `ArrayAfterValue`) and the next `step_char` call will admit
+        // further whitespace via the structural-phase bypass above.
+        if self.whitespace_permissive
+            && matches!(c, ' ' | '\t' | '\n' | '\r')
+            && !self.frames.is_empty()
+            && matches!(
+                self.frames[self.frames.len() - 1].phase,
+                Phase::NumberDigits {
+                    had_digits: true,
+                    ..
+                }
+            )
+        {
+            self.frames.pop();
+            self.bubble_value_done();
             return Ok(());
         }
         // We've accepted that `c` is a legal next char; now mutate the
@@ -1311,6 +1363,40 @@ impl JsonGrammar {
                     frame.phase = Phase::Start;
                     return self.apply_step(c);
                 }
+            }
+
+            // ----- ONE_OF / ANY_OF: commit to the first branch whose
+            // start state accepts the emitted char, then re-dispatch.
+            // REQ-8 PARTIAL (#1486). Same shape as `Nullable`'s commit-
+            // on-first-char semantics, generalised to N branches. The
+            // walk is in document order — disjoint first-char sets
+            // (the common case) make ordering irrelevant; overlapping
+            // first-chars commit to the earlier branch, which the
+            // post-emit validator can re-check against any other branch
+            // if `oneOf`'s "exactly one" semantics matter to the
+            // caller.
+            (Schema::OneOf(branches), Phase::Start) | (Schema::AnyOf(branches), Phase::Start) => {
+                let branches = branches.clone();
+                let mut committed_idx: Option<usize> = None;
+                for (i, branch) in branches.iter().enumerate() {
+                    let probe = Frame {
+                        schema: branch.clone(),
+                        phase: Phase::Start,
+                    };
+                    if valid_next_chars_for(&probe, None).contains(&c) {
+                        committed_idx = Some(i);
+                        break;
+                    }
+                }
+                let Some(idx) = committed_idx else {
+                    return Err(StepError::UnexpectedChar {
+                        got: c,
+                        expected: Vec::new(),
+                    });
+                };
+                frame.schema = branches[idx].clone();
+                frame.phase = Phase::Start;
+                return self.apply_step(c);
             }
 
             // ----- OBJECT -----
@@ -1788,6 +1874,23 @@ fn valid_next_chars_for(frame: &Frame, parent: Option<&Frame>) -> Vec<char> {
             v.sort_unstable();
             v.dedup();
             v
+        }
+
+        // REQ-8 PARTIAL (#1486): oneOf / anyOf union of branch start
+        // chars. The frame commits to a branch on the first emitted
+        // char (`apply_step` matches the same shape).
+        (Schema::OneOf(branches), Phase::Start) | (Schema::AnyOf(branches), Phase::Start) => {
+            let mut set: BTreeSet<char> = BTreeSet::new();
+            for branch in branches {
+                let probe = Frame {
+                    schema: branch.clone(),
+                    phase: Phase::Start,
+                };
+                for c in valid_next_chars_for(&probe, parent) {
+                    set.insert(c);
+                }
+            }
+            set.into_iter().collect()
         }
 
         (Schema::Object { properties, .. }, Phase::Start) => {

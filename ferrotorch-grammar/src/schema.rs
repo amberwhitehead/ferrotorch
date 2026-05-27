@@ -22,10 +22,22 @@
 //!   `Schema::Integer` constrained variants. The grammar honours them
 //!   at the `Phase::StringChars` and `Phase::NumberDigits` arms.
 //!
+//! ## Partial support (REQ-8 PARTIAL, #1486)
+//!
+//! - **`oneOf` / `anyOf` composition** (REQ-8 partial): each branch is
+//!   compiled recursively into a sub-`Schema`, stored in
+//!   `Schema::OneOf(Vec<Schema>)` / `Schema::AnyOf(Vec<Schema>)`. The
+//!   grammar's `Phase::Start` arm dispatches on the first emitted char:
+//!   it commits to whichever sub-schema's start state accepts that
+//!   char. Disjoint first-char sets (the common case — e.g.
+//!   `{"oneOf":[{"type":"string"},{"type":"number"}]}`) work; ambiguous
+//!   first-chars commit to the first branch in document order.
+//!
 //! ## Not supported (yet)
 //!
-//! - `oneOf` / `anyOf` / `allOf` composition (require union/intersection
-//!   state in `JsonGrammar`).
+//! - `allOf` composition (would require intersection-state tracking
+//!   across simultaneously-active sub-grammars — #1486 remains OPEN for
+//!   the allOf scope).
 //! - `pattern` (regex on strings).
 //! - `format` (date-time, email, etc.) and other annotations.
 //! - `additionalProperties` (always treated as `false`).
@@ -38,7 +50,8 @@
 //! | REQ-2 | SHIPPED | impl: `pub enum SchemaError` with `UnsupportedType`, `Unsupported`, `MalformedProperty`, `MalformedEnum`, `NotASchema` variants, `#[non_exhaustive]`, `thiserror::Error`-derived in `schema.rs`; non-test consumer: `GrammarError::Schema(#[from] SchemaError)` in `json_schema.rs` wraps it for the public processor API. |
 //! | REQ-3 | SHIPPED | impl: `pub fn Schema::from_json_schema` in `schema.rs` with `parse_object`, `parse_array`, `parse_enum` helpers; non-test consumer: `JsonSchemaProcessor::new` in `json_schema.rs` invokes `Schema::from_json_schema(schema)?` on every construction. |
 //! | REQ-4 | SHIPPED | impl: `type`-array handling in `from_json_schema` matches `Vec` with single concrete type + `null` flag, wraps in `Schema::Nullable(Box::new(_))`; rejects multi-non-null with `SchemaError::Unsupported`; non-test consumer: `JsonGrammar::apply_step` `(Schema::Nullable(inner), Phase::Start)` arm in `state.rs` dispatches into either the null branch or the inner schema based on the first char. |
-//! | REQ-5 | PARTIAL | impl: `fn from_json_schema_with_root` + `fn resolve_pointer` ship `$ref` intra-document resolution against `definitions` / `$defs` (RFC 6901 pointer decoding) in `schema.rs`; non-test consumer: every `JsonSchemaProcessor::new` call now resolves refs before constructing the grammar. `oneOf`/`anyOf`/`allOf` still rejected via `SchemaError::Unsupported` (would need union/intersection state in `JsonGrammar`); #1486 remains OPEN for the composition state machine. |
+//! | REQ-5 | PARTIAL | impl: `fn from_json_schema_with_root` + `fn resolve_pointer` ship `$ref` intra-document resolution against `definitions` / `$defs` (RFC 6901 pointer decoding) in `schema.rs`; non-test consumer: every `JsonSchemaProcessor::new` call now resolves refs before constructing the grammar. `oneOf` / `anyOf` now land as `Schema::OneOf` / `Schema::AnyOf` (see REQ-8). `allOf` still rejected via `SchemaError::Unsupported` (would need intersection-state tracking); #1486 remains OPEN for the allOf scope. |
+//! | REQ-8 | PARTIAL | impl: `Schema::OneOf(Vec<Schema>)` + `Schema::AnyOf(Vec<Schema>)` variants and the `oneOf` / `anyOf` arms of `from_json_schema_with_root` in `schema.rs`; non-test consumer: `JsonGrammar::apply_step` `(Schema::OneOf(_) \| Schema::AnyOf(_), Phase::Start)` arm in `state.rs` commits the frame to the first sub-schema whose start state accepts the emitted char, then re-dispatches; `valid_next_chars_for` mirrors with the union of start-state char sets. `allOf` still rejected; #1486 remains OPEN for the allOf scope. |
 //! | REQ-6 | PARTIAL | impl: `Schema::StringConstrained { min_length, max_length }`, `Schema::NumberConstrained { minimum, maximum, multiple_of }`, `Schema::IntegerConstrained { ... }` variants + `parse_*_constrained` helpers in `schema.rs`; non-test consumer: state.rs `(Schema::StringConstrained, Phase::StringChars)` arm in `valid_next_chars_for` gates the closing `'"'` on `partial.chars().count() >= min_length` and gates body chars on `< max_length`. `pattern` and `format` still silently dropped (would need regex sub-grammar). #1487 closes for the min/max/length subset. |
 //! | REQ-7 | SHIPPED | impl: `parse_object` does not consult `additionalProperties` and `JsonGrammar`'s `ObjectKey` candidates list is built from `properties.keys().filter(|k| !keys_seen.contains(*k))` in `state.rs` — unknown keys are masked out. Documented in the module header comment. Non-test consumer: every production `compute_mask` / `step_token` call in `json_schema.rs` walks the same `valid_next_chars_for` path. |
 
@@ -135,6 +148,20 @@ pub enum Schema {
     /// A union of the inner schema and `null`. Equivalent to JSON Schema's
     /// `type: ["X", "null"]`.
     Nullable(Box<Schema>),
+    /// JSON Schema `oneOf` composition (REQ-8 PARTIAL, #1486). The
+    /// grammar's `Phase::Start` arm commits the frame to whichever
+    /// branch accepts the first emitted char. Disjoint first-char sets
+    /// (the common case) are unambiguous; ambiguous first-chars commit
+    /// to the first branch in document order. Strict "exactly one
+    /// matches" semantics are NOT enforced at grammar level —
+    /// post-emit validators can re-check the value against every
+    /// branch if needed.
+    OneOf(Vec<Schema>),
+    /// JSON Schema `anyOf` composition (REQ-8 PARTIAL, #1486). For
+    /// prefix-grammar acceptance this behaves identically to
+    /// `Schema::OneOf` — once committed to a branch, the value must
+    /// satisfy that branch.
+    AnyOf(Vec<Schema>),
 }
 
 impl Schema {
@@ -174,14 +201,19 @@ fn from_json_schema_with_root(
         return from_json_schema_with_root(resolved, root, ref_depth + 1);
     }
 
-    // Composition keywords (oneOf/anyOf/allOf) — still rejected
-    // explicitly. The state-machine union/intersection state for
-    // them is tracked separately (see #1486 status in schema.md).
-    if map.contains_key("oneOf") {
-        return Err(SchemaError::Unsupported("oneOf"));
+    // Composition keywords. `oneOf` / `anyOf` ship as REQ-8 PARTIAL
+    // (#1486 partial close): compile each branch recursively into the
+    // matching `Schema::OneOf(_)` / `Schema::AnyOf(_)` variant. The
+    // state machine commits to whichever branch accepts the first
+    // emitted char (`apply_step` / `valid_next_chars_for` in
+    // `state.rs`). `allOf` still rejected — intersection-state
+    // tracking across simultaneously-active sub-grammars is the
+    // remaining #1486 scope.
+    if let Some(branches) = map.get("oneOf") {
+        return parse_composition(branches, root, ref_depth, /*one_of=*/ true);
     }
-    if map.contains_key("anyOf") {
-        return Err(SchemaError::Unsupported("anyOf"));
+    if let Some(branches) = map.get("anyOf") {
+        return parse_composition(branches, root, ref_depth, /*one_of=*/ false);
     }
     if map.contains_key("allOf") {
         return Err(SchemaError::Unsupported("allOf"));
@@ -370,6 +402,37 @@ fn parse_array_with_root(
     })
 }
 
+/// Compile a JSON `oneOf` / `anyOf` value into the matching
+/// composition variant. The branches array must be non-empty; each
+/// element must itself be a valid sub-schema. `one_of=true` selects
+/// `Schema::OneOf`, `false` selects `Schema::AnyOf` — at the grammar
+/// level both behave the same (prefix-grammar acceptance is the union
+/// of branches' start sets).
+fn parse_composition(
+    branches: &serde_json::Value,
+    root: &serde_json::Value,
+    ref_depth: u32,
+    one_of: bool,
+) -> Result<Schema, SchemaError> {
+    let arr = branches.as_array().ok_or(SchemaError::Unsupported(
+        "oneOf/anyOf value must be a JSON array",
+    ))?;
+    if arr.is_empty() {
+        return Err(SchemaError::Unsupported(
+            "oneOf/anyOf array must be non-empty",
+        ));
+    }
+    let mut compiled = Vec::with_capacity(arr.len());
+    for sub in arr {
+        compiled.push(from_json_schema_with_root(sub, root, ref_depth)?);
+    }
+    Ok(if one_of {
+        Schema::OneOf(compiled)
+    } else {
+        Schema::AnyOf(compiled)
+    })
+}
+
 fn parse_enum(values: &serde_json::Value) -> Result<Schema, SchemaError> {
     let arr = values.as_array().ok_or(SchemaError::MalformedEnum)?;
     if arr.is_empty() {
@@ -480,13 +543,53 @@ mod tests {
         }
     }
 
+    /// REQ-8 PARTIAL (#1486): `oneOf` of a string + number compiles to
+    /// `Schema::OneOf` with two branches, in document order.
     #[test]
-    fn rejects_oneof() {
-        let err = Schema::from_json_schema(&json!({
+    fn parses_oneof_to_compiled_branches() {
+        let s = Schema::from_json_schema(&json!({
             "oneOf": [{"type": "string"}, {"type": "number"}]
         }))
+        .unwrap();
+        match s {
+            Schema::OneOf(branches) => {
+                assert_eq!(branches.len(), 2);
+                assert_eq!(branches[0], Schema::String);
+                assert_eq!(branches[1], Schema::Number);
+            }
+            other => panic!("expected Schema::OneOf, got {other:?}"),
+        }
+    }
+
+    /// REQ-8 PARTIAL (#1486): `anyOf` lands in `Schema::AnyOf`.
+    #[test]
+    fn parses_anyof_to_compiled_branches() {
+        let s = Schema::from_json_schema(&json!({
+            "anyOf": [{"type": "boolean"}, {"type": "null"}]
+        }))
+        .unwrap();
+        match s {
+            Schema::AnyOf(branches) => {
+                assert_eq!(branches.len(), 2);
+                assert_eq!(branches[0], Schema::Boolean);
+                assert_eq!(branches[1], Schema::Null);
+            }
+            other => panic!("expected Schema::AnyOf, got {other:?}"),
+        }
+    }
+
+    /// `allOf` is still REJECTED — #1486 closes for oneOf+anyOf; the
+    /// allOf intersection-state machine remains OPEN.
+    #[test]
+    fn rejects_allof() {
+        let err = Schema::from_json_schema(&json!({
+            "allOf": [
+                {"type": "object", "properties": {"a": {"type": "number"}}, "required": ["a"]},
+                {"type": "object", "properties": {"b": {"type": "string"}}, "required": ["b"]}
+            ]
+        }))
         .unwrap_err();
-        assert!(matches!(err, SchemaError::Unsupported("oneOf")));
+        assert!(matches!(err, SchemaError::Unsupported("allOf")));
     }
 
     /// REQ-5 SHIPPED ($ref intra-doc): a bare `$ref` to a missing

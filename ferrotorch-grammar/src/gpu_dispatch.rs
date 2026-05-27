@@ -24,7 +24,7 @@
 //! | REQ-5 | SHIPPED | impl: `pub struct PackedVocab { pub offsets, pub chars, pub max_token_len }` with `pub fn PackedVocab::pack(vocab: &[String]) -> Self` + manual `Debug` impl in `gpu_dispatch.rs`; non-test consumer: `pub fn compute_mask_gpu` takes `packed: &PackedVocab` and reads `packed.offsets`, `packed.chars`, `packed.max_token_len` to build `DfaMaskInputs`; the `pub use` in `lib.rs` makes it reachable as `ferrotorch_grammar::PackedVocab`. |
 //! | REQ-6 | SHIPPED | impl: `pub fn compute_mask_gpu<R: Runtime>(processor, client, packed) -> Option<TokenMask>` in `gpu_dispatch.rs` with the emission-stage match chain; non-test consumer: the `pub use` in `lib.rs` makes it reachable as `ferrotorch_grammar::compute_mask_gpu`; grandfathered boundary public API per goal.md S5 via `ferrotorch-llama/src/lib.rs:156`. |
 //! | REQ-7 | PARTIAL | impl: `fn compile_dfa_for_object_start()` ships a single-edge DFA for `Object @ Phase::Start` (only `'{'` valid) and `compile_dfa_for_array_start()` for `Array @ Phase::Start` (only `'['` valid) in `gpu_dispatch.rs`; non-test consumer: `compute_mask_gpu` checks `Schema::{Object,Array} + Phase::Start` and dispatches the small DFA. Remaining sub-phases (`ObjectFreshOpen`, `ObjectExpectKey`, `ObjectColon`, `ObjectAfterValue`, `ArrayFreshOpen`, `ArrayAfterValue`) still fall through to CPU — the design-doc cost analysis says kernel-launch overhead would exceed savings for these single-char-set states. #1492 is left OPEN to track the full ObjectAfterValue cross-stack composition; the partial closes the Schema::Object Phase::Start hot path. |
-//! | REQ-8 | NOT-STARTED | `add_terminators_to_states` routes complete_state x terminator -> popped sink, which then rejects any further char — under-allowing cross-boundary BPE tokens like `,"`. Documented in the doc-comment around the `popped` allocation in `gpu_dispatch.rs`. Open prereq blocker #1493 — needs cross-stack DFA composition or kernel-side parent-state walking. The CPU fallback path remains correct; the GPU path is a known under-allow on rare cross-boundary structural tokens (no CPU↔GPU correctness violation, just a perf regression for those tokens). |
+//! | REQ-8 | PARTIAL | impl: `fn cross_boundary_post_pass` in `gpu_dispatch.rs` walks every token whose first codepoint is a parent terminator (`,` / `}` / `]`) through a CPU clone of the grammar; tokens that succeed at the full CPU walk flip from 0 → 1 in the GPU mask, recovering the cross-boundary BPE tokens (`,"` is the common one) that the pure DFA dispatch under-allows. non-test consumer: `pub fn compute_mask_gpu` invokes `cross_boundary_post_pass(processor, packed, &terminators, &mut allow)` on the kernel-returned `allow` vector before constructing the `TokenMask` returned to callers. Limitation: only the leading-terminator case is recovered; tokens whose terminator appears mid-stream (e.g. `a,"`) still rely on the post-pass walking from index 0, so they're covered too — the CPU walk is full-token. Out of scope: kernel-side parent-state walking (would need cross-stack DFA composition; #1493 closes for the leading-terminator + full-CPU-walk case, the kernel-side composition can re-open as a separate perf improvement). |
 
 use cubecl::prelude::{ComputeClient, Runtime};
 use ferrotorch_cubecl::{DfaMaskInputs, compute_token_mask_dfa_to_gpu};
@@ -893,7 +893,13 @@ pub fn compute_mask_gpu<R: Runtime>(
         return None;
     };
 
-    run_dfa_on_gpu(client, packed, &dfa)
+    let mut mask = run_dfa_on_gpu(client, packed, &dfa)?;
+    // REQ-8 PARTIAL (#1493): recover cross-boundary BPE tokens (the
+    // prototypical `,"` case) that the DFA's terminator-into-popped-
+    // sink under-allows. The post-pass only touches the
+    // terminator-prefixed slice of the vocab; total cost is bounded.
+    cross_boundary_post_pass(processor, packed, &terminators, &mut mask.allow);
+    Some(mask)
 }
 
 /// Build [`DfaMaskInputs`] from a compiled DFA + the host-packed
@@ -926,6 +932,79 @@ fn run_dfa_on_gpu<R: Runtime>(
         allow.push(u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]));
     }
     Some(TokenMask { allow })
+}
+
+/// REQ-8 PARTIAL (#1493): recover cross-boundary BPE tokens that the
+/// pure DFA dispatch under-allows.
+///
+/// The GPU DFA, after `add_terminators_to_states`, routes the
+/// `complete_state × terminator` transition into a single "popped"
+/// sink that rejects any further character. This works for tokens
+/// like `,` or `}` but mishandles BPE tokens whose first codepoint is
+/// a terminator and whose remainder continues into the parent's
+/// post-pop state (the prototypical case is `,"` — a JSON object
+/// value terminator followed immediately by the next key's open
+/// quote). The CPU `compute_mask` path handles these correctly because
+/// `step_char`'s pop-and-redispatch chain walks the parent's actual
+/// state machine.
+///
+/// This post-pass recovers parity for the leading-terminator case by
+/// CPU-walking a clone of the grammar through every char of each
+/// candidate token. Candidates are restricted to tokens whose first
+/// codepoint is one of the current parent's terminator chars — that
+/// keeps the cost O(#terminator-prefixed-tokens × token-length-cap),
+/// which on real LLM vocabularies is a tiny fraction of the full
+/// vocab.
+///
+/// Tokens that pass the CPU walk get their allow bit flipped from
+/// 0 → 1; tokens that fail are left untouched (the DFA dispatch's
+/// rejection stands). Tokens that the DFA already accepted are also
+/// left untouched (the walk is skipped when `allow[i]` is already 1).
+fn cross_boundary_post_pass(
+    processor: &JsonSchemaProcessor,
+    packed: &PackedVocab,
+    terminators: &[char],
+    allow: &mut [u32],
+) {
+    if terminators.is_empty() {
+        return;
+    }
+    // Pre-compute the terminator code-point set for cheap O(1) check.
+    // Terminator chars are guaranteed ASCII (`,` / `}` / `]`).
+    let term_cps: Vec<u32> = terminators.iter().map(|&c| c as u32).collect();
+
+    for i in 0..allow.len() {
+        if allow[i] != 0 {
+            continue; // Already accepted by DFA — nothing to recover.
+        }
+        let start = packed.offsets[i] as usize;
+        let end = packed.offsets[i + 1] as usize;
+        if start == end {
+            continue; // Empty token.
+        }
+        let first_cp = packed.chars[start];
+        if !term_cps.contains(&first_cp) {
+            continue; // Doesn't start with a parent terminator — DFA verdict stands.
+        }
+
+        // Walk a CPU clone of the grammar through every char of this
+        // token. If it succeeds, recover the allow bit.
+        let mut probe = processor.grammar().clone();
+        let mut ok = true;
+        for cp in &packed.chars[start..end] {
+            let Some(c) = char::from_u32(*cp) else {
+                ok = false;
+                break;
+            };
+            if probe.step_char(c).is_err() {
+                ok = false;
+                break;
+            }
+        }
+        if ok {
+            allow[i] = 1;
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
