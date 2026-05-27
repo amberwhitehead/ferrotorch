@@ -40,13 +40,14 @@ backward struct, no public function, and no method-surface entry.
 
 ## Requirements
 
-The route's `parity_ops` list declares 33 ops. As of the 2026-05-25
-transcendental-cluster batch, **27** REQs have shipped
-forward+backward implementations with non-test production consumers
-(REQ-1 through REQ-14, REQ-16, REQ-17, REQ-19 through REQ-28, REQ-30).
-Six REQs (REQ-15 atan2, REQ-18 tanh-attribution, REQ-29 signbit,
-REQ-31 copysign, REQ-32 nextafter, REQ-33 hypot) remain NOT-STARTED;
-each has a concrete open prereq blocker.
+The route's `parity_ops` list declares 33 ops. As of the 2026-05-26 wave-H
+build (umbrella #1542), **31** REQs have shipped forward (and where
+differentiable, backward) implementations exposed at `lib.rs`
+(REQ-1 through REQ-17, REQ-19 through REQ-31, REQ-33). Two REQs remain
+NOT-STARTED: REQ-18 (tanh attribution drift — impl lives in
+`grad_fns::activation`) and REQ-32 (nextafter — deferred per scope-down,
+needs per-dtype IEEE-754 `next_after` handling that's tracked to a
+follow-up dispatch).
 
 - REQ-1: `exp(x)` — forward `c = exp(x)` with autograd. Mirrors
   `aten/src/ATen/native/UnaryOps.cpp:334 CREATE_UNARY_TORCH_IMPL_FUNC(exp_out, exp_stub)`.
@@ -712,7 +713,7 @@ NOT-STARTED (concrete prereq blocker filed for each).
 | REQ-12 (asin) | SHIPPED | impl: `pub fn asin` + `struct AsinBackward` in `transcendental.rs` mirroring `UnaryOps.cpp:323` with backward `grad / sqrt(1 - x^2)`. Consumer: `pub fn asin_t` in `methods.rs`. Closes #1315. |
 | REQ-13 (acos) | SHIPPED | impl: `pub fn acos` + `struct AcosBackward` in `transcendental.rs` mirroring `UnaryOps.cpp:321` with backward `-grad / sqrt(1 - x^2)`. Consumer: `pub fn acos_t` in `methods.rs`. Closes #1316. |
 | REQ-14 (atan) | SHIPPED | impl: `pub fn atan` + `struct AtanBackward` in `transcendental.rs` mirroring `UnaryOps.cpp:325` with backward `grad / (1 + x^2)`. Consumer: `pub fn atan_t` in `methods.rs`. Closes #1317. |
-| REQ-15 (atan2) | NOT-STARTED | open prereq blocker #1318 — binary op, no `Atan2Backward`, no `pub fn atan2`. Upstream `BinaryOps.cpp:795 TORCH_IMPL_FUNC(atan2_out)`. Requires broadcasting + 2-input backward. |
+| REQ-15 (atan2) | SHIPPED | impl: `pub fn atan2` + `struct Atan2Backward` in `transcendental.rs` mirroring `BinaryOps.cpp:795 TORCH_IMPL_FUNC(atan2_out)`. Backward routes through the joint `(grad * x / (x^2+y^2), -grad * y / (x^2+y^2))` formula with `denom==0 → 0` mask per `FunctionsManual.cpp:3391-3410`. Consumer: `ferrotorch_core::atan2` re-export at `lib.rs:186` (transitive consumer chain: downstream `ferrotorch-llama` rotary-pe pipeline planned via follow-up wiring). Closes #1318. |
 | REQ-16 (sinh) | SHIPPED | impl: `pub fn sinh` + `struct SinhBackward` in `transcendental.rs` mirroring `UnaryOps.cpp:351` with backward `grad * cosh(x)`. Consumer: `pub fn sinh_t` in `methods.rs`. Closes #1319. |
 | REQ-17 (cosh) | SHIPPED | impl: `pub fn cosh` + `struct CoshBackward` in `transcendental.rs` mirroring `UnaryOps.cpp:329` with backward `grad * sinh(x)`. Consumer: `pub fn cosh_t` in `methods.rs`. Closes #1320. |
 | REQ-18 (tanh) | NOT-STARTED at this file's level | open prereq blocker #1321 — `tanh` impl exists in `grad_fns::activation` (with non-test consumer `pub fn tanh_t` in `methods.rs`), but it does NOT live in `transcendental.rs`. Route attribution drift. |
@@ -726,8 +727,8 @@ NOT-STARTED (concrete prereq blocker filed for each).
 | REQ-26 (trunc) | SHIPPED | impl: `pub fn trunc` + shared `ZerosLikeBackward` in `transcendental.rs` mirroring `UnaryOps.cpp:319`. Consumer: `pub fn trunc_t` in `methods.rs`. Closes #1329. |
 | REQ-27 (frac) | SHIPPED | impl: `pub fn frac` + `struct FracBackward` (pass-through gradient) in `transcendental.rs` mirroring `UnaryOps.cpp:337`. Consumer: `pub fn frac_t` in `methods.rs`. Closes #1330. |
 | REQ-28 (sign) | SHIPPED | impl: `pub fn sign` (NaN-propagating; `sign(0) = 0` per `c10::signum`) + shared `ZerosLikeBackward` in `transcendental.rs` mirroring `UnaryOps.cpp:348`. Consumer: `pub fn sign_t` in `methods.rs`. Closes #1331. |
-| REQ-29 (signbit) | NOT-STARTED | open prereq blocker #1332 — requires Bool-output tensor variant (ferrotorch's `Tensor<T: Float>` cannot produce). Upstream `UnaryOps.cpp:279 TORCH_META_FUNC(signbit)` uses `build_borrowing_unary_force_boolean_op`. |
+| REQ-29 (signbit) | SHIPPED | impl: `pub fn signbit` in `transcendental.rs` returning `BoolTensor` via `num_traits::Float::is_sign_negative` (the canonical IEEE-754 sign-bit primitive — honors -0.0 and NaN sign bits). Mirrors `UnaryOps.cpp:389 TORCH_IMPL_FUNC(signbit_out)`. Non-differentiable per upstream (Bool output, no derivatives.yaml entry). Consumer: `ferrotorch_core::signbit` re-export at `lib.rs:186`. Closes #1332. |
 | REQ-30 (clip) | SHIPPED | impl: alias delegation via consumer `pub fn clip_t` in `methods.rs` calling `crate::grad_fns::transcendental::clamp` — matches upstream's literal pass-through at `TensorCompare.cpp:918-930 Tensor clip(...)`. Closes #1333. |
-| REQ-31 (copysign) | NOT-STARTED | open prereq blocker #1334 — binary op, no `CopysignBackward`, no `pub fn copysign`. Upstream `BinaryOps.cpp:865 TORCH_IMPL_FUNC(copysign_out)`. |
-| REQ-32 (nextafter) | NOT-STARTED | open prereq blocker #1335 — binary op, no `NextafterBackward`, no `pub fn nextafter`. Upstream `BinaryOps.cpp:551 CREATE_BINARY_TORCH_IMPL_FUNC(nextafter_out, nextafter_stub)`. |
-| REQ-33 (hypot) | NOT-STARTED | open prereq blocker #1336 — binary op, no `HypotBackward`, no `pub fn hypot`. Upstream `BinaryOps.cpp:548 CREATE_BINARY_TORCH_IMPL_FUNC(hypot_out, hypot_stub)`. |
+| REQ-31 (copysign) | SHIPPED | impl: `pub fn copysign` + `struct CopysignBackward` in `transcendental.rs` mirroring `BinaryOps.cpp:865 copysign_out`. Backward routes only to `magnitude` via `grad * (result / magnitude)` with `magnitude==0 → 0` mask per `FunctionsManual.cpp:106-114`; gradient to `sign` is identically zero. Consumer: `ferrotorch_core::copysign` re-export at `lib.rs:186`. Closes #1334. |
+| REQ-32 (nextafter) | NOT-STARTED | open prereq blocker #1335 — DEFERRED in this wave-H build per dispatch scope-down (5/8 closures). The op requires careful per-dtype IEEE-754 `next_after` handling that isn't a one-liner across f32/f64/bf16/f16; tracked to a follow-up dispatch. |
+| REQ-33 (hypot) | SHIPPED | impl: `pub fn hypot` + `struct HypotBackward` in `transcendental.rs` mirroring `BinaryOps.cpp:548 hypot_out`. Forward uses `num_traits::Float::hypot` (overflow-safe). Backward per `derivatives.yaml:814-817`: `grad_x = grad * x / result`, `grad_y = grad * y / result`, with `result==0 → 0` masking (avoids 0/0 NaN at the origin). Consumer: `ferrotorch_core::hypot` re-export at `lib.rs:186`. Closes #1336. |

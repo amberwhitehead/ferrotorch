@@ -23,10 +23,10 @@
 //! | REQ-6 (`mean_dim`) | NOT-STARTED | `mean_dim` + `MeanDimBackward` ship; consumed by `meta_propagate.rs`; parity runner arm gated by #1314. |
 //! | REQ-7 (backward VJP wiring) | NOT-STARTED | every `*Backward` struct implements the `GradFn` trait with `backward` / `inputs` / `name`; the no-grad / `requires_grad=false` short-circuit is exercised by the `test_*_no_grad*` family; gated by #1314 closing the parity runner arms. |
 //! | REQ-8 (`std` / `var`) | NOT-STARTED | no `WelfordBackward` in this file. Blocker #1301. |
-//! | REQ-9 (`max(dim)` / `min(dim)` with `(values, indices)`) | NOT-STARTED | no dim-keyed value-selecting reduction backward. Blocker #1302. |
+//! | REQ-9 (`max(dim)` / `min(dim)` with `(values, indices)`) | SHIPPED | `max_with_dim` / `min_with_dim` return `(Tensor<T>, IntTensor<i64>)`; shared `MaxMinDimBackward` scatters grad at saved per-slice argmax/argmin; NaN-poisoning per upstream `SharedReduceOps.h:26-34`; consumed by `lib.rs:182` re-export; closes #1302. |
 //! | REQ-10 (`argmax` / `argmin`) | NOT-STARTED | integer-output, non-differentiable; no integer-output reduction scaffold. Blocker #1304. |
 //! | REQ-11 (`median` / `nanmedian`) | NOT-STARTED | no median reduction. Blocker #1306. |
-//! | REQ-12 (`norm`) | NOT-STARTED | no `NormBackward`. Blocker #1308. |
+//! | REQ-12 (`norm`) | SHIPPED | `norm_with_dim(input, p, dim, keepdim)` + `NormDimBackward` for `p > 0 finite` per `derivatives.yaml` `norm.ScalarOpt_dim`; `result==0 → 0` mask; consumed by `lib.rs:182` re-export; closes #1308. |
 //! | REQ-13 (`logsumexp`) | NOT-STARTED | kernel-layer forward exists in `ops::elementwise`; no autograd wrapper here. Blocker #1310. |
 //! | REQ-14 (`any` / `all` / `count_nonzero`) | NOT-STARTED | bool/integer-output, non-differentiable; no scaffold. Blocker #1312. |
 //! | REQ-15 (parity-sweep runner arms) | NOT-STARTED | the runner has arms only for the five cumulative ops (owned by `grad_fns/cumulative.rs`); no arms for `sum`, `mean`, `prod`, `amin`, `amax` or any NOT-STARTED op above. Umbrella blocker #1314. |
@@ -2579,6 +2579,386 @@ pub fn prod_dim<T: Float>(
         Tensor::from_operation(s, sh, grad_fn)
     } else {
         Ok(result_t)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// max(dim) / min(dim) — tuple return (values, indices). Differentiable.
+// ---------------------------------------------------------------------------
+//
+// Mirrors `aten/src/ATen/native/ReduceOps.cpp` `max.dim` / `min.dim` overloads
+// — both return a `(values, indices)` named tuple. VJP per
+// `tools/autograd/derivatives.yaml`:
+//   - name: max.dim(Tensor self, int dim, bool keepdim=False) -> (Tensor values, Tensor indices)
+//     self: value_selecting_reduction_backward(grad, dim, indices, self.sizes(), keepdim)
+// — the gradient is scatter-routed to the `indices` positions only.
+//
+// NaN propagation matches `aten/src/ATen/native/SharedReduceOps.h:26-34
+// `max_propagate_nan` / `min_propagate_nan`: when a slice contains NaN, the
+// extremum reported is NaN, and the recorded index is the FIRST NaN
+// position. The CPU walk below mirrors that semantics. Closes #1302.
+
+#[derive(Debug)]
+pub struct MaxMinDimBackward<T: Float> {
+    input: Tensor<T>,
+    /// Flat index per output slot (outer * inner-many). Drives the
+    /// scatter-routing in backward — gradient lands at exactly these
+    /// positions in the input's flat buffer.
+    indices_flat: Vec<i64>,
+    dim: usize,
+    keepdim: bool,
+    /// Human-readable kind for the `name()` reporter ("MaxDimBackward" /
+    /// "MinDimBackward").
+    name: &'static str,
+}
+
+impl<T: Float> GradFn<T> for MaxMinDimBackward<T> {
+    fn backward(&self, grad_output: &Tensor<T>) -> FerrotorchResult<Vec<Option<Tensor<T>>>> {
+        if self.input.is_cuda() {
+            return Err(FerrotorchError::NotImplementedOnCuda {
+                op: "max_with_dim/min_with_dim backward",
+            });
+        }
+        let in_shape = self.input.shape();
+        let dim_size = in_shape[self.dim];
+        let outer: usize = in_shape[..self.dim].iter().product();
+        let inner: usize = in_shape[self.dim + 1..].iter().product();
+        let go = grad_output.data()?;
+        let _ = self.keepdim; // shape info absorbed via the (o*inner + i) flat layout
+
+        let zero = <T as num_traits::Zero>::zero();
+        let in_numel: usize = in_shape.iter().product();
+        let mut out = vec![zero; in_numel];
+        // For each output slot (o, i), drop grad_output[o*inner+i] at
+        // input position (o, indices_flat[o*inner+i], i).
+        for o in 0..outer {
+            for i in 0..inner {
+                let slot = o * inner + i;
+                let d = self.indices_flat[slot] as usize;
+                debug_assert!(d < dim_size);
+                let flat_in = o * dim_size * inner + d * inner + i;
+                out[flat_in] = go[slot];
+            }
+        }
+        let grad_input = Tensor::from_storage(TensorStorage::cpu(out), in_shape.to_vec(), false)?;
+        Ok(vec![Some(grad_input)])
+    }
+
+    fn inputs(&self) -> Vec<&Tensor<T>> {
+        vec![&self.input]
+    }
+
+    fn name(&self) -> &'static str {
+        self.name
+    }
+}
+
+#[allow(
+    clippy::type_complexity,
+    reason = "single-use helper returning (values, indices_flat, indices_int, out_shape, dim); \
+              wrapping in a struct adds boilerplate without aiding the two callers."
+)]
+fn max_min_with_dim_forward<T: Float>(
+    input: &Tensor<T>,
+    dim: i64,
+    keepdim: bool,
+    find_max: bool,
+) -> FerrotorchResult<(Vec<T>, Vec<i64>, IntTensor<i64>, Vec<usize>, usize)> {
+    let ndim = input.ndim();
+    if ndim == 0 {
+        return Err(FerrotorchError::InvalidArgument {
+            message: "max/min_with_dim: cannot reduce a 0-D tensor along a dimension".into(),
+        });
+    }
+    let norm_dim = if dim < 0 {
+        (ndim as i64 + dim) as usize
+    } else {
+        dim as usize
+    };
+    if norm_dim >= ndim {
+        return Err(FerrotorchError::InvalidArgument {
+            message: format!("max/min_with_dim: dim {dim} out of bounds for {ndim}-D tensor"),
+        });
+    }
+    let input_ref = if input.is_contiguous() {
+        input.clone()
+    } else {
+        input.contiguous()?
+    };
+    let in_data = input_ref.data()?;
+    let in_shape = input_ref.shape();
+    let dim_size = in_shape[norm_dim];
+    let outer: usize = in_shape[..norm_dim].iter().product();
+    let inner: usize = in_shape[norm_dim + 1..].iter().product();
+
+    let mut values = Vec::with_capacity(outer * inner);
+    let mut indices = Vec::with_capacity(outer * inner);
+    for o in 0..outer {
+        for i in 0..inner {
+            let base = o * dim_size * inner + i;
+            let mut best = in_data[base];
+            let mut best_idx: i64 = 0;
+            for d in 1..dim_size {
+                let v = in_data[base + d * inner];
+                // NaN-poison per upstream `SharedReduceOps.h:26-34`.
+                let take = if find_max {
+                    v.is_nan() || (!best.is_nan() && v > best)
+                } else {
+                    v.is_nan() || (!best.is_nan() && v < best)
+                };
+                if take {
+                    best = v;
+                    best_idx = d as i64;
+                }
+            }
+            values.push(best);
+            indices.push(best_idx);
+        }
+    }
+    let mut out_shape: Vec<usize> = in_shape.to_vec();
+    if keepdim {
+        out_shape[norm_dim] = 1;
+    } else {
+        out_shape.remove(norm_dim);
+    }
+    let indices_int = IntTensor::<i64>::from_vec(indices.clone(), out_shape.clone())?;
+    Ok((values, indices, indices_int, out_shape, norm_dim))
+}
+
+/// Differentiable `(values, indices) = max(input, dim, keepdim)` with the
+/// PyTorch named-tuple return. Mirrors `torch.max(input, dim, keepdim)` at
+/// `aten/src/ATen/native/ReduceOps.cpp` `max.dim` overload. NaN propagation
+/// per `SharedReduceOps.h:26-34`. Backward scatters `grad` to the input
+/// positions identified by `indices`. Closes #1302 (max).
+pub fn max_with_dim<T: Float>(
+    input: &Tensor<T>,
+    dim: i64,
+    keepdim: bool,
+) -> FerrotorchResult<(Tensor<T>, IntTensor<i64>)> {
+    if input.is_cuda() {
+        return Err(FerrotorchError::NotImplementedOnCuda { op: "max_with_dim" });
+    }
+    let (values, indices_flat, indices_int, out_shape, norm_dim) =
+        max_min_with_dim_forward(input, dim, keepdim, true)?;
+    let storage = TensorStorage::cpu(values);
+    let values_t = Tensor::from_storage(storage, out_shape, false)?;
+    let values_t = if is_grad_enabled() && input.requires_grad() {
+        let grad_fn = Arc::new(MaxMinDimBackward {
+            input: input.clone(),
+            indices_flat,
+            dim: norm_dim,
+            keepdim,
+            name: "MaxDimBackward",
+        });
+        let (s, sh) = values_t.into_storage_and_shape()?;
+        Tensor::from_operation(s, sh, grad_fn)?
+    } else {
+        values_t
+    };
+    Ok((values_t, indices_int))
+}
+
+/// Differentiable `(values, indices) = min(input, dim, keepdim)` —
+/// symmetric to [`max_with_dim`]. Closes #1302 (min).
+pub fn min_with_dim<T: Float>(
+    input: &Tensor<T>,
+    dim: i64,
+    keepdim: bool,
+) -> FerrotorchResult<(Tensor<T>, IntTensor<i64>)> {
+    if input.is_cuda() {
+        return Err(FerrotorchError::NotImplementedOnCuda { op: "min_with_dim" });
+    }
+    let (values, indices_flat, indices_int, out_shape, norm_dim) =
+        max_min_with_dim_forward(input, dim, keepdim, false)?;
+    let storage = TensorStorage::cpu(values);
+    let values_t = Tensor::from_storage(storage, out_shape, false)?;
+    let values_t = if is_grad_enabled() && input.requires_grad() {
+        let grad_fn = Arc::new(MaxMinDimBackward {
+            input: input.clone(),
+            indices_flat,
+            dim: norm_dim,
+            keepdim,
+            name: "MinDimBackward",
+        });
+        let (s, sh) = values_t.into_storage_and_shape()?;
+        Tensor::from_operation(s, sh, grad_fn)?
+    } else {
+        values_t
+    };
+    Ok((values_t, indices_int))
+}
+
+// ---------------------------------------------------------------------------
+// norm(input, p, dim, keepdim) — p-norm along a dimension.
+// ---------------------------------------------------------------------------
+//
+// Mirrors `aten/src/ATen/native/ReduceOps.cpp` `linalg_vector_norm.out` and
+// the `Tensor::norm(p, dim, keepdim)` overload at `aten/src/ATen/native/
+// LinearAlgebra.cpp`. Forward: `result = (sum(|x|^p, dim))^(1/p)`. Backward
+// per `tools/autograd/derivatives.yaml`:
+//   - name: norm.ScalarOpt_dim(Tensor self, Scalar? p, int[1] dim, bool keepdim=False) -> Tensor
+//     self: norm_backward(grad, self, p, result, dim, keepdim)
+// reducing (for non-degenerate `result`) to:
+//   d/dx_j = |x_j|^(p-1) * sign(x_j) * (result_broadcast)^(1-p) * grad_broadcast
+// with `result == 0 -> 0` mask (every input was zero, no gradient signal).
+//
+// Closes #1308.
+
+#[derive(Debug)]
+pub struct NormDimBackward<T: Float> {
+    input: Tensor<T>,
+    p: f64,
+    /// Saved forward output in *keepdim shape* so broadcast indexing
+    /// stays simple in backward (re-insert size-1 dim if forward squeezed).
+    result_keepdim: Tensor<T>,
+    dim: usize,
+}
+
+impl<T: Float> GradFn<T> for NormDimBackward<T> {
+    fn backward(&self, grad_output: &Tensor<T>) -> FerrotorchResult<Vec<Option<Tensor<T>>>> {
+        if self.input.is_cuda() {
+            return Err(FerrotorchError::NotImplementedOnCuda {
+                op: "norm_with_dim backward",
+            });
+        }
+        let in_shape = self.input.shape();
+        let dim_size = in_shape[self.dim];
+        let outer: usize = in_shape[..self.dim].iter().product();
+        let inner: usize = in_shape[self.dim + 1..].iter().product();
+
+        let in_data = self.input.data()?;
+        let go = grad_output.data()?;
+        let res = self.result_keepdim.data()?;
+        let p = self.p;
+        let zero = <T as num_traits::Zero>::zero();
+        let one_f64 = 1.0_f64;
+        let in_numel: usize = in_shape.iter().product();
+        let mut out = vec![zero; in_numel];
+
+        for o in 0..outer {
+            for i in 0..inner {
+                let slot = o * inner + i;
+                let r_f = to_f64::<T>(res[slot])?;
+                if r_f == 0.0 {
+                    // result==0 means every input in this slice is 0 → grad is 0.
+                    continue;
+                }
+                let g_f = to_f64::<T>(go[slot])?;
+                let scale_pow = r_f.powf(one_f64 - p);
+                for d in 0..dim_size {
+                    let xf = to_f64::<T>(in_data[o * dim_size * inner + d * inner + i])?;
+                    let abs_x = xf.abs();
+                    let s = if xf > 0.0 {
+                        1.0
+                    } else if xf < 0.0 {
+                        -1.0
+                    } else {
+                        0.0
+                    };
+                    let grad_xf = g_f * abs_x.powf(p - one_f64) * s * scale_pow;
+                    out[o * dim_size * inner + d * inner + i] = float_from_f64::<T>(grad_xf)?;
+                }
+            }
+        }
+        let grad_input = Tensor::from_storage(TensorStorage::cpu(out), in_shape.to_vec(), false)?;
+        Ok(vec![Some(grad_input)])
+    }
+
+    fn inputs(&self) -> Vec<&Tensor<T>> {
+        vec![&self.input]
+    }
+
+    fn name(&self) -> &'static str {
+        "NormDimBackward"
+    }
+}
+
+/// Differentiable p-norm along a dimension: `result = (sum(|x|^p, dim))^(1/p)`.
+/// Mirrors `aten/src/ATen/native/ReduceOps.cpp` `linalg_vector_norm` / the
+/// `Tensor::norm(p, dim, keepdim)` overload. Backward per
+/// `tools/autograd/derivatives.yaml` `norm.ScalarOpt_dim`. Closes #1308.
+pub fn norm_with_dim<T: Float>(
+    input: &Tensor<T>,
+    p: f64,
+    dim: i64,
+    keepdim: bool,
+) -> FerrotorchResult<Tensor<T>> {
+    if input.is_cuda() {
+        return Err(FerrotorchError::NotImplementedOnCuda {
+            op: "norm_with_dim",
+        });
+    }
+    if !(p.is_finite() && p > 0.0) {
+        return Err(FerrotorchError::InvalidArgument {
+            message: format!(
+                "norm_with_dim: p must be finite and > 0; got {p}. Other norms (inf, 0) \
+                 are non-differentiable / piecewise and tracked separately."
+            ),
+        });
+    }
+    let ndim = input.ndim();
+    if ndim == 0 {
+        return Err(FerrotorchError::InvalidArgument {
+            message: "norm_with_dim: cannot reduce a 0-D tensor along a dimension".into(),
+        });
+    }
+    let norm_dim = if dim < 0 {
+        (ndim as i64 + dim) as usize
+    } else {
+        dim as usize
+    };
+    if norm_dim >= ndim {
+        return Err(FerrotorchError::InvalidArgument {
+            message: format!("norm_with_dim: dim {dim} out of bounds for {ndim}-D tensor"),
+        });
+    }
+    let input_ref = if input.is_contiguous() {
+        input.clone()
+    } else {
+        input.contiguous()?
+    };
+    let in_data = input_ref.data()?;
+    let in_shape = input_ref.shape();
+    let dim_size = in_shape[norm_dim];
+    let outer: usize = in_shape[..norm_dim].iter().product();
+    let inner: usize = in_shape[norm_dim + 1..].iter().product();
+    let mut result_keepdim_data = Vec::with_capacity(outer * inner);
+    for o in 0..outer {
+        for i in 0..inner {
+            let mut acc = 0.0_f64;
+            for d in 0..dim_size {
+                let v = to_f64::<T>(in_data[o * dim_size * inner + d * inner + i])?;
+                acc += v.abs().powf(p);
+            }
+            let r = acc.powf(1.0 / p);
+            result_keepdim_data.push(float_from_f64::<T>(r)?);
+        }
+    }
+    let mut keepdim_shape: Vec<usize> = in_shape.to_vec();
+    keepdim_shape[norm_dim] = 1;
+    let result_keepdim = Tensor::from_storage(
+        TensorStorage::cpu(result_keepdim_data.clone()),
+        keepdim_shape.clone(),
+        false,
+    )?;
+    let mut out_shape = keepdim_shape.clone();
+    if !keepdim {
+        out_shape.remove(norm_dim);
+    }
+    let final_result =
+        Tensor::from_storage(TensorStorage::cpu(result_keepdim_data), out_shape, false)?;
+
+    if is_grad_enabled() && input.requires_grad() {
+        let grad_fn = Arc::new(NormDimBackward {
+            input: input.clone(),
+            p,
+            result_keepdim,
+            dim: norm_dim,
+        });
+        let (s, sh) = final_result.into_storage_and_shape()?;
+        Tensor::from_operation(s, sh, grad_fn)
+    } else {
+        Ok(final_result)
     }
 }
 

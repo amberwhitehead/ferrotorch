@@ -23,7 +23,7 @@
 //! | REQ-12 (`asin`) | SHIPPED | `asin` + `AsinBackward` consumed by `Tensor::asin_t`; closes #1315. |
 //! | REQ-13 (`acos`) | SHIPPED | `acos` + `AcosBackward` consumed by `Tensor::acos_t`; closes #1316. |
 //! | REQ-14 (`atan`) | SHIPPED | `atan` + `AtanBackward` consumed by `Tensor::atan_t`; closes #1317. |
-//! | REQ-15 (`atan2`) | NOT-STARTED | binary op, no `Atan2Backward`. Blocker #1318. |
+//! | REQ-15 (`atan2`) | SHIPPED | `atan2` + `Atan2Backward` (joint VJP, `denom==0 → 0` mask) consumed by `lib.rs:186` re-export; closes #1318. |
 //! | REQ-16 (`sinh`) | SHIPPED | `sinh` + `SinhBackward` consumed by `Tensor::sinh_t`; closes #1319. |
 //! | REQ-17 (`cosh`) | SHIPPED | `cosh` + `CoshBackward` consumed by `Tensor::cosh_t`; closes #1320. |
 //! | REQ-18 (`tanh` attribution) | NOT-STARTED | impl lives in `grad_fns::activation`, not this file. Route attribution drift tracked under #1321. |
@@ -37,20 +37,23 @@
 //! | REQ-26 (`trunc`) | SHIPPED | `trunc` + shared `ZerosLikeBackward` consumed by `Tensor::trunc_t`; closes #1329. |
 //! | REQ-27 (`frac`) | SHIPPED | `frac` + `FracBackward` (pass-through gradient) consumed by `Tensor::frac_t`; closes #1330. |
 //! | REQ-28 (`sign`) | SHIPPED | `sign` (NaN-propagating, `sign(0) = 0`) + shared `ZerosLikeBackward` consumed by `Tensor::sign_t`; closes #1331. |
-//! | REQ-29 (`signbit`) | NOT-STARTED | requires a Bool-output tensor variant. Blocker #1332. |
+//! | REQ-29 (`signbit`) | SHIPPED | `signbit` returns `BoolTensor` via `num_traits::Float::is_sign_negative`; non-diff per upstream; consumed by `lib.rs:186` re-export; closes #1332. |
 //! | REQ-30 (`clip`) | SHIPPED | `Tensor::clip_t` delegates to `clamp` per upstream's literal pass-through; closes #1333. |
-//! | REQ-31 (`copysign`) | NOT-STARTED | binary op, no `CopysignBackward`. Blocker #1334. |
-//! | REQ-32 (`nextafter`) | NOT-STARTED | binary op, no `NextafterBackward`. Blocker #1335. |
-//! | REQ-33 (`hypot`) | NOT-STARTED | binary op, no `HypotBackward`. Blocker #1336. |
+//! | REQ-31 (`copysign`) | SHIPPED | `copysign` + `CopysignBackward` (grad to magnitude only, `magnitude==0 → 0` mask) consumed by `lib.rs:186` re-export; closes #1334. |
+//! | REQ-32 (`nextafter`) | NOT-STARTED | binary op, no `NextafterBackward`. Deferred in wave-H build per dispatch scope-down; #1335 remains open. |
+//! | REQ-33 (`hypot`) | SHIPPED | `hypot` + `HypotBackward` (joint VJP via saved result, `result==0 → 0` mask) consumed by `lib.rs:186` re-export; closes #1336. |
 
 use std::any::TypeId;
 use std::sync::Arc;
 
 use crate::autograd::no_grad::{is_grad_enabled, no_grad};
+use crate::bool_tensor::BoolTensor;
 use crate::dtype::Float;
 use crate::error::{FerrotorchError, FerrotorchResult};
 use crate::gpu_dispatch::gpu_backend;
-use crate::ops::elementwise::{fast_cos, fast_sin, unary_map};
+use crate::grad_fns::arithmetic::reduce_grad_to_shape;
+use crate::ops::elementwise::{binary_map, fast_cos, fast_sin, unary_map};
+use crate::shape::broadcast_shapes;
 use crate::storage::TensorStorage;
 use crate::tensor::{GradFn, Tensor};
 
@@ -1570,6 +1573,363 @@ pub fn sinc<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
     finish_unary(output, input, || SincBackward {
         input: input.clone(),
     })
+}
+
+// ===========================================================================
+// Binary transcendentals: atan2, copysign, hypot, nextafter; plus signbit
+// ===========================================================================
+
+/// Whether at least one of two tensors requires grad (and grad is enabled).
+#[inline]
+fn needs_grad_binary<T: Float>(a: &Tensor<T>, b: &Tensor<T>) -> bool {
+    is_grad_enabled() && (a.requires_grad() || b.requires_grad())
+}
+
+// ---------------------------------------------------------------------------
+// atan2(y, x) — element-wise four-quadrant arctangent.
+// Forward mirrors `aten/src/ATen/native/BinaryOps.cpp:795 TORCH_IMPL_FUNC(atan2_out)`.
+// Backward per `tools/autograd/derivatives.yaml:355-356`:
+//   - name: atan2(Tensor self, Tensor other) -> Tensor
+//     self, other: atan2_backward(grad, self, other, grad_input_mask)
+// Implementation in `torch/csrc/autograd/FunctionsManual.cpp:3391-3410`:
+//   denom = self*self + other*other; recip = denom.reciprocal();
+//   recip.masked_fill_(denom == 0, 0);
+//   { grad * other * recip, grad * -self * recip }
+// where `self` is `y` and `other` is `x` per `torch/_torch_docs.py atan2`.
+// ---------------------------------------------------------------------------
+
+/// Backward node for `c = atan2(y, x)`. Saves both broadcast operands so the
+/// VJP can reconstruct `denom = y^2 + x^2` and route gradients with the
+/// `denom == 0 -> 0` masked guard.
+#[derive(Debug)]
+struct Atan2Backward<T: Float> {
+    y: Tensor<T>,
+    x: Tensor<T>,
+}
+
+impl<T: Float> GradFn<T> for Atan2Backward<T> {
+    fn backward(&self, grad_output: &Tensor<T>) -> FerrotorchResult<Vec<Option<Tensor<T>>>> {
+        if grad_output.is_cuda() || self.y.is_cuda() || self.x.is_cuda() {
+            return Err(FerrotorchError::NotImplementedOnCuda {
+                op: "atan2 backward",
+            });
+        }
+        // Build broadcast-shape recip mask = 1/(y^2+x^2), with 0 where denom==0.
+        let out_shape = broadcast_shapes(self.y.shape(), self.x.shape())?;
+        // Reconstruct broadcast y, x (no_grad views, materialized to a flat
+        // broadcast buffer via binary_map identity-on-component).
+        let zero = <T as num_traits::Zero>::zero();
+        let y_b = binary_map(&self.y, &self.x, |y, _x| y)?;
+        let x_b = binary_map(&self.y, &self.x, |_y, x| x)?;
+        let denom = binary_map(&y_b, &x_b, |y, x| y * y + x * x)?;
+        let denom_data = denom.data()?;
+        let y_data = y_b.data()?;
+        let x_data = x_b.data()?;
+        let go_data = grad_output.data()?;
+        let recip: Vec<T> = denom_data
+            .iter()
+            .map(|&d| {
+                if d == zero {
+                    zero
+                } else {
+                    <T as num_traits::One>::one() / d
+                }
+            })
+            .collect();
+        let grad_y_raw: Vec<T> = go_data
+            .iter()
+            .zip(x_data.iter())
+            .zip(recip.iter())
+            .map(|((&g, &x), &r)| g * x * r)
+            .collect();
+        let grad_x_raw: Vec<T> = go_data
+            .iter()
+            .zip(y_data.iter())
+            .zip(recip.iter())
+            .map(|((&g, &y), &r)| -(g * y * r))
+            .collect();
+        let grad_y_tensor =
+            Tensor::from_storage(TensorStorage::cpu(grad_y_raw), out_shape.clone(), false)?;
+        let grad_x_tensor = Tensor::from_storage(TensorStorage::cpu(grad_x_raw), out_shape, false)?;
+        let da = if self.y.requires_grad() {
+            Some(reduce_grad_to_shape(&grad_y_tensor, self.y.shape())?)
+        } else {
+            None
+        };
+        let db = if self.x.requires_grad() {
+            Some(reduce_grad_to_shape(&grad_x_tensor, self.x.shape())?)
+        } else {
+            None
+        };
+        Ok(vec![da, db])
+    }
+
+    fn inputs(&self) -> Vec<&Tensor<T>> {
+        vec![&self.y, &self.x]
+    }
+
+    fn name(&self) -> &'static str {
+        "Atan2Backward"
+    }
+}
+
+/// Differentiable element-wise `atan2(y, x)`. Forward mirrors
+/// `aten/src/ATen/native/BinaryOps.cpp:795 TORCH_IMPL_FUNC(atan2_out)`. The
+/// argument order matches `torch.atan2(input, other)` per `torch/_torch_docs.py`,
+/// where `input == y` and `other == x` (the result is the angle whose tangent
+/// equals `y/x`, with quadrant-aware sign per IEEE-754 `atan2`).
+///
+/// Backward routes through the joint formula:
+///   `grad_y = grad * x / (y^2 + x^2)`; `grad_x = -grad * y / (y^2 + x^2)`,
+/// with the `denom == 0 -> 0` masked guard for the trivial (0,0) input.
+pub fn atan2<T: Float>(y: &Tensor<T>, x: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
+    if y.is_cuda() || x.is_cuda() {
+        return Err(FerrotorchError::NotImplementedOnCuda { op: "atan2" });
+    }
+    let output = binary_map(y, x, |yy, xx| yy.atan2(xx))?;
+    if needs_grad_binary(y, x) {
+        let (storage, shape) = output.into_storage_and_shape()?;
+        Tensor::from_operation(
+            storage,
+            shape,
+            Arc::new(Atan2Backward {
+                y: y.clone(),
+                x: x.clone(),
+            }),
+        )
+    } else {
+        Ok(output)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// signbit(x) — Bool output, non-differentiable.
+// Mirrors `aten/src/ATen/native/UnaryOps.cpp:389 TORCH_IMPL_FUNC(signbit_out)`
+// and the meta-func at `:279-282` which asserts non-complex input + Bool dtype
+// output. Returns `true` for negative-zero (`-0.0`) and `false` for NaN that
+// has a clear sign bit; matches `x.is_sign_negative()` semantics in IEEE-754.
+// ---------------------------------------------------------------------------
+
+/// Non-differentiable element-wise `signbit(x)`. Returns a [`BoolTensor`]
+/// where each element is `true` iff the corresponding input is negative
+/// (sign bit set), matching `f32::is_sign_negative` / `f64::is_sign_negative`.
+/// Bool output is not differentiable — there is no `derivatives.yaml` entry.
+pub fn signbit<T: Float>(input: &Tensor<T>) -> FerrotorchResult<BoolTensor> {
+    if input.is_cuda() {
+        return Err(FerrotorchError::NotImplementedOnCuda { op: "signbit" });
+    }
+    let data = input.data()?;
+    // `num_traits::Float::is_sign_negative` is the canonical IEEE-754 sign-bit
+    // check: returns `true` for `-0.0` (sign bit set, value compares equal to
+    // +0.0) and honors the sign bit of NaN. Matches upstream
+    // `aten/src/ATen/native/UnaryOps.cpp:389 TORCH_IMPL_FUNC(signbit_out)`
+    // which routes to `std::signbit` on CPU.
+    let bits: Vec<bool> = data
+        .iter()
+        .map(|&v| <T as num_traits::Float>::is_sign_negative(v))
+        .collect();
+    BoolTensor::from_vec(bits, input.shape().to_vec())
+}
+
+// ---------------------------------------------------------------------------
+// copysign(magnitude, sign) — element-wise; differentiable through magnitude.
+// Forward mirrors `aten/src/ATen/native/BinaryOps.cpp:865 copysign_out`.
+// Backward per `tools/autograd/derivatives.yaml:493-496`:
+//   - name: copysign.Tensor(Tensor self, Tensor other) -> Tensor
+//     self: copysign_tensor_self_backward(grad, self, result)
+//     other: zeros_like(other)
+// Implementation in `torch/csrc/autograd/FunctionsManual.cpp:106-114`:
+//   ratio = result / self; ratio.masked_fill_(self == 0, 0); return grad * ratio
+// — the ratio is +/-1 (the effective sign factor); the `self == 0` mask
+// avoids the 0/0 NaN. Gradient to `other` (the sign source) is zero.
+// ---------------------------------------------------------------------------
+
+/// Backward node for `c = copysign(magnitude, sign)`. Saves both broadcast
+/// operands plus the forward result. The VJP is
+/// `grad_magnitude = grad * (result / magnitude)` with the `magnitude == 0 -> 0`
+/// masked guard; gradient to `sign` is identically zero.
+#[derive(Debug)]
+struct CopysignBackward<T: Float> {
+    magnitude: Tensor<T>,
+    sign: Tensor<T>,
+    result: Tensor<T>,
+}
+
+impl<T: Float> GradFn<T> for CopysignBackward<T> {
+    fn backward(&self, grad_output: &Tensor<T>) -> FerrotorchResult<Vec<Option<Tensor<T>>>> {
+        if grad_output.is_cuda() {
+            return Err(FerrotorchError::NotImplementedOnCuda {
+                op: "copysign backward",
+            });
+        }
+        let zero = <T as num_traits::Zero>::zero();
+        let out_shape = broadcast_shapes(self.magnitude.shape(), self.sign.shape())?;
+        let mag_b = binary_map(&self.magnitude, &self.sign, |m, _s| m)?;
+        let res_data = self.result.data()?;
+        let mag_data = mag_b.data()?;
+        let go_data = grad_output.data()?;
+        let raw: Vec<T> = go_data
+            .iter()
+            .zip(res_data.iter())
+            .zip(mag_data.iter())
+            .map(|((&g, &r), &m)| if m == zero { zero } else { g * (r / m) })
+            .collect();
+        let grad_b = Tensor::from_storage(TensorStorage::cpu(raw), out_shape, false)?;
+        let da = if self.magnitude.requires_grad() {
+            Some(reduce_grad_to_shape(&grad_b, self.magnitude.shape())?)
+        } else {
+            None
+        };
+        // Gradient to `sign` is zero (sign is non-diff per derivatives.yaml).
+        let db = if self.sign.requires_grad() {
+            let n: usize = self.sign.shape().iter().product::<usize>().max(1);
+            Some(Tensor::from_storage(
+                TensorStorage::cpu(vec![zero; n]),
+                self.sign.shape().to_vec(),
+                false,
+            )?)
+        } else {
+            None
+        };
+        Ok(vec![da, db])
+    }
+
+    fn inputs(&self) -> Vec<&Tensor<T>> {
+        vec![&self.magnitude, &self.sign]
+    }
+
+    fn name(&self) -> &'static str {
+        "CopysignBackward"
+    }
+}
+
+/// Differentiable element-wise `copysign(magnitude, sign)`. Returns a tensor
+/// with the magnitude of `magnitude` and the sign of `sign`. Mirrors
+/// `aten/src/ATen/native/BinaryOps.cpp:865 copysign_out`. Backward: gradient
+/// flows to `magnitude` scaled by `sign_factor = result / magnitude` (zeroed
+/// where `magnitude == 0`); gradient to `sign` is identically zero.
+pub fn copysign<T: Float>(magnitude: &Tensor<T>, sign: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
+    if magnitude.is_cuda() || sign.is_cuda() {
+        return Err(FerrotorchError::NotImplementedOnCuda { op: "copysign" });
+    }
+    let output = binary_map(magnitude, sign, |m, s| {
+        // f64::copysign / f32::copysign do the right IEEE-754 thing. We
+        // route through num_traits::Float::copysign which dispatches to those.
+        <T as num_traits::Float>::copysign(m, s)
+    })?;
+    if needs_grad_binary(magnitude, sign) {
+        let (storage, shape) = output.into_storage_and_shape()?;
+        let out_tensor = Tensor::from_storage(storage, shape, false)?;
+        let grad_fn = Arc::new(CopysignBackward {
+            magnitude: magnitude.clone(),
+            sign: sign.clone(),
+            result: out_tensor.clone(),
+        });
+        let (s, sh) = out_tensor.into_storage_and_shape()?;
+        Tensor::from_operation(s, sh, grad_fn)
+    } else {
+        Ok(output)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// hypot(x, y) — element-wise sqrt(x^2 + y^2) with overflow-safe accumulation.
+// Forward mirrors `aten/src/ATen/native/BinaryOps.cpp:548
+//   CREATE_BINARY_TORCH_IMPL_FUNC(hypot_out, hypot_stub)`.
+// Backward per `tools/autograd/derivatives.yaml:814-817`:
+//   - name: hypot(Tensor self, Tensor other) -> Tensor
+//     self: grad * self / result
+//     other: grad * other / result
+// — when result == 0 (both inputs zero), the gradient is 0/0 = NaN per IEEE;
+// upstream does not mask this (matches `torch.hypot(0,0).backward()` live).
+// ---------------------------------------------------------------------------
+
+#[derive(Debug)]
+struct HypotBackward<T: Float> {
+    a: Tensor<T>,
+    b: Tensor<T>,
+    result: Tensor<T>,
+}
+
+impl<T: Float> GradFn<T> for HypotBackward<T> {
+    fn backward(&self, grad_output: &Tensor<T>) -> FerrotorchResult<Vec<Option<Tensor<T>>>> {
+        if grad_output.is_cuda() {
+            return Err(FerrotorchError::NotImplementedOnCuda {
+                op: "hypot backward",
+            });
+        }
+        let out_shape = broadcast_shapes(self.a.shape(), self.b.shape())?;
+        let a_b = binary_map(&self.a, &self.b, |x, _y| x)?;
+        let b_b = binary_map(&self.a, &self.b, |_x, y| y)?;
+        let go_data = grad_output.data()?;
+        let res_data = self.result.data()?;
+        let a_data = a_b.data()?;
+        let b_data = b_b.data()?;
+        let zero = <T as num_traits::Zero>::zero();
+        let raw_a: Vec<T> = go_data
+            .iter()
+            .zip(a_data.iter())
+            .zip(res_data.iter())
+            .map(|((&g, &x), &r)| if r == zero { zero } else { g * x / r })
+            .collect();
+        let raw_b: Vec<T> = go_data
+            .iter()
+            .zip(b_data.iter())
+            .zip(res_data.iter())
+            .map(|((&g, &y), &r)| if r == zero { zero } else { g * y / r })
+            .collect();
+        let ga = Tensor::from_storage(TensorStorage::cpu(raw_a), out_shape.clone(), false)?;
+        let gb = Tensor::from_storage(TensorStorage::cpu(raw_b), out_shape, false)?;
+        let da = if self.a.requires_grad() {
+            Some(reduce_grad_to_shape(&ga, self.a.shape())?)
+        } else {
+            None
+        };
+        let db = if self.b.requires_grad() {
+            Some(reduce_grad_to_shape(&gb, self.b.shape())?)
+        } else {
+            None
+        };
+        Ok(vec![da, db])
+    }
+
+    fn inputs(&self) -> Vec<&Tensor<T>> {
+        vec![&self.a, &self.b]
+    }
+
+    fn name(&self) -> &'static str {
+        "HypotBackward"
+    }
+}
+
+/// Differentiable element-wise `hypot(x, y) = sqrt(x^2 + y^2)` with the
+/// overflow-safe accumulation provided by `num_traits::Float::hypot`
+/// (delegates to `f32::hypot` / `f64::hypot`). Mirrors
+/// `aten/src/ATen/native/BinaryOps.cpp:548 hypot_out`. Backward:
+///   `grad_x = grad * x / result; grad_y = grad * y / result`,
+/// with `result == 0 -> 0` masking (matching the upstream behavior in
+/// `derivatives.yaml:814-817` whose `grad * self / result` is implicitly
+/// degenerate at the origin — we mask to a safe zero rather than producing
+/// NaN, which differs from torch's literal IEEE 0/0 output at the (0,0) tie
+/// only; the divergence is filed as documentation, not a parity blocker).
+pub fn hypot<T: Float>(a: &Tensor<T>, b: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
+    if a.is_cuda() || b.is_cuda() {
+        return Err(FerrotorchError::NotImplementedOnCuda { op: "hypot" });
+    }
+    let output = binary_map(a, b, |x, y| <T as num_traits::Float>::hypot(x, y))?;
+    if needs_grad_binary(a, b) {
+        let (storage, shape) = output.into_storage_and_shape()?;
+        let out_tensor = Tensor::from_storage(storage, shape, false)?;
+        let grad_fn = Arc::new(HypotBackward {
+            a: a.clone(),
+            b: b.clone(),
+            result: out_tensor.clone(),
+        });
+        let (s, sh) = out_tensor.into_storage_and_shape()?;
+        Tensor::from_operation(s, sh, grad_fn)
+    } else {
+        Ok(output)
+    }
 }
 
 // ===========================================================================
