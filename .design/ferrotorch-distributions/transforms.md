@@ -101,10 +101,17 @@ upstream `__all__`) and
   Likewise the Constraint linkage (`domain` / `codomain` properties
   per transform) is not implemented.
 
-- REQ-9: NOT-STARTED — Monte-Carlo entropy fallback for non-closed-form
+- REQ-9: SHIPPED — Monte-Carlo entropy fallback for non-closed-form
   transform chains (Sigmoid, Tanh, Softplus, multi-Exp,
-  Exp-then-Affine, etc.) is not implemented; today these surface
-  `InvalidArgument` instead of falling back to sampled estimation.
+  Exp-then-Affine, etc.). `fn TransformedDistribution::entropy_monte_carlo`
+  estimates `H(Y) = H(X) + E_X[log|det J_f(X)|]` with
+  `MC_ENTROPY_SAMPLES = 20_000` base draws pushed through each link's
+  `log_abs_det_jacobian`, averaged over the sample axis and broadcast
+  onto `base_entropy`'s shape. The `entropy` dispatcher invokes it as
+  path 4 on fall-through, so `td.entropy()` on these chains now returns
+  a value instead of `InvalidArgument`. Quadrature-verified by
+  `test_transformed_distribution_entropy_{sigmoid,exp_then_affine}_monte_carlo`
+  + integration `divergence_wave_k_audit::audit_1378_*`. Closes #1378.
 
 ## Acceptance Criteria
 
@@ -123,7 +130,8 @@ upstream `__all__`) and
 - [x] AC-7: `TransformedDistribution::entropy` three-path dispatch
   with named-transform error message on fall-through.
 - [ ] AC-8: 11 missing transforms — blocker #1373.
-- [ ] AC-9: Monte-Carlo entropy fallback — blocker #1378.
+- [x] AC-9: Monte-Carlo entropy fallback for X-dependent-Jacobian
+  chains — closes #1378.
 
 ## Architecture
 
@@ -349,4 +357,4 @@ Expected: `~30 passed`.
 | REQ-6 | SHIPPED | impl: `pub struct TransformedDistribution<T: Float>` with `Box<dyn Distribution<T>>` base + `Vec<Box<dyn Transform<T>>>` chain + `sample`/`rsample`/`log_prob`/`entropy` Distribution impl in `transforms.rs`, mirroring `torch/distributions/transformed_distribution.py:TransformedDistribution`; non-test consumer: `pub use transforms::TransformedDistribution` in `lib.rs:108` — grandfathered public API. |
 | REQ-7 | SHIPPED | impl: `fn TransformedDistribution::entropy` three-case dispatcher (empty, all-constant-Jacobian, single-Exp) with named-transform error message on fall-through in `transforms.rs`; non-test consumer: `fn TransformedDistribution::entropy` is itself the dispatcher; the consumer is any downstream code calling `td.entropy()` — `pub use TransformedDistribution` makes the entropy method part of the public Distribution impl and `test_transformed_distribution_entropy_*` tests pin all four branches. |
 | REQ-8 | NOT-STARTED | blocker #1373 — 11 of 16 upstream transforms not ported (`AbsTransform`, `PowerTransform`, `SoftmaxTransform`, `StickBreakingTransform`, `CatTransform`, `StackTransform`, `CorrCholeskyTransform`, `LowerCholeskyTransform`, `PositiveDefiniteTransform`, `ReshapeTransform`, `IndependentTransform`, `CumulativeDistributionTransform`); also Constraint domain/codomain linkage missing. |
-| REQ-9 | NOT-STARTED | blocker #1378 — Monte-Carlo entropy fallback for non-closed-form chains (Sigmoid/Tanh/Softplus/multi-Exp/Exp-then-Affine) not implemented; PyTorch uses MC fallback, ferrotorch surfaces `InvalidArgument`. |
+| REQ-9 | SHIPPED | impl: `fn TransformedDistribution::entropy_monte_carlo` in `transforms.rs` estimates `H(Y) = H(X) + E_X[log|det J_f(X)|]` with `MC_ENTROPY_SAMPLES = 20_000` base draws pushed through each link's `log_abs_det_jacobian`, averaged over the sample axis and broadcast onto the batch shape; non-test consumer: `fn TransformedDistribution::entropy` invokes it as path 4 on fall-through (so a Sigmoid/Tanh chain's `td.entropy()` returns a value instead of erroring) — reachable through `pub use transforms::TransformedDistribution`. Quadrature-verified by `test_transformed_distribution_entropy_{sigmoid,exp_then_affine}_monte_carlo` + integration `divergence_wave_k_audit::audit_1378_{sigmoid,tanh,exp_then_affine}_*`. Closes #1378. |

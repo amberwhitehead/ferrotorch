@@ -20,7 +20,7 @@
 //! | REQ-4 (8 same-family closed-form formulas) | SHIPPED | 8 closed-form helpers in `kl.rs` (`kl_normal_normal`, `kl_bernoulli_bernoulli`, `kl_uniform_uniform`, `kl_categorical_categorical`, `kl_laplace_laplace`, `kl_exponential_exponential`, `kl_gamma_gamma`, `kl_poisson_poisson`) mirroring `@register_kl` bodies in `torch/distributions/kl.py`; consumer: the dispatcher invokes each formula |
 //! | REQ-5 (4 cross-family formulas) | SHIPPED | `kl_normal_uniform`, `kl_uniform_normal`, `kl_gamma_exponential`, `kl_exponential_gamma` in `kl.rs`; last two use `kl_gamma_scalar` via `Exp(λ) ≡ Gamma(1, λ)`; consumer: the dispatcher calls each; `kl_gamma_scalar` is consumed by 3 production sites internally |
 //! | REQ-6 (fallback guard on every formula) | SHIPPED | every formula's first statement is `crate::fallback::check_gpu_fallback_opt_in(&[...], "kl_divergence(P, Q)")?` in `kl.rs` — 12 production call sites of the fallback gate; consumer: this IS the production consumer of `fn check_gpu_fallback_opt_in` per `fallback.md` REQ-2 |
-//! | REQ-7 (full ~75-pair PyTorch coverage) | NOT-STARTED | blocker #1374 — PyTorch ships ~75 (P, Q) KL pairs; ferrotorch has 12; missing pairs include Beta-Beta, Dirichlet-Dirichlet, Gumbel-Gumbel, HalfNormal-HalfNormal, MVN-MVN, Pareto-Pareto, StudentT-Normal + many cross-family (Gamma-Normal, Poisson-Bernoulli, etc.) |
+//! | REQ-7 (full ~75-pair PyTorch coverage) | PARTIAL | blocker #1374 — ferrotorch now ships 19 of PyTorch's ~75 pairs (was 12). Added (#1374): Beta-Beta, Gumbel-Gumbel, Pareto-Pareto, HalfNormal-HalfNormal (same-family) + Exponential-Normal, Gamma-Normal, Laplace-Normal (cross-family), each mirroring its `@register_kl` body in `torch/distributions/kl.py`; consumer: the dispatcher's new downcast arms. Still missing: Dirichlet-Dirichlet, Binomial-Binomial, Geometric-Geometric, MVN-MVN, ContinuousBernoulli pairs, and the many `+inf` boundary cross-pairs (Beta-Gamma, Gamma-Gumbel, Gumbel-Normal, ...) — #1374 stays open for the remaining ~56. |
 //! | REQ-8 (`register_kl` extension API) | NOT-STARTED | blocker #1375 — `register_kl` decorator pattern + `_dispatch_kl` most-specific-subclass match (mirroring `torch/distributions/kl.py:51-138`) not implemented; the hand-coded `Any::downcast_ref` chain is closed to downstream extension |
 
 use ferrotorch_core::dtype::Float;
@@ -30,8 +30,13 @@ use ferrotorch_core::tensor::Tensor;
 
 use crate::special_fns::{digamma_scalar, lgamma_scalar};
 use crate::{
-    Bernoulli, Categorical, Distribution, Exponential, Gamma, Laplace, Normal, Poisson, Uniform,
+    Bernoulli, Beta, Categorical, Distribution, Exponential, Gamma, Gumbel, HalfNormal, Laplace,
+    Normal, Pareto, Poisson, Uniform,
 };
+
+/// Euler-Mascheroni constant `γ`. Mirrors PyTorch's
+/// `torch.distributions.utils.euler_constant` (used by the Gumbel KL formulas).
+const EULER_GAMMA: f64 = 0.577_215_664_901_532_9;
 
 // ---------------------------------------------------------------------------
 // Public API
@@ -64,6 +69,13 @@ use crate::{
 /// | Poisson | Poisson |
 /// | Gamma | Exponential |
 /// | Exponential | Gamma |
+/// | Beta | Beta |
+/// | Gumbel | Gumbel |
+/// | Pareto | Pareto |
+/// | HalfNormal | HalfNormal |
+/// | Exponential | Normal |
+/// | Gamma | Normal |
+/// | Laplace | Normal |
 ///
 /// The same set is also reported by [`kl_supported_pair_count`].
 ///
@@ -98,7 +110,7 @@ pub const fn kl_supported_pair_count() -> usize {
 /// Compile-time count of registered `(P, Q)` pairs. Update this when adding
 /// or removing a branch in [`kl_dispatch`] **and** the doc table on
 /// [`kl_divergence`] in lockstep; the drift test enforces the invariant.
-const KL_SUPPORTED_PAIR_COUNT: usize = 12;
+const KL_SUPPORTED_PAIR_COUNT: usize = 19;
 
 fn kl_dispatch<T: Float>(
     p: &dyn std::any::Any,
@@ -182,14 +194,53 @@ fn kl_dispatch<T: Float>(
     ) {
         return kl_exponential_gamma(pe, qg);
     }
+    // Beta-Beta
+    if let (Some(pb), Some(qb)) = (p.downcast_ref::<Beta<T>>(), q.downcast_ref::<Beta<T>>()) {
+        return kl_beta_beta(pb, qb);
+    }
+    // Gumbel-Gumbel
+    if let (Some(pg), Some(qg)) = (p.downcast_ref::<Gumbel<T>>(), q.downcast_ref::<Gumbel<T>>()) {
+        return kl_gumbel_gumbel(pg, qg);
+    }
+    // Pareto-Pareto
+    if let (Some(pp_), Some(qp_)) = (p.downcast_ref::<Pareto<T>>(), q.downcast_ref::<Pareto<T>>()) {
+        return kl_pareto_pareto(pp_, qp_);
+    }
+    // HalfNormal-HalfNormal
+    if let (Some(ph), Some(qh)) = (
+        p.downcast_ref::<HalfNormal<T>>(),
+        q.downcast_ref::<HalfNormal<T>>(),
+    ) {
+        return kl_halfnormal_halfnormal(ph, qh);
+    }
+    // Exponential-Normal (cross-family)
+    if let (Some(pe), Some(qn)) = (
+        p.downcast_ref::<Exponential<T>>(),
+        q.downcast_ref::<Normal<T>>(),
+    ) {
+        return kl_exponential_normal(pe, qn);
+    }
+    // Gamma-Normal (cross-family)
+    if let (Some(pg), Some(qn)) = (p.downcast_ref::<Gamma<T>>(), q.downcast_ref::<Normal<T>>()) {
+        return kl_gamma_normal(pg, qn);
+    }
+    // Laplace-Normal (cross-family)
+    if let (Some(pl), Some(qn)) = (
+        p.downcast_ref::<Laplace<T>>(),
+        q.downcast_ref::<Normal<T>>(),
+    ) {
+        return kl_laplace_normal(pl, qn);
+    }
 
     Err(FerrotorchError::InvalidArgument {
         message: "No KL divergence formula registered for this distribution pair. \
                   Supported same-family pairs: Normal-Normal, Bernoulli-Bernoulli, \
                   Uniform-Uniform, Categorical-Categorical, Laplace-Laplace, \
-                  Exponential-Exponential, Gamma-Gamma, Poisson-Poisson. \
+                  Exponential-Exponential, Gamma-Gamma, Poisson-Poisson, \
+                  Beta-Beta, Gumbel-Gumbel, Pareto-Pareto, HalfNormal-HalfNormal. \
                   Cross-family: Normal-Uniform, Uniform-Normal, \
-                  Gamma-Exponential, Exponential-Gamma."
+                  Gamma-Exponential, Exponential-Gamma, Exponential-Normal, \
+                  Gamma-Normal, Laplace-Normal."
             .into(),
     })
 }
@@ -592,6 +643,314 @@ fn kl_exponential_gamma<T: Float>(p: &Exponential<T>, q: &Gamma<T>) -> Ferrotorc
         .collect();
 
     Tensor::from_storage(TensorStorage::cpu(result), p.rate().shape().to_vec(), false)
+}
+
+// ---------------------------------------------------------------------------
+// Additional KL formulas (#1374): Beta-Beta, Gumbel-Gumbel, Pareto-Pareto,
+// HalfNormal-HalfNormal + cross-family Exponential-Normal, Gamma-Normal,
+// Laplace-Normal. Each mirrors a `@register_kl` body in
+// `torch/distributions/kl.py`.
+// ---------------------------------------------------------------------------
+
+/// KL(Beta(α1, β1) || Beta(α2, β2)).
+///
+/// Mirrors `torch/distributions/kl.py:219-228` `_kl_beta_beta`:
+/// ```text
+/// t1 = lnΓ(α2) + lnΓ(β2) + lnΓ(α1+β1)
+/// t2 = lnΓ(α1) + lnΓ(β1) + lnΓ(α2+β2)
+/// t3 = (α1-α2)·ψ(α1);  t4 = (β1-β2)·ψ(β1)
+/// t5 = (α2+β2 - (α1+β1))·ψ(α1+β1)
+/// KL = t1 - t2 + t3 + t4 + t5
+/// ```
+/// where `concentration1 = α` and `concentration0 = β`.
+fn kl_beta_beta<T: Float>(p: &Beta<T>, q: &Beta<T>) -> FerrotorchResult<Tensor<T>> {
+    crate::fallback::check_gpu_fallback_opt_in(
+        &[
+            p.concentration1(),
+            p.concentration0(),
+            q.concentration1(),
+            q.concentration0(),
+        ],
+        "kl_divergence(Beta, Beta)",
+    )?;
+    let pa = p.concentration1().data_vec()?;
+    let pb = p.concentration0().data_vec()?;
+    let qa = q.concentration1().data_vec()?;
+    let qb = q.concentration0().data_vec()?;
+
+    let result: Vec<T> = pa
+        .iter()
+        .zip(pb.iter())
+        .zip(qa.iter().cycle())
+        .zip(qb.iter().cycle())
+        .map(|(((&pa, &pb), &qa), &qb)| {
+            let sum_p = pa + pb;
+            let sum_q = qa + qb;
+            let t1 = lgamma_scalar(qa) + lgamma_scalar(qb) + lgamma_scalar(sum_p);
+            let t2 = lgamma_scalar(pa) + lgamma_scalar(pb) + lgamma_scalar(sum_q);
+            let t3 = (pa - qa) * digamma_scalar(pa);
+            let t4 = (pb - qb) * digamma_scalar(pb);
+            let t5 = (sum_q - sum_p) * digamma_scalar(sum_p);
+            t1 - t2 + t3 + t4 + t5
+        })
+        .collect();
+
+    Tensor::from_storage(
+        TensorStorage::cpu(result),
+        p.concentration1().shape().to_vec(),
+        false,
+    )
+}
+
+/// KL(Gumbel(loc1, scale1) || Gumbel(loc2, scale2)).
+///
+/// Mirrors `torch/distributions/kl.py:309-317` `_kl_gumbel_gumbel`:
+/// ```text
+/// ct1 = scale1/scale2;  ct2 = loc2/scale2;  ct3 = loc1/scale2
+/// t1 = -ln(ct1) - ct2 + ct3
+/// t2 = ct1·γ
+/// t3 = exp(ct2 + lnΓ(1 + ct1) - ct3)
+/// KL = t1 + t2 + t3 - (1 + γ)
+/// ```
+fn kl_gumbel_gumbel<T: Float>(p: &Gumbel<T>, q: &Gumbel<T>) -> FerrotorchResult<Tensor<T>> {
+    crate::fallback::check_gpu_fallback_opt_in(
+        &[p.loc(), p.scale(), q.loc(), q.scale()],
+        "kl_divergence(Gumbel, Gumbel)",
+    )?;
+    let p_loc = p.loc().data_vec()?;
+    let p_scale = p.scale().data_vec()?;
+    let q_loc = q.loc().data_vec()?;
+    let q_scale = q.scale().data_vec()?;
+    let one = T::from(1.0).unwrap();
+    let euler = T::from(EULER_GAMMA).unwrap();
+
+    let result: Vec<T> = p_loc
+        .iter()
+        .zip(p_scale.iter())
+        .zip(q_loc.iter().cycle())
+        .zip(q_scale.iter().cycle())
+        .map(|(((&pl, &ps), &ql), &qs)| {
+            let ct1 = ps / qs;
+            let ct2 = ql / qs;
+            let ct3 = pl / qs;
+            let t1 = -ct1.ln() - ct2 + ct3;
+            let t2 = ct1 * euler;
+            let t3 = (ct2 + lgamma_scalar(one + ct1) - ct3).exp();
+            t1 + t2 + t3 - (one + euler)
+        })
+        .collect();
+
+    Tensor::from_storage(TensorStorage::cpu(result), p.loc().shape().to_vec(), false)
+}
+
+/// KL(Pareto(scale1, α1) || Pareto(scale2, α2)).
+///
+/// Mirrors `torch/distributions/kl.py:479-488` `_kl_pareto_pareto`:
+/// ```text
+/// scale_ratio = scale1/scale2;  alpha_ratio = α2/α1
+/// t1 = α2·ln(scale_ratio);  t2 = -ln(alpha_ratio)
+/// KL = t1 + t2 + alpha_ratio - 1
+/// KL = +inf when scale1 < scale2 (support lower bound of p below q's)
+/// ```
+fn kl_pareto_pareto<T: Float>(p: &Pareto<T>, q: &Pareto<T>) -> FerrotorchResult<Tensor<T>> {
+    crate::fallback::check_gpu_fallback_opt_in(
+        &[p.scale(), p.alpha(), q.scale(), q.alpha()],
+        "kl_divergence(Pareto, Pareto)",
+    )?;
+    let p_scale = p.scale().data_vec()?;
+    let p_alpha = p.alpha().data_vec()?;
+    let q_scale = q.scale().data_vec()?;
+    let q_alpha = q.alpha().data_vec()?;
+    let one = T::from(1.0).unwrap();
+
+    let result: Vec<T> = p_scale
+        .iter()
+        .zip(p_alpha.iter())
+        .zip(q_scale.iter().cycle())
+        .zip(q_alpha.iter().cycle())
+        .map(|(((&ps, &pa), &qs), &qa)| {
+            // Pareto support lower bound is `scale`; KL is +inf when p's
+            // support extends below q's (p.scale < q.scale).
+            if ps < qs {
+                T::infinity()
+            } else {
+                let scale_ratio = ps / qs;
+                let alpha_ratio = qa / pa;
+                qa * scale_ratio.ln() - alpha_ratio.ln() + alpha_ratio - one
+            }
+        })
+        .collect();
+
+    Tensor::from_storage(
+        TensorStorage::cpu(result),
+        p.scale().shape().to_vec(),
+        false,
+    )
+}
+
+/// KL(HalfNormal(scale1) || HalfNormal(scale2)).
+///
+/// Mirrors `torch/distributions/kl.py:325-327` `_kl_halfnormal_halfnormal`,
+/// which delegates to `_kl_normal_normal(p.base_dist, q.base_dist)` with both
+/// base distributions `Normal(0, scale)`. With `loc = 0` this is
+/// `0.5·(var_ratio - 1 - ln(var_ratio))` where `var_ratio = (s1/s2)^2`.
+fn kl_halfnormal_halfnormal<T: Float>(
+    p: &HalfNormal<T>,
+    q: &HalfNormal<T>,
+) -> FerrotorchResult<Tensor<T>> {
+    crate::fallback::check_gpu_fallback_opt_in(
+        &[p.scale(), q.scale()],
+        "kl_divergence(HalfNormal, HalfNormal)",
+    )?;
+    let p_scale = p.scale().data_vec()?;
+    let q_scale = q.scale().data_vec()?;
+    let half = T::from(0.5).unwrap();
+    let one = T::from(1.0).unwrap();
+
+    let result: Vec<T> = p_scale
+        .iter()
+        .zip(q_scale.iter().cycle())
+        .map(|(&ps, &qs)| {
+            let var_ratio = (ps / qs) * (ps / qs);
+            half * (var_ratio - one - var_ratio.ln())
+        })
+        .collect();
+
+    Tensor::from_storage(
+        TensorStorage::cpu(result),
+        p.scale().shape().to_vec(),
+        false,
+    )
+}
+
+/// KL(Exponential(rate) || Normal(loc, scale)) (cross-family).
+///
+/// Mirrors `torch/distributions/kl.py:654-662` `_kl_exponential_normal`:
+/// ```text
+/// var = scale^2;  rate_sqr = rate^2
+/// t1 = 0.5·ln(rate_sqr · var · 2π)
+/// t2 = 1/rate_sqr;  t3 = loc/rate;  t4 = loc^2 / 2
+/// KL = t1 - 1 + (t2 - t3 + t4) / var
+/// ```
+fn kl_exponential_normal<T: Float>(
+    p: &Exponential<T>,
+    q: &Normal<T>,
+) -> FerrotorchResult<Tensor<T>> {
+    crate::fallback::check_gpu_fallback_opt_in(
+        &[p.rate(), q.loc(), q.scale()],
+        "kl_divergence(Exponential, Normal)",
+    )?;
+    let p_rate = p.rate().data_vec()?;
+    let q_loc = q.loc().data_vec()?;
+    let q_scale = q.scale().data_vec()?;
+    let half = T::from(0.5).unwrap();
+    let one = T::from(1.0).unwrap();
+    let two = T::from(2.0).unwrap();
+    let two_pi = T::from(2.0 * std::f64::consts::PI).unwrap();
+
+    let result: Vec<T> = p_rate
+        .iter()
+        .zip(q_loc.iter().cycle())
+        .zip(q_scale.iter().cycle())
+        .map(|((&rate, &loc), &scale)| {
+            let var = scale * scale;
+            let rate_sqr = rate * rate;
+            let t1 = half * (rate_sqr * var * two_pi).ln();
+            let t2 = one / rate_sqr;
+            let t3 = loc / rate;
+            let t4 = loc * loc / two;
+            t1 - one + (t2 - t3 + t4) / var
+        })
+        .collect();
+
+    Tensor::from_storage(TensorStorage::cpu(result), p.rate().shape().to_vec(), false)
+}
+
+/// KL(Gamma(α, β) || Normal(loc, scale)) (cross-family).
+///
+/// Mirrors `torch/distributions/kl.py:699-715` `_kl_gamma_normal`:
+/// ```text
+/// var = scale^2;  beta_sqr = β^2
+/// t1 = 0.5·ln(beta_sqr · var · 2π) - α - lnΓ(α)
+/// t2 = 0.5·(α^2 + α)/beta_sqr;  t3 = loc·α/β;  t4 = 0.5·loc^2
+/// KL = t1 + (α-1)·ψ(α) + (t2 - t3 + t4)/var
+/// ```
+fn kl_gamma_normal<T: Float>(p: &Gamma<T>, q: &Normal<T>) -> FerrotorchResult<Tensor<T>> {
+    crate::fallback::check_gpu_fallback_opt_in(
+        &[p.concentration(), p.rate(), q.loc(), q.scale()],
+        "kl_divergence(Gamma, Normal)",
+    )?;
+    let p_conc = p.concentration().data_vec()?;
+    let p_rate = p.rate().data_vec()?;
+    let q_loc = q.loc().data_vec()?;
+    let q_scale = q.scale().data_vec()?;
+    let half = T::from(0.5).unwrap();
+    let one = T::from(1.0).unwrap();
+    let two_pi = T::from(2.0 * std::f64::consts::PI).unwrap();
+
+    let result: Vec<T> = p_conc
+        .iter()
+        .zip(p_rate.iter())
+        .zip(q_loc.iter().cycle())
+        .zip(q_scale.iter().cycle())
+        .map(|(((&alpha, &beta), &loc), &scale)| {
+            let var = scale * scale;
+            let beta_sqr = beta * beta;
+            let t1 = half * (beta_sqr * var * two_pi).ln() - alpha - lgamma_scalar(alpha);
+            let t2 = half * (alpha * alpha + alpha) / beta_sqr;
+            let t3 = loc * alpha / beta;
+            let t4 = half * loc * loc;
+            t1 + (alpha - one) * digamma_scalar(alpha) + (t2 - t3 + t4) / var
+        })
+        .collect();
+
+    Tensor::from_storage(
+        TensorStorage::cpu(result),
+        p.concentration().shape().to_vec(),
+        false,
+    )
+}
+
+/// KL(Laplace(loc, scale) || Normal(loc2, scale2)) (cross-family).
+///
+/// Mirrors `torch/distributions/kl.py:750-758` `_kl_laplace_normal`:
+/// ```text
+/// var = scale2^2;  ratio = scale^2 / var
+/// t1 = 0.5·ln(2·ratio/π)
+/// t2 = 0.5·loc^2;  t3 = loc·loc2;  t4 = 0.5·loc2^2
+/// KL = -t1 + ratio + (t2 - t3 + t4)/var - 1
+/// ```
+fn kl_laplace_normal<T: Float>(p: &Laplace<T>, q: &Normal<T>) -> FerrotorchResult<Tensor<T>> {
+    crate::fallback::check_gpu_fallback_opt_in(
+        &[p.loc(), p.scale(), q.loc(), q.scale()],
+        "kl_divergence(Laplace, Normal)",
+    )?;
+    let p_loc = p.loc().data_vec()?;
+    let p_scale = p.scale().data_vec()?;
+    let q_loc = q.loc().data_vec()?;
+    let q_scale = q.scale().data_vec()?;
+    let half = T::from(0.5).unwrap();
+    let one = T::from(1.0).unwrap();
+    let two = T::from(2.0).unwrap();
+    let pi = T::from(std::f64::consts::PI).unwrap();
+
+    let result: Vec<T> = p_loc
+        .iter()
+        .zip(p_scale.iter())
+        .zip(q_loc.iter().cycle())
+        .zip(q_scale.iter().cycle())
+        .map(|(((&pl, &ps), &ql), &qs)| {
+            let var = qs * qs;
+            let ratio = ps * ps / var;
+            let t1 = half * (two * ratio / pi).ln();
+            let t2 = half * pl * pl;
+            let t3 = pl * ql;
+            let t4 = half * ql * ql;
+            -t1 + ratio + (t2 - t3 + t4) / var - one
+        })
+        .collect();
+
+    Tensor::from_storage(TensorStorage::cpu(result), p.loc().shape().to_vec(), false)
 }
 
 // ---------------------------------------------------------------------------
@@ -1006,6 +1365,214 @@ mod tests {
         assert!(
             kl.item().unwrap().abs() < 1e-6,
             "KL(Exp(1)||Gamma(1,1)) should be 0, got {}",
+            kl.item().unwrap()
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // #1374: new same-family pairs (Beta, Gumbel, Pareto, HalfNormal) +
+    // cross-family (Exponential-Normal, Gamma-Normal, Laplace-Normal).
+    // -----------------------------------------------------------------------
+
+    use crate::{Beta, Gumbel, HalfNormal, Pareto};
+
+    // -- Beta-Beta -----------------------------------------------------------
+
+    #[test]
+    fn test_kl_beta_beta_same_is_zero() {
+        let p = Beta::new(scalar(2.0f64).unwrap(), scalar(3.0f64).unwrap()).unwrap();
+        let q = Beta::new(scalar(2.0f64).unwrap(), scalar(3.0f64).unwrap()).unwrap();
+        let kl = kl_divergence(&p, &q).unwrap();
+        assert!(
+            kl.item().unwrap().abs() < 1e-10,
+            "got {}",
+            kl.item().unwrap()
+        );
+    }
+
+    #[test]
+    fn test_kl_beta_beta_known_value() {
+        // KL(Beta(2,3) || Beta(3,2)). Computed from the closed form mirrored
+        // from torch _kl_beta_beta (kl.py:219-228):
+        //   t1 = lnΓ(3)+lnΓ(2)+lnΓ(5); t2 = lnΓ(2)+lnΓ(3)+lnΓ(5)
+        //   t3 = (2-3)ψ(2); t4 = (3-2)ψ(3); t5 = (5-5)ψ(5)
+        //   => t1-t2 = 0; KL = -ψ(2) + ψ(3) = (ψ(3)-ψ(2)) = 1/2 = 0.5
+        // (ψ(3)-ψ(2) = 1/2 by the digamma recurrence ψ(x+1)=ψ(x)+1/x).
+        let p = Beta::new(scalar(2.0f64).unwrap(), scalar(3.0f64).unwrap()).unwrap();
+        let q = Beta::new(scalar(3.0f64).unwrap(), scalar(2.0f64).unwrap()).unwrap();
+        let kl = kl_divergence(&p, &q).unwrap();
+        assert!(
+            (kl.item().unwrap() - 0.5).abs() < 1e-9,
+            "expected 0.5, got {}",
+            kl.item().unwrap()
+        );
+    }
+
+    #[test]
+    fn test_kl_beta_beta_nonnegative() {
+        let p = Beta::new(scalar(0.5f64).unwrap(), scalar(0.5f64).unwrap()).unwrap();
+        let q = Beta::new(scalar(2.0f64).unwrap(), scalar(5.0f64).unwrap()).unwrap();
+        let kl = kl_divergence(&p, &q).unwrap();
+        assert!(kl.item().unwrap() >= -1e-9, "got {}", kl.item().unwrap());
+    }
+
+    // -- Gumbel-Gumbel -------------------------------------------------------
+
+    #[test]
+    fn test_kl_gumbel_gumbel_same_is_zero() {
+        let p = Gumbel::new(scalar(1.0f64).unwrap(), scalar(2.0f64).unwrap()).unwrap();
+        let q = Gumbel::new(scalar(1.0f64).unwrap(), scalar(2.0f64).unwrap()).unwrap();
+        let kl = kl_divergence(&p, &q).unwrap();
+        // Same distribution → KL = 0. The Gumbel formula reduces exactly to 0
+        // since exp(lnΓ(2)) = 1 and the linear/γ terms cancel.
+        assert!(
+            kl.item().unwrap().abs() < 1e-9,
+            "got {}",
+            kl.item().unwrap()
+        );
+    }
+
+    #[test]
+    fn test_kl_gumbel_gumbel_nonnegative() {
+        let p = Gumbel::new(scalar(0.0f64).unwrap(), scalar(1.0f64).unwrap()).unwrap();
+        let q = Gumbel::new(scalar(2.0f64).unwrap(), scalar(3.0f64).unwrap()).unwrap();
+        let kl = kl_divergence(&p, &q).unwrap();
+        assert!(kl.item().unwrap() >= -1e-9, "got {}", kl.item().unwrap());
+    }
+
+    // -- Pareto-Pareto -------------------------------------------------------
+
+    #[test]
+    fn test_kl_pareto_pareto_same_is_zero() {
+        let p = Pareto::new(scalar(1.0f64).unwrap(), scalar(3.0f64).unwrap()).unwrap();
+        let q = Pareto::new(scalar(1.0f64).unwrap(), scalar(3.0f64).unwrap()).unwrap();
+        let kl = kl_divergence(&p, &q).unwrap();
+        assert!(
+            kl.item().unwrap().abs() < 1e-10,
+            "got {}",
+            kl.item().unwrap()
+        );
+    }
+
+    #[test]
+    fn test_kl_pareto_pareto_known_value() {
+        // KL(Pareto(scale=1, α=4) || Pareto(scale=1, α=2)). scale_ratio=1 so
+        // t1 = 0; alpha_ratio = 2/4 = 0.5; KL = -ln(0.5) + 0.5 - 1
+        //   = ln(2) - 0.5 ≈ 0.193147.
+        let p = Pareto::new(scalar(1.0f64).unwrap(), scalar(4.0f64).unwrap()).unwrap();
+        let q = Pareto::new(scalar(1.0f64).unwrap(), scalar(2.0f64).unwrap()).unwrap();
+        let kl = kl_divergence(&p, &q).unwrap();
+        let expected = 2.0f64.ln() - 0.5;
+        assert!(
+            (kl.item().unwrap() - expected).abs() < 1e-10,
+            "expected {expected}, got {}",
+            kl.item().unwrap()
+        );
+    }
+
+    #[test]
+    fn test_kl_pareto_pareto_support_violation_is_inf() {
+        // p.scale < q.scale → p support extends below q → +inf (kl.py:487).
+        let p = Pareto::new(scalar(1.0f64).unwrap(), scalar(3.0f64).unwrap()).unwrap();
+        let q = Pareto::new(scalar(2.0f64).unwrap(), scalar(3.0f64).unwrap()).unwrap();
+        let kl = kl_divergence(&p, &q).unwrap();
+        assert!(kl.item().unwrap().is_infinite());
+    }
+
+    // -- HalfNormal-HalfNormal -----------------------------------------------
+
+    #[test]
+    fn test_kl_halfnormal_halfnormal_same_is_zero() {
+        let p = HalfNormal::new(scalar(1.5f64).unwrap()).unwrap();
+        let q = HalfNormal::new(scalar(1.5f64).unwrap()).unwrap();
+        let kl = kl_divergence(&p, &q).unwrap();
+        assert!(
+            kl.item().unwrap().abs() < 1e-12,
+            "got {}",
+            kl.item().unwrap()
+        );
+    }
+
+    #[test]
+    fn test_kl_halfnormal_matches_normal_normal() {
+        // _kl_halfnormal_halfnormal delegates to _kl_normal_normal(Normal(0,s1),
+        // Normal(0,s2)) (kl.py:325-327). Cross-check against the Normal-Normal
+        // formula with loc=0.
+        let s1 = 1.0f64;
+        let s2 = 2.0f64;
+        let p = HalfNormal::new(scalar(s1).unwrap()).unwrap();
+        let q = HalfNormal::new(scalar(s2).unwrap()).unwrap();
+        let kl_hn = kl_divergence(&p, &q).unwrap().item().unwrap();
+
+        let pn = Normal::new(scalar(0.0f64).unwrap(), scalar(s1).unwrap()).unwrap();
+        let qn = Normal::new(scalar(0.0f64).unwrap(), scalar(s2).unwrap()).unwrap();
+        let kl_nn = kl_divergence(&pn, &qn).unwrap().item().unwrap();
+        assert!(
+            (kl_hn - kl_nn).abs() < 1e-12,
+            "HalfNormal KL {kl_hn} must equal Normal-Normal(loc=0) KL {kl_nn}"
+        );
+    }
+
+    // -- Exponential-Normal (cross-family) -----------------------------------
+
+    #[test]
+    fn test_kl_exponential_normal_known_value() {
+        // KL(Exp(1) || Normal(0, 1)). var=1, rate_sqr=1.
+        //   t1 = 0.5·ln(1·1·2π) = 0.5·ln(2π)
+        //   t2 = 1; t3 = 0; t4 = 0
+        //   KL = 0.5·ln(2π) - 1 + 1 = 0.5·ln(2π) ≈ 0.918939
+        let p = Exponential::new(scalar(1.0f64).unwrap()).unwrap();
+        let q = Normal::new(scalar(0.0f64).unwrap(), scalar(1.0f64).unwrap()).unwrap();
+        let kl = kl_divergence(&p, &q).unwrap();
+        let expected = 0.5 * (2.0 * std::f64::consts::PI).ln();
+        assert!(
+            (kl.item().unwrap() - expected).abs() < 1e-12,
+            "expected {expected}, got {}",
+            kl.item().unwrap()
+        );
+    }
+
+    // -- Gamma-Normal (cross-family) -----------------------------------------
+
+    #[test]
+    fn test_kl_gamma_normal_finite_nonnegative() {
+        let p = Gamma::new(scalar(2.0f64).unwrap(), scalar(1.0f64).unwrap()).unwrap();
+        let q = Normal::new(scalar(2.0f64).unwrap(), scalar(2.0f64).unwrap()).unwrap();
+        let kl = kl_divergence(&p, &q).unwrap();
+        let v = kl.item().unwrap();
+        assert!(v.is_finite(), "got {v}");
+        // Gamma(2,1) has mean 2, matching the Normal mean; KL stays finite.
+    }
+
+    #[test]
+    fn test_kl_gamma_normal_exp_special_case() {
+        // Gamma(1, λ) == Exp(λ); KL(Gamma(1,1) || Normal(0,1)) must equal
+        // KL(Exp(1) || Normal(0,1)) = 0.5·ln(2π).
+        let pg = Gamma::new(scalar(1.0f64).unwrap(), scalar(1.0f64).unwrap()).unwrap();
+        let q = Normal::new(scalar(0.0f64).unwrap(), scalar(1.0f64).unwrap()).unwrap();
+        let kl_g = kl_divergence(&pg, &q).unwrap().item().unwrap();
+        let expected = 0.5 * (2.0 * std::f64::consts::PI).ln();
+        assert!(
+            (kl_g - expected).abs() < 1e-9,
+            "Gamma(1,1)-Normal should match Exp(1)-Normal {expected}, got {kl_g}"
+        );
+    }
+
+    // -- Laplace-Normal (cross-family) ---------------------------------------
+
+    #[test]
+    fn test_kl_laplace_normal_known_value() {
+        // KL(Laplace(0, 1) || Normal(0, 1)). var=1, ratio = 1/1 = 1.
+        //   t1 = 0.5·ln(2·1/π) = 0.5·ln(2/π)
+        //   t2=t3=t4=0 (loc=loc2=0)
+        //   KL = -0.5·ln(2/π) + 1 + 0 - 1 = -0.5·ln(2/π) = 0.5·ln(π/2)
+        let p = Laplace::new(scalar(0.0f64).unwrap(), scalar(1.0f64).unwrap()).unwrap();
+        let q = Normal::new(scalar(0.0f64).unwrap(), scalar(1.0f64).unwrap()).unwrap();
+        let kl = kl_divergence(&p, &q).unwrap();
+        let expected = 0.5 * (std::f64::consts::PI / 2.0).ln();
+        assert!(
+            (kl.item().unwrap() - expected).abs() < 1e-12,
+            "expected {expected}, got {}",
             kl.item().unwrap()
         );
     }

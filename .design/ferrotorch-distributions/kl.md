@@ -11,11 +11,13 @@ upstream-paths:
 ## Summary
 
 `ferrotorch-distributions/src/kl.rs` provides analytical closed-form
-KL divergence formulas for 12 distribution pairs:
+KL divergence formulas for 19 distribution pairs:
 Normal-Normal, Bernoulli-Bernoulli, Uniform-Uniform,
 Categorical-Categorical, Normal-Uniform, Uniform-Normal,
 Laplace-Laplace, Exponential-Exponential, Gamma-Gamma,
-Poisson-Poisson, Gamma-Exponential, Exponential-Gamma. Mirrors
+Poisson-Poisson, Gamma-Exponential, Exponential-Gamma,
+Beta-Beta, Gumbel-Gumbel, Pareto-Pareto, HalfNormal-HalfNormal,
+Exponential-Normal, Gamma-Normal, Laplace-Normal. Mirrors
 `torch/distributions/kl.py`. The dispatcher is a hand-coded chain
 of `Any::downcast_ref` arms; the same pattern PyTorch ships via
 `register_kl` + `_dispatch_kl` but expressed in Rust without the
@@ -34,7 +36,7 @@ runtime-class-decorator machinery.
 
 - REQ-2: `pub const fn kl_supported_pair_count() -> usize`
   introspects the dispatcher's registered-pair count. Backed by
-  `const KL_SUPPORTED_PAIR_COUNT: usize = 12`. Tested via
+  `const KL_SUPPORTED_PAIR_COUNT: usize = 19`. Tested via
   `kl_doc_table_matches_dispatcher` (which parses
   `include_str!("kl.rs")` and counts BOTH the doc-table rows AND
   the `p.downcast_ref::<...>()` arms in `fn kl_dispatch`, asserting
@@ -42,9 +44,9 @@ runtime-class-decorator machinery.
   guard that fixes the historical failure mode of #1124.
 
 - REQ-3: `fn kl_dispatch<T: Float>(p: &dyn Any, q: &dyn Any) ->
-  FerrotorchResult<Tensor<T>>` is the type-dispatch core. 12 `if let
+  FerrotorchResult<Tensor<T>>` is the type-dispatch core. 19 `if let
   (Some(_), Some(_)) = (p.downcast_ref::<P>(), q.downcast_ref::<Q>())`
-  arms cover the 12 registered pairs; fall-through is a structured
+  arms cover the 19 registered pairs; fall-through is a structured
   `InvalidArgument` with the full pair list in the error message.
   Mirrors PyTorch's `_dispatch_kl` (`kl.py:113-138`) which uses
   class-hierarchy lookup; ferrotorch's hand-coded chain is the
@@ -77,11 +79,16 @@ runtime-class-decorator machinery.
   crate-wide CPU-fallback policy. CUDA inputs without the env var
   return `NotImplementedOnCuda`.
 
-- REQ-7: NOT-STARTED — PyTorch ships ~75 KL pairs (Beta-Beta,
-  Dirichlet-Dirichlet, MVN-MVN, Gumbel-Gumbel, HalfNormal-HalfNormal,
-  Pareto-Pareto, and dozens of cross-family pairs). ferrotorch has
-  12; closing the gap is a per-pair builder dispatch tracked by
-  blocker #1374.
+- REQ-7: PARTIAL — PyTorch ships ~75 KL pairs. ferrotorch now ships
+  19 (was 12). #1374 added Beta-Beta, Gumbel-Gumbel, Pareto-Pareto,
+  HalfNormal-HalfNormal (same-family) and Exponential-Normal,
+  Gamma-Normal, Laplace-Normal (cross-family), each mirroring its
+  `@register_kl` body. Still missing: Dirichlet-Dirichlet,
+  Binomial-Binomial, Geometric-Geometric, MVN-MVN, the
+  ContinuousBernoulli pairs, and the many `+inf` boundary
+  cross-pairs (Beta-Gamma, Gamma-Gumbel, Gumbel-Normal, ...).
+  Closing the remaining ~56 is a per-pair builder dispatch tracked
+  by blocker #1374 (stays open).
 
 - REQ-8: NOT-STARTED — register-based dispatch (the `register_kl`
   decorator pattern that lets downstream crates extend the registry)
@@ -93,7 +100,7 @@ runtime-class-decorator machinery.
 - [x] AC-1: `pub fn kl_divergence<T, P, Q>` with the `Distribution +
   'static` bounds + `Any`-downcast dispatch core.
 - [x] AC-2: `pub const fn kl_supported_pair_count() -> usize`
-  returning 12 + the drift test
+  returning 19 + the drift test
   `kl_doc_table_matches_dispatcher` is green.
 - [x] AC-3: All 8 same-family formulas (`kl_normal_normal`,
   `kl_bernoulli_bernoulli`, `kl_uniform_uniform`,
@@ -104,9 +111,10 @@ runtime-class-decorator machinery.
   `kl_uniform_normal`, `kl_gamma_exponential`,
   `kl_exponential_gamma`) ship as `fn` items in `kl.rs`.
 - [x] AC-5: Every formula's first statement is the fallback guard.
-- [x] AC-6: The doc-table on `kl_divergence` lists exactly 12 pairs,
+- [x] AC-6: The doc-table on `kl_divergence` lists exactly 19 pairs,
   matching `KL_SUPPORTED_PAIR_COUNT`.
-- [ ] AC-7: PyTorch's full ~75-pair coverage — blocker #1374.
+- [~] AC-7: PyTorch's full ~75-pair coverage — 19/~75 shipped
+  (#1374 added 7); blocker #1374 stays open for the remaining ~56.
 - [ ] AC-8: `register_kl` extension API — blocker #1375.
 
 ## Architecture
@@ -135,15 +143,15 @@ objects in.
 
 `pub const fn kl_supported_pair_count() -> usize` is a `const fn`
 that returns the compile-time constant
-`KL_SUPPORTED_PAIR_COUNT: usize = 12`. The test
+`KL_SUPPORTED_PAIR_COUNT: usize = 19`. The test
 `kl_doc_table_matches_dispatcher` parses this very source file at
 runtime via `include_str!("kl.rs")` and asserts:
 
 1. `KL_SUPPORTED_PAIR_COUNT == kl_supported_pair_count()` — the
    public accessor mirrors the internal constant.
-2. The supported-pairs doc table on `kl_divergence` has exactly 12
+2. The supported-pairs doc table on `kl_divergence` has exactly 19
    rows.
-3. The dispatcher in `kl_dispatch` has exactly 12
+3. The dispatcher in `kl_dispatch` has exactly 19
    `p.downcast_ref::<...>()` arms.
 
 The triple check catches the drift scenario in historical issue
@@ -154,7 +162,7 @@ others trips the test.
 ### Dispatcher core (REQ-3)
 
 `fn kl_dispatch<T: Float>(p: &dyn Any, q: &dyn Any) ->
-FerrotorchResult<Tensor<T>>` is a 12-arm `if let` chain. Each arm:
+FerrotorchResult<Tensor<T>>` is a 19-arm `if let` chain. Each arm:
 
 ```rust
 if let (Some(pn), Some(qn)) = (p.downcast_ref::<Normal<T>>(), q.downcast_ref::<Normal<T>>()) {
@@ -288,10 +296,10 @@ Expected: `~30 passed`.
 | REQ | Status | Evidence |
 |---|---|---|
 | REQ-1 | SHIPPED | impl: `pub fn kl_divergence<T: Float, P, Q>` with `P: Distribution<T> + 'static`, `Q: Distribution<T> + 'static` bounds in `kl.rs`, mirroring `torch/distributions/kl.py:kl_divergence`; non-test consumer: `pub mod kl` in `lib.rs:63` and `pub fn kl_divergence` exposes it as grandfathered public API; tests `test_kl_*` (~25 sites) exercise it through the trait dispatch path. |
-| REQ-2 | SHIPPED | impl: `pub const fn kl_supported_pair_count() -> usize` and `KL_SUPPORTED_PAIR_COUNT: usize = 12` constant in `kl.rs`; non-test consumer: the const fn is grandfathered public API (introspection extension point); the drift-prevention test `kl_doc_table_matches_dispatcher` reads `include_str!("kl.rs")` and asserts the three-way invariant against the public accessor — that test is the production check. |
-| REQ-3 | SHIPPED | impl: `fn kl_dispatch<T: Float>(p: &dyn Any, q: &dyn Any)` 12-arm `Any::downcast_ref` chain in `kl.rs`, mirroring PyTorch's `_dispatch_kl` in `torch/distributions/kl.py:113-138`; non-test consumer: `pub fn kl_divergence` invokes `kl_dispatch::<T>(p, q)` on every call — that's the in-crate production consumer. |
+| REQ-2 | SHIPPED | impl: `pub const fn kl_supported_pair_count() -> usize` and `KL_SUPPORTED_PAIR_COUNT: usize = 19` constant in `kl.rs`; non-test consumer: the const fn is grandfathered public API (introspection extension point); the drift-prevention test `kl_doc_table_matches_dispatcher` reads `include_str!("kl.rs")` and asserts the three-way invariant against the public accessor — that test is the production check. |
+| REQ-3 | SHIPPED | impl: `fn kl_dispatch<T: Float>(p: &dyn Any, q: &dyn Any)` 19-arm `Any::downcast_ref` chain in `kl.rs`, mirroring PyTorch's `_dispatch_kl` in `torch/distributions/kl.py:113-138`; non-test consumer: `pub fn kl_divergence` invokes `kl_dispatch::<T>(p, q)` on every call — that's the in-crate production consumer. |
 | REQ-4 | SHIPPED | impl: 8 same-family `fn kl_<p>_<q><T: Float>` formulas in `kl.rs` (`kl_normal_normal`, `kl_bernoulli_bernoulli`, `kl_uniform_uniform`, `kl_categorical_categorical`, `kl_laplace_laplace`, `kl_exponential_exponential`, `kl_gamma_gamma`, `kl_poisson_poisson`), mirroring the `@register_kl` bodies in `torch/distributions/kl.py`; non-test consumer: `fn kl_dispatch in kl.rs` invokes each formula in its respective arm — 8 production call sites. |
 | REQ-5 | SHIPPED | impl: 4 cross-family formulas (`kl_normal_uniform`, `kl_uniform_normal`, `kl_gamma_exponential`, `kl_exponential_gamma`) in `kl.rs`; the last two use `fn kl_gamma_scalar` via `Exp(λ) ≡ Gamma(1, λ)`; non-test consumer: `fn kl_dispatch in kl.rs` calls each — 4 production call sites; `fn kl_gamma_scalar` is consumed by 3 production sites internally (Gamma-Gamma, Gamma-Exp, Exp-Gamma). |
-| REQ-6 | SHIPPED | impl: every formula's first statement is `crate::fallback::check_gpu_fallback_opt_in(&[...], "kl_divergence(P, Q)")?` in `kl.rs` — 12 production call sites of the fallback gate; non-test consumer: this IS the production consumer of `fn check_gpu_fallback_opt_in in fallback.rs` (per `fallback.md` REQ-2). The `op` argument names every call site. |
-| REQ-7 | NOT-STARTED | blocker #1374 — PyTorch ships ~75 (P, Q) KL pairs; ferrotorch has 12. Missing pairs include Beta-Beta, Dirichlet-Dirichlet, Gumbel-Gumbel, HalfNormal-HalfNormal, MultivariateNormal-MultivariateNormal, Pareto-Pareto, StudentT-Normal, plus many cross-family (Gamma-Normal, Poisson-Bernoulli, etc.). Each is a small per-pair builder dispatch. |
+| REQ-6 | SHIPPED | impl: every formula's first statement is `crate::fallback::check_gpu_fallback_opt_in(&[...], "kl_divergence(P, Q)")?` in `kl.rs` — 19 production call sites of the fallback gate; non-test consumer: this IS the production consumer of `fn check_gpu_fallback_opt_in in fallback.rs` (per `fallback.md` REQ-2). The `op` argument names every call site. |
+| REQ-7 | PARTIAL | blocker #1374 — PyTorch ships ~75 (P, Q) KL pairs; ferrotorch now has 19 (was 12). #1374 added impl: `fn kl_beta_beta` (mirrors `kl.py:219-228`), `fn kl_gumbel_gumbel` (`kl.py:309-317`), `fn kl_pareto_pareto` (`kl.py:479-488`), `fn kl_halfnormal_halfnormal` (`kl.py:325-327`), `fn kl_exponential_normal` (`kl.py:654-662`), `fn kl_gamma_normal` (`kl.py:699-715`), `fn kl_laplace_normal` (`kl.py:750-758`) in `kl.rs`; non-test consumer: each is invoked by its `kl_dispatch` downcast arm (the in-crate production caller). Pinned by `test_kl_{beta_beta,gumbel_gumbel,pareto_pareto,halfnormal_halfnormal,exponential_normal,gamma_normal,laplace_normal}_*` with PyTorch-traceable reference values. Still missing ~56 (Dirichlet-Dirichlet, Binomial-Binomial, Geometric-Geometric, MVN-MVN, ContinuousBernoulli pairs, the `+inf` boundary cross-pairs); #1374 stays open. |
 | REQ-8 | NOT-STARTED | blocker #1375 — `register_kl` decorator pattern + `_dispatch_kl` most-specific-subclass match (mirroring `torch/distributions/kl.py:51-138`) not implemented. ferrotorch's hand-coded `Any::downcast_ref` chain is closed to extension by downstream crates. Replacing the chain with a `Lazy<HashMap<(TypeId, TypeId), Fn>>` registry would enable extension. |

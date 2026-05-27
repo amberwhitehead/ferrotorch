@@ -23,7 +23,7 @@
 //! | REQ-6 (`TransformedDistribution<T>`) | SHIPPED | `pub struct TransformedDistribution<T: Float>` with `Box<dyn Distribution<T>>` base + `Vec<Box<dyn Transform<T>>>` chain + full `Distribution` impl in `transforms.rs` mirroring `torch/distributions/transformed_distribution.py:TransformedDistribution`; consumer: `pub use transforms::TransformedDistribution` in `lib.rs` — grandfathered public API |
 //! | REQ-7 (`TransformedDistribution::entropy` three-case dispatcher) | SHIPPED | `fn TransformedDistribution::entropy` three-case dispatch (empty, all-constant-Jacobian, single-Exp) with named-transform error on fall-through in `transforms.rs`; consumer: the `impl Distribution::entropy` IS the dispatcher; `test_transformed_distribution_entropy_*` tests pin all four branches |
 //! | REQ-8 (11 missing upstream transforms + domain/codomain) | NOT-STARTED | blocker #1373 — 11 of 16 upstream transforms not ported (`AbsTransform`, `PowerTransform`, `SoftmaxTransform`, `StickBreakingTransform`, `CatTransform`, `StackTransform`, `CorrCholeskyTransform`, `LowerCholeskyTransform`, `PositiveDefiniteTransform`, `ReshapeTransform`, `IndependentTransform`, `CumulativeDistributionTransform`); also Constraint domain/codomain linkage missing |
-//! | REQ-9 (Monte-Carlo entropy fallback) | NOT-STARTED | blocker #1378 — MC entropy fallback for non-closed-form chains (Sigmoid/Tanh/Softplus/multi-Exp/Exp-then-Affine) not implemented; PyTorch uses MC fallback, ferrotorch surfaces `InvalidArgument` |
+//! | REQ-9 (Monte-Carlo entropy fallback) | SHIPPED | `fn TransformedDistribution::entropy_monte_carlo` estimates `H(Y) = H(X) + E_X[log|det J_f(X)|]` with `MC_ENTROPY_SAMPLES` base draws pushed through each link's `log_abs_det_jacobian` for the X-dependent chains (Sigmoid/Tanh/Softplus/multi-Exp/Exp-then-Affine) in `transforms.rs`; consumer: `fn TransformedDistribution::entropy` invokes it as path 4 on fall-through — `td.entropy()` on a Sigmoid/Tanh chain now returns a value instead of erroring. FD/quadrature-verified by `test_transformed_distribution_entropy_{sigmoid,exp_then_affine}_monte_carlo`. Closes #1378. |
 
 use ferrotorch_core::autograd::no_grad;
 use ferrotorch_core::creation;
@@ -34,6 +34,7 @@ use ferrotorch_core::grad_fns::activation::{
 };
 use ferrotorch_core::grad_fns::arithmetic::{add, div, mul, neg, sub};
 use ferrotorch_core::grad_fns::transcendental::{exp as exp_op, log as log_op};
+use ferrotorch_core::storage::TensorStorage;
 use ferrotorch_core::tensor::Tensor;
 
 // ---------------------------------------------------------------------------
@@ -624,34 +625,88 @@ impl<T: Float> Distribution<T> for TransformedDistribution<T> {
             return add(&base_entropy, &mean_on_device);
         }
 
-        // Fall-through: enumerate the problematic transforms by name so the
-        // caller knows which link blocks the closed-form path.
-        let problematic: Vec<&'static str> = self
-            .transforms
-            .iter()
-            .filter(|t| t.constant_entropy_contribution().is_none() && !t.is_exp_transform())
-            .map(|t| t.name())
-            .collect();
-        let summary = if problematic.is_empty() {
-            // The list contains an Exp transform but is not exactly
-            // [Exp] — e.g. [Exp, Exp] or [Exp, Affine]. Multi-Exp /
-            // mixed-Exp chains require E[exp(...)] which is not constant
-            // in closed form for arbitrary bases.
-            "TransformedDistribution::entropy: chain contains ExpTransform but is not a \
-             single Exp — the contribution would require evaluating E_X[exp(...)] which \
-             has no closed form for the general base"
-                .to_string()
-        } else {
-            format!(
-                "TransformedDistribution::entropy: closed-form contribution is \
-                 intractable for transform(s) {problematic:?}. Supported transforms \
-                 are AffineTransform (and compositions thereof) plus a single \
-                 ExpTransform; everything else (SigmoidTransform, TanhTransform, \
-                 SoftplusTransform, ...) has no general analytic form. \
-                 Use Monte-Carlo estimation instead.",
-            )
-        };
-        Err(ferrotorch_core::error::FerrotorchError::InvalidArgument { message: summary })
+        // Path 4 (REQ-9, #1378) — Monte-Carlo fallback for chains whose
+        // log|det J| depends on X (SigmoidTransform, TanhTransform,
+        // SoftplusTransform, multi-Exp, Exp-then-Affine, ...). The
+        // change-of-variables entropy identity
+        //   H(Y) = H(X) + E_X[ log|det J_f(X)| ]
+        // holds for ANY bijection; when the contribution is not closed-form we
+        // estimate the expectation with `MC_ENTROPY_SAMPLES` base draws pushed
+        // through the chain's `log_abs_det_jacobian`. PyTorch's upstream
+        // `TransformedDistribution` raises `NotImplementedError` here; the MC
+        // estimator is the documented faithful fallback (`transforms.md`
+        // REQ-9). The estimate is averaged per batch element so it broadcasts
+        // onto `base_entropy`'s shape.
+        self.entropy_monte_carlo(&base_entropy)
+    }
+}
+
+/// Number of base samples drawn to Monte-Carlo estimate
+/// `E_X[log|det J_f(X)|]` in the entropy fallback. Chosen for a stable
+/// estimate (relative std-error ~ 1/sqrt(N)) without excessive cost; the
+/// fallback is only hit for the X-dependent-Jacobian chains.
+const MC_ENTROPY_SAMPLES: usize = 20_000;
+
+impl<T: Float> TransformedDistribution<T> {
+    /// Monte-Carlo estimate of `H(Y) = H(X) + E_X[log|det J_f(X)|]` for chains
+    /// whose log-det-Jacobian contribution depends on `X` and therefore has no
+    /// closed form (Sigmoid/Tanh/Softplus/multi-Exp/Exp-then-Affine).
+    ///
+    /// Draws `MC_ENTROPY_SAMPLES` base samples per batch element, pushes them
+    /// through the transform chain accumulating each link's
+    /// `log_abs_det_jacobian`, and averages over the sample axis. The result is
+    /// `base_entropy + mean_sample(sum_links log|det J|)`, element-wise on the
+    /// batch shape. CPU-resident (the estimator reads `data_vec()`).
+    fn entropy_monte_carlo(&self, base_entropy: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
+        no_grad(|| {
+            let batch_shape = self.base.batch_shape();
+            let batch_len: usize = batch_shape.iter().product::<usize>().max(1);
+            let n = MC_ENTROPY_SAMPLES;
+
+            // Draw an [n, *batch] block of base samples and push the whole block
+            // through the chain at once so each per-link LDJ is evaluated on the
+            // correct intermediate values.
+            let sample_shape: Vec<usize> = if batch_shape.is_empty() {
+                vec![n]
+            } else {
+                let mut s = vec![n];
+                s.extend_from_slice(&batch_shape);
+                s
+            };
+            let x0 = self.base.sample(&sample_shape)?;
+
+            // Accumulate sum of per-link log|det J| evaluated along the chain.
+            let mut xs = x0;
+            let mut sum_ldj: Option<Tensor<T>> = None;
+            for t in &self.transforms {
+                let next = t.forward(&xs)?;
+                let ldj = t.log_abs_det_jacobian(&xs, &next)?;
+                sum_ldj = Some(match sum_ldj {
+                    Some(acc) => add(&acc, &ldj)?,
+                    None => ldj,
+                });
+                xs = next;
+            }
+            let sum_ldj = sum_ldj.expect("non-empty chain reaches the MC fallback");
+
+            // Average over the sample axis (the leading `n`): the flat layout is
+            // row-major [n, *batch], so element i maps to batch slot i % batch_len.
+            let ldj_data = sum_ldj.data_vec()?;
+            let zero = T::from(0.0).unwrap();
+            let n_t = T::from(n as f64).unwrap();
+            let mut contrib = vec![zero; batch_len];
+            for (i, &v) in ldj_data.iter().enumerate() {
+                let slot = i % batch_len;
+                contrib[slot] += v;
+            }
+            let contrib: Vec<T> = contrib.into_iter().map(|c| c / n_t).collect();
+
+            let device = base_entropy.device();
+            let contrib_t =
+                Tensor::from_storage(TensorStorage::cpu(contrib), batch_shape.clone(), false)?
+                    .to(device)?;
+            add(base_entropy, &contrib_t)
+        })
     }
 }
 
@@ -1137,45 +1192,82 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_transformed_distribution_entropy_sigmoid_errors() {
-        // SigmoidTransform has no closed-form analytic contribution; the
-        // dispatcher must return an InvalidArgument naming Sigmoid.
-        use crate::Normal;
-        let loc = scalar(0.0f32).unwrap();
-        let scale = scalar(1.0f32).unwrap();
-        let base = Normal::new(loc, scale).unwrap();
-        let td = TransformedDistribution::new(Box::new(base), vec![Box::new(SigmoidTransform)]);
-        let err = td.entropy().unwrap_err();
-        let msg = format!("{err}");
-        assert!(
-            msg.contains("SigmoidTransform"),
-            "expected SigmoidTransform in error, got: {msg}",
-        );
+    /// Numerical reference for `E_{X~Normal(0,1)}[ g(X) ]` via dense
+    /// trapezoidal quadrature over `[-12, 12]` against the standard-normal
+    /// density. Independent of the production Monte-Carlo sampler, so it is a
+    /// genuine oracle for the MC entropy fallback (#1378).
+    fn normal_expectation_quadrature(g: impl Fn(f64) -> f64) -> f64 {
+        let lo = -12.0_f64;
+        let hi = 12.0_f64;
+        let steps = 240_000;
+        let dx = (hi - lo) / steps as f64;
+        let norm = 1.0 / (2.0 * std::f64::consts::PI).sqrt();
+        let mut acc = 0.0;
+        for i in 0..=steps {
+            let x = lo + i as f64 * dx;
+            let w = if i == 0 || i == steps { 0.5 } else { 1.0 };
+            let pdf = norm * (-0.5 * x * x).exp();
+            acc += w * pdf * g(x) * dx;
+        }
+        acc
     }
 
     #[test]
-    fn test_transformed_distribution_entropy_exp_then_affine_errors() {
-        // A chain with Exp AND another non-Affine link is *not* in our
-        // currently supported set (mixed chains with Exp require the chain
-        // to be exactly [Exp]). The dispatcher should surface a precise
-        // error referencing Exp's intractability in mixed chains.
+    fn test_transformed_distribution_entropy_sigmoid_monte_carlo() {
+        // SigmoidTransform's log|det J| = log(sigmoid(x)) + log(1-sigmoid(x))
+        // = -softplus(-x) - softplus(x) is X-dependent → MC fallback (#1378).
+        // Verify H(Y) = H(Normal(0,1)) + E_X[log|det J|] against an INDEPENDENT
+        // trapezoidal quadrature oracle for the expectation.
         use crate::Normal;
-        let loc = scalar(0.0f32).unwrap();
-        let scale = scalar(1.0f32).unwrap();
-        let base = Normal::new(loc, scale).unwrap();
+        let base = Normal::new(scalar(0.0f64).unwrap(), scalar(1.0f64).unwrap()).unwrap();
+        let td = TransformedDistribution::new(Box::new(base), vec![Box::new(SigmoidTransform)]);
+        let got = td.entropy().unwrap().item().unwrap();
+
+        let base_ent = {
+            let b = Normal::new(scalar(0.0f64).unwrap(), scalar(1.0f64).unwrap()).unwrap();
+            b.entropy().unwrap().item().unwrap()
+        };
+        // log|sigma'(x)| = -softplus(-x) - softplus(x).
+        let softplus = |z: f64| (1.0 + z.exp()).ln();
+        let contrib = normal_expectation_quadrature(|x| -softplus(-x) - softplus(x));
+        let expected = base_ent + contrib;
+        // MC standard error ~ |ldj_std| / sqrt(N); N=20000 → tol ~ 2e-2.
+        assert!(
+            (got - expected).abs() < 3e-2,
+            "sigmoid MC entropy: got {got}, quadrature reference {expected}, |err|={}",
+            (got - expected).abs()
+        );
+        assert!(got.is_finite());
+    }
+
+    #[test]
+    fn test_transformed_distribution_entropy_exp_then_affine_monte_carlo() {
+        // [Exp, Affine(0, 2)] over Normal(0,1): y = 2*exp(x). log|det J| for the
+        // chain is x (Exp) + log|2| (Affine); the chain is no longer a single
+        // Exp, so it routes through the MC fallback. The contribution is
+        // E_X[X] + log 2 = loc + log 2 = 0 + log 2, which we cross-check against
+        // the closed-form LogNormal-scaled identity.
+        use crate::Normal;
+        let base = Normal::new(scalar(0.0f64).unwrap(), scalar(1.0f64).unwrap()).unwrap();
         let td = TransformedDistribution::new(
             Box::new(base),
             vec![
                 Box::new(ExpTransform),
-                Box::new(AffineTransform::new(0.0f32, 1.0)),
+                Box::new(AffineTransform::new(0.0f64, 2.0)),
             ],
         );
-        let err = td.entropy().unwrap_err();
-        let msg = format!("{err}");
+        let got = td.entropy().unwrap().item().unwrap();
+
+        let base_ent = {
+            let b = Normal::new(scalar(0.0f64).unwrap(), scalar(1.0f64).unwrap()).unwrap();
+            b.entropy().unwrap().item().unwrap()
+        };
+        // E_X[x + log 2] = E[x] + log 2 = 0 + ln 2.
+        let expected = base_ent + 0.0 + 2.0_f64.ln();
         assert!(
-            msg.contains("Exp"),
-            "expected Exp mention in mixed-Exp error, got: {msg}",
+            (got - expected).abs() < 3e-2,
+            "exp-then-affine MC entropy: got {got}, reference {expected}, |err|={}",
+            (got - expected).abs()
         );
     }
 

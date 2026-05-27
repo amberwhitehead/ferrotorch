@@ -16,7 +16,7 @@
 //! | REQ-6 (`Distribution::rsample` differentiable through loc/scale) | SHIPPED | `impl Distribution::rsample` builds `Tensor::from_operation` with `StudentTRsampleBackward` autograd node capturing `df`/`loc`/`scale`/`z`/`chi2`; pinned by `test_student_t_rsample_{has_grad, backward}`. |
 //! | REQ-7 (`Distribution::log_prob` closed-form) | SHIPPED | `impl Distribution::log_prob` returns the closed-form Student's-t log density; pinned by `test_student_t_log_prob_at_loc` (Cauchy edge), `test_student_t_log_prob_high_df_approaches_normal`. |
 //! | REQ-8 (`Distribution::entropy` closed-form) | SHIPPED | `impl Distribution::entropy` uses `lgamma_scalar` + `digamma_scalar` from `special_fns.rs`; mirrors `studentT.py:114-127`. |
-//! | REQ-9 (`df` gradient in backward node) | NOT-STARTED | blocker #1427 — `StudentTRsampleBackward::backward` returns `None` for the `df` slot. The correct df gradient needs the Chi2 implicit-reparameterisation gradient `d(sg)/d(alpha) = -(∂_alpha P(alpha,sg))/pdf(sg)` (PyTorch's `_standard_gamma_grad` series), which ferrotorch lacks. The repo's `GammaRsampleBackward` closed form `sg·(ln sg − digamma(alpha))` is NOT that ratio (FD/scipy-`gammaincinv`-verified discrepancy: `0.953` vs `-0.020` at `alpha=2.5,sg=2`), so shipping it would be a wrong gradient. loc/scale gradients are tractable and SHIPPED (REQ-6). #1427 stays open; the incorrect Gamma formula is a separate spillover finding. |
+//! | REQ-9 (`df` gradient in backward node) | SHIPPED | `StudentTRsampleBackward::backward` populates the `df` slot via the pathwise Chi2 reparameterisation gradient: explicit `df` in `sqrt(df/chi2)` plus the implicit channel `d(chi2)/d(df) = standard_gamma_grad_one(df/2, chi2/2)` (the correct `-(∂_alpha P(alpha,sg))/pdf(sg)` series landed in `special_fns.rs`, commit fae8ca185). FD-verified against an independent `gammp`-based central difference in `tests::test_student_t_df_gradient_matches_finite_difference` across the small-x/rational/saddle branches. Non-test consumer: `Distribution::rsample` attaches the node whenever `df.requires_grad()` and is reachable through `pub use StudentT`. Closes #1427. The OLD score-function form `sg·(ln sg − digamma(alpha))` (which is NOT the pathwise grad) is pinned-as-wrong by `test_repo_gamma_implicit_grad_formula_is_incorrect` to guard against regression. |
 //! | REQ-10 (`expand`/`support`/`mode`/`mean`/`variance`/`arg_constraints`/`has_rsample`) | SHIPPED | the trait overrides at the tail of `impl Distribution for StudentT` in `student_t.rs` mirror `torch/distributions/studentT.py:34-50`; consumer: trait dispatch via `pub use StudentT` re-export (closes #1428; `cdf`/`icdf` require the regularized incomplete-beta function which is part of #1372 / not yet ported). |
 
 use std::collections::HashMap;
@@ -29,7 +29,7 @@ use ferrotorch_core::storage::TensorStorage;
 use ferrotorch_core::tensor::{GradFn, Tensor};
 
 use crate::constraints;
-use crate::special_fns::{digamma_scalar, lgamma_scalar};
+use crate::special_fns::{digamma_scalar, lgamma_scalar, standard_gamma_grad_one};
 use crate::{DistConstraint, Distribution};
 
 /// Student's t-distribution parameterized by `df` (degrees of freedom),
@@ -264,23 +264,24 @@ impl<T: Float> Distribution<T> for StudentT<T> {
 
         let storage = TensorStorage::cpu(result);
 
-        let out = if (self.loc.requires_grad() || self.scale.requires_grad())
-            && ferrotorch_core::is_grad_enabled()
-        {
-            let z_tensor = z.clone();
-            let chi2_tensor =
-                Tensor::from_storage(TensorStorage::cpu(chi2_samples), shape.to_vec(), false)?;
-            let grad_fn = Arc::new(StudentTRsampleBackward {
-                df: self.df.clone(),
-                loc: self.loc.clone(),
-                scale: self.scale.clone(),
-                z: z_tensor,
-                chi2: chi2_tensor,
-            });
-            Tensor::from_operation(storage, shape.to_vec(), grad_fn)?
-        } else {
-            Tensor::from_storage(storage, shape.to_vec(), false)?
-        };
+        let out =
+            if (self.df.requires_grad() || self.loc.requires_grad() || self.scale.requires_grad())
+                && ferrotorch_core::is_grad_enabled()
+            {
+                let z_tensor = z.clone();
+                let chi2_tensor =
+                    Tensor::from_storage(TensorStorage::cpu(chi2_samples), shape.to_vec(), false)?;
+                let grad_fn = Arc::new(StudentTRsampleBackward {
+                    df: self.df.clone(),
+                    loc: self.loc.clone(),
+                    scale: self.scale.clone(),
+                    z: z_tensor,
+                    chi2: chi2_tensor,
+                });
+                Tensor::from_operation(storage, shape.to_vec(), grad_fn)?
+            } else {
+                Tensor::from_storage(storage, shape.to_vec(), false)?
+            };
         if device.is_cuda() {
             out.to(device)
         } else {
@@ -446,18 +447,30 @@ impl<T: Float> Distribution<T> for StudentT<T> {
 ///
 /// `d(out)/d(loc) = 1`; `d(out)/d(scale) = z*sqrt(df/chi2) = (out - loc)/scale`.
 ///
-/// `d(out)/d(df)` is PARTIAL (returns `None`). Upstream `studentT.py:97-98`
-/// flows the `df` gradient through `self._chi2.rsample()` (Chi2 = Gamma(df/2,
-/// 1/2)) whose implicit-reparameterisation gradient is
-/// `d(sg)/d(alpha) = -(∂_alpha P(alpha, sg)) / pdf(sg)` (PyTorch's
-/// `_standard_gamma_grad` series). ferrotorch has no `_standard_gamma_grad`
-/// primitive, and the repo's `GammaRsampleBackward` closed form
-/// `sg·(ln sg − digamma(alpha))` does NOT equal that ratio (verified against
-/// scipy `gammaincinv`: e.g. `alpha=2.5, sg=2` gives `0.953` vs the closed
-/// form's `-0.020`). Shipping a wrong `df` gradient would be worse than none,
-/// so the slot stays `None` until the implicit-Gamma grad primitive lands.
-/// Blocker #1427 remains open for the `df` term; #1555 tracks the incorrect
-/// `GammaRsampleBackward` formula.
+/// `d(out)/d(df)` flows through TWO channels (upstream `studentT.py:96-99`
+/// differentiates `self._chi2.rsample()` w.r.t. `df` and the explicit `df`
+/// in `torch.rsqrt(Z / df)`):
+///
+/// 1. **Explicit `df`** in `sqrt(df / chi2)`, holding `chi2` fixed:
+///    `∂/∂df [scale·z·sqrt(df/chi2)] = scale·z · 0.5 / sqrt(df·chi2)`.
+/// 2. **Implicit, through `chi2`'s dependence on `df`**: `chi2 = 2·sg` with
+///    `sg ~ Gamma(df/2, 1)`. The pathwise reparameterisation gradient of `sg`
+///    w.r.t. its shape `alpha = df/2` is `standard_gamma_grad_one(alpha, sg)`
+///    (PyTorch's `_standard_gamma_grad`, `Distributions.h:302-368`). By the
+///    chain rule `d(sg)/d(df) = standard_gamma_grad_one(df/2, sg) · 0.5`, so
+///    `d(chi2)/d(df) = 2 · 0.5 · sgg = sgg` where `sgg =
+///    standard_gamma_grad_one(df/2, chi2/2)`. Combined with
+///    `∂/∂chi2 [scale·z·sqrt(df/chi2)] = -0.5·scale·z·sqrt(df)·chi2^(-1.5)`:
+///    channel-2 = `-0.5·scale·z·sqrt(df)·chi2^(-1.5) · sgg`.
+///
+/// `d(out)/d(df) = scale·z·[ 0.5/sqrt(df·chi2)
+///                           - 0.5·sqrt(df)·chi2^(-1.5)·sgg ]`.
+///
+/// FD-verified against a fixed-`(z, chi2)` central difference in
+/// `tests::test_student_t_df_gradient_matches_finite_difference`. The
+/// pathwise `standard_gamma_grad_one` primitive (correct, scipy-`gammp`-FD
+/// matched) landed in `special_fns.rs` (commit fae8ca185), which is what makes
+/// the `df` slot tractable; this closes blocker #1427.
 #[derive(Debug)]
 struct StudentTRsampleBackward<T: Float> {
     df: Tensor<T>,
@@ -509,14 +522,45 @@ impl<T: Float> GradFn<T> for StudentTRsampleBackward<T> {
             grad_scale
         };
 
-        // grad_df: PARTIAL — left as `None`. The correct df gradient needs the
-        // implicit-Gamma reparameterisation gradient `d(sg)/d(alpha)` for the
-        // Chi2 sample, which has no closed form in ferrotorch yet (PyTorch uses
-        // a `_standard_gamma_grad` series). See the struct doc; blocker #1427
-        // stays open for the df term.
+        // grad_df: pathwise gradient through both the explicit `df` and the
+        // implicit dependence of `chi2 = 2*sg` on `df` via the Gamma shape
+        // `alpha = df/2`. See the struct doc for the full derivation.
+        //   d(out)/d(df) = scale*z*[ 0.5/sqrt(df*chi2)
+        //                            - 0.5*sqrt(df)*chi2^(-1.5)*sgg ]
+        // where sgg = standard_gamma_grad_one(df/2, chi2/2).
+        let half = T::from(0.5).unwrap();
+        let scale_data = self.scale.data_vec()?;
+        let grad_df_val: T = go
+            .iter()
+            .zip(z_data.iter())
+            .zip(chi2_data.iter())
+            .zip(df_data.iter().cycle())
+            .zip(scale_data.iter().cycle())
+            .fold(zero, |acc, ((((&g, &z), &chi2), &df), &scale)| {
+                // Channel 1: explicit df, chi2 held fixed.
+                let explicit = half / (df * chi2).sqrt();
+                // Channel 2: through chi2's dependence on df.
+                let sgg = standard_gamma_grad_one(df * half, chi2 * half);
+                let implicit = half * df.sqrt() * chi2.powf(T::from(-1.5).unwrap()) * sgg;
+                acc + g * scale * z * (explicit - implicit)
+            });
+        let grad_df = Tensor::from_storage(
+            TensorStorage::cpu(vec![grad_df_val]),
+            self.df.shape().to_vec(),
+            false,
+        )?;
+        let grad_df = if device.is_cuda() {
+            grad_df.to(device)?
+        } else {
+            grad_df
+        };
 
         Ok(vec![
-            None, // df gradient PARTIAL — see struct doc / #1427.
+            if self.df.requires_grad() {
+                Some(grad_df)
+            } else {
+                None
+            },
             if self.loc.requires_grad() {
                 Some(grad_loc)
             } else {
@@ -766,16 +810,23 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // df gradient via Chi2 implicit reparameterization (#1427) — PARTIAL.
+    // df gradient via Chi2 implicit reparameterization (#1427) — SHIPPED.
     //
-    // The df gradient is NOT shipped: it requires the implicit-Gamma
-    // reparameterisation gradient d(sg)/d(alpha) = -(d_alpha P(alpha,sg))/pdf(sg)
-    // for the Chi2 sample, which ferrotorch lacks (PyTorch uses a
-    // `_standard_gamma_grad` series). These tests (a) pin that the df slot is
-    // currently `None`, and (b) DOCUMENT — as an independent scipy-grade FD
-    // oracle — that the repo's `GammaRsampleBackward` closed form
-    // `sg*(ln sg - digamma(alpha))` is NOT the correct implicit gradient, so it
-    // must not be reused here. Both are non-tautological regression anchors.
+    // The df gradient now flows through both the explicit `df` in
+    // `sqrt(df/chi2)` and the implicit dependence of `chi2 = 2*sg` on `df`
+    // via the Gamma shape `alpha = df/2`, using the pathwise primitive
+    // `standard_gamma_grad_one(alpha, sg)` (= `-(d_alpha P(alpha,sg))/pdf(sg)`,
+    // PyTorch's `_standard_gamma_grad`, landed in `special_fns.rs`).
+    //
+    // These tests:
+    //   (a) FD-verify the emitted df gradient against an INDEPENDENT central
+    //       finite difference of `t(df) = loc + scale*z*sqrt(df/chi2(df))`,
+    //       where `chi2(df)` is reconstructed via the `gammp_ref` regularized
+    //       incomplete-gamma oracle's implicit derivative — no production code
+    //       in the oracle path;
+    //   (b) DOCUMENT that the OLD high-variance score-function closed form
+    //       `sg*(ln sg - digamma(alpha))` is NOT the pathwise gradient (so a
+    //       future "simplification" that regresses to it fails loudly).
     // -----------------------------------------------------------------------
 
     /// Independent reference for the regularized lower incomplete gamma
@@ -824,19 +875,95 @@ mod tests {
         }
     }
 
+    /// pdf of the standard Gamma(alpha) at x = x^(a-1) e^-x / Gamma(a).
+    fn gamma_pdf_ref(a: f64, x: f64) -> f64 {
+        ((a - 1.0) * x.ln() - x - lgamma_scalar(a)).exp()
+    }
+
+    /// Independent FD oracle for `d(sg)/d(alpha)` of a reparameterized
+    /// standard-Gamma sample `sg` at shape `alpha`, via the implicit-function
+    /// identity `-(d_alpha P(alpha,sg)) / pdf(sg)`. Uses only `gammp_ref`
+    /// (a self-contained Numerical-Recipes incomplete gamma), so it does NOT
+    /// reuse the production `standard_gamma_grad_one`.
+    fn dsg_dalpha_fd(alpha: f64, sg: f64) -> f64 {
+        let h = 1e-6;
+        let dp = (gammp_ref(alpha + h, sg) - gammp_ref(alpha - h, sg)) / (2.0 * h);
+        -dp / gamma_pdf_ref(alpha, sg)
+    }
+
     #[test]
-    fn test_student_t_df_gradient_currently_none() {
-        // Honest pin: with df.requires_grad and loc/scale NOT requiring grad,
-        // rsample does not attach a node (only loc/scale drive the graph), so
-        // there is no df gradient. This documents REQ-9 staying NOT-STARTED.
+    fn test_student_t_df_gradient_attaches_node() {
+        // With df.requires_grad (loc/scale fixed), rsample now attaches the
+        // StudentTRsampleBackward node and backward populates df.grad. This is
+        // the REQ-9 SHIPPED behaviour (was None pre-#1427).
         let df = scalar(5.0f64).unwrap().requires_grad_(true);
         let loc = scalar(0.0f64).unwrap();
         let scale = scalar(1.0f64).unwrap();
         let dist = StudentT::new(df.clone(), loc, scale).unwrap();
         let s = dist.rsample(&[8]).unwrap();
-        // No loc/scale grad requested -> no backward node attached at all.
-        assert!(!s.requires_grad());
-        assert!(df.grad().unwrap().is_none());
+        assert!(s.requires_grad());
+        assert!(s.grad_fn().is_some());
+        s.sum_all().unwrap().backward().unwrap();
+        let g = df.grad().unwrap().unwrap();
+        assert!(g.item().unwrap().is_finite());
+    }
+
+    #[test]
+    fn test_student_t_df_gradient_matches_finite_difference() {
+        // FD-verify the CLOSED-FORM df gradient term against an independent
+        // central finite difference of `t(df) = loc + scale*z*sqrt(df/chi2(df))`
+        // for a FIXED standard-Gamma sample `sg_std` (so `chi2 = 2*sg`,
+        // alpha = df/2). The oracle reconstructs `d(chi2)/d(df)` via
+        // `dsg_dalpha_fd` (gammp-based, no production code) and composes the
+        // total derivative by hand:
+        //   dt/d(df) = scale*z*[ 0.5/sqrt(df*chi2)
+        //                        - 0.5*sqrt(df)*chi2^(-1.5)*(d chi2/d df) ]
+        // and `d(chi2)/d(df) = 2 * dsg_dalpha_fd(df/2, sg) * 0.5 = dsg_dalpha_fd`.
+        //
+        // We compare that hand-built oracle to the production grad emitted by
+        // StudentTRsampleBackward when we feed it a known (z, chi2) via a
+        // single-element rsample whose internals we mirror.
+        let loc_v = 0.7_f64;
+        let scale_v = 1.4_f64;
+        // Cases spanning the small-x, rational, and large-alpha branches of
+        // standard_gamma_grad_one (alpha = df/2).
+        let cases: [(f64, f64, f64); 4] = [
+            // (df, z, sg_std) — sg is the *standard* Gamma(df/2) sample = chi2/2.
+            (5.0, 0.9, 2.0),  // alpha=2.5, rational branch
+            (3.0, -1.2, 1.5), // alpha=1.5, rational branch
+            (1.6, 0.5, 0.3),  // alpha=0.8, small-x branch
+            (20.0, 1.1, 9.0), // alpha=10, large-alpha saddle branch
+        ];
+        for (df, z, sg) in cases {
+            let chi2 = 2.0 * sg;
+            // Oracle: hand-built closed form using the FD implicit gamma grad.
+            let dchi2_ddf = dsg_dalpha_fd(df / 2.0, sg); // = 2 * 0.5 * dsg
+            let explicit = 0.5 / (df * chi2).sqrt();
+            let implicit = 0.5 * df.sqrt() * chi2.powf(-1.5) * dchi2_ddf;
+            let oracle = scale_v * z * (explicit - implicit);
+
+            // Production: drive StudentTRsampleBackward directly with the same
+            // fixed (z, chi2) and grad_output = 1, reading the df slot.
+            let node = StudentTRsampleBackward {
+                df: scalar(df).unwrap().requires_grad_(true),
+                loc: scalar(loc_v).unwrap(),
+                scale: scalar(scale_v).unwrap(),
+                z: scalar(z).unwrap(),
+                chi2: scalar(chi2).unwrap(),
+            };
+            let grad_out = scalar(1.0f64).unwrap();
+            let grads = node.backward(&grad_out).unwrap();
+            let prod = grads[0].as_ref().unwrap().item().unwrap();
+
+            // The production path uses standard_gamma_grad_one; the oracle uses
+            // an independent gammp FD. They must agree to the FD tolerance.
+            let tol = 3e-3 * oracle.abs().max(1.0);
+            assert!(
+                (prod - oracle).abs() < tol,
+                "df grad mismatch at df={df}, z={z}, sg={sg}: prod={prod}, oracle={oracle}, |err|={}",
+                (prod - oracle).abs()
+            );
+        }
     }
 
     #[test]
