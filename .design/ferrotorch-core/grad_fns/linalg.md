@@ -73,18 +73,21 @@ a public-forward-driven test in this file's `#[cfg(test)] mod tests`
 resolved** — all its ops are grad-aware end-to-end.
 
 The research-grade decomposition backwards `eigvalsh`, `eigh` (real
-symmetric F-matrix), `pinv` (algebraic Moore-Penrose), `lstsq` (full-rank
+symmetric F-matrix), `svd` (3-output reduced F-matrix VJP + rectangular
+projectors), `pinv` (algebraic Moore-Penrose), `lstsq` (full-rank
 solution VJP via `pinv_backward`), `lu` / `lu_factor` (square `m==n`), plus
 the clean `cross` (bilinear) and `norm` (Frobenius / Euclidean `p=2`)
 VJPs shipped 2026-05-27 with `*Backward` `GradFn` structs in this file and
 grad-aware forwards in `ferrotorch-core/src/linalg.rs` delegating to them
-(SHIPPED — REQ-13/15/19/22/23/25/27/28). `matrix_rank` is
+(SHIPPED — REQ-11/13/15/19/22/23/25/27/28). `matrix_rank` is
 non-differentiable and mirrors torch's no-grad contract (REQ-24, no
-`GradFn` needed). This closes the bulk of sub-blocker #1577.
+`GradFn` needed). With `svd` landed, **the differentiable scope of
+sub-blocker #1577 is complete** — `eig`/`eigvals` need complex-tensor
+autograd and `householder_product` is a reflector-recursion VJP, both
+tracked separately under #1345.
 
 The remaining `torch.linalg.*` factorizations are still **forward-only** in
-`ferrotorch-core/src/linalg.rs` with no `*Backward` `GradFn`: `svd` (the
-3-output gauge-fixed + rectangular F-matrix VJP — residual under #1577),
+`ferrotorch-core/src/linalg.rs` with no `*Backward` `GradFn`:
 `eig` / `eigvals` (COMPLEX eigenvectors — blocked on a complex-tensor
 autograd primitive, #1345), `householder_product` (reflector-recursion VJP,
 #1345), and the RECTANGULAR `m != n` LU and the rank-deficient `lstsq` /
@@ -195,12 +198,48 @@ non-`p=2` `norm` branches (residual follow-ups under #1577).
   b.requires_grad())`; the wrapper computes the forward inside `no_grad`
   (preventing re-entry).
 
-- REQ-11: `linalg.svd(A, full_matrices=True)` — singular value
+- REQ-11: `linalg.svd(A, full_matrices=False)` — reduced singular value
   decomposition `A = U @ diag(S) @ Vh`. Documented in
-  `torch/linalg/__init__.py`. Forward-only impl `pub fn svd` in
-  `ferrotorch-core/src/linalg.rs` (via `ferray_linalg::svd`).
-  **NOT-STARTED in this file** — no `LinalgSvdBackward`. Open prereq
-  blocker #1577 (research-grade degenerate-singular-value / gauge VJP).
+  `torch/linalg/__init__.py`. **SHIPPED** (2026-05-27, closing #1577's svd
+  subset): the split `SvdBackwardU` / `SvdBackwardS` / `SvdBackwardV`
+  (real reduced-SVD F-matrix VJP, INCLUDING the rectangular `m != n`
+  projector terms) + `svd_differentiable` in
+  `ferrotorch-core/src/grad_fns/linalg.rs`, consumed by the grad-aware
+  `pub fn svd` in `ferrotorch-core/src/linalg.rs`. Mirrors `svd_backward`
+  at `torch/csrc/autograd/FunctionsManual.cpp:3605` (the real case): the
+  singular-value-gap matrix `E[i,j] = S²[j] - S²[i]` off-diagonal / `1` on
+  the diagonal (`FunctionsManual.cpp:3770-3777`), the symmetrized core
+  `(UhgU·S + S·VhgV)/E + diag(gS)` (`3767-3797`), and the rectangular
+  projectors `(I_m - UU^T) gU S⁻¹ V^T` for `m>n` and `U S⁻¹ gV^T (I_n -
+  VV^T)` for `m<n` (`3799-3815`). The three outputs `(U,S,Vh)` are jointly
+  linear in `gA`, so the joint VJP is SPLIT across the three single-output
+  nodes (`SvdBackwardU` on the `U` output, `SvdBackwardS` on `S`,
+  `SvdBackwardV` on `Vh`) accumulated into `A.grad` — the same split-node
+  strategy QR (`QrBackwardQ`/`QrBackwardR`) and eigh
+  (`EighBackwardW`/`EighBackwardV`) use. A consumer that uses only `S`
+  (`gU=gVh=None`) gets only the `SvdBackwardS` contribution, matching
+  torch's svdvals optimisation (`FunctionsManual.cpp:3738-3741`). Verified
+  against LIVE `torch 2.11.0+cu130` float64 `A.grad` for SQUARE (3×3), TALL
+  (4×3, `m>n`), WIDE (3×4, `m<n`), and S-only inputs by
+  `grad_fns::linalg::tests::svd_backward_{square_3x3,tall_4x3,wide_3x4,
+  s_only_square_3x3,s_only_tall_4x3}_matches_torch` at `1e-6`.
+  **Eigenvector-gauge caveat (R-DEV-1, mirrors eigh #1584):** the reduced
+  SVD is gauge-free — `(U,V)` and `(U·diag(±1), V·diag(±1))` are both valid
+  decompositions (upstream `FunctionsManual.cpp:3682-3698`). ferray's
+  faer-backed `svd` forward emits per-column signs that differ
+  matrix-by-matrix from torch's LAPACK signs; the SINGULAR VALUES match
+  torch exactly, and the VJP is sign-consistent, so for SIGN-INVARIANT
+  losses (`sum((U*U)*M)`, reconstructions `U diag(f(S)) Vh`, PCA/whitening,
+  and any `S`-only objective) `A.grad` matches torch byte-for-byte; the
+  tests therefore assert a gauge-invariant loss
+  `sum((U*U)*MU)+sum((Vh*Vh)*MV)+sum(S*c)` (verified maxdiff=0 under joint
+  U/Vh column sign flips in the torch oracle). EXACT for inputs with
+  DISTINCT singular values; on a degenerate input the `E` off-diagonal
+  `1/(S²[j]-S²[i])` diverges exactly as torch's does (torch does not
+  special-case degeneracy). The complex case (`Im(diag(...))` invariance
+  terms at `FunctionsManual.cpp:3718-3725,3793-3795`) is out of scope — it
+  needs complex-tensor autograd (#1345). The CUDA forward stays
+  forward-only.
 
 - REQ-12: `linalg.eig(A)` — non-symmetric eigendecomposition. Documented
   in `torch/linalg/__init__.py`. Forward-only impl `pub fn eig` in
@@ -582,12 +621,13 @@ non-`p=2` `norm` branches (residual follow-ups under #1577).
   `pub fn slogdet` / `pub fn solve` / `pub fn inv` / `pub fn det` in
   `ferrotorch-core/src/linalg.rs` delegate to the matching
   `*_differentiable` wrappers (forward computed under `no_grad`). The
-  remaining factorizations
-  (svd/eig/eigh/eigvals/eigvalsh/pinv/lstsq/norm/matrix_rank/cross/
-  householder_product/lu/lu_factor) have no `GradFn` at all; the
   research-grade degenerate / gauge-freedom subset
-  (svd/eigh/eigvalsh/pinv/lstsq/lu) is tracked under #1577, the rest
-  under #1345.
+  (svd/eigh/eigvalsh/pinv/lstsq/lu/lu_factor + cross/norm) is now wired
+  end-to-end (REQ-11/13/15/19/22/23/25/27/28), closing the differentiable
+  scope of #1577. The remaining factorizations
+  (eig/eigvals/matrix_rank/householder_product, the rectangular LU and
+  rank-deficient lstsq / non-`p=2` norm branches) have no `GradFn` and are
+  tracked under #1345 / residual #1577.
 
 ## Architecture
 
@@ -764,10 +804,12 @@ the remaining scope of #1583):
   diagonal}` and `crate::ops::tensor_ops::{diag,tril,triu}`) now delegate
   to the matching `*_differentiable` wrapper, mirroring the
   qr/cholesky/slogdet and solve/inv/det/trace/outer pattern above. With
-  these wired, **#1583 is fully resolved**; only the research-grade
-  factorizations (svd/eigh/eigvalsh/pinv/lstsq/lu under #1577, and
-  eig/eigvals/norm/matrix_rank/cross/householder_product under #1345)
-  remain forward-only.
+  these wired, **#1583 is fully resolved**. The research-grade
+  factorizations svd/eigh/eigvalsh/pinv/lstsq/lu/lu_factor (the #1577
+  degenerate / gauge-freedom subset) plus cross/norm are now SHIPPED;
+  only eig/eigvals/matrix_rank/householder_product (under #1345) and the
+  rectangular-LU / rank-deficient-lstsq / non-`p=2`-norm residuals
+  (#1577) remain forward-only.
 
 The QR multi-output case is handled by SPLITTING the jointly-linear
 `(gQ, gR)` VJP across two single-output nodes — `QrBackwardQ` on the `Q`
@@ -779,18 +821,28 @@ partial as zero, matching PyTorch's undefined-grad semantics. Slogdet
 likewise attaches its node only to the differentiable `logabsdet`
 output, leaving `sign` plain (non-differentiable in the real case).
 
-The remaining factorizations — `linalg.svd`, `linalg.eig` / `eigh` /
-`eigvals` / `eigvalsh`, `linalg.pinv`, `linalg.lstsq`, `linalg.norm`,
-`linalg.matrix_rank`, `linalg.cross`, `linalg.householder_product`,
-`linalg.lu`, `linalg.lu_factor` — remain forward-only in
-`ferrotorch-core/src/linalg.rs` routed through `ferray_linalg::*`, with
-no `*Backward` `GradFn` at all. Autograd through several requires
-research-grade VJPs (degenerate eigenvalues, gauge freedom — e.g. SVD's
-F-matrix formula `dA = U (F ∘ (U^T dU - dU^T U)/2 S + dS) Vh + ...`). The
-degenerate / gauge-freedom subset (svd/eigh/eigvalsh/pinv/lstsq/lu/
-lu_factor) is tracked under sub-blocker #1577; the rest
-(eig/eigvals/norm/matrix_rank/cross/householder_product) stay
-NOT-STARTED under #1345.
+`linalg.svd` is **SHIPPED** (2026-05-27, closing #1577's svd subset): the
+split `SvdBackwardU`/`SvdBackwardS`/`SvdBackwardV` + `svd_differentiable`
+implement the real reduced-SVD VJP — the F-matrix `E[i,j] = S²[j] - S²[i]`
+off-diagonal / `1` on the diagonal, the symmetrized core
+`(skew(U^T gU)·S + S·skew(Vh gVh^T))/E + diag(gS)`, AND the rectangular
+projectors `(I_m - UU^T) gU S⁻¹ V^T` (for `m>n`) / `U S⁻¹ gV^T (I_n -
+VV^T)` (for `m<n`), grounded in `svd_backward` at
+`FunctionsManual.cpp:3605`. The 3-output joint VJP is split across the
+`U`/`S`/`Vh` outputs (same strategy as QR's Q/R and eigh's W/V) and
+accumulated into `A.grad`. Consumed by the grad-aware `pub fn svd` in
+`ferrotorch-core/src/linalg.rs`; the complex case (the `Im(diag(...))`
+invariance terms) is out of scope (#1345). With this landed the
+differentiable scope of #1577 is complete.
+
+The factorizations that remain forward-only in
+`ferrotorch-core/src/linalg.rs` (routed through `ferray_linalg::*`, no
+`*Backward` `GradFn`): `linalg.eig` / `linalg.eigvals` (COMPLEX
+eigenvectors — need a complex-tensor autograd primitive),
+`linalg.householder_product` (reflector-recursion VJP), and
+`linalg.matrix_rank` (non-differentiable, mirrors torch). These stay
+NOT-STARTED under #1345. The rectangular `m != n` LU / rank-deficient
+`lstsq` / non-`p=2` `norm` branches are residual follow-ups under #1577.
 
 ### REQ-29..REQ-35 trace/diagonal/diag/tril/triu/kron/outer
 
@@ -841,7 +893,7 @@ grad-aware end-to-end.
 | `addmv` | `TORCH_IMPL_FUNC(addmv_out_cpu)` in `aten/src/ATen/native/Blas.cpp` | dself=beta·grad, dmat=alpha·outer(grad,vec), dvec=alpha·mat^T·grad | SHIPPED (REQ-8): `AddmvBackward` + grad-aware `pub fn addmv` forward. FD-verified. |
 | `addr` | `Tensor addr(...)` in `aten/src/ATen/native/LinearAlgebra.cpp` | dself=beta·grad, dvec1=alpha·grad@vec2, dvec2=alpha·vec1^T@grad | SHIPPED (REQ-9): `AddrBackward` + grad-aware `pub fn addr` forward. FD-verified. |
 | `linalg.solve` | `Tensor linalg_solve(...)` in `aten/src/ATen/native/BatchLinearAlgebra.cpp` | `gB = A^{-T} @ gX`, `gA = -gB @ X^T` (`linalg_solve_backward` in `FunctionsManual.cpp`) | SHIPPED (REQ-10): `LinalgSolveBackward` + grad-aware `pub fn solve` forward delegating to `solve_differentiable`. FD-verified (matrix + vector RHS). |
-| `linalg.svd` | `svd = _add_docstr(...)` in `torch/linalg/__init__.py` | 3-output gauge-fixed + rectangular F-matrix | No `GradFn`; forward-only. NOT-STARTED. Blocker #1577 (3-way split + rectangular projector + reduced-shape bookkeeping — residual). |
+| `linalg.svd` | `svd = _add_docstr(...)` in `torch/linalg/__init__.py` | 3-output reduced F-matrix + rectangular projectors | `SvdBackwardU`/`SvdBackwardS`/`SvdBackwardV` + `svd_differentiable`; grad-aware `crate::linalg::svd` consumer; verified vs LIVE torch float64 (square/tall/wide/S-only). SHIPPED (closes #1577 svd subset). |
 | `linalg.eig` | `eig = _add_docstr(...)` in `torch/linalg/__init__.py` | COMPLEX F-matrix VJP | No `GradFn`; forward-only. NOT-STARTED. Blocker #1345 (needs complex-tensor autograd primitive — ferrotorch eig returns `[n,2]` real/imag). |
 | `linalg.eigh` | `eigh = _add_docstr(...)` in `torch/linalg/__init__.py` | sym F-matrix (real spectrum) | SHIPPED (REQ-13): split `EighBackwardW`/`EighBackwardV` + grad-aware `pub fn eigh`. Exact for distinct eigenvalues; degenerate diverges as torch. FD-verified. |
 | `linalg.eigvals` | `eigvals = _add_docstr(...)` in `torch/linalg/__init__.py` | COMPLEX eigvals shortcut of `eig` VJP | No `GradFn`; forward-only. NOT-STARTED. Blocker #1345 (same complex-tensor primitive as `eig`). |
@@ -981,7 +1033,7 @@ expectations).
 | REQ-8 (addmv) | SHIPPED | impl: `pub struct AddmvBackward` + `pub fn addmv_differentiable` in `ferrotorch-core/src/grad_fns/linalg.rs` (mirroring `TORCH_IMPL_FUNC(addmv_out_cpu)` at `aten/src/ATen/native/Blas.cpp:72` + `addmv` at `tools/autograd/derivatives.yaml:267`). FD-verified by `fn addmv_public_forward_is_grad_aware_and_matches_fd`. Non-test production consumer: the grad-aware forward `pub fn addmv` in `ferrotorch-core/src/linalg.rs` delegates to `addmv_differentiable`. |
 | REQ-9 (addr) | SHIPPED | impl: `pub struct AddrBackward` + `pub fn addr_differentiable` in `ferrotorch-core/src/grad_fns/linalg.rs` (mirroring `Tensor addr(...)` at `aten/src/ATen/native/LinearAlgebra.cpp:1200` + `addr` at `tools/autograd/derivatives.yaml:273`). FD-verified by `fn addr_public_forward_is_grad_aware_and_matches_fd`. Non-test production consumer: the grad-aware forward `pub fn addr` in `ferrotorch-core/src/linalg.rs` delegates to `addr_differentiable`. |
 | REQ-10 (linalg.solve) | SHIPPED | impl: `pub struct LinalgSolveBackward` + `pub fn solve_differentiable` in `ferrotorch-core/src/grad_fns/linalg.rs` (VJP `gB = A^{-T} @ gX`, `gA = -gB @ X^T`, mirroring `linalg_solve_backward` at `torch/csrc/autograd/FunctionsManual.cpp:6160`). FD-verified by `fn solve_forward_is_grad_aware_and_matches_fd_matrix_rhs` + `fn solve_forward_is_grad_aware_and_matches_fd_vector_rhs` in the in-file `#[cfg(test)] mod tests` (both drive the public forward and check `A.grad`/`B.grad` vs central FD). Non-test production consumer: the grad-aware forward `pub fn solve` in `ferrotorch-core/src/linalg.rs` (the `torch.linalg.solve` public surface) delegates to `solve_differentiable` when `!a.is_cuda() && is_grad_enabled() && (a.requires_grad() || b.requires_grad())`; the wrapper computes the forward under `no_grad` to avoid re-entry. |
-| REQ-11 (linalg.svd) | NOT-STARTED | open prereq blocker #1577. The real-case `svd_backward` (`torch/csrc/autograd/FunctionsManual.cpp:3605`) is a THREE-output (`U`, `S`, `Vh`) jointly-linear VJP requiring the F-matrix `E_{jk} = S_k^2 - S_j^2`, the `skew(U^T gU)/E`/`skew(V^T gV)/E` gauge-fixing terms, AND the rectangular correction `(I_m - UU^T) gU S^{-1} V^T` (m>n) / `U S^{-1} (gV)^T (I_n - VV^T)` (m<n). The eigvalsh/eigh F-matrix machinery this commit ships is the prerequisite groundwork, but the 3-way split-node accumulation + rectangular projector + reduced-vs-full `U`/`Vh` shape bookkeeping is the remaining research-grade work — deferred to avoid shipping a VJP that FD-passes on one square input but breaks on the rectangular / gauge cases. Forward-only `pub fn svd` in `ferrotorch-core/src/linalg.rs`. |
+| REQ-11 (linalg.svd) | SHIPPED | impl: split `struct SvdBackwardU` + `struct SvdBackwardS` + `struct SvdBackwardV` (sharing `SvdBackwardShared`) + `pub fn svd_differentiable` in `ferrotorch-core/src/grad_fns/linalg.rs` implement the real reduced-SVD VJP mirroring `svd_backward` at `torch/csrc/autograd/FunctionsManual.cpp:3605`: the F-matrix `E[i,j] = S²[j] - S²[i]` off-diagonal / `1` on the diagonal (`3770-3777`), the symmetrized core `(skew(U^T gU)·S + S·skew(Vh gVh^T))/E + diag(gS)` (`3767-3797`), AND the rectangular projectors `(I_m - UU^T) gU S⁻¹ V^T` for `m>n` / `U S⁻¹ gV^T (I_n - VV^T)` for `m<n` (`3799-3815`). The 3-output `(U,S,Vh)` jointly-linear VJP is split across the three single-output nodes (`SvdBackwardU` on `U`, `SvdBackwardS` on `S`, `SvdBackwardV` on `Vh`) and accumulated into `A.grad` — same split-node strategy as QR (Q/R) and eigh (W/V); an `S`-only consumer gets just the `SvdBackwardS` partial (torch's svdvals optimisation, `3738-3741`). Verified against LIVE `torch 2.11.0+cu130` float64 `A.grad` for SQUARE 3×3, TALL 4×3 (`m>n` projector), WIDE 3×4 (`m<n` projector), and S-only by `fn svd_backward_{square_3x3,tall_4x3,wide_3x4,s_only_square_3x3,s_only_tall_4x3}_matches_torch` at `1e-6`, using a gauge-invariant loss (gauge caveat mirrors eigh #1584: ferray=faer signs differ from torch=LAPACK, but the VJP is sign-consistent, so sign-invariant losses match exactly). Non-test production consumer: the grad-aware forward `pub fn svd` in `ferrotorch-core/src/linalg.rs` delegates to `svd_differentiable` when `!input.is_cuda() && is_grad_enabled() && input.requires_grad()` (forward under `no_grad`). The complex case (the `Im(diag(...))` invariance terms) is out of scope (#1345). Closes #1577 svd subset. |
 | REQ-12 (linalg.eig) | NOT-STARTED | open prereq blocker #1345 — CONCRETE: needs complex-tensor autograd support. `linalg_eig_backward` (non-Hermitian, `torch/csrc/autograd/FunctionsManual.cpp:3820`) operates on COMPLEX eigenvalues/eigenvectors (`V.mH()`, `at::linalg_solve(V.mH(), ...)`, complex `Econj`). ferrotorch's `pub fn eig` returns eigenvalues/vectors as `[n,2]`/`[n,n,2]` real/imag-encoded tensors (no native `Complex<T>` `Tensor` with a complex autograd `GradFn`), so the conjugate-transpose VJP cannot be expressed without a complex-tensor primitive. Forward-only `pub fn eig` in `ferrotorch-core/src/linalg.rs`. |
 | REQ-13 (linalg.eigh) | SHIPPED | impl: split `pub struct EighBackwardW` + `pub struct EighBackwardV` (sharing `EighBackwardShared`) + `pub fn eigh_differentiable` in `ferrotorch-core/src/grad_fns/linalg.rs` implement the real symmetric F-matrix VJP `gA = sym(U[(skew(U^T gU)/Econj) + diag(gw)]U^T)` with the skew-symmetric projection `0.5*(VhgV - VhgV^T)` and `Econj_{ij} = w_j - w_i` off-diagonal (1 on the diagonal), mirroring `linalg_eig_backward` (Hermitian branch, real case) at `torch/csrc/autograd/FunctionsManual.cpp:3882-3917`; the jointly-linear `(gw, gU)` VJP is split across the two single-output nodes and accumulated into `A.grad`. FD-verified on a distinct-eigenvalue well-conditioned symmetric 3x3 by `fn eigh_public_forward_is_grad_aware_and_matches_fd` (weighted sum over BOTH eigenvalues and eigenvectors, analytic-vs-FD both symmetrized, tol 2e-3). Non-test production consumer: the grad-aware forward `pub fn eigh` in `ferrotorch-core/src/linalg.rs` (the `torch.linalg.eigh` public surface) delegates to `eigh_differentiable` when `!a.is_cuda() && is_grad_enabled() && a.requires_grad()` (forward under `no_grad`). Degenerate-eigenvalue inputs diverge through `1/(w_j-w_i)` exactly as PyTorch's `linalg_eig_backward` does (no special-casing upstream). |
 | REQ-14 (linalg.eigvals) | NOT-STARTED | open prereq blocker #1345 — same complex-tensor blocker as REQ-12. The eigvals-only shortcut of `linalg_eig_backward` (non-Hermitian, `at::linalg_solve(V.mH(), gL.unsqueeze(-1) * V.mH())`, `FunctionsManual.cpp:3861`) is still complex-valued (general eigenvalues are complex even for real `A`), so it needs the same complex-tensor autograd primitive REQ-12 lacks. Forward-only `pub fn eigvals` in `ferrotorch-core/src/linalg.rs`. |

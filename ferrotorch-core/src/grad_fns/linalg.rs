@@ -17,7 +17,7 @@
 //! | REQ-8 (`addmv`) | SHIPPED | `AddmvBackward` + `addmv_differentiable` (per `derivatives.yaml:267`); FD-verified `grad_fns::linalg::tests::addmv_public_forward_is_grad_aware_and_matches_fd`; non-test consumer: the grad-aware `crate::linalg::addmv` forward delegates here. Closes #1583. |
 //! | REQ-9 (`addr`) | SHIPPED | `AddrBackward` + `addr_differentiable` (per `derivatives.yaml:273`); FD-verified `grad_fns::linalg::tests::addr_public_forward_is_grad_aware_and_matches_fd`; non-test consumer: the grad-aware `crate::linalg::addr` forward delegates here. Closes #1583. |
 //! | REQ-10 (`linalg.solve`) | SHIPPED | `LinalgSolveBackward` + `solve_differentiable` (VJP `gB = A^-T @ gX`, `gA = -gB @ X^T` per `FunctionsManual.cpp:6160`); FD-verified `tests/divergence_linalg_grad_audit.rs:solve_backward_*`; non-test consumer `tools/parity-sweep/runner/src/main.rs` `"linalg.solve"` arm (parity 24/24 non-skipped, 0 failed). Blocker #1345. |
-//! | REQ-11 (`linalg.svd`) | NOT-STARTED | forward exists; no `LinalgSvdBackward`. Blocker #1345. |
+//! | REQ-11 (`linalg.svd`) | SHIPPED | `SvdBackwardU`/`SvdBackwardS`/`SvdBackwardV` + `svd_differentiable` (real reduced-SVD VJP, F-matrix `E[i,j]=S²[j]-S²[i]` + symmetrized core + rectangular `m!=n` projectors, split across the U/S/Vh outputs and accumulated into `A.grad`) per `FunctionsManual.cpp:3605` (E `3770-3777`, core `3767-3797`, projectors `3799-3815`); verified vs LIVE torch float64 by `grad_fns::linalg::tests::svd_backward_{square_3x3,tall_4x3,wide_3x4,s_only_square_3x3,s_only_tall_4x3}_matches_torch`; non-test consumer: the grad-aware `crate::linalg::svd` forward delegates here when grad is enabled. Gauge caveat mirrors eigh #1584. Blocker #1577. |
 //! | REQ-12 (`linalg.eig`) | NOT-STARTED | forward exists; no backward. Blocker #1345. |
 //! | REQ-13 (`linalg.eigh`) | NOT-STARTED | forward exists; no backward. Blocker #1345. |
 //! | REQ-14 (`linalg.eigvals`) | NOT-STARTED | forward exists; no backward. Blocker #1345. |
@@ -3096,6 +3096,322 @@ pub fn eigh_differentiable<T: Float>(a: &Tensor<T>) -> FerrotorchResult<(Tensor<
     let w = Tensor::from_operation(w_storage, w_shape, w_node)?;
     let u = Tensor::from_operation(u_storage, u_shape, v_node)?;
     Ok((w, u))
+}
+
+// ---------------------------------------------------------------------------
+// SvdBackward — (U, S, Vh) = svd(A, full_matrices=False)   (2D, reduced SVD)
+// ---------------------------------------------------------------------------
+
+/// Shared real reduced-SVD VJP, split across three single-output nodes
+/// (`SvdBackwardU` on `U`, `SvdBackwardS` on `S`, `SvdBackwardV` on `Vh`).
+///
+/// For `A = U diag(S) Vh` with `A` `m×n`, `U` `m×k`, `S` `k`, `Vh` `k×n`,
+/// `k = min(m, n)`, this mirrors `svd_backward` at
+/// `torch/csrc/autograd/FunctionsManual.cpp:3605` (the REAL case, where
+/// `skew(X) = X - X^T` and `^H` is the plain transpose):
+///
+/// - `UhgU = skew(U^T @ gU)` (`k×k`), `VhgV = skew(Vh @ gVh^T)` (`k×k`)
+/// - `E[i,j] = S^2[j] - S^2[i]` off-diagonal, `1` on the diagonal
+///   (`FunctionsManual.cpp:3770-3777`: `S2.unsqueeze(-2) - S2.unsqueeze(-1)`,
+///   diagonal then `fill_(1)`)
+/// - core `ret` — both gU & gVh:
+///   `ret[i,j] = (UhgU[i,j]*S[j] + S[i]*VhgV[i,j]) / E[i,j]`; gU only:
+///   `ret[i,j] = UhgU[i,j]/E[i,j] * S[j]`; gVh only:
+///   `ret[i,j] = S[i] * VhgV[i,j]/E[i,j]`; then `ret += diag(gS)` when gS is
+///   present (`FunctionsManual.cpp:3767-3797`).
+/// - assembly (`FunctionsManual.cpp:3799-3815`) — for m > n & gU:
+///   `gA = [U@ret + gU S^{-1} - U(U^T gU S^{-1})] @ Vh`; for m < n & gVh:
+///   `gA = U @ [ret@Vh + S^{-1}gVh - (S^{-1}gVh Vh^T)Vh]`; else (square / no
+///   projector): `gA = U @ ret @ Vh`.
+///
+/// The three outputs `(U, S, Vh)` are jointly linear in `gA`, so the engine
+/// accumulates the `SvdBackwardU` (`gS=gVh=0`), `SvdBackwardS` (`gU=gVh=0`),
+/// and `SvdBackwardV` (`gU=gS=0`) partials into `A.grad` — the same split-node
+/// strategy QR (`QrBackwardQ`/`QrBackwardR`) and eigh
+/// (`EighBackwardW`/`EighBackwardV`) use. Splitting the `gU`/`gS`/`gVh`
+/// contributions reproduces exactly torch's `if gU.defined() ... else`
+/// branching for the "only some outputs have gradients" case.
+///
+/// EXACT for inputs with DISTINCT singular values (and full rank, as torch
+/// assumes — `FunctionsManual.cpp:3613-3615`). On a degenerate input the `E`
+/// off-diagonal `1/(S^2[j]-S^2[i])` blows up exactly as torch's does (torch
+/// does not special-case degeneracy; the JVP/VJP are ill-defined at a
+/// repeated singular value). Like `eigh`, the SVD is gauge-free: `(U, V)` and
+/// `(U·diag(±1), V·diag(±1))` are both valid reduced SVDs, so a loss must be
+/// invariant under joint column sign flips for the gradient to be well-posed
+/// (`FunctionsManual.cpp:3682-3698`); ferray's faer-backed forward emits its
+/// own column signs (differing from torch's LAPACK signs), but the VJP is
+/// sign-consistent, so on well-posed (gauge-invariant) losses `A.grad` matches
+/// torch.
+#[derive(Debug)]
+struct SvdBackwardShared<T: Float> {
+    /// Left singular vectors `U` (`m×k`), retained.
+    u: Tensor<T>,
+    /// Singular values `S` (`k`), retained.
+    s: Tensor<T>,
+    /// Right singular vectors (hermitian) `Vh` (`k×n`), retained.
+    vh: Tensor<T>,
+}
+
+impl<T: Float> SvdBackwardShared<T> {
+    fn m(&self) -> usize {
+        self.u.shape()[0]
+    }
+    fn n(&self) -> usize {
+        self.vh.shape()[1]
+    }
+    fn k(&self) -> usize {
+        self.s.shape()[0]
+    }
+
+    /// `E[i,j] = S^2[j] - S^2[i]` off-diagonal, `1` on the diagonal — the
+    /// singular-value-gap denominator (`FunctionsManual.cpp:3770-3777`).
+    fn e_matrix(&self, s: &[T]) -> Vec<T> {
+        let k = self.k();
+        let one = <T as num_traits::One>::one();
+        let mut e = vec![one; k * k];
+        for i in 0..k {
+            for j in 0..k {
+                if i != j {
+                    e[i * k + j] = s[j] * s[j] - s[i] * s[i];
+                }
+            }
+        }
+        e
+    }
+
+    /// `gA = U @ ret @ Vh` (the square / no-projector assembly,
+    /// `FunctionsManual.cpp:3811-3814`). `ret` is the `k×k` middle factor.
+    fn conjugate(&self, ret: &[T]) -> FerrotorchResult<Tensor<T>> {
+        let (m, n, k) = (self.m(), self.n(), self.k());
+        let u = self.u.data()?; // [m,k]
+        let vh = self.vh.data()?; // [k,n]
+        let uret = mm_rows(u, ret, m, k, k); // [m,k]
+        let ga = mm_rows(&uret, vh, m, k, n); // [m,n]
+        from_cpu(ga, vec![m, n])
+    }
+
+    /// `gU`-only contribution. Core `ret_U[i,j] = UhgU[i,j]/E[i,j] * S[j]`
+    /// plus, when `m > n`, the rectangular projector
+    /// `(I_m - U U^T) gU S^{-1} V^T`.
+    fn grad_a_from_gu(&self, gu: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
+        let (m, n, k) = (self.m(), self.n(), self.k());
+        let zero = <T as num_traits::Zero>::zero();
+        let u = self.u.data()?; // [m,k]
+        let vh = self.vh.data()?; // [k,n]
+        let s = self.s.data()?;
+        let gud = gu.data()?; // [m,k]
+        let e = self.e_matrix(s);
+
+        // UhgU = skew(U^T @ gU) = U^T gU - (U^T gU)^T,  [k,k].
+        let utgu = mm_at_rows(u, gud, k, m, k); // U^T @ gU, [k,k]
+        let mut uhgu = vec![zero; k * k];
+        for i in 0..k {
+            for j in 0..k {
+                uhgu[i * k + j] = utgu[i * k + j] - utgu[j * k + i];
+            }
+        }
+        // ret[i,j] = UhgU[i,j]/E[i,j] * S[j].
+        let mut ret = vec![zero; k * k];
+        for i in 0..k {
+            for j in 0..k {
+                ret[i * k + j] = uhgu[i * k + j] / e[i * k + j] * s[j];
+            }
+        }
+
+        if m > n {
+            // gA = [U@ret + gU S^{-1} - U(U^T gU S^{-1})] @ Vh
+            //      (FunctionsManual.cpp:3799-3804).
+            let uret = mm_rows(u, &ret, m, k, k); // [m,k]
+            // gUSinv[i,j] = gU[i,j] / S[j],  [m,k].
+            let mut gusinv = vec![zero; m * k];
+            for i in 0..m {
+                for j in 0..k {
+                    gusinv[i * k + j] = gud[i * k + j] / s[j];
+                }
+            }
+            // U (U^T gUSinv): [m,k].
+            let utgusinv = mm_at_rows(u, &gusinv, k, m, k); // [k,k]
+            let proj = mm_rows(u, &utgusinv, m, k, k); // [m,k]
+            let mut inner = vec![zero; m * k];
+            for idx in 0..m * k {
+                inner[idx] = uret[idx] + gusinv[idx] - proj[idx];
+            }
+            let ga = mm_rows(&inner, vh, m, k, n); // [m,n]
+            from_cpu(ga, vec![m, n])
+        } else {
+            // m <= n: no gU projector; gA = U @ ret @ Vh.
+            self.conjugate(&ret)
+        }
+    }
+
+    /// `gS`-only contribution: `ret = diag(gS)`, then `gA = U @ ret @ Vh`
+    /// (`FunctionsManual.cpp:3738-3741` svdvals optimisation / the diagonal
+    /// fill at `3790-3791`).
+    fn grad_a_from_gs(&self, gs: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
+        let k = self.k();
+        let zero = <T as num_traits::Zero>::zero();
+        let gsd = gs.data()?;
+        let mut ret = vec![zero; k * k];
+        for i in 0..k {
+            ret[i * k + i] = gsd[i];
+        }
+        self.conjugate(&ret)
+    }
+
+    /// `gVh`-only contribution. Core `ret_V[i,j] = S[i] * VhgV[i,j]/E[i,j]`
+    /// plus, when `m < n`, the rectangular projector
+    /// `U S^{-1} (gV)^T (I_n - V V^T)`.
+    fn grad_a_from_gvh(&self, gvh: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
+        let (m, n, k) = (self.m(), self.n(), self.k());
+        let zero = <T as num_traits::Zero>::zero();
+        let u = self.u.data()?; // [m,k]
+        let vh = self.vh.data()?; // [k,n]
+        let s = self.s.data()?;
+        let gvhd = gvh.data()?; // [k,n]
+        let e = self.e_matrix(s);
+
+        // VhgV = skew(Vh @ gVh^T) = Vh gVh^T - (Vh gVh^T)^T,  [k,k].
+        let vgvt = mm_bt_rows(vh, gvhd, k, n, k); // Vh @ gVh^T, [k,k]
+        let mut vhgv = vec![zero; k * k];
+        for i in 0..k {
+            for j in 0..k {
+                vhgv[i * k + j] = vgvt[i * k + j] - vgvt[j * k + i];
+            }
+        }
+        // ret[i,j] = S[i] * VhgV[i,j]/E[i,j].
+        let mut ret = vec![zero; k * k];
+        for i in 0..k {
+            for j in 0..k {
+                ret[i * k + j] = s[i] * vhgv[i * k + j] / e[i * k + j];
+            }
+        }
+
+        if m < n {
+            // gA = U @ [ret@Vh + S^{-1}gVh - (S^{-1}gVh Vh^T)Vh]
+            //      (FunctionsManual.cpp:3805-3810).
+            let retvh = mm_rows(&ret, vh, k, k, n); // [k,n]
+            // SinvgVh[i,j] = gVh[i,j] / S[i],  [k,n].
+            let mut sinvgvh = vec![zero; k * n];
+            for i in 0..k {
+                for j in 0..n {
+                    sinvgvh[i * n + j] = gvhd[i * n + j] / s[i];
+                }
+            }
+            // (SinvgVh @ Vh^T) @ Vh: [k,n].
+            let sgvht = mm_bt_rows(&sinvgvh, vh, k, n, k); // [k,k]
+            let proj = mm_rows(&sgvht, vh, k, k, n); // [k,n]
+            let mut inner = vec![zero; k * n];
+            for idx in 0..k * n {
+                inner[idx] = retvh[idx] + sinvgvh[idx] - proj[idx];
+            }
+            let ga = mm_rows(u, &inner, m, k, n); // [m,n]
+            from_cpu(ga, vec![m, n])
+        } else {
+            // m >= n: no gVh projector; gA = U @ ret @ Vh.
+            self.conjugate(&ret)
+        }
+    }
+}
+
+/// `gU`-only svd backward node, attached to the `U` output.
+#[derive(Debug)]
+struct SvdBackwardU<T: Float> {
+    input: Tensor<T>,
+    shared: SvdBackwardShared<T>,
+}
+
+impl<T: Float> GradFn<T> for SvdBackwardU<T> {
+    fn backward(&self, grad_output: &Tensor<T>) -> FerrotorchResult<Vec<Option<Tensor<T>>>> {
+        Ok(vec![Some(self.shared.grad_a_from_gu(grad_output)?)])
+    }
+    fn inputs(&self) -> Vec<&Tensor<T>> {
+        vec![&self.input]
+    }
+    fn name(&self) -> &'static str {
+        "SvdBackward"
+    }
+}
+
+/// `gS`-only svd backward node, attached to the `S` output.
+#[derive(Debug)]
+struct SvdBackwardS<T: Float> {
+    input: Tensor<T>,
+    shared: SvdBackwardShared<T>,
+}
+
+impl<T: Float> GradFn<T> for SvdBackwardS<T> {
+    fn backward(&self, grad_output: &Tensor<T>) -> FerrotorchResult<Vec<Option<Tensor<T>>>> {
+        Ok(vec![Some(self.shared.grad_a_from_gs(grad_output)?)])
+    }
+    fn inputs(&self) -> Vec<&Tensor<T>> {
+        vec![&self.input]
+    }
+    fn name(&self) -> &'static str {
+        "SvdBackward"
+    }
+}
+
+/// `gVh`-only svd backward node, attached to the `Vh` output.
+#[derive(Debug)]
+struct SvdBackwardV<T: Float> {
+    input: Tensor<T>,
+    shared: SvdBackwardShared<T>,
+}
+
+impl<T: Float> GradFn<T> for SvdBackwardV<T> {
+    fn backward(&self, grad_output: &Tensor<T>) -> FerrotorchResult<Vec<Option<Tensor<T>>>> {
+        Ok(vec![Some(self.shared.grad_a_from_gvh(grad_output)?)])
+    }
+    fn inputs(&self) -> Vec<&Tensor<T>> {
+        vec![&self.input]
+    }
+    fn name(&self) -> &'static str {
+        "SvdBackward"
+    }
+}
+
+/// Differentiable reduced `svd` (real, distinct singular values). Attaches the
+/// split `SvdBackwardU` / `SvdBackwardS` / `SvdBackwardV` nodes (whose `A.grad`
+/// contributions the autograd engine accumulates) when grad is needed.
+///
+/// Forward computed under `no_grad` (re-entry guard): `linalg_fwd::svd`
+/// delegates back here when grad is enabled. Mirrors
+/// `torch.linalg.svd(A, full_matrices=False)` / `torch.svd`. The rectangular
+/// `m != n` projector terms are handled inside the U/V partials
+/// (`grad_a_from_gu` for `m>n`, `grad_a_from_gvh` for `m<n`).
+pub fn svd_differentiable<T: Float>(
+    a: &Tensor<T>,
+) -> FerrotorchResult<(Tensor<T>, Tensor<T>, Tensor<T>)> {
+    let (u, s, vh) = crate::autograd::no_grad::no_grad(|| linalg_fwd::svd(a))?;
+    let needs_grad = is_grad_enabled() && a.requires_grad();
+    if !needs_grad {
+        return Ok((u, s, vh));
+    }
+    let shared = || SvdBackwardShared {
+        u: u.clone(),
+        s: s.clone(),
+        vh: vh.clone(),
+    };
+    let u_node = Arc::new(SvdBackwardU {
+        input: a.clone(),
+        shared: shared(),
+    });
+    let s_node = Arc::new(SvdBackwardS {
+        input: a.clone(),
+        shared: shared(),
+    });
+    let v_node = Arc::new(SvdBackwardV {
+        input: a.clone(),
+        shared: shared(),
+    });
+    let (u_storage, u_shape) = u.into_storage_and_shape()?;
+    let (s_storage, s_shape) = s.into_storage_and_shape()?;
+    let (vh_storage, vh_shape) = vh.into_storage_and_shape()?;
+    let u = Tensor::from_operation(u_storage, u_shape, u_node)?;
+    let s = Tensor::from_operation(s_storage, s_shape, s_node)?;
+    let vh = Tensor::from_operation(vh_storage, vh_shape, v_node)?;
+    Ok((u, s, vh))
 }
 
 // ---------------------------------------------------------------------------
@@ -6938,5 +7254,208 @@ mod tests {
             linalg_fwd::vector_norm(x, 2.0).unwrap().item().unwrap()
         });
         assert_grad_close64(&analytic, &numeric, 1e-5, "vector_norm(p=2) vs FD");
+    }
+
+    // -----------------------------------------------------------------------
+    // svd backward (REQ-11, #1577) — A.grad vs LIVE torch 2.11.0+cu130 float64
+    // for the reduced SVD `torch.linalg.svd(A, full_matrices=False)`.
+    //
+    // GAUGE FREEDOM (R-DEV-1, same situation eigh #1584 documents): `(U, V)`
+    // and `(U·diag(±1), V·diag(±1))` are both valid reduced SVDs of `A`
+    // (upstream: `FunctionsManual.cpp:3682-3698`). ferray's faer-backed
+    // forward emits its OWN per-column signs, differing matrix-by-matrix from
+    // torch's LAPACK signs. So the loss MUST be invariant under joint U/Vh
+    // column sign flips for `A.grad` to be well-posed and comparable. We use
+    //   L = sum((U*U)*MU) + sum((Vh*Vh)*MV) + sum(S*c)
+    // — each `U_ij^2` and `Vh_ij^2` is unchanged under a column sign flip, and
+    // `S` is gauge-free. The Python oracle (below) verifies maxdiff == 0 under
+    // the sign flip, confirming the loss is gauge-invariant; both torch and
+    // ferrotorch must then agree regardless of their differing sign
+    // conventions. The MU/MV terms give BOTH `gU` and `gVh` nonzero so the
+    // rectangular projector branches (`m>n` in `grad_a_from_gu`, `m<n` in
+    // `grad_a_from_gvh`) are exercised for the tall/wide cases.
+    //
+    // R-CHAR-3 (a): every `torch = [...]` below is a LIVE torch float64 result.
+    // Reproduce with (PYTHONPATH=~/.local/.../site-packages):
+    //   import torch; torch.set_default_dtype(torch.float64)
+    //   A = torch.tensor(<a_data>).reshape(shape).clone().requires_grad_(True)
+    //   U,S,Vh = torch.linalg.svd(A, full_matrices=False)
+    //   MU = torch.tensor(<mu>).reshape(U.shape)
+    //   MV = torch.tensor(<mv>).reshape(Vh.shape)
+    //   c  = torch.tensor(<c>).reshape(S.shape)
+    //   (((U*U)*MU).sum() + ((Vh*Vh)*MV).sum() + (S*c).sum()).backward()
+    //   A.grad.reshape(-1)
+    // -----------------------------------------------------------------------
+
+    /// Gauge-invariant SVD loss `sum((U*U)*MU) + sum((Vh*Vh)*MV) + sum(S*c)`
+    /// driven through the PUBLIC grad-aware forward `linalg_fwd::svd`. Exercises
+    /// all three split nodes (`SvdBackwardU`/`SvdBackwardS`/`SvdBackwardV`).
+    fn svd_gauge_invariant_grad(
+        a_data: &[f64],
+        shape: &[usize],
+        mu: &[f64],
+        mv: &[f64],
+        c: &[f64],
+    ) -> Vec<f64> {
+        let a = leaf64(a_data, shape);
+        let (u, s, vh) = linalg_fwd::svd(&a).unwrap();
+        assert!(
+            u.grad_fn().is_some() && s.grad_fn().is_some() && vh.grad_fn().is_some(),
+            "svd forward must attach grad_fns on all three outputs when input requires_grad"
+        );
+        let mu_t = no_grad_leaf64(mu, u.shape());
+        let mv_t = no_grad_leaf64(mv, vh.shape());
+        let c_t = no_grad_leaf64(c, s.shape());
+        let usq = crate::grad_fns::arithmetic::mul(&u, &u).unwrap();
+        let lu = crate::grad_fns::reduction::sum(
+            &crate::grad_fns::arithmetic::mul(&usq, &mu_t).unwrap(),
+        )
+        .unwrap();
+        let vsq = crate::grad_fns::arithmetic::mul(&vh, &vh).unwrap();
+        let lv = crate::grad_fns::reduction::sum(
+            &crate::grad_fns::arithmetic::mul(&vsq, &mv_t).unwrap(),
+        )
+        .unwrap();
+        let ls =
+            crate::grad_fns::reduction::sum(&crate::grad_fns::arithmetic::mul(&s, &c_t).unwrap())
+                .unwrap();
+        let loss = lu.add_t(&lv).unwrap().add_t(&ls).unwrap();
+        loss.backward().unwrap();
+        a.grad().unwrap().unwrap().data().unwrap().to_vec()
+    }
+
+    // (a) SQUARE 3x3, distinct singular values.
+    #[test]
+    fn svd_backward_square_3x3_matches_torch() {
+        let a = [4.0, 0.5, 0.3, 0.2, 2.5, 0.1, 0.3, 0.15, 1.2];
+        let mu = [0.2, -0.5, 0.7, 0.3, 0.1, -0.4, -0.6, 0.8, 0.25];
+        let mv = [0.4, 0.1, -0.3, -0.2, 0.5, 0.6, 0.15, -0.7, 0.3];
+        let c = [1.3, -0.7, 0.9];
+        let g = svd_gauge_invariant_grad(&a, &[3, 3], &mu, &mv, &c);
+        // LIVE torch.linalg.svd A.grad (R-CHAR-3 (a)), gauge-invariance verified.
+        let torch = [
+            1.291_872_488_158_285_7,
+            0.254_925_342_453_013_6,
+            0.010_080_726_167_581_882,
+            0.268_367_455_984_650_4,
+            -0.671_927_227_458_943_4,
+            -0.184_516_208_432_730_06,
+            0.035_875_446_437_466_67,
+            -0.159_779_784_325_520_42,
+            0.881_087_563_055_650_3,
+        ];
+        assert_grad_close64(&g, &torch, 1e-6, "svd square 3x3 A.grad vs torch");
+    }
+
+    // (b) TALL 4x3 (m > n) — exercises the `grad_a_from_gu` `m>n` projector.
+    #[test]
+    fn svd_backward_tall_4x3_matches_torch() {
+        let a = [3.0, 0.4, 0.2, 0.1, 2.2, 0.3, 0.25, 0.1, 1.5, 0.6, 0.35, 0.4];
+        let mu = [
+            0.2, -0.5, 0.7, 0.3, 0.1, -0.4, -0.6, 0.8, 0.25, 0.5, -0.2, 0.9,
+        ];
+        let mv = [0.4, 0.1, -0.3, -0.2, 0.5, 0.6, 0.15, -0.7, 0.3];
+        let c = [1.1, -0.6, 0.8];
+        let g = svd_gauge_invariant_grad(&a, &[4, 3], &mu, &mv, &c);
+        let torch = [
+            1.197_882_050_858_392_5,
+            0.228_300_430_582_179_41,
+            0.022_954_471_103_677_15,
+            0.188_714_949_098_595_6,
+            -0.389_113_965_271_648_04,
+            -0.855_548_366_417_448_8,
+            0.101_652_565_998_676_11,
+            -0.720_888_340_220_490_3,
+            0.455_085_481_936_931_93,
+            0.327_980_345_907_320_56,
+            -0.247_945_299_633_792_36,
+            0.126_868_877_585_850_53,
+        ];
+        assert_grad_close64(&g, &torch, 1e-6, "svd tall 4x3 A.grad vs torch");
+    }
+
+    // (c) WIDE 3x4 (m < n) — exercises the `grad_a_from_gvh` `m<n` projector.
+    #[test]
+    fn svd_backward_wide_3x4_matches_torch() {
+        let a = [
+            3.0, 0.4, 0.2, 0.5, 0.1, 2.2, 0.3, 0.15, 0.25, 0.1, 1.5, 0.35,
+        ];
+        let mu = [0.2, -0.5, 0.7, 0.3, 0.1, -0.4, -0.6, 0.8, 0.25];
+        let mv = [
+            0.4, 0.1, -0.3, 0.2, -0.2, 0.5, 0.6, -0.1, 0.15, -0.7, 0.3, 0.45,
+        ];
+        let c = [1.2, -0.5, 0.7];
+        let g = svd_gauge_invariant_grad(&a, &[3, 4], &mu, &mv, &c);
+        let torch = [
+            1.320_835_083_725_02,
+            0.155_998_234_431_780_49,
+            0.025_100_247_386_388_476,
+            0.213_629_738_873_760_5,
+            0.184_679_120_382_554_57,
+            -0.354_909_223_025_186_57,
+            -0.733_393_775_260_972_9,
+            -0.187_334_699_726_463_5,
+            0.105_428_571_937_452_24,
+            -0.656_612_751_778_449_9,
+            0.419_718_259_999_602_1,
+            0.090_484_769_926_790_86,
+        ];
+        assert_grad_close64(&g, &torch, 1e-6, "svd wide 3x4 A.grad vs torch");
+    }
+
+    /// (d) grad through S only (`gU = gVh = None`). Singular values are
+    /// gauge-free and smooth in `A`, so this matches torch exactly with NO
+    /// gauge caveat. Loss = `sum(S*c)`; only `SvdBackwardS` fires.
+    fn svd_s_only_grad(a_data: &[f64], shape: &[usize], c: &[f64]) -> Vec<f64> {
+        let a = leaf64(a_data, shape);
+        let (_u, s, _vh) = linalg_fwd::svd(&a).unwrap();
+        let c_t = no_grad_leaf64(c, s.shape());
+        let loss =
+            crate::grad_fns::reduction::sum(&crate::grad_fns::arithmetic::mul(&s, &c_t).unwrap())
+                .unwrap();
+        loss.backward().unwrap();
+        a.grad().unwrap().unwrap().data().unwrap().to_vec()
+    }
+
+    #[test]
+    fn svd_backward_s_only_square_3x3_matches_torch() {
+        let a = [4.0, 0.5, 0.3, 0.2, 2.5, 0.1, 0.3, 0.15, 1.2];
+        let c = [1.3, -0.7, 0.9];
+        let g = svd_s_only_grad(&a, &[3, 3], &c);
+        // LIVE torch.linalg.svd, loss = (S*c).sum() (R-CHAR-3 (a)).
+        let torch = [
+            1.194_931_571_680_387_4,
+            0.448_845_297_858_673_9,
+            0.054_245_497_692_962_86,
+            0.420_930_628_143_998_4,
+            -0.597_262_866_179_166_1,
+            -0.061_889_902_447_841_184,
+            0.062_108_766_246_365_944,
+            -0.056_066_490_205_725_995,
+            0.901_663_478_439_573_2,
+        ];
+        assert_grad_close64(&g, &torch, 1e-6, "svd S-only 3x3 A.grad vs torch");
+    }
+
+    #[test]
+    fn svd_backward_s_only_tall_4x3_matches_torch() {
+        let a = [3.0, 0.4, 0.2, 0.1, 2.2, 0.3, 0.25, 0.1, 1.5, 0.6, 0.35, 0.4];
+        let c = [1.1, -0.6, 0.8];
+        let g = svd_s_only_grad(&a, &[4, 3], &c);
+        let torch = [
+            0.868_920_516_856_988_9,
+            0.548_143_680_162_881_7,
+            0.120_098_994_041_652_57,
+            0.505_486_391_476_610_9,
+            -0.353_954_199_304_621,
+            -0.230_198_242_257_246_6,
+            0.130_796_388_653_387_1,
+            -0.223_191_598_632_373_5,
+            0.745_402_308_929_012_2,
+            0.242_254_390_771_033_14,
+            0.007_115_371_210_751_172,
+            0.158_164_374_952_315_28,
+        ];
+        assert_grad_close64(&g, &torch, 1e-6, "svd S-only tall 4x3 A.grad vs torch");
     }
 }

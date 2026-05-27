@@ -4,12 +4,13 @@
 //! decompositions, solvers, norms, and related functions. Each delegates to
 //! the corresponding ferray-linalg routine via the same Array bridge pattern.
 //!
-//! **Backward support**: `solve`, `det`, `inv`, `trace`, `outer` (here) and
-//! `qr`, `cholesky`, `slogdet` are autograd-aware: when grad tracking is
-//! active they delegate to the matching `crate::grad_fns::linalg::*_differentiable`
-//! wrapper (which computes the forward under `no_grad` to avoid re-entry and
-//! attaches the closed-form `*Backward` VJP). The remaining factorizations
-//! (svd/eig/eigh/eigvals/eigvalsh/pinv/lstsq/lu/lu_factor/norm/matrix_rank/
+//! **Backward support**: `solve`, `det`, `inv`, `trace`, `outer` (here),
+//! `qr`, `cholesky`, `slogdet`, and `svd` are autograd-aware: when grad
+//! tracking is active they delegate to the matching
+//! `crate::grad_fns::linalg::*_differentiable` wrapper (which computes the
+//! forward under `no_grad` to avoid re-entry and attaches the closed-form
+//! `*Backward` VJP). The remaining factorizations
+//! (eig/eigh/eigvals/eigvalsh/pinv/lstsq/lu/lu_factor/norm/matrix_rank/
 //! householder_product) return non-grad tensors (research-grade VJPs tracked
 //! under #1577/#1345).
 //!
@@ -155,13 +156,24 @@ fn require_cpu<T: Float>(t: &Tensor<T>, op: &str) -> FerrotorchResult<()> {
 /// singular values in descending order. Uses reduced (thin) SVD.
 ///
 /// # Backward
-/// Not yet implemented. Returns non-grad tensors.
+/// Autograd-aware (CPU): when grad tracking is active for `input`, this routes
+/// through `crate::grad_fns::linalg::svd_differentiable` (the real reduced-SVD
+/// VJP mirroring `svd_backward` at `FunctionsManual.cpp:3605`, split across the
+/// three `U`/`S`/`Vh` outputs and accumulated into `A.grad`, including the
+/// rectangular `m != n` projector terms). The CUDA forward stays forward-only.
 pub fn svd<T: Float>(input: &Tensor<T>) -> FerrotorchResult<(Tensor<T>, Tensor<T>, Tensor<T>)> {
     let shape = input.shape();
     if shape.len() != 2 {
         return Err(FerrotorchError::InvalidArgument {
             message: format!("svd requires a 2-D tensor, got {shape:?}"),
         });
+    }
+
+    // Autograd path (CPU): delegate to the differentiable wrapper, which
+    // computes the forward inside `no_grad` (preventing re-entry here) and
+    // attaches the split `SvdBackward{U,S,V}` nodes. CUDA stays forward-only.
+    if !input.is_cuda() && crate::autograd::no_grad::is_grad_enabled() && input.requires_grad() {
+        return crate::grad_fns::linalg::svd_differentiable(input);
     }
 
     if input.is_cuda() {
