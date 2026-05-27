@@ -22,12 +22,53 @@ fast path uses Philox 4x32-10 CBRNG for reproducible mask
 generation. `FeatureAlphaDropout` is implemented (per-channel
 alpha-dropout). The `inplace` kwarg is threaded through all six
 layers: the four standard dropouts (`Dropout`, `Dropout{1,2,3}d`)
-mutate the input storage in place when `inplace=true` and training
-(CPU path), mirroring torch's `_VF.dropout_` / `_VF.feature_dropout_`
-family; `AlphaDropout` / `FeatureAlphaDropout` carry the `inplace`
+honor `inplace=true` in training via an **autograd-safe policy**
+(`apply_inplace_dropout`), mirroring torch's `_VF.dropout_` /
+`_VF.feature_dropout_` family on the memory-optimization path while
+deviating where ferrotorch lacks torch's version-counter
+infrastructure (see "In-place autograd safety" below);
+`AlphaDropout` / `FeatureAlphaDropout` carry the `inplace`
 field for ABI parity but — matching torch's module `forward`, which
 never forwards `self.inplace` to the functional — do NOT mutate in
 place.
+
+### In-place autograd safety (R-DEV-7 deviation)
+
+torch keeps in-place dropout autograd-correct with two mechanisms
+ferrotorch's engine does not have: (1) a **leaf in-place guard**
+(`torch/csrc/autograd/VariableTypeUtils.h:61-63,80-84` raises
+`"a leaf Variable that requires grad is being used in an in-place
+operation."`), and (2) a **version counter** that makes a saved
+tensor's later mutation raise `"one of the variables needed for
+gradient computation has been modified by an inplace operation"`
+(`torch/csrc/autograd/saved_variable.cpp:170-186`). ferrotorch has
+no `version` field on `TensorInner` and `Tensor::clone` shares the
+`Arc<TensorInner>` storage, so an unconditional in-place write
+silently corrupts any branch whose backward saved that storage
+(#1580) and silently mutates a grad-requiring leaf (#1581). The
+shared `apply_inplace_dropout` helper in `dropout.rs` adopts a
+conservative policy on the four standard dropouts' training path:
+
+1. **grad enabled + leaf requiring grad** → returns an `Err`
+   mirroring torch's leaf-guard message (matches torch; #1581).
+2. **grad enabled + non-leaf requiring grad** → does NOT mutate;
+   falls back to the out-of-place computation. Result and gradient
+   are identical/correct; this is more permissive than torch's
+   version-counter `RuntimeError`, but ferrotorch cannot prove the
+   shared storage is unused by another backward without a version
+   counter, so it declines to mutate (eliminates #1580's
+   corruption).
+3. **grad disabled, or input does not require grad** → mutates in
+   place, the genuine memory-optimization case (matches
+   `_VF.dropout_`).
+
+The deviation preserves torch's observable result (identical output,
+correct gradient) while declining torch's runtime error on the
+non-leaf path because the version counter that error depends on does
+not exist in ferrotorch. R-DEV-7: ferrotorch's safety policy is the
+better-guarantee Rust analog (no UB, no silent graph corruption);
+the upstream contract being deviated from is
+`torch/csrc/autograd/saved_variable.cpp:170-186`.
 
 ## Requirements
 
@@ -72,17 +113,22 @@ place.
   via `with_inplace` builders + `inplace` getters on `Dropout`,
   `Dropout1d`, `Dropout2d`, `Dropout3d`, `AlphaDropout`,
   `FeatureAlphaDropout`. For the four standard dropouts,
-  `inplace=true` + training mutates the input tensor storage in
-  place (mask + `1/(1-p)` scale written back) via the shared
-  `write_inplace` helper (`Tensor::update_data`), mirroring torch's
+  `inplace=true` + training routes through the autograd-safe policy
+  `apply_inplace_dropout` (see "In-place autograd safety" above): it
+  mutates the input storage (mask + `1/(1-p)` scale written back via
+  the raw `write_inplace` / `Tensor::update_data`) only when grad is
+  disabled or the input does not require grad (mirroring torch's
   `_VF.dropout_` / `_VF.feature_dropout_` at
-  `torch/nn/functional.py:1449,1516,1579,1629`. The saved mask keeps
-  the `DropoutBackward` / `Dropout2dBackward` autograd correct (the
-  backward routes via the mask, never reading the mutated input
-  values). `AlphaDropout` / `FeatureAlphaDropout` carry the field
-  for ABI parity but, matching torch's module `forward`
-  (`dropout.py:265-269,319-323`, which never pass `self.inplace`),
-  do NOT mutate in place. Closes #1446.
+  `torch/nn/functional.py:1449,1516,1579,1629`); it errors on a
+  grad-requiring leaf (matching torch's leaf guard,
+  `VariableTypeUtils.h:80-84`; #1581) and falls back to out-of-place
+  on a grad-requiring non-leaf (R-DEV-7; ferrotorch lacks torch's
+  version counter, `saved_variable.cpp:170-186`; eliminates #1580's
+  silent gradient corruption). `AlphaDropout` / `FeatureAlphaDropout`
+  carry the field for ABI parity but, matching torch's module
+  `forward` (`dropout.py:265-269,319-323`, which never pass
+  `self.inplace`), do NOT mutate in place. Closes #1446, #1580,
+  #1581.
 - REQ-13: NOT-STARTED — `FeatureAlphaDropout` from upstream
   (`dropout.py:FeatureAlphaDropout`) is not implemented. Blocker
   #1448.
@@ -108,13 +154,21 @@ place.
   unit-input.
 - [x] AC-8: GPU Dropout reproduces the same mask given the same
   Philox state (`test_dropout_gpu_reproducible`).
-- [x] AC-9: `inplace=True` — standard dropouts mutate input storage;
-  alpha variants carry the field but match torch's no-op-in-module
-  behavior. Tested by `test_dropout_inplace_mutates_input_storage`,
+- [x] AC-9: `inplace=True` — standard dropouts mutate input storage
+  on the non-grad-tracked path; on the grad-tracked path the
+  autograd-safe policy errors on a grad-requiring leaf and falls back
+  to out-of-place on a grad-requiring non-leaf (eliminating silent
+  graph corruption); alpha variants carry the field but match torch's
+  no-op-in-module behavior. Tested by
+  `test_dropout_inplace_mutates_input_storage`,
   `test_dropout{1,2,3}d_inplace_mutates_input_storage`,
-  `test_dropout_inplace_backward_routes_through_surviving`,
+  `test_dropout_inplace_backward_routes_through_surviving` (non-leaf
+  fallback), `test_dropout_inplace_on_grad_leaf_errors`,
   `test_dropout_inplace_eval_is_identity`,
-  `test_{alpha,feature_alpha}_dropout_inplace_field_does_not_mutate`.
+  `test_{alpha,feature_alpha}_dropout_inplace_field_does_not_mutate`,
+  and the divergence probes
+  `divergence_1446_dropout_inplace_shared_input_graph` (#1580) +
+  `divergence_1446_dropout_inplace_leaf_requires_grad` (#1581).
 - [ ] AC-10: `FeatureAlphaDropout` — blocker #1448.
 - [ ] AC-11: Dropout2d / 1d / 3d GPU forward — blocker #1441 +
   internal GPU-kernel work.
@@ -253,6 +307,6 @@ Expected grep count after blocker #1441 closes: `>= 1` for each.
 | REQ-9 | SHIPPED | impl: `pub struct AlphaDropout<T: Float>` + SELU affine correction body in `<AlphaDropout as Module>::forward` in `dropout.rs`; non-test consumer: `pub use dropout::AlphaDropout` in `lib.rs`. |
 | REQ-10 | SHIPPED | impl: `struct AlphaDropoutBackward<T>` + `GradFn` impl in `dropout.rs`; non-test consumer: autograd engine traversal on models using `AlphaDropout`. |
 | REQ-11 | SHIPPED | impl: 5 `Module<T> for <DropoutKind><T>` impl blocks in `dropout.rs`, each returning `vec![]` for parameters; non-test consumer: `ferrotorch_optim::Optimizer` walks `Module::parameters_mut()` of containers; dropout returns an empty list (correct: dropout has no trainable parameters). |
-| REQ-12 | SHIPPED | impl: `with_inplace` builder + `inplace` getter + `inplace` field on all six dropout structs, plus the shared `write_inplace` helper (calls `Tensor::update_data`) and the `if self.inplace { write_inplace(input, &output_data)? }` branch inside `<Dropout/Dropout1d/Dropout2d/Dropout3d as Module>::forward` in `dropout.rs`, mirroring `_VF.dropout_`/`_VF.feature_dropout_` at `torch/nn/functional.py:1449,1516,1579,1629`; `AlphaDropout`/`FeatureAlphaDropout` carry the field for ABI parity but match torch's module forward which never forwards `inplace` (`dropout.py:265-269,319-323`). Non-test production consumer: the `if self.inplace` branch is on the live forward path of `<Dropout as Module>::forward` in `dropout.rs`, exercised by every model that constructs a dropout via `crate::dropout::Dropout` — `ferrotorch-nn/src/lora.rs` (LoRA input dropout), `ferrotorch-vision/src/models/vgg.rs` / `inception.rs` (classifier head), `ferrotorch-graph/src/gcn.rs` (inter-layer dropout). The `inplace` field defaults `false`, so existing consumers see unchanged behavior; the in-place capability is a builder opt-in on the same boundary public API (`Dropout` mirrors `torch.nn.Dropout` field-for-field per goal.md S5). Closes #1446. |
+| REQ-12 | SHIPPED | impl: `with_inplace` builder + `inplace` getter + `inplace` field on all six dropout structs, plus the autograd-safe `apply_inplace_dropout` helper (errors on grad-requiring leaf, out-of-place fallback on grad-requiring non-leaf, raw `write_inplace`/`Tensor::update_data` only on the non-grad-tracked path) and the `if self.inplace { apply_inplace_dropout(input, &output_data)? }` branch inside `<Dropout/Dropout1d/Dropout2d/Dropout3d as Module>::forward` in `dropout.rs`, mirroring `_VF.dropout_`/`_VF.feature_dropout_` at `torch/nn/functional.py:1449,1516,1579,1629` on the memory-opt path and deviating (R-DEV-7) where ferrotorch lacks torch's leaf guard (`VariableTypeUtils.h:80-84`) and version counter (`saved_variable.cpp:170-186`); `AlphaDropout`/`FeatureAlphaDropout` carry the field for ABI parity but match torch's module forward which never forwards `inplace` (`dropout.py:265-269,319-323`). Non-test production consumer: the `if self.inplace` branch is on the live forward path of `<Dropout as Module>::forward` in `dropout.rs`, exercised by every model that constructs a dropout via `crate::dropout::Dropout` — `ferrotorch-nn/src/lora.rs` (LoRA input dropout), `ferrotorch-vision/src/models/vgg.rs` / `inception.rs` (classifier head), `ferrotorch-graph/src/gcn.rs` (inter-layer dropout). The `inplace` field defaults `false`, so existing consumers see unchanged behavior. Closes #1446, #1580, #1581. |
 | REQ-13 | NOT-STARTED | blocker #1448 — `FeatureAlphaDropout` not implemented. |
 | REQ-14 | NOT-STARTED | blocker #1441 (umbrella) — `Dropout2d/1d/3d` GPU forward absent (CUDA inputs return `NotImplementedOnCuda`). Parity-sweep runner arms also absent. |

@@ -64,14 +64,24 @@ fn divergence_inplace_dropout_corrupts_shared_branch_grad() {
     let y = mul(&t, &t).unwrap();
     let loss = sum(&y).unwrap();
 
-    // In-place dropout on t mutates t's storage (shared with y's saved copy).
+    // In-place dropout on t. `t` is a grad-tracked NON-LEAF whose storage is
+    // shared (via Arc) with the copy `MulBackward` saved for `y`'s gradient.
+    // The FIX (`apply_inplace_dropout` in `ferrotorch-nn/src/dropout.rs`)
+    // declines to mutate that shared storage: ferrotorch has no autograd
+    // version counter, so rather than risk silently corrupting `y`'s branch it
+    // falls back to out-of-place. The post-fix contract is therefore that `t`'s
+    // storage is LEFT UNMUTATED (or, alternatively, that backward errors as
+    // torch's version counter would).
     let d = Dropout::<f32>::new(0.5).unwrap().with_inplace(true);
     let z = d.forward(&t).unwrap();
 
     let t_after = t.data().unwrap().to_vec();
-    assert_ne!(
+    assert_eq!(
         t_orig, t_after,
-        "precondition: inplace dropout must have mutated t's storage"
+        "FIX: in-place dropout on a grad-tracked non-leaf must NOT mutate the \
+         shared storage (it falls back to out-of-place); torch raises via its \
+         version counter, ferrotorch declines to mutate. Either way the saved \
+         copy for y's MulBackward stays intact."
     );
 
     // PyTorch raises RuntimeError here. ferrotorch must EITHER error (matching

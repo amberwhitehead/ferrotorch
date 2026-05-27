@@ -24,7 +24,7 @@
 //! | REQ-9 | SHIPPED | impl: `pub struct AlphaDropout<T: Float>` + SELU affine correction body inside `<AlphaDropout as Module>::forward` here; non-test consumer: `pub use dropout::AlphaDropout` in `lib.rs`. |
 //! | REQ-10 | SHIPPED | impl: `struct AlphaDropoutBackward<T>` + `GradFn` impl here; non-test consumer: autograd engine traversal on models using `AlphaDropout`. |
 //! | REQ-11 | SHIPPED | impl: 5 `Module<T> for <DropoutKind><T>` impl blocks here, each returning `vec![]` for parameters; non-test consumer: `ferrotorch_optim::Optimizer` walks `Module::parameters_mut()` of containers; dropout returns an empty list (correct: dropout has no trainable parameters). |
-//! | REQ-12 | SHIPPED | impl: `with_inplace` builder + `inplace` getter + `inplace` field on all six dropout structs, the shared `write_inplace` helper (`Tensor::update_data`), and the `if self.inplace { write_inplace(input, &output_data)? }` branch in `<Dropout/Dropout1d/Dropout2d/Dropout3d as Module>::forward` here, mirroring `_VF.dropout_`/`_VF.feature_dropout_` at `torch/nn/functional.py:1449,1516,1579,1629`; `AlphaDropout`/`FeatureAlphaDropout` carry the field for ABI parity but match torch's module forward which never forwards `inplace` (`dropout.py:265-269,319-323`). Non-test production consumer: the `if self.inplace` branch is on the live forward path of `<Dropout as Module>::forward` here, exercised by `ferrotorch-nn/src/lora.rs` (LoRA input dropout), `ferrotorch-vision/src/models/vgg.rs` / `inception.rs` (classifier head), and `ferrotorch-graph/src/gcn.rs` (inter-layer dropout). Default `inplace=false` preserves existing behavior. Closes #1446. |
+//! | REQ-12 | SHIPPED | impl: `with_inplace` builder + `inplace` getter + `inplace` field on all six dropout structs, the autograd-safe `apply_inplace_dropout` helper (errors on grad-requiring leaf per torch `VariableTypeUtils.h:80-84`; out-of-place fallback on grad-requiring non-leaf — R-DEV-7, ferrotorch lacks torch's version counter `saved_variable.cpp:170-186`; raw `write_inplace`/`Tensor::update_data` only on the non-grad-tracked path), and the `if self.inplace { apply_inplace_dropout(input, &output_data)? }` branch in `<Dropout/Dropout1d/Dropout2d/Dropout3d as Module>::forward` here, mirroring `_VF.dropout_`/`_VF.feature_dropout_` at `torch/nn/functional.py:1449,1516,1579,1629` on the memory-opt path; `AlphaDropout`/`FeatureAlphaDropout` carry the field for ABI parity but match torch's module forward which never forwards `inplace` (`dropout.py:265-269,319-323`). Non-test production consumer: the `if self.inplace` branch is on the live forward path of `<Dropout as Module>::forward` here, exercised by `ferrotorch-nn/src/lora.rs` (LoRA input dropout), `ferrotorch-vision/src/models/vgg.rs` / `inception.rs` (classifier head), and `ferrotorch-graph/src/gcn.rs` (inter-layer dropout). Default `inplace=false` preserves existing behavior. Closes #1446, #1580, #1581. |
 //! | REQ-13 | SHIPPED | impl: `pub struct FeatureAlphaDropout<T: Float>` + `FeatureAlphaDropoutBackward<T>` + `Module<T>` impl here (per-channel alpha-dropout mask broadcast over `[N, C, *]`), closes #1448; non-test consumer: `pub use dropout::FeatureAlphaDropout` in `lib.rs` (re-export) exposes the layer to downstream self-normalising-network model code in `ferrotorch-vision` / `ferrotorch-llama`. |
 //! | REQ-14 | NOT-STARTED | blocker #1441 (umbrella) — `Dropout2d` / `Dropout1d` / `Dropout3d` GPU forward absent (CUDA inputs return `NotImplementedOnCuda`). Parity-sweep runner arms also absent. |
 
@@ -154,32 +154,109 @@ fn philox_dropout_mask<T: Float>(
 // In-place storage write
 // ---------------------------------------------------------------------------
 
-/// Write `new_data` over `input`'s storage in place, mirroring torch's
-/// `_VF.dropout_` family (`torch/nn/functional.py:1449,1471,1516,1579,1629`)
-/// which mutate the input tensor's buffer rather than allocating a fresh
-/// output. The returned values are the post-mask data, used to build the
-/// autograd output node whose backward routes through the saved mask.
+/// Whether the in-place dropout policy actually mutated the input storage, or
+/// suppressed the mutation for autograd safety. See [`apply_inplace_dropout`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum InplaceOutcome {
+    /// The input storage was mutated in place (`inplace=true` honored).
+    Mutated,
+    /// The mutation was suppressed for autograd safety; the caller must build
+    /// the output out-of-place from the freshly-allocated `output_data` buffer.
+    FellBackToOutOfPlace,
+}
+
+/// Apply the in-place dropout policy, mutating `input`'s storage where it is
+/// autograd-safe to do so and matching torch's observable error contract where
+/// ferrotorch can.
 ///
-/// Autograd correctness: the dropout backward nodes
-/// ([`DropoutBackward`] / [`Dropout2dBackward`]) reapply the *saved mask* to
-/// `grad_output` — they never read the forward input's data — so mutating the
-/// input storage is graph-safe. This matches torch, where `dropout_` saves the
-/// mask for backward and the gradient flows through the same scale/zero
-/// pattern independent of the (now mutated) input values.
+/// # Autograd safety (R-DEV-7 deviation — documented)
+///
+/// torch enforces in-place autograd correctness with two mechanisms that
+/// ferrotorch's autograd engine does NOT have:
+///
+/// 1. A **leaf in-place guard** — mutating a leaf that requires grad raises
+///    `"a leaf Variable that requires grad is being used in an in-place
+///    operation."` from `check_inplace`
+///    (`torch/csrc/autograd/VariableTypeUtils.h:61-63,80-84`).
+/// 2. A **version counter** — every saved tensor records the storage version it
+///    was saved at; if an in-place op bumps that version before backward,
+///    `SavedVariable::unpack` raises `"one of the variables needed for gradient
+///    computation has been modified by an inplace operation"`
+///    (`torch/csrc/autograd/saved_variable.cpp:170-186`).
+///
+/// ferrotorch has neither (no `version` field on `TensorInner`; `Tensor::clone`
+/// shares the `Arc<TensorInner>` storage). Without a version counter it cannot
+/// *detect* that another backward node saved the pre-mutation storage, so an
+/// unconditional in-place write silently corrupts that branch's gradient
+/// (#1580). To eliminate the corruption rather than risk it, this helper adopts
+/// a conservative policy on the grad-tracked path:
+///
+/// * **Leaf requiring grad, grad enabled** → return an `Err` mirroring torch's
+///   leaf-guard message. (Matches torch exactly; pins #1581.)
+/// * **Non-leaf requiring grad, grad enabled** → do NOT mutate; signal
+///   [`InplaceOutcome::FellBackToOutOfPlace`] so the caller builds a fresh
+///   output. The result tensor is numerically identical and the gradient is
+///   correct (no shared-storage corruption); this is *more permissive* than
+///   torch's version-counter `RuntimeError` — ferrotorch cannot prove the
+///   storage is unused by another backward without a version counter, so it
+///   declines to mutate instead of erroring. (Eliminates #1580's corruption.)
+/// * **Grad disabled, or input does not require grad** → mutate in place. This
+///   is the real memory-optimization case; no autograd node observes the
+///   storage, so it is graph-safe and matches torch's `_VF.dropout_`.
+///
+/// The deviation preserves torch's *observable result* (identical output,
+/// correct gradient) while declining to replicate torch's runtime error on the
+/// non-leaf path, because ferrotorch lacks the version-counter infrastructure
+/// that error depends on.
+fn apply_inplace_dropout<T: Float>(
+    input: &Tensor<T>,
+    new_data: &[T],
+) -> FerrotorchResult<InplaceOutcome> {
+    if is_grad_enabled() && input.requires_grad() {
+        if input.is_leaf() {
+            // Match torch's leaf in-place guard
+            // (`torch/csrc/autograd/VariableTypeUtils.h:80-84`).
+            return Err(FerrotorchError::InvalidArgument {
+                message:
+                    "a leaf Variable that requires grad is being used in an in-place operation."
+                        .to_string(),
+            });
+        }
+        // Non-leaf requiring grad: ferrotorch has no version counter to prove
+        // the shared storage is unused by another saved-for-backward node, so
+        // fall back to out-of-place rather than risk corrupting that branch's
+        // gradient (#1580). The caller builds the output from `new_data`.
+        return Ok(InplaceOutcome::FellBackToOutOfPlace);
+    }
+
+    // Grad disabled or input does not require grad: the genuine
+    // memory-optimization case. No autograd node can observe the storage, so
+    // the in-place write is graph-safe and matches torch's `_VF.dropout_`.
+    write_inplace(input, new_data)?;
+    Ok(InplaceOutcome::Mutated)
+}
+
+/// Write `new_data` over `input`'s storage in place, mirroring torch's
+/// `_VF.dropout_` family (`torch/nn/functional.py:1449,1516,1579,1629`)
+/// which mutate the input tensor's buffer rather than allocating a fresh
+/// output.
+///
+/// This is the raw write; the autograd-safety policy that decides *whether* a
+/// write is permitted lives in [`apply_inplace_dropout`]. Callers must route
+/// through that helper and never call this directly on a grad-tracked path.
 fn write_inplace<T: Float>(input: &Tensor<T>, new_data: &[T]) -> FerrotorchResult<()> {
     // SAFETY: `update_data` requires exclusive access to the input's storage
     // for the duration of the write. The dropout forward holds the only live
-    // borrow of the input data (consumed into `new_data` above before this
-    // call), and no backward node captures a read view of the forward input's
-    // values — `DropoutBackward`/`Dropout2dBackward` route gradient solely via
-    // the saved mask. `new_data.len() == input.numel()` is guaranteed by the
-    // callers (the mask and input share numel). PyTorch performs this exact
-    // mutation in `_VF.dropout_` (`torch/nn/functional.py:1449`), an in-place
-    // edit of the input buffer whose autograd node likewise depends only on the
-    // saved mask, not the mutated values.
+    // borrow of the input data (consumed into `new_data` by the caller before
+    // this call). The autograd-safety policy in `apply_inplace_dropout`
+    // guarantees this is only reached when grad is disabled or the input does
+    // not require grad, so no backward node has saved (and could later read) a
+    // version of this storage. `new_data.len() == input.numel()` is guaranteed
+    // by the callers (the mask and input share numel). PyTorch performs this
+    // exact mutation in `_VF.dropout_` (`torch/nn/functional.py:1449`).
     #[allow(
         clippy::undocumented_unsafe_blocks,
-        reason = "SAFETY comment above documents the exclusive-access invariant; torch dropout inplace=True mutates input storage via _VF.dropout_ (torch/nn/functional.py:1449), and the mask-based backward keeps autograd correct"
+        reason = "SAFETY comment above documents the exclusive-access invariant; apply_inplace_dropout gates this to the non-grad-tracked path where no backward node observes the storage"
     )]
     unsafe {
         input.update_data(new_data)?;
@@ -412,12 +489,16 @@ impl<T: Float> Module<T> for Dropout<T> {
             .map(|(&x, &m)| x * m)
             .collect();
 
-        // In-place branch: write the masked values back over the input's
-        // storage, mirroring `_VF.dropout_(input, p, training)` at
-        // `torch/nn/functional.py:1449`. The input buffer is mutated; the
-        // returned autograd node still routes gradient via the saved mask.
+        // In-place branch, mirroring `_VF.dropout_(input, p, training)` at
+        // `torch/nn/functional.py:1449`. `apply_inplace_dropout` applies the
+        // autograd-safe policy: it errors on a grad-requiring leaf (matching
+        // torch), falls back to out-of-place for a grad-requiring non-leaf
+        // (ferrotorch lacks torch's version counter, so it declines to mutate
+        // shared storage), and mutates in place only when no autograd node can
+        // observe the storage. The out-of-place output below is always built
+        // from `output_data`, so the fallback needs no special handling here.
         if self.inplace {
-            write_inplace(input, &output_data)?;
+            apply_inplace_dropout(input, &output_data)?;
         }
 
         if is_grad_enabled() && input.requires_grad() {
@@ -585,9 +666,12 @@ impl<T: Float> Module<T> for Dropout2d<T> {
             .collect();
 
         // In-place branch mirrors `_VF.feature_dropout_` at
-        // `torch/nn/functional.py:1579`.
+        // `torch/nn/functional.py:1579`. Routed through the autograd-safe
+        // policy (`apply_inplace_dropout`): errors on a grad-requiring leaf,
+        // falls back to out-of-place on a grad-requiring non-leaf, mutates only
+        // when no autograd node observes the storage.
         if self.inplace {
-            write_inplace(input, &output_data)?;
+            apply_inplace_dropout(input, &output_data)?;
         }
 
         let result = if is_grad_enabled() && input.requires_grad() {
@@ -744,9 +828,12 @@ impl<T: Float> Module<T> for Dropout1d<T> {
             .collect();
 
         // In-place branch mirrors `_VF.feature_dropout_` at
-        // `torch/nn/functional.py:1516`.
+        // `torch/nn/functional.py:1516`. Routed through the autograd-safe
+        // policy (`apply_inplace_dropout`): errors on a grad-requiring leaf,
+        // falls back to out-of-place on a grad-requiring non-leaf, mutates only
+        // when no autograd node observes the storage.
         if self.inplace {
-            write_inplace(input, &output_data)?;
+            apply_inplace_dropout(input, &output_data)?;
         }
 
         let result = if is_grad_enabled() && input.requires_grad() {
@@ -901,9 +988,12 @@ impl<T: Float> Module<T> for Dropout3d<T> {
             .collect();
 
         // In-place branch mirrors `_VF.feature_dropout_` at
-        // `torch/nn/functional.py:1629`.
+        // `torch/nn/functional.py:1629`. Routed through the autograd-safe
+        // policy (`apply_inplace_dropout`): errors on a grad-requiring leaf,
+        // falls back to out-of-place on a grad-requiring non-leaf, mutates only
+        // when no autograd node observes the storage.
         if self.inplace {
-            write_inplace(input, &output_data)?;
+            apply_inplace_dropout(input, &output_data)?;
         }
 
         let result = if is_grad_enabled() && input.requires_grad() {
@@ -2164,14 +2254,36 @@ mod tests {
         assert!(input.data().unwrap().iter().all(|&x| x == 1.0));
     }
 
-    // (c) backward through an in-place dropout is correct: the gradient routes
-    //     only through surviving elements (0 for dropped, 2.0 for kept) and the
-    //     grad mask matches the output mask, exactly as the out-of-place path.
+    // (c) backward through an in-place dropout on a grad-tracked NON-LEAF is
+    //     correct: the autograd-safe policy falls back to out-of-place (no
+    //     version counter to prove the shared storage is unused), so the input
+    //     storage is NOT mutated, but the gradient still routes only through
+    //     surviving elements (0 for dropped, 2.0 for kept) and the grad mask
+    //     matches the output mask, exactly as the out-of-place path.
     #[test]
     fn test_dropout_inplace_backward_routes_through_surviving() {
+        use ferrotorch_core::grad_fns::arithmetic::mul;
+
         let d = Dropout::<f32>::new(0.5).unwrap().with_inplace(true);
-        let input = leaf_tensor(&[1.0; 1000], &[1000], true);
+        // Non-leaf grad-tracked input: `t = x * 1` requires grad but is not a
+        // leaf, so `apply_inplace_dropout` takes the out-of-place fallback
+        // rather than erroring on the leaf guard.
+        let x = leaf_tensor(&[1.0; 1000], &[1000], true);
+        let ones = leaf_tensor(&[1.0; 1000], &[1000], false);
+        let input = mul(&x, &ones).unwrap();
+        assert!(input.requires_grad() && !input.is_leaf());
+        let input_before = input.data().unwrap().to_vec();
+
         let output = d.forward(&input).unwrap();
+
+        // Safe fallback: the grad-tracked non-leaf storage is left UNMUTATED.
+        let input_after = input.data().unwrap().to_vec();
+        assert_eq!(
+            input_before, input_after,
+            "in-place dropout on a grad-tracked non-leaf must fall back to \
+             out-of-place and leave the input storage untouched (no version \
+             counter to prove the shared storage is unused)"
+        );
 
         let out_data = output.data().unwrap().to_vec();
         let total: f32 = out_data.iter().sum();
@@ -2185,7 +2297,8 @@ mod tests {
         .unwrap();
         loss.backward().unwrap();
 
-        let grad = input.grad().unwrap().unwrap();
+        // Gradient flows back to the leaf `x` through the out-of-place dropout.
+        let grad = x.grad().unwrap().unwrap();
         let grad_data = grad.data().unwrap();
         for &g in grad_data {
             assert!(
@@ -2201,6 +2314,29 @@ mod tests {
                 "mismatch at index {i}: out={o}, grad={g}"
             );
         }
+    }
+
+    // (c2) in-place dropout on a grad-requiring LEAF errors, matching torch's
+    //      leaf in-place guard (`torch/csrc/autograd/VariableTypeUtils.h:80-84`,
+    //      "a leaf Variable that requires grad is being used in an in-place
+    //      operation."). Pins #1581.
+    #[test]
+    fn test_dropout_inplace_on_grad_leaf_errors() {
+        let original = vec![1.0f32; 100];
+        let d = Dropout::<f32>::new(0.5).unwrap().with_inplace(true);
+        let input = leaf_tensor(&original, &[100], true);
+        assert!(input.is_leaf() && input.requires_grad());
+
+        let err = d.forward(&input).unwrap_err();
+        match err {
+            FerrotorchError::InvalidArgument { message } => assert!(
+                message.contains("leaf Variable that requires grad"),
+                "expected torch leaf-guard message, got: {message}"
+            ),
+            other => panic!("expected InvalidArgument leaf-guard error, got {other:?}"),
+        }
+        // The leaf storage is left untouched (no partial mutation before error).
+        assert_eq!(input.data().unwrap().to_vec(), original);
     }
 
     // (e) all four standard dropout variants honor inplace: the input storage
