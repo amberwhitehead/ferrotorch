@@ -88,13 +88,16 @@ Closed-form `log_prob` / `entropy` / `mean` / `mode` /
   ```
   Summed across the sample tensor into scalar gradients.
 
-- REQ-12: NOT-STARTED — `expand`, `arg_constraints`, `support`,
-  `validate_args`, `cdf` (which would require an
-  incomplete-gamma function), `_natural_params` /
-  `_log_normalizer` (from `gamma.py:36-43, 70-77, 108-119`)
-  not implemented. Cross-cutting with `lib.md` REQ-5
-  (blocker #1376). Tracked as blocker #1416 for the
-  Gamma-side fill-out.
+- REQ-12: PARTIAL — `expand`, `arg_constraints`, `support`,
+  and `cdf` are SHIPPED. `cdf` is the regularized lower
+  incomplete gamma `P(conc, rate*x)` (Numerical-Recipes
+  `gammp` in `lower_incomplete_gamma_regularized` /
+  `gammp_f64`), verified against `scipy.special.gammainc`
+  (closes #1397). STILL NOT-STARTED: `validate_args`,
+  `_natural_params` / `_log_normalizer` (from
+  `gamma.py:36-43, 108-114`). Cross-cutting with `lib.md`
+  REQ-5 (blocker #1376). Blocker #1416 closed for the
+  trait-surface fill-out.
 
 ## Acceptance Criteria
 
@@ -113,8 +116,9 @@ Closed-form `log_prob` / `entropy` / `mean` / `mode` /
 - [x] AC-10: `mean`, `mode`, `variance` overrides.
 - [x] AC-11: `GammaRsampleBackward` GradFn.
 - [x] AC-12: `test_gamma_*` test suite (12 tests).
-- [ ] AC-13: `expand` / `cdf` / `validate_args` —
-  blocker #1416.
+- [x] AC-13: `expand` / `cdf` (regularized lower incomplete
+  gamma, scipy-verified) — closes #1416, #1397. `validate_args`
+  remains an orthogonal tracker.
 
 ## Architecture
 
@@ -264,4 +268,4 @@ Expected: `12 passed; 0 failed`.
 | REQ-9 | SHIPPED | impl: `fn Gamma::entropy` in `gamma.rs` mirroring `gamma.py:100-106`; non-test consumer: external `dist.entropy()` calls. |
 | REQ-10 | SHIPPED | impl: `fn Gamma::{mean, mode, variance}` overrides in `gamma.rs` mirroring `gamma.py:45-55`; non-test consumer: external `dist.{mean, mode, variance}` calls; `test_gamma_mean_variance` pins all three. |
 | REQ-11 | SHIPPED | impl: `struct GammaRsampleBackward<T: Float>` with `GradFn::backward` in `gamma.rs` implementing implicit-reparam through standard-Gamma; non-test consumer: invoked by `fn Gamma::rsample` whenever either parameter requires grad — and that `rsample` is reached transitively by `fn Beta::rsample` (which uses the Gamma trait surface), so `BetaRsampleBackward`'s grad path also depends on `GammaRsampleBackward` indirectly via the autograd graph. |
-| REQ-12 | PARTIAL | impl: `has_rsample` / `support` (NonNegative) / `arg_constraints` (concentration:Positive, rate:Positive) / `event_shape` / `expand` (broadcasts both parameters) trait overrides at the tail of `impl Distribution<T> for Gamma<T>` in `gamma.rs` mirroring `torch/distributions/gamma.py:18-68`; non-test consumer: `pub use gamma::Gamma` at `lib.rs`; `tests/divergence_distribution_trait_surface.rs::gamma_*` pins every override. Closes #1416 — STILL NOT-STARTED: `cdf` via regularized lower incomplete gamma, `validate_args`, `_natural_params` / `_log_normalizer` (orthogonal trackers). |
+| REQ-12 | PARTIAL | impl: `has_rsample` / `support` (NonNegative) / `arg_constraints` (concentration:Positive, rate:Positive) / `event_shape` / `expand` (broadcasts both parameters) / `cdf` trait overrides at the tail of `impl Distribution<T> for Gamma<T>` in `gamma.rs` mirroring `torch/distributions/gamma.py:18-119`; `cdf` = regularized lower incomplete gamma `P(conc, rate*x)` via `fn lower_incomplete_gamma_regularized` / `fn gammp_f64` (Numerical-Recipes `gammp`: power series for `x<s+1`, Lentz continued fraction for `x≥s+1`) mirroring `gamma.py:116-119 torch.special.gammainc`, verified to 1e-12 against `scipy.special.gammainc` by `gamma.rs::test_gamma_cdf_*` (7 tests); non-test consumer: `pub use gamma::Gamma` at `lib.rs` + external `dist.cdf(value)` calls. Closes #1416, #1397 — STILL NOT-STARTED: `validate_args`, `_natural_params` / `_log_normalizer` (orthogonal trackers). |

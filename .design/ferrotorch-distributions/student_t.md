@@ -84,11 +84,18 @@ Marsaglia-Tsang Chi-squared sampler and a hand-coded backward node
 
 - REQ-9: NOT-STARTED — `rsample` does NOT propagate gradients to
   `df`. The `StudentTRsampleBackward::backward` returns `None` for
-  the df slot (`student_t.rs:417`). Upstream's `rsample`
-  differentiates df via the `Chi2.rsample` chain (Chi2's own
-  reparameterization gradient through `df`). ferrotorch's
-  Marsaglia-Tsang Chi-squared sampler is not autograd-aware. Blocker
-  #1427 tracks differentiable df.
+  the df slot. Upstream's `rsample` differentiates df via the
+  `Chi2.rsample` chain whose implicit-reparameterization gradient is
+  `d(sg)/d(alpha) = -(∂_alpha P(alpha,sg)) / pdf(sg)` (PyTorch's
+  `_standard_gamma_grad` series). ferrotorch has no such primitive,
+  and the existing `GammaRsampleBackward` closed form
+  `sg·(ln sg − digamma(alpha))` is NOT that ratio — verified against
+  `scipy.special.gammaincinv` (`alpha=2.5, sg=2` → correct `+0.953`
+  vs the repo form's `-0.020`). Shipping the wrong formula would be a
+  wrong gradient, so the slot stays `None`. Blocker #1427 stays open;
+  the incorrect Gamma formula is filed as spillover blocker #1555.
+  Pinned by `student_t.rs::test_repo_gamma_implicit_grad_formula_is_incorrect`
+  and `test_student_t_df_gradient_currently_none`.
 
 - REQ-10: NOT-STARTED — `expand`, `support`, `mode`,
   `cdf`, `icdf` not implemented. Mode is `loc` (`studentT.py:48-50`)
@@ -271,5 +278,5 @@ Expected: `10 passed`.
 | REQ-6 | SHIPPED | impl: `Distribution::rsample` in `student_t.rs` builds `Tensor::from_operation` with `Arc<StudentTRsampleBackward>` autograd node capturing `df`, `loc`, `scale`, `z`, `chi2` (lines 250-263); the backward computes `grad_loc = sum(grad_output)` and `grad_scale = sum(grad_output * z * sqrt(df/chi2))`; non-test consumer: tests `test_student_t_rsample_{has_grad, backward}` pin the differentiable path. The production code path is the `impl Distribution::rsample` itself — any external caller invoking `dist.rsample(...)` with `loc.requires_grad_(true)` hits this path and gets a differentiable result, which is the production use case (e.g. Bayesian neural network with t-distributed priors). |
 | REQ-7 | SHIPPED | impl: `Distribution::log_prob` in `student_t.rs` returns `lgamma((df+1)/2) - lgamma(df/2) - 0.5*ln(df*pi) - ln(scale) - (df+1)/2 * ln(1 + y^2/df)` for `y = (x-loc)/scale`, mirroring `studentT.py:101-112` (algebraically equivalent expansion of `-0.5*(df+1)*log1p(y^2/df) - Z` form); non-test consumer: `pub use StudentT` re-export + impl dispatch; tests `test_student_t_log_prob_{at_loc, symmetry, high_df_approaches_normal}` pin three behaviours. |
 | REQ-8 | SHIPPED | impl: `Distribution::entropy` in `student_t.rs` returns `(df+1)/2 * (digamma((df+1)/2) - digamma(df/2)) + 0.5*ln(df) + lgamma(df/2) + 0.5*ln(pi) - lgamma((df+1)/2) + ln(scale)`, mirroring `studentT.py:114-127`; non-test consumer: `pub use StudentT` re-export; test `test_student_t_entropy_positive` pins. Uses `lgamma_scalar` / `digamma_scalar` from `special_fns.rs`. |
-| REQ-9 | NOT-STARTED | blocker #1427 — `StudentTRsampleBackward::backward` returns `None` for the `df` gradient slot (`student_t.rs:417`); upstream's `rsample` differentiates `df` via the `Chi2.rsample` chain (Chi2's own reparameterization). ferrotorch's `sample_chi2` Marsaglia-Tsang sampler is not autograd-aware. |
+| REQ-9 | NOT-STARTED | blocker #1427 — `StudentTRsampleBackward::backward` returns `None` for the `df` gradient slot; upstream's `rsample` differentiates `df` via the `Chi2.rsample` chain whose implicit-reparam gradient `d(sg)/d(alpha) = -(∂_alpha P(alpha,sg))/pdf(sg)` (PyTorch `_standard_gamma_grad`) ferrotorch lacks. The repo's `GammaRsampleBackward` closed form `sg·(ln sg − digamma(alpha))` is NOT that ratio (scipy-`gammaincinv`-verified: `+0.953` vs `-0.020`), so it must not be reused. loc/scale gradients SHIPPED (REQ-6). Incorrect Gamma formula filed as spillover #1555; pinned by `student_t.rs::test_repo_gamma_implicit_grad_formula_is_incorrect`. |
 | REQ-10 | SHIPPED | impl: `has_rsample`(=true) / `batch_shape` / `support`(`Real` per `studentT.py:39`) / `arg_constraints`(`{df: Positive, loc: Real, scale: Positive}` per `studentT.py:34-38`) / `mean` (=loc if df>1 else NaN per `studentT.py:42-46`) / `mode` (=loc per `studentT.py:48-50`) / `variance` (=scale^2*df/(df-2) if df>2 else inf per `studentT.py:52-62`) / `expand` overrides at the tail of `impl Distribution for StudentT` in `student_t.rs`; non-test consumer: trait dispatch through `pub use StudentT` re-export at `lib.rs:120`; `test_student_t_mean_mode_variance_df_gt_2` / `test_student_t_mean_df_le_1_is_nan` / `test_student_t_variance_df_le_2_is_inf` / `test_student_t_surface_overrides` / `test_student_t_expand` pin the overrides. Closes #1428 — `cdf` / `icdf` require regularized incomplete-beta (under #1372). |

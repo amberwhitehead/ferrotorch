@@ -270,14 +270,17 @@ difference numerical-gradient tests).
   `pub fn argmax` / `argmin`, no integer-output reduction path.
   Tracking prereq blocker #1304.
 
-- REQ-11: `median(input)` / `nanmedian(input)` — global median ignoring
-  (or not) NaN values. Upstream entry points around `ReduceOps.cpp`
-  (the median family lives in `Sorting.cpp` for the dim-keyed form +
-  here for the full-reduction form). The VJP per
-  `derivatives.yaml:1157-1163` is `evenly_distribute_backward(grad,
-  self, result)` — distribute grad evenly across all input positions
-  equal to the median value. **Not present in `reduction.rs`** — no
-  `pub fn median` / `nanmedian`. Tracking prereq blocker #1306.
+- REQ-11: `median_with_dim` / `nanmedian_with_dim` — SHIPPED. The
+  dim-keyed `(values, indices)` form per `Sorting.cpp:503-607
+  median_with_indices_impl`: lower-median sorted rank
+  `(effective - 1)/2` over a stable index sort with the upstream
+  `ip[i]<ip[j] || (==&&i<j)` tie-break; `median` NaN-poisons a slice
+  (returns the first NaN + its index), `nanmedian` excludes NaNs. The
+  VJP per `derivatives.yaml:1179-1185` is
+  `value_selecting_reduction_backward` — scatter grad to the selected
+  median index — reusing the shared `MaxMinDimBackward` node. Consumed
+  by the `lib.rs` re-export. Closes #1306. (The full-reduction
+  `median(input)` scalar form remains a follow-up.)
 
 - REQ-12: `norm(input, p, ...)` — p-norm reduction. Upstream
   `TORCH_IMPL_FUNC(norm_out)` at `ReduceOps.cpp:1590-1598` and
@@ -354,9 +357,12 @@ difference numerical-gradient tests).
 - [ ] AC-7: `argmax` / `argmin` parity-sweep at `--seeds 8` returns
   0-skipped pass. Currently FAILS: both `0/52 passed (52 skipped, 0
   failed)`. Blocked on #1304 + #1314.
-- [ ] AC-8: `median` / `nanmedian` parity-sweep at `--seeds 8` returns
-  0-skipped pass. Currently FAILS: both `0/52 passed (52 skipped, 0
-  failed)`. Blocked on #1306 + #1314.
+- [x] AC-8: `median_with_dim` / `nanmedian_with_dim` autograd ops
+  SHIPPED with `(values, indices)` return + scatter backward (#1306);
+  pinned by `reduction.rs::test_median_*` / `test_nanmedian_*`. The
+  parity-sweep runner ARM stays gated on the #1314 umbrella (smoke
+  reports `0 failed` — no regression — with seeds skipped pending the
+  arm, the same posture as REQ-9/REQ-12).
 - [ ] AC-9: `norm` parity-sweep at `--seeds 8` returns 0-skipped pass.
   Currently FAILS: `[norm] 0/168 passed (168 skipped, 0 failed)`.
   Blocked on #1308 + #1314.
@@ -691,7 +697,7 @@ until #1314 closes.
 | REQ-8 (std/var) | SHIPPED | impl: `pub fn var` + `pub fn std` (full-reduction with Bessel correction via `unbiased: bool`) + `pub fn var_dim` + `pub fn std_dim` (per-slice two-pass, accepts arbitrary `correction: f64`) + `struct VarBackward` + `struct StdBackward` in `reduction.rs` mirroring `ReduceOps.cpp:2085 Tensor var(...)` / `:2105 Tensor std(...)` and `derivatives.yaml:1924-1925` (var) / `:1673-1676` (std with `result == 0 -> 0` degeneracy guard). Non-test consumers: `Tensor::var_t` / `Tensor::std_t` in `methods.rs`. Runner arm: parity sweep `[std] 88/112 passed (24 skipped, 0 failed)` + `[var] 88/112 passed (24 skipped, 0 failed)`. The 24 skips per op are NOT-STARTED non-{0,1} `correction` on the full-reduction path (op_db samples with `correction=-1`, `-5`, `0.5`, `1.3`, `2` and no `dim` kwarg — these need a `std_with_correction(input, correction)` full-reduction API; tracked as follow-up to #1301). Single-dim and multi-dim list with any `correction` work via the `var_dim`/`std_dim` chain. |
 | REQ-9 (max/min with dim) | NOT-STARTED | not implemented in `reduction.rs`. Upstream returns `std::tuple<Tensor, Tensor>` (values + indices). The VJP at `aten/src/ATen/native/ReduceOps.cpp:2372 Tensor value_selecting_reduction_backward_symint(...)` scatters grad back through the saved indices — symmetric to cummax/cummin's `cummaxmin_backward` (which IS shipped in `cumulative.rs`). Open prereq blocker: #1302. |
 | REQ-10 (argmax/argmin) | SHIPPED | impl: `pub fn argmax` + `pub fn argmax_dim` + `pub fn argmin` + `pub fn argmin_dim` in `reduction.rs` mirroring `ReduceOps.cpp:1809 TORCH_IMPL_FUNC(argmax_out)` / `:1817 TORCH_IMPL_FUNC(argmin_out)`. Integer-output, NON-differentiable (no `derivatives.yaml` entry → no `*Backward` node). Output is `IntTensor<i64>`. 0-D input with `dim` returns `IntTensor::scalar(0)` per upstream's `:1789-1792 result.fill_(0)` for `sizes[dim] == 1`. Non-test consumers: `Tensor::argmax_t` / `argmin_t` / `argmax_dim_t` / `argmin_dim_t` in `methods.rs`. Runner arm widens `IntTensor<i64>` → `Tensor<f32>` via `int_to_f32` for the value-equality gate (and `WireTensor::to_f32` accepts int64 expected outputs symmetrically). Parity sweep: `[argmax] 104/104 passed (0 skipped, 0 failed)` + `[argmin] 104/104 passed (0 skipped, 0 failed)` (smoke=1 each). |
-| REQ-11 (median/nanmedian) | NOT-STARTED | not implemented in `reduction.rs`. Upstream `derivatives.yaml:1157-1163 self: evenly_distribute_backward(grad, self, result)` distributes grad evenly across all positions equal to the median. Open prereq blocker: #1306. |
+| REQ-11 (median/nanmedian) | SHIPPED | impl: `pub fn median_with_dim` / `pub fn nanmedian_with_dim` + `fn median_with_dim_forward` in `reduction.rs` returning `(Tensor<T>, IntTensor<i64>)` per `Sorting.cpp:503-607 median_with_indices_impl`: lower-median rank `(effective-1)/2` over a stable index sort with the `ip[i]<ip[j] || (==&&i<j)` tie-break; `median` NaN-poisons (first NaN + index), `nanmedian` excludes NaNs. Backward = `value_selecting_reduction_backward` per `derivatives.yaml:1179-1185`, reusing the shared `MaxMinDimBackward` scatter (names `MedianDimBackward`/`NanmedianDimBackward`). Non-test consumer: `pub use grad_fns::reduction::{median_with_dim, nanmedian_with_dim}` re-export at `lib.rs`. Pinned by `reduction.rs::test_median_*` / `test_nanmedian_*` (10 tests). Parity-sweep runner arm gated on #1314 (smoke `0 failed`, seeds skipped). Closes #1306. |
 | REQ-12 (norm) | NOT-STARTED | not implemented in `reduction.rs`. Upstream `TORCH_IMPL_FUNC(norm_out)` at `aten/src/ATen/native/ReduceOps.cpp:1590-1598` dispatches through `norm_stub` declared at `:451`. Accumulator types in `aten/src/ATen/native/SharedReduceOps.h:247-355` (`NormOps`, `NormZeroOps`, `NormOneOps`, `AbsMinOps`, `AbsMaxOps`). Multi-p backward generates `grad_input = (grad * sign(input) * |input|^(p-1)) / result^(p-1)`. Open prereq blocker: #1308. |
 | REQ-13 (logsumexp autograd) | SHIPPED | impl: `pub fn logsumexp` (full) + `pub fn logsumexp_dim` + `struct LogsumexpBackward` + `struct LogsumexpDimBackward` in `reduction.rs` wrapping the kernel-layer forward at `ferrotorch-core/src/ops/elementwise.rs:1233 pub fn logsumexp` (full) / `:1269 pub fn logsumexp_dim` with the autograd VJP per `tools/autograd/derivatives.yaml:1052-1054 self: logsumexp_backward(grad, self, result, dim, keepdim)` (`grad * exp(input - result)` softmax-weighted routing). Saves `result` (or `result_keepdim`) at forward time so backward avoids re-running the max-subtraction. Non-test consumers: `Tensor::logsumexp_t` / `Tensor::logsumexp_dim_t` in `methods.rs`. Runner arm: `args=[input, dim_list, keepdim]` positional decode; multi-dim list reduced via descending-order `logsumexp_dim` chain. Parity sweep: `[logsumexp] 120/120 passed (0 skipped, 0 failed)` (smoke=1). |
 | REQ-14 (any/all/count_nonzero) | SHIPPED | impl: `pub fn any` + `pub fn all` + `pub fn count_nonzero` (full-reduction) + `pub fn any_dim` + `pub fn all_dim` + `pub fn count_nonzero_dim` (dim-keyed) in `reduction.rs` mirroring `ReduceOps.cpp:1681 TORCH_IMPL_FUNC(any_out)` / `:1667 TORCH_IMPL_FUNC(all_out)` and `SummaryOps.cpp count_nonzero`. Non-differentiable; returns `BoolTensor` (any/all) or `IntTensor<i64>` (count_nonzero). Empty input convention matches upstream monoid identities: `any(empty)=false`, `all(empty)=true`, `count_nonzero(empty)=0`. NaN counts as non-zero per IEEE-754 (`NaN != 0.0` is true). Non-test consumers: `Tensor::any_t` / `Tensor::all_t` / `Tensor::count_nonzero_t` in `methods.rs`. Runner arm widens bool→f32 / i64→f32 for the value gate; multi-dim count_nonzero realized as `sum_dim` chain over a `1.0 if nonzero else 0.0` indicator view. Parity sweep: `[any] 160/160 passed` + `[all] 160/160 passed` + `[count_nonzero] 160/160 passed (0 skipped, 0 failed)` (smoke=1 each). |

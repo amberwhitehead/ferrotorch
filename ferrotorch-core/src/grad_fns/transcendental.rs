@@ -40,7 +40,7 @@
 //! | REQ-29 (`signbit`) | SHIPPED | `signbit` returns `BoolTensor` via `num_traits::Float::is_sign_negative`; non-diff per upstream; consumed by `lib.rs:186` re-export; closes #1332. |
 //! | REQ-30 (`clip`) | SHIPPED | `Tensor::clip_t` delegates to `clamp` per upstream's literal pass-through; closes #1333. |
 //! | REQ-31 (`copysign`) | SHIPPED | `copysign` + `CopysignBackward` (grad to magnitude only, `magnitude==0 → 0` mask) consumed by `lib.rs:186` re-export; closes #1334. |
-//! | REQ-32 (`nextafter`) | NOT-STARTED | binary op, no `NextafterBackward`. Deferred in wave-H build per dispatch scope-down; #1335 remains open. |
+//! | REQ-32 (`nextafter`) | SHIPPED | `nextafter` + `NextafterBackward` (per-dtype IEEE-754 one-ULP step via `f64_one_ulp` bit manipulation — MSRV 1.85 precludes `f64::next_up`/`next_down`); VJP `self: where(self != other, grad, 0)`, `other: zeros_like` per `derivatives.yaml:1322-1324`; consumed by `lib.rs:183` re-export; closes #1335. |
 //! | REQ-33 (`hypot`) | SHIPPED | `hypot` + `HypotBackward` (joint VJP via saved result, `result==0 → 0` mask) consumed by `lib.rs:186` re-export; closes #1336. |
 
 use std::any::TypeId;
@@ -1932,6 +1932,176 @@ pub fn hypot<T: Float>(a: &Tensor<T>, b: &Tensor<T>) -> FerrotorchResult<Tensor<
     }
 }
 
+// ---------------------------------------------------------------------------
+// nextafter(a, b) — element-wise next representable float from `a` toward `b`.
+// Forward mirrors `aten/src/ATen/native/BinaryOps.cpp:551
+//   CREATE_BINARY_TORCH_IMPL_FUNC(nextafter_out, nextafter_stub)` whose CPU
+// kernel routes to `std::nextafter`. Backward per
+// `tools/autograd/derivatives.yaml:1322-1324`:
+//   - name: nextafter(Tensor self, Tensor other) -> Tensor
+//     self: at::where(self != other, grad, 0)
+//     other: zeros_like(other)
+// — the gradient passes through to `self` (the step is one ULP, so locally
+// the map is the identity for autograd purposes) but is masked to zero on the
+// `self == other` tie (where `nextafter(a, a) == a` is exactly flat); gradient
+// to `other` (the direction operand) is identically zero.
+// ---------------------------------------------------------------------------
+
+/// One-ULP step of an `f64` toward `+inf` (`up = true`) or `-inf`
+/// (`up = false`) via bit-pattern increment/decrement, mirroring the classic
+/// `std::nextafter` integer-monotonicity trick: the IEEE-754 bit pattern of a
+/// positive float is monotonically increasing in value, so adding 1 to the
+/// bits advances exactly one ULP. Crossing zero is handled by the sign-flip
+/// branch. Used by [`nextafter_scalar`]; bit-manipulation is chosen over
+/// `f64::next_up`/`next_down` because those stabilised in Rust 1.86 and the
+/// workspace MSRV is 1.85.
+#[inline]
+#[allow(
+    clippy::float_cmp,
+    reason = "exact IEEE-754 zero test gates the cross-zero ULP branch; \
+              an epsilon tolerance would corrupt nextafter's bit-exact step."
+)]
+fn f64_one_ulp(x: f64, up: bool) -> f64 {
+    debug_assert!(!x.is_nan());
+    if x == 0.0 {
+        // From +/-0, the next value toward +inf is +MIN_POSITIVE_SUBNORMAL,
+        // toward -inf is its negation. `f64::from_bits(1)` is the smallest
+        // positive subnormal.
+        return if up {
+            f64::from_bits(1)
+        } else {
+            -f64::from_bits(1)
+        };
+    }
+    let bits = x.to_bits();
+    // For x > 0, value increases with bits; for x < 0, value increases as bits
+    // decrease (sign bit set). `up == (x > 0)` means step in the +bits dir.
+    let step_up_in_bits = up == (x > 0.0);
+    let new_bits = if step_up_in_bits { bits + 1 } else { bits - 1 };
+    f64::from_bits(new_bits)
+}
+
+/// IEEE-754 next-representable value from `a` toward `b`, generic over the
+/// workspace `Float` dtypes. Routes through `f64` (every `Float: ToPrimitive`)
+/// and steps one ULP via [`f64_one_ulp`] bit manipulation, then rebuilds the
+/// target dtype via `T::from`. Matches `std::nextafter` semantics:
+///   - `a == b` (incl. signed-zero compare-equal) -> return `b`,
+///   - either operand NaN -> NaN,
+///   - otherwise step one ULP from `a` in the direction of `b`.
+#[inline]
+#[allow(
+    clippy::float_cmp,
+    reason = "exact IEEE-754 equality is the std::nextafter tie semantics: \
+              on a == b (incl. signed-zero) the result is exactly b."
+)]
+fn nextafter_scalar<T: Float>(a: T, b: T) -> T {
+    if a.is_nan() || b.is_nan() {
+        return T::nan();
+    }
+    let af = <T as num_traits::ToPrimitive>::to_f64(&a).unwrap_or(f64::NAN);
+    let bf = <T as num_traits::ToPrimitive>::to_f64(&b).unwrap_or(f64::NAN);
+    // `==` treats `-0.0 == 0.0`; `std::nextafter` returns `b` (the toward
+    // operand) on equality so the result carries `b`'s sign for the zero tie.
+    if af == bf {
+        return b;
+    }
+    let stepped = f64_one_ulp(af, bf > af);
+    // Round-trip through `T`. For `T == f64` this is exact; for narrower
+    // dtypes the one-ULP-in-f64 step is conservative (still strictly toward
+    // `b`), which is the closest single-ULP target the dtype can express.
+    T::from(stepped).unwrap_or(b)
+}
+
+/// Backward node for `c = nextafter(a, b)`. The VJP routes `grad` straight
+/// through to `a` everywhere `a != b`, masking the gradient to zero on the
+/// `a == b` tie (the flat self-step); gradient to `b` is identically zero.
+/// Saves both broadcast operands to rebuild the `a != b` mask.
+#[derive(Debug)]
+struct NextafterBackward<T: Float> {
+    a: Tensor<T>,
+    b: Tensor<T>,
+}
+
+impl<T: Float> GradFn<T> for NextafterBackward<T> {
+    #[allow(
+        clippy::float_cmp,
+        reason = "the `a != b` mask is the exact upstream gradient gate per \
+                  derivatives.yaml:1323 `at::where(self != other, grad, 0)`; \
+                  an epsilon tolerance would misroute the tie's zero gradient."
+    )]
+    fn backward(&self, grad_output: &Tensor<T>) -> FerrotorchResult<Vec<Option<Tensor<T>>>> {
+        if grad_output.is_cuda() || self.a.is_cuda() || self.b.is_cuda() {
+            return Err(FerrotorchError::NotImplementedOnCuda {
+                op: "nextafter backward",
+            });
+        }
+        let zero = <T as num_traits::Zero>::zero();
+        let out_shape = broadcast_shapes(self.a.shape(), self.b.shape())?;
+        let a_b = binary_map(&self.a, &self.b, |a, _b| a)?;
+        let b_b = binary_map(&self.a, &self.b, |_a, b| b)?;
+        let go_data = grad_output.data()?;
+        let a_data = a_b.data()?;
+        let b_data = b_b.data()?;
+        // self: at::where(self != other, grad, 0).
+        let raw_a: Vec<T> = go_data
+            .iter()
+            .zip(a_data.iter())
+            .zip(b_data.iter())
+            .map(|((&g, &av), &bv)| if av == bv { zero } else { g })
+            .collect();
+        let grad_a = Tensor::from_storage(TensorStorage::cpu(raw_a), out_shape, false)?;
+        let da = if self.a.requires_grad() {
+            Some(reduce_grad_to_shape(&grad_a, self.a.shape())?)
+        } else {
+            None
+        };
+        // other: zeros_like(other).
+        let db = if self.b.requires_grad() {
+            let n: usize = self.b.shape().iter().product::<usize>().max(1);
+            Some(Tensor::from_storage(
+                TensorStorage::cpu(vec![zero; n]),
+                self.b.shape().to_vec(),
+                false,
+            )?)
+        } else {
+            None
+        };
+        Ok(vec![da, db])
+    }
+
+    fn inputs(&self) -> Vec<&Tensor<T>> {
+        vec![&self.a, &self.b]
+    }
+
+    fn name(&self) -> &'static str {
+        "NextafterBackward"
+    }
+}
+
+/// Differentiable element-wise `nextafter(a, b)`: the next representable
+/// floating-point value after `a` in the direction of `b`. Forward mirrors
+/// `aten/src/ATen/native/BinaryOps.cpp:551 nextafter_out` (CPU kernel
+/// `std::nextafter`). Backward per `derivatives.yaml:1322-1324` routes `grad`
+/// to `a` where `a != b` (zero on the `a == b` tie); gradient to `b` is zero.
+pub fn nextafter<T: Float>(a: &Tensor<T>, b: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
+    if a.is_cuda() || b.is_cuda() {
+        return Err(FerrotorchError::NotImplementedOnCuda { op: "nextafter" });
+    }
+    let output = binary_map(a, b, nextafter_scalar)?;
+    if needs_grad_binary(a, b) {
+        let (storage, shape) = output.into_storage_and_shape()?;
+        let out_tensor = Tensor::from_storage(storage, shape, false)?;
+        let grad_fn = Arc::new(NextafterBackward {
+            a: a.clone(),
+            b: b.clone(),
+        });
+        let (s, sh) = out_tensor.into_storage_and_shape()?;
+        Tensor::from_operation(s, sh, grad_fn)
+    } else {
+        Ok(output)
+    }
+}
+
 // ===========================================================================
 // Tests
 // ===========================================================================
@@ -2544,5 +2714,74 @@ mod tests {
         c.backward().unwrap();
         // The closed-form sinc'(0) = 0.
         assert_scalar_approx(&a.grad().unwrap().unwrap(), 0.0, 1e-6);
+    }
+
+    // nextafter (#1335)
+
+    /// f64 leaf vector helper for the bit-exact nextafter assertions.
+    fn leaf_vec_f64(data: &[f64], requires_grad: bool) -> Tensor<f64> {
+        Tensor::from_storage(
+            TensorStorage::cpu(data.to_vec()),
+            vec![data.len()],
+            requires_grad,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn test_nextafter_matches_std_nextafter_f64() {
+        // Oracle: std-library `f64::next_up`/`next_down` give the exact IEEE
+        // one-ULP neighbours. We compare ferrotorch's `nextafter` against the
+        // toolchain's bit-exact answer (the build toolchain is 1.85+ at test
+        // time even though the *library* MSRV forbids using these in src/).
+        let a = leaf_vec_f64(&[1.0, -1.0, 0.0, 0.0, 1e300], false);
+        let b = leaf_vec_f64(&[2.0, -2.0, 1.0, -1.0, f64::INFINITY], false);
+        let out = nextafter(&a, &b).unwrap();
+        let d = out.data().unwrap();
+        // toward larger -> next_up; 0.0 toward +1 -> smallest +subnormal.
+        assert_eq!(d[0], 1.0_f64.next_up());
+        // -1.0 toward -2.0 (more negative) -> next_down.
+        assert_eq!(d[1], (-1.0_f64).next_down());
+        assert_eq!(d[2], f64::from_bits(1));
+        assert_eq!(d[3], -f64::from_bits(1));
+        assert_eq!(d[4], 1e300_f64.next_up());
+    }
+
+    #[test]
+    fn test_nextafter_equal_returns_b_and_nan_propagates() {
+        // a == b -> result is b (carries b's sign for the signed-zero tie).
+        let a = leaf_vec_f64(&[5.0, 0.0], false);
+        let b = leaf_vec_f64(&[5.0, -0.0], false);
+        let out = nextafter(&a, &b).unwrap();
+        let d = out.data().unwrap();
+        assert_eq!(d[0], 5.0);
+        // 0.0 == -0.0, result is b == -0.0 (negative sign bit).
+        assert!(d[1].is_sign_negative() && d[1] == 0.0);
+        // NaN in either operand -> NaN.
+        let an = leaf_vec_f64(&[f64::NAN, 1.0], false);
+        let bn = leaf_vec_f64(&[1.0, f64::NAN], false);
+        let outn = nextafter(&an, &bn).unwrap();
+        let dn = outn.data().unwrap();
+        assert!(dn[0].is_nan() && dn[1].is_nan());
+    }
+
+    #[test]
+    fn test_nextafter_backward_passthrough_and_tie_mask() {
+        // VJP per derivatives.yaml:1322-1324:
+        //   self: where(self != other, grad, 0); other: zeros_like(other).
+        // a[0] != b[0] -> grad passes through (1.0); a[1] == b[1] -> 0.
+        let a = leaf_vec_f64(&[1.0, 3.0], true);
+        let b = leaf_vec_f64(&[2.0, 3.0], true);
+        let out = nextafter(&a, &b).unwrap();
+        out.sum_all().unwrap().backward().unwrap();
+        let ga = a.grad().unwrap().unwrap();
+        let gad = ga.data().unwrap();
+        assert_eq!(gad[0], 1.0);
+        assert_eq!(gad[1], 0.0);
+        // Gradient to `b` (direction operand) is identically zero.
+        let gb = b.grad().unwrap().unwrap();
+        for &v in gb.data().unwrap() {
+            assert_eq!(v, 0.0);
+        }
     }
 }

@@ -21,7 +21,7 @@
 //! | REQ-9 (`entropy`) | SHIPPED | closed form mirroring `gamma.py:100-106`; consumer: trait surface |
 //! | REQ-10 (`mean`/`mode`/`variance`) | SHIPPED | overrides mirroring `gamma.py:45-55` (mode NaN for α<1, R-DEV-6 vs PyTorch's clamp); consumer: trait surface |
 //! | REQ-11 (`GammaRsampleBackward`) | SHIPPED | implicit-reparam through standard-Gamma; consumer: invoked by the rsample method when grad enabled |
-//! | REQ-12 (full PyTorch surface — `expand`/`arg_constraints`/`support`/`has_rsample`) | SHIPPED | trait overrides at the tail of `impl Distribution for Gamma` in `gamma.rs` mirror `torch/distributions/gamma.py:18-68`; consumer: `tests/divergence_distribution_trait_surface.rs::gamma_*` pins every override (closes #1416 — `cdf` via incomplete gamma + `validate_args` + exp-family hooks remain orthogonal trackers). |
+//! | REQ-12 (full PyTorch surface — `expand`/`arg_constraints`/`support`/`has_rsample`/`cdf`) | SHIPPED | trait overrides at the tail of `impl Distribution for Gamma` in `gamma.rs` mirror `torch/distributions/gamma.py:18-119`; `cdf` = regularized lower incomplete gamma `P(conc, rate*x)` via `lower_incomplete_gamma_regularized` (Numerical-Recipes `gammp`: series for `x<s+1`, Lentz continued fraction for `x≥s+1`) mirroring `gamma.py:116-119 torch.special.gammainc`, verified against `scipy.special.gammainc` to 1e-12; consumer: `pub use gamma::Gamma` in `lib.rs` + `tests/divergence_distribution_trait_surface.rs::gamma_*` (closes #1416, #1397 — `validate_args` + exp-family `_natural_params`/`_log_normalizer` remain orthogonal trackers). |
 
 use std::sync::Arc;
 
@@ -169,6 +169,85 @@ fn sample_standard_gamma<T: Float>(alphas: &[T], n: usize) -> FerrotorchResult<V
     }
 
     Ok(result)
+}
+
+/// Regularized lower incomplete gamma `P(s, x) = γ(s, x) / Γ(s)`, computed
+/// in `f64` for accuracy then cast back to `T`. This is the Numerical-Recipes
+/// `gammp` routine and the scalar core of `torch.special.gammainc`, which is
+/// what `torch/distributions/gamma.py:119 Gamma.cdf` calls
+/// (`gammainc(concentration, rate * value)`).
+///
+/// Two complementary expansions cover the argument plane:
+///   * `x < s + 1`: the power-series `γ*(s,x)·x^s·e^-x` form `e^{-x} x^s /
+///     Γ(s) · Σ_{n≥0} x^n / (s(s+1)…(s+n))` (`gser`),
+///   * `x ≥ s + 1`: the Lentz continued fraction for `Q(s,x) = 1 − P(s,x)`
+///     (`gcf`).
+///
+/// Boundary conventions match scipy/torch: `x ≤ 0 → 0`, `s ≤ 0 → NaN`,
+/// `x = 0 → 0`, and `P → 1` as `x → ∞`.
+fn lower_incomplete_gamma_regularized<T: Float>(s: T, x: T) -> T {
+    let s = <T as num_traits::ToPrimitive>::to_f64(&s).unwrap_or(f64::NAN);
+    let x = <T as num_traits::ToPrimitive>::to_f64(&x).unwrap_or(f64::NAN);
+    let result = gammp_f64(s, x);
+    T::from(result).unwrap_or_else(|| T::from(f64::NAN).unwrap())
+}
+
+/// f64 core of [`lower_incomplete_gamma_regularized`]. `ln_gamma` is
+/// `f64::ln_gamma`-equivalent via the crate's `lgamma_scalar` (Lanczos).
+fn gammp_f64(s: f64, x: f64) -> f64 {
+    if x.is_nan() || s.is_nan() {
+        return f64::NAN;
+    }
+    if s <= 0.0 {
+        return f64::NAN;
+    }
+    if x <= 0.0 {
+        return 0.0;
+    }
+    let gln = lgamma_scalar(s);
+    if x < s + 1.0 {
+        // Series expansion for P(s, x).
+        let mut ap = s;
+        let mut sum = 1.0 / s;
+        let mut del = sum;
+        // ~200 iterations is ample for f64 convergence over the series region.
+        for _ in 0..300 {
+            ap += 1.0;
+            del *= x / ap;
+            sum += del;
+            if del.abs() < sum.abs() * 1e-15 {
+                break;
+            }
+        }
+        sum * (-x + s * x.ln() - gln).exp()
+    } else {
+        // Lentz's continued fraction for Q(s, x) = 1 - P(s, x).
+        let tiny = 1e-300;
+        let mut b = x + 1.0 - s;
+        let mut c = 1.0 / tiny;
+        let mut d = 1.0 / b;
+        let mut h = d;
+        for i in 1..300 {
+            let an = -(i as f64) * (i as f64 - s);
+            b += 2.0;
+            d = an * d + b;
+            if d.abs() < tiny {
+                d = tiny;
+            }
+            c = b + an / c;
+            if c.abs() < tiny {
+                c = tiny;
+            }
+            d = 1.0 / d;
+            let del = d * c;
+            h *= del;
+            if (del - 1.0).abs() < 1e-15 {
+                break;
+            }
+        }
+        let q = (-x + s * x.ln() - gln).exp() * h;
+        1.0 - q
+    }
 }
 
 impl<T: Float> Distribution<T> for Gamma<T> {
@@ -390,6 +469,34 @@ impl<T: Float> Distribution<T> for Gamma<T> {
 
     fn event_shape(&self) -> Vec<usize> {
         vec![]
+    }
+
+    fn cdf(&self, value: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
+        // `torch/distributions/gamma.py:116-119`:
+        //   return torch.special.gammainc(self.concentration, self.rate * value)
+        // i.e. the regularized lower incomplete gamma `P(conc, rate * x)`.
+        crate::fallback::check_gpu_fallback_opt_in(
+            &[&self.concentration, &self.rate, value],
+            "Gamma::cdf",
+        )?;
+        let device = self.concentration.device();
+        let conc_data = self.concentration.data_vec()?;
+        let rate_data = self.rate.data_vec()?;
+        let val_data = value.data_vec()?;
+
+        let result: Vec<T> = val_data
+            .iter()
+            .zip(conc_data.iter().cycle())
+            .zip(rate_data.iter().cycle())
+            .map(|((&x, &conc), &rate)| lower_incomplete_gamma_regularized(conc, rate * x))
+            .collect();
+
+        let out = Tensor::from_storage(TensorStorage::cpu(result), value.shape().to_vec(), false)?;
+        if device.is_cuda() {
+            out.to(device)
+        } else {
+            Ok(out)
+        }
     }
 
     fn expand(&self, batch_shape: &[usize]) -> FerrotorchResult<Box<dyn Distribution<T>>> {
@@ -652,5 +759,114 @@ mod tests {
     fn test_gamma_mode_nan_for_concentration_below_one() {
         let dist = Gamma::new(scalar(0.5f64).unwrap(), scalar(2.0f64).unwrap()).unwrap();
         assert!(dist.mode().unwrap().item().unwrap().is_nan());
+    }
+
+    // -----------------------------------------------------------------------
+    // cdf via regularized lower incomplete gamma (#1397)
+    // Reference values from scipy.special.gammainc (verified at build time):
+    //   gammainc(2.0, 1.0)  = 0.2642411176571153
+    //   gammainc(3.0, 2.0)  = 0.32332358381693654
+    //   gammainc(0.5, 0.5)  = 0.6826894921370859
+    //   gammainc(5.0, 3.0)  = 0.18473675547622787
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_gamma_cdf_series_region_matches_scipy() {
+        // Gamma(conc=2, rate=1).cdf(1) = gammainc(2, 1*1) = gammainc(2,1).
+        let dist = Gamma::new(scalar(2.0f64).unwrap(), scalar(1.0f64).unwrap()).unwrap();
+        let c = dist.cdf(&scalar(1.0f64).unwrap()).unwrap();
+        assert!(
+            (c.item().unwrap() - 0.264_241_117_657_115_3).abs() < 1e-12,
+            "got {}",
+            c.item().unwrap()
+        );
+    }
+
+    #[test]
+    fn test_gamma_cdf_continued_fraction_region_matches_scipy() {
+        // Gamma(conc=5, rate=1).cdf(3) = gammainc(5, 3): x >= s+1 -> Lentz CF.
+        let dist = Gamma::new(scalar(5.0f64).unwrap(), scalar(1.0f64).unwrap()).unwrap();
+        let c = dist.cdf(&scalar(3.0f64).unwrap()).unwrap();
+        assert!(
+            (c.item().unwrap() - 0.184_736_755_476_227_87).abs() < 1e-12,
+            "got {}",
+            c.item().unwrap()
+        );
+    }
+
+    #[test]
+    fn test_gamma_cdf_rate_scales_argument() {
+        // Gamma(conc=3, rate=2).cdf(1) = gammainc(3, 2*1) = gammainc(3,2).
+        let dist = Gamma::new(scalar(3.0f64).unwrap(), scalar(2.0f64).unwrap()).unwrap();
+        let c = dist.cdf(&scalar(1.0f64).unwrap()).unwrap();
+        assert!(
+            (c.item().unwrap() - 0.323_323_583_816_936_54).abs() < 1e-12,
+            "got {}",
+            c.item().unwrap()
+        );
+    }
+
+    #[test]
+    fn test_gamma_cdf_subunit_concentration_matches_scipy() {
+        // Gamma(conc=0.5, rate=1).cdf(0.5) = gammainc(0.5, 0.5).
+        let dist = Gamma::new(scalar(0.5f64).unwrap(), scalar(1.0f64).unwrap()).unwrap();
+        let c = dist.cdf(&scalar(0.5f64).unwrap()).unwrap();
+        assert!(
+            (c.item().unwrap() - 0.682_689_492_137_085_9).abs() < 1e-12,
+            "got {}",
+            c.item().unwrap()
+        );
+    }
+
+    #[test]
+    fn test_gamma_cdf_exponential_closed_form() {
+        // Gamma(1, rate) == Exponential(rate): cdf(x) = 1 - exp(-rate*x), exact.
+        let dist = Gamma::new(scalar(1.0f64).unwrap(), scalar(2.0f64).unwrap()).unwrap();
+        let c = dist.cdf(&scalar(1.5f64).unwrap()).unwrap();
+        let expected = 1.0 - (-2.0f64 * 1.5).exp();
+        assert!(
+            (c.item().unwrap() - expected).abs() < 1e-12,
+            "expected {expected}, got {}",
+            c.item().unwrap()
+        );
+    }
+
+    #[test]
+    fn test_gamma_cdf_boundaries() {
+        let dist = Gamma::new(scalar(2.0f64).unwrap(), scalar(1.0f64).unwrap()).unwrap();
+        // x = 0 -> P = 0; x -> large -> P -> 1.
+        assert_eq!(
+            dist.cdf(&scalar(0.0f64).unwrap()).unwrap().item().unwrap(),
+            0.0
+        );
+        assert!(
+            dist.cdf(&scalar(0.0f64).unwrap())
+                .unwrap()
+                .item()
+                .unwrap()
+                .abs()
+                < 1e-15
+        );
+        assert!(
+            (dist
+                .cdf(&scalar(100.0f64).unwrap())
+                .unwrap()
+                .item()
+                .unwrap()
+                - 1.0)
+                .abs()
+                < 1e-12
+        );
+    }
+
+    #[test]
+    fn test_gamma_cdf_f32() {
+        let dist = Gamma::new(scalar(2.0f32).unwrap(), scalar(1.0f32).unwrap()).unwrap();
+        let c = dist.cdf(&scalar(1.0f32).unwrap()).unwrap();
+        assert!(
+            (c.item().unwrap() - 0.264_241_12).abs() < 1e-5,
+            "got {}",
+            c.item().unwrap()
+        );
     }
 }

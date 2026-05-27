@@ -25,7 +25,7 @@
 //! | REQ-8 (`std` / `var`) | NOT-STARTED | no `WelfordBackward` in this file. Blocker #1301. |
 //! | REQ-9 (`max(dim)` / `min(dim)` with `(values, indices)`) | SHIPPED | `max_with_dim` / `min_with_dim` return `(Tensor<T>, IntTensor<i64>)`; shared `MaxMinDimBackward` scatters grad at saved per-slice argmax/argmin; NaN-poisoning per upstream `SharedReduceOps.h:26-34`; consumed by `lib.rs:182` re-export; closes #1302. |
 //! | REQ-10 (`argmax` / `argmin`) | NOT-STARTED | integer-output, non-differentiable; no integer-output reduction scaffold. Blocker #1304. |
-//! | REQ-11 (`median` / `nanmedian`) | NOT-STARTED | no median reduction. Blocker #1306. |
+//! | REQ-11 (`median` / `nanmedian`) | SHIPPED | `median_with_dim` / `nanmedian_with_dim` return `(Tensor<T>, IntTensor<i64>)`; lower-median rank `(effective-1)/2` over a stable index sort with the upstream `ip[i]<ip[j] || (==&&i<j)` tie-break per `Sorting.cpp:503-607`; median NaN-poisons, nanmedian skips NaNs; shared `MaxMinDimBackward` scatters grad at the saved per-slice median index per `derivatives.yaml:1179-1185`; consumed by `lib.rs:181` re-export; closes #1306. |
 //! | REQ-12 (`norm`) | SHIPPED | `norm_with_dim(input, p, dim, keepdim)` + `NormDimBackward` for `p > 0 finite` per `derivatives.yaml` `norm.ScalarOpt_dim`; `result==0 → 0` mask; consumed by `lib.rs:182` re-export; closes #1308. |
 //! | REQ-13 (`logsumexp`) | NOT-STARTED | kernel-layer forward exists in `ops::elementwise`; no autograd wrapper here. Blocker #1310. |
 //! | REQ-14 (`any` / `all` / `count_nonzero`) | NOT-STARTED | bool/integer-output, non-differentiable; no scaffold. Blocker #1312. |
@@ -2789,6 +2789,215 @@ pub fn min_with_dim<T: Float>(
 }
 
 // ---------------------------------------------------------------------------
+// median(dim) / nanmedian(dim) — tuple return (values, indices). Differentiable.
+// ---------------------------------------------------------------------------
+//
+// Mirrors `aten/src/ATen/native/Sorting.cpp:503-607 median_with_indices_impl`
+// — both `median.dim` and `nanmedian.dim` return a `(values, indices)` named
+// tuple where `indices` is the position OF the median element IN the original
+// (unsorted) slice. Semantics per the upstream loop body:
+//   * median (ignore_nan=false): if the slice contains any NaN, the result is
+//     that NaN and its index (first NaN). Otherwise the lower median at sorted
+//     rank `(size - 1) / 2` with tie-break `ip[i] < ip[j] || (ip[i]==ip[j] && i<j)`.
+//   * nanmedian (ignore_nan=true): NaNs are excluded; the median is the
+//     non-NaN element at rank `(size - num_nan - 1) / 2`. If the entire slice
+//     is NaN (num_nan == size), the rank-`(size-1)/2` element (a NaN) is taken.
+// The reported index is into the original slice (not the sorted order),
+// matching `*indp = *nth` where `nth` indexes the iota-initialised index vec.
+//
+// VJP per `tools/autograd/derivatives.yaml:1179-1185`:
+//   self: value_selecting_reduction_backward(grad, dim, indices, self.sizes(), keepdim)
+// — identical scatter-routing to `max.dim`/`min.dim`, so the existing
+// `MaxMinDimBackward` (which scatters grad at the saved per-slice flat index)
+// is reused verbatim. Closes #1306.
+
+/// Forward kernel shared by `median_with_dim` / `nanmedian_with_dim`. Sorts a
+/// stable copy of each slice's indices and selects the median rank. Returns
+/// `(values, indices_flat, indices_int, out_shape, norm_dim)` mirroring
+/// `max_min_with_dim_forward`. `ignore_nan` toggles the median vs. nanmedian
+/// branch per `Sorting.cpp:562-596`.
+#[allow(
+    clippy::type_complexity,
+    reason = "single-use helper returning (values, indices_flat, indices_int, out_shape, dim); \
+              matches max_min_with_dim_forward's tuple shape for the two callers."
+)]
+fn median_with_dim_forward<T: Float>(
+    input: &Tensor<T>,
+    dim: i64,
+    keepdim: bool,
+    ignore_nan: bool,
+) -> FerrotorchResult<(Vec<T>, Vec<i64>, IntTensor<i64>, Vec<usize>, usize)> {
+    let ndim = input.ndim();
+    if ndim == 0 {
+        return Err(FerrotorchError::InvalidArgument {
+            message: "median/nanmedian_with_dim: cannot reduce a 0-D tensor along a dimension"
+                .into(),
+        });
+    }
+    let norm_dim = if dim < 0 {
+        (ndim as i64 + dim) as usize
+    } else {
+        dim as usize
+    };
+    if norm_dim >= ndim {
+        return Err(FerrotorchError::InvalidArgument {
+            message: format!(
+                "median/nanmedian_with_dim: dim {dim} out of bounds for {ndim}-D tensor"
+            ),
+        });
+    }
+    let input_ref = if input.is_contiguous() {
+        input.clone()
+    } else {
+        input.contiguous()?
+    };
+    let in_data = input_ref.data()?;
+    let in_shape = input_ref.shape();
+    let dim_size = in_shape[norm_dim];
+    let outer: usize = in_shape[..norm_dim].iter().product();
+    let inner: usize = in_shape[norm_dim + 1..].iter().product();
+
+    let mut values = Vec::with_capacity(outer * inner);
+    let mut indices = Vec::with_capacity(outer * inner);
+    for o in 0..outer {
+        for i in 0..inner {
+            let base = o * dim_size * inner + i;
+            // Gather the slice's (local-index, value) pairs.
+            let slice: Vec<(usize, T)> = (0..dim_size)
+                .map(|d| (d, in_data[base + d * inner]))
+                .collect();
+
+            // median (not nanmedian): a NaN anywhere wins, at its first index.
+            if !ignore_nan {
+                if let Some(&(nan_idx, nan_val)) = slice.iter().find(|(_, v)| v.is_nan()) {
+                    values.push(nan_val);
+                    indices.push(nan_idx as i64);
+                    continue;
+                }
+            }
+
+            // Stable sort by value with the upstream tie-break: equal values
+            // keep ascending original index (`ip[i]==ip[j] && i<j`). NaNs are
+            // ordered to the tail for the nanmedian branch.
+            let mut order: Vec<usize> = (0..dim_size).collect();
+            order.sort_by(|&i, &j| {
+                let vi = slice[i].1;
+                let vj = slice[j].1;
+                let i_nan = vi.is_nan();
+                let j_nan = vj.is_nan();
+                match (i_nan, j_nan) {
+                    (true, true) => i.cmp(&j),
+                    (true, false) => std::cmp::Ordering::Greater, // NaN sinks to tail
+                    (false, true) => std::cmp::Ordering::Less,
+                    (false, false) => match vi.partial_cmp(&vj) {
+                        Some(std::cmp::Ordering::Equal) | None => i.cmp(&j),
+                        Some(ord) => ord,
+                    },
+                }
+            });
+
+            // Median rank: lower median over the non-NaN prefix (nanmedian) or
+            // the full slice (median, which has no NaN at this point).
+            let num_nan = if ignore_nan {
+                slice.iter().filter(|(_, v)| v.is_nan()).count()
+            } else {
+                0
+            };
+            let effective = dim_size - num_nan;
+            let rank = if effective == 0 {
+                // Whole slice is NaN under nanmedian: upstream nth still points
+                // into the (NaN-only) sorted order at (size-1)/2.
+                (dim_size - 1) / 2
+            } else {
+                (effective - 1) / 2
+            };
+            let median_local = order[rank];
+            values.push(slice[median_local].1);
+            indices.push(median_local as i64);
+        }
+    }
+
+    let mut out_shape: Vec<usize> = in_shape.to_vec();
+    if keepdim {
+        out_shape[norm_dim] = 1;
+    } else {
+        out_shape.remove(norm_dim);
+    }
+    let indices_int = IntTensor::<i64>::from_vec(indices.clone(), out_shape.clone())?;
+    Ok((values, indices, indices_int, out_shape, norm_dim))
+}
+
+/// Differentiable `(values, indices) = median(input, dim, keepdim)` with the
+/// PyTorch named-tuple return. Mirrors `torch.median(input, dim, keepdim)` at
+/// `aten/src/ATen/native/Sorting.cpp:503 median_with_indices_impl` (ignore_nan
+/// = false: a NaN in the slice poisons the result). Backward scatters `grad`
+/// to the input positions identified by `indices` via the shared
+/// `MaxMinDimBackward`. Closes #1306 (median).
+pub fn median_with_dim<T: Float>(
+    input: &Tensor<T>,
+    dim: i64,
+    keepdim: bool,
+) -> FerrotorchResult<(Tensor<T>, IntTensor<i64>)> {
+    if input.is_cuda() {
+        return Err(FerrotorchError::NotImplementedOnCuda {
+            op: "median_with_dim",
+        });
+    }
+    let (values, indices_flat, indices_int, out_shape, norm_dim) =
+        median_with_dim_forward(input, dim, keepdim, false)?;
+    let storage = TensorStorage::cpu(values);
+    let values_t = Tensor::from_storage(storage, out_shape, false)?;
+    let values_t = if is_grad_enabled() && input.requires_grad() {
+        let grad_fn = Arc::new(MaxMinDimBackward {
+            input: input.clone(),
+            indices_flat,
+            dim: norm_dim,
+            keepdim,
+            name: "MedianDimBackward",
+        });
+        let (s, sh) = values_t.into_storage_and_shape()?;
+        Tensor::from_operation(s, sh, grad_fn)?
+    } else {
+        values_t
+    };
+    Ok((values_t, indices_int))
+}
+
+/// Differentiable `(values, indices) = nanmedian(input, dim, keepdim)` —
+/// NaN-skipping counterpart of [`median_with_dim`]. Mirrors
+/// `torch.nanmedian(input, dim, keepdim)` (`ignore_nan = true`): NaNs are
+/// excluded from the median rank computation. Closes #1306 (nanmedian).
+pub fn nanmedian_with_dim<T: Float>(
+    input: &Tensor<T>,
+    dim: i64,
+    keepdim: bool,
+) -> FerrotorchResult<(Tensor<T>, IntTensor<i64>)> {
+    if input.is_cuda() {
+        return Err(FerrotorchError::NotImplementedOnCuda {
+            op: "nanmedian_with_dim",
+        });
+    }
+    let (values, indices_flat, indices_int, out_shape, norm_dim) =
+        median_with_dim_forward(input, dim, keepdim, true)?;
+    let storage = TensorStorage::cpu(values);
+    let values_t = Tensor::from_storage(storage, out_shape, false)?;
+    let values_t = if is_grad_enabled() && input.requires_grad() {
+        let grad_fn = Arc::new(MaxMinDimBackward {
+            input: input.clone(),
+            indices_flat,
+            dim: norm_dim,
+            keepdim,
+            name: "NanmedianDimBackward",
+        });
+        let (s, sh) = values_t.into_storage_and_shape()?;
+        Tensor::from_operation(s, sh, grad_fn)?
+    } else {
+        values_t
+    };
+    Ok((values_t, indices_int))
+}
+
+// ---------------------------------------------------------------------------
 // norm(input, p, dim, keepdim) — p-norm along a dimension.
 // ---------------------------------------------------------------------------
 //
@@ -3513,5 +3722,105 @@ mod tests {
         let m = mean_dim(&x, 0, false).unwrap();
         assert!(m.grad_fn().is_some());
         assert_eq!(m.grad_fn().unwrap().name(), "MeanDimBackward");
+    }
+
+    // --- median / nanmedian with dim (#1306) ---
+
+    #[test]
+    fn test_median_with_dim_odd_lower_median() {
+        // Per Sorting.cpp:584, median selects sorted rank (size-1)/2.
+        // Slice [3, 1, 2] sorted = [1(idx1), 2(idx2), 3(idx0)]; rank 1 -> value 2
+        // at original index 2.
+        let x = leaf(&[3.0, 1.0, 2.0], &[3], false);
+        let (vals, inds) = median_with_dim(&x, 0, false).unwrap();
+        assert_eq!(vals.data().unwrap(), &[2.0]);
+        assert_eq!(inds.data().unwrap(), &[2]);
+    }
+
+    #[test]
+    fn test_median_with_dim_even_takes_lower() {
+        // size=4 even -> rank (4-1)/2 = 1 (the lower of the two middles).
+        // [4, 2, 1, 3] sorted = [1(2), 2(1), 3(3), 4(0)]; rank 1 -> value 2 at idx 1.
+        let x = leaf(&[4.0, 2.0, 1.0, 3.0], &[4], false);
+        let (vals, inds) = median_with_dim(&x, 0, false).unwrap();
+        assert_eq!(vals.data().unwrap(), &[2.0]);
+        assert_eq!(inds.data().unwrap(), &[1]);
+    }
+
+    #[test]
+    fn test_median_with_dim_2d_axis1() {
+        // rows: [5,3,4] -> median 4 @ idx2 ; [1,9,2] -> median 2 @ idx2
+        let x = leaf(&[5.0, 3.0, 4.0, 1.0, 9.0, 2.0], &[2, 3], false);
+        let (vals, inds) = median_with_dim(&x, 1, false).unwrap();
+        assert_eq!(vals.shape(), &[2]);
+        assert_eq!(vals.data().unwrap(), &[4.0, 2.0]);
+        assert_eq!(inds.data().unwrap(), &[2, 2]);
+    }
+
+    #[test]
+    fn test_median_nan_poisons_slice() {
+        // torch.median: any NaN in the slice -> result is the NaN at its index
+        // (Sorting.cpp:562-569).
+        let x = leaf(&[1.0, f64::NAN, 3.0], &[3], false);
+        let (vals, inds) = median_with_dim(&x, 0, false).unwrap();
+        assert!(vals.data().unwrap()[0].is_nan());
+        assert_eq!(inds.data().unwrap(), &[1]);
+    }
+
+    #[test]
+    fn test_nanmedian_skips_nan() {
+        // torch.nanmedian: NaNs excluded. [1, NaN, 3, 2] -> non-NaN {1,3,2},
+        // effective=3, rank (3-1)/2=1; sorted non-NaN [1(0),2(3),3(2)] -> value 2
+        // at original idx 3.
+        let x = leaf(&[1.0, f64::NAN, 3.0, 2.0], &[4], false);
+        let (vals, inds) = nanmedian_with_dim(&x, 0, false).unwrap();
+        assert_eq!(vals.data().unwrap(), &[2.0]);
+        assert_eq!(inds.data().unwrap(), &[3]);
+    }
+
+    #[test]
+    fn test_median_with_dim_keepdim_shape() {
+        let x = leaf(&[5.0, 3.0, 4.0, 1.0, 9.0, 2.0], &[2, 3], false);
+        let (vals, inds) = median_with_dim(&x, 1, true).unwrap();
+        assert_eq!(vals.shape(), &[2, 1]);
+        assert_eq!(inds.shape(), &[2, 1]);
+    }
+
+    #[test]
+    fn test_median_backward_scatters_to_selected_index() {
+        // Backward routes grad only to the median position per
+        // derivatives.yaml:1179-1181 (value_selecting_reduction_backward).
+        // Slice [3,1,2]: median value 2 at idx 2 -> grad lands only at idx 2.
+        let x = leaf(&[3.0, 1.0, 2.0], &[3], true);
+        let (vals, _inds) = median_with_dim(&x, 0, false).unwrap();
+        assert_eq!(vals.grad_fn().unwrap().name(), "MedianDimBackward");
+        vals.backward().unwrap();
+        let g = x.grad().unwrap().unwrap();
+        assert_eq!(g.data().unwrap(), &[0.0, 0.0, 1.0]);
+    }
+
+    #[test]
+    fn test_median_backward_2d_finite_difference() {
+        // Finite-difference check: median is piecewise-linear (selects one
+        // element), so the analytic grad must match a one-hot at the selected
+        // index. rows [5,3,4]->idx2, [1,9,2]->idx2.
+        let x = leaf(&[5.0, 3.0, 4.0, 1.0, 9.0, 2.0], &[2, 3], true);
+        let (vals, _inds) = median_with_dim(&x, 1, false).unwrap();
+        let loss = sum(&vals).unwrap();
+        loss.backward().unwrap();
+        let g = x.grad().unwrap().unwrap();
+        // one-hot at idx 2 of each row.
+        assert_eq!(g.data().unwrap(), &[0.0, 0.0, 1.0, 0.0, 0.0, 1.0]);
+    }
+
+    #[test]
+    fn test_nanmedian_backward_scatters_to_nonnan_median() {
+        let x = leaf(&[1.0, f64::NAN, 3.0, 2.0], &[4], true);
+        let (vals, _inds) = nanmedian_with_dim(&x, 0, false).unwrap();
+        assert_eq!(vals.grad_fn().unwrap().name(), "NanmedianDimBackward");
+        vals.backward().unwrap();
+        let g = x.grad().unwrap().unwrap();
+        // median value 2 is at original idx 3.
+        assert_eq!(g.data().unwrap(), &[0.0, 0.0, 0.0, 1.0]);
     }
 }
