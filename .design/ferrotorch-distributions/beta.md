@@ -91,12 +91,18 @@ concentration tensors.
   ```text
   d(out)/d(γa) = γb / (γa+γb)²
   d(out)/d(γb) = -γa / (γa+γb)²
-  d(γa)/d(α)  ≈ γa * (ln(γa) - ψ(α))     ; implicit reparam
-  d(γb)/d(β)  ≈ γb * (ln(γb) - ψ(β))
+  d(γa)/d(α)  = standard_gamma_grad_one(α, γa)   ; pathwise
+  d(γb)/d(β)  = standard_gamma_grad_one(β, γb)
   ```
-  Summed across the output tensor to produce scalar
-  `grad_concentration1` and `grad_concentration0`. Matches the
-  derivation behind PyTorch's `_standard_gamma_grad`.
+  Each per-Gamma term is the PATHWISE implicit-reparameterization
+  gradient `d(γ)/d(conc) = -(∂_conc P(conc, γ)) / pdf(γ; conc)`
+  computed by `pub(crate) fn standard_gamma_grad_one` in
+  `ferrotorch-distributions/src/special_fns.rs:134` (port of
+  PyTorch's `_standard_gamma_grad`). This replaced the prior
+  score-function form `γ * (ln(γ) - ψ(conc))`, which is unbiased
+  only in expectation and flips sign per-sample (fixed by commit
+  fae8ca185, closes #1555). Summed across the output tensor to
+  produce scalar `grad_concentration1` and `grad_concentration0`.
 
 - REQ-11: NOT-STARTED — `expand`, `arg_constraints`, `support`,
   `validate_args`, the alternative-stacked-Dirichlet
@@ -176,14 +182,18 @@ formula directly to skip the Dirichlet machinery overhead.
 
 ### `BetaRsampleBackward` (REQ-10)
 
-The custom `GradFn` is the key piece of the rsample contract.
-It owns clones of `concentration1`, `concentration0`,
-`gamma_a` (the realized Gamma(α, 1) samples), and `gamma_b`
-(the realized Gamma(β, 1) samples). On backward:
+The custom `struct BetaRsampleBackward<T: Float>` at
+`ferrotorch-distributions/src/beta.rs:362` is the key piece of
+the rsample contract. It owns clones of `concentration1`,
+`concentration0`, `gamma_a` (the realized Gamma(α, 1) samples),
+and `gamma_b` (the realized Gamma(β, 1) samples). On backward:
 
 - Chains the ratio's local Jacobian (`γb/(γa+γb)²`,
-  `-γa/(γa+γb)²`) with the per-Gamma implicit-reparam gradient
-  (`γ·(ln γ - ψ(conc))`).
+  `-γa/(γa+γb)²`) with the per-Gamma PATHWISE implicit-reparam
+  gradient `standard_gamma_grad_one(conc, γ)` from
+  `ferrotorch-distributions/src/special_fns.rs:134` — NOT the
+  former score-function form `γ·(ln γ - ψ(conc))`, which was
+  replaced in commit fae8ca185 (#1555).
 - Sums into scalar accumulators per concentration parameter,
   yielding a single-element gradient tensor of the same shape as
   the input parameter.
@@ -266,5 +276,5 @@ Expected: `12 passed; 0 failed`.
 | REQ-7 | SHIPPED | impl: `fn Beta::log_prob` in `beta.rs` with `(α-1)*ln(x) + (β-1)*ln(1-x) - lbeta(α,β)` formula via `lgamma_scalar`, mirroring `beta.py:87-91`; non-test consumer: external `dist.log_prob(value)` calls. |
 | REQ-8 | SHIPPED | impl: `fn Beta::entropy` in `beta.rs` with closed-form using `digamma_scalar`, mirroring `beta.py:93-94`; non-test consumer: external `dist.entropy()` calls. |
 | REQ-9 | SHIPPED | impl: `fn Beta::{mean, mode, variance}` overrides in `beta.rs` mirroring `beta.py:71-82`; non-test consumer: external `dist.{mean, mode, variance}()` calls exercise the overrides; `test_beta_mean_variance_mode` and `test_beta_mode_undefined_for_alpha_le_one` pin the closed-forms. |
-| REQ-10 | SHIPPED | impl: `struct BetaRsampleBackward<T: Float>` with `GradFn::backward` in `beta.rs` implementing the implicit-reparam chain rule; non-test consumer: invoked by `fn Beta::rsample` (REQ-6) whenever either parameter requires grad. |
+| REQ-10 | SHIPPED | impl: `struct BetaRsampleBackward<T: Float>` at `ferrotorch-distributions/src/beta.rs:362` whose `GradFn::backward` chains the ratio Jacobian with the per-Gamma PATHWISE implicit-reparam gradient `pub(crate) fn standard_gamma_grad_one` at `ferrotorch-distributions/src/special_fns.rs:134` (port of `torch._standard_gamma_grad`) — replacing the prior score-function form `γ·(ln γ - ψ(conc))` in commit fae8ca185 (#1555); non-test consumer: invoked by `fn Beta::rsample` (REQ-6) whenever either parameter requires grad. |
 | REQ-11 | NOT-STARTED | blocker #1408 — `expand`, `arg_constraints`, `support`, `validate_args`, scalar-broadcast `__init__` branch, `_natural_params` / `_log_normalizer` (from `beta.py:63-69, 113-118`) not implemented. Cross-cutting with `lib.md` REQ-5 (Distribution-trait-surface blocker #1376). |

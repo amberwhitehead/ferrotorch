@@ -45,9 +45,12 @@ build (umbrella #1542) plus the #1335 follow-up, **32** REQs have shipped
 forward (and where differentiable, backward) implementations exposed at
 `lib.rs` (REQ-1 through REQ-17, REQ-19 through REQ-33). One REQ remains
 NOT-STARTED: REQ-18 (tanh attribution drift — impl lives in
-`grad_fns::activation`). REQ-32 (nextafter) shipped via `fn f64_one_ulp`
-bit-pattern one-ULP stepping (the MSRV-1.85-safe alternative to
-`f64::next_up`/`next_down`); closes #1335.
+`grad_fns::activation`). REQ-32 (nextafter) shipped via per-native-width
+bit-pattern one-ULP stepping — `fn f32_one_ulp` (u32),
+`fn f64_one_ulp` (u64), `fn u16_one_ulp` (f16/bf16) — dispatched
+by dtype (the MSRV-1.85-safe alternative to
+`f32`/`f64::next_up`/`next_down`, stable only in 1.86); closes
+#1335 #1556.
 
 - REQ-1: `exp(x)` — forward `c = exp(x)` with autograd. Mirrors
   `aten/src/ATen/native/UnaryOps.cpp:334 CREATE_UNARY_TORCH_IMPL_FUNC(exp_out, exp_stub)`.
@@ -342,13 +345,24 @@ bit-pattern one-ULP stepping (the MSRV-1.85-safe alternative to
 - REQ-32: `nextafter(self, other)` — SHIPPED. `c[i]` is the next
   representable floating-point value from `self[i]` toward `other[i]`,
   mirror of `BinaryOps.cpp:551 CREATE_BINARY_TORCH_IMPL_FUNC(nextafter_out,
-  nextafter_stub)`. Per-dtype IEEE-754 one-ULP step via `fn f64_one_ulp`
-  bit-pattern increment/decrement (chosen over `f64::next_up`/`next_down`
-  which stabilised in Rust 1.86 > the 1.85 MSRV). Backward per
-  `derivatives.yaml:1322-1324`: `self: at::where(self != other, grad, 0)`,
+  nextafter_stub)`. The one-ULP step is taken at the value's NATIVE
+  bit width — `fn f32_one_ulp` (u32 increment/decrement) for `f32`,
+  `fn f64_one_ulp` (u64) for `f64`, `fn u16_one_ulp` (u16) for
+  `f16`/`bf16` — dispatched by dtype inside `fn nextafter_scalar`,
+  matching `std::nextafter(a, b)` at the tensor dtype
+  (`aten/src/ATen/native/cpu/BinaryOpsKernel.cpp:1257` under
+  `AT_DISPATCH_FLOATING_TYPES`). The earlier code stepped one ULP in
+  `f64` and cast back; that produced a value strictly *between* two
+  adjacent narrower-dtype values which then rounded straight back to
+  the original, making the op a no-op for every `f32`/`f16`/`bf16`
+  input — the exact bug fixed in #1335/#1556. Bit manipulation is
+  chosen over `next_up`/`next_down` (stable only in Rust 1.86 > the
+  1.85 MSRV). Backward per `derivatives.yaml:1322-1324`:
+  `self: at::where(self != other, grad, 0)`,
   `other: zeros_like(other)` via `NextafterBackward`. Consumed by the
   `lib.rs` re-export. Pinned by `transcendental.rs::test_nextafter_*`
-  (3 tests). Closes #1335.
+  (3 tests incl. the std-`next_up`/`next_down` bit-exact oracle).
+  Closes #1335 #1556.
 
 - REQ-33: `hypot(self, other)` — `c = sqrt(self^2 + other^2)`, mirror of
   `BinaryOps.cpp:548 CREATE_BINARY_TORCH_IMPL_FUNC(hypot_out, hypot_stub)`.
@@ -733,5 +747,5 @@ NOT-STARTED (concrete prereq blocker filed for each).
 | REQ-29 (signbit) | SHIPPED | impl: `pub fn signbit` in `transcendental.rs` returning `BoolTensor` via `num_traits::Float::is_sign_negative` (the canonical IEEE-754 sign-bit primitive — honors -0.0 and NaN sign bits). Mirrors `UnaryOps.cpp:389 TORCH_IMPL_FUNC(signbit_out)`. Non-differentiable per upstream (Bool output, no derivatives.yaml entry). Consumer: `ferrotorch_core::signbit` re-export at `lib.rs:186`. Closes #1332. |
 | REQ-30 (clip) | SHIPPED | impl: alias delegation via consumer `pub fn clip_t` in `methods.rs` calling `crate::grad_fns::transcendental::clamp` — matches upstream's literal pass-through at `TensorCompare.cpp:918-930 Tensor clip(...)`. Closes #1333. |
 | REQ-31 (copysign) | SHIPPED | impl: `pub fn copysign` + `struct CopysignBackward` in `transcendental.rs` mirroring `BinaryOps.cpp:865 copysign_out`. Backward routes only to `magnitude` via `grad * (result / magnitude)` with `magnitude==0 → 0` mask per `FunctionsManual.cpp:106-114`; gradient to `sign` is identically zero. Consumer: `ferrotorch_core::copysign` re-export at `lib.rs:186`. Closes #1334. |
-| REQ-32 (nextafter) | SHIPPED | impl: `pub fn nextafter` + `struct NextafterBackward` + `fn nextafter_scalar` / `fn f64_one_ulp` in `transcendental.rs` mirroring `BinaryOps.cpp:551 CREATE_BINARY_TORCH_IMPL_FUNC(nextafter_out, nextafter_stub)`. Per-dtype IEEE-754 one-ULP step via bit-pattern increment/decrement (routes all `Float` dtypes through f64; chosen over `f64::next_up`/`next_down` which need Rust 1.86 > the 1.85 MSRV). Backward per `derivatives.yaml:1322-1324`: `self: at::where(self != other, grad, 0)` (passthrough off the tie), `other: zeros_like`. Non-test consumer: `pub use grad_fns::transcendental::nextafter` re-export at `lib.rs`. Pinned by `transcendental.rs::test_nextafter_*` (3 tests incl. the std-`next_up`/`next_down` oracle). Parity arm gated on the runner umbrella (smoke `0 failed`). Closes #1335. |
+| REQ-32 (nextafter) | SHIPPED | impl: `pub fn nextafter` + `struct NextafterBackward` + `fn nextafter_scalar` in `transcendental.rs`, mirroring `BinaryOps.cpp:551 CREATE_BINARY_TORCH_IMPL_FUNC(nextafter_out, nextafter_stub)`. The one-ULP step is taken at each dtype's NATIVE width — `fn f32_one_ulp` (u32) at `transcendental.rs:1998`, `fn f64_one_ulp` (u64) at `transcendental.rs:1964`, `fn u16_one_ulp` (u16, f16/bf16) at `transcendental.rs:2021` — dispatched by dtype in `fn nextafter_scalar` at `transcendental.rs:2052`, matching `std::nextafter(a, b)` at the tensor dtype (`BinaryOpsKernel.cpp:1257`). The prior code stepped in f64 and cast back, rounding straight back to the original value for every narrower dtype (a silent no-op) — exactly the bug fixed in commit 0f45e0813 (#1335 #1556). Bit-pattern increment/decrement is chosen over `next_up`/`next_down` which need Rust 1.86 > the 1.85 MSRV. Backward per `derivatives.yaml:1322-1324`: `self: at::where(self != other, grad, 0)` (passthrough off the tie), `other: zeros_like`. Non-test consumer: `pub use grad_fns::transcendental::nextafter` re-export at `lib.rs`. Pinned by `transcendental.rs::test_nextafter_*` (3 tests incl. the std-`next_up`/`next_down` bit-exact oracle). Parity arm gated on the runner umbrella (smoke `0 failed`). Closes #1335 #1556. |
 | REQ-33 (hypot) | SHIPPED | impl: `pub fn hypot` + `struct HypotBackward` in `transcendental.rs` mirroring `BinaryOps.cpp:548 hypot_out`. Forward uses `num_traits::Float::hypot` (overflow-safe). Backward per `derivatives.yaml:814-817`: `grad_x = grad * x / result`, `grad_y = grad * y / result`, with `result==0 → 0` masking (avoids 0/0 NaN at the origin). Consumer: `ferrotorch_core::hypot` re-export at `lib.rs:186`. Closes #1336. |
