@@ -130,11 +130,18 @@ rfftn, irfftn, hfft, ihfft, fftfreq, rfftfreq, fftshift, ifftshift}`.
 
 ## Parity contract
 
-`parity_ops = []` (no parity-sweep op declared in the route for FFT
-ops). The numeric contract is byte-for-byte parity with
-`torch.fft.*` for f32/f64 inputs; verified through unit tests that
-cross-check against the rustfft and ferray-fft reference
-implementations.
+`parity_ops = []` for *this* (forward-kernel) route. The 18 `fft.*`
+parity-sweep ops are declared on the autograd-wrapper route — see
+`.design/ferrotorch-core/grad_fns/fft.md` `## Parity contract`. As of
+#1294 those 18 ops are wired end-to-end (oracle complex-dtype round-trip
++ runner `dispatch_fft` arm) and each verifies `K >= 1` passed / `0
+failed` at `--seeds 8`; several forward kernels in *this* file (`hfft`,
+`ihfft`, `rfft2`, `irfft2`, `hfft2`, `ihfft2`, `hfftn`, `ihfftn`) are the
+production consumers the runner invokes directly (no autograd wrapper
+exists for the six exotic ops yet). The numeric contract remains
+byte-for-byte parity with `torch.fft.*` for f32/f64 inputs; additionally
+cross-checked against the rustfft and ferray-fft reference
+implementations in the unit tests.
 
 ## Verification
 

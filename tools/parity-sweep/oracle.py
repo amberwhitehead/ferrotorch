@@ -52,8 +52,25 @@ _DTYPE_TO_NAME = {
     torch.int64: "int64",
     torch.uint8: "uint8",
     torch.bool: "bool",
+    # Complex dtypes (#1294): the FFT family (`torch.fft.*`) returns
+    # `torch.complex64` / `torch.complex128` and accepts complex inputs.
+    # ferrotorch carries complex data as an interleaved real tensor with a
+    # trailing dim of 2 (`[re, im, re, im, ...]`) — exactly the memory layout
+    # `torch.view_as_real(c)` produces (verified byte-for-byte). We serialize a
+    # complex tensor as its `view_as_real` interleaved-float buffer, recording
+    # the `complex64`/`complex128` dtype name and appending the trailing `2`
+    # to the shape so the Rust runner reconstructs ferrotorch's `[..., 2]`
+    # layout. See `tensor_to_wire` / `wire_to_tensor` below.
+    torch.complex64: "complex64",
+    torch.complex128: "complex128",
 }
 _NAME_TO_DTYPE = {v: k for k, v in _DTYPE_TO_NAME.items()}
+
+# The float dtype each complex dtype's interleaved real/imag parts use.
+_COMPLEX_REAL_DTYPE = {
+    torch.complex64: torch.float32,
+    torch.complex128: torch.float64,
+}
 
 
 def tensor_to_wire(t: torch.Tensor) -> dict[str, Any]:
@@ -63,6 +80,26 @@ def tensor_to_wire(t: torch.Tensor) -> dict[str, Any]:
     # bf16 has no numpy equivalent — view as i16 to extract raw bytes.
     if t.dtype == torch.bfloat16:
         raw = t.contiguous().view(torch.int16).cpu().numpy().tobytes()
+    elif t.dtype in _COMPLEX_REAL_DTYPE:
+        # Complex (#1294): `torch.view_as_real` reinterprets `[..., N]` complex
+        # as `[..., N, 2]` real interleaved (real0, imag0, real1, imag1, ...)
+        # without copying. The raw bytes are identical to the complex tensor's
+        # own buffer; we record the trailing-2 shape so the runner reads it as
+        # ferrotorch's `[..., 2]` complex layout.
+        #
+        # `resolve_conj()` materializes any lazy conjugate bit: `ifft` (and the
+        # other inverse transforms) return tensors carrying an *unresolved*
+        # conjugate flag (a zero-copy view trick), which `view_as_real` refuses
+        # to reinterpret ("view_as_real doesn't work on unresolved conjugated
+        # tensors"). Resolving first flips the imaginary signs into the buffer
+        # so the interleaved bytes are the true real/imag pairs.
+        real = torch.view_as_real(t.resolve_conj().contiguous())
+        raw = real.contiguous().cpu().numpy().tobytes()
+        return {
+            "shape": list(real.shape),
+            "dtype": _DTYPE_TO_NAME[t.dtype],
+            "data_b64": base64.b64encode(raw).decode("ascii"),
+        }
     else:
         raw = t.contiguous().cpu().numpy().tobytes()
     return {
@@ -80,6 +117,16 @@ def wire_to_tensor(w: dict[str, Any]) -> torch.Tensor:
     if dtype == torch.bfloat16:
         arr = np.frombuffer(raw, dtype=np.int16).reshape(w["shape"]).copy()
         return torch.from_numpy(arr).view(torch.bfloat16)
+    if dtype in _COMPLEX_REAL_DTYPE:
+        # Complex (#1294): the wire shape is the trailing-2 `[..., 2]` real
+        # interleaved form (see `tensor_to_wire`). Read it as the matching real
+        # float dtype, then fold the trailing pair back into a complex tensor
+        # via `torch.view_as_complex`.
+        real_np = {torch.float32: np.float32, torch.float64: np.float64}[
+            _COMPLEX_REAL_DTYPE[dtype]
+        ]
+        arr = np.frombuffer(raw, dtype=real_np).reshape(w["shape"]).copy()
+        return torch.view_as_complex(torch.from_numpy(arr))
     np_dtype = {
         "float32": np.float32, "float64": np.float64, "float16": np.float16,
         "int8": np.int8, "int16": np.int16, "int32": np.int32, "int64": np.int64,

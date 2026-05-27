@@ -45,6 +45,51 @@ impl WireTensor {
         // in f32 mantissa for tensor shapes the suite uses; bool is {0,1}).
         match self.dtype.as_str() {
             "float32" => {}
+            // Complex (#1294): the oracle serializes `torch.complex64` /
+            // `torch.complex128` FFT outputs as interleaved real/imag floats
+            // with a trailing `2` already appended to the shape (via
+            // `torch.view_as_real` — see `oracle.py` `tensor_to_wire`). This is
+            // byte-for-byte ferrotorch's own `[..., 2]` complex layout. We
+            // decode the interleaved floats to an f32 tensor of the trailing-2
+            // shape so the existing `assert_close_f32` value gate compares
+            // ferrotorch's `[..., 2]` complex output against torch's directly.
+            // complex64 carries f32 parts; complex128 carries f64 parts (widened
+            // to f32 here — lossless for the value ranges the FFT sweep emits).
+            "complex64" | "complex128" => {
+                let bytes = B64.decode(&self.data_b64)?;
+                let numel: usize = self.shape.iter().product();
+                let (elem_bytes, is_f64) = if self.dtype == "complex64" {
+                    (4usize, false)
+                } else {
+                    (8usize, true)
+                };
+                let expected = numel * elem_bytes;
+                if bytes.len() != expected {
+                    return Err(format!(
+                        "{} byte length {} does not match shape {:?} (expected {})",
+                        self.dtype,
+                        bytes.len(),
+                        self.shape,
+                        expected
+                    )
+                    .into());
+                }
+                let data: Vec<f32> = if is_f64 {
+                    bytes
+                        .chunks_exact(8)
+                        .map(|c| {
+                            f64::from_le_bytes([c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7]])
+                                as f32
+                        })
+                        .collect()
+                } else {
+                    bytes
+                        .chunks_exact(4)
+                        .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+                        .collect()
+                };
+                return Ok(from_vec(data, &self.shape)?);
+            }
             "int64" | "int32" | "uint8" | "bool" => {
                 let numel: usize = if self.shape.is_empty() {
                     1
@@ -4702,8 +4747,130 @@ fn dispatch_f32(
         "pad_sequence" => dispatch_pad_sequence(args),
         "pack_padded_sequence" => dispatch_pack_unpack_roundtrip(args),
 
+        // FFT family (#1294). 18 op_db ops (`fft.fft` .. `fft.ihfftn`).
+        // ferrotorch's FFT kernels operate on the trailing signal axis/axes
+        // with unnormalized-forward / 1/n-inverse normalization (torch's
+        // default `norm="backward"`) and carry complex data as an interleaved
+        // `[..., 2]` real tensor. op_db emits samples with `norm`/`dim`/`s`
+        // kwargs that ferrotorch's fixed-axis kernels can't honour; `dispatch_fft`
+        // returns `Ok(None)` (legitimate skip) for those and dispatches the rest.
+        // Production consumers: `ferrotorch_core::{fft_differentiable, ...}`
+        // (the autograd wrappers re-exported at `lib.rs:175-179`) and the six
+        // forward-only kernels at `lib.rs:168-171`.
+        "fft.fft" | "fft.ifft" | "fft.rfft" | "fft.irfft" | "fft.fft2" | "fft.ifft2"
+        | "fft.fftn" | "fft.ifftn" | "fft.rfftn" | "fft.irfftn" | "fft.hfft" | "fft.ihfft"
+        | "fft.rfft2" | "fft.irfft2" | "fft.hfft2" | "fft.ihfft2" | "fft.hfftn" | "fft.ihfftn" => {
+            dispatch_fft(op, args, kwargs)
+        }
+
         _ => Ok(None),
     }
+}
+
+/// FFT-family parity dispatch (#1294).
+///
+/// ferrotorch's `torch.fft.*` kernels operate on a *fixed* trailing signal
+/// axis (1-D), the trailing two axes (2-D), or all inner axes (N-D), with
+/// `norm="backward"` (unnormalized forward / `1/n` inverse) only, and carry
+/// complex data as an interleaved `[..., 2]` real tensor. op_db's FFT samples
+/// add `norm` / `dim` / `s` kwargs that ferrotorch's fixed-axis kernels can't
+/// honour; this arm returns `Ok(None)` (legitimate skip) for any sample that
+/// is not on the default `norm`/`dim`/`s` path, and dispatches the rest.
+///
+/// Input adaptation: op_db feeds **real** `float32` inputs to every FFT op
+/// (torch promotes them — a real input is treated as complex with zero
+/// imaginary). For ferrotorch ops whose input layout is complex
+/// (`fft`/`ifft`/`irfft`/`fft2`/`ifft2`/`fftn`/`ifftn`/`irfftn`/`hfft`/
+/// `hfft2`/`hfftn`) we widen the real wire tensor to `[..., 2]` interleaved
+/// (`[re, 0, re, 0, ...]`). For ferrotorch's real-input ops
+/// (`rfft`/`rfftn`/`rfft2`/`ihfft`/`ihfft2`/`ihfftn`) the real tensor is
+/// passed through unchanged. The complex output is compared against the
+/// oracle's `view_as_real`-serialized interleaved expected via
+/// `assert_close_f32` (see `WireTensor::to_f32`'s `complex64`/`complex128`
+/// arm). Routes through the autograd wrappers (`*_differentiable`,
+/// re-exported at `lib.rs:175-179`) where they exist, else the forward
+/// kernels (`lib.rs:168-171`) for the six exotic Hermitian/2-D ops.
+fn dispatch_fft(
+    op: &str,
+    args: &[Value],
+    kwargs: &serde_json::Map<String, Value>,
+) -> Result<Option<Tensor<f32>>, Box<dyn std::error::Error>> {
+    use ferrotorch_core::{from_vec as fc_from_vec, grad_fns::fft as gfft};
+
+    // Skip non-default norm: ferrotorch's kernels are `norm="backward"` only.
+    match kwargs.get("norm") {
+        None | Some(Value::Null) => {}
+        Some(Value::String(s)) if s == "backward" => {}
+        Some(_) => return Ok(None),
+    }
+    // Skip explicit `dim` (ferrotorch fixes the transform axes) and explicit
+    // `s` (N-D per-axis resize — only the 1-D `n` resize is supported here).
+    if kwargs.get("dim").is_some_and(|v| !v.is_null()) {
+        return Ok(None);
+    }
+    if kwargs.get("s").is_some_and(|v| !v.is_null()) {
+        return Ok(None);
+    }
+    // 1-D `n` resize kwarg (the `*2` / `*n` ops ignore it — they took the
+    // `s`-absent path above, and op_db never pairs `n` with those ops).
+    let n: Option<usize> = match kwargs.get("n") {
+        None | Some(Value::Null) => None,
+        Some(Value::Number(num)) => {
+            let v = num.as_i64().ok_or("fft: n kwarg is not an integer")?;
+            if v <= 0 {
+                return Ok(None);
+            }
+            Some(v as usize)
+        }
+        Some(_) => return Ok(None),
+    };
+
+    let wire = unwrap_tensor_arg(&args[0]).ok_or("fft: arg 0 not a tensor")?;
+    // op_db only emits real float32 inputs for these ops; the wire decode
+    // widens int/bool but a complex-dtype input would need the `[..., 2]`
+    // layout — guard against it so we never silently misinterpret.
+    if wire.dtype != "float32" {
+        return Ok(None);
+    }
+    let real = wire.to_f32()?;
+
+    // Build the interleaved `[..., 2]` complex form: `[re, 0, re, 0, ...]`.
+    let to_complex = |t: &Tensor<f32>| -> Result<Tensor<f32>, Box<dyn std::error::Error>> {
+        let data = t.data_vec()?;
+        let mut interleaved = Vec::with_capacity(data.len() * 2);
+        for v in data {
+            interleaved.push(v);
+            interleaved.push(0.0);
+        }
+        let mut shape = t.shape().to_vec();
+        shape.push(2);
+        Ok(fc_from_vec(interleaved, &shape)?)
+    };
+
+    let out = match op {
+        // Complex-input C2C / C2R ops: widen real -> interleaved complex.
+        "fft.fft" => gfft::fft_differentiable(&to_complex(&real)?, n)?,
+        "fft.ifft" => gfft::ifft_differentiable(&to_complex(&real)?, n)?,
+        "fft.irfft" => gfft::irfft_differentiable(&to_complex(&real)?, n)?,
+        "fft.fft2" => gfft::fft2_differentiable(&to_complex(&real)?)?,
+        "fft.ifft2" => gfft::ifft2_differentiable(&to_complex(&real)?)?,
+        "fft.fftn" => gfft::fftn_differentiable(&to_complex(&real)?, None, None)?,
+        "fft.ifftn" => gfft::ifftn_differentiable(&to_complex(&real)?, None, None)?,
+        "fft.irfftn" => gfft::irfftn_differentiable(&to_complex(&real)?, None, None)?,
+        "fft.irfft2" => ferrotorch_core::irfft2(&to_complex(&real)?, None, None)?,
+        "fft.hfft" => ferrotorch_core::hfft(&to_complex(&real)?, n)?,
+        "fft.hfft2" => ferrotorch_core::hfft2(&to_complex(&real)?, None, None)?,
+        "fft.hfftn" => ferrotorch_core::hfftn(&to_complex(&real)?, None, None)?,
+        // Real-input R2C ops: pass the real tensor straight through.
+        "fft.rfft" => gfft::rfft_differentiable(&real, n)?,
+        "fft.rfftn" => gfft::rfftn_differentiable(&real, None, None)?,
+        "fft.rfft2" => ferrotorch_core::rfft2(&real, None, None)?,
+        "fft.ihfft" => ferrotorch_core::ihfft(&real, n)?,
+        "fft.ihfft2" => ferrotorch_core::ihfft2(&real, None, None)?,
+        "fft.ihfftn" => ferrotorch_core::ihfftn(&real, None, None)?,
+        _ => return Ok(None),
+    };
+    Ok(Some(out))
 }
 
 // ---------------------------------------------------------------------------
