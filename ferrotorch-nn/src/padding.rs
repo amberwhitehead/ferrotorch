@@ -72,10 +72,18 @@ fn pad_1d_constant<T: Float>(
     let rows = if rows == 0 { 1 } else { rows };
 
     let mut out = vec![value; rows * new_inner];
-    for r in 0..rows {
-        let src_start = r * inner;
-        let dst_start = r * new_inner + pad_left;
-        out[dst_start..dst_start + inner].copy_from_slice(&data[src_start..src_start + inner]);
+    // Degenerate input (numel 0 — e.g. an empty data buffer paired with a
+    // non-empty declared shape, or `inner == 0`): there is no source data to
+    // copy in. Mirror upstream `aten/src/ATen/native/PadNd.cpp:94-106`, which
+    // `fill_(value)`s the output then `copy_`s the source — a no-op for a
+    // zero-element input — leaving the correctly-shaped, value-filled output.
+    // The guard prevents the out-of-bounds slice on `data` (#1551).
+    if !data.is_empty() {
+        for r in 0..rows {
+            let src_start = r * inner;
+            let dst_start = r * new_inner + pad_left;
+            out[dst_start..dst_start + inner].copy_from_slice(&data[src_start..src_start + inner]);
+        }
     }
 
     let mut new_shape = shape.to_vec();
@@ -103,11 +111,15 @@ fn pad_2d_constant<T: Float>(
     let outer = if outer == 0 { 1 } else { outer };
 
     let mut out = vec![value; outer * new_h * new_w];
-    for o in 0..outer {
-        for row in 0..h {
-            let src_off = o * h * w + row * w;
-            let dst_off = o * new_h * new_w + (row + pad_top) * new_w + pad_left;
-            out[dst_off..dst_off + w].copy_from_slice(&data[src_off..src_off + w]);
+    // Degenerate input (numel 0): no source data to copy in. Same rationale as
+    // `pad_1d_constant` — mirror upstream `PadNd.cpp:94-106` (#1551).
+    if !data.is_empty() {
+        for o in 0..outer {
+            for row in 0..h {
+                let src_off = o * h * w + row * w;
+                let dst_off = o * new_h * new_w + (row + pad_top) * new_w + pad_left;
+                out[dst_off..dst_off + w].copy_from_slice(&data[src_off..src_off + w]);
+            }
         }
     }
 
@@ -144,15 +156,19 @@ fn pad_3d_constant<T: Float>(
     let outer = if outer == 0 { 1 } else { outer };
 
     let mut out = vec![value; outer * new_d * new_h * new_w];
-    for o in 0..outer {
-        for dep in 0..d {
-            for row in 0..h {
-                let src_off = o * d * h * w + dep * h * w + row * w;
-                let dst_off = o * new_d * new_h * new_w
-                    + (dep + pad_front) * new_h * new_w
-                    + (row + pad_top) * new_w
-                    + pad_left;
-                out[dst_off..dst_off + w].copy_from_slice(&data[src_off..src_off + w]);
+    // Degenerate input (numel 0): no source data to copy in. Same rationale as
+    // `pad_1d_constant` — mirror upstream `PadNd.cpp:94-106` (#1551).
+    if !data.is_empty() {
+        for o in 0..outer {
+            for dep in 0..d {
+                for row in 0..h {
+                    let src_off = o * d * h * w + dep * h * w + row * w;
+                    let dst_off = o * new_d * new_h * new_w
+                        + (dep + pad_front) * new_h * new_w
+                        + (row + pad_top) * new_w
+                        + pad_left;
+                    out[dst_off..dst_off + w].copy_from_slice(&data[src_off..src_off + w]);
+                }
             }
         }
     }
@@ -1847,5 +1863,46 @@ mod tests {
         assert!(!pad.is_training());
         pad.train();
         assert!(pad.is_training());
+    }
+
+    // -----------------------------------------------------------------------
+    // Degenerate (numel-0) constant pad — regression for #1551.
+    //
+    // op_db emits pad samples whose input has an empty data buffer paired
+    // with a non-empty *declared* last dim (e.g. shape `[0, 3]`: numel 0,
+    // inner 3). Previously `pad_{1,2,3}d_constant` forced rows/outer to 1 and
+    // then read `inner`/`w` elements from the empty `data` slice, panicking
+    // with "range end index N out of range for slice of length 0" at the
+    // `copy_from_slice`. Upstream `torch.nn.functional.pad`
+    // (`aten/src/ATen/native/PadNd.cpp:94-106`) allocates the padded output,
+    // `fill_(value)`s it, then `copy_`s the (empty) source — a no-op — so the
+    // result is the correctly-shaped, value-filled tensor. These assert the
+    // fixed behaviour: no panic + correct output shape on numel-0 input.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_constant_pad1d_empty_numel_no_panic() {
+        // shape [0, 3]: numel 0 but inner = 3. data buffer is empty.
+        let (out, new_shape) = pad_1d_constant::<f32>(&[], &[0, 3], 2, 3, 7.0);
+        // last dim padded 3 -> 3+2+3 = 8; outer 0-dim with forced row count 1.
+        assert_eq!(new_shape, vec![0, 8]);
+        // value-filled output, no source copied in.
+        assert!(out.iter().all(|&v| v == 7.0));
+    }
+
+    #[test]
+    fn test_constant_pad2d_empty_numel_no_panic() {
+        // shape [0, 2, 3]: numel 0, h = 2, w = 3, empty data.
+        let (out, new_shape) = pad_2d_constant::<f32>(&[], &[0, 2, 3], 1, 1, 1, 1, 5.0);
+        assert_eq!(new_shape, vec![0, 4, 5]);
+        assert!(out.iter().all(|&v| v == 5.0));
+    }
+
+    #[test]
+    fn test_constant_pad3d_empty_numel_no_panic() {
+        // shape [0, 2, 2, 3]: numel 0, d = 2, h = 2, w = 3, empty data.
+        let (out, new_shape) = pad_3d_constant::<f32>(&[], &[0, 2, 2, 3], 1, 1, 1, 1, 1, 1, 3.0);
+        assert_eq!(new_shape, vec![0, 4, 4, 5]);
+        assert!(out.iter().all(|&v| v == 3.0));
     }
 }
