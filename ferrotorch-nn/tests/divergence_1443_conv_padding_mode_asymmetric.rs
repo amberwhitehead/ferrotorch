@@ -88,7 +88,7 @@ fn divergence_conv1d_reflect_asymmetric_forward() {
     let x = leaf(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0], &[1, 1, 6]);
     let y = conv.forward(&x).unwrap();
     assert_close(
-        &y.data().unwrap(),
+        y.data().unwrap(),
         &[23.0, 12.0, 21.0, 32.0, 43.0, 54.0, 65.0, 56.0, 45.0],
         1e-3,
         "Conv1d reflect padding=2 k=2 forward",
@@ -103,7 +103,7 @@ fn divergence_conv1d_replicate_asymmetric_forward() {
     let x = leaf(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0], &[1, 1, 6]);
     let y = conv.forward(&x).unwrap();
     assert_close(
-        &y.data().unwrap(),
+        y.data().unwrap(),
         &[11.0, 11.0, 21.0, 32.0, 43.0, 54.0, 65.0, 66.0, 66.0],
         1e-3,
         "Conv1d replicate padding=2 k=2 forward",
@@ -119,7 +119,7 @@ fn divergence_conv1d_circular_asymmetric_forward() {
     let x = leaf(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0], &[1, 1, 6]);
     let y = conv.forward(&x).unwrap();
     assert_close(
-        &y.data().unwrap(),
+        y.data().unwrap(),
         &[65.0, 16.0, 21.0, 32.0, 43.0, 54.0, 65.0, 16.0, 21.0],
         1e-3,
         "Conv1d circular padding=2 k=2 forward",
@@ -141,7 +141,7 @@ fn divergence_conv1d_reflect_asymmetric_backward() {
         .unwrap()
         .expect("Conv1d reflect input grad must be populated");
     assert_close(
-        &g.data().unwrap(),
+        g.data().unwrap(),
         &[11.0, 22.0, 12.0, 21.0, 22.0, 11.0],
         1e-3,
         "Conv1d reflect padding=2 k=2 backward input grad",
@@ -160,7 +160,7 @@ fn divergence_conv1d_replicate_asymmetric_backward() {
         .unwrap()
         .expect("Conv1d replicate input grad must be populated");
     assert_close(
-        &g.data().unwrap(),
+        g.data().unwrap(),
         &[23.0, 11.0, 11.0, 11.0, 11.0, 32.0],
         1e-3,
         "Conv1d replicate padding=2 k=2 backward input grad",
@@ -179,7 +179,7 @@ fn divergence_conv1d_circular_asymmetric_backward() {
         .unwrap()
         .expect("Conv1d circular input grad must be populated");
     assert_close(
-        &g.data().unwrap(),
+        g.data().unwrap(),
         &[22.0, 21.0, 11.0, 11.0, 12.0, 22.0],
         1e-3,
         "Conv1d circular padding=2 k=2 backward input grad",
@@ -207,7 +207,7 @@ fn divergence_conv3d_reflect_asymmetric_forward() {
     let y = conv.forward(&x).unwrap();
     assert_eq!(y.shape(), &[1, 1, 4, 2, 5]);
     assert_close(
-        &y.data().unwrap(),
+        y.data().unwrap(),
         &[
             16.0, 14.0, 16.0, 18.0, 16.0, 22.0, 20.0, 22.0, 24.0, 22.0, 4.0, 2.0, 4.0, 6.0, 4.0,
             10.0, 8.0, 10.0, 12.0, 10.0, 16.0, 14.0, 16.0, 18.0, 16.0, 22.0, 20.0, 22.0, 24.0,
@@ -226,7 +226,7 @@ fn divergence_conv3d_replicate_asymmetric_forward() {
     let y = conv.forward(&x).unwrap();
     assert_eq!(y.shape(), &[1, 1, 4, 2, 5]);
     assert_close(
-        &y.data().unwrap(),
+        y.data().unwrap(),
         &[
             2.0, 2.0, 4.0, 6.0, 6.0, 8.0, 8.0, 10.0, 12.0, 12.0, 2.0, 2.0, 4.0, 6.0, 6.0, 8.0, 8.0,
             10.0, 12.0, 12.0, 14.0, 14.0, 16.0, 18.0, 18.0, 20.0, 20.0, 22.0, 24.0, 24.0, 14.0,
@@ -245,7 +245,7 @@ fn divergence_conv3d_circular_asymmetric_forward() {
     let y = conv.forward(&x).unwrap();
     assert_eq!(y.shape(), &[1, 1, 4, 2, 5]);
     assert_close(
-        &y.data().unwrap(),
+        y.data().unwrap(),
         &[
             18.0, 14.0, 16.0, 18.0, 14.0, 24.0, 20.0, 22.0, 24.0, 20.0, 6.0, 2.0, 4.0, 6.0, 2.0,
             12.0, 8.0, 10.0, 12.0, 8.0, 18.0, 14.0, 16.0, 18.0, 14.0, 24.0, 20.0, 22.0, 24.0, 20.0,
@@ -271,7 +271,7 @@ fn divergence_conv3d_reflect_asymmetric_backward() {
         .unwrap()
         .expect("Conv3d reflect input grad must be populated");
     assert_close(
-        &g.data().unwrap(),
+        g.data().unwrap(),
         &[
             4.0, 12.0, 4.0, 4.0, 12.0, 4.0, 4.0, 12.0, 4.0, 4.0, 12.0, 4.0,
         ],
@@ -293,7 +293,7 @@ fn divergence_conv3d_replicate_asymmetric_backward() {
         .unwrap()
         .expect("Conv3d replicate input grad must be populated");
     assert_close(
-        &g.data().unwrap(),
+        g.data().unwrap(),
         &[8.0, 4.0, 8.0, 8.0, 4.0, 8.0, 8.0, 4.0, 8.0, 8.0, 4.0, 8.0],
         1e-3,
         "Conv3d replicate padding=(1,0,1) backward input grad",
@@ -313,7 +313,7 @@ fn divergence_conv3d_circular_asymmetric_backward() {
         .unwrap()
         .expect("Conv3d circular input grad must be populated");
     assert_close(
-        &g.data().unwrap(),
+        g.data().unwrap(),
         &[8.0, 4.0, 8.0, 8.0, 4.0, 8.0, 8.0, 4.0, 8.0, 8.0, 4.0, 8.0],
         1e-3,
         "Conv3d circular padding=(1,0,1) backward input grad",

@@ -191,7 +191,7 @@ fn rsqrt_backward_matches_pytorch_at_known_points() {
     let g = grad.data().expect("grad data");
 
     // Reference: live torch produced [-0.1767766774, -0.02209708467, -0.0078125].
-    let torch_grad = [-0.1767766774_f32, -0.02209708467_f32, -0.0078125_f32];
+    let torch_grad = [-0.176_776_68_f32, -0.022_097_085_f32, -0.0078125_f32];
 
     for (i, (got, want)) in g.iter().zip(torch_grad.iter()).enumerate() {
         let abs_err = (got - want).abs();

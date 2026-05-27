@@ -61,7 +61,7 @@ const TORCH_DSG_DF20_SG9: f64 = 0.964_218_107_437_950_1; // alpha=10 large-alpha
 /// production `lgamma_scalar` and the builder's in-crate copy.
 fn lgamma_lanczos(x: f64) -> f64 {
     const G: [f64; 9] = [
-        0.999_999_999_999_809_93,
+        0.999_999_999_999_809_9,
         676.520_368_121_885_1,
         -1_259.139_216_722_402_8,
         771.323_428_777_653_1,

@@ -179,6 +179,10 @@ fn divergence_fft_f64_dim0_matches_torch_float64() {
 /// Divergence probe: rfft ortho — Hermitian half-spectrum with 1/sqrt(n).
 /// torch oracle: `torch.fft.rfft([1..8], norm="ortho")`, float64.
 #[test]
+#[allow(
+    clippy::approx_constant,
+    reason = "oracle f64 outputs from live torch.fft.rfft; values that happen to equal sqrt(2)/1-sqrt(2) are torch results, not hand-written math constants — replacing with consts::SQRT_2 would lose the file:line oracle traceability"
+)]
 fn divergence_rfft_f64_ortho_matches_torch_float64() {
     let input = from_vec(vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0], &[8]).unwrap();
     let out = rfft_norm(&input, None, None, FftNorm::Ortho).unwrap();
@@ -223,6 +227,10 @@ fn divergence_hfft_f64_ortho_matches_torch_float64() {
 /// a per-axis vs whole-transform scale bug would show here.
 /// torch oracle: `torch.fft.fftn(complex(arange(6).reshape(2,3),0), norm="ortho")`.
 #[test]
+#[allow(
+    clippy::approx_constant,
+    reason = "oracle f64 outputs from live torch.fft.fftn; values that happen to equal sqrt(6)/2 or 1/sqrt(2) are torch results, not hand-written math constants — replacing with consts would lose the file:line oracle traceability"
+)]
 fn divergence_fftn_f64_ortho_2d_matches_torch_float64() {
     // 2x3 complex, imag=0, layout [2,3,2].
     let vals: Vec<f64> = (0..6).map(|x| x as f64).collect();

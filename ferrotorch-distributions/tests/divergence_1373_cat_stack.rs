@@ -31,14 +31,14 @@ fn divergence_cat_transform_forward_ldj() {
     let y = ct.forward(&x).unwrap();
     approx(
         y.data().unwrap(),
-        &[1.1051710f32, 1.2214028, 1.6],
+        &[1.105_171_f32, 1.2214028, 1.6],
         1e-5,
         "Cat forward",
     );
     let ldj = ct.log_abs_det_jacobian(&x, &y).unwrap();
     approx(
         ldj.data().unwrap(),
-        &[0.1f32, 0.2, 0.69314718],
+        &[0.1f32, 0.2, 0.693_147_2],
         1e-5,
         "Cat ldj",
     );
@@ -55,7 +55,7 @@ fn divergence_stack_transform_forward_ldj() {
     let y = st.forward(&x).unwrap();
     approx(
         y.data().unwrap(),
-        &[1.1051710f32, 1.2214028, 0.9, 1.2],
+        &[1.105_171_f32, 1.2214028, 0.9, 1.2],
         1e-5,
         "Stack forward",
     );
