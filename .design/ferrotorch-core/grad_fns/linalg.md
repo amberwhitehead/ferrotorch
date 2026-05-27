@@ -85,17 +85,24 @@ non-differentiable and mirrors torch's no-grad contract (REQ-24, no
 sub-blocker #1577 is complete**. `householder_product` (REQ-26) shipped
 2026-05-27 — `HouseholderProductBackward` + `householder_product_differentiable`
 implement the real reflector-recursion VJP (`FunctionsManual.cpp:5544`),
-consumed by the now-`[m,k]`-shaped grad-aware `pub fn householder_product`;
-the only residual #1345 ops are `eig`/`eigvals`, which need complex-tensor
-autograd.
+consumed by the now-`[m,k]`-shaped grad-aware `pub fn householder_product`.
 
-The remaining `torch.linalg.*` factorizations are still **forward-only** in
-`ferrotorch-core/src/linalg.rs` with no `*Backward` `GradFn`:
-`eig` / `eigvals` (COMPLEX eigenvectors — blocked on a complex-tensor
-autograd primitive, #1345), and the RECTANGULAR `m != n` LU and the
-rank-deficient `lstsq` / non-`p=2` `norm` branches (residual follow-ups under
-#1577). `householder_product` is no longer forward-only — it shipped its
-reflector-recursion backward 2026-05-27 (REQ-26).
+`eig` / `eigvals` (REQ-12/14) shipped their COMPLEX backward 2026-05-27,
+closing the LAST #1345 linalg-autograd gap: `EigBackwardW`/`EigBackwardV`
+(`eig`) and `EigvalsBackward` (`eigvals`) + the grad-aware `pub fn eig` /
+`pub fn eigvals` forwards in `ferrotorch-core/src/linalg.rs` implement
+`linalg_eig_backward` (`FunctionsManual.cpp:3820`, non-Hermitian branch) via
+a private complex-linalg toolkit (`c_matmul`/`c_conj_transpose`/`c_inverse`/
+`c_solve`/`c_econj_gap`) on the `[n,2]` / `[n,n,2]` real/imag encoding — the
+real part of the complex `gA` (real `A`, `handle_r_to_c`,
+`derivatives.yaml:1740`). With these wired, **#1345 is fully resolved** for
+the differentiable scope — all its named ops are grad-aware end-to-end.
+
+The remaining `torch.linalg.*` factorizations still **forward-only** in
+`ferrotorch-core/src/linalg.rs` with no `*Backward` `GradFn` are the residual
+#1577 follow-ups: the RECTANGULAR `m != n` LU and the rank-deficient `lstsq`
+/ non-`p=2` `norm` branches. `eig`/`eigvals`/`householder_product` are no
+longer forward-only.
 
 ## Requirements
 
@@ -246,9 +253,54 @@ reflector-recursion backward 2026-05-27 (REQ-26).
   forward-only.
 
 - REQ-12: `linalg.eig(A)` — non-symmetric eigendecomposition. Documented
-  in `torch/linalg/__init__.py`. Forward-only impl `pub fn eig` in
-  `ferrotorch-core/src/linalg.rs` via `ferray_linalg::eig`.
-  **NOT-STARTED in this file**. Open prereq blocker #1345.
+  in `torch/linalg/__init__.py`, derivative `linalg_eig` in
+  `tools/autograd/derivatives.yaml:1739-1740`. **SHIPPED** (2026-05-27,
+  closing #1345): the split `EigBackwardW` / `EigBackwardV` +
+  `eig_differentiable` in `ferrotorch-core/src/grad_fns/linalg.rs`
+  implement the non-Hermitian COMPLEX VJP, grounded in `linalg_eig_backward`
+  at `torch/csrc/autograd/FunctionsManual.cpp:3820` (the general,
+  `is_hermitian=false` branch). For `A = V diag(L) V^{-1}`:
+  `VhgV = V^H @ gV`; the unit-norm tangent projection
+  `VhgV <- VhgV - V^H @ (V * real(diag(VhgV)))`
+  (`FunctionsManual.cpp:3887-3889`); `Econj[i,j] = conj(L_j) - conj(L_i)`
+  off-diagonal / `1` on the diagonal (`FunctionsManual.cpp:3893-3898`);
+  `ret = VhgV / Econj` with the diagonal carrying `gL`; and the conjugation
+  `gA = linalg_solve(V^H, ret @ V^H)` (`FunctionsManual.cpp:3919`). All
+  arithmetic is COMPLEX, performed on the `[n,2]` / `[n,n,2]` real/imag
+  encoding by the private complex-linalg toolkit (`c_matmul`,
+  `c_conj_transpose`, `c_inverse` via Gauss-Jordan partial pivot, `c_solve`,
+  `c_econj_gap`) in this file — bounded plumbing, NOT a complex-dtype
+  subsystem. Because `A` is REAL the returned gradient is the REAL part
+  (`handle_r_to_c`, `derivatives.yaml:1740`). The two outputs `(L, V)` are
+  jointly linear in `gA`, so the joint VJP is SPLIT across two single-output
+  nodes (`EigBackwardW` on the eigenvalues output, `EigBackwardV` on the
+  eigenvectors output) accumulated into `A.grad` — the same split-node
+  strategy `eigh`/`svd`/`qr` use; grad through `L` only (`gV=0`), `V` only
+  (`gL=0`), or both is handled by the split. Non-test production consumer:
+  the grad-aware forward `pub fn eig` in `ferrotorch-core/src/linalg.rs`
+  delegates to `eig_differentiable` when
+  `is_grad_enabled() && a.requires_grad()` (forward computed under
+  `no_grad`); that forward also UNIT-NORM-normalizes ferray's faer-backed
+  eigenvector columns (`normalize_complex_eigenvector_columns`) to match
+  torch's documented norm-one contract (`FunctionsManual.cpp:3837-3839`), so
+  the VJP's unit-norm projection is correct and `V` matches torch up to a
+  per-column phase. Verified vs LIVE `torch 2.11.0` float64 `A.grad` for a
+  3×3 with DISTINCT REAL eigenvalues (V real) AND a 2×2 with a
+  COMPLEX-CONJUGATE eigenvalue pair (`[[1,-1],[1,1]]`, `L = 1 ± i`, V
+  genuinely complex) by
+  `grad_fns::linalg::tests::{eig_backward_real_3x3,
+  eig_backward_complex_pair_2x2, eig_backward_v_only_complex_pair_2x2}_matches_torch`
+  at `1e-6`. **Eigenvector-gauge caveat (R-DEV-1):** eig eigenvectors are
+  scale-free; torch normalizes to unit norm but the PHASE
+  `V_j -> V_j e^{i phi}` is a genuine gauge freedom torch asserts the loss
+  must be invariant to (`FunctionsManual.cpp:3867-3879`), so the tests use a
+  PHASE-INVARIANT loss `sum(|V_ij|^2 * M)` for which `A.grad` is well-posed
+  and matches torch even though ferray's faer phase may differ from LAPACK's.
+  EXACT for DIAGONALIZABLE (distinct-eigenvalue) inputs; on a defective
+  input `V` is singular and `c_inverse` returns `SingularMatrix`, and on a
+  repeated eigenvalue the `Econj` off-diagonal diverges exactly as torch's
+  does (torch does not special-case degeneracy). The CUDA forward stays
+  forward-only.
 
 - REQ-13: `linalg.eigh(A, UPLO='L')` — symmetric/Hermitian
   eigendecomposition. Documented in `torch/linalg/__init__.py`.
@@ -286,10 +338,32 @@ reflector-recursion backward 2026-05-27 (REQ-26).
   determinism.
 
 - REQ-14: `linalg.eigvals(A)` — eigenvalues only (non-symmetric).
-  Documented in `torch/linalg/__init__.py`. Forward-only impl
-  `pub fn eigvals` in `ferrotorch-core/src/linalg.rs` via
-  `ferray_linalg::eigvals`. **NOT-STARTED in this file**. Open prereq
-  blocker #1345.
+  Documented in `torch/linalg/__init__.py` (no separate `derivatives.yaml`
+  entry — eigvals backward is the eigenvalues-only specialization of
+  `linalg_eig`). **SHIPPED** (2026-05-27, closing #1345): `EigvalsBackward`
+  + `eigvals_differentiable` in `ferrotorch-core/src/grad_fns/linalg.rs`
+  implement the `!gV.defined()`, non-Hermitian SHORTCUT of
+  `linalg_eig_backward` at `torch/csrc/autograd/FunctionsManual.cpp:3857-3862`:
+  `gA = linalg_solve(V^H, gL.unsqueeze(-1) * V^H)` (where
+  `gL.unsqueeze(-1) * V^H == diag(gL) @ V^H`), i.e.
+  `gA = real(V^{-H} @ diag(gL) @ V^H)`. The COMPLEX cotangent `gL` is
+  reconstructed from the `[n,2]` real cotangent as `re + i*im` (torch's
+  conjugate-Wirtinger convention for a real loss of a complex output —
+  verified `L.grad == cr + i*ci`), and all arithmetic runs on the `[.,2]`
+  encoding via the private complex toolkit (shared with REQ-12). Because `A`
+  is REAL the returned gradient is the REAL part (`handle_r_to_c`,
+  `derivatives.yaml:1740`). Non-test production consumer: the grad-aware
+  forward `pub fn eigvals` in `ferrotorch-core/src/linalg.rs` delegates to
+  `eigvals_differentiable` when `is_grad_enabled() && a.requires_grad()`
+  (forward + the eigenvectors `V` the VJP needs both computed under
+  `no_grad` via `crate::linalg::eig`). Verified vs LIVE `torch 2.11.0`
+  float64 `A.grad` for a 3×3 with DISTINCT REAL eigenvalues AND a 2×2
+  COMPLEX-CONJUGATE pair (`L = 1 ± i`) by
+  `grad_fns::linalg::tests::{eigvals_backward_real_3x3,
+  eigvals_backward_complex_pair_2x2}_matches_torch` at `1e-6`. EXACT for
+  DIAGONALIZABLE inputs; defective inputs return `SingularMatrix` from
+  `c_inverse` (torch likewise has no defined gradient there). The CUDA
+  forward stays forward-only.
 
 - REQ-15: `linalg.eigvalsh(A, UPLO='L')` — eigenvalues only
   (symmetric/Hermitian). Documented in `torch/linalg/__init__.py`.
@@ -650,10 +724,11 @@ reflector-recursion backward 2026-05-27 (REQ-26).
   research-grade degenerate / gauge-freedom subset
   (svd/eigh/eigvalsh/pinv/lstsq/lu/lu_factor + cross/norm) is now wired
   end-to-end (REQ-11/13/15/19/22/23/25/27/28), closing the differentiable
-  scope of #1577. The remaining factorizations
-  (eig/eigvals/matrix_rank/householder_product, the rectangular LU and
-  rank-deficient lstsq / non-`p=2` norm branches) have no `GradFn` and are
-  tracked under #1345 / residual #1577.
+  scope of #1577. `linalg.eig` / `linalg.eigvals` (REQ-12/14) gained their
+  COMPLEX `*Backward` `GradFn`s + grad-aware forwards 2026-05-27 (closing
+  #1345). The remaining no-`GradFn` ops are `matrix_rank`
+  (non-differentiable, mirrors torch) and the rectangular LU /
+  rank-deficient lstsq / non-`p=2` norm branches (residual #1577).
 
 ## Architecture
 
@@ -871,13 +946,24 @@ not the full `[m, m]` matrix); the new `pub fn householder_product_full`
 exposes the `[m, m]` reconstruction the backward needs. The grad-aware
 forward is the non-test production consumer. Verified vs LIVE torch float64.
 
+`linalg.eig` / `linalg.eigvals` are **SHIPPED** (2026-05-27, closing #1345,
+REQ-12/14): `EigBackwardW`/`EigBackwardV` (eig) and `EigvalsBackward`
+(eigvals) implement the non-Hermitian COMPLEX `linalg_eig_backward` VJP
+(`FunctionsManual.cpp:3820`) on the `[.,2]` real/imag encoding via the
+private complex-linalg toolkit, returning the real part for the real input
+`A` (`handle_r_to_c`, `derivatives.yaml:1740`). The grad-aware `pub fn eig` /
+`pub fn eigvals` forwards in `ferrotorch-core/src/linalg.rs` are the non-test
+production consumers (the `eig` forward also unit-norm-normalizes ferray's
+eigenvector columns to match torch's norm-one contract). EXACT for
+diagonalizable A; the eig eigenvector PHASE gauge is handled by a
+phase-invariant test loss (R-DEV-1). With these wired the differentiable
+scope of #1345 is complete.
+
 The factorizations that remain forward-only in
 `ferrotorch-core/src/linalg.rs` (routed through `ferray_linalg::*`, no
-`*Backward` `GradFn`): `linalg.eig` / `linalg.eigvals` (COMPLEX
-eigenvectors — need a complex-tensor autograd primitive) and
-`linalg.matrix_rank` (non-differentiable, mirrors torch). These stay
-NOT-STARTED under #1345. The rectangular `m != n` LU / rank-deficient
-`lstsq` / non-`p=2` `norm` branches are residual follow-ups under #1577.
+`*Backward` `GradFn`): `linalg.matrix_rank` (non-differentiable, mirrors
+torch). The rectangular `m != n` LU / rank-deficient `lstsq` / non-`p=2`
+`norm` branches are residual follow-ups under #1577.
 
 ### REQ-29..REQ-35 trace/diagonal/diag/tril/triu/kron/outer
 

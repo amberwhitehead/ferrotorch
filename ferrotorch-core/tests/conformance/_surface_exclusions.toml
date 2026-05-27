@@ -1638,6 +1638,11 @@ reason = "Pending Phase 2.4-linalg — linalg. Autograd grad_fn / forward-helper
 tracking_issue = "#766"
 
 [[exclusion]]
+path = "ferrotorch_core::grad_fns::linalg::EigvalsBackward"
+reason = "Pending Phase 2.4-linalg — linalg. Autograd grad_fn / forward-helper internal for the linalg family (eig/eigvals complex VJP, #1345); the VJP is verified vs LIVE torch float64 by grad_fns::linalg::tests::eigvals_backward_* and the public crate::linalg::eigvals forward is conformance-covered by cpu_eig_and_eigvals."
+tracking_issue = "#766"
+
+[[exclusion]]
 path = "ferrotorch_core::grad_fns::linalg::EigvalshBackward"
 reason = "Pending Phase 2.4-linalg — linalg. Autograd grad_fn / forward-helper internal for the linalg family; the phase will land a conformance test exercising its VJP against PyTorch parity (CPU + GPU + autograd-where-applicable)."
 tracking_issue = "#766"
@@ -1765,6 +1770,31 @@ tracking_issue = "#766"
 [[exclusion]]
 path = "ferrotorch_core::grad_fns::linalg::eigvalsh_differentiable"
 reason = "Pending Phase 2.4-linalg — linalg. Autograd grad_fn / forward-helper internal for the linalg family; the phase will land a conformance test exercising its VJP against PyTorch parity (CPU + GPU + autograd-where-applicable)."
+tracking_issue = "#766"
+
+[[exclusion]]
+path = "ferrotorch_core::grad_fns::linalg::eig_differentiable"
+reason = "Pending Phase 2.4-linalg — linalg. Autograd grad_fn / forward-helper internal for the linalg family (eig complex VJP, #1345); the VJP is verified vs LIVE torch float64 by grad_fns::linalg::tests::eig_backward_* and the public crate::linalg::eig forward is conformance-covered by cpu_eig_and_eigvals."
+tracking_issue = "#766"
+
+[[exclusion]]
+path = "ferrotorch_core::grad_fns::linalg::eigvals_differentiable"
+reason = "Pending Phase 2.4-linalg — linalg. Autograd grad_fn / forward-helper internal for the linalg family (eigvals complex VJP, #1345); the VJP is verified vs LIVE torch float64 by grad_fns::linalg::tests::eigvals_backward_* and the public crate::linalg::eigvals forward is conformance-covered by cpu_eig_and_eigvals."
+tracking_issue = "#766"
+
+[[exclusion]]
+path = "ferrotorch_core::grad_fns::linalg::HouseholderProductBackward"
+reason = "Pending Phase 2.4-linalg — linalg. Autograd grad_fn / forward-helper internal for the linalg family; the VJP is verified vs LIVE torch float64 by grad_fns::linalg::tests::householder_product_backward_* and the public crate::linalg::householder_product forward is conformance-covered."
+tracking_issue = "#766"
+
+[[exclusion]]
+path = "ferrotorch_core::grad_fns::linalg::householder_product_differentiable"
+reason = "Pending Phase 2.4-linalg — linalg. Autograd grad_fn / forward-helper internal for the linalg family; the VJP is verified vs LIVE torch float64 by grad_fns::linalg::tests::householder_product_backward_* and the public crate::linalg::householder_product forward is conformance-covered."
+tracking_issue = "#766"
+
+[[exclusion]]
+path = "ferrotorch_core::grad_fns::linalg::svd_differentiable"
+reason = "Pending Phase 2.4-linalg — linalg. Autograd grad_fn / forward-helper internal for the linalg family; the VJP is verified vs LIVE torch float64 by grad_fns::linalg::tests::svd_backward_* and the public crate::linalg::svd forward is conformance-covered."
 tracking_issue = "#766"
 
 [[exclusion]]

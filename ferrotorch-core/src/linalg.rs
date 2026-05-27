@@ -862,6 +862,14 @@ pub fn eig<T: Float>(a: &Tensor<T>) -> FerrotorchResult<(Tensor<T>, Tensor<T>)> 
     }
     let n = shape[0];
 
+    // Autograd path (CPU): delegate to the differentiable wrapper, which
+    // computes the forward under `no_grad` (preventing re-entry here) and
+    // attaches the split `EigBackwardW` / `EigBackwardV` nodes (complex VJP,
+    // real `A.grad` via `at::real`). #1345.
+    if crate::autograd::no_grad::is_grad_enabled() && a.requires_grad() {
+        return crate::grad_fns::linalg::eig_differentiable(a);
+    }
+
     if is_f32::<T>() {
         let arr = tensor_to_array2_f32(a)?;
         let (w, v) = ferray_linalg::eig(&arr).map_err(FerrotorchError::Ferray)?;
@@ -871,12 +879,13 @@ pub fn eig<T: Float>(a: &Tensor<T>) -> FerrotorchResult<(Tensor<T>, Tensor<T>)> 
             .iter()
             .flat_map(|c| [T::from(c.re).unwrap(), T::from(c.im).unwrap()])
             .collect();
-        let v_data: Vec<T> = v
+        let mut v_data: Vec<T> = v
             .as_slice()
             .unwrap()
             .iter()
             .flat_map(|c| [T::from(c.re).unwrap(), T::from(c.im).unwrap()])
             .collect();
+        normalize_complex_eigenvector_columns(&mut v_data, n);
         Ok((
             Tensor::from_storage(TensorStorage::cpu(w_data), vec![n, 2], false)?,
             Tensor::from_storage(TensorStorage::cpu(v_data), vec![n, n, 2], false)?,
@@ -890,12 +899,13 @@ pub fn eig<T: Float>(a: &Tensor<T>) -> FerrotorchResult<(Tensor<T>, Tensor<T>)> 
             .iter()
             .flat_map(|c| [T::from(c.re).unwrap(), T::from(c.im).unwrap()])
             .collect();
-        let v_data: Vec<T> = v
+        let mut v_data: Vec<T> = v
             .as_slice()
             .unwrap()
             .iter()
             .flat_map(|c| [T::from(c.re).unwrap(), T::from(c.im).unwrap()])
             .collect();
+        normalize_complex_eigenvector_columns(&mut v_data, n);
         Ok((
             Tensor::from_storage(TensorStorage::cpu(w_data), vec![n, 2], false)?,
             Tensor::from_storage(TensorStorage::cpu(v_data), vec![n, n, 2], false)?,
@@ -904,6 +914,44 @@ pub fn eig<T: Float>(a: &Tensor<T>) -> FerrotorchResult<(Tensor<T>, Tensor<T>)> 
         Err(FerrotorchError::InvalidArgument {
             message: "linalg op requires f32 or f64".into(),
         })
+    }
+}
+
+/// Normalize each COLUMN of a complex `n×n` eigenvector matrix `v` (encoded
+/// row-major `[n,n,2]` as interleaved `[re, im]`) to UNIT 2-NORM, matching
+/// `torch.linalg.eig`'s documented contract that eigenvectors have norm one
+/// (`torch/csrc/autograd/FunctionsManual.cpp:3837-3839` — "the eigenvalue
+/// decomposition is returned with eigenvectors normalized to have norm one").
+///
+/// ferray's faer-backed `eig` forward returns eigenvectors with an arbitrary
+/// per-column scale (e.g. a pivot entry forced to 1), NOT unit norm. The
+/// `linalg_eig_backward` VJP's unit-norm-tangent projection term
+/// `-V^H V real(diag(V^H gV))` (`FunctionsManual.cpp:3887-3889`) is only correct
+/// when columns are unit-norm, so normalizing here (R-DEV-1, match torch's
+/// numerical contract) makes BOTH the forward V and the backward consistent with
+/// torch. After normalization ferrotorch's V matches torch's V up to a per-column
+/// phase `e^{i phi}` (a genuine gauge freedom torch documents at
+/// `FunctionsManual.cpp:3877-3880`); a phase-invariant loss (`sum(|V_ij|^2 M)`)
+/// is therefore comparable byte-for-byte.
+fn normalize_complex_eigenvector_columns<T: Float>(v: &mut [T], n: usize) {
+    let zero = <T as num_traits::Zero>::zero();
+    for col in 0..n {
+        // Column 2-norm: sqrt(sum_i (re^2 + im^2)).
+        let mut sumsq = zero;
+        for row in 0..n {
+            let base = 2 * (row * n + col);
+            let re = v[base];
+            let im = v[base + 1];
+            sumsq = sumsq + re * re + im * im;
+        }
+        let norm = sumsq.sqrt();
+        if norm > zero {
+            for row in 0..n {
+                let base = 2 * (row * n + col);
+                v[base] = v[base] / norm;
+                v[base + 1] = v[base + 1] / norm;
+            }
+        }
     }
 }
 
@@ -919,6 +967,14 @@ pub fn eigvals<T: Float>(a: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
         });
     }
     let n = shape[0];
+
+    // Autograd path (CPU): delegate to the differentiable wrapper, which
+    // computes the forward (and the eigenvectors the VJP needs) under `no_grad`
+    // (preventing re-entry here) and attaches `EigvalsBackward` (complex VJP,
+    // real `A.grad` via `at::real`). #1345.
+    if crate::autograd::no_grad::is_grad_enabled() && a.requires_grad() {
+        return crate::grad_fns::linalg::eigvals_differentiable(a);
+    }
 
     if is_f32::<T>() {
         let arr = tensor_to_array2_f32(a)?;
