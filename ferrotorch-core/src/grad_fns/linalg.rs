@@ -2443,7 +2443,7 @@ impl<T: Float> GradFn<T> for AddmmBackward<T> {
         let g = grad_output.data()?;
 
         let grad_bias = if self.bias.requires_grad() {
-            let scaled = scale_vec(&g, self.beta);
+            let scaled = scale_vec(g, self.beta);
             Some(from_cpu(
                 reduce_grad_to_shape(&scaled, &[m, n], self.bias.shape()),
                 self.bias.shape().to_vec(),
@@ -2456,7 +2456,7 @@ impl<T: Float> GradFn<T> for AddmmBackward<T> {
             // d_mat1 = alpha * (grad @ mat2^T); mat2 is (k, n) so grad(m,n) @ mat2^T(n,k).
             let k = self.mat1.shape()[1];
             let m2 = self.mat2.data()?;
-            let prod = mm_bt_rows(&g, &m2, m, n, k);
+            let prod = mm_bt_rows(g, m2, m, n, k);
             Some(from_cpu(scale_vec(&prod, self.alpha), vec![m, k])?)
         } else {
             None
@@ -2466,7 +2466,7 @@ impl<T: Float> GradFn<T> for AddmmBackward<T> {
             // d_mat2 = alpha * (mat1^T @ grad); mat1 is (m, k).
             let k = self.mat1.shape()[1];
             let m1 = self.mat1.data()?;
-            let prod = mm_at_rows(&m1, &g, k, m, n);
+            let prod = mm_at_rows(m1, g, k, m, n);
             Some(from_cpu(scale_vec(&prod, self.alpha), vec![k, n])?)
         } else {
             None
@@ -2515,7 +2515,7 @@ pub fn addmm_differentiable<T: Float>(
 
     let m1 = mat1.data()?;
     let m2 = mat2.data()?;
-    let prod = mm_rows(&m1, &m2, m, k, n);
+    let prod = mm_rows(m1, m2, m, k, n);
 
     // out = beta*self_broadcast + alpha*prod.
     let bias_b = broadcast_data_to(bias, &[m, n])?;
@@ -2621,7 +2621,7 @@ impl<T: Float> GradFn<T> for AddmvBackward<T> {
         let k = self.mat.shape()[1];
 
         let grad_bias = if self.bias.requires_grad() {
-            let scaled = scale_vec(&g, self.beta);
+            let scaled = scale_vec(g, self.beta);
             Some(from_cpu(
                 reduce_grad_to_shape(&scaled, &[m], self.bias.shape()),
                 self.bias.shape().to_vec(),
@@ -2758,7 +2758,7 @@ impl<T: Float> GradFn<T> for AddrBackward<T> {
         let g = grad_output.data()?;
 
         let grad_bias = if self.bias.requires_grad() {
-            let scaled = scale_vec(&g, self.beta);
+            let scaled = scale_vec(g, self.beta);
             Some(from_cpu(
                 reduce_grad_to_shape(&scaled, &[m, n], self.bias.shape()),
                 self.bias.shape().to_vec(),
@@ -2891,7 +2891,7 @@ impl<T: Float> GradFn<T> for BaddbmmBackward<T> {
         let g = grad_output.data()?;
 
         let grad_bias = if self.bias.requires_grad() {
-            let scaled = scale_vec(&g, self.beta);
+            let scaled = scale_vec(g, self.beta);
             Some(from_cpu(
                 reduce_grad_to_shape(&scaled, &[bsz, m, n], self.bias.shape()),
                 self.bias.shape().to_vec(),
@@ -3041,7 +3041,7 @@ impl<T: Float> GradFn<T> for AddbmmBackward<T> {
         let g = grad_output.data()?;
 
         let grad_bias = if self.bias.requires_grad() {
-            let scaled = scale_vec(&g, self.beta);
+            let scaled = scale_vec(g, self.beta);
             Some(from_cpu(
                 reduce_grad_to_shape(&scaled, &[m, n], self.bias.shape()),
                 self.bias.shape().to_vec(),
@@ -3057,7 +3057,7 @@ impl<T: Float> GradFn<T> for AddbmmBackward<T> {
                 let b2_off = bi * k * n;
                 let o_off = bi * m * k;
                 // grad is shared (broadcast over batch): d_b1[b] = alpha*(grad @ b2[b]^T).
-                let slab = mm_bt_rows(&g, &b2[b2_off..b2_off + k * n], m, n, k);
+                let slab = mm_bt_rows(g, &b2[b2_off..b2_off + k * n], m, n, k);
                 for (i, &v) in slab.iter().enumerate() {
                     out[o_off + i] = self.alpha * v;
                 }
@@ -3073,7 +3073,7 @@ impl<T: Float> GradFn<T> for AddbmmBackward<T> {
             for bi in 0..bsz {
                 let b1_off = bi * m * k;
                 let o_off = bi * k * n;
-                let slab = mm_at_rows(&b1[b1_off..b1_off + m * k], &g, k, m, n);
+                let slab = mm_at_rows(&b1[b1_off..b1_off + m * k], g, k, m, n);
                 for (i, &v) in slab.iter().enumerate() {
                     out[o_off + i] = self.alpha * v;
                 }
@@ -3165,9 +3165,9 @@ pub fn addbmm_differentiable<T: Float>(
 /// Backward for the 2-D Kronecker product `K = kron(A, B)`.
 ///
 /// Forward (2-D case of `Tensor kron(...)` at
-/// `aten/src/ATen/native/LinearAlgebra.cpp:3530`, the reshape + broadcast-mul
-/// + view recipe `KronImpl::kron`): for `A` `(p, q)` and `B` `(r, s)`,
-/// `K[i*r + u, j*s + v] = A[i,j] * B[u,v]`, shape `(p*r, q*s)`.
+/// `aten/src/ATen/native/LinearAlgebra.cpp:3530`, the reshape, broadcast-mul,
+/// and view recipe `KronImpl::kron`): for `A` `(p, q)` and `B` `(r, s)`,
+/// the result is `K[i*r + u, j*s + v] = A[i,j] * B[u,v]`, shape `(p*r, q*s)`.
 ///
 /// Backward (adjoint of the bilinear product, equivalently the autograd of the
 /// reshape/mul recipe):
