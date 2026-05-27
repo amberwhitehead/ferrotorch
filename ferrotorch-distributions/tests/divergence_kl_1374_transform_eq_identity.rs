@@ -70,7 +70,6 @@ fn boxed_normal(loc: &[f64], scale: &[f64]) -> Box<dyn Distribution<f64>> {
 /// ferrotorch: returns the base Normal-Normal KL (Ok), a value torch never
 /// produces for this pair.
 /// Tracking: #1576.
-#[ignore = "divergence: TD-TD KL equates distinct identity-__eq__ transforms (Reshape); torch raises; tracking #1576"]
 #[test]
 fn divergence_kl_td_distinct_reshape_must_raise() {
     let bp = vec![0.0, 1.0, 2.0, -1.0, 0.5, 3.0];
@@ -111,7 +110,6 @@ fn divergence_kl_td_distinct_reshape_must_raise() {
 /// Verified live torch 2.11: tp.transforms==tq.transforms -> False;
 /// kl_divergence(tp,tq) -> NotImplementedError.
 /// Tracking: #1576.
-#[ignore = "divergence: TD-TD KL equates distinct identity-__eq__ transforms (Independent); torch raises; tracking #1576"]
 #[test]
 fn divergence_kl_td_distinct_independent_transform_must_raise() {
     let tp = TransformedDistribution::new(

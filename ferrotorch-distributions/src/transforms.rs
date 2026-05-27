@@ -152,17 +152,35 @@ pub trait Transform<T: Float>: Send + Sync {
     /// KL recursion to mirror PyTorch's per-transform `__eq__`
     /// (`torch/distributions/kl.py:498` `if p.transforms != q.transforms`).
     ///
-    /// PyTorch's `Transform.__eq__` is type-identity for the unparameterised
-    /// transforms (`isinstance(other, ExpTransform)` at
-    /// `torch/distributions/transforms.py:586`, `SigmoidTransform` :621,
-    /// `SoftplusTransform` :657, `AbsTransform` :683, `TanhTransform` :724,
-    /// `SoftmaxTransform`/`StickBreakingTransform` :960,:1001), so the default
-    /// returns [`name`](Transform::name). Parameterised transforms
-    /// (`AffineTransform.__eq__` compares `loc`/`scale` at
-    /// `transforms.py:808-825`, `PowerTransform` compares the exponent) override
-    /// this to fold their parameters into the key so two affines with different
-    /// scales compare unequal — exactly as `p.transforms != q.transforms` does
-    /// upstream.
+    /// PyTorch's `Transform.__eq__` is TYPE-IDENTITY for the unparameterised
+    /// transforms that DEFINE `def __eq__(self, other): return isinstance(other,
+    /// X)` (`ExpTransform` at `torch/distributions/transforms.py:586-587`,
+    /// `SigmoidTransform` :657-658, `SoftplusTransform` :683-684, `TanhTransform`
+    /// :724-725, `AbsTransform` :747-748, `SoftmaxTransform` :960-961,
+    /// `StickBreakingTransform` :1001-1002, `LowerCholeskyTransform` :1051-1052).
+    /// For those, two DISTINCT same-type instances ARE equal, so the default
+    /// returns [`name`](Transform::name).
+    ///
+    /// Three other equality regimes override this default:
+    ///
+    /// 1. **Parameterised / structural** — `AffineTransform.__eq__` compares
+    ///    `loc`/`scale` (`transforms.py:808-826`), `PowerTransform` compares the
+    ///    exponent (`:621-624`), `ComposeTransform` compares the parts list
+    ///    (`:306-309` `self.parts == other.parts`). These fold their parameters
+    ///    (or the recursive keys of their parts) into the key so two transforms
+    ///    with different parameters compare unequal — exactly as
+    ///    `p.transforms != q.transforms` does upstream.
+    /// 2. **Inherited IDENTITY `__eq__`** — `ReshapeTransform` (class at
+    ///    `transforms.py:500`, no `__eq__`), `IndependentTransform` (:422),
+    ///    `CatTransform` (:1081), `StackTransform` (:1223),
+    ///    `CorrCholeskyTransform` (:864), `CumulativeDistributionTransform`
+    ///    (:1324) define NO `__eq__` and therefore inherit the base
+    ///    `Transform.__eq__` which is OBJECT IDENTITY
+    ///    (`transforms.py:148-149  def __eq__(self, other): return self is
+    ///    other`). For these, two separately-constructed instances are NEVER
+    ///    equal even with identical parameters, so they override
+    ///    `transform_eq_key` to fold the per-instance heap address (`{:p}` of
+    ///    `self`) into the key — the Rust analog of Python's `self is other`.
     fn transform_eq_key(&self) -> String {
         self.name().to_string()
     }
@@ -571,6 +589,24 @@ impl<T: Float> Transform<T> for ComposeTransform<T> {
 
     fn name(&self) -> &'static str {
         "ComposeTransform"
+    }
+
+    fn transform_eq_key(&self) -> String {
+        // `ComposeTransform.__eq__` (`transforms.py:306-309`) is STRUCTURAL on
+        // the parts: `isinstance(other, ComposeTransform) and self.parts ==
+        // other.parts`. So two compose chains are equal iff their parts compare
+        // equal element-wise — and each part's equality follows ITS OWN
+        // `__eq__`. Fold the recursive per-part keys (which already encode
+        // structural-vs-identity equality per transform) so a chain of
+        // identity-`__eq__` parts (e.g. two distinct `ReshapeTransform`s) is
+        // correctly UNEQUAL while a chain of type-identity/structural parts is
+        // EQUAL.
+        let parts: Vec<String> = self
+            .transforms
+            .iter()
+            .map(|t| t.transform_eq_key())
+            .collect();
+        format!("ComposeTransform({})", parts.join(","))
     }
 
     fn constant_entropy_contribution(&self) -> Option<T> {
@@ -1296,6 +1332,16 @@ impl<T: Float> Transform<T> for CorrCholeskyTransform {
         "CorrCholeskyTransform"
     }
 
+    fn transform_eq_key(&self) -> String {
+        // `CorrCholeskyTransform` (class at `transforms.py:864`) defines no
+        // `__eq__` and inherits the base IDENTITY `Transform.__eq__`
+        // (`transforms.py:148-149  return self is other`). Two distinct
+        // instances compare UNEQUAL upstream. Fold the per-instance heap address
+        // into the key (`CorrCholeskyTransform` is a unit struct, so all
+        // instances would otherwise produce the identical `name()` key).
+        format!("CorrCholeskyTransform@{:p}", self)
+    }
+
     fn event_dim(&self) -> usize {
         // domain is real_vector (event_dim 1), codomain is corr_cholesky
         // (event_dim 2). Upstream raises on mismatched event_dim; ferrotorch
@@ -1400,6 +1446,16 @@ impl<T: Float> Transform<T> for ReshapeTransform {
         "ReshapeTransform"
     }
 
+    fn transform_eq_key(&self) -> String {
+        // `ReshapeTransform` (class at `transforms.py:500`) defines no `__eq__`
+        // and inherits the base IDENTITY `Transform.__eq__`
+        // (`transforms.py:148-149  return self is other`), so two distinct
+        // instances — even with identical `in_shape`/`out_shape` — compare
+        // UNEQUAL. Fold the per-instance heap address into the key (the Rust
+        // analog of `self is other`).
+        format!("ReshapeTransform@{:p}", self)
+    }
+
     fn event_dim(&self) -> usize {
         self.in_shape.len()
     }
@@ -1463,6 +1519,17 @@ impl<T: Float> Transform<T> for IndependentTransform<T> {
 
     fn name(&self) -> &'static str {
         "IndependentTransform"
+    }
+
+    fn transform_eq_key(&self) -> String {
+        // `IndependentTransform` (class at `transforms.py:422`) defines no
+        // `__eq__` and inherits the base IDENTITY `Transform.__eq__`
+        // (`transforms.py:148-149  return self is other`). Two distinct
+        // instances — even wrapping identical base transforms with the same
+        // `reinterpreted_batch_ndims` — compare UNEQUAL upstream. Fold the
+        // per-instance heap address into the key (the Rust analog of `self is
+        // other`).
+        format!("IndependentTransform@{:p}", self)
     }
 
     fn bijective(&self) -> bool {
@@ -1630,6 +1697,15 @@ impl<T: Float> Transform<T> for CatTransform<T> {
         "CatTransform"
     }
 
+    fn transform_eq_key(&self) -> String {
+        // `CatTransform` (class at `transforms.py:1081`) defines no `__eq__` and
+        // inherits the base IDENTITY `Transform.__eq__` (`transforms.py:148-149
+        // return self is other`). Two distinct instances compare UNEQUAL
+        // upstream regardless of their sub-transforms/dim/lengths. Fold the
+        // per-instance heap address into the key.
+        format!("CatTransform@{:p}", self)
+    }
+
     fn bijective(&self) -> bool {
         self.transforms.iter().all(|t| t.bijective())
     }
@@ -1713,6 +1789,15 @@ impl<T: Float> Transform<T> for StackTransform<T> {
         "StackTransform"
     }
 
+    fn transform_eq_key(&self) -> String {
+        // `StackTransform` (class at `transforms.py:1223`) defines no `__eq__`
+        // and inherits the base IDENTITY `Transform.__eq__`
+        // (`transforms.py:148-149  return self is other`). Two distinct
+        // instances compare UNEQUAL upstream. Fold the per-instance heap address
+        // into the key.
+        format!("StackTransform@{:p}", self)
+    }
+
     fn bijective(&self) -> bool {
         self.transforms.iter().all(|t| t.bijective())
     }
@@ -1758,6 +1843,15 @@ impl<T: Float> Transform<T> for CumulativeDistributionTransform<T> {
 
     fn name(&self) -> &'static str {
         "CumulativeDistributionTransform"
+    }
+
+    fn transform_eq_key(&self) -> String {
+        // `CumulativeDistributionTransform` (class at `transforms.py:1324`)
+        // defines no `__eq__` and inherits the base IDENTITY `Transform.__eq__`
+        // (`transforms.py:148-149  return self is other`). Two distinct
+        // instances — even wrapping the same base distribution — compare UNEQUAL
+        // upstream. Fold the per-instance heap address into the key.
+        format!("CumulativeDistributionTransform@{:p}", self)
     }
 
     fn sign(&self) -> Option<i32> {
