@@ -1099,6 +1099,80 @@ impl<T: Float> Tensor<T> {
         crate::grad_fns::indexing::put(self, index, source, accumulate)
     }
 
+    /// `torch.where(condition, self, other)` — pointwise ternary selection
+    /// taking a host `&[bool]` mask. Returns a tensor where each element is
+    /// `self[i]` if `condition[i]` is true, else `other[i]`. Differentiable
+    /// — a `WhereBackward` node is attached when grad tracking is enabled
+    /// on either input.
+    ///
+    /// Mirrors `torch.where(condition, input, other)` per
+    /// `torch/_torch_docs.py:13089` and the upstream impl macro at
+    /// `aten/src/ATen/native/TensorCompare.cpp:646
+    /// TORCH_IMPL_FUNC(where_out)` — the `self`-vs-other dispatch shape.
+    ///
+    /// Non-test production consumer wiring for
+    /// `grad_fns::comparison::where_` per R-DEFER-1 (closes blocker #1295):
+    /// this method is the public, chainable surface that closes the
+    /// consumer requirement. The boolean-tensor variant is `where_bt_t`.
+    pub fn where_t(
+        &self,
+        condition: &[bool],
+        other: &Tensor<T>,
+    ) -> FerrotorchResult<Tensor<T>> {
+        crate::grad_fns::comparison::where_(condition, self, other)
+    }
+
+    /// `torch.where(condition, self, other)` — `BoolTensor` overload.
+    ///
+    /// Pointwise ternary selection where `condition` is a first-class
+    /// [`BoolTensor`](crate::bool_tensor::BoolTensor). The condition must
+    /// match `self.numel()` and `self.shape() == other.shape()`. Delegates
+    /// to `grad_fns::comparison::where_bt` which validates shape +
+    /// materialises the host mask and dispatches to `where_` for
+    /// autograd-aware forward.
+    ///
+    /// Mirrors `torch.where(cond, x, y)` for `cond: BoolTensor` per
+    /// `torch/_torch_docs.py:13089`.
+    ///
+    /// Non-test production consumer wiring for
+    /// `grad_fns::comparison::where_bt` per R-DEFER-1 (closes blocker
+    /// #1297): this method is the public, chainable surface that closes
+    /// the consumer requirement.
+    pub fn where_bt_t(
+        &self,
+        condition: &crate::bool_tensor::BoolTensor,
+        other: &Tensor<T>,
+    ) -> FerrotorchResult<Tensor<T>> {
+        crate::grad_fns::comparison::where_bt(condition, self, other)
+    }
+
+    /// `torch.Tensor.scatter_(dim, index, value)` (scalar-src overload) —
+    /// scatter a single scalar `value` into a clone of `self` at the
+    /// positions named by `index` along `dim`. Mirrors the upstream
+    /// scalar overload `Tensor& scatter_(int64_t dim, const Tensor& index,
+    /// const Scalar& value)` at
+    /// `aten/src/ATen/native/TensorAdvancedIndexing.cpp:2278` —
+    /// the `scatter.value` dispatch arm that op_db emits as a distinct
+    /// sample family alongside the tensor-src overload.
+    ///
+    /// Equivalent to `self.scatter_(dim, index, full_like(index, value))`
+    /// but avoids the temporary `src` allocation. No autograd is attached
+    /// because the scalar `value` is not a differentiable input.
+    ///
+    /// Non-test production consumer wiring for
+    /// `crate::ops::indexing::scatter_value` per R-DEFER-1 (closes blocker
+    /// #1258): this method is the public, chainable surface that closes
+    /// the consumer requirement.
+    pub fn scatter_value_t(
+        &self,
+        dim: i64,
+        index: &[usize],
+        index_shape: &[usize],
+        value: T,
+    ) -> FerrotorchResult<Tensor<T>> {
+        crate::ops::indexing::scatter_value(self, dim as isize, index, index_shape, value)
+    }
+
     // --- PyTorch compatibility aliases ---
 
     /// Alias for `shape()`. Returns the tensor dimensions like PyTorch's `Tensor.size()`.

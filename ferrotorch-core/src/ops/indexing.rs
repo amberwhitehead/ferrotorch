@@ -14,7 +14,7 @@
 //! | REQ | Status | Evidence |
 //! |---|---|---|
 //! | REQ-1 | SHIPPED | `gather` at `ops/indexing.rs:112`; consumer: re-export `ferrotorch_core::gather` at `lib.rs:174` |
-//! | REQ-2 | SHIPPED | `scatter` at `ops/indexing.rs:183`; consumer: re-export at `lib.rs:174` |
+//! | REQ-2 | SHIPPED | `scatter` at `ops/indexing.rs:183` + scalar-src overload `scatter_value` at `ops/indexing.rs:306` (closes #1258 mirroring `aten/src/ATen/native/TensorAdvancedIndexing.cpp:2278`); consumer: re-export at `lib.rs:174`; non-test consumer for `scatter_value`: `Tensor::scatter_value_t` at `methods.rs:1166`. |
 //! | REQ-3 | SHIPPED | `scatter_add` at `ops/indexing.rs:259`; consumer: `grad_fns::cumulative::cumsum_backward` at `grad_fns/cumulative.rs:503` invokes `ops::indexing::scatter_add` |
 //! | REQ-4 | SHIPPED | `where_cond` at `ops/indexing.rs:334`; consumer: re-export at `lib.rs:174`; `where_cond_bt` CPU fallback at `:458` |
 //! | REQ-5 | SHIPPED | `where_cond_bt` at `ops/indexing.rs:397`; consumer: `grad_fns::indexing::where_differentiable` at `grad_fns/indexing.rs:1845,1853` |
@@ -267,6 +267,99 @@ pub fn scatter<T: Float>(
         let grad_fn = Arc::new(crate::grad_fns::indexing::ScatterBackward {
             input: input.clone(),
             src: src.clone(),
+            dim,
+            index: index.to_vec(),
+            index_shape: index_shape.to_vec(),
+        });
+        Tensor::from_operation(TensorStorage::cpu(output), output_shape, grad_fn)
+    } else {
+        Tensor::from_storage(TensorStorage::cpu(output), output_shape, false)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// scatter_value (scalar-src overload — closes #1258)
+// ---------------------------------------------------------------------------
+
+/// Scatter a scalar `value` into a clone of `input` along `dim` at the
+/// positions named by `index`. The `scatter.value` overload of PyTorch's
+/// `scatter`.
+///
+/// PyTorch semantics (scalar-src):
+/// ```text
+/// output = input.clone()
+/// output[index[i][j][k]][j][k] = value  # if dim == 0
+/// ```
+///
+/// Mirrors upstream `Tensor& scatter_(int64_t dim, const Tensor& index,
+/// const Scalar& value)` at
+/// `aten/src/ATen/native/TensorAdvancedIndexing.cpp:2278`. Equivalent to
+/// `scatter(input, dim, index, index_shape, full_like(index, value))` but
+/// avoids the temporary `src` allocation.
+///
+/// Autograd note: the scalar `value` is not a differentiable input, so
+/// gradients route only to `input` via a `ScatterValueBackward`-shaped path
+/// — for now we route through the existing `ScatterBackward` by
+/// materialising a `src` of zeros (the value-arm grad of `src` is
+/// discarded anyway). When `input` does not require grad, no autograd node
+/// is attached.
+pub fn scatter_value<T: Float>(
+    input: &Tensor<T>,
+    dim: isize,
+    index: &[usize],
+    index_shape: &[usize],
+    value: T,
+) -> FerrotorchResult<Tensor<T>> {
+    let ndim = input.ndim();
+    if ndim == 0 {
+        return Err(FerrotorchError::InvalidArgument {
+            message: "scatter_value: input must have at least 1 dimension".into(),
+        });
+    }
+    let dim = normalize_axis(dim, ndim)?;
+    let input_shape = input.shape();
+
+    if input.is_cuda() {
+        return Err(FerrotorchError::NotImplementedOnCuda {
+            op: "scatter_value",
+        });
+    }
+
+    validate_gather_shapes(input_shape, dim, index_shape, index, input_shape[dim])?;
+
+    let index_numel: usize = index_shape.iter().product();
+
+    let mut output = input.data_vec()?;
+
+    let mut coords = vec![0usize; ndim];
+    for i in 0..index_numel {
+        let idx_val = index[i];
+        let mut dst_coords = coords.clone();
+        dst_coords[dim] = idx_val;
+        let dst_flat = flat_index(&dst_coords, input_shape);
+        output[dst_flat] = value;
+
+        if i + 1 < index_numel {
+            increment_coords(&mut coords, index_shape);
+        }
+    }
+
+    let output_shape = input_shape.to_vec();
+
+    if is_grad_enabled() && input.requires_grad() {
+        // Route through ScatterBackward by passing a zeros `src` — the
+        // value-arm has no `src` gradient (scalar is not differentiable),
+        // and the `input` gradient is the standard scatter zero-out at the
+        // written positions.
+        let zero = <T as num_traits::Zero>::zero();
+        let zeros_src = Tensor::from_storage(
+            TensorStorage::cpu(vec![zero; index_numel]),
+            index_shape.to_vec(),
+            false,
+        )?;
+        let grad_fn = Arc::new(crate::grad_fns::indexing::ScatterBackward {
+            input: input.clone(),
+            src: zeros_src,
             dim,
             index: index.to_vec(),
             index_shape: index_shape.to_vec(),

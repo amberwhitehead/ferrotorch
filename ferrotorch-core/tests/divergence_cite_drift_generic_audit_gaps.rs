@@ -90,7 +90,11 @@ fn divergence_1270_cumulative_md_req_table_rows_446_447_stale_test_cites() {
             "test_cumsum_negative_dim",
             446,
         ),
-        (":830-835 test_cumsum_dim_out_of_bounds", "test_cumsum_dim_out_of_bounds", 446),
+        (
+            ":830-835 test_cumsum_dim_out_of_bounds",
+            "test_cumsum_dim_out_of_bounds",
+            446,
+        ),
         // cumulative.md:447 (REQ-7 row)
         ("cumulative.rs:449-484", "test_cumsum_backward", 447),
         (":742-779", "test_logcumsumexp_backward", 447),
@@ -204,7 +208,7 @@ fn divergence_1269_gap_a_generic_test_misses_backward_struct_cite_mismatch() {
             "--test",
             "divergence_cite_drift_generic",
             "--",
-            "arithmetic_md",
+            "all_design_docs_cites_resolve_at_head",
             "--exact",
         ])
         .current_dir(&root)
@@ -243,7 +247,7 @@ fn divergence_1269_gap_b_generic_test_misses_plus_one_line_shift_in_rs() {
             "--test",
             "divergence_cite_drift_generic",
             "--",
-            "arithmetic_md",
+            "all_design_docs_cites_resolve_at_head",
             "--exact",
         ])
         .current_dir(&root)
@@ -283,7 +287,7 @@ fn divergence_1269_gap_c_generic_test_silently_skips_typo_filepaths() {
             "--test",
             "divergence_cite_drift_generic",
             "--",
-            "arithmetic_md",
+            "all_design_docs_cites_resolve_at_head",
             "--exact",
         ])
         .current_dir(&root)
