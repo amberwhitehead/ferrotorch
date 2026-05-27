@@ -32,8 +32,8 @@
 //! binomial #1569 precedent in `divergence_binomial_3d1dd0881_batch_shape.rs`).
 
 use ferrotorch_core::creation::{from_slice, scalar};
-use ferrotorch_distributions::kl::kl_divergence;
 use ferrotorch_distributions::Geometric;
+use ferrotorch_distributions::kl::kl_divergence;
 
 /// Divergence: ferrotorch's `kl_geometric_geometric`
 /// (`ferrotorch-distributions/src/kl.rs:2493-2542`) diverges from
@@ -48,7 +48,6 @@ use ferrotorch_distributions::Geometric;
 /// Upstream returns `[2]`; ferrotorch returns `[]`.
 /// Tracking: #1572
 #[test]
-#[ignore = "divergence: kl_geometric_geometric cycle() drops elements for scalar-p/batched-q; tracking #1572"]
 fn divergence_kl_geometric_scalar_p_batched_q() {
     let p = Geometric::new(scalar(0.3f64).unwrap()).unwrap();
     let q = Geometric::new(from_slice(&[0.5f64, 0.2], &[2]).unwrap()).unwrap();
@@ -84,7 +83,6 @@ fn divergence_kl_geometric_scalar_p_batched_q() {
 /// Upstream returns `[2,3]`; ferrotorch returns `[2,1]`.
 /// Tracking: #1572
 #[test]
-#[ignore = "divergence: kl_geometric_geometric does not broadcast disjoint batch dims; tracking #1572"]
 fn divergence_kl_geometric_disjoint_2d_broadcast() {
     let p = Geometric::new(from_slice(&[0.3f64, 0.6], &[2, 1]).unwrap()).unwrap();
     let q = Geometric::new(from_slice(&[0.5f64, 0.2, 0.4], &[1, 3]).unwrap()).unwrap();
@@ -131,6 +129,14 @@ fn kl_geometric_elementwise_2x2_matches_torch() {
     assert_eq!(kl.shape(), &[2]);
     let d = kl.data().unwrap();
     // Live torch: [0.27427626168350594, 0.6365141682948129].
-    assert!((d[0] - 0.274_276_261_683_505_94).abs() < 1e-12, "got {}", d[0]);
-    assert!((d[1] - 0.636_514_168_294_812_9).abs() < 1e-12, "got {}", d[1]);
+    assert!(
+        (d[0] - 0.274_276_261_683_505_94).abs() < 1e-12,
+        "got {}",
+        d[0]
+    );
+    assert!(
+        (d[1] - 0.636_514_168_294_812_9).abs() < 1e-12,
+        "got {}",
+        d[1]
+    );
 }

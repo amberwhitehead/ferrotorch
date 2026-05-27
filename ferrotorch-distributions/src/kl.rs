@@ -25,6 +25,7 @@
 
 use ferrotorch_core::dtype::Float;
 use ferrotorch_core::error::{FerrotorchError, FerrotorchResult};
+use ferrotorch_core::shape::broadcast_shapes;
 use ferrotorch_core::storage::TensorStorage;
 use ferrotorch_core::tensor::Tensor;
 
@@ -2490,6 +2491,48 @@ fn kl_binomial_binomial<T: Float>(p: &Binomial<T>, q: &Binomial<T>) -> Ferrotorc
     )
 }
 
+/// Row-major (C-contiguous) strides for `shape` — the element step each axis
+/// advances, used for broadcast index arithmetic. Mirrors the private helper
+/// in `geometric.rs` / `binomial.rs` (the FIXED batch-broadcast references);
+/// duplicated here so `kl_geometric_geometric` (and future KL pairs) can
+/// broadcast `p`/`q` without reaching across the module boundary.
+fn kl_row_major_strides(shape: &[usize]) -> Vec<usize> {
+    let mut strides = vec![1usize; shape.len()];
+    for i in (0..shape.len().saturating_sub(1)).rev() {
+        strides[i] = strides[i + 1] * shape[i + 1];
+    }
+    strides
+}
+
+/// Map a flat index into `out_shape` (with precomputed `out_strides`/`out_ndim`)
+/// to the flat index into a source tensor of `src_shape`/`src_strides` under
+/// NumPy/PyTorch right-aligned broadcasting: a source axis of length 1 (or
+/// absent because the source has fewer dims) is pinned to coordinate 0,
+/// otherwise the coordinate is carried through. Mirrors the `geometric.rs` /
+/// `binomial.rs` helper of the same shape.
+fn kl_broadcast_flat_index(
+    out_flat: usize,
+    out_strides: &[usize],
+    out_ndim: usize,
+    src_shape: &[usize],
+    src_strides: &[usize],
+) -> usize {
+    let mut src_flat = 0usize;
+    let offset = out_ndim - src_shape.len();
+    let mut rem = out_flat;
+    for (axis, &stride) in out_strides.iter().enumerate() {
+        let coord = rem / stride;
+        rem %= stride;
+        if axis >= offset {
+            let src_axis = axis - offset;
+            if src_shape[src_axis] != 1 {
+                src_flat += coord * src_strides[src_axis];
+            }
+        }
+    }
+    src_flat
+}
+
 /// KL(Geometric(p) || Geometric(q)) (discrete same-family, finite).
 ///
 /// Mirrors `torch/distributions/kl.py:320-322` `_kl_geometric_geometric`:
@@ -2500,8 +2543,14 @@ fn kl_binomial_binomial<T: Float>(p: &Binomial<T>, q: &Binomial<T>) -> Ferrotorc
 /// `H(Geometric(p)) = BCE_with_logits(logit_p, p)/p`. The probability vectors
 /// are clamped to `[eps, 1-eps]` (`eps = finfo(dtype).eps = T::epsilon()`,
 /// `torch/distributions/utils.py:124`) to keep the logs finite — the same
-/// clamp `probs_to_logits`/`logits_to_probs` use internally. `q` broadcasts
-/// over `p` via `cycle()`, matching the other same-family KL bodies.
+/// clamp `probs_to_logits`/`logits_to_probs` use internally.
+///
+/// `p.probs()` and `q.probs()` are broadcast element-wise over the right-aligned
+/// broadcast of their batch shapes (NumPy/PyTorch rules), exactly as torch's
+/// `kl_divergence` does via `broadcast_all` inside each `entropy`/`probs`/
+/// `logits` op (`torch/distributions/utils.py:27`). The result tensor's shape is
+/// the broadcast shape, NOT `p.probs().shape()` — so `KL(scalar, batched)` and
+/// disjoint batch dims (`p:[2,1]` vs `q:[1,3]` -> `[2,3]`) match upstream.
 fn kl_geometric_geometric<T: Float>(
     p: &Geometric<T>,
     q: &Geometric<T>,
@@ -2512,14 +2561,27 @@ fn kl_geometric_geometric<T: Float>(
     )?;
     let p_probs = p.probs().data_vec()?;
     let q_probs = q.probs().data_vec()?;
+    let p_shape = p.probs().shape().to_vec();
+    let q_shape = q.probs().shape().to_vec();
     let one = T::from(1.0).unwrap();
     let zero = T::from(0.0).unwrap();
     let eps = <T as num_traits::Float>::epsilon();
 
-    let result: Vec<T> = p_probs
-        .iter()
-        .zip(q_probs.iter().cycle())
-        .map(|(&pp, &qp)| {
+    let out_shape = broadcast_shapes(&p_shape, &q_shape)?;
+    let out_ndim = out_shape.len();
+    let out_strides = kl_row_major_strides(&out_shape);
+    let p_strides = kl_row_major_strides(&p_shape);
+    let q_strides = kl_row_major_strides(&q_shape);
+    let numel: usize = out_shape.iter().product();
+
+    let result: Vec<T> = (0..numel)
+        .map(|out_flat| {
+            let pi =
+                kl_broadcast_flat_index(out_flat, &out_strides, out_ndim, &p_shape, &p_strides);
+            let qi =
+                kl_broadcast_flat_index(out_flat, &out_strides, out_ndim, &q_shape, &q_strides);
+            let pp = p_probs[pi];
+            let qp = q_probs[qi];
             let pc = pp.max(eps).min(one - eps);
             let qc = qp.max(eps).min(one - eps);
             // H(Geometric(p)) = BCE_with_logits(logit_p, p)/p, stable form
@@ -2535,11 +2597,7 @@ fn kl_geometric_geometric<T: Float>(
         })
         .collect();
 
-    Tensor::from_storage(
-        TensorStorage::cpu(result),
-        p.probs().shape().to_vec(),
-        false,
-    )
+    Tensor::from_storage(TensorStorage::cpu(result), out_shape, false)
 }
 
 // ---------------------------------------------------------------------------
