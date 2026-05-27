@@ -34,8 +34,8 @@ fn audit_1374_supported_pair_count_is_41() {
     // dispatcher arms agree with this number.
     assert_eq!(
         kl_supported_pair_count(),
-        41,
-        "wave-N added 4 MVN/LowRankMVN pairs (37 -> 41); update this audit + the doc table together"
+        68,
+        "#1562 both-types-exist gaps added 27 pairs (41 -> 68); update this audit + the doc table together"
     );
 }
 

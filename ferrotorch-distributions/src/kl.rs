@@ -15,12 +15,12 @@
 //! | REQ | Status | Evidence |
 //! |---|---|---|
 //! | REQ-1 (`kl_divergence<T, P, Q>` public entry point) | SHIPPED | `pub fn kl_divergence<T: Float, P, Q>` with `P: Distribution<T> + 'static`, `Q: Distribution<T> + 'static` bounds in `kl.rs` mirroring `torch/distributions/kl.py:kl_divergence`; consumer: `pub mod kl` in `lib.rs` exposes it as grandfathered public API; `test_kl_*` (~25 sites) exercise the dispatch path |
-//! | REQ-2 (`kl_supported_pair_count` introspection) | SHIPPED | `pub const fn kl_supported_pair_count() -> usize` + `KL_SUPPORTED_PAIR_COUNT: usize = 12` in `kl.rs`; consumer: const fn is grandfathered public API; drift-prevention test `kl_doc_table_matches_dispatcher` reads `include_str!("kl.rs")` and asserts three-way invariant against the public accessor |
-//! | REQ-3 (`kl_dispatch` `Any::downcast_ref` chain) | SHIPPED | the dispatcher in `kl.rs` is a 12-arm chain mirroring PyTorch's `_dispatch_kl` in `torch/distributions/kl.py:113-138`; consumer: `pub fn kl_divergence` invokes the dispatcher on every call |
+//! | REQ-2 (`kl_supported_pair_count` introspection) | SHIPPED | `pub const fn kl_supported_pair_count() -> usize` + `KL_SUPPORTED_PAIR_COUNT: usize = 68` in `kl.rs`; consumer: const fn is grandfathered public API; drift-prevention test `kl_doc_table_matches_dispatcher` reads `include_str!("kl.rs")` and asserts three-way invariant against the public accessor |
+//! | REQ-3 (`kl_dispatch` `Any::downcast_ref` chain) | SHIPPED | the dispatcher in `kl.rs` is a 68-arm chain mirroring PyTorch's `_dispatch_kl` in `torch/distributions/kl.py:113-138`; consumer: `pub fn kl_divergence` invokes the dispatcher on every call |
 //! | REQ-4 (8 same-family closed-form formulas) | SHIPPED | 8 closed-form helpers in `kl.rs` (`kl_normal_normal`, `kl_bernoulli_bernoulli`, `kl_uniform_uniform`, `kl_categorical_categorical`, `kl_laplace_laplace`, `kl_exponential_exponential`, `kl_gamma_gamma`, `kl_poisson_poisson`) mirroring `@register_kl` bodies in `torch/distributions/kl.py`; consumer: the dispatcher invokes each formula |
 //! | REQ-5 (4 cross-family formulas) | SHIPPED | `kl_normal_uniform`, `kl_uniform_normal`, `kl_gamma_exponential`, `kl_exponential_gamma` in `kl.rs`; last two use `kl_gamma_scalar` via `Exp(λ) ≡ Gamma(1, λ)`; consumer: the dispatcher calls each; `kl_gamma_scalar` is consumed by 3 production sites internally |
-//! | REQ-6 (fallback guard on every formula) | SHIPPED | every formula's first statement is `crate::fallback::check_gpu_fallback_opt_in(&[...], "kl_divergence(P, Q)")?` in `kl.rs` — 12 production call sites of the fallback gate; consumer: this IS the production consumer of `fn check_gpu_fallback_opt_in` per `fallback.md` REQ-2 |
-//! | REQ-7 (full ~75-pair PyTorch coverage) | PARTIAL | blocker #1374 — ferrotorch now ships 41 of PyTorch's ~75 pairs (was 37). Wave-N added the multivariate pairs `kl_multivariatenormal_multivariatenormal` (mirrors `torch/distributions/kl.py:442-464`), `kl_multivariatenormal_lowrank` (`kl.py:375-403`), `kl_lowrank_multivariatenormal` (`kl.py:405-440`), `kl_lowrank_lowrank` (`kl.py:341-373`), all sharing `kl_mvn_dense_scalar` over the dense `scale_tril` (value-identical to torch's Woodbury form, R-DEV-1); consumer: the dispatcher's 4 new downcast arms. Still NOT-STARTED — each blocked on a missing distribution TYPE (no consumer can exist until the type lands): Binomial-Binomial + Poisson-Binomial (need a `Binomial` struct), Geometric-Geometric (need a `Geometric` struct), ContinuousBernoulli-* pairs (need a `ContinuousBernoulli` struct), Bernoulli-Poisson (no `_kl_bernoulli_poisson`; torch only has Poisson-Bernoulli which needs Bernoulli's enumerate path). Also deprioritised: the all-`+inf` degenerate-support cross-pairs (Normal-Exponential/Gamma/Pareto, Gamma-Uniform/Beta, etc. — no new type needed). #1374 stays open for the remaining ~34. |
+//! | REQ-6 (fallback guard on every formula) | SHIPPED | every finite formula's first statement is `crate::fallback::check_gpu_fallback_opt_in(&[...], "kl_divergence(P, Q)")?` in `kl.rs`; consumer: this IS the production consumer of `fn check_gpu_fallback_opt_in` per `fallback.md` REQ-2 (the `+inf` support-mismatch arms read a single param tensor that is already host-resident, so they hand it straight to `kl_infinite_like`) |
+//! | REQ-7 (full ~75-pair PyTorch coverage) | PARTIAL | blocker #1374 — ferrotorch now ships 68 of PyTorch's ~75 pairs (was 41). The #1562 both-types-exist gap closure added 27 pairs: 3 finite (`kl_onehotcategorical_onehotcategorical` mirrors `torch/distributions/kl.py:474-476`, `kl_bernoulli_poisson` `kl.py:513-516`, `kl_normal_laplace` `kl.py:782-792`) + 24 support-mismatch `+inf` arms (PyTorch's `_infinite_like` registrations: Beta-Pareto `kl.py:528`; Exponential-{Beta,Pareto,Uniform} `kl.py:620-623`; Gamma-{Beta,Pareto,Uniform} `kl.py:665-668`; Gumbel-{Beta,Exponential,Gamma,Pareto,Uniform} `kl.py:718-723`; Laplace-{Beta,Exponential,Gamma,Pareto,Uniform} `kl.py:740-745`; Normal-{Beta,Exponential,Gamma,Pareto} `kl.py:761-765`; Pareto-{Beta,Uniform} `kl.py:795-797`; Poisson-Bernoulli `kl.py:841`) routed through the `kl_infinite_like` helper; consumer: each is invoked by its dispatcher downcast arm. Still NOT-STARTED: (a) `Independent-Independent` (`kl.py:944`) — `Independent<T, D>` is generic over the concrete base `D`, so `Any::downcast_ref` cannot match it without a KL-recursion trait hook on `Distribution` (`lib.rs`) + an override in `independent.rs`, both outside this manifest (concrete prereq, not a deferral); (b) Binomial-Binomial + Poisson-Binomial (need a `Binomial` struct), Geometric-Geometric (need a `Geometric` struct), ContinuousBernoulli-* pairs (need a `ContinuousBernoulli` struct), TransformedDistribution-TransformedDistribution / ExponentialFamily-ExponentialFamily — each blocked on a missing distribution TYPE or trait surface. #1374 stays open for the remaining ~7. |
 //! | REQ-8 (`register_kl` extension API) | SHIPPED (design decision, #1375) | the explicit `Any::downcast_ref` match in `kl_dispatch` is the deliberate Rust-idiomatic equivalent of PyTorch's `@register_kl` + `_dispatch_kl` (a Python-runtime open-extension pattern). Rust's static analog is the closed-crate match, kept maintainable by the `kl_doc_table_matches_dispatcher` drift test that pins the doc table, the const count, and the dispatcher arms in lockstep. A `Lazy<HashMap<(TypeId,TypeId),Fn>>` registry would add indirection without enabling cross-crate extension (formulas need concrete accessors). Documented in `kl.md` REQ-8. Closes #1375. |
 
 use ferrotorch_core::dtype::Float;
@@ -31,8 +31,8 @@ use ferrotorch_core::tensor::Tensor;
 use crate::special_fns::{digamma_scalar, lgamma_scalar};
 use crate::{
     Bernoulli, Beta, Categorical, Cauchy, Dirichlet, Distribution, Exponential, Gamma, Gumbel,
-    HalfNormal, Laplace, LowRankMultivariateNormal, MultivariateNormal, Normal, Pareto, Poisson,
-    Uniform,
+    HalfNormal, Laplace, LowRankMultivariateNormal, MultivariateNormal, Normal, OneHotCategorical,
+    Pareto, Poisson, Uniform,
 };
 
 /// Euler-Mascheroni constant `γ`. Mirrors PyTorch's
@@ -99,6 +99,33 @@ const EULER_GAMMA: f64 = 0.577_215_664_901_532_9;
 /// | MultivariateNormal | LowRankMultivariateNormal |
 /// | LowRankMultivariateNormal | MultivariateNormal |
 /// | LowRankMultivariateNormal | LowRankMultivariateNormal |
+/// | OneHotCategorical | OneHotCategorical |
+/// | Bernoulli | Poisson |
+/// | Normal | Laplace |
+/// | Beta | Pareto |
+/// | Exponential | Beta |
+/// | Exponential | Pareto |
+/// | Exponential | Uniform |
+/// | Gamma | Beta |
+/// | Gamma | Pareto |
+/// | Gamma | Uniform |
+/// | Gumbel | Beta |
+/// | Gumbel | Exponential |
+/// | Gumbel | Gamma |
+/// | Gumbel | Pareto |
+/// | Gumbel | Uniform |
+/// | Laplace | Beta |
+/// | Laplace | Exponential |
+/// | Laplace | Gamma |
+/// | Laplace | Pareto |
+/// | Laplace | Uniform |
+/// | Normal | Beta |
+/// | Normal | Exponential |
+/// | Normal | Gamma |
+/// | Normal | Pareto |
+/// | Pareto | Beta |
+/// | Pareto | Uniform |
+/// | Poisson | Bernoulli |
 ///
 /// The same set is also reported by [`kl_supported_pair_count`].
 ///
@@ -133,7 +160,7 @@ pub const fn kl_supported_pair_count() -> usize {
 /// Compile-time count of registered `(P, Q)` pairs. Update this when adding
 /// or removing a branch in [`kl_dispatch`] **and** the doc table on
 /// [`kl_divergence`] in lockstep; the drift test enforces the invariant.
-const KL_SUPPORTED_PAIR_COUNT: usize = 41;
+const KL_SUPPORTED_PAIR_COUNT: usize = 68;
 
 fn kl_dispatch<T: Float>(
     p: &dyn std::any::Any,
@@ -375,6 +402,143 @@ fn kl_dispatch<T: Float>(
     ) {
         return kl_lowrank_lowrank(pl, ql);
     }
+    // ---- #1374 / #1562: both-types-exist gaps ----
+    // OneHotCategorical-OneHotCategorical (delegates to Categorical-Categorical)
+    if let (Some(pc), Some(qc)) = (
+        p.downcast_ref::<OneHotCategorical<T>>(),
+        q.downcast_ref::<OneHotCategorical<T>>(),
+    ) {
+        return kl_onehotcategorical_onehotcategorical(pc, qc);
+    }
+    // Bernoulli-Poisson (cross-family, finite)
+    if let (Some(pb), Some(qp_)) = (
+        p.downcast_ref::<Bernoulli<T>>(),
+        q.downcast_ref::<Poisson<T>>(),
+    ) {
+        return kl_bernoulli_poisson(pb, qp_);
+    }
+    // Normal-Laplace (cross-family, finite; symmetric partner of Laplace-Normal)
+    if let (Some(pn), Some(ql)) = (
+        p.downcast_ref::<Normal<T>>(),
+        q.downcast_ref::<Laplace<T>>(),
+    ) {
+        return kl_normal_laplace(pn, ql);
+    }
+    // ---- support-mismatch `+inf` family (PyTorch `_infinite_like`) ----
+    // Beta-Pareto (kl.py:528)
+    if let (Some(pb), Some(_)) = (p.downcast_ref::<Beta<T>>(), q.downcast_ref::<Pareto<T>>()) {
+        return kl_infinite_like(pb.concentration1());
+    }
+    // Exponential-{Beta, Pareto, Uniform} (kl.py:620-623)
+    if let (Some(pe), Some(_)) = (
+        p.downcast_ref::<Exponential<T>>(),
+        q.downcast_ref::<Beta<T>>(),
+    ) {
+        return kl_infinite_like(pe.rate());
+    }
+    if let (Some(pe), Some(_)) = (
+        p.downcast_ref::<Exponential<T>>(),
+        q.downcast_ref::<Pareto<T>>(),
+    ) {
+        return kl_infinite_like(pe.rate());
+    }
+    if let (Some(pe), Some(_)) = (
+        p.downcast_ref::<Exponential<T>>(),
+        q.downcast_ref::<Uniform<T>>(),
+    ) {
+        return kl_infinite_like(pe.rate());
+    }
+    // Gamma-{Beta, Pareto, Uniform} (kl.py:665-668)
+    if let (Some(pg), Some(_)) = (p.downcast_ref::<Gamma<T>>(), q.downcast_ref::<Beta<T>>()) {
+        return kl_infinite_like(pg.concentration());
+    }
+    if let (Some(pg), Some(_)) = (p.downcast_ref::<Gamma<T>>(), q.downcast_ref::<Pareto<T>>()) {
+        return kl_infinite_like(pg.concentration());
+    }
+    if let (Some(pg), Some(_)) = (p.downcast_ref::<Gamma<T>>(), q.downcast_ref::<Uniform<T>>()) {
+        return kl_infinite_like(pg.concentration());
+    }
+    // Gumbel-{Beta, Exponential, Gamma, Pareto, Uniform} (kl.py:718-723)
+    if let (Some(pg), Some(_)) = (p.downcast_ref::<Gumbel<T>>(), q.downcast_ref::<Beta<T>>()) {
+        return kl_infinite_like(pg.loc());
+    }
+    if let (Some(pg), Some(_)) = (
+        p.downcast_ref::<Gumbel<T>>(),
+        q.downcast_ref::<Exponential<T>>(),
+    ) {
+        return kl_infinite_like(pg.loc());
+    }
+    if let (Some(pg), Some(_)) = (p.downcast_ref::<Gumbel<T>>(), q.downcast_ref::<Gamma<T>>()) {
+        return kl_infinite_like(pg.loc());
+    }
+    if let (Some(pg), Some(_)) = (p.downcast_ref::<Gumbel<T>>(), q.downcast_ref::<Pareto<T>>()) {
+        return kl_infinite_like(pg.loc());
+    }
+    if let (Some(pg), Some(_)) = (
+        p.downcast_ref::<Gumbel<T>>(),
+        q.downcast_ref::<Uniform<T>>(),
+    ) {
+        return kl_infinite_like(pg.loc());
+    }
+    // Laplace-{Beta, Exponential, Gamma, Pareto, Uniform} (kl.py:740-745)
+    if let (Some(pl), Some(_)) = (p.downcast_ref::<Laplace<T>>(), q.downcast_ref::<Beta<T>>()) {
+        return kl_infinite_like(pl.loc());
+    }
+    if let (Some(pl), Some(_)) = (
+        p.downcast_ref::<Laplace<T>>(),
+        q.downcast_ref::<Exponential<T>>(),
+    ) {
+        return kl_infinite_like(pl.loc());
+    }
+    if let (Some(pl), Some(_)) = (p.downcast_ref::<Laplace<T>>(), q.downcast_ref::<Gamma<T>>()) {
+        return kl_infinite_like(pl.loc());
+    }
+    if let (Some(pl), Some(_)) = (
+        p.downcast_ref::<Laplace<T>>(),
+        q.downcast_ref::<Pareto<T>>(),
+    ) {
+        return kl_infinite_like(pl.loc());
+    }
+    if let (Some(pl), Some(_)) = (
+        p.downcast_ref::<Laplace<T>>(),
+        q.downcast_ref::<Uniform<T>>(),
+    ) {
+        return kl_infinite_like(pl.loc());
+    }
+    // Normal-{Beta, Exponential, Gamma, Pareto} (kl.py:761-765; Normal-Uniform
+    // is registered separately above as a finite cross-family formula).
+    if let (Some(pn), Some(_)) = (p.downcast_ref::<Normal<T>>(), q.downcast_ref::<Beta<T>>()) {
+        return kl_infinite_like(pn.loc());
+    }
+    if let (Some(pn), Some(_)) = (
+        p.downcast_ref::<Normal<T>>(),
+        q.downcast_ref::<Exponential<T>>(),
+    ) {
+        return kl_infinite_like(pn.loc());
+    }
+    if let (Some(pn), Some(_)) = (p.downcast_ref::<Normal<T>>(), q.downcast_ref::<Gamma<T>>()) {
+        return kl_infinite_like(pn.loc());
+    }
+    if let (Some(pn), Some(_)) = (p.downcast_ref::<Normal<T>>(), q.downcast_ref::<Pareto<T>>()) {
+        return kl_infinite_like(pn.loc());
+    }
+    // Pareto-{Beta, Uniform} (kl.py:795-797)
+    if let (Some(pp_), Some(_)) = (p.downcast_ref::<Pareto<T>>(), q.downcast_ref::<Beta<T>>()) {
+        return kl_infinite_like(pp_.scale());
+    }
+    if let (Some(pp_), Some(_)) = (
+        p.downcast_ref::<Pareto<T>>(),
+        q.downcast_ref::<Uniform<T>>(),
+    ) {
+        return kl_infinite_like(pp_.scale());
+    }
+    // Poisson-Bernoulli (kl.py:841)
+    if let (Some(pp_), Some(_)) = (
+        p.downcast_ref::<Poisson<T>>(),
+        q.downcast_ref::<Bernoulli<T>>(),
+    ) {
+        return kl_infinite_like(pp_.rate());
+    }
 
     Err(FerrotorchError::InvalidArgument {
         message: "No KL divergence formula registered for this distribution pair. \
@@ -393,7 +557,14 @@ fn kl_dispatch<T: Float>(
                   Pareto-Exponential, Pareto-Gamma, Pareto-Normal, \
                   Uniform-Exponential, Uniform-Gamma, Uniform-Pareto, Uniform-Beta, \
                   MultivariateNormal-LowRankMultivariateNormal, \
-                  LowRankMultivariateNormal-MultivariateNormal."
+                  LowRankMultivariateNormal-MultivariateNormal, \
+                  OneHotCategorical-OneHotCategorical, Bernoulli-Poisson, \
+                  Normal-Laplace. Support-mismatch (+inf): Beta-Pareto, \
+                  Exponential-{Beta,Pareto,Uniform}, Gamma-{Beta,Pareto,Uniform}, \
+                  Gumbel-{Beta,Exponential,Gamma,Pareto,Uniform}, \
+                  Laplace-{Beta,Exponential,Gamma,Pareto,Uniform}, \
+                  Normal-{Beta,Exponential,Gamma,Pareto}, Pareto-{Beta,Uniform}, \
+                  Poisson-Bernoulli."
             .into(),
     })
 }
@@ -2095,6 +2266,170 @@ fn kl_lowrank_lowrank<T: Float>(
         q.scale_tril(),
         q.dim(),
     )
+}
+
+// ---------------------------------------------------------------------------
+// Additional KL formulas (#1374 / #1562, both-types-exist gaps): the
+// finite OneHotCategorical-OneHotCategorical, Bernoulli-Poisson, Normal-Laplace
+// pairs + the support-mismatch `+inf` cross-pair family. Each mirrors a
+// `@register_kl` body in `torch/distributions/kl.py`. The `+inf` family
+// mirrors PyTorch's `_infinite_like` registrations (the support of `q` does
+// not cover the support of `p`, so the KL is `+inf` everywhere).
+// ---------------------------------------------------------------------------
+
+/// `+inf`-everywhere KL result shaped like `p`'s parameter tensor.
+///
+/// Mirrors `torch/distributions/kl.py:141-145` `_infinite_like`, which PyTorch
+/// registers for every `(P, Q)` pair where `Q`'s support fails to cover `P`'s
+/// (so the divergence is `+inf` at every point). The shape follows `p`'s
+/// representative parameter tensor, matching `torch.full_like(tensor, inf)`.
+fn kl_infinite_like<T: Float>(param: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
+    let n: usize = param.shape().iter().product::<usize>().max(1);
+    Tensor::from_storage(
+        TensorStorage::cpu(vec![T::infinity(); n]),
+        param.shape().to_vec(),
+        false,
+    )
+}
+
+/// KL(OneHotCategorical(p) || OneHotCategorical(q)).
+///
+/// Mirrors `torch/distributions/kl.py:474-476` `_kl_onehotcategorical_onehotcategorical`,
+/// which delegates to `_kl_categorical_categorical(p._categorical, q._categorical)`.
+/// `OneHotCategorical` carries the same probability vector as the equivalent
+/// `Categorical`, so the divergence is exactly the Categorical-Categorical
+/// closed form `Σ_k p_k·ln(p_k/q_k)` (a scalar). The probs are already
+/// normalised by `OneHotCategorical::new`.
+fn kl_onehotcategorical_onehotcategorical<T: Float>(
+    p: &OneHotCategorical<T>,
+    q: &OneHotCategorical<T>,
+) -> FerrotorchResult<Tensor<T>> {
+    crate::fallback::check_gpu_fallback_opt_in(
+        &[p.probs(), q.probs()],
+        "kl_divergence(OneHotCategorical, OneHotCategorical)",
+    )?;
+    let p_probs = p.probs().data_vec()?;
+    let q_probs = q.probs().data_vec()?;
+
+    let zero = T::from(0.0).unwrap();
+    let eps = T::from(1e-7).unwrap();
+
+    // Probs are normalised at construction; recompute the totals defensively
+    // so the formula matches `_kl_categorical_categorical` exactly.
+    let p_total: T = p_probs.iter().copied().fold(zero, |a, b| a + b);
+    let q_total: T = q_probs.iter().copied().fold(zero, |a, b| a + b);
+
+    let kl: T = p_probs
+        .iter()
+        .zip(q_probs.iter())
+        .fold(zero, |acc, (&pp, &qp)| {
+            let pp_norm = pp / p_total;
+            let qp_norm = (qp / q_total).max(eps);
+            if pp_norm <= eps {
+                acc
+            } else if qp_norm <= eps {
+                T::infinity()
+            } else {
+                acc + pp_norm * (pp_norm / qp_norm).ln()
+            }
+        });
+
+    Tensor::from_storage(TensorStorage::cpu(vec![kl]), vec![], false)
+}
+
+/// KL(Bernoulli(p) || Poisson(rate)) (cross-family, finite).
+///
+/// Mirrors `torch/distributions/kl.py:513-516` `_kl_bernoulli_poisson`:
+/// ```text
+/// KL = -H(Bernoulli) - (p · ln(rate) - rate)
+/// ```
+/// where `H(Bernoulli(p)) = -p·ln(p) - (1-p)·ln(1-p)`. Probabilities are
+/// clamped to `[eps, 1-eps]` to mirror the entropy clamp in `Bernoulli::entropy`.
+fn kl_bernoulli_poisson<T: Float>(p: &Bernoulli<T>, q: &Poisson<T>) -> FerrotorchResult<Tensor<T>> {
+    crate::fallback::check_gpu_fallback_opt_in(
+        &[p.probs(), q.rate()],
+        "kl_divergence(Bernoulli, Poisson)",
+    )?;
+    let p_probs = p.probs().data_vec()?;
+    let q_rate = q.rate().data_vec()?;
+    let one = T::from(1.0).unwrap();
+    let eps = T::from(1e-7).unwrap();
+
+    let result: Vec<T> = p_probs
+        .iter()
+        .zip(q_rate.iter().cycle())
+        .map(|(&pp, &rate)| {
+            let pc = pp.max(eps).min(one - eps);
+            let entropy = -(pc * pc.ln()) - (one - pc) * (one - pc).ln();
+            -entropy - (pp * rate.ln() - rate)
+        })
+        .collect();
+
+    Tensor::from_storage(
+        TensorStorage::cpu(result),
+        p.probs().shape().to_vec(),
+        false,
+    )
+}
+
+/// KL(Normal(loc1, scale1) || Laplace(loc2, scale2)) (cross-family, finite).
+///
+/// Mirrors `torch/distributions/kl.py:782-792` `_kl_normal_laplace`:
+/// ```text
+/// loc_diff = loc1 - loc2;  scale_ratio = scale1/scale2
+/// loc_diff_scale_ratio = loc_diff / scale1
+/// t1 = ln(scale_ratio)
+/// t2 = sqrt(2/π)·scale1·exp(-0.5·loc_diff_scale_ratio²)
+/// t3 = loc_diff·erf(sqrt(0.5)·loc_diff_scale_ratio)
+/// KL = -t1 + (t2 + t3)/scale2 - 0.5·(1 + ln(0.5·π))
+/// ```
+/// `erf` is computed via `ferrotorch_core::special::erf` (the public tensor
+/// entry point, ~1 ulp on f64) applied to the per-element arguments.
+fn kl_normal_laplace<T: Float>(p: &Normal<T>, q: &Laplace<T>) -> FerrotorchResult<Tensor<T>> {
+    crate::fallback::check_gpu_fallback_opt_in(
+        &[p.loc(), p.scale(), q.loc(), q.scale()],
+        "kl_divergence(Normal, Laplace)",
+    )?;
+    let p_loc = p.loc().data_vec()?;
+    let p_scale = p.scale().data_vec()?;
+    let q_loc = q.loc().data_vec()?;
+    let q_scale = q.scale().data_vec()?;
+
+    let half = T::from(0.5).unwrap();
+    let sqrt_2_over_pi = T::from((2.0 / std::f64::consts::PI).sqrt()).unwrap();
+    let sqrt_half = T::from(0.5_f64.sqrt()).unwrap();
+    let half_ln_half_pi_term = T::from(0.5 * (1.0 + (0.5 * std::f64::consts::PI).ln())).unwrap();
+
+    // erf argument = sqrt(0.5) * (loc_diff / scale1), one per output element.
+    // q broadcasts over p via `cycle()`, matching the other cross-family bodies.
+    let n = p_loc.len();
+    let erf_args: Vec<T> = p_loc
+        .iter()
+        .zip(p_scale.iter())
+        .zip(q_loc.iter().cycle())
+        .map(|((&pl, &ps), &ql)| sqrt_half * ((pl - ql) / ps))
+        .collect();
+    let erf_tensor = Tensor::from_storage(TensorStorage::cpu(erf_args), vec![n], false)?;
+    let erf_vals = ferrotorch_core::special::erf(&erf_tensor)?.data_vec()?;
+
+    let result: Vec<T> = p_loc
+        .iter()
+        .zip(p_scale.iter())
+        .zip(q_loc.iter().cycle())
+        .zip(q_scale.iter().cycle())
+        .zip(erf_vals.iter())
+        .map(|((((&pl, &ps), &ql), &qs), &erf_v)| {
+            let loc_diff = pl - ql;
+            let scale_ratio = ps / qs;
+            let ldsr = loc_diff / ps;
+            let t1 = scale_ratio.ln();
+            let t2 = sqrt_2_over_pi * ps * (-half * ldsr * ldsr).exp();
+            let t3 = loc_diff * erf_v;
+            -t1 + (t2 + t3) / qs - half_ln_half_pi_term
+        })
+        .collect();
+
+    Tensor::from_storage(TensorStorage::cpu(result), p.loc().shape().to_vec(), false)
 }
 
 // ---------------------------------------------------------------------------
