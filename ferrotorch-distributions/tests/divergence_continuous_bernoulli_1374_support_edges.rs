@@ -7,9 +7,9 @@
 //! traced to continuous_bernoulli.py:196-210 (cdf) / :187-194 (log_prob) and
 //! kl.py:610-616 / :879-885 (where-mask). R-CHAR-3 non-tautological.
 
+use ferrotorch_core::creation::scalar;
 use ferrotorch_distributions::kl::kl_divergence;
 use ferrotorch_distributions::{ContinuousBernoulli, Distribution, Uniform};
-use ferrotorch_core::creation::scalar;
 
 fn cb(p: f64) -> ContinuousBernoulli<f64> {
     ContinuousBernoulli::new(scalar(p).unwrap()).unwrap()
@@ -19,7 +19,10 @@ fn u(lo: f64, hi: f64) -> Uniform<f64> {
 }
 
 fn close(a: f64, b: f64, ctx: &str) {
-    assert!((a - b).abs() <= 1e-12, "{ctx}: ferrotorch={a:?} torch={b:?}");
+    assert!(
+        (a - b).abs() <= 1e-12,
+        "{ctx}: ferrotorch={a:?} torch={b:?}"
+    );
 }
 
 #[test]
@@ -58,12 +61,18 @@ fn divergence_cb_cdf_clamps_outside_support() {
 #[test]
 fn divergence_kl_cb_uniform_inclusive_boundary() {
     // INCLUSIVE: low==0 -> torch.ge(low,0)=True -> +inf; high==1 -> le(high,1)=True -> +inf.
-    let lo0 = kl_divergence(&cb(0.4), &u(0.0, 2.0)).unwrap().item().unwrap();
+    let lo0 = kl_divergence(&cb(0.4), &u(0.0, 2.0))
+        .unwrap()
+        .item()
+        .unwrap();
     assert!(
         lo0.is_infinite() && lo0 > 0.0,
         "KL(CB,U(0,2)) low==0 must be +inf, got {lo0}"
     );
-    let hi1 = kl_divergence(&cb(0.4), &u(-1.0, 1.0)).unwrap().item().unwrap();
+    let hi1 = kl_divergence(&cb(0.4), &u(-1.0, 1.0))
+        .unwrap()
+        .item()
+        .unwrap();
     assert!(
         hi1.is_infinite() && hi1 > 0.0,
         "KL(CB,U(-1,1)) high==1 must be +inf, got {hi1}"
@@ -73,12 +82,18 @@ fn divergence_kl_cb_uniform_inclusive_boundary() {
 #[test]
 fn divergence_kl_uniform_cb_inclusive_boundary() {
     // INCLUSIVE: low==0 -> torch.le(low,0)=True -> +inf; high==1 -> ge(high,1)=True -> +inf.
-    let lo0 = kl_divergence(&u(0.0, 0.8), &cb(0.4)).unwrap().item().unwrap();
+    let lo0 = kl_divergence(&u(0.0, 0.8), &cb(0.4))
+        .unwrap()
+        .item()
+        .unwrap();
     assert!(
         lo0.is_infinite() && lo0 > 0.0,
         "KL(U(0,0.8),CB) low==0 must be +inf, got {lo0}"
     );
-    let hi1 = kl_divergence(&u(0.2, 1.0), &cb(0.4)).unwrap().item().unwrap();
+    let hi1 = kl_divergence(&u(0.2, 1.0), &cb(0.4))
+        .unwrap()
+        .item()
+        .unwrap();
     assert!(
         hi1.is_infinite() && hi1 > 0.0,
         "KL(U(0.2,1),CB) high==1 must be +inf, got {hi1}"

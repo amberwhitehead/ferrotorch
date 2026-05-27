@@ -11,11 +11,11 @@
 //! mismatched cutoff predicate or Taylor coefficient shows up as a
 //! discontinuity across the 0.499/0.501 boundary that diverges from torch.
 
+use ferrotorch_core::creation::{from_slice, scalar};
 use ferrotorch_distributions::kl::kl_divergence;
 use ferrotorch_distributions::{
     Beta, ContinuousBernoulli, Distribution, Exponential, Normal, Uniform,
 };
-use ferrotorch_core::creation::{from_slice, scalar};
 
 fn cb(p: f64) -> ContinuousBernoulli<f64> {
     ContinuousBernoulli::new(scalar(p).unwrap()).unwrap()
@@ -44,12 +44,12 @@ fn divergence_cb_log_prob_band_x03() {
         // band edges + interior — these straddle the exact/Taylor boundary:
         (0.498, 0.001_597_341_839_731_592),
         (0.4989, 0.000_879_194_750_604_050_9),
-        (0.499, 0.000_799_334_398_304_152_3),       // exact branch (p<=0.499)
-        (0.499_000_1, 0.000_799_254_531_321_014_2),  // Taylor branch
+        (0.499, 0.000_799_334_398_304_152_3), // exact branch (p<=0.499)
+        (0.499_000_1, 0.000_799_254_531_321_014_2), // Taylor branch
         (0.4995, 0.000_399_833_466_561_139_16),
         (0.5, 0.0),
         (0.5005, -0.000_400_166_800_105_572_5),
-        (0.501, -0.000_800_667_735_024_740_4),       // Taylor branch (p<=0.501)
+        (0.501, -0.000_800_667_735_024_740_4), // Taylor branch (p<=0.501)
         (0.501_000_1, -0.000_800_747_868_694_218_2), // exact branch (p>0.501)
         (0.502, -0.001_602_675_227_098_893),
     ];
@@ -73,9 +73,9 @@ fn divergence_cb_mean_band() {
         (0.5, 0.5),
         (0.9, 0.669_880_386_686_581_3),
         (0.499, 0.499_666_666_313_316_9),       // exact
-        (0.499_000_1, 0.499_666_699_644_551_1),  // Taylor
-        (0.501, 0.500_333_333_688_888_9),        // Taylor
-        (0.501_000_1, 0.500_333_367_020_005),    // exact
+        (0.499_000_1, 0.499_666_699_644_551_1), // Taylor
+        (0.501, 0.500_333_333_688_888_9),       // Taylor
+        (0.501_000_1, 0.500_333_367_020_005),   // exact
     ];
     for (p, want) in cases {
         let got = cb(p).mean().unwrap().item().unwrap();
@@ -91,10 +91,10 @@ fn divergence_cb_variance_band() {
     let cases = [
         (0.3, 0.080_425_152_206_194_28),
         (0.499, 0.083_333_267_764_828_63),       // exact
-        (0.499_000_1, 0.083_333_266_680_134_73),  // Taylor
+        (0.499_000_1, 0.083_333_266_680_134_73), // Taylor
         (0.5, 0.083_333_333_333_333_33),
-        (0.501, 0.083_333_266_666_802_12),        // Taylor
-        (0.501_000_1, 0.083_333_267_823_036_3),   // exact
+        (0.501, 0.083_333_266_666_802_12),      // Taylor
+        (0.501_000_1, 0.083_333_267_823_036_3), // exact
     ];
     for (p, want) in cases {
         let got = cb(p).variance().unwrap().item().unwrap();
@@ -106,7 +106,7 @@ fn divergence_cb_variance_band() {
 fn divergence_cb_entropy_band() {
     let cases = [
         (0.3, -0.029_386_202_232_129_12),
-        (0.499, -6.666_681_593_436_863e-7),      // exact
+        (0.499, -6.666_681_593_436_863e-7),       // exact
         (0.499_000_1, -6.665_348_505_352_497e-7), // Taylor
         (0.5, 0.0),
         (0.501, -6.666_681_777_733_885e-7),       // Taylor
@@ -125,17 +125,13 @@ fn divergence_cb_cdf_band() {
         (0.3, 0.392_796_368_275_436_5),
         (0.5, 0.3),
         (0.7, 0.217_061_956_894_589_8),
-        (0.499, 0.300_420_112_442_633_95),    // exact
-        (0.499_000_1, 0.3),                    // Taylor -> value
-        (0.501, 0.3),                          // Taylor -> value
+        (0.499, 0.300_420_112_442_633_95),       // exact
+        (0.499_000_1, 0.3),                      // Taylor -> value
+        (0.501, 0.3),                            // Taylor -> value
         (0.501_000_1, 0.299_580_069_580_106_97), // exact
     ];
     for (p, want) in cases {
-        let got = cb(p)
-            .cdf(&scalar(0.3f64).unwrap())
-            .unwrap()
-            .item()
-            .unwrap();
+        let got = cb(p).cdf(&scalar(0.3f64).unwrap()).unwrap().item().unwrap();
         close(got, want, 1e-12, &format!("cdf(p={p}, 0.3)"));
     }
 }
@@ -146,9 +142,9 @@ fn divergence_cb_icdf_band() {
         (0.3, 0.221_943_475_010_077_75),
         (0.5, 0.3),
         (0.7, 0.397_112_104_670_546_2),
-        (0.499, 0.299_580_223_585_924_73),    // exact
-        (0.499_000_1, 0.3),                    // Taylor -> value
-        (0.501, 0.3),                          // Taylor -> value
+        (0.499, 0.299_580_223_585_924_73),      // exact
+        (0.499_000_1, 0.3),                     // Taylor -> value
+        (0.501, 0.3),                           // Taylor -> value
         (0.501_000_1, 0.300_420_266_459_690_6), // exact
     ];
     for (p, want) in cases {
@@ -242,10 +238,13 @@ fn divergence_kl_cb_cross_family_finite() {
     );
     // CB(0.4)||Exp(1.5): kl.py:586-588.
     close(
-        kl_divergence(&cb(0.4), &Exponential::new(scalar(1.5f64).unwrap()).unwrap())
-            .unwrap()
-            .item()
-            .unwrap(),
+        kl_divergence(
+            &cb(0.4),
+            &Exponential::new(scalar(1.5f64).unwrap()).unwrap(),
+        )
+        .unwrap()
+        .item()
+        .unwrap(),
         0.300_812_134_623_041_46,
         1e-12,
         "KL(CB(0.4),Exp(1.5))",

@@ -5,9 +5,9 @@
 //!
 //! Expected values from live torch 2.11.0+cu130 (2026-05-27). R-CHAR-3.
 
-use ferrotorch_distributions::kl::kl_divergence;
-use ferrotorch_distributions::ContinuousBernoulli;
 use ferrotorch_core::creation::from_slice;
+use ferrotorch_distributions::ContinuousBernoulli;
+use ferrotorch_distributions::kl::kl_divergence;
 
 #[test]
 fn divergence_kl_cb_incompatible_shapes_error() {
@@ -28,8 +28,7 @@ fn divergence_kl_cb_2d_broadcast() {
     //   row0 = [0.06451926445321665, 0.00793458221874696, 0.011484897164652397]
     //   row1 = [0.006840721103852643, 0.006840721103852643, 0.07883084812988328]
     let p = ContinuousBernoulli::new(from_slice(&[0.3f64, 0.5], &[2, 1]).unwrap()).unwrap();
-    let q =
-        ContinuousBernoulli::new(from_slice(&[0.6f64, 0.4, 0.2], &[1, 3]).unwrap()).unwrap();
+    let q = ContinuousBernoulli::new(from_slice(&[0.6f64, 0.4, 0.2], &[1, 3]).unwrap()).unwrap();
     let kl = kl_divergence(&p, &q).unwrap();
     assert_eq!(kl.shape(), &[2, 3], "broadcast shape");
     let d = kl.data().unwrap();

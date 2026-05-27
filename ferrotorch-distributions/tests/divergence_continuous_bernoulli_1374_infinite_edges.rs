@@ -6,11 +6,11 @@
 //! `torch/distributions/kl.py` (CB-Pareto :581; {Exp,Gamma,Gumbel,Laplace,
 //! Normal,Pareto}-CB :621,666,719,741,762,796). R-CHAR-3 non-tautological.
 
+use ferrotorch_core::creation::scalar;
 use ferrotorch_distributions::kl::kl_divergence;
 use ferrotorch_distributions::{
     ContinuousBernoulli, Distribution, Exponential, Gamma, Gumbel, Laplace, Normal, Pareto,
 };
-use ferrotorch_core::creation::scalar;
 
 fn cb(p: f64) -> ContinuousBernoulli<f64> {
     ContinuousBernoulli::new(scalar(p).unwrap()).unwrap()
@@ -35,10 +35,13 @@ fn divergence_kl_cb_seven_infinite_pairs() {
     );
     // Exponential-CB (kl.py:621).
     assert_pos_inf(
-        kl_divergence(&Exponential::new(scalar(1.5f64).unwrap()).unwrap(), &cb(0.4))
-            .unwrap()
-            .item()
-            .unwrap(),
+        kl_divergence(
+            &Exponential::new(scalar(1.5f64).unwrap()).unwrap(),
+            &cb(0.4),
+        )
+        .unwrap()
+        .item()
+        .unwrap(),
         "KL(Exp(1.5),CB(0.4))",
     );
     // Gamma-CB (kl.py:666).
@@ -137,8 +140,5 @@ fn divergence_cb_f32_mean_and_log_prob() {
         .unwrap()
         .item()
         .unwrap();
-    assert!(
-        (lp - 0.182_088_37).abs() < 1e-6,
-        "f32 log_prob got {lp}"
-    );
+    assert!((lp - 0.182_088_37).abs() < 1e-6, "f32 log_prob got {lp}");
 }
