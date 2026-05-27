@@ -889,3 +889,1870 @@ tracking_issue = "#806"
 path = "ferrotorch_core::sparse::SparseTensor <T>::values"
 reason = "Implicit coverage: SparseTensor::values method tested via SparseTensor integration tests in conformance_nested_sparse.rs; gate substring mismatch on method-call syntax."
 tracking_issue = "#770"
+
+# === Issue #1585 — indexing/shape autograd + meta-plumbing internals (prior commits) ===
+# Added pub items from c013b5432 and the surrounding indexing/scatter/roll +
+# meta-storage commits. None is exercised by an existing conformance behavior
+# assertion; all are autograd grad_fn / forward-helper / meta-plumbing internals
+# with no separate user-facing forward-op contract currently tested. Per R-CHAR-3
+# (no tautological tests) the honest resolution is an exclusion with justification
+# matching the existing Phase-2.3-shape and Phase-2.14-plumbing conventions, not a
+# fabricated tautological test. Issue #1585 is the audit trail; the named phase
+# issue is where the real conformance test lands.
+
+[[exclusion]]
+path = "ferrotorch_core::grad_fns::indexing::IndexSelectDimBackward"
+reason = "Pending Phase 2.3-shape — shape, indexing, view. Autograd grad_fn for index_select_dim (N-D gather along arbitrary axis); the phase will land a conformance test exercising its VJP against PyTorch parity (CPU + GPU + autograd)."
+tracking_issue = "#765"
+
+[[exclusion]]
+path = "ferrotorch_core::grad_fns::indexing::index_select_dim"
+reason = "Pending Phase 2.3-shape — shape, indexing, view. Forward helper that constructs IndexSelectDimBackward; non-test consumer is RandomHorizontalFlip::apply in ferrotorch-data/src/transforms.rs. The phase will land a conformance test exercising it against PyTorch parity."
+tracking_issue = "#765"
+
+[[exclusion]]
+path = "ferrotorch_core::grad_fns::shape::RollBackward <T>::new"
+reason = "Implicit coverage: constructor for RollBackward; invoked by Tensor::roll in ops/tensor_ops.rs when requires_grad. The RollBackward struct itself is covered via conformance_shape.rs; the gate's Type::method substring match doesn't catch RollBackward::new through the struct's existing coverage."
+tracking_issue = "#765"
+
+[[exclusion]]
+path = "ferrotorch_core::ops::scatter::scatter_add_segments"
+reason = "Pending Phase 2.3-shape — shape, indexing, view. Segment-scatter primitive (scatter-add along a 1-D index into a fixed dim_size); non-test consumer is ferrotorch-graph MessagePassing per ferrotorch-graph/README.md. The phase will land a conformance test exercising it against PyTorch parity."
+tracking_issue = "#765"
+
+[[exclusion]]
+path = "ferrotorch_core::scatter_add_segments"
+reason = "Re-export of ops::scatter::scatter_add_segments at lib.rs; covered transitively by the same Phase 2.3-shape conformance test that exercises the underlying function. Gate has no auto-coverage for re-exports whose short ident is absent from conformance sources."
+tracking_issue = "#765"
+
+[[exclusion]]
+path = "ferrotorch_core::storage::TensorStorage <T>::meta_filled"
+reason = "Implicit coverage: meta-storage constructor that records a fill value for shape-inference (meta-device) tensors; non-test consumer is creation::full_meta / Tensor::to. Meta-device plumbing has no numerical forward contract; gate substring mismatch on method-call syntax."
+tracking_issue = "#776"
+
+[[exclusion]]
+path = "ferrotorch_core::storage::TensorStorage <T>::meta_fill_value"
+reason = "Implicit coverage: meta-storage accessor returning the recorded fill value for meta-device tensors; non-test consumer is Tensor::meta_fill_value for the full_meta round-trip. Meta-device plumbing has no numerical forward contract; gate substring mismatch on method-call syntax."
+tracking_issue = "#776"
+
+[[exclusion]]
+path = "ferrotorch_core::tensor::Tensor <T>::meta_fill_value"
+reason = "Implicit coverage: Tensor-level accessor delegating to TensorStorage::meta_fill_value for meta-device tensors. Meta-device plumbing has no numerical forward contract; gate substring mismatch on method-call syntax."
+tracking_issue = "#776"
+
+# === Issue #1585 — surface-inventory refresh backlog ===
+# The committed _surface.json was stale by ~408 pub items (last regenerated at
+# commit 5defe41d1; many pub-adding commits landed since). Running the full
+# `cargo test -p ferrotorch-core` regenerates _surface.json via
+# conformance_surface_inventory and then the coverage gate sees the fresh, larger
+# surface. These entries cover every newly-surfaced item that lacks a conformance
+# behavior assertion. All are autograd grad_fn / forward-helper / re-export /
+# method-syntax / meta-plumbing internals with no separate user-facing forward-op
+# contract currently tested. Per R-CHAR-3 (no tautological tests) the honest
+# resolution is exclusions with justification pointing at the owning phase issue,
+# matching the established conventions above. Issue #1585 is the audit trail.
+
+[[exclusion]]
+path = "ferrotorch_core::FftNorm"
+reason = "Re-export covered transitively by the Phase 2.7-fft-complex conformance test that exercises the underlying item; the gate has no auto-coverage for re-exports whose short ident is absent from conformance sources."
+tracking_issue = "#769"
+
+[[exclusion]]
+path = "ferrotorch_core::Generator"
+reason = "Re-export covered transitively by the Phase 2.14-plumbing conformance test that exercises the underlying item; the gate has no auto-coverage for re-exports whose short ident is absent from conformance sources."
+tracking_issue = "#776"
+
+[[exclusion]]
+path = "ferrotorch_core::atan2"
+reason = "Re-export covered transitively by the Phase 2.1-elementwise conformance test that exercises the underlying item; the gate has no auto-coverage for re-exports whose short ident is absent from conformance sources."
+tracking_issue = "#763"
+
+[[exclusion]]
+path = "ferrotorch_core::bool_tensor::BoolTensor::device"
+reason = "Pending Phase 2.13-bool-int — bool & int tensors. Method covered transitively via its containing type's integration tests in the phase suite; gate substring mismatch on method-call syntax."
+tracking_issue = "#775"
+
+[[exclusion]]
+path = "ferrotorch_core::bool_tensor::BoolTensor::eq_int"
+reason = "Pending Phase 2.13-bool-int — bool & int tensors. Method covered transitively via its containing type's integration tests in the phase suite; gate substring mismatch on method-call syntax."
+tracking_issue = "#775"
+
+[[exclusion]]
+path = "ferrotorch_core::bool_tensor::BoolTensor::from_gpu_handle"
+reason = "Pending Phase 2.13-bool-int — bool & int tensors. Method covered transitively via its containing type's integration tests in the phase suite; gate substring mismatch on method-call syntax."
+tracking_issue = "#775"
+
+[[exclusion]]
+path = "ferrotorch_core::bool_tensor::BoolTensor::ge_int"
+reason = "Pending Phase 2.13-bool-int — bool & int tensors. Method covered transitively via its containing type's integration tests in the phase suite; gate substring mismatch on method-call syntax."
+tracking_issue = "#775"
+
+[[exclusion]]
+path = "ferrotorch_core::bool_tensor::BoolTensor::gpu_handle"
+reason = "Pending Phase 2.13-bool-int — bool & int tensors. Method covered transitively via its containing type's integration tests in the phase suite; gate substring mismatch on method-call syntax."
+tracking_issue = "#775"
+
+[[exclusion]]
+path = "ferrotorch_core::bool_tensor::BoolTensor::gt_int"
+reason = "Pending Phase 2.13-bool-int — bool & int tensors. Method covered transitively via its containing type's integration tests in the phase suite; gate substring mismatch on method-call syntax."
+tracking_issue = "#775"
+
+[[exclusion]]
+path = "ferrotorch_core::bool_tensor::BoolTensor::is_cuda"
+reason = "Pending Phase 2.13-bool-int — bool & int tensors. Method covered transitively via its containing type's integration tests in the phase suite; gate substring mismatch on method-call syntax."
+tracking_issue = "#775"
+
+[[exclusion]]
+path = "ferrotorch_core::bool_tensor::BoolTensor::le_int"
+reason = "Pending Phase 2.13-bool-int — bool & int tensors. Method covered transitively via its containing type's integration tests in the phase suite; gate substring mismatch on method-call syntax."
+tracking_issue = "#775"
+
+[[exclusion]]
+path = "ferrotorch_core::bool_tensor::BoolTensor::lt_int"
+reason = "Pending Phase 2.13-bool-int — bool & int tensors. Method covered transitively via its containing type's integration tests in the phase suite; gate substring mismatch on method-call syntax."
+tracking_issue = "#775"
+
+[[exclusion]]
+path = "ferrotorch_core::bool_tensor::BoolTensor::ne_int"
+reason = "Pending Phase 2.13-bool-int — bool & int tensors. Method covered transitively via its containing type's integration tests in the phase suite; gate substring mismatch on method-call syntax."
+tracking_issue = "#775"
+
+[[exclusion]]
+path = "ferrotorch_core::broadcast_tensors"
+reason = "Re-export covered transitively by the Phase 2.3-shape conformance test that exercises the underlying item; the gate has no auto-coverage for re-exports whose short ident is absent from conformance sources."
+tracking_issue = "#765"
+
+[[exclusion]]
+path = "ferrotorch_core::broadcast_to"
+reason = "Re-export covered transitively by the Phase 2.3-shape conformance test that exercises the underlying item; the gate has no auto-coverage for re-exports whose short ident is absent from conformance sources."
+tracking_issue = "#765"
+
+[[exclusion]]
+path = "ferrotorch_core::column_stack"
+reason = "Re-export covered transitively by the Phase 2.3-shape conformance test that exercises the underlying item; the gate has no auto-coverage for re-exports whose short ident is absent from conformance sources."
+tracking_issue = "#765"
+
+[[exclusion]]
+path = "ferrotorch_core::copysign"
+reason = "Re-export covered transitively by the Phase 2.1-elementwise conformance test that exercises the underlying item; the gate has no auto-coverage for re-exports whose short ident is absent from conformance sources."
+tracking_issue = "#763"
+
+[[exclusion]]
+path = "ferrotorch_core::dstack"
+reason = "Re-export covered transitively by the Phase 2.3-shape conformance test that exercises the underlying item; the gate has no auto-coverage for re-exports whose short ident is absent from conformance sources."
+tracking_issue = "#765"
+
+[[exclusion]]
+path = "ferrotorch_core::dtype_dispatch::is_bf16"
+reason = "Pending Phase 2.14-plumbing — plumbing & core types. The phase will land a conformance test exercising this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
+tracking_issue = "#776"
+
+[[exclusion]]
+path = "ferrotorch_core::dtype_dispatch::is_f16"
+reason = "Pending Phase 2.14-plumbing — plumbing & core types. The phase will land a conformance test exercising this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
+tracking_issue = "#776"
+
+[[exclusion]]
+path = "ferrotorch_core::dtype_dispatch::is_f32"
+reason = "Pending Phase 2.14-plumbing — plumbing & core types. The phase will land a conformance test exercising this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
+tracking_issue = "#776"
+
+[[exclusion]]
+path = "ferrotorch_core::expand_as"
+reason = "Re-export covered transitively by the Phase 2.3-shape conformance test that exercises the underlying item; the gate has no auto-coverage for re-exports whose short ident is absent from conformance sources."
+tracking_issue = "#765"
+
+[[exclusion]]
+path = "ferrotorch_core::fft2_differentiable"
+reason = "Re-export covered transitively by the Phase 2.7-fft-complex conformance test that exercises the underlying item; the gate has no auto-coverage for re-exports whose short ident is absent from conformance sources."
+tracking_issue = "#769"
+
+[[exclusion]]
+path = "ferrotorch_core::fft2_differentiable_norm"
+reason = "Re-export covered transitively by the Phase 2.7-fft-complex conformance test that exercises the underlying item; the gate has no auto-coverage for re-exports whose short ident is absent from conformance sources."
+tracking_issue = "#769"
+
+[[exclusion]]
+path = "ferrotorch_core::fft2_norm"
+reason = "Re-export covered transitively by the Phase 2.7-fft-complex conformance test that exercises the underlying item; the gate has no auto-coverage for re-exports whose short ident is absent from conformance sources."
+tracking_issue = "#769"
+
+[[exclusion]]
+path = "ferrotorch_core::fft::FftNorm"
+reason = "Re-export covered transitively by the Phase 2.7-fft-complex conformance test that exercises the underlying item; the gate has no auto-coverage for re-exports whose short ident is absent from conformance sources."
+tracking_issue = "#769"
+
+[[exclusion]]
+path = "ferrotorch_core::fft::fft2_norm"
+reason = "Pending Phase 2.7-fft-complex — FFT, complex, signal. The phase will land a conformance test exercising this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
+tracking_issue = "#769"
+
+[[exclusion]]
+path = "ferrotorch_core::fft::fft_norm"
+reason = "Pending Phase 2.7-fft-complex — FFT, complex, signal. The phase will land a conformance test exercising this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
+tracking_issue = "#769"
+
+[[exclusion]]
+path = "ferrotorch_core::fft::fft_norm_from_str"
+reason = "Pending Phase 2.7-fft-complex — FFT, complex, signal. The phase will land a conformance test exercising this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
+tracking_issue = "#769"
+
+[[exclusion]]
+path = "ferrotorch_core::fft::fftn_norm"
+reason = "Pending Phase 2.7-fft-complex — FFT, complex, signal. The phase will land a conformance test exercising this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
+tracking_issue = "#769"
+
+[[exclusion]]
+path = "ferrotorch_core::fft::hfft2"
+reason = "Pending Phase 2.7-fft-complex — FFT, complex, signal. The phase will land a conformance test exercising this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
+tracking_issue = "#769"
+
+[[exclusion]]
+path = "ferrotorch_core::fft::hfft2_norm"
+reason = "Pending Phase 2.7-fft-complex — FFT, complex, signal. The phase will land a conformance test exercising this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
+tracking_issue = "#769"
+
+[[exclusion]]
+path = "ferrotorch_core::fft::hfft_norm"
+reason = "Pending Phase 2.7-fft-complex — FFT, complex, signal. The phase will land a conformance test exercising this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
+tracking_issue = "#769"
+
+[[exclusion]]
+path = "ferrotorch_core::fft::hfftn"
+reason = "Pending Phase 2.7-fft-complex — FFT, complex, signal. The phase will land a conformance test exercising this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
+tracking_issue = "#769"
+
+[[exclusion]]
+path = "ferrotorch_core::fft::hfftn_norm"
+reason = "Pending Phase 2.7-fft-complex — FFT, complex, signal. The phase will land a conformance test exercising this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
+tracking_issue = "#769"
+
+[[exclusion]]
+path = "ferrotorch_core::fft::ifft2_norm"
+reason = "Pending Phase 2.7-fft-complex — FFT, complex, signal. The phase will land a conformance test exercising this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
+tracking_issue = "#769"
+
+[[exclusion]]
+path = "ferrotorch_core::fft::ifft_norm"
+reason = "Pending Phase 2.7-fft-complex — FFT, complex, signal. The phase will land a conformance test exercising this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
+tracking_issue = "#769"
+
+[[exclusion]]
+path = "ferrotorch_core::fft::ifftn_norm"
+reason = "Pending Phase 2.7-fft-complex — FFT, complex, signal. The phase will land a conformance test exercising this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
+tracking_issue = "#769"
+
+[[exclusion]]
+path = "ferrotorch_core::fft::ihfft2"
+reason = "Pending Phase 2.7-fft-complex — FFT, complex, signal. The phase will land a conformance test exercising this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
+tracking_issue = "#769"
+
+[[exclusion]]
+path = "ferrotorch_core::fft::ihfft2_norm"
+reason = "Pending Phase 2.7-fft-complex — FFT, complex, signal. The phase will land a conformance test exercising this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
+tracking_issue = "#769"
+
+[[exclusion]]
+path = "ferrotorch_core::fft::ihfft_norm"
+reason = "Pending Phase 2.7-fft-complex — FFT, complex, signal. The phase will land a conformance test exercising this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
+tracking_issue = "#769"
+
+[[exclusion]]
+path = "ferrotorch_core::fft::ihfftn"
+reason = "Pending Phase 2.7-fft-complex — FFT, complex, signal. The phase will land a conformance test exercising this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
+tracking_issue = "#769"
+
+[[exclusion]]
+path = "ferrotorch_core::fft::ihfftn_norm"
+reason = "Pending Phase 2.7-fft-complex — FFT, complex, signal. The phase will land a conformance test exercising this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
+tracking_issue = "#769"
+
+[[exclusion]]
+path = "ferrotorch_core::fft::irfft2"
+reason = "Pending Phase 2.7-fft-complex — FFT, complex, signal. The phase will land a conformance test exercising this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
+tracking_issue = "#769"
+
+[[exclusion]]
+path = "ferrotorch_core::fft::irfft2_norm"
+reason = "Pending Phase 2.7-fft-complex — FFT, complex, signal. The phase will land a conformance test exercising this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
+tracking_issue = "#769"
+
+[[exclusion]]
+path = "ferrotorch_core::fft::irfft_norm"
+reason = "Pending Phase 2.7-fft-complex — FFT, complex, signal. The phase will land a conformance test exercising this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
+tracking_issue = "#769"
+
+[[exclusion]]
+path = "ferrotorch_core::fft::irfftn_norm"
+reason = "Pending Phase 2.7-fft-complex — FFT, complex, signal. The phase will land a conformance test exercising this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
+tracking_issue = "#769"
+
+[[exclusion]]
+path = "ferrotorch_core::fft::rfft2"
+reason = "Pending Phase 2.7-fft-complex — FFT, complex, signal. The phase will land a conformance test exercising this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
+tracking_issue = "#769"
+
+[[exclusion]]
+path = "ferrotorch_core::fft::rfft2_norm"
+reason = "Pending Phase 2.7-fft-complex — FFT, complex, signal. The phase will land a conformance test exercising this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
+tracking_issue = "#769"
+
+[[exclusion]]
+path = "ferrotorch_core::fft::rfft_norm"
+reason = "Pending Phase 2.7-fft-complex — FFT, complex, signal. The phase will land a conformance test exercising this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
+tracking_issue = "#769"
+
+[[exclusion]]
+path = "ferrotorch_core::fft::rfftn_norm"
+reason = "Pending Phase 2.7-fft-complex — FFT, complex, signal. The phase will land a conformance test exercising this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
+tracking_issue = "#769"
+
+[[exclusion]]
+path = "ferrotorch_core::fft_differentiable_norm"
+reason = "Re-export covered transitively by the Phase 2.7-fft-complex conformance test that exercises the underlying item; the gate has no auto-coverage for re-exports whose short ident is absent from conformance sources."
+tracking_issue = "#769"
+
+[[exclusion]]
+path = "ferrotorch_core::fft_norm"
+reason = "Re-export covered transitively by the Phase 2.7-fft-complex conformance test that exercises the underlying item; the gate has no auto-coverage for re-exports whose short ident is absent from conformance sources."
+tracking_issue = "#769"
+
+[[exclusion]]
+path = "ferrotorch_core::fftn_differentiable_norm"
+reason = "Re-export covered transitively by the Phase 2.7-fft-complex conformance test that exercises the underlying item; the gate has no auto-coverage for re-exports whose short ident is absent from conformance sources."
+tracking_issue = "#769"
+
+[[exclusion]]
+path = "ferrotorch_core::fftn_norm"
+reason = "Re-export covered transitively by the Phase 2.7-fft-complex conformance test that exercises the underlying item; the gate has no auto-coverage for re-exports whose short ident is absent from conformance sources."
+tracking_issue = "#769"
+
+[[exclusion]]
+path = "ferrotorch_core::fliplr"
+reason = "Re-export covered transitively by the Phase 2.3-shape conformance test that exercises the underlying item; the gate has no auto-coverage for re-exports whose short ident is absent from conformance sources."
+tracking_issue = "#765"
+
+[[exclusion]]
+path = "ferrotorch_core::flipud"
+reason = "Re-export covered transitively by the Phase 2.3-shape conformance test that exercises the underlying item; the gate has no auto-coverage for re-exports whose short ident is absent from conformance sources."
+tracking_issue = "#765"
+
+[[exclusion]]
+path = "ferrotorch_core::gammainc"
+reason = "Re-export covered transitively by the Phase 2.5-special-transcendental conformance test that exercises the underlying item; the gate has no auto-coverage for re-exports whose short ident is absent from conformance sources."
+tracking_issue = "#767"
+
+[[exclusion]]
+path = "ferrotorch_core::gammaincc"
+reason = "Re-export covered transitively by the Phase 2.5-special-transcendental conformance test that exercises the underlying item; the gate has no auto-coverage for re-exports whose short ident is absent from conformance sources."
+tracking_issue = "#767"
+
+[[exclusion]]
+path = "ferrotorch_core::gammaln_sign"
+reason = "Re-export covered transitively by the Phase 2.5-special-transcendental conformance test that exercises the underlying item; the gate has no auto-coverage for re-exports whose short ident is absent from conformance sources."
+tracking_issue = "#767"
+
+[[exclusion]]
+path = "ferrotorch_core::gpu_dispatch::CompareOp"
+reason = "Pending Phase 2.14-plumbing — plumbing & core types. The phase will land a conformance test exercising this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
+tracking_issue = "#776"
+
+[[exclusion]]
+path = "ferrotorch_core::gpu_dispatch::CompareOp::suffix"
+reason = "Pending Phase 2.14-plumbing — plumbing & core types. Method covered transitively via its containing type's integration tests in the phase suite; gate substring mismatch on method-call syntax."
+tracking_issue = "#776"
+
+[[exclusion]]
+path = "ferrotorch_core::gpu_dispatch::GpuBufferHandle::dtype"
+reason = "Pending Phase 2.14-plumbing — plumbing & core types. Method covered transitively via its containing type's integration tests in the phase suite; gate substring mismatch on method-call syntax."
+tracking_issue = "#776"
+
+[[exclusion]]
+path = "ferrotorch_core::grad_fns::activation::CeluBackward"
+reason = "Pending Phase 2.5-special-transcendental — activations, transcendental, special. Autograd grad_fn / forward-helper internal for the activation family; the phase will land a conformance test exercising its VJP against PyTorch parity (CPU + GPU + autograd-where-applicable)."
+tracking_issue = "#767"
+
+[[exclusion]]
+path = "ferrotorch_core::grad_fns::activation::CeluBackward <T>::new"
+reason = "Pending Phase 2.5-special-transcendental — activations, transcendental, special. Autograd grad_fn / forward-helper internal for the activation family; the phase will land a conformance test exercising its VJP against PyTorch parity (CPU + GPU + autograd-where-applicable)."
+tracking_issue = "#767"
+
+[[exclusion]]
+path = "ferrotorch_core::grad_fns::activation::RReluBackward"
+reason = "Pending Phase 2.5-special-transcendental — activations, transcendental, special. Autograd grad_fn / forward-helper internal for the activation family; the phase will land a conformance test exercising its VJP against PyTorch parity (CPU + GPU + autograd-where-applicable)."
+tracking_issue = "#767"
+
+[[exclusion]]
+path = "ferrotorch_core::grad_fns::activation::RReluBackward <T>::new"
+reason = "Pending Phase 2.5-special-transcendental — activations, transcendental, special. Autograd grad_fn / forward-helper internal for the activation family; the phase will land a conformance test exercising its VJP against PyTorch parity (CPU + GPU + autograd-where-applicable)."
+tracking_issue = "#767"
+
+[[exclusion]]
+path = "ferrotorch_core::grad_fns::activation::SoftminBackward"
+reason = "Pending Phase 2.5-special-transcendental — activations, transcendental, special. Autograd grad_fn / forward-helper internal for the activation family; the phase will land a conformance test exercising its VJP against PyTorch parity (CPU + GPU + autograd-where-applicable)."
+tracking_issue = "#767"
+
+[[exclusion]]
+path = "ferrotorch_core::grad_fns::activation::SoftminBackward <T>::new"
+reason = "Pending Phase 2.5-special-transcendental — activations, transcendental, special. Autograd grad_fn / forward-helper internal for the activation family; the phase will land a conformance test exercising its VJP against PyTorch parity (CPU + GPU + autograd-where-applicable)."
+tracking_issue = "#767"
+
+[[exclusion]]
+path = "ferrotorch_core::grad_fns::activation::ThresholdBackward"
+reason = "Pending Phase 2.5-special-transcendental — activations, transcendental, special. Autograd grad_fn / forward-helper internal for the activation family; the phase will land a conformance test exercising its VJP against PyTorch parity (CPU + GPU + autograd-where-applicable)."
+tracking_issue = "#767"
+
+[[exclusion]]
+path = "ferrotorch_core::grad_fns::activation::ThresholdBackward <T>::new"
+reason = "Pending Phase 2.5-special-transcendental — activations, transcendental, special. Autograd grad_fn / forward-helper internal for the activation family; the phase will land a conformance test exercising its VJP against PyTorch parity (CPU + GPU + autograd-where-applicable)."
+tracking_issue = "#767"
+
+[[exclusion]]
+path = "ferrotorch_core::grad_fns::activation::celu"
+reason = "Pending Phase 2.5-special-transcendental — activations, transcendental, special. Autograd grad_fn / forward-helper internal for the activation family; the phase will land a conformance test exercising its VJP against PyTorch parity (CPU + GPU + autograd-where-applicable)."
+tracking_issue = "#767"
+
+[[exclusion]]
+path = "ferrotorch_core::grad_fns::activation::rrelu"
+reason = "Pending Phase 2.5-special-transcendental — activations, transcendental, special. Autograd grad_fn / forward-helper internal for the activation family; the phase will land a conformance test exercising its VJP against PyTorch parity (CPU + GPU + autograd-where-applicable)."
+tracking_issue = "#767"
+
+[[exclusion]]
+path = "ferrotorch_core::grad_fns::activation::softmin"
+reason = "Pending Phase 2.5-special-transcendental — activations, transcendental, special. Autograd grad_fn / forward-helper internal for the activation family; the phase will land a conformance test exercising its VJP against PyTorch parity (CPU + GPU + autograd-where-applicable)."
+tracking_issue = "#767"
+
+[[exclusion]]
+path = "ferrotorch_core::grad_fns::arithmetic::add_out"
+reason = "Pending Phase 2.1-elementwise — elementwise & inplace. Autograd grad_fn / forward-helper internal for the arithmetic family; the phase will land a conformance test exercising its VJP against PyTorch parity (CPU + GPU + autograd-where-applicable)."
+tracking_issue = "#763"
+
+[[exclusion]]
+path = "ferrotorch_core::grad_fns::arithmetic::add_scaled"
+reason = "Pending Phase 2.1-elementwise — elementwise & inplace. Autograd grad_fn / forward-helper internal for the arithmetic family; the phase will land a conformance test exercising its VJP against PyTorch parity (CPU + GPU + autograd-where-applicable)."
+tracking_issue = "#763"
+
+[[exclusion]]
+path = "ferrotorch_core::grad_fns::arithmetic::add_scaled_out"
+reason = "Pending Phase 2.1-elementwise — elementwise & inplace. Autograd grad_fn / forward-helper internal for the arithmetic family; the phase will land a conformance test exercising its VJP against PyTorch parity (CPU + GPU + autograd-where-applicable)."
+tracking_issue = "#763"
+
+[[exclusion]]
+path = "ferrotorch_core::grad_fns::arithmetic::addcdiv"
+reason = "Pending Phase 2.1-elementwise — elementwise & inplace. Autograd grad_fn / forward-helper internal for the arithmetic family; the phase will land a conformance test exercising its VJP against PyTorch parity (CPU + GPU + autograd-where-applicable)."
+tracking_issue = "#763"
+
+[[exclusion]]
+path = "ferrotorch_core::grad_fns::arithmetic::addcmul"
+reason = "Pending Phase 2.1-elementwise — elementwise & inplace. Autograd grad_fn / forward-helper internal for the arithmetic family; the phase will land a conformance test exercising its VJP against PyTorch parity (CPU + GPU + autograd-where-applicable)."
+tracking_issue = "#763"
+
+[[exclusion]]
+path = "ferrotorch_core::grad_fns::arithmetic::floor_divide"
+reason = "Pending Phase 2.1-elementwise — elementwise & inplace. Autograd grad_fn / forward-helper internal for the arithmetic family; the phase will land a conformance test exercising its VJP against PyTorch parity (CPU + GPU + autograd-where-applicable)."
+tracking_issue = "#763"
+
+[[exclusion]]
+path = "ferrotorch_core::grad_fns::arithmetic::fmod"
+reason = "Pending Phase 2.1-elementwise — elementwise & inplace. Autograd grad_fn / forward-helper internal for the arithmetic family; the phase will land a conformance test exercising its VJP against PyTorch parity (CPU + GPU + autograd-where-applicable)."
+tracking_issue = "#763"
+
+[[exclusion]]
+path = "ferrotorch_core::grad_fns::arithmetic::reciprocal"
+reason = "Pending Phase 2.1-elementwise — elementwise & inplace. Autograd grad_fn / forward-helper internal for the arithmetic family; the phase will land a conformance test exercising its VJP against PyTorch parity (CPU + GPU + autograd-where-applicable)."
+tracking_issue = "#763"
+
+[[exclusion]]
+path = "ferrotorch_core::grad_fns::arithmetic::remainder"
+reason = "Pending Phase 2.1-elementwise — elementwise & inplace. Autograd grad_fn / forward-helper internal for the arithmetic family; the phase will land a conformance test exercising its VJP against PyTorch parity (CPU + GPU + autograd-where-applicable)."
+tracking_issue = "#763"
+
+[[exclusion]]
+path = "ferrotorch_core::grad_fns::arithmetic::rsqrt"
+reason = "Pending Phase 2.1-elementwise — elementwise & inplace. Autograd grad_fn / forward-helper internal for the arithmetic family; the phase will land a conformance test exercising its VJP against PyTorch parity (CPU + GPU + autograd-where-applicable)."
+tracking_issue = "#763"
+
+[[exclusion]]
+path = "ferrotorch_core::grad_fns::arithmetic::rsub"
+reason = "Pending Phase 2.1-elementwise — elementwise & inplace. Autograd grad_fn / forward-helper internal for the arithmetic family; the phase will land a conformance test exercising its VJP against PyTorch parity (CPU + GPU + autograd-where-applicable)."
+tracking_issue = "#763"
+
+[[exclusion]]
+path = "ferrotorch_core::grad_fns::arithmetic::sub_scaled"
+reason = "Pending Phase 2.1-elementwise — elementwise & inplace. Autograd grad_fn / forward-helper internal for the arithmetic family; the phase will land a conformance test exercising its VJP against PyTorch parity (CPU + GPU + autograd-where-applicable)."
+tracking_issue = "#763"
+
+[[exclusion]]
+path = "ferrotorch_core::grad_fns::cumulative::CummaxBackward"
+reason = "Pending Phase 2.2-reduction — reductions & cumulative. Autograd grad_fn / forward-helper internal for the cumulative family; the phase will land a conformance test exercising its VJP against PyTorch parity (CPU + GPU + autograd-where-applicable)."
+tracking_issue = "#764"
+
+[[exclusion]]
+path = "ferrotorch_core::grad_fns::cumulative::CumminBackward"
+reason = "Pending Phase 2.2-reduction — reductions & cumulative. Autograd grad_fn / forward-helper internal for the cumulative family; the phase will land a conformance test exercising its VJP against PyTorch parity (CPU + GPU + autograd-where-applicable)."
+tracking_issue = "#764"
+
+[[exclusion]]
+path = "ferrotorch_core::grad_fns::fft::Fft2Backward"
+reason = "Pending Phase 2.7-fft-complex — FFT, complex, signal. Autograd grad_fn / forward-helper internal for the fft family; the phase will land a conformance test exercising its VJP against PyTorch parity (CPU + GPU + autograd-where-applicable)."
+tracking_issue = "#769"
+
+[[exclusion]]
+path = "ferrotorch_core::grad_fns::fft::Fft2Backward <T>::new"
+reason = "Pending Phase 2.7-fft-complex — FFT, complex, signal. Autograd grad_fn / forward-helper internal for the fft family; the phase will land a conformance test exercising its VJP against PyTorch parity (CPU + GPU + autograd-where-applicable)."
+tracking_issue = "#769"
+
+[[exclusion]]
+path = "ferrotorch_core::grad_fns::fft::FftBackward <T>::new_norm"
+reason = "Pending Phase 2.7-fft-complex — FFT, complex, signal. Autograd grad_fn / forward-helper internal for the fft family; the phase will land a conformance test exercising its VJP against PyTorch parity (CPU + GPU + autograd-where-applicable)."
+tracking_issue = "#769"
+
+[[exclusion]]
+path = "ferrotorch_core::grad_fns::fft::FftnBackward <T>::new_norm"
+reason = "Pending Phase 2.7-fft-complex — FFT, complex, signal. Autograd grad_fn / forward-helper internal for the fft family; the phase will land a conformance test exercising its VJP against PyTorch parity (CPU + GPU + autograd-where-applicable)."
+tracking_issue = "#769"
+
+[[exclusion]]
+path = "ferrotorch_core::grad_fns::fft::Ifft2Backward"
+reason = "Pending Phase 2.7-fft-complex — FFT, complex, signal. Autograd grad_fn / forward-helper internal for the fft family; the phase will land a conformance test exercising its VJP against PyTorch parity (CPU + GPU + autograd-where-applicable)."
+tracking_issue = "#769"
+
+[[exclusion]]
+path = "ferrotorch_core::grad_fns::fft::Ifft2Backward <T>::new"
+reason = "Pending Phase 2.7-fft-complex — FFT, complex, signal. Autograd grad_fn / forward-helper internal for the fft family; the phase will land a conformance test exercising its VJP against PyTorch parity (CPU + GPU + autograd-where-applicable)."
+tracking_issue = "#769"
+
+[[exclusion]]
+path = "ferrotorch_core::grad_fns::fft::IfftBackward <T>::new_norm"
+reason = "Pending Phase 2.7-fft-complex — FFT, complex, signal. Autograd grad_fn / forward-helper internal for the fft family; the phase will land a conformance test exercising its VJP against PyTorch parity (CPU + GPU + autograd-where-applicable)."
+tracking_issue = "#769"
+
+[[exclusion]]
+path = "ferrotorch_core::grad_fns::fft::IfftnBackward <T>::new_norm"
+reason = "Pending Phase 2.7-fft-complex — FFT, complex, signal. Autograd grad_fn / forward-helper internal for the fft family; the phase will land a conformance test exercising its VJP against PyTorch parity (CPU + GPU + autograd-where-applicable)."
+tracking_issue = "#769"
+
+[[exclusion]]
+path = "ferrotorch_core::grad_fns::fft::IrfftnBackward <T>::new_norm"
+reason = "Pending Phase 2.7-fft-complex — FFT, complex, signal. Autograd grad_fn / forward-helper internal for the fft family; the phase will land a conformance test exercising its VJP against PyTorch parity (CPU + GPU + autograd-where-applicable)."
+tracking_issue = "#769"
+
+[[exclusion]]
+path = "ferrotorch_core::grad_fns::fft::RfftnBackward <T>::new_norm"
+reason = "Pending Phase 2.7-fft-complex — FFT, complex, signal. Autograd grad_fn / forward-helper internal for the fft family; the phase will land a conformance test exercising its VJP against PyTorch parity (CPU + GPU + autograd-where-applicable)."
+tracking_issue = "#769"
+
+[[exclusion]]
+path = "ferrotorch_core::grad_fns::fft::fft2_differentiable"
+reason = "Pending Phase 2.7-fft-complex — FFT, complex, signal. Autograd grad_fn / forward-helper internal for the fft family; the phase will land a conformance test exercising its VJP against PyTorch parity (CPU + GPU + autograd-where-applicable)."
+tracking_issue = "#769"
+
+[[exclusion]]
+path = "ferrotorch_core::grad_fns::fft::fft2_differentiable_norm"
+reason = "Pending Phase 2.7-fft-complex — FFT, complex, signal. Autograd grad_fn / forward-helper internal for the fft family; the phase will land a conformance test exercising its VJP against PyTorch parity (CPU + GPU + autograd-where-applicable)."
+tracking_issue = "#769"
+
+[[exclusion]]
+path = "ferrotorch_core::grad_fns::fft::fft_differentiable_norm"
+reason = "Pending Phase 2.7-fft-complex — FFT, complex, signal. Autograd grad_fn / forward-helper internal for the fft family; the phase will land a conformance test exercising its VJP against PyTorch parity (CPU + GPU + autograd-where-applicable)."
+tracking_issue = "#769"
+
+[[exclusion]]
+path = "ferrotorch_core::grad_fns::fft::fftn_differentiable_norm"
+reason = "Pending Phase 2.7-fft-complex — FFT, complex, signal. Autograd grad_fn / forward-helper internal for the fft family; the phase will land a conformance test exercising its VJP against PyTorch parity (CPU + GPU + autograd-where-applicable)."
+tracking_issue = "#769"
+
+[[exclusion]]
+path = "ferrotorch_core::grad_fns::fft::ifft2_differentiable"
+reason = "Pending Phase 2.7-fft-complex — FFT, complex, signal. Autograd grad_fn / forward-helper internal for the fft family; the phase will land a conformance test exercising its VJP against PyTorch parity (CPU + GPU + autograd-where-applicable)."
+tracking_issue = "#769"
+
+[[exclusion]]
+path = "ferrotorch_core::grad_fns::fft::ifft2_differentiable_norm"
+reason = "Pending Phase 2.7-fft-complex — FFT, complex, signal. Autograd grad_fn / forward-helper internal for the fft family; the phase will land a conformance test exercising its VJP against PyTorch parity (CPU + GPU + autograd-where-applicable)."
+tracking_issue = "#769"
+
+[[exclusion]]
+path = "ferrotorch_core::grad_fns::fft::ifft_differentiable_norm"
+reason = "Pending Phase 2.7-fft-complex — FFT, complex, signal. Autograd grad_fn / forward-helper internal for the fft family; the phase will land a conformance test exercising its VJP against PyTorch parity (CPU + GPU + autograd-where-applicable)."
+tracking_issue = "#769"
+
+[[exclusion]]
+path = "ferrotorch_core::grad_fns::fft::ifftn_differentiable_norm"
+reason = "Pending Phase 2.7-fft-complex — FFT, complex, signal. Autograd grad_fn / forward-helper internal for the fft family; the phase will land a conformance test exercising its VJP against PyTorch parity (CPU + GPU + autograd-where-applicable)."
+tracking_issue = "#769"
+
+[[exclusion]]
+path = "ferrotorch_core::grad_fns::fft::irfft_differentiable_norm"
+reason = "Pending Phase 2.7-fft-complex — FFT, complex, signal. Autograd grad_fn / forward-helper internal for the fft family; the phase will land a conformance test exercising its VJP against PyTorch parity (CPU + GPU + autograd-where-applicable)."
+tracking_issue = "#769"
+
+[[exclusion]]
+path = "ferrotorch_core::grad_fns::fft::irfftn_differentiable_norm"
+reason = "Pending Phase 2.7-fft-complex — FFT, complex, signal. Autograd grad_fn / forward-helper internal for the fft family; the phase will land a conformance test exercising its VJP against PyTorch parity (CPU + GPU + autograd-where-applicable)."
+tracking_issue = "#769"
+
+[[exclusion]]
+path = "ferrotorch_core::grad_fns::fft::rfft_differentiable_norm"
+reason = "Pending Phase 2.7-fft-complex — FFT, complex, signal. Autograd grad_fn / forward-helper internal for the fft family; the phase will land a conformance test exercising its VJP against PyTorch parity (CPU + GPU + autograd-where-applicable)."
+tracking_issue = "#769"
+
+[[exclusion]]
+path = "ferrotorch_core::grad_fns::fft::rfftn_differentiable_norm"
+reason = "Pending Phase 2.7-fft-complex — FFT, complex, signal. Autograd grad_fn / forward-helper internal for the fft family; the phase will land a conformance test exercising its VJP against PyTorch parity (CPU + GPU + autograd-where-applicable)."
+tracking_issue = "#769"
+
+[[exclusion]]
+path = "ferrotorch_core::grad_fns::indexing::IndexAddBackward"
+reason = "Pending Phase 2.3-shape — shape, indexing, view. Autograd grad_fn / forward-helper internal for the indexing family; the phase will land a conformance test exercising its VJP against PyTorch parity (CPU + GPU + autograd-where-applicable)."
+tracking_issue = "#765"
+
+[[exclusion]]
+path = "ferrotorch_core::grad_fns::indexing::IndexCopyBackward"
+reason = "Pending Phase 2.3-shape — shape, indexing, view. Autograd grad_fn / forward-helper internal for the indexing family; the phase will land a conformance test exercising its VJP against PyTorch parity (CPU + GPU + autograd-where-applicable)."
+tracking_issue = "#765"
+
+[[exclusion]]
+path = "ferrotorch_core::grad_fns::indexing::IndexFillBackward"
+reason = "Pending Phase 2.3-shape — shape, indexing, view. Autograd grad_fn / forward-helper internal for the indexing family; the phase will land a conformance test exercising its VJP against PyTorch parity (CPU + GPU + autograd-where-applicable)."
+tracking_issue = "#765"
+
+[[exclusion]]
+path = "ferrotorch_core::grad_fns::indexing::MaskedScatterBackward"
+reason = "Pending Phase 2.3-shape — shape, indexing, view. Autograd grad_fn / forward-helper internal for the indexing family; the phase will land a conformance test exercising its VJP against PyTorch parity (CPU + GPU + autograd-where-applicable)."
+tracking_issue = "#765"
+
+[[exclusion]]
+path = "ferrotorch_core::grad_fns::indexing::MaskedSelectBackward"
+reason = "Pending Phase 2.3-shape — shape, indexing, view. Autograd grad_fn / forward-helper internal for the indexing family; the phase will land a conformance test exercising its VJP against PyTorch parity (CPU + GPU + autograd-where-applicable)."
+tracking_issue = "#765"
+
+[[exclusion]]
+path = "ferrotorch_core::grad_fns::indexing::PutBackward"
+reason = "Pending Phase 2.3-shape — shape, indexing, view. Autograd grad_fn / forward-helper internal for the indexing family; the phase will land a conformance test exercising its VJP against PyTorch parity (CPU + GPU + autograd-where-applicable)."
+tracking_issue = "#765"
+
+[[exclusion]]
+path = "ferrotorch_core::grad_fns::indexing::ScatterReduce"
+reason = "Pending Phase 2.3-shape — shape, indexing, view. Autograd grad_fn / forward-helper internal for the indexing family; the phase will land a conformance test exercising its VJP against PyTorch parity (CPU + GPU + autograd-where-applicable)."
+tracking_issue = "#765"
+
+[[exclusion]]
+path = "ferrotorch_core::grad_fns::indexing::ScatterReduce::parse_str"
+reason = "Pending Phase 2.3-shape — shape, indexing, view. Autograd grad_fn / forward-helper internal for the indexing family; the phase will land a conformance test exercising its VJP against PyTorch parity (CPU + GPU + autograd-where-applicable)."
+tracking_issue = "#765"
+
+[[exclusion]]
+path = "ferrotorch_core::grad_fns::indexing::ScatterReduceBackward"
+reason = "Pending Phase 2.3-shape — shape, indexing, view. Autograd grad_fn / forward-helper internal for the indexing family; the phase will land a conformance test exercising its VJP against PyTorch parity (CPU + GPU + autograd-where-applicable)."
+tracking_issue = "#765"
+
+[[exclusion]]
+path = "ferrotorch_core::grad_fns::indexing::TakeBackward"
+reason = "Pending Phase 2.3-shape — shape, indexing, view. Autograd grad_fn / forward-helper internal for the indexing family; the phase will land a conformance test exercising its VJP against PyTorch parity (CPU + GPU + autograd-where-applicable)."
+tracking_issue = "#765"
+
+[[exclusion]]
+path = "ferrotorch_core::grad_fns::indexing::index_add"
+reason = "Pending Phase 2.3-shape — shape, indexing, view. Autograd grad_fn / forward-helper internal for the indexing family; the phase will land a conformance test exercising its VJP against PyTorch parity (CPU + GPU + autograd-where-applicable)."
+tracking_issue = "#765"
+
+[[exclusion]]
+path = "ferrotorch_core::grad_fns::indexing::index_copy"
+reason = "Pending Phase 2.3-shape — shape, indexing, view. Autograd grad_fn / forward-helper internal for the indexing family; the phase will land a conformance test exercising its VJP against PyTorch parity (CPU + GPU + autograd-where-applicable)."
+tracking_issue = "#765"
+
+[[exclusion]]
+path = "ferrotorch_core::grad_fns::indexing::index_fill"
+reason = "Pending Phase 2.3-shape — shape, indexing, view. Autograd grad_fn / forward-helper internal for the indexing family; the phase will land a conformance test exercising its VJP against PyTorch parity (CPU + GPU + autograd-where-applicable)."
+tracking_issue = "#765"
+
+[[exclusion]]
+path = "ferrotorch_core::grad_fns::indexing::masked_fill_bcast"
+reason = "Pending Phase 2.3-shape — shape, indexing, view. Autograd grad_fn / forward-helper internal for the indexing family; the phase will land a conformance test exercising its VJP against PyTorch parity (CPU + GPU + autograd-where-applicable)."
+tracking_issue = "#765"
+
+[[exclusion]]
+path = "ferrotorch_core::grad_fns::indexing::masked_scatter"
+reason = "Pending Phase 2.3-shape — shape, indexing, view. Autograd grad_fn / forward-helper internal for the indexing family; the phase will land a conformance test exercising its VJP against PyTorch parity (CPU + GPU + autograd-where-applicable)."
+tracking_issue = "#765"
+
+[[exclusion]]
+path = "ferrotorch_core::grad_fns::indexing::masked_select_bcast"
+reason = "Pending Phase 2.3-shape — shape, indexing, view. Autograd grad_fn / forward-helper internal for the indexing family; the phase will land a conformance test exercising its VJP against PyTorch parity (CPU + GPU + autograd-where-applicable)."
+tracking_issue = "#765"
+
+[[exclusion]]
+path = "ferrotorch_core::grad_fns::indexing::scatter_reduce"
+reason = "Pending Phase 2.3-shape — shape, indexing, view. Autograd grad_fn / forward-helper internal for the indexing family; the phase will land a conformance test exercising its VJP against PyTorch parity (CPU + GPU + autograd-where-applicable)."
+tracking_issue = "#765"
+
+[[exclusion]]
+path = "ferrotorch_core::grad_fns::indexing::where_cond_bcast"
+reason = "Pending Phase 2.3-shape — shape, indexing, view. Autograd grad_fn / forward-helper internal for the indexing family; the phase will land a conformance test exercising its VJP against PyTorch parity (CPU + GPU + autograd-where-applicable)."
+tracking_issue = "#765"
+
+[[exclusion]]
+path = "ferrotorch_core::grad_fns::linalg::AddbmmBackward"
+reason = "Pending Phase 2.4-linalg — linalg. Autograd grad_fn / forward-helper internal for the linalg family; the phase will land a conformance test exercising its VJP against PyTorch parity (CPU + GPU + autograd-where-applicable)."
+tracking_issue = "#766"
+
+[[exclusion]]
+path = "ferrotorch_core::grad_fns::linalg::AddmmBackward"
+reason = "Pending Phase 2.4-linalg — linalg. Autograd grad_fn / forward-helper internal for the linalg family; the phase will land a conformance test exercising its VJP against PyTorch parity (CPU + GPU + autograd-where-applicable)."
+tracking_issue = "#766"
+
+[[exclusion]]
+path = "ferrotorch_core::grad_fns::linalg::AddmvBackward"
+reason = "Pending Phase 2.4-linalg — linalg. Autograd grad_fn / forward-helper internal for the linalg family; the phase will land a conformance test exercising its VJP against PyTorch parity (CPU + GPU + autograd-where-applicable)."
+tracking_issue = "#766"
+
+[[exclusion]]
+path = "ferrotorch_core::grad_fns::linalg::AddrBackward"
+reason = "Pending Phase 2.4-linalg — linalg. Autograd grad_fn / forward-helper internal for the linalg family; the phase will land a conformance test exercising its VJP against PyTorch parity (CPU + GPU + autograd-where-applicable)."
+tracking_issue = "#766"
+
+[[exclusion]]
+path = "ferrotorch_core::grad_fns::linalg::BaddbmmBackward"
+reason = "Pending Phase 2.4-linalg — linalg. Autograd grad_fn / forward-helper internal for the linalg family; the phase will land a conformance test exercising its VJP against PyTorch parity (CPU + GPU + autograd-where-applicable)."
+tracking_issue = "#766"
+
+[[exclusion]]
+path = "ferrotorch_core::grad_fns::linalg::CholeskyBackward"
+reason = "Pending Phase 2.4-linalg — linalg. Autograd grad_fn / forward-helper internal for the linalg family; the phase will land a conformance test exercising its VJP against PyTorch parity (CPU + GPU + autograd-where-applicable)."
+tracking_issue = "#766"
+
+[[exclusion]]
+path = "ferrotorch_core::grad_fns::linalg::CrossBackward"
+reason = "Pending Phase 2.4-linalg — linalg. Autograd grad_fn / forward-helper internal for the linalg family; the phase will land a conformance test exercising its VJP against PyTorch parity (CPU + GPU + autograd-where-applicable)."
+tracking_issue = "#766"
+
+[[exclusion]]
+path = "ferrotorch_core::grad_fns::linalg::DiagBackward"
+reason = "Pending Phase 2.4-linalg — linalg. Autograd grad_fn / forward-helper internal for the linalg family; the phase will land a conformance test exercising its VJP against PyTorch parity (CPU + GPU + autograd-where-applicable)."
+tracking_issue = "#766"
+
+[[exclusion]]
+path = "ferrotorch_core::grad_fns::linalg::DiagonalBackward"
+reason = "Pending Phase 2.4-linalg — linalg. Autograd grad_fn / forward-helper internal for the linalg family; the phase will land a conformance test exercising its VJP against PyTorch parity (CPU + GPU + autograd-where-applicable)."
+tracking_issue = "#766"
+
+[[exclusion]]
+path = "ferrotorch_core::grad_fns::linalg::EigvalshBackward"
+reason = "Pending Phase 2.4-linalg — linalg. Autograd grad_fn / forward-helper internal for the linalg family; the phase will land a conformance test exercising its VJP against PyTorch parity (CPU + GPU + autograd-where-applicable)."
+tracking_issue = "#766"
+
+[[exclusion]]
+path = "ferrotorch_core::grad_fns::linalg::KronBackward"
+reason = "Pending Phase 2.4-linalg — linalg. Autograd grad_fn / forward-helper internal for the linalg family; the phase will land a conformance test exercising its VJP against PyTorch parity (CPU + GPU + autograd-where-applicable)."
+tracking_issue = "#766"
+
+[[exclusion]]
+path = "ferrotorch_core::grad_fns::linalg::LinalgDetBackward"
+reason = "Pending Phase 2.4-linalg — linalg. Autograd grad_fn / forward-helper internal for the linalg family; the phase will land a conformance test exercising its VJP against PyTorch parity (CPU + GPU + autograd-where-applicable)."
+tracking_issue = "#766"
+
+[[exclusion]]
+path = "ferrotorch_core::grad_fns::linalg::LinalgInvBackward"
+reason = "Pending Phase 2.4-linalg — linalg. Autograd grad_fn / forward-helper internal for the linalg family; the phase will land a conformance test exercising its VJP against PyTorch parity (CPU + GPU + autograd-where-applicable)."
+tracking_issue = "#766"
+
+[[exclusion]]
+path = "ferrotorch_core::grad_fns::linalg::LinalgSolveBackward"
+reason = "Pending Phase 2.4-linalg — linalg. Autograd grad_fn / forward-helper internal for the linalg family; the phase will land a conformance test exercising its VJP against PyTorch parity (CPU + GPU + autograd-where-applicable)."
+tracking_issue = "#766"
+
+[[exclusion]]
+path = "ferrotorch_core::grad_fns::linalg::LstsqBackward"
+reason = "Pending Phase 2.4-linalg — linalg. Autograd grad_fn / forward-helper internal for the linalg family; the phase will land a conformance test exercising its VJP against PyTorch parity (CPU + GPU + autograd-where-applicable)."
+tracking_issue = "#766"
+
+[[exclusion]]
+path = "ferrotorch_core::grad_fns::linalg::LuFactorBackward"
+reason = "Pending Phase 2.4-linalg — linalg. Autograd grad_fn / forward-helper internal for the linalg family; the phase will land a conformance test exercising its VJP against PyTorch parity (CPU + GPU + autograd-where-applicable)."
+tracking_issue = "#766"
+
+[[exclusion]]
+path = "ferrotorch_core::grad_fns::linalg::NormBackward"
+reason = "Pending Phase 2.4-linalg — linalg. Autograd grad_fn / forward-helper internal for the linalg family; the phase will land a conformance test exercising its VJP against PyTorch parity (CPU + GPU + autograd-where-applicable)."
+tracking_issue = "#766"
+
+[[exclusion]]
+path = "ferrotorch_core::grad_fns::linalg::OuterBackward"
+reason = "Pending Phase 2.4-linalg — linalg. Autograd grad_fn / forward-helper internal for the linalg family; the phase will land a conformance test exercising its VJP against PyTorch parity (CPU + GPU + autograd-where-applicable)."
+tracking_issue = "#766"
+
+[[exclusion]]
+path = "ferrotorch_core::grad_fns::linalg::OuterBackward <T>::new"
+reason = "Pending Phase 2.4-linalg — linalg. Autograd grad_fn / forward-helper internal for the linalg family; the phase will land a conformance test exercising its VJP against PyTorch parity (CPU + GPU + autograd-where-applicable)."
+tracking_issue = "#766"
+
+[[exclusion]]
+path = "ferrotorch_core::grad_fns::linalg::PinvBackward"
+reason = "Pending Phase 2.4-linalg — linalg. Autograd grad_fn / forward-helper internal for the linalg family; the phase will land a conformance test exercising its VJP against PyTorch parity (CPU + GPU + autograd-where-applicable)."
+tracking_issue = "#766"
+
+[[exclusion]]
+path = "ferrotorch_core::grad_fns::linalg::SlogdetBackward"
+reason = "Pending Phase 2.4-linalg — linalg. Autograd grad_fn / forward-helper internal for the linalg family; the phase will land a conformance test exercising its VJP against PyTorch parity (CPU + GPU + autograd-where-applicable)."
+tracking_issue = "#766"
+
+[[exclusion]]
+path = "ferrotorch_core::grad_fns::linalg::TraceBackward"
+reason = "Pending Phase 2.4-linalg — linalg. Autograd grad_fn / forward-helper internal for the linalg family; the phase will land a conformance test exercising its VJP against PyTorch parity (CPU + GPU + autograd-where-applicable)."
+tracking_issue = "#766"
+
+[[exclusion]]
+path = "ferrotorch_core::grad_fns::linalg::TriangularBackward"
+reason = "Pending Phase 2.4-linalg — linalg. Autograd grad_fn / forward-helper internal for the linalg family; the phase will land a conformance test exercising its VJP against PyTorch parity (CPU + GPU + autograd-where-applicable)."
+tracking_issue = "#766"
+
+[[exclusion]]
+path = "ferrotorch_core::grad_fns::linalg::addbmm_differentiable"
+reason = "Pending Phase 2.4-linalg — linalg. Autograd grad_fn / forward-helper internal for the linalg family; the phase will land a conformance test exercising its VJP against PyTorch parity (CPU + GPU + autograd-where-applicable)."
+tracking_issue = "#766"
+
+[[exclusion]]
+path = "ferrotorch_core::grad_fns::linalg::addmm_differentiable"
+reason = "Pending Phase 2.4-linalg — linalg. Autograd grad_fn / forward-helper internal for the linalg family; the phase will land a conformance test exercising its VJP against PyTorch parity (CPU + GPU + autograd-where-applicable)."
+tracking_issue = "#766"
+
+[[exclusion]]
+path = "ferrotorch_core::grad_fns::linalg::addmv_differentiable"
+reason = "Pending Phase 2.4-linalg — linalg. Autograd grad_fn / forward-helper internal for the linalg family; the phase will land a conformance test exercising its VJP against PyTorch parity (CPU + GPU + autograd-where-applicable)."
+tracking_issue = "#766"
+
+[[exclusion]]
+path = "ferrotorch_core::grad_fns::linalg::addr_differentiable"
+reason = "Pending Phase 2.4-linalg — linalg. Autograd grad_fn / forward-helper internal for the linalg family; the phase will land a conformance test exercising its VJP against PyTorch parity (CPU + GPU + autograd-where-applicable)."
+tracking_issue = "#766"
+
+[[exclusion]]
+path = "ferrotorch_core::grad_fns::linalg::baddbmm_differentiable"
+reason = "Pending Phase 2.4-linalg — linalg. Autograd grad_fn / forward-helper internal for the linalg family; the phase will land a conformance test exercising its VJP against PyTorch parity (CPU + GPU + autograd-where-applicable)."
+tracking_issue = "#766"
+
+[[exclusion]]
+path = "ferrotorch_core::grad_fns::linalg::cholesky_differentiable"
+reason = "Pending Phase 2.4-linalg — linalg. Autograd grad_fn / forward-helper internal for the linalg family; the phase will land a conformance test exercising its VJP against PyTorch parity (CPU + GPU + autograd-where-applicable)."
+tracking_issue = "#766"
+
+[[exclusion]]
+path = "ferrotorch_core::grad_fns::linalg::cross_differentiable"
+reason = "Pending Phase 2.4-linalg — linalg. Autograd grad_fn / forward-helper internal for the linalg family; the phase will land a conformance test exercising its VJP against PyTorch parity (CPU + GPU + autograd-where-applicable)."
+tracking_issue = "#766"
+
+[[exclusion]]
+path = "ferrotorch_core::grad_fns::linalg::det_differentiable"
+reason = "Pending Phase 2.4-linalg — linalg. Autograd grad_fn / forward-helper internal for the linalg family; the phase will land a conformance test exercising its VJP against PyTorch parity (CPU + GPU + autograd-where-applicable)."
+tracking_issue = "#766"
+
+[[exclusion]]
+path = "ferrotorch_core::grad_fns::linalg::diag_differentiable"
+reason = "Pending Phase 2.4-linalg — linalg. Autograd grad_fn / forward-helper internal for the linalg family; the phase will land a conformance test exercising its VJP against PyTorch parity (CPU + GPU + autograd-where-applicable)."
+tracking_issue = "#766"
+
+[[exclusion]]
+path = "ferrotorch_core::grad_fns::linalg::diagonal_differentiable"
+reason = "Pending Phase 2.4-linalg — linalg. Autograd grad_fn / forward-helper internal for the linalg family; the phase will land a conformance test exercising its VJP against PyTorch parity (CPU + GPU + autograd-where-applicable)."
+tracking_issue = "#766"
+
+[[exclusion]]
+path = "ferrotorch_core::grad_fns::linalg::eigh_differentiable"
+reason = "Pending Phase 2.4-linalg — linalg. Autograd grad_fn / forward-helper internal for the linalg family; the phase will land a conformance test exercising its VJP against PyTorch parity (CPU + GPU + autograd-where-applicable)."
+tracking_issue = "#766"
+
+[[exclusion]]
+path = "ferrotorch_core::grad_fns::linalg::eigvalsh_differentiable"
+reason = "Pending Phase 2.4-linalg — linalg. Autograd grad_fn / forward-helper internal for the linalg family; the phase will land a conformance test exercising its VJP against PyTorch parity (CPU + GPU + autograd-where-applicable)."
+tracking_issue = "#766"
+
+[[exclusion]]
+path = "ferrotorch_core::grad_fns::linalg::inv_differentiable"
+reason = "Pending Phase 2.4-linalg — linalg. Autograd grad_fn / forward-helper internal for the linalg family; the phase will land a conformance test exercising its VJP against PyTorch parity (CPU + GPU + autograd-where-applicable)."
+tracking_issue = "#766"
+
+[[exclusion]]
+path = "ferrotorch_core::grad_fns::linalg::kron_differentiable"
+reason = "Pending Phase 2.4-linalg — linalg. Autograd grad_fn / forward-helper internal for the linalg family; the phase will land a conformance test exercising its VJP against PyTorch parity (CPU + GPU + autograd-where-applicable)."
+tracking_issue = "#766"
+
+[[exclusion]]
+path = "ferrotorch_core::grad_fns::linalg::lstsq_differentiable"
+reason = "Pending Phase 2.4-linalg — linalg. Autograd grad_fn / forward-helper internal for the linalg family; the phase will land a conformance test exercising its VJP against PyTorch parity (CPU + GPU + autograd-where-applicable)."
+tracking_issue = "#766"
+
+[[exclusion]]
+path = "ferrotorch_core::grad_fns::linalg::lu_differentiable"
+reason = "Pending Phase 2.4-linalg — linalg. Autograd grad_fn / forward-helper internal for the linalg family; the phase will land a conformance test exercising its VJP against PyTorch parity (CPU + GPU + autograd-where-applicable)."
+tracking_issue = "#766"
+
+[[exclusion]]
+path = "ferrotorch_core::grad_fns::linalg::lu_factor_differentiable"
+reason = "Pending Phase 2.4-linalg — linalg. Autograd grad_fn / forward-helper internal for the linalg family; the phase will land a conformance test exercising its VJP against PyTorch parity (CPU + GPU + autograd-where-applicable)."
+tracking_issue = "#766"
+
+[[exclusion]]
+path = "ferrotorch_core::grad_fns::linalg::matrix_norm_differentiable"
+reason = "Pending Phase 2.4-linalg — linalg. Autograd grad_fn / forward-helper internal for the linalg family; the phase will land a conformance test exercising its VJP against PyTorch parity (CPU + GPU + autograd-where-applicable)."
+tracking_issue = "#766"
+
+[[exclusion]]
+path = "ferrotorch_core::grad_fns::linalg::outer_differentiable"
+reason = "Pending Phase 2.4-linalg — linalg. Autograd grad_fn / forward-helper internal for the linalg family; the phase will land a conformance test exercising its VJP against PyTorch parity (CPU + GPU + autograd-where-applicable)."
+tracking_issue = "#766"
+
+[[exclusion]]
+path = "ferrotorch_core::grad_fns::linalg::pinv_differentiable"
+reason = "Pending Phase 2.4-linalg — linalg. Autograd grad_fn / forward-helper internal for the linalg family; the phase will land a conformance test exercising its VJP against PyTorch parity (CPU + GPU + autograd-where-applicable)."
+tracking_issue = "#766"
+
+[[exclusion]]
+path = "ferrotorch_core::grad_fns::linalg::qr_differentiable"
+reason = "Pending Phase 2.4-linalg — linalg. Autograd grad_fn / forward-helper internal for the linalg family; the phase will land a conformance test exercising its VJP against PyTorch parity (CPU + GPU + autograd-where-applicable)."
+tracking_issue = "#766"
+
+[[exclusion]]
+path = "ferrotorch_core::grad_fns::linalg::slogdet_differentiable"
+reason = "Pending Phase 2.4-linalg — linalg. Autograd grad_fn / forward-helper internal for the linalg family; the phase will land a conformance test exercising its VJP against PyTorch parity (CPU + GPU + autograd-where-applicable)."
+tracking_issue = "#766"
+
+[[exclusion]]
+path = "ferrotorch_core::grad_fns::linalg::solve_differentiable"
+reason = "Pending Phase 2.4-linalg — linalg. Autograd grad_fn / forward-helper internal for the linalg family; the phase will land a conformance test exercising its VJP against PyTorch parity (CPU + GPU + autograd-where-applicable)."
+tracking_issue = "#766"
+
+[[exclusion]]
+path = "ferrotorch_core::grad_fns::linalg::trace_differentiable"
+reason = "Pending Phase 2.4-linalg — linalg. Autograd grad_fn / forward-helper internal for the linalg family; the phase will land a conformance test exercising its VJP against PyTorch parity (CPU + GPU + autograd-where-applicable)."
+tracking_issue = "#766"
+
+[[exclusion]]
+path = "ferrotorch_core::grad_fns::linalg::tril_differentiable"
+reason = "Pending Phase 2.4-linalg — linalg. Autograd grad_fn / forward-helper internal for the linalg family; the phase will land a conformance test exercising its VJP against PyTorch parity (CPU + GPU + autograd-where-applicable)."
+tracking_issue = "#766"
+
+[[exclusion]]
+path = "ferrotorch_core::grad_fns::linalg::triu_differentiable"
+reason = "Pending Phase 2.4-linalg — linalg. Autograd grad_fn / forward-helper internal for the linalg family; the phase will land a conformance test exercising its VJP against PyTorch parity (CPU + GPU + autograd-where-applicable)."
+tracking_issue = "#766"
+
+[[exclusion]]
+path = "ferrotorch_core::grad_fns::linalg::vector_norm_differentiable"
+reason = "Pending Phase 2.4-linalg — linalg. Autograd grad_fn / forward-helper internal for the linalg family; the phase will land a conformance test exercising its VJP against PyTorch parity (CPU + GPU + autograd-where-applicable)."
+tracking_issue = "#766"
+
+[[exclusion]]
+path = "ferrotorch_core::grad_fns::quantize_grad::fake_quantize_per_channel_affine"
+reason = "Pending Phase 2.9-quantize-prune — quantize & prune. Autograd grad_fn / forward-helper internal for the quantize_grad family; the phase will land a conformance test exercising its VJP against PyTorch parity (CPU + GPU + autograd-where-applicable)."
+tracking_issue = "#771"
+
+[[exclusion]]
+path = "ferrotorch_core::grad_fns::reduction::AmaxDimBackward"
+reason = "Pending Phase 2.2-reduction — reductions & cumulative. Autograd grad_fn / forward-helper internal for the reduction family; the phase will land a conformance test exercising its VJP against PyTorch parity (CPU + GPU + autograd-where-applicable)."
+tracking_issue = "#764"
+
+[[exclusion]]
+path = "ferrotorch_core::grad_fns::reduction::AminDimBackward"
+reason = "Pending Phase 2.2-reduction — reductions & cumulative. Autograd grad_fn / forward-helper internal for the reduction family; the phase will land a conformance test exercising its VJP against PyTorch parity (CPU + GPU + autograd-where-applicable)."
+tracking_issue = "#764"
+
+[[exclusion]]
+path = "ferrotorch_core::grad_fns::reduction::LogsumexpBackward"
+reason = "Pending Phase 2.2-reduction — reductions & cumulative. Autograd grad_fn / forward-helper internal for the reduction family; the phase will land a conformance test exercising its VJP against PyTorch parity (CPU + GPU + autograd-where-applicable)."
+tracking_issue = "#764"
+
+[[exclusion]]
+path = "ferrotorch_core::grad_fns::reduction::LogsumexpDimBackward"
+reason = "Pending Phase 2.2-reduction — reductions & cumulative. Autograd grad_fn / forward-helper internal for the reduction family; the phase will land a conformance test exercising its VJP against PyTorch parity (CPU + GPU + autograd-where-applicable)."
+tracking_issue = "#764"
+
+[[exclusion]]
+path = "ferrotorch_core::grad_fns::reduction::MaxMinDimBackward"
+reason = "Pending Phase 2.2-reduction — reductions & cumulative. Autograd grad_fn / forward-helper internal for the reduction family; the phase will land a conformance test exercising its VJP against PyTorch parity (CPU + GPU + autograd-where-applicable)."
+tracking_issue = "#764"
+
+[[exclusion]]
+path = "ferrotorch_core::grad_fns::reduction::NormDimBackward"
+reason = "Pending Phase 2.2-reduction — reductions & cumulative. Autograd grad_fn / forward-helper internal for the reduction family; the phase will land a conformance test exercising its VJP against PyTorch parity (CPU + GPU + autograd-where-applicable)."
+tracking_issue = "#764"
+
+[[exclusion]]
+path = "ferrotorch_core::grad_fns::reduction::ProdDimBackward"
+reason = "Pending Phase 2.2-reduction — reductions & cumulative. Autograd grad_fn / forward-helper internal for the reduction family; the phase will land a conformance test exercising its VJP against PyTorch parity (CPU + GPU + autograd-where-applicable)."
+tracking_issue = "#764"
+
+[[exclusion]]
+path = "ferrotorch_core::grad_fns::reduction::StdBackward"
+reason = "Pending Phase 2.2-reduction — reductions & cumulative. Autograd grad_fn / forward-helper internal for the reduction family; the phase will land a conformance test exercising its VJP against PyTorch parity (CPU + GPU + autograd-where-applicable)."
+tracking_issue = "#764"
+
+[[exclusion]]
+path = "ferrotorch_core::grad_fns::reduction::VarBackward"
+reason = "Pending Phase 2.2-reduction — reductions & cumulative. Autograd grad_fn / forward-helper internal for the reduction family; the phase will land a conformance test exercising its VJP against PyTorch parity (CPU + GPU + autograd-where-applicable)."
+tracking_issue = "#764"
+
+[[exclusion]]
+path = "ferrotorch_core::grad_fns::reduction::all_dim"
+reason = "Pending Phase 2.2-reduction — reductions & cumulative. Autograd grad_fn / forward-helper internal for the reduction family; the phase will land a conformance test exercising its VJP against PyTorch parity (CPU + GPU + autograd-where-applicable)."
+tracking_issue = "#764"
+
+[[exclusion]]
+path = "ferrotorch_core::grad_fns::reduction::amax_dim"
+reason = "Pending Phase 2.2-reduction — reductions & cumulative. Autograd grad_fn / forward-helper internal for the reduction family; the phase will land a conformance test exercising its VJP against PyTorch parity (CPU + GPU + autograd-where-applicable)."
+tracking_issue = "#764"
+
+[[exclusion]]
+path = "ferrotorch_core::grad_fns::reduction::amin_dim"
+reason = "Pending Phase 2.2-reduction — reductions & cumulative. Autograd grad_fn / forward-helper internal for the reduction family; the phase will land a conformance test exercising its VJP against PyTorch parity (CPU + GPU + autograd-where-applicable)."
+tracking_issue = "#764"
+
+[[exclusion]]
+path = "ferrotorch_core::grad_fns::reduction::any_dim"
+reason = "Pending Phase 2.2-reduction — reductions & cumulative. Autograd grad_fn / forward-helper internal for the reduction family; the phase will land a conformance test exercising its VJP against PyTorch parity (CPU + GPU + autograd-where-applicable)."
+tracking_issue = "#764"
+
+[[exclusion]]
+path = "ferrotorch_core::grad_fns::reduction::argmax"
+reason = "Pending Phase 2.2-reduction — reductions & cumulative. Autograd grad_fn / forward-helper internal for the reduction family; the phase will land a conformance test exercising its VJP against PyTorch parity (CPU + GPU + autograd-where-applicable)."
+tracking_issue = "#764"
+
+[[exclusion]]
+path = "ferrotorch_core::grad_fns::reduction::argmax_dim"
+reason = "Pending Phase 2.2-reduction — reductions & cumulative. Autograd grad_fn / forward-helper internal for the reduction family; the phase will land a conformance test exercising its VJP against PyTorch parity (CPU + GPU + autograd-where-applicable)."
+tracking_issue = "#764"
+
+[[exclusion]]
+path = "ferrotorch_core::grad_fns::reduction::argmin"
+reason = "Pending Phase 2.2-reduction — reductions & cumulative. Autograd grad_fn / forward-helper internal for the reduction family; the phase will land a conformance test exercising its VJP against PyTorch parity (CPU + GPU + autograd-where-applicable)."
+tracking_issue = "#764"
+
+[[exclusion]]
+path = "ferrotorch_core::grad_fns::reduction::argmin_dim"
+reason = "Pending Phase 2.2-reduction — reductions & cumulative. Autograd grad_fn / forward-helper internal for the reduction family; the phase will land a conformance test exercising its VJP against PyTorch parity (CPU + GPU + autograd-where-applicable)."
+tracking_issue = "#764"
+
+[[exclusion]]
+path = "ferrotorch_core::grad_fns::reduction::count_nonzero"
+reason = "Pending Phase 2.2-reduction — reductions & cumulative. Autograd grad_fn / forward-helper internal for the reduction family; the phase will land a conformance test exercising its VJP against PyTorch parity (CPU + GPU + autograd-where-applicable)."
+tracking_issue = "#764"
+
+[[exclusion]]
+path = "ferrotorch_core::grad_fns::reduction::count_nonzero_dim"
+reason = "Pending Phase 2.2-reduction — reductions & cumulative. Autograd grad_fn / forward-helper internal for the reduction family; the phase will land a conformance test exercising its VJP against PyTorch parity (CPU + GPU + autograd-where-applicable)."
+tracking_issue = "#764"
+
+[[exclusion]]
+path = "ferrotorch_core::grad_fns::reduction::max_with_dim"
+reason = "Pending Phase 2.2-reduction — reductions & cumulative. Autograd grad_fn / forward-helper internal for the reduction family; the phase will land a conformance test exercising its VJP against PyTorch parity (CPU + GPU + autograd-where-applicable)."
+tracking_issue = "#764"
+
+[[exclusion]]
+path = "ferrotorch_core::grad_fns::reduction::median_with_dim"
+reason = "Pending Phase 2.2-reduction — reductions & cumulative. Autograd grad_fn / forward-helper internal for the reduction family; the phase will land a conformance test exercising its VJP against PyTorch parity (CPU + GPU + autograd-where-applicable)."
+tracking_issue = "#764"
+
+[[exclusion]]
+path = "ferrotorch_core::grad_fns::reduction::min_with_dim"
+reason = "Pending Phase 2.2-reduction — reductions & cumulative. Autograd grad_fn / forward-helper internal for the reduction family; the phase will land a conformance test exercising its VJP against PyTorch parity (CPU + GPU + autograd-where-applicable)."
+tracking_issue = "#764"
+
+[[exclusion]]
+path = "ferrotorch_core::grad_fns::reduction::nanmedian_with_dim"
+reason = "Pending Phase 2.2-reduction — reductions & cumulative. Autograd grad_fn / forward-helper internal for the reduction family; the phase will land a conformance test exercising its VJP against PyTorch parity (CPU + GPU + autograd-where-applicable)."
+tracking_issue = "#764"
+
+[[exclusion]]
+path = "ferrotorch_core::grad_fns::reduction::norm_with_dim"
+reason = "Pending Phase 2.2-reduction — reductions & cumulative. Autograd grad_fn / forward-helper internal for the reduction family; the phase will land a conformance test exercising its VJP against PyTorch parity (CPU + GPU + autograd-where-applicable)."
+tracking_issue = "#764"
+
+[[exclusion]]
+path = "ferrotorch_core::grad_fns::reduction::prod_dim"
+reason = "Pending Phase 2.2-reduction — reductions & cumulative. Autograd grad_fn / forward-helper internal for the reduction family; the phase will land a conformance test exercising its VJP against PyTorch parity (CPU + GPU + autograd-where-applicable)."
+tracking_issue = "#764"
+
+[[exclusion]]
+path = "ferrotorch_core::grad_fns::reduction::std_dim"
+reason = "Pending Phase 2.2-reduction — reductions & cumulative. Autograd grad_fn / forward-helper internal for the reduction family; the phase will land a conformance test exercising its VJP against PyTorch parity (CPU + GPU + autograd-where-applicable)."
+tracking_issue = "#764"
+
+[[exclusion]]
+path = "ferrotorch_core::grad_fns::reduction::std_with_correction"
+reason = "Pending Phase 2.2-reduction — reductions & cumulative. Autograd grad_fn / forward-helper internal for the reduction family; the phase will land a conformance test exercising its VJP against PyTorch parity (CPU + GPU + autograd-where-applicable)."
+tracking_issue = "#764"
+
+[[exclusion]]
+path = "ferrotorch_core::grad_fns::reduction::var_dim"
+reason = "Pending Phase 2.2-reduction — reductions & cumulative. Autograd grad_fn / forward-helper internal for the reduction family; the phase will land a conformance test exercising its VJP against PyTorch parity (CPU + GPU + autograd-where-applicable)."
+tracking_issue = "#764"
+
+[[exclusion]]
+path = "ferrotorch_core::grad_fns::reduction::var_with_correction"
+reason = "Pending Phase 2.2-reduction — reductions & cumulative. Autograd grad_fn / forward-helper internal for the reduction family; the phase will land a conformance test exercising its VJP against PyTorch parity (CPU + GPU + autograd-where-applicable)."
+tracking_issue = "#764"
+
+[[exclusion]]
+path = "ferrotorch_core::grad_fns::shape::FlipBackward"
+reason = "Pending Phase 2.3-shape — shape, indexing, view. Autograd grad_fn / forward-helper internal for the shape family; the phase will land a conformance test exercising its VJP against PyTorch parity (CPU + GPU + autograd-where-applicable)."
+tracking_issue = "#765"
+
+[[exclusion]]
+path = "ferrotorch_core::grad_fns::shape::FlipBackward <T>::new"
+reason = "Pending Phase 2.3-shape — shape, indexing, view. Autograd grad_fn / forward-helper internal for the shape family; the phase will land a conformance test exercising its VJP against PyTorch parity (CPU + GPU + autograd-where-applicable)."
+tracking_issue = "#765"
+
+[[exclusion]]
+path = "ferrotorch_core::grad_fns::shape::RepeatInterleaveBackward"
+reason = "Pending Phase 2.3-shape — shape, indexing, view. Autograd grad_fn / forward-helper internal for the shape family; the phase will land a conformance test exercising its VJP against PyTorch parity (CPU + GPU + autograd-where-applicable)."
+tracking_issue = "#765"
+
+[[exclusion]]
+path = "ferrotorch_core::grad_fns::shape::RepeatInterleaveBackward <T>::new"
+reason = "Pending Phase 2.3-shape — shape, indexing, view. Autograd grad_fn / forward-helper internal for the shape family; the phase will land a conformance test exercising its VJP against PyTorch parity (CPU + GPU + autograd-where-applicable)."
+tracking_issue = "#765"
+
+[[exclusion]]
+path = "ferrotorch_core::grad_fns::shape::broadcast_tensors"
+reason = "Pending Phase 2.3-shape — shape, indexing, view. Autograd grad_fn / forward-helper internal for the shape family; the phase will land a conformance test exercising its VJP against PyTorch parity (CPU + GPU + autograd-where-applicable)."
+tracking_issue = "#765"
+
+[[exclusion]]
+path = "ferrotorch_core::grad_fns::shape::broadcast_to"
+reason = "Pending Phase 2.3-shape — shape, indexing, view. Autograd grad_fn / forward-helper internal for the shape family; the phase will land a conformance test exercising its VJP against PyTorch parity (CPU + GPU + autograd-where-applicable)."
+tracking_issue = "#765"
+
+[[exclusion]]
+path = "ferrotorch_core::grad_fns::shape::column_stack"
+reason = "Pending Phase 2.3-shape — shape, indexing, view. Autograd grad_fn / forward-helper internal for the shape family; the phase will land a conformance test exercising its VJP against PyTorch parity (CPU + GPU + autograd-where-applicable)."
+tracking_issue = "#765"
+
+[[exclusion]]
+path = "ferrotorch_core::grad_fns::shape::dstack"
+reason = "Pending Phase 2.3-shape — shape, indexing, view. Autograd grad_fn / forward-helper internal for the shape family; the phase will land a conformance test exercising its VJP against PyTorch parity (CPU + GPU + autograd-where-applicable)."
+tracking_issue = "#765"
+
+[[exclusion]]
+path = "ferrotorch_core::grad_fns::shape::expand_as"
+reason = "Pending Phase 2.3-shape — shape, indexing, view. Autograd grad_fn / forward-helper internal for the shape family; the phase will land a conformance test exercising its VJP against PyTorch parity (CPU + GPU + autograd-where-applicable)."
+tracking_issue = "#765"
+
+[[exclusion]]
+path = "ferrotorch_core::grad_fns::shape::fliplr"
+reason = "Pending Phase 2.3-shape — shape, indexing, view. Autograd grad_fn / forward-helper internal for the shape family; the phase will land a conformance test exercising its VJP against PyTorch parity (CPU + GPU + autograd-where-applicable)."
+tracking_issue = "#765"
+
+[[exclusion]]
+path = "ferrotorch_core::grad_fns::shape::flipud"
+reason = "Pending Phase 2.3-shape — shape, indexing, view. Autograd grad_fn / forward-helper internal for the shape family; the phase will land a conformance test exercising its VJP against PyTorch parity (CPU + GPU + autograd-where-applicable)."
+tracking_issue = "#765"
+
+[[exclusion]]
+path = "ferrotorch_core::grad_fns::shape::hstack"
+reason = "Pending Phase 2.3-shape — shape, indexing, view. Autograd grad_fn / forward-helper internal for the shape family; the phase will land a conformance test exercising its VJP against PyTorch parity (CPU + GPU + autograd-where-applicable)."
+tracking_issue = "#765"
+
+[[exclusion]]
+path = "ferrotorch_core::grad_fns::shape::moveaxis"
+reason = "Pending Phase 2.3-shape — shape, indexing, view. Autograd grad_fn / forward-helper internal for the shape family; the phase will land a conformance test exercising its VJP against PyTorch parity (CPU + GPU + autograd-where-applicable)."
+tracking_issue = "#765"
+
+[[exclusion]]
+path = "ferrotorch_core::grad_fns::shape::movedim"
+reason = "Pending Phase 2.3-shape — shape, indexing, view. Autograd grad_fn / forward-helper internal for the shape family; the phase will land a conformance test exercising its VJP against PyTorch parity (CPU + GPU + autograd-where-applicable)."
+tracking_issue = "#765"
+
+[[exclusion]]
+path = "ferrotorch_core::grad_fns::shape::repeat_interleave"
+reason = "Pending Phase 2.3-shape — shape, indexing, view. Autograd grad_fn / forward-helper internal for the shape family; the phase will land a conformance test exercising its VJP against PyTorch parity (CPU + GPU + autograd-where-applicable)."
+tracking_issue = "#765"
+
+[[exclusion]]
+path = "ferrotorch_core::grad_fns::shape::rot90"
+reason = "Pending Phase 2.3-shape — shape, indexing, view. Autograd grad_fn / forward-helper internal for the shape family; the phase will land a conformance test exercising its VJP against PyTorch parity (CPU + GPU + autograd-where-applicable)."
+tracking_issue = "#765"
+
+[[exclusion]]
+path = "ferrotorch_core::grad_fns::shape::swapaxes"
+reason = "Pending Phase 2.3-shape — shape, indexing, view. Autograd grad_fn / forward-helper internal for the shape family; the phase will land a conformance test exercising its VJP against PyTorch parity (CPU + GPU + autograd-where-applicable)."
+tracking_issue = "#765"
+
+[[exclusion]]
+path = "ferrotorch_core::grad_fns::shape::swapdims"
+reason = "Pending Phase 2.3-shape — shape, indexing, view. Autograd grad_fn / forward-helper internal for the shape family; the phase will land a conformance test exercising its VJP against PyTorch parity (CPU + GPU + autograd-where-applicable)."
+tracking_issue = "#765"
+
+[[exclusion]]
+path = "ferrotorch_core::grad_fns::shape::tensor_split"
+reason = "Pending Phase 2.3-shape — shape, indexing, view. Autograd grad_fn / forward-helper internal for the shape family; the phase will land a conformance test exercising its VJP against PyTorch parity (CPU + GPU + autograd-where-applicable)."
+tracking_issue = "#765"
+
+[[exclusion]]
+path = "ferrotorch_core::grad_fns::shape::unbind"
+reason = "Pending Phase 2.3-shape — shape, indexing, view. Autograd grad_fn / forward-helper internal for the shape family; the phase will land a conformance test exercising its VJP against PyTorch parity (CPU + GPU + autograd-where-applicable)."
+tracking_issue = "#765"
+
+[[exclusion]]
+path = "ferrotorch_core::grad_fns::shape::unflatten"
+reason = "Pending Phase 2.3-shape — shape, indexing, view. Autograd grad_fn / forward-helper internal for the shape family; the phase will land a conformance test exercising its VJP against PyTorch parity (CPU + GPU + autograd-where-applicable)."
+tracking_issue = "#765"
+
+[[exclusion]]
+path = "ferrotorch_core::grad_fns::shape::vstack"
+reason = "Pending Phase 2.3-shape — shape, indexing, view. Autograd grad_fn / forward-helper internal for the shape family; the phase will land a conformance test exercising its VJP against PyTorch parity (CPU + GPU + autograd-where-applicable)."
+tracking_issue = "#765"
+
+[[exclusion]]
+path = "ferrotorch_core::grad_fns::transcendental::acos"
+reason = "Pending Phase 2.5-special-transcendental — activations, transcendental, special. Autograd grad_fn / forward-helper internal for the transcendental family; the phase will land a conformance test exercising its VJP against PyTorch parity (CPU + GPU + autograd-where-applicable)."
+tracking_issue = "#767"
+
+[[exclusion]]
+path = "ferrotorch_core::grad_fns::transcendental::acosh"
+reason = "Pending Phase 2.5-special-transcendental — activations, transcendental, special. Autograd grad_fn / forward-helper internal for the transcendental family; the phase will land a conformance test exercising its VJP against PyTorch parity (CPU + GPU + autograd-where-applicable)."
+tracking_issue = "#767"
+
+[[exclusion]]
+path = "ferrotorch_core::grad_fns::transcendental::asinh"
+reason = "Pending Phase 2.5-special-transcendental — activations, transcendental, special. Autograd grad_fn / forward-helper internal for the transcendental family; the phase will land a conformance test exercising its VJP against PyTorch parity (CPU + GPU + autograd-where-applicable)."
+tracking_issue = "#767"
+
+[[exclusion]]
+path = "ferrotorch_core::grad_fns::transcendental::atan"
+reason = "Pending Phase 2.5-special-transcendental — activations, transcendental, special. Autograd grad_fn / forward-helper internal for the transcendental family; the phase will land a conformance test exercising its VJP against PyTorch parity (CPU + GPU + autograd-where-applicable)."
+tracking_issue = "#767"
+
+[[exclusion]]
+path = "ferrotorch_core::grad_fns::transcendental::atan2"
+reason = "Pending Phase 2.5-special-transcendental — activations, transcendental, special. Autograd grad_fn / forward-helper internal for the transcendental family; the phase will land a conformance test exercising its VJP against PyTorch parity (CPU + GPU + autograd-where-applicable)."
+tracking_issue = "#767"
+
+[[exclusion]]
+path = "ferrotorch_core::grad_fns::transcendental::atanh"
+reason = "Pending Phase 2.5-special-transcendental — activations, transcendental, special. Autograd grad_fn / forward-helper internal for the transcendental family; the phase will land a conformance test exercising its VJP against PyTorch parity (CPU + GPU + autograd-where-applicable)."
+tracking_issue = "#767"
+
+[[exclusion]]
+path = "ferrotorch_core::grad_fns::transcendental::copysign"
+reason = "Pending Phase 2.5-special-transcendental — activations, transcendental, special. Autograd grad_fn / forward-helper internal for the transcendental family; the phase will land a conformance test exercising its VJP against PyTorch parity (CPU + GPU + autograd-where-applicable)."
+tracking_issue = "#767"
+
+[[exclusion]]
+path = "ferrotorch_core::grad_fns::transcendental::cosh"
+reason = "Pending Phase 2.5-special-transcendental — activations, transcendental, special. Autograd grad_fn / forward-helper internal for the transcendental family; the phase will land a conformance test exercising its VJP against PyTorch parity (CPU + GPU + autograd-where-applicable)."
+tracking_issue = "#767"
+
+[[exclusion]]
+path = "ferrotorch_core::grad_fns::transcendental::exp2"
+reason = "Pending Phase 2.5-special-transcendental — activations, transcendental, special. Autograd grad_fn / forward-helper internal for the transcendental family; the phase will land a conformance test exercising its VJP against PyTorch parity (CPU + GPU + autograd-where-applicable)."
+tracking_issue = "#767"
+
+[[exclusion]]
+path = "ferrotorch_core::grad_fns::transcendental::frac"
+reason = "Pending Phase 2.5-special-transcendental — activations, transcendental, special. Autograd grad_fn / forward-helper internal for the transcendental family; the phase will land a conformance test exercising its VJP against PyTorch parity (CPU + GPU + autograd-where-applicable)."
+tracking_issue = "#767"
+
+[[exclusion]]
+path = "ferrotorch_core::grad_fns::transcendental::hypot"
+reason = "Pending Phase 2.5-special-transcendental — activations, transcendental, special. Autograd grad_fn / forward-helper internal for the transcendental family; the phase will land a conformance test exercising its VJP against PyTorch parity (CPU + GPU + autograd-where-applicable)."
+tracking_issue = "#767"
+
+[[exclusion]]
+path = "ferrotorch_core::grad_fns::transcendental::log10"
+reason = "Pending Phase 2.5-special-transcendental — activations, transcendental, special. Autograd grad_fn / forward-helper internal for the transcendental family; the phase will land a conformance test exercising its VJP against PyTorch parity (CPU + GPU + autograd-where-applicable)."
+tracking_issue = "#767"
+
+[[exclusion]]
+path = "ferrotorch_core::grad_fns::transcendental::log2"
+reason = "Pending Phase 2.5-special-transcendental — activations, transcendental, special. Autograd grad_fn / forward-helper internal for the transcendental family; the phase will land a conformance test exercising its VJP against PyTorch parity (CPU + GPU + autograd-where-applicable)."
+tracking_issue = "#767"
+
+[[exclusion]]
+path = "ferrotorch_core::grad_fns::transcendental::nextafter"
+reason = "Pending Phase 2.5-special-transcendental — activations, transcendental, special. Autograd grad_fn / forward-helper internal for the transcendental family; the phase will land a conformance test exercising its VJP against PyTorch parity (CPU + GPU + autograd-where-applicable)."
+tracking_issue = "#767"
+
+[[exclusion]]
+path = "ferrotorch_core::grad_fns::transcendental::signbit"
+reason = "Pending Phase 2.5-special-transcendental — activations, transcendental, special. Autograd grad_fn / forward-helper internal for the transcendental family; the phase will land a conformance test exercising its VJP against PyTorch parity (CPU + GPU + autograd-where-applicable)."
+tracking_issue = "#767"
+
+[[exclusion]]
+path = "ferrotorch_core::grad_fns::transcendental::sinh"
+reason = "Pending Phase 2.5-special-transcendental — activations, transcendental, special. Autograd grad_fn / forward-helper internal for the transcendental family; the phase will land a conformance test exercising its VJP against PyTorch parity (CPU + GPU + autograd-where-applicable)."
+tracking_issue = "#767"
+
+[[exclusion]]
+path = "ferrotorch_core::hfft2"
+reason = "Re-export covered transitively by the Phase 2.7-fft-complex conformance test that exercises the underlying item; the gate has no auto-coverage for re-exports whose short ident is absent from conformance sources."
+tracking_issue = "#769"
+
+[[exclusion]]
+path = "ferrotorch_core::hfft2_norm"
+reason = "Re-export covered transitively by the Phase 2.7-fft-complex conformance test that exercises the underlying item; the gate has no auto-coverage for re-exports whose short ident is absent from conformance sources."
+tracking_issue = "#769"
+
+[[exclusion]]
+path = "ferrotorch_core::hfft_norm"
+reason = "Re-export covered transitively by the Phase 2.7-fft-complex conformance test that exercises the underlying item; the gate has no auto-coverage for re-exports whose short ident is absent from conformance sources."
+tracking_issue = "#769"
+
+[[exclusion]]
+path = "ferrotorch_core::hfftn"
+reason = "Re-export covered transitively by the Phase 2.7-fft-complex conformance test that exercises the underlying item; the gate has no auto-coverage for re-exports whose short ident is absent from conformance sources."
+tracking_issue = "#769"
+
+[[exclusion]]
+path = "ferrotorch_core::hfftn_norm"
+reason = "Re-export covered transitively by the Phase 2.7-fft-complex conformance test that exercises the underlying item; the gate has no auto-coverage for re-exports whose short ident is absent from conformance sources."
+tracking_issue = "#769"
+
+[[exclusion]]
+path = "ferrotorch_core::hstack"
+reason = "Re-export covered transitively by the Phase 2.3-shape conformance test that exercises the underlying item; the gate has no auto-coverage for re-exports whose short ident is absent from conformance sources."
+tracking_issue = "#765"
+
+[[exclusion]]
+path = "ferrotorch_core::hypot"
+reason = "Re-export covered transitively by the Phase 2.1-elementwise conformance test that exercises the underlying item; the gate has no auto-coverage for re-exports whose short ident is absent from conformance sources."
+tracking_issue = "#763"
+
+[[exclusion]]
+path = "ferrotorch_core::ifft2_differentiable"
+reason = "Re-export covered transitively by the Phase 2.7-fft-complex conformance test that exercises the underlying item; the gate has no auto-coverage for re-exports whose short ident is absent from conformance sources."
+tracking_issue = "#769"
+
+[[exclusion]]
+path = "ferrotorch_core::ifft2_differentiable_norm"
+reason = "Re-export covered transitively by the Phase 2.7-fft-complex conformance test that exercises the underlying item; the gate has no auto-coverage for re-exports whose short ident is absent from conformance sources."
+tracking_issue = "#769"
+
+[[exclusion]]
+path = "ferrotorch_core::ifft2_norm"
+reason = "Re-export covered transitively by the Phase 2.7-fft-complex conformance test that exercises the underlying item; the gate has no auto-coverage for re-exports whose short ident is absent from conformance sources."
+tracking_issue = "#769"
+
+[[exclusion]]
+path = "ferrotorch_core::ifft_differentiable_norm"
+reason = "Re-export covered transitively by the Phase 2.7-fft-complex conformance test that exercises the underlying item; the gate has no auto-coverage for re-exports whose short ident is absent from conformance sources."
+tracking_issue = "#769"
+
+[[exclusion]]
+path = "ferrotorch_core::ifft_norm"
+reason = "Re-export covered transitively by the Phase 2.7-fft-complex conformance test that exercises the underlying item; the gate has no auto-coverage for re-exports whose short ident is absent from conformance sources."
+tracking_issue = "#769"
+
+[[exclusion]]
+path = "ferrotorch_core::ifftn_differentiable_norm"
+reason = "Re-export covered transitively by the Phase 2.7-fft-complex conformance test that exercises the underlying item; the gate has no auto-coverage for re-exports whose short ident is absent from conformance sources."
+tracking_issue = "#769"
+
+[[exclusion]]
+path = "ferrotorch_core::ifftn_norm"
+reason = "Re-export covered transitively by the Phase 2.7-fft-complex conformance test that exercises the underlying item; the gate has no auto-coverage for re-exports whose short ident is absent from conformance sources."
+tracking_issue = "#769"
+
+[[exclusion]]
+path = "ferrotorch_core::ihfft2"
+reason = "Re-export covered transitively by the Phase 2.7-fft-complex conformance test that exercises the underlying item; the gate has no auto-coverage for re-exports whose short ident is absent from conformance sources."
+tracking_issue = "#769"
+
+[[exclusion]]
+path = "ferrotorch_core::ihfft2_norm"
+reason = "Re-export covered transitively by the Phase 2.7-fft-complex conformance test that exercises the underlying item; the gate has no auto-coverage for re-exports whose short ident is absent from conformance sources."
+tracking_issue = "#769"
+
+[[exclusion]]
+path = "ferrotorch_core::ihfft_norm"
+reason = "Re-export covered transitively by the Phase 2.7-fft-complex conformance test that exercises the underlying item; the gate has no auto-coverage for re-exports whose short ident is absent from conformance sources."
+tracking_issue = "#769"
+
+[[exclusion]]
+path = "ferrotorch_core::ihfftn"
+reason = "Re-export covered transitively by the Phase 2.7-fft-complex conformance test that exercises the underlying item; the gate has no auto-coverage for re-exports whose short ident is absent from conformance sources."
+tracking_issue = "#769"
+
+[[exclusion]]
+path = "ferrotorch_core::ihfftn_norm"
+reason = "Re-export covered transitively by the Phase 2.7-fft-complex conformance test that exercises the underlying item; the gate has no auto-coverage for re-exports whose short ident is absent from conformance sources."
+tracking_issue = "#769"
+
+[[exclusion]]
+path = "ferrotorch_core::int_tensor::IntTensor <I>::add"
+reason = "Pending Phase 2.13-bool-int — bool & int tensors. Method covered transitively via its containing type's integration tests in the phase suite; gate substring mismatch on method-call syntax."
+tracking_issue = "#775"
+
+[[exclusion]]
+path = "ferrotorch_core::int_tensor::IntTensor <I>::bitand"
+reason = "Pending Phase 2.13-bool-int — bool & int tensors. Method covered transitively via its containing type's integration tests in the phase suite; gate substring mismatch on method-call syntax."
+tracking_issue = "#775"
+
+[[exclusion]]
+path = "ferrotorch_core::int_tensor::IntTensor <I>::bitnot"
+reason = "Pending Phase 2.13-bool-int — bool & int tensors. Method covered transitively via its containing type's integration tests in the phase suite; gate substring mismatch on method-call syntax."
+tracking_issue = "#775"
+
+[[exclusion]]
+path = "ferrotorch_core::int_tensor::IntTensor <I>::bitor"
+reason = "Pending Phase 2.13-bool-int — bool & int tensors. Method covered transitively via its containing type's integration tests in the phase suite; gate substring mismatch on method-call syntax."
+tracking_issue = "#775"
+
+[[exclusion]]
+path = "ferrotorch_core::int_tensor::IntTensor <I>::bitxor"
+reason = "Pending Phase 2.13-bool-int — bool & int tensors. Method covered transitively via its containing type's integration tests in the phase suite; gate substring mismatch on method-call syntax."
+tracking_issue = "#775"
+
+[[exclusion]]
+path = "ferrotorch_core::int_tensor::IntTensor <I>::device"
+reason = "Pending Phase 2.13-bool-int — bool & int tensors. Method covered transitively via its containing type's integration tests in the phase suite; gate substring mismatch on method-call syntax."
+tracking_issue = "#775"
+
+[[exclusion]]
+path = "ferrotorch_core::int_tensor::IntTensor <I>::floor_div"
+reason = "Pending Phase 2.13-bool-int — bool & int tensors. Method covered transitively via its containing type's integration tests in the phase suite; gate substring mismatch on method-call syntax."
+tracking_issue = "#775"
+
+[[exclusion]]
+path = "ferrotorch_core::int_tensor::IntTensor <I>::gpu_handle"
+reason = "Pending Phase 2.13-bool-int — bool & int tensors. Method covered transitively via its containing type's integration tests in the phase suite; gate substring mismatch on method-call syntax."
+tracking_issue = "#775"
+
+[[exclusion]]
+path = "ferrotorch_core::int_tensor::IntTensor <I>::is_cuda"
+reason = "Pending Phase 2.13-bool-int — bool & int tensors. Method covered transitively via its containing type's integration tests in the phase suite; gate substring mismatch on method-call syntax."
+tracking_issue = "#775"
+
+[[exclusion]]
+path = "ferrotorch_core::int_tensor::IntTensor <I>::max"
+reason = "Pending Phase 2.13-bool-int — bool & int tensors. Method covered transitively via its containing type's integration tests in the phase suite; gate substring mismatch on method-call syntax."
+tracking_issue = "#775"
+
+[[exclusion]]
+path = "ferrotorch_core::int_tensor::IntTensor <I>::min"
+reason = "Pending Phase 2.13-bool-int — bool & int tensors. Method covered transitively via its containing type's integration tests in the phase suite; gate substring mismatch on method-call syntax."
+tracking_issue = "#775"
+
+[[exclusion]]
+path = "ferrotorch_core::int_tensor::IntTensor <I>::mul"
+reason = "Pending Phase 2.13-bool-int — bool & int tensors. Method covered transitively via its containing type's integration tests in the phase suite; gate substring mismatch on method-call syntax."
+tracking_issue = "#775"
+
+[[exclusion]]
+path = "ferrotorch_core::int_tensor::IntTensor <I>::neg"
+reason = "Pending Phase 2.13-bool-int — bool & int tensors. Method covered transitively via its containing type's integration tests in the phase suite; gate substring mismatch on method-call syntax."
+tracking_issue = "#775"
+
+[[exclusion]]
+path = "ferrotorch_core::int_tensor::IntTensor <I>::prod"
+reason = "Pending Phase 2.13-bool-int — bool & int tensors. Method covered transitively via its containing type's integration tests in the phase suite; gate substring mismatch on method-call syntax."
+tracking_issue = "#775"
+
+[[exclusion]]
+path = "ferrotorch_core::int_tensor::IntTensor <I>::remainder"
+reason = "Pending Phase 2.13-bool-int — bool & int tensors. Method covered transitively via its containing type's integration tests in the phase suite; gate substring mismatch on method-call syntax."
+tracking_issue = "#775"
+
+[[exclusion]]
+path = "ferrotorch_core::int_tensor::IntTensor <I>::shl"
+reason = "Pending Phase 2.13-bool-int — bool & int tensors. Method covered transitively via its containing type's integration tests in the phase suite; gate substring mismatch on method-call syntax."
+tracking_issue = "#775"
+
+[[exclusion]]
+path = "ferrotorch_core::int_tensor::IntTensor <I>::shr"
+reason = "Pending Phase 2.13-bool-int — bool & int tensors. Method covered transitively via its containing type's integration tests in the phase suite; gate substring mismatch on method-call syntax."
+tracking_issue = "#775"
+
+[[exclusion]]
+path = "ferrotorch_core::int_tensor::IntTensor <I>::sub"
+reason = "Pending Phase 2.13-bool-int — bool & int tensors. Method covered transitively via its containing type's integration tests in the phase suite; gate substring mismatch on method-call syntax."
+tracking_issue = "#775"
+
+[[exclusion]]
+path = "ferrotorch_core::int_tensor::IntTensor <I>::sum"
+reason = "Pending Phase 2.13-bool-int — bool & int tensors. Method covered transitively via its containing type's integration tests in the phase suite; gate substring mismatch on method-call syntax."
+tracking_issue = "#775"
+
+[[exclusion]]
+path = "ferrotorch_core::int_tensor::IntTensor <I>::to"
+reason = "Pending Phase 2.13-bool-int — bool & int tensors. Method covered transitively via its containing type's integration tests in the phase suite; gate substring mismatch on method-call syntax."
+tracking_issue = "#775"
+
+[[exclusion]]
+path = "ferrotorch_core::irfft2"
+reason = "Re-export covered transitively by the Phase 2.7-fft-complex conformance test that exercises the underlying item; the gate has no auto-coverage for re-exports whose short ident is absent from conformance sources."
+tracking_issue = "#769"
+
+[[exclusion]]
+path = "ferrotorch_core::irfft2_norm"
+reason = "Re-export covered transitively by the Phase 2.7-fft-complex conformance test that exercises the underlying item; the gate has no auto-coverage for re-exports whose short ident is absent from conformance sources."
+tracking_issue = "#769"
+
+[[exclusion]]
+path = "ferrotorch_core::irfft_differentiable_norm"
+reason = "Re-export covered transitively by the Phase 2.7-fft-complex conformance test that exercises the underlying item; the gate has no auto-coverage for re-exports whose short ident is absent from conformance sources."
+tracking_issue = "#769"
+
+[[exclusion]]
+path = "ferrotorch_core::irfft_norm"
+reason = "Re-export covered transitively by the Phase 2.7-fft-complex conformance test that exercises the underlying item; the gate has no auto-coverage for re-exports whose short ident is absent from conformance sources."
+tracking_issue = "#769"
+
+[[exclusion]]
+path = "ferrotorch_core::irfftn_differentiable_norm"
+reason = "Re-export covered transitively by the Phase 2.7-fft-complex conformance test that exercises the underlying item; the gate has no auto-coverage for re-exports whose short ident is absent from conformance sources."
+tracking_issue = "#769"
+
+[[exclusion]]
+path = "ferrotorch_core::irfftn_norm"
+reason = "Re-export covered transitively by the Phase 2.7-fft-complex conformance test that exercises the underlying item; the gate has no auto-coverage for re-exports whose short ident is absent from conformance sources."
+tracking_issue = "#769"
+
+[[exclusion]]
+path = "ferrotorch_core::linalg::addbmm"
+reason = "Pending Phase 2.4-linalg — linalg. The phase will land a conformance test exercising this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
+tracking_issue = "#766"
+
+[[exclusion]]
+path = "ferrotorch_core::linalg::addmm"
+reason = "Pending Phase 2.4-linalg — linalg. The phase will land a conformance test exercising this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
+tracking_issue = "#766"
+
+[[exclusion]]
+path = "ferrotorch_core::linalg::addmv"
+reason = "Pending Phase 2.4-linalg — linalg. The phase will land a conformance test exercising this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
+tracking_issue = "#766"
+
+[[exclusion]]
+path = "ferrotorch_core::linalg::addr"
+reason = "Pending Phase 2.4-linalg — linalg. The phase will land a conformance test exercising this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
+tracking_issue = "#766"
+
+[[exclusion]]
+path = "ferrotorch_core::linalg::baddbmm"
+reason = "Pending Phase 2.4-linalg — linalg. The phase will land a conformance test exercising this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
+tracking_issue = "#766"
+
+[[exclusion]]
+path = "ferrotorch_core::linalg::kron"
+reason = "Pending Phase 2.4-linalg — linalg. The phase will land a conformance test exercising this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
+tracking_issue = "#766"
+
+[[exclusion]]
+path = "ferrotorch_core::log_beta"
+reason = "Re-export covered transitively by the Phase 2.5-special-transcendental conformance test that exercises the underlying item; the gate has no auto-coverage for re-exports whose short ident is absent from conformance sources."
+tracking_issue = "#767"
+
+[[exclusion]]
+path = "ferrotorch_core::manual_seed"
+reason = "Re-export covered transitively by the Phase 2.14-plumbing conformance test that exercises the underlying item; the gate has no auto-coverage for re-exports whose short ident is absent from conformance sources."
+tracking_issue = "#776"
+
+[[exclusion]]
+path = "ferrotorch_core::masked_select"
+reason = "Re-export covered transitively by the Phase 2.3-shape conformance test that exercises the underlying item; the gate has no auto-coverage for re-exports whose short ident is absent from conformance sources."
+tracking_issue = "#765"
+
+[[exclusion]]
+path = "ferrotorch_core::max_with_dim"
+reason = "Re-export covered transitively by the Phase 2.2-reduction conformance test that exercises the underlying item; the gate has no auto-coverage for re-exports whose short ident is absent from conformance sources."
+tracking_issue = "#764"
+
+[[exclusion]]
+path = "ferrotorch_core::median_with_dim"
+reason = "Re-export covered transitively by the Phase 2.2-reduction conformance test that exercises the underlying item; the gate has no auto-coverage for re-exports whose short ident is absent from conformance sources."
+tracking_issue = "#764"
+
+[[exclusion]]
+path = "ferrotorch_core::min_with_dim"
+reason = "Re-export covered transitively by the Phase 2.2-reduction conformance test that exercises the underlying item; the gate has no auto-coverage for re-exports whose short ident is absent from conformance sources."
+tracking_issue = "#764"
+
+[[exclusion]]
+path = "ferrotorch_core::moveaxis"
+reason = "Re-export covered transitively by the Phase 2.3-shape conformance test that exercises the underlying item; the gate has no auto-coverage for re-exports whose short ident is absent from conformance sources."
+tracking_issue = "#765"
+
+[[exclusion]]
+path = "ferrotorch_core::movedim"
+reason = "Re-export covered transitively by the Phase 2.3-shape conformance test that exercises the underlying item; the gate has no auto-coverage for re-exports whose short ident is absent from conformance sources."
+tracking_issue = "#765"
+
+[[exclusion]]
+path = "ferrotorch_core::multigammaln"
+reason = "Re-export covered transitively by the Phase 2.5-special-transcendental conformance test that exercises the underlying item; the gate has no auto-coverage for re-exports whose short ident is absent from conformance sources."
+tracking_issue = "#767"
+
+[[exclusion]]
+path = "ferrotorch_core::mvlgamma"
+reason = "Re-export covered transitively by the Phase 2.5-special-transcendental conformance test that exercises the underlying item; the gate has no auto-coverage for re-exports whose short ident is absent from conformance sources."
+tracking_issue = "#767"
+
+[[exclusion]]
+path = "ferrotorch_core::nanmedian_with_dim"
+reason = "Re-export covered transitively by the Phase 2.2-reduction conformance test that exercises the underlying item; the gate has no auto-coverage for re-exports whose short ident is absent from conformance sources."
+tracking_issue = "#764"
+
+[[exclusion]]
+path = "ferrotorch_core::nextafter"
+reason = "Re-export covered transitively by the Phase 2.1-elementwise conformance test that exercises the underlying item; the gate has no auto-coverage for re-exports whose short ident is absent from conformance sources."
+tracking_issue = "#763"
+
+[[exclusion]]
+path = "ferrotorch_core::norm_with_dim"
+reason = "Re-export covered transitively by the Phase 2.2-reduction conformance test that exercises the underlying item; the gate has no auto-coverage for re-exports whose short ident is absent from conformance sources."
+tracking_issue = "#764"
+
+[[exclusion]]
+path = "ferrotorch_core::ops::indexing::masked_select"
+reason = "Pending Phase 2.3-shape — shape, indexing, view. The phase will land a conformance test exercising this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
+tracking_issue = "#765"
+
+[[exclusion]]
+path = "ferrotorch_core::ops::indexing::scatter_value"
+reason = "Pending Phase 2.3-shape — shape, indexing, view. The phase will land a conformance test exercising this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
+tracking_issue = "#765"
+
+[[exclusion]]
+path = "ferrotorch_core::ops::indexing::where_cond_bt"
+reason = "Pending Phase 2.3-shape — shape, indexing, view. The phase will land a conformance test exercising this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
+tracking_issue = "#765"
+
+[[exclusion]]
+path = "ferrotorch_core::ops::linalg::MKL_ENABLED"
+reason = "Pending Phase 2.4-linalg — linalg. The phase will land a conformance test exercising this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
+tracking_issue = "#766"
+
+[[exclusion]]
+path = "ferrotorch_core::ops::phase2c::IntTensor <I>::argmax"
+reason = "Pending Phase 2.3-shape — shape, indexing, view. Method covered transitively via its containing type's integration tests in the phase suite; gate substring mismatch on method-call syntax."
+tracking_issue = "#765"
+
+[[exclusion]]
+path = "ferrotorch_core::ops::phase2c::IntTensor <I>::argmin"
+reason = "Pending Phase 2.3-shape — shape, indexing, view. Method covered transitively via its containing type's integration tests in the phase suite; gate substring mismatch on method-call syntax."
+tracking_issue = "#765"
+
+[[exclusion]]
+path = "ferrotorch_core::ops::phase2c::IntTensor <I>::gather"
+reason = "Pending Phase 2.3-shape — shape, indexing, view. Method covered transitively via its containing type's integration tests in the phase suite; gate substring mismatch on method-call syntax."
+tracking_issue = "#765"
+
+[[exclusion]]
+path = "ferrotorch_core::ops::phase2c::IntTensor <I>::index_select"
+reason = "Pending Phase 2.3-shape — shape, indexing, view. Method covered transitively via its containing type's integration tests in the phase suite; gate substring mismatch on method-call syntax."
+tracking_issue = "#765"
+
+[[exclusion]]
+path = "ferrotorch_core::ops::phase2c::IntTensor <I>::to_float"
+reason = "Pending Phase 2.3-shape — shape, indexing, view. Method covered transitively via its containing type's integration tests in the phase suite; gate substring mismatch on method-call syntax."
+tracking_issue = "#765"
+
+[[exclusion]]
+path = "ferrotorch_core::ops::phase2c::Tensor <T>::argmax"
+reason = "Pending Phase 2.3-shape — shape, indexing, view. Method covered transitively via its containing type's integration tests in the phase suite; gate substring mismatch on method-call syntax."
+tracking_issue = "#765"
+
+[[exclusion]]
+path = "ferrotorch_core::ops::phase2c::Tensor <T>::argmin"
+reason = "Pending Phase 2.3-shape — shape, indexing, view. Method covered transitively via its containing type's integration tests in the phase suite; gate substring mismatch on method-call syntax."
+tracking_issue = "#765"
+
+[[exclusion]]
+path = "ferrotorch_core::ops::phase2c::Tensor <T>::gather"
+reason = "Pending Phase 2.3-shape — shape, indexing, view. Method covered transitively via its containing type's integration tests in the phase suite; gate substring mismatch on method-call syntax."
+tracking_issue = "#765"
+
+[[exclusion]]
+path = "ferrotorch_core::ops::phase2c::Tensor <T>::index_select"
+reason = "Pending Phase 2.3-shape — shape, indexing, view. Method covered transitively via its containing type's integration tests in the phase suite; gate substring mismatch on method-call syntax."
+tracking_issue = "#765"
+
+[[exclusion]]
+path = "ferrotorch_core::repeat_interleave"
+reason = "Re-export covered transitively by the Phase 2.3-shape conformance test that exercises the underlying item; the gate has no auto-coverage for re-exports whose short ident is absent from conformance sources."
+tracking_issue = "#765"
+
+[[exclusion]]
+path = "ferrotorch_core::rfft2"
+reason = "Re-export covered transitively by the Phase 2.7-fft-complex conformance test that exercises the underlying item; the gate has no auto-coverage for re-exports whose short ident is absent from conformance sources."
+tracking_issue = "#769"
+
+[[exclusion]]
+path = "ferrotorch_core::rfft2_norm"
+reason = "Re-export covered transitively by the Phase 2.7-fft-complex conformance test that exercises the underlying item; the gate has no auto-coverage for re-exports whose short ident is absent from conformance sources."
+tracking_issue = "#769"
+
+[[exclusion]]
+path = "ferrotorch_core::rfft_differentiable_norm"
+reason = "Re-export covered transitively by the Phase 2.7-fft-complex conformance test that exercises the underlying item; the gate has no auto-coverage for re-exports whose short ident is absent from conformance sources."
+tracking_issue = "#769"
+
+[[exclusion]]
+path = "ferrotorch_core::rfft_norm"
+reason = "Re-export covered transitively by the Phase 2.7-fft-complex conformance test that exercises the underlying item; the gate has no auto-coverage for re-exports whose short ident is absent from conformance sources."
+tracking_issue = "#769"
+
+[[exclusion]]
+path = "ferrotorch_core::rfftn_differentiable_norm"
+reason = "Re-export covered transitively by the Phase 2.7-fft-complex conformance test that exercises the underlying item; the gate has no auto-coverage for re-exports whose short ident is absent from conformance sources."
+tracking_issue = "#769"
+
+[[exclusion]]
+path = "ferrotorch_core::rfftn_norm"
+reason = "Re-export covered transitively by the Phase 2.7-fft-complex conformance test that exercises the underlying item; the gate has no auto-coverage for re-exports whose short ident is absent from conformance sources."
+tracking_issue = "#769"
+
+[[exclusion]]
+path = "ferrotorch_core::rng::Generator"
+reason = "Pending Phase 2.14-plumbing — plumbing & core types. The phase will land a conformance test exercising this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
+tracking_issue = "#776"
+
+[[exclusion]]
+path = "ferrotorch_core::rng::Generator::manual_seed"
+reason = "Pending Phase 2.14-plumbing — plumbing & core types. Method covered transitively via its containing type's integration tests in the phase suite; gate substring mismatch on method-call syntax."
+tracking_issue = "#776"
+
+[[exclusion]]
+path = "ferrotorch_core::rng::Generator::new"
+reason = "Pending Phase 2.14-plumbing — plumbing & core types. Method covered transitively via its containing type's integration tests in the phase suite; gate substring mismatch on method-call syntax."
+tracking_issue = "#776"
+
+[[exclusion]]
+path = "ferrotorch_core::rng::Generator::next_normal_f32"
+reason = "Pending Phase 2.14-plumbing — plumbing & core types. Method covered transitively via its containing type's integration tests in the phase suite; gate substring mismatch on method-call syntax."
+tracking_issue = "#776"
+
+[[exclusion]]
+path = "ferrotorch_core::rng::Generator::next_normal_f64"
+reason = "Pending Phase 2.14-plumbing — plumbing & core types. Method covered transitively via its containing type's integration tests in the phase suite; gate substring mismatch on method-call syntax."
+tracking_issue = "#776"
+
+[[exclusion]]
+path = "ferrotorch_core::rng::Generator::next_uniform_f32"
+reason = "Pending Phase 2.14-plumbing — plumbing & core types. Method covered transitively via its containing type's integration tests in the phase suite; gate substring mismatch on method-call syntax."
+tracking_issue = "#776"
+
+[[exclusion]]
+path = "ferrotorch_core::rng::Generator::next_uniform_f64"
+reason = "Pending Phase 2.14-plumbing — plumbing & core types. Method covered transitively via its containing type's integration tests in the phase suite; gate substring mismatch on method-call syntax."
+tracking_issue = "#776"
+
+[[exclusion]]
+path = "ferrotorch_core::rng::Generator::random_u32"
+reason = "Pending Phase 2.14-plumbing — plumbing & core types. Method covered transitively via its containing type's integration tests in the phase suite; gate substring mismatch on method-call syntax."
+tracking_issue = "#776"
+
+[[exclusion]]
+path = "ferrotorch_core::rng::Generator::random_u64"
+reason = "Pending Phase 2.14-plumbing — plumbing & core types. Method covered transitively via its containing type's integration tests in the phase suite; gate substring mismatch on method-call syntax."
+tracking_issue = "#776"
+
+[[exclusion]]
+path = "ferrotorch_core::rng::Generator::seed"
+reason = "Pending Phase 2.14-plumbing — plumbing & core types. Method covered transitively via its containing type's integration tests in the phase suite; gate substring mismatch on method-call syntax."
+tracking_issue = "#776"
+
+[[exclusion]]
+path = "ferrotorch_core::rng::Generator::seed_from_entropy"
+reason = "Pending Phase 2.14-plumbing — plumbing & core types. Method covered transitively via its containing type's integration tests in the phase suite; gate substring mismatch on method-call syntax."
+tracking_issue = "#776"
+
+[[exclusion]]
+path = "ferrotorch_core::rng::manual_seed"
+reason = "Pending Phase 2.14-plumbing — plumbing & core types. The phase will land a conformance test exercising this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
+tracking_issue = "#776"
+
+[[exclusion]]
+path = "ferrotorch_core::rng::with_thread_rng"
+reason = "Pending Phase 2.14-plumbing — plumbing & core types. The phase will land a conformance test exercising this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
+tracking_issue = "#776"
+
+[[exclusion]]
+path = "ferrotorch_core::rot90"
+reason = "Re-export covered transitively by the Phase 2.3-shape conformance test that exercises the underlying item; the gate has no auto-coverage for re-exports whose short ident is absent from conformance sources."
+tracking_issue = "#765"
+
+[[exclusion]]
+path = "ferrotorch_core::signbit"
+reason = "Re-export covered transitively by the Phase 2.1-elementwise conformance test that exercises the underlying item; the gate has no auto-coverage for re-exports whose short ident is absent from conformance sources."
+tracking_issue = "#763"
+
+[[exclusion]]
+path = "ferrotorch_core::special::gammainc"
+reason = "Pending Phase 2.5-special-transcendental — activations, transcendental, special. The phase will land a conformance test exercising this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
+tracking_issue = "#767"
+
+[[exclusion]]
+path = "ferrotorch_core::special::gammaincc"
+reason = "Pending Phase 2.5-special-transcendental — activations, transcendental, special. The phase will land a conformance test exercising this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
+tracking_issue = "#767"
+
+[[exclusion]]
+path = "ferrotorch_core::special::gammaln_sign"
+reason = "Pending Phase 2.5-special-transcendental — activations, transcendental, special. The phase will land a conformance test exercising this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
+tracking_issue = "#767"
+
+[[exclusion]]
+path = "ferrotorch_core::special::log_beta"
+reason = "Pending Phase 2.5-special-transcendental — activations, transcendental, special. The phase will land a conformance test exercising this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
+tracking_issue = "#767"
+
+[[exclusion]]
+path = "ferrotorch_core::special::multigammaln"
+reason = "Pending Phase 2.5-special-transcendental — activations, transcendental, special. The phase will land a conformance test exercising this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
+tracking_issue = "#767"
+
+[[exclusion]]
+path = "ferrotorch_core::special::mvlgamma"
+reason = "Pending Phase 2.5-special-transcendental — activations, transcendental, special. The phase will land a conformance test exercising this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
+tracking_issue = "#767"
+
+[[exclusion]]
+path = "ferrotorch_core::swapaxes"
+reason = "Re-export covered transitively by the Phase 2.3-shape conformance test that exercises the underlying item; the gate has no auto-coverage for re-exports whose short ident is absent from conformance sources."
+tracking_issue = "#765"
+
+[[exclusion]]
+path = "ferrotorch_core::swapdims"
+reason = "Re-export covered transitively by the Phase 2.3-shape conformance test that exercises the underlying item; the gate has no auto-coverage for re-exports whose short ident is absent from conformance sources."
+tracking_issue = "#765"
+
+[[exclusion]]
+path = "ferrotorch_core::tensor::Tensor <T>::masked_fill"
+reason = "Pending Phase 2.14-plumbing — plumbing & core types. Method covered transitively via its containing type's integration tests in the phase suite; gate substring mismatch on method-call syntax."
+tracking_issue = "#776"
+
+[[exclusion]]
+path = "ferrotorch_core::tensor::Tensor <T>::masked_select"
+reason = "Pending Phase 2.14-plumbing — plumbing & core types. Method covered transitively via its containing type's integration tests in the phase suite; gate substring mismatch on method-call syntax."
+tracking_issue = "#776"
+
+[[exclusion]]
+path = "ferrotorch_core::tensor::Tensor <T>::update_storage_and_shape"
+reason = "Pending Phase 2.14-plumbing — plumbing & core types. Method covered transitively via its containing type's integration tests in the phase suite; gate substring mismatch on method-call syntax."
+tracking_issue = "#776"
+
+[[exclusion]]
+path = "ferrotorch_core::tensor_split"
+reason = "Re-export covered transitively by the Phase 2.3-shape conformance test that exercises the underlying item; the gate has no auto-coverage for re-exports whose short ident is absent from conformance sources."
+tracking_issue = "#765"
+
+[[exclusion]]
+path = "ferrotorch_core::unbind"
+reason = "Re-export covered transitively by the Phase 2.3-shape conformance test that exercises the underlying item; the gate has no auto-coverage for re-exports whose short ident is absent from conformance sources."
+tracking_issue = "#765"
+
+[[exclusion]]
+path = "ferrotorch_core::unflatten"
+reason = "Re-export covered transitively by the Phase 2.3-shape conformance test that exercises the underlying item; the gate has no auto-coverage for re-exports whose short ident is absent from conformance sources."
+tracking_issue = "#765"
+
+[[exclusion]]
+path = "ferrotorch_core::vstack"
+reason = "Re-export covered transitively by the Phase 2.3-shape conformance test that exercises the underlying item; the gate has no auto-coverage for re-exports whose short ident is absent from conformance sources."
+tracking_issue = "#765"
+
+[[exclusion]]
+path = "ferrotorch_core::where_cond_bt"
+reason = "Re-export covered transitively by the Phase 2.3-shape conformance test that exercises the underlying item; the gate has no auto-coverage for re-exports whose short ident is absent from conformance sources."
+tracking_issue = "#765"
