@@ -259,7 +259,19 @@ fn batch_norm_gpu_backward<T: Float>(
         None
     };
 
-    Ok(Some(vec![Some(grad_input), grad_weight, grad_bias]))
+    // The returned grad vec MUST match `BatchNorm{1,2,3}dBackward::inputs()`,
+    // which registers only `input` when `affine == false` (no weight/bias
+    // leaves) and `[input, weight, bias]` when affine. Returning a length-3
+    // vec for a 1-input graph makes the autograd engine reject the node
+    // ("backward returned 3 gradients but expected 1"). Mirrors PyTorch's
+    // `grad_input_mask` in `aten/src/ATen/native/Normalization.cpp:322-330`,
+    // where `grad_weight`/`grad_bias` are simply not produced when their
+    // mask bits are unset.
+    if affine {
+        Ok(Some(vec![Some(grad_input), grad_weight, grad_bias]))
+    } else {
+        Ok(Some(vec![Some(grad_input)]))
+    }
 }
 
 /// GPU backward for InstanceNorm (#1449).
@@ -2250,11 +2262,20 @@ impl<T: Float> GradFn<T> for BatchNorm2dBackward<T> {
             None
         };
 
-        Ok(vec![
-            Some(grad_input_tensor),
-            grad_weight_out,
-            grad_bias_out,
-        ])
+        // Match `inputs()`: when `affine == false` the forward registered only
+        // `input` as a differentiable leaf, so the grad vec must be length 1.
+        // Returning weight/bias slots for a 1-input graph makes the autograd
+        // engine reject the node. Mirrors PyTorch's `grad_input_mask` in
+        // `aten/src/ATen/native/Normalization.cpp:322-330` (#1567).
+        if self.affine {
+            Ok(vec![
+                Some(grad_input_tensor),
+                grad_weight_out,
+                grad_bias_out,
+            ])
+        } else {
+            Ok(vec![Some(grad_input_tensor)])
+        }
     }
 
     fn inputs(&self) -> Vec<&Tensor<T>> {
@@ -2922,11 +2943,20 @@ impl<T: Float> GradFn<T> for BatchNorm1dBackward<T> {
             None
         };
 
-        Ok(vec![
-            Some(grad_input_tensor),
-            grad_weight_out,
-            grad_bias_out,
-        ])
+        // Match `inputs()`: when `affine == false` the forward registered only
+        // `input` as a differentiable leaf, so the grad vec must be length 1.
+        // Returning weight/bias slots for a 1-input graph makes the autograd
+        // engine reject the node. Mirrors PyTorch's `grad_input_mask` in
+        // `aten/src/ATen/native/Normalization.cpp:322-330` (#1567).
+        if self.affine {
+            Ok(vec![
+                Some(grad_input_tensor),
+                grad_weight_out,
+                grad_bias_out,
+            ])
+        } else {
+            Ok(vec![Some(grad_input_tensor)])
+        }
     }
 
     fn inputs(&self) -> Vec<&Tensor<T>> {
@@ -3590,11 +3620,20 @@ impl<T: Float> GradFn<T> for BatchNorm3dBackward<T> {
             None
         };
 
-        Ok(vec![
-            Some(grad_input_tensor),
-            grad_weight_out,
-            grad_bias_out,
-        ])
+        // Match `inputs()`: when `affine == false` the forward registered only
+        // `input` as a differentiable leaf, so the grad vec must be length 1.
+        // Returning weight/bias slots for a 1-input graph makes the autograd
+        // engine reject the node. Mirrors PyTorch's `grad_input_mask` in
+        // `aten/src/ATen/native/Normalization.cpp:322-330` (#1567).
+        if self.affine {
+            Ok(vec![
+                Some(grad_input_tensor),
+                grad_weight_out,
+                grad_bias_out,
+            ])
+        } else {
+            Ok(vec![Some(grad_input_tensor)])
+        }
     }
 
     fn inputs(&self) -> Vec<&Tensor<T>> {
@@ -5690,6 +5729,118 @@ mod tests {
 
         let grad = input.grad().unwrap().unwrap();
         assert_eq!(grad.shape(), &[4, 2]);
+    }
+
+    // #1567: a non-affine BatchNorm backward used to return a length-3 grad
+    // vec while `inputs()` (and the autograd graph) only registered `input`,
+    // so the engine errored "backward returned 3 gradients but expected 1".
+    // These CPU regressions prove affine=false backward now runs end-to-end
+    // (the GPU helper has the identical fix; pinned by the CUDA-gated
+    // `divergence_bn2d_gpu_nonaffine_train_backward_vs_torch`). The grad-vec
+    // length must match `inputs()` per
+    // `aten/src/ATen/native/Normalization.cpp:322-330` (grad_input_mask).
+    #[test]
+    fn test_batchnorm2d_nonaffine_backward_runs_grad_input_only() {
+        use ferrotorch_core::autograd::graph::backward;
+
+        let bn = BatchNorm2d::<f64>::new(4, 1e-5, 0.1, false).unwrap();
+        assert!(bn.weight.is_none() && bn.bias.is_none());
+        let n = 3 * 4 * 2 * 3;
+        let data: Vec<f64> = (0..n).map(|k| ((k % 19) as f64) * 0.11 - 1.0).collect();
+        let input = leaf(&data, &[3, 4, 2, 3], true);
+        let output = bn.forward(&input).unwrap();
+
+        // The grad node declares only `input`, so the engine must accept the
+        // length-1 grad vec (would error before #1567).
+        assert_eq!(output.grad_fn().unwrap().inputs().len(), 1);
+
+        let total: f64 = output.data().unwrap().iter().sum();
+        let sum_gf = Arc::new(SumBackwardHelper {
+            input: output.clone(),
+        });
+        let loss = Tensor::from_operation(TensorStorage::cpu(vec![total]), vec![], sum_gf).unwrap();
+        backward(&loss).unwrap();
+
+        let grad = input.grad().unwrap().expect("grad_input populated");
+        assert_eq!(grad.shape(), &[3, 4, 2, 3]);
+    }
+
+    #[test]
+    fn test_batchnorm1d_nonaffine_backward_runs_grad_input_only() {
+        use ferrotorch_core::autograd::graph::backward;
+
+        let bn = BatchNorm1d::<f64>::new(3, 1e-5, 0.1, false).unwrap();
+        let n = 4 * 3 * 5;
+        let data: Vec<f64> = (0..n).map(|k| ((k % 17) as f64) * 0.13 - 0.9).collect();
+        let input = leaf(&data, &[4, 3, 5], true);
+        let output = bn.forward(&input).unwrap();
+        assert_eq!(output.grad_fn().unwrap().inputs().len(), 1);
+
+        let total: f64 = output.data().unwrap().iter().sum();
+        let sum_gf = Arc::new(SumBackwardHelper {
+            input: output.clone(),
+        });
+        let loss = Tensor::from_operation(TensorStorage::cpu(vec![total]), vec![], sum_gf).unwrap();
+        backward(&loss).unwrap();
+
+        let grad = input.grad().unwrap().expect("grad_input populated");
+        assert_eq!(grad.shape(), &[4, 3, 5]);
+    }
+
+    #[test]
+    fn test_batchnorm3d_nonaffine_backward_runs_grad_input_only() {
+        use ferrotorch_core::autograd::graph::backward;
+
+        let bn = BatchNorm3d::<f64>::new(3, 1e-5, 0.1, false).unwrap();
+        let n = 2 * 3 * 2 * 2 * 2;
+        let data: Vec<f64> = (0..n).map(|k| ((k % 13) as f64) * 0.17 - 1.0).collect();
+        let input = leaf(&data, &[2, 3, 2, 2, 2], true);
+        let output = bn.forward(&input).unwrap();
+        assert_eq!(output.grad_fn().unwrap().inputs().len(), 1);
+
+        let total: f64 = output.data().unwrap().iter().sum();
+        let sum_gf = Arc::new(SumBackwardHelper {
+            input: output.clone(),
+        });
+        let loss = Tensor::from_operation(TensorStorage::cpu(vec![total]), vec![], sum_gf).unwrap();
+        backward(&loss).unwrap();
+
+        let grad = input.grad().unwrap().expect("grad_input populated");
+        assert_eq!(grad.shape(), &[2, 3, 2, 2, 2]);
+    }
+
+    #[test]
+    fn test_batchnorm2d_affine_backward_still_returns_three_grads() {
+        use ferrotorch_core::autograd::graph::backward;
+
+        // Regression guard for the affine=true path: grad vec stays length 3
+        // and weight/bias grads are populated.
+        // BatchNorm2d::new sets training=true by default.
+        let bn = BatchNorm2d::<f64>::new(4, 1e-5, 0.1, true).unwrap();
+        let n = 3 * 4 * 2 * 3;
+        let data: Vec<f64> = (0..n).map(|k| ((k % 19) as f64) * 0.11 - 1.0).collect();
+        let input = leaf(&data, &[3, 4, 2, 3], true);
+        let output = bn.forward(&input).unwrap();
+        assert_eq!(output.grad_fn().unwrap().inputs().len(), 3);
+
+        let total: f64 = output.data().unwrap().iter().sum();
+        let sum_gf = Arc::new(SumBackwardHelper {
+            input: output.clone(),
+        });
+        let loss = Tensor::from_operation(TensorStorage::cpu(vec![total]), vec![], sum_gf).unwrap();
+        backward(&loss).unwrap();
+
+        assert!(input.grad().unwrap().is_some());
+        assert!(
+            bn.weight
+                .as_ref()
+                .unwrap()
+                .tensor()
+                .grad()
+                .unwrap()
+                .is_some()
+        );
+        assert!(bn.bias.as_ref().unwrap().tensor().grad().unwrap().is_some());
     }
 
     #[test]

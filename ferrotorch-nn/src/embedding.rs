@@ -612,20 +612,27 @@ impl<T: Float> Embedding<T> {
 impl<T: Float> Module<T> for Embedding<T> {
     /// Forward pass: look up embedding vectors for the given indices.
     ///
-    /// `input` must be a 1-D tensor whose values are non-negative integers
-    /// stored as floats. Each value is cast to `usize` and used to index
-    /// into the weight matrix.
+    /// `input` is an index tensor of ANY shape whose values are non-negative
+    /// integers stored as floats. Each value is cast to `usize` and used to
+    /// index into the weight matrix. The lookup operates on the flattened
+    /// indices (row-major), exactly mirroring upstream `embedding_symint`
+    /// (`aten/src/ATen/native/Embedding.cpp:43-53`):
+    /// `weight.index_select(0, indices.reshape(-1)).view_symint(size)` where
+    /// `size = (*indices.sizes(), weight.size(1))`.
     ///
-    /// Returns a tensor of shape `[input.len(), embedding_dim]`.
+    /// Returns a tensor of shape `(*input.shape(), embedding_dim)`. A 1-D
+    /// index of length `n` therefore yields `[n, embedding_dim]`, and a 2-D
+    /// index `[a, b]` yields `[a, b, embedding_dim]`, matching `F.embedding`.
     fn forward(&self, input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
-        // Validate input is 1-D.
-        if input.ndim() != 1 {
-            return Err(FerrotorchError::InvalidArgument {
-                message: format!("Embedding input must be 1-D, got shape {:?}", input.shape()),
-            });
-        }
-
         let dim = self.embedding_dim;
+
+        // Output shape is the index shape with `embedding_dim` appended, per
+        // upstream `embedding_symint` (`Embedding.cpp:48-53`): the gather runs
+        // over the flattened indices and the result is viewed back to
+        // `(*indices.sizes(), weight.size(1))`. A 1-D input keeps the existing
+        // `[n, dim]` behavior (the empty-prefix special-case is implicit).
+        let mut output_shape: Vec<usize> = input.shape().to_vec();
+        output_shape.push(dim);
 
         // GPU fast path for f32/f64 embeddings: gather rows entirely on GPU.
         if self.weight.tensor().is_cuda() && (is_f32::<T>() || is_f64::<T>()) {
@@ -683,7 +690,6 @@ impl<T: Float> Module<T> for Embedding<T> {
             // only if padding_idx is actually referenced.
             // (The weight is zeroed at init, so we skip extra GPU work here.)
 
-            let output_shape = vec![n, dim];
             let storage = TensorStorage::gpu(output_handle);
 
             if self.weight.requires_grad() && is_grad_enabled() {
@@ -763,8 +769,6 @@ impl<T: Float> Module<T> for Embedding<T> {
                 }
             }
         }
-
-        let output_shape = vec![n, dim];
 
         // Output device matches the weight's device (GPU if model is on GPU).
         let device = self.weight.tensor().device();
@@ -1410,10 +1414,13 @@ mod tests {
         assert!(result.is_err());
     }
 
-    // --- Non-1D input error ---
+    // --- N-D index input (matches upstream F.embedding) ---
 
     #[test]
-    fn test_non_1d_input_error() {
+    fn test_2d_index_input_shape() {
+        // Upstream `embedding_symint` (aten/src/ATen/native/Embedding.cpp:48-53)
+        // accepts ANY index shape and returns `(*indices.sizes(), embedding_dim)`.
+        // A [2,2] index against a [5,3] weight => output shape [2,2,3].
         let emb = Embedding::<f32>::new(5, 3, None).unwrap();
         let input = Tensor::from_storage(
             TensorStorage::cpu(vec![0.0f32, 1.0, 2.0, 3.0]),
@@ -1421,8 +1428,8 @@ mod tests {
             false,
         )
         .unwrap();
-        let result = emb.forward(&input);
-        assert!(result.is_err());
+        let output = emb.forward(&input).unwrap();
+        assert_eq!(output.shape(), &[2, 2, 3]);
     }
 
     // --- Backward tests ---

@@ -386,8 +386,10 @@ fn divergence_lrn_gpu_even_size2_window_vs_torch() {
 // torch: BatchNorm2d(affine=False); see /tmp/oracle_extra.py::bn_noaffine.
 // Tracking: #1567
 // ---------------------------------------------------------------------------
+// FIXED #1567: BatchNorm{1,2,3}dBackward now return a grad vec whose length
+// matches `inputs()` (length 1 when affine=false), so the non-affine GPU
+// backward runs and matches torch. Permanent regression coverage.
 #[test]
-#[ignore = "divergence #1567: non-affine BatchNorm backward returns 3 grads for 1-input graph (pre-existing, CPU+GPU)"]
 fn divergence_bn2d_gpu_nonaffine_train_backward_vs_torch() {
     if !cuda_ready() {
         return;
