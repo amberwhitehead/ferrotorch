@@ -8,10 +8,15 @@
 //! input is upcast to f64, the transform runs in double precision, and the
 //! result is cast back to the input dtype. The 1-D and 2-D paths
 //! ([`fft`], [`ifft`], [`fft2`], [`ifft2`], [`rfft`], [`irfft`]) are powered
-//! by [`rustfft`] directly. The N-D, Hermitian, frequency-helper, and
-//! shift paths ([`fftn`], [`ifftn`], [`rfftn`], [`irfftn`], [`hfft`],
-//! [`ihfft`], [`fftfreq`], [`rfftfreq`], [`fftshift`], [`ifftshift`]) are
-//! delegated to [`ferray_fft`].
+//! by [`rustfft`] directly. The N-D, 2-D real/Hermitian, Hermitian,
+//! frequency-helper, and shift paths ([`fftn`], [`ifftn`], [`rfftn`],
+//! [`irfftn`], [`rfft2`], [`irfft2`], [`hfft`], [`ihfft`], [`hfft2`],
+//! [`ihfft2`], [`hfftn`], [`ihfftn`], [`fftfreq`], [`rfftfreq`],
+//! [`fftshift`], [`ifftshift`]) are delegated to [`ferray_fft`]. The
+//! 2-D real/Hermitian ops `rfft2`/`irfft2`/`hfft2`/`ihfft2` and the N-D
+//! Hermitian ops `hfftn`/`ihfftn` were added under #1299 (each delegates to
+//! the matching `ferray_fft` entry point, which is itself the N-D-over-
+//! trailing-axes specialization matching `torch.fft.<op>`).
 //!
 //! # GPU note
 //!
@@ -996,6 +1001,49 @@ pub fn irfftn<T: Float>(
     real_array_to_tensor(&result)
 }
 
+/// 2-D real-to-complex FFT (`torch.fft.rfft2`).
+///
+/// Input is real-valued with shape `[..., rows, cols]`. The 2-D transform
+/// runs over the last two axes; only the last axis is Hermitian-truncated
+/// (to `cols/2 + 1`), the rows axis goes full length. Output shape is the
+/// input shape with `cols` replaced by `cols/2 + 1` and a trailing `2`
+/// appended for the complex pair. The 2-D specialization of [`rfftn`] over
+/// the trailing two axes (matches `aten::fft_rfft2_symint`'s `return
+/// fft_rfftn_symint(...)` delegation).
+pub fn rfft2<T: Float>(
+    input: &Tensor<T>,
+    s: Option<&[usize]>,
+    axes: Option<&[isize]>,
+) -> FerrotorchResult<Tensor<T>> {
+    let arr = tensor_to_real_array(input, "rfft2")?;
+    let result = ferray_fft::rfft2(&arr, s, axes, FftNorm::Backward).map_err(|e| {
+        FerrotorchError::InvalidArgument {
+            message: format!("rfft2: {e}"),
+        }
+    })?;
+    complex_array_to_tensor(&result)
+}
+
+/// 2-D complex-to-real inverse FFT (`torch.fft.irfft2`).
+///
+/// Inverse of [`rfft2`]. Input has shape `[..., rows, cols/2 + 1, 2]`; output
+/// is real with the last transform axis restored to `cols` (or whatever `s`
+/// specifies). The 2-D specialization of [`irfftn`] over the trailing two
+/// axes.
+pub fn irfft2<T: Float>(
+    input: &Tensor<T>,
+    s: Option<&[usize]>,
+    axes: Option<&[isize]>,
+) -> FerrotorchResult<Tensor<T>> {
+    let arr = tensor_to_complex_array(input, "irfft2")?;
+    let result = ferray_fft::irfft2(&arr, s, axes, FftNorm::Backward).map_err(|e| {
+        FerrotorchError::InvalidArgument {
+            message: format!("irfft2: {e}"),
+        }
+    })?;
+    real_array_to_tensor(&result)
+}
+
 // ---------------------------------------------------------------------------
 // Hermitian FFT (hfft, ihfft)
 // ---------------------------------------------------------------------------
@@ -1090,6 +1138,88 @@ pub fn ihfft<T: Float>(input: &Tensor<T>, n: Option<usize>) -> FerrotorchResult<
     let result = ferray_fft::ihfft(&arr, n, None, FftNorm::Backward).map_err(|e| {
         FerrotorchError::InvalidArgument {
             message: format!("ihfft: {e}"),
+        }
+    })?;
+    complex_array_to_tensor(&result)
+}
+
+/// 2-D FFT of a Hermitian-symmetric spectrum, returning real output
+/// (`torch.fft.hfft2`).
+///
+/// Input has shape `[..., rows, cols/2 + 1, 2]` (Hermitian complex); output is
+/// real with shape `[..., rows, n]` where `n` is the last entry of `s` (or
+/// `2 * (cols/2+1 - 1)` by default). The 2-D specialization of [`hfftn`] over
+/// the trailing two axes (matches `aten::fft_hfft2_symint`).
+pub fn hfft2<T: Float>(
+    input: &Tensor<T>,
+    s: Option<&[usize]>,
+    axes: Option<&[isize]>,
+) -> FerrotorchResult<Tensor<T>> {
+    let arr = tensor_to_complex_array(input, "hfft2")?;
+    let result = ferray_fft::hfft2(&arr, s, axes, FftNorm::Backward).map_err(|e| {
+        FerrotorchError::InvalidArgument {
+            message: format!("hfft2: {e}"),
+        }
+    })?;
+    real_array_to_tensor(&result)
+}
+
+/// 2-D inverse FFT of a real signal, returning a Hermitian-symmetric spectrum
+/// (`torch.fft.ihfft2`).
+///
+/// Inverse of [`hfft2`]. Input is real with shape `[..., rows, cols]`; output
+/// is Hermitian complex `[..., rows, cols/2 + 1, 2]`. The 2-D specialization of
+/// [`ihfftn`] over the trailing two axes.
+pub fn ihfft2<T: Float>(
+    input: &Tensor<T>,
+    s: Option<&[usize]>,
+    axes: Option<&[isize]>,
+) -> FerrotorchResult<Tensor<T>> {
+    let arr = tensor_to_real_array(input, "ihfft2")?;
+    let result = ferray_fft::ihfft2(&arr, s, axes, FftNorm::Backward).map_err(|e| {
+        FerrotorchError::InvalidArgument {
+            message: format!("ihfft2: {e}"),
+        }
+    })?;
+    complex_array_to_tensor(&result)
+}
+
+/// N-D FFT of a Hermitian-symmetric spectrum, returning real output
+/// (`torch.fft.hfftn`). Generalizes [`hfft`] / [`hfft2`] to arbitrary axes.
+///
+/// Input has shape `[..., 2]` (Hermitian complex); only the last transform
+/// axis is the half-spectrum (`n_last/2 + 1`). Output is real with that axis
+/// restored to `n_last` (or whatever the last entry of `s` specifies). The
+/// N-D analog of `aten::fft_hfftn_symint`.
+pub fn hfftn<T: Float>(
+    input: &Tensor<T>,
+    s: Option<&[usize]>,
+    axes: Option<&[isize]>,
+) -> FerrotorchResult<Tensor<T>> {
+    let arr = tensor_to_complex_array(input, "hfftn")?;
+    let result = ferray_fft::hfftn(&arr, s, axes, FftNorm::Backward).map_err(|e| {
+        FerrotorchError::InvalidArgument {
+            message: format!("hfftn: {e}"),
+        }
+    })?;
+    real_array_to_tensor(&result)
+}
+
+/// N-D inverse FFT of a real signal, returning a Hermitian-symmetric spectrum
+/// (`torch.fft.ihfftn`). Generalizes [`ihfft`] / [`ihfft2`] to arbitrary axes.
+///
+/// Input is real with shape `[..., n]`; the last transform axis becomes
+/// `n_last/2 + 1` complex coefficients (trailing 2 appended). The N-D analog
+/// of `aten::fft_ihfftn_symint`.
+pub fn ihfftn<T: Float>(
+    input: &Tensor<T>,
+    s: Option<&[usize]>,
+    axes: Option<&[isize]>,
+) -> FerrotorchResult<Tensor<T>> {
+    let arr = tensor_to_real_array(input, "ihfftn")?;
+    let result = ferray_fft::ihfftn(&arr, s, axes, FftNorm::Backward).map_err(|e| {
+        FerrotorchError::InvalidArgument {
+            message: format!("ihfftn: {e}"),
         }
     })?;
     complex_array_to_tensor(&result)
@@ -1663,5 +1793,74 @@ mod tests {
         let by_fft2 = fft2(&input).unwrap();
         let by_fftn = fftn(&input, None, None).unwrap();
         assert_close(by_fft2.data().unwrap(), by_fftn.data().unwrap(), 1e-9);
+    }
+
+    // -----------------------------------------------------------------------
+    // 2-D / N-D real + Hermitian forward ops (#1299)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn rfft2_output_shape_and_irfft2_roundtrip() {
+        // Real 3x4 input → rfft2 over last 2 axes. Last axis 4 → 4/2+1 = 3.
+        let original: Vec<f64> = (1..=12).map(|x| x as f64).collect();
+        let input = t(&original, &[3, 4]);
+        let spectrum = rfft2(&input, None, None).unwrap();
+        // Rows (3) full length, cols (4) → 3 complex, trailing 2.
+        assert_eq!(spectrum.shape(), &[3, 3, 2]);
+        let recovered = irfft2(&spectrum, Some(&[3, 4]), None).unwrap();
+        assert_eq!(recovered.shape(), &[3, 4]);
+        assert_close(recovered.data().unwrap(), &original, 1e-9);
+    }
+
+    #[test]
+    fn rfft2_matches_rfftn_over_last_two_axes() {
+        // rfft2 is the 2-D specialization of rfftn over the trailing 2 axes
+        // (aten::fft_rfft2_symint delegates to fft_rfftn_symint).
+        let original: Vec<f64> = (1..=24).map(|x| x as f64 * 0.5).collect();
+        let input = t(&original, &[2, 3, 4]);
+        let by_rfft2 = rfft2(&input, None, None).unwrap();
+        let by_rfftn = rfftn(&input, None, Some(&[-2, -1])).unwrap();
+        assert_eq!(by_rfft2.shape(), by_rfftn.shape());
+        assert_close(by_rfft2.data().unwrap(), by_rfftn.data().unwrap(), 1e-9);
+    }
+
+    #[test]
+    fn ihfft2_hfft2_roundtrip() {
+        // Real 4x4 → ihfft2 → Hermitian complex → hfft2 → real 4x4.
+        let original: Vec<f64> = (1..=16).map(|x| x as f64).collect();
+        let input = t(&original, &[4, 4]);
+        let spectrum = ihfft2(&input, None, None).unwrap();
+        // Last axis 4 → 4/2+1 = 3 complex coefficients, trailing 2.
+        assert_eq!(spectrum.shape(), &[4, 3, 2]);
+        let recovered = hfft2(&spectrum, Some(&[4, 4]), None).unwrap();
+        assert_eq!(recovered.shape(), &[4, 4]);
+        assert_close(recovered.data().unwrap(), &original, 1e-9);
+    }
+
+    #[test]
+    fn ihfftn_hfftn_roundtrip_3d() {
+        // Real 2x2x4 → ihfftn (all axes) → Hermitian complex → hfftn → real.
+        let original: Vec<f64> = (1..=16).map(|x| x as f64 * 0.25).collect();
+        let input = t(&original, &[2, 2, 4]);
+        let spectrum = ihfftn(&input, None, None).unwrap();
+        // Last transform axis 4 → 4/2+1 = 3; trailing 2 appended.
+        assert_eq!(spectrum.shape(), &[2, 2, 3, 2]);
+        let recovered = hfftn(&spectrum, Some(&[2, 2, 4]), None).unwrap();
+        assert_eq!(recovered.shape(), &[2, 2, 4]);
+        assert_close(recovered.data().unwrap(), &original, 1e-9);
+    }
+
+    #[test]
+    fn hfft2_matches_hfftn_over_last_two_axes() {
+        // hfft2 is the 2-D specialization of hfftn over the trailing 2 axes.
+        // Build a Hermitian-shaped complex input [2, 3, 3, 2] (last axis = 3
+        // half-spectrum bins) by running ihfftn on a real signal first.
+        let original: Vec<f64> = (1..=24).map(|x| x as f64 * 0.3).collect();
+        let real_in = t(&original, &[2, 3, 4]);
+        let spectrum = ihfftn(&real_in, Some(&[3, 4]), Some(&[-2, -1])).unwrap();
+        let by_hfft2 = hfft2(&spectrum, Some(&[3, 4]), None).unwrap();
+        let by_hfftn = hfftn(&spectrum, Some(&[3, 4]), Some(&[-2, -1])).unwrap();
+        assert_eq!(by_hfft2.shape(), by_hfftn.shape());
+        assert_close(by_hfft2.data().unwrap(), by_hfftn.data().unwrap(), 1e-9);
     }
 }

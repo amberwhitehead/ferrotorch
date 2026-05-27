@@ -166,16 +166,16 @@ pub use named_tensor::NamedTensor;
 // already declared `pub mod linalg;` above.
 pub use dispatch::{DispatchKey, DispatchKeySet, Dispatcher, Kernel};
 pub use fft::{
-    fft, fft2, fftfreq, fftn, fftshift, hfft, ifft, ifft2, ifftn, ifftshift, ihfft, irfft, irfftn,
-    rfft, rfftfreq, rfftn,
+    fft, fft2, fftfreq, fftn, fftshift, hfft, hfft2, hfftn, ifft, ifft2, ifftn, ifftshift, ihfft,
+    ihfft2, ihfftn, irfft, irfft2, irfftn, rfft, rfft2, rfftfreq, rfftn,
 };
 pub use flex_attention::flex_attention;
 pub use grad_fns::activation::{GeluApproximate, gelu, gelu_with, sigmoid, tanh};
 pub use grad_fns::cumulative::{cummax, cummin, cumprod, cumsum, logcumsumexp};
 pub use grad_fns::fft::{
-    fft_differentiable, fftn_differentiable, hfft_differentiable, ifft_differentiable,
-    ifftn_differentiable, ihfft_differentiable, irfft_differentiable, irfftn_differentiable,
-    rfft_differentiable, rfftn_differentiable,
+    fft_differentiable, fft2_differentiable, fftn_differentiable, hfft_differentiable,
+    ifft_differentiable, ifft2_differentiable, ifftn_differentiable, ihfft_differentiable,
+    irfft_differentiable, irfftn_differentiable, rfft_differentiable, rfftn_differentiable,
 };
 pub use grad_fns::quantize_grad::fake_quantize_differentiable;
 pub use grad_fns::reduction::{max_with_dim, mean_dim, min_with_dim, norm_with_dim, sum_dim};

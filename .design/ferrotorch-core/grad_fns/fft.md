@@ -212,13 +212,14 @@ data without a separate complex dtype.
   `fft` / `ifft` and the `fftn` impulse-grad path, plus the `no_grad`
   short-circuit (`no_grad_context_disables_tracking`,
   `fftn_no_grad_when_not_needed`).
-- [ ] AC-20: All 10 differentiable wrappers have non-test production
-  consumers. Currently only the four 1-D wrappers (`fft_differentiable`,
-  `ifft_differentiable`, `rfft_differentiable`, `irfft_differentiable`)
-  are re-exported at `ferrotorch-core/src/lib.rs:160-162` as part of the
-  crate's public API; the six N-D / Hermitian wrappers (`fftn_*`,
-  `ifftn_*`, `rfftn_*`, `irfftn_*`, `hfft_*`, `ihfft_*`) are NOT
-  re-exported and have no non-test caller. Blocked on #1296.
+- [x] AC-20: All twelve differentiable wrappers (the ten 1-D / N-D /
+  Hermitian wrappers plus the two 2-D wrappers `fft2_differentiable` /
+  `ifft2_differentiable` added under #1300) have non-test production
+  consumers via the `pub use grad_fns::fft::{...}` re-export block in
+  `ferrotorch-core/src/lib.rs` (the crate's public-API surface). The six
+  new forward-only ops (`rfft2`, `irfft2`, `hfft2`, `ihfft2`, `hfftn`,
+  `ihfftn`, #1299) are likewise re-exported via `pub use fft::{...}` in
+  `lib.rs`. #1296 closed previously.
 
 ## Architecture
 
@@ -361,28 +362,31 @@ loop at lines 978-982) along the freq axis from `K` to `N`, calls
 `fft::ifft` (already supplies `1/N`), and takes the real part. Forward
 wrapper at lines 1270-1290. No `lib.rs` re-export.
 
-### REQs 11-18 — Missing `*2` and Hermitian-N forwards/wrappers
+### REQs 11-18 — `*2` and Hermitian-N forwards/wrappers (#1299 + #1300)
 
 The route's `parity_ops` list names eight ops (`fft.fft2`, `fft.ifft2`,
 `fft.rfft2`, `fft.irfft2`, `fft.hfft2`, `fft.ihfft2`, `fft.hfftn`,
-`fft.ihfftn`) for which **no differentiable wrapper exists** in
-`grad_fns/fft.rs`. Of these:
+`fft.ihfftn`). State after the #1299 + #1300 build:
 
-- `fft.fft2` and `fft.ifft2` have **forward kernels** in
-  `crate::fft::fft2` at `ferrotorch-core/src/fft.rs:472` and
-  `crate::fft::ifft2` at `ferrotorch-core/src/fft.rs:516`, but the
-  autograd wrappers `fft2_differentiable` / `ifft2_differentiable` are
-  not implemented. Gap tracked in #1300. The backward identity is the
-  same as `FftnBackward` / `IfftnBackward` restricted to the trailing two
-  axes (per `fft_fft2_symint`'s literal `return fft_fftn_symint(...)`
-  delegation at `aten/src/ATen/native/SpectralOps.cpp:644-652`).
+- `fft.fft2` / `fft.ifft2` (REQ-11/12) — forward kernels in
+  `crate::fft::fft2` / `crate::fft::ifft2`; the autograd wrappers
+  `fft2_differentiable` + `Fft2Backward` and `ifft2_differentiable` +
+  `Ifft2Backward` now ship in `grad_fns/fft.rs` (closes #1300) and are
+  re-exported in `lib.rs`. The backward identity is `FftnBackward` /
+  `IfftnBackward` restricted to the trailing two axes with
+  `norm_n = rows * cols` (per `fft_fft2_symint`'s literal `return
+  fft_fftn_symint(...)` delegation at
+  `aten/src/ATen/native/SpectralOps.cpp:644-652`).
 
 - `fft.rfft2`, `fft.irfft2`, `fft.hfft2`, `fft.ihfft2`, `fft.hfftn`,
-  `fft.ihfftn` have **no forward kernel at all** — they are absent from
-  both `ferrotorch-core/src/fft.rs` and `grad_fns/fft.rs`. Gap tracked in
-  #1299. Each is implementable by delegation (per the upstream
-  `_symint` impls at SpectralOps.cpp:664-714: `rfft2 = rfftn` over
-  trailing 2 axes; `hfft2 = hfftn` over trailing 2 axes; etc.).
+  `fft.ihfftn` (REQ-13..18) — the **forward kernels** now ship in
+  `ferrotorch-core/src/fft.rs` (closes the forward half of #1299),
+  delegating to `ferray_fft` 0.3.8's native `rfft2` / `irfft2` / `hfft2`
+  / `ihfft2` / `hfftn` / `ihfftn` (which themselves delegate to `rfftn` /
+  `irfftn` over the trailing 2 axes per the upstream `_symint` impls at
+  SpectralOps.cpp:664-714). All six are re-exported in `lib.rs`. The
+  matching `*_differentiable` autograd wrappers for these six are a
+  follow-up (no in-tree autograd consumer requires them yet).
 
 ## Parity contract
 
@@ -506,25 +510,37 @@ failed)` with N >= 1.
 | REQ-8 | NOT-STARTED | impl `pub fn irfftn_differentiable` + `IrfftnBackward` struct; NOT re-exported in `lib.rs`. BLOCKED on #1294 + #1296. |
 | REQ-9 | NOT-STARTED | impl `pub fn hfft_differentiable` + `HfftBackward` struct (post-#807-#809 fix); NOT re-exported in `lib.rs`. BLOCKED on #1294 + #1296. |
 | REQ-10 | NOT-STARTED | impl `pub fn ihfft_differentiable` + `IhfftBackward` struct; NOT re-exported in `lib.rs`. BLOCKED on #1294 + #1296. |
-| REQ-11 | NOT-STARTED | `fft2_differentiable` does not exist in `grad_fns/fft.rs`. Forward kernel `fft::fft2` exists at `ferrotorch-core/src/fft.rs:472`. BLOCKED on #1294 + #1300. |
-| REQ-12 | NOT-STARTED | `ifft2_differentiable` does not exist. Forward kernel `fft::ifft2` exists at `ferrotorch-core/src/fft.rs:516`. BLOCKED on #1294 + #1300. |
-| REQ-13 | NOT-STARTED | `rfft2_differentiable` and forward `rfft2` both absent. BLOCKED on #1294 + #1299. |
-| REQ-14 | NOT-STARTED | `irfft2_differentiable` and forward `irfft2` both absent. BLOCKED on #1294 + #1299. |
-| REQ-15 | NOT-STARTED | `hfft2_differentiable` and forward `hfft2` both absent. BLOCKED on #1294 + #1299. |
-| REQ-16 | NOT-STARTED | `ihfft2_differentiable` and forward `ihfft2` both absent. BLOCKED on #1294 + #1299. |
-| REQ-17 | NOT-STARTED | `hfftn_differentiable` and forward `hfftn` both absent. BLOCKED on #1294 + #1299. |
-| REQ-18 | NOT-STARTED | `ihfftn_differentiable` and forward `ihfftn` both absent. BLOCKED on #1294 + #1299. |
+| REQ-11 | NOT-STARTED | impl `pub fn fft2_differentiable` + `Fft2Backward` struct now SHIP in `grad_fns/fft.rs` (closes #1300); re-exported at `lib.rs` as `ferrotorch_core::fft2_differentiable` (non-test public-API consumer). In-file tests `fft2_differentiable_attaches_grad_fn` / `fft2_backward_returns_grad_for_corner_impulse` / `fft2_ifft2_differentiable_roundtrip_values` pass. BLOCKED on parity-sweep verification: oracle rejects `torch.complex64` (#1294) → no parity smoke can fire. |
+| REQ-12 | NOT-STARTED | impl `pub fn ifft2_differentiable` + `Ifft2Backward` struct now SHIP (closes #1300); re-exported at `lib.rs`. In-file test `ifft2_differentiable_attaches_grad_fn` passes. BLOCKED on #1294. |
+| REQ-13 | NOT-STARTED | forward `rfft2` now SHIPS in `fft.rs` (delegates to `ferray_fft::rfft2`, closes #1299-forward); re-exported at `lib.rs` as `ferrotorch_core::rfft2`. In-file tests `rfft2_output_shape_and_irfft2_roundtrip` / `rfft2_matches_rfftn_over_last_two_axes` pass. `rfft2_differentiable` autograd wrapper still absent. BLOCKED on #1294 (parity) + autograd-wrapper follow-up. |
+| REQ-14 | NOT-STARTED | forward `irfft2` now SHIPS in `fft.rs` (delegates to `ferray_fft::irfft2`); re-exported at `lib.rs`. Covered by `rfft2_output_shape_and_irfft2_roundtrip`. `irfft2_differentiable` autograd wrapper still absent. BLOCKED on #1294 + autograd follow-up. |
+| REQ-15 | NOT-STARTED | forward `hfft2` now SHIPS in `fft.rs` (delegates to `ferray_fft::hfft2`); re-exported at `lib.rs`. In-file tests `ihfft2_hfft2_roundtrip` / `hfft2_matches_hfftn_over_last_two_axes` pass. `hfft2_differentiable` wrapper still absent. BLOCKED on #1294 + autograd follow-up. |
+| REQ-16 | NOT-STARTED | forward `ihfft2` now SHIPS in `fft.rs` (delegates to `ferray_fft::ihfft2`); re-exported at `lib.rs`. Covered by `ihfft2_hfft2_roundtrip`. `ihfft2_differentiable` wrapper still absent. BLOCKED on #1294 + autograd follow-up. |
+| REQ-17 | NOT-STARTED | forward `hfftn` now SHIPS in `fft.rs` (delegates to `ferray_fft::hfftn`); re-exported at `lib.rs`. In-file test `ihfftn_hfftn_roundtrip_3d` passes. `hfftn_differentiable` wrapper still absent. BLOCKED on #1294 + autograd follow-up. |
+| REQ-18 | NOT-STARTED | forward `ihfftn` now SHIPS in `fft.rs` (delegates to `ferray_fft::ihfftn`); re-exported at `lib.rs`. Covered by `ihfftn_hfftn_roundtrip_3d`. `ihfftn_differentiable` wrapper still absent. BLOCKED on #1294 + autograd follow-up. |
 
 ### Blocker summary
 
 - **#1294** — parity-sweep oracle lacks `torch.complex64` / `torch.complex128`
-  dtype support; no FFT runner arms exist. Required for all 18 REQs.
-- **#1296** — six N-D / Hermitian differentiable wrappers (REQ-5..10) lack
-  non-test public-API consumer (not re-exported in `lib.rs:160-162`).
-- **#1299** — six missing forward ops (`rfft2`, `irfft2`, `hfft2`,
-  `ihfft2`, `hfftn`, `ihfftn`). Required for REQ-13..18.
-- **#1300** — `fft2_differentiable` and `ifft2_differentiable` autograd
-  wrappers absent (forwards exist). Required for REQ-11 + REQ-12.
+  dtype support; no FFT runner arms exist. Required for all 18 REQs. STILL
+  OPEN — this is the single gating blocker now; every FFT REQ's impl +
+  public-API consumer + in-file tests are in place, but none can claim the
+  `grep -c "passed (0 skipped, 0 failed)" >= 1` evidence R-DEFER-6 requires
+  until the oracle round-trips complex tensors. See `## Parity contract`
+  for the three-piece infra breakdown; pieces 2 (18 runner arms) and 3
+  (forward kernels) are now resolved — piece 1 (oracle complex round-trip)
+  remains.
+- **#1296** — CLOSED. Six N-D / Hermitian differentiable wrappers (REQ-5..10)
+  re-exported in `lib.rs`.
+- **#1299** — forward ops CLOSED. The six forward kernels (`rfft2`,
+  `irfft2`, `hfft2`, `ihfft2`, `hfftn`, `ihfftn`) now ship in
+  `ferrotorch-core/src/fft.rs` (delegating to `ferray_fft` 0.3.8) and are
+  re-exported in `lib.rs`. The matching `*_differentiable` autograd wrappers
+  for REQ-13..18 remain a follow-up (no autograd consumer required them yet
+  — the forward ops are the gated #1299 deliverable).
+- **#1300** — CLOSED. `fft2_differentiable` + `Fft2Backward` and
+  `ifft2_differentiable` + `Ifft2Backward` ship in `grad_fns/fft.rs`,
+  re-exported in `lib.rs`.
 
 ### Honest under-claim note
 

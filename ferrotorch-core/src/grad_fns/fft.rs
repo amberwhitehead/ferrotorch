@@ -24,14 +24,14 @@
 //! | REQ-8 (`fft.irfftn`) | NOT-STARTED | `irfftn_differentiable` + `IrfftnBackward` ship and are re-exported at `lib.rs` (closes #1296); blocked on #1294. |
 //! | REQ-9 (`fft.hfft`) | NOT-STARTED | `hfft_differentiable` + `HfftBackward` (post-#807-#809 fix) ship and are re-exported at `lib.rs` (closes #1296); blocked on #1294. |
 //! | REQ-10 (`fft.ihfft`) | NOT-STARTED | `ihfft_differentiable` + `IhfftBackward` ship and are re-exported at `lib.rs` (closes #1296); blocked on #1294. |
-//! | REQ-11 (`fft.fft2`) | NOT-STARTED | the autograd wrapper `fft2_differentiable` does not exist (forward `fft::fft2` exists in `fft.rs`); blocked on #1294 + #1300. |
-//! | REQ-12 (`fft.ifft2`) | NOT-STARTED | the autograd wrapper `ifft2_differentiable` does not exist (forward `fft::ifft2` exists); blocked on #1294 + #1300. |
-//! | REQ-13 (`fft.rfft2`) | NOT-STARTED | no forward kernel, no autograd wrapper; blocked on #1294 + #1299. |
-//! | REQ-14 (`fft.irfft2`) | NOT-STARTED | no forward kernel, no autograd wrapper; blocked on #1294 + #1299. |
-//! | REQ-15 (`fft.hfft2`) | NOT-STARTED | no forward kernel, no autograd wrapper; blocked on #1294 + #1299. |
-//! | REQ-16 (`fft.ihfft2`) | NOT-STARTED | no forward kernel, no autograd wrapper; blocked on #1294 + #1299. |
-//! | REQ-17 (`fft.hfftn`) | NOT-STARTED | no forward kernel, no autograd wrapper; blocked on #1294 + #1299. |
-//! | REQ-18 (`fft.ihfftn`) | NOT-STARTED | no forward kernel, no autograd wrapper; blocked on #1294 + #1299. |
+//! | REQ-11 (`fft.fft2`) | NOT-STARTED | `fft2_differentiable` + `Fft2Backward` ship and are re-exported at `lib.rs` (closes #1300); parity-sweep gated on oracle complex-dtype support (#1294). |
+//! | REQ-12 (`fft.ifft2`) | NOT-STARTED | `ifft2_differentiable` + `Ifft2Backward` ship and are re-exported at `lib.rs` (closes #1300); blocked on #1294. |
+//! | REQ-13 (`fft.rfft2`) | NOT-STARTED | forward `fft::rfft2` ships and is re-exported at `lib.rs` (closes forward half of #1299); autograd wrapper is a follow-up; blocked on #1294. |
+//! | REQ-14 (`fft.irfft2`) | NOT-STARTED | forward `fft::irfft2` ships and is re-exported at `lib.rs` (closes #1299-forward); autograd wrapper follow-up; blocked on #1294. |
+//! | REQ-15 (`fft.hfft2`) | NOT-STARTED | forward `fft::hfft2` ships and is re-exported at `lib.rs` (closes #1299-forward); autograd wrapper follow-up; blocked on #1294. |
+//! | REQ-16 (`fft.ihfft2`) | NOT-STARTED | forward `fft::ihfft2` ships and is re-exported at `lib.rs` (closes #1299-forward); autograd wrapper follow-up; blocked on #1294. |
+//! | REQ-17 (`fft.hfftn`) | NOT-STARTED | forward `fft::hfftn` ships and is re-exported at `lib.rs` (closes #1299-forward); autograd wrapper follow-up; blocked on #1294. |
+//! | REQ-18 (`fft.ihfftn`) | NOT-STARTED | forward `fft::ihfftn` ships and is re-exported at `lib.rs` (closes #1299-forward); autograd wrapper follow-up; blocked on #1294. |
 
 use std::sync::Arc;
 
@@ -1313,6 +1313,144 @@ pub fn ihfft_differentiable<T: Float>(
 }
 
 // ---------------------------------------------------------------------------
+// Fft2Backward / Ifft2Backward — 2-D complex FFT backward (#1300).
+// ---------------------------------------------------------------------------
+//
+// `torch.fft.fft2` / `ifft2` are the 2-D specializations of `fftn` / `ifftn`
+// over the trailing two spatial axes (`aten::fft_fft2_symint` literally does
+// `return fft_fftn_symint(self, s, dim, norm)` at SpectralOps.cpp:644-652).
+// The VJPs are therefore the FftnBackward / IfftnBackward identities with the
+// transform set fixed to the last two axes:
+//   y = fft2(x)   → grad_x = (rows*cols) * ifft2(grad_y)
+//   y = ifft2(x)  → grad_x = fft2(grad_y) / (rows*cols)
+// `norm_n = rows * cols` is the product of the two transform-axis lengths,
+// captured from the forward input shape (`shape[ndim-3] * shape[ndim-2]`,
+// since the trailing axis of size 2 is the complex pair).
+
+/// Backward for `y = fft2(x)` (un-normalized 2-D forward DFT over the last two
+/// spatial axes). VJP: `grad_x = norm_n * ifft2(grad_y)` (our `ifft2` divides
+/// by `rows*cols`; multiplying by `norm_n` undoes that to yield the
+/// un-normalized inverse).
+#[derive(Debug)]
+pub struct Fft2Backward<T: Float> {
+    input: Tensor<T>,
+    /// Product of the two transform-axis lengths (rows * cols).
+    norm_n: usize,
+}
+
+impl<T: Float> Fft2Backward<T> {
+    pub fn new(input: Tensor<T>, norm_n: usize) -> Self {
+        Self { input, norm_n }
+    }
+}
+
+impl<T: Float> GradFn<T> for Fft2Backward<T> {
+    fn backward(&self, grad_output: &Tensor<T>) -> FerrotorchResult<Vec<Option<Tensor<T>>>> {
+        let grad_input = if self.input.requires_grad() {
+            let device = grad_output.device();
+            let inv = fft::ifft2(grad_output)?;
+            let scale = T::from(self.norm_n).unwrap();
+            let inv_data = inv.data_vec()?;
+            let scaled: Vec<T> = inv_data.iter().map(|&v| v * scale).collect();
+            let t = Tensor::from_storage(TensorStorage::cpu(scaled), inv.shape().to_vec(), false)?;
+            Some(if device.is_cuda() { t.to(device)? } else { t })
+        } else {
+            None
+        };
+        Ok(vec![grad_input])
+    }
+
+    fn inputs(&self) -> Vec<&Tensor<T>> {
+        vec![&self.input]
+    }
+
+    fn name(&self) -> &'static str {
+        "Fft2Backward"
+    }
+}
+
+/// Backward for `y = ifft2(x)` (1/(rows*cols)-normalized 2-D inverse). VJP:
+/// `grad_x = fft2(grad_y) / norm_n`.
+#[derive(Debug)]
+pub struct Ifft2Backward<T: Float> {
+    input: Tensor<T>,
+    norm_n: usize,
+}
+
+impl<T: Float> Ifft2Backward<T> {
+    pub fn new(input: Tensor<T>, norm_n: usize) -> Self {
+        Self { input, norm_n }
+    }
+}
+
+impl<T: Float> GradFn<T> for Ifft2Backward<T> {
+    fn backward(&self, grad_output: &Tensor<T>) -> FerrotorchResult<Vec<Option<Tensor<T>>>> {
+        let grad_input = if self.input.requires_grad() {
+            let device = grad_output.device();
+            let fwd = fft::fft2(grad_output)?;
+            let scale = T::from(1.0).unwrap() / T::from(self.norm_n).unwrap();
+            let fwd_data = fwd.data_vec()?;
+            let scaled: Vec<T> = fwd_data.iter().map(|&v| v * scale).collect();
+            let t = Tensor::from_storage(TensorStorage::cpu(scaled), fwd.shape().to_vec(), false)?;
+            Some(if device.is_cuda() { t.to(device)? } else { t })
+        } else {
+            None
+        };
+        Ok(vec![grad_input])
+    }
+
+    fn inputs(&self) -> Vec<&Tensor<T>> {
+        vec![&self.input]
+    }
+
+    fn name(&self) -> &'static str {
+        "Ifft2Backward"
+    }
+}
+
+/// Product of the two transform-axis lengths for `fft2` / `ifft2`. The forward
+/// kernels are fixed to the trailing two spatial axes; for input shape
+/// `[..., rows, cols, 2]` this is `rows * cols`.
+fn fft2_norm_n<T: Float>(input: &Tensor<T>) -> usize {
+    let shape = input.shape();
+    let ndim = shape.len();
+    if ndim < 3 {
+        return 1;
+    }
+    (shape[ndim - 3] * shape[ndim - 2]).max(1)
+}
+
+/// Differentiable 2-D FFT. Attaches `Fft2Backward` when grad is needed.
+pub fn fft2_differentiable<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
+    let device = input.device();
+    let result = fft::fft2(input)?;
+
+    if is_grad_enabled() && input.requires_grad() {
+        let norm_n = fft2_norm_n(input);
+        let grad_fn = Arc::new(Fft2Backward::new(input.clone(), norm_n));
+        let storage = TensorStorage::on_device(result.data_vec()?, device)?;
+        Tensor::from_operation(storage, result.shape().to_vec(), grad_fn)
+    } else {
+        Ok(result)
+    }
+}
+
+/// Differentiable 2-D inverse FFT. Attaches `Ifft2Backward` when grad is needed.
+pub fn ifft2_differentiable<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
+    let device = input.device();
+    let result = fft::ifft2(input)?;
+
+    if is_grad_enabled() && input.requires_grad() {
+        let norm_n = fft2_norm_n(input);
+        let grad_fn = Arc::new(Ifft2Backward::new(input.clone(), norm_n));
+        let storage = TensorStorage::on_device(result.data_vec()?, device)?;
+        Tensor::from_operation(storage, result.shape().to_vec(), grad_fn)
+    } else {
+        Ok(result)
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -1532,5 +1670,79 @@ mod tests {
         let input = no_grad_leaf(&vec![0.0; 2 * 3 * 4 * 2], &[2, 3, 4, 2]);
         let n = fftn_norm_n(&input, None, Some(&[1, 2]));
         assert_eq!(n, 12);
+    }
+
+    // -----------------------------------------------------------------------
+    // 2-D FFT differentiable wrappers (#1300)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn fft2_differentiable_attaches_grad_fn() {
+        // 2x3 complex grid → [2, 3, 2].
+        let input = leaf(&[0.0; 2 * 3 * 2], &[2, 3, 2]);
+        let result = fft2_differentiable(&input).unwrap();
+        assert!(result.grad_fn().is_some());
+        assert_eq!(result.grad_fn().unwrap().name(), "Fft2Backward");
+    }
+
+    #[test]
+    fn ifft2_differentiable_attaches_grad_fn() {
+        let input = leaf(&[0.0; 2 * 3 * 2], &[2, 3, 2]);
+        let result = ifft2_differentiable(&input).unwrap();
+        assert!(result.grad_fn().is_some());
+        assert_eq!(result.grad_fn().unwrap().name(), "Ifft2Backward");
+    }
+
+    #[test]
+    fn fft2_no_grad_when_not_needed() {
+        let input = no_grad_leaf(&[0.0; 2 * 3 * 2], &[2, 3, 2]);
+        let result = fft2_differentiable(&input).unwrap();
+        assert!(result.grad_fn().is_none());
+    }
+
+    #[test]
+    fn fft2_norm_n_is_rows_times_cols() {
+        // [4, 5, 2] → rows=4, cols=5 → norm_n=20.
+        let input = no_grad_leaf(&vec![0.0; 4 * 5 * 2], &[4, 5, 2]);
+        assert_eq!(fft2_norm_n(&input), 20);
+        // Batched [2, 3, 4, 2] → rows=3, cols=4 → norm_n=12.
+        let batched = no_grad_leaf(&vec![0.0; 2 * 3 * 4 * 2], &[2, 3, 4, 2]);
+        assert_eq!(fft2_norm_n(&batched), 12);
+    }
+
+    #[test]
+    fn fft2_backward_returns_grad_for_corner_impulse() {
+        // 2x2 corner impulse encoded complex: [[1+0i,0],[0,0]] → flat [2,2,2].
+        // fft2 of a corner impulse is the all-ones 2x2 complex grid.
+        // grad_y = ones → grad_x = norm_n * ifft2(ones) = 4 * (impulse/4)
+        //        = impulse. So grad_x = [4,0, 0,0, 0,0, 0,0]?  No: ifft2(ones)
+        // over a 2x2 grid = corner impulse (value 1 at [0,0]); times norm_n=4
+        // → [4,0] at the corner, zeros elsewhere.
+        let input = leaf(&[1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0], &[2, 2, 2]);
+        let result = fft2_differentiable(&input).unwrap();
+        let grad_out = no_grad_leaf(&[1.0, 0.0, 1.0, 0.0, 1.0, 0.0, 1.0, 0.0], &[2, 2, 2]);
+        let grads = result.grad_fn().unwrap().backward(&grad_out).unwrap();
+        let g = grads[0].as_ref().unwrap();
+        assert_close(
+            g.data().unwrap(),
+            &[4.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+            1e-9,
+        );
+    }
+
+    #[test]
+    fn fft2_ifft2_differentiable_roundtrip_values() {
+        // Verify the differentiable forwards round-trip to identity. A
+        // [2, 3, 2] complex tensor holds 2*3 = 6 complex pairs (12 floats);
+        // the trailing dim of size 2 is the (re, im) pair.
+        let mut complex = Vec::with_capacity(12);
+        for i in 0..6 {
+            complex.push(i as f64);
+            complex.push(i as f64 * 0.5);
+        }
+        let input = leaf(&complex, &[2, 3, 2]);
+        let spectrum = fft2_differentiable(&input).unwrap();
+        let recovered = ifft2_differentiable(&spectrum).unwrap();
+        assert_close(recovered.data().unwrap(), &complex, 1e-9);
     }
 }
