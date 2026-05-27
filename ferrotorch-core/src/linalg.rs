@@ -886,6 +886,7 @@ pub fn eig<T: Float>(a: &Tensor<T>) -> FerrotorchResult<(Tensor<T>, Tensor<T>)> 
             .flat_map(|c| [T::from(c.re).unwrap(), T::from(c.im).unwrap()])
             .collect();
         normalize_complex_eigenvector_columns(&mut v_data, n);
+        canonicalize_complex_eigenvector_phase(&mut v_data, n);
         Ok((
             Tensor::from_storage(TensorStorage::cpu(w_data), vec![n, 2], false)?,
             Tensor::from_storage(TensorStorage::cpu(v_data), vec![n, n, 2], false)?,
@@ -906,6 +907,7 @@ pub fn eig<T: Float>(a: &Tensor<T>) -> FerrotorchResult<(Tensor<T>, Tensor<T>)> 
             .flat_map(|c| [T::from(c.re).unwrap(), T::from(c.im).unwrap()])
             .collect();
         normalize_complex_eigenvector_columns(&mut v_data, n);
+        canonicalize_complex_eigenvector_phase(&mut v_data, n);
         Ok((
             Tensor::from_storage(TensorStorage::cpu(w_data), vec![n, 2], false)?,
             Tensor::from_storage(TensorStorage::cpu(v_data), vec![n, n, 2], false)?,
@@ -951,6 +953,72 @@ fn normalize_complex_eigenvector_columns<T: Float>(v: &mut [T], n: usize) {
                 v[base] = v[base] / norm;
                 v[base + 1] = v[base + 1] / norm;
             }
+        }
+    }
+}
+
+/// Canonicalize the PHASE of each complex eigenvector COLUMN deterministically
+/// (encoded row-major `[n,n,2]` as interleaved `[re, im]`).
+///
+/// Complex eigenvectors are defined only up to multiplication by a per-column
+/// phase `e^{i phi}` — a genuine gauge freedom that `torch.linalg.eig`
+/// documents at `torch/csrc/autograd/FunctionsManual.cpp:3867-3879` ("The
+/// eigenvectors in the complex case are specified up to multiplication by
+/// e^{i phi}. The specified loss function depends on this quantity, so it is
+/// ill-defined."). ferray's faer-backed `eig` emits per-column phases that
+/// differ matrix-by-matrix from torch's LAPACK `geev` gauge; matching torch's
+/// arbitrary LAPACK phase would require replicating `geev` (impractical and
+/// not the contract). Instead we pick a DETERMINISTIC, reproducible gauge:
+/// multiply each column by `e^{-i phi}` so that its LARGEST-MAGNITUDE component
+/// becomes real-POSITIVE (its imaginary part driven to 0 and real part > 0).
+///
+/// This mirrors `canonicalize_eigenvector_signs` for the real `eigh` case
+/// (which forces the largest-magnitude component non-negative — the real-axis
+/// specialization of the same idea). It does NOT match torch's gauge (that is
+/// impossible without LAPACK), but it makes ferrotorch's eig output
+/// REPRODUCIBLE: calling `eig` twice on the same input yields identical `V`.
+///
+/// For PHASE-INVARIANT losses (`sum(|V_ij|^2 M)`, reconstructions, any
+/// well-posed objective) the gradient is gauge-free, so this rotation does NOT
+/// change `A.grad` — ferrotorch still matches torch. For PHASE-DEPENDENT losses
+/// the value is ill-defined regardless of gauge; the `EigBackwardV` guard
+/// rejects grossly-phase-dependent losses, but its exact threshold is
+/// gauge-dependent and may differ from torch's LAPACK-gauge boundary (the
+/// losses in any divergent window are mathematically meaningless anyway).
+fn canonicalize_complex_eigenvector_phase<T: Float>(v: &mut [T], n: usize) {
+    let zero = <T as num_traits::Zero>::zero();
+    for col in 0..n {
+        // Find the row of the largest-magnitude entry (|re|^2 + |im|^2) in this
+        // column — the canonical pivot whose phase we rotate to the real axis.
+        let mut best_row = 0usize;
+        let mut best_mag = zero;
+        for row in 0..n {
+            let base = 2 * (row * n + col);
+            let mag = v[base] * v[base] + v[base + 1] * v[base + 1];
+            if mag > best_mag {
+                best_mag = mag;
+                best_row = row;
+            }
+        }
+        if best_mag <= zero {
+            continue;
+        }
+        // Pivot p = a + bi; |p| = sqrt(best_mag). Rotating by e^{-i phi} where
+        // phi = arg(p) makes the pivot real-positive: every component is
+        // multiplied by conj(p)/|p| = (a - bi)/|p|.
+        let base_p = 2 * (best_row * n + col);
+        let a = v[base_p];
+        let b = v[base_p + 1];
+        let mag = best_mag.sqrt();
+        let cr = a / mag; // real part of unit phase rotation conj(p)/|p|
+        let ci = -b / mag; // imag part
+        for row in 0..n {
+            let base = 2 * (row * n + col);
+            let re = v[base];
+            let im = v[base + 1];
+            // (re + im i) * (cr + ci i) = (re*cr - im*ci) + (re*ci + im*cr) i
+            v[base] = re * cr - im * ci;
+            v[base + 1] = re * ci + im * cr;
         }
     }
 }

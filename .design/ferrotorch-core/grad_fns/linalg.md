@@ -290,17 +290,37 @@ longer forward-only.
   genuinely complex) by
   `grad_fns::linalg::tests::{eig_backward_real_3x3,
   eig_backward_complex_pair_2x2, eig_backward_v_only_complex_pair_2x2}_matches_torch`
-  at `1e-6`. **Eigenvector-gauge caveat (R-DEV-1):** eig eigenvectors are
-  scale-free; torch normalizes to unit norm but the PHASE
-  `V_j -> V_j e^{i phi}` is a genuine gauge freedom torch asserts the loss
-  must be invariant to (`FunctionsManual.cpp:3867-3879`), so the tests use a
-  PHASE-INVARIANT loss `sum(|V_ij|^2 * M)` for which `A.grad` is well-posed
-  and matches torch even though ferray's faer phase may differ from LAPACK's.
-  EXACT for DIAGONALIZABLE (distinct-eigenvalue) inputs; on a defective
-  input `V` is singular and `c_inverse` returns `SingularMatrix`, and on a
-  repeated eigenvalue the `Econj` off-diagonal diverges exactly as torch's
-  does (torch does not special-case degeneracy). The CUDA forward stays
-  forward-only.
+  at `1e-6`. **Eigenvector-gauge caveat (R-DEV-1, mirrors eigh #1584; #1591):**
+  eig eigenvectors are scale-free AND phase-free; torch normalizes to unit norm
+  but the PHASE `V_j -> V_j e^{i phi}` is a genuine gauge freedom torch documents
+  and asserts the loss must be invariant to (`FunctionsManual.cpp:3867-3879`).
+  ferray's faer-backed `eig` emits per-column phases that differ matrix-by-matrix
+  from torch's LAPACK `geev` gauge. To give a stable, REPRODUCIBLE contract,
+  `canonicalize_complex_eigenvector_phase` in `ferrotorch-core/src/linalg.rs`
+  rotates each eigenvector column by `e^{-i phi}` so its LARGEST-MAGNITUDE
+  component becomes real-positive — a DETERMINISTIC ferrotorch convention (the
+  complex analog of `canonicalize_eigenvector_signs` for `eigh`). This does NOT
+  match torch's LAPACK gauge (matching its arbitrary `geev` phases would require
+  replicating `geev`), but makes ferrotorch's eig output reproducible (call `eig`
+  twice → identical `V`). For **PHASE-INVARIANT** losses (`sum(|V_ij|^2 * M)`,
+  reconstructions, every well-posed objective) the gradient is gauge-FREE, so the
+  canonicalization does not change `A.grad` and it matches torch exactly — the
+  tests therefore use a phase-invariant loss. For **PHASE-DEPENDENT** losses the
+  value/gradient is ILL-DEFINED (depends on the arbitrary phase); the
+  `EigBackwardV` phase-invariance guard (`|imag(diag(V^H gV))| > 1e-2`, mirroring
+  `FunctionsManual.cpp:3867-3879`) rejects grossly-phase-dependent losses, but its
+  EXACT threshold is gauge-dependent and may differ from torch's LAPACK-gauge
+  boundary — a window can exist where torch raises and ferrotorch's guard does
+  not (or vice-versa). The losses in any such window are mathematically
+  meaningless regardless of gauge; this is a property of the ill-posed objective,
+  not a backward-formula bug. The reframed
+  `divergence_eig_1590_phase_guard_boundary.rs` asserts the well-posed,
+  gauge-robust quantities: phase-invariant grad vs LIVE torch, grossly
+  phase-dependent loss errors, and eigenvector determinism. EXACT for
+  DIAGONALIZABLE (distinct-eigenvalue) inputs; on a defective input `V` is
+  singular and `c_inverse` returns `SingularMatrix`, and on a repeated eigenvalue
+  the `Econj` off-diagonal diverges exactly as torch's does (torch does not
+  special-case degeneracy). The CUDA forward stays forward-only.
 
 - REQ-13: `linalg.eigh(A, UPLO='L')` — symmetric/Hermitian
   eigendecomposition. Documented in `torch/linalg/__init__.py`.

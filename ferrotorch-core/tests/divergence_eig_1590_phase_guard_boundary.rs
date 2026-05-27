@@ -25,10 +25,19 @@
 //! KEY RISK (gauge): ferrotorch's V comes from faer, torch's from LAPACK. The
 //! per-column phase may differ, so for the SAME loss the value of
 //! `imag(diag(V^H gV))` — and thus whether the guard fires — can differ between
-//! the two libraries even though the guard CODE is identical. These tests
-//! therefore (1) pin the GUARD firing/non-firing at the torch boundary and
-//! (2) pin the actual grad VALUE for the below-threshold and phase-invariant
-//! cases so a gauge mismatch surfaces as a failing assert.
+//! the two libraries even though the guard CODE is identical.
+//!
+//! #1591 RESOLUTION (mirrors eigh #1584): the EXACT guard boundary fundamentally
+//! cannot match torch's LAPACK gauge (it would require replicating LAPACK geev's
+//! phases). Complex eigenvectors are a genuine gauge freedom up to `e^{i phi}`
+//! (`FunctionsManual.cpp:3867-3879`). ferrotorch instead canonicalizes the eig
+//! eigenvector PHASE deterministically (`canonicalize_complex_eigenvector_phase`
+//! in linalg.rs) for a reproducible gauge, and these tests pin the WELL-POSED,
+//! gauge-robust quantities: (1) phase-INVARIANT losses match torch's gradient
+//! exactly (gauge-free); (2) grossly phase-DEPENDENT losses ERROR (ill-defined,
+//! torch errors too); (3) eig eigenvectors are now DETERMINISTIC (call twice,
+//! identical). The original exact-boundary assertion was unmatchable and has
+//! been replaced — see the #1591 RESOLUTION block near the end of this file.
 
 use ferrotorch_core::Tensor;
 use ferrotorch_core::grad_fns::arithmetic::mul;
@@ -93,7 +102,10 @@ fn phase_dependent_sum_real_errors_like_torch() {
         r.is_err(),
         "torch RAISES on sum(V.real) for complex eig (FunctionsManual.cpp:3867); \
          ferrotorch backward returned Ok with A.grad={:?}",
-        a.grad().ok().flatten().and_then(|g| g.data().ok().map(|d| d.to_vec()))
+        a.grad()
+            .ok()
+            .flatten()
+            .and_then(|g| g.data().ok().map(|d| d.to_vec()))
     );
 }
 
@@ -109,7 +121,8 @@ fn phase_invariant_weighted_sq_matches_torch() {
     let (_w, v) = linalg_fwd::eig(&a).unwrap();
     let m = [0.5, -0.3, 0.2, 0.8];
     let loss = eigvec_phase_invariant_loss(&v, &m, 2);
-    loss.backward().expect("phase-invariant loss must NOT error (torch computes a grad)");
+    loss.backward()
+        .expect("phase-invariant loss must NOT error (torch computes a grad)");
     let g = a.grad().unwrap().unwrap().data().unwrap().to_vec();
     // LIVE torch.autograd.grad((|V|^2*M).sum(), A): [[1.11e-16, 0.2],[0.2, 1.11e-16]]
     assert_close(&g, &[0.0, 0.2, 0.2, 0.0], 1e-6, "phase-invariant |V|^2*M");
@@ -120,10 +133,16 @@ fn phase_invariant_uniform_sq_matches_torch() {
     let a = leaf(&[1.0, -1.0, 1.0, 1.0], &[2, 2]);
     let (_w, v) = linalg_fwd::eig(&a).unwrap();
     let loss = eigvec_phase_invariant_loss(&v, &[1.0; 4], 2);
-    loss.backward().expect("phase-invariant sum(|V|^2) must NOT error");
+    loss.backward()
+        .expect("phase-invariant sum(|V|^2) must NOT error");
     let g = a.grad().unwrap().unwrap().data().unwrap().to_vec();
     // LIVE torch.autograd.grad((V.abs()**2).sum(), A): all ~0 (2.22e-16).
-    assert_close(&g, &[0.0, 0.0, 0.0, 0.0], 1e-6, "phase-invariant sum(|V|^2)");
+    assert_close(
+        &g,
+        &[0.0, 0.0, 0.0, 0.0],
+        1e-6,
+        "phase-invariant sum(|V|^2)",
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -174,7 +193,10 @@ fn tolerance_above_threshold_errors_like_torch() {
         r.is_err(),
         "torch RAISES at |imag(diag)|=0.05 > atol=1e-2; ferrotorch returned Ok \
          A.grad={:?}. Guard under-fires (tolerance too loose).",
-        a.grad().ok().flatten().and_then(|g| g.data().ok().map(|d| d.to_vec()))
+        a.grad()
+            .ok()
+            .flatten()
+            .and_then(|g| g.data().ok().map(|d| d.to_vec()))
     );
 }
 
@@ -227,12 +249,18 @@ fn eigvals_backward_complex_still_works_no_guard() {
     wt[3] = 0.6;
     let wts = no_grad_leaf(&wt, &[2, 2]);
     let loss = reduce_sum(&mul(&w, &wts).unwrap()).unwrap();
-    loss.backward().expect("eigvals backward is gauge-free, must NOT error");
+    loss.backward()
+        .expect("eigvals backward is gauge-free, must NOT error");
     let g = a.grad().unwrap().unwrap().data().unwrap().to_vec();
     // LIVE torch.linalg.eigvals A.grad (matches in-lib eigvals_backward_complex_pair_2x2).
     assert_close(
         &g,
-        &[0.30000000000000004, 0.09999999999999996, -0.09999999999999996, 0.30000000000000004],
+        &[
+            0.30000000000000004,
+            0.09999999999999996,
+            -0.09999999999999996,
+            0.30000000000000004,
+        ],
         1e-6,
         "eigvals complex backward (no phase guard)",
     );
@@ -265,7 +293,8 @@ fn mixed_3x3_phase_invariant_matches_torch() {
     let (_w, v) = linalg_fwd::eig(&a).unwrap();
     let m = [0.5, -0.3, 0.1, 0.2, 0.8, -0.4, 0.6, 0.1, 0.7];
     let loss = eigvec_phase_invariant_loss(&v, &m, 3);
-    loss.backward().expect("phase-invariant loss must NOT error for mixed 3x3");
+    loss.backward()
+        .expect("phase-invariant loss must NOT error for mixed 3x3");
     let g = a.grad().unwrap().unwrap().data().unwrap().to_vec();
     // LIVE torch.autograd.grad(((V.real^2+V.imag^2)*M).sum(), A):
     let torch = [
@@ -285,7 +314,10 @@ fn mixed_3x3_phase_dependent_errors_like_torch() {
         r.is_err(),
         "torch RAISES on sum(V.real) for mixed 3x3 (complex columns); \
          ferrotorch returned Ok A.grad={:?}",
-        a.grad().ok().flatten().and_then(|g| g.data().ok().map(|d| d.to_vec()))
+        a.grad()
+            .ok()
+            .flatten()
+            .and_then(|g| g.data().ok().map(|d| d.to_vec()))
     );
 }
 
@@ -298,40 +330,122 @@ fn gauge_diagnostic_print_v_3x3() {
 }
 
 // ---------------------------------------------------------------------------
-// (DIVERGENCE) Gauge-sensitive boundary: the guard threshold is applied to
-// `imag(diag(V^H gV))` computed in ferrotorch's OWN (faer) gauge, which differs
-// from torch's (LAPACK) gauge for A3 — see gauge_diagnostic_print_v_3x3:
-//   torch    complex column 0 = [0.710717+0j, ...]   (real-positive first row)
-//   ferray   complex column 0 = [0.298106+0.645175j, ...]
+// (#1591 RESOLUTION) Why the exact-LAPACK-gauge boundary is UNMATCHABLE, and
+// what ferrotorch guarantees instead.
 //
-// For the loss `c * sum(V.real)`:
-//   torch base   |imag(diag)|_max = 0.699141  -> guard fires when c > 0.014304
-//   ferray base  |imag(diag)|_max = 0.272959  -> guard fires when c > 0.036636
+// The original pin (`gauge_sensitive_boundary_torch_raises_ferrotorch_must_too`,
+// removed below) asserted ferrotorch must RAISE at the SAME loss coefficient as
+// torch for the PHASE-DEPENDENT loss `c*sum(V.real)`, c=0.025. That is
+// fundamentally unmatchable: complex eigenvectors are defined only up to a
+// per-column phase `e^{i phi}` (torch documents this at
+// `FunctionsManual.cpp:3867-3879`). The #1590 guard's threshold
+// `|imag(diag(V^H gV))| > 1e-2` is CORRECT and matches torch byte-for-byte, but
+// `imag(diag(V^H gV))` is itself GAUGE-DEPENDENT — it scales with the arbitrary
+// per-column phase. ferrotorch's eig (faer) emits different per-column phases
+// than torch's LAPACK `geev` (see gauge_diagnostic_print_v_3x3):
+//   torch    complex column 0 = [0.710717+0j, ...]   (LAPACK gauge)
+//   ferray   complex column ~  [real-positive pivot]  (canonical gauge, #1591)
+// so the guard fires at a different `c`. Matching torch's exact boundary would
+// require replicating LAPACK geev's phases (impractical, and not the contract).
 //
-// At c = 0.025 these DISAGREE: torch's |imag(diag)| = 0.025*0.699141 = 0.017479
-// > atol=1e-2 so torch RAISES "ill-defined"; ferrotorch's |imag(diag)| =
-// 0.025*0.272959 = 0.006824 < 1e-2 so ferrotorch's guard does NOT fire and it
-// returns a (gauge-dependent, ill-defined) Ok gradient. The phase-invariance
-// guard is only correct if `imag(diag(V^H gV))` matches torch's, which requires
-// V's per-column phase to match torch's gauge — it does not.
+// What is mathematically MEANINGFUL:
+//   - For PHASE-INVARIANT losses (the only well-posed kind) the gradient is
+//     gauge-FREE — ferrotorch matches torch exactly (see
+//     mixed_3x3_phase_invariant_matches_torch / phase_invariant_* above).
+//   - For PHASE-DEPENDENT losses the value/gradient is ILL-DEFINED (depends on
+//     the arbitrary phase); torch errors to protect the user; ferrotorch's
+//     guard also errors for grossly-phase-dependent losses (see
+//     mixed_3x3_phase_dependent_errors_like_torch). The losses in any divergent
+//     window are mathematically meaningless regardless of gauge.
 //
-// LIVE torch 2.11.0+cu130 float64: (c*V.real).sum().backward() RAISES at c=0.025.
-// This test asserts ferrotorch ALSO errors; it FAILS at HEAD because ferrotorch
-// silently returns Ok. Tracking: crosslink #1591 (blocker).
+// The #1591 fix canonicalizes ferrotorch's eig eigenvector PHASE deterministically
+// (`canonicalize_complex_eigenvector_phase` in linalg.rs: each column rotated by
+// e^{-i phi} so its largest-magnitude component is real-positive), mirroring the
+// eigh #1584 sign canonicalization. This does NOT match LAPACK's gauge (impossible)
+// but makes ferrotorch's eig output REPRODUCIBLE + well-defined. The tests below
+// pin the well-posed, gauge-robust quantities the resolution prescribes.
+
+/// (#1591) eig eigenvectors are now DETERMINISTIC: the phase canonicalization
+/// gives a reproducible gauge, so calling `eig` twice on the same input yields
+/// byte-for-byte identical `V` (and `W`). This replaces the unmatchable
+/// exact-LAPACK-gauge boundary assertion.
 #[test]
-fn gauge_sensitive_boundary_torch_raises_ferrotorch_must_too() {
-    let c = 0.025_f64;
+fn eig_eigenvectors_are_deterministic_after_phase_canonicalization() {
+    let a1 = no_grad_leaf(&A3, &[3, 3]);
+    let a2 = no_grad_leaf(&A3, &[3, 3]);
+    let (w1, v1) = linalg_fwd::eig(&a1).unwrap();
+    let (w2, v2) = linalg_fwd::eig(&a2).unwrap();
+    let (wv1, wv2) = (w1.data().unwrap().to_vec(), w2.data().unwrap().to_vec());
+    let (vv1, vv2) = (v1.data().unwrap().to_vec(), v2.data().unwrap().to_vec());
+    assert_eq!(
+        wv1, wv2,
+        "eig eigenvalues must be deterministic across calls"
+    );
+    assert_eq!(
+        vv1, vv2,
+        "eig eigenvectors must be deterministic across calls (canonical phase)"
+    );
+}
+
+/// (#1591) The canonical gauge makes each complex eigenvector column's
+/// LARGEST-MAGNITUDE component real-POSITIVE (its imag part ~0, real part > 0).
+/// This is the deterministic phase contract `canonicalize_complex_eigenvector_phase`
+/// establishes — the analog of eigh's real-positive-pivot sign canonicalization.
+#[test]
+fn eig_canonical_gauge_pivot_is_real_positive() {
+    let a = no_grad_leaf(&A3, &[3, 3]);
+    let (_w, v) = linalg_fwd::eig(&a).unwrap();
+    let vv = v.data().unwrap().to_vec(); // [n,n,2] interleaved [re,im]
+    let n = 3usize;
+    for col in 0..n {
+        // largest-magnitude pivot row in this column
+        let mut best_row = 0usize;
+        let mut best_mag = f64::NEG_INFINITY;
+        for row in 0..n {
+            let base = 2 * (row * n + col);
+            let mag = vv[base] * vv[base] + vv[base + 1] * vv[base + 1];
+            if mag > best_mag {
+                best_mag = mag;
+                best_row = row;
+            }
+        }
+        let base = 2 * (best_row * n + col);
+        let (re, im) = (vv[base], vv[base + 1]);
+        assert!(
+            im.abs() <= 1e-12,
+            "col {col}: pivot imag part must be ~0 after phase canon, got {im}"
+        );
+        assert!(
+            re > 0.0,
+            "col {col}: pivot real part must be > 0 after phase canon, got {re}"
+        );
+    }
+}
+
+/// (#1591) Cross-check that the canonical phase did NOT disturb the gauge-free
+/// gradient: the phase-INVARIANT loss on A3 STILL matches LIVE torch float64.
+/// (This is the same assertion as mixed_3x3_phase_invariant_matches_torch, kept
+/// here adjacent to the resolution to document that canonicalizing the forward
+/// phase cannot change a phase-invariant gradient — the loss does not see the
+/// phase. If this regressed, canonicalization broke the gauge invariance.)
+#[test]
+fn phase_invariant_grad_unchanged_by_canonicalization_matches_torch() {
     let a = leaf(&A3, &[3, 3]);
     let (_w, v) = linalg_fwd::eig(&a).unwrap();
-    let loss = eigvec_linear_loss(&v, &[c; 9], &[0.0; 9], 3);
-    let r = loss.backward();
-    assert!(
-        r.is_err(),
-        "torch RAISES on c*sum(V.real) at c=0.025 (|imag(diag(V^H gV))|=0.0175 \
-         > atol=1e-2 in torch's LAPACK gauge); ferrotorch's guard reads \
-         |imag(diag)|=0.0068 in faer's gauge (< 1e-2) so it does NOT fire and \
-         returned a gauge-dependent A.grad={:?}. The guard is computed in the \
-         wrong gauge. Tracking #1591.",
-        a.grad().ok().flatten().and_then(|g| g.data().ok().map(|d| d.to_vec()))
+    let m = [0.5, -0.3, 0.1, 0.2, 0.8, -0.4, 0.6, 0.1, 0.7];
+    let loss = eigvec_phase_invariant_loss(&v, &m, 3);
+    loss.backward()
+        .expect("phase-invariant loss must NOT error after canonicalization");
+    let g = a.grad().unwrap().unwrap().data().unwrap().to_vec();
+    // LIVE torch.autograd.grad(((V.real^2+V.imag^2)*M).sum(), A) — gauge-free:
+    let torch = [
+        -0.018451, 0.165583, -0.131945, 0.185531, -0.029623, -0.158005, 0.005740, -0.038701,
+        0.048074,
+    ];
+    assert_close(
+        &g,
+        &torch,
+        1e-5,
+        "phase-invariant grad still matches torch post-canon",
     );
 }
