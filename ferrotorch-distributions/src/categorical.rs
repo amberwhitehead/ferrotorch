@@ -562,7 +562,7 @@ mod tests {
         let dist = Categorical::from_logits(&logits).unwrap();
         let probs = dist.probs().data().unwrap();
         for &p in probs {
-            assert!(p.is_finite() && p >= 0.0 && p <= 1.0);
+            assert!(p.is_finite() && (0.0..=1.0).contains(&p));
         }
         // softmax preserves differences: probs ~ softmax([0,1,2]).
         let denom = 1.0_f64.exp() + std::f64::consts::E + (2.0_f64).exp();

@@ -3142,6 +3142,10 @@ mod tests {
     // -- PowerTransform ------------------------------------------------------
 
     #[test]
+    #[allow(
+        clippy::approx_constant,
+        reason = "0.6931472 is the f32 PyTorch oracle output ln(2) from PowerTransform(2.0).log_abs_det_jacobian, not std::f32::consts::LN_2; keep the printed torch value"
+    )]
     fn test_power_transform() {
         // torch: PowerTransform(2.0): forward([1,2,3])=[1,4,9]; inv=[1,2,3];
         // ldj = (2*y/x).abs().log() = [ln(2), ln(4), ln(6)] = [.6931,1.3863,1.7918].
@@ -3181,7 +3185,7 @@ mod tests {
         let xr = Transform::inverse(&t, &y).unwrap();
         approx_slice(
             xr.data().unwrap(),
-            &[-2.4076059, -1.4076059, -0.40760598],
+            &[-2.407606, -1.4076059, -0.40760598],
             1e-5,
             "softmax inverse",
         );
@@ -3218,8 +3222,8 @@ mod tests {
         approx_slice(xr.data().unwrap(), &[0.5, -1.0, 0.3], 1e-4, "stick inverse");
         let ldj = Transform::log_abs_det_jacobian(&t, &x, &y).unwrap();
         assert!(
-            (ldj.item().unwrap() - (-5.9589319)).abs() < 1e-4,
-            "stick ldj: got {}, want -5.9589319",
+            (ldj.item().unwrap() - (-5.958932)).abs() < 1e-4,
+            "stick ldj: got {}, want -5.958932",
             ldj.item().unwrap()
         );
         assert_eq!(
@@ -3280,7 +3284,7 @@ mod tests {
                 0.0,
                 0.0,
                 0.19737533,
-                0.98032802,
+                0.980328,
                 0.0,
                 -0.46211717,
                 0.58888036,

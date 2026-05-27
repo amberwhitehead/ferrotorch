@@ -178,7 +178,7 @@ fn check_relaxed_one_hot_jacobian(p: &[f32], temp: f32) {
 
     // Analytic Jacobian J[i][m] = d z_i / d p_m.
     let mut analytic = vec![vec![0.0_f32; k]; k];
-    for i in 0..k {
+    for (i, row) in analytic.iter_mut().enumerate() {
         ferrotorch_core::manual_seed(SEED);
         let probs = leaf(p, &[k]);
         let d = RelaxedOneHotCategorical::new(temp, probs.clone()).unwrap();
@@ -191,9 +191,7 @@ fn check_relaxed_one_hot_jacobian(p: &[f32], temp: f32) {
             .expect("grad Some")
             .data_vec()
             .unwrap();
-        for m in 0..k {
-            analytic[i][m] = g[m];
-        }
+        row.copy_from_slice(&g[..k]);
     }
 
     let forward = |pp: &[f32]| -> Vec<f32> {
@@ -273,7 +271,7 @@ fn check_exp_relaxed_jacobian(p: &[f32], temp: f32) {
     let eps = 1e-3_f32;
 
     let mut analytic = vec![vec![0.0_f32; k]; k];
-    for i in 0..k {
+    for (i, row) in analytic.iter_mut().enumerate() {
         ferrotorch_core::manual_seed(SEED);
         let probs = leaf(p, &[k]);
         let d = ExpRelaxedCategorical::new(temp, probs.clone()).unwrap();
@@ -286,9 +284,7 @@ fn check_exp_relaxed_jacobian(p: &[f32], temp: f32) {
             .expect("grad Some")
             .data_vec()
             .unwrap();
-        for m in 0..k {
-            analytic[i][m] = g[m];
-        }
+        row.copy_from_slice(&g[..k]);
     }
 
     let forward = |pp: &[f32]| -> Vec<f32> {
@@ -382,12 +378,10 @@ fn relaxed_one_hot_batched_shapes_independence_and_grad() {
         .expect("grad Some")
         .data_vec()
         .unwrap();
-    for m in 3..6 {
+    for (col, &gv) in g[3..6].iter().enumerate() {
         assert!(
-            g[m].abs() < 1e-6,
-            "cross-row gradient leak: d z[row0,c0] / d p[row1,c{}] = {} must be 0",
-            m - 3,
-            g[m]
+            gv.abs() < 1e-6,
+            "cross-row gradient leak: d z[row0,c0] / d p[row1,c{col}] = {gv} must be 0"
         );
     }
     // And the within-row gradient (indices 0,1,2) must finite-diff-match.

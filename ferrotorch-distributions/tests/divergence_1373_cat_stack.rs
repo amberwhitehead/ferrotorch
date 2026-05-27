@@ -21,6 +21,10 @@ fn approx(a: &[f32], b: &[f32], tol: f32, ctx: &str) {
 }
 
 #[test]
+#[allow(
+    clippy::approx_constant,
+    reason = "0.693_147_2 is the f32 PyTorch oracle ldj output ln(2) from the exp leg of the CatTransform, not std::f32::consts::LN_2; keep the printed torch value"
+)]
 fn divergence_cat_transform_forward_ldj() {
     let transforms: Vec<Box<dyn Transform<f32>>> = vec![
         Box::new(ExpTransform),

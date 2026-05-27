@@ -4722,7 +4722,7 @@ mod tests {
             "scalar-p must broadcast to q's batch shape"
         );
         assert_close_slice(
-            &kl.data().unwrap(),
+            kl.data().unwrap(),
             &[0.3493971805599453, 2.8068528194400546, 0.3499095525526088],
             1e-12,
             "normal scalarP_batchedQ",
@@ -4747,7 +4747,7 @@ mod tests {
         let kl = kl_divergence(&p, &q).unwrap();
         assert_eq!(kl.shape(), &[2, 3], "disjoint dims must broadcast to [2,3]");
         assert_close_slice(
-            &kl.data().unwrap(),
+            kl.data().unwrap(),
             &[
                 0.18324288588594217,
                 0.25341894868579024,
@@ -4777,7 +4777,7 @@ mod tests {
         // (same precision profile as the other Beta/Gamma KL tests in this
         // file); the broadcast shape + element layout is exact.
         assert_close_slice(
-            &kl.data().unwrap(),
+            kl.data().unwrap(),
             &[0.12509280256138844, 0.9436159179138452, 0.557228754232566],
             1e-6,
             "beta scalarP_batchedQ",
@@ -4802,7 +4802,7 @@ mod tests {
         let kl = kl_divergence(&p, &q).unwrap();
         assert_eq!(kl.shape(), &[2, 3]);
         assert_close_slice(
-            &kl.data().unwrap(),
+            kl.data().unwrap(),
             &[
                 0.12509280256138844,
                 0.9436159179138452,
@@ -4830,7 +4830,7 @@ mod tests {
         assert_eq!(kl.shape(), &[3]);
         // tol 1e-6: digamma/lgamma scalar precision (see beta tests above).
         assert_close_slice(
-            &kl.data().unwrap(),
+            kl.data().unwrap(),
             &[0.8017689293133528, 0.8200915031193047, 0.8638912440028863],
             1e-6,
             "gamma scalarP_batchedQ",
@@ -4855,7 +4855,7 @@ mod tests {
         let kl = kl_divergence(&p, &q).unwrap();
         assert_eq!(kl.shape(), &[2, 3]);
         assert_close_slice(
-            &kl.data().unwrap(),
+            kl.data().unwrap(),
             &[
                 0.8017689293133528,
                 0.8200915031193047,
@@ -4882,7 +4882,7 @@ mod tests {
             "scalar-p must broadcast to q's batch shape"
         );
         assert_close_slice(
-            &kl.data().unwrap(),
+            kl.data().unwrap(),
             &[0.08228287850505181, 0.1536635868037986, 0.5826853020432397],
             1e-9,
             "bern scalarP_batchedQ",
@@ -4906,7 +4906,7 @@ mod tests {
         let kl = kl_divergence(&p, &q).unwrap();
         assert_eq!(kl.shape(), &[2, 3], "disjoint dims must broadcast to [2,3]");
         assert_close_slice(
-            &kl.data().unwrap(),
+            kl.data().unwrap(),
             &[
                 0.08228287850505178,
                 0.15366358680379852,
