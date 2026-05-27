@@ -100,7 +100,12 @@ fn divergence_kl_1573_formula_exponential_exponential() {
     let p = Exponential::new(tensor(&[1.3]).unwrap()).unwrap();
     let q = Exponential::new(tensor(&[0.7]).unwrap()).unwrap();
     let got = kl_divergence(&p, &q).unwrap().data_vec().unwrap();
-    assert_close(&got, &[0.15750074686776205], 1e-9, "exponential_exponential");
+    assert_close(
+        &got,
+        &[0.15750074686776205],
+        1e-9,
+        "exponential_exponential",
+    );
 }
 
 #[test]
