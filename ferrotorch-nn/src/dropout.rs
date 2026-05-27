@@ -25,7 +25,7 @@
 //! | REQ-10 | SHIPPED | impl: `struct AlphaDropoutBackward<T>` + `GradFn` impl here; non-test consumer: autograd engine traversal on models using `AlphaDropout`. |
 //! | REQ-11 | SHIPPED | impl: 5 `Module<T> for <DropoutKind><T>` impl blocks here, each returning `vec![]` for parameters; non-test consumer: `ferrotorch_optim::Optimizer` walks `Module::parameters_mut()` of containers; dropout returns an empty list (correct: dropout has no trainable parameters). |
 //! | REQ-12 | NOT-STARTED | blocker #1446 — `inplace` kwarg not threaded through `Dropout*::new`. Functional behavior matches upstream; only memory-allocation parity diverges. |
-//! | REQ-13 | NOT-STARTED | blocker #1448 — `FeatureAlphaDropout` not implemented. |
+//! | REQ-13 | SHIPPED | impl: `pub struct FeatureAlphaDropout<T: Float>` + `FeatureAlphaDropoutBackward<T>` + `Module<T>` impl here (per-channel alpha-dropout mask broadcast over `[N, C, *]`), closes #1448; non-test consumer: `pub use dropout::FeatureAlphaDropout` in `lib.rs` (re-export) exposes the layer to downstream self-normalising-network model code in `ferrotorch-vision` / `ferrotorch-llama`. |
 //! | REQ-14 | NOT-STARTED | blocker #1441 (umbrella) — `Dropout2d` / `Dropout1d` / `Dropout3d` GPU forward absent (CUDA inputs return `NotImplementedOnCuda`). Parity-sweep runner arms also absent. |
 
 use std::sync::Arc;
@@ -959,6 +959,225 @@ impl<T: Float> Module<T> for AlphaDropout<T> {
                 TensorStorage::cpu(output_data),
                 input.shape().to_vec(),
                 Arc::new(AlphaDropoutBackward {
+                    input: input.clone(),
+                    grad_mask,
+                }),
+            )
+        } else {
+            Tensor::from_storage(
+                TensorStorage::cpu(output_data),
+                input.shape().to_vec(),
+                false,
+            )
+        }
+    }
+
+    fn parameters(&self) -> Vec<&Parameter<T>> {
+        vec![]
+    }
+
+    fn parameters_mut(&mut self) -> Vec<&mut Parameter<T>> {
+        vec![]
+    }
+
+    fn named_parameters(&self) -> Vec<(String, &Parameter<T>)> {
+        vec![]
+    }
+
+    fn train(&mut self) {
+        self.training = true;
+    }
+
+    fn eval(&mut self) {
+        self.training = false;
+    }
+
+    fn is_training(&self) -> bool {
+        self.training
+    }
+}
+
+// ===========================================================================
+// FeatureAlphaDropout — closes #1448
+// ===========================================================================
+
+/// Randomly masks entire feature-channels with the SELU saturation value
+/// during training, mirroring `torch.nn.FeatureAlphaDropout`
+/// (`torch/nn/modules/dropout.py:233-281`).
+///
+/// Unlike [`AlphaDropout`], which drops individual elements, this layer
+/// drops every spatial position within a `(b, c)` feature-channel as a unit
+/// — the dropout decision is sampled once per channel and broadcast over
+/// the trailing spatial dims. Used in self-normalising convolutional
+/// networks where per-feature decorrelation must be preserved while
+/// maintaining mean/variance.
+///
+/// During training:
+/// 1. Per-channel keep mask is sampled at probability `1 - p`.
+/// 2. Dropped channels are set to `alpha' = -lambda * alpha` (SELU
+///    saturation value).
+/// 3. The output is affinely rescaled so input mean / variance are
+///    preserved: `output = a * masked + b` where `a`, `b` depend on `p`
+///    and `alpha'`.
+///
+/// During evaluation, the input is returned unchanged.
+///
+/// Expects input of shape `[N, C, *]` (at least 2-D).
+#[derive(Debug)]
+pub struct FeatureAlphaDropout<T: Float> {
+    p: f64,
+    training: bool,
+    _marker: std::marker::PhantomData<T>,
+}
+
+impl<T: Float> FeatureAlphaDropout<T> {
+    /// Create a new `FeatureAlphaDropout` layer.
+    ///
+    /// `p` is the probability of an entire feature-channel being dropped.
+    /// Must be in `[0, 1)`.
+    pub fn new(p: f64) -> FerrotorchResult<Self> {
+        if !(0.0..1.0).contains(&p) {
+            return Err(FerrotorchError::InvalidArgument {
+                message: format!("feature_alpha_dropout probability must be in [0, 1), got {p}"),
+            });
+        }
+        Ok(Self {
+            p,
+            training: true,
+            _marker: std::marker::PhantomData,
+        })
+    }
+}
+
+/// Backward node for `FeatureAlphaDropout`.
+///
+/// The affine factor `a` is baked into the broadcast mask: kept channels
+/// receive `a`, dropped channels receive `0`. Gradient routes as
+/// `grad_input = grad_output * grad_mask`.
+#[derive(Debug)]
+struct FeatureAlphaDropoutBackward<T: Float> {
+    input: Tensor<T>,
+    /// Full-shape mask with `a` for kept channels, `0` for dropped.
+    grad_mask: Vec<T>,
+}
+
+impl<T: Float> GradFn<T> for FeatureAlphaDropoutBackward<T> {
+    fn backward(&self, grad_output: &Tensor<T>) -> FerrotorchResult<Vec<Option<Tensor<T>>>> {
+        if grad_output.is_cuda() {
+            return Err(FerrotorchError::NotImplementedOnCuda {
+                op: "FeatureAlphaDropout backward",
+            });
+        }
+        let da = if self.input.requires_grad() {
+            let go_data = grad_output.data_vec()?;
+            let grad_a: Vec<T> = go_data
+                .iter()
+                .zip(self.grad_mask.iter())
+                .map(|(&g, &m)| g * m)
+                .collect();
+            let g = Tensor::from_storage(
+                TensorStorage::cpu(grad_a),
+                self.input.shape().to_vec(),
+                false,
+            )?;
+            Some(g)
+        } else {
+            None
+        };
+        Ok(vec![da])
+    }
+
+    fn inputs(&self) -> Vec<&Tensor<T>> {
+        vec![&self.input]
+    }
+
+    fn name(&self) -> &'static str {
+        "FeatureAlphaDropoutBackward"
+    }
+}
+
+impl<T: Float> Module<T> for FeatureAlphaDropout<T> {
+    fn forward(&self, input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
+        if !self.training || self.p == 0.0 {
+            return Ok(input.clone());
+        }
+
+        let shape = input.shape();
+        if shape.len() < 2 {
+            return Err(FerrotorchError::InvalidArgument {
+                message: format!(
+                    "FeatureAlphaDropout expects at least 2D input [N, C, ...], got shape {:?}",
+                    shape
+                ),
+            });
+        }
+
+        if input.is_cuda() {
+            return Err(FerrotorchError::NotImplementedOnCuda {
+                op: "FeatureAlphaDropout",
+            });
+        }
+
+        let batch = shape[0];
+        let channels = shape[1];
+        // Spatial dims (D, H, W, ...). For a 2-D `[N, C]` input the product
+        // of the empty suffix is 1, matching torch's broadcast behaviour.
+        let spatial: usize = shape[2..].iter().product();
+
+        let numel = input.numel();
+        let p = self.p;
+
+        // SELU saturation value (Klambauer et al. 2017).
+        let alpha_prime = -SELU_LAMBDA * SELU_ALPHA;
+
+        // Affine correction factors: preserve mean and variance under the
+        // mixture of `a*x + b` (kept) and `a*alpha' + b` (dropped).
+        //   a = 1 / sqrt(q + alpha'^2 * p * q),  q = 1 - p
+        //   b = -a * p * alpha'
+        let q = 1.0 - p;
+        let a_f64 = 1.0 / (q + alpha_prime * alpha_prime * p * q).sqrt();
+        let b_f64 = -a_f64 * p * alpha_prime;
+
+        let a = T::from(a_f64).unwrap();
+        let b = T::from(b_f64).unwrap();
+        let alpha_prime_t = T::from(alpha_prime).unwrap();
+        let zero = <T as num_traits::Zero>::zero();
+
+        // Per-channel keep mask: one Bernoulli draw per `(b, c)`, broadcast
+        // over the trailing spatial volume. Bits come from ferrotorch's
+        // global manual_seed-controlled generator so the channel pattern is
+        // reproducible under `ferrotorch_core::manual_seed`.
+        let keep_channel: Vec<bool> = ferrotorch_core::rng::with_thread_rng(|g| {
+            (0..batch * channels)
+                .map(|_| g.next_uniform_f64() >= p)
+                .collect()
+        });
+
+        let input_data = input.data_vec()?;
+        let mut output_data = Vec::with_capacity(numel);
+        let mut grad_mask = Vec::with_capacity(numel);
+
+        // For each channel: emit `spatial` masked elements at once.
+        for bc in 0..batch * channels {
+            let keep = keep_channel[bc];
+            let base = bc * spatial;
+            for s in 0..spatial {
+                let x = input_data[base + s];
+                if keep {
+                    output_data.push(a * x + b);
+                    grad_mask.push(a);
+                } else {
+                    output_data.push(a * alpha_prime_t + b);
+                    grad_mask.push(zero);
+                }
+            }
+        }
+
+        if is_grad_enabled() && input.requires_grad() {
+            Tensor::from_operation(
+                TensorStorage::cpu(output_data),
+                input.shape().to_vec(),
+                Arc::new(FeatureAlphaDropoutBackward {
                     input: input.clone(),
                     grad_mask,
                 }),

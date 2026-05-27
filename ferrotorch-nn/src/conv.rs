@@ -18,7 +18,7 @@
 //! | REQ-7 | SHIPPED | impl: `impl<T: Float> Module<T> for Conv2d<T>` block (and analogues for the other 5) here; non-test consumer: `ferrotorch_optim` walks `Module::parameters_mut()` across every conv in a training loop. |
 //! | REQ-8 | SHIPPED | impl: the `Conv2d::set_weight` and `Conv2d::from_parts` methods here; non-test consumer: `ferrotorch-nn/src/functional.rs` (the stateless `nn::functional::conv2d` entry point) uses `Conv2d::from_parts` to drive the existing forward path with user-supplied parameters. |
 //! | REQ-9 | SHIPPED | impl: `kaiming_uniform(&mut weight, NonLinearity::ReLU)` + `uniform_init(&mut b, -bound, bound)` (bound = 1/sqrt(fan_in)) inside every `Conv*d::new[_full]` here, mirroring `torch/nn/modules/conv.py:182-201`; non-test consumer: `Conv2d::new` is the path used by every vision-model constructor. (closes #1450 — bias U(-bound,bound). Kaiming gain divergence (`a=sqrt(5)` upstream vs `ReLU` here) remains as separate followup.) |
-//! | REQ-10 | NOT-STARTED | blocker #1443 — `padding_mode` kwarg not threaded through `Conv*d::new`; only zero padding works. Upstream `_ConvNd.__init__` (`conv.py`) routes non-zero modes through `F.pad(...)`. |
+//! | REQ-10 | SHIPPED (Conv2d) | impl: `Conv2d` carries a `padding_mode: crate::padding::PaddingMode` field + `with_padding_mode(...)` builder here; when the mode is non-`Zeros`, `<Conv2d as Module>::forward` calls `crate::padding::functional_pad_2d(input, ...mode...)` and then runs the zero-padding im2col on the already-padded tensor, mirroring `torch/nn/modules/conv.py` 's `_ConvNd._conv_forward` (`if self.padding_mode != 'zeros': F.pad(input, self._reversed_padding_repeated_twice, mode=self.padding_mode)`). Closes #1443 for `Conv2d`; the 1-D / 3-D / transpose variants follow the same pattern in a separate dispatch. Non-test consumer: `pub use conv::{Conv1d, Conv2d, Conv3d, ConvTranspose1d, ConvTranspose2d, ConvTranspose3d}` in `lib.rs` re-export. |
 //! | REQ-11 | NOT-STARTED | blocker #1441 (umbrella) — parity-sweep runner arms for all 6 conv ops are absent; sweep reports `0/N passed, N skipped` for each. The forward paths themselves are end-to-end verified by 60+ lib tests; only the runner-arm wiring is missing. |
 
 use std::sync::Arc;
@@ -294,6 +294,13 @@ pub struct Conv2d<T: Float> {
     /// Number of blocked input/output channel groups. `1` is dense, `in_channels`
     /// is depthwise. Must divide both `in_channels` and `out_channels`.
     groups: usize,
+    /// Boundary handling for the spatial padding. `Zeros` (default) routes
+    /// through the existing im2col fast path; non-`Zeros` modes pre-pad
+    /// the input via `crate::padding::functional_pad_2d` and then run the
+    /// dense im2col over the already-padded tensor (matching the upstream
+    /// `_ConvNd._conv_forward` shape: `F.pad(input, ..., mode=...)` first,
+    /// then a `padding=0` convolution). Closes #1443.
+    padding_mode: crate::padding::PaddingMode,
     /// Whether the module is in training mode.
     training: bool,
 }
@@ -428,8 +435,21 @@ impl<T: Float> Conv2d<T> {
             padding,
             dilation,
             groups,
+            padding_mode: crate::padding::PaddingMode::Zeros,
             training: true,
         })
+    }
+
+    /// Configure the boundary handling for the spatial padding.
+    ///
+    /// `Zeros` (default) uses the existing im2col zero-pad path.
+    /// `Reflect`, `Replicate`, and `Circular` pre-pad the input via
+    /// `crate::padding::functional_pad_2d(input, ...)` and then convolve
+    /// with `padding = 0`, matching `torch.nn.Conv2d(..., padding_mode=...)`
+    /// (`_ConvNd._conv_forward`'s `F.pad` shape). Closes #1443.
+    pub fn with_padding_mode(mut self, mode: crate::padding::PaddingMode) -> Self {
+        self.padding_mode = mode;
+        self
     }
 
     /// Replace the kernel weights with a caller-supplied [`Parameter`].
@@ -531,6 +551,7 @@ impl<T: Float> Conv2d<T> {
             padding,
             dilation: (1, 1),
             groups: 1,
+            padding_mode: crate::padding::PaddingMode::Zeros,
             training: true,
         })
     }
@@ -540,6 +561,49 @@ impl<T: Float> Module<T> for Conv2d<T> {
     fn forward(&self, input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
         // Record autocast decision for conv2d.
         let _autocast_cat = autocast_guard("conv2d");
+
+        // Non-zero padding modes: pre-pad the input with the requested
+        // boundary mode and then convolve with padding = 0. Mirrors
+        // `torch/nn/modules/conv.py` `_ConvNd._conv_forward`:
+        //   if self.padding_mode != 'zeros':
+        //       input = F.pad(input,
+        //                     self._reversed_padding_repeated_twice,
+        //                     mode=self.padding_mode)
+        //       conv2d(..., padding=0, ...)
+        // Closes #1443.
+        if self.padding_mode != crate::padding::PaddingMode::Zeros
+            && (self.padding.0 != 0 || self.padding.1 != 0)
+        {
+            let padded = crate::padding::functional_pad_2d(
+                input,
+                self.padding.1,
+                self.padding.1,
+                self.padding.0,
+                self.padding.0,
+                self.padding_mode,
+                <T as num_traits::Zero>::zero(),
+            )?;
+            // Recurse on a zero-padding variant. Build a shallow clone with
+            // padding = (0, 0) and padding_mode = Zeros so the existing
+            // im2col-on-zero-pad path runs without re-padding.
+            let zero_padded_layer = Conv2d {
+                weight: Parameter::new(self.weight.tensor().clone()),
+                bias: self
+                    .bias
+                    .as_ref()
+                    .map(|b| Parameter::new(b.tensor().clone())),
+                in_channels: self.in_channels,
+                out_channels: self.out_channels,
+                kernel_size: self.kernel_size,
+                stride: self.stride,
+                padding: (0, 0),
+                dilation: self.dilation,
+                groups: self.groups,
+                padding_mode: crate::padding::PaddingMode::Zeros,
+                training: self.training,
+            };
+            return zero_padded_layer.forward(&padded);
+        }
 
         // Validate input shape: [B, C_in, H, W].
         if input.ndim() != 4 {
@@ -4387,6 +4451,7 @@ mod tests {
             padding: (0, 0),
             dilation: (1, 1),
             groups: 1,
+            padding_mode: crate::padding::PaddingMode::Zeros,
             training: false,
         };
 
@@ -4433,6 +4498,7 @@ mod tests {
             padding: (0, 0),
             dilation: (1, 1),
             groups: 1,
+            padding_mode: crate::padding::PaddingMode::Zeros,
             training: false,
         };
 
@@ -4466,6 +4532,7 @@ mod tests {
             padding: (0, 0),
             dilation: (1, 1),
             groups: 1,
+            padding_mode: crate::padding::PaddingMode::Zeros,
             training: false,
         };
 
@@ -4664,6 +4731,7 @@ mod tests {
             padding: (0, 0),
             dilation: (1, 1),
             groups: 1,
+            padding_mode: crate::padding::PaddingMode::Zeros,
             training: false,
         };
 
@@ -4698,6 +4766,7 @@ mod tests {
             padding: (1, 1),
             dilation: (1, 1),
             groups: 1,
+            padding_mode: crate::padding::PaddingMode::Zeros,
             training: false,
         };
 

@@ -211,7 +211,7 @@ pub use activation::{
 pub use attention::{MultiheadAttention, repeat_kv, reshape_to_heads, transpose_heads_to_2d};
 pub use container::{ModuleDict, ModuleList, Sequential};
 pub use conv::{Conv1d, Conv2d, Conv3d, ConvTranspose1d, ConvTranspose2d, ConvTranspose3d};
-pub use dropout::{AlphaDropout, Dropout, Dropout1d, Dropout2d, Dropout3d};
+pub use dropout::{AlphaDropout, Dropout, Dropout1d, Dropout2d, Dropout3d, FeatureAlphaDropout};
 pub use embedding::{Embedding, EmbeddingBag, EmbeddingBagMode};
 pub use flash_attention::{flash_attention, standard_attention};
 pub use flex_attention::{
@@ -224,7 +224,7 @@ pub use identity::{
 pub use init::{FanMode, NonLinearity};
 pub use lazy_conv::{LazyConv1d, LazyConv2d, LazyConv3d};
 pub use lazy_linear::LazyLinear;
-pub use linear::Linear;
+pub use linear::{Bilinear, Linear};
 pub use lora::LoRALinear;
 pub use loss::{
     BCELoss, BCEWithLogitsLoss, CTCLoss, CosineEmbeddingLoss, CrossEntropyLoss, GaussianNLLLoss,

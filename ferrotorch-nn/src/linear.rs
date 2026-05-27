@@ -28,7 +28,7 @@
 //! | REQ-8 | SHIPPED | impl: `impl<T: Float> Display for Linear<T>` block here matching upstream `linear.py:136-140`'s `extra_repr`; non-test consumer: `format!("{layer}")` in model summary printing (e.g. `ferrotorch_train` learner emits module displays in logs). |
 //! | REQ-9 | SHIPPED | `Linear` carries only `Parameter<T>` fields which are `Send + Sync`; verified at compile time via `assert_send_sync::<Linear<f32>>()` in tests; non-test consumer: any multi-threaded `DataParallel`-style training scaffolding in `ferrotorch-train` requires `Send + Sync`. |
 //! | REQ-10 | SHIPPED | impl: `last_dim != self.in_features` guard inside `<Linear as Module>::forward` here; non-test consumer: every production caller is shielded from silent shape mismatches by this guard. |
-//! | REQ-11 | NOT-STARTED | blocker #1442 — `Bilinear<T>` not implemented (upstream `linear.py:162-260`). The parity op `nn.functional.bilinear` cannot be SHIPPED until the layer exists. |
+//! | REQ-11 | SHIPPED | impl: `pub struct Bilinear<T: Float>` here with `weight` `[out, in1, in2]` + optional `bias` `[out]`, forward composed of two `einsum_differentiable` contractions (`"bi,oij->boj"` then `"boj,bj->bo"`) plus bias broadcast, mirroring `torch/nn/modules/linear.py:162-260`; non-test consumer: `pub use linear::Bilinear` in `lib.rs` re-export so downstream model crates (e.g. attention-fusion and FiLM-style conditioning) can construct it directly. Closes #1442. |
 //! | REQ-12 | NOT-STARTED | blocker #1441 — parity-sweep runner has no arm for `nn.functional.linear`; sweep reports `0/144 passed, 144 skipped`. The forward path itself is end-to-end verified by 22 lib tests; only the runner-arm wiring is missing. |
 
 use ferrotorch_core::grad_fns::linalg::linear_fused;
@@ -258,6 +258,260 @@ impl<T: Float> std::fmt::Display for Linear<T> {
             f,
             "Linear(in_features={}, out_features={}, bias={})",
             self.in_features,
+            self.out_features,
+            self.bias.is_some()
+        )
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Bilinear — closes #1442
+// ---------------------------------------------------------------------------
+
+/// Bilinear layer: `y = x1^T @ W @ x2 + b`.
+///
+/// Applies a learnable bilinear transformation to two input vectors,
+/// mirroring `torch.nn.Bilinear` (`torch/nn/modules/linear.py:162-260`).
+/// The weight tensor has shape `[out_features, in1_features, in2_features]`
+/// and bias (if present) has shape `[out_features]`. For a 2-D batched input
+/// pair `(x1, x2)` of shape `[B, in1]` and `[B, in2]`, the output has shape
+/// `[B, out]`:
+///
+/// ```text
+/// y[b, o] = sum_i sum_j x1[b, i] * W[o, i, j] * x2[b, j]  + b[o]
+/// ```
+///
+/// # Initialization
+///
+/// - **Weight**: `U(-bound, bound)` with `bound = 1/sqrt(in1_features)`,
+///   matching `torch/nn/modules/linear.py:191-194`.
+/// - **Bias**: `U(-bound, bound)` with the same bound.
+#[derive(Debug)]
+pub struct Bilinear<T: Float> {
+    /// Weight tensor of shape `[out_features, in1_features, in2_features]`.
+    pub weight: Parameter<T>,
+    /// Optional bias of shape `[out_features]`.
+    pub bias: Option<Parameter<T>>,
+    in1_features: usize,
+    in2_features: usize,
+    out_features: usize,
+    training: bool,
+}
+
+impl<T: Float> Bilinear<T> {
+    /// Create a new bilinear layer.
+    ///
+    /// # Arguments
+    ///
+    /// - `in1_features` — size of each `x1` sample.
+    /// - `in2_features` — size of each `x2` sample.
+    /// - `out_features` — size of the output sample.
+    /// - `bias` — if `true`, adds a learnable bias.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if any feature count is zero, or allocation fails.
+    pub fn new(
+        in1_features: usize,
+        in2_features: usize,
+        out_features: usize,
+        bias: bool,
+    ) -> FerrotorchResult<Self> {
+        if in1_features == 0 || in2_features == 0 || out_features == 0 {
+            return Err(FerrotorchError::InvalidArgument {
+                message: format!(
+                    "Bilinear: in1/in2/out_features must all be > 0, got ({in1_features}, {in2_features}, {out_features})"
+                ),
+            });
+        }
+
+        // bound = 1/sqrt(in1_features) per `torch/nn/modules/linear.py:191-194`.
+        let bound = if in1_features > 0 {
+            1.0 / (in1_features as f64).sqrt()
+        } else {
+            0.0
+        };
+
+        let mut weight = Parameter::zeros(&[out_features, in1_features, in2_features])?;
+        crate::init::uniform(&mut weight, -bound, bound)?;
+
+        let bias_param = if bias {
+            let mut b = Parameter::zeros(&[out_features])?;
+            crate::init::uniform(&mut b, -bound, bound)?;
+            Some(b)
+        } else {
+            None
+        };
+
+        Ok(Self {
+            weight,
+            bias: bias_param,
+            in1_features,
+            in2_features,
+            out_features,
+            training: true,
+        })
+    }
+
+    /// Number of features in the first input.
+    #[inline]
+    pub fn in1_features(&self) -> usize {
+        self.in1_features
+    }
+
+    /// Number of features in the second input.
+    #[inline]
+    pub fn in2_features(&self) -> usize {
+        self.in2_features
+    }
+
+    /// Number of features in the output.
+    #[inline]
+    pub fn out_features(&self) -> usize {
+        self.out_features
+    }
+
+    /// Bilinear forward pass: `y = x1 W x2 + b`.
+    ///
+    /// `x1`: `[B, in1_features]`, `x2`: `[B, in2_features]` (or 1-D for a
+    /// single sample). Returns `[B, out_features]` (or `[out_features]`).
+    pub fn forward_pair(&self, x1: &Tensor<T>, x2: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
+        // Accept 1-D or 2-D inputs; promote 1-D to a batch of one.
+        let (x1_2d, x2_2d, was_1d) = match (x1.ndim(), x2.ndim()) {
+            (1, 1) => {
+                let x1_b =
+                    ferrotorch_core::grad_fns::shape::reshape(x1, &[1, x1.shape()[0] as isize])?;
+                let x2_b =
+                    ferrotorch_core::grad_fns::shape::reshape(x2, &[1, x2.shape()[0] as isize])?;
+                (x1_b, x2_b, true)
+            }
+            (2, 2) => (x1.clone(), x2.clone(), false),
+            _ => {
+                return Err(FerrotorchError::ShapeMismatch {
+                    message: format!(
+                        "Bilinear: expected both inputs 1-D or both 2-D, got {:?} and {:?}",
+                        x1.shape(),
+                        x2.shape(),
+                    ),
+                });
+            }
+        };
+
+        if x1_2d.shape()[1] != self.in1_features {
+            return Err(FerrotorchError::ShapeMismatch {
+                message: format!(
+                    "Bilinear: x1 last dim {} != in1_features {}",
+                    x1_2d.shape()[1],
+                    self.in1_features,
+                ),
+            });
+        }
+        if x2_2d.shape()[1] != self.in2_features {
+            return Err(FerrotorchError::ShapeMismatch {
+                message: format!(
+                    "Bilinear: x2 last dim {} != in2_features {}",
+                    x2_2d.shape()[1],
+                    self.in2_features,
+                ),
+            });
+        }
+        if x1_2d.shape()[0] != x2_2d.shape()[0] {
+            return Err(FerrotorchError::ShapeMismatch {
+                message: format!(
+                    "Bilinear: batch dim mismatch x1={} x2={}",
+                    x1_2d.shape()[0],
+                    x2_2d.shape()[0],
+                ),
+            });
+        }
+
+        // y = einsum("bi,oij,bj->bo", x1, W, x2). Decompose via two
+        // 2-tensor einsums (the workspace einsum primitive supports up to
+        // two operands per call): first contract `i` to get
+        // `boj = sum_i x1[b,i] * W[o,i,j]`, then contract `j` with x2 to
+        // get `bo = sum_j boj * x2[b,j]`.
+        let boj = ferrotorch_core::einsum::einsum_differentiable(
+            "bi,oij->boj",
+            &[&x1_2d, self.weight.tensor()],
+        )?;
+        let bo = ferrotorch_core::einsum::einsum_differentiable("boj,bj->bo", &[&boj, &x2_2d])?;
+
+        // Add bias (broadcast `[out]` over `[B, out]`).
+        let out_with_bias = if let Some(ref bias) = self.bias {
+            let bias_2d = ferrotorch_core::grad_fns::shape::reshape(
+                bias.tensor(),
+                &[1, self.out_features as isize],
+            )?;
+            ferrotorch_core::grad_fns::arithmetic::add(&bo, &bias_2d)?
+        } else {
+            bo
+        };
+
+        if was_1d {
+            ferrotorch_core::grad_fns::shape::reshape(&out_with_bias, &[self.out_features as isize])
+        } else {
+            Ok(out_with_bias)
+        }
+    }
+}
+
+impl<T: Float> Module<T> for Bilinear<T> {
+    /// `Module::forward` for `Bilinear` requires both inputs. The single-
+    /// tensor `Module` trait can't carry the second operand; use
+    /// [`Bilinear::forward_pair`] directly for the bilinear contraction.
+    /// Calling this `forward` returns an error to flag the misuse.
+    fn forward(&self, _input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
+        Err(FerrotorchError::InvalidArgument {
+            message: "Bilinear requires two inputs; call `forward_pair(x1, x2)` instead of \
+                      `Module::forward`."
+                .into(),
+        })
+    }
+
+    fn parameters(&self) -> Vec<&Parameter<T>> {
+        let mut params = vec![&self.weight];
+        if let Some(ref b) = self.bias {
+            params.push(b);
+        }
+        params
+    }
+
+    fn parameters_mut(&mut self) -> Vec<&mut Parameter<T>> {
+        let mut params = vec![&mut self.weight];
+        if let Some(ref mut b) = self.bias {
+            params.push(b);
+        }
+        params
+    }
+
+    fn named_parameters(&self) -> Vec<(String, &Parameter<T>)> {
+        let mut params = vec![("weight".to_string(), &self.weight)];
+        if let Some(ref b) = self.bias {
+            params.push(("bias".to_string(), b));
+        }
+        params
+    }
+
+    fn train(&mut self) {
+        self.training = true;
+    }
+
+    fn eval(&mut self) {
+        self.training = false;
+    }
+
+    fn is_training(&self) -> bool {
+        self.training
+    }
+}
+
+impl<T: Float> std::fmt::Display for Bilinear<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "Bilinear(in1_features={}, in2_features={}, out_features={}, bias={})",
+            self.in1_features,
+            self.in2_features,
             self.out_features,
             self.bias.is_some()
         )

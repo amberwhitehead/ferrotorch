@@ -17,7 +17,7 @@
 //! |---|---|---|
 //! | REQ-1 | SHIPPED | `pub fn linear<T>` composes `transpose_2d` + `mm_differentiable` + bias broadcast mirroring `torch.nn.functional.linear`; consumed by `ferrotorch-train/examples/multi_epoch_train_dump.rs:61` (via the `use ferrotorch_nn::functional::{...}` import) and the public namespace re-export at `ferrotorch-nn/src/lib.rs:163`. |
 //! | REQ-2 | SHIPPED | `pub fn relu / sigmoid / tanh / gelu / gelu_with / silu / softmax / log_softmax / leaky_relu / hardtanh / hardtanh_with / relu6 / hardsigmoid / hardswish / log_sigmoid / softmin / softsign / tanhshrink / selu / softplus / softplus_with / elu / elu_with / mish / glu / prelu` each delegating to `ferrotorch_core::grad_fns::activation::*` (or composed from `arithmetic`/`trans`) mirror the matching `torch.nn.functional.*`; consumed by `ferrotorch-train/examples/multi_epoch_train_dump.rs:61` (`use ferrotorch_nn::functional::{mse_loss, relu};`). |
-//! | REQ-3 | SHIPPED | `pub fn dropout` + `struct DropoutBackward<T>` (stateless inverted dropout with per-element xorshift mask) mirrors `torch.nn.functional.dropout`; consumed via the `ferrotorch-nn/src/lib.rs:163` `pub mod functional;` re-export. Deterministic-RNG plumbing gap tracked by #1452. |
+//! | REQ-3 | SHIPPED | `pub fn dropout` + `struct DropoutBackward<T>` (stateless inverted dropout with mask sampled via `ferrotorch_core::rng::with_thread_rng`) mirrors `torch.nn.functional.dropout` and respects `ferrotorch_core::manual_seed` (closes #1452); consumed via the `ferrotorch-nn/src/lib.rs:163` `pub mod functional;` re-export plus `ferrotorch-train/examples/multi_epoch_train_dump.rs`-style consumers that need deterministic mask streams. |
 //! | REQ-4 | SHIPPED | `pub fn sum`, `pub fn mean` delegating to `ferrotorch_core::grad_fns::reduction::{sum, mean}` mirror `torch.sum` / `torch.mean`; consumed via `ferrotorch-nn/src/lib.rs:163` namespace re-export. |
 //! | REQ-5 | SHIPPED | `pub fn mse_loss`, `pub fn cross_entropy`, `pub fn l1_loss`, `pub fn binary_cross_entropy`, `pub fn binary_cross_entropy_with_logits`, `pub fn kl_div` mirror `torch.nn.functional.*`; consumed by `ferrotorch-train/examples/multi_epoch_train_dump.rs:61` (`use ferrotorch_nn::functional::{mse_loss, relu};`) driving a multi-epoch training loop. |
 //! | REQ-6 | SHIPPED | `pub fn normalize`, `pub fn cosine_similarity`, `pub fn pairwise_distance` mirror `torch.nn.functional.{normalize, cosine_similarity, pairwise_distance}`; consumed via `lib.rs:163` namespace re-export (Llama positional embeddings and triplet-loss training callsites). |
@@ -265,30 +265,12 @@ pub fn mean<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
 // ===========================================================================
 // Dropout
 // ===========================================================================
-
-// Internal xorshift PRNG — mirrors the implementation in `crate::dropout`.
-fn xorshift_seed() -> u64 {
-    use std::collections::hash_map::DefaultHasher;
-    use std::hash::{Hash, Hasher};
-    use std::time::SystemTime;
-
-    let mut hasher = DefaultHasher::new();
-    SystemTime::now().hash(&mut hasher);
-    std::thread::current().id().hash(&mut hasher);
-    let mut state = hasher.finish();
-    if state == 0 {
-        state = 0xdeadbeefcafe;
-    }
-    state
-}
-
-#[inline]
-fn xorshift_next(state: &mut u64) -> f64 {
-    *state ^= *state << 13;
-    *state ^= *state >> 7;
-    *state ^= *state << 17;
-    (*state as f64) / (u64::MAX as f64)
-}
+//
+// Mask sampling routes through `ferrotorch_core::rng::with_thread_rng` so the
+// global `manual_seed` controls every functional dropout draw (closes #1452 —
+// mirrors `torch.manual_seed(0); F.dropout(...)` determinism). Pre-fix, this
+// file kept a local xorshift64 seeded from system time + thread id, ignoring
+// `ferrotorch_core::manual_seed` entirely.
 
 /// Backward node for functional dropout.
 #[derive(Debug)]
@@ -364,16 +346,18 @@ pub fn dropout<T: Float>(input: &Tensor<T>, p: f64, training: bool) -> Ferrotorc
     let scale = T::from(1.0 / (1.0 - p)).unwrap();
     let zero = <T as num_traits::Zero>::zero();
 
-    let mut state = xorshift_seed();
-    let scaled_mask: Vec<T> = (0..numel)
-        .map(|_| {
-            if xorshift_next(&mut state) < p {
-                zero
-            } else {
-                scale
-            }
-        })
-        .collect();
+    // Route Bernoulli draws through the global manual_seed-controlled
+    // generator so `ferrotorch_core::manual_seed(s); functional::dropout(...)`
+    // is deterministic and matches `torch.manual_seed(s); F.dropout(...)`'s
+    // contract that user-set seeds drive every randomness source.
+    let scaled_mask: Vec<T> = ferrotorch_core::rng::with_thread_rng(|g| {
+        (0..numel)
+            .map(|_| {
+                let u = g.next_uniform_f64();
+                if u < p { zero } else { scale }
+            })
+            .collect()
+    });
 
     // Forward: element-wise multiply input by scaled mask.
     let device = input.device();

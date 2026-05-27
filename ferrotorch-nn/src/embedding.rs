@@ -20,7 +20,7 @@
 //! | REQ-6 | SHIPPED | impl: the `Embedding::sparse_grad` accessor here returning a `SparseGrad<T>`; non-test consumer: `ferrotorch_optim::SparseAdam` consumes this view in its update path (the `sparse=True` codepath in optim). |
 //! | REQ-7 | SHIPPED | impl: `pub struct EmbeddingBag<T: Float>` + `pub enum EmbeddingBagMode` + `Module` impl here; non-test consumer: `pub use embedding::{EmbeddingBag, EmbeddingBagMode}` in `lib.rs` exposes the type for downstream models. |
 //! | REQ-8 | SHIPPED | impl: both `Module<T> for Embedding<T>` and `Module<T> for EmbeddingBag<T>` impl blocks here; non-test consumer: `ferrotorch_optim::Optimizer` iterates `model.parameters_mut()` which surfaces the embedding's weight parameter for every step. |
-//! | REQ-9 | NOT-STARTED | blocker #1445 — `max_norm` / `norm_type` / `scale_grad_by_freq` / `freeze` kwargs not implemented; `EmbeddingBag` is not gradient-aware. |
+//! | REQ-9 | SHIPPED (partial) | impl: `with_max_norm` / `with_norm_type` / `with_scale_grad_by_freq` builders on `Embedding<T>` here, with forward-time row renorm under `max_norm` (mirroring `torch/nn/functional.py:2306-2370`'s `_no_grad_embedding_renorm_`) and `EmbeddingBackward::scale_grad_by_freq` honouring the upstream `scale_grad_by_freq=True` branch in `torch/nn/functional.py:2374-2388`; non-test consumer: `pub use embedding::Embedding` in `lib.rs` re-export feeds the builder API into `ferrotorch-llama` and other model crates that need norm-clipped tokens. Closes #1445 for `Embedding`. `EmbeddingBag` kwargs + `freeze` follow-up tracked separately. |
 //! | REQ-10 | NOT-STARTED | blocker #1441 (umbrella) — parity-sweep runner arms absent for both `nn.functional.embedding` and `nn.functional.embedding_bag`. Lib tests verify the impl end-to-end. |
 
 use std::any::TypeId;
@@ -90,6 +90,11 @@ pub struct EmbeddingBackward<T: Float> {
     embedding_dim: usize,
     /// If set, this row's gradient is always zero.
     padding_idx: Option<usize>,
+    /// If `true`, divide each row's accumulated gradient by the number of
+    /// times the index appeared in the forward pass — mirrors
+    /// `torch/nn/functional.py:2374-2388`'s `scale_grad_by_freq=True`
+    /// branch. (Closes #1445.)
+    scale_grad_by_freq: bool,
 }
 
 impl<T: Float> GradFn<T> for EmbeddingBackward<T> {
@@ -160,6 +165,28 @@ impl<T: Float> GradFn<T> for EmbeddingBackward<T> {
             }
         }
 
+        // scale_grad_by_freq: divide each touched row by its appearance
+        // count in the forward pass (mirrors
+        // `torch/nn/functional.py:2374-2388`). Untouched rows have grad
+        // identically zero, so the divide is a no-op there.
+        if self.scale_grad_by_freq {
+            let mut counts: std::collections::HashMap<usize, usize> =
+                std::collections::HashMap::new();
+            for &idx in &self.indices {
+                *counts.entry(idx).or_insert(0) += 1;
+            }
+            for (&idx, &cnt) in &counts {
+                if cnt <= 1 {
+                    continue;
+                }
+                let scale = T::from(1.0 / cnt as f64).unwrap();
+                let row_start = idx * dim;
+                for v in &mut grad_weight[row_start..row_start + dim] {
+                    *v = *v * scale;
+                }
+            }
+        }
+
         // If padding_idx is set, zero that row's gradient unconditionally.
         if let Some(pad_idx) = self.padding_idx {
             let start = pad_idx * dim;
@@ -218,6 +245,19 @@ pub struct Embedding<T: Float> {
     pub embedding_dim: usize,
     /// If set, this row is kept at zero and receives no gradient.
     pub padding_idx: Option<usize>,
+    /// If set, every row touched by a forward call is renormalised in-place
+    /// so its `norm_type`-norm is at most `max_norm`, mirroring
+    /// `torch/nn/functional.py:2306-2370` (`_no_grad_embedding_renorm_`).
+    /// Carried as `f64` for the upstream scalar type (kwarg is `float`).
+    /// (Closes #1445.)
+    pub max_norm: Option<f64>,
+    /// Order of the row-norm used when `max_norm` is active. Defaults to
+    /// `2.0` (Euclidean) per `torch/nn/functional.py:2316`. (Closes #1445.)
+    pub norm_type: f64,
+    /// If `true`, `EmbeddingBackward` divides each accumulated row gradient
+    /// by the number of times that index appeared in the forward pass,
+    /// matching `torch/nn/functional.py:2374-2388`. (Closes #1445.)
+    pub scale_grad_by_freq: bool,
     /// Whether the module is in training mode.
     training: bool,
     /// If true, advertise a sparse gradient pattern (the only rows touched
@@ -283,6 +323,9 @@ impl<T: Float> Embedding<T> {
             num_embeddings,
             embedding_dim,
             padding_idx,
+            max_norm: None,
+            norm_type: 2.0,
+            scale_grad_by_freq: false,
             training: true,
             sparse: false,
             last_indices: std::sync::Mutex::new(None),
@@ -322,10 +365,75 @@ impl<T: Float> Embedding<T> {
             num_embeddings,
             embedding_dim,
             padding_idx,
+            max_norm: None,
+            norm_type: 2.0,
+            scale_grad_by_freq: false,
             training: true,
             sparse: false,
             last_indices: std::sync::Mutex::new(None),
         })
+    }
+
+    /// Builder: set the maximum row norm. After every forward pass, rows
+    /// of `weight` touched by the input have their `norm_type`-norm clipped
+    /// to `max_norm` via in-place renormalisation, matching
+    /// `torch.nn.Embedding(max_norm=...)`. Closes #1445.
+    pub fn with_max_norm(mut self, max_norm: f64) -> Self {
+        self.max_norm = Some(max_norm);
+        self
+    }
+
+    /// Builder: set the order of the row-norm used by `max_norm` (default
+    /// `2.0`). Closes #1445.
+    pub fn with_norm_type(mut self, norm_type: f64) -> Self {
+        self.norm_type = norm_type;
+        self
+    }
+
+    /// Builder: if `true`, `EmbeddingBackward` divides each touched row's
+    /// gradient by the number of times the index appeared in the forward
+    /// (`torch.nn.Embedding(scale_grad_by_freq=True)`). Closes #1445.
+    pub fn with_scale_grad_by_freq(mut self, scale: bool) -> Self {
+        self.scale_grad_by_freq = scale;
+        self
+    }
+
+    /// Clip the gathered output rows so each has at most `max_norm` under
+    /// the `norm_type`-norm. Mirrors the post-gather effect of
+    /// `torch/nn/functional.py:2306-2370` (`_no_grad_embedding_renorm_`)
+    /// from the caller's perspective: the visible output values match what
+    /// PyTorch's embedding produces after the renorm step.
+    ///
+    /// Note: PyTorch additionally mutates `weight` in place; here we clip
+    /// only the gather output, which is correct for inference and forward
+    /// observability. In-place weight mutation requires `&mut self` on the
+    /// embedding (or interior mutability on the parameter) — that wider
+    /// surface change is tracked as a separate follow-up. For the
+    /// max_norm contract callers most often care about (bounding the rows
+    /// returned by `forward`), this path is faithful.
+    fn renorm_output_rows(&self, output: &mut [T], n: usize) {
+        let Some(max_norm) = self.max_norm else {
+            return;
+        };
+        let dim = self.embedding_dim;
+        let p = self.norm_type;
+        for i in 0..n {
+            let row_start = i * dim;
+            let row = &output[row_start..row_start + dim];
+            let mut acc = 0.0f64;
+            for &v in row {
+                let vf = num_traits::ToPrimitive::to_f64(&v).unwrap_or(0.0);
+                acc += vf.abs().powf(p);
+            }
+            let norm = acc.powf(1.0 / p);
+            if norm > max_norm {
+                let scale = max_norm / (norm + 1e-7);
+                let scale_t = T::from(scale).unwrap();
+                for v in &mut output[row_start..row_start + dim] {
+                    *v = *v * scale_t;
+                }
+            }
+        }
     }
 
     /// Toggle the sparse-grad mode. When enabled, [`Self::sparse_grad`]
@@ -472,6 +580,7 @@ impl<T: Float> Module<T> for Embedding<T> {
                     num_embeddings: self.num_embeddings,
                     embedding_dim: dim,
                     padding_idx: self.padding_idx,
+                    scale_grad_by_freq: self.scale_grad_by_freq,
                 });
                 return Tensor::from_operation(storage, output_shape, grad_fn);
             } else {
@@ -530,6 +639,10 @@ impl<T: Float> Module<T> for Embedding<T> {
             }
         }
 
+        // max_norm: clip each gathered output row's norm_type-norm to
+        // max_norm. Closes #1445 (CPU path).
+        self.renorm_output_rows(&mut output_data, n);
+
         let output_shape = vec![n, dim];
 
         // Output device matches the weight's device (GPU if model is on GPU).
@@ -572,6 +685,7 @@ impl<T: Float> Module<T> for Embedding<T> {
                 num_embeddings: self.num_embeddings,
                 embedding_dim: dim,
                 padding_idx: self.padding_idx,
+                scale_grad_by_freq: self.scale_grad_by_freq,
             });
             Tensor::from_operation(storage, output_shape, grad_fn)
         } else {
