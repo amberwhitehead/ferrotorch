@@ -15,12 +15,12 @@
 //! | REQ | Status | Evidence |
 //! |---|---|---|
 //! | REQ-1 (`kl_divergence<T, P, Q>` public entry point) | SHIPPED | `pub fn kl_divergence<T: Float, P, Q>` with `P: Distribution<T> + 'static`, `Q: Distribution<T> + 'static` bounds in `kl.rs` mirroring `torch/distributions/kl.py:kl_divergence`; consumer: `pub mod kl` in `lib.rs` exposes it as grandfathered public API; `test_kl_*` (~25 sites) exercise the dispatch path |
-//! | REQ-2 (`kl_supported_pair_count` introspection) | SHIPPED | `pub const fn kl_supported_pair_count() -> usize` + `KL_SUPPORTED_PAIR_COUNT: usize = 84` in `kl.rs`; consumer: const fn is grandfathered public API; drift-prevention test `kl_doc_table_matches_dispatcher` reads `include_str!("kl.rs")` and asserts three-way invariant against the public accessor |
+//! | REQ-2 (`kl_supported_pair_count` introspection) | SHIPPED | `pub const fn kl_supported_pair_count() -> usize` + `KL_SUPPORTED_PAIR_COUNT: usize = 87` in `kl.rs`; consumer: const fn is grandfathered public API; drift-prevention test `kl_doc_table_matches_dispatcher` reads `include_str!("kl.rs")` and asserts three-way invariant against the public accessor |
 //! | REQ-3 (`kl_dispatch` `Any::downcast_ref` chain) | SHIPPED | the dispatcher in `kl.rs` is an 84-arm chain mirroring PyTorch's `_dispatch_kl` in `torch/distributions/kl.py:113-138`; consumer: `pub fn kl_divergence` invokes the dispatcher on every call |
 //! | REQ-4 (8 same-family closed-form formulas) | SHIPPED | 8 closed-form helpers in `kl.rs` (`kl_normal_normal`, `kl_bernoulli_bernoulli`, `kl_uniform_uniform`, `kl_categorical_categorical`, `kl_laplace_laplace`, `kl_exponential_exponential`, `kl_gamma_gamma`, `kl_poisson_poisson`) mirroring `@register_kl` bodies in `torch/distributions/kl.py`; consumer: the dispatcher invokes each formula |
 //! | REQ-5 (cross-family finite formulas) | SHIPPED | `kl_uniform_normal`, `kl_gamma_exponential`, `kl_exponential_gamma` in `kl.rs`; last two use `kl_gamma_scalar` via `Exp(λ) ≡ Gamma(1, λ)`; consumer: the dispatcher calls each; `kl_gamma_scalar` is consumed by 3 production sites internally. (Normal-Uniform was a finite arm here but moved to the `+inf` support-mismatch family per `kl.py:766,768` `_kl_normal_infinity` — #1563.) |
 //! | REQ-6 (fallback guard on every formula) | SHIPPED | every finite formula's first statement is `crate::fallback::check_gpu_fallback_opt_in(&[...], "kl_divergence(P, Q)")?` in `kl.rs`; consumer: this IS the production consumer of `fn check_gpu_fallback_opt_in` per `fallback.md` REQ-2 (the `+inf` support-mismatch arms read a single param tensor that is already host-resident, so they hand it straight to `kl_infinite_like`) |
-//! | REQ-7 (full ~75-pair PyTorch coverage) | PARTIAL | blocker #1374 — ferrotorch now ships 86 of PyTorch's ~87 (P,Q) pairs (was 41). The #1562 closure added 27; the #1374 Binomial sub-part added 2: `kl_binomial_binomial` (finite, mirrors `torch/distributions/kl.py:231-244`) + Poisson-Binomial via `kl_infinite_like` (`_kl_poisson_infinity` `kl.py:842`). The #1374 Geometric sub-part added 1: `kl_geometric_geometric` (finite, `kl.py:320-322`). The #1374 ContinuousBernoulli sub-part added 13 (needed the new `ContinuousBernoulli` struct, `continuous_bernoulli.rs`): 6 finite — `kl_continuous_bernoulli_continuous_bernoulli` (`kl.py:255-260`), `kl_beta_continuous_bernoulli` (`kl.py:518-525`), `kl_continuous_bernoulli_exponential` (`kl.py:586-588`), `kl_continuous_bernoulli_normal` (`kl.py:595-604`), `kl_continuous_bernoulli_uniform` (`kl.py:607-617`, where-mask `+inf` when the Uniform support contains [0,1]), `kl_uniform_continuous_bernoulli` (`kl.py:871-886`, where-mask) — plus 7 support-mismatch `+inf` via `kl_infinite_like`: ContinuousBernoulli-Pareto (`kl.py:581`), {Exponential,Gamma,Gumbel,Laplace,Normal,Pareto}-ContinuousBernoulli (`kl.py:621,666,719,741,762,796`); the CB closed forms reuse the crate-visible `_lims=(0.499,0.501)` Taylor-cutoff scalar helpers from `continuous_bernoulli.rs`. Finite #1562 arms (`kl_onehotcategorical_onehotcategorical` `kl.py:474-476`, `kl_bernoulli_poisson` `kl.py:513-516`, `kl_normal_laplace` `kl.py:782-792`) + 24 support-mismatch `+inf` arms (PyTorch's `_infinite_like` registrations: Beta-Pareto `kl.py:528`; Exponential-{Beta,Pareto,Uniform} `kl.py:620-623`; Gamma-{Beta,Pareto,Uniform} `kl.py:665-668`; Gumbel-{Beta,Exponential,Gamma,Pareto,Uniform} `kl.py:718-723`; Laplace-{Beta,Exponential,Gamma,Pareto,Uniform} `kl.py:740-745`; Normal-{Beta,Exponential,Gamma,Pareto} `kl.py:761-765`; Pareto-{Beta,Uniform} `kl.py:795-797`; Poisson-Bernoulli `kl.py:841`) routed through the `kl_infinite_like` helper; consumer: each is invoked by its dispatcher downcast arm. The #1374 final tail SHIPPED the 2 recursion pairs (84 -> 86): `Independent-Independent` (`kl.py:944-949`, `pub fn kl_divergence_dyn` + `kl_recurse_pair`/`kl_sum_rightmost` in `kl.rs`, dispatched via the new `AsDistAny` `Distribution` supertrait + `Distribution::kl_recurse` in `lib.rs` + `Independent::kl_recurse` in `independent.rs`) and `TransformedDistribution-TransformedDistribution` (`kl.py:496-502`, `kl_recurse_pair` transform-fingerprint/event-shape guards + `Transform::transform_eq_key` + `TransformedDistribution::kl_recurse` in `transforms.rs`); consumer: `pub fn kl_divergence` -> `kl_divergence_dyn` invokes each on every matching pair. Still NOT-STARTED: `ExponentialFamily-ExponentialFamily` (`kl.py:282-300`) — blocker #1575: needs a generic-exp-family dispatch path + a differentiable `log_normalizer` (current impls compute on raw `.data_vec()` with no autograd graph). #1374 stays open until #1575 resolves. |
+//! | REQ-7 (full ~75-pair PyTorch coverage) | PARTIAL | blocker #1374 — ferrotorch now ships 86 of PyTorch's ~87 (P,Q) pairs (was 41). The #1562 closure added 27; the #1374 Binomial sub-part added 2: `kl_binomial_binomial` (finite, mirrors `torch/distributions/kl.py:231-244`) + Poisson-Binomial via `kl_infinite_like` (`_kl_poisson_infinity` `kl.py:842`). The #1374 Geometric sub-part added 1: `kl_geometric_geometric` (finite, `kl.py:320-322`). The #1374 ContinuousBernoulli sub-part added 13 (needed the new `ContinuousBernoulli` struct, `continuous_bernoulli.rs`): 6 finite — `kl_continuous_bernoulli_continuous_bernoulli` (`kl.py:255-260`), `kl_beta_continuous_bernoulli` (`kl.py:518-525`), `kl_continuous_bernoulli_exponential` (`kl.py:586-588`), `kl_continuous_bernoulli_normal` (`kl.py:595-604`), `kl_continuous_bernoulli_uniform` (`kl.py:607-617`, where-mask `+inf` when the Uniform support contains [0,1]), `kl_uniform_continuous_bernoulli` (`kl.py:871-886`, where-mask) — plus 7 support-mismatch `+inf` via `kl_infinite_like`: ContinuousBernoulli-Pareto (`kl.py:581`), {Exponential,Gamma,Gumbel,Laplace,Normal,Pareto}-ContinuousBernoulli (`kl.py:621,666,719,741,762,796`); the CB closed forms reuse the crate-visible `_lims=(0.499,0.501)` Taylor-cutoff scalar helpers from `continuous_bernoulli.rs`. Finite #1562 arms (`kl_onehotcategorical_onehotcategorical` `kl.py:474-476`, `kl_bernoulli_poisson` `kl.py:513-516`, `kl_normal_laplace` `kl.py:782-792`) + 24 support-mismatch `+inf` arms (PyTorch's `_infinite_like` registrations: Beta-Pareto `kl.py:528`; Exponential-{Beta,Pareto,Uniform} `kl.py:620-623`; Gamma-{Beta,Pareto,Uniform} `kl.py:665-668`; Gumbel-{Beta,Exponential,Gamma,Pareto,Uniform} `kl.py:718-723`; Laplace-{Beta,Exponential,Gamma,Pareto,Uniform} `kl.py:740-745`; Normal-{Beta,Exponential,Gamma,Pareto} `kl.py:761-765`; Pareto-{Beta,Uniform} `kl.py:795-797`; Poisson-Bernoulli `kl.py:841`) routed through the `kl_infinite_like` helper; consumer: each is invoked by its dispatcher downcast arm. The #1374 final tail SHIPPED the 2 recursion pairs (84 -> 86): `Independent-Independent` (`kl.py:944-949`, `pub fn kl_divergence_dyn` + `kl_recurse_pair`/`kl_sum_rightmost` in `kl.rs`, dispatched via the new `AsDistAny` `Distribution` supertrait + `Distribution::kl_recurse` in `lib.rs` + `Independent::kl_recurse` in `independent.rs`) and `TransformedDistribution-TransformedDistribution` (`kl.py:496-502`, `kl_recurse_pair` transform-fingerprint/event-shape guards + `Transform::transform_eq_key` + `TransformedDistribution::kl_recurse` in `transforms.rs`); consumer: `pub fn kl_divergence` -> `kl_divergence_dyn` invokes each on every matching pair. The #1575 tail SHIPPED the final pair (86 -> 87): `ExponentialFamily-ExponentialFamily` (`kl.py:282-300` `_kl_expfamily_expfamily`), the generic Bregman-divergence fallback. `kl_divergence_dyn` falls through to `exp_family::try_kl_expfamily` after the concrete `kl_dispatch` chain reports no formula; it fires only for a same-family exp pair (`kl.py:284`). The blocker's differentiable-`log_normalizer` prereq is sidestepped via the analytic `ExponentialFamily::mean_params` gradient (R-DEV-7) — `impl ExponentialFamily for {Normal,Poisson,Gamma,Exponential,Beta,Bernoulli}`; consumer: `kl_divergence_dyn` -> `try_kl_expfamily` -> `kl_expfamily_expfamily`. Shadowed for all six built-in families (each also has a specific same-family arm), exactly as PyTorch's `_dispatch_kl` selects the most specific registration. REQ-7 is now SHIPPED; #1374 and #1575 both close. |
 //! | REQ-8 (`register_kl` extension API) | SHIPPED (design decision, #1375) | the explicit `Any::downcast_ref` match in `kl_dispatch` is the deliberate Rust-idiomatic equivalent of PyTorch's `@register_kl` + `_dispatch_kl` (a Python-runtime open-extension pattern). Rust's static analog is the closed-crate match, kept maintainable by the `kl_doc_table_matches_dispatcher` drift test that pins the doc table, the const count, and the dispatcher arms in lockstep. A `Lazy<HashMap<(TypeId,TypeId),Fn>>` registry would add indirection without enabling cross-crate extension (formulas need concrete accessors). Documented in `kl.md` REQ-8. Closes #1375. |
 
 use ferrotorch_core::dtype::Float;
@@ -150,15 +150,25 @@ const EULER_GAMMA: f64 = 0.577_215_664_901_532_9;
 /// | Pareto | ContinuousBernoulli |
 /// | Independent | Independent |
 /// | TransformedDistribution | TransformedDistribution |
+/// | ExponentialFamily | ExponentialFamily |
 ///
 /// The same set is also reported by [`kl_supported_pair_count`].
 ///
-/// The last two pairs are *recursion-based*: they re-dispatch
+/// The `Independent-Independent` / `TransformedDistribution-TransformedDistribution`
+/// pairs are *recursion-based*: they re-dispatch
 /// `kl_divergence(p.base_dist, q.base_dist)` rather than reading concrete
 /// parameters (mirroring `_kl_independent_independent` /
 /// `_kl_transformed_transformed`), so they are handled in
 /// [`kl_divergence_dyn`] via [`Distribution::kl_recurse`] instead of the
 /// [`kl_dispatch`] `Any::downcast_ref` chain.
+///
+/// The final `ExponentialFamily-ExponentialFamily` row is the *generic*
+/// Bregman-divergence fallback (`torch/distributions/kl.py:282-300`): it fires
+/// for any two distributions of the **same** exponential family when no
+/// more-specific pair matched. It is dispatched in [`kl_divergence_dyn`] via
+/// [`crate::exp_family::try_kl_expfamily`], also outside the `downcast_ref`
+/// chain. Registered exp families: Normal, Poisson, Gamma, Exponential, Beta,
+/// Bernoulli.
 ///
 /// # Errors
 ///
@@ -209,7 +219,22 @@ pub fn kl_divergence_dyn<T: Float>(
             return result;
         }
     }
-    kl_dispatch::<T>(p.as_dist_any(), q.as_dist_any())
+    // Concrete `(P, Q)` arms next.
+    match kl_dispatch::<T>(p.as_dist_any(), q.as_dist_any()) {
+        Ok(t) => Ok(t),
+        Err(e) => {
+            // Generic exponential-family Bregman fallback, mirroring PyTorch's
+            // `@register_kl(ExponentialFamily, ExponentialFamily)`
+            // (`torch/distributions/kl.py:282-300`), which is the lowest-priority
+            // registration tried after all specific pairs. Fires only when both
+            // operands are the *same* exponential family (`kl.py:284`).
+            if let Some(result) = crate::exp_family::try_kl_expfamily::<T>(p, q)? {
+                Ok(result)
+            } else {
+                Err(e)
+            }
+        }
+    }
 }
 
 /// Apply the two recursion-based KL registrations when both operands expose a
@@ -339,9 +364,11 @@ pub const fn kl_supported_pair_count() -> usize {
 ///
 /// Breakdown: 84 concrete `Any::downcast_ref` arms in [`kl_dispatch`] + 2
 /// recursion-based arms in [`kl_divergence_dyn`] (`Independent-Independent`
-/// and `TransformedDistribution-TransformedDistribution`, #1374), which
-/// dispatch via [`Distribution::kl_recurse`] rather than `downcast_ref`.
-const KL_SUPPORTED_PAIR_COUNT: usize = 86;
+/// and `TransformedDistribution-TransformedDistribution`, #1374) + 1 generic
+/// exponential-family Bregman fallback (`ExponentialFamily-ExponentialFamily`,
+/// #1575), both groups dispatched in [`kl_divergence_dyn`] rather than by the
+/// `downcast_ref` chain.
+const KL_SUPPORTED_PAIR_COUNT: usize = 87;
 
 /// Number of recursion-based KL arms handled in [`kl_divergence_dyn`] (not in
 /// the [`kl_dispatch`] `downcast_ref` chain): `Independent-Independent` +
@@ -349,6 +376,15 @@ const KL_SUPPORTED_PAIR_COUNT: usize = 86;
 /// constant so the drift test can add it to the `downcast_ref` arm count.
 #[cfg(test)]
 const KL_RECURSION_ARM_COUNT: usize = 2;
+
+/// Number of generic exponential-family Bregman fallback arms handled in
+/// [`kl_divergence_dyn`] (not in the [`kl_dispatch`] `downcast_ref` chain):
+/// the single `ExponentialFamily-ExponentialFamily` registration (#1575,
+/// `torch/distributions/kl.py:282-300`), which fires for any two distributions
+/// of the same exponential family with no more-specific arm. Kept as a named
+/// constant so the drift test can add it to the `downcast_ref` arm count.
+#[cfg(test)]
+const KL_EXPFAMILY_ARM_COUNT: usize = 1;
 
 fn kl_dispatch<T: Float>(
     p: &dyn std::any::Any,
@@ -4918,12 +4954,18 @@ mod tests {
         // and TransformedDistribution-TransformedDistribution, #1374) are
         // dispatched via `Distribution::kl_recurse` in `kl_divergence_dyn`, NOT
         // by `downcast_ref`, so they are counted by the named constant
-        // `KL_RECURSION_ARM_COUNT`.
-        let dispatch_arms = count_dispatcher_arms(SRC) + KL_RECURSION_ARM_COUNT;
+        // `KL_RECURSION_ARM_COUNT`; the 1 generic exponential-family Bregman
+        // fallback (ExponentialFamily-ExponentialFamily, #1575) is dispatched
+        // via `crate::exp_family::try_kl_expfamily` in `kl_divergence_dyn`,
+        // likewise outside the `downcast_ref` chain, counted by
+        // `KL_EXPFAMILY_ARM_COUNT`.
+        let dispatch_arms =
+            count_dispatcher_arms(SRC) + KL_RECURSION_ARM_COUNT + KL_EXPFAMILY_ARM_COUNT;
         assert_eq!(
             dispatch_arms, expected,
             "dispatcher arms ({dispatch_arms} = downcast_ref arms + \
-             KL_RECURSION_ARM_COUNT) must equal KL_SUPPORTED_PAIR_COUNT ({expected})"
+             KL_RECURSION_ARM_COUNT + KL_EXPFAMILY_ARM_COUNT) must equal \
+             KL_SUPPORTED_PAIR_COUNT ({expected})"
         );
     }
 

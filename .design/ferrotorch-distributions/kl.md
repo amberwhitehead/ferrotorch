@@ -11,8 +11,9 @@ upstream-paths:
 ## Summary
 
 `ferrotorch-distributions/src/kl.rs` provides analytical closed-form
-KL divergence formulas for 86 distribution pairs (84 concrete closed-form
-pairs + 2 recursion-based pairs):
+KL divergence formulas for 87 distribution pairs (84 concrete closed-form
+pairs + 2 recursion-based pairs + 1 generic exponential-family Bregman
+fallback):
 Normal-Normal, Bernoulli-Bernoulli, Uniform-Uniform,
 Categorical-Categorical, Normal-Uniform, Uniform-Normal,
 Laplace-Laplace, Exponential-Exponential, Gamma-Gamma,
@@ -56,10 +57,15 @@ and TransformedDistribution-TransformedDistribution (`kl.py:496-502`
 `_kl_transformed_transformed`). These are dispatched through the new
 `Distribution::kl_recurse` hook (in `lib.rs`) via the public
 `kl_divergence_dyn` entry, NOT by the `Any::downcast_ref` chain (which
-cannot match the generic `Independent<T, D>` base type). The last
-missing pair, ExponentialFamily-ExponentialFamily (`kl.py:282-300`), is
-NOT-STARTED — blocked on #1575 (needs a generic-ExponentialFamily
-dispatch path + a differentiable `log_normalizer`).
+cannot match the generic `Independent<T, D>` base type).
+The #1575 tail added the final missing pair,
+ExponentialFamily-ExponentialFamily (`kl.py:282-300`), as the generic
+Bregman-divergence fallback: `kl_divergence_dyn` falls through to
+`exp_family::try_kl_expfamily` (in `exp_family.rs`) after the concrete
+`kl_dispatch` chain reports no formula, firing only when both operands are the
+same exponential family. The blocker's prereq (a *differentiable*
+`log_normalizer`) is sidestepped via the analytic `mean_params` gradient
+(R-DEV-7) — see `.design/ferrotorch-distributions/exp_family.md`.
 Mirrors `torch/distributions/kl.py`. The concrete-pair dispatcher
 is a hand-coded chain of `Any::downcast_ref` arms; the same pattern
 PyTorch ships via `register_kl` + `_dispatch_kl` but expressed in
@@ -79,11 +85,14 @@ match is the deliberate Rust-idiomatic design (REQ-8 / #1375).
 
 - REQ-2: `pub const fn kl_supported_pair_count() -> usize`
   introspects the dispatcher's registered-pair count. Backed by
-  `const KL_SUPPORTED_PAIR_COUNT: usize = 84`. Tested via
-  `kl_doc_table_matches_dispatcher` (which parses
-  `include_str!("kl.rs")` and counts BOTH the doc-table rows AND
-  the `p.downcast_ref::<...>()` arms in `fn kl_dispatch`, asserting
-  they all match the constant). This is the drift-prevention
+  `const KL_SUPPORTED_PAIR_COUNT: usize = 87` (84 concrete
+  `downcast_ref` arms + 2 recursion-based + 1 exponential-family
+  Bregman fallback). Tested via `kl_doc_table_matches_dispatcher`
+  (which parses `include_str!("kl.rs")` and counts the doc-table rows,
+  the `p.downcast_ref::<...>()` arms in `fn kl_dispatch`, plus the
+  `KL_RECURSION_ARM_COUNT` and `KL_EXPFAMILY_ARM_COUNT` named
+  constants for the arms dispatched outside the `downcast_ref` chain,
+  asserting they all match the constant). This is the drift-prevention
   guard that fixes the historical failure mode of #1124.
 
 - REQ-3: `fn kl_dispatch<T: Float>(p: &dyn Any, q: &dyn Any) ->
@@ -122,8 +131,9 @@ match is the deliberate Rust-idiomatic design (REQ-8 / #1375).
   crate-wide CPU-fallback policy. CUDA inputs without the env var
   return `NotImplementedOnCuda`.
 
-- REQ-7: PARTIAL — PyTorch ships ~87 registered KL pairs. ferrotorch now
-  ships 86 (was 41); only ExponentialFamily-ExponentialFamily remains.
+- REQ-7: SHIPPED — PyTorch ships ~87 registered KL pairs. ferrotorch now
+  ships 87 (was 41); the last pair, ExponentialFamily-ExponentialFamily,
+  landed under #1575 (see the #1575 tail at the end of this REQ).
   The #1374 ContinuousBernoulli sub-part added 13 pairs
   that needed the new `ContinuousBernoulli` struct
   (`continuous_bernoulli.rs`): 6 finite — `kl_continuous_bernoulli_continuous_bernoulli`
@@ -193,23 +203,34 @@ match is the deliberate Rust-idiomatic design (REQ-8 / #1375).
       `transforms.py:808-825`) and `PowerTransform` (folds `exponent`,
       `transforms.py:621-624`); the `fn TransformedDistribution::kl_recurse`
       override (all in `transforms.rs`).
-  Still NOT-STARTED (a concrete prereq, not a deferral):
+  The #1575 tail SHIPPED the last pair (86 -> 87):
     - ExponentialFamily-ExponentialFamily (`kl.py:282-300`
-      `_kl_expfamily_expfamily`) — blocked on #1575. Two prerequisites:
-      (1) a dispatch path that matches a GENERIC `T: ExponentialFamily`
-      pair — the closed `Any::downcast_ref` chain in `kl_dispatch` cannot
-      express a "match any exponential family" arm (it matches concrete
-      types only); and (2) a DIFFERENTIABLE `log_normalizer`: torch calls
-      `torch.autograd.grad(lg_normal.sum(), p_nparams, create_graph=True)`
-      (`kl.py:292`), but ferrotorch's `ExponentialFamily::log_normalizer`
-      impls (`normal.rs`, `poisson.rs`) compute on raw `.data_vec()` with
-      `requires_grad=false` and build no autograd graph, so `grad()`
-      through them is impossible. Do NOT half-build a Bregman fallback
-      without both prerequisites.
-  Closing the last pair is tracked by blocker #1575; blocker #1374 stays
-  open until #1575 resolves. The missing distribution-type prerequisites
-  (Geometric, ContinuousBernoulli) and the recursion trait hooks have now
-  all shipped.
+      `_kl_expfamily_expfamily`) — the generic Bregman-divergence fallback.
+      `fn kl_divergence_dyn` falls through to
+      `fn exp_family::try_kl_expfamily` after the concrete `kl_dispatch`
+      chain reports no formula; the hook downcasts both operands to each
+      registered exponential family and fires `fn kl_expfamily_expfamily`
+      only for a same-family pair (mirroring `kl.py:284`'s
+      `if type(p) is not type(q): raise`). Both #1575 prerequisites were
+      resolved: (1) the generic-`T: ExponentialFamily` dispatch is the
+      enumerated `try_kl_expfamily` family list (the same closed-crate
+      pattern as `kl_dispatch`, REQ-8); (2) the DIFFERENTIABLE
+      `log_normalizer` requirement is sidestepped via the analytic
+      `fn ExponentialFamily::mean_params` gradient (R-DEV-7) instead of
+      autograd-through-`log_normalizer` — see
+      `.design/ferrotorch-distributions/exp_family.md`. Registered
+      exp families: Normal, Poisson, Gamma, Exponential, Beta, Bernoulli;
+      each has a `fn mean_params` (the analytic `∇A`) verified to reproduce
+      torch's autograd result and the specific-pair KL to ~1e-9
+      (`exp_family::tests` + `tests/divergence_kl_1575_expfamily_bregman.rs`).
+      The fallback is *shadowed* for all six built-in families (each also
+      has a specific same-family arm), exactly as in PyTorch where
+      `_dispatch_kl` selects the most-specific registration; it is the
+      registry backstop, invoked at runtime on every no-formula dispatch.
+  Both blocker #1575 and the umbrella #1374 close with this landing. The
+  missing distribution-type prerequisites (Geometric, ContinuousBernoulli)
+  and the recursion trait hooks shipped earlier; the exp-family fallback
+  completes the ~87-pair PyTorch KL registry parity.
 
 - REQ-8: SHIPPED (design decision, #1375) — the explicit
   `Any::downcast_ref` match in `kl_dispatch` IS the chosen

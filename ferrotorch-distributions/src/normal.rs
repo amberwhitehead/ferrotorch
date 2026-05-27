@@ -583,6 +583,25 @@ impl<T: Float> crate::ExponentialFamily<T> for Normal<T> {
         )
     }
 
+    fn mean_params(&self) -> FerrotorchResult<Vec<Tensor<T>>> {
+        // ∇A(η) for the Normal: the expected sufficient statistics
+        // (E[x], E[x²]) = (μ, μ² + σ²). PyTorch obtains these by autograd
+        // through `_log_normalizer` (`exp_family.py:62`); the closed form is
+        // ∂A/∂η1 = -η1/(2η2) = μ and ∂A/∂η2 = η1²/(4η2²) − 1/(2η2) = μ² + σ²,
+        // matching torch's autograd result to ~1e-12 (verified in tests).
+        let loc_d = self.loc.data_vec()?;
+        let scale_d = self.scale.data_vec()?;
+        let m1: Vec<T> = loc_d.clone();
+        let m2: Vec<T> = loc_d
+            .iter()
+            .zip(scale_d.iter())
+            .map(|(&l, &s)| l * l + s * s)
+            .collect();
+        let t1 = Tensor::from_storage(TensorStorage::cpu(m1), self.loc.shape().to_vec(), false)?;
+        let t2 = Tensor::from_storage(TensorStorage::cpu(m2), self.scale.shape().to_vec(), false)?;
+        Ok(vec![t1, t2])
+    }
+
     fn mean_carrier_measure(&self) -> FerrotorchResult<T> {
         // `torch/distributions/normal.py:37`: `_mean_carrier_measure = 0`.
         Ok(<T as num_traits::Zero>::zero())

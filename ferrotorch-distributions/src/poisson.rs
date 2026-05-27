@@ -318,6 +318,17 @@ impl<T: Float> crate::ExponentialFamily<T> for Poisson<T> {
         )
     }
 
+    fn mean_params(&self) -> FerrotorchResult<Vec<Tensor<T>>> {
+        // ∇A(η) for the Poisson: A(x) = exp(x) so ∂A/∂η = exp(η) = rate, the
+        // expected sufficient statistic E[x] = rate. PyTorch obtains this by
+        // autograd through `_log_normalizer` (`exp_family.py:62`); here it is
+        // the closed-form gradient. Mirrors `torch/distributions/poisson.py:85-87`.
+        let rate_d = self.rate.data_vec()?;
+        let out: Vec<T> = rate_d.clone();
+        let t = Tensor::from_storage(TensorStorage::cpu(out), self.rate.shape().to_vec(), false)?;
+        Ok(vec![t])
+    }
+
     fn mean_carrier_measure(&self) -> FerrotorchResult<T> {
         Ok(<T as num_traits::Zero>::zero())
     }

@@ -284,6 +284,66 @@ impl<T: Float> Distribution<T> for Bernoulli<T> {
     }
 }
 
+// ---------------------------------------------------------------------------
+// ExponentialFamily impl (#1575) — enables the generic Bregman KL fallback
+// (`kl_expfamily_expfamily`, `torch/distributions/kl.py:282-300`).
+// ---------------------------------------------------------------------------
+
+impl<T: Float> crate::ExponentialFamily<T> for Bernoulli<T> {
+    fn natural_params(&self) -> FerrotorchResult<Vec<Tensor<T>>> {
+        // `torch/distributions/bernoulli.py:139-141`:
+        //   _natural_params = (torch.logit(self.probs),)  # logit(p) = ln(p/(1-p))
+        let probs = self.probs.data_vec()?;
+        let one = <T as num_traits::One>::one();
+        let out: Vec<T> = probs.iter().map(|&p| (p / (one - p)).ln()).collect();
+        let t = Tensor::from_storage(TensorStorage::cpu(out), self.probs.shape().to_vec(), false)?;
+        Ok(vec![t])
+    }
+
+    fn log_normalizer(&self, natural_params: &[Tensor<T>]) -> FerrotorchResult<Tensor<T>> {
+        // `torch/distributions/bernoulli.py:143-145`:
+        //   _log_normalizer(x) = log1p(exp(x))  (softplus)
+        // Computed in the numerically-stable form max(x,0) + log1p(exp(-|x|)).
+        if natural_params.len() != 1 {
+            return Err(FerrotorchError::InvalidArgument {
+                message: format!(
+                    "Bernoulli::log_normalizer expects 1 natural param, got {}",
+                    natural_params.len()
+                ),
+            });
+        }
+        let x = natural_params[0].data_vec()?;
+        let zero = <T as num_traits::Zero>::zero();
+        let out: Vec<T> = x
+            .iter()
+            .map(|&v| {
+                let m = if v > zero { v } else { zero };
+                m + (-(v.abs())).exp().ln_1p()
+            })
+            .collect();
+        Tensor::from_storage(
+            TensorStorage::cpu(out),
+            natural_params[0].shape().to_vec(),
+            false,
+        )
+    }
+
+    fn mean_params(&self) -> FerrotorchResult<Vec<Tensor<T>>> {
+        // ∇A(η) for the Bernoulli (closed form; torch obtains it by autograd
+        // through `_log_normalizer`, `exp_family.py:62`):
+        //   A(x) = softplus(x);  ∂A/∂η = sigmoid(x) = p = E[X].
+        let probs = self.probs.data_vec()?;
+        let out: Vec<T> = probs.clone();
+        let t = Tensor::from_storage(TensorStorage::cpu(out), self.probs.shape().to_vec(), false)?;
+        Ok(vec![t])
+    }
+
+    fn mean_carrier_measure(&self) -> FerrotorchResult<T> {
+        // `torch/distributions/bernoulli.py:45`: `_mean_carrier_measure = 0`.
+        Ok(<T as num_traits::Zero>::zero())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

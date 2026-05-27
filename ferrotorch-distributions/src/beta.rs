@@ -455,6 +455,103 @@ impl<T: Float> GradFn<T> for BetaRsampleBackward<T> {
     }
 }
 
+// ---------------------------------------------------------------------------
+// ExponentialFamily impl (#1575) — enables the generic Bregman KL fallback
+// (`kl_expfamily_expfamily`, `torch/distributions/kl.py:282-300`).
+// ---------------------------------------------------------------------------
+
+impl<T: Float> crate::ExponentialFamily<T> for Beta<T> {
+    fn natural_params(&self) -> FerrotorchResult<Vec<Tensor<T>>> {
+        // `torch/distributions/beta.py:112-114`:
+        //   _natural_params = (self.concentration1, self.concentration0)
+        let c1 = self.concentration1.data_vec()?;
+        let c0 = self.concentration0.data_vec()?;
+        let t1 = Tensor::from_storage(
+            TensorStorage::cpu(c1),
+            self.concentration1.shape().to_vec(),
+            false,
+        )?;
+        let t0 = Tensor::from_storage(
+            TensorStorage::cpu(c0),
+            self.concentration0.shape().to_vec(),
+            false,
+        )?;
+        Ok(vec![t1, t0])
+    }
+
+    fn log_normalizer(&self, natural_params: &[Tensor<T>]) -> FerrotorchResult<Tensor<T>> {
+        // `torch/distributions/beta.py:116-118`:
+        //   _log_normalizer(x, y) = lgamma(x) + lgamma(y) - lgamma(x + y)
+        if natural_params.len() != 2 {
+            return Err(FerrotorchError::InvalidArgument {
+                message: format!(
+                    "Beta::log_normalizer expects 2 natural params, got {}",
+                    natural_params.len()
+                ),
+            });
+        }
+        let x = natural_params[0].data_vec()?;
+        let y = natural_params[1].data_vec()?;
+        if x.len() != y.len() {
+            return Err(FerrotorchError::ShapeMismatch {
+                message: format!(
+                    "Beta::log_normalizer: eta1 len {} != eta2 len {}",
+                    x.len(),
+                    y.len()
+                ),
+            });
+        }
+        let out: Vec<T> = x
+            .iter()
+            .zip(y.iter())
+            .map(|(&xi, &yi)| {
+                crate::special_fns::lgamma_scalar(xi) + crate::special_fns::lgamma_scalar(yi)
+                    - crate::special_fns::lgamma_scalar(xi + yi)
+            })
+            .collect();
+        Tensor::from_storage(
+            TensorStorage::cpu(out),
+            natural_params[0].shape().to_vec(),
+            false,
+        )
+    }
+
+    fn mean_params(&self) -> FerrotorchResult<Vec<Tensor<T>>> {
+        // ∇A(η) for the Beta (closed form; torch obtains it by autograd through
+        // `_log_normalizer`, `exp_family.py:62`):
+        //   A(x,y) = lnΓ(x)+lnΓ(y)−lnΓ(x+y);
+        //   ∂A/∂η1 = ψ(c1) − ψ(c1+c0) = E[ln X]
+        //   ∂A/∂η2 = ψ(c0) − ψ(c1+c0) = E[ln(1−X)]
+        let c1 = self.concentration1.data_vec()?;
+        let c0 = self.concentration0.data_vec()?;
+        let m1: Vec<T> = c1
+            .iter()
+            .zip(c0.iter())
+            .map(|(&a, &b)| {
+                crate::special_fns::digamma_scalar(a) - crate::special_fns::digamma_scalar(a + b)
+            })
+            .collect();
+        let m0: Vec<T> = c1
+            .iter()
+            .zip(c0.iter())
+            .map(|(&a, &b)| {
+                crate::special_fns::digamma_scalar(b) - crate::special_fns::digamma_scalar(a + b)
+            })
+            .collect();
+        let t1 = Tensor::from_storage(
+            TensorStorage::cpu(m1),
+            self.concentration1.shape().to_vec(),
+            false,
+        )?;
+        let t0 = Tensor::from_storage(
+            TensorStorage::cpu(m0),
+            self.concentration0.shape().to_vec(),
+            false,
+        )?;
+        Ok(vec![t1, t0])
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

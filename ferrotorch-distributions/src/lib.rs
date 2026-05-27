@@ -73,6 +73,7 @@ mod cauchy;
 pub mod constraints;
 mod continuous_bernoulli;
 mod dirichlet;
+pub mod exp_family;
 mod exponential;
 pub(crate) mod fallback;
 mod gamma;
@@ -137,6 +138,8 @@ pub use transforms::{
 pub use uniform::Uniform;
 pub use von_mises::VonMises;
 pub use weibull::Weibull;
+
+pub use exp_family::kl_expfamily_expfamily;
 
 use std::any::Any;
 use std::collections::HashMap;
@@ -527,6 +530,25 @@ pub trait ExponentialFamily<T: Float>: Distribution<T> {
     /// [`natural_params`](Self::natural_params) returns. Mirrors
     /// `_log_normalizer(*natural_params)` (`exp_family.py:40-45`).
     fn log_normalizer(&self, natural_params: &[Tensor<T>]) -> FerrotorchResult<Tensor<T>>;
+
+    /// The mean parameters `∇F(η)` — the gradient of the log-normalizer
+    /// evaluated at this distribution's own natural parameters, which equals
+    /// the expected sufficient statistics `E[t(X)]`.
+    ///
+    /// PyTorch obtains this gradient via reverse-mode autograd through
+    /// `_log_normalizer` (`torch/distributions/exp_family.py:62`
+    /// `torch.autograd.grad(lg_normal.sum(), nparams, create_graph=True)` and
+    /// `torch/distributions/kl.py:292` likewise). ferrotorch instead provides
+    /// the gradient in **closed form** per family (R-DEV-7: the analytic
+    /// gradient is cleaner and avoids building an autograd graph through the
+    /// host-side `_log_normalizer`). The returned `Vec` is index-aligned with
+    /// [`natural_params`](Self::natural_params): `mean_params()[i]` is
+    /// `∂F/∂η_i` at this distribution's `η`.
+    ///
+    /// Consumed by [`kl_expfamily_expfamily`](crate::exp_family::kl_expfamily_expfamily)
+    /// as the `∇A(η_p)` term of the Bregman-divergence KL formula
+    /// (`torch/distributions/kl.py:282-297`).
+    fn mean_params(&self) -> FerrotorchResult<Vec<Tensor<T>>>;
 
     /// The expected carrier measure `E[k(X)]`. Returns 0 for most
     /// continuous families. Mirrors `_mean_carrier_measure`

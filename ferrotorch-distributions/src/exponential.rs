@@ -25,7 +25,7 @@ use std::sync::Arc;
 
 use ferrotorch_core::creation;
 use ferrotorch_core::dtype::Float;
-use ferrotorch_core::error::FerrotorchResult;
+use ferrotorch_core::error::{FerrotorchError, FerrotorchResult};
 use ferrotorch_core::storage::TensorStorage;
 use ferrotorch_core::tensor::{GradFn, Tensor};
 
@@ -325,6 +325,58 @@ impl<T: Float> GradFn<T> for ExponentialRsampleBackward<T> {
 
     fn name(&self) -> &'static str {
         "ExponentialRsampleBackward"
+    }
+}
+
+// ---------------------------------------------------------------------------
+// ExponentialFamily impl (#1575) — enables the generic Bregman KL fallback
+// (`kl_expfamily_expfamily`, `torch/distributions/kl.py:282-300`).
+// ---------------------------------------------------------------------------
+
+impl<T: Float> crate::ExponentialFamily<T> for Exponential<T> {
+    fn natural_params(&self) -> FerrotorchResult<Vec<Tensor<T>>> {
+        // `torch/distributions/exponential.py:88-90`:
+        //   _natural_params = (-self.rate,)
+        let rate = self.rate.data_vec()?;
+        let out: Vec<T> = rate.iter().map(|&r| -r).collect();
+        let t = Tensor::from_storage(TensorStorage::cpu(out), self.rate.shape().to_vec(), false)?;
+        Ok(vec![t])
+    }
+
+    fn log_normalizer(&self, natural_params: &[Tensor<T>]) -> FerrotorchResult<Tensor<T>> {
+        // `torch/distributions/exponential.py:92-94`:
+        //   _log_normalizer(x) = -log(-x)
+        if natural_params.len() != 1 {
+            return Err(FerrotorchError::InvalidArgument {
+                message: format!(
+                    "Exponential::log_normalizer expects 1 natural param, got {}",
+                    natural_params.len()
+                ),
+            });
+        }
+        let x = natural_params[0].data_vec()?;
+        let out: Vec<T> = x.iter().map(|&v| -((-v).ln())).collect();
+        Tensor::from_storage(
+            TensorStorage::cpu(out),
+            natural_params[0].shape().to_vec(),
+            false,
+        )
+    }
+
+    fn mean_params(&self) -> FerrotorchResult<Vec<Tensor<T>>> {
+        // ∇A(η) for the Exponential (closed form; torch obtains it by autograd
+        // through `_log_normalizer`, `exp_family.py:62`):
+        //   A(x) = -log(-x);  ∂A/∂η = -1/x = 1/rate = E[X].
+        let rate = self.rate.data_vec()?;
+        let one = <T as num_traits::One>::one();
+        let out: Vec<T> = rate.iter().map(|&r| one / r).collect();
+        let t = Tensor::from_storage(TensorStorage::cpu(out), self.rate.shape().to_vec(), false)?;
+        Ok(vec![t])
+    }
+
+    fn mean_carrier_measure(&self) -> FerrotorchResult<T> {
+        // `torch/distributions/exponential.py:33`: `_mean_carrier_measure = 0`.
+        Ok(<T as num_traits::Zero>::zero())
     }
 }
 

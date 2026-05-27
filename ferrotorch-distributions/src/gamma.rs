@@ -607,6 +607,96 @@ impl<T: Float> GradFn<T> for GammaRsampleBackward<T> {
     }
 }
 
+// ---------------------------------------------------------------------------
+// ExponentialFamily impl (#1575) — enables the generic Bregman KL fallback
+// (`kl_expfamily_expfamily`, `torch/distributions/kl.py:282-300`).
+// ---------------------------------------------------------------------------
+
+impl<T: Float> crate::ExponentialFamily<T> for Gamma<T> {
+    fn natural_params(&self) -> FerrotorchResult<Vec<Tensor<T>>> {
+        // `torch/distributions/gamma.py:109-111`:
+        //   _natural_params = (self.concentration - 1, -self.rate)
+        let conc = self.concentration.data_vec()?;
+        let rate = self.rate.data_vec()?;
+        let one = <T as num_traits::One>::one();
+        let eta1: Vec<T> = conc.iter().map(|&c| c - one).collect();
+        let eta2: Vec<T> = rate.iter().map(|&r| -r).collect();
+        let t1 = Tensor::from_storage(
+            TensorStorage::cpu(eta1),
+            self.concentration.shape().to_vec(),
+            false,
+        )?;
+        let t2 = Tensor::from_storage(TensorStorage::cpu(eta2), self.rate.shape().to_vec(), false)?;
+        Ok(vec![t1, t2])
+    }
+
+    fn log_normalizer(&self, natural_params: &[Tensor<T>]) -> FerrotorchResult<Tensor<T>> {
+        // `torch/distributions/gamma.py:113-114`:
+        //   _log_normalizer(x, y) = lgamma(x + 1) + (x + 1) * log(-y.reciprocal())
+        if natural_params.len() != 2 {
+            return Err(FerrotorchError::InvalidArgument {
+                message: format!(
+                    "Gamma::log_normalizer expects 2 natural params, got {}",
+                    natural_params.len()
+                ),
+            });
+        }
+        let x = natural_params[0].data_vec()?;
+        let y = natural_params[1].data_vec()?;
+        if x.len() != y.len() {
+            return Err(FerrotorchError::ShapeMismatch {
+                message: format!(
+                    "Gamma::log_normalizer: eta1 len {} != eta2 len {}",
+                    x.len(),
+                    y.len()
+                ),
+            });
+        }
+        let one = <T as num_traits::One>::one();
+        let out: Vec<T> = x
+            .iter()
+            .zip(y.iter())
+            .map(|(&xi, &yi)| {
+                // log(-1/y); y = -rate < 0 so -1/y = 1/rate > 0.
+                crate::special_fns::lgamma_scalar(xi + one) + (xi + one) * (-(one / yi)).ln()
+            })
+            .collect();
+        Tensor::from_storage(
+            TensorStorage::cpu(out),
+            natural_params[0].shape().to_vec(),
+            false,
+        )
+    }
+
+    fn mean_params(&self) -> FerrotorchResult<Vec<Tensor<T>>> {
+        // ∇A(η) for the Gamma (closed form; torch obtains it by autograd
+        // through `_log_normalizer`, `exp_family.py:62`):
+        //   ∂A/∂η1 = ψ(x+1) + log(-1/y) = ψ(α) − ln(rate) = E[ln X]
+        //   ∂A/∂η2 = -(x+1)/y          = α / rate         = E[X]
+        // (x+1 = concentration, -y = rate).
+        let conc = self.concentration.data_vec()?;
+        let rate = self.rate.data_vec()?;
+        let m1: Vec<T> = conc
+            .iter()
+            .zip(rate.iter())
+            .map(|(&a, &r)| crate::special_fns::digamma_scalar(a) - r.ln())
+            .collect();
+        let m2: Vec<T> = conc.iter().zip(rate.iter()).map(|(&a, &r)| a / r).collect();
+        let t1 = Tensor::from_storage(
+            TensorStorage::cpu(m1),
+            self.concentration.shape().to_vec(),
+            false,
+        )?;
+        let t2 = Tensor::from_storage(TensorStorage::cpu(m2), self.rate.shape().to_vec(), false)?;
+        Ok(vec![t1, t2])
+    }
+
+    fn mean_carrier_measure(&self) -> FerrotorchResult<T> {
+        // `torch/distributions/gamma.py:43`: `_mean_carrier_measure = 0`.
+        Ok(<T as num_traits::Zero>::zero())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

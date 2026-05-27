@@ -242,11 +242,14 @@ fn audit_1375_supported_pair_count() {
     // and the #1374 ContinuousBernoulli sub-part (13 CB pairs: 6 finite +
     // 7 `+inf`); the #1374 final tail then added 2 recursion-based pairs
     // (Independent-Independent + TransformedDistribution-TransformedDistribution,
-    // dispatched via `Distribution::kl_recurse` in `kl_divergence_dyn`) for 86
-    // total; the precise count is also drift-checked by
+    // dispatched via `Distribution::kl_recurse` in `kl_divergence_dyn`) for 86;
+    // the #1575 tail then added the generic exponential-family Bregman fallback
+    // (ExponentialFamily-ExponentialFamily, dispatched via
+    // `exp_family::try_kl_expfamily` in `kl_divergence_dyn`) for 87 total; the
+    // precise count is also drift-checked by
     // `kl::tests::kl_doc_table_matches_dispatcher` and
     // `divergence_wave_m_audit::audit_1374_supported_pair_count_is_41`.
-    assert_eq!(kl_supported_pair_count(), 86);
+    assert_eq!(kl_supported_pair_count(), 87);
 }
 
 // ---------------------------------------------------------------------------

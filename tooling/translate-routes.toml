@@ -1812,6 +1812,15 @@ parity_ops = []
 
 
 [[route]]
+crate_pattern = "ferrotorch-distributions/src/exp_family.rs"
+upstream = [
+  "/home/doll/pytorch/torch/distributions/",
+]
+design = ".design/ferrotorch-distributions/exp_family.md"
+parity_ops = []
+
+
+[[route]]
 crate_pattern = "ferrotorch-distributions/src/exponential.rs"
 upstream = [
   "/home/doll/pytorch/torch/distributions/",
