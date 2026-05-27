@@ -72,10 +72,12 @@ and `meta_propagate.rs`.
 - REQ-4: `unflatten(input, dim, sizes)` — `torch.unflatten(input, dim,
   sizes)`. Per `TensorShape.cpp:4350 Tensor unflatten_symint(const
   Tensor& self, int64_t dim, SymIntArrayRef sizes)` — reshapes a single
-  dim into multiple, leaving the other dims untouched. The free-function
-  op is NOT YET implemented in ferrotorch-core; only the `nn::Unflatten`
-  Module-style layer exists at `ferrotorch-nn/src/identity.rs:264`,
-  which is the layer wrapper, not the standalone free op.
+  dim into multiple, leaving the other dims untouched. SHIPPED as the
+  free-function `pub fn unflatten` in `grad_fns/shape.rs` (resolves a
+  single local `-1` slot against `self.size(dim)`, splices the resolved
+  sizes in place of `dim`, then `reshape`s — inheriting `ReshapeBackward`).
+  The separate `nn::Unflatten` Module-style layer at
+  `ferrotorch-nn/src/identity.rs:264` remains the layer wrapper.
 
 - REQ-5: `squeeze(input, dim)` — `torch.squeeze(input, dim)`. Per
   `TensorShape.cpp:4026 Tensor squeeze(const Tensor& self, int64_t dim)`
@@ -114,15 +116,15 @@ and `meta_propagate.rs`.
 - REQ-9: `swapaxes(input, axis0, axis1)` — `torch.swapaxes(input,
   axis0, axis1)`. Per `TensorShape.cpp:4776 Tensor swapaxes(const
   Tensor& self, int64_t axis0, int64_t axis1) { return
-  self.transpose(axis0, axis1); }` — a literal alias of transpose. The
-  alias name does not yet exist as a free fn or method in
-  ferrotorch-core; users must call `transpose` directly.
+  self.transpose(axis0, axis1); }` — a literal alias of transpose.
+  SHIPPED as `pub fn swapaxes` in `grad_fns/shape.rs` + `Tensor::swapaxes`
+  in `methods.rs`.
 
 - REQ-10: `swapdims(input, dim0, dim1)` — `torch.swapdims(input, dim0,
   dim1)`. Per `TensorShape.cpp:4784 Tensor swapdims(const Tensor&
   self, int64_t dim0, int64_t dim1) { return self.transpose(dim0,
-  dim1); }` — also a literal transpose alias. Same alias-gap status as
-  `swapaxes`.
+  dim1); }` — also a literal transpose alias. SHIPPED alongside
+  `swapaxes` as `pub fn swapdims` + `Tensor::swapdims`.
 
 - REQ-11: `expand(input, sizes)` — `torch.Tensor.expand(*sizes)`. Per
   `TensorShape.cpp:1344 Tensor expand(const Tensor& self,
@@ -138,8 +140,8 @@ and `meta_propagate.rs`.
   Per `TensorShape.cpp:1374 Tensor expand_as(const Tensor& self, const
   Tensor& other) { return self.expand_symint(other.sym_sizes()); }` —
   a literal one-liner delegating to `expand` with `other.sizes()`.
-  Not yet implemented as a named pub fn/method in ferrotorch-core;
-  users must call `expand` with the explicit target sizes.
+  SHIPPED as `pub fn expand_as` in `grad_fns/shape.rs` +
+  `Tensor::expand_as_t` in `methods.rs` (inherits `ExpandBackward`).
 
 - REQ-13: `repeat(input, repeats)` — `torch.Tensor.repeat(*repeats)`.
   Per `TensorShape.cpp:1909 Tensor repeat(const Tensor& self,
@@ -535,20 +537,22 @@ it on the meta-shape path.
 
 ### NOT-STARTED architecture
 
-The 20 NOT-STARTED REQs split into three categories:
+The remaining NOT-STARTED REQs split into three categories
+(`swapaxes`/`swapdims`/`expand_as`/`unflatten` are now SHIPPED — see
+their REQ rows):
 
-1. **Pure alias gaps** — `swapaxes` (REQ-9), `swapdims` (REQ-10),
-   `expand_as` (REQ-12), `broadcast_to` (REQ-27), `moveaxis`
-   (REQ-30), `fliplr` (REQ-35), `flipud` (REQ-36). Upstream
-   implements each as a one-line delegation to another op. The
-   delegated op IS shipped (transpose/expand/movedim/flip), but
-   the named alias is missing. Tracked under umbrella blocker
-   #1342.
+1. **Pure alias gaps (remaining)** — `broadcast_to` (REQ-27),
+   `moveaxis` (REQ-30), `fliplr` (REQ-35), `flipud` (REQ-36).
+   Upstream implements each as a one-line delegation to another op.
+   The delegated op IS shipped (expand/movedim/flip), but the named
+   alias is missing. (`swapaxes`/`swapdims`/`expand_as` were aliases
+   in this category and are now SHIPPED.) Tracked under umbrella
+   blocker #1342.
 
-2. **Missing free-function ops with a Module-style sibling** —
-   `unflatten` (REQ-4): `nn::Unflatten` Module exists at
-   `ferrotorch-nn/src/identity.rs:264`, but the free-function
-   `tensor.unflatten(dim, sizes)` does not. Tracked under #1342.
+2. **Missing free-function ops with a Module-style sibling** — none
+   remaining: `unflatten` (REQ-4) is now SHIPPED as a free function
+   alongside the `nn::Unflatten` Module at
+   `ferrotorch-nn/src/identity.rs:264`.
 
 3. **Missing free-function ops with no sibling** — `repeat`
    (REQ-13), `repeat_interleave` (REQ-14), `vstack`/`hstack`/
@@ -669,15 +673,15 @@ tests above and indirect coverage through ops that USE them
 | REQ-1 (view) | SHIPPED | impl: `pub fn view_t` in `methods.rs` (delegates to `crate::grad_fns::shape::reshape`) mirrors upstream `aten/src/ATen/native/TensorShape.cpp:4563 Tensor view`; non-test consumer: `Tensor::view` method in `methods.rs`; lib test `test_resolve_shape_*` covers the shared `-1`-infer path; parity-sweep `view` at seeds=8 reports `56/56 passed (0 skipped, 0 failed)` per the runner arm `"view"` in `tools/parity-sweep/runner/src/main.rs` (closes #1340). |
 | REQ-2 (reshape) | SHIPPED | impl: `pub fn reshape` + `pub struct ReshapeBackward` in `grad_fns/shape.rs` mirror upstream `aten/src/ATen/native/TensorShape.cpp:2129 Tensor reshape`; non-test consumers: `Tensor::reshape_t` in `methods.rs`, `flex_attention.rs`, `einsum.rs`; lib tests `test_reshape_forward/_backward/_infer_dim/_shape_mismatch/_no_grad`; parity-sweep `reshape` at seeds=8 reports `56/56 passed (0 skipped, 0 failed)` per the runner arm `"reshape"` in `tools/parity-sweep/runner/src/main.rs` (closes #1340). |
 | REQ-3 (flatten) | SHIPPED | impl: `pub fn flatten` + `pub struct FlattenBackward` in `grad_fns/shape.rs` mirror upstream `aten/src/ATen/native/TensorShape.cpp:4178 Tensor flatten`; non-test consumers: `Tensor::flatten_t` in `methods.rs`, `Tensor::flatten` method-body in `tensor.rs` consumes `FlattenBackward`; lib tests `test_flatten_forward/_backward/_preserves_grad_fn`; parity-sweep `flatten` at seeds=8 reports `48/48 passed (0 skipped, 0 failed)` per the runner arm `"flatten"` in `tools/parity-sweep/runner/src/main.rs` (closes #1340). |
-| REQ-4 (unflatten) | NOT-STARTED | Free op not implemented; only `nn::Unflatten` Module exists at `ferrotorch-nn/src/identity.rs:264`. Implementation blocker #1342. |
+| REQ-4 (unflatten) | SHIPPED | impl: `pub fn unflatten` + helper `resolve_unflatten_sizes` in `grad_fns/shape.rs` mirror upstream `aten/src/ATen/native/TensorShape.cpp:4350 Tensor unflatten_symint` / `:4305 unflatten_impl` (maybe_wrap_dim + non-empty check + `infer_size_dv` local `-1` resolution + spliced `view`); autograd inherited from `reshape`'s `ReshapeBackward`; non-test consumer: `Tensor::unflatten_t` in `methods.rs`; lib tests `test_unflatten_forward/_infer_slot/_negative_dim_and_middle_splice/_empty_sizes_errors/_product_mismatch_errors/_backward_reaches_leaf`; runner-arm gap #1340. |
 | REQ-5 (squeeze) | SHIPPED | impl: `pub fn squeeze` at `shape.rs:211` + `SqueezeBackward` at `shape.rs:177` mirrors upstream `TensorShape.cpp:4026 Tensor squeeze(self, dim)`; non-test consumers: `methods.rs:509 squeeze_t`, `einsum.rs:870/885`; lib tests `test_squeeze_forward/_non_one_error/_unsqueeze_roundtrip/_preserves_grad_fn/_backward_reaches_leaf/_in_longer_chain/_no_grad_is_view`; runner-arm gap #1340. |
 | REQ-6 (unsqueeze) | SHIPPED | impl: `pub fn unsqueeze` at `shape.rs:283` + `UnsqueezeBackward` at `shape.rs:245` mirrors upstream `TensorShape.cpp:4109 Tensor unsqueeze`; non-test consumers: `methods.rs:513 unsqueeze_t`, `einsum.rs:838/839/868/883`, `grad_fns/indexing.rs` (broadcast prep); lib tests `test_unsqueeze_forward/_preserves_grad_fn/_backward_reaches_leaf`; runner-arm gap #1340. |
 | REQ-7 (permute) | SHIPPED | impl: `pub fn permute_t` at `methods.rs:876` + `PermuteBackward` at `methods.rs:941` mirrors upstream `TensorShape.cpp:1829 Tensor permute`; non-test consumers: `Tensor::permute` at `methods.rs:521`, `shape.rs:339/364` (TransposeBackward and transpose_2d both delegate here), `einsum.rs:306` (intermediate permutation), `lib.rs:171` re-exports `permute_t`; runner-arm gap #1340. |
 | REQ-8 (transpose) | SHIPPED | impl: `Tensor::transpose(dim0, dim1)` at `methods.rs:528` (builds swap-perm + calls `permute_t`) + `pub fn transpose_2d` at `shape.rs:356` + `TransposeBackward` at `shape.rs:323` mirror upstream `TensorShape.cpp:3816 Tensor transpose` and `:3873 Tensor t`; non-test consumer: `Tensor::t` at `methods.rs:467`; lib test `test_transpose_2d_forward`; runner-arm gap #1340 (the existing runner arm at `runner/src/main.rs:1555` produces 0/64 passed 64 skipped because dispatch is not wired). |
-| REQ-9 (swapaxes) | NOT-STARTED | Pure alias of transpose per upstream `TensorShape.cpp:4776`; not implemented. Implementation blocker #1342. |
-| REQ-10 (swapdims) | NOT-STARTED | Pure alias of transpose per upstream `TensorShape.cpp:4784`; not implemented. Implementation blocker #1342. |
+| REQ-9 (swapaxes) | SHIPPED | impl: `pub fn swapaxes` in `grad_fns/shape.rs` (literal `input.transpose(axis0, axis1)` alias) mirrors upstream `TensorShape.cpp:4776 Tensor swapaxes(self, axis0, axis1) { return self.transpose(axis0, axis1); }`; autograd inherited from `Tensor::transpose`'s `PermuteBackward`; non-test consumer: `Tensor::swapaxes` in `methods.rs`; lib tests `test_swapaxes_equals_transpose` (byte-equality vs transpose), `test_swapaxes_backward_reaches_leaf`; runner-arm gap #1340. |
+| REQ-10 (swapdims) | SHIPPED | impl: `pub fn swapdims` in `grad_fns/shape.rs` (literal `input.transpose(dim0, dim1)` alias) mirrors upstream `TensorShape.cpp:4784 Tensor swapdims(self, dim0, dim1) { return self.transpose(dim0, dim1); }`; non-test consumer: `Tensor::swapdims` in `methods.rs`; lib test `test_swapdims_equals_transpose` (byte-equality vs transpose on a 3-D tensor); runner-arm gap #1340. |
 | REQ-11 (expand) | SHIPPED | impl: `pub fn expand` at `shape.rs:414` + `ExpandBackward` at `shape.rs:377` mirrors upstream `TensorShape.cpp:1344 Tensor expand`; non-test consumers: `grad_fns/indexing.rs:1806/1826/1851/3577` (broadcast prep for masked_fill / where_cond), `einsum.rs:1725` (sum-grad expand), `lib.rs:165` re-exports `expand`; runner-arm gap #1340 (existing arm at `runner/src/main.rs:1561` produces 0/72 passed 72 skipped). |
-| REQ-12 (expand_as) | NOT-STARTED | Pure alias delegating to `expand` per upstream `TensorShape.cpp:1374`; not implemented as a named pub fn. Implementation blocker #1342. |
+| REQ-12 (expand_as) | SHIPPED | impl: `pub fn expand_as` in `grad_fns/shape.rs` (delegates to `expand(input, other.shape())`) mirrors upstream `TensorShape.cpp:1374 Tensor expand_as(self, other) { return self.expand_symint(other.sym_sizes()); }`; autograd inherited from `expand`'s `ExpandBackward` (sum-reduces broadcast axes); non-test consumer: `Tensor::expand_as_t` in `methods.rs`; lib tests `test_expand_as_equals_expand` (byte-equality vs explicit-shape expand), `test_expand_as_backward_sums_broadcast_axes`; runner-arm gap #1340. |
 | REQ-13 (repeat) | NOT-STARTED | torch `Tensor.repeat` (tile-style) not implemented; the unrelated `einops::repeat` at `einops.rs:589` uses string-pattern semantics. Implementation blocker #1342. |
 | REQ-14 (repeat_interleave) | NOT-STARTED | Not implemented. Implementation blocker #1342. |
 | REQ-15 (cat) | SHIPPED | impl: `pub fn cat` at `shape.rs:764` + `CatBackward` at `shape.rs:503` mirrors upstream `TensorShape.cpp:676 TORCH_IMPL_FUNC(cat_out_cpu)` + `:772 Tensor cat`; GPU fast path mirrors `aten::cat_out_cuda` via byte-width-dispatched `strided_cat`; non-test consumers: `flex_attention.rs:235/238` (head-grouped attention assembly), `lib.rs:165` re-exports `cat`; lib tests `test_cat_forward_axis0/_axis1`, `test_cat_backward_axis0/_axis1/_mixed_requires_grad`, `test_cat_empty_error`, `test_cat_1d`; runner-arm gap #1340. |

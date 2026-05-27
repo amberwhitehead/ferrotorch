@@ -802,6 +802,35 @@ impl<T: Float> Tensor<T> {
         permute_t(self, &perm)
     }
 
+    /// Swap two axes. Like PyTorch's `tensor.swapaxes(axis0, axis1)` — a
+    /// literal alias of `transpose` per upstream
+    /// `aten/src/ATen/native/TensorShape.cpp:4776`.
+    pub fn swapaxes(&self, axis0: usize, axis1: usize) -> FerrotorchResult<Tensor<T>> {
+        crate::grad_fns::shape::swapaxes(self, axis0, axis1)
+    }
+
+    /// Swap two dims. Like PyTorch's `tensor.swapdims(dim0, dim1)` — a literal
+    /// alias of `transpose` per upstream
+    /// `aten/src/ATen/native/TensorShape.cpp:4784`.
+    pub fn swapdims(&self, dim0: usize, dim1: usize) -> FerrotorchResult<Tensor<T>> {
+        crate::grad_fns::shape::swapdims(self, dim0, dim1)
+    }
+
+    /// Reshape a single dimension `dim` into multiple `sizes`. Like PyTorch's
+    /// `tensor.unflatten(dim, sizes)` per upstream
+    /// `aten/src/ATen/native/TensorShape.cpp:4350`. At most one `-1`
+    /// inference slot is allowed in `sizes`.
+    pub fn unflatten_t(&self, dim: isize, sizes: &[isize]) -> FerrotorchResult<Tensor<T>> {
+        crate::grad_fns::shape::unflatten(self, dim, sizes)
+    }
+
+    /// Broadcast this tensor to the shape of `other`. Like PyTorch's
+    /// `tensor.expand_as(other)` per upstream
+    /// `aten/src/ATen/native/TensorShape.cpp:1374`.
+    pub fn expand_as_t(&self, other: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
+        crate::grad_fns::shape::expand_as(self, other)
+    }
+
     /// Return a narrowed view along `dim` starting at `start` with `length`
     /// elements. Like PyTorch's `tensor.narrow(dim, start, length)`.
     ///
@@ -1114,11 +1143,7 @@ impl<T: Float> Tensor<T> {
     /// `grad_fns::comparison::where_` per R-DEFER-1 (closes blocker #1295):
     /// this method is the public, chainable surface that closes the
     /// consumer requirement. The boolean-tensor variant is `where_bt_t`.
-    pub fn where_t(
-        &self,
-        condition: &[bool],
-        other: &Tensor<T>,
-    ) -> FerrotorchResult<Tensor<T>> {
+    pub fn where_t(&self, condition: &[bool], other: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
         crate::grad_fns::comparison::where_(condition, self, other)
     }
 

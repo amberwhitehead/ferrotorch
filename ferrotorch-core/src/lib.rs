@@ -179,7 +179,7 @@ pub use grad_fns::fft::{
 };
 pub use grad_fns::quantize_grad::fake_quantize_differentiable;
 pub use grad_fns::reduction::{max_with_dim, mean_dim, min_with_dim, norm_with_dim, sum_dim};
-pub use grad_fns::shape::{cat, expand};
+pub use grad_fns::shape::{cat, expand, expand_as, swapaxes, swapdims, unflatten};
 pub use grad_fns::transcendental::{atan2, clamp, copysign, cos, exp, hypot, log, signbit, sin};
 pub use masked::{
     MaskedTensor, masked_count, masked_equal, masked_invalid, masked_max, masked_mean, masked_min,

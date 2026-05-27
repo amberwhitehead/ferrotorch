@@ -12,15 +12,15 @@
 //! | REQ-1 (`view`) | SHIPPED | `Tensor::view_t` in `methods.rs` delegates to `grad_fns::shape::reshape`; parity-sweep `view` reports `56/56 passed`. |
 //! | REQ-2 (`reshape`) | SHIPPED | `reshape` + `ReshapeBackward` consumed by `Tensor::reshape_t`, `flex_attention.rs`, `einsum.rs`; parity `56/56 passed`. |
 //! | REQ-3 (`flatten`) | SHIPPED | `flatten` + `FlattenBackward` consumed by `Tensor::flatten_t` and `Tensor::flatten` (method body in `tensor.rs`); parity `48/48 passed`. |
-//! | REQ-4 (`unflatten`) | NOT-STARTED | only `nn::Unflatten` Module exists; no free-function op. Blocker #1342. |
+//! | REQ-4 (`unflatten`) | SHIPPED | `unflatten` here (reshape a single dim into `sizes`, inheriting `ReshapeBackward`) consumed by `Tensor::unflatten_t` in `methods.rs`; lib tests `test_unflatten_*`. Closes #1342 REQ-4. |
 //! | REQ-5 (`squeeze`) | SHIPPED | `squeeze` + `SqueezeBackward` consumed by `Tensor::squeeze_t` and `einsum.rs`; runner-arm gap tracked under #1340. |
 //! | REQ-6 (`unsqueeze`) | SHIPPED | `unsqueeze` + `UnsqueezeBackward` consumed by `Tensor::unsqueeze_t`, `einsum.rs`, and `grad_fns::indexing` broadcast prep; runner-arm gap #1340. |
 //! | REQ-7 (`permute`) | SHIPPED | `permute_t` + `PermuteBackward` live in `methods.rs`; `TransposeBackward` and `transpose_2d` here delegate through it; consumers include `Tensor::permute` + pervasive einsum/vmap callers; runner-arm gap #1340. |
 //! | REQ-8 (`transpose` / 2-D `t`) | SHIPPED | `transpose_2d` + `TransposeBackward` here, plus `Tensor::transpose` in `methods.rs` building a swap perm; consumer is `Tensor::t`; runner-arm gap #1340. |
-//! | REQ-9 (`swapaxes`) | NOT-STARTED | pure alias of transpose; not implemented. Blocker #1342. |
-//! | REQ-10 (`swapdims`) | NOT-STARTED | pure alias of transpose; not implemented. Blocker #1342. |
+//! | REQ-9 (`swapaxes`) | SHIPPED | `swapaxes` here (literal transpose alias) consumed by `Tensor::swapaxes` in `methods.rs`; lib tests `test_swapaxes_equals_transpose`, `test_swapaxes_backward_reaches_leaf`. Closes #1342 REQ-9. |
+//! | REQ-10 (`swapdims`) | SHIPPED | `swapdims` here (literal transpose alias) consumed by `Tensor::swapdims` in `methods.rs`; lib test `test_swapdims_equals_transpose`. Closes #1342 REQ-10. |
 //! | REQ-11 (`expand`) | SHIPPED | `expand` + `ExpandBackward` consume the shared `arithmetic::reduce_grad_to_shape`; GPU fast path via `broadcast_add_{f32,f64}`; consumed by `grad_fns::indexing` broadcast prep and `einsum.rs`; runner-arm gap #1340. |
-//! | REQ-12 (`expand_as`) | NOT-STARTED | pure alias of expand; not implemented as a named pub fn. Blocker #1342. |
+//! | REQ-12 (`expand_as`) | SHIPPED | `expand_as` here (delegates to `expand` with `other.shape()`, inheriting `ExpandBackward`) consumed by `Tensor::expand_as_t` in `methods.rs`; lib tests `test_expand_as_equals_expand`, `test_expand_as_backward_sums_broadcast_axes`. Closes #1342 REQ-12. |
 //! | REQ-13 (`repeat`) | NOT-STARTED | tile-style `Tensor.repeat` not implemented; the `einops::repeat` is unrelated. Blocker #1342. |
 //! | REQ-14 (`repeat_interleave`) | NOT-STARTED | not implemented. Blocker #1342. |
 //! | REQ-15 (`cat`) | SHIPPED | `cat` + `CatBackward` with byte-width-dispatched `strided_cat` GPU fast path; consumers in `flex_attention.rs` and `lib.rs` re-export; runner-arm gap #1340. |
@@ -530,6 +530,131 @@ pub fn expand<T: Float>(input: &Tensor<T>, new_shape: &[usize]) -> FerrotorchRes
     } else {
         Tensor::from_storage(TensorStorage::cpu(out_data), new_shape.to_vec(), false)
     }
+}
+
+/// `expand_as(input, other)` — broadcast `input` to the shape of `other`.
+///
+/// Mirrors upstream `aten/src/ATen/native/TensorShape.cpp:1374 Tensor
+/// expand_as(const Tensor& self, const Tensor& other) { return
+/// self.expand_symint(other.sym_sizes()); }` — a literal one-line delegation
+/// to `expand` with `other`'s sizes. Autograd is inherited from `expand`'s
+/// `ExpandBackward` (sum-reduces over broadcast axes back to `input`'s shape).
+pub fn expand_as<T: Float>(input: &Tensor<T>, other: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
+    expand(input, other.shape())
+}
+
+/// `unflatten(input, dim, sizes)` — reshape a single dimension `dim` into the
+/// multiple sizes `sizes`, leaving every other dimension untouched.
+///
+/// Mirrors upstream `aten/src/ATen/native/TensorShape.cpp:4350 Tensor
+/// unflatten_symint(const Tensor& self, int64_t dim, SymIntArrayRef sizes)`,
+/// which delegates to `unflatten_impl` at `:4305`: it `maybe_wrap_dim`s the
+/// dim, requires `sizes` be non-empty, `infer_size_dv`-resolves a single `-1`
+/// slot against `self.sym_size(dim)`, then `view_symint`s the spliced shape.
+///
+/// `sizes` accepts at most one `-1` inference slot; the product of the
+/// remaining entries must divide the size of `dim`. Autograd is inherited from
+/// `reshape`'s `ReshapeBackward` (the op is a pure metadata change).
+pub fn unflatten<T: Float>(
+    input: &Tensor<T>,
+    dim: isize,
+    sizes: &[isize],
+) -> FerrotorchResult<Tensor<T>> {
+    if sizes.is_empty() {
+        return Err(FerrotorchError::InvalidArgument {
+            message: "unflatten: sizes must be non-empty".into(),
+        });
+    }
+    let norm_dim = crate::shape::normalize_axis(dim, input.ndim())?;
+    let old_shape = input.shape();
+    let dim_size = old_shape[norm_dim];
+
+    // Splice `sizes` in place of `old_shape[norm_dim]`, then let `reshape`'s
+    // `resolve_shape` validate the product and resolve any single `-1` against
+    // the *full* numel. We pre-substitute `dim_size` for a `-1` slot so the
+    // inference is local to `dim` (upstream resolves against `self.size(dim)`,
+    // not the whole tensor) and emit a clear unflatten-specific error.
+    let resolved_sizes = resolve_unflatten_sizes(sizes, dim_size)?;
+
+    let mut new_shape: Vec<isize> = Vec::with_capacity(old_shape.len() + sizes.len() - 1);
+    new_shape.extend(old_shape[..norm_dim].iter().map(|&d| d as isize));
+    new_shape.extend(resolved_sizes.iter().map(|&d| d as isize));
+    new_shape.extend(old_shape[norm_dim + 1..].iter().map(|&d| d as isize));
+
+    reshape(input, &new_shape)
+}
+
+/// Resolve the `sizes` argument of `unflatten` against `dim_size`, handling a
+/// single `-1` inference slot exactly as upstream's `infer_size_dv` does
+/// (`aten/src/ATen/native/TensorShape.cpp:4322`).
+fn resolve_unflatten_sizes(sizes: &[isize], dim_size: usize) -> FerrotorchResult<Vec<usize>> {
+    let mut inferred_idx: Option<usize> = None;
+    let mut product: usize = 1;
+    for (i, &s) in sizes.iter().enumerate() {
+        if s == -1 {
+            if inferred_idx.is_some() {
+                return Err(FerrotorchError::InvalidArgument {
+                    message: "unflatten: only one dimension can be -1".into(),
+                });
+            }
+            inferred_idx = Some(i);
+        } else if s < 0 {
+            return Err(FerrotorchError::InvalidArgument {
+                message: format!("unflatten: invalid size {s}"),
+            });
+        } else {
+            product *= s as usize;
+        }
+    }
+
+    let mut out: Vec<usize> = sizes.iter().map(|&s| s.max(0) as usize).collect();
+    if let Some(idx) = inferred_idx {
+        if product == 0 || dim_size % product != 0 {
+            return Err(FerrotorchError::ShapeMismatch {
+                message: format!(
+                    "unflatten: cannot infer -1 slot for dim of size {dim_size} from {sizes:?}"
+                ),
+            });
+        }
+        out[idx] = dim_size / product;
+    } else if product != dim_size {
+        return Err(FerrotorchError::ShapeMismatch {
+            message: format!(
+                "unflatten: provided sizes {sizes:?} (product {product}) do not match dim size {dim_size}"
+            ),
+        });
+    }
+    Ok(out)
+}
+
+/// `swapaxes(input, axis0, axis1)` — swap two axes; a literal alias of
+/// `transpose`.
+///
+/// Mirrors upstream `aten/src/ATen/native/TensorShape.cpp:4776 Tensor
+/// swapaxes(const Tensor& self, int64_t axis0, int64_t axis1) { return
+/// self.transpose(axis0, axis1); }`. Zero-copy stride swap; autograd inherited
+/// from `Tensor::transpose`'s `PermuteBackward`.
+pub fn swapaxes<T: Float>(
+    input: &Tensor<T>,
+    axis0: usize,
+    axis1: usize,
+) -> FerrotorchResult<Tensor<T>> {
+    input.transpose(axis0, axis1)
+}
+
+/// `swapdims(input, dim0, dim1)` — swap two dims; a literal alias of
+/// `transpose`.
+///
+/// Mirrors upstream `aten/src/ATen/native/TensorShape.cpp:4784 Tensor
+/// swapdims(const Tensor& self, int64_t dim0, int64_t dim1) { return
+/// self.transpose(dim0, dim1); }`. Identical behavior to `swapaxes` — both are
+/// the NumPy / array-API spellings of `transpose`.
+pub fn swapdims<T: Float>(
+    input: &Tensor<T>,
+    dim0: usize,
+    dim1: usize,
+) -> FerrotorchResult<Tensor<T>> {
+    input.transpose(dim0, dim1)
 }
 
 // ---------------------------------------------------------------------------
@@ -1713,6 +1838,155 @@ mod tests {
                 (got - exp).abs() < 1e-6,
                 "grad[{i}] = {got}, expected {exp}"
             );
+        }
+    }
+
+    // -- unflatten (REQ-4, #1342) --
+
+    #[test]
+    fn test_unflatten_forward() {
+        let x = leaf(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0], &[2, 3], false);
+        // Unflatten dim 1 (size 3) into [3] is a no-op-ish reshape preserving
+        // values; unflatten dim 0 (size 2) into [2, 1] splices a singleton.
+        let y = unflatten(&x, 0, &[2, 1]).unwrap();
+        assert_eq!(y.shape(), &[2, 1, 3]);
+        assert_eq!(y.data_vec().unwrap(), &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
+    }
+
+    #[test]
+    fn test_unflatten_infer_slot() {
+        let x = leaf(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0], &[6], false);
+        // dim 0 size 6 -> [2, -1] resolves the -1 to 3 (local to the dim).
+        let y = unflatten(&x, 0, &[2, -1]).unwrap();
+        assert_eq!(y.shape(), &[2, 3]);
+        assert_eq!(y.data_vec().unwrap(), &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
+    }
+
+    #[test]
+    fn test_unflatten_negative_dim_and_middle_splice() {
+        let x = leaf(
+            &(0..24).map(|v| v as f32).collect::<Vec<_>>(),
+            &[2, 12, 1],
+            false,
+        );
+        // dim=-2 normalizes to 1 (size 12) -> [3, 4]; outer/inner dims kept.
+        let y = unflatten(&x, -2, &[3, 4]).unwrap();
+        assert_eq!(y.shape(), &[2, 3, 4, 1]);
+    }
+
+    #[test]
+    fn test_unflatten_empty_sizes_errors() {
+        let x = leaf(&[1.0, 2.0], &[2], false);
+        assert!(unflatten(&x, 0, &[]).is_err());
+    }
+
+    #[test]
+    fn test_unflatten_product_mismatch_errors() {
+        let x = leaf(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0], &[6], false);
+        // 2 * 4 = 8 != 6.
+        assert!(unflatten(&x, 0, &[2, 4]).is_err());
+    }
+
+    #[test]
+    fn test_unflatten_backward_reaches_leaf() {
+        let x = leaf(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0], &[6], true);
+        let y = unflatten(&x, 0, &[2, 3]).unwrap();
+        let loss = sum_to_scalar(&y);
+        backward(&loss).unwrap();
+        let g = x.grad().unwrap().expect("x should have gradient");
+        assert_eq!(g.shape(), &[6]);
+        for &v in g.data().unwrap() {
+            assert!((v - 1.0).abs() < 1e-6);
+        }
+    }
+
+    // -- swapaxes / swapdims (REQ-9, REQ-10, #1342) --
+
+    #[test]
+    fn test_swapaxes_equals_transpose() {
+        // R-CHAR-3: swapaxes is upstream-defined as `self.transpose(a, b)`
+        // (TensorShape.cpp:4776-4778). Assert byte-equality with transpose.
+        let x = leaf(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0], &[2, 3], false);
+        let via_swap = swapaxes(&x, 0, 1).unwrap();
+        let via_transpose = x.transpose(0, 1).unwrap();
+        assert_eq!(via_swap.shape(), via_transpose.shape());
+        assert_eq!(
+            via_swap.data_vec().unwrap(),
+            via_transpose.data_vec().unwrap()
+        );
+        assert_eq!(via_swap.shape(), &[3, 2]);
+        assert_eq!(
+            via_swap.data_vec().unwrap(),
+            &[1.0, 4.0, 2.0, 5.0, 3.0, 6.0]
+        );
+    }
+
+    #[test]
+    fn test_swapdims_equals_transpose() {
+        // swapdims is upstream-defined as `self.transpose(d0, d1)`
+        // (TensorShape.cpp:4784-4786).
+        let x = leaf(
+            &(0..24).map(|v| v as f32).collect::<Vec<_>>(),
+            &[2, 3, 4],
+            false,
+        );
+        let via_swap = swapdims(&x, 0, 2).unwrap();
+        let via_transpose = x.transpose(0, 2).unwrap();
+        assert_eq!(via_swap.shape(), &[4, 3, 2]);
+        assert_eq!(
+            via_swap.data_vec().unwrap(),
+            via_transpose.data_vec().unwrap()
+        );
+    }
+
+    #[test]
+    fn test_swapaxes_backward_reaches_leaf() {
+        let x = leaf(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0], &[2, 3], true);
+        // swapaxes yields a stride view; materialize before the host-side
+        // sum_to_scalar helper which reads contiguous data.
+        let y = crate::methods::contiguous_t(&swapaxes(&x, 0, 1).unwrap()).unwrap();
+        let loss = sum_to_scalar(&y);
+        backward(&loss).unwrap();
+        let g = x.grad().unwrap().expect("x should have gradient");
+        assert_eq!(g.shape(), &[2, 3]);
+        for &v in g.data().unwrap() {
+            assert!((v - 1.0).abs() < 1e-6);
+        }
+    }
+
+    // -- expand_as (REQ-12, #1342) --
+
+    #[test]
+    fn test_expand_as_equals_expand() {
+        // expand_as is upstream-defined as `self.expand(other.sizes())`
+        // (TensorShape.cpp:1374-1376).
+        let x = leaf(&[1.0, 2.0, 3.0], &[1, 3], false);
+        let other = leaf(&[0.0; 12], &[4, 3], false);
+        let via_expand_as = expand_as(&x, &other).unwrap();
+        let via_expand = expand(&x, &[4, 3]).unwrap();
+        assert_eq!(via_expand_as.shape(), &[4, 3]);
+        assert_eq!(
+            via_expand_as.data_vec().unwrap(),
+            via_expand.data_vec().unwrap()
+        );
+        assert_eq!(
+            via_expand_as.data_vec().unwrap(),
+            &[1.0, 2.0, 3.0, 1.0, 2.0, 3.0, 1.0, 2.0, 3.0, 1.0, 2.0, 3.0]
+        );
+    }
+
+    #[test]
+    fn test_expand_as_backward_sums_broadcast_axes() {
+        let x = leaf(&[1.0, 2.0, 3.0], &[1, 3], true);
+        let other = leaf(&[0.0; 12], &[4, 3], false);
+        let y = expand_as(&x, &other).unwrap();
+        let loss = sum_to_scalar(&y);
+        backward(&loss).unwrap();
+        let g = x.grad().unwrap().expect("x should have gradient");
+        // The size-1 axis was broadcast to 4, so each element accumulates 4×1.
+        assert_eq!(g.shape(), &[1, 3]);
+        for &v in g.data().unwrap() {
+            assert!((v - 4.0).abs() < 1e-6, "expected 4.0, got {v}");
         }
     }
 }
