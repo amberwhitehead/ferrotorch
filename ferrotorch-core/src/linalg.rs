@@ -707,7 +707,8 @@ pub fn eigh<T: Float>(a: &Tensor<T>) -> FerrotorchResult<(Tensor<T>, Tensor<T>)>
         let arr = tensor_to_array2_f32(a)?;
         let (w, q) = ferray_linalg::eigh(&arr).map_err(FerrotorchError::Ferray)?;
         let w_data = slice_f32_to_vec::<T>(w.as_slice().unwrap());
-        let q_data = slice_f32_to_vec::<T>(q.as_slice().unwrap());
+        let mut q_data = slice_f32_to_vec::<T>(q.as_slice().unwrap());
+        canonicalize_eigenvector_signs(&mut q_data, n);
         Ok((
             Tensor::from_storage(TensorStorage::cpu(w_data), vec![n], false)?,
             Tensor::from_storage(TensorStorage::cpu(q_data), vec![n, n], false)?,
@@ -716,7 +717,8 @@ pub fn eigh<T: Float>(a: &Tensor<T>) -> FerrotorchResult<(Tensor<T>, Tensor<T>)>
         let arr = tensor_to_array2_f64(a)?;
         let (w, q) = ferray_linalg::eigh(&arr).map_err(FerrotorchError::Ferray)?;
         let w_data = slice_to_vec::<T>(w.as_slice().unwrap());
-        let q_data = slice_to_vec::<T>(q.as_slice().unwrap());
+        let mut q_data = slice_to_vec::<T>(q.as_slice().unwrap());
+        canonicalize_eigenvector_signs(&mut q_data, n);
         Ok((
             Tensor::from_storage(TensorStorage::cpu(w_data), vec![n], false)?,
             Tensor::from_storage(TensorStorage::cpu(q_data), vec![n, n], false)?,
@@ -725,6 +727,54 @@ pub fn eigh<T: Float>(a: &Tensor<T>) -> FerrotorchResult<(Tensor<T>, Tensor<T>)>
         Err(FerrotorchError::InvalidArgument {
             message: "linalg op requires f32 or f64".into(),
         })
+    }
+}
+
+/// Canonicalize the per-column SIGN of a row-major `n×n` eigenvector matrix `q`
+/// (column `j` is the eigenvector for `w[j]`) to a deterministic convention:
+/// the entry of largest absolute value in each column is made non-negative.
+///
+/// # Gauge freedom (R-DEV-1 caveat, cite `FunctionsManual.cpp:3877-3880`)
+///
+/// Eigenvectors of a symmetric matrix are defined only up to a sign (for real
+/// matrices, up to multiplication by `e^{i phi}` in the complex case — upstream
+/// documents this at `torch/csrc/autograd/FunctionsManual.cpp:3877-3880`:
+/// "The eigenvectors ... are specified up to multiplication by e^{i phi}. The
+/// specified loss function depends on this quantity, so it is ill-defined.").
+/// LAPACK `syevd` (what `torch.linalg.eigh` returns) emits an implementation-
+/// defined sign per column; ferray (faer-backed) emits its own. Neither is
+/// "more correct". This routine gives ferrotorch a STABLE, REPRODUCIBLE sign
+/// contract so two `eigh` calls on the same input return identical eigenvectors
+/// — it does NOT (and cannot, without replicating LAPACK) match torch's signs.
+///
+/// The downstream `EighBackwardV` VJP is sign-consistent: flipping a column of
+/// `U` flips the same column of the cotangent `gU`, and the skew-symmetric
+/// projection + `U @ ret @ U^T` conjugation is invariant under that joint flip.
+/// So for SIGN-INVARIANT losses (`L(U) = L(U·diag(±1))` — PCA, whitening,
+/// `U @ diag(f(w)) @ U^T` reconstructions, every well-posed objective on
+/// eigenvectors) the gradient is convention-independent and matches torch
+/// byte-for-byte. Only gauge-DEPENDENT losses (a raw `<W, U>` linear functional)
+/// observe the convention, and for those no implementation can match torch's
+/// arbitrary LAPACK signs.
+fn canonicalize_eigenvector_signs<T: Float>(q: &mut [T], n: usize) {
+    let zero = <T as num_traits::Zero>::zero();
+    for col in 0..n {
+        // Find the row of the largest-magnitude entry in this column.
+        let mut best_row = 0usize;
+        let mut best_abs = zero;
+        for row in 0..n {
+            let v = q[row * n + col].abs();
+            if v > best_abs {
+                best_abs = v;
+                best_row = row;
+            }
+        }
+        // If that pivot entry is negative, flip the whole column.
+        if q[best_row * n + col] < zero {
+            for row in 0..n {
+                q[row * n + col] = -q[row * n + col];
+            }
+        }
     }
 }
 

@@ -216,6 +216,31 @@ non-`p=2` `norm` branches (residual follow-ups under #1577).
   `pub fn eigh` in `ferrotorch-core/src/linalg.rs`. EXACT for distinct
   eigenvalues; degenerate inputs diverge through `1/(w_j-w_i)` exactly as
   upstream `linalg_eig_backward` (FunctionsManual.cpp:3882-3917).
+  **Eigenvector-gauge caveat (R-DEV-1, #1584):** eigenvectors are defined
+  only up to a per-column sign (real case) / `e^{i phi}` (complex), which
+  upstream documents at `FunctionsManual.cpp:3877-3880` ("The eigenvectors
+  ... are specified up to multiplication by e^{i phi}. The specified loss
+  function depends on this quantity, so it is ill-defined."). ferray's
+  `eigh` forward (faer-backed) emits column signs that differ matrix-by-
+  matrix from LAPACK `syevd` (what `torch.linalg.eigh` returns);
+  EIGENVALUES match torch exactly. To give a stable contract,
+  `canonicalize_eigenvector_signs` in `ferrotorch-core/src/linalg.rs`
+  forces the largest-absolute-value component of each eigenvector column
+  non-negative — a DETERMINISTIC ferrotorch convention. This does NOT match
+  torch (torch does not canonicalize; matching its arbitrary LAPACK signs
+  would require replicating `syevd`). The `EighBackwardV` VJP is
+  sign-consistent (flipping a column of `U` flips the same column of `gU`;
+  the skew-projection + `U @ ret @ U^T` conjugation is invariant under that
+  joint flip), so for **SIGN-INVARIANT** losses `L(U)=L(U·diag(±1))` —
+  PCA, whitening, `U @ diag(f(w)) @ U^T` reconstructions, every
+  mathematically well-posed objective on eigenvectors — `A.grad` matches
+  torch byte-for-byte. For **gauge-DEPENDENT** losses (a raw `<W, U>` linear
+  functional of eigenvector entries) the gradient is convention-dependent
+  and fundamentally cannot match torch's arbitrary LAPACK signs; that is a
+  property of the ill-posed objective, not a backward-formula bug. The
+  reframed `divergence_eigh_1577_eigenvector_sign_convention.rs` asserts the
+  well-posed sign-invariant gradient vs LIVE torch float64 + eigenvector
+  determinism.
 
 - REQ-14: `linalg.eigvals(A)` — eigenvalues only (non-symmetric).
   Documented in `torch/linalg/__init__.py`. Forward-only impl
