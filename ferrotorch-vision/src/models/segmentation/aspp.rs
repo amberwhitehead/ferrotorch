@@ -566,7 +566,17 @@ mod tests {
     #[test]
     fn test_aspp_output_shape() {
         // torchvision deeplabv3_resnet50 default rates (Phase 9 #1009).
-        let aspp = Aspp::<f32>::new(2048, 256, (12, 24, 36)).unwrap();
+        let mut aspp = Aspp::<f32>::new(2048, 256, (12, 24, 36)).unwrap();
+        // This is an INFERENCE shape-check, so run in eval mode — the
+        // semantically-correct mode for inference. In train mode the
+        // ASPPPooling branch builds a `[1, 256, 1, 1]` tensor whose BN
+        // (batch*spatial == 1) correctly hits the #1558 `_verify_batch_size`
+        // guard, exactly as torch's `nn.functional._verify_batch_size`
+        // (/home/doll/pytorch/torch/nn/functional.py:2798-2814) does;
+        // torchvision can't train ASPP at batch=1 either. `eval()` switches
+        // every nested BN onto running stats (no count check), matching how
+        // torchvision runs `deeplabv3_resnet50` for inference.
+        aspp.eval();
         // Tiny spatial: 4×4 to keep test fast.
         let x = no_grad(|| randn_4d([1, 2048, 4, 4]));
         let y = no_grad(|| aspp.forward(&x).unwrap());

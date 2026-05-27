@@ -504,7 +504,15 @@ mod tests {
 
     #[test]
     fn test_deeplabv3_output_shape_small() {
-        let model = deeplabv3_resnet50::<f32>(21).unwrap();
+        // Inference shape-check: run in eval mode. With batch=1 the ASPP
+        // image-pooling branch makes a `[1, 256, 1, 1]` tensor; in train
+        // mode that BN correctly trips the #1558 `_verify_batch_size` guard
+        // (matching torch's `nn.functional._verify_batch_size` at
+        // /home/doll/pytorch/torch/nn/functional.py:2798-2814). `eval()`
+        // recurses to every nested BN (running stats, no count check),
+        // mirroring how torchvision runs `deeplabv3_resnet50` for inference.
+        let mut model = deeplabv3_resnet50::<f32>(21).unwrap();
+        model.eval();
         let x = tiny_rgb(1, 32, 32);
         let y = no_grad(|| model.forward(&x).unwrap());
         assert_eq!(y.shape(), &[1, 21, 32, 32]);
@@ -512,7 +520,9 @@ mod tests {
 
     #[test]
     fn test_deeplabv3_output_shape_64x64() {
-        let model = deeplabv3_resnet50::<f32>(21).unwrap();
+        // Inference shape-check — eval mode (see test_deeplabv3_output_shape_small).
+        let mut model = deeplabv3_resnet50::<f32>(21).unwrap();
+        model.eval();
         let x = tiny_rgb(1, 64, 64);
         let y = no_grad(|| model.forward(&x).unwrap());
         assert_eq!(y.shape(), &[1, 21, 64, 64]);
@@ -528,7 +538,9 @@ mod tests {
 
     #[test]
     fn test_deeplabv3_custom_num_classes() {
-        let model = deeplabv3_resnet50::<f32>(5).unwrap();
+        // Inference shape-check — eval mode (see test_deeplabv3_output_shape_small).
+        let mut model = deeplabv3_resnet50::<f32>(5).unwrap();
+        model.eval();
         let x = tiny_rgb(1, 32, 32);
         let y = no_grad(|| model.forward(&x).unwrap());
         assert_eq!(y.shape(), &[1, 5, 32, 32]);

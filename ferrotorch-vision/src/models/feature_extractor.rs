@@ -161,7 +161,16 @@ mod tests {
 
     #[test]
     fn test_feature_extractor_filters_to_requested_nodes() {
-        let resnet = resnet18::<f32>(10).unwrap();
+        // Inference roundtrip: with batch=1 the deep stages collapse spatial
+        // dims to `1×1`, so a training-mode BN over `[1, C, 1, 1]` correctly
+        // trips the #1558 `_verify_batch_size` guard (matching torch's
+        // `nn.functional._verify_batch_size` at
+        // /home/doll/pytorch/torch/nn/functional.py:2798-2814). `eval()`
+        // recurses to every nested BN onto running stats — the correct mode
+        // for an inference feature-extraction probe (same idiom as
+        // `test_densenet_feature_extractor_roundtrip`).
+        let mut resnet = resnet18::<f32>(10).unwrap();
+        resnet.eval();
         let extractor =
             FeatureExtractor::new(resnet, vec!["layer3".to_string(), "layer4".to_string()])
                 .unwrap();
@@ -190,7 +199,10 @@ mod tests {
 
     #[test]
     fn test_feature_extractor_full_forward_features_includes_all_nodes() {
-        let resnet = resnet18::<f32>(10).unwrap();
+        // Inference roundtrip — eval mode so batch=1 deep-stage `[1, C, 1, 1]`
+        // BNs use running stats (see test_feature_extractor_filters_to_requested_nodes).
+        let mut resnet = resnet18::<f32>(10).unwrap();
+        resnet.eval();
         let input: Tensor<f32> = randn(&[1, 3, 32, 32]).unwrap();
         let all = resnet.forward_features(&input).unwrap();
         // forward_features always returns every named stage.
@@ -203,7 +215,10 @@ mod tests {
     fn test_feature_extractor_final_output_matches_module_forward() {
         // The "fc" intermediate from forward_features must equal the
         // tensor returned by Module::forward.
-        let resnet = resnet18::<f32>(10).unwrap();
+        // Inference roundtrip — eval mode so batch=1 deep-stage `[1, C, 1, 1]`
+        // BNs use running stats (see test_feature_extractor_filters_to_requested_nodes).
+        let mut resnet = resnet18::<f32>(10).unwrap();
+        resnet.eval();
         let input: Tensor<f32> = randn(&[1, 3, 32, 32]).unwrap();
         let module_out = Module::<f32>::forward(&resnet, &input).unwrap();
         let features = resnet.forward_features(&input).unwrap();
@@ -218,7 +233,10 @@ mod tests {
 
     #[test]
     fn test_feature_extractor_empty_return_nodes_returns_empty_map() {
-        let resnet = resnet18::<f32>(10).unwrap();
+        // Inference roundtrip — eval mode so batch=1 deep-stage `[1, C, 1, 1]`
+        // BNs use running stats (see test_feature_extractor_filters_to_requested_nodes).
+        let mut resnet = resnet18::<f32>(10).unwrap();
+        resnet.eval();
         let extractor = FeatureExtractor::new(resnet, vec![]).unwrap();
         let input: Tensor<f32> = randn(&[1, 3, 32, 32]).unwrap();
         let features = extractor.forward(&input).unwrap();
@@ -230,7 +248,13 @@ mod tests {
     #[test]
     fn test_mobilenet_v2_feature_extractor_roundtrip() {
         use crate::models::mobilenet::mobilenet_v2;
-        let model: crate::models::mobilenet::MobileNetV2<f32> = mobilenet_v2(10).unwrap();
+        // Inference roundtrip — eval mode so the batch=1 final block's
+        // `[1, 576, 1, 1]` BN uses running stats instead of tripping the
+        // #1558 `_verify_batch_size` guard (same idiom as the densenet
+        // roundtrip below; matches torch's `_verify_batch_size` at
+        // /home/doll/pytorch/torch/nn/functional.py:2798-2814).
+        let mut model: crate::models::mobilenet::MobileNetV2<f32> = mobilenet_v2(10).unwrap();
+        model.eval();
         let names = model.feature_node_names();
         assert!(names.iter().any(|n| n == "stem"));
         assert!(names.iter().any(|n| n == "classifier"));
