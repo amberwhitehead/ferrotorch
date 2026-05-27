@@ -26,7 +26,7 @@
 
 #![cfg(feature = "cuda")]
 
-use ferrotorch_core::{backward_with_grad, Device, Tensor, TensorStorage};
+use ferrotorch_core::{Device, Tensor, TensorStorage, backward_with_grad};
 use ferrotorch_nn::module::Module as _;
 use ferrotorch_nn::norm::{BatchNorm2d, InstanceNorm2d, LocalResponseNorm};
 

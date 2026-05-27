@@ -729,8 +729,12 @@ mod tests {
     // -----------------------------------------------------------------------
     #[test]
     fn test_pad_sequence_batch_first() {
-        let a = Tensor::from_storage(TensorStorage::cpu(vec![0.0f32, 1.0, 2.0]), vec![3, 1], false)
-            .unwrap();
+        let a = Tensor::from_storage(
+            TensorStorage::cpu(vec![0.0f32, 1.0, 2.0]),
+            vec![3, 1],
+            false,
+        )
+        .unwrap();
         let b =
             Tensor::from_storage(TensorStorage::cpu(vec![0.0f32, 1.0]), vec![2, 1], false).unwrap();
         let c = Tensor::from_storage(TensorStorage::cpu(vec![0.0f32]), vec![1, 1], false).unwrap();
@@ -752,8 +756,12 @@ mod tests {
     // -----------------------------------------------------------------------
     #[test]
     fn test_pad_sequence_seq_first() {
-        let a = Tensor::from_storage(TensorStorage::cpu(vec![1.0f32, 2.0, 3.0]), vec![3, 1], false)
-            .unwrap();
+        let a = Tensor::from_storage(
+            TensorStorage::cpu(vec![1.0f32, 2.0, 3.0]),
+            vec![3, 1],
+            false,
+        )
+        .unwrap();
         let b =
             Tensor::from_storage(TensorStorage::cpu(vec![4.0f32, 5.0]), vec![2, 1], false).unwrap();
 

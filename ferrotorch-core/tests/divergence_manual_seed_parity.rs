@@ -20,7 +20,7 @@
 //! (`aten/src/ATen/core/MT19937RNGEngine.h:139-150` + `DistributionsHelper.h:106-113`),
 //! the output bits must agree exactly.
 
-use ferrotorch_core::{manual_seed, rand, randn, Generator};
+use ferrotorch_core::{Generator, manual_seed, rand, randn};
 
 // `torch.manual_seed(42); torch.rand(10)` — exact f32 bit patterns.
 const TORCH_RAND_SEED_42_F32_BITS: [u32; 10] = [

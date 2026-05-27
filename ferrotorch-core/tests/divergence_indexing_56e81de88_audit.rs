@@ -43,7 +43,7 @@
 //!    Divergences A/B/C from the parity sweep.
 
 use ferrotorch_core::GradFn;
-use ferrotorch_core::grad_fns::indexing::{index_add, index_copy, scatter_reduce, ScatterReduce};
+use ferrotorch_core::grad_fns::indexing::{ScatterReduce, index_add, index_copy, scatter_reduce};
 use ferrotorch_core::int_tensor::IntTensor;
 use ferrotorch_core::storage::TensorStorage;
 use ferrotorch_core::tensor::Tensor;
@@ -60,8 +60,7 @@ fn idx(d: Vec<i64>, s: Vec<usize>) -> IntTensor<i64> {
 fn audit_56e81de88_index_add_0d_self_1d_len1_source_should_error() {
     let input = Tensor::from_storage(TensorStorage::cpu(vec![5.0_f32]), vec![], false).unwrap();
     let i = idx(vec![0], vec![1]);
-    let source =
-        Tensor::from_storage(TensorStorage::cpu(vec![99.0_f32]), vec![1], false).unwrap();
+    let source = Tensor::from_storage(TensorStorage::cpu(vec![99.0_f32]), vec![1], false).unwrap();
     let res = index_add(&input, 0, &i, &source, 1.0);
     assert!(
         res.is_err(),
@@ -171,12 +170,8 @@ fn audit_56e81de88_scatter_reduce_amax_breaks_autograd_chain() {
 /// from day one. This new test pins the correct upstream behavior.
 #[test]
 fn audit_56e81de88_scatter_reduce_prod_must_attach_grad_fn_per_upstream() {
-    let input = Tensor::from_storage(
-        TensorStorage::cpu(vec![1.0_f32, 2.0, 3.0]),
-        vec![3],
-        true,
-    )
-    .unwrap();
+    let input =
+        Tensor::from_storage(TensorStorage::cpu(vec![1.0_f32, 2.0, 3.0]), vec![3], true).unwrap();
     let index: Vec<usize> = vec![0, 2];
     let src = Tensor::from_storage(TensorStorage::cpu(vec![2.0_f32, 3.0]), vec![2], true).unwrap();
     let out = scatter_reduce(&input, 0, &index, &[2], &src, ScatterReduce::Prod, true)

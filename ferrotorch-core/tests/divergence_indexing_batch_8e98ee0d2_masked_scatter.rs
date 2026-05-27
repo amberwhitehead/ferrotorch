@@ -113,12 +113,8 @@ fn masked_scatter_non_broadcast_backward_pin() {
     )
     .unwrap();
     let mask = BoolTensor::from_vec(vec![true, false, true, false], vec![4]).unwrap();
-    let src = Tensor::from_storage(
-        TensorStorage::cpu(vec![100.0_f32, 200.0]),
-        vec![2],
-        true,
-    )
-    .unwrap();
+    let src =
+        Tensor::from_storage(TensorStorage::cpu(vec![100.0_f32, 200.0]), vec![2], true).unwrap();
     let out = masked_scatter(&inp, &mask, &src).unwrap();
     assert_eq!(out.data().unwrap(), &[100.0_f32, 2.0, 200.0, 4.0]);
     let gf = out.grad_fn().expect("MaskedScatterBackward");

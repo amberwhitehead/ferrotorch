@@ -64,10 +64,7 @@ fn methods_rs_index_fill_t_rustdoc_must_not_claim_negative_rejection() {
     let doc_start = prefix.rfind("/// `torch.Tensor.index_fill").unwrap_or(0);
     let docblock = &text[doc_start..fn_pos];
 
-    let stale_phrases = [
-        "Negative index values are rejected",
-        "narrower contract",
-    ];
+    let stale_phrases = ["Negative index values are rejected", "narrower contract"];
     let found: Vec<&str> = stale_phrases
         .iter()
         .filter(|s| docblock.contains(*s))

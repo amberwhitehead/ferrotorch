@@ -75,10 +75,7 @@ impl Optimizer<f32> for MockOpt {
     fn state_dict(&self) -> FerrotorchResult<ferrotorch_optim::OptimizerState> {
         Ok(Default::default())
     }
-    fn load_state_dict(
-        &mut self,
-        _s: &ferrotorch_optim::OptimizerState,
-    ) -> FerrotorchResult<()> {
+    fn load_state_dict(&mut self, _s: &ferrotorch_optim::OptimizerState) -> FerrotorchResult<()> {
         Ok(())
     }
 }

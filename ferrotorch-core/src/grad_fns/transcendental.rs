@@ -2025,11 +2025,7 @@ fn u16_one_ulp(bits: u16, is_zero: bool, is_positive: bool, up: bool) -> u16 {
         return if up { 0x0001 } else { 0x8001 };
     }
     let step_up_in_bits = up == is_positive;
-    if step_up_in_bits {
-        bits + 1
-    } else {
-        bits - 1
-    }
+    if step_up_in_bits { bits + 1 } else { bits - 1 }
 }
 
 /// IEEE-754 next-representable value from `a` toward `b`, generic over the

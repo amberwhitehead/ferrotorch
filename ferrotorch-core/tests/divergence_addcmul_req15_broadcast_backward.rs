@@ -171,8 +171,8 @@ fn divergence_addcmul_backward_simple_value_two_oracle_pinned() {
     let t1 = leaf(&[3.0, 4.0], &[2], true);
     let t2 = leaf(&[5.0, 6.0], &[2], true);
 
-    let c = grad_fns::arithmetic::addcmul(&input, &t1, &t2, 2.0)
-        .expect("addcmul forward must succeed");
+    let c =
+        grad_fns::arithmetic::addcmul(&input, &t1, &t2, 2.0).expect("addcmul forward must succeed");
     let loss = grad_fns::reduction::sum(&c).expect("sum must succeed");
     loss.backward().expect("backward must succeed");
 

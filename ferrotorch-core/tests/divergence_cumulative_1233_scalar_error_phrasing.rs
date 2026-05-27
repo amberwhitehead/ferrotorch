@@ -55,7 +55,7 @@
 //! These tests FAIL against `8572b0c38` because the message strings do
 //! not contain the upstream key phrases.
 
-use ferrotorch_core::{cummax, cummin, cumprod, cumsum, from_vec, logcumsumexp, FerrotorchError};
+use ferrotorch_core::{FerrotorchError, cummax, cummin, cumprod, cumsum, from_vec, logcumsumexp};
 
 /// Named typed constants traceable to the upstream PyTorch source.
 /// Per R-CHAR-3: the expected substring is sourced from

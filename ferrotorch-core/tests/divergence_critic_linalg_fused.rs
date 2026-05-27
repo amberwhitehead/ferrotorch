@@ -97,7 +97,9 @@ fn assert_close(analytic: &[f64], numeric: &[f64], tol: f64, label: &str) {
 #[test]
 fn addmm_fd() {
     let m1d = vec![0.1, -0.2, 0.3, 0.4, -0.5, 0.6]; // 2x3
-    let m2d = vec![1.0, -1.1, 1.2, -1.3, 0.7, 0.8, -0.9, 1.0, -0.4, 0.5, -0.6, 0.3]; // 3x4
+    let m2d = vec![
+        1.0, -1.1, 1.2, -1.3, 0.7, 0.8, -0.9, 1.0, -0.4, 0.5, -0.6, 0.3,
+    ]; // 3x4
     let bd = vec![0.2, -0.3, 0.4, -0.1, 0.5, -0.6, 0.7, -0.8]; // 2x4
     let beta = 0.5;
     let alpha = 2.5;
@@ -114,15 +116,36 @@ fn addmm_fd() {
     let a_m2 = m2.grad().unwrap().unwrap().data().unwrap().to_vec();
 
     let f_bias = |x: &[f64]| {
-        let o = glin::addmm_differentiable(&nog(x, &[2, 4]), &nog(&m1d, &[2, 3]), &nog(&m2d, &[3, 4]), beta, alpha).unwrap();
+        let o = glin::addmm_differentiable(
+            &nog(x, &[2, 4]),
+            &nog(&m1d, &[2, 3]),
+            &nog(&m2d, &[3, 4]),
+            beta,
+            alpha,
+        )
+        .unwrap();
         weighted_loss(&o, &w)
     };
     let f_m1 = |x: &[f64]| {
-        let o = glin::addmm_differentiable(&nog(&bd, &[2, 4]), &nog(x, &[2, 3]), &nog(&m2d, &[3, 4]), beta, alpha).unwrap();
+        let o = glin::addmm_differentiable(
+            &nog(&bd, &[2, 4]),
+            &nog(x, &[2, 3]),
+            &nog(&m2d, &[3, 4]),
+            beta,
+            alpha,
+        )
+        .unwrap();
         weighted_loss(&o, &w)
     };
     let f_m2 = |x: &[f64]| {
-        let o = glin::addmm_differentiable(&nog(&bd, &[2, 4]), &nog(&m1d, &[2, 3]), &nog(x, &[3, 4]), beta, alpha).unwrap();
+        let o = glin::addmm_differentiable(
+            &nog(&bd, &[2, 4]),
+            &nog(&m1d, &[2, 3]),
+            &nog(x, &[3, 4]),
+            beta,
+            alpha,
+        )
+        .unwrap();
         weighted_loss(&o, &w)
     };
     assert_close(&a_bias, &fd_grad(&bd, 1e-6, f_bias), 1e-3, "addmm d_bias");
@@ -154,9 +177,45 @@ fn addmv_fd() {
     let a_mat = mat.grad().unwrap().unwrap().data().unwrap().to_vec();
     let a_vec = vecn.grad().unwrap().unwrap().data().unwrap().to_vec();
 
-    let f_bias = |x: &[f64]| weighted_loss(&glin::addmv_differentiable(&nog(x, &[3]), &nog(&matd, &[3, 2]), &nog(&vecd, &[2]), beta, alpha).unwrap(), &w);
-    let f_mat = |x: &[f64]| weighted_loss(&glin::addmv_differentiable(&nog(&bd, &[3]), &nog(x, &[3, 2]), &nog(&vecd, &[2]), beta, alpha).unwrap(), &w);
-    let f_vec = |x: &[f64]| weighted_loss(&glin::addmv_differentiable(&nog(&bd, &[3]), &nog(&matd, &[3, 2]), &nog(x, &[2]), beta, alpha).unwrap(), &w);
+    let f_bias = |x: &[f64]| {
+        weighted_loss(
+            &glin::addmv_differentiable(
+                &nog(x, &[3]),
+                &nog(&matd, &[3, 2]),
+                &nog(&vecd, &[2]),
+                beta,
+                alpha,
+            )
+            .unwrap(),
+            &w,
+        )
+    };
+    let f_mat = |x: &[f64]| {
+        weighted_loss(
+            &glin::addmv_differentiable(
+                &nog(&bd, &[3]),
+                &nog(x, &[3, 2]),
+                &nog(&vecd, &[2]),
+                beta,
+                alpha,
+            )
+            .unwrap(),
+            &w,
+        )
+    };
+    let f_vec = |x: &[f64]| {
+        weighted_loss(
+            &glin::addmv_differentiable(
+                &nog(&bd, &[3]),
+                &nog(&matd, &[3, 2]),
+                &nog(x, &[2]),
+                beta,
+                alpha,
+            )
+            .unwrap(),
+            &w,
+        )
+    };
     assert_close(&a_bias, &fd_grad(&bd, 1e-6, f_bias), 1e-3, "addmv d_bias");
     assert_close(&a_mat, &fd_grad(&matd, 1e-6, f_mat), 1e-3, "addmv d_mat");
     assert_close(&a_vec, &fd_grad(&vecd, 1e-6, f_vec), 1e-3, "addmv d_vec");
@@ -172,10 +231,14 @@ fn addmv_fd() {
 fn addr_fd() {
     let v1d = vec![0.4, -0.5, 0.6]; // 3
     let v2d = vec![1.1, -0.2, 0.3, -0.7]; // 4
-    let bd = vec![0.1, -0.2, 0.3, -0.4, 0.5, -0.6, 0.7, -0.8, 0.9, -1.0, 0.2, -0.3]; // 3x4
+    let bd = vec![
+        0.1, -0.2, 0.3, -0.4, 0.5, -0.6, 0.7, -0.8, 0.9, -1.0, 0.2, -0.3,
+    ]; // 3x4
     let beta = 0.5;
     let alpha = 2.0;
-    let w = vec![1.0, -2.0, 0.5, 3.0, -1.5, 2.0, -0.5, 1.0, 0.3, -0.7, 1.2, -0.9]; // 3x4
+    let w = vec![
+        1.0, -2.0, 0.5, 3.0, -1.5, 2.0, -0.5, 1.0, 0.3, -0.7, 1.2, -0.9,
+    ]; // 3x4
 
     let bias = leaf(&bd, &[3, 4]);
     let v1 = leaf(&v1d, &[3]);
@@ -186,9 +249,45 @@ fn addr_fd() {
     let a_v1 = v1.grad().unwrap().unwrap().data().unwrap().to_vec();
     let a_v2 = v2.grad().unwrap().unwrap().data().unwrap().to_vec();
 
-    let f_bias = |x: &[f64]| weighted_loss(&glin::addr_differentiable(&nog(x, &[3, 4]), &nog(&v1d, &[3]), &nog(&v2d, &[4]), beta, alpha).unwrap(), &w);
-    let f_v1 = |x: &[f64]| weighted_loss(&glin::addr_differentiable(&nog(&bd, &[3, 4]), &nog(x, &[3]), &nog(&v2d, &[4]), beta, alpha).unwrap(), &w);
-    let f_v2 = |x: &[f64]| weighted_loss(&glin::addr_differentiable(&nog(&bd, &[3, 4]), &nog(&v1d, &[3]), &nog(x, &[4]), beta, alpha).unwrap(), &w);
+    let f_bias = |x: &[f64]| {
+        weighted_loss(
+            &glin::addr_differentiable(
+                &nog(x, &[3, 4]),
+                &nog(&v1d, &[3]),
+                &nog(&v2d, &[4]),
+                beta,
+                alpha,
+            )
+            .unwrap(),
+            &w,
+        )
+    };
+    let f_v1 = |x: &[f64]| {
+        weighted_loss(
+            &glin::addr_differentiable(
+                &nog(&bd, &[3, 4]),
+                &nog(x, &[3]),
+                &nog(&v2d, &[4]),
+                beta,
+                alpha,
+            )
+            .unwrap(),
+            &w,
+        )
+    };
+    let f_v2 = |x: &[f64]| {
+        weighted_loss(
+            &glin::addr_differentiable(
+                &nog(&bd, &[3, 4]),
+                &nog(&v1d, &[3]),
+                &nog(x, &[4]),
+                beta,
+                alpha,
+            )
+            .unwrap(),
+            &w,
+        )
+    };
     assert_close(&a_bias, &fd_grad(&bd, 1e-6, f_bias), 1e-3, "addr d_bias");
     assert_close(&a_v1, &fd_grad(&v1d, 1e-6, f_v1), 1e-3, "addr d_vec1");
     assert_close(&a_v2, &fd_grad(&v2d, 1e-6, f_v2), 1e-3, "addr d_vec2");
@@ -218,9 +317,45 @@ fn baddbmm_fd() {
     let a_b1 = b1.grad().unwrap().unwrap().data().unwrap().to_vec();
     let a_b2 = b2.grad().unwrap().unwrap().data().unwrap().to_vec();
 
-    let f_bias = |x: &[f64]| weighted_loss(&glin::baddbmm_differentiable(&nog(x, &[2, 2, 4]), &nog(&b1d, &[2, 2, 3]), &nog(&b2d, &[2, 3, 4]), beta, alpha).unwrap(), &w);
-    let f_b1 = |x: &[f64]| weighted_loss(&glin::baddbmm_differentiable(&nog(&bd, &[2, 2, 4]), &nog(x, &[2, 2, 3]), &nog(&b2d, &[2, 3, 4]), beta, alpha).unwrap(), &w);
-    let f_b2 = |x: &[f64]| weighted_loss(&glin::baddbmm_differentiable(&nog(&bd, &[2, 2, 4]), &nog(&b1d, &[2, 2, 3]), &nog(x, &[2, 3, 4]), beta, alpha).unwrap(), &w);
+    let f_bias = |x: &[f64]| {
+        weighted_loss(
+            &glin::baddbmm_differentiable(
+                &nog(x, &[2, 2, 4]),
+                &nog(&b1d, &[2, 2, 3]),
+                &nog(&b2d, &[2, 3, 4]),
+                beta,
+                alpha,
+            )
+            .unwrap(),
+            &w,
+        )
+    };
+    let f_b1 = |x: &[f64]| {
+        weighted_loss(
+            &glin::baddbmm_differentiable(
+                &nog(&bd, &[2, 2, 4]),
+                &nog(x, &[2, 2, 3]),
+                &nog(&b2d, &[2, 3, 4]),
+                beta,
+                alpha,
+            )
+            .unwrap(),
+            &w,
+        )
+    };
+    let f_b2 = |x: &[f64]| {
+        weighted_loss(
+            &glin::baddbmm_differentiable(
+                &nog(&bd, &[2, 2, 4]),
+                &nog(&b1d, &[2, 2, 3]),
+                &nog(x, &[2, 3, 4]),
+                beta,
+                alpha,
+            )
+            .unwrap(),
+            &w,
+        )
+    };
     assert_close(&a_bias, &fd_grad(&bd, 1e-6, f_bias), 1e-3, "baddbmm d_bias");
     assert_close(&a_b1, &fd_grad(&b1d, 1e-6, f_b1), 1e-3, "baddbmm d_batch1");
     assert_close(&a_b2, &fd_grad(&b2d, 1e-6, f_b2), 1e-3, "baddbmm d_batch2");
@@ -240,7 +375,9 @@ fn addbmm_fd() {
     let bd: Vec<f64> = (0..8).map(|i| (i as f64) * 0.07 - 0.25).collect(); // 2x4
     let beta = 0.5;
     let alpha = 1.5;
-    let w: Vec<f64> = (0..8).map(|i| ((i as f64) * 0.41).sin() * 1.3 + 0.2).collect(); // 2x4
+    let w: Vec<f64> = (0..8)
+        .map(|i| ((i as f64) * 0.41).sin() * 1.3 + 0.2)
+        .collect(); // 2x4
 
     let bias = leaf(&bd, &[2, 4]);
     let b1 = leaf(&b1d, &[3, 2, 3]);
@@ -251,9 +388,45 @@ fn addbmm_fd() {
     let a_b1 = b1.grad().unwrap().unwrap().data().unwrap().to_vec();
     let a_b2 = b2.grad().unwrap().unwrap().data().unwrap().to_vec();
 
-    let f_bias = |x: &[f64]| weighted_loss(&glin::addbmm_differentiable(&nog(x, &[2, 4]), &nog(&b1d, &[3, 2, 3]), &nog(&b2d, &[3, 3, 4]), beta, alpha).unwrap(), &w);
-    let f_b1 = |x: &[f64]| weighted_loss(&glin::addbmm_differentiable(&nog(&bd, &[2, 4]), &nog(x, &[3, 2, 3]), &nog(&b2d, &[3, 3, 4]), beta, alpha).unwrap(), &w);
-    let f_b2 = |x: &[f64]| weighted_loss(&glin::addbmm_differentiable(&nog(&bd, &[2, 4]), &nog(&b1d, &[3, 2, 3]), &nog(x, &[3, 3, 4]), beta, alpha).unwrap(), &w);
+    let f_bias = |x: &[f64]| {
+        weighted_loss(
+            &glin::addbmm_differentiable(
+                &nog(x, &[2, 4]),
+                &nog(&b1d, &[3, 2, 3]),
+                &nog(&b2d, &[3, 3, 4]),
+                beta,
+                alpha,
+            )
+            .unwrap(),
+            &w,
+        )
+    };
+    let f_b1 = |x: &[f64]| {
+        weighted_loss(
+            &glin::addbmm_differentiable(
+                &nog(&bd, &[2, 4]),
+                &nog(x, &[3, 2, 3]),
+                &nog(&b2d, &[3, 3, 4]),
+                beta,
+                alpha,
+            )
+            .unwrap(),
+            &w,
+        )
+    };
+    let f_b2 = |x: &[f64]| {
+        weighted_loss(
+            &glin::addbmm_differentiable(
+                &nog(&bd, &[2, 4]),
+                &nog(&b1d, &[3, 2, 3]),
+                &nog(x, &[3, 3, 4]),
+                beta,
+                alpha,
+            )
+            .unwrap(),
+            &w,
+        )
+    };
     assert_close(&a_bias, &fd_grad(&bd, 1e-6, f_bias), 1e-3, "addbmm d_bias");
     assert_close(&a_b1, &fd_grad(&b1d, 1e-6, f_b1), 1e-3, "addbmm d_batch1");
     assert_close(&a_b2, &fd_grad(&b2d, 1e-6, f_b2), 1e-3, "addbmm d_batch2");
@@ -268,7 +441,9 @@ fn addbmm_fd() {
 fn kron_fd() {
     let ad = vec![0.3, -0.4, 0.5, -0.6, 0.7, -0.8]; // 2x3
     let bdat = vec![1.2, -0.5, 0.9, -1.1]; // 2x2
-    let w: Vec<f64> = (0..24).map(|i| ((i as f64) * 0.23).sin() * 1.4 - 0.3).collect(); // 4x6
+    let w: Vec<f64> = (0..24)
+        .map(|i| ((i as f64) * 0.23).sin() * 1.4 - 0.3)
+        .collect(); // 4x6
 
     let a = leaf(&ad, &[2, 3]);
     let b = leaf(&bdat, &[2, 2]);
@@ -277,8 +452,18 @@ fn kron_fd() {
     let a_a = a.grad().unwrap().unwrap().data().unwrap().to_vec();
     let a_b = b.grad().unwrap().unwrap().data().unwrap().to_vec();
 
-    let f_a = |x: &[f64]| weighted_loss(&glin::kron_differentiable(&nog(x, &[2, 3]), &nog(&bdat, &[2, 2])).unwrap(), &w);
-    let f_b = |x: &[f64]| weighted_loss(&glin::kron_differentiable(&nog(&ad, &[2, 3]), &nog(x, &[2, 2])).unwrap(), &w);
+    let f_a = |x: &[f64]| {
+        weighted_loss(
+            &glin::kron_differentiable(&nog(x, &[2, 3]), &nog(&bdat, &[2, 2])).unwrap(),
+            &w,
+        )
+    };
+    let f_b = |x: &[f64]| {
+        weighted_loss(
+            &glin::kron_differentiable(&nog(&ad, &[2, 3]), &nog(x, &[2, 2])).unwrap(),
+            &w,
+        )
+    };
     assert_close(&a_a, &fd_grad(&ad, 1e-6, f_a), 1e-3, "kron dA");
     assert_close(&a_b, &fd_grad(&bdat, 1e-6, f_b), 1e-3, "kron dB");
 }
@@ -295,15 +480,27 @@ fn diagonal_case(offset: i64) {
         .data()
         .unwrap()
         .len();
-    let w: Vec<f64> = (0..dlen).map(|i| ((i as f64) * 0.7).cos() * 1.5 + 0.4).collect();
+    let w: Vec<f64> = (0..dlen)
+        .map(|i| ((i as f64) * 0.7).cos() * 1.5 + 0.4)
+        .collect();
 
     let a = leaf(&ad, &[3, 4]);
     let out = glin::diagonal_differentiable(&a, offset).unwrap();
     out.backward_with_gradient(&nog(&w, &[dlen])).unwrap();
     let a_a = a.grad().unwrap().unwrap().data().unwrap().to_vec();
 
-    let f = |x: &[f64]| weighted_loss(&glin::diagonal_differentiable(&nog(x, &[3, 4]), offset).unwrap(), &w);
-    assert_close(&a_a, &fd_grad(&ad, 1e-6, f), 1e-3, &format!("diagonal offset={offset}"));
+    let f = |x: &[f64]| {
+        weighted_loss(
+            &glin::diagonal_differentiable(&nog(x, &[3, 4]), offset).unwrap(),
+            &w,
+        )
+    };
+    assert_close(
+        &a_a,
+        &fd_grad(&ad, 1e-6, f),
+        1e-3,
+        &format!("diagonal offset={offset}"),
+    );
 }
 
 #[test]
@@ -332,15 +529,27 @@ fn diag_extract_fd() {
             .data()
             .unwrap()
             .len();
-        let w: Vec<f64> = (0..dlen).map(|i| ((i as f64) * 0.9).sin() * 1.2 - 0.3).collect();
+        let w: Vec<f64> = (0..dlen)
+            .map(|i| ((i as f64) * 0.9).sin() * 1.2 - 0.3)
+            .collect();
 
         let a = leaf(&ad, &[3, 4]);
         let out = glin::diag_differentiable(&a, offset).unwrap();
         out.backward_with_gradient(&nog(&w, &[dlen])).unwrap();
         let a_a = a.grad().unwrap().unwrap().data().unwrap().to_vec();
 
-        let f = |x: &[f64]| weighted_loss(&glin::diag_differentiable(&nog(x, &[3, 4]), offset).unwrap(), &w);
-        assert_close(&a_a, &fd_grad(&ad, 1e-6, f), 1e-3, &format!("diag extract offset={offset}"));
+        let f = |x: &[f64]| {
+            weighted_loss(
+                &glin::diag_differentiable(&nog(x, &[3, 4]), offset).unwrap(),
+                &w,
+            )
+        };
+        assert_close(
+            &a_a,
+            &fd_grad(&ad, 1e-6, f),
+            1e-3,
+            &format!("diag extract offset={offset}"),
+        );
     }
 }
 
@@ -351,15 +560,27 @@ fn diag_construct_fd() {
         let out0 = glin::diag_differentiable(&nog(&ad, &[4]), offset).unwrap();
         let osh = out0.shape().to_vec();
         let olen: usize = osh.iter().product();
-        let w: Vec<f64> = (0..olen).map(|i| ((i as f64) * 0.37).cos() * 1.3 + 0.5).collect();
+        let w: Vec<f64> = (0..olen)
+            .map(|i| ((i as f64) * 0.37).cos() * 1.3 + 0.5)
+            .collect();
 
         let a = leaf(&ad, &[4]);
         let out = glin::diag_differentiable(&a, offset).unwrap();
         out.backward_with_gradient(&nog(&w, &osh)).unwrap();
         let a_a = a.grad().unwrap().unwrap().data().unwrap().to_vec();
 
-        let f = |x: &[f64]| weighted_loss(&glin::diag_differentiable(&nog(x, &[4]), offset).unwrap(), &w);
-        assert_close(&a_a, &fd_grad(&ad, 1e-6, f), 1e-3, &format!("diag construct offset={offset}"));
+        let f = |x: &[f64]| {
+            weighted_loss(
+                &glin::diag_differentiable(&nog(x, &[4]), offset).unwrap(),
+                &w,
+            )
+        };
+        assert_close(
+            &a_a,
+            &fd_grad(&ad, 1e-6, f),
+            1e-3,
+            &format!("diag construct offset={offset}"),
+        );
     }
 }
 
@@ -369,7 +590,9 @@ fn diag_construct_fd() {
 // ===========================================================================
 fn tri_case(lower: bool, diagonal: i64) {
     let ad: Vec<f64> = (0..12).map(|i| (i as f64) * 0.19 - 0.6).collect(); // 3x4
-    let w: Vec<f64> = (0..12).map(|i| ((i as f64) * 0.53).sin() * 1.6 - 0.2).collect();
+    let w: Vec<f64> = (0..12)
+        .map(|i| ((i as f64) * 0.53).sin() * 1.6 - 0.2)
+        .collect();
 
     let a = leaf(&ad, &[3, 4]);
     let out = if lower {
@@ -389,7 +612,12 @@ fn tri_case(lower: bool, diagonal: i64) {
         weighted_loss(&o, &w)
     };
     let name = if lower { "tril" } else { "triu" };
-    assert_close(&a_a, &fd_grad(&ad, 1e-6, f), 1e-3, &format!("{name} diagonal={diagonal}"));
+    assert_close(
+        &a_a,
+        &fd_grad(&ad, 1e-6, f),
+        1e-3,
+        &format!("{name} diagonal={diagonal}"),
+    );
 }
 
 #[test]

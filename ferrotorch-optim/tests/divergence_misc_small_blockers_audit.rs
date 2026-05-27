@@ -16,10 +16,10 @@
 //! GENUINELY-WIRED from VOCAB-ONLY. Tests run against the CPU path; CUDA
 //! probes are gated under `--features cuda`.
 
-use ferrotorch_nn::init::{
-    self, kaiming_normal_with_fan_mode, kaiming_uniform_with_fan_mode, FanMode, NonLinearity,
-};
 use ferrotorch_nn::Parameter;
+use ferrotorch_nn::init::{
+    self, FanMode, NonLinearity, kaiming_normal_with_fan_mode, kaiming_uniform_with_fan_mode,
+};
 use ferrotorch_optim::muon::{Muon, MuonConfig};
 use ferrotorch_optim::optimizer::Optimizer;
 use ferrotorch_optim::rprop::{Rprop, RpropConfig};
@@ -144,7 +144,10 @@ fn audit_1465_quintic_differs_from_cubic_step() {
     };
 
     let p_cubic = make_param();
-    let cfg_cubic = MuonConfig::new(0.1).momentum(0.0).nesterov(false).ns_steps(5);
+    let cfg_cubic = MuonConfig::new(0.1)
+        .momentum(0.0)
+        .nesterov(false)
+        .ns_steps(5);
     let mut m_cubic = Muon::new(vec![p_cubic], cfg_cubic);
     m_cubic.step().unwrap();
     let cubic_out = m_cubic.param_groups()[0].params()[0]

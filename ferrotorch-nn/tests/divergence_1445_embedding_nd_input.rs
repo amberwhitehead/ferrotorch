@@ -27,8 +27,8 @@
 
 use ferrotorch_core::storage::TensorStorage;
 use ferrotorch_core::tensor::Tensor;
-use ferrotorch_nn::module::Module;
 use ferrotorch_nn::Embedding;
+use ferrotorch_nn::module::Module;
 
 /// Divergence: ferrotorch's `Embedding::forward` diverges from
 /// `pytorch aten/src/ATen/native/Embedding.cpp:43-53` for a 2-D index input.
@@ -41,8 +41,7 @@ use ferrotorch_nn::Embedding;
 #[ignore = "divergence: Embedding::forward rejects N-D index input (pytorch returns (*input_shape, embedding_dim)); pre-existing; tracking #1565"]
 fn divergence_embedding_2d_index_input_shape() {
     let weight_data: Vec<f64> = (0..12).map(|i| i as f64).collect();
-    let weight =
-        Tensor::from_storage(TensorStorage::cpu(weight_data), vec![6, 2], true).unwrap();
+    let weight = Tensor::from_storage(TensorStorage::cpu(weight_data), vec![6, 2], true).unwrap();
     let emb = Embedding::from_pretrained(weight, None).unwrap();
 
     // 2-D index tensor [[0,1],[2,3]] -> torch output shape [2,2,2].

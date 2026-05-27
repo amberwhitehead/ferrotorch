@@ -133,7 +133,8 @@ fn backward_mask_matches_torch_f32_chain_x025_qmax64() {
     let grad_data = grad.data().unwrap();
     let expected_torch_grad: f32 = 1.0;
     assert_eq!(
-        grad_data[0], expected_torch_grad,
+        grad_data[0],
+        expected_torch_grad,
         "fake_quantize_per_tensor_affine backward mask at x=0.025_f32, scale=0.05, \
          zp=64, [qmin=-128, qmax=64]: torch returns grad={expected_torch_grad} (because \
          upstream's mask at QuantizedOpKernels.cpp:2686 reuses the same f32 `qval_f` \
@@ -172,7 +173,8 @@ fn backward_mask_matches_torch_f32_chain_x175_qmax67() {
     let grad_data = grad.data().unwrap();
     let expected_torch_grad: f32 = 0.0;
     assert_eq!(
-        grad_data[0], expected_torch_grad,
+        grad_data[0],
+        expected_torch_grad,
         "fake_quantize_per_tensor_affine backward mask at x=0.175_f32, scale=0.05, \
          zp=64, [qmin=-128, qmax=67]: torch returns grad={expected_torch_grad} (mask \
          at QuantizedOpKernels.cpp:2686 reuses f32 `qval_f`=68, which exceeds \

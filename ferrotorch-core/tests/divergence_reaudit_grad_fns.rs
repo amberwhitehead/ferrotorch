@@ -9,9 +9,7 @@
 //! output (R-CHAR-3).
 
 use ferrotorch_core::storage::TensorStorage;
-use ferrotorch_core::{
-    Tensor, atan2, copysign, hypot, max_with_dim, min_with_dim, norm_with_dim,
-};
+use ferrotorch_core::{Tensor, atan2, copysign, hypot, max_with_dim, min_with_dim, norm_with_dim};
 
 fn vec_t(d: &[f64]) -> Tensor<f64> {
     Tensor::from_storage(TensorStorage::cpu(d.to_vec()), vec![d.len()], false).unwrap()
@@ -87,11 +85,17 @@ fn copysign_backward_magnitude_only() {
     let r = copysign(&mag, &sgn).unwrap();
     r.backward().unwrap();
     let gm = mag.grad().unwrap().unwrap().data().unwrap()[0];
-    assert!((gm - (-1.0)).abs() < 1e-9, "copysign d/dmag got {gm} want -1");
+    assert!(
+        (gm - (-1.0)).abs() < 1e-9,
+        "copysign d/dmag got {gm} want -1"
+    );
     // sign input gradient must be zero (sign is non-diff in derivatives.yaml).
     if let Some(g) = sgn.grad().unwrap() {
         let v = g.data().unwrap()[0];
-        assert!(v.abs() < 1e-12, "copysign grad to sign should be 0, got {v}");
+        assert!(
+            v.abs() < 1e-12,
+            "copysign grad to sign should be 0, got {v}"
+        );
     }
 }
 
@@ -125,7 +129,10 @@ fn max_with_dim_values_indices_and_backward() {
     let x = t2d(&[1.0, 5.0, 3.0, 4.0, 2.0, 6.0], 2, 3);
     let (vals, idx) = max_with_dim(&x, 1, false).unwrap();
     let vd = vals.data().unwrap();
-    assert!((vd[0] - 5.0).abs() < 1e-12 && (vd[1] - 6.0).abs() < 1e-12, "max values {vd:?}");
+    assert!(
+        (vd[0] - 5.0).abs() < 1e-12 && (vd[1] - 6.0).abs() < 1e-12,
+        "max values {vd:?}"
+    );
     let id = idx.data().unwrap();
     assert_eq!(id[0], 1, "argmax row0 should be col 1");
     assert_eq!(id[1], 2, "argmax row1 should be col 2");
@@ -133,7 +140,10 @@ fn max_with_dim_values_indices_and_backward() {
     // min
     let (mvals, midx) = min_with_dim(&x, 1, false).unwrap();
     let mvd = mvals.data().unwrap();
-    assert!((mvd[0] - 1.0).abs() < 1e-12 && (mvd[1] - 2.0).abs() < 1e-12, "min values {mvd:?}");
+    assert!(
+        (mvd[0] - 1.0).abs() < 1e-12 && (mvd[1] - 2.0).abs() < 1e-12,
+        "min values {mvd:?}"
+    );
     let mid = midx.data().unwrap();
     assert_eq!(mid[0], 0, "argmin row0 should be col 0");
     assert_eq!(mid[1], 1, "argmin row1 should be col 1");
@@ -152,7 +162,10 @@ fn max_with_dim_values_indices_and_backward() {
     // expected grad: [[0,1,0],[0,0,1]]
     let expected = [0.0, 1.0, 0.0, 0.0, 0.0, 1.0];
     for (i, (&got, &want)) in g.iter().zip(expected.iter()).enumerate() {
-        assert!((got - want).abs() < 1e-9, "max backward grad[{i}] got {got} want {want}");
+        assert!(
+            (got - want).abs() < 1e-9,
+            "max backward grad[{i}] got {got} want {want}"
+        );
     }
 }
 
@@ -166,7 +179,10 @@ fn max_with_dim_values_indices_and_backward() {
 fn norm_with_dim_value_and_backward() {
     let x = vec_g(&[3.0, 4.0]);
     let n = norm_with_dim(&x, 2.0, 0, false).unwrap();
-    assert!((n.data().unwrap()[0] - 5.0).abs() < 1e-12, "L2 norm of [3,4]");
+    assert!(
+        (n.data().unwrap()[0] - 5.0).abs() < 1e-12,
+        "L2 norm of [3,4]"
+    );
     n.backward().unwrap();
     let g = x.grad().unwrap().unwrap().data().unwrap().to_vec();
     assert!((g[0] - 0.6).abs() < 1e-6, "d|x|/dx0 got {} want 0.6", g[0]);
@@ -183,9 +199,7 @@ fn norm_with_dim_value_and_backward() {
 fn scatter_value_writes_scalar() {
     let base = t2d(&[0.0; 6], 2, 3);
     // index tensor of shape [2,1]: row0 -> col0, row1 -> col2.
-    let out = base
-        .scatter_value_t(1, &[0, 2], &[2, 1], 5.0_f64)
-        .unwrap();
+    let out = base.scatter_value_t(1, &[0, 2], &[2, 1], 5.0_f64).unwrap();
     let d = out.data().unwrap();
     // out laid out row-major [2,3]: positions (0,0)=idx0 and (1,2)=idx5.
     assert_eq!(d[0], 5.0, "scatter_value did not write 5.0 at (0,0)");

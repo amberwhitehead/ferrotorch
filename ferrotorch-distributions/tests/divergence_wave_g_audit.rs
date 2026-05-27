@@ -214,20 +214,12 @@ fn audit_1422_relaxed_one_hot_logits_match_log_normalized() {
 #[test]
 fn audit_1432_von_mises_sample_honours_manual_seed() {
     ferrotorch_core::manual_seed(0xC0FFEE);
-    let d1 = VonMises::new(
-        cpu_tensor_f64(&[0.0], &[1]),
-        cpu_tensor_f64(&[2.0], &[1]),
-    )
-    .unwrap();
+    let d1 = VonMises::new(cpu_tensor_f64(&[0.0], &[1]), cpu_tensor_f64(&[2.0], &[1])).unwrap();
     let s1 = d1.sample(&[50]).unwrap();
     let v1 = s1.data().unwrap().to_vec();
 
     ferrotorch_core::manual_seed(0xC0FFEE);
-    let d2 = VonMises::new(
-        cpu_tensor_f64(&[0.0], &[1]),
-        cpu_tensor_f64(&[2.0], &[1]),
-    )
-    .unwrap();
+    let d2 = VonMises::new(cpu_tensor_f64(&[0.0], &[1]), cpu_tensor_f64(&[2.0], &[1])).unwrap();
     let s2 = d2.sample(&[50]).unwrap();
     let v2 = s2.data().unwrap().to_vec();
 
@@ -241,11 +233,7 @@ fn audit_1432_von_mises_sample_honours_manual_seed() {
 /// Upstream `torch/distributions/von_mises.py:170-171`.
 #[test]
 fn audit_1433_von_mises_small_kappa_terminates() {
-    let d = VonMises::new(
-        cpu_tensor_f64(&[0.0], &[1]),
-        cpu_tensor_f64(&[1e-8], &[1]),
-    )
-    .unwrap();
+    let d = VonMises::new(cpu_tensor_f64(&[0.0], &[1]), cpu_tensor_f64(&[1e-8], &[1])).unwrap();
     let s = d.sample(&[20]).unwrap();
     let pi = std::f64::consts::PI;
     for &v in s.data().unwrap() {
@@ -270,11 +258,7 @@ fn audit_1433_von_mises_small_kappa_terminates() {
 ///   H exact = 1.6274014590...
 #[test]
 fn audit_1434_von_mises_entropy_exact_ratio() {
-    let d = VonMises::new(
-        cpu_tensor_f64(&[0.0], &[1]),
-        cpu_tensor_f64(&[1.0], &[1]),
-    )
-    .unwrap();
+    let d = VonMises::new(cpu_tensor_f64(&[0.0], &[1]), cpu_tensor_f64(&[1.0], &[1])).unwrap();
     let h = d.entropy().unwrap();
     let val = h.data().unwrap()[0];
     assert!(

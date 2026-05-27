@@ -66,7 +66,11 @@ fn pt_inf_input_grad_zero() {
     let g = x.grad().unwrap().unwrap();
     let gd = g.data().unwrap();
     // Live torch grad = 0.0 for +inf (mask is False because qval_f=+inf > qmax=127)
-    assert_eq!(gd[0], 0.0f32, "+inf grad expected 0.0 (torch); got {}", gd[0]);
+    assert_eq!(
+        gd[0], 0.0f32,
+        "+inf grad expected 0.0 (torch); got {}",
+        gd[0]
+    );
 }
 
 #[test]
@@ -77,7 +81,11 @@ fn pt_neg_inf_input_grad_zero() {
     backward(&s).unwrap();
     let g = x.grad().unwrap().unwrap();
     let gd = g.data().unwrap();
-    assert_eq!(gd[0], 0.0f32, "-inf grad expected 0.0 (torch); got {}", gd[0]);
+    assert_eq!(
+        gd[0], 0.0f32,
+        "-inf grad expected 0.0 (torch); got {}",
+        gd[0]
+    );
 }
 
 #[test]
@@ -88,7 +96,11 @@ fn pt_nan_input_grad_zero() {
     backward(&s).unwrap();
     let g = x.grad().unwrap().unwrap();
     let gd = g.data().unwrap();
-    assert_eq!(gd[0], 0.0f32, "NaN grad expected 0.0 (torch); got {}", gd[0]);
+    assert_eq!(
+        gd[0], 0.0f32,
+        "NaN grad expected 0.0 (torch); got {}",
+        gd[0]
+    );
 }
 
 #[test]
@@ -100,7 +112,11 @@ fn pt_small_scale_grad_one() {
     backward(&s).unwrap();
     let g = x.grad().unwrap().unwrap();
     let gd = g.data().unwrap();
-    assert_eq!(gd[0], 1.0f32, "x=1e-9 scale=1e-10 grad expected 1.0; got {}", gd[0]);
+    assert_eq!(
+        gd[0], 1.0f32,
+        "x=1e-9 scale=1e-10 grad expected 1.0; got {}",
+        gd[0]
+    );
 }
 
 #[test]
@@ -112,7 +128,11 @@ fn pt_large_scale_grad_one() {
     backward(&s).unwrap();
     let g = x.grad().unwrap().unwrap();
     let gd = g.data().unwrap();
-    assert_eq!(gd[0], 1.0f32, "x=5e10 scale=1e10 grad expected 1.0; got {}", gd[0]);
+    assert_eq!(
+        gd[0], 1.0f32,
+        "x=5e10 scale=1e10 grad expected 1.0; got {}",
+        gd[0]
+    );
 }
 
 #[test]
@@ -132,7 +152,11 @@ fn pt_huge_input_overflows_qmax() {
 
 #[test]
 fn pc_inf_input_grad_zero() {
-    let x = t(vec![f32::INFINITY, f32::NEG_INFINITY, f32::NAN], vec![1, 3], true);
+    let x = t(
+        vec![f32::INFINITY, f32::NEG_INFINITY, f32::NAN],
+        vec![1, 3],
+        true,
+    );
     let sc = t(vec![0.1, 0.1, 0.1], vec![3], false);
     let zp = ti(vec![0, 0, 0], vec![3]);
     let out = fake_quantize_per_channel_affine(&x, &sc, &zp, 1, -128, 127).unwrap();
@@ -158,45 +182,61 @@ fn pc_inf_input_grad_zero() {
 #[test]
 fn pt_third_scale_boundary_x0166_qmax0() {
     let x = t(vec![1.0_f32 / 6.0], vec![1], true);
-    let out = fake_quantize_per_tensor_affine(&x, 1.0/3.0, 0, -128, 0).unwrap();
+    let out = fake_quantize_per_tensor_affine(&x, 1.0 / 3.0, 0, -128, 0).unwrap();
     let s = sum(&out).unwrap();
     backward(&s).unwrap();
     let g = x.grad().unwrap().unwrap();
     let gd = g.data().unwrap();
-    assert_eq!(gd[0], 1.0_f32, "x=1/6 scale=1/3 qmax=0: torch grad=1.0; got {}", gd[0]);
+    assert_eq!(
+        gd[0], 1.0_f32,
+        "x=1/6 scale=1/3 qmax=0: torch grad=1.0; got {}",
+        gd[0]
+    );
 }
 
 #[test]
 fn pt_third_scale_boundary_x05_qmax1() {
     let x = t(vec![0.5_f32], vec![1], true);
-    let out = fake_quantize_per_tensor_affine(&x, 1.0/3.0, 0, -128, 1).unwrap();
+    let out = fake_quantize_per_tensor_affine(&x, 1.0 / 3.0, 0, -128, 1).unwrap();
     let s = sum(&out).unwrap();
     backward(&s).unwrap();
     let g = x.grad().unwrap().unwrap();
     let gd = g.data().unwrap();
-    assert_eq!(gd[0], 0.0_f32, "x=0.5 scale=1/3 qmax=1: torch grad=0.0; got {}", gd[0]);
+    assert_eq!(
+        gd[0], 0.0_f32,
+        "x=0.5 scale=1/3 qmax=1: torch grad=0.0; got {}",
+        gd[0]
+    );
 }
 
 #[test]
 fn pt_third_scale_boundary_x0833_qmax2() {
     let x = t(vec![5.0_f32 / 6.0], vec![1], true);
-    let out = fake_quantize_per_tensor_affine(&x, 1.0/3.0, 0, -128, 2).unwrap();
+    let out = fake_quantize_per_tensor_affine(&x, 1.0 / 3.0, 0, -128, 2).unwrap();
     let s = sum(&out).unwrap();
     backward(&s).unwrap();
     let g = x.grad().unwrap().unwrap();
     let gd = g.data().unwrap();
-    assert_eq!(gd[0], 1.0_f32, "x=5/6 scale=1/3 qmax=2: torch grad=1.0; got {}", gd[0]);
+    assert_eq!(
+        gd[0], 1.0_f32,
+        "x=5/6 scale=1/3 qmax=2: torch grad=1.0; got {}",
+        gd[0]
+    );
 }
 
 #[test]
 fn pt_third_scale_boundary_x15_qmax4() {
     let x = t(vec![1.5_f32], vec![1], true);
-    let out = fake_quantize_per_tensor_affine(&x, 1.0/3.0, 0, -128, 4).unwrap();
+    let out = fake_quantize_per_tensor_affine(&x, 1.0 / 3.0, 0, -128, 4).unwrap();
     let s = sum(&out).unwrap();
     backward(&s).unwrap();
     let g = x.grad().unwrap().unwrap();
     let gd = g.data().unwrap();
-    assert_eq!(gd[0], 1.0_f32, "x=1.5 scale=1/3 qmax=4: torch grad=1.0; got {}", gd[0]);
+    assert_eq!(
+        gd[0], 1.0_f32,
+        "x=1.5 scale=1/3 qmax=4: torch grad=1.0; got {}",
+        gd[0]
+    );
 }
 
 // Per-channel multi-element with non-trivial zp and saturation.
@@ -221,12 +261,8 @@ fn pt_third_scale_boundary_x15_qmax4() {
 //   -10 <= -13 → False. grad=0.0.
 #[test]
 fn pc_mixed_zp_saturation() {
-    let x = t(
-        vec![0.5, 5.0, 1.5, -5.0],
-        vec![1, 2, 2],
-        true,
-    );
-    let sc = t(vec![1.0_f32/3.0, 0.5], vec![2], false);
+    let x = t(vec![0.5, 5.0, 1.5, -5.0], vec![1, 2, 2], true);
+    let sc = t(vec![1.0_f32 / 3.0, 0.5], vec![2], false);
     let zp = ti(vec![2, -3], vec![2]);
     let out = fake_quantize_per_channel_affine(&x, &sc, &zp, 1, -10, 4).unwrap();
     let s = sum(&out).unwrap();

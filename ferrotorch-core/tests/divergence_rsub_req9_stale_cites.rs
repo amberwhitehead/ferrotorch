@@ -249,10 +249,7 @@ fn audit_targets() -> Vec<(&'static str, &'static str)> {
     vec![
         ("ferrotorch-core/src/grad_fns/arithmetic.rs", "pub fn rsub<"),
         ("ferrotorch-core/src/methods.rs", "pub fn rsub_t("),
-        (
-            "tools/parity-sweep/runner/src/main.rs",
-            "\"rsub\" =>",
-        ),
+        ("tools/parity-sweep/runner/src/main.rs", "\"rsub\" =>"),
     ]
 }
 
@@ -289,7 +286,10 @@ fn divergence_rsub_req9_cites_resolve_to_their_symbols() {
             continue;
         }
         for cite in matching {
-            tested.push(format!("{}:{} (anchor=`{}`)", cite.src_path, cite.line, anchor));
+            tested.push(format!(
+                "{}:{} (anchor=`{}`)",
+                cite.src_path, cite.line, anchor
+            ));
             if let Err(msg) = cite_resolves_to_anchor(cite, anchor) {
                 violations.push(msg);
             }

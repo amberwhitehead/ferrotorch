@@ -81,9 +81,9 @@ fn divergence_conv3d_replicate_perdim_order_forward() {
         &y.data().unwrap(),
         &[
             2.0, 2.0, 2.0, 4.0, 6.0, 6.0, 6.0, 8.0, 8.0, 8.0, 10.0, 12.0, 12.0, 12.0, 2.0, 2.0,
-            2.0, 4.0, 6.0, 6.0, 6.0, 8.0, 8.0, 8.0, 10.0, 12.0, 12.0, 12.0, 14.0, 14.0, 14.0,
-            16.0, 18.0, 18.0, 18.0, 20.0, 20.0, 20.0, 22.0, 24.0, 24.0, 24.0, 14.0, 14.0, 14.0,
-            16.0, 18.0, 18.0, 18.0, 20.0, 20.0, 20.0, 22.0, 24.0, 24.0, 24.0,
+            2.0, 4.0, 6.0, 6.0, 6.0, 8.0, 8.0, 8.0, 10.0, 12.0, 12.0, 12.0, 14.0, 14.0, 14.0, 16.0,
+            18.0, 18.0, 18.0, 20.0, 20.0, 20.0, 22.0, 24.0, 24.0, 24.0, 14.0, 14.0, 14.0, 16.0,
+            18.0, 18.0, 18.0, 20.0, 20.0, 20.0, 22.0, 24.0, 24.0, 24.0,
         ],
         1e-3,
         "Conv3d replicate padding=(1,0,2) forward",
@@ -119,7 +119,9 @@ fn divergence_conv3d_reflect_perdim_order_backward() {
     let g = x.grad().unwrap().expect("reflect input grad populated");
     assert_close(
         &g.data().unwrap(),
-        &[8.0, 12.0, 8.0, 8.0, 12.0, 8.0, 8.0, 12.0, 8.0, 8.0, 12.0, 8.0],
+        &[
+            8.0, 12.0, 8.0, 8.0, 12.0, 8.0, 8.0, 12.0, 8.0, 8.0, 12.0, 8.0,
+        ],
         1e-3,
         "Conv3d reflect padding=(1,0,2) backward",
     );
@@ -134,7 +136,9 @@ fn divergence_conv3d_replicate_perdim_order_backward() {
     let g = x.grad().unwrap().expect("replicate input grad populated");
     assert_close(
         &g.data().unwrap(),
-        &[12.0, 4.0, 12.0, 12.0, 4.0, 12.0, 12.0, 4.0, 12.0, 12.0, 4.0, 12.0],
+        &[
+            12.0, 4.0, 12.0, 12.0, 4.0, 12.0, 12.0, 4.0, 12.0, 12.0, 4.0, 12.0,
+        ],
         1e-3,
         "Conv3d replicate padding=(1,0,2) backward",
     );
@@ -149,7 +153,9 @@ fn divergence_conv3d_circular_perdim_order_backward() {
     let g = x.grad().unwrap().expect("circular input grad populated");
     assert_close(
         &g.data().unwrap(),
-        &[8.0, 12.0, 8.0, 8.0, 12.0, 8.0, 8.0, 12.0, 8.0, 8.0, 12.0, 8.0],
+        &[
+            8.0, 12.0, 8.0, 8.0, 12.0, 8.0, 8.0, 12.0, 8.0, 8.0, 12.0, 8.0,
+        ],
         1e-3,
         "Conv3d circular padding=(1,0,2) backward",
     );

@@ -255,11 +255,7 @@ impl<T: Float, D: Distribution<T>> Distribution<T> for MixtureSameFamily<T, D> {
         let v_dev = value.device();
         let value_tiled = {
             let t = Tensor::from_storage(TensorStorage::cpu(tiled), tiled_shape, false)?;
-            if v_dev.is_cuda() {
-                t.to(v_dev)?
-            } else {
-                t
-            }
+            if v_dev.is_cuda() { t.to(v_dev)? } else { t }
         };
 
         // Per-component log p_k(x): shape [...batch, K] (event dims reduced).
@@ -422,11 +418,7 @@ impl<T: Float, D: Distribution<T>> Distribution<T> for MixtureSameFamily<T, D> {
         let v_dev = value.device();
         let value_tiled = {
             let t = Tensor::from_storage(TensorStorage::cpu(tiled), tiled_shape, false)?;
-            if v_dev.is_cuda() {
-                t.to(v_dev)?
-            } else {
-                t
-            }
+            if v_dev.is_cuda() { t.to(v_dev)? } else { t }
         };
 
         let comp_cdf = self.components.cdf(&value_tiled)?;
@@ -443,11 +435,7 @@ impl<T: Float, D: Distribution<T>> Distribution<T> for MixtureSameFamily<T, D> {
             out.push(acc);
         }
         let t = Tensor::from_storage(TensorStorage::cpu(out), v_shape, false)?;
-        if v_dev.is_cuda() {
-            t.to(v_dev)
-        } else {
-            Ok(t)
-        }
+        if v_dev.is_cuda() { t.to(v_dev) } else { Ok(t) }
     }
 }
 

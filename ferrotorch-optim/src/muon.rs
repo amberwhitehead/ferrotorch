@@ -397,10 +397,7 @@ impl<T: Float> Muon<T> {
     /// implicitly — if the caller forgot to set the flag, this method
     /// still enforces the precondition. Use the non-strict `Muon::new`
     /// for the legacy fall-back-to-SGD path.
-    pub fn new_strict_2d(
-        params: Vec<Parameter<T>>,
-        config: MuonConfig,
-    ) -> FerrotorchResult<Self> {
+    pub fn new_strict_2d(params: Vec<Parameter<T>>, config: MuonConfig) -> FerrotorchResult<Self> {
         for (i, p) in params.iter().enumerate() {
             if p.shape().len() != 2 {
                 return Err(ferrotorch_core::FerrotorchError::InvalidArgument {

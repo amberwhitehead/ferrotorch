@@ -47,7 +47,11 @@ fn bits_to_f32(bits: &[u32]) -> Vec<f32> {
 }
 
 fn assert_byte_exact(actual: &[f32], expected_bits: &[u32], label: &str) {
-    assert_eq!(actual.len(), expected_bits.len(), "{label}: length mismatch");
+    assert_eq!(
+        actual.len(),
+        expected_bits.len(),
+        "{label}: length mismatch"
+    );
     let mut mismatches = Vec::new();
     let mut max_ulp = 0u32;
     for (i, (&a, &eb)) in actual.iter().zip(expected_bits.iter()).enumerate() {
@@ -97,8 +101,12 @@ fn assert_byte_exact(actual: &[f32], expected_bits: &[u32], label: &str) {
 // Tracking: blocker #N (file if FAILS).
 #[test]
 fn divergence_critic_thin_1x16384x1_byte_exact() {
-    let a = bits_to_f32(&load_bits(&format!("{FIXTURES}/probe_1x16384x1_a_bits.bin")));
-    let b = bits_to_f32(&load_bits(&format!("{FIXTURES}/probe_1x16384x1_b_bits.bin")));
+    let a = bits_to_f32(&load_bits(&format!(
+        "{FIXTURES}/probe_1x16384x1_a_bits.bin"
+    )));
+    let b = bits_to_f32(&load_bits(&format!(
+        "{FIXTURES}/probe_1x16384x1_b_bits.bin"
+    )));
     let expected_bits = load_bits(&format!("{FIXTURES}/probe_1x16384x1_c_bits.bin"));
     let c = mm_raw::<f32>(&a, &b, 1, 16384, 1);
     assert_byte_exact(&c, &expected_bits, "mm_raw (1,16384)@(16384,1) thin f32");
@@ -139,7 +147,11 @@ fn divergence_critic_127x127_byte_exact() {
     let b = bits_to_f32(&load_bits(&format!("{FIXTURES}/probe_127x127_b_bits.bin")));
     let expected_bits = load_bits(&format!("{FIXTURES}/probe_127x127_c_bits.bin"));
     let c = mm_raw::<f32>(&a, &b, 127, 127, 127);
-    assert_byte_exact(&c, &expected_bits, "mm_raw (127,127)@(127,127) non-power-of-2 f32");
+    assert_byte_exact(
+        &c,
+        &expected_bits,
+        "mm_raw (127,127)@(127,127) non-power-of-2 f32",
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -154,9 +166,7 @@ fn divergence_critic_127x127_byte_exact() {
 // Reference: torch.manual_seed(4); a=randn(5,1); b=randn(1,7); c=a@b.
 #[test]
 fn divergence_critic_outer_5x1x7_byte_exact() {
-    let a_bits: &[u32] = &[
-        0xbfcd79b2, 0x3e6e10bc, 0x400f5a08, 0x3f58e83f, 0x3f99aeb6,
-    ];
+    let a_bits: &[u32] = &[0xbfcd79b2, 0x3e6e10bc, 0x400f5a08, 0x3f58e83f, 0x3f99aeb6];
     let b_bits: &[u32] = &[
         0xbecd9801, 0xbfb687d0, 0x3f676812, 0x3f5b102d, 0x3f305a80, 0x3f628e6c, 0x3fe2a46e,
     ];

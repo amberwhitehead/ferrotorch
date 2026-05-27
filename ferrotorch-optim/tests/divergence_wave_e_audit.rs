@@ -22,8 +22,7 @@ fn audit_1468_with_cpu_fallback_builder_flips_field() {
 }
 
 fn make_param() -> Parameter<f64> {
-    let t =
-        Tensor::<f64>::from_storage(TensorStorage::cpu(vec![5.0_f64]), vec![1], true).unwrap();
+    let t = Tensor::<f64>::from_storage(TensorStorage::cpu(vec![5.0_f64]), vec![1], true).unwrap();
     Parameter::new(t)
 }
 
@@ -40,7 +39,8 @@ fn audit_1468_cpu_step_with_fallback_enabled_succeeds() {
     let p = make_param();
     set_grad(&p, 1.0);
     let mut opt = Rprop::new(vec![p], RpropConfig::default().with_cpu_fallback(true));
-    opt.step().expect("CPU step with cpu_fallback=true must succeed");
+    opt.step()
+        .expect("CPU step with cpu_fallback=true must succeed");
 }
 
 /// `cpu_fallback=false` (default) and a CPU param also succeeds.

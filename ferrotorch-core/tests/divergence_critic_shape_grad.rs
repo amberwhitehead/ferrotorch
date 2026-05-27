@@ -20,7 +20,7 @@
 //!   y = <op>(x); y.backward(<non-uniform grad>); print(x.grad)
 //! and quoted inline — NOT copied from the ferrotorch side.
 
-use ferrotorch_core::{backward_with_grad, Tensor, TensorStorage};
+use ferrotorch_core::{Tensor, TensorStorage, backward_with_grad};
 
 fn leaf(data: &[f32], shape: &[usize]) -> Tensor<f32> {
     Tensor::from_storage(TensorStorage::cpu(data.to_vec()), shape.to_vec(), true).unwrap()
@@ -81,7 +81,10 @@ fn critic_repeat_interleave_backward_segment_sum_1d() {
     )
     .unwrap();
     backward_with_grad(&y, Some(&g)).unwrap();
-    let grad = x.grad().unwrap().expect("repeat_interleave must propagate grad");
+    let grad = x
+        .grad()
+        .unwrap()
+        .expect("repeat_interleave must propagate grad");
     assert_eq!(dense(&grad), vec![3.0, 7.0, 11.0]);
 }
 
@@ -104,7 +107,10 @@ fn critic_repeat_interleave_backward_2d_dim1() {
     )
     .unwrap();
     backward_with_grad(&y, Some(&g)).unwrap();
-    let grad = x.grad().unwrap().expect("repeat_interleave 2d must propagate grad");
+    let grad = x
+        .grad()
+        .unwrap()
+        .expect("repeat_interleave 2d must propagate grad");
     assert_eq!(dense(&grad), vec![11.0, 22.0, 33.0, 44.0]);
 }
 
@@ -115,7 +121,8 @@ fn critic_repeat_interleave_backward_2d_dim1() {
 #[test]
 fn critic_movedim_shape() {
     // torch.movedim(torch.zeros(2,3,4), 0, 2).shape == [3,4,2]
-    let x = Tensor::from_storage(TensorStorage::cpu(vec![0.0f32; 24]), vec![2, 3, 4], false).unwrap();
+    let x =
+        Tensor::from_storage(TensorStorage::cpu(vec![0.0f32; 24]), vec![2, 3, 4], false).unwrap();
     let y = x.movedim_t(&[0], &[2]).unwrap();
     assert_eq!(y.shape(), &[3, 4, 2]);
 }
@@ -123,8 +130,12 @@ fn critic_movedim_shape() {
 #[test]
 fn critic_rot90_2x2_value() {
     // torch.rot90(torch.tensor([[1,2],[3,4]])) -> [[2,4],[1,3]]
-    let x = Tensor::from_storage(TensorStorage::cpu(vec![1.0f32, 2.0, 3.0, 4.0]), vec![2, 2], false)
-        .unwrap();
+    let x = Tensor::from_storage(
+        TensorStorage::cpu(vec![1.0f32, 2.0, 3.0, 4.0]),
+        vec![2, 2],
+        false,
+    )
+    .unwrap();
     let y = x.rot90_t(1, &[0, 1]).unwrap();
     assert_eq!(dense(&y), vec![2.0, 4.0, 1.0, 3.0]);
 }
@@ -132,8 +143,7 @@ fn critic_rot90_2x2_value() {
 #[test]
 fn critic_tile_1d_value() {
     // torch.tile(torch.tensor([1.,2.]), (2,)) -> [1,2,1,2]
-    let x =
-        Tensor::from_storage(TensorStorage::cpu(vec![1.0f32, 2.0]), vec![2], false).unwrap();
+    let x = Tensor::from_storage(TensorStorage::cpu(vec![1.0f32, 2.0]), vec![2], false).unwrap();
     let y = x.tile_t(&[2]).unwrap();
     assert_eq!(dense(&y), vec![1.0, 2.0, 1.0, 2.0]);
 }

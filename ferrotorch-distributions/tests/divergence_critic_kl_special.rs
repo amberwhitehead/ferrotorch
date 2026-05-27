@@ -95,7 +95,10 @@ fn critic_kl_beta_uniform_support_escape_is_inf() {
     let p = Beta::new(sc(2.0), sc(3.0)).unwrap();
     let q = Uniform::new(sc(0.1), sc(0.9)).unwrap();
     let kl = kl_divergence(&p, &q).unwrap().item().unwrap();
-    assert!(kl.is_infinite() && kl > 0.0, "Beta-Uniform escape must be +inf, got {kl}");
+    assert!(
+        kl.is_infinite() && kl > 0.0,
+        "Beta-Uniform escape must be +inf, got {kl}"
+    );
 }
 
 #[test]
@@ -112,7 +115,10 @@ fn critic_kl_pareto_exponential_alpha_le_1_is_inf() {
     let p = Pareto::new(sc(1.0), sc(0.5)).unwrap();
     let q = Exponential::new(sc(0.5)).unwrap();
     let kl = kl_divergence(&p, &q).unwrap().item().unwrap();
-    assert!(kl.is_infinite() && kl > 0.0, "Pareto-Exp alpha<=1 must be +inf, got {kl}");
+    assert!(
+        kl.is_infinite() && kl > 0.0,
+        "Pareto-Exp alpha<=1 must be +inf, got {kl}"
+    );
 }
 
 #[test]
@@ -137,7 +143,10 @@ fn critic_kl_pareto_normal_alpha_le_2_is_inf() {
     let p = Pareto::new(sc(1.0), sc(1.5)).unwrap();
     let q = Normal::new(sc(0.0), sc(2.0)).unwrap();
     let kl = kl_divergence(&p, &q).unwrap().item().unwrap();
-    assert!(kl.is_infinite() && kl > 0.0, "Pareto-Normal alpha<=2 must be +inf, got {kl}");
+    assert!(
+        kl.is_infinite() && kl > 0.0,
+        "Pareto-Normal alpha<=2 must be +inf, got {kl}"
+    );
 }
 
 #[test]
@@ -153,7 +162,10 @@ fn critic_kl_uniform_exponential_low_lt_0_is_inf() {
     let p = Uniform::new(sc(-1.0), sc(2.0)).unwrap();
     let q = Exponential::new(sc(1.5)).unwrap();
     let kl = kl_divergence(&p, &q).unwrap().item().unwrap();
-    assert!(kl.is_infinite() && kl > 0.0, "Uniform-Exp low<0 must be +inf, got {kl}");
+    assert!(
+        kl.is_infinite() && kl > 0.0,
+        "Uniform-Exp low<0 must be +inf, got {kl}"
+    );
 }
 
 #[test]
@@ -178,7 +190,10 @@ fn critic_kl_uniform_pareto_low_lt_scale_is_inf() {
     let p = Uniform::new(sc(0.5), sc(4.0)).unwrap();
     let q = Pareto::new(sc(1.0), sc(3.0)).unwrap();
     let kl = kl_divergence(&p, &q).unwrap().item().unwrap();
-    assert!(kl.is_infinite() && kl > 0.0, "Uniform-Pareto low<scale must be +inf, got {kl}");
+    assert!(
+        kl.is_infinite() && kl > 0.0,
+        "Uniform-Pareto low<scale must be +inf, got {kl}"
+    );
 }
 
 #[test]
@@ -195,5 +210,8 @@ fn critic_kl_uniform_beta_support_escape_is_inf() {
     let p = Uniform::new(sc(-0.1), sc(1.0)).unwrap();
     let q = Beta::new(sc(2.0), sc(3.0)).unwrap();
     let kl = kl_divergence(&p, &q).unwrap().item().unwrap();
-    assert!(kl.is_infinite() && kl > 0.0, "Uniform-Beta escape must be +inf, got {kl}");
+    assert!(
+        kl.is_infinite() && kl > 0.0,
+        "Uniform-Beta escape must be +inf, got {kl}"
+    );
 }

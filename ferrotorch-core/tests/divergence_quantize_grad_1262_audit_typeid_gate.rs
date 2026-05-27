@@ -23,7 +23,7 @@
 //!   dtype combinations exercised by typical Python callers. The scalar
 //!   type *gate* (which is what #1262 fixes) admits bf16.
 
-use ferrotorch_core::{from_vec, grad_fns, IntTensor};
+use ferrotorch_core::{IntTensor, from_vec, grad_fns};
 
 /// Audit A — exact substring of upstream's error message for f64 scale.
 ///
@@ -75,11 +75,7 @@ fn audit_per_channel_f64_error_message_exact_phrasing() {
 /// ```
 #[test]
 fn audit_per_channel_f16_scale_rejected_with_half_phrasing() {
-    let input = from_vec(
-        vec![half::f16::from_f32(1.0)],
-        &[1, 1],
-    )
-    .unwrap();
+    let input = from_vec(vec![half::f16::from_f32(1.0)], &[1, 1]).unwrap();
     let scale = from_vec(vec![half::f16::from_f32(1.0)], &[1]).unwrap();
     let zp = IntTensor::<i64>::from_vec(vec![0], vec![1]).unwrap();
     let result = grad_fns::quantize_grad::fake_quantize_per_channel_affine(
@@ -155,11 +151,7 @@ fn audit_per_channel_bf16_scale_passes_typeid_gate() {
         &[1, 2],
     )
     .unwrap();
-    let scale = from_vec(
-        vec![half::bf16::from_f32(1.0)],
-        &[1],
-    )
-    .unwrap();
+    let scale = from_vec(vec![half::bf16::from_f32(1.0)], &[1]).unwrap();
     let zp = IntTensor::<i64>::from_vec(vec![0], vec![1]).unwrap();
     let result = grad_fns::quantize_grad::fake_quantize_per_channel_affine(
         &input, &scale, &zp, 0, -128, 127,

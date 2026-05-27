@@ -11,8 +11,8 @@
 //!      the shipped closed form sg*(ln sg - digamma(alpha)) = -0.0200)
 
 use ferrotorch_core::Tensor;
-use ferrotorch_distributions::Gamma;
 use ferrotorch_distributions::Distribution;
+use ferrotorch_distributions::Gamma;
 
 fn scalar_f64(v: f64) -> Tensor<f64> {
     ferrotorch_core::from_vec(vec![v], &[]).expect("scalar f64")

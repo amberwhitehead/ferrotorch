@@ -59,8 +59,7 @@ fn workspace_root() -> PathBuf {
 fn read_arithmetic_md() -> String {
     let root = workspace_root();
     let p = root.join(".design/ferrotorch-core/grad_fns/arithmetic.md");
-    fs::read_to_string(&p)
-        .unwrap_or_else(|e| panic!("read {}: {}", p.display(), e))
+    fs::read_to_string(&p).unwrap_or_else(|e| panic!("read {}: {}", p.display(), e))
 }
 
 fn req_op_names() -> Vec<(u32, Vec<&'static str>)> {
@@ -182,8 +181,8 @@ fn find_req_row(doc: &str, req: u32) -> Option<String> {
 /// Check whether the given file at `line_no` contains a `pub fn <op>(` or
 /// `struct <Op>Backward` definition (or any `pub fn <op>...`).
 fn line_declares_op(file_path: &Path, line_no: usize, op: &str) -> Result<bool, String> {
-    let src =
-        fs::read_to_string(file_path).map_err(|e| format!("read {}: {}", file_path.display(), e))?;
+    let src = fs::read_to_string(file_path)
+        .map_err(|e| format!("read {}: {}", file_path.display(), e))?;
     let lines: Vec<&str> = src.lines().collect();
     if line_no == 0 || line_no > lines.len() {
         return Ok(false);

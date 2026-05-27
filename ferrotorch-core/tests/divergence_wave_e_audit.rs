@@ -153,7 +153,10 @@ fn audit_1214_clamp_opt_nan_bound_fills_with_nan() {
     a.clamp_opt_(Some(f32::NAN), Some(10.0))
         .expect("clamp_opt_ with NaN-bound must not error");
     let got = a.data_vec().unwrap();
-    assert!(got.iter().all(|x| x.is_nan()), "all outputs must be NaN, got {got:?}");
+    assert!(
+        got.iter().all(|x| x.is_nan()),
+        "all outputs must be NaN, got {got:?}"
+    );
 }
 
 #[test]
@@ -175,7 +178,8 @@ fn audit_1256_gather_0d_input_scalar_index() {
     // Per the user's brief: 0-d input + 0-d index, single element.
     let input = t::<f32>(vec![5.0], vec![]);
     // 0-d index_shape (`&[]`), one index value `[0]`.
-    let result = gather(&input, 0, &[0_usize], &[]).expect("gather must accept 0-D input + 0-D index");
+    let result =
+        gather(&input, 0, &[0_usize], &[]).expect("gather must accept 0-D input + 0-D index");
     assert_eq!(result.shape(), &[] as &[usize]);
     assert_eq!(result.data_vec().unwrap(), vec![5.0]);
 }

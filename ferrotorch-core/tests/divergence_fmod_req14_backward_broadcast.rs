@@ -68,8 +68,8 @@ fn divergence_fmod_backward_broadcast_b_scalar() {
     let a = leaf_vec(&[5.0, -5.0, 5.0, -5.0], true);
     let b = leaf_vec(&[3.0], true);
 
-    let c = grad_fns::arithmetic::fmod(&a, &b)
-        .expect("fmod fwd must succeed on broadcastable shapes");
+    let c =
+        grad_fns::arithmetic::fmod(&a, &b).expect("fmod fwd must succeed on broadcastable shapes");
 
     // Forward must already be sign-of-dividend (oracle: [2,-2,2,-2]).
     let c_data = c.data().expect("c.data");
@@ -149,8 +149,8 @@ fn divergence_fmod_backward_broadcast_a_scalar() {
     let a = leaf_vec(&[5.0], true);
     let b = leaf_vec(&[3.0, 4.0, -2.0, -7.0], true);
 
-    let c = grad_fns::arithmetic::fmod(&a, &b)
-        .expect("fmod fwd must succeed on broadcastable shapes");
+    let c =
+        grad_fns::arithmetic::fmod(&a, &b).expect("fmod fwd must succeed on broadcastable shapes");
 
     // Forward sign-of-dividend (all positive since dividend = +5).
     let c_data = c.data().expect("c.data");

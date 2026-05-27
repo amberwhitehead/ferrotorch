@@ -56,12 +56,8 @@ fn index_fill_backward_negative_index_matches_upstream_grad() {
         .grad_fn()
         .expect("requires_grad=true input must yield grad_fn on y");
     assert_eq!(gf.name(), "IndexFillBackward");
-    let grad_output: Tensor<f32> = Tensor::from_storage(
-        TensorStorage::cpu(vec![1.0_f32; 6]),
-        vec![2, 3],
-        false,
-    )
-    .unwrap();
+    let grad_output: Tensor<f32> =
+        Tensor::from_storage(TensorStorage::cpu(vec![1.0_f32; 6]), vec![2, 3], false).unwrap();
     let grads = gf
         .backward(&grad_output)
         .expect("IndexFillBackward.backward must succeed");

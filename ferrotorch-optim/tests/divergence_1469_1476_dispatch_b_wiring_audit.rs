@@ -117,8 +117,7 @@ fn audit_1473_cyclic_lr_with_scale_fn_overrides_triangular_amplitude() {
     let mut sgd = sgd_fixture(0.001, 0.0);
 
     // Builtin Triangular at step 10 (peak): LR = max_lr = 0.01.
-    let mut sched_default =
-        CyclicLR::new(0.001, 0.01, 10, None, CyclicMode::Triangular, 1.0);
+    let mut sched_default = CyclicLR::new(0.001, 0.01, 10, None, CyclicMode::Triangular, 1.0);
     for _ in 0..10 {
         sched_default.step(&mut sgd);
     }
@@ -129,8 +128,7 @@ fn audit_1473_cyclic_lr_with_scale_fn_overrides_triangular_amplitude() {
     let mut sgd2 = sgd_fixture(0.001, 0.0);
     let custom: ScaleFn = Arc::new(|_cycle: f64| 0.5_f64);
     let mut sched_custom =
-        CyclicLR::new(0.001, 0.01, 10, None, CyclicMode::Triangular, 1.0)
-            .with_scale_fn(custom);
+        CyclicLR::new(0.001, 0.01, 10, None, CyclicMode::Triangular, 1.0).with_scale_fn(custom);
     for _ in 0..10 {
         sched_custom.step(&mut sgd2);
     }
@@ -286,7 +284,9 @@ fn audit_1474_one_cycle_lr_cycle_momentum_not_implemented() {
 #[test]
 #[ignore = "vocab-only on dispatch B; tracking #1475 — Learner has no with_metric_scheduler builder for ReduceLROnPlateau"]
 fn audit_1475_plateau_metric_scheduler_not_implemented() {
-    unreachable!("dispatch goal #1475 was not addressed in dispatch B; plateau.rs + learner.rs unchanged")
+    unreachable!(
+        "dispatch goal #1475 was not addressed in dispatch B; plateau.rs + learner.rs unchanged"
+    )
 }
 
 // ---------------------------------------------------------------------------

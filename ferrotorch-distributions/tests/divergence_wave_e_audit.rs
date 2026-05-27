@@ -60,8 +60,7 @@ fn audit_1418_ste_gradient_flows_to_probs() {
         true, // requires_grad
     )
     .unwrap();
-    let dist = OneHotCategoricalStraightThrough::new(probs.clone())
-        .expect("dist construction");
+    let dist = OneHotCategoricalStraightThrough::new(probs.clone()).expect("dist construction");
 
     let r = dist.rsample(&[4]).expect("rsample");
     assert_eq!(r.shape(), &[4, 4]);
@@ -78,8 +77,8 @@ fn audit_1418_ste_gradient_flows_to_probs() {
     backward(&loss).expect("backward must succeed");
 
     let g_opt = probs.grad().expect("grad() call must succeed");
-    let g = g_opt
-        .expect("probs.grad() must be Some after STE backward (straight-through path active)");
+    let g =
+        g_opt.expect("probs.grad() must be Some after STE backward (straight-through path active)");
     let gd = g.data_vec().unwrap();
     assert_eq!(gd.len(), 4);
     let max_abs = gd.iter().fold(0.0_f32, |m, x| m.max(x.abs()));

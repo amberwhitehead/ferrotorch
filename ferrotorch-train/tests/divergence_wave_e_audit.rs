@@ -95,8 +95,7 @@ fn topk_adapter(k: usize) -> ClassificationAdapter<f32> {
                     .max_by(|a, b| a.1.partial_cmp(b.1).unwrap())
                     .unwrap()
                     .0;
-                let mut indexed: Vec<(usize, f32)> =
-                    p_row.iter().copied().enumerate().collect();
+                let mut indexed: Vec<(usize, f32)> = p_row.iter().copied().enumerate().collect();
                 indexed.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
                 let top: Vec<usize> = indexed.iter().take(k).map(|(i, _)| *i).collect();
                 if top.contains(&ta) {
@@ -114,8 +113,7 @@ fn topk_adapter(k: usize) -> ClassificationAdapter<f32> {
 #[test]
 fn audit_1494_accuracy_metric_attached_and_updated() {
     let layer = linear_cc().expect("linear");
-    let params: Vec<Parameter<f32>> =
-        layer.parameters().iter().map(|p| (*p).clone()).collect();
+    let params: Vec<Parameter<f32>> = layer.parameters().iter().map(|p| (*p).clone()).collect();
     let optimizer: Box<dyn Optimizer<f32>> = Box::new(Sgd::new(params, SgdConfig::new(0.01)));
     let mut learner = Learner::new(layer, optimizer, mse_loss())
         .with_accuracy_metric(AccuracyMetric::new(), argmax_adapter());
@@ -144,8 +142,7 @@ fn audit_1494_accuracy_metric_attached_and_updated() {
 #[test]
 fn audit_1495_topk_accuracy_metric_attached() {
     let layer = linear_cc().expect("linear");
-    let params: Vec<Parameter<f32>> =
-        layer.parameters().iter().map(|p| (*p).clone()).collect();
+    let params: Vec<Parameter<f32>> = layer.parameters().iter().map(|p| (*p).clone()).collect();
     let optimizer: Box<dyn Optimizer<f32>> = Box::new(Sgd::new(params, SgdConfig::new(0.01)));
     let mut learner = Learner::new(layer, optimizer, mse_loss())
         .with_topk_accuracy_metric(TopKAccuracy::new(3), topk_adapter(3));
@@ -162,7 +159,10 @@ fn audit_1495_topk_accuracy_metric_attached() {
         epoch.metrics.keys().collect::<Vec<_>>()
     );
     let v = epoch.metrics["train_top_k_accuracy"];
-    assert!((v - 1.0).abs() < 1e-9, "expected top-3 accuracy ≈ 1.0, got {v}");
+    assert!(
+        (v - 1.0).abs() < 1e-9,
+        "expected top-3 accuracy ≈ 1.0, got {v}"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -171,8 +171,7 @@ fn audit_1495_topk_accuracy_metric_attached() {
 #[test]
 fn audit_1496_running_avg_metric_attached() {
     let layer = linear_cc().expect("linear");
-    let params: Vec<Parameter<f32>> =
-        layer.parameters().iter().map(|p| (*p).clone()).collect();
+    let params: Vec<Parameter<f32>> = layer.parameters().iter().map(|p| (*p).clone()).collect();
     let optimizer: Box<dyn Optimizer<f32>> = Box::new(Sgd::new(params, SgdConfig::new(0.01)));
     let mut learner = Learner::new(layer, optimizer, mse_loss())
         .with_running_average_metric(RunningAverage::new(8));
@@ -201,8 +200,7 @@ fn audit_1496_running_avg_metric_attached() {
 #[test]
 fn audit_1494_1495_1496_metric_snapshot_contains_all_three() {
     let layer = linear_cc().expect("linear");
-    let params: Vec<Parameter<f32>> =
-        layer.parameters().iter().map(|p| (*p).clone()).collect();
+    let params: Vec<Parameter<f32>> = layer.parameters().iter().map(|p| (*p).clone()).collect();
     let optimizer: Box<dyn Optimizer<f32>> = Box::new(Sgd::new(params, SgdConfig::new(0.01)));
     let mut learner = Learner::new(layer, optimizer, mse_loss())
         .with_accuracy_metric(AccuracyMetric::new(), argmax_adapter())

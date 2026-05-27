@@ -123,7 +123,8 @@ fn per_channel_backward_mask_matches_torch_f32_chain_x035_qmax3() {
     let grad_data = grad.data().unwrap();
     let expected_torch_grad: f32 = 0.0;
     assert_eq!(
-        grad_data[0], expected_torch_grad,
+        grad_data[0],
+        expected_torch_grad,
         "fake_quantize_per_channel_affine backward mask at x=0.35_f32, scale=0.1, \
          zp=0, axis=1, [qmin=-128, qmax=3]: torch returns grad={expected_torch_grad} \
          (upstream's f32 mask at QuantizedOpKernels.cpp:2832 yields qval_i64=4, which \

@@ -869,10 +869,10 @@ impl GpuBackend for CudaBackendImpl {
                 // and tag the handle `DType::Bool`. The `&[u8]` view of the
                 // serialised `&[bool]` is byte-identical — no value translation.
                 let count = data.len(); // 1 byte per bool
-                                        // `data` is already `&[u8]`; the bytes are exactly the `bool`
-                                        // values (each 0 or 1) reinterpreted, which `u8` reads back
-                                        // identically. No `from_raw_parts` reinterpret is needed (unlike
-                                        // the multi-byte arms): a bool slice IS a byte slice here.
+                // `data` is already `&[u8]`; the bytes are exactly the `bool`
+                // values (each 0 or 1) reinterpreted, which `u8` reads back
+                // identically. No `from_raw_parts` reinterpret is needed (unlike
+                // the multi-byte arms): a bool slice IS a byte slice here.
                 debug_assert_eq!(count, data.len());
                 let buf = crate::transfer::cpu_to_gpu(data, dev).map_err(Self::map_gpu_err)?;
                 Ok(Self::wrap_buffer_bool(buf, device))

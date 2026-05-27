@@ -76,7 +76,18 @@ fn divergence_fft_backward_ortho_grad_matches_torch() {
     let grads = gf.backward(&cot).unwrap();
     let g = grads[0].as_ref().unwrap();
     let expected = [
-        2.4494897427831783, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+        2.4494897427831783,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
     ];
     assert_close(g.data().unwrap(), &expected, TOL, "fft ortho real-cot grad");
 }
@@ -93,7 +104,18 @@ fn divergence_fft_backward_ortho_imag_cot_grad_matches_torch() {
     let grads = gf.backward(&cot).unwrap();
     let g = grads[0].as_ref().unwrap();
     let expected = [
-        0.0, 2.4494897427831783, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+        0.0,
+        2.4494897427831783,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
     ];
     assert_close(g.data().unwrap(), &expected, TOL, "fft ortho imag-cot grad");
 }
@@ -109,7 +131,12 @@ fn divergence_fft_backward_default_grad_matches_torch() {
     let grads = gf.backward(&cot).unwrap();
     let g = grads[0].as_ref().unwrap();
     let expected = [6.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0];
-    assert_close(g.data().unwrap(), &expected, TOL, "fft backward real-cot grad");
+    assert_close(
+        g.data().unwrap(),
+        &expected,
+        TOL,
+        "fft backward real-cot grad",
+    );
 }
 
 /// Divergence probe: backward of `fft(norm="forward")` real cotangent.
@@ -123,7 +150,12 @@ fn divergence_fft_backward_forward_grad_matches_torch() {
     let grads = gf.backward(&cot).unwrap();
     let g = grads[0].as_ref().unwrap();
     let expected = [1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0];
-    assert_close(g.data().unwrap(), &expected, TOL, "fft forward real-cot grad");
+    assert_close(
+        g.data().unwrap(),
+        &expected,
+        TOL,
+        "fft forward real-cot grad",
+    );
 }
 
 /// Divergence probe: backward of `ifft(norm="ortho")` real cotangent.
@@ -138,9 +170,25 @@ fn divergence_ifft_backward_ortho_grad_matches_torch() {
     let grads = gf.backward(&cot).unwrap();
     let g = grads[0].as_ref().unwrap();
     let expected = [
-        2.4494897427831783, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+        2.4494897427831783,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
     ];
-    assert_close(g.data().unwrap(), &expected, TOL, "ifft ortho real-cot grad");
+    assert_close(
+        g.data().unwrap(),
+        &expected,
+        TOL,
+        "ifft ortho real-cot grad",
+    );
 }
 
 /// Divergence probe: backward of `ifft(norm="backward")` real cotangent.
@@ -154,5 +202,10 @@ fn divergence_ifft_backward_default_grad_matches_torch() {
     let grads = gf.backward(&cot).unwrap();
     let g = grads[0].as_ref().unwrap();
     let expected = [1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0];
-    assert_close(g.data().unwrap(), &expected, TOL, "ifft backward real-cot grad");
+    assert_close(
+        g.data().unwrap(),
+        &expected,
+        TOL,
+        "ifft backward real-cot grad",
+    );
 }

@@ -36,12 +36,8 @@ fn divergence_index_copy_negative_index_silently_wraps_should_error() {
     )
     .unwrap();
     let i = idx(vec![-1, -3], vec![2]);
-    let source = Tensor::from_storage(
-        TensorStorage::cpu(vec![100.0_f32, 200.0]),
-        vec![2],
-        false,
-    )
-    .unwrap();
+    let source =
+        Tensor::from_storage(TensorStorage::cpu(vec![100.0_f32, 200.0]), vec![2], false).unwrap();
     let res = index_copy(&input, 0, &i, &source);
     assert!(
         res.is_err(),
@@ -63,12 +59,8 @@ fn index_copy_positive_idx_baseline_pin() {
     )
     .unwrap();
     let i = idx(vec![1, 3], vec![2]);
-    let source = Tensor::from_storage(
-        TensorStorage::cpu(vec![100.0_f32, 200.0]),
-        vec![2],
-        false,
-    )
-    .unwrap();
+    let source =
+        Tensor::from_storage(TensorStorage::cpu(vec![100.0_f32, 200.0]), vec![2], false).unwrap();
     let out = index_copy(&input, 0, &i, &source).unwrap();
     assert_eq!(out.data().unwrap(), &[1.0_f32, 100.0, 3.0, 200.0]);
 }

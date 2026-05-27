@@ -50,9 +50,7 @@ fn locate_design_doc() -> PathBuf {
             return p;
         }
     }
-    panic!(
-        "could not locate .design/ferrotorch-core/inplace.md from cwd; tried: {candidates:?}"
-    );
+    panic!("could not locate .design/ferrotorch-core/inplace.md from cwd; tried: {candidates:?}");
 }
 
 fn locate_workspace_root() -> PathBuf {

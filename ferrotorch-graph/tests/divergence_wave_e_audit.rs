@@ -52,10 +52,10 @@ fn audit_1481_graph_new_rejects_invalid_inputs() {
 /// type). Textual audit of the production example.
 #[test]
 fn audit_1481_example_actually_calls_graph_new() {
-    let example_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("examples/gcn_inference_dump.rs");
-    let src = fs::read_to_string(&example_path)
-        .unwrap_or_else(|e| panic!("read {example_path:?}: {e}"));
+    let example_path =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("examples/gcn_inference_dump.rs");
+    let src =
+        fs::read_to_string(&example_path).unwrap_or_else(|e| panic!("read {example_path:?}: {e}"));
 
     assert!(
         src.contains("Graph::new("),
@@ -89,8 +89,8 @@ fn audit_1481_example_actually_calls_graph_new() {
 /// validation is bypassed.
 #[test]
 fn audit_1481_example_forward_uses_graph_buffers() {
-    let example_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("examples/gcn_inference_dump.rs");
+    let example_path =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("examples/gcn_inference_dump.rs");
     let src = fs::read_to_string(&example_path).unwrap();
     assert!(
         src.contains("net.forward(&graph.x, &graph.edge_index)"),

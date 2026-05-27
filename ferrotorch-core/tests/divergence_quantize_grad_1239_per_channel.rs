@@ -120,7 +120,7 @@
 //! upstream cpp formula at `QuantizedOpKernels.cpp:2837-2843`, never to
 //! ferrotorch's own output.
 
-use ferrotorch_core::{from_vec, grad_fns, IntTensor};
+use ferrotorch_core::{IntTensor, from_vec, grad_fns};
 
 /// Control test for Divergence 1: at `x=0.05_f32, scale=0.1_f32` the
 /// f32 vs f64 paths happen to produce the SAME banker-rounding result
@@ -251,8 +251,9 @@ fn divergence_per_channel_scale_zero_silently_proceeds() {
     let scale = from_vec(vec![0.0f32, 1.0], &[2]).unwrap();
     let zp = IntTensor::<i64>::from_vec(vec![0, 0], vec![2]).unwrap();
 
-    let out_result =
-        grad_fns::quantize_grad::fake_quantize_per_channel_affine(&input, &scale, &zp, 0, -128, 127);
+    let out_result = grad_fns::quantize_grad::fake_quantize_per_channel_affine(
+        &input, &scale, &zp, 0, -128, 127,
+    );
 
     // Upstream returns an OK result; ferrotorch must mirror that, not Err.
     let out = out_result.expect(
@@ -314,8 +315,9 @@ fn divergence_per_channel_scale_negative_silently_proceeds() {
     let scale = from_vec(vec![-0.1f32, 1.0], &[2]).unwrap();
     let zp = IntTensor::<i64>::from_vec(vec![0, 0], vec![2]).unwrap();
 
-    let out_result =
-        grad_fns::quantize_grad::fake_quantize_per_channel_affine(&input, &scale, &zp, 0, -128, 127);
+    let out_result = grad_fns::quantize_grad::fake_quantize_per_channel_affine(
+        &input, &scale, &zp, 0, -128, 127,
+    );
 
     let out = out_result.expect(
         "upstream torch returns tensor([[1., 2.], [3., 4.]]) for scale=[-0.1, 1.0]; \
@@ -367,8 +369,9 @@ fn divergence_per_channel_f64_scale_silently_accepted() {
     let scale = from_vec(vec![1.0f64], &[1]).unwrap();
     let zp = IntTensor::<i64>::from_vec(vec![0], vec![1]).unwrap();
 
-    let result =
-        grad_fns::quantize_grad::fake_quantize_per_channel_affine(&input, &scale, &zp, 0, -128, 127);
+    let result = grad_fns::quantize_grad::fake_quantize_per_channel_affine(
+        &input, &scale, &zp, 0, -128, 127,
+    );
 
     // Expected: Err containing "Scale must be Float or BFloat16" or
     // equivalent dtype-rejection message.

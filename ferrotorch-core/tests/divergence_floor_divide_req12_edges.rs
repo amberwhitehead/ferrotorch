@@ -76,8 +76,7 @@ fn leaf_scalar(v: f32, requires_grad: bool) -> Tensor<f32> {
 fn divergence_floor_divide_inf_dividend_yields_nan() {
     let a = leaf_vec(&[f32::INFINITY, f32::NEG_INFINITY], false);
     let b = leaf_vec(&[3.0, 3.0], false);
-    let c = grad_fns::arithmetic::floor_divide(&a, &b)
-        .expect("floor_divide fwd must succeed");
+    let c = grad_fns::arithmetic::floor_divide(&a, &b).expect("floor_divide fwd must succeed");
     let data = c.data().expect("c.data");
     assert!(
         data[0].is_nan(),
@@ -119,8 +118,7 @@ fn divergence_floor_divide_inf_divisor_sign_correction() {
         ],
         false,
     );
-    let c = grad_fns::arithmetic::floor_divide(&a, &b)
-        .expect("floor_divide fwd must succeed");
+    let c = grad_fns::arithmetic::floor_divide(&a, &b).expect("floor_divide fwd must succeed");
     let data = c.data().expect("c.data");
     let expected = [0.0_f32, -1.0, -1.0, 0.0];
     for (i, &exp) in expected.iter().enumerate() {
@@ -148,16 +146,15 @@ fn divergence_floor_divide_inf_divisor_sign_correction() {
 #[test]
 fn divergence_floor_divide_signed_zero_sign_bit() {
     let cases = [
-        (0.0_f32, 3.0_f32, 0u32),         // +0
-        (0.0_f32, -3.0_f32, 0x80000000),  // -0
-        (-0.0_f32, 3.0_f32, 0x80000000),  // -0
-        (-0.0_f32, -3.0_f32, 0u32),       // +0
+        (0.0_f32, 3.0_f32, 0u32),        // +0
+        (0.0_f32, -3.0_f32, 0x80000000), // -0
+        (-0.0_f32, 3.0_f32, 0x80000000), // -0
+        (-0.0_f32, -3.0_f32, 0u32),      // +0
     ];
     for (a_v, b_v, expected_bits) in cases {
         let a = leaf_scalar(a_v, false);
         let b = leaf_scalar(b_v, false);
-        let c = grad_fns::arithmetic::floor_divide(&a, &b)
-            .expect("floor_divide fwd must succeed");
+        let c = grad_fns::arithmetic::floor_divide(&a, &b).expect("floor_divide fwd must succeed");
         let v = c.item().expect("c.item");
         let bits = v.to_bits();
         assert_eq!(

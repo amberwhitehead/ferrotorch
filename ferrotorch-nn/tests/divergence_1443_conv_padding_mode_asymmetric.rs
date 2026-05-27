@@ -53,12 +53,7 @@ fn assert_close(actual: &[f32], expected: &[f32], tol: f32, msg: &str) {
 }
 
 /// Build a Conv1d via the public `from_parts` API with explicit weight, no bias.
-fn conv1d(
-    weight: &[f32],
-    wshape: &[usize],
-    padding: usize,
-    mode: PaddingMode,
-) -> Conv1d<f32> {
+fn conv1d(weight: &[f32], wshape: &[usize], padding: usize, mode: PaddingMode) -> Conv1d<f32> {
     Conv1d::<f32>::from_parts(tensor(weight, wshape), None, 1, padding)
         .unwrap()
         .with_padding_mode(mode)
@@ -233,9 +228,9 @@ fn divergence_conv3d_replicate_asymmetric_forward() {
     assert_close(
         &y.data().unwrap(),
         &[
-            2.0, 2.0, 4.0, 6.0, 6.0, 8.0, 8.0, 10.0, 12.0, 12.0, 2.0, 2.0, 4.0, 6.0, 6.0, 8.0,
-            8.0, 10.0, 12.0, 12.0, 14.0, 14.0, 16.0, 18.0, 18.0, 20.0, 20.0, 22.0, 24.0, 24.0,
-            14.0, 14.0, 16.0, 18.0, 18.0, 20.0, 20.0, 22.0, 24.0, 24.0,
+            2.0, 2.0, 4.0, 6.0, 6.0, 8.0, 8.0, 10.0, 12.0, 12.0, 2.0, 2.0, 4.0, 6.0, 6.0, 8.0, 8.0,
+            10.0, 12.0, 12.0, 14.0, 14.0, 16.0, 18.0, 18.0, 20.0, 20.0, 22.0, 24.0, 24.0, 14.0,
+            14.0, 16.0, 18.0, 18.0, 20.0, 20.0, 22.0, 24.0, 24.0,
         ],
         1e-3,
         "Conv3d replicate padding=(1,0,1) forward",
@@ -253,8 +248,8 @@ fn divergence_conv3d_circular_asymmetric_forward() {
         &y.data().unwrap(),
         &[
             18.0, 14.0, 16.0, 18.0, 14.0, 24.0, 20.0, 22.0, 24.0, 20.0, 6.0, 2.0, 4.0, 6.0, 2.0,
-            12.0, 8.0, 10.0, 12.0, 8.0, 18.0, 14.0, 16.0, 18.0, 14.0, 24.0, 20.0, 22.0, 24.0,
-            20.0, 6.0, 2.0, 4.0, 6.0, 2.0, 12.0, 8.0, 10.0, 12.0, 8.0,
+            12.0, 8.0, 10.0, 12.0, 8.0, 18.0, 14.0, 16.0, 18.0, 14.0, 24.0, 20.0, 22.0, 24.0, 20.0,
+            6.0, 2.0, 4.0, 6.0, 2.0, 12.0, 8.0, 10.0, 12.0, 8.0,
         ],
         1e-3,
         "Conv3d circular padding=(1,0,1) forward",
@@ -277,7 +272,9 @@ fn divergence_conv3d_reflect_asymmetric_backward() {
         .expect("Conv3d reflect input grad must be populated");
     assert_close(
         &g.data().unwrap(),
-        &[4.0, 12.0, 4.0, 4.0, 12.0, 4.0, 4.0, 12.0, 4.0, 4.0, 12.0, 4.0],
+        &[
+            4.0, 12.0, 4.0, 4.0, 12.0, 4.0, 4.0, 12.0, 4.0, 4.0, 12.0, 4.0,
+        ],
         1e-3,
         "Conv3d reflect padding=(1,0,1) backward input grad",
     );

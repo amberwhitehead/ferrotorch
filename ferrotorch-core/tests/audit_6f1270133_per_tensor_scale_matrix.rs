@@ -41,10 +41,9 @@ use ferrotorch_core::{from_vec, grad_fns};
 #[test]
 fn audit_scale_zero_zp0_int8() {
     let input = from_vec(vec![5.0_f32], &[1]).unwrap();
-    let out = grad_fns::quantize_grad::fake_quantize_per_tensor_affine(
-        &input, 0.0_f64, 0, -128, 127,
-    )
-    .expect("scale=0 should silently proceed post-6f1270133");
+    let out =
+        grad_fns::quantize_grad::fake_quantize_per_tensor_affine(&input, 0.0_f64, 0, -128, 127)
+            .expect("scale=0 should silently proceed post-6f1270133");
     let data = out.data().unwrap();
     assert_eq!(data.len(), 1);
     assert_eq!(data[0], 0.0_f32, "torch oracle: 0.0; got {}", data[0]);
@@ -63,10 +62,9 @@ fn audit_scale_zero_zp0_int8() {
 #[test]
 fn audit_scale_zero_zp64_int8() {
     let input = from_vec(vec![5.0_f32], &[1]).unwrap();
-    let out = grad_fns::quantize_grad::fake_quantize_per_tensor_affine(
-        &input, 0.0_f64, 64, -128, 127,
-    )
-    .expect("scale=0, zp=64 should silently proceed");
+    let out =
+        grad_fns::quantize_grad::fake_quantize_per_tensor_affine(&input, 0.0_f64, 64, -128, 127)
+            .expect("scale=0, zp=64 should silently proceed");
     let data = out.data().unwrap();
     assert_eq!(data.len(), 1);
     assert_eq!(data[0], 0.0_f32, "torch oracle: 0.0; got {}", data[0]);
@@ -80,10 +78,8 @@ fn audit_scale_zero_zp64_int8() {
 #[test]
 fn audit_scale_zero_zp0_qmin_zero() {
     let input = from_vec(vec![5.0_f32], &[1]).unwrap();
-    let out = grad_fns::quantize_grad::fake_quantize_per_tensor_affine(
-        &input, 0.0_f64, 0, 0, 127,
-    )
-    .expect("scale=0, zp=0, qmin=0, qmax=127 should silently proceed");
+    let out = grad_fns::quantize_grad::fake_quantize_per_tensor_affine(&input, 0.0_f64, 0, 0, 127)
+        .expect("scale=0, zp=0, qmin=0, qmax=127 should silently proceed");
     let data = out.data().unwrap();
     assert_eq!(data.len(), 1);
     assert_eq!(data[0], 0.0_f32, "torch oracle: 0.0; got {}", data[0]);
@@ -110,10 +106,9 @@ fn audit_scale_zero_zp0_qmin_zero() {
 #[test]
 fn audit_scale_negative_two_saturating() {
     let input = from_vec(vec![1.0_f32, 2.0, 3.0, 4.0], &[4]).unwrap();
-    let out = grad_fns::quantize_grad::fake_quantize_per_tensor_affine(
-        &input, -2.0_f64, 0, -128, 127,
-    )
-    .expect("scale=-2.0 should silently proceed post-6f1270133");
+    let out =
+        grad_fns::quantize_grad::fake_quantize_per_tensor_affine(&input, -2.0_f64, 0, -128, 127)
+            .expect("scale=-2.0 should silently proceed post-6f1270133");
     let data = out.data().unwrap();
     let expected = [-0.0_f32, 2.0, 4.0, 4.0];
     for (i, (&a, &e)) in data.iter().zip(expected.iter()).enumerate() {
@@ -147,10 +142,9 @@ fn audit_scale_negative_two_saturating() {
 #[test]
 fn audit_scale_negative_zp_nonzero() {
     let input = from_vec(vec![1.0_f32, 2.0, 3.0, 4.0], &[4]).unwrap();
-    let out = grad_fns::quantize_grad::fake_quantize_per_tensor_affine(
-        &input, -0.1_f64, 64, -128, 127,
-    )
-    .expect("scale=-0.1, zp=64 should silently proceed");
+    let out =
+        grad_fns::quantize_grad::fake_quantize_per_tensor_affine(&input, -0.1_f64, 64, -128, 127)
+            .expect("scale=-0.1, zp=64 should silently proceed");
     let data = out.data().unwrap();
     let expected = [1.0_f32, 2.0, 3.0, 4.0];
     for (i, (&a, &e)) in data.iter().zip(expected.iter()).enumerate() {
@@ -171,14 +165,9 @@ fn audit_scale_negative_zp_nonzero() {
 #[test]
 fn audit_2d_scale_nan() {
     let input = from_vec(vec![1.0_f32, 2.0, 3.0, 4.0], &[2, 2]).unwrap();
-    let out = grad_fns::quantize_grad::fake_quantize_per_tensor_affine(
-        &input,
-        f64::NAN,
-        0,
-        -128,
-        127,
-    )
-    .expect("scale=NaN on 2-D input should silently proceed");
+    let out =
+        grad_fns::quantize_grad::fake_quantize_per_tensor_affine(&input, f64::NAN, 0, -128, 127)
+            .expect("scale=NaN on 2-D input should silently proceed");
     assert_eq!(out.shape(), &[2, 2]);
     let data = out.data().unwrap();
     assert_eq!(data.len(), 4);
@@ -195,10 +184,9 @@ fn audit_2d_scale_nan() {
 #[test]
 fn audit_2d_scale_zero_zp64() {
     let input = from_vec(vec![1.0_f32, 2.0, 3.0, 4.0], &[2, 2]).unwrap();
-    let out = grad_fns::quantize_grad::fake_quantize_per_tensor_affine(
-        &input, 0.0_f64, 64, -128, 127,
-    )
-    .expect("scale=0, zp=64 on 2-D input should silently proceed");
+    let out =
+        grad_fns::quantize_grad::fake_quantize_per_tensor_affine(&input, 0.0_f64, 64, -128, 127)
+            .expect("scale=0, zp=64 on 2-D input should silently proceed");
     assert_eq!(out.shape(), &[2, 2]);
     let data = out.data().unwrap();
     let expected = [0.0_f32, 0.0, 0.0, 0.0];
@@ -220,10 +208,8 @@ fn audit_2d_scale_zero_zp64() {
 #[test]
 fn audit_scale_negative_uint8_saturate() {
     let input = from_vec(vec![1.0_f32, 2.0, 3.0, 4.0], &[4]).unwrap();
-    let out = grad_fns::quantize_grad::fake_quantize_per_tensor_affine(
-        &input, -0.1_f64, 0, 0, 255,
-    )
-    .expect("scale=-0.1 uint8 should silently proceed");
+    let out = grad_fns::quantize_grad::fake_quantize_per_tensor_affine(&input, -0.1_f64, 0, 0, 255)
+        .expect("scale=-0.1 uint8 should silently proceed");
     let data = out.data().unwrap();
     assert_eq!(data.len(), 4);
     for (i, &a) in data.iter().enumerate() {
@@ -244,10 +230,9 @@ fn audit_scale_negative_uint8_saturate() {
 #[test]
 fn audit_scale_negative_uint8_zp64_round_trip() {
     let input = from_vec(vec![1.0_f32, 2.0, 3.0, 4.0], &[4]).unwrap();
-    let out = grad_fns::quantize_grad::fake_quantize_per_tensor_affine(
-        &input, -0.1_f64, 64, 0, 255,
-    )
-    .expect("scale=-0.1, zp=64, uint8 should silently proceed");
+    let out =
+        grad_fns::quantize_grad::fake_quantize_per_tensor_affine(&input, -0.1_f64, 64, 0, 255)
+            .expect("scale=-0.1, zp=64, uint8 should silently proceed");
     let data = out.data().unwrap();
     let expected = [1.0_f32, 2.0, 3.0, 4.0];
     for (i, (&a, &e)) in data.iter().zip(expected.iter()).enumerate() {
@@ -269,10 +254,9 @@ fn audit_scale_negative_uint8_zp64_round_trip() {
 #[test]
 fn audit_smoke_scale_one_identity() {
     let input = from_vec(vec![0.5_f32, 1.0, 1.5], &[3]).unwrap();
-    let out = grad_fns::quantize_grad::fake_quantize_per_tensor_affine(
-        &input, 1.0_f64, 0, -128, 127,
-    )
-    .expect("scale=1.0 nominal path");
+    let out =
+        grad_fns::quantize_grad::fake_quantize_per_tensor_affine(&input, 1.0_f64, 0, -128, 127)
+            .expect("scale=1.0 nominal path");
     let data = out.data().unwrap();
     let expected = [0.0_f32, 1.0, 2.0];
     for (i, (&a, &e)) in data.iter().zip(expected.iter()).enumerate() {

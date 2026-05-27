@@ -2351,11 +2351,7 @@ pub fn solve_differentiable<T: Float>(a: &Tensor<T>, b: &Tensor<T>) -> Ferrotorc
 /// `TORCH_META_FUNC(addmm)` (`aten/src/ATen/native/LinearAlgebra.cpp:194`),
 /// whose VJP `self: maybe_multiply(grad, beta)` is then reduced to `self`'s
 /// shape by the autograd engine's `sum_to`.
-fn reduce_grad_to_shape<T: Float>(
-    grad: &[T],
-    grad_shape: &[usize],
-    target: &[usize],
-) -> Vec<T> {
+fn reduce_grad_to_shape<T: Float>(grad: &[T], grad_shape: &[usize], target: &[usize]) -> Vec<T> {
     if grad_shape == target {
         return grad.to_vec();
     }
@@ -2526,9 +2522,7 @@ pub fn addmm_differentiable<T: Float>(
     let storage = TensorStorage::cpu(out);
     let shape = vec![m, n];
 
-    if is_grad_enabled()
-        && (bias.requires_grad() || mat1.requires_grad() || mat2.requires_grad())
-    {
+    if is_grad_enabled() && (bias.requires_grad() || mat1.requires_grad() || mat2.requires_grad()) {
         let grad_fn = Arc::new(AddmmBackward {
             bias: bias.clone(),
             mat1: mat1.clone(),
@@ -2847,9 +2841,7 @@ pub fn addr_differentiable<T: Float>(
     let storage = TensorStorage::cpu(out);
     let shape = vec![m, n];
 
-    if is_grad_enabled()
-        && (bias.requires_grad() || vec1.requires_grad() || vec2.requires_grad())
-    {
+    if is_grad_enabled() && (bias.requires_grad() || vec1.requires_grad() || vec2.requires_grad()) {
         let grad_fn = Arc::new(AddrBackward {
             bias: bias.clone(),
             vec1: vec1.clone(),
@@ -2908,7 +2900,13 @@ impl<T: Float> GradFn<T> for BaddbmmBackward<T> {
                 let b2_off = bi * k * n;
                 let o_off = bi * m * k;
                 // d_b1[b] = alpha * (grad[b] @ batch2[b]^T): grad(m,n) @ b2(k,n)^T.
-                let slab = mm_bt_rows(&g[g_off..g_off + m * n], &b2[b2_off..b2_off + k * n], m, n, k);
+                let slab = mm_bt_rows(
+                    &g[g_off..g_off + m * n],
+                    &b2[b2_off..b2_off + k * n],
+                    m,
+                    n,
+                    k,
+                );
                 for (i, &v) in slab.iter().enumerate() {
                     out[o_off + i] = self.alpha * v;
                 }
@@ -2926,7 +2924,13 @@ impl<T: Float> GradFn<T> for BaddbmmBackward<T> {
                 let b1_off = bi * m * k;
                 let o_off = bi * k * n;
                 // d_b2[b] = alpha * (batch1[b]^T @ grad[b]): b1(m,k)^T @ grad(m,n).
-                let slab = mm_at_rows(&b1[b1_off..b1_off + m * k], &g[g_off..g_off + m * n], k, m, n);
+                let slab = mm_at_rows(
+                    &b1[b1_off..b1_off + m * k],
+                    &g[g_off..g_off + m * n],
+                    k,
+                    m,
+                    n,
+                );
                 for (i, &v) in slab.iter().enumerate() {
                     out[o_off + i] = self.alpha * v;
                 }
@@ -2983,7 +2987,13 @@ pub fn baddbmm_differentiable<T: Float>(
         let a_off = bi * m * k;
         let b_off = bi * k * n;
         let c_off = bi * m * n;
-        let slab = mm_rows(&b1[a_off..a_off + m * k], &b2[b_off..b_off + k * n], m, k, n);
+        let slab = mm_rows(
+            &b1[a_off..a_off + m * k],
+            &b2[b_off..b_off + k * n],
+            m,
+            k,
+            n,
+        );
         prod[c_off..c_off + m * n].copy_from_slice(&slab);
     }
     let bias_b = broadcast_data_to(bias, &[bsz, m, n])?;
@@ -3129,7 +3139,13 @@ pub fn addbmm_differentiable<T: Float>(
     for bi in 0..bsz {
         let a_off = bi * m * k;
         let b_off = bi * k * n;
-        let slab = mm_rows(&b1[a_off..a_off + m * k], &b2[b_off..b_off + k * n], m, k, n);
+        let slab = mm_rows(
+            &b1[a_off..a_off + m * k],
+            &b2[b_off..b_off + k * n],
+            m,
+            k,
+            n,
+        );
         for (i, &v) in slab.iter().enumerate() {
             acc[i] += v;
         }
@@ -3352,7 +3368,10 @@ impl<T: Float> GradFn<T> for DiagonalForward<T> {
 
 /// Differentiable `diagonal(A, offset)`. Mirrors `Tensor linalg_diagonal(...)`
 /// at `aten/src/ATen/native/LinearAlgebra.cpp:2215`.
-pub fn diagonal_differentiable<T: Float>(a: &Tensor<T>, offset: i64) -> FerrotorchResult<Tensor<T>> {
+pub fn diagonal_differentiable<T: Float>(
+    a: &Tensor<T>,
+    offset: i64,
+) -> FerrotorchResult<Tensor<T>> {
     let result = linalg_fwd::diagonal(a, offset)?;
     if is_grad_enabled() && a.requires_grad() {
         let shape = a.shape();
@@ -3524,7 +3543,11 @@ impl<T: Float> GradFn<T> for TriangularBackward<T> {
     }
 
     fn name(&self) -> &'static str {
-        if self.lower { "TrilBackward" } else { "TriuBackward" }
+        if self.lower {
+            "TrilBackward"
+        } else {
+            "TriuBackward"
+        }
     }
 }
 

@@ -80,12 +80,8 @@ fn take_backward_accumulates_grad_on_duplicate_indices() {
     let gf = out
         .grad_fn()
         .expect("take must attach TakeBackward when input requires_grad");
-    let go = Tensor::from_storage(
-        TensorStorage::cpu(vec![1.0_f32, 1.0, 1.0]),
-        vec![3],
-        false,
-    )
-    .unwrap();
+    let go =
+        Tensor::from_storage(TensorStorage::cpu(vec![1.0_f32, 1.0, 1.0]), vec![3], false).unwrap();
     let grads = gf.backward(&go).expect("take backward must not panic");
     let g = grads[0].as_ref().expect("Some(grad)");
     assert_eq!(
@@ -122,12 +118,8 @@ fn put_accumulate_true_duplicate_index_backward_pin() {
     )
     .unwrap();
     let i = idx(vec![0, 0], vec![2]);
-    let source = Tensor::from_storage(
-        TensorStorage::cpu(vec![10.0_f32, 20.0]),
-        vec![2],
-        true,
-    )
-    .unwrap();
+    let source =
+        Tensor::from_storage(TensorStorage::cpu(vec![10.0_f32, 20.0]), vec![2], true).unwrap();
     let out = put(&input, &i, &source, true).unwrap();
     // Forward value: out[0] = 1 + 10 + 20 = 31, rest unchanged
     assert_eq!(out.data().unwrap(), &[31.0_f32, 2.0, 3.0, 4.0]);
@@ -167,12 +159,8 @@ fn put_accumulate_false_backward_pin() {
     )
     .unwrap();
     let i = idx(vec![0, 2], vec![2]);
-    let source = Tensor::from_storage(
-        TensorStorage::cpu(vec![100.0_f32, 200.0]),
-        vec![2],
-        true,
-    )
-    .unwrap();
+    let source =
+        Tensor::from_storage(TensorStorage::cpu(vec![100.0_f32, 200.0]), vec![2], true).unwrap();
     let out = put(&input, &i, &source, false).unwrap();
     let gf = out.grad_fn().expect("put attaches PutBackward");
     let go = Tensor::from_storage(

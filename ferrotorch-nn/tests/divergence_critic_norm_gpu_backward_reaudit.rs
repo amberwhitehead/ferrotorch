@@ -26,9 +26,11 @@
 
 #![cfg(feature = "cuda")]
 
-use ferrotorch_core::{backward_with_grad, Device, Tensor, TensorStorage};
+use ferrotorch_core::{Device, Tensor, TensorStorage, backward_with_grad};
 use ferrotorch_nn::module::Module as _;
-use ferrotorch_nn::norm::{BatchNorm1d, BatchNorm2d, BatchNorm3d, InstanceNorm2d, LocalResponseNorm};
+use ferrotorch_nn::norm::{
+    BatchNorm1d, BatchNorm2d, BatchNorm3d, InstanceNorm2d, LocalResponseNorm,
+};
 
 fn cuda_ready() -> bool {
     ferrotorch_gpu::init_cuda_backend().is_ok()
@@ -86,7 +88,10 @@ fn divergence_bn2d_gpu_train_backward_general_reduction_vs_torch() {
     let go: Vec<f32> = (0..n).map(|k| ((k % 7) as f32) * 0.05 - 0.1).collect();
 
     let mut bn = BatchNorm2d::<f32>::new(c, 1e-5, 0.1, true).unwrap();
-    bn.weight.as_mut().unwrap().set_data(cpu_tensor(&gamma, &[c]));
+    bn.weight
+        .as_mut()
+        .unwrap()
+        .set_data(cpu_tensor(&gamma, &[c]));
     bn.bias.as_mut().unwrap().set_data(cpu_tensor(&beta, &[c]));
     bn.to_device(Device::Cuda(0)).unwrap();
 
@@ -100,9 +105,20 @@ fn divergence_bn2d_gpu_train_backward_general_reduction_vs_torch() {
 
     let gi = x.grad().unwrap().expect("grad_input populated");
     assert!(gi.is_cuda(), "grad_input must stay on CUDA (R-CODE-4)");
-    assert_close("BN2d train grad_input (full)", &gi.data_vec().unwrap(), &BNG_GI);
+    assert_close(
+        "BN2d train grad_input (full)",
+        &gi.data_vec().unwrap(),
+        &BNG_GI,
+    );
 
-    let gw = bn.weight.as_ref().unwrap().tensor().grad().unwrap().unwrap();
+    let gw = bn
+        .weight
+        .as_ref()
+        .unwrap()
+        .tensor()
+        .grad()
+        .unwrap()
+        .unwrap();
     assert!(gw.is_cuda());
     assert_close("BN2d train grad_weight", &gw.data_vec().unwrap(), &BNG_GW);
     let gb = bn.bias.as_ref().unwrap().tensor().grad().unwrap().unwrap();
@@ -127,7 +143,10 @@ fn divergence_bn1d_gpu_train_backward_vs_torch() {
     let go: Vec<f32> = (0..n).map(|k| ((k % 7) as f32) * 0.05 - 0.1).collect();
 
     let mut bn = BatchNorm1d::<f32>::new(c, 1e-5, 0.1, true).unwrap();
-    bn.weight.as_mut().unwrap().set_data(cpu_tensor(&gamma, &[c]));
+    bn.weight
+        .as_mut()
+        .unwrap()
+        .set_data(cpu_tensor(&gamma, &[c]));
     bn.bias.as_mut().unwrap().set_data(cpu_tensor(&beta, &[c]));
     bn.to_device(Device::Cuda(0)).unwrap();
 
@@ -141,8 +160,19 @@ fn divergence_bn1d_gpu_train_backward_vs_torch() {
 
     let gi = x.grad().unwrap().expect("grad_input populated");
     assert!(gi.is_cuda(), "grad_input must stay on CUDA (R-CODE-4)");
-    assert_close("BN1d train grad_input (full)", &gi.data_vec().unwrap(), &BN1DG_GI);
-    let gw = bn.weight.as_ref().unwrap().tensor().grad().unwrap().unwrap();
+    assert_close(
+        "BN1d train grad_input (full)",
+        &gi.data_vec().unwrap(),
+        &BN1DG_GI,
+    );
+    let gw = bn
+        .weight
+        .as_ref()
+        .unwrap()
+        .tensor()
+        .grad()
+        .unwrap()
+        .unwrap();
     assert_close("BN1d train grad_weight", &gw.data_vec().unwrap(), &BN1DG_GW);
 }
 
@@ -183,7 +213,11 @@ fn divergence_instancenorm2d_gpu_backward_newshape_vs_torch() {
 
     let gi = x.grad().unwrap().expect("grad_input populated");
     assert!(gi.is_cuda(), "InstanceNorm grad_input must stay on CUDA");
-    assert_close("InstanceNorm grad_input (full)", &gi.data_vec().unwrap(), &ING_GI);
+    assert_close(
+        "InstanceNorm grad_input (full)",
+        &gi.data_vec().unwrap(),
+        &ING_GI,
+    );
 
     let params = inorm.named_parameters();
     let gw = params
@@ -231,13 +265,21 @@ fn divergence_lrn_gpu_size3_full_array_vs_torch() {
         .requires_grad_(true);
     let y: Tensor<f32> = lrn.forward(&x).unwrap();
     assert!(y.is_cuda());
-    assert_close("LRN size=3 forward (full)", &y.data_vec().unwrap(), &LRNA_OUT);
+    assert_close(
+        "LRN size=3 forward (full)",
+        &y.data_vec().unwrap(),
+        &LRNA_OUT,
+    );
 
     let go_t = cpu_tensor(&go, &[b, c, h, w]).to(Device::Cuda(0)).unwrap();
     backward_with_grad(&y, Some(&go_t)).unwrap();
     let gi = x.grad().unwrap().expect("grad_input populated");
     assert!(gi.is_cuda(), "LRN grad_input must stay on CUDA (R-CODE-4)");
-    assert_close("LRN size=3 grad_input (full)", &gi.data_vec().unwrap(), &LRNA_GI);
+    assert_close(
+        "LRN size=3 grad_input (full)",
+        &gi.data_vec().unwrap(),
+        &LRNA_GI,
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -265,13 +307,21 @@ fn divergence_lrn_gpu_even_size4_window_vs_torch() {
         .requires_grad_(true);
     let y: Tensor<f32> = lrn.forward(&x).unwrap();
     assert!(y.is_cuda());
-    assert_close("LRN even size=4 forward (full)", &y.data_vec().unwrap(), &LRNB_OUT);
+    assert_close(
+        "LRN even size=4 forward (full)",
+        &y.data_vec().unwrap(),
+        &LRNB_OUT,
+    );
 
     let go_t = cpu_tensor(&go, &[b, c, h, w]).to(Device::Cuda(0)).unwrap();
     backward_with_grad(&y, Some(&go_t)).unwrap();
     let gi = x.grad().unwrap().expect("grad_input populated");
     assert!(gi.is_cuda(), "LRN grad_input must stay on CUDA");
-    assert_close("LRN even size=4 grad_input (full)", &gi.data_vec().unwrap(), &LRNB_GI);
+    assert_close(
+        "LRN even size=4 grad_input (full)",
+        &gi.data_vec().unwrap(),
+        &LRNB_GI,
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -298,13 +348,21 @@ fn divergence_lrn_gpu_even_size2_window_vs_torch() {
         .requires_grad_(true);
     let y: Tensor<f32> = lrn.forward(&x).unwrap();
     assert!(y.is_cuda());
-    assert_close("LRN even size=2 forward (full)", &y.data_vec().unwrap(), &LRNC_OUT);
+    assert_close(
+        "LRN even size=2 forward (full)",
+        &y.data_vec().unwrap(),
+        &LRNC_OUT,
+    );
 
     let go_t = cpu_tensor(&go, &[b, c, h, w]).to(Device::Cuda(0)).unwrap();
     backward_with_grad(&y, Some(&go_t)).unwrap();
     let gi = x.grad().unwrap().expect("grad_input populated");
     assert!(gi.is_cuda(), "LRN grad_input must stay on CUDA");
-    assert_close("LRN even size=2 grad_input (full)", &gi.data_vec().unwrap(), &LRNC_GI);
+    assert_close(
+        "LRN even size=2 grad_input (full)",
+        &gi.data_vec().unwrap(),
+        &LRNC_GI,
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -352,7 +410,11 @@ fn divergence_bn2d_gpu_nonaffine_train_backward_vs_torch() {
 
     let gi = x.grad().unwrap().expect("grad_input populated");
     assert!(gi.is_cuda(), "grad_input must stay on CUDA (R-CODE-4)");
-    assert_close("BN2d non-affine grad_input (full)", &gi.data_vec().unwrap(), &BNNA_GI);
+    assert_close(
+        "BN2d non-affine grad_input (full)",
+        &gi.data_vec().unwrap(),
+        &BNNA_GI,
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -374,7 +436,10 @@ fn divergence_bn3d_gpu_train_backward_vs_torch() {
     let go: Vec<f32> = (0..n).map(|k| ((k % 7) as f32) * 0.05 - 0.1).collect();
 
     let mut bn = BatchNorm3d::<f32>::new(c, 1e-5, 0.1, true).unwrap();
-    bn.weight.as_mut().unwrap().set_data(cpu_tensor(&gamma, &[c]));
+    bn.weight
+        .as_mut()
+        .unwrap()
+        .set_data(cpu_tensor(&gamma, &[c]));
     bn.bias.as_mut().unwrap().set_data(cpu_tensor(&beta, &[c]));
     bn.to_device(Device::Cuda(0)).unwrap();
 
@@ -383,13 +448,26 @@ fn divergence_bn3d_gpu_train_backward_vs_torch() {
         .unwrap()
         .requires_grad_(true);
     let y = bn.forward(&x).unwrap();
-    let go_t = cpu_tensor(&go, &[b, c, d, h, w]).to(Device::Cuda(0)).unwrap();
+    let go_t = cpu_tensor(&go, &[b, c, d, h, w])
+        .to(Device::Cuda(0))
+        .unwrap();
     backward_with_grad(&y, Some(&go_t)).unwrap();
 
     let gi = x.grad().unwrap().expect("grad_input populated");
     assert!(gi.is_cuda(), "grad_input must stay on CUDA (R-CODE-4)");
-    assert_close("BN3d train grad_input (full)", &gi.data_vec().unwrap(), &BN3D_GI);
-    let gw = bn.weight.as_ref().unwrap().tensor().grad().unwrap().unwrap();
+    assert_close(
+        "BN3d train grad_input (full)",
+        &gi.data_vec().unwrap(),
+        &BN3D_GI,
+    );
+    let gw = bn
+        .weight
+        .as_ref()
+        .unwrap()
+        .tensor()
+        .grad()
+        .unwrap()
+        .unwrap();
     assert_close("BN3d train grad_weight", &gw.data_vec().unwrap(), &BN3D_GW);
     let gb = bn.bias.as_ref().unwrap().tensor().grad().unwrap().unwrap();
     assert_close("BN3d train grad_bias", &gb.data_vec().unwrap(), &BN3D_GB);

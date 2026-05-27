@@ -112,12 +112,7 @@ fn relaxed_bernoulli_forward_fixed_u_matches_sigmoid_logit_formula() {
 #[test]
 fn relaxed_bernoulli_rsample_grad_matches_finite_difference() {
     let eps = 1e-3_f32;
-    let points = [
-        (0.30_f32, 2.0_f32),
-        (0.05, 0.5),
-        (0.92, 1.0),
-        (0.50, 0.3),
-    ];
+    let points = [(0.30_f32, 2.0_f32), (0.05, 0.5), (0.92, 1.0), (0.50, 0.3)];
 
     for &(p_val, temp) in &points {
         // Analytic grad d z0 / d p.
@@ -127,7 +122,12 @@ fn relaxed_bernoulli_rsample_grad_matches_finite_difference() {
         let z = d.rsample(&[1]).unwrap();
         let seed_grad = one_hot_seed(1, 0, &[1]);
         backward_with_grad(&z, Some(&seed_grad)).unwrap();
-        let analytic = probs.grad().unwrap().expect("probs.grad must be Some").data_vec().unwrap()[0];
+        let analytic = probs
+            .grad()
+            .unwrap()
+            .expect("probs.grad must be Some")
+            .data_vec()
+            .unwrap()[0];
 
         // Central finite-difference of the SAME forward map with the SAME noise.
         let forward = |p: f32| -> f32 {
@@ -185,7 +185,12 @@ fn check_relaxed_one_hot_jacobian(p: &[f32], temp: f32) {
         let z = d.rsample(&[1]).unwrap();
         let seed = one_hot_seed(k, i, &[1, k]);
         backward_with_grad(&z, Some(&seed)).unwrap();
-        let g = probs.grad().unwrap().expect("grad Some").data_vec().unwrap();
+        let g = probs
+            .grad()
+            .unwrap()
+            .expect("grad Some")
+            .data_vec()
+            .unwrap();
         for m in 0..k {
             analytic[i][m] = g[m];
         }
@@ -275,7 +280,12 @@ fn check_exp_relaxed_jacobian(p: &[f32], temp: f32) {
         let log_z = d.rsample(&[1]).unwrap();
         let seed = one_hot_seed(k, i, &[1, k]);
         backward_with_grad(&log_z, Some(&seed)).unwrap();
-        let g = probs.grad().unwrap().expect("grad Some").data_vec().unwrap();
+        let g = probs
+            .grad()
+            .unwrap()
+            .expect("grad Some")
+            .data_vec()
+            .unwrap();
         for m in 0..k {
             analytic[i][m] = g[m];
         }
@@ -337,7 +347,10 @@ fn relaxed_one_hot_batched_shapes_independence_and_grad() {
     let zd = z.data_vec().unwrap();
     for row in 0..2 {
         let s: f32 = (0..3).map(|c| zd[row * 3 + c]).sum();
-        assert!((s - 1.0).abs() < 1e-4, "batch row {row} sum={s} not on simplex");
+        assert!(
+            (s - 1.0).abs() < 1e-4,
+            "batch row {row} sum={s} not on simplex"
+        );
     }
 
     // log_prob over a [2,3] value collapses K → [2], rows differ (independence).
@@ -345,7 +358,10 @@ fn relaxed_one_hot_batched_shapes_independence_and_grad() {
     let lp = d.log_prob(&value).unwrap();
     assert_eq!(lp.shape(), &[2], "batched log_prob shape");
     let lpd = lp.data_vec().unwrap();
-    assert!(lpd.iter().all(|v| v.is_finite()), "log_prob rows finite: {lpd:?}");
+    assert!(
+        lpd.iter().all(|v| v.is_finite()),
+        "log_prob rows finite: {lpd:?}"
+    );
     assert!(
         (lpd[0] - lpd[1]).abs() > 1e-3,
         "batch rows must be computed independently; got identical log_prob {lpd:?}"
@@ -360,7 +376,12 @@ fn relaxed_one_hot_batched_shapes_independence_and_grad() {
     let z2 = d2.rsample(&[1]).unwrap();
     let seed = one_hot_seed(6, 0, &[1, 2, 3]); // z[0,0,0] (sample, row0, cat0)
     backward_with_grad(&z2, Some(&seed)).unwrap();
-    let g = probs2.grad().unwrap().expect("grad Some").data_vec().unwrap();
+    let g = probs2
+        .grad()
+        .unwrap()
+        .expect("grad Some")
+        .data_vec()
+        .unwrap();
     for m in 3..6 {
         assert!(
             g[m].abs() < 1e-6,
@@ -457,7 +478,12 @@ fn mixture_multi_event_dim_shapes_mean_and_log_prob() {
 
     // mean == weighted sum of component means, per event element.
     let mean = mix.mean().unwrap();
-    assert_eq!(mean.shape(), &[2], "mixture mean has event_shape [2], got {:?}", mean.shape());
+    assert_eq!(
+        mean.shape(),
+        &[2],
+        "mixture mean has event_shape [2], got {:?}",
+        mean.shape()
+    );
     let md = mean.data_vec().unwrap();
     let expect_0 = 0.25_f32 * 0.0 + 0.75 * 10.0;
     let expect_1 = 0.25_f32 * 0.0 + 0.75 * -10.0;

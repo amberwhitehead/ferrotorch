@@ -29,7 +29,7 @@
 //! These tests fail against HEAD `8e98ee0d2`.
 
 use ferrotorch_core::GradFn;
-use ferrotorch_core::grad_fns::indexing::{scatter_reduce, ScatterReduce, ScatterReduceBackward};
+use ferrotorch_core::grad_fns::indexing::{ScatterReduce, ScatterReduceBackward, scatter_reduce};
 use ferrotorch_core::storage::TensorStorage;
 use ferrotorch_core::tensor::Tensor;
 
@@ -117,14 +117,9 @@ fn divergence_scatter_reduce_prod_docstring_claims_no_grad_fn_but_code_attaches_
 /// that changes the message or panics is caught.)
 #[test]
 fn scatter_reduce_amax_backward_returns_invalid_argument_not_panic() {
-    let input = Tensor::from_storage(
-        TensorStorage::cpu(vec![1.0_f32, 2.0, 3.0]),
-        vec![3],
-        true,
-    )
-    .unwrap();
-    let src =
-        Tensor::from_storage(TensorStorage::cpu(vec![5.0_f32, 6.0]), vec![2], true).unwrap();
+    let input =
+        Tensor::from_storage(TensorStorage::cpu(vec![1.0_f32, 2.0, 3.0]), vec![3], true).unwrap();
+    let src = Tensor::from_storage(TensorStorage::cpu(vec![5.0_f32, 6.0]), vec![2], true).unwrap();
     let go =
         Tensor::from_storage(TensorStorage::cpu(vec![1.0_f32, 1.0, 1.0]), vec![3], false).unwrap();
     let bw: ScatterReduceBackward<f32> = ScatterReduceBackward {

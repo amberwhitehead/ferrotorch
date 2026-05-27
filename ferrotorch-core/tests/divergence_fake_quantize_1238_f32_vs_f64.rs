@@ -121,7 +121,8 @@ fn fake_quantize_matches_torch_at_f32_half_boundary_x025_scale005() {
     //   qval_clamped  = 64; dq = (64-64) * 0.05  = 0.0
     let expected_torch: f32 = 0.0;
     assert_eq!(
-        actual[0], expected_torch,
+        actual[0],
+        expected_torch,
         "fake_quantize_per_tensor_affine(0.025_f32, scale=0.05, zp=64, qmin=-128, qmax=127) \
          must match torch's f32-precision kernel: torch returns {expected_torch}, \
          ferrotorch returned {got}. Upstream stub takes `float sc` per \
