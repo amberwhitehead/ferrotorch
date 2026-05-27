@@ -333,41 +333,64 @@ impl<T: Float> Optimizer<T> for SparseAdam<T> {
         let (beta1, beta2) = self.config.betas;
         let eps = self.config.eps;
 
+        // PASS 1 — validate-all-before-apply (atomicity, #1593).
+        // torch.optim.SparseAdam collects every param's grad in one loop and
+        // RAISES the dense-grad `RuntimeError` the moment it sees a non-sparse
+        // `p.grad` — BEFORE `F.sparse_adam` writes ANY param
+        // (`sparse_adam.py:85-92,116`). So on a dense grad anywhere, NO param
+        // is mutated, even earlier params with a valid sparse grad. We mirror
+        // that by checking every group/param FIRST (without consuming the
+        // registered sparse grads and without mutating any param), returning
+        // the rejection before pass 2 applies a single update.
+        for gi in 0..self.param_groups.len() {
+            for pi in 0..self.param_groups[gi].params.len() {
+                let key = Self::param_key(gi, pi);
+                let has_sparse_grad = self.sparse_grads.contains_key(&key);
+
+                let param = &self.param_groups[gi].params[pi];
+                let tensor = param.tensor();
+
+                if has_sparse_grad {
+                    // A param consumed by pass 2 must not be on CUDA; torch's
+                    // device dispatch would likewise fail before any write.
+                    if tensor.is_cuda() {
+                        return Err(FerrotorchError::NotImplementedOnCuda { op: "SparseAdam" });
+                    }
+                    continue;
+                }
+
+                // No sparse grad registered. A DENSE `p.grad` is rejected
+                // exactly as torch does (sparse_adam.py:88-92); a param with no
+                // gradient at all is simply skipped in pass 2.
+                if tensor.grad()?.is_some() {
+                    return Err(FerrotorchError::InvalidArgument {
+                        message:
+                            "SparseAdam does not support dense gradients, please consider Adam instead"
+                                .to_string(),
+                    });
+                }
+            }
+        }
+
+        // PASS 2 — apply the masked update now that every grad is validated
+        // sparse. No `Err` after this point depends on a not-yet-mutated param,
+        // so the step is atomic-on-error (the only post-validation failures are
+        // internal numeric/shape faults that torch would also surface).
         for gi in 0..self.param_groups.len() {
             let lr = self.param_groups[gi].lr;
 
             for pi in 0..self.param_groups[gi].params.len() {
                 let key = Self::param_key(gi, pi);
 
-                // Prefer a registered sparse gradient (the ferrotorch analog
-                // of `p.grad.is_sparse == True`). torch.optim.SparseAdam ONLY
-                // consumes sparse grads; a DENSE `p.grad` raises
-                // `RuntimeError("SparseAdam does not support dense gradients,
-                // please consider Adam instead")` (sparse_adam.py:88-92).
-                let sparse_grad = self.sparse_grads.remove(&key);
-
-                let param = &self.param_groups[gi].params[pi];
-                let tensor = param.tensor();
-                let has_dense_grad = tensor.grad()?.is_some();
-
-                let Some(sparse_grad) = sparse_grad else {
-                    // No sparse grad registered. If a dense grad was set on
-                    // this param, reject exactly as torch does; otherwise the
-                    // param simply has no gradient this step (skip).
-                    if has_dense_grad {
-                        return Err(FerrotorchError::InvalidArgument {
-                            message:
-                                "SparseAdam does not support dense gradients, please consider Adam instead"
-                                    .to_string(),
-                        });
-                    }
+                // Consume the registered sparse gradient (the ferrotorch analog
+                // of `p.grad.is_sparse == True`), validated in pass 1.
+                let Some(sparse_grad) = self.sparse_grads.remove(&key) else {
+                    // Validated in pass 1 as having no grad — skip.
                     continue;
                 };
 
-                if tensor.is_cuda() {
-                    return Err(FerrotorchError::NotImplementedOnCuda { op: "SparseAdam" });
-                }
-
+                let param = &self.param_groups[gi].params[pi];
+                let tensor = param.tensor();
                 let numel = tensor.numel();
                 // Clone the parameter handle (Arc clone) so the per-key
                 // `sparse_step` can borrow `self.state` mutably without

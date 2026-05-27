@@ -26,8 +26,8 @@ use ferrotorch_optim::{Optimizer, ParamGroup, SparseAdam, SparseAdamConfig};
 
 fn make_param_2d(data: &[f64], leading: usize, slab: usize) -> Parameter<f64> {
     assert_eq!(data.len(), leading * slab);
-    let t = Tensor::from_storage(TensorStorage::cpu(data.to_vec()), vec![leading, slab], true)
-        .unwrap();
+    let t =
+        Tensor::from_storage(TensorStorage::cpu(data.to_vec()), vec![leading, slab], true).unwrap();
     Parameter::new(t)
 }
 
@@ -52,7 +52,6 @@ fn read(param: &Parameter<f64>) -> Vec<f64> {
 ///
 /// FAILS against `9f5218b16`: ferrotorch leaves p0 == 0.9000000316227666.
 #[test]
-#[ignore = "divergence: SparseAdam::step not atomic-on-error, mutates earlier params before rejecting a later dense grad; tracking #1593"]
 fn divergence_1463_dense_reject_leaves_earlier_param_unmutated() {
     let p0 = make_param_2d(&[1.0], 1, 1);
     let p1 = make_param_2d(&[2.0], 1, 1);
@@ -68,15 +67,13 @@ fn divergence_1463_dense_reject_leaves_earlier_param_unmutated() {
     // p0: valid sparse grad. p1: dense grad (no registered sparse grad).
     let g0 = SparseGrad::<f64>::new(vec![0], vec![1.0], vec![1]).unwrap();
     opt.set_sparse_grad(0, 0, g0);
-    let dense =
-        Tensor::from_storage(TensorStorage::cpu(vec![0.5f64]), vec![1, 1], false).unwrap();
+    let dense = Tensor::from_storage(TensorStorage::cpu(vec![0.5f64]), vec![1, 1], false).unwrap();
     p1.tensor().set_grad(Some(dense)).unwrap();
 
     let err = opt.step().unwrap_err();
     match err {
         FerrotorchError::InvalidArgument { ref message } => assert_eq!(
-            message,
-            "SparseAdam does not support dense gradients, please consider Adam instead",
+            message, "SparseAdam does not support dense gradients, please consider Adam instead",
             "must mirror torch RuntimeError verbatim"
         ),
         other => panic!("expected dense-grad rejection, got {other:?}"),
@@ -106,7 +103,6 @@ fn divergence_1463_dense_reject_leaves_earlier_param_unmutated() {
 ///
 /// FAILS against `9f5218b16`: ferrotorch leaves group-0 == 9.900000031622767.
 #[test]
-#[ignore = "divergence: SparseAdam::step not atomic-on-error across groups; tracking #1593"]
 fn divergence_1463_dense_reject_atomicity_across_groups() {
     let p0 = make_param_2d(&[10.0], 1, 1);
     let p1 = make_param_2d(&[20.0], 1, 1);
@@ -122,8 +118,7 @@ fn divergence_1463_dense_reject_atomicity_across_groups() {
 
     let g0 = SparseGrad::<f64>::new(vec![0], vec![1.0], vec![1]).unwrap();
     opt.set_sparse_grad(0, 0, g0);
-    let dense =
-        Tensor::from_storage(TensorStorage::cpu(vec![0.5f64]), vec![1, 1], false).unwrap();
+    let dense = Tensor::from_storage(TensorStorage::cpu(vec![0.5f64]), vec![1, 1], false).unwrap();
     p1.tensor().set_grad(Some(dense)).unwrap();
 
     let _ = opt.step().unwrap_err();
