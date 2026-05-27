@@ -80,11 +80,15 @@ fn divergence_kl_td_distinct_reshape_must_raise() {
 
     let tp = TransformedDistribution::new(
         boxed_normal(&bp, &sp),
-        vec![Box::new(ReshapeTransform::new(vec![6], vec![2, 3]).unwrap())],
+        vec![Box::new(
+            ReshapeTransform::new(vec![6], vec![2, 3]).unwrap(),
+        )],
     );
     let tq = TransformedDistribution::new(
         boxed_normal(&bq, &sq),
-        vec![Box::new(ReshapeTransform::new(vec![6], vec![2, 3]).unwrap())],
+        vec![Box::new(
+            ReshapeTransform::new(vec![6], vec![2, 3]).unwrap(),
+        )],
     );
 
     let result = kl_divergence(&tp, &tq);

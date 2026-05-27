@@ -127,7 +127,11 @@ fn affirm_kl_independent_ndims_mismatch_errs() {
     )
     .unwrap();
     let q = Independent::new(
-        Normal::new(vec2(&[0.0, 0.0, 0.0, 0.0], &[2, 2]), vec2(&[1.0; 4], &[2, 2])).unwrap(),
+        Normal::new(
+            vec2(&[0.0, 0.0, 0.0, 0.0], &[2, 2]),
+            vec2(&[1.0; 4], &[2, 2]),
+        )
+        .unwrap(),
         2,
     )
     .unwrap();
