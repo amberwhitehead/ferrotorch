@@ -172,7 +172,10 @@ pub use kv_cache::{LayerKvCache, LlamaKvCache};
 pub use layer::LlamaDecoderLayer;
 pub use mlp::LlamaMLP;
 pub use model::{LlamaForCausalLM, LlamaModel};
-pub use quant_loaders::{AwqQ4, GptqQ4, dequantize_awq_q4, dequantize_gptq_q4};
+pub use quant_loaders::{
+    AwqQ4, GptqQ4, HqqQ4Axis1, dequantize_awq_q4, dequantize_gptq_q4, dequantize_hqq_q4_axis1,
+    hqq_q4_axis1_to_dense, hqq_state_dict_to_dense,
+};
 pub use spec_decode::{
     LlamaHandle, ModelHandle, SpecDecodeConfig, SpecDecodeOutput, speculative_decode,
 };

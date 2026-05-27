@@ -386,6 +386,39 @@ impl<T: Float> LlamaForCausalLM<T> {
         }
         self.load_state_dict(&remapped, strict)
     }
+
+    /// Load an HQQ-quantized HuggingFace checkpoint. (#1172)
+    ///
+    /// HQQ (`mobiusml/hqq`) ships each quantized linear as a packed `W_q`
+    /// byte tensor plus per-group `scale` / `zero` meta tensors under the
+    /// module's `{prefix}.` (see `hqq/core/quantize.py`
+    /// `HQQLinear.state_dict`). This entry point dequantizes every
+    /// `*.W_q` linear to a dense `*.weight` via
+    /// [`crate::quant_loaders::hqq_state_dict_to_dense`], passes
+    /// non-quantized tensors (norms, embeddings, biases) through unchanged,
+    /// and delegates to [`Self::load_hf_state_dict`].
+    ///
+    /// Only the common non-nested HQQ Q4 config (`nbits = 4`,
+    /// `group_size ∈ {64, 128}`, `axis = 1`) is supported. Nested
+    /// quantization (where `scale` / `zero` are themselves HQQ-quantized)
+    /// returns an error from the dequantizer rather than silently producing
+    /// wrong weights; that case is a tracked follow-up.
+    ///
+    /// # Errors
+    ///
+    /// Returns whatever [`crate::quant_loaders::hqq_state_dict_to_dense`]
+    /// returns on an unsupported config or a missing HQQ meta tensor, or
+    /// whatever [`Self::load_hf_state_dict`] returns when the dequantized
+    /// dense state dict fails to load (e.g. a shape mismatch against the
+    /// model's parameter shapes).
+    pub fn load_hqq_state_dict(
+        &mut self,
+        hqq_state: &StateDict<T>,
+        strict: bool,
+    ) -> FerrotorchResult<()> {
+        let dense = crate::quant_loaders::hqq_state_dict_to_dense(hqq_state)?;
+        self.load_hf_state_dict(&dense, strict)
+    }
 }
 
 impl<T: Float> Module<T> for LlamaForCausalLM<T> {

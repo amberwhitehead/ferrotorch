@@ -2963,8 +2963,17 @@ parity_ops = []
 
 [[route]]
 crate_pattern = "ferrotorch-llama/src/quant_loaders.rs"
+# GPTQ/AWQ/HQQ are third-party ecosystem quant formats (R-DEV-7 ecosystem
+# additions), not core PyTorch. The torch dir anchors the Tensor/Linear
+# contract; the HQQ Q4 loader (#1172) is grounded in the mobiusml/hqq
+# reference pinned below.
 upstream = [
   "/home/doll/pytorch/torch/",
+  # HQQ reference (Half-Quadratic Quantization), Mobius Labs, pinned v0.2.1:
+  #   github.com/mobiusml/hqq/blob/v0.2.1/hqq/core/quantize.py (Quantizer)
+  #   github.com/mobiusml/hqq/blob/v0.2.1/hqq/core/bitpack.py (BitPack)
+  "https://github.com/mobiusml/hqq/blob/v0.2.1/hqq/core/quantize.py",
+  "https://github.com/mobiusml/hqq/blob/v0.2.1/hqq/core/bitpack.py",
 ]
 design = ".design/ferrotorch-llama/quant_loaders.md"
 parity_ops = []

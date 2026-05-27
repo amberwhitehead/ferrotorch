@@ -11,7 +11,8 @@
 //!    [`ferrotorch_hub::hf_download_model`].
 //! 2. Loads the packed weight tiles through the corresponding
 //!    ferrotorch-llama dequantizer (`dequantize_gptq_q4`, `dequantize_awq_q4`,
-//!    `dequantize_hqq`).
+//!    `dequantize_hqq_q4_axis1`). For HQQ the test drives the production
+//!    `LlamaForCausalLM::load_hqq_state_dict` path directly (#1172).
 //! 3. Injects the dequantized weights into a [`LlamaForCausalLM`] and runs
 //!    `forward_from_ids` on a fixed token sequence.
 //! 4. Compares the last-token logits against the expected values captured by
@@ -55,10 +56,9 @@ use std::path::Path;
 
 use ferrotorch_core::{Tensor, TensorStorage};
 use ferrotorch_hub::{HubCache, hf_download_model};
-use ferrotorch_llama::quant_loaders::{HqqWeights, dequantize_hqq};
 use ferrotorch_llama::{
-    AwqQ4, GptqQ4, LlamaActivation, LlamaConfig, LlamaForCausalLM, dequantize_awq_q4,
-    dequantize_gptq_q4,
+    AwqQ4, GptqQ4, HqqQ4Axis1, LlamaActivation, LlamaConfig, LlamaForCausalLM, dequantize_awq_q4,
+    dequantize_gptq_q4, dequantize_hqq_q4_axis1, hqq_state_dict_to_dense,
 };
 use ferrotorch_nn::module::StateDict;
 use ferrotorch_serialize::load_safetensors_auto;
@@ -318,14 +318,15 @@ fn hqq_smoke() {
     // 2. Build config.
     let cfg = load_llama_config_from_dir(&model_dir);
 
-    // 3. Load + dequantize packed HQQ weights.
+    // 3. Load packed HQQ weights and run them through the *production*
+    //    consumer: LlamaForCausalLM::load_hqq_state_dict (#1172). This
+    //    exercises the same path a real application would, rather than a
+    //    test-local dequantizer.
     let raw_sd = load_safetensors_auto::<f32>(&model_dir)
         .unwrap_or_else(|e| panic!("hqq_smoke: safetensors load failed: {e}"));
 
-    let dequant_sd = dequantize_hqq_state_dict(&raw_sd, &cfg);
-
-    // 4. Build model and run forward pass.
-    let logits = run_forward(cfg, dequant_sd);
+    // 4. Build model and run forward pass via the production HQQ loader.
+    let logits = run_forward_hqq(cfg, raw_sd);
 
     // 5. Compare against reference fixture.
     let fixture = load_expected_fixture();
@@ -407,6 +408,20 @@ fn run_forward(cfg: LlamaConfig, state_dict: StateDict<f32>) -> Tensor<f32> {
     model
         .forward_from_ids(PROMPT_IDS)
         .expect("run_forward: forward_from_ids failed")
+}
+
+/// Build a [`LlamaForCausalLM`] and load a *raw HQQ-format* state dict
+/// through the production [`LlamaForCausalLM::load_hqq_state_dict`] path,
+/// then run `forward_from_ids` on [`PROMPT_IDS`]. (#1172)
+fn run_forward_hqq(cfg: LlamaConfig, raw_hqq_sd: StateDict<f32>) -> Tensor<f32> {
+    let mut model =
+        LlamaForCausalLM::<f32>::new(cfg).expect("run_forward_hqq: LlamaForCausalLM::new failed");
+    model
+        .load_hqq_state_dict(&raw_hqq_sd, false)
+        .expect("run_forward_hqq: load_hqq_state_dict failed");
+    model
+        .forward_from_ids(PROMPT_IDS)
+        .expect("run_forward_hqq: forward_from_ids failed")
 }
 
 // ---------------------------------------------------------------------------
@@ -610,91 +625,92 @@ fn dequantize_awq_state_dict(raw_sd: &StateDict<f32>, cfg: &LlamaConfig) -> Stat
 }
 
 // ---------------------------------------------------------------------------
-// HQQ state-dict dequantizer
+// HQQ axis=1 grouped Q4 — offline golden-oracle integration test (#1172)
+//
+// Network-free: builds a raw HQQ-format state dict from oracle bytes
+// produced by the HQQ reference (mobiusml/hqq v0.2.1) and runs it through
+// the production `hqq_state_dict_to_dense` + `load_hqq_state_dict` path.
+// R-CHAR-3: the dense weight is checked against the reference dequant,
+// not against ferrotorch's own output.
 // ---------------------------------------------------------------------------
 
-/// Walk every `*.W_q` key (HQQ's packed weights tensor name), reconstruct
-/// the packed [`HqqWeights`] tile from `*.meta.scale` and `*.meta.zero`,
-/// dequantize to f32, and emit standard `*.weight` keys.
-///
-/// HQQ checkpoints store: `{prefix}.W_q`, `{prefix}.meta.scale`,
-/// `{prefix}.meta.zero`, `{prefix}.meta.nbits`.
-fn dequantize_hqq_state_dict(raw_sd: &StateDict<f32>, cfg: &LlamaConfig) -> StateDict<f32> {
-    let mut out: StateDict<f32> = HashMap::new();
+/// Oracle (gs=4, in=8, out=4, axis=1): `W = (arange(32).reshape(4,8) -
+/// 16.0) * 0.25` quantized by `Quantizer.quantize(nbits=4, group_size=4,
+/// axis=1, bitpack=True)`. Two groups per output row — the per-row HQQ
+/// model cannot represent this. Verifies the production state-dict path
+/// reproduces `Quantizer.dequantize` byte-for-byte (within f32 tol).
+#[test]
+fn hqq_axis1_state_dict_to_dense_matches_reference_oracle() {
+    let mk = |d: Vec<f32>, shape: Vec<usize>| {
+        Tensor::from_storage(TensorStorage::cpu(d), shape, false).unwrap()
+    };
+    let mut raw: StateDict<f32> = HashMap::new();
+    // pack_4bit_u8 output, shape [num_groups/2=4, group_size=4].
+    raw.insert(
+        "lm_head.W_q".to_string(),
+        mk(
+            vec![
+                0.0, 85.0, 170.0, 255.0, 0.0, 85.0, 170.0, 255.0, 0.0, 85.0, 170.0, 255.0, 0.0,
+                85.0, 170.0, 255.0,
+            ],
+            vec![4, 4],
+        ),
+    );
+    raw.insert("lm_head.scale".to_string(), mk(vec![0.05; 8], vec![8, 1]));
+    raw.insert(
+        "lm_head.zero".to_string(),
+        mk(
+            vec![80.0, 60.0, 40.0, 20.0, 0.0, -20.0, -40.0, -60.0],
+            vec![8, 1],
+        ),
+    );
+    raw.insert("lm_head.nbits".to_string(), mk(vec![4.0], vec![1]));
+    raw.insert("lm_head.group_size".to_string(), mk(vec![4.0], vec![1]));
+    raw.insert("lm_head.shape".to_string(), mk(vec![4.0, 8.0], vec![2]));
 
-    let prefixes: std::collections::BTreeSet<String> = raw_sd
-        .keys()
-        .filter_map(|k| k.strip_suffix(".W_q").map(String::from))
-        .collect();
+    let dense = hqq_state_dict_to_dense(&raw).expect("hqq_state_dict_to_dense");
+    let w = dense
+        .get("lm_head.weight")
+        .expect("dense state dict missing lm_head.weight");
+    assert_eq!(w.shape(), &[4, 8]);
 
-    for prefix in &prefixes {
-        let wq_key = format!("{prefix}.W_q");
-        let scale_key = format!("{prefix}.meta.scale");
-        let zero_key = format!("{prefix}.meta.zero");
-        let nbits_key = format!("{prefix}.meta.nbits");
+    let expected: [f32; 32] = [
+        -4.0, -3.75, -3.5, -3.25, -3.0, -2.75, -2.5, -2.25, -2.0, -1.75, -1.5, -1.25, -1.0, -0.75,
+        -0.5, -0.25, 0.0, 0.25, 0.5, 0.75, 1.0, 1.25, 1.5, 1.75, 2.0, 2.25, 2.5, 2.75, 3.0, 3.25,
+        3.5, 3.75,
+    ];
+    let got = w.data_vec().unwrap();
+    assert_allclose(
+        &got,
+        &expected,
+        F32_TRANSCENDENTAL,
+        "hqq_axis1/lm_head.weight",
+    );
+}
 
-        let wq_t = raw_sd
-            .get(&wq_key)
-            .unwrap_or_else(|| panic!("dequantize_hqq: missing {wq_key}"));
-        let scale_t = raw_sd
-            .get(&scale_key)
-            .unwrap_or_else(|| panic!("dequantize_hqq: missing {scale_key}"));
-        let zero_t = raw_sd
-            .get(&zero_key)
-            .unwrap_or_else(|| panic!("dequantize_hqq: missing {zero_key}"));
-
-        let wq_shape = wq_t.shape().to_vec();
-        let out_features = wq_shape[0];
-        let in_features = wq_shape[1];
-
-        // Reconstruct byte buffer from f32-encoded uint8 values.
-        let wq_data: Vec<u8> = wq_t
-            .data_vec()
-            .expect("dequantize_hqq: W_q data_vec")
-            .iter()
-            .map(|&f| f as u8)
-            .collect();
-
-        let scale_raw = scale_t.data_vec().expect("dequantize_hqq: scale data_vec");
-        let zero_raw = zero_t.data_vec().expect("dequantize_hqq: zero data_vec");
-
-        // nbits is stored as a scalar tensor or absent (defaults to 4).
-        let bits: u8 = raw_sd
-            .get(&nbits_key)
-            .and_then(|t| t.data_vec().ok())
-            .and_then(|v| v.first().copied())
-            .map(|f| f as u8)
-            .unwrap_or(4);
-
-        let packed = HqqWeights::new(
-            bits,
-            wq_data,
-            scale_raw,
-            zero_raw,
-            out_features,
-            in_features,
-        );
-
-        let dequant = dequantize_hqq(&packed)
-            .unwrap_or_else(|e| panic!("dequantize_hqq: {prefix} dequant failed: {e}"));
-
-        let weight_tensor = make_tensor_f32(dequant, &[out_features, in_features]);
-        out.insert(format!("{prefix}.weight"), weight_tensor);
-    }
-
-    // Pass through non-quantized tensors.
-    for (k, v) in raw_sd {
-        if !k.ends_with(".W_q")
-            && !k.ends_with(".meta.scale")
-            && !k.ends_with(".meta.zero")
-            && !k.ends_with(".meta.nbits")
-        {
-            out.insert(k.clone(), v.clone());
-        }
-    }
-
-    let _ = cfg;
-    out
+/// Direct check of [`dequantize_hqq_q4_axis1`] against the gs=8 reference
+/// oracle (one group per row) — the `out=4, in=8` case from
+/// `Quantizer.dequantize`.
+#[test]
+fn hqq_q4_axis1_dequant_matches_reference_oracle_gs8() {
+    let tile = HqqQ4Axis1::new(
+        vec![
+            0, 34, 68, 102, 153, 187, 221, 255, 0, 34, 68, 102, 153, 187, 221, 255,
+        ],
+        vec![0.046_666_67, 0.046_666_67, 0.046_666_66, 0.046_666_67],
+        vec![21.428_572, 4.285_714, -12.857_144, -30.0],
+        8,
+        4,
+        8,
+    );
+    let out = dequantize_hqq_q4_axis1(&tile).expect("dequantize_hqq_q4_axis1");
+    let expected: [f32; 32] = [
+        -1.0, -0.906_667, -0.813_333, -0.72, -0.58, -0.486_667, -0.393_333, -0.3, -0.2, -0.106_667,
+        -0.013_333, 0.08, 0.22, 0.313_333, 0.406_667, 0.5, 0.6, 0.693_333, 0.786_667, 0.88, 1.02,
+        1.113_333, 1.206_667, 1.3, 1.4, 1.493_333, 1.586_667, 1.68, 1.82, 1.913_334, 2.006_667,
+        2.1,
+    ];
+    assert_allclose(&out, &expected, 1e-4, "hqq_axis1/gs8");
 }
 
 // ---------------------------------------------------------------------------

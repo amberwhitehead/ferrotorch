@@ -14,10 +14,17 @@
 //! tensors (`qweight`, `qzeros`, `scales`, optional `g_idx`) shipped
 //! by the HF Transformers `auto_gptq` / `autoawq` libraries.
 //!
-//! HQQ unpacking is more involved (per-row half-precision scales + an
-//! offset table) and is deferred — tracked at #1172.
+//! HQQ comes in two shapes here: the per-row [`HqqWeights`] /
+//! [`dequantize_hqq`] model, and the on-disk `HQQLinear` axis=1 grouped Q4
+//! format ([`HqqQ4Axis1`] / [`dequantize_hqq_q4_axis1`]) with per-group
+//! scale/zero and the `pack_4bit_u8` split-half packing. The latter is the
+//! format real `mobius-hqq` Q4 checkpoints ship; it is wired into model
+//! loading via [`hqq_state_dict_to_dense`] and
+//! [`crate::model::LlamaForCausalLM::load_hqq_state_dict`] (#1172).
 
-use ferrotorch_core::{FerrotorchError, FerrotorchResult};
+use ferrotorch_core::numeric_cast::cast;
+use ferrotorch_core::{FerrotorchError, FerrotorchResult, Float, Tensor, TensorStorage};
+use ferrotorch_nn::module::StateDict;
 
 /// A 4-bit GPTQ-packed weight tile. Layout matches `auto_gptq` v0.7+.
 ///
@@ -569,6 +576,390 @@ fn unpack_hqq_3bit(packed: &[u8], total: usize) -> FerrotorchResult<Vec<u8>> {
     Ok(out)
 }
 
+// ===========================================================================
+// HQQ axis=1 grouped Q4 — the on-disk HQQLinear format (#1172)
+// ===========================================================================
+//
+// The `HqqWeights` / `dequantize_hqq` pair above models the *per-row*
+// special case (one scale/zero per output row). Real HQQ checkpoints
+// shipped by `HQQLinear` use **per-group** scale/zero along a quantization
+// axis with `group_size ∈ {64, 128}`, and a packing that is NOT
+// "2 consecutive nibbles per byte" — it splits the grouped tensor in half
+// along its first (group) axis.
+//
+// Reference: mobiusml/hqq v0.2.1 `hqq/core/quantize.py` `Quantizer.quantize`
+// / `Quantizer.dequantize` and `hqq/core/bitpack.py` `BitPack.pack_4bit_u8`
+// / `unpack_4bit_u8`. github.com/mobiusml/hqq (pinned 0.2.1).
+//
+// quantize (axis=1): `W.reshape([-1, group_size])` → `num_groups =
+// numel / group_size` rows; `scale`, `zero` have shape `[num_groups, 1]`.
+// `W_q = round(W * (1/scale) + zero)`; meta stores `scale = 1/(that)` so
+// dequant is a plain multiply.
+//
+// dequantize: `W_r = (unpack(W_q) - zero) * scale` then `.reshape(shape)`.
+//
+// pack_4bit_u8 (`bitpack.py:24`): `_step = len(W_q) // 2; (W_q[:_step] << 4)
+// | W_q[_step:]`. So packed byte `(pr, c)` holds the high nibble of grouped
+// row `pr` and the low nibble of grouped row `pr + step`.
+//
+// unpack_4bit_u8 (`bitpack.py:31`): `tmp[:step] = (W_q & 0xF0) >> 4;
+// tmp[step:] = W_q & 0x0F`, producing `[2*step, group_size]`.
+
+/// A 4-bit HQQ-quantized weight tile in the on-disk `HQQLinear` layout
+/// with **per-group** scale/zero along `axis = 1`. (#1172)
+///
+/// This is the format real `mobius-hqq` Q4 checkpoints ship, distinct
+/// from the per-row [`HqqWeights`] model above. The packed buffer is the
+/// `pack_4bit_u8` output: a row-major `[num_groups / 2, group_size]`
+/// `u8` matrix.
+#[derive(Debug)]
+#[non_exhaustive]
+pub struct HqqQ4Axis1 {
+    /// `pack_4bit_u8` output bytes, row-major `[num_groups / 2, group_size]`.
+    /// The high nibble of byte `(pr, c)` is grouped element `(pr, c)`; the
+    /// low nibble is grouped element `(pr + num_groups/2, c)`.
+    pub w_q: Vec<u8>,
+    /// Per-group dequant scale (meta `scale`, already the reciprocal HQQ
+    /// stores for dequantization). Length `num_groups`.
+    pub scale: Vec<f32>,
+    /// Per-group zero point (meta `zero`). Length `num_groups`.
+    pub zero: Vec<f32>,
+    /// `group_size` along the quantization axis (HQQ default 64; 128 common).
+    pub group_size: usize,
+    /// Output features (rows of the reshaped dequantized matrix).
+    pub out_features: usize,
+    /// Input features (cols of the reshaped dequantized matrix).
+    pub in_features: usize,
+}
+
+impl HqqQ4Axis1 {
+    /// Construct an [`HqqQ4Axis1`] tile from the individual packed buffers.
+    ///
+    /// Exists so external callers can build the tile despite
+    /// `#[non_exhaustive]`.
+    pub fn new(
+        w_q: Vec<u8>,
+        scale: Vec<f32>,
+        zero: Vec<f32>,
+        group_size: usize,
+        out_features: usize,
+        in_features: usize,
+    ) -> Self {
+        Self {
+            w_q,
+            scale,
+            zero,
+            group_size,
+            out_features,
+            in_features,
+        }
+    }
+}
+
+/// Dequantize an HQQ axis=1 grouped Q4 tile to row-major `f32`. (#1172)
+///
+/// Output shape: `[out_features, in_features]` (matching
+/// `torch.nn.Linear.weight`). Implements the HQQ reference flow:
+/// `unpack_4bit_u8(W_q)` → `(q - zero[g]) * scale[g]` per group → reshape.
+///
+/// # Errors
+/// - `group_size == 0` or `numel` not divisible by `group_size`.
+/// - `num_groups` is odd (4-bit packing splits the group axis in half).
+/// - `scale` / `zero` length != `num_groups`.
+/// - `w_q` buffer too short for `[num_groups / 2, group_size]`.
+pub fn dequantize_hqq_q4_axis1(packed: &HqqQ4Axis1) -> FerrotorchResult<Vec<f32>> {
+    let HqqQ4Axis1 {
+        w_q,
+        scale,
+        zero,
+        group_size,
+        out_features,
+        in_features,
+    } = packed;
+    let group_size = *group_size;
+    let out_features = *out_features;
+    let in_features = *in_features;
+
+    if group_size == 0 {
+        return Err(FerrotorchError::InvalidArgument {
+            message: "HQQ q4 axis1: group_size must be > 0".into(),
+        });
+    }
+    let numel = out_features * in_features;
+    if numel % group_size != 0 {
+        return Err(FerrotorchError::InvalidArgument {
+            message: format!(
+                "HQQ q4 axis1: numel ({numel}) not divisible by group_size ({group_size})"
+            ),
+        });
+    }
+    let num_groups = numel / group_size;
+    if num_groups % 2 != 0 {
+        return Err(FerrotorchError::InvalidArgument {
+            message: format!(
+                "HQQ q4 axis1: num_groups ({num_groups}) must be even (4-bit packing splits the group axis in half)"
+            ),
+        });
+    }
+    if scale.len() != num_groups {
+        return Err(FerrotorchError::ShapeMismatch {
+            message: format!(
+                "HQQ q4 axis1: scale len {} != num_groups {num_groups}",
+                scale.len()
+            ),
+        });
+    }
+    if zero.len() != num_groups {
+        return Err(FerrotorchError::ShapeMismatch {
+            message: format!(
+                "HQQ q4 axis1: zero len {} != num_groups {num_groups}",
+                zero.len()
+            ),
+        });
+    }
+    let step = num_groups / 2;
+    if w_q.len() < step * group_size {
+        return Err(FerrotorchError::ShapeMismatch {
+            message: format!(
+                "HQQ q4 axis1: w_q buffer too short ({} bytes for [{step}, {group_size}], need {})",
+                w_q.len(),
+                step * group_size
+            ),
+        });
+    }
+
+    // Build the unpacked grouped tensor U[num_groups, group_size] then map
+    // each flattened weight index f -> group g = f / group_size, offset
+    // o = f % group_size, and write (U[g, o] - zero[g]) * scale[g].
+    let mut out = vec![0.0f32; numel];
+    for f in 0..numel {
+        let g = f / group_size;
+        let o = f % group_size;
+        // unpack_4bit_u8: grouped row g, col o.
+        //   g <  step -> high nibble of packed byte (g, o)
+        //   g >= step -> low  nibble of packed byte (g - step, o)
+        let q = if g < step {
+            (w_q[g * group_size + o] >> 4) & 0x0F
+        } else {
+            w_q[(g - step) * group_size + o] & 0x0F
+        };
+        out[f] = (q as f32 - zero[g]) * scale[g];
+    }
+    Ok(out)
+}
+
+/// The HQQ-format suffixes for a single quantized linear inside a flat
+/// HuggingFace/HQQ `safetensors` state dict. (#1172)
+///
+/// `HQQLinear.state_dict` (`hqq/core/quantize.py` `state_dict_keys`)
+/// serializes each quantized weight under a per-module `{prefix}.` with
+/// these leaf keys. We read `W_q`, `scale`, `zero`, `nbits`, `group_size`,
+/// `axis`, and the original `shape`.
+const HQQ_WQ_SUFFIX: &str = ".W_q";
+const HQQ_SCALE_SUFFIX: &str = ".scale";
+const HQQ_ZERO_SUFFIX: &str = ".zero";
+const HQQ_NBITS_SUFFIX: &str = ".nbits";
+const HQQ_GROUP_SIZE_SUFFIX: &str = ".group_size";
+const HQQ_SHAPE_SUFFIX: &str = ".shape";
+
+/// Read a `Tensor<T>` scalar/array as `f32` values (HQQ meta tensors arrive
+/// as the model's float type after a `safetensors` load).
+fn tensor_to_f32_vec<T: Float>(t: &Tensor<T>) -> FerrotorchResult<Vec<f32>> {
+    t.data_vec()?
+        .into_iter()
+        .map(|v| cast::<T, f32>(v))
+        .collect()
+}
+
+/// Read a single scalar meta tensor as `usize` (e.g. `group_size`, `nbits`).
+fn tensor_scalar_usize<T: Float>(t: &Tensor<T>) -> FerrotorchResult<usize> {
+    let v = t.data_vec()?;
+    let first = v
+        .first()
+        .copied()
+        .ok_or_else(|| FerrotorchError::InvalidArgument {
+            message: "HQQ: expected a non-empty scalar meta tensor".into(),
+        })?;
+    let f: f64 = cast::<T, f64>(first)?;
+    if f < 0.0 {
+        return Err(FerrotorchError::InvalidArgument {
+            message: format!("HQQ: scalar meta value {f} must be non-negative"),
+        });
+    }
+    Ok(f as usize)
+}
+
+/// Convert one HQQ-quantized linear's raw buffers into a dense
+/// `[out_features, in_features]` weight tensor. (#1172)
+///
+/// `w_q_t` is the `pack_4bit_u8` byte tensor (loaded as `T`; each element is
+/// a `u8` value). `scale_t` / `zero_t` are the per-group meta tensors,
+/// `group_size` the HQQ group size, and `shape = [out_features, in_features]`
+/// the original weight shape. Only `axis = 1`, `nbits = 4` is handled here;
+/// other configs return [`FerrotorchError::InvalidArgument`] so callers can
+/// fall back or report a concrete gap.
+///
+/// # Errors
+/// - `shape` is not 2-D.
+/// - `nbits != 4` or `axis != 1` (the supported HQQ Q4 config).
+/// - Underlying [`dequantize_hqq_q4_axis1`] validation fails.
+pub fn hqq_q4_axis1_to_dense<T: Float>(
+    w_q_t: &Tensor<T>,
+    scale_t: &Tensor<T>,
+    zero_t: &Tensor<T>,
+    nbits: usize,
+    group_size: usize,
+    axis: usize,
+    shape: &[usize],
+) -> FerrotorchResult<Tensor<T>> {
+    if nbits != 4 {
+        return Err(FerrotorchError::InvalidArgument {
+            message: format!("HQQ loader: only nbits=4 is supported, got {nbits}"),
+        });
+    }
+    if axis != 1 {
+        return Err(FerrotorchError::InvalidArgument {
+            message: format!("HQQ loader: only axis=1 is supported, got {axis}"),
+        });
+    }
+    if shape.len() != 2 {
+        return Err(FerrotorchError::InvalidArgument {
+            message: format!("HQQ loader: expected a 2-D weight shape, got {shape:?}"),
+        });
+    }
+    let out_features = shape[0];
+    let in_features = shape[1];
+
+    // W_q bytes arrive as T-encoded u8 values; round-to-nearest then mask to
+    // a byte. HQQ stores these as exact small integers, so the cast is exact.
+    let w_q: Vec<u8> = w_q_t
+        .data_vec()?
+        .into_iter()
+        .map(|v| {
+            let f: f64 = cast::<T, f64>(v)?;
+            Ok((f.round() as i64).clamp(0, 255) as u8)
+        })
+        .collect::<FerrotorchResult<Vec<u8>>>()?;
+
+    let scale = tensor_to_f32_vec(scale_t)?;
+    let zero = tensor_to_f32_vec(zero_t)?;
+
+    let tile = HqqQ4Axis1::new(w_q, scale, zero, group_size, out_features, in_features);
+    let dense_f32 = dequantize_hqq_q4_axis1(&tile)?;
+
+    // Cast f32 dequant back to the model's element type T.
+    let dense_t: Vec<T> = dense_f32
+        .into_iter()
+        .map(|v| cast::<f32, T>(v))
+        .collect::<FerrotorchResult<Vec<T>>>()?;
+    Tensor::from_storage(
+        TensorStorage::cpu(dense_t),
+        vec![out_features, in_features],
+        false,
+    )
+}
+
+/// Rewrite a raw HQQ-format state dict into a dense one the standard model
+/// `load_*_state_dict` path can ingest. (#1172)
+///
+/// For every `{prefix}.W_q` key, reads the parallel HQQ meta tensors
+/// (`scale`, `zero`, `nbits`, `group_size`, `shape`), dequantizes the linear
+/// to a dense `{prefix}.weight` tensor, and copies through every key that is
+/// not an HQQ meta leaf (norms, embeddings, biases, `lm_head`, …). If
+/// `group_size` is absent it defaults to HQQ's documented `64`; if `nbits` is
+/// absent it defaults to `4`; if `axis` is absent it defaults to `1`.
+///
+/// This is the production entry point consumed by
+/// [`crate::model::LlamaForCausalLM::load_hqq_state_dict`].
+///
+/// # Errors
+/// Returns [`FerrotorchError::InvalidArgument`] when a required HQQ meta
+/// tensor (`scale`, `zero`, `shape`) is missing for a `W_q` key, or when the
+/// dequant config is unsupported (see [`hqq_q4_axis1_to_dense`]).
+pub fn hqq_state_dict_to_dense<T: Float>(raw: &StateDict<T>) -> FerrotorchResult<StateDict<T>> {
+    use std::collections::BTreeSet;
+    let prefixes: BTreeSet<&str> = raw
+        .keys()
+        .filter_map(|k| k.strip_suffix(HQQ_WQ_SUFFIX))
+        .collect();
+
+    let mut out: StateDict<T> = StateDict::with_capacity(raw.len());
+
+    for prefix in &prefixes {
+        let get = |suffix: &str| raw.get(&format!("{prefix}{suffix}"));
+        let req = |suffix: &str| -> FerrotorchResult<&Tensor<T>> {
+            get(suffix).ok_or_else(|| FerrotorchError::InvalidArgument {
+                message: format!("HQQ loader: missing required key {prefix}{suffix}"),
+            })
+        };
+
+        let w_q_t = req(HQQ_WQ_SUFFIX)?;
+        let scale_t = req(HQQ_SCALE_SUFFIX)?;
+        let zero_t = req(HQQ_ZERO_SUFFIX)?;
+
+        let nbits = match get(HQQ_NBITS_SUFFIX) {
+            Some(t) => tensor_scalar_usize(t)?,
+            None => 4,
+        };
+        let group_size = match get(HQQ_GROUP_SIZE_SUFFIX) {
+            Some(t) => tensor_scalar_usize(t)?,
+            None => 64,
+        };
+        // `shape` is serialized as a small int vector [out_features, in_features].
+        let shape: Vec<usize> = match get(HQQ_SHAPE_SUFFIX) {
+            Some(t) => tensor_to_f32_vec(t)?
+                .into_iter()
+                .map(|f| f.round() as usize)
+                .collect(),
+            None => {
+                return Err(FerrotorchError::InvalidArgument {
+                    message: format!("HQQ loader: missing required key {prefix}{HQQ_SHAPE_SUFFIX}"),
+                });
+            }
+        };
+
+        let dense = hqq_q4_axis1_to_dense(w_q_t, scale_t, zero_t, nbits, group_size, 1, &shape)?;
+        out.insert(format!("{prefix}.weight"), dense);
+    }
+
+    // Copy through everything that is not an HQQ meta leaf for a known
+    // quantized prefix. Unrelated dense tensors (norms, embeddings, biases)
+    // pass straight through.
+    let meta_suffixes = [
+        HQQ_WQ_SUFFIX,
+        HQQ_SCALE_SUFFIX,
+        HQQ_ZERO_SUFFIX,
+        HQQ_NBITS_SUFFIX,
+        HQQ_GROUP_SIZE_SUFFIX,
+        HQQ_SHAPE_SUFFIX,
+        ".axis",
+        ".packing",
+        ".unpack_view_dtype",
+        ".view_as_float",
+        ".channel_wise",
+        ".optimize",
+        ".round_zero",
+        ".quant_scale",
+        ".quant_zero",
+        ".compute_dtype",
+        ".encoded_state_dict",
+        ".stores_quant_config",
+        ".offload_meta",
+    ];
+    for (k, v) in raw {
+        let is_hqq_meta = prefixes.iter().any(|p| {
+            meta_suffixes
+                .iter()
+                .any(|suf| k.as_str() == format!("{p}{suf}"))
+        });
+        if !is_hqq_meta {
+            out.insert(k.clone(), v.clone());
+        }
+    }
+
+    Ok(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1009,5 +1400,178 @@ mod tests {
             dequantize_hqq(&p).unwrap_err(),
             FerrotorchError::ShapeMismatch { .. }
         ));
+    }
+
+    // -------------------------------------------------------------------
+    // HQQ axis=1 grouped Q4 tests (#1172)
+    //
+    // Oracles below were produced by running the HQQ reference
+    // (mobiusml/hqq v0.2.1) `Quantizer.quantize(..., nbits=4, axis=1,
+    // bitpack=True)` on a known matrix and recording the packed bytes,
+    // meta scale/zero, and `Quantizer.dequantize` output. R-CHAR-3: the
+    // expected values trace to the HQQ reference, not to ferrotorch.
+    // -------------------------------------------------------------------
+
+    /// Oracle: `out=4, in=8, group_size=8, axis=1`.
+    /// `W = arange(32).reshape(4,8) * 0.1 - 1.0`.
+    /// `Quantizer.quantize(W, nbits=4, group_size=8, axis=1, bitpack=True)`
+    /// yields the packed bytes + scale/zero recorded below; the dequant
+    /// values come from `Quantizer.dequantize`.
+    #[test]
+    fn hqq_q4_axis1_oracle_group_size_8() {
+        // pack_4bit_u8 output, shape [num_groups/2=2, group_size=8].
+        let w_q: Vec<u8> = vec![
+            0, 34, 68, 102, 153, 187, 221, 255, // grouped rows 0,1 high/low nibbles
+            0, 34, 68, 102, 153, 187, 221, 255, // grouped rows 2,3
+        ];
+        let scale: Vec<f32> = vec![0.046_666_67, 0.046_666_67, 0.046_666_66, 0.046_666_67];
+        let zero: Vec<f32> = vec![21.428_572, 4.285_714, -12.857_144, -30.0];
+        let tile = HqqQ4Axis1::new(w_q, scale, zero, 8, 4, 8);
+        let out = dequantize_hqq_q4_axis1(&tile).unwrap();
+
+        let expected: [f32; 32] = [
+            -1.0, -0.906_667, -0.813_333, -0.72, -0.58, -0.486_667, -0.393_333, -0.3, -0.2,
+            -0.106_667, -0.013_333, 0.08, 0.22, 0.313_333, 0.406_667, 0.5, 0.6, 0.693_333,
+            0.786_667, 0.88, 1.02, 1.113_333, 1.206_667, 1.3, 1.4, 1.493_333, 1.586_667, 1.68,
+            1.82, 1.913_334, 2.006_667, 2.1,
+        ];
+        assert_eq!(out.len(), expected.len());
+        for (i, (&g, &e)) in out.iter().zip(expected.iter()).enumerate() {
+            assert!((g - e).abs() < 1e-4, "i={i}: got {g}, want {e}");
+        }
+    }
+
+    /// Discriminating oracle: `out=4, in=8, group_size=4, axis=1` — TWO
+    /// groups per output row (8 groups total). The per-row [`dequantize_hqq`]
+    /// model cannot represent this; the axis=1 path must.
+    /// `W = (arange(32).reshape(4,8) - 16.0) * 0.25`.
+    #[test]
+    fn hqq_q4_axis1_oracle_two_groups_per_row() {
+        // pack_4bit_u8 output, shape [num_groups/2=4, group_size=4].
+        let w_q: Vec<u8> = vec![
+            0, 85, 170, 255, // groups 0,4
+            0, 85, 170, 255, // groups 1,5
+            0, 85, 170, 255, // groups 2,6
+            0, 85, 170, 255, // groups 3,7
+        ];
+        let scale: Vec<f32> = vec![0.05; 8];
+        let zero: Vec<f32> = vec![80.0, 60.0, 40.0, 20.0, 0.0, -20.0, -40.0, -60.0];
+        let tile = HqqQ4Axis1::new(w_q, scale, zero, 4, 4, 8);
+        let out = dequantize_hqq_q4_axis1(&tile).unwrap();
+
+        // From Quantizer.dequantize, reshaped to [4,8].
+        let expected: [f32; 32] = [
+            -4.0, -3.75, -3.5, -3.25, -3.0, -2.75, -2.5, -2.25, -2.0, -1.75, -1.5, -1.25, -1.0,
+            -0.75, -0.5, -0.25, 0.0, 0.25, 0.5, 0.75, 1.0, 1.25, 1.5, 1.75, 2.0, 2.25, 2.5, 2.75,
+            3.0, 3.25, 3.5, 3.75,
+        ];
+        assert_eq!(out.len(), expected.len());
+        for (i, (&g, &e)) in out.iter().zip(expected.iter()).enumerate() {
+            assert!((g - e).abs() < 1e-5, "i={i}: got {g}, want {e}");
+        }
+    }
+
+    #[test]
+    fn hqq_q4_axis1_rejects_odd_num_groups() {
+        // numel=12, group_size=4 -> num_groups=3 (odd) -> reject.
+        let tile = HqqQ4Axis1::new(vec![0u8; 8], vec![1.0; 3], vec![0.0; 3], 4, 3, 4);
+        assert!(matches!(
+            dequantize_hqq_q4_axis1(&tile).unwrap_err(),
+            FerrotorchError::InvalidArgument { .. }
+        ));
+    }
+
+    #[test]
+    fn hqq_q4_axis1_rejects_scale_length_mismatch() {
+        // numel=16, group_size=4 -> num_groups=4, but scale has len 3.
+        let tile = HqqQ4Axis1::new(vec![0u8; 8], vec![1.0; 3], vec![0.0; 4], 4, 4, 4);
+        assert!(matches!(
+            dequantize_hqq_q4_axis1(&tile).unwrap_err(),
+            FerrotorchError::ShapeMismatch { .. }
+        ));
+    }
+
+    #[test]
+    fn hqq_q4_axis1_rejects_short_buffer() {
+        // numel=16, group_size=4 -> num_groups=4, step=2, need 2*4=8 bytes.
+        let tile = HqqQ4Axis1::new(vec![0u8; 4], vec![1.0; 4], vec![0.0; 4], 4, 4, 4);
+        assert!(matches!(
+            dequantize_hqq_q4_axis1(&tile).unwrap_err(),
+            FerrotorchError::ShapeMismatch { .. }
+        ));
+    }
+
+    /// The production `hqq_state_dict_to_dense` path: build a raw HQQ-format
+    /// state dict from the gs=4 oracle, plus a passthrough norm tensor, and
+    /// verify the `.weight` key matches the reference dequant and the norm
+    /// survives.
+    #[test]
+    fn hqq_state_dict_to_dense_produces_oracle_weight() {
+        let mut raw: StateDict<f32> = StateDict::new();
+        let w_q = vec![
+            0.0f32, 85.0, 170.0, 255.0, 0.0, 85.0, 170.0, 255.0, 0.0, 85.0, 170.0, 255.0, 0.0,
+            85.0, 170.0, 255.0,
+        ];
+        let mk = |d: Vec<f32>, shape: Vec<usize>| {
+            Tensor::from_storage(TensorStorage::cpu(d), shape, false).unwrap()
+        };
+        raw.insert(
+            "model.layers.0.self_attn.q_proj.W_q".into(),
+            mk(w_q, vec![4, 4]),
+        );
+        raw.insert(
+            "model.layers.0.self_attn.q_proj.scale".into(),
+            mk(vec![0.05; 8], vec![8, 1]),
+        );
+        raw.insert(
+            "model.layers.0.self_attn.q_proj.zero".into(),
+            mk(
+                vec![80.0, 60.0, 40.0, 20.0, 0.0, -20.0, -40.0, -60.0],
+                vec![8, 1],
+            ),
+        );
+        raw.insert(
+            "model.layers.0.self_attn.q_proj.nbits".into(),
+            mk(vec![4.0], vec![1]),
+        );
+        raw.insert(
+            "model.layers.0.self_attn.q_proj.group_size".into(),
+            mk(vec![4.0], vec![1]),
+        );
+        raw.insert(
+            "model.layers.0.self_attn.q_proj.shape".into(),
+            mk(vec![4.0, 8.0], vec![2]),
+        );
+        // A passthrough (non-quantized) tensor that must survive unchanged.
+        raw.insert("model.norm.weight".into(), mk(vec![1.0, 2.0, 3.0], vec![3]));
+
+        let dense = hqq_state_dict_to_dense(&raw).unwrap();
+
+        // The meta keys must be gone; only `.weight` + the norm survive.
+        assert!(dense.contains_key("model.layers.0.self_attn.q_proj.weight"));
+        assert!(!dense.contains_key("model.layers.0.self_attn.q_proj.W_q"));
+        assert!(!dense.contains_key("model.layers.0.self_attn.q_proj.scale"));
+        assert!(dense.contains_key("model.norm.weight"));
+        assert_eq!(
+            dense.get("model.norm.weight").unwrap().data_vec().unwrap(),
+            vec![1.0, 2.0, 3.0]
+        );
+
+        let w = dense.get("model.layers.0.self_attn.q_proj.weight").unwrap();
+        assert_eq!(w.shape(), &[4, 8]);
+        let expected: [f32; 32] = [
+            -4.0, -3.75, -3.5, -3.25, -3.0, -2.75, -2.5, -2.25, -2.0, -1.75, -1.5, -1.25, -1.0,
+            -0.75, -0.5, -0.25, 0.0, 0.25, 0.5, 0.75, 1.0, 1.25, 1.5, 1.75, 2.0, 2.25, 2.5, 2.75,
+            3.0, 3.25, 3.5, 3.75,
+        ];
+        for (i, (g, e)) in w
+            .data_vec()
+            .unwrap()
+            .iter()
+            .zip(expected.iter())
+            .enumerate()
+        {
+            assert!((g - e).abs() < 1e-5, "i={i}: got {g}, want {e}");
+        }
     }
 }
