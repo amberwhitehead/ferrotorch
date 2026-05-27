@@ -26,19 +26,24 @@ construction surface of `torch.optim.SparseAdam` (`torch/optim/sparse_adam.py:13
   `impl Optimizer<T>`; tracks per-`ParamKey` `step_count` + `exp_avg` +
   `exp_avg_sq`. Mirrors upstream's per-parameter `state["step"] / state["exp_avg"]
   / state["exp_avg_sq"]` (`torch/optim/sparse_adam.py:96-104`).
-- REQ-3: Sparse-skip semantics — at indices where `g == 0`, the moment
-  buffers are NOT updated and the parameter is NOT touched. Indices where
-  `g != 0` get the full Adam update with per-key bias correction.
-  Upstream contract uses a true sparse-COO gradient (`p.grad.is_sparse`,
-  `torch/optim/sparse_adam.py:88-92`); ferrotorch reads dense and checks
-  per-element. Behavioral parity for the sparse-coordinate case but the
-  type-level contract differs.
+- REQ-3: Sparse-COO gradient contract — `SparseAdam` REQUIRES a sparse
+  gradient (a `ferrotorch_core::SparseGrad`, the analog of
+  `p.grad.is_sparse == True`). A parameter with a DENSE `.grad` and no
+  registered sparse grad is rejected with the verbatim upstream message
+  `"SparseAdam does not support dense gradients, please consider Adam
+  instead"` (`torch/optim/sparse_adam.py:88-92`). The masked update touches
+  only the coalesced indices of the sparse grad; rows absent from the COO
+  indices keep their moments at zero and their param byte-stable
+  (`torch/optim/_functional.py:65-72`).
 - REQ-4: `step_count` is per-`ParamKey`, NOT global; mirrors upstream's
   per-parameter state (`torch/optim/sparse_adam.py:98`).
-- REQ-5: Bias correction matches Adam:
-  `bc1 = 1 - beta1^t`, `bc2 = 1 - beta2^t`,
-  `m_hat = exp_avg / bc1`, `v_hat = exp_avg_sq / bc2`,
-  `param -= lr * m_hat / (sqrt(v_hat) + eps)`.
+- REQ-5: Bias-corrected sparse-Adam step (the TRUE masked formula, NOT dense
+  Adam): `bc1 = 1 - beta1^t`, `bc2 = 1 - beta2^t`,
+  `step_size = lr * sqrt(bc2) / bc1`,
+  `param -= step_size * exp_avg / (sqrt(exp_avg_sq) + eps)`
+  (`torch/optim/_functional.py:80-84`). Note eps enters the denominator
+  differently from dense Adam's `m_hat/(sqrt(v_hat)+eps)`; the prior dense
+  implementation used the Adam formula and was wrong for SparseAdam.
 - REQ-6: `state_dict` / `load_state_dict` are no-op stubs that round-trip
   an empty `OptimizerState`. Upstream serializes the sparse Adam state;
   ferrotorch does not.
@@ -50,18 +55,21 @@ construction surface of `torch.optim.SparseAdam` (`torch/optim/sparse_adam.py:13
 
 - [x] AC-1: `SparseAdamConfig::default()` returns
   `{ lr: 1e-3, betas: (0.9, 0.999), eps: 1e-8 }`.
-- [x] AC-2: A non-zero gradient at one index and zero gradients elsewhere
-  moves only the targeted parameter coordinate; other coordinates are
-  unchanged byte-for-byte. Pinned by `test_sparse_adam_skips_zero_gradients`.
-- [x] AC-3: After 10 steps of a constant positive scalar gradient, the
-  parameter strictly decreases. Pinned by `test_sparse_adam_multiple_steps`.
+- [x] AC-2: A sparse grad touching only some rows moves only those
+  coordinates; rows absent from the COO indices are unchanged byte-for-byte.
+  Pinned by `sparse_adam_leaves_untouched_rows_byte_stable` and
+  `sparse_adam_skips_untouched_rows`.
+- [x] AC-3: A multi-step constant sparse gradient drives the param along the
+  torch trajectory. Pinned by `sparse_adam_matches_torch_oracle_multi_step`.
 - [x] AC-4: `zero_grad()` sets every parameter's `.grad` to `None`.
 - [x] AC-5: Calling `step()` with a CUDA parameter returns
   `FerrotorchError::NotImplementedOnCuda { op: "SparseAdam" }`.
-- [ ] AC-6: Dense parameter with a SparseCoo-formatted gradient is
-  rejected with a clear error message mirroring upstream's
+- [x] AC-6: A parameter with a DENSE gradient and no registered sparse grad
+  is rejected with the verbatim upstream message
   `"SparseAdam does not support dense gradients, please consider Adam instead"`
-  (inverted in upstream — it checks for `is_sparse`). Blocked by #1463.
+  (`torch/optim/sparse_adam.py:88-92`). Pinned by
+  `sparse_adam_rejects_dense_grad_like_torch` (lib) and the live-torch oracle.
+  Closes #1463.
 
 ## Architecture
 
@@ -74,25 +82,32 @@ upstream.
 
 ### `SparseAdam<T>` and `SparseAdam::step`
 
-`step()` iterates `(group_idx, param_idx)` pairs. For each parameter with
-`grad.is_some()`, it builds a `ParamKey` (CL-1122 typed key — replaces
-the per-step `format!("g{}_p{}")` heap allocation), then:
+The optimizer holds a `sparse_grads: HashMap<ParamKey, SparseGrad<T>>`
+registry — the ferrotorch analog of `p.grad` being a sparse-COO tensor.
+Callers register a parameter's sparse gradient via
+`set_sparse_grad(group_idx, param_idx, grad)` (the boundary, like assigning
+`p.grad = <sparse>`), or via the wired producer path
+`collect_sparse_grad_from_embedding(emb, gi, pi)` which pulls
+`Embedding::sparse_grad` and registers it.
 
-1. Fail-fast on CUDA with `FerrotorchError::NotImplementedOnCuda`.
-2. Reuse the `param_workspace: Vec<T>` and `grad_workspace: Vec<T>`
-   buffers (CL-1125 — keeps per-step heap traffic at zero).
-3. For each element index `i`:
-   - If `g_i == 0`, skip (sparse-coordinate path).
-   - Else update `exp_avg[i]`, `exp_avg_sq[i]`, compute bias-corrected
-     moments, then write `param[i] -= lr * m_hat / (sqrt(v_hat) + eps)`.
-4. Commit via `unsafe { tensor_handle.update_data(&self.param_workspace) }`
-   inside a `no_grad` closure (SAFETY block documents the four sole-writer
-   invariants).
+`step()` iterates `(group_idx, param_idx)` pairs. For each:
 
-The dense-input + element-wise zero-skip is the divergence from upstream.
-Behaviourally on a SparseCoo gradient materialized as dense, the results
-match index-by-index, but the type-level contract (upstream rejects dense
-gradients) is missing. Tracking blocker #1463.
+1. Pop any registered `SparseGrad` for the `ParamKey` (CL-1122 typed key).
+2. If none is registered but a DENSE `.grad` is set, REJECT with
+   `"SparseAdam does not support dense gradients, please consider Adam
+   instead"` (`torch/optim/sparse_adam.py:88-92`). If neither, skip (no grad).
+3. Fail-fast on CUDA with `FerrotorchError::NotImplementedOnCuda` (#1468).
+4. `sparse_step`: coalesce the grad (duplicate indices summed,
+   `_functional.py:44`), increment the per-key step, then for each coalesced
+   index `r` and slab element `j`: masked-EMA `exp_avg[r,j]` / `exp_avg_sq[r,j]`,
+   compute `step_size = lr*sqrt(bc2)/bc1`, write
+   `param[r,j] -= step_size * exp_avg[r,j] / (sqrt(exp_avg_sq[r,j]) + eps)`.
+5. Commit via `unsafe { tensor.update_data(&data) }` (SAFETY block documents
+   the sole-writer CPU-only invariant; mirrors torch's `@torch.no_grad()`).
+
+Moment buffers and parameter elements OUTSIDE the coalesced indices are left
+untouched (the sparse mask, `_functional.py:65-72`). Validated byte-for-byte
+against live `torch.optim.SparseAdam` 2.11.0. Closes #1463.
 
 ### `state_dict` / `load_state_dict`
 
@@ -107,9 +122,13 @@ estimate. Upstream serializes `step / exp_avg / exp_avg_sq` per parameter.
 as `ferrotorch::optim::{SparseAdam, SparseAdamConfig}`. This is the
 public boundary every downstream training crate sees.
 
-`ferrotorch-nn/src/embedding.rs` documents `SparseAdam` as the canonical
-consumer of `Embedding::sparse_grad` (`embedding.rs`),
-binding the embedding sparse-grad path to this optimizer.
+`ferrotorch-nn/src/embedding.rs`'s `Embedding::sparse_grad` is the sparse-grad
+producer; `SparseAdam::collect_sparse_grad_from_embedding`
+(`ferrotorch-optim/src/sparse_adam.rs`) is the wired non-test production
+consumer — it calls `Embedding::sparse_grad`, registers the result via
+`set_sparse_grad`, and `SparseAdam::step` applies the masked update. This is
+the `nn.Embedding(sparse=True)` → `torch.optim.SparseAdam` flow
+(`torch/nn/modules/sparse.py:34,48`).
 
 ## Parity contract
 
@@ -120,24 +139,41 @@ back to the lib-test suite for this file.
 
 Edge-case behaviors the code owns:
 
-- **Zero gradient at all indices** — step is a no-op for that parameter
-  (every per-index branch hits `continue`).
+- **Empty sparse grad (nnz == 0)** — step is a no-op for that parameter
+  (`sparse_step` returns early before incrementing the step), matching
+  torch's empty-grad skip (`torch/optim/_functional.py:47-49`).
+- **Dense `.grad` with no registered sparse grad** — rejected with the
+  verbatim upstream message (`torch/optim/sparse_adam.py:88-92`).
+- **Index absent from the COO grad** — its moment buffers stay at zero and
+  its param stays byte-stable (the sparse mask, `_functional.py:65-72`).
 - **CUDA parameter** — `FerrotorchError::NotImplementedOnCuda` early-return
   (no silent demote).
-- **Empty tensor (numel == 0)** — the per-index loop does not execute;
-  `update_data` writes an empty slice.
-- **NaN/Inf gradient at index `i`** — the moment buffers accumulate
-  the NaN/Inf and propagate it forever after; ferrotorch makes no
-  attempt to gate this (matches upstream).
+- **NaN/Inf gradient value** — the moment buffers accumulate the NaN/Inf and
+  propagate it forever after; ferrotorch makes no attempt to gate this
+  (matches upstream).
 
 ## Verification
 
-Tests in `mod tests` of `sparse_adam.rs` (4 tests):
+Tests in `mod tests` of `sparse_adam.rs` (6 tests), all grounded in a live
+`torch.optim.SparseAdam` 2.11.0 oracle (R-CHAR-3):
 
-- `test_sparse_adam_skips_zero_gradients` — zero gradient indices stay byte-stable.
-- `test_sparse_adam_dense_matches_direction` — positive grad shrinks, negative grad grows.
-- `test_sparse_adam_multiple_steps` — 10 steps of constant positive gradient decreases param.
-- `test_sparse_adam_zero_grad` — `zero_grad()` clears.
+- `sparse_adam_matches_torch_oracle_one_step_with_coalesce` — single step with
+  a duplicate-index grad; byte-matches torch including the coalesce sum.
+- `sparse_adam_matches_torch_oracle_multi_step` — 3 sequential steps match the
+  torch trajectory.
+- `sparse_adam_leaves_untouched_rows_byte_stable` — masked update touches only
+  coalesced indices.
+- `sparse_adam_rejects_dense_grad_like_torch` — dense grad → verbatim error.
+- `sparse_adam_no_grad_is_noop` — no grad set → no-op.
+- `sparse_adam_zero_grad_clears` — `zero_grad()` clears.
+
+Conformance (`ferrotorch-optim/tests/conformance_optim_adam_family.rs`):
+`sparse_adam_trajectory` drives the optimizer through a fully-materialised
+sparse grad (the masked `step_size` formula, fixture validated byte-for-byte
+vs live torch in `scripts/regenerate_optim_adam_fixtures.py`),
+`sparse_adam_skips_untouched_rows`, and the end-to-end production chain
+`sparse_adam_consumes_embedding_sparse_grad_end_to_end`
+(`Embedding(sparse=true)` → `collect_sparse_grad_from_embedding` → `step`).
 
 Smoke command:
 
@@ -145,7 +181,7 @@ Smoke command:
 cargo test -p ferrotorch-optim --lib sparse_adam:: 2>&1 | tail -3
 ```
 
-Expected: `4 passed`.
+Expected: `6 passed`. `parity_ops = []` per the parity contract below.
 
 ## REQ status table
 
@@ -153,8 +189,8 @@ Expected: `4 passed`.
 |---|---|---|
 | REQ-1 | SHIPPED | impl: `pub struct SparseAdamConfig` in `ferrotorch-optim/src/sparse_adam.rs` mirroring `torch/optim/sparse_adam.py:14`; non-test consumer: `ferrotorch/src/lib.rs` `pub use ferrotorch_optim::*;` re-exports as `ferrotorch::optim::SparseAdamConfig`. |
 | REQ-2 | SHIPPED | impl: `pub struct SparseAdam<T>` + `impl<T: Float> Optimizer<T>` in `ferrotorch-optim/src/sparse_adam.rs` mirroring `torch.optim.SparseAdam` (`torch/optim/sparse_adam.py:13`); non-test consumer: `ferrotorch/src/lib.rs` re-export plus the documented consumer chain at `ferrotorch-nn/src/embedding.rs`. |
-| REQ-3 | NOT-STARTED | sparse-COO gradient contract missing; blocked on #1463. Current behavior matches per-index but the type-level `is_sparse` check is absent. |
-| REQ-4 | SHIPPED | impl: per-`ParamKey` `state: HashMap<ParamKey, SparseAdamState>` in `ferrotorch-optim/src/sparse_adam.rs` with per-key `step_count` updated at `sparse_adam.rs` mirroring `torch/optim/sparse_adam.py:98`; non-test consumer: `ferrotorch/src/lib.rs` re-export. |
-| REQ-5 | SHIPPED | impl: bias-corrected Adam update at `ferrotorch-optim/src/sparse_adam.rs` mirroring the Adam update in upstream's `_functional.py` invoked from `torch/optim/sparse_adam.py:126-138`; non-test consumer: `ferrotorch/src/lib.rs` re-export. |
-| REQ-6 | NOT-STARTED | state_dict/load_state_dict are no-op stubs at `ferrotorch-optim/src/sparse_adam.rs`; blocked on follow-up not yet filed (state-dict for SparseAdam needs the sparse-COO type from #1463 to land first). |
-| REQ-7 | SHIPPED | impl: `FerrotorchError::NotImplementedOnCuda { op: "SparseAdam" }` early-return at `ferrotorch-optim/src/sparse_adam.rs` (a documented intentional divergence from upstream, tracked by #1468); non-test consumer: `ferrotorch/src/lib.rs` re-export — every downstream caller transparently sees the error and routes around it. |
+| REQ-3 | SHIPPED | impl: `SparseAdam::step` requires a registered `ferrotorch_core::SparseGrad` and rejects a dense `.grad` with torch's verbatim message (`fn step` in `ferrotorch-optim/src/sparse_adam.rs`, mirroring `torch/optim/sparse_adam.py:88-92`); the masked step (`fn sparse_step`) mirrors `torch/optim/_functional.py:24-84`. Non-test production consumer: `SparseAdam::collect_sparse_grad_from_embedding` (`ferrotorch-optim/src/sparse_adam.rs`) consumes `Embedding::sparse_grad` (`ferrotorch-nn/src/embedding.rs`) and registers via `set_sparse_grad`, which `SparseAdam::step` reads. Closes #1463. |
+| REQ-4 | SHIPPED | impl: per-`ParamKey` `state: HashMap<ParamKey, SparseAdamState>` in `ferrotorch-optim/src/sparse_adam.rs` with per-key `step_count` incremented in `fn sparse_step` mirroring `torch/optim/sparse_adam.py:98`; non-test consumer: `ferrotorch/src/lib.rs` re-export. |
+| REQ-5 | SHIPPED | impl: bias-corrected sparse-Adam step (`step_size = lr*sqrt(bc2)/bc1`, `param -= step_size*numer/(sqrt(v)+eps)`) in `fn sparse_step` in `ferrotorch-optim/src/sparse_adam.rs` mirroring `torch/optim/_functional.py:80-84`; non-test consumer: `ferrotorch/src/lib.rs` re-export. |
+| REQ-6 | NOT-STARTED | state_dict/load_state_dict are no-op stubs at `ferrotorch-optim/src/sparse_adam.rs`; serialisation of the masked moment buffers is unbuilt (no prereq blocker filed yet). |
+| REQ-7 | SHIPPED | impl: `FerrotorchError::NotImplementedOnCuda { op: "SparseAdam" }` early-return in `fn step`/`fn sparse_step` at `ferrotorch-optim/src/sparse_adam.rs` (a documented intentional divergence from upstream, tracked by #1468); non-test consumer: `ferrotorch/src/lib.rs` re-export — every downstream caller transparently sees the error and routes around it. |

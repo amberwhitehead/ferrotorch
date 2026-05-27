@@ -2132,6 +2132,27 @@ impl<T: Float> SparseGrad<T> {
         self.slab_shape.iter().product::<usize>().max(1)
     }
 
+    /// Whether this gradient uses a sparse layout.
+    ///
+    /// Always `true` — a [`SparseGrad`] is the materialised sparse-layout
+    /// gradient that `nn.Embedding(sparse=True)` produces. This mirrors
+    /// `torch.Tensor.is_sparse` returning `True` for a sparse-COO gradient
+    /// (`torch/overrides.py:1389`, the `is_sparse` getter). Optimizers that
+    /// require sparse gradients gate on this predicate the way
+    /// `torch.optim.SparseAdam` checks `p.grad.is_sparse`
+    /// (`torch/optim/sparse_adam.py:88`); a dense `Tensor<T>` gradient has no
+    /// `SparseGrad` view and therefore is rejected by those optimizers.
+    ///
+    /// It is a method rather than a constant so the predicate reads
+    /// identically at the call site to the upstream `p.grad.is_sparse`
+    /// attribute access, and so a future dense-backed `SparseGrad` variant
+    /// could return `false` without a breaking signature change.
+    #[inline]
+    #[must_use]
+    pub fn is_sparse(&self) -> bool {
+        true
+    }
+
     /// Coalesce: sum slabs that share the same index, returning a new
     /// `SparseGrad` whose `indices` are unique (and sorted ascending).
     pub fn coalesce(&self) -> Self {
@@ -3122,6 +3143,15 @@ mod tests {
         // 2 indices, slab_shape [3] → expects 6 values.
         let err = SparseGrad::<f32>::new(vec![0, 2], vec![1.0; 5], vec![3]).unwrap_err();
         assert!(matches!(err, FerrotorchError::ShapeMismatch { .. }));
+    }
+
+    #[test]
+    fn sparse_grad_is_sparse_predicate() {
+        // Mirrors `torch.Tensor.is_sparse == True` for a sparse-COO grad
+        // (torch/overrides.py:1389); the marker `torch.optim.SparseAdam`
+        // gates on at sparse_adam.py:88.
+        let g = SparseGrad::<f32>::new(vec![0], vec![1.0, 2.0], vec![2]).unwrap();
+        assert!(g.is_sparse());
     }
 
     #[test]

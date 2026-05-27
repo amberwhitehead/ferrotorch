@@ -267,8 +267,14 @@ def run_radam(
 
 # ---------------------------------------------------------------------------
 # SparseAdam
-# Reference: torch.optim.SparseAdam
-# Dense inputs: equivalent to Adam without weight_decay/amsgrad.
+# Reference: torch.optim.SparseAdam (the TRUE masked formula, not Adam).
+# torch.optim._functional.sparse_adam (torch/optim/_functional.py:24-84):
+#   step_size = lr * sqrt(bc2) / bc1
+#   param -= step_size * exp_avg / (sqrt(exp_avg_sq) + eps)
+# This differs from dense Adam (m_hat/(sqrt(v_hat)+eps)) in where eps enters.
+# Here every index is materialised (a fully-dense sparse grad), so the mask
+# covers all coordinates and the trajectory is the exact SparseAdam path —
+# what ferrotorch reproduces by registering a SparseGrad over all rows.
 # ---------------------------------------------------------------------------
 
 
@@ -288,11 +294,11 @@ def run_sparse_adam(
         v = [beta2 * v[i] + (1 - beta2) * g[i] ** 2 for i in range(N_PARAMS)]
         bc1 = 1 - beta1**step
         bc2 = 1 - beta2**step
+        step_size = lr * math.sqrt(bc2) / bc1
         new_params = []
         for i in range(N_PARAMS):
-            m_hat = m[i] / bc1
-            v_hat = v[i] / bc2
-            new_params.append(params[i] - lr * m_hat / (math.sqrt(v_hat) + eps))
+            denom = math.sqrt(v[i]) + eps
+            new_params.append(params[i] - step_size * m[i] / denom)
         params = new_params
         trajectory.append(list(params))
     return trajectory

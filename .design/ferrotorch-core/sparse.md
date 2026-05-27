@@ -51,8 +51,9 @@ integration path for dense↔sparse conversion + spmm on CUDA.
   `torch.sparse_csc_tensor`.
 - REQ-7: `SemiStructuredSparseTensor<T>` — 2:4 structured sparsity
   layout. Compress / decompress round-trip matches
-  `pruning::apply_2_4_mask` output (cross-checked at
-  `sparse.rs:3011-3027`). Mirrors `torch.sparse.SparseSemiStructuredTensor`
+  `pruning::apply_2_4_mask` output (cross-checked in the
+  `semi24_compress_then_decompress_matches_apply_2_4_mask` test in
+  `sparse.rs`). Mirrors `torch.sparse.SparseSemiStructuredTensor`
   and the cuSPARSELt 2:4 layout at
   `aten/src/ATen/native/cuda/Sparse24.cu`.
 - REQ-8: `sparse_matmul_24(sparse, dense)` — matmul where the LHS is a
@@ -61,7 +62,11 @@ integration path for dense↔sparse conversion + spmm on CUDA.
 - REQ-9: `SparseGrad<T>` — sparse gradient accumulator used by
   `nn.Embedding.weight` when `sparse=True`. Stores indices + values
   and merges into the dense param at optimizer step time. Mirrors
-  PyTorch's `torch.optim.SparseAdam` parameter expectations.
+  PyTorch's `torch.optim.SparseAdam` parameter expectations. The
+  `is_sparse()` predicate (always `true`) is the marker that sparse-grad
+  optimizers gate on, mirroring `torch.Tensor.is_sparse`
+  (`torch/overrides.py:1389`) that `torch.optim.SparseAdam` checks
+  (`torch/optim/sparse_adam.py:88`).
 
 ## Acceptance Criteria
 
@@ -71,7 +76,8 @@ integration path for dense↔sparse conversion + spmm on CUDA.
   non-zero entries (CPU path).
 - [x] AC-3: `SemiStructuredSparseTensor::compress(t).decompress()`
   produces the same buffer as `pruning::apply_2_4_mask(t)`
-  (`sparse.rs:3011-3027`).
+  (the `semi24_compress_then_decompress_matches_apply_2_4_mask` test in
+  `sparse.rs`).
 - [x] AC-4: `CsrTensor` round-trips to / from dense.
 - [x] AC-5: `sparse_matmul_24(sparse, dense)` matches
   `apply_2_4_mask(weight).matmul(dense)` byte-for-byte on CPU.
@@ -81,49 +87,50 @@ integration path for dense↔sparse conversion + spmm on CUDA.
 
 The file groups four sparse layouts plus the gradient accumulator:
 
-- `SparseTensor<T>` (`sparse.rs:99-770`) — owns the COO data + a
-  rich method set (`to_dense`, `coalesce`, `from_dense`, arithmetic).
-  `from_dense` has a cuSPARSE fast path at `:178-195` that handles
-  the `T ∈ {f32, f64} && threshold == 0 && device == CUDA` case via
-  the `dense_to_sparse_csr_*` backend methods; falls back to a host
-  walk for other dtypes / thresholds / devices.
-- `CooTensor<T>` (`sparse.rs:771-1074`) — the value-typed mirror
-  with a `Vec<isize>` indices layout (more amenable to `dyn`-erased
+- `SparseTensor<T>` (`pub struct SparseTensor` in `sparse.rs`) — owns the
+  COO data + a rich method set (`to_dense`, `coalesce`, `from_dense`,
+  arithmetic). `from_dense` has a cuSPARSE fast path that handles the
+  `T ∈ {f32, f64} && threshold == 0 && device == CUDA` case via the
+  `dense_to_sparse_csr_*` backend methods; falls back to a host walk for
+  other dtypes / thresholds / devices.
+- `CooTensor<T>` (`pub struct CooTensor` in `sparse.rs`) — the value-typed
+  mirror with a `Vec<isize>` indices layout (more amenable to `dyn`-erased
   dispatch). Provides `to_dense`, `coalesce`, slice operations.
-- `CsrTensor<T>` (`sparse.rs:1075-1395`) — CSR with `crow_indices:
-  Vec<i64>`, `col_indices: Vec<i64>`, `values: Vec<T>`. Includes
-  `to_dense`, `from_dense`, `matmul_dense` and the cuSPARSE
+- `CsrTensor<T>` (`pub struct CsrTensor` in `sparse.rs`) — CSR with
+  `crow_indices: Vec<i64>`, `col_indices: Vec<i64>`, `values: Vec<T>`.
+  Includes `to_dense`, `from_dense`, `matmul_dense` and the cuSPARSE
   conversion helpers used by `SparseTensor::from_dense`.
-- `SemiStructuredSparseTensor<T>` (`sparse.rs:1396-1691`) — packed
-  storage of the 2 kept values per group + a 2-bit mask per group
-  encoding which positions were kept. `compress` walks 4-element
-  chunks; `decompress` is the inverse. The compressed form is the
+- `SemiStructuredSparseTensor<T>` (`pub struct SemiStructuredSparseTensor`
+  in `sparse.rs`) — packed storage of the 2 kept values per group + a 2-bit
+  mask per group encoding which positions were kept. `compress` walks
+  4-element chunks; `decompress` is the inverse. The compressed form is the
   one cuSPARSELt consumes for 2:4 matmul.
-- `sparse_matmul_24` (`sparse.rs:1570-1691`) — top-level free
-  function for 2:4 sparse × dense matmul; dispatches to cuSPARSELt
-  via the backend on CUDA (when supported), CPU reference impl
-  otherwise.
-- `CscTensor<T>` (`sparse.rs:1692-2058`) — column-compressed mirror
-  of CSR with the same to_dense / from_dense surface.
-- `SparseGrad<T>` (`sparse.rs:2059-...`) — accumulates `(indices,
-  values)` updates produced by `Embedding`'s backward when
-  `sparse=True`, then merges into the dense parameter at optimizer
-  step time.
+- `sparse_matmul_24` (`pub fn sparse_matmul_24` in `sparse.rs`) — top-level
+  free function for 2:4 sparse × dense matmul; dispatches to cuSPARSELt via
+  the backend on CUDA (when supported), CPU reference impl otherwise.
+- `CscTensor<T>` (`pub struct CscTensor` in `sparse.rs`) — column-compressed
+  mirror of CSR with the same to_dense / from_dense surface.
+- `SparseGrad<T>` (`pub struct SparseGrad` in `sparse.rs`) — accumulates
+  `(indices, values)` updates produced by `Embedding`'s backward when
+  `sparse=True`, exposes `is_sparse()` / `coalesce()`, then merges into the
+  dense parameter at optimizer step time (`SparseGrad::apply_sgd`, or the
+  masked sparse-Adam update in `ferrotorch_optim::SparseAdam`).
 
 Non-test production consumers:
 
 - `pruning::apply_2_4_mask` is cross-checked against
-  `SemiStructuredSparseTensor::compress`+`decompress` at
-  `sparse.rs:3011-3027` (this is the integration site that proves
-  the two implementations agree).
-- The cuSPARSE backend methods are documented at
-  `gpu_dispatch.rs:2960-3019, 3071-3334` as the consumers of
-  `SparseTensor` / `CooTensor` GPU dispatch.
-- All sparse layouts are re-exported at
-  `lib.rs:185-186` (`pub use sparse::{CooTensor, CscTensor, CsrTensor,
-  SparseGrad, SparseTensor, SemiStructuredSparseTensor,
-  sparse_matmul_24};`) and consumed by downstream `ferrotorch-nn`
-  (`nn::Embedding` with `sparse=true`).
+  `SemiStructuredSparseTensor::compress`+`decompress` in the
+  `semi24_compress_then_decompress_matches_apply_2_4_mask` test in
+  `sparse.rs` (the integration site that proves the two implementations
+  agree).
+- The cuSPARSE backend methods (the `dense_to_sparse_csr_*` /
+  `// -- Sparse <-> Dense conversion (cuSPARSE)` region of `gpu_dispatch.rs`)
+  are the consumers of `SparseTensor` / `CooTensor` GPU dispatch.
+- All sparse layouts are re-exported from `lib.rs`
+  (`pub use sparse::{CooTensor, CscTensor, CsrTensor, SparseGrad,
+  SparseTensor, SemiStructuredSparseTensor, sparse_matmul_24};`) and
+  consumed by downstream `ferrotorch-nn` (`nn::Embedding` with
+  `sparse=true`).
 
 ## Parity contract
 
@@ -146,12 +153,12 @@ Expected: the in-file test mod (~3-4 tests) passes.
 
 | REQ | Status | Evidence |
 |---|---|---|
-| REQ-1 | SHIPPED | impl: `SparseTensor` struct at `ferrotorch-core/src/sparse.rs:99`, `new` constructor at `:120` with validation; non-test consumer: re-exported at `ferrotorch-core/src/lib.rs:185-186`, reachable by `ferrotorch_core::SparseTensor::new(...)`. |
-| REQ-2 | SHIPPED | impl: `SparseTensor::from_dense` at `ferrotorch-core/src/sparse.rs:178-195` (cuSPARSE path) plus host walk fallback; non-test consumer: pub method on the re-exported type, called by downstream sparse-aware optimizers (used by `nn::Embedding(sparse=True)` materialisation logic). |
-| REQ-3 | SHIPPED | impl: `coalesce`, `to_dense`, sparse-add methods on `SparseTensor` in the `sparse.rs:99-770` block; non-test consumer: pub-method surface on the re-exported type. Per S5 the pub API is grandfathered. |
-| REQ-4 | SHIPPED | impl: `CooTensor<T>` at `ferrotorch-core/src/sparse.rs:771`; non-test consumer: re-exported at `lib.rs:185`. |
-| REQ-5 | SHIPPED | impl: `CsrTensor<T>` at `ferrotorch-core/src/sparse.rs:1075`; non-test consumer: re-exported at `lib.rs:185`; cuSPARSE backend consumes its `(crow_indices, col_indices, values)` layout at the dispatch boundary (`gpu_dispatch.rs:2960-3019`). |
-| REQ-6 | SHIPPED | impl: `CscTensor<T>` at `ferrotorch-core/src/sparse.rs:1692`; non-test consumer: re-exported at `lib.rs:185`. |
-| REQ-7 | SHIPPED | impl: `SemiStructuredSparseTensor<T>` at `ferrotorch-core/src/sparse.rs:1396`; non-test consumer: cross-checked against `pruning::apply_2_4_mask` in the `semi24_compress_then_decompress_matches_apply_2_4_mask` test at `sparse.rs:3011-3027`, which proves the layout's production round-trip semantics match the pruning mask exactly. |
-| REQ-8 | SHIPPED | impl: `sparse_matmul_24` at `ferrotorch-core/src/sparse.rs:1570`; non-test consumer: re-exported at `lib.rs:186`. |
-| REQ-9 | SHIPPED | impl: `SparseGrad<T>` at `ferrotorch-core/src/sparse.rs:2059`; non-test consumer: re-exported at `lib.rs:185`; consumed by `Embedding.backward(sparse=true)` to accumulate gradients on selected rows only. |
+| REQ-1 | SHIPPED | impl: `pub struct SparseTensor` + `SparseTensor::new` (with validation) in `ferrotorch-core/src/sparse.rs`; non-test consumer: re-exported at `ferrotorch-core/src/lib.rs` (`pub use sparse::SparseTensor`), reachable by `ferrotorch_core::SparseTensor::new(...)`. |
+| REQ-2 | SHIPPED | impl: `SparseTensor::from_dense` in `ferrotorch-core/src/sparse.rs` (cuSPARSE path) plus host walk fallback; non-test consumer: pub method on the re-exported type, called by downstream sparse-aware optimizers (used by `nn::Embedding(sparse=True)` materialisation logic). |
+| REQ-3 | SHIPPED | impl: `coalesce`, `to_dense`, sparse-add methods on `SparseTensor` in `sparse.rs`; non-test consumer: pub-method surface on the re-exported type. Per S5 the pub API is grandfathered. |
+| REQ-4 | SHIPPED | impl: `pub struct CooTensor` in `ferrotorch-core/src/sparse.rs`; non-test consumer: re-exported at `lib.rs` (`pub use sparse::CooTensor`). |
+| REQ-5 | SHIPPED | impl: `pub struct CsrTensor` in `ferrotorch-core/src/sparse.rs`; non-test consumer: re-exported at `lib.rs`; cuSPARSE backend consumes its `(crow_indices, col_indices, values)` layout at the `dense_to_sparse_csr_*` dispatch boundary in `gpu_dispatch.rs`. |
+| REQ-6 | SHIPPED | impl: `pub struct CscTensor` in `ferrotorch-core/src/sparse.rs`; non-test consumer: re-exported at `lib.rs`. |
+| REQ-7 | SHIPPED | impl: `pub struct SemiStructuredSparseTensor` in `ferrotorch-core/src/sparse.rs`; non-test consumer: cross-checked against `pruning::apply_2_4_mask` in the `semi24_compress_then_decompress_matches_apply_2_4_mask` test in `sparse.rs`, which proves the layout's production round-trip semantics match the pruning mask exactly. |
+| REQ-8 | SHIPPED | impl: `pub fn sparse_matmul_24` in `ferrotorch-core/src/sparse.rs`; non-test consumer: re-exported at `lib.rs` (`pub use sparse::sparse_matmul_24`). |
+| REQ-9 | SHIPPED | impl: `SparseGrad<T>` (incl. `is_sparse()` predicate mirroring `torch/overrides.py:1389`) at `ferrotorch-core/src/sparse.rs`; non-test consumer: re-exported at `lib.rs`; produced by `Embedding::sparse_grad` (`ferrotorch-nn/src/embedding.rs`, `sparse=true`) and consumed by `ferrotorch_optim::SparseAdam::sparse_step` (`ferrotorch-optim/src/sparse_adam.rs`, the masked sparse-Adam update mirroring `torch/optim/_functional.py:24-84`). |
