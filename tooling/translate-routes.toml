@@ -1740,6 +1740,15 @@ parity_ops = []
 
 
 [[route]]
+crate_pattern = "ferrotorch-distributions/src/binomial.rs"
+upstream = [
+  "/home/doll/pytorch/torch/distributions/",
+]
+design = ".design/ferrotorch-distributions/binomial.md"
+parity_ops = []
+
+
+[[route]]
 crate_pattern = "ferrotorch-distributions/src/beta.rs"
 upstream = [
   "/home/doll/pytorch/torch/distributions/",

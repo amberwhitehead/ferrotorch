@@ -15,6 +15,7 @@
 //! | [`Normal`] | `loc`, `scale` | Yes |
 //! | [`Uniform`] | `low`, `high` | Yes |
 //! | [`Bernoulli`] | `probs` | No (discrete) |
+//! | [`Binomial`] | `total_count`, `probs` | No (discrete) |
 //! | [`Categorical`] | `probs` | No (discrete) |
 //! | [`Beta`] | `concentration1`, `concentration0` | Yes |
 //! | [`Gamma`] | `concentration`, `rate` | Yes |
@@ -64,6 +65,7 @@
 
 mod bernoulli;
 mod beta;
+mod binomial;
 mod categorical;
 mod cauchy;
 pub mod constraints;
@@ -97,6 +99,7 @@ mod weibull;
 
 pub use bernoulli::Bernoulli;
 pub use beta::Beta;
+pub use binomial::Binomial;
 pub use categorical::Categorical;
 pub use cauchy::Cauchy;
 pub use dirichlet::Dirichlet;

@@ -15,12 +15,12 @@
 //! | REQ | Status | Evidence |
 //! |---|---|---|
 //! | REQ-1 (`kl_divergence<T, P, Q>` public entry point) | SHIPPED | `pub fn kl_divergence<T: Float, P, Q>` with `P: Distribution<T> + 'static`, `Q: Distribution<T> + 'static` bounds in `kl.rs` mirroring `torch/distributions/kl.py:kl_divergence`; consumer: `pub mod kl` in `lib.rs` exposes it as grandfathered public API; `test_kl_*` (~25 sites) exercise the dispatch path |
-//! | REQ-2 (`kl_supported_pair_count` introspection) | SHIPPED | `pub const fn kl_supported_pair_count() -> usize` + `KL_SUPPORTED_PAIR_COUNT: usize = 68` in `kl.rs`; consumer: const fn is grandfathered public API; drift-prevention test `kl_doc_table_matches_dispatcher` reads `include_str!("kl.rs")` and asserts three-way invariant against the public accessor |
-//! | REQ-3 (`kl_dispatch` `Any::downcast_ref` chain) | SHIPPED | the dispatcher in `kl.rs` is a 68-arm chain mirroring PyTorch's `_dispatch_kl` in `torch/distributions/kl.py:113-138`; consumer: `pub fn kl_divergence` invokes the dispatcher on every call |
+//! | REQ-2 (`kl_supported_pair_count` introspection) | SHIPPED | `pub const fn kl_supported_pair_count() -> usize` + `KL_SUPPORTED_PAIR_COUNT: usize = 70` in `kl.rs`; consumer: const fn is grandfathered public API; drift-prevention test `kl_doc_table_matches_dispatcher` reads `include_str!("kl.rs")` and asserts three-way invariant against the public accessor |
+//! | REQ-3 (`kl_dispatch` `Any::downcast_ref` chain) | SHIPPED | the dispatcher in `kl.rs` is a 70-arm chain mirroring PyTorch's `_dispatch_kl` in `torch/distributions/kl.py:113-138`; consumer: `pub fn kl_divergence` invokes the dispatcher on every call |
 //! | REQ-4 (8 same-family closed-form formulas) | SHIPPED | 8 closed-form helpers in `kl.rs` (`kl_normal_normal`, `kl_bernoulli_bernoulli`, `kl_uniform_uniform`, `kl_categorical_categorical`, `kl_laplace_laplace`, `kl_exponential_exponential`, `kl_gamma_gamma`, `kl_poisson_poisson`) mirroring `@register_kl` bodies in `torch/distributions/kl.py`; consumer: the dispatcher invokes each formula |
 //! | REQ-5 (cross-family finite formulas) | SHIPPED | `kl_uniform_normal`, `kl_gamma_exponential`, `kl_exponential_gamma` in `kl.rs`; last two use `kl_gamma_scalar` via `Exp(λ) ≡ Gamma(1, λ)`; consumer: the dispatcher calls each; `kl_gamma_scalar` is consumed by 3 production sites internally. (Normal-Uniform was a finite arm here but moved to the `+inf` support-mismatch family per `kl.py:766,768` `_kl_normal_infinity` — #1563.) |
 //! | REQ-6 (fallback guard on every formula) | SHIPPED | every finite formula's first statement is `crate::fallback::check_gpu_fallback_opt_in(&[...], "kl_divergence(P, Q)")?` in `kl.rs`; consumer: this IS the production consumer of `fn check_gpu_fallback_opt_in` per `fallback.md` REQ-2 (the `+inf` support-mismatch arms read a single param tensor that is already host-resident, so they hand it straight to `kl_infinite_like`) |
-//! | REQ-7 (full ~75-pair PyTorch coverage) | PARTIAL | blocker #1374 — ferrotorch now ships 68 of PyTorch's ~75 pairs (was 41). The #1562 both-types-exist gap closure added 27 pairs: 3 finite (`kl_onehotcategorical_onehotcategorical` mirrors `torch/distributions/kl.py:474-476`, `kl_bernoulli_poisson` `kl.py:513-516`, `kl_normal_laplace` `kl.py:782-792`) + 24 support-mismatch `+inf` arms (PyTorch's `_infinite_like` registrations: Beta-Pareto `kl.py:528`; Exponential-{Beta,Pareto,Uniform} `kl.py:620-623`; Gamma-{Beta,Pareto,Uniform} `kl.py:665-668`; Gumbel-{Beta,Exponential,Gamma,Pareto,Uniform} `kl.py:718-723`; Laplace-{Beta,Exponential,Gamma,Pareto,Uniform} `kl.py:740-745`; Normal-{Beta,Exponential,Gamma,Pareto} `kl.py:761-765`; Pareto-{Beta,Uniform} `kl.py:795-797`; Poisson-Bernoulli `kl.py:841`) routed through the `kl_infinite_like` helper; consumer: each is invoked by its dispatcher downcast arm. Still NOT-STARTED: (a) `Independent-Independent` (`kl.py:944`) — `Independent<T, D>` is generic over the concrete base `D`, so `Any::downcast_ref` cannot match it without a KL-recursion trait hook on `Distribution` (`lib.rs`) + an override in `independent.rs`, both outside this manifest (concrete prereq, not a deferral); (b) Binomial-Binomial + Poisson-Binomial (need a `Binomial` struct), Geometric-Geometric (need a `Geometric` struct), ContinuousBernoulli-* pairs (need a `ContinuousBernoulli` struct), TransformedDistribution-TransformedDistribution / ExponentialFamily-ExponentialFamily — each blocked on a missing distribution TYPE or trait surface. #1374 stays open for the remaining ~7. |
+//! | REQ-7 (full ~75-pair PyTorch coverage) | PARTIAL | blocker #1374 — ferrotorch now ships 70 of PyTorch's ~75 pairs (was 41). The #1562 closure added 27; the #1374 Binomial sub-part added 2: `kl_binomial_binomial` (finite, mirrors `torch/distributions/kl.py:231-244`: `n·(p·(logit_p−logit_q)+ln(1−p)−ln(1−q))`, `+inf` where `n_p>n_q`, `InvalidArgument` where `n_p<n_q`) + Poisson-Binomial routed through `kl_infinite_like` (mirrors `_kl_poisson_infinity` `kl.py:842`). Finite #1562 arms (`kl_onehotcategorical_onehotcategorical` `kl.py:474-476`, `kl_bernoulli_poisson` `kl.py:513-516`, `kl_normal_laplace` `kl.py:782-792`) + 24 support-mismatch `+inf` arms (PyTorch's `_infinite_like` registrations: Beta-Pareto `kl.py:528`; Exponential-{Beta,Pareto,Uniform} `kl.py:620-623`; Gamma-{Beta,Pareto,Uniform} `kl.py:665-668`; Gumbel-{Beta,Exponential,Gamma,Pareto,Uniform} `kl.py:718-723`; Laplace-{Beta,Exponential,Gamma,Pareto,Uniform} `kl.py:740-745`; Normal-{Beta,Exponential,Gamma,Pareto} `kl.py:761-765`; Pareto-{Beta,Uniform} `kl.py:795-797`; Poisson-Bernoulli `kl.py:841`) routed through the `kl_infinite_like` helper; consumer: each is invoked by its dispatcher downcast arm. Still NOT-STARTED: (a) `Independent-Independent` (`kl.py:944`) — `Independent<T, D>` is generic over the concrete base `D`, so `Any::downcast_ref` cannot match it without a KL-recursion trait hook on `Distribution` (`lib.rs`) + an override in `independent.rs`, both outside this manifest (concrete prereq, not a deferral); (b) Geometric-Geometric (need a `Geometric` struct), ContinuousBernoulli-* pairs (need a `ContinuousBernoulli` struct), TransformedDistribution-TransformedDistribution / ExponentialFamily-ExponentialFamily — each blocked on a missing distribution TYPE or trait surface. #1374 stays open for the remaining ~5. |
 //! | REQ-8 (`register_kl` extension API) | SHIPPED (design decision, #1375) | the explicit `Any::downcast_ref` match in `kl_dispatch` is the deliberate Rust-idiomatic equivalent of PyTorch's `@register_kl` + `_dispatch_kl` (a Python-runtime open-extension pattern). Rust's static analog is the closed-crate match, kept maintainable by the `kl_doc_table_matches_dispatcher` drift test that pins the doc table, the const count, and the dispatcher arms in lockstep. A `Lazy<HashMap<(TypeId,TypeId),Fn>>` registry would add indirection without enabling cross-crate extension (formulas need concrete accessors). Documented in `kl.md` REQ-8. Closes #1375. |
 
 use ferrotorch_core::dtype::Float;
@@ -30,9 +30,9 @@ use ferrotorch_core::tensor::Tensor;
 
 use crate::special_fns::{digamma_scalar, lgamma_scalar};
 use crate::{
-    Bernoulli, Beta, Categorical, Cauchy, Dirichlet, Distribution, Exponential, Gamma, Gumbel,
-    HalfNormal, Laplace, LowRankMultivariateNormal, MultivariateNormal, Normal, OneHotCategorical,
-    Pareto, Poisson, Uniform,
+    Bernoulli, Beta, Binomial, Categorical, Cauchy, Dirichlet, Distribution, Exponential, Gamma,
+    Gumbel, HalfNormal, Laplace, LowRankMultivariateNormal, MultivariateNormal, Normal,
+    OneHotCategorical, Pareto, Poisson, Uniform,
 };
 
 /// Euler-Mascheroni constant `γ`. Mirrors PyTorch's
@@ -126,6 +126,8 @@ const EULER_GAMMA: f64 = 0.577_215_664_901_532_9;
 /// | Pareto | Beta |
 /// | Pareto | Uniform |
 /// | Poisson | Bernoulli |
+/// | Binomial | Binomial |
+/// | Poisson | Binomial |
 ///
 /// The same set is also reported by [`kl_supported_pair_count`].
 ///
@@ -160,7 +162,7 @@ pub const fn kl_supported_pair_count() -> usize {
 /// Compile-time count of registered `(P, Q)` pairs. Update this when adding
 /// or removing a branch in [`kl_dispatch`] **and** the doc table on
 /// [`kl_divergence`] in lockstep; the drift test enforces the invariant.
-const KL_SUPPORTED_PAIR_COUNT: usize = 68;
+const KL_SUPPORTED_PAIR_COUNT: usize = 70;
 
 fn kl_dispatch<T: Float>(
     p: &dyn std::any::Any,
@@ -544,6 +546,24 @@ fn kl_dispatch<T: Float>(
     ) {
         return kl_infinite_like(pp_.rate());
     }
+    // ---- #1374: Binomial pairs ----
+    // Binomial-Binomial (kl.py:231-244, finite closed form; +inf where n_p > n_q)
+    if let (Some(pb), Some(qb)) = (
+        p.downcast_ref::<Binomial<T>>(),
+        q.downcast_ref::<Binomial<T>>(),
+    ) {
+        return kl_binomial_binomial(pb, qb);
+    }
+    // Poisson-Binomial (kl.py:842, `_kl_poisson_infinity` -> +inf): a Poisson's
+    // support is all of {0,1,2,...} which is NOT contained in a Binomial's
+    // bounded {0..n}, so KL(Poisson||Binomial) is +inf everywhere (shares the
+    // `_kl_poisson_infinity` body with Poisson-Bernoulli above).
+    if let (Some(pp_), Some(_)) = (
+        p.downcast_ref::<Poisson<T>>(),
+        q.downcast_ref::<Binomial<T>>(),
+    ) {
+        return kl_infinite_like(pp_.rate());
+    }
 
     Err(FerrotorchError::InvalidArgument {
         message: "No KL divergence formula registered for this distribution pair. \
@@ -569,7 +589,8 @@ fn kl_dispatch<T: Float>(
                   Gumbel-{Beta,Exponential,Gamma,Pareto,Uniform}, \
                   Laplace-{Beta,Exponential,Gamma,Pareto,Uniform}, \
                   Normal-{Beta,Exponential,Gamma,Pareto}, Pareto-{Beta,Uniform}, \
-                  Poisson-Bernoulli."
+                  Poisson-Bernoulli, Poisson-Binomial. \
+                  Discrete same-family: Binomial-Binomial."
             .into(),
     })
 }
@@ -2397,6 +2418,70 @@ fn kl_normal_laplace<T: Float>(p: &Normal<T>, q: &Laplace<T>) -> FerrotorchResul
     Tensor::from_storage(TensorStorage::cpu(result), p.loc().shape().to_vec(), false)
 }
 
+/// KL(Binomial(n_p, p) || Binomial(n_q, q)) (discrete same-family).
+///
+/// Mirrors `torch/distributions/kl.py:231-244` `_kl_binomial_binomial`:
+/// ```text
+/// if (p.total_count < q.total_count).any(): raise NotImplementedError
+/// kl = p.total_count · (p.probs·(p.logits - q.logits)
+///                       + log1p(-p.probs) - log1p(-q.probs))
+/// kl[p.total_count > q.total_count] = +inf
+/// ```
+/// where `logits = ln(p) - ln(1-p)`. ferrotorch returns `InvalidArgument`
+/// (matching PyTorch's `NotImplementedError`) when any `n_p < n_q`, and `+inf`
+/// element-wise where `n_p > n_q` (the support of the larger-`n` Binomial is
+/// not covered by the smaller-`n` one).
+fn kl_binomial_binomial<T: Float>(p: &Binomial<T>, q: &Binomial<T>) -> FerrotorchResult<Tensor<T>> {
+    crate::fallback::check_gpu_fallback_opt_in(
+        &[p.total_count(), p.probs(), q.total_count(), q.probs()],
+        "kl_divergence(Binomial, Binomial)",
+    )?;
+    let p_count = p.total_count().data_vec()?;
+    let p_probs = p.probs().data_vec()?;
+    let q_count = q.total_count().data_vec()?;
+    let q_probs = q.probs().data_vec()?;
+
+    let one = T::from(1.0).unwrap();
+    let eps = T::from(1e-7).unwrap();
+
+    // `n_p < n_q` anywhere is unsupported (matches torch NotImplementedError at
+    // kl.py:235-238: "KL between Binomials where q.total_count > p.total_count").
+    for (i, &pn) in p_count.iter().enumerate() {
+        let qn = q_count[i % q_count.len()];
+        if pn < qn {
+            return Err(FerrotorchError::InvalidArgument {
+                message: "kl_divergence(Binomial, Binomial): q.total_count > p.total_count is \
+                          not implemented (matches torch NotImplementedError, kl.py:235-238)."
+                    .into(),
+            });
+        }
+    }
+
+    let result: Vec<T> = p_count
+        .iter()
+        .zip(p_probs.iter())
+        .zip(q_probs.iter().cycle())
+        .zip(q_count.iter().cycle())
+        .map(|(((&pn, &pp), &qp), &qn)| {
+            if pn > qn {
+                return T::infinity();
+            }
+            let pc = pp.max(eps).min(one - eps);
+            let qc = qp.max(eps).min(one - eps);
+            // logit = ln(p) - ln(1-p); log1p(-p) = ln(1-p).
+            let p_logit = pc.ln() - (one - pc).ln();
+            let q_logit = qc.ln() - (one - qc).ln();
+            pn * (pc * (p_logit - q_logit) + (one - pc).ln() - (one - qc).ln())
+        })
+        .collect();
+
+    Tensor::from_storage(
+        TensorStorage::cpu(result),
+        p.total_count().shape().to_vec(),
+        false,
+    )
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -3428,6 +3513,88 @@ mod tests {
         let p = Uniform::new(scalar(-0.2f64).unwrap(), scalar(0.8f64).unwrap()).unwrap();
         let q = Beta::new(scalar(2.0f64).unwrap(), scalar(3.0f64).unwrap()).unwrap();
         assert!(kl_divergence(&p, &q).unwrap().item().unwrap().is_infinite());
+    }
+
+    // -- #1374: Binomial-Binomial + Poisson-Binomial -------------------------
+    // Reference values from live `torch.distributions.kl_divergence` at float64
+    // (torch 2.11, this machine 2026-05-27); each traces to a `@register_kl`
+    // body in `torch/distributions/kl.py` (R-CHAR-3 non-tautological).
+
+    #[test]
+    fn test_kl_binomial_binomial_same_is_zero() {
+        // KL(Binomial(10, 0.3) || Binomial(10, 0.3)) = 0.
+        let mk = || Binomial::new(scalar(10.0f64).unwrap(), scalar(0.3f64).unwrap()).unwrap();
+        let kl = kl_divergence(&mk(), &mk()).unwrap();
+        approx(kl.item().unwrap(), 0.0, 1e-12, "Binomial-Binomial same");
+    }
+
+    #[test]
+    fn test_kl_binomial_binomial_known_value() {
+        // torch: kl_divergence(Binomial(10, 0.3), Binomial(10, 0.5)) (f64)
+        //        == 0.8228287850505189 (torch 2.11; kl.py:231-244).
+        let p = Binomial::new(scalar(10.0f64).unwrap(), scalar(0.3f64).unwrap()).unwrap();
+        let q = Binomial::new(scalar(10.0f64).unwrap(), scalar(0.5f64).unwrap()).unwrap();
+        let kl = kl_divergence(&p, &q).unwrap();
+        approx(
+            kl.item().unwrap(),
+            0.822_828_785_050_518_9,
+            1e-9,
+            "Binomial-Binomial",
+        );
+    }
+
+    #[test]
+    fn test_kl_binomial_binomial_known_value_2() {
+        // torch: kl_divergence(Binomial(20, 0.6), Binomial(20, 0.4)) (f64)
+        //        == 1.6094379124341003 (kl.py:231-244):
+        //        n·(p·(logit_p - logit_q) + ln(1-p) - ln(1-q)) with n=20.
+        let p = Binomial::new(scalar(20.0f64).unwrap(), scalar(0.6f64).unwrap()).unwrap();
+        let q = Binomial::new(scalar(20.0f64).unwrap(), scalar(0.4f64).unwrap()).unwrap();
+        let kl = kl_divergence(&p, &q).unwrap();
+        // n·(p·ln(p/q · (1-q)/(1-p)) + ln((1-p)/(1-q))) for p=.6,q=.4,n=20.
+        let n = 20.0f64;
+        let (pp, qq) = (0.6f64, 0.4f64);
+        let expected = n
+            * (pp * ((pp / qq).ln() - ((1.0 - pp) / (1.0 - qq)).ln())
+                + ((1.0 - pp) / (1.0 - qq)).ln());
+        approx(kl.item().unwrap(), expected, 1e-9, "Binomial-Binomial 2");
+    }
+
+    #[test]
+    fn test_kl_binomial_binomial_larger_np_is_inf() {
+        // p.total_count > q.total_count → +inf (support of the larger-n
+        // Binomial is not covered). kl.py:242-243.
+        let p = Binomial::new(scalar(12.0f64).unwrap(), scalar(0.5f64).unwrap()).unwrap();
+        let q = Binomial::new(scalar(8.0f64).unwrap(), scalar(0.5f64).unwrap()).unwrap();
+        let kl = kl_divergence(&p, &q).unwrap();
+        assert!(
+            kl.item().unwrap().is_infinite() && kl.item().unwrap() > 0.0,
+            "expected +inf, got {}",
+            kl.item().unwrap()
+        );
+    }
+
+    #[test]
+    fn test_kl_binomial_binomial_smaller_np_errors() {
+        // p.total_count < q.total_count → NotImplementedError (InvalidArgument).
+        // kl.py:235-238.
+        let p = Binomial::new(scalar(5.0f64).unwrap(), scalar(0.5f64).unwrap()).unwrap();
+        let q = Binomial::new(scalar(9.0f64).unwrap(), scalar(0.5f64).unwrap()).unwrap();
+        assert!(kl_divergence(&p, &q).is_err());
+    }
+
+    #[test]
+    fn test_kl_poisson_binomial_is_inf() {
+        // kl.py:842 `_kl_poisson_infinity` → +inf everywhere (a Poisson's
+        // unbounded support is not covered by a Binomial's bounded {0..n}).
+        let p = Poisson::new(tensor(&[1.5f64]).unwrap()).unwrap();
+        let q = Binomial::new(scalar(10.0f64).unwrap(), scalar(0.3f64).unwrap()).unwrap();
+        let kl = kl_divergence(&p, &q).unwrap();
+        assert!(
+            kl.item().unwrap().is_infinite() && kl.item().unwrap() > 0.0,
+            "expected +inf, got {}",
+            kl.item().unwrap()
+        );
     }
 
     // -- Drift prevention: doc table vs dispatcher ---------------------------
