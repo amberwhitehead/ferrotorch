@@ -179,7 +179,8 @@ fn feature_alpha_dropout_drops_whole_channels() {
             data.push((ch * 10 + s) as f32 + 1.0);
         }
     }
-    let x = Tensor::from_storage(TensorStorage::cpu(data.clone()), vec![1, c, 2, 2], false).unwrap();
+    let x =
+        Tensor::from_storage(TensorStorage::cpu(data.clone()), vec![1, c, 2, 2], false).unwrap();
     let mut layer = FeatureAlphaDropout::<f32>::new(0.5).unwrap();
     layer.train();
     let out = layer.forward(&x).unwrap();
@@ -226,14 +227,20 @@ fn functional_dropout_deterministic_under_manual_seed() {
         .data()
         .unwrap()
         .to_vec();
-    assert_eq!(a, b, "functional::dropout not deterministic under manual_seed");
+    assert_eq!(
+        a, b,
+        "functional::dropout not deterministic under manual_seed"
+    );
     ferrotorch_core::manual_seed(999);
     let c = ferrotorch_nn::functional::dropout(&x, 0.5, true)
         .unwrap()
         .data()
         .unwrap()
         .to_vec();
-    assert_ne!(a, c, "distinct seeds produced identical masks (RNG not seeded)");
+    assert_ne!(
+        a, c,
+        "distinct seeds produced identical masks (RNG not seeded)"
+    );
 }
 
 // ===========================================================================
@@ -293,7 +300,6 @@ fn conv2d_bias_init_bounded_and_nonzero() {
     );
 }
 
-
 // ===========================================================================
 // ADVERSARIAL: Conv2d non-zero padding_mode autograd severance.
 // `crate::padding::functional_pad_2d` returns a tensor with
@@ -307,7 +313,6 @@ fn conv2d_bias_init_bounded_and_nonzero() {
 // ===========================================================================
 
 #[test]
-#[ignore = "divergence: Conv2d non-zero padding_mode severs input autograd (functional_pad_2d returns requires_grad=false); tracking #1550"]
 fn conv2d_reflect_padding_preserves_input_autograd() {
     use ferrotorch_core::Tensor as T;
     let mut conv = Conv2d::<f32>::new(1, 1, (3, 3), (1, 1), (1, 1), false)
@@ -347,5 +352,129 @@ fn conv2d_zero_padding_preserves_input_autograd_control() {
     assert!(
         x.grad().unwrap().is_some(),
         "zero-pad Conv2d should populate input.grad (control)"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Pad adjoint VALUE checks (not just graph connectivity). For loss = sum(pad(x))
+// the gradient d(loss)/d(x[s]) equals the multiplicity of source index `s` in
+// the pad's gather map (each output element contributes a 1 to its source).
+// These are hand-computed from the gather index map, never from ferrotorch.
+// ---------------------------------------------------------------------------
+
+/// Reflect pad of a 1x1x1x4 row [1,2,3,4] with left=right=1 maps output cols
+/// to source cols [1,0,1,2,3,2] -> multiplicities [1,2,2,1]. Loss=sum(pad)
+/// so input.grad must be exactly [[1,2,2,1]] (the reflect adjoint folds the
+/// out-of-bounds grad back onto the mirrored interior columns).
+#[test]
+fn pad2d_reflect_adjoint_values() {
+    use ferrotorch_core::Tensor as T;
+    use ferrotorch_nn::padding::functional_pad_2d;
+    let x = T::from_storage(
+        TensorStorage::cpu(vec![1.0f32, 2.0, 3.0, 4.0]),
+        vec![1, 1, 1, 4],
+        true,
+    )
+    .unwrap();
+    let padded = functional_pad_2d(&x, 1, 1, 0, 0, PaddingMode::Reflect, 0.0).unwrap();
+    padded.sum_all().unwrap().backward().unwrap();
+    let g = x
+        .grad()
+        .unwrap()
+        .expect("reflect pad severed grad")
+        .data()
+        .unwrap()
+        .to_vec();
+    assert_eq!(
+        g,
+        vec![1.0, 2.0, 2.0, 1.0],
+        "reflect adjoint multiplicity wrong: {g:?}"
+    );
+}
+
+/// Replicate pad left=2,right=1 of [1,2,3,4] maps output cols to sources
+/// [0,0,0,1,2,3,3] -> multiplicities [3,1,1,2]. Replicate adjoint sums the
+/// replicated edge columns into the boundary element.
+#[test]
+fn pad2d_replicate_adjoint_values() {
+    use ferrotorch_core::Tensor as T;
+    use ferrotorch_nn::padding::functional_pad_2d;
+    let x = T::from_storage(
+        TensorStorage::cpu(vec![1.0f32, 2.0, 3.0, 4.0]),
+        vec![1, 1, 1, 4],
+        true,
+    )
+    .unwrap();
+    let padded = functional_pad_2d(&x, 2, 1, 0, 0, PaddingMode::Replicate, 0.0).unwrap();
+    padded.sum_all().unwrap().backward().unwrap();
+    let g = x
+        .grad()
+        .unwrap()
+        .expect("replicate pad severed grad")
+        .data()
+        .unwrap()
+        .to_vec();
+    assert_eq!(
+        g,
+        vec![3.0, 1.0, 1.0, 2.0],
+        "replicate adjoint edge-sum wrong: {g:?}"
+    );
+}
+
+/// Circular pad left=1,right=2 of [1,2,3,4] maps output cols to sources
+/// [3,0,1,2,3,0,1] -> multiplicities [2,2,1,2]. Circular adjoint wraps the
+/// out-of-bounds grad around to the opposite edge.
+#[test]
+fn pad2d_circular_adjoint_values() {
+    use ferrotorch_core::Tensor as T;
+    use ferrotorch_nn::padding::functional_pad_2d;
+    let x = T::from_storage(
+        TensorStorage::cpu(vec![1.0f32, 2.0, 3.0, 4.0]),
+        vec![1, 1, 1, 4],
+        true,
+    )
+    .unwrap();
+    let padded = functional_pad_2d(&x, 1, 2, 0, 0, PaddingMode::Circular, 0.0).unwrap();
+    padded.sum_all().unwrap().backward().unwrap();
+    let g = x
+        .grad()
+        .unwrap()
+        .expect("circular pad severed grad")
+        .data()
+        .unwrap()
+        .to_vec();
+    assert_eq!(
+        g,
+        vec![2.0, 2.0, 1.0, 2.0],
+        "circular adjoint wrap wrong: {g:?}"
+    );
+}
+
+/// Zeros pad adjoint is a pure interior crop: padded columns have no source,
+/// so loss=sum(pad) gives input.grad of all-ones (each interior element
+/// appears exactly once).
+#[test]
+fn pad2d_zeros_adjoint_is_crop() {
+    use ferrotorch_core::Tensor as T;
+    use ferrotorch_nn::padding::functional_pad_2d;
+    let x = T::from_storage(
+        TensorStorage::cpu(vec![1.0f32, 2.0, 3.0, 4.0]),
+        vec![1, 1, 1, 4],
+        true,
+    )
+    .unwrap();
+    let padded = functional_pad_2d(&x, 2, 2, 0, 0, PaddingMode::Zeros, 0.0).unwrap();
+    padded.sum_all().unwrap().backward().unwrap();
+    let g = x
+        .grad()
+        .unwrap()
+        .expect("zeros pad severed grad")
+        .data()
+        .unwrap()
+        .to_vec();
+    assert_eq!(
+        g,
+        vec![1.0, 1.0, 1.0, 1.0],
+        "zeros adjoint crop wrong: {g:?}"
     );
 }
