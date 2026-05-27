@@ -24,7 +24,11 @@ fn hqq_q4_axis1_rejects_nbits_3() {
     let scale = t(vec![1.0; 4], vec![4, 1]);
     let zero = t(vec![0.0; 4], vec![4, 1]);
     let r = hqq_q4_axis1_to_dense(&w_q, &scale, &zero, 3, 4, 1, &[4, 4]);
-    assert!(r.is_err(), "nbits=3 must be rejected, got {:?}", r.map(|_| ()));
+    assert!(
+        r.is_err(),
+        "nbits=3 must be rejected, got {:?}",
+        r.map(|_| ())
+    );
 }
 
 /// axis=0 (per-input-channel grouping, the HQQ default for some configs)
@@ -35,7 +39,11 @@ fn hqq_q4_axis1_rejects_axis_0() {
     let scale = t(vec![1.0; 4], vec![4, 1]);
     let zero = t(vec![0.0; 4], vec![4, 1]);
     let r = hqq_q4_axis1_to_dense(&w_q, &scale, &zero, 4, 4, 0, &[4, 4]);
-    assert!(r.is_err(), "axis=0 must be rejected, got {:?}", r.map(|_| ()));
+    assert!(
+        r.is_err(),
+        "axis=0 must be rejected, got {:?}",
+        r.map(|_| ())
+    );
 }
 
 /// A non-2-D shape must be rejected.
@@ -45,5 +53,9 @@ fn hqq_q4_axis1_rejects_non_2d_shape() {
     let scale = t(vec![1.0; 4], vec![4, 1]);
     let zero = t(vec![0.0; 4], vec![4, 1]);
     let r = hqq_q4_axis1_to_dense(&w_q, &scale, &zero, 4, 4, 1, &[2, 2, 4]);
-    assert!(r.is_err(), "3-D shape must be rejected, got {:?}", r.map(|_| ()));
+    assert!(
+        r.is_err(),
+        "3-D shape must be rejected, got {:?}",
+        r.map(|_| ())
+    );
 }
