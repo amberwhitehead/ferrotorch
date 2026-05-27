@@ -25,8 +25,8 @@ use ferrotorch_optim::{Optimizer, SparseAdam, SparseAdamConfig};
 /// `[leading, slab]`-shaped f64 parameter from a flat row-major buffer.
 fn make_param_2d(data: &[f64], leading: usize, slab: usize) -> Parameter<f64> {
     assert_eq!(data.len(), leading * slab);
-    let t = Tensor::from_storage(TensorStorage::cpu(data.to_vec()), vec![leading, slab], true)
-        .unwrap();
+    let t =
+        Tensor::from_storage(TensorStorage::cpu(data.to_vec()), vec![leading, slab], true).unwrap();
     Parameter::new(t)
 }
 
@@ -179,12 +179,7 @@ fn divergence_1463_axis3_duplicate_index_summed_not_lastwins() {
     let g = SparseGrad::<f64>::new(vec![2, 0, 2], vec![0.3, 5.0, 0.7], vec![1]).unwrap();
     opt.set_sparse_grad(0, 0, g);
     opt.step().unwrap();
-    let expected = [
-        9.500000031622776,
-        20.0,
-        29.50000015811383,
-        40.0,
-    ];
+    let expected = [9.500000031622776, 20.0, 29.50000015811383, 40.0];
     assert_close(&read(&param), &expected, "axis3 dup-index coalesced sum");
 }
 
@@ -208,11 +203,6 @@ fn divergence_1463_axis3_coalesced_equiv_control() {
     let g = SparseGrad::<f64>::new(vec![0, 2], vec![5.0, 1.0], vec![1]).unwrap();
     opt.set_sparse_grad(0, 0, g);
     opt.step().unwrap();
-    let expected = [
-        9.500000031622776,
-        20.0,
-        29.50000015811383,
-        40.0,
-    ];
+    let expected = [9.500000031622776, 20.0, 29.50000015811383, 40.0];
     assert_close(&read(&param), &expected, "axis3 coalesced-equiv control");
 }

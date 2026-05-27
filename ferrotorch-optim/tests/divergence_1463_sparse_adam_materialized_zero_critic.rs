@@ -23,8 +23,8 @@ use ferrotorch_optim::{Optimizer, SparseAdam, SparseAdamConfig};
 
 fn make_param_2d(data: &[f64], leading: usize, slab: usize) -> Parameter<f64> {
     assert_eq!(data.len(), leading * slab);
-    let t = Tensor::from_storage(TensorStorage::cpu(data.to_vec()), vec![leading, slab], true)
-        .unwrap();
+    let t =
+        Tensor::from_storage(TensorStorage::cpu(data.to_vec()), vec![leading, slab], true).unwrap();
     Parameter::new(t)
 }
 
