@@ -6049,8 +6049,9 @@ impl<T: Float> EigBackwardShared<T> {
         self.conjugate(&ret, n)
     }
 
-    /// `gV`-only contribution: build `VhgV`, project onto the unit-norm tangent
-    /// space, divide by `Econj`, then conjugate
+    /// `gV`-only contribution: build `VhgV`, GUARD that the loss is
+    /// phase-invariant (`imag(diag(VhgV)) ≈ 0`, `FunctionsManual.cpp:3867-3879`),
+    /// project onto the unit-norm tangent space, divide by `Econj`, then conjugate
     /// (`FunctionsManual.cpp:3864-3919`, `gL` undefined).
     fn grad_a_from_gv(&self, gv: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
         let n = self.n();
@@ -6062,6 +6063,29 @@ impl<T: Float> EigBackwardShared<T> {
         // VhgV = V^H @ gV  (n×n).
         let vh = c_conj_transpose(&vc, n, n);
         let mut vhgv = c_matmul(&vh, &gvc, n, n, n);
+
+        // Phase-invariance guard (FunctionsManual.cpp:3867-3879). Non-Hermitian
+        // eigenvectors are defined only up to a per-column phase
+        // `V_j -> V_j e^{i phi}`, so torch RAISES on a loss that is NOT
+        // phase-invariant: it takes `diag_VhgV = diag(V^H gV)` (right after the
+        // matmul, BEFORE the unit-norm projection) and checks that its imaginary
+        // part is ~0 via `allclose(imag(diag_VhgV), zeros, rtol=1e-2, atol=1e-2)`.
+        // For a real-V decomposition every imag(diag) is 0, so the guard never
+        // fires for phase-invariant losses; it fires only when the loss reads the
+        // gauge-dependent phase (e.g. `sum(V.real)`), where torch errors and we
+        // must too rather than return a gauge-dependent (ill-defined) gradient.
+        // allclose vs zeros: `|imag(diag)_i| <= atol + rtol*|0| = 1e-2`.
+        let atol = T::from(1e-2).unwrap();
+        let phase_tol_exceeded = (0..n).any(|i| vhgv[i * n + i].1.abs() > atol);
+        if phase_tol_exceeded {
+            return Err(FerrotorchError::InvalidArgument {
+                message: "linalg_eig_backward: The eigenvectors in the complex \
+                          case are specified up to multiplication by e^{i phi}. \
+                          The specified loss function depends on this quantity, \
+                          so it is ill-defined."
+                    .to_string(),
+            });
+        }
 
         // Projection onto the tangent space at V^H V of unit-norm columns:
         //   VhgV <- VhgV - V^H @ (V * real(diag(VhgV)))
