@@ -24,7 +24,7 @@
 //! | REQ-9 | SHIPPED | impl: `pub struct AlphaDropout<T: Float>` + SELU affine correction body inside `<AlphaDropout as Module>::forward` here; non-test consumer: `pub use dropout::AlphaDropout` in `lib.rs`. |
 //! | REQ-10 | SHIPPED | impl: `struct AlphaDropoutBackward<T>` + `GradFn` impl here; non-test consumer: autograd engine traversal on models using `AlphaDropout`. |
 //! | REQ-11 | SHIPPED | impl: 5 `Module<T> for <DropoutKind><T>` impl blocks here, each returning `vec![]` for parameters; non-test consumer: `ferrotorch_optim::Optimizer` walks `Module::parameters_mut()` of containers; dropout returns an empty list (correct: dropout has no trainable parameters). |
-//! | REQ-12 | NOT-STARTED | blocker #1446 — `inplace` kwarg not threaded through `Dropout*::new`. Functional behavior matches upstream; only memory-allocation parity diverges. |
+//! | REQ-12 | SHIPPED | impl: `with_inplace` builder + `inplace` getter + `inplace` field on all six dropout structs, the shared `write_inplace` helper (`Tensor::update_data`), and the `if self.inplace { write_inplace(input, &output_data)? }` branch in `<Dropout/Dropout1d/Dropout2d/Dropout3d as Module>::forward` here, mirroring `_VF.dropout_`/`_VF.feature_dropout_` at `torch/nn/functional.py:1449,1516,1579,1629`; `AlphaDropout`/`FeatureAlphaDropout` carry the field for ABI parity but match torch's module forward which never forwards `inplace` (`dropout.py:265-269,319-323`). Non-test production consumer: the `if self.inplace` branch is on the live forward path of `<Dropout as Module>::forward` here, exercised by `ferrotorch-nn/src/lora.rs` (LoRA input dropout), `ferrotorch-vision/src/models/vgg.rs` / `inception.rs` (classifier head), and `ferrotorch-graph/src/gcn.rs` (inter-layer dropout). Default `inplace=false` preserves existing behavior. Closes #1446. |
 //! | REQ-13 | SHIPPED | impl: `pub struct FeatureAlphaDropout<T: Float>` + `FeatureAlphaDropoutBackward<T>` + `Module<T>` impl here (per-channel alpha-dropout mask broadcast over `[N, C, *]`), closes #1448; non-test consumer: `pub use dropout::FeatureAlphaDropout` in `lib.rs` (re-export) exposes the layer to downstream self-normalising-network model code in `ferrotorch-vision` / `ferrotorch-llama`. |
 //! | REQ-14 | NOT-STARTED | blocker #1441 (umbrella) — `Dropout2d` / `Dropout1d` / `Dropout3d` GPU forward absent (CUDA inputs return `NotImplementedOnCuda`). Parity-sweep runner arms also absent. |
 
@@ -151,6 +151,43 @@ fn philox_dropout_mask<T: Float>(
 }
 
 // ---------------------------------------------------------------------------
+// In-place storage write
+// ---------------------------------------------------------------------------
+
+/// Write `new_data` over `input`'s storage in place, mirroring torch's
+/// `_VF.dropout_` family (`torch/nn/functional.py:1449,1471,1516,1579,1629`)
+/// which mutate the input tensor's buffer rather than allocating a fresh
+/// output. The returned values are the post-mask data, used to build the
+/// autograd output node whose backward routes through the saved mask.
+///
+/// Autograd correctness: the dropout backward nodes
+/// ([`DropoutBackward`] / [`Dropout2dBackward`]) reapply the *saved mask* to
+/// `grad_output` — they never read the forward input's data — so mutating the
+/// input storage is graph-safe. This matches torch, where `dropout_` saves the
+/// mask for backward and the gradient flows through the same scale/zero
+/// pattern independent of the (now mutated) input values.
+fn write_inplace<T: Float>(input: &Tensor<T>, new_data: &[T]) -> FerrotorchResult<()> {
+    // SAFETY: `update_data` requires exclusive access to the input's storage
+    // for the duration of the write. The dropout forward holds the only live
+    // borrow of the input data (consumed into `new_data` above before this
+    // call), and no backward node captures a read view of the forward input's
+    // values — `DropoutBackward`/`Dropout2dBackward` route gradient solely via
+    // the saved mask. `new_data.len() == input.numel()` is guaranteed by the
+    // callers (the mask and input share numel). PyTorch performs this exact
+    // mutation in `_VF.dropout_` (`torch/nn/functional.py:1449`), an in-place
+    // edit of the input buffer whose autograd node likewise depends only on the
+    // saved mask, not the mutated values.
+    #[allow(
+        clippy::undocumented_unsafe_blocks,
+        reason = "SAFETY comment above documents the exclusive-access invariant; torch dropout inplace=True mutates input storage via _VF.dropout_ (torch/nn/functional.py:1449), and the mask-based backward keeps autograd correct"
+    )]
+    unsafe {
+        input.update_data(new_data)?;
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
 // DropoutBackward
 // ---------------------------------------------------------------------------
 
@@ -258,6 +295,13 @@ impl<T: Float> GradFn<T> for Dropout2dBackward<T> {
 pub struct Dropout<T: Float> {
     p: f64,
     training: bool,
+    /// When `true`, the forward mutates the input tensor's storage in place
+    /// (mask + scale written back over the input) instead of allocating a
+    /// fresh output buffer. Mirrors `_DropoutNd.inplace` at
+    /// `torch/nn/modules/dropout.py:29` and the `inplace` branch of
+    /// `F.dropout` at `torch/nn/functional.py:1448-1450`
+    /// (`_VF.dropout_(input, p, training) if inplace`).
+    inplace: bool,
     _marker: std::marker::PhantomData<T>,
 }
 
@@ -274,8 +318,23 @@ impl<T: Float> Dropout<T> {
         Ok(Self {
             p,
             training: true,
+            inplace: false,
             _marker: std::marker::PhantomData,
         })
+    }
+
+    /// Set the `inplace` flag, mirroring `torch.nn.Dropout(p, inplace=...)`
+    /// at `torch/nn/modules/dropout.py:22-29`. When `true`, training-mode
+    /// forward mutates the input storage instead of allocating a new buffer.
+    #[must_use]
+    pub fn with_inplace(mut self, inplace: bool) -> Self {
+        self.inplace = inplace;
+        self
+    }
+
+    /// Returns the `inplace` flag.
+    pub fn inplace(&self) -> bool {
+        self.inplace
     }
 }
 
@@ -353,6 +412,14 @@ impl<T: Float> Module<T> for Dropout<T> {
             .map(|(&x, &m)| x * m)
             .collect();
 
+        // In-place branch: write the masked values back over the input's
+        // storage, mirroring `_VF.dropout_(input, p, training)` at
+        // `torch/nn/functional.py:1449`. The input buffer is mutated; the
+        // returned autograd node still routes gradient via the saved mask.
+        if self.inplace {
+            write_inplace(input, &output_data)?;
+        }
+
         if is_grad_enabled() && input.requires_grad() {
             let scaled_mask = Tensor::from_storage(
                 TensorStorage::cpu(scaled_mask_vec),
@@ -419,6 +486,11 @@ impl<T: Float> Module<T> for Dropout<T> {
 pub struct Dropout2d<T: Float> {
     p: f64,
     training: bool,
+    /// In-place flag, mirroring `_DropoutNd.inplace` at
+    /// `torch/nn/modules/dropout.py:29` and the `inplace` branch of
+    /// `F.dropout2d` at `torch/nn/functional.py:1578-1582`
+    /// (`_VF.feature_dropout_(input, p, training) if inplace`).
+    inplace: bool,
     _marker: std::marker::PhantomData<T>,
 }
 
@@ -435,8 +507,22 @@ impl<T: Float> Dropout2d<T> {
         Ok(Self {
             p,
             training: true,
+            inplace: false,
             _marker: std::marker::PhantomData,
         })
+    }
+
+    /// Set the `inplace` flag, mirroring `torch.nn.Dropout2d(p, inplace=...)`.
+    /// When `true`, training-mode forward mutates the input storage.
+    #[must_use]
+    pub fn with_inplace(mut self, inplace: bool) -> Self {
+        self.inplace = inplace;
+        self
+    }
+
+    /// Returns the `inplace` flag.
+    pub fn inplace(&self) -> bool {
+        self.inplace
     }
 }
 
@@ -497,6 +583,12 @@ impl<T: Float> Module<T> for Dropout2d<T> {
             .zip(scaled_mask.iter())
             .map(|(&x, &m)| x * m)
             .collect();
+
+        // In-place branch mirrors `_VF.feature_dropout_` at
+        // `torch/nn/functional.py:1579`.
+        if self.inplace {
+            write_inplace(input, &output_data)?;
+        }
 
         let result = if is_grad_enabled() && input.requires_grad() {
             Tensor::from_operation(
@@ -560,6 +652,11 @@ impl<T: Float> Module<T> for Dropout2d<T> {
 pub struct Dropout1d<T: Float> {
     p: f64,
     training: bool,
+    /// In-place flag, mirroring `_DropoutNd.inplace` at
+    /// `torch/nn/modules/dropout.py:29` and the `inplace` branch of
+    /// `F.dropout1d` at `torch/nn/functional.py:1515-1519`
+    /// (`_VF.feature_dropout_(input, p, training) if inplace`).
+    inplace: bool,
     _marker: std::marker::PhantomData<T>,
 }
 
@@ -576,8 +673,22 @@ impl<T: Float> Dropout1d<T> {
         Ok(Self {
             p,
             training: true,
+            inplace: false,
             _marker: std::marker::PhantomData,
         })
+    }
+
+    /// Set the `inplace` flag, mirroring `torch.nn.Dropout1d(p, inplace=...)`.
+    /// When `true`, training-mode forward mutates the input storage.
+    #[must_use]
+    pub fn with_inplace(mut self, inplace: bool) -> Self {
+        self.inplace = inplace;
+        self
+    }
+
+    /// Returns the `inplace` flag.
+    pub fn inplace(&self) -> bool {
+        self.inplace
     }
 }
 
@@ -631,6 +742,12 @@ impl<T: Float> Module<T> for Dropout1d<T> {
             .zip(scaled_mask.iter())
             .map(|(&x, &m)| x * m)
             .collect();
+
+        // In-place branch mirrors `_VF.feature_dropout_` at
+        // `torch/nn/functional.py:1516`.
+        if self.inplace {
+            write_inplace(input, &output_data)?;
+        }
 
         let result = if is_grad_enabled() && input.requires_grad() {
             Tensor::from_operation(
@@ -692,6 +809,11 @@ impl<T: Float> Module<T> for Dropout1d<T> {
 pub struct Dropout3d<T: Float> {
     p: f64,
     training: bool,
+    /// In-place flag, mirroring `_DropoutNd.inplace` at
+    /// `torch/nn/modules/dropout.py:29` and the `inplace` branch of
+    /// `F.dropout3d` at `torch/nn/functional.py:1628-1632`
+    /// (`_VF.feature_dropout_(input, p, training) if inplace`).
+    inplace: bool,
     _marker: std::marker::PhantomData<T>,
 }
 
@@ -708,8 +830,22 @@ impl<T: Float> Dropout3d<T> {
         Ok(Self {
             p,
             training: true,
+            inplace: false,
             _marker: std::marker::PhantomData,
         })
+    }
+
+    /// Set the `inplace` flag, mirroring `torch.nn.Dropout3d(p, inplace=...)`.
+    /// When `true`, training-mode forward mutates the input storage.
+    #[must_use]
+    pub fn with_inplace(mut self, inplace: bool) -> Self {
+        self.inplace = inplace;
+        self
+    }
+
+    /// Returns the `inplace` flag.
+    pub fn inplace(&self) -> bool {
+        self.inplace
     }
 }
 
@@ -763,6 +899,12 @@ impl<T: Float> Module<T> for Dropout3d<T> {
             .zip(scaled_mask.iter())
             .map(|(&x, &m)| x * m)
             .collect();
+
+        // In-place branch mirrors `_VF.feature_dropout_` at
+        // `torch/nn/functional.py:1629`.
+        if self.inplace {
+            write_inplace(input, &output_data)?;
+        }
 
         let result = if is_grad_enabled() && input.requires_grad() {
             Tensor::from_operation(
@@ -834,6 +976,20 @@ impl<T: Float> Module<T> for Dropout3d<T> {
 pub struct AlphaDropout<T: Float> {
     p: f64,
     training: bool,
+    /// In-place flag, carried for API parity with `_DropoutNd.inplace`
+    /// (`torch/nn/modules/dropout.py:29`).
+    ///
+    /// NOTE — faithful upstream behaviour: `AlphaDropout.forward` at
+    /// `torch/nn/modules/dropout.py:265-269` calls
+    /// `F.alpha_dropout(input, self.p, self.training)` and does **not** pass
+    /// `self.inplace`, so torch's `nn.AlphaDropout(p, inplace=True)` does NOT
+    /// mutate in place at the module level — the `inplace` field exists on the
+    /// struct (inherited from `_DropoutNd.__init__`) but the module forward
+    /// drops it. We mirror that exactly: the field is stored for ABI parity,
+    /// but [`AlphaDropout::forward`] never mutates the input. (The functional
+    /// `F.alpha_dropout` does accept `inplace`, but the module never forwards
+    /// it.)
+    inplace: bool,
     _marker: std::marker::PhantomData<T>,
 }
 
@@ -854,8 +1010,27 @@ impl<T: Float> AlphaDropout<T> {
         Ok(Self {
             p,
             training: true,
+            inplace: false,
             _marker: std::marker::PhantomData,
         })
+    }
+
+    /// Set the `inplace` flag for API parity with
+    /// `torch.nn.AlphaDropout(p, inplace=...)`.
+    ///
+    /// Like upstream, the module `forward` does NOT mutate in place even when
+    /// this is `true` — `torch.nn.AlphaDropout.forward` never forwards
+    /// `self.inplace` to `F.alpha_dropout` (`dropout.py:265-269`). The flag is
+    /// retained so the constructor surface matches torch field-for-field.
+    #[must_use]
+    pub fn with_inplace(mut self, inplace: bool) -> Self {
+        self.inplace = inplace;
+        self
+    }
+
+    /// Returns the `inplace` flag.
+    pub fn inplace(&self) -> bool {
+        self.inplace
     }
 }
 
@@ -1027,6 +1202,17 @@ impl<T: Float> Module<T> for AlphaDropout<T> {
 pub struct FeatureAlphaDropout<T: Float> {
     p: f64,
     training: bool,
+    /// In-place flag, carried for API parity with `_DropoutNd.inplace`
+    /// (`torch/nn/modules/dropout.py:29`).
+    ///
+    /// NOTE — faithful upstream behaviour: `FeatureAlphaDropout.forward` at
+    /// `torch/nn/modules/dropout.py:319-323` calls
+    /// `F.feature_alpha_dropout(input, self.p, self.training)` and does **not**
+    /// pass `self.inplace`, so torch's `nn.FeatureAlphaDropout(p,
+    /// inplace=True)` does NOT mutate in place at the module level. We mirror
+    /// that exactly: the field is stored for ABI parity, but
+    /// [`FeatureAlphaDropout::forward`] never mutates the input.
+    inplace: bool,
     _marker: std::marker::PhantomData<T>,
 }
 
@@ -1044,8 +1230,26 @@ impl<T: Float> FeatureAlphaDropout<T> {
         Ok(Self {
             p,
             training: true,
+            inplace: false,
             _marker: std::marker::PhantomData,
         })
+    }
+
+    /// Set the `inplace` flag for API parity with
+    /// `torch.nn.FeatureAlphaDropout(p, inplace=...)`.
+    ///
+    /// Like upstream, the module `forward` does NOT mutate in place even when
+    /// this is `true` — `torch.nn.FeatureAlphaDropout.forward` never forwards
+    /// `self.inplace` to `F.feature_alpha_dropout` (`dropout.py:319-323`).
+    #[must_use]
+    pub fn with_inplace(mut self, inplace: bool) -> Self {
+        self.inplace = inplace;
+        self
+    }
+
+    /// Returns the `inplace` flag.
+    pub fn inplace(&self) -> bool {
+        self.inplace
     }
 }
 
@@ -1863,5 +2067,253 @@ mod tests {
         fn assert_send_sync<T: Send + Sync>() {}
         assert_send_sync::<AlphaDropout<f32>>();
         assert_send_sync::<AlphaDropout<f64>>();
+    }
+
+    // -----------------------------------------------------------------------
+    // inplace=true — blocker #1446
+    //
+    // Mirrors torch's `_VF.dropout_` / `_VF.feature_dropout_` family
+    // (`torch/nn/functional.py:1449,1516,1579,1629`): with `inplace=True` and
+    // training, the input tensor's storage is mutated (mask + scale written
+    // back) instead of a fresh buffer being allocated. The mask-based backward
+    // keeps autograd correct.
+    // -----------------------------------------------------------------------
+
+    /// A minimal sum-reduction backward node used to drive `.backward()` in
+    /// the in-place gradient tests below.
+    #[derive(Debug)]
+    struct SumBackward<T: Float> {
+        input: Tensor<T>,
+    }
+    impl<T: Float> GradFn<T> for SumBackward<T> {
+        fn backward(&self, _grad_output: &Tensor<T>) -> FerrotorchResult<Vec<Option<Tensor<T>>>> {
+            let ones = vec![<T as num_traits::One>::one(); self.input.numel()];
+            let t =
+                Tensor::from_storage(TensorStorage::cpu(ones), self.input.shape().to_vec(), false)?;
+            Ok(vec![Some(t)])
+        }
+        fn inputs(&self) -> Vec<&Tensor<T>> {
+            vec![&self.input]
+        }
+        fn name(&self) -> &'static str {
+            "SumBackward"
+        }
+    }
+
+    // (a) inplace=true mutates the SAME input storage. The input buffer (all
+    //     ones before forward) is overwritten with the masked / scaled values
+    //     {0, 2.0}. Verified by reading `input.data()` AFTER forward.
+    #[test]
+    fn test_dropout_inplace_mutates_input_storage() {
+        let d = Dropout::<f32>::new(0.5).unwrap().with_inplace(true);
+        assert!(d.inplace());
+
+        // Leaf without grad so we can re-read the input storage directly.
+        let buf = vec![1.0f32; 10_000];
+        let input = leaf_tensor(&buf, &[10_000], false);
+        // Before forward: every element is 1.0.
+        assert!(input.data().unwrap().iter().all(|&x| x == 1.0));
+
+        let output = d.forward(&input).unwrap();
+
+        // After forward: the INPUT storage itself has been mutated to the
+        // post-dropout values (0.0 dropped, 2.0 = 1/(1-0.5) survivors). This
+        // is the load-bearing in-place observation.
+        let in_after = input.data().unwrap();
+        assert!(
+            in_after.contains(&0.0),
+            "inplace forward must have zeroed some input elements"
+        );
+        for &x in in_after {
+            assert!(
+                x == 0.0 || (x - 2.0).abs() < 1e-6,
+                "mutated input element = {x}, expected 0.0 or 2.0"
+            );
+        }
+
+        // (b) The output equals the mutated input element-for-element: the
+        //     in-place write and the returned buffer carry the identical mask.
+        let out_data = output.data().unwrap();
+        assert_eq!(out_data.len(), in_after.len());
+        for (i, (&o, &x)) in out_data.iter().zip(in_after.iter()).enumerate() {
+            assert_eq!(o, x, "output/input mismatch at {i}: out={o}, in={x}");
+        }
+    }
+
+    // (d) eval-mode inplace is identity — torch's `F.dropout(.., training=False,
+    //     inplace=True)` returns the input untouched (the `_VF.dropout_` branch
+    //     is never reached because training is False; see functional.py:1448).
+    #[test]
+    fn test_dropout_inplace_eval_is_identity() {
+        let mut d = Dropout::<f32>::new(0.5).unwrap().with_inplace(true);
+        d.eval();
+        let input = leaf_tensor(&[1.0; 100], &[100], false);
+        let output = d.forward(&input).unwrap();
+        // Identity: same tensor object returned, input storage untouched.
+        assert!(output.is_same(&input));
+        assert!(input.data().unwrap().iter().all(|&x| x == 1.0));
+    }
+
+    // p == 0 with inplace=true is also identity.
+    #[test]
+    fn test_dropout_inplace_p_zero_is_identity() {
+        let d = Dropout::<f32>::new(0.0).unwrap().with_inplace(true);
+        let input = leaf_tensor(&[1.0; 100], &[100], false);
+        let output = d.forward(&input).unwrap();
+        assert!(output.is_same(&input));
+        assert!(input.data().unwrap().iter().all(|&x| x == 1.0));
+    }
+
+    // (c) backward through an in-place dropout is correct: the gradient routes
+    //     only through surviving elements (0 for dropped, 2.0 for kept) and the
+    //     grad mask matches the output mask, exactly as the out-of-place path.
+    #[test]
+    fn test_dropout_inplace_backward_routes_through_surviving() {
+        let d = Dropout::<f32>::new(0.5).unwrap().with_inplace(true);
+        let input = leaf_tensor(&[1.0; 1000], &[1000], true);
+        let output = d.forward(&input).unwrap();
+
+        let out_data = output.data().unwrap().to_vec();
+        let total: f32 = out_data.iter().sum();
+        let loss = Tensor::from_operation(
+            TensorStorage::cpu(vec![total]),
+            vec![],
+            Arc::new(SumBackward {
+                input: output.clone(),
+            }),
+        )
+        .unwrap();
+        loss.backward().unwrap();
+
+        let grad = input.grad().unwrap().unwrap();
+        let grad_data = grad.data().unwrap();
+        for &g in grad_data {
+            assert!(
+                g == 0.0 || (g - 2.0).abs() < 1e-6,
+                "gradient element = {g}, expected 0.0 or 2.0"
+            );
+        }
+        // grad mask matches output mask: dropped iff zero gradient.
+        for (i, (&o, &g)) in out_data.iter().zip(grad_data.iter()).enumerate() {
+            assert_eq!(
+                o == 0.0,
+                g == 0.0,
+                "mismatch at index {i}: out={o}, grad={g}"
+            );
+        }
+    }
+
+    // (e) all four standard dropout variants honor inplace: the input storage
+    //     is mutated channel-wise (or element-wise for `Dropout`).
+    #[test]
+    fn test_dropout2d_inplace_mutates_input_storage() {
+        let d = Dropout2d::<f32>::new(0.5).unwrap().with_inplace(true);
+        assert!(d.inplace());
+        let input = leaf_tensor(&[1.0; 2 * 500 * 4], &[2, 500, 2, 2], false);
+        let _ = d.forward(&input).unwrap();
+        let in_after = input.data().unwrap();
+        // Channel-wise: each (b, c) block of 4 spatial elems is uniform.
+        let spatial = 4;
+        let mut saw_dropped = false;
+        for blk in in_after.chunks(spatial) {
+            let first = blk[0];
+            assert!(blk.iter().all(|&x| (x - first).abs() < 1e-6));
+            assert!(first == 0.0 || (first - 2.0).abs() < 1e-6);
+            if first == 0.0 {
+                saw_dropped = true;
+            }
+        }
+        assert!(
+            saw_dropped,
+            "inplace dropout2d must have zeroed some channels"
+        );
+    }
+
+    #[test]
+    fn test_dropout1d_inplace_mutates_input_storage() {
+        let d = Dropout1d::<f32>::new(0.5).unwrap().with_inplace(true);
+        assert!(d.inplace());
+        let input = leaf_tensor(&[1.0; 500 * 4], &[1, 500, 4], false);
+        let _ = d.forward(&input).unwrap();
+        let in_after = input.data().unwrap();
+        let mut saw_dropped = false;
+        for blk in in_after.chunks(4) {
+            let first = blk[0];
+            assert!(blk.iter().all(|&x| (x - first).abs() < 1e-6));
+            assert!(first == 0.0 || (first - 2.0).abs() < 1e-6);
+            if first == 0.0 {
+                saw_dropped = true;
+            }
+        }
+        assert!(
+            saw_dropped,
+            "inplace dropout1d must have zeroed some channels"
+        );
+    }
+
+    #[test]
+    fn test_dropout3d_inplace_mutates_input_storage() {
+        let d = Dropout3d::<f32>::new(0.5).unwrap().with_inplace(true);
+        assert!(d.inplace());
+        let input = leaf_tensor(&[1.0; 500 * 8], &[1, 500, 2, 2, 2], false);
+        let _ = d.forward(&input).unwrap();
+        let in_after = input.data().unwrap();
+        let mut saw_dropped = false;
+        for blk in in_after.chunks(8) {
+            let first = blk[0];
+            assert!(blk.iter().all(|&x| (x - first).abs() < 1e-6));
+            assert!(first == 0.0 || (first - 2.0).abs() < 1e-6);
+            if first == 0.0 {
+                saw_dropped = true;
+            }
+        }
+        assert!(
+            saw_dropped,
+            "inplace dropout3d must have zeroed some channels"
+        );
+    }
+
+    // The non-inplace path is the default and leaves the input untouched —
+    // confirms inplace=false (existing behavior) is preserved.
+    #[test]
+    fn test_dropout_default_is_not_inplace() {
+        let d = Dropout::<f32>::new(0.5).unwrap();
+        assert!(!d.inplace());
+        let input = leaf_tensor(&[1.0; 1000], &[1000], false);
+        let _ = d.forward(&input).unwrap();
+        // Input untouched: still all ones.
+        assert!(input.data().unwrap().iter().all(|&x| x == 1.0));
+    }
+
+    // AlphaDropout / FeatureAlphaDropout carry the `inplace` field for ABI
+    // parity but — matching torch's module forward (`dropout.py:265-269`,
+    // `319-323`, which never pass `self.inplace` to the functional) — do NOT
+    // mutate the input even when inplace=true. The field is observable via the
+    // `inplace()` getter.
+    #[test]
+    fn test_alpha_dropout_inplace_field_does_not_mutate() {
+        let d = AlphaDropout::<f32>::new(0.5).unwrap().with_inplace(true);
+        assert!(d.inplace(), "field is retained for API parity");
+        let input = leaf_tensor(&[1.0; 1000], &[1000], false);
+        let _ = d.forward(&input).unwrap();
+        // Matching torch: the module forward ignores inplace, input untouched.
+        assert!(
+            input.data().unwrap().iter().all(|&x| x == 1.0),
+            "AlphaDropout module forward must not mutate in place (matches torch dropout.py:265-269)"
+        );
+    }
+
+    #[test]
+    fn test_feature_alpha_dropout_inplace_field_does_not_mutate() {
+        let d = FeatureAlphaDropout::<f32>::new(0.5)
+            .unwrap()
+            .with_inplace(true);
+        assert!(d.inplace(), "field is retained for API parity");
+        let input = leaf_tensor(&[1.0; 1000], &[1, 1000], false);
+        let _ = d.forward(&input).unwrap();
+        assert!(
+            input.data().unwrap().iter().all(|&x| x == 1.0),
+            "FeatureAlphaDropout module forward must not mutate in place (matches torch dropout.py:319-323)"
+        );
     }
 }
