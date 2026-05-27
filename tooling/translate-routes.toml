@@ -4316,8 +4316,11 @@ parity_ops = []
 
 [[route]]
 crate_pattern = "ferrotorch-vision/src/models/detection/roi_heads_postprocess.rs"
+# Upstream is torchvision (an ecosystem lib), not PyTorch core. Pinned to the
+# installed torchvision 0.26.0+cu130 source the design doc baselines against.
 upstream = [
-  "/home/doll/pytorch/torch/",
+  "/home/doll/.local/lib/python3.13/site-packages/torchvision/models/detection/roi_heads.py",
+  "/home/doll/.local/lib/python3.13/site-packages/torchvision/models/detection/_utils.py",
 ]
 design = ".design/ferrotorch-vision/models/detection/roi_heads_postprocess.md"
 parity_ops = []
