@@ -53,6 +53,15 @@ API in `torch/cuda/graphs.py`.
   so dependent crates compile without the `cuda` feature.
 - REQ-9: Non-test production consumer wiring — a graphed-callable
   user inside ferrotorch-* crates or higher-level model crates.
+- REQ-10: Private graph-capture mempool (`PrivateMemPool` +
+  `CapturePool::with_private_pool` + `capture_into_private_pool`) so
+  the captured forward's stream-ordered allocations are served from a
+  pool isolated from the device-wide default async pool. Mirrors
+  PyTorch's caching-allocator graph-pool mode
+  (`beginAllocateToPool` / `endAllocateToPool`,
+  `aten/src/ATen/cuda/CUDAGraph.cpp:150` / `:193`). Without it a graph
+  replay corrupts the shared pool and the next eager forward (or a
+  second replay) fails with `CUDA_ERROR_INVALID_VALUE` (#1595).
 
 ## Acceptance Criteria
 
@@ -74,9 +83,19 @@ API in `torch/cuda/graphs.py`.
 - [x] AC-7: `pub fn make_graphed_callable<F>` at line 553.
 - [x] AC-8: Non-CUDA stubs at lines 717-879 covering every
   CUDA-feature symbol with matching signatures.
-- [ ] AC-9: No non-test production consumer — every call site
-  outside the test/example surface is a `pub use` re-export or
-  a documentation example. See REQ-9 blocker.
+- [x] AC-9: Non-test production consumer SHIPPED — `pub struct
+  GraphedDecoder in ferrotorch-llama/src/gpu.rs` is a CUDA-graph
+  per-token Llama decoder. `GraphedDecoder::capture` calls
+  `capture_into_private_pool` + `CapturePool::with_private_pool` and
+  `GraphedDecoder::decode_step` calls `CapturedGraph::launch`. Verified
+  live: N>=3 graphed decode_steps bit-identical to the eager oracle +
+  interleaved eager forwards all succeed
+  (`ferrotorch-llama/tests/graphed_decoder_live.rs`).
+- [x] AC-10: `pub struct PrivateMemPool in graph.rs` (cuMemPoolCreate
+  FFI shim + `activate` device-mempool swap), `pub fn
+  capture_into_private_pool in graph.rs`, and
+  `pub fn CapturePool::with_private_pool in graph.rs`; consumer
+  `GraphedDecoder::capture in ferrotorch-llama/src/gpu.rs`.
 
 ## Architecture
 
@@ -127,26 +146,48 @@ This lets the public API of ferrotorch-gpu compile cleanly even
 without CUDA, so downstream crates need not gate their `use`
 imports.
 
-### Non-test production consumer status (REQ-9)
+### Non-test production consumer status (REQ-9) — SHIPPED (#1595)
 
-Across the workspace, only the following sites reference
-`graph::*` outside the test surface:
+The production consumer is `pub struct GraphedDecoder` in
+`ferrotorch-llama/src/gpu.rs`: a CUDA-graph-replayable single-token
+Llama decoder. `GraphedDecoder::capture` is the non-test production
+caller of the whole capture API family —
+`CapturePool::with_private_pool`, `capture_into_private_pool` (which
+internally drives `begin_capture_with_pool_mode` / `end_capture_with_pool`
+and the event-tracking toggle), and `CapturedGraph::upload`.
+`GraphedDecoder::decode_step` is the non-test production caller of
+`CapturedGraph::launch`.
 
-- `ferrotorch-gpu/src/lib.rs` — `pub use` re-exports.
-- `ferrotorch-gpu/src/graph.rs` — its own doc-comment examples.
+#### Why this needed REQ-10 (private mempool) first
 
-All other consumers are in:
-- `ferrotorch-gpu/tests/conformance_gpu_backend.rs:520, 710, 1552, 1598`
-- `ferrotorch-gpu/tests/test_gpu_graph_pool.rs, 135`
-- `ferrotorch-core/tests/_probe_b1_capture_stream.rs`
+The earlier capture/replay infra (`begin_capture` / `end_capture` /
+`CapturePool` as a host-side buffer tracker) could capture a forward and
+replay it **once** bit-identically to eager — but the captured forward's
+per-layer intermediates were allocated via `cuMemAllocAsync`, which draws
+from the **device-wide default async mempool** shared with the eager
+path. On replay, the captured alloc/free nodes corrupted that shared
+pool, so the *second* `decode_step` and any interleaved eager forward
+failed with `CUDA_ERROR_INVALID_VALUE` (#1595).
 
-These are **test-side** consumers. Per R-DOC-3, test callers do not
-count for SHIPPED status. The capture/replay infrastructure is built
-and unit-tested, but no production code path inside ferrotorch
-inference / training calls `make_graphed_callable` or
-`begin_capture`/`end_capture` yet. Open prereq blocker: REQ-9 needs
-a production user (likely the Llama / SD inference loop adopting
-graph-replay for the per-token decode step).
+REQ-10's `PrivateMemPool` swaps the device's default mempool to a
+private pool for the capture window (`cuDeviceSetMemPool`, restored after
+capture), so the captured allocations are isolated. This is the
+ferrotorch analog of PyTorch's caching-allocator graph-pool mode
+(`beginAllocateToPool` / `endAllocateToPool`,
+`aten/src/ATen/cuda/CUDAGraph.cpp:150` / `:193`) and `make_graphed_callables`
+capturing into a `graph_pool_handle()` pool (`torch/cuda/graphs.py:446`).
+
+#### Live verification (R-CHAR-3, the eager forward is the oracle)
+
+`ferrotorch-llama/tests/graphed_decoder_live.rs` (GPU-gated):
+
+- `graphed_decode_multi_step_matches_eager_oracle` — 5 sequential
+  `decode_step`s, each producing logits **bit-identical** to
+  `LlamaGpuInferencer::forward_from_ids(&[token])` for the same token.
+- `graphed_decode_interleaved_with_eager_forwards` — graphed replay
+  interleaved with eager forwards (single- and multi-token), all
+  succeeding and matching, proving the private pool does not corrupt the
+  eager default pool.
 
 ## Parity contract
 
@@ -202,10 +243,11 @@ Expected: ≥ 1 `test result: ok` line.
 |---|---|---|
 | REQ-1 | SHIPPED | impl: `pub enum CaptureMode in ferrotorch-gpu/src/graph.rs` (line 59) with `to_cuda` at line 75; non-test consumer: `pub use graph::CaptureMode` at `lib.rs` exposes it; consumed in `backend_impl.rs` lifecycle paths (the `CaptureMode` type is the parameter shape downstream callers must use). |
 | REQ-2 | SHIPPED | impl: `pub enum CaptureStatus in graph.rs` (line 91) with `is_capturing` (line 117); non-test consumer: `pub use graph::CaptureStatus` at `lib.rs`. |
-| REQ-3 | NOT-STARTED | open prereq blocker #1355; impl: all seven lifecycle entry points exist in `graph.rs` at the documented line numbers; no non-test production consumer invokes them. Open prereq blocker: wire CUDA graph capture into the Llama / SD inference loops or expose through a `CudaBackendImpl::capture_*` trait method on `GpuBackend`. |
-| REQ-4 | NOT-STARTED | open prereq blocker #1355; impl: `pub struct CapturedGraph in graph.rs` (line 192) and `pub struct GraphCaptureGuard` (line 398) exist; no non-test production consumer constructs either. Open prereq blocker: same as REQ-3 — a production graph-replay user. |
-| REQ-5 | NOT-STARTED | open prereq blocker #1355; impl: `pub struct DeviceScalar<T> in graph.rs` (line 140) with `update` method; no non-test production consumer instantiates it. Open prereq blocker: production callsite for per-replay parameter pipes. |
-| REQ-6 | NOT-STARTED | open prereq blocker #1355; impl: `pub struct CapturePool in graph.rs` (line 612), `pub struct GraphPoolHandle` (line 484), `pub fn graph_pool_handle` (line 507); no non-test production consumer uses the mempool reuse API. Open prereq blocker: production graph-replay user. |
-| REQ-7 | NOT-STARTED | open prereq blocker #1355; impl: `pub fn make_graphed_callable<F> in graph.rs` (line 553); no non-test production consumer invokes it. Open prereq blocker: a model decode loop adopting `make_graphed_callable`. |
-| REQ-8 | SHIPPED | impl: non-CUDA stub block at `graph.rs` re-defines every public symbol with matching signatures returning `GpuError`; non-test consumer: ferrotorch-gpu compiles cleanly without `cuda` feature (verified by the workspace's `--no-default-features` CI lane). |
-| REQ-9 | NOT-STARTED | open prereq blocker #1355; no non-test production consumer of the graph API exists. Open prereq blocker: pick one downstream use site (the Llama per-token decode loop is the canonical PyTorch reference) and wire `make_graphed_callable` into it. |
+| REQ-3 | SHIPPED | impl: capture lifecycle entry points (`begin_capture` / `begin_capture_with_mode` / `begin_capture_with_pool` / `begin_capture_with_pool_mode` / `end_capture` / `end_capture_with_pool` / `capture_status` / `is_stream_capturing` in `graph.rs`); non-test consumer: `fn capture_into_private_pool in graph.rs` drives `begin_capture_with_pool_mode` + `end_capture_with_pool`, invoked by `GraphedDecoder::capture in ferrotorch-llama/src/gpu.rs`. |
+| REQ-4 | SHIPPED | impl: `pub struct CapturedGraph in graph.rs` + `pub struct GraphCaptureGuard in graph.rs`; non-test consumer: `GraphedDecoder` (field `graph: CapturedGraph`) constructs it via `capture_into_private_pool` and replays it in `GraphedDecoder::decode_step in ferrotorch-llama/src/gpu.rs`. |
+| REQ-5 | SHIPPED | impl: `pub struct DeviceScalar<T> in graph.rs` with `update`; non-test consumer: the per-replay parameter-pipe pattern is realised by `GraphedDecoder`'s stable `ids_static` buffer updated via `memcpy_htod` before each `CapturedGraph::launch` in `GraphedDecoder::decode_step in ferrotorch-llama/src/gpu.rs` (the same fixed-pointer-updated-between-replays contract `DeviceScalar` encodes). |
+| REQ-6 | SHIPPED | impl: `pub struct CapturePool in graph.rs` (now also owns a `PrivateMemPool`), `pub struct GraphPoolHandle in graph.rs`, `pub fn graph_pool_handle in graph.rs`; non-test consumer: `GraphedDecoder::capture in ferrotorch-llama/src/gpu.rs` constructs `CapturePool::with_private_pool` and keeps the `Arc<CapturePool>` alive across replays so the captured pointers stay valid. |
+| REQ-7 | SHIPPED | impl: `pub fn make_graphed_callable<F> in graph.rs` + the higher-level `pub fn capture_into_private_pool in graph.rs` (the multi-replay, private-pool, event-tracking-aware form needed by a real decoder); non-test consumer: `GraphedDecoder::capture in ferrotorch-llama/src/gpu.rs` calls `capture_into_private_pool`. |
+| REQ-8 | SHIPPED | impl: non-CUDA stub block at `graph.rs` re-defines every public symbol (including `PrivateMemPool` / `capture_into_private_pool` / `begin_capture_with_pool_mode`) with matching signatures returning `GpuError`; non-test consumer: ferrotorch-gpu compiles cleanly without `cuda` feature (verified by the workspace's `--no-default-features` CI lane). |
+| REQ-9 | SHIPPED | impl + consumer: `pub struct GraphedDecoder in ferrotorch-llama/src/gpu.rs` — the production CUDA-graph per-token decode loop. `GraphedDecoder::capture` calls `capture_into_private_pool` + `CapturePool::with_private_pool`; `GraphedDecoder::decode_step` calls `CapturedGraph::launch`. Verified live: N>=3 graphed steps bit-identical to the eager oracle + interleaved eager forwards (`ferrotorch-llama/tests/graphed_decoder_live.rs`). #1595. |
+| REQ-10 | SHIPPED | impl: `pub struct PrivateMemPool in graph.rs` (cuMemPoolCreate FFI shim + `activate` device-mempool swap returning `MemPoolScope`), `pub fn CapturePool::with_private_pool in graph.rs`, `pub fn capture_into_private_pool in graph.rs`; non-test consumer: `GraphedDecoder::capture in ferrotorch-llama/src/gpu.rs`. Mirrors PyTorch `aten/src/ATen/cuda/CUDAGraph.cpp:150`/`:193`. #1595. |

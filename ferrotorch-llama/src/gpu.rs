@@ -518,17 +518,42 @@ impl LlamaGpuInferencer {
     fn forward_core(
         &self,
         ids: &[u32],
-        mut taps: Option<&mut ForwardTaps>,
+        taps: Option<&mut ForwardTaps>,
     ) -> FerrotorchResult<CudaSlice<u16>> {
         if ids.is_empty() {
             return Err(FerrotorchError::InvalidArgument {
                 message: "forward_core: empty id list".into(),
             });
         }
-
-        let cfg = &self.config;
-        let dev = &self.device;
         let seq = ids.len();
+        let ids_gpu = self
+            .device
+            .stream()
+            .clone_htod(ids)
+            .map_err(map_driver_err)?;
+        self.forward_core_from_ids_gpu(&self.device, &ids_gpu, seq, taps)
+    }
+
+    /// Core forward shared by the eager and graphed paths. Takes the
+    /// token ids as a device-resident `CudaSlice<u32>` rather than a host
+    /// slice, so the graphed decoder can capture this exact kernel
+    /// sequence against a stable `ids` buffer it updates between replays.
+    /// The eager path (`forward_core`) reaches this via a `clone_htod`;
+    /// the graphed path (`GraphedDecoder`) reaches it under stream
+    /// capture with a private mempool active.
+    ///
+    /// `dev` overrides which device/stream the kernels launch on (the
+    /// model's weights are read by reference and stay valid across any
+    /// stream of the same context). The eager path passes `&self.device`;
+    /// the graphed path passes the capture-stream device fork.
+    fn forward_core_from_ids_gpu(
+        &self,
+        dev: &GpuDevice,
+        ids_gpu: &CudaSlice<u32>,
+        seq: usize,
+        mut taps: Option<&mut ForwardTaps>,
+    ) -> FerrotorchResult<CudaSlice<u16>> {
+        let cfg = &self.config;
         let hidden = cfg.hidden_size;
         let n_heads = cfg.num_attention_heads;
         let n_kv = cfg.num_key_value_heads;
@@ -546,9 +571,7 @@ impl LlamaGpuInferencer {
             });
         }
 
-        let ids_gpu = dev.stream().clone_htod(ids).map_err(map_driver_err)?;
-
-        let mut hidden_buf = gpu_embedding_gather_bf16(&self.embed_tokens, &ids_gpu, hidden, dev)
+        let mut hidden_buf = gpu_embedding_gather_bf16(&self.embed_tokens, ids_gpu, hidden, dev)
             .map_err(map_gpu_err)?;
 
         for (layer_idx, layer) in self.layers.iter().enumerate() {
@@ -762,6 +785,218 @@ impl LlamaGpuInferencer {
         )
         .map_err(map_gpu_err)?;
         Ok(final_norm)
+    }
+
+    /// Run the forward pass against a device-resident `ids` buffer and
+    /// `memcpy_dtod` the full `[seq, vocab]` bf16 logits into the caller's
+    /// pre-allocated `logits_out`. Shared by [`GraphedDecoder`] capture
+    /// and replay: the final copy node into a stable destination is what
+    /// makes the replayed logits readable from a fixed address without
+    /// re-capturing.
+    fn forward_logits_into(
+        &self,
+        dev: &GpuDevice,
+        ids_gpu: &CudaSlice<u32>,
+        seq: usize,
+        logits_out: &mut CudaSlice<u16>,
+    ) -> FerrotorchResult<()> {
+        let cfg = &self.config;
+        let hidden = cfg.hidden_size;
+        let vocab = cfg.vocab_size;
+
+        let final_norm = self.forward_core_from_ids_gpu(dev, ids_gpu, seq, None)?;
+        let logits = gpu_matmul_bf16_bf16_nt(&final_norm, &self.lm_head, seq, hidden, vocab, dev)
+            .map_err(map_gpu_err)?;
+        dev.stream()
+            .memcpy_dtod(&logits, logits_out)
+            .map_err(map_driver_err)?;
+        Ok(())
+    }
+}
+
+// ---------------------------------------------------------------------------
+// GraphedDecoder — CUDA-graph per-token decode (production consumer of the
+// ferrotorch-gpu graph capture/replay + private-mempool infrastructure).
+// Closes graph.md REQ-3..9 (#1595 / #1355 / #1358).
+// ---------------------------------------------------------------------------
+
+use ferrotorch_gpu::{CaptureMode, CapturePool, CapturedGraph, capture_into_private_pool};
+use std::sync::Arc;
+
+/// A CUDA-graph-replayable single-token Llama decoder.
+///
+/// This is the production consumer that exercises ferrotorch-gpu's CUDA
+/// graph capture/replay API (`begin_capture_with_pool` /
+/// `end_capture_with_pool` / `CapturedGraph::launch`) and the private
+/// graph-capture mempool (`CapturePool::with_private_pool`,
+/// `PrivateMemPool`) for the per-token decode hot loop.
+///
+/// # Why a private mempool (#1595)
+///
+/// The captured forward allocates its per-layer intermediates via
+/// `cuMemAllocAsync`, which draws from the device's default async
+/// mempool — the same pool the eager forward path uses. On graph replay
+/// those captured alloc/free nodes mutate that shared pool's free lists,
+/// corrupting it so that the *next* allocation (a second replay, or an
+/// interleaved eager forward) fails with `CUDA_ERROR_INVALID_VALUE`.
+/// [`GraphedDecoder::capture`] routes the capture's allocations through a
+/// [`CapturePool::with_private_pool`] so the shared pool is never touched
+/// — this is what lets multiple replays *and* interleaved eager forwards
+/// all succeed. Mirrors PyTorch's `make_graphed_callables` over a
+/// `graph_pool_handle()` pool (`torch/cuda/graphs.py:446`).
+///
+/// # Correctness contract
+///
+/// The replayed logits are **bit-identical** to the eager
+/// `forward_from_ids` output for the same token — the eager path is the
+/// oracle (R-CHAR-3). Verified live across N>=3 sequential replays plus
+/// interleaved eager forwards.
+pub struct GraphedDecoder {
+    /// The captured single-token forward graph. Replayed by
+    /// [`decode_step`](Self::decode_step).
+    graph: CapturedGraph,
+    /// Stable device buffer the captured graph reads the input token id
+    /// from. Updated by a small `memcpy_htod` before each replay.
+    ids_static: CudaSlice<u32>,
+    /// Stable device buffer the captured graph's final node copies the
+    /// `[1, vocab]` bf16 logits into. Read back to host after replay.
+    logits_static: CudaSlice<u16>,
+    /// The capture stream (a fork of the model's default stream — graph
+    /// capture is illegal on the legacy default stream).
+    stream: Arc<cudarc::driver::CudaStream>,
+    /// Kept alive for the decoder's lifetime so the private mempool
+    /// (held inside) outlives the captured graph's recorded pointers.
+    _pool: Arc<CapturePool>,
+    vocab: usize,
+}
+
+impl std::fmt::Debug for GraphedDecoder {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("GraphedDecoder")
+            .field("vocab", &self.vocab)
+            .field("num_replays", &self.graph.num_replays())
+            .finish_non_exhaustive()
+    }
+}
+
+impl GraphedDecoder {
+    /// Capture a single-token decode forward of `model` into a replayable
+    /// CUDA graph backed by a private mempool.
+    ///
+    /// `warmup_token` is run once eagerly (outside capture) to lazy-init
+    /// any module caches, then the same single-token forward is captured.
+    /// All capture-time allocations are served from the private pool so
+    /// replays don't corrupt the eager path (#1595).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FerrotorchError::Gpu`] for any CUDA driver / capture
+    /// failure, or [`FerrotorchError::InvalidArgument`] if the model's
+    /// vocab is empty.
+    pub fn capture(model: &LlamaGpuInferencer, warmup_token: u32) -> FerrotorchResult<Self> {
+        let vocab = model.config.vocab_size;
+        if vocab == 0 {
+            return Err(FerrotorchError::InvalidArgument {
+                message: "GraphedDecoder::capture: model vocab_size is 0".into(),
+            });
+        }
+
+        // Capture must run on a non-default (forkable) stream — graph
+        // capture is illegal on the legacy default stream
+        // (CUDAGraph.cpp:115). Fork the model device's stream into a
+        // per-decoder GpuDevice view (shares the same context + weights)
+        // so every kernel launch in the captured forward lands on the
+        // capture stream.
+        let cap_device = GpuDevice::fork_for_capture(&model.device).map_err(map_gpu_err)?;
+        let stream = cap_device.default_stream().clone();
+        let ordinal = cap_device.ordinal();
+
+        let pool = Arc::new(CapturePool::with_private_pool(ordinal).map_err(map_gpu_err)?);
+
+        // `capture_into_private_pool` (gpu leaf crate) disables cudarc's
+        // per-CudaSlice event tracking for the whole prologue+capture
+        // window (cudarc's cross-stream wait events otherwise abort
+        // capture with CUDA_ERROR_STREAM_CAPTURE_ISOLATION), runs
+        // `prologue` eagerly to allocate the stable buffers (so their
+        // device pointers are fixed for the graph's lifetime) + warm up
+        // the module caches, then captures `capture_body` with the private
+        // mempool active. All the unsafe FFI lives in the gpu leaf crate,
+        // keeping this `#![deny(unsafe_code)]` model crate clean.
+        let (graph, (ids_static, logits_static)) = capture_into_private_pool(
+            cap_device.context(),
+            &stream,
+            &pool,
+            CaptureMode::Relaxed,
+            // lift the gpu helper's internal GpuError into our taxonomy.
+            map_gpu_err,
+            // prologue: allocate the stable ids/logits buffers + warm-up
+            // (eager). Returns the buffers as the capture state.
+            || -> FerrotorchResult<(CudaSlice<u32>, CudaSlice<u16>)> {
+                let ids = stream.clone_htod(&[warmup_token]).map_err(map_driver_err)?;
+                let mut logits = stream.alloc_zeros::<u16>(vocab).map_err(map_driver_err)?;
+                model.forward_logits_into(&cap_device, &ids, 1, &mut logits)?;
+                stream.synchronize().map_err(map_driver_err)?;
+                Ok((ids, logits))
+            },
+            // capture body: the single-token forward against the stable
+            // buffers, recorded into the graph with allocations served
+            // from the private pool.
+            |(ids, logits)| model.forward_logits_into(&cap_device, ids, 1, logits),
+        )?;
+
+        graph.upload().map_err(map_gpu_err)?;
+
+        // Keep the capture device (forked stream + its cuBLAS handle)
+        // alive for the graph's lifetime: the captured cuBLAS calls
+        // recorded handles bound to this stream.
+        pool.record_buffer(cap_device);
+
+        Ok(Self {
+            graph,
+            ids_static,
+            logits_static,
+            stream,
+            _pool: pool,
+            vocab,
+        })
+    }
+
+    /// Decode one token: update the input id, replay the captured graph,
+    /// and download the resulting `[vocab]` logits as `Vec<f32>`.
+    ///
+    /// Bit-identical to `LlamaGpuInferencer::forward_from_ids(&[token])`
+    /// (the eager oracle). Safe to call repeatedly and to interleave with
+    /// eager forwards because the captured allocations live in a private
+    /// mempool (#1595).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FerrotorchError::Gpu`] for any CUDA driver / replay
+    /// failure.
+    pub fn decode_step(&mut self, token: u32) -> FerrotorchResult<Vec<f32>> {
+        // Update the stable input id (small async H->D copy on the capture
+        // stream, ordered before the replay).
+        self.stream
+            .memcpy_htod(&[token], &mut self.ids_static)
+            .map_err(map_driver_err)?;
+        // Replay the captured graph.
+        self.graph.launch().map_err(map_gpu_err)?;
+        self.stream.synchronize().map_err(map_driver_err)?;
+        // Download the logits from the stable destination buffer.
+        let logits_host: Vec<u16> = self
+            .stream
+            .clone_dtoh(&self.logits_static)
+            .map_err(map_driver_err)?;
+        Ok(logits_host
+            .iter()
+            .map(|&b| bf16::from_bits(b).to_f32())
+            .collect())
+    }
+
+    /// Number of times the captured graph has been replayed.
+    #[must_use]
+    pub fn num_replays(&self) -> u64 {
+        self.graph.num_replays()
     }
 }
 

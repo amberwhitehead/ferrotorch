@@ -225,14 +225,14 @@ pub use device::GpuDevice;
 pub use error::{GpuError, GpuResult};
 pub use flash_attention::{gpu_flash_attention_f32, gpu_flash_attention_f64};
 pub use graph::{
-    CaptureMode, CapturePool, CaptureStatus, CapturedGraph, GraphPoolHandle, begin_capture,
-    capture_pool_for_handle, end_capture, end_capture_with_pool, graph_pool_handle,
-    make_graphed_callable, release_graph_pool_handle,
+    CaptureMode, CapturePool, CaptureStatus, CapturedGraph, GraphPoolHandle, PrivateMemPool,
+    begin_capture, capture_into_private_pool, capture_pool_for_handle, end_capture,
+    end_capture_with_pool, graph_pool_handle, make_graphed_callable, release_graph_pool_handle,
 };
 #[cfg(feature = "cuda")]
 pub use graph::{
-    GraphCaptureGuard, begin_capture_with_mode, begin_capture_with_pool, capture_status,
-    is_stream_capturing,
+    GraphCaptureGuard, MemPoolScope, begin_capture_with_mode, begin_capture_with_pool,
+    begin_capture_with_pool_mode, capture_status, is_stream_capturing,
 };
 #[cfg(feature = "cuda")]
 pub use group_norm::gpu_group_norm_f32;

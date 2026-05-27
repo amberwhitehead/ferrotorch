@@ -181,4 +181,4 @@ pub use spec_decode::{
 };
 
 #[cfg(feature = "cuda")]
-pub use gpu::{LlamaGpuInferencer, LlamaGpuLayer, ProfiledForwardResult};
+pub use gpu::{GraphedDecoder, LlamaGpuInferencer, LlamaGpuLayer, ProfiledForwardResult};
