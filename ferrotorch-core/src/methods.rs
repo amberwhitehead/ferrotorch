@@ -831,6 +831,125 @@ impl<T: Float> Tensor<T> {
         crate::grad_fns::shape::expand_as(self, other)
     }
 
+    /// Reverse element order along each axis in `dims`. Like PyTorch's
+    /// `torch.flip(input, dims)` per upstream
+    /// `aten/src/ATen/native/TensorTransformations.cpp:36`.
+    pub fn flip_t(&self, dims: &[isize]) -> FerrotorchResult<Tensor<T>> {
+        crate::grad_fns::shape::flip(self, dims)
+    }
+
+    /// Flip left-to-right (along dim 1). Like PyTorch's `torch.fliplr` per
+    /// upstream `aten/src/ATen/native/TensorTransformations.cpp:180`.
+    pub fn fliplr_t(&self) -> FerrotorchResult<Tensor<T>> {
+        crate::grad_fns::shape::fliplr(self)
+    }
+
+    /// Flip up-to-down (along dim 0). Like PyTorch's `torch.flipud` per
+    /// upstream `aten/src/ATen/native/TensorTransformations.cpp:186`.
+    pub fn flipud_t(&self) -> FerrotorchResult<Tensor<T>> {
+        crate::grad_fns::shape::flipud(self)
+    }
+
+    /// Rotate 90° `k` times in the plane spanned by `dims`. Like PyTorch's
+    /// `torch.rot90(input, k, dims)` per upstream
+    /// `aten/src/ATen/native/TensorTransformations.cpp:134`.
+    pub fn rot90_t(&self, k: i64, dims: &[isize]) -> FerrotorchResult<Tensor<T>> {
+        crate::grad_fns::shape::rot90(self, k, dims)
+    }
+
+    /// Reposition dims from `source` to `destination`. Like PyTorch's
+    /// `torch.movedim(input, source, destination)` per upstream
+    /// `aten/src/ATen/native/TensorShape.cpp:4657`.
+    pub fn movedim_t(
+        &self,
+        source: &[isize],
+        destination: &[isize],
+    ) -> FerrotorchResult<Tensor<T>> {
+        crate::grad_fns::shape::movedim(self, source, destination)
+    }
+
+    /// Reposition axes from `source` to `destination`. Like PyTorch's
+    /// `torch.moveaxis` (an alias of `movedim`) per upstream
+    /// `aten/src/ATen/native/TensorShape.cpp:4768`.
+    pub fn moveaxis_t(
+        &self,
+        source: &[isize],
+        destination: &[isize],
+    ) -> FerrotorchResult<Tensor<T>> {
+        crate::grad_fns::shape::moveaxis(self, source, destination)
+    }
+
+    /// Broadcast this tensor to `shape`. Like PyTorch's
+    /// `torch.broadcast_to(input, shape)` (an alias of `expand`) per upstream
+    /// `aten/src/ATen/native/TensorShape.cpp:652`.
+    pub fn broadcast_to_t(&self, shape: &[usize]) -> FerrotorchResult<Tensor<T>> {
+        crate::grad_fns::shape::broadcast_to(self, shape)
+    }
+
+    /// Tile this tensor `repeats[i]` times along each axis. Like PyTorch's
+    /// `tensor.repeat(*repeats)` per upstream
+    /// `aten/src/ATen/native/TensorShape.cpp:1909`.
+    pub fn repeat_t(&self, repeats: &[isize]) -> FerrotorchResult<Tensor<T>> {
+        crate::grad_fns::shape::repeat(self, repeats)
+    }
+
+    /// NumPy-style tile. Like PyTorch's `torch.tile(input, reps)` per upstream
+    /// `aten/src/ATen/native/TensorShape.cpp:1971`.
+    pub fn tile_t(&self, reps: &[isize]) -> FerrotorchResult<Tensor<T>> {
+        crate::grad_fns::shape::tile(self, reps)
+    }
+
+    /// Repeat each element `repeats` times consecutively along `dim`. Like
+    /// PyTorch's `torch.repeat_interleave(input, repeats, dim)`.
+    pub fn repeat_interleave_t(&self, repeats: usize, dim: isize) -> FerrotorchResult<Tensor<T>> {
+        crate::grad_fns::shape::repeat_interleave(self, repeats, dim)
+    }
+
+    /// Split into `size(dim)` slices with `dim` removed. Like PyTorch's
+    /// `torch.unbind(input, dim)` per upstream
+    /// `aten/src/ATen/native/TensorShape.cpp:4367`.
+    pub fn unbind_t(&self, dim: isize) -> FerrotorchResult<Vec<Tensor<T>>> {
+        crate::grad_fns::shape::unbind(self, dim)
+    }
+
+    /// Split at the integer section boundaries `indices` along `dim`. Like
+    /// PyTorch's `torch.tensor_split(input, indices, dim)` per upstream
+    /// `aten/src/ATen/native/TensorShape.cpp:1167`.
+    pub fn tensor_split_t(
+        &self,
+        indices: &[usize],
+        dim: isize,
+    ) -> FerrotorchResult<Vec<Tensor<T>>> {
+        crate::grad_fns::shape::tensor_split(self, indices, dim)
+    }
+
+    /// Stack tensors row-wise (≥2-D then `cat` dim 0). Like PyTorch's
+    /// `torch.vstack` per upstream
+    /// `aten/src/ATen/native/TensorShape.cpp:3532`.
+    pub fn vstack_t(tensors: &[Tensor<T>]) -> FerrotorchResult<Tensor<T>> {
+        crate::grad_fns::shape::vstack(tensors)
+    }
+
+    /// Stack tensors column-wise. Like PyTorch's `torch.hstack` per upstream
+    /// `aten/src/ATen/native/TensorShape.cpp:3514`.
+    pub fn hstack_t(tensors: &[Tensor<T>]) -> FerrotorchResult<Tensor<T>> {
+        crate::grad_fns::shape::hstack(tensors)
+    }
+
+    /// Stack tensors depth-wise (≥3-D then `cat` dim 2). Like PyTorch's
+    /// `torch.dstack` per upstream
+    /// `aten/src/ATen/native/TensorShape.cpp:3544`.
+    pub fn dstack_t(tensors: &[Tensor<T>]) -> FerrotorchResult<Tensor<T>> {
+        crate::grad_fns::shape::dstack(tensors)
+    }
+
+    /// Stack ≤1-D tensors as columns of a 2-D matrix. Like PyTorch's
+    /// `torch.column_stack` per upstream
+    /// `aten/src/ATen/native/TensorShape.cpp:3628`.
+    pub fn column_stack_t(tensors: &[Tensor<T>]) -> FerrotorchResult<Tensor<T>> {
+        crate::grad_fns::shape::column_stack(tensors)
+    }
+
     /// Return a narrowed view along `dim` starting at `start` with `length`
     /// elements. Like PyTorch's `tensor.narrow(dim, start, length)`.
     ///

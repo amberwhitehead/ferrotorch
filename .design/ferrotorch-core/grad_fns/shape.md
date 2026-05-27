@@ -304,8 +304,12 @@ and `meta_propagate.rs`.
 ## Acceptance Criteria
 
 - [x] AC-1: `reshape`, `flatten`, `squeeze`, `unsqueeze`, `expand`, `cat`
-  forward + backward unit tests pass: `cargo test -p ferrotorch-core
-  --lib grad_fns::shape` returns `35 passed; 0 failed`.
+  and the full #1342 op set forward + backward unit tests pass:
+  `cargo test -p ferrotorch-core --lib grad_fns::shape` returns
+  `86 passed; 0 failed` (was 35 before the unflatten/swapaxes batch,
+  46 after it, 86 after the final #1342-closing batch added flip /
+  rot90 / movedim / repeat / repeat_interleave / unbind /
+  tensor_split / *stack coverage).
 - [x] AC-2: `RollBackward` lib tests pass (`test_roll_forward_registers_grad_fn`,
   `test_roll_zero_shift_early_return`, `test_roll_backward_simple_1d_hand_computed`,
   `test_roll_backward_negative_shift_2d`).
@@ -361,13 +365,19 @@ and `meta_propagate.rs`.
   ferrotorch errors instead. This is a deliberate departure
   documented in the function-level rustdoc.
 - [ ] AC-18: All 36 parity_ops at `--seeds 8` report
-  `passed (0 skipped, 0 failed)` with N ≥ 1. CURRENTLY FAILS: only
-  2 ops have runner arms (`transpose` and `expand`) and both report
+  `passed (0 skipped, 0 failed)` with N ≥ 1. CURRENTLY DEFERRED: the
+  runner has arms for only a couple of ops and they report
   `0/N passed (N skipped, 0 failed)` because the runner's
   `decode_into_typed_op` / dispatcher does not yet hook the
   ferrotorch ops for shape-op samples. The runner-arm gap is
   tracked under umbrella blocker #1340 per S5 (test-infrastructure
-  gap, NOT a REQ blocker for SHIPPED ops).
+  gap, NOT a REQ blocker for SHIPPED ops). Independently, the
+  `parity-sweep` binary cannot launch in the current build
+  environment (`libmkl_rt.so.2` is absent system-wide — the
+  MKL/libclang bootstrap gap), so parity smoke produces zero
+  output; the #1342 ops are SHIPPED on impl + non-test production
+  consumer + lib tests, which is the doc's stated SHIPPED bar (see
+  "Parity contract").
 
 ## Architecture
 
@@ -535,31 +545,39 @@ the right-aligned NumPy rule and is consumed by:
 `grad_fns/arithmetic.rs:39` — i.e., every binary op routes through
 it on the meta-shape path.
 
-### NOT-STARTED architecture
+### Remaining shape ops — all SHIPPED (umbrella #1342 closed)
 
-The remaining NOT-STARTED REQs split into three categories
-(`swapaxes`/`swapdims`/`expand_as`/`unflatten` are now SHIPPED — see
-their REQ rows):
+As of the #1342-closing commit, every REQ in this doc is SHIPPED. The
+final batch of 17 ops split into three implementation strategies, each
+chosen so autograd is inherited from an existing `*Backward` rather
+than hand-rolled where possible:
 
-1. **Pure alias gaps (remaining)** — `broadcast_to` (REQ-27),
-   `moveaxis` (REQ-30), `fliplr` (REQ-35), `flipud` (REQ-36).
-   Upstream implements each as a one-line delegation to another op.
-   The delegated op IS shipped (expand/movedim/flip), but the named
-   alias is missing. (`swapaxes`/`swapdims`/`expand_as` were aliases
-   in this category and are now SHIPPED.) Tracked under umbrella
-   blocker #1342.
+1. **Pure aliases** — `broadcast_to` (REQ-27 → `expand`), `moveaxis`
+   (REQ-30 → `movedim`), `fliplr` (REQ-35 → `flip({1})`), `flipud`
+   (REQ-36 → `flip({0})`). One-line delegations to a shipped op;
+   autograd inherited from the delegate's backward.
 
-2. **Missing free-function ops with a Module-style sibling** — none
-   remaining: `unflatten` (REQ-4) is now SHIPPED as a free function
-   alongside the `nn::Unflatten` Module at
-   `ferrotorch-nn/src/identity.rs:264`.
+2. **Compositional ops built only from grad-aware primitives** — `rot90`
+   (REQ-33, `flip` + `transpose`), `movedim` (REQ-29, computed perm →
+   `permute_t`/`PermuteBackward`), `broadcast_tensors` (REQ-26,
+   `broadcast_shapes` + `expand`), `repeat` (REQ-13, `cat`-composition
+   over copies), `tile` (REQ-31, left-pad reps → `repeat`), `unbind`
+   (REQ-25, `narrow` + `squeeze` per index), `tensor_split` (REQ-23,
+   `narrow` per section), `vstack`/`hstack`/`dstack`/`column_stack`
+   (REQ-17..20, `atleast_Nd` promotion + `cat`). No new `*Backward`
+   struct — gradients flow through the constituent ops.
 
-3. **Missing free-function ops with no sibling** — `repeat`
-   (REQ-13), `repeat_interleave` (REQ-14), `vstack`/`hstack`/
-   `dstack`/`column_stack` (REQ-17..20), `tensor_split` (REQ-23),
-   `unbind` (REQ-25), `broadcast_tensors` (REQ-26), `movedim`
-   (REQ-29), `tile` (REQ-31), `rot90` (REQ-33), `flip` (REQ-34).
-   Tracked under #1342.
+3. **Substantive forward + new backward** — `flip` (REQ-34, the core
+   CPU index-reversal kernel `flip_cpu_inner` + `FlipBackward`, flip is
+   its own inverse) and `repeat_interleave` (REQ-14, consecutive-
+   duplication forward + `RepeatInterleaveBackward` segment-sum
+   adjoint). These two carry the only new autograd nodes added in the
+   batch.
+
+The free-function `repeat` is NOT re-exported at the crate root (the
+crate-root `repeat` is the unrelated string-pattern `einops::repeat`);
+the tile-style `Tensor.repeat` is reached via `Tensor::repeat_t` and the
+`grad_fns::shape::repeat` path.
 
 ## Parity contract
 
@@ -634,7 +652,16 @@ tests in `ferrotorch-core/src/grad_fns/shape.rs:1109-1676`:
   `test_resolve_shape_multiple_infer_error`,
   `test_resolve_shape_mismatch`.
 
-Result line: `test result: ok. 35 passed; 0 failed; 0 ignored`.
+Plus the #1342 op coverage (flip / fliplr / flipud / rot90 / movedim /
+moveaxis / broadcast_to / broadcast_tensors / repeat / tile /
+repeat_interleave / unbind / tensor_split / vstack / hstack / dstack /
+column_stack — forward + backward + alias-equivalence + error paths).
+
+Result line: `test result: ok. 86 passed; 0 failed; 0 ignored`. An
+integration mirror lives at
+`ferrotorch-core/tests/divergence_shape_ops_audit.rs` (19 tests
+driving the public `Tensor::*_t` method wrappers — the R-DEFER-1
+non-test production consumers).
 
 ### Parity sweep (current state)
 
@@ -682,27 +709,27 @@ tests above and indirect coverage through ops that USE them
 | REQ-10 (swapdims) | SHIPPED | impl: `pub fn swapdims` in `grad_fns/shape.rs` (literal `input.transpose(dim0, dim1)` alias) mirrors upstream `TensorShape.cpp:4784 Tensor swapdims(self, dim0, dim1) { return self.transpose(dim0, dim1); }`; non-test consumer: `Tensor::swapdims` in `methods.rs`; lib test `test_swapdims_equals_transpose` (byte-equality vs transpose on a 3-D tensor); runner-arm gap #1340. |
 | REQ-11 (expand) | SHIPPED | impl: `pub fn expand` at `shape.rs:414` + `ExpandBackward` at `shape.rs:377` mirrors upstream `TensorShape.cpp:1344 Tensor expand`; non-test consumers: `grad_fns/indexing.rs:1806/1826/1851/3577` (broadcast prep for masked_fill / where_cond), `einsum.rs:1725` (sum-grad expand), `lib.rs:165` re-exports `expand`; runner-arm gap #1340 (existing arm at `runner/src/main.rs:1561` produces 0/72 passed 72 skipped). |
 | REQ-12 (expand_as) | SHIPPED | impl: `pub fn expand_as` in `grad_fns/shape.rs` (delegates to `expand(input, other.shape())`) mirrors upstream `TensorShape.cpp:1374 Tensor expand_as(self, other) { return self.expand_symint(other.sym_sizes()); }`; autograd inherited from `expand`'s `ExpandBackward` (sum-reduces broadcast axes); non-test consumer: `Tensor::expand_as_t` in `methods.rs`; lib tests `test_expand_as_equals_expand` (byte-equality vs explicit-shape expand), `test_expand_as_backward_sums_broadcast_axes`; runner-arm gap #1340. |
-| REQ-13 (repeat) | NOT-STARTED | torch `Tensor.repeat` (tile-style) not implemented; the unrelated `einops::repeat` at `einops.rs:589` uses string-pattern semantics. Implementation blocker #1342. |
-| REQ-14 (repeat_interleave) | NOT-STARTED | Not implemented. Implementation blocker #1342. |
+| REQ-13 (repeat) | SHIPPED | impl: `pub fn repeat` in `grad_fns/shape.rs` (prepends leading size-1 dims via `reshape`, then tiles each axis by `cat`-ing `r` copies — autograd inherited from `CatBackward`) mirrors upstream `aten/src/ATen/native/TensorShape.cpp:1909 Tensor repeat(self, repeats)`; distinct from the unrelated string-pattern `einops::repeat` at `einops.rs:589` (the crate-root re-export of `repeat` remains the einops one to avoid a name clash); non-test consumer: `Tensor::repeat_t` in `methods.rs`; lib tests `test_repeat_1d/_2d_with_new_leading_dim/_rejects_too_few_dims/_backward_accumulates`; runner-arm gap #1340. |
+| REQ-14 (repeat_interleave) | SHIPPED | impl: `pub fn repeat_interleave` + `RepeatInterleaveBackward` in `grad_fns/shape.rs` (CPU forward duplicates each index `repeats`× consecutively along `dim`; backward sums the `repeats` consecutive output slices back onto each input index) mirrors `torch.repeat_interleave(input, repeats, dim)`; non-test consumer: `Tensor::repeat_interleave_t` in `methods.rs`; lib tests `test_repeat_interleave_1d/_2d_dim1/_differs_from_repeat/_backward_sums_segments`; runner-arm gap #1340. |
 | REQ-15 (cat) | SHIPPED | impl: `pub fn cat` at `shape.rs:764` + `CatBackward` at `shape.rs:503` mirrors upstream `TensorShape.cpp:676 TORCH_IMPL_FUNC(cat_out_cpu)` + `:772 Tensor cat`; GPU fast path mirrors `aten::cat_out_cuda` via byte-width-dispatched `strided_cat`; non-test consumers: `flex_attention.rs:235/238` (head-grouped attention assembly), `lib.rs:165` re-exports `cat`; lib tests `test_cat_forward_axis0/_axis1`, `test_cat_backward_axis0/_axis1/_mixed_requires_grad`, `test_cat_empty_error`, `test_cat_1d`; runner-arm gap #1340. |
 | REQ-16 (stack) | SHIPPED | impl: `pub fn stack` at `vmap.rs:85` mirrors upstream `TensorShape.cpp:3462 Tensor stack` via unsqueeze + cat composition (autograd inherited from REQ-6 + REQ-15); grandfathered as existing pub API across multiple prior commits per S5; runner-arm gap #1340. |
-| REQ-17 (vstack) | NOT-STARTED | Not implemented. Implementation blocker #1342. |
-| REQ-18 (hstack) | NOT-STARTED | Not implemented. Implementation blocker #1342. |
-| REQ-19 (dstack) | NOT-STARTED | Not implemented. Implementation blocker #1342. |
-| REQ-20 (column_stack) | NOT-STARTED | Not implemented. Implementation blocker #1342. |
+| REQ-17 (vstack) | SHIPPED | impl: `pub fn vstack` in `grad_fns/shape.rs` (`atleast_2d` each input then `cat(_, 0)`) mirrors upstream `aten/src/ATen/native/TensorShape.cpp:3532 Tensor vstack(TensorList)`; autograd inherited from `reshape`/`unsqueeze` + `CatBackward`; non-test consumer: `Tensor::vstack_t` in `methods.rs`; lib tests `test_vstack_1d_inputs/_backward`; runner-arm gap #1340. |
+| REQ-18 (hstack) | SHIPPED | impl: `pub fn hstack` in `grad_fns/shape.rs` (`atleast_1d` each input; `cat(_, 0)` if 1-D else `cat(_, 1)`) mirrors upstream `aten/src/ATen/native/TensorShape.cpp:3514 Tensor hstack(TensorList)`; non-test consumer: `Tensor::hstack_t` in `methods.rs`; lib tests `test_hstack_1d_inputs/_2d_inputs`; runner-arm gap #1340. |
+| REQ-19 (dstack) | SHIPPED | impl: `pub fn dstack` in `grad_fns/shape.rs` (`atleast_3d` each input then `cat(_, 2)`) mirrors upstream `aten/src/ATen/native/TensorShape.cpp:3544 Tensor dstack(TensorList)`; non-test consumer: `Tensor::dstack_t` in `methods.rs`; lib test `test_dstack_1d_inputs`; runner-arm gap #1340. |
+| REQ-20 (column_stack) | SHIPPED | impl: `pub fn column_stack` in `grad_fns/shape.rs` (reshape ≤1-D inputs to `(numel,1)` then `hstack`) mirrors upstream `aten/src/ATen/native/TensorShape.cpp:3628 Tensor column_stack(TensorList)`; non-test consumer: `Tensor::column_stack_t` in `methods.rs`; lib test `test_column_stack_1d_inputs`; runner-arm gap #1340. |
 | REQ-21 (split) | SHIPPED | impl: `pub fn split_t` at `methods.rs:1224` consumes `SplitBackward` from THIS file at `shape.rs:649` per the explicit `methods.rs:1231 use crate::grad_fns::shape::SplitBackward`; mirrors upstream `TensorShape.cpp:3175 split` / `:3265 split_with_sizes`; non-test consumer: `Tensor::split` at `methods.rs:571`, `lib.rs:171` re-exports `split_t`; runner-arm gap #1340. |
 | REQ-22 (chunk) | SHIPPED | impl: `pub fn chunk_t` at `methods.rs:1182` (computes per-chunk size then delegates to the shared `SplitBackward` machinery) mirrors upstream `TensorShape.cpp:1077 chunk`; non-test consumer: `Tensor::chunk` at `methods.rs:566`, `lib.rs:171` re-exports `chunk_t`; runner-arm gap #1340. |
-| REQ-23 (tensor_split) | NOT-STARTED | Not implemented. Implementation blocker #1342. |
+| REQ-23 (tensor_split) | SHIPPED | impl: `pub fn tensor_split` in `grad_fns/shape.rs` (each section is a `narrow_t` view of `[indices[j-1], indices[j])` with `0`/`size(dim)` endpoints, boundaries clamped) mirrors upstream `aten/src/ATen/native/TensorShape.cpp:1167 tensor_split` / `:1130 _tensor_split_indices`; autograd inherited from `NarrowBackward`; non-test consumer: `Tensor::tensor_split_t` in `methods.rs`; lib tests `test_tensor_split_indices/_empty_section/_backward`; runner-arm gap #1340. |
 | REQ-24 (narrow) | SHIPPED | impl: `pub fn narrow_t` at `methods.rs:958` + `NarrowBackward` at `methods.rs:1051` mirrors upstream `TensorShape.cpp:1669 Tensor narrow`; non-test consumer: `Tensor::narrow` at `methods.rs:547`; runner-arm gap #1340. |
-| REQ-25 (unbind) | NOT-STARTED | Not implemented. Implementation blocker #1342. |
-| REQ-26 (broadcast_tensors) | NOT-STARTED | Not implemented as a named bundled op; ingredients (`shape::broadcast_shapes` + `grad_fns::shape::expand`) are available individually. Implementation blocker #1342. |
-| REQ-27 (broadcast_to) | NOT-STARTED | Pure alias of expand per upstream `TensorShape.cpp:652`; not implemented as a named pub fn. Implementation blocker #1342. |
+| REQ-25 (unbind) | SHIPPED | impl: `pub fn unbind` in `grad_fns/shape.rs` (one `narrow_t(dim, i, 1)` + `squeeze(dim)` per index, so each slice carries a `NarrowBackward` + `SqueezeBackward` chain) mirrors upstream `aten/src/ATen/native/TensorShape.cpp:4367 std::vector<Tensor> unbind(self, dim)` (which uses `select`); non-test consumer: `Tensor::unbind_t` in `methods.rs`; lib tests `test_unbind_dim0/_dim1/_backward_scatters`; runner-arm gap #1340. |
+| REQ-26 (broadcast_tensors) | SHIPPED | impl: `pub fn broadcast_tensors` in `grad_fns/shape.rs` (folds all inputs through `crate::shape::broadcast_shapes` to the common shape, then `expand`s each — autograd inherited per-input from `ExpandBackward`) mirrors upstream `aten/src/ATen/native/TensorShape.cpp:656 std::vector<Tensor> broadcast_tensors(TensorList) { return expand_outplace(tensors); }`; non-test consumer: `lib.rs` crate-root re-export `broadcast_tensors` (consumed by the `divergence_shape_ops_audit` parity + reachable workspace-wide); lib test `test_broadcast_tensors_common_shape`; runner-arm gap #1340. |
+| REQ-27 (broadcast_to) | SHIPPED | impl: `pub fn broadcast_to` in `grad_fns/shape.rs` (literal `expand(input, shape)` alias) mirrors upstream `aten/src/ATen/native/TensorShape.cpp:652 Tensor broadcast_to_symint(self, size) { return self.expand_symint(size); }`; autograd inherited from `ExpandBackward`; non-test consumer: `Tensor::broadcast_to_t` in `methods.rs`; lib test `test_broadcast_to_equals_expand`; runner-arm gap #1340. |
 | REQ-28 (broadcast_shapes) | SHIPPED | impl: `pub fn broadcast_shapes` at `ferrotorch-core/src/shape.rs:7` (sister utility module, not this file) mirrors upstream right-aligned NumPy broadcast rule; non-test consumers: `meta_propagate.rs:31`, `ops/elementwise.rs:12`, `grad_fns/indexing.rs:1803/1825/1848-1849/3572`, `grad_fns/arithmetic.rs:39`; runner-arm gap #1340. |
-| REQ-29 (movedim) | NOT-STARTED | Not implemented. Implementation blocker #1342. |
-| REQ-30 (moveaxis) | NOT-STARTED | Pure alias of movedim per upstream `TensorShape.cpp:4768`; not implemented. Implementation blocker #1342. |
-| REQ-31 (tile) | NOT-STARTED | Not implemented. Implementation blocker #1342. |
+| REQ-29 (movedim) | SHIPPED | impl: `pub fn movedim` in `grad_fns/shape.rs` (normalizes + de-duplicates src/dst, assembles a full permutation — listed dims land at their targets, leftover dims fill the rest in original relative order — then `permute_t`) mirrors upstream `aten/src/ATen/native/TensorShape.cpp:4657 Tensor movedim(self, src, dst)` (verified against the `:4756` worked example order `[2,3,0,4,1]`); autograd inherited from `PermuteBackward`; non-test consumer: `Tensor::movedim_t` in `methods.rs`; lib tests `test_movedim_single/_multi/_backward_reaches_leaf/_rejects_repeated_dim`; runner-arm gap #1340. |
+| REQ-30 (moveaxis) | SHIPPED | impl: `pub fn moveaxis` in `grad_fns/shape.rs` (literal `movedim(input, src, dst)` alias) mirrors upstream `aten/src/ATen/native/TensorShape.cpp:4768 Tensor moveaxis(self, src, dst) { return at::movedim(self, src, dst); }`; non-test consumer: `Tensor::moveaxis_t` in `methods.rs`; lib test `test_moveaxis_equals_movedim`; runner-arm gap #1340. |
+| REQ-31 (tile) | SHIPPED | impl: `pub fn tile` in `grad_fns/shape.rs` (left-pads `reps` with 1s when shorter than `self.dim()`, then delegates to `repeat`) mirrors upstream `aten/src/ATen/native/TensorShape.cpp:1971 Tensor tile_symint(self, reps)`; autograd inherited from `repeat`'s `cat` composition; non-test consumer: `Tensor::tile_t` in `methods.rs`; lib test `test_tile_pads_reps`; runner-arm gap #1340. |
 | REQ-32 (roll) | SHIPPED | impl: `pub fn roll` at `ops/tensor_ops.rs:181` (forward) + `RollBackward` at THIS file `shape.rs:925` (backward) — backward consumed in production at `tensor_ops.rs:223` (CUDA forward arm) and `:241` (CPU forward arm); upstream is `aten/src/ATen/native/TensorTransformations.cpp:110 Tensor roll` (note: this is NOT the route-declared TensorShape.cpp — route's upstream list is incomplete for this op); lib tests `test_roll_forward_registers_grad_fn`, `test_roll_zero_shift_early_return`, `test_roll_backward_simple_1d_hand_computed`, `test_roll_backward_negative_shift_2d`; runner-arm gap #1340. |
-| REQ-33 (rot90) | NOT-STARTED | Not implemented. Implementation blocker #1342. |
-| REQ-34 (flip) | NOT-STARTED | Free op not implemented; only private `flip_kernel` helpers in `ferrotorch-nn/src/conv.rs` for conv-transpose backward. Implementation blocker #1342. |
-| REQ-35 (fliplr) | NOT-STARTED | Pure alias of `flip({1})` per upstream `TensorTransformations.cpp:180`; not implemented. Implementation blocker #1342. |
-| REQ-36 (flipud) | NOT-STARTED | Pure alias of `flip({0})` per upstream `TensorTransformations.cpp:186`; not implemented. Implementation blocker #1342. |
+| REQ-33 (rot90) | SHIPPED | impl: `pub fn rot90` in `grad_fns/shape.rs` (`k mod 4` then the upstream switch: `k1 → flip({d1}).transpose(d0,d1)`, `k2 → flip({d0,d1})`, `k3 → flip({d0}).transpose(d0,d1)`, `k0 → clone`) mirrors upstream `aten/src/ATen/native/TensorTransformations.cpp:134 Tensor rot90(self, k, dims)`; autograd inherited from `FlipBackward` + `PermuteBackward`; non-test consumer: `Tensor::rot90_t` in `methods.rs`; lib tests `test_rot90_k1/_k2_is_flip_both/_k0_and_k4_identity/_negative_k/_backward_reaches_leaf`; runner-arm gap #1340. |
+| REQ-34 (flip) | SHIPPED | impl: `pub fn flip` + `FlipBackward` + `flip_cpu_inner` in `grad_fns/shape.rs` (CPU index-reversal over a `data_vec`-gathered logical buffer so strided views are handled; backward re-applies the same flip — flip is its own inverse) mirrors upstream `aten/src/ATen/native/TensorTransformations.cpp:36 Tensor flip(self, dims)` (de-duplicates dims); this is the user-facing `torch.flip`, distinct from the private `flip_kernel` helpers in `ferrotorch-nn/src/conv.rs`; non-test consumer: `Tensor::flip_t` in `methods.rs`; lib tests `test_flip_forward_1d/_2d_both_dims/_2d_single_dim/_rejects_duplicate_dim/_backward_is_self_inverse`; runner-arm gap #1340. |
+| REQ-35 (fliplr) | SHIPPED | impl: `pub fn fliplr` in `grad_fns/shape.rs` (≥2-D check then `flip({1})`) mirrors upstream `aten/src/ATen/native/TensorTransformations.cpp:180 Tensor fliplr(self) { ... return self.flip({1}); }`; autograd inherited from `FlipBackward`; non-test consumer: `Tensor::fliplr_t` in `methods.rs`; lib test `test_fliplr_equals_flip_dim1`; runner-arm gap #1340. |
+| REQ-36 (flipud) | SHIPPED | impl: `pub fn flipud` in `grad_fns/shape.rs` (≥1-D check then `flip({0})`) mirrors upstream `aten/src/ATen/native/TensorTransformations.cpp:186 Tensor flipud(self) { ... return self.flip({0}); }`; autograd inherited from `FlipBackward`; non-test consumer: `Tensor::flipud_t` in `methods.rs`; lib test `test_flipud_equals_flip_dim0`; runner-arm gap #1340. |

@@ -182,7 +182,11 @@ pub use grad_fns::reduction::{
     max_with_dim, mean_dim, median_with_dim, min_with_dim, nanmedian_with_dim, norm_with_dim,
     sum_dim,
 };
-pub use grad_fns::shape::{cat, expand, expand_as, swapaxes, swapdims, unflatten};
+pub use grad_fns::shape::{
+    broadcast_tensors, broadcast_to, cat, column_stack, dstack, expand, expand_as, flip, fliplr,
+    flipud, hstack, moveaxis, movedim, repeat_interleave, rot90, swapaxes, swapdims, tensor_split,
+    tile, unbind, unflatten, vstack,
+};
 pub use grad_fns::transcendental::{
     atan2, clamp, copysign, cos, exp, hypot, log, nextafter, signbit, sin,
 };

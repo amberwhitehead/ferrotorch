@@ -21,30 +21,30 @@
 //! | REQ-10 (`swapdims`) | SHIPPED | `swapdims` here (literal transpose alias) consumed by `Tensor::swapdims` in `methods.rs`; lib test `test_swapdims_equals_transpose`. Closes #1342 REQ-10. |
 //! | REQ-11 (`expand`) | SHIPPED | `expand` + `ExpandBackward` consume the shared `arithmetic::reduce_grad_to_shape`; GPU fast path via `broadcast_add_{f32,f64}`; consumed by `grad_fns::indexing` broadcast prep and `einsum.rs`; runner-arm gap #1340. |
 //! | REQ-12 (`expand_as`) | SHIPPED | `expand_as` here (delegates to `expand` with `other.shape()`, inheriting `ExpandBackward`) consumed by `Tensor::expand_as_t` in `methods.rs`; lib tests `test_expand_as_equals_expand`, `test_expand_as_backward_sums_broadcast_axes`. Closes #1342 REQ-12. |
-//! | REQ-13 (`repeat`) | NOT-STARTED | tile-style `Tensor.repeat` not implemented; the `einops::repeat` is unrelated. Blocker #1342. |
-//! | REQ-14 (`repeat_interleave`) | NOT-STARTED | not implemented. Blocker #1342. |
+//! | REQ-13 (`repeat`) | SHIPPED | `repeat` here (cat-composition tile) consumed by `Tensor::repeat_t`; lib tests `test_repeat_*`. Closes #1342 REQ-13. |
+//! | REQ-14 (`repeat_interleave`) | SHIPPED | `repeat_interleave` + `RepeatInterleaveBackward` here consumed by `Tensor::repeat_interleave_t`; lib tests `test_repeat_interleave_*`. Closes #1342 REQ-14. |
 //! | REQ-15 (`cat`) | SHIPPED | `cat` + `CatBackward` with byte-width-dispatched `strided_cat` GPU fast path; consumers in `flex_attention.rs` and `lib.rs` re-export; runner-arm gap #1340. |
 //! | REQ-16 (`stack`) | SHIPPED | `vmap::stack` is the pub-API surface (grandfathered per S5); autograd inherited from `unsqueeze + cat`; runner-arm gap #1340. |
-//! | REQ-17 (`vstack`) | NOT-STARTED | not implemented. Blocker #1342. |
-//! | REQ-18 (`hstack`) | NOT-STARTED | not implemented. Blocker #1342. |
-//! | REQ-19 (`dstack`) | NOT-STARTED | not implemented. Blocker #1342. |
-//! | REQ-20 (`column_stack`) | NOT-STARTED | not implemented. Blocker #1342. |
+//! | REQ-17 (`vstack`) | SHIPPED | `vstack` here (`atleast_2d` + `cat(_,0)`) consumed by `Tensor::vstack_t`; lib tests `test_vstack_*`. Closes #1342 REQ-17. |
+//! | REQ-18 (`hstack`) | SHIPPED | `hstack` here (`atleast_1d` + rank-dispatched `cat`) consumed by `Tensor::hstack_t`; lib tests `test_hstack_*`. Closes #1342 REQ-18. |
+//! | REQ-19 (`dstack`) | SHIPPED | `dstack` here (`atleast_3d` + `cat(_,2)`) consumed by `Tensor::dstack_t`; lib test `test_dstack_1d_inputs`. Closes #1342 REQ-19. |
+//! | REQ-20 (`column_stack`) | SHIPPED | `column_stack` here (reshape ≤1-D → `(numel,1)` + `hstack`) consumed by `Tensor::column_stack_t`; lib test `test_column_stack_1d_inputs`. Closes #1342 REQ-20. |
 //! | REQ-21 (`split`) | SHIPPED | `SplitBackward` here is consumed by `methods::split_t` per the explicit `use crate::grad_fns::shape::SplitBackward`; runner-arm gap #1340. |
 //! | REQ-22 (`chunk`) | SHIPPED | `methods::chunk_t` shares the `SplitBackward` machinery from this file; runner-arm gap #1340. |
-//! | REQ-23 (`tensor_split`) | NOT-STARTED | not implemented. Blocker #1342. |
+//! | REQ-23 (`tensor_split`) | SHIPPED | `tensor_split` here (`narrow` per section, boundaries clamped) consumed by `Tensor::tensor_split_t`; lib tests `test_tensor_split_*`. Closes #1342 REQ-23. |
 //! | REQ-24 (`narrow`) | SHIPPED | `narrow_t` + `NarrowBackward` live in `methods.rs`; consumer is `Tensor::narrow`; runner-arm gap #1340. |
-//! | REQ-25 (`unbind`) | NOT-STARTED | not implemented. Blocker #1342. |
-//! | REQ-26 (`broadcast_tensors`) | NOT-STARTED | ingredients exist but the named bundled op does not. Blocker #1342. |
-//! | REQ-27 (`broadcast_to`) | NOT-STARTED | pure alias of expand; not implemented as a named pub fn. Blocker #1342. |
+//! | REQ-25 (`unbind`) | SHIPPED | `unbind` here (`narrow` + `squeeze` per index) consumed by `Tensor::unbind_t`; lib tests `test_unbind_*`. Closes #1342 REQ-25. |
+//! | REQ-26 (`broadcast_tensors`) | SHIPPED | `broadcast_tensors` here (`broadcast_shapes` fold + per-input `expand`) consumed by `lib.rs` crate-root re-export; lib test `test_broadcast_tensors_common_shape`. Closes #1342 REQ-26. |
+//! | REQ-27 (`broadcast_to`) | SHIPPED | `broadcast_to` here (literal `expand` alias) consumed by `Tensor::broadcast_to_t`; lib test `test_broadcast_to_equals_expand`. Closes #1342 REQ-27. |
 //! | REQ-28 (`broadcast_shapes`) | SHIPPED | `broadcast_shapes` lives in `crate::shape` (sister utility module); consumed across `meta_propagate.rs`, `ops/elementwise.rs`, `grad_fns/indexing.rs`, `grad_fns/arithmetic.rs`; runner-arm gap #1340. |
-//! | REQ-29 (`movedim`) | NOT-STARTED | not implemented. Blocker #1342. |
-//! | REQ-30 (`moveaxis`) | NOT-STARTED | pure alias of movedim; not implemented. Blocker #1342. |
-//! | REQ-31 (`tile`) | NOT-STARTED | not implemented. Blocker #1342. |
+//! | REQ-29 (`movedim`) | SHIPPED | `movedim` here (computed full perm → `permute_t`) consumed by `Tensor::movedim_t`; lib tests `test_movedim_*`. Closes #1342 REQ-29. |
+//! | REQ-30 (`moveaxis`) | SHIPPED | `moveaxis` here (literal `movedim` alias) consumed by `Tensor::moveaxis_t`; lib test `test_moveaxis_equals_movedim`. Closes #1342 REQ-30. |
+//! | REQ-31 (`tile`) | SHIPPED | `tile` here (left-pad reps → `repeat`) consumed by `Tensor::tile_t`; lib test `test_tile_pads_reps`. Closes #1342 REQ-31. |
 //! | REQ-32 (`roll`) | SHIPPED | `RollBackward` here is consumed by `ops::tensor_ops::roll` (CUDA + CPU forward arms both attach the backward fn); upstream is `TensorTransformations.cpp:110` (route's upstream list is incomplete for this op); runner-arm gap #1340. |
-//! | REQ-33 (`rot90`) | NOT-STARTED | not implemented. Blocker #1342. |
-//! | REQ-34 (`flip`) | NOT-STARTED | only a private `flip_kernel` in `ferrotorch-nn::conv` for conv-transpose backward. Blocker #1342. |
-//! | REQ-35 (`fliplr`) | NOT-STARTED | pure alias of `flip({1})`; not implemented. Blocker #1342. |
-//! | REQ-36 (`flipud`) | NOT-STARTED | pure alias of `flip({0})`; not implemented. Blocker #1342. |
+//! | REQ-33 (`rot90`) | SHIPPED | `rot90` here (`k mod 4` switch over `flip`+`transpose`) consumed by `Tensor::rot90_t`; lib tests `test_rot90_*`. Closes #1342 REQ-33. |
+//! | REQ-34 (`flip`) | SHIPPED | `flip` + `FlipBackward` + `flip_cpu_inner` here (CPU index-reversal; flip is its own inverse) consumed by `Tensor::flip_t`; lib tests `test_flip_*`. Closes #1342 REQ-34. |
+//! | REQ-35 (`fliplr`) | SHIPPED | `fliplr` here (≥2-D check + `flip({1})`) consumed by `Tensor::fliplr_t`; lib test `test_fliplr_equals_flip_dim1`. Closes #1342 REQ-35. |
+//! | REQ-36 (`flipud`) | SHIPPED | `flipud` here (≥1-D check + `flip({0})`) consumed by `Tensor::flipud_t`; lib test `test_flipud_equals_flip_dim0`. Closes #1342 REQ-36. |
 
 use std::any::TypeId;
 use std::sync::Arc;
@@ -655,6 +655,732 @@ pub fn swapdims<T: Float>(
     dim1: usize,
 ) -> FerrotorchResult<Tensor<T>> {
     input.transpose(dim0, dim1)
+}
+
+// ---------------------------------------------------------------------------
+// FlipBackward — backward for flip (REQ-34)
+// ---------------------------------------------------------------------------
+
+/// Backward for `flip(x, dims)` (reverse element order along `dims`).
+///
+/// VJP: `flip` is a permutation (its own inverse), so the Jacobian is the
+/// corresponding permutation matrix and the VJP re-applies the SAME flip to
+/// the incoming gradient: `grad_input = flip(grad_output, dims)`.
+#[derive(Debug)]
+pub struct FlipBackward<T: Float> {
+    input: Tensor<T>,
+    /// The (already normalized) dims that were reversed in the forward pass.
+    dims: Vec<usize>,
+}
+
+impl<T: Float> FlipBackward<T> {
+    pub fn new(input: Tensor<T>, dims: Vec<usize>) -> Self {
+        Self { input, dims }
+    }
+}
+
+impl<T: Float> GradFn<T> for FlipBackward<T> {
+    fn backward(&self, grad_output: &Tensor<T>) -> FerrotorchResult<Vec<Option<Tensor<T>>>> {
+        if !self.input.requires_grad() {
+            return Ok(vec![None]);
+        }
+        // Flip is its own inverse: re-flip the incoming gradient along the
+        // same dims to reverse the permutation. Re-use the host kernel so the
+        // grad tensor is unconditionally a leaf (no nested grad_fn).
+        let (cpu_go, device) = ensure_cpu(grad_output)?;
+        let go_data = cpu_go.data_vec()?;
+        let shape = cpu_go.shape();
+        let flipped = flip_cpu_inner(&go_data, shape, &self.dims);
+        let grad_tensor = Tensor::from_storage(TensorStorage::cpu(flipped), shape.to_vec(), false)?;
+        Ok(vec![Some(restore_device(grad_tensor, device)?)])
+    }
+
+    fn inputs(&self) -> Vec<&Tensor<T>> {
+        vec![&self.input]
+    }
+
+    fn name(&self) -> &'static str {
+        "FlipBackward"
+    }
+}
+
+/// Reverse the order of elements along each axis in `dims`.
+///
+/// Mirrors upstream `aten/src/ATen/native/TensorTransformations.cpp:36 Tensor
+/// flip(const Tensor& self, IntArrayRef dims)` — wraps + de-duplicates the
+/// dims (a repeated dim is an error here), then materializes a copy with each
+/// listed axis reversed. Backward re-applies the same flip (`FlipBackward`,
+/// flip is its own inverse).
+pub fn flip<T: Float>(input: &Tensor<T>, dims: &[isize]) -> FerrotorchResult<Tensor<T>> {
+    let ndim = input.ndim();
+    // Normalize + validate dims, rejecting duplicates (upstream
+    // `dim_list_to_bitset` sets one bit per dim and errors on a repeat).
+    let mut norm: Vec<usize> = Vec::with_capacity(dims.len());
+    for &d in dims {
+        let nd = crate::shape::normalize_axis(d, ndim)?;
+        if norm.contains(&nd) {
+            return Err(FerrotorchError::InvalidArgument {
+                message: format!("flip: dim {nd} appears multiple times in the list of dims"),
+            });
+        }
+        norm.push(nd);
+    }
+
+    if input.is_cuda() {
+        return Err(crate::error::FerrotorchError::NotImplementedOnCuda { op: "flip" });
+    }
+
+    // `data_vec` gathers a (possibly strided) view into logical C-order, so
+    // `flip_cpu_inner`'s C-contiguous-stride assumption holds even when the
+    // input is a non-materialized view (e.g. a transpose produced by `rot90`).
+    let in_data = input.data_vec()?;
+    let shape = input.shape();
+    let out_data = flip_cpu_inner(&in_data, shape, &norm);
+
+    if is_grad_enabled() && input.requires_grad() {
+        let grad_fn = Arc::new(FlipBackward::new(input.clone(), norm));
+        Tensor::from_operation(TensorStorage::cpu(out_data), shape.to_vec(), grad_fn)
+    } else {
+        Tensor::from_storage(TensorStorage::cpu(out_data), shape.to_vec(), false)
+    }
+}
+
+/// CPU flip kernel shared by `flip` (forward) and `FlipBackward` (backward).
+///
+/// Produces `out[i0,…] = data[j0,…]` where the coordinate along every axis in
+/// `dims` is reversed (`jk = size_k - 1 - ik`) and unchanged otherwise.
+/// `data` is assumed C-contiguous in `shape`.
+fn flip_cpu_inner<T: Float>(data: &[T], shape: &[usize], dims: &[usize]) -> Vec<T> {
+    let numel = data.len();
+    let strides = crate::shape::c_contiguous_strides(shape);
+    let ndim = shape.len();
+    let mut out = vec![<T as num_traits::Zero>::zero(); numel];
+
+    for out_flat in 0..numel {
+        // Decompose the output flat index into coords, mapping each flipped
+        // axis to its source coordinate, then recompose into the source flat
+        // index (same C-contiguous strides for input and output).
+        let mut rem = out_flat;
+        let mut src_flat = 0usize;
+        for d in 0..ndim {
+            let stride = strides[d] as usize;
+            let coord = rem / stride;
+            rem %= stride;
+            let src_coord = if dims.contains(&d) {
+                shape[d] - 1 - coord
+            } else {
+                coord
+            };
+            src_flat += src_coord * stride;
+        }
+        out[out_flat] = data[src_flat];
+    }
+    out
+}
+
+/// `fliplr(input)` — flip a (≥2-D) tensor left-to-right (along dim 1).
+///
+/// Mirrors upstream `aten/src/ATen/native/TensorTransformations.cpp:180 Tensor
+/// fliplr(const Tensor& self) { ... return self.flip({1}); }`. Autograd is
+/// inherited from `flip`'s `FlipBackward`.
+pub fn fliplr<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
+    if input.ndim() < 2 {
+        return Err(FerrotorchError::InvalidArgument {
+            message: format!("fliplr: input must be >= 2-D, got {}-D", input.ndim()),
+        });
+    }
+    flip(input, &[1])
+}
+
+/// `flipud(input)` — flip a (≥1-D) tensor up-to-down (along dim 0).
+///
+/// Mirrors upstream `aten/src/ATen/native/TensorTransformations.cpp:186 Tensor
+/// flipud(const Tensor& self) { ... return self.flip({0}); }`. Autograd is
+/// inherited from `flip`'s `FlipBackward`.
+pub fn flipud<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
+    if input.ndim() < 1 {
+        return Err(FerrotorchError::InvalidArgument {
+            message: "flipud: input must be >= 1-D, got 0-D".into(),
+        });
+    }
+    flip(input, &[0])
+}
+
+/// `rot90(input, k, dims)` — rotate a tensor 90° `k` times in the plane
+/// spanned by `dims`.
+///
+/// Mirrors upstream `aten/src/ATen/native/TensorTransformations.cpp:134 Tensor
+/// rot90(const Tensor& self, int64_t k, IntArrayRef dims)`: `k` is reduced mod
+/// 4, then `k==1 → flip({dims[1]}).transpose(dims[0],dims[1])`,
+/// `k==2 → flip(dims)`, `k==3 → flip({dims[0]}).transpose(dims[0],dims[1])`,
+/// `k==0 → clone`. Autograd is inherited from the `flip` + `transpose`
+/// composition (`FlipBackward` + `PermuteBackward`).
+pub fn rot90<T: Float>(input: &Tensor<T>, k: i64, dims: &[isize]) -> FerrotorchResult<Tensor<T>> {
+    let ndim = input.ndim();
+    if dims.len() != 2 {
+        return Err(FerrotorchError::InvalidArgument {
+            message: format!(
+                "rot90: expected exactly 2 rotation dims, got {}",
+                dims.len()
+            ),
+        });
+    }
+    if ndim < 2 {
+        return Err(FerrotorchError::InvalidArgument {
+            message: format!("rot90: expected total dims >= 2, got {ndim}"),
+        });
+    }
+    let d0 = crate::shape::normalize_axis(dims[0], ndim)?;
+    let d1 = crate::shape::normalize_axis(dims[1], ndim)?;
+    if d0 == d1 {
+        return Err(FerrotorchError::InvalidArgument {
+            message: format!("rot90: rotation dims must differ, got dim0 = {d0}, dim1 = {d1}"),
+        });
+    }
+
+    // Handle modulo with negative k: reduce to {0,1,2,3}.
+    let kk = k.rem_euclid(4) as u8;
+    match kk {
+        1 => flip(input, &[d1 as isize])?.transpose(d0, d1),
+        2 => flip(input, &[d0 as isize, d1 as isize]),
+        3 => flip(input, &[d0 as isize])?.transpose(d0, d1),
+        _ => Ok(input.clone()),
+    }
+}
+
+/// `movedim(input, source, destination)` — reposition the dims listed in
+/// `source` to the indices listed in `destination`.
+///
+/// Mirrors upstream `aten/src/ATen/native/TensorShape.cpp:4657 Tensor
+/// movedim(const Tensor& self, IntArrayRef src, IntArrayRef dst)`: it
+/// `maybe_wrap_dim`s + de-duplicates both lists, then assembles a full
+/// permutation (the listed dims land at their targets; the remaining dims
+/// fill the leftover slots in their original relative order) and `permute`s.
+/// Autograd is inherited from `permute_t`'s `PermuteBackward`.
+pub fn movedim<T: Float>(
+    input: &Tensor<T>,
+    source: &[isize],
+    destination: &[isize],
+) -> FerrotorchResult<Tensor<T>> {
+    if source.len() != destination.len() {
+        return Err(FerrotorchError::InvalidArgument {
+            message: format!(
+                "movedim: source ({} dims) and destination ({} dims) must match in length",
+                source.len(),
+                destination.len()
+            ),
+        });
+    }
+    let ndim = input.ndim();
+
+    let norm_src: Vec<usize> = source
+        .iter()
+        .map(|&d| crate::shape::normalize_axis(d, ndim))
+        .collect::<FerrotorchResult<_>>()?;
+    let norm_dst: Vec<usize> = destination
+        .iter()
+        .map(|&d| crate::shape::normalize_axis(d, ndim))
+        .collect::<FerrotorchResult<_>>()?;
+
+    let has_dup = |v: &[usize]| {
+        let mut s = v.to_vec();
+        s.sort_unstable();
+        s.windows(2).any(|w| w[0] == w[1])
+    };
+    if has_dup(&norm_src) {
+        return Err(FerrotorchError::InvalidArgument {
+            message: "movedim: repeated dim in `source`".into(),
+        });
+    }
+    if has_dup(&norm_dst) {
+        return Err(FerrotorchError::InvalidArgument {
+            message: "movedim: repeated dim in `destination`".into(),
+        });
+    }
+
+    if ndim == 0 {
+        return Ok(input.clone());
+    }
+
+    // `order[new_pos] = old_pos`. Mark the explicitly-placed dims, then fill
+    // the remaining target slots with the leftover source dims in order.
+    let sentinel = usize::MAX;
+    let mut order = vec![sentinel; ndim];
+    let mut src_used = vec![false; ndim];
+    for i in 0..norm_src.len() {
+        order[norm_dst[i]] = norm_src[i];
+        src_used[norm_src[i]] = true;
+    }
+    let mut leftover_src = (0..ndim).filter(|d| !src_used[*d]);
+    for slot in &mut order {
+        if *slot == sentinel {
+            *slot = leftover_src
+                .next()
+                .expect("movedim: leftover dim accounting");
+        }
+    }
+
+    crate::methods::permute_t(input, &order)
+}
+
+/// `moveaxis(input, source, destination)` — a literal alias of `movedim`.
+///
+/// Mirrors upstream `aten/src/ATen/native/TensorShape.cpp:4768 Tensor
+/// moveaxis(const Tensor& self, IntArrayRef src, IntArrayRef dst) { return
+/// at::movedim(self, src, dst); }`. Autograd inherited via `movedim`.
+pub fn moveaxis<T: Float>(
+    input: &Tensor<T>,
+    source: &[isize],
+    destination: &[isize],
+) -> FerrotorchResult<Tensor<T>> {
+    movedim(input, source, destination)
+}
+
+/// `broadcast_to(input, shape)` — broadcast `input` to `shape`; a literal
+/// alias of `expand`.
+///
+/// Mirrors upstream `aten/src/ATen/native/TensorShape.cpp:652 Tensor
+/// broadcast_to_symint(const Tensor& self, SymIntArrayRef size) { return
+/// self.expand_symint(size); }`. Autograd inherited from `expand`'s
+/// `ExpandBackward`.
+pub fn broadcast_to<T: Float>(input: &Tensor<T>, shape: &[usize]) -> FerrotorchResult<Tensor<T>> {
+    expand(input, shape)
+}
+
+/// `broadcast_tensors(tensors)` — expand every input to their common
+/// broadcast shape.
+///
+/// Mirrors upstream `aten/src/ATen/native/TensorShape.cpp:656
+/// std::vector<Tensor> broadcast_tensors(TensorList tensors) { return
+/// expand_outplace(tensors); }`. The common shape is the right-aligned NumPy
+/// broadcast of all inputs (via `crate::shape::broadcast_shapes`); each input
+/// is then `expand`ed to it, so autograd is inherited per-input from
+/// `ExpandBackward`.
+pub fn broadcast_tensors<T: Float>(tensors: &[Tensor<T>]) -> FerrotorchResult<Vec<Tensor<T>>> {
+    if tensors.is_empty() {
+        return Err(FerrotorchError::InvalidArgument {
+            message: "broadcast_tensors: empty tensor list".into(),
+        });
+    }
+    let mut common: Vec<usize> = tensors[0].shape().to_vec();
+    for t in &tensors[1..] {
+        common = crate::shape::broadcast_shapes(&common, t.shape())?;
+    }
+    tensors.iter().map(|t| expand(t, &common)).collect()
+}
+
+/// `repeat(input, repeats)` — tile `input` `repeats[i]` times along each axis.
+///
+/// Mirrors upstream `aten/src/ATen/native/TensorShape.cpp:1909 Tensor
+/// repeat(const Tensor& self, IntArrayRef repeats)`: `repeats.size()` must be
+/// `>= self.dim()`; leading new dims are prepended (treated as size-1 inputs);
+/// the result size along axis `i` is `input_size[i] * repeats[i]`. We assemble
+/// the tile by repeated `cat` of the (optionally leading-unsqueezed) input
+/// along each axis, so autograd is inherited from `cat`'s `CatBackward`
+/// (gradient of a tile is the sum of the per-copy gradients).
+pub fn repeat<T: Float>(input: &Tensor<T>, repeats: &[isize]) -> FerrotorchResult<Tensor<T>> {
+    let in_ndim = input.ndim();
+    if repeats.len() < in_ndim {
+        return Err(FerrotorchError::InvalidArgument {
+            message: format!(
+                "repeat: number of repeat dims ({}) cannot be smaller than tensor dims ({})",
+                repeats.len(),
+                in_ndim
+            ),
+        });
+    }
+    for &r in repeats {
+        if r < 0 {
+            return Err(FerrotorchError::InvalidArgument {
+                message: format!("repeat: repeat value {r} must be non-negative"),
+            });
+        }
+    }
+
+    // Prepend leading size-1 dims so the input matches `repeats.len()`.
+    let num_new = repeats.len() - in_ndim;
+    let mut cur = if num_new > 0 {
+        let mut padded: Vec<isize> = vec![1; num_new];
+        padded.extend(input.shape().iter().map(|&d| d as isize));
+        reshape(input, &padded)?
+    } else {
+        input.clone()
+    };
+
+    // Tile axis by axis: `cat` `r` copies of `cur` along axis `ax`. A 0 repeat
+    // collapses that axis to size 0 (matches the upstream empty-tensor path).
+    for (ax, &r) in repeats.iter().enumerate() {
+        let r = r as usize;
+        if r == 1 {
+            continue;
+        }
+        if r == 0 {
+            let mut zero_shape: Vec<isize> = cur.shape().iter().map(|&d| d as isize).collect();
+            zero_shape[ax] = 0;
+            cur = reshape(&cur, &zero_shape)?;
+            continue;
+        }
+        let copies = vec![cur.clone(); r];
+        cur = cat(&copies, ax as isize)?;
+    }
+    Ok(cur)
+}
+
+/// `tile(input, reps)` — NumPy-style tile.
+///
+/// Mirrors upstream `aten/src/ATen/native/TensorShape.cpp:1971 Tensor
+/// tile_symint(const Tensor& self, SymIntArrayRef reps)`: when `reps` is
+/// shorter than `self.dim()` it is left-padded with 1s (so a 4-D tensor with
+/// `reps=(2,2)` is treated as `(1,1,2,2)`), then delegates to `repeat`.
+/// Autograd inherited from `repeat`'s `cat` composition.
+pub fn tile<T: Float>(input: &Tensor<T>, reps: &[isize]) -> FerrotorchResult<Tensor<T>> {
+    let in_ndim = input.ndim();
+    if reps.len() < in_ndim {
+        let pad = in_ndim - reps.len();
+        let mut padded: Vec<isize> = vec![1; pad];
+        padded.extend_from_slice(reps);
+        repeat(input, &padded)
+    } else {
+        repeat(input, reps)
+    }
+}
+
+/// `unbind(input, dim)` — split `input` into `size(dim)` slices, removing
+/// `dim` from each.
+///
+/// Mirrors upstream `aten/src/ATen/native/TensorShape.cpp:4367
+/// std::vector<Tensor> unbind(const Tensor& self, int64_t dim)`: returns one
+/// `select(dim, i)` per index `i`. We compose `narrow(dim, i, 1)` +
+/// `squeeze(dim)` (both autograd-aware) so each output slice inherits a
+/// `NarrowBackward` + `SqueezeBackward` chain that scatters its gradient back
+/// into the correct slice of `input`.
+pub fn unbind<T: Float>(input: &Tensor<T>, dim: isize) -> FerrotorchResult<Vec<Tensor<T>>> {
+    let ndim = input.ndim();
+    if ndim == 0 {
+        return Err(FerrotorchError::InvalidArgument {
+            message: "unbind: cannot unbind a 0-D tensor".into(),
+        });
+    }
+    let norm_dim = crate::shape::normalize_axis(dim, ndim)?;
+    let size = input.shape()[norm_dim];
+    let mut out = Vec::with_capacity(size);
+    for i in 0..size {
+        let slice = crate::methods::narrow_t(input, norm_dim, i, 1)?;
+        out.push(squeeze(&slice, norm_dim as isize)?);
+    }
+    Ok(out)
+}
+
+/// `tensor_split(input, indices, dim)` — split `input` at the given integer
+/// `indices` along `dim` (the indices form section boundaries).
+///
+/// Mirrors upstream `aten/src/ATen/native/TensorShape.cpp:1167
+/// tensor_split` (the indices form, `_tensor_split_indices` at `:1130`):
+/// section `j` spans `[indices[j-1], indices[j])` along `dim` (with implicit
+/// `0` and `size(dim)` endpoints), so `n` indices yield `n+1` sections and an
+/// out-of-order / out-of-range index clamps to the valid range. Each section
+/// is a `narrow` view, inheriting `NarrowBackward`.
+pub fn tensor_split<T: Float>(
+    input: &Tensor<T>,
+    indices: &[usize],
+    dim: isize,
+) -> FerrotorchResult<Vec<Tensor<T>>> {
+    let ndim = input.ndim();
+    if ndim == 0 {
+        return Err(FerrotorchError::InvalidArgument {
+            message: "tensor_split: expected at least a 1-dimensional tensor".into(),
+        });
+    }
+    let norm_dim = crate::shape::normalize_axis(dim, ndim)?;
+    let dim_size = input.shape()[norm_dim];
+
+    let mut out = Vec::with_capacity(indices.len() + 1);
+    let mut start = 0usize;
+    for &idx in indices {
+        // Upstream clamps each boundary to [start, dim_size] so the section is
+        // never negative-length and never overruns the axis.
+        let end = idx.clamp(start, dim_size);
+        out.push(crate::methods::narrow_t(
+            input,
+            norm_dim,
+            start,
+            end - start,
+        )?);
+        start = end;
+    }
+    out.push(crate::methods::narrow_t(
+        input,
+        norm_dim,
+        start,
+        dim_size - start,
+    )?);
+    Ok(out)
+}
+
+// ---------------------------------------------------------------------------
+// RepeatInterleaveBackward — backward for repeat_interleave (REQ-14)
+// ---------------------------------------------------------------------------
+
+/// Backward for `repeat_interleave(x, repeats, dim)`.
+///
+/// Forward duplicates each index `i` along `dim` `repeats` times
+/// contiguously. The op is a (non-square) selection matrix whose VJP sums the
+/// `repeats` consecutive output gradient slices that came from each input
+/// index back onto that index.
+#[derive(Debug)]
+pub struct RepeatInterleaveBackward<T: Float> {
+    input: Tensor<T>,
+    /// The (already normalized) dim along which elements were repeated.
+    dim: usize,
+    /// The (constant) per-element repeat count.
+    repeats: usize,
+}
+
+impl<T: Float> RepeatInterleaveBackward<T> {
+    pub fn new(input: Tensor<T>, dim: usize, repeats: usize) -> Self {
+        Self {
+            input,
+            dim,
+            repeats,
+        }
+    }
+}
+
+impl<T: Float> GradFn<T> for RepeatInterleaveBackward<T> {
+    fn backward(&self, grad_output: &Tensor<T>) -> FerrotorchResult<Vec<Option<Tensor<T>>>> {
+        if !self.input.requires_grad() {
+            return Ok(vec![None]);
+        }
+        let (cpu_go, device) = ensure_cpu(grad_output)?;
+        let go_data = cpu_go.data()?;
+        let in_shape = self.input.shape();
+        let dim = self.dim;
+        let dim_size = in_shape[dim];
+
+        let outer: usize = in_shape[..dim].iter().product();
+        let inner: usize = if dim + 1 < in_shape.len() {
+            in_shape[dim + 1..].iter().product()
+        } else {
+            1
+        };
+        let out_dim_size = dim_size * self.repeats;
+
+        let in_numel: usize = in_shape.iter().product();
+        let mut grad = vec![<T as num_traits::Zero>::zero(); in_numel];
+
+        // For each input index `d`, sum the `repeats` consecutive output rows
+        // `[d*repeats .. (d+1)*repeats)` back onto it.
+        for o in 0..outer {
+            for d in 0..dim_size {
+                for r in 0..self.repeats {
+                    let od = d * self.repeats + r;
+                    let src_base = o * out_dim_size * inner + od * inner;
+                    let dst_base = o * dim_size * inner + d * inner;
+                    for i in 0..inner {
+                        grad[dst_base + i] += go_data[src_base + i];
+                    }
+                }
+            }
+        }
+
+        let grad_tensor = Tensor::from_storage(TensorStorage::cpu(grad), in_shape.to_vec(), false)?;
+        Ok(vec![Some(restore_device(grad_tensor, device)?)])
+    }
+
+    fn inputs(&self) -> Vec<&Tensor<T>> {
+        vec![&self.input]
+    }
+
+    fn name(&self) -> &'static str {
+        "RepeatInterleaveBackward"
+    }
+}
+
+/// `repeat_interleave(input, repeats, dim)` — repeat each element `repeats`
+/// times consecutively along `dim`.
+///
+/// Mirrors `torch.repeat_interleave(input, repeats, dim)` for the scalar
+/// `repeats` form (`aten/src/ATen/native/TensorShape.cpp` `repeat_interleave`
+/// family): unlike `repeat`/`tile` (which tile whole blocks), this interleaves
+/// — `[a, b]` with `repeats=2` along dim 0 becomes `[a, a, b, b]`. Backward
+/// (`RepeatInterleaveBackward`) sums the `repeats` consecutive output slices
+/// of each input index back onto it.
+pub fn repeat_interleave<T: Float>(
+    input: &Tensor<T>,
+    repeats: usize,
+    dim: isize,
+) -> FerrotorchResult<Tensor<T>> {
+    let ndim = input.ndim();
+    if ndim == 0 {
+        return Err(FerrotorchError::InvalidArgument {
+            message: "repeat_interleave: cannot repeat a 0-D tensor along a dim".into(),
+        });
+    }
+    let norm_dim = crate::shape::normalize_axis(dim, ndim)?;
+
+    if input.is_cuda() {
+        return Err(crate::error::FerrotorchError::NotImplementedOnCuda {
+            op: "repeat_interleave",
+        });
+    }
+
+    // Gather logical C-order so a strided view input is handled correctly.
+    let in_data = input.data_vec()?;
+    let in_shape = input.shape();
+    let dim_size = in_shape[norm_dim];
+    let outer: usize = in_shape[..norm_dim].iter().product();
+    let inner: usize = if norm_dim + 1 < ndim {
+        in_shape[norm_dim + 1..].iter().product()
+    } else {
+        1
+    };
+
+    let out_dim_size = dim_size * repeats;
+    let out_numel = outer * out_dim_size * inner;
+    let mut out_data = Vec::with_capacity(out_numel);
+    for o in 0..outer {
+        for d in 0..dim_size {
+            let src_base = o * dim_size * inner + d * inner;
+            for _ in 0..repeats {
+                out_data.extend_from_slice(&in_data[src_base..src_base + inner]);
+            }
+        }
+    }
+
+    let mut out_shape = in_shape.to_vec();
+    out_shape[norm_dim] = out_dim_size;
+
+    if is_grad_enabled() && input.requires_grad() {
+        let grad_fn = Arc::new(RepeatInterleaveBackward::new(
+            input.clone(),
+            norm_dim,
+            repeats,
+        ));
+        Tensor::from_operation(TensorStorage::cpu(out_data), out_shape, grad_fn)
+    } else {
+        Tensor::from_storage(TensorStorage::cpu(out_data), out_shape, false)
+    }
+}
+
+/// `vstack(tensors)` — stack tensors row-wise (along dim 0 after promoting
+/// each to ≥2-D).
+///
+/// Mirrors upstream `aten/src/ATen/native/TensorShape.cpp:3532 Tensor
+/// vstack(TensorList tensors)`: `atleast_2d` each input then `cat(_, 0)`.
+/// Autograd inherited from `reshape`/`unsqueeze` + `cat`.
+pub fn vstack<T: Float>(tensors: &[Tensor<T>]) -> FerrotorchResult<Tensor<T>> {
+    if tensors.is_empty() {
+        return Err(FerrotorchError::InvalidArgument {
+            message: "vstack: empty tensor list".into(),
+        });
+    }
+    let promoted: Vec<Tensor<T>> = tensors
+        .iter()
+        .map(atleast_2d)
+        .collect::<FerrotorchResult<_>>()?;
+    cat(&promoted, 0)
+}
+
+/// `hstack(tensors)` — stack tensors column-wise.
+///
+/// Mirrors upstream `aten/src/ATen/native/TensorShape.cpp:3514 Tensor
+/// hstack(TensorList tensors)`: `atleast_1d` each input; if the (promoted)
+/// inputs are 1-D, `cat(_, 0)`, otherwise `cat(_, 1)`. Autograd inherited from
+/// `cat`.
+pub fn hstack<T: Float>(tensors: &[Tensor<T>]) -> FerrotorchResult<Tensor<T>> {
+    if tensors.is_empty() {
+        return Err(FerrotorchError::InvalidArgument {
+            message: "hstack: empty tensor list".into(),
+        });
+    }
+    let promoted: Vec<Tensor<T>> = tensors
+        .iter()
+        .map(atleast_1d)
+        .collect::<FerrotorchResult<_>>()?;
+    // 1-D (promoted) inputs cat along axis 0; otherwise along axis 1.
+    let axis: isize = isize::from(promoted[0].ndim() != 1);
+    cat(&promoted, axis)
+}
+
+/// `dstack(tensors)` — stack tensors depth-wise (along dim 2 after promoting
+/// each to ≥3-D).
+///
+/// Mirrors upstream `aten/src/ATen/native/TensorShape.cpp:3544 Tensor
+/// dstack(TensorList tensors)`: `atleast_3d` each input then `cat(_, 2)`.
+/// Autograd inherited from `reshape`/`unsqueeze` + `cat`.
+pub fn dstack<T: Float>(tensors: &[Tensor<T>]) -> FerrotorchResult<Tensor<T>> {
+    if tensors.is_empty() {
+        return Err(FerrotorchError::InvalidArgument {
+            message: "dstack: empty tensor list".into(),
+        });
+    }
+    let promoted: Vec<Tensor<T>> = tensors
+        .iter()
+        .map(atleast_3d)
+        .collect::<FerrotorchResult<_>>()?;
+    cat(&promoted, 2)
+}
+
+/// `column_stack(tensors)` — stack 1-D/0-D tensors as columns of a 2-D matrix.
+///
+/// Mirrors upstream `aten/src/ATen/native/TensorShape.cpp:3628 Tensor
+/// column_stack(TensorList tensors)`: reshape each ≤1-D input to `(numel, 1)`,
+/// leave ≥2-D inputs as-is, then `hstack`. Autograd inherited from
+/// `reshape` + `cat`.
+pub fn column_stack<T: Float>(tensors: &[Tensor<T>]) -> FerrotorchResult<Tensor<T>> {
+    if tensors.is_empty() {
+        return Err(FerrotorchError::InvalidArgument {
+            message: "column_stack: empty tensor list".into(),
+        });
+    }
+    let reshaped: Vec<Tensor<T>> = tensors
+        .iter()
+        .map(|t| {
+            if t.ndim() <= 1 {
+                reshape(t, &[t.numel() as isize, 1])
+            } else {
+                Ok(t.clone())
+            }
+        })
+        .collect::<FerrotorchResult<_>>()?;
+    hstack(&reshaped)
+}
+
+/// `atleast_1d(input)` — view `input` as ≥1-D, reshaping a 0-D scalar to `[1]`.
+///
+/// Mirrors upstream `aten/src/ATen/native/TensorTransformations.cpp:192`.
+fn atleast_1d<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
+    if input.ndim() == 0 {
+        reshape(input, &[1])
+    } else {
+        Ok(input.clone())
+    }
+}
+
+/// `atleast_2d(input)` — view `input` as ≥2-D.
+///
+/// Mirrors upstream `aten/src/ATen/native/TensorTransformations.cpp:211`:
+/// 0-D → `[1, 1]`, 1-D → `unsqueeze(0)`, else unchanged.
+fn atleast_2d<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
+    match input.ndim() {
+        0 => reshape(input, &[1, 1]),
+        1 => unsqueeze(input, 0),
+        _ => Ok(input.clone()),
+    }
+}
+
+/// `atleast_3d(input)` — view `input` as ≥3-D.
+///
+/// Mirrors upstream `aten/src/ATen/native/TensorTransformations.cpp:233`:
+/// 0-D → `[1, 1, 1]`, 1-D → `unsqueeze(0).unsqueeze(-1)`, 2-D →
+/// `unsqueeze(-1)`, else unchanged.
+fn atleast_3d<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
+    match input.ndim() {
+        0 => reshape(input, &[1, 1, 1]),
+        1 => unsqueeze(&unsqueeze(input, 0)?, -1),
+        2 => unsqueeze(input, -1),
+        _ => Ok(input.clone()),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1987,6 +2713,529 @@ mod tests {
         assert_eq!(g.shape(), &[1, 3]);
         for &v in g.data().unwrap() {
             assert!((v - 4.0).abs() < 1e-6, "expected 4.0, got {v}");
+        }
+    }
+
+    // -- flip / fliplr / flipud (REQ-34/35/36, #1342) --
+
+    #[test]
+    fn test_flip_forward_1d() {
+        // torch.flip([1,2,3,4], [0]) == [4,3,2,1] (TensorTransformations.cpp:36).
+        let x = leaf(&[1.0, 2.0, 3.0, 4.0], &[4], false);
+        let y = flip(&x, &[0]).unwrap();
+        assert_eq!(y.shape(), &[4]);
+        assert_eq!(y.data_vec().unwrap(), &[4.0, 3.0, 2.0, 1.0]);
+    }
+
+    #[test]
+    fn test_flip_forward_2d_both_dims() {
+        // x = [[1,2,3],[4,5,6]]; flip both dims reverses rows AND columns:
+        // torch.flip(x, [0,1]) == [[6,5,4],[3,2,1]].
+        let x = leaf(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0], &[2, 3], false);
+        let y = flip(&x, &[0, 1]).unwrap();
+        assert_eq!(y.shape(), &[2, 3]);
+        assert_eq!(y.data_vec().unwrap(), &[6.0, 5.0, 4.0, 3.0, 2.0, 1.0]);
+    }
+
+    #[test]
+    fn test_flip_forward_2d_single_dim() {
+        // flip(x, [1]) reverses each row: [[3,2,1],[6,5,4]].
+        let x = leaf(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0], &[2, 3], false);
+        let y = flip(&x, &[1]).unwrap();
+        assert_eq!(y.data_vec().unwrap(), &[3.0, 2.0, 1.0, 6.0, 5.0, 4.0]);
+    }
+
+    #[test]
+    fn test_flip_rejects_duplicate_dim() {
+        let x = leaf(&[1.0, 2.0, 3.0, 4.0], &[2, 2], false);
+        assert!(flip(&x, &[0, 0]).is_err());
+    }
+
+    #[test]
+    fn test_flip_backward_is_self_inverse() {
+        // flip is a permutation; the VJP re-flips. With a non-uniform upstream
+        // gradient (via the row-distinct weights), grad_x = flip(grad_y, dims).
+        // x=[10,20,30], y=flip(x,[0])=[30,20,10]; grad_y=[1,2,3] (weights) ⇒
+        // grad_x = flip([1,2,3],[0]) = [3,2,1].
+        let x = leaf(&[10.0, 20.0, 30.0], &[3], true);
+        let y = flip(&x, &[0]).unwrap();
+        assert_eq!(y.data_vec().unwrap(), &[30.0, 20.0, 10.0]);
+
+        #[derive(Debug)]
+        struct WSum {
+            input: Tensor<f32>,
+            w: Vec<f32>,
+        }
+        impl GradFn<f32> for WSum {
+            fn backward(&self, _g: &Tensor<f32>) -> FerrotorchResult<Vec<Option<Tensor<f32>>>> {
+                Ok(vec![Some(
+                    Tensor::from_storage(
+                        TensorStorage::cpu(self.w.clone()),
+                        self.input.shape().to_vec(),
+                        false,
+                    )
+                    .unwrap(),
+                )])
+            }
+            fn inputs(&self) -> Vec<&Tensor<f32>> {
+                vec![&self.input]
+            }
+            fn name(&self) -> &'static str {
+                "WSum"
+            }
+        }
+        let w = vec![1.0_f32, 2.0, 3.0];
+        let total: f32 = y.data().unwrap().iter().zip(&w).map(|(a, b)| a * b).sum();
+        let loss = Tensor::from_operation(
+            TensorStorage::cpu(vec![total]),
+            vec![],
+            Arc::new(WSum {
+                input: y.clone(),
+                w,
+            }),
+        )
+        .unwrap();
+        backward(&loss).unwrap();
+        let g = x.grad().unwrap().expect("x should have gradient");
+        assert_eq!(g.data().unwrap(), &[3.0, 2.0, 1.0]);
+    }
+
+    #[test]
+    fn test_fliplr_equals_flip_dim1() {
+        let x = leaf(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0], &[2, 3], false);
+        assert_eq!(
+            fliplr(&x).unwrap().data_vec().unwrap(),
+            flip(&x, &[1]).unwrap().data_vec().unwrap()
+        );
+        assert!(fliplr(&leaf(&[1.0, 2.0], &[2], false)).is_err());
+    }
+
+    #[test]
+    fn test_flipud_equals_flip_dim0() {
+        let x = leaf(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0], &[2, 3], false);
+        assert_eq!(
+            flipud(&x).unwrap().data_vec().unwrap(),
+            flip(&x, &[0]).unwrap().data_vec().unwrap()
+        );
+    }
+
+    // -- rot90 (REQ-33, #1342) --
+
+    #[test]
+    fn test_rot90_k1() {
+        // torch.rot90 of [[1,2],[3,4]] by k=1 in dims (0,1) ==
+        // flip({1}).transpose(0,1) = [[2,4],[1,3]] (TensorTransformations.cpp:170).
+        let x = leaf(&[1.0, 2.0, 3.0, 4.0], &[2, 2], false);
+        let y = crate::methods::contiguous_t(&rot90(&x, 1, &[0, 1]).unwrap()).unwrap();
+        assert_eq!(y.shape(), &[2, 2]);
+        assert_eq!(y.data_vec().unwrap(), &[2.0, 4.0, 1.0, 3.0]);
+    }
+
+    #[test]
+    fn test_rot90_k2_is_flip_both() {
+        // k=2 ⇒ flip(dims) = flip both ⇒ [[4,3],[2,1]].
+        let x = leaf(&[1.0, 2.0, 3.0, 4.0], &[2, 2], false);
+        let y = rot90(&x, 2, &[0, 1]).unwrap();
+        assert_eq!(y.data_vec().unwrap(), &[4.0, 3.0, 2.0, 1.0]);
+    }
+
+    #[test]
+    fn test_rot90_k0_and_k4_identity() {
+        let x = leaf(&[1.0, 2.0, 3.0, 4.0], &[2, 2], false);
+        assert_eq!(
+            rot90(&x, 0, &[0, 1]).unwrap().data_vec().unwrap(),
+            &[1.0, 2.0, 3.0, 4.0]
+        );
+        assert_eq!(
+            rot90(&x, 4, &[0, 1]).unwrap().data_vec().unwrap(),
+            &[1.0, 2.0, 3.0, 4.0]
+        );
+    }
+
+    #[test]
+    fn test_rot90_negative_k() {
+        // k=-1 ≡ 3 mod 4 ⇒ flip({0}).transpose(0,1) = [[3,1],[4,2]].
+        let x = leaf(&[1.0, 2.0, 3.0, 4.0], &[2, 2], false);
+        let y = crate::methods::contiguous_t(&rot90(&x, -1, &[0, 1]).unwrap()).unwrap();
+        assert_eq!(y.data_vec().unwrap(), &[3.0, 1.0, 4.0, 2.0]);
+    }
+
+    #[test]
+    fn test_rot90_backward_reaches_leaf() {
+        let x = leaf(&[1.0, 2.0, 3.0, 4.0], &[2, 2], true);
+        let y = crate::methods::contiguous_t(&rot90(&x, 1, &[0, 1]).unwrap()).unwrap();
+        let loss = sum_to_scalar(&y);
+        backward(&loss).unwrap();
+        let g = x.grad().unwrap().expect("x should have gradient");
+        assert_eq!(g.shape(), &[2, 2]);
+        for &v in g.data().unwrap() {
+            assert!((v - 1.0).abs() < 1e-6);
+        }
+    }
+
+    // -- movedim / moveaxis (REQ-29/30, #1342) --
+
+    #[test]
+    fn test_movedim_single() {
+        // x shape [2,3,4]; movedim(0, 2) -> permute [1,2,0] -> shape [3,4,2].
+        let x = leaf(
+            &(0..24).map(|v| v as f32).collect::<Vec<_>>(),
+            &[2, 3, 4],
+            false,
+        );
+        let y = movedim(&x, &[0], &[2]).unwrap();
+        assert_eq!(y.shape(), &[3, 4, 2]);
+        // Equivalent to permute([1,2,0]).
+        let viap = crate::methods::permute_t(&x, &[1, 2, 0]).unwrap();
+        assert_eq!(
+            crate::methods::contiguous_t(&y)
+                .unwrap()
+                .data_vec()
+                .unwrap(),
+            crate::methods::contiguous_t(&viap)
+                .unwrap()
+                .data_vec()
+                .unwrap()
+        );
+    }
+
+    #[test]
+    fn test_movedim_multi() {
+        // src=[0,1] dst=[2,4] on a 5-D tensor reproduces the upstream worked
+        // example: order = [2,3,0,4,1] (TensorShape.cpp:4756).
+        let x = leaf(&vec![0.0; 2 * 3 * 4 * 5 * 6], &[2, 3, 4, 5, 6], false);
+        let y = movedim(&x, &[0, 1], &[2, 4]).unwrap();
+        let viap = crate::methods::permute_t(&x, &[2, 3, 0, 4, 1]).unwrap();
+        assert_eq!(y.shape(), viap.shape());
+        assert_eq!(y.shape(), &[4, 5, 2, 6, 3]);
+    }
+
+    #[test]
+    fn test_moveaxis_equals_movedim() {
+        let x = leaf(
+            &(0..24).map(|v| v as f32).collect::<Vec<_>>(),
+            &[2, 3, 4],
+            false,
+        );
+        assert_eq!(
+            moveaxis(&x, &[2], &[0]).unwrap().shape(),
+            movedim(&x, &[2], &[0]).unwrap().shape()
+        );
+    }
+
+    #[test]
+    fn test_movedim_backward_reaches_leaf() {
+        let x = leaf(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0], &[2, 3], true);
+        let y = crate::methods::contiguous_t(&movedim(&x, &[0], &[1]).unwrap()).unwrap();
+        let loss = sum_to_scalar(&y);
+        backward(&loss).unwrap();
+        let g = x.grad().unwrap().expect("x should have gradient");
+        assert_eq!(g.shape(), &[2, 3]);
+        for &v in g.data().unwrap() {
+            assert!((v - 1.0).abs() < 1e-6);
+        }
+    }
+
+    #[test]
+    fn test_movedim_rejects_repeated_dim() {
+        let x = leaf(&[1.0, 2.0, 3.0, 4.0], &[2, 2], false);
+        assert!(movedim(&x, &[0, 0], &[0, 1]).is_err());
+        assert!(movedim(&x, &[0, 1], &[1, 1]).is_err());
+        assert!(movedim(&x, &[0], &[0, 1]).is_err());
+    }
+
+    // -- broadcast_to / broadcast_tensors (REQ-27/26, #1342) --
+
+    #[test]
+    fn test_broadcast_to_equals_expand() {
+        let x = leaf(&[1.0, 2.0, 3.0], &[1, 3], false);
+        let y = broadcast_to(&x, &[2, 3]).unwrap();
+        let e = expand(&x, &[2, 3]).unwrap();
+        assert_eq!(y.shape(), &[2, 3]);
+        assert_eq!(y.data_vec().unwrap(), e.data_vec().unwrap());
+        assert_eq!(y.data_vec().unwrap(), &[1.0, 2.0, 3.0, 1.0, 2.0, 3.0]);
+    }
+
+    #[test]
+    fn test_broadcast_tensors_common_shape() {
+        // [3,1] and [1,4] broadcast to [3,4].
+        let a = leaf(&[1.0, 2.0, 3.0], &[3, 1], false);
+        let b = leaf(&[10.0, 20.0, 30.0, 40.0], &[1, 4], false);
+        let out = broadcast_tensors(&[a, b]).unwrap();
+        assert_eq!(out.len(), 2);
+        assert_eq!(out[0].shape(), &[3, 4]);
+        assert_eq!(out[1].shape(), &[3, 4]);
+        // a expands by repeating each row element across the 4 columns.
+        assert_eq!(
+            out[0].data_vec().unwrap(),
+            &[1.0, 1.0, 1.0, 1.0, 2.0, 2.0, 2.0, 2.0, 3.0, 3.0, 3.0, 3.0]
+        );
+    }
+
+    // -- repeat / tile (REQ-13/31, #1342) --
+
+    #[test]
+    fn test_repeat_1d() {
+        // torch.tensor([1,2,3]).repeat(2) == [1,2,3,1,2,3] (TensorShape.cpp:1909).
+        let x = leaf(&[1.0, 2.0, 3.0], &[3], false);
+        let y = repeat(&x, &[2]).unwrap();
+        assert_eq!(y.shape(), &[6]);
+        assert_eq!(y.data_vec().unwrap(), &[1.0, 2.0, 3.0, 1.0, 2.0, 3.0]);
+    }
+
+    #[test]
+    fn test_repeat_2d_with_new_leading_dim() {
+        // [1,2] with repeats [2,2] -> shape [2,4]: each row is [1,2,1,2],
+        // two such rows. (input promoted from [2] to [1,2] then tiled.)
+        let x = leaf(&[1.0, 2.0], &[2], false);
+        let y = repeat(&x, &[2, 2]).unwrap();
+        assert_eq!(y.shape(), &[2, 4]);
+        assert_eq!(
+            y.data_vec().unwrap(),
+            &[1.0, 2.0, 1.0, 2.0, 1.0, 2.0, 1.0, 2.0]
+        );
+    }
+
+    #[test]
+    fn test_repeat_rejects_too_few_dims() {
+        let x = leaf(&[1.0, 2.0, 3.0, 4.0], &[2, 2], false);
+        assert!(repeat(&x, &[2]).is_err());
+    }
+
+    #[test]
+    fn test_tile_pads_reps() {
+        // tile of a [2,2] tensor with reps (2,) is treated as (1,2):
+        // tile each row twice horizontally. [[1,2],[3,4]] -> [[1,2,1,2],[3,4,3,4]].
+        let x = leaf(&[1.0, 2.0, 3.0, 4.0], &[2, 2], false);
+        let y = tile(&x, &[2]).unwrap();
+        assert_eq!(y.shape(), &[2, 4]);
+        assert_eq!(
+            y.data_vec().unwrap(),
+            &[1.0, 2.0, 1.0, 2.0, 3.0, 4.0, 3.0, 4.0]
+        );
+    }
+
+    #[test]
+    fn test_repeat_backward_accumulates() {
+        // grad of a tile is the sum over copies. x=[1,2], repeat 3 along dim 0
+        // -> [1,2,1,2,1,2]; d(sum)/dx = [3,3] (each element copied 3×).
+        let x = leaf(&[1.0, 2.0], &[2], true);
+        let y = repeat(&x, &[3]).unwrap();
+        assert_eq!(y.shape(), &[6]);
+        let loss = sum_to_scalar(&y);
+        backward(&loss).unwrap();
+        let g = x.grad().unwrap().expect("x should have gradient");
+        assert_eq!(g.shape(), &[2]);
+        for &v in g.data().unwrap() {
+            assert!((v - 3.0).abs() < 1e-6, "expected 3.0, got {v}");
+        }
+    }
+
+    // -- repeat_interleave (REQ-14, #1342) --
+
+    #[test]
+    fn test_repeat_interleave_1d() {
+        // torch.repeat_interleave([1,2,3], 2) == [1,1,2,2,3,3].
+        let x = leaf(&[1.0, 2.0, 3.0], &[3], false);
+        let y = repeat_interleave(&x, 2, 0).unwrap();
+        assert_eq!(y.shape(), &[6]);
+        assert_eq!(y.data_vec().unwrap(), &[1.0, 1.0, 2.0, 2.0, 3.0, 3.0]);
+    }
+
+    #[test]
+    fn test_repeat_interleave_2d_dim1() {
+        // x=[[1,2],[3,4]]; repeat_interleave(2, dim=1) duplicates each column
+        // in place: [[1,1,2,2],[3,3,4,4]].
+        let x = leaf(&[1.0, 2.0, 3.0, 4.0], &[2, 2], false);
+        let y = repeat_interleave(&x, 2, 1).unwrap();
+        assert_eq!(y.shape(), &[2, 4]);
+        assert_eq!(
+            y.data_vec().unwrap(),
+            &[1.0, 1.0, 2.0, 2.0, 3.0, 3.0, 4.0, 4.0]
+        );
+    }
+
+    #[test]
+    fn test_repeat_interleave_differs_from_repeat() {
+        // interleave: [a,a,b,b]; repeat/tile: [a,b,a,b] — distinct orderings.
+        let x = leaf(&[1.0, 2.0], &[2], false);
+        assert_eq!(
+            repeat_interleave(&x, 2, 0).unwrap().data_vec().unwrap(),
+            &[1.0, 1.0, 2.0, 2.0]
+        );
+        assert_eq!(
+            repeat(&x, &[2]).unwrap().data_vec().unwrap(),
+            &[1.0, 2.0, 1.0, 2.0]
+        );
+    }
+
+    #[test]
+    fn test_repeat_interleave_backward_sums_segments() {
+        // x=[1,2], interleave 3 -> [1,1,1,2,2,2]; d(sum)/dx = [3,3].
+        let x = leaf(&[1.0, 2.0], &[2], true);
+        let y = repeat_interleave(&x, 3, 0).unwrap();
+        let loss = sum_to_scalar(&y);
+        backward(&loss).unwrap();
+        let g = x.grad().unwrap().expect("x should have gradient");
+        assert_eq!(g.shape(), &[2]);
+        for &v in g.data().unwrap() {
+            assert!((v - 3.0).abs() < 1e-6, "expected 3.0, got {v}");
+        }
+    }
+
+    // -- unbind (REQ-25, #1342) --
+
+    #[test]
+    fn test_unbind_dim0() {
+        // x=[[1,2,3],[4,5,6]]; unbind(0) -> [[1,2,3], [4,5,6]] (each 1-D).
+        let x = leaf(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0], &[2, 3], false);
+        let parts = unbind(&x, 0).unwrap();
+        assert_eq!(parts.len(), 2);
+        assert_eq!(parts[0].shape(), &[3]);
+        assert_eq!(
+            crate::methods::contiguous_t(&parts[0])
+                .unwrap()
+                .data_vec()
+                .unwrap(),
+            &[1.0, 2.0, 3.0]
+        );
+        assert_eq!(
+            crate::methods::contiguous_t(&parts[1])
+                .unwrap()
+                .data_vec()
+                .unwrap(),
+            &[4.0, 5.0, 6.0]
+        );
+    }
+
+    #[test]
+    fn test_unbind_dim1() {
+        // unbind(1) gives 3 column slices, each shape [2].
+        let x = leaf(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0], &[2, 3], false);
+        let parts = unbind(&x, 1).unwrap();
+        assert_eq!(parts.len(), 3);
+        assert_eq!(parts[0].shape(), &[2]);
+        assert_eq!(
+            crate::methods::contiguous_t(&parts[1])
+                .unwrap()
+                .data_vec()
+                .unwrap(),
+            &[2.0, 5.0]
+        );
+    }
+
+    #[test]
+    fn test_unbind_backward_scatters() {
+        // Backprop through one slice scatters its grad into the right row.
+        let x = leaf(&[1.0, 2.0, 3.0, 4.0], &[2, 2], true);
+        let parts = unbind(&x, 0).unwrap();
+        // loss = sum(parts[1]); grad should be [[0,0],[1,1]].
+        let loss = sum_to_scalar(&crate::methods::contiguous_t(&parts[1]).unwrap());
+        backward(&loss).unwrap();
+        let g = x.grad().unwrap().expect("x should have gradient");
+        assert_eq!(g.data().unwrap(), &[0.0, 0.0, 1.0, 1.0]);
+    }
+
+    // -- tensor_split (REQ-23, #1342) --
+
+    #[test]
+    fn test_tensor_split_indices() {
+        // x = 0..6 along dim 0; indices [2,4] -> [0:2], [2:4], [4:6].
+        let x = leaf(&[0.0, 1.0, 2.0, 3.0, 4.0, 5.0], &[6], false);
+        let parts = tensor_split(&x, &[2, 4], 0).unwrap();
+        assert_eq!(parts.len(), 3);
+        assert_eq!(parts[0].data_vec().unwrap(), &[0.0, 1.0]);
+        assert_eq!(parts[1].data_vec().unwrap(), &[2.0, 3.0]);
+        assert_eq!(parts[2].data_vec().unwrap(), &[4.0, 5.0]);
+    }
+
+    #[test]
+    fn test_tensor_split_empty_section() {
+        // Equal indices yield a zero-length middle section.
+        let x = leaf(&[0.0, 1.0, 2.0, 3.0], &[4], false);
+        let parts = tensor_split(&x, &[2, 2], 0).unwrap();
+        assert_eq!(parts.len(), 3);
+        assert_eq!(parts[0].shape(), &[2]);
+        assert_eq!(parts[1].shape(), &[0]);
+        assert_eq!(parts[2].shape(), &[2]);
+    }
+
+    #[test]
+    fn test_tensor_split_backward() {
+        let x = leaf(&[0.0, 1.0, 2.0, 3.0, 4.0, 5.0], &[6], true);
+        let parts = tensor_split(&x, &[2, 4], 0).unwrap();
+        // Backprop only through the middle section.
+        let loss = sum_to_scalar(&crate::methods::contiguous_t(&parts[1]).unwrap());
+        backward(&loss).unwrap();
+        let g = x.grad().unwrap().expect("x should have gradient");
+        assert_eq!(g.data().unwrap(), &[0.0, 0.0, 1.0, 1.0, 0.0, 0.0]);
+    }
+
+    // -- vstack / hstack / dstack / column_stack (REQ-17/18/19/20, #1342) --
+
+    #[test]
+    fn test_vstack_1d_inputs() {
+        // vstack of two 1-D [3] tensors -> [2,3] (each promoted to [1,3]).
+        let a = leaf(&[1.0, 2.0, 3.0], &[3], false);
+        let b = leaf(&[4.0, 5.0, 6.0], &[3], false);
+        let y = vstack(&[a, b]).unwrap();
+        assert_eq!(y.shape(), &[2, 3]);
+        assert_eq!(y.data_vec().unwrap(), &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
+    }
+
+    #[test]
+    fn test_hstack_1d_inputs() {
+        // hstack of 1-D tensors concatenates along dim 0.
+        let a = leaf(&[1.0, 2.0], &[2], false);
+        let b = leaf(&[3.0, 4.0, 5.0], &[3], false);
+        let y = hstack(&[a, b]).unwrap();
+        assert_eq!(y.shape(), &[5]);
+        assert_eq!(y.data_vec().unwrap(), &[1.0, 2.0, 3.0, 4.0, 5.0]);
+    }
+
+    #[test]
+    fn test_hstack_2d_inputs() {
+        // hstack of 2-D tensors concatenates along dim 1.
+        let a = leaf(&[1.0, 2.0, 3.0, 4.0], &[2, 2], false);
+        let b = leaf(&[5.0, 6.0], &[2, 1], false);
+        let y = hstack(&[a, b]).unwrap();
+        assert_eq!(y.shape(), &[2, 3]);
+        assert_eq!(y.data_vec().unwrap(), &[1.0, 2.0, 5.0, 3.0, 4.0, 6.0]);
+    }
+
+    #[test]
+    fn test_dstack_1d_inputs() {
+        // dstack promotes 1-D [3] to [1,3,1] then cats dim 2 -> [1,3,2].
+        let a = leaf(&[1.0, 2.0, 3.0], &[3], false);
+        let b = leaf(&[4.0, 5.0, 6.0], &[3], false);
+        let y = dstack(&[a, b]).unwrap();
+        assert_eq!(y.shape(), &[1, 3, 2]);
+        assert_eq!(y.data_vec().unwrap(), &[1.0, 4.0, 2.0, 5.0, 3.0, 6.0]);
+    }
+
+    #[test]
+    fn test_column_stack_1d_inputs() {
+        // column_stack of two 1-D [3] tensors -> [3,2] (each reshaped to [3,1]).
+        let a = leaf(&[1.0, 2.0, 3.0], &[3], false);
+        let b = leaf(&[4.0, 5.0, 6.0], &[3], false);
+        let y = column_stack(&[a, b]).unwrap();
+        assert_eq!(y.shape(), &[3, 2]);
+        assert_eq!(y.data_vec().unwrap(), &[1.0, 4.0, 2.0, 5.0, 3.0, 6.0]);
+    }
+
+    #[test]
+    fn test_vstack_backward() {
+        let a = leaf(&[1.0, 2.0, 3.0], &[3], true);
+        let b = leaf(&[4.0, 5.0, 6.0], &[3], true);
+        let y = vstack(&[a.clone(), b.clone()]).unwrap();
+        let loss = sum_to_scalar(&y);
+        backward(&loss).unwrap();
+        for t in [&a, &b] {
+            let g = t.grad().unwrap().expect("should have gradient");
+            assert_eq!(g.shape(), &[3]);
+            for &v in g.data().unwrap() {
+                assert!((v - 1.0).abs() < 1e-6);
+            }
         }
     }
 }
