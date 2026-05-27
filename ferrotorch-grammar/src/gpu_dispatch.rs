@@ -258,54 +258,130 @@ fn compile_dfa_for_number(stage: &NumberEmissionStage) -> CompiledDfa {
 }
 
 /// Compile a [`StringEmissionStage`] into a DFA for `Schema::String`
-/// (non-enum). Two grammar states map onto three DFA states.
+/// (non-enum), mirroring the CPU oracle's `Schema::String` body +
+/// escape handling byte-for-byte.
 ///
-/// Char classes:
-/// - 0 = `'"'` (string delimiter)
-/// - 1 = `'\\'` (escapes are intentionally unsupported per the grammar)
-/// - 2 = printable ASCII other than `'"'` / `'\\'` (i.e. `0x20..=0x7E` minus those two)
-/// - 3 = OTHER (control chars, non-ASCII — REJECT)
+/// The CPU grammar SHIPPED JSON string escapes (state.md REQ-5): in a
+/// `Schema::String` body, `'\\'` is a valid char that transitions into
+/// `Phase::StringEscape` rather than rejecting (see `state.rs`
+/// `valid_next_chars_for` `(Schema::String, Phase::StringChars)` —
+/// the content set is `0x20..=0x7E` minus only `'"'`, so `'\\'` IS in
+/// the set — and `apply_step`'s `(Schema::String, Phase::StringChars)`
+/// arm enters `Phase::StringEscape` on `'\\'`). After `'\\'`, the
+/// escape-start set (`hex_digits == 0`) is `" \ / b f n r t u`; the
+/// eight short escapes return to the body, `u` opens a four-hex-digit
+/// (`\uXXXX`) walk (`state.rs` `(Schema::String, Phase::StringEscape)`
+/// arm). The earlier "backslash → REJECT" GPU model diverged from this
+/// oracle (#1596) — the GPU then under-allowed every `'\\'`-containing
+/// token relative to CPU.
+///
+/// Char classes (chosen so every body+escape transition is exact):
+/// - 0 = `'"'` (string delimiter / first short-escape)
+/// - 1 = `'\\'` (opens an escape; also a short-escape after `'\\'`)
+/// - 2 = `'u'` (opens the `\uXXXX` hex walk; plain content in the body)
+/// - 3 = short escapes that are ALSO hex digits: `'b'`, `'f'`
+/// - 4 = short escapes that are NOT hex digits: `'/'`, `'n'`, `'r'`, `'t'`
+/// - 5 = hex digits that are NOT short escapes: `0-9 a c d e A-F`
+/// - 6 = other printable ASCII content (`0x20..=0x7E` minus all of the above)
+/// - 7 = OTHER (control chars, non-ASCII — REJECT)
 ///
 /// States:
 /// - 0 = `Phase::Start`, expects opening `'"'`
-/// - 1 = inside body, accepts content chars or closing `'"'`
+/// - 1 = inside body, accepts content chars / closing `'"'` / `'\\'`
 /// - 2 = closed (after `'"'`), any further char rejects
-/// - 3 = REJECT
+/// - 3 = escape-start (`hex_digits == 0`): the 9 escape chars
+/// - 4 = `\u` hex walk, 1 digit seen (`hex_digits == 1`)
+/// - 5 = `\u` hex walk, 2 digits seen (`hex_digits == 2`)
+/// - 6 = `\u` hex walk, 3 digits seen (`hex_digits == 3`)
+/// - 7 = REJECT
 fn compile_dfa_for_string(stage: &StringEmissionStage) -> CompiledDfa {
     let class_quote = 0u32;
     let class_backslash = 1u32;
-    let class_content = 2u32;
-    let class_other = 3u32;
-    let num_classes = 4u32;
+    let class_u = 2u32;
+    let class_short_hex = 3u32; // 'b', 'f' — short escape AND hex digit
+    let class_short_only = 4u32; // '/', 'n', 'r', 't' — short escape, not hex
+    let class_hex_only = 5u32; // hex digit, not a short escape
+    let class_content = 6u32; // other printable ASCII body content
+    let class_other = 7u32; // control / non-ASCII → REJECT
+    let num_classes = 8u32;
 
     let mut char_classes = vec![class_other; 128];
     for b in 0x20u8..=0x7Eu8 {
         char_classes[b as usize] = class_content;
     }
+    // Hex digits (not short escapes) and short escapes get their own
+    // classes; the order below means the more-specific assignments
+    // (short escapes, 'u', '"', '\\') win over the generic hex/content.
+    for b in b'0'..=b'9' {
+        char_classes[b as usize] = class_hex_only;
+    }
+    for b in [b'a', b'c', b'd', b'e', b'A', b'B', b'C', b'D', b'E', b'F'] {
+        char_classes[b as usize] = class_hex_only;
+    }
+    // 'b' and 'f' are BOTH short escapes and hex digits.
+    char_classes[b'b' as usize] = class_short_hex;
+    char_classes[b'f' as usize] = class_short_hex;
+    // '/', 'n', 'r', 't' are short escapes only (not hex digits).
+    for b in [b'/', b'n', b'r', b't'] {
+        char_classes[b as usize] = class_short_only;
+    }
+    char_classes[b'u' as usize] = class_u;
     char_classes[b'"' as usize] = class_quote;
     char_classes[b'\\' as usize] = class_backslash;
 
-    let num_states = 4usize;
-    let reject = 3u32;
+    let num_states = 8usize;
+    let reject = 7u32;
+    let escape_start = 3u32;
+    let hex1 = 4u32;
+    let hex2 = 5u32;
+    let hex3 = 6u32;
     let nc = num_classes as usize;
     let mut transitions = vec![reject; num_states * nc];
     let row = |s: usize, c: u32| s * nc + c as usize;
 
-    // state 0 (Start): only opening '"' is valid
+    // state 0 (Start): only opening '"' is valid.
     transitions[row(0, class_quote)] = 1;
-    // state 1 (in body): content chars stay in body, closing '"' goes to closed
-    transitions[row(1, class_content)] = 1;
+
+    // state 1 (in body): every body content char stays in the body
+    // (CPU: `0x20..=0x7E` minus '"' are content); closing '"' → closed;
+    // '\\' → escape-start (CPU: `apply_step` enters `Phase::StringEscape`).
     transitions[row(1, class_quote)] = 2;
-    // backslash → REJECT (already set; escapes unsupported by the grammar).
+    transitions[row(1, class_backslash)] = escape_start;
+    transitions[row(1, class_u)] = 1;
+    transitions[row(1, class_short_hex)] = 1;
+    transitions[row(1, class_short_only)] = 1;
+    transitions[row(1, class_hex_only)] = 1;
+    transitions[row(1, class_content)] = 1;
+
     // state 2 (closed): any further char → REJECT (already set).
-    // state 3 (REJECT): already set.
+
+    // state 3 (escape-start, hex_digits == 0): CPU valid set is
+    // `" \ / b f n r t u`. The eight short escapes resolve back to the
+    // body; 'u' opens the four-hex-digit walk.
+    transitions[row(escape_start as usize, class_quote)] = 1;
+    transitions[row(escape_start as usize, class_backslash)] = 1;
+    transitions[row(escape_start as usize, class_short_hex)] = 1;
+    transitions[row(escape_start as usize, class_short_only)] = 1;
+    transitions[row(escape_start as usize, class_u)] = hex1;
+
+    // states 4/5/6 (\u hex walk, 1/2/3 digits seen): CPU valid set is a
+    // hex digit `[0-9a-fA-F]`. 'b' and 'f' (class_short_hex) ARE hex
+    // digits, so they advance the walk too. The fourth hex digit
+    // resolves the escape and returns to the body.
+    for &(from, to) in &[(hex1, hex2), (hex2, hex3), (hex3, 1u32)] {
+        transitions[row(from as usize, class_hex_only)] = to;
+        transitions[row(from as usize, class_short_hex)] = to;
+    }
+
+    // state 7 (REJECT): every class → REJECT (already set).
 
     let start_state = match stage {
         StringEmissionStage::Start => 0,
         StringEmissionStage::InBody => 1,
     };
 
-    // String is complete only after the closing '"' (state 2).
+    // String is complete only after the closing '"' (state 2). The body
+    // and the mid-escape states are NOT completion points.
     CompiledDfa {
         transitions,
         char_classes,
@@ -1474,9 +1550,19 @@ mod cuda_tests {
         let gpu_mask = compute_mask_gpu::<CudaRuntime>(&processor, &client, &packed)
             .expect("String InBody must be DFA-compilable");
         assert_eq!(cpu_mask.allow, gpu_mask.allow);
-        // Backslash is intentionally rejected (escapes unsupported).
+        // Backslash opens a JSON string escape (state.rs REQ-5 SHIPPED:
+        // `Schema::String` body admits '\\' and steps into
+        // `Phase::StringEscape`), so the CPU oracle ALLOWS a single '\\'
+        // token in the body. The GPU DFA must match byte-for-byte (#1596).
         let bs = vocab.iter().position(|s| s == "\\").unwrap();
-        assert_eq!(gpu_mask.allow[bs], 0, "backslash must reject (no escapes)");
+        assert_eq!(
+            cpu_mask.allow[bs], 1,
+            "CPU oracle allows '\\' (opens escape per state.rs REQ-5)"
+        );
+        assert_eq!(
+            gpu_mask.allow[bs], 1,
+            "GPU must allow '\\' to match the CPU oracle (escape open)"
+        );
     }
 
     // -----------------------------------------------------------------
@@ -1751,9 +1837,17 @@ mod cuda_tests {
             gpu_mask.allow[comma], 1,
             "comma is valid string-body content"
         );
-        // The backslash is still rejected (escapes unsupported).
+        // Backslash opens an escape inside the nested string body too;
+        // the CPU oracle allows it, so the GPU must match (#1596).
         let bs = vocab.iter().position(|s| s == "\\").unwrap();
-        assert_eq!(gpu_mask.allow[bs], 0);
+        assert_eq!(
+            cpu_mask.allow[bs], 1,
+            "CPU oracle allows '\\' inside the nested string body (escape open)"
+        );
+        assert_eq!(
+            gpu_mask.allow[bs], 1,
+            "GPU must allow '\\' to match the CPU oracle inside the nested string body"
+        );
     }
 
     /// Walk a Boolean nested inside an Array. After "[t", we're at

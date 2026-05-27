@@ -167,9 +167,14 @@ in `state.rs`. The table sizes are:
 - **Number**: 7 states × 5 classes (adds `.` class).
   Completion at every digit-emitting state EXCEPT AfterDecimalNoFrac
   (which requires a fractional digit before the value can terminate).
-- **String** (non-enum): 4 states × 4 classes (`"`/`\\`/content/OTHER).
-  `\\` always REJECT (escapes unsupported per REQ-5 of state.md).
-  Single completion state: after closing `"`.
+- **String** (non-enum): 8 states × 8 classes mirroring the CPU
+  `Schema::String` body + escape DFA. `\\` in the body opens a JSON
+  string escape (state.md REQ-5 SHIPPED — escapes ARE accepted): the
+  body steps into an escape-start state whose valid set is `" \ / b f
+  n r t u`; the eight short escapes return to the body, `u` opens a
+  four-hex-digit (`\uXXXX`) walk. Single completion state: after
+  closing `"`. (The earlier "backslash always REJECT" model diverged
+  from the CPU oracle — fixed under #1596.)
 - **StringEnum**: prefix trie. Number of states = 1 (Phase::Start) +
   number of distinct prefixes in any value + 2 (closed + REJECT).
   Number of classes = number of distinct ASCII chars + 1 (`"`) + 1
@@ -343,9 +348,11 @@ Notable edge cases pinned:
   (`integer_gpu_mask_matches_cpu_after_zero`) — JSON forbids `01`.
 - **Number mid-decimal**: only digits accepted; `.` specifically
   rejected (`number_gpu_mask_matches_cpu_mid_decimal`).
-- **String body**: `\\` always rejected
+- **String body**: `\\` opens a JSON string escape and is therefore
+  ALLOWED by the CPU oracle (state.md REQ-5); the GPU must match
   (`string_gpu_mask_matches_cpu_in_body` — `bs = vocab.position("\\")`,
-  asserts `mask.allow[bs] == 0`).
+  asserts both `cpu_mask.allow[bs] == 1` and `gpu_mask.allow[bs] == 1`;
+  #1596 corrected the prior over-rejecting model).
 - **StringEnum closing quote**: only allowed when partial matches a
   complete value
   (`string_enum_gpu_mask_matches_cpu_after_complete_value`).
@@ -356,7 +363,8 @@ Notable edge cases pinned:
   (`nested_integer_in_array_after_digit`).
 - **Nested String body**: `,` is content (not a terminator —
   terminator-class transitions fire only at complete_states); `\\`
-  still rejected (`nested_string_in_array_after_open_quote`).
+  opens an escape and is ALLOWED (matches the CPU oracle, #1596)
+  (`nested_string_in_array_after_open_quote`).
 - **ObjectKey at empty partial**: only first-chars of unseen
   property names allowed
   (`object_key_gpu_mask_matches_cpu_at_empty_partial`).
