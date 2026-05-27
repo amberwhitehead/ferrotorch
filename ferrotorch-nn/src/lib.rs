@@ -260,7 +260,7 @@ pub use pooling::{
 };
 pub use qat::{ObserverType, QatConfig, QatModel, QuantizedModel, prepare_qat};
 pub use rnn::{GRU, GRUCell, LSTM, LSTMCell, RNN, RNNCell, RNNNonlinearity};
-pub use rnn_utils::{PackedSequence, pack_padded_sequence, pad_packed_sequence};
+pub use rnn_utils::{PackedSequence, pack_padded_sequence, pad_packed_sequence, pad_sequence};
 pub use se::SqueezeExcitation;
 pub use transformer::{
     KVCache, RoPEConvention, RoPEScaling, RotaryPositionEmbedding, SwiGLU, Transformer,

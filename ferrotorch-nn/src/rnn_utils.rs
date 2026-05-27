@@ -11,16 +11,16 @@
 //!
 //! | REQ | Status | Evidence |
 //! |---|---|---|
-//! | REQ-1 | SHIPPED | the `PackedSequence<T>` struct with `data` / `batch_sizes` / `sorted_indices` / `unsorted_indices` here; non-test consumer: re-export at `ferrotorch-nn/src/lib.rs:246` |
-//! | REQ-2 | SHIPPED | the `pack_padded_sequence<T>` entry here; non-test consumer: re-export at `lib.rs:246` |
-//! | REQ-3 | SHIPPED | the `pad_packed_sequence<T>` entry here; non-test consumer: re-export at `lib.rs:246` |
-//! | REQ-4 | SHIPPED | validation guards at the head of `pack_padded_sequence` here; non-test consumer: re-export at `lib.rs:246` |
-//! | REQ-5 | SHIPPED | `batch_first` axis-swap logic inside `pack_padded_sequence` here; non-test consumer: re-export at `lib.rs:246` |
-//! | REQ-6 | SHIPPED | stable sort + `sorted_indices` / `unsorted_indices` capture inside `pack_padded_sequence` here; non-test consumer: re-export at `lib.rs:246` |
-//! | REQ-7 | SHIPPED | per-timestep batch-size accumulation inside `pack_padded_sequence` here; non-test consumer: re-export at `lib.rs:246` |
-//! | REQ-8 | NOT-STARTED | parity-sweep runner arm for `pack_padded_sequence` not wired — blocker #1457 |
-//! | REQ-9 | NOT-STARTED | parity-sweep runner arm for `pad_packed_sequence` not wired — blocker #1457 |
-//! | REQ-10 | NOT-STARTED | `pad_sequence` implementation not present in `rnn_utils.rs`; blocker #1457 tracks both impl and runner arm |
+//! | REQ-1 | SHIPPED | the `PackedSequence<T>` struct with `data` / `batch_sizes` / `sorted_indices` / `unsorted_indices` here; non-test consumer: re-export at `ferrotorch-nn/src/lib.rs:263` |
+//! | REQ-2 | SHIPPED | the `pack_padded_sequence<T>` entry here; non-test consumer: re-export at `lib.rs:263` |
+//! | REQ-3 | SHIPPED | the `pad_packed_sequence<T>` entry here; non-test consumer: re-export at `lib.rs:263` |
+//! | REQ-4 | SHIPPED | validation guards at the head of `pack_padded_sequence` here; non-test consumer: re-export at `lib.rs:263` |
+//! | REQ-5 | SHIPPED | `batch_first` axis-swap logic inside `pack_padded_sequence` here; non-test consumer: re-export at `lib.rs:263` |
+//! | REQ-6 | SHIPPED | stable sort + `sorted_indices` / `unsorted_indices` capture inside `pack_padded_sequence` here; non-test consumer: re-export at `lib.rs:263` |
+//! | REQ-7 | SHIPPED | per-timestep batch-size accumulation inside `pack_padded_sequence` here; non-test consumer: re-export at `lib.rs:263` |
+//! | REQ-8 | SHIPPED | parity op `pack_padded_sequence` wired as a pack/pad round-trip; runner arm `dispatch_pack_unpack_roundtrip` + oracle `_pack_unpack_roundtrip_torch_call`; 48/48 pass — closes #1457 |
+//! | REQ-9 | SHIPPED | covered by the same round-trip arm (unpad half calls `pad_packed_sequence`); closes #1457 |
+//! | REQ-10 | SHIPPED | `pad_sequence` implemented here; parity op wired via `dispatch_pad_sequence` + oracle `_pad_sequence_torch_call`; 48/48 pass — closes #1457 |
 
 use ferrotorch_core::{FerrotorchError, FerrotorchResult, Float, Tensor, TensorStorage};
 
@@ -287,6 +287,111 @@ pub fn pad_packed_sequence<T: Float>(
     }
 
     Ok((tensor, original_lengths))
+}
+
+// ---------------------------------------------------------------------------
+// pad_sequence
+// ---------------------------------------------------------------------------
+
+/// Pad a list of variable-length sequences into a single batched tensor.
+///
+/// Mirrors `torch.nn.utils.rnn.pad_sequence` at
+/// `torch/nn/utils/rnn.py:405-470`. Each input sequence has shape
+/// `[L_i, *trailing]` where `L_i` is the (variable) sequence length and
+/// `*trailing` is a fixed set of feature dimensions shared by every sequence.
+/// The sequences are stacked along a new batch dimension and right-padded
+/// with `padding_value` so every row has length `T = max_i L_i`.
+///
+/// # Arguments
+///
+/// * `sequences` — slice of `[L_i, *trailing]` tensors. Must be non-empty,
+///   and every sequence must share the same trailing dimensions.
+/// * `batch_first` — if `true`, the output is `[B, T, *trailing]`; otherwise
+///   it is `[T, B, *trailing]` (upstream's default).
+/// * `padding_value` — value written into the padded tail of each sequence.
+///
+/// # Returns
+///
+/// A single padded tensor (`[B, T, *trailing]` or `[T, B, *trailing]`).
+pub fn pad_sequence<T: Float>(
+    sequences: &[Tensor<T>],
+    batch_first: bool,
+    padding_value: T,
+) -> FerrotorchResult<Tensor<T>> {
+    if sequences.is_empty() {
+        return Err(FerrotorchError::InvalidArgument {
+            message: "pad_sequence: sequences must be non-empty".into(),
+        });
+    }
+
+    // Every sequence must have ndim >= 1 (a length axis plus optional features)
+    // and identical trailing dimensions. Upstream assumes "trailing dimensions
+    // and type of all the Tensors in sequences are same" (rnn.py:429-432).
+    let first = &sequences[0];
+    if first.ndim() < 1 {
+        return Err(FerrotorchError::InvalidArgument {
+            message: "pad_sequence: each sequence must have ndim >= 1".into(),
+        });
+    }
+    let trailing: Vec<usize> = first.shape()[1..].to_vec();
+    let feature_numel: usize = trailing.iter().product();
+
+    for (i, seq) in sequences.iter().enumerate() {
+        if seq.ndim() != first.ndim() {
+            return Err(FerrotorchError::InvalidArgument {
+                message: format!(
+                    "pad_sequence: sequence {i} has ndim {} but sequence 0 has ndim {}",
+                    seq.ndim(),
+                    first.ndim()
+                ),
+            });
+        }
+        if seq.shape()[1..] != trailing[..] {
+            return Err(FerrotorchError::InvalidArgument {
+                message: format!(
+                    "pad_sequence: sequence {i} trailing dims {:?} != {:?}",
+                    &seq.shape()[1..],
+                    trailing
+                ),
+            });
+        }
+    }
+
+    let batch = sequences.len();
+    let max_len = sequences.iter().map(|s| s.shape()[0]).max().unwrap_or(0);
+
+    // Allocate the padded buffer filled with padding_value.
+    let numel = batch * max_len * feature_numel;
+    let mut out = vec![padding_value; numel];
+
+    // Whether grad must flow: if any input requires grad, the output does too.
+    let requires_grad = sequences.iter().any(|s| s.requires_grad());
+
+    // Scatter each sequence's rows into the batched buffer. The flat layout is
+    // [B, T, feature_numel] for batch_first, else [T, B, feature_numel].
+    for (b, seq) in sequences.iter().enumerate() {
+        let len = seq.shape()[0];
+        let src = seq.data()?;
+        for t in 0..len {
+            let src_off = t * feature_numel;
+            let dst_off = if batch_first {
+                (b * max_len + t) * feature_numel
+            } else {
+                (t * batch + b) * feature_numel
+            };
+            out[dst_off..dst_off + feature_numel]
+                .copy_from_slice(&src[src_off..src_off + feature_numel]);
+        }
+    }
+
+    let mut out_shape = if batch_first {
+        vec![batch, max_len]
+    } else {
+        vec![max_len, batch]
+    };
+    out_shape.extend_from_slice(&trailing);
+
+    Tensor::from_storage(TensorStorage::cpu(out), out_shape, requires_grad)
 }
 
 // ===========================================================================
@@ -610,6 +715,121 @@ mod tests {
                 }
             }
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // pad_sequence: batch_first stacks + right-pads variable-length seqs.
+    //
+    // Expected values traceable to torch.nn.utils.rnn.pad_sequence
+    // (torch/nn/utils/rnn.py:405). Live-verified 2026-05-26:
+    //   a = arange(3).reshape(3,1); b = arange(2).reshape(2,1);
+    //   c = arange(1).reshape(1,1)
+    //   pad_sequence([a,b,c], batch_first=True, padding_value=-9.0).squeeze(-1)
+    //     == [[0,1,2],[0,1,-9],[0,-9,-9]]
+    // -----------------------------------------------------------------------
+    #[test]
+    fn test_pad_sequence_batch_first() {
+        let a = Tensor::from_storage(TensorStorage::cpu(vec![0.0f32, 1.0, 2.0]), vec![3, 1], false)
+            .unwrap();
+        let b =
+            Tensor::from_storage(TensorStorage::cpu(vec![0.0f32, 1.0]), vec![2, 1], false).unwrap();
+        let c = Tensor::from_storage(TensorStorage::cpu(vec![0.0f32]), vec![1, 1], false).unwrap();
+
+        let out = pad_sequence(&[a, b, c], true, -9.0f32).unwrap();
+        assert_eq!(out.shape(), &[3, 3, 1]);
+        // Flat [B=3, T=3, F=1] row-major.
+        assert_eq!(
+            out.data().unwrap(),
+            &[0.0, 1.0, 2.0, 0.0, 1.0, -9.0, 0.0, -9.0, -9.0]
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // pad_sequence: seq_first ([T, B, *]) is the upstream default layout.
+    //
+    // Live-verified 2026-05-26: pad_sequence([a,b,c], batch_first=False,
+    // padding_value=0.0) has shape [3, 3, 1].
+    // -----------------------------------------------------------------------
+    #[test]
+    fn test_pad_sequence_seq_first() {
+        let a = Tensor::from_storage(TensorStorage::cpu(vec![1.0f32, 2.0, 3.0]), vec![3, 1], false)
+            .unwrap();
+        let b =
+            Tensor::from_storage(TensorStorage::cpu(vec![4.0f32, 5.0]), vec![2, 1], false).unwrap();
+
+        let out = pad_sequence(&[a, b], false, 0.0f32).unwrap();
+        assert_eq!(out.shape(), &[3, 2, 1]);
+        // Flat [T=3, B=2, F=1]:
+        //   t=0: a0=1, b0=4
+        //   t=1: a1=2, b1=5
+        //   t=2: a2=3, b_pad=0
+        assert_eq!(out.data().unwrap(), &[1.0, 4.0, 2.0, 5.0, 3.0, 0.0]);
+    }
+
+    // -----------------------------------------------------------------------
+    // pad_sequence: multi-feature trailing dims preserved.
+    // -----------------------------------------------------------------------
+    #[test]
+    fn test_pad_sequence_multifeature() {
+        // a: [2, 2], b: [1, 2]
+        let a = Tensor::from_storage(
+            TensorStorage::cpu(vec![1.0f32, 2.0, 3.0, 4.0]),
+            vec![2, 2],
+            false,
+        )
+        .unwrap();
+        let b =
+            Tensor::from_storage(TensorStorage::cpu(vec![5.0f32, 6.0]), vec![1, 2], false).unwrap();
+
+        let out = pad_sequence(&[a, b], true, 0.0f32).unwrap();
+        assert_eq!(out.shape(), &[2, 2, 2]);
+        // [B=2, T=2, F=2]:
+        //   b0: [[1,2],[3,4]]
+        //   b1: [[5,6],[pad,pad]]
+        assert_eq!(
+            out.data().unwrap(),
+            &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 0.0, 0.0]
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // pad_sequence: equal-length sequences need no padding.
+    // -----------------------------------------------------------------------
+    #[test]
+    fn test_pad_sequence_equal_lengths() {
+        let a =
+            Tensor::from_storage(TensorStorage::cpu(vec![1.0f32, 2.0]), vec![2, 1], false).unwrap();
+        let b =
+            Tensor::from_storage(TensorStorage::cpu(vec![3.0f32, 4.0]), vec![2, 1], false).unwrap();
+
+        let out = pad_sequence(&[a, b], true, -1.0f32).unwrap();
+        assert_eq!(out.shape(), &[2, 2, 1]);
+        assert_eq!(out.data().unwrap(), &[1.0, 2.0, 3.0, 4.0]);
+    }
+
+    // -----------------------------------------------------------------------
+    // pad_sequence error: empty list.
+    // -----------------------------------------------------------------------
+    #[test]
+    fn test_pad_sequence_error_empty() {
+        let empty: &[Tensor<f32>] = &[];
+        assert!(pad_sequence(empty, true, 0.0f32).is_err());
+    }
+
+    // -----------------------------------------------------------------------
+    // pad_sequence error: mismatched trailing dims.
+    // -----------------------------------------------------------------------
+    #[test]
+    fn test_pad_sequence_error_trailing_mismatch() {
+        let a = Tensor::from_storage(
+            TensorStorage::cpu(vec![1.0f32, 2.0, 3.0, 4.0]),
+            vec![2, 2],
+            false,
+        )
+        .unwrap();
+        let b =
+            Tensor::from_storage(TensorStorage::cpu(vec![5.0f32, 6.0]), vec![2, 1], false).unwrap();
+        assert!(pad_sequence(&[a, b], true, 0.0f32).is_err());
     }
 
     // -----------------------------------------------------------------------

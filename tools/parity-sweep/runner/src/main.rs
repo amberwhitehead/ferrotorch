@@ -4693,6 +4693,15 @@ fn dispatch_f32(
         "nn.functional.gru_cell" => dispatch_gru_cell(args),
         "nn.functional.lstm_cell" => dispatch_lstm_cell(args),
 
+        // RNN sequence utilities (#1457). `pad_sequence` returns a plain
+        // tensor directly; `pack_padded_sequence` runs the pack/pad
+        // round-trip (the raw op returns a PackedSequence). Both ride the
+        // existing tensor-equality gate. Production entry points:
+        // `ferrotorch_nn::{pad_sequence, pack_padded_sequence,
+        // pad_packed_sequence}` in `ferrotorch-nn/src/rnn_utils.rs`.
+        "pad_sequence" => dispatch_pad_sequence(args),
+        "pack_padded_sequence" => dispatch_pack_unpack_roundtrip(args),
+
         _ => Ok(None),
     }
 }
@@ -5193,6 +5202,85 @@ fn dispatch_lstm_cell(args: &[Value]) -> Result<Option<Tensor<f32>>, Box<dyn std
     Ok(Some(h_new))
 }
 
+/// `torch.nn.utils.rnn.pad_sequence` — stack a list of variable-length
+/// sequences into a single right-padded batch. Wire shape:
+///   args = [[seq0, seq1, ...], batch_first(bool), padding_value(float)]
+/// The sequence list arrives as a JSON array of tensor envelopes (same
+/// mechanism as `dispatch_lstm_cell`'s `[h, c]` list). Routes through the
+/// production `ferrotorch_nn::pad_sequence` entry point. Closes #1457.
+fn dispatch_pad_sequence(
+    args: &[Value],
+) -> Result<Option<Tensor<f32>>, Box<dyn std::error::Error>> {
+    if args.len() < 3 {
+        return Err("pad_sequence: needs [seqs_list, batch_first, padding_value]".into());
+    }
+    let seqs_arr = args[0]
+        .as_array()
+        .ok_or("pad_sequence: arg 0 must be a list of sequences")?;
+    if seqs_arr.is_empty() {
+        return Ok(None);
+    }
+    let mut seqs: Vec<Tensor<f32>> = Vec::with_capacity(seqs_arr.len());
+    for s in seqs_arr {
+        let t = unwrap_tensor_arg(s)
+            .ok_or("pad_sequence: sequence element not a tensor")?
+            .to_f32()?;
+        seqs.push(t);
+    }
+    let batch_first = args[1]
+        .as_bool()
+        .ok_or("pad_sequence: batch_first not a bool")?;
+    let padding_value = args[2]
+        .as_f64()
+        .ok_or("pad_sequence: padding_value not a number")? as f32;
+    Ok(Some(ferrotorch_nn::pad_sequence(
+        &seqs,
+        batch_first,
+        padding_value,
+    )?))
+}
+
+/// pack/pad round-trip parity for `pack_padded_sequence`. The raw op returns
+/// a `PackedSequence` (not a plain tensor); we instead verify the identity
+///   pad_packed_sequence(pack_padded_sequence(x, lengths)) == x  (padded)
+/// which produces a plain tensor matching the oracle's torch round-trip. This
+/// exercises BOTH the pack path and the unpad path. Wire shape:
+///   args = [input_tensor, lengths(int list), batch_first(bool)]
+/// Routes through the production `ferrotorch_nn::{pack_padded_sequence,
+/// pad_packed_sequence}` pair. Closes #1457.
+fn dispatch_pack_unpack_roundtrip(
+    args: &[Value],
+) -> Result<Option<Tensor<f32>>, Box<dyn std::error::Error>> {
+    if args.len() < 3 {
+        return Err("pack_padded_sequence: needs [input, lengths, batch_first]".into());
+    }
+    let input = unwrap_tensor_arg(&args[0])
+        .ok_or("pack_padded_sequence: input not a tensor")?
+        .to_f32()?;
+    let lengths_arr = args[1]
+        .as_array()
+        .ok_or("pack_padded_sequence: lengths must be an int list")?;
+    let mut lengths: Vec<usize> = Vec::with_capacity(lengths_arr.len());
+    for l in lengths_arr {
+        let v = l
+            .as_i64()
+            .ok_or("pack_padded_sequence: lengths element not an integer")?;
+        if v < 0 {
+            return Ok(None);
+        }
+        lengths.push(v as usize);
+    }
+    let batch_first = args[2]
+        .as_bool()
+        .ok_or("pack_padded_sequence: batch_first not a bool")?;
+
+    let packed = ferrotorch_nn::pack_padded_sequence(&input, &lengths, batch_first, true)?;
+    // padding_value=0.0 matches the oracle's `pad_packed_sequence(...,
+    // padding_value=0.0)` so padded tails compare equal on both sides.
+    let (out, _lens) = ferrotorch_nn::pad_packed_sequence(&packed, batch_first, 0.0f32)?;
+    Ok(Some(out))
+}
+
 fn dispatch_ops() -> &'static [&'static str] {
     &[
         "add",
@@ -5482,6 +5570,13 @@ fn dispatch_ops() -> &'static [&'static str] {
         "nn.functional.rnn_tanh_cell",
         "nn.functional.gru_cell",
         "nn.functional.lstm_cell",
+        // RNN sequence utilities (#1457). `pad_sequence` stacks + right-pads a
+        // list of variable-length sequences; `pack_padded_sequence` runs the
+        // pack/pad round-trip (raw op returns a PackedSequence). Both route
+        // through `ferrotorch_nn::{pad_sequence, pack_padded_sequence,
+        // pad_packed_sequence}` and compare a plain tensor against torch.
+        "pad_sequence",
+        "pack_padded_sequence",
     ]
 }
 

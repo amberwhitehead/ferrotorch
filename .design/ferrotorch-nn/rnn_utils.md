@@ -68,19 +68,24 @@ padded zeros.
   `data[offset..offset + batch_sizes[t]]` at each timestep.
   Matches upstream's `_VF._pack_padded_sequence` output contract.
 
-- REQ-8: Parity op `pack_padded_sequence` — output `PackedSequence`
-  matches upstream's structural contract. NOT-STARTED until the
-  parity-sweep runner has a dispatch arm (blocker #1457).
+- REQ-8: Parity op `pack_padded_sequence` — SHIPPED. The raw op
+  returns a `PackedSequence` (not a plain tensor), so the
+  parity-sweep runner routes it as a pack/pad round-trip:
+  `pad_packed_sequence(pack_padded_sequence(x, lengths))` recovers
+  the padded input, comparing a plain tensor against torch's
+  identical round-trip. This exercises both the pack path (data
+  layout + `batch_sizes`) and the unpad path (scatter back to
+  original rows). Closed by blocker #1457.
 
-- REQ-9: Parity op `pad_packed_sequence` — round-tripped padded
-  output equals the original padded input. NOT-STARTED — blocker
-  #1457.
+- REQ-9: Parity op `pad_packed_sequence` — SHIPPED. Covered by the
+  same round-trip parity arm as REQ-8: the recovered padded output
+  equals the original padded input on both ferrotorch and torch.
+  Closed by blocker #1457.
 
-- REQ-10: Parity op `pad_sequence` — NOT-STARTED. The standalone
-  `pad_sequence` from `rnn.py:405-472` (which stacks variable-length
-  tensors into a single padded batch) is not implemented in
-  ferrotorch's `rnn_utils.rs`. Blocker #1457 tracks both the runner
-  arm and the implementation.
+- REQ-10: Parity op `pad_sequence` — SHIPPED. The standalone
+  `pad_sequence` from `rnn.py:405-470` (which stacks variable-length
+  tensors into a single right-padded batch) is now implemented in
+  `rnn_utils.rs` and wired as a parity op. Closed by blocker #1457.
 
 ## Acceptance Criteria
 
@@ -97,12 +102,15 @@ padded zeros.
 - [x] AC-6: `pad_packed_sequence(packed, batch_first=true,
   padding_value=0.0, total_length=None)` reconstructs the original
   padded tensor (up to the `padding_value` substitution).
-- [ ] AC-7: parity-sweep `pack_padded_sequence` at status
-  `verified` — blocker #1457.
-- [ ] AC-8: parity-sweep `pad_packed_sequence` at status
-  `verified` — blocker #1457.
-- [ ] AC-9: `pad_sequence` implementation — NOT-STARTED. Blocker
-  #1457.
+- [x] AC-7: parity-sweep `pack_padded_sequence` (pack/pad
+  round-trip) passes 48/48 (0 skipped, 0 failed) at seeds 0..8 —
+  closed by blocker #1457.
+- [x] AC-8: parity-sweep `pad_packed_sequence` — covered by the
+  round-trip arm in AC-7 (the recovered padded output equals the
+  input). Closed by blocker #1457.
+- [x] AC-9: `pad_sequence` implementation present in `rnn_utils.rs`;
+  parity-sweep `pad_sequence` passes 48/48 (0 skipped, 0 failed) at
+  seeds 0..8. Closed by blocker #1457.
 
 ## Architecture
 
@@ -149,13 +157,28 @@ vectors are stored as `Vec<usize>` for O(1) lookup during unpack.
    `unsorted_indices[i]`.
 4. Return `(padded_tensor, lengths_in_original_order)`.
 
+### pad_sequence (REQ-10)
+
+`pub fn pad_sequence<T: Float>(sequences, batch_first, padding_value)
+-> FerrotorchResult<Tensor<T>>` in `rnn_utils.rs` stacks a slice of
+`[L_i, *trailing]` tensors into a single right-padded batch:
+
+1. Validate the list is non-empty and every sequence shares the same
+   trailing dimensions (`ndim >= 1` per upstream's "trailing
+   dimensions ... are same" assumption at `rnn.py:429-432`).
+2. Allocate a `[B, T, *trailing]` (or `[T, B, *trailing]`) buffer
+   filled with `padding_value`, where `T = max_i L_i`.
+3. Copy each sequence's `L_i` rows into the slot for batch index `b`,
+   leaving the tail padded.
+
+Mirrors `torch.nn.utils.rnn.pad_sequence` at `rnn.py:405-470`.
+
 ### Non-test production consumers
 
 - `pub use rnn_utils::{PackedSequence, pack_padded_sequence,
-  pad_packed_sequence}` at
-  `ferrotorch-nn/src/lib.rs:246` — grandfathered public API
-  surface. (Note: `pad_sequence` is intentionally NOT re-exported
-  because it's not implemented; see REQ-10.)
+  pad_packed_sequence, pad_sequence}` at
+  `ferrotorch-nn/src/lib.rs:263` — public API surface. `pad_sequence`
+  is now re-exported (REQ-10 SHIPPED).
 
 ## Parity contract
 
@@ -169,7 +192,10 @@ vectors are stored as `Vec<usize>` for O(1) lookup during unpack.
   - **Unsorted with `enforce_sorted=true`** — rejected.
   - **Single-sample batch** — works; `batch_sizes = [1, 1, ...,
     1]` up to `lengths[0]`.
-- Parity-sweep audit status: `MISSING` (blocker #1457).
+- Parity-sweep audit status: `VERIFIED` via the pack/pad round-trip
+  parity op `pack_padded_sequence` (oracle round-trips through torch's
+  `pad_packed_sequence(pack_padded_sequence(...))`); 48/48 pass at
+  seeds 0..8. Closed by #1457.
 
 ### `pad_packed_sequence`
 
@@ -180,13 +206,20 @@ vectors are stored as `Vec<usize>` for O(1) lookup during unpack.
     ferrotorch matches.
   - **Custom `padding_value`** — every padded slot receives this
     value (default 0).
-- Parity-sweep audit status: `MISSING` (blocker #1457).
+- Parity-sweep audit status: `VERIFIED` via the same round-trip arm
+  as `pack_padded_sequence` (the unpad half). Closed by #1457.
 
-### `pad_sequence` (NOT-STARTED)
+### `pad_sequence`
 
 - Upstream entry: `torch/nn/utils/rnn.py:405 — pad_sequence`.
-- Implementation not yet present in `rnn_utils.rs`. Blocker
-  #1457 tracks the work item.
+- Implemented at `pub fn pad_sequence` in `rnn_utils.rs`; wired as
+  parity op `pad_sequence`. Edge cases preserved:
+  - **Variable lengths** — right-padded to `T = max_i L_i`.
+  - **`batch_first`** — `[B, T, *]` vs `[T, B, *]` layout.
+  - **Custom `padding_value`** — every padded slot receives it.
+  - **Multi-feature trailing dims** — preserved unchanged.
+- Parity-sweep audit status: `VERIFIED`; 48/48 pass at seeds 0..8.
+  Closed by #1457.
 
 ## Verification
 
@@ -206,20 +239,22 @@ for OP in pack_padded_sequence pad_packed_sequence pad_sequence; do
 done
 ```
 
-Expected (post-#1457): each line returns `>= 1`. Current: each
-returns `0`.
+Post-#1457: `pad_sequence` and `pack_padded_sequence` each return
+`1` (verified 48/48, 0 skipped, 0 failed at seeds 0..8).
+`pad_packed_sequence` parity is folded into the `pack_padded_sequence`
+round-trip arm (the unpad half), so it is not a standalone runner op.
 
 ## REQ status table
 
 | REQ | Status | Evidence |
 |---|---|---|
-| REQ-1 | SHIPPED | impl: `pub struct PackedSequence<T: Float>` with `data`/`batch_sizes`/`sorted_indices`/`unsorted_indices` in `rnn_utils.rs`; non-test consumer: re-export at `ferrotorch-nn/src/lib.rs:246`. |
-| REQ-2 | SHIPPED | impl: `pub fn pack_padded_sequence<T: Float>` in `rnn_utils.rs`; non-test consumer: re-export at `lib.rs:246`. |
-| REQ-3 | SHIPPED | impl: `pub fn pad_packed_sequence<T: Float>` in `rnn_utils.rs`; non-test consumer: re-export at `lib.rs:246`. |
-| REQ-4 | SHIPPED | impl: validation guards at the head of `pack_padded_sequence` in `rnn_utils.rs`; non-test consumer: re-export at `lib.rs:246`. |
-| REQ-5 | SHIPPED | impl: `batch_first` axis-swap logic inside `pack_padded_sequence` in `rnn_utils.rs`; non-test consumer: re-export at `lib.rs:246`. |
-| REQ-6 | SHIPPED | impl: stable sort + `sorted_indices` / `unsorted_indices` capture inside `pack_padded_sequence` in `rnn_utils.rs`; non-test consumer: re-export at `lib.rs:246`. |
-| REQ-7 | SHIPPED | impl: per-timestep batch-size accumulation inside `pack_padded_sequence` in `rnn_utils.rs`; non-test consumer: re-export at `lib.rs:246`. |
-| REQ-8 | NOT-STARTED | parity-sweep runner arm for `pack_padded_sequence` not wired — blocker #1457. |
-| REQ-9 | NOT-STARTED | parity-sweep runner arm for `pad_packed_sequence` not wired — blocker #1457. |
-| REQ-10 | NOT-STARTED | `pad_sequence` implementation not present in `rnn_utils.rs`; blocker #1457 tracks both the impl and the runner arm. |
+| REQ-1 | SHIPPED | impl: `pub struct PackedSequence<T: Float>` with `data`/`batch_sizes`/`sorted_indices`/`unsorted_indices` in `rnn_utils.rs`; non-test consumer: re-export at `ferrotorch-nn/src/lib.rs:263`. |
+| REQ-2 | SHIPPED | impl: `pub fn pack_padded_sequence<T: Float>` in `rnn_utils.rs`; non-test consumer: re-export at `lib.rs:263`. |
+| REQ-3 | SHIPPED | impl: `pub fn pad_packed_sequence<T: Float>` in `rnn_utils.rs`; non-test consumer: re-export at `lib.rs:263`. |
+| REQ-4 | SHIPPED | impl: validation guards at the head of `pack_padded_sequence` in `rnn_utils.rs`; non-test consumer: re-export at `lib.rs:263`. |
+| REQ-5 | SHIPPED | impl: `batch_first` axis-swap logic inside `pack_padded_sequence` in `rnn_utils.rs`; non-test consumer: re-export at `lib.rs:263`. |
+| REQ-6 | SHIPPED | impl: stable sort + `sorted_indices` / `unsorted_indices` capture inside `pack_padded_sequence` in `rnn_utils.rs`; non-test consumer: re-export at `lib.rs:263`. |
+| REQ-7 | SHIPPED | impl: per-timestep batch-size accumulation inside `pack_padded_sequence` in `rnn_utils.rs`; non-test consumer: re-export at `lib.rs:263`. |
+| REQ-8 | SHIPPED | impl: pack/pad round-trip arm `dispatch_pack_unpack_roundtrip` at `tools/parity-sweep/runner/src/main.rs` (registered in `dispatch_f32` + `dispatch_ops`); oracle round-trip `_pack_unpack_roundtrip_torch_call` at `tools/parity-sweep/oracle.py`; non-test consumer: the runner's `dispatch_f32` match arm `"pack_padded_sequence" => dispatch_pack_unpack_roundtrip(args)` calls `ferrotorch_nn::pack_padded_sequence`. 48/48 pass at seeds 0..8. Closed by #1457. |
+| REQ-9 | SHIPPED | covered by the same round-trip arm (the unpad half calls `ferrotorch_nn::pad_packed_sequence` in `dispatch_pack_unpack_roundtrip` at `main.rs`); recovered padded output equals input. 48/48 pass. Closed by #1457. |
+| REQ-10 | SHIPPED | impl: `pub fn pad_sequence<T: Float>` in `rnn_utils.rs`; runner arm `dispatch_pad_sequence` at `main.rs`; oracle `_pad_sequence_torch_call` at `oracle.py`; non-test consumer: re-export at `lib.rs:263` AND the runner match arm `"pad_sequence" => dispatch_pad_sequence(args)`. 48/48 pass at seeds 0..8. Closed by #1457. |

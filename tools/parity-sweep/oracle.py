@@ -469,6 +469,102 @@ def _lstm_cell_torch_call(input_, hc_list, w_ih, w_hh, b_ih, b_hh):
     return torch.lstm_cell(input_, (hc_list[0], hc_list[1]), w_ih, w_hh, b_ih, b_hh)
 
 
+def _pad_sequence_samples() -> list[tuple[tuple, dict]]:
+    """Hand-crafted samples for `torch.nn.utils.rnn.pad_sequence`.
+
+    Not in op_db (verified 2026-05-26 by enumerating op_db names). Wire
+    shape (matches ferrotorch's `dispatch_pad_sequence`):
+
+      args = [[seq0, seq1, ...], batch_first(bool), padding_value(float)]
+
+    where each `seq_i` is `[L_i, *trailing]`. The list of sequences is
+    encoded as a JSON array of tensor envelopes (same mechanism the
+    lstm-cell `[h, c]` list uses). `torch.nn.utils.rnn.pad_sequence`
+    returns a single plain tensor, so the existing tensor-equality gate
+    applies — no structured-output oracle needed.
+    """
+    g = torch.Generator().manual_seed(0)
+    samples: list[tuple[tuple, dict]] = []
+    # (lengths, trailing_features, batch_first, padding_value)
+    configs = [
+        ([3, 2, 1], (), True, 0.0),       # scalar-feature (1-D seqs)
+        ([3, 2, 1], (1,), True, -9.0),    # single feature, custom pad
+        ([4, 2], (2,), False, 0.0),       # seq-first default layout
+        ([5, 5, 5], (3,), True, 0.0),     # equal lengths, no padding
+        ([1], (4,), False, 1.0),          # single sequence
+        ([6, 4, 4, 1], (2,), True, -1.0), # 4-way batch, ties in length
+    ]
+    for lengths, trailing, batch_first, pad in configs:
+        seqs = [
+            torch.randn(L, *trailing, generator=g, dtype=torch.float32)
+            for L in lengths
+        ]
+        samples.append(((seqs, batch_first, pad), {}))
+    return samples
+
+
+def _pad_sequence_torch_call(seqs_list, batch_first, padding_value):
+    """Adapter: the wire packs the sequence list as a JSON array (decoded to
+    a Python list of tensors); `torch.nn.utils.rnn.pad_sequence` accepts a
+    list directly. Returns a single plain tensor.
+    """
+    from torch.nn.utils.rnn import pad_sequence
+    return pad_sequence(seqs_list, batch_first=batch_first, padding_value=padding_value)
+
+
+def _pack_unpack_roundtrip_samples() -> list[tuple[tuple, dict]]:
+    """Samples for the pack/pad round-trip parity op `pack_padded_sequence`.
+
+    `pack_padded_sequence` and `pad_packed_sequence` exchange a
+    `PackedSequence` (data + batch_sizes), which is NOT a plain tensor and
+    so cannot ride the harness's tensor-equality gate directly. Instead we
+    verify the round-trip identity:
+
+        pad_packed_sequence(pack_padded_sequence(x, lengths)) == x   (padded)
+
+    which produces a plain tensor on both sides. This exercises BOTH the
+    pack path (data layout + batch_sizes) and the unpad path (scatter back
+    to original rows), so a single round-trip op covers REQ-8 (pack) and
+    REQ-9 (pad). Wire shape (matches `dispatch_pack_unpack_roundtrip`):
+
+      args = [input_tensor, lengths(int list), batch_first(bool)]
+
+    Lengths are kept sorted descending so `enforce_sorted=True` holds on
+    both sides (the sort path is covered by the host-side unit tests).
+    """
+    g = torch.Generator().manual_seed(0)
+    samples: list[tuple[tuple, dict]] = []
+    # (batch, max_seq_len, features, lengths, batch_first)
+    configs = [
+        (3, 5, 4, [5, 3, 2], True),
+        (3, 4, 2, [4, 2, 1], False),
+        (1, 3, 2, [3], True),
+        (4, 3, 2, [3, 3, 3, 3], True),
+        (2, 6, 8, [6, 4], True),
+        (5, 4, 1, [4, 4, 2, 2, 1], False),
+    ]
+    for (batch, max_len, feat, lengths, batch_first) in configs:
+        if batch_first:
+            x = torch.randn(batch, max_len, feat, generator=g, dtype=torch.float32)
+        else:
+            x = torch.randn(max_len, batch, feat, generator=g, dtype=torch.float32)
+        samples.append(((x, lengths, batch_first), {}))
+    return samples
+
+
+def _pack_unpack_roundtrip_torch_call(x, lengths, batch_first):
+    """torch round-trip: pack then unpad, returning the recovered padded
+    tensor (padding positions become `padding_value=0.0`).
+    """
+    from torch.nn.utils.rnn import pack_padded_sequence, pad_packed_sequence
+    packed = pack_padded_sequence(
+        x, torch.as_tensor(lengths, dtype=torch.int64),
+        batch_first=batch_first, enforce_sorted=True,
+    )
+    out, _lens = pad_packed_sequence(packed, batch_first=batch_first, padding_value=0.0)
+    return out
+
+
 _CUSTOM_OPS: dict[str, dict[str, Any]] = {
     "fake_quantize_per_tensor_affine": {
         "callable": torch.fake_quantize_per_tensor_affine,
@@ -499,6 +595,18 @@ _CUSTOM_OPS: dict[str, dict[str, Any]] = {
     "nn.functional.lstm_cell": {
         "callable": _lstm_cell_torch_call,
         "samples": _lstm_cell_samples(),
+    },
+    # RNN sequence utilities (#1457). Not in op_db. `pad_sequence` returns a
+    # plain tensor; `pack_padded_sequence` is routed as a pack/pad round-trip
+    # (the raw op returns a PackedSequence, not a plain tensor) so both ride
+    # the existing tensor-equality gate.
+    "pad_sequence": {
+        "callable": _pad_sequence_torch_call,
+        "samples": _pad_sequence_samples(),
+    },
+    "pack_padded_sequence": {
+        "callable": _pack_unpack_roundtrip_torch_call,
+        "samples": _pack_unpack_roundtrip_samples(),
     },
 }
 
