@@ -447,7 +447,46 @@ pub struct CorrCholesky;
 
 impl Constraint for CorrCholesky {
     fn check<T: Float>(&self, value: T) -> bool {
+        // Per-element: same as `Real` (rejects NaN). The matrix validity
+        // property (lower-triangular + positive diagonal + unit-norm rows)
+        // is a 2-D event property — see `check_tensor`.
         !value.is_nan()
+    }
+
+    fn check_tensor<T: Float>(&self, value: &Tensor<T>) -> FerrotorchResult<bool> {
+        // Mirrors `torch/distributions/constraints.py:_CorrCholesky.check`:
+        //   tol = torch.finfo(value.dtype).eps * value.size(-1) * 10
+        //   row_norm = torch.linalg.norm(value.detach(), dim=-1)
+        //   unit_row_norm = (row_norm - 1.0).abs().le(tol).all(dim=-1)
+        //   return _LowerCholesky().check(value) & unit_row_norm
+        // First require LowerCholesky validity (lower-triangular + positive
+        // diagonal), then require each row to have unit Euclidean norm within
+        // `tol`. The trailing two dims are the matrix event.
+        if !lower_cholesky_check_tensor(value)? {
+            return Ok(false);
+        }
+        let shape = value.shape();
+        let ncols = match shape.last().copied() {
+            Some(n) if n > 0 => n,
+            _ => return Ok(false),
+        };
+        let data = value.data_vec()?;
+        let one = T::from(1.0).unwrap();
+        // tol = eps * size(-1) * 10 (10 is upstream's adjustable fudge factor).
+        let tol = T::epsilon() * T::from(ncols).unwrap() * T::from(10.0).unwrap();
+        // Each contiguous run of `ncols` elements is one row; require its L2
+        // norm to be within `tol` of 1.0.
+        for row in data.chunks(ncols) {
+            let mut sum_sq = T::from(0.0).unwrap();
+            for &x in row {
+                sum_sq += x * x;
+            }
+            let row_norm = sum_sq.sqrt();
+            if (row_norm - one).abs() > tol {
+                return Ok(false);
+            }
+        }
+        Ok(true)
     }
 
     fn event_dim(&self) -> usize {
@@ -472,7 +511,19 @@ pub struct LowerCholesky;
 
 impl Constraint for LowerCholesky {
     fn check<T: Float>(&self, value: T) -> bool {
+        // Per-element: same as `Real` (rejects NaN). The matrix validity
+        // property (lower-triangular + positive diagonal) is a 2-D event
+        // property — see `check_tensor`.
         !value.is_nan()
+    }
+
+    fn check_tensor<T: Float>(&self, value: &Tensor<T>) -> FerrotorchResult<bool> {
+        // Mirrors `torch/distributions/constraints.py:_LowerCholesky.check`:
+        //   value_tril = value.tril()
+        //   lower_triangular = (value_tril == value)...min(-1)[0]
+        //   positive_diagonal = (value.diagonal(dim1=-2, dim2=-1) > 0).min(-1)[0]
+        //   return lower_triangular & positive_diagonal
+        lower_cholesky_check_tensor(value)
     }
 
     fn event_dim(&self) -> usize {
@@ -482,6 +533,51 @@ impl Constraint for LowerCholesky {
     fn name(&self) -> &'static str {
         "LowerCholesky"
     }
+}
+
+/// Tensor-level validity check shared by [`LowerCholesky`] and
+/// [`CorrCholesky`]: each trailing 2-D matrix must be lower-triangular
+/// (strict upper-triangle entries exactly zero) with a strictly-positive
+/// diagonal. Mirrors `torch/distributions/constraints.py:_LowerCholesky.check`.
+fn lower_cholesky_check_tensor<T: Float>(value: &Tensor<T>) -> FerrotorchResult<bool> {
+    let shape = value.shape();
+    let ndim = shape.len();
+    if ndim < 2 {
+        // A constraint with `event_dim == 2` requires at least a 2-D matrix.
+        return Ok(false);
+    }
+    let nrows = shape[ndim - 2];
+    let ncols = shape[ndim - 1];
+    if nrows == 0 || ncols == 0 {
+        return Ok(false);
+    }
+    let data = value.data_vec()?;
+    let zero = T::from(0.0).unwrap();
+    let matrix_len = nrows * ncols;
+    // Iterate over each batched matrix in the flat row-major buffer.
+    for matrix in data.chunks(matrix_len) {
+        for r in 0..nrows {
+            for c in 0..ncols {
+                let x = matrix[r * ncols + c];
+                if c > r {
+                    // Strict upper triangle: must be exactly zero (torch's
+                    // `value.tril() == value` element-wise equality).
+                    if x != zero {
+                        return Ok(false);
+                    }
+                } else if c == r {
+                    // Diagonal: must be strictly positive (`> 0`). Written as
+                    // `!(x > 0)` semantics — a NaN diagonal must also be
+                    // rejected (torch's `value.diagonal() > 0` is False for
+                    // NaN), so we cannot rewrite as `x <= 0`.
+                    if x <= zero || x.is_nan() {
+                        return Ok(false);
+                    }
+                }
+            }
+        }
+    }
+    Ok(true)
 }
 
 // ---------------------------------------------------------------------------

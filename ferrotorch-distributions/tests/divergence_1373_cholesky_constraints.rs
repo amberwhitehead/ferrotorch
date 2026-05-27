@@ -25,7 +25,6 @@ use ferrotorch_distributions::constraints::{Constraint, CorrCholesky, LowerChole
 /// ferrotorch `constraints.rs:448-460` returns `!value.is_nan()`.
 /// Tracking: #1568.
 #[test]
-#[ignore = "divergence: CorrCholesky::check is tautological (!is_nan); tracking #1568"]
 fn divergence_corr_cholesky_constraint_rejects_non_unit_norm_rows() {
     let c = CorrCholesky;
     // Lower-triangular but rows are NOT unit Euclidean norm -> not a corr-chol.
@@ -43,7 +42,6 @@ fn divergence_corr_cholesky_constraint_rejects_non_unit_norm_rows() {
 /// ferrotorch `constraints.rs:473-485` returns `!value.is_nan()`.
 /// Tracking: #1568.
 #[test]
-#[ignore = "divergence: LowerCholesky::check is tautological (!is_nan); tracking #1568"]
 fn divergence_lower_cholesky_constraint_rejects_upper_triangle() {
     let c = LowerCholesky;
     // Nonzero (0,1) entry -> not lower-triangular.
@@ -59,7 +57,6 @@ fn divergence_lower_cholesky_constraint_rejects_upper_triangle() {
 /// Upstream `torch/distributions/constraints.py:_LowerCholesky.check`.
 /// Tracking: #1568.
 #[test]
-#[ignore = "divergence: LowerCholesky::check is tautological (!is_nan); tracking #1568"]
 fn divergence_lower_cholesky_constraint_rejects_negative_diagonal() {
     let c = LowerCholesky;
     // Diagonal (1,1) = -2.0 -> not a valid Cholesky factor.
@@ -74,11 +71,24 @@ fn divergence_lower_cholesky_constraint_rejects_negative_diagonal() {
 /// torch (True) and ferrotorch. Pins that the fix must not over-reject.
 /// torch corr_cholesky.check([[1,0,0],[0.197..,0.980..,0],[-0.462..,0.536..,0.707..]]) == True
 #[test]
+#[allow(
+    clippy::excessive_precision,
+    reason = "literals are OracleDerived from live torch 2.11.0; truncating them \
+              changes the pinned expected factor (R-CHAR-3 named typed bits)"
+)]
 fn corr_cholesky_constraint_accepts_valid_factor() {
     let c = CorrCholesky;
     let good = from_slice(
         &[
-            1.0f32, 0.0, 0.0, 0.19737533, 0.98032802, 0.0, -0.46211717, 0.53596479, 0.70653343,
+            1.0f32,
+            0.0,
+            0.0,
+            0.19737533,
+            0.98032802,
+            0.0,
+            -0.46211717,
+            0.53596479,
+            0.70653343,
         ],
         &[3, 3],
     )
