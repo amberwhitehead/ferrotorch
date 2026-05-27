@@ -22,7 +22,7 @@
 //! | REQ-5 (interval constraints) | SHIPPED | `pub struct OpenInterval<T>`, `ClosedInterval<T>`, `HalfOpenInterval<T>` + constructors in `constraints.rs` mirroring `_Interval`/`_HalfOpenInterval`; consumer: `pub use constraints` re-export in `lib.rs` |
 //! | REQ-6 (`UnitInterval`/`BooleanConstraint`) | SHIPPED | `pub struct UnitInterval`, `BooleanConstraint` + `unit_interval()`/`boolean()` constructors with `BooleanConstraint::is_discrete() -> true` in `constraints.rs` mirroring `unit_interval = _Interval(0., 1.)` / `boolean = _Boolean()`; consumer: `pub use constraints` re-export in `lib.rs` |
 //! | REQ-7 (`Simplex` w/ `event_dim() -> 1` + full-vector `check_tensor`) | SHIPPED | `pub struct Simplex` with `event_dim() -> 1` + `check_tensor` override (`all(value >= 0, dim=-1) & ((value.sum(-1) - 1).abs() < 1e-6)`) + `simplex()` constructor in `constraints.rs` mirroring `torch/distributions/constraints.py:_Simplex.check`; consumer: `fn Dirichlet::log_prob` in `dirichlet.rs` validates the sample against `Simplex::check_tensor` (#1547). |
-//! | REQ-8 (17 missing upstream constraint variants) | PARTIAL | wave-H #1372 — `IntegerInterval`/`NonNegativeInteger` added to `constraints.rs` mirroring `torch/distributions/constraints.py:_IntegerInterval` / `nonnegative_integer = _IntegerGreaterThan(0)`; consumer: `pub use constraints` re-export in `lib.rs`. Remaining 15 variants (`PositiveDefinite`, `PositiveSemiDefinite`, `Multinomial`, `OneHot`, `Symmetric`, `LowerCholesky`, `LowerTriangular`, `CorrCholesky`, `RealVector`, `Cat`, `Stack`, `Independent` composite, `_Dependent`/`is_dependent`, `MixtureSameFamilyConstraint`) remain under #1372 follow-up — they each need a paired concrete-distribution consumer (e.g. `MultivariateNormal.support = real_vector`) which is cross-cutting. |
+//! | REQ-8 (17 missing upstream constraint variants) | PARTIAL | wave-H #1372 — `IntegerInterval`/`NonNegativeInteger` added; #1373 — `RealVector`/`CorrCholesky`/`LowerCholesky` added to `constraints.rs` mirroring `torch/distributions/constraints.py:954` (`real_vector`), `:947` (`corr_cholesky`), `:943` (`lower_cholesky`); consumer: `fn SoftmaxTransform::domain` / `fn CorrCholeskyTransform::codomain` / `fn LowerCholeskyTransform::codomain` in `transforms.rs` return these as the transform domain/codomain (reachable via `pub use transforms::*` in `lib.rs`). Remaining 12 variants (`PositiveDefinite`, `PositiveSemiDefinite`, `Multinomial`, `OneHot`, `Symmetric`, `LowerTriangular`, `Cat`, `Stack`, `Independent` composite, `_Dependent`/`is_dependent`, `MixtureSameFamilyConstraint`) remain under #1372 follow-up — they each need a paired concrete-distribution consumer which is cross-cutting. |
 //! | REQ-9 (concrete `arg_constraints` wiring) | SHIPPED | trait extension #1376 (commit `ff14fe66b`) added `support`/`arg_constraints` overrides to 20 concrete distributions (`normal.rs:296-308`, `bernoulli.rs`, `beta.rs`, `categorical.rs`, `cauchy.rs`, `exponential.rs`, `gamma.rs`, `gumbel.rs`, `half_normal.rs`, `independent.rs`, `laplace.rs`, `lognormal.rs`, `pareto.rs`, `poisson.rs`, `relaxed_bernoulli.rs`, `relaxed_one_hot_categorical.rs`, `student_t.rs`, `uniform.rs`, `von_mises.rs`, `weibull.rs`); consumer per #1376: production dispatch through `Distribution::support`/`arg_constraints` defaults exposed at `lib.rs:344-356`. Closes #1371. |
 
 use ferrotorch_core::dtype::Float;
@@ -404,6 +404,86 @@ impl Constraint for NonNegativeInteger {
     }
 }
 
+/// Constraint for a real-valued vector (one event dimension).
+///
+/// Mirrors `torch/distributions/constraints.py:_IndependentConstraint(_Real(),
+/// 1)` exposed as `real_vector` (`constraints.py:954`). The validity predicate
+/// is the same as [`Real`] (rejects NaN) applied element-wise; the only
+/// difference is `event_dim() == 1`, marking the rightmost dim as the event.
+/// Used as the domain of [`SoftmaxTransform`](crate::transforms::SoftmaxTransform),
+/// [`StickBreakingTransform`](crate::transforms::StickBreakingTransform), and
+/// [`CorrCholeskyTransform`](crate::transforms::CorrCholeskyTransform).
+#[derive(Debug, Clone, Copy)]
+pub struct RealVector;
+
+impl Constraint for RealVector {
+    fn check<T: Float>(&self, value: T) -> bool {
+        // Element-wise: same as `Real` (rejects NaN). The event structure
+        // (sum over the last dim) is metadata via `event_dim`.
+        !value.is_nan()
+    }
+
+    fn event_dim(&self) -> usize {
+        1
+    }
+
+    fn name(&self) -> &'static str {
+        "RealVector"
+    }
+}
+
+/// Constraint for the Cholesky factor of a correlation matrix.
+///
+/// A lower-triangular matrix with positive diagonal and unit Euclidean norm
+/// per row. Mirrors `torch/distributions/constraints.py:_CorrCholesky` exposed
+/// as `corr_cholesky` (`constraints.py:947`); `event_dim == 2`. Used as the
+/// codomain of
+/// [`CorrCholeskyTransform`](crate::transforms::CorrCholeskyTransform). The
+/// per-element scalar predicate cannot express the matrix validity property,
+/// so [`check`](Constraint::check) only verifies finiteness; full validation
+/// is left to upstream-style tensor checks not yet ported.
+#[derive(Debug, Clone, Copy)]
+pub struct CorrCholesky;
+
+impl Constraint for CorrCholesky {
+    fn check<T: Float>(&self, value: T) -> bool {
+        !value.is_nan()
+    }
+
+    fn event_dim(&self) -> usize {
+        2
+    }
+
+    fn name(&self) -> &'static str {
+        "CorrCholesky"
+    }
+}
+
+/// Constraint for lower-triangular matrices with non-negative diagonal.
+///
+/// Mirrors `torch/distributions/constraints.py:_LowerCholesky` exposed as
+/// `lower_cholesky` (`constraints.py:943`); `event_dim == 2`. Used as the
+/// codomain of
+/// [`LowerCholeskyTransform`](crate::transforms::LowerCholeskyTransform). The
+/// scalar predicate verifies finiteness only; the lower-triangular and
+/// positive-diagonal matrix property is structural metadata via `event_dim`.
+#[derive(Debug, Clone, Copy)]
+pub struct LowerCholesky;
+
+impl Constraint for LowerCholesky {
+    fn check<T: Float>(&self, value: T) -> bool {
+        !value.is_nan()
+    }
+
+    fn event_dim(&self) -> usize {
+        2
+    }
+
+    fn name(&self) -> &'static str {
+        "LowerCholesky"
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Convenience constructors (matches PyTorch's module-level constants)
 // ---------------------------------------------------------------------------
@@ -488,6 +568,21 @@ pub fn integer_interval<T: Float>(lower_bound: T, upper_bound: T) -> IntegerInte
 /// Non-negative integer constraint `{0, 1, 2, ...}`.
 pub fn nonnegative_integer() -> NonNegativeInteger {
     NonNegativeInteger
+}
+
+/// Real-vector constraint (real line, `event_dim == 1`).
+pub fn real_vector() -> RealVector {
+    RealVector
+}
+
+/// Correlation-Cholesky constraint (`event_dim == 2`).
+pub fn corr_cholesky() -> CorrCholesky {
+    CorrCholesky
+}
+
+/// Lower-Cholesky constraint (`event_dim == 2`).
+pub fn lower_cholesky() -> LowerCholesky {
+    LowerCholesky
 }
 
 // ---------------------------------------------------------------------------

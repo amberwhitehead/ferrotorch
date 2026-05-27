@@ -22,20 +22,22 @@
 //! | REQ-5 (`ComposeTransform<T>`) | SHIPPED | `pub struct ComposeTransform<T: Float>` + L→R forward + R→L inverse + sum-of-LDJs + empty-chain identity branch in `transforms.rs` mirroring `torch/distributions/transforms.py:ComposeTransform`; consumer: `fn TransformedDistribution::entropy` reads `constant_entropy_contribution()` override on chained instances |
 //! | REQ-6 (`TransformedDistribution<T>`) | SHIPPED | `pub struct TransformedDistribution<T: Float>` with `Box<dyn Distribution<T>>` base + `Vec<Box<dyn Transform<T>>>` chain + full `Distribution` impl in `transforms.rs` mirroring `torch/distributions/transformed_distribution.py:TransformedDistribution`; consumer: `pub use transforms::TransformedDistribution` in `lib.rs` — grandfathered public API |
 //! | REQ-7 (`TransformedDistribution::entropy` three-case dispatcher) | SHIPPED | `fn TransformedDistribution::entropy` three-case dispatch (empty, all-constant-Jacobian, single-Exp) with named-transform error on fall-through in `transforms.rs`; consumer: the `impl Distribution::entropy` IS the dispatcher; `test_transformed_distribution_entropy_*` tests pin all four branches |
-//! | REQ-8 (11 missing upstream transforms + domain/codomain) | PARTIAL | #1373 — Constraint domain/codomain linkage SHIPPED: `fn Transform::domain` / `fn Transform::codomain` return `Box<dyn DistConstraint>` (default `Real`/`Real`) with per-transform overrides mirroring `torch/distributions/transforms.py` domain/codomain attributes; consumer: `fn TransformedDistribution::support` returns the chain's final codomain (`transformed_distribution.py:129-137`). Still NOT-STARTED: 11 of 16 upstream transforms (`AbsTransform`, `PowerTransform`, `SoftmaxTransform`, `StickBreakingTransform`, `CatTransform`, `StackTransform`, `CorrCholeskyTransform`, `LowerCholeskyTransform`, `PositiveDefiniteTransform`, `ReshapeTransform`, `IndependentTransform`, `CumulativeDistributionTransform`); blocker #1373 stays open for those |
+//! | REQ-8 (16 upstream transforms + domain/codomain) | SHIPPED | #1373 — Constraint domain/codomain linkage + the 11 remaining upstream transforms ported: `AbsTransform`, `PowerTransform<T>`, `SoftmaxTransform`, `StickBreakingTransform`, `LowerCholeskyTransform`, `CorrCholeskyTransform`, `ReshapeTransform`, `IndependentTransform<T>`, `CatTransform<T>`, `StackTransform<T>`, `CumulativeDistributionTransform<T>` in `transforms.rs`, each mirroring upstream `_call`/`_inverse`/`log_abs_det_jacobian`/`domain`/`codomain` in `torch/distributions/transforms.py`; trait gained `event_dim()`/`bijective()`/`sign()` defaults; new codomain constraints `RealVector`/`CorrCholesky`/`LowerCholesky` in `constraints.rs`. Consumer: `fn TransformedDistribution::support` returns the chain's final codomain and the chain machinery drives each boxed transform; all re-exported from `lib.rs` as boundary API. Remaining NOT-STARTED: only `PositiveDefiniteTransform` (out of dispatch scope) |
 //! | REQ-9 (Monte-Carlo entropy fallback) | SHIPPED | `fn TransformedDistribution::entropy_monte_carlo` estimates `H(Y) = H(X) + E_X[log|det J_f(X)|]` with `MC_ENTROPY_SAMPLES` base draws pushed through each link's `log_abs_det_jacobian` for the X-dependent chains (Sigmoid/Tanh/Softplus/multi-Exp/Exp-then-Affine) in `transforms.rs`; consumer: `fn TransformedDistribution::entropy` invokes it as path 4 on fall-through — `td.entropy()` on a Sigmoid/Tanh chain now returns a value instead of erroring. FD/quadrature-verified by `test_transformed_distribution_entropy_{sigmoid,exp_then_affine}_monte_carlo`. Closes #1378. |
 
 use ferrotorch_core::autograd::no_grad;
 use ferrotorch_core::creation;
 use ferrotorch_core::dtype::Float;
-use ferrotorch_core::error::FerrotorchResult;
+use ferrotorch_core::error::{FerrotorchError, FerrotorchResult};
 use ferrotorch_core::grad_fns::activation::{
-    sigmoid as sigmoid_op, softplus as softplus_op, tanh as tanh_op,
+    sigmoid as sigmoid_op, softmax as softmax_op, softplus as softplus_op, tanh as tanh_op,
 };
-use ferrotorch_core::grad_fns::arithmetic::{add, div, mul, neg, sub};
+use ferrotorch_core::grad_fns::arithmetic::{abs as abs_op, add, div, mul, neg, sub};
+use ferrotorch_core::grad_fns::shape::cat as cat_op;
 use ferrotorch_core::grad_fns::transcendental::{exp as exp_op, log as log_op};
 use ferrotorch_core::storage::TensorStorage;
 use ferrotorch_core::tensor::Tensor;
+use ferrotorch_core::vmap::{select as select_op, stack as stack_op};
 
 use crate::DistConstraint;
 
@@ -118,6 +120,32 @@ pub trait Transform<T: Float>: Send + Sync {
     /// `torch/distributions/transforms.py:95`.
     fn codomain(&self) -> Box<dyn DistConstraint> {
         Box::new(crate::constraints::Real)
+    }
+
+    /// Number of rightmost dimensions that together form a single event for
+    /// this transform. Element-wise transforms are `0`; vector transforms
+    /// (`SoftmaxTransform`, `StickBreakingTransform`) are `1`; matrix
+    /// transforms (`LowerCholeskyTransform`) are `2`. Mirrors the
+    /// `event_dim` property derived from `domain`/`codomain` at
+    /// `torch/distributions/transforms.py:113-117`.
+    fn event_dim(&self) -> usize {
+        0
+    }
+
+    /// Whether the transform is a bijection (`t.inv(t(x)) == x`). Defaults to
+    /// `true`; non-bijective transforms (`AbsTransform`, `SoftmaxTransform`)
+    /// override to `false`. Mirrors the class-level `bijective` flag at
+    /// `torch/distributions/transforms.py:93`.
+    fn bijective(&self) -> bool {
+        true
+    }
+
+    /// Sign of the Jacobian determinant for monotone univariate transforms:
+    /// `+1` increasing, `-1` decreasing, `None` if not applicable. Mirrors
+    /// the `sign` property at `torch/distributions/transforms.py:133-139`
+    /// (which raises `NotImplementedError` by default — we surface `None`).
+    fn sign(&self) -> Option<i32> {
+        None
     }
 }
 
@@ -548,6 +576,1170 @@ impl<T: Float> Transform<T> for ComposeTransform<T> {
             Some(last) => last.codomain(),
             None => Box::new(crate::constraints::Real),
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// AbsTransform: y = |x|
+// ---------------------------------------------------------------------------
+
+/// Transform via `y = |x|`.
+///
+/// Maps the real line to the non-negative reals. NOT bijective (two `x`
+/// values map to one `y`); `inverse` returns `y` unchanged (the
+/// pseudo-inverse) and `log_abs_det_jacobian` is undefined. Mirrors
+/// `torch/distributions/transforms.py:741-754` (`class AbsTransform`).
+#[derive(Debug, Clone, Copy)]
+pub struct AbsTransform;
+
+impl<T: Float> Transform<T> for AbsTransform {
+    fn forward(&self, x: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
+        // y = |x|; `transforms.py:750-751` `return x.abs()`.
+        no_grad(|| abs_op(x))
+    }
+
+    fn inverse(&self, y: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
+        // Pseudo-inverse: `transforms.py:753-754` `return y`.
+        no_grad(|| Ok(y.clone()))
+    }
+
+    fn log_abs_det_jacobian(&self, _x: &Tensor<T>, _y: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
+        // `AbsTransform` is not bijective: upstream `Transform.log_abs_det_jacobian`
+        // `raise NotImplementedError` (`transforms.py:193-197`).
+        Err(FerrotorchError::InvalidArgument {
+            message: "AbsTransform is not bijective; log_abs_det_jacobian is undefined".into(),
+        })
+    }
+
+    fn name(&self) -> &'static str {
+        "AbsTransform"
+    }
+
+    fn bijective(&self) -> bool {
+        false
+    }
+
+    fn codomain(&self) -> Box<dyn DistConstraint> {
+        // domain = real (default), codomain = positive.
+        // `transforms.py:744-745`.
+        Box::new(crate::constraints::Positive)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// PowerTransform: y = x^exponent
+// ---------------------------------------------------------------------------
+
+/// Transform via `y = x^exponent`.
+///
+/// Maps the positive reals to the positive reals. Stores a scalar `exponent`
+/// of type `T` (upstream allows a broadcastable tensor exponent; ferrotorch's
+/// device-resident `pow` takes a scalar power, so the scalar exponent is the
+/// faithful subset). Mirrors `torch/distributions/transforms.py:599-639`
+/// (`class PowerTransform`).
+#[derive(Debug, Clone, Copy)]
+pub struct PowerTransform<T: Float> {
+    /// The power applied element-wise.
+    pub exponent: T,
+}
+
+impl<T: Float> PowerTransform<T> {
+    /// Create a power transform with the given scalar `exponent`.
+    pub fn new(exponent: T) -> Self {
+        Self { exponent }
+    }
+}
+
+impl<T: Float> Transform<T> for PowerTransform<T> {
+    fn forward(&self, x: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
+        // y = x^exponent; `transforms.py:626-627` `return x.pow(self.exponent)`.
+        no_grad(|| ferrotorch_core::grad_fns::arithmetic::pow(x, self.exponent.to_f64().unwrap()))
+    }
+
+    fn inverse(&self, y: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
+        // x = y^(1/exponent); `transforms.py:629-630` `return y.pow(1 / self.exponent)`.
+        no_grad(|| {
+            let inv = T::from(1.0).unwrap() / self.exponent;
+            ferrotorch_core::grad_fns::arithmetic::pow(y, inv.to_f64().unwrap())
+        })
+    }
+
+    fn log_abs_det_jacobian(&self, x: &Tensor<T>, y: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
+        // `transforms.py:632-633`:
+        //   return (self.exponent * y / x).abs().log()
+        no_grad(|| {
+            let device = x.device();
+            let exp_t = creation::scalar(self.exponent)?.to(device)?;
+            let scaled = mul(&exp_t, y)?;
+            let ratio = div(&scaled, x)?;
+            let abs = abs_op(&ratio)?;
+            log_op(&abs)
+        })
+    }
+
+    fn name(&self) -> &'static str {
+        "PowerTransform"
+    }
+
+    fn sign(&self) -> Option<i32> {
+        // `transforms.py:617-619` `return self.exponent.sign()`.
+        let zero = T::from(0.0).unwrap();
+        Some(if self.exponent > zero {
+            1
+        } else if self.exponent < zero {
+            -1
+        } else {
+            0
+        })
+    }
+
+    fn domain(&self) -> Box<dyn DistConstraint> {
+        // `transforms.py:604` `domain = constraints.positive`.
+        Box::new(crate::constraints::Positive)
+    }
+
+    fn codomain(&self) -> Box<dyn DistConstraint> {
+        // `transforms.py:605` `codomain = constraints.positive`.
+        Box::new(crate::constraints::Positive)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// SoftmaxTransform: y = softmax(x) over the last dim
+// ---------------------------------------------------------------------------
+
+/// Transform from unconstrained space to the simplex via `y = softmax(x)`.
+///
+/// NOT bijective (the softmax is shift-invariant, so it loses one degree of
+/// freedom). Forward is `exp(x - max(x)) / sum(...)` over the last dim;
+/// inverse is `log(y)` (the pseudo-inverse). `log_abs_det_jacobian` is
+/// undefined (the domain and codomain have mismatched dimension). Mirrors
+/// `torch/distributions/transforms.py:947-980` (`class SoftmaxTransform`).
+#[derive(Debug, Clone, Copy)]
+pub struct SoftmaxTransform;
+
+impl<T: Float> Transform<T> for SoftmaxTransform {
+    fn forward(&self, x: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
+        // `transforms.py:963-966`:
+        //   probs = (logprobs - logprobs.max(-1, True)[0]).exp()
+        //   return probs / probs.sum(-1, True)
+        // ferrotorch's core `softmax` is exactly this stable last-dim formula
+        // (`activation.rs:1028` subtracts the row max, exps, normalises).
+        no_grad(|| softmax_op(x))
+    }
+
+    fn inverse(&self, y: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
+        // `transforms.py:968-970` `return probs.log()`.
+        no_grad(|| log_op(y))
+    }
+
+    fn log_abs_det_jacobian(&self, _x: &Tensor<T>, _y: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
+        // SoftmaxTransform is not bijective; upstream provides no
+        // `log_abs_det_jacobian`, so `Transform.log_abs_det_jacobian`
+        // `raise NotImplementedError` (`transforms.py:193-197`).
+        Err(FerrotorchError::InvalidArgument {
+            message: "SoftmaxTransform is not bijective; log_abs_det_jacobian is undefined".into(),
+        })
+    }
+
+    fn name(&self) -> &'static str {
+        "SoftmaxTransform"
+    }
+
+    fn bijective(&self) -> bool {
+        false
+    }
+
+    fn event_dim(&self) -> usize {
+        1
+    }
+
+    fn domain(&self) -> Box<dyn DistConstraint> {
+        // `transforms.py:957` `domain = constraints.real_vector`.
+        Box::new(crate::constraints::RealVector)
+    }
+
+    fn codomain(&self) -> Box<dyn DistConstraint> {
+        // `transforms.py:958` `codomain = constraints.simplex`.
+        Box::new(crate::constraints::Simplex)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// StickBreakingTransform: R^{K-1} -> simplex of K
+// ---------------------------------------------------------------------------
+
+/// Transform from `R^{K-1}` to the `K`-simplex via a stick-breaking process.
+///
+/// Bijective and appropriate for HMC. Forward maps a length-`(K-1)` vector to
+/// a length-`K` probability vector; inverse goes the other way.
+/// `log_abs_det_jacobian` returns a scalar per batch element. Mirrors
+/// `torch/distributions/transforms.py:983-1036`
+/// (`class StickBreakingTransform`).
+///
+/// The body operates over the rightmost (event) dimension; ferrotorch's core
+/// lacks a last-dim-only `cumprod`/`cumsum`-with-clamp chain matching the
+/// padded upstream layout, so the math runs CPU-side over `data_vec()` rows
+/// (consistent with the crate's `Dirichlet`/`MultivariateNormal` idiom).
+#[derive(Debug, Clone, Copy)]
+pub struct StickBreakingTransform;
+
+impl<T: Float> Transform<T> for StickBreakingTransform {
+    fn forward(&self, x: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
+        // `transforms.py:1004-1009`:
+        //   offset = x.shape[-1] + 1 - x.new_ones(x.shape[-1]).cumsum(-1)
+        //   z = _clipped_sigmoid(x - offset.log())
+        //   z_cumprod = (1 - z).cumprod(-1)
+        //   y = pad(z, [0,1], value=1) * pad(z_cumprod, [1,0], value=1)
+        no_grad(|| {
+            let shape = x.shape();
+            let km1 = match shape.last().copied() {
+                Some(k) if k >= 1 => k,
+                _ => {
+                    return Err(FerrotorchError::InvalidArgument {
+                        message: "StickBreakingTransform: input must have >= 1 trailing dim".into(),
+                    });
+                }
+            };
+            let k = km1 + 1;
+            let data = x.data_vec()?;
+            let rows = data.len() / km1;
+            let one = T::from(1.0).unwrap();
+            let tiny = T::from(1e-7).unwrap();
+            let eps = T::from(1.19e-7).unwrap(); // f32 eps; upstream uses dtype eps.
+            let mut out = Vec::with_capacity(rows * k);
+            for r in 0..rows {
+                let row = &data[r * km1..(r + 1) * km1];
+                // offset_i = (K - i)  for i in 0..K-1  (cumsum of ones gives 1..K-1).
+                let mut z = vec![T::from(0.0).unwrap(); km1];
+                for (i, &xi) in row.iter().enumerate() {
+                    let offset = T::from((k - 1 - i) as f64).unwrap(); // K - 1 - i + ... see below
+                    // offset = x.shape[-1] + 1 - cumsum(ones)[i]
+                    //        = (K-1) + 1 - (i+1) = K - 1 - i
+                    let arg = xi - offset.ln();
+                    let s = one / (one + (T::from(0.0).unwrap() - arg).exp());
+                    // clipped sigmoid: clamp to [tiny, 1 - eps].
+                    let s = if s < tiny {
+                        tiny
+                    } else if s > one - eps {
+                        one - eps
+                    } else {
+                        s
+                    };
+                    z[i] = s;
+                }
+                // z_cumprod[i] = prod_{j<=i} (1 - z[j]); cumprod of (1-z).
+                let mut cumprod = vec![one; km1];
+                let mut acc = one;
+                for i in 0..km1 {
+                    acc = acc * (one - z[i]);
+                    cumprod[i] = acc;
+                }
+                // y[i] = pad(z,[0,1],1)[i] * pad(z_cumprod,[1,0],1)[i]:
+                //   y[0]      = z[0] * 1
+                //   y[i]      = z[i] * cumprod[i-1]   for 1 <= i < K-1
+                //   y[K-1]    = 1    * cumprod[K-2]   (the last "stick remainder")
+                for i in 0..k {
+                    let z_pad = if i < km1 { z[i] } else { one };
+                    let cp_pad = if i == 0 { one } else { cumprod[i - 1] };
+                    out.push(z_pad * cp_pad);
+                }
+            }
+            let mut out_shape = shape.to_vec();
+            *out_shape.last_mut().unwrap() = k;
+            Tensor::from_storage(TensorStorage::cpu(out), out_shape, false)?.to(x.device())
+        })
+    }
+
+    fn inverse(&self, y: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
+        // `transforms.py:1011-1019`:
+        //   y_crop = y[..., :-1]
+        //   offset = y.shape[-1] - cumsum(ones over K-1)
+        //   sf = 1 - y_crop.cumsum(-1); clamp(min=tiny)
+        //   x = y_crop.log() - sf.log() + offset.log()
+        no_grad(|| {
+            let shape = y.shape();
+            let k = match shape.last().copied() {
+                Some(k) if k >= 2 => k,
+                _ => {
+                    return Err(FerrotorchError::InvalidArgument {
+                        message:
+                            "StickBreakingTransform inverse: input must have >= 2 trailing dim"
+                                .into(),
+                    });
+                }
+            };
+            let km1 = k - 1;
+            let data = y.data_vec()?;
+            let rows = data.len() / k;
+            let tiny = T::from(1e-7).unwrap();
+            let mut out = Vec::with_capacity(rows * km1);
+            for r in 0..rows {
+                let row = &data[r * k..(r + 1) * k];
+                let mut cumsum = T::from(0.0).unwrap();
+                // `i` is needed arithmetically for the per-position `offset`
+                // (`K - (i+1)`), not merely as an index, so the range loop is
+                // the faithful form of upstream's positional cumsum.
+                #[allow(clippy::needless_range_loop, reason = "i used in offset arithmetic")]
+                for i in 0..km1 {
+                    cumsum += row[i];
+                    let mut sf = T::from(1.0).unwrap() - cumsum;
+                    if sf < tiny {
+                        sf = tiny;
+                    }
+                    // offset_i = K - cumsum(ones)[i] = K - (i+1).
+                    let offset = T::from((k - (i + 1)) as f64).unwrap();
+                    out.push(row[i].ln() - sf.ln() + offset.ln());
+                }
+            }
+            let mut out_shape = shape.to_vec();
+            *out_shape.last_mut().unwrap() = km1;
+            Tensor::from_storage(TensorStorage::cpu(out), out_shape, false)?.to(y.device())
+        })
+    }
+
+    fn log_abs_det_jacobian(&self, x: &Tensor<T>, y: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
+        // `transforms.py:1021-1026`:
+        //   offset = x.shape[-1] + 1 - cumsum(ones)
+        //   x = x - offset.log()
+        //   detJ = (-x + logsigmoid(x) + y[..., :-1].log()).sum(-1)
+        // logsigmoid(x) = -softplus(-x); we compute it directly per element.
+        no_grad(|| {
+            let shape = x.shape();
+            let km1 = match shape.last().copied() {
+                Some(k) if k >= 1 => k,
+                _ => {
+                    return Err(FerrotorchError::InvalidArgument {
+                        message: "StickBreakingTransform ldj: input must have >= 1 trailing dim"
+                            .into(),
+                    });
+                }
+            };
+            let k = km1 + 1;
+            let xdata = x.data_vec()?;
+            let ydata = y.data_vec()?;
+            let rows = xdata.len() / km1;
+            let one = T::from(1.0).unwrap();
+            let zero = T::from(0.0).unwrap();
+            let mut out = Vec::with_capacity(rows);
+            for r in 0..rows {
+                let xrow = &xdata[r * km1..(r + 1) * km1];
+                let yrow = &ydata[r * k..(r + 1) * k];
+                let mut acc = zero;
+                for (i, &xi) in xrow.iter().enumerate() {
+                    let offset = T::from((k - 1 - i) as f64).unwrap();
+                    let xshift = xi - offset.ln();
+                    // logsigmoid(z) = -softplus(-z) = -ln(1 + exp(-z)).
+                    let logsig = zero - (one + (zero - xshift).exp()).ln();
+                    acc += (zero - xshift) + logsig + yrow[i].ln();
+                }
+                out.push(acc);
+            }
+            let out_shape: Vec<usize> = shape[..shape.len() - 1].to_vec();
+            Tensor::from_storage(TensorStorage::cpu(out), out_shape, false)?.to(x.device())
+        })
+    }
+
+    fn name(&self) -> &'static str {
+        "StickBreakingTransform"
+    }
+
+    fn event_dim(&self) -> usize {
+        1
+    }
+
+    fn domain(&self) -> Box<dyn DistConstraint> {
+        // `transforms.py:997` `domain = constraints.real_vector`.
+        Box::new(crate::constraints::RealVector)
+    }
+
+    fn codomain(&self) -> Box<dyn DistConstraint> {
+        // `transforms.py:998` `codomain = constraints.simplex`.
+        Box::new(crate::constraints::Simplex)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// LowerCholeskyTransform: unconstrained matrices -> lower-triangular w/ +diag
+// ---------------------------------------------------------------------------
+
+/// Transform from unconstrained matrices to lower-triangular matrices with
+/// positive diagonal entries.
+///
+/// Forward keeps the strictly-lower triangle and exponentiates the diagonal;
+/// inverse keeps the strictly-lower triangle and takes `log` of the diagonal.
+/// Mirrors `torch/distributions/transforms.py:1039-1058`
+/// (`class LowerCholeskyTransform`). Operates on the trailing `2` matrix dims
+/// CPU-side (no `diag_embed`/`tril` event-dim chain in the distributions
+/// crate's device-resident path).
+#[derive(Debug, Clone, Copy)]
+pub struct LowerCholeskyTransform;
+
+impl LowerCholeskyTransform {
+    /// Apply the per-matrix lower-Cholesky map (`forward`) or its inverse.
+    /// `forward == true` does `tril(-1) + diag(exp(diag))`; `forward == false`
+    /// does `tril(-1) + diag(log(diag))`.
+    fn map_matrices<T: Float>(m: &Tensor<T>, forward: bool) -> FerrotorchResult<Tensor<T>> {
+        let shape = m.shape();
+        if shape.len() < 2 {
+            return Err(FerrotorchError::InvalidArgument {
+                message: "LowerCholeskyTransform: input must have >= 2 dims".into(),
+            });
+        }
+        let rows = shape[shape.len() - 2];
+        let cols = shape[shape.len() - 1];
+        if rows != cols {
+            return Err(FerrotorchError::InvalidArgument {
+                message: "LowerCholeskyTransform: trailing dims must be square".into(),
+            });
+        }
+        let n = rows;
+        let data = m.data_vec()?;
+        let mat_sz = n * n;
+        let batches = data.len() / mat_sz;
+        let zero = T::from(0.0).unwrap();
+        let mut out = vec![zero; data.len()];
+        for b in 0..batches {
+            let base = b * mat_sz;
+            for i in 0..n {
+                for j in 0..n {
+                    let v = data[base + i * n + j];
+                    out[base + i * n + j] = if i == j {
+                        if forward { v.exp() } else { v.ln() }
+                    } else if j < i {
+                        // strictly lower triangle kept as-is.
+                        v
+                    } else {
+                        // strictly upper triangle zeroed.
+                        zero
+                    };
+                }
+            }
+        }
+        Tensor::from_storage(TensorStorage::cpu(out), shape.to_vec(), false)?.to(m.device())
+    }
+}
+
+impl<T: Float> Transform<T> for LowerCholeskyTransform {
+    fn forward(&self, x: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
+        // `transforms.py:1054-1055`:
+        //   return x.tril(-1) + x.diagonal(-2,-1).exp().diag_embed()
+        no_grad(|| Self::map_matrices(x, true))
+    }
+
+    fn inverse(&self, y: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
+        // `transforms.py:1057-1058`:
+        //   return y.tril(-1) + y.diagonal(-2,-1).log().diag_embed()
+        no_grad(|| Self::map_matrices(y, false))
+    }
+
+    fn log_abs_det_jacobian(&self, _x: &Tensor<T>, _y: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
+        // Upstream `LowerCholeskyTransform` does not implement
+        // `log_abs_det_jacobian`; the base `Transform.log_abs_det_jacobian`
+        // `raise NotImplementedError` (`transforms.py:193-197`).
+        Err(FerrotorchError::InvalidArgument {
+            message: "LowerCholeskyTransform: log_abs_det_jacobian is not implemented".into(),
+        })
+    }
+
+    fn name(&self) -> &'static str {
+        "LowerCholeskyTransform"
+    }
+
+    fn event_dim(&self) -> usize {
+        2
+    }
+
+    fn domain(&self) -> Box<dyn DistConstraint> {
+        // `transforms.py:1048` `domain = constraints.independent(real, 2)`.
+        // ferrotorch surfaces this as a RealVector-style event-dim-2 marker via
+        // the `event_dim()` metadata; the dtype-independent name is "Real".
+        Box::new(crate::constraints::Real)
+    }
+
+    fn codomain(&self) -> Box<dyn DistConstraint> {
+        // `transforms.py:1049` `codomain = constraints.lower_cholesky`.
+        Box::new(crate::constraints::LowerCholesky)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// CorrCholeskyTransform: R^{D(D-1)/2} -> Cholesky factor of a corr matrix
+// ---------------------------------------------------------------------------
+
+/// Transform an unconstrained vector of length `D*(D-1)/2` into the Cholesky
+/// factor of a `D`-dimension correlation matrix (lower-triangular, positive
+/// diagonal, unit-norm rows). Mirrors
+/// `torch/distributions/transforms.py:864-944`
+/// (`class CorrCholeskyTransform`).
+///
+/// Runs CPU-side over the trailing event dim: row-order fill of the
+/// lower-triangle, signed stick-breaking on the squared `tanh`, then the
+/// determinant via the Stan reference identity. Bijective.
+#[derive(Debug, Clone, Copy)]
+pub struct CorrCholeskyTransform;
+
+impl CorrCholeskyTransform {
+    /// Solve `D*(D-1)/2 == n` for `D` (the matrix dimension). Returns `None`
+    /// if `n` is not a valid flattened-lower-triangular length.
+    fn matrix_dim(n: usize) -> Option<usize> {
+        // D = round((0.25 + 2N)^0.5 + 0.5); verify D*(D-1)/2 == N.
+        // `transforms.py:930-933`.
+        let d = (0.25 + 2.0 * n as f64).sqrt() + 0.5;
+        let d = d.round() as usize;
+        if d * (d - 1) / 2 == n { Some(d) } else { None }
+    }
+}
+
+impl<T: Float> Transform<T> for CorrCholeskyTransform {
+    fn forward(&self, x: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
+        // `transforms.py:885-898`:
+        //   x = tanh(x); clamp to (-1+eps, 1-eps); r = vec_to_tril(x, diag=-1)
+        //   z = r^2; z1m_cumprod_sqrt = (1-z).sqrt().cumprod(-1)
+        //   r += eye; y = r * pad(z1m_cumprod_sqrt[...,:-1], [1,0], value=1)
+        no_grad(|| {
+            let shape = x.shape();
+            let n = match shape.last().copied() {
+                Some(n) if n >= 1 => n,
+                _ => {
+                    return Err(FerrotorchError::InvalidArgument {
+                        message: "CorrCholeskyTransform: input must have >= 1 trailing dim".into(),
+                    });
+                }
+            };
+            let d = Self::matrix_dim(n).ok_or_else(|| FerrotorchError::InvalidArgument {
+                message: format!("CorrCholeskyTransform: {n} is not a D*(D-1)/2 length"),
+            })?;
+            let data = x.data_vec()?;
+            let rows = data.len() / n;
+            let one = T::from(1.0).unwrap();
+            let eps = T::from(1.19e-7).unwrap();
+            let mut out = vec![T::from(0.0).unwrap(); rows * d * d];
+            for b in 0..rows {
+                let vec = &data[b * n..(b + 1) * n];
+                // r: lower-triangular matrix (diag=-1, i.e. strictly below the
+                // diagonal), row-major fill of `tanh(x)` clamped to (-1,1).
+                let mut r = vec![T::from(0.0).unwrap(); d * d];
+                let mut idx = 0;
+                for i in 1..d {
+                    for j in 0..i {
+                        let t = vec[idx].tanh();
+                        let t = if t < eps - one {
+                            eps - one
+                        } else if t > one - eps {
+                            one - eps
+                        } else {
+                            t
+                        };
+                        r[i * d + j] = t;
+                        idx += 1;
+                    }
+                }
+                // For each row i: y[i][j] = r[i][j] * sqrt(prod_{l<j} (1 - r[i][l]^2)).
+                // Diagonal y[i][i] = sqrt(prod_{l<i}(1 - r[i][l]^2)) (r diag = 1).
+                for i in 0..d {
+                    let mut cumprod = one; // prod of (1 - z) up to j-1.
+                    for j in 0..=i {
+                        let base = b * d * d + i * d + j;
+                        if j == i {
+                            // diagonal: r=1, factor = sqrt(cumprod).
+                            out[base] = cumprod.sqrt();
+                        } else {
+                            let rij = r[i * d + j];
+                            out[base] = rij * cumprod.sqrt();
+                            cumprod = cumprod * (one - rij * rij);
+                        }
+                    }
+                }
+            }
+            let mut out_shape = shape[..shape.len() - 1].to_vec();
+            out_shape.push(d);
+            out_shape.push(d);
+            Tensor::from_storage(TensorStorage::cpu(out), out_shape, false)?.to(x.device())
+        })
+    }
+
+    fn inverse(&self, y: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
+        // `transforms.py:900-910`:
+        //   y_cumsum = 1 - cumsum(y*y, -1); shifted = pad(y_cumsum[...,:-1],[1,0],1)
+        //   y_vec = tril_to_vec(y, diag=-1); y_cumsum_vec = tril_to_vec(shifted, diag=-1)
+        //   t = y_vec / sqrt(y_cumsum_vec); x = (log1p(t) - log1p(-t)) / 2
+        no_grad(|| {
+            let shape = y.shape();
+            if shape.len() < 2 {
+                return Err(FerrotorchError::InvalidArgument {
+                    message: "CorrCholeskyTransform inverse: input must have >= 2 dims".into(),
+                });
+            }
+            let d = shape[shape.len() - 1];
+            if shape[shape.len() - 2] != d {
+                return Err(FerrotorchError::InvalidArgument {
+                    message: "CorrCholeskyTransform inverse: trailing dims must be square".into(),
+                });
+            }
+            let n = d * (d - 1) / 2;
+            let data = y.data_vec()?;
+            let batches = data.len() / (d * d);
+            let one = T::from(1.0).unwrap();
+            let half = T::from(0.5).unwrap();
+            let mut out = Vec::with_capacity(batches * n);
+            for b in 0..batches {
+                let base = b * d * d;
+                // For each row i, y_cumsum_shifted[i][j] = 1 - sum_{l<j} y[i][l]^2.
+                for i in 1..d {
+                    let mut cumsum = T::from(0.0).unwrap(); // sum_{l < j} y^2
+                    for j in 0..i {
+                        let yij = data[base + i * d + j];
+                        let shifted = one - cumsum; // value at position j (before adding y[j]^2)
+                        let t = yij / shifted.sqrt();
+                        // atanh(t) = (log1p(t) - log1p(-t)) / 2.
+                        let atanh = ((one + t).ln() - (one - t).ln()) * half;
+                        out.push(atanh);
+                        cumsum += yij * yij;
+                    }
+                }
+            }
+            let mut out_shape = shape[..shape.len() - 2].to_vec();
+            out_shape.push(n);
+            Tensor::from_storage(TensorStorage::cpu(out), out_shape, false)?.to(y.device())
+        })
+    }
+
+    fn log_abs_det_jacobian(&self, x: &Tensor<T>, y: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
+        // `transforms.py:912-924`:
+        //   y1m_cumsum = 1 - (y*y).cumsum(-1)
+        //   y1m_cumsum_tril = tril_to_vec(y1m_cumsum, diag=-2)
+        //   stick_breaking_logdet = 0.5 * y1m_cumsum_tril.log().sum(-1)
+        //   tanh_logdet = -2 * (x + softplus(-2x) - log(2)).sum(-1)
+        //   return stick_breaking_logdet + tanh_logdet
+        no_grad(|| {
+            let yshape = y.shape();
+            let d = yshape[yshape.len() - 1];
+            let xshape = x.shape();
+            let n = xshape[xshape.len() - 1];
+            let ydata = y.data_vec()?;
+            let xdata = x.data_vec()?;
+            let batches = ydata.len() / (d * d);
+            let one = T::from(1.0).unwrap();
+            let two = T::from(2.0).unwrap();
+            let half = T::from(0.5).unwrap();
+            let ln2 = T::from(2.0f64.ln()).unwrap();
+            let zero = T::from(0.0).unwrap();
+            let mut out = Vec::with_capacity(batches);
+            for b in 0..batches {
+                // stick_breaking_logdet: tril of (1 - cumsum(y^2)) with diag=-2,
+                // i.e. for row i (i>=2) and columns j < i-1.
+                let ybase = b * d * d;
+                let mut sb = zero;
+                for i in 0..d {
+                    let mut cumsum = zero;
+                    for j in 0..d {
+                        cumsum += ydata[ybase + i * d + j] * ydata[ybase + i * d + j];
+                        let val = one - cumsum;
+                        // diag=-2 keeps entries with j <= i - 2.
+                        if j as isize <= i as isize - 2 {
+                            sb += half * val.ln();
+                        }
+                    }
+                }
+                // tanh_logdet over the input vector (length n).
+                let xrow = &xdata[b * n..(b + 1) * n];
+                let mut th = zero;
+                for &xi in xrow {
+                    // softplus(-2x) = ln(1 + exp(-2x)).
+                    let sp = (one + (zero - two * xi).exp()).ln();
+                    th += xi + sp - ln2;
+                }
+                out.push(sb + (zero - two) * th);
+            }
+            let out_shape: Vec<usize> = xshape[..xshape.len() - 1].to_vec();
+            Tensor::from_storage(TensorStorage::cpu(out), out_shape, false)?.to(x.device())
+        })
+    }
+
+    fn name(&self) -> &'static str {
+        "CorrCholeskyTransform"
+    }
+
+    fn event_dim(&self) -> usize {
+        // domain is real_vector (event_dim 1), codomain is corr_cholesky
+        // (event_dim 2). Upstream raises on mismatched event_dim; ferrotorch
+        // reports the codomain's for the metadata accessor.
+        1
+    }
+
+    fn domain(&self) -> Box<dyn DistConstraint> {
+        // `transforms.py:881` `domain = constraints.real_vector`.
+        Box::new(crate::constraints::RealVector)
+    }
+
+    fn codomain(&self) -> Box<dyn DistConstraint> {
+        // `transforms.py:882` `codomain = constraints.corr_cholesky`.
+        Box::new(crate::constraints::CorrCholesky)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// ReshapeTransform: reshape the rightmost event dims (unit Jacobian)
+// ---------------------------------------------------------------------------
+
+/// Unit-Jacobian transform that reshapes the rightmost part of a tensor.
+///
+/// `in_shape` and `out_shape` must have the same number of elements. Mirrors
+/// `torch/distributions/transforms.py:500-573` (`class ReshapeTransform`).
+#[derive(Debug, Clone)]
+pub struct ReshapeTransform {
+    /// The input event shape.
+    pub in_shape: Vec<usize>,
+    /// The output event shape.
+    pub out_shape: Vec<usize>,
+}
+
+impl ReshapeTransform {
+    /// Create a reshape transform. `in_shape` and `out_shape` must have equal
+    /// element counts (mirrors `transforms.py:524-525`).
+    pub fn new(in_shape: Vec<usize>, out_shape: Vec<usize>) -> FerrotorchResult<Self> {
+        let in_numel: usize = in_shape.iter().product();
+        let out_numel: usize = out_shape.iter().product();
+        if in_numel != out_numel {
+            return Err(FerrotorchError::InvalidArgument {
+                message: "ReshapeTransform: in_shape, out_shape have different numbers of elements"
+                    .into(),
+            });
+        }
+        Ok(Self {
+            in_shape,
+            out_shape,
+        })
+    }
+
+    /// Replace the trailing `from` dims of `t` with `to`, preserving the batch
+    /// prefix. Mirrors `transforms.py:543-549` (`_call` / `_inverse`).
+    fn reshape_trailing<T: Float>(
+        t: &Tensor<T>,
+        from: &[usize],
+        to: &[usize],
+    ) -> FerrotorchResult<Tensor<T>> {
+        let shape = t.shape();
+        if shape.len() < from.len() {
+            return Err(FerrotorchError::InvalidArgument {
+                message: "ReshapeTransform: too few dimensions on input".into(),
+            });
+        }
+        let cut = shape.len() - from.len();
+        if &shape[cut..] != from {
+            return Err(FerrotorchError::InvalidArgument {
+                message: format!(
+                    "ReshapeTransform: shape mismatch — expected trailing {:?}, got {:?}",
+                    from,
+                    &shape[cut..]
+                ),
+            });
+        }
+        let mut new_shape: Vec<isize> = shape[..cut].iter().map(|&d| d as isize).collect();
+        new_shape.extend(to.iter().map(|&d| d as isize));
+        ferrotorch_core::grad_fns::shape::reshape(t, &new_shape)
+    }
+}
+
+impl<T: Float> Transform<T> for ReshapeTransform {
+    fn forward(&self, x: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
+        no_grad(|| Self::reshape_trailing(x, &self.in_shape, &self.out_shape))
+    }
+
+    fn inverse(&self, y: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
+        no_grad(|| Self::reshape_trailing(y, &self.out_shape, &self.in_shape))
+    }
+
+    fn log_abs_det_jacobian(&self, x: &Tensor<T>, _y: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
+        // `transforms.py:551-553` `return x.new_zeros(batch_shape)`.
+        no_grad(|| {
+            let shape = x.shape();
+            let cut = shape.len().saturating_sub(self.in_shape.len());
+            let batch_shape: Vec<usize> = shape[..cut].to_vec();
+            creation::full(&batch_shape, T::from(0.0).unwrap())?.to(x.device())
+        })
+    }
+
+    fn name(&self) -> &'static str {
+        "ReshapeTransform"
+    }
+
+    fn event_dim(&self) -> usize {
+        self.in_shape.len()
+    }
+
+    fn domain(&self) -> Box<dyn DistConstraint> {
+        // `transforms.py:530-531` `independent(real, len(in_shape))`.
+        Box::new(crate::constraints::Real)
+    }
+
+    fn codomain(&self) -> Box<dyn DistConstraint> {
+        // `transforms.py:535-536` `independent(real, len(out_shape))`.
+        Box::new(crate::constraints::Real)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// IndependentTransform: reinterpret rightmost batch dims as event dims
+// ---------------------------------------------------------------------------
+
+/// Wraps a base transform, treating `reinterpreted_batch_ndims`-many rightmost
+/// dimensions as dependent. Forward/inverse pass straight through; only
+/// `log_abs_det_jacobian` changes — it sums out those rightmost dims. Mirrors
+/// `torch/distributions/transforms.py:422-497`
+/// (`class IndependentTransform`).
+pub struct IndependentTransform<T: Float> {
+    base: Box<dyn Transform<T>>,
+    reinterpreted_batch_ndims: usize,
+}
+
+impl<T: Float> IndependentTransform<T> {
+    /// Wrap `base`, reinterpreting `reinterpreted_batch_ndims` rightmost dims
+    /// as event dims.
+    pub fn new(base: Box<dyn Transform<T>>, reinterpreted_batch_ndims: usize) -> Self {
+        Self {
+            base,
+            reinterpreted_batch_ndims,
+        }
+    }
+}
+
+impl<T: Float> Transform<T> for IndependentTransform<T> {
+    fn forward(&self, x: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
+        // `transforms.py:475-478` — no change to the forward map.
+        self.base.forward(x)
+    }
+
+    fn inverse(&self, y: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
+        // `transforms.py:480-483`.
+        self.base.inverse(y)
+    }
+
+    fn log_abs_det_jacobian(&self, x: &Tensor<T>, y: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
+        // `transforms.py:485-488`:
+        //   result = base.log_abs_det_jacobian(x, y)
+        //   result = _sum_rightmost(result, reinterpreted_batch_ndims)
+        no_grad(|| {
+            let ldj = self.base.log_abs_det_jacobian(x, y)?;
+            sum_rightmost(&ldj, self.reinterpreted_batch_ndims)
+        })
+    }
+
+    fn name(&self) -> &'static str {
+        "IndependentTransform"
+    }
+
+    fn bijective(&self) -> bool {
+        self.base.bijective()
+    }
+
+    fn sign(&self) -> Option<i32> {
+        self.base.sign()
+    }
+
+    fn event_dim(&self) -> usize {
+        // `transforms.py:453-465` — base event dim + reinterpreted ndims.
+        <dyn Transform<T> as TransformEventDim>::event_dim_of(self.base.as_ref())
+            + self.reinterpreted_batch_ndims
+    }
+
+    fn domain(&self) -> Box<dyn DistConstraint> {
+        self.base.domain()
+    }
+
+    fn codomain(&self) -> Box<dyn DistConstraint> {
+        self.base.codomain()
+    }
+}
+
+/// Helper to read a boxed transform's `event_dim` without re-borrowing through
+/// the generic `Transform` method (which `IndependentTransform::event_dim`
+/// already shadows). Object-safe shim over the trait method.
+trait TransformEventDim {
+    fn event_dim_of(&self) -> usize;
+}
+
+impl<T: Float> TransformEventDim for dyn Transform<T> {
+    fn event_dim_of(&self) -> usize {
+        Transform::event_dim(self)
+    }
+}
+
+/// Sum the rightmost `ndims` dimensions of `t`, mirroring
+/// `torch/distributions/utils.py:_sum_rightmost`. CPU-side reduction over the
+/// flattened trailing block.
+fn sum_rightmost<T: Float>(t: &Tensor<T>, ndims: usize) -> FerrotorchResult<Tensor<T>> {
+    if ndims == 0 {
+        return Ok(t.clone());
+    }
+    let shape = t.shape();
+    if shape.len() < ndims {
+        return Err(FerrotorchError::InvalidArgument {
+            message: "sum_rightmost: too few dimensions".into(),
+        });
+    }
+    let cut = shape.len() - ndims;
+    let out_shape: Vec<usize> = shape[..cut].to_vec();
+    let block: usize = shape[cut..].iter().product::<usize>().max(1);
+    let data = t.data_vec()?;
+    let n_blocks = data.len() / block;
+    let zero = T::from(0.0).unwrap();
+    let mut out = Vec::with_capacity(n_blocks);
+    for b in 0..n_blocks {
+        let mut acc = zero;
+        for &v in &data[b * block..(b + 1) * block] {
+            acc += v;
+        }
+        out.push(acc);
+    }
+    Tensor::from_storage(TensorStorage::cpu(out), out_shape, false)?.to(t.device())
+}
+
+// ---------------------------------------------------------------------------
+// CatTransform: apply sub-transforms to slices along a dim (cat-compatible)
+// ---------------------------------------------------------------------------
+
+/// Apply a sequence of sub-transforms component-wise to contiguous slices of
+/// the input along `dim`, each of the corresponding `lengths`, then
+/// concatenate. Mirrors `torch/distributions/transforms.py:1081-1220`
+/// (`class CatTransform`).
+pub struct CatTransform<T: Float> {
+    transforms: Vec<Box<dyn Transform<T>>>,
+    dim: usize,
+    lengths: Vec<usize>,
+}
+
+impl<T: Float> CatTransform<T> {
+    /// Create a `CatTransform` over `dim` with per-transform slice `lengths`.
+    /// `lengths.len()` must equal `transforms.len()` (mirrors
+    /// `transforms.py:1114-1117`).
+    pub fn new(
+        transforms: Vec<Box<dyn Transform<T>>>,
+        dim: usize,
+        lengths: Vec<usize>,
+    ) -> FerrotorchResult<Self> {
+        if lengths.len() != transforms.len() {
+            return Err(FerrotorchError::InvalidArgument {
+                message: "CatTransform: lengths must match number of transforms".into(),
+            });
+        }
+        Ok(Self {
+            transforms,
+            dim,
+            lengths,
+        })
+    }
+
+    fn total_length(&self) -> usize {
+        self.lengths.iter().sum()
+    }
+}
+
+impl<T: Float> Transform<T> for CatTransform<T> {
+    fn forward(&self, x: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
+        // `transforms.py:1133-1148`: narrow each slice, transform, then cat.
+        no_grad(|| {
+            if x.shape().get(self.dim).copied() != Some(self.total_length()) {
+                return Err(FerrotorchError::InvalidArgument {
+                    message: "CatTransform: x size along dim must equal sum(lengths)".into(),
+                });
+            }
+            let mut slices = Vec::with_capacity(self.transforms.len());
+            let mut start = 0usize;
+            for (t, &len) in self.transforms.iter().zip(self.lengths.iter()) {
+                let xs = x.narrow(self.dim, start, len)?;
+                slices.push(t.forward(&xs)?);
+                start += len;
+            }
+            cat_op(&slices, self.dim as isize)
+        })
+    }
+
+    fn inverse(&self, y: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
+        // `transforms.py:1150-1165`.
+        no_grad(|| {
+            if y.shape().get(self.dim).copied() != Some(self.total_length()) {
+                return Err(FerrotorchError::InvalidArgument {
+                    message: "CatTransform: y size along dim must equal sum(lengths)".into(),
+                });
+            }
+            let mut slices = Vec::with_capacity(self.transforms.len());
+            let mut start = 0usize;
+            for (t, &len) in self.transforms.iter().zip(self.lengths.iter()) {
+                let ys = y.narrow(self.dim, start, len)?;
+                slices.push(t.inverse(&ys)?);
+                start += len;
+            }
+            cat_op(&slices, self.dim as isize)
+        })
+    }
+
+    fn log_abs_det_jacobian(&self, x: &Tensor<T>, y: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
+        // `transforms.py:1167-1202`: per-slice LDJ; concatenate along `dim`
+        // (the event_dim==0 case our element-wise transforms exercise).
+        no_grad(|| {
+            let mut slices = Vec::with_capacity(self.transforms.len());
+            let mut start = 0usize;
+            for (t, &len) in self.transforms.iter().zip(self.lengths.iter()) {
+                let xs = x.narrow(self.dim, start, len)?;
+                let ys = y.narrow(self.dim, start, len)?;
+                slices.push(t.log_abs_det_jacobian(&xs, &ys)?);
+                start += len;
+            }
+            cat_op(&slices, self.dim as isize)
+        })
+    }
+
+    fn name(&self) -> &'static str {
+        "CatTransform"
+    }
+
+    fn bijective(&self) -> bool {
+        self.transforms.iter().all(|t| t.bijective())
+    }
+}
+
+// ---------------------------------------------------------------------------
+// StackTransform: apply sub-transforms to slices along a dim (stack-compatible)
+// ---------------------------------------------------------------------------
+
+/// Apply a sequence of sub-transforms component-wise to each slice taken along
+/// `dim`, then re-stack. The input size along `dim` must equal the number of
+/// transforms. Mirrors `torch/distributions/transforms.py:1223-1321`
+/// (`class StackTransform`).
+pub struct StackTransform<T: Float> {
+    transforms: Vec<Box<dyn Transform<T>>>,
+    dim: usize,
+}
+
+impl<T: Float> StackTransform<T> {
+    /// Create a `StackTransform` over `dim`.
+    pub fn new(transforms: Vec<Box<dyn Transform<T>>>, dim: usize) -> Self {
+        Self { transforms, dim }
+    }
+
+    fn check_size<F>(&self, t: &Tensor<F>) -> FerrotorchResult<()>
+    where
+        F: Float,
+    {
+        if t.shape().get(self.dim).copied() != Some(self.transforms.len()) {
+            return Err(FerrotorchError::InvalidArgument {
+                message: "StackTransform: size along dim must equal number of transforms".into(),
+            });
+        }
+        Ok(())
+    }
+}
+
+impl<T: Float> Transform<T> for StackTransform<T> {
+    fn forward(&self, x: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
+        // `transforms.py:1257-1269`: select each slice, transform, stack.
+        no_grad(|| {
+            self.check_size(x)?;
+            let mut slices = Vec::with_capacity(self.transforms.len());
+            for (i, t) in self.transforms.iter().enumerate() {
+                let xs = select_op(x, self.dim, i)?;
+                slices.push(t.forward(&xs)?);
+            }
+            stack_op(&slices, self.dim)
+        })
+    }
+
+    fn inverse(&self, y: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
+        // `transforms.py:1271-1283`.
+        no_grad(|| {
+            self.check_size(y)?;
+            let mut slices = Vec::with_capacity(self.transforms.len());
+            for (i, t) in self.transforms.iter().enumerate() {
+                let ys = select_op(y, self.dim, i)?;
+                slices.push(t.inverse(&ys)?);
+            }
+            stack_op(&slices, self.dim)
+        })
+    }
+
+    fn log_abs_det_jacobian(&self, x: &Tensor<T>, y: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
+        // `transforms.py:1285-1307`: per-slice LDJ, stacked along `dim`.
+        no_grad(|| {
+            self.check_size(x)?;
+            self.check_size(y)?;
+            let mut slices = Vec::with_capacity(self.transforms.len());
+            for (i, t) in self.transforms.iter().enumerate() {
+                let xs = select_op(x, self.dim, i)?;
+                let ys = select_op(y, self.dim, i)?;
+                slices.push(t.log_abs_det_jacobian(&xs, &ys)?);
+            }
+            stack_op(&slices, self.dim)
+        })
+    }
+
+    fn name(&self) -> &'static str {
+        "StackTransform"
+    }
+
+    fn bijective(&self) -> bool {
+        self.transforms.iter().all(|t| t.bijective())
+    }
+}
+
+// ---------------------------------------------------------------------------
+// CumulativeDistributionTransform: y = distribution.cdf(x)
+// ---------------------------------------------------------------------------
+
+/// Transform via the cumulative distribution function of a base distribution.
+///
+/// Forward applies the CDF (`R → (0,1)`), inverse the inverse-CDF, and
+/// `log_abs_det_jacobian` is the base distribution's `log_prob(x)` (since the
+/// derivative of the CDF is the density). Mirrors
+/// `torch/distributions/transforms.py:1324-1367`
+/// (`class CumulativeDistributionTransform`).
+pub struct CumulativeDistributionTransform<T: Float> {
+    distribution: Box<dyn Distribution<T>>,
+}
+
+impl<T: Float> CumulativeDistributionTransform<T> {
+    /// Create a CDF transform from a base `distribution`.
+    pub fn new(distribution: Box<dyn Distribution<T>>) -> Self {
+        Self { distribution }
+    }
+}
+
+impl<T: Float> Transform<T> for CumulativeDistributionTransform<T> {
+    fn forward(&self, x: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
+        // `transforms.py:1355-1356` `return self.distribution.cdf(x)`.
+        no_grad(|| self.distribution.cdf(x))
+    }
+
+    fn inverse(&self, y: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
+        // `transforms.py:1358-1359` `return self.distribution.icdf(y)`.
+        no_grad(|| self.distribution.icdf(y))
+    }
+
+    fn log_abs_det_jacobian(&self, x: &Tensor<T>, _y: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
+        // `transforms.py:1361-1362` `return self.distribution.log_prob(x)`.
+        no_grad(|| self.distribution.log_prob(x))
+    }
+
+    fn name(&self) -> &'static str {
+        "CumulativeDistributionTransform"
+    }
+
+    fn sign(&self) -> Option<i32> {
+        // `transforms.py:1345` `sign = +1` (CDF is monotone increasing).
+        Some(1)
+    }
+
+    fn domain(&self) -> Box<dyn DistConstraint> {
+        // `transforms.py:1351-1353` `return self.distribution.support`.
+        self.distribution
+            .support()
+            .unwrap_or_else(|| Box::new(crate::constraints::Real))
+    }
+
+    fn codomain(&self) -> Box<dyn DistConstraint> {
+        // `transforms.py:1344` `codomain = constraints.unit_interval`.
+        Box::new(crate::constraints::UnitInterval)
     }
 }
 
@@ -1753,5 +2945,412 @@ mod tests {
                 "td log_prob at y={yv}: got {lv} expected {expected}",
             );
         }
+    }
+
+    // -- #1373: the 11 newly-ported upstream transforms --------------------
+    //
+    // Each expected value is OracleDerived from live torch 2.11
+    // (`torch.distributions.transforms.<T>`), see the constant blocks. R-CHAR-3:
+    // every reference vector below is the printed output of the upstream class
+    // on the same input, not a self-referential ferrotorch constant.
+
+    fn approx_slice(got: &[f32], want: &[f32], tol: f32, label: &str) {
+        assert_eq!(got.len(), want.len(), "{label}: length mismatch");
+        for (i, (g, w)) in got.iter().zip(want.iter()).enumerate() {
+            assert!(
+                (g - w).abs() < tol,
+                "{label}[{i}]: got {g}, want {w}, |err|={}",
+                (g - w).abs()
+            );
+        }
+    }
+
+    // -- AbsTransform --------------------------------------------------------
+
+    #[test]
+    fn test_abs_transform_forward_inverse() {
+        // torch: AbsTransform()(tensor([-2,0,3])) = [2,0,3]; inv([2,0,3]) = [2,0,3].
+        let t = AbsTransform;
+        let x = from_slice(&[-2.0f32, 0.0, 3.0], &[3]).unwrap();
+        let y = Transform::forward(&t, &x).unwrap();
+        approx_slice(y.data().unwrap(), &[2.0, 0.0, 3.0], 1e-6, "abs forward");
+        let yin = from_slice(&[2.0f32, 0.0, 3.0], &[3]).unwrap();
+        let xr = Transform::inverse(&t, &yin).unwrap();
+        approx_slice(xr.data().unwrap(), &[2.0, 0.0, 3.0], 1e-6, "abs inverse");
+        // Non-bijective: codomain Positive, log_abs_det_jacobian errors.
+        assert_eq!(
+            <AbsTransform as Transform<f32>>::codomain(&t).name(),
+            "Positive"
+        );
+        assert!(!<AbsTransform as Transform<f32>>::bijective(&t));
+        assert!(Transform::log_abs_det_jacobian(&t, &x, &y).is_err());
+    }
+
+    // -- PowerTransform ------------------------------------------------------
+
+    #[test]
+    fn test_power_transform() {
+        // torch: PowerTransform(2.0): forward([1,2,3])=[1,4,9]; inv=[1,2,3];
+        // ldj = (2*y/x).abs().log() = [ln(2), ln(4), ln(6)] = [.6931,1.3863,1.7918].
+        let t = PowerTransform::new(2.0f32);
+        let x = from_slice(&[1.0f32, 2.0, 3.0], &[3]).unwrap();
+        let y = Transform::forward(&t, &x).unwrap();
+        approx_slice(y.data().unwrap(), &[1.0, 4.0, 9.0], 1e-5, "power forward");
+        let xr = Transform::inverse(&t, &y).unwrap();
+        approx_slice(xr.data().unwrap(), &[1.0, 2.0, 3.0], 1e-5, "power inverse");
+        let ldj = Transform::log_abs_det_jacobian(&t, &x, &y).unwrap();
+        approx_slice(
+            ldj.data().unwrap(),
+            &[0.6931472, 1.3862944, 1.7917595],
+            1e-5,
+            "power ldj",
+        );
+        assert_eq!(t.domain().name(), "Positive");
+        assert_eq!(t.codomain().name(), "Positive");
+        assert_eq!(Transform::sign(&t), Some(1));
+    }
+
+    // -- SoftmaxTransform ----------------------------------------------------
+
+    #[test]
+    fn test_softmax_transform() {
+        // torch: SoftmaxTransform()([1,2,3]) = [.09003,.24473,.66524];
+        // inv = log(y) = [-2.40761,-1.40761,-0.40761].
+        let t = SoftmaxTransform;
+        let x = from_slice(&[1.0f32, 2.0, 3.0], &[3]).unwrap();
+        let y = Transform::forward(&t, &x).unwrap();
+        approx_slice(
+            y.data().unwrap(),
+            &[0.09003057, 0.24472848, 0.66524094],
+            1e-6,
+            "softmax forward",
+        );
+        let xr = Transform::inverse(&t, &y).unwrap();
+        approx_slice(
+            xr.data().unwrap(),
+            &[-2.4076059, -1.4076059, -0.40760598],
+            1e-5,
+            "softmax inverse",
+        );
+        assert_eq!(
+            <SoftmaxTransform as Transform<f32>>::domain(&t).name(),
+            "RealVector"
+        );
+        assert_eq!(
+            <SoftmaxTransform as Transform<f32>>::codomain(&t).name(),
+            "Simplex"
+        );
+        assert!(!<SoftmaxTransform as Transform<f32>>::bijective(&t));
+        assert!(Transform::log_abs_det_jacobian(&t, &x, &y).is_err());
+    }
+
+    // -- StickBreakingTransform ----------------------------------------------
+
+    #[test]
+    fn test_stick_breaking_transform() {
+        // torch: StickBreakingTransform()([0.5,-1.0,0.3]) (K-1=3 -> K=4) =
+        //   [0.35466126, 0.10026139, 0.31311563, 0.23196176];
+        // inverse round-trips to [0.5,-1.0,0.3]; ldj = -5.95893.
+        let t = StickBreakingTransform;
+        let x = from_slice(&[0.5f32, -1.0, 0.3], &[3]).unwrap();
+        let y = Transform::forward(&t, &x).unwrap();
+        assert_eq!(y.shape(), &[4]);
+        approx_slice(
+            y.data().unwrap(),
+            &[0.35466126, 0.10026139, 0.31311563, 0.23196176],
+            1e-5,
+            "stick forward",
+        );
+        let xr = Transform::inverse(&t, &y).unwrap();
+        approx_slice(xr.data().unwrap(), &[0.5, -1.0, 0.3], 1e-4, "stick inverse");
+        let ldj = Transform::log_abs_det_jacobian(&t, &x, &y).unwrap();
+        assert!(
+            (ldj.item().unwrap() - (-5.9589319)).abs() < 1e-4,
+            "stick ldj: got {}, want -5.9589319",
+            ldj.item().unwrap()
+        );
+        assert_eq!(
+            <StickBreakingTransform as Transform<f32>>::domain(&t).name(),
+            "RealVector"
+        );
+        assert_eq!(
+            <StickBreakingTransform as Transform<f32>>::codomain(&t).name(),
+            "Simplex"
+        );
+    }
+
+    // -- LowerCholeskyTransform ----------------------------------------------
+
+    #[test]
+    fn test_lower_cholesky_transform() {
+        // torch: LowerCholeskyTransform()([[.5,1],[2,-.3]]) =
+        //   [[1.64872122, 0],[2, 0.7408182]] (diag exp'd, upper zeroed);
+        // inverse round-trips to [[.5,0],[2,-.3]] (upper dropped, diag log'd).
+        let t = LowerCholeskyTransform;
+        let x = from_slice(&[0.5f32, 1.0, 2.0, -0.3], &[2, 2]).unwrap();
+        let y = Transform::forward(&t, &x).unwrap();
+        approx_slice(
+            y.data().unwrap(),
+            &[1.6487212, 0.0, 2.0, 0.7408182],
+            1e-5,
+            "lowerchol forward",
+        );
+        let xr = Transform::inverse(&t, &y).unwrap();
+        approx_slice(
+            xr.data().unwrap(),
+            &[0.5, 0.0, 2.0, -0.3],
+            1e-5,
+            "lowerchol inverse",
+        );
+        assert_eq!(
+            <LowerCholeskyTransform as Transform<f32>>::codomain(&t).name(),
+            "LowerCholesky"
+        );
+        assert_eq!(<LowerCholeskyTransform as Transform<f32>>::event_dim(&t), 2);
+    }
+
+    // -- CorrCholeskyTransform -----------------------------------------------
+
+    #[test]
+    fn test_corr_cholesky_transform() {
+        // torch: CorrCholeskyTransform()([0.2,-0.5,0.8]) (N=3 -> 3x3) =
+        //   [[1,0,0],[0.19737533,0.98032802,0],[-0.46211717,0.58888036,0.66307443]];
+        // inverse round-trips to [0.2,-0.5,0.8]; ldj = -0.98158675.
+        let t = CorrCholeskyTransform;
+        let x = from_slice(&[0.2f32, -0.5, 0.8], &[3]).unwrap();
+        let y = Transform::forward(&t, &x).unwrap();
+        assert_eq!(y.shape(), &[3, 3]);
+        approx_slice(
+            y.data().unwrap(),
+            &[
+                1.0,
+                0.0,
+                0.0,
+                0.19737533,
+                0.98032802,
+                0.0,
+                -0.46211717,
+                0.58888036,
+                0.66307443,
+            ],
+            1e-5,
+            "corrchol forward",
+        );
+        let xr = Transform::inverse(&t, &y).unwrap();
+        approx_slice(
+            xr.data().unwrap(),
+            &[0.2, -0.5, 0.8],
+            1e-4,
+            "corrchol inverse",
+        );
+        let ldj = Transform::log_abs_det_jacobian(&t, &x, &y).unwrap();
+        assert!(
+            (ldj.item().unwrap() - (-0.98158675)).abs() < 1e-4,
+            "corrchol ldj: got {}, want -0.98158675",
+            ldj.item().unwrap()
+        );
+        assert_eq!(
+            <CorrCholeskyTransform as Transform<f32>>::domain(&t).name(),
+            "RealVector"
+        );
+        assert_eq!(
+            <CorrCholeskyTransform as Transform<f32>>::codomain(&t).name(),
+            "CorrCholesky"
+        );
+    }
+
+    // -- ReshapeTransform ----------------------------------------------------
+
+    #[test]
+    fn test_reshape_transform() {
+        // torch: ReshapeTransform([2,2],[4])([[1,2],[3,4]]) = [1,2,3,4];
+        // ldj over a batch shape () is a scalar zero.
+        let t: ReshapeTransform = ReshapeTransform::new(vec![2, 2], vec![4]).unwrap();
+        let x = from_slice(&[1.0f32, 2.0, 3.0, 4.0], &[2, 2]).unwrap();
+        let y = Transform::forward(&t, &x).unwrap();
+        assert_eq!(y.shape(), &[4]);
+        approx_slice(
+            y.data().unwrap(),
+            &[1.0, 2.0, 3.0, 4.0],
+            1e-6,
+            "reshape forward",
+        );
+        let xr = Transform::inverse(&t, &y).unwrap();
+        assert_eq!(xr.shape(), &[2, 2]);
+        approx_slice(
+            xr.data().unwrap(),
+            &[1.0, 2.0, 3.0, 4.0],
+            1e-6,
+            "reshape inverse",
+        );
+        let ldj = Transform::log_abs_det_jacobian(&t, &x, &y).unwrap();
+        // batch shape is empty -> 0-D zero.
+        assert!(
+            ldj.data().unwrap().iter().all(|&v| v == 0.0),
+            "reshape ldj must be zeros"
+        );
+        // Mismatched element counts must error.
+        assert!(ReshapeTransform::new(vec![2, 2], vec![3]).is_err());
+    }
+
+    // -- IndependentTransform ------------------------------------------------
+
+    #[test]
+    fn test_independent_transform() {
+        // torch: IndependentTransform(Exp(),1) over [[0,1,2]]: forward = exp;
+        // ldj sums the rightmost 1 dim of x -> [3.0].
+        let t: IndependentTransform<f32> = IndependentTransform::new(Box::new(ExpTransform), 1);
+        let x = from_slice(&[0.0f32, 1.0, 2.0], &[1, 3]).unwrap();
+        let y = t.forward(&x).unwrap();
+        approx_slice(
+            y.data().unwrap(),
+            &[1.0, std::f32::consts::E, std::f32::consts::E.powi(2)],
+            1e-4,
+            "indep forward",
+        );
+        let ldj = t.log_abs_det_jacobian(&x, &y).unwrap();
+        assert_eq!(ldj.shape(), &[1]);
+        assert!(
+            (ldj.item().unwrap() - 3.0).abs() < 1e-5,
+            "indep ldj: got {}, want 3.0",
+            ldj.item().unwrap()
+        );
+        assert_eq!(t.event_dim(), 1);
+        assert!(t.bijective());
+    }
+
+    // -- CatTransform --------------------------------------------------------
+
+    #[test]
+    fn test_cat_transform() {
+        // torch: CatTransform([Exp, identity], dim=0, lengths=[2,2])([0,1,5,6]) =
+        //   [1, e, 5, 6]; inverse = [0,1,5,6]; ldj = cat([x_exp_part, zeros]) =
+        //   [0, 1, 0, 0].
+        let t: CatTransform<f32> = CatTransform::new(
+            vec![
+                Box::new(ExpTransform),
+                Box::new(ComposeTransform::new(vec![])),
+            ],
+            0,
+            vec![2, 2],
+        )
+        .unwrap();
+        let x = from_slice(&[0.0f32, 1.0, 5.0, 6.0], &[4]).unwrap();
+        let y = t.forward(&x).unwrap();
+        approx_slice(
+            y.data().unwrap(),
+            &[1.0, std::f32::consts::E, 5.0, 6.0],
+            1e-4,
+            "cat forward",
+        );
+        let xr = t.inverse(&y).unwrap();
+        approx_slice(
+            xr.data().unwrap(),
+            &[0.0, 1.0, 5.0, 6.0],
+            1e-4,
+            "cat inverse",
+        );
+        let ldj = t.log_abs_det_jacobian(&x, &y).unwrap();
+        approx_slice(ldj.data().unwrap(), &[0.0, 1.0, 0.0, 0.0], 1e-4, "cat ldj");
+    }
+
+    // -- StackTransform ------------------------------------------------------
+
+    #[test]
+    fn test_stack_transform() {
+        // torch: StackTransform([Exp, Affine(0,2)], dim=0)([[0,1,2],[1,2,3]]) =
+        //   [[1, e, e^2],[2,4,6]]; ldj = [[0,1,2],[ln2,ln2,ln2]].
+        let t: StackTransform<f32> = StackTransform::new(
+            vec![
+                Box::new(ExpTransform),
+                Box::new(AffineTransform::new(0.0, 2.0)),
+            ],
+            0,
+        );
+        let x = from_slice(&[0.0f32, 1.0, 2.0, 1.0, 2.0, 3.0], &[2, 3]).unwrap();
+        let y = t.forward(&x).unwrap();
+        let e = std::f32::consts::E;
+        approx_slice(
+            y.data().unwrap(),
+            &[1.0, e, e * e, 2.0, 4.0, 6.0],
+            1e-4,
+            "stack forward",
+        );
+        let xr = t.inverse(&y).unwrap();
+        approx_slice(
+            xr.data().unwrap(),
+            &[0.0, 1.0, 2.0, 1.0, 2.0, 3.0],
+            1e-4,
+            "stack inverse",
+        );
+        let ldj = t.log_abs_det_jacobian(&x, &y).unwrap();
+        let l2 = 2.0f32.ln();
+        approx_slice(
+            ldj.data().unwrap(),
+            &[0.0, 1.0, 2.0, l2, l2, l2],
+            1e-4,
+            "stack ldj",
+        );
+    }
+
+    // -- CumulativeDistributionTransform -------------------------------------
+
+    #[test]
+    fn test_cumulative_distribution_transform() {
+        // torch: CumulativeDistributionTransform(Normal(0,1))([-1,0,1]):
+        //   forward (CDF) = [0.15865526, 0.5, 0.84134471];
+        //   inverse (ICDF) round-trips; ldj = log_prob = [-1.4189385, -0.9189385, -1.4189385].
+        use crate::Normal;
+        let base = Normal::new(scalar(0.0f32).unwrap(), scalar(1.0f32).unwrap()).unwrap();
+        let t: CumulativeDistributionTransform<f32> =
+            CumulativeDistributionTransform::new(Box::new(base));
+        let x = from_slice(&[-1.0f32, 0.0, 1.0], &[3]).unwrap();
+        let y = Transform::forward(&t, &x).unwrap();
+        approx_slice(
+            y.data().unwrap(),
+            &[0.15865526, 0.5, 0.8413447],
+            1e-5,
+            "cdf forward",
+        );
+        let xr = Transform::inverse(&t, &y).unwrap();
+        approx_slice(xr.data().unwrap(), &[-1.0, 0.0, 1.0], 1e-4, "cdf inverse");
+        let ldj = Transform::log_abs_det_jacobian(&t, &x, &y).unwrap();
+        approx_slice(
+            ldj.data().unwrap(),
+            &[-1.4189385, -0.9189385, -1.4189385],
+            1e-5,
+            "cdf ldj",
+        );
+        assert_eq!(
+            <CumulativeDistributionTransform<f32> as Transform<f32>>::codomain(&t).name(),
+            "UnitInterval"
+        );
+        assert_eq!(Transform::sign(&t), Some(1));
+    }
+
+    // -- production consumer: TransformedDistribution over a new transform ---
+
+    #[test]
+    fn test_transformed_distribution_with_power_transform() {
+        // Production consumer of PowerTransform (#1373): build a
+        // TransformedDistribution and exercise sample/log_prob through the
+        // boxed Transform chain. Normal(0,1) is positive-supported only after
+        // exp; we compose [Exp, Power(2)] = (exp x)^2 = exp(2x), positive.
+        use crate::Normal;
+        let base = Normal::new(scalar(0.0f32).unwrap(), scalar(1.0f32).unwrap()).unwrap();
+        let td = TransformedDistribution::new(
+            Box::new(base),
+            vec![
+                Box::new(ExpTransform),
+                Box::new(PowerTransform::new(2.0f32)),
+            ],
+        );
+        let s = td.sample(&[50]).unwrap();
+        assert_eq!(s.shape(), &[50]);
+        for &v in s.data().unwrap() {
+            assert!(v > 0.0, "exp-then-power sample must be positive, got {v}");
+        }
+        // support() = chain's last codomain = Power's codomain = Positive.
+        assert_eq!(td.support().unwrap().name(), "Positive");
     }
 }

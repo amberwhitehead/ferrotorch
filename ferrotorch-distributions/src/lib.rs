@@ -119,7 +119,12 @@ pub use poisson::Poisson;
 pub use relaxed_bernoulli::RelaxedBernoulli;
 pub use relaxed_one_hot_categorical::{ExpRelaxedCategorical, RelaxedOneHotCategorical};
 pub use student_t::StudentT;
-pub use transforms::TransformedDistribution;
+pub use transforms::{
+    AbsTransform, AffineTransform, CatTransform, ComposeTransform, CorrCholeskyTransform,
+    CumulativeDistributionTransform, ExpTransform, IndependentTransform, LowerCholeskyTransform,
+    PowerTransform, ReshapeTransform, SigmoidTransform, SoftmaxTransform, SoftplusTransform,
+    StackTransform, StickBreakingTransform, TanhTransform, Transform, TransformedDistribution,
+};
 pub use uniform::Uniform;
 pub use von_mises::VonMises;
 pub use weibull::Weibull;

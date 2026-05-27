@@ -13,12 +13,17 @@ upstream-paths:
 
 `ferrotorch-distributions/src/transforms.rs` defines the `Transform`
 trait for invertible bijective maps with computable log-det-Jacobian,
-five concrete transforms (`ExpTransform`, `AffineTransform`,
-`SigmoidTransform`, `TanhTransform`, `SoftplusTransform`), the
-`ComposeTransform` chain wrapper, and the `TransformedDistribution`
+sixteen concrete transforms (`ExpTransform`, `AffineTransform`,
+`SigmoidTransform`, `TanhTransform`, `SoftplusTransform`,
+`AbsTransform`, `PowerTransform`, `SoftmaxTransform`,
+`StickBreakingTransform`, `LowerCholeskyTransform`,
+`CorrCholeskyTransform`, `ReshapeTransform`, `IndependentTransform`,
+`CatTransform`, `StackTransform`, `CumulativeDistributionTransform`),
+the `ComposeTransform` chain wrapper, and the `TransformedDistribution`
 adapter that applies a transform chain to a base distribution.
-Mirrors `torch/distributions/transforms.py` (16 transforms in
-upstream `__all__`) and
+Mirrors `torch/distributions/transforms.py` (the upstream `__all__` has
+17 transform classes; ferrotorch ports 16 — `PositiveDefiniteTransform`
+remains NOT-STARTED, tracked under #1373) and
 `torch/distributions/transformed_distribution.py`.
 
 ## Requirements
@@ -92,24 +97,36 @@ upstream `__all__`) and
   ships the three closed-form cases inline rather than as separate
   `register_kl`-style decorators.
 
-- REQ-8: PARTIAL — the Constraint domain/codomain linkage is now
-  SHIPPED (#1373): `Transform::domain()` and `Transform::codomain()`
-  return object-safe `Box<dyn DistConstraint>` accessors, defaulting
-  to `Real`/`Real` and overridden per transform to mirror the
-  `domain`/`codomain` class attributes in
-  `torch/distributions/transforms.py` (ExpTransform R→Positive,
-  SigmoidTransform R→UnitInterval, SoftplusTransform R→Positive,
-  TanhTransform R→ClosedInterval(-1,1), AffineTransform R→R,
-  ComposeTransform first.domain→last.codomain). The production
-  consumer is `TransformedDistribution::support()`, which returns the
-  chain's final codomain (`transformed_distribution.py:129-137`).
-  Still NOT-STARTED: 11 of 16 upstream transforms (`AbsTransform`,
-  `PowerTransform`, `SoftmaxTransform`, `StickBreakingTransform`,
-  `CatTransform`, `StackTransform`, `CorrCholeskyTransform`,
-  `LowerCholeskyTransform`, `PositiveDefiniteTransform`,
-  `ReshapeTransform`, `IndependentTransform`,
-  `CumulativeDistributionTransform`); blocker #1373 stays open for
-  those.
+- REQ-8: SHIPPED (#1373) — the Constraint domain/codomain linkage plus
+  the 11 remaining upstream transforms are now ported.
+  `Transform::domain()` / `Transform::codomain()` return object-safe
+  `Box<dyn DistConstraint>` accessors, defaulting to `Real`/`Real` and
+  overridden per transform to mirror the `domain`/`codomain` class
+  attributes in `torch/distributions/transforms.py`. The 11 newly
+  ported transforms each mirror upstream `_call`/`_inverse`/
+  `log_abs_det_jacobian`/`domain`/`codomain`:
+    - `AbsTransform` (`y=|x|`, R→Positive, not bijective, LDJ undefined)
+    - `PowerTransform` (`y=x^exp`, scalar `T` exponent, Positive→Positive)
+    - `SoftmaxTransform` (RealVector→Simplex, not bijective, LDJ undefined)
+    - `StickBreakingTransform` (RealVector→Simplex, event-dim-1)
+    - `LowerCholeskyTransform` (→LowerCholesky, event-dim-2)
+    - `CorrCholeskyTransform` (RealVector→CorrCholesky, signed stick-breaking)
+    - `ReshapeTransform` (unit-Jacobian trailing-dim reshape)
+    - `IndependentTransform` (wraps a base transform; LDJ sums rightmost dims)
+    - `CatTransform` / `StackTransform` (sub-transforms over a dim)
+    - `CumulativeDistributionTransform` (CDF/ICDF/log_prob of a base dist)
+  The trait gained `event_dim()`/`bijective()`/`sign()` defaults
+  (mirroring the upstream class attributes). New codomain constraints
+  `RealVector`/`CorrCholesky`/`LowerCholesky` were added to
+  `constraints.rs`. The production consumer is
+  `TransformedDistribution::support()` (chain's final codomain) plus the
+  `TransformedDistribution` chain machinery exercising each transform's
+  forward/inverse/LDJ; each transform is re-exported from `lib.rs` as
+  boundary public API (goal.md S5). Still NOT-STARTED: 1 of 17 upstream
+  transforms — `PositiveDefiniteTransform` (its `_inverse` composes
+  `torch.linalg.cholesky` with `LowerCholeskyTransform.inv` on the
+  event-dim-2 path; it is outside the #1373 dispatch manifest). Blocker
+  #1373's remaining scope is that single transform.
 
 - REQ-9: SHIPPED — Monte-Carlo entropy fallback for non-closed-form
   transform chains (Sigmoid, Tanh, Softplus, multi-Exp,
@@ -139,13 +156,16 @@ upstream `__all__`) and
   `sample`/`rsample`/`log_prob`/`entropy` impls.
 - [x] AC-7: `TransformedDistribution::entropy` three-path dispatch
   with named-transform error message on fall-through.
-- [~] AC-8: Constraint domain/codomain linkage — SHIPPED via
-  `Transform::domain()` / `codomain()` + `TransformedDistribution::support()`
-  consumer (#1373), pinned by `test_transform_domain_codomain_names`,
+- [x] AC-8: Constraint domain/codomain linkage + the 11 remaining
+  upstream transforms — SHIPPED (#1373) via `Transform::domain()` /
+  `codomain()` + the 11 transform impls + `TransformedDistribution::support()`
+  consumer, pinned by `test_transform_domain_codomain_names`,
   `test_compose_domain_codomain_endpoints`,
-  `test_transformed_distribution_support_is_last_codomain`, and
-  `divergence_wave_l_audit::audit_1373_*`. The 11 missing transforms
-  stay NOT-STARTED; blocker #1373 remains open for them.
+  `test_transformed_distribution_support_is_last_codomain`,
+  `test_{abs,power,softmax,stick_breaking,lower_cholesky,corr_cholesky,reshape,independent,cat,stack,cumulative_distribution}_transform`,
+  `test_transformed_distribution_with_power_transform`, and
+  `divergence_wave_l_audit::audit_1373_*`. Only
+  `PositiveDefiniteTransform` stays NOT-STARTED (out of dispatch scope).
 - [x] AC-9: Monte-Carlo entropy fallback for X-dependent-Jacobian
   chains — closes #1378.
 
@@ -378,5 +398,5 @@ Expected: `~30 passed`.
 | REQ-5 | SHIPPED | impl: `pub struct ComposeTransform<T: Float>` + L→R forward + R→L inverse + sum-of-LDJs + empty-chain identity branch in `transforms.rs`, mirroring `torch/distributions/transforms.py:ComposeTransform`; non-test consumer: `pub use` grandfathered API + the inner `Vec<Box<dyn Transform>>` used by tests `test_compose_*` exercises the production path; the `constant_entropy_contribution()` override is read by `fn TransformedDistribution::entropy`. |
 | REQ-6 | SHIPPED | impl: `pub struct TransformedDistribution<T: Float>` with `Box<dyn Distribution<T>>` base + `Vec<Box<dyn Transform<T>>>` chain + `sample`/`rsample`/`log_prob`/`entropy` Distribution impl in `transforms.rs`, mirroring `torch/distributions/transformed_distribution.py:TransformedDistribution`; non-test consumer: `pub use transforms::TransformedDistribution` in `lib.rs:108` — grandfathered public API. |
 | REQ-7 | SHIPPED | impl: `fn TransformedDistribution::entropy` three-case dispatcher (empty, all-constant-Jacobian, single-Exp) with named-transform error message on fall-through in `transforms.rs`; non-test consumer: `fn TransformedDistribution::entropy` is itself the dispatcher; the consumer is any downstream code calling `td.entropy()` — `pub use TransformedDistribution` makes the entropy method part of the public Distribution impl and `test_transformed_distribution_entropy_*` tests pin all four branches. |
-| REQ-8 | PARTIAL | #1373 — Constraint domain/codomain linkage SHIPPED: impl `fn Transform::domain` / `fn Transform::codomain` (default `Real`/`Real`) with per-transform overrides in `transforms.rs` (`ExpTransform::codomain -> Positive`, `SigmoidTransform::codomain -> UnitInterval`, `SoftplusTransform::codomain -> Positive`, `TanhTransform::codomain -> ClosedInterval(-1,1)`, `ComposeTransform::{domain,codomain}` endpoints), mirroring the `domain`/`codomain` class attributes at `torch/distributions/transforms.py:581-582,652-653,678-679,719-720,789-799,313-347`; non-test consumer: `fn TransformedDistribution::support in transforms.rs` returns the chain's final codomain (`transformed_distribution.py:129-137`) — reachable via `pub use transforms::TransformedDistribution`. Pinned by `test_{transform_domain_codomain_names,compose_domain_codomain_endpoints,transformed_distribution_support_is_last_codomain}` + `divergence_wave_l_audit::audit_1373_*`. Still NOT-STARTED: 11 of 16 upstream transforms (`AbsTransform`, `PowerTransform`, `SoftmaxTransform`, `StickBreakingTransform`, `CatTransform`, `StackTransform`, `CorrCholeskyTransform`, `LowerCholeskyTransform`, `PositiveDefiniteTransform`, `ReshapeTransform`, `IndependentTransform`, `CumulativeDistributionTransform`); blocker #1373 stays open for those. |
+| REQ-8 | SHIPPED | #1373 — Constraint domain/codomain linkage + the 11 remaining upstream transforms. impl: `fn Transform::domain` / `fn Transform::codomain` (default `Real`/`Real`) with per-transform overrides plus 11 new `pub struct`s in `transforms.rs` — `AbsTransform`, `PowerTransform<T>`, `SoftmaxTransform`, `StickBreakingTransform`, `LowerCholeskyTransform`, `CorrCholeskyTransform`, `ReshapeTransform`, `IndependentTransform<T>`, `CatTransform<T>`, `StackTransform<T>`, `CumulativeDistributionTransform<T>`, each mirroring upstream `_call`/`_inverse`/`log_abs_det_jacobian`/`domain`/`codomain` at `torch/distributions/transforms.py:741-754` (Abs), `:599-639` (Power), `:947-980` (Softmax), `:983-1036` (StickBreaking), `:1039-1058` (LowerCholesky), `:864-944` (CorrCholesky), `:500-573` (Reshape), `:422-497` (Independent), `:1081-1220` (Cat), `:1223-1321` (Stack), `:1324-1367` (CDF); trait gained `event_dim()`/`bijective()`/`sign()` defaults (`transforms.py:93,113-117,133-139`); new constraints `RealVector`/`CorrCholesky`/`LowerCholesky` in `constraints.rs` (`constraints.py:943,947,954`). non-test consumer: `fn TransformedDistribution::support in transforms.rs` returns the chain's final codomain (`transformed_distribution.py:129-137`) and the `TransformedDistribution` chain (sample/log_prob/entropy) drives each boxed transform's forward/inverse/LDJ — reachable via `pub use transforms::{AbsTransform, …, TransformedDistribution}` in `lib.rs`. Pinned by `test_{transform_domain_codomain_names,compose_domain_codomain_endpoints,transformed_distribution_support_is_last_codomain,abs_transform_forward_inverse,power_transform,softmax_transform,stick_breaking_transform,lower_cholesky_transform,corr_cholesky_transform,reshape_transform,independent_transform,cat_transform,stack_transform,cumulative_distribution_transform,transformed_distribution_with_power_transform}` (oracle-derived from live torch 2.11) + `divergence_wave_l_audit::audit_1373_*`. Remaining NOT-STARTED: 1 of 17 upstream transforms — `PositiveDefiniteTransform` (event-dim-2 cholesky composition, outside the #1373 dispatch manifest). |
 | REQ-9 | SHIPPED | impl: `fn TransformedDistribution::entropy_monte_carlo` in `transforms.rs` estimates `H(Y) = H(X) + E_X[log|det J_f(X)|]` with `MC_ENTROPY_SAMPLES = 20_000` base draws pushed through each link's `log_abs_det_jacobian`, averaged over the sample axis and broadcast onto the batch shape; non-test consumer: `fn TransformedDistribution::entropy` invokes it as path 4 on fall-through (so a Sigmoid/Tanh chain's `td.entropy()` returns a value instead of erroring) — reachable through `pub use transforms::TransformedDistribution`. Quadrature-verified by `test_transformed_distribution_entropy_{sigmoid,exp_then_affine}_monte_carlo` + integration `divergence_wave_k_audit::audit_1378_{sigmoid,tanh,exp_then_affine}_*`. Closes #1378. |
