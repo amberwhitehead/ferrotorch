@@ -20,6 +20,10 @@
 //! | REQ-10 | SHIPPED | `hermite_polynomial_h`/`hermite_polynomial_he` at `special.rs:841,849`; consumer: `ferrotorch_core::special::*` |
 //! | REQ-11 | SHIPPED | `laguerre_polynomial_l`/`legendre_polynomial_p` at `special.rs:859,867`; consumer: `ferrotorch_core::special::*` |
 //! | REQ-12 | SHIPPED | `shifted_chebyshev_polynomial_{t,u,v,w}` at `special.rs:875-908`; consumer: `ferrotorch_core::special::*` |
+//! | REQ-13 | SHIPPED | pub fn `gammainc`/`gammaincc` mirror `torch.special.gammainc`/`gammaincc`; consumer: re-exported at top of `lib.rs` as `ferrotorch_core::{gammainc, gammaincc}` (S5: torch.special public surface IS the consumer) |
+//! | REQ-14 | SHIPPED | pub fn `log_beta`/`beta` mirror `scipy.special.betaln`/`beta`; consumer: re-exported as `ferrotorch_core::{log_beta, beta}` |
+//! | REQ-15 | SHIPPED | pub fn `multigammaln`/`mvlgamma` mirror `torch.special.multigammaln`/`torch.mvlgamma`; consumer: re-exported as `ferrotorch_core::{multigammaln, mvlgamma}` |
+//! | REQ-16 | SHIPPED | pub fn `gammaln_sign` mirrors `scipy.special.gammasgn`; consumer: re-exported as `ferrotorch_core::gammaln_sign` |
 
 use std::any::TypeId;
 
@@ -681,6 +685,254 @@ fn xlogy_scalar<T: Float>(x: T, y: T) -> T {
 }
 
 // ---------------------------------------------------------------------------
+// Incomplete-gamma family (gammainc / gammaincc) and log-beta / multigammaln
+// ---------------------------------------------------------------------------
+//
+// The interior of the (a, x) plane is computed by the Numerical-Recipes
+// `gammp`/`gammq` pair (power series for `x < a + 1`, Lentz continued fraction
+// for `x >= a + 1`) — the same scalar kernel that
+// `ferrotorch-distributions/src/gamma.rs::lower_incomplete_gamma_regularized`
+// uses to back `Gamma::cdf`. The kernel is lifted here so the PUBLIC
+// `torch.special.gammainc`/`gammaincc` tensor ops own it, while distributions
+// keeps its private scalar copy. The boundary handling on top of the kernel
+// mirrors PyTorch's `calc_igamma`/`calc_igammac` exactly (see cites below) so
+// that `gammainc(0, x>0) = 1`, `gammainc(a>0, 0) = 0`, NaN for negatives, etc.
+
+/// Numerical-Recipes `gammp` core in f64: the *smooth-interior* regularized
+/// lower incomplete gamma `P(a, x) = γ(a, x) / Γ(a)` for `a > 0`, `x > 0`. The
+/// caller is responsible for the boundary cases (`x <= 0`, `a <= 0`, infinities)
+/// — this helper assumes both arguments are finite and strictly positive.
+fn gammp_core_f64(a: f64, x: f64) -> f64 {
+    let gln = lgamma_scalar(a);
+    if x < a + 1.0 {
+        // Power series expansion for P(a, x).
+        let mut ap = a;
+        let mut sum = 1.0 / a;
+        let mut del = sum;
+        for _ in 0..300 {
+            ap += 1.0;
+            del *= x / ap;
+            sum += del;
+            if del.abs() < sum.abs() * 1e-15 {
+                break;
+            }
+        }
+        sum * (-x + a * x.ln() - gln).exp()
+    } else {
+        // Lentz's continued fraction for Q(a, x) = 1 - P(a, x).
+        1.0 - gammq_core_f64_cf(a, x, gln)
+    }
+}
+
+/// Lentz continued fraction for the regularized upper incomplete gamma
+/// `Q(a, x)` valid for `x >= a + 1`. `gln = lgamma(a)` is passed in to avoid
+/// recomputing it. Returns `Q(a, x)` directly (no `1 - P` cancellation).
+fn gammq_core_f64_cf(a: f64, x: f64, gln: f64) -> f64 {
+    let tiny = 1e-300;
+    let mut b = x + 1.0 - a;
+    let mut c = 1.0 / tiny;
+    let mut d = 1.0 / b;
+    let mut h = d;
+    for i in 1..300 {
+        let an = -(i as f64) * (i as f64 - a);
+        b += 2.0;
+        d = an * d + b;
+        if d.abs() < tiny {
+            d = tiny;
+        }
+        c = b + an / c;
+        if c.abs() < tiny {
+            c = tiny;
+        }
+        d = 1.0 / d;
+        let del = d * c;
+        h *= del;
+        if (del - 1.0).abs() < 1e-15 {
+            break;
+        }
+    }
+    (-x + a * x.ln() - gln).exp() * h
+}
+
+/// Numerical-Recipes `gammq` core in f64: the *smooth-interior* regularized
+/// upper incomplete gamma `Q(a, x) = Γ(a, x) / Γ(a)` for `a > 0`, `x > 0`.
+/// For `x < a + 1` it is `1 - P(a, x)` (series); for `x >= a + 1` it is the
+/// continued fraction directly (avoiding the `1 - P` cancellation in the tail).
+fn gammq_core_f64(a: f64, x: f64) -> f64 {
+    let gln = lgamma_scalar(a);
+    if x < a + 1.0 {
+        1.0 - gammp_core_f64(a, x)
+    } else {
+        gammq_core_f64_cf(a, x, gln)
+    }
+}
+
+/// Regularized lower incomplete gamma `P(a, x)` matching `torch.special.gammainc`
+/// boundary-for-boundary.
+///
+/// Boundary contract is a direct port of PyTorch
+/// `aten/src/ATen/native/Math.h:1164-1187 calc_igamma`:
+///   - `x < 0 || a < 0` → NaN
+///   - `a == 0`: `x > 0` → 1.0, else NaN
+///   - `x == 0` → 0.0
+///   - `a == inf`: `x == inf` → NaN, else 0.0
+///   - `x == inf` → 1.0
+///
+/// The smooth interior is the NR `gammp` core (`gammp_core_f64`).
+fn gammainc_scalar<T: Float>(a: T, x: T) -> T {
+    let af = <T as num_traits::ToPrimitive>::to_f64(&a).unwrap_or(f64::NAN);
+    let xf = <T as num_traits::ToPrimitive>::to_f64(&x).unwrap_or(f64::NAN);
+    let result = calc_igamma_f64(af, xf);
+    T::from(result).unwrap_or_else(|| T::from(f64::NAN).unwrap())
+}
+
+/// f64 boundary-aware regularized lower incomplete gamma. See
+/// [`gammainc_scalar`] for the upstream cite.
+fn calc_igamma_f64(a: f64, x: f64) -> f64 {
+    if a.is_nan() || x.is_nan() {
+        return f64::NAN;
+    }
+    if x < 0.0 || a < 0.0 {
+        return f64::NAN;
+    }
+    if a == 0.0 {
+        return if x > 0.0 { 1.0 } else { f64::NAN };
+    }
+    if x == 0.0 {
+        return 0.0;
+    }
+    if a.is_infinite() {
+        return if x.is_infinite() { f64::NAN } else { 0.0 };
+    }
+    if x.is_infinite() {
+        return 1.0;
+    }
+    gammp_core_f64(a, x)
+}
+
+/// Regularized upper incomplete gamma `Q(a, x)` matching
+/// `torch.special.gammaincc` boundary-for-boundary.
+///
+/// Boundary contract is a direct port of PyTorch
+/// `aten/src/ATen/native/Math.h:1085-1107 calc_igammac`:
+///   - `x < 0 || a < 0` → NaN
+///   - `a == 0`: `x > 0` → 0.0, else NaN
+///   - `x == 0` → 1.0
+///   - `a == inf`: `x == inf` → NaN, else 1.0
+///   - `x == inf` → 0.0
+///
+/// The smooth interior is the NR `gammq` core (`gammq_core_f64`).
+fn gammaincc_scalar<T: Float>(a: T, x: T) -> T {
+    let af = <T as num_traits::ToPrimitive>::to_f64(&a).unwrap_or(f64::NAN);
+    let xf = <T as num_traits::ToPrimitive>::to_f64(&x).unwrap_or(f64::NAN);
+    let result = calc_igammac_f64(af, xf);
+    T::from(result).unwrap_or_else(|| T::from(f64::NAN).unwrap())
+}
+
+/// f64 boundary-aware regularized upper incomplete gamma. See
+/// [`gammaincc_scalar`] for the upstream cite.
+fn calc_igammac_f64(a: f64, x: f64) -> f64 {
+    if a.is_nan() || x.is_nan() {
+        return f64::NAN;
+    }
+    if x < 0.0 || a < 0.0 {
+        return f64::NAN;
+    }
+    if a == 0.0 {
+        return if x > 0.0 { 0.0 } else { f64::NAN };
+    }
+    if x == 0.0 {
+        return 1.0;
+    }
+    if a.is_infinite() {
+        return if x.is_infinite() { f64::NAN } else { 1.0 };
+    }
+    if x.is_infinite() {
+        return 0.0;
+    }
+    gammq_core_f64(a, x)
+}
+
+/// Log-beta `lnB(a, b) = lgamma(a) + lgamma(b) - lgamma(a + b)`.
+///
+/// Mirrors `torch.special.gammaln`-built `lbeta` / `scipy.special.betaln`.
+/// Computed in f64 then narrowed to `T` (the subtraction of three lgamma
+/// values loses bits in f32 otherwise).
+fn log_beta_scalar<T: Float>(a: T, b: T) -> T {
+    let af = <T as num_traits::ToPrimitive>::to_f64(&a).unwrap_or(f64::NAN);
+    let bf = <T as num_traits::ToPrimitive>::to_f64(&b).unwrap_or(f64::NAN);
+    let r = lgamma_scalar(af) + lgamma_scalar(bf) - lgamma_scalar(af + bf);
+    T::from(r).unwrap_or_else(|| T::from(f64::NAN).unwrap())
+}
+
+/// Beta function `B(a, b) = exp(lnB(a, b))`.
+fn beta_scalar<T: Float>(a: T, b: T) -> T {
+    let lb = log_beta_scalar::<f64>(
+        <T as num_traits::ToPrimitive>::to_f64(&a).unwrap_or(f64::NAN),
+        <T as num_traits::ToPrimitive>::to_f64(&b).unwrap_or(f64::NAN),
+    );
+    T::from(lb.exp()).unwrap_or_else(|| T::from(f64::NAN).unwrap())
+}
+
+/// Multivariate log-gamma `log Γ_p(a)`:
+/// `C + Σ_{i=1}^p lgamma(a + (1 - i)/2)` with `C = (p(p-1)/4) ln(π)`.
+///
+/// Mirrors `torch.special.multigammaln` / `torch.mvlgamma`
+/// (`aten/src/ATen/native/UnaryOps.cpp:887-905`). The documented domain is
+/// `a > (p - 1)/2` (per `torch/special/__init__.py:862`); outside it, the
+/// individual `lgamma(a + (1-i)/2)` evaluations land in the gamma-reflection
+/// branch, so we return NaN to flag the undefined region rather than emit a
+/// silently-wrong value.
+fn multigammaln_scalar<T: Float>(a: T, p: usize) -> T {
+    let af = <T as num_traits::ToPrimitive>::to_f64(&a).unwrap_or(f64::NAN);
+    let pf = p as f64;
+    // Documented domain check: a > (p - 1)/2. NaN inputs and out-of-domain
+    // values both map to NaN (the `> ` comparison is false for NaN).
+    if af.is_nan() || af <= (pf - 1.0) / 2.0 {
+        return T::from(f64::NAN).unwrap();
+    }
+    let c = (pf * (pf - 1.0) / 4.0) * std::f64::consts::PI.ln();
+    let mut sum = 0.0_f64;
+    for i in 1..=p {
+        sum += lgamma_scalar(af + (1.0 - i as f64) / 2.0);
+    }
+    T::from(c + sum).unwrap_or_else(|| T::from(f64::NAN).unwrap())
+}
+
+/// Sign of the gamma function `Γ(x)` — the sign that `lgamma = ln|Γ|`
+/// discards. Mirrors `scipy.special.gammasgn`:
+///   - `x > 0` (and `+0.0`) → `+1`
+///   - `x` a negative integer (a pole of Γ) → NaN
+///   - `x < 0` non-integer → `(-1)^floor(x)`
+///
+/// PyTorch exposes the equivalent via `torch.sgn(torch.lgamma(...))`-style
+/// composition; scipy's `gammasgn` is the canonical named contract and is the
+/// reference this op pins against.
+fn gammaln_sign_scalar<T: Float>(x: T) -> T {
+    let one = nt_one::<T>();
+    let zero = nt_zero::<T>();
+    if x.is_nan() {
+        return x;
+    }
+    // Positive (including +0.0) → +1.
+    if x > zero {
+        return one;
+    }
+    let xf = <T as num_traits::ToPrimitive>::to_f64(&x).unwrap_or(f64::NAN);
+    // Here x is not NaN and not strictly positive, so x <= 0.
+    if xf < 0.0 {
+        // Negative integers are poles of Γ → NaN; otherwise (-1)^floor(x).
+        if xf.fract() == 0.0 {
+            return T::from(f64::NAN).unwrap();
+        }
+        let fi = xf.floor() as i64;
+        return if fi.rem_euclid(2) == 0 { one } else { -one };
+    }
+    // x is exactly zero (either sign): scipy returns +1 for +0.0, -1 for -0.0.
+    if xf.is_sign_negative() { -one } else { one }
+}
+
+// ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
 
@@ -749,6 +1001,86 @@ pub fn sinc<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
 /// This is useful for entropy computations where 0 * log(0) should be 0.
 pub fn xlogy<T: Float>(x: &Tensor<T>, y: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
     binary_map(x, y, xlogy_scalar)
+}
+
+/// Regularized lower incomplete gamma `P(a, x)`, element-wise over a broadcast
+/// of `input` (the `a` argument) and `other` (the `x` argument).
+///
+/// Mirrors `torch.special.gammainc(input, other)` /
+/// `torch.igamma(input, other)`. Both arguments must be weakly positive with at
+/// least one strictly positive; if either is negative, or both are zero, the
+/// result is `NaN` (matching `aten/src/ATen/native/Math.h:1144 calc_igamma`).
+/// `input = 0, other > 0 → 1`; `input > 0, other = 0 → 0`; `other → ∞ → 1`.
+pub fn gammainc<T: Float>(input: &Tensor<T>, other: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
+    binary_map(input, other, gammainc_scalar)
+}
+
+/// Regularized upper incomplete gamma `Q(a, x) = 1 - P(a, x)`, element-wise
+/// over a broadcast of `input` (the `a` argument) and `other` (the `x`
+/// argument).
+///
+/// Mirrors `torch.special.gammaincc(input, other)` /
+/// `torch.igammac(input, other)`. Same domain as [`gammainc`];
+/// `input = 0, other > 0 → 0`; `input > 0, other = 0 → 1`; `other → ∞ → 0`
+/// (matching `aten/src/ATen/native/Math.h calc_igammac`).
+pub fn gammaincc<T: Float>(input: &Tensor<T>, other: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
+    binary_map(input, other, gammaincc_scalar)
+}
+
+/// Log-beta function `lnB(a, b) = lgamma(a) + lgamma(b) - lgamma(a + b)`,
+/// element-wise over a broadcast of `a` and `b`.
+///
+/// Mirrors `scipy.special.betaln` / the `lbeta` PyTorch users build from
+/// `torch.lgamma`. The accumulation runs in f64 then narrows to `T` so the
+/// three-way lgamma subtraction does not lose bits in the f32 path.
+pub fn log_beta<T: Float>(a: &Tensor<T>, b: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
+    binary_map(a, b, log_beta_scalar)
+}
+
+/// Beta function `B(a, b) = exp(lnB(a, b)) = Γ(a)Γ(b)/Γ(a + b)`, element-wise
+/// over a broadcast of `a` and `b`.
+///
+/// Mirrors `scipy.special.beta`.
+pub fn beta<T: Float>(a: &Tensor<T>, b: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
+    binary_map(a, b, beta_scalar)
+}
+
+/// Multivariate log-gamma `log Γ_p(a)` with dimension `p`, element-wise over
+/// `input`:
+///
+/// `log Γ_p(a) = (p(p-1)/4) ln(π) + Σ_{i=1}^p lgamma(a + (1 - i)/2)`.
+///
+/// Mirrors `torch.special.multigammaln(input, p)` /
+/// `torch.mvlgamma(input, p)` (`aten/src/ATen/native/UnaryOps.cpp:887`). The
+/// documented domain is `a > (p - 1)/2` (`torch/special/__init__.py:862`);
+/// elements outside it yield `NaN`.
+///
+/// # Errors
+///
+/// Returns an error if `p == 0` (PyTorch requires `p >= 1`, see
+/// `UnaryOps.cpp:884 mvlgamma_check`).
+pub fn multigammaln<T: Float>(input: &Tensor<T>, p: usize) -> FerrotorchResult<Tensor<T>> {
+    if p == 0 {
+        return Err(FerrotorchError::InvalidArgument {
+            message: "multigammaln: p has to be greater than or equal to 1".to_string(),
+        });
+    }
+    unary_map(input, move |x| multigammaln_scalar(x, p))
+}
+
+/// Alias for [`multigammaln`] — mirrors `torch.mvlgamma(input, p)`
+/// (`torch/_torch_docs.py:7895`, "Alias for torch.special.multigammaln").
+pub fn mvlgamma<T: Float>(input: &Tensor<T>, p: usize) -> FerrotorchResult<Tensor<T>> {
+    multigammaln(input, p)
+}
+
+/// Sign of the gamma function `Γ(x)` — the `±1` (or `NaN` at poles) factor that
+/// `lgamma = ln|Γ|` discards, element-wise over `input`.
+///
+/// Mirrors `scipy.special.gammasgn`: `+1` for `x > 0`; `NaN` for negative
+/// integers (poles of Γ); `(-1)^floor(x)` for `x < 0` non-integer.
+pub fn gammaln_sign<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
+    unary_map(input, gammaln_sign_scalar)
 }
 
 // ===========================================================================
@@ -1718,5 +2050,316 @@ mod tests {
         // Sanity: the gate itself is exercised here on a CPU tensor.
         let x = t(&[0.0], &[1]);
         assert!(chebyshev_polynomial_t(&x, 3).is_ok());
+    }
+
+    // ---------------------------------------------------------------------
+    // gammainc / gammaincc (torch.special.gammainc / gammaincc)
+    //
+    // Oracle values are from live `torch.special.gammainc(...)` (torch 2.11,
+    // this machine, 2026-05-27), cross-checked against `scipy.special.gammainc`
+    // to ~1e-7 (torch's CPU kernel narrows through f32 internally; our f64 path
+    // matches scipy to ~1e-12, so we pin against the scipy/torch-f64 doubles):
+    //   gammainc(2.0, 1.5)  = 0.4421745996289252
+    //   gammaincc(2.0, 1.5) = 0.5578254003710748
+    //   gammainc(4.0, 3.0)  = 0.35276811121776874
+    //   gammaincc(4.0, 3.0) = 0.6472318887822313
+    //   gammainc(0.5, 0.5)  = 0.6826894921370859
+    //   gammainc(5.0, 3.0)  = 0.18473675547622787
+    //   gammainc(7.5, 10.0) = 0.8280673106233991
+    // ---------------------------------------------------------------------
+
+    #[test]
+    fn gammainc_series_region_matches_oracle() {
+        // x < a + 1 -> power series.
+        let a = t(&[2.0], &[1]);
+        let x = t(&[1.5], &[1]);
+        let r = gammainc(&a, &x).unwrap();
+        assert!(
+            (r.data().unwrap()[0] - 0.442_174_599_628_925_2).abs() < 1e-12,
+            "got {}",
+            r.data().unwrap()[0]
+        );
+    }
+
+    #[test]
+    fn gammainc_continued_fraction_region_matches_oracle() {
+        // x >= a + 1 -> Lentz CF. gammainc(5, 3): 3 < 6 actually series; use
+        // gammainc(7.5, 10.0) where 10 >= 8.5 -> CF.
+        let a = t(&[7.5], &[1]);
+        let x = t(&[10.0], &[1]);
+        let r = gammainc(&a, &x).unwrap();
+        assert!(
+            (r.data().unwrap()[0] - 0.828_067_310_623_399_1).abs() < 1e-12,
+            "got {}",
+            r.data().unwrap()[0]
+        );
+    }
+
+    #[test]
+    fn gammaincc_matches_oracle() {
+        let a = t(&[2.0, 4.0], &[2]);
+        let x = t(&[1.5, 3.0], &[2]);
+        let r = gammaincc(&a, &x).unwrap();
+        let d = r.data().unwrap();
+        assert!(
+            (d[0] - 0.557_825_400_371_074_8).abs() < 1e-12,
+            "got {}",
+            d[0]
+        );
+        assert!(
+            (d[1] - 0.647_231_888_782_231_3).abs() < 1e-12,
+            "got {}",
+            d[1]
+        );
+    }
+
+    #[test]
+    fn gammainc_plus_gammaincc_is_one() {
+        // P(a,x) + Q(a,x) == 1 for a,x > 0 (the torch docstring identity).
+        let a = t(&[4.0, 4.0, 4.0], &[3]);
+        let x = t(&[3.0, 4.0, 5.0], &[3]);
+        let p = gammainc(&a, &x).unwrap();
+        let q = gammaincc(&a, &x).unwrap();
+        let pd = p.data().unwrap();
+        let qd = q.data().unwrap();
+        for i in 0..3 {
+            assert!(
+                (pd[i] + qd[i] - 1.0).abs() < 1e-12,
+                "P+Q at i={i} = {} (expected 1)",
+                pd[i] + qd[i]
+            );
+        }
+    }
+
+    #[test]
+    fn gammainc_subunit_concentration_matches_oracle() {
+        let a = t(&[0.5], &[1]);
+        let x = t(&[0.5], &[1]);
+        let r = gammainc(&a, &x).unwrap();
+        assert!(
+            (r.data().unwrap()[0] - 0.682_689_492_137_085_9).abs() < 1e-12,
+            "got {}",
+            r.data().unwrap()[0]
+        );
+    }
+
+    #[test]
+    fn gammainc_boundary_cases_match_torch() {
+        // Per aten/src/ATen/native/Math.h calc_igamma / calc_igammac, verified
+        // against live torch: gammainc(0, 2)=1, gammainc(2, 0)=0,
+        // gammainc(-1, 2)=NaN, gammainc(2, -1)=NaN, gammainc(0, 0)=NaN.
+        let gi = |av: f64, xv: f64| {
+            gammainc(&t(&[av], &[1]), &t(&[xv], &[1]))
+                .unwrap()
+                .data()
+                .unwrap()[0]
+        };
+        let gc = |av: f64, xv: f64| {
+            gammaincc(&t(&[av], &[1]), &t(&[xv], &[1]))
+                .unwrap()
+                .data()
+                .unwrap()[0]
+        };
+        assert_eq!(gi(0.0, 2.0), 1.0);
+        assert_eq!(gi(2.0, 0.0), 0.0);
+        assert!(gi(-1.0, 2.0).is_nan());
+        assert!(gi(2.0, -1.0).is_nan());
+        assert!(gi(0.0, 0.0).is_nan());
+        // Upper tail boundaries: gammaincc(0, 2)=0, gammaincc(2, 0)=1.
+        assert_eq!(gc(0.0, 2.0), 0.0);
+        assert_eq!(gc(2.0, 0.0), 1.0);
+        // Infinite x.
+        assert_eq!(gi(2.0, f64::INFINITY), 1.0);
+        assert_eq!(gc(2.0, f64::INFINITY), 0.0);
+    }
+
+    #[test]
+    fn gammainc_f32_matches_oracle_within_f32_tol() {
+        let a = Tensor::from_storage(TensorStorage::cpu(vec![2.0f32]), vec![1], false).unwrap();
+        let x = Tensor::from_storage(TensorStorage::cpu(vec![1.5f32]), vec![1], false).unwrap();
+        let r = gammainc(&a, &x).unwrap();
+        assert!(
+            (r.data().unwrap()[0] - 0.442_174_6).abs() < 1e-5,
+            "got {}",
+            r.data().unwrap()[0]
+        );
+    }
+
+    // ---------------------------------------------------------------------
+    // log_beta / beta (scipy.special.betaln / beta)
+    //
+    // Oracle (scipy 1.17, this machine):
+    //   betaln(2, 3)   = -2.4849066497880004
+    //   beta(2, 3)     =  0.08333333333333333
+    //   betaln(0.5, 2.5) = 0.1639006328376739
+    // ---------------------------------------------------------------------
+
+    #[test]
+    fn log_beta_matches_scipy() {
+        let a = t(&[2.0], &[1]);
+        let b = t(&[3.0], &[1]);
+        let r = log_beta(&a, &b).unwrap();
+        assert!(
+            (r.data().unwrap()[0] - (-2.484_906_649_788_000_4)).abs() < 1e-12,
+            "got {}",
+            r.data().unwrap()[0]
+        );
+    }
+
+    #[test]
+    fn beta_matches_scipy() {
+        let a = t(&[2.0], &[1]);
+        let b = t(&[3.0], &[1]);
+        let r = beta(&a, &b).unwrap();
+        assert!(
+            (r.data().unwrap()[0] - 0.083_333_333_333_333_33).abs() < 1e-12,
+            "got {}",
+            r.data().unwrap()[0]
+        );
+    }
+
+    #[test]
+    fn log_beta_symmetric_and_broadcasts() {
+        // B(a,b) == B(b,a); also a half-integer pair against scipy.
+        let a = t(&[0.5, 3.0], &[2]);
+        let b = t(&[2.5, 2.0], &[2]);
+        let r = log_beta(&a, &b).unwrap();
+        let d = r.data().unwrap();
+        assert!(
+            (d[0] - 0.163_900_632_837_673_9).abs() < 1e-12,
+            "got {}",
+            d[0]
+        );
+        // B(3,2) = 1/12 -> ln(1/12).
+        assert!((d[1] - (1.0f64 / 12.0).ln()).abs() < 1e-12, "got {}", d[1]);
+    }
+
+    // ---------------------------------------------------------------------
+    // multigammaln / mvlgamma (torch.special.multigammaln / torch.mvlgamma)
+    //
+    // Oracle (scipy.special.multigammaln 1.17 / torch 2.11, this machine):
+    //   multigammaln(3.0, 2) = 1.5501949939575645
+    //   multigammaln(5.0, 3) = 9.140644699192542
+    //   multigammaln(2.5, 1) = 0.2846828704729192   (== lgamma(2.5))
+    // ---------------------------------------------------------------------
+
+    #[test]
+    fn multigammaln_p2_matches_scipy() {
+        let a = t(&[3.0], &[1]);
+        let r = multigammaln(&a, 2).unwrap();
+        assert!(
+            (r.data().unwrap()[0] - 1.550_194_993_957_564_5).abs() < 1e-12,
+            "got {}",
+            r.data().unwrap()[0]
+        );
+    }
+
+    #[test]
+    fn multigammaln_p3_matches_scipy() {
+        let a = t(&[5.0], &[1]);
+        let r = multigammaln(&a, 3).unwrap();
+        assert!(
+            (r.data().unwrap()[0] - 9.140_644_699_192_542).abs() < 1e-11,
+            "got {}",
+            r.data().unwrap()[0]
+        );
+    }
+
+    #[test]
+    fn multigammaln_p1_is_lgamma() {
+        // Γ_1(a) = Γ(a), so multigammaln(a, 1) == lgamma(a).
+        let a = t(&[2.5], &[1]);
+        let r = multigammaln(&a, 1).unwrap();
+        assert!(
+            (r.data().unwrap()[0] - 0.284_682_870_472_919_2).abs() < 1e-12,
+            "got {}",
+            r.data().unwrap()[0]
+        );
+        // mvlgamma is the alias.
+        let r2 = mvlgamma(&a, 1).unwrap();
+        assert_eq!(r.data().unwrap()[0], r2.data().unwrap()[0]);
+    }
+
+    #[test]
+    fn multigammaln_domain_violation_is_nan() {
+        // Domain is a > (p-1)/2; for p=3, (p-1)/2 = 1.0, so a=0.5 is out.
+        let a = t(&[0.5], &[1]);
+        let r = multigammaln(&a, 3).unwrap();
+        assert!(
+            r.data().unwrap()[0].is_nan(),
+            "got {}",
+            r.data().unwrap()[0]
+        );
+    }
+
+    #[test]
+    fn multigammaln_p_zero_errors() {
+        let a = t(&[3.0], &[1]);
+        assert!(multigammaln(&a, 0).is_err());
+    }
+
+    // ---------------------------------------------------------------------
+    // gammaln_sign (scipy.special.gammasgn)
+    //
+    // Oracle (scipy 1.17, this machine):
+    //   gammasgn(-2.5) = -1.0   (floor(-2.5) = -3, (-1)^-3 = -1)
+    //   gammasgn(-1.5) = +1.0   (floor(-1.5) = -2)
+    //   gammasgn(-0.5) = -1.0
+    //   gammasgn( 2.0) = +1.0
+    //   gammasgn(-6.5) = -1.0
+    //   gammasgn(-2.0) = NaN    (negative integer = pole)
+    //   gammasgn( 0.0) = +1.0
+    // ---------------------------------------------------------------------
+
+    #[test]
+    #[allow(clippy::needless_range_loop)]
+    fn gammaln_sign_matches_scipy_gammasgn() {
+        let xs = [-2.5, -1.5, -0.5, 2.0, -6.5, 0.5, -3.7];
+        let expected = [-1.0, 1.0, -1.0, 1.0, -1.0, 1.0, 1.0];
+        let input = t(&xs, &[xs.len()]);
+        let r = gammaln_sign(&input).unwrap();
+        let d = r.data().unwrap();
+        for i in 0..xs.len() {
+            assert!(
+                (d[i] - expected[i]).abs() < 1e-15,
+                "gammasgn({}) = {} (expected {})",
+                xs[i],
+                d[i],
+                expected[i]
+            );
+        }
+    }
+
+    #[test]
+    fn gammaln_sign_negative_integer_is_nan() {
+        let input = t(&[-2.0, -3.0, -10.0], &[3]);
+        let r = gammaln_sign(&input).unwrap();
+        for &v in r.data().unwrap() {
+            assert!(v.is_nan(), "expected NaN at pole, got {v}");
+        }
+    }
+
+    #[test]
+    fn gammaln_sign_positive_and_zero() {
+        let input = t(&[0.0, 1.0, 100.0], &[3]);
+        let r = gammaln_sign(&input).unwrap();
+        for &v in r.data().unwrap() {
+            assert_eq!(v, 1.0);
+        }
+    }
+
+    #[test]
+    fn gammaln_sign_recovers_gamma_via_lgamma() {
+        // exp(lgamma(x)) * gammasgn(x) == Γ(x). Check at a negative non-integer
+        // where Γ is negative: Γ(-0.5) = -2*sqrt(pi) ≈ -3.5449077.
+        let input = t(&[-0.5], &[1]);
+        let sign = gammaln_sign(&input).unwrap().data().unwrap()[0];
+        let lg = lgamma(&input).unwrap().data().unwrap()[0];
+        let gamma = sign * lg.exp();
+        let expected = -2.0 * std::f64::consts::PI.sqrt();
+        assert!(
+            (gamma - expected).abs() < 1e-9,
+            "reconstructed Γ(-0.5) = {gamma} (expected {expected})"
+        );
     }
 }

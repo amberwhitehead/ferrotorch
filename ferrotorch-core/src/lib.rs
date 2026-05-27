@@ -217,7 +217,10 @@ pub use rng::{Generator, manual_seed};
 pub use shape::{broadcast_shapes, normalize_axis};
 pub use sparse::{CooTensor, CscTensor, CsrTensor, SparseGrad, SparseTensor};
 pub use sparse::{SemiStructuredSparseTensor, sparse_matmul_24};
-pub use special::{digamma, erf, erfc, erfinv, expm1, lgamma, log1p, sinc, xlogy};
+pub use special::{
+    beta, digamma, erf, erfc, erfinv, expm1, gammainc, gammaincc, gammaln_sign, lgamma, log_beta,
+    log1p, multigammaln, mvlgamma, sinc, xlogy,
+};
 pub use storage::{StorageBuffer, TensorStorage};
 pub use stride_tricks::{AsStridedBackward, as_strided, as_strided_copy, as_strided_scatter};
 pub use tensor::{GradFn, MemoryFormat, Tensor, TensorId};
