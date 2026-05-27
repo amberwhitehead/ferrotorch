@@ -180,7 +180,11 @@ fn divergence_case5_same_class_overlap_one_suppressed() {
     let proposals =
         from_slice::<f32>(&[10.0, 10.0, 50.0, 50.0, 11.0, 11.0, 51.0, 51.0], &[2, 4]).unwrap();
     let det = postprocess_detections::<f32>(&logits, &deltas, &proposals, [200, 200]).unwrap();
-    assert_eq!(det.boxes.shape()[0], 1, "same-class overlap: one suppressed");
+    assert_eq!(
+        det.boxes.shape()[0],
+        1,
+        "same-class overlap: one suppressed"
+    );
     assert_eq!(det.labels, vec![1usize]);
 }
 
@@ -215,7 +219,11 @@ fn divergence_case6_topk_global_descending_order() {
     )
     .unwrap();
     let det = postprocess_detections::<f32>(&logits, &deltas, &proposals, [500, 500]).unwrap();
-    assert_eq!(det.boxes.shape()[0], 4, "all 4 distinct-class boxes survive");
+    assert_eq!(
+        det.boxes.shape()[0],
+        4,
+        "all 4 distinct-class boxes survive"
+    );
     // Must be in global descending-score order (the order keep[:K] truncates).
     assert_eq!(
         det.labels,
