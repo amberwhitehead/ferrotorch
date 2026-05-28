@@ -87,11 +87,19 @@ other modes with the upstream `ValueError`.
   `ValueError('Only "zeros" padding mode is supported for ...')`
   message (`_ConvTransposeNd.__init__`, `conv.py:755-758`). Closes
   #1443.
-- REQ-11: NOT-STARTED — parity-sweep runner arms for
-  `nn.functional.conv1d`/`conv2d`/`conv3d`/`conv_transpose1d`/
-  `conv_transpose2d`/`conv_transpose3d` are absent (each reports
-  `0/N passed, N skipped`). Blocker #1441 (umbrella) tracks the
-  runner-arm gap.
+- REQ-11: forward conv arms SHIPPED, transpose arms unchanged. The
+  parity-sweep runner arms for `nn.functional.conv1d`/`conv2d`/`conv3d`
+  are wired (#1441) and reach 0-failed: `dispatch_conv::<D>` in
+  `tools/parity-sweep/runner/src/main.rs`. conv2d routes through
+  `Conv2d::new_full` + `Parameter::set_data` so the production grouped +
+  dilated CPU forward runs (groups / dilation / bias execute). conv1d /
+  conv3d are dense-only in production (the structs carry no
+  `groups`/`dilation` fields), so grouped/dilated samples are documented
+  feature-gap skips: #1600 (conv1d), #1601 (conv3d). String padding
+  `'valid'` maps to 0 and runs; `'same'` (asymmetric in general) is
+  gap #1602. Unbatched (rank D+1) input is gap #1604. The
+  `conv_transpose{1,2,3}d` arms are owned by a separate dispatch and
+  unchanged here.
 
 ## Acceptance Criteria
 
@@ -269,4 +277,4 @@ Expected grep count after blocker #1441 closes: `>= 1` for each.
 | REQ-8 | SHIPPED | impl: `Conv2d::set_weight` and `Conv2d::from_parts` in `conv.rs`; non-test consumer: `ferrotorch-nn/src/functional.rs` (the stateless `nn::functional::conv2d` entry point) uses `Conv2d::from_parts` to drive the existing forward path with user-supplied parameters. |
 | REQ-9 | SHIPPED | impl: `kaiming_uniform(&mut weight, NonLinearity::ReLU)` + `uniform_init(&mut b, -bound, bound)` (bound = 1/sqrt(fan_in)) in every `Conv*d::new[_full]` in `conv.rs` mirroring `torch/nn/modules/conv.py:198-201`; non-test consumer: `Conv2d::new` is the path used by every vision-model constructor. (Closes #1450 — bias path; Kaiming `a=sqrt(5)` gain divergence remains a separate followup.) |
 | REQ-10 | SHIPPED | impl (forward layers): `padding_mode` field + `with_padding_mode` builder on `Conv1d` / `Conv2d` / `Conv3d`, with the non-`Zeros` pre-pad branch in each `<Conv*d as Module>::forward` calling `crate::padding::functional_pad_1d`/`_2d`/`_3d` then convolving with `padding=0`, mirroring `torch/nn/modules/conv.py:367-378` (Conv1d) / `716-732` (Conv3d). impl (transposed): `ConvTranspose{1,2,3}d::with_padding_mode` routes through `fn reject_non_zeros_transpose` returning the upstream `ValueError('Only "zeros" padding mode is supported for ...')` per `conv.py:755-758`. The 1-D/3-D pre-pads are autograd-aware via `Pad1dBackward` / `Pad3dBackward` in `padding.rs` (the #1550 fix class). Non-test production consumer: `pub use conv::{Conv1d, Conv2d, Conv3d, ConvTranspose1d, ConvTranspose2d, ConvTranspose3d}` re-export in `ferrotorch-nn/src/lib.rs`, and the `<Conv1d as Module>::forward` / `<Conv3d as Module>::forward` bodies consume `functional_pad_1d` / `functional_pad_3d` in production. Closes #1443. |
-| REQ-11 | NOT-STARTED | blocker #1441 (umbrella) — parity-sweep runner arms for all 6 conv ops are absent; sweep reports `0/N passed, N skipped` for each. The forward paths themselves are end-to-end verified by 60+ lib tests; only the runner-arm wiring is missing. |
+| REQ-11 | SHIPPED (forward arms) | impl: `dispatch_conv::<D>` in `tools/parity-sweep/runner/src/main.rs` wires `nn.functional.conv1d`/`conv2d`/`conv3d` (#1441). conv2d drives the production grouped+dilated forward via `Conv2d::new_full` + `Parameter::set_data` (non-test production driver of `new_full`: `ferrotorch-vision/src/models/resnet.rs` grouped/dilated blocks). Sweep at `--seeds 8`: conv1d 24/80, conv2d 112/240, conv3d 24/160, ALL 0 failed. Residual skips are filed production gaps: #1600 (conv1d groups/dilation), #1601 (conv3d groups/dilation), #1602 ('same' padding), #1604 (unbatched input). `conv_transpose{1,2,3}d` arms are a separate dispatch (unchanged). |

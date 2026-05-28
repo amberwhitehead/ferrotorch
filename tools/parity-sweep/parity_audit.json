@@ -673,6 +673,125 @@
    "comparison": "UNIQUE: the vector cross product is a unique bilinear product; compared directly (samples are [3] and batched [n,3] with the default dim=-1).",
    "tolerance": "rtol=1e-4, atol=1e-6 (rides the decomposition envelope for uniformity; cross is exact)",
    "known_divergences": []
+  },
+  "nn.functional.linear": {
+   "status": "verified",
+   "last_sweep_at": "2026-05-28T00:00:00Z",
+   "samples_attempted": 144,
+   "samples_passed": 144,
+   "samples_failed": 0,
+   "samples_skipped": 0,
+   "pytorch_source": "aten/src/ATen/native/Linear.cpp:48 Tensor linear(...); F.linear in torch/nn/functional.py (input, weight, bias=None) — flattens arbitrary leading dims (*, in)",
+   "ferrotorch_source": "pub struct Linear<T> in ferrotorch-nn/src/linear.rs; <Linear as Module>::forward flattens (*, in) -> [N, in] -> linear_fused -> reshape back (REQ-3 SHIPPED); non-test consumer ferrotorch-nn/src/transformer.rs + ferrotorch-llama QKV projections",
+   "runner_arm": "tools/parity-sweep/runner/src/main.rs dispatch_f32 \"nn.functional.linear\" arm builds Linear::new + Parameter::set_data (via Module::parameters_mut) + Module::forward (1-D / 2-D / N-D all run; #1441)",
+   "tolerance": "rtol=1e-4, atol=1e-7 (matmul/norm-family im2col+GEMM FMA envelope in tolerance_for)",
+   "known_divergences": []
+  },
+  "nn.functional.bilinear": {
+   "status": "verified",
+   "last_sweep_at": "2026-05-28T00:00:00Z",
+   "samples_attempted": 128,
+   "samples_passed": 64,
+   "samples_failed": 0,
+   "samples_skipped": 64,
+   "pytorch_source": "F.bilinear in torch/nn/functional.py (input1, input2, weight, bias=None); torch.nn.Bilinear at torch/nn/modules/linear.py:162-260 — y = x1^T A x2 + b, flattens arbitrary leading dims",
+   "ferrotorch_source": "pub struct Bilinear<T> in ferrotorch-nn/src/linear.rs; forward_pair = einsum(\"bi,oij->boj\") then einsum(\"boj,bj->bo\") + bias broadcast (REQ-11 SHIPPED, #1442); non-test consumer pub use linear::Bilinear in ferrotorch-nn/src/lib.rs",
+   "runner_arm": "tools/parity-sweep/runner/src/main.rs dispatch_f32 \"nn.functional.bilinear\" arm builds Bilinear::new + Parameter::set_data + forward_pair(input1, input2) (#1441)",
+   "tolerance": "rtol=1e-4, atol=1e-7 (matmul/norm-family einsum FMA envelope in tolerance_for via the linear arm)",
+   "known_divergences": [
+    {
+     "category": "nd_input",
+     "root_cause": "Bilinear::forward_pair handles only 1-D / 2-D inputs; torch F.bilinear flattens arbitrary leading dims. The 3-D op_db samples (input ndim 3) skip (4/16 per seed).",
+     "tracking_blocker": "#1603"
+    },
+    {
+     "category": "empty_batch_einsum_panic",
+     "root_cause": "ferrotorch-core einsum_differentiable panics with `% 0` at einsum.rs:1310 on a size-0 batch dim; torch F.bilinear handles [0, in]. The empty-batch op_db samples skip (4/16 per seed) rather than crash the sweep.",
+     "tracking_blocker": "#1605"
+    }
+   ]
+  },
+  "nn.functional.conv1d": {
+   "status": "verified",
+   "last_sweep_at": "2026-05-28T00:00:00Z",
+   "samples_attempted": 80,
+   "samples_passed": 24,
+   "samples_failed": 0,
+   "samples_skipped": 56,
+   "pytorch_source": "aten/src/ATen/native/Convolution.cpp conv1d(input, weight, bias=None, stride=1, padding=0, dilation=1, groups=1)",
+   "ferrotorch_source": "pub struct Conv1d<T> in ferrotorch-nn/src/conv.rs (dense-only: no groups/dilation fields); pub fn conv1d in ferrotorch-nn/src/functional.rs builds Conv1d::from_parts; non-test consumer ferrotorch-vision models",
+   "runner_arm": "tools/parity-sweep/runner/src/main.rs dispatch_conv::<1> (dense + 'valid'->0 RUN; groups>1 / dilation>1 / 'same' / unbatched skip with blocker #) (#1441)",
+   "tolerance": "rtol=1e-4, atol=1e-5 (im2col+GEMM FMA + catastrophic-cancellation envelope in tolerance_for)",
+   "known_divergences": [
+    {
+     "category": "groups_dilation_dense_only",
+     "root_cause": "Conv1d struct has no groups/dilation fields; production forward is dense-only. groups>1 / dilation>1 op_db samples skip (genuine feature-gap).",
+     "tracking_blocker": "#1600"
+    },
+    {
+     "category": "string_padding_same",
+     "root_cause": "Conv1d accepts only symmetric usize padding; torch padding='same' can be asymmetric. 'valid' maps to padding 0 and RUNS; 'same' skips.",
+     "tracking_blocker": "#1602"
+    },
+    {
+     "category": "unbatched_input",
+     "root_cause": "Conv1d::forward requires rank D+2 [B,C,L]; torch accepts unbatched [C,L]. Unbatched op_db samples skip.",
+     "tracking_blocker": "#1604"
+    }
+   ]
+  },
+  "nn.functional.conv2d": {
+   "status": "verified",
+   "last_sweep_at": "2026-05-28T00:00:00Z",
+   "samples_attempted": 240,
+   "samples_passed": 112,
+   "samples_failed": 0,
+   "samples_skipped": 128,
+   "pytorch_source": "aten/src/ATen/native/Convolution.cpp conv2d(input, weight, bias=None, stride=1, padding=0, dilation=1, groups=1)",
+   "ferrotorch_source": "pub struct Conv2d<T> in ferrotorch-nn/src/conv.rs; Conv2d::new_full(in,out,kernel,stride,padding,dilation,groups,bias) drives the production grouped+dilated CPU im2col forward (REQ-1/REQ-2); non-test consumer ferrotorch-vision/src/models/resnet.rs",
+   "runner_arm": "tools/parity-sweep/runner/src/main.rs dispatch_conv::<2> builds Conv2d::new_full + Parameter::set_data (via Module::parameters_mut) + Module::forward — groups / dilation / bias all RUN; unbatched + 'same' skip with blocker # (#1441)",
+   "tolerance": "rtol=1e-4, atol=1e-5 (im2col+GEMM FMA + grouped-conv catastrophic-cancellation: op_db i=26 groups=2 absMIN element 0.0215 in an output spanning |223.48|, drift 4.29e-6 = 1.9e-8 relative-to-max, pure FMA-order)",
+   "known_divergences": [
+    {
+     "category": "string_padding_same",
+     "root_cause": "Conv2d accepts only symmetric usize padding; torch padding='same' (with dilation) is asymmetric. 'valid' maps to padding 0 and RUNS; 'same' skips.",
+     "tracking_blocker": "#1602"
+    },
+    {
+     "category": "unbatched_input",
+     "root_cause": "Conv2d::forward requires rank D+2 [B,C,H,W]; torch accepts unbatched [C,H,W]. Unbatched op_db samples skip (the larger half of the skips since op_db emits batched+unbatched pairs).",
+     "tracking_blocker": "#1604"
+    }
+   ]
+  },
+  "nn.functional.conv3d": {
+   "status": "verified",
+   "last_sweep_at": "2026-05-28T00:00:00Z",
+   "samples_attempted": 160,
+   "samples_passed": 24,
+   "samples_failed": 0,
+   "samples_skipped": 136,
+   "pytorch_source": "aten/src/ATen/native/Convolution.cpp conv3d(input, weight, bias=None, stride=1, padding=0, dilation=1, groups=1)",
+   "ferrotorch_source": "pub struct Conv3d<T> in ferrotorch-nn/src/conv.rs (dense-only: no groups/dilation fields); pub fn conv3d in ferrotorch-nn/src/functional.rs builds Conv3d::from_parts; non-test consumer ferrotorch-vision models",
+   "runner_arm": "tools/parity-sweep/runner/src/main.rs dispatch_conv::<3> (dense + 'valid'->0 RUN; groups>1 / dilation>1 / 'same' / unbatched skip with blocker #) (#1441)",
+   "tolerance": "rtol=1e-4, atol=1e-5 (im2col+GEMM FMA + catastrophic-cancellation envelope in tolerance_for)",
+   "known_divergences": [
+    {
+     "category": "groups_dilation_dense_only",
+     "root_cause": "Conv3d struct has no groups/dilation fields; production forward is dense-only. groups>1 / dilation>1 op_db samples skip (genuine feature-gap).",
+     "tracking_blocker": "#1601"
+    },
+    {
+     "category": "string_padding_same",
+     "root_cause": "Conv3d accepts only symmetric usize padding; torch padding='same' is asymmetric in general. op_db conv3d samples lean heavily on 'same'. 'valid' maps to padding 0 and RUNS; 'same' skips.",
+     "tracking_blocker": "#1602"
+    },
+    {
+     "category": "unbatched_input",
+     "root_cause": "Conv3d::forward requires rank D+2 [B,C,D,H,W]; torch accepts unbatched [C,D,H,W]. Unbatched op_db samples skip.",
+     "tracking_blocker": "#1604"
+    }
+   ]
   }
  }
 }

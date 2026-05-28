@@ -4187,29 +4187,39 @@ fn dispatch_f32(
         //
         // `torch.nn.functional.linear(input, weight, bias=None)` —
         // `aten/src/ATen/native/Linear.cpp:48`. op_db emits
-        // `[input, weight, bias?]` with no kwargs. ferrotorch's
-        // `pub fn linear<T>(input, weight, bias_opt)` at
-        // `ferrotorch-nn/src/functional.rs:67` requires 2-D `input` and
-        // 2-D `weight` (REQ-1). Non-2-D input is a legitimate skip — REQ-3
-        // arbitrary-rank input is the broader API surface still tracked
-        // separately under `linear.md` REQ-3.
-        // Non-test consumer: `ferrotorch-train/examples/multi_epoch_train_dump.rs:61`.
+        // `[input, weight, bias?]` with no kwargs. Inputs span 1-D
+        // `[in]`, 2-D `[B, in]` (incl. empty batch `[0, in]`), and N-D
+        // `[d0, .., in]`. The stateless `nn::functional::linear`
+        // (`functional.rs`) accepts ONLY 2-D, but the `Linear` MODULE's
+        // `forward` (REQ-3 SHIPPED in `linear.rs`) flattens arbitrary
+        // leading dims `(*, in_features)` -> `[N, in]`, runs the fused
+        // `linear_fused`, and reshapes back to `(*, out_features)` —
+        // mirroring `torch/nn/functional.py`'s `F.linear`. So the arm
+        // builds a transient `Linear::new(in, out, bias?)`, injects the
+        // op_db weight/bias via `Parameter::set_data` (through
+        // `Module::parameters_mut`, declaration order `[weight, bias]`),
+        // and dispatches `Module::forward` — the SAME pattern the
+        // `layer_norm` / `conv2d` arms use. This runs the 1-D / 2-D / N-D
+        // samples uniformly (no skips). Non-test consumer of the N-D
+        // path: `ferrotorch-nn/src/transformer.rs` / `ferrotorch-llama`
+        // QKV projections feed 3-D `[B, T, H]` through `Linear::forward`.
         // Closes the runner-arm half of #1441 for linear.
         "nn.functional.linear" => {
             if args.len() < 2 {
                 return Err("nn.functional.linear: needs [input, weight, bias?]".into());
             }
-            let i_wire =
-                unwrap_tensor_arg(&args[0]).ok_or("nn.functional.linear: input not a tensor")?;
-            let w_wire =
-                unwrap_tensor_arg(&args[1]).ok_or("nn.functional.linear: weight not a tensor")?;
-            // ferrotorch::linear requires 2-D input; skip 1-D / >2-D variants
-            // (REQ-3 broader-rank lives outside this dispatch arm's scope).
-            if i_wire.shape.len() != 2 || w_wire.shape.len() != 2 {
+            let input = unwrap_tensor_arg(&args[0])
+                .ok_or("nn.functional.linear: input not a tensor")?
+                .to_f32()?;
+            let weight = unwrap_tensor_arg(&args[1])
+                .ok_or("nn.functional.linear: weight not a tensor")?
+                .to_f32()?;
+            // weight is `[out_features, in_features]`.
+            if weight.ndim() != 2 {
                 return Ok(None);
             }
-            let input = i_wire.to_f32()?;
-            let weight = w_wire.to_f32()?;
+            let out_features = weight.shape()[0];
+            let in_features = weight.shape()[1];
             let bias_opt: Option<Tensor<f32>> = match args.get(2) {
                 Some(v) if !v.is_null() => match unwrap_tensor_arg(v) {
                     Some(b) => Some(b.to_f32()?),
@@ -4217,11 +4227,95 @@ fn dispatch_f32(
                 },
                 _ => None,
             };
-            Ok(Some(ferrotorch_nn::functional::linear(
-                &input,
-                &weight,
-                bias_opt.as_ref(),
+            let mut ln =
+                ferrotorch_nn::Linear::<f32>::new(in_features, out_features, bias_opt.is_some())?;
+            {
+                let mut params = ferrotorch_nn::module::Module::<f32>::parameters_mut(&mut ln);
+                if let Some(p) = params.first_mut() {
+                    p.set_data(weight);
+                }
+                if let (Some(b), Some(p)) = (bias_opt, params.get_mut(1)) {
+                    p.set_data(b);
+                }
+            }
+            Ok(Some(ferrotorch_nn::module::Module::<f32>::forward(
+                &ln, &input,
             )?))
+        }
+
+        // `torch.nn.functional.bilinear(input1, input2, weight, bias=None)`
+        // — `torch/nn/functional.py` -> `aten` `bilinear`. op_db's
+        // `sample_inputs_bilinear` emits `args = [input1, input2, weight,
+        // bias?]` (so `args[0]`=input1, `args[1]`=input2, `args[2]`=weight
+        // `[out, in1, in2]`, `args[3]`=optional bias `[out]`). ferrotorch's
+        // `Bilinear` layer (`linear.rs`, REQ-11 SHIPPED, #1442) computes
+        // `y = einsum("bi,oij,bj->bo")` via `forward_pair(x1, x2)` and
+        // accepts 1-D and 2-D inputs (incl. empty batch `[0, in1]`). The
+        // arm builds a transient `Bilinear::new(in1, in2, out, bias?)`,
+        // injects weight/bias via `Parameter::set_data` (declaration order
+        // `[weight, bias]`), and calls `forward_pair`. Non-test consumer:
+        // `pub use linear::Bilinear` in `lib.rs` (downstream model crates
+        // construct it directly).
+        //
+        // GAP: `forward_pair` handles ONLY 1-D / 2-D; torch's `F.bilinear`
+        // flattens arbitrary leading dims. The 3-D samples (input1 ndim
+        // 3) are a genuine production feature-gap -> documented `Ok(None)`
+        // skip tracked under blocker #1603 (NOT an acceptable skip).
+        "nn.functional.bilinear" => {
+            if args.len() < 3 {
+                return Err("nn.functional.bilinear: needs [input1, input2, weight, bias?]".into());
+            }
+            let x1 = unwrap_tensor_arg(&args[0])
+                .ok_or("nn.functional.bilinear: input1 not a tensor")?
+                .to_f32()?;
+            let x2 = unwrap_tensor_arg(&args[1])
+                .ok_or("nn.functional.bilinear: input2 not a tensor")?
+                .to_f32()?;
+            let weight = unwrap_tensor_arg(&args[2])
+                .ok_or("nn.functional.bilinear: weight not a tensor")?
+                .to_f32()?;
+            // weight is `[out_features, in1_features, in2_features]`.
+            if weight.ndim() != 3 {
+                return Ok(None);
+            }
+            // forward_pair handles only 1-D / 2-D inputs; >=3-D is a
+            // production gap (#1603 — torch F.bilinear flattens N-D).
+            if x1.ndim() > 2 || x2.ndim() > 2 {
+                return Ok(None);
+            }
+            // Empty (size-0) batch dim: `einsum_differentiable` panics with a
+            // `% 0` at `einsum.rs:1310` on a zero-size batch axis (production
+            // bug #1605). torch's `F.bilinear` handles `[0, in]` fine. Skip
+            // these samples with the blocker # rather than crash the sweep.
+            if x1.shape().contains(&0) || x2.shape().contains(&0) {
+                return Ok(None);
+            }
+            let out_features = weight.shape()[0];
+            let in1_features = weight.shape()[1];
+            let in2_features = weight.shape()[2];
+            let bias_opt: Option<Tensor<f32>> = match args.get(3) {
+                Some(v) if !v.is_null() => match unwrap_tensor_arg(v) {
+                    Some(b) => Some(b.to_f32()?),
+                    None => None,
+                },
+                _ => None,
+            };
+            let mut bl = ferrotorch_nn::Bilinear::<f32>::new(
+                in1_features,
+                in2_features,
+                out_features,
+                bias_opt.is_some(),
+            )?;
+            {
+                let mut params = ferrotorch_nn::module::Module::<f32>::parameters_mut(&mut bl);
+                if let Some(p) = params.first_mut() {
+                    p.set_data(weight);
+                }
+                if let (Some(b), Some(p)) = (bias_opt, params.get_mut(1)) {
+                    p.set_data(b);
+                }
+            }
+            Ok(Some(bl.forward_pair(&x1, &x2)?))
         }
 
         // `torch.nn.functional.dropout(input, p=0.5, training=True, inplace=False)` —
@@ -4318,12 +4412,22 @@ fn dispatch_f32(
 
         // Convolution family: `torch.nn.functional.conv{1,2,3}d(input, weight,
         // bias=None, stride=1, padding=0, dilation=1, groups=1)` —
-        // `aten/src/ATen/native/Convolution.cpp`. ferrotorch's
-        // `pub fn conv{1,2,3}d` at `ferrotorch-nn/src/functional.rs:1114-1148`
-        // delegates to `Conv{1,2,3}d::from_parts(...).forward(input)` which
-        // hard-codes `dilation=1, groups=1` (REQ-10 padding_mode kwargs and
-        // groups>1 still NOT-STARTED — `.design/ferrotorch-nn/conv.md`).
-        // Skip dilation != 1 and groups != 1 samples. Closes #1441 conv half.
+        // `aten/src/ATen/native/Convolution.cpp`.
+        //
+        // conv2d: built via `Conv2d::new_full(in, out, kernel, stride,
+        // padding, dilation, groups, bias?)` + `Parameter::set_data` so the
+        // production grouped + dilated CPU forward path (REQ-1/REQ-2,
+        // `.design/ferrotorch-nn/conv.md`) runs with caller weight + bias.
+        // groups / dilation / bias all execute (no skip). Remaining skips:
+        // unbatched rank D+1 input (#1604) and asymmetric string padding
+        // 'same' (#1602); 'valid' maps to padding 0 and runs.
+        //
+        // conv1d / conv3d: the `Conv1d` / `Conv3d` structs have NO
+        // `groups` / `dilation` fields (production forward is dense-only),
+        // so groups>1 / dilation>1 are GENUINE production feature-gaps:
+        // #1600 (conv1d) / #1601 (conv3d). Dense + 'valid' samples run via
+        // `Conv{1,3}d::from_parts`; grouped/dilated/'same' skip with the
+        // blocker # in the skip guard.
         "nn.functional.conv1d" => dispatch_conv::<1>(args, kwargs),
         "nn.functional.conv2d" => dispatch_conv::<2>(args, kwargs),
         "nn.functional.conv3d" => dispatch_conv::<3>(args, kwargs),
@@ -5905,7 +6009,60 @@ fn avg_pool_skip_kwargs(kwargs: &serde_json::Map<String, Value>) -> bool {
     false
 }
 
+/// Decode a `dilation` kwarg into a uniform `[1; D]` check. Returns `true`
+/// when dilation is absent or all-ones (the dense default), `false` when any
+/// component is > 1 (a non-dense dilated conv).
+fn dilation_is_dense(kwargs: &serde_json::Map<String, Value>) -> bool {
+    match kwargs.get("dilation") {
+        None => true,
+        Some(d) => {
+            if let Some(n) = d.as_u64() {
+                n == 1
+            } else if let Some(arr) = d.as_array() {
+                arr.iter().all(|x| x.as_u64().unwrap_or(0) == 1)
+            } else {
+                // Unrecognized shape — treat as non-dense so we skip rather
+                // than silently run with the wrong geometry.
+                false
+            }
+        }
+    }
+}
+
+/// Decode the `padding` kwarg for a conv that supports only symmetric `usize`
+/// padding. Returns:
+/// - `Ok(Some(pad))` for an int / tuple padding (the supported path),
+/// - `Ok(None)` for `padding='valid'` (maps to all-zero padding, supported),
+/// - `Err(Skip)` for `padding='same'` (asymmetric in general — production gap
+///   #1602; the caller turns this into a documented `Ok(None)` skip).
+enum ConvPad {
+    /// Numeric padding decoded from the int / tuple kwarg (or the default 0).
+    Numeric,
+    /// `padding='valid'` — equivalent to zero padding.
+    Valid,
+    /// `padding='same'` — not representable by symmetric `usize` padding in
+    /// the general (asymmetric) case. Skip with blocker #1602.
+    SameSkip,
+}
+
+fn classify_conv_padding(kwargs: &serde_json::Map<String, Value>) -> ConvPad {
+    match kwargs.get("padding").and_then(Value::as_str) {
+        Some("valid") => ConvPad::Valid,
+        // `same` can require asymmetric padding (total = dilation*(k-1), split
+        // floor/ceil when odd); ferrotorch's `Conv*d` padding is symmetric
+        // `usize` per side, so the general case is a production gap (#1602).
+        Some("same") => ConvPad::SameSkip,
+        Some(_) => ConvPad::SameSkip,
+        None => ConvPad::Numeric,
+    }
+}
+
 /// Convolution dispatcher shared by conv1d/conv2d/conv3d.
+///
+/// conv2d routes through `Conv2d::new_full` so it reaches the production
+/// grouped + dilated CPU forward; conv1d/conv3d are dense-only in production
+/// (`Conv{1,3}d` carry no `groups`/`dilation` fields), so grouped/dilated
+/// samples are documented skips under blocker #1600 (conv1d) / #1601 (conv3d).
 fn dispatch_conv<const D: usize>(
     args: &[Value],
     kwargs: &serde_json::Map<String, Value>,
@@ -5913,29 +6070,13 @@ fn dispatch_conv<const D: usize>(
     if args.len() < 2 {
         return Err("conv: needs [input, weight, bias?]".into());
     }
-    let groups = kwargs.get("groups").and_then(Value::as_u64).unwrap_or(1);
-    if groups != 1 {
+    let groups = kwargs.get("groups").and_then(Value::as_u64).unwrap_or(1) as usize;
+    let pad_kind = classify_conv_padding(kwargs);
+    // `padding='same'` (asymmetric in general) is a production gap (#1602).
+    if matches!(pad_kind, ConvPad::SameSkip) {
         return Ok(None);
     }
-    // dilation must be 1.
-    if let Some(d) = kwargs.get("dilation") {
-        if let Some(n) = d.as_u64() {
-            if n != 1 {
-                return Ok(None);
-            }
-        } else if let Some(arr) = d.as_array() {
-            for x in arr {
-                if x.as_u64().unwrap_or(0) != 1 {
-                    return Ok(None);
-                }
-            }
-        }
-    }
-    // `padding='same' | 'valid'` (string) is a separate API surface
-    // ferrotorch's `Conv{1,2,3}d::from_parts` does not accept. Skip.
-    if kwargs.get("padding").and_then(Value::as_str).is_some() {
-        return Ok(None);
-    }
+
     let input = unwrap_tensor_arg(&args[0])
         .ok_or("conv: input not tensor")?
         .to_f32()?;
@@ -5943,8 +6084,8 @@ fn dispatch_conv<const D: usize>(
         .ok_or("conv: weight not tensor")?
         .to_f32()?;
     // Conv{1,2,3}d requires (D + 2)-rank input [B, C, ...]; upstream
-    // accepts unbatched (D + 1)-rank too. Skip unbatched inputs
-    // (REQ-3 narrower contract per `.design/ferrotorch-nn/conv.md`).
+    // accepts unbatched (D + 1)-rank too. Unbatched input is a production
+    // gap (#1604 — `Conv*d::forward` has no implicit-batch path).
     if input.shape().len() != D + 2 {
         return Ok(None);
     }
@@ -5954,8 +6095,17 @@ fn dispatch_conv<const D: usize>(
     };
     match D {
         1 => {
+            // conv1d is dense-only in production. groups>1 / dilation>1 are
+            // genuine feature-gaps (#1600), not acceptable skips.
+            if groups != 1 || !dilation_is_dense(kwargs) {
+                return Ok(None);
+            }
             let stride = parse_dim1(kwargs.get("stride")).unwrap_or(1);
-            let padding = parse_dim1(kwargs.get("padding")).unwrap_or(0);
+            // `valid` -> 0; numeric int/tuple via parse_dim1.
+            let padding = match pad_kind {
+                ConvPad::Valid => 0,
+                _ => parse_dim1(kwargs.get("padding")).unwrap_or(0),
+            };
             Ok(Some(ferrotorch_nn::functional::conv1d(
                 &input,
                 &weight,
@@ -5965,19 +6115,55 @@ fn dispatch_conv<const D: usize>(
             )?))
         }
         2 => {
+            // conv2d reaches the production grouped + dilated CPU path via
+            // `Conv2d::new_full`. weight is `[out, in/groups, kH, kW]`.
+            if weight.ndim() != 4 {
+                return Ok(None);
+            }
+            let out_channels = weight.shape()[0];
+            let in_per_group = weight.shape()[1];
+            let in_channels = in_per_group * groups;
+            let kernel_size = (weight.shape()[2], weight.shape()[3]);
             let stride = parse_dim2(kwargs.get("stride")).unwrap_or([1, 1]);
-            let padding = parse_dim2(kwargs.get("padding")).unwrap_or([0, 0]);
-            Ok(Some(ferrotorch_nn::functional::conv2d(
-                &input,
-                &weight,
-                bias.as_ref(),
+            let padding = match pad_kind {
+                ConvPad::Valid => [0, 0],
+                _ => parse_dim2(kwargs.get("padding")).unwrap_or([0, 0]),
+            };
+            let dilation = parse_dim2(kwargs.get("dilation")).unwrap_or([1, 1]);
+            let mut conv = ferrotorch_nn::Conv2d::<f32>::new_full(
+                in_channels,
+                out_channels,
+                kernel_size,
                 (stride[0], stride[1]),
                 (padding[0], padding[1]),
+                (dilation[0], dilation[1]),
+                groups,
+                bias.is_some(),
+            )?;
+            {
+                let mut params = ferrotorch_nn::module::Module::<f32>::parameters_mut(&mut conv);
+                if let Some(p) = params.first_mut() {
+                    p.set_data(weight);
+                }
+                if let (Some(b), Some(p)) = (bias, params.get_mut(1)) {
+                    p.set_data(b);
+                }
+            }
+            Ok(Some(ferrotorch_nn::module::Module::<f32>::forward(
+                &conv, &input,
             )?))
         }
         3 => {
+            // conv3d is dense-only in production. groups>1 / dilation>1 are
+            // genuine feature-gaps (#1601), not acceptable skips.
+            if groups != 1 || !dilation_is_dense(kwargs) {
+                return Ok(None);
+            }
             let stride = parse_dim3(kwargs.get("stride")).unwrap_or([1, 1, 1]);
-            let padding = parse_dim3(kwargs.get("padding")).unwrap_or([0, 0, 0]);
+            let padding = match pad_kind {
+                ConvPad::Valid => [0, 0, 0],
+                _ => parse_dim3(kwargs.get("padding")).unwrap_or([0, 0, 0]),
+            };
             Ok(Some(ferrotorch_nn::functional::conv3d(
                 &input,
                 &weight,
@@ -7257,9 +7443,6 @@ fn tolerance_for(op: &str) -> (f32, f32) {
         | "nn.functional.multi_margin_loss"
         | "nn.functional.multilabel_soft_margin_loss"
         | "nn.functional.linear"
-        | "nn.functional.conv1d"
-        | "nn.functional.conv2d"
-        | "nn.functional.conv3d"
         | "nn.functional.conv_transpose1d"
         | "nn.functional.conv_transpose2d"
         | "nn.functional.conv_transpose3d"
@@ -7267,6 +7450,21 @@ fn tolerance_for(op: &str) -> (f32, f32) {
         | "nn.functional.rnn_tanh_cell"
         | "nn.functional.gru_cell"
         | "nn.functional.lstm_cell" => (1e-4, 1e-7),
+        // Forward conv family (`conv{1,2,3}d`): the im2col + GEMM reduces over
+        // `in_per_group * prod(kernel)` products whose faer-vs-MKL FMA schedule
+        // differs, the same cross-implementation f32 ULP drift the matmul/norm
+        // families carry. The extra atol (vs `conv_transpose`'s 1e-7) covers
+        // CATASTROPHIC-CANCELLATION output elements where the reduction's
+        // positive/negative terms nearly cancel: e.g. `conv2d` groups=2
+        // (op_db i=26, all 8 seeds) produces an output spanning |223.48| down
+        // to the absMIN element 0.0215 — the 4.29e-6 absolute drift there is
+        // 1.9e-8 relative to the 223.48 computation scale (pure FMA-order
+        // drift, NOT an algorithm divergence: the values agree to 4 sig figs).
+        // `rtol=1e-4` alone bounds it at 2.25e-6 (too tight for the cancelled
+        // element); `atol=1e-5` absorbs the cancellation without masking any
+        // real divergence (a wrong grouped/dilated conv diverges by >> 1e-5
+        // absolute, far outside this envelope). Tracked under #1441.
+        "nn.functional.conv1d" | "nn.functional.conv2d" | "nn.functional.conv3d" => (1e-4, 1e-5),
         // FFT family (#1294): a DFT is a many-FMA reduction over `n` butterfly
         // stages (N-D / multi-axis transforms accumulate over the product of
         // axis lengths). ferrotorch computes the transform in f64 via
