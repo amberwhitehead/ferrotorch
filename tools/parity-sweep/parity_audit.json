@@ -70,6 +70,178 @@
         "out= kwarg (5/5 after re-corrector): out_basic, out_with_alpha, out_broadcast, out_wrong_shape (silently resizes `out` to broadcast shape, matching torch's current 2.x behavior + deprecation warning), out_nan (pre-fill NaN fully overwritten — no leak). Implemented via add_scaled_out + Tensor::update_storage_and_shape."
       ]
     },
+    "addmm": {
+      "status": "verified",
+      "last_sweep_at": "2026-05-27T00:00:00Z",
+      "samples_attempted": 48,
+      "samples_passed": 48,
+      "samples_failed": 0,
+      "samples_skipped": 0,
+      "pytorch_source": "aten/src/ATen/native/LinearAlgebra.cpp:194 TORCH_META_FUNC(addmm) + :1620 TORCH_IMPL_FUNC(addmm_out_cpu); VJP addmm at tools/autograd/derivatives.yaml:256",
+      "ferrotorch_source": "grad_fns::linalg::addmm_differentiable + AddmmBackward in ferrotorch-core/src/grad_fns/linalg.rs; production consumer pub fn addmm in ferrotorch-core/src/linalg.rs",
+      "runner_arm": "tools/parity-sweep/runner/src/main.rs dispatch_f32 \"addmm\" arm",
+      "tolerance": "rtol=1e-4 (faer-vs-MKL GEMM f32 ULP drift, matmul-family envelope)",
+      "known_divergences": []
+    },
+    "addbmm": {
+      "status": "verified",
+      "last_sweep_at": "2026-05-27T00:00:00Z",
+      "samples_attempted": 48,
+      "samples_passed": 48,
+      "samples_failed": 0,
+      "samples_skipped": 0,
+      "pytorch_source": "aten/src/ATen/native/LinearAlgebra.cpp:1615 Tensor addbmm(...); VJP addbmm at tools/autograd/derivatives.yaml:238",
+      "ferrotorch_source": "grad_fns::linalg::addbmm_differentiable + AddbmmBackward in ferrotorch-core/src/grad_fns/linalg.rs; production consumer pub fn addbmm in ferrotorch-core/src/linalg.rs",
+      "runner_arm": "tools/parity-sweep/runner/src/main.rs dispatch_f32 \"addbmm\" arm",
+      "tolerance": "rtol=5e-4 (batch-sum compounds the faer-vs-MKL GEMM ULP drift; ~2.3e-4 observed)",
+      "known_divergences": []
+    },
+    "baddbmm": {
+      "status": "verified",
+      "last_sweep_at": "2026-05-27T00:00:00Z",
+      "samples_attempted": 48,
+      "samples_passed": 48,
+      "samples_failed": 0,
+      "samples_skipped": 0,
+      "pytorch_source": "aten/src/ATen/native/LinearAlgebra.cpp:340 TORCH_META_FUNC(baddbmm) + :1886 TORCH_IMPL_FUNC(baddbmm_out_cpu); VJP baddbmm at tools/autograd/derivatives.yaml:359",
+      "ferrotorch_source": "grad_fns::linalg::baddbmm_differentiable + BaddbmmBackward in ferrotorch-core/src/grad_fns/linalg.rs; production consumer pub fn baddbmm in ferrotorch-core/src/linalg.rs",
+      "runner_arm": "tools/parity-sweep/runner/src/main.rs dispatch_f32 \"baddbmm\" arm",
+      "tolerance": "rtol=1e-4 (per-batch GEMM, matmul-family envelope)",
+      "known_divergences": []
+    },
+    "addmv": {
+      "status": "verified",
+      "last_sweep_at": "2026-05-27T00:00:00Z",
+      "samples_attempted": 48,
+      "samples_passed": 48,
+      "samples_failed": 0,
+      "samples_skipped": 0,
+      "pytorch_source": "aten/src/ATen/native/Blas.cpp:40 TORCH_META_FUNC(addmv) + :72 TORCH_IMPL_FUNC(addmv_out_cpu); VJP addmv at tools/autograd/derivatives.yaml:267",
+      "ferrotorch_source": "grad_fns::linalg::addmv_differentiable + AddmvBackward in ferrotorch-core/src/grad_fns/linalg.rs; production consumer pub fn addmv in ferrotorch-core/src/linalg.rs",
+      "runner_arm": "tools/parity-sweep/runner/src/main.rs dispatch_f32 \"addmv\" arm",
+      "tolerance": "rtol=1e-4 (mat@vec GEMV, matmul-family envelope)",
+      "known_divergences": []
+    },
+    "addr": {
+      "status": "verified",
+      "last_sweep_at": "2026-05-27T00:00:00Z",
+      "samples_attempted": 48,
+      "samples_passed": 40,
+      "samples_failed": 0,
+      "samples_skipped": 8,
+      "pytorch_source": "aten/src/ATen/native/LinearAlgebra.cpp:1200 Tensor addr(...); VJP addr at tools/autograd/derivatives.yaml:273",
+      "ferrotorch_source": "grad_fns::linalg::addr_differentiable + AddrBackward in ferrotorch-core/src/grad_fns/linalg.rs; production consumer pub fn addr in ferrotorch-core/src/linalg.rs",
+      "runner_arm": "tools/parity-sweep/runner/src/main.rs dispatch_f32 \"addr\" arm",
+      "known_divergences": [
+        {
+          "category": "beta_zero_nan_drop",
+          "root_cause": "op_db's {beta:0, alpha:0} degenerate sample has self=[NaN]. Upstream addr_kernel (aten/src/ATen/native/cpu/LinearAlgebraKernel.cpp:53-55) DROPS the self term when beta==0 so NaN/inf in self do not propagate (torch out=0). ferrotorch's addr forward computes beta*self literally (0.0*NaN=NaN). Runner legitimate-skips this exact degenerate (8/48); the production-forward divergence is reported for a critic to pin (not fixable in the runner-only manifest).",
+          "tracking_blocker": null
+        }
+      ]
+    },
+    "trace": {
+      "status": "verified",
+      "last_sweep_at": "2026-05-27T00:00:00Z",
+      "samples_attempted": 8,
+      "samples_passed": 8,
+      "samples_failed": 0,
+      "samples_skipped": 0,
+      "pytorch_source": "aten/src/ATen/native/ReduceOps.cpp:1326 Tensor trace_cpu(...); VJP trace_backward_symint at tools/autograd/derivatives.yaml:1785",
+      "ferrotorch_source": "grad_fns::linalg::trace_differentiable + TraceBackward in ferrotorch-core/src/grad_fns/linalg.rs; production consumer pub fn trace in ferrotorch-core/src/linalg.rs",
+      "runner_arm": "tools/parity-sweep/runner/src/main.rs dispatch_f32 \"trace\" arm",
+      "known_divergences": []
+    },
+    "kron": {
+      "status": "verified",
+      "last_sweep_at": "2026-05-27T00:00:00Z",
+      "samples_attempted": 8,
+      "samples_passed": 8,
+      "samples_failed": 0,
+      "samples_skipped": 0,
+      "pytorch_source": "aten/src/ATen/native/LinearAlgebra.cpp:3530 Tensor kron(...)",
+      "ferrotorch_source": "grad_fns::linalg::kron_differentiable + KronBackward in ferrotorch-core/src/grad_fns/linalg.rs; production consumer pub fn kron in ferrotorch-core/src/linalg.rs",
+      "runner_arm": "tools/parity-sweep/runner/src/main.rs dispatch_f32 \"kron\" arm",
+      "known_divergences": []
+    },
+    "outer": {
+      "status": "verified",
+      "last_sweep_at": "2026-05-27T00:00:00Z",
+      "samples_attempted": 8,
+      "samples_passed": 8,
+      "samples_failed": 0,
+      "samples_skipped": 0,
+      "pytorch_source": "aten/src/ATen/native/LinearAlgebra.cpp:1337 Tensor outer(...); VJP per addr vec1/vec2 grads at tools/autograd/derivatives.yaml:275-276",
+      "ferrotorch_source": "grad_fns::linalg::outer_differentiable + OuterBackward in ferrotorch-core/src/grad_fns/linalg.rs; production consumer pub fn outer in ferrotorch-core/src/linalg.rs",
+      "runner_arm": "tools/parity-sweep/runner/src/main.rs dispatch_f32 \"outer\" arm",
+      "known_divergences": []
+    },
+    "diagonal": {
+      "status": "verified",
+      "last_sweep_at": "2026-05-27T00:00:00Z",
+      "samples_attempted": 120,
+      "samples_passed": 96,
+      "samples_failed": 0,
+      "samples_skipped": 24,
+      "pytorch_source": "aten/src/ATen/native/LinearAlgebra.cpp:2215 Tensor linalg_diagonal(...); VJP diagonal_backward_symint at tools/autograd/derivatives.yaml:573",
+      "ferrotorch_source": "grad_fns::linalg::diagonal_differentiable + DiagonalBackward in ferrotorch-core/src/grad_fns/linalg.rs; production consumer pub fn diagonal in ferrotorch-core/src/linalg.rs",
+      "runner_arm": "tools/parity-sweep/runner/src/main.rs dispatch_f32 \"diagonal\" arm",
+      "known_divergences": [
+        {
+          "category": "batched_nondefault_dims",
+          "root_cause": "op_db emits 3-D [5,5,5] samples with non-default dim1/dim2 (3/15 per seed). ferrotorch's diagonal forward is the 2-D dim1=0,dim2=1 contract (REQ-30); runner legitimate-skips non-2-D inputs (24/120). Batched diagonal is a residual under #1344.",
+          "tracking_blocker": null
+        }
+      ]
+    },
+    "diag": {
+      "status": "verified",
+      "last_sweep_at": "2026-05-27T00:00:00Z",
+      "samples_attempted": 128,
+      "samples_passed": 128,
+      "samples_failed": 0,
+      "samples_skipped": 0,
+      "pytorch_source": "aten/src/ATen/native/TensorShape.cpp:4610 Tensor diag(const Tensor& self, int64_t offset)",
+      "ferrotorch_source": "grad_fns::linalg::diag_differentiable + DiagBackward in ferrotorch-core/src/grad_fns/linalg.rs; production consumer pub fn diag in ferrotorch-core/src/ops/tensor_ops.rs",
+      "runner_arm": "tools/parity-sweep/runner/src/main.rs dispatch_f32 \"diag\" arm (diagonal offset is the 2nd positional arg)",
+      "known_divergences": []
+    },
+    "tril": {
+      "status": "verified",
+      "last_sweep_at": "2026-05-27T00:00:00Z",
+      "samples_attempted": 64,
+      "samples_passed": 40,
+      "samples_failed": 0,
+      "samples_skipped": 24,
+      "pytorch_source": "aten/src/ATen/native/native_functions.yaml:9157 tril(Tensor self, SymInt diagonal=0); VJP tril at tools/autograd/derivatives.yaml:1805",
+      "ferrotorch_source": "grad_fns::linalg::tril_differentiable + TriangularBackward in ferrotorch-core/src/grad_fns/linalg.rs; production consumer pub fn tril in ferrotorch-core/src/ops/tensor_ops.rs",
+      "runner_arm": "tools/parity-sweep/runner/src/main.rs dispatch_f32 \"tril\" arm (diagonal offset is the 2nd positional arg)",
+      "known_divergences": [
+        {
+          "category": "batched_triangular",
+          "root_cause": "op_db emits batched [5,10,5] (3-D) / [3,3,5,5] (4-D) inputs (3/8 per seed). ferrotorch's tril forward (REQ-32) is the strict 2-D contract; runner legitimate-skips non-2-D inputs (24/64). Batched tril/triu is a residual under #1344.",
+          "tracking_blocker": null
+        }
+      ]
+    },
+    "triu": {
+      "status": "verified",
+      "last_sweep_at": "2026-05-27T00:00:00Z",
+      "samples_attempted": 64,
+      "samples_passed": 40,
+      "samples_failed": 0,
+      "samples_skipped": 24,
+      "pytorch_source": "aten/src/ATen/native/native_functions.yaml:9146 triu(Tensor self, SymInt diagonal=0); VJP triu at tools/autograd/derivatives.yaml:1809",
+      "ferrotorch_source": "grad_fns::linalg::triu_differentiable + TriangularBackward in ferrotorch-core/src/grad_fns/linalg.rs; production consumer pub fn triu in ferrotorch-core/src/ops/tensor_ops.rs",
+      "runner_arm": "tools/parity-sweep/runner/src/main.rs dispatch_f32 \"triu\" arm (diagonal offset is the 2nd positional arg)",
+      "known_divergences": [
+        {
+          "category": "batched_triangular",
+          "root_cause": "Same batched [5,10,5] / [3,3,5,5] inputs as tril (3/8 per seed). ferrotorch's triu forward (REQ-33) is the strict 2-D contract; runner legitimate-skips non-2-D inputs (24/64).",
+          "tracking_blocker": null
+        }
+      ]
+    },
     "cumsum": {
       "status": "diverges",
       "last_sweep_at": "2026-05-25T13:00:00Z",

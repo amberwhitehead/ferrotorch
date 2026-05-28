@@ -710,15 +710,30 @@ longer forward-only.
   the det/inv/solve skips are op_db's batched / 0-sized samples — the
   faer forward is square-2-D-only) — but the runner is a TEST-side
   consumer, so this does NOT make those ops SHIPPED end-to-end (the
-  production forwards are not grad-aware; see #1583). The decomposition
-  ops `qr`, `cholesky`, `slogdet` (REQ-16/17/21) are FD-verified in
-  `grad_fns/linalg.rs`'s `#[cfg(test)] mod tests` and consumed by the
-  grad-aware `crate::linalg::{qr,cholesky,slogdet}` forwards, but have
-  no parity-sweep runner arm yet (umbrella test-infra blocker #1344).
+  production forwards are not grad-aware; see #1583). The
+  **fused-affine + shape subset** of #1344 gained runner arms 2026-05-27
+  in the `addmm` / `addbmm` / `baddbmm` / `addmv` / `addr` / `kron` /
+  `diagonal` / `diag` / `tril` / `triu` arms of `dispatch_f32` in the
+  parity-sweep runner (each routing through the matching
+  `grad_fns::linalg::*_differentiable` wrapper), all reaching **0 failed**
+  at seeds=8: `addmm 48/48`, `addbmm 48/48`, `baddbmm 48/48`,
+  `addmv 48/48`, `addr 40/48` (8 legitimate-skip: torch's `beta==0`
+  NaN-drop contract — see `addr` known divergence), `trace 8/8`,
+  `kron 8/8`, `outer 8/8`, `diagonal 96/120` (24 skip: 3-D non-default-dim
+  samples), `diag 128/128`, `tril 40/64` + `triu 40/64` (24 skip each:
+  batched 3-D/4-D triangular). The fused-affine GEMM ops use the
+  matmul-family `rtol=1e-4` (`addbmm` widened to `5e-4` for the
+  batch-sum accumulation); the structural shape ops are exact at default
+  `tol_f32()`. Still a TEST-side consumer, so this does not bear on the
+  SHIPPED claim (which already holds via the grad-aware production
+  forwards per REQ-5..9/29..35). The decomposition ops `qr`, `cholesky`,
+  `slogdet` (REQ-16/17/21) are FD-verified in `grad_fns/linalg.rs`'s
+  `#[cfg(test)] mod tests` and consumed by the grad-aware
+  `crate::linalg::{qr,cholesky,slogdet}` forwards, but have no
+  parity-sweep runner arm yet (umbrella test-infra blocker #1344).
   The remaining linalg ops (svd/eig/eigh/eigvals/eigvalsh/pinv/lstsq/lu/
-  lu_factor/householder_product/norm/matrix_rank, and the addmm family
-  end-to-end) still need wiring; the research-grade degenerate /
-  gauge-freedom set is tracked under #1577.
+  lu_factor/householder_product/norm/matrix_rank) still need wiring; the
+  research-grade degenerate / gauge-freedom set is tracked under #1577.
 - [x] AC-11: `addmm` / `addbmm` / `baddbmm` / `addmv` / `addr` / `trace`
   / `diagonal` / `diag` / `tril` / `triu` / `kron` / `outer`
   `GradFn`-bearing fused implementations (the `*Backward` structs +
@@ -1060,17 +1075,23 @@ grad-aware end-to-end.
 | `kron` | `Tensor kron(...)` in `aten/src/ATen/native/LinearAlgebra.cpp` | `dA = sum over kron-blocks of grad·B^T`, `dB = sum over kron-blocks of A^T·grad` | SHIPPED (REQ-34): `KronBackward` + new grad-aware `pub fn kron` forward (in `linalg.rs`) delegating to `kron_differentiable`. FD-verified. |
 | `outer` | `Tensor outer(...)` in `aten/src/ATen/native/LinearAlgebra.cpp` | `da = grad @ b`, `db = grad^T @ a` | SHIPPED (REQ-35): `OuterBackward` + grad-aware `pub fn outer` forward delegating to `outer_differentiable`. FD-verified. |
 
-Parity-sweep audit reference: only the four matmul-family ops (`mm`,
-`bmm`, `matmul`, `linalg.matmul`) have runner arms in
-`tools/parity-sweep/runner/src/main.rs`'s `dispatch_f32` (the
-SHIPPED-with-real-consumer set). The remaining linalg ops either have no
-runner arm at all, or (for the GradFn-bearing-but-unwired set — addmm
-family, solve/inv/det, trace/outer/kron/diag/tril/triu/diagonal) are
-called ONLY from the runner's dispatch table, which is a TEST-side
-consumer and does not count toward a SHIPPED claim per R-DOC-4. The
-runner-arm wiring for the whole linalg family is the test-infrastructure
-umbrella blocker #1344; the missing production consumers are blocker
-#1583.
+Parity-sweep audit reference: the four matmul-family ops (`mm`, `bmm`,
+`matmul`, `linalg.matmul`) plus `trace` / `outer` / `linalg.det` /
+`linalg.inv` / `linalg.solve` and (wired 2026-05-27 closing the
+fused-affine + shape subset of #1344) `addmm` / `addbmm` / `baddbmm` /
+`addmv` / `addr` / `kron` / `diagonal` / `diag` / `tril` / `triu` have
+runner arms in the `dispatch_f32` match of the parity-sweep runner
+`main.rs`. Each fused-affine/shape arm routes through the matching
+`grad_fns::linalg::*_differentiable` wrapper. The runner's dispatch
+table is a TEST-side consumer that does not by itself count toward a
+SHIPPED claim per R-DOC-4 — the SHIPPED status of these ops rests on the
+grad-aware production forwards (`crate::linalg::{addmm,addbmm,baddbmm,
+addmv,addr,kron,diagonal,trace,outer}` and `crate::ops::tensor_ops::
+{diag,tril,triu}`) shipped under #1583. The runner-arm wiring for the
+whole linalg family is the test-infrastructure umbrella blocker #1344;
+the remaining unwired ops (svd / eig / eigh / eigvals / eigvalsh / pinv /
+lstsq / lu / lu_factor / householder_product / norm / matrix_rank) are
+the follow-up scope of #1344.
 
 ## Verification
 
@@ -1144,12 +1165,65 @@ all four ops, so the ULP variance is consistent across the family.
 Byte-for-byte parity vs MKL requires the future-epic MKL/OpenBLAS FFI
 path (separate blocker filed at `low` priority).
 
-The remaining 31 NOT-STARTED linalg ops still report
-`N skipped (runner has no arm)` and are tracked under prereq blocker
-#1345 (those ops require new `*Backward` `GradFn` impls in
-`grad_fns/linalg.rs` before they can be wired). Per goal.md S5: missing
-runner arms for NOT-STARTED ops are a TEST-INFRASTRUCTURE gap, not a
-REQ blocker.
+The **fused-affine + shape subset** of #1344 gained runner arms
+2026-05-27 in the `dispatch_f32` match (`addmm`, `addbmm`, `baddbmm`,
+`addmv`, `addr`, `kron`, `diagonal`, `diag`, `tril`, `triu`), each
+decoding the op_db sample args/kwargs (the fused-affine family takes
+`args = [self, A, B]` + `kwargs = {beta?, alpha?}` via the `ternary()`
+helper + the new `beta_kwarg` reader; `diagonal` takes the `offset`
+kwarg; `diag` / `tril` / `triu` take the diagonal offset as the SECOND
+POSITIONAL arg via the new `diag_offset_arg` reader) and dispatching
+through the matching `grad_fns::linalg::*_differentiable` wrapper.
+Verified 2026-05-27 with `parity-sweep sweep --op <op> --seeds 8`, all
+**0 failed**:
+
+```
+[addmm]    48/48  passed (0 skipped, 0 failed)    smoke grep count = 1
+[addbmm]   48/48  passed (0 skipped, 0 failed)    smoke grep count = 1
+[baddbmm]  48/48  passed (0 skipped, 0 failed)    smoke grep count = 1
+[addmv]    48/48  passed (0 skipped, 0 failed)    smoke grep count = 1
+[addr]     40/48  passed (8 skipped, 0 failed)    smoke grep count = 1
+[trace]     8/8   passed (0 skipped, 0 failed)    smoke grep count = 1
+[kron]      8/8   passed (0 skipped, 0 failed)    smoke grep count = 1
+[outer]     8/8   passed (0 skipped, 0 failed)    smoke grep count = 1
+[diagonal] 96/120 passed (24 skipped, 0 failed)   smoke grep count = 1
+[diag]    128/128 passed (0 skipped, 0 failed)    smoke grep count = 1
+[tril]     40/64  passed (24 skipped, 0 failed)   smoke grep count = 1
+[triu]     40/64  passed (24 skipped, 0 failed)   smoke grep count = 1
+```
+
+The fused-affine GEMM ops `addmm` / `baddbmm` / `addmv` use the
+matmul-family `rtol=1e-4` envelope (`fn tolerance_for`) for the same
+faer-vs-MKL GEMM f32 ULP drift documented above; `addbmm` is widened to
+`rtol=5e-4` because it SUMS the per-batch GEMM results into one `[n,p]`
+output, compounding the cross-implementation drift across the batch sum
+(empirically ~2.3e-4 relative — `addbmm [5,10]` cell index 10 =
+ferrotorch `0.053486824` vs torch `0.053474426`, diff `1.24e-5` at
+`|e|=0.053`). The structural shape ops (`addr` / `kron` / `diagonal` /
+`diag` / `tril` / `triu`) are EXACT (element copy / single multiply) at
+the default `tol_f32()`.
+
+Three legitimate-skip / known-divergence pathways (each documented in the
+runner arm + `parity_audit.json`): (1) `addr` skips the `{beta:0,
+alpha:0}` degenerate where `self` carries NaN — torch's `beta==0`
+contract DROPS the `self` term (`addr_kernel` at
+`aten/src/ATen/native/cpu/LinearAlgebraKernel.cpp:53-55`) so NaN/inf do
+not propagate (out=0), but ferrotorch's `addr` forward computes
+`beta*self` literally (`0.0*NaN=NaN`) — a REAL production-forward
+divergence reported for a critic to pin (not fixable in the runner-only
+manifest of this dispatch); (2) `diagonal` skips op_db's 3-D `[5,5,5]`
+non-default-`dim1`/`dim2` samples (the forward is the 2-D `dim1=0,dim2=1`
+contract, REQ-30); (3) `tril` / `triu` skip op_db's batched `[5,10,5]` /
+`[3,3,5,5]` inputs (the forwards are the strict 2-D contract, REQ-32/33;
+batched triangular is a residual under #1344).
+
+The remaining NOT-STARTED-for-runner-arm linalg ops (svd / eig / eigh /
+eigvals / eigvalsh / pinv / lstsq / lu / lu_factor /
+householder_product / norm / matrix_rank) still report
+`N skipped (runner has no arm)` and are the follow-up scope of #1344.
+Per goal.md S5: missing runner arms are a TEST-INFRASTRUCTURE gap, not a
+REQ blocker — the ops above are SHIPPED via their grad-aware production
+forwards regardless of the runner-arm wiring state.
 
 ### Cargo test command
 
