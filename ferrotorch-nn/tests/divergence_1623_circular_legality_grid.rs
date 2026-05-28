@@ -68,7 +68,6 @@ fn tensor(data: &[f32], shape: &[usize]) -> Tensor<f32> {
 ///
 /// Tracking: #1624
 #[test]
-#[ignore = "divergence: circular net-zero crop returns empty [..,0] in torch but ferrotorch new_size<1 Errs; tracking #1624"]
 fn divergence_circular_netzero_crop_left() {
     let x = tensor(&[1.0, 2.0, 3.0, 4.0], &[1, 4]);
     let y = functional_pad_1d_signed(&x, -4, 0, PaddingMode::Circular, 0.0)
@@ -92,7 +91,6 @@ fn divergence_circular_netzero_crop_left() {
 /// ```
 /// Tracking: #1624
 #[test]
-#[ignore = "divergence: circular net-zero crop (right) returns empty [..,0] in torch but ferrotorch Errs; tracking #1624"]
 fn divergence_circular_netzero_crop_right() {
     let x = tensor(&[1.0, 2.0, 3.0, 4.0], &[1, 4]);
     let y = functional_pad_1d_signed(&x, 0, -4, PaddingMode::Circular, 0.0)
@@ -108,7 +106,6 @@ fn divergence_circular_netzero_crop_right() {
 /// ```
 /// Tracking: #1624
 #[test]
-#[ignore = "divergence: circular net-zero crop (both sides) returns empty [..,0] in torch but ferrotorch Errs; tracking #1624"]
 fn divergence_circular_netzero_crop_both() {
     let x = tensor(&[1.0, 2.0, 3.0, 4.0], &[1, 4]);
     let y = functional_pad_1d_signed(&x, -2, -2, PaddingMode::Circular, 0.0)
@@ -128,7 +125,6 @@ fn divergence_circular_netzero_crop_both() {
 /// ```
 /// Tracking: #1624
 #[test]
-#[ignore = "divergence: circular net-zero with deep one-side crop returns empty [..,0] in torch but ferrotorch Errs; tracking #1624"]
 fn divergence_circular_netzero_deep_left_crop() {
     let x = tensor(&[1.0, 2.0], &[1, 2]);
     let y = functional_pad_1d_signed(&x, -3, 1, PaddingMode::Circular, 0.0)
@@ -146,7 +142,6 @@ fn divergence_circular_netzero_deep_left_crop() {
 /// ```
 /// Tracking: #1624
 #[test]
-#[ignore = "divergence: circular net-zero crop forward Errs so backward unreachable in ferrotorch; tracking #1624"]
 fn divergence_circular_netzero_crop_backward() {
     let x = leaf(&[1.0, 2.0, 3.0, 4.0], &[1, 4]);
     let y = functional_pad_1d_signed(&x, -4, 0, PaddingMode::Circular, 0.0)
@@ -183,7 +178,6 @@ fn divergence_circular_netzero_crop_backward() {
 ///
 /// Tracking: #1624
 #[test]
-#[ignore = "divergence: circular positive over-wrap (pad>size) rejected by torch but ferrotorch wraps repeatedly; tracking #1624"]
 fn divergence_circular_positive_overwrap_right() {
     let x = tensor(&[1.0, 2.0], &[1, 2]);
     let r = functional_pad_1d_signed(&x, 0, 3, PaddingMode::Circular, 0.0);
@@ -206,7 +200,6 @@ fn divergence_circular_positive_overwrap_right() {
 ///
 /// Tracking: #1624
 #[test]
-#[ignore = "divergence: circular positive over-wrap (left, pad>size) rejected by torch but ferrotorch wraps; tracking #1624"]
 fn divergence_circular_positive_overwrap_left() {
     let x = tensor(&[1.0, 2.0, 3.0], &[1, 3]);
     let r = functional_pad_1d_signed(&x, 4, 0, PaddingMode::Circular, 0.0);
@@ -242,7 +235,6 @@ fn divergence_circular_positive_overwrap_left() {
 ///
 /// Tracking: #1624
 #[test]
-#[ignore = "divergence: circular mixed-sign over-crop ([-1,2] size2) PANICs OOB in ferrotorch; torch rejects cleanly (R-CODE-2); tracking #1624"]
 fn divergence_circular_mixed_sign_overcrop_panics() {
     let x = tensor(&[1.0, 2.0], &[1, 2]);
     // torch rejects; ferrotorch must NOT panic — it must return Err. This test
@@ -267,7 +259,6 @@ fn divergence_circular_mixed_sign_overcrop_panics() {
 ///
 /// Tracking: #1624
 #[test]
-#[ignore = "divergence: circular mixed-sign over-crop ([2,-1] size2) PANICs OOB in ferrotorch; torch rejects; tracking #1624"]
 fn divergence_circular_mixed_sign_overcrop_mirror_panics() {
     let x = tensor(&[1.0, 2.0], &[1, 2]);
     let r = functional_pad_1d_signed(&x, 2, -1, PaddingMode::Circular, 0.0);

@@ -249,8 +249,23 @@ For each:
   `RuntimeError`; ferrotorch returns `InvalidArgument`.
 - **Replicate with empty input dim** — both implementations need at
   least 1 element to replicate; both reject.
-- **Circular with `pad > input_dim`** — both wrap around multiple
-  times; semantics match.
+- **Circular with `pad > input_dim`** — upstream `_pad_circular`
+  REJECTS it: `aten/src/ATen/native/PadNd.cpp:142`
+  `TORCH_CHECK(pad_l <= size && pad_r <= size, "Padding value causes
+  wrapping around more than once.")`. ferrotorch matches — both the
+  all-non-negative path (`check_circular_positive` in `padding.rs`)
+  and the signed path (`circular_axis_new_size` in `padding.rs`)
+  return `InvalidArgument` for a pad strictly greater than the axis
+  size (#1624). A net-zero crop (e.g. `circular [-4,0]` on size 4) is
+  ACCEPTED as an empty `[..,0]` dim — `PadNd.cpp:144` allows
+  `out_shape >= 0`, distinct from reflect which demands `>= 1`. A
+  mixed-sign over-crop where the cropped center is smaller than the
+  opposite-side wrap (e.g. `circular [-1,2]` on size 2) is REJECTED:
+  torch's slice-copy wrap reads uninitialized memory there (no defined
+  byte-for-byte contract), so ferrotorch returns `InvalidArgument`
+  rather than panicking on an out-of-bounds gather (R-CODE-2). The full
+  accept/reject/empty/value behavior matches live torch 2.11 across the
+  grid sizes 2..6 × all `lo,hi` in `-size-1..=size+1` (#1624).
 - **NaN / Inf preservation** — both modes pass NaN/Inf through
   unchanged (constant `value` is literally placed).
 

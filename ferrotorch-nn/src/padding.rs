@@ -490,6 +490,29 @@ fn pad_3d_replicate<T: Float>(
 // Circular padding helpers
 // ---------------------------------------------------------------------------
 
+/// Reject an all-non-negative circular pad that wraps around more than once.
+///
+/// The positive-only `pad_*_circular` helpers gather via `rem_euclid`, which
+/// silently wraps a pad strictly larger than the axis size MULTIPLE times
+/// (e.g. `circular [0,3]` on size 2 -> `[1,2,1,2,1]`). Upstream
+/// `_pad_circular_symint` rejects this at `aten/src/ATen/native/PadNd.cpp:142`:
+/// `TORCH_CHECK(pad_l <= size && pad_r <= size, "Padding value causes wrapping
+/// around more than once.")`. For a non-negative pad the net extent is always
+/// `>= size > 0`, so `:142` is the only check that can fire — mirror it here so
+/// the positive circular path matches torch's accept/reject (`pad <= size`).
+fn check_circular_positive(axes: &[(usize, usize)]) -> FerrotorchResult<()> {
+    for (idx, &(size, pad)) in axes.iter().enumerate() {
+        if pad > size {
+            return Err(FerrotorchError::InvalidArgument {
+                message: format!(
+                    "Circular padding {pad} on axis (size {size}, position {idx}) causes wrapping around more than once (pad must be <= size)"
+                ),
+            });
+        }
+    }
+    Ok(())
+}
+
 /// Circular-pad the last dimension (wrap-around).
 fn pad_1d_circular<T: Float>(
     data: &[T],
@@ -740,7 +763,11 @@ pub fn functional_pad_1d<T: Float>(
     let (out_data, new_shape) = match mode {
         PaddingMode::Reflect => pad_1d_reflect(&data, shape, pad_left, pad_right)?,
         PaddingMode::Replicate => pad_1d_replicate(&data, shape, pad_left, pad_right),
-        PaddingMode::Circular => pad_1d_circular(&data, shape, pad_left, pad_right),
+        PaddingMode::Circular => {
+            let inner = shape[shape.len() - 1];
+            check_circular_positive(&[(inner, pad_left), (inner, pad_right)])?;
+            pad_1d_circular(&data, shape, pad_left, pad_right)
+        }
         PaddingMode::Zeros => {
             return functional_pad_1d_signed(
                 input,
@@ -945,6 +972,14 @@ pub fn functional_pad_2d<T: Float>(
             pad_2d_replicate(&data, shape, pad_left, pad_right, pad_top, pad_bottom)
         }
         PaddingMode::Circular => {
+            let nd = shape.len();
+            let (h, w) = (shape[nd - 2], shape[nd - 1]);
+            check_circular_positive(&[
+                (w, pad_left),
+                (w, pad_right),
+                (h, pad_top),
+                (h, pad_bottom),
+            ])?;
             pad_2d_circular(&data, shape, pad_left, pad_right, pad_top, pad_bottom)
         }
         PaddingMode::Zeros => {
@@ -1163,9 +1198,21 @@ pub fn functional_pad_3d<T: Float>(
         PaddingMode::Replicate => pad_3d_replicate(
             &data, shape, pad_left, pad_right, pad_top, pad_bottom, pad_front, pad_back,
         ),
-        PaddingMode::Circular => pad_3d_circular(
-            &data, shape, pad_left, pad_right, pad_top, pad_bottom, pad_front, pad_back,
-        ),
+        PaddingMode::Circular => {
+            let nd = shape.len();
+            let (d, h, w) = (shape[nd - 3], shape[nd - 2], shape[nd - 1]);
+            check_circular_positive(&[
+                (w, pad_left),
+                (w, pad_right),
+                (h, pad_top),
+                (h, pad_bottom),
+                (d, pad_front),
+                (d, pad_back),
+            ])?;
+            pad_3d_circular(
+                &data, shape, pad_left, pad_right, pad_top, pad_bottom, pad_front, pad_back,
+            )
+        }
         PaddingMode::Zeros => {
             return functional_pad_3d_signed(
                 input,
@@ -1532,9 +1579,12 @@ fn reflect_axis_src(j: usize, size: usize, pad: isize) -> usize {
 /// CROPPED center — NOT a plain modulo against the original window (which only
 /// coincides when there is no crop). `j` is the output position, `size` the
 /// ORIGINAL input size, `(lo, hi)` the signed pads on this axis. Returns the
-/// source index into the ORIGINAL input. Caller guarantees `out_w >= 1`.
+/// RAW (signed) source index into the ORIGINAL input; it may fall outside
+/// `0..size` for an illegal pad — `circular_axis_new_size` pre-validates every
+/// index lies in `0..size` before the gather casts it to `usize`. Only called
+/// for `out_w >= 1` (an empty `out_w == 0` axis runs the gather zero times).
 #[inline]
-fn circular_axis_src(j: usize, size: usize, lo: isize, hi: isize) -> usize {
+fn circular_axis_src(j: usize, size: usize, lo: isize, hi: isize) -> isize {
     let j = j as isize;
     let size_i = size as isize;
     let out_w = size_i + lo + hi;
@@ -1552,18 +1602,84 @@ fn circular_axis_src(j: usize, size: usize, lo: isize, hi: isize) -> usize {
         j
     };
     // Center → input: in[max(-lo,0) + (center - max(lo,0))].
-    (lo.min(0).abs() + (center - lo_pos)) as usize
+    lo.min(0).abs() + (center - lo_pos)
+}
+
+/// Complete circular-pad legality for one axis, returning the new axis extent
+/// (`size + lo + hi`, which may be `0` for a net-zero crop → an empty dim).
+///
+/// This mirrors `_pad_circular_symint`'s two `TORCH_CHECK`s and the slice-copy
+/// gather (`aten/src/ATen/native/PadNd.cpp:140-187`) EXACTLY, validated
+/// byte-for-byte against live torch 2.11 over the full grid (sizes 2..6, all
+/// `lo,hi` in `-size-1..=size+1`):
+///
+/// - `:142` `TORCH_CHECK(pad_l <= size && pad_r <= size, "Padding value causes
+///   wrapping around more than once.")` — a pad strictly greater than `size`
+///   wraps more than once → `Err`.
+/// - `:144-145` `TORCH_CHECK(out_shape >= 0, "Negative padding value is
+///   resulting in an empty dimension")` — a negative net extent → `Err`; a net
+///   extent of EXACTLY `0` is allowed (an empty `[..,0]` dim, like
+///   `constant_pad_nd`), distinct from reflect which demands `>= 1`.
+/// - The slice-copy gather (`:148-187`): every output index `j` reads the
+///   source index `circular_axis_src(j, size, lo, hi)`. We validate that index
+///   lies in `0..size` for EVERY `j`, so the subsequent gather can never index
+///   out of bounds (Class C — no `R-CODE-2` panic). The cases this rejects are
+///   exactly the ones where torch's center copy is degenerate and the wrap
+///   reads uninitialized memory (torch returns nondeterministic garbage there;
+///   there is no byte-for-byte contract to match, so ferrotorch rejects
+///   cleanly — `R-DEV-6`).
+fn circular_axis_new_size(
+    size: usize,
+    lo: isize,
+    hi: isize,
+    dim: usize,
+) -> FerrotorchResult<usize> {
+    let size_i = size as isize;
+    // `:142` — a pad larger than the dim wraps around more than once.
+    if lo > size_i || hi > size_i {
+        return Err(FerrotorchError::InvalidArgument {
+            message: format!(
+                "Circular padding ({lo}, {hi}) causes wrapping around more than once on dimension {dim} (size {size})"
+            ),
+        });
+    }
+    // `:144-145` — a negative net extent is an error; net zero is an empty dim.
+    let out_w = size_i + lo + hi;
+    if out_w < 0 {
+        return Err(FerrotorchError::InvalidArgument {
+            message: format!(
+                "Circular padding ({lo}, {hi}) on dimension {dim} of size {size} results in a negative output size {out_w} (empty dimension)"
+            ),
+        });
+    }
+    // `:148-187` — pre-validate the gather: every output index must read an
+    // in-bounds source. This catches the mixed-sign over-crop cases torch can
+    // only express as uninitialized garbage, BEFORE any element is gathered.
+    let out_w = out_w as usize;
+    for j in 0..out_w {
+        let s = circular_axis_src(j, size, lo, hi);
+        if !(0..size_i).contains(&s) {
+            return Err(FerrotorchError::InvalidArgument {
+                message: format!(
+                    "Circular padding ({lo}, {hi}) on dimension {dim} of size {size} crops the center below the wrap width, so the wrap would read out of bounds (torch returns uninitialized data here)"
+                ),
+            });
+        }
+    }
+    Ok(out_w)
 }
 
 /// Resolve, for one axis, the source index a reflect/circular output index
 /// reads from the ORIGINAL input window. Both modes always read a real element
 /// (never a fill), so this returns a bare `usize`. `(lo, hi)` are the signed
-/// pads on this axis.
+/// pads on this axis. The circular index is pre-validated in
+/// `circular_axis_new_size` to lie in `0..size`, so the `as usize` cast here is
+/// always in-bounds (no OOB — R-CODE-2).
 #[inline]
 fn signed_mode_axis_src(mode: PaddingMode, j: usize, size: usize, lo: isize, hi: isize) -> usize {
     match mode {
         PaddingMode::Reflect => reflect_axis_src(j, size, lo),
-        PaddingMode::Circular => circular_axis_src(j, size, lo, hi),
+        PaddingMode::Circular => circular_axis_src(j, size, lo, hi) as usize,
         // Zeros routes through the constant gather; Replicate keeps the
         // crop-then-pad path. This resolver is only invoked for Reflect/Circular
         // (see `pad_nd_signed_reflect_circular` / `PadNdSignedModeBackward`); the
@@ -1608,31 +1724,27 @@ fn pad_nd_signed_reflect_circular<T: Float>(
                 ),
             });
         }
-        // Circular: torch rejects a positive pad larger than the dim ("Padding
-        // value causes wrapping around more than once.") — `pad_l <= size &&
-        // pad_r <= size` (`aten/src/ATen/native/PadNd.cpp:140-142`). On the
-        // negative side, torch's circular kernel produces undefined results
-        // (uninitialized memory / broadcast errors) once a crop reaches
-        // `pad <= -size`; ferrotorch's `circular_axis_src` would index OOB and
-        // PANIC there (R-CODE-2). Reject `lo <= -size || hi <= -size` so the
-        // gather never goes out of bounds — torch has no defined contract to
-        // match in that range.
-        if mode == PaddingMode::Circular && (lo > size || hi > size || lo <= -size || hi <= -size) {
-            return Err(FerrotorchError::InvalidArgument {
-                message: format!(
-                    "Circular padding ({lo}, {hi}) causes wrapping around more than once on dimension {dim} (size {size})"
-                ),
-            });
-        }
-        let new_size = size + lo + hi;
-        if new_size < 1 {
-            return Err(FerrotorchError::InvalidArgument {
-                message: format!(
-                    "padding ({lo}, {hi}) on dimension {dim} of size {size} yields non-positive output size {new_size}"
-                ),
-            });
-        }
-        new_shape[dim] = new_size as usize;
+        // Circular: the COMPLETE torch legality lives in `circular_axis_new_size`
+        // (`aten/src/ATen/native/PadNd.cpp:140-187`) — reject `pad > size`
+        // (`:142`), reject a negative net extent (`:144`), allow a net extent of
+        // exactly 0 (an empty dim, unlike reflect's `>= 1`), and pre-validate the
+        // gather so a mixed-sign over-crop is rejected BEFORE any element is read
+        // (Class C — no OOB panic). Reflect keeps its own `new_size < 1` reject
+        // below; only circular allows net-zero.
+        let new_size: usize = if mode == PaddingMode::Circular {
+            circular_axis_new_size(shape[dim], lo, hi, dim)?
+        } else {
+            let n = size + lo + hi;
+            if n < 1 {
+                return Err(FerrotorchError::InvalidArgument {
+                    message: format!(
+                        "padding ({lo}, {hi}) on dimension {dim} of size {size} yields non-positive output size {n}"
+                    ),
+                });
+            }
+            n as usize
+        };
+        new_shape[dim] = new_size;
     }
 
     let first_padded = ndim - npad;
