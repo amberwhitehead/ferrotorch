@@ -298,9 +298,19 @@ For each:
   opposite-side wrap (e.g. `circular [-1,2]` on size 2) is REJECTED:
   torch's slice-copy wrap reads uninitialized memory there (no defined
   byte-for-byte contract), so ferrotorch returns `InvalidArgument`
-  rather than panicking on an out-of-bounds gather (R-CODE-2). The full
+  rather than panicking on an out-of-bounds gather (R-CODE-2). A
+  mixed-sign NET-ZERO over-crop (`lo > 0`, `hi < 0`, `|hi| > size`,
+  `out_w == 0`, e.g. `circular [1,-4]` on size 3) is ALSO REJECTED:
+  torch's CENTER copy `out_slice.copy_(in_slice)` (`PadNd.cpp:158-161`)
+  finds a 0-element destination against an `inc = |hi| - size >= 2`
+  source slice that does not broadcast, raising "The size of tensor a
+  (0) must match the size of tensor b (N)"; `circular_axis_new_size`
+  mirrors this with a `copy_` broadcast-legality gate (#1627). The full
   accept/reject/empty/value behavior matches live torch 2.11 across the
-  grid sizes 2..6 × all `lo,hi` in `-size-1..=size+1` (#1624).
+  exhaustive grid sizes 1..6 × all `lo,hi` in `-(size+2)..=(size+2)`
+  (1-D) and sizes 1..3 (2-D): 0 accept-mismatch, 0 value/shape mismatch,
+  0 panic (the only ferro-Err/torch-OK residual is the R-DEV-6
+  uninitialized-garbage carve-out) (#1624 #1627).
 - **NaN / Inf preservation** — both modes pass NaN/Inf through
   unchanged (constant `value` is literally placed).
 

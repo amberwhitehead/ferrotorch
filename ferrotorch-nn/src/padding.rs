@@ -1635,13 +1635,33 @@ fn circular_axis_src(j: usize, size: usize, lo: isize, hi: isize) -> isize {
     lo.min(0).abs() + (center - lo_pos)
 }
 
+/// Size of `tensor.slice(dim, start, end)` for a `length`-element axis, mirroring
+/// torch's `slice_symint` index normalization (`aten/src/ATen/native/
+/// TensorShape.cpp` `slice`): a negative `start`/`end` is first normalized by
+/// `+ length`, then both are clamped to `[0, length]`, and the resulting extent
+/// is `max(0, end - start)`. Used to model the circular CENTER copy's slice
+/// sizes (`PadNd.cpp:158-161`) so the broadcast-legality of `copy_` can be
+/// validated without ever materializing the (possibly degenerate) tensor.
+#[inline]
+fn circular_slice_len(length: isize, mut start: isize, mut end: isize) -> isize {
+    if start < 0 {
+        start += length;
+    }
+    if end < 0 {
+        end += length;
+    }
+    start = start.clamp(0, length);
+    end = end.clamp(0, length);
+    (end - start).max(0)
+}
+
 /// Complete circular-pad legality for one axis, returning the new axis extent
 /// (`size + lo + hi`, which may be `0` for a net-zero crop → an empty dim).
 ///
-/// This mirrors `_pad_circular_symint`'s two `TORCH_CHECK`s and the slice-copy
-/// gather (`aten/src/ATen/native/PadNd.cpp:140-187`) EXACTLY, validated
-/// byte-for-byte against live torch 2.11 over the full grid (sizes 2..6, all
-/// `lo,hi` in `-size-1..=size+1`):
+/// This mirrors `_pad_circular_symint`'s two `TORCH_CHECK`s, the center
+/// slice-copy, and the wrap gather (`aten/src/ATen/native/PadNd.cpp:140-187`)
+/// EXACTLY, validated byte-for-byte against live torch 2.11 over the full grid
+/// (sizes 1..6, all `lo,hi` in `-(size+2)..=(size+2)`):
 ///
 /// - `:142` `TORCH_CHECK(pad_l <= size && pad_r <= size, "Padding value causes
 ///   wrapping around more than once.")` — a pad strictly greater than `size`
@@ -1650,6 +1670,15 @@ fn circular_axis_src(j: usize, size: usize, lo: isize, hi: isize) -> isize {
 ///   resulting in an empty dimension")` — a negative net extent → `Err`; a net
 ///   extent of EXACTLY `0` is allowed (an empty `[..,0]` dim, like
 ///   `constant_pad_nd`), distinct from reflect which demands `>= 1`.
+/// - `:158-161` the CENTER copy `out_slice.copy_(in_slice)`, where
+///   `out_slice = out.slice(dim, max(lo,0), out_w - max(hi,0))` has size `outc`
+///   and `in_slice = self.slice(dim, max(-lo,0), size - max(-hi,0))` has size
+///   `inc`. `copy_` broadcasts, so it RAISES iff `outc != inc && outc != 1 && inc != 1`.
+///   This is the gate that catches the mixed-sign NET-ZERO over-crops (`lo > 0`,
+///   `hi < 0`, `|hi| > size`, `out_w == 0`): there `outc == 0` while `inc >= 2`,
+///   so torch errors "The size of tensor a (0) must match the size of tensor
+///   b (N)" — the gather loop below never runs for `out_w == 0`, so without this
+///   check ferrotorch would wrongly accept the empty dim (#1627).
 /// - The slice-copy gather (`:148-187`): every output index `j` reads the
 ///   source index `circular_axis_src(j, size, lo, hi)`. We validate that index
 ///   lies in `0..size` for EVERY `j`, so the subsequent gather can never index
@@ -1679,6 +1708,19 @@ fn circular_axis_new_size(
         return Err(FerrotorchError::InvalidArgument {
             message: format!(
                 "Circular padding ({lo}, {hi}) on dimension {dim} of size {size} results in a negative output size {out_w} (empty dimension)"
+            ),
+        });
+    }
+    // `:158-161` — the center copy `out_slice.copy_(in_slice)` requires the two
+    // slices to be broadcast-compatible. `copy_` errors unless the sizes match
+    // OR one of them is 1. This catches the mixed-sign net-zero over-crop edge
+    // (`out_w == 0`, `inc >= 2`) that the gather loop below cannot see (#1627).
+    let outc = circular_slice_len(out_w, lo.max(0), out_w - hi.max(0));
+    let inc = circular_slice_len(size_i, (-lo).max(0), size_i - (-hi).max(0));
+    if outc != inc && outc != 1 && inc != 1 {
+        return Err(FerrotorchError::InvalidArgument {
+            message: format!(
+                "Circular padding ({lo}, {hi}) on dimension {dim} of size {size}: the wrap source ({inc}) does not match the cropped center ({outc}) and neither broadcasts (torch raises a size-mismatch here)"
             ),
         });
     }
