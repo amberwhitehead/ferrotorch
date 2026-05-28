@@ -743,40 +743,40 @@
    "status": "verified",
    "last_sweep_at": "2026-05-28T00:00:00Z",
    "samples_attempted": 80,
-   "samples_passed": 48,
+   "samples_passed": 80,
    "samples_failed": 0,
-   "samples_skipped": 32,
-   "pytorch_source": "torch/nn/functional.py F.conv_transpose1d(input, weight, bias=None, stride=1, padding=0, output_padding=0, groups=1, dilation=1); aten/src/ATen/native/Convolution.cpp; unbatched batchify Convolution.cpp:816-831",
+   "samples_skipped": 0,
+   "pytorch_source": "torch/nn/functional.py F.conv_transpose1d(input, weight, bias=None, stride=1, padding=0, output_padding=0, groups=1, dilation=1); torch/overrides.py:558; aten/src/ATen/native/Convolution.cpp; weight [in,out/groups,*k] torch/nn/modules/conv.py:161-166; per-group partition Convolution.cpp:1723-1729; unbatched batchify Convolution.cpp:1178",
    "ferrotorch_source": "pub fn conv_transpose1d in ferrotorch-nn/src/functional.rs builds ConvTranspose1d::from_parts (stride/padding/output_padding; groups=1, dilation=1 only); non-test consumer ferrotorch-nn/src/lazy_conv_transpose.rs LazyConvTranspose1d::materialize + pub use in lib.rs",
-   "runner_arm": "tools/parity-sweep/runner/src/main.rs dispatch_conv_transpose::<1> decodes stride/padding/output_padding + bias; UNBATCHED rank-(D+1) samples run via runner-side batchify (view_reshape add/drop batch dim, mirroring torch batchify) on the production batched forward (#1441)",
+   "runner_arm": "tools/parity-sweep/runner/src/main.rs dispatch_conv_transpose::<1> now builds ConvTranspose1d::new_full(.., dilation, groups, bias) + inject_conv_params (Parameter::set_data) + Module::forward, exercising the PRODUCTION per-group (#1607) + dilated (#1608) forward and the rank-(D+1) unbatched implicit-batch path (<ConvTranspose1d as Module>::forward unsqueeze/squeeze, #1609). 0 skip (#1441)",
    "tolerance": "rtol=1e-4, atol=1e-5 (col2im+GEMM FMA + catastrophic-cancellation envelope; moved from atol=1e-7, #1441)",
-   "known_divergences": ["groups!=1 -> Ok(None) skip, blocker #1607 (ConvTranspose has no grouped forward)", "dilation!=1 -> Ok(None) skip, blocker #1608 (ConvTranspose has no dilated forward); 32 skips = 16 dilation-only + 16 groups+dilation"]
+   "known_divergences": []
   },
   "nn.functional.conv_transpose2d": {
    "status": "verified",
    "last_sweep_at": "2026-05-28T00:00:00Z",
    "samples_attempted": 96,
-   "samples_passed": 48,
+   "samples_passed": 96,
    "samples_failed": 0,
-   "samples_skipped": 48,
-   "pytorch_source": "torch/nn/functional.py F.conv_transpose2d(...); aten/src/ATen/native/NaiveConvolutionTranspose2d.cpp:109-112 output size; unbatched batchify Convolution.cpp:816-831",
+   "samples_skipped": 0,
+   "pytorch_source": "torch/nn/functional.py F.conv_transpose2d(...); torch/overrides.py:559; aten/src/ATen/native/NaiveConvolutionTranspose2d.cpp:109-112 output size; per-group partition Convolution.cpp:1723-1729; unbatched batchify Convolution.cpp:1197",
    "ferrotorch_source": "pub fn conv_transpose2d in ferrotorch-nn/src/functional.rs builds ConvTranspose2d::from_parts (groups=1, dilation=1 only); non-test consumer ferrotorch-nn/src/lazy_conv_transpose.rs + ferrotorch-vision/src/models/inception.rs uses ConvTranspose2d",
-   "runner_arm": "tools/parity-sweep/runner/src/main.rs dispatch_conv_transpose::<2>; unbatched rank-(D+1) run via runner-side batchify (#1441)",
+   "runner_arm": "tools/parity-sweep/runner/src/main.rs dispatch_conv_transpose::<2> now builds ConvTranspose2d::new_full(.., dilation, groups, bias) + inject_conv_params + Module::forward, exercising the PRODUCTION per-group (#1607) + dilated (#1608) forward and the rank-(D+1) unbatched path (#1609). 0 skip (#1441)",
    "tolerance": "rtol=1e-4, atol=1e-5 (col2im+GEMM FMA envelope; #1441)",
-   "known_divergences": ["groups!=1 -> Ok(None) skip, blocker #1607", "dilation!=1 -> Ok(None) skip, blocker #1608; 48 skips = 16 groups-only + 16 dilation-only + 16 groups+dilation"]
+   "known_divergences": []
   },
   "nn.functional.conv_transpose3d": {
-   "status": "verified",
+   "status": "divergence_surfaced",
    "last_sweep_at": "2026-05-28T00:00:00Z",
    "samples_attempted": 80,
-   "samples_passed": 48,
-   "samples_failed": 0,
-   "samples_skipped": 32,
-   "pytorch_source": "torch/nn/functional.py F.conv_transpose3d(...); aten/src/ATen/native/Convolution.cpp; unbatched batchify Convolution.cpp:816-831",
+   "samples_passed": 64,
+   "samples_failed": 16,
+   "samples_skipped": 0,
+   "pytorch_source": "torch/nn/functional.py F.conv_transpose3d(...); torch/overrides.py:560; aten/src/ATen/native/Convolution.cpp; per-group partition Convolution.cpp:1723-1729; unbatched batchify Convolution.cpp:1216",
    "ferrotorch_source": "pub fn conv_transpose3d in ferrotorch-nn/src/functional.rs builds ConvTranspose3d::from_parts (groups=1, dilation=1 only); non-test consumer ferrotorch-nn/src/lazy_conv_transpose.rs LazyConvTranspose3d::materialize + pub use in lib.rs",
-   "runner_arm": "tools/parity-sweep/runner/src/main.rs dispatch_conv_transpose::<3>; unbatched rank-(D+1) run via runner-side batchify (#1441)",
+   "runner_arm": "tools/parity-sweep/runner/src/main.rs dispatch_conv_transpose::<3> now builds ConvTranspose3d::new_full(.., dilation, groups, bias) + inject_conv_params + Module::forward (production per-group/dilated/unbatched path). 0 skip (#1441) — the dilated samples now RUN, surfacing the production divergence below instead of hiding it behind a skip.",
    "tolerance": "rtol=1e-4, atol=1e-5 (col2im+GEMM many-FMA catastrophic-cancellation: seed=7 i=0 index 454 ferro 0.022621393 vs torch 0.022624016 absdiff 2.6e-6 rel 1.16e-4, 5-sig-fig match, pure FMA-order; was atol=1e-7 which surfaced once 3-D samples ran, #1441)",
-   "known_divergences": ["groups!=1 -> Ok(None) skip, blocker #1607", "dilation!=1 -> Ok(None) skip, blocker #1608; 32 skips = 16 dilation-only + 16 groups+dilation"]
+   "known_divergences": ["PRODUCTION DIVERGENCE (blocker #1619): conv_transpose3d sample 4 (batched) / sample 5 (unbatched), ALL seeds, output_padding=1 + dilation=(2,3,2) stride=2 padding=1. 16 FAILED samples (= 2 samples x 8 seeds). ferrotorch=3.3094802 (bias alone -> zero scatter) vs torch=-94.20793 at flat index 279. conv_transpose3d_forward_group in ferrotorch-nn/src/conv.rs drops input contributions into the output_padding-extended trailing region when dilation>1. Production fix needed in ferrotorch-nn/src/conv.rs (OUTSIDE the #1441 test-infra manifest); contradicts the REQ-6/#1608 'dilated forward verified' claim for the 3-D rank."]
   },
   "nn.functional.pad": {
    "status": "verified",
@@ -808,14 +808,14 @@
    "status": "verified",
    "last_sweep_at": "2026-05-28T00:00:00Z",
    "samples_attempted": 392,
-   "samples_passed": 296,
+   "samples_passed": 392,
    "samples_failed": 0,
-   "samples_skipped": 96,
-   "pytorch_source": "torch/nn/functional.py F.embedding_bag(input, weight, offsets, max_norm, norm_type, scale_grad_by_freq, mode='mean', sparse, per_sample_weights, include_last_offset, padding_idx); aten/src/ATen/native/EmbeddingBag.cpp:140-156 padding_idx exclusion",
-   "ferrotorch_source": "pub struct EmbeddingBag<T> + EmbeddingBagMode{Sum,Mean,Max} in ferrotorch-nn/src/embedding.rs; new_with + with_max_norm/with_norm_type/with_scale_grad_by_freq/with_include_last_offset (#1445); forward_bag(indices, offsets) excludes padding_idx from reduction + mean divisor; non-test consumer pub use in lib.rs (boundary public API per goal.md S5)",
-   "runner_arm": "tools/parity-sweep/runner/src/main.rs \"nn.functional.embedding_bag\" arm builds EmbeddingBag::new_with + with_* + Parameter::set_data (Module::parameters_mut) + forward_bag (1-D + offsets) / Module::forward (2-D fixed bags); mode sum/mean/max, offsets, include_last_offset, padding_idx (neg-wrapped), max_norm/norm_type, scale_grad_by_freq (forward-inert) ALL RUN (#1441)",
-   "tolerance": "default rtol=1e-5, atol=1e-7 (bag sum/mean/max reduction within default)",
-   "known_divergences": ["per_sample_weights -> Ok(None) skip, blocker #1610 (forward_bag takes no per-index multiplier). All 96 skips are per_sample_weights samples"]
+   "samples_skipped": 0,
+   "pytorch_source": "torch/nn/functional.py F.embedding_bag(input, weight, offsets, max_norm, norm_type, scale_grad_by_freq, mode='mean', sparse, per_sample_weights, include_last_offset, padding_idx); 2-D input reshapes BOTH input and per_sample_weights to -1 functional.py:2730-2738; per-sample scale before reduction aten/src/ATen/native/EmbeddingBag.cpp:537-543; padding_idx exclusion EmbeddingBag.cpp:140-156",
+   "ferrotorch_source": "pub struct EmbeddingBag<T> + EmbeddingBagMode{Sum,Mean,Max} in ferrotorch-nn/src/embedding.rs; new_with + with_max_norm/with_norm_type/with_scale_grad_by_freq/with_include_last_offset (#1445); forward_bag_weighted(indices, offsets, per_sample_weights) — sum-mode-only per-index scale (#1610) — with forward_bag delegating to it; excludes padding_idx from reduction + mean divisor; non-test consumer pub use in lib.rs (boundary public API per goal.md S5)",
+   "runner_arm": "tools/parity-sweep/runner/src/main.rs \"nn.functional.embedding_bag\" arm builds EmbeddingBag::new_with + with_* + Parameter::set_data (Module::parameters_mut) + forward_bag_weighted (1-D + offsets, optional per_sample_weights) / flatten-to-1D + implicit per-row offsets for 2-D fixed bags (mirroring functional.py:2730-2738); mode sum/mean/max, offsets, include_last_offset, padding_idx (neg-wrapped), max_norm/norm_type, scale_grad_by_freq (forward-inert), AND per_sample_weights (#1610) ALL RUN. 0 skip (#1441)",
+   "tolerance": "default rtol=1e-5, atol=1e-7 (bag sum/mean/max reduction + per-sample-weighted sum within default)",
+   "known_divergences": []
   }
  }
 }

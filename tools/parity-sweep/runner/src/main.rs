@@ -4439,25 +4439,22 @@ fn dispatch_f32(
         // `functional.py:2621-2624`) — all via `new_with` + the `with_*`
         // builders (#1445).
         //
-        // GENUINE production gap (NOT an acceptable dodge): `per_sample_weights`
-        // (a per-index multiplier applied before the bag reduction,
-        // `functional.py:2774-2783`) has NO production surface — `forward_bag`
-        // takes no per-sample weights. op_db emits it on most samples; each
-        // stays an `Ok(None)` skip mapped to blocker #1610.
+        // `per_sample_weights` (a per-index multiplier applied before the bag
+        // reduction, `aten/src/ATen/native/EmbeddingBag.cpp:537-543`) is now
+        // SHIPPED in production (#1610) via `EmbeddingBag::forward_bag_weighted`
+        // (sum-mode only). The runner FEEDS the op_db `per_sample_weights`
+        // samples through it, decoding `psw` + flattening it alongside the
+        // indices for the 2-D fixed-bag layout exactly as torch does
+        // (`torch/nn/functional.py:2736-2738` reshapes BOTH `input` and
+        // `per_sample_weights` to `-1`). Closes the #1610 runner-arm gap for
+        // #1441 — the 96 `per_sample_weights` samples RUN instead of skipping.
         //
         // `scale_grad_by_freq` / `sparse` are BACKWARD-only knobs (forward
         // value unchanged); they RUN. The runner compares only the forward
-        // output. Closes #1441 embedding_bag half (modulo #1610).
+        // output.
         "nn.functional.embedding_bag" => {
             if args.len() < 2 {
                 return Err("nn.functional.embedding_bag: needs [weight, indices]".into());
-            }
-            // per_sample_weights is unsupported in production (gap #1610).
-            if kwargs
-                .get("per_sample_weights")
-                .is_some_and(|v| !v.is_null())
-            {
-                return Ok(None);
             }
             let weight_wire = unwrap_tensor_arg(&args[0])
                 .ok_or("nn.functional.embedding_bag: weight not a tensor")?;
@@ -4529,6 +4526,18 @@ fn dispatch_f32(
                     p.set_data(weight);
                 }
             }
+            // Decode the optional `per_sample_weights` (sum-mode only; #1610).
+            // It carries the SAME shape as the indices on the wire — torch
+            // flattens both to `-1` for 2-D fixed-bag inputs
+            // (`functional.py:2736-2738`), so we mirror that below.
+            let psw: Option<Tensor<f32>> = match kwargs.get("per_sample_weights") {
+                Some(v) if !v.is_null() => Some(
+                    unwrap_tensor_arg(v)
+                        .ok_or("embedding_bag: per_sample_weights not a tensor")?
+                        .to_f32()?,
+                ),
+                _ => None,
+            };
             let indices = idx_wire.to_f32()?;
             match idx_wire.shape.len() {
                 1 => {
@@ -4552,14 +4561,38 @@ fn dispatch_f32(
                             }
                         }
                     };
-                    Ok(Some(bag.forward_bag(&indices, &offsets)?))
+                    // `forward_bag_weighted` is the unified reduction body
+                    // (`forward_bag` delegates to it with `None`); when `psw`
+                    // is present it scales each gathered row before the sum
+                    // (#1610). 1-D psw is already index-shaped.
+                    Ok(Some(bag.forward_bag_weighted(
+                        &indices,
+                        &offsets,
+                        psw.as_ref(),
+                    )?))
                 }
                 2 => {
-                    // 2-D indices `[num_bags, bag_size]`: each row is a bag.
-                    // `Module::forward` builds the implicit per-row offsets
-                    // (`embedding.rs` 2-D branch) and reduces each row.
-                    Ok(Some(ferrotorch_nn::module::Module::<f32>::forward(
-                        &bag, &indices,
+                    // 2-D indices `[num_bags, bag_size]`: each row is a fixed
+                    // bag. Flatten the indices to 1-D and build the implicit
+                    // per-row offsets (`offsets[b] = b * bag_size`), exactly as
+                    // `<EmbeddingBag as Module>::forward`'s 2-D branch and
+                    // torch's `functional.py:2730-2738` do. `per_sample_weights`
+                    // is flattened the SAME way (`functional.py:2737-2738`
+                    // `per_sample_weights.reshape(-1)`) so it stays
+                    // index-aligned for `forward_bag_weighted`.
+                    let num_bags = idx_wire.shape[0];
+                    let bag_size = idx_wire.shape[1];
+                    let total = num_bags * bag_size;
+                    let flat_indices = indices.view_reshape(vec![total])?;
+                    let offsets: Vec<usize> = (0..num_bags).map(|b| b * bag_size).collect();
+                    let flat_psw = match psw {
+                        Some(p) => Some(p.view_reshape(vec![total])?),
+                        None => None,
+                    };
+                    Ok(Some(bag.forward_bag_weighted(
+                        &flat_indices,
+                        &offsets,
+                        flat_psw.as_ref(),
                     )?))
                 }
                 _ => Ok(None),
@@ -4586,10 +4619,17 @@ fn dispatch_f32(
         "nn.functional.conv2d" => dispatch_conv::<2>(args, kwargs),
         "nn.functional.conv3d" => dispatch_conv::<3>(args, kwargs),
 
-        // `torch.nn.functional.conv_transpose{1,2,3}d`. ferrotorch's
-        // `pub fn conv_transpose{1,2,3}d` at
-        // `ferrotorch-nn/src/functional.rs:1153-1209` mirrors. Skip
-        // dilation != 1 and groups != 1. Closes #1441 conv_transpose half.
+        // `torch.nn.functional.conv_transpose{1,2,3}d(input, weight, bias=None,
+        // stride=1, padding=0, output_padding=0, groups=1, dilation=1)`
+        // (`torch/overrides.py:558-560`). All three ranks now build via
+        // `ConvTranspose{1,2,3}d::new_full(.., dilation, groups, bias)` +
+        // `Parameter::set_data` + `Module::forward`, so each reaches the
+        // production per-group + dilated transposed forward (#1607 groups,
+        // #1608 dilation) and the rank-`(D+1)` unbatched implicit-batch path
+        // (#1609). No conv_transpose config ferrotorch supports is skipped —
+        // the dispatch returns `Err` for genuinely malformed samples so they
+        // SURFACE. See `dispatch_conv_transpose` for the shared body. Closes
+        // the #1607/#1608/#1609 runner-arm gaps for #1441.
         "nn.functional.conv_transpose1d" => dispatch_conv_transpose::<1>(args, kwargs),
         "nn.functional.conv_transpose2d" => dispatch_conv_transpose::<2>(args, kwargs),
         "nn.functional.conv_transpose3d" => dispatch_conv_transpose::<3>(args, kwargs),
@@ -6392,6 +6432,27 @@ fn apply_string_padding_3d(
     })
 }
 
+/// Transposed-convolution dispatcher shared by conv_transpose1d/2d/3d.
+///
+/// All three ranks build via `ConvTranspose{1,2,3}d::new_full(in, out, kernel,
+/// stride, padding, output_padding, dilation, groups, bias?)`, inject the op_db
+/// sample's `weight` / `bias` via `Parameter::set_data`, then run
+/// `Module::forward` — so each reaches the PRODUCTION per-group + dilated CPU
+/// transposed forward (#1607 groups, #1608 dilation) and the rank-`(D+1)`
+/// unbatched implicit-batch path (`<ConvTranspose*d as Module>::forward`
+/// `unsqueeze`/recurse/`squeeze`, #1609; mirrors `batchify` at
+/// `aten/src/ATen/native/Convolution.cpp:1178, 1197, 1216`). This replaces the
+/// old `functional::conv_transpose*` (`from_parts`, dense `groups=1`/
+/// `dilation=1` only) + runner-side batchify path, so the grouped / dilated /
+/// unbatched op_db samples now RUN instead of `Ok(None)`-skipping — closing the
+/// #1607/#1608/#1609 runner-arm gaps for #1441.
+///
+/// Transposed weight layout is `[in_channels, out_channels/groups, *kernel]`
+/// (`torch/nn/modules/conv.py:161-166`); `out_channels = weight.shape[1] *
+/// groups`, the per-group channel partition (`Convolution.cpp:1723-1729`). The
+/// F.conv_transpose signature is `(input, weight, bias=None, stride=1,
+/// padding=0, output_padding=0, groups=1, dilation=1)`
+/// (`torch/overrides.py:558-560`).
 fn dispatch_conv_transpose<const D: usize>(
     args: &[Value],
     kwargs: &serde_json::Map<String, Value>,
@@ -6399,34 +6460,8 @@ fn dispatch_conv_transpose<const D: usize>(
     if args.len() < 2 {
         return Err("conv_transpose: needs [input, weight, bias?]".into());
     }
-    // GENUINE production feature gaps (NOT acceptable dodges): ferrotorch's
-    // `functional::conv_transpose{1,2,3}d` build a `ConvTranspose{1,2,3}d` via
-    // `from_parts`, which is `groups = 1`, `dilation = 1` only (`conv.rs`
-    // `ConvTranspose*::from_parts`). op_db samples with `groups != 1` or
-    // `dilation != 1` therefore have no production path; each stays an
-    // `Ok(None)` skip mapped to a filed blocker (#1607 groups, #1608 dilation)
-    // — surfacing the gap rather than hiding a divergence. If the production
-    // ConvTranspose grows grouped/dilated forwards, drop the skip here.
-    let groups = kwargs.get("groups").and_then(Value::as_u64).unwrap_or(1);
-    if groups != 1 {
-        // Production gap #1607: ConvTranspose has no grouped forward.
-        return Ok(None);
-    }
-    if let Some(d) = kwargs.get("dilation") {
-        if let Some(n) = d.as_u64() {
-            if n != 1 {
-                // Production gap #1608: ConvTranspose has no dilated forward.
-                return Ok(None);
-            }
-        } else if let Some(arr) = d.as_array() {
-            for x in arr {
-                if x.as_u64().unwrap_or(0) != 1 {
-                    // Production gap #1608: ConvTranspose has no dilated forward.
-                    return Ok(None);
-                }
-            }
-        }
-    }
+    let groups = kwargs.get("groups").and_then(Value::as_u64).unwrap_or(1) as usize;
+
     let input = unwrap_tensor_arg(&args[0])
         .ok_or("conv_transpose: input")?
         .to_f32()?;
@@ -6437,83 +6472,97 @@ fn dispatch_conv_transpose<const D: usize>(
         Some(v) if !v.is_null() => unwrap_tensor_arg(v).map(|b| b.to_f32()).transpose()?,
         _ => None,
     };
-    // ConvTranspose{1,2,3}d::forward requires a batched (D + 2)-rank input
-    // `[B, C_in, *spatial]` — unlike the forward `Conv*d` it has NO implicit-
-    // batch (unsqueeze/squeeze) path (the unbatched forward is production gap
-    // #1609; `Conv*d` got it in #1604 but `ConvTranspose*d` did not). op_db
-    // emits ~half its samples unbatched (rank `D + 1`, `[C_in, *spatial]`). We
-    // do NOT silently skip those: instead the runner performs the SAME
-    // `batchify` torch does (`aten/.../Convolution.cpp:816-831`) as a pure
-    // test-side adaptation — prepend a singleton batch dim, run the REAL
-    // production batched forward, then drop the batch dim off the result. The
-    // computed value is byte-identical to torch's unbatched output (torch
-    // unsqueezes/squeezes the exact same way), so this exercises the production
-    // forward on the op_db parameters without masking any divergence. Only
-    // genuinely unsupported configs (groups/dilation above) stay `Ok(None)`.
-    let rank = input.shape().len();
-    let (input, was_unbatched) = if rank == D + 1 {
-        let mut batched_shape = vec![1usize];
-        batched_shape.extend_from_slice(input.shape());
-        (input.view_reshape(batched_shape)?, true)
-    } else if rank == D + 2 {
-        (input, false)
-    } else {
-        // Neither batched nor unbatched for this rank — a malformed sample.
-        // Surface as an Err so it is not silently hidden.
-        return Err(
-            format!("conv_transpose{D}d: input rank {rank} is neither (D+1) nor (D+2)").into(),
-        );
-    };
+
+    // `<ConvTranspose*d as Module>::forward` accepts both the batched
+    // (D + 2)-rank `[B, C_in, *spatial]` form and the unbatched (D + 1)-rank
+    // `[C_in, *spatial]` form (the production unsqueeze/squeeze implicit-batch
+    // path, #1609). Anything else is a genuinely malformed sample, surfaced as
+    // an `Err` so it is never silently hidden.
+    if input.ndim() != D + 1 && input.ndim() != D + 2 {
+        return Err(format!(
+            "conv_transpose{D}d: input rank {} is neither (D+1) nor (D+2)",
+            input.ndim()
+        )
+        .into());
+    }
+    // Transposed weight is `[in_channels, out_channels/groups, *kernel]`
+    // (rank D + 2).
+    if weight.ndim() != D + 2 {
+        return Err(format!(
+            "conv_transpose{D}d: weight rank {} != D+2 ({}) for D={D}",
+            weight.ndim(),
+            D + 2
+        )
+        .into());
+    }
+    let in_channels = weight.shape()[0];
+    let out_per_group = weight.shape()[1];
+    let out_channels = out_per_group * groups;
+
     let out = match D {
         1 => {
+            let kernel_size = weight.shape()[2];
             let stride = parse_dim1(kwargs.get("stride")).unwrap_or(1);
             let padding = parse_dim1(kwargs.get("padding")).unwrap_or(0);
             let outpad = parse_dim1(kwargs.get("output_padding")).unwrap_or(0);
-            ferrotorch_nn::functional::conv_transpose1d(
-                &input,
-                &weight,
-                bias.as_ref(),
+            let dilation = parse_dim1(kwargs.get("dilation")).unwrap_or(1);
+            let mut conv = ferrotorch_nn::ConvTranspose1d::<f32>::new_full(
+                in_channels,
+                out_channels,
+                kernel_size,
                 stride,
                 padding,
                 outpad,
-            )?
+                dilation,
+                groups,
+                bias.is_some(),
+            )?;
+            inject_conv_params(&mut conv, weight, bias);
+            ferrotorch_nn::module::Module::<f32>::forward(&conv, &input)?
         }
         2 => {
+            let kernel_size = (weight.shape()[2], weight.shape()[3]);
             let stride = parse_dim2(kwargs.get("stride")).unwrap_or([1, 1]);
             let padding = parse_dim2(kwargs.get("padding")).unwrap_or([0, 0]);
             let outpad = parse_dim2(kwargs.get("output_padding")).unwrap_or([0, 0]);
-            ferrotorch_nn::functional::conv_transpose2d(
-                &input,
-                &weight,
-                bias.as_ref(),
+            let dilation = parse_dim2(kwargs.get("dilation")).unwrap_or([1, 1]);
+            let mut conv = ferrotorch_nn::ConvTranspose2d::<f32>::new_full(
+                in_channels,
+                out_channels,
+                kernel_size,
                 (stride[0], stride[1]),
                 (padding[0], padding[1]),
                 (outpad[0], outpad[1]),
-            )?
+                (dilation[0], dilation[1]),
+                groups,
+                bias.is_some(),
+            )?;
+            inject_conv_params(&mut conv, weight, bias);
+            ferrotorch_nn::module::Module::<f32>::forward(&conv, &input)?
         }
         3 => {
+            let kernel_size = (weight.shape()[2], weight.shape()[3], weight.shape()[4]);
             let stride = parse_dim3(kwargs.get("stride")).unwrap_or([1, 1, 1]);
             let padding = parse_dim3(kwargs.get("padding")).unwrap_or([0, 0, 0]);
             let outpad = parse_dim3(kwargs.get("output_padding")).unwrap_or([0, 0, 0]);
-            ferrotorch_nn::functional::conv_transpose3d(
-                &input,
-                &weight,
-                bias.as_ref(),
+            let dilation = parse_dim3(kwargs.get("dilation")).unwrap_or([1, 1, 1]);
+            let mut conv = ferrotorch_nn::ConvTranspose3d::<f32>::new_full(
+                in_channels,
+                out_channels,
+                kernel_size,
                 (stride[0], stride[1], stride[2]),
                 (padding[0], padding[1], padding[2]),
                 (outpad[0], outpad[1], outpad[2]),
-            )?
+                (dilation[0], dilation[1], dilation[2]),
+                groups,
+                bias.is_some(),
+            )?;
+            inject_conv_params(&mut conv, weight, bias);
+            ferrotorch_nn::module::Module::<f32>::forward(&conv, &input)?
         }
         _ => return Err("conv_transpose: unsupported rank".into()),
     };
-    // Squeeze the singleton batch dim back off when we batchified an unbatched
-    // sample, so the output rank matches torch's unbatched `[C_out, *spatial]`.
-    if was_unbatched {
-        let squeezed: Vec<usize> = out.shape()[1..].to_vec();
-        Ok(Some(out.view_reshape(squeezed)?))
-    } else {
-        Ok(Some(out))
-    }
+    Ok(Some(out))
 }
 
 /// RNN-relu / RNN-tanh single-step cell dispatcher.

@@ -100,9 +100,11 @@ reduction with the mean divisor decremented).
   samples contribute 0 to the reduction and to BOTH gradients (skipped at
   `EmbeddingBag.cpp:537,1561,1720`). The unweighted 2-arg `forward_bag`
   delegates to `forward_bag_weighted(.., None)` and is unchanged (non-grad
-  reduction). The runner arm that FEEDS the 96 `per_sample_weights` op_db
-  samples is a separate test-infrastructure follow-up (goal.md S5); the
-  production capability is verified by the live-torch oracle lib tests.
+  reduction). The runner arm now FEEDS the 96 `per_sample_weights` op_db
+  samples through `forward_bag_weighted` (#1441): for the 2-D fixed-bag layout
+  the indices AND `psw` are both flattened to 1-D with implicit per-row offsets
+  exactly as torch does (`functional.py:2736-2738`). The production capability
+  is verified by the live-torch oracle lib tests AND the parity sweep.
 - REQ-10: SHIPPED — parity-sweep runner arms for
   `nn.functional.embedding` and `nn.functional.embedding_bag` are wired
   in `tools/parity-sweep/runner/src/main.rs` (#1441). The `embedding`
@@ -111,14 +113,13 @@ reduction with the mean divisor decremented).
   (0-D / 1-D / N-D indices, `max_norm` / `norm_type`,
   `scale_grad_by_freq` + `sparse` forward-inert all RUN); reaches
   80/80 at `--seeds 8` (0 skip, 0 failed). The `embedding_bag` arm
-  builds `EmbeddingBag::new_with` + `with_*` + `forward_bag` (1-D +
-  offsets) / `Module::forward` (2-D fixed bags) covering
-  sum/mean/max, offsets, include_last_offset, padding_idx (negatives
-  wrapped), max_norm/norm_type; reaches 296/392 at `--seeds 8`
-  (0 failed). The 96 `embedding_bag` skips are ALL
-  `per_sample_weights` samples — a genuine production gap
-  (`forward_bag` takes no per-index multiplier), filed as blocker
-  #1610.
+  builds `EmbeddingBag::new_with` + `with_*` + `forward_bag_weighted` (1-D +
+  offsets, optional `per_sample_weights`) / flatten-to-1D + implicit per-row
+  offsets for 2-D fixed bags, covering sum/mean/max, offsets,
+  include_last_offset, padding_idx (negatives wrapped), max_norm/norm_type,
+  AND `per_sample_weights` (#1610); reaches 392/392 at `--seeds 8`
+  (0 skip, 0 failed). The 96 `per_sample_weights` samples that previously
+  `Ok(None)`-skipped now RUN through `forward_bag_weighted`.
 
 ## Acceptance Criteria
 
@@ -142,8 +143,9 @@ reduction with the mean divisor decremented).
   `test_scale_grad_by_freq_off_accumulates`).
 - [x] AC-9: parity-sweep arms wired — #1441. `nn.functional.embedding`
   reaches 80/80 (0 skip, 0 failed); `nn.functional.embedding_bag`
-  reaches 296/392 (0 failed; the 96 skips are all `per_sample_weights`
-  samples, production gap #1610).
+  reaches 392/392 (0 skip, 0 failed) — the 96 `per_sample_weights`
+  samples now RUN through `forward_bag_weighted` (#1610) instead of
+  skipping.
 
 ## Architecture
 
@@ -248,17 +250,18 @@ For `embedding_bag`:
 - **per_sample_weights** — IMPLEMENTED in production (#1610) via
   `EmbeddingBag::forward_bag_weighted` (sum-mode-only scaling + grad to
   BOTH weight and psw; `mode!='sum'` and shape-mismatch errors match
-  torch). The runner arm still returns `Ok(None)` for these 96 samples —
-  feeding them is a separate test-infrastructure follow-up (goal.md S5,
-  one umbrella runner-arm gap, NOT a REQ blocker); the production
-  capability is verified by live-torch 2.11 oracle lib tests
-  (`test_bag_psw_*`). (Previously mis-cited #1445, which was the
-  max_norm/norm_type work — corrected to #1610.)
+  torch). The runner arm now FEEDS these 96 samples through
+  `forward_bag_weighted` (#1441): the 2-D fixed-bag samples flatten both the
+  indices and `psw` to 1-D with implicit per-row offsets, mirroring torch's
+  `functional.py:2736-2738` reshape-to-`-1`. Verified by live-torch 2.11 oracle
+  lib tests (`test_bag_psw_*`) AND the parity sweep at 0-skip / 0-failed.
+  (Previously mis-cited #1445, which was the max_norm/norm_type work —
+  corrected to #1610.)
 
 Parity-sweep audit entries: both ops `verified` (#1441) —
 `nn.functional.embedding` at 80/80 (0 skip / 0 failed),
-`nn.functional.embedding_bag` at 296/392 (0 failed; 96 skips =
-`per_sample_weights`, #1610).
+`nn.functional.embedding_bag` at 392/392 (0 skip / 0 failed; the 96
+`per_sample_weights` samples now RUN, #1610).
 
 ## Verification
 
@@ -273,14 +276,15 @@ Tests in `mod tests` of `embedding.rs` (~20 tests):
   `test_embedding_bag_max`,
   `test_embedding_bag_2d_fixed_bags`.
 
-Parity-sweep smoke commands (currently 0/N passed, N skipped):
+Parity-sweep smoke commands (both at 0-skip / 0-failed after #1441):
 
 ```bash
 ./target/release/parity-sweep sweep --op nn.functional.embedding --seeds 8 2>&1 | tail -1
 ./target/release/parity-sweep sweep --op nn.functional.embedding_bag --seeds 8 2>&1 | tail -1
 ```
 
-Expected grep count after blocker #1441 closes: `>= 1` for each.
+Grep count `passed (0 skipped, 0 failed)` is `>= 1` for each (embedding
+80/80, embedding_bag 392/392).
 
 ## REQ status table
 
@@ -295,5 +299,5 @@ Expected grep count after blocker #1441 closes: `>= 1` for each.
 | REQ-7 | SHIPPED | impl: `pub struct EmbeddingBag<T: Float>` + `pub enum EmbeddingBagMode` + `impl Module` in `embedding.rs`; non-test consumer: `pub use embedding::{EmbeddingBag, EmbeddingBagMode}` in `lib.rs` exposes the type for downstream models. |
 | REQ-8 | SHIPPED | impl: both `Module<T> for Embedding<T>` and `Module<T> for EmbeddingBag<T>` impl blocks in `embedding.rs`; non-test consumer: `ferrotorch_optim::Optimizer` iterates `model.parameters_mut()` which surfaces the embedding's weight parameter for every step. |
 | REQ-9 | SHIPPED | impl: free fn `renorm_weight_rows_in_place` (faithful `embedding_renorm_cpu_` translation, persisted in-place weight mutation via `Tensor::update_data`, row norm via `at::norm` special-cased per `aten/src/ATen/native/cpu/ReduceOpsKernel.cpp:191-203` for `norm_type` 0/+inf/-inf; the default `norm_type == 2.0` f32 row reduces via `ferrotorch_core::simd_reduce::l2_norm_f32_torch` per the vectorized last-dim L2 kernel `ReduceOpsKernel.cpp:222-255`, f32 accumulator, so the `norm > max_norm` boundary decision matches torch byte-for-byte — closes the powf-vs-`v*v` summation gap #1612 left open, #1614) in `embedding.rs`, called by `Embedding::renorm_weight_in_place` and `EmbeddingBag::forward_bag`; `with_max_norm`/`with_norm_type`/`with_scale_grad_by_freq` on `Embedding`, plus `EmbeddingBag::new_with` + `with_max_norm`/`with_norm_type`/`with_scale_grad_by_freq`/`with_sparse`/`with_include_last_offset` + `padding_idx` exclusion in `forward_bag`. Consumer surface: per goal.md S5, `Embedding`/`EmbeddingBag` ARE boundary public API mirroring `torch.nn.Embedding`/`torch.nn.EmbeddingBag` (the user-facing kwargs ARE the deliverable) — grandfathered SHIPPED with no further downstream caller required. `<Embedding as Module>::forward` calls `self.renorm_weight_in_place(&indices)?` before every gather (renorm on the live forward path, no-op when `max_norm` unset); `EmbeddingBag::forward_bag`/`<EmbeddingBag as Module>::forward` consume the bag kwargs; both re-exported via `pub use embedding::{Embedding, EmbeddingBag, EmbeddingBagMode}` in `lib.rs` as the public consumer surface. `EmbeddingBag` per-bag backward remains unimplemented (forward returns a non-grad tensor) — tracked separately. (NB #1566: prior cite of `ferrotorch-llama/src/model.rs embed_tokens` as the renorm consumer was FALSE — `model.rs` uses `Embedding::new(.., None)` with no `max_norm`/`EmbeddingBag`; corrected to the S5 boundary-API rationale.) |
-| REQ-10 | SHIPPED | impl: the `nn.functional.embedding` arm (builds `Embedding::from_pretrained` + `with_max_norm`/`with_norm_type`/`with_scale_grad_by_freq` + `Module::forward`) and the `nn.functional.embedding_bag` arm (builds `EmbeddingBag::new_with` + `with_*` + `Parameter::set_data` via `Module::parameters_mut` + `forward_bag`/`Module::forward`) in `tools/parity-sweep/runner/src/main.rs` (#1441). Non-test production consumer of the wired surface: `<Embedding as Module>::forward` (driven on every Llama token via `ferrotorch-llama/src/model.rs` `embed_tokens.forward`) and `EmbeddingBag` as boundary public API re-exported at `ferrotorch-nn/src/lib.rs` `pub use embedding::{Embedding, EmbeddingBag, EmbeddingBagMode}` (goal.md S5). Sweep `--seeds 8`: embedding 80/80 (0 skip, 0 failed); embedding_bag 296/392 (0 failed). The 96 embedding_bag skips are all `per_sample_weights` samples; the production capability now EXISTS (`forward_bag_weighted`, REQ-11 / #1610) but the runner arm does not yet FEED those samples (it still returns `Ok(None)`) — that is a separate test-infrastructure runner-arm follow-up (goal.md S5), NOT a production gap. `padding_idx` is forward-inert for `F.embedding` (gathers the actual weight row; only backward grad zeroed) so the arm passes `None` to the layer to match torch's functional. |
+| REQ-10 | SHIPPED | impl: the `nn.functional.embedding` arm (builds `Embedding::from_pretrained` + `with_max_norm`/`with_norm_type`/`with_scale_grad_by_freq` + `Module::forward`) and the `nn.functional.embedding_bag` arm (builds `EmbeddingBag::new_with` + `with_*` + `Parameter::set_data` via `Module::parameters_mut` + `forward_bag_weighted` for the 1-D-offsets path / flatten-to-1D + implicit per-row offsets for the 2-D fixed-bag path) in `tools/parity-sweep/runner/src/main.rs` (#1441). Non-test production consumer of the wired surface: `<Embedding as Module>::forward` (driven on every Llama token via `ferrotorch-llama/src/model.rs` `embed_tokens.forward`) and `EmbeddingBag` as boundary public API re-exported at `ferrotorch-nn/src/lib.rs` `pub use embedding::{Embedding, EmbeddingBag, EmbeddingBagMode}` (goal.md S5). Sweep `--seeds 8`: embedding 80/80 (0 skip, 0 failed); embedding_bag 392/392 (0 skip, 0 failed). The 96 `per_sample_weights` samples that previously `Ok(None)`-skipped now RUN through `forward_bag_weighted` (REQ-11 / #1610), flattening indices + `psw` to 1-D for 2-D fixed bags exactly as torch (`functional.py:2736-2738`). `padding_idx` is forward-inert for `F.embedding` (gathers the actual weight row; only backward grad zeroed) so the arm passes `None` to the layer to match torch's functional. |
 | REQ-11 | SHIPPED | impl: `EmbeddingBag::forward_bag_weighted(input, offsets, per_sample_weights: Option<&Tensor<T>>)` in `embedding.rs` — sum-mode-only per-sample scaling before the reduction (`aten/src/ATen/native/EmbeddingBag.cpp:537-543`), with `EmbeddingBagSumWeightedBackward` (`embedding.rs`) flowing grad to BOTH the embedding table (`EmbeddingBag.cpp:1564-1582`) and `per_sample_weights` (`EmbeddingBag.cpp:1716-1724`); `mode!='sum'` returns torch's exact `NotImplementedError` text (`torch/nn/functional.py:2773-2778`) and shape-mismatch returns the `functional.py:2698-2702` error; `padding_idx` samples contribute 0 to both grads. Non-test production consumer: the existing 2-arg `EmbeddingBag::forward_bag` (called by the parity-sweep runner's `embedding_bag` arm AND boundary public API re-exported at `ferrotorch-nn/src/lib.rs` `pub use embedding::{EmbeddingBag, ..}`, goal.md S5) is rewired to call `forward_bag_weighted(.., None)` in the same commit — `forward_bag_weighted` is the unified reduction body that `forward_bag` now delegates to (so the new pub method has an in-production caller per R-DEFER-1). Verified by live-torch 2.11.0 oracle lib tests `test_bag_psw_sum_forward_single_bag` / `test_bag_psw_sum_grad_to_weight_and_psw` / `test_bag_psw_sum_two_bags_offsets` / `test_bag_psw_with_padding_idx` / `test_bag_psw_end_to_end_autograd` / `test_bag_psw_rejects_mean_and_max_modes` / `test_bag_psw_rejects_shape_mismatch` in `embedding.rs`. |

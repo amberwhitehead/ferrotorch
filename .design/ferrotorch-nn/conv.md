@@ -124,11 +124,20 @@ the unbatched input shape.
   conv1d 80/80, conv2d 240/240, conv3d 160/160, all 0 skipped / 0 failed.
   Any op_db sample the arm cannot decode now returns `Err` (surfaces) —
   there is no silent `Ok(None)` skip left in the forward conv family. The
-  `conv_transpose{1,2,3}d` arms (`dispatch_conv_transpose::<D>`) are now wired
-  too (#1441): stride/padding/output_padding/bias decode + runner-side
-  batchify for unbatched input; 0-failed across all three ranks at `--seeds 8`
-  (48/80, 48/96, 48/80). Their only `Ok(None)` skips are the genuine
-  `groups != 1` (#1607) / `dilation != 1` (#1608) production feature-gaps.
+  `conv_transpose{1,2,3}d` arms (`dispatch_conv_transpose::<D>`) now build via
+  `ConvTranspose{1,2,3}d::new_full(.., dilation, groups, bias)` +
+  `inject_conv_params` (`Parameter::set_data`) + `Module::forward`, so each
+  reaches the PRODUCTION per-group (#1607) + dilated (#1608) transposed forward
+  and the rank-`(D+1)` unbatched implicit-batch path (#1609) — the
+  grouped/dilated/unbatched samples now RUN instead of `Ok(None)`-skipping
+  (#1441). At `--seeds 8`: conv_transpose1d 80/80 and conv_transpose2d 96/96
+  reach 0-skip / 0-failed. conv_transpose3d reaches 0-skip but the now-running
+  dilated samples (sample 4/5, `output_padding=1`+`dilation=(2,3,2)`) SURFACE a
+  production divergence in `conv_transpose3d_forward_group`
+  (ferrotorch=bias-alone vs torch=-94.2 at flat index 279) — 16 FAILED, tracked
+  as blocker #1619. This is the correct surfacing behavior: the build replaced
+  the skip that was HIDING the dilated-3-D bug. The production fix is in
+  `ferrotorch-nn/src/conv.rs` (outside the #1441 runner manifest).
 
 - REQ-12: String padding (`'same'` / `'valid'`) for `Conv{1,2,3}d`,
   mirroring the `padding: str` branch of `torch.nn.Conv{1,2,3}d`
@@ -186,18 +195,19 @@ the unbatched input shape.
 - [x] AC-10: parity-sweep arms wired for all 6 ops — #1441.
   conv1d/conv2d/conv3d arms reach 0-skip / 0-failed via `dispatch_conv::<D>`
   (`new_full` + `with_string_padding` + `Module::forward`). The three
-  `conv_transpose{1,2,3}d` arms are now wired via `dispatch_conv_transpose::<D>`
-  (decode stride/padding/output_padding/bias; unbatched rank-(D+1) samples run
-  via runner-side batchify on the production batched forward). Sweep at
-  `--seeds 8`: conv_transpose1d 48/80, conv_transpose2d 48/96,
-  conv_transpose3d 48/80, ALL 0-failed. The grouped/dilated/unbatched
-  PRODUCTION capability is now SHIPPED (`ConvTranspose*::new_full` +
-  per-group/dilated forward+backward; #1607/#1608/#1609 — verified by the
-  live-torch-oracle lib tests). The residual `Ok(None)` skips are now a
-  TEST-INFRASTRUCTURE-only gap: the runner still drives
-  `functional::conv_transpose*` (which builds via `from_parts`, dense), so
-  threading its `groups`/`dilation` kwargs to `new_full` to reach 0-skip
-  is the remaining #1441 runner-arm follow-up. No parity FAIL remains.
+  `conv_transpose{1,2,3}d` arms now build via `dispatch_conv_transpose::<D>` =
+  `ConvTranspose{1,2,3}d::new_full(.., dilation, groups, bias)` +
+  `inject_conv_params` + `Module::forward`, so the grouped/dilated/unbatched
+  op_db samples RUN against the PRODUCTION per-group (#1607) + dilated (#1608)
+  + unbatched (#1609) path (the old `from_parts`-dense + runner-batchify path
+  is removed). Sweep at `--seeds 8`: conv_transpose1d 80/80 and
+  conv_transpose2d 96/96 reach 0-skip / 0-failed. conv_transpose3d reaches
+  0-skip but the now-running dilated samples SURFACE a production divergence in
+  `conv_transpose3d_forward_group` (output_padding+dilation drops scatter
+  contributions; 16 FAILED) — blocker #1619, production fix in
+  `ferrotorch-nn/src/conv.rs`. Surfacing this was the point: the prior `48/80
+  ALL 0-failed` figure was an ARTIFACT of skipping the dilated-3-D samples that
+  the bug lived in.
 - [x] AC-11: String padding `'same'` / `'valid'` for Conv1d/2d/3d —
   forward + backward match the live torch 2.11 oracle including the
   asymmetric even-kernel `'same'` split, `'valid'`, and the stride>1
@@ -467,7 +477,7 @@ conv2d / conv3d; the conv_transpose arms close under the remaining
 | REQ-3 | SHIPPED | impl: `<Conv2d as Module>::forward` body in `conv.rs` (im2col + matmul) mirroring `aten::convolution`; non-test consumer: every vision model forward invokes `Conv2d::forward` through its `Module` impl. |
 | REQ-4 | SHIPPED | impl: `is_f32 && input.is_cuda()` dispatch to `backend.conv2d_f32` in `<Conv2d as Module>::forward` in `conv.rs`; non-test consumer: `ferrotorch-gpu/src/backend_impl.rs` exposes `Backend::conv2d_f32`; vision-model training runs that put modules on CUDA trigger this dispatch end-to-end. |
 | REQ-5 | SHIPPED | impl: `Conv2dBackward<T>: GradFn<T>` impl block in `conv.rs`; non-test consumer: every gradient step on a vision model's `loss.backward()` traverses these `Conv2dBackward` nodes through `ferrotorch_core::autograd::engine`. |
-| REQ-6 | SHIPPED | impl: `pub struct Conv1d` / `Conv3d` / `ConvTranspose{1,2,3}d` in `conv.rs`, each carrying `groups`/`dilation` via `*::new_full(.., dilation, groups, bias)`. Forward layers: per-group + dilated `<Conv1d as Module>::forward` / `<Conv3d as Module>::forward` + `Conv1dBackward` / `Conv3dBackward` (closes #1600 conv1d, #1601 conv3d). Transposed layers: `ConvTranspose{1,2,3}d::new_full` + the per-group helpers `conv_transpose2d_forward_group` / `conv_transpose3d_forward_group` and the per-group loops in `<ConvTranspose*d as Module>::forward` + the per-group+dilated `ConvTranspose{1,2,3}dBackward` (closes #1607 groups, #1608 dilation), plus the rank-`D+1` unbatched `unsqueeze`/recurse/`squeeze` guard at the top of each transposed `forward` (closes #1609). Transposed weight layout `[in_channels, out_channels/groups, *kernel]` per `torch/nn/modules/conv.py:164`; per-group channel partition (input dim 1 / weight dim 0 / bias dim 0) per `aten/src/ATen/native/Convolution.cpp:1723-1729`; dilated internal conv `internal_pad = dilation*(k-1) - padding`. non-test consumer: `Conv1d::new` / `Conv3d::new` / `ConvTranspose{1,2,3}d::new` delegate to `new_full` in production and are called by `ferrotorch-nn/src/lazy_conv.rs` `LazyConv1d::materialize` / `LazyConv3d::materialize` and `ferrotorch-nn/src/lazy_conv_transpose.rs` `LazyConvTranspose{1,2,3}d::materialize`; `ferrotorch-vision/src/models/detection/mask_rcnn.rs` + `keypoint_rcnn.rs` construct `ConvTranspose2d::new`; `ferrotorch-vision/src/models/inception.rs` uses Conv2d + ConvTranspose2d. |
+| REQ-6 | SHIPPED | impl: `pub struct Conv1d` / `Conv3d` / `ConvTranspose{1,2,3}d` in `conv.rs`, each carrying `groups`/`dilation` via `*::new_full(.., dilation, groups, bias)`. Forward layers: per-group + dilated `<Conv1d as Module>::forward` / `<Conv3d as Module>::forward` + `Conv1dBackward` / `Conv3dBackward` (closes #1600 conv1d, #1601 conv3d). Transposed layers: `ConvTranspose{1,2,3}d::new_full` + the per-group helpers `conv_transpose2d_forward_group` / `conv_transpose3d_forward_group` and the per-group loops in `<ConvTranspose*d as Module>::forward` + the per-group+dilated `ConvTranspose{1,2,3}dBackward` (closes #1607 groups, #1608 dilation), plus the rank-`D+1` unbatched `unsqueeze`/recurse/`squeeze` guard at the top of each transposed `forward` (closes #1609). Transposed weight layout `[in_channels, out_channels/groups, *kernel]` per `torch/nn/modules/conv.py:164`; per-group channel partition (input dim 1 / weight dim 0 / bias dim 0) per `aten/src/ATen/native/Convolution.cpp:1723-1729`; dilated internal conv `internal_pad = dilation*(k-1) - padding`. non-test consumer: `Conv1d::new` / `Conv3d::new` / `ConvTranspose{1,2,3}d::new` delegate to `new_full` in production and are called by `ferrotorch-nn/src/lazy_conv.rs` `LazyConv1d::materialize` / `LazyConv3d::materialize` and `ferrotorch-nn/src/lazy_conv_transpose.rs` `LazyConvTranspose{1,2,3}d::materialize`; `ferrotorch-vision/src/models/detection/mask_rcnn.rs` + `keypoint_rcnn.rs` construct `ConvTranspose2d::new`; `ferrotorch-vision/src/models/inception.rs` uses Conv2d + ConvTranspose2d. CAVEAT (#1619, surfaced 2026-05-28 by the #1441 parity-sweep runner-arm extension): the `conv_transpose3d_forward_group` DILATED path DIVERGES for the `output_padding=1`+`dilation=(2,3,2)` op_db sample — ferrotorch returns the bias alone (zero scatter) where torch computes `-94.2` at flat index 279. So the "closes #1608" claim holds for the conv_transpose1d/2d dilated ranks (parity-verified 80/80, 96/96) but NOT yet for conv_transpose3d's output_padding×dilation interaction; production fix tracked in blocker #1619. |
 | REQ-7 | SHIPPED | impl: `impl<T: Float> Module<T> for Conv2d<T>` block (and analogues for the other 5) in `conv.rs`; non-test consumer: `ferrotorch_optim` walks `Module::parameters_mut()` across every conv in a training loop. |
 | REQ-8 | SHIPPED | impl: `Conv2d::set_weight` and `Conv2d::from_parts` in `conv.rs`; non-test consumer: `ferrotorch-nn/src/functional.rs` (the stateless `nn::functional::conv2d` entry point) uses `Conv2d::from_parts` to drive the existing forward path with user-supplied parameters. |
 | REQ-9 | SHIPPED | impl: `kaiming_uniform(&mut weight, NonLinearity::ReLU)` + `uniform_init(&mut b, -bound, bound)` (bound = 1/sqrt(fan_in)) in every `Conv*d::new[_full]` in `conv.rs` mirroring `torch/nn/modules/conv.py:198-201`; non-test consumer: `Conv2d::new` is the path used by every vision-model constructor. (Closes #1450 — bias path; Kaiming `a=sqrt(5)` gain divergence remains a separate followup.) |
