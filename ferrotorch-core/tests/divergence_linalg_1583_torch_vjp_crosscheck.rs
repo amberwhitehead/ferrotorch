@@ -68,6 +68,11 @@ fn weighted_backward(out: &Tensor<f64>, weight: &[f64], wshape: &[usize]) {
 //   kron dB = [3.5, 6.0, 13.5, 16.0]
 // =====================================================================
 #[test]
+#[allow(
+    non_snake_case,
+    reason = "dA/dB is the torch derivative-of-A/derivative-of-B convention; \
+              renaming would obscure the grad being asserted"
+)]
 fn kron_dA_dB_match_torch_weighted() {
     let a = leaf(&[1.0, 2.0, -1.0, 0.5], &[2, 2]);
     let b = leaf(&[2.0, -1.0, 0.5, 1.0], &[2, 2]);
@@ -95,12 +100,7 @@ fn diagonal_offset_pos1_scatter_position_matches_torch() {
     let a = leaf(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0], &[3, 3]);
     let d = linalg_fwd::diagonal(&a, 1).unwrap();
     // forward value must also match torch diagonal(A,1) = [2,6]
-    assert_close(
-        &d.data().unwrap().to_vec(),
-        &[2.0, 6.0],
-        1e-9,
-        "diagonal(A,1) fwd",
-    );
+    assert_close(d.data().unwrap(), &[2.0, 6.0], 1e-9, "diagonal(A,1) fwd");
     weighted_backward(&d, &[10.0, 100.0], &[2]);
     let g = a.grad().unwrap().unwrap().data().unwrap().to_vec();
     assert_close(
@@ -115,12 +115,7 @@ fn diagonal_offset_pos1_scatter_position_matches_torch() {
 fn diagonal_offset_neg1_scatter_position_matches_torch() {
     let a = leaf(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0], &[3, 3]);
     let d = linalg_fwd::diagonal(&a, -1).unwrap();
-    assert_close(
-        &d.data().unwrap().to_vec(),
-        &[4.0, 8.0],
-        1e-9,
-        "diagonal(A,-1) fwd",
-    );
+    assert_close(d.data().unwrap(), &[4.0, 8.0], 1e-9, "diagonal(A,-1) fwd");
     weighted_backward(&d, &[10.0, 100.0], &[2]);
     let g = a.grad().unwrap().unwrap().data().unwrap().to_vec();
     assert_close(
@@ -240,7 +235,7 @@ fn addmm_vector_bias_broadcast_grad_matches_torch() {
     let c = linalg_fwd::addmm(&bias, &m1, &m2, 0.5, 2.0).unwrap();
     assert_eq!(c.shape(), &[2, 2]);
     assert_close(
-        &c.data().unwrap().to_vec(),
+        c.data().unwrap(),
         &[3.25, 2.5, 8.25, 3.5],
         1e-9,
         "addmm fwd (vec bias)",
@@ -254,7 +249,7 @@ fn addmm_vector_bias_broadcast_grad_matches_torch() {
         "addmm dbias must keep the [2] vector shape"
     );
     assert_close(
-        &gb.data().unwrap().to_vec(),
+        gb.data().unwrap(),
         &[1.0, 1.0],
         1e-9,
         "addmm dbias vs torch",
@@ -356,7 +351,7 @@ fn addbmm_vector_bias_broadcast_grad_matches_torch() {
     let c = linalg_fwd::addbmm(&bias, &b1, &b2, 0.5, 1.5).unwrap();
     assert_eq!(c.shape(), &[2, 2]);
     assert_close(
-        &c.data().unwrap().to_vec(),
+        c.data().unwrap(),
         &[6.25, -2.0, -0.125, 4.75],
         1e-9,
         "addbmm fwd (vec bias)",
@@ -366,7 +361,7 @@ fn addbmm_vector_bias_broadcast_grad_matches_torch() {
     let gb = bias.grad().unwrap().unwrap();
     assert_eq!(gb.shape(), &[2], "addbmm dbias must keep [2] vector shape");
     assert_close(
-        &gb.data().unwrap().to_vec(),
+        gb.data().unwrap(),
         &[1.0, 1.0],
         1e-9,
         "addbmm dbias vs torch",

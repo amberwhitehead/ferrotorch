@@ -796,6 +796,11 @@ reason = "Implicit coverage: SparseGrad::indices method tested via SparseGrad in
 tracking_issue = "#770"
 
 [[exclusion]]
+path = "ferrotorch_core::sparse::SparseGrad <T>::is_sparse"
+reason = "Trivial predicate getter (always true) added by the SparseAdam work (#1463) to mirror upstream `p.grad.is_sparse` (torch/optim/sparse_adam.py:88). Exercised by the `sparse.rs` #[cfg(test)] unit test, not yet by a conformance_*.rs test; substring gate only scans tests/conformance_*.rs. Promote to a real conformance reference when the SparseAdam optimizer path lands under #770."
+tracking_issue = "#770"
+
+[[exclusion]]
 path = "ferrotorch_core::sparse::SparseGrad <T>::new"
 reason = "Implicit coverage: SparseGrad::new method tested via SparseGrad integration tests in conformance_nested_sparse.rs; gate substring mismatch on method-call syntax."
 tracking_issue = "#770"
@@ -889,6 +894,12 @@ tracking_issue = "#806"
 path = "ferrotorch_core::sparse::SparseTensor <T>::values"
 reason = "Implicit coverage: SparseTensor::values method tested via SparseTensor integration tests in conformance_nested_sparse.rs; gate substring mismatch on method-call syntax."
 tracking_issue = "#770"
+
+# === Issue #1614 — torch-matching f32 L2-norm primitive (added by 3c422f8fd) ===
+[[exclusion]]
+path = "ferrotorch_core::simd_reduce::l2_norm_f32_torch"
+reason = "Implicit coverage: l2_norm_f32_torch is bit-exact verified against the live-torch f32 oracle by the simd_reduce.rs #[cfg(test)] unit tests (matches_torch_len1, empty_is_zero, boundary_decision_does_not_clip, etc.) and the divergence_critic_1614_l2_residual_unpinned.rs probe; the surface gate only scans tests/conformance_*.rs so the src-side unit tests are invisible to it. Promote to a conformance_*.rs reference when the simd_reduce conformance lane lands."
+tracking_issue = "#1614"
 
 # === Issue #1585 — indexing/shape autograd + meta-plumbing internals (prior commits) ===
 # Added pub items from c013b5432 and the surrounding indexing/scatter/roll +

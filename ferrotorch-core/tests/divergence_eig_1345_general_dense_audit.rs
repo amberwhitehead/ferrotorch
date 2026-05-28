@@ -7,6 +7,7 @@
 //!     eigenvectors are special (triangular -> simple V structure), and
 //!   - the single complex-pair 2x2 [[1,-1],[1,1]] (eigenvalues 1±i), a highly
 //!     symmetric structure.
+//!
 //! Neither is (a) a GENERAL dense non-symmetric matrix with a non-orthogonal
 //! well-conditioned V, nor (b) a MIXED matrix with one complex-conjugate
 //! eigenvalue pair AND one real eigenvalue (V has both real and complex columns,

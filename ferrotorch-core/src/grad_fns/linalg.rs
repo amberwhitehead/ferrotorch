@@ -8363,6 +8363,11 @@ mod tests {
 
     // (a) SQUARE 3x3, k=3.
     #[test]
+    #[allow(
+        clippy::excessive_precision,
+        reason = "literals are verbatim LIVE torch float64 repr() oracle values; \
+                  trailing digits beyond f64 precision are kept for provenance"
+    )]
     fn householder_product_backward_square_3x3_matches_torch() {
         let v = [1.0, 0.2, 0.3, 0.5, 1.0, 0.1, 0.3, 0.15, 1.0];
         let tau = [0.4, 0.5, 0.6];
@@ -8401,6 +8406,11 @@ mod tests {
 
     // (b) TALL 4x3, k=3 (m > k == cols).
     #[test]
+    #[allow(
+        clippy::excessive_precision,
+        reason = "literals are verbatim LIVE torch float64 repr() oracle values; \
+                  trailing digits beyond f64 precision are kept for provenance"
+    )]
     fn householder_product_backward_tall_4x3_matches_torch() {
         let v = [1.0, 0.2, 0.3, 0.5, 1.0, 0.1, 0.3, 0.15, 1.0, 0.6, 0.35, 0.4];
         let tau = [0.4, 0.5, 0.6];
@@ -8438,6 +8448,11 @@ mod tests {
 
     // (c) TALL 4x2, k=2 < m (truncated product — exercises k < cols active set).
     #[test]
+    #[allow(
+        clippy::excessive_precision,
+        reason = "literals are verbatim LIVE torch float64 repr() oracle values; \
+                  trailing digits beyond f64 precision are kept for provenance"
+    )]
     fn householder_product_backward_tall_4x2_matches_torch() {
         let v = [1.0, 0.2, 0.5, 1.0, 0.3, 0.15, 0.6, 0.35];
         let tau = [0.4, 0.5];

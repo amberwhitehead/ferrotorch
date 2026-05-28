@@ -105,6 +105,11 @@ fn divergence_hh_forward_values_tall_4x2() {
 /// (FunctionsManual.cpp:5564-5565) and the forward ignores diag+upper.
 /// Reference = LIVE torch on the dirty V (matches the clean-V oracle exactly).
 #[test]
+#[allow(
+    clippy::excessive_precision,
+    reason = "literals are verbatim LIVE torch float64 repr() oracle values; \
+              trailing digits beyond f64 precision are kept for provenance"
+)]
 fn divergence_hh_dirty_input_invariance_square_3x3() {
     let v_dirty = [999.0, 888.0, 888.0, 0.5, 999.0, 888.0, 0.3, 0.15, 999.0];
     let tau = [0.4, 0.5, 0.6];
@@ -150,6 +155,11 @@ fn divergence_hh_dirty_input_invariance_square_3x3() {
 
 /// Divergence probe: dirty tall 4x3 (diag=999, upper=888) forward + grads.
 #[test]
+#[allow(
+    clippy::excessive_precision,
+    reason = "literals are verbatim LIVE torch float64 repr() oracle values; \
+              trailing digits beyond f64 precision are kept for provenance"
+)]
 fn divergence_hh_dirty_input_invariance_tall_4x3() {
     let v_dirty = [
         999.0, 888.0, 888.0, 0.5, 999.0, 888.0, 0.3, 0.15, 999.0, 0.6, 0.35, 0.4,

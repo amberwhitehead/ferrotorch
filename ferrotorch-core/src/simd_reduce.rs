@@ -299,6 +299,11 @@ mod tests {
     /// Single-element row: the norm of `[x]` is `|x|`. For `x = 29.04990959`,
     /// live torch `at::norm(2.0)` f32 = bits `0x41e86637`.
     #[test]
+    #[allow(
+        clippy::excessive_precision,
+        reason = "29.04990959 is the verbatim torch input scalar for the len-1 \
+                  norm oracle; kept for provenance against at::norm(2.0) f32"
+    )]
     fn matches_torch_len1() {
         let row = [29.04990959_f32];
         assert_torch_bits(&row, 0x41e8_6637);
@@ -328,8 +333,15 @@ mod tests {
         // torch's f32 norm widened to f64 (== `.item<double>()` at
         // Embedding.cpp:203) used as the max_norm threshold.
         let max_norm = f64::from(norm);
+        #[allow(
+            clippy::neg_cmp_op_on_partial_ord,
+            reason = "deliberately mirrors torch's `norm > max_norm` decision \
+                      (Embedding.cpp:204) verbatim — asserting it is false at the \
+                      boundary; `<=` would obscure the upstream comparison operator"
+        )]
+        let does_not_clip = !(f64::from(norm) > max_norm);
         assert!(
-            !(f64::from(norm) > max_norm),
+            does_not_clip,
             "norm > max_norm must be false at the boundary (torch does not clip)"
         );
     }

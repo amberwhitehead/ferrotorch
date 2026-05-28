@@ -49,18 +49,18 @@ fn ensure_cuda_backend() {
 /// pattern.
 fn dense_kn(k: usize, n: usize, seed: u32) -> Vec<f32> {
     let mut out = vec![0.0_f32; k * n];
-    for i in 0..k * n {
+    for (i, slot) in out.iter_mut().enumerate() {
         let v = ((i as u32).wrapping_mul(2654435761).wrapping_add(seed) % 13) as f32 - 6.0;
-        out[i] = v * 0.25;
+        *slot = v * 0.25;
     }
     out
 }
 
 fn dense_mk(m: usize, k: usize, seed: u32) -> Vec<f32> {
     let mut out = vec![0.0_f32; m * k];
-    for i in 0..m * k {
+    for (i, slot) in out.iter_mut().enumerate() {
         let v = ((i as u32).wrapping_mul(40503).wrapping_add(seed) % 11) as f32 - 5.0;
-        out[i] = v * 0.5;
+        *slot = v * 0.5;
     }
     out
 }
