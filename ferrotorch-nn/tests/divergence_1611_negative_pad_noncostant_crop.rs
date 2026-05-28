@@ -37,9 +37,7 @@
 
 use ferrotorch_core::Tensor;
 use ferrotorch_core::storage::TensorStorage;
-use ferrotorch_nn::padding::{
-    PaddingMode, functional_pad_1d_signed, functional_pad_2d_signed,
-};
+use ferrotorch_nn::padding::{PaddingMode, functional_pad_1d_signed, functional_pad_2d_signed};
 
 fn leaf(data: &[f32], shape: &[usize]) -> Tensor<f32> {
     Tensor::from_storage(TensorStorage::cpu(data.to_vec()), shape.to_vec(), true).unwrap()
@@ -76,7 +74,6 @@ fn assert_close(actual: &[f32], expected: &[f32], tol: f32, msg: &str) {
 ///
 /// Tracking: #1620
 #[test]
-#[ignore = "divergence: reflect/replicate/circular crop for negative pad, ferrotorch errors; tracking #1620"]
 fn divergence_reflect_negative_pad_crops_not_errors() {
     let x = tensor(&[1.0, 2.0, 3.0, 4.0, 5.0], &[1, 1, 5]);
     let y = functional_pad_1d_signed(&x, -1, 0, PaddingMode::Reflect, 0.0)
@@ -103,12 +100,15 @@ fn divergence_reflect_negative_pad_crops_not_errors() {
 ///
 /// Tracking: #1620
 #[test]
-#[ignore = "divergence: reflect/replicate/circular crop for negative pad, ferrotorch errors; tracking #1620"]
 fn divergence_replicate_mixed_sign_crops_not_errors() {
     let x = leaf(&[1.0, 2.0, 3.0, 4.0, 5.0], &[1, 1, 5]);
     let y = functional_pad_1d_signed(&x, 1, -1, PaddingMode::Replicate, 0.0)
         .expect("torch F.pad replicate [1,-1] returns [1,1,2,3,4]; ferrotorch must not error");
-    assert_eq!(y.shape(), &[1, 1, 5], "torch replicate [1,-1] -> shape [1,1,5]");
+    assert_eq!(
+        y.shape(),
+        &[1, 1, 5],
+        "torch replicate [1,-1] -> shape [1,1,5]"
+    );
     assert_close(
         y.data().unwrap(),
         &[1.0, 1.0, 2.0, 3.0, 4.0],
@@ -139,12 +139,15 @@ fn divergence_replicate_mixed_sign_crops_not_errors() {
 ///
 /// Tracking: #1620
 #[test]
-#[ignore = "divergence: reflect/replicate/circular crop for negative pad, ferrotorch errors; tracking #1620"]
 fn divergence_circular_negative_pad_crops_not_errors() {
     let x = leaf(&[1.0, 2.0, 3.0, 4.0, 5.0], &[1, 1, 5]);
     let y = functional_pad_1d_signed(&x, -1, 0, PaddingMode::Circular, 0.0)
         .expect("torch F.pad circular [-1,0] CROPS (returns [2,3,4,5]); ferrotorch must not error");
-    assert_eq!(y.shape(), &[1, 1, 4], "torch circular [-1,0] -> shape [1,1,4]");
+    assert_eq!(
+        y.shape(),
+        &[1, 1, 4],
+        "torch circular [-1,0] -> shape [1,1,4]"
+    );
     assert_close(
         y.data().unwrap(),
         &[2.0, 3.0, 4.0, 5.0],
@@ -177,7 +180,6 @@ fn divergence_circular_negative_pad_crops_not_errors() {
 ///
 /// Tracking: #1620
 #[test]
-#[ignore = "divergence: reflect/replicate/circular crop for negative pad, ferrotorch errors; tracking #1620"]
 fn divergence_reflect2d_mixed_sign_crops_not_errors() {
     let x = tensor(
         &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0],

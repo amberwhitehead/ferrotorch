@@ -1205,13 +1205,17 @@ pub fn functional_pad_3d<T: Float>(
 // ===========================================================================
 //
 // `torch.nn.functional.pad` accepts NEGATIVE pad amounts: a negative pad on a
-// side CROPS (removes) `|pad|` elements from that side instead of adding. Only
-// the `mode="constant"` path supports this — upstream
-// `aten/src/ATen/native/PadNd.cpp:207-219` (`_pad_enum_symint`) routes
-// `constant` through `constant_pad_nd` (which handles negatives) but routes
-// `reflect`/`replicate`/`circular` to the `reflection_pad*` / `replication_pad*`
-// native kernels, which neither accept a non-zero `value` (PadNd.cpp:217-219)
-// nor a negative pad. So crop is a `PaddingMode::Zeros`-only capability here.
+// side CROPS (removes) `|pad|` elements from that side instead of adding. ALL
+// modes support this — upstream `aten/src/ATen/native/PadNd.cpp:207-242`
+// (`_pad_enum_symint`) routes `constant` through `constant_pad_nd` (which
+// narrows for negatives) and `reflect`/`replicate`/`circular` straight to the
+// native `reflection_pad*` / `replication_pad*` / `_pad_circular` kernels, which
+// compute `output = input + pad_l + pad_r` (a negative pad narrows the side)
+// and gather with offset `max(0,-pad) - max(0,pad)` (ReflectionPad.cpp:46,
+// PaddingKernel.cpp:63-65, PadNd.cpp:158-159). The non-constant modes still
+// reject a non-zero `value` (PadNd.cpp:217-219). This signed-constant gather is
+// the `PaddingMode::Zeros` forward; the other modes compose crop-then-pad
+// (`functional_pad_nd_signed`), which is byte-identical to their native kernels.
 //
 // Forward (PadNd.cpp:29-108): for each padded dim with signed pads `(lo, hi)`
 // the cropped input is `narrow(i, -lo, size+lo)` (when `lo<0`) then
@@ -1457,12 +1461,65 @@ impl<T: Float> GradFn<T> for PadNdSignedBackward<T> {
     }
 }
 
+/// Apply the all-non-negative pad part of `pads` under a non-`Zeros` mode by
+/// delegating to the positive-only helpers, so reflect/replicate/circular keep
+/// their exact gather + autograd behaviour. `pads` is LAST axis first.
+fn functional_pad_nd_positive<T: Float>(
+    input: &Tensor<T>,
+    pads: &[(isize, isize)],
+    mode: PaddingMode,
+    value: T,
+) -> FerrotorchResult<Tensor<T>> {
+    match pads.len() {
+        1 => functional_pad_1d(input, pads[0].0 as usize, pads[0].1 as usize, mode, value),
+        2 => functional_pad_2d(
+            input,
+            pads[0].0 as usize,
+            pads[0].1 as usize,
+            pads[1].0 as usize,
+            pads[1].1 as usize,
+            mode,
+            value,
+        ),
+        3 => functional_pad_3d(
+            input,
+            pads[0].0 as usize,
+            pads[0].1 as usize,
+            pads[1].0 as usize,
+            pads[1].1 as usize,
+            pads[2].0 as usize,
+            pads[2].1 as usize,
+            mode,
+            value,
+        ),
+        other => Err(FerrotorchError::InvalidArgument {
+            message: format!("functional_pad_nd_signed supports 1-3 padded dims, got {other}"),
+        }),
+    }
+}
+
 /// Shared signed-pad driver for the 1-D/2-D/3-D public entrypoints. `pads` is
-/// ordered LAST padded axis first. Only `PaddingMode::Zeros` (torch
-/// `mode="constant"`) supports negative (crop) pads — when any pad is negative
-/// under a non-`Zeros` mode this returns `InvalidArgument`, mirroring torch's
-/// `reflection_pad*` / `replication_pad*` kernels which reject negative pads
-/// (`aten/src/ATen/native/PadNd.cpp:221-242`).
+/// ordered LAST padded axis first.
+///
+/// For `PaddingMode::Zeros` (torch `mode="constant"`) negative pads narrow via
+/// the signed-constant gather below. For reflect/replicate/circular, live torch
+/// 2.11 does NOT reject a negative pad — `_pad_enum` dispatches straight to the
+/// native `reflection_pad*` / `replication_pad*` / `_pad_circular` kernels,
+/// which compute `output = input + pad_l + pad_r` directly (a negative pad
+/// narrows the side) and offset the gather window by `max(0,-pad) - max(0,pad)`
+/// (`aten/src/ATen/native/ReflectionPad.cpp:46`,
+/// `aten/src/ATen/native/cpu/PaddingKernel.cpp:63-65`,
+/// `aten/src/ATen/native/PadNd.cpp:158-159`). That is byte-identical to first
+/// CROPPING the negative side(s) (constant-mode narrow) and then applying the
+/// positive pad part with the mode's gather — verified against the live oracle
+/// (`reflect [-1,0]` on `[1,2,3,4,5]` -> `[2,3,4,5]`; `replicate [1,-1]` ->
+/// `[1,1,2,3,4]` grad `[2,1,1,1,0]`; `circular [-1,0]` -> `[2,3,4,5]` grad
+/// `[0,1,1,1,1]`; `reflect2d [-1,1,0,0]` on the 3x3 -> `[[2,3,2],[5,6,5],
+/// [8,9,8]]`). We compose crop-then-pad so the backward chains the crop adjoint
+/// (zero-pad of the cropped side) with the mode-pad adjoint (the gather
+/// scatter-add) through the normal autograd graph. Over-cropping a side
+/// (`crop >= dim`) still errors via the signed-constant `narrow` check, matching
+/// torch (`PadNd.cpp:221-242`).
 fn functional_pad_nd_signed<T: Float>(
     input: &Tensor<T>,
     pads: &[(isize, isize)],
@@ -1472,42 +1529,35 @@ fn functional_pad_nd_signed<T: Float>(
     let has_negative = pads.iter().any(|&(lo, hi)| lo < 0 || hi < 0);
 
     if mode != PaddingMode::Zeros {
-        if has_negative {
-            return Err(FerrotorchError::InvalidArgument {
-                message: format!(
-                    "negative (crop) padding is only supported for constant mode; mode {mode:?} does not accept negative pads (matches torch's reflection_pad*/replication_pad* kernels)"
-                ),
-            });
+        if !has_negative {
+            // All-non-negative under a non-constant mode: pure mode-pad.
+            return functional_pad_nd_positive(input, pads, mode, value);
         }
-        // All-non-negative under a non-constant mode: delegate to the existing
-        // positive-only helpers so reflect/replicate/circular keep their exact
-        // gather + autograd behaviour. `pads` is LAST axis first.
-        return match pads.len() {
-            1 => functional_pad_1d(input, pads[0].0 as usize, pads[0].1 as usize, mode, value),
-            2 => functional_pad_2d(
-                input,
-                pads[0].0 as usize,
-                pads[0].1 as usize,
-                pads[1].0 as usize,
-                pads[1].1 as usize,
-                mode,
-                value,
-            ),
-            3 => functional_pad_3d(
-                input,
-                pads[0].0 as usize,
-                pads[0].1 as usize,
-                pads[1].0 as usize,
-                pads[1].1 as usize,
-                pads[2].0 as usize,
-                pads[2].1 as usize,
-                mode,
-                value,
-            ),
-            other => Err(FerrotorchError::InvalidArgument {
-                message: format!("functional_pad_nd_signed supports 1-3 padded dims, got {other}"),
-            }),
+        // Mixed/negative under a non-constant mode: torch CROPS the negative
+        // side(s) then applies the mode's padding on the positive part. Split
+        // each axis pad into its crop part (negative only) and pad part
+        // (positive only), narrow via the constant-mode signed gather (autograd
+        // attaches `PadNdSignedBackward`), then mode-pad the positive remainder
+        // (autograd attaches `Pad{1,2,3}dBackward`). Both compose through the
+        // standard autograd graph, so the crop adjoint (zero-pad) and the
+        // mode-pad adjoint (scatter-add) chain automatically.
+        let crop_pads: Vec<(isize, isize)> = pads
+            .iter()
+            .map(|&(lo, hi)| (lo.min(0), hi.min(0)))
+            .collect();
+        let pad_pads: Vec<(isize, isize)> = pads
+            .iter()
+            .map(|&(lo, hi)| (lo.max(0), hi.max(0)))
+            .collect();
+
+        let cropped = if crop_pads.iter().any(|&(lo, hi)| lo != 0 || hi != 0) {
+            // Narrow via the constant-mode signed path; `value` is unused since
+            // crop-only pads never fill (every output position reads source).
+            functional_pad_nd_signed(input, &crop_pads, PaddingMode::Zeros, value)?
+        } else {
+            input.clone()
         };
+        return functional_pad_nd_positive(&cropped, &pad_pads, mode, value);
     }
 
     let data = input.data_vec()?;
@@ -1544,9 +1594,11 @@ fn functional_pad_nd_signed<T: Float>(
 /// `torch.nn.functional.pad(input, [left, right], mode="constant", value=...)`
 /// with negative `left`/`right` (`aten/src/ATen/native/PadNd.cpp:29-108`).
 ///
-/// Negative (crop) pads require `mode = PaddingMode::Zeros` (torch
-/// `mode="constant"`); any other mode with a negative pad returns
-/// `InvalidArgument`, matching torch. Over-cropping (removing more than the
+/// Negative (crop) pads are supported under EVERY mode: `Zeros` narrows via the
+/// signed-constant gather, while reflect/replicate/circular crop the negative
+/// side(s) then apply their gather on the positive part — byte-identical to
+/// torch's native kernels, which compute `output = input + pad_l + pad_r`
+/// directly (`PadNd.cpp:221-242`). Over-cropping (removing more than the
 /// dimension holds) returns `InvalidArgument`, mirroring torch's
 /// "narrow(): length must be non-negative".
 pub fn functional_pad_1d_signed<T: Float>(
@@ -2915,21 +2967,29 @@ mod tests {
         assert!(y.data().unwrap().is_empty());
     }
 
-    /// Negative (crop) pad under a non-constant mode is rejected — torch routes
-    /// reflect/replicate/circular through `reflection_pad*`/`replication_pad*`
-    /// which do not accept negative pads (`PadNd.cpp:221-242`).
+    /// Negative (crop) pad under a non-constant mode CROPS — live torch 2.11's
+    /// `_pad_enum` dispatches reflect/replicate/circular straight to the native
+    /// kernels, which narrow for negative pads (`PadNd.cpp:221-242`). For
+    /// `[-1, 0]` on `[1,2,3,4]` all three modes crop the left element, yielding
+    /// `[2,3,4]` (the positive part of the pad is zero, so it is a pure crop).
+    /// torch: `F.pad([[[1.,2.,3.,4.]]], [-1,0], mode=<m>)` -> shape [1,1,3],
+    /// `[2,3,4]` for reflect/replicate/circular alike (#1620).
     #[test]
-    fn test_functional_pad_signed_negative_non_constant_errors() {
+    fn test_functional_pad_signed_negative_non_constant_crops() {
         let x = t(&[1.0, 2.0, 3.0, 4.0], &[1, 1, 4]);
         for mode in [
             PaddingMode::Reflect,
             PaddingMode::Replicate,
             PaddingMode::Circular,
         ] {
-            assert!(
-                functional_pad_1d_signed(&x, -1, 0, mode, 0.0).is_err(),
-                "negative pad under {mode:?} must be rejected"
+            let y = functional_pad_1d_signed(&x, -1, 0, mode, 0.0)
+                .unwrap_or_else(|_| panic!("negative pad under {mode:?} must crop, not error"));
+            assert_eq!(
+                y.shape(),
+                &[1, 1, 3],
+                "{mode:?} crops left -> shape [1,1,3]"
             );
+            assert_close(y.data().unwrap(), &[2.0, 3.0, 4.0], 1e-7);
         }
     }
 

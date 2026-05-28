@@ -37,12 +37,16 @@ dispatch.
   `torch.nn.functional.pad(mode="constant", value=...)`. The
   `usize`-typed entrypoints handle only non-negative (grow) pads; the
   signed entrypoints `functional_pad_1d/2d/3d_signed` (`isize` pad
-  amounts) additionally support NEGATIVE (crop) pads under
-  `mode="constant"`, mirroring `constant_pad_nd`'s negative-pad
-  narrowing (`aten/src/ATen/native/PadNd.cpp:29-108`). Crop is a
-  constant-mode-only capability — reflect/replicate/circular reject
-  negative pads, matching upstream `_pad_enum`
-  (`PadNd.cpp:221-242`).
+  amounts) additionally support NEGATIVE (crop) pads under EVERY mode.
+  For `mode="constant"` the crop narrows via the signed-constant gather,
+  mirroring `constant_pad_nd`'s negative-pad narrowing
+  (`aten/src/ATen/native/PadNd.cpp:29-108`). For reflect/replicate/
+  circular, live torch 2.11's `_pad_enum` dispatches straight to the
+  native kernels, which compute `output = input + pad_l + pad_r` (a
+  negative pad narrows the side) and gather with offset
+  `max(0,-pad) - max(0,pad)` (`PadNd.cpp:221-242`,
+  `ReflectionPad.cpp:46`, `cpu/PaddingKernel.cpp:63-65`); ferrotorch
+  composes crop-then-mode-pad to reproduce this byte-for-byte (#1620).
 - REQ-3: `pub struct ConstantPad{1,2,3}d<T: Float>` — constant-value
   padding. Mirror upstream `ConstantPad{1,2,3}d` at `padding.py`.
   Carries `padding: (usize, usize[, …])` and `value: T`.
@@ -142,11 +146,13 @@ functional_pad_1d_signed`, `pub fn functional_pad_2d_signed`, and
 amounts. They delegate to the shared driver `fn
 functional_pad_nd_signed`, which:
 
-- rejects negative pads under non-`Zeros` modes
-  (`InvalidArgument`) and, for all-non-negative non-`Zeros` pads,
-  delegates to the positive-only `functional_pad_{1,2,3}d` so
-  reflect/replicate/circular keep their exact gather + autograd
-  behaviour;
+- for all-non-negative non-`Zeros` pads, delegates to the positive-only
+  `functional_pad_{1,2,3}d` so reflect/replicate/circular keep their
+  exact gather + autograd behaviour; for negative/mixed non-`Zeros`
+  pads, CROPS the negative side(s) (via the signed-constant gather) then
+  applies the mode's positive pad on the remainder — byte-identical to
+  torch's native reflect/replicate/circular kernels, which narrow for
+  negative pads (`PadNd.cpp:221-242`) (#1620);
 - for `Zeros` (constant) mode, runs `fn pad_nd_signed_constant` — a
   generic last-`N`-dim gather where output index `o` reads source
   `o - lo` (in bounds ⇒ data, otherwise ⇒ `value` fill), with
@@ -158,10 +164,14 @@ functional_pad_nd_signed`, which:
   output grad onto the original-size input (cropped positions get 0).
 
 These mirror `constant_pad_nd`'s negative-pad narrowing + `fill_` +
-`copy_` (`aten/src/ATen/native/PadNd.cpp:29-108`). Crop is
-constant-mode-only because `_pad_enum` routes only `mode="constant"`
-through `constant_pad_nd`; the reflect/replicate/circular kernels do
-not accept negative pads (`PadNd.cpp:221-242`). #1611.
+`copy_` (`aten/src/ATen/native/PadNd.cpp:29-108`). Crop is supported
+under EVERY mode: `_pad_enum` routes `mode="constant"` through
+`constant_pad_nd` and reflect/replicate/circular straight to the native
+kernels, which compute `output = input + pad_l + pad_r` (negative pads
+narrow) and gather with offset `max(0,-pad) - max(0,pad)`
+(`PadNd.cpp:221-242`, `ReflectionPad.cpp:46`,
+`cpu/PaddingKernel.cpp:63-65`). ferrotorch reproduces the non-constant
+modes by composing crop-then-mode-pad (#1620). #1611.
 
 ### Layer family (REQ-3..REQ-7)
 
@@ -214,19 +224,27 @@ For each:
   value=v)` fills the new positions with `v`; ferrotorch threads
   `value: T` through `pad_Nd_constant` to do the same (#1553).
 - **Negative pad** — upstream accepts negative padding to crop a side
-  (`aten/src/ATen/native/PadNd.cpp:29-108`). The `isize`-typed
-  `functional_pad_1d/2d/3d_signed` entrypoints implement this for
-  `mode="constant"`: a negative `lo`/`hi` narrows the dim, mixed signs
-  per-dim are supported (e.g. `[-1, 2]` crops 1 from the start and adds
-  2 fill at the end), and the backward (`PadNdSignedBackward`)
-  scatter-adds the output grad back onto the original-size input so
-  cropped-away positions receive zero gradient. Over-cropping (a side
-  removing more than the running dim size, mirroring torch's
-  `narrow(): length must be non-negative`) returns `InvalidArgument`; a
-  net-zero crop is allowed (torch returns an empty dim). Closes #1611.
-  The `nn.functional.pad` runner arm still skips negative samples until
-  the runner is widened to feed `i64` pads to the signed entrypoints (a
-  test-infrastructure follow-up under #1441, separate from this build).
+  (`aten/src/ATen/native/PadNd.cpp:29-108`, `:221-242`) under EVERY mode.
+  The `isize`-typed `functional_pad_1d/2d/3d_signed` entrypoints
+  implement this. For `mode="constant"`: a negative `lo`/`hi` narrows the
+  dim, mixed signs per-dim are supported (e.g. `[-1, 2]` crops 1 from the
+  start and adds 2 fill at the end), and the backward
+  (`PadNdSignedBackward`) scatter-adds the output grad back onto the
+  original-size input so cropped-away positions receive zero gradient.
+  For reflect/replicate/circular: the negative side(s) are cropped, then
+  the positive part is mode-padded — matching torch's native kernels
+  byte-for-byte (e.g. `reflect [-1,0]` on `[1,2,3,4,5]` -> `[2,3,4,5]`;
+  `replicate [1,-1]` -> `[1,1,2,3,4]` grad `[2,1,1,1,0]`; `circular
+  [-1,0]` -> `[2,3,4,5]` grad `[0,1,1,1,1]`; `reflect2d [-1,1,0,0]` on the
+  3x3 -> `[[2,3,2],[5,6,5],[8,9,8]]`); the backward chains the crop
+  adjoint with the mode-pad adjoint through the autograd graph (#1620).
+  Over-cropping (a side removing more than the running dim size,
+  mirroring torch's `narrow(): length must be non-negative`) returns
+  `InvalidArgument`; a net-zero crop is allowed (torch returns an empty
+  dim). Closes #1611. The `nn.functional.pad` runner arm still skips
+  negative samples until the runner is widened to feed `i64` pads to the
+  signed entrypoints (a test-infrastructure follow-up under #1441,
+  separate from this build).
 - **Reflect with `pad >= input_dim`** — upstream raises
   `RuntimeError`; ferrotorch returns `InvalidArgument`.
 - **Replicate with empty input dim** — both implementations need at
