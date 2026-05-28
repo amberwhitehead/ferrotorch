@@ -116,30 +116,54 @@ fn renorm_weight_rows_in_place<T: Float>(
         //   else       -> NormOps     : (Σ|x|^p)^(1/p)
         // (p == 1 / p == 2 are exact under the generic formula, so they need
         // no separate arm here.)
-        let norm = if norm_type == 0.0 {
+        //
+        // PRECISION (#1612): the norm is accumulated and rooted in the WEIGHT'S
+        // NATIVE dtype `T`, then widened to f64 only for the `> max_norm`
+        // compare and the scale. This mirrors `row.norm(norm_type).item<double>()`
+        // at `Embedding.cpp:202-203` byte-for-byte: `at::norm`'s accumulator is
+        // `at::opmath_type<scalar_t>` (`ReduceOpsKernel.cpp:190`), which is
+        // `float` for an f32 row and `double` for an f64 row, and the result is
+        // stored back as `scalar_t` (`result_data[0] = scalar_t(std::sqrt(..))`,
+        // `ReduceOpsKernel.cpp:253`); `.item<double>()` widens that already-`T`-
+        // rounded scalar AFTER the fact. Accumulating in f64 for an f32 weight
+        // would make the clip DECISION on a value torch never sees — at the
+        // boundary (f32 norm == max_norm) torch does NOT clip but an f64 norm
+        // can land just above, wrongly scaling the row (#1612).
+        let norm_t: T = if norm_type == 0.0 {
             // NormZeroOps (`SharedReduceOps.h:285`): count of nonzeros.
-            row.iter()
-                .filter(|&&v| num_traits::ToPrimitive::to_f64(&v).unwrap_or(0.0) != 0.0)
-                .count() as f64
+            T::from(
+                row.iter()
+                    .filter(|&&v| v != <T as num_traits::Zero>::zero())
+                    .count(),
+            )
+            .unwrap_or_else(<T as num_traits::Zero>::zero)
         } else if norm_type == f64::INFINITY {
-            // AbsMaxOps (`SharedReduceOps.h:216`): max_i |x_i|.
-            row.iter().fold(0.0f64, |acc, &v| {
-                acc.max(num_traits::ToPrimitive::to_f64(&v).unwrap_or(0.0).abs())
+            // AbsMaxOps (`SharedReduceOps.h:216`): max_i |x_i|, in `T`.
+            row.iter().fold(<T as num_traits::Zero>::zero(), |acc, &v| {
+                let av = v.abs();
+                if av > acc { av } else { acc }
             })
         } else if norm_type == f64::NEG_INFINITY {
-            // AbsMinOps (`SharedReduceOps.h:186`): min_i |x_i|, acc seeded +inf.
-            row.iter().fold(f64::INFINITY, |acc, &v| {
-                acc.min(num_traits::ToPrimitive::to_f64(&v).unwrap_or(0.0).abs())
+            // AbsMinOps (`SharedReduceOps.h:186`): min_i |x_i|, acc seeded +inf,
+            // in `T`.
+            row.iter().fold(T::infinity(), |acc, &v| {
+                let av = v.abs();
+                if av < acc { av } else { acc }
             })
         } else {
-            // NormOps: generic finite p-norm `(Σ|x|^p)^(1/p)`.
-            let mut acc = 0.0f64;
+            // NormOps: generic finite p-norm `(Σ|x|^p)^(1/p)`, accumulated and
+            // rooted in `T` (f32 for an f32 weight) to match `at::norm`.
+            let p_t = T::from(norm_type).unwrap_or_else(<T as num_traits::One>::one);
+            let mut acc = <T as num_traits::Zero>::zero();
             for &v in row {
-                let vf = num_traits::ToPrimitive::to_f64(&v).unwrap_or(0.0);
-                acc += vf.abs().powf(norm_type);
+                acc += v.abs().powf(p_t);
             }
-            acc.powf(1.0 / norm_type)
+            let inv_p = T::from(1.0 / norm_type).unwrap_or_else(<T as num_traits::One>::one);
+            acc.powf(inv_p)
         };
+        // Widen the native-precision norm to f64 exactly as `.item<double>()`
+        // does (`Embedding.cpp:203`) — only NOW does the value become f64.
+        let norm = num_traits::ToPrimitive::to_f64(&norm_t).unwrap_or(0.0);
         if norm > max_norm {
             // Lazily materialise the mutable copy only when a row needs
             // clipping, so the no-clip case never touches the buffer.
@@ -1889,6 +1913,45 @@ mod tests {
             "row2 should be untouched: {}",
             w[5]
         );
+    }
+
+    #[test]
+    fn test_max_norm_f32_vs_f64_norm_boundary_unchanged() {
+        // #1612: the renorm clip DECISION must be made in the weight's native
+        // dtype (f32 here), matching torch's `row.norm(norm_type).item<double>()`
+        // (Embedding.cpp:202-203) — `at::norm` accumulates in `opmath_type<f32>`
+        // == f32, stores back as f32, and only THEN widens to double.
+        //
+        // Oracle (live torch 2.11.0+cu130, 2026-05-28): this row's f32 L2-norm
+        // is exactly 100.0, so `F.embedding([0], w, max_norm=100.0,
+        // norm_type=2.0)` leaves the row UNCHANGED (100.0 > 100.0 is false). Its
+        // f64 norm is 100.00000387877625 > 100.0, which the OLD f64 accumulation
+        // wrongly treated as "exceeds max_norm" and scaled the row down.
+        let row: [f32; 4] = [-5.092_077_7, -9.034_002, -99.067_34, -8.838_612];
+        let emb = {
+            let mut data = row.to_vec();
+            data.extend_from_slice(&[0.1f32, 0.2, 0.3, 0.4]);
+            let w = Tensor::from_storage(TensorStorage::cpu(data), vec![2, 4], true).unwrap();
+            Embedding::from_pretrained(w, None)
+                .unwrap()
+                .with_max_norm(100.0)
+                .with_norm_type(2.0)
+        };
+
+        let idx = index_tensor(&[0.0]);
+        let _ = emb.forward(&idx).unwrap();
+
+        // Persisted weight row 0 must be byte-identical to the input — torch's
+        // f32 norm == max_norm so it does NOT clip.
+        let w = emb.weight.data().unwrap().to_vec();
+        for (i, &orig) in row.iter().enumerate() {
+            assert_eq!(
+                w[i], orig,
+                "row[{i}] must stay byte-for-byte unchanged at the f32-norm==max_norm \
+                 boundary (torch F.embedding leaves it intact); got {} expected {orig}",
+                w[i]
+            );
+        }
     }
 
     // -------------------------------------------------------------------
