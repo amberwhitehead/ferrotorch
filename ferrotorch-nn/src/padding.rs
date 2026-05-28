@@ -1718,8 +1718,10 @@ fn circular_slice_range(length: isize, mut start: isize, mut end: isize) -> (usi
 ///   by `slice(dim, max(pad,0), …)` / `slice(dim, max(-pad,0), …)`, then copy.
 ///   `copy_` errors unless the source broadcasts to the destination shape (per
 ///   dim: sizes equal OR source size 1); a mismatch is a torch `RuntimeError`.
-/// - `:169-187` the left/right wrap `copy_`s, each reading from `out` itself
-///   (already partially written). Same broadcast-legality gate.
+/// - `:169-187` the left/right wrap `copy_`s, each reading from `out` LIVE
+///   (`in_slice = out.slice_symint(...)` aliases the buffer being written, so a
+///   wrap reads cells the center or an earlier wrap just wrote — `:163-165`
+///   "Corners will be written more than once"). Same broadcast-legality gate.
 ///
 /// Because the wraps read from `out`, an axis whose isolated wrap would be OOB
 /// is harmless when a different axis emptied the output (every `copy_` is then a
@@ -1761,14 +1763,22 @@ fn circular_slicecopy_block<T: Float>(
 
     // Per-dim half-open copy windows for the dst (`out`) and src.
     // `copy_block` copies `src[src_win]` (broadcast) into `out[dst_win]`,
-    // reading from `read` (either the input or `out` itself) and writing `out`,
-    // propagating the init mask. Returns Err on a broadcast-illegal `copy_`.
+    // propagating the init mask, and returns Err on a broadcast-illegal `copy_`.
     // `dst_win`/`src_win` are `(start,end)` per inner dim.
+    //
+    // When `read_data` is `Some`, the source is a SEPARATE buffer (the original
+    // input, for the center copy — `read_strides` indexes it). When `read_data`
+    // is `None`, the source is `out` ITSELF, read LIVE in the same pass: this
+    // mirrors torch's `:169-187` wrap `copy_`s where `in_slice = out.slice(...)`
+    // aliases the very `out` buffer being written (`read_strides` indexes `out`).
+    // Iterating in row-major dst order, a wrap cell can therefore read a cell the
+    // center (or an earlier dst cell in this same wrap) just wrote, deterministi-
+    // cally propagating a narrow center band exactly as torch does (#1629).
     #[allow(clippy::too_many_arguments)]
     fn copy_block<T: Float>(
         out: &mut [T],
         init: &mut [bool],
-        read_data: &[T],
+        read_data: Option<&[T]>,
         read_init: Option<&[bool]>,
         ninner: usize,
         out_strides: &[usize],
@@ -1796,6 +1806,43 @@ fn circular_slicecopy_block<T: Float>(
         if total == 0 {
             return Ok(()); // no-op over an empty extent (`:148` empty out_shape)
         }
+        // torch `copy_` memory-overlap gate (live-read wraps only). When the wrap
+        // reads from `out` itself (`read_data is None`), torch's `copy_` raises
+        // `RuntimeError: ... refer to a single memory location` when the source
+        // and destination slices each form a CONTIGUOUS memory run AND those runs
+        // overlap by a non-identity offset (MEM_OVERLAP_YES). A wrap slices a
+        // SINGLE dim `wd` (all other dims full-extent); its dst/src each form a
+        // contiguous run iff every dim MORE MAJOR than `wd` has extent 1 (else the
+        // slice repeats once per major index → strided, and torch's overlap
+        // detector returns "too hard" and proceeds with the well-defined band
+        // propagation, #1629). An EXACT-identity window pair is a self-copy no-op
+        // torch always allows; disjoint windows never overlap. We mirror torch's
+        // raise as a clean `Err` (R-CODE-2: never a panic).
+        if read_data.is_none() {
+            let mut wrap_dim: Option<usize> = None;
+            for d in 0..ninner {
+                if dst_win[d] != src_win[d] {
+                    // a wrap differs on exactly one (the wrap) dim
+                    wrap_dim = Some(d);
+                    break;
+                }
+            }
+            if let Some(wd) = wrap_dim {
+                // contiguous run iff every more-major dim is collapsed to extent 1
+                let runs_contiguous = (0..wd).all(|d| dst_ext[d] == 1);
+                let ds = dst_win[wd];
+                let ss = src_win[wd];
+                let overlap = ds.0 < ss.1 && ss.0 < ds.1; // half-open range overlap
+                let identical = ds == ss;
+                if runs_contiguous && overlap && !identical {
+                    return Err(FerrotorchError::InvalidArgument {
+                        message:
+                            "Circular padding: torch's wrap copy_ would read and write a single memory location over a contiguous slice (RuntimeError: some elements of the input and written-to tensor refer to a single memory location); ferrotorch rejects rather than fabricate (R-DEV-6)"
+                                .to_string(),
+                    });
+                }
+            }
+        }
         // Iterate every dst coordinate; map to the (broadcast) src coordinate.
         let mut coord = vec![0usize; ninner];
         for _ in 0..total {
@@ -1811,8 +1858,16 @@ fn circular_slicecopy_block<T: Float>(
                 };
                 src_off += sc * read_strides[d];
             }
-            out[dst_off] = read_data[src_off];
-            init[dst_off] = read_init.map(|ri| ri[src_off]).unwrap_or(true);
+            // LIVE read: when `read_data` is `None` the source IS `out`/`init`
+            // (torch's wrap `in_slice = out.slice(...)`), so we read the current
+            // value at `src_off` — including a cell written earlier in this very
+            // pass — before overwriting `dst_off`.
+            let (v, src_inited) = match (read_data, read_init) {
+                (Some(rd), ri) => (rd[src_off], ri.map(|m| m[src_off]).unwrap_or(true)),
+                (None, _) => (out[src_off], init[src_off]),
+            };
+            out[dst_off] = v;
+            init[dst_off] = src_inited;
             // advance coord (row-major over dst extents)
             let mut d = ninner;
             while d > 0 {
@@ -1846,7 +1901,7 @@ fn circular_slicecopy_block<T: Float>(
     copy_block(
         &mut out,
         &mut init,
-        in_block,
+        Some(in_block),
         None,
         ninner,
         &out_strides,
@@ -1855,12 +1910,15 @@ fn circular_slicecopy_block<T: Float>(
         &src_win,
     )?;
 
-    // `:169-187` — the left/right wrap copies, each reading from `out` itself.
-    // We snapshot `out`/`init` before each copy so the source reads the state
-    // BEFORE that copy's writes (torch's `out.slice` aliases `out`, but the
-    // per-element copy below reads then writes in the SAME pass; snapshotting
-    // matches torch's well-defined non-overlapping wraps and rejects the
-    // overlapping ones via the leftover-uninit R-DEV-6 check at the end).
+    // `:169-187` — the left/right wrap copies, each reading from `out` LIVE.
+    // torch's `in_slice = out.slice_symint(...)` (`:176`/`:184`) aliases the SAME
+    // `out` buffer the loop is writing, and `:163-165` is explicit that corners
+    // are written more than once across the sequence. So each wrap reads the
+    // CURRENT `out` (including cells the center or an earlier wrap just wrote),
+    // deterministically propagating a narrow over-cropped center band exactly as
+    // torch does (#1629). We pass `read_data = None` so `copy_block` reads `out`/
+    // `init` in place — NOT a pre-copy snapshot. Cells torch never writes stay
+    // uninit and are caught by the leftover-uninit R-DEV-6 check below.
     for (k, &(pl, pr)) in pads.iter().enumerate() {
         // i in torch is k counted from the FIRST padded axis; torch's `dim` is
         // the inner dim `ninner - npad + k`. Our `pads` is last-axis-first, so
@@ -1872,8 +1930,6 @@ fn circular_slicecopy_block<T: Float>(
         let dim = ninner - 1 - k;
         let out_len = out_inner_shape[dim] as isize;
         if pl > 0 {
-            let snap = out.clone();
-            let snap_init = init.clone();
             let mut dwin = vec![(0usize, 0usize); ninner];
             let mut swin = vec![(0usize, 0usize); ninner];
             for d in 0..ninner {
@@ -1886,8 +1942,8 @@ fn circular_slicecopy_block<T: Float>(
             copy_block(
                 &mut out,
                 &mut init,
-                &snap,
-                Some(&snap_init),
+                None,
+                None,
                 ninner,
                 &out_strides,
                 &out_strides,
@@ -1896,8 +1952,6 @@ fn circular_slicecopy_block<T: Float>(
             )?;
         }
         if pr > 0 {
-            let snap = out.clone();
-            let snap_init = init.clone();
             let mut dwin = vec![(0usize, 0usize); ninner];
             let mut swin = vec![(0usize, 0usize); ninner];
             for d in 0..ninner {
@@ -1909,8 +1963,8 @@ fn circular_slicecopy_block<T: Float>(
             copy_block(
                 &mut out,
                 &mut init,
-                &snap,
-                Some(&snap_init),
+                None,
+                None,
                 ninner,
                 &out_strides,
                 &out_strides,

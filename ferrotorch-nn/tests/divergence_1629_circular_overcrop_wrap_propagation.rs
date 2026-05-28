@@ -55,7 +55,6 @@ fn tensor(data: &[f64], shape: &[usize]) -> Tensor<f64> {
 ///
 /// Tracking: #1629
 #[test]
-#[ignore = "divergence: circular over-crop wrap-propagation; torch returns defined [1,2,3] all-2.0 (pure linear gather of input[..,1], stable across 8 fresh processes), ferro false-R-DEV-6 Errs due to snapshot-before-wrap (padding.rs:1875); tracking #1629"]
 fn divergence_circular_overcrop_propagation_112_w_neg1_2_h_0_1() {
     let x = tensor(&[1.0, 2.0], &[1, 1, 2]);
     // torch: F.pad(x, [-1, 2, 0, 1], mode='circular') -> shape [1,2,3], all 2.0.
@@ -78,7 +77,6 @@ fn divergence_circular_overcrop_propagation_112_w_neg1_2_h_0_1() {
 ///
 /// Tracking: #1629
 #[test]
-#[ignore = "divergence: circular over-crop wrap-propagation 2-D; torch returns defined [1,4,3], ferro false-R-DEV-6 Errs; tracking #1629"]
 fn divergence_circular_overcrop_propagation_122_w_neg1_2_h_1_1() {
     let x = tensor(&[1.0, 2.0, 3.0, 4.0], &[1, 2, 2]);
     // torch: F.pad(x, [-1, 2, 1, 1], mode='circular') -> [1,4,3]
@@ -102,7 +100,6 @@ fn divergence_circular_overcrop_propagation_122_w_neg1_2_h_1_1() {
 ///
 /// Tracking: #1629
 #[test]
-#[ignore = "divergence: circular over-crop wrap-propagation (non-uniform); torch returns defined [1,2,7], ferro false-R-DEV-6 Errs; tracking #1629"]
 fn divergence_circular_overcrop_propagation_114_w_neg1_4_h_0_1() {
     let x = tensor(&[1.0, 2.0, 3.0, 4.0], &[1, 1, 4]);
     // torch: F.pad(x, [-1, 4, 0, 1], mode='circular') -> [1,2,7]
