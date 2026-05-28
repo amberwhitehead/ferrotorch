@@ -413,6 +413,229 @@ impl Oracle {
 }
 
 // ---------------------------------------------------------------------------
+// Linalg DECOMPOSITION gauge-invariant comparison helpers (#1344, HARD subset)
+// ---------------------------------------------------------------------------
+//
+// Eigenvectors / singular vectors carry SIGN / PHASE / ORDERING gauge freedom:
+// comparing ferrotorch's raw U / V / Q element-wise against torch's would
+// spuriously FAIL even when the decomposition is correct. Each helper below
+// reproduces — on the ferrotorch side — the SAME gauge-invariant derived
+// quantity the oracle's `_<op>_torch_call` adapter emits (see
+// `tools/parity-sweep/oracle.py`): singular VALUES, sorted eigenVALUES, a
+// RECONSTRUCTION `U diag(S) Vh` / `Q diag(w) Q^T` / `P L U`, a residual norm,
+// or the (unique) pinv / lstsq solution. The runner's existing
+// `assert_close_f32_with_tol` value gate then compares the two derived
+// quantities apples-to-apples.
+
+/// Row-major `[m, n]` @ `[n, p]` -> `[m, p]` via the faer-consolidated
+/// raw kernel (`ops::linalg::mm_raw`), used to assemble reconstructions.
+fn recon_mm(a: &[f32], m: usize, k: usize, b: &[f32], n: usize) -> Vec<f32> {
+    ferrotorch_core::ops::linalg::mm_raw::<f32>(a, b, m, k, n)
+}
+
+/// Multiply each COLUMN `j` of a row-major `[m, k]` matrix by `s[j]` —
+/// i.e. compute `M @ diag(s)` for the SVD / eigh reconstruction.
+fn scale_columns(m_data: &[f32], rows: usize, cols: usize, s: &[f32]) -> Vec<f32> {
+    let mut out = vec![0.0f32; rows * cols];
+    for i in 0..rows {
+        for j in 0..cols {
+            out[i * cols + j] = m_data[i * cols + j] * s[j];
+        }
+    }
+    out
+}
+
+/// Transpose a row-major `[r, c]` matrix to `[c, r]`.
+fn transpose_rm(m: &[f32], r: usize, c: usize) -> Vec<f32> {
+    let mut out = vec![0.0f32; r * c];
+    for i in 0..r {
+        for j in 0..c {
+            out[j * r + i] = m[i * c + j];
+        }
+    }
+    out
+}
+
+/// ferrotorch side of the gauge-invariant SVD probe: `concat([S, recon])`
+/// where `recon = U @ diag(S) @ Vh ≈ A`. Mirrors `_svd_torch_call`.
+fn ferrotorch_svd_probe(a: &Tensor<f32>) -> Result<Tensor<f32>, Box<dyn std::error::Error>> {
+    let (u, s, vh) = ferrotorch_core::linalg::svd(a)?;
+    let m = u.shape()[0];
+    let k = u.shape()[1]; // k = min(m, n)
+    let n = vh.shape()[1];
+    let u_d = u.data_vec()?;
+    let s_d = s.data_vec()?;
+    let vh_d = vh.data_vec()?;
+    // recon = (U scaled by S columns) @ Vh   : [m,k] @ [k,n] = [m,n]
+    let us = scale_columns(&u_d, m, k, &s_d);
+    let recon = recon_mm(&us, m, k, &vh_d, n);
+    let mut out = s_d;
+    out.extend_from_slice(&recon);
+    Ok(from_vec(out.clone(), &[out.len()])?)
+}
+
+/// ferrotorch side of the gauge-invariant symmetric-eig probe:
+/// `concat([w, recon])` with `recon = Q @ diag(w) @ Q^T ≈ A`. Mirrors
+/// `_eigh_torch_call` (eigenvalues already ascending from ferray's syevd).
+fn ferrotorch_eigh_probe(a: &Tensor<f32>) -> Result<Tensor<f32>, Box<dyn std::error::Error>> {
+    let (w, q) = ferrotorch_core::linalg::eigh(a)?;
+    let n = q.shape()[0];
+    let w_d = w.data_vec()?;
+    let q_d = q.data_vec()?;
+    // recon = (Q scaled by w columns) @ Q^T : [n,n] @ [n,n].
+    let qw = scale_columns(&q_d, n, n, &w_d);
+    let qt = transpose_rm(&q_d, n, n);
+    let recon = recon_mm(&qw, n, n, &qt, n);
+    let mut out = w_d;
+    out.extend_from_slice(&recon);
+    Ok(from_vec(out.clone(), &[out.len()])?)
+}
+
+/// Sort a ferrotorch `[n, 2]` interleaved-complex eigenvalue tensor as a SET
+/// by (re, im) — the gauge-invariant ordering matching `_sorted_complex_eigvals`
+/// in the oracle (same 5-decimal rounding key so conjugate pairs order
+/// identically across the faer / LAPACK gauge boundary).
+fn sort_complex_eigvals(w: &[f32], n: usize) -> Vec<f32> {
+    let mut idx: Vec<usize> = (0..n).collect();
+    let key = |i: usize| -> (i64, i64) {
+        let re = (w[2 * i] as f64 * 1e5).round() as i64;
+        let im = (w[2 * i + 1] as f64 * 1e5).round() as i64;
+        (re, im)
+    };
+    idx.sort_by_key(|&x| key(x));
+    let mut out = Vec::with_capacity(2 * n);
+    for i in idx {
+        out.push(w[2 * i]);
+        out.push(w[2 * i + 1]);
+    }
+    out
+}
+
+/// ferrotorch side of the gauge-invariant non-symmetric eig probe: the
+/// eigenvalue SET sorted by (re, im). Mirrors `_eig_torch_call` — it does NOT
+/// emit the per-column residual (that quantity is ≈0 on both sides but
+/// differs at the f32 noise floor). Instead this asserts ferrotorch's OWN
+/// residual `||A v_j - λ_j v_j||` is small (`< 1e-3` relative to ||A||); a
+/// genuinely-WRONG forward would blow that up and surface here as an Err
+/// (a divergence to report), not a silent pass.
+fn ferrotorch_eig_probe(a: &Tensor<f32>) -> Result<Tensor<f32>, Box<dyn std::error::Error>> {
+    let (w, v) = ferrotorch_core::linalg::eig(a)?; // w:[n,2], v:[n,n,2]
+    let n = a.shape()[0];
+    let a_d = a.data_vec()?;
+    let w_d = w.data_vec()?;
+    let v_d = v.data_vec()?; // row-major [n,n,2] interleaved re/im
+
+    // Per-column complex residual r_j = A v_j - λ_j v_j ; assert ||r_j|| small
+    // (the decomposition is genuine). Use the matrix Frobenius norm as the
+    // scale so the threshold is relative to A's magnitude.
+    let a_fro: f64 = a_d
+        .iter()
+        .map(|&x| (x as f64) * (x as f64))
+        .sum::<f64>()
+        .sqrt();
+    let scale = a_fro.max(1.0);
+    for j in 0..n {
+        let lr = w_d[2 * j] as f64;
+        let li = w_d[2 * j + 1] as f64;
+        let mut sumsq = 0.0f64;
+        for i in 0..n {
+            // (A v_j)_i = sum_t A[i,t] * v[t,j]  (A real, v complex)
+            let mut avr = 0.0f64;
+            let mut avi = 0.0f64;
+            for t in 0..n {
+                let are = a_d[i * n + t] as f64;
+                let vre = v_d[2 * (t * n + j)] as f64;
+                let vim = v_d[2 * (t * n + j) + 1] as f64;
+                avr += are * vre;
+                avi += are * vim;
+            }
+            // (λ_j v_j)_i = (lr + li i)(vre + vim i)
+            let vre = v_d[2 * (i * n + j)] as f64;
+            let vim = v_d[2 * (i * n + j) + 1] as f64;
+            let lvr = lr * vre - li * vim;
+            let lvi = lr * vim + li * vre;
+            let dr = avr - lvr;
+            let di = avi - lvi;
+            sumsq += dr * dr + di * di;
+        }
+        let resid = sumsq.sqrt();
+        if resid > 1e-3 * scale {
+            return Err(format!(
+                "eig residual ||A v_{j} - λ_{j} v_{j}|| = {resid:.3e} \
+                 exceeds 1e-3 * ||A||_F ({:.3e}) — forward divergence",
+                scale
+            )
+            .into());
+        }
+    }
+
+    let out = sort_complex_eigvals(&w_d, n);
+    Ok(from_vec(out.clone(), &[out.len()])?)
+}
+
+/// ferrotorch side of the gauge-invariant LU probe: reconstruction
+/// `P @ L @ U ≈ A`. Mirrors `_lu_torch_call`.
+fn ferrotorch_lu_probe(a: &Tensor<f32>) -> Result<Tensor<f32>, Box<dyn std::error::Error>> {
+    let (p, l, u) = ferrotorch_core::linalg::lu(a)?;
+    let m = p.shape()[0]; // P: [m,m]
+    let k = l.shape()[1]; // L: [m,k]
+    let n = u.shape()[1]; // U: [k,n]
+    let p_d = p.data_vec()?;
+    let l_d = l.data_vec()?;
+    let u_d = u.data_vec()?;
+    let lu = recon_mm(&l_d, m, k, &u_d, n); // [m,n]
+    let recon = recon_mm(&p_d, m, m, &lu, n); // [m,n]
+    Ok(from_vec(recon.clone(), &[recon.len()])?)
+}
+
+/// ferrotorch side of the gauge-invariant lu_factor probe: reconstruction
+/// `P @ L @ U ≈ A` rebuilt from the packed `(LU, pivots)` form. Mirrors
+/// `_lu_factor_torch_call`.
+fn ferrotorch_lu_factor_probe(a: &Tensor<f32>) -> Result<Tensor<f32>, Box<dyn std::error::Error>> {
+    let (lu, ipiv) = ferrotorch_core::linalg::lu_factor(a)?;
+    let n = lu.shape()[0];
+    let lu_d = lu.data_vec()?;
+    // Unpack packed LU: L = unit-lower (strict lower of lu + I), U = upper.
+    let mut l = vec![0.0f32; n * n];
+    let mut u = vec![0.0f32; n * n];
+    for i in 0..n {
+        for j in 0..n {
+            if j < i {
+                l[i * n + j] = lu_d[i * n + j];
+            } else if j == i {
+                l[i * n + j] = 1.0;
+                u[i * n + j] = lu_d[i * n + j];
+            } else {
+                u[i * n + j] = lu_d[i * n + j];
+            }
+        }
+    }
+    // Rebuild the permutation P from the 1-based LAPACK swap-sequence `ipiv`:
+    // start from identity row-permutation `perm = [0..n)`, then for step i
+    // swap rows i and ipiv[i]-1 (replay the factorization's pivots).
+    let mut perm: Vec<usize> = (0..n).collect();
+    for (i, &piv) in ipiv.iter().enumerate() {
+        let j = (piv - 1) as usize;
+        perm.swap(i, j);
+    }
+    // P @ (L @ U): build LU then scatter rows by `perm`. `perm[r]` is the
+    // source row of `L@U` that lands in output row `r` (P @ M moves row
+    // perm^{-1}; we constructed perm as the row order so P[r, perm[r]] = 1).
+    let luu = recon_mm(&l, n, n, &u, n); // [n,n] = L@U
+    let mut recon = vec![0.0f32; n * n];
+    // perm gives the LAPACK pivot permutation in the SAME convention
+    // `lu_factor`'s CPU path used to build ipiv (row swapped into position i),
+    // so output row `perm[i]` of A equals row `i` of `L@U`.
+    for i in 0..n {
+        let dst = perm[i];
+        for c in 0..n {
+            recon[dst * n + c] = luu[i * n + c];
+        }
+    }
+    Ok(from_vec(recon.clone(), &[recon.len()])?)
+}
+
+// ---------------------------------------------------------------------------
 // ferrotorch dispatch table (op name -> closure)
 // ---------------------------------------------------------------------------
 
@@ -3393,6 +3616,131 @@ fn dispatch_f32(
             )?))
         }
 
+        // ===================================================================
+        // Linalg DECOMPOSITION subset (#1344, HARD) — gauge-invariant probes.
+        // ===================================================================
+        //
+        // Each arm computes the SAME gauge-invariant derived quantity the
+        // oracle's `_<op>_torch_call` adapter emits (singular VALUES, sorted
+        // eigenVALUES, a RECONSTRUCTION, a residual norm, or the unique
+        // pinv / lstsq solution), so the harness's `assert_close_f32` value
+        // gate compares them apples-to-apples — never the sign/phase/ordering-
+        // ambiguous raw U / V / Q. The samples are custom (hand-crafted
+        // well-conditioned real f32 matrices in `oracle.py`'s `_CUSTOM_OPS`,
+        // NOT op_db's raw-tuple samples), keyed by these bare op names. The
+        // forward production consumers are the grad-aware `pub fn svd` / `eigh`
+        // / `eig` / `lu` / `pinv` / ... in `ferrotorch-core/src/linalg.rs`
+        // (the `torch.linalg.*` public surface — see
+        // `.design/ferrotorch-core/grad_fns/linalg.md` REQ-11..28).
+
+        // `torch.linalg.svd(A, full_matrices=False)` — compare singular VALUES
+        // (gauge-free) + the reconstruction `U diag(S) Vh ≈ A`
+        // (gauge-invariant). Upstream `Tensor linalg_svd(...)` /
+        // `svd_backward` at `torch/csrc/autograd/FunctionsManual.cpp:3605`;
+        // forward `pub fn svd` in `ferrotorch-core/src/linalg.rs`. The raw
+        // U / Vh are NEVER compared element-wise (LAPACK vs faer signs differ).
+        "svd" => {
+            let a = unary("svd")?;
+            Ok(Some(ferrotorch_svd_probe(&a)?))
+        }
+        // `torch.linalg.eigh(B, UPLO='L')` — symmetric eigendecomposition:
+        // compare eigenVALUES (real, ascending — gauge-free) + the
+        // reconstruction `Q diag(w) Q^T ≈ B` (gauge-invariant). The raw Q is
+        // sign-ambiguous per column (`canonicalize_eigenvector_signs` makes
+        // ferrotorch reproducible but does NOT match LAPACK signs — see
+        // `ferrotorch-core/src/linalg.rs` doc), so reconstruction is the
+        // contract. Forward `pub fn eigh` in `ferrotorch-core/src/linalg.rs`.
+        "eigh" => {
+            let a = unary("eigh")?;
+            Ok(Some(ferrotorch_eigh_probe(&a)?))
+        }
+        // `torch.linalg.eigvalsh(B, UPLO='L')` — symmetric eigenvalues only
+        // (real, ascending, gauge-free). Compared directly. Forward
+        // `pub fn eigvalsh` in `ferrotorch-core/src/linalg.rs`.
+        "eigvalsh" => {
+            let a = unary("eigvalsh")?;
+            Ok(Some(ferrotorch_core::linalg::eigvalsh(&a)?))
+        }
+        // `torch.linalg.eig(A)` — non-symmetric (complex) eigendecomposition:
+        // compare the eigenvalue SET (sorted by (re, im), the unique
+        // invariant) + the per-column residual norms `||A v - λ v|| ≈ 0`. The
+        // raw V carries a per-column phase gauge (and the column ordering is
+        // implementation-defined), so it is NEVER compared directly. Forward
+        // `pub fn eig` in `ferrotorch-core/src/linalg.rs` (#1345 tracks the
+        // COMPLEX backward; the sweep exercises the forward only).
+        "eig" => {
+            let a = unary("eig")?;
+            Ok(Some(ferrotorch_eig_probe(&a)?))
+        }
+        // `torch.linalg.eigvals(A)` — non-symmetric eigenvalues only (complex
+        // SET, sorted by (re, im)). Forward `pub fn eigvals` in
+        // `ferrotorch-core/src/linalg.rs`.
+        "eigvals" => {
+            let a = unary("eigvals")?;
+            let w = ferrotorch_core::linalg::eigvals(&a)?; // [n,2] interleaved
+            let n = a.shape()[0];
+            let w_d = w.data_vec()?;
+            let sorted = sort_complex_eigvals(&w_d, n);
+            Ok(Some(from_vec(sorted.clone(), &[sorted.len()])?))
+        }
+        // `torch.linalg.pinv(A)` — Moore-Penrose pseudo-inverse. UNIQUE (no
+        // gauge freedom), compared directly. Forward `pub fn pinv` in
+        // `ferrotorch-core/src/linalg.rs`.
+        "pinv" => {
+            let a = unary("pinv")?;
+            Ok(Some(ferrotorch_core::linalg::pinv(&a)?))
+        }
+        // `torch.linalg.lstsq(A, B).solution` — least-squares solution. For
+        // the full-rank `A` the custom samples emit, the solution is UNIQUE,
+        // compared directly. Forward `pub fn lstsq_solve` in
+        // `ferrotorch-core/src/linalg.rs` (the solution-only slice of the
+        // full `lstsq` tuple).
+        "lstsq" => {
+            let (a, b) = binary("lstsq")?;
+            Ok(Some(ferrotorch_core::linalg::lstsq_solve(&a, &b)?))
+        }
+        // `torch.linalg.lu(A)` — LU with partial pivoting: compare the
+        // reconstruction `P L U ≈ A` (the raw P/L/U pivot/sign freedom
+        // cancels). Forward `pub fn lu` in `ferrotorch-core/src/linalg.rs`.
+        "lu" => {
+            let a = unary("lu")?;
+            Ok(Some(ferrotorch_lu_probe(&a)?))
+        }
+        // `torch.linalg.lu_factor(A)` — packed LU: compare the reconstruction
+        // `P L U ≈ A` rebuilt from `(LU_packed, pivots)`. Forward
+        // `pub fn lu_factor` in `ferrotorch-core/src/linalg.rs`.
+        "lu_factor" => {
+            let a = unary("lu_factor")?;
+            Ok(Some(ferrotorch_lu_factor_probe(&a)?))
+        }
+        // `torch.linalg.householder_product(input, tau)` — `Q` is a
+        // DETERMINISTIC function of `(input, tau)` (no gauge freedom), so it is
+        // compared directly under the decomposition rtol. Both sides receive
+        // the SAME `(input, tau)` from `torch.geqrf`. Forward
+        // `pub fn householder_product` in `ferrotorch-core/src/linalg.rs`.
+        "householder_product" => {
+            let (v, tau) = binary("householder_product")?;
+            Ok(Some(ferrotorch_core::linalg::householder_product(
+                &v, &tau,
+            )?))
+        }
+        // `torch.linalg.matrix_norm(A)` (default Frobenius) — a SCALAR.
+        // ferrotorch's `norm` forward covers the matrix Frobenius norm via
+        // `pub fn matrix_norm` in `ferrotorch-core/src/linalg.rs`. Compared
+        // directly.
+        "norm" => {
+            let a = unary("norm")?;
+            Ok(Some(ferrotorch_core::linalg::matrix_norm(&a)?))
+        }
+        // `torch.linalg.matrix_rank(A)` — an INTEGER (the harness widens the
+        // int64 expected to f32; rank values fit the f32 mantissa exactly).
+        // Forward `pub fn matrix_rank` in `ferrotorch-core/src/linalg.rs`
+        // (default tol). Compared directly.
+        "matrix_rank" => {
+            let a = unary("matrix_rank")?;
+            Ok(Some(ferrotorch_core::linalg::matrix_rank(&a, None)?))
+        }
+
         // `torch.kron(input, other)` — Kronecker product. Upstream `Tensor
         // kron(const Tensor& self, const Tensor& other)` at
         // `aten/src/ATen/native/LinearAlgebra.cpp:3530`; the per-Kron-block
@@ -6019,7 +6367,7 @@ fn dispatch_ops() -> &'static [&'static str] {
         // triu) are exact element copies/single multiplies and stay at the
         // default `tol_f32()`. The harder decompositions (svd/eig/eigh/eigvals/
         // eigvalsh/pinv/lstsq/lu/lu_factor/householder_product/norm/
-        // matrix_rank) remain unwired follow-ups under #1344.
+        // matrix_rank) are the DECOMPOSITION subset wired below.
         "addmm",
         "addbmm",
         "baddbmm",
@@ -6030,6 +6378,31 @@ fn dispatch_ops() -> &'static [&'static str] {
         "diag",
         "tril",
         "triu",
+        // DECOMPOSITION subset of #1344 — wired 2026-05-27 with GAUGE-INVARIANT
+        // comparison (the raw U / V / Q carry sign / phase / ordering freedom,
+        // so each arm compares singular VALUES / sorted eigenVALUES / a
+        // RECONSTRUCTION / a residual norm / the unique pinv-lstsq solution —
+        // see the `dispatch_f32` arm doc-comments + the `ferrotorch_*_probe`
+        // helpers + the `_<op>_torch_call` oracle adapters). Custom samples
+        // (well-conditioned real f32 matrices in `oracle.py`'s `_CUSTOM_OPS`),
+        // NOT op_db's raw-tuple samples. Production consumers: the grad-aware
+        // `pub fn {svd,eigh,eigvalsh,eig,eigvals,pinv,lstsq_solve,lu,lu_factor,
+        // householder_product,matrix_norm,matrix_rank}` in
+        // `ferrotorch-core/src/linalg.rs` (REQ-11..28 of
+        // `.design/ferrotorch-core/grad_fns/linalg.md`). Decomposition rtol=1e-4
+        // (faer vs LAPACK ULP) via `tolerance_for`.
+        "svd",
+        "eigh",
+        "eigvalsh",
+        "eig",
+        "eigvals",
+        "pinv",
+        "lstsq",
+        "lu",
+        "lu_factor",
+        "householder_product",
+        "norm",
+        "matrix_rank",
         // Einsum + SDPA — runner arms wired 2026-05-26 to close #1532.
         // `einsum` consumes op_db's `[List[Tensor], equation_str]` envelope
         // (closed under REQ-2/REQ-5 of `.design/ferrotorch-core/einsum.md`);
@@ -6612,6 +6985,34 @@ fn tolerance_for(op: &str) -> (f32, f32) {
         // exact (a pure diagonal sum / a single multiply per element) and
         // stay at the default `tol_f32()`.
         "linalg.det" | "linalg.inv" | "linalg.solve" => (1e-4, 1e-7),
+        // Decomposition subset (#1344): svd / eigh / eigvalsh / eig / eigvals /
+        // pinv / lstsq / lu / lu_factor / householder_product / norm /
+        // matrix_rank. These run a full LAPACK-class factorization (SVD, QR,
+        // LU, eigensolve) whose pivot order + FMA schedule + (for SVD/eig) the
+        // Jacobi/QR-iteration sweep differ between ferrotorch's faer backend
+        // and torch's LAPACK, inducing the SAME structural cross-implementation
+        // f32 ULP drift as the matmul / det / inv family — amplified for the
+        // RECONSTRUCTION probes (svd/eigh/lu reconstruct via a `diag`-scale +
+        // matmul, accumulating an extra GEMM round of drift). The comparison is
+        // GAUGE-INVARIANT (singular VALUES / sorted eigenVALUES / a
+        // reconstruction / a residual norm / the unique pinv-lstsq solution),
+        // so rtol=1e-4 absorbs the structural drift without masking a real
+        // divergence; byte-for-byte parity vs LAPACK requires the future MKL/
+        // LAPACK FFI epic (same as matmul). `matrix_rank` is an EXACT integer
+        // (atol absorbs the f32-mantissa-exact rank value); `norm` is a single
+        // sqrt-of-sum that lands well inside rtol=1e-4.
+        "svd"
+        | "eigh"
+        | "eigvalsh"
+        | "eig"
+        | "eigvals"
+        | "pinv"
+        | "lstsq"
+        | "lu"
+        | "lu_factor"
+        | "householder_product"
+        | "norm"
+        | "matrix_rank" => (1e-4, 1e-6),
         // Fused-affine GEMM family (`beta*self + alpha*(A @ B)`): the inner
         // `A @ B` is the same faer-vs-MKL GEMM whose f32 ULP drift the
         // matmul-family doc-comment above measures (~4e-6 at |e|=0.14 for

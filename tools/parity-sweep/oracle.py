@@ -612,7 +612,350 @@ def _pack_unpack_roundtrip_torch_call(x, lengths, batch_first):
     return out
 
 
+# ---------------------------------------------------------------------------
+# Linalg DECOMPOSITION ops (#1344, HARD subset) — gauge-invariant comparison.
+# ---------------------------------------------------------------------------
+#
+# Eigenvectors / singular vectors carry SIGN / PHASE / ORDERING ambiguity:
+# comparing torch's raw U / V / Q element-wise against ferrotorch's would
+# spuriously FAIL even when the underlying decomposition is correct (LAPACK
+# and faer pick different gauges). So each adapter below maps torch's raw
+# decomposition output to a GAUGE-INVARIANT derived quantity (singular VALUES
+# / sorted eigenVALUES / a RECONSTRUCTION `U diag(S) Vh` / `P L U` / a
+# residual norm) — a single plain `torch.Tensor` that rides the existing
+# tensor-equality gate. The matching runner arm (`dispatch_f32` in
+# `tools/parity-sweep/runner/src/main.rs`) computes the SAME derived
+# quantity on the ferrotorch side, so the two are apples-to-apples.
+#
+# These ops ARE in op_db under the `linalg.*` names, but op_db's
+# `sample_inputs` hand back the RAW (U, S, Vh) / (w, Q) / (P, L, U) tuples
+# which the harness's `output[0]`-selecting tensor gate cannot compare
+# gauge-invariantly. Registering them as custom ops lets us (a) emit the
+# derived quantity instead of the raw tuple, and (b) control the sample
+# matrix (well-conditioned real f32 matrices the ferrotorch CPU forward
+# supports — square / tall / wide / SPD where the op requires it). The
+# routes are keyed by the bare ferrotorch op names the dispatch table uses
+# (`svd`, `eigh`, ...) so `dispatch_f32` matches them directly.
+
+
+def _linalg_decomp_matrices(seed: int = 0) -> list[torch.Tensor]:
+    """Well-conditioned real f32 GENERAL matrices for the SVD / LU / pinv /
+    lstsq / norm / matrix_rank / householder family (no symmetry required).
+
+    Shapes cover square, tall (m>n), wide (m<n), and a 1x1 degenerate. All
+    are full-rank and well-separated in singular value (a diagonal-dominant
+    construction) so faer and LAPACK agree to f32 ULP and the gauge-invariant
+    reconstruction lands inside the rtol envelope.
+    """
+    g = torch.Generator().manual_seed(seed)
+    shapes = [(3, 3), (4, 4), (4, 3), (3, 4), (5, 5), (1, 1), (2, 5), (6, 2)]
+    mats: list[torch.Tensor] = []
+    for (m, n) in shapes:
+        a = torch.randn(m, n, generator=g, dtype=torch.float32)
+        # Diagonal-dominant nudge keeps singular values well separated so the
+        # decomposition is numerically stable (no near-degenerate gauge cliff).
+        k = min(m, n)
+        for i in range(k):
+            a[i, i] = a[i, i] + 2.0 + float(i)
+        mats.append(a)
+    return mats
+
+
+def _linalg_symmetric_matrices(seed: int = 0) -> list[torch.Tensor]:
+    """Symmetric real f32 matrices for the eigh / eigvalsh family.
+
+    Built as `B = A + A^T + (2+i)*I` so eigenvalues are real, well separated
+    (the diagonal shift lifts degeneracy), matching `torch.linalg.eigh`'s
+    symmetric contract (it reads the lower triangle, UPLO='L').
+    """
+    g = torch.Generator().manual_seed(seed)
+    sizes = [1, 2, 3, 4, 5, 6]
+    mats: list[torch.Tensor] = []
+    for n in sizes:
+        a = torch.randn(n, n, generator=g, dtype=torch.float32)
+        b = a + a.transpose(0, 1)
+        for i in range(n):
+            b[i, i] = b[i, i] + 2.0 + float(i)
+        mats.append(b)
+    return mats
+
+
+def _linalg_general_square_matrices(seed: int = 0) -> list[torch.Tensor]:
+    """General (non-symmetric) square real f32 matrices for the eig /
+    eigvals family. Real matrices can have complex-conjugate eigenvalue
+    pairs; the comparison sorts the eigenvalue SET by (re, im) so the
+    arbitrary LAPACK/faer ordering does not matter.
+    """
+    g = torch.Generator().manual_seed(seed)
+    sizes = [1, 2, 3, 4, 5]
+    mats: list[torch.Tensor] = []
+    for n in sizes:
+        a = torch.randn(n, n, generator=g, dtype=torch.float32)
+        for i in range(n):
+            a[i, i] = a[i, i] + 1.5
+        mats.append(a)
+    return mats
+
+
+def _svd_samples() -> list[tuple[tuple, dict]]:
+    return [((a,), {}) for a in _linalg_decomp_matrices()]
+
+
+def _svd_torch_call(a: torch.Tensor) -> torch.Tensor:
+    """Gauge-invariant SVD probe: concat([S (descending), reconstruction]).
+
+    `torch.linalg.svd(A, full_matrices=False)` returns `(U, S, Vh)` with `U:
+    [m,k]`, `S: [k]` (descending, non-negative — gauge-FREE), `Vh: [k,n]`,
+    `k=min(m,n)`. The singular VALUES are unique; the RECONSTRUCTION `U @
+    diag(S) @ Vh ≈ A` is gauge-INVARIANT (U/Vh sign/rotation freedom cancels).
+    We emit `[S ; reconstruction.flatten()]` so a single tensor tests BOTH
+    the singular-value parity AND that ferrotorch's own U/S/Vh reconstruct
+    the input — without ever comparing the sign-ambiguous U/Vh element-wise.
+    """
+    u, s, vh = torch.linalg.svd(a, full_matrices=False)
+    recon = (u * s.unsqueeze(-2)) @ vh
+    return torch.cat([s.reshape(-1), recon.reshape(-1)])
+
+
+def _eigh_samples() -> list[tuple[tuple, dict]]:
+    return [((b,), {}) for b in _linalg_symmetric_matrices()]
+
+
+def _eigh_torch_call(b: torch.Tensor) -> torch.Tensor:
+    """Gauge-invariant symmetric-eigendecomposition probe:
+    concat([w (ascending), reconstruction `Q diag(w) Q^T`]).
+
+    `torch.linalg.eigh(B)` returns `(w, Q)`: real eigenvalues `w` ASCENDING
+    (gauge-free) and orthonormal eigenvectors `Q` (each column sign-ambiguous).
+    We emit `[w ; (Q diag(w) Q^T).flatten()]`: eigenvalues compare directly;
+    the reconstruction is gauge-invariant (a sign flip of column j cancels in
+    `q_j w_j q_j^T`). Raw `Q` is never compared element-wise.
+    """
+    w, q = torch.linalg.eigh(b)
+    recon = (q * w.unsqueeze(-2)) @ q.transpose(-2, -1)
+    return torch.cat([w.reshape(-1), recon.reshape(-1)])
+
+
+def _eigvalsh_samples() -> list[tuple[tuple, dict]]:
+    return [((b,), {}) for b in _linalg_symmetric_matrices()]
+
+
+def _eigvalsh_torch_call(b: torch.Tensor) -> torch.Tensor:
+    """`torch.linalg.eigvalsh(B)` — real eigenvalues, ASCENDING (gauge-free).
+    Compared directly."""
+    return torch.linalg.eigvalsh(b)
+
+
+def _eig_samples() -> list[tuple[tuple, dict]]:
+    return [((a,), {}) for a in _linalg_general_square_matrices()]
+
+
+def _sorted_complex_eigvals(w: torch.Tensor) -> torch.Tensor:
+    """Sort complex eigenvalues `w` as a SET by (re, im) and return them as an
+    interleaved real `[n, 2]` tensor (ferrotorch's complex layout). `eig` /
+    `eigvals` eigenvalue ORDERING is implementation-defined (faer vs LAPACK
+    differ, and complex-conjugate pairs may swap), so comparing the SORTED set
+    is the gauge-invariant contract."""
+    re = w.real
+    im = w.imag
+    # Lexicographic sort by (re, im) with a rounding key so ties (conjugate
+    # pairs with re equal to f32 precision) order deterministically by im.
+    keys = [(round(float(r), 5), round(float(i), 5), idx)
+            for idx, (r, i) in enumerate(zip(re.tolist(), im.tolist()))]
+    order = [idx for (_r, _i, idx) in sorted(keys)]
+    out = torch.empty(len(order), 2, dtype=torch.float32)
+    for row, idx in enumerate(order):
+        out[row, 0] = float(re[idx])
+        out[row, 1] = float(im[idx])
+    return out
+
+
+def _eig_torch_call(a: torch.Tensor) -> torch.Tensor:
+    """Gauge-invariant non-symmetric eigenvalue probe: the eigenvalue SET,
+    sorted by (re, im) — the UNIQUE invariant of `torch.linalg.eig(A)`.
+
+    The eigenVECTORS carry a per-column phase gauge AND an implementation-
+    defined column ordering, so they cannot be compared element-wise. We do
+    NOT include any per-column residual `||A v - λ v||` in the comparison: it
+    is ≈ 0 on BOTH sides (so it confirms the decomposition is genuine), but its
+    exact magnitude sits at the f32 noise floor where faer's and LAPACK's tiny
+    residuals legitimately differ by an absolute `~1e-6` — comparing them
+    element-wise spuriously fails on a quantity that is meaningless near zero.
+    The runner arm instead asserts ferrotorch's OWN residual is small locally
+    (a real forward divergence would blow that up and surface as an Err, not a
+    silent skip). So the cross-implementation comparison is the sorted
+    eigenvalue set alone."""
+    w, _v = torch.linalg.eig(a)
+    return _sorted_complex_eigvals(w).reshape(-1)
+
+
+def _eigvals_samples() -> list[tuple[tuple, dict]]:
+    return [((a,), {}) for a in _linalg_general_square_matrices()]
+
+
+def _eigvals_torch_call(a: torch.Tensor) -> torch.Tensor:
+    """`torch.linalg.eigvals(A)` — complex eigenvalue SET, sorted by (re, im)."""
+    w = torch.linalg.eigvals(a)
+    return _sorted_complex_eigvals(w).reshape(-1)
+
+
+def _pinv_samples() -> list[tuple[tuple, dict]]:
+    return [((a,), {}) for a in _linalg_decomp_matrices()]
+
+
+def _pinv_torch_call(a: torch.Tensor) -> torch.Tensor:
+    """`torch.linalg.pinv(A)` — the Moore-Penrose pseudo-inverse is UNIQUE,
+    so compared directly (no gauge freedom)."""
+    return torch.linalg.pinv(a)
+
+
+def _lstsq_samples() -> list[tuple[tuple, dict]]:
+    """`(A, B)` least-squares samples. `A` is tall / square full-rank so the
+    least-squares solution is unique; `B` is `[m, k]`."""
+    g = torch.Generator().manual_seed(0)
+    samples: list[tuple[tuple, dict]] = []
+    configs = [(4, 3, 2), (5, 5, 1), (6, 2, 3), (3, 3, 3), (5, 4, 2)]
+    for (m, n, kk) in configs:
+        a = torch.randn(m, n, generator=g, dtype=torch.float32)
+        for i in range(min(m, n)):
+            a[i, i] = a[i, i] + 2.0 + float(i)
+        b = torch.randn(m, kk, generator=g, dtype=torch.float32)
+        samples.append(((a, b), {}))
+    return samples
+
+
+def _lstsq_torch_call(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
+    """`torch.linalg.lstsq(A, B).solution` — for full-rank `A` the
+    least-squares solution is UNIQUE, so compared directly."""
+    return torch.linalg.lstsq(a, b).solution
+
+
+def _lu_samples() -> list[tuple[tuple, dict]]:
+    return [((a,), {}) for a in _linalg_decomp_matrices()]
+
+
+def _lu_torch_call(a: torch.Tensor) -> torch.Tensor:
+    """Gauge-invariant LU probe: the reconstruction `P @ L @ U ≈ A`.
+
+    `torch.linalg.lu(A)` returns `(P, L, U)`. The raw `P` (permutation) / `L`
+    (unit-lower) / `U` (upper) factors carry pivot/sign freedom, but the
+    product `P @ L @ U` reconstructs `A` exactly — the gauge-invariant
+    quantity. ferrotorch's runner arm reconstructs from its own `(P, L, U)`."""
+    p, l, u = torch.linalg.lu(a)
+    return (p @ l @ u).reshape(-1)
+
+
+def _lu_factor_samples() -> list[tuple[tuple, dict]]:
+    """`lu_factor` is square-only (ferrotorch contract)."""
+    g = torch.Generator().manual_seed(0)
+    samples: list[tuple[tuple, dict]] = []
+    for n in [1, 2, 3, 4, 5]:
+        a = torch.randn(n, n, generator=g, dtype=torch.float32)
+        for i in range(n):
+            a[i, i] = a[i, i] + 2.0 + float(i)
+        samples.append(((a,), {}))
+    return samples
+
+
+def _lu_factor_torch_call(a: torch.Tensor) -> torch.Tensor:
+    """Gauge-invariant lu_factor probe: reconstruction `P @ L @ U ≈ A`.
+
+    `torch.linalg.lu_factor(A)` returns `(LU_packed, pivots)`. We unpack with
+    `torch.lu_unpack` to `(P, L, U)` and reconstruct `P @ L @ U ≈ A` (the
+    pivots carry permutation freedom; the reconstruction is invariant)."""
+    lu, piv = torch.linalg.lu_factor(a)
+    p, l, u = torch.lu_unpack(lu, piv)
+    return (p @ l @ u).reshape(-1)
+
+
+def _householder_samples() -> list[tuple[tuple, dict]]:
+    """`(input, tau)` from `torch.geqrf` so the (v, tau) Householder reflectors
+    are a valid LAPACK-convention representation `householder_product`
+    accepts on both sides."""
+    g = torch.Generator().manual_seed(0)
+    samples: list[tuple[tuple, dict]] = []
+    for (m, n) in [(3, 3), (4, 3), (5, 5), (4, 4), (6, 2)]:
+        a = torch.randn(m, n, generator=g, dtype=torch.float32)
+        h, tau = torch.geqrf(a)
+        samples.append(((h, tau), {}))
+    return samples
+
+
+def _householder_torch_call(inp: torch.Tensor, tau: torch.Tensor) -> torch.Tensor:
+    """`torch.linalg.householder_product(input, tau)` — `Q` is a DETERMINISTIC
+    function of `(input, tau)` (no gauge freedom): the product of the
+    reflectors `(I - tau_i v_i v_i^T)`. Both sides get the SAME `(input, tau)`,
+    so `Q` is compared directly (under the decomposition rtol)."""
+    return torch.linalg.householder_product(inp, tau)
+
+
+def _norm_samples() -> list[tuple[tuple, dict]]:
+    """Frobenius / 2-norm samples. `ferrotorch`'s `norm` forward covers the
+    matrix Frobenius norm (`matrix_norm`) and the vector Euclidean norm
+    (`vector_norm` ord=2); we feed 2-D matrices so `vector_norm` over the
+    flattened entries equals the Frobenius norm both sides compute."""
+    g = torch.Generator().manual_seed(0)
+    samples: list[tuple[tuple, dict]] = []
+    for (m, n) in [(3, 3), (4, 2), (2, 5), (5, 5), (1, 4), (6, 3)]:
+        a = torch.randn(m, n, generator=g, dtype=torch.float32)
+        samples.append(((a,), {}))
+    return samples
+
+
+def _norm_torch_call(a: torch.Tensor) -> torch.Tensor:
+    """`torch.linalg.matrix_norm(A)` (default Frobenius) — a SCALAR, unique,
+    compared directly. Equals `vector_norm(A.flatten(), ord=2)`."""
+    return torch.linalg.matrix_norm(a)
+
+
+def _matrix_rank_samples() -> list[tuple[tuple, dict]]:
+    """Matrices of KNOWN rank (full-rank + explicitly rank-deficient) so the
+    integer rank parity is meaningful, not just full-rank trivia."""
+    g = torch.Generator().manual_seed(0)
+    samples: list[tuple[tuple, dict]] = []
+    # Full-rank well-conditioned.
+    for (m, n) in [(3, 3), (4, 3), (3, 4), (5, 5)]:
+        a = torch.randn(m, n, generator=g, dtype=torch.float32)
+        for i in range(min(m, n)):
+            a[i, i] = a[i, i] + 3.0 + float(i)
+        samples.append(((a,), {}))
+    # Rank-deficient: last row = sum of the others (rank m-1).
+    r = torch.randn(4, 4, generator=g, dtype=torch.float32)
+    r[3] = r[0] + r[1] + r[2]
+    samples.append(((r,), {}))
+    # Rank-1: outer product.
+    u = torch.randn(4, generator=g, dtype=torch.float32)
+    v = torch.randn(3, generator=g, dtype=torch.float32)
+    samples.append(((torch.outer(u, v),), {}))
+    return samples
+
+
+def _matrix_rank_torch_call(a: torch.Tensor) -> torch.Tensor:
+    """`torch.linalg.matrix_rank(A)` — an INTEGER, unique, compared directly
+    (the harness widens the int64 expected to f32; the rank values fit
+    exactly in the f32 mantissa for these shapes)."""
+    return torch.linalg.matrix_rank(a)
+
+
 _CUSTOM_OPS: dict[str, dict[str, Any]] = {
+    # Linalg DECOMPOSITION subset (#1344, gauge-invariant comparison — see the
+    # adapter doc-comments above for the per-op derived quantity). Keyed by the
+    # bare ferrotorch op names the runner's `dispatch_f32` matches.
+    "svd": {"callable": _svd_torch_call, "samples": _svd_samples()},
+    "eigh": {"callable": _eigh_torch_call, "samples": _eigh_samples()},
+    "eigvalsh": {"callable": _eigvalsh_torch_call, "samples": _eigvalsh_samples()},
+    "eig": {"callable": _eig_torch_call, "samples": _eig_samples()},
+    "eigvals": {"callable": _eigvals_torch_call, "samples": _eigvals_samples()},
+    "pinv": {"callable": _pinv_torch_call, "samples": _pinv_samples()},
+    "lstsq": {"callable": _lstsq_torch_call, "samples": _lstsq_samples()},
+    "lu": {"callable": _lu_torch_call, "samples": _lu_samples()},
+    "lu_factor": {"callable": _lu_factor_torch_call, "samples": _lu_factor_samples()},
+    "householder_product": {
+        "callable": _householder_torch_call,
+        "samples": _householder_samples(),
+    },
+    "norm": {"callable": _norm_torch_call, "samples": _norm_samples()},
+    "matrix_rank": {"callable": _matrix_rank_torch_call, "samples": _matrix_rank_samples()},
     "fake_quantize_per_tensor_affine": {
         "callable": torch.fake_quantize_per_tensor_affine,
         "samples": _fake_quantize_per_tensor_affine_samples(),
