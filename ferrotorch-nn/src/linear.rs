@@ -28,7 +28,7 @@
 //! | REQ-8 | SHIPPED | impl: `impl<T: Float> Display for Linear<T>` block here matching upstream `linear.py:136-140`'s `extra_repr`; non-test consumer: `format!("{layer}")` in model summary printing (e.g. `ferrotorch_train` learner emits module displays in logs). |
 //! | REQ-9 | SHIPPED | `Linear` carries only `Parameter<T>` fields which are `Send + Sync`; verified at compile time via `assert_send_sync::<Linear<f32>>()` in tests; non-test consumer: any multi-threaded `DataParallel`-style training scaffolding in `ferrotorch-train` requires `Send + Sync`. |
 //! | REQ-10 | SHIPPED | impl: `last_dim != self.in_features` guard inside `<Linear as Module>::forward` here; non-test consumer: every production caller is shielded from silent shape mismatches by this guard. |
-//! | REQ-11 | SHIPPED | impl: `pub struct Bilinear<T: Float>` here with `weight` `[out, in1, in2]` + optional `bias` `[out]`, forward composed of two `einsum_differentiable` contractions (`"bi,oij->boj"` then `"boj,bj->bo"`) plus bias broadcast, mirroring `torch/nn/modules/linear.py:162-260`; non-test consumer: `pub use linear::Bilinear` in `lib.rs` re-export so downstream model crates (e.g. attention-fusion and FiLM-style conditioning) can construct it directly. Closes #1442. |
+//! | REQ-11 | SHIPPED | impl: `pub struct Bilinear<T: Float>` here with `weight` `[out, in1, in2]` + optional `bias` `[out]`. `forward_pair` accepts arbitrary leading batch dims `(*, in)` -> `(*, out)`: flattens all-but-last to `[N, in]` (explicit batch product, handles `N == 0`), runs two `einsum_differentiable` contractions (`"bi,oij->boj"` then `"boj,bj->bo"`) + bias broadcast, then reshapes back to `(*, out)`, mirroring `torch/nn/modules/linear.py:162-256` + `aten/src/ATen/native/Linear.cpp:792-802`; non-test consumer: `pub use linear::Bilinear` in `lib.rs` re-export so downstream model crates (e.g. attention-fusion and FiLM-style conditioning) can construct it directly. Closes #1442, #1603. |
 //! | REQ-12 | NOT-STARTED | blocker #1441 — parity-sweep runner has no arm for `nn.functional.linear`; sweep reports `0/144 passed, 144 skipped`. The forward path itself is end-to-end verified by 22 lib tests; only the runner-arm wiring is missing. |
 
 use ferrotorch_core::grad_fns::linalg::linear_fused;
@@ -373,57 +373,92 @@ impl<T: Float> Bilinear<T> {
 
     /// Bilinear forward pass: `y = x1 W x2 + b`.
     ///
-    /// `x1`: `[B, in1_features]`, `x2`: `[B, in2_features]` (or 1-D for a
-    /// single sample). Returns `[B, out_features]` (or `[out_features]`).
+    /// Accepts arbitrary leading batch dims, mirroring `torch.nn.Bilinear`'s
+    /// `(*, H_in)` shape contract (`torch/nn/modules/linear.py:172-178`):
+    ///
+    /// - `x1`: `(*, in1_features)`, `x2`: `(*, in2_features)` where `*` is
+    ///   any number of additional dimensions (including none, i.e. 1-D).
+    /// - Both inputs must share the **same** leading shape `*`.
+    /// - Returns `(*, out_features)`.
+    ///
+    /// The contraction is `y[*, o] = sum_{i,j} x1[*, i] * W[o, i, j] *
+    /// x2[*, j] + b[o]`. Following the upstream ATen implementation
+    /// (`aten/src/ATen/native/Linear.cpp:792-802`), the leading dims are
+    /// flattened into a single batch axis `N`, the bilinear contraction
+    /// runs on `[N, in]`, and the output `[N, out]` is reshaped back to
+    /// `(*, out_features)`. A zero-size leading dim (`N == 0`) yields the
+    /// correctly-shaped empty output.
     pub fn forward_pair(&self, x1: &Tensor<T>, x2: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
-        // Accept 1-D or 2-D inputs; promote 1-D to a batch of one.
-        let (x1_2d, x2_2d, was_1d) = match (x1.ndim(), x2.ndim()) {
-            (1, 1) => {
-                let x1_b =
-                    ferrotorch_core::grad_fns::shape::reshape(x1, &[1, x1.shape()[0] as isize])?;
-                let x2_b =
-                    ferrotorch_core::grad_fns::shape::reshape(x2, &[1, x2.shape()[0] as isize])?;
-                (x1_b, x2_b, true)
-            }
-            (2, 2) => (x1.clone(), x2.clone(), false),
-            _ => {
+        // Both inputs must have the same rank, and at least 1-D (the last
+        // axis is the feature axis). Mirrors `Linear.cpp:777` (`input1.dim()
+        // == input2.dim()`).
+        if x1.ndim() == 0 || x2.ndim() == 0 {
+            return Err(FerrotorchError::ShapeMismatch {
+                message: "Bilinear: scalar (0-D) inputs not supported; expected (*, features)"
+                    .into(),
+            });
+        }
+        if x1.ndim() != x2.ndim() {
+            return Err(FerrotorchError::ShapeMismatch {
+                message: format!(
+                    "Bilinear: input dimensions do not match: got {} and {}",
+                    x1.ndim(),
+                    x2.ndim(),
+                ),
+            });
+        }
+
+        let x1_shape = x1.shape().to_vec();
+        let x2_shape = x2.shape().to_vec();
+
+        // All but the last dimension (the leading shape `*`) must match.
+        // Mirrors `Linear.cpp:778-781` (per-dim batch-shape equality).
+        let lead_len = x1_shape.len() - 1;
+        for d in 0..lead_len {
+            if x1_shape[d] != x2_shape[d] {
                 return Err(FerrotorchError::ShapeMismatch {
                     message: format!(
-                        "Bilinear: expected both inputs 1-D or both 2-D, got {:?} and {:?}",
-                        x1.shape(),
-                        x2.shape(),
+                        "Bilinear: input batch dimensions do not match at dim {}: got {} and {}",
+                        d, x1_shape[d], x2_shape[d],
                     ),
                 });
             }
-        };
+        }
 
-        if x1_2d.shape()[1] != self.in1_features {
+        // Feature-axis (last dim) checks. Mirrors `Linear.cpp:782-787`.
+        if x1_shape[lead_len] != self.in1_features {
             return Err(FerrotorchError::ShapeMismatch {
                 message: format!(
                     "Bilinear: x1 last dim {} != in1_features {}",
-                    x1_2d.shape()[1],
-                    self.in1_features,
+                    x1_shape[lead_len], self.in1_features,
                 ),
             });
         }
-        if x2_2d.shape()[1] != self.in2_features {
+        if x2_shape[lead_len] != self.in2_features {
             return Err(FerrotorchError::ShapeMismatch {
                 message: format!(
                     "Bilinear: x2 last dim {} != in2_features {}",
-                    x2_2d.shape()[1],
-                    self.in2_features,
+                    x2_shape[lead_len], self.in2_features,
                 ),
             });
         }
-        if x1_2d.shape()[0] != x2_2d.shape()[0] {
-            return Err(FerrotorchError::ShapeMismatch {
-                message: format!(
-                    "Bilinear: batch dim mismatch x1={} x2={}",
-                    x1_2d.shape()[0],
-                    x2_2d.shape()[0],
-                ),
-            });
-        }
+
+        // Flatten the leading `*` dims into a single batch axis `N`.
+        // `N` is the explicit product of the leading dims (NOT `-1`), so a
+        // zero-size leading dim flattens to `N == 0` correctly — the einsum
+        // empty-output path (`einsum.rs`, #1605) then returns the right
+        // empty shape rather than panicking. Mirrors `Linear.cpp:796-797`
+        // (`input1.reshape({-1, input1.size(-1)})`).
+        let batch_shape = &x1_shape[..lead_len];
+        let n: usize = batch_shape.iter().product();
+        let x1_2d = ferrotorch_core::grad_fns::shape::reshape(
+            x1,
+            &[n as isize, self.in1_features as isize],
+        )?;
+        let x2_2d = ferrotorch_core::grad_fns::shape::reshape(
+            x2,
+            &[n as isize, self.in2_features as isize],
+        )?;
 
         // y = einsum("bi,oij,bj->bo", x1, W, x2). Decompose via two
         // 2-tensor einsums (the workspace einsum primitive supports up to
@@ -436,8 +471,11 @@ impl<T: Float> Bilinear<T> {
         )?;
         let bo = ferrotorch_core::einsum::einsum_differentiable("boj,bj->bo", &[&boj, &x2_2d])?;
 
-        // Add bias (broadcast `[out]` over `[B, out]`).
-        let out_with_bias = if let Some(ref bias) = self.bias {
+        // Add bias (broadcast `[out]` over `[N, out]`). Upstream adds the
+        // bias AFTER the reshape-back (`Linear.cpp:799-801`); broadcasting
+        // `[out]` over the flattened `[N, out]` is equivalent and keeps the
+        // add in the 2-D regime the einsum primitive already produced.
+        let out_2d = if let Some(ref bias) = self.bias {
             let bias_2d = ferrotorch_core::grad_fns::shape::reshape(
                 bias.tensor(),
                 &[1, self.out_features as isize],
@@ -447,11 +485,12 @@ impl<T: Float> Bilinear<T> {
             bo
         };
 
-        if was_1d {
-            ferrotorch_core::grad_fns::shape::reshape(&out_with_bias, &[self.out_features as isize])
-        } else {
-            Ok(out_with_bias)
-        }
+        // Reshape the output's batch axis back to the original leading
+        // shape `(*, out_features)`. Mirrors `Linear.cpp:792-798`
+        // (`output_size = size1[:-1] + [weight.size(0)]`).
+        let mut out_shape: Vec<isize> = batch_shape.iter().map(|&d| d as isize).collect();
+        out_shape.push(self.out_features as isize);
+        ferrotorch_core::grad_fns::shape::reshape(&out_2d, &out_shape)
     }
 }
 
@@ -1056,5 +1095,239 @@ mod tests {
         let mut layer = Linear::<f32>::new(4, 3, true).unwrap();
         let result = layer.to_device(ferrotorch_core::Device::Cuda(0));
         assert!(result.is_err());
+    }
+
+    // -----------------------------------------------------------------------
+    // Bilinear N-D input — closes #1603
+    //
+    // Oracle values constructed by live-calling PyTorch 2.11 (R-CHAR-3):
+    //   import torch
+    //   y = torch.nn.functional.bilinear(x1, x2, W, b)
+    //   y.sum().backward()  # for the four gradients
+    // Each test documents the exact torch invocation that produced its
+    // expected tensor. The bilinear contract is
+    // `torch/nn/modules/linear.py:172-178` (shape `(*, H_in)`) and
+    // `aten/src/ATen/native/Linear.cpp:792-802` (flatten-2D-then-reshape).
+    // -----------------------------------------------------------------------
+
+    /// Build the shared deterministic weight `[out=2, in1=3, in2=2]` and bias
+    /// `[out=2]` used by the 3-D forward/backward oracle tests below. These
+    /// exact values are what was fed to `torch.nn.functional.bilinear` to
+    /// produce the expected outputs/gradients.
+    fn bilinear_3d_layer() -> Bilinear<f32> {
+        let mut layer = Bilinear::<f32>::new(3, 2, 2, true).unwrap();
+        // W[o,i,j], row-major flatten of the [2,3,2] tensor.
+        layer.weight = Parameter::from_slice(
+            &[
+                0.1, 0.2, 0.3, -0.1, -0.2, 0.05, // o=0
+                0.0, 0.4, -0.3, 0.2, 0.1, -0.15, // o=1
+            ],
+            &[2, 3, 2],
+        )
+        .unwrap();
+        *layer.bias.as_mut().unwrap() = Parameter::from_slice(&[0.5, -0.25], &[2]).unwrap();
+        layer
+    }
+
+    #[test]
+    fn test_bilinear_3d_forward_matches_torch() {
+        // torch:
+        //   x1 = [[[1,2,3],[-1,0.5,2]],[[0,1,-1],[2,-2,1]]]  # (2,2,3)
+        //   x2 = [[[1,-1],[0.5,2]],[[-1,1],[3,0]]]            # (2,2,2)
+        //   F.bilinear(x1, x2, W, b).shape == (2,2,2)
+        let layer = bilinear_3d_layer();
+        let x1 = leaf(
+            &[
+                1.0, 2.0, 3.0, -1.0, 0.5, 2.0, 0.0, 1.0, -1.0, 2.0, -2.0, 1.0,
+            ],
+            &[2, 2, 3],
+            false,
+        );
+        let x2 = leaf(
+            &[1.0, -1.0, 0.5, 2.0, -1.0, 1.0, 3.0, 0.0],
+            &[2, 2, 2],
+            false,
+        );
+        let y = layer.forward_pair(&x1, &x2).unwrap();
+        assert_eq!(y.shape(), &[2, 2, 2]);
+        // FWD3D_out from torch oracle.
+        assert_close(
+            y.data().unwrap(),
+            &[0.45, -0.9, 0.025, -1.425, -0.15, 0.5, -1.3, 1.85],
+            1e-5,
+        );
+    }
+
+    #[test]
+    fn test_bilinear_3d_backward_matches_torch() {
+        // Same inputs as the forward test; loss = y.sum().
+        // Expected grads are GRAD_x1 / GRAD_x2 / GRAD_W / GRAD_b from torch.
+        let layer = bilinear_3d_layer();
+        let x1 = leaf(
+            &[
+                1.0, 2.0, 3.0, -1.0, 0.5, 2.0, 0.0, 1.0, -1.0, 2.0, -2.0, 1.0,
+            ],
+            &[2, 2, 3],
+            true,
+        );
+        let x2 = leaf(
+            &[1.0, -1.0, 0.5, 2.0, -1.0, 1.0, 3.0, 0.0],
+            &[2, 2, 2],
+            true,
+        );
+        let y = layer.forward_pair(&x1, &x2).unwrap();
+        let loss = ferrotorch_core::grad_fns::reduction::sum(&y).unwrap();
+        loss.backward().unwrap();
+
+        let g_x1 = x1.grad().unwrap().expect("x1 should have grad");
+        assert_eq!(g_x1.shape(), &[2, 2, 3]);
+        assert_close(
+            g_x1.data().unwrap(),
+            &[
+                -0.5, -0.1, 0.0, 1.25, 0.2, -0.25, 0.5, 0.1, 0.0, 0.3, 0.0, -0.3,
+            ],
+            1e-5,
+        );
+
+        let g_x2 = x2.grad().unwrap().expect("x2 should have grad");
+        assert_eq!(g_x2.shape(), &[2, 2, 2]);
+        assert_close(
+            g_x2.data().unwrap(),
+            &[-0.2, 0.5, -0.3, -0.75, 0.1, 0.2, 0.1, 0.9],
+            1e-5,
+        );
+
+        let g_w = layer.weight.grad().unwrap().expect("W should have grad");
+        assert_eq!(g_w.shape(), &[2, 3, 2]);
+        assert_close(
+            g_w.data().unwrap(),
+            &[
+                6.5, -3.0, -4.75, 0.0, 8.0, 0.0, 6.5, -3.0, -4.75, 0.0, 8.0, 0.0,
+            ],
+            1e-5,
+        );
+
+        let g_b = layer
+            .bias
+            .as_ref()
+            .unwrap()
+            .grad()
+            .unwrap()
+            .expect("bias should have grad");
+        assert_eq!(g_b.shape(), &[2]);
+        assert_close(g_b.data().unwrap(), &[4.0, 4.0], 1e-5);
+    }
+
+    #[test]
+    fn test_bilinear_4d_forward_matches_torch() {
+        // torch:
+        //   W = [[[1,0],[0,1]]]  (out=1,in1=2,in2=2 -> identity contraction)
+        //   x1 = [[[[1,2],[3,4]]],[[[5,6],[7,8]]]]  # (2,1,2,2)
+        //   x2 = [[[[1,1],[1,1]]],[[[2,2],[2,2]]]]  # (2,1,2,2)
+        //   F.bilinear(x1,x2,W).shape == (2,1,2,1); data == [3,7,22,30]
+        let mut layer = Bilinear::<f32>::new(2, 2, 1, false).unwrap();
+        layer.weight = Parameter::from_slice(&[1.0, 0.0, 0.0, 1.0], &[1, 2, 2]).unwrap();
+        let x1 = leaf(
+            &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0],
+            &[2, 1, 2, 2],
+            false,
+        );
+        let x2 = leaf(
+            &[1.0, 1.0, 1.0, 1.0, 2.0, 2.0, 2.0, 2.0],
+            &[2, 1, 2, 2],
+            false,
+        );
+        let y = layer.forward_pair(&x1, &x2).unwrap();
+        assert_eq!(y.shape(), &[2, 1, 2, 1]);
+        assert_close(y.data().unwrap(), &[3.0, 7.0, 22.0, 30.0], 1e-5);
+    }
+
+    #[test]
+    fn test_bilinear_2d_still_matches_torch() {
+        // Regression guard: the pre-existing 2-D path must keep working.
+        // torch:
+        //   W = [[[1,0],[0,1]]] (out=1,in1=2,in2=2), x1=[[1,2],[3,4]],
+        //   x2=[[1,1],[1,1]] -> y = [[1*1+2*1],[3*1+4*1]] = [[3],[7]]
+        let mut layer = Bilinear::<f32>::new(2, 2, 1, false).unwrap();
+        layer.weight = Parameter::from_slice(&[1.0, 0.0, 0.0, 1.0], &[1, 2, 2]).unwrap();
+        let x1 = leaf(&[1.0, 2.0, 3.0, 4.0], &[2, 2], false);
+        let x2 = leaf(&[1.0, 1.0, 1.0, 1.0], &[2, 2], false);
+        let y = layer.forward_pair(&x1, &x2).unwrap();
+        assert_eq!(y.shape(), &[2, 1]);
+        assert_close(y.data().unwrap(), &[3.0, 7.0], 1e-5);
+    }
+
+    #[test]
+    fn test_bilinear_1d_still_matches_torch() {
+        // Regression guard: a 1-D pair (no batch dim) -> (out,).
+        // torch: W=[[[1,0],[0,1]]], x1=[2,3], x2=[1,1] -> y=[2*1+3*1]=[5]
+        let mut layer = Bilinear::<f32>::new(2, 2, 1, false).unwrap();
+        layer.weight = Parameter::from_slice(&[1.0, 0.0, 0.0, 1.0], &[1, 2, 2]).unwrap();
+        let x1 = leaf(&[2.0, 3.0], &[2], false);
+        let x2 = leaf(&[1.0, 1.0], &[2], false);
+        let y = layer.forward_pair(&x1, &x2).unwrap();
+        assert_eq!(y.shape(), &[1]);
+        assert_close(y.data().unwrap(), &[5.0], 1e-5);
+    }
+
+    #[test]
+    fn test_bilinear_empty_leading_dim_2d() {
+        // torch: F.bilinear(zeros(0,3), zeros(0,2), W, b).shape == (0,2)
+        let layer = bilinear_3d_layer();
+        let x1 = leaf(&[], &[0, 3], false);
+        let x2 = leaf(&[], &[0, 2], false);
+        let y = layer.forward_pair(&x1, &x2).unwrap();
+        assert_eq!(y.shape(), &[0, 2]);
+        assert_eq!(y.numel(), 0);
+    }
+
+    #[test]
+    fn test_bilinear_empty_leading_dim_3d() {
+        // torch: F.bilinear(zeros(0,4,3), zeros(0,4,2), W, b).shape == (0,4,2)
+        let layer = bilinear_3d_layer();
+        let x1 = leaf(&[], &[0, 4, 3], false);
+        let x2 = leaf(&[], &[0, 4, 2], false);
+        let y = layer.forward_pair(&x1, &x2).unwrap();
+        assert_eq!(y.shape(), &[0, 4, 2]);
+        assert_eq!(y.numel(), 0);
+    }
+
+    #[test]
+    fn test_bilinear_zero_middle_dim_3d() {
+        // torch: F.bilinear(zeros(2,0,3), zeros(2,0,2), W, b).shape == (2,0,2)
+        let layer = bilinear_3d_layer();
+        let x1 = leaf(&[], &[2, 0, 3], false);
+        let x2 = leaf(&[], &[2, 0, 2], false);
+        let y = layer.forward_pair(&x1, &x2).unwrap();
+        assert_eq!(y.shape(), &[2, 0, 2]);
+        assert_eq!(y.numel(), 0);
+    }
+
+    #[test]
+    fn test_bilinear_mismatched_ndim_rejected() {
+        // torch raises: "bilinear(): input dimensions do not match: got 3 and 2"
+        let layer = bilinear_3d_layer();
+        let x1 = leaf(&[0.0; 2 * 2 * 3], &[2, 2, 3], false);
+        let x2 = leaf(&[0.0; 2 * 2], &[2, 2], false);
+        assert!(layer.forward_pair(&x1, &x2).is_err());
+    }
+
+    #[test]
+    fn test_bilinear_mismatched_leading_dim_rejected() {
+        // torch raises: "bilinear(): input batch dimensions do not match at
+        // dim 1: got 3 and 4"
+        let layer = bilinear_3d_layer();
+        let x1 = leaf(&[0.0; 2 * 3 * 3], &[2, 3, 3], false);
+        let x2 = leaf(&[0.0; 2 * 4 * 2], &[2, 4, 2], false);
+        assert!(layer.forward_pair(&x1, &x2).is_err());
+    }
+
+    #[test]
+    fn test_bilinear_wrong_feature_dim_rejected() {
+        // torch raises: "input1 size does not match weight size".
+        let layer = bilinear_3d_layer(); // in1=3, in2=2
+        let bad_x1 = leaf(&[0.0; 2 * 2 * 4], &[2, 2, 4], false); // last dim 4 != 3
+        let x2 = leaf(&[0.0; 2 * 2 * 2], &[2, 2, 2], false);
+        assert!(layer.forward_pair(&bad_x1, &x2).is_err());
     }
 }

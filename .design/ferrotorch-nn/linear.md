@@ -64,17 +64,21 @@ back. Bilinear is NOT implemented.
 - REQ-10: Validation parity (forward) — rejects mismatched
   `in_features` with `ShapeMismatch`; mirrors PyTorch raising
   `RuntimeError: mat1 and mat2 shapes cannot be multiplied`.
-- REQ-11: SHIPPED — `Bilinear<T>` (upstream `linear.py:162-260`) is
+- REQ-11: SHIPPED — `Bilinear<T>` (upstream `linear.py:162-256`) is
   implemented as `pub struct Bilinear<T>` in `linear.rs` with
-  `forward_pair(x1, x2)` (two-step `einsum` `"bi,oij->boj"` then
-  `"boj,bj->bo"` + bias broadcast). #1442 closed. The parity op
+  `forward_pair(x1, x2)`. The forward accepts arbitrary leading batch
+  dims `(*, in1)` / `(*, in2)` -> `(*, out)`: it flattens all-but-last
+  to `[N, in]` (explicit batch product, NOT `-1`, so `N == 0` is
+  handled), runs the two-step `einsum` `"bi,oij->boj"` then
+  `"boj,bj->bo"` + bias broadcast, then reshapes the output's batch
+  axis back to `(*, out)`. Mirrors `aten/src/ATen/native/Linear.cpp:792-802`
+  (flatten-to-2D, contract, reshape-back). #1442 closed; the N-D input
+  case is #1603 closed. The empty (size-0) batch case is correct via
+  the einsum empty-output path (#1605 closed). The parity op
   `nn.functional.bilinear` runner arm is wired (#1441): builds
   `Bilinear::new` + injects op_db weight/bias via `Parameter::set_data`
-  + calls `forward_pair`. 1-D / 2-D samples reach 0-failed. Residual
-  skips are genuine production feature-gaps, not arm omissions:
-  >=3-D input (`forward_pair` is 1-D/2-D only; torch flattens N-D) is
-  blocker #1603, and empty (size-0) batch input panics
-  `einsum_differentiable` (`% 0` at `einsum.rs:1310`) — blocker #1605.
+  + calls `forward_pair`; with N-D + empty support landed the 1-D /
+  2-D / N-D / empty samples all run.
 - REQ-12: SHIPPED — parity-sweep runner arm for
   `nn.functional.linear` is wired (#1441): the arm builds a transient
   `Linear::new` + injects the op_db weight/bias via
@@ -105,9 +109,20 @@ back. Bilinear is NOT implemented.
   in `linear.rs` (#1442 closed).
 - [x] AC-10: parity-sweep `nn.functional.linear` arm wired (#1441) —
   144/144 passed (0 skipped, 0 failed) at `--seeds 8`.
-- [x] AC-11: parity-sweep `nn.functional.bilinear` arm wired (#1441) —
-  64/128 passed (0 failed); the 64 skips are documented production
-  feature-gaps #1603 (N-D input) + #1605 (empty-batch einsum panic).
+- [x] AC-11: parity-sweep `nn.functional.bilinear` arm wired (#1441).
+  The former production feature-gaps are closed: N-D input (#1603) and
+  empty-batch (#1605) both land in `forward_pair`, so the N-D and
+  empty-batch op_db samples no longer skip. (Re-running the runner arm
+  over the now-supported N-D samples is the #1441 follow-up.)
+- [x] AC-12: Bilinear `forward_pair` accepts arbitrary leading batch
+  dims `(*, in)` and matches torch forward + all four gradients
+  (`input1`/`input2`/`weight`/`bias`) for 3-D inputs, plus the
+  4-D/2-D/1-D and empty/zero-leading-dim shapes
+  (`test_bilinear_3d_forward_matches_torch`,
+  `test_bilinear_3d_backward_matches_torch`,
+  `test_bilinear_4d_forward_matches_torch`,
+  `test_bilinear_empty_leading_dim_2d`/`_3d`,
+  `test_bilinear_zero_middle_dim_3d`). #1603 closed.
 
 ## Architecture
 
@@ -177,14 +192,20 @@ asserted in `test_linear_is_send_sync`.
 
 ### SHIPPED — Bilinear (REQ-11)
 
-`torch.nn.Bilinear` at `linear.py:162-260` computes `y = x_1^T A
+`torch.nn.Bilinear` at `linear.py:162-256` computes `y = x_1^T A
 x_2 + b` for two-input bilinear forms. ferrotorch-nn ships
 `pub struct Bilinear<T>` in `linear.rs` with `forward_pair(x1, x2)`
-(two-step `einsum` `"bi,oij->boj"` then `"boj,bj->bo"` + bias
-broadcast), accepting 1-D and 2-D inputs. #1442 closed. Production
-gaps surfaced by the parity arm (#1441): N-D (>=3-D) input flatten
-is blocker #1603; empty (size-0) batch input panics
-`einsum_differentiable` is blocker #1605.
+accepting arbitrary leading batch dims `(*, in)` -> `(*, out)`. The
+forward flattens all-but-last dims to a single batch axis `[N, in]`
+(via the explicit batch product so a zero-size leading dim is handled
+without `-1` reshape), runs the two-step `einsum` `"bi,oij->boj"` then
+`"boj,bj->bo"` + bias broadcast, and reshapes the output back to
+`(*, out)`. This mirrors `aten/src/ATen/native/Linear.cpp:792-802`,
+which builds `output_size = input1.sizes()[:-1] + [weight.size(0)]`,
+flattens both inputs to `[-1, last]`, runs `_trilinear`, and reshapes
+back (then adds bias). #1442 closed; N-D input #1603 closed; empty
+(size-0) batch is handled by the einsum empty-output path #1605
+closed.
 
 ## Parity contract
 
@@ -209,10 +230,14 @@ is blocker #1603; empty (size-0) batch input panics
     + `Module::forward` so 1-D / 2-D / N-D all run.
 - **`nn.functional.bilinear`** — upstream entry point
   `torch.nn.functional.bilinear(input1, input2, weight, bias)`.
-  Implemented as `Bilinear::forward_pair` (#1442 closed). Runner arm
-  wired (#1441): 64/128 passed (0 failed). Residual skips are
-  production feature-gaps: N-D input (#1603) + empty-batch einsum
-  panic (#1605).
+  Implemented as `Bilinear::forward_pair` (#1442 closed). N-D input
+  (#1603) and empty-batch (#1605) both land in `forward_pair`, so the
+  arbitrary-rank `(*, in)` and zero-size-batch samples are now
+  supported end-to-end (verified by the 3-D forward+backward,
+  4-D/2-D/1-D, and three empty/zero-leading-dim oracle tests). The
+  runner arm (#1441) builds `Bilinear::new` + `Parameter::set_data` +
+  `forward_pair`; re-exercising the now-supported N-D samples is the
+  #1441 follow-up.
 
 ## Verification
 
@@ -269,5 +294,5 @@ Expected grep count after blocker #1441 closes: `>= 1` for each.
 | REQ-8 | SHIPPED | impl: `impl<T: Float> Display for Linear<T>` in `linear.rs` matching upstream `linear.py:136-140`'s `extra_repr`; non-test consumer: `format!("{layer}")` in model summary printing (e.g. `ferrotorch_train` learner emits module displays in logs). |
 | REQ-9 | SHIPPED | `Linear` carries only `Parameter<T>` fields which are `Send + Sync`; verified at compile time via `assert_send_sync::<Linear<f32>>()` in tests; non-test consumer: any multi-threaded `DataParallel`-style training scaffolding in `ferrotorch-train` requires `Send + Sync` on the module. |
 | REQ-10 | SHIPPED | impl: `last_dim != self.in_features` guard in `<Linear as Module>::forward` in `linear.rs`; non-test consumer: every production caller is shielded from silent shape mismatches by this guard. |
-| REQ-11 | SHIPPED | impl: `pub struct Bilinear<T>` + `forward_pair` in `linear.rs` (two-step `einsum` + bias broadcast) mirroring `torch/nn/modules/linear.py:162-260`; non-test consumer: `pub use linear::Bilinear` in `lib.rs`. Parity arm wired (#1441): `dispatch_f32 "nn.functional.bilinear"` in `tools/parity-sweep/runner/src/main.rs` builds `Bilinear::new` + `Parameter::set_data` + `forward_pair`, 64/128 passed (0 failed) at `--seeds 8`; residual skips are production gaps #1603 (N-D) + #1605 (empty-batch einsum panic). #1442 closed. |
+| REQ-11 | SHIPPED | impl: `pub struct Bilinear<T>` + `forward_pair` in `linear.rs` — N-D-capable: flattens `(*, in)` -> `[N, in]`, two-step `einsum` (`"bi,oij->boj"` then `"boj,bj->bo"`) + bias broadcast, reshapes back to `(*, out)`, mirroring `torch/nn/modules/linear.py:162-256` + `aten/src/ATen/native/Linear.cpp:792-802`; non-test consumer: `pub use linear::Bilinear` in `lib.rs` re-export consumed by downstream model crates + the parity arm `dispatch_f32 "nn.functional.bilinear"` in `tools/parity-sweep/runner/src/main.rs` (builds `Bilinear::new` + `Parameter::set_data` + `forward_pair`). N-D input #1603 closed; empty-batch #1605 closed; #1442 closed. |
 | REQ-12 | SHIPPED | impl: parity-sweep runner arm `dispatch_f32 "nn.functional.linear"` in `tools/parity-sweep/runner/src/main.rs` builds a transient `Linear::new` + `Parameter::set_data` (via `Module::parameters_mut`) + `Module::forward`, exercising the arbitrary-rank `(*, in_features)` path (REQ-3); non-test production driver of that path: `ferrotorch-nn/src/transformer.rs` + `ferrotorch-llama` QKV projections. Sweep: 144/144 passed (0 skipped, 0 failed) at `--seeds 8`. |
