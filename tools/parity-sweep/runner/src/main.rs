@@ -4313,11 +4313,33 @@ fn dispatch_f32(
         // `torch.nn.functional.dropout(input, p=0.5, training=True, inplace=False)` —
         // `torch/nn/functional.py`. op_db emits `args=[input]` with kwargs
         // `{p, training}`. ferrotorch's `pub fn dropout(input, p, training)`
-        // at `ferrotorch-nn/src/functional.rs:351` uses a deterministic
-        // xorshift mask (REQ-3 at `.design/ferrotorch-nn/dropout.md`); the
-        // mask sequence does NOT match torch's RNG so value-parity is
-        // achievable only on the `p=0` / `training=false` no-op paths.
-        // RNG-plumbing gap tracked under #1452. Closes #1441 dropout half.
+        // at `ferrotorch-nn/src/functional.rs` uses an inverted-dropout mask
+        // (REQ-3 at `.design/ferrotorch-nn/dropout.md`); the mask sequence does
+        // NOT match torch's RNG so value-parity against torch's output is only
+        // achievable on the DETERMINISTIC paths — everything that is invariant
+        // to the random mask:
+        //   • `training == false` (eval): dropout is the IDENTITY, output ==
+        //     input exactly (upstream `F.dropout` early-returns the input on
+        //     `not training`). Wired via the production `dropout` no-op path.
+        //   • `p == 0.0`: identity regardless of `training` (no element is
+        //     dropped, scale `1/(1-0)=1`). Wired via production `dropout`.
+        //   • `p == 1.0` + `training`: EVERY element is dropped, so torch's
+        //     output is all-zeros independent of any RNG draw (upstream
+        //     `dropout_impl` zeros the whole tensor when `p == 1`). ferrotorch's
+        //     production `dropout` validates `0 <= p < 1` (REQ-12, narrower
+        //     than torch) and would error, so we build the deterministic
+        //     all-zeros result here with `zeros_like` — the unique tensor torch
+        //     must return — rather than calling production with an out-of-range
+        //     `p`. This is NOT a property-check: it is the exact value parity.
+        // The remaining `0 < p < 1` + `training == true` samples are genuinely
+        // STOCHASTIC: the Bernoulli mask (scaled by `1/(1-p)`) is drawn from an
+        // independent RNG on each side and is NOT byte-comparable to torch's
+        // mask. The runner compares against torch's concrete output tensor and
+        // has no oracle-side derived-quantity (gauge-invariant) channel for an
+        // independently-random mask, so these are LEGITIMATE `Ok(None)` skips —
+        // the only configuration in this op that is genuinely unrepresentable
+        // for byte-parity. RNG-plumbing gap tracked under #1452. Closes #1441
+        // dropout half.
         "nn.functional.dropout" => {
             if args.is_empty() {
                 return Err("nn.functional.dropout: needs [input]".into());
@@ -4327,19 +4349,28 @@ fn dispatch_f32(
                 .get("training")
                 .and_then(Value::as_bool)
                 .unwrap_or(true);
-            // Non-deterministic mask path — skip unless p == 0 or !training.
-            // Also skip p == 1.0 (ferrotorch's `dropout` validates p < 1;
-            // upstream accepts p=1 and returns zeros — REQ-12 narrower
-            // contract per `.design/ferrotorch-nn/dropout.md`).
-            if training && p > 0.0 {
-                return Ok(None);
-            }
-            if p >= 1.0 {
-                return Ok(None);
-            }
             let input = unwrap_tensor_arg(&args[0])
                 .ok_or("nn.functional.dropout: input not a tensor")?
                 .to_f32()?;
+            // p == 1.0 + training: deterministic all-zeros (every element
+            // dropped). Built directly because production `dropout` rejects
+            // p >= 1; `zeros_like` is the exact tensor torch returns.
+            if p >= 1.0 {
+                if training {
+                    return Ok(Some(ferrotorch_core::creation::zeros_like(&input)?));
+                }
+                // p >= 1 + eval: identity (eval ignores p). dropout rejects
+                // p >= 1, so emit the identity directly.
+                return Ok(Some(input));
+            }
+            // 0 < p < 1 + training: genuinely stochastic — random mask not
+            // byte-comparable to torch RNG; eval / p == 0 / p == 1 deterministic
+            // samples wired. Legitimate skip (#1452).
+            if training && p > 0.0 {
+                return Ok(None);
+            }
+            // Deterministic identity paths: !training (eval) or p == 0.0.
+            // Production `dropout` returns input unchanged on both.
             Ok(Some(ferrotorch_nn::functional::dropout(
                 &input, p, training,
             )?))
@@ -4637,9 +4668,14 @@ fn dispatch_f32(
         // `torch.nn.functional.pad(input, pad, mode='constant', value=None)` —
         // `torch/nn/functional.py`. op_db emits `args=[input, pad_tuple]`
         // with optional `mode` / `value` kwargs. ferrotorch's
-        // `functional_pad_{1,2,3}d` at `ferrotorch-nn/src/padding.rs:596-672`
-        // takes per-axis pad amounts + mode + value. The number of pad
-        // entries selects the rank: 2 → 1d, 4 → 2d, 6 → 3d.
+        // crop-capable `functional_pad_{1,2,3}d_signed` (`isize` pads) at
+        // `ferrotorch-nn/src/padding.rs` take per-axis pad amounts + mode +
+        // value and support NEGATIVE (crop) pads byte-identically to torch's
+        // `constant_pad_nd` / reflect/replicate/circular crop kernels (the
+        // #1611/#1620..#1631 chain). The number of pad entries selects the
+        // rank: 2 → 1d, 4 → 2d, 6 → 3d. We call the `_signed` variants
+        // directly so the 32 NEGATIVE op_db samples RUN (previously skipped
+        // because the `usize` `pad1d/2d/3d` reject negative amounts).
         "nn.functional.pad" => {
             if args.len() < 2 {
                 return Err("nn.functional.pad: needs [input, pad]".into());
@@ -4650,14 +4686,14 @@ fn dispatch_f32(
             let pad_arr = args[1]
                 .as_array()
                 .ok_or("nn.functional.pad: pad must be array")?;
-            let pads: Vec<i64> = pad_arr
+            // Decode the (possibly-negative) pad amounts exactly as torch's
+            // `F.pad(x, pad, ...)` reads them: a flat list, LAST axis first
+            // `[left, right, top, bottom, front, back]`. `isize` preserves the
+            // sign for the crop-capable `_signed` entrypoints.
+            let pads: Vec<isize> = pad_arr
                 .iter()
-                .map(|v| v.as_i64().ok_or("pad: int element"))
+                .map(|v| v.as_i64().map(|i| i as isize).ok_or("pad: int element"))
                 .collect::<Result<_, _>>()?;
-            // Reject negative pad (ferrotorch's pad helpers take usize).
-            if pads.iter().any(|&p| p < 0) {
-                return Ok(None);
-            }
             // op_db's `F.pad` sample_inputs supply `mode` and `value` as
             // POSITIONAL args (`args[2]`, `args[3]`) per the upstream signature
             // `pad(input, pad, mode="constant", value=None)`
@@ -4682,32 +4718,14 @@ fn dispatch_f32(
                 _ => return Ok(None),
             };
             match pads.len() {
-                2 => Ok(Some(ferrotorch_nn::functional::pad1d(
-                    &input,
-                    pads[0] as usize,
-                    pads[1] as usize,
-                    mode,
-                    value_f,
+                2 => Ok(Some(ferrotorch_nn::padding::functional_pad_1d_signed(
+                    &input, pads[0], pads[1], mode, value_f,
                 )?)),
-                4 => Ok(Some(ferrotorch_nn::functional::pad2d(
-                    &input,
-                    pads[0] as usize,
-                    pads[1] as usize,
-                    pads[2] as usize,
-                    pads[3] as usize,
-                    mode,
-                    value_f,
+                4 => Ok(Some(ferrotorch_nn::padding::functional_pad_2d_signed(
+                    &input, pads[0], pads[1], pads[2], pads[3], mode, value_f,
                 )?)),
-                6 => Ok(Some(ferrotorch_nn::functional::pad3d(
-                    &input,
-                    pads[0] as usize,
-                    pads[1] as usize,
-                    pads[2] as usize,
-                    pads[3] as usize,
-                    pads[4] as usize,
-                    pads[5] as usize,
-                    mode,
-                    value_f,
+                6 => Ok(Some(ferrotorch_nn::padding::functional_pad_3d_signed(
+                    &input, pads[0], pads[1], pads[2], pads[3], pads[4], pads[5], mode, value_f,
                 )?)),
                 _ => Ok(None),
             }

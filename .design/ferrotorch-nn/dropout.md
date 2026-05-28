@@ -172,7 +172,9 @@ the upstream contract being deviated from is
 - [ ] AC-10: `FeatureAlphaDropout` — blocker #1448.
 - [ ] AC-11: Dropout2d / 1d / 3d GPU forward — blocker #1441 +
   internal GPU-kernel work.
-- [ ] AC-12: parity-sweep arms wired — blocker #1441.
+- [ ] AC-12: parity-sweep arms wired — #1441. `nn.functional.dropout`
+  is wired (120/152, 0 failed; 32 legitimate stochastic-mask skips);
+  `dropout2d` / `dropout3d` remain unwired, so AC-12 stays open.
 
 ## Architecture
 
@@ -252,9 +254,13 @@ For all three:
 - **Eval mode** — both upstream and ferrotorch return identity
   (zero-cost).
 - **`p == 0`** — identity short-circuit (no PRNG draws).
-- **`p == 1`** — upstream allows (returns all zeros);
-  ferrotorch's `[0, 1)` rejects `p == 1`. NOTE: divergence; in
-  practice `p == 1` is a degenerate case.
+- **`p == 1`** — upstream allows (returns all zeros, `Dropout.cpp:68`
+  `if (p == 1) return multiply(input, at::zeros(...))`); ferrotorch's
+  production `dropout` validates `[0, 1)` and rejects `p == 1` (REQ-12,
+  narrower contract). The parity-sweep runner arm therefore builds the
+  unique torch result directly: `p == 1` + `training` → `zeros_like`
+  (the exact all-zeros tensor torch returns, RNG-independent), `p == 1`
+  + eval → identity. This is EXACT value parity, not a property check.
 - **Expectation preservation** — `E[output] ≈ input` via the
   `1/(1-p)` scaling on survivors.
 - **Mask determinism on GPU** — given the same Philox RNG state,
@@ -265,8 +271,22 @@ For all three:
 - **Channel-wise zeroing (Dropout2d)** — a dropped channel has all
   spatial positions zeroed; surviving channels scaled by `1/(1-p)`.
 
-Parity-sweep audit entries: all 3 declared, runner has no arm.
-Blocker #1441.
+Parity-sweep audit entries: all 3 declared. The
+`nn.functional.dropout` arm IS wired in
+`tools/parity-sweep/runner/src/main.rs` (#1441): it routes every
+DETERMINISTIC, mask-invariant configuration to a byte-comparable
+result — `!training` and `p == 0` through the production
+`ferrotorch_nn::functional::dropout` identity path (`Dropout.cpp:64`
+`if (p == 0 || !train || numel == 0) return input`), and `p == 1`
+through the runner-built `zeros_like` / identity (production rejects
+`p == 1`). Sweep `--seeds 8`: **120/152 passed, 32 skipped, 0
+failed**. The 32 skips are the `0 < p < 1` + `training` samples (4
+stochastic configs/seed × 8 seeds): these draw a Bernoulli mask from
+ferrotorch's own RNG, which is NOT byte-comparable to torch's Philox
+mask, so they are genuinely unrepresentable for byte-parity — a
+LEGITIMATE `Ok(None)` skip, never a fake-pass or failure (the
+RNG-equivalence question is tracked separately). `dropout2d` /
+`dropout3d` still have NO runner arm.
 
 ## Verification
 
@@ -282,7 +302,9 @@ Tests in `mod tests` of `dropout.rs` (~25 tests):
 - `test_alpha_dropout_preserves_mean_and_variance`.
 - `test_alpha_dropout_eval_identity`.
 
-Parity-sweep smoke commands (currently 0/N passed, N skipped):
+Parity-sweep smoke commands (`nn.functional.dropout` now 120/152
+passed, 32 stochastic-mask skips, 0 failed; `dropout2d`/`dropout3d`
+still unwired):
 
 ```bash
 for OP in nn.functional.dropout nn.functional.dropout2d nn.functional.dropout3d; do

@@ -69,12 +69,15 @@ dispatch.
 - REQ-9: NOT-STARTED — the `nn.functional.pad` arm IS wired in
   `tools/parity-sweep/runner/src/main.rs` (#1441): it decodes the pad
   tuple (2→1d, 4→2d, 6→3d), the mode (constant/reflect/replicate/
-  circular), and the value (positional or kwarg), dispatching to
-  `functional_pad_{1,2,3}d`. Sweep `--seeds 8`: 376/408, 0 failed; the
-  32 skips are ALL negative-pad (crop) samples — a genuine production
-  gap (`functional_pad_{1,2,3}d` take `usize`, cannot crop), filed as
-  blocker #1611. op_db emits only `mode='constant'` for
-  `nn.functional.pad`. The OTHER 5 pad ops
+  circular), and the value (positional or kwarg), dispatching to the
+  crop-capable `pub fn functional_pad_{1,2,3}d_signed` (`isize` pads)
+  in `padding.rs`. The decode reads pad amounts as `isize` (sign
+  preserved) so NEGATIVE (crop) samples reach the signed path instead
+  of being rejected. Sweep `--seeds 8`: **408/408, 0 skipped, 0
+  failed** — all 32 previously-skipped negative-pad (crop) samples now
+  RUN byte-identically to torch's `constant_pad_nd`/reflect/replicate/
+  circular crop kernels (#1611/#1620..#1631 chain). op_db emits only
+  `mode='constant'` for `nn.functional.pad`. The OTHER 5 pad ops
   (`nn.functional.constant_pad_nd`, `reflection_pad{1,2}d`,
   `replication_pad{1,2}d`) still have NO runner arm, so REQ-9 stays
   NOT-STARTED until those arms land under #1441.
@@ -96,8 +99,9 @@ dispatch.
 - [ ] AC-6: GPU forward — currently CPU-only. (Not declared as a
   REQ; GPU-side padding kernels are tracked elsewhere.)
 - [ ] AC-7: parity-sweep arms wired — #1441. `nn.functional.pad` is
-  wired (376/408, 0 failed; 32 negative-pad skips → #1611); the other
-  5 pad ops remain unwired, so AC-7 stays open.
+  fully wired via the signed (crop-capable) path (408/408, 0 skipped,
+  0 failed — negative-pad samples now RUN); the other 5 pad ops remain
+  unwired, so AC-7 stays open.
 
 ## Architecture
 

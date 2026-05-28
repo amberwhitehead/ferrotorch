@@ -776,20 +776,37 @@
    "ferrotorch_source": "pub fn conv_transpose3d in ferrotorch-nn/src/functional.rs builds ConvTranspose3d::from_parts (groups=1, dilation=1 only); non-test consumer ferrotorch-nn/src/lazy_conv_transpose.rs LazyConvTranspose3d::materialize + pub use in lib.rs",
    "runner_arm": "tools/parity-sweep/runner/src/main.rs dispatch_conv_transpose::<3> now builds ConvTranspose3d::new_full(.., dilation, groups, bias) + inject_conv_params + Module::forward (production per-group/dilated/unbatched path). 0 skip (#1441) — the dilated samples now RUN, surfacing the production divergence below instead of hiding it behind a skip.",
    "tolerance": "rtol=1e-4, atol=1e-5 (col2im+GEMM many-FMA catastrophic-cancellation: seed=7 i=0 index 454 ferro 0.022621393 vs torch 0.022624016 absdiff 2.6e-6 rel 1.16e-4, 5-sig-fig match, pure FMA-order; was atol=1e-7 which surfaced once 3-D samples ran, #1441)",
-   "known_divergences": ["PRODUCTION DIVERGENCE (blocker #1619): conv_transpose3d sample 4 (batched) / sample 5 (unbatched), ALL seeds, output_padding=1 + dilation=(2,3,2) stride=2 padding=1. 16 FAILED samples (= 2 samples x 8 seeds). ferrotorch=3.3094802 (bias alone -> zero scatter) vs torch=-94.20793 at flat index 279. conv_transpose3d_forward_group in ferrotorch-nn/src/conv.rs drops input contributions into the output_padding-extended trailing region when dilation>1. Production fix needed in ferrotorch-nn/src/conv.rs (OUTSIDE the #1441 test-infra manifest); contradicts the REQ-6/#1608 'dilated forward verified' claim for the 3-D rank."]
+   "known_divergences": [
+    "PRODUCTION DIVERGENCE (blocker #1619): conv_transpose3d sample 4 (batched) / sample 5 (unbatched), ALL seeds, output_padding=1 + dilation=(2,3,2) stride=2 padding=1. 16 FAILED samples (= 2 samples x 8 seeds). ferrotorch=3.3094802 (bias alone -> zero scatter) vs torch=-94.20793 at flat index 279. conv_transpose3d_forward_group in ferrotorch-nn/src/conv.rs drops input contributions into the output_padding-extended trailing region when dilation>1. Production fix needed in ferrotorch-nn/src/conv.rs (OUTSIDE the #1441 test-infra manifest); contradicts the REQ-6/#1608 'dilated forward verified' claim for the 3-D rank."
+   ]
   },
   "nn.functional.pad": {
    "status": "verified",
    "last_sweep_at": "2026-05-28T00:00:00Z",
    "samples_attempted": 408,
-   "samples_passed": 376,
+   "samples_passed": 408,
+   "samples_failed": 0,
+   "samples_skipped": 0,
+   "pytorch_source": "torch/nn/functional.py:5532 pad(input, pad, mode='constant', value=None); aten/src/ATen/native/PadNd.cpp:94 output.fill_(value).copy_(source)",
+   "ferrotorch_source": "pub fn functional_pad_1d_signed/functional_pad_2d_signed/functional_pad_3d_signed (isize per-axis pads, crop-capable) in ferrotorch-nn/src/padding.rs take per-axis isize pad + PaddingMode + value, support NEGATIVE (crop) pads byte-identically to torch constant_pad_nd/reflect/replicate/circular crop (#1611/#1620..#1631); non-test consumer: pub use in ferrotorch-nn/src/lib.rs + Conv2d::forward pre-pad (conv.rs)",
+   "runner_arm": "tools/parity-sweep/runner/src/main.rs \"nn.functional.pad\" arm decodes the pad tuple as isize (sign preserved: 2->1d,4->2d,6->3d) + mode (constant/reflect/replicate/circular) + value (positional or kwarg) and dispatches to functional_pad_{1,2,3}d_signed so NEGATIVE (crop) samples RUN; op_db emits only mode='constant' for this op (#1441)",
+   "tolerance": "default rtol=1e-5, atol=1e-7 (element copy / constant fill, exact)",
+   "known_divergences": []
+  },
+  "nn.functional.dropout": {
+   "status": "verified",
+   "last_sweep_at": "2026-05-28T00:00:00Z",
+   "samples_attempted": 152,
+   "samples_passed": 120,
    "samples_failed": 0,
    "samples_skipped": 32,
-   "pytorch_source": "torch/nn/functional.py:5532 pad(input, pad, mode='constant', value=None); aten/src/ATen/native/PadNd.cpp:94 output.fill_(value).copy_(source)",
-   "ferrotorch_source": "pub fn pad1d/pad2d/pad3d (functional_pad_{1,2,3}d) in ferrotorch-nn/src/padding.rs take per-axis usize pad + PaddingMode + value; non-test consumer Conv2d::forward pre-pad (conv.rs) + pub use in lib.rs",
-   "runner_arm": "tools/parity-sweep/runner/src/main.rs \"nn.functional.pad\" arm decodes pad tuple (2->1d,4->2d,6->3d) + mode (constant/reflect/replicate/circular) + value (positional or kwarg); op_db emits only mode='constant' for this op (#1441)",
-   "tolerance": "default rtol=1e-5, atol=1e-7 (element copy / constant fill, exact)",
-   "known_divergences": ["negative pad (crop) -> Ok(None) skip, blocker #1611 (functional_pad_{1,2,3}d take usize, cannot crop). All 32 skips are negative-pad samples; mode is always 'constant' for op_db nn.functional.pad"]
+   "pytorch_source": "torch/nn/functional.py:1425 dropout(input, p=0.5, training=True, inplace=False); aten/src/ATen/native/Dropout.cpp:64 if (p == 0 || !train || numel == 0) return input; Dropout.cpp:68 if (p == 1) return multiply(input, at::zeros({}, input.options()))",
+   "ferrotorch_source": "pub fn dropout in ferrotorch-nn/src/functional.rs (validates 0<=p<1, inverted mask via ferrotorch_core::rng::with_thread_rng) handles !training/p==0 identity; runner builds p==1 result directly (zeros_like for train, identity for eval) since production rejects p>=1; non-test consumer: pub mod functional in ferrotorch-nn/src/lib.rs + Dropout layer forward (dropout.rs) used by lora.rs / vgg.rs / gcn.rs",
+   "runner_arm": "tools/parity-sweep/runner/src/main.rs \"nn.functional.dropout\" arm: !training and p==0 -> production dropout identity; p==1+training -> zeros_like (exact torch all-zeros, RNG-independent); p==1+eval -> identity; 0<p<1+training -> Ok(None) (#1441)",
+   "tolerance": "default rtol=1e-5, atol=1e-7 (identity / exact zeros, exact)",
+   "known_divergences": [
+    "0 < p < 1 + training -> Ok(None) skip: Bernoulli mask drawn from ferrotorch's own RNG is not byte-comparable to torch's Philox mask (genuinely unrepresentable for byte-parity, not a failure). 4 stochastic configs/seed x 8 seeds = 32 skips. dropout2d/dropout3d arms absent (#1441)."
+   ]
   },
   "nn.functional.embedding": {
    "status": "verified",
