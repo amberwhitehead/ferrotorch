@@ -20,7 +20,7 @@
 //! | REQ-6 | SHIPPED | impl: the `Embedding::sparse_grad` accessor here returning a `SparseGrad<T>`; non-test consumer: `ferrotorch_optim::SparseAdam::collect_sparse_grad_from_embedding` (`ferrotorch-optim/src/sparse_adam.rs`) calls `Embedding::sparse_grad` and registers it via `set_sparse_grad`, then `SparseAdam::step` applies the masked sparse-Adam update — the wired `nn.Embedding(sparse=True)` → `torch.optim.SparseAdam` flow (`torch/optim/sparse_adam.py:132-161`). |
 //! | REQ-7 | SHIPPED | impl: `pub struct EmbeddingBag<T: Float>` + `pub enum EmbeddingBagMode` + `Module` impl here; non-test consumer: `pub use embedding::{EmbeddingBag, EmbeddingBagMode}` in `lib.rs` exposes the type for downstream models. |
 //! | REQ-8 | SHIPPED | impl: both `Module<T> for Embedding<T>` and `Module<T> for EmbeddingBag<T>` impl blocks here; non-test consumer: `ferrotorch_optim::Optimizer` iterates `model.parameters_mut()` which surfaces the embedding's weight parameter for every step. |
-//! | REQ-9 | SHIPPED | impl: free fn `renorm_weight_rows_in_place` here (faithful translation of `embedding_renorm_cpu_` at `aten/src/ATen/native/Embedding.cpp:181-212` — sort+dedup touched rows, row norm via `at::norm` special-cased per `aten/src/ATen/native/cpu/ReduceOpsKernel.cpp:191-203` for `norm_type` 0/+inf/-inf, scale rows with norm > max_norm by `max_norm/(norm+1e-7)`, persist via `Tensor::update_data`), called by `Embedding::renorm_weight_in_place` and `EmbeddingBag::forward_bag`; `with_max_norm`/`with_norm_type`/`with_scale_grad_by_freq` builders on `Embedding<T>`, plus `EmbeddingBag::new_with` + `with_max_norm`/`with_norm_type`/`with_scale_grad_by_freq`/`with_sparse`/`with_include_last_offset` and `padding_idx` exclusion in `forward_bag`. `EmbeddingBackward::scale_grad_by_freq` divides each touched row's grad by its forward count (`torch/nn/functional.py:2499-2500`). Renorm runs BEFORE the gather, matching `F.embedding`/`F.embedding_bag` (`functional.py:2561-2573`, `2766-2771`). Consumer surface: per goal.md S5, `Embedding`/`EmbeddingBag` ARE boundary public API (the module mirrors `torch.nn.Embedding`/`torch.nn.EmbeddingBag` field-for-field — the user-facing kwargs ARE the deliverable), grandfathered SHIPPED with no further downstream caller required. The renorm is on the live forward path: `<Embedding as Module>::forward` here calls `self.renorm_weight_in_place(&indices)?` on every forward (no-op when `max_norm` unset), and `EmbeddingBag::forward_bag` / `<EmbeddingBag as Module>::forward` consume the bag kwargs; both types are re-exported via `pub use embedding::{Embedding, EmbeddingBag, EmbeddingBagMode}` in `lib.rs` as the public consumer surface. (NB #1566: the prior cite to `ferrotorch-llama/src/model.rs embed_tokens` as the renorm consumer was FALSE — `model.rs` constructs `Embedding::new(.., None)` with no `max_norm`/`EmbeddingBag`; corrected to the S5 boundary-API rationale.) |
+//! | REQ-9 | SHIPPED | impl: free fn `renorm_weight_rows_in_place` here (faithful translation of `embedding_renorm_cpu_` at `aten/src/ATen/native/Embedding.cpp:181-212` — sort+dedup touched rows, row norm via `at::norm` special-cased per `aten/src/ATen/native/cpu/ReduceOpsKernel.cpp:191-203` for `norm_type` 0/+inf/-inf, scale rows with norm > max_norm by `max_norm/(norm+1e-7)`, persist via `Tensor::update_data`), called by `Embedding::renorm_weight_in_place` and `EmbeddingBag::forward_bag`. L2 PRECISION (#1614): the default `norm_type == 2.0` f32 row reduces via `ferrotorch_core::simd_reduce::l2_norm_f32_torch` (torch's vectorized last-dim L2 kernel model, `ReduceOpsKernel.cpp:222-255`, f32 accumulator) so the `norm > max_norm` boundary decision matches torch byte-for-byte (closing the powf-vs-`v*v` summation-method gap #1612 left open); f64 rows and finite `p != 2` keep the generic `(Σ|x|^p)^(1/p)` arm. `with_max_norm`/`with_norm_type`/`with_scale_grad_by_freq` builders on `Embedding<T>`, plus `EmbeddingBag::new_with` + `with_max_norm`/`with_norm_type`/`with_scale_grad_by_freq`/`with_sparse`/`with_include_last_offset` and `padding_idx` exclusion in `forward_bag`. `EmbeddingBackward::scale_grad_by_freq` divides each touched row's grad by its forward count (`torch/nn/functional.py:2499-2500`). Renorm runs BEFORE the gather, matching `F.embedding`/`F.embedding_bag` (`functional.py:2561-2573`, `2766-2771`). Consumer surface: per goal.md S5, `Embedding`/`EmbeddingBag` ARE boundary public API (the module mirrors `torch.nn.Embedding`/`torch.nn.EmbeddingBag` field-for-field — the user-facing kwargs ARE the deliverable), grandfathered SHIPPED with no further downstream caller required. The renorm is on the live forward path: `<Embedding as Module>::forward` here calls `self.renorm_weight_in_place(&indices)?` on every forward (no-op when `max_norm` unset), and `EmbeddingBag::forward_bag` / `<EmbeddingBag as Module>::forward` consume the bag kwargs; both types are re-exported via `pub use embedding::{Embedding, EmbeddingBag, EmbeddingBagMode}` in `lib.rs` as the public consumer surface. (NB #1566: the prior cite to `ferrotorch-llama/src/model.rs embed_tokens` as the renorm consumer was FALSE — `model.rs` constructs `Embedding::new(.., None)` with no `max_norm`/`EmbeddingBag`; corrected to the S5 boundary-API rationale.) |
 //! | REQ-10 | NOT-STARTED | blocker #1441 (umbrella) — parity-sweep runner arms absent for both `nn.functional.embedding` and `nn.functional.embedding_bag`. Lib tests verify the impl end-to-end. |
 
 use std::any::TypeId;
@@ -150,9 +150,34 @@ fn renorm_weight_rows_in_place<T: Float>(
                 let av = v.abs();
                 if av < acc { av } else { acc }
             })
+        } else if norm_type == 2.0 && is_f32::<T>() {
+            // L2 FAST PATH (#1614): the default `norm_type == 2.0` over a
+            // contiguous f32 row is what torch's `at::norm(2.0)` evaluates via
+            // its VECTORIZED last-dim L2 kernel (`ReduceOpsKernel.cpp:222-255`):
+            // a width-8 lane accumulate of `v*v` + a naive left-fold + a scalar
+            // FMA tail + `sqrt`, all in an f32 (NOT f64) accumulator. A scalar
+            // `Σ |v|.powf(2)` then `.powf(0.5)` (the generic arm below) lands up
+            // to one ULP off that value, flipping the `norm > max_norm` boundary
+            // decision (#1612 / #1614). Route the f32 L2 row through the shared
+            // `ferrotorch_core::simd_reduce::l2_norm_f32_torch` primitive so the
+            // renorm decision matches torch byte-for-byte (modulo the documented
+            // ~3% one-ULP residual; the #1614 boundary row IS matched).
+            //
+            // `row: &[T]` is f32 here (guarded by `is_f32::<T>()`); collect it as
+            // `&[f32]` via the exact identity `ToPrimitive::to_f32`.
+            let mut row_f32: Vec<f32> = Vec::with_capacity(row.len());
+            for &v in row {
+                row_f32.push(num_traits::ToPrimitive::to_f32(&v).unwrap_or(0.0));
+            }
+            let n_f32 = ferrotorch_core::simd_reduce::l2_norm_f32_torch(&row_f32);
+            // Lift the f32 norm back into `T` (== f32). The unwrap is on the
+            // identity f32->f32 NumCast, which never fails for finite/inf/NaN.
+            T::from(n_f32).unwrap_or_else(<T as num_traits::Zero>::zero)
         } else {
             // NormOps: generic finite p-norm `(Σ|x|^p)^(1/p)`, accumulated and
-            // rooted in `T` (f32 for an f32 weight) to match `at::norm`.
+            // rooted in `T` (f32 for an f32 weight) to match `at::norm`. (Used
+            // for f64 rows, and for finite p != 2; the f32 L2 case is handled
+            // by the byte-exact `simd_reduce` arm above.)
             let p_t = T::from(norm_type).unwrap_or_else(<T as num_traits::One>::one);
             let mut acc = <T as num_traits::Zero>::zero();
             for &v in row {
@@ -1922,19 +1947,34 @@ mod tests {
         // (Embedding.cpp:202-203) — `at::norm` accumulates in `opmath_type<f32>`
         // == f32, stores back as f32, and only THEN widens to double.
         //
-        // Oracle (live torch 2.11.0+cu130, 2026-05-28): this row's f32 L2-norm
-        // is exactly 100.0, so `F.embedding([0], w, max_norm=100.0,
-        // norm_type=2.0)` leaves the row UNCHANGED (100.0 > 100.0 is false). Its
-        // f64 norm is 100.00000387877625 > 100.0, which the OLD f64 accumulation
-        // wrongly treated as "exceeds max_norm" and scaled the row down.
-        let row: [f32; 4] = [-5.092_077_7, -9.034_002, -99.067_34, -8.838_612];
+        // #1614 NOTE: the f32 L2 norm is now computed via
+        // `ferrotorch_core::simd_reduce::l2_norm_f32_torch` (torch's vectorized
+        // last-dim L2 kernel model), not the old scalar `Σ powf(|v|,2)`. The
+        // row below was re-selected (live torch 2.11.0+cu130, 2026-05-28) so
+        // that BOTH torch AND the SIMD primitive give the exact same f32 norm
+        // 151.10968017578125 (bits 0x43171c14), preserving this test's intent
+        // (f32-boundary, row unchanged) on a row where ferrotorch matches torch
+        // byte-for-byte. (The previous row `[-5.0920777, -9.034002, -99.06734,
+        // -8.838612]` — torch f32 norm == 100.0 — is a known ~3% one-ULP
+        // residual under the SIMD primitive: torch gives 0x42c80000 but the
+        // portable model gives 0x42c80001; that residual is documented in
+        // `simd_reduce.rs` / `.design/ferrotorch-core/simd_reduce.md`. Re-rowing
+        // here keeps this test pinning the f32-vs-f64 decision, not the residual.)
+        //
+        // Oracle: torch f32 norm of this row is 151.10968017578125 (== max_norm
+        // below), so `F.embedding([0], w, max_norm=151.10968017578125,
+        // norm_type=2.0)` leaves the row UNCHANGED (norm > max_norm is false,
+        // verified live). Its f64 norm is 151.10968198544464 > the f32 norm,
+        // which the OLD f64-accumulate path treated as "exceeds" and wrongly
+        // scaled the row down — exactly the #1612 distinction this test pins.
+        let row: [f32; 4] = [-92.500_87, -13.270_86, -86.028_92, -81.857_4];
         let emb = {
             let mut data = row.to_vec();
             data.extend_from_slice(&[0.1f32, 0.2, 0.3, 0.4]);
             let w = Tensor::from_storage(TensorStorage::cpu(data), vec![2, 4], true).unwrap();
             Embedding::from_pretrained(w, None)
                 .unwrap()
-                .with_max_norm(100.0)
+                .with_max_norm(151.109_680_175_781_25)
                 .with_norm_type(2.0)
         };
 

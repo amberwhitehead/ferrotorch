@@ -26,7 +26,7 @@
 //! | REQ-9 (`max(dim)` / `min(dim)` with `(values, indices)`) | SHIPPED | `max_with_dim` / `min_with_dim` return `(Tensor<T>, IntTensor<i64>)`; shared `MaxMinDimBackward` scatters grad at saved per-slice argmax/argmin; NaN-poisoning per upstream `SharedReduceOps.h:26-34`; consumed by `lib.rs:182` re-export; closes #1302. |
 //! | REQ-10 (`argmax` / `argmin`) | NOT-STARTED | integer-output, non-differentiable; no integer-output reduction scaffold. Blocker #1304. |
 //! | REQ-11 (`median` / `nanmedian`) | SHIPPED | `median_with_dim` / `nanmedian_with_dim` return `(Tensor<T>, IntTensor<i64>)`; lower-median rank `(effective-1)/2` over a stable index sort with the upstream `ip[i]<ip[j] || (==&&i<j)` tie-break per `Sorting.cpp:503-607`; median NaN-poisons, nanmedian skips NaNs; shared `MaxMinDimBackward` scatters grad at the saved per-slice median index per `derivatives.yaml:1179-1185`; consumed by `lib.rs:181` re-export; closes #1306. |
-//! | REQ-12 (`norm`) | SHIPPED | `norm_with_dim(input, p, dim, keepdim)` + `NormDimBackward` for `p > 0 finite` per `derivatives.yaml` `norm.ScalarOpt_dim`; `result==0 → 0` mask; consumed by `lib.rs:182` re-export; closes #1308. |
+//! | REQ-12 (`norm`) | SHIPPED | `norm_with_dim(input, p, dim, keepdim)` + `NormDimBackward` for `p > 0 finite` per `derivatives.yaml` `norm.ScalarOpt_dim`; `result==0 → 0` mask; consumed by `lib.rs:182` re-export; closes #1308. F32 L2 forward (`p==2.0`, `T==f32`, `inner==1`) reduces via `crate::simd_reduce::l2_norm_f32_torch` to match torch's vectorized last-dim L2 kernel byte-for-byte (#1614); generic f64 path retained for other p / dtype / strided cases. |
 //! | REQ-13 (`logsumexp`) | NOT-STARTED | kernel-layer forward exists in `ops::elementwise`; no autograd wrapper here. Blocker #1310. |
 //! | REQ-14 (`any` / `all` / `count_nonzero`) | NOT-STARTED | bool/integer-output, non-differentiable; no scaffold. Blocker #1312. |
 //! | REQ-15 (parity-sweep runner arms) | NOT-STARTED | the runner has arms only for the five cumulative ops (owned by `grad_fns/cumulative.rs`); no arms for `sum`, `mean`, `prod`, `amin`, `amax` or any NOT-STARTED op above. Umbrella blocker #1314. |
@@ -3132,15 +3132,52 @@ pub fn norm_with_dim<T: Float>(
     let outer: usize = in_shape[..norm_dim].iter().product();
     let inner: usize = in_shape[norm_dim + 1..].iter().product();
     let mut result_keepdim_data = Vec::with_capacity(outer * inner);
-    for o in 0..outer {
-        for i in 0..inner {
-            let mut acc = 0.0_f64;
+
+    // L2 fast path (#1614): for `p == 2.0` over a CONTIGUOUS last-dim slice
+    // (`inner == 1`) with an f32 dtype, torch's `at::norm(2.0)` goes through the
+    // vectorized last-dim L2 kernel (`ReduceOpsKernel.cpp:222-255`) — a width-8
+    // lane accumulate + left-fold + scalar FMA tail + `sqrt`, with an f32 (NOT
+    // f64) accumulator (`opmath_type<float> == float`, `OpMathType.h:16`). The
+    // generic `Σ |v|^p` then `^(1/p)` f64 path below differs from that by up to
+    // one ULP, which flips boundary decisions. Route the f32 last-dim L2 case
+    // through the shared `simd_reduce::l2_norm_f32_torch` primitive so it
+    // matches torch byte-for-byte (modulo the documented ~3% residual).
+    let t_is_f32 = std::any::TypeId::of::<T>() == std::any::TypeId::of::<f32>();
+    #[allow(
+        clippy::float_cmp,
+        reason = "exact `p == 2.0` mirrors torch's norm-kernel dispatch `if (val == 2.0)` at ReduceOpsKernel.cpp:195 — the L2 vectorized path is selected by exact equality, not an epsilon band; a margin compare would mis-route p values near 2.0 that torch routes to the generic NormOps path"
+    )]
+    let is_l2_lastdim_f32 = p == 2.0 && t_is_f32 && inner == 1;
+    if is_l2_lastdim_f32 {
+        // `inner == 1` means each reduced slice is `dim_size` CONTIGUOUS
+        // elements at `o * dim_size .. (o + 1) * dim_size`. Collect them as
+        // f32 (T is f32 here) and reduce with the torch-matching primitive.
+        for o in 0..outer {
+            let slice_start = o * dim_size;
+            let mut row: Vec<f32> = Vec::with_capacity(dim_size);
             for d in 0..dim_size {
-                let v = to_f64::<T>(in_data[o * dim_size * inner + d * inner + i])?;
-                acc += v.abs().powf(p);
+                let v = in_data[slice_start + d];
+                // T == f32 here, so this conversion is exact (identity).
+                row.push(num_traits::ToPrimitive::to_f32(&v).ok_or(
+                    FerrotorchError::InvalidArgument {
+                        message: "norm_with_dim: f32 element not representable".into(),
+                    },
+                )?);
             }
-            let r = acc.powf(1.0 / p);
-            result_keepdim_data.push(float_from_f64::<T>(r)?);
+            let norm_f32 = crate::simd_reduce::l2_norm_f32_torch(&row);
+            result_keepdim_data.push(float_from_f64::<T>(f64::from(norm_f32))?);
+        }
+    } else {
+        for o in 0..outer {
+            for i in 0..inner {
+                let mut acc = 0.0_f64;
+                for d in 0..dim_size {
+                    let v = to_f64::<T>(in_data[o * dim_size * inner + d * inner + i])?;
+                    acc += v.abs().powf(p);
+                }
+                let r = acc.powf(1.0 / p);
+                result_keepdim_data.push(float_from_f64::<T>(r)?);
+            }
         }
     }
     let mut keepdim_shape: Vec<usize> = in_shape.to_vec();

@@ -593,6 +593,21 @@ parity_ops = [
 
 
 [[route]]
+crate_pattern = "ferrotorch-core/src/simd_reduce.rs"
+upstream = [
+  "/home/doll/pytorch/aten/src/ATen/native/SharedReduceOps.h",
+  "/home/doll/pytorch/aten/src/ATen/native/cpu/ReduceOpsKernel.cpp",
+  "/home/doll/pytorch/aten/src/ATen/native/cpu/Reduce.h",
+  "/home/doll/pytorch/aten/src/ATen/cpu/vec/functional_base.h",
+]
+design = ".design/ferrotorch-core/simd_reduce.md"
+parity_ops = [
+  "norm",
+  "nn.functional.embedding",
+]
+
+
+[[route]]
 crate_pattern = "ferrotorch-core/src/grad_fns/shape.rs"
 upstream = [
   "/home/doll/pytorch/aten/src/ATen/native/TensorShape.cpp",
