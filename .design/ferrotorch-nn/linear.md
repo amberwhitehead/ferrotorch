@@ -78,7 +78,10 @@ back. Bilinear is NOT implemented.
   `nn.functional.bilinear` runner arm is wired (#1441): builds
   `Bilinear::new` + injects op_db weight/bias via `Parameter::set_data`
   + calls `forward_pair`; with N-D + empty support landed the 1-D /
-  2-D / N-D / empty samples all run.
+  2-D / N-D / empty samples all run. The arm's prior `ndim > 2` and
+  `shape.contains(0)` skip guards are removed (the production features
+  they hedged are SHIPPED), so the sweep reaches 128/128 passed
+  (0 skipped, 0 failed) at `--seeds 8`.
 - REQ-12: SHIPPED — parity-sweep runner arm for
   `nn.functional.linear` is wired (#1441): the arm builds a transient
   `Linear::new` + injects the op_db weight/bias via
@@ -109,11 +112,12 @@ back. Bilinear is NOT implemented.
   in `linear.rs` (#1442 closed).
 - [x] AC-10: parity-sweep `nn.functional.linear` arm wired (#1441) —
   144/144 passed (0 skipped, 0 failed) at `--seeds 8`.
-- [x] AC-11: parity-sweep `nn.functional.bilinear` arm wired (#1441).
-  The former production feature-gaps are closed: N-D input (#1603) and
-  empty-batch (#1605) both land in `forward_pair`, so the N-D and
-  empty-batch op_db samples no longer skip. (Re-running the runner arm
-  over the now-supported N-D samples is the #1441 follow-up.)
+- [x] AC-11: parity-sweep `nn.functional.bilinear` arm wired (#1441) —
+  128/128 passed (0 skipped, 0 failed) at `--seeds 8`. The former
+  production feature-gaps are closed: N-D input (#1603) and empty-batch
+  (#1605) both land in `forward_pair`, and the arm's `ndim > 2` /
+  `shape.contains(0)` skip guards are removed, so every op_db bilinear
+  sample (1-D / 2-D / N-D / empty batch) RUNS.
 - [x] AC-12: Bilinear `forward_pair` accepts arbitrary leading batch
   dims `(*, in)` and matches torch forward + all four gradients
   (`input1`/`input2`/`weight`/`bias`) for 3-D inputs, plus the
@@ -236,8 +240,9 @@ closed.
   supported end-to-end (verified by the 3-D forward+backward,
   4-D/2-D/1-D, and three empty/zero-leading-dim oracle tests). The
   runner arm (#1441) builds `Bilinear::new` + `Parameter::set_data` +
-  `forward_pair`; re-exercising the now-supported N-D samples is the
-  #1441 follow-up.
+  `forward_pair` for ALL ranks (the `ndim > 2` / `shape.contains(0)`
+  skip guards are removed): 128/128 passed (0 skipped, 0 failed) at
+  `--seeds 8`.
 
 ## Verification
 

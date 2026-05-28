@@ -100,25 +100,22 @@ the unbatched input shape.
   `ValueError('Only "zeros" padding mode is supported for ...')`
   message (`_ConvTransposeNd.__init__`, `conv.py:755-758`). Closes
   #1443.
-- REQ-11: forward conv arms SHIPPED, transpose arms unchanged. The
-  parity-sweep runner arms for `nn.functional.conv1d`/`conv2d`/`conv3d`
-  are wired (#1441) and reach 0-failed: `dispatch_conv::<D>` in
-  `tools/parity-sweep/runner/src/main.rs`. conv2d routes through
-  `Conv2d::new_full` + `Parameter::set_data` so the production grouped +
-  dilated CPU forward runs (groups / dilation / bias execute). conv1d
-  and conv3d now ALSO support `groups`/`dilation` in production
-  (`Conv1d::new_full` / `Conv3d::new_full` + per-group dilated
-  forward/backward, #1600 / #1601 closed); the remaining conv1d/conv3d
-  parity-sweep skips are a TEST-INFRASTRUCTURE gap, not a production
-  feature gap — the runner's `dispatch_conv::<D>` still drives those two
-  arms through the dense `Conv{1,3}d::from_parts` path, so grouped/dilated
-  op_db samples skip until the runner arms are extended to construct
-  `new_full` layers (separate orchestrator follow-up; tracked as the
-  per-file runner-arm gap, not a per-op REQ blocker, per goal.md S5).
-  String padding `'valid'` and `'same'` are now SHIPPED (REQ-12, #1602) and
-  unbatched (rank D+1) input is SHIPPED (REQ-13, #1604); the residual
-  conv1d/conv3d parity-sweep skips remain a TEST-INFRASTRUCTURE runner-arm
-  gap (separate orchestrator follow-up). The
+- REQ-11: forward conv arms SHIPPED at 0-skip, transpose arms unchanged.
+  The parity-sweep runner arms for
+  `nn.functional.conv1d`/`conv2d`/`conv3d` are wired (#1441) and reach
+  0-skip / 0-failed: `dispatch_conv::<D>` in
+  `tools/parity-sweep/runner/src/main.rs`. ALL three ranks now build via
+  `Conv{1,2,3}d::new_full` + `with_string_padding` + `Parameter::set_data`
+  + `Module::forward`, so each reaches the production grouped + dilated CPU
+  forward (groups / dilation / bias all execute; #1600 conv1d / #1601
+  conv3d / REQ-2 conv2d), the `'same'`/`'valid'` string-padding path
+  (REQ-12, #1602), and the unbatched rank-(D+1) implicit-batch path
+  (REQ-13, #1604). The runner no longer drives the dense
+  `Conv{1,3}d::from_parts` path for conv1d/conv3d — that was the
+  TEST-INFRASTRUCTURE runner-arm gap, now closed. Sweep at `--seeds 8`:
+  conv1d 80/80, conv2d 240/240, conv3d 160/160, all 0 skipped / 0 failed.
+  Any op_db sample the arm cannot decode now returns `Err` (surfaces) —
+  there is no silent `Ok(None)` skip left in the conv family. The
   `conv_transpose{1,2,3}d` arms are owned by a separate dispatch and
   unchanged here.
 
@@ -176,6 +173,10 @@ the unbatched input shape.
 - [ ] AC-9: Bias init matches upstream `U(-sqrt(k), sqrt(k))` —
   blocker #1450.
 - [ ] AC-10: parity-sweep arms wired for all 6 ops — blocker #1441.
+  conv1d/conv2d/conv3d arms reach 0-skip / 0-failed via `dispatch_conv::<D>`
+  (`new_full` + `with_string_padding` + `Module::forward`). The three
+  `conv_transpose{1,2,3}d` arms remain under #1441 (separate dispatch);
+  AC-10 stays open until those land.
 - [x] AC-11: String padding `'same'` / `'valid'` for Conv1d/2d/3d —
   forward + backward match the live torch 2.11 oracle including the
   asymmetric even-kernel `'same'` split, `'valid'`, and the stride>1
@@ -319,9 +320,11 @@ For each:
 - **Empty batch (B=0)**: upstream returns `[0, C_out, H_out,
   W_out]`; ferrotorch matches via the im2col + matmul algebra.
 
-Parity-sweep audit entries: each of the 6 op names is declared but
-the runner has no arm — `parity_audit.json` reports `missing` for
-each. Blocker #1441 tracks the runner-arm wiring.
+Parity-sweep audit entries (`parity_audit.json`): `nn.functional.conv1d`
+/ `conv2d` / `conv3d` are `verified` at 0-skip / 0-failed (the
+`dispatch_conv::<D>` arm; #1441). The three `conv_transpose{1,2,3}d`
+arms remain narrow (groups / dilation skip) and are tracked under the
+remaining #1441 scope.
 
 ## Verification
 
@@ -339,8 +342,11 @@ covering:
   `test_conv2d_backward_numerical_gradient` for the FD check.
 - ConvTranspose tests: shape, output_padding, backward.
 
-Parity-sweep smoke commands (all currently 0/N passed, N skipped
-because of the runner-arm gap, blocker #1441):
+Parity-sweep smoke commands. conv1d/conv2d/conv3d reach 0-skip /
+0-failed at `--seeds 8` (`dispatch_conv::<D>` via `new_full` +
+`with_string_padding`, #1441): conv1d 80/80, conv2d 240/240,
+conv3d 160/160. The `conv_transpose{1,2,3}d` arms remain narrow
+(groups / dilation skip) under the remaining #1441 scope.
 
 ```bash
 for OP in nn.functional.conv1d nn.functional.conv2d nn.functional.conv3d \
@@ -350,7 +356,9 @@ for OP in nn.functional.conv1d nn.functional.conv2d nn.functional.conv3d \
 done
 ```
 
-Expected grep count after blocker #1441 closes: `>= 1` for each.
+Grep count for `passed (0 skipped, 0 failed)`: `>= 1` for conv1d /
+conv2d / conv3d; the conv_transpose arms close under the remaining
+#1441 scope.
 
 ## REQ status table
 
@@ -366,6 +374,6 @@ Expected grep count after blocker #1441 closes: `>= 1` for each.
 | REQ-8 | SHIPPED | impl: `Conv2d::set_weight` and `Conv2d::from_parts` in `conv.rs`; non-test consumer: `ferrotorch-nn/src/functional.rs` (the stateless `nn::functional::conv2d` entry point) uses `Conv2d::from_parts` to drive the existing forward path with user-supplied parameters. |
 | REQ-9 | SHIPPED | impl: `kaiming_uniform(&mut weight, NonLinearity::ReLU)` + `uniform_init(&mut b, -bound, bound)` (bound = 1/sqrt(fan_in)) in every `Conv*d::new[_full]` in `conv.rs` mirroring `torch/nn/modules/conv.py:198-201`; non-test consumer: `Conv2d::new` is the path used by every vision-model constructor. (Closes #1450 — bias path; Kaiming `a=sqrt(5)` gain divergence remains a separate followup.) |
 | REQ-10 | SHIPPED | impl (forward layers): `padding_mode` field + `with_padding_mode` builder on `Conv1d` / `Conv2d` / `Conv3d`, with the non-`Zeros` pre-pad branch in each `<Conv*d as Module>::forward` calling `crate::padding::functional_pad_1d`/`_2d`/`_3d` then convolving with `padding=0`, mirroring `torch/nn/modules/conv.py:367-378` (Conv1d) / `716-732` (Conv3d). impl (transposed): `ConvTranspose{1,2,3}d::with_padding_mode` routes through `fn reject_non_zeros_transpose` returning the upstream `ValueError('Only "zeros" padding mode is supported for ...')` per `conv.py:755-758`. The 1-D/3-D pre-pads are autograd-aware via `Pad1dBackward` / `Pad3dBackward` in `padding.rs` (the #1550 fix class). Non-test production consumer: `pub use conv::{Conv1d, Conv2d, Conv3d, ConvTranspose1d, ConvTranspose2d, ConvTranspose3d}` re-export in `ferrotorch-nn/src/lib.rs`, and the `<Conv1d as Module>::forward` / `<Conv3d as Module>::forward` bodies consume `functional_pad_1d` / `functional_pad_3d` in production. Closes #1443. |
-| REQ-11 | SHIPPED (forward arms) | impl: `dispatch_conv::<D>` in `tools/parity-sweep/runner/src/main.rs` wires `nn.functional.conv1d`/`conv2d`/`conv3d` (#1441). conv2d drives the production grouped+dilated forward via `Conv2d::new_full` + `Parameter::set_data` (non-test production driver of `new_full`: `ferrotorch-vision/src/models/resnet.rs` grouped/dilated blocks). Sweep at `--seeds 8`: conv1d 24/80, conv2d 112/240, conv3d 24/160, ALL 0 failed. conv1d/conv3d grouped+dilated production support landed (#1600 / #1601 closed) — their residual sweep skips are now a runner-arm TEST gap (the arms drive `from_parts`, not `new_full`), NOT a production feature gap. The 'same'/'valid'/unbatched op_db samples are now SHIPPED in production (REQ-12 / REQ-13) but still skip in the sweep for the same runner-arm reason. `conv_transpose{1,2,3}d` arms are a separate dispatch (unchanged). |
+| REQ-11 | SHIPPED (forward arms, 0-skip) | impl: `dispatch_conv::<D>` in `tools/parity-sweep/runner/src/main.rs` wires `nn.functional.conv1d`/`conv2d`/`conv3d` (#1441). All three ranks build via `Conv{1,2,3}d::new_full` + `with_string_padding` + `Parameter::set_data` + `Module::forward`, driving the production grouped+dilated CPU forward (non-test production driver of `new_full`: `ferrotorch-vision/src/models/resnet.rs` grouped/dilated blocks; `ferrotorch-nn/src/lazy_conv.rs` `LazyConv1d::materialize` / `LazyConv3d::materialize`). Sweep at `--seeds 8`: conv1d 80/80, conv2d 240/240, conv3d 160/160, ALL 0 skipped / 0 failed. groups / dilation (#1600 / #1601), `'same'`/`'valid'` (REQ-12 / #1602), and unbatched rank-(D+1) (REQ-13 / #1604) op_db samples all RUN; the prior conv1d/conv3d `from_parts` runner-arm gap is closed. `conv_transpose{1,2,3}d` arms are a separate dispatch (unchanged). |
 | REQ-12 | SHIPPED | impl: `pub enum StringPadding` + `fn same_pad_lr` + `Conv1d::with_string_padding` / `Conv2d::with_string_padding` / `Conv3d::with_string_padding` and the `string_padding` branch at the top of each `<Conv*d as Module>::forward` in `conv.rs` (asymmetric pre-pad via `crate::padding::functional_pad_{1,2,3}d`, `left=total/2`/`right=total-left` per `aten/src/ATen/native/Pool.h:91-107`; stride>1 `'same'` rejected per `torch/nn/modules/conv.py:117-120`); non-test production consumer: the `forward` bodies (production `Module::forward`) consume `same_pad_lr` + `functional_pad_{1,2,3}d` + `recurse_clone`, and the `Conv{1,2,3}d` types are re-exported from `ferrotorch-nn/src/lib.rs`. Closes #1602. |
 | REQ-13 | SHIPPED | impl: the unbatched `input.ndim()` guard at the top of each `<Conv*d as Module>::forward` in `conv.rs` (`unsqueeze(0)` → recurse → `squeeze(0)`) using `ferrotorch_core::grad_fns::shape::{unsqueeze, squeeze}`, mirroring `batchify` + `output.squeeze(0)` at `aten/src/ATen/native/Convolution.cpp:816-831, 990-1047`; non-test production consumer: the `<Conv*d as Module>::forward` bodies (production) call `unsqueeze`/`squeeze`, and the `Conv{1,2,3}d` types are re-exported from `ferrotorch-nn/src/lib.rs`. Closes #1604. |

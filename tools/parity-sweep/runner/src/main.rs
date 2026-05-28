@@ -4248,19 +4248,16 @@ fn dispatch_f32(
         // `sample_inputs_bilinear` emits `args = [input1, input2, weight,
         // bias?]` (so `args[0]`=input1, `args[1]`=input2, `args[2]`=weight
         // `[out, in1, in2]`, `args[3]`=optional bias `[out]`). ferrotorch's
-        // `Bilinear` layer (`linear.rs`, REQ-11 SHIPPED, #1442) computes
-        // `y = einsum("bi,oij,bj->bo")` via `forward_pair(x1, x2)` and
-        // accepts 1-D and 2-D inputs (incl. empty batch `[0, in1]`). The
-        // arm builds a transient `Bilinear::new(in1, in2, out, bias?)`,
-        // injects weight/bias via `Parameter::set_data` (declaration order
-        // `[weight, bias]`), and calls `forward_pair`. Non-test consumer:
-        // `pub use linear::Bilinear` in `lib.rs` (downstream model crates
-        // construct it directly).
-        //
-        // GAP: `forward_pair` handles ONLY 1-D / 2-D; torch's `F.bilinear`
-        // flattens arbitrary leading dims. The 3-D samples (input1 ndim
-        // 3) are a genuine production feature-gap -> documented `Ok(None)`
-        // skip tracked under blocker #1603 (NOT an acceptable skip).
+        // `Bilinear` layer (`linear.rs`, REQ-11 SHIPPED, #1442/#1603) computes
+        // `y = einsum("bi,oij,bj->bo")` via `forward_pair(x1, x2)` and accepts
+        // arbitrary leading batch dims `(*, in)` (1-D / 2-D / N-D), flattening
+        // the leading `*` to a single batch axis `N` (explicit product, so an
+        // empty leading dim `N == 0` lands on the einsum empty-output path,
+        // #1605, rather than crashing). The arm builds a transient
+        // `Bilinear::new(in1, in2, out, bias?)`, injects weight/bias via
+        // `Parameter::set_data` (declaration order `[weight, bias]`), and
+        // calls `forward_pair`. Non-test consumer: `pub use linear::Bilinear`
+        // in `lib.rs` (downstream model crates construct it directly).
         "nn.functional.bilinear" => {
             if args.len() < 3 {
                 return Err("nn.functional.bilinear: needs [input1, input2, weight, bias?]".into());
@@ -4274,22 +4271,17 @@ fn dispatch_f32(
             let weight = unwrap_tensor_arg(&args[2])
                 .ok_or("nn.functional.bilinear: weight not a tensor")?
                 .to_f32()?;
-            // weight is `[out_features, in1_features, in2_features]`.
+            // weight is `[out_features, in1_features, in2_features]`. A weight
+            // that is not rank-3 is a malformed sample, not a feature gap.
             if weight.ndim() != 3 {
-                return Ok(None);
+                return Err(
+                    format!("nn.functional.bilinear: weight rank {} != 3", weight.ndim()).into(),
+                );
             }
-            // forward_pair handles only 1-D / 2-D inputs; >=3-D is a
-            // production gap (#1603 — torch F.bilinear flattens N-D).
-            if x1.ndim() > 2 || x2.ndim() > 2 {
-                return Ok(None);
-            }
-            // Empty (size-0) batch dim: `einsum_differentiable` panics with a
-            // `% 0` at `einsum.rs:1310` on a zero-size batch axis (production
-            // bug #1605). torch's `F.bilinear` handles `[0, in]` fine. Skip
-            // these samples with the blocker # rather than crash the sweep.
-            if x1.shape().contains(&0) || x2.shape().contains(&0) {
-                return Ok(None);
-            }
+            // `forward_pair` accepts arbitrary leading batch dims (1-D / 2-D /
+            // N-D) AND a zero-size leading dim (`N == 0`), both SHIPPED in
+            // production (#1603 N-D, #1605 empty batch). No rank/zero-size
+            // skip remains — every op_db bilinear sample RUNS.
             let out_features = weight.shape()[0];
             let in1_features = weight.shape()[1];
             let in2_features = weight.shape()[2];
@@ -4414,20 +4406,18 @@ fn dispatch_f32(
         // bias=None, stride=1, padding=0, dilation=1, groups=1)` —
         // `aten/src/ATen/native/Convolution.cpp`.
         //
-        // conv2d: built via `Conv2d::new_full(in, out, kernel, stride,
-        // padding, dilation, groups, bias?)` + `Parameter::set_data` so the
-        // production grouped + dilated CPU forward path (REQ-1/REQ-2,
-        // `.design/ferrotorch-nn/conv.md`) runs with caller weight + bias.
-        // groups / dilation / bias all execute (no skip). Remaining skips:
-        // unbatched rank D+1 input (#1604) and asymmetric string padding
-        // 'same' (#1602); 'valid' maps to padding 0 and runs.
-        //
-        // conv1d / conv3d: the `Conv1d` / `Conv3d` structs have NO
-        // `groups` / `dilation` fields (production forward is dense-only),
-        // so groups>1 / dilation>1 are GENUINE production feature-gaps:
-        // #1600 (conv1d) / #1601 (conv3d). Dense + 'valid' samples run via
-        // `Conv{1,3}d::from_parts`; grouped/dilated/'same' skip with the
-        // blocker # in the skip guard.
+        // All three ranks now build via `Conv{1,2,3}d::new_full(in, out,
+        // kernel, stride, padding, dilation, groups, bias?)` + `with_string_padding`
+        // + `Parameter::set_data` + `Module::forward`, so each reaches the
+        // production grouped + dilated CPU forward (REQ-2 conv2d; #1600 conv1d;
+        // #1601 conv3d — all SHIPPED + critic-verified on main). The unbatched
+        // rank-(D+1) `[C, *spatial]` form runs via the `Module::forward`
+        // implicit-batch unsqueeze/squeeze path (#1604). `padding='same'`/`'valid'`
+        // run via `with_string_padding(StringPadding::Same/Valid)` (#1602,
+        // asymmetric `same_pad_lr` split). No conv-family config that ferrotorch
+        // supports is skipped; the only `Ok(None)` left is — none (the dispatch
+        // returns `Err` for genuinely malformed samples so they SURFACE).
+        // See `dispatch_conv` for the shared body.
         "nn.functional.conv1d" => dispatch_conv::<1>(args, kwargs),
         "nn.functional.conv2d" => dispatch_conv::<2>(args, kwargs),
         "nn.functional.conv3d" => dispatch_conv::<3>(args, kwargs),
@@ -6009,60 +5999,57 @@ fn avg_pool_skip_kwargs(kwargs: &serde_json::Map<String, Value>) -> bool {
     false
 }
 
-/// Decode a `dilation` kwarg into a uniform `[1; D]` check. Returns `true`
-/// when dilation is absent or all-ones (the dense default), `false` when any
-/// component is > 1 (a non-dense dilated conv).
-fn dilation_is_dense(kwargs: &serde_json::Map<String, Value>) -> bool {
-    match kwargs.get("dilation") {
-        None => true,
-        Some(d) => {
-            if let Some(n) = d.as_u64() {
-                n == 1
-            } else if let Some(arr) = d.as_array() {
-                arr.iter().all(|x| x.as_u64().unwrap_or(0) == 1)
-            } else {
-                // Unrecognized shape — treat as non-dense so we skip rather
-                // than silently run with the wrong geometry.
-                false
-            }
-        }
-    }
-}
-
-/// Decode the `padding` kwarg for a conv that supports only symmetric `usize`
-/// padding. Returns:
-/// - `Ok(Some(pad))` for an int / tuple padding (the supported path),
-/// - `Ok(None)` for `padding='valid'` (maps to all-zero padding, supported),
-/// - `Err(Skip)` for `padding='same'` (asymmetric in general — production gap
-///   #1602; the caller turns this into a documented `Ok(None)` skip).
+/// Decode the `padding` kwarg of a conv into one of three forms the production
+/// `Conv{1,2,3}d` layer accepts:
+///
+/// - `Numeric` — an int / tuple padding (or the default 0), driven via the
+///   `padding` ctor field;
+/// - `Valid` — `padding='valid'`, equivalent to zero padding
+///   (`Convolution.cpp:1122-1124`), driven via `with_string_padding(Valid)`;
+/// - `Same` — `padding='same'`, the asymmetric `'same'` pre-pad now SHIPPED in
+///   production (`Conv*d::with_string_padding(Same)` + `same_pad_lr`, #1602),
+///   so it RUNS rather than skips.
+///
+/// Returns `Err` for an unrecognized string padding (neither `'same'` nor
+/// `'valid'`) — that maps to a GENUINE op_db decode gap, not a silent skip.
 enum ConvPad {
     /// Numeric padding decoded from the int / tuple kwarg (or the default 0).
     Numeric,
     /// `padding='valid'` — equivalent to zero padding.
     Valid,
-    /// `padding='same'` — not representable by symmetric `usize` padding in
-    /// the general (asymmetric) case. Skip with blocker #1602.
-    SameSkip,
+    /// `padding='same'` — asymmetric `'same'` pre-pad, SHIPPED in production
+    /// via `Conv*d::with_string_padding(StringPadding::Same)` (#1602).
+    Same,
 }
 
-fn classify_conv_padding(kwargs: &serde_json::Map<String, Value>) -> ConvPad {
+fn classify_conv_padding(
+    kwargs: &serde_json::Map<String, Value>,
+) -> Result<ConvPad, Box<dyn std::error::Error>> {
     match kwargs.get("padding").and_then(Value::as_str) {
-        Some("valid") => ConvPad::Valid,
-        // `same` can require asymmetric padding (total = dilation*(k-1), split
-        // floor/ceil when odd); ferrotorch's `Conv*d` padding is symmetric
-        // `usize` per side, so the general case is a production gap (#1602).
-        Some("same") => ConvPad::SameSkip,
-        Some(_) => ConvPad::SameSkip,
-        None => ConvPad::Numeric,
+        Some("valid") => Ok(ConvPad::Valid),
+        // `same` requires asymmetric padding in general (total = dilation*(k-1),
+        // split floor/ceil when odd); production `Conv*d::with_string_padding`
+        // + `same_pad_lr` (#1602, critic-verified) handle this exactly, so it
+        // RUNS.
+        Some("same") => Ok(ConvPad::Same),
+        // Any other string padding is not a torch padding value — surface it
+        // as a decode error rather than silently skipping.
+        Some(other) => Err(format!("conv: unrecognized string padding {other:?}").into()),
+        None => Ok(ConvPad::Numeric),
     }
 }
 
 /// Convolution dispatcher shared by conv1d/conv2d/conv3d.
 ///
-/// conv2d routes through `Conv2d::new_full` so it reaches the production
-/// grouped + dilated CPU forward; conv1d/conv3d are dense-only in production
-/// (`Conv{1,3}d` carry no `groups`/`dilation` fields), so grouped/dilated
-/// samples are documented skips under blocker #1600 (conv1d) / #1601 (conv3d).
+/// All three ranks route through `Conv{1,2,3}d::new_full`, inject the op_db
+/// sample's `weight`/`bias` via `Parameter::set_data`, then run
+/// `Module::forward` so each reaches the production grouped and dilated CPU
+/// forward (#1600 conv1d / #1601 conv3d / REQ-2 conv2d) and the unbatched
+/// rank-(D+1) implicit-batch path (`Module::forward` unsqueeze/squeeze, #1604).
+/// `padding='same'` / `'valid'` route through `with_string_padding`
+/// (`StringPadding::Same` / `Valid`, #1602); numeric padding uses the ctor
+/// `padding` field. The weight layout is `[out, in/groups, *kernel]`
+/// (`torch/nn/modules/conv.py:171`).
 fn dispatch_conv<const D: usize>(
     args: &[Value],
     kwargs: &serde_json::Map<String, Value>,
@@ -6071,11 +6058,7 @@ fn dispatch_conv<const D: usize>(
         return Err("conv: needs [input, weight, bias?]".into());
     }
     let groups = kwargs.get("groups").and_then(Value::as_u64).unwrap_or(1) as usize;
-    let pad_kind = classify_conv_padding(kwargs);
-    // `padding='same'` (asymmetric in general) is a production gap (#1602).
-    if matches!(pad_kind, ConvPad::SameSkip) {
-        return Ok(None);
-    }
+    let pad_kind = classify_conv_padding(kwargs)?;
 
     let input = unwrap_tensor_arg(&args[0])
         .ok_or("conv: input not tensor")?
@@ -6083,53 +6066,69 @@ fn dispatch_conv<const D: usize>(
     let weight = unwrap_tensor_arg(&args[1])
         .ok_or("conv: weight not tensor")?
         .to_f32()?;
-    // Conv{1,2,3}d requires (D + 2)-rank input [B, C, ...]; upstream
-    // accepts unbatched (D + 1)-rank too. Unbatched input is a production
-    // gap (#1604 — `Conv*d::forward` has no implicit-batch path).
-    if input.shape().len() != D + 2 {
-        return Ok(None);
+    // `Conv{1,2,3}d::forward` now accepts both the batched (D + 2)-rank
+    // `[B, C, *spatial]` form and the unbatched (D + 1)-rank `[C, *spatial]`
+    // form (the implicit-batch unsqueeze/squeeze path, #1604). Anything else
+    // is a genuinely malformed sample.
+    if input.shape().len() != D + 1 && input.shape().len() != D + 2 {
+        return Err(format!(
+            "conv: input rank {} is neither (D+1) nor (D+2) for D={D}",
+            input.shape().len()
+        )
+        .into());
     }
     let bias: Option<Tensor<f32>> = match args.get(2) {
         Some(v) if !v.is_null() => unwrap_tensor_arg(v).map(|b| b.to_f32()).transpose()?,
         _ => None,
     };
+    // weight is `[out, in/groups, *kernel]` (rank D + 2).
+    if weight.ndim() != D + 2 {
+        return Err(format!(
+            "conv: weight rank {} != D+2 ({}) for D={D}",
+            weight.ndim(),
+            D + 2
+        )
+        .into());
+    }
+    let out_channels = weight.shape()[0];
+    let in_per_group = weight.shape()[1];
+    let in_channels = in_per_group * groups;
+
     match D {
         1 => {
-            // conv1d is dense-only in production. groups>1 / dilation>1 are
-            // genuine feature-gaps (#1600), not acceptable skips.
-            if groups != 1 || !dilation_is_dense(kwargs) {
-                return Ok(None);
-            }
+            let kernel_size = weight.shape()[2];
             let stride = parse_dim1(kwargs.get("stride")).unwrap_or(1);
-            // `valid` -> 0; numeric int/tuple via parse_dim1.
+            let dilation = parse_dim1(kwargs.get("dilation")).unwrap_or(1);
             let padding = match pad_kind {
-                ConvPad::Valid => 0,
-                _ => parse_dim1(kwargs.get("padding")).unwrap_or(0),
+                ConvPad::Numeric => parse_dim1(kwargs.get("padding")).unwrap_or(0),
+                // `Same` / `Valid` set padding = 0 in the ctor; the string
+                // padding builder drives the effective pre-pad.
+                _ => 0,
             };
-            Ok(Some(ferrotorch_nn::functional::conv1d(
-                &input,
-                &weight,
-                bias.as_ref(),
+            let mut conv = ferrotorch_nn::Conv1d::<f32>::new_full(
+                in_channels,
+                out_channels,
+                kernel_size,
                 stride,
                 padding,
+                dilation,
+                groups,
+                bias.is_some(),
+            )?;
+            conv = apply_string_padding_1d(conv, &pad_kind)?;
+            inject_conv_params(&mut conv, weight, bias);
+            Ok(Some(ferrotorch_nn::module::Module::<f32>::forward(
+                &conv, &input,
             )?))
         }
         2 => {
-            // conv2d reaches the production grouped + dilated CPU path via
-            // `Conv2d::new_full`. weight is `[out, in/groups, kH, kW]`.
-            if weight.ndim() != 4 {
-                return Ok(None);
-            }
-            let out_channels = weight.shape()[0];
-            let in_per_group = weight.shape()[1];
-            let in_channels = in_per_group * groups;
             let kernel_size = (weight.shape()[2], weight.shape()[3]);
             let stride = parse_dim2(kwargs.get("stride")).unwrap_or([1, 1]);
-            let padding = match pad_kind {
-                ConvPad::Valid => [0, 0],
-                _ => parse_dim2(kwargs.get("padding")).unwrap_or([0, 0]),
-            };
             let dilation = parse_dim2(kwargs.get("dilation")).unwrap_or([1, 1]);
+            let padding = match pad_kind {
+                ConvPad::Numeric => parse_dim2(kwargs.get("padding")).unwrap_or([0, 0]),
+                _ => [0, 0],
+            };
             let mut conv = ferrotorch_nn::Conv2d::<f32>::new_full(
                 in_channels,
                 out_channels,
@@ -6140,40 +6139,93 @@ fn dispatch_conv<const D: usize>(
                 groups,
                 bias.is_some(),
             )?;
-            {
-                let mut params = ferrotorch_nn::module::Module::<f32>::parameters_mut(&mut conv);
-                if let Some(p) = params.first_mut() {
-                    p.set_data(weight);
-                }
-                if let (Some(b), Some(p)) = (bias, params.get_mut(1)) {
-                    p.set_data(b);
-                }
-            }
+            conv = apply_string_padding_2d(conv, &pad_kind)?;
+            inject_conv_params(&mut conv, weight, bias);
             Ok(Some(ferrotorch_nn::module::Module::<f32>::forward(
                 &conv, &input,
             )?))
         }
         3 => {
-            // conv3d is dense-only in production. groups>1 / dilation>1 are
-            // genuine feature-gaps (#1601), not acceptable skips.
-            if groups != 1 || !dilation_is_dense(kwargs) {
-                return Ok(None);
-            }
+            let kernel_size = (weight.shape()[2], weight.shape()[3], weight.shape()[4]);
             let stride = parse_dim3(kwargs.get("stride")).unwrap_or([1, 1, 1]);
+            let dilation = parse_dim3(kwargs.get("dilation")).unwrap_or([1, 1, 1]);
             let padding = match pad_kind {
-                ConvPad::Valid => [0, 0, 0],
-                _ => parse_dim3(kwargs.get("padding")).unwrap_or([0, 0, 0]),
+                ConvPad::Numeric => parse_dim3(kwargs.get("padding")).unwrap_or([0, 0, 0]),
+                _ => [0, 0, 0],
             };
-            Ok(Some(ferrotorch_nn::functional::conv3d(
-                &input,
-                &weight,
-                bias.as_ref(),
+            let mut conv = ferrotorch_nn::Conv3d::<f32>::new_full(
+                in_channels,
+                out_channels,
+                kernel_size,
                 (stride[0], stride[1], stride[2]),
                 (padding[0], padding[1], padding[2]),
+                (dilation[0], dilation[1], dilation[2]),
+                groups,
+                bias.is_some(),
+            )?;
+            conv = apply_string_padding_3d(conv, &pad_kind)?;
+            inject_conv_params(&mut conv, weight, bias);
+            Ok(Some(ferrotorch_nn::module::Module::<f32>::forward(
+                &conv, &input,
             )?))
         }
         _ => Err("conv: unsupported rank".into()),
     }
+}
+
+/// Inject caller-supplied `weight` / `bias` into a freshly-constructed conv via
+/// the declaration-order `parameters_mut()` slice (`[weight, bias]`). Shared by
+/// conv1d/conv2d/conv3d so the production grouped + dilated forward runs on the
+/// op_db sample's exact parameters.
+fn inject_conv_params<M: ferrotorch_nn::module::Module<f32>>(
+    conv: &mut M,
+    weight: Tensor<f32>,
+    bias: Option<Tensor<f32>>,
+) {
+    let mut params = conv.parameters_mut();
+    if let Some(p) = params.first_mut() {
+        p.set_data(weight);
+    }
+    if let (Some(b), Some(p)) = (bias, params.get_mut(1)) {
+        p.set_data(b);
+    }
+}
+
+/// Apply `padding='same'`/`'valid'` to a `Conv1d` via `with_string_padding`.
+/// `Numeric` is a no-op (the ctor already carries the numeric padding).
+fn apply_string_padding_1d(
+    conv: ferrotorch_nn::Conv1d<f32>,
+    pad_kind: &ConvPad,
+) -> Result<ferrotorch_nn::Conv1d<f32>, Box<dyn std::error::Error>> {
+    Ok(match pad_kind {
+        ConvPad::Numeric => conv,
+        ConvPad::Valid => conv.with_string_padding(ferrotorch_nn::StringPadding::Valid)?,
+        ConvPad::Same => conv.with_string_padding(ferrotorch_nn::StringPadding::Same)?,
+    })
+}
+
+/// Apply `padding='same'`/`'valid'` to a `Conv2d` via `with_string_padding`.
+fn apply_string_padding_2d(
+    conv: ferrotorch_nn::Conv2d<f32>,
+    pad_kind: &ConvPad,
+) -> Result<ferrotorch_nn::Conv2d<f32>, Box<dyn std::error::Error>> {
+    Ok(match pad_kind {
+        ConvPad::Numeric => conv,
+        ConvPad::Valid => conv.with_string_padding(ferrotorch_nn::StringPadding::Valid)?,
+        ConvPad::Same => conv.with_string_padding(ferrotorch_nn::StringPadding::Same)?,
+    })
+}
+
+/// Apply `padding='same'`/`'valid'` to a `Conv3d` via `with_string_padding`.
+fn apply_string_padding_3d(
+    conv: ferrotorch_nn::Conv3d<f32>,
+    pad_kind: &ConvPad,
+) -> Result<ferrotorch_nn::Conv3d<f32>, Box<dyn std::error::Error>> {
+    Ok(match pad_kind {
+        ConvPad::Numeric => conv,
+        ConvPad::Valid => conv.with_string_padding(ferrotorch_nn::StringPadding::Valid)?,
+        ConvPad::Same => conv.with_string_padding(ferrotorch_nn::StringPadding::Same)?,
+    })
 }
 
 fn dispatch_conv_transpose<const D: usize>(
