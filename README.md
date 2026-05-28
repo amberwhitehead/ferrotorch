@@ -5,7 +5,7 @@
 [![crates.io](https://img.shields.io/crates/v/ferrotorch.svg)](https://crates.io/crates/ferrotorch)
 [![docs.rs](https://docs.rs/ferrotorch/badge.svg)](https://docs.rs/ferrotorch)
 [![license](https://img.shields.io/crates/l/ferrotorch.svg)](https://github.com/dollspace-gay/ferrotorch#license)
-[![tests](https://img.shields.io/badge/tests-4%2C800%2B_passing-brightgreen.svg)](#)
+[![tests](https://img.shields.io/badge/tests-9%2C800%2B_passing-brightgreen.svg)](#)
 
 ---
 
@@ -29,7 +29,7 @@ If you have ever wanted to train a ResNet or a transformer in Rust without pulli
 - **ONNX export** --- trace a model and emit a standard `.onnx` file loadable by onnxruntime, TensorRT, CoreML. Exports via the ferrotorch-jit `IrGraph`. Hand-written protobuf encoder, no external dependency.
 - **GGUF support** --- parse, load, and dequantize GGUF-quantized models (Q4_0, Q4_1, Q5_0, Q5_1, Q8_0, Q8_1, F16, F32) directly from `.gguf` files without Python tooling.
 - **Operation fusion** --- chain elementwise ops into a single kernel with PTX codegen. 2-5x GPU speedup for fused chains.
-- **SafeTensors + PyTorch .pt import** --- load HuggingFace models directly; pure-Rust pickle parser (28 opcodes) for PyTorch checkpoints.
+- **SafeTensors + PyTorch .pt import** --- load HuggingFace models directly; pure-Rust pickle parser (39 opcodes) for PyTorch checkpoints.
 - **Vision model architectures** --- 10 classification (ResNet, VGG, ViT-B/16, EfficientNet-B0, ConvNeXt-T, Swin-T, MobileNetV2, MobileNetV3, DenseNet-121, InceptionV3), 7 detection (Faster R-CNN, Mask R-CNN, Keypoint R-CNN, RetinaNet, FCOS, SSD300, YOLO), 4 segmentation (DeepLabV3, FCN, LR-ASPP, U-Net).
 - **INT8/INT4 quantization** --- per-tensor and per-channel post-training quantization with quantized matmul.
 - **Distributed training** --- DDP with gradient synchronization over a TCP backend, GPU-aware collectives, `DistributedSampler` for multi-rank training.
@@ -338,7 +338,7 @@ This structure means every public API has an explicit test and any regression is
 | **Proc macro** | `#[derive(Module)]` | No (dynamic) | `#[derive(Module)]` | No | No |
 | **LoRA** | Yes (`LoRALinear` + merge) | Via libraries | No | No | Yes |
 | **Einops** | Yes (rearrange/repeat/reduce) | Via library | No | No | No |
-| **Tests** | 4,800+ | Extensive | Growing | Via libtorch | Growing |
+| **Tests** | 9,800+ | Extensive | Growing | Via libtorch | Growing |
 
 ## Installation
 
