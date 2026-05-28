@@ -92,7 +92,6 @@ fn assert_close(actual: &[f32], expected: &[f32], tol: f32, msg: &str) {
 ///
 /// Tracking: #1621
 #[test]
-#[ignore = "divergence: reflect crop-then-pad loses original window; tracking #1621"]
 fn divergence_reflect_crop3_pad2_forward() {
     let x = tensor(&[1.0, 2.0, 3.0, 4.0], &[1, 1, 4]);
     let y = functional_pad_1d_signed(&x, -3, 2, PaddingMode::Reflect, 0.0).expect(
@@ -125,7 +124,6 @@ fn divergence_reflect_crop3_pad2_forward() {
 ///
 /// Tracking: #1621
 #[test]
-#[ignore = "divergence: reflect crop-then-pad loses original window; tracking #1621"]
 fn divergence_reflect_crop2_pad3_forward() {
     let x = tensor(&[1.0, 2.0, 3.0, 4.0], &[1, 1, 4]);
     let y = functional_pad_1d_signed(&x, -2, 3, PaddingMode::Reflect, 0.0).expect(
@@ -157,7 +155,6 @@ fn divergence_reflect_crop2_pad3_forward() {
 ///
 /// Tracking: #1621
 #[test]
-#[ignore = "divergence: reflect crop-then-pad loses original window; tracking #1621"]
 fn divergence_reflect_pad3_crop2_mirror_forward() {
     let x = tensor(&[1.0, 2.0, 3.0, 4.0], &[1, 1, 4]);
     let y = functional_pad_1d_signed(&x, 3, -2, PaddingMode::Reflect, 0.0).expect(
@@ -191,7 +188,6 @@ fn divergence_reflect_pad3_crop2_mirror_forward() {
 ///
 /// Tracking: #1621
 #[test]
-#[ignore = "divergence: reflect crop-then-pad backward loses original window; tracking #1621"]
 fn divergence_reflect_crop3_pad2_backward() {
     let x = leaf(&[1.0, 2.0, 3.0, 4.0], &[1, 1, 4]);
     let y = functional_pad_1d_signed(&x, -3, 2, PaddingMode::Reflect, 0.0)
@@ -219,7 +215,6 @@ fn divergence_reflect_crop3_pad2_backward() {
 ///
 /// Tracking: #1621
 #[test]
-#[ignore = "divergence: reflect crop-then-pad backward loses original window; tracking #1621"]
 fn divergence_reflect_crop2_pad3_backward() {
     let x = leaf(&[1.0, 2.0, 3.0, 4.0], &[1, 1, 4]);
     let y = functional_pad_1d_signed(&x, -2, 3, PaddingMode::Reflect, 0.0)

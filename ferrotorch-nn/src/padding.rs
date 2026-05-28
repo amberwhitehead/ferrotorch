@@ -1498,6 +1498,234 @@ fn functional_pad_nd_positive<T: Float>(
     }
 }
 
+/// Unified reflect index map matching upstream
+/// `aten/src/ATen/native/cpu/PaddingKernel.cpp:63-80`. `j` is the output
+/// position, `size` is the ORIGINAL input size on this axis, and `pad` is the
+/// signed LOW-side pad. The window offset is
+/// `offset = max(0, -pad) - max(0, pad)` (`PaddingKernel.cpp:63-65`); the
+/// reflected index is then read as `i + offset` from the ORIGINAL input
+/// (`PaddingKernel.cpp:71-80`). This reads the original window directly, so a
+/// positive pad on a cropped side correctly reaches elements a crop-first pass
+/// would have discarded. Caller guarantees the resolved index is in
+/// `0..size` via the reflect legality check (`|pad| < size` per side).
+#[inline]
+fn reflect_axis_src(j: usize, size: usize, pad: isize) -> usize {
+    let j = j as isize;
+    let size_i = size as isize;
+    let offset = 0i64.max(-(pad as i64)) - 0i64.max(pad as i64);
+    let offset = offset as isize;
+    let i = if j < pad {
+        pad * 2 - j
+    } else if j >= pad && j < size_i + pad {
+        j
+    } else {
+        (size_i + pad - 1) * 2 - j
+    };
+    (i + offset) as usize
+}
+
+/// Circular index map mirroring `_pad_circular`'s slice-copy gather
+/// (`aten/src/ATen/native/PadNd.cpp:148-187`). The kernel first copies a
+/// (possibly cropped) center slice `out[max(lo,0) .. out_w-max(hi,0)]` from
+/// `in[max(-lo,0) .. size-max(-hi,0)]`, then wraps the left pad from the END of
+/// the output and the right pad from the START. So a wrap reads from the
+/// CROPPED center — NOT a plain modulo against the original window (which only
+/// coincides when there is no crop). `j` is the output position, `size` the
+/// ORIGINAL input size, `(lo, hi)` the signed pads on this axis. Returns the
+/// source index into the ORIGINAL input. Caller guarantees `out_w >= 1`.
+#[inline]
+fn circular_axis_src(j: usize, size: usize, lo: isize, hi: isize) -> usize {
+    let j = j as isize;
+    let size_i = size as isize;
+    let out_w = size_i + lo + hi;
+    let lo_pos = lo.max(0);
+    let hi_pos = hi.max(0);
+    // Resolve `j` to a center-region output index (left/right wraps copy from
+    // the already-written center), then map that center index to the input.
+    let center = if j < lo_pos {
+        // Left wrap (`pad_l > 0`): out[0..lo] <- out[out_w-lo-hi_pos .. out_w-hi_pos].
+        out_w - lo - hi_pos + j
+    } else if j >= out_w - hi_pos {
+        // Right wrap (`pad_r > 0`): out[out_w-hi .. out_w] <- out[lo_pos .. lo_pos+hi].
+        lo_pos + (j - (out_w - hi))
+    } else {
+        j
+    };
+    // Center → input: in[max(-lo,0) + (center - max(lo,0))].
+    (lo.min(0).abs() + (center - lo_pos)) as usize
+}
+
+/// Resolve, for one axis, the source index a reflect/circular output index
+/// reads from the ORIGINAL input window. Both modes always read a real element
+/// (never a fill), so this returns a bare `usize`. `(lo, hi)` are the signed
+/// pads on this axis.
+#[inline]
+fn signed_mode_axis_src(mode: PaddingMode, j: usize, size: usize, lo: isize, hi: isize) -> usize {
+    match mode {
+        PaddingMode::Reflect => reflect_axis_src(j, size, lo),
+        PaddingMode::Circular => circular_axis_src(j, size, lo, hi),
+        // Zeros routes through the constant gather; Replicate keeps the
+        // crop-then-pad path. This resolver is only invoked for Reflect/Circular
+        // (see `pad_nd_signed_reflect_circular` / `PadNdSignedModeBackward`); the
+        // clamp here is a defensive in-bounds fallback that never executes.
+        PaddingMode::Zeros | PaddingMode::Replicate => {
+            (j as isize - lo).clamp(0, size as isize - 1) as usize
+        }
+    }
+}
+
+/// Crop-capable reflect/circular pad over the last `npad` dimensions using the
+/// unified index map against the ORIGINAL input window. `pads` is `[(lo,hi),
+/// ...]` ordered LAST padded axis first. Output extent per axis is
+/// `size + lo + hi` (negative pads narrow). Reflect legality (`|lo| < size`
+/// and `|hi| < size` per axis, checked against the ORIGINAL size, mirroring
+/// `aten/src/ATen/native/ReflectionPad.cpp:46-48`) is validated here.
+fn pad_nd_signed_reflect_circular<T: Float>(
+    data: &[T],
+    shape: &[usize],
+    pads: &[(isize, isize)],
+    mode: PaddingMode,
+) -> FerrotorchResult<(Vec<T>, Vec<usize>)> {
+    let ndim = shape.len();
+    let npad = pads.len();
+    let mut new_shape = shape.to_vec();
+    for (k, &(lo, hi)) in pads.iter().enumerate() {
+        let dim = ndim - 1 - k;
+        let size = shape[dim] as isize;
+        if mode == PaddingMode::Reflect && (lo.abs() >= size || hi.abs() >= size) {
+            return Err(FerrotorchError::InvalidArgument {
+                message: format!(
+                    "Reflection padding ({lo}, {hi}) must be less than input size ({size}) on dimension {dim}"
+                ),
+            });
+        }
+        // Circular: torch rejects a pad larger than the dim ("Padding value
+        // causes wrapping around more than once.") — `pad_l <= size &&
+        // pad_r <= size` (`aten/src/ATen/native/PadNd.cpp:140-142`).
+        if mode == PaddingMode::Circular && (lo > size || hi > size) {
+            return Err(FerrotorchError::InvalidArgument {
+                message: format!(
+                    "Circular padding ({lo}, {hi}) causes wrapping around more than once on dimension {dim} (size {size})"
+                ),
+            });
+        }
+        let new_size = size + lo + hi;
+        if new_size < 1 {
+            return Err(FerrotorchError::InvalidArgument {
+                message: format!(
+                    "padding ({lo}, {hi}) on dimension {dim} of size {size} yields non-positive output size {new_size}"
+                ),
+            });
+        }
+        new_shape[dim] = new_size as usize;
+    }
+
+    let first_padded = ndim - npad;
+    let outer: usize = shape[..first_padded]
+        .iter()
+        .copied()
+        .product::<usize>()
+        .max(1);
+    let in_inner: usize = shape[first_padded..].iter().product();
+    let out_inner: usize = new_shape[first_padded..].iter().product();
+    let zero = <T as num_traits::Zero>::zero();
+    let new_total: usize = new_shape.iter().copied().product();
+    let mut out = vec![zero; new_total];
+
+    for o in 0..outer {
+        let in_base = o * in_inner;
+        let out_base = o * out_inner;
+        for flat in 0..out_inner {
+            let mut rem = flat;
+            let mut src_lin = 0usize;
+            let mut src_stride = 1usize;
+            for k in 0..npad {
+                let dim = ndim - 1 - k;
+                let axis_new = new_shape[dim];
+                let coord = rem % axis_new;
+                rem /= axis_new;
+                let (lo, hi) = pads[k];
+                let s = signed_mode_axis_src(mode, coord, shape[dim], lo, hi);
+                src_lin += s * src_stride;
+                src_stride *= shape[dim];
+            }
+            out[out_base + flat] = data[in_base + src_lin];
+        }
+    }
+
+    Ok((out, new_shape))
+}
+
+/// Backward for the signed reflect/circular pad: the adjoint of the unified
+/// gather is a scatter-add into the original-size input
+/// (`grad_input[src(o)] += grad_output[o]`), matching torch's
+/// `reflection_pad*_backward` / `_pad_circular` backward.
+#[derive(Debug)]
+struct PadNdSignedModeBackward<T: Float> {
+    input: Tensor<T>,
+    input_shape: Vec<usize>,
+    mode: PaddingMode,
+    /// `(lo, hi)` per padded axis, ordered LAST axis first (same as the forward).
+    pads: Vec<(isize, isize)>,
+}
+
+impl<T: Float> GradFn<T> for PadNdSignedModeBackward<T> {
+    fn backward(&self, grad_output: &Tensor<T>) -> FerrotorchResult<Vec<Option<Tensor<T>>>> {
+        if !self.input.requires_grad() {
+            return Ok(vec![None]);
+        }
+        let ndim = self.input_shape.len();
+        let npad = self.pads.len();
+        let first_padded = ndim - npad;
+        let outer: usize = self.input_shape[..first_padded]
+            .iter()
+            .copied()
+            .product::<usize>()
+            .max(1);
+        let in_inner: usize = self.input_shape[first_padded..].iter().product();
+
+        let go_shape = grad_output.shape();
+        let out_inner: usize = go_shape[first_padded..].iter().product();
+
+        let go = grad_output.data_vec()?;
+        let zero = <T as num_traits::Zero>::zero();
+        let mut grad_in = vec![zero; outer * in_inner];
+
+        for o in 0..outer {
+            let in_base = o * in_inner;
+            let out_base = o * out_inner;
+            for flat in 0..out_inner {
+                let mut rem = flat;
+                let mut src_lin = 0usize;
+                let mut src_stride = 1usize;
+                for k in 0..npad {
+                    let dim = ndim - 1 - k;
+                    let axis_new = go_shape[dim];
+                    let coord = rem % axis_new;
+                    rem /= axis_new;
+                    let (lo, hi) = self.pads[k];
+                    let s = signed_mode_axis_src(self.mode, coord, self.input_shape[dim], lo, hi);
+                    src_lin += s * src_stride;
+                    src_stride *= self.input_shape[dim];
+                }
+                grad_in[in_base + src_lin] += go[out_base + flat];
+            }
+        }
+
+        let grad_input =
+            Tensor::from_storage(TensorStorage::cpu(grad_in), self.input_shape.clone(), false)?;
+        Ok(vec![Some(grad_input)])
+    }
+
+    fn inputs(&self) -> Vec<&Tensor<T>> {
+        vec![&self.input]
+    }
+
+    fn name(&self) -> &'static str {
+        "PadNdSignedModeBackward"
+    }
+}
+
 /// Shared signed-pad driver for the 1-D/2-D/3-D public entrypoints. `pads` is
 /// ordered LAST padded axis first.
 ///
@@ -1533,14 +1761,49 @@ fn functional_pad_nd_signed<T: Float>(
             // All-non-negative under a non-constant mode: pure mode-pad.
             return functional_pad_nd_positive(input, pads, mode, value);
         }
-        // Mixed/negative under a non-constant mode: torch CROPS the negative
-        // side(s) then applies the mode's padding on the positive part. Split
-        // each axis pad into its crop part (negative only) and pad part
-        // (positive only), narrow via the constant-mode signed gather (autograd
-        // attaches `PadNdSignedBackward`), then mode-pad the positive remainder
-        // (autograd attaches `Pad{1,2,3}dBackward`). Both compose through the
-        // standard autograd graph, so the crop adjoint (zero-pad) and the
-        // mode-pad adjoint (scatter-add) chain automatically.
+        // Reflect/Circular with a negative (crop) pad: torch does NOT crop
+        // first. It reflects/wraps against the ORIGINAL input window via a
+        // single index map with offset `max(0,-pad) - max(0,pad)`
+        // (`aten/src/ATen/native/cpu/PaddingKernel.cpp:63-80`,
+        // `ReflectionPad.cpp:46-48`, `PadNd.cpp:158-159`). A positive pad on a
+        // cropped side reads elements a crop-first pass would have discarded
+        // (e.g. `reflect [-3,2]` on `[1,2,3,4]` -> `[4,3,2]`, not an error). We
+        // gather directly from the original window and scatter-add the adjoint
+        // through `PadNdSignedModeBackward` (#1620 #1621).
+        if matches!(mode, PaddingMode::Reflect | PaddingMode::Circular) {
+            let data = input.data_vec()?;
+            let shape = input.shape();
+            if pads.len() > shape.len() {
+                return Err(FerrotorchError::InvalidArgument {
+                    message: format!(
+                        "pad targets {} dims but input has only {} dims",
+                        pads.len(),
+                        shape.len()
+                    ),
+                });
+            }
+            let input_shape = shape.to_vec();
+            let (out_data, new_shape) = pad_nd_signed_reflect_circular(&data, shape, pads, mode)?;
+            if is_grad_enabled() && input.requires_grad() {
+                let grad_fn = Arc::new(PadNdSignedModeBackward {
+                    input: input.clone(),
+                    input_shape,
+                    mode,
+                    pads: pads.to_vec(),
+                });
+                return Tensor::from_operation(TensorStorage::cpu(out_data), new_shape, grad_fn);
+            }
+            return Tensor::from_storage(TensorStorage::cpu(out_data), new_shape, false);
+        }
+        // Replicate with a negative (crop) pad: torch's clamp always reads the
+        // PRESERVED boundary element, so crop-first then replicate-pad composes
+        // correctly (verified: `replicate [-2,3]` on `[1,2,3,4]` -> `[3,4,4,4,4]`,
+        // grad `[0,0,1,4]`). Split each axis pad into its crop part (negative
+        // only) and pad part (positive only), narrow via the constant-mode
+        // signed gather (autograd attaches `PadNdSignedBackward`), then
+        // replicate-pad the positive remainder (autograd attaches
+        // `Pad{1,2,3}dBackward`). Both compose through the standard autograd
+        // graph.
         let crop_pads: Vec<(isize, isize)> = pads
             .iter()
             .map(|&(lo, hi)| (lo.min(0), hi.min(0)))
