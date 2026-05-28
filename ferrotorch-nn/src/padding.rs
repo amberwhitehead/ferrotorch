@@ -12,7 +12,7 @@
 //! | REQ | Status | Evidence |
 //! |---|---|---|
 //! | REQ-1 | SHIPPED | impl: `pub enum PaddingMode` here with 4 variants `Zeros` / `Reflect` / `Replicate` / `Circular`; non-test consumer: `ferrotorch-nn/src/conv.rs` uses `PaddingMode` as the `Conv{1,2,3}d` `padding_mode` field — the non-`Zeros` forward branch routes through `functional_pad_{1,2,3}d` (wiring landed in #1443), and `ConvTranspose{1,2,3}d::with_padding_mode` matches on it to reject non-`Zeros`. |
-//! | REQ-2 | SHIPPED | impl: the `functional_pad_1d` / `functional_pad_2d` / `functional_pad_3d` entry points here dispatching on `PaddingMode`; non-test consumer: `ferrotorch-nn/src/functional.rs` re-exposes these as `nn::functional::pad` for the public API surface. |
+//! | REQ-2 | SHIPPED | impl: the grow-only `functional_pad_1d` / `functional_pad_2d` / `functional_pad_3d` entry points here dispatch on `PaddingMode`; the `Zeros`/constant arm routes through the crop-capable `functional_pad_1d_signed` / `functional_pad_2d_signed` / `functional_pad_3d_signed` (`isize` pads) which support NEGATIVE (crop) pads + mixed signs for `mode="constant"` via `pad_nd_signed_constant` + `PadNdSignedBackward`, mirroring `constant_pad_nd` at upstream `aten/src/ATen/native/PadNd.cpp:29-108` (#1611). Non-test consumer: the `usize` `functional_pad_{1,2,3}d` consume the signed entrypoints in production (the `Zeros` arm); `ferrotorch-nn/src/conv.rs` calls `functional_pad_{1,2,3}d` for the conv pre-pad; `ferrotorch-nn/src/functional.rs` re-exposes these as `nn::functional::pad`. |
 //! | REQ-3 | SHIPPED | impl: `pub struct ConstantPad{1,2,3}d<T: Float>` here, mirroring `torch/nn/modules/padding.py` constant-pad family; non-test consumer: `pub use` in `lib.rs` exposes them to external crates; the vision-model code uses `ConstantPad2d` via the `lib.rs` re-export for padding non-square inputs. |
 //! | REQ-4 | SHIPPED | impl: `pub struct ZeroPad{1,2,3}d<T: Float>` here; non-test consumer: `pub use` in `lib.rs` exposes them. |
 //! | REQ-5 | SHIPPED | impl: `pub struct ReflectionPad{1,2,3}d<T: Float>` here with reflect-overflow check inside `pad_*d_reflect`; non-test consumer: `pub use` in `lib.rs`; reflection padding is the standard for U-nets and image-translation models. |
@@ -720,19 +720,36 @@ pub fn functional_pad_1d<T: Float>(
     mode: PaddingMode,
     value: T,
 ) -> FerrotorchResult<Tensor<T>> {
+    // `Zeros` is the runner's mapping for torch `mode="constant"`; route it
+    // through the crop-capable signed constant path — the single source of
+    // truth for constant padding, mirroring torch dispatching `mode="constant"`
+    // through `constant_pad_nd` (`aten/src/ATen/native/PadNd.cpp:214-215`). For
+    // a non-negative `usize` pad the signed forward is byte-identical to the old
+    // `pad_1d_constant` and its `PadNdSignedBackward` scatter-add equals the old
+    // `Pad1dBackward` adjoint; the `value` fill (#1553) is preserved.
+    if mode == PaddingMode::Zeros {
+        return functional_pad_1d_signed(input, pad_left as isize, pad_right as isize, mode, value);
+    }
+
     let data = input.data_vec()?;
     let shape = input.shape();
     let input_shape = shape.to_vec();
+    // The `Zeros` (constant) arm is dispatched above through the crop-capable
+    // signed path; the remaining gather modes never crop and keep their
+    // existing positive-only helpers + `Pad1dBackward` adjoint.
     let (out_data, new_shape) = match mode {
-        // `Zeros` is the runner's mapping for torch `mode="constant"`; the fill
-        // is the `value` kwarg, not a hardcoded zero. Upstream
-        // `aten/src/ATen/native/PadNd.cpp:94` does `output.fill_(value)` then
-        // copies the source in. ZeroPad layers pass `T::zero()` explicitly, so
-        // threading `value` here is the constant-pad semantics (#1553).
-        PaddingMode::Zeros => pad_1d_constant(&data, shape, pad_left, pad_right, value),
         PaddingMode::Reflect => pad_1d_reflect(&data, shape, pad_left, pad_right)?,
         PaddingMode::Replicate => pad_1d_replicate(&data, shape, pad_left, pad_right),
         PaddingMode::Circular => pad_1d_circular(&data, shape, pad_left, pad_right),
+        PaddingMode::Zeros => {
+            return functional_pad_1d_signed(
+                input,
+                pad_left as isize,
+                pad_right as isize,
+                mode,
+                value,
+            );
+        }
     };
 
     // Grad path: attach Pad1dBackward so the autograd graph stays connected.
@@ -902,15 +919,25 @@ pub fn functional_pad_2d<T: Float>(
     mode: PaddingMode,
     value: T,
 ) -> FerrotorchResult<Tensor<T>> {
+    // `Zeros` (torch `mode="constant"`) routes through the crop-capable signed
+    // path — see the `functional_pad_1d` note. The `value` fill (#1553) is
+    // preserved; for non-negative `usize` pads the result is byte-identical.
+    if mode == PaddingMode::Zeros {
+        return functional_pad_2d_signed(
+            input,
+            pad_left as isize,
+            pad_right as isize,
+            pad_top as isize,
+            pad_bottom as isize,
+            mode,
+            value,
+        );
+    }
+
     let data = input.data_vec()?;
     let shape = input.shape();
     let input_shape = shape.to_vec();
     let (out_data, new_shape) = match mode {
-        // `Zeros` carries the torch `mode="constant"` fill `value` (see the
-        // PadNd.cpp:94 note on `functional_pad_1d`); #1553.
-        PaddingMode::Zeros => pad_2d_constant(
-            &data, shape, pad_left, pad_right, pad_top, pad_bottom, value,
-        ),
         PaddingMode::Reflect => {
             pad_2d_reflect(&data, shape, pad_left, pad_right, pad_top, pad_bottom)?
         }
@@ -919,6 +946,17 @@ pub fn functional_pad_2d<T: Float>(
         }
         PaddingMode::Circular => {
             pad_2d_circular(&data, shape, pad_left, pad_right, pad_top, pad_bottom)
+        }
+        PaddingMode::Zeros => {
+            return functional_pad_2d_signed(
+                input,
+                pad_left as isize,
+                pad_right as isize,
+                pad_top as isize,
+                pad_bottom as isize,
+                mode,
+                value,
+            );
         }
     };
 
@@ -1098,15 +1136,27 @@ pub fn functional_pad_3d<T: Float>(
     mode: PaddingMode,
     value: T,
 ) -> FerrotorchResult<Tensor<T>> {
+    // `Zeros` (torch `mode="constant"`) routes through the crop-capable signed
+    // path — see the `functional_pad_1d` note. The `value` fill (#1553) is
+    // preserved; for non-negative `usize` pads the result is byte-identical.
+    if mode == PaddingMode::Zeros {
+        return functional_pad_3d_signed(
+            input,
+            pad_left as isize,
+            pad_right as isize,
+            pad_top as isize,
+            pad_bottom as isize,
+            pad_front as isize,
+            pad_back as isize,
+            mode,
+            value,
+        );
+    }
+
     let data = input.data_vec()?;
     let shape = input.shape();
     let input_shape = shape.to_vec();
     let (out_data, new_shape) = match mode {
-        // `Zeros` carries the torch `mode="constant"` fill `value` (see the
-        // PadNd.cpp:94 note on `functional_pad_1d`); #1553.
-        PaddingMode::Zeros => pad_3d_constant(
-            &data, shape, pad_left, pad_right, pad_top, pad_bottom, pad_front, pad_back, value,
-        ),
         PaddingMode::Reflect => pad_3d_reflect(
             &data, shape, pad_left, pad_right, pad_top, pad_bottom, pad_front, pad_back,
         )?,
@@ -1116,6 +1166,19 @@ pub fn functional_pad_3d<T: Float>(
         PaddingMode::Circular => pad_3d_circular(
             &data, shape, pad_left, pad_right, pad_top, pad_bottom, pad_front, pad_back,
         ),
+        PaddingMode::Zeros => {
+            return functional_pad_3d_signed(
+                input,
+                pad_left as isize,
+                pad_right as isize,
+                pad_top as isize,
+                pad_bottom as isize,
+                pad_front as isize,
+                pad_back as isize,
+                mode,
+                value,
+            );
+        }
     };
 
     // Grad path: attach Pad3dBackward so the autograd graph stays connected.
@@ -1135,6 +1198,416 @@ pub fn functional_pad_3d<T: Float>(
     }
 
     Tensor::from_storage(TensorStorage::cpu(out_data), new_shape, false)
+}
+
+// ===========================================================================
+// Signed (crop-capable) functional pad — torch `constant_pad_nd` negative pad
+// ===========================================================================
+//
+// `torch.nn.functional.pad` accepts NEGATIVE pad amounts: a negative pad on a
+// side CROPS (removes) `|pad|` elements from that side instead of adding. Only
+// the `mode="constant"` path supports this — upstream
+// `aten/src/ATen/native/PadNd.cpp:207-219` (`_pad_enum_symint`) routes
+// `constant` through `constant_pad_nd` (which handles negatives) but routes
+// `reflect`/`replicate`/`circular` to the `reflection_pad*` / `replication_pad*`
+// native kernels, which neither accept a non-zero `value` (PadNd.cpp:217-219)
+// nor a negative pad. So crop is a `PaddingMode::Zeros`-only capability here.
+//
+// Forward (PadNd.cpp:29-108): for each padded dim with signed pads `(lo, hi)`
+// the cropped input is `narrow(i, -lo, size+lo)` (when `lo<0`) then
+// `narrow(i, 0, size'+hi)` (when `hi<0`); the output of size
+// `new = size + lo + hi` is `fill_(value)`d and the cropped input copied into
+// the `max(lo,0)` offset window (PadNd.cpp:94-106). Equivalently, an output
+// index `o` reads source index `s = o - lo`: when `0 <= s < size` it is real
+// data, otherwise (only possible for the POSITIVE-pad region) it is the `value`
+// fill. This one rule handles MIXED signs per-dim correctly.
+//
+// Over-crop: torch's `narrow` rejects a negative length
+// ("narrow(): length must be non-negative", from PadNd.cpp:49 / :54), and
+// PadNd.cpp:76 `TORCH_CHECK(new_dim >= 0)`. We mirror BOTH: a left crop may not
+// exceed `size`, and a right crop may not exceed the post-left-crop size — i.e.
+// `size + min(lo,0) >= 0` AND `size + min(lo,0) + min(hi,0) >= 0`. A net size of
+// exactly 0 is allowed (torch returns an empty dim, e.g. `F.pad(x3, [-1,-2])`).
+//
+// Backward: the adjoint of a crop-or-pad gather is a scatter-add into the
+// (full, original-size) input — `grad_input[o - lo] += grad_output[o]` for the
+// in-bounds outputs. Cropped-away positions receive no contribution (grad 0),
+// matching torch's `constant_pad_nd` backward being itself a `constant_pad_nd`
+// with negated pads.
+
+/// Resolve, for a single axis, the source index a padded/cropped output index
+/// reads from. Returns `None` for the constant-fill region (an output position
+/// in the POSITIVE-pad area that has no source element). `lo` is the signed pad
+/// on the low side of this axis.
+#[inline]
+fn signed_axis_src(new_idx: usize, size: usize, lo: isize) -> Option<usize> {
+    let s = new_idx as isize - lo;
+    if s >= 0 && (s as usize) < size {
+        Some(s as usize)
+    } else {
+        None
+    }
+}
+
+/// Validate the signed pads for one axis against torch's sequential-`narrow`
+/// crop rule and return the new axis size. Errors when a crop removes more than
+/// the (running) axis size — mirroring torch's
+/// "narrow(): length must be non-negative" / `TORCH_CHECK(new_dim >= 0)`.
+fn signed_axis_new_size(
+    size: usize,
+    lo: isize,
+    hi: isize,
+    axis_label: &str,
+) -> FerrotorchResult<usize> {
+    // Left crop applies first (PadNd.cpp:49): narrow length `size + lo` must be
+    // non-negative when `lo < 0`.
+    let after_left: isize = if lo < 0 {
+        size as isize + lo
+    } else {
+        size as isize
+    };
+    if after_left < 0 {
+        return Err(FerrotorchError::InvalidArgument {
+            message: format!(
+                "constant pad: negative padding {lo} on {axis_label} crops more than the dimension size {size} (narrow length would be negative)"
+            ),
+        });
+    }
+    // Right crop applies to the post-left size (PadNd.cpp:54).
+    let after_right: isize = if hi < 0 { after_left + hi } else { after_left };
+    if after_right < 0 {
+        return Err(FerrotorchError::InvalidArgument {
+            message: format!(
+                "constant pad: negative padding ({lo}, {hi}) on {axis_label} crops more than the dimension size {size}, resulting in a negative output size"
+            ),
+        });
+    }
+    // The actual new size also adds the POSITIVE side of each pad back in.
+    Ok((after_right + lo.max(0) + hi.max(0)) as usize)
+}
+
+/// Generic crop-capable constant pad over the last `npad` dimensions.
+///
+/// `pads` is `[lo_0, hi_0, lo_1, hi_1, ...]` ordered from the LAST padded axis
+/// inward (i.e. matching the `(left, right, top, bottom, front, back)`
+/// flattened layout the public entrypoints use). Returns `(data, new_shape)`.
+fn pad_nd_signed_constant<T: Float>(
+    data: &[T],
+    shape: &[usize],
+    pads: &[(isize, isize)],
+    value: T,
+) -> FerrotorchResult<(Vec<T>, Vec<usize>)> {
+    let ndim = shape.len();
+    let npad = pads.len();
+    // `pads[0]` targets the LAST axis; map axis k (0-based from the last padded
+    // axis) to absolute dim `ndim - 1 - k`.
+    let mut new_shape = shape.to_vec();
+    let mut new_sizes = vec![0usize; npad]; // new_sizes[k] for axis ndim-1-k
+    for (k, &(lo, hi)) in pads.iter().enumerate() {
+        let dim = ndim - 1 - k;
+        let new_size = signed_axis_new_size(shape[dim], lo, hi, &format!("dimension {dim}"))?;
+        new_sizes[k] = new_size;
+        new_shape[dim] = new_size;
+    }
+
+    // Outer dims (everything before the first padded axis) are untouched.
+    let first_padded = ndim - npad;
+    let outer: usize = shape[..first_padded]
+        .iter()
+        .copied()
+        .product::<usize>()
+        .max(1);
+
+    let new_total: usize = new_shape.iter().copied().product();
+    let mut out = vec![value; new_total];
+
+    // Degenerate input (numel 0 — e.g. shape `[0, 3]`: empty data buffer with a
+    // non-empty declared dim): no source data to gather. Mirror upstream
+    // `aten/src/ATen/native/PadNd.cpp:94-106`, which `fill_(value)`s the output
+    // then `copy_`s the (empty) source — a no-op — leaving the value-filled
+    // output. The guard prevents an out-of-bounds index into the empty `data`
+    // (same #1551 bug class the positive-only `pad_*d_constant` helpers guard).
+    if data.is_empty() {
+        return Ok((out, new_shape));
+    }
+
+    // Per-element gather over the padded sub-volume. `npad` is at most 3 here,
+    // so a small fixed-stride walk over the last axes is sufficient and clear.
+    // Strides within the (single outer slice of the) input / output.
+    let in_inner: usize = shape[first_padded..].iter().product();
+    let out_inner: usize = new_shape[first_padded..].iter().product();
+
+    // Source coordinate buffer reused per output element.
+    for o in 0..outer {
+        let in_base = o * in_inner;
+        let out_base = o * out_inner;
+        for flat in 0..out_inner {
+            // Decode `flat` into per-axis output coords (last axis fastest).
+            let mut rem = flat;
+            let mut src_lin = 0usize;
+            let mut src_stride = 1usize;
+            let mut missing = false;
+            // Walk axes from last (k=0) to first padded (k=npad-1).
+            for k in 0..npad {
+                let dim = ndim - 1 - k;
+                let axis_new = new_shape[dim];
+                let coord = rem % axis_new;
+                rem /= axis_new;
+                let lo = pads[k].0;
+                match signed_axis_src(coord, shape[dim], lo) {
+                    Some(s) => {
+                        src_lin += s * src_stride;
+                        src_stride *= shape[dim];
+                    }
+                    None => {
+                        missing = true;
+                        break;
+                    }
+                }
+            }
+            if !missing {
+                out[out_base + flat] = data[in_base + src_lin];
+            }
+            // else: leave the `value` fill already in place.
+        }
+    }
+
+    Ok((out, new_shape))
+}
+
+/// Backward node for the signed (crop-capable) constant functional pad. The
+/// adjoint of the crop/pad gather is a scatter-add into the original-size
+/// input: `grad_input[o - lo] += grad_output[o]` for in-bounds outputs. Cropped
+/// positions get no contribution (grad 0). Mirrors torch's `constant_pad_nd`
+/// backward (itself a `constant_pad_nd` with negated pads).
+#[derive(Debug)]
+struct PadNdSignedBackward<T: Float> {
+    input: Tensor<T>,
+    input_shape: Vec<usize>,
+    /// `(lo, hi)` per padded axis, ordered LAST axis first (same as the forward).
+    pads: Vec<(isize, isize)>,
+}
+
+impl<T: Float> GradFn<T> for PadNdSignedBackward<T> {
+    fn backward(&self, grad_output: &Tensor<T>) -> FerrotorchResult<Vec<Option<Tensor<T>>>> {
+        if !self.input.requires_grad() {
+            return Ok(vec![None]);
+        }
+        let ndim = self.input_shape.len();
+        let npad = self.pads.len();
+        let first_padded = ndim - npad;
+        let outer: usize = self.input_shape[..first_padded]
+            .iter()
+            .copied()
+            .product::<usize>()
+            .max(1);
+        let in_inner: usize = self.input_shape[first_padded..].iter().product();
+
+        let go_shape = grad_output.shape();
+        let out_inner: usize = go_shape[first_padded..].iter().product();
+
+        // The backward runs on host: scatter-add is data-dependent over the
+        // index map. `data_vec` materialises the (possibly GPU) grad to CPU.
+        let go = grad_output.data_vec()?;
+        let zero = <T as num_traits::Zero>::zero();
+        let mut grad_in = vec![zero; outer * in_inner];
+
+        for o in 0..outer {
+            let in_base = o * in_inner;
+            let out_base = o * out_inner;
+            for flat in 0..out_inner {
+                let mut rem = flat;
+                let mut src_lin = 0usize;
+                let mut src_stride = 1usize;
+                let mut missing = false;
+                for k in 0..npad {
+                    let dim = ndim - 1 - k;
+                    let axis_new = go_shape[dim];
+                    let coord = rem % axis_new;
+                    rem /= axis_new;
+                    let lo = self.pads[k].0;
+                    match signed_axis_src(coord, self.input_shape[dim], lo) {
+                        Some(s) => {
+                            src_lin += s * src_stride;
+                            src_stride *= self.input_shape[dim];
+                        }
+                        None => {
+                            missing = true;
+                            break;
+                        }
+                    }
+                }
+                if !missing {
+                    grad_in[in_base + src_lin] += go[out_base + flat];
+                }
+            }
+        }
+
+        let grad_input =
+            Tensor::from_storage(TensorStorage::cpu(grad_in), self.input_shape.clone(), false)?;
+        Ok(vec![Some(grad_input)])
+    }
+
+    fn inputs(&self) -> Vec<&Tensor<T>> {
+        vec![&self.input]
+    }
+
+    fn name(&self) -> &'static str {
+        "PadNdSignedBackward"
+    }
+}
+
+/// Shared signed-pad driver for the 1-D/2-D/3-D public entrypoints. `pads` is
+/// ordered LAST padded axis first. Only `PaddingMode::Zeros` (torch
+/// `mode="constant"`) supports negative (crop) pads — when any pad is negative
+/// under a non-`Zeros` mode this returns `InvalidArgument`, mirroring torch's
+/// `reflection_pad*` / `replication_pad*` kernels which reject negative pads
+/// (`aten/src/ATen/native/PadNd.cpp:221-242`).
+fn functional_pad_nd_signed<T: Float>(
+    input: &Tensor<T>,
+    pads: &[(isize, isize)],
+    mode: PaddingMode,
+    value: T,
+) -> FerrotorchResult<Tensor<T>> {
+    let has_negative = pads.iter().any(|&(lo, hi)| lo < 0 || hi < 0);
+
+    if mode != PaddingMode::Zeros {
+        if has_negative {
+            return Err(FerrotorchError::InvalidArgument {
+                message: format!(
+                    "negative (crop) padding is only supported for constant mode; mode {mode:?} does not accept negative pads (matches torch's reflection_pad*/replication_pad* kernels)"
+                ),
+            });
+        }
+        // All-non-negative under a non-constant mode: delegate to the existing
+        // positive-only helpers so reflect/replicate/circular keep their exact
+        // gather + autograd behaviour. `pads` is LAST axis first.
+        return match pads.len() {
+            1 => functional_pad_1d(input, pads[0].0 as usize, pads[0].1 as usize, mode, value),
+            2 => functional_pad_2d(
+                input,
+                pads[0].0 as usize,
+                pads[0].1 as usize,
+                pads[1].0 as usize,
+                pads[1].1 as usize,
+                mode,
+                value,
+            ),
+            3 => functional_pad_3d(
+                input,
+                pads[0].0 as usize,
+                pads[0].1 as usize,
+                pads[1].0 as usize,
+                pads[1].1 as usize,
+                pads[2].0 as usize,
+                pads[2].1 as usize,
+                mode,
+                value,
+            ),
+            other => Err(FerrotorchError::InvalidArgument {
+                message: format!("functional_pad_nd_signed supports 1-3 padded dims, got {other}"),
+            }),
+        };
+    }
+
+    let data = input.data_vec()?;
+    let shape = input.shape();
+    if pads.len() > shape.len() {
+        return Err(FerrotorchError::InvalidArgument {
+            message: format!(
+                "pad targets {} dims but input has only {} dims",
+                pads.len(),
+                shape.len()
+            ),
+        });
+    }
+    let input_shape = shape.to_vec();
+    let (out_data, new_shape) = pad_nd_signed_constant(&data, shape, pads, value)?;
+
+    // Grad path: attach PadNdSignedBackward so autograd stays connected (same
+    // #1550 bug class the positive-only paths fixed).
+    if is_grad_enabled() && input.requires_grad() {
+        let grad_fn = Arc::new(PadNdSignedBackward {
+            input: input.clone(),
+            input_shape,
+            pads: pads.to_vec(),
+        });
+        return Tensor::from_operation(TensorStorage::cpu(out_data), new_shape, grad_fn);
+    }
+
+    Tensor::from_storage(TensorStorage::cpu(out_data), new_shape, false)
+}
+
+/// Apply crop-capable padding to the last dimension of a tensor. Unlike
+/// [`functional_pad_1d`] (which takes `usize`), the pad amounts are SIGNED: a
+/// negative value crops `|pad|` elements off that side, mirroring
+/// `torch.nn.functional.pad(input, [left, right], mode="constant", value=...)`
+/// with negative `left`/`right` (`aten/src/ATen/native/PadNd.cpp:29-108`).
+///
+/// Negative (crop) pads require `mode = PaddingMode::Zeros` (torch
+/// `mode="constant"`); any other mode with a negative pad returns
+/// `InvalidArgument`, matching torch. Over-cropping (removing more than the
+/// dimension holds) returns `InvalidArgument`, mirroring torch's
+/// "narrow(): length must be non-negative".
+pub fn functional_pad_1d_signed<T: Float>(
+    input: &Tensor<T>,
+    pad_left: isize,
+    pad_right: isize,
+    mode: PaddingMode,
+    value: T,
+) -> FerrotorchResult<Tensor<T>> {
+    functional_pad_nd_signed(input, &[(pad_left, pad_right)], mode, value)
+}
+
+/// Crop-capable padding for the last 2 dimensions. Signed analogue of
+/// [`functional_pad_2d`]; see [`functional_pad_1d_signed`] for the crop
+/// semantics and constant-mode restriction.
+pub fn functional_pad_2d_signed<T: Float>(
+    input: &Tensor<T>,
+    pad_left: isize,
+    pad_right: isize,
+    pad_top: isize,
+    pad_bottom: isize,
+    mode: PaddingMode,
+    value: T,
+) -> FerrotorchResult<Tensor<T>> {
+    // `pads` is LAST axis (W: left/right) first, then 2nd-last (H: top/bottom).
+    functional_pad_nd_signed(
+        input,
+        &[(pad_left, pad_right), (pad_top, pad_bottom)],
+        mode,
+        value,
+    )
+}
+
+/// Crop-capable padding for the last 3 dimensions. Signed analogue of
+/// [`functional_pad_3d`]; see [`functional_pad_1d_signed`] for the crop
+/// semantics and constant-mode restriction.
+// Public API: matches `torch.nn.functional.pad`'s 3-axis layout
+// (left, right, top, bottom, front, back) — 6 signed pad amounts.
+#[allow(clippy::too_many_arguments)]
+pub fn functional_pad_3d_signed<T: Float>(
+    input: &Tensor<T>,
+    pad_left: isize,
+    pad_right: isize,
+    pad_top: isize,
+    pad_bottom: isize,
+    pad_front: isize,
+    pad_back: isize,
+    mode: PaddingMode,
+    value: T,
+) -> FerrotorchResult<Tensor<T>> {
+    // LAST axis (W) first, then H, then D (front/back).
+    functional_pad_nd_signed(
+        input,
+        &[
+            (pad_left, pad_right),
+            (pad_top, pad_bottom),
+            (pad_front, pad_back),
+        ],
+        mode,
+        value,
+    )
 }
 
 // ===========================================================================
@@ -2267,5 +2740,211 @@ mod tests {
         ferrotorch_core::backward(&sum).unwrap();
         let g = x.grad().unwrap().expect("grad must be populated");
         assert_close(g.data().unwrap(), &[8.0; 8], 1e-5);
+    }
+
+    // -----------------------------------------------------------------------
+    // Negative (crop) padding — `torch.nn.functional.pad` with negative pad
+    // amounts CROPS that side instead of adding. Only the constant
+    // (`PaddingMode::Zeros`) path supports it; upstream
+    // `aten/src/ATen/native/PadNd.cpp:29-108` (`constant_pad_nd`) narrows the
+    // input for negative pads, fills the output with `value`, and copies the
+    // cropped input into the positive-pad window. Reflect/replicate/circular
+    // reject negative pads (PadNd.cpp:221-242). #1611.
+    //
+    // All expected forward + backward (sum().backward()) values below are from
+    // a live PyTorch 2.11 oracle (R-CHAR-3); the deriving script is in the
+    // #1611 commit body. Each block names the exact `F.pad(...)` call it pins.
+    // -----------------------------------------------------------------------
+
+    /// torch: `F.pad(torch.tensor([[[1,2,3,4,5]]]), [-1,-1], "constant")`
+    /// -> out [2,3,4]; sum().backward() grad_input = [0,1,1,1,0].
+    #[test]
+    fn test_functional_pad_1d_signed_crop_both_matches_torch() {
+        let x = leaf(&[1.0, 2.0, 3.0, 4.0, 5.0], &[1, 1, 5]);
+        let y = functional_pad_1d_signed(&x, -1, -1, PaddingMode::Zeros, 0.0).unwrap();
+        assert_eq!(y.shape(), &[1, 1, 3]);
+        assert_close(y.data().unwrap(), &[2.0, 3.0, 4.0], 1e-7);
+        assert_eq!(y.grad_fn().unwrap().name(), "PadNdSignedBackward");
+        let sum = ferrotorch_core::grad_fns::reduction::sum(&y).unwrap();
+        ferrotorch_core::backward(&sum).unwrap();
+        let g = x.grad().unwrap().expect("grad must be populated");
+        assert_close(g.data().unwrap(), &[0.0, 1.0, 1.0, 1.0, 0.0], 1e-7);
+    }
+
+    /// Mixed signs: torch
+    /// `F.pad(torch.tensor([[[1,2,3,4]]]), [-1,2], "constant", value=9)`
+    /// -> out [2,3,4,9,9] (crop 1 from start, add 2 fill at end);
+    /// sum().backward() grad_input = [0,1,1,1].
+    #[test]
+    fn test_functional_pad_1d_signed_mixed_matches_torch() {
+        let x = leaf(&[1.0, 2.0, 3.0, 4.0], &[1, 1, 4]);
+        let y = functional_pad_1d_signed(&x, -1, 2, PaddingMode::Zeros, 9.0).unwrap();
+        assert_eq!(y.shape(), &[1, 1, 5]);
+        assert_close(y.data().unwrap(), &[2.0, 3.0, 4.0, 9.0, 9.0], 1e-7);
+        let sum = ferrotorch_core::grad_fns::reduction::sum(&y).unwrap();
+        ferrotorch_core::backward(&sum).unwrap();
+        let g = x.grad().unwrap().expect("grad must be populated");
+        assert_close(g.data().unwrap(), &[0.0, 1.0, 1.0, 1.0], 1e-7);
+    }
+
+    /// 2-D crop: torch `F.pad(3x3, [-1,0, 0,-1], "constant")` crops the right
+    /// column (last dim) and the bottom row (2nd-last) -> 2x2 [[2,3],[5,6]];
+    /// sum().backward() grad = [[0,1,1],[0,1,1],[0,0,0]] (flattened).
+    #[test]
+    fn test_functional_pad_2d_signed_crop_matches_torch() {
+        #[rustfmt::skip]
+        let x = leaf(&[
+            1.0, 2.0, 3.0,
+            4.0, 5.0, 6.0,
+            7.0, 8.0, 9.0,
+        ], &[1, 1, 3, 3]);
+        let y = functional_pad_2d_signed(&x, -1, 0, 0, -1, PaddingMode::Zeros, 0.0).unwrap();
+        assert_eq!(y.shape(), &[1, 1, 2, 2]);
+        assert_close(y.data().unwrap(), &[2.0, 3.0, 5.0, 6.0], 1e-7);
+        let sum = ferrotorch_core::grad_fns::reduction::sum(&y).unwrap();
+        ferrotorch_core::backward(&sum).unwrap();
+        let g = x.grad().unwrap().expect("grad must be populated");
+        assert_close(
+            g.data().unwrap(),
+            &[0.0, 1.0, 1.0, 0.0, 1.0, 1.0, 0.0, 0.0, 0.0],
+            1e-7,
+        );
+    }
+
+    /// 2-D mixed signs: torch
+    /// `F.pad(2x3, [-1,2, 1,-1], "constant", value=7)` (last dim crop1/add2,
+    /// 2nd-last add1/crop1) -> 2x4 [[7,7,7,7],[2,3,7,7]];
+    /// sum().backward() grad = [[0,1,1],[0,0,0]] (flattened).
+    #[test]
+    fn test_functional_pad_2d_signed_mixed_matches_torch() {
+        #[rustfmt::skip]
+        let x = leaf(&[
+            1.0, 2.0, 3.0,
+            4.0, 5.0, 6.0,
+        ], &[1, 1, 2, 3]);
+        let y = functional_pad_2d_signed(&x, -1, 2, 1, -1, PaddingMode::Zeros, 7.0).unwrap();
+        assert_eq!(y.shape(), &[1, 1, 2, 4]);
+        #[rustfmt::skip]
+        let expected = [
+            7.0, 7.0, 7.0, 7.0,
+            2.0, 3.0, 7.0, 7.0,
+        ];
+        assert_close(y.data().unwrap(), &expected, 1e-7);
+        let sum = ferrotorch_core::grad_fns::reduction::sum(&y).unwrap();
+        ferrotorch_core::backward(&sum).unwrap();
+        let g = x.grad().unwrap().expect("grad must be populated");
+        assert_close(g.data().unwrap(), &[0.0, 1.0, 1.0, 0.0, 0.0, 0.0], 1e-7);
+    }
+
+    /// 3-D crop: torch `F.pad(2x2x2 [1..8], [-1,0, 0,-1, -1,0], "constant")`
+    /// (W crop right, H crop bottom, D crop front) -> 1x1x1 [6];
+    /// sum().backward() grad = [0,0,0,0,0,1,0,0].
+    #[test]
+    fn test_functional_pad_3d_signed_crop_matches_torch() {
+        let x_data: Vec<f32> = (1..=8).map(|v| v as f32).collect();
+        let x = leaf(&x_data, &[1, 1, 2, 2, 2]);
+        let y = functional_pad_3d_signed(&x, -1, 0, 0, -1, -1, 0, PaddingMode::Zeros, 0.0).unwrap();
+        assert_eq!(y.shape(), &[1, 1, 1, 1, 1]);
+        assert_close(y.data().unwrap(), &[6.0], 1e-7);
+        let sum = ferrotorch_core::grad_fns::reduction::sum(&y).unwrap();
+        ferrotorch_core::backward(&sum).unwrap();
+        let g = x.grad().unwrap().expect("grad must be populated");
+        assert_close(
+            g.data().unwrap(),
+            &[0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0],
+            1e-7,
+        );
+    }
+
+    /// 3-D mixed signs incl. positive adds: torch
+    /// `F.pad(2x2x2 [1..8], [1,-1, 0,1, -1,2], "constant", value=3)`
+    /// -> 3x3x2; sum().backward() grad = [0,0,0,0,1,0,1,0].
+    #[test]
+    fn test_functional_pad_3d_signed_mixed_matches_torch() {
+        let x_data: Vec<f32> = (1..=8).map(|v| v as f32).collect();
+        let x = leaf(&x_data, &[1, 1, 2, 2, 2]);
+        let y = functional_pad_3d_signed(&x, 1, -1, 0, 1, -1, 2, PaddingMode::Zeros, 3.0).unwrap();
+        assert_eq!(y.shape(), &[1, 1, 3, 3, 2]);
+        #[rustfmt::skip]
+        let expected = [
+            3.0, 5.0, 3.0, 7.0, 3.0, 3.0, 3.0, 3.0, 3.0,
+            3.0, 3.0, 3.0, 3.0, 3.0, 3.0, 3.0, 3.0, 3.0,
+        ];
+        assert_close(y.data().unwrap(), &expected, 1e-7);
+        let sum = ferrotorch_core::grad_fns::reduction::sum(&y).unwrap();
+        ferrotorch_core::backward(&sum).unwrap();
+        let g = x.grad().unwrap().expect("grad must be populated");
+        assert_close(
+            g.data().unwrap(),
+            &[0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 1.0, 0.0],
+            1e-7,
+        );
+    }
+
+    /// Over-crop: torch raises `RuntimeError: narrow(): length must be
+    /// non-negative` when a single side crops more than the dim holds
+    /// (`F.pad([[[1,2,3]]], [-4,0])`) or the combined net size is negative
+    /// (`F.pad([[[1,2,3]]], [-2,-2])`). ferrotorch returns `InvalidArgument`.
+    #[test]
+    fn test_functional_pad_1d_signed_over_crop_errors() {
+        // Single side over-crops (left 4 from size 3).
+        let x = t(&[1.0, 2.0, 3.0], &[1, 1, 3]);
+        assert!(
+            functional_pad_1d_signed(&x, -4, 0, PaddingMode::Zeros, 0.0).is_err(),
+            "single-side over-crop must error like torch narrow()"
+        );
+        // Combined net negative size (left 2 + right 2 from size 3 -> -1).
+        assert!(
+            functional_pad_1d_signed(&x, -2, -2, PaddingMode::Zeros, 0.0).is_err(),
+            "combined net-negative crop must error like torch"
+        );
+        // Right side over-crops after left (left 1 -> size 2, right 3 -> -1).
+        assert!(
+            functional_pad_1d_signed(&x, -1, -3, PaddingMode::Zeros, 0.0).is_err(),
+            "right-after-left over-crop must error like torch"
+        );
+    }
+
+    /// Net-zero crop is NOT an error in torch: `F.pad([[[1,2,3]]], [-1,-2])`
+    /// returns an empty dim `[1,1,0]`. ferrotorch must match (no error).
+    #[test]
+    fn test_functional_pad_1d_signed_net_zero_empty_dim_matches_torch() {
+        let x = t(&[1.0, 2.0, 3.0], &[1, 1, 3]);
+        let y = functional_pad_1d_signed(&x, -1, -2, PaddingMode::Zeros, 0.0).unwrap();
+        assert_eq!(y.shape(), &[1, 1, 0]);
+        assert!(y.data().unwrap().is_empty());
+    }
+
+    /// Negative (crop) pad under a non-constant mode is rejected — torch routes
+    /// reflect/replicate/circular through `reflection_pad*`/`replication_pad*`
+    /// which do not accept negative pads (`PadNd.cpp:221-242`).
+    #[test]
+    fn test_functional_pad_signed_negative_non_constant_errors() {
+        let x = t(&[1.0, 2.0, 3.0, 4.0], &[1, 1, 4]);
+        for mode in [
+            PaddingMode::Reflect,
+            PaddingMode::Replicate,
+            PaddingMode::Circular,
+        ] {
+            assert!(
+                functional_pad_1d_signed(&x, -1, 0, mode, 0.0).is_err(),
+                "negative pad under {mode:?} must be rejected"
+            );
+        }
+    }
+
+    /// A non-negative signed pad must be byte-identical to the existing
+    /// positive-only `functional_pad_1d` (the delegation invariant that makes
+    /// the signed path the single source of truth for constant padding without
+    /// changing conv.rs's production behaviour). torch:
+    /// `F.pad([[[1,2,3]]], [1,1], "constant", value=2)` -> [2,1,2,3,2].
+    #[test]
+    fn test_functional_pad_1d_signed_nonneg_equals_positive_path() {
+        let input = t(&[1.0, 2.0, 3.0], &[1, 1, 3]);
+        let signed = functional_pad_1d_signed(&input, 1, 1, PaddingMode::Zeros, 2.0).unwrap();
+        let positive = functional_pad_1d(&input, 1, 1, PaddingMode::Zeros, 2.0).unwrap();
+        assert_eq!(signed.shape(), positive.shape());
+        assert_close(signed.data().unwrap(), positive.data().unwrap(), 1e-7);
+        assert_close(signed.data().unwrap(), &[2.0, 1.0, 2.0, 3.0, 2.0], 1e-7);
     }
 }

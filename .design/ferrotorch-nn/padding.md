@@ -31,10 +31,18 @@ dispatch.
   tensor with a given `PaddingMode`. Mirrors
   `torch.nn.functional.pad(input, pad, mode, value)` at
   `torch/nn/functional.py`. The constant (`Zeros`) path threads the
-  caller-supplied `value: T` through to `pad_Nd_constant` — the
-  out-of-bounds fill is the caller's `value` (defaulting to `0` only
-  when the caller passes `T::zero()`), matching
-  `torch.nn.functional.pad(mode="constant", value=...)`.
+  caller-supplied `value: T` through to the crop-capable signed path —
+  the out-of-bounds fill is the caller's `value` (defaulting to `0`
+  only when the caller passes `T::zero()`), matching
+  `torch.nn.functional.pad(mode="constant", value=...)`. The
+  `usize`-typed entrypoints handle only non-negative (grow) pads; the
+  signed entrypoints `functional_pad_1d/2d/3d_signed` (`isize` pad
+  amounts) additionally support NEGATIVE (crop) pads under
+  `mode="constant"`, mirroring `constant_pad_nd`'s negative-pad
+  narrowing (`aten/src/ATen/native/PadNd.cpp:29-108`). Crop is a
+  constant-mode-only capability — reflect/replicate/circular reject
+  negative pads, matching upstream `_pad_enum`
+  (`PadNd.cpp:221-242`).
 - REQ-3: `pub struct ConstantPad{1,2,3}d<T: Float>` — constant-value
   padding. Mirror upstream `ConstantPad{1,2,3}d` at `padding.py`.
   Carries `padding: (usize, usize[, …])` and `value: T`.
@@ -103,30 +111,57 @@ the source in — mirroring upstream
 `aten/src/ATen/native/PadNd.cpp:94`'s `output.fill_(value)` then
 `copy_(source)`.
 
-The first constant helper `pad_1d_constant` is declared at
-`padding.rs:59`; the 2-D and 3-D variants follow the same
-`value`-seeding shape.
+The first constant helper is `fn pad_1d_constant` in `padding.rs`;
+the 2-D and 3-D variants (`fn pad_2d_constant` / `fn pad_3d_constant`)
+follow the same `value`-seeding shape.
 
 ### Functional entrypoints (REQ-2)
 
-The 1-D entrypoint `functional_pad_1d` is at `functional_pad_1d in padding.rs`.
-
-The 2-D entrypoint `functional_pad_2d` is at `padding.rs:779`.
-
-The 3-D entrypoint `functional_pad_3d` is at `padding.rs:829`.
-
-Each matches against `PaddingMode::{Zeros, Reflect, Replicate,
-Circular}` and dispatches. The `Zeros` arm (torch
-`mode="constant"`) threads the caller's `value: T` through to the
-corresponding `pad_Nd_constant` helper — the out-of-bounds fill is
-the caller-supplied `value`, not a hardcoded `T::zero()`, so an
-arbitrary constant fill works (#1553, commit 276f740bd). The
-`ZeroPad{1,2,3}d` layers obtain zero-fill by explicitly passing
-`T::zero()`; the `Reflect`/`Replicate`/`Circular` arms ignore
-`value` (the fill is gathered from existing data), and tests cover
-all four arms — including
+The `usize`-typed (grow-only) entrypoints are `pub fn
+functional_pad_1d`, `pub fn functional_pad_2d`, and `pub fn
+functional_pad_3d` in `padding.rs`. Each dispatches on
+`PaddingMode::{Zeros, Reflect, Replicate, Circular}`. The
+`Reflect`/`Replicate`/`Circular` arms ignore `value` (the fill is
+gathered from existing data) and use the positive-only
+`pad_Nd_<mode>` helpers + `Pad{1,2,3}dBackward` adjoint. The `Zeros`
+arm (torch `mode="constant"`) is dispatched through the crop-capable
+signed path (see below), the single source of truth for constant
+padding — mirroring torch routing `mode="constant"` through
+`constant_pad_nd` (`aten/src/ATen/native/PadNd.cpp:214-215`). For a
+non-negative `usize` pad the signed forward is byte-identical to the
+old `pad_Nd_constant` and its scatter-add backward equals the old
+`Pad{1,2,3}dBackward` adjoint; the caller's `value: T` fill is
+preserved (#1553). The `ZeroPad{1,2,3}d` layers obtain zero-fill by
+explicitly passing `T::zero()`. Tests cover all four arms — including
 `test_functional_pad_{1,2,3}d_constant_uses_value`, which asserts a
 non-zero `value` reaches the padded cells.
+
+The crop-capable (signed) entrypoints are `pub fn
+functional_pad_1d_signed`, `pub fn functional_pad_2d_signed`, and
+`pub fn functional_pad_3d_signed` in `padding.rs`, taking `isize` pad
+amounts. They delegate to the shared driver `fn
+functional_pad_nd_signed`, which:
+
+- rejects negative pads under non-`Zeros` modes
+  (`InvalidArgument`) and, for all-non-negative non-`Zeros` pads,
+  delegates to the positive-only `functional_pad_{1,2,3}d` so
+  reflect/replicate/circular keep their exact gather + autograd
+  behaviour;
+- for `Zeros` (constant) mode, runs `fn pad_nd_signed_constant` — a
+  generic last-`N`-dim gather where output index `o` reads source
+  `o - lo` (in bounds ⇒ data, otherwise ⇒ `value` fill), with
+  per-axis size validated by `fn signed_axis_new_size` (over-crop ⇒
+  `InvalidArgument`, net-zero ⇒ empty dim) and per-axis source
+  resolution by `fn signed_axis_src`;
+- attaches `struct PadNdSignedBackward` (named
+  `"PadNdSignedBackward"`) when grad is enabled, scatter-adding the
+  output grad onto the original-size input (cropped positions get 0).
+
+These mirror `constant_pad_nd`'s negative-pad narrowing + `fill_` +
+`copy_` (`aten/src/ATen/native/PadNd.cpp:29-108`). Crop is
+constant-mode-only because `_pad_enum` routes only `mode="constant"`
+through `constant_pad_nd`; the reflect/replicate/circular kernels do
+not accept negative pads (`PadNd.cpp:221-242`). #1611.
 
 ### Layer family (REQ-3..REQ-7)
 
@@ -154,9 +189,16 @@ trainable parameters. `train` / `eval` toggle `training`;
   ReplicationPad2d, ReplicationPad3d, CircularPad1d, CircularPad2d,
   CircularPad3d, functional_pad_1d, functional_pad_2d,
   functional_pad_3d}` at `ferrotorch-nn/src/lib.rs`.
-- `Conv2d::forward` invokes the 2-D pad helper at `conv.rs:577`
-  when `padding_mode != Zeros`, pre-padding the input with the
-  selected mode before the zero-padding im2col path runs (#1443).
+- The grow-only `functional_pad_{1,2,3}d` consume the crop-capable
+  `functional_pad_{1,2,3}d_signed` in production (the `Zeros`/constant
+  arm delegates to the signed path — the single source of truth for
+  constant padding), so the signed entrypoints have a non-test
+  production consumer (R-DEFER-1) within the crate.
+- `Conv2d::forward` (and `Conv1d`/`Conv3d::forward`) invoke the pad
+  helper when `padding_mode != Zeros`, pre-padding the input with the
+  selected mode before the zero-padding im2col path runs (#1443); the
+  `StringPadding::Same` branch also calls `functional_pad_*` with the
+  (possibly `Zeros`) `padding_mode`, reaching the signed constant path.
 - `ferrotorch-nn/src/functional.rs` re-exposes `functional_pad_*`
   as the public `nn::functional::pad` entrypoint.
 
@@ -171,12 +213,20 @@ For each:
 - **Constant fill `value`** — upstream `F.pad(..., mode="constant",
   value=v)` fills the new positions with `v`; ferrotorch threads
   `value: T` through `pad_Nd_constant` to do the same (#1553).
-- **Negative pad** — upstream accepts negative padding to crop;
-  ferrotorch's `usize`-typed padding values reject this at the type
-  level. This is a genuine production gap, filed as blocker #1611;
-  the `nn.functional.pad` runner arm returns `Ok(None)` for
-  negative-pad samples (the 32 skips at `--seeds 8`). Cropping must be
-  done via slice ops until #1611 lands an `i64`-typed pad path.
+- **Negative pad** — upstream accepts negative padding to crop a side
+  (`aten/src/ATen/native/PadNd.cpp:29-108`). The `isize`-typed
+  `functional_pad_1d/2d/3d_signed` entrypoints implement this for
+  `mode="constant"`: a negative `lo`/`hi` narrows the dim, mixed signs
+  per-dim are supported (e.g. `[-1, 2]` crops 1 from the start and adds
+  2 fill at the end), and the backward (`PadNdSignedBackward`)
+  scatter-adds the output grad back onto the original-size input so
+  cropped-away positions receive zero gradient. Over-cropping (a side
+  removing more than the running dim size, mirroring torch's
+  `narrow(): length must be non-negative`) returns `InvalidArgument`; a
+  net-zero crop is allowed (torch returns an empty dim). Closes #1611.
+  The `nn.functional.pad` runner arm still skips negative samples until
+  the runner is widened to feed `i64` pads to the signed entrypoints (a
+  test-infrastructure follow-up under #1441, separate from this build).
 - **Reflect with `pad >= input_dim`** — upstream raises
   `RuntimeError`; ferrotorch returns `InvalidArgument`.
 - **Replicate with empty input dim** — both implementations need at
@@ -227,7 +277,7 @@ Expected grep count after blocker #1441 closes: `>= 1` for each.
 | REQ | Status | Evidence |
 |---|---|---|
 | REQ-1 | SHIPPED | impl: `pub enum PaddingMode` in `padding.rs` with 4 variants `Zeros`/`Reflect`/`Replicate`/`Circular`; non-test consumer: `ferrotorch-nn/src/conv.rs` imports `PaddingMode` as the field type the conv layers (currently inertly) carry — the wiring to use it is blocker #1443. |
-| REQ-2 | SHIPPED | impl: the 1-D entrypoint `functional_pad_1d in padding.rs` dispatches on `PaddingMode`; the 2-D entrypoint `functional_pad_2d in padding.rs` and the 3-D entrypoint `functional_pad_3d in padding.rs` follow the same shape. The `Zeros`/constant arm threads the caller's `value: T` into `pad_Nd_constant` (the fill is the caller-supplied value, default `0` only when `T::zero()` is passed), matching `torch.nn.functional.pad(mode="constant", value=...)` — fixed in #1553 (commit 276f740bd), where the path previously hardcoded `T::zero()`. Non-test consumer: `Conv2d::forward` calls the 2-D pad helper at `conv in conv.rs` for non-`Zeros` `padding_mode`, and `ferrotorch-nn/src/functional.rs` re-exposes it as `nn::functional::pad`. |
+| REQ-2 | SHIPPED | impl: grow-only entrypoints `pub fn functional_pad_1d` / `functional_pad_2d` / `functional_pad_3d` in `padding.rs` dispatch on `PaddingMode`; the `Zeros`/constant arm routes through the crop-capable `pub fn functional_pad_1d_signed` / `functional_pad_2d_signed` / `functional_pad_3d_signed` (`isize` pads) in `padding.rs`, which support negative (crop) pads + mixed signs for `mode="constant"` via `fn functional_pad_nd_signed` → `fn pad_nd_signed_constant` + `struct PadNdSignedBackward`, mirroring `constant_pad_nd` (`aten/src/ATen/native/PadNd.cpp:29-108`); the caller's `value: T` fill (#1553) is preserved. Non-test consumer: the `usize` `functional_pad_{1,2,3}d` consume the signed entrypoints in production (the `Zeros` arm), and `<Conv1d as Module>::forward` / `<Conv2d as Module>::forward` / `<Conv3d as Module>::forward` in `conv.rs` call `functional_pad_{1,2,3}d` for the non-`Zeros` `padding_mode` pre-pad and the `StringPadding::Same` (`Zeros`) pre-pad — so the signed path is reached in production through them. `ferrotorch-nn/src/functional.rs` also re-exposes `functional_pad_{1,2,3}d` as `nn::functional::pad`. |
 | REQ-3 | SHIPPED | impl: `pub struct ConstantPad{1,2,3}d<T: Float>` in `padding.rs` mirroring `torch/nn/modules/padding.py` constant-pad family; non-test consumer: `pub use` in `lib.rs` exposes them to external crates. The vision-model code uses `ConstantPad2d` via the `lib.rs` re-export for padding non-square inputs. |
 | REQ-4 | SHIPPED | impl: `pub struct ZeroPad{1,2,3}d<T: Float>` in `padding.rs`; non-test consumer: `pub use` in `lib.rs` exposes them. |
 | REQ-5 | SHIPPED | impl: `pub struct ReflectionPad{1,2,3}d<T: Float>` in `padding.rs` with reflect-overflow check inside `pad_*d_reflect`; non-test consumer: `pub use` in `lib.rs` exposes them; reflection padding is the standard for unets and image-translation models. |
