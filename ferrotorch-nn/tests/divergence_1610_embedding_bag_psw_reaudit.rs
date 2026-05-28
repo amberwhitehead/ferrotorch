@@ -81,7 +81,6 @@ fn grad_tensor(data: &[f32], shape: &[usize]) -> Tensor<f32> {
 ///
 /// Tracking: #1618
 #[test]
-#[ignore = "divergence: scale_grad_by_freq+psw weight-grad uses per-index count, torch uses sorted-unique-iteration neighbor count (EmbeddingBag.cpp:1522/1570); tracking #1618"]
 fn divergence_psw_sgbf_count_uses_sorted_neighbor() {
     let bag = bag_from_rows(
         &[&[1.0, 2.0], &[3.0, 4.0], &[5.0, 6.0]],

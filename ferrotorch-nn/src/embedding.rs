@@ -443,19 +443,48 @@ impl<T: Float> GradFn<T> for EmbeddingBagSumWeightedBackward<T> {
         // zero for padding samples (EmbeddingBag.cpp:1716-1724).
         let mut grad_psw = vec![<T as num_traits::Zero>::zero(); n];
 
-        // Per-index forward counts for scale_grad_by_freq (EmbeddingBag.cpp:1570).
-        let counts: Option<std::collections::HashMap<usize, usize>> = if self.scale_grad_by_freq {
-            let mut c: std::collections::HashMap<usize, usize> = std::collections::HashMap::new();
-            for &idx in &self.indices {
-                if self.padding_idx == Some(idx) {
-                    continue;
+        // scale_grad_by_freq divisor map (EmbeddingBag.cpp:1522,1569-1571).
+        //
+        // Torch's dense sum/mean backward operates on SORTED indices. It builds
+        // `counts[v]` = occurrences of value `v` over the full index array
+        // (`EmbeddingBag.cpp:1475-1478`), sorts the indices (`:1522`), then walks
+        // the sorted array one UNIQUE index at a time with the stride
+        // `i += counts[sorted[i]]` (`:1499`). For the k-th unique step (counter
+        // `i` in torch's loop, here `k`) it divides that index's grad by
+        // `counts[indices_data[i]]` — i.e. `counts[sorted[k]]`, NOT
+        // `counts[that index's own value]` (`:1569-1571`). Because `k` indexes the
+        // SORTED array, for any input that is not already sorted this divides one
+        // index's grad by a *neighbouring* index's frequency. We replicate this
+        // exactly: `divisor_of_index[v]` = `counts[sorted[k]]` for the unique step
+        // `k` that lands on value `v`. Padding indices participate in `counts`, the
+        // sort, and the unique-step counter `k` (only their grad scatter is skipped
+        // at `:1561`), so they are included here too.
+        let divisor_of_index: Option<std::collections::HashMap<usize, usize>> =
+            if self.scale_grad_by_freq {
+                let mut counts: std::collections::HashMap<usize, usize> =
+                    std::collections::HashMap::new();
+                for &idx in &self.indices {
+                    *counts.entry(idx).or_insert(0) += 1;
                 }
-                *c.entry(idx).or_insert(0) += 1;
-            }
-            Some(c)
-        } else {
-            None
-        };
+                let mut sorted = self.indices.clone();
+                sorted.sort_unstable();
+                let mut divisor: std::collections::HashMap<usize, usize> =
+                    std::collections::HashMap::new();
+                let mut i = 0usize; // position in the sorted array
+                let mut k = 0usize; // unique-step counter (torch's loop index `i`)
+                while i < sorted.len() {
+                    let index = sorted[i]; // the value this unique step owns
+                    // The quirk: torch divides by counts[indices_data[k]] = counts[sorted[k]].
+                    let div = counts.get(&sorted[k]).copied().unwrap_or(1);
+                    divisor.insert(index, div);
+                    let stride = counts.get(&index).copied().unwrap_or(1).max(1);
+                    i += stride;
+                    k += 1;
+                }
+                Some(divisor)
+            } else {
+                None
+            };
 
         for i in 0..n {
             let idx = self.indices[i];
@@ -469,13 +498,14 @@ impl<T: Float> GradFn<T> for EmbeddingBagSumWeightedBackward<T> {
             let w_row = &weight_data[idx * dim..(idx + 1) * dim];
             let psw_i = psw_data[i];
 
-            // weight-grad scale: psw, optionally divided by the index frequency.
+            // weight-grad scale: psw, optionally divided by torch's sorted-neighbour
+            // frequency divisor (EmbeddingBag.cpp:1569-1571).
             let mut w_scale = psw_i;
-            if let Some(c) = &counts {
-                if let Some(&cnt) = c.get(&idx) {
-                    if cnt > 0 {
+            if let Some(d) = &divisor_of_index {
+                if let Some(&div) = d.get(&idx) {
+                    if div > 0 {
                         w_scale =
-                            w_scale / T::from(cnt).unwrap_or_else(<T as num_traits::One>::one);
+                            w_scale / T::from(div).unwrap_or_else(<T as num_traits::One>::one);
                     }
                 }
             }
