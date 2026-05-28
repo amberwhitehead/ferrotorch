@@ -1259,10 +1259,36 @@ fn einsum_two<T: Float>(
     let free_b_sizes: Vec<usize> = free_b_chars.iter().map(|c| dim_map[c]).collect();
     let contract_sizes: Vec<usize> = contract_chars.iter().map(|c| dim_map[c]).collect();
 
+    // `.max(1)` collapses an EMPTY group (no chars → product of [] == 1) to a
+    // single scalar slot. It must NOT mask a genuine zero-size dim: if any
+    // group's product is 0, that dim is empty. torch (`at::native::einsum`
+    // lowers to `at::bmm` over reshaped operands, `aten/src/ATen/native/
+    // Linear.cpp:261-264`) propagates a zero-size dim into the output: an
+    // einsum whose OUTPUT carries a zero-size axis returns a correctly-shaped
+    // EMPTY tensor (numel 0), no panic. Short-circuit here so the
+    // `decode_multi` index arithmetic below never divides by a zero size when
+    // the output is empty. e.g. `F.bilinear(zeros(0,3), zeros(0,2), W, b)` ->
+    // `einsum("bi,oij->boj")` with b=0 -> `[0, o, j]` (#1605).
+    let out_shape_empty: Vec<usize> = out_subs.iter().map(|c| dim_map[c]).collect();
+    if out_shape_empty.contains(&0) {
+        return Tensor::from_storage(TensorStorage::cpu(Vec::new()), out_shape_empty, false);
+    }
+
     let batch_total: usize = batch_sizes.iter().product::<usize>().max(1);
     let free_a_total: usize = free_a_sizes.iter().product::<usize>().max(1);
     let free_b_total: usize = free_b_sizes.iter().product::<usize>().max(1);
-    let contract_total: usize = contract_sizes.iter().product::<usize>().max(1);
+    // `.max(1)` collapses an EMPTY contraction group (no contract chars ->
+    // product of [] == 1, the "single dot-product term" slot) to 1, but a
+    // GENUINE zero-size contracted dim must give 0 terms: the sum over an empty
+    // contraction is the zero init, matching torch's `at::bmm` over a zero K
+    // (`aten/src/ATen/native/Linear.cpp:261-264`). Without the `is_empty()`
+    // guard the inner loop would run `ci=0` and index into the empty operand
+    // storage (#1605: `einsum("ij,jk->ik")` with j=0 -> zero-filled [i,k]).
+    let contract_total: usize = if contract_sizes.is_empty() {
+        1
+    } else {
+        contract_sizes.iter().product::<usize>()
+    };
 
     let a_data = a.data_vec()?;
     let b_data = b.data_vec()?;
@@ -1303,6 +1329,9 @@ fn einsum_two<T: Float>(
     };
 
     // Helper: decode a flat index for a group of chars into per-char values.
+    // Callers guarantee `sizes` carries no zero entry: the empty-output case is
+    // short-circuited before any `decode_multi` call, and a zero contracted dim
+    // makes `contract_total == 0` so the contraction loop never iterates (#1605).
     fn decode_multi(flat: usize, sizes: &[usize]) -> Vec<usize> {
         let mut result = vec![0usize; sizes.len()];
         let mut remainder = flat;
@@ -1950,6 +1979,43 @@ mod tests {
                 (a - e).abs()
             );
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // Zero-size dims (#1605): must not panic with `% 0` in `decode_multi`.
+    // torch lowers einsum to `at::bmm` over reshaped operands
+    // (`aten/src/ATen/native/Linear.cpp:261-264`), so a zero-size dim
+    // propagates into the output as an empty tensor, and a zero CONTRACTED
+    // dim yields a zero-filled output of the non-contracted shape.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_einsum_zero_batch_bilinear_eq() {
+        // The exact equation `Bilinear::forward_pair` issues, with a zero
+        // batch axis. torch `F.bilinear(zeros(0,3), zeros(0,2), W, b)` -> [0,4].
+        // Here the einsum core: "bi,oij->boj" with b=0, o=4, i=3, j=2 -> [0,4,2].
+        let x1 = t(&[], &[0, 3]); // [b=0, i=3]
+        // weight [o=4, i=3, j=2]
+        let w = t(
+            &(0..(4 * 3 * 2)).map(|i| i as f32).collect::<Vec<_>>(),
+            &[4, 3, 2],
+        );
+        let out = einsum("bi,oij->boj", &[&x1, &w]).unwrap();
+        // b=0 in the output -> empty tensor, shape [0, 4, 2], numel 0, no panic.
+        assert_eq!(out.shape(), &[0, 4, 2]);
+        assert_eq!(out.data().unwrap().len(), 0);
+    }
+
+    #[test]
+    fn test_einsum_zero_contracted_dim_zero_filled() {
+        // Contracted dim j=0, output dims nonzero: matmul "ij,jk->ik" with
+        // i=2, j=0, k=3. torch returns a zero-filled [2,3] (sum over empty
+        // contraction). Must not panic; must be all zeros.
+        let a = t(&[], &[2, 0]); // [i=2, j=0]
+        let b = t(&[], &[0, 3]); // [j=0, k=3]
+        let c = einsum("ij,jk->ik", &[&a, &b]).unwrap();
+        assert_eq!(c.shape(), &[2, 3]);
+        assert_close(c.data().unwrap(), &[0.0; 6], 1e-6);
     }
 
     // -----------------------------------------------------------------------

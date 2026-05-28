@@ -292,13 +292,15 @@ fn divergence_1441_bilinear_2d_matches_torch() {
 ///   thread '...' panicked at ferrotorch-core/src/einsum.rs:1310:25:
 ///   attempt to calculate the remainder with a divisor of zero
 ///
-/// `#[ignore]`d only because the issue is already filed and actively worked;
-/// remove the ignore once #1605 lands. The panic IS the block.
+/// Permanent regression coverage as of #1605: `einsum_two`'s general CPU
+/// fallback short-circuits a zero-size OUTPUT dim to an empty tensor and gives
+/// 0 contraction terms for a zero shared dim (matching torch's `at::bmm`
+/// lowering, `aten/src/ATen/native/Linear.cpp:261-264`) instead of the prior
+/// `% 0` panic in `decode_multi`.
 ///
 /// torch driver: torch.nn.functional.bilinear(torch.zeros(0,3), torch.zeros(0,2), W, b)
 ///   -> shape [0, 4] (no panic).
 #[test]
-#[ignore = "divergence: einsum_differentiable % 0 panic on size-0 batch (einsum.rs:1310); tracking #1605"]
 fn divergence_1441_bilinear_zero_batch_panics_1605() {
     let bl = Bilinear::<f32>::new(3, 2, 4, true).unwrap();
     let x1 = t(&[], &[0, 3]);
