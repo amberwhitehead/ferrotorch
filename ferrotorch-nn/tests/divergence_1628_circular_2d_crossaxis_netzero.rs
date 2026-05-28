@@ -77,7 +77,6 @@ fn tensor(data: &[f64], shape: &[usize]) -> Tensor<f64> {
 ///
 /// Tracking: #1628
 #[test]
-#[ignore = "divergence: circular 2-D cross-axis net-zero — one axis empties the output while another axis's isolated wrap is OOB; torch returns empty [1,1,0], ferro Errs; tracking #1628"]
 fn divergence_circular_2d_crossaxis_netzero_111() {
     let x = tensor(&[5.0], &[1, 1, 1]);
     let y = functional_pad_2d_signed(&x, -2, 1, -1, 1, PaddingMode::Circular, 0.0).expect(
@@ -105,7 +104,6 @@ fn divergence_circular_2d_crossaxis_netzero_111() {
 ///
 /// Tracking: #1628
 #[test]
-#[ignore = "divergence: circular 2-D cross-axis net-zero (W empties, H wrap OOB); torch returns [1,2,0], ferro Errs; tracking #1628"]
 fn divergence_circular_2d_crossaxis_netzero_123_w_empties() {
     let x = tensor(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0], &[1, 2, 3]);
     let y = functional_pad_2d_signed(&x, -3, 0, -2, 2, PaddingMode::Circular, 0.0).expect(
@@ -125,7 +123,6 @@ fn divergence_circular_2d_crossaxis_netzero_123_w_empties() {
 ///
 /// Tracking: #1628
 #[test]
-#[ignore = "divergence: circular 2-D cross-axis net-zero (W right-crop empties, H wrap OOB); torch returns [1,2,0], ferro Errs; tracking #1628"]
 fn divergence_circular_2d_crossaxis_netzero_123_right() {
     let x = tensor(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0], &[1, 2, 3]);
     let y = functional_pad_2d_signed(&x, 0, -3, 2, -2, PaddingMode::Circular, 0.0).expect(

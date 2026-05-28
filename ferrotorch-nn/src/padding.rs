@@ -1635,66 +1635,34 @@ fn circular_axis_src(j: usize, size: usize, lo: isize, hi: isize) -> isize {
     lo.min(0).abs() + (center - lo_pos)
 }
 
-/// Size of `tensor.slice(dim, start, end)` for a `length`-element axis, mirroring
-/// torch's `slice_symint` index normalization (`aten/src/ATen/native/
-/// TensorShape.cpp` `slice`): a negative `start`/`end` is first normalized by
-/// `+ length`, then both are clamped to `[0, length]`, and the resulting extent
-/// is `max(0, end - start)`. Used to model the circular CENTER copy's slice
-/// sizes (`PadNd.cpp:158-161`) so the broadcast-legality of `copy_` can be
-/// validated without ever materializing the (possibly degenerate) tensor.
-#[inline]
-fn circular_slice_len(length: isize, mut start: isize, mut end: isize) -> isize {
-    if start < 0 {
-        start += length;
-    }
-    if end < 0 {
-        end += length;
-    }
-    start = start.clamp(0, length);
-    end = end.clamp(0, length);
-    (end - start).max(0)
-}
-
-/// Complete circular-pad legality for one axis, returning the new axis extent
+/// PER-AXIS circular-pad legality, returning the new axis extent
 /// (`size + lo + hi`, which may be `0` for a net-zero crop → an empty dim).
 ///
-/// This mirrors `_pad_circular_symint`'s two `TORCH_CHECK`s, the center
-/// slice-copy, and the wrap gather (`aten/src/ATen/native/PadNd.cpp:140-187`)
-/// EXACTLY, validated byte-for-byte against live torch 2.11 over the full grid
-/// (sizes 1..6, all `lo,hi` in `-(size+2)..=(size+2)`):
+/// This mirrors EXACTLY the two `TORCH_CHECK`s inside `_pad_circular_symint`'s
+/// shape loop (`aten/src/ATen/native/PadNd.cpp:140-145`) — and ONLY those. The
+/// center slice-copy (`:158-161`) and the wrap gather (`:169-187`) are NOT
+/// per-axis legality: torch first allocates the FULL N-D output
+/// (`:148 auto out = self.new_empty_symint(out_shape, ...)`) and only THEN does
+/// the per-axis `copy_`. Those `copy_`s are validated in
+/// [`circular_axis_validate_nonempty`], gated on the WHOLE output being
+/// non-empty (when any axis is `0`, `out` has `numel 0` and every `copy_` is a
+/// no-op — see the holistic restructure in [`pad_nd_signed_reflect_circular`]).
 ///
-/// - `:142` `TORCH_CHECK(pad_l <= size && pad_r <= size, "Padding value causes
-///   wrapping around more than once.")` — a pad strictly greater than `size`
-///   wraps more than once → `Err`.
-/// - `:144-145` `TORCH_CHECK(out_shape >= 0, "Negative padding value is
+/// - `:140-142` `TORCH_CHECK(pad_l <= size && pad_r <= size, "Padding value
+///   causes wrapping around more than once.")` — a pad strictly greater than
+///   `size` wraps more than once → `Err`. This is the ONLY per-axis legality.
+/// - `:143-145` `TORCH_CHECK(out_shape >= 0, "Negative padding value is
 ///   resulting in an empty dimension")` — a negative net extent → `Err`; a net
 ///   extent of EXACTLY `0` is allowed (an empty `[..,0]` dim, like
 ///   `constant_pad_nd`), distinct from reflect which demands `>= 1`.
-/// - `:158-161` the CENTER copy `out_slice.copy_(in_slice)`, where
-///   `out_slice = out.slice(dim, max(lo,0), out_w - max(hi,0))` has size `outc`
-///   and `in_slice = self.slice(dim, max(-lo,0), size - max(-hi,0))` has size
-///   `inc`. `copy_` broadcasts, so it RAISES iff `outc != inc && outc != 1 && inc != 1`.
-///   This is the gate that catches the mixed-sign NET-ZERO over-crops (`lo > 0`,
-///   `hi < 0`, `|hi| > size`, `out_w == 0`): there `outc == 0` while `inc >= 2`,
-///   so torch errors "The size of tensor a (0) must match the size of tensor
-///   b (N)" — the gather loop below never runs for `out_w == 0`, so without this
-///   check ferrotorch would wrongly accept the empty dim (#1627).
-/// - The slice-copy gather (`:148-187`): every output index `j` reads the
-///   source index `circular_axis_src(j, size, lo, hi)`. We validate that index
-///   lies in `0..size` for EVERY `j`, so the subsequent gather can never index
-///   out of bounds (Class C — no `R-CODE-2` panic). The cases this rejects are
-///   exactly the ones where torch's center copy is degenerate and the wrap
-///   reads uninitialized memory (torch returns nondeterministic garbage there;
-///   there is no byte-for-byte contract to match, so ferrotorch rejects
-///   cleanly — `R-DEV-6`).
-fn circular_axis_new_size(
+fn circular_axis_legality(
     size: usize,
     lo: isize,
     hi: isize,
     dim: usize,
 ) -> FerrotorchResult<usize> {
     let size_i = size as isize;
-    // `:142` — a pad larger than the dim wraps around more than once.
+    // `:140-142` — a pad larger than the dim wraps around more than once.
     if lo > size_i || hi > size_i {
         return Err(FerrotorchError::InvalidArgument {
             message: format!(
@@ -1702,7 +1670,7 @@ fn circular_axis_new_size(
             ),
         });
     }
-    // `:144-145` — a negative net extent is an error; net zero is an empty dim.
+    // `:143-145` — a negative net extent is an error; net zero is an empty dim.
     let out_w = size_i + lo + hi;
     if out_w < 0 {
         return Err(FerrotorchError::InvalidArgument {
@@ -1711,34 +1679,260 @@ fn circular_axis_new_size(
             ),
         });
     }
-    // `:158-161` — the center copy `out_slice.copy_(in_slice)` requires the two
-    // slices to be broadcast-compatible. `copy_` errors unless the sizes match
-    // OR one of them is 1. This catches the mixed-sign net-zero over-crop edge
-    // (`out_w == 0`, `inc >= 2`) that the gather loop below cannot see (#1627).
-    let outc = circular_slice_len(out_w, lo.max(0), out_w - hi.max(0));
-    let inc = circular_slice_len(size_i, (-lo).max(0), size_i - (-hi).max(0));
-    if outc != inc && outc != 1 && inc != 1 {
-        return Err(FerrotorchError::InvalidArgument {
-            message: format!(
-                "Circular padding ({lo}, {hi}) on dimension {dim} of size {size}: the wrap source ({inc}) does not match the cropped center ({outc}) and neither broadcasts (torch raises a size-mismatch here)"
-            ),
-        });
+    Ok(out_w as usize)
+}
+
+/// Normalize a `tensor.slice(dim, start, end)` to a clamped `[start, end)`
+/// half-open range over a `length`-element axis, mirroring torch's
+/// `slice_symint` index normalization (negative indices `+= length`, then clamp
+/// to `[0, length]`). Used by [`circular_slicecopy_block`] to model every
+/// `slice_symint` in `_pad_circular_symint` (`PadNd.cpp:148-187`).
+#[inline]
+fn circular_slice_range(length: isize, mut start: isize, mut end: isize) -> (usize, usize) {
+    if start < 0 {
+        start += length;
     }
-    // `:148-187` — pre-validate the gather: every output index must read an
-    // in-bounds source. This catches the mixed-sign over-crop cases torch can
-    // only express as uninitialized garbage, BEFORE any element is gathered.
-    let out_w = out_w as usize;
-    for j in 0..out_w {
-        let s = circular_axis_src(j, size, lo, hi);
-        if !(0..size_i).contains(&s) {
-            return Err(FerrotorchError::InvalidArgument {
-                message: format!(
-                    "Circular padding ({lo}, {hi}) on dimension {dim} of size {size} crops the center below the wrap width, so the wrap would read out of bounds (torch returns uninitialized data here)"
-                ),
-            });
+    if end < 0 {
+        end += length;
+    }
+    start = start.clamp(0, length);
+    end = end.clamp(0, length);
+    if end < start {
+        end = start;
+    }
+    (start as usize, end as usize)
+}
+
+/// HOLISTIC faithful simulation of torch's `_pad_circular_symint` allocate-then-
+/// copy algorithm (`aten/src/ATen/native/PadNd.cpp:148-187`) over the last
+/// `npad` dims of ONE outer batch block. This replaces the prior per-axis
+/// wrap-OOB / center-copy pre-validation (which rejected an axis whose ISOLATED
+/// wrap was OOB even when a SIBLING axis had already emptied the whole output —
+/// the #1628 cross-axis net-zero divergence). Instead of validating each axis in
+/// isolation, we reproduce torch's exact sequence on the full N-D output buffer:
+///
+/// - `:148` `auto out = self.new_empty_symint(out_shape)` — a buffer with an
+///   `init` mask (all `false`); uninitialized cells are tracked so an over-crop
+///   that leaves a final cell unwritten is detected as the R-DEV-6 carve-out.
+/// - `:154-161` ONE center `copy_`: narrow `out` and `self` on every padded dim
+///   by `slice(dim, max(pad,0), …)` / `slice(dim, max(-pad,0), …)`, then copy.
+///   `copy_` errors unless the source broadcasts to the destination shape (per
+///   dim: sizes equal OR source size 1); a mismatch is a torch `RuntimeError`.
+/// - `:169-187` the left/right wrap `copy_`s, each reading from `out` itself
+///   (already partially written). Same broadcast-legality gate.
+///
+/// Because the wraps read from `out`, an axis whose isolated wrap would be OOB
+/// is harmless when a different axis emptied the output (every `copy_` is then a
+/// no-op over the empty extent), and torch's well-defined cross-axis wraps that
+/// the prior per-axis check rejected are now reproduced byte-for-byte. After all
+/// copies, any cell still uninitialized means torch read uninitialized memory
+/// there (no reproducible byte-for-byte contract — R-DEV-6); ferrotorch rejects
+/// such cases cleanly rather than returning nondeterministic garbage (R-CODE-2:
+/// no panic). The legality `:140-145` is already enforced by
+/// [`circular_axis_legality`] before this runs.
+fn circular_slicecopy_block<T: Float>(
+    in_block: &[T],
+    in_inner_shape: &[usize],
+    out_inner_shape: &[usize],
+    pads: &[(isize, isize)],
+) -> FerrotorchResult<Vec<T>> {
+    let npad = pads.len();
+    let ninner = in_inner_shape.len();
+    let out_total: usize = out_inner_shape.iter().product();
+    let zero = <T as num_traits::Zero>::zero();
+    let mut out = vec![zero; out_total];
+    let mut init = vec![false; out_total];
+
+    // Row-major strides for the inner (padded-region) coordinate space.
+    let mut in_strides = vec![1usize; ninner];
+    let mut out_strides = vec![1usize; ninner];
+    for d in (0..ninner.saturating_sub(1)).rev() {
+        in_strides[d] = in_strides[d + 1] * in_inner_shape[d + 1];
+        out_strides[d] = out_strides[d + 1] * out_inner_shape[d + 1];
+    }
+
+    // `pads` is ordered LAST padded axis first; the padded inner dims are the
+    // trailing `npad` dims of the inner block. Inner-dim index for pad entry `k`
+    // (which targets axis `dim = ninner - 1 - k`).
+    let pad_for_inner_dim = |d: usize| -> (isize, isize) {
+        // d in [ninner-npad, ninner-1] -> k = ninner - 1 - d
+        pads[ninner - 1 - d]
+    };
+
+    // Per-dim half-open copy windows for the dst (`out`) and src.
+    // `copy_block` copies `src[src_win]` (broadcast) into `out[dst_win]`,
+    // reading from `read` (either the input or `out` itself) and writing `out`,
+    // propagating the init mask. Returns Err on a broadcast-illegal `copy_`.
+    // `dst_win`/`src_win` are `(start,end)` per inner dim.
+    #[allow(clippy::too_many_arguments)]
+    fn copy_block<T: Float>(
+        out: &mut [T],
+        init: &mut [bool],
+        read_data: &[T],
+        read_init: Option<&[bool]>,
+        ninner: usize,
+        out_strides: &[usize],
+        read_strides: &[usize],
+        dst_win: &[(usize, usize)],
+        src_win: &[(usize, usize)],
+    ) -> FerrotorchResult<()> {
+        // Broadcast-legality (torch `copy_`): per dim, dst extent must equal src
+        // extent OR src extent must be 1. Otherwise torch raises.
+        let mut dst_ext = vec![0usize; ninner];
+        let mut src_ext = vec![0usize; ninner];
+        for d in 0..ninner {
+            dst_ext[d] = dst_win[d].1 - dst_win[d].0;
+            src_ext[d] = src_win[d].1 - src_win[d].0;
+            if dst_ext[d] != src_ext[d] && src_ext[d] != 1 {
+                return Err(FerrotorchError::InvalidArgument {
+                    message: format!(
+                        "Circular padding: a slice copy of source extent {} into destination extent {} is not broadcastable on inner dim {d} (torch raises a size-mismatch here)",
+                        src_ext[d], dst_ext[d]
+                    ),
+                });
+            }
+        }
+        let total: usize = dst_ext.iter().product();
+        if total == 0 {
+            return Ok(()); // no-op over an empty extent (`:148` empty out_shape)
+        }
+        // Iterate every dst coordinate; map to the (broadcast) src coordinate.
+        let mut coord = vec![0usize; ninner];
+        for _ in 0..total {
+            let mut dst_off = 0usize;
+            let mut src_off = 0usize;
+            for d in 0..ninner {
+                let dc = dst_win[d].0 + coord[d];
+                dst_off += dc * out_strides[d];
+                let sc = if src_ext[d] == 1 {
+                    src_win[d].0
+                } else {
+                    src_win[d].0 + coord[d]
+                };
+                src_off += sc * read_strides[d];
+            }
+            out[dst_off] = read_data[src_off];
+            init[dst_off] = read_init.map(|ri| ri[src_off]).unwrap_or(true);
+            // advance coord (row-major over dst extents)
+            let mut d = ninner;
+            while d > 0 {
+                d -= 1;
+                coord[d] += 1;
+                if coord[d] < dst_ext[d] {
+                    break;
+                }
+                coord[d] = 0;
+            }
+        }
+        Ok(())
+    }
+
+    // `:154-161` — the single CENTER copy. Build dst/src windows per inner dim.
+    let mut dst_win = vec![(0usize, 0usize); ninner];
+    let mut src_win = vec![(0usize, 0usize); ninner];
+    for d in 0..ninner {
+        let out_len = out_inner_shape[d] as isize;
+        let in_len = in_inner_shape[d] as isize;
+        if d < ninner - npad {
+            // Non-padded inner dim: full extent on both sides.
+            dst_win[d] = (0, out_inner_shape[d]);
+            src_win[d] = (0, in_inner_shape[d]);
+        } else {
+            let (pl, pr) = pad_for_inner_dim(d);
+            dst_win[d] = circular_slice_range(out_len, pl.max(0), out_len - pr.max(0));
+            src_win[d] = circular_slice_range(in_len, (-pl).max(0), in_len - (-pr).max(0));
         }
     }
-    Ok(out_w)
+    copy_block(
+        &mut out,
+        &mut init,
+        in_block,
+        None,
+        ninner,
+        &out_strides,
+        &in_strides,
+        &dst_win,
+        &src_win,
+    )?;
+
+    // `:169-187` — the left/right wrap copies, each reading from `out` itself.
+    // We snapshot `out`/`init` before each copy so the source reads the state
+    // BEFORE that copy's writes (torch's `out.slice` aliases `out`, but the
+    // per-element copy below reads then writes in the SAME pass; snapshotting
+    // matches torch's well-defined non-overlapping wraps and rejects the
+    // overlapping ones via the leftover-uninit R-DEV-6 check at the end).
+    for (k, &(pl, pr)) in pads.iter().enumerate() {
+        // i in torch is k counted from the FIRST padded axis; torch's `dim` is
+        // the inner dim `ninner - npad + k`. Our `pads` is last-axis-first, so
+        // entry k targets inner dim `ninner - 1 - k`. torch iterates i=0..npad
+        // over `pad[2*i]` (first-axis-first); the set of (dim,pl,pr) visited is
+        // identical, only the order differs — and torch's wraps on distinct dims
+        // are order-independent for the WELL-DEFINED cases (the order-dependent
+        // overlapping ones land in the R-DEV-6 leftover-uninit reject either way).
+        let dim = ninner - 1 - k;
+        let out_len = out_inner_shape[dim] as isize;
+        if pl > 0 {
+            let snap = out.clone();
+            let snap_init = init.clone();
+            let mut dwin = vec![(0usize, 0usize); ninner];
+            let mut swin = vec![(0usize, 0usize); ninner];
+            for d in 0..ninner {
+                dwin[d] = (0, out_inner_shape[d]);
+                swin[d] = (0, out_inner_shape[d]);
+            }
+            dwin[dim] = circular_slice_range(out_len, 0, pl);
+            swin[dim] =
+                circular_slice_range(out_len, out_len - pl - pr.max(0), out_len - pr.max(0));
+            copy_block(
+                &mut out,
+                &mut init,
+                &snap,
+                Some(&snap_init),
+                ninner,
+                &out_strides,
+                &out_strides,
+                &dwin,
+                &swin,
+            )?;
+        }
+        if pr > 0 {
+            let snap = out.clone();
+            let snap_init = init.clone();
+            let mut dwin = vec![(0usize, 0usize); ninner];
+            let mut swin = vec![(0usize, 0usize); ninner];
+            for d in 0..ninner {
+                dwin[d] = (0, out_inner_shape[d]);
+                swin[d] = (0, out_inner_shape[d]);
+            }
+            dwin[dim] = circular_slice_range(out_len, out_len - pr, out_len);
+            swin[dim] = circular_slice_range(out_len, pl.max(0), pl.max(0) + pr);
+            copy_block(
+                &mut out,
+                &mut init,
+                &snap,
+                Some(&snap_init),
+                ninner,
+                &out_strides,
+                &out_strides,
+                &dwin,
+                &swin,
+            )?;
+        }
+    }
+
+    // R-DEV-6: if any output cell is still uninitialized, torch read freed /
+    // uninitialized memory there (a mixed-sign over-crop where the cropped
+    // center is narrower than the wrap, or an overlapping `copy_`). There is no
+    // reproducible byte-for-byte contract, so ferrotorch rejects cleanly rather
+    // than emit nondeterministic garbage (R-CODE-2: no panic).
+    if init.iter().any(|&b| !b) {
+        return Err(FerrotorchError::InvalidArgument {
+            message:
+                "Circular padding crops the center below the wrap width, so torch reads uninitialized memory (no byte-for-byte contract; R-DEV-6)"
+                    .to_string(),
+        });
+    }
+    Ok(out)
 }
 
 /// Resolve, for one axis, the source index a reflect/circular output index
@@ -1823,14 +2017,18 @@ fn pad_nd_signed_reflect_circular<T: Float>(
                 ),
             });
         }
-        // Circular: the COMPLETE torch legality lives in `circular_axis_new_size`
-        // (`aten/src/ATen/native/PadNd.cpp:140-187`) — reject `pad > size`
-        // (`:142`), reject a negative net extent (`:144`), allow a net extent of
-        // exactly 0 (an empty dim), and pre-validate the gather so a mixed-sign
-        // over-crop is rejected BEFORE any element is read (Class C — no OOB
-        // panic). Reflect/Replicate use the rank-dependent `per_axis_min` reject.
+        // Circular: torch's `_pad_circular_symint` is allocate-then-copy
+        // (`aten/src/ATen/native/PadNd.cpp:140-187`). The PER-AXIS legality is
+        // ONLY `:142` (reject `pad > size`, wraps more than once) and `:144`
+        // (reject a negative net extent; allow exactly `0` → an empty dim) —
+        // `circular_axis_legality`. The center copy (`:158-161`) and the wrap
+        // gather (`:169-187`) operate on slices of the FULL `:148 new_empty`
+        // output, so they are validated SEPARATELY below, gated on the WHOLE
+        // output being non-empty (any `out_i == 0` ⇒ every `copy_` no-ops ⇒
+        // torch returns the empty tensor without materializing ANY wrap index,
+        // #1628). Reflect/Replicate use the rank-dependent `per_axis_min` reject.
         let new_size: usize = if mode == PaddingMode::Circular {
-            circular_axis_new_size(shape[dim], lo, hi, dim)?
+            circular_axis_legality(shape[dim], lo, hi, dim)?
         } else {
             let n = size + lo + hi;
             if n < per_axis_min {
@@ -1844,6 +2042,7 @@ fn pad_nd_signed_reflect_circular<T: Float>(
         };
         new_shape[dim] = new_size;
     }
+
     // 2-D/3-D reflect & replicate: at least one padded spatial axis must survive
     // (`output_w >= 1 || output_h >= 1 (|| output_d >= 1)`,
     // `ReflectionPad.cpp:251`/`:152`, `ReplicationPadding.cpp:114`). When every
@@ -1874,6 +2073,30 @@ fn pad_nd_signed_reflect_circular<T: Float>(
     let new_total: usize = new_shape.iter().copied().product();
     let mut out = vec![zero; new_total];
 
+    // CIRCULAR: HOLISTIC allocate-then-copy (`PadNd.cpp:148-187`) per outer
+    // batch, mirroring torch's `:148 new_empty(out_shape)` + center/wrap `copy_`
+    // sequence on the FULL N-D output. This replaces the prior per-axis wrap-OOB
+    // pre-validation + per-axis gather, which rejected an axis whose ISOLATED
+    // wrap was OOB even when a SIBLING axis had already emptied the whole output
+    // (the #1628 cross-axis net-zero divergence). The simulator reproduces the
+    // empty short-circuit (any `out_i == 0` ⇒ every `copy_` no-ops ⇒ empty
+    // tensor), the cross-axis well-defined wraps, AND the R-DEV-6 over-crop
+    // rejection (leftover-uninit ⇒ Err, never a panic) in one faithful pass.
+    if mode == PaddingMode::Circular {
+        let in_inner_shape = &shape[first_padded..];
+        let out_inner_shape = &new_shape[first_padded..];
+        for o in 0..outer {
+            let in_block = &data[o * in_inner..(o + 1) * in_inner];
+            let out_block =
+                circular_slicecopy_block(in_block, in_inner_shape, out_inner_shape, pads)?;
+            out[o * out_inner..(o + 1) * out_inner].copy_from_slice(&out_block);
+        }
+        return Ok((out, new_shape));
+    }
+
+    // REFLECT / REPLICATE: the unified original-window per-axis gather
+    // (`cpu/PaddingKernel.cpp:63-105`). Each output index reads a real input
+    // element via the mode's per-axis index resolver.
     for o in 0..outer {
         let in_base = o * in_inner;
         let out_base = o * out_inner;

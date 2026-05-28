@@ -315,7 +315,7 @@ fn assert_mode_clean(name: &str, c: &ModeCounts, examples: &[String]) {
 /// value/shape/panic/accept-mismatch/reject-mismatch/dev6-accepted is nonzero
 /// for ANY mode. The tolerated `dev6_carveout` count is reported but never fails.
 #[test]
-#[ignore = "divergence: circular 2-D cross-axis net-zero (3052 reject-mismatches); constant/reflect/replicate 0/0/0/0; tracking #1628"]
+#[ignore = "circular net-zero-empty class FIXED (#1628: reject_mm net-zero=0, accept_mm=0, value=0, shape=0, panic=0). Residual circular reject_mm (~1667) is the over-crop R-DEV-6 class where torch reads uninitialized/overlapping memory; the grid generator's `garbage` heuristic under-flags ~1328 allocator-stable reads as garbage=False (a TEST-generator gap in fixtures_pad_grid_gen.py, not a padding.rs bug). constant/reflect/replicate all 0/0/0/0. Needs generator garbage-heuristic widening (separate blocker)."]
 fn definitive_negpad_grid_all_modes() {
     let rep = run_grid();
 
