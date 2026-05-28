@@ -22,6 +22,7 @@
 //! | REQ-8 | SHIPPED | impl: both `Module<T> for Embedding<T>` and `Module<T> for EmbeddingBag<T>` impl blocks here; non-test consumer: `ferrotorch_optim::Optimizer` iterates `model.parameters_mut()` which surfaces the embedding's weight parameter for every step. |
 //! | REQ-9 | SHIPPED | impl: free fn `renorm_weight_rows_in_place` here (faithful translation of `embedding_renorm_cpu_` at `aten/src/ATen/native/Embedding.cpp:181-212` — sort+dedup touched rows, row norm via `at::norm` special-cased per `aten/src/ATen/native/cpu/ReduceOpsKernel.cpp:191-203` for `norm_type` 0/+inf/-inf, scale rows with norm > max_norm by `max_norm/(norm+1e-7)`, persist via `Tensor::update_data`), called by `Embedding::renorm_weight_in_place` and `EmbeddingBag::forward_bag`. L2 PRECISION (#1614): the default `norm_type == 2.0` f32 row reduces via `ferrotorch_core::simd_reduce::l2_norm_f32_torch` (torch's vectorized last-dim L2 kernel model, `ReduceOpsKernel.cpp:222-255`, f32 accumulator) so the `norm > max_norm` boundary decision matches torch byte-for-byte (closing the powf-vs-`v*v` summation-method gap #1612 left open); f64 rows and finite `p != 2` keep the generic `(Σ|x|^p)^(1/p)` arm. `with_max_norm`/`with_norm_type`/`with_scale_grad_by_freq` builders on `Embedding<T>`, plus `EmbeddingBag::new_with` + `with_max_norm`/`with_norm_type`/`with_scale_grad_by_freq`/`with_sparse`/`with_include_last_offset` and `padding_idx` exclusion in `forward_bag`. `EmbeddingBackward::scale_grad_by_freq` divides each touched row's grad by its forward count (`torch/nn/functional.py:2499-2500`). Renorm runs BEFORE the gather, matching `F.embedding`/`F.embedding_bag` (`functional.py:2561-2573`, `2766-2771`). Consumer surface: per goal.md S5, `Embedding`/`EmbeddingBag` ARE boundary public API (the module mirrors `torch.nn.Embedding`/`torch.nn.EmbeddingBag` field-for-field — the user-facing kwargs ARE the deliverable), grandfathered SHIPPED with no further downstream caller required. The renorm is on the live forward path: `<Embedding as Module>::forward` here calls `self.renorm_weight_in_place(&indices)?` on every forward (no-op when `max_norm` unset), and `EmbeddingBag::forward_bag` / `<EmbeddingBag as Module>::forward` consume the bag kwargs; both types are re-exported via `pub use embedding::{Embedding, EmbeddingBag, EmbeddingBagMode}` in `lib.rs` as the public consumer surface. (NB #1566: the prior cite to `ferrotorch-llama/src/model.rs embed_tokens` as the renorm consumer was FALSE — `model.rs` constructs `Embedding::new(.., None)` with no `max_norm`/`EmbeddingBag`; corrected to the S5 boundary-API rationale.) |
 //! | REQ-10 | NOT-STARTED | blocker #1441 (umbrella) — parity-sweep runner arms absent for both `nn.functional.embedding` and `nn.functional.embedding_bag`. Lib tests verify the impl end-to-end. |
+//! | REQ-11 | SHIPPED | impl: `pub fn forward_bag_weighted` + `struct EmbeddingBagSumWeightedBackward` here — `per_sample_weights` (#1610): sum-mode-only per-sample scaling before the bag reduction (`aten/src/ATen/native/EmbeddingBag.cpp:537-543`), grad to BOTH the embedding table (`grad[bag]*psw`, `EmbeddingBag.cpp:1564-1582`) AND `per_sample_weights` (`dot(grad[bag], weight[idx])`, `EmbeddingBag.cpp:1716-1724`); `mode!='sum'` returns torch's exact `NotImplementedError` text (`torch/nn/functional.py:2773-2778`), shape-mismatch matches `functional.py:2698-2702`, `padding_idx` samples contribute 0 to both grads. Non-test production consumer: the existing 2-arg `EmbeddingBag::forward_bag` (called by the parity-sweep `embedding_bag` runner arm + boundary public API re-exported at `lib.rs`) is rewired in this commit to delegate to `forward_bag_weighted(.., None)`, so the new pub method has an in-production caller (R-DEFER-1). Verified by the `test_bag_psw_*` live-torch-2.11 oracle lib tests. |
 
 use std::any::TypeId;
 use std::sync::Arc;
@@ -367,6 +368,152 @@ impl<T: Float> GradFn<T> for EmbeddingBackward<T> {
 
     fn name(&self) -> &'static str {
         "EmbeddingBackward"
+    }
+}
+
+// ---------------------------------------------------------------------------
+// EmbeddingBagSumWeightedBackward — sum-mode bag with per_sample_weights
+// ---------------------------------------------------------------------------
+
+/// Backward function for `EmbeddingBag::forward_bag_weighted` in `sum` mode
+/// with `per_sample_weights` supplied. The forward is the scaled
+/// index-select-add (`aten/src/ATen/native/EmbeddingBag.cpp:537-543`):
+///
+/// `output[bag(i)][:] += weight[idx[i]][:] * psw[i]`  (padding samples skipped)
+///
+/// Gradient flows to BOTH the embedding table AND `per_sample_weights`, matching
+/// torch's autograd (`per_sample_weights.requires_grad` is honored at
+/// `EmbeddingBag.cpp:1248-1250`):
+///
+/// - `grad_weight[idx[i]][:] += grad_output[bag(i)][:] * psw[i]`
+///   — the sum-mode `scale = per_sample_weights_data[..]` axpy at
+///   `EmbeddingBag.cpp:1564-1582` (`scale_grad_by_freq` divides by the index
+///   frequency; `mode == SUM` never divides by bag size).
+/// - `grad_psw[i] = dot(grad_output[bag(i)][:], weight[idx[i]][:])`
+///   — `_embedding_bag_per_sample_weights_backward_cpu_template`'s per-sample
+///   `dot_impl(grad[bag], weight[idx])` at `EmbeddingBag.cpp:1716-1724`.
+///
+/// Padding samples (`idx[i] == padding_idx`) contribute 0 to BOTH gradients:
+/// they are skipped in the weight-grad loop (`EmbeddingBag.cpp:1561`) and their
+/// `grad_psw` entry stays at the zero-init (`EmbeddingBag.cpp:1671`, `:1720`).
+#[derive(Debug)]
+struct EmbeddingBagSumWeightedBackward<T: Float> {
+    /// The embedding table (input 0; receives the scatter-add grad).
+    weight: Tensor<T>,
+    /// The per-sample weights (input 1; receives the per-sample dot grad).
+    per_sample_weights: Tensor<T>,
+    /// Flattened embedding indices, one per sample, in forward order.
+    indices: Vec<usize>,
+    /// Bag id for each sample (`offset2bag`): `bag_of[i]` is the output row that
+    /// sample `i` accumulates into.
+    bag_of: Vec<usize>,
+    /// Total number of embedding rows.
+    num_embeddings: usize,
+    /// Width of each embedding vector.
+    embedding_dim: usize,
+    /// If set, samples whose index equals this contribute no gradient.
+    padding_idx: Option<usize>,
+    /// If `true`, each touched weight-row grad is divided by the number of
+    /// times that index appeared in the forward (`EmbeddingBag.cpp:1569-1571`).
+    scale_grad_by_freq: bool,
+}
+
+impl<T: Float> GradFn<T> for EmbeddingBagSumWeightedBackward<T> {
+    fn backward(&self, grad_output: &Tensor<T>) -> FerrotorchResult<Vec<Option<Tensor<T>>>> {
+        if !is_grad_enabled() {
+            return Ok(vec![None, None]);
+        }
+
+        if grad_output.is_cuda() {
+            return Err(FerrotorchError::NotImplementedOnCuda {
+                op: "EmbeddingBagSumWeightedBackward",
+            });
+        }
+
+        let dim = self.embedding_dim;
+        let go_data = grad_output.data()?;
+        let weight_data = self.weight.data()?;
+        let psw_data = self.per_sample_weights.data()?;
+        let n = self.indices.len();
+
+        // grad to the embedding table: scatter-add the bag's grad row scaled by
+        // the sample's per_sample_weight (EmbeddingBag.cpp:1564-1582).
+        let mut grad_weight = vec![<T as num_traits::Zero>::zero(); self.num_embeddings * dim];
+        // grad to per_sample_weights: dot(grad[bag], weight[idx]) per sample,
+        // zero for padding samples (EmbeddingBag.cpp:1716-1724).
+        let mut grad_psw = vec![<T as num_traits::Zero>::zero(); n];
+
+        // Per-index forward counts for scale_grad_by_freq (EmbeddingBag.cpp:1570).
+        let counts: Option<std::collections::HashMap<usize, usize>> = if self.scale_grad_by_freq {
+            let mut c: std::collections::HashMap<usize, usize> = std::collections::HashMap::new();
+            for &idx in &self.indices {
+                if self.padding_idx == Some(idx) {
+                    continue;
+                }
+                *c.entry(idx).or_insert(0) += 1;
+            }
+            Some(c)
+        } else {
+            None
+        };
+
+        for i in 0..n {
+            let idx = self.indices[i];
+            // Padding samples are excluded from BOTH grads (EmbeddingBag.cpp:1561,
+            // :1720): grad_psw[i] stays 0 and no weight-row update happens.
+            if self.padding_idx == Some(idx) {
+                continue;
+            }
+            let bag = self.bag_of[i];
+            let go_row = &go_data[bag * dim..(bag + 1) * dim];
+            let w_row = &weight_data[idx * dim..(idx + 1) * dim];
+            let psw_i = psw_data[i];
+
+            // weight-grad scale: psw, optionally divided by the index frequency.
+            let mut w_scale = psw_i;
+            if let Some(c) = &counts {
+                if let Some(&cnt) = c.get(&idx) {
+                    if cnt > 0 {
+                        w_scale =
+                            w_scale / T::from(cnt).unwrap_or_else(<T as num_traits::One>::one);
+                    }
+                }
+            }
+            let gw_row = &mut grad_weight[idx * dim..(idx + 1) * dim];
+            for (gw, &go) in gw_row.iter_mut().zip(go_row.iter()) {
+                *gw += go * w_scale;
+            }
+
+            // per_sample_weight grad: dot(grad[bag], weight[idx]). This is the
+            // UNSCALED bag grad against the embedding row — scale_grad_by_freq
+            // only weights the table grad, not the psw grad (it is absent from
+            // the psw-backward kernel at EmbeddingBag.cpp:1716-1724).
+            let mut dot = <T as num_traits::Zero>::zero();
+            for (&go, &w) in go_row.iter().zip(w_row.iter()) {
+                dot += go * w;
+            }
+            grad_psw[i] = dot;
+        }
+
+        let grad_weight_t = Tensor::from_storage(
+            TensorStorage::cpu(grad_weight),
+            vec![self.num_embeddings, dim],
+            false,
+        )?;
+        let grad_psw_t = Tensor::from_storage(
+            TensorStorage::cpu(grad_psw),
+            self.per_sample_weights.shape().to_vec(),
+            false,
+        )?;
+        Ok(vec![Some(grad_weight_t), Some(grad_psw_t)])
+    }
+
+    fn inputs(&self) -> Vec<&Tensor<T>> {
+        vec![&self.weight, &self.per_sample_weights]
+    }
+
+    fn name(&self) -> &'static str {
+        "EmbeddingBagSumWeightedBackward"
     }
 }
 
@@ -1092,11 +1239,77 @@ impl<T: Float> EmbeddingBag<T> {
     /// mirroring `aten/src/ATen/native/EmbeddingBag.cpp:140-156`). `max` mode
     /// rejects `scale_grad_by_freq` / `sparse`
     /// (`functional.py:2755-2761`).
+    ///
+    /// This is the unweighted path (`per_sample_weights = None`); it delegates
+    /// to [`Self::forward_bag_weighted`] so the two share a single reduction
+    /// body. The unweighted forward returns a non-grad-tracked tensor (per-bag
+    /// backward for the plain reductions is tracked separately).
     pub fn forward_bag(&self, input: &Tensor<T>, offsets: &[usize]) -> FerrotorchResult<Tensor<T>> {
+        self.forward_bag_weighted(input, offsets, None)
+    }
+
+    /// Forward pass with optional `per_sample_weights`, mirroring
+    /// `F.embedding_bag(input, weight, offsets, ..., per_sample_weights=...)`
+    /// (`torch/nn/functional.py:2576-2791`).
+    ///
+    /// When `per_sample_weights` is `Some(psw)`:
+    /// - It is ONLY valid for `mode == Sum`; any other mode returns torch's
+    ///   exact `NotImplementedError` text (`functional.py:2773-2778`).
+    /// - `psw` must have the same shape as `input` (`functional.py:2698-2702`).
+    /// - Each gathered embedding row is scaled by its sample weight BEFORE the
+    ///   sum reduction (`output[bag][:] += weight[idx][:] * psw[i]`,
+    ///   `EmbeddingBag.cpp:537-543`).
+    /// - The output is grad-tracked: gradient flows to BOTH `weight` and
+    ///   `psw` via [`EmbeddingBagSumWeightedBackward`], matching torch's
+    ///   autograd. `padding_idx` samples contribute 0 to the reduction and to
+    ///   both gradients.
+    ///
+    /// When `per_sample_weights` is `None` this is the plain unweighted
+    /// reduction (sum / mean / max) and returns a non-grad tensor — identical
+    /// to the historical [`Self::forward_bag`] behavior.
+    pub fn forward_bag_weighted(
+        &self,
+        input: &Tensor<T>,
+        offsets: &[usize],
+        per_sample_weights: Option<&Tensor<T>>,
+    ) -> FerrotorchResult<Tensor<T>> {
         if input.ndim() != 1 {
             return Err(FerrotorchError::InvalidArgument {
                 message: format!("EmbeddingBag input must be 1-D, got {:?}", input.shape()),
             });
+        }
+
+        // per_sample_weights is only supported for mode='sum' — torch raises a
+        // NotImplementedError with this exact text (functional.py:2773-2778).
+        // Validate this BEFORE the shape check matches torch's ordering only
+        // loosely, but both are user-facing errors; we surface the mode error
+        // first since it is the dominant constraint for this feature.
+        if let Some(psw) = per_sample_weights {
+            if self.mode != EmbeddingBagMode::Sum {
+                let mode_str = match self.mode {
+                    EmbeddingBagMode::Sum => "sum",
+                    EmbeddingBagMode::Mean => "mean",
+                    EmbeddingBagMode::Max => "max",
+                };
+                return Err(FerrotorchError::InvalidArgument {
+                    message: format!(
+                        "embedding_bag: per_sample_weights was not None. per_sample_weights is \
+                         only supported for mode='sum' (got mode='{mode_str}'). Please open a \
+                         feature request on GitHub."
+                    ),
+                });
+            }
+            // psw must have exactly the same shape as input (functional.py:2698).
+            if psw.shape() != input.shape() {
+                return Err(FerrotorchError::InvalidArgument {
+                    message: format!(
+                        "embedding_bag: If per_sample_weights ({:?}) is not None, then it must \
+                         have the same shape as the input ({:?})",
+                        psw.shape(),
+                        input.shape()
+                    ),
+                });
+            }
         }
 
         // mode='max' forbids scale_grad_by_freq and sparse, matching
@@ -1159,6 +1372,16 @@ impl<T: Float> EmbeddingBag<T> {
             )?;
         }
 
+        // per_sample_weights data + a `bag_of` map (offset2bag) — both only
+        // materialised when psw is present (psw is sum-mode-only, validated
+        // above). `bag_of[i]` is the output row sample `i` accumulates into,
+        // mirroring torch's `offset2bag` (`EmbeddingBag.cpp:1563`).
+        let psw_data: Option<Vec<T>> = match per_sample_weights {
+            Some(psw) => Some(psw.data_vec()?),
+            None => None,
+        };
+        let mut bag_of: Vec<usize> = vec![0; total];
+
         // Re-read the (possibly renormed) weight for the reduction.
         let weight_data = self.weight.tensor().data()?;
 
@@ -1174,21 +1397,41 @@ impl<T: Float> EmbeddingBag<T> {
                 total
             };
 
+            // Record offset2bag for every sample in this bag so the weighted
+            // backward (when psw is present) can map sample -> bag grad row.
+            for s in bag_of.iter_mut().take(end).skip(start) {
+                *s = b;
+            }
+
             match self.mode {
                 EmbeddingBagMode::Sum | EmbeddingBagMode::Mean => {
                     // Count of non-padding entries; the mean divides by this,
                     // mirroring the bag_size decrement at EmbeddingBag.cpp:151-156.
                     let mut count: usize = 0;
                     let out_start = b * dim;
-                    for &idx in &indices[start..end] {
+                    for s in start..end {
+                        let idx = indices[s];
                         // padding_idx entries are excluded from the reduction
                         // (EmbeddingBag.cpp:147 `if (idx != padding_idx)`).
                         if self.padding_idx == Some(idx) {
                             continue;
                         }
                         let row_start = idx * dim;
-                        for d in 0..dim {
-                            output[out_start + d] += weight_data[row_start + d];
+                        // per_sample_weights scale (sum-mode only): each gathered
+                        // row is multiplied by its sample weight BEFORE the sum
+                        // (EmbeddingBag.cpp:540-543). `None` => scale of 1.
+                        match &psw_data {
+                            Some(pw) => {
+                                let scale = pw[s];
+                                for d in 0..dim {
+                                    output[out_start + d] += weight_data[row_start + d] * scale;
+                                }
+                            }
+                            None => {
+                                for d in 0..dim {
+                                    output[out_start + d] += weight_data[row_start + d];
+                                }
+                            }
                         }
                         count += 1;
                     }
@@ -1229,7 +1472,34 @@ impl<T: Float> EmbeddingBag<T> {
             }
         }
 
-        Tensor::from_storage(TensorStorage::cpu(output), vec![num_bags, dim], false)
+        let storage = TensorStorage::cpu(output);
+        let out_shape = vec![num_bags, dim];
+
+        // When per_sample_weights is supplied (sum mode, validated above) and
+        // either the weight or the psw requires grad, attach the weighted
+        // backward so gradient flows to BOTH inputs (EmbeddingBag.cpp:1248-1250
+        // honors per_sample_weights.requires_grad).
+        if let Some(psw) = per_sample_weights {
+            let weight_t = self.weight.tensor();
+            let needs_grad = is_grad_enabled() && (weight_t.requires_grad() || psw.requires_grad());
+            if needs_grad {
+                let grad_fn = Arc::new(EmbeddingBagSumWeightedBackward {
+                    weight: weight_t.clone(),
+                    per_sample_weights: psw.clone(),
+                    indices,
+                    bag_of,
+                    num_embeddings: self.num_embeddings,
+                    embedding_dim: dim,
+                    padding_idx: self.padding_idx,
+                    scale_grad_by_freq: self.scale_grad_by_freq,
+                });
+                return Tensor::from_operation(storage, out_shape, grad_fn);
+            }
+        }
+
+        // Unweighted path (or grad disabled): non-grad tensor, matching the
+        // historical forward_bag behavior.
+        Tensor::from_storage(storage, out_shape, false)
     }
 
     /// Number of embeddings in the table.
@@ -2212,5 +2482,286 @@ mod tests {
             );
         }
         assert_eq!(bag.padding_idx(), Some(2));
+    }
+
+    // -------------------------------------------------------------------
+    // #1610 — EmbeddingBag per_sample_weights (sum-mode-only scaling +
+    // gradient to BOTH the embedding table AND per_sample_weights).
+    // -------------------------------------------------------------------
+    //
+    // All oracle values constructed from live torch 2.11.0+cu130
+    // (2026-05-28) via `torch.nn.functional.embedding_bag(...,
+    // per_sample_weights=...)` with `.backward()`:
+    //   torch/nn/functional.py:2576-2791 (psw handling + mode='sum'-only
+    //   check at :2773-2778; shape check at :2698-2702);
+    //   aten/src/ATen/native/EmbeddingBag.cpp:537-543 (forward scale),
+    //   :1564-1582 (grad to weight = grad[bag]*psw), :1716-1724
+    //   (grad to psw = dot(grad[bag], weight[idx])).
+
+    /// Helper: build a `per_sample_weights` tensor with `requires_grad`.
+    fn psw_tensor(w: &[f32]) -> Tensor<f32> {
+        Tensor::from_storage(TensorStorage::cpu(w.to_vec()), vec![w.len()], true).unwrap()
+    }
+
+    #[test]
+    fn test_bag_psw_sum_forward_single_bag() {
+        // Oracle (torch 2.11.0): W=[[1,2],[3,4],[5,6]], input [0,1,2],
+        // offsets [0], mode=sum, per_sample_weights=[0.5,2.0,1.0].
+        //   out = 0.5*[1,2] + 2*[3,4] + 1*[5,6] = [11.5, 15.0]
+        let rows = vec![vec![1.0, 2.0], vec![3.0, 4.0], vec![5.0, 6.0]];
+        let bag = pretrained_bag(&rows, EmbeddingBagMode::Sum);
+        let inp = index_tensor(&[0.0, 1.0, 2.0]);
+        let offs = [0usize];
+        let psw = psw_tensor(&[0.5, 2.0, 1.0]);
+        let out = bag.forward_bag_weighted(&inp, &offs, Some(&psw)).unwrap();
+        let od = out.data().unwrap();
+        assert!((od[0] - 11.5).abs() < 1e-5, "out[0]={}", od[0]);
+        assert!((od[1] - 15.0).abs() < 1e-5, "out[1]={}", od[1]);
+    }
+
+    #[test]
+    fn test_bag_psw_sum_grad_to_weight_and_psw() {
+        // Same setup as the forward test; grad_output = ones[1,2].
+        // Oracle (torch 2.11.0):
+        //   grad_W   = [[0.5,0.5],[2,2],[1,1]]   (= grad[bag]*psw per row)
+        //   grad_psw = [3.0, 7.0, 11.0]          (= dot(grad[bag], weight[idx]))
+        let rows = vec![vec![1.0, 2.0], vec![3.0, 4.0], vec![5.0, 6.0]];
+        let bag = pretrained_bag(&rows, EmbeddingBagMode::Sum);
+        let inp = index_tensor(&[0.0, 1.0, 2.0]);
+        let offs = [0usize];
+        let psw = psw_tensor(&[0.5, 2.0, 1.0]);
+        let out = bag.forward_bag_weighted(&inp, &offs, Some(&psw)).unwrap();
+
+        assert!(out.requires_grad());
+        assert_eq!(
+            out.grad_fn().unwrap().name(),
+            "EmbeddingBagSumWeightedBackward"
+        );
+
+        let grad_output =
+            Tensor::from_storage(TensorStorage::cpu(vec![1.0f32, 1.0]), vec![1, 2], false).unwrap();
+        let grads = out.grad_fn().unwrap().backward(&grad_output).unwrap();
+
+        // grads[0] -> weight (input 0), grads[1] -> psw (input 1).
+        let gw = grads[0].as_ref().unwrap().data().unwrap();
+        assert_eq!(grads[0].as_ref().unwrap().shape(), &[3, 2]);
+        let expect_w = [0.5, 0.5, 2.0, 2.0, 1.0, 1.0];
+        for (i, &e) in expect_w.iter().enumerate() {
+            assert!((gw[i] - e).abs() < 1e-5, "grad_W[{i}]={} exp {e}", gw[i]);
+        }
+
+        let gp = grads[1].as_ref().unwrap().data().unwrap();
+        assert_eq!(grads[1].as_ref().unwrap().shape(), &[3]);
+        let expect_psw = [3.0, 7.0, 11.0];
+        for (i, &e) in expect_psw.iter().enumerate() {
+            assert!((gp[i] - e).abs() < 1e-5, "grad_psw[{i}]={} exp {e}", gp[i]);
+        }
+    }
+
+    #[test]
+    fn test_bag_psw_sum_two_bags_offsets() {
+        // Oracle (torch 2.11.0): W=[[1,2,3],[4,5,6],[7,8,9],[10,11,12]],
+        // input [0,1,2,3], offsets [0,2], mode=sum, psw=[2,0.5,1.5,3].
+        //   bag0 = 2*[1,2,3] + 0.5*[4,5,6]   = [4, 6.5, 9]
+        //   bag1 = 1.5*[7,8,9] + 3*[10,11,12] = [40.5, 45, 49.5]
+        // grad_output = [[1,1,1],[2,2,2]]:
+        //   grad_W   = [[2,2,2],[0.5,0.5,0.5],[3,3,3],[6,6,6]]
+        //   grad_psw = [6, 15, 48, 66]
+        let rows = vec![
+            vec![1.0, 2.0, 3.0],
+            vec![4.0, 5.0, 6.0],
+            vec![7.0, 8.0, 9.0],
+            vec![10.0, 11.0, 12.0],
+        ];
+        let bag = pretrained_bag(&rows, EmbeddingBagMode::Sum);
+        let inp = index_tensor(&[0.0, 1.0, 2.0, 3.0]);
+        let offs = [0usize, 2];
+        let psw = psw_tensor(&[2.0, 0.5, 1.5, 3.0]);
+        let out = bag.forward_bag_weighted(&inp, &offs, Some(&psw)).unwrap();
+        let od = out.data().unwrap();
+        let expect_out = [4.0, 6.5, 9.0, 40.5, 45.0, 49.5];
+        for (i, &e) in expect_out.iter().enumerate() {
+            assert!((od[i] - e).abs() < 1e-4, "out[{i}]={} exp {e}", od[i]);
+        }
+
+        let grad_output = Tensor::from_storage(
+            TensorStorage::cpu(vec![1.0f32, 1.0, 1.0, 2.0, 2.0, 2.0]),
+            vec![2, 3],
+            false,
+        )
+        .unwrap();
+        let grads = out.grad_fn().unwrap().backward(&grad_output).unwrap();
+        let gw = grads[0].as_ref().unwrap().data().unwrap();
+        let expect_w = [2.0, 2.0, 2.0, 0.5, 0.5, 0.5, 3.0, 3.0, 3.0, 6.0, 6.0, 6.0];
+        for (i, &e) in expect_w.iter().enumerate() {
+            assert!((gw[i] - e).abs() < 1e-4, "grad_W[{i}]={} exp {e}", gw[i]);
+        }
+        let gp = grads[1].as_ref().unwrap().data().unwrap();
+        let expect_psw = [6.0, 15.0, 48.0, 66.0];
+        for (i, &e) in expect_psw.iter().enumerate() {
+            assert!((gp[i] - e).abs() < 1e-4, "grad_psw[{i}]={} exp {e}", gp[i]);
+        }
+    }
+
+    #[test]
+    fn test_bag_psw_with_padding_idx() {
+        // Oracle (torch 2.11.0): W=[[1,1],[2,2],[4,4],[8,8]], padding_idx=1,
+        // single bag input [0,1,2], mode=sum, psw=[2,5,3].
+        // idx 1 is padding -> excluded from the bag AND from both grads.
+        //   out = 2*[1,1] + 3*[4,4] = [14, 14]
+        //   grad_W   (g=ones) = [[2,2],[0,0],[3,3],[0,0]]
+        //   grad_psw           = [2.0, 0.0, 8.0]   (padding sample's psw grad 0)
+        let rows = vec![
+            vec![1.0, 1.0],
+            vec![2.0, 2.0],
+            vec![4.0, 4.0],
+            vec![8.0, 8.0],
+        ];
+        let mut bag = pretrained_bag(&rows, EmbeddingBagMode::Sum);
+        bag.padding_idx = Some(1);
+        let inp = index_tensor(&[0.0, 1.0, 2.0]);
+        let offs = [0usize];
+        let psw = psw_tensor(&[2.0, 5.0, 3.0]);
+        let out = bag.forward_bag_weighted(&inp, &offs, Some(&psw)).unwrap();
+        let od = out.data().unwrap();
+        assert!((od[0] - 14.0).abs() < 1e-5, "out[0]={}", od[0]);
+        assert!((od[1] - 14.0).abs() < 1e-5, "out[1]={}", od[1]);
+
+        let grad_output =
+            Tensor::from_storage(TensorStorage::cpu(vec![1.0f32, 1.0]), vec![1, 2], false).unwrap();
+        let grads = out.grad_fn().unwrap().backward(&grad_output).unwrap();
+        let gw = grads[0].as_ref().unwrap().data().unwrap();
+        let expect_w = [2.0, 2.0, 0.0, 0.0, 3.0, 3.0, 0.0, 0.0];
+        for (i, &e) in expect_w.iter().enumerate() {
+            assert!((gw[i] - e).abs() < 1e-5, "grad_W[{i}]={} exp {e}", gw[i]);
+        }
+        let gp = grads[1].as_ref().unwrap().data().unwrap();
+        let expect_psw = [2.0, 0.0, 8.0];
+        for (i, &e) in expect_psw.iter().enumerate() {
+            assert!((gp[i] - e).abs() < 1e-5, "grad_psw[{i}]={} exp {e}", gp[i]);
+        }
+    }
+
+    #[test]
+    fn test_bag_psw_end_to_end_autograd() {
+        // End-to-end via the autograd engine: a scalar loss = sum(out) should
+        // populate grads on BOTH the weight parameter and the psw leaf.
+        // Reuses the single-bag oracle (grad_output = ones).
+        let rows = vec![vec![1.0, 2.0], vec![3.0, 4.0], vec![5.0, 6.0]];
+        let bag = pretrained_bag(&rows, EmbeddingBagMode::Sum);
+        let inp = index_tensor(&[0.0, 1.0, 2.0]);
+        let offs = [0usize];
+        let psw = psw_tensor(&[0.5, 2.0, 1.0]);
+        let out = bag.forward_bag_weighted(&inp, &offs, Some(&psw)).unwrap();
+
+        // loss = sum(out); SumBackward broadcasts the scalar grad to ones.
+        let out_data = out.data().unwrap();
+        let total: f32 = out_data.iter().sum();
+        #[derive(Debug)]
+        struct SumBackward<T: Float> {
+            input: Tensor<T>,
+        }
+        impl<T: Float> GradFn<T> for SumBackward<T> {
+            fn backward(
+                &self,
+                grad_output: &Tensor<T>,
+            ) -> FerrotorchResult<Vec<Option<Tensor<T>>>> {
+                let go_val = grad_output.data()?[0];
+                let grad = vec![go_val; self.input.numel()];
+                Ok(vec![Some(Tensor::from_storage(
+                    TensorStorage::cpu(grad),
+                    self.input.shape().to_vec(),
+                    false,
+                )?)])
+            }
+            fn inputs(&self) -> Vec<&Tensor<T>> {
+                vec![&self.input]
+            }
+            fn name(&self) -> &'static str {
+                "SumBackward"
+            }
+        }
+        let loss = Tensor::from_operation(
+            TensorStorage::cpu(vec![total]),
+            vec![],
+            Arc::new(SumBackward { input: out.clone() }),
+        )
+        .unwrap();
+        backward(&loss).unwrap();
+
+        // Weight grad = [[0.5,0.5],[2,2],[1,1]].
+        let wg = bag.weight.tensor().grad().unwrap().unwrap();
+        let wgd = wg.data().unwrap();
+        let expect_w = [0.5, 0.5, 2.0, 2.0, 1.0, 1.0];
+        for (i, &e) in expect_w.iter().enumerate() {
+            assert!((wgd[i] - e).abs() < 1e-5, "W.grad[{i}]={} exp {e}", wgd[i]);
+        }
+        // psw grad = [3,7,11].
+        let pg = psw.grad().unwrap().unwrap();
+        let pgd = pg.data().unwrap();
+        let expect_psw = [3.0, 7.0, 11.0];
+        for (i, &e) in expect_psw.iter().enumerate() {
+            assert!(
+                (pgd[i] - e).abs() < 1e-5,
+                "psw.grad[{i}]={} exp {e}",
+                pgd[i]
+            );
+        }
+    }
+
+    #[test]
+    fn test_bag_psw_rejects_mean_and_max_modes() {
+        // torch raises NotImplementedError with this exact text for non-sum
+        // modes (functional.py:2773-2778). ferrotorch returns Err with the
+        // byte-identical message.
+        let rows = vec![vec![1.0, 2.0], vec![3.0, 4.0]];
+        let inp = index_tensor(&[0.0, 1.0]);
+        let offs = [0usize];
+        let psw = psw_tensor(&[1.0, 1.0]);
+
+        for (mode, mode_str) in [
+            (EmbeddingBagMode::Mean, "mean"),
+            (EmbeddingBagMode::Max, "max"),
+        ] {
+            let bag = pretrained_bag(&rows, mode);
+            let err = bag
+                .forward_bag_weighted(&inp, &offs, Some(&psw))
+                .unwrap_err();
+            let msg = err.to_string();
+            let expected = format!(
+                "embedding_bag: per_sample_weights was not None. per_sample_weights is only \
+                 supported for mode='sum' (got mode='{mode_str}'). Please open a feature request \
+                 on GitHub."
+            );
+            assert!(
+                msg.contains(&expected),
+                "mode={mode_str}: error message must contain torch's exact text.\n got: {msg}\n want: {expected}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_bag_psw_rejects_shape_mismatch() {
+        // psw must have the same shape as input (functional.py:2698-2702).
+        let rows = vec![vec![1.0, 2.0], vec![3.0, 4.0]];
+        let bag = pretrained_bag(&rows, EmbeddingBagMode::Sum);
+        let inp = index_tensor(&[0.0, 1.0]);
+        let offs = [0usize];
+        let psw = psw_tensor(&[1.0]); // wrong length
+        assert!(bag.forward_bag_weighted(&inp, &offs, Some(&psw)).is_err());
+    }
+
+    #[test]
+    fn test_bag_forward_bag_unweighted_unchanged() {
+        // The 2-arg forward_bag (psw=None delegate) must produce the SAME
+        // unweighted sum as before, with NO grad attached.
+        let rows = vec![vec![1.0, 2.0], vec![3.0, 4.0], vec![5.0, 6.0]];
+        let bag = pretrained_bag(&rows, EmbeddingBagMode::Sum);
+        let inp = index_tensor(&[0.0, 1.0, 2.0]);
+        let offs = [0usize];
+        let out = bag.forward_bag(&inp, &offs).unwrap();
+        // sum = [1+3+5, 2+4+6] = [9, 12]
+        assert_eq!(out.data().unwrap(), &[9.0, 12.0]);
+        assert!(!out.requires_grad());
     }
 }
