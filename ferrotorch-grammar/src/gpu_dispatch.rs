@@ -290,10 +290,14 @@ fn compile_dfa_for_number(stage: &NumberEmissionStage) -> CompiledDfa {
 /// - 1 = inside body, accepts content chars / closing `'"'` / `'\\'`
 /// - 2 = closed (after `'"'`), any further char rejects
 /// - 3 = escape-start (`hex_digits == 0`): the 9 escape chars
-/// - 4 = `\u` hex walk, 1 digit seen (`hex_digits == 1`)
-/// - 5 = `\u` hex walk, 2 digits seen (`hex_digits == 2`)
-/// - 6 = `\u` hex walk, 3 digits seen (`hex_digits == 3`)
-/// - 7 = REJECT
+/// - 4 = `\u` hex walk, 1 digit expected (`hex_digits == 1`)
+/// - 5 = `\u` hex walk, 2 digits expected (`hex_digits == 2`)
+/// - 6 = `\u` hex walk, 3 digits expected (`hex_digits == 3`)
+/// - 7 = `\u` hex walk, 4 digits expected (`hex_digits == 4`): the 4th
+///   hex digit completes the escape and returns to body (CPU
+///   `apply_step` `new_n == 5`, state.rs:1154); a non-hex char or `"`
+///   here is REJECTED (state.rs:1819-1826 valid set is hex-only)
+/// - 8 = REJECT
 fn compile_dfa_for_string(stage: &StringEmissionStage) -> CompiledDfa {
     let class_quote = 0u32;
     let class_backslash = 1u32;
@@ -329,12 +333,13 @@ fn compile_dfa_for_string(stage: &StringEmissionStage) -> CompiledDfa {
     char_classes[b'"' as usize] = class_quote;
     char_classes[b'\\' as usize] = class_backslash;
 
-    let num_states = 8usize;
-    let reject = 7u32;
+    let num_states = 9usize;
+    let reject = 8u32;
     let escape_start = 3u32;
     let hex1 = 4u32;
     let hex2 = 5u32;
     let hex3 = 6u32;
+    let hex4 = 7u32;
     let nc = num_classes as usize;
     let mut transitions = vec![reject; num_states * nc];
     let row = |s: usize, c: u32| s * nc + c as usize;
@@ -364,16 +369,20 @@ fn compile_dfa_for_string(stage: &StringEmissionStage) -> CompiledDfa {
     transitions[row(escape_start as usize, class_short_only)] = 1;
     transitions[row(escape_start as usize, class_u)] = hex1;
 
-    // states 4/5/6 (\u hex walk, 1/2/3 digits seen): CPU valid set is a
-    // hex digit `[0-9a-fA-F]`. 'b' and 'f' (class_short_hex) ARE hex
-    // digits, so they advance the walk too. The fourth hex digit
-    // resolves the escape and returns to the body.
-    for &(from, to) in &[(hex1, hex2), (hex2, hex3), (hex3, 1u32)] {
+    // states 4/5/6/7 (\u hex walk, 1/2/3/4 digits expected): CPU valid set
+    // is a hex digit `[0-9a-fA-F]` (state.rs:1813 `hex_digits < 4` and
+    // state.rs:1819-1826 `hex_digits == 4`). 'b' and 'f' (class_short_hex)
+    // ARE hex digits, so they advance the walk too. The FOURTH hex digit
+    // resolves the escape and returns to the body (CPU `apply_step`
+    // `new_n == 5`, state.rs:1154). A non-hex char or `"` before the 4th
+    // hex digit is REJECTED (default reject row), matching the CPU oracle's
+    // requirement of EXACTLY 4 hex digits per the JSON `\uXXXX` spec.
+    for &(from, to) in &[(hex1, hex2), (hex2, hex3), (hex3, hex4), (hex4, 1u32)] {
         transitions[row(from as usize, class_hex_only)] = to;
         transitions[row(from as usize, class_short_hex)] = to;
     }
 
-    // state 7 (REJECT): every class → REJECT (already set).
+    // state 8 (REJECT): every class → REJECT (already set).
 
     let start_state = match stage {
         StringEmissionStage::Start => 0,

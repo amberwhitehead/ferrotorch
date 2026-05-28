@@ -138,7 +138,6 @@ fn tok(vocab: &[String], s: &str) -> usize {
 /// the authority; the GPU must match it. The current GPU DFA accepts the
 /// 3-hex forms `\u123"` and `\u123g` that the CPU rejects, so this fails.
 #[test]
-#[ignore = "divergence #1597: GPU \\uXXXX DFA accepts 3 hex digits; CPU oracle requires 4 (gpu_dispatch.rs:371)"]
 fn divergence_1597_uescape_hex_count_mask_matches_cpu_oracle() {
     let vocab = uescape_vocab();
     let p = string_in_body(&vocab);
@@ -173,7 +172,6 @@ fn divergence_1597_uescape_hex_count_mask_matches_cpu_oracle() {
 /// "accepts 3 hex digits and returns to body" (NOT "accepts 3 then
 /// strictly requires a 4th").
 #[test]
-#[ignore = "divergence #1597: GPU accepts 3-hex `\\u123\"` (closes early); CPU oracle requires a 4th hex (gpu_dispatch.rs:371)"]
 fn divergence_1597_three_hex_then_quote_gpu_closes_early() {
     let vocab = uescape_vocab();
     let p = string_in_body(&vocab);
@@ -210,7 +208,6 @@ fn divergence_1597_three_hex_then_quote_gpu_closes_early() {
 /// behavior (b): it does NOT enforce a hex 4th at all — it is purely
 /// 3-hex-then-body.
 #[test]
-#[ignore = "divergence #1597: GPU treats the 4th `\\uXXX` char as body content (accepts non-hex `g`); CPU oracle requires a 4th HEX (gpu_dispatch.rs:371)"]
 fn divergence_1597_three_hex_then_nonhex_pins_body_fallthrough() {
     let vocab = uescape_vocab();
     let p = string_in_body(&vocab);
