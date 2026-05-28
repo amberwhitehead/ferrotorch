@@ -83,9 +83,22 @@ reduction with the mean divisor decremented).
   the existing `Parameter::set_requires_grad` and is not a separate
   surface here. `EmbeddingBag`'s `Module::forward` still returns a
   non-grad-tracked tensor (per-bag backward unchanged this iter).
-- REQ-10: NOT-STARTED — parity-sweep runner arms for
-  `nn.functional.embedding` and `nn.functional.embedding_bag` are
-  absent. Blocker #1441 (umbrella).
+- REQ-10: SHIPPED — parity-sweep runner arms for
+  `nn.functional.embedding` and `nn.functional.embedding_bag` are wired
+  in `tools/parity-sweep/runner/src/main.rs` (#1441). The `embedding`
+  arm builds `Embedding::from_pretrained` + `with_max_norm` /
+  `with_norm_type` / `with_scale_grad_by_freq` + `Module::forward`
+  (0-D / 1-D / N-D indices, `max_norm` / `norm_type`,
+  `scale_grad_by_freq` + `sparse` forward-inert all RUN); reaches
+  80/80 at `--seeds 8` (0 skip, 0 failed). The `embedding_bag` arm
+  builds `EmbeddingBag::new_with` + `with_*` + `forward_bag` (1-D +
+  offsets) / `Module::forward` (2-D fixed bags) covering
+  sum/mean/max, offsets, include_last_offset, padding_idx (negatives
+  wrapped), max_norm/norm_type; reaches 296/392 at `--seeds 8`
+  (0 failed). The 96 `embedding_bag` skips are ALL
+  `per_sample_weights` samples — a genuine production gap
+  (`forward_bag` takes no per-index multiplier), filed as blocker
+  #1610.
 
 ## Acceptance Criteria
 
@@ -107,7 +120,10 @@ reduction with the mean divisor decremented).
 - [x] AC-8: `scale_grad_by_freq` weighting
   (`test_scale_grad_by_freq_divides_duplicates`,
   `test_scale_grad_by_freq_off_accumulates`).
-- [ ] AC-9: parity-sweep arms wired — blocker #1441.
+- [x] AC-9: parity-sweep arms wired — #1441. `nn.functional.embedding`
+  reaches 80/80 (0 skip, 0 failed); `nn.functional.embedding_bag`
+  reaches 296/392 (0 failed; the 96 skips are all `per_sample_weights`
+  samples, production gap #1610).
 
 ## Architecture
 
@@ -209,11 +225,16 @@ For `embedding_bag`:
 - **mode** — Sum/Mean/Max parity matches upstream.
 - **Empty bag** (offsets imply a 0-length bag) — both return zero
   vector for that bag.
-- **per_sample_weights** — NOT-IMPLEMENTED upstream feature;
-  blocker #1445.
+- **per_sample_weights** — NOT-IMPLEMENTED in ferrotorch
+  (`EmbeddingBag::forward_bag` takes no per-index multiplier); the
+  runner arm returns `Ok(None)` for these samples, mapped to blocker
+  #1610. (Previously mis-cited #1445, which was the max_norm/norm_type
+  work — corrected to #1610.)
 
-Parity-sweep audit entries: both ops declared, runner has no arm.
-Blocker #1441 (umbrella).
+Parity-sweep audit entries: both ops `verified` (#1441) —
+`nn.functional.embedding` at 80/80 (0 skip / 0 failed),
+`nn.functional.embedding_bag` at 296/392 (0 failed; 96 skips =
+`per_sample_weights`, #1610).
 
 ## Verification
 
@@ -250,4 +271,4 @@ Expected grep count after blocker #1441 closes: `>= 1` for each.
 | REQ-7 | SHIPPED | impl: `pub struct EmbeddingBag<T: Float>` + `pub enum EmbeddingBagMode` + `impl Module` in `embedding.rs`; non-test consumer: `pub use embedding::{EmbeddingBag, EmbeddingBagMode}` in `lib.rs` exposes the type for downstream models. |
 | REQ-8 | SHIPPED | impl: both `Module<T> for Embedding<T>` and `Module<T> for EmbeddingBag<T>` impl blocks in `embedding.rs`; non-test consumer: `ferrotorch_optim::Optimizer` iterates `model.parameters_mut()` which surfaces the embedding's weight parameter for every step. |
 | REQ-9 | SHIPPED | impl: free fn `renorm_weight_rows_in_place` (faithful `embedding_renorm_cpu_` translation, persisted in-place weight mutation via `Tensor::update_data`, row norm via `at::norm` special-cased per `aten/src/ATen/native/cpu/ReduceOpsKernel.cpp:191-203` for `norm_type` 0/+inf/-inf) in `embedding.rs`, called by `Embedding::renorm_weight_in_place` and `EmbeddingBag::forward_bag`; `with_max_norm`/`with_norm_type`/`with_scale_grad_by_freq` on `Embedding`, plus `EmbeddingBag::new_with` + `with_max_norm`/`with_norm_type`/`with_scale_grad_by_freq`/`with_sparse`/`with_include_last_offset` + `padding_idx` exclusion in `forward_bag`. Consumer surface: per goal.md S5, `Embedding`/`EmbeddingBag` ARE boundary public API mirroring `torch.nn.Embedding`/`torch.nn.EmbeddingBag` (the user-facing kwargs ARE the deliverable) — grandfathered SHIPPED with no further downstream caller required. `<Embedding as Module>::forward` calls `self.renorm_weight_in_place(&indices)?` before every gather (renorm on the live forward path, no-op when `max_norm` unset); `EmbeddingBag::forward_bag`/`<EmbeddingBag as Module>::forward` consume the bag kwargs; both re-exported via `pub use embedding::{Embedding, EmbeddingBag, EmbeddingBagMode}` in `lib.rs` as the public consumer surface. `EmbeddingBag` per-bag backward remains unimplemented (forward returns a non-grad tensor) — tracked separately. (NB #1566: prior cite of `ferrotorch-llama/src/model.rs embed_tokens` as the renorm consumer was FALSE — `model.rs` uses `Embedding::new(.., None)` with no `max_norm`/`EmbeddingBag`; corrected to the S5 boundary-API rationale.) |
-| REQ-10 | NOT-STARTED | blocker #1441 (umbrella) — parity-sweep runner arms absent for both `nn.functional.embedding` and `nn.functional.embedding_bag`. Lib tests verify the impl end-to-end. |
+| REQ-10 | SHIPPED | impl: the `nn.functional.embedding` arm (builds `Embedding::from_pretrained` + `with_max_norm`/`with_norm_type`/`with_scale_grad_by_freq` + `Module::forward`) and the `nn.functional.embedding_bag` arm (builds `EmbeddingBag::new_with` + `with_*` + `Parameter::set_data` via `Module::parameters_mut` + `forward_bag`/`Module::forward`) in `tools/parity-sweep/runner/src/main.rs` (#1441). Non-test production consumer of the wired surface: `<Embedding as Module>::forward` (driven on every Llama token via `ferrotorch-llama/src/model.rs` `embed_tokens.forward`) and `EmbeddingBag` as boundary public API re-exported at `ferrotorch-nn/src/lib.rs` `pub use embedding::{Embedding, EmbeddingBag, EmbeddingBagMode}` (goal.md S5). Sweep `--seeds 8`: embedding 80/80 (0 skip, 0 failed); embedding_bag 296/392 (0 failed). The 96 embedding_bag skips are all `per_sample_weights` samples — production gap #1610 (`forward_bag` takes no per-index multiplier). `padding_idx` is forward-inert for `F.embedding` (gathers the actual weight row; only backward grad zeroed) so the arm passes `None` to the layer to match torch's functional. |

@@ -54,11 +54,18 @@ dispatch.
 - REQ-8: All padding layers impl `Module<T>` with `forward = pad`,
   no parameters (`parameters()` returns `vec![]`), and
   `train`/`eval`/`is_training`.
-- REQ-9: NOT-STARTED — parity-sweep runner arms for all 6 padding
-  ops (`nn.functional.pad`, `nn.functional.constant_pad_nd`,
-  `nn.functional.reflection_pad{1,2}d`,
-  `nn.functional.replication_pad{1,2}d`) are absent. Blocker #1441
-  tracks the runner-arm gap (umbrella for LAYERS).
+- REQ-9: NOT-STARTED — the `nn.functional.pad` arm IS wired in
+  `tools/parity-sweep/runner/src/main.rs` (#1441): it decodes the pad
+  tuple (2→1d, 4→2d, 6→3d), the mode (constant/reflect/replicate/
+  circular), and the value (positional or kwarg), dispatching to
+  `functional_pad_{1,2,3}d`. Sweep `--seeds 8`: 376/408, 0 failed; the
+  32 skips are ALL negative-pad (crop) samples — a genuine production
+  gap (`functional_pad_{1,2,3}d` take `usize`, cannot crop), filed as
+  blocker #1611. op_db emits only `mode='constant'` for
+  `nn.functional.pad`. The OTHER 5 pad ops
+  (`nn.functional.constant_pad_nd`, `reflection_pad{1,2}d`,
+  `replication_pad{1,2}d`) still have NO runner arm, so REQ-9 stays
+  NOT-STARTED until those arms land under #1441.
 
 ## Acceptance Criteria
 
@@ -76,7 +83,9 @@ dispatch.
   `test_functional_pad_{1,2,3}d_constant_uses_value` (#1553).
 - [ ] AC-6: GPU forward — currently CPU-only. (Not declared as a
   REQ; GPU-side padding kernels are tracked elsewhere.)
-- [ ] AC-7: parity-sweep arms wired — blocker #1441.
+- [ ] AC-7: parity-sweep arms wired — #1441. `nn.functional.pad` is
+  wired (376/408, 0 failed; 32 negative-pad skips → #1611); the other
+  5 pad ops remain unwired, so AC-7 stays open.
 
 ## Architecture
 
@@ -164,8 +173,10 @@ For each:
   `value: T` through `pad_Nd_constant` to do the same (#1553).
 - **Negative pad** — upstream accepts negative padding to crop;
   ferrotorch's `usize`-typed padding values reject this at the type
-  level. This is a known divergence; cropping must be done via slice
-  ops. (Tracked separately if downstream needs negative-pad parity.)
+  level. This is a genuine production gap, filed as blocker #1611;
+  the `nn.functional.pad` runner arm returns `Ok(None)` for
+  negative-pad samples (the 32 skips at `--seeds 8`). Cropping must be
+  done via slice ops until #1611 lands an `i64`-typed pad path.
 - **Reflect with `pad >= input_dim`** — upstream raises
   `RuntimeError`; ferrotorch returns `InvalidArgument`.
 - **Replicate with empty input dim** — both implementations need at
@@ -175,9 +186,11 @@ For each:
 - **NaN / Inf preservation** — both modes pass NaN/Inf through
   unchanged (constant `value` is literally placed).
 
-Parity-sweep audit entries: all 6 ops declared in route, runner has
-no arms — `parity_audit.json` reports `missing` for each. Blocker
-#1441 tracks the runner-arm wiring.
+Parity-sweep audit entries: `nn.functional.pad` is now `verified` in
+`parity_audit.json` (#1441) at 376/408, 0 failed (the 32 negative-pad
+skips map to #1611). The other 5 pad ops
+(`constant_pad_nd`, `reflection_pad{1,2}d`, `replication_pad{1,2}d`)
+still have no runner arm and stay un-recorded pending #1441.
 
 ## Verification
 
@@ -221,6 +234,4 @@ Expected grep count after blocker #1441 closes: `>= 1` for each.
 | REQ-6 | SHIPPED | impl: `pub struct ReplicationPad{1,2,3}d<T: Float>` in `padding.rs`; non-test consumer: `pub use` in `lib.rs`. |
 | REQ-7 | SHIPPED | impl: `pub struct CircularPad{1,2,3}d<T: Float>` in `padding.rs`; non-test consumer: `pub use` in `lib.rs`. |
 | REQ-8 | SHIPPED | impl: `macro_rules! impl_padding_module` in `padding.rs` generates the `Module<T>` impls for all 12 structs; non-test consumer: `ferrotorch_optim` walks `Module::parameters()` of containers that include padding layers (every padding layer returns the empty parameter list, which is the correct behavior). |
-| REQ-9 | NOT-STARTED | blocker #1441 (umbrella) — parity-sweep runner arms absent for all 6 padding ops. Impl is end-to-end verified by 40+ lib tests; only the runner-arm wiring is missing. |
-</content>
-</invoke>
+| REQ-9 | NOT-STARTED | The `nn.functional.pad` arm IS wired in `tools/parity-sweep/runner/src/main.rs` (#1441): decodes pad tuple/mode/value → `functional_pad_{1,2,3}d`; sweep `--seeds 8` 376/408, 0 failed. The 32 skips are all negative-pad (crop) — production gap #1611 (`functional_pad_{1,2,3}d` take `usize`). The OTHER 5 pad ops (`constant_pad_nd`, `reflection_pad{1,2}d`, `replication_pad{1,2}d`) still have NO runner arm, so REQ-9 stays NOT-STARTED until those land (#1441). Impl is end-to-end verified by 40+ lib tests. |

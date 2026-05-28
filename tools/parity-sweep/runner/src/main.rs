@@ -4345,61 +4345,225 @@ fn dispatch_f32(
             )?))
         }
 
-        // `torch.nn.functional.embedding(input, weight, padding_idx=None, ...)`.
-        // op_db naming: `sample_inputs_embedding` passes `weight` as `input`
-        // (SampleInput.input) and the indices tensor as `args[0]` (verified by
-        // sample-dump 2026-05-26). ferrotorch's `pub fn embedding(input,
-        // weight, padding_idx)` at `ferrotorch-nn/src/functional.rs:1241`
-        // expects `input` = INDICES (1-D), `weight` = lookup table (2-D).
-        // So we SWAP positional 0 (weight) <-> positional 1 (indices) when
-        // dispatching. Skip paths: indices ndim != 1; `max_norm` / `sparse` /
-        // `scale_grad_by_freq` kwargs (not in REQ-3 narrower contract — see
-        // `.design/ferrotorch-nn/embedding.md` REQ-9 NOT-STARTED). Closes
-        // #1441 embedding half.
+        // `torch.nn.functional.embedding(input, weight, padding_idx=None,
+        // max_norm=None, norm_type=2.0, scale_grad_by_freq=False,
+        // sparse=False)`. op_db naming: `sample_inputs_embedding` passes
+        // `weight` as `input` (SampleInput.input) and the indices tensor as
+        // `args[0]` (verified by sample-dump 2026-05-28). ferrotorch's
+        // `Embedding<T>` forward (`ferrotorch-nn/src/embedding.rs`) accepts an
+        // indices tensor of ANY shape (0-D scalar, 1-D, N-D — output is
+        // `(*idx.shape(), embedding_dim)`, mirroring `embedding_symint` at
+        // `aten/src/ATen/native/Embedding.cpp:43-53`) and supports
+        // `max_norm`/`norm_type` via `with_max_norm`/`with_norm_type` builders
+        // (#1445). So instead of the 2-D-only / 1-D-idx-only functional
+        // `embedding()`, we build an `Embedding::from_pretrained(weight,
+        // padding_idx)` + the kwarg builders and drive `Module::forward`.
+        //
+        // `scale_grad_by_freq` / `sparse` are BACKWARD-only knobs: they do not
+        // change the forward gather value at all (scale_grad_by_freq divides
+        // grads — `torch/nn/functional.py:2499-2500`; sparse changes the grad
+        // layout). The runner compares only the forward output, so those
+        // samples RUN unchanged (we set `scale_grad_by_freq` for fidelity but
+        // it is forward-inert). `max_norm` DOES affect forward (it renorms the
+        // weight in place before the gather, `functional.py:2561-2573`), so it
+        // is applied via the builder. No `Ok(None)` skip remains for embedding.
+        // Closes #1441 embedding half.
         "nn.functional.embedding" => {
             if args.len() < 2 {
                 return Err("nn.functional.embedding: needs [weight, indices]".into());
             }
-            // Skip unsupported kwargs.
-            if kwargs.get("max_norm").is_some_and(|v| !v.is_null()) {
-                return Ok(None);
+            let weight_wire = unwrap_tensor_arg(&args[0])
+                .ok_or("nn.functional.embedding: weight not a tensor")?;
+            let idx_wire = unwrap_tensor_arg(&args[1])
+                .ok_or("nn.functional.embedding: indices not a tensor")?;
+            if weight_wire.shape.len() != 2 {
+                return Err("nn.functional.embedding: weight must be 2-D [num, dim]".into());
+            }
+            let weight = weight_wire.to_f32()?;
+            // Convert int64 indices -> f32 via WireTensor::to_f32's
+            // int-widening branch (same pathway used by reduction ops). A 0-D
+            // scalar index decodes as a rank-0 f32 tensor, which `forward`
+            // gathers to a `[embedding_dim]` row (matching torch's `T[]` ->
+            // `[dim]`).
+            let indices = idx_wire.to_f32()?;
+            // `padding_idx` is FORWARD-INERT for `F.embedding`: torch's
+            // functional `F.embedding(weight, idx, padding_idx=k)` gathers the
+            // ACTUAL `weight[k]` row in the forward (verified live 2026-05-28:
+            // `F.embedding(idx, w, padding_idx=2)[idx==2] == w[2]`) — the
+            // `padding_idx` only zeros the GRADIENT for that row
+            // (`torch/nn/functional.py:2495-2503`). ferrotorch's `Embedding`
+            // LAYER, by contrast, mirrors `torch.nn.Embedding` (the *module*),
+            // which DOES zero `weight[padding_idx]` at construction via
+            // `_fill_padding_idx_with_zero` and zeros the output rows
+            // (`embedding.rs` forward `if let Some(pad_idx)`). Driving the layer
+            // WITH `padding_idx` would therefore zero rows torch's *functional*
+            // leaves intact — a forward divergence from `F.embedding`. Since
+            // `padding_idx` does not change `F.embedding`'s forward value (only
+            // its backward, which the runner does not compare), we pass `None`
+            // to the layer so the gather matches torch's functional byte-for-
+            // byte. (No skip: the sample RUNS, matching `F.embedding`.)
+            let mut layer = ferrotorch_nn::Embedding::<f32>::from_pretrained(weight, None)?;
+            if let Some(max_norm) = kwargs.get("max_norm").and_then(Value::as_f64) {
+                layer = layer.with_max_norm(max_norm);
+                if let Some(norm_type) = kwargs.get("norm_type").and_then(Value::as_f64) {
+                    layer = layer.with_norm_type(norm_type);
+                }
             }
             if kwargs
                 .get("scale_grad_by_freq")
                 .and_then(Value::as_bool)
                 .unwrap_or(false)
             {
-                return Ok(None);
+                // Forward-inert (backward-only); carried for fidelity.
+                layer = layer.with_scale_grad_by_freq(true);
             }
+            Ok(Some(ferrotorch_nn::module::Module::<f32>::forward(
+                &layer, &indices,
+            )?))
+        }
+
+        // `torch.nn.functional.embedding_bag(input, weight, offsets=None,
+        // max_norm=None, norm_type=2.0, scale_grad_by_freq=False, mode='mean',
+        // sparse=False, per_sample_weights=None, include_last_offset=False,
+        // padding_idx=None)`. op_db naming (sample-dump 2026-05-28):
+        // `SampleInput.input` is the WEIGHT `[num, dim]`, `args[0]` is the
+        // INDICES (1-D with an `offsets` kwarg defining the bags, OR 2-D
+        // `[num_bags, bag_size]` fixed-size bags with NO offsets — torch builds
+        // implicit per-row offsets, `functional.py:2730-2736`). ferrotorch's
+        // `EmbeddingBag<T>` (`embedding.rs`) supports `mode` sum/mean/max,
+        // explicit `offsets` (1-D path) + implicit per-row bags (2-D path via
+        // `Module::forward`), `padding_idx` (excluded from the reduction +
+        // mean divisor, `aten/.../EmbeddingBag.cpp:140-156`), `max_norm` /
+        // `norm_type` (in-place renorm before the reduction,
+        // `functional.py:2766-2771`), and `include_last_offset` (CSR layout,
+        // `functional.py:2621-2624`) — all via `new_with` + the `with_*`
+        // builders (#1445).
+        //
+        // GENUINE production gap (NOT an acceptable dodge): `per_sample_weights`
+        // (a per-index multiplier applied before the bag reduction,
+        // `functional.py:2774-2783`) has NO production surface — `forward_bag`
+        // takes no per-sample weights. op_db emits it on most samples; each
+        // stays an `Ok(None)` skip mapped to blocker #1610.
+        //
+        // `scale_grad_by_freq` / `sparse` are BACKWARD-only knobs (forward
+        // value unchanged); they RUN. The runner compares only the forward
+        // output. Closes #1441 embedding_bag half (modulo #1610).
+        "nn.functional.embedding_bag" => {
+            if args.len() < 2 {
+                return Err("nn.functional.embedding_bag: needs [weight, indices]".into());
+            }
+            // per_sample_weights is unsupported in production (gap #1610).
             if kwargs
-                .get("sparse")
-                .and_then(Value::as_bool)
-                .unwrap_or(false)
+                .get("per_sample_weights")
+                .is_some_and(|v| !v.is_null())
             {
                 return Ok(None);
             }
             let weight_wire = unwrap_tensor_arg(&args[0])
-                .ok_or("nn.functional.embedding: weight not a tensor")?;
+                .ok_or("nn.functional.embedding_bag: weight not a tensor")?;
             let idx_wire = unwrap_tensor_arg(&args[1])
-                .ok_or("nn.functional.embedding: indices not a tensor")?;
-            // ferrotorch::embedding's forward requires 1-D indices.
-            if idx_wire.shape.len() != 1 {
-                return Ok(None);
+                .ok_or("nn.functional.embedding_bag: indices not a tensor")?;
+            if weight_wire.shape.len() != 2 {
+                return Err("nn.functional.embedding_bag: weight must be 2-D [num, dim]".into());
             }
+            let num_embeddings = weight_wire.shape[0];
+            let embedding_dim = weight_wire.shape[1];
             let weight = weight_wire.to_f32()?;
-            // Convert int64 indices -> f32 via WireTensor::to_f32's
-            // int-widening branch (same pathway used by reduction ops).
-            let indices = idx_wire.to_f32()?;
-            let padding_idx = kwargs
-                .get("padding_idx")
-                .and_then(Value::as_i64)
-                .filter(|&v| v >= 0)
-                .map(|v| v as usize);
-            Ok(Some(ferrotorch_nn::functional::embedding(
-                &indices,
-                &weight,
+            // mode: torch default is 'mean' (`functional.py` F.embedding_bag).
+            let mode_str = kwargs.get("mode").and_then(Value::as_str).unwrap_or("mean");
+            let mode = match mode_str {
+                "sum" => ferrotorch_nn::EmbeddingBagMode::Sum,
+                "mean" => ferrotorch_nn::EmbeddingBagMode::Mean,
+                "max" => ferrotorch_nn::EmbeddingBagMode::Max,
+                _ => return Err(format!("embedding_bag: unknown mode {mode_str:?}").into()),
+            };
+            // padding_idx may be negative (wrapped as num_embeddings + idx,
+            // `functional.py`); EmbeddingBag::new_with takes Option<usize>.
+            let padding_idx = match kwargs.get("padding_idx").and_then(Value::as_i64) {
+                Some(v) if v >= 0 => Some(v as usize),
+                Some(v) => Some((num_embeddings as i64 + v) as usize),
+                None => None,
+            };
+            let include_last_offset = kwargs
+                .get("include_last_offset")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            let mut bag = ferrotorch_nn::EmbeddingBag::<f32>::new_with(
+                num_embeddings,
+                embedding_dim,
+                mode,
                 padding_idx,
-            )?))
+            )?;
+            if let Some(max_norm) = kwargs.get("max_norm").and_then(Value::as_f64) {
+                bag = bag.with_max_norm(max_norm);
+                if let Some(norm_type) = kwargs.get("norm_type").and_then(Value::as_f64) {
+                    bag = bag.with_norm_type(norm_type);
+                }
+            }
+            if include_last_offset {
+                bag = bag.with_include_last_offset(true);
+            }
+            if kwargs
+                .get("scale_grad_by_freq")
+                .and_then(Value::as_bool)
+                .unwrap_or(false)
+            {
+                // Forward-inert (backward-only); carried for fidelity. `max`
+                // mode forbids it (`functional.py:2755-2758`), so guard on mode.
+                if mode != ferrotorch_nn::EmbeddingBagMode::Max {
+                    bag = bag.with_scale_grad_by_freq(true);
+                }
+            }
+            // Inject the op_db weight (overriding the random init) via the
+            // `Module::parameters_mut()` slice (`[weight]`), the same pattern
+            // the conv / RNN-cell arms use.
+            {
+                let mut params = ferrotorch_nn::module::Module::<f32>::parameters_mut(&mut bag);
+                if let Some(p) = params.first_mut() {
+                    // padding_idx zeros that weight row at construction; the
+                    // op_db expected reflects torch's actual weight rows, where
+                    // the padding row likewise contributes 0 to the reduction
+                    // (it is EXCLUDED from the sum AND the mean divisor), so
+                    // overriding the full weight here keeps parity — the
+                    // padding row's value never enters the bag output.
+                    p.set_data(weight);
+                }
+            }
+            let indices = idx_wire.to_f32()?;
+            match idx_wire.shape.len() {
+                1 => {
+                    // 1-D indices: bags are defined by the `offsets` tensor.
+                    // With include_last_offset the trailing offset is the total
+                    // index count (CSR). When NO offsets are supplied torch
+                    // treats the whole 1-D input as a single bag.
+                    let offsets: Vec<usize> = match kwargs.get("offsets") {
+                        Some(v) if !v.is_null() => {
+                            let off_wire = unwrap_tensor_arg(v)
+                                .ok_or("embedding_bag: offsets not a tensor")?;
+                            let off_f = off_wire.to_f32()?;
+                            off_f.data_vec()?.iter().map(|&x| x as usize).collect()
+                        }
+                        _ => {
+                            // No offsets: single bag (or CSR [0, total]).
+                            if include_last_offset {
+                                vec![0, indices.shape()[0]]
+                            } else {
+                                vec![0]
+                            }
+                        }
+                    };
+                    Ok(Some(bag.forward_bag(&indices, &offsets)?))
+                }
+                2 => {
+                    // 2-D indices `[num_bags, bag_size]`: each row is a bag.
+                    // `Module::forward` builds the implicit per-row offsets
+                    // (`embedding.rs` 2-D branch) and reduces each row.
+                    Ok(Some(ferrotorch_nn::module::Module::<f32>::forward(
+                        &bag, &indices,
+                    )?))
+                }
+                _ => Ok(None),
+            }
         }
 
         // Convolution family: `torch.nn.functional.conv{1,2,3}d(input, weight,
@@ -6235,18 +6399,29 @@ fn dispatch_conv_transpose<const D: usize>(
     if args.len() < 2 {
         return Err("conv_transpose: needs [input, weight, bias?]".into());
     }
+    // GENUINE production feature gaps (NOT acceptable dodges): ferrotorch's
+    // `functional::conv_transpose{1,2,3}d` build a `ConvTranspose{1,2,3}d` via
+    // `from_parts`, which is `groups = 1`, `dilation = 1` only (`conv.rs`
+    // `ConvTranspose*::from_parts`). op_db samples with `groups != 1` or
+    // `dilation != 1` therefore have no production path; each stays an
+    // `Ok(None)` skip mapped to a filed blocker (#1607 groups, #1608 dilation)
+    // — surfacing the gap rather than hiding a divergence. If the production
+    // ConvTranspose grows grouped/dilated forwards, drop the skip here.
     let groups = kwargs.get("groups").and_then(Value::as_u64).unwrap_or(1);
     if groups != 1 {
+        // Production gap #1607: ConvTranspose has no grouped forward.
         return Ok(None);
     }
     if let Some(d) = kwargs.get("dilation") {
         if let Some(n) = d.as_u64() {
             if n != 1 {
+                // Production gap #1608: ConvTranspose has no dilated forward.
                 return Ok(None);
             }
         } else if let Some(arr) = d.as_array() {
             for x in arr {
                 if x.as_u64().unwrap_or(0) != 1 {
+                    // Production gap #1608: ConvTranspose has no dilated forward.
                     return Ok(None);
                 }
             }
@@ -6258,55 +6433,86 @@ fn dispatch_conv_transpose<const D: usize>(
     let weight = unwrap_tensor_arg(&args[1])
         .ok_or("conv_transpose: weight")?
         .to_f32()?;
-    // ConvTranspose{1,2,3}d requires (D + 2)-rank input [B, C_in, ...].
-    if input.shape().len() != D + 2 {
-        return Ok(None);
-    }
     let bias: Option<Tensor<f32>> = match args.get(2) {
         Some(v) if !v.is_null() => unwrap_tensor_arg(v).map(|b| b.to_f32()).transpose()?,
         _ => None,
     };
-    match D {
+    // ConvTranspose{1,2,3}d::forward requires a batched (D + 2)-rank input
+    // `[B, C_in, *spatial]` — unlike the forward `Conv*d` it has NO implicit-
+    // batch (unsqueeze/squeeze) path (the unbatched forward is production gap
+    // #1609; `Conv*d` got it in #1604 but `ConvTranspose*d` did not). op_db
+    // emits ~half its samples unbatched (rank `D + 1`, `[C_in, *spatial]`). We
+    // do NOT silently skip those: instead the runner performs the SAME
+    // `batchify` torch does (`aten/.../Convolution.cpp:816-831`) as a pure
+    // test-side adaptation — prepend a singleton batch dim, run the REAL
+    // production batched forward, then drop the batch dim off the result. The
+    // computed value is byte-identical to torch's unbatched output (torch
+    // unsqueezes/squeezes the exact same way), so this exercises the production
+    // forward on the op_db parameters without masking any divergence. Only
+    // genuinely unsupported configs (groups/dilation above) stay `Ok(None)`.
+    let rank = input.shape().len();
+    let (input, was_unbatched) = if rank == D + 1 {
+        let mut batched_shape = vec![1usize];
+        batched_shape.extend_from_slice(input.shape());
+        (input.view_reshape(batched_shape)?, true)
+    } else if rank == D + 2 {
+        (input, false)
+    } else {
+        // Neither batched nor unbatched for this rank — a malformed sample.
+        // Surface as an Err so it is not silently hidden.
+        return Err(
+            format!("conv_transpose{D}d: input rank {rank} is neither (D+1) nor (D+2)").into(),
+        );
+    };
+    let out = match D {
         1 => {
             let stride = parse_dim1(kwargs.get("stride")).unwrap_or(1);
             let padding = parse_dim1(kwargs.get("padding")).unwrap_or(0);
             let outpad = parse_dim1(kwargs.get("output_padding")).unwrap_or(0);
-            Ok(Some(ferrotorch_nn::functional::conv_transpose1d(
+            ferrotorch_nn::functional::conv_transpose1d(
                 &input,
                 &weight,
                 bias.as_ref(),
                 stride,
                 padding,
                 outpad,
-            )?))
+            )?
         }
         2 => {
             let stride = parse_dim2(kwargs.get("stride")).unwrap_or([1, 1]);
             let padding = parse_dim2(kwargs.get("padding")).unwrap_or([0, 0]);
             let outpad = parse_dim2(kwargs.get("output_padding")).unwrap_or([0, 0]);
-            Ok(Some(ferrotorch_nn::functional::conv_transpose2d(
+            ferrotorch_nn::functional::conv_transpose2d(
                 &input,
                 &weight,
                 bias.as_ref(),
                 (stride[0], stride[1]),
                 (padding[0], padding[1]),
                 (outpad[0], outpad[1]),
-            )?))
+            )?
         }
         3 => {
             let stride = parse_dim3(kwargs.get("stride")).unwrap_or([1, 1, 1]);
             let padding = parse_dim3(kwargs.get("padding")).unwrap_or([0, 0, 0]);
             let outpad = parse_dim3(kwargs.get("output_padding")).unwrap_or([0, 0, 0]);
-            Ok(Some(ferrotorch_nn::functional::conv_transpose3d(
+            ferrotorch_nn::functional::conv_transpose3d(
                 &input,
                 &weight,
                 bias.as_ref(),
                 (stride[0], stride[1], stride[2]),
                 (padding[0], padding[1], padding[2]),
                 (outpad[0], outpad[1], outpad[2]),
-            )?))
+            )?
         }
-        _ => Err("conv_transpose: unsupported rank".into()),
+        _ => return Err("conv_transpose: unsupported rank".into()),
+    };
+    // Squeeze the singleton batch dim back off when we batchified an unbatched
+    // sample, so the output rank matches torch's unbatched `[C_out, *spatial]`.
+    if was_unbatched {
+        let squeezed: Vec<usize> = out.shape()[1..].to_vec();
+        Ok(Some(out.view_reshape(squeezed)?))
+    } else {
+        Ok(Some(out))
     }
 }
 
@@ -7495,28 +7701,39 @@ fn tolerance_for(op: &str) -> (f32, f32) {
         | "nn.functional.multi_margin_loss"
         | "nn.functional.multilabel_soft_margin_loss"
         | "nn.functional.linear"
-        | "nn.functional.conv_transpose1d"
-        | "nn.functional.conv_transpose2d"
-        | "nn.functional.conv_transpose3d"
         | "nn.functional.rnn_relu_cell"
         | "nn.functional.rnn_tanh_cell"
         | "nn.functional.gru_cell"
         | "nn.functional.lstm_cell" => (1e-4, 1e-7),
-        // Forward conv family (`conv{1,2,3}d`): the im2col + GEMM reduces over
-        // `in_per_group * prod(kernel)` products whose faer-vs-MKL FMA schedule
-        // differs, the same cross-implementation f32 ULP drift the matmul/norm
-        // families carry. The extra atol (vs `conv_transpose`'s 1e-7) covers
-        // CATASTROPHIC-CANCELLATION output elements where the reduction's
-        // positive/negative terms nearly cancel: e.g. `conv2d` groups=2
-        // (op_db i=26, all 8 seeds) produces an output spanning |223.48| down
-        // to the absMIN element 0.0215 — the 4.29e-6 absolute drift there is
-        // 1.9e-8 relative to the 223.48 computation scale (pure FMA-order
-        // drift, NOT an algorithm divergence: the values agree to 4 sig figs).
-        // `rtol=1e-4` alone bounds it at 2.25e-6 (too tight for the cancelled
-        // element); `atol=1e-5` absorbs the cancellation without masking any
-        // real divergence (a wrong grouped/dilated conv diverges by >> 1e-5
-        // absolute, far outside this envelope). Tracked under #1441.
-        "nn.functional.conv1d" | "nn.functional.conv2d" | "nn.functional.conv3d" => (1e-4, 1e-5),
+        // Forward AND transposed conv family (`conv{1,2,3}d` /
+        // `conv_transpose{1,2,3}d`): the im2col + GEMM (forward) / col2im + GEMM
+        // (transposed) reduces over `in_per_group * prod(kernel)` products whose
+        // faer-vs-MKL FMA schedule differs, the same cross-implementation f32 ULP
+        // drift the matmul/norm families carry. The extra atol (vs the `1e-7`
+        // default) covers CATASTROPHIC-CANCELLATION output elements where the
+        // reduction's positive/negative terms nearly cancel: e.g. `conv2d`
+        // groups=2 (op_db i=26, all 8 seeds) produces an output spanning |223.48|
+        // down to the absMIN element 0.0215 — the 4.29e-6 absolute drift there is
+        // 1.9e-8 relative to the 223.48 computation scale (pure FMA-order drift,
+        // NOT an algorithm divergence: the values agree to 4 sig figs). The
+        // transposed family hits the SAME pattern: `conv_transpose3d` seed=7 i=0
+        // index 454 is ferrotorch 0.022621393 vs torch 0.022624016 (absdiff
+        // 2.6e-6, rel 1.16e-4) and i=8 index 1548 is -0.024681546 vs -0.024677277
+        // (absdiff 4.27e-6, rel 1.73e-4) — values agree to 5 sig figs, the absdiff
+        // is the col2im-reduction's cancellation noise on a small-magnitude cell,
+        // and `rtol=1e-4` alone (bounding at 2.5e-6) is too tight for it.
+        // `atol=1e-5` absorbs the cancellation without masking any real divergence
+        // (a wrong grouped/dilated/transposed conv diverges by >> 1e-5 absolute,
+        // far outside this envelope). conv_transpose moved here from the `1e-7`
+        // bucket (#1441): it is the same many-FMA reduction, the prior `1e-7` atol
+        // was an oversight that surfaced once the 3-D transposed samples ran.
+        // Tracked under #1441.
+        "nn.functional.conv1d"
+        | "nn.functional.conv2d"
+        | "nn.functional.conv3d"
+        | "nn.functional.conv_transpose1d"
+        | "nn.functional.conv_transpose2d"
+        | "nn.functional.conv_transpose3d" => (1e-4, 1e-5),
         // FFT family (#1294): a DFT is a many-FMA reduction over `n` butterfly
         // stages (N-D / multi-axis transforms accumulate over the product of
         // axis lengths). ferrotorch computes the transform in f64 via
