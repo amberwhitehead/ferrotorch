@@ -4281,10 +4281,20 @@ pub fn addmm_differentiable<T: Float>(
     let prod = mm_rows(m1, m2, m, k, n);
 
     // out = beta*self_broadcast + alpha*prod.
-    let bias_b = broadcast_data_to(bias, &[m, n])?;
+    // When beta == 0 the self/bias term is DROPPED entirely (never read), so
+    // nans/infs in self do not propagate — matches torch's
+    // `aten/src/ATen/native/cpu/BlasKernel.cpp:161-162` (`if (beta == 0) c = alpha*dot;`)
+    // and `aten/src/ATen/native/LinearAlgebra.cpp:1442` (self copied only when beta != 0).
     let mut out = vec![<T as num_traits::Zero>::zero(); m * n];
-    for i in 0..m * n {
-        out[i] = beta * bias_b[i] + alpha * prod[i];
+    if beta == <T as num_traits::Zero>::zero() {
+        for i in 0..m * n {
+            out[i] = alpha * prod[i];
+        }
+    } else {
+        let bias_b = broadcast_data_to(bias, &[m, n])?;
+        for i in 0..m * n {
+            out[i] = beta * bias_b[i] + alpha * prod[i];
+        }
     }
     let storage = TensorStorage::cpu(out);
     let shape = vec![m, n];
@@ -4471,10 +4481,20 @@ pub fn addmv_differentiable<T: Float>(
         }
         *slot = acc;
     }
-    let bias_b = broadcast_data_to(bias, &[m])?;
+    // When beta == 0 the self term is DROPPED entirely (never read), so
+    // nans/infs in self do not propagate — matches torch's
+    // `aten/src/ATen/native/Blas.cpp:77-79,90` ("when beta==0, values in self
+    // should be ignored ... self copied only when betaval != 0.0").
     let mut out = vec![<T as num_traits::Zero>::zero(); m];
-    for i in 0..m {
-        out[i] = beta * bias_b[i] + alpha * prod[i];
+    if beta == <T as num_traits::Zero>::zero() {
+        for i in 0..m {
+            out[i] = alpha * prod[i];
+        }
+    } else {
+        let bias_b = broadcast_data_to(bias, &[m])?;
+        for i in 0..m {
+            out[i] = beta * bias_b[i] + alpha * prod[i];
+        }
     }
     let storage = TensorStorage::cpu(out);
     let shape = vec![m];
@@ -4596,13 +4616,28 @@ pub fn addr_differentiable<T: Float>(
     let n = vec2.shape()[0];
     let v1 = vec1.data()?;
     let v2 = vec2.data()?;
-    let bias_b = broadcast_data_to(bias, &[m, n])?;
+    // When beta == 0 the self term is DROPPED entirely (never read), so
+    // nans/infs in self do not propagate — matches torch's
+    // `aten/src/ATen/native/cpu/LinearAlgebraKernel.cpp:53-55,60`
+    // ("when beta == 0, values in self should be ignored, nans and infs in self
+    // should not propagate" + `return alpha_val * vec1_val * vec2_val;`).
     let mut out = vec![<T as num_traits::Zero>::zero(); m * n];
-    for i in 0..m {
-        let av1 = alpha * v1[i];
-        let row = i * n;
-        for j in 0..n {
-            out[row + j] = beta * bias_b[row + j] + av1 * v2[j];
+    if beta == <T as num_traits::Zero>::zero() {
+        for i in 0..m {
+            let av1 = alpha * v1[i];
+            let row = i * n;
+            for j in 0..n {
+                out[row + j] = av1 * v2[j];
+            }
+        }
+    } else {
+        let bias_b = broadcast_data_to(bias, &[m, n])?;
+        for i in 0..m {
+            let av1 = alpha * v1[i];
+            let row = i * n;
+            for j in 0..n {
+                out[row + j] = beta * bias_b[row + j] + av1 * v2[j];
+            }
         }
     }
     let storage = TensorStorage::cpu(out);
@@ -4763,10 +4798,20 @@ pub fn baddbmm_differentiable<T: Float>(
         );
         prod[c_off..c_off + m * n].copy_from_slice(&slab);
     }
-    let bias_b = broadcast_data_to(bias, &[bsz, m, n])?;
+    // When beta == 0 the self term is DROPPED entirely (never read), so
+    // nans/infs in self do not propagate — matches torch's
+    // `aten/src/ATen/native/LinearAlgebra.cpp:1682-1684`
+    // ("For beta == 0, the r's value will be ignored, especially for nan value.").
     let mut out = vec![<T as num_traits::Zero>::zero(); bsz * m * n];
-    for i in 0..out.len() {
-        out[i] = beta * bias_b[i] + alpha * prod[i];
+    if beta == <T as num_traits::Zero>::zero() {
+        for i in 0..out.len() {
+            out[i] = alpha * prod[i];
+        }
+    } else {
+        let bias_b = broadcast_data_to(bias, &[bsz, m, n])?;
+        for i in 0..out.len() {
+            out[i] = beta * bias_b[i] + alpha * prod[i];
+        }
     }
     let storage = TensorStorage::cpu(out);
     let shape = vec![bsz, m, n];
@@ -4917,10 +4962,20 @@ pub fn addbmm_differentiable<T: Float>(
             acc[i] += v;
         }
     }
-    let bias_b = broadcast_data_to(bias, &[m, n])?;
+    // When beta == 0 the self term is DROPPED entirely (never read), so
+    // nans/infs in self do not propagate — matches torch's
+    // `aten/src/ATen/native/LinearAlgebra.cpp:1682-1684`
+    // ("For beta == 0, the r's value will be ignored, especially for nan value.").
     let mut out = vec![<T as num_traits::Zero>::zero(); m * n];
-    for i in 0..m * n {
-        out[i] = beta * bias_b[i] + alpha * acc[i];
+    if beta == <T as num_traits::Zero>::zero() {
+        for i in 0..m * n {
+            out[i] = alpha * acc[i];
+        }
+    } else {
+        let bias_b = broadcast_data_to(bias, &[m, n])?;
+        for i in 0..m * n {
+            out[i] = beta * bias_b[i] + alpha * acc[i];
+        }
     }
     let storage = TensorStorage::cpu(out);
     let shape = vec![m, n];
