@@ -20,11 +20,14 @@
 //! | REQ-9 | SHIPPED | impl: `kaiming_uniform(&mut weight, NonLinearity::ReLU)` + `uniform_init(&mut b, -bound, bound)` (bound = 1/sqrt(fan_in)) inside every `Conv*d::new[_full]` here, mirroring `torch/nn/modules/conv.py:182-201`; non-test consumer: `Conv2d::new` is the path used by every vision-model constructor. (closes #1450 — bias U(-bound,bound). Kaiming gain divergence (`a=sqrt(5)` upstream vs `ReLU` here) remains as separate followup.) |
 //! | REQ-10 | SHIPPED | impl: `Conv1d` / `Conv2d` / `Conv3d` each carry a `padding_mode: crate::padding::PaddingMode` field + `with_padding_mode(...)` builder here; when the mode is non-`Zeros`, the layer's `forward` calls `crate::padding::functional_pad_1d`/`_2d`/`_3d` (with `_reversed_padding_repeated_twice` amounts) and then runs the zero-padding im2col on the already-padded tensor, mirroring `torch/nn/modules/conv.py` `_ConvNd._conv_forward` (Conv1d `conv.py:367-378`, Conv3d `conv.py:716-732`). The 1-D/3-D pre-pads are autograd-aware (`Pad1dBackward` / `Pad3dBackward` in `padding.rs`), so input gradients flow through the boundary (the #1550 fix class). `ConvTranspose{1,2,3}d::with_padding_mode` rejects any non-`Zeros` mode via `fn reject_non_zeros_transpose` with the upstream `ValueError('Only "zeros" padding mode is supported for ...')` (`conv.py:755-758`). Closes #1443. Non-test consumer: `pub use conv::{Conv1d, Conv2d, Conv3d, ConvTranspose1d, ConvTranspose2d, ConvTranspose3d}` in `lib.rs` re-export; the `<Conv1d as Module>::forward` / `<Conv3d as Module>::forward` bodies consume `functional_pad_1d` / `functional_pad_3d` in production. |
 //! | REQ-11 | NOT-STARTED | blocker #1441 (umbrella) — parity-sweep runner arms for all 6 conv ops are absent; sweep reports `0/N passed, N skipped` for each. The forward paths themselves are end-to-end verified by 60+ lib tests; only the runner-arm wiring is missing. |
+//! | REQ-12 | SHIPPED | impl: `pub enum StringPadding` + `fn same_pad_lr` + `Conv{1,2,3}d::with_string_padding` and the `string_padding` branch of each `<Conv*d as Module>::forward` here (asymmetric `'same'` pre-pad via `crate::padding::functional_pad_{1,2,3}d`, `left=total/2`/`right=total-left` per `aten/src/ATen/native/Pool.h:91-107`; `'valid'`==padding 0 per `aten/src/ATen/native/Convolution.cpp:1122-1124`; stride>1 `'same'` rejected per `torch/nn/modules/conv.py:117-120`). Non-test consumer: the production `Module::forward` bodies consume `same_pad_lr` + `functional_pad_{1,2,3}d` + `recurse_clone`; `Conv{1,2,3}d` re-exported from `lib.rs`. Closes #1602. |
+//! | REQ-13 | SHIPPED | impl: the unbatched `input.ndim()` guard at the top of each `<Conv*d as Module>::forward` here (`unsqueeze(0)` → recurse → `squeeze(0)` via `ferrotorch_core::grad_fns::shape::{unsqueeze, squeeze}`), mirroring `batchify` + `output.squeeze(0)` at `aten/src/ATen/native/Convolution.cpp:816-831, 990-1047`. Non-test consumer: the production `Module::forward` bodies call `unsqueeze`/`squeeze`; `Conv{1,2,3}d` re-exported from `lib.rs`. Closes #1604. |
 
 use std::sync::Arc;
 
 use ferrotorch_core::autograd::autocast_ops::autocast_guard;
 use ferrotorch_core::autograd::no_grad::is_grad_enabled;
+use ferrotorch_core::grad_fns::shape::{squeeze, unsqueeze};
 use ferrotorch_core::ops::linalg::{mm, transpose};
 use ferrotorch_core::storage::TensorStorage;
 use ferrotorch_core::tensor::{GradFn, Tensor};
@@ -56,6 +59,60 @@ fn reject_non_zeros_transpose(
         });
     }
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// String padding ('same' / 'valid')  — #1602
+// ---------------------------------------------------------------------------
+
+/// The string-padding modes a `Conv{1,2,3}d` may be configured with, mirroring
+/// the `padding: str` branch of `torch.nn.Conv{1,2,3}d`
+/// (`torch/nn/modules/conv.py:111-120`, `valid_padding_strings = {"same",
+/// "valid"}`).
+///
+/// - [`StringPadding::Valid`] is equivalent to `padding = 0` (no padding;
+///   `aten/src/ATen/native/Convolution.cpp:1122-1124`
+///   `padding == "valid" -> convolution_symint(.., {{0}}, ..)`).
+/// - [`StringPadding::Same`] pads so that, for `stride = 1`, the output spatial
+///   size equals the input spatial size. The total pad per dim is
+///   `dilation * (kernel - 1)`, split ASYMMETRICALLY as
+///   `left = total / 2`, `right = total - left` (the END gets the extra pad
+///   when `total` is odd), mirroring `_pooling_same_mode_padding_lr`
+///   (`aten/src/ATen/native/Pool.h:91-107`) and the matching
+///   `_ConvNd.__init__` `_reversed_padding_repeated_twice` arithmetic
+///   (`conv.py:143-155`). `'same'` is rejected for strided convolutions
+///   (`conv.py:117-120` / `Convolution.cpp:1071`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StringPadding {
+    /// `padding='same'` — pad so output spatial size == input spatial size
+    /// (stride must be 1). Asymmetric split per [`same_pad_lr`].
+    Same,
+    /// `padding='valid'` — no padding (equivalent to `padding = 0`).
+    Valid,
+}
+
+/// Compute the asymmetric `(left, right)` `'same'` padding for one spatial dim.
+///
+/// Mirrors `_pooling_same_mode_padding_lr` in
+/// `aten/src/ATen/native/Pool.h:91-107`:
+///
+/// ```text
+/// total_padding = dilation * (kernel_size - 1)
+/// left  = total_padding / 2          // floor
+/// right = total_padding - left
+/// ```
+///
+/// The `stride > 2` wiggle-room branch of the upstream helper is unreachable
+/// here because `'same'` requires `stride == 1` (validated at construction,
+/// `conv.py:117-120`). The right side therefore receives the extra unit of
+/// padding whenever `total_padding` is odd — this is the exact same arithmetic
+/// the Python `_ConvNd.__init__` runs to populate
+/// `_reversed_padding_repeated_twice` for the `'same'` case
+/// (`conv.py:150-155`).
+fn same_pad_lr(kernel_size: usize, dilation: usize) -> (usize, usize) {
+    let total_padding = dilation * (kernel_size - 1);
+    let left = total_padding / 2;
+    (left, total_padding - left)
 }
 
 // ---------------------------------------------------------------------------
@@ -331,6 +388,13 @@ pub struct Conv2d<T: Float> {
     /// `_ConvNd._conv_forward` shape: `F.pad(input, ..., mode=...)` first,
     /// then a `padding=0` convolution). Closes #1443.
     padding_mode: crate::padding::PaddingMode,
+    /// String padding mode (`'same'` / `'valid'`), `None` when numeric
+    /// `padding` is used. When `Some`, the `padding` field is ignored and the
+    /// effective padding is derived per [`StringPadding`] in `forward`
+    /// (mirroring the `padding: str` branch of `torch.nn.Conv2d`,
+    /// `torch/nn/modules/conv.py:111-155`). Set via
+    /// [`Conv2d::with_string_padding`]. Closes #1602.
+    string_padding: Option<StringPadding>,
     /// Whether the module is in training mode.
     training: bool,
 }
@@ -466,6 +530,7 @@ impl<T: Float> Conv2d<T> {
             dilation,
             groups,
             padding_mode: crate::padding::PaddingMode::Zeros,
+            string_padding: None,
             training: true,
         })
     }
@@ -480,6 +545,35 @@ impl<T: Float> Conv2d<T> {
     pub fn with_padding_mode(mut self, mode: crate::padding::PaddingMode) -> Self {
         self.padding_mode = mode;
         self
+    }
+
+    /// Configure string padding (`'same'` / `'valid'`), mirroring the
+    /// `padding: str` branch of `torch.nn.Conv2d` (`conv.py:111-155`).
+    ///
+    /// `StringPadding::Valid` is equivalent to `padding = 0`.
+    /// `StringPadding::Same` pads so the output spatial size equals the input
+    /// spatial size (for `stride = 1`), splitting the per-dim total
+    /// `dilation * (kernel - 1)` asymmetrically as `left = total/2`,
+    /// `right = total - left` (the END gets the extra unit; see
+    /// [`same_pad_lr`]). The pre-pad uses the configured `padding_mode`
+    /// (constant-0 for the default `Zeros`, matching
+    /// `convolution_same`'s `constant_pad_nd(..., 0)` at
+    /// `Convolution.cpp:1105`) and is autograd-aware via `Pad2dBackward`.
+    ///
+    /// Returns `Err` if `StringPadding::Same` is requested with a stride other
+    /// than 1 in any dimension, matching upstream
+    /// `raise ValueError("padding='same' is not supported for strided
+    /// convolutions")` (`conv.py:117-120`, `Convolution.cpp:1071`). Closes
+    /// #1602.
+    pub fn with_string_padding(mut self, padding: StringPadding) -> FerrotorchResult<Self> {
+        if padding == StringPadding::Same && (self.stride.0 != 1 || self.stride.1 != 1) {
+            return Err(FerrotorchError::InvalidArgument {
+                message: "padding='same' is not supported for strided convolutions".into(),
+            });
+        }
+        self.string_padding = Some(padding);
+        self.padding = (0, 0);
+        Ok(self)
     }
 
     /// Replace the kernel weights with a caller-supplied [`Parameter`].
@@ -582,8 +676,41 @@ impl<T: Float> Conv2d<T> {
             dilation: (1, 1),
             groups: 1,
             padding_mode: crate::padding::PaddingMode::Zeros,
+            string_padding: None,
             training: true,
         })
+    }
+}
+
+impl<T: Float> Conv2d<T> {
+    /// Build a shallow clone of this layer with the geometry fields
+    /// overridden (used by `forward` to recurse onto the dense
+    /// zero-padding im2col path after a string-padding / non-zero
+    /// `padding_mode` pre-pad). The weight/bias `Parameter`s are re-wrapped
+    /// (cheap `Arc` clone of the underlying tensor storage); `string_padding`
+    /// is cleared so the recursion runs the numeric-padding path.
+    fn recurse_clone(
+        &self,
+        padding: (usize, usize),
+        padding_mode: crate::padding::PaddingMode,
+    ) -> Conv2d<T> {
+        Conv2d {
+            weight: Parameter::new(self.weight.tensor().clone()),
+            bias: self
+                .bias
+                .as_ref()
+                .map(|b| Parameter::new(b.tensor().clone())),
+            in_channels: self.in_channels,
+            out_channels: self.out_channels,
+            kernel_size: self.kernel_size,
+            stride: self.stride,
+            padding,
+            dilation: self.dilation,
+            groups: self.groups,
+            padding_mode,
+            string_padding: None,
+            training: self.training,
+        }
     }
 }
 
@@ -591,6 +718,60 @@ impl<T: Float> Module<T> for Conv2d<T> {
     fn forward(&self, input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
         // Record autocast decision for conv2d.
         let _autocast_cat = autocast_guard("conv2d");
+
+        // Unbatched input: `(C, H, W)` (rank 3) is accepted in addition to the
+        // batched `(N, C, H, W)` (rank 4) form. Mirrors `batchify` /
+        // `_conv_forward` at `aten/src/ATen/native/Convolution.cpp:816-831,
+        // 1015-1022`: an unbatched input is `unsqueeze(0)`d to add a batch
+        // dim, convolved, then `squeeze(0)`d so the output is rank 3. The
+        // unsqueeze/squeeze are autograd-aware (`UnsqueezeBackward` /
+        // `SqueezeBackward`) so gradients flow back to the unbatched shape.
+        // Closes #1604.
+        if input.ndim() == 3 {
+            let batched = unsqueeze(input, 0)?;
+            let output = self.forward(&batched)?;
+            return squeeze(&output, 0);
+        }
+
+        // String padding ('same' / 'valid'), mirroring the `padding: str`
+        // branch of `torch.nn.Conv2d` (`conv.py:111-155`,
+        // `Convolution.cpp:1119-1124`). `Valid` == numeric `padding = 0`;
+        // `Same` pre-pads asymmetrically (`left = total/2`, `right = total -
+        // left`, the END side getting the extra unit) via the autograd-aware
+        // `functional_pad_2d` then convolves with `padding = 0` — exactly the
+        // `convolution_same` -> `constant_pad_nd(.., 0)` path at
+        // `Convolution.cpp:1098-1108`. The pre-pad fill follows the configured
+        // `padding_mode` (constant-0 for the default `Zeros`). The stride>1
+        // rejection already happened at `with_string_padding` construction
+        // (`conv.py:117-120`). Closes #1602.
+        if let Some(sp) = self.string_padding {
+            match sp {
+                StringPadding::Valid => {
+                    // 'valid' == no padding.
+                    return self
+                        .recurse_clone((0, 0), crate::padding::PaddingMode::Zeros)
+                        .forward(input);
+                }
+                StringPadding::Same => {
+                    let (kh, kw) = self.kernel_size;
+                    let (dh, dw) = self.dilation;
+                    let (top, bottom) = same_pad_lr(kh, dh);
+                    let (left, right) = same_pad_lr(kw, dw);
+                    let padded = crate::padding::functional_pad_2d(
+                        input,
+                        left,
+                        right,
+                        top,
+                        bottom,
+                        self.padding_mode,
+                        <T as num_traits::Zero>::zero(),
+                    )?;
+                    return self
+                        .recurse_clone((0, 0), crate::padding::PaddingMode::Zeros)
+                        .forward(&padded);
+                }
+            }
+        }
 
         // Non-zero padding modes: pre-pad the input with the requested
         // boundary mode and then convolve with padding = 0. Mirrors
@@ -616,23 +797,9 @@ impl<T: Float> Module<T> for Conv2d<T> {
             // Recurse on a zero-padding variant. Build a shallow clone with
             // padding = (0, 0) and padding_mode = Zeros so the existing
             // im2col-on-zero-pad path runs without re-padding.
-            let zero_padded_layer = Conv2d {
-                weight: Parameter::new(self.weight.tensor().clone()),
-                bias: self
-                    .bias
-                    .as_ref()
-                    .map(|b| Parameter::new(b.tensor().clone())),
-                in_channels: self.in_channels,
-                out_channels: self.out_channels,
-                kernel_size: self.kernel_size,
-                stride: self.stride,
-                padding: (0, 0),
-                dilation: self.dilation,
-                groups: self.groups,
-                padding_mode: crate::padding::PaddingMode::Zeros,
-                training: self.training,
-            };
-            return zero_padded_layer.forward(&padded);
+            return self
+                .recurse_clone((0, 0), crate::padding::PaddingMode::Zeros)
+                .forward(&padded);
         }
 
         // Validate input shape: [B, C_in, H, W].
@@ -1296,6 +1463,13 @@ pub struct Conv1d<T: Float> {
     /// then a `padding=0` convolution). See `torch/nn/modules/conv.py:367-378`.
     /// Closes #1443.
     padding_mode: crate::padding::PaddingMode,
+    /// String padding mode (`'same'` / `'valid'`), `None` when numeric
+    /// `padding` is used. When `Some`, the `padding` field is ignored and the
+    /// effective padding is derived per [`StringPadding`] in `forward`
+    /// (mirroring the `padding: str` branch of `torch.nn.Conv1d`,
+    /// `torch/nn/modules/conv.py:111-155`). Set via
+    /// [`Conv1d::with_string_padding`]. Closes #1602.
+    string_padding: Option<StringPadding>,
     /// Whether the module is in training mode.
     training: bool,
 }
@@ -1427,6 +1601,7 @@ impl<T: Float> Conv1d<T> {
             dilation,
             groups,
             padding_mode: crate::padding::PaddingMode::Zeros,
+            string_padding: None,
             training: true,
         })
     }
@@ -1439,6 +1614,33 @@ impl<T: Float> Conv1d<T> {
     /// Dilation (`1` is the dense default).
     pub fn dilation(&self) -> usize {
         self.dilation
+    }
+
+    /// Configure string padding (`'same'` / `'valid'`), mirroring the
+    /// `padding: str` branch of `torch.nn.Conv1d` (`conv.py:111-155`).
+    ///
+    /// `StringPadding::Valid` is equivalent to `padding = 0`.
+    /// `StringPadding::Same` pads so the output length equals the input length
+    /// (for `stride = 1`), splitting the total `dilation * (kernel - 1)`
+    /// asymmetrically as `left = total/2`, `right = total - left` (the END
+    /// gets the extra unit; see [`same_pad_lr`]). The pre-pad uses the
+    /// configured `padding_mode` (constant-0 for the default `Zeros`, matching
+    /// `convolution_same`'s `constant_pad_nd(.., 0)`, `Convolution.cpp:1105`)
+    /// and is autograd-aware via `Pad1dBackward`.
+    ///
+    /// Returns `Err` if `StringPadding::Same` is requested with `stride != 1`,
+    /// matching upstream `raise ValueError("padding='same' is not supported
+    /// for strided convolutions")` (`conv.py:117-120`,
+    /// `Convolution.cpp:1071`). Closes #1602.
+    pub fn with_string_padding(mut self, padding: StringPadding) -> FerrotorchResult<Self> {
+        if padding == StringPadding::Same && self.stride != 1 {
+            return Err(FerrotorchError::InvalidArgument {
+                message: "padding='same' is not supported for strided convolutions".into(),
+            });
+        }
+        self.string_padding = Some(padding);
+        self.padding = 0;
+        Ok(self)
     }
 
     /// Configure the boundary handling for the spatial padding.
@@ -1512,8 +1714,37 @@ impl<T: Float> Conv1d<T> {
             dilation: 1,
             groups: 1,
             padding_mode: crate::padding::PaddingMode::Zeros,
+            string_padding: None,
             training: true,
         })
+    }
+
+    /// Build a shallow clone with the geometry overridden (used by `forward`
+    /// to recurse onto the dense zero-padding im2col path after a
+    /// string-padding / non-zero `padding_mode` pre-pad). `string_padding` is
+    /// cleared so the recursion runs the numeric-padding path.
+    fn recurse_clone(
+        &self,
+        padding: usize,
+        padding_mode: crate::padding::PaddingMode,
+    ) -> Conv1d<T> {
+        Conv1d {
+            weight: Parameter::new(self.weight.tensor().clone()),
+            bias: self
+                .bias
+                .as_ref()
+                .map(|b| Parameter::new(b.tensor().clone())),
+            in_channels: self.in_channels,
+            out_channels: self.out_channels,
+            kernel_size: self.kernel_size,
+            stride: self.stride,
+            padding,
+            dilation: self.dilation,
+            groups: self.groups,
+            padding_mode,
+            string_padding: None,
+            training: self.training,
+        }
     }
 }
 
@@ -1521,6 +1752,51 @@ impl<T: Float> Module<T> for Conv1d<T> {
     fn forward(&self, input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
         // Record autocast decision for conv1d.
         let _autocast_cat = autocast_guard("conv1d");
+
+        // Unbatched input: `(C, L)` (rank 2) is accepted in addition to the
+        // batched `(N, C, L)` (rank 3) form. Mirrors `batchify` /
+        // `_conv_forward` at `aten/src/ATen/native/Convolution.cpp:816-831,
+        // 990-997`: an unbatched input is `unsqueeze(0)`d, convolved, then
+        // `squeeze(0)`d so the output is rank 2. The unsqueeze/squeeze are
+        // autograd-aware so gradients flow back to the unbatched shape. Closes
+        // #1604.
+        if input.ndim() == 2 {
+            let batched = unsqueeze(input, 0)?;
+            let output = self.forward(&batched)?;
+            return squeeze(&output, 0);
+        }
+
+        // String padding ('same' / 'valid'), mirroring the `padding: str`
+        // branch of `torch.nn.Conv1d` (`conv.py:111-155`,
+        // `Convolution.cpp:1119-1124`). `Valid` == numeric `padding = 0`;
+        // `Same` pre-pads asymmetrically (`left = total/2`, `right = total -
+        // left`) via the autograd-aware `functional_pad_1d` then convolves
+        // with `padding = 0` — the `convolution_same` ->
+        // `constant_pad_nd(.., 0)` path (`Convolution.cpp:1098-1108`). The
+        // stride>1 rejection happened at `with_string_padding` construction
+        // (`conv.py:117-120`). Closes #1602.
+        if let Some(sp) = self.string_padding {
+            match sp {
+                StringPadding::Valid => {
+                    return self
+                        .recurse_clone(0, crate::padding::PaddingMode::Zeros)
+                        .forward(input);
+                }
+                StringPadding::Same => {
+                    let (left, right) = same_pad_lr(self.kernel_size, self.dilation);
+                    let padded = crate::padding::functional_pad_1d(
+                        input,
+                        left,
+                        right,
+                        self.padding_mode,
+                        <T as num_traits::Zero>::zero(),
+                    )?;
+                    return self
+                        .recurse_clone(0, crate::padding::PaddingMode::Zeros)
+                        .forward(&padded);
+                }
+            }
+        }
 
         // Non-zero padding modes: pre-pad the input with the requested
         // boundary mode and then convolve with padding = 0. Mirrors
@@ -1544,23 +1820,9 @@ impl<T: Float> Module<T> for Conv1d<T> {
             // Recurse on a zero-padding variant: build a shallow clone with
             // padding = 0 and padding_mode = Zeros so the existing
             // im2col-on-zero-pad path runs without re-padding.
-            let zero_padded_layer = Conv1d {
-                weight: Parameter::new(self.weight.tensor().clone()),
-                bias: self
-                    .bias
-                    .as_ref()
-                    .map(|b| Parameter::new(b.tensor().clone())),
-                in_channels: self.in_channels,
-                out_channels: self.out_channels,
-                kernel_size: self.kernel_size,
-                stride: self.stride,
-                padding: 0,
-                dilation: self.dilation,
-                groups: self.groups,
-                padding_mode: crate::padding::PaddingMode::Zeros,
-                training: self.training,
-            };
-            return zero_padded_layer.forward(&padded);
+            return self
+                .recurse_clone(0, crate::padding::PaddingMode::Zeros)
+                .forward(&padded);
         }
 
         // Validate input shape: [B, C_in, L].
@@ -2998,6 +3260,13 @@ pub struct Conv3d<T: Float> {
     /// `padding=0` convolution). See `torch/nn/modules/conv.py:716-732`.
     /// Closes #1443.
     padding_mode: crate::padding::PaddingMode,
+    /// String padding mode (`'same'` / `'valid'`), `None` when numeric
+    /// `padding` is used. When `Some`, the `padding` field is ignored and the
+    /// effective padding is derived per [`StringPadding`] in `forward`
+    /// (mirroring the `padding: str` branch of `torch.nn.Conv3d`,
+    /// `torch/nn/modules/conv.py:111-155`). Set via
+    /// [`Conv3d::with_string_padding`]. Closes #1602.
+    string_padding: Option<StringPadding>,
     /// Whether the module is in training mode.
     training: bool,
 }
@@ -3133,6 +3402,7 @@ impl<T: Float> Conv3d<T> {
             dilation,
             groups,
             padding_mode: crate::padding::PaddingMode::Zeros,
+            string_padding: None,
             training: true,
         })
     }
@@ -3145,6 +3415,37 @@ impl<T: Float> Conv3d<T> {
     /// Dilation `(dilD, dilH, dilW)` (`(1, 1, 1)` is the dense default).
     pub fn dilation(&self) -> (usize, usize, usize) {
         self.dilation
+    }
+
+    /// Configure string padding (`'same'` / `'valid'`), mirroring the
+    /// `padding: str` branch of `torch.nn.Conv3d` (`conv.py:111-155`).
+    ///
+    /// `StringPadding::Valid` is equivalent to `padding = 0`.
+    /// `StringPadding::Same` pads so the output spatial size equals the input
+    /// spatial size (for `stride = 1`), splitting each per-dim total
+    /// `dilation * (kernel - 1)` asymmetrically as `left = total/2`,
+    /// `right = total - left` (the END gets the extra unit; see
+    /// [`same_pad_lr`]). The pre-pad uses the configured `padding_mode`
+    /// (constant-0 for the default `Zeros`, matching `convolution_same`'s
+    /// `constant_pad_nd(.., 0)`, `Convolution.cpp:1105`) and is autograd-aware
+    /// via `Pad3dBackward`.
+    ///
+    /// Returns `Err` if `StringPadding::Same` is requested with a stride other
+    /// than 1 in any dimension, matching upstream
+    /// `raise ValueError("padding='same' is not supported for strided
+    /// convolutions")` (`conv.py:117-120`, `Convolution.cpp:1071`). Closes
+    /// #1602.
+    pub fn with_string_padding(mut self, padding: StringPadding) -> FerrotorchResult<Self> {
+        if padding == StringPadding::Same
+            && (self.stride.0 != 1 || self.stride.1 != 1 || self.stride.2 != 1)
+        {
+            return Err(FerrotorchError::InvalidArgument {
+                message: "padding='same' is not supported for strided convolutions".into(),
+            });
+        }
+        self.string_padding = Some(padding);
+        self.padding = (0, 0, 0);
+        Ok(self)
     }
 
     /// Configure the boundary handling for the spatial padding.
@@ -3222,8 +3523,37 @@ impl<T: Float> Conv3d<T> {
             dilation: (1, 1, 1),
             groups: 1,
             padding_mode: crate::padding::PaddingMode::Zeros,
+            string_padding: None,
             training: true,
         })
+    }
+
+    /// Build a shallow clone with the geometry overridden (used by `forward`
+    /// to recurse onto the dense zero-padding im2col path after a
+    /// string-padding / non-zero `padding_mode` pre-pad). `string_padding` is
+    /// cleared so the recursion runs the numeric-padding path.
+    fn recurse_clone(
+        &self,
+        padding: (usize, usize, usize),
+        padding_mode: crate::padding::PaddingMode,
+    ) -> Conv3d<T> {
+        Conv3d {
+            weight: Parameter::new(self.weight.tensor().clone()),
+            bias: self
+                .bias
+                .as_ref()
+                .map(|b| Parameter::new(b.tensor().clone())),
+            in_channels: self.in_channels,
+            out_channels: self.out_channels,
+            kernel_size: self.kernel_size,
+            stride: self.stride,
+            padding,
+            dilation: self.dilation,
+            groups: self.groups,
+            padding_mode,
+            string_padding: None,
+            training: self.training,
+        }
     }
 }
 
@@ -3231,6 +3561,61 @@ impl<T: Float> Module<T> for Conv3d<T> {
     fn forward(&self, input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
         // Record autocast decision for conv3d.
         let _autocast_cat = autocast_guard("conv3d");
+
+        // Unbatched input: `(C, D, H, W)` (rank 4) is accepted in addition to
+        // the batched `(N, C, D, H, W)` (rank 5) form. Mirrors `batchify` /
+        // `_conv_forward` at `aten/src/ATen/native/Convolution.cpp:816-831,
+        // 1040-1047`: an unbatched input is `unsqueeze(0)`d, convolved, then
+        // `squeeze(0)`d so the output is rank 4. The unsqueeze/squeeze are
+        // autograd-aware so gradients flow back to the unbatched shape. Closes
+        // #1604.
+        if input.ndim() == 4 {
+            let batched = unsqueeze(input, 0)?;
+            let output = self.forward(&batched)?;
+            return squeeze(&output, 0);
+        }
+
+        // String padding ('same' / 'valid'), mirroring the `padding: str`
+        // branch of `torch.nn.Conv3d` (`conv.py:111-155`,
+        // `Convolution.cpp:1119-1124`). `Valid` == numeric `padding = 0`;
+        // `Same` pre-pads each spatial dim asymmetrically (`left = total/2`,
+        // `right = total - left`) via the autograd-aware `functional_pad_3d`
+        // then convolves with `padding = 0` — the `convolution_same` ->
+        // `constant_pad_nd(.., 0)` path (`Convolution.cpp:1098-1108`).
+        // `functional_pad_3d` takes amounts in `(W, H, D)` order
+        // (left/right=W, top/bottom=H, front/back=D). The stride>1 rejection
+        // happened at `with_string_padding` construction (`conv.py:117-120`).
+        // Closes #1602.
+        if let Some(sp) = self.string_padding {
+            match sp {
+                StringPadding::Valid => {
+                    return self
+                        .recurse_clone((0, 0, 0), crate::padding::PaddingMode::Zeros)
+                        .forward(input);
+                }
+                StringPadding::Same => {
+                    let (kd, kh, kw) = self.kernel_size;
+                    let (dd, dh, dw) = self.dilation;
+                    let (front, back) = same_pad_lr(kd, dd);
+                    let (top, bottom) = same_pad_lr(kh, dh);
+                    let (left, right) = same_pad_lr(kw, dw);
+                    let padded = crate::padding::functional_pad_3d(
+                        input,
+                        left,
+                        right,
+                        top,
+                        bottom,
+                        front,
+                        back,
+                        self.padding_mode,
+                        <T as num_traits::Zero>::zero(),
+                    )?;
+                    return self
+                        .recurse_clone((0, 0, 0), crate::padding::PaddingMode::Zeros)
+                        .forward(&padded);
+                }
+            }
+        }
 
         // Non-zero padding modes: pre-pad the input with the requested
         // boundary mode and then convolve with padding = 0. Mirrors
@@ -3262,23 +3647,9 @@ impl<T: Float> Module<T> for Conv3d<T> {
             // Recurse on a zero-padding variant: build a shallow clone with
             // padding = (0,0,0) and padding_mode = Zeros so the existing
             // im2col-on-zero-pad path runs without re-padding.
-            let zero_padded_layer = Conv3d {
-                weight: Parameter::new(self.weight.tensor().clone()),
-                bias: self
-                    .bias
-                    .as_ref()
-                    .map(|b| Parameter::new(b.tensor().clone())),
-                in_channels: self.in_channels,
-                out_channels: self.out_channels,
-                kernel_size: self.kernel_size,
-                stride: self.stride,
-                padding: (0, 0, 0),
-                dilation: self.dilation,
-                groups: self.groups,
-                padding_mode: crate::padding::PaddingMode::Zeros,
-                training: self.training,
-            };
-            return zero_padded_layer.forward(&padded);
+            return self
+                .recurse_clone((0, 0, 0), crate::padding::PaddingMode::Zeros)
+                .forward(&padded);
         }
 
         // Validate input shape: [B, C_in, D, H, W].
@@ -5293,6 +5664,7 @@ mod tests {
             dilation: (1, 1),
             groups: 1,
             padding_mode: crate::padding::PaddingMode::Zeros,
+            string_padding: None,
             training: false,
         };
 
@@ -5340,6 +5712,7 @@ mod tests {
             dilation: (1, 1),
             groups: 1,
             padding_mode: crate::padding::PaddingMode::Zeros,
+            string_padding: None,
             training: false,
         };
 
@@ -5374,6 +5747,7 @@ mod tests {
             dilation: (1, 1),
             groups: 1,
             padding_mode: crate::padding::PaddingMode::Zeros,
+            string_padding: None,
             training: false,
         };
 
@@ -5573,6 +5947,7 @@ mod tests {
             dilation: (1, 1),
             groups: 1,
             padding_mode: crate::padding::PaddingMode::Zeros,
+            string_padding: None,
             training: false,
         };
 
@@ -5608,6 +5983,7 @@ mod tests {
             dilation: (1, 1),
             groups: 1,
             padding_mode: crate::padding::PaddingMode::Zeros,
+            string_padding: None,
             training: false,
         };
 
@@ -5684,6 +6060,7 @@ mod tests {
             dilation: 1,
             groups: 1,
             padding_mode: crate::padding::PaddingMode::Zeros,
+            string_padding: None,
             training: false,
         };
 
@@ -5718,6 +6095,7 @@ mod tests {
             dilation: 1,
             groups: 1,
             padding_mode: crate::padding::PaddingMode::Zeros,
+            string_padding: None,
             training: false,
         };
 
@@ -5744,6 +6122,7 @@ mod tests {
             dilation: 1,
             groups: 1,
             padding_mode: crate::padding::PaddingMode::Zeros,
+            string_padding: None,
             training: false,
         };
 
@@ -6113,6 +6492,7 @@ mod tests {
             dilation: (1, 1, 1),
             groups: 1,
             padding_mode: crate::padding::PaddingMode::Zeros,
+            string_padding: None,
             training: false,
         };
 
@@ -6143,6 +6523,7 @@ mod tests {
             dilation: (1, 1, 1),
             groups: 1,
             padding_mode: crate::padding::PaddingMode::Zeros,
+            string_padding: None,
             training: false,
         };
 
@@ -6169,6 +6550,7 @@ mod tests {
             dilation: (1, 1, 1),
             groups: 1,
             padding_mode: crate::padding::PaddingMode::Zeros,
+            string_padding: None,
             training: false,
         };
 
@@ -6198,6 +6580,7 @@ mod tests {
             dilation: (1, 1, 1),
             groups: 1,
             padding_mode: crate::padding::PaddingMode::Zeros,
+            string_padding: None,
             training: false,
         };
 
@@ -6741,6 +7124,7 @@ mod tests {
             dilation: 1,
             groups: 1,
             padding_mode: mode,
+            string_padding: None,
             training: false,
         }
     }
@@ -7080,6 +7464,7 @@ mod tests {
             dilation: (1, 1, 1),
             groups: 1,
             padding_mode: mode,
+            string_padding: None,
             training: false,
         }
     }
@@ -7421,5 +7806,448 @@ mod tests {
             conv.with_padding_mode(crate::padding::PaddingMode::Zeros)
                 .is_ok()
         );
+    }
+
+    // =======================================================================
+    // String padding 'same' / 'valid'  — #1602
+    // Oracle values are from live torch 2.11.0 (`F.conv{1,2,3}d(..,
+    // padding="same"|"valid")` / `nn.Conv2d(.., padding="same")`), R-CHAR-3.
+    // The asymmetric 'same' split is `left = total/2`, `right = total - left`
+    // with `total = dilation*(kernel-1)` (`aten/src/ATen/native/Pool.h:91-107`,
+    // `torch/nn/modules/conv.py:143-155`) — the END side gets the extra unit.
+    // =======================================================================
+
+    /// Build a Conv1d with explicit weight/bias for deterministic oracle parity.
+    fn conv1d_with_weight(weight: &[f32], wshape: &[usize], bias: f32) -> Conv1d<f32> {
+        let mut c = Conv1d::<f32>::new(wshape[1], wshape[0], wshape[2], 1, 0, true).unwrap();
+        // Direct field write (tests live in the same module), mirroring the
+        // existing `conv1d_full_fixed` helper.
+        c.weight = Parameter::from_slice(weight, wshape).unwrap();
+        c.bias = Some(Parameter::from_slice(&[bias], &[wshape[0]]).unwrap());
+        c
+    }
+
+    /// Conv1d 'same', ODD kernel k=3 (symmetric pad 1,1).
+    /// torch: F.conv1d([[[1,2,3,4,5]]], w=[1,2,3], b=0.5, padding="same")
+    ///   -> [8.5, 14.5, 20.5, 26.5, 14.5]
+    #[test]
+    fn test_conv1d_same_odd_kernel_matches_torch() {
+        let conv = conv1d_with_weight(&[1.0, 2.0, 3.0], &[1, 1, 3], 0.5)
+            .with_string_padding(StringPadding::Same)
+            .unwrap();
+        let x = t(&[1.0, 2.0, 3.0, 4.0, 5.0], &[1, 1, 5]);
+        let y = conv.forward(&x).unwrap();
+        assert_eq!(y.shape(), &[1, 1, 5]);
+        assert_close(y.data().unwrap(), &[8.5, 14.5, 20.5, 26.5, 14.5], 1e-4);
+    }
+
+    /// Conv1d 'same', EVEN kernel k=4 — ASYMMETRIC pad (total=3 -> left=1,
+    /// right=2; the END gets the extra unit). torch:
+    ///   F.conv1d([[[1..6]]], w=[1,2,3,4], b=0, padding="same")
+    ///   -> [20, 30, 40, 50, 32, 17]
+    /// A symmetric (left=right) split would give a different sequence, so this
+    /// test FAILS unless the asymmetric `right = total - total/2` is correct.
+    #[test]
+    fn test_conv1d_same_even_kernel_asymmetric_matches_torch() {
+        let conv = conv1d_with_weight(&[1.0, 2.0, 3.0, 4.0], &[1, 1, 4], 0.0)
+            .with_string_padding(StringPadding::Same)
+            .unwrap();
+        let x = t(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0], &[1, 1, 6]);
+        let y = conv.forward(&x).unwrap();
+        assert_eq!(y.shape(), &[1, 1, 6]);
+        assert_close(
+            y.data().unwrap(),
+            &[20.0, 30.0, 40.0, 50.0, 32.0, 17.0],
+            1e-4,
+        );
+    }
+
+    /// Conv1d 'same' backward: gradient flows through the autograd-aware
+    /// asymmetric pre-pad back to the original input shape.
+    /// torch grad of sum(F.conv1d([[[1,2,3,4,5]]], w=[1,2,3], b=0.5,
+    ///   padding="same")) wrt x = [3, 6, 6, 6, 5].
+    #[test]
+    fn test_conv1d_same_odd_kernel_backward_matches_torch() {
+        let conv = conv1d_with_weight(&[1.0, 2.0, 3.0], &[1, 1, 3], 0.5)
+            .with_string_padding(StringPadding::Same)
+            .unwrap();
+        let x = leaf(&[1.0, 2.0, 3.0, 4.0, 5.0], &[1, 1, 5]);
+        let y = conv.forward(&x).unwrap();
+        // out.sum().backward() — grad_output is all-ones (matches the torch oracle).
+        let sum = ferrotorch_core::grad_fns::reduction::sum(&y).unwrap();
+        ferrotorch_core::backward(&sum).unwrap();
+        let gx = x.grad().unwrap().expect("input grad must be populated");
+        assert_eq!(gx.shape(), &[1, 1, 5]);
+        assert_close(gx.data().unwrap(), &[3.0, 6.0, 6.0, 6.0, 5.0], 1e-4);
+    }
+
+    /// Conv1d 'same' backward, EVEN kernel asymmetric. torch grad wrt x =
+    ///   [3, 6, 10, 10, 10, 9].
+    #[test]
+    fn test_conv1d_same_even_kernel_backward_matches_torch() {
+        let conv = conv1d_with_weight(&[1.0, 2.0, 3.0, 4.0], &[1, 1, 4], 0.0)
+            .with_string_padding(StringPadding::Same)
+            .unwrap();
+        let x = leaf(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0], &[1, 1, 6]);
+        let y = conv.forward(&x).unwrap();
+        // out.sum().backward() — grad_output is all-ones (matches the torch oracle).
+        let sum = ferrotorch_core::grad_fns::reduction::sum(&y).unwrap();
+        ferrotorch_core::backward(&sum).unwrap();
+        let gx = x.grad().unwrap().expect("input grad must be populated");
+        assert_eq!(gx.shape(), &[1, 1, 6]);
+        assert_close(gx.data().unwrap(), &[3.0, 6.0, 10.0, 10.0, 10.0, 9.0], 1e-4);
+    }
+
+    /// Conv1d 'valid' == padding 0. torch:
+    ///   F.conv1d([[[1,2,3,4,5]]], w=[1,1,1], b=0, padding="valid") -> [6,9,12]
+    #[test]
+    fn test_conv1d_valid_matches_torch() {
+        let conv = conv1d_with_weight(&[1.0, 1.0, 1.0], &[1, 1, 3], 0.0)
+            .with_string_padding(StringPadding::Valid)
+            .unwrap();
+        let x = t(&[1.0, 2.0, 3.0, 4.0, 5.0], &[1, 1, 5]);
+        let y = conv.forward(&x).unwrap();
+        assert_eq!(y.shape(), &[1, 1, 3]);
+        assert_close(y.data().unwrap(), &[6.0, 9.0, 12.0], 1e-4);
+    }
+
+    /// Conv2d 'same', ODD kernel 3x3 (symmetric pad). torch oracle from
+    ///   F.conv2d(arange(1..17).view(1,1,4,4), arange(1..10).view(1,1,3,3),
+    ///            b=0.5, padding="same").
+    #[test]
+    fn test_conv2d_same_odd_kernel_matches_torch() {
+        let weight = Parameter::from_slice(
+            &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0],
+            &[1, 1, 3, 3],
+        )
+        .unwrap();
+        let mut conv = Conv2d::<f32>::new(1, 1, (3, 3), (1, 1), (0, 0), true).unwrap();
+        conv.set_weight(weight).unwrap();
+        conv.bias = Some(Parameter::from_slice(&[0.5], &[1]).unwrap());
+        let conv = conv.with_string_padding(StringPadding::Same).unwrap();
+        let x = t(
+            &(1..=16).map(|v| v as f32).collect::<Vec<_>>(),
+            &[1, 1, 4, 4],
+        );
+        let y = conv.forward(&x).unwrap();
+        assert_eq!(y.shape(), &[1, 1, 4, 4]);
+        let expected = [
+            111.5, 178.5, 217.5, 145.5, 231.5, 348.5, 393.5, 252.5, 363.5, 528.5, 573.5, 360.5,
+            197.5, 274.5, 295.5, 175.5,
+        ];
+        assert_close(y.data().unwrap(), &expected, 1e-3);
+    }
+
+    /// Conv2d 'same', EVEN kernel (2,2) — ASYMMETRIC per dim (total=1 ->
+    /// left/top=0, right/bottom=1). torch oracle:
+    ///   F.conv2d(arange(1..10).view(1,1,3,3), [[1,2],[3,4]], b=0, "same").
+    #[test]
+    fn test_conv2d_same_even_kernel_asymmetric_matches_torch() {
+        let weight = Parameter::from_slice(&[1.0, 2.0, 3.0, 4.0], &[1, 1, 2, 2]).unwrap();
+        let mut conv = Conv2d::<f32>::new(1, 1, (2, 2), (1, 1), (0, 0), false).unwrap();
+        conv.set_weight(weight).unwrap();
+        let conv = conv.with_string_padding(StringPadding::Same).unwrap();
+        let x = t(
+            &(1..=9).map(|v| v as f32).collect::<Vec<_>>(),
+            &[1, 1, 3, 3],
+        );
+        let y = conv.forward(&x).unwrap();
+        assert_eq!(y.shape(), &[1, 1, 3, 3]);
+        let expected = [37.0, 47.0, 21.0, 67.0, 77.0, 33.0, 23.0, 26.0, 9.0];
+        assert_close(y.data().unwrap(), &expected, 1e-3);
+    }
+
+    /// Conv2d 'same' backward (odd 3x3). torch grad wrt x:
+    ///   [[12,21,21,16],[27,45,45,33],[27,45,45,33],[24,39,39,28]].
+    #[test]
+    fn test_conv2d_same_backward_matches_torch() {
+        let weight = Parameter::from_slice(
+            &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0],
+            &[1, 1, 3, 3],
+        )
+        .unwrap();
+        let mut conv = Conv2d::<f32>::new(1, 1, (3, 3), (1, 1), (0, 0), true).unwrap();
+        conv.set_weight(weight).unwrap();
+        conv.bias = Some(Parameter::from_slice(&[0.5], &[1]).unwrap());
+        let conv = conv.with_string_padding(StringPadding::Same).unwrap();
+        let x = leaf(
+            &(1..=16).map(|v| v as f32).collect::<Vec<_>>(),
+            &[1, 1, 4, 4],
+        );
+        let y = conv.forward(&x).unwrap();
+        // out.sum().backward() — grad_output is all-ones (matches the torch oracle).
+        let sum = ferrotorch_core::grad_fns::reduction::sum(&y).unwrap();
+        ferrotorch_core::backward(&sum).unwrap();
+        let gx = x.grad().unwrap().expect("input grad must be populated");
+        assert_eq!(gx.shape(), &[1, 1, 4, 4]);
+        let expected = [
+            12.0, 21.0, 21.0, 16.0, 27.0, 45.0, 45.0, 33.0, 27.0, 45.0, 45.0, 33.0, 24.0, 39.0,
+            39.0, 28.0,
+        ];
+        assert_close(gx.data().unwrap(), &expected, 1e-3);
+    }
+
+    /// Conv2d 'valid' == padding 0. torch:
+    ///   F.conv2d(arange(1..26).view(1,1,5,5), ones(1,1,3,3), padding="valid").
+    #[test]
+    fn test_conv2d_valid_matches_torch() {
+        let weight = Parameter::from_slice(&[1.0; 9], &[1, 1, 3, 3]).unwrap();
+        let mut conv = Conv2d::<f32>::new(1, 1, (3, 3), (1, 1), (0, 0), false).unwrap();
+        conv.set_weight(weight).unwrap();
+        let conv = conv.with_string_padding(StringPadding::Valid).unwrap();
+        let x = t(
+            &(1..=25).map(|v| v as f32).collect::<Vec<_>>(),
+            &[1, 1, 5, 5],
+        );
+        let y = conv.forward(&x).unwrap();
+        assert_eq!(y.shape(), &[1, 1, 3, 3]);
+        let expected = [63.0, 72.0, 81.0, 108.0, 117.0, 126.0, 153.0, 162.0, 171.0];
+        assert_close(y.data().unwrap(), &expected, 1e-3);
+    }
+
+    /// Conv3d 'same', EVEN kernel (2,2,2) — ASYMMETRIC per dim (total=1 ->
+    /// front/top/left=0, back/bottom/right=1). torch oracle:
+    ///   F.conv3d(arange(1..28).view(1,1,3,3,3), arange(1..9).view(1,1,2,2,2),
+    ///            b=0, padding="same").
+    #[test]
+    fn test_conv3d_same_even_kernel_asymmetric_matches_torch() {
+        let weight =
+            Parameter::from_slice(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0], &[1, 1, 2, 2, 2])
+                .unwrap();
+        let mut conv = Conv3d::<f32>::new(1, 1, (2, 2, 2), (1, 1, 1), (0, 0, 0), false).unwrap();
+        // Direct field write (Conv3d has no `set_weight`; tests share the module).
+        conv.weight = weight;
+        let conv = conv.with_string_padding(StringPadding::Same).unwrap();
+        let x = t(
+            &(1..=27).map(|v| v as f32).collect::<Vec<_>>(),
+            &[1, 1, 3, 3, 3],
+        );
+        let y = conv.forward(&x).unwrap();
+        assert_eq!(y.shape(), &[1, 1, 3, 3, 3]);
+        let expected = [
+            356.0, 392.0, 186.0, 464.0, 500.0, 234.0, 205.0, 219.0, 99.0, 680.0, 716.0, 330.0,
+            788.0, 824.0, 378.0, 331.0, 345.0, 153.0, 217.0, 227.0, 93.0, 247.0, 257.0, 105.0,
+            77.0, 80.0, 27.0,
+        ];
+        assert_close(y.data().unwrap(), &expected, 1e-3);
+    }
+
+    /// Conv3d 'same' backward (even 2x2x2). torch grad wrt x (27 values).
+    #[test]
+    fn test_conv3d_same_backward_matches_torch() {
+        let weight =
+            Parameter::from_slice(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0], &[1, 1, 2, 2, 2])
+                .unwrap();
+        let mut conv = Conv3d::<f32>::new(1, 1, (2, 2, 2), (1, 1, 1), (0, 0, 0), false).unwrap();
+        // Direct field write (Conv3d has no `set_weight`; tests share the module).
+        conv.weight = weight;
+        let conv = conv.with_string_padding(StringPadding::Same).unwrap();
+        let x = leaf(
+            &(1..=27).map(|v| v as f32).collect::<Vec<_>>(),
+            &[1, 1, 3, 3, 3],
+        );
+        let y = conv.forward(&x).unwrap();
+        // out.sum().backward() — grad_output is all-ones (matches the torch oracle).
+        let sum = ferrotorch_core::grad_fns::reduction::sum(&y).unwrap();
+        ferrotorch_core::backward(&sum).unwrap();
+        let gx = x.grad().unwrap().expect("input grad must be populated");
+        assert_eq!(gx.shape(), &[1, 1, 3, 3, 3]);
+        let expected = [
+            1.0, 3.0, 3.0, 4.0, 10.0, 10.0, 4.0, 10.0, 10.0, 6.0, 14.0, 14.0, 16.0, 36.0, 36.0,
+            16.0, 36.0, 36.0, 6.0, 14.0, 14.0, 16.0, 36.0, 36.0, 16.0, 36.0, 36.0,
+        ];
+        assert_close(gx.data().unwrap(), &expected, 1e-3);
+    }
+
+    /// `padding='same'` with stride>1 is rejected at construction, matching
+    /// upstream `ValueError("padding='same' is not supported for strided
+    /// convolutions")` (`conv.py:117-120`).
+    #[test]
+    fn test_conv_same_stride_gt1_rejected() {
+        // Conv1d
+        let c1 = Conv1d::<f32>::new(1, 1, 3, 2, 0, false)
+            .unwrap()
+            .with_string_padding(StringPadding::Same);
+        let e1 = c1.unwrap_err();
+        assert!(
+            format!("{e1}").contains("padding='same' is not supported for strided convolutions"),
+            "conv1d: {e1}"
+        );
+        // Conv2d (stride 2 in one dim)
+        let c2 = Conv2d::<f32>::new(1, 1, (3, 3), (1, 2), (0, 0), false)
+            .unwrap()
+            .with_string_padding(StringPadding::Same);
+        assert!(
+            format!("{}", c2.unwrap_err())
+                .contains("padding='same' is not supported for strided convolutions")
+        );
+        // Conv3d
+        let c3 = Conv3d::<f32>::new(1, 1, (2, 2, 2), (2, 1, 1), (0, 0, 0), false)
+            .unwrap()
+            .with_string_padding(StringPadding::Same);
+        assert!(
+            format!("{}", c3.unwrap_err())
+                .contains("padding='same' is not supported for strided convolutions")
+        );
+        // 'valid' with stride>1 is fine (no constraint).
+        assert!(
+            Conv2d::<f32>::new(1, 1, (3, 3), (2, 2), (0, 0), false)
+                .unwrap()
+                .with_string_padding(StringPadding::Valid)
+                .is_ok()
+        );
+    }
+
+    // =======================================================================
+    // Unbatched input (rank D+1)  — #1604
+    // Oracle values from live torch 2.11.0; the output is rank D+1 and the
+    // gradient flows back to the unbatched input shape (`batchify` /
+    // `output.squeeze(0)` at `aten/src/ATen/native/Convolution.cpp:816-831,
+    // 990-1047`), R-CHAR-3.
+    // =======================================================================
+
+    /// Conv1d unbatched `(C, L)` -> output `(C_out, L_out)` (rank 2).
+    /// torch: F.conv1d([[1,2,3,4,5]], w=[1,2,3], b=0.5) -> [[14.5,20.5,26.5]].
+    #[test]
+    fn test_conv1d_unbatched_forward_matches_torch() {
+        let conv = conv1d_with_weight(&[1.0, 2.0, 3.0], &[1, 1, 3], 0.5);
+        let x = t(&[1.0, 2.0, 3.0, 4.0, 5.0], &[1, 5]); // (C=1, L=5) unbatched
+        let y = conv.forward(&x).unwrap();
+        assert_eq!(y.ndim(), 2, "unbatched output must be rank 2");
+        assert_eq!(y.shape(), &[1, 3]);
+        assert_close(y.data().unwrap(), &[14.5, 20.5, 26.5], 1e-4);
+    }
+
+    /// Conv1d unbatched backward: grad shape == unbatched input `(C, L)`.
+    /// torch grad of sum wrt x = [1, 3, 6, 5, 3].
+    #[test]
+    fn test_conv1d_unbatched_backward_matches_torch() {
+        let conv = conv1d_with_weight(&[1.0, 2.0, 3.0], &[1, 1, 3], 0.5);
+        let x = leaf(&[1.0, 2.0, 3.0, 4.0, 5.0], &[1, 5]);
+        let y = conv.forward(&x).unwrap();
+        // out.sum().backward() — grad_output is all-ones (matches the torch oracle).
+        let sum = ferrotorch_core::grad_fns::reduction::sum(&y).unwrap();
+        ferrotorch_core::backward(&sum).unwrap();
+        let gx = x.grad().unwrap().expect("input grad must be populated");
+        assert_eq!(gx.shape(), &[1, 5], "grad must match unbatched input shape");
+        assert_close(gx.data().unwrap(), &[1.0, 3.0, 6.0, 5.0, 3.0], 1e-4);
+    }
+
+    /// Conv2d unbatched `(C, H, W)` -> output `(C_out, H_out, W_out)` (rank 3).
+    /// torch: F.conv2d(arange(1..26).view(1,5,5), arange(1..10).view(1,1,3,3),
+    ///   b=0) -> [[[411,456,501],[636,681,726],[861,906,951]]].
+    #[test]
+    fn test_conv2d_unbatched_forward_matches_torch() {
+        let weight = Parameter::from_slice(
+            &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0],
+            &[1, 1, 3, 3],
+        )
+        .unwrap();
+        let mut conv = Conv2d::<f32>::new(1, 1, (3, 3), (1, 1), (0, 0), false).unwrap();
+        conv.set_weight(weight).unwrap();
+        let x = t(&(1..=25).map(|v| v as f32).collect::<Vec<_>>(), &[1, 5, 5]); // (C,H,W)
+        let y = conv.forward(&x).unwrap();
+        assert_eq!(y.ndim(), 3, "unbatched output must be rank 3");
+        assert_eq!(y.shape(), &[1, 3, 3]);
+        let expected = [
+            411.0, 456.0, 501.0, 636.0, 681.0, 726.0, 861.0, 906.0, 951.0,
+        ];
+        assert_close(y.data().unwrap(), &expected, 1e-3);
+    }
+
+    /// Conv2d unbatched backward: grad shape == unbatched input `(C, H, W)`.
+    /// torch grad wrt x (25 values).
+    #[test]
+    fn test_conv2d_unbatched_backward_matches_torch() {
+        let weight = Parameter::from_slice(
+            &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0],
+            &[1, 1, 3, 3],
+        )
+        .unwrap();
+        let mut conv = Conv2d::<f32>::new(1, 1, (3, 3), (1, 1), (0, 0), false).unwrap();
+        conv.set_weight(weight).unwrap();
+        let x = leaf(&(1..=25).map(|v| v as f32).collect::<Vec<_>>(), &[1, 5, 5]);
+        let y = conv.forward(&x).unwrap();
+        // out.sum().backward() — grad_output is all-ones (matches the torch oracle).
+        let sum = ferrotorch_core::grad_fns::reduction::sum(&y).unwrap();
+        ferrotorch_core::backward(&sum).unwrap();
+        let gx = x.grad().unwrap().expect("input grad must be populated");
+        assert_eq!(gx.shape(), &[1, 5, 5], "grad must match unbatched input");
+        let expected = [
+            1.0, 3.0, 6.0, 5.0, 3.0, 5.0, 12.0, 21.0, 16.0, 9.0, 12.0, 27.0, 45.0, 33.0, 18.0,
+            11.0, 24.0, 39.0, 28.0, 15.0, 7.0, 15.0, 24.0, 17.0, 9.0,
+        ];
+        assert_close(gx.data().unwrap(), &expected, 1e-3);
+    }
+
+    /// Conv3d unbatched `(C, D, H, W)` -> output rank 4.
+    /// torch: F.conv3d(arange(1..28).view(1,3,3,3), arange(1..9).view(1,1,2,2,2),
+    ///   b=0) -> [[[[356,392],[464,500]],[[680,716],[788,824]]]].
+    #[test]
+    fn test_conv3d_unbatched_forward_matches_torch() {
+        let weight =
+            Parameter::from_slice(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0], &[1, 1, 2, 2, 2])
+                .unwrap();
+        let mut conv = Conv3d::<f32>::new(1, 1, (2, 2, 2), (1, 1, 1), (0, 0, 0), false).unwrap();
+        // Direct field write (Conv3d has no `set_weight`; tests share the module).
+        conv.weight = weight;
+        let x = t(
+            &(1..=27).map(|v| v as f32).collect::<Vec<_>>(),
+            &[1, 3, 3, 3],
+        ); // (C,D,H,W)
+        let y = conv.forward(&x).unwrap();
+        assert_eq!(y.ndim(), 4, "unbatched output must be rank 4");
+        assert_eq!(y.shape(), &[1, 2, 2, 2]);
+        let expected = [356.0, 392.0, 464.0, 500.0, 680.0, 716.0, 788.0, 824.0];
+        assert_close(y.data().unwrap(), &expected, 1e-3);
+    }
+
+    /// Conv3d unbatched backward: grad shape == unbatched input `(C, D, H, W)`.
+    /// torch grad wrt x (27 values).
+    #[test]
+    fn test_conv3d_unbatched_backward_matches_torch() {
+        let weight =
+            Parameter::from_slice(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0], &[1, 1, 2, 2, 2])
+                .unwrap();
+        let mut conv = Conv3d::<f32>::new(1, 1, (2, 2, 2), (1, 1, 1), (0, 0, 0), false).unwrap();
+        // Direct field write (Conv3d has no `set_weight`; tests share the module).
+        conv.weight = weight;
+        let x = leaf(
+            &(1..=27).map(|v| v as f32).collect::<Vec<_>>(),
+            &[1, 3, 3, 3],
+        );
+        let y = conv.forward(&x).unwrap();
+        // out.sum().backward() — grad_output is all-ones (matches the torch oracle).
+        let sum = ferrotorch_core::grad_fns::reduction::sum(&y).unwrap();
+        ferrotorch_core::backward(&sum).unwrap();
+        let gx = x.grad().unwrap().expect("input grad must be populated");
+        assert_eq!(
+            gx.shape(),
+            &[1, 3, 3, 3],
+            "grad must match unbatched input shape"
+        );
+        let expected = [
+            1.0, 3.0, 2.0, 4.0, 10.0, 6.0, 3.0, 7.0, 4.0, 6.0, 14.0, 8.0, 16.0, 36.0, 20.0, 10.0,
+            22.0, 12.0, 5.0, 11.0, 6.0, 12.0, 26.0, 14.0, 7.0, 15.0, 8.0,
+        ];
+        assert_close(gx.data().unwrap(), &expected, 1e-3);
+    }
+
+    /// Unbatched 'same' composes: Conv2d unbatched `(C,H,W)` with `padding=
+    /// 'same'` keeps the spatial dims and stays rank 3.
+    #[test]
+    fn test_conv2d_unbatched_same_composes() {
+        let weight = Parameter::from_slice(
+            &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0],
+            &[1, 1, 3, 3],
+        )
+        .unwrap();
+        let mut conv = Conv2d::<f32>::new(1, 1, (3, 3), (1, 1), (0, 0), false).unwrap();
+        conv.set_weight(weight).unwrap();
+        let conv = conv.with_string_padding(StringPadding::Same).unwrap();
+        let x = t(&(1..=16).map(|v| v as f32).collect::<Vec<_>>(), &[1, 4, 4]); // (C,H,W)
+        let y = conv.forward(&x).unwrap();
+        assert_eq!(y.ndim(), 3);
+        assert_eq!(y.shape(), &[1, 4, 4], "same padding preserves spatial dims");
     }
 }

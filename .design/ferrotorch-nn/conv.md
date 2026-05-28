@@ -26,7 +26,17 @@ support `stride`, `padding`, and `output_padding`. The `padding_mode`
 kwarg from upstream IS implemented (#1443): `Conv{1,2,3}d` honor
 `reflect`/`replicate`/`circular` (forward + backward, autograd-aware
 pre-pad), while `ConvTranspose{1,2,3}d` accept only `zeros` and reject
-other modes with the upstream `ValueError`.
+other modes with the upstream `ValueError`. String padding (`'same'` /
+`'valid'`) is implemented for `Conv{1,2,3}d` (#1602): `'valid'` maps to
+`padding = 0`; `'same'` pre-pads asymmetrically (`left = total/2`,
+`right = total - left` with `total = dilation*(kernel-1)`, the END side
+getting the extra unit) through the same autograd-aware
+`functional_pad_{1,2,3}d` path the `padding_mode` work uses, and rejects
+strided convolutions with the upstream `ValueError`. Unbatched input
+(rank `D+1`, i.e. `(C, *spatial)`) is also accepted (#1604): the layer
+unsqueezes a batch dim, convolves, and squeezes it back so the output is
+rank `D+1`, with autograd-aware unsqueeze/squeeze so gradients flow to
+the unbatched input shape.
 
 ## Requirements
 
@@ -105,10 +115,43 @@ other modes with the upstream `ValueError`.
   op_db samples skip until the runner arms are extended to construct
   `new_full` layers (separate orchestrator follow-up; tracked as the
   per-file runner-arm gap, not a per-op REQ blocker, per goal.md S5).
-  String padding `'valid'` maps to 0 and runs; `'same'` (asymmetric in
-  general) is gap #1602. Unbatched (rank D+1) input is gap #1604. The
+  String padding `'valid'` and `'same'` are now SHIPPED (REQ-12, #1602) and
+  unbatched (rank D+1) input is SHIPPED (REQ-13, #1604); the residual
+  conv1d/conv3d parity-sweep skips remain a TEST-INFRASTRUCTURE runner-arm
+  gap (separate orchestrator follow-up). The
   `conv_transpose{1,2,3}d` arms are owned by a separate dispatch and
   unchanged here.
+
+- REQ-12: String padding (`'same'` / `'valid'`) for `Conv{1,2,3}d`,
+  mirroring the `padding: str` branch of `torch.nn.Conv{1,2,3}d`
+  (`torch/nn/modules/conv.py:111-155`) and the functional
+  `_convolution_mode` dispatch (`aten/src/ATen/native/Convolution.cpp:
+  1111-1124`). A `StringPadding` enum (`Same` / `Valid`) + a
+  `with_string_padding` builder on each forward layer carry the mode.
+  `'valid'` is equivalent to `padding = 0`
+  (`Convolution.cpp:1122-1124`). `'same'` pads so the output spatial
+  size equals the input spatial size for `stride = 1`: the per-dim total
+  is `dilation * (kernel - 1)`, split ASYMMETRICALLY as `left = total/2`,
+  `right = total - left` (the END gets the extra unit when `total` is
+  odd), exactly the `_pooling_same_mode_padding_lr` arithmetic
+  (`aten/src/ATen/native/Pool.h:91-107`). The asymmetric pre-pad reuses
+  the autograd-aware `functional_pad_{1,2,3}d` (the same #1443 path) with
+  the configured `padding_mode` (constant-0 for the default `Zeros`,
+  matching `convolution_same`'s `constant_pad_nd(.., 0)`,
+  `Convolution.cpp:1105`), then convolves with `padding = 0`. `'same'`
+  with `stride != 1` is rejected at construction with the upstream
+  `ValueError("padding='same' is not supported for strided
+  convolutions")` (`conv.py:117-120`, `Convolution.cpp:1071`). Closes
+  #1602.
+- REQ-13: Unbatched input (rank `D+1`, `(C, *spatial)`) for
+  `Conv{1,2,3}d`, mirroring `batchify` + the `output.squeeze(0)`
+  un-batching in `conv{1,2,3}d` (`aten/src/ATen/native/Convolution.cpp:
+  816-831, 990-1047`). When the input rank is `num_spatial_dims + 1`
+  (2 for Conv1d, 3 for Conv2d, 4 for Conv3d), `forward` `unsqueeze(0)`s a
+  batch dim, recurses on the batched path, and `squeeze(0)`s the batch
+  dim off the result so the output is rank `D+1`. The unsqueeze/squeeze
+  are autograd-aware (`UnsqueezeBackward` / `SqueezeBackward`) so input
+  gradients flow back to the unbatched shape. Closes #1604.
 
 ## Acceptance Criteria
 
@@ -133,6 +176,17 @@ other modes with the upstream `ValueError`.
 - [ ] AC-9: Bias init matches upstream `U(-sqrt(k), sqrt(k))` —
   blocker #1450.
 - [ ] AC-10: parity-sweep arms wired for all 6 ops — blocker #1441.
+- [x] AC-11: String padding `'same'` / `'valid'` for Conv1d/2d/3d —
+  forward + backward match the live torch 2.11 oracle including the
+  asymmetric even-kernel `'same'` split, `'valid'`, and the stride>1
+  `'same'` `ValueError` (verified by `test_conv{1,2,3}d_same_*` /
+  `test_conv{1,2}d_valid_matches_torch` / `test_conv_same_stride_gt1_rejected`
+  in `conv.rs`). Closes #1602.
+- [x] AC-12: Unbatched `(C, *spatial)` input for Conv1d/2d/3d — forward
+  produces a rank-`D+1` output and backward produces a gradient of the
+  unbatched input shape, matching the live torch 2.11 oracle (verified by
+  `test_conv{1,2,3}d_unbatched_{forward,backward}_matches_torch` and
+  `test_conv2d_unbatched_same_composes` in `conv.rs`). Closes #1604.
 
 ## Architecture
 
@@ -312,4 +366,6 @@ Expected grep count after blocker #1441 closes: `>= 1` for each.
 | REQ-8 | SHIPPED | impl: `Conv2d::set_weight` and `Conv2d::from_parts` in `conv.rs`; non-test consumer: `ferrotorch-nn/src/functional.rs` (the stateless `nn::functional::conv2d` entry point) uses `Conv2d::from_parts` to drive the existing forward path with user-supplied parameters. |
 | REQ-9 | SHIPPED | impl: `kaiming_uniform(&mut weight, NonLinearity::ReLU)` + `uniform_init(&mut b, -bound, bound)` (bound = 1/sqrt(fan_in)) in every `Conv*d::new[_full]` in `conv.rs` mirroring `torch/nn/modules/conv.py:198-201`; non-test consumer: `Conv2d::new` is the path used by every vision-model constructor. (Closes #1450 — bias path; Kaiming `a=sqrt(5)` gain divergence remains a separate followup.) |
 | REQ-10 | SHIPPED | impl (forward layers): `padding_mode` field + `with_padding_mode` builder on `Conv1d` / `Conv2d` / `Conv3d`, with the non-`Zeros` pre-pad branch in each `<Conv*d as Module>::forward` calling `crate::padding::functional_pad_1d`/`_2d`/`_3d` then convolving with `padding=0`, mirroring `torch/nn/modules/conv.py:367-378` (Conv1d) / `716-732` (Conv3d). impl (transposed): `ConvTranspose{1,2,3}d::with_padding_mode` routes through `fn reject_non_zeros_transpose` returning the upstream `ValueError('Only "zeros" padding mode is supported for ...')` per `conv.py:755-758`. The 1-D/3-D pre-pads are autograd-aware via `Pad1dBackward` / `Pad3dBackward` in `padding.rs` (the #1550 fix class). Non-test production consumer: `pub use conv::{Conv1d, Conv2d, Conv3d, ConvTranspose1d, ConvTranspose2d, ConvTranspose3d}` re-export in `ferrotorch-nn/src/lib.rs`, and the `<Conv1d as Module>::forward` / `<Conv3d as Module>::forward` bodies consume `functional_pad_1d` / `functional_pad_3d` in production. Closes #1443. |
-| REQ-11 | SHIPPED (forward arms) | impl: `dispatch_conv::<D>` in `tools/parity-sweep/runner/src/main.rs` wires `nn.functional.conv1d`/`conv2d`/`conv3d` (#1441). conv2d drives the production grouped+dilated forward via `Conv2d::new_full` + `Parameter::set_data` (non-test production driver of `new_full`: `ferrotorch-vision/src/models/resnet.rs` grouped/dilated blocks). Sweep at `--seeds 8`: conv1d 24/80, conv2d 112/240, conv3d 24/160, ALL 0 failed. conv1d/conv3d grouped+dilated production support landed (#1600 / #1601 closed) — their residual sweep skips are now a runner-arm TEST gap (the arms drive `from_parts`, not `new_full`), NOT a production feature gap. Remaining filed gaps: #1602 ('same' padding), #1604 (unbatched input). `conv_transpose{1,2,3}d` arms are a separate dispatch (unchanged). |
+| REQ-11 | SHIPPED (forward arms) | impl: `dispatch_conv::<D>` in `tools/parity-sweep/runner/src/main.rs` wires `nn.functional.conv1d`/`conv2d`/`conv3d` (#1441). conv2d drives the production grouped+dilated forward via `Conv2d::new_full` + `Parameter::set_data` (non-test production driver of `new_full`: `ferrotorch-vision/src/models/resnet.rs` grouped/dilated blocks). Sweep at `--seeds 8`: conv1d 24/80, conv2d 112/240, conv3d 24/160, ALL 0 failed. conv1d/conv3d grouped+dilated production support landed (#1600 / #1601 closed) — their residual sweep skips are now a runner-arm TEST gap (the arms drive `from_parts`, not `new_full`), NOT a production feature gap. The 'same'/'valid'/unbatched op_db samples are now SHIPPED in production (REQ-12 / REQ-13) but still skip in the sweep for the same runner-arm reason. `conv_transpose{1,2,3}d` arms are a separate dispatch (unchanged). |
+| REQ-12 | SHIPPED | impl: `pub enum StringPadding` + `fn same_pad_lr` + `Conv1d::with_string_padding` / `Conv2d::with_string_padding` / `Conv3d::with_string_padding` and the `string_padding` branch at the top of each `<Conv*d as Module>::forward` in `conv.rs` (asymmetric pre-pad via `crate::padding::functional_pad_{1,2,3}d`, `left=total/2`/`right=total-left` per `aten/src/ATen/native/Pool.h:91-107`; stride>1 `'same'` rejected per `torch/nn/modules/conv.py:117-120`); non-test production consumer: the `forward` bodies (production `Module::forward`) consume `same_pad_lr` + `functional_pad_{1,2,3}d` + `recurse_clone`, and the `Conv{1,2,3}d` types are re-exported from `ferrotorch-nn/src/lib.rs`. Closes #1602. |
+| REQ-13 | SHIPPED | impl: the unbatched `input.ndim()` guard at the top of each `<Conv*d as Module>::forward` in `conv.rs` (`unsqueeze(0)` → recurse → `squeeze(0)`) using `ferrotorch_core::grad_fns::shape::{unsqueeze, squeeze}`, mirroring `batchify` + `output.squeeze(0)` at `aten/src/ATen/native/Convolution.cpp:816-831, 990-1047`; non-test production consumer: the `<Conv*d as Module>::forward` bodies (production) call `unsqueeze`/`squeeze`, and the `Conv{1,2,3}d` types are re-exported from `ferrotorch-nn/src/lib.rs`. Closes #1604. |
