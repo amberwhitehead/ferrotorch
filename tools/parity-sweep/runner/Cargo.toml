@@ -1,0 +1,24 @@
+[package]
+name = "parity-sweep-runner"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[[bin]]
+name = "parity-sweep"
+path = "src/main.rs"
+
+[dependencies]
+# Crates that provide tensor-level ops surfaced by torch's op_db:
+#   - ferrotorch-core         → arithmetic, linalg, fft, sparse, einsum, special, dunder methods
+#   - ferrotorch-nn           → torch.nn.functional.* (linear, conv, batchnorm, softmax, etc.)
+#   - ferrotorch-distributions → torch.distributions.* (Normal, Categorical, sample/log_prob/entropy)
+# Other workspace crates (gpu/cubecl/mps backends, training, models, tokenize, hub) compose
+# these ops rather than provide new ones to op_db, so are deliberately not pulled in.
+ferrotorch-core.workspace = true
+ferrotorch-nn.workspace = true
+ferrotorch-distributions.workspace = true
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
+base64 = "0.22"
