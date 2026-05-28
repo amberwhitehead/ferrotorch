@@ -13,28 +13,35 @@
 //! `ferray_linalg::vector_norm`, with an `ord` parameter and DISTINCT
 //! semantics from `matrix_norm` (the matrix Frobenius/operator norm).
 //!
-//! The runner `norm` arm (`tools/parity-sweep/runner/src/main.rs:3750`) calls
+//! The runner `norm` arm (`tools/parity-sweep/runner/src/main.rs`) calls
 //! `ferrotorch_core::linalg::matrix_norm` and the oracle's `_norm_torch_call`
-//! (`tools/parity-sweep/oracle.py:905`) calls `torch.linalg.matrix_norm` — i.e.
-//! the `norm` key covers ONLY `matrix_norm`. There is NO `vector_norm` dispatch
-//! arm and NO `vector_norm` entry in the oracle's `_CUSTOM_OPS`. Sweeping it
-//! yields `oracle: unknown op: vector_norm`.
+//! (`tools/parity-sweep/oracle.py`) calls `torch.linalg.matrix_norm` — i.e.
+//! the `norm` key covers ONLY `matrix_norm`. Before #1599 there was NO
+//! `vector_norm` dispatch arm and NO `vector_norm` entry in the oracle's
+//! `_CUSTOM_OPS`, so sweeping it yielded `oracle: unknown op: vector_norm`.
 //!
-//! This test pins the gap: it asks the live torch oracle to `execute`
+//! This test pinned the gap: it asks the live torch oracle to `execute`
 //! `vector_norm` (the same `_CUSTOM_OPS` path the decomposition/final arms use)
-//! and asserts it succeeds. It FAILS today because no adapter is registered —
-//! the failure IS the proof the runner-arm scope is not yet complete. NOTE:
-//! `vector_norm` is behaviorally CORRECT on spot inputs (ord=2 -> 13.0, ord=1
-//! -> 19.0, ord=inf -> 12.0, all matching torch); this is a COVERAGE gap, not
-//! a value divergence — hence the test pins the missing ADAPTER, not a wrong
-//! value.
+//! and asserts it succeeds. NOTE: `vector_norm` is behaviorally CORRECT on spot
+//! inputs (ord=2 -> 13.0, ord=1 -> 19.0, ord=inf -> 12.0, all matching torch);
+//! this was a COVERAGE gap, not a value divergence — hence the test pins the
+//! ADAPTER, not a wrong value.
 //!
-//! Tracking: crosslink #1599 (blocker, parent #1344).
+//! RESOLVED 2026-05-28 (#1599, last linalg runner arm of #1344): the oracle
+//! now registers a `vector_norm` `_CUSTOM_OPS` adapter
+//! (`tools/parity-sweep/oracle.py`, `_vector_norm_torch_call`) and the runner a
+//! `"vector_norm"` dispatch arm (`tools/parity-sweep/runner/src/main.rs`)
+//! routing through `ferrotorch_core::linalg::vector_norm`. The full-tensor
+//! sweep reaches `384/384 passed (0 skipped, 0 failed)` across the op_db `ord`
+//! vocabulary. This test is now un-ignored, serving as permanent regression
+//! coverage for the adapter.
+//!
+//! Tracking: crosslink #1599 (closed; parent #1344).
 //!
 //! Run with:
 //!   LD_LIBRARY_PATH="$HOME/.local/lib:$LD_LIBRARY_PATH" \
 //!     cargo test -p parity-sweep-runner \
-//!     --test divergence_linalg_vector_norm_coverage -- --ignored --nocapture
+//!     --test divergence_linalg_vector_norm_coverage -- --nocapture
 
 use std::io::{BufRead, BufReader, Write};
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
@@ -109,12 +116,12 @@ fn tensor_arg(data: &[f32], shape: &[usize]) -> Value {
 /// `det`/`slogdet`/`cross` use) so the runner can parity-check
 /// `torch.linalg.vector_norm` against ferrotorch's `pub fn vector_norm`.
 ///
-/// FAILS today: `execute("vector_norm", ...)` returns
-/// `{"ok": false, "err": "unknown op: vector_norm"}` because no adapter is
-/// registered — proving the #1344 runner-arm scope is NOT complete (the commit
-/// claims only dot/mv/mm_bt lack arms, omitting vector_norm).
+/// PASSES as of #1599: `execute("vector_norm", ...)` now returns
+/// `{"ok": true, "output": <scalar>}` because the adapter is registered. Before
+/// #1599 it returned `{"ok": false, "err": "unknown op: vector_norm"}`, proving
+/// the #1344 runner-arm scope was incomplete (the commit claimed only
+/// dot/mv/mm_bt lacked arms, omitting vector_norm).
 #[test]
-#[ignore = "divergence: vector_norm (REQ-23) has no parity-sweep runner arm/oracle adapter; #1344 scope incomplete; tracking #1599"]
 fn vector_norm_has_a_runner_arm_or_oracle_adapter() {
     let Some(mut oracle) = OracleProc::spawn() else {
         eprintln!("SKIP: torch oracle unavailable; cannot probe vector_norm coverage");

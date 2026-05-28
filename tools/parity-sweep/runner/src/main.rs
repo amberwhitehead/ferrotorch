@@ -3751,6 +3751,44 @@ fn dispatch_f32(
             let a = unary("norm")?;
             Ok(Some(ferrotorch_core::linalg::matrix_norm(&a)?))
         }
+        // `torch.linalg.vector_norm(x, ord=2, dim=None, keepdim=False)` — the
+        // full-tensor p-norm, DISTINCT from `matrix_norm`/`norm` (different
+        // `ord` semantics). A UNIQUE scalar (no gauge ambiguity), compared
+        // DIRECTLY. Forward `pub fn vector_norm` in
+        // `ferrotorch-core/src/linalg.rs` (REQ-23 of
+        // `.design/ferrotorch-core/grad_fns/linalg.md`), backed by
+        // `ferray_linalg::vector_norm` with the `ord -> NormOrder` mapping in
+        // `float_to_norm_order` (`inf`/`-inf`/`1`/`2`/arbitrary `P(p)`).
+        // ferrotorch's forward reduces over the WHOLE tensor (it passes
+        // `dim=None, keepdim=false` to ferray), so the custom samples in
+        // `oracle.py`'s `_CUSTOM_OPS["vector_norm"]` are full-tensor (no
+        // `dim`/`keepdim` kwarg). `ord` arrives wire-safe: a JSON number for
+        // finite orders, or the `"+Inf"`/`"-Inf"` string sentinels (JSON has
+        // no infinity literal, and op_db's raw `ord=inf` serializes to the
+        // non-standard JSON token `Infinity` which `serde_json` rejects — so
+        // the oracle adapter substitutes the sentinels, decoded back here to
+        // `f64::INFINITY` / `f64::NEG_INFINITY`). Wired 2026-05-28 to close
+        // the LAST linalg runner-arm gap of #1344 (tracking #1599).
+        "vector_norm" => {
+            let a = unary("vector_norm")?;
+            let ord: f64 = match kwargs.get("ord") {
+                // Default matches `torch.linalg.vector_norm`'s `ord=2`.
+                None => 2.0,
+                Some(Value::String(s)) => match s.as_str() {
+                    "+Inf" => f64::INFINITY,
+                    "-Inf" => f64::NEG_INFINITY,
+                    other => {
+                        return Err(
+                            format!("vector_norm: unknown ord sentinel string {other:?}").into(),
+                        );
+                    }
+                },
+                Some(v) => v
+                    .as_f64()
+                    .ok_or_else(|| format!("vector_norm: ord kwarg is not a JSON number: {v}"))?,
+            };
+            Ok(Some(ferrotorch_core::linalg::vector_norm(&a, ord)?))
+        }
         // `torch.linalg.matrix_rank(A)` — an INTEGER (the harness widens the
         // int64 expected to f32; rank values fit the f32 mantissa exactly).
         // Forward `pub fn matrix_rank` in `ferrotorch-core/src/linalg.rs`
@@ -7149,6 +7187,7 @@ fn tolerance_for(op: &str) -> (f32, f32) {
         | "lu_factor"
         | "householder_product"
         | "norm"
+        | "vector_norm"
         | "matrix_rank"
         | "solve"
         | "qr"

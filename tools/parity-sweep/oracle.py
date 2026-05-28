@@ -908,6 +908,72 @@ def _norm_torch_call(a: torch.Tensor) -> torch.Tensor:
     return torch.linalg.matrix_norm(a)
 
 
+# `ord` wire sentinels for `vector_norm` (JSON has no inf literal, and torch's
+# op_db echoes `ord=inf` back as the non-standard JSON token `Infinity` which
+# the Rust runner's `serde_json` REJECTS — verified 2026-05-28 by sweeping
+# op_db's `linalg.vector_norm`, which FAILS at the `ord=inf` sample with
+# `expected value at line 1 column 105`). We therefore carry `ord` as a
+# wire-safe JSON value: a plain number for finite orders, or the existing
+# `_FLOAT_TOKENS` string sentinels `"+Inf"` / `"-Inf"` for the infinity orders.
+# These round-trip cleanly through JSON in both directions and are decoded back
+# to `float('inf')` / `float('-inf')` here AND to `f32::INFINITY` /
+# `f32::NEG_INFINITY` in the runner's `vector_norm` arm.
+_VECTOR_NORM_ORD_SENTINELS = {"+Inf": float("inf"), "-Inf": float("-inf")}
+
+
+def _resolve_vector_norm_ord(ord_value: Any) -> float:
+    """Decode a wire-safe `ord` (number or `"+Inf"`/`"-Inf"` sentinel) to the
+    float `torch.linalg.vector_norm` accepts. Mirrors the runner-side decode in
+    `tools/parity-sweep/runner/src/main.rs`'s `"vector_norm"` arm."""
+    if isinstance(ord_value, str):
+        if ord_value not in _VECTOR_NORM_ORD_SENTINELS:
+            raise ValueError(f"unknown vector_norm ord sentinel: {ord_value!r}")
+        return _VECTOR_NORM_ORD_SENTINELS[ord_value]
+    return float(ord_value)
+
+
+def _vector_norm_samples() -> list[tuple[tuple, dict]]:
+    """`torch.linalg.vector_norm(x, ord)` full-tensor (dim=None) samples.
+
+    ferrotorch's `pub fn vector_norm(input, ord)` in
+    `ferrotorch-core/src/linalg.rs` reduces over the WHOLE tensor (it calls
+    `ferray_linalg::vector_norm(arr, order, None, false)` -> a SCALAR; it has
+    NO `dim`/`keepdim` parameters), so we feed full-tensor samples only and the
+    output is the scalar both sides compute. We sweep the op_db `ord` vocabulary
+    (`1`/`2`/`3`/`4`/`6` int, `0.9` float, `+inf`, `-inf` — see op_db's
+    `linalg.vector_norm` sample enumeration) over NON-ZERO vectors/matrices so
+    every order is well-defined (the negative / fractional orders are singular
+    at a zero entry, which is the op_db `dim`-subset degeneracy ferrotorch's
+    full-reduction forward does not model). `ord` is carried wire-safe (number
+    or `"+Inf"`/`"-Inf"` sentinel; see `_resolve_vector_norm_ord`)."""
+    g = torch.Generator().manual_seed(0)
+    # All-positive entries (abs(randn)+0.5) so no element is zero and the
+    # negative / fractional `ord` powers are finite and unambiguous on both
+    # the torch and the ferrotorch (faer) side.
+    shapes = [(3,), (5,), (4,), (2, 3), (3, 3), (2, 4)]
+    ord_values: list[Any] = [1, 2, 3, 4, 6, 0.9, "+Inf", "-Inf"]
+    samples: list[tuple[tuple, dict]] = []
+    for shape in shapes:
+        a = torch.randn(*shape, generator=g, dtype=torch.float32).abs() + 0.5
+        for ord_value in ord_values:
+            # `ord` rides the KWARGS envelope (mirroring torch's
+            # `vector_norm(x, ord=...)` keyword + the runner's
+            # `kwargs.get("ord")` decode); the tensor is the sole positional.
+            samples.append(((a,), {"ord": ord_value}))
+    return samples
+
+
+def _vector_norm_torch_call(a: torch.Tensor, ord: Any = 2) -> torch.Tensor:
+    """`torch.linalg.vector_norm(x, ord=2, dim=None, keepdim=False)` — the
+    full-tensor p-norm. UNIQUE (no gauge ambiguity), a SCALAR, compared
+    DIRECTLY against ferrotorch's `pub fn vector_norm`. `ord` arrives wire-safe
+    (number or `"+Inf"`/`"-Inf"`); the default `ord=2` matches torch's signature
+    so the critic-test `execute("vector_norm", kwargs={})` probe gets the
+    Euclidean 2-norm. Documented `torch.linalg.vector_norm` in
+    `torch/linalg/__init__.py`."""
+    return torch.linalg.vector_norm(a, ord=_resolve_vector_norm_ord(ord))
+
+
 def _matrix_rank_samples() -> list[tuple[tuple, dict]]:
     """Matrices of KNOWN rank (full-rank + explicitly rank-deficient) so the
     integer rank parity is meaningful, not just full-rank trivia."""
@@ -1129,6 +1195,18 @@ _CUSTOM_OPS: dict[str, dict[str, Any]] = {
         "samples": _householder_samples(),
     },
     "norm": {"callable": _norm_torch_call, "samples": _norm_samples()},
+    # `torch.linalg.vector_norm(x, ord, dim=None, keepdim=False)` — the
+    # full-tensor p-norm (DISTINCT from `matrix_norm`/`norm`: different `ord`
+    # semantics). UNIQUE scalar, compared DIRECTLY. Registered as a custom op
+    # (NOT op_db) because op_db's `linalg.vector_norm` samples are dominated by
+    # `dim`-subset reductions ferrotorch's full-reduction `pub fn vector_norm`
+    # does not model AND echo `ord=inf` as JSON `Infinity` the runner rejects
+    # (see `_vector_norm_samples` / `_resolve_vector_norm_ord`). Closes the
+    # last linalg runner-arm gap of #1344 (tracking #1599).
+    "vector_norm": {
+        "callable": _vector_norm_torch_call,
+        "samples": _vector_norm_samples(),
+    },
     "matrix_rank": {"callable": _matrix_rank_torch_call, "samples": _matrix_rank_samples()},
     # FINAL linalg subset (#1344): solve / qr / cholesky / inv / det /
     # slogdet / cross. Unique or gauge-invariant derived quantities (see the

@@ -547,6 +547,21 @@
    "tolerance": "rtol=1e-4, atol=1e-6 (faer vs LAPACK factorization f32 ULP drift, decomposition-family envelope in fn tolerance_for); gauge-invariant comparison",
    "known_divergences": []
   },
+  "vector_norm": {
+   "status": "verified",
+   "last_sweep_at": "2026-05-28T00:00:00Z",
+   "samples_attempted": 384,
+   "samples_passed": 384,
+   "samples_failed": 0,
+   "samples_skipped": 0,
+   "pytorch_source": "torch.linalg.vector_norm(x, ord=2, dim=None, keepdim=False) documented in torch/linalg/__init__.py; full-tensor p-norm, DISTINCT from matrix_norm (different ord semantics)",
+   "ferrotorch_source": "pub fn vector_norm in ferrotorch-core/src/linalg.rs (full-tensor reduction; ord -> NormOrder via float_to_norm_order, backed by ferray_linalg::vector_norm; grad-aware: delegates to grad_fns::linalg::vector_norm_differentiable when grad enabled); runner arm dispatch_f32 \"vector_norm\" in tools/parity-sweep/runner/src/main.rs",
+   "runner_arm": "tools/parity-sweep/runner/src/main.rs dispatch_f32 \"vector_norm\" arm (decodes ord from kwargs: JSON number or \"+Inf\"/\"-Inf\" sentinel) + oracle.py _CUSTOM_OPS[\"vector_norm\"] adapter _vector_norm_torch_call (full-tensor samples over op_db ord vocabulary)",
+   "comparison": "SCALAR: full-tensor p-norm is UNIQUE (no gauge ambiguity); compared directly. ord swept over 1/2/3/4/6 int, 0.9 float, +inf, -inf over non-zero vectors/matrices.",
+   "tolerance": "rtol=1e-4, atol=1e-6 (faer vs LAPACK power-sum-power f32 ULP drift, decomposition-family envelope in fn tolerance_for)",
+   "known_divergences": [],
+   "notes": "Last linalg runner arm of #1344 (tracking #1599). 384/384 passed at seeds=8 across the full ord range confirms the forward is correct for every supported order (not skip-masked). Coverage test divergence_linalg_vector_norm_coverage.rs un-ignored."
+  },
   "matrix_rank": {
    "status": "verified",
    "last_sweep_at": "2026-05-27T00:00:00Z",
