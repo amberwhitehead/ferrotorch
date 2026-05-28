@@ -40,6 +40,10 @@ fn assert_close(actual: &[f32], expected: &[f32], tol: f32, ctx: &str) {
 ///   torch.nn.functional.bilinear(x1,x2,W,b) == [[64.6,-2.2],[186.6,-10.2]]
 ///   torch.nn.functional.bilinear(x2,x1,W,b) == [[60.6,-4.2],[182.6,-12.2]]  (differs => non-symmetric)
 #[test]
+#[allow(
+    clippy::excessive_precision,
+    reason = "oracle-derived f32 expected values copied verbatim from live torch 2.11 — full precision intentional"
+)]
 fn divergence_1603_bilinear_shape_invisible_swap() {
     let mut bl = Bilinear::<f32>::new(2, 2, 2, true).unwrap();
     {

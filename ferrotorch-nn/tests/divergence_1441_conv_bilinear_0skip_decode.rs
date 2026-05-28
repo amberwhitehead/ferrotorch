@@ -185,12 +185,8 @@ fn divergence_1441_conv2d_unbatched_grouped_dilated_matches_torch() {
     reason = "oracle-derived f32 expected values copied verbatim from live torch 2.11"
 )]
 fn divergence_1441_conv2d_same_dilated_matches_torch() {
-    let input: Vec<f32> = (0..(1 * 4 * 5 * 5))
-        .map(|i| i as f32 * 0.02 - 0.5)
-        .collect();
-    let weight: Vec<f32> = (0..(1 * 4 * 2 * 3))
-        .map(|i| i as f32 * 0.03 - 0.2)
-        .collect();
+    let input: Vec<f32> = (0..(4 * 5 * 5)).map(|i| i as f32 * 0.02 - 0.5).collect();
+    let weight: Vec<f32> = (0..(4 * 2 * 3)).map(|i| i as f32 * 0.03 - 0.2).collect();
 
     // EXPECTED: live torch.nn.functional.conv2d output, [1,1,5,5] flattened.
     let torch_out = [

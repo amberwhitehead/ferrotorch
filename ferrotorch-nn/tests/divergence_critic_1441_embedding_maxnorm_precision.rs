@@ -66,12 +66,7 @@ fn tensor(data: &[f32], shape: &[usize]) -> Tensor<f32> {
 }
 
 /// The adversarial weight row whose f32 L2-norm is exactly `max_norm = 100.0`.
-const ADVERSARIAL_ROW: [f32; 4] = [
-    -5.092_077_7,
-    -9.034_002,
-    -99.067_34,
-    -8.838_612,
-];
+const ADVERSARIAL_ROW: [f32; 4] = [-5.092_077_7, -9.034_002, -99.067_34, -8.838_612];
 
 /// LIVE torch `F.embedding([0], weight, max_norm=100.0, norm_type=2.0)[0]`:
 /// the row is returned UNCHANGED because torch's f32-precision norm equals

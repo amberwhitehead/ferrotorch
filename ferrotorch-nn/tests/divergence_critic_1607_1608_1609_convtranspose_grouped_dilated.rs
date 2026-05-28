@@ -71,6 +71,10 @@ fn assert_close(got: &[f32], want: &[f32], ctx: &str) {
 //   y.sum().backward()
 // ---------------------------------------------------------------------------
 #[test]
+#[allow(
+    clippy::excessive_precision,
+    reason = "oracle-derived f32 expected values copied verbatim from live torch 2.11 — full precision intentional"
+)]
 fn divergence_ct2d_groups3_distinct_weights_matches_torch() {
     let weight: Vec<f32> = (1..=24).map(|i| i as f32 * 0.1).collect();
     let bias = [0.5f32, -0.5, 0.25];
@@ -154,6 +158,10 @@ fn divergence_ct2d_groups3_distinct_weights_matches_torch() {
 //   y.sum().backward()
 // ---------------------------------------------------------------------------
 #[test]
+#[allow(
+    clippy::excessive_precision,
+    reason = "oracle-derived f32 expected values copied verbatim from live torch 2.11 — full precision intentional"
+)]
 fn divergence_ct2d_combo_asymmetric_kernel_matches_torch() {
     let weight: Vec<f32> = (1..=24).map(|i| i as f32 * 0.1).collect();
     let bias = [0.3f32, -0.3];
@@ -239,6 +247,10 @@ fn divergence_ct2d_combo_asymmetric_kernel_matches_torch() {
 //   y.sum().backward()
 // ---------------------------------------------------------------------------
 #[test]
+#[allow(
+    clippy::excessive_precision,
+    reason = "oracle-derived f32 expected values copied verbatim from live torch 2.11 — full precision intentional"
+)]
 fn divergence_ct3d_combo_dilated_grouped_matches_torch() {
     let weight: Vec<f32> = (1..=32).map(|i| i as f32 * 0.05).collect();
     let bias = [0.1f32, -0.1];

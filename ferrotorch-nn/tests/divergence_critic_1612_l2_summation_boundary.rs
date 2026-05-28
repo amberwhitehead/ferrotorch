@@ -77,6 +77,10 @@ const ROW: [f32; 6] = [
 
 /// LIVE torch `at::norm(row, 2.0)` in f32 (verified torch 2.11.0+cu130,
 /// 2026-05-28). Bits `0x4201970d`.
+#[allow(
+    clippy::excessive_precision,
+    reason = "oracle-derived f32 expected value copied verbatim from live torch 2.11 — full precision intentional (the f64-literal digits round to the exact f32 bits 0x4201970d the test pins)"
+)]
 const TORCH_F32_L2_NORM: f32 = 32.39751052856445;
 
 /// LIVE torch `F.embedding([0], w, max_norm=TORCH_F32_L2_NORM, norm_type=2.0)`:
@@ -96,6 +100,19 @@ const ATOL: f32 = 1e-7;
 /// `norm > max_norm` decision flips. Upstream: Embedding.cpp:202-203 +
 /// ReduceOpsKernel.cpp:221-256. ferrotorch: embedding.rs:153-162. Tracking: #1614.
 #[test]
+#[ignore = "#1614 OPEN: the prescribed fix (scalar `Σ v*v` + `sqrt`) does NOT \
+            reproduce torch's `0x4201970d` — a scalar left-to-right `Σ v*v` in \
+            native f32 gives `0x4201970e` (one ULP HIGH), the SAME wrong answer \
+            as the current `powf` path, so it still renorms this row. torch's \
+            value comes from its AVX2 width-8 lane-grouped SIMD reduction in \
+            `binary_kernel_reduce`/`NormTwoOps` (the general norm path, since \
+            `is_reduce_lastdim` is false for a single contiguous row view), whose \
+            exact per-row-length, CPU-target-dependent (AVX2 w=8 vs AVX512 w=16 \
+            vs scalar) accumulation tree cannot be reproduced byte-for-byte by a \
+            portable scalar Rust loop. Matching torch here requires a \
+            width-parameterized SIMD norm primitive — out of single-file fixer \
+            scope (R-FIX-2/3); escalated to acto-builder. Re-pinned `#[ignore]` \
+            with #1614 still OPEN per R-VERIFY-1."]
 fn divergence_embedding_l2_powf_vs_vv_summation_boundary_renorms() {
     // Two-row weight: row 0 is the boundary row, row 1 is arbitrary.
     let mut data = ROW.to_vec();
@@ -141,6 +158,12 @@ fn divergence_embedding_l2_powf_vs_vv_summation_boundary_renorms() {
 /// boundary row renorms it where torch's `F.embedding_bag` would not. Confirms
 /// the #1612-incomplete L2 boundary is not Embedding-specific. Tracking: #1614.
 #[test]
+#[ignore = "#1614 OPEN: shares `renorm_weight_rows_in_place` with the Embedding \
+            case above — same root cause, same blocker. The scalar `Σ v*v`+`sqrt` \
+            fix gives `0x4201970e` not torch's lane-reduced `0x4201970d`; matching \
+            torch needs a width-parameterized SIMD norm primitive, out of \
+            single-file fixer scope. Escalated to acto-builder; re-pinned \
+            `#[ignore]` with #1614 still OPEN per R-VERIFY-1."]
 fn divergence_embedding_bag_l2_powf_vs_vv_summation_boundary_renorms() {
     let mut bag = EmbeddingBag::<f32>::new(2, 6, EmbeddingBagMode::Sum).unwrap();
     let mut data = ROW.to_vec();
@@ -150,11 +173,8 @@ fn divergence_embedding_bag_l2_powf_vs_vv_summation_boundary_renorms() {
     // arm uses to install pretrained bag weights).
     {
         let mut params = Module::<f32>::parameters_mut(&mut bag);
-        params[0].set_data(Tensor::from_storage(
-            TensorStorage::cpu(data),
-            vec![2, 6],
-            true,
-        ).unwrap());
+        params[0]
+            .set_data(Tensor::from_storage(TensorStorage::cpu(data), vec![2, 6], true).unwrap());
     }
     let bag = bag
         .with_max_norm(TORCH_F32_L2_NORM as f64)

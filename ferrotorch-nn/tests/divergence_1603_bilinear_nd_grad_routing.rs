@@ -89,6 +89,10 @@ fn make_layer() -> Bilinear<f32> {
 /// choices hide a per-position grad-routing transpose. This test removes both
 /// masks.
 #[test]
+#[allow(
+    clippy::excessive_precision,
+    reason = "oracle-derived f32 expected values copied verbatim from live torch 2.11 — full precision intentional"
+)]
 fn divergence_1603_bilinear_3d_nonuniform_grad_routing() {
     let bl = make_layer();
 
@@ -103,8 +107,8 @@ fn divergence_1603_bilinear_3d_nonuniform_grad_routing() {
     // FWD oracle (non-square leading dims): catches a leading-dim transpose
     // even in the forward pass.
     let fwd: [f32; 12] = [
-        0.7, -0.05, 2.75, 1.8, 6.9, 5.150001, 13.150001, 9.999998, 21.500004, 16.349998,
-        31.950001, 24.200001,
+        0.7, -0.05, 2.75, 1.8, 6.9, 5.150001, 13.150001, 9.999998, 21.500004, 16.349998, 31.950001,
+        24.200001,
     ];
     assert_close(y.data().unwrap(), &fwd, 1e-4, "3D fwd (non-square leading)");
 
@@ -119,14 +123,24 @@ fn divergence_1603_bilinear_3d_nonuniform_grad_routing() {
         0.105, 0.015, -0.025, 0.485, 0.055, -0.12, 1.145, 0.135, -0.295, 2.085, 0.255, -0.55,
         3.305, 0.415, -0.885, 4.805, 0.615, -1.3,
     ];
-    assert_close(g_x1.data().unwrap(), &grad_x1, 1e-4, "3D grad_x1 (non-uniform)");
+    assert_close(
+        g_x1.data().unwrap(),
+        &grad_x1,
+        1e-4,
+        "3D grad_x1 (non-uniform)",
+    );
 
     let g_x2 = x2.grad().unwrap().expect("x2 grad");
     assert_eq!(g_x2.shape(), &[2, 3, 2]);
     let grad_x2: [f32; 12] = [
         -0.05, 0.085, -0.15, 0.86, -0.25, 2.355, -0.35, 4.57, -0.45, 7.505, -0.55, 11.160001,
     ];
-    assert_close(g_x2.data().unwrap(), &grad_x2, 1e-4, "3D grad_x2 (non-uniform)");
+    assert_close(
+        g_x2.data().unwrap(),
+        &grad_x2,
+        1e-4,
+        "3D grad_x2 (non-uniform)",
+    );
 
     let g_w = bl.weight.grad().unwrap().expect("W grad");
     assert_eq!(g_w.shape(), &[2, 3, 2]);
@@ -134,7 +148,12 @@ fn divergence_1603_bilinear_3d_nonuniform_grad_routing() {
         184.550003, 205.100006, 198.850006, 221.200012, 213.150009, 237.300018, 205.100006,
         228.200012, 221.200012, 246.400009, 237.300003, 264.600006,
     ];
-    assert_close(g_w.data().unwrap(), &grad_w, 2e-3, "3D grad_W (non-uniform)");
+    assert_close(
+        g_w.data().unwrap(),
+        &grad_w,
+        2e-3,
+        "3D grad_W (non-uniform)",
+    );
 
     let g_b = bl
         .bias
@@ -146,7 +165,12 @@ fn divergence_1603_bilinear_3d_nonuniform_grad_routing() {
     assert_eq!(g_b.shape(), &[2]);
     // bias grad sums the seeded output grad over ALL leading dims:
     // sum over o=0 positions = 0.1+0.3+0.5+0.7+0.9+1.1 = 3.6; o=1 = 4.2.
-    assert_close(g_b.data().unwrap(), &[3.6, 4.2], 1e-4, "3D grad_bias (non-uniform)");
+    assert_close(
+        g_b.data().unwrap(),
+        &[3.6, 4.2],
+        1e-4,
+        "3D grad_bias (non-uniform)",
+    );
 }
 
 /// 4-D NON-UNIFORM-GRADIENT forward + backward (no 4-D backward exists in the
@@ -161,6 +185,10 @@ fn divergence_1603_bilinear_3d_nonuniform_grad_routing() {
 ///   go = (arange(1, y.numel()+1).float()*0.1).reshape(y.shape)
 ///   y.backward(go)
 #[test]
+#[allow(
+    clippy::excessive_precision,
+    reason = "oracle-derived f32 expected values copied verbatim from live torch 2.11 — full precision intentional"
+)]
 fn divergence_1603_bilinear_4d_nonuniform_grad_routing() {
     let bl = make_layer();
 
@@ -185,9 +213,8 @@ fn divergence_1603_bilinear_4d_nonuniform_grad_routing() {
     let g_x1 = x1.grad().unwrap().expect("x1 grad");
     assert_eq!(g_x1.shape(), &[2, 1, 4, 3]);
     let grad_x1: [f32; 24] = [
-        0.009, 0.006, -0.0025, 0.119, 0.016, -0.0285, 0.341, 0.042, -0.0865, 0.675, 0.084,
-        -0.1765, 1.121, 0.142, -0.2985, 1.679, 0.216, -0.4525, 2.349, 0.306, -0.6385, 3.131,
-        0.412, -0.8565,
+        0.009, 0.006, -0.0025, 0.119, 0.016, -0.0285, 0.341, 0.042, -0.0865, 0.675, 0.084, -0.1765,
+        1.121, 0.142, -0.2985, 1.679, 0.216, -0.4525, 2.349, 0.306, -0.6385, 3.131, 0.412, -0.8565,
     ];
     assert_close(g_x1.data().unwrap(), &grad_x1, 1e-4, "4D grad_x1");
 
