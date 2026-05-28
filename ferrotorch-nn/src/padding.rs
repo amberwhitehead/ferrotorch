@@ -1577,9 +1577,9 @@ fn signed_mode_axis_src(mode: PaddingMode, j: usize, size: usize, lo: isize, hi:
 /// Crop-capable reflect/circular pad over the last `npad` dimensions using the
 /// unified index map against the ORIGINAL input window. `pads` is `[(lo,hi),
 /// ...]` ordered LAST padded axis first. Output extent per axis is
-/// `size + lo + hi` (negative pads narrow). Reflect legality (`|lo| < size`
-/// and `|hi| < size` per axis, checked against the ORIGINAL size, mirroring
-/// `aten/src/ATen/native/ReflectionPad.cpp:46-48`) is validated here.
+/// `size + lo + hi` (negative pads narrow). Reflect legality (SIGNED `lo < size`
+/// and `hi < size` per axis, checked against the ORIGINAL size, mirroring
+/// `aten/src/ATen/native/ReflectionPad.cpp:48-49`) is validated here.
 fn pad_nd_signed_reflect_circular<T: Float>(
     data: &[T],
     shape: &[usize],
@@ -1592,17 +1592,32 @@ fn pad_nd_signed_reflect_circular<T: Float>(
     for (k, &(lo, hi)) in pads.iter().enumerate() {
         let dim = ndim - 1 - k;
         let size = shape[dim] as isize;
-        if mode == PaddingMode::Reflect && (lo.abs() >= size || hi.abs() >= size) {
+        // Reflect: torch's check is SIGNED, not absolute
+        // (`aten/src/ATen/native/ReflectionPad.cpp:48-49`):
+        // `TORCH_CHECK(pad_l < input_w && pad_r < input_w, ...)`. A NEGATIVE
+        // (crop) pad is always `< input_w`, so torch only rejects POSITIVE pads
+        // whose magnitude reaches `>= input_w`. The prior `lo.abs() >= size`
+        // wrongly rejected valid negative crops where `|pad| >= size` (e.g.
+        // `F.pad([[1,2,3]], [-3,2], reflect)` -> torch `[2,1]`, ferrotorch Err).
+        // Over-crop legality is enforced below by the `new_size < 1` guard,
+        // matching `ReflectionPad.cpp:60-65`'s `output_w >= 1` check.
+        if mode == PaddingMode::Reflect && (lo >= size || hi >= size) {
             return Err(FerrotorchError::InvalidArgument {
                 message: format!(
                     "Reflection padding ({lo}, {hi}) must be less than input size ({size}) on dimension {dim}"
                 ),
             });
         }
-        // Circular: torch rejects a pad larger than the dim ("Padding value
-        // causes wrapping around more than once.") — `pad_l <= size &&
-        // pad_r <= size` (`aten/src/ATen/native/PadNd.cpp:140-142`).
-        if mode == PaddingMode::Circular && (lo > size || hi > size) {
+        // Circular: torch rejects a positive pad larger than the dim ("Padding
+        // value causes wrapping around more than once.") — `pad_l <= size &&
+        // pad_r <= size` (`aten/src/ATen/native/PadNd.cpp:140-142`). On the
+        // negative side, torch's circular kernel produces undefined results
+        // (uninitialized memory / broadcast errors) once a crop reaches
+        // `pad <= -size`; ferrotorch's `circular_axis_src` would index OOB and
+        // PANIC there (R-CODE-2). Reject `lo <= -size || hi <= -size` so the
+        // gather never goes out of bounds — torch has no defined contract to
+        // match in that range.
+        if mode == PaddingMode::Circular && (lo > size || hi > size || lo <= -size || hi <= -size) {
             return Err(FerrotorchError::InvalidArgument {
                 message: format!(
                     "Circular padding ({lo}, {hi}) causes wrapping around more than once on dimension {dim} (size {size})"

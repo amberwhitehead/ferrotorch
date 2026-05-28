@@ -87,7 +87,6 @@ fn assert_close(actual: &[f32], expected: &[f32], tol: f32, msg: &str) {
 ///
 /// Tracking: #1621
 #[test]
-#[ignore = "divergence: reflect legality uses abs(pad)>=size, torch uses signed pad<size; tracking #1621"]
 fn divergence_reflect_negpad_eq_size_legality() {
     let x = tensor(&[1.0, 2.0, 3.0], &[1, 3]);
     let y = functional_pad_1d_signed(&x, -3, 2, PaddingMode::Reflect, 0.0).expect(
@@ -119,7 +118,6 @@ fn divergence_reflect_negpad_eq_size_legality() {
 ///
 /// Tracking: #1621
 #[test]
-#[ignore = "divergence: reflect legality uses abs(pad)>=size, torch uses signed pad<size; tracking #1621"]
 fn divergence_reflect_negpad_mirror_legality() {
     let x = tensor(&[1.0, 2.0, 3.0], &[1, 3]);
     let y = functional_pad_1d_signed(&x, 1, -3, PaddingMode::Reflect, 0.0)
@@ -148,7 +146,6 @@ fn divergence_reflect_negpad_mirror_legality() {
 ///
 /// Tracking: #1621
 #[test]
-#[ignore = "divergence: reflect legality uses abs(pad)>=size, torch uses signed pad<size; tracking #1621"]
 fn divergence_reflect_negpad4_size4_legality() {
     let x = tensor(&[1.0, 2.0, 3.0, 4.0], &[1, 4]);
     let y = functional_pad_1d_signed(&x, -4, 3, PaddingMode::Reflect, 0.0).expect(
@@ -180,7 +177,6 @@ fn divergence_reflect_negpad4_size4_legality() {
 ///
 /// Tracking: #1621
 #[test]
-#[ignore = "divergence: reflect legality uses abs(pad)>=size, torch uses signed pad<size; tracking #1621"]
 fn divergence_reflect_negpad_eq_size_backward() {
     let x = leaf(&[1.0, 2.0, 3.0], &[1, 3]);
     let y = functional_pad_1d_signed(&x, -3, 2, PaddingMode::Reflect, 0.0)
@@ -209,7 +205,6 @@ fn divergence_reflect_negpad_eq_size_backward() {
 ///
 /// Tracking: #1621
 #[test]
-#[ignore = "divergence: reflect legality uses abs(pad)>=size, torch uses signed pad<size; tracking #1621"]
 fn divergence_reflect_2d_negpad_w_legality() {
     let data: Vec<f32> = (1..=12).map(|v| v as f32).collect();
     let x = tensor(&data, &[1, 3, 4]);
