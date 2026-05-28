@@ -2641,6 +2641,39 @@ fn stride_insert_zeros<T: Float>(
     (out, h_up, w_up)
 }
 
+/// Crop a `[batch, channels, H, W]` plane by `crop_*` elements off BOTH ends of
+/// each spatial axis (the 2-D analogue of `crop_volume_3d`). Used by the
+/// transposed-conv forward when the internal padding `dilation*(k-1) - padding`
+/// is negative; see `crop_volume_3d` for the upstream `col2vol`
+/// (`aten/src/ATen/native/vol2col.h:80-106`) correspondence. Callers guarantee
+/// `2*crop_* < extent`.
+fn crop_plane_2d<T: Float>(
+    input: &[T],
+    batch: usize,
+    channels: usize,
+    h: usize,
+    w: usize,
+    crop_h: usize,
+    crop_w: usize,
+) -> (Vec<T>, usize, usize) {
+    let h_out = h - 2 * crop_h;
+    let w_out = w - 2 * crop_w;
+    let zero = <T as num_traits::Zero>::zero();
+    let mut out = vec![zero; batch * channels * h_out * w_out];
+
+    for b in 0..batch {
+        for c in 0..channels {
+            for oh in 0..h_out {
+                let src = ((b * channels + c) * h + (oh + crop_h)) * w + crop_w;
+                let dst = ((b * channels + c) * h_out + oh) * w_out;
+                out[dst..dst + w_out].copy_from_slice(&input[src..src + w_out]);
+            }
+        }
+    }
+
+    (out, h_out, w_out)
+}
+
 /// Flip a kernel along both spatial axes: `kernel[c_in, c_out, kh, kw]` ->
 /// `kernel[c_out, c_in, kH-1-kh, kW-1-kw]` (also transposes channel dims).
 fn flip_kernel<T: Float>(kernel: &[T], c_in: usize, c_out: usize, kh: usize, kw: usize) -> Vec<T> {
@@ -2728,18 +2761,32 @@ fn conv_transpose2d_forward_group<T: Float>(
     // signal. The internal padding is `dilation*(kernel-1) - padding`, the
     // dilated generalisation of the dense `kernel-1-padding` (#1560). The
     // `eff_k = dilation*(k-1)+1` kernel taps are spaced by `dilation` in
-    // `im2col_dilated`, mirroring `ConvUtils.h:255`.
+    // `im2col_dilated`, mirroring `ConvUtils.h:255`. When `padding >
+    // dilation*(k-1)` the internal pad is NEGATIVE and the signal is CROPPED
+    // rather than zero-padded (a negative `usize` would wrap and silently drop
+    // the scatter); see `conv_transpose3d_forward_group` / `crop_volume_3d`
+    // for the upstream `col2vol` (`aten/src/ATen/native/vol2col.h:80-106`)
+    // correspondence.
     let eff_kh = dh * (kh - 1) + 1;
     let eff_kw = dw * (kw - 1) + 1;
-    let internal_pad_h = eff_kh - 1 - ph;
-    let internal_pad_w = eff_kw - 1 - pw;
+    let signed_pad_h = (eff_kh - 1) as isize - ph as isize;
+    let signed_pad_w = (eff_kw - 1) as isize - pw as isize;
+    let crop_h = (-signed_pad_h).max(0) as usize;
+    let crop_w = (-signed_pad_w).max(0) as usize;
+    let (conv_input, h_in, w_in) = if crop_h > 0 || crop_w > 0 {
+        crop_plane_2d(&upsampled, batch, in_pg, h_up, w_up, crop_h, crop_w)
+    } else {
+        (upsampled, h_up, w_up)
+    };
+    let internal_pad_h = signed_pad_h.max(0) as usize;
+    let internal_pad_w = signed_pad_w.max(0) as usize;
 
     let (cols, col_rows, col_cols) = im2col_dilated(
-        &upsampled,
+        &conv_input,
         batch,
         in_pg,
-        h_up,
-        w_up,
+        h_in,
+        w_in,
         kh,
         kw,
         1,
@@ -2752,8 +2799,8 @@ fn conv_transpose2d_forward_group<T: Float>(
 
     // Internal stride-1 conv output size over the `output_padding`-extended,
     // dilation-spaced signal.
-    let h_out = (h_up + 2 * internal_pad_h - eff_kh) + 1;
-    let w_out = (w_up + 2 * internal_pad_w - eff_kw) + 1;
+    let h_out = (h_in + 2 * internal_pad_h - eff_kh) + 1;
+    let w_out = (w_in + 2 * internal_pad_w - eff_kw) + 1;
 
     // Reshape flipped kernel to 2-D: [out_pg, in_pg * kH * kW].
     let flipped_2d =
@@ -5335,6 +5382,52 @@ fn stride_insert_zeros_3d<T: Float>(
     (out, d_up, h_up, w_up)
 }
 
+/// Crop a `[batch, channels, D, H, W]` volume by `crop_*` elements off BOTH
+/// ends of each spatial axis, returning the cropped buffer plus its new
+/// spatial extents. Used by the transposed-conv forward when the internal
+/// padding `dilation*(k-1) - padding` is negative (i.e. `padding >
+/// dilation*(k-1)`): a negative internal pad means the upsampled signal must
+/// be trimmed rather than zero-padded before the stride-1 internal
+/// convolution, mirroring upstream's output-extent-bounded `col2vol` scatter
+/// (`aten/src/ATen/native/vol2col.h:80-106`). Callers guarantee
+/// `2*crop_* < extent` (the transposed output extent is otherwise non-
+/// positive, which `new_full`'s construction-time checks already reject).
+// Internal kernel: the descriptor mirrors a 3-D volume layout; a config struct
+// would force allocation in the per-group hot loop.
+#[allow(clippy::too_many_arguments)]
+fn crop_volume_3d<T: Float>(
+    input: &[T],
+    batch: usize,
+    channels: usize,
+    d: usize,
+    h: usize,
+    w: usize,
+    crop_d: usize,
+    crop_h: usize,
+    crop_w: usize,
+) -> (Vec<T>, usize, usize, usize) {
+    let d_out = d - 2 * crop_d;
+    let h_out = h - 2 * crop_h;
+    let w_out = w - 2 * crop_w;
+    let zero = <T as num_traits::Zero>::zero();
+    let mut out = vec![zero; batch * channels * d_out * h_out * w_out];
+
+    for b in 0..batch {
+        for c in 0..channels {
+            for od in 0..d_out {
+                for oh in 0..h_out {
+                    let src =
+                        (((b * channels + c) * d + (od + crop_d)) * h + (oh + crop_h)) * w + crop_w;
+                    let dst = (((b * channels + c) * d_out + od) * h_out + oh) * w_out;
+                    out[dst..dst + w_out].copy_from_slice(&input[src..src + w_out]);
+                }
+            }
+        }
+    }
+
+    (out, d_out, h_out, w_out)
+}
+
 /// Flip a 3-D kernel along all spatial axes and transpose channel dimensions:
 /// `kernel[c_in, c_out, kD, kH, kW]` ->
 /// `kernel[c_out, c_in, kD-1-kd, kH-1-kh, kW-1-kw]`.
@@ -5435,22 +5528,48 @@ fn conv_transpose3d_forward_group<T: Float>(
     // Step 2: flip the kernel and transpose channel dimensions.
     let flipped = flip_kernel_3d(group_weight, in_pg, out_pg, kd, kh, kw);
 
-    // Step 3: dilation-spaced stride-1 internal convolution. `internal_pad =
-    // dilation*(k-1) - padding`, `eff_k = dilation*(k-1)+1`.
+    // Step 3: dilation-spaced stride-1 internal convolution. The internal pad
+    // is `internal_pad = dilation*(k-1) - padding = eff_k - 1 - padding`,
+    // `eff_k = dilation*(k-1)+1`. When `padding > dilation*(k-1)` this goes
+    // NEGATIVE — the transposed-conv output position maps to a read index
+    // INSIDE the upsampled buffer rather than into a zero-pad halo, so the
+    // signal must be CROPPED by `|internal_pad|` on each side instead of
+    // zero-padded (a negative `usize` here would wrap and silently drop the
+    // whole scatter — the #1619 `output_padding=1`+`dilation=(2,3,2)`,`kw=1`,
+    // `pw=1` case). This matches upstream's `col2vol` scatter
+    // (`aten/src/ATen/native/vol2col.h:80-106`), whose `t_pad = t*stride - pad
+    // + t_offset*dilation` mapping is bounded only by the OUTPUT extent and
+    // naturally drops positions that fall outside it — there is no separate
+    // non-negative "internal pad" in upstream.
     let eff_kd = dd * (kd - 1) + 1;
     let eff_kh = dh * (kh - 1) + 1;
     let eff_kw = dw * (kw - 1) + 1;
-    let internal_pad_d = eff_kd - 1 - pd;
-    let internal_pad_h = eff_kh - 1 - ph;
-    let internal_pad_w = eff_kw - 1 - pw;
+    let signed_pad_d = (eff_kd - 1) as isize - pd as isize;
+    let signed_pad_h = (eff_kh - 1) as isize - ph as isize;
+    let signed_pad_w = (eff_kw - 1) as isize - pw as isize;
+    // Crop the negative dims; zero-pad the non-negative dims (the latter is
+    // handled by `im2col_3d_dilated`'s pad argument).
+    let crop_d = (-signed_pad_d).max(0) as usize;
+    let crop_h = (-signed_pad_h).max(0) as usize;
+    let crop_w = (-signed_pad_w).max(0) as usize;
+    let (conv_input, d_in, h_in, w_in) = if crop_d > 0 || crop_h > 0 || crop_w > 0 {
+        crop_volume_3d(
+            &upsampled, batch, in_pg, d_up, h_up, w_up, crop_d, crop_h, crop_w,
+        )
+    } else {
+        (upsampled, d_up, h_up, w_up)
+    };
+    let internal_pad_d = signed_pad_d.max(0) as usize;
+    let internal_pad_h = signed_pad_h.max(0) as usize;
+    let internal_pad_w = signed_pad_w.max(0) as usize;
 
     let (cols, col_rows, col_cols) = im2col_3d_dilated(
-        &upsampled,
+        &conv_input,
         batch,
         in_pg,
-        d_up,
-        h_up,
-        w_up,
+        d_in,
+        h_in,
+        w_in,
         kd,
         kh,
         kw,
@@ -5465,9 +5584,9 @@ fn conv_transpose3d_forward_group<T: Float>(
         dw,
     );
 
-    let d_out = (d_up + 2 * internal_pad_d - eff_kd) + 1;
-    let h_out = (h_up + 2 * internal_pad_h - eff_kh) + 1;
-    let w_out = (w_up + 2 * internal_pad_w - eff_kw) + 1;
+    let d_out = (d_in + 2 * internal_pad_d - eff_kd) + 1;
+    let h_out = (h_in + 2 * internal_pad_h - eff_kh) + 1;
+    let w_out = (w_in + 2 * internal_pad_w - eff_kw) + 1;
     let spatial_out = d_out * h_out * w_out;
 
     let flipped_2d =
@@ -8208,6 +8327,73 @@ mod tests {
             &[27.0, 27.0],
             1e-4,
         );
+    }
+
+    /// ConvTranspose3d dilated forward with `output_padding=1` AND a kernel dim
+    /// whose `dilation*(k-1) < padding` (here `kw=1`, `dilation_w=2`,
+    /// `padding_w=1` -> internal pad `eff_kw-1-pw = -1`, NEGATIVE). The prior
+    /// `internal_pad = eff_k-1-padding` `usize` subtraction wrapped to
+    /// `usize::MAX` in release builds, which made `im2col_3d_dilated`'s width
+    /// bounds check reject every position -> ZERO scatter -> the output was the
+    /// bias alone in the `output_padding`-extended trailing region (#1619:
+    /// op_db conv_transpose3d sample 4/5, ferrotorch=bias vs torch=-94.2 at
+    /// flat index 279). The fix crops the upsampled signal for the negative
+    /// dims and zero-pads the rest, matching upstream's output-extent-bounded
+    /// `col2vol` scatter (`aten/src/ATen/native/vol2col.h:80-106`). Oracle is
+    /// live torch 2.11.0 `F.conv_transpose3d(stride=2, padding=1,
+    /// output_padding=1, dilation=(2,3,2))`. Closes #1619.
+    #[test]
+    fn test_conv_transpose3d_dilated_output_padding_negative_internal_pad_matches_torch() {
+        let weight: Vec<f32> = (1..=4).map(|i| i as f32 * 0.1).collect(); // [1,1,2,2,1]
+        let bias = [0.5f32];
+        let ct = ct3d_full_fixed(
+            1,
+            1,
+            (2, 2, 1),
+            (2, 2, 2),
+            (1, 1, 1),
+            (1, 1, 1),
+            (2, 3, 2),
+            1,
+            &weight,
+            Some(&bias),
+        );
+        let x = leaf(
+            &(1..=8).map(|i| i as f32).collect::<Vec<_>>(),
+            &[1, 1, 2, 2, 2],
+        );
+        let y = ct.forward(&x).unwrap();
+        assert_eq!(y.shape(), &[1, 1, 4, 5, 2]);
+        // Full output vs the live torch 2.11.0 oracle. The trailing-region
+        // positions (indices 13, 15, 19, 33, 35, 39) are exactly the ones the
+        // bug zeroed; index 39 (the trailing corner) must be 3.7, not the bias.
+        let yd = y.data().unwrap();
+        #[rustfmt::skip]
+        let oracle = [
+            0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 2.5, 0.5, 2.5,
+            0.5, 0.5, 0.5, 3.7, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5,
+            0.5, 2.9, 0.5, 2.9, 0.5, 0.5, 0.5, 3.7,
+        ];
+        assert_close(yd, &oracle, 1e-4);
+        // Backward must also flow through the cropped path (torch oracle grads).
+        let grads = ct
+            .forward(&x)
+            .unwrap()
+            .grad_fn()
+            .unwrap()
+            .backward(&t(&[1.0f32; 40], &[1, 1, 4, 5, 2]))
+            .unwrap();
+        assert_close(
+            grads[0].as_ref().unwrap().data().unwrap(),
+            &[0.0, 0.4, 0.0, 0.7, 0.0, 0.6, 0.0, 1.0],
+            1e-4,
+        );
+        assert_close(
+            grads[1].as_ref().unwrap().data().unwrap(),
+            &[8.0, 14.0, 12.0, 20.0],
+            1e-4,
+        );
+        assert_close(grads[2].as_ref().unwrap().data().unwrap(), &[40.0], 1e-4);
     }
 
     /// Unbatched ConvTranspose3d input `(C, D, H, W)`. Closes #1609.
