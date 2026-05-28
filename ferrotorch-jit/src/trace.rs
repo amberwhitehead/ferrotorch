@@ -14,6 +14,7 @@
 //! | REQ-2 | SHIPPED | `Dtype::from_type_name(std::any::type_name::<T>())` check in `trace.rs` (~L237); consumer: every call site monomorphises `T` and the check fails fast on non-f32/f64 |
 //! | REQ-3 | SHIPPED | `output.grad_fn().ok_or_else(...)` guard in `trace.rs`; consumer: `module.rs:276` and `symbolic.rs:404` rely on this error surface |
 //! | REQ-4 | SHIPPED | `map_name_to_op` table in `trace.rs`; consumer: comment at `graph_break.rs:35` and `:600` pins this as the canonical source kept in sync with `KNOWN_OP_NAMES` |
+//! | REQ-5 | SHIPPED | `map_add_scaled_scale` in `trace.rs` recovers `Sub`/`Add` from `AddScaledBackward::scalar_args` (sub delegates to `add_scaled(.., -1.0)`, BinaryOps.cpp:434-439); consumer: the `"AddScaledBackward"` arm of `map_name_to_op`, reached by `module.rs` `compile` / `symbolic.rs` / `aot_autograd.rs` / `export.rs` (#1633) |
 
 use std::collections::{HashMap, VecDeque};
 
@@ -46,6 +47,18 @@ fn map_name_to_op(
         // Arithmetic
         "AddBackward" => Ok(IrOpKind::Add),
         "SubBackward" => Ok(IrOpKind::Sub),
+        // #1633: `arithmetic::sub` delegates to `add_scaled(a, b, -1.0)`, so the
+        // C++-style delegation (BinaryOps.cpp:434-439, `add_stub(.., -alpha)`)
+        // collapses the user op into a single `AddScaledBackward` carrying the
+        // scale via `scalar_args()`. Recover the user-facing op the way torch's
+        // tracer keys on the dispatched op-name, not the internal kernel:
+        //   * scale == -1.0 -> `aten::sub` (`a - b`)
+        //   * scale ==  1.0 -> `aten::add` (`a + b`)
+        // Any other scale is `torch.add(a, b, alpha=k)` which torch traces as a
+        // single `aten::add` with an `alpha` attribute; the IR has no scaled-add
+        // edge, so we fail fast (naming the scale) rather than silently dropping
+        // it and emitting a wrong `Add`.
+        "AddScaledBackward" => map_add_scaled_scale(scalar_args),
         "MulBackward" => Ok(IrOpKind::Mul),
         "DivBackward" => Ok(IrOpKind::Div),
         "NegBackward" => Ok(IrOpKind::Neg),
@@ -109,6 +122,58 @@ fn map_name_to_op(
         other => Err(FerrotorchError::InvalidArgument {
             message: format!("unsupported operation in tracer: {other}"),
         }),
+    }
+}
+
+/// Recover the user-facing arithmetic op from an `AddScaledBackward` scale.
+///
+/// `arithmetic::add_scaled(a, b, alpha)` is the single ferrotorch primitive
+/// behind the upstream `torch.add(a, b, alpha)` AND (via the `sub` ->
+/// `sub_scaled` -> `add_scaled(a, b, -alpha)` delegation) `torch.sub`. The
+/// delegation is implementation-internal exactly as in upstream
+/// (`aten/src/ATen/native/BinaryOps.cpp:434-439`), so a faithful trace must
+/// recover the dispatched op-name the way torch's tracer does:
+///
+///   * `alpha == -1.0` -> `IrOpKind::Sub`  (`a - b`, parity `aten::sub`)
+///   * `alpha ==  1.0` -> `IrOpKind::Add`  (`a + b`, parity `aten::add`)
+///
+/// Any other scale corresponds to `torch.add(a, b, alpha=k)`, which torch
+/// records as a single `aten::add` node carrying an `alpha` attribute. The
+/// IR has no scaled-add edge (adding `IrOpKind::AddScaled` would touch every
+/// codegen/optimize/interpreter match and is tracked as a follow-up), so we
+/// fail fast naming the scale rather than emit a wrong un-scaled `Add` (#1633).
+#[allow(
+    clippy::float_cmp,
+    reason = "alpha is an exact f64 literal saved by AddScaledBackward (-1.0 for sub, \
+              1.0 for add); we branch only on the identity (1.0) and negate (-1.0) points, \
+              matching add_scaled's own exact `== 1.0` fast-path discipline at arithmetic.rs"
+)]
+fn map_add_scaled_scale(scalar_args: &[f64]) -> FerrotorchResult<IrOpKind> {
+    // `add_scaled` stores `alpha` as an exact `f64` literal (`-1.0` for `sub`,
+    // `1.0` for `add_scaled(.., 1.0)` which actually fast-paths to plain
+    // `add`); exact equality is the correct test — the same exact-`== 1.0`
+    // discipline `add_scaled` itself uses for its identity fast path.
+    let Some(scale) = scalar_args.first().copied() else {
+        return Err(FerrotorchError::InvalidArgument {
+            message: "unsupported operation in tracer: AddScaledBackward exposed no \
+                      scale via scalar_args(); the AddScaledBackward::scalar_args override \
+                      must return vec![alpha]"
+                .into(),
+        });
+    };
+    if scale == -1.0 {
+        Ok(IrOpKind::Sub)
+    } else if scale == 1.0 {
+        Ok(IrOpKind::Add)
+    } else {
+        Err(FerrotorchError::InvalidArgument {
+            message: format!(
+                "unsupported operation in tracer: AddScaledBackward with scale {scale} \
+                 (only scale == -1.0 [sub] and scale == 1.0 [add] are representable in \
+                 the JIT IR today; torch.add(a, b, alpha={scale}) needs a scaled-add IR \
+                 edge — tracked as a follow-up to #1633)"
+            ),
+        })
     }
 }
 
@@ -429,7 +494,7 @@ mod tests {
     use crate::graph::IrNodeId;
     use ferrotorch_core::error::FerrotorchResult;
     use ferrotorch_core::grad_fns::activation::relu;
-    use ferrotorch_core::grad_fns::arithmetic::{add, mul};
+    use ferrotorch_core::grad_fns::arithmetic::{add, add_scaled, mul, sub};
     use ferrotorch_core::grad_fns::linalg::mm_differentiable;
     use ferrotorch_core::grad_fns::reduction::sum;
     use ferrotorch_core::storage::TensorStorage;
@@ -626,5 +691,73 @@ mod tests {
         assert_eq!(graph.node_count(), 4);
         assert_eq!(graph.input_values.len(), 2);
         assert_eq!(graph.output_values.len(), 1);
+    }
+
+    // -----------------------------------------------------------------------
+    // #1633: sub delegates to add_scaled(a, b, -1.0) -> AddScaledBackward.
+    // The tracer must recover IrOpKind::Sub from the scale, matching torch's
+    // torch.jit.trace(a - b) -> aten::sub (BinaryOps.cpp:434-439 delegation is
+    // implementation-internal).
+    // -----------------------------------------------------------------------
+
+    /// `trace(|a, b| a - b)` produces an `IrOpKind::Sub` node (not the
+    /// delegated `AddScaled`).
+    #[test]
+    fn trace_sub_produces_sub() {
+        let a = grad_vec(vec![5.0, 7.0, 9.0]);
+        let b = grad_vec(vec![1.0, 2.0, 3.0]);
+
+        let graph = trace(
+            |inputs: &[Tensor<f32>]| -> FerrotorchResult<Tensor<f32>> {
+                sub(&inputs[0], &inputs[1])
+            },
+            &[a, b],
+        )
+        .unwrap();
+
+        // 2 Inputs + 1 Sub = 3 nodes.
+        assert_eq!(graph.node_count(), 3);
+        assert!(
+            graph.nodes.iter().any(|n| matches!(n.op, IrOpKind::Sub)),
+            "trace(a - b) must contain IrOpKind::Sub; found {:?}",
+            graph.nodes.iter().map(|n| &n.op).collect::<Vec<_>>()
+        );
+        assert!(
+            !graph.nodes.iter().any(|n| matches!(n.op, IrOpKind::Add)),
+            "the delegation through add_scaled must NOT surface as an Add"
+        );
+    }
+
+    /// `map_add_scaled_scale` recovers Sub for -1.0, Add for 1.0, and fails
+    /// fast on any other scale (no silent wrong Add).
+    #[test]
+    fn map_add_scaled_scale_unit_and_non_unit() {
+        assert_eq!(map_add_scaled_scale(&[-1.0]).unwrap(), IrOpKind::Sub);
+        assert_eq!(map_add_scaled_scale(&[1.0]).unwrap(), IrOpKind::Add);
+        let err = map_add_scaled_scale(&[3.5]).expect_err("non-±1 scale must error");
+        assert!(format!("{err}").contains("AddScaledBackward"));
+    }
+
+    /// A directly-traced `add_scaled(a, b, alpha)` with a non-±1 alpha fails
+    /// fast at trace time rather than emitting a wrong un-scaled `Add`. This
+    /// is the honest behaviour until the IR grows a scaled-add edge: torch
+    /// would record one `aten::add` with an `alpha` attribute, which the IR
+    /// cannot represent today.
+    #[test]
+    fn trace_add_scaled_non_unit_alpha_errors() {
+        let a = grad_vec(vec![1.0, 2.0, 3.0]);
+        let b = grad_vec(vec![4.0, 5.0, 6.0]);
+        let result = trace(
+            |inputs: &[Tensor<f32>]| -> FerrotorchResult<Tensor<f32>> {
+                add_scaled(&inputs[0], &inputs[1], 2.0)
+            },
+            &[a, b],
+        );
+        let err = result.expect_err("trace(add_scaled, alpha=2.0) must fail fast");
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("AddScaledBackward") && msg.contains('2'),
+            "error must name the unrepresentable scale; got: {msg}"
+        );
     }
 }

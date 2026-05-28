@@ -42,6 +42,21 @@ and emit one `IrNode` per visited op. Mirrors the executor of
   `graph_break.rs`'s `KNOWN_OP_NAMES` set; an unknown op-name
   surfaces `JitError::UnsupportedOp` (which through the `From`
   impl appears as a `FerrotorchError::InvalidArgument`).
+- REQ-5 (#1633): `AddScaledBackward` is delegation-only — `sub` /
+  `sub_scaled` route through `add_scaled(a, b, -alpha)`, exactly as
+  upstream `sub_out` delegates `add_stub(.., -alpha)`
+  (`aten/src/ATen/native/BinaryOps.cpp:434-439`). The user-facing op
+  must be recovered from the saved scale (exposed via
+  `AddScaledBackward::scalar_args`): scale `-1.0` -> `IrOpKind::Sub`
+  (`aten::sub`, `sub.Tensor` schema at
+  `native_functions.yaml:7197`), scale `1.0` -> `IrOpKind::Add`
+  (`aten::add`, `add.Tensor` schema at `native_functions.yaml:555`).
+  A non-±1 scale (`torch.add(a, b, alpha=k)`, recorded by torch as a
+  single `aten::add` with an `alpha` attribute) has no scaled-add IR
+  edge today, so the mapper fails fast naming the scale rather than
+  emitting a wrong un-scaled `Add`; growing an `IrOpKind::AddScaled`
+  edge is a separate cross-cutting build (every codegen / optimize /
+  interpreter match arm).
 
 ## Acceptance Criteria
 
@@ -145,3 +160,4 @@ Expected: all tests pass.
 | REQ-2 | SHIPPED | impl: `Dtype::from_type_name(std::any::type_name::<T>())` check in `trace.rs` (~line 237); non-test consumer: every call site that monomorphises `T` on a non-`f32`/`f64` type. Pinned by `test_dtype_from_actual_type_name` in `graph.rs`. |
 | REQ-3 | SHIPPED | impl: `output.grad_fn().ok_or_else(...)` guard in `trace.rs`; non-test consumer: `module in module.rs` and `symbolic in symbolic.rs` rely on the error surface. |
 | REQ-4 | SHIPPED | impl: `map_name_to_op` in `trace.rs`; non-test consumer: `graph_break in graph_break.rs` comments pin that this table is the canonical source kept in sync with `KNOWN_OP_NAMES`. |
+| REQ-5 | SHIPPED | impl: `map_add_scaled_scale` in `trace.rs` (mirrored in `graph_break.rs`), reading `AddScaledBackward::scalar_args` in `arithmetic.rs`; non-test consumer: `map_name_to_op` in `trace.rs` (its `"AddScaledBackward"` arm), reached in production by `trace in module.rs` (`compile`), `symbolic in symbolic.rs`, `trace in aot_autograd.rs`, `export in export.rs`. `"AddScaledBackward"` is in `KNOWN_OPS` in `graph_break.rs` so `trace_with_breaks` compiles `sub` without a graph break. |

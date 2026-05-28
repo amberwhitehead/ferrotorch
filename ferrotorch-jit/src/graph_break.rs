@@ -48,6 +48,9 @@ const KNOWN_OPS: &[&str] = &[
     // Arithmetic
     "AddBackward",
     "SubBackward",
+    // #1633: `sub`/`sub_scaled` delegate to `add_scaled(a, b, -alpha)`, which
+    // emits `AddScaledBackward`; the tracer recovers Sub/Add from its scale.
+    "AddScaledBackward",
     "MulBackward",
     "DivBackward",
     "NegBackward",
@@ -618,6 +621,9 @@ fn map_name_to_op(
     match name {
         "AddBackward" => Ok(IrOpKind::Add),
         "SubBackward" => Ok(IrOpKind::Sub),
+        // #1633: `sub` delegates to `add_scaled(a, b, -1.0)`; recover the
+        // user-facing op from the scale (see `trace::map_add_scaled_scale`).
+        "AddScaledBackward" => map_add_scaled_scale(scalar_args),
         "MulBackward" => Ok(IrOpKind::Mul),
         "DivBackward" => Ok(IrOpKind::Div),
         "NegBackward" => Ok(IrOpKind::Neg),
@@ -665,6 +671,45 @@ fn map_name_to_op(
         other => Err(FerrotorchError::InvalidArgument {
             message: format!("unsupported operation in tracer: {other}"),
         }),
+    }
+}
+
+/// Recover the user-facing arithmetic op from an `AddScaledBackward` scale.
+///
+/// Mirror of `trace::map_add_scaled_scale` (#1633). `sub` delegates to
+/// `add_scaled(a, b, -1.0)` so the C++-style delegation
+/// (`aten/src/ATen/native/BinaryOps.cpp:434-439`) collapses the user op into a
+/// single `AddScaledBackward`. `alpha == -1.0` -> `Sub` (`aten::sub`),
+/// `alpha == 1.0` -> `Add` (`aten::add`); any other scale fails fast because
+/// the IR has no scaled-add edge (follow-up to #1633).
+#[allow(
+    clippy::float_cmp,
+    reason = "alpha is an exact f64 literal saved by AddScaledBackward (-1.0 for sub, \
+              1.0 for add); branch only on the identity/negate points, matching \
+              add_scaled's own exact `== 1.0` fast-path discipline at arithmetic.rs"
+)]
+fn map_add_scaled_scale(scalar_args: &[f64]) -> FerrotorchResult<IrOpKind> {
+    let Some(scale) = scalar_args.first().copied() else {
+        return Err(FerrotorchError::InvalidArgument {
+            message: "unsupported operation in tracer: AddScaledBackward exposed no \
+                      scale via scalar_args(); the AddScaledBackward::scalar_args override \
+                      must return vec![alpha]"
+                .into(),
+        });
+    };
+    if scale == -1.0 {
+        Ok(IrOpKind::Sub)
+    } else if scale == 1.0 {
+        Ok(IrOpKind::Add)
+    } else {
+        Err(FerrotorchError::InvalidArgument {
+            message: format!(
+                "unsupported operation in tracer: AddScaledBackward with scale {scale} \
+                 (only scale == -1.0 [sub] and scale == 1.0 [add] are representable in \
+                 the JIT IR today; torch.add(a, b, alpha={scale}) needs a scaled-add IR \
+                 edge — tracked as a follow-up to #1633)"
+            ),
+        })
     }
 }
 
@@ -728,7 +773,7 @@ mod tests {
     use super::*;
     use crate::graph::IrOpKind;
     use ferrotorch_core::error::FerrotorchResult;
-    use ferrotorch_core::grad_fns::arithmetic::{add, mul};
+    use ferrotorch_core::grad_fns::arithmetic::{add, mul, sub};
     use ferrotorch_core::grad_fns::reduction::sum;
     use ferrotorch_core::storage::TensorStorage;
     use ferrotorch_core::tensor::Tensor;
@@ -1001,6 +1046,9 @@ mod tests {
         assert!(is_known_op("SumBackward"));
         assert!(is_known_op("MmBackward"));
         assert!(is_known_op("TransposeBackward"));
+        // #1633: `sub` delegates to `add_scaled(.., -1.0)` -> AddScaledBackward,
+        // which the tracer now compiles (recovering Sub/Add from the scale).
+        assert!(is_known_op("AddScaledBackward"));
 
         assert!(!is_known_op("CustomOpBackward"));
         assert!(!is_known_op("PrintBackward"));
@@ -1196,5 +1244,61 @@ mod tests {
             err.to_string().contains("ConvBackward"),
             "error must name the unsupported op; got: {err}"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // #1633: AddScaledBackward scale -> IrOpKind recovery (mirrors trace.rs).
+    // -----------------------------------------------------------------------
+
+    /// `map_add_scaled_scale` recovers the user-facing op the way torch's
+    /// tracer keys on the dispatched op-name: scale -1.0 is `aten::sub`,
+    /// scale 1.0 is `aten::add`.
+    #[test]
+    fn test_map_add_scaled_scale_recovers_sub_and_add() {
+        assert_eq!(map_add_scaled_scale(&[-1.0]).unwrap(), IrOpKind::Sub);
+        assert_eq!(map_add_scaled_scale(&[1.0]).unwrap(), IrOpKind::Add);
+    }
+
+    /// A non-±1 scale (`torch.add(a, b, alpha=k)`) has no scaled-add IR edge
+    /// today, so the mapper fails fast naming the scale rather than emitting a
+    /// wrong un-scaled `Add`.
+    #[test]
+    fn test_map_add_scaled_scale_non_unit_scale_errors() {
+        let err = map_add_scaled_scale(&[2.0]).expect_err("non-±1 scale must error");
+        let msg = format!("{err}");
+        assert!(msg.contains("AddScaledBackward"), "got: {msg}");
+        assert!(msg.contains('2'), "error must name the scale; got: {msg}");
+    }
+
+    /// `trace_with_breaks(|a, b| a - b)` must compile cleanly (no graph break)
+    /// to an `Unbroken` graph containing `IrOpKind::Sub` — mirroring torch's
+    /// `torch.jit.trace(a - b)` -> `aten::sub`. Before #1633 this hit a graph
+    /// break because `AddScaledBackward` was absent from `KNOWN_OPS`.
+    #[test]
+    fn test_trace_with_breaks_sub_is_unbroken_sub() {
+        let a = grad_vec(vec![1.0, 2.0, 3.0]);
+        let b = grad_vec(vec![4.0, 5.0, 6.0]);
+        let config = CompileConfig::default();
+        let result = trace_with_breaks(
+            |inputs: &[Tensor<f32>]| -> FerrotorchResult<Tensor<f32>> {
+                sub(&inputs[0], &inputs[1])
+            },
+            &[a, b],
+            &config,
+        )
+        .expect("trace_with_breaks(sub) must succeed");
+
+        match result {
+            TraceResult::Unbroken(graph) => {
+                assert!(
+                    graph.nodes.iter().any(|n| matches!(n.op, IrOpKind::Sub)),
+                    "graph must contain IrOpKind::Sub; found {:?}",
+                    graph.nodes.iter().map(|n| &n.op).collect::<Vec<_>>()
+                );
+            }
+            TraceResult::Segmented(_) => {
+                panic!("expected Unbroken — sub must no longer trigger a graph break")
+            }
+        }
     }
 }

@@ -12,22 +12,22 @@
 //!
 //! | REQ | Status | Evidence |
 //! |---|---|---|
-//! | REQ-1 (add / add_scaled / add_out / add_scaled_out) | SHIPPED | `add` at `arithmetic.rs:376`, `add_scaled` at `:733`, `add_out` at `:640`, `add_scaled_out` at `:667`; consumer `Tensor::add_t` in `methods.rs`; parity `[add] 88/88` (grep=1) |
-//! | REQ-2 (sub / sub_scaled) | SHIPPED | `sub` at `arithmetic.rs:811` delegates to `sub_scaled` at `:840` → `add_scaled(a,b,-alpha)`; parity `[sub] 88/88` (grep=1) |
+//! | REQ-1 (add / add_scaled / add_out / add_scaled_out) | SHIPPED | `add` at `arithmetic.rs:376`, `add_scaled` at `:746`, `add_out` at `:653`, `add_scaled_out` at `:680`; consumer `Tensor::add_t` in `methods.rs`; parity `[add] 88/88` (grep=1) |
+//! | REQ-2 (sub / sub_scaled) | SHIPPED | `sub` at `arithmetic.rs:824` delegates to `sub_scaled` at `:853` → `add_scaled(a,b,-alpha)`; parity `[sub] 88/88` (grep=1) |
 //! | REQ-3 (mul) | SHIPPED | `mul` + `MulBackward` in `arithmetic.rs`; parity `[mul] 72/72` (grep=1) |
 //! | REQ-4 (div) | SHIPPED | `div` + `DivBackward` in `arithmetic.rs`; parity `[div] 72/72` (grep=1) |
 //! | REQ-5 (neg) | SHIPPED | `neg` + `NegBackward`; parity `[neg] 8/8` (grep=1) |
 //! | REQ-6 (abs) | SHIPPED | `abs` + `AbsBackward`; parity `[abs] 8/8` (grep=1) |
 //! | REQ-7 (sqrt) | SHIPPED | `sqrt` + `SqrtBackward`; parity `[sqrt] 8/8` (grep=1) |
 //! | REQ-8 (pow scalar exponent) | SHIPPED | `pow` + `PowBackward` (scalar exp; tensor-exp overload returns `Ok(None)` and is skipped, not failed); parity `[pow] 24/72 passed 48 skipped` (grep=1) |
-//! | REQ-9 (rsub) | SHIPPED | `rsub` at `arithmetic.rs:892` delegates to `sub_scaled(b,a,alpha)`; consumer `Tensor::rsub_t` in `methods.rs`; parity `[rsub]` (grep=1) |
-//! | REQ-10 (rsqrt) | SHIPPED | `rsqrt` at `arithmetic.rs:1656` + `RsqrtBackward` at `:1565`; consumer `Tensor::rsqrt_t` in `methods.rs`; parity `[rsqrt] 24/24` (grep=1) |
-//! | REQ-11 (reciprocal) | SHIPPED | `reciprocal` at `arithmetic.rs:1804` + `ReciprocalBackward` at `:1727`; consumer `Tensor::reciprocal_t` in `methods.rs`; parity `[reciprocal] 24/24` (grep=1) |
-//! | REQ-12 (floor_divide) | SHIPPED | `floor_divide` at `arithmetic.rs:2641` + `FloorDivideBackward` at `:2484` (errors on `.backward()` mirroring upstream's `<NotImplemented>` grad_fn); consumer `Tensor::floor_divide_t` in `methods.rs`; parity `[floor_divide] 72/72` (grep=1) |
-//! | REQ-13 (remainder) | SHIPPED | `remainder` at `arithmetic.rs:2004` + `RemainderBackward` at `:1890`; consumer `Tensor::remainder_t` in `methods.rs`; parity `[remainder] 72/72` (grep=1) |
-//! | REQ-14 (fmod) | SHIPPED | `fmod` at `arithmetic.rs:2311` + `FmodBackward` at `:2193`; consumer `Tensor::fmod_t` in `methods.rs`; parity `[fmod] 72/72` (grep=1) |
-//! | REQ-15 (addcmul) | SHIPPED | `addcmul` at `arithmetic.rs:2988` + `AddcmulBackward` at `:2845`; consumer `Tensor::addcmul_t` in `methods.rs`; parity `[addcmul] 96/96` (grep=1) |
-//! | REQ-16 (addcdiv) | SHIPPED | `addcdiv` at `arithmetic.rs:3303` + `AddcdivBackward` at `:3141`; consumer `Tensor::addcdiv_t` in `methods.rs`; parity `[addcdiv]` (grep=1) |
+//! | REQ-9 (rsub) | SHIPPED | `rsub` at `arithmetic.rs:905` delegates to `sub_scaled(b,a,alpha)`; consumer `Tensor::rsub_t` in `methods.rs`; parity `[rsub]` (grep=1) |
+//! | REQ-10 (rsqrt) | SHIPPED | `rsqrt` at `arithmetic.rs:1669` + `RsqrtBackward` at `:1578`; consumer `Tensor::rsqrt_t` in `methods.rs`; parity `[rsqrt] 24/24` (grep=1) |
+//! | REQ-11 (reciprocal) | SHIPPED | `reciprocal` at `arithmetic.rs:1817` + `ReciprocalBackward` at `:1740`; consumer `Tensor::reciprocal_t` in `methods.rs`; parity `[reciprocal] 24/24` (grep=1) |
+//! | REQ-12 (floor_divide) | SHIPPED | `floor_divide` at `arithmetic.rs:2654` + `FloorDivideBackward` at `:2497` (errors on `.backward()` mirroring upstream's `<NotImplemented>` grad_fn); consumer `Tensor::floor_divide_t` in `methods.rs`; parity `[floor_divide] 72/72` (grep=1) |
+//! | REQ-13 (remainder) | SHIPPED | `remainder` at `arithmetic.rs:2017` + `RemainderBackward` at `:1903`; consumer `Tensor::remainder_t` in `methods.rs`; parity `[remainder] 72/72` (grep=1) |
+//! | REQ-14 (fmod) | SHIPPED | `fmod` at `arithmetic.rs:2324` + `FmodBackward` at `:2206`; consumer `Tensor::fmod_t` in `methods.rs`; parity `[fmod] 72/72` (grep=1) |
+//! | REQ-15 (addcmul) | SHIPPED | `addcmul` at `arithmetic.rs:3001` + `AddcmulBackward` at `:2858`; consumer `Tensor::addcmul_t` in `methods.rs`; parity `[addcmul] 96/96` (grep=1) |
+//! | REQ-16 (addcdiv) | SHIPPED | `addcdiv` at `arithmetic.rs:3316` + `AddcdivBackward` at `:3154`; consumer `Tensor::addcdiv_t` in `methods.rs`; parity `[addcdiv]` (grep=1) |
 
 use std::any::TypeId;
 use std::sync::Arc;
@@ -534,6 +534,19 @@ impl<T: Float> GradFn<T> for AddScaledBackward<T> {
 
     fn name(&self) -> &'static str {
         "AddScaledBackward"
+    }
+
+    fn scalar_args(&self) -> Vec<f64> {
+        // The scale `alpha` is the single scalar saved by AddScaledBackward.
+        // The JIT tracer (`trace::map_name_to_op` / `graph_break::map_name_to_op`)
+        // reads this to recover the user-facing op: PyTorch's `sub`/`sub_scaled`
+        // delegate to `add_scaled(a, b, -alpha)` so the C++ delegation collapses
+        // the user op into this single backward node. `alpha == -1.0` is `a - b`
+        // (`aten::sub`), `alpha == 1.0` is `a + b` (`aten::add`). Mirrors the
+        // `PowBackward::scalar_args` exponent-plumbing pattern (#887) so the
+        // tracer can branch on the scale rather than leaking the delegation as
+        // an unsupported op (#1633).
+        vec![self.alpha]
     }
 }
 

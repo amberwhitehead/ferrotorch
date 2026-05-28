@@ -69,18 +69,15 @@ fn baseline_trace_add_still_works() {
     );
 }
 
-/// Divergence: `trace(|x, y| x - y)` MUST produce an `IrOpKind::Sub` node,
-/// matching PyTorch's `aten::sub` in the traced graph. After the #1192-chain
-/// delegation, this now errors with "unsupported operation in tracer:
-/// AddScaledBackward". Upstream parity contract:
+/// Regression (#1633, FIXED): `trace(|x, y| x - y)` produces an
+/// `IrOpKind::Sub` node, matching PyTorch's `aten::sub` in the traced graph.
+/// After the #1192-chain delegation, `sub` emits `AddScaledBackward { alpha:
+/// -1.0 }`; the tracer's `map_name_to_op` now reads that scale via
+/// `GradFn::scalar_args()` and recovers `IrOpKind::Sub` (scale -1.0) /
+/// `IrOpKind::Add` (scale 1.0). Upstream parity contract:
 /// `pytorch/aten/src/ATen/native/BinaryOps.cpp:434-439` (C++ delegation is
 /// implementation-internal; the user-visible op-name remains `aten::sub`).
-///
-/// Tracking: blocker #1633 (JIT tracer lacks an `AddScaledBackward` mapping).
 #[test]
-#[ignore = "tracks #1633: JIT tracer's map_name_to_op / KNOWN_OPS lack AddScaledBackward; \
-            sub delegates to add_scaled(a,b,-1.0), so trace(sub) errors instead of yielding \
-            IrOpKind::Sub (vs torch aten::sub). Fix pending."]
 fn divergence_trace_sub_produces_addscaled_not_sub() {
     let x = grad_vec_f32(vec![1.0, 2.0, 3.0]);
     let y = grad_vec_f32(vec![4.0, 5.0, 6.0]);
