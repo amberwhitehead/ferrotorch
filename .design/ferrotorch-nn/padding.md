@@ -149,10 +149,17 @@ functional_pad_nd_signed`, which:
 - for all-non-negative non-`Zeros` pads, delegates to the positive-only
   `functional_pad_{1,2,3}d` so reflect/replicate/circular keep their
   exact gather + autograd behaviour; for negative/mixed non-`Zeros`
-  pads, CROPS the negative side(s) (via the signed-constant gather) then
-  applies the mode's positive pad on the remainder — byte-identical to
-  torch's native reflect/replicate/circular kernels, which narrow for
-  negative pads (`PadNd.cpp:221-242`) (#1620);
+  pads, gathers DIRECTLY from the ORIGINAL input window via the unified
+  index map `fn pad_nd_signed_reflect_circular` (NOT crop-then-pad), with
+  window offset `max(0,-pad) - max(0,pad)` and the mode's per-index
+  resolver `fn signed_mode_axis_src`: reflect uses `fn reflect_axis_src`,
+  replicate uses `fn replicate_axis_src` (CLAMPS to the original boundary
+  `[pad, size+pad-1]` so an over-crop to a zero-size axis still reads the
+  preserved edge — no `inner - 1` underflow/panic, #1625), and circular
+  uses `fn circular_axis_src`. This is byte-identical to torch's native
+  reflect/replicate/circular kernels, whose `ReflectionPad::index` /
+  `ReplicationPad::index` read the original window
+  (`cpu/PaddingKernel.cpp:63-105`) (#1620 #1621 #1625);
 - for `Zeros` (constant) mode, runs `fn pad_nd_signed_constant` — a
   generic last-`N`-dim gather where output index `o` reads source
   `o - lo` (in bounds ⇒ data, otherwise ⇒ `value` fill), with
@@ -163,15 +170,35 @@ functional_pad_nd_signed`, which:
   `"PadNdSignedBackward"`) when grad is enabled, scatter-adding the
   output grad onto the original-size input (cropped positions get 0).
 
-These mirror `constant_pad_nd`'s negative-pad narrowing + `fill_` +
-`copy_` (`aten/src/ATen/native/PadNd.cpp:29-108`). Crop is supported
-under EVERY mode: `_pad_enum` routes `mode="constant"` through
+The constant path mirrors `constant_pad_nd`'s negative-pad narrowing +
+`fill_` + `copy_` (`aten/src/ATen/native/PadNd.cpp:29-108`). Crop is
+supported under EVERY mode: `_pad_enum` routes `mode="constant"` through
 `constant_pad_nd` and reflect/replicate/circular straight to the native
 kernels, which compute `output = input + pad_l + pad_r` (negative pads
-narrow) and gather with offset `max(0,-pad) - max(0,pad)`
-(`PadNd.cpp:221-242`, `ReflectionPad.cpp:46`,
-`cpu/PaddingKernel.cpp:63-65`). ferrotorch reproduces the non-constant
-modes by composing crop-then-mode-pad (#1620). #1611.
+narrow) and gather from the ORIGINAL window with offset
+`max(0,-pad) - max(0,pad)` (`PadNd.cpp:221-242`, `ReflectionPad.cpp:46`,
+`cpu/PaddingKernel.cpp:63-105`). ferrotorch reproduces the non-constant
+modes with the same single original-window index map (`fn
+pad_nd_signed_reflect_circular`), NOT by composing crop-then-mode-pad —
+so a positive pad on a cropped side reads elements a crop-first pass
+would have discarded, and a replicate over-crop to a zero-size axis still
+clamps to the preserved boundary instead of panicking (#1620 #1621
+#1625). #1611.
+
+The reflect & replicate net-zero output rule is RANK-DEPENDENT, matching
+torch's per-rank meta functions: 1-D `reflection_pad1d` /
+`replication_pad1d` require output `>= 1`
+(`ReflectionPad.cpp:60-65`, `ReplicationPadding.cpp:49`), so a net-zero
+1-D pad `Err`s; 2-D/3-D `reflection_pad2d`/`3d` /
+`replication_pad2d`/`3d` require only `output_w >= 1 || output_h >= 1
+(|| output_d >= 1)` (`ReflectionPad.cpp:251`/`:152`,
+`ReplicationPadding.cpp:114`), so an INDIVIDUAL spatial axis may be
+net-zero (an empty `[..,0,..]` / `[..,0,W]` tensor) as long as one
+padded spatial axis survives. `fn pad_nd_signed_reflect_circular`
+encodes this with `per_axis_min = isize::from(npad == 1)` plus a final
+all-axes-collapsed guard (#1626). Replicate has NO upstream `pad <
+input` reflect-style check (`ReplicationPadding.cpp` guards only the
+output extent), so that rejection stays reflect-only.
 
 ### Layer family (REQ-3..REQ-7)
 
@@ -231,17 +258,25 @@ For each:
   start and adds 2 fill at the end), and the backward
   (`PadNdSignedBackward`) scatter-adds the output grad back onto the
   original-size input so cropped-away positions receive zero gradient.
-  For reflect/replicate/circular: the negative side(s) are cropped, then
-  the positive part is mode-padded — matching torch's native kernels
-  byte-for-byte (e.g. `reflect [-1,0]` on `[1,2,3,4,5]` -> `[2,3,4,5]`;
-  `replicate [1,-1]` -> `[1,1,2,3,4]` grad `[2,1,1,1,0]`; `circular
-  [-1,0]` -> `[2,3,4,5]` grad `[0,1,1,1,1]`; `reflect2d [-1,1,0,0]` on the
-  3x3 -> `[[2,3,2],[5,6,5],[8,9,8]]`); the backward chains the crop
-  adjoint with the mode-pad adjoint through the autograd graph (#1620).
-  Over-cropping (a side removing more than the running dim size,
-  mirroring torch's `narrow(): length must be non-negative`) returns
-  `InvalidArgument`; a net-zero crop is allowed (torch returns an empty
-  dim). Closes #1611. The `nn.functional.pad` runner arm still skips
+  For reflect/replicate/circular: the gather reads DIRECTLY from the
+  ORIGINAL window via the unified index map (NOT crop-then-pad), with the
+  window offset `max(0,-pad) - max(0,pad)` — matching torch's native
+  kernels byte-for-byte (e.g. `reflect [-1,0]` on `[1,2,3,4,5]` ->
+  `[2,3,4,5]`; `replicate [1,-1]` -> `[1,1,2,3,4]` grad `[2,1,1,1,0]`;
+  `replicate [2,-2]` on `[1,2]` -> `[1,1]`; `replicate [-2,1]` on `[1,2]`
+  -> `[2.]`; `circular [-1,0]` -> `[2,3,4,5]` grad `[0,1,1,1,1]`;
+  `reflect2d [-1,1,0,0]` on the 3x3 -> `[[2,3,2],[5,6,5],[8,9,8]]`); the
+  backward is the gather adjoint (`PadNdSignedModeBackward` scatter-add)
+  through the autograd graph (#1620 #1621 #1625). Replicate CLAMPS the
+  gather to the original boundary, so an over-crop that collapses an axis
+  to size 0 (e.g. `replicate [-4,1,0,0]` on a 3x4 plane -> `[1,3,1]`
+  `[4,8,12]`) still reads the preserved edge — NEVER panics (#1625,
+  R-CODE-2). For constant the over-crop (a side removing more than the
+  running dim size, mirroring torch's `narrow(): length must be
+  non-negative`) returns `InvalidArgument`; a net-zero crop is allowed
+  per the rank-dependent rule (1-D reflect/replicate Err, 2-D/3-D return
+  an empty `[..,0,..]` dim — see the Functional entrypoints section,
+  #1626). Closes #1611. The `nn.functional.pad` runner arm still skips
   negative samples until the runner is widened to feed `i64` pads to the
   signed entrypoints (a test-infrastructure follow-up under #1441,
   separate from this build).

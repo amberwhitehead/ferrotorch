@@ -29,8 +29,8 @@
 //! VERDICT: release-blocker — ferrotorch rejects an input torch accepts and
 //! returns an empty tensor for. Tracking: #1626.
 
-use ferrotorch_core::Tensor;
 use ferrotorch_core::storage::TensorStorage;
+use ferrotorch_core::Tensor;
 use ferrotorch_nn::padding::{functional_pad_2d_signed, PaddingMode};
 
 fn tensor(data: &[f64], shape: &[usize]) -> Tensor<f64> {
@@ -51,7 +51,6 @@ fn plane_3x4() -> Tensor<f64> {
 /// requires `>= 1`). ferrotorch Errs via the shared `new_size < 1` guard.
 /// Tracking: #1626
 #[test]
-#[ignore = "divergence: 2-D reflect net-zero crop Errs but torch returns empty; tracking #1626"]
 fn divergence_reflect_2d_w_netzero_left_crop() {
     let x = plane_3x4();
     let y = functional_pad_2d_signed(&x, -4, 0, 0, 0, PaddingMode::Reflect, 0.0).expect(
@@ -71,7 +70,6 @@ fn divergence_reflect_2d_w_netzero_left_crop() {
 /// ```
 /// Both-side net-zero crop on W. Tracking: #1626
 #[test]
-#[ignore = "divergence: 2-D reflect net-zero crop Errs but torch returns empty; tracking #1626"]
 fn divergence_reflect_2d_w_netzero_both_crop() {
     let x = plane_3x4();
     let y = functional_pad_2d_signed(&x, -2, -2, 0, 0, PaddingMode::Reflect, 0.0)
@@ -86,7 +84,6 @@ fn divergence_reflect_2d_w_netzero_both_crop() {
 /// ```
 /// Right-side net-zero crop on W. Tracking: #1626
 #[test]
-#[ignore = "divergence: 2-D reflect net-zero crop Errs but torch returns empty; tracking #1626"]
 fn divergence_reflect_2d_w_netzero_right_crop() {
     let x = plane_3x4();
     let y = functional_pad_2d_signed(&x, 0, -4, 0, 0, PaddingMode::Reflect, 0.0)
@@ -101,7 +98,6 @@ fn divergence_reflect_2d_w_netzero_right_crop() {
 /// ```
 /// H net = 3 - 3 = 0. Tracking: #1626
 #[test]
-#[ignore = "divergence: 2-D reflect net-zero crop Errs but torch returns empty; tracking #1626"]
 fn divergence_reflect_2d_h_netzero_top_crop() {
     let x = plane_3x4();
     let y = functional_pad_2d_signed(&x, 0, 0, -3, 0, PaddingMode::Reflect, 0.0)
@@ -116,7 +112,6 @@ fn divergence_reflect_2d_h_netzero_top_crop() {
 /// ```
 /// W net = 4 - 3 = 1, H net = 3 - 3 = 0 -> empty. Tracking: #1626
 #[test]
-#[ignore = "divergence: 2-D reflect net-zero crop Errs but torch returns empty; tracking #1626"]
 fn divergence_reflect_2d_both_axes_netzero_h() {
     let x = plane_3x4();
     let y = functional_pad_2d_signed(&x, -3, 0, 0, -3, PaddingMode::Reflect, 0.0)

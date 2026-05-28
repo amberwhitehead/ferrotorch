@@ -30,8 +30,8 @@
 
 use std::panic::{catch_unwind, AssertUnwindSafe};
 
-use ferrotorch_core::Tensor;
 use ferrotorch_core::storage::TensorStorage;
+use ferrotorch_core::Tensor;
 use ferrotorch_nn::padding::{functional_pad_1d_signed, functional_pad_2d_signed, PaddingMode};
 
 fn tensor(data: &[f64], shape: &[usize]) -> Tensor<f64> {
@@ -53,7 +53,6 @@ fn approx(a: &[f64], b: &[f64]) -> bool {
 /// `inner == 0` (`padding.rs:391`).
 /// Tracking: #1625
 #[test]
-#[ignore = "divergence: replicate crop-to-zero + pad panics (subtract overflow); tracking #1625"]
 fn divergence_replicate_1d_pad_left_crop_right_panics() {
     let res = catch_unwind(AssertUnwindSafe(|| {
         let x = tensor(&[1.0, 2.0], &[1, 2]);
@@ -80,7 +79,6 @@ fn divergence_replicate_1d_pad_left_crop_right_panics() {
 /// positive replicate-pad PANICS on `inner - 1`.
 /// Tracking: #1625
 #[test]
-#[ignore = "divergence: replicate deep crop + pad panics (subtract overflow); tracking #1625"]
 fn divergence_replicate_1d_deep_left_crop_pad_right_panics() {
     let res = catch_unwind(AssertUnwindSafe(|| {
         let x = tensor(&[1.0, 2.0], &[1, 2]);
@@ -107,7 +105,6 @@ fn divergence_replicate_1d_deep_left_crop_pad_right_panics() {
 /// zero-size axis).
 /// Tracking: #1625
 #[test]
-#[ignore = "divergence: replicate 2-D over-crop + pad panics (subtract overflow); tracking #1625"]
 fn divergence_replicate_2d_w_overcrop_pad_panics() {
     let data: Vec<f64> = (1..=12).map(|v| v as f64).collect();
     let res = catch_unwind(AssertUnwindSafe(|| {
