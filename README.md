@@ -19,7 +19,7 @@ If you have ever wanted to train a ResNet or a transformer in Rust without pulli
 - **Reverse-mode autograd** with 80+ differentiable operations (including exp, log, sin, cos, clamp, FFT, eigh, signal processing), topological-sort backward pass, gradient accumulation, broadcast gradient reduction, checkpointing, sparse gradients, and `backward_with_gradient()` for non-scalar tensors.
 - **Operator overloading** --- write `&a + &b`, `&x * &y`, `-z` with natural Rust syntax. All ownership combinations supported.
 - **30+ neural network layers** including Linear, Conv1d/2d, LSTM, GRU, MultiheadAttention, BatchNorm, LayerNorm, RMSNorm, Flatten, Identity, lazy modules (`LazyLinear`, `LazyConv2d`), and LLM modules (RoPE, SwiGLU 3-weight FFN, KV cache, paged KV cache, TransformerEncoderLayer/DecoderLayer, FlexAttention with score_mod).
-- **19 optimizers** --- SGD, Adam, AdamW, Adamax, NAdam, RAdam, Adagrad, Adadelta, Adafactor, RMSprop, Rprop, ASGD, SparseAdam, L-BFGS, Muon, NaturalGradient (K-FAC), EMA, SWA — with parameter groups, foreach (on-device) update mode for SGD/AdamW, 12+ LR schedulers, and gradient clipping (`clip_grad_norm`, `clip_grad_value`).
+- **18 optimizers** --- SGD, Adam, AdamW, Adamax, NAdam, RAdam, Adagrad, Adadelta, Adafactor, RMSprop, Rprop, ASGD, SparseAdam, L-BFGS, Muon, K-FAC natural gradient, EMA, SWA — with parameter groups, foreach (on-device) update mode for SGD/AdamW, 12+ LR schedulers, and gradient clipping (`clip_grad_norm`, `clip_grad_value`).
 - **JIT compiler** --- both `trace` (capture-based) and `script` (source-based, in `ferrotorch-jit-script`) frontends. Lower into a static IR, then run constant folding, dead code elimination, operator fusion, and memory planning. `compile()` API mirrors `torch.compile`.
 - **GPU acceleration** --- unified device-aware tensors (`tensor.cuda()`, `model.to_device(Device::Cuda(0))`) with auto-dispatch to CPU or GPU, f32/f64/bf16 dispatch. NVIDIA via cudarc + cuBLAS (81.8x matmul speedup on RTX 3090) + cuSPARSE + cuSPARSELt 2:4 sparse matmul + cuFFT (rfft/irfft/hfft/fftn/ifftn) + FlashAttention-2 forward + bf16 mixed-precision kernels. AMD/Intel/Apple via CubeCL (WGPU, ROCm, Vulkan, Metal), Apple Silicon native via ferrotorch-mps, Intel Arc via ferrotorch-xpu. No separate `GpuTensor` type.
 - **Llama 3 inference stack** --- full GQA + RoPE + SwiGLU decoder, KV cache, GPU bf16 inference, HuggingFace SafeTensors loader, GPTQ/AWQ/HQQ quantized loaders.
@@ -27,10 +27,10 @@ If you have ever wanted to train a ResNet or a transformer in Rust without pulli
 - **Named tensors** --- `NamedTensor<T>` with `refine_names`, `align_to`, `rename` for advisory dim labels.
 - **GPU memory safety** --- pre-OOM hooks, VRAM reservation, budget enforcement, pressure watchdog, and emergency checkpointing. Never lose a training run to a Steam game again.
 - **ONNX export** --- trace a model and emit a standard `.onnx` file loadable by onnxruntime, TensorRT, CoreML. Exports via the ferrotorch-jit `IrGraph`. Hand-written protobuf encoder, no external dependency.
-- **GGUF support** --- parse, load, and dequantize GGUF-quantized models (Q4_0, Q4_1, Q8_0, Q5_0, Q5_1, F16, F32) directly from `.gguf` files without Python tooling.
+- **GGUF support** --- parse, load, and dequantize GGUF-quantized models (Q4_0, Q4_1, Q5_0, Q5_1, Q8_0, Q8_1, F16, F32) directly from `.gguf` files without Python tooling.
 - **Operation fusion** --- chain elementwise ops into a single kernel with PTX codegen. 2-5x GPU speedup for fused chains.
 - **SafeTensors + PyTorch .pt import** --- load HuggingFace models directly; pure-Rust pickle parser (28 opcodes) for PyTorch checkpoints.
-- **Vision model architectures** --- 10 classification (ResNet, VGG, ViT-B/16, EfficientNet-B0, ConvNeXt-T, Swin-T, MobileNetV2, MobileNetV3, DenseNet-121, InceptionV3), 3 detection (Faster R-CNN, Mask R-CNN, SSD300), 2 segmentation (DeepLabV3, FCN).
+- **Vision model architectures** --- 10 classification (ResNet, VGG, ViT-B/16, EfficientNet-B0, ConvNeXt-T, Swin-T, MobileNetV2, MobileNetV3, DenseNet-121, InceptionV3), 7 detection (Faster R-CNN, Mask R-CNN, Keypoint R-CNN, RetinaNet, FCOS, SSD300, YOLO), 4 segmentation (DeepLabV3, FCN, LR-ASPP, U-Net).
 - **INT8/INT4 quantization** --- per-tensor and per-channel post-training quantization with quantized matmul.
 - **Distributed training** --- DDP with gradient synchronization over a TCP backend, GPU-aware collectives, `DistributedSampler` for multi-rank training.
 - **Training loop** --- `Learner` abstraction with metrics (loss, accuracy, top-k), callbacks (early stopping, progress logging), training history, and model checkpointing (save/load).
@@ -111,7 +111,11 @@ let history = learner.fit(&train_loader, Some(&val_loader), 50)?;
 
 ## Crate Overview
 
-ferrotorch is a workspace of 22 crates. Use the umbrella crate for convenience, or depend on individual crates for minimal compile times.
+ferrotorch is a workspace of 28 crates. Use the umbrella crate for convenience, or depend on individual crates for minimal compile times.
+
+The **foundation** crates implement the framework; the **model** crates compose those primitives into full pretrained architectures.
+
+### Foundation
 
 | Crate | Description |
 |---|---|
@@ -119,10 +123,10 @@ ferrotorch is a workspace of 22 crates. Use the umbrella crate for convenience, 
 | **ferrotorch-core** | Tensor, autograd engine, 80+ differentiable ops, complex / sparse / named tensors, FFT, signal, masked, quantization |
 | **ferrotorch-nn** | Module trait, 30+ layers, lazy modules, losses, activations, `#[derive(Module)]` |
 | **ferrotorch-nn-derive** | Proc macro for `#[derive(Module)]` |
-| **ferrotorch-optim** | 19 optimizers (foreach mode for SGD/AdamW), 12+ LR schedulers, gradient clipping, GradScaler |
+| **ferrotorch-optim** | 18 optimizers (foreach mode for SGD/AdamW), 12+ LR schedulers, gradient clipping, GradScaler |
 | **ferrotorch-data** | Dataset, parallel DataLoader, samplers, transforms, collate_fn, NumPy/Arrow interop |
 | **ferrotorch-train** | Learner, metrics, callbacks, training history, checkpointing |
-| **ferrotorch-vision** | 10 classification + 3 detection + 2 segmentation architectures, MNIST/CIFAR/ImageFolder datasets, image I/O |
+| **ferrotorch-vision** | 10 classification + 7 detection + 4 segmentation architectures, MNIST/CIFAR/ImageFolder datasets, image I/O |
 | **ferrotorch-jit** | Tracing, IR graph, optimization passes, codegen backends |
 | **ferrotorch-jit-script** | Script-frontend (Rust-source-to-IR) compiler for ahead-of-time graph lowering |
 | **ferrotorch-serialize** | SafeTensors, PyTorch .pt import, ONNX export, checkpoints |
@@ -135,8 +139,19 @@ ferrotorch is a workspace of 22 crates. Use the umbrella crate for convenience, 
 | **ferrotorch-hub** | Pretrained model registry, download, and caching |
 | **ferrotorch-profiler** | Operation profiling and Chrome trace export |
 | **ferrotorch-tokenize** | HuggingFace `tokenizers` wrapper (BPE, WordPiece, Unigram) |
-| **ferrotorch-llama** | Llama 3 / Meta LLaMA model composition, GPU bf16 inference, GPTQ/AWQ/HQQ quant loaders |
+| **ferrotorch-grammar** | Constrained decoding — JSON-Schema → per-step token-allow masks |
 | **ferrotorch-ml** | Sklearn-compatible adapter, ferrolearn bridge, classic-ML datasets and metrics |
+
+### Model composition
+
+| Crate | Description |
+|---|---|
+| **ferrotorch-llama** | Llama 3 / Meta LLaMA model composition, GPU bf16 inference, GPTQ/AWQ/HQQ quant loaders |
+| **ferrotorch-bert** | BERT encoder-only composition + `SentenceTransformer` mean-pooled sentence embeddings |
+| **ferrotorch-whisper** | Whisper audio encoder composition + log-mel preprocessing |
+| **ferrotorch-diffusion** | Stable Diffusion pipeline — CLIP text encoder + UNet + VAE decoder + DDIM scheduler |
+| **ferrotorch-graph** | Graph neural networks (GCN, node classification on Cora) |
+| **ferrotorch-rl** | Reinforcement learning — stable-baselines3 `ActorCriticPolicy` / PPO MlpPolicy |
 
 ## GPU Support
 
@@ -274,11 +289,15 @@ Pre-built architectures in ferrotorch-vision, ready to use or fine-tune:
 | **InceptionV3** | standard | Image classification |
 | **Faster R-CNN** | ResNet-50 + FPN | Object detection |
 | **Mask R-CNN** | ResNet-50 + FPN | Instance segmentation |
-| **SSD300** | standard | Object detection |
-| **DeepLabV3** | ResNet backbone | Semantic segmentation |
-| **FCN** | ResNet backbone | Semantic segmentation |
-| **U-Net** | --- | Semantic segmentation |
+| **Keypoint R-CNN** | ResNet-50 + FPN | Keypoint detection |
+| **RetinaNet** | ResNet-50 + FPN | Object detection |
+| **FCOS** | ResNet-50 + FPN | Object detection |
+| **SSD300** | VGG-16 | Object detection |
 | **YOLO** | --- | Object detection |
+| **DeepLabV3** | ResNet-50 | Semantic segmentation |
+| **FCN** | ResNet-50 | Semantic segmentation |
+| **LR-ASPP** | MobileNetV3-Large | Semantic segmentation |
+| **U-Net** | --- | Semantic segmentation |
 
 ```rust
 use ferrotorch_vision::models::{list_models, get_model};
@@ -314,7 +333,7 @@ This structure means every public API has an explicit test and any regression is
 | **Quantization** | INT8 / INT4 | INT8 / INT4 / FP8 | INT8 | Via libtorch | GGUF |
 | **ONNX export** | Yes (pure Rust) | Yes | No | Yes | No |
 | **GPU memory safety** | Pre-OOM hooks, budget, watchdog | Basic caching | No | Via libtorch | No |
-| **Model zoo** | 17 architectures (classification, detection, segmentation) | Thousands | Limited | Via libtorch | LLM-focused |
+| **Model zoo** | 21 architectures (classification, detection, segmentation) | Thousands | Limited | Via libtorch | LLM-focused |
 | **Training loop** | Learner + callbacks | Manual / Lightning | Learner | Manual | Manual |
 | **Proc macro** | `#[derive(Module)]` | No (dynamic) | `#[derive(Module)]` | No | No |
 | **LoRA** | Yes (`LoRALinear` + merge) | Via libraries | No | No | Yes |

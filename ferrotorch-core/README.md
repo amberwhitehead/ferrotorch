@@ -33,7 +33,7 @@ Core tensor and autograd engine for ferrotorch — PyTorch in Rust.
 - **Higher-order autograd**, anomaly mode, hooks (`register_hook`,
   `register_post_accumulate_grad_hook`), gradcheck.
 - **Saved tensors**, fixed-point derivatives for DEQ networks,
-  forward-mode AD via `DualNumber`.
+  forward-mode AD via `DualTensor`.
 
 ### Operations
 
@@ -64,8 +64,9 @@ Core tensor and autograd engine for ferrotorch — PyTorch in Rust.
   `mish`, `sigmoid`, `tanh`, `softmax`, `log_softmax`
 - **FFT** — `fft`, `ifft`, `rfft`, `irfft`, `hfft`, `ihfft`, `fft2`, `ifft2`, `fftn`,
   `ifftn`, `rfftn`, `irfftn`, with axes-aware cuFFT GPU dispatch (`cufftPlanMany`)
-- **Signal processing** — `signal::{stft, istft, hilbert,
-  spectrogram, hann/hamming/blackman}` window functions
+- **Signal processing** — `signal::{hann, hamming, blackman, bartlett,
+  cosine, exponential, gaussian, kaiser, nuttall, parzen, taylor, tukey}`
+  window functions
 - **Complex tensors** — interleaved-real complex storage, complex-aware
   arithmetic, FFT, and `eig` non-symmetric eigendecomposition
 - **Sparse** — `SparseTensor` (COO format) with sparse arithmetic, `spmm`, `to_dense`/`from_dense` with GPU dispatch (cuSPARSE CSR path), and sparse-grad support for embedding tables

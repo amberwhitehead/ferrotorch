@@ -4,9 +4,12 @@ Distributed training for ferrotorch -- backends, collectives, and DDP.
 
 ## What it provides
 
-- **Backends** -- `TcpBackend` for real multi-process training, `SimulatedBackend` for in-process testing, and the `Backend` trait
-- **Collectives** -- `allreduce`, `broadcast`, `barrier` with `ReduceOp` (Sum, Mean, Min, Max)
+- **Backends** -- `TcpBackend` for real multi-process training, `SimulatedBackend` for in-process testing, the `Backend` trait, plus optional native-Rust `GlooBackend` / `MpiBackend` (feature-gated) and an `NcclBackend` (requires `nccl` feature)
+- **Collectives** -- `allreduce`, `all_gather`, `reduce_scatter`, `all_to_all`, `broadcast`, `barrier` with `ReduceOp` (Sum, Mean)
 - **DDP** -- `DDP` wraps any `Module` and synchronizes gradients across ranks after each backward pass
+- **FSDP** -- `FSDP` shards parameters across ranks, all-gathering during forward and reduce-scattering gradients during backward
+- **RPC** -- `RpcAgent` / `TcpRpcBackend` for invoking functions on remote ranks
+- **Pipeline parallelism** -- `Pipeline` splits a model into sequential stages with GPipe / Interleaved1F1B schedules
 - **GPU collectives** (requires `gpu` feature) -- `gpu_allreduce`, `gpu_broadcast` for GPU tensor communication
 
 ## Feature flags

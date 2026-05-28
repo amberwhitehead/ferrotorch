@@ -8,6 +8,7 @@ Intel XPU (Arc / Data Center GPU Max) backend for ferrotorch via CubeCL wgpu.
 - **Element-wise ops** -- `xpu_add`, `xpu_sub`, `xpu_mul`, `xpu_div`, `xpu_neg`, `xpu_abs`, `xpu_relu`
 - **Transcendentals** -- `xpu_exp`, `xpu_ln`, `xpu_sqrt`, `xpu_sin`, `xpu_cos`, `xpu_tanh`, `xpu_sigmoid`
 - **Matrix multiply** -- `xpu_matmul` (2-D)
+- **Orthogonal polynomials** -- `xpu_chebyshev_polynomial_t`, `xpu_chebyshev_polynomial_u`, `xpu_chebyshev_polynomial_v`, `xpu_chebyshev_polynomial_w`, `xpu_hermite_polynomial_h`, `xpu_hermite_polynomial_he`, `xpu_laguerre_polynomial_l`, `xpu_legendre_polynomial_p`
 
 Switching a model from CUDA to XPU is a single line:
 

@@ -29,7 +29,7 @@ OpenAI's Whisper model.
 ```rust
 use ferrotorch_whisper::{WhisperConfig, WhisperEncoder, audio};
 
-let cfg = WhisperConfig::tiny();
+let cfg = WhisperConfig::whisper_tiny();
 let mut encoder: WhisperEncoder<f32> = WhisperEncoder::new(cfg)?;
 let _drop = ferrotorch_whisper::load_whisper_encoder(&mut encoder, "/path/to/whisper-tiny")?;
 

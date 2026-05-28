@@ -26,9 +26,12 @@ checkpoint and verified for forward-pass parity against
   value.
 - **`MlpPolicy`** — the full sb3 `ActorCriticPolicy` (`flatten` →
   `MlpExtractor` → `(ActionNet, ValueHead)` heads) with
-  `forward_actor(obs) -> logits` and `forward_critic(obs) -> value`.
+  `forward(obs) -> PolicyOutput { action_logits, value }`. (The
+  `forward_actor` / `forward_critic` trunk methods live on
+  `MlpExtractor`.)
 - **`load_ppo_policy`** — SafeTensors loader for the upstream sb3
-  checkpoint; returns a `DropReport` (#1141 silent-drop-bug guard).
+  checkpoint; takes `(weights_path, cfg, strict)` and returns
+  `(MlpPolicy, DropReport)` (#1141 silent-drop-bug guard).
 
 ## Architecture (sb3 `MlpPolicy` defaults for CartPole-v1)
 
@@ -45,15 +48,19 @@ MlpPolicy
 ## Quick start
 
 ```rust
-use ferrotorch_rl::{MlpPolicy, MlpPolicyConfig, load_ppo_policy};
+use ferrotorch_rl::{MlpPolicyConfig, load_ppo_policy};
 use ferrotorch_core::Tensor;
 
-let mut policy = MlpPolicy::new(MlpPolicyConfig::cartpole_v1())?;
-let _drop = load_ppo_policy(&mut policy, "/path/to/ppo-cartpole-v1.safetensors")?;
+let (policy, _drop) = load_ppo_policy(
+    Path::new("/path/to/ppo-cartpole-v1.safetensors"),
+    MlpPolicyConfig::cartpole_v1(),
+    /*strict*/ true,
+)?;
 
 let obs: Tensor<f32> = /* [B, 4] CartPole observation */;
-let logits = policy.forward_actor(&obs)?;   // [B, 2]
-let value  = policy.forward_critic(&obs)?;  // [B, 1]
+let out = policy.forward(&obs)?;
+let logits = out.action_logits;  // [B, 2]
+let value  = out.value;          // [B, 1]
 ```
 
 ## Real-artifact parity

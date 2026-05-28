@@ -30,7 +30,7 @@ L2 normalization for sentence embeddings.
 ```rust
 use ferrotorch_bert::{BertConfig, SentenceTransformer, load_sentence_transformer};
 
-let cfg = BertConfig::all_mini_lm_l6_v2();
+let cfg = BertConfig::all_minilm_l6_v2();
 let mut model: SentenceTransformer<f32> = SentenceTransformer::new(cfg, /* normalize */ true)?;
 let drop_report = load_sentence_transformer(&mut model, "/path/to/all-MiniLM-L6-v2")?;
 assert!(drop_report.is_empty(), "loader dropped upstream keys: {drop_report:?}");

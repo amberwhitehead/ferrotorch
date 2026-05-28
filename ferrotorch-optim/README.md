@@ -19,15 +19,15 @@ The `Optimizer<T>` trait with `step`, `zero_grad`, `lr`/`set_lr`, parameter grou
 | `Adagrad`        | Per-parameter learning rate accumulation                            |
 | `Adadelta`       | Adagrad with running window                                         |
 | `Adafactor`      | Memory-efficient Adam (row/column factorization)                    |
-| `RMSprop`        | RMSprop with momentum                                               |
+| `Rmsprop`        | RMSprop with momentum                                               |
 | `Rprop`          | Resilient backprop                                                  |
-| `ASGD`           | Averaged SGD                                                        |
+| `Asgd`           | Averaged SGD                                                        |
 | `SparseAdam`     | Adam variant for sparse gradients                                   |
-| `LBFGS`          | L-BFGS with Strong Wolfe line search                                |
+| `Lbfgs`          | L-BFGS with Strong Wolfe line search                                |
 | `Muon`           | Momentum + Newton-Schulz orthogonalization                          |
-| `NaturalGradient`| K-FAC approximation (Kronecker-factored Fisher)                     |
-| `Ema`            | Exponential moving average of parameters                            |
-| `Swa`            | Stochastic Weight Averaging                                         |
+| `Kfac`           | K-FAC approximation (Kronecker-factored Fisher)                     |
+| `ExponentialMovingAverage` | Exponential moving average of parameters                  |
+| `AveragedModel` / `Swalr`  | Stochastic Weight Averaging (model + LR schedule)         |
 
 ### Fused / foreach mode (CL-388)
 
@@ -46,8 +46,10 @@ device. Parity tests verify identical results to the legacy path.
 ### Learning rate schedulers
 
 `StepLR`, `MultiStepLR`, `ExponentialLR`, `CosineAnnealingLR`,
-`ReduceLROnPlateau`, `LinearWarmup`, `SequentialLr`,
-`cosine_warmup_scheduler`, `OneCycleLR`, `CyclicLR`, `PolynomialLR`.
+`CosineAnnealingWarmRestarts`, `ReduceLROnPlateau`, `LinearWarmup`,
+`LinearLR`, `ConstantLR`, `LambdaLR`, `MultiplicativeLR`,
+`SequentialLr`, `ChainedScheduler`, `cosine_warmup_scheduler`,
+`OneCycleLR`, `CyclicLR`, `PolynomialLR`.
 
 ## Quick start
 

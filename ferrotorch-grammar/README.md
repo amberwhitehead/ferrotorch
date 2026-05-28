@@ -64,10 +64,10 @@ loop {
 | `type: boolean`    | yes                                 |
 | `type: null`       | yes                                 |
 | `nullable: true`   | yes                                 |
-| `oneOf` / `anyOf`  | not yet                             |
-| `$ref` / `$defs`   | not yet                             |
+| `oneOf` / `anyOf`  | partial (no `allOf`)                |
+| `$ref` / `$defs`   | yes (intra-document)                |
 | `pattern`          | not yet                             |
-| `minLength` / etc. | not yet                             |
+| `minLength` / etc. | partial (length / min / max / multipleOf) |
 
 Schemas using unsupported keywords return `GrammarError::Schema`.
 

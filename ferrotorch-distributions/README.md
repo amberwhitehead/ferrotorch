@@ -25,12 +25,15 @@ The `Distribution<T>` trait with `sample`, `rsample` (reparameterized), `log_pro
 | `Weibull`              | `scale`, `concentration`         | yes             |
 | `Pareto`               | `scale`, `alpha`                 | yes             |
 | `Kumaraswamy`          | `concentration1`, `concentration0` | yes           |
+| `ContinuousBernoulli`  | `probs`                          | yes (on [0,1])  |
 
 ### Discrete
 
 | Distribution           | Parameters                       | Reparameterized |
 |------------------------|----------------------------------|-----------------|
 | `Bernoulli`            | `probs`                          | no              |
+| `Binomial`             | `total_count`, `probs`           | no              |
+| `Geometric`            | `probs`                          | no              |
 | `Categorical`          | `probs`                          | no              |
 | `OneHotCategorical`    | `probs`                          | no              |
 | `Multinomial`          | `total_count`, `probs`           | no              |
@@ -52,6 +55,7 @@ The `Distribution<T>` trait with `sample`, `rsample` (reparameterized), `log_pro
 | `MixtureSameFamily`             | Finite mixture with same-family components                   |
 | `RelaxedBernoulli`              | Concrete (Gumbel-softmax) relaxation of Bernoulli            |
 | `RelaxedOneHotCategorical`      | Concrete relaxation of Categorical (simplex-valued samples)  |
+| `ExpRelaxedCategorical`         | Log-simplex Concrete relaxation of Categorical               |
 | `TransformedDistribution`       | Apply bijective transforms with log-det-Jacobian             |
 
 ### Infrastructure

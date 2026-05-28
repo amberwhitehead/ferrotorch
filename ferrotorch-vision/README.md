@@ -6,35 +6,41 @@ Vision models, datasets, and transforms for ferrotorch — covering classificati
 
 ### Model architectures
 
-**Classification** (8 architectures with full forward parity):
+**Classification** (10 architectures with full forward parity):
 
-| Architecture      | Variants              |
-|-------------------|-----------------------|
-| ResNet            | 18, 34, 50            |
-| VGG               | 11, 16                |
-| EfficientNet      | B0                    |
-| MobileNetV2       | standard              |
-| MobileNetV3       | Small                 |
-| ConvNeXt          | Tiny                  |
-| Swin Transformer  | Tiny                  |
-| ViT               | B/16                  |
-| DenseNet          | 121                   |
-| InceptionV3       | standard              |
+| Architecture      | Variants              | Registry key                          |
+|-------------------|-----------------------|---------------------------------------|
+| ResNet            | 18, 34, 50            | `resnet18` / `resnet34` / `resnet50`  |
+| VGG               | 11, 16                | `vgg11` / `vgg16`                     |
+| EfficientNet      | B0                    | `efficientnet_b0`                     |
+| MobileNetV2       | standard              | `mobilenet_v2`                        |
+| MobileNetV3       | Small                 | `mobilenet_v3_small`                  |
+| ConvNeXt          | Tiny                  | `convnext_tiny`                       |
+| Swin Transformer  | Tiny                  | `swin_tiny`                           |
+| ViT               | B/16                  | `vit_b_16`                            |
+| DenseNet          | 121                   | `densenet121`                         |
+| InceptionV3       | standard              | `inception_v3`                        |
 
-**Object detection** (3 architectures):
+**Object detection** (7 architectures):
 
-| Architecture      | Notes                                     |
-|-------------------|-------------------------------------------|
-| Faster R-CNN      | ResNet-50 backbone with FPN               |
-| Mask R-CNN        | Faster R-CNN + mask head                  |
-| SSD300            | Single Shot Detector, 300x300 input       |
+| Architecture      | Notes                                     | Registry key                  |
+|-------------------|-------------------------------------------|-------------------------------|
+| Faster R-CNN      | ResNet-50 backbone with FPN               | `fasterrcnn_resnet50_fpn`     |
+| Mask R-CNN        | Faster R-CNN + mask head                  | `maskrcnn_resnet50_fpn`       |
+| Keypoint R-CNN    | Faster R-CNN + keypoint head              | `keypointrcnn_resnet50_fpn`   |
+| RetinaNet         | ResNet-50 + FPN, focal loss               | `retinanet_resnet50_fpn`      |
+| FCOS              | Anchor-free, ResNet-50 + FPN              | `fcos_resnet50_fpn`           |
+| SSD300            | Single Shot Detector, VGG-16, 300x300     | `ssd300_vgg16`                |
+| YOLO              | Single-stage real-time detector           | `yolo`                        |
 
-**Segmentation** (2 architectures):
+**Segmentation** (4 architectures):
 
-| Architecture      | Notes                                     |
-|-------------------|-------------------------------------------|
-| DeepLabV3         | ASPP-based segmentation                   |
-| FCN               | Fully Convolutional Network               |
+| Architecture      | Notes                                     | Registry key                  |
+|-------------------|-------------------------------------------|-------------------------------|
+| DeepLabV3         | ASPP-based, ResNet-50 backbone            | `deeplabv3_resnet50`          |
+| FCN               | Fully Convolutional Network, ResNet-50    | `fcn_resnet50`                |
+| LR-ASPP           | Lite R-ASPP, MobileNetV3-Large backbone   | `lraspp_mobilenet_v3_large`   |
+| U-Net             | Encoder–decoder with skip connections     | `unet`                        |
 
 ### Datasets
 
@@ -74,7 +80,7 @@ let normalized = VisionNormalize::new(vec![0.1307], vec![0.3081])
 let model = get_model::<f32>("resnet50", 1000)?;
 
 // Instantiate a detection model
-let detector = get_model::<f32>("faster_rcnn", 91)?;
+let detector = get_model::<f32>("fasterrcnn_resnet50_fpn", 91)?;
 ```
 
 ## Part of ferrotorch

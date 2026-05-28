@@ -5,8 +5,11 @@ Data loading, batching, transforms, and device transfer for ferrotorch.
 ## What it provides
 
 - **`Dataset` trait** — random-access datasets with `len`/`get`
+- **`IterableDataset` trait** — streaming datasets with worker-partitioned iteration (`WorkerInfo`)
 - **`VecDataset`** — in-memory dataset from vectors
 - **`MappedDataset`** — lazy map transform over an existing dataset
+- **`TensorDataset`** — dim-0-aligned tuple of tensors
+- **`ConcatDataset`** / **`ChainDataset`** — concatenate or chain multiple datasets
 - **`DataLoader`** — parallel batched iteration with:
   - Rayon-based `num_workers` for parallel per-sample loading
   - `prefetch_factor` — background thread pipeline that hides I/O latency

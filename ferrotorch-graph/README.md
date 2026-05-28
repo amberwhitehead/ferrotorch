@@ -9,18 +9,20 @@ the Cora node-classification benchmark (1433-dim features, 2708 nodes,
 
 ## What it provides
 
-- **`data::Graph`** — `(num_nodes, num_edges, edge_index [2, E])` plus
-  the symmetric-normalized adjacency `Â = D^(-1/2) (A + I) D^(-1/2)`
-  pre-computed for the message-passing forward.
+- **`data::Graph`** — plain-data container holding node features
+  `x: [N, F]`, the COO `edge_index` (flat `Vec<i64>`, `[2, E]`),
+  cached `num_edges`, and per-node integer labels `y`. The
+  symmetric-normalized adjacency `Â = D^(-1/2) (A + I) D^(-1/2)` is
+  computed inside the convolution forward, not stored on the graph.
 - **`GcnConv`** — one Kipf-and-Welling graph convolution layer
-  (`Â · X · W + b`, optional bias). Forward: `[N, in_features]` →
-  `[N, out_features]` for a fixed graph.
-- **`GcnNet`** — two-layer GCN classifier (`GcnConv -> ReLU -> Dropout
-  -> GcnConv`) with helpers `in_features()`, `hidden()`,
-  `num_classes()`.
+  (`Â · X · W + b`). Forward: `(x: &Tensor<f32>, edge_index: &[i64])`
+  maps `[N, in_features]` → `[N, out_features]`.
+- **`GcnNet`** — two-layer GCN classifier (`conv1 -> ReLU -> conv2`,
+  dropout is `Identity` at eval) with helpers `in_features()`,
+  `hidden()`, `num_classes()`.
 - **`load_gcn_net`** — SafeTensors loader for the pinned upstream
-  PyTorch-Geometric checkpoint; returns a `DropReport` (#1141
-  silent-drop-bug guard).
+  PyTorch-Geometric checkpoint; constructs the `GcnNet` and returns
+  `(GcnNet, DropReport)` (#1141 silent-drop-bug guard).
 
 The message-passing primitive (segmented `scatter_add`) lives in
 `ferrotorch-core::ops::scatter::scatter_add_segments` so non-graph
@@ -29,14 +31,16 @@ crates can reuse it.
 ## Quick start
 
 ```rust
-use ferrotorch_graph::{Graph, GcnNet, load_gcn_net};
+use ferrotorch_graph::{Graph, load_gcn_net};
 
 // Cora: 2708 nodes, 1433 features, 7 classes
-let graph = Graph::cora_from_files("/path/to/cora")?;
-let mut net: GcnNet<f32> = GcnNet::new(/*in*/ 1433, /*hidden*/ 16, /*classes*/ 7)?;
-let _drop = load_gcn_net(&mut net, "/path/to/gcn-cora.safetensors")?;
+let graph = Graph::new(x, edge_index, labels)?; // x: [N, F], edge_index: [2, E] flat
+let (net, _drop) = load_gcn_net(
+    Path::new("/path/to/gcn-cora.safetensors"),
+    /*in*/ 1433, /*hidden*/ 16, /*classes*/ 7, /*strict*/ true,
+)?;
 
-let logits = net.forward(&graph, &graph.features)?;
+let logits = net.forward(&graph.x, &graph.edge_index)?;
 // logits: [2708, 7] — argmax along axis 1 to get predicted class
 ```
 

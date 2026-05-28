@@ -21,13 +21,17 @@ classifier-free-guidance text-to-image loop.
 - **`VaeDecoder` / `Decoder` / `VaeDecoderConfig`** — the
   `diffusers.AutoencoderKL` decoder half (post-`scaling_factor`
   latent → image). Loaded via `safetensors_loader::load_vae_decoder`.
+- **`VaeEncoder` / `Encoder` / `VaeEncoderConfig` /
+  `DiagonalGaussianDistribution`** — the `diffusers.AutoencoderKL`
+  encoder half (image → latent distribution). Loaded via
+  `safetensors_loader::load_vae_encoder`.
 
 ### Building blocks
 
 `Attention`, `BasicTransformerBlock`, `FeedForward`,
-`Transformer2DModel` (attention.rs); `AttnBlock2D`, `Downsample2D`,
-`ResnetBlock2D`, `UNetMidBlock2D`, `UpDecoderBlock2D`, `Upsample2D`
-(blocks.rs); `ResnetBlock2DTime` (resnet_block_time.rs);
+`Transformer2DModel` (attention.rs); `AttnBlock2D`, `DownEncoderBlock2D`,
+`Downsample2D`, `ResnetBlock2D`, `UNetMidBlock2D`, `UpDecoderBlock2D`,
+`Upsample2D` (blocks.rs); `ResnetBlock2DTime` (resnet_block_time.rs);
 `TimestepEmbedding`, `Timesteps` (time_embedding.rs).
 
 ### Scheduler
@@ -47,7 +51,8 @@ classifier-free-guidance text-to-image loop.
 ### GPU paths (`cuda` feature)
 
 `gpu::GpuClipTextEncoder`, `gpu::GpuUNet2DConditional`,
-`gpu::GpuVaeDecoder`, `gpu::GpuStableDiffusionPipeline` — VRAM-resident
+`gpu::GpuVaeDecoder`, `gpu::GpuVaeEncoder`,
+`gpu::GpuStableDiffusionPipeline` — VRAM-resident
 versions that exercise the CUDA forward path through
 [`ferrotorch-gpu`](../ferrotorch-gpu) (#1164, #1165, #1166).
 

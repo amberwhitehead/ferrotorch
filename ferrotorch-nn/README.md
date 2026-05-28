@@ -30,8 +30,8 @@ Neural network modules for ferrotorch — layers, losses, hooks, and parameter m
 `CrossEntropyLoss`, `NLLLoss`, `BCELoss`, `BCEWithLogitsLoss`, `MSELoss`,
 `L1Loss`, `HuberLoss`, `SmoothL1Loss`, `KLDivLoss`, `CosineEmbeddingLoss`,
 `MarginRankingLoss`, `TripletMarginLoss`, `HingeEmbeddingLoss`,
-`MultiLabelMarginLoss`, `PoissonNLLLoss`, `GaussianNLLLoss`,
-`CTCLoss`.
+`MultiMarginLoss`, `MultiLabelSoftMarginLoss`, `PoissonNLLLoss`,
+`GaussianNLLLoss`, `CTCLoss`.
 
 ### Initialization
 

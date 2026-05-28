@@ -12,7 +12,7 @@ Llama 3 / Meta LLaMA model composition, weight loading, speculative decoding, an
 - **`LlamaConfig`** -- model hyperparameters (8B, 70B, etc.)
 - **`LlamaGpuInferencer`** -- bf16 GPU inference on CUDA (with `cuda` feature)
 - **Speculative decoding** -- `speculative_decode`, `SpecDecodeConfig`, `SpecDecodeOutput` for draft-target token verification; any type implementing `ModelHandle` can serve as draft or target model
-- **Quantized weight loaders** -- `dequantize_gptq_q4`, `dequantize_awq_q4` (GPTQ and AWQ Q4 INT4 loaders); GGUF weight remapping via `gguf_remap` for loading `.gguf` checkpoints directly through ferrotorch-serialize
+- **Quantized weight loaders** -- `dequantize_gptq_q4`, `dequantize_awq_q4`, `dequantize_hqq_q4_axis1` (GPTQ, AWQ, and HQQ Q4 INT4 loaders); GGUF weight remapping via `gguf_remap` for loading `.gguf` checkpoints directly through ferrotorch-serialize
 
 Weight loading accepts HuggingFace transformers naming convention via `load_hf_state_dict`, working directly with SafeTensors checkpoints.
 
