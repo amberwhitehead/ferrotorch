@@ -14,7 +14,7 @@
 //! | REQ-3 | SHIPPED | impl: `<Conv2d as Module>::forward` body here (im2col + matmul) mirroring `aten::convolution`; non-test consumer: every vision model forward invokes `Conv2d::forward` through its `Module` impl. |
 //! | REQ-4 | SHIPPED | impl: `is_f32 && input.is_cuda()` dispatch to `backend.conv2d_f32` inside `<Conv2d as Module>::forward`; non-test consumer: `ferrotorch-gpu/src/backend_impl.rs` exposes `Backend::conv2d_f32`; vision-model training runs on CUDA trigger this dispatch end-to-end. |
 //! | REQ-5 | SHIPPED | impl: `Conv2dBackward<T>: GradFn<T>` impl block here; non-test consumer: every gradient step on a vision model's `loss.backward()` traverses these `Conv2dBackward` nodes through `ferrotorch_core::autograd::engine`. |
-//! | REQ-6 | SHIPPED | impl: `pub struct Conv1d` / `Conv3d` / `ConvTranspose{1,2,3}d` here; non-test consumer: `ferrotorch-vision/src/models/inception.rs` uses `Conv2d` + `ConvTranspose2d`; `ferrotorch-nn/src/lazy_conv.rs` instantiates `Conv{1,2,3}d` via the materialize path. |
+//! | REQ-6 | SHIPPED | impl: `pub struct Conv1d` / `Conv3d` / `ConvTranspose{1,2,3}d` here. Conv1d/Conv3d carry `groups`/`dilation` (forward layers) via `Conv1d::new_full` / `Conv3d::new_full` + the per-group + dilated `<Conv1d as Module>::forward` / `<Conv3d as Module>::forward` and `Conv1dBackward` / `Conv3dBackward` (closes #1600 conv1d, #1601 conv3d; weight `[out, in/groups, *k]` per `torch/nn/modules/conv.py:171`, channel partition per `aten/src/ATen/native/Convolution.cpp:1723-1729`, `eff_kernel = dilation*(k-1)+1` per `aten/src/ATen/native/ConvUtils.h:255`). non-test consumer: `Conv1d::new` / `Conv3d::new` delegate to `new_full` in production and are called by `ferrotorch-nn/src/lazy_conv.rs` `LazyConv1d::materialize` / `LazyConv3d::materialize`; `ferrotorch-vision/src/models/inception.rs` uses `Conv2d` + `ConvTranspose2d`. |
 //! | REQ-7 | SHIPPED | impl: `impl<T: Float> Module<T> for Conv2d<T>` block (and analogues for the other 5) here; non-test consumer: `ferrotorch_optim` walks `Module::parameters_mut()` across every conv in a training loop. |
 //! | REQ-8 | SHIPPED | impl: the `Conv2d::set_weight` and `Conv2d::from_parts` methods here; non-test consumer: `ferrotorch-nn/src/functional.rs` (the stateless `nn::functional::conv2d` entry point) uses `Conv2d::from_parts` to drive the existing forward path with user-supplied parameters. |
 //! | REQ-9 | SHIPPED | impl: `kaiming_uniform(&mut weight, NonLinearity::ReLU)` + `uniform_init(&mut b, -bound, bound)` (bound = 1/sqrt(fan_in)) inside every `Conv*d::new[_full]` here, mirroring `torch/nn/modules/conv.py:182-201`; non-test consumer: `Conv2d::new` is the path used by every vision-model constructor. (closes #1450 — bias U(-bound,bound). Kaiming gain divergence (`a=sqrt(5)` upstream vs `ReLU` here) remains as separate followup.) |
@@ -177,9 +177,15 @@ fn im2col_dilated<T: Float>(
 ///
 /// Given columns of shape `[B, C * kH * kW, H_out * W_out]`, accumulates
 /// values back into a `[B, C, H, W]` tensor (with padding stripped).
+///
+/// `#[cfg(test)]`-gated: production backward paths (`Conv1dBackward`,
+/// `Conv2dBackward`) call [`col2im_dilated`] directly with the layer's
+/// dilation, so the only remaining caller of this non-dilated shim is the
+/// im2col/col2im roundtrip unit test.
 // Internal kernel: argument set is the adjoint of `im2col` (same descriptor
 // inputs); refactoring to a config struct would diverge the two helpers'
 // signatures unhelpfully.
+#[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 fn col2im<T: Float>(
     cols: &[T],
@@ -1259,7 +1265,7 @@ impl<T: Float> GradFn<T> for Conv2dBackward<T> {
 /// where `L_out = (L + 2 * padding - kernel_size) / stride + 1`.
 #[derive(Debug)]
 pub struct Conv1d<T: Float> {
-    /// Learnable kernel weights `[out_channels, in_channels, kernel_size]`.
+    /// Learnable kernel weights `[out_channels, in_channels / groups, kernel_size]`.
     weight: Parameter<T>,
     /// Optional learnable bias `[out_channels]`.
     bias: Option<Parameter<T>>,
@@ -1273,6 +1279,15 @@ pub struct Conv1d<T: Float> {
     stride: usize,
     /// Zero-padding applied to both sides.
     padding: usize,
+    /// Dilation. `1` is the dense default. Spaces kernel taps `dilation`
+    /// apart along the temporal axis (`eff_kernel = dilation * (k - 1) + 1`),
+    /// mirroring `torch.nn.Conv1d(..., dilation=1)` (`conv.py:337`).
+    dilation: usize,
+    /// Number of blocked input/output channel groups. `1` is dense,
+    /// `in_channels` is depthwise. Must divide both `in_channels` and
+    /// `out_channels`, mirroring `torch.nn.Conv1d(..., groups=1)`
+    /// (`conv.py:338`, validation `conv.py:107-110`).
+    groups: usize,
     /// Boundary handling for the spatial padding. `Zeros` (default) routes
     /// through the existing im2col zero-pad path; non-`Zeros` modes pre-pad
     /// the input via `crate::padding::functional_pad_1d` and then run the
@@ -1286,17 +1301,57 @@ pub struct Conv1d<T: Float> {
 }
 
 impl<T: Float> Conv1d<T> {
-    /// Create a new `Conv1d` layer.
+    /// Create a new `Conv1d` layer (dense, dilation `1`, `groups = 1`).
     ///
     /// Weight is initialized with Kaiming uniform (ReLU gain).
     /// Bias, if enabled, is initialized U(-bound, bound) with
     /// `bound = 1/sqrt(fan_in)` per `torch/nn/modules/conv.py:198-201`.
+    ///
+    /// This is a thin shim over [`Conv1d::new_full`] preserved for callers
+    /// that only need the dense configuration (e.g. `LazyConv1d::materialize`).
     pub fn new(
         in_channels: usize,
         out_channels: usize,
         kernel_size: usize,
         stride: usize,
         padding: usize,
+        bias: bool,
+    ) -> FerrotorchResult<Self> {
+        Self::new_full(
+            in_channels,
+            out_channels,
+            kernel_size,
+            stride,
+            padding,
+            1,
+            1,
+            bias,
+        )
+    }
+
+    /// Create a new `Conv1d` layer with the full PyTorch-shaped argument set,
+    /// including `dilation` and `groups`.
+    ///
+    /// `groups` must divide BOTH `in_channels` and `out_channels` (PyTorch
+    /// `torch.nn.Conv1d` raises `ValueError` otherwise, `conv.py:107-110`).
+    /// `dilation` must be strictly positive. Weight is initialised with
+    /// Kaiming uniform (ReLU gain); bias (if enabled) with U(-bound, bound)
+    /// where `bound = 1/sqrt(fan_in)`, `fan_in = (in_channels/groups) *
+    /// kernel_size` per `torch/nn/modules/conv.py:198-201`.
+    ///
+    /// Weight layout is `[out_channels, in_channels / groups, kernel_size]`,
+    /// the PyTorch grouped-conv convention (`conv.py:171`). Argument order
+    /// `(.., dilation, groups, bias)` mirrors `Conv1d.__init__`
+    /// (`conv.py:330-339`, R-DEV-2).
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_full(
+        in_channels: usize,
+        out_channels: usize,
+        kernel_size: usize,
+        stride: usize,
+        padding: usize,
+        dilation: usize,
+        groups: usize,
         bias: bool,
     ) -> FerrotorchResult<Self> {
         if in_channels == 0 || out_channels == 0 {
@@ -1314,15 +1369,42 @@ impl<T: Float> Conv1d<T> {
                 message: "stride must be > 0".into(),
             });
         }
+        if dilation == 0 {
+            return Err(FerrotorchError::InvalidArgument {
+                message: format!("Conv1d::new_full: dilation must be > 0, got {dilation}"),
+            });
+        }
+        if groups == 0 {
+            return Err(FerrotorchError::InvalidArgument {
+                message: "Conv1d::new_full: groups must be > 0".into(),
+            });
+        }
+        // `torch/nn/modules/conv.py:107-110`: `in_channels % groups != 0`
+        // and `out_channels % groups != 0` each raise ValueError.
+        if in_channels % groups != 0 {
+            return Err(FerrotorchError::InvalidArgument {
+                message: format!(
+                    "Conv1d::new_full: groups={groups} must divide in_channels={in_channels}"
+                ),
+            });
+        }
+        if out_channels % groups != 0 {
+            return Err(FerrotorchError::InvalidArgument {
+                message: format!(
+                    "Conv1d::new_full: groups={groups} must divide out_channels={out_channels}"
+                ),
+            });
+        }
 
-        let mut weight = Parameter::zeros(&[out_channels, in_channels, kernel_size])?;
+        // PyTorch weight layout is [C_out, C_in / groups, k] (`conv.py:171`).
+        let mut weight = Parameter::zeros(&[out_channels, in_channels / groups, kernel_size])?;
         kaiming_uniform(&mut weight, NonLinearity::ReLU)?;
 
         let bias_param = if bias {
             let mut b = Parameter::zeros(&[out_channels])?;
             // `torch/nn/modules/conv.py:198-201`: bias U(-bound, bound) with
-            //   `bound = 1 / sqrt(fan_in)`, `fan_in = in_channels * kernel_size` for Conv1d.
-            let fan_in = in_channels * kernel_size;
+            //   `bound = 1 / sqrt(fan_in)`, `fan_in = (in_channels/groups) * kernel_size`.
+            let fan_in = (in_channels / groups) * kernel_size;
             let bound = if fan_in > 0 {
                 1.0 / (fan_in as f64).sqrt()
             } else {
@@ -1342,9 +1424,21 @@ impl<T: Float> Conv1d<T> {
             kernel_size,
             stride,
             padding,
+            dilation,
+            groups,
             padding_mode: crate::padding::PaddingMode::Zeros,
             training: true,
         })
+    }
+
+    /// Number of channel groups (`1` is dense, `in_channels` is depthwise).
+    pub fn groups(&self) -> usize {
+        self.groups
+    }
+
+    /// Dilation (`1` is the dense default).
+    pub fn dilation(&self) -> usize {
+        self.dilation
     }
 
     /// Configure the boundary handling for the spatial padding.
@@ -1375,7 +1469,10 @@ impl<T: Float> Conv1d<T> {
     /// Build a `Conv1d` from caller-supplied weight and optional bias tensors.
     ///
     /// `weight` must have shape `[out_channels, in_channels, kernel_size]`.
-    /// Used by `nn::functional::conv1d`.
+    /// The resulting layer is dense (`groups = 1`, `dilation = 1`) so the
+    /// constructor remains API-compatible with `nn::functional::conv1d`,
+    /// which infers `in_channels = weight.shape()[1]` and cannot recover
+    /// `groups` from the weight shape alone.
     pub fn from_parts(
         weight: Tensor<T>,
         bias: Option<Tensor<T>>,
@@ -1412,6 +1509,8 @@ impl<T: Float> Conv1d<T> {
             kernel_size,
             stride,
             padding,
+            dilation: 1,
+            groups: 1,
             padding_mode: crate::padding::PaddingMode::Zeros,
             training: true,
         })
@@ -1456,6 +1555,8 @@ impl<T: Float> Module<T> for Conv1d<T> {
                 kernel_size: self.kernel_size,
                 stride: self.stride,
                 padding: 0,
+                dilation: self.dilation,
+                groups: self.groups,
                 padding_mode: crate::padding::PaddingMode::Zeros,
                 training: self.training,
             };
@@ -1488,53 +1589,140 @@ impl<T: Float> Module<T> for Conv1d<T> {
         let k = self.kernel_size;
         let s = self.stride;
         let p = self.padding;
+        let dil = self.dilation;
+        let groups = self.groups;
 
+        // Effective kernel extent after dilation, mirroring
+        // `ConvUtils.h:255` `kernel = dilation * (weight_size - 1) + 1`.
+        let eff_k = dil * (k - 1) + 1;
         let l_padded = length + 2 * p;
-        if l_padded < k {
+        if l_padded < eff_k {
             return Err(FerrotorchError::InvalidArgument {
                 message: format!(
-                    "Conv1d: padded input length ({l_padded}) is smaller than kernel ({k})"
+                    "Conv1d: padded input length ({l_padded}) is smaller than effective kernel ({eff_k})"
                 ),
             });
         }
 
-        let l_out = (l_padded - k) / s + 1;
+        let l_out = (l_padded - eff_k) / s + 1;
 
         // Save the input device so we can restore it on the output.
         let input_device = input.device();
 
-        // Reshape input [B, C_in, L] -> [B, C_in, 1, L] and use 2-D im2col
-        // with kernel (1, k), stride (1, s), padding (0, p).
+        // Reshape input [B, C_in, L] -> [B, C_in, 1, L] and use the 2-D dilated
+        // im2col with kernel (1, k), stride (1, s), padding (0, p), dilation
+        // (1, dil) so the temporal dilation maps to the W axis. The CPU path
+        // partitions channels by `groups` exactly like Conv2d: each group's
+        // input slice [B, in_per_group, L] is convolved with its weight slice
+        // and the outputs are stacked along the C_out axis (mirroring the
+        // per-group subtensor/cat loop at `Convolution.cpp:1723-1729`).
         let input_data = input.data_vec()?;
-
-        let (cols, col_rows, col_cols) =
-            im2col(&input_data, batch, c_in, 1, length, 1, k, 1, s, 0, p);
-
-        // Reshape weight [C_out, C_in, k] to 2-D: [C_out, C_in * k]
         let weight_data = self.weight.data_vec()?;
-        let weight_2d = Tensor::from_storage(
-            TensorStorage::cpu(weight_data),
-            vec![self.out_channels, col_rows],
-            false,
-        )?;
 
-        // Per-batch matmul: weight_2d @ cols_b -> [C_out, L_out]
         let zero = <T as num_traits::Zero>::zero();
         let mut output = vec![zero; batch * self.out_channels * l_out];
 
-        for b in 0..batch {
-            let col_start = b * col_rows * col_cols;
-            let col_end = col_start + col_rows * col_cols;
-            let cols_b = Tensor::from_storage(
-                TensorStorage::cpu(cols[col_start..col_end].to_vec()),
-                vec![col_rows, col_cols],
+        // Per-group dimensions.
+        let in_per_group = self.in_channels / groups;
+        let out_per_group = self.out_channels / groups;
+        let weight_per_group_numel = out_per_group * in_per_group * k;
+        let group_col_rows = in_per_group * k;
+        let col_cols = l_out;
+
+        // Saved im2col columns for autograd (dense channel layout `[B,
+        // C_in * k, L_out]` so the backward can accumulate grad_input back
+        // into a `[B, C_in, L]` tensor uniformly across groups, exactly like
+        // Conv2dBackward).
+        let saved_cols_rows = self.in_channels * k;
+        let mut saved_cols: Vec<T> = if is_grad_enabled()
+            && (input.requires_grad()
+                || self.weight.requires_grad()
+                || self.bias.as_ref().is_some_and(|b| b.requires_grad()))
+        {
+            vec![zero; batch * saved_cols_rows * col_cols]
+        } else {
+            Vec::new()
+        };
+        let save_cols = !saved_cols.is_empty();
+
+        for g in 0..groups {
+            // Slice the input channels belonging to this group: [B, in_per_group, L].
+            let mut group_input = vec![zero; batch * in_per_group * length];
+            for b in 0..batch {
+                for c in 0..in_per_group {
+                    let src_c = g * in_per_group + c;
+                    let src_start = b * self.in_channels * length + src_c * length;
+                    let dst_start = b * in_per_group * length + c * length;
+                    group_input[dst_start..dst_start + length]
+                        .copy_from_slice(&input_data[src_start..src_start + length]);
+                }
+            }
+
+            let (g_cols, g_col_rows, g_col_cols) = im2col_dilated(
+                &group_input,
+                batch,
+                in_per_group,
+                1,
+                length,
+                1,
+                k,
+                1,
+                s,
+                0,
+                p,
+                1,
+                dil,
+            );
+            debug_assert_eq!(g_col_rows, group_col_rows);
+            debug_assert_eq!(g_col_cols, col_cols);
+
+            // Save into the dense [C_in * k, col_cols] layout if backward needs it.
+            if save_cols {
+                for b in 0..batch {
+                    for c in 0..in_per_group {
+                        let dst_c = g * in_per_group + c;
+                        for kk in 0..k {
+                            let src_row = c * k + kk;
+                            let dst_row = dst_c * k + kk;
+                            let src_off = b * group_col_rows * col_cols + src_row * col_cols;
+                            let dst_off = b * saved_cols_rows * col_cols + dst_row * col_cols;
+                            saved_cols[dst_off..dst_off + col_cols]
+                                .copy_from_slice(&g_cols[src_off..src_off + col_cols]);
+                        }
+                    }
+                }
+            }
+
+            // Group's slice of the weight: [out_per_group, in_per_group, k]
+            // flattened to [out_per_group, group_col_rows].
+            let w_group_start = g * weight_per_group_numel;
+            let w_group_end = w_group_start + weight_per_group_numel;
+            let weight_group_2d = Tensor::from_storage(
+                TensorStorage::cpu(weight_data[w_group_start..w_group_end].to_vec()),
+                vec![out_per_group, group_col_rows],
                 false,
             )?;
 
-            let out_b = mm(&weight_2d, &cols_b)?;
-            let out_data = out_b.data()?;
-            let out_start = b * self.out_channels * l_out;
-            output[out_start..out_start + self.out_channels * l_out].copy_from_slice(out_data);
+            for b in 0..batch {
+                let col_start = b * group_col_rows * col_cols;
+                let col_end = col_start + group_col_rows * col_cols;
+                let cols_b = Tensor::from_storage(
+                    TensorStorage::cpu(g_cols[col_start..col_end].to_vec()),
+                    vec![group_col_rows, col_cols],
+                    false,
+                )?;
+
+                let out_b = mm(&weight_group_2d, &cols_b)?;
+                let out_data = out_b.data()?;
+                // Place this group's output channels into [b, g*out_per_group.., :].
+                for oc in 0..out_per_group {
+                    let dst_c = g * out_per_group + oc;
+                    let dst_start = b * self.out_channels * l_out + dst_c * l_out;
+                    let src_start = oc * l_out;
+                    output[dst_start..dst_start + l_out]
+                        .copy_from_slice(&out_data[src_start..src_start + l_out]);
+                }
+            }
         }
 
         // Add bias if present: broadcast [C_out] over [B, C_out, L_out].
@@ -1557,11 +1745,7 @@ impl<T: Float> Module<T> for Conv1d<T> {
         )?;
 
         // Attach backward if gradients are enabled.
-        if is_grad_enabled()
-            && (input.requires_grad()
-                || self.weight.requires_grad()
-                || self.bias.as_ref().is_some_and(|b| b.requires_grad()))
-        {
+        if save_cols {
             let grad_fn = Arc::new(Conv1dBackward {
                 input: input.clone(),
                 weight: self.weight.tensor().clone(),
@@ -1571,8 +1755,10 @@ impl<T: Float> Module<T> for Conv1d<T> {
                 kernel_size: self.kernel_size,
                 stride: self.stride,
                 padding: self.padding,
-                cols,
-                col_rows,
+                dilation: self.dilation,
+                groups: self.groups,
+                cols: saved_cols,
+                col_rows: saved_cols_rows,
                 col_cols,
                 l_out,
             });
@@ -1629,6 +1815,12 @@ impl<T: Float> Module<T> for Conv1d<T> {
 // ---------------------------------------------------------------------------
 
 /// Backward function for `Conv1d` forward pass.
+///
+/// Saved `cols` use the **dense channel layout** `[B, C_in * k, L_out]`
+/// (the forward saves into this shape regardless of `groups`), mirroring
+/// `Conv2dBackward`'s grouped scheme so the per-group slice is taken at
+/// gradient-computation time and grad_input accumulates uniformly across
+/// groups. `dilation`/`groups` reconstruct the per-group + dilated math.
 #[derive(Debug)]
 struct Conv1dBackward<T: Float> {
     input: Tensor<T>,
@@ -1639,6 +1831,8 @@ struct Conv1dBackward<T: Float> {
     kernel_size: usize,
     stride: usize,
     padding: usize,
+    dilation: usize,
+    groups: usize,
     cols: Vec<T>,
     col_rows: usize,
     col_cols: usize,
@@ -1648,58 +1842,95 @@ struct Conv1dBackward<T: Float> {
 impl<T: Float> GradFn<T> for Conv1dBackward<T> {
     fn backward(&self, grad_output: &Tensor<T>) -> FerrotorchResult<Vec<Option<Tensor<T>>>> {
         // grad_output shape: [B, C_out, L_out]
+        let input_device = self.input.device();
+        let weight_device = self.weight.device();
+        let bias_device = self.bias.as_ref().map(|b| b.device());
         let go_data = grad_output.data_vec()?;
         let batch = self.input.shape()[0];
         let length = self.input.shape()[2];
         let k = self.kernel_size;
         let s = self.stride;
         let p = self.padding;
+        let dil = self.dilation;
+        let groups = self.groups;
+        let in_per_group = self.in_channels / groups;
+        let out_per_group = self.out_channels / groups;
+        let group_col_rows = in_per_group * k;
+        let zero = <T as num_traits::Zero>::zero();
 
         // --- grad_weight ---
+        // Per group `g`: gw_g += grad_output_b_g @ cols_b_g^T, stacked along
+        // the C_out axis to recover [C_out, C_in/G, k]. Mirrors Conv2dBackward.
         let grad_weight = if self.weight.requires_grad() {
-            let zero = <T as num_traits::Zero>::zero();
-            let weight_numel = self.out_channels * self.col_rows;
+            let weight_numel = self.out_channels * in_per_group * k;
             let mut gw_accum = vec![zero; weight_numel];
+            let weight_per_group_numel = out_per_group * group_col_rows;
 
-            for b in 0..batch {
-                let go_start = b * self.out_channels * self.l_out;
-                let go_end = go_start + self.out_channels * self.l_out;
-                let go_b = Tensor::from_storage(
-                    TensorStorage::cpu(go_data[go_start..go_end].to_vec()),
-                    vec![self.out_channels, self.l_out],
-                    false,
-                )?;
+            for g in 0..groups {
+                for b in 0..batch {
+                    // Slice grad_output for this group: [out_per_group, l_out].
+                    let mut go_g = vec![zero; out_per_group * self.l_out];
+                    for oc in 0..out_per_group {
+                        let src_c = g * out_per_group + oc;
+                        let src_start = b * self.out_channels * self.l_out + src_c * self.l_out;
+                        let dst_start = oc * self.l_out;
+                        go_g[dst_start..dst_start + self.l_out]
+                            .copy_from_slice(&go_data[src_start..src_start + self.l_out]);
+                    }
+                    let go_b_g = Tensor::from_storage(
+                        TensorStorage::cpu(go_g),
+                        vec![out_per_group, self.l_out],
+                        false,
+                    )?;
 
-                let col_start = b * self.col_rows * self.col_cols;
-                let col_end = col_start + self.col_rows * self.col_cols;
-                let cols_b = Tensor::from_storage(
-                    TensorStorage::cpu(self.cols[col_start..col_end].to_vec()),
-                    vec![self.col_rows, self.col_cols],
-                    false,
-                )?;
+                    // Slice cols for this group: [in_per_group * k, col_cols].
+                    let mut cols_g = vec![zero; group_col_rows * self.col_cols];
+                    for c in 0..in_per_group {
+                        let src_c = g * in_per_group + c;
+                        for kk in 0..k {
+                            let src_row = src_c * k + kk;
+                            let dst_row = c * k + kk;
+                            let src_off =
+                                b * self.col_rows * self.col_cols + src_row * self.col_cols;
+                            let dst_off = dst_row * self.col_cols;
+                            cols_g[dst_off..dst_off + self.col_cols]
+                                .copy_from_slice(&self.cols[src_off..src_off + self.col_cols]);
+                        }
+                    }
+                    let cols_b_g = Tensor::from_storage(
+                        TensorStorage::cpu(cols_g),
+                        vec![group_col_rows, self.col_cols],
+                        false,
+                    )?;
 
-                let cols_bt = transpose(&cols_b)?;
-                let gw_b = mm(&go_b, &cols_bt)?;
-                let gw_data = gw_b.data()?;
+                    let cols_bt = transpose(&cols_b_g)?;
+                    let gw_b = mm(&go_b_g, &cols_bt)?;
+                    let gw_data = gw_b.data()?;
 
-                for i in 0..weight_numel {
-                    gw_accum[i] += gw_data[i];
+                    let dst_off = g * weight_per_group_numel;
+                    for i in 0..weight_per_group_numel {
+                        gw_accum[dst_off + i] += gw_data[i];
+                    }
                 }
             }
 
-            Some(Tensor::from_storage(
-                TensorStorage::cpu(gw_accum),
-                vec![self.out_channels, self.in_channels, k],
-                false,
-            )?)
+            Some(
+                Tensor::from_storage(
+                    TensorStorage::cpu(gw_accum),
+                    vec![self.out_channels, in_per_group, k],
+                    false,
+                )?
+                .to(weight_device)?,
+            )
         } else {
             None
         };
 
         // --- grad_bias ---
+        // Sum grad_output over batch + length. Bias is per-output-channel
+        // ([C_out]), identical for any groups setting.
         let grad_bias = match &self.bias {
             Some(b) if b.requires_grad() => {
-                let zero = <T as num_traits::Zero>::zero();
                 let mut gb = vec![zero; self.out_channels];
                 for batch_idx in 0..batch {
                     for c in 0..self.out_channels {
@@ -1709,67 +1940,95 @@ impl<T: Float> GradFn<T> for Conv1dBackward<T> {
                         }
                     }
                 }
-                Some(Tensor::from_storage(
-                    TensorStorage::cpu(gb),
-                    vec![self.out_channels],
-                    false,
-                )?)
+                let target_dev = bias_device.unwrap_or(input_device);
+                Some(
+                    Tensor::from_storage(TensorStorage::cpu(gb), vec![self.out_channels], false)?
+                        .to(target_dev)?,
+                )
             }
             _ => None,
         };
 
         // --- grad_input ---
+        // Per group `g`: weight_g_2d^T @ grad_output_b_g -> [in_per_group * k,
+        // l_out], then col2im_dilated -> [in_per_group, 1, L] placed into the
+        // right in-channel slice of [B, C_in, L]. Mirrors Conv2dBackward.
         let grad_input = if self.input.requires_grad() {
             let weight_data = self.weight.data_vec()?;
-            let weight_2d = Tensor::from_storage(
-                TensorStorage::cpu(weight_data),
-                vec![self.out_channels, self.col_rows],
-                false,
-            )?;
-            let weight_2d_t = transpose(&weight_2d)?;
+            let mut grad_input_data = vec![zero; batch * self.in_channels * length];
+            let weight_per_group_numel = out_per_group * group_col_rows;
 
-            let zero = <T as num_traits::Zero>::zero();
-            let mut grad_cols = vec![zero; batch * self.col_rows * self.col_cols];
-
-            for b in 0..batch {
-                let go_start = b * self.out_channels * self.l_out;
-                let go_end = go_start + self.out_channels * self.l_out;
-                let go_b = Tensor::from_storage(
-                    TensorStorage::cpu(go_data[go_start..go_end].to_vec()),
-                    vec![self.out_channels, self.l_out],
+            for g in 0..groups {
+                let w_off = g * weight_per_group_numel;
+                let weight_g_2d = Tensor::from_storage(
+                    TensorStorage::cpu(weight_data[w_off..w_off + weight_per_group_numel].to_vec()),
+                    vec![out_per_group, group_col_rows],
                     false,
                 )?;
+                let weight_g_t = transpose(&weight_g_2d)?;
 
-                let gc_b = mm(&weight_2d_t, &go_b)?;
-                let gc_data = gc_b.data()?;
+                let mut grad_cols_g = vec![zero; batch * group_col_rows * self.col_cols];
+                for b in 0..batch {
+                    let mut go_g = vec![zero; out_per_group * self.l_out];
+                    for oc in 0..out_per_group {
+                        let src_c = g * out_per_group + oc;
+                        let src_start = b * self.out_channels * self.l_out + src_c * self.l_out;
+                        let dst_start = oc * self.l_out;
+                        go_g[dst_start..dst_start + self.l_out]
+                            .copy_from_slice(&go_data[src_start..src_start + self.l_out]);
+                    }
+                    let go_b_g = Tensor::from_storage(
+                        TensorStorage::cpu(go_g),
+                        vec![out_per_group, self.l_out],
+                        false,
+                    )?;
 
-                let gc_start = b * self.col_rows * self.col_cols;
-                grad_cols[gc_start..gc_start + self.col_rows * self.col_cols]
-                    .copy_from_slice(gc_data);
+                    let gc_b = mm(&weight_g_t, &go_b_g)?;
+                    let gc_data = gc_b.data()?;
+                    let gc_start = b * group_col_rows * self.col_cols;
+                    grad_cols_g[gc_start..gc_start + group_col_rows * self.col_cols]
+                        .copy_from_slice(gc_data);
+                }
+
+                // col2im_dilated scatters group's columns back to
+                // [B, in_per_group, 1, L]; the W axis carries the dilation.
+                let gi_g = col2im_dilated(
+                    &grad_cols_g,
+                    batch,
+                    in_per_group,
+                    1,
+                    length,
+                    1,
+                    k,
+                    1,
+                    s,
+                    0,
+                    p,
+                    1,
+                    dil,
+                    1,
+                    self.l_out,
+                );
+
+                for b in 0..batch {
+                    for c in 0..in_per_group {
+                        let dst_c = g * in_per_group + c;
+                        let dst_start = b * self.in_channels * length + dst_c * length;
+                        let src_start = b * in_per_group * length + c * length;
+                        grad_input_data[dst_start..dst_start + length]
+                            .copy_from_slice(&gi_g[src_start..src_start + length]);
+                    }
+                }
             }
 
-            // col2im back to [B, C_in, 1, L], then reshape to [B, C_in, L]
-            let gi = col2im(
-                &grad_cols,
-                batch,
-                self.in_channels,
-                1,
-                length,
-                1,
-                k,
-                1,
-                s,
-                0,
-                p,
-                1,
-                self.l_out,
-            );
-
-            Some(Tensor::from_storage(
-                TensorStorage::cpu(gi),
-                self.input.shape().to_vec(),
-                false,
-            )?)
+            Some(
+                Tensor::from_storage(
+                    TensorStorage::cpu(grad_input_data),
+                    self.input.shape().to_vec(),
+                    false,
+                )?
+                .to(input_device)?,
+            )
         } else {
             None
         };
@@ -2509,9 +2768,49 @@ fn im2col_3d<T: Float>(
     pad_h: usize,
     pad_w: usize,
 ) -> (Vec<T>, usize, usize) {
-    let d_out = (depth + 2 * pad_d - kernel_d) / stride_d + 1;
-    let h_out = (height + 2 * pad_h - kernel_h) / stride_h + 1;
-    let w_out = (width + 2 * pad_w - kernel_w) / stride_w + 1;
+    im2col_3d_dilated(
+        input, batch, channels, depth, height, width, kernel_d, kernel_h, kernel_w, stride_d,
+        stride_h, stride_w, pad_d, pad_h, pad_w, 1, 1, 1,
+    )
+}
+
+/// Extract volumetric patches into columns, supporting dilation
+/// `(dil_d, dil_h, dil_w)`.
+///
+/// Given a 5-D input `[B, C, D, H, W]`, produces
+/// `[B, C * kD * kH * kW, D_out * H_out * W_out]` where each column is one
+/// flattened receptive-field patch with kernel taps spaced by the dilation
+/// factors. Output spatial sizes follow `out = (in + 2*pad - dil*(k - 1) -
+/// 1)/stride + 1`, mirroring `ConvUtils.h:255-256`.
+// Internal kernel: argument set mirrors the 3-D convolution descriptor; a
+// config struct would force allocation on every call in convolution hot paths.
+#[allow(clippy::too_many_arguments)]
+fn im2col_3d_dilated<T: Float>(
+    input: &[T],
+    batch: usize,
+    channels: usize,
+    depth: usize,
+    height: usize,
+    width: usize,
+    kernel_d: usize,
+    kernel_h: usize,
+    kernel_w: usize,
+    stride_d: usize,
+    stride_h: usize,
+    stride_w: usize,
+    pad_d: usize,
+    pad_h: usize,
+    pad_w: usize,
+    dil_d: usize,
+    dil_h: usize,
+    dil_w: usize,
+) -> (Vec<T>, usize, usize) {
+    let eff_kd = dil_d * (kernel_d - 1) + 1;
+    let eff_kh = dil_h * (kernel_h - 1) + 1;
+    let eff_kw = dil_w * (kernel_w - 1) + 1;
+    let d_out = (depth + 2 * pad_d - eff_kd) / stride_d + 1;
+    let h_out = (height + 2 * pad_h - eff_kh) / stride_h + 1;
+    let w_out = (width + 2 * pad_w - eff_kw) / stride_w + 1;
     let col_rows = channels * kernel_d * kernel_h * kernel_w;
     let col_cols = d_out * h_out * w_out;
 
@@ -2530,9 +2829,9 @@ fn im2col_3d<T: Float>(
                         for od in 0..d_out {
                             for oh in 0..h_out {
                                 for ow in 0..w_out {
-                                    let id = od * stride_d + kd;
-                                    let ih = oh * stride_h + kh;
-                                    let iw = ow * stride_w + kw;
+                                    let id = od * stride_d + kd * dil_d;
+                                    let ih = oh * stride_h + kh * dil_h;
+                                    let iw = ow * stride_w + kw * dil_w;
                                     let col = od * h_out * w_out + oh * w_out + ow;
 
                                     let val = if id >= pad_d
@@ -2567,14 +2866,14 @@ fn im2col_3d<T: Float>(
     (cols, col_rows, col_cols)
 }
 
-/// Scatter columns back into a volume tensor (adjoint of `im2col_3d`).
-///
-/// Given columns of shape `[B, C * kD * kH * kW, D_out * H_out * W_out]`,
-/// accumulates values back into a `[B, C, D, H, W]` tensor (with padding
-/// stripped).
-// Internal kernel: adjoint of `im2col_3d`; same descriptor signature.
+/// Scatter columns back into a volume tensor with dilation support
+/// (adjoint of `im2col_3d_dilated`). The non-dilated 3-D scatter is simply
+/// this with `(dil_d, dil_h, dil_w) = (1, 1, 1)`; production callers
+/// (`Conv3dBackward`) always pass the layer's dilation directly, so no
+/// separate non-dilated shim is kept.
+// Internal kernel: adjoint of `im2col_3d_dilated`; same descriptor signature.
 #[allow(clippy::too_many_arguments)]
-fn col2im_3d<T: Float>(
+fn col2im_3d_dilated<T: Float>(
     cols: &[T],
     batch: usize,
     channels: usize,
@@ -2590,6 +2889,9 @@ fn col2im_3d<T: Float>(
     pad_d: usize,
     pad_h: usize,
     pad_w: usize,
+    dil_d: usize,
+    dil_h: usize,
+    dil_w: usize,
     d_out: usize,
     h_out: usize,
     w_out: usize,
@@ -2612,9 +2914,9 @@ fn col2im_3d<T: Float>(
                         for od in 0..d_out {
                             for oh in 0..h_out {
                                 for ow in 0..w_out {
-                                    let id = od * stride_d + kd;
-                                    let ih = oh * stride_h + kh;
-                                    let iw = ow * stride_w + kw;
+                                    let id = od * stride_d + kd * dil_d;
+                                    let ih = oh * stride_h + kh * dil_h;
+                                    let iw = ow * stride_w + kw * dil_w;
                                     let col = od * h_out * w_out + oh * w_out + ow;
 
                                     if id >= pad_d
@@ -2664,7 +2966,7 @@ fn col2im_3d<T: Float>(
 /// analogously for H and W).
 #[derive(Debug)]
 pub struct Conv3d<T: Float> {
-    /// Learnable kernel weights `[out_channels, in_channels, kD, kH, kW]`.
+    /// Learnable kernel weights `[out_channels, in_channels / groups, kD, kH, kW]`.
     weight: Parameter<T>,
     /// Optional learnable bias `[out_channels]`.
     bias: Option<Parameter<T>>,
@@ -2678,6 +2980,16 @@ pub struct Conv3d<T: Float> {
     stride: (usize, usize, usize),
     /// Zero-padding `(pD, pH, pW)` applied to both sides.
     padding: (usize, usize, usize),
+    /// Dilation `(dilD, dilH, dilW)`. `(1, 1, 1)` is the dense default.
+    /// Spaces kernel taps apart along each spatial axis (`eff_kernel =
+    /// dilation * (k - 1) + 1`), mirroring `torch.nn.Conv3d(..., dilation=1)`
+    /// (`conv.py:689`).
+    dilation: (usize, usize, usize),
+    /// Number of blocked input/output channel groups. `1` is dense,
+    /// `in_channels` is depthwise. Must divide both `in_channels` and
+    /// `out_channels`, mirroring `torch.nn.Conv3d(..., groups=1)`
+    /// (`conv.py:690`, validation `conv.py:107-110`).
+    groups: usize,
     /// Boundary handling for the spatial padding. `Zeros` (default) routes
     /// through the existing im2col zero-pad path; non-`Zeros` modes pre-pad
     /// the input via `crate::padding::functional_pad_3d` and then run the
@@ -2691,17 +3003,58 @@ pub struct Conv3d<T: Float> {
 }
 
 impl<T: Float> Conv3d<T> {
-    /// Create a new `Conv3d` layer.
+    /// Create a new `Conv3d` layer (dense, dilation `(1, 1, 1)`, `groups = 1`).
     ///
     /// Weight is initialized with Kaiming uniform (ReLU gain).
     /// Bias, if enabled, is initialized U(-bound, bound) with
     /// `bound = 1/sqrt(fan_in)` per `torch/nn/modules/conv.py:198-201`.
+    ///
+    /// This is a thin shim over [`Conv3d::new_full`] preserved for callers
+    /// that only need the dense configuration (e.g. `LazyConv3d::materialize`).
     pub fn new(
         in_channels: usize,
         out_channels: usize,
         kernel_size: (usize, usize, usize),
         stride: (usize, usize, usize),
         padding: (usize, usize, usize),
+        bias: bool,
+    ) -> FerrotorchResult<Self> {
+        Self::new_full(
+            in_channels,
+            out_channels,
+            kernel_size,
+            stride,
+            padding,
+            (1, 1, 1),
+            1,
+            bias,
+        )
+    }
+
+    /// Create a new `Conv3d` layer with the full PyTorch-shaped argument set,
+    /// including `dilation` and `groups`.
+    ///
+    /// `groups` must divide BOTH `in_channels` and `out_channels` (PyTorch
+    /// `torch.nn.Conv3d` raises `ValueError` otherwise, `conv.py:107-110`).
+    /// `dilation` must be strictly positive in all dimensions. Weight is
+    /// initialised with Kaiming uniform (ReLU gain); bias (if enabled) with
+    /// U(-bound, bound) where `bound = 1/sqrt(fan_in)`, `fan_in =
+    /// (in_channels/groups) * kD * kH * kW` per
+    /// `torch/nn/modules/conv.py:198-201`.
+    ///
+    /// Weight layout is `[out_channels, in_channels / groups, kD, kH, kW]`,
+    /// the PyTorch grouped-conv convention (`conv.py:171`). Argument order
+    /// `(.., dilation, groups, bias)` mirrors `Conv3d.__init__`
+    /// (`conv.py:682-691`, R-DEV-2).
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_full(
+        in_channels: usize,
+        out_channels: usize,
+        kernel_size: (usize, usize, usize),
+        stride: (usize, usize, usize),
+        padding: (usize, usize, usize),
+        dilation: (usize, usize, usize),
+        groups: usize,
         bias: bool,
     ) -> FerrotorchResult<Self> {
         if in_channels == 0 || out_channels == 0 {
@@ -2719,16 +3072,45 @@ impl<T: Float> Conv3d<T> {
                 message: "stride must be > 0 in all dimensions".into(),
             });
         }
+        if dilation.0 == 0 || dilation.1 == 0 || dilation.2 == 0 {
+            return Err(FerrotorchError::InvalidArgument {
+                message: format!(
+                    "Conv3d::new_full: dilation must be > 0 in all dimensions, got {dilation:?}"
+                ),
+            });
+        }
+        if groups == 0 {
+            return Err(FerrotorchError::InvalidArgument {
+                message: "Conv3d::new_full: groups must be > 0".into(),
+            });
+        }
+        // `torch/nn/modules/conv.py:107-110`: `in_channels % groups != 0`
+        // and `out_channels % groups != 0` each raise ValueError.
+        if in_channels % groups != 0 {
+            return Err(FerrotorchError::InvalidArgument {
+                message: format!(
+                    "Conv3d::new_full: groups={groups} must divide in_channels={in_channels}"
+                ),
+            });
+        }
+        if out_channels % groups != 0 {
+            return Err(FerrotorchError::InvalidArgument {
+                message: format!(
+                    "Conv3d::new_full: groups={groups} must divide out_channels={out_channels}"
+                ),
+            });
+        }
 
         let (kd, kh, kw) = kernel_size;
-        let mut weight = Parameter::zeros(&[out_channels, in_channels, kd, kh, kw])?;
+        // PyTorch weight layout is [C_out, C_in / groups, kD, kH, kW] (`conv.py:171`).
+        let mut weight = Parameter::zeros(&[out_channels, in_channels / groups, kd, kh, kw])?;
         kaiming_uniform(&mut weight, NonLinearity::ReLU)?;
 
         let bias_param = if bias {
             let mut b = Parameter::zeros(&[out_channels])?;
             // `torch/nn/modules/conv.py:198-201`: bias U(-bound, bound) with
-            //   `bound = 1 / sqrt(fan_in)`, `fan_in = in_channels * kD * kH * kW` for Conv3d.
-            let fan_in = in_channels * kd * kh * kw;
+            //   `bound = 1 / sqrt(fan_in)`, `fan_in = (in_channels/groups) * kD * kH * kW`.
+            let fan_in = (in_channels / groups) * kd * kh * kw;
             let bound = if fan_in > 0 {
                 1.0 / (fan_in as f64).sqrt()
             } else {
@@ -2748,9 +3130,21 @@ impl<T: Float> Conv3d<T> {
             kernel_size,
             stride,
             padding,
+            dilation,
+            groups,
             padding_mode: crate::padding::PaddingMode::Zeros,
             training: true,
         })
+    }
+
+    /// Number of channel groups (`1` is dense, `in_channels` is depthwise).
+    pub fn groups(&self) -> usize {
+        self.groups
+    }
+
+    /// Dilation `(dilD, dilH, dilW)` (`(1, 1, 1)` is the dense default).
+    pub fn dilation(&self) -> (usize, usize, usize) {
+        self.dilation
     }
 
     /// Configure the boundary handling for the spatial padding.
@@ -2785,7 +3179,10 @@ impl<T: Float> Conv3d<T> {
     /// Build a `Conv3d` from caller-supplied weight and optional bias tensors.
     ///
     /// `weight` must have shape `[out_channels, in_channels, kD, kH, kW]`.
-    /// Used by `nn::functional::conv3d`.
+    /// The resulting layer is dense (`groups = 1`, `dilation = (1, 1, 1)`) so
+    /// the constructor remains API-compatible with `nn::functional::conv3d`,
+    /// which infers `in_channels = weight.shape()[1]` and cannot recover
+    /// `groups` from the weight shape alone.
     pub fn from_parts(
         weight: Tensor<T>,
         bias: Option<Tensor<T>>,
@@ -2822,6 +3219,8 @@ impl<T: Float> Conv3d<T> {
             kernel_size,
             stride,
             padding,
+            dilation: (1, 1, 1),
+            groups: 1,
             padding_mode: crate::padding::PaddingMode::Zeros,
             training: true,
         })
@@ -2874,6 +3273,8 @@ impl<T: Float> Module<T> for Conv3d<T> {
                 kernel_size: self.kernel_size,
                 stride: self.stride,
                 padding: (0, 0, 0),
+                dilation: self.dilation,
+                groups: self.groups,
                 padding_mode: crate::padding::PaddingMode::Zeros,
                 training: self.training,
             };
@@ -2908,75 +3309,150 @@ impl<T: Float> Module<T> for Conv3d<T> {
         let (kd, kh, kw) = self.kernel_size;
         let (sd, sh, sw) = self.stride;
         let (pd, ph, pw) = self.padding;
+        let (dd, dh, dw) = self.dilation;
+        let groups = self.groups;
 
-        // Check that the kernel fits.
+        // Effective kernel extent after dilation (`ConvUtils.h:255`).
+        let eff_kd = dd * (kd - 1) + 1;
+        let eff_kh = dh * (kh - 1) + 1;
+        let eff_kw = dw * (kw - 1) + 1;
+
         let d_padded = d + 2 * pd;
         let h_padded = h + 2 * ph;
         let w_padded = w + 2 * pw;
-        if d_padded < kd || h_padded < kh || w_padded < kw {
+        if d_padded < eff_kd || h_padded < eff_kh || w_padded < eff_kw {
             return Err(FerrotorchError::InvalidArgument {
                 message: format!(
-                    "Conv3d: padded input ({d_padded}, {h_padded}, {w_padded}) is smaller than kernel ({kd}, {kh}, {kw})"
+                    "Conv3d: padded input ({d_padded}, {h_padded}, {w_padded}) is smaller than effective kernel ({eff_kd}, {eff_kh}, {eff_kw})"
                 ),
             });
         }
 
-        let d_out = (d_padded - kd) / sd + 1;
-        let h_out = (h_padded - kh) / sh + 1;
-        let w_out = (w_padded - kw) / sw + 1;
+        let d_out = (d_padded - eff_kd) / sd + 1;
+        let h_out = (h_padded - eff_kh) / sh + 1;
+        let w_out = (w_padded - eff_kw) / sw + 1;
 
         // Save the input device so we can restore it on the output.
         let input_device = input.device();
 
-        // ---- CPU path ----
+        // ---- CPU path (dense, dilated, grouped, and grouped+dilated) ----
+        // Partitions channels by `groups` exactly like Conv2d: each group's
+        // input slice [B, in_per_group, D, H, W] is convolved with its weight
+        // slice via the dilated 3-D im2col + GEMM and the outputs are stacked
+        // along the C_out axis (mirroring `Convolution.cpp:1723-1729`).
         let input_data = input.data_vec()?;
-
-        // im2col_3d: [B, C_in * kD * kH * kW, D_out * H_out * W_out]
-        let (cols, col_rows, col_cols) = im2col_3d(
-            &input_data,
-            batch,
-            c_in,
-            d,
-            h,
-            w,
-            kd,
-            kh,
-            kw,
-            sd,
-            sh,
-            sw,
-            pd,
-            ph,
-            pw,
-        );
-
-        // Reshape weight to 2D: [C_out, C_in * kD * kH * kW]
         let weight_data = self.weight.data_vec()?;
-        let weight_2d = Tensor::from_storage(
-            TensorStorage::cpu(weight_data),
-            vec![self.out_channels, col_rows],
-            false,
-        )?;
 
-        // Per-batch matmul: weight_2d @ cols_b -> [C_out, D_out * H_out * W_out]
         let zero = <T as num_traits::Zero>::zero();
+        let spatial_in = d * h * w;
         let spatial_out = d_out * h_out * w_out;
         let mut output = vec![zero; batch * self.out_channels * spatial_out];
 
-        for b in 0..batch {
-            let col_start = b * col_rows * col_cols;
-            let col_end = col_start + col_rows * col_cols;
-            let cols_b = Tensor::from_storage(
-                TensorStorage::cpu(cols[col_start..col_end].to_vec()),
-                vec![col_rows, col_cols],
+        // Per-group dimensions.
+        let in_per_group = self.in_channels / groups;
+        let out_per_group = self.out_channels / groups;
+        let group_col_rows = in_per_group * kd * kh * kw;
+        let weight_per_group_numel = out_per_group * group_col_rows;
+        let col_cols = spatial_out;
+
+        // Saved im2col columns for autograd (dense channel layout
+        // `[B, C_in * kD * kH * kW, D_out*H_out*W_out]`), so the backward
+        // accumulates grad_input uniformly across groups (like Conv2dBackward).
+        let saved_cols_rows = self.in_channels * kd * kh * kw;
+        let mut saved_cols: Vec<T> = if is_grad_enabled()
+            && (input.requires_grad()
+                || self.weight.requires_grad()
+                || self.bias.as_ref().is_some_and(|b| b.requires_grad()))
+        {
+            vec![zero; batch * saved_cols_rows * col_cols]
+        } else {
+            Vec::new()
+        };
+        let save_cols = !saved_cols.is_empty();
+        let kvol = kd * kh * kw;
+
+        for g in 0..groups {
+            // Slice the input channels for this group: [B, in_per_group, D, H, W].
+            let mut group_input = vec![zero; batch * in_per_group * spatial_in];
+            for b in 0..batch {
+                for c in 0..in_per_group {
+                    let src_c = g * in_per_group + c;
+                    let src_start = b * self.in_channels * spatial_in + src_c * spatial_in;
+                    let dst_start = b * in_per_group * spatial_in + c * spatial_in;
+                    group_input[dst_start..dst_start + spatial_in]
+                        .copy_from_slice(&input_data[src_start..src_start + spatial_in]);
+                }
+            }
+
+            let (g_cols, g_col_rows, g_col_cols) = im2col_3d_dilated(
+                &group_input,
+                batch,
+                in_per_group,
+                d,
+                h,
+                w,
+                kd,
+                kh,
+                kw,
+                sd,
+                sh,
+                sw,
+                pd,
+                ph,
+                pw,
+                dd,
+                dh,
+                dw,
+            );
+            debug_assert_eq!(g_col_rows, group_col_rows);
+            debug_assert_eq!(g_col_cols, col_cols);
+
+            // Save into the dense [C_in * kvol, col_cols] layout if needed.
+            if save_cols {
+                for b in 0..batch {
+                    for c in 0..in_per_group {
+                        let dst_c = g * in_per_group + c;
+                        for kk in 0..kvol {
+                            let src_row = c * kvol + kk;
+                            let dst_row = dst_c * kvol + kk;
+                            let src_off = b * group_col_rows * col_cols + src_row * col_cols;
+                            let dst_off = b * saved_cols_rows * col_cols + dst_row * col_cols;
+                            saved_cols[dst_off..dst_off + col_cols]
+                                .copy_from_slice(&g_cols[src_off..src_off + col_cols]);
+                        }
+                    }
+                }
+            }
+
+            // Group's slice of the weight: [out_per_group, in_per_group, kD, kH, kW]
+            // flattened to [out_per_group, group_col_rows].
+            let w_group_start = g * weight_per_group_numel;
+            let w_group_end = w_group_start + weight_per_group_numel;
+            let weight_group_2d = Tensor::from_storage(
+                TensorStorage::cpu(weight_data[w_group_start..w_group_end].to_vec()),
+                vec![out_per_group, group_col_rows],
                 false,
             )?;
 
-            let out_b = mm(&weight_2d, &cols_b)?;
-            let out_data = out_b.data()?;
-            let out_start = b * self.out_channels * spatial_out;
-            output[out_start..out_start + self.out_channels * spatial_out]
-                .copy_from_slice(out_data);
+            for b in 0..batch {
+                let col_start = b * group_col_rows * col_cols;
+                let col_end = col_start + group_col_rows * col_cols;
+                let cols_b = Tensor::from_storage(
+                    TensorStorage::cpu(g_cols[col_start..col_end].to_vec()),
+                    vec![group_col_rows, col_cols],
+                    false,
+                )?;
+
+                let out_b = mm(&weight_group_2d, &cols_b)?;
+                let out_data = out_b.data()?;
+                for oc in 0..out_per_group {
+                    let dst_c = g * out_per_group + oc;
+                    let dst_start = b * self.out_channels * spatial_out + dst_c * spatial_out;
+                    let src_start = oc * spatial_out;
+                    output[dst_start..dst_start + spatial_out]
+                        .copy_from_slice(&out_data[src_start..src_start + spatial_out]);
+                }
+            }
         }
 
         // Add bias if present: broadcast [C_out] over [B, C_out, D_out, H_out, W_out].
@@ -2999,11 +3475,7 @@ impl<T: Float> Module<T> for Conv3d<T> {
         )?;
 
         // Attach backward if gradients are enabled and any input/param requires grad.
-        if is_grad_enabled()
-            && (input.requires_grad()
-                || self.weight.requires_grad()
-                || self.bias.as_ref().is_some_and(|b| b.requires_grad()))
-        {
+        if save_cols {
             let grad_fn = Arc::new(Conv3dBackward {
                 input: input.clone(),
                 weight: self.weight.tensor().clone(),
@@ -3013,8 +3485,10 @@ impl<T: Float> Module<T> for Conv3d<T> {
                 kernel_size: self.kernel_size,
                 stride: self.stride,
                 padding: self.padding,
-                cols,
-                col_rows,
+                dilation: self.dilation,
+                groups: self.groups,
+                cols: saved_cols,
+                col_rows: saved_cols_rows,
                 col_cols,
                 d_out,
                 h_out,
@@ -3076,9 +3550,14 @@ impl<T: Float> Module<T> for Conv3d<T> {
 ///
 /// Saved tensors:
 /// - `input`: the original 5-D input
-/// - `weight`: the 5-D kernel
+/// - `weight`: the 5-D kernel `[C_out, C_in / groups, kD, kH, kW]`
 /// - `bias`: optional 1-D bias
-/// - `cols`: the im2col_3d columns from the forward pass (avoids recomputation)
+/// - `cols`: the dilated im2col_3d columns with **dense channel layout**
+///   `[B, C_in * kD * kH * kW, D_out*H_out*W_out]` (saved regardless of
+///   `groups`, so the backward takes the per-group slice at gradient time,
+///   mirroring `Conv2dBackward`).
+/// - `dilation`, `groups`: descriptors to reconstruct the per-group +
+///   dilated math.
 #[derive(Debug)]
 struct Conv3dBackward<T: Float> {
     input: Tensor<T>,
@@ -3089,6 +3568,8 @@ struct Conv3dBackward<T: Float> {
     kernel_size: (usize, usize, usize),
     stride: (usize, usize, usize),
     padding: (usize, usize, usize),
+    dilation: (usize, usize, usize),
+    groups: usize,
     cols: Vec<T>,
     col_rows: usize,
     col_cols: usize,
@@ -3100,6 +3581,9 @@ struct Conv3dBackward<T: Float> {
 impl<T: Float> GradFn<T> for Conv3dBackward<T> {
     fn backward(&self, grad_output: &Tensor<T>) -> FerrotorchResult<Vec<Option<Tensor<T>>>> {
         // grad_output shape: [B, C_out, D_out, H_out, W_out]
+        let input_device = self.input.device();
+        let weight_device = self.weight.device();
+        let bias_device = self.bias.as_ref().map(|b| b.device());
         let go_data = grad_output.data_vec()?;
         let batch = self.input.shape()[0];
         let d = self.input.shape()[2];
@@ -3108,57 +3592,90 @@ impl<T: Float> GradFn<T> for Conv3dBackward<T> {
         let (kd, kh, kw) = self.kernel_size;
         let (sd, sh, sw) = self.stride;
         let (pd, ph, pw) = self.padding;
+        let (dd, dh, dw) = self.dilation;
+        let groups = self.groups;
+        let in_per_group = self.in_channels / groups;
+        let out_per_group = self.out_channels / groups;
+        let kvol = kd * kh * kw;
+        let group_col_rows = in_per_group * kvol;
+        let spatial_in = d * h * w;
         let spatial_out = self.d_out * self.h_out * self.w_out;
+        let zero = <T as num_traits::Zero>::zero();
 
         // --- grad_weight ---
-        // For each batch element:
-        //   grad_output_b: [C_out, D_out * H_out * W_out]
-        //   cols_b:        [col_rows, col_cols]
-        //   grad_weight += grad_output_b @ cols_b^T
+        // Per group `g`: gw_g += grad_output_b_g @ cols_b_g^T, stacked along
+        // the C_out axis to recover [C_out, C_in/G, kD, kH, kW]. Mirrors
+        // Conv2dBackward.
         let grad_weight = if self.weight.requires_grad() {
-            let zero = <T as num_traits::Zero>::zero();
-            let weight_numel = self.out_channels * self.col_rows;
+            let weight_numel = self.out_channels * group_col_rows;
             let mut gw_accum = vec![zero; weight_numel];
+            let weight_per_group_numel = out_per_group * group_col_rows;
 
-            for b in 0..batch {
-                let go_start = b * self.out_channels * spatial_out;
-                let go_end = go_start + self.out_channels * spatial_out;
-                let go_b = Tensor::from_storage(
-                    TensorStorage::cpu(go_data[go_start..go_end].to_vec()),
-                    vec![self.out_channels, spatial_out],
-                    false,
-                )?;
+            for g in 0..groups {
+                for b in 0..batch {
+                    // Slice grad_output for this group: [out_per_group, spatial_out].
+                    let mut go_g = vec![zero; out_per_group * spatial_out];
+                    for oc in 0..out_per_group {
+                        let src_c = g * out_per_group + oc;
+                        let src_start = b * self.out_channels * spatial_out + src_c * spatial_out;
+                        let dst_start = oc * spatial_out;
+                        go_g[dst_start..dst_start + spatial_out]
+                            .copy_from_slice(&go_data[src_start..src_start + spatial_out]);
+                    }
+                    let go_b_g = Tensor::from_storage(
+                        TensorStorage::cpu(go_g),
+                        vec![out_per_group, spatial_out],
+                        false,
+                    )?;
 
-                let col_start = b * self.col_rows * self.col_cols;
-                let col_end = col_start + self.col_rows * self.col_cols;
-                let cols_b = Tensor::from_storage(
-                    TensorStorage::cpu(self.cols[col_start..col_end].to_vec()),
-                    vec![self.col_rows, self.col_cols],
-                    false,
-                )?;
+                    // Slice cols for this group: [in_per_group * kvol, col_cols].
+                    let mut cols_g = vec![zero; group_col_rows * self.col_cols];
+                    for c in 0..in_per_group {
+                        let src_c = g * in_per_group + c;
+                        for kk in 0..kvol {
+                            let src_row = src_c * kvol + kk;
+                            let dst_row = c * kvol + kk;
+                            let src_off =
+                                b * self.col_rows * self.col_cols + src_row * self.col_cols;
+                            let dst_off = dst_row * self.col_cols;
+                            cols_g[dst_off..dst_off + self.col_cols]
+                                .copy_from_slice(&self.cols[src_off..src_off + self.col_cols]);
+                        }
+                    }
+                    let cols_b_g = Tensor::from_storage(
+                        TensorStorage::cpu(cols_g),
+                        vec![group_col_rows, self.col_cols],
+                        false,
+                    )?;
 
-                let cols_bt = transpose(&cols_b)?;
-                let gw_b = mm(&go_b, &cols_bt)?;
-                let gw_data = gw_b.data()?;
+                    let cols_bt = transpose(&cols_b_g)?;
+                    let gw_b = mm(&go_b_g, &cols_bt)?;
+                    let gw_data = gw_b.data()?;
 
-                for i in 0..weight_numel {
-                    gw_accum[i] += gw_data[i];
+                    let dst_off = g * weight_per_group_numel;
+                    for i in 0..weight_per_group_numel {
+                        gw_accum[dst_off + i] += gw_data[i];
+                    }
                 }
             }
 
-            Some(Tensor::from_storage(
-                TensorStorage::cpu(gw_accum),
-                vec![self.out_channels, self.in_channels, kd, kh, kw],
-                false,
-            )?)
+            Some(
+                Tensor::from_storage(
+                    TensorStorage::cpu(gw_accum),
+                    vec![self.out_channels, in_per_group, kd, kh, kw],
+                    false,
+                )?
+                .to(weight_device)?,
+            )
         } else {
             None
         };
 
         // --- grad_bias ---
+        // Sum grad_output over batch + spatial. Bias is per-output-channel,
+        // identical for any groups setting.
         let grad_bias = match &self.bias {
             Some(b) if b.requires_grad() => {
-                let zero = <T as num_traits::Zero>::zero();
                 let mut gb = vec![zero; self.out_channels];
                 for batch_idx in 0..batch {
                     for c in 0..self.out_channels {
@@ -3168,72 +3685,102 @@ impl<T: Float> GradFn<T> for Conv3dBackward<T> {
                         }
                     }
                 }
-                Some(Tensor::from_storage(
-                    TensorStorage::cpu(gb),
-                    vec![self.out_channels],
-                    false,
-                )?)
+                let target_dev = bias_device.unwrap_or(input_device);
+                Some(
+                    Tensor::from_storage(TensorStorage::cpu(gb), vec![self.out_channels], false)?
+                        .to(target_dev)?,
+                )
             }
             _ => None,
         };
 
         // --- grad_input ---
+        // Per group `g`: weight_g_2d^T @ grad_output_b_g -> [in_per_group *
+        // kvol, spatial_out], then col2im_3d_dilated -> [in_per_group, D, H, W]
+        // placed into the right in-channel slice of [B, C_in, D, H, W].
+        // Mirrors Conv2dBackward.
         let grad_input = if self.input.requires_grad() {
             let weight_data = self.weight.data_vec()?;
-            let weight_2d = Tensor::from_storage(
-                TensorStorage::cpu(weight_data),
-                vec![self.out_channels, self.col_rows],
-                false,
-            )?;
-            let weight_2d_t = transpose(&weight_2d)?;
+            let mut grad_input_data = vec![zero; batch * self.in_channels * spatial_in];
+            let weight_per_group_numel = out_per_group * group_col_rows;
 
-            let zero = <T as num_traits::Zero>::zero();
-            let mut grad_cols = vec![zero; batch * self.col_rows * self.col_cols];
-
-            for b in 0..batch {
-                let go_start = b * self.out_channels * spatial_out;
-                let go_end = go_start + self.out_channels * spatial_out;
-                let go_b = Tensor::from_storage(
-                    TensorStorage::cpu(go_data[go_start..go_end].to_vec()),
-                    vec![self.out_channels, spatial_out],
+            for g in 0..groups {
+                let w_off = g * weight_per_group_numel;
+                let weight_g_2d = Tensor::from_storage(
+                    TensorStorage::cpu(weight_data[w_off..w_off + weight_per_group_numel].to_vec()),
+                    vec![out_per_group, group_col_rows],
                     false,
                 )?;
+                let weight_g_t = transpose(&weight_g_2d)?;
 
-                let gc_b = mm(&weight_2d_t, &go_b)?;
-                let gc_data = gc_b.data()?;
+                let mut grad_cols_g = vec![zero; batch * group_col_rows * self.col_cols];
+                for b in 0..batch {
+                    let mut go_g = vec![zero; out_per_group * spatial_out];
+                    for oc in 0..out_per_group {
+                        let src_c = g * out_per_group + oc;
+                        let src_start = b * self.out_channels * spatial_out + src_c * spatial_out;
+                        let dst_start = oc * spatial_out;
+                        go_g[dst_start..dst_start + spatial_out]
+                            .copy_from_slice(&go_data[src_start..src_start + spatial_out]);
+                    }
+                    let go_b_g = Tensor::from_storage(
+                        TensorStorage::cpu(go_g),
+                        vec![out_per_group, spatial_out],
+                        false,
+                    )?;
 
-                let gc_start = b * self.col_rows * self.col_cols;
-                grad_cols[gc_start..gc_start + self.col_rows * self.col_cols]
-                    .copy_from_slice(gc_data);
+                    let gc_b = mm(&weight_g_t, &go_b_g)?;
+                    let gc_data = gc_b.data()?;
+                    let gc_start = b * group_col_rows * self.col_cols;
+                    grad_cols_g[gc_start..gc_start + group_col_rows * self.col_cols]
+                        .copy_from_slice(gc_data);
+                }
+
+                // col2im_3d_dilated scatters group's columns back to
+                // [B, in_per_group, D, H, W] honouring the dilation factors.
+                let gi_g = col2im_3d_dilated(
+                    &grad_cols_g,
+                    batch,
+                    in_per_group,
+                    d,
+                    h,
+                    w,
+                    kd,
+                    kh,
+                    kw,
+                    sd,
+                    sh,
+                    sw,
+                    pd,
+                    ph,
+                    pw,
+                    dd,
+                    dh,
+                    dw,
+                    self.d_out,
+                    self.h_out,
+                    self.w_out,
+                );
+
+                for b in 0..batch {
+                    for c in 0..in_per_group {
+                        let dst_c = g * in_per_group + c;
+                        let dst_start = b * self.in_channels * spatial_in + dst_c * spatial_in;
+                        let src_start = b * in_per_group * spatial_in + c * spatial_in;
+                        grad_input_data[dst_start..dst_start + spatial_in]
+                            .copy_from_slice(&gi_g[src_start..src_start + spatial_in]);
+                    }
+                }
             }
 
-            // col2im_3d to scatter back to [B, C_in, D, H, W]
-            let gi = col2im_3d(
-                &grad_cols,
-                batch,
-                self.in_channels,
-                d,
-                h,
-                w,
-                kd,
-                kh,
-                kw,
-                sd,
-                sh,
-                sw,
-                pd,
-                ph,
-                pw,
-                self.d_out,
-                self.h_out,
-                self.w_out,
-            );
-
-            Some(Tensor::from_storage(
-                TensorStorage::cpu(gi),
-                self.input.shape().to_vec(),
-                false,
-            )?)
+            Some(
+                Tensor::from_storage(
+                    TensorStorage::cpu(grad_input_data),
+                    self.input.shape().to_vec(),
+                    false,
+                )?
+                .to(input_device)?,
+            )
         } else {
             None
         };
@@ -5134,6 +5681,8 @@ mod tests {
             kernel_size: 1,
             stride: 1,
             padding: 0,
+            dilation: 1,
+            groups: 1,
             padding_mode: crate::padding::PaddingMode::Zeros,
             training: false,
         };
@@ -5166,6 +5715,8 @@ mod tests {
             kernel_size: 3,
             stride: 1,
             padding: 0,
+            dilation: 1,
+            groups: 1,
             padding_mode: crate::padding::PaddingMode::Zeros,
             training: false,
         };
@@ -5190,6 +5741,8 @@ mod tests {
             kernel_size: 1,
             stride: 1,
             padding: 0,
+            dilation: 1,
+            groups: 1,
             padding_mode: crate::padding::PaddingMode::Zeros,
             training: false,
         };
@@ -5557,6 +6110,8 @@ mod tests {
             kernel_size: (1, 1, 1),
             stride: (1, 1, 1),
             padding: (0, 0, 0),
+            dilation: (1, 1, 1),
+            groups: 1,
             padding_mode: crate::padding::PaddingMode::Zeros,
             training: false,
         };
@@ -5585,6 +6140,8 @@ mod tests {
             kernel_size: (3, 3, 3),
             stride: (1, 1, 1),
             padding: (0, 0, 0),
+            dilation: (1, 1, 1),
+            groups: 1,
             padding_mode: crate::padding::PaddingMode::Zeros,
             training: false,
         };
@@ -5609,6 +6166,8 @@ mod tests {
             kernel_size: (1, 1, 1),
             stride: (1, 1, 1),
             padding: (0, 0, 0),
+            dilation: (1, 1, 1),
+            groups: 1,
             padding_mode: crate::padding::PaddingMode::Zeros,
             training: false,
         };
@@ -5636,6 +6195,8 @@ mod tests {
             kernel_size: (3, 3, 3),
             stride: (1, 1, 1),
             padding: (0, 0, 0),
+            dilation: (1, 1, 1),
+            groups: 1,
             padding_mode: crate::padding::PaddingMode::Zeros,
             training: false,
         };
@@ -6177,6 +6738,8 @@ mod tests {
             kernel_size: kernel,
             stride: 1,
             padding,
+            dilation: 1,
+            groups: 1,
             padding_mode: mode,
             training: false,
         }
@@ -6286,6 +6849,215 @@ mod tests {
         assert_close(xg.data().unwrap(), &[6.0, 6.0, 6.0, 6.0, 6.0], 1e-4);
     }
 
+    // -----------------------------------------------------------------------
+    // Conv1d groups + dilation (closes #1600) — oracle: live torch 2.11.0
+    // -----------------------------------------------------------------------
+
+    /// Build a grouped/dilated Conv1d through the production `new_full`
+    /// constructor, then overwrite the weight/bias with deterministic
+    /// caller-supplied tensors via `set_weight` / `set_data`. The weight must
+    /// be `[out, in/groups, k]` (the grouped-conv layout, `conv.py:171`).
+    fn conv1d_full_fixed(
+        in_c: usize,
+        out_c: usize,
+        k: usize,
+        dilation: usize,
+        groups: usize,
+        weight: &[f32],
+        bias: Option<&[f32]>,
+    ) -> Conv1d<f32> {
+        let mut conv =
+            Conv1d::<f32>::new_full(in_c, out_c, k, 1, 0, dilation, groups, bias.is_some())
+                .unwrap();
+        // Overwrite the Kaiming-initialised weight with the deterministic
+        // tensor (direct field write — tests live in the same module).
+        conv.weight = Parameter::from_slice(weight, &[out_c, in_c / groups, k]).unwrap();
+        if let Some(bvals) = bias {
+            conv.bias = Some(Parameter::from_slice(bvals, &[out_c]).unwrap());
+        }
+        conv
+    }
+
+    /// Grouped Conv1d, groups=2. Forward + grad_x + grad_w + grad_b all match
+    /// the live torch 2.11 oracle (`F.conv1d(x, w, b, groups=2)`,
+    /// `out.sum().backward()`). in=4 out=4 k=2 groups=2.
+    #[test]
+    fn test_conv1d_groups2_forward_and_backward_matches_torch() {
+        // weight [4, 2, 2] = arange(1..=16) * 0.1; bias [0.5,-0.5,0.25,-0.25].
+        let weight: Vec<f32> = (1..=16).map(|i| i as f32 * 0.1).collect();
+        let bias = [0.5f32, -0.5, 0.25, -0.25];
+        let conv = conv1d_full_fixed(4, 4, 2, 1, 2, &weight, Some(&bias));
+
+        // x [1, 4, 5] = arange(1..=20).
+        let x_data: Vec<f32> = (1..=20).map(|i| i as f32).collect();
+        let x = leaf(&x_data, &[1, 4, 5]);
+        let y = conv.forward(&x).unwrap();
+        assert_eq!(y.shape(), &[1, 4, 4]);
+        // torch A_fwd:
+        assert_close(
+            y.data().unwrap(),
+            &[
+                5.6, 6.6, 7.6, 8.6, 11.0, 13.6, 16.2, 18.8, 60.15, 64.35, 68.55, 72.75, 82.05,
+                87.85, 93.65, 99.45,
+            ],
+            1e-3,
+        );
+
+        // out.sum().backward() => grad_output = ones.
+        let grad_output = t(&[1.0f32; 16], &[1, 4, 4]);
+        let grads = conv
+            .forward(&x)
+            .unwrap()
+            .grad_fn()
+            .unwrap()
+            .backward(&grad_output)
+            .unwrap();
+        // grad_input (torch A_gx):
+        assert_close(
+            grads[0].as_ref().unwrap().data().unwrap(),
+            &[
+                0.6, 1.4, 1.4, 1.4, 0.8, 1.0, 2.2, 2.2, 2.2, 1.2, 2.2, 4.6, 4.6, 4.6, 2.4, 2.6,
+                5.4, 5.4, 5.4, 2.8,
+            ],
+            1e-4,
+        );
+        // grad_weight (torch A_gw) — shape [4, 2, 2]:
+        assert_eq!(grads[1].as_ref().unwrap().shape(), &[4, 2, 2]);
+        assert_close(
+            grads[1].as_ref().unwrap().data().unwrap(),
+            &[
+                10.0, 14.0, 30.0, 34.0, 10.0, 14.0, 30.0, 34.0, 50.0, 54.0, 70.0, 74.0, 50.0, 54.0,
+                70.0, 74.0,
+            ],
+            1e-4,
+        );
+        // grad_bias (torch A_gb):
+        assert_close(
+            grads[2].as_ref().unwrap().data().unwrap(),
+            &[4.0, 4.0, 4.0, 4.0],
+            1e-4,
+        );
+    }
+
+    /// Depthwise Conv1d, groups=3 (groups == in_channels), no bias. Forward +
+    /// grad_x + grad_w match the live torch 2.11 oracle. in=3 out=3 k=2.
+    #[test]
+    fn test_conv1d_groups3_depthwise_forward_and_backward_matches_torch() {
+        // weight [3, 1, 2] = arange(1..=6) * 0.5.
+        let weight: Vec<f32> = (1..=6).map(|i| i as f32 * 0.5).collect();
+        let conv = conv1d_full_fixed(3, 3, 2, 1, 3, &weight, None);
+
+        // x [1, 3, 6] = arange(1..=18).
+        let x_data: Vec<f32> = (1..=18).map(|i| i as f32).collect();
+        let x = leaf(&x_data, &[1, 3, 6]);
+        let y = conv.forward(&x).unwrap();
+        assert_eq!(y.shape(), &[1, 3, 5]);
+        // torch B_fwd:
+        assert_close(
+            y.data().unwrap(),
+            &[
+                2.5, 4.0, 5.5, 7.0, 8.5, 26.5, 30.0, 33.5, 37.0, 40.5, 74.5, 80.0, 85.5, 91.0, 96.5,
+            ],
+            1e-3,
+        );
+
+        let grad_output = t(&[1.0f32; 15], &[1, 3, 5]);
+        let grads = conv
+            .forward(&x)
+            .unwrap()
+            .grad_fn()
+            .unwrap()
+            .backward(&grad_output)
+            .unwrap();
+        // grad_input (torch B_gx):
+        assert_close(
+            grads[0].as_ref().unwrap().data().unwrap(),
+            &[
+                0.5, 1.5, 1.5, 1.5, 1.5, 1.0, 1.5, 3.5, 3.5, 3.5, 3.5, 2.0, 2.5, 5.5, 5.5, 5.5,
+                5.5, 3.0,
+            ],
+            1e-4,
+        );
+        // grad_weight (torch B_gw) — shape [3, 1, 2]:
+        assert_eq!(grads[1].as_ref().unwrap().shape(), &[3, 1, 2]);
+        assert_close(
+            grads[1].as_ref().unwrap().data().unwrap(),
+            &[15.0, 20.0, 45.0, 50.0, 75.0, 80.0],
+            1e-4,
+        );
+    }
+
+    /// Dilated Conv1d, dilation=2, groups=1. Forward + grad_x + grad_w +
+    /// grad_b match the live torch 2.11 oracle. in=2 out=2 k=3 dilation=2 =>
+    /// eff_k=5, L=7 -> L_out=3.
+    #[test]
+    fn test_conv1d_dilation2_forward_and_backward_matches_torch() {
+        // weight [2, 2, 3] = arange(1..=12) * 0.1; bias [1.0, -1.0].
+        let weight: Vec<f32> = (1..=12).map(|i| i as f32 * 0.1).collect();
+        let bias = [1.0f32, -1.0];
+        let conv = conv1d_full_fixed(2, 2, 3, 2, 1, &weight, Some(&bias));
+
+        // x [1, 2, 7] = arange(1..=14).
+        let x_data: Vec<f32> = (1..=14).map(|i| i as f32).collect();
+        let x = leaf(&x_data, &[1, 2, 7]);
+        let y = conv.forward(&x).unwrap();
+        assert_eq!(y.shape(), &[1, 2, 3]);
+        // torch C_fwd:
+        assert_close(
+            y.data().unwrap(),
+            &[18.6, 20.7, 22.8, 40.0, 45.7, 51.4],
+            1e-3,
+        );
+
+        let grad_output = t(&[1.0f32; 6], &[1, 2, 3]);
+        let grads = conv
+            .forward(&x)
+            .unwrap()
+            .grad_fn()
+            .unwrap()
+            .backward(&grad_output)
+            .unwrap();
+        // grad_input (torch C_gx):
+        assert_close(
+            grads[0].as_ref().unwrap().data().unwrap(),
+            &[
+                0.8, 0.8, 1.8, 1.0, 2.2, 1.2, 1.2, 1.4, 1.4, 3.0, 1.6, 3.4, 1.8, 1.8,
+            ],
+            1e-4,
+        );
+        // grad_weight (torch C_gw) — shape [2, 2, 3]:
+        assert_eq!(grads[1].as_ref().unwrap().shape(), &[2, 2, 3]);
+        assert_close(
+            grads[1].as_ref().unwrap().data().unwrap(),
+            &[
+                6.0, 12.0, 18.0, 27.0, 33.0, 39.0, 6.0, 12.0, 18.0, 27.0, 33.0, 39.0,
+            ],
+            1e-4,
+        );
+        // grad_bias (torch C_gb):
+        assert_close(
+            grads[2].as_ref().unwrap().data().unwrap(),
+            &[3.0, 3.0],
+            1e-4,
+        );
+    }
+
+    /// `Conv1d::new_full` rejects `groups` that does not divide channels,
+    /// matching `torch.nn.Conv1d`'s `ValueError` (`conv.py:107-110`).
+    #[test]
+    fn test_conv1d_groups_must_divide_channels() {
+        // in_channels=3 not divisible by groups=2.
+        assert!(Conv1d::<f32>::new_full(3, 4, 2, 1, 0, 1, 2, true).is_err());
+        // out_channels=5 not divisible by groups=2 (in divisible).
+        assert!(Conv1d::<f32>::new_full(4, 5, 2, 1, 0, 1, 2, true).is_err());
+        // zero groups rejected.
+        assert!(Conv1d::<f32>::new_full(4, 4, 2, 1, 0, 1, 0, true).is_err());
+        // zero dilation rejected.
+        assert!(Conv1d::<f32>::new_full(4, 4, 2, 1, 0, 0, 2, true).is_err());
+        // valid grouped config accepted.
+        assert!(Conv1d::<f32>::new_full(4, 4, 2, 1, 0, 1, 2, true).is_ok());
+    }
+
     /// Build a Conv3d with explicit weight/bias for deterministic oracle parity.
     fn conv3d_fixed(
         weight: &[f32],
@@ -6305,6 +7077,8 @@ mod tests {
             kernel_size: kernel,
             stride: (1, 1, 1),
             padding,
+            dilation: (1, 1, 1),
+            groups: 1,
             padding_mode: mode,
             training: false,
         }
@@ -6412,6 +7186,164 @@ mod tests {
             xg.data().unwrap(),
             &[90.0, 99.0, 108.0, 117.0, 126.0, 135.0, 144.0, 153.0],
             1e-3,
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Conv3d groups + dilation (closes #1601) — oracle: live torch 2.11.0
+    // -----------------------------------------------------------------------
+
+    /// Grouped + dilated Conv3d, groups=2, dilation=2. Forward + grad_x +
+    /// grad_w + grad_b match the live torch 2.11 oracle. in=2 out=2
+    /// k=(2,2,2) groups=2 dilation=(2,2,2) over a 4x4x4 volume => eff_k=3,
+    /// out spatial = 2x2x2.
+    #[test]
+    fn test_conv3d_groups2_dilation2_forward_and_backward_matches_torch() {
+        // weight [2, 1, 2, 2, 2] = arange(1..=16) * 0.01; bias [0.1, -0.1].
+        let weight: Vec<f32> = (1..=16).map(|i| i as f32 * 0.01).collect();
+        let bias = [0.1f32, -0.1];
+        let mut conv =
+            Conv3d::<f32>::new_full(2, 2, (2, 2, 2), (1, 1, 1), (0, 0, 0), (2, 2, 2), 2, true)
+                .unwrap();
+        conv.weight = Parameter::from_slice(&weight, &[2, 1, 2, 2, 2]).unwrap();
+        conv.bias = Some(Parameter::from_slice(&bias, &[2]).unwrap());
+
+        // x [1, 2, 4, 4, 4] = arange(1..=128).
+        let x_data: Vec<f32> = (1..=128).map(|i| i as f32).collect();
+        let x = leaf(&x_data, &[1, 2, 4, 4, 4]);
+        let y = conv.forward(&x).unwrap();
+        assert_eq!(y.shape(), &[1, 2, 2, 2, 2]);
+        // torch D_fwd:
+        assert_close(
+            y.data().unwrap(),
+            &[
+                10.94, 11.3, 12.38, 12.74, 16.7, 17.06, 18.14, 18.5, 88.82, 89.82, 92.82, 93.82,
+                104.82, 105.82, 108.82, 109.82,
+            ],
+            1e-3,
+        );
+
+        let grad_output = t(&[1.0f32; 16], &[1, 2, 2, 2, 2]);
+        let grads = conv
+            .forward(&x)
+            .unwrap()
+            .grad_fn()
+            .unwrap()
+            .backward(&grad_output)
+            .unwrap();
+        // grad_input (torch D_gx) — full 128 elements:
+        #[rustfmt::skip]
+        let d_gx: [f32; 128] = [
+            0.01, 0.01, 0.02, 0.02, 0.01, 0.01, 0.02, 0.02, 0.03, 0.03, 0.04, 0.04, 0.03, 0.03,
+            0.04, 0.04, 0.01, 0.01, 0.02, 0.02, 0.01, 0.01, 0.02, 0.02, 0.03, 0.03, 0.04, 0.04,
+            0.03, 0.03, 0.04, 0.04, 0.05, 0.05, 0.06, 0.06, 0.05, 0.05, 0.06, 0.06, 0.07, 0.07,
+            0.08, 0.08, 0.07, 0.07, 0.08, 0.08, 0.05, 0.05, 0.06, 0.06, 0.05, 0.05, 0.06, 0.06,
+            0.07, 0.07, 0.08, 0.08, 0.07, 0.07, 0.08, 0.08, 0.09, 0.09, 0.1, 0.1, 0.09, 0.09, 0.1,
+            0.1, 0.11, 0.11, 0.12, 0.12, 0.11, 0.11, 0.12, 0.12, 0.09, 0.09, 0.1, 0.1, 0.09, 0.09,
+            0.1, 0.1, 0.11, 0.11, 0.12, 0.12, 0.11, 0.11, 0.12, 0.12, 0.13, 0.13, 0.14, 0.14, 0.13,
+            0.13, 0.14, 0.14, 0.15, 0.15, 0.16, 0.16, 0.15, 0.15, 0.16, 0.16, 0.13, 0.13, 0.14,
+            0.14, 0.13, 0.13, 0.14, 0.14, 0.15, 0.15, 0.16, 0.16, 0.15, 0.15, 0.16, 0.16,
+        ];
+        assert_close(grads[0].as_ref().unwrap().data().unwrap(), &d_gx, 1e-4);
+        // grad_weight (torch D_gw) — shape [2, 1, 2, 2, 2]:
+        assert_eq!(grads[1].as_ref().unwrap().shape(), &[2, 1, 2, 2, 2]);
+        assert_close(
+            grads[1].as_ref().unwrap().data().unwrap(),
+            &[
+                92.0, 108.0, 156.0, 172.0, 348.0, 364.0, 412.0, 428.0, 604.0, 620.0, 668.0, 684.0,
+                860.0, 876.0, 924.0, 940.0,
+            ],
+            1e-3,
+        );
+        // grad_bias (torch D_gb):
+        assert_close(
+            grads[2].as_ref().unwrap().data().unwrap(),
+            &[8.0, 8.0],
+            1e-4,
+        );
+    }
+
+    /// Grouped Conv3d (groups=2, dilation=1) sanity: a 1x1x1 grouped conv is
+    /// a per-group channel mix. Forward + grad_x + grad_w match the live
+    /// torch 2.11 oracle. in=2 out=4 k=(1,1,1) groups=2.
+    #[test]
+    fn test_conv3d_groups2_forward_and_backward_matches_torch() {
+        // weight [4, 1, 1, 1, 1] = [1, 2, 3, 4], no bias.
+        let weight = [1.0f32, 2.0, 3.0, 4.0];
+        let mut conv =
+            Conv3d::<f32>::new_full(2, 4, (1, 1, 1), (1, 1, 1), (0, 0, 0), (1, 1, 1), 2, false)
+                .unwrap();
+        conv.weight = Parameter::from_slice(&weight, &[4, 1, 1, 1, 1]).unwrap();
+
+        // x [1, 2, 2, 2, 2] = arange(1..=16).
+        let x_data: Vec<f32> = (1..=16).map(|i| i as f32).collect();
+        let x = leaf(&x_data, &[1, 2, 2, 2, 2]);
+        let y = conv.forward(&x).unwrap();
+        assert_eq!(y.shape(), &[1, 4, 2, 2, 2]);
+        // torch E_fwd:
+        assert_close(
+            y.data().unwrap(),
+            &[
+                1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 2.0, 4.0, 6.0, 8.0, 10.0, 12.0, 14.0, 16.0,
+                27.0, 30.0, 33.0, 36.0, 39.0, 42.0, 45.0, 48.0, 36.0, 40.0, 44.0, 48.0, 52.0, 56.0,
+                60.0, 64.0,
+            ],
+            1e-3,
+        );
+
+        let grad_output = t(&[1.0f32; 32], &[1, 4, 2, 2, 2]);
+        let grads = conv
+            .forward(&x)
+            .unwrap()
+            .grad_fn()
+            .unwrap()
+            .backward(&grad_output)
+            .unwrap();
+        // grad_input (torch E_gx):
+        assert_close(
+            grads[0].as_ref().unwrap().data().unwrap(),
+            &[
+                3.0, 3.0, 3.0, 3.0, 3.0, 3.0, 3.0, 3.0, 7.0, 7.0, 7.0, 7.0, 7.0, 7.0, 7.0, 7.0,
+            ],
+            1e-4,
+        );
+        // grad_weight (torch E_gw) — shape [4, 1, 1, 1, 1]:
+        assert_eq!(grads[1].as_ref().unwrap().shape(), &[4, 1, 1, 1, 1]);
+        assert_close(
+            grads[1].as_ref().unwrap().data().unwrap(),
+            &[36.0, 36.0, 100.0, 100.0],
+            1e-4,
+        );
+    }
+
+    /// `Conv3d::new_full` rejects `groups` that does not divide channels,
+    /// matching `torch.nn.Conv3d`'s `ValueError` (`conv.py:107-110`).
+    #[test]
+    fn test_conv3d_groups_must_divide_channels() {
+        // in_channels=3 not divisible by groups=2.
+        assert!(
+            Conv3d::<f32>::new_full(3, 4, (2, 2, 2), (1, 1, 1), (0, 0, 0), (1, 1, 1), 2, true)
+                .is_err()
+        );
+        // out_channels=5 not divisible by groups=2.
+        assert!(
+            Conv3d::<f32>::new_full(4, 5, (2, 2, 2), (1, 1, 1), (0, 0, 0), (1, 1, 1), 2, true)
+                .is_err()
+        );
+        // zero groups rejected.
+        assert!(
+            Conv3d::<f32>::new_full(4, 4, (2, 2, 2), (1, 1, 1), (0, 0, 0), (1, 1, 1), 0, true)
+                .is_err()
+        );
+        // zero dilation rejected.
+        assert!(
+            Conv3d::<f32>::new_full(4, 4, (2, 2, 2), (1, 1, 1), (0, 0, 0), (0, 1, 1), 2, true)
+                .is_err()
+        );
+        // valid grouped+dilated config accepted.
+        assert!(
+            Conv3d::<f32>::new_full(4, 4, (2, 2, 2), (1, 1, 1), (0, 0, 0), (2, 2, 2), 2, true)
+                .is_ok()
         );
     }
 

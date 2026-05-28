@@ -18,7 +18,10 @@ mirroring `torch.nn.{Conv,ConvTranspose}{1,2,3}d` at
 `torch/nn/modules/conv.py`. Forward uses the im2col + matmul
 algorithm on CPU and dispatches to `ferrotorch_gpu::conv2d_f32` for
 f32 CUDA tensors. Supports `stride`, `padding`, `dilation`, and
-`groups` for the forward layers (`Conv*d`); the transposed layers
+`groups` for ALL THREE forward layers — `Conv1d`, `Conv2d`, `Conv3d`
+(grouped + dilated CPU forward AND backward; #1600 conv1d / #1601
+conv3d closed the per-group channel partition + dilated im2col that
+previously left those two dense-only); the transposed layers
 support `stride`, `padding`, and `output_padding`. The `padding_mode`
 kwarg from upstream IS implemented (#1443): `Conv{1,2,3}d` honor
 `reflect`/`replicate`/`circular` (forward + backward, autograd-aware
@@ -92,12 +95,18 @@ other modes with the upstream `ValueError`.
   are wired (#1441) and reach 0-failed: `dispatch_conv::<D>` in
   `tools/parity-sweep/runner/src/main.rs`. conv2d routes through
   `Conv2d::new_full` + `Parameter::set_data` so the production grouped +
-  dilated CPU forward runs (groups / dilation / bias execute). conv1d /
-  conv3d are dense-only in production (the structs carry no
-  `groups`/`dilation` fields), so grouped/dilated samples are documented
-  feature-gap skips: #1600 (conv1d), #1601 (conv3d). String padding
-  `'valid'` maps to 0 and runs; `'same'` (asymmetric in general) is
-  gap #1602. Unbatched (rank D+1) input is gap #1604. The
+  dilated CPU forward runs (groups / dilation / bias execute). conv1d
+  and conv3d now ALSO support `groups`/`dilation` in production
+  (`Conv1d::new_full` / `Conv3d::new_full` + per-group dilated
+  forward/backward, #1600 / #1601 closed); the remaining conv1d/conv3d
+  parity-sweep skips are a TEST-INFRASTRUCTURE gap, not a production
+  feature gap — the runner's `dispatch_conv::<D>` still drives those two
+  arms through the dense `Conv{1,3}d::from_parts` path, so grouped/dilated
+  op_db samples skip until the runner arms are extended to construct
+  `new_full` layers (separate orchestrator follow-up; tracked as the
+  per-file runner-arm gap, not a per-op REQ blocker, per goal.md S5).
+  String padding `'valid'` maps to 0 and runs; `'same'` (asymmetric in
+  general) is gap #1602. Unbatched (rank D+1) input is gap #1604. The
   `conv_transpose{1,2,3}d` arms are owned by a separate dispatch and
   unchanged here.
 
@@ -160,9 +169,31 @@ reshaped to `[out_channels, in_channels/groups, kH, kW]`;
 ### Conv1d / Conv3d (REQ-6)
 
 Parallel `pub struct Conv1d<T: Float>` and `pub struct Conv3d<T:
-Float>` definitions in `conv.rs`. Each has its own
-`im2col`-style helper and matching backward. The 1D path collapses
-the W dimension; the 3D path adds a D dimension to the inner loops.
+Float>` definitions in `conv.rs`. Both now carry `dilation` and
+`groups` fields and a `new_full(.., dilation, groups, bias)`
+constructor mirroring `Conv2d::new_full` (and the upstream
+`Conv1d.__init__` / `Conv3d.__init__` argument order at
+`torch/nn/modules/conv.py:330-339` / `682-691`); `new` is a thin
+shim delegating to `new_full` with dilation `1` / `groups 1`. Both
+validate `in_channels % groups == 0` and `out_channels % groups ==
+0` (raising the upstream-equivalent error per `conv.py:107-110`),
+and the weight layout is `[out, in/groups, *kernel]` (`conv.py:171`).
+
+The 1D forward collapses the W dimension and feeds the 2-D dilated
+`im2col_dilated` (temporal dilation maps to the W axis); the 3D
+forward uses the new `im2col_3d_dilated` / `col2im_3d_dilated`
+helpers (the prior non-dilated `im2col_3d` / `col2im_3d` lacked
+dilation). Both forwards partition input channels into `groups`
+slices, convolve each with its weight slice, and stack the per-group
+outputs along the C_out axis — the same per-group subtensor/cat loop
+PyTorch runs at `aten/src/ATen/native/Convolution.cpp:1723-1729`.
+`Conv1dBackward` / `Conv3dBackward` carry `dilation`/`groups` and
+save the im2col columns in the dense channel layout so the per-group
+`grad_input` (via `col2im_*_dilated`) / `grad_weight` /
+`grad_bias` mirror `Conv2dBackward`'s grouped decomposition.
+`from_parts` stays dense (`groups = 1`, `dilation = 1`) so
+`nn::functional::conv{1,3}d` remain ABI-compatible (they cannot
+recover `groups` from the weight shape alone).
 
 ### ConvTranspose1/2/3d (REQ-6)
 
@@ -213,9 +244,13 @@ For each:
   `view` / `reshape` before im2col; ferrotorch's `data_vec()` call
   flattens to the canonical layout.
 - **groups**: PyTorch requires `in_channels % groups == 0` and
-  `out_channels % groups == 0`; ferrotorch matches.
+  `out_channels % groups == 0`; ferrotorch matches across all three
+  forward layers (`Conv1d`/`Conv2d`/`Conv3d` each validate in
+  `new_full` and partition channels per-group in forward + backward).
 - **dilation**: PyTorch's `eff_kernel = dilation * (kernel - 1) +
-  1`; ferrotorch matches.
+  1` (`ConvUtils.h:255`); ferrotorch matches across `Conv1d`
+  (via the 2-D `im2col_dilated` with the dilation on the W axis),
+  `Conv2d`, and `Conv3d` (via `im2col_3d_dilated`).
 - **output_padding** (transposed): PyTorch requires
   `output_padding < max(stride, dilation)`; ferrotorch validates at
   construction.
@@ -272,9 +307,9 @@ Expected grep count after blocker #1441 closes: `>= 1` for each.
 | REQ-3 | SHIPPED | impl: `<Conv2d as Module>::forward` body in `conv.rs` (im2col + matmul) mirroring `aten::convolution`; non-test consumer: every vision model forward invokes `Conv2d::forward` through its `Module` impl. |
 | REQ-4 | SHIPPED | impl: `is_f32 && input.is_cuda()` dispatch to `backend.conv2d_f32` in `<Conv2d as Module>::forward` in `conv.rs`; non-test consumer: `ferrotorch-gpu/src/backend_impl.rs` exposes `Backend::conv2d_f32`; vision-model training runs that put modules on CUDA trigger this dispatch end-to-end. |
 | REQ-5 | SHIPPED | impl: `Conv2dBackward<T>: GradFn<T>` impl block in `conv.rs`; non-test consumer: every gradient step on a vision model's `loss.backward()` traverses these `Conv2dBackward` nodes through `ferrotorch_core::autograd::engine`. |
-| REQ-6 | SHIPPED | impl: `pub struct Conv1d` / `Conv3d` / `ConvTranspose{1,2,3}d` in `conv.rs`; non-test consumer: `ferrotorch-vision/src/models/inception.rs` uses Conv2d + ConvTranspose2d; `ferrotorch-nn/src/lazy_conv.rs` instantiates Conv{1,2,3}d via `materialize`. |
+| REQ-6 | SHIPPED | impl: `pub struct Conv1d` / `Conv3d` / `ConvTranspose{1,2,3}d` in `conv.rs`, each carrying `groups`/`dilation` for the forward layers via `Conv1d::new_full` / `Conv3d::new_full` + the per-group + dilated `<Conv1d as Module>::forward` / `<Conv3d as Module>::forward` and `Conv1dBackward` / `Conv3dBackward` (closes #1600 conv1d, #1601 conv3d; mirrors `Conv2d::new_full` per `torch/nn/modules/conv.py:171` weight layout + `Convolution.cpp:1723-1729` channel partition); non-test consumer: `Conv1d::new` / `Conv3d::new` delegate to `new_full` in production and are themselves called by `ferrotorch-nn/src/lazy_conv.rs` `LazyConv1d::materialize` / `LazyConv3d::materialize`; `ferrotorch-vision/src/models/inception.rs` uses Conv2d + ConvTranspose2d. |
 | REQ-7 | SHIPPED | impl: `impl<T: Float> Module<T> for Conv2d<T>` block (and analogues for the other 5) in `conv.rs`; non-test consumer: `ferrotorch_optim` walks `Module::parameters_mut()` across every conv in a training loop. |
 | REQ-8 | SHIPPED | impl: `Conv2d::set_weight` and `Conv2d::from_parts` in `conv.rs`; non-test consumer: `ferrotorch-nn/src/functional.rs` (the stateless `nn::functional::conv2d` entry point) uses `Conv2d::from_parts` to drive the existing forward path with user-supplied parameters. |
 | REQ-9 | SHIPPED | impl: `kaiming_uniform(&mut weight, NonLinearity::ReLU)` + `uniform_init(&mut b, -bound, bound)` (bound = 1/sqrt(fan_in)) in every `Conv*d::new[_full]` in `conv.rs` mirroring `torch/nn/modules/conv.py:198-201`; non-test consumer: `Conv2d::new` is the path used by every vision-model constructor. (Closes #1450 — bias path; Kaiming `a=sqrt(5)` gain divergence remains a separate followup.) |
 | REQ-10 | SHIPPED | impl (forward layers): `padding_mode` field + `with_padding_mode` builder on `Conv1d` / `Conv2d` / `Conv3d`, with the non-`Zeros` pre-pad branch in each `<Conv*d as Module>::forward` calling `crate::padding::functional_pad_1d`/`_2d`/`_3d` then convolving with `padding=0`, mirroring `torch/nn/modules/conv.py:367-378` (Conv1d) / `716-732` (Conv3d). impl (transposed): `ConvTranspose{1,2,3}d::with_padding_mode` routes through `fn reject_non_zeros_transpose` returning the upstream `ValueError('Only "zeros" padding mode is supported for ...')` per `conv.py:755-758`. The 1-D/3-D pre-pads are autograd-aware via `Pad1dBackward` / `Pad3dBackward` in `padding.rs` (the #1550 fix class). Non-test production consumer: `pub use conv::{Conv1d, Conv2d, Conv3d, ConvTranspose1d, ConvTranspose2d, ConvTranspose3d}` re-export in `ferrotorch-nn/src/lib.rs`, and the `<Conv1d as Module>::forward` / `<Conv3d as Module>::forward` bodies consume `functional_pad_1d` / `functional_pad_3d` in production. Closes #1443. |
-| REQ-11 | SHIPPED (forward arms) | impl: `dispatch_conv::<D>` in `tools/parity-sweep/runner/src/main.rs` wires `nn.functional.conv1d`/`conv2d`/`conv3d` (#1441). conv2d drives the production grouped+dilated forward via `Conv2d::new_full` + `Parameter::set_data` (non-test production driver of `new_full`: `ferrotorch-vision/src/models/resnet.rs` grouped/dilated blocks). Sweep at `--seeds 8`: conv1d 24/80, conv2d 112/240, conv3d 24/160, ALL 0 failed. Residual skips are filed production gaps: #1600 (conv1d groups/dilation), #1601 (conv3d groups/dilation), #1602 ('same' padding), #1604 (unbatched input). `conv_transpose{1,2,3}d` arms are a separate dispatch (unchanged). |
+| REQ-11 | SHIPPED (forward arms) | impl: `dispatch_conv::<D>` in `tools/parity-sweep/runner/src/main.rs` wires `nn.functional.conv1d`/`conv2d`/`conv3d` (#1441). conv2d drives the production grouped+dilated forward via `Conv2d::new_full` + `Parameter::set_data` (non-test production driver of `new_full`: `ferrotorch-vision/src/models/resnet.rs` grouped/dilated blocks). Sweep at `--seeds 8`: conv1d 24/80, conv2d 112/240, conv3d 24/160, ALL 0 failed. conv1d/conv3d grouped+dilated production support landed (#1600 / #1601 closed) — their residual sweep skips are now a runner-arm TEST gap (the arms drive `from_parts`, not `new_full`), NOT a production feature gap. Remaining filed gaps: #1602 ('same' padding), #1604 (unbatched input). `conv_transpose{1,2,3}d` arms are a separate dispatch (unchanged). |
