@@ -139,19 +139,20 @@
   },
   "addr": {
    "status": "verified",
-   "last_sweep_at": "2026-05-27T00:00:00Z",
+   "last_sweep_at": "2026-05-28T00:00:00Z",
    "samples_attempted": 48,
-   "samples_passed": 40,
+   "samples_passed": 48,
    "samples_failed": 0,
-   "samples_skipped": 8,
+   "samples_skipped": 0,
    "pytorch_source": "aten/src/ATen/native/LinearAlgebra.cpp:1200 Tensor addr(...); VJP addr at tools/autograd/derivatives.yaml:273",
    "ferrotorch_source": "grad_fns::linalg::addr_differentiable + AddrBackward in ferrotorch-core/src/grad_fns/linalg.rs; production consumer pub fn addr in ferrotorch-core/src/linalg.rs",
    "runner_arm": "tools/parity-sweep/runner/src/main.rs dispatch_f32 \"addr\" arm",
-   "known_divergences": [
+   "known_divergences": [],
+   "fixed_divergences": [
     {
      "category": "beta_zero_nan_drop",
-     "root_cause": "op_db's {beta:0, alpha:0} degenerate sample has self=[NaN]. Upstream addr_kernel (aten/src/ATen/native/cpu/LinearAlgebraKernel.cpp:53-55) DROPS the self term when beta==0 so NaN/inf in self do not propagate (torch out=0). ferrotorch's addr forward computes beta*self literally (0.0*NaN=NaN). Runner legitimate-skips this exact degenerate (8/48); the production-forward divergence is reported for a critic to pin (not fixable in the runner-only manifest).",
-     "tracking_blocker": null
+     "root_cause": "op_db's {beta:0, alpha:0} degenerate sample has self=[NaN]. Upstream addr_kernel (aten/src/ATen/native/cpu/LinearAlgebraKernel.cpp:53-55) DROPS the self term when beta==0 so NaN/inf in self do not propagate (torch out=0). ferrotorch's addr forward used to compute beta*self literally (0.0*NaN=NaN), so the runner legitimate-skipped this exact degenerate (8/48). FIXED in grad_fns/linalg.rs commit 1a43ddeee (#1598): addr_differentiable now branches on beta==0 and computes alpha*outer(vec1,vec2) only (the self/bias buffer is NEVER read), matching torch. The runner skip guard was removed 2026-05-28 (#1344 addr-skip cleanup); addr now reaches 48/48 passed (0 skipped, 0 failed).",
+     "fix_ref": "ferrotorch-core/src/grad_fns/linalg.rs addr_differentiable beta==0 branch (commit 1a43ddeee, #1598); runner skip removed in tools/parity-sweep/runner/src/main.rs \"addr\" arm (#1344)"
     }
    ]
   },
@@ -558,6 +559,104 @@
    "runner_arm": "tools/parity-sweep/runner/src/main.rs dispatch_f32 \"matrix_rank\" arm + oracle.py _CUSTOM_OPS[\"matrix_rank\"] gauge-invariant adapter",
    "comparison": "INTEGER: numerical rank is unique; compared directly (harness widens int64 -> f32, exact for these shapes).",
    "tolerance": "rtol=1e-4, atol=1e-6 (faer vs LAPACK factorization f32 ULP drift, decomposition-family envelope in fn tolerance_for); gauge-invariant comparison",
+   "known_divergences": []
+  },
+  "solve": {
+   "status": "verified",
+   "last_sweep_at": "2026-05-28T00:00:00Z",
+   "samples_attempted": 40,
+   "samples_passed": 40,
+   "samples_failed": 0,
+   "samples_skipped": 0,
+   "pytorch_source": "Tensor linalg_solve(...) in aten/src/ATen/native/BatchLinearAlgebra.cpp; linalg_solve_backward at torch/csrc/autograd/FunctionsManual.cpp:6160",
+   "ferrotorch_source": "pub fn solve in ferrotorch-core/src/linalg.rs (grad-aware, delegates to grad_fns::linalg::solve_differentiable); runner arm dispatch_f32 \"solve\" in tools/parity-sweep/runner/src/main.rs",
+   "runner_arm": "tools/parity-sweep/runner/src/main.rs dispatch_f32 \"solve\" arm + oracle.py _CUSTOM_OPS[\"solve\"] custom square-invertible samples",
+   "comparison": "UNIQUE: the solution X of A X = B is unique for invertible A; compared directly (rtol 1e-4).",
+   "tolerance": "rtol=1e-4, atol=1e-6 (faer vs LAPACK LU-solve f32 ULP drift, decomposition-family envelope in fn tolerance_for)",
+   "known_divergences": []
+  },
+  "qr": {
+   "status": "verified",
+   "last_sweep_at": "2026-05-28T00:00:00Z",
+   "samples_attempted": 40,
+   "samples_passed": 40,
+   "samples_failed": 0,
+   "samples_skipped": 0,
+   "pytorch_source": "qr = _add_docstr(...) in torch/linalg/__init__.py; linalg_qr_backward in torch/csrc/autograd/FunctionsManual.cpp",
+   "ferrotorch_source": "pub fn qr in ferrotorch-core/src/linalg.rs (grad-aware reduced m>=n, delegates to grad_fns::linalg::qr_differentiable); runner arm dispatch_f32 \"qr\" + ferrotorch_qr_probe in tools/parity-sweep/runner/src/main.rs",
+   "runner_arm": "tools/parity-sweep/runner/src/main.rs dispatch_f32 \"qr\" arm + ferrotorch_qr_probe + oracle.py _CUSTOM_OPS[\"qr\"] gauge-invariant adapter",
+   "comparison": "GAUGE-INVARIANT: compare the reconstruction Q @ R ~= A (raw Q/R column-sign freedom cancels; torch fixes signs by R's diagonal, faer uses its own convention, so Q/R are never compared element-wise). Samples are m>=n only (the m<n backward is tracked under #1577).",
+   "tolerance": "rtol=1e-4, atol=1e-6 (faer vs LAPACK QR f32 ULP drift + reconstruction GEMM round, decomposition-family envelope)",
+   "known_divergences": []
+  },
+  "cholesky": {
+   "status": "verified",
+   "last_sweep_at": "2026-05-28T00:00:00Z",
+   "samples_attempted": 40,
+   "samples_passed": 40,
+   "samples_failed": 0,
+   "samples_skipped": 0,
+   "pytorch_source": "Tensor linalg_cholesky(const Tensor& A, bool upper) in aten/src/ATen/native/BatchLinearAlgebra.cpp; cholesky_backward in torch/csrc/autograd/FunctionsManual.cpp",
+   "ferrotorch_source": "pub fn cholesky in ferrotorch-core/src/linalg.rs (grad-aware, delegates to grad_fns::linalg::cholesky_differentiable); runner arm dispatch_f32 \"cholesky\" + ferrotorch_cholesky_probe in tools/parity-sweep/runner/src/main.rs",
+   "runner_arm": "tools/parity-sweep/runner/src/main.rs dispatch_f32 \"cholesky\" arm + ferrotorch_cholesky_probe + oracle.py _CUSTOM_OPS[\"cholesky\"] adapter",
+   "comparison": "UNIQUE + RECONSTRUCTION: for an SPD input the lower-triangular L is unique, compared DIRECTLY; the probe concats L @ L^T ~= A as a double-check. Samples are SPD (G G^T + n I), matching torch op_db cholesky.",
+   "tolerance": "rtol=1e-4, atol=1e-6 (faer vs LAPACK Cholesky f32 ULP drift + reconstruction GEMM round, decomposition-family envelope)",
+   "known_divergences": []
+  },
+  "inv": {
+   "status": "verified",
+   "last_sweep_at": "2026-05-28T00:00:00Z",
+   "samples_attempted": 40,
+   "samples_passed": 40,
+   "samples_failed": 0,
+   "samples_skipped": 0,
+   "pytorch_source": "Tensor linalg_inv(...) in aten/src/ATen/native/BatchLinearAlgebra.cpp; linalg_inv_ex VJP at tools/autograd/derivatives.yaml:916",
+   "ferrotorch_source": "pub fn inv in ferrotorch-core/src/linalg.rs (grad-aware, delegates to grad_fns::linalg::inv_differentiable); runner arm dispatch_f32 \"inv\" in tools/parity-sweep/runner/src/main.rs",
+   "runner_arm": "tools/parity-sweep/runner/src/main.rs dispatch_f32 \"inv\" arm + oracle.py _CUSTOM_OPS[\"inv\"] custom square-invertible samples",
+   "comparison": "UNIQUE: the inverse A^{-1} is unique; compared directly (rtol 1e-4).",
+   "tolerance": "rtol=1e-4, atol=1e-6 (faer vs LAPACK LU-inverse f32 ULP drift, decomposition-family envelope in fn tolerance_for)",
+   "known_divergences": []
+  },
+  "det": {
+   "status": "verified",
+   "last_sweep_at": "2026-05-28T00:00:00Z",
+   "samples_attempted": 40,
+   "samples_passed": 40,
+   "samples_failed": 0,
+   "samples_skipped": 0,
+   "pytorch_source": "Tensor linalg_det(...) in aten/src/ATen/native/LinearAlgebra.cpp; linalg_det_backward at torch/csrc/autograd/FunctionsManual.cpp:4373",
+   "ferrotorch_source": "pub fn det in ferrotorch-core/src/linalg.rs (grad-aware, delegates to grad_fns::linalg::det_differentiable); runner arm dispatch_f32 \"det\" in tools/parity-sweep/runner/src/main.rs",
+   "runner_arm": "tools/parity-sweep/runner/src/main.rs dispatch_f32 \"det\" arm + oracle.py _CUSTOM_OPS[\"det\"] custom square samples",
+   "comparison": "UNIQUE SCALAR: the determinant is a unique 0-D scalar; compared directly (oracle emits the 0-D () tensor matching ferrotorch's []-shaped det).",
+   "tolerance": "rtol=1e-4, atol=1e-6 (faer vs LAPACK LU-determinant f32 ULP drift, decomposition-family envelope in fn tolerance_for)",
+   "known_divergences": []
+  },
+  "slogdet": {
+   "status": "verified",
+   "last_sweep_at": "2026-05-28T00:00:00Z",
+   "samples_attempted": 40,
+   "samples_passed": 40,
+   "samples_failed": 0,
+   "samples_skipped": 0,
+   "pytorch_source": "slogdet = _add_docstr(...) in torch/linalg/__init__.py; slogdet_backward in torch/csrc/autograd/FunctionsManual.cpp (_linalg_slogdet in derivatives.yaml)",
+   "ferrotorch_source": "pub fn slogdet in ferrotorch-core/src/linalg.rs (grad-aware, delegates to grad_fns::linalg::slogdet_differentiable); runner arm dispatch_f32 \"slogdet\" in tools/parity-sweep/runner/src/main.rs",
+   "runner_arm": "tools/parity-sweep/runner/src/main.rs dispatch_f32 \"slogdet\" arm + oracle.py _CUSTOM_OPS[\"slogdet\"] adapter",
+   "comparison": "UNIQUE PAIR: (sign, logabsdet) both unique (sign exact in {-1,+1}, logabsdet a real scalar); the probe concats them into a [2] tensor compared directly. Samples include a negative-determinant (odd-permutation) case so sign exercises both +1 and -1.",
+   "tolerance": "rtol=1e-4, atol=1e-6 (faer vs LAPACK LU f32 ULP drift on logabsdet; sign exact)",
+   "known_divergences": []
+  },
+  "cross": {
+   "status": "verified",
+   "last_sweep_at": "2026-05-28T00:00:00Z",
+   "samples_attempted": 32,
+   "samples_passed": 32,
+   "samples_failed": 0,
+   "samples_skipped": 0,
+   "pytorch_source": "cross = _add_docstr(...) in torch/linalg/__init__.py; linalg_cross VJP at tools/autograd/derivatives.yaml:516-518",
+   "ferrotorch_source": "pub fn cross in ferrotorch-core/src/linalg.rs (grad-aware, delegates to grad_fns::linalg::cross_differentiable); runner arm dispatch_f32 \"cross\" in tools/parity-sweep/runner/src/main.rs",
+   "runner_arm": "tools/parity-sweep/runner/src/main.rs dispatch_f32 \"cross\" arm + oracle.py _CUSTOM_OPS[\"cross\"] adapter (dim=-1, size-3 trailing axis)",
+   "comparison": "UNIQUE: the vector cross product is a unique bilinear product; compared directly (samples are [3] and batched [n,3] with the default dim=-1).",
+   "tolerance": "rtol=1e-4, atol=1e-6 (rides the decomposition envelope for uniformity; cross is exact)",
    "known_divergences": []
   }
  }

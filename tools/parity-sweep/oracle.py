@@ -937,6 +937,180 @@ def _matrix_rank_torch_call(a: torch.Tensor) -> torch.Tensor:
     return torch.linalg.matrix_rank(a)
 
 
+# ---------------------------------------------------------------------------
+# FINAL linalg subset (#1344): solve / qr / cholesky / inv / det / slogdet /
+# cross. Each emits a UNIQUE or gauge-INVARIANT derived quantity so the value
+# gate compares apples-to-apples with the ferrotorch runner arm (see
+# `tools/parity-sweep/runner/src/main.rs` and
+# `.design/ferrotorch-core/grad_fns/linalg.md`). The samples are
+# well-conditioned SQUARE real f32 matrices the square-2-D-only faer forwards
+# support.
+# ---------------------------------------------------------------------------
+
+
+def _linalg_square_matrices(seed: int = 0) -> list[torch.Tensor]:
+    """Well-conditioned real f32 SQUARE matrices for the solve / inv / det /
+    slogdet / qr family. Diagonal-dominant so the matrix is invertible and
+    the LU/QR factorization is numerically stable (faer and LAPACK agree to
+    f32 ULP)."""
+    g = torch.Generator().manual_seed(seed)
+    sizes = [1, 2, 3, 4, 5]
+    mats: list[torch.Tensor] = []
+    for n in sizes:
+        a = torch.randn(n, n, generator=g, dtype=torch.float32)
+        for i in range(n):
+            a[i, i] = a[i, i] + 2.0 + float(i)
+        mats.append(a)
+    return mats
+
+
+def _linalg_spd_matrices(seed: int = 0) -> list[torch.Tensor]:
+    """Symmetric POSITIVE-DEFINITE real f32 matrices for the cholesky family,
+    built as `B = G Gᵀ + n·I` so `B` is SPD (matching torch's op_db cholesky
+    samples) and the lower-triangular factor `L` is UNIQUE and well separated
+    from singularity."""
+    g = torch.Generator().manual_seed(seed)
+    sizes = [1, 2, 3, 4, 5]
+    mats: list[torch.Tensor] = []
+    for n in sizes:
+        a = torch.randn(n, n, generator=g, dtype=torch.float32)
+        b = a @ a.transpose(0, 1) + float(n) * torch.eye(n, dtype=torch.float32)
+        mats.append(b)
+    return mats
+
+
+def _solve_samples() -> list[tuple[tuple, dict]]:
+    """`(A, B)` linear-system samples: square invertible `A` `[n, n]`, RHS
+    `B` `[n, k]`."""
+    g = torch.Generator().manual_seed(1)
+    samples: list[tuple[tuple, dict]] = []
+    for (n, kk) in [(2, 1), (3, 2), (4, 4), (5, 3), (3, 1)]:
+        a = torch.randn(n, n, generator=g, dtype=torch.float32)
+        for i in range(n):
+            a[i, i] = a[i, i] + 2.0 + float(i)
+        b = torch.randn(n, kk, generator=g, dtype=torch.float32)
+        samples.append(((a, b), {}))
+    return samples
+
+
+def _solve_torch_call(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
+    """`torch.linalg.solve(A, B)` — the solution `X` is UNIQUE for invertible
+    `A`, compared directly."""
+    return torch.linalg.solve(a, b)
+
+
+def _qr_samples() -> list[tuple[tuple, dict]]:
+    """QR samples: square + TALL (m≥n) only — the ferrotorch backward is the
+    reduced m≥n case (the m<n branch is tracked under #1577)."""
+    g = torch.Generator().manual_seed(2)
+    samples: list[tuple[tuple, dict]] = []
+    for (m, n) in [(3, 3), (4, 3), (5, 5), (4, 4), (6, 2)]:
+        a = torch.randn(m, n, generator=g, dtype=torch.float32)
+        k = min(m, n)
+        for i in range(k):
+            a[i, i] = a[i, i] + 2.0 + float(i)
+        samples.append(((a,), {}))
+    return samples
+
+
+def _qr_torch_call(a: torch.Tensor) -> torch.Tensor:
+    """Gauge-invariant QR probe: the reconstruction `Q @ R ≈ A`.
+
+    `torch.linalg.qr(A, mode='reduced')` returns `(Q, R)` with `Q: [m, k]`,
+    `R: [k, n]`, `k=min(m,n)`. torch fixes `Q`'s column signs by the sign of
+    `R`'s diagonal but ferrotorch's faer backend uses faer's own convention,
+    so the raw `Q` / `R` are NOT compared element-wise. The product `Q @ R`
+    reconstructs `A` exactly — the gauge-invariant quantity."""
+    q, r = torch.linalg.qr(a, mode="reduced")
+    return (q @ r).reshape(-1)
+
+
+def _cholesky_samples() -> list[tuple[tuple, dict]]:
+    return [((b,), {}) for b in _linalg_spd_matrices()]
+
+
+def _cholesky_torch_call(a: torch.Tensor) -> torch.Tensor:
+    """Cholesky probe: `concat([L.flatten(), (L Lᵀ).flatten()])`.
+
+    `torch.linalg.cholesky(A)` returns the lower-triangular `L` with
+    `A = L Lᵀ`. For an SPD input `L` is UNIQUE (no gauge freedom), so `L` is
+    compared DIRECTLY; the reconstruction `L @ Lᵀ ≈ A` is concatenated as a
+    double-check that the factor genuinely reconstructs the input."""
+    l = torch.linalg.cholesky(a)
+    recon = l @ l.transpose(-2, -1)
+    return torch.cat([l.reshape(-1), recon.reshape(-1)])
+
+
+def _inv_samples() -> list[tuple[tuple, dict]]:
+    return [((a,), {}) for a in _linalg_square_matrices()]
+
+
+def _inv_torch_call(a: torch.Tensor) -> torch.Tensor:
+    """`torch.linalg.inv(A)` — the inverse is UNIQUE, compared directly."""
+    return torch.linalg.inv(a)
+
+
+def _det_samples() -> list[tuple[tuple, dict]]:
+    return [((a,), {}) for a in _linalg_square_matrices()]
+
+
+def _det_torch_call(a: torch.Tensor) -> torch.Tensor:
+    """`torch.linalg.det(A)` — the determinant is a UNIQUE scalar, compared
+    directly. Returned as a 0-D `()` tensor to match ferrotorch's `det`
+    forward (which emits a `[]`-shaped scalar)."""
+    return torch.linalg.det(a)
+
+
+def _slogdet_samples() -> list[tuple[tuple, dict]]:
+    """slogdet samples include a matrix with NEGATIVE determinant (a row swap
+    of an otherwise diagonal-dominant matrix) so the `sign` output exercises
+    both `+1` and `-1`."""
+    g = torch.Generator().manual_seed(3)
+    samples: list[tuple[tuple, dict]] = []
+    for n in [2, 3, 4, 5]:
+        a = torch.randn(n, n, generator=g, dtype=torch.float32)
+        for i in range(n):
+            a[i, i] = a[i, i] + 2.0 + float(i)
+        samples.append(((a,), {}))
+    # Negative-determinant case: swap rows 0 and 1 of a diagonal-dominant 3x3
+    # (an odd permutation flips the sign of det).
+    nd = torch.randn(3, 3, generator=g, dtype=torch.float32)
+    for i in range(3):
+        nd[i, i] = nd[i, i] + 3.0 + float(i)
+    nd = nd[[1, 0, 2], :]
+    samples.append(((nd,), {}))
+    return samples
+
+
+def _slogdet_torch_call(a: torch.Tensor) -> torch.Tensor:
+    """slogdet probe: `[sign, logabsdet]`.
+
+    `torch.linalg.slogdet(A)` returns `(sign, logabsdet)`: `sign ∈ {-1, +1}`
+    (EXACT) and `logabsdet = log|det(A)|` (a real scalar). Both are unique, so
+    the probe concats them into a `[2]` tensor compared directly."""
+    sign, logabsdet = torch.linalg.slogdet(a)
+    return torch.stack([sign.reshape(()), logabsdet.reshape(())]).reshape(-1)
+
+
+def _cross_samples() -> list[tuple[tuple, dict]]:
+    """`(A, B)` cross-product samples. `torch.linalg.cross` defaults to
+    `dim=-1`, which must have size 3. Emit `[3]` vectors and batched `[n, 3]`
+    pairs so the size-3 axis is the trailing one."""
+    g = torch.Generator().manual_seed(4)
+    samples: list[tuple[tuple, dict]] = []
+    for shape in [(3,), (2, 3), (4, 3), (3, 3)]:
+        a = torch.randn(*shape, generator=g, dtype=torch.float32)
+        b = torch.randn(*shape, generator=g, dtype=torch.float32)
+        samples.append(((a, b), {}))
+    return samples
+
+
+def _cross_torch_call(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
+    """`torch.linalg.cross(A, B, dim=-1)` — the cross product is UNIQUE (a
+    bilinear product), compared directly."""
+    return torch.linalg.cross(a, b, dim=-1)
+
+
 _CUSTOM_OPS: dict[str, dict[str, Any]] = {
     # Linalg DECOMPOSITION subset (#1344, gauge-invariant comparison — see the
     # adapter doc-comments above for the per-op derived quantity). Keyed by the
@@ -956,6 +1130,17 @@ _CUSTOM_OPS: dict[str, dict[str, Any]] = {
     },
     "norm": {"callable": _norm_torch_call, "samples": _norm_samples()},
     "matrix_rank": {"callable": _matrix_rank_torch_call, "samples": _matrix_rank_samples()},
+    # FINAL linalg subset (#1344): solve / qr / cholesky / inv / det /
+    # slogdet / cross. Unique or gauge-invariant derived quantities (see the
+    # adapter doc-comments above). Keyed by the bare ferrotorch op names the
+    # runner's `dispatch_f32` matches.
+    "solve": {"callable": _solve_torch_call, "samples": _solve_samples()},
+    "qr": {"callable": _qr_torch_call, "samples": _qr_samples()},
+    "cholesky": {"callable": _cholesky_torch_call, "samples": _cholesky_samples()},
+    "inv": {"callable": _inv_torch_call, "samples": _inv_samples()},
+    "det": {"callable": _det_torch_call, "samples": _det_samples()},
+    "slogdet": {"callable": _slogdet_torch_call, "samples": _slogdet_samples()},
+    "cross": {"callable": _cross_torch_call, "samples": _cross_samples()},
     "fake_quantize_per_tensor_affine": {
         "callable": torch.fake_quantize_per_tensor_affine,
         "samples": _fake_quantize_per_tensor_affine_samples(),

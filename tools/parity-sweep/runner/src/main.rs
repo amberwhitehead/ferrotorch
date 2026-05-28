@@ -635,6 +635,39 @@ fn ferrotorch_lu_factor_probe(a: &Tensor<f32>) -> Result<Tensor<f32>, Box<dyn st
     Ok(from_vec(recon.clone(), &[recon.len()])?)
 }
 
+/// ferrotorch side of the gauge-invariant QR probe: reconstruction
+/// `Q @ R ≈ A`. Mirrors `_qr_torch_call`. `torch.linalg.qr` fixes the column
+/// signs of `Q` by the sign of `R`'s diagonal, but ferrotorch's faer-backed
+/// QR uses faer's own sign convention, so the raw `Q` / `R` are NOT compared
+/// element-wise (the per-column sign would spuriously diverge). The product
+/// `Q @ R` reconstructs `A` exactly — the gauge-invariant quantity.
+fn ferrotorch_qr_probe(a: &Tensor<f32>) -> Result<Tensor<f32>, Box<dyn std::error::Error>> {
+    let (q, r) = ferrotorch_core::linalg::qr(a)?;
+    let m = q.shape()[0]; // Q: [m, k]
+    let k = q.shape()[1]; // k = min(m, n)
+    let n = r.shape()[1]; // R: [k, n]
+    let q_d = q.data_vec()?;
+    let r_d = r.data_vec()?;
+    let recon = recon_mm(&q_d, m, k, &r_d, n); // [m, n]
+    Ok(from_vec(recon.clone(), &[recon.len()])?)
+}
+
+/// ferrotorch side of the Cholesky probe: `concat([L.flatten(), (L Lᵀ).flatten()])`.
+/// For an SPD input the lower-triangular factor `L` is UNIQUE (no gauge
+/// freedom), so `L` is compared directly; the reconstruction `L @ Lᵀ ≈ A`
+/// double-checks that ferrotorch's own `L` factors the input. Mirrors
+/// `_cholesky_torch_call`.
+fn ferrotorch_cholesky_probe(a: &Tensor<f32>) -> Result<Tensor<f32>, Box<dyn std::error::Error>> {
+    let l = ferrotorch_core::linalg::cholesky(a)?;
+    let n = l.shape()[0]; // L: [n, n] lower-triangular
+    let l_d = l.data_vec()?;
+    let lt = transpose_rm(&l_d, n, n);
+    let recon = recon_mm(&l_d, n, n, &lt, n); // L @ Lᵀ ≈ A
+    let mut out = l_d;
+    out.extend_from_slice(&recon);
+    Ok(from_vec(out.clone(), &[out.len()])?)
+}
+
 // ---------------------------------------------------------------------------
 // ferrotorch dispatch table (op name -> closure)
 // ---------------------------------------------------------------------------
@@ -3579,42 +3612,28 @@ fn dispatch_f32(
         // `tools/autograd/derivatives.yaml:273`. Routes through
         // `addr_differentiable` (attaches `AddrBackward`). `vec1` is 1-D
         // `[n]`, `vec2` is 1-D `[m]`; `self` broadcasts to `[n, m]`. op_db
-        // emits the no-kwargs default (`beta=alpha=1`) and `{beta:0.6,
-        // alpha:0.2}` samples — both covered.
+        // emits the no-kwargs default (`beta=alpha=1`), the `{beta:0.6,
+        // alpha:0.2}` sample, AND a `{beta:0.0, alpha:0.0}` degenerate sample
+        // whose `self` is a `[1,1]` tensor containing NaN — all covered.
         //
-        // Legitimate skip / KNOWN DIVERGENCE: op_db ALSO emits a
-        // `{beta:0.0, alpha:0.0}` degenerate sample whose `self` is a `[1,1]`
-        // tensor containing NaN. PyTorch's `beta==0` contract DROPS the
-        // `self` term entirely so `nans and infs in self should not
-        // propagate` (upstream `addr_kernel` at
-        // `aten/src/ATen/native/cpu/LinearAlgebraKernel.cpp:53-55`:
+        // PyTorch's `beta==0` contract DROPS the `self` term entirely so
+        // `nans and infs in self should not propagate` (upstream `addr_kernel`
+        // at `aten/src/ATen/native/cpu/LinearAlgebraKernel.cpp:53-55`:
         // `if (beta_val == zero_val) { ... return alpha_val * vec1_val *
         // vec2_val; }` — the `self_val` arg is unread), making torch's output
-        // a finite `0`. ferrotorch's `addr` forward computes
-        // `beta * self` literally (`0.0f32 * NaN = NaN` in IEEE-754), so it
-        // propagates the NaN — a REAL forward divergence from torch's beta=0
-        // NaN-dropping semantics. This is a PRODUCTION-FORWARD divergence (in
-        // `grad_fns::linalg::addr_differentiable` /
-        // `crate::linalg::addr`), NOT a runner-arm gap, so it is reported as
-        // a separate divergence for a critic to pin (it cannot be fixed in
-        // this manifest, which is runner-only) and the exact degenerate
-        // sample is skipped here so as NOT to mask other addr coverage. The
-        // `beta != 0 || alpha != 0` samples (the vast majority) are covered.
-        "addr" => {
+        // a finite `0`. As of `grad_fns/linalg.rs` commit 1a43ddeee (#1598),
+        // `addr_differentiable` / `crate::linalg::addr` BRANCH on `beta == 0`
+        // and compute `alpha*outer(vec1, vec2)` only (the `self`/bias buffer is
+        // NEVER read), matching torch's NaN-dropping semantics — so the prior
+        // `{beta:0, alpha:0, self=NaN}` runner skip is OBSOLETE and is removed
+        // (2026-05-28, closing the addr-skip cleanup of #1344). The full op_db
+        // sample set now RUNS (48/48, 0 skipped).
+        "addr" => Ok(Some({
             let (bias, vec1, vec2) = ternary("addr")?;
             let beta = beta_kwarg("addr")? as f32;
             let alpha = alpha_kwarg("addr")? as f32;
-            // Skip ONLY the beta==0 && alpha==0 degenerate where `self`
-            // carries a non-finite value torch's zero-fill semantics drop
-            // but ferrotorch's literal `beta*self` propagates (known
-            // forward divergence, tracked separately — see comment above).
-            if beta == 0.0 && alpha == 0.0 && !bias.data()?.iter().all(|v| v.is_finite()) {
-                return Ok(None);
-            }
-            Ok(Some(grad_fns::linalg::addr_differentiable(
-                &bias, &vec1, &vec2, beta, alpha,
-            )?))
-        }
+            grad_fns::linalg::addr_differentiable(&bias, &vec1, &vec2, beta, alpha)?
+        })),
 
         // ===================================================================
         // Linalg DECOMPOSITION subset (#1344, HARD) — gauge-invariant probes.
@@ -3740,6 +3759,114 @@ fn dispatch_f32(
             let a = unary("matrix_rank")?;
             Ok(Some(ferrotorch_core::linalg::matrix_rank(&a, None)?))
         }
+
+        // ===================================================================
+        // FINAL linalg subset (#1344) — solve / qr / cholesky / inv / det /
+        // slogdet / cross. Custom well-conditioned f32 samples in `oracle.py`'s
+        // `_CUSTOM_OPS` (keyed by these bare op names) so the comparison rides
+        // the same gauge-invariant value gate as the decomposition subset
+        // above. The forward production consumers are the grad-aware
+        // `pub fn solve` / `qr` / `cholesky` / `inv` / `det` / `slogdet` /
+        // `cross` in `ferrotorch-core/src/linalg.rs` (the `torch.linalg.*`
+        // public surface — see `.design/ferrotorch-core/grad_fns/linalg.md`
+        // REQ-10/16/17/18/20/21/25). Wired 2026-05-28.
+        // ===================================================================
+
+        // `torch.linalg.solve(A, B)` — solves `A X = B` for a square invertible
+        // `A`. The solution `X` is UNIQUE (no gauge freedom), compared directly.
+        // Upstream `Tensor linalg_solve(...)` in
+        // `aten/src/ATen/native/BatchLinearAlgebra.cpp`; VJP
+        // `linalg_solve_backward` at
+        // `torch/csrc/autograd/FunctionsManual.cpp:6160`. Routes through
+        // `grad_fns::linalg::solve_differentiable` (attaches
+        // `LinalgSolveBackward`). Distinct from the `linalg.solve` op_db arm
+        // above: this bare `solve` key uses custom square-only `[n, k]`-RHS
+        // samples that the square-2-D-only faer forward (REQ-10) fully supports.
+        "solve" => Ok(Some({
+            let (a, b) = binary("solve")?;
+            grad_fns::linalg::solve_differentiable(&a, &b)?
+        })),
+        // `torch.linalg.qr(A, mode='reduced')` — compare the reconstruction
+        // `Q @ R ≈ A` (gauge-invariant). `torch.linalg.qr` fixes `Q`'s column
+        // signs by the sign of `R`'s diagonal, but ferrotorch's faer-backed QR
+        // uses faer's own convention, so the raw `Q` / `R` are NEVER compared
+        // element-wise (the per-column sign would spuriously diverge). Upstream
+        // `qr = _add_docstr(...)` in `torch/linalg/__init__.py`; VJP
+        // `linalg_qr_backward` in `FunctionsManual.cpp`. Forward
+        // `pub fn qr` in `ferrotorch-core/src/linalg.rs` (reduced, m≥n; #1577
+        // tracks the m<n branch — the custom samples are m≥n only).
+        "qr" => {
+            let a = unary("qr")?;
+            Ok(Some(ferrotorch_qr_probe(&a)?))
+        }
+        // `torch.linalg.cholesky(A)` — for an SPD input the lower-triangular
+        // factor `L` is UNIQUE, so `L` is compared DIRECTLY (no gauge freedom);
+        // the probe also concats the reconstruction `L @ Lᵀ ≈ A` as a
+        // double-check. Upstream `Tensor linalg_cholesky(const Tensor& A, bool
+        // upper)` in `aten/src/ATen/native/BatchLinearAlgebra.cpp`; VJP
+        // `cholesky_backward` in `FunctionsManual.cpp`. Forward
+        // `pub fn cholesky` in `ferrotorch-core/src/linalg.rs`. The custom
+        // samples are SPD (`G Gᵀ + n·I`), matching torch's op_db cholesky
+        // contract.
+        "cholesky" => {
+            let a = unary("cholesky")?;
+            Ok(Some(ferrotorch_cholesky_probe(&a)?))
+        }
+        // `torch.linalg.inv(A)` — inverse of a square invertible matrix. UNIQUE
+        // (no gauge freedom), compared directly. Upstream `Tensor
+        // linalg_inv(...)` in `aten/src/ATen/native/BatchLinearAlgebra.cpp`;
+        // VJP `linalg_inv_ex` at `tools/autograd/derivatives.yaml:916`
+        // (`dA = -inv^T @ grad @ inv^T`). Routes through
+        // `grad_fns::linalg::inv_differentiable` (attaches `LinalgInvBackward`).
+        // Distinct from the `linalg.inv` op_db arm: this bare `inv` key uses
+        // custom square-only samples the square-2-D-only forward (REQ-18)
+        // fully supports.
+        "inv" => {
+            let a = unary("inv")?;
+            Ok(Some(grad_fns::linalg::inv_differentiable(&a)?))
+        }
+        // `torch.linalg.det(A)` — determinant (a SCALAR). UNIQUE, compared
+        // directly. Upstream `Tensor linalg_det(...)` in
+        // `aten/src/ATen/native/LinearAlgebra.cpp`; VJP `linalg_det_backward`
+        // at `torch/csrc/autograd/FunctionsManual.cpp:4373`
+        // (`dA = det * grad * inv(A)^T`). Routes through
+        // `grad_fns::linalg::det_differentiable` (attaches `LinalgDetBackward`).
+        // Distinct from the `linalg.det` op_db arm: bare `det` uses custom
+        // square-only samples.
+        "det" => {
+            let a = unary("det")?;
+            Ok(Some(grad_fns::linalg::det_differentiable(&a)?))
+        }
+        // `torch.linalg.slogdet(A)` — `(sign, logabsdet)`. BOTH outputs are
+        // unique (sign EXACT, logabsdet a real scalar), so the probe concats
+        // `[sign, logabsdet]` to compare both in one gate. Upstream
+        // `slogdet = _add_docstr(...)` in `torch/linalg/__init__.py`; VJP
+        // `slogdet_backward` in `FunctionsManual.cpp` (real case
+        // `dA = grad_logabsdet * inv(A)^T`, sign-grad is 0). Forward
+        // `pub fn slogdet` in `ferrotorch-core/src/linalg.rs` returns the
+        // `(sign, logabsdet)` scalar pair (both `[]`-shaped); the probe flattens
+        // them to a `[2]` tensor. The `_slogdet_torch_call` oracle adapter emits
+        // the same `[sign, logabsdet]` concat.
+        "slogdet" => {
+            let a = unary("slogdet")?;
+            let (sign, logabs) = ferrotorch_core::linalg::slogdet(&a)?;
+            let s = sign.data_vec()?;
+            let l = logabs.data_vec()?;
+            Ok(Some(from_vec(vec![s[0], l[0]], &[2])?))
+        }
+        // `torch.linalg.cross(A, B, dim=-1)` — vector cross product along `dim`
+        // (the `dim`-th axis must have size 3). UNIQUE (a bilinear product),
+        // compared directly. Upstream `cross = _add_docstr(...)` in
+        // `torch/linalg/__init__.py`; VJP `linalg_cross` at
+        // `tools/autograd/derivatives.yaml:516-518`
+        // (`da = cross(b, grad)`, `db = cross(grad, a)`). Routes through
+        // `grad_fns::linalg::cross_differentiable`. The custom samples emit a
+        // pair of `[3]` / `[n, 3]` operands so the default `dim=-1` is the
+        // size-3 axis (matching torch's `linalg.cross` contract).
+        "cross" => Ok(Some({
+            let (a, b) = binary("cross")?;
+            grad_fns::linalg::cross_differentiable(&a, &b, -1)?
+        })),
 
         // `torch.kron(input, other)` — Kronecker product. Upstream `Tensor
         // kron(const Tensor& self, const Tensor& other)` at
@@ -7001,6 +7128,16 @@ fn tolerance_for(op: &str) -> (f32, f32) {
         // LAPACK FFI epic (same as matmul). `matrix_rank` is an EXACT integer
         // (atol absorbs the f32-mantissa-exact rank value); `norm` is a single
         // sqrt-of-sum that lands well inside rtol=1e-4.
+        // The FINAL linalg subset (#1344) — `solve` / `qr` / `cholesky` /
+        // `inv` / `det` / `slogdet` / `cross` — runs the same LAPACK-class
+        // factorization (LU for solve/inv/det/slogdet, QR for qr, Cholesky for
+        // cholesky) whose pivot order + FMA schedule differ between faer and
+        // LAPACK, inducing the same structural cross-implementation f32 ULP
+        // drift (amplified for the `qr` / `cholesky` reconstruction probes by
+        // the extra GEMM round). `cross` is a single bilinear product (exact)
+        // but rides the same envelope for uniformity. The comparison is
+        // unique / gauge-invariant; rtol=1e-4 absorbs the structural drift
+        // without masking a real divergence.
         "svd"
         | "eigh"
         | "eigvalsh"
@@ -7012,7 +7149,14 @@ fn tolerance_for(op: &str) -> (f32, f32) {
         | "lu_factor"
         | "householder_product"
         | "norm"
-        | "matrix_rank" => (1e-4, 1e-6),
+        | "matrix_rank"
+        | "solve"
+        | "qr"
+        | "cholesky"
+        | "inv"
+        | "det"
+        | "slogdet"
+        | "cross" => (1e-4, 1e-6),
         // Fused-affine GEMM family (`beta*self + alpha*(A @ B)`): the inner
         // `A @ B` is the same faer-vs-MKL GEMM whose f32 ULP drift the
         // matmul-family doc-comment above measures (~4e-6 at |e|=0.14 for
