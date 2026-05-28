@@ -210,7 +210,9 @@ pub use activation::{
 };
 pub use attention::{MultiheadAttention, repeat_kv, reshape_to_heads, transpose_heads_to_2d};
 pub use container::{ModuleDict, ModuleList, Sequential};
-pub use conv::{Conv1d, Conv2d, Conv3d, ConvTranspose1d, ConvTranspose2d, ConvTranspose3d};
+pub use conv::{
+    Conv1d, Conv2d, Conv3d, ConvTranspose1d, ConvTranspose2d, ConvTranspose3d, StringPadding,
+};
 pub use dropout::{AlphaDropout, Dropout, Dropout1d, Dropout2d, Dropout3d, FeatureAlphaDropout};
 pub use embedding::{Embedding, EmbeddingBag, EmbeddingBagMode};
 pub use flash_attention::{flash_attention, standard_attention};

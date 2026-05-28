@@ -42,9 +42,8 @@
 
 use ferrotorch_core::storage::TensorStorage;
 use ferrotorch_core::tensor::Tensor;
-use ferrotorch_nn::conv::StringPadding;
 use ferrotorch_nn::module::Module;
-use ferrotorch_nn::{Conv1d, Conv2d};
+use ferrotorch_nn::{Conv1d, Conv2d, StringPadding};
 
 /// Leaf tensor that does NOT require grad.
 fn t(data: &[f32], shape: &[usize]) -> Tensor<f32> {

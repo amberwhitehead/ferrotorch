@@ -17,6 +17,7 @@
 //!   2. D/H/W axis SWAP in the 5-D col2im/im2col bookkeeping: a symmetric
 //!      kernel `(2,2,2)` with symmetric dilation `(2,2,2)` over a cubic volume
 //!      is invariant under D<->H<->W transposition, so a swapped axis passes.
+//!
 //! This file pins both with DISTINCT-magnitude per-group weights (a leak blows
 //! up by orders of magnitude) and an ASYMMETRIC kernel `(1,2,3)` + asymmetric
 //! dilation `(1,2,1)` over a non-cubic `3x5x4` volume (an axis swap changes
@@ -103,7 +104,11 @@ fn divergence_1600_conv1d_groups2_distinct_weights_no_cross_group_leak() {
         5.6f32, 6.6, 7.6, 8.6, 11.0, 13.6, 16.2, 18.8, 655.25, 701.25, 747.25, 793.25, 878.75,
         940.75, 1002.75, 1064.75,
     ];
-    assert_close(y.data().unwrap(), &a_fwd, "A_fwd conv1d groups=2 distinct weights");
+    assert_close(
+        y.data().unwrap(),
+        &a_fwd,
+        "A_fwd conv1d groups=2 distinct weights",
+    );
 
     // out.sum().backward() => grad_output = ones.
     let grad_output = t(&[1.0f32; 16], &[1, 4, 4]);
@@ -257,7 +262,11 @@ fn divergence_1601_conv3d_groups2_asymmetric_kernel_dilation_matches_torch() {
         85.34, 86.63, 90.5, 91.79, 95.66, 96.95, 111.14, 112.43, 116.3, 117.59, 121.46, 122.75,
         136.94, 138.23, 142.1, 143.39, 147.26, 148.55,
     ];
-    assert_close(y.data().unwrap(), &f_fwd, "F_fwd conv3d groups2 asym kernel+dilation");
+    assert_close(
+        y.data().unwrap(),
+        &f_fwd,
+        "F_fwd conv3d groups2 asym kernel+dilation",
+    );
 
     let grad_output = t(&[1.0f32; 72], &[1, 4, 3, 3, 2]);
     let grads = Module::<f32>::forward(&conv, &x)

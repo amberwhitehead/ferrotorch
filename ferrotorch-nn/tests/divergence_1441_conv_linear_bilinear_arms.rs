@@ -65,13 +65,17 @@ fn assert_close(got: &[f32], want: &[f32], ctx: &str) {
 /// channels convolves ONLY group g of the INPUT channels. A correct partition
 /// must yield torch's values below; a swapped/mis-sliced partition will not.
 #[test]
+#[allow(
+    clippy::excessive_precision,
+    reason = "oracle-derived f32 expected values copied verbatim from live torch 2.11 — full precision is intentional"
+)]
 fn divergence_1441_conv2d_groups2_matches_torch() {
     let in_c = 4;
     let out_c = 4;
     let groups = 2;
     let (kh, kw) = (2usize, 2usize);
 
-    let input: Vec<f32> = (0..(1 * 4 * 3 * 3)).map(|i| i as f32).collect();
+    let input: Vec<f32> = (0..(4 * 3 * 3)).map(|i| i as f32).collect();
     let weight: Vec<f32> = (0..(4 * 2 * 2 * 2)).map(|i| i as f32 * 0.1 - 1.0).collect();
     let bias = vec![0.5f32, -0.5, 1.0, -1.0];
 
@@ -95,17 +99,9 @@ fn divergence_1441_conv2d_groups2_matches_torch() {
         406.600_006_103_515_6,
     ];
 
-    let mut conv = Conv2d::<f32>::new_full(
-        in_c,
-        out_c,
-        (kh, kw),
-        (1, 1),
-        (0, 0),
-        (1, 1),
-        groups,
-        true,
-    )
-    .unwrap();
+    let mut conv =
+        Conv2d::<f32>::new_full(in_c, out_c, (kh, kw), (1, 1), (0, 0), (1, 1), groups, true)
+            .unwrap();
     {
         let mut params = Module::<f32>::parameters_mut(&mut conv);
         // weight shape [out, in/groups, kH, kW] = [4,2,2,2].
@@ -128,11 +124,16 @@ fn divergence_1441_conv2d_groups2_matches_torch() {
 ///   w   = (torch.arange(3*2*2*2).float()*0.05 - 0.3).reshape(3,2,2,2)
 ///   torch.nn.functional.conv2d(inp,w,None,stride=1,padding=0,dilation=2,groups=1)
 #[test]
+#[allow(
+    clippy::excessive_precision,
+    reason = "oracle-derived f32 expected values copied verbatim from live torch 2.11 — full precision is intentional"
+)]
 fn divergence_1441_conv2d_dilation2_matches_torch() {
-    let mut conv =
-        Conv2d::<f32>::new_full(2, 3, (2, 2), (1, 1), (0, 0), (2, 2), 1, false).unwrap();
-    let input: Vec<f32> = (0..(1 * 2 * 5 * 5)).map(|i| i as f32).collect();
-    let weight: Vec<f32> = (0..(3 * 2 * 2 * 2)).map(|i| i as f32 * 0.05 - 0.3).collect();
+    let mut conv = Conv2d::<f32>::new_full(2, 3, (2, 2), (1, 1), (0, 0), (2, 2), 1, false).unwrap();
+    let input: Vec<f32> = (0..(2 * 5 * 5)).map(|i| i as f32).collect();
+    let weight: Vec<f32> = (0..(3 * 2 * 2 * 2))
+        .map(|i| i as f32 * 0.05 - 0.3)
+        .collect();
     {
         let mut params = Module::<f32>::parameters_mut(&mut conv);
         params[0].set_data(t(&weight, &[3, 2, 2, 2]));
@@ -186,6 +187,10 @@ fn divergence_1441_conv2d_dilation2_matches_torch() {
 ///   b   = torch.tensor([0.1,0.2,0.3,0.4,0.5])
 ///   torch.nn.functional.linear(inp, w, b)
 #[test]
+#[allow(
+    clippy::excessive_precision,
+    reason = "oracle-derived f32 expected values copied verbatim from live torch 2.11 — full precision is intentional"
+)]
 fn divergence_1441_linear_3d_matches_torch() {
     let mut ln = Linear::<f32>::new(4, 5, true).unwrap();
     let input: Vec<f32> = (0..(2 * 3 * 4)).map(|i| i as f32 * 0.1).collect();
@@ -248,6 +253,10 @@ fn divergence_1441_linear_3d_matches_torch() {
 ///   b  = torch.tensor([0.05,-0.05,0.15,-0.15])
 ///   torch.nn.functional.bilinear(x1, x2, W, b)
 #[test]
+#[allow(
+    clippy::excessive_precision,
+    reason = "oracle-derived f32 expected values copied verbatim from live torch 2.11 — full precision is intentional"
+)]
 fn divergence_1441_bilinear_2d_matches_torch() {
     let mut bl = Bilinear::<f32>::new(3, 2, 4, true).unwrap();
     let x1: Vec<f32> = (0..(2 * 3)).map(|i| i as f32 * 0.2 - 0.5).collect();

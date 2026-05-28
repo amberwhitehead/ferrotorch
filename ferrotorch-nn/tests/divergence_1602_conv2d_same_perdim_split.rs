@@ -21,9 +21,9 @@
 
 use ferrotorch_core::storage::TensorStorage;
 use ferrotorch_core::tensor::Tensor;
-use ferrotorch_nn::conv::StringPadding;
-use ferrotorch_nn::module::Module;
 use ferrotorch_nn::Conv2d;
+use ferrotorch_nn::StringPadding;
+use ferrotorch_nn::module::Module;
 
 fn t(data: &[f32], shape: &[usize]) -> Tensor<f32> {
     Tensor::from_storage(TensorStorage::cpu(data.to_vec()), shape.to_vec(), false).unwrap()

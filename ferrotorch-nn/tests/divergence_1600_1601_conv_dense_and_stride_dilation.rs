@@ -85,13 +85,17 @@ fn divergence_1600_conv1d_dense_stride2_regression_matches_torch() {
 
     assert_close(
         grads[0].as_ref().unwrap().data().unwrap(),
-        &[0.8, 1.0, 2.0, 1.0, 2.0, 1.0, 1.2, 0.0, 1.4, 1.6, 3.2, 1.6, 3.2, 1.6, 1.8, 0.0],
+        &[
+            0.8, 1.0, 2.0, 1.0, 2.0, 1.0, 1.2, 0.0, 1.4, 1.6, 3.2, 1.6, 3.2, 1.6, 1.8, 0.0,
+        ],
         "G_gx conv1d dense stride2 grad_input",
     );
     assert_eq!(grads[1].as_ref().unwrap().shape(), &[2, 2, 3]);
     assert_close(
         grads[1].as_ref().unwrap().data().unwrap(),
-        &[9.0, 12.0, 15.0, 33.0, 36.0, 39.0, 9.0, 12.0, 15.0, 33.0, 36.0, 39.0],
+        &[
+            9.0, 12.0, 15.0, 33.0, 36.0, 39.0, 9.0, 12.0, 15.0, 33.0, 36.0, 39.0,
+        ],
         "G_gw conv1d dense stride2 grad_weight",
     );
     assert_close(
@@ -189,7 +193,8 @@ fn divergence_1601_conv3d_groups2_nonuniform_stride_dilation_matches_torch() {
     let mut weight: Vec<f32> = (1..=8).map(|i| i as f32 * 0.01).collect();
     weight.extend((1..=8).map(|i| i as f32 * 10.0));
     let mut conv =
-        Conv3d::<f32>::new_full(2, 2, (2, 2, 2), (1, 2, 1), (0, 0, 0), (2, 1, 1), 2, false).unwrap();
+        Conv3d::<f32>::new_full(2, 2, (2, 2, 2), (1, 2, 1), (0, 0, 0), (2, 1, 1), 2, false)
+            .unwrap();
     {
         let mut params = Module::<f32>::parameters_mut(&mut conv);
         params[0].set_data(t(&weight, &[2, 1, 2, 2, 2]));
@@ -209,7 +214,11 @@ fn divergence_1601_conv3d_groups2_nonuniform_stride_dilation_matches_torch() {
         55040.0, 55400.0, 55760.0, 57920.0, 58280.0, 58640.0, 62240.0, 62600.0, 62960.0, 65120.0,
         65480.0, 65840.0,
     ];
-    assert_close(y.data().unwrap(), &i_fwd, "I_fwd conv3d groups2 nonuniform stride+dilation");
+    assert_close(
+        y.data().unwrap(),
+        &i_fwd,
+        "I_fwd conv3d groups2 nonuniform stride+dilation",
+    );
 
     let grad_output = t(&[1.0f32; 36], &[1, 2, 3, 2, 3]);
     let grads = Module::<f32>::forward(&conv, &x)
